@@ -1,0 +1,39 @@
+# Build artifacts
+**/bin/
+**/out/
+**/target/
+**/lib/
+
+# Compiled objects
+*.o
+*.so
+*.dylib
+
+# LLVM bitcode
+*.bc
+*.ll
+
+# dSYM (debug info for macOS)
+*.dSYM/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# Editor
+.vscode/
+.idea/
+*.sublime-*
+
+# Build system
+debug.txt
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+build/
+compile_commands.json
+
+# Precompiled headers
+*.gch
+*.pch
