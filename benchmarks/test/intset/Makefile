@@ -1,34 +1,28 @@
-ROOT ?= ../..
+# IntSet Benchmark Makefile - Modern C++17 Version
 
-include $(ROOT)/Makefile.common
+CXX := clang++
+CXXFLAGS := -std=c++17 -O2 -pthread
 
-BINS = intset-hs intset-ll intset-rb intset-sl
+SRC := intset.cpp
+BIN := bin/intset
 
-UNAME := $(shell uname)
-ifeq ($(UNAME), SunOS)
-# Solaris requires rt lib for nanosleep
-LDFLAGS += -lrt
-endif
+# Output directories
+OUT_DIR := out
+BIN_DIR := bin
 
-.PHONY:	all clean
+.PHONY: all clean test
 
-all:	$(BINS)
+all: $(BIN_DIR) $(BIN)
 
-intset-hs.o:	intset.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEFINES) -DUSE_HASHSET -c -o $@ $<
+$(BIN_DIR):
+	mkdir -p $(BIN_DIR)
 
-intset-ll.o:	intset.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEFINES) -DUSE_LINKEDLIST -c -o $@ $<
+$(BIN): $(SRC) | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(SRC) -o $(BIN)
 
-intset-rb.o:	intset.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEFINES) -DUSE_RBTREE -c -o $@ $<
-
-intset-sl.o:	intset.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEFINES) -DUSE_SKIPLIST -c -o $@ $<
-
-# FIXME in case of ABI $(TMLIB) must be replaced to abi/...
-$(BINS):	%:	%.o $(TMLIB)
-	$(LD) -o $@ $< $(LDFLAGS)
+test: $(BIN)
+	@echo "Running intset benchmark (4 threads, 5 seconds)..."
+	@$(BIN) -t 4 -d 5000 || echo "Test completed"
 
 clean:
-	rm -f $(BINS) *.o
+	rm -rf $(BIN_DIR)

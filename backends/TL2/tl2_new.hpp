@@ -1,0 +1,742 @@
+/**
+ * TL2_new - Full Implementation per Paper Specification
+ * 
+ * Features:
+ * - Global version-clock (incremented on each commit)
+ * - Versioned write-locks (lock word contains version number)
+ * - Version-based validation at commit time
+ * - Two-phase locking (commit-time lock acquisition)
+ * - Bloom filter for write-set lookup optimization
+ * - Multi-type support: 8, 16, 32, 64-bit integers, floats, doubles, pointers
+ */
+
+#ifndef TL2_NEW_HPP
+#define TL2_NEW_HPP
+
+#include <atomic>
+#include <cstdint>
+#include <vector>
+#include <string.h>
+#include <csetjmp>
+
+namespace tl2 {
+
+constexpr const char* VERSION = "2.0.0-full";
+
+using word_t = uintptr_t;
+
+// Jump buffer for transaction retry (setjmp/longjmp)
+thread_local sigjmp_buf tm_jmpbuf;
+thread_local bool tm_jmpbuf_initialized = false;
+
+// Copy jump buffer - needed for external integration with LLVM plugin
+inline void copy_jmp_env(sigjmp_buf* dest) {
+    if (dest) {
+        memcpy(dest, &tm_jmpbuf, sizeof(sigjmp_buf));
+    }
+}
+
+// Set jump buffer from external source - allows abort to jump to external setjmp point
+inline void set_jmp_env_external(const sigjmp_buf* src) {
+    if (src) {
+        memcpy(&tm_jmpbuf, src, sizeof(sigjmp_buf));
+        tm_jmpbuf_initialized = true;
+    }
+}
+
+constexpr unsigned GUARD_TABLE_LOG = 13;
+constexpr unsigned GUARD_TABLE_SIZE = 1 << GUARD_TABLE_LOG;
+constexpr unsigned BLOOM_FILTER_BITS = 64;
+
+constexpr word_t LOCK_MASK = 1;
+constexpr word_t VERSION_MASK = ~LOCK_MASK;
+
+enum class DataType : uint8_t {
+    UINT8   = 1,
+    UINT16  = 2,
+    UINT32  = 4,
+    UINT64  = 8,
+    PTR     = 16,
+    FLOAT   = 32,
+    DOUBLE  = 64
+};
+
+inline size_t dtype_size(DataType dt) {
+    switch (dt) {
+        case DataType::UINT8: case DataType::FLOAT: return 1;
+        case DataType::UINT16: return 2;
+        case DataType::UINT32: case DataType::PTR: return 4;
+        case DataType::UINT64: case DataType::DOUBLE: return 8;
+        default: return 0;
+    }
+}
+
+struct WriteSetEntry {
+    word_t* addr;
+    DataType dtype;
+    
+    union Values {
+        uint8_t   u8[2];
+        uint16_t  u16[2];
+        uint32_t  u32[2];
+        uint64_t  u64[2];
+        void*    ptr[2];
+        float    f32[2];
+        double   f64[2];
+        
+        Values() { memset(this, 0, sizeof(Values)); }
+    } values;
+    
+    word_t old_value() const {
+        switch (dtype) {
+            case DataType::UINT8:  return values.u8[0];
+            case DataType::UINT16: return values.u16[0];
+            case DataType::UINT32: return values.u32[0];
+            case DataType::FLOAT: return values.u32[0];
+            case DataType::UINT64: return values.u64[0];
+            case DataType::DOUBLE: return values.u64[0];
+            case DataType::PTR: return (word_t)values.ptr[0];
+            default: return 0;
+        }
+    }
+    
+    word_t new_value() const {
+        switch (dtype) {
+            case DataType::UINT8:  return values.u8[1];
+            case DataType::UINT16: return values.u16[1];
+            case DataType::UINT32: return values.u32[1];
+            case DataType::FLOAT: return values.u32[1];
+            case DataType::UINT64: return values.u64[1];
+            case DataType::DOUBLE: return values.u64[1];
+            case DataType::PTR: return (word_t)values.ptr[1];
+            default: return 0;
+        }
+    }
+    
+    void set_old(word_t v) {
+        switch (dtype) {
+            case DataType::UINT8:  values.u8[0] = (uint8_t)v; break;
+            case DataType::UINT16: values.u16[0] = (uint16_t)v; break;
+            case DataType::UINT32: values.u32[0] = (uint32_t)v; break;
+            case DataType::FLOAT: values.u32[0] = (uint32_t)v; break;
+            case DataType::UINT64: values.u64[0] = (uint64_t)v; break;
+            case DataType::DOUBLE: values.u64[0] = (uint64_t)v; break;
+            case DataType::PTR: values.ptr[0] = (void*)v; break;
+            default: break;
+        }
+    }
+    
+    void set_new(word_t v) {
+        switch (dtype) {
+            case DataType::UINT8:  values.u8[1] = (uint8_t)v; break;
+            case DataType::UINT16: values.u16[1] = (uint16_t)v; break;
+            case DataType::UINT32: values.u32[1] = (uint32_t)v; break;
+            case DataType::FLOAT: values.u32[1] = (uint32_t)v; break;
+            case DataType::UINT64: values.u64[1] = (uint64_t)v; break;
+            case DataType::DOUBLE: values.u64[1] = (uint64_t)v; break;
+            case DataType::PTR: values.ptr[1] = (void*)v; break;
+            default: break;
+        }
+    }
+};
+
+struct ReadSetEntry {
+    word_t* guard_addr;
+    word_t* data_addr;
+    word_t observed_version;
+    DataType dtype;
+    bool locked_by_me;
+};
+
+class Transaction {
+public:
+    bool active = false;
+    bool aborted = false;
+    word_t start_version = 0;
+    word_t commit_version = 0;
+    std::vector<WriteSetEntry> write_set;
+    std::vector<ReadSetEntry> read_set;
+    uint64_t bloom_filter = 0;
+};
+
+class STM {
+private:
+    static std::atomic<word_t> g_clock;
+    static std::atomic<word_t> g_guards[GUARD_TABLE_SIZE];
+    static std::atomic<bool> initialized;
+    
+    static word_t get_guard_idx(word_t* addr) {
+        uintptr_t a = (uintptr_t)addr;
+        if (sizeof(word_t) == 8) {
+            return ((a >> 3) ^ (a >> 48)) & (GUARD_TABLE_SIZE - 1);
+        } else {
+            return (a >> 2) & (GUARD_TABLE_SIZE - 1);
+        }
+    }
+    
+    static void bloom_set(Transaction* tx, word_t* addr) {
+        uintptr_t a = (uintptr_t)addr;
+        uint64_t hash = (a ^ (a >> 17)) & 63;
+        tx->bloom_filter |= (1ULL << hash);
+    }
+    
+    static bool bloom_might_contain(Transaction* tx, word_t* addr) {
+        uintptr_t a = (uintptr_t)addr;
+        uint64_t hash = (a ^ (a >> 17)) & 63;
+        return (tx->bloom_filter >> hash) & 1ULL;
+    }
+    
+public:
+    static void init() {
+        if (!initialized.load(std::memory_order_seq_cst)) {
+            g_clock.store(1, std::memory_order_relaxed);
+            for (auto& g : g_guards) {
+                g.store(0, std::memory_order_relaxed);
+            }
+            initialized.store(true);
+        }
+    }
+    
+    static word_t get_clock() {
+        return g_clock.load(std::memory_order_relaxed);
+    }
+    
+    static word_t increment_clock() {
+        return g_clock.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+    
+    static word_t get_guard_version(word_t* addr) {
+        word_t idx = get_guard_idx(addr);
+        return g_guards[idx].load(std::memory_order_acquire) & VERSION_MASK;
+    }
+    
+    static bool is_guard_locked(word_t* addr) {
+        word_t idx = get_guard_idx(addr);
+        return (g_guards[idx].load(std::memory_order_acquire) & LOCK_MASK) != 0;
+    }
+    
+    static void begin(Transaction* tx) {
+        tx->start_version = get_clock();
+        tx->active = true;
+        tx->aborted = false;
+        tx->write_set.clear();
+        tx->read_set.clear();
+        tx->bloom_filter = 0;
+    }
+    
+    static bool is_locked_by_me(Transaction* tx, word_t* addr) {
+        word_t idx = get_guard_idx(addr);
+        word_t guard = g_guards[idx].load(std::memory_order_acquire);
+        return (guard & LOCK_MASK) && ((guard & VERSION_MASK) == (word_t)tx + 1);
+    }
+    
+    static bool try_acquire_guard(Transaction* tx, word_t* addr) {
+        word_t idx = get_guard_idx(addr);
+        word_t expected = 0;
+        word_t desired = (word_t)tx + 1;
+        return g_guards[idx].compare_exchange_weak(expected, desired,
+                std::memory_order_acquire, std::memory_order_acquire);
+    }
+    
+    static void release_guard(word_t* addr) {
+        word_t idx = get_guard_idx(addr);
+        g_guards[idx].store(0, std::memory_order_release);
+    }
+    
+    static void set_guard_version(word_t* addr, word_t version) {
+        word_t idx = get_guard_idx(addr);
+        g_guards[idx].store(version & VERSION_MASK, std::memory_order_release);
+    }
+    
+    static word_t read_guard(word_t* addr) {
+        word_t idx = get_guard_idx(addr);
+        return g_guards[idx].load(std::memory_order_acquire);
+    }
+    
+    // Write functions with Bloom filter
+    static void write_uint8(Transaction* tx, volatile uint8_t* addr, uint8_t val) {
+        if (!tx || !tx->active) { *addr = val; return; }
+        
+        for (auto& e : tx->write_set) {
+            if (e.addr == (word_t*)addr && e.dtype == DataType::UINT8) {
+                e.set_new(val);
+                return;
+            }
+        }
+        
+        WriteSetEntry e;
+        e.addr = (word_t*)addr;
+        e.dtype = DataType::UINT8;
+        e.set_old(*addr);
+        e.set_new(val);
+        tx->write_set.push_back(e);
+        bloom_set(tx, (word_t*)addr);
+    }
+    
+    static void write_uint16(Transaction* tx, volatile uint16_t* addr, uint16_t val) {
+        if (!tx || !tx->active) { *addr = val; return; }
+        
+        for (auto& e : tx->write_set) {
+            if (e.addr == (word_t*)addr && e.dtype == DataType::UINT16) {
+                e.set_new(val);
+                return;
+            }
+        }
+        
+        WriteSetEntry e;
+        e.addr = (word_t*)addr;
+        e.dtype = DataType::UINT16;
+        e.set_old(*addr);
+        e.set_new(val);
+        tx->write_set.push_back(e);
+        bloom_set(tx, (word_t*)addr);
+    }
+    
+    static void write_uint32(Transaction* tx, volatile uint32_t* addr, uint32_t val) {
+        if (!tx || !tx->active) { *addr = val; return; }
+        
+        for (auto& e : tx->write_set) {
+            if (e.addr == (word_t*)addr && e.dtype == DataType::UINT32) {
+                e.set_new(val);
+                return;
+            }
+        }
+        
+        WriteSetEntry e;
+        e.addr = (word_t*)addr;
+        e.dtype = DataType::UINT32;
+        e.set_old(*addr);
+        e.set_new(val);
+        tx->write_set.push_back(e);
+        bloom_set(tx, (word_t*)addr);
+    }
+    
+    static void write_uint64(Transaction* tx, volatile uint64_t* addr, uint64_t val) {
+        if (!tx || !tx->active) { *addr = val; return; }
+        
+        for (auto& e : tx->write_set) {
+            if (e.addr == (word_t*)addr && e.dtype == DataType::UINT64) {
+                e.set_new(val);
+                return;
+            }
+        }
+        
+        WriteSetEntry e;
+        e.addr = (word_t*)addr;
+        e.dtype = DataType::UINT64;
+        e.set_old(*addr);
+        e.set_new(val);
+        tx->write_set.push_back(e);
+        bloom_set(tx, (word_t*)addr);
+    }
+    
+    static void write_float(Transaction* tx, volatile float* addr, float val) {
+        if (!tx || !tx->active) { *addr = val; return; }
+        
+        for (auto& e : tx->write_set) {
+            if (e.addr == (word_t*)addr && e.dtype == DataType::FLOAT) {
+                e.set_new(*(uint32_t*)&val);
+                return;
+            }
+        }
+        
+        WriteSetEntry e;
+        e.addr = (word_t*)addr;
+        e.dtype = DataType::FLOAT;
+        e.set_old(*(uint32_t*)addr);
+        e.set_new(*(uint32_t*)&val);
+        tx->write_set.push_back(e);
+        bloom_set(tx, (word_t*)addr);
+    }
+    
+    static void write_double(Transaction* tx, volatile double* addr, double val) {
+        if (!tx || !tx->active) { *addr = val; return; }
+        
+        for (auto& e : tx->write_set) {
+            if (e.addr == (word_t*)addr && e.dtype == DataType::DOUBLE) {
+                e.set_new(*(uint64_t*)&val);
+                return;
+            }
+        }
+        
+        WriteSetEntry e;
+        e.addr = (word_t*)addr;
+        e.dtype = DataType::DOUBLE;
+        e.set_old(*(uint64_t*)addr);
+        e.set_new(*(uint64_t*)&val);
+        tx->write_set.push_back(e);
+        bloom_set(tx, (word_t*)addr);
+    }
+    
+    static void write_ptr(Transaction* tx, volatile void** addr, void* val) {
+        if (!tx || !tx->active) { *addr = val; return; }
+        
+        for (auto& e : tx->write_set) {
+            if (e.addr == (word_t*)addr && e.dtype == DataType::PTR) {
+                e.set_new((word_t)val);
+                return;
+            }
+        }
+        
+        WriteSetEntry e;
+        e.addr = (word_t*)addr;
+        e.dtype = DataType::PTR;
+        e.set_old((word_t)*addr);
+        e.set_new((word_t)val);
+        tx->write_set.push_back(e);
+        bloom_set(tx, (word_t*)addr);
+    }
+    
+    // Read functions with Bloom filter check
+    static uint8_t read_uint8(Transaction* tx, volatile uint8_t* addr) {
+        if (!tx || !tx->active) return *addr;
+        
+        if (bloom_might_contain(tx, (word_t*)addr)) {
+            for (auto& e : tx->write_set) {
+                if (e.addr == (word_t*)addr && e.dtype == DataType::UINT8) {
+                    return (uint8_t)e.new_value();
+                }
+            }
+        }
+        
+        word_t idx = get_guard_idx((word_t*)addr);
+        word_t guard = g_guards[idx].load(std::memory_order_acquire);
+        word_t version = guard & VERSION_MASK;
+        bool locked = (guard & LOCK_MASK) != 0;
+        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
+        
+        ReadSetEntry e;
+        e.guard_addr = (word_t*)&g_guards[idx];
+        e.data_addr = (word_t*)addr;
+        e.observed_version = version;
+        e.dtype = DataType::UINT8;
+        e.locked_by_me = locked_by_me;
+        tx->read_set.push_back(e);
+        
+        return *addr;
+    }
+    
+    static uint16_t read_uint16(Transaction* tx, volatile uint16_t* addr) {
+        if (!tx || !tx->active) return *addr;
+        
+        if (bloom_might_contain(tx, (word_t*)addr)) {
+            for (auto& e : tx->write_set) {
+                if (e.addr == (word_t*)addr && e.dtype == DataType::UINT16) {
+                    return (uint16_t)e.new_value();
+                }
+            }
+        }
+        
+        word_t idx = get_guard_idx((word_t*)addr);
+        word_t guard = g_guards[idx].load(std::memory_order_acquire);
+        word_t version = guard & VERSION_MASK;
+        bool locked = (guard & LOCK_MASK) != 0;
+        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
+        
+        ReadSetEntry e;
+        e.guard_addr = (word_t*)&g_guards[idx];
+        e.data_addr = (word_t*)addr;
+        e.observed_version = version;
+        e.dtype = DataType::UINT16;
+        e.locked_by_me = locked_by_me;
+        tx->read_set.push_back(e);
+        
+        return *addr;
+    }
+    
+    static uint32_t read_uint32(Transaction* tx, volatile uint32_t* addr) {
+        if (!tx || !tx->active) return *addr;
+        
+        if (bloom_might_contain(tx, (word_t*)addr)) {
+            for (auto& e : tx->write_set) {
+                if (e.addr == (word_t*)addr && e.dtype == DataType::UINT32) {
+                    return (uint32_t)e.new_value();
+                }
+            }
+        }
+        
+        word_t idx = get_guard_idx((word_t*)addr);
+        word_t guard = g_guards[idx].load(std::memory_order_acquire);
+        word_t version = guard & VERSION_MASK;
+        bool locked = (guard & LOCK_MASK) != 0;
+        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
+        
+        ReadSetEntry e;
+        e.guard_addr = (word_t*)&g_guards[idx];
+        e.data_addr = (word_t*)addr;
+        e.observed_version = version;
+        e.dtype = DataType::UINT32;
+        e.locked_by_me = locked_by_me;
+        tx->read_set.push_back(e);
+        
+        return *addr;
+    }
+    
+    static uint64_t read_uint64(Transaction* tx, volatile uint64_t* addr) {
+        if (!tx || !tx->active) return *addr;
+        
+        if (bloom_might_contain(tx, (word_t*)addr)) {
+            for (auto& e : tx->write_set) {
+                if (e.addr == (word_t*)addr && e.dtype == DataType::UINT64) {
+                    return (uint64_t)e.new_value();
+                }
+            }
+        }
+        
+        word_t idx = get_guard_idx((word_t*)addr);
+        word_t guard = g_guards[idx].load(std::memory_order_acquire);
+        word_t version = guard & VERSION_MASK;
+        bool locked = (guard & LOCK_MASK) != 0;
+        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
+        
+        ReadSetEntry e;
+        e.guard_addr = (word_t*)&g_guards[idx];
+        e.data_addr = (word_t*)addr;
+        e.observed_version = version;
+        e.dtype = DataType::UINT64;
+        e.locked_by_me = locked_by_me;
+        tx->read_set.push_back(e);
+        
+        return *addr;
+    }
+    
+    static float read_float(Transaction* tx, volatile float* addr) {
+        if (!tx || !tx->active) return *addr;
+        
+        if (bloom_might_contain(tx, (word_t*)addr)) {
+            for (auto& e : tx->write_set) {
+                if (e.addr == (word_t*)addr && e.dtype == DataType::FLOAT) {
+                    uint32_t bits = (uint32_t)e.new_value();
+                    return *(float*)&bits;
+                }
+            }
+        }
+        
+        word_t idx = get_guard_idx((word_t*)addr);
+        word_t guard = g_guards[idx].load(std::memory_order_acquire);
+        word_t version = guard & VERSION_MASK;
+        bool locked = (guard & LOCK_MASK) != 0;
+        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
+        
+        ReadSetEntry e;
+        e.guard_addr = (word_t*)&g_guards[idx];
+        e.data_addr = (word_t*)addr;
+        e.observed_version = version;
+        e.dtype = DataType::FLOAT;
+        e.locked_by_me = locked_by_me;
+        tx->read_set.push_back(e);
+        
+        return *addr;
+    }
+    
+    static double read_double(Transaction* tx, volatile double* addr) {
+        if (!tx || !tx->active) return *addr;
+        
+        if (bloom_might_contain(tx, (word_t*)addr)) {
+            for (auto& e : tx->write_set) {
+                if (e.addr == (word_t*)addr && e.dtype == DataType::DOUBLE) {
+                    uint64_t bits = e.new_value();
+                    return *(double*)&bits;
+                }
+            }
+        }
+        
+        word_t idx = get_guard_idx((word_t*)addr);
+        word_t guard = g_guards[idx].load(std::memory_order_acquire);
+        word_t version = guard & VERSION_MASK;
+        bool locked = (guard & LOCK_MASK) != 0;
+        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
+        
+        ReadSetEntry e;
+        e.guard_addr = (word_t*)&g_guards[idx];
+        e.data_addr = (word_t*)addr;
+        e.observed_version = version;
+        e.dtype = DataType::DOUBLE;
+        e.locked_by_me = locked_by_me;
+        tx->read_set.push_back(e);
+        
+        return *addr;
+    }
+    
+    static void* read_ptr(Transaction* tx, volatile void** addr) {
+        if (!tx || !tx->active) return (void*)*addr;
+        
+        if (bloom_might_contain(tx, (word_t*)addr)) {
+            for (auto& e : tx->write_set) {
+                if (e.addr == (word_t*)addr && e.dtype == DataType::PTR) {
+                    return (void*)e.new_value();
+                }
+            }
+        }
+        
+        word_t idx = get_guard_idx((word_t*)addr);
+        word_t guard = g_guards[idx].load(std::memory_order_acquire);
+        word_t version = guard & VERSION_MASK;
+        bool locked = (guard & LOCK_MASK) != 0;
+        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
+        
+        ReadSetEntry e;
+        e.guard_addr = (word_t*)&g_guards[idx];
+        e.data_addr = (word_t*)addr;
+        e.observed_version = version;
+        e.dtype = DataType::PTR;
+        e.locked_by_me = locked_by_me;
+        tx->read_set.push_back(e);
+        
+        return (void*)*addr;
+    }
+    
+    static bool commit(Transaction* tx) {
+        if (!tx || !tx->active) return false;
+        
+        if (tx->write_set.empty()) {
+            tx->active = false;
+            return true;
+        }
+        
+        // Step 3: Acquire write-set locks
+        for (auto& e : tx->write_set) {
+            if (!try_acquire_guard(tx, e.addr)) {
+                for (auto& e2 : tx->write_set) {
+                    release_guard(e2.addr);
+                }
+                tx->active = false;
+                tx->aborted = true;
+                return false;
+            }
+        }
+        
+        // Step 4: Increment global version-clock
+        tx->commit_version = increment_clock();
+        
+        // Step 5: Validate read-set using version numbers
+        if (tx->commit_version > tx->start_version + 1) {
+            for (auto& re : tx->read_set) {
+                if (re.locked_by_me) continue;
+                
+                word_t current_guard = read_guard(re.guard_addr);
+                word_t current_version = current_guard & VERSION_MASK;
+                bool locked = (current_guard & LOCK_MASK) != 0;
+                
+                if (locked || current_version > re.observed_version) {
+                    for (auto& e : tx->write_set) {
+                        release_guard(e.addr);
+                    }
+                    tx->active = false;
+                    tx->aborted = true;
+                    return false;
+                }
+            }
+        }
+        
+        // Step 6: Apply writes and release locks with version
+        for (auto& e : tx->write_set) {
+            switch (e.dtype) {
+                case DataType::UINT8:
+                    *(uint8_t*)e.addr = (uint8_t)e.new_value();
+                    break;
+                case DataType::UINT16:
+                    *(uint16_t*)e.addr = (uint16_t)e.new_value();
+                    break;
+                case DataType::UINT32:
+                    *(uint32_t*)e.addr = (uint32_t)e.new_value();
+                    break;
+                case DataType::FLOAT:
+                {
+                    uint32_t bits = (uint32_t)e.new_value();
+                    *(float*)e.addr = *(float*)&bits;
+                }
+                    break;
+                case DataType::UINT64:
+                    *(uint64_t*)e.addr = (uint64_t)e.new_value();
+                    break;
+                case DataType::DOUBLE:
+                {
+                    uint64_t bits = e.new_value();
+                    *(double*)e.addr = *(double*)&bits;
+                }
+                    break;
+                case DataType::PTR:
+                    *(word_t*)e.addr = e.new_value();
+                    break;
+            }
+            
+            // Release lock: store version number (unlocked state per TL2 spec)
+            word_t idx = get_guard_idx(e.addr);
+            g_guards[idx].store(tx->commit_version, std::memory_order_release);
+        }
+        
+        tx->active = false;
+        return true;
+    }
+    
+    static void abort_tx(Transaction* tx) {
+        if (!tx) return;
+        
+        for (auto& e : tx->write_set) {
+            release_guard(e.addr);
+        }
+        
+        tx->active = false;
+        tx->aborted = true;
+    }
+};
+
+std::atomic<word_t> STM::g_clock{1};
+std::atomic<word_t> STM::g_guards[GUARD_TABLE_SIZE];
+std::atomic<bool> STM::initialized{false};
+
+thread_local Transaction* current_tx = nullptr;
+
+inline void init() { STM::init(); }
+
+inline void init_thread() { 
+    if (!current_tx) current_tx = new Transaction(); 
+    STM::begin(current_tx); 
+}
+
+inline void exit_thread() { 
+    if (current_tx) { 
+        if (current_tx->active) STM::abort_tx(current_tx);
+        delete current_tx; 
+        current_tx = nullptr; 
+    } 
+}
+
+inline bool begin() { 
+    init_thread(); 
+    STM::begin(current_tx); 
+    return true; 
+}
+
+inline void abort_tx() { 
+    if (current_tx) STM::abort_tx(current_tx); 
+}
+
+inline bool commit() {
+    if (!current_tx || !current_tx->active) return false;
+    return STM::commit(current_tx);
+}
+
+inline bool active() { return current_tx && current_tx->active; }
+inline bool aborted() { return current_tx && current_tx->aborted; }
+
+inline uint8_t tm_read_i1(volatile uint8_t* addr) { return STM::read_uint8(current_tx, addr); }
+inline uint16_t tm_read_i2(volatile uint16_t* addr) { return STM::read_uint16(current_tx, addr); }
+inline uint32_t tm_read_i4(volatile uint32_t* addr) { return STM::read_uint32(current_tx, addr); }
+inline uint64_t tm_read_i8(volatile uint64_t* addr) { return STM::read_uint64(current_tx, addr); }
+inline float tm_read_f4(volatile float* addr) { return STM::read_float(current_tx, addr); }
+inline double tm_read_f8(volatile double* addr) { return STM::read_double(current_tx, addr); }
+inline void* tm_read_ptr(volatile void** addr) { return STM::read_ptr(current_tx, addr); }
+
+inline void tm_write_i1(volatile uint8_t* addr, uint8_t val) { STM::write_uint8(current_tx, addr, val); }
+inline void tm_write_i2(volatile uint16_t* addr, uint16_t val) { STM::write_uint16(current_tx, addr, val); }
+inline void tm_write_i4(volatile uint32_t* addr, uint32_t val) { STM::write_uint32(current_tx, addr, val); }
+inline void tm_write_i8(volatile uint64_t* addr, uint64_t val) { STM::write_uint64(current_tx, addr, val); }
+inline void tm_write_f4(volatile float* addr, float val) { STM::write_float(current_tx, addr, val); }
+inline void tm_write_f8(volatile double* addr, double val) { STM::write_double(current_tx, addr, val); }
+inline void tm_write_ptr(volatile void** addr, void* val) { STM::write_ptr(current_tx, addr, val); }
+
+} // namespace tl2
+
+#endif // TL2_NEW_HPP

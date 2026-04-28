@@ -58,6 +58,8 @@ struct Bank {
     int size() const { return accounts.size(); }
 };
 
+TM Bank *bank;
+
 // =============================================================================
 // Transaction Functions
 // =============================================================================
@@ -65,23 +67,26 @@ struct Bank {
 /**
  * Transfer money from one account to another within a transaction
  */
-TX void transfer(Account &src, Account &dst, int amount) {
-    int balance = src.balance;
+TX void transfer(int src, int dst, int amount) {
+    Account *a_src = &bank->accounts[src];
+    Account *a_dst = &bank->accounts[dst];
+    int balance = a_src->balance;
+
     balance -= amount;
-    src.balance = balance;
+    a_src->balance = balance;
     
-    balance = dst.balance;
+    balance = a_dst->balance;
     balance += amount;
-    dst.balance = balance;
+    a_dst->balance = balance;
 }
 
 /**
  * Read all account balances and compute total
  */
-TX int total_transactional(const Bank &bank) {
+TX int total_transactional() {
     int total = 0;
-    for (int i = 0; i < bank.size(); ++i) {
-        total += bank.accounts[i].balance;
+    for (int i = 0; i < bank->size(); ++i) {
+        total += bank->accounts[i].balance;
     }
     return total;
 }
@@ -89,10 +94,10 @@ TX int total_transactional(const Bank &bank) {
 /**
  * Non-transactional total (for final verification)
  */
-int total_non_transactional(const Bank &bank) {
+int total_non_transactional() {
     int total = 0;
-    for (int i = 0; i < bank.size(); ++i) {
-        total += bank.accounts[i].balance;
+    for (int i = 0; i < bank->size(); ++i) {
+        total += bank->accounts[i].balance;
     }
     return total;
 }
@@ -100,9 +105,9 @@ int total_non_transactional(const Bank &bank) {
 /**
  * Reset all accounts to initial balance
  */
-TX void reset(Bank &bank) {
-    for (int i = 0; i < bank.size(); ++i) {
-        bank.accounts[i].balance = DEFAULT_INITIAL_BALANCE;
+TX void reset() {
+    for (int i = 0; i < bank->size(); ++i) {
+        bank->accounts[i].balance = DEFAULT_INITIAL_BALANCE;
     }
 }
 
@@ -177,10 +182,10 @@ void worker_thread(ThreadData &data) {
         double roll = dist(rng);
         
         if (roll < data.read_all_pct) {
-            int t = total_transactional(*data.bank);
+            int t = total_transactional();
             data.nb_read_all++;
         } else if (roll < (data.read_all_pct + data.write_all_pct)) {
-            reset(*data.bank);
+            reset();
             data.nb_write_all++;
         } else {
             // Random transfer
@@ -190,7 +195,7 @@ void worker_thread(ThreadData &data) {
             if (dst == src) {
                 dst = ((src + 1) % rand_max) + rand_min;
             }
-            transfer(data.bank->accounts[src], data.bank->accounts[dst], 1);
+            transfer(src, dst, 1);
             data.nb_transfer++;
         }
     }
@@ -259,11 +264,12 @@ int main(int argc, char *argv[]) {
     }
     
     // Create bank
-    Bank bank(nb_accounts);
+    // Bank bank(nb_accounts);
+    bank = new Bank(nb_accounts);
     Barrier barrier(nb_threads);
     
     // Verify initial state
-    int initial_total = total_non_transactional(bank);
+    int initial_total = total_non_transactional();
     int expected_total = nb_accounts * DEFAULT_INITIAL_BALANCE;
     
     std::cout << "Initial bank total: " << initial_total << " (expected: " << expected_total << ")\n";
@@ -278,7 +284,7 @@ int main(int argc, char *argv[]) {
     
     for (int i = 0; i < nb_threads; ++i) {
         auto data = std::make_unique<ThreadData>();
-        data->bank = &bank;
+        data->bank = bank;
         data->barrier = &barrier;
         data->seed = i + 1234;
         data->thread_id = i;
@@ -305,7 +311,7 @@ int main(int argc, char *argv[]) {
     }
     
     // Compute final totals and statistics
-    int final_total = total_non_transactional(bank);
+    int final_total = total_non_transactional();
     auto end_time = std::chrono::high_resolution_clock::now();
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         end_time - start_time).count();
@@ -335,10 +341,10 @@ int main(int argc, char *argv[]) {
               << "Txns/sec:         " << (total_txns * 1000.0 / elapsed_ms) << "\n"
               << std::endl;
     
+    delete bank;
     // Verify correctness
     if (final_total == expected_total) {
         std::cout << "✓ PASS: Bank total is correct (money was conserved)\n";
-        std::cout << "✓ Accounts are properly instrumented for transactional access\n";
         return 0;
     } else {
         std::cerr << "✗ FAIL: Bank total mismatch!\n"

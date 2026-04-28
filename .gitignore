@@ -2,7 +2,10 @@
 **/bin/
 **/out/
 **/target/
-**/lib/
+**/lib/*.a
+**/inputs/*.txt
+**/inputs/*.gz
+**/*.dSYM/
 
 # Compiled objects
 *.o

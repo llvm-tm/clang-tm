@@ -1,0 +1,15 @@
+# Bank Benchmark Results
+# Generated: Mon Apr 20 08:42:14 WEST 2026
+# Samples: 5
+# Duration: 2000ms
+#
+# Backend           Threads   Txns/sec (avg)    Txns/sec (std)   Total-Txns (avg)   Pass-Rate
+# ================================================================================
+uninstrumented          1      1540654         2399          1540654       100%
+uninstrumented          2      2973550         5773          2973550         0%
+uninstrumented          4      4953166        17514          4953166         0%
+uninstrumented          8      8739984        20330          8739984         0%
+singlelock              1      1514600         1410          1514600       100%
+singlelock              2      1215260         5824          1215260       100%
+singlelock              4       840927        12998           840927       100%
+singlelock              8       634033         3749           634033       100%

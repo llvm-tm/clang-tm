@@ -1,0 +1,26 @@
+Bank Benchmark - Modern C++17 Version
+======================================
+Duration:    2000 ms
+Accounts:    1024
+Threads:     4
+Read-all %:  20%
+Write-all %: 0%
+Disjoint:    no
+Initial balance per account: 1000
+
+Initial bank total: 1024000 (expected: 1024000)
+
+Bench Benchmark Results
+=======================
+Elapsed time:     2005 ms
+Final bank total: 1023873 (expected: 1024000)
+Total transfers:  7936407
+Total read-alls:  1985061
+Total write-alls: 0
+Total txns:       9921468
+Txns/sec:         4.94836e+06
+
+✗ FAIL: Bank total mismatch!
+  Expected: 1024000
+  Got:      1023873
+  Difference: -127

@@ -1,250 +1,191 @@
 /**
  * TinySTM Runtime Wrapper for LLVM TM Plugin
- * 
- * This file provides C++ wrapper functions for TinySTM operations.
- * It bridges the LLVM instrumentation plugin's transaction interface
- * with the TinySTM implementation.
- * 
- * Uses modern C++17 memory ordering from tm_atomic.h for proper synchronization.
+ * Uses TinySTM for transactional memory
  */
 
 #include <cstdint>
-#include <cstdlib>
+#include <csetjmp>
+#include <cassert>
+#include <cstdio>
+#include <atomic>
 #include <cstring>
-#include <iostream>
-#include <thread>
 
-#include "../include/tm_atomic.h"
+#include "../TinySTM/tinystm_wbetl.hpp"
 
-// TinySTM C API
-extern "C" {
-    #include "stm.h"
-    
-    // TinySTM provides:
-    // stm_init() - Initialize STM system
-    // stm_exit() - Shutdown STM system
-    // stm_init_thread() - Initialize thread
-    // stm_exit_thread() - Cleanup thread
-    // stm_start(tx_attr) - Start transaction
-    // stm_commit() - Commit transaction
-    // stm_abort(tx_id) - Abort transaction
-    // stm_load(addr) - Transactional load
-    // stm_store(addr, val) - Transactional store
+// Thread-local state
+static __thread int8_t tm_is_init_ready = 0;
+__thread int32_t tm_nested_call_counter = 0;
+__thread int32_t tm_jmpbuf_ret = 0;
+// sigjmp_buf is typically ~200 bytes, use 256 to be safe
+__thread sigjmp_buf tm_jmpbuf;
+
+// Retry loop support: returns true if retry via longjmp, false if new transaction
+static inline bool check_retry_or_init() {
+    if (tm_jmpbuf_ret != 0) {
+        // sigsetjmp was called and returned non-zero = retry from abort
+        // tinystm::begin() has already been called by the retry path
+        return true;
+    }
+    // First time or no plugin: set up setjmp if not done
+    if (!tm_is_init_ready) {
+        tm_jmpbuf_ret = sigsetjmp(tm_jmpbuf, 0);
+        tm_is_init_ready = 1;
+    }
+    return tm_jmpbuf_ret != 0;
 }
 
-// Thread-local transaction context with proper memory ordering
-thread_local int __tinystm_tx_active = 0;
-thread_local sigjmp_buf *__tinystm_jmp_env = nullptr;
-thread_local sigjmp_buf __tinystm_local_jmp;
+#define TM_BUFFER_SIZE 1024
+static __thread uint8_t tm_buffer[TM_BUFFER_SIZE];
 
-// Global initialization flag with acquire-release semantics
-static std::atomic<bool> __tinystm_global_init{false};
+// Global transaction counters
+static std::atomic<int64_t> g_tm_begin_count{0};
+static std::atomic<int64_t> g_tm_end_count{0};
 
-/**
- * Initialize the TinySTM system
- * Uses seq_cst for proper visibility across threads
- */
 extern "C" void tm_init() {
-    bool expected = false;
-    if (__tinystm_global_init.compare_exchange_strong(expected, true, 
-            std::memory_order_seq_cst, std::memory_order_relaxed)) {
-        stm_init();
-    }
+    tinystm::init();
 }
 
-/**
- * Shut down the TinySTM system
- */
 extern "C" void tm_exit() {
-    if (__tinystm_global_init.load(std::memory_order_seq_cst)) {
-        stm_exit();
-        __tinystm_global_init.store(false, std::memory_order_seq_cst);
-    }
 }
 
-/**
- * Initialize thread-local STM state
- * Full memory barrier to ensure visibility
- */
 extern "C" void tm_init_thread() {
-    stm_init_thread();
-    std::atomic_thread_fence(std::memory_order_seq_cst);
+    tinystm::init_thread();
 }
 
-/**
- * Cleanup thread-local STM state
- */
 extern "C" void tm_exit_thread() {
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    stm_exit_thread();
+    tinystm::exit_thread();
 }
 
-/**
- * Begin a transaction
- *
- * Flow when NOT using abort/retry:
- * 1. Plugin injects setjmp(tm_jmpbuf) at function entry
- * 2. setjmp returns 0 (first attempt)
- * 3. We call stm_start() to initialize TinySTM tx
- * 4. Transaction body runs
- * 5. On abort (shouldn't happen normally): we just retry from plugin's setjmp
- */
-extern "C" void tm_begin() {
-    if (__tinystm_tx_active) {
-        return;
-    }
-
-    stm_tx_attr_t attr = {0};
-    stm_start(attr);
-    __tinystm_tx_active = 1;
+extern "C" int tm_setjmp() {
+    // This should NOT be called - the plugin injects setjmp
+    // Just return 0 to satisfy the linker
+    return 0;
 }
 
-/**
- * End a transaction (commit)
- */
-extern "C" void tm_end() {
-    if (__tinystm_tx_active) {
-        stm_commit();
-        __tinystm_tx_active = 0;
+extern "C" sigjmp_buf* tm_get_env() {
+    return &tm_jmpbuf;
+}
+
+extern "C" void tm_set_env(sigjmp_buf* env) {
+    if (env) {
+        memcpy(&tm_jmpbuf, env, sizeof(sigjmp_buf));
+        tm_is_init_ready = 1;
     }
 }
 
-/**
- * Read an 8-bit value from a transactional address
- */
-extern "C" uint8_t tm_read_i1(volatile uint8_t *addr) {
-    return (uint8_t)stm_load((stm_word_t *)addr);
-}
+// Wrapper functions matching plugin interface
 
-/**
- * Read a 16-bit value from a transactional address
- */
-extern "C" uint16_t tm_read_i2(volatile uint16_t *addr) {
-    return (uint16_t)stm_load((stm_word_t *)addr);
-}
-
-/**
- * Read a 32-bit value from a transactional address
- */
-extern "C" uint32_t tm_read_i4(volatile uint32_t *addr) {
-    return (uint32_t)stm_load((stm_word_t *)addr);
-}
-
-/**
- * Read a 64-bit value from a transactional address
- */
-extern "C" uint64_t tm_read_i8(volatile uint64_t *addr) {
-    return (uint64_t)stm_load((stm_word_t *)addr);
-}
-
-/**
- * Read a 32-bit float from a transactional address
- */
-extern "C" float tm_read_f4(volatile float *addr) {
-    uint32_t bits = (uint32_t)stm_load((stm_word_t *)addr);
-    float result;
-    std::memcpy(&result, &bits, sizeof(float));
-    return result;
-}
-
-/**
- * Read a 64-bit double from a transactional address
- */
-extern "C" double tm_read_f8(volatile double *addr) {
-    uint64_t bits = (uint64_t)stm_load((stm_word_t *)addr);
-    double result;
-    std::memcpy(&result, &bits, sizeof(double));
-    return result;
-}
-
-/**
- * Read a pointer from a transactional address
- */
-extern "C" void *tm_read_ptr(volatile void **addr) {
-    return (void *)stm_load((stm_word_t *)addr);
-}
-
-/**
- * Read a block of memory from a transactional address
- */
-extern "C" void *tm_read_z(volatile uint8_t *src, uint64_t len) {
-    void *buffer = std::malloc(len);
-    for (uint64_t i = 0; i < len; ++i) {
-        ((uint8_t *)buffer)[i] = tm_read_i1(src + i);
+extern "C" int tm_begin() {
+    if (tinystm::active()) {
+        if (tinystm::aborted()) {
+            tinystm::begin();
+        }
+        return 1;
     }
-    return buffer;
+    tinystm::begin();
+    g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
+    return 1;
 }
 
-/**
- * Write an 8-bit value to a transactional address
- */
-extern "C" void tm_write_i1(volatile uint8_t *addr, uint8_t val) {
-    stm_store((stm_word_t *)addr, (stm_word_t)val);
+extern "C" int tm_end() {
+    bool result = tinystm::commit();
+    g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
+    if (!result) {
+        fprintf(stderr, "TinySTM: tm_end ABORTED\n");
+        return 0;
+    }
+    if (g_tm_end_count.load(std::memory_order_relaxed) % 50000 == 0) {
+        fprintf(stderr, "TinySTM: tm_end #%lld (COMMIT OK)\n", (long long)g_tm_end_count.load());
+    }
+    return 1;
 }
 
-/**
- * Write a 16-bit value to a transactional address
- */
-extern "C" void tm_write_i2(volatile uint16_t *addr, uint16_t val) {
-    stm_store((stm_word_t *)addr, (stm_word_t)val);
+// Read wrappers
+extern "C" uint8_t tm_read_i1(uint8_t *addr, uint32_t symbol_id) {
+    return tinystm::tm_read_i1(addr);
 }
 
-/**
- * Write a 32-bit value to a transactional address
- */
-extern "C" void tm_write_i4(volatile uint32_t *addr, uint32_t val) {
-    stm_store((stm_word_t *)addr, (stm_word_t)val);
+extern "C" uint16_t tm_read_i2(uint16_t *addr, uint32_t symbol_id) {
+    return tinystm::tm_read_i2(addr);
 }
 
-/**
- * Write a 64-bit value to a transactional address
- */
-extern "C" void tm_write_i8(volatile uint64_t *addr, uint64_t val) {
-    stm_store((stm_word_t *)addr, (stm_word_t)val);
+extern "C" uint32_t tm_read_i4(uint32_t *addr, uint32_t symbol_id) {
+    return tinystm::tm_read_i4(addr);
 }
 
-/**
- * Write a 32-bit float to a transactional address
- */
-extern "C" void tm_write_f4(volatile float *addr, float val) {
-    uint32_t bits;
-    std::memcpy(&bits, &val, sizeof(float));
-    stm_store((stm_word_t *)addr, (stm_word_t)bits);
+extern "C" uint64_t tm_read_i8(uint64_t *addr, uint32_t symbol_id) {
+    return tinystm::tm_read_i8(addr);
 }
 
-/**
- * Write a 64-bit double to a transactional address
- */
-extern "C" void tm_write_f8(volatile double *addr, double val) {
-    uint64_t bits;
-    std::memcpy(&bits, &val, sizeof(double));
-    stm_store((stm_word_t *)addr, (stm_word_t)bits);
+extern "C" float tm_read_f4(float *addr, uint32_t symbol_id) {
+    return tinystm::tm_read_f4(addr);
 }
 
-/**
- * End a transaction (commit)
- */
-extern "C" void tm_end() {
-    if (__tinystm_tx_active) {
-        stm_commit();
-        __tinystm_tx_active = 0;
+extern "C" double tm_read_f8(double *addr, uint32_t symbol_id) {
+    return tinystm::tm_read_f8(addr);
+}
+
+extern "C" void *tm_read_ptr(void **addr, uint32_t symbol_id) {
+    return tinystm::tm_read_ptr((volatile void**)addr);
+}
+
+extern "C" void *tm_read_z(uint8_t *addr, uint64_t len, uint32_t symbol_id) {
+    assert(len < TM_BUFFER_SIZE);
+    for (uint64_t i = 0; i < len; i++) {
+        tm_buffer[i] = tinystm::tm_read_i1(&addr[i]);
+    }
+    return tm_buffer;
+}
+
+// Write wrappers
+extern "C" void tm_write_i1(uint8_t *addr, uint8_t val, uint32_t symbol_id) {
+    tinystm::tm_write_i1(addr, val);
+}
+
+extern "C" void tm_write_i2(uint16_t *addr, uint16_t val, uint32_t symbol_id) {
+    tinystm::tm_write_i2(addr, val);
+}
+
+extern "C" void tm_write_i4(uint32_t *addr, uint32_t val, uint32_t symbol_id) {
+    tinystm::tm_write_i4(addr, val);
+}
+
+extern "C" void tm_write_i8(uint64_t *addr, uint64_t val, uint32_t symbol_id) {
+    tinystm::tm_write_i8(addr, val);
+}
+
+extern "C" void tm_write_f4(float *addr, float val, uint32_t symbol_id) {
+    tinystm::tm_write_f4(addr, val);
+}
+
+extern "C" void tm_write_f8(double *addr, double val, uint32_t symbol_id) {
+    tinystm::tm_write_f8(addr, val);
+}
+
+extern "C" void tm_write_ptr(void **addr, void *val, uint32_t symbol_id) {
+    tinystm::tm_write_ptr((volatile void**)addr, val);
+}
+
+extern "C" void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len, uint32_t symbol_id) {
+    for (uint64_t i = 0; i < len; i++) {
+        tinystm::tm_write_i1(&dst[i], src[i]);
     }
 }
 
-/**
- * Write a block of memory to a transactional address
- */
-extern "C" void tm_write_z(volatile uint8_t *dst, volatile uint8_t *src, uint64_t len) {
-    for (uint64_t i = 0; i < len; ++i) {
-        tm_write_i1(dst + i, src[i]);
+extern "C" void tm_memset(uint8_t *addr, uint8_t val, uint64_t len, uint32_t symbol_id) {
+    for (uint64_t i = 0; i < len; i++) {
+        tinystm::tm_write_i1(&addr[i], val);
     }
 }
 
-/**
- * Transactional memset operation
- */
-extern "C" void tm_memset(volatile uint8_t *addr, uint8_t val, uint64_t len) {
-    for (uint64_t i = 0; i < len; ++i) {
-        tm_write_i1(addr + i, val);
-    }
+extern "C" void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
+
+static void print_stats() {
+    fprintf(stderr, "=== TinySTM_new Runtime Stats ===\n");
+    fprintf(stderr, "tm_begin: %lld, tm_end: %lld\n", 
+        (long long)g_tm_begin_count.load(std::memory_order_relaxed), 
+        (long long)g_tm_end_count.load(std::memory_order_relaxed));
+}
+
+static int init = (std::atexit(print_stats), 0);
