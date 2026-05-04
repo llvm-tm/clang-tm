@@ -36,7 +36,7 @@ $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
 $(OUT_DIR)/%.bc: $(TEST_DIR)/%.cpp | $(OUT_DIR)
-	clang -O1 -fno-inline -fno-inline-functions -emit-llvm -c $< -o $@ -fno-stack-protector
+	clang -O1 -fno-inline -emit-llvm -c $< -o $@ -fno-stack-protector
 
 $(OUT_DIR)/%.ll: $(TEST_DIR)/%.cpp | $(OUT_DIR)
 	clang -O1 -fno-inline -fno-inline-functions -emit-llvm -S $< -o $@ -fno-stack-protector

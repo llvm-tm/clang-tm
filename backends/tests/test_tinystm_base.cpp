@@ -6,8 +6,8 @@ extern "C" {
     void tm_exit();
     void tm_init_thread();
     void tm_exit_thread();
-    int tm_begin();
-    int tm_end();
+    void tm_begin();
+    void tm_end();
     uint32_t tm_read_i4(volatile uint32_t* addr);
     void tm_write_i4(volatile uint32_t* addr, uint32_t val);
 }

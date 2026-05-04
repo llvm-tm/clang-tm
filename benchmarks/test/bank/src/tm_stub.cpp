@@ -9,7 +9,7 @@
 thread_local uint8_t tm_tx_buffer[TM_BUFFER_SIZE];
 __thread sigjmp_buf tm_jmpbuf;
 __thread int32_t tm_nested_call_counter;
-__thread int32_t tm_jmpbuf_ret = 0;
+__thread int32_t tm_longjmp_ret = 0;
 
 extern "C" void tm_init() {}
 extern "C" void tm_exit() {}

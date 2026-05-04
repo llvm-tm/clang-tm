@@ -10,7 +10,7 @@
 int8_t tm_is_init_ready = 0;
 int8_t tm_is_init_thread_ready = 0;
 __thread int32_t tm_setjmp_ret = 0;
-__thread int32_t tm_jmpbuf_ret = 0;
+__thread int32_t tm_longjmp_ret = 0;
 __thread int32_t tm_nested_call_counter = 0;
 __thread int32_t __tm_nested_call_counter = 0;
 __thread sigjmp_buf tm_jmpbuf;

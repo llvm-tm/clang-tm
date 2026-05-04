@@ -75,8 +75,8 @@ bank_tl2: $(OUT_DIR)/bank_tl2.opt.bc $(RUNTIMES_DIR)/TL2_runtime.cpp | $(BIN_DIR
 
 # Build with TinySTM runtime
 bank_tinystm: $(OUT_DIR)/bank_tinystm.opt.bc $(RUNTIMES_DIR)/TinySTM_runtime.cpp | $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(OUT_DIR)/bank_tinystm.opt.bc \
-	  $(RUNTIMES_DIR)/TinySTM_runtime.cpp -o $(BIN_DIR)/$@
+	$(CXX) $(CXXFLAGS) -DDESIGN_WBCTL $(OUT_DIR)/bank_tinystm.opt.bc \
+	  $(RUNTIMES_DIR)/TinySTM_runtime.cpp -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) -o $(BIN_DIR)/$@
 
 # Build with SwissTM runtime
 bank_swiss: $(OUT_DIR)/bank_tinystm.opt.bc $(RUNTIMES_DIR)/SwissTM_runtime.cpp | $(BIN_DIR)

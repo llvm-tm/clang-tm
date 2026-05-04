@@ -1,0 +1,58 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+UseTab: ForIndentation
+TabWidth: 4
+IndentWidth: 4
+ColumnLimit: 90
+
+# Function declaration formatting
+AllowAllParametersOfDeclarationOnNextLine: false
+BinPackParameters: false
+BinPackArguments: false
+AllowAllArgumentsOnNextLine: true
+
+# Return type on separate line
+AlwaysBreakAfterReturnType: None
+AlwaysBreakAfterDefinitionReturnType: None
+
+# Comment alignment
+AlignTrailingComments: true
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignOperands: Align
+
+# Line breaking
+BreakBeforeBraces: Linux
+BreakConstructorInitializersBeforeComma: false
+BreakConstructorInitializers: BeforeColon
+PackConstructorInitializers: Never
+
+# Spaces and formatting
+SpaceAfterCStyleCast: false
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpaceInEmptyBlock: false
+SpaceAfterLogicalNot: false
+
+# Indentation
+ContinuationIndentWidth: 4
+ConstructorInitializerIndentWidth: 4
+AccessModifierOffset: -4
+
+# Other preferences
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+PointerAlignment: Right
+DerivePointerAlignment: false
+SortIncludes: true
+SortUsingDeclarations: true
+ReflowComments: false
+
+# Parameter formatting for function declarations - STRICT
+PenaltyReturnTypeOnItsOwnLine: 1000000
+PenaltyBreakBeforeFirstCallParameter: 1000000
+PenaltyBreakAssignment: 1000000
+Cpp11BracedListStyle: true
+...

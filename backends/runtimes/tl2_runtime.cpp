@@ -15,7 +15,7 @@
 // Thread-local state
 static __thread int8_t tm_is_init_ready = 0;
 __thread int32_t tm_nested_call_counter = 0;
-__thread int32_t tm_jmpbuf_ret = 0;
+__thread int32_t tm_longjmp_ret = 0;
 __thread sigjmp_buf tm_jmpbuf;
 
 #define TM_BUFFER_SIZE 1024

@@ -19,7 +19,7 @@
 
 extern "C" {
     extern __thread unsigned char tm_jmpbuf[256];
-    extern __thread int32_t tm_jmpbuf_ret;
+    extern __thread int32_t tm_longjmp_ret;
     extern __thread int32_t tm_nested_call_counter;
 }
 
@@ -28,13 +28,13 @@ TM int32_t tm_max_retries = 3;
 
 TX void retry_transaction() {
     printf("retry_transaction: start, counter=%d, jmpbuf_ret=%d, nested_counter=%d\n", 
-           tm_counter, tm_jmpbuf_ret, tm_nested_call_counter);
+           tm_counter, tm_longjmp_ret, tm_nested_call_counter);
 
-    if (tm_jmpbuf_ret != 0) {
-        printf("retry_transaction: retry detected! jmpbuf_ret=%d\n", tm_jmpbuf_ret);
-        if (tm_jmpbuf_ret >= tm_max_retries) {
+    if (tm_longjmp_ret != 0) {
+        printf("retry_transaction: retry detected! jmpbuf_ret=%d\n", tm_longjmp_ret);
+        if (tm_longjmp_ret >= tm_max_retries) {
             printf("retry_transaction: ERROR - infinite loop! jmpbuf_ret=%d >= %d\n", 
-                   tm_jmpbuf_ret, tm_max_retries);
+                   tm_longjmp_ret, tm_max_retries);
             return;
         }
     }

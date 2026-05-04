@@ -19,7 +19,7 @@ static std::atomic<bool> initialized{false};
 // Plugin required
 __thread std::jmp_buf tm_jmpbuf;
 __thread int32_t tm_nested_call_counter;
-__thread int32_t tm_jmpbuf_ret;
+__thread int32_t tm_longjmp_ret;
 
 extern "C" {
 

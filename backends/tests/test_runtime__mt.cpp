@@ -1,6 +1,6 @@
 /**
- * Simple SwissTM Test - uses tm_* stubs from runtime
- * This test can work with any TM implementation by linking different runtime files
+ * Runtime Test - uses tm_* stubs with proper abort handling
+ * This test properly handles aborts using setjmp/longjmp
  */
 
 #include <atomic>
@@ -19,8 +19,10 @@ void tm_init();
 void tm_exit();
 void tm_init_thread();
 void tm_exit_thread();
-void tm_begin();
-void tm_end();
+void tm_begin();                  // Start transaction
+sigjmp_buf *tm_get_env();         // Get jump buffer for abort handling
+void tm_set_env(sigjmp_buf *env); // Set jump buffer
+void tm_end();                    // Returns 1 on success,0 on failure
 uint32_t tm_read_i4(volatile uint32_t *addr);
 void tm_write_i4(volatile uint32_t *addr, uint32_t val);
 }
@@ -44,12 +46,18 @@ void thread_func(int thread_id)
 	tm_init_thread();
 
 	for (int i = 0; i < ITERATIONS; ++i) {
-		int committed = 0;
-		tm_longjmp_ret = sigsetjmp(tm_jmpbuf, 0);
+		tm_longjmp_ret = sigsetjmp(tm_jmpbuf, 0); // Set up jump buffer for abort handling
 		tm_begin();
+
+		if (tm_longjmp_ret != 0) {
+			// Transaction aborted, retry
+			continue;
+		}
+
 		uint32_t val = tm_read_i4(&shared_data.counter);
 		val++;
 		tm_write_i4(&shared_data.counter, val);
+
 		tm_end();
 	}
 
@@ -58,7 +66,7 @@ void thread_func(int thread_id)
 
 int main()
 {
-	std::cout << "SwissTM Runtime Simple Test\n";
+	std::cout << "Runtime Simple Test v2 (with abort handling)\n";
 	std::cout << "====================\n";
 	std::cout << "Threads:    " << NUM_THREADS << "\n";
 	std::cout << "Iterations: " << ITERATIONS << "\n";

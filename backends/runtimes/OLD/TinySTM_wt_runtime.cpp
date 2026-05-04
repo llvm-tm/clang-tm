@@ -15,23 +15,23 @@
 // Thread-local state
 static __thread int8_t tm_is_init_ready = 0;
 __thread int32_t tm_nested_call_counter = 0;
-__thread int32_t tm_jmpbuf_ret = 0;
+__thread int32_t tm_longjmp_ret = 0;
 // sigjmp_buf is typically ~200 bytes, use 256 to be safe
 __thread sigjmp_buf tm_jmpbuf;
 
 // Retry loop support: returns true if retry via longjmp, false if new transaction
 static inline bool check_retry_or_init() {
-    if (tm_jmpbuf_ret != 0) {
+    if (tm_longjmp_ret != 0) {
         // sigsetjmp was called and returned non-zero = retry from abort
         // tinystm::begin() has already been called by the retry path
         return true;
     }
     // First time or no plugin: set up setjmp if not done
     if (!tm_is_init_ready) {
-        tm_jmpbuf_ret = sigsetjmp(tm_jmpbuf, 0);
+        tm_longjmp_ret = sigsetjmp(tm_jmpbuf, 0);
         tm_is_init_ready = 1;
     }
-    return tm_jmpbuf_ret != 0;
+    return tm_longjmp_ret != 0;
 }
 
 #define TM_BUFFER_SIZE 1024
@@ -75,23 +75,22 @@ extern "C" void tm_set_env(sigjmp_buf* env) {
 
 // Wrapper functions matching plugin interface
 
-extern "C" int tm_begin() {
+extern "C" void tm_begin() {
     if (tinystm::active()) {
         if (tinystm::aborted()) {
             tinystm::begin();
         }
         // Nested call
-        return 1;
+        return;
     }
     tinystm::begin();
     g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
     if (g_tm_begin_count.load(std::memory_order_relaxed) % 50000 == 0) {
         fprintf(stderr, "TinySTM: tm_begin #%lld\n", (long long)g_tm_begin_count.load());
     }
-    return 1;
 }
 
-extern "C" int tm_end() {
+extern "C" void tm_end() {
     bool result = tinystm::commit();
     g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
     if (!result) {
