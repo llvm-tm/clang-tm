@@ -76,35 +76,35 @@ void tm_end() {
     }
 }
 
-// Read functions with symbol_id parameter
-uint8_t tm_read_i1(volatile uint8_t *addr, uint32_t symbol_id) { return *addr; }
-uint16_t tm_read_i2(volatile uint16_t *addr, uint32_t symbol_id) { return *addr; }
-uint32_t tm_read_i4(volatile uint32_t *addr, uint32_t symbol_id) { return *addr; }
-uint64_t tm_read_i8(volatile uint64_t *addr, uint32_t symbol_id) { return *addr; }
-float tm_read_f4(volatile float *addr, uint32_t symbol_id) { return *addr; }
-double tm_read_f8(volatile double *addr, uint32_t symbol_id) { return *addr; }
-void *tm_read_ptr(volatile void **addr, uint32_t symbol_id) { return (void*)*addr; }
+// Read functions without symbol_id parameter
+uint8_t tm_read_i1(volatile uint8_t *addr) { return *addr; }
+uint16_t tm_read_i2(volatile uint16_t *addr) { return *addr; }
+uint32_t tm_read_i4(volatile uint32_t *addr) { return *addr; }
+uint64_t tm_read_i8(volatile uint64_t *addr) { return *addr; }
+float tm_read_f4(volatile float *addr) { return *addr; }
+double tm_read_f8(volatile double *addr) { return *addr; }
+void *tm_read_ptr(volatile void **addr) { return (void*)*addr; }
 
-void *tm_read_z(volatile uint8_t *src, uint64_t len, uint32_t symbol_id) {
+void *tm_read_z(volatile uint8_t *src, uint64_t len) {
     void *buf = malloc(len);
     memcpy(buf, (const void*)src, len);
     return buf;
 }
 
-// Write functions with symbol_id parameter
-void tm_write_i1(volatile uint8_t *addr, uint8_t val, uint32_t symbol_id) { *addr = val; }
-void tm_write_i2(volatile uint16_t *addr, uint16_t val, uint32_t symbol_id) { *addr = val; }
-void tm_write_i4(volatile uint32_t *addr, uint32_t val, uint32_t symbol_id) { *addr = val; }
-void tm_write_i8(volatile uint64_t *addr, uint64_t val, uint32_t symbol_id) { *addr = val; }
-void tm_write_f4(volatile float *addr, float val, uint32_t symbol_id) { *addr = val; }
-void tm_write_f8(volatile double *addr, double val, uint32_t symbol_id) { *addr = val; }
-void tm_write_ptr(volatile void **addr, void *val, uint32_t symbol_id) { *addr = val; }
+// Write functions without symbol_id parameter
+void tm_write_i1(volatile uint8_t *addr, uint8_t val) { *addr = val; }
+void tm_write_i2(volatile uint16_t *addr, uint16_t val) { *addr = val; }
+void tm_write_i4(volatile uint32_t *addr, uint32_t val) { *addr = val; }
+void tm_write_i8(volatile uint64_t *addr, uint64_t val) { *addr = val; }
+void tm_write_f4(volatile float *addr, float val) { *addr = val; }
+void tm_write_f8(volatile double *addr, double val) { *addr = val; }
+void tm_write_ptr(volatile void **addr, void *val) { *addr = val; }
 
-void tm_write_z(volatile uint8_t *dst, volatile uint8_t *src, uint64_t len, uint32_t symbol_id) {
+void tm_write_z(volatile uint8_t *dst, volatile uint8_t *src, uint64_t len) {
     memcpy((void*)dst, (const void*)src, len);
 }
 
-void tm_memset(volatile uint8_t *addr, uint8_t val, uint64_t len, uint32_t symbol_id) {
+void tm_memset(volatile uint8_t *addr, uint8_t val, uint64_t len) {
     memset((void*)addr, val, len);
 }
 

@@ -684,6 +684,8 @@ public:
 				IRBuilder<> OuterEndBuilder(OuterEndBB);
 #ifndef DISABLE_SETJMP
 				OuterEndBuilder.CreateCall(tm_end, {});
+				// Reset tm_longjmp_ret to 0 after successful commit
+				OuterEndBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetGV);
 #endif
 				OuterEndBuilder.CreateBr(CleanupBB);
 

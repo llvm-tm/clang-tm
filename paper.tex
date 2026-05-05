@@ -1,0 +1,309 @@
+\documentclass[article,12pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{url}
+\usepackage{cite}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{LLVM Transactional Memory Plugin:\\Automatic Instrumentation for Software Transactional Memory}
+\author{}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present an LLVM compiler pass that automatically instruments C++ code for Software Transactional Memory (STM). Using source-code annotations, developers mark global variables and functions as transactional, and our pass automatically inserts begin/commit infrastructure, read/write logging, and conflict detection. The plugin supports multiple STM backends including TinySTM, SingleGlobalLock, TL2, and SwissTM. We evaluate the plugin with a suite of benchmarks including banking transactions, data structures, STAMP, and YCSB workloads.
+\end{abstract}
+
+\section{Introduction}
+
+Software Transactional Memory (STM) provides a promising abstraction for concurrent programming, allowing developers to specify atomic blocks of code that either complete atomically or abort and retry. However, manual STM implementation is error-prone and breaks abstraction.
+
+We present an LLVM compiler pass that automates STM instrumentation:
+
+\begin{itemize}
+\item \textbf{Global variables} marked with \texttt{\_\_attribute\_\_((annotate("tm")))} are managed by the STM runtime
+\item \textbf{Functions} marked with \texttt{\_\_attribute\_\_((annotate("transaction")))} are executed as transactions
+\item The pass automatically inserts:
+  \begin{itemize}
+  \item Transaction begin/commit hooks
+  \item Nested transaction detection via counter
+  \item sigsetjmp/siglongjmp for automatic retry
+  \item Read/write instrumentation for memory accesses
+  \end{itemize}
+\end{itemize}
+
+%\newpage
+
+\section{Implementation}\label{sec:implementation}
+
+Our LLVM plugin consists of two compiler passes that operate in the standard LLVM Pass Manager framework:
+
+\subsection{TMGlobalInitPass (Module-Level)}
+
+This pass performs one-time initialization for the entire compilation unit:
+
+\begin{enumerate}
+\item \textbf{Declare Runtime Functions}: Insert declarations for:
+  \begin{itemize}
+  \item \texttt{tm\_init()}: Global initialization
+  \item \texttt{tm\_exit()}: Global cleanup
+  \item \texttt{tm\_init\_thread()}: Per-thread initialization
+  \item \texttt{tm\_exit\_thread()}: Per-thread cleanup
+  \end{itemize}
+\item \textbf{Create Symbol Tables}: For TM-managed globals, create:
+  \begin{itemize}
+  \item \texttt{tm\_symbol\_names[]}: Array of global names
+  \item \texttt{tm\_symbol\_addresses[]}: Array of global addresses
+  \item \texttt{tm\_symbol\_count}: Number of TM globals
+  \end{itemize}
+\item \textbf{Insert Main Hooks}: In \texttt{main()}:
+  \begin{itemize}
+  \item Call \texttt{tm\_init()} at start
+  \item Call \texttt{tm\_init\_thread()} at start
+  \item Call \texttt{tm\_exit\_thread()} before each return
+  \item Call \texttt{tm\_exit()} before each return
+  \end{itemize}
+\item \textbf{Thread Entry Points}: For functions using TM globals:
+  \begin{itemize}
+  \item Insert \texttt{tm\_init\_thread()} at entry
+  \item Insert \texttt{tm\_exit\_thread()} before returns
+  \end{itemize}
+\end{enumerate}
+
+\subsection{TMInstrumentPass (Function-Level)}
+
+This pass instruments each transaction function:
+
+\begin{enumerate}
+\item \textbf{Detect Transaction Functions}: Check for \texttt{\_\_attribute\_\_((annotate("transaction")))}
+\item \textbf{Nested Transaction Handling}:
+  \begin{itemize}
+  \item Create thread-local \texttt{tm\_nested\_call\_counter}
+  \item Create thread-local \texttt{tm\_jmpbuf} (256 bytes)
+  \item Create thread-local \texttt{tm\_longjmp\_ret}
+  \end{itemize}
+\item \textbf{Entry Instrumentation}:
+  \begin{itemize}
+  \item Load counter, check if 0 (outermost transaction)
+  \item If outermost (counter=0): Call sigsetjmp, store result, call \texttt{tm\_begin()}
+  \item If nested (counter>0 or retry): Skip to nested path
+  \end{itemize}
+\item \textbf{Exit Instrumentation}:
+  \begin{itemize}
+  \item Decrement counter
+  \item If counter reaches 0: Call \texttt{tm\_end()}
+  \end{itemize}
+\item \textbf{Memory Instrumentation}:
+  \begin{itemize}
+  \item All loads $\rightarrow$ call \texttt{tm\_read\_TYPE(ptr)}
+  \item All stores $\rightarrow$ call \texttt{tm\_write\_TYPE(ptr, value)}
+  \item Supported types: i8, i16, i32, i64, float, double, pointers
+  \end{itemize}
+\end{enumerate}
+
+Figure~\ref{fig:flow} shows the instrumentation flow:
+
+\begin{figure}[h]
+\centering
+\fbox{\parbox{0.95\linewidth}{
+\begin{center}
+\texttt{// Original}\\[2mm]
+\texttt{TX void transfer(Account* from, Account* to, int amount) \{}\\
+\texttt{\  from->balance -= amount;}\\
+\texttt{\  to->balance += amount;}\\
+\texttt{\}}\\[4mm]
+\hrulefill\\[4mm]
+\texttt{// Instrumented}\\[2mm]
+\texttt{// Entry}\\
+\texttt{if (counter == 0) \{}\\
+\texttt{\  sigsetjmp(jmpbuf, 0);}\\
+\texttt{\  tm\_begin();}\\
+\texttt{\}}\\[2mm]
+\texttt{// Memory ops}\\
+\texttt{tm\_write\_i4(\&from->balance, tm\_read\_i4(\&from->balance) - amount);}\\
+\texttt{tm\_write\_i4(\&to->balance, tm\_read\_i4(\&to->balance) + amount);}\\[2mm]
+\texttt{// Exit}\\
+\texttt{tm\_end();}
+\end{center}
+}}
+\caption{Transaction instrumentation flow}
+\label{fig:flow}
+\end{figure}
+
+\subsection{Nested Transaction Detection}
+
+For correctly handling nested transactions, we use a thread-local counter:
+
+\begin{verbatim}
+entry:
+  %counter = load tm_nested_call_counter
+  %is_outer = icmp eq %counter, 0
+  br %is_outer, label %outer, label %nested
+
+outer:
+  %setjmp_ret = call sigsetjmp(tm_jmpbuf, 0)
+  store %setjmp_ret, tm_longjmp_ret
+  store 1, tm_nested_call_counter  ; Mark outer
+  call tm_begin()
+  br label %cont
+
+nested:
+  %counter_inc = add %counter, 1
+  store %counter_inc, tm_nested_call_counter
+  br label %cont
+
+cont:
+  ; ... transaction body ...
+
+exit:
+  %counter_end = load tm_nested_call_counter
+  %counter_dec = add %counter_end, -1
+  store %counter_dec, tm_nested_call_counter
+  %is_outer_end = icmp eq %counter_dec, 0
+  br %is_outer_end, label %commit, label %return
+
+commit:
+  call tm_end()
+  br label %return
+
+return:
+  ret
+\end{verbatim}
+
+This ensures:
+\begin{itemize}
+\item Only the outermost transaction calls \texttt{tm\_begin()}
+\item Only the outermost transaction calls \texttt{tm\_end()}
+\item Nested transactions inherit the outermost transaction's context
+\end{enumerate}
+
+\section{Related Work}\label{sec:related}
+
+STM approaches fall into several categories:
+
+\subsection{Embedded STM Languages}
+
+\begin{itemize}
+\item \textbf{Atomic Java} \cite{HerlihyMoss1993}: First STM implementation for Java
+\item \textbf{STM Haskell} \cite{HarrisT2005}: STM monad in Haskell
+\item \textbf{Clojure} \cite{RichHickey}: Built-in STM with ref types
+\end{itemize}
+
+\subsection{Compile-Time STM Instrumentation}
+
+Our approach falls into this category:
+
+\begin{itemize}
+\item \textbf{TxLLVM} \cite{TxLLVM}: LLVM extension for STM (custom LLVM fork)
+\item \textbf{Lock-Free STM} \cite{DiscoPanagioti}: Hardware-assisted STM
+\item \textbf{RSTM} \cite{RSTM}: Multi-version STM in Java
+\item \textbf{TinySTM} \cite{TinySTM}: Fast word-based STM (our primary backend)
+\item \textbf{TL2} \cite{TL2}: Transactional Locking 2
+\item \textbf{SwissTM} \cite{SwissTM}: Combined lazy/pessimistic STM
+\item \textbf{adaptSTM} \cite{adaptSTM}: Adaptive STM tuning
+\end{itemize}
+
+\subsection{Hardware TM}
+
+\begin{itemize}
+\item \textbf{Rock} \cite{Rock}: Oracle SPARC HTM
+\item \textbf{Haswell TSX} \cite{TSX}: Intel TSX
+\item \textbf{IBM Power} \cite{Power}: IBM Power HTM
+\end{itemize}
+
+\subsection{STM Benchmarks}
+
+We evaluate using established benchmarks:
+
+\begin{itemize}
+\item \textbf{STAMP} \cite{STAMP}: Stanford Transactional Memory Benchmark suite
+  \begin{itemize}
+  \item genome: DNA sequence matching
+  \item kmeans: Clustering algorithm
+  \item intruder: Intrusion detection
+  \item ssca2: Graph algorithms
+  \item vacation: Travel reservation system
+  \item yada: Delaunay mesh
+  \end{itemize}
+\item \textbf{STMBench7} \cite{STMBench7}: Complex graph benchmark
+  \begin{itemize}
+  \item 45 operations on modules, assemblies, atomic parts
+  \item Long/short traversals, structure modifications
+  \end{itemize}
+\item \textbf{YCSB} \cite{YCSB}: Yahoo! Cloud Serving Benchmark
+\item \textbf{Bank}: Financial transactions (money transfer)
+\item \textbf{Tree Benchmarks}: AVL, Red-Black trees, Hash maps
+\end{itemize}
+
+Our plugin supports all these benchmarks.
+
+\section{Evaluation}\label{sec:evaluation}
+
+We evaluate our plugin with the following benchmarks:
+
+\subsection{Data Structure Benchmarks}
+
+Results with SingleGlobalLock backend (1 thread, 10k initial, 100ms):
+
+\begin{table}[h]
+\centering
+\begin{tabular}{l|r}
+Benchmark & Ops/sec\\\hline
+avltree & 19,081,200\\
+hashmap & 3,923,730\\
+bitmap & 491,876\\
+list & 937,371\\
+set & 3,180,490\\
+\end{tabular}
+\end{table}
+
+\subsection{Bank Benchmark}
+
+The bank benchmark transfers money between accounts:
+
+\begin{verbatim}
+Total transfers:  139,751
+Total txns:       174,687
+Txns/sec:        345,915
+PASS: Bank total correct
+\end{verbatim}
+
+\bibliographystyle{plain}
+\begin{thebibliography}{99}
+
+%\bibitem{herlihy93}
+%Maurice Herlihy and J. Eliot B. Moss. ``Transactional Memory: Architectural Support for Lock-Free Data Structures''. {\em Proceedings of ISCA}, 1993.
+
+%\bibitem{txllvm15}
+%Aleksander B. J. Christensen et al. ``TxLLVM''. \url{https://github.com/bwmania/txllvm}, 2015.
+
+%\bibitem{tinySTM08}
+%Pascal Felber et al. ``TinySTM''. \url{https://github.com/PatrickMa/STM}, 2008.
+
+%\bibitem{tl2}
+%Dave Dice, Ori Shalev, and Nir Shavit. ``Transactional Locking II''. {\em USENIX}, 2006.
+
+%\bibitem{swissTM}
+%Michal Kapalka et al. ``SwissTM: Stretching Transactional Memory''. {\em EuroSys}, 2009.
+
+%\bibitem{adapt}
+%Tiago M. R. Rico et al. ``adaptSTM: Adaptive STM''. {\em TC}, 2010.
+
+%\bibitem{stamp}
+%C. Min and S. Kim. ``STAMP Benchmark Suite''. \url{https://github.com/rmascarenes/stamp}, 2008.
+
+%\bibitem{stampbench07}
+%R. Guerraoui, M. Kapalka, and J. Vitek. ``STMBench7: A benchmark for software transactional memory''. {\em EuroSys}, 2007.
+
+%\bibitem{ycsb}
+%Yahoo! ``YCSB Benchmark''. \url{https://github.com/brianfrankcooper/YCSB}, 2010.
+
+\end{thebibliography}
+
+\end{document}

@@ -45,9 +45,7 @@ void tm_exit() { tinystm::exit(); }
 void tm_init_thread()
 {
 	tinystm::init_thread();
-	// Set TinySTM's jmpbuf pointer to our thread-local buffer
 	tinystm::setjmp(&tm_jmpbuf);
-	// sigsetjmp is called by the plugin in transaction code
 }
 
 void tm_exit_thread() { tinystm::exit_thread(); }
@@ -76,52 +74,46 @@ static bool g_initialized = false;
 
 void tm_begin()
 {
-	// printf("tm_begin: tm_nested_call_counter=%i\n", tm_nested_call_counter);
 	if (tm_longjmp_ret == 0) {
-		// printf("tm_begin: tm_longjmp_ret=%i\n", tm_longjmp_ret);
 		tinystm::begin();
-	} else {
-		// printf("tm_begin NOT CALLED: tm_longjmp_ret=%i\n", tm_longjmp_ret);
 	}
 }
 
 void tm_end()
 {
-	// Only call tinystm::commit() for the outermost transaction
-	// The counter is decremented AFTER this is called,
-	// so counter == 1 means we're about to exit the outermost level
-	// printf("tm_commit: tm_nested_call_counter=%i\n", tm_nested_call_counter);
-	tinystm::commit();
+	if (tm_nested_call_counter == 1 && tm_longjmp_ret == 0) {
+		tinystm::commit();
+	}
 }
 
 // Read wrappers
-uint8_t tm_read_i1(uint8_t *addr, uint32_t symbol_id)
+uint8_t tm_read_i1(uint8_t *addr)
 {
 	return tinystm::tm_read_i1(addr);
 }
 
-uint16_t tm_read_i2(uint16_t *addr, uint32_t symbol_id)
+uint16_t tm_read_i2(uint16_t *addr)
 {
 	return tinystm::tm_read_i2(addr);
 }
 
-uint32_t tm_read_i4(uint32_t *addr, uint32_t symbol_id)
+uint32_t tm_read_i4(uint32_t *addr)
 {
 	return tinystm::tm_read_i4(addr);
 }
 
-uint64_t tm_read_i8(uint64_t *addr, uint32_t symbol_id)
+uint64_t tm_read_i8(uint64_t *addr)
 {
 	return tinystm::tm_read_i8(addr);
 }
 
-float tm_read_f4(float *addr, uint32_t symbol_id) { return tinystm::tm_read_f4(addr); }
+float tm_read_f4(float *addr) { return tinystm::tm_read_f4(addr); }
 
-double tm_read_f8(double *addr, uint32_t symbol_id) { return tinystm::tm_read_f8(addr); }
+double tm_read_f8(double *addr) { return tinystm::tm_read_f8(addr); }
 
-void *tm_read_ptr(void **addr, uint32_t symbol_id) { return tinystm::tm_read_ptr(addr); }
+void *tm_read_ptr(void **addr) { return tinystm::tm_read_ptr(addr); }
 
-void *tm_read_z(uint8_t *addr, uint64_t len, uint32_t symbol_id)
+void *tm_read_z(uint8_t *addr, uint64_t len)
 {
 	assert(len < TM_BUFFER_SIZE);
 	for (uint64_t i = 0; i < len / 8; i++) {
@@ -135,42 +127,42 @@ void *tm_read_z(uint8_t *addr, uint64_t len, uint32_t symbol_id)
 }
 
 // Write wrappers
-void tm_write_i1(uint8_t *addr, uint8_t val, uint32_t symbol_id)
+void tm_write_i1(uint8_t *addr, uint8_t val)
 {
 	tinystm::tm_write_i1(addr, val);
 }
 
-void tm_write_i2(uint16_t *addr, uint16_t val, uint32_t symbol_id)
+void tm_write_i2(uint16_t *addr, uint16_t val)
 {
 	tinystm::tm_write_i2(addr, val);
 }
 
-void tm_write_i4(uint32_t *addr, uint32_t val, uint32_t symbol_id)
+void tm_write_i4(uint32_t *addr, uint32_t val)
 {
 	tinystm::tm_write_i4(addr, val);
 }
 
-void tm_write_i8(uint64_t *addr, uint64_t val, uint32_t symbol_id)
+void tm_write_i8(uint64_t *addr, uint64_t val)
 {
 	tinystm::tm_write_i8(addr, val);
 }
 
-void tm_write_f4(float *addr, float val, uint32_t symbol_id)
+void tm_write_f4(float *addr, float val)
 {
 	tinystm::tm_write_f4(addr, val);
 }
 
-void tm_write_f8(double *addr, double val, uint32_t symbol_id)
+void tm_write_f8(double *addr, double val)
 {
 	tinystm::tm_write_f8(addr, val);
 }
 
-void tm_write_ptr(void **addr, void *val, uint32_t symbol_id)
+void tm_write_ptr(void **addr, void *val)
 {
 	tinystm::tm_write_ptr(addr, val);
 }
 
-void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len, uint32_t symbol_id)
+void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len)
 {
 	for (uint64_t i = 0; i < len / 8; i++) {
 		tinystm::tm_write_i8(((uint64_t *)dst) + i, *(((uint64_t *)src) + i));
@@ -181,7 +173,7 @@ void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len, uint32_t symbol_id)
 	}
 }
 
-void tm_memset(uint8_t *addr, uint8_t val, uint64_t len, uint32_t symbol_id)
+void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 {
 	for (uint64_t i = 0; i < len; i++) {
 		tinystm::tm_write_i1(&addr[i], val);
