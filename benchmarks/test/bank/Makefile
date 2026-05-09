@@ -7,6 +7,7 @@ BACKENDS_DIR := ../../../backends
 RUNTIMES_DIR := $(BACKENDS_DIR)/runtimes
 TL2_DIR := $(BACKENDS_DIR)/TL2
 TINYSTM_DIR := $(BACKENDS_DIR)/TinySTM
+NOREC_DIR := $(BACKENDS_DIR)/NOrec
 SWISSSTM_DIR := $(BACKENDS_DIR)/SwissTM
 
 # Output directories
@@ -15,7 +16,7 @@ BIN_DIR := bin
 
 # Compiler settings
 CXX := clang++
-CXXFLAGS := -std=c++17 -O1 -g -fno-inline -fno-inline-functions -pthread
+CXXFLAGS := -std=c++17 -O3 -pthread
 
 # Plugin
 PLUGIN_LIB := $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
@@ -24,7 +25,7 @@ PLUGIN_LIB := $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
 BANK_SRC := bank.cpp
 
 # Build targets for each runtime
-TARGETS := bank_uninstrumented bank_singlelock bank_tl2 bank_tinystm bank_swiss
+TARGETS := bank_uninstrumented bank_singlelock bank_tl2 bank_tinystm bank_swiss bank_norec
 
 .PHONY: all clean test help
 
@@ -42,7 +43,7 @@ bank_uninstrumented: $(BANK_SRC) | $(BIN_DIR)
 
 # Build LLVM IR from modern C++ source (only once, shared for all runtimes)
 $(OUT_DIR)/bank.bc: $(BANK_SRC) | $(OUT_DIR)
-	clang++ -std=c++17 -O1 -g -fno-inline -fno-inline-functions -emit-llvm -c $(BANK_SRC) \
+	clang++ -std=c++17 -O3 -emit-llvm -c $(BANK_SRC) \
 	  -o $@ -fno-stack-protector -pthread
 
 # Apply LLVM plugin instrumentation for each runtime
@@ -73,8 +74,25 @@ bank_tl2: $(OUT_DIR)/bank_tl2.opt.bc $(RUNTIMES_DIR)/TL2_runtime.cpp | $(BIN_DIR
 	$(CXX) $(CXXFLAGS) $(OUT_DIR)/bank_tl2.opt.bc \
 	  $(RUNTIMES_DIR)/TL2_runtime.cpp -o $(BIN_DIR)/$@
 
-# Build with TinySTM runtime
-bank_tinystm: $(OUT_DIR)/bank_tinystm.opt.bc $(RUNTIMES_DIR)/TinySTM_runtime.cpp | $(BIN_DIR)
+# Verify TM/TX annotations were detected before building
+verify_annotations: $(OUT_DIR)/bank.bc $(PLUGIN_LIB)
+	@echo "Verifying TM/TX annotations were detected..."
+	@opt -load-pass-plugin=$(PLUGIN_LIB) -passes="tm-instrument" \
+		$(OUT_DIR)/bank.bc -o /dev/null 2>&1 | tee $(OUT_DIR)/bank.plugin.log
+	@if ! grep -qE "Found [1-9][0-9]* TM-annotated symbols" $(OUT_DIR)/bank.plugin.log; then \
+		echo "ERROR: No TM-annotated symbols detected in bank.cpp!"; \
+		echo "The plugin failed to detect TM annotations - instrumentation NOT applied!"; \
+		exit 1; \
+	fi
+	@if ! grep -q "Instrumenting transaction function:" $(OUT_DIR)/bank.plugin.log; then \
+		echo "ERROR: No transaction functions detected in bank.cpp!"; \
+		echo "The plugin failed to detect TX annotations!"; \
+		exit 1; \
+	fi
+	@echo "Annotation detection verified."
+
+# Build with TinySTM runtime (depends on annotation verification)
+bank_tinystm: verify_annotations $(OUT_DIR)/bank_tinystm.opt.bc $(RUNTIMES_DIR)/TinySTM_runtime.cpp | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) -DDESIGN_WBCTL $(OUT_DIR)/bank_tinystm.opt.bc \
 	  $(RUNTIMES_DIR)/TinySTM_runtime.cpp -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) -o $(BIN_DIR)/$@
 
@@ -82,6 +100,11 @@ bank_tinystm: $(OUT_DIR)/bank_tinystm.opt.bc $(RUNTIMES_DIR)/TinySTM_runtime.cpp
 bank_swiss: $(OUT_DIR)/bank_tinystm.opt.bc $(RUNTIMES_DIR)/SwissTM_runtime.cpp | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(OUT_DIR)/bank_tinystm.opt.bc \
 	  $(RUNTIMES_DIR)/SwissTM_runtime.cpp -I $(SWISSSTM_DIR) -o $(BIN_DIR)/$@
+
+# Build with NOrec runtime
+bank_norec: $(OUT_DIR)/bank_tinystm.opt.bc $(RUNTIMES_DIR)/NOrec_runtime.cpp | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(OUT_DIR)/bank_tinystm.opt.bc \
+	  $(RUNTIMES_DIR)/NOrec_runtime.cpp -I $(NOREC_DIR) -I $(BACKENDS_DIR) -o $(BIN_DIR)/$@
 
 # Test targets
 test: test_tl2 test_tinystm test_swiss

@@ -13,7 +13,7 @@ BIN_DIR := bin
 PLUGIN := $(BIN_DIR)/libTMInstrument.so
 PLUGIN_NO_SETJMP := $(BIN_DIR)/libTMInstrument_no_setjmp.so
 
-TEST_NAMES := types memtest nested threads persist retry test_stl_containers test_stl_primitive
+TEST_NAMES := types memtest nested threads persist retry test_stl_containers test_stl_primitive annotation_detect
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))
 TEST_BCS := $(addprefix $(OUT_DIR)/,$(addsuffix .bc,$(TEST_NAMES)))
 TEST_LLS := $(addprefix $(OUT_DIR)/,$(addsuffix .ll,$(TEST_NAMES)))

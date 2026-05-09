@@ -7,6 +7,8 @@ CXXFLAGS := -std=c++17 -O1 -pthread
 PLUGIN := ../../llvm_tm_plugin/bin/libTMInstrument.so
 PLUGIN_PASS := -load-pass-plugin=$(PLUGIN) -passes="tm-instrument"
 RUNTIMES_DIR := ../../backends/runtimes
+TL2_DIR := ../../backends/TL2
+TINYSTM_DIR := ../../backends/TinySTM
 
 SRC := STMbench7.cpp
 
@@ -36,7 +38,8 @@ stmbench_tl2: out bin
 stmbench_tinystm: out bin
 	clang -c -emit-llvm $(SRC) -o out/stmbench7.bc
 	opt $(PLUGIN_PASS) out/stmbench7.bc -o out/stmbench_tinystm.opt.bc
-	$(CXX) $(CXXFLAGS) out/stmbench_tinystm.opt.bc $(RUNTIMES_DIR)/TinySTM_runtime.cpp -o bin/stmbench_tinystm
+	$(CXX) $(CXXFLAGS) -DDESIGN_WBCTL out/stmbench_tinystm.opt.bc \
+	  $(RUNTIMES_DIR)/TinySTM_runtime.cpp -I $(TINYSTM_DIR) -I ../../backends -o bin/stmbench_tinystm
 
 clean:
 	rm -rf out bin

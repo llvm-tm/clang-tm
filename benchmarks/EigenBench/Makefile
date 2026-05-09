@@ -7,6 +7,8 @@ CXXFLAGS := -std=c++17 -O1 -pthread
 PLUGIN := ../../llvm_tm_plugin/bin/libTMInstrument.so
 PLUGIN_PASS := -load-pass-plugin=$(PLUGIN) -passes="tm-instrument"
 RUNTIMES_DIR := ../../backends/runtimes
+TL2_DIR := ../../backends/TL2
+TINYSTM_DIR := ../../backends/TinySTM
 
 SRC := EigenBench.cpp
 
@@ -36,7 +38,8 @@ eigen_tl2: out bin
 eigen_tinystm: out bin
 	clang -c -emit-llvm $(SRC) -o out/eigen.bc
 	opt $(PLUGIN_PASS) out/eigen.bc -o out/eigen_tinystm.opt.bc
-	$(CXX) $(CXXFLAGS) out/eigen_tinystm.opt.bc $(RUNTIMES_DIR)/TinySTM_runtime.cpp -o bin/eigen_tinystm
+	$(CXX) $(CXXFLAGS) -DDESIGN_WBCTL out/eigen_tinystm.opt.bc \
+	  $(RUNTIMES_DIR)/TinySTM_runtime.cpp -I $(TINYSTM_DIR) -I ../../backends -o bin/eigen_tinystm
 
 clean:
 	rm -rf out bin

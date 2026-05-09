@@ -50,10 +50,12 @@ BENCHMARK_SUBDIRS := \
 	benchmarks/STMbench7 \
 	benchmarks/YCSB \
 	benchmarks/EigenBench \
-	benchmarks/STAMP_new \
+	benchmarks/STAMP \
 	benchmarks/TPCC \
-	benchmarks/test/intset \
-	benchmarks/test/regression
+	benchmarks/test/intset
+
+# regression is broken - missing Makefile.common
+# benchmarks/test/regression
 
 .PHONY: all clean plugin runtimes benchmarks tests check help info
 

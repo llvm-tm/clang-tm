@@ -39,7 +39,8 @@ tpcc_tl2: out bin
 tpcc_tinystm: out bin
 	clang -c -emit-llvm $(SRC) -o out/tpcc.bc
 	opt $(PLUGIN_PASS) out/tpcc.bc -o out/tpcc_tinystm.opt.bc
-	$(CXX) $(CXXFLAGS) out/tpcc_tinystm.opt.bc $(RUNTIMES_DIR)/TinySTM_runtime.cpp -o bin/tpcc_tinystm
+	$(CXX) $(CXXFLAGS) -DDESIGN_WBCTL out/tpcc_tinystm.opt.bc \
+	  $(RUNTIMES_DIR)/TinySTM_runtime.cpp -I $(TINYSTM_DIR) -I ../../backends -o bin/tpcc_tinystm
 
 clean:
 	rm -rf out bin

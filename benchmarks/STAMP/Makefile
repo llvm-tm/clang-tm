@@ -1,10 +1,14 @@
-# STAMP_new Benchmark Makefile
+# STAMP Benchmark Makefile
 
 CXX := clang++
 CXXFLAGS := -std=c++17 -O1 -pthread
 LLVM_PLUGIN_DIR := ../../llvm_tm_plugin
 PLUGIN := $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
 PLUGIN_PASS := -load-pass-plugin=$(PLUGIN) -passes="tm-instrument"
+
+# TinySTM directories
+TINYSTM_DIR := ../../backends/TinySTM
+BACKENDS_DIR := ../../backends
 
 OUT_DIR := out
 BIN_DIR := bin
@@ -42,7 +46,8 @@ $(OUT_DIR)/stamp_tinystm.opt.bc: $(OUT_DIR)/stamp.bc | mkdirs
 	opt $(PLUGIN_PASS) $(OUT_DIR)/stamp.bc -o $(OUT_DIR)/stamp_tinystm.opt.bc
 
 $(BIN_DIR)/stamp_tinystm: $(OUT_DIR)/stamp_tinystm.opt.bc ../../backends/runtimes/TinySTM_runtime.cpp | mkdirs
-	$(CXX) $(CXXFLAGS) $(OUT_DIR)/stamp_tinystm.opt.bc ../../backends/runtimes/TinySTM_runtime.cpp -o $(BIN_DIR)/stamp_tinystm
+	$(CXX) $(CXXFLAGS) -DDESIGN_WBCTL $(OUT_DIR)/stamp_tinystm.opt.bc \
+	  ../../backends/runtimes/TinySTM_runtime.cpp -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) -o $(BIN_DIR)/stamp_tinystm
 
 # With SwissTM runtime
 $(OUT_DIR)/stamp_swiss.opt.bc: $(OUT_DIR)/stamp.bc | mkdirs

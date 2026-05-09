@@ -38,6 +38,7 @@ static __thread uint8_t tm_buffer[TM_BUFFER_SIZE];
 // Global transaction counters
 static std::atomic<int64_t> g_tm_begin_count{0};
 static std::atomic<int64_t> g_tm_end_count{0};
+static std::atomic<int64_t> g_tm_tx_count{0};
 
 void tm_init() { norec::init(); }
 
@@ -76,12 +77,20 @@ void tm_set_env(sigjmp_buf *env)
 
 void tm_begin()
 {
+	// Always print to see if called
+	fprintf(stderr, "NOrec tm_begin called\n");
 	if (tm_longjmp_ret == 0)
 		norec::begin();
-	// g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
+	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 }
 
-void tm_end() { norec::commit(); }
+void tm_end()
+{
+	fprintf(stderr, "NOrec tm_end called\n");
+	norec::commit();
+	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
+	g_tm_tx_count.fetch_add(1, std::memory_order_relaxed);
+}
 
 // Read wrappers
 uint8_t tm_read_i1(uint8_t *addr, uint32_t symbol_id) { return norec::tm_read_i1(addr); }
@@ -178,11 +187,12 @@ void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {}
 
 static void print_stats()
 {
-	fprintf(stderr, "=== TinySTM_new Runtime Stats ===\n");
+	fprintf(stderr, "=== NOrec Runtime Stats ===\n");
 	fprintf(stderr,
-	        "tm_begin: %lld, tm_end: %lld\n",
+	        "tm_begin: %lld, tm_end: %lld, #TXs: %lld\n",
 	        (long long)g_tm_begin_count.load(std::memory_order_relaxed),
-	        (long long)g_tm_end_count.load(std::memory_order_relaxed));
+	        (long long)g_tm_end_count.load(std::memory_order_relaxed),
+	        (long long)g_tm_tx_count.load(std::memory_order_relaxed));
 }
 
 static int init = (std::atexit(print_stats), 0);

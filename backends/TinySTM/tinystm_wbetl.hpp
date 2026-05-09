@@ -14,6 +14,10 @@
 
 #include "tinystm_common.hpp"
 
+extern "C" {
+extern __thread int32_t tm_nested_call_counter;
+}
+
 namespace tinystm
 {
 
@@ -98,25 +102,33 @@ exit_thread() //
 inline bool //
 begin()     //
 {
-	if (!current_tx_wbetl) {
-		current_tx_wbetl = new Transaction<ReadLogEntry_wbetl, WriteLogEntry_wbetl>();
-	}
-
 	auto *tx = current_tx_wbetl;
-	TINYSTM_ASSERT(tx != nullptr, "begin: tx is null");
+	printf("THR%llu begin: tx->abort_count=%i tm_nested_call_counter=%i\n",
+	       tx->id,
+	       tx->abort_count,
+	       tm_nested_call_counter);
 
-	tx->reset();
+	TINYSTM_ASSERT(tx, "tx not defined");
+	TINYSTM_ASSERT(!tx->active, "nested not supported");
+
 	tx->start_version = get_clock();
 	tx->end_version = tx->start_version;
 	tx->active = true;
 	tx->read_only = true;
+	tx->abort_count = 0;
 
 	return true;
 }
 
-inline void abort_tx()
+inline void //
+abort_tx()  //
 {
 	auto *tx = current_tx_wbetl;
+
+	printf("THR%llu abort_tx\n", tx->id);
+
+	TINYSTM_ASSERT(tx, "tx not defined");
+	TINYSTM_ASSERT(tx->active, "tx not active");
 
 	tx->unlock_held_locks_and_clear();
 
@@ -126,19 +138,14 @@ inline void abort_tx()
 	// }
 
 	tx->abort_count++;
-
-	// TODO: backoff
-	// int backoff = 1 << std::min(tx->abort_count, 10);
-	// if (backoff > 0) {
-	// 	std::this_thread::sleep_for(std::chrono::nanoseconds(backoff * 10));
-	// }
+	siglongjmp(*jmpbuf, 1);
+	TINYSTM_ASSERT(false, "Did not jump");
 }
 
 inline bool //
 validate()  //
 {
 	auto *tx = current_tx_wbetl;
-	std::atomic_thread_fence(std::memory_order_acquire);
 	for (auto &r : tx->read_set) {
 		ByteOffset bo((word_t)r.addr);
 		Lock *lock = &g_locks_wbetl.get(bo.base_addr);
@@ -166,9 +173,8 @@ commit()    //
 {
 	auto *tx = current_tx_wbetl;
 
-	if (!tx || !tx->active) {
-		return false;
-	}
+	TINYSTM_ASSERT(tx, "tx not defined");
+	TINYSTM_ASSERT(tx->active, "tx not active");
 
 	// Locks already taken: write-back
 
@@ -189,6 +195,7 @@ commit()    //
 	}
 
 	tx->clear();
+	printf("THR%llu commit\n", tx->id);
 	return true;
 }
 

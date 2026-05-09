@@ -20,6 +20,7 @@ COLORS = {
     'tinystm': '#e74c3c',
     'tl2': '#9b59b6',
     'swisstm': '#f39c12',
+    'norec': '#1abc9c',
 }
 
 BACKEND_LABELS = {
@@ -28,6 +29,7 @@ BACKEND_LABELS = {
     'tinystm': 'TinySTM',
     'tl2': 'TL2',
     'swisstm': 'SwissTM',
+    'norec': 'NOrec',
 }
 
 
@@ -54,12 +56,23 @@ def parse_results_file(results_dir):
             txns_avg = int(parts[2]) if parts[2].isdigit() else 0
             txns_std = int(parts[3]) if parts[3].isdigit() else 0
 
+            # Extract tm_begin, tm_end, abort_rate if available
+            tm_begin = int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else None
+            tm_end = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None
+            abort_rate = float(parts[8].rstrip('%')) if len(parts) > 8 and parts[8].rstrip('%').replace('.', '').isdigit() else None
+
             if backend not in data:
-                data[backend] = {'threads': [], 'txns_avg': [], 'txns_std': []}
+                data[backend] = {'threads': [], 'txns_avg': [], 'txns_std': [], 'tm_begin': [], 'tm_end': [], 'abort_rate': []}
 
             data[backend]['threads'].append(threads)
             data[backend]['txns_avg'].append(txns_avg)
             data[backend]['txns_std'].append(txns_std)
+            if tm_begin is not None:
+                data[backend]['tm_begin'].append(tm_begin)
+            if tm_end is not None:
+                data[backend]['tm_end'].append(tm_end)
+            if abort_rate is not None:
+                data[backend]['abort_rate'].append(abort_rate)
 
     return data
 
@@ -85,6 +98,21 @@ def plot_throughput(data, output_file):
             capsize=4,
             label=label,
             color=color,
+        )
+
+    baseline_data = data.get('uninstrumented')
+    if baseline_data and baseline_data['txns_avg']:
+        baseline_1t = baseline_data['txns_avg'][0]
+        all_threads = sorted(set(t for v in data.values() for t in v['threads']))
+        linear_throughput = [baseline_1t * t for t in all_threads]
+        ax.plot(
+            all_threads,
+            [x / 1e6 for x in linear_throughput],
+            linestyle='--',
+            linewidth=1.5,
+            color='gray',
+            alpha=0.7,
+            label='linear',
         )
 
     ax.set_xlabel('Number of Threads', fontsize=12)
@@ -184,6 +212,62 @@ def plot_comparison(data, output_file):
     print(f"Saved comparison plot to: {output_file}")
 
 
+def plot_abort_rate(data, output_file):
+    """Plot abort rate (1 - #TXs / tm_begin) for each backend."""
+    # Filter to only include backends with abort rate data
+    abort_backends = {
+        b: v for b, v in data.items()
+        if v.get('abort_rate') and any(a is not None and a != 'N/A' for a in v['abort_rate'])
+    }
+
+    if not abort_backends:
+        print(f"Warning: No abort rate data found, skipping abort rate plot")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for backend, values in abort_backends.items():
+        if not values['threads'] or not values['abort_rate']:
+            continue
+
+        # Filter out None/N/A values
+        threads = []
+        abort_rates = []
+        for t, ar in zip(values['threads'], values['abort_rate']):
+            if ar is not None and ar != 'N/A':
+                threads.append(t)
+                abort_rates.append(ar)
+
+        if not threads:
+            continue
+
+        color = COLORS.get(backend, '#95a5a6')
+        label = BACKEND_LABELS.get(backend, backend)
+
+        ax.plot(
+            threads,
+            abort_rates,
+            marker='o',
+            linewidth=2,
+            markersize=8,
+            label=label,
+            color=color,
+        )
+
+    ax.set_xlabel('Number of Threads', fontsize=12)
+    ax.set_ylabel('Abort Rate (%)', fontsize=12)
+    ax.set_title('Bank Benchmark: Transaction Abort Rate', fontsize=14, fontweight='bold')
+    ax.legend(loc='best', fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.set_xticks(sorted(set(t for v in abort_backends.values() for t in v['threads'] if t is not None)))
+    ax.set_ylim(0, 100)
+
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=150)
+    plt.close()
+    print(f"Saved abort rate plot to: {output_file}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Generate plots from bank benchmark results'
@@ -204,15 +288,16 @@ def main():
 
     if args.results_dir is None:
         script_dir = os.path.dirname(os.path.abspath(__file__))
+        out_dir = os.path.join(script_dir, "out")
         dirs = [
-            d for d in os.listdir(script_dir)
-            if os.path.isdir(os.path.join(script_dir, d)) and d.startswith('results_')
+            d for d in os.listdir(out_dir)
+            if os.path.isdir(os.path.join(out_dir, d)) and d.startswith('results_')
         ]
         if not dirs:
             print("Error: No results directories found")
             sys.exit(1)
         dirs.sort()
-        args.results_dir = os.path.join(script_dir, dirs[-1])
+        args.results_dir = os.path.join(out_dir, dirs[-1])
         print(f"Using latest results directory: {args.results_dir}")
 
     if not os.path.exists(args.results_dir):
@@ -232,6 +317,7 @@ def main():
     plot_throughput(data, os.path.join(args.output, 'throughput.png'))
     plot_speedup(data, os.path.join(args.output, 'speedup.png'))
     plot_comparison(data, os.path.join(args.output, 'comparison.png'))
+    plot_abort_rate(data, os.path.join(args.output, 'abort_rate.png'))
 
     print(f"\nAll plots saved to: {args.output}/")
 

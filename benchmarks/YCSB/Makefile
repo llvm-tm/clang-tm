@@ -38,7 +38,8 @@ ycsb_tl2: out bin
 ycsb_tinystm: out bin
 	clang -c -emit-llvm $(SRC) -o out/ycsb.bc
 	opt $(PLUGIN_PASS) out/ycsb.bc -o out/ycsb_tinystm.opt.bc
-	$(CXX) $(CXXFLAGS) out/ycsb_tinystm.opt.bc $(RUNTIMES_DIR)/TinySTM_runtime.cpp -o bin/ycsb_tinystm
+	$(CXX) $(CXXFLAGS) -DDESIGN_WBCTL out/ycsb_tinystm.opt.bc \
+	  $(RUNTIMES_DIR)/TinySTM_runtime.cpp -I $(TINYSTM_DIR) -I ../../backends -o bin/ycsb_tinystm
 
 clean:
 	rm -rf out bin

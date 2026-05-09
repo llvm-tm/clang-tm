@@ -20,6 +20,7 @@ __thread Transaction<ReadLogEntry_wbctl, WriteLogEntry_wbctl> *current_tx_wbctl 
 } // namespace tinystm
 #elif defined(DESIGN_WT)
 #include "tinystm_wt.hpp"
+#include <random>
 namespace tinystm
 {
 LockTable<Lock_wt> g_locks_wt;
@@ -31,6 +32,9 @@ __thread Transaction<ReadLogEntry_wt, WriteLogEntry_wt> *current_tx_wt = nullptr
 
 namespace tinystm
 {
+thread_local bool rng_initialized = false; // for random backoff
+thread_local std::mt19937 rng;
+
 std::atomic<tinystm::word_t> reset_locks_thr{0};
 std::atomic<tinystm::word_t> g_clock{1};
 std::atomic<tinystm::word_t> thr_counter{1};

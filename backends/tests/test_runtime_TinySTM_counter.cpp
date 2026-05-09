@@ -27,6 +27,7 @@ extern tinystm::LockTable<tinystm::Lock_wt> tinystm::g_locks_wt;
 
 // Runtime stubs - implementation provided by linking with appropriate runtime file
 extern "C" {
+extern __thread int32_t tm_nested_call_counter;
 extern __thread int32_t tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;
 void tm_init();
@@ -67,6 +68,7 @@ SharedData shared_data;
 void thread_func(int thread_id)
 {
 	tm_init_thread();
+	tm_nested_call_counter++;
 
 	volatile uint32_t &i = i_array[thread_id];
 	for (i = 0; i < ITERATIONS; ++i) {
@@ -79,6 +81,8 @@ void thread_func(int thread_id)
 		//                                 .get((uint64_t)&shared_data.counter & ~7L)
 		//                                 .get();
 
+		// std::cout << "Thread " << thread_id << " idx " << idx << " tm_longjmp_ret "
+		//           << tm_longjmp_ret << "\n";
 		tm_begin();
 
 		uint32_t val = tm_read_i4(&shared_data.counter);
@@ -102,6 +106,7 @@ void thread_func(int thread_id)
 		// std::cout << "Thread " << thread_id << " committed TX " << i << "\n";
 	}
 
+	tm_nested_call_counter--;
 	tm_exit_thread();
 }
 

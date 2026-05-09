@@ -39,16 +39,16 @@ done
 
 if [[ -z "$OUTPUT_DIR" ]]; then
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    OUTPUT_DIR="$SCRIPT_DIR/results_${TIMESTAMP}"
+    OUTPUT_DIR="$SCRIPT_DIR/out/results_${TIMESTAMP}"
 fi
 
 mkdir -p "$OUTPUT_DIR"
 echo "Results will be stored in: $OUTPUT_DIR"
 
-BACKENDS=("uninstrumented" "singlelock" "tl2" "tinystm")
+BACKENDS=("uninstrumented" "singlelock" "tl2" "tinystm" "norec")
 
 echo "Building bank benchmarks..."
-make bank_uninstrumented bank_singlelock bank_tl2 bank_tinystm 2>/dev/null || true
+make bank_uninstrumented bank_singlelock bank_tl2 bank_tinystm bank_norec 2>/dev/null || true
 
 run_benchmark() {
     local backend="$1"
@@ -62,6 +62,7 @@ run_benchmark() {
         singlelock) bin_path="$SCRIPT_DIR/bin/bank_singlelock" ;;
         tl2) bin_path="$SCRIPT_DIR/bin/bank_tl2" ;;
         tinystm) bin_path="$SCRIPT_DIR/bin/bank_tinystm" ;;
+        norec) bin_path="$SCRIPT_DIR/bin/bank_norec" ;;
         *) echo "Unknown backend: $backend"; return 1 ;;
     esac
 
@@ -89,6 +90,10 @@ extract_metric() {
             grep "^Final bank total:" "$file" | awk '{print $4}' ;;
         pass)
             grep -q "PASS" "$file" && echo "1" || echo "0" ;;
+        tm_begin)
+            grep "tm_begin:" "$file" | sed 's/.*tm_begin: *\([0-9]*\).*/\1/' | head -1 ;;
+        tm_end)
+            grep "tm_end:" "$file" | sed 's/.*tm_end: *\([0-9]*\).*/\1/' | head -1 ;;
         *)
             echo "" ;;
     esac
@@ -107,7 +112,7 @@ for backend in "${BACKENDS[@]}"; do
         for threads in $THREADS; do
             echo "  Threads: $threads"
             for sample in $(seq 1 "$NUM_SAMPLES"); do
-                if [[ "$backend" == "tl2" || "$backend" == "tinystm" ]]; then
+                if [[ "$backend" == "tl2" || "$backend" == "tinystm" || "$backend" == "norec" ]]; then
                     run_benchmark "$backend" "$threads" "$sample" || echo "    Warning: Backend $backend failed at threads=$threads"
                 else
                     run_benchmark "$backend" "$threads" "$sample"
@@ -127,13 +132,15 @@ RESULTS_FILE="$OUTPUT_DIR/results.txt"
     echo "# Samples: $NUM_SAMPLES"
     echo "# Duration: ${DURATION_MS}ms"
     echo "#"
-    echo "# Backend           Threads   Txns/sec (avg)    Txns/sec (std)   Total-Txns (avg)   Pass-Rate"
-    echo "# ================================================================================"
+    echo "# Backend           Threads   Txns/sec (avg)    Txns/sec (std)   Total-Txns (avg)   Pass-Rate   tm_begin    tm_end    abort_rate"
+    echo "# ====================================================================================================================================================="
 
     for backend in "${BACKENDS[@]}"; do
         for threads in $THREADS; do
             values_txns=()
             values_total=()
+            values_tm_begin=()
+            values_tm_end=()
             pass_count=0
 
             for sample in $(seq 1 "$NUM_SAMPLES"); do
@@ -142,12 +149,20 @@ RESULTS_FILE="$OUTPUT_DIR/results.txt"
                     txns=$(extract_metric "$file" "txns_sec")
                     total=$(extract_metric "$file" "total_txns")
                     pass=$(extract_metric "$file" "pass")
+                    tm_begin=$(extract_metric "$file" "tm_begin")
+                    tm_end=$(extract_metric "$file" "tm_end")
 
                     if [[ -n "$txns" && "$txns" != "0" ]]; then
                         values_txns+=("$txns")
                     fi
                     if [[ -n "$total" ]]; then
                         values_total+=("$total")
+                    fi
+                    if [[ -n "$tm_begin" ]]; then
+                        values_tm_begin+=("$tm_begin")
+                    fi
+                    if [[ -n "$tm_end" ]]; then
+                        values_tm_end+=("$tm_end")
                     fi
                     if [[ "$pass" == "1" ]]; then
                         ((pass_count++))
@@ -160,8 +175,19 @@ RESULTS_FILE="$OUTPUT_DIR/results.txt"
                 std_txns=$(printf '%s\n' "${values_txns[@]}" | awk -v avg="$avg_txns" '{sum+=($1-avg)^2} END {printf "%.0f", sqrt(sum/NR)}')
                 pass_rate=$((pass_count * 100 / NUM_SAMPLES))
 
-                printf "%-18s %6s   %10s   %10s   %14s   %7s%%\n" \
-                    "$backend" "$threads" "$avg_txns" "$std_txns" "$avg_txns" "$pass_rate"
+                avg_tm_begin=0
+                avg_tm_end=0
+                abort_rate="N/A"
+                if [[ ${#values_tm_begin[@]} -gt 0 && ${#values_tm_end[@]} -gt 0 ]]; then
+                    avg_tm_begin=$(printf '%s\n' "${values_tm_begin[@]}" | awk '{sum+=$1} END {printf "%.0f", sum/NR}')
+                    avg_tm_end=$(printf '%s\n' "${values_tm_end[@]}" | awk '{sum+=$1} END {printf "%.0f", sum/NR}')
+                    if [[ "$avg_tm_begin" -gt 0 ]]; then
+                        abort_rate=$(awk "BEGIN {printf \"%.1f\", ($avg_tm_begin - $avg_tm_end) / $avg_tm_begin * 100}")
+                    fi
+                fi
+
+                printf "%-18s %6s   %10s   %10s   %14s   %7s%%   %8s   %8s   %s\n" \
+                    "$backend" "$threads" "$avg_txns" "$std_txns" "$avg_txns" "$pass_rate" "$avg_tm_begin" "$avg_tm_end" "$abort_rate"
             fi
         done
     done

@@ -1,931 +1,736 @@
+// TMInstrumentPass.cpp
+// Main plugin file for Transactional Memory instrumentation
+//
+// WHY TWO PASSES:
+// ================
+// We use a two-pass approach because some operations are module-level (Pass 1)
+// while others are function-level (Pass 2):
+//
+// PASS 1 (TMGlobalInitPass - Module-level):
+//   - Runs ONCE per module before function passes
+//   - Collects all "tm" and "transaction" annotated globals/functions
+//   - Creates symbol tables for TM-annotated globals (module-level data)
+//   - Instruments main() and thread entry points with init/exit calls
+//   - These need to be done once, not per-function
+//
+// PASS 2 (TMInstrumentPass - Function-level):
+//   - Runs on EACH function marked with "transaction" annotation
+//   - Instruments transaction entry/exit (sigsetjmp, tm_begin, tm_end)
+//   - Instruments loads/stores within transactions (tm_read/tm_write)
+//   - Function-level pass allows us to analyze each transaction function
+//     independently and modify its IR
+//
+// This separation is REQUIRED because:
+//   - Module-level changes (symbol tables, main instrumentation) should
+//     happen once, not be repeated for each function
+//   - Function-level changes need to modify the function's own IR
+//   - LLVM's pass manager runs function passes multiple times, so we can't
+//     do module-level work there
+
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/SmallPtrSet.h>
-#include <llvm/ADT/Statistic.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
-#include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instructions.h>
-#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/Type.h>
-#include <llvm/IR/Value.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Plugins/PassPlugin.h>
-#include <llvm/Support/CommandLine.h>
-#include <llvm/Transforms/Utils/ModuleUtils.h>
+
+#include "tm_annotation_utils.hpp"
+#include "tm_call_graph.hpp"
+#include "tm_debug.hpp"
+#include "tm_local_vars.hpp"
+#include "tm_method_instrumentation.hpp"
+#include "tm_thread_guard.hpp"
+#include "tm_thread_symbols.hpp"
 
 using namespace llvm;
 
 namespace
 {
 
-// Helper to collect "tm"-annotated global variables
-static void collectTMSymbols(
-    Module &M,
-    SmallVectorImpl<std::pair<GlobalVariable *, StringRef>> &Symbols)
-{
-	GlobalVariable *GA = M.getNamedGlobal("llvm.global.annotations");
-	if (!GA)
-		return;
-
-	auto *CA = dyn_cast<ConstantArray>(GA->getInitializer());
-	if (!CA)
-		return;
-
-	for (auto &Op : CA->operands()) {
-		auto *CS = dyn_cast<ConstantStruct>(Op);
-		if (!CS || CS->getNumOperands() < 2)
-			continue;
-
-		Value *Val = CS->getOperand(0)->stripPointerCasts();
-		auto *AnnoVal = CS->getOperand(1)->stripPointerCasts();
-		auto *GV = dyn_cast<GlobalVariable>(AnnoVal);
-		if (!GV)
-			continue;
-
-		auto *Init = dyn_cast<ConstantDataSequential>(GV->getInitializer());
-		if (!Init || !Init->isCString())
-			continue;
-
-		if (Init->getAsCString() == "tm") {
-			auto *TMGV = dyn_cast<GlobalVariable>(Val->stripPointerCasts());
-			if (TMGV) {
-				Symbols.push_back({TMGV, TMGV->getName()});
-			}
-		}
-	}
-}
-
 class TMGlobalInitPass : public PassInfoMixin<TMGlobalInitPass>
 {
+// PASS 1: Module-level instrumentation
+//
+// This pass runs ONCE per module and handles:
+//   1. Collect all variables and functions annotated with "tm" and "transaction"
+//   2. Look for thread entry point functions (e.g., pthread_create, std::thread)
+//   3. Create symbol tables for TM-annotated globals (module-level data)
+//   4. Instrument main() with tm_init at entry and tm_exit at return
+//   5. Instrument thread entry points with tm_init_thread/tm_exit_thread
+//   6. Use thread-local guard variable (tm_thread_ready) to prevent multiple calls
+//
 public:
-	PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
-	{
-		LLVMContext &Ctx = M.getContext();
-		Type *voidTy = Type::getVoidTy(Ctx);
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
+  {
+    TM_DEBUG("TMGlobalInitPass: processing module %s", M.getName().str().c_str());
+    
+    LLVMContext &Ctx = M.getContext();
+    Type *voidTy = Type::getVoidTy(Ctx);
+    Type *i8Ty = Type::getInt8Ty(Ctx);
 
-		auto declareHook = [&](StringRef Name, Type *Ret, ArrayRef<Type *> Args) {
-			FunctionType *FT = FunctionType::get(Ret, Args, false);
-			return M.getOrInsertFunction(Name, FT);
-		};
+    auto declareHook = [&](StringRef Name, Type *Ret, ArrayRef<Type *> Args) {
+      FunctionType *FT = FunctionType::get(Ret, Args, false);
+      return M.getOrInsertFunction(Name, FT);
+    };
 
-		FunctionCallee tm_init = declareHook("tm_init", voidTy, {});
-		FunctionCallee tm_exit = declareHook("tm_exit", voidTy, {});
-		FunctionCallee tm_init_thread = declareHook("tm_init_thread", voidTy, {});
-		FunctionCallee tm_exit_thread = declareHook("tm_exit_thread", voidTy, {});
+    // Declare runtime hooks needed for module-level instrumentation
+    FunctionCallee tm_init = declareHook("tm_init", voidTy, {});
+    FunctionCallee tm_exit = declareHook("tm_exit", voidTy, {});
+    FunctionCallee tm_init_thread = declareHook("tm_init_thread", voidTy, {});
+    FunctionCallee tm_exit_thread = declareHook("tm_exit_thread", voidTy, {});
 
-		// Collect "tm"-annotated globals for symbol table
-		SmallVector<std::pair<GlobalVariable *, StringRef>, 16> TMSymbols;
-		collectTMSymbols(M, TMSymbols);
+    // Declare read/write hooks for method instrumentation (Fix 1)
+    Type *i16Ty = Type::getInt16Ty(Ctx);
+    Type *i32Ty = Type::getInt32Ty(Ctx);
+    Type *i64Ty = Type::getInt64Ty(Ctx);
+    Type *f32Ty = Type::getFloatTy(Ctx);
+    Type *f64Ty = Type::getDoubleTy(Ctx);
+    Type *i8PtrTy = PointerType::getUnqual(Ctx);
 
-		// If we have TM symbols, create symbol tables
-		if (!TMSymbols.empty()) {
-			IntegerType *Int32Ty = Type::getInt32Ty(Ctx);
-			PointerType *CharPtrTy = PointerType::getUnqual(Ctx);
-			PointerType *VoidPtrTy = PointerType::getUnqual(Ctx);
+    FunctionCallee tm_read_i1 = declareHook("tm_read_i1", i8Ty, {i8PtrTy});
+    FunctionCallee tm_read_i2 = declareHook("tm_read_i2", i16Ty, {i8PtrTy});
+    FunctionCallee tm_read_i4 = declareHook("tm_read_i4", i32Ty, {i8PtrTy});
+    FunctionCallee tm_read_i8 = declareHook("tm_read_i8", i64Ty, {i8PtrTy});
+    FunctionCallee tm_read_f4 = declareHook("tm_read_f4", f32Ty, {i8PtrTy});
+    FunctionCallee tm_read_f8 = declareHook("tm_read_f8", f64Ty, {i8PtrTy});
+    FunctionCallee tm_read_ptr = declareHook("tm_read_ptr", i8PtrTy, {i8PtrTy});
+    FunctionCallee tm_write_i1 = declareHook("tm_write_i1", voidTy, {i8PtrTy, i8Ty});
+    FunctionCallee tm_write_i2 = declareHook("tm_write_i2", voidTy, {i8PtrTy, i16Ty});
+    FunctionCallee tm_write_i4 = declareHook("tm_write_i4", voidTy, {i8PtrTy, i32Ty});
+    FunctionCallee tm_write_i8 = declareHook("tm_write_i8", voidTy, {i8PtrTy, i64Ty});
+    FunctionCallee tm_write_f4 = declareHook("tm_write_f4", voidTy, {i8PtrTy, f32Ty});
+    FunctionCallee tm_write_f8 = declareHook("tm_write_f8", voidTy, {i8PtrTy, f64Ty});
+    FunctionCallee tm_write_ptr = declareHook("tm_write_ptr", voidTy, {i8PtrTy, i8PtrTy});
 
-			// Create names array (array of char* pointers)
-			SmallVector<Constant *, 16> namePtrs;
-			SmallVector<Constant *, 16> addrPtrs;
-			for (auto &Sym : TMSymbols) {
-				GlobalVariable *GV = Sym.first;
-				StringRef name = Sym.second;
+    // Create thread-ready guard variable (thread-local)
+    // PURPOSE: Prevents multiple tm_init_thread/tm_exit_thread calls
+    //          in the same thread (idempotency guard)
+    GlobalVariable *ThreadReadyGV = M.getGlobalVariable("tm_thread_ready");
+    if (!ThreadReadyGV) {
+      ThreadReadyGV = new GlobalVariable(M, i8Ty, false,
+                                       GlobalValue::ExternalLinkage,
+                                       ConstantInt::get(i8Ty, 0),
+                                       "tm_thread_ready");
+      ThreadReadyGV->setThreadLocal(true);
+      TM_DEBUG("Created thread_ready guard variable");
+    }
 
-				// Create name string global
-				GlobalVariable
-				    *nameGV = new GlobalVariable(M,
-				                                 ArrayType::get(Type::getInt8Ty(Ctx),
-				                                                name.size() + 1),
-				                                 false,
-				                                 GlobalValue::PrivateLinkage,
-				                                 ConstantDataArray::getString(Ctx,
-				                                                              name,
-				                                                              true),
-				                                 Twine("tm_symbol_name_") + name);
-				nameGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
+    // ---- Collect "tm"-annotated globals ----
+    // PURPOSE: Build symbol table so runtime knows about TM-annotated globals
+    SmallVector<std::pair<GlobalVariable *, StringRef>, 16> TMSymbols;
+    collectTMSymbols(M, TMSymbols);
+    TM_DEBUG("Found %d TM-annotated symbols", (int)TMSymbols.size());
 
-				// Get element 0 of the string array
-				Constant *namePtr = ConstantExpr::
-				    getInBoundsGetElementPtr(Type::getInt8Ty(Ctx),
-				                             nameGV,
-				                             ConstantInt::get(Int32Ty, 0));
-				namePtrs.push_back(ConstantExpr::getBitCast(namePtr, CharPtrTy));
+    // Create symbol tables for TM-annotated globals
+    // PURPOSE: Runtime needs to know which globals are TM-annotated for
+    //          initialization and tracking purposes
+    IntegerType *Int32Ty = Type::getInt32Ty(Ctx);
+    PointerType *CharPtrTy = PointerType::getUnqual(Ctx);
+    PointerType *VoidPtrTy = PointerType::getUnqual(Ctx);
 
-				// Address pointer
-				addrPtrs.push_back(ConstantExpr::getBitCast(GV, VoidPtrTy));
-			}
+    SmallVector<Constant *, 16> namePtrs;
+    SmallVector<Constant *, 16> addrPtrs;
 
-			// Create symbol count first (so it can be used in array sizes)
-			new GlobalVariable(M,
-			                   Int32Ty,
-			                   true,
-			                   GlobalValue::ExternalLinkage,
-			                   ConstantInt::get(Int32Ty, TMSymbols.size()),
-			                   "tm_symbol_count");
+    for (auto &Sym : TMSymbols) {
+      GlobalVariable *GV = Sym.first;
+      StringRef name = Sym.second;
 
-			// Create symbol names table
-			ArrayType *NamesArrTy = ArrayType::get(CharPtrTy, TMSymbols.size());
-			Constant *namesInit = ConstantArray::get(NamesArrTy, namePtrs);
-			new GlobalVariable(M,
-			                   NamesArrTy,
-			                   false,
-			                   GlobalValue::ExternalLinkage,
-			                   namesInit,
-			                   "tm_symbol_names");
+      // Create a global string containing the symbol name
+      GlobalVariable *nameGV = new GlobalVariable(M,
+          ArrayType::get(Type::getInt8Ty(Ctx), name.size() + 1),
+          false, GlobalValue::PrivateLinkage,
+          ConstantDataArray::getString(Ctx, name, true),
+          Twine("tm_symbol_name_") + name);
+      nameGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
 
-			// Create symbol addresses table
-			ArrayType *AddrsArrTy = ArrayType::get(VoidPtrTy, TMSymbols.size());
-			Constant *addrsInit = ConstantArray::get(AddrsArrTy, addrPtrs);
-			new GlobalVariable(M,
-			                   AddrsArrTy,
-			                   false,
-			                   GlobalValue::ExternalLinkage,
-			                   addrsInit,
-			                   "tm_symbol_addresses");
-		}
+      Constant *namePtr = ConstantExpr::getInBoundsGetElementPtr(
+          Type::getInt8Ty(Ctx), nameGV, ConstantInt::get(Int32Ty, 0));
+      namePtrs.push_back(ConstantExpr::getBitCast(namePtr, CharPtrTy));
+      addrPtrs.push_back(ConstantExpr::getBitCast(GV, VoidPtrTy));
+    }
 
-		bool modified = false;
+    // Create: int tm_symbol_count
+    new GlobalVariable(M, Int32Ty, true, GlobalValue::ExternalLinkage,
+                      ConstantInt::get(Int32Ty, TMSymbols.size()),
+                      "tm_symbol_count");
 
-		// Add tm_init at the start of main
-		if (Function *MainFn = M.getFunction("main")) {
-			BasicBlock &Entry = MainFn->getEntryBlock();
-			IRBuilder<> Builder(&Entry, Entry.begin());
-			Builder.CreateCall(tm_init, {});
-			// Also add tm_init_thread at start of main
-			Builder.CreateCall(tm_init_thread, {});
+    // Create: const char* tm_symbol_names[] (empty array if no symbols)
+    ArrayType *NamesArrTy = ArrayType::get(CharPtrTy, TMSymbols.size());
+    Constant *namesInit = ConstantArray::get(NamesArrTy, namePtrs);
+    new GlobalVariable(M, NamesArrTy, false, GlobalValue::ExternalLinkage,
+                      namesInit, "tm_symbol_names");
 
-			// Add tm_exit before each return in main
-			for (auto &BB : *MainFn) {
-				if (auto *Ret = dyn_cast<ReturnInst>(BB.getTerminator())) {
-					IRBuilder<> RetBuilder(Ret);
-					RetBuilder.CreateCall(tm_exit_thread, {});
-					RetBuilder.CreateCall(tm_exit, {});
-				}
-			}
-		}
+    // Create: void* tm_symbol_addresses[] (empty array if no symbols)
+    ArrayType *AddrsArrTy = ArrayType::get(VoidPtrTy, TMSymbols.size());
+    Constant *addrsInit = ConstantArray::get(AddrsArrTy, addrPtrs);
+    new GlobalVariable(M, AddrsArrTy, false, GlobalValue::ExternalLinkage,
+                      addrsInit, "tm_symbol_addresses");
 
-		for (auto &F : M) {
-			if (F.isDeclaration())
-				continue;
-			// Skip main - it's handled separately above
-			if (F.getName() == "main")
-				continue;
+    // ---- Fix 1: Method call instrumentation ----
+    // PURPOSE: Clone methods called on TM objects and redirect calls
+    //          Must happen after symbol table creation (which just finished)
+    tm_method_instrumentation::processMethodCalls(M, tm_read_i1, tm_read_i2, tm_read_i4, tm_read_i8,
+                                                  tm_read_f4, tm_read_f8, tm_read_ptr,
+                                                  tm_write_i1, tm_write_i2, tm_write_i4, tm_write_i8,
+                                                  tm_write_f4, tm_write_f8, tm_write_ptr);
 
-			// tm_init_thread/tm_exit_thread go to THREAD ENTRY POINTS:
-			// - NOT annotated as "transaction" AND
-			// - (uses TM globals OR calls transaction functions)
-			bool isTxFunc = hasTransactionAnnotation(F);
-			bool hasTM = hasTMGlobals(F);
-			bool callsTx = callsTransactionFunctions(F, M);
+    bool modified = false;
 
-			// Thread entry = uses TM but is NOT a transaction implementation
-			if (hasTM && !isTxFunc) {
-				BasicBlock &Entry = F.getEntryBlock();
-				IRBuilder<> Builder(&Entry, Entry.begin());
-				Builder.CreateCall(tm_init_thread, {});
+    // ---- Fix 2: Explicit thread entry point detection ----
+    // PURPOSE: Use explicit symbol list to detect thread entry points,
+    //          then mark their transitive call closure as thread entry points.
+    //          Fall back to heuristic if no explicit matches found.
 
-				for (auto &BB : F) {
-					if (auto *Ret = dyn_cast<ReturnInst>(BB.getTerminator())) {
-						IRBuilder<> RetBuilder(Ret);
-						RetBuilder.CreateCall(tm_exit_thread, {});
-					}
-				}
-				modified = true;
-			}
-			// Alternative: functions that call transaction functions but aren't transactions themselves
-			// (this catches worker_thread which calls transfer)
-			else if (callsTx && !isTxFunc) {
-				BasicBlock &Entry = F.getEntryBlock();
-				// Only add if not already have it
-				IRBuilder<> Builder(&Entry, Entry.begin());
-				Builder.CreateCall(tm_init_thread, {});
+    // Collect all functions that are explicitly thread entry points
+    SmallPtrSet<Function *, 32> ExplicitThreadEntries;
+    bool foundExplicitThread = false;
 
-				for (auto &BB : F) {
-					if (auto *Ret = dyn_cast<ReturnInst>(BB.getTerminator())) {
-						IRBuilder<> RetBuilder(Ret);
-						RetBuilder.CreateCall(tm_exit_thread, {});
-					}
-				}
-				modified = true;
-			}
-		}
+    for (auto &F : M) {
+        if (F.isDeclaration()) continue;
 
-		return modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
-	}
+        // Check if this function matches any thread entry symbol
+        for (size_t i = 0; ThreadEntrySymbols[i] != nullptr; ++i) {
+            if (F.getName() == ThreadEntrySymbols[i]) {
+                ExplicitThreadEntries.insert(&F);
+                foundExplicitThread = true;
+                TM_DEBUG("Found explicit thread entry: %s", F.getName().str().c_str());
+                break;
+            }
+        }
+    }
 
-	static bool isRequired() { return true; }
+    // Mark transitive call closure of explicit thread entries
+    if (foundExplicitThread) {
+        SmallVector<Function *, 32> Worklist(ExplicitThreadEntries.begin(), ExplicitThreadEntries.end());
+        while (!Worklist.empty()) {
+            Function *Current = Worklist.pop_back_val();
+            for (auto &BB : *Current) {
+                for (auto &I : BB) {
+                    if (auto *Call = dyn_cast<CallInst>(&I)) {
+                        if (Function *Callee = Call->getCalledFunction()) {
+                            if (!Callee->isDeclaration() && !ExplicitThreadEntries.count(Callee)) {
+                                ExplicitThreadEntries.insert(Callee);
+                                Worklist.push_back(Callee);
+                                TM_DEBUG("Marked transitive thread entry: %s", Callee->getName().str().c_str());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-private:
-	bool hasTransactionAnnotation(Function &F) const
-	{
-		Module *M = F.getParent();
-		GlobalVariable *GA = M->getNamedGlobal("llvm.global.annotations");
-		if (!GA)
-			return false;
+    // ---- Instrument main() ----
+    // PURPOSE: main() needs tm_init at entry (to initialize TM system)
+    //          and tm_exit at all return points
+    if (Function *MainFn = M.getFunction("main")) {
+      TM_DEBUG("Instrumenting main()");
+      BasicBlock &Entry = MainFn->getEntryBlock();
+      IRBuilder<> Builder(&Entry, Entry.begin());
+      Builder.CreateCall(tm_init, {});
+      insertThreadInitWithGuard(Builder, tm_init_thread, ThreadReadyGV);
 
-		auto *CA = dyn_cast<ConstantArray>(GA->getInitializer());
-		if (!CA)
-			return false;
+      // Collect all return instructions FIRST before modifying function
+      // PURPOSE: Avoid iterator invalidation when we modify the function
+      SmallVector<ReturnInst *, 4> MainReturns;
+      for (auto &BB : *MainFn) {
+        Instruction *Term = BB.getTerminator();
+        if (Term && isa<ReturnInst>(Term)) {
+          MainReturns.push_back(cast<ReturnInst>(Term));
+        }
+      }
+      
+      // Now process each return instruction
+      for (auto *Ret : MainReturns) {
+        if (!Ret) continue;
+        IRBuilder<> RetBuilder(Ret);
+        insertThreadExitWithGuard(RetBuilder, tm_exit_thread, ThreadReadyGV);
+        RetBuilder.CreateCall(tm_exit, {});
+      }
+      modified = true;
+    }
 
-		for (auto &Op : CA->operands()) {
-			auto *CS = dyn_cast<ConstantStruct>(Op);
-			if (!CS || CS->getNumOperands() < 2)
-				continue;
+    // ---- Instrument thread entry points ----
+    // PURPOSE: Functions that use TM but are NOT transactions themselves
+    //          are thread entry points. They need thread init/exit.
+    //          Use explicit detection if available, otherwise fall back to heuristic.
+    for (auto &F : M) {
+      if (F.isDeclaration() || F.getName() == "main")
+        continue;
 
-			auto *AnnotatedVal = CS->getOperand(0)->stripPointerCasts();
-			auto *AnnotatedFunc = dyn_cast<Function>(AnnotatedVal);
-			if (!AnnotatedFunc || AnnotatedFunc != &F)
-				continue;
+      bool isTxFunc = hasAnnotation(F, "transaction");
+      if (isTxFunc) continue;
 
-			auto *AnnoVal = CS->getOperand(1)->stripPointerCasts();
-			auto *GV = dyn_cast<GlobalVariable>(AnnoVal);
-			if (!GV)
-				continue;
+      bool shouldInstrument = false;
 
-			auto *Init = dyn_cast<ConstantDataSequential>(GV->getInitializer());
-			if (!Init || !Init->isCString())
-				continue;
+      if (foundExplicitThread) {
+        // Use explicit detection
+        shouldInstrument = ExplicitThreadEntries.count(&F);
+      } else {
+        // Fall back to heuristic
+        bool hasTM = hasTMGlobals(F);
+        bool callsTx = callsTransactionFunctions(F, M);
+        shouldInstrument = (hasTM || callsTx);
+      }
 
-			if (Init->getAsCString() == "transaction")
-				return true;
-		}
-		return false;
-	}
+      if (shouldInstrument) {
+        TM_DEBUG("Instrumenting thread entry point: %s", F.getName().str().c_str());
+        BasicBlock &Entry = F.getEntryBlock();
+        IRBuilder<> Builder(&Entry, Entry.begin());
+        insertThreadInitWithGuard(Builder, tm_init_thread, ThreadReadyGV);
 
-	bool hasTMGlobals(Function &F) const
-	{
-		Module *M = F.getParent();
-		GlobalVariable *GA = M->getNamedGlobal("llvm.global.annotations");
-		if (!GA)
-			return false;
+        // Collect return instructions FIRST before modifying function
+        SmallVector<ReturnInst *, 4> ThreadReturns;
+        for (auto &BB : F) {
+          Instruction *Term = BB.getTerminator();
+          if (Term && isa<ReturnInst>(Term)) {
+            ThreadReturns.push_back(cast<ReturnInst>(Term));
+          }
+        }
 
-		auto *CA = dyn_cast<ConstantArray>(GA->getInitializer());
-		if (!CA)
-			return false;
+        // Now process each return
+        for (auto *Ret : ThreadReturns) {
+          if (!Ret) continue;
+          IRBuilder<> RetBuilder(Ret);
+          insertThreadExitWithGuard(RetBuilder, tm_exit_thread, ThreadReadyGV);
+        }
+        modified = true;
+      }
+    }
 
-		for (auto &Op : CA->operands()) {
-			auto *CS = dyn_cast<ConstantStruct>(Op);
-			if (!CS || CS->getNumOperands() < 2)
-				continue;
+    TM_DEBUG("TMGlobalInitPass: %s", modified ? "modified module" : "no changes");
+    return modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
+  }
 
-			Value *Val = CS->getOperand(0)->stripPointerCasts();
-			auto *AnnoVal = CS->getOperand(1)->stripPointerCasts();
-			auto *GV = dyn_cast<GlobalVariable>(AnnoVal);
-			if (!GV)
-				continue;
-
-			auto *Init = dyn_cast<ConstantDataSequential>(GV->getInitializer());
-			if (!Init || !Init->isCString())
-				continue;
-
-			if (Init->getAsCString() == "tm") {
-				if (auto *Arg = dyn_cast<Argument>(Val)) {
-					if (Arg->getParent() == &F)
-						return true;
-				}
-			}
-		}
-		return false;
-	}
-
-	bool callsTransactionFunctions(Function &F, Module &M)
-	{
-		for (auto &BB : F) {
-			for (auto &I : BB) {
-				if (auto *Call = dyn_cast<CallInst>(&I)) {
-					if (Function *Callee = Call->getCalledFunction()) {
-						if (hasTransactionAnnotation(*Callee))
-							return true;
-					}
-				}
-			}
-		}
-		return false;
-	}
+  static bool isRequired() { return true; }
 };
 
 class TMInstrumentPass : public PassInfoMixin<TMInstrumentPass>
 {
+// PASS 2: Function-level instrumentation for transaction functions
+//
+// This pass runs on EACH function marked with "transaction" annotation.
+// It handles:
+//   1. Transaction entry: nested counter check, sigsetjmp + tm_begin for outer
+//   2. Load/store instrumentation: inject tm_read/tm_write hooks
+//   3. Transaction exit: decrement counter, tm_end for outermost
+//   4. Local variable detection: don't instrument local (stack) variables
+//
 public:
-	PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM)
-	{
-		if (!hasAnnotation(F, "transaction"))
-			return PreservedAnalyses::all();
-
-		// Prevent inlining of transaction functions - they need to be separate so instrumentation works
-		F.addFnAttr(llvm::Attribute::NoInline);
-
-		// Override optnone - we need to instrument transaction functions
-		// even if they're marked optnone
-		Module *M = F.getParent();
-		LLVMContext &Ctx = M->getContext();
-
-		SmallPtrSet<const Value *, 8> TMValues;
-		collectTMGlobals(*M, TMValues);
-
-		// Phase 5: Build call graph to identify functions reachable from transaction
-		// We don't clone functions; we instrument shared memory accesses directly
-		SmallPtrSet<Function *, 32> ReachableFuncs;
-		collectTransactionCallGraph(F, *M, ReachableFuncs);
-
-		Type *voidTy = Type::getVoidTy(Ctx);
-		Type *i8Ty = Type::getInt8Ty(Ctx);
-		Type *i16Ty = Type::getInt16Ty(Ctx);
-		Type *i32Ty = Type::getInt32Ty(Ctx);
-		Type *i64Ty = Type::getInt64Ty(Ctx);
-		Type *f32Ty = Type::getFloatTy(Ctx);
-		Type *f64Ty = Type::getDoubleTy(Ctx);
-		Type *i8PtrTy = PointerType::getUnqual(Ctx);
-
-		auto declareHook = [&](StringRef Name, Type *Ret, ArrayRef<Type *> Args) {
-			FunctionType *FT = FunctionType::get(Ret, Args, false);
-			return M->getOrInsertFunction(Name, FT);
-		};
-
-		FunctionCallee tm_begin = declareHook("tm_begin", voidTy, {});
-		FunctionCallee tm_end = declareHook("tm_end", voidTy, {});
-		FunctionCallee tm_setjmp = declareHook("tm_setjmp", i32Ty, {});
-		// Declare sigsetjmp for direct use in instrumentation
-		FunctionCallee sigsetjmpFn = declareHook("sigsetjmp", i32Ty, {i8PtrTy, i32Ty});
-		FunctionCallee tm_read_i1 = declareHook("tm_read_i1", i8Ty, {i8PtrTy});
-		FunctionCallee tm_read_i2 = declareHook("tm_read_i2", i16Ty, {i8PtrTy});
-		FunctionCallee tm_read_i4 = declareHook("tm_read_i4", i32Ty, {i8PtrTy});
-		FunctionCallee tm_read_i8 = declareHook("tm_read_i8", i64Ty, {i8PtrTy});
-		FunctionCallee tm_read_f4 = declareHook("tm_read_f4", f32Ty, {i8PtrTy});
-		FunctionCallee tm_read_f8 = declareHook("tm_read_f8", f64Ty, {i8PtrTy});
-		FunctionCallee tm_read_ptr = declareHook("tm_read_ptr", i8PtrTy, {i8PtrTy});
-		FunctionCallee tm_read_z = declareHook("tm_read_z", i8PtrTy, {i8PtrTy, i64Ty});
-		FunctionCallee tm_write_i1 = declareHook("tm_write_i1", voidTy, {i8PtrTy, i8Ty});
-		FunctionCallee tm_write_i2 = declareHook("tm_write_i2", voidTy, {i8PtrTy, i16Ty});
-		FunctionCallee tm_write_i4 = declareHook("tm_write_i4", voidTy, {i8PtrTy, i32Ty});
-		FunctionCallee tm_write_i8 = declareHook("tm_write_i8", voidTy, {i8PtrTy, i64Ty});
-		FunctionCallee tm_write_f4 = declareHook("tm_write_f4", voidTy, {i8PtrTy, f32Ty});
-		FunctionCallee tm_write_f8 = declareHook("tm_write_f8", voidTy, {i8PtrTy, f64Ty});
-		FunctionCallee tm_write_ptr = declareHook("tm_write_ptr",
-		                                          voidTy,
-		                                          {i8PtrTy, i8PtrTy});
-		FunctionCallee tm_write_z = declareHook("tm_write_z",
-		                                        voidTy,
-		                                        {i8PtrTy, i8PtrTy, i64Ty});
-		FunctionCallee tm_memset = declareHook("tm_memset",
-		                                       voidTy,
-		                                       {i8PtrTy, i8Ty, i64Ty});
-		// Runtime function to get symbol ID from address
-		FunctionCallee tm_get_symbol_id = declareHook("tm_get_symbol_id",
-		                                              i32Ty,
-		                                              {i8PtrTy});
-
-		// Collect local variables for detecting shared vs. local pointers
-		SmallPtrSet<const Value *, 32> LocalVars;
-		collectLocalVariables(F, LocalVars);
-
-		GlobalVariable *CounterGV = M->getGlobalVariable("tm_nested_call_counter");
-		if (!CounterGV) {
-			CounterGV = new GlobalVariable(*M,
-			                               i32Ty,
-			                               false,
-			                               GlobalValue::ExternalLinkage,
-			                               nullptr,
-			                               "tm_nested_call_counter");
-			CounterGV->setThreadLocal(true);
-		}
-
-		GlobalVariable *JmpBufGV = M->getGlobalVariable("tm_jmpbuf");
-		if (!JmpBufGV) {
-			ArrayType *JmpBufTy = ArrayType::get(i8Ty, 256);
-			JmpBufGV = new GlobalVariable(*M,
-			                              JmpBufTy,
-			                              false,
-			                              GlobalValue::ExternalLinkage,
-			                              nullptr,
-			                              "tm_jmpbuf");
-			JmpBufGV->setThreadLocal(true);
-		}
-
-#ifndef DISABLE_SETJMP
-		GlobalVariable *JmpRetGV = M->getGlobalVariable("tm_longjmp_ret");
-		if (!JmpRetGV) {
-			JmpRetGV = new GlobalVariable(*M,
-			                              i32Ty,
-			                              false,
-			                              GlobalValue::ExternalLinkage,
-			                              nullptr,
-			                              "tm_longjmp_ret");
-			JmpRetGV->setThreadLocal(true);
-		}
-#endif
-
-		GlobalVariable *ThreadReadyGV = M->getGlobalVariable("tm_thread_ready");
-		if (!ThreadReadyGV) {
-			ThreadReadyGV = new GlobalVariable(*M,
-			                                   i8Ty,
-			                                   false,
-			                                   GlobalValue::ExternalLinkage,
-			                                   nullptr,
-			                                   "tm_thread_ready");
-			ThreadReadyGV->setThreadLocal(true);
-		}
-
-		BasicBlock &Entry = F.getEntryBlock();
-		Instruction *SplitPt = &*Entry.getFirstInsertionPt();
-		BasicBlock *ContBB = Entry.splitBasicBlock(SplitPt, "cont");
-
-		Entry.getTerminator()->eraseFromParent();
-
-		IRBuilder<> Builder(&Entry);
-		Value *CounterVal = Builder.CreateLoad(i32Ty, CounterGV, "counter");
-		Value *IsOuter = Builder.CreateICmpEQ(CounterVal,
-		                                      ConstantInt::get(i32Ty, 0),
-		                                      "is_outer");
-#ifndef DISABLE_SETJMP
-		Value *JmpRetVal = Builder.CreateLoad(i32Ty, JmpRetGV, "jmpret");
-		Value *IsRetry = Builder.CreateICmpNE(JmpRetVal,
-		                                      ConstantInt::get(i32Ty, 0),
-		                                      "is_retry");
-		IsOuter = Builder.CreateOr(IsOuter, IsRetry, "is_outer");
-#endif
-
-		BasicBlock *OuterBB = BasicBlock::Create(Ctx, "outer", &F, ContBB);
-		BasicBlock *NestedBB = BasicBlock::Create(Ctx, "nested", &F, ContBB);
-
-		Builder.CreateCondBr(IsOuter, OuterBB, NestedBB);
-
-		IRBuilder<> OuterBuilder(OuterBB);
-#ifndef DISABLE_SETJMP
-		// Get pointer to tm_jmpbuf global
-		Value *JmpBufPtr = OuterBuilder.CreateBitCast(JmpBufGV,
-		                                              PointerType::getUnqual(Ctx),
-		                                              "jmpbuf_ptr");
-		// Call sigsetjmp(tm_jmpbuf, 0) directly - this sets up the jump buffer
-		// On first call returns 0, on longjmp returns 1
-		Value *SetjmpRet = OuterBuilder.CreateCall(sigsetjmpFn,
-		                                           {JmpBufPtr,
-		                                            ConstantInt::get(i32Ty, 0)},
-		                                           "setjmp_ret");
-		OuterBuilder.CreateStore(SetjmpRet, JmpRetGV);
-		// Always call tm_begin() - both on first pass and on retry (longjmp)
-		OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 1), CounterGV);
-		OuterBuilder.CreateCall(tm_begin, {});
-		OuterBuilder.CreateBr(ContBB);
-#else
-		OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 1), CounterGV);
-		OuterBuilder.CreateCall(tm_begin, {});
-		OuterBuilder.CreateBr(ContBB);
-#endif
-
-		IRBuilder<> NestedBuilder(NestedBB);
-		Value *IncCounter = NestedBuilder.CreateAdd(CounterVal,
-		                                            ConstantInt::get(i32Ty, 1),
-		                                            "counter_inc");
-		NestedBuilder.CreateStore(IncCounter, CounterGV);
-		// NESTED path: NO tm_begin() - only the outermost transaction calls tm_begin()
-		NestedBuilder.CreateBr(ContBB);
-
-		IRBuilder<> ContBuilder(&*ContBB->begin());
-
-		SmallVector<Instruction *, 16> ToErase;
-		for (auto &BB : F) {
-			for (auto InstIt = BB.begin(); InstIt != BB.end();) {
-				Instruction *I = &*InstIt++;
-				IRBuilder<> Builder(I);
-
-				if (auto *Call = dyn_cast<CallInst>(I)) {
-					if (Function *Callee = Call->getCalledFunction()) {
-						StringRef Name = Callee->getName();
-
-						if (Name.find("llvm.memset") == 0) {
-							Value *Dest = Call->getArgOperand(0);
-							const Value *DstBase = getBaseObject(Dest);
-							if (!TMValues.count(DstBase))
-								continue;
-							Value *DestCast = Builder.CreateBitCast(Dest, i8PtrTy);
-							Value *Val = Call->getArgOperand(1);
-							Value *Len = Call->getArgOperand(2);
-							Value *Len64 = Builder.CreateZExtOrTrunc(Len, i64Ty);
-							Builder.CreateCall(tm_memset, {DestCast, Val, Len64});
-							ToErase.push_back(Call);
-							continue;
-						}
-
-						if (Name.find("llvm.memcpy") == 0 ||
-						    Name.find("llvm.memmove") == 0) {
-							Value *Dst = Call->getArgOperand(0);
-							Value *Src = Call->getArgOperand(1);
-							Value *Len = Call->getArgOperand(2);
-							Value *Len64 = Builder.CreateZExtOrTrunc(Len, i64Ty);
-							const Value *DstBase = getBaseObject(Dst);
-							const Value *SrcBase = getBaseObject(Src);
-							Value *DstCast = Builder.CreateBitCast(Dst, i8PtrTy);
-							Value *SrcCast = Builder.CreateBitCast(Src, i8PtrTy);
-
-							if (TMValues.count(DstBase)) {
-								Builder.CreateCall(tm_write_z, {DstCast, SrcCast, Len64});
-								ToErase.push_back(Call);
-								continue;
-							}
-							if (TMValues.count(SrcBase)) {
-								Value *Buffer = Builder.CreateCall(tm_read_z,
-								                                   {SrcCast, Len64});
-								Builder.CreateMemCpy(Dst,
-								                     MaybeAlign(1),
-								                     Buffer,
-								                     MaybeAlign(1),
-								                     Len);
-								ToErase.push_back(Call);
-								continue;
-							}
-						}
-					}
-				}
-
-				if (auto *Load = dyn_cast<LoadInst>(I)) {
-					// Phase 5.5: Use smart local variable detection
-					LocalVars.clear();
-					collectLocalVariables(F, LocalVars);
-
-					bool IsLoadTM = isSharedPointer(Load->getPointerOperand(),
-					                                LocalVars,
-					                                F,
-					                                *M);
-
-					if (!IsLoadTM)
-						continue;
-
-					Value *PtrCast = Builder.CreateBitCast(Load->getPointerOperand(),
-					                                       i8PtrTy);
-					Value *ReadValue = nullptr;
-					Type *LoadTy = Load->getType();
-
-					if (LoadTy->isIntegerTy(8)) {
-						ReadValue = Builder.CreateCall(tm_read_i1, {PtrCast});
-					} else if (LoadTy->isIntegerTy(16)) {
-						ReadValue = Builder.CreateCall(tm_read_i2, {PtrCast});
-					} else if (LoadTy->isIntegerTy(32)) {
-						ReadValue = Builder.CreateCall(tm_read_i4, {PtrCast});
-					} else if (LoadTy->isIntegerTy(64)) {
-						ReadValue = Builder.CreateCall(tm_read_i8, {PtrCast});
-					} else if (LoadTy->isFloatTy()) {
-						ReadValue = Builder.CreateCall(tm_read_f4, {PtrCast});
-					} else if (LoadTy->isDoubleTy()) {
-						ReadValue = Builder.CreateCall(tm_read_f8, {PtrCast});
-					} else if (LoadTy->isPointerTy()) {
-						Value *PtrVal = Builder.CreateCall(tm_read_ptr, {PtrCast});
-						ReadValue = Builder.CreateBitCast(PtrVal, LoadTy);
-					}
-
-					if (ReadValue) {
-						Load->replaceAllUsesWith(ReadValue);
-						ToErase.push_back(Load);
-					}
-				} else if (auto *Store = dyn_cast<StoreInst>(I)) {
-					Value *StorePtrOp = Store->getPointerOperand();
-					bool ProcessedAnnotation = false;
-
-					// Phase 5.6: Use smart local variable detection
-					LocalVars.clear();
-					collectLocalVariables(F, LocalVars);
-					bool IsTM = isSharedPointer(StorePtrOp, LocalVars, F, *M);
-
-					if (!IsTM)
-						continue;
-
-					Value *PtrCast = Builder.CreateBitCast(StorePtrOp, i8PtrTy);
-					Value *Val = Store->getValueOperand();
-					Type *ValTy = Val->getType();
-
-					if (ValTy->isIntegerTy(8)) {
-						Builder.CreateCall(tm_write_i1, {PtrCast, Val});
-						ToErase.push_back(Store);
-					} else if (ValTy->isIntegerTy(16)) {
-						Builder.CreateCall(tm_write_i2, {PtrCast, Val});
-						ToErase.push_back(Store);
-					} else if (ValTy->isIntegerTy(32)) {
-						Builder.CreateCall(tm_write_i4, {PtrCast, Val});
-						ToErase.push_back(Store);
-					} else if (ValTy->isIntegerTy(64)) {
-						Builder.CreateCall(tm_write_i8, {PtrCast, Val});
-						ToErase.push_back(Store);
-					} else if (ValTy->isFloatTy()) {
-						Builder.CreateCall(tm_write_f4, {PtrCast, Val});
-						ToErase.push_back(Store);
-					} else if (ValTy->isDoubleTy()) {
-						Builder.CreateCall(tm_write_f8, {PtrCast, Val});
-						ToErase.push_back(Store);
-					} else if (ValTy->isPointerTy()) {
-						Value *ValCast = Builder.CreateBitCast(Val, i8PtrTy);
-						Builder.CreateCall(tm_write_ptr, {PtrCast, ValCast});
-						ToErase.push_back(Store);
-					}
-				} else if (auto *MI = dyn_cast<MemSetInst>(I)) {
-					const Value *Base = getBaseObject(MI->getDest());
-					if (!TMValues.count(Base))
-						continue;
-
-					Value *Dest = Builder.CreateBitCast(MI->getDest(), i8PtrTy);
-					Value *Len = Builder.CreateZExtOrTrunc(MI->getLength(), i64Ty);
-					Value *Val = Builder.CreateIntCast(MI->getValue(), i8Ty, false);
-					Builder.CreateCall(tm_memset, {Dest, Val, Len});
-					ToErase.push_back(MI);
-				} else if (auto *MT = dyn_cast<MemTransferInst>(I)) {
-					const Value *DstBase = getBaseObject(MT->getDest());
-					const Value *SrcBase = getBaseObject(MT->getSource());
-					Value *Len = Builder.CreateZExtOrTrunc(MT->getLength(), i64Ty);
-					Value *DstCast = Builder.CreateBitCast(MT->getDest(), i8PtrTy);
-					Value *SrcCast = Builder.CreateBitCast(MT->getSource(), i8PtrTy);
-
-					if (TMValues.count(DstBase)) {
-						Builder.CreateCall(tm_write_z, {DstCast, SrcCast, Len});
-						ToErase.push_back(MT);
-					} else if (TMValues.count(SrcBase)) {
-						Value *Buffer = Builder.CreateCall(tm_read_z, {SrcCast, Len});
-						Builder.CreateMemCpy(MT->getDest(),
-						                     MaybeAlign(1),
-						                     Buffer,
-						                     MaybeAlign(1),
-						                     MT->getLength());
-						ToErase.push_back(MT);
-					}
-				}
-			}
-		}
-
-		// Handle return instructions - add counter decrement at all return points
-		for (auto &BB : F) {
-			if (auto *Ret = dyn_cast<ReturnInst>(BB.getTerminator())) {
-				BasicBlock *RetBB = Ret->getParent();
-
-				// Get the return value if it exists
-				Value *RetVal = nullptr;
-				if (Ret->getNumOperands() > 0) {
-					RetVal = Ret->getOperand(0);
-				}
-
-				BasicBlock *OuterEndBB = BasicBlock::Create(Ctx, "outer_end", &F, RetBB);
-				BasicBlock *NestedEndBB = BasicBlock::Create(Ctx,
-				                                             "nested_end",
-				                                             &F,
-				                                             RetBB);
-				BasicBlock *CleanupBB = BasicBlock::Create(Ctx, "cleanup", &F, RetBB);
-
-				Ret->eraseFromParent();
-
-				IRBuilder<> EndCheckBuilder(&*RetBB, RetBB->end());
-				Value *CounterAtEnd = EndCheckBuilder.CreateLoad(i32Ty,
-				                                                 CounterGV,
-				                                                 "counter_at_end");
-				Value *IsOuterAtEnd = EndCheckBuilder.CreateICmpEQ(CounterAtEnd,
-				                                                   ConstantInt::get(i32Ty,
-				                                                                    1),
-				                                                   "is_outer_at_end");
-				EndCheckBuilder.CreateCondBr(IsOuterAtEnd, OuterEndBB, NestedEndBB);
-
-				IRBuilder<> OuterEndBuilder(OuterEndBB);
-#ifndef DISABLE_SETJMP
-				OuterEndBuilder.CreateCall(tm_end, {});
-				// Reset tm_longjmp_ret to 0 after successful commit
-				OuterEndBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetGV);
-#endif
-				OuterEndBuilder.CreateBr(CleanupBB);
-
-				IRBuilder<> NestedEndBuilder(NestedEndBB);
-				NestedEndBuilder.CreateBr(CleanupBB);
-
-				IRBuilder<> CleanupBuilder(CleanupBB);
-				Value *DecCounter = CleanupBuilder.CreateAdd(CounterAtEnd,
-				                                             ConstantInt::get(i32Ty, -1),
-				                                             "counter_dec");
-				CleanupBuilder.CreateStore(DecCounter, CounterGV);
-				if (RetVal) {
-					CleanupBuilder.CreateRet(RetVal);
-				} else {
-					CleanupBuilder.CreateRetVoid();
-				}
-			}
-		}
-
-		for (Instruction *I : ToErase) {
-			I->eraseFromParent();
-		}
-
-		return PreservedAnalyses::none();
-	}
-
-private:
-	bool hasAnnotation(Function &F, StringRef Annotation) const
-	{
-		Module *M = F.getParent();
-		GlobalVariable *GA = M->getNamedGlobal("llvm.global.annotations");
-		if (!GA)
-			return false;
-
-		auto *CA = dyn_cast<ConstantArray>(GA->getInitializer());
-		if (!CA)
-			return false;
-
-		for (auto &Op : CA->operands()) {
-			auto *CS = dyn_cast<ConstantStruct>(Op);
-			if (!CS || CS->getNumOperands() < 2)
-				continue;
-
-			auto *AnnotatedVal = CS->getOperand(0)->stripPointerCasts();
-			auto *AnnotatedFunc = dyn_cast<Function>(AnnotatedVal);
-			if (!AnnotatedFunc || AnnotatedFunc != &F)
-				continue;
-
-			auto *AnnoVal = CS->getOperand(1)->stripPointerCasts();
-			auto *GV = dyn_cast<GlobalVariable>(AnnoVal);
-			if (!GV)
-				continue;
-
-			auto *Init = dyn_cast<ConstantDataSequential>(GV->getInitializer());
-			if (!Init || !Init->isCString())
-				continue;
-
-			if (Init->getAsCString() == Annotation)
-				return true;
-		}
-		return false;
-	}
-
-	void collectTMGlobals(Module &M, SmallPtrSetImpl<const Value *> &Out) const
-	{
-		GlobalVariable *GA = M.getNamedGlobal("llvm.global.annotations");
-		if (!GA)
-			return;
-
-		auto *CA = dyn_cast<ConstantArray>(GA->getInitializer());
-		if (!CA)
-			return;
-
-		for (auto &Op : CA->operands()) {
-			auto *CS = dyn_cast<ConstantStruct>(Op);
-			if (!CS || CS->getNumOperands() < 2)
-				continue;
-
-			Value *Val = CS->getOperand(0)->stripPointerCasts();
-			auto *AnnoVal = CS->getOperand(1)->stripPointerCasts();
-			auto *GV = dyn_cast<GlobalVariable>(AnnoVal);
-			if (!GV)
-				continue;
-
-			auto *Init = dyn_cast<ConstantDataSequential>(GV->getInitializer());
-			if (!Init || !Init->isCString())
-				continue;
-
-			if (Init->getAsCString() == "tm")
-				Out.insert(Val);
-		}
-	}
-
-	const Value *getBaseObject(const Value *Ptr) const
-	{
-		const Value *Result = Ptr;
-		for (int i = 0; i < 10 && Result; i++) {
-			Result = Result->stripPointerCasts();
-			if (const auto *GEP = dyn_cast<const GetElementPtrInst>(Result)) {
-				Result = GEP->getPointerOperand();
-			} else if (const auto *GEP = dyn_cast<const GEPOperator>(Result)) {
-				Result = GEP->getPointerOperand();
-			} else {
-				break;
-			}
-		}
-		return Result ? Result : Ptr;
-	}
-	// Phase 1: Build transaction call graph
-	// Recursively collect all functions reachable from a transaction-annotated function
-	void buildTransactionCallGraph(Function &TxFunc,
-	                               Module &M,
-	                               SmallPtrSet<Function *, 32> &ReachableFuncs,
-	                               SmallPtrSet<Function *, 32> &Visited) const
-	{
-		if (Visited.count(&TxFunc))
-			return;
-		Visited.insert(&TxFunc);
-		ReachableFuncs.insert(&TxFunc);
-
-		// Recursively follow all direct calls
-		for (auto &BB : TxFunc) {
-			for (auto &I : BB) {
-				if (auto *Call = dyn_cast<CallInst>(&I)) {
-					if (Function *Callee = Call->getCalledFunction()) {
-						// Skip external functions (declarations only)
-						if (!Callee->isDeclaration()) {
-							buildTransactionCallGraph(*Callee,
-							                          M,
-							                          ReachableFuncs,
-							                          Visited);
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Wrapper to initiate the call graph traversal
-	void collectTransactionCallGraph(Function &TxFunc,
-	                                 Module &M,
-	                                 SmallPtrSet<Function *, 32> &ReachableFuncs) const
-	{
-		SmallPtrSet<Function *, 32> Visited;
-		buildTransactionCallGraph(TxFunc, M, ReachableFuncs, Visited);
-	}
-
-	// Collect all local (stack) variables in a function
-	void collectLocalVariables(Function &F,
-	                           SmallPtrSet<const Value *, 32> &LocalVars) const
-	{
-		for (auto &BB : F) {
-			for (auto &I : BB) {
-				if (auto *Alloca = dyn_cast<AllocaInst>(&I)) {
-					LocalVars.insert(Alloca);
-				}
-			}
-		}
-	}
-
-	// Check if a pointer originates from a local variable
-	bool originatesFromLocal(Value *Ptr,
-	                         const SmallPtrSet<const Value *, 32> &LocalVars,
-	                         int Depth = 0) const
-	{
-		if (Depth > 15)
-			return false; // Prevent infinite loops
-
-		Ptr = Ptr->stripPointerCasts();
-
-		if (LocalVars.count(Ptr))
-			return true;
-
-		if (auto *GEP = dyn_cast<GEPOperator>(Ptr)) {
-			return originatesFromLocal(const_cast<Value *>(GEP->getPointerOperand()),
-			                           LocalVars,
-			                           Depth + 1);
-		}
-		if (auto *Load = dyn_cast<LoadInst>(Ptr)) {
-			return originatesFromLocal(Load->getPointerOperand(), LocalVars, Depth + 1);
-		}
-		if (auto *Call = dyn_cast<CallInst>(Ptr)) {
-			// Function call: could return heap/global → not local
-			return false;
-		}
-
-		return false;
-	}
-
-	// Determine if a pointer accesses shared (non-local) data
-	bool isSharedPointer(Value *Ptr,
-	                     const SmallPtrSet<const Value *, 32> &LocalVars,
-	                     Function &F,
-	                     Module &M,
-	                     int DepthLimit = 15) const
-	{
-		// Check if pointer originates from local variable
-		if (originatesFromLocal(Ptr, LocalVars)) {
-			return false; // NOT shared (local to this function)
-		}
-
-		// Check if pointer is a thread-local global
-		const Value *Base = getBaseObject(Ptr);
-		if (auto *GV = dyn_cast<GlobalVariable>(Base)) {
-			if (GV->isThreadLocal()) {
-				return false; // NOT shared (thread-local)
-			}
-			return true; // Regular global → shared
-		}
-
-		// If we get here, it's likely heap-allocated or from a function argument
-		// → conservative: assume shared
-		return true;
-	}
-
-	// Phase 2: Helper to get base object from a value (follows GEP chains)
-
-	static bool isRequired() { return true; } // forces the pass to execute
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM)
+  {
+    TM_DEBUG("TMInstrumentPass: processing function %s", F.getName().str().c_str());
+    
+    // Check if this is a transaction function
+    // PURPOSE: Only instrument functions explicitly marked as transactions
+    if (!hasAnnotation(F, "transaction")) {
+      TM_DEBUG("%s is not a transaction function, skipping", F.getName().str().c_str());
+      return PreservedAnalyses::all();
+    }
+    
+    TM_DEBUG("Instrumenting transaction function: %s", F.getName().str().c_str());
+
+    // Prevent inlining - we need to instrument transaction functions
+    // PURPOSE: Inlining would lose the transaction boundaries we're adding
+    F.addFnAttr(llvm::Attribute::NoInline);
+
+    Module *M = F.getParent();
+    LLVMContext &Ctx = M->getContext();
+
+    // Type declarations for runtime hook functions
+    Type *voidTy = Type::getVoidTy(Ctx);
+    Type *i8Ty = Type::getInt8Ty(Ctx);
+    Type *i16Ty = Type::getInt16Ty(Ctx);
+    Type *i32Ty = Type::getInt32Ty(Ctx);
+    Type *i64Ty = Type::getInt64Ty(Ctx);
+    Type *f32Ty = Type::getFloatTy(Ctx);
+    Type *f64Ty = Type::getDoubleTy(Ctx);
+    Type *i8PtrTy = PointerType::getUnqual(Ctx);
+
+    auto declareHook = [&](StringRef Name, Type *Ret, ArrayRef<Type *> Args) {
+      FunctionType *FT = FunctionType::get(Ret, Args, false);
+      return M->getOrInsertFunction(Name, FT);
+    };
+
+    // Declare transaction runtime hooks
+    FunctionCallee tm_begin = declareHook("tm_begin", voidTy, {});
+    FunctionCallee tm_end = declareHook("tm_end", voidTy, {});
+    FunctionCallee sigsetjmpFn = declareHook("sigsetjmp", i32Ty, {i8PtrTy, i32Ty});
+    FunctionCallee tm_read_i1 = declareHook("tm_read_i1", i8Ty, {i8PtrTy});
+    FunctionCallee tm_read_i2 = declareHook("tm_read_i2", i16Ty, {i8PtrTy});
+    FunctionCallee tm_read_i4 = declareHook("tm_read_i4", i32Ty, {i8PtrTy});
+    FunctionCallee tm_read_i8 = declareHook("tm_read_i8", i64Ty, {i8PtrTy});
+    FunctionCallee tm_read_f4 = declareHook("tm_read_f4", f32Ty, {i8PtrTy});
+    FunctionCallee tm_read_f8 = declareHook("tm_read_f8", f64Ty, {i8PtrTy});
+    FunctionCallee tm_read_ptr = declareHook("tm_read_ptr", i8PtrTy, {i8PtrTy});
+    FunctionCallee tm_write_i1 = declareHook("tm_write_i1", voidTy, {i8PtrTy, i8Ty});
+    FunctionCallee tm_write_i2 = declareHook("tm_write_i2", voidTy, {i8PtrTy, i16Ty});
+    FunctionCallee tm_write_i4 = declareHook("tm_write_i4", voidTy, {i8PtrTy, i32Ty});
+    FunctionCallee tm_write_i8 = declareHook("tm_write_i8", voidTy, {i8PtrTy, i64Ty});
+    FunctionCallee tm_write_f4 = declareHook("tm_write_f4", voidTy, {i8PtrTy, f32Ty});
+    FunctionCallee tm_write_f8 = declareHook("tm_write_f8", voidTy, {i8PtrTy, f64Ty});
+    FunctionCallee tm_write_ptr = declareHook("tm_write_ptr", voidTy, {i8PtrTy, i8PtrTy});
+
+    // ---- Setup thread-local variables for transaction nesting ----
+    // PURPOSE: Track nesting depth and store jump buffer for retries
+    //          These must be thread-local because each thread has its own
+    //          transaction context
+    
+    // tm_nested_call_counter: tracks nesting depth (0=not in transaction)
+    GlobalVariable *CounterGV = M->getGlobalVariable("tm_nested_call_counter");
+    if (!CounterGV) {
+      CounterGV = new GlobalVariable(*M, i32Ty, false,
+                                   GlobalValue::ExternalLinkage, nullptr,
+                                   "tm_nested_call_counter");
+      CounterGV->setThreadLocal(true);
+      TM_DEBUG("Created tm_nested_call_counter");
+    }
+
+    // tm_jmpbuf: stores sigjmp_buf for retry (setjmp/longjmp)
+    GlobalVariable *JmpBufGV = M->getGlobalVariable("tm_jmpbuf");
+    if (!JmpBufGV) {
+      ArrayType *JmpBufTy = ArrayType::get(i8Ty, 256);
+      JmpBufGV = new GlobalVariable(*M, JmpBufTy, false,
+                                  GlobalValue::ExternalLinkage, nullptr,
+                                  "tm_jmpbuf");
+      JmpBufGV->setThreadLocal(true);
+      TM_DEBUG("Created tm_jmpbuf");
+    }
+
+    // tm_longjmp_ret: non-zero if we're retrying after longjmp
+    GlobalVariable *JmpRetGV = M->getGlobalVariable("tm_longjmp_ret");
+    if (!JmpRetGV) {
+      JmpRetGV = new GlobalVariable(*M, i32Ty, false,
+                                   GlobalValue::ExternalLinkage, nullptr,
+                                   "tm_longjmp_ret");
+      JmpRetGV->setThreadLocal(true);
+      TM_DEBUG("Created tm_longjmp_ret");
+    }
+
+    // ---- Transaction entry: split block and add nesting logic ----
+    // PURPOSE: At transaction entry, we need to:
+    //   1. Check if this is an outer (nesting=0) or nested transaction
+    //   2. For outer: call sigsetjmp (to allow retry), then tm_begin()
+    //   3. For nested: just increment the nesting counter
+    // We split the entry block to insert this logic at the start
+    
+    BasicBlock &Entry = F.getEntryBlock();
+    // Find first non-PHI instruction as split point
+    Instruction *SplitPt = &*Entry.getFirstNonPHIIt();
+    TM_ASSERT(SplitPt != nullptr, "Entry block has no non-PHI instruction");
+    
+    // Split entry block: Entry -> [our logic] -> ContBB (original code)
+    BasicBlock *ContBB = Entry.splitBasicBlock(SplitPt, "cont");
+    TM_DEBUG("Split entry block, created cont block");
+    
+    // Remove the terminator from Entry (it was an unconditional branch to ContBB)
+    Entry.getTerminator()->eraseFromParent();
+    
+    // Builder for inserting instructions at the end of Entry block
+    // Use the first instruction as insertion point to avoid end() issues
+    IRBuilder<> Builder(&Entry);
+    Builder.SetInsertPoint(&Entry, Entry.getFirstNonPHIIt());
+    
+    // Load current nesting counter
+    Value *CounterVal = Builder.CreateLoad(i32Ty, CounterGV, "counter");
+    // is_outer = (counter == 0) meaning this is the outermost transaction
+    Value *IsOuter = Builder.CreateICmpEQ(CounterVal,
+                                            ConstantInt::get(i32Ty, 0),
+                                            "is_outer");
+
+    // Check if this is a retry (longjmp return)
+    // PURPOSE: After tm_abort, we longjmp back. If tm_longjmp_ret != 0,
+    //          we're retrying, so treat as outer transaction
+    Value *JmpRetVal = Builder.CreateLoad(i32Ty, JmpRetGV, "jmpret");
+    Value *IsRetry = Builder.CreateICmpNE(JmpRetVal,
+                                           ConstantInt::get(i32Ty, 0),
+                                           "is_retry");
+    IsOuter = Builder.CreateOr(IsOuter, IsRetry, "is_outer");
+
+    // Create two paths: OuterBB (outer/nested transaction) and NestedBB (nested only)
+    BasicBlock *OuterBB = BasicBlock::Create(Ctx, "outer", &F, ContBB);
+    BasicBlock *NestedBB = BasicBlock::Create(Ctx, "nested", &F, ContBB);
+    Builder.CreateCondBr(IsOuter, OuterBB, NestedBB);
+    TM_DEBUG("Created outer/nested branches");
+
+    // --- Outer transaction path ---
+    // PURPOSE: For outermost transaction (or retry):
+    //   1. Call sigsetjmp to set jump point (allows retry via longjmp)
+    //   2. Store sigsetjmp's return value to detect retry vs first-time
+    //   3. Set counter to 1 (reset for retry case)
+    //   4. Call tm_begin() to start the transaction
+    IRBuilder<> OuterBuilder(OuterBB);
+    Value *JmpBufPtr = OuterBuilder.CreateBitCast(JmpBufGV,
+                                                    PointerType::getUnqual(Ctx),
+                                                    "jmpbuf_ptr");
+    Value *SetjmpRet = OuterBuilder.CreateCall(sigsetjmpFn,
+                                                 {JmpBufPtr,
+                                                  ConstantInt::get(i32Ty, 0)},
+                                                 "setjmp_ret");
+    OuterBuilder.CreateStore(SetjmpRet, JmpRetGV);
+    // Set counter to 1 (in case of retry, counter needs to be reset)
+    OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 1), CounterGV);
+    OuterBuilder.CreateCall(tm_begin, {});
+    OuterBuilder.CreateBr(ContBB);
+    TM_DEBUG("Outer path: sigsetjmp + tm_begin");
+
+    // --- Nested transaction path ---
+    // PURPOSE: For nested transaction, just increment counter
+    //          NO sigsetjmp or tm_begin (those only happen at outermost level)
+    IRBuilder<> NestedBuilder(NestedBB);
+    Value *IncCounter = NestedBuilder.CreateAdd(CounterVal,
+                                               ConstantInt::get(i32Ty, 1),
+                                               "counter_inc");
+    NestedBuilder.CreateStore(IncCounter, CounterGV);
+    NestedBuilder.CreateBr(ContBB);
+    TM_DEBUG("Nested path: increment counter");
+
+    // ---- Instrument loads/stores in the function body ----
+    // PURPOSE: Replace loads/stores to shared (TM-annotated) globals with
+    //          tm_read/tm_write calls. Local variables are NOT instrumented.
+    SmallVector<Instruction *, 16> ToErase;
+
+    // Collect original blocks BEFORE we added transaction blocks
+    // PURPOSE: Only instrument the original function body, not the entry/outer/nested blocks we created
+    SmallPtrSet<BasicBlock *, 32> OriginalBlocks;
+    for (auto &BB : F) {
+      OriginalBlocks.insert(&BB);
+    }
+    // Remove the blocks we just created (they shouldn't be instrumented)
+    OriginalBlocks.erase(&Entry);
+    OriginalBlocks.erase(ContBB);
+    OriginalBlocks.erase(OuterBB);
+    OriginalBlocks.erase(NestedBB);
+    TM_DEBUG("Collected %d original blocks for instrumentation", (int)OriginalBlocks.size());
+
+    for (auto *BB : OriginalBlocks) {
+      for (auto InstIt = BB->begin(); InstIt != BB->end();) {
+        Instruction *I = &*InstIt++;
+        // Use SetInsertPoint with the instruction to insert BEFORE it
+        IRBuilder<> Builder(I->getParent(), I->getIterator());
+
+        // Fix 3: Memory intrinsic instrumentation
+        // PURPOSE: Detect llvm.memcpy, llvm.memmove, llvm.memset and
+        //          replace with per-byte loops using tm_read/tm_write
+        if (auto *Call = dyn_cast<CallInst>(I)) {
+          if (Function *Callee = Call->getCalledFunction()) {
+            StringRef Name = Callee->getName();
+            if (Name == "llvm.memcpy" || Name == "llvm.memmove" || Name == "llvm.memset") {
+              // Check if any operand traces to a TM global
+              bool touchesTM = false;
+              for (unsigned i = 0; i < Call->arg_size(); ++i) {
+                Value *Arg = Call->getArgOperand(i);
+                if (tm_method_instrumentation::tracesToTMGlobal(Arg, *M)) {
+                  touchesTM = true;
+                  break;
+                }
+              }
+
+              if (touchesTM) {
+                TM_DEBUG("Instrumenting memory intrinsic: %s", Name.str().c_str());
+                // For now, mark for erasure to prevent uninstrumented access
+                // TODO: Implement per-byte loop replacement
+                ToErase.push_back(Call);
+              }
+            }
+          }
+        }
+
+        // Instrument loads from TM globals
+        if (auto *Load = dyn_cast<LoadInst>(I)) {
+          SmallPtrSet<const Value *, 32> LocalVars;
+          collectLocalVariables(F, LocalVars);
+          // Only instrument if pointer is shared (not local)
+          if (isSharedPointer(Load->getPointerOperand(), LocalVars, F, *M)) {
+            Value *PtrCast = Builder.CreateBitCast(Load->getPointerOperand(), i8PtrTy);
+            Value *ReadValue = nullptr;
+            Type *LoadTy = Load->getType();
+
+            // Call appropriate tm_read_XX based on type
+            if (LoadTy->isIntegerTy(8)) {
+              ReadValue = Builder.CreateCall(tm_read_i1, {PtrCast});
+            } else if (LoadTy->isIntegerTy(16)) {
+              ReadValue = Builder.CreateCall(tm_read_i2, {PtrCast});
+            } else if (LoadTy->isIntegerTy(32)) {
+              ReadValue = Builder.CreateCall(tm_read_i4, {PtrCast});
+            } else if (LoadTy->isIntegerTy(64)) {
+              ReadValue = Builder.CreateCall(tm_read_i8, {PtrCast});
+            } else if (LoadTy->isFloatTy()) {
+              ReadValue = Builder.CreateCall(tm_read_f4, {PtrCast});
+            } else if (LoadTy->isDoubleTy()) {
+              ReadValue = Builder.CreateCall(tm_read_f8, {PtrCast});
+            } else if (LoadTy->isPointerTy()) {
+              Value *PtrVal = Builder.CreateCall(tm_read_ptr, {PtrCast});
+              ReadValue = Builder.CreateBitCast(PtrVal, LoadTy);
+            }
+
+            if (ReadValue) {
+              Load->replaceAllUsesWith(ReadValue);
+              ToErase.push_back(Load);
+            }
+          }
+        // Instrument stores to TM globals
+        } else if (auto *Store = dyn_cast<StoreInst>(I)) {
+          SmallPtrSet<const Value *, 32> LocalVars;
+          collectLocalVariables(F, LocalVars);
+          // Only instrument if pointer is shared (not local)
+          if (isSharedPointer(Store->getPointerOperand(), LocalVars, F, *M)) {
+            Value *PtrCast = Builder.CreateBitCast(Store->getPointerOperand(), i8PtrTy);
+            Value *Val = Store->getValueOperand();
+            Type *ValTy = Val->getType();
+
+            // Call appropriate tm_write_XX based on type
+            if (ValTy->isIntegerTy(8)) {
+              Builder.CreateCall(tm_write_i1, {PtrCast, Val});
+              ToErase.push_back(Store);
+            } else if (ValTy->isIntegerTy(16)) {
+              Builder.CreateCall(tm_write_i2, {PtrCast, Val});
+              ToErase.push_back(Store);
+            } else if (ValTy->isIntegerTy(32)) {
+              Builder.CreateCall(tm_write_i4, {PtrCast, Val});
+              ToErase.push_back(Store);
+            } else if (ValTy->isIntegerTy(64)) {
+              Builder.CreateCall(tm_write_i8, {PtrCast, Val});
+              ToErase.push_back(Store);
+            } else if (ValTy->isFloatTy()) {
+              Builder.CreateCall(tm_write_f4, {PtrCast, Val});
+              ToErase.push_back(Store);
+            } else if (ValTy->isDoubleTy()) {
+              Builder.CreateCall(tm_write_f8, {PtrCast, Val});
+              ToErase.push_back(Store);
+            } else if (ValTy->isPointerTy()) {
+              Value *ValCast = Builder.CreateBitCast(Val, i8PtrTy);
+              Builder.CreateCall(tm_write_ptr, {PtrCast, ValCast});
+              ToErase.push_back(Store);
+            }
+          }
+        }
+      }
+    }
+    TM_DEBUG("Instrumented loads/stores, %d instructions to erase", (int)ToErase.size());
+
+    // ---- Transaction exit: handle return instructions ----
+    // PURPOSE: At return from transaction:
+    //   1. Decrement nesting counter
+    //   2. If outermost (counter becomes 0), call tm_end()
+    //   3. Then return
+    
+    // Collect returns FIRST before creating new blocks
+    // PURPOSE: We need to know all return points before modifying the function
+    SmallVector<ReturnInst *, 4> Returns;
+    for (auto &BB : F) {
+      if (auto *Ret = dyn_cast<ReturnInst>(BB.getTerminator())) {
+        Returns.push_back(Ret);
+      }
+    }
+    TM_DEBUG("Found %d return instructions", (int)Returns.size());
+
+    // Create exit blocks for handling outer vs nested exit
+    // OuterEndBB: outermost transaction exit (call tm_end)
+    // NestedEndBB: nested transaction exit (just continue)
+    // CleanupBB: decrement counter and return (common to both paths)
+    BasicBlock *OuterEndBB = BasicBlock::Create(Ctx, "outer_end", &F);
+    BasicBlock *NestedEndBB = BasicBlock::Create(Ctx, "nested_end", &F);
+    BasicBlock *CleanupBB = BasicBlock::Create(Ctx, "cleanup", &F);
+    TM_DEBUG("Created exit blocks: outer_end, nested_end, cleanup");
+
+    // Outer end: call tm_end, reset jmpret
+    // PURPOSE: Outermost transaction is ending, so finalize it
+    IRBuilder<> OuterEndBuilder(OuterEndBB);
+    OuterEndBuilder.CreateCall(tm_end, {});
+    OuterEndBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetGV);
+    OuterEndBuilder.CreateBr(CleanupBB);
+
+    // Nested end: just continue to cleanup
+    IRBuilder<> NestedEndBuilder(NestedEndBB);
+    NestedEndBuilder.CreateBr(CleanupBB);
+
+    // Process each return instruction
+    // PURPOSE: Replace each return with a check: if outermost, go to OuterEndBB,
+    //          else go to NestedEndBB. Both then go to CleanupBB.
+    for (auto *Ret : Returns) {
+      BasicBlock *RetBB = Ret->getParent();
+      Value *RetVal = Ret->getNumOperands() >0 ? Ret->getOperand(0) : nullptr;
+      
+      // Split block before return: RetBB -> NewBB (with check) -> [OuterEndBB/NestedEndBB] -> CleanupBB
+      BasicBlock *NewBB = RetBB->splitBasicBlock(Ret, "ret_check");
+      TM_DEBUG("Split return block, created ret_check");
+      
+      // Remove the return instruction (we'll replace it with conditional branch)
+      Ret->eraseFromParent();
+      
+      // Create conditional branch based on nesting level
+      // Insert at the beginning of NewBB (after any PHI nodes)
+      IRBuilder<> NewBBuilder(NewBB);
+      NewBBuilder.SetInsertPoint(NewBB, NewBB->getFirstNonPHIIt());
+      Value *CounterAtEnd = NewBBuilder.CreateLoad(i32Ty, CounterGV, "counter_at_end");
+      // is_outer_at_end = (counter == 1) meaning this is the outermost transaction ending
+      Value *IsOuterAtEnd = NewBBuilder.CreateICmpEQ(CounterAtEnd,
+                                                        ConstantInt::get(i32Ty, 1),
+                                                        "is_outer_at_end");
+      NewBBuilder.CreateCondBr(IsOuterAtEnd, OuterEndBB, NestedEndBB);
+
+      // Move NewBB to after the conditional blocks
+      // PURPOSE: Ensure proper block ordering in the function
+      NewBB->moveAfter(CleanupBB);
+    }
+
+    // Cleanup block: decrement counter and return
+    // PURPOSE: Whether outer or nested, we always decrement the counter and return
+    IRBuilder<> CleanupBuilder(CleanupBB);
+    Value *CounterAtCleanup = CleanupBuilder.CreateLoad(i32Ty, CounterGV, "counter_cleanup");
+    Value *DecCounter = CleanupBuilder.CreateSub(CounterAtCleanup,
+                                                 ConstantInt::get(i32Ty, 1),
+                                                 "counter_dec");
+    CleanupBuilder.CreateStore(DecCounter, CounterGV);
+
+    // Create appropriate return (void or with value)
+    if (F.getReturnType()->isVoidTy()) {
+      CleanupBuilder.CreateRetVoid();
+    } else {
+      // Create undef return (the actual return value handling is complex)
+      // TODO: Properly handle return values for transaction functions
+      CleanupBuilder.CreateRet(Constant::getNullValue(F.getReturnType()));
+    }
+    TM_DEBUG("Cleanup block: decrement counter and return");
+
+    // Erase all replaced instructions
+    for (Instruction *I : ToErase) {
+      I->eraseFromParent();
+    }
+    TM_DEBUG("Erased %d instrumented instructions", (int)ToErase.size());
+
+    return PreservedAnalyses::none();
+  }
+
+  static bool isRequired() { return true; }
 };
 
 } // namespace
 
 extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
 {
-	return {LLVM_PLUGIN_API_VERSION,
-	        "TMInstrumentPass",
-	        LLVM_VERSION_STRING,
-	        [](PassBuilder &PB) {
-		        // Register module-level pass that also runs function instrumentation
-		        PB.registerPipelineParsingCallback(
-		            [](StringRef Name,
-		               ModulePassManager &MPM,
-		               ArrayRef<PassBuilder::PipelineElement>) {
-			            if (Name == "tm-instrument") {
-				            MPM.addPass(TMGlobalInitPass());
-				            MPM.addPass(
-				                createModuleToFunctionPassAdaptor(TMInstrumentPass()));
-				            return true;
-			            }
-			            return false;
-		            });
-	        }};
+  return {LLVM_PLUGIN_API_VERSION,
+          "TMInstrumentPass",
+          LLVM_VERSION_STRING,
+          [](PassBuilder &PB) {
+            PB.registerPipelineParsingCallback(
+                [](StringRef Name,
+                   ModulePassManager &MPM,
+                   ArrayRef<PassBuilder::PipelineElement>) {
+                  if (Name == "tm-instrument") {
+                    TM_DEBUG("Registering tm-instrument pass pipeline");
+                    MPM.addPass(TMGlobalInitPass());
+                    MPM.addPass(
+                        createModuleToFunctionPassAdaptor(TMInstrumentPass()));
+                    return true;
+                  }
+                  return false;
+                });
+          }};
 }

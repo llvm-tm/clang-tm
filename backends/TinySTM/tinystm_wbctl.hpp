@@ -29,6 +29,7 @@ struct ReadLogEntry_wbctl {
 struct WriteLogEntry_wbctl {
 	ValueType type;
 	void *addr;
+	word_t version;
 	any_type_t new_val;
 };
 
@@ -67,6 +68,29 @@ exit_thread() //
 	current_tx_wbctl = nullptr;
 }
 
+static void //
+init_rand() //
+{
+	if (!rng_initialized) {
+		std::random_device rd;
+		rng.seed(rd());
+		rng_initialized = true;
+	}
+}
+
+static void      //
+random_backoff() //
+{
+	if (!rng_initialized) {
+		init_rand();
+	}
+	std::exponential_distribution<> dist((double)1 /
+	                                     (double)(current_tx_wbctl->abort_count + 1));
+	int delay = std::min(dist(rng), 1e5); // max delay is 100ms
+	// printf("THR%llu Sleep for %i\n", current_tx_wbctl->id, delay);
+	std::this_thread::sleep_for(std::chrono::microseconds(delay));
+}
+
 /** -------------------------------------------------------
   * Stubs for Transaction begin/end.
   * ---------------------------------------------------- */
@@ -98,13 +122,19 @@ abort_tx()  //
 {
 	auto *tx = current_tx_wbctl;
 
-	// printf("THR%llu abort_tx\n", tx->id);
-
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
 	tx->unlock_held_locks_and_clear();
 	tx->abort_count++;
+	fprintf(stderr, "TinySTM abort_tx #%d\n", tx->abort_count);
+	fflush(stderr);
+	// printf("THR%llu abort_tx (%i)\n", tx->id, tx->abort_count);
+	// std::atomic_thread_fence(std::memory_order_acq_rel);
+	if (tx->abort_count > 5) { // Magic number
+		// random backoff when aborts are really bad
+		random_backoff();
+	}
 	siglongjmp(*jmpbuf, 1);
 	TINYSTM_ASSERT(false, "Did not jump");
 }
@@ -116,8 +146,12 @@ validate()  //
 	for (auto &r : tx->read_set) {
 		ByteOffset bo((word_t)r.addr);
 		Lock *lock = &g_locks_wbctl.get(bo.base_addr);
+		word_t l = lock->get();
+		word_t is_locked = (l & OWNED_MASK) != 0;
+		word_t owner = (l & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS;
+		word_t current_version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
 
-		if (lock->is_locked() || lock->get_version() > r.observed_version) {
+		if ((is_locked && owner != tx->id) || current_version > r.observed_version) {
 			return false;
 		}
 	}
@@ -135,6 +169,15 @@ extend()    //
 	return true;
 }
 
+static bool                       //
+compareByAddr(                    //
+    const WriteLogEntry_wbctl &a, //
+    const WriteLogEntry_wbctl &b  //
+)
+{
+	return (word_t)a.addr < (word_t)b.addr;
+}
+
 inline bool //
 commit()    //
 {
@@ -147,6 +190,9 @@ commit()    //
 	if (!tx->read_only) { // Acquire locks and write-back
 
 		// Lock acquisition phase
+		if (tx->abort_count > 2) { // Magic number
+			std::sort(tx->write_set.begin(), tx->write_set.end(), compareByAddr);
+		}
 		for (auto &w : tx->write_set) {
 			ByteOffset bo((word_t)w.addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
@@ -161,7 +207,7 @@ commit()    //
 				tx->locks_held.push_back(lock); // keep track of locks
 			}
 			TINYSTM_ASSERT(lock->is_locked() && lock->get_owner() == tx->id,
-			               "Lock not locked");
+			               "Lock not locked or wrong owner");
 		}
 
 		// can commit, increase the global clock
@@ -171,9 +217,11 @@ commit()    //
 		// Check if there were transactions in between
 		if (commit_version != tx->end_version + 1) {
 			if (!extend()) {
-				abort_tx();
+				abort_tx(); // can leave gaps in the global clock
 			}
 		}
+
+		// increment_clock(tx->id); // Reading above and incrementing here does not work
 
 		// Write-back phase
 		for (auto &w : tx->write_set) {
@@ -190,7 +238,7 @@ commit()    //
 			ByteOffset bo((word_t)w.addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 			if (!lock->is_locked_by(tx->id)) {
-				TINYSTM_ASSERT(false, "Written to unlocked position");
+				TINYSTM_ASSERT(false, "Write to unlocked position");
 				continue; // possible duplicated writes
 			}
 			if (lock->get_version() > commit_version) {
@@ -200,8 +248,8 @@ commit()    //
 				               "Lock version updated while locked");
 				lock->unlock_with_version(tx->id, commit_version);
 			}
-			// TINYSTM_ASSERT(lock->get_version() >= commit_version,
-			//                "Lock version not updated");
+			TINYSTM_ASSERT(lock->get_version() >= commit_version,
+			               "Lock version not updated");
 		}
 
 		// clear lock list
@@ -327,6 +375,7 @@ write_word_ctl(                                               //
 		w.new_val = val;                // new val to write-back on commit
 		w.type = sz;
 		w.addr = addr;
+		w.version = lock->get_version();
 		tx->write_set.push_back(w);
 		return;
 	}

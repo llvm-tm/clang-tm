@@ -16,6 +16,10 @@
 static std::mutex global_tx_lock;
 static std::atomic<bool> initialized{false};
 
+static std::atomic<int64_t> g_tm_begin_count{0};
+static std::atomic<int64_t> g_tm_end_count{0};
+static std::atomic<int64_t> g_tm_tx_count{0};
+
 // Plugin required
 __thread std::jmp_buf tm_jmpbuf;
 __thread int32_t tm_nested_call_counter;
@@ -63,15 +67,16 @@ void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
 
 void tm_begin() {
-    fprintf(stderr, "SingleGlobalLock: tm_begin tm_nested_call_counter=%d\n", tm_nested_call_counter);
     if (tm_nested_call_counter == 1) {
+        g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
         global_tx_lock.lock();
     }
 }
 
 void tm_end() {
-    fprintf(stderr, "SingleGlobalLock: tm_end tm_nested_call_counter=%d\n", tm_nested_call_counter);
     if (tm_nested_call_counter == 1) {
+        g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
+        g_tm_tx_count.fetch_add(1, std::memory_order_relaxed);
         global_tx_lock.unlock();
     }
 }
@@ -109,5 +114,17 @@ void tm_memset(volatile uint8_t *addr, uint8_t val, uint64_t len) {
 }
 
 void consume_ptr(volatile void *ptr) { (void)ptr; }
+
+static void print_stats()
+{
+	fprintf(stderr, "=== SingleGlobalLock Runtime Stats ===\n");
+	fprintf(stderr,
+	        "tm_begin: %lld, tm_end: %lld, #TXs: %lld\n",
+	        (long long)g_tm_begin_count.load(std::memory_order_relaxed),
+	        (long long)g_tm_end_count.load(std::memory_order_relaxed),
+	        (long long)g_tm_tx_count.load(std::memory_order_relaxed));
+}
+
+static int init = (std::atexit(print_stats), 0);
 
 } // extern "C"

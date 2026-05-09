@@ -19,8 +19,7 @@
 #include <thread>
 #include <vector>
 
-// #include "tinystm_common.hpp" // -I tm_api_cpp/backends/TinySTM/
-#include "tinystm_wbctl.hpp" // -I tm_api_cpp/backends/TinySTM/
+#include "NOrec.hpp"
 
 constexpr int DEFAULT_DURATION_MS = 5000;
 constexpr int DEFAULT_NB_ACCOUNTS = 256;
@@ -53,43 +52,24 @@ Bank *bank;
 
 void transfer(int src, int dst, int amount)
 {
-	sigjmp_buf longjmp_buf;
-	tinystm::setjmp(&longjmp_buf);
-	int aborted = 0;
-	aborted = sigsetjmp(longjmp_buf, 0);
-	if (!aborted)
-		tinystm::begin();
-
 	Account *a_src = &bank->accounts[src];
 	Account *a_dst = &bank->accounts[dst];
 
-	uint32_t balance = tinystm::tm_read_i4(&a_src->balance);
+	uint32_t balance = norec::tm_read_i4(&a_src->balance);
 	balance -= amount;
-	tinystm::tm_write_i4(&a_src->balance, balance);
+	norec::tm_write_i4(&a_src->balance, balance);
 
-	balance = tinystm::tm_read_i4(&a_dst->balance);
+	balance = norec::tm_read_i4(&a_dst->balance);
 	balance += amount;
-	tinystm::tm_write_i4(&a_dst->balance, balance);
-	tinystm::commit();
+	norec::tm_write_i4(&a_dst->balance, balance);
 }
 
 int total_transactional()
 {
 	int total = 0;
-
-	sigjmp_buf longjmp_buf;
-	tinystm::setjmp(&longjmp_buf);
-	int aborted = 0;
-	aborted = sigsetjmp(longjmp_buf, 0);
-
-	if (!aborted)
-		tinystm::begin();
-
 	for (int i = 0; i < bank->size(); ++i) {
-		total += tinystm::tm_read_i4(&bank->accounts[i].balance);
+		total += norec::tm_read_i4(&bank->accounts[i].balance);
 	}
-
-	tinystm::commit();
 	return total;
 }
 
@@ -104,19 +84,9 @@ int total_non_transactional()
 
 void reset()
 {
-	sigjmp_buf longjmp_buf;
-	tinystm::setjmp(&longjmp_buf);
-	int aborted = 0;
-	aborted = sigsetjmp(longjmp_buf, 0);
-
-	if (!aborted)
-		tinystm::begin();
-
 	for (int i = 0; i < bank->size(); ++i) {
-		tinystm::tm_write_i4(&bank->accounts[i].balance, DEFAULT_INITIAL_BALANCE);
+		norec::tm_write_i4(&bank->accounts[i].balance, DEFAULT_INITIAL_BALANCE);
 	}
-
-	tinystm::commit();
 }
 
 class Barrier
@@ -175,11 +145,21 @@ void worker_thread(ThreadData &data)
 	                             : data.bank->size();
 	int rand_min = data.disjoint ? (rand_max * data.thread_id) : 0;
 
-	tinystm::init_thread();
+	norec::init_thread();
 	data.barrier->wait();
+
+	sigjmp_buf longjmp_buf;
+	norec::setjmp(&longjmp_buf);
 
 	while (!stop_workers.load(std::memory_order_relaxed)) {
 		double roll = dist(rng);
+
+		int aborted = 0;
+
+		aborted = sigsetjmp(longjmp_buf, 0);
+
+		if (!aborted)
+			norec::begin();
 
 		if (roll < data.read_all_pct) {
 			int t = total_transactional();
@@ -197,9 +177,11 @@ void worker_thread(ThreadData &data)
 			transfer(src, dst, 1);
 			data.nb_transfer++;
 		}
+
+		norec::commit();
 	}
 
-	tinystm::exit_thread();
+	norec::exit_thread();
 }
 
 int main(int argc, char *argv[])
@@ -211,7 +193,7 @@ int main(int argc, char *argv[])
 	int write_all_pct = DEFAULT_WRITE_ALL;
 	bool disjoint = false;
 
-	tinystm::init();
+	norec::init();
 
 	for (int i = 1; i < argc; ++i) {
 		std::string arg(argv[i]);
@@ -230,7 +212,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	std::cout << "Bank Benchmark - Hand-Instrumented (TinySTM Direct)\n"
+	std::cout << "Bank Benchmark - Hand-Instrumented (NOrec)\n"
 	          << "=============================================\n"
 	          << "Duration:    " << duration_ms << " ms\n"
 	          << "Accounts:    " << nb_accounts << "\n"
@@ -311,7 +293,7 @@ int main(int argc, char *argv[])
 
 	delete bank;
 
-	tinystm::exit();
+	norec::exit();
 
 	if (final_total == expected_total) {
 		std::cout << "PASS: Bank total is correct\n";

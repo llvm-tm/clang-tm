@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "tm_common.hpp"
+#include <random>
+#include <thread>
 
 #ifndef NDEBUG
 #define TINYSTM_ASSERT(cond, msg)                                                        \
@@ -303,6 +305,8 @@ tm_write(                    //
 extern std::atomic<word_t> g_clock;
 extern std::atomic<tinystm::word_t> thr_counter;
 extern std::atomic<tinystm::word_t> reset_locks_thr;
+extern thread_local bool rng_initialized;
+extern thread_local std::mt19937 rng;
 
 inline void init()
 {
@@ -319,7 +323,8 @@ inline word_t get_clock()
 {
 	volatile word_t res;
 	while ((res = g_clock.load(std::memory_order_acquire)) >= VERSION_MASK)
-		; // someone is reseting the clock
+		std::this_thread::sleep_for(
+		    std::chrono::microseconds(1000)); // someone is reseting the clock
 	return res;
 }
 
@@ -331,15 +336,13 @@ inline word_t increment_clock(word_t tx_id)
 	if (res >= VERSION_MAX) {
 		word_t expect = 0L;
 		word_t desired = tx_id;
-		if (reset_locks_thr.compare_exchange_strong(expect,
-		                                            desired,
-		                                            std::memory_order_acquire,
-		                                            std::memory_order_acquire)) {
+		if (reset_locks_thr.compare_exchange_strong(expect, desired)) {
 			reset_locks();
 			reset_locks_thr.store(expect, std::memory_order_release);
 		} else {
 			while ((res = get_clock()) >= VERSION_MASK)
-				; // someone is reseting the clock
+				std::this_thread::sleep_for(
+				    std::chrono::microseconds(1000)); // someone is reseting the clock
 		}
 	}
 

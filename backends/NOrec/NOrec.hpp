@@ -243,9 +243,11 @@ validate()    //
 			any_type_t check_val = read_value_from_addr(r.addr, r.type);
 			if (!iseq(check_val, r.observed_val))
 				abort_tx();
-			if (time == get_clock())
-				return time;
 		}
+		// Only check after validating the ENTIRE read set, not after each read
+		if (time == get_clock())
+			return time;
+		// Lock changed during validation - restart from beginning
 	}
 	return time;
 }
@@ -268,13 +270,18 @@ commit()    //
 	NOREC_ASSERT((expect & 1) == 0, "Already locked");
 	while (!global_lock.compare_exchange_strong(expect, desire)) {
 		tx->snapshot = validate();
+		expect = tx->snapshot;
+		desire = expect + 1;
 	}
 
 	for (auto &w : tx->write_set) {
 		write_value_to_addr(w.addr, w.new_val, w.type);
 	}
 
-	set_clock(tx->snapshot + 2); // +1 than in the CAS
+	// After successful CAS from expect → expect+1:
+	// - global_lock is now expect+1 (odd, lock held)
+	// - Release by setting to expect+2 (next even version)
+	set_clock(expect + 2);
 
 	tx->reset();
 	return;
@@ -310,6 +317,7 @@ read_word_norec(     //
 	ReadLogEntry r;
 	r.addr = addr;
 	r.observed_val = value;
+	r.observed_version = tx->snapshot;
 	r.type = sz;
 	tx->read_set.push_back(r);
 
