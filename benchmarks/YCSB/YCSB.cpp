@@ -33,7 +33,9 @@
 #include <unordered_map>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 constexpr int DEFAULT_DURATION_MS = 10000;
 constexpr int DEFAULT_NB_THREADS = 4;
@@ -234,7 +236,7 @@ struct ThreadData {
     std::mt19937* rng;
 };
 
-void worker(ThreadData* data) {
+THREAD void worker(ThreadData* data) {
     std::uniform_int_distribution<int> uniform_dist(0, data->key_range - 1);
     std::uniform_real_distribution<double> real_dist(0.0, 1.0);
 
@@ -322,7 +324,7 @@ void worker(ThreadData* data) {
     }
 }
 
-int main(int argc, char* argv[]) {
+MAIN int main(int argc, char* argv[]) {
     int nb_threads = DEFAULT_NB_THREADS;
     int duration_ms = DEFAULT_DURATION_MS;
     WorkloadType workload = WorkloadType::A;

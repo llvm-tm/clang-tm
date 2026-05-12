@@ -47,15 +47,13 @@ static void collectTMGlobalsCached(Module &M, SmallPtrSetImpl<const GlobalVariab
             for (unsigned i = 0; i < Init->getNumOperands(); ++i) {
                 Constant *Annotation = cast<Constant>(Init->getOperand(i));
                 if (Annotation->getNumOperands() >= 2) {
-                    if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Annotation->getOperand(0))) {
-                        if (GlobalVariable *GV = dyn_cast<GlobalVariable>(CE->getOperand(0))) {
-                            if (ConstantExpr *StrExpr = dyn_cast<ConstantExpr>(Annotation->getOperand(1))) {
-                                if (GlobalVariable *StrGV = dyn_cast<GlobalVariable>(StrExpr->getOperand(0))) {
-                                    if (ConstantDataArray *StrArray = dyn_cast<ConstantDataArray>(StrGV->getInitializer())) {
-                                        if (StrArray->getAsString() == "tm") {
-                                            TMG.insert(GV);
-                                        }
-                                    }
+                    Value *AnnotatedValue = Annotation->getOperand(0)->stripPointerCasts();
+                    if (auto *AnnotatedGV = dyn_cast<GlobalVariable>(AnnotatedValue)) {
+                        Value *StrOperand = Annotation->getOperand(1)->stripPointerCasts();
+                        if (auto *StrGV = dyn_cast<GlobalVariable>(StrOperand)) {
+                            if (auto *StrArray = dyn_cast<ConstantDataArray>(StrGV->getInitializer())) {
+                                if (StrArray->getAsCString() == "tm") {
+                                    TMG.insert(AnnotatedGV);
                                 }
                             }
                         }
@@ -92,7 +90,7 @@ static bool tracesToTMGlobal(Value *Ptr, Module &M)
     return false;
 }
 
-static bool isCallOnTMObject(CallInst *Call, Module &M)
+static bool isCallOnTMObject(CallBase *Call, Module &M)
 {
     if (Call->isIndirectCall()) return false;
 
@@ -105,11 +103,12 @@ static bool isCallOnTMObject(CallInst *Call, Module &M)
     Value *ThisPtr = Call->getArgOperand(0);
     if (!ThisPtr) return false;
 
-    if (tracesToTMGlobal(ThisPtr, M)) {
-        return true;
+    bool traced = tracesToTMGlobal(ThisPtr, M);
+    if (traced) {
+        TM_DEBUG("isCallOnTMObject: found call to %s on TM object",
+                Callee->getName().str().c_str());
     }
-
-    return false;
+    return traced;
 }
 
 static void instrumentLoadsStoresInFunction(Function *F, Module *M,
@@ -239,6 +238,7 @@ static Function *cloneMethodWithSuffix(Function *Original, const Twine &Suffix,
                       CloneFunctionChangeType::LocalChangesOnly, Returns, "",
                       nullptr);
 
+    NewFunc->setDSOLocal(true);
     NewFunc->addFnAttr(llvm::Attribute::NoInline);
 
     instrumentLoadsStoresInFunction(NewFunc, M,
@@ -280,11 +280,11 @@ static void processMethodCalls(Module &M,
     SmallPtrSet<const GlobalVariable *, 16> TMG;
     collectTMGlobalsCached(M, TMG);
 
-    SmallVector<CallInst *, 32> CallsToInstrument;
+    SmallVector<CallBase *, 32> CallsToInstrument;
     for (auto &F : M) {
         for (auto &BB : F) {
             for (auto &I : BB) {
-                if (auto *Call = dyn_cast<CallInst>(&I)) {
+                if (auto *Call = dyn_cast<CallBase>(&I)) {
                     if (isCallOnTMObject(Call, M)) {
                         CallsToInstrument.push_back(Call);
                     }
@@ -298,7 +298,7 @@ static void processMethodCalls(Module &M,
     TM_DEBUG("Found %d method calls on TM objects", (int)CallsToInstrument.size());
 
     SmallPtrSet<Function *, 16> MethodsToClone;
-    for (CallInst *Call : CallsToInstrument) {
+    for (CallBase *Call : CallsToInstrument) {
         Function *Callee = Call->getCalledFunction();
         if (Callee && !Callee->isDeclaration()) {
             MethodsToClone.insert(Callee);
@@ -323,7 +323,7 @@ static void processMethodCalls(Module &M,
         ClonedMap.push_back({Method, Cloned});
     }
 
-    for (CallInst *Call : CallsToInstrument) {
+    for (CallBase *Call : CallsToInstrument) {
         Function *Callee = Call->getCalledFunction();
         if (!Callee) continue;
 

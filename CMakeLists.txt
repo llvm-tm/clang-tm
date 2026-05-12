@@ -83,25 +83,32 @@ if(BUILD_TESTS)
     foreach(test_name ${TEST_NAMES})
         set(test_src ${PLUGIN_DIR}/test/${test_name}.cpp)
 
-        # Compile to bitcode
+        # Step 1: Compile to bitcode (with -fno-inline)
         add_custom_command(OUTPUT ${test_name}.bc
             COMMAND clang -O1 -fno-inline -emit-llvm -c ${test_src} -o ${test_name}.bc
             DEPENDS ${test_src}
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         )
 
-        # Run plugin
-        add_custom_command(OUTPUT ${test_name}.opt.bc
+        # Step 2: Run TM instrumentation plugin
+        add_custom_command(OUTPUT ${test_name}.instr.bc
             COMMAND opt -load-pass-plugin=${CMAKE_SOURCE_DIR}/llvm_tm_plugin/bin/libTMInstrument.so
-                -passes=tm-instrument ${test_name}.bc -o ${test_name}.opt.bc
+                -passes=tm-instrument ${test_name}.bc -o ${test_name}.instr.bc
             DEPENDS ${test_name}.bc TMInstrument
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         )
 
-        # Create executable
+        # Step 3: Optimize instrumented IR (inline cloned methods)
+        add_custom_command(OUTPUT ${test_name}.opt.bc
+            COMMAND opt -O3 ${test_name}.instr.bc -o ${test_name}.opt.bc
+            DEPENDS ${test_name}.instr.bc
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        )
+
+        # Step 4: Create executable
         add_executable(${test_name}
             ${test_name}.opt.bc
-            ${PLUGIN_DIR}/tm_implementation/tm_runtime.cpp
+            ${PLUGIN_DIR}/runtime/tm_runtime.cpp
         )
 
         target_link_libraries(${test_name} PRIVATE pthread)

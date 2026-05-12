@@ -53,6 +53,8 @@ int tm_setjmp() {
     return 0;
 }
 
+void tm_set_jmpbuf(void *buf) { }
+
 sigjmp_buf* tm_get_env() {
     return (sigjmp_buf*)&tm_jmpbuf;
 }

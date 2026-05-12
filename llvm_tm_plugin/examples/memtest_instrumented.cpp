@@ -7,7 +7,9 @@
 #include <cstring>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 // TM globals
 TM char tm_buf1[16];
@@ -83,7 +85,7 @@ void tm_memops()
 	tm_nested_call_counter--;
 }
 
-int main()
+MAIN int main()
 {
 	tm_init();
 

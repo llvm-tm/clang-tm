@@ -22,7 +22,9 @@
 
 // Transaction annotations
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 // =============================================================================
 // Global Configuration
@@ -217,7 +219,7 @@ void do_transaction_work(WorkerContext &ctx)
 // Thread Worker Function
 // =============================================================================
 
-void worker_thread(ThreadData &data)
+THREAD void worker_thread(ThreadData &data)
 {
 	auto rng = std::mt19937(data.seed);
 	auto dist = std::uniform_real_distribution<double>(0.0, 100.0);
@@ -249,7 +251,7 @@ void worker_thread(ThreadData &data)
 // Main Benchmark
 // =============================================================================
 
-int main(int argc, char *argv[])
+MAIN int main(int argc, char *argv[])
 {
 	int duration_ms = DEFAULT_DURATION_MS;
 	int nb_accounts = DEFAULT_NB_ACCOUNTS;

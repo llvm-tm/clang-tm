@@ -7,7 +7,9 @@
 #include <vector>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 // Shared transactional variable
 TM int shared_counter = 0;
@@ -63,7 +65,7 @@ void increment_counter()
 
 // Worker thread function - this is NOT a transaction function!
 // It uses TM globals (shared_counter) so it needs thread init/exit
-void worker_thread(int thread_id)
+THREAD void worker_thread(int thread_id)
 {
 	// Thread entry point - inject tm_init_thread()
 	if (is_tm_init_thread_ready == 0) {
@@ -86,7 +88,7 @@ void worker_thread(int thread_id)
 }
 
 // Main function
-int main()
+MAIN int main()
 {
 	tm_init();
 

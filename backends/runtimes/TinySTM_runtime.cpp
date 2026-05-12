@@ -16,7 +16,7 @@ extern "C" {
 
 __thread int32_t tm_nested_call_counter = 0;
 __thread int32_t tm_longjmp_ret = 0;
-__thread sigjmp_buf tm_jmpbuf;
+__thread unsigned char tm_jmpbuf[256];
 
 #define TM_BUFFER_SIZE 1024
 static __thread uint8_t tm_buffer[TM_BUFFER_SIZE];
@@ -41,18 +41,17 @@ void tm_exit()
 
 void tm_init_thread()
 {
-	static std::atomic<int> init_count{0};
-	int count = init_count.fetch_add(1) + 1;
-	pthread_t tid = pthread_self();
-	fprintf(stderr, "tm_init_thread #%d for pthread %lu\n", count, (unsigned long)tid);
-	fflush(stderr);
 	tinystm::init_thread();
-	tinystm::setjmp(&tm_jmpbuf);
 }
 
 void tm_exit_thread()
 {
-	tinystm::exit_thread();
+	// no-op — Transaction object persists for the thread's lifetime
+}
+
+void tm_set_jmpbuf(void *buf)
+{
+	tinystm::jmpbuf = (sigjmp_buf *)buf;
 }
 
 int tm_setjmp()

@@ -9,7 +9,9 @@
 #include <cstdint>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 TM int32_t tm_array[8] = {1, 2, 3, 4, 5, 6, 7, 8};
 
@@ -28,7 +30,7 @@ TX void access_via_offset() {
     tm_array[4] = tm_array[2] + tm_array[3];
 }
 
-int main() {
+MAIN int main() {
     sum_elements();
     printf("sum = %d (expected 36)\n", tm_array[0]);
     

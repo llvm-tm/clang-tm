@@ -6,7 +6,7 @@ This project contains an LLVM `opt` plugin that instruments annotated transactio
 
 - `src/` contains the instrumentation pass source.
 - `test/` contains the transactional test cases.
-- `tm_implementation/` contains the debug TM runtime implementation.
+- `runtime/` contains the debug TM runtime implementation.
 - `out/` is used for intermediate bitcode artifacts.
 - `bin/` contains the built plugin and test executables.
 

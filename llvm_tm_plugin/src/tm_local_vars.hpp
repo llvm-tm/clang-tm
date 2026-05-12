@@ -22,14 +22,11 @@
 using namespace llvm;
 
 // Get the base object from a pointer (follows GEP chains)
-// PURPOSE: Given a pointer like &arr[3].field, find the original base object
-//          (e.g., the alloca or global variable it came from)
 static const Value *getBaseObject(const Value *Ptr)
 {
   const Value *Result = Ptr;
   for (int i = 0; i < 10 && Result; i++) {
     Result = Result->stripPointerCasts();
-    // Follow GEP (GetElementPtr) operators to find the base pointer
     if (const auto *GEP = dyn_cast<const GetElementPtrInst>(Result)) {
       Result = GEP->getPointerOperand();
     } else if (const auto *GEP = dyn_cast<const GEPOperator>(Result)) {
@@ -41,10 +38,32 @@ static const Value *getBaseObject(const Value *Ptr)
   return Result ? Result : Ptr;
 }
 
+// Check if a call instruction is a heap allocation function
+static bool isHeapAllocationCall(const Value *V) {
+  const auto *Call = dyn_cast<CallInst>(V);
+  if (!Call) return false;
+  const Function *F = Call->getCalledFunction();
+  if (!F) return false;
+  StringRef Name = F->getName();
+  return Name == "_Znwm" || Name == "_Znam" ||
+         Name == "_Znwj" || Name == "_Znaj" ||
+         Name == "malloc" || Name == "calloc" ||
+         Name == "realloc" || Name == "strdup";
+}
+
+// Check if a call instruction is a heap deallocation function
+static bool isDeallocationCall(const Value *V) {
+  const auto *Call = dyn_cast<CallInst>(V);
+  if (!Call) return false;
+  const Function *F = Call->getCalledFunction();
+  if (!F) return false;
+  StringRef Name = F->getName();
+  return Name == "_ZdlPv" || Name == "_ZdlPvm" ||
+         Name == "_ZdaPv" || Name == "_ZdaPvm" ||
+         Name == "free";
+}
+
 // Collect all local (stack) variables in a function
-// PURPOSE: Build a set of all alloca instructions in the function.
-//          These are stack-allocated variables that are private to the
-//          function and don't need TM instrumentation.
 static void collectLocalVariables(Function &F,
                                 SmallPtrSet<const Value *, 32> &LocalVars)
 {
@@ -59,76 +78,166 @@ static void collectLocalVariables(Function &F,
   TM_DEBUG("Total local variables in %s: %d", F.getName().str().c_str(), (int)LocalVars.size());
 }
 
-// Check if a pointer originates from a local variable
-// PURPOSE: Determine if a pointer refers to a local (stack) variable.
-//          We trace back through pointer operations (GEP, load) to see
-//          if we eventually reach an alloca instruction.
-// DEPTH: Prevents infinite recursion from cycles in the IR.
+// Check if an allocation result's uses escape to non-local memory
+static bool escapesToNonLocal(Value *Alloc, Function &F) {
+  SmallPtrSet<Value *, 32> Visited;
+  SmallVector<Value *, 32> Worklist;
+  Worklist.push_back(Alloc);
+  Visited.insert(Alloc);
+
+  while (!Worklist.empty()) {
+    Value *V = Worklist.pop_back_val();
+    for (User *U : V->users()) {
+      if (!Visited.insert(U).second) continue;
+      if (auto *Store = dyn_cast<StoreInst>(U)) {
+        if (Store->getValueOperand() == V) {
+          const Value *Target = getBaseObject(Store->getPointerOperand());
+          if (isa<GlobalVariable>(Target) || isa<Argument>(Target))
+            return true;
+        }
+        continue;
+      }
+      if (auto *Call = dyn_cast<CallBase>(U)) {
+        if (isHeapAllocationCall(Call)) continue;
+        if (isDeallocationCall(Call)) continue;
+        Function *Callee = Call->getCalledFunction();
+        if (Callee && Callee->isIntrinsic()) continue;
+        if (Callee != &F)
+          return true;
+        continue;
+      }
+      if (isa<PHINode>(U) || isa<GEPOperator>(U) ||
+          isa<BitCastInst>(U) || isa<SelectInst>(U) ||
+          isa<PtrToIntInst>(U) || isa<IntToPtrInst>(U)) {
+        Worklist.push_back(U);
+      }
+      if (isa<ReturnInst>(U)) return true;
+    }
+  }
+  return false;
+}
+
+// Check if a pointer originates from a local variable or in-function heap allocation
 static bool originatesFromLocal(Value *Ptr,
                               const SmallPtrSet<const Value *, 32> &LocalVars,
+                              Function *CurrentFunc = nullptr,
                               int Depth = 0)
 {
   if (Depth > 15) {
     TM_DEBUG("Max recursion depth reached in originatesFromLocal");
-    return false; // Prevent infinite loops
+    return false;
   }
 
   Ptr = Ptr->stripPointerCasts();
 
-  // If the pointer itself is a local variable, return true
   if (LocalVars.count(Ptr)) return true;
 
-  // If it's a GEP, check the pointer operand (follow the chain)
   if (auto *GEP = dyn_cast<GEPOperator>(Ptr)) {
     return originatesFromLocal(const_cast<Value *>(GEP->getPointerOperand()),
-                             LocalVars, Depth + 1);
+                             LocalVars, CurrentFunc, Depth + 1);
   }
-  // If it's loaded from somewhere, check what was loaded
+
   if (auto *Load = dyn_cast<LoadInst>(Ptr)) {
-    return originatesFromLocal(Load->getPointerOperand(), LocalVars, Depth + 1);
+    return originatesFromLocal(Load->getPointerOperand(), LocalVars, CurrentFunc, Depth + 1);
   }
-  // If it's from a function call, assume it's NOT local (heap or global)
-  if (auto *Call = dyn_cast<CallInst>(Ptr)) {
-    return false; // Function call: could return heap/global → not local
+
+  // Handle phi nodes: all incoming values must be local
+  if (auto *Phi = dyn_cast<PHINode>(Ptr)) {
+    for (Value *Incoming : Phi->incoming_values()) {
+      Incoming = Incoming->stripPointerCasts();
+      if (isa<ConstantPointerNull>(Incoming) || isa<UndefValue>(Incoming))
+        continue;
+      if (!originatesFromLocal(Incoming, LocalVars, CurrentFunc, Depth + 1))
+        return false;
+    }
+    return true;
+  }
+
+  // Handle select: both operands must be local
+  if (auto *Select = dyn_cast<SelectInst>(Ptr)) {
+    return originatesFromLocal(Select->getTrueValue(), LocalVars, CurrentFunc, Depth + 1) &&
+           originatesFromLocal(Select->getFalseValue(), LocalVars, CurrentFunc, Depth + 1);
+  }
+
+  // Handle inttoptr
+  if (auto *IToP = dyn_cast<IntToPtrInst>(Ptr)) {
+    return originatesFromLocal(IToP->getOperand(0), LocalVars, CurrentFunc, Depth + 1);
+  }
+
+  // Handle function calls (CallInst and InvokeInst)
+  if (auto *Call = dyn_cast<CallBase>(Ptr)) {
+    // In-function heap allocation that doesn't escape → local
+    if (CurrentFunc && isHeapAllocationCall(Call) &&
+        Call->getFunction() == CurrentFunc) {
+      if (!escapesToNonLocal(Call, *CurrentFunc)) {
+        TM_DEBUG("In-function heap allocation that doesn't escape → local");
+        return true;
+      }
+      TM_DEBUG("In-function heap allocation that escapes → not local");
+      return false;
+    }
+    // Check if any pointer argument traces to a local variable
+    for (auto &Arg : Call->args()) {
+      if (Arg->getType()->isPointerTy()) {
+        if (originatesFromLocal(const_cast<Value *>(&*Arg), LocalVars, CurrentFunc, Depth + 1))
+          return true;
+      }
+    }
+    return false;
   }
 
   return false;
 }
 
+// Overload without CurrentFunc for backward compatibility
+static bool originatesFromLocal(Value *Ptr,
+                              const SmallPtrSet<const Value *, 32> &LocalVars,
+                              int Depth = 0)
+{
+  return originatesFromLocal(Ptr, LocalVars, nullptr, Depth);
+}
+
 // Determine if a pointer accesses shared (non-local) data
-// PURPOSE: Main entry point for deciding whether to instrument a load/store.
-//          Returns true if the pointer accesses shared data (needs tm_read/tm_write).
-//
-// Decision logic:
-//   1. If pointer originates from local variable → NOT shared (return false)
-//   2. If pointer is a thread-local global → NOT shared (return false)
-//   3. If pointer is a regular global → SHARED (return true)
-//   4. Otherwise (heap, function args) → conservative: assume SHARED
 static bool isSharedPointer(Value *Ptr,
                            const SmallPtrSet<const Value *, 32> &LocalVars,
                            Function &F,
                            Module &M,
                            int DepthLimit = 15)
 {
-  // Check if pointer originates from local variable
-  if (originatesFromLocal(Ptr, LocalVars)) {
-    TM_DEBUG("Pointer is local (from alloca)");
-    return false; // NOT shared (local to this function)
+  if (originatesFromLocal(Ptr, LocalVars, &F)) {
+    TM_DEBUG("Pointer is local (from alloca or in-function allocation)");
+    return false;
   }
 
-  // Check if pointer is a thread-local global
   const Value *Base = getBaseObject(Ptr);
   if (auto *GV = dyn_cast<GlobalVariable>(Base)) {
     if (GV->isThreadLocal()) {
       TM_DEBUG("Pointer is thread-local global: %s", GV->getName().str().c_str());
-      return false; // NOT shared (thread-local)
+      return false;
     }
     TM_DEBUG("Pointer is shared global: %s", GV->getName().str().c_str());
-    return true; // Regular global → shared
+    return true;
   }
 
-  // If we get here, it's likely heap-allocated or from a function argument
-  // → conservative: assume shared
+  // Handle phi nodes as base objects
+  if (auto *Phi = dyn_cast<PHINode>(Base)) {
+    for (const Value *Incoming : Phi->incoming_values()) {
+      const Value *Stripped = Incoming->stripPointerCasts();
+      if (auto *GV = dyn_cast<GlobalVariable>(Stripped)) {
+        if (!GV->isThreadLocal()) {
+          TM_DEBUG("PHI has global incoming value → shared");
+          return true;
+        }
+      }
+      if (isa<Argument>(Stripped)) {
+        TM_DEBUG("PHI has argument incoming value → shared");
+        return true;
+      }
+    }
+    TM_DEBUG("PHI has only local/null incoming values → not shared");
+    return false;
+  }
+
   TM_DEBUG("Pointer assumed shared (heap/argument)");
   return true;
 }

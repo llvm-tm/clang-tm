@@ -3,7 +3,9 @@
 #include <vector>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 // Shared transactional variable
 TM int shared_counter = 0;
@@ -12,7 +14,7 @@ TX void increment_counter() {
     shared_counter = shared_counter + 1;
 }
 
-void worker_thread(int thread_id) {
+THREAD void worker_thread(int thread_id) {
     printf("worker_thread %d: starting\n", thread_id);
     fflush(stdout);
     
@@ -25,7 +27,7 @@ void worker_thread(int thread_id) {
     fflush(stdout);
 }
 
-int main() {
+MAIN int main() {
     printf("tm_threads test: starting\n");
     fflush(stdout);
     

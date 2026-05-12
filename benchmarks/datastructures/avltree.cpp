@@ -20,7 +20,9 @@
 #include "common.hpp"
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 constexpr int DEFAULT_DURATION_MS = 10000;
 constexpr int DEFAULT_NB_THREADS = 4;
@@ -281,7 +283,7 @@ struct ThreadData {
     int range_max;
 };
 
-void worker(ThreadData* data) {
+THREAD void worker(ThreadData* data) {
     FILE* f = fopen("/tmp/debug.log", "a");
     fprintf(f, "WORKER %d: starting\n", data->thread_id);
     fflush(f);
@@ -325,7 +327,7 @@ void worker(ThreadData* data) {
     }
 }
 
-int main(int argc, char* argv[]) {
+MAIN int main(int argc, char* argv[]) {
     int duration_ms = DEFAULT_DURATION_MS;
     int nb_threads = DEFAULT_NB_THREADS;
     int initial_size = DEFAULT_INITIAL_SIZE;

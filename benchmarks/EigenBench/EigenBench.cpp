@@ -36,7 +36,9 @@
 #include <cmath>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 constexpr int DEFAULT_DURATION_MS = 10000;
 constexpr int DEFAULT_NB_THREADS = 4;
@@ -183,7 +185,7 @@ struct WorkerData {
     ThreadLocalData td;
 };
 
-void worker(WorkerData* w) {
+THREAD void worker(WorkerData* w) {
     int t = w->id;
     long val = 1;
     int R1 = g_config.R1;
@@ -259,7 +261,7 @@ void print_usage(const char* prog) {
     std::cout << "  8. Density          - --density (spatial locality)\n";
 }
 
-int main(int argc, char* argv[]) {
+MAIN int main(int argc, char* argv[]) {
     g_config.threads = DEFAULT_NB_THREADS;
     g_config.duration = DEFAULT_DURATION_MS;
     g_config.R1 = 10;

@@ -2,7 +2,9 @@
 #include <cstdint>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 TM char tm_buf1[16];
 TM char tm_buf2[16];
@@ -17,7 +19,7 @@ TX void tm_memops() {
     memset(tm_int_buf, 0, sizeof(tm_int_buf));
 }
 
-int main() {
+MAIN int main() {
     tm_memops();
     return 0;
 }

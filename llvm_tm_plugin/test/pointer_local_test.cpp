@@ -15,7 +15,9 @@
 #include <cstdint>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 TM int32_t shared_val = 0;
 
@@ -24,7 +26,7 @@ TX void test_local_pointer() {
     *p = 42;
 }
 
-int main() {
+MAIN int main() {
     test_local_pointer();
     printf("shared_val = %d (expected 42)\n", shared_val);
     if (shared_val == 42) {

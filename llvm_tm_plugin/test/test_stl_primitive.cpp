@@ -9,7 +9,9 @@
 #include <cstdint>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 TM std::vector<int> g_int_vector;
 TM std::vector<double> g_double_vector;
@@ -76,7 +78,7 @@ TX void test_map_double() {
     }
 }
 
-int main() {
+MAIN int main() {
     std::cout << "STL Primitive Container Test\n";
     std::cout << "=============================\n\n";
     

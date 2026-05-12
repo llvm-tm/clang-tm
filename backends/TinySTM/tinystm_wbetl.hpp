@@ -83,14 +83,15 @@ init_thread() //
 {
 	if (!current_tx_wbetl) {
 		current_tx_wbetl = new Transaction<ReadLogEntry_wbetl, WriteLogEntry_wbetl>();
+		current_tx_wbetl->id = thr_counter.fetch_add(1, std::memory_order_acq_rel);
 	}
-	current_tx_wbetl->id = thr_counter.fetch_add(1, std::memory_order_acq_rel);
 	current_tx_wbetl->reset();
 }
 
 inline void   //
 exit_thread() //
 {
+	if (!current_tx_wbetl) return;
 	delete current_tx_wbetl;
 	current_tx_wbetl = nullptr;
 }

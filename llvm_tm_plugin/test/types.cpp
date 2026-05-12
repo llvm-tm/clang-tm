@@ -1,7 +1,9 @@
 #include <cstdint>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 TM int8_t tm_i8 = 10;
 TM int16_t tm_i16 = 20;
@@ -44,7 +46,7 @@ TX void tm_types() {
     (void)rf8;
 }
 
-int main() {
+MAIN int main() {
     tm_types();
     return 0;
 }

@@ -108,6 +108,9 @@ benchmarks: plugin
 	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures bin/list_SingleGlobalLock
 	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures bin/set_SingleGlobalLock
 	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures bin/heap_SingleGlobalLock
+	@$(MAKE) -C $(BENCHMARKS_DIR)/STAMP clean 2>/dev/null || true
+	@$(MAKE) -C $(BENCHMARKS_DIR)/STAMP stamp_uninstrumented
+	@$(MAKE) -C $(BENCHMARKS_DIR)/STAMP stamp_tinystm BACKEND=$(BACKEND)
 	@echo "Benchmarks built."
 
 # ============================================================================
@@ -179,5 +182,8 @@ test_run: benchmarks
 	@echo ""
 	@echo "AVL Tree benchmark:"
 	@$(BENCHMARKS_DIR)/datastructures/bin/avltree_SingleGlobalLock 1 10 100 || echo "(timeout or error)"
+	@echo ""
+	@echo "STAMP benchmarks (uninstrumented):"
+	@$(BENCHMARKS_DIR)/STAMP/bin/stamp_uninstrumented -t 2 -d 500 || echo "(timeout or error)"
 	@echo ""
 	@echo "Tests complete."

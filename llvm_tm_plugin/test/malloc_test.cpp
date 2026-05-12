@@ -10,7 +10,9 @@
 #include <cstdlib>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 TM int32_t *heap_data = nullptr;
 
@@ -32,7 +34,7 @@ TX void cleanup_data() {
     heap_data = nullptr;
 }
 
-int main() {
+MAIN MAIN int main() {
     init_data();
     access_data();
     

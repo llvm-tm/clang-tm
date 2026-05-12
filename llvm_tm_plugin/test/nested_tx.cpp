@@ -1,7 +1,9 @@
 #include <cstdio>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 TM int counter = 0;
 
@@ -19,7 +21,7 @@ TX void outer_tx() {
     printf("outer_tx: counter after = %d\n", counter);
 }
 
-int main() {
+MAIN int main() {
     printf("main: starting\n");
     outer_tx();
     printf("main: final counter = %d\n", counter);

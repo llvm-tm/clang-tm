@@ -22,6 +22,8 @@ int tm_setjmp() {
     return 0;
 }
 
+void tm_set_jmpbuf(void *buf) { }
+
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
 

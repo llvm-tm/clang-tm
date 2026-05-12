@@ -17,7 +17,9 @@
 #include <vector>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 constexpr int DEFAULT_DURATION_MS = 1000;
 constexpr int DEFAULT_NB_ACCOUNTS = 64;
@@ -123,7 +125,7 @@ struct ThreadData {
 	bool disjoint;
 };
 
-void worker_thread(ThreadData &data)
+THREAD void worker_thread(ThreadData &data)
 {
 	auto rng = std::mt19937(data.seed);
 	auto dist = std::uniform_real_distribution<double>(0.0, 100.0);
@@ -152,7 +154,7 @@ void worker_thread(ThreadData &data)
 	}
 }
 
-int main(int argc, char *argv[])
+MAIN int main(int argc, char *argv[])
 {
 	int duration_ms = DEFAULT_DURATION_MS;
 	int nb_accounts = DEFAULT_NB_ACCOUNTS;

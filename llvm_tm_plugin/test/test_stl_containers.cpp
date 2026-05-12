@@ -10,7 +10,9 @@
 #include <cstdint>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 // Global TM-annotated data structures
 TM std::vector<int> g_int_vector;
@@ -85,7 +87,7 @@ TX void test_container_copy() {
     dst[0] = 100;
 }
 
-int main() {
+MAIN int main() {
     std::cout << "STL Container Test for LLVM TM Plugin\n";
     std::cout << "======================================\n\n";
     

@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-if [ ! -x ./bin/types ] || [ ! -x ./bin/memtest ] || [ ! -x ./bin/nested ] || [ ! -x ./bin/threads ] || [ ! -x ./bin/persist ] || [ ! -x ./bin/retry ] || [ ! -x ./bin/test_stl_containers ]; then
+if [ ! -x ./bin/types ] || [ ! -x ./bin/memtest ] || [ ! -x ./bin/nested ] || [ ! -x ./bin/threads ] || [ ! -x ./bin/persist ] || [ ! -x ./bin/retry ] || [ ! -x ./bin/test_stl_containers ] || [ ! -x ./bin/local_containers_test ]; then
   echo "Error: test binaries are missing. Run 'make test' first." >&2
   exit 1
 fi
@@ -87,6 +87,9 @@ if ! grep -q "counter = 2" out/persist_run2.txt; then
   exit 1
 fi
 
+# Local containers test (vector + map in transaction functions)
+run_test local_containers_test "PASS: All local containers tests passed"
+
 # STL container test
 run_test test_stl_containers "STL Container Test" "All tests passed"
 
@@ -108,7 +111,6 @@ done
 echo "All annotation detections verified."
 
 # Retry test: verifies longjmp/sigsetjmp for transaction retry
-# DISABLED: crashes due to sigsetjmp/longjmp handling issues
-# run_test retry "retry" "longjmp" "retry detected" "Test PASSED"
+run_test retry "retry" "longjmp" "Test PASSED" "final counter = 3"
 
 echo "All tests passed."

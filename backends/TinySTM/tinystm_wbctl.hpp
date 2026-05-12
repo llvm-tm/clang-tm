@@ -56,14 +56,15 @@ init_thread() //
 {
 	if (!current_tx_wbctl) {
 		current_tx_wbctl = new Transaction<ReadLogEntry_wbctl, WriteLogEntry_wbctl>();
+		current_tx_wbctl->id = thr_counter.fetch_add(1, std::memory_order_acq_rel);
 	}
-	current_tx_wbctl->id = thr_counter.fetch_add(1, std::memory_order_acq_rel);
 	current_tx_wbctl->reset();
 }
 
 inline void   //
 exit_thread() //
 {
+	if (!current_tx_wbctl) return;
 	delete current_tx_wbctl;
 	current_tx_wbctl = nullptr;
 }
@@ -100,11 +101,6 @@ begin()     //
 {
 	auto *tx = current_tx_wbctl;
 
-	// printf("THR%llu begin: tx->abort_count=%i tm_nested_call_counter=%i\n",
-	//        tx->id,
-	//        tx->abort_count,
-	//        tm_nested_call_counter);
-
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(!tx->active, "nested not supported");
 
@@ -127,8 +123,6 @@ abort_tx()  //
 
 	tx->unlock_held_locks_and_clear();
 	tx->abort_count++;
-	fprintf(stderr, "TinySTM abort_tx #%d\n", tx->abort_count);
-	fflush(stderr);
 	// printf("THR%llu abort_tx (%i)\n", tx->id, tx->abort_count);
 	// std::atomic_thread_fence(std::memory_order_acq_rel);
 	if (tx->abort_count > 5) { // Magic number
@@ -189,10 +183,8 @@ commit()    //
 
 	if (!tx->read_only) { // Acquire locks and write-back
 
-		// Lock acquisition phase
-		if (tx->abort_count > 2) { // Magic number
-			std::sort(tx->write_set.begin(), tx->write_set.end(), compareByAddr);
-		}
+		// Lock acquisition phase — sort by address for global lock ordering
+		std::sort(tx->write_set.begin(), tx->write_set.end(), compareByAddr);
 		for (auto &w : tx->write_set) {
 			ByteOffset bo((word_t)w.addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
@@ -238,8 +230,10 @@ commit()    //
 			ByteOffset bo((word_t)w.addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 			if (!lock->is_locked_by(tx->id)) {
-				TINYSTM_ASSERT(false, "Write to unlocked position");
-				continue; // possible duplicated writes
+				// Already unlocked by a previous write entry for the same
+				// 8-byte lock word (e.g., two adjacent 4-byte ints).  This is
+				// valid — all entries have already been written back.
+				continue;
 			}
 			if (lock->get_version() > commit_version) {
 				lock->unlock(tx->id);

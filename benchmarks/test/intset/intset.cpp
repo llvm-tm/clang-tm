@@ -20,7 +20,9 @@
 #include <array>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 constexpr int DEFAULT_DURATION_MS = 10000;
 constexpr int DEFAULT_NB_THREADS = 4;
@@ -242,7 +244,7 @@ struct ThreadData {
     int range_max;
 };
 
-void worker_thread(ThreadData& data) {
+THREAD void worker_thread(ThreadData& data) {
     auto rng = std::mt19937(data.seed);
     std::uniform_int_distribution<> dist(0, data.range_max - 1);
 
@@ -265,7 +267,7 @@ void worker_thread(ThreadData& data) {
     }
 }
 
-int main(int argc, char* argv[]) {
+MAIN int main(int argc, char* argv[]) {
     int duration_ms = DEFAULT_DURATION_MS;
     int nb_threads = DEFAULT_NB_THREADS;
     int initial_size = DEFAULT_INITIAL_SIZE;

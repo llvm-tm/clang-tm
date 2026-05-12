@@ -19,7 +19,9 @@
 #include <cstdint>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 constexpr int DEFAULT_DURATION_MS = 5000;
 constexpr int DEFAULT_NB_THREADS = 4;
@@ -66,7 +68,7 @@ struct ThreadData {
     unsigned int seed;
 };
 
-void worker_read_only(ThreadData& data) {
+THREAD void worker_read_only(ThreadData& data) {
     auto rng = std::mt19937(data.seed);
     std::uniform_int_distribution<> dist(0, data.array_size - 1);
 
@@ -82,7 +84,7 @@ void worker_read_only(ThreadData& data) {
     data.counter.store(local_counter);
 }
 
-void worker_read_write(ThreadData& data) {
+THREAD void worker_read_write(ThreadData& data) {
     auto rng = std::mt19937(data.seed);
     std::uniform_int_distribution<> dist(0, data.array_size - 1);
 
@@ -134,7 +136,7 @@ double getAverage(const std::vector<double>& v) {
     return std::accumulate(v.begin(), v.end(), 0.0) / v.size();
 }
 
-int main(int argc, char* argv[]) {
+MAIN int main(int argc, char* argv[]) {
     int duration_ms = DEFAULT_DURATION_MS;
     int nb_threads = DEFAULT_NB_THREADS;
     int array_size = DEFAULT_ARRAY_SIZE;

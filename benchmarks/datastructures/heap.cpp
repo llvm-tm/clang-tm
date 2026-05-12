@@ -18,7 +18,9 @@
 #include <chrono>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 constexpr int DEFAULT_DURATION_MS = 10000;
 constexpr int DEFAULT_NB_THREADS = 4;
@@ -149,7 +151,7 @@ struct ThreadData {
     int range_max;
 };
 
-void worker(ThreadData* data) {
+THREAD void worker(ThreadData* data) {
     std::mt19937 rng(data->seed);
     std::uniform_int_distribution<int> key_dist(0, data->range_max - 1);
     std::uniform_int_distribution<int> op_dist(0, 99);
@@ -174,7 +176,7 @@ void worker(ThreadData* data) {
     }
 }
 
-int main(int argc, char* argv[]) {
+MAIN int main(int argc, char* argv[]) {
     int duration_ms = DEFAULT_DURATION_MS;
     int nb_threads = DEFAULT_NB_THREADS;
     int initial_size = DEFAULT_INITIAL_SIZE;

@@ -7,7 +7,9 @@
 #include <cstdlib>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 extern "C" {
 extern __thread unsigned char tm_jmpbuf[256];
@@ -104,7 +106,7 @@ void outer_retry_transaction()
 	tm_nested_call_counter--;
 }
 
-int main()
+MAIN int main()
 {
 	tm_init();
 	tm_init_thread();

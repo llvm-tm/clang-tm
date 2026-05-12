@@ -11,7 +11,9 @@
 #include <cstdint>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 TM int32_t counter = 0;
 
@@ -21,7 +23,7 @@ TX void increment() {
     printf("increment: counter after = %d\n", counter);
 }
 
-int main() {
+MAIN int main() {
     printf("main: starting, counter = %d\n", counter);
     increment();
     increment();

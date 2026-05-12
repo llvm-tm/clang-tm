@@ -59,6 +59,25 @@ static bool callsTransactionFunctions(Function &F, Module &M)
   return false;
 }
 
+// Check if any function directly called by F, itself directly calls a transaction function
+// PURPOSE: Distinguish "thread entry points" from "transaction callers".
+//          A thread entry (e.g., worker_thread) does NOT directly call a transaction
+//          but calls helpers that do. A direct caller of a transaction should NOT
+//          get tm_init_thread/tm_exit_thread instrumentation.
+static bool transitivelyCallsTransactionFunctions(Function &F, Module &M)
+{
+  SmallPtrSet<Function *, 32> CalledFuncs;
+  collectDirectCalls(F, CalledFuncs);
+  for (Function *Callee : CalledFuncs) {
+    if (callsTransactionFunctions(*Callee, M)) {
+      TM_DEBUG("Function %s transitively calls a transaction function through %s",
+               F.getName().str().c_str(), Callee->getName().str().c_str());
+      return true;
+    }
+  }
+  return false;
+}
+
 // Recursively collect all functions reachable from a transaction-annotated function
 // PURPOSE: Build the transitive closure of functions called from transactions.
 //          This helps understand the full call graph for TM optimization.

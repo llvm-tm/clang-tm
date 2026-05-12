@@ -6,7 +6,9 @@
 #include <cstdio>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 // TM globals
 TM int32_t tm_counter = 0;
@@ -100,7 +102,7 @@ void outer_tx()
 }
 
 // Main function - thread entry point
-int main()
+MAIN int main()
 {
 	tm_init();
 

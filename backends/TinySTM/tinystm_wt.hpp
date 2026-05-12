@@ -233,6 +233,7 @@ inline void init_thread()
 
 inline void exit_thread()
 {
+	if (!current_tx) return;
 	delete current_tx;
 	current_tx = nullptr;
 }

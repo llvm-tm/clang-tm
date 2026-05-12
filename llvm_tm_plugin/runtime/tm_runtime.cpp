@@ -132,6 +132,8 @@ void tm_end()
 // sigsetjmp/longjmp implementation
 int tm_setjmp() { return sigsetjmp(*(sigjmp_buf *)tm_jmpbuf, 0); }
 
+void tm_set_jmpbuf(void *buf) { }
+
 void tm_longjmp(int val) { longjmp(*(sigjmp_buf *)tm_jmpbuf, val); }
 
 // int tm_setjmp() { return sigsetjmp(*(sigjmp_buf *)tm_jmpbuf, 0); }

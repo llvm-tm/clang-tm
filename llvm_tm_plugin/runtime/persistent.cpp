@@ -155,6 +155,8 @@ void tm_exit_thread()
 
 // int tm_setjmp() { return sigsetjmp(*(sigjmp_buf *)tm_jmpbuf, 0); }
 
+void tm_set_jmpbuf(void *buf) { }
+
 void tm_begin()
 {
 	printf("tm_nested_call_counter=%d  --  ", tm_nested_call_counter);

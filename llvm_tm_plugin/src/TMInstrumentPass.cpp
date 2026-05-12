@@ -130,11 +130,15 @@ public:
     // PURPOSE: Runtime needs to know which globals are TM-annotated for
     //          initialization and tracking purposes
     IntegerType *Int32Ty = Type::getInt32Ty(Ctx);
+    IntegerType *Int64Ty = Type::getInt64Ty(Ctx);
     PointerType *CharPtrTy = PointerType::getUnqual(Ctx);
     PointerType *VoidPtrTy = PointerType::getUnqual(Ctx);
 
     SmallVector<Constant *, 16> namePtrs;
     SmallVector<Constant *, 16> addrPtrs;
+    SmallVector<Constant *, 16> sizesVals;
+
+    const DataLayout &DL = M.getDataLayout();
 
     for (auto &Sym : TMSymbols) {
       GlobalVariable *GV = Sym.first;
@@ -146,12 +150,17 @@ public:
           false, GlobalValue::PrivateLinkage,
           ConstantDataArray::getString(Ctx, name, true),
           Twine("tm_symbol_name_") + name);
+      nameGV->setDSOLocal(true);
       nameGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
 
       Constant *namePtr = ConstantExpr::getInBoundsGetElementPtr(
           Type::getInt8Ty(Ctx), nameGV, ConstantInt::get(Int32Ty, 0));
       namePtrs.push_back(ConstantExpr::getBitCast(namePtr, CharPtrTy));
       addrPtrs.push_back(ConstantExpr::getBitCast(GV, VoidPtrTy));
+
+      // Compute the size of the global variable for persistence
+      uint64_t size = DL.getTypeAllocSize(GV->getValueType());
+      sizesVals.push_back(ConstantInt::get(Int64Ty, size));
     }
 
     // Create: int tm_symbol_count
@@ -170,6 +179,12 @@ public:
     Constant *addrsInit = ConstantArray::get(AddrsArrTy, addrPtrs);
     new GlobalVariable(M, AddrsArrTy, false, GlobalValue::ExternalLinkage,
                       addrsInit, "tm_symbol_addresses");
+
+    // Create: uint64_t tm_symbol_sizes[] for persistence runtime
+    ArrayType *SizesArrTy = ArrayType::get(Int64Ty, TMSymbols.size());
+    Constant *sizesInit = ConstantArray::get(SizesArrTy, sizesVals);
+    new GlobalVariable(M, SizesArrTy, false, GlobalValue::ExternalLinkage,
+                      sizesInit, "tm_symbol_sizes");
 
     // ---- Fix 1: Method call instrumentation ----
     // PURPOSE: Clone methods called on TM objects and redirect calls
@@ -200,27 +215,6 @@ public:
                 foundExplicitThread = true;
                 TM_DEBUG("Found explicit thread entry: %s", F.getName().str().c_str());
                 break;
-            }
-        }
-    }
-
-    // Mark transitive call closure of explicit thread entries
-    if (foundExplicitThread) {
-        SmallVector<Function *, 32> Worklist(ExplicitThreadEntries.begin(), ExplicitThreadEntries.end());
-        while (!Worklist.empty()) {
-            Function *Current = Worklist.pop_back_val();
-            for (auto &BB : *Current) {
-                for (auto &I : BB) {
-                    if (auto *Call = dyn_cast<CallInst>(&I)) {
-                        if (Function *Callee = Call->getCalledFunction()) {
-                            if (!Callee->isDeclaration() && !ExplicitThreadEntries.count(Callee)) {
-                                ExplicitThreadEntries.insert(Callee);
-                                Worklist.push_back(Callee);
-                                TM_DEBUG("Marked transitive thread entry: %s", Callee->getName().str().c_str());
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -256,26 +250,17 @@ public:
     }
 
     // ---- Instrument thread entry points ----
-    // PURPOSE: Functions that use TM but are NOT transactions themselves
-    //          are thread entry points. They need thread init/exit.
-    //          Use explicit detection if available, otherwise fall back to heuristic.
+    // PURPOSE: Functions marked with "thread" annotation or matching explicit
+    //          thread entry symbols need tm_init_thread/tm_exit_thread.
     for (auto &F : M) {
       if (F.isDeclaration() || F.getName() == "main")
         continue;
 
-      bool isTxFunc = hasAnnotation(F, "transaction");
-      if (isTxFunc) continue;
+      if (hasAnnotation(F, "transaction")) continue;
 
-      bool shouldInstrument = false;
-
-      if (foundExplicitThread) {
-        // Use explicit detection
+      bool shouldInstrument = hasAnnotation(F, "thread");
+      if (!shouldInstrument) {
         shouldInstrument = ExplicitThreadEntries.count(&F);
-      } else {
-        // Fall back to heuristic
-        bool hasTM = hasTMGlobals(F);
-        bool callsTx = callsTransactionFunctions(F, M);
-        shouldInstrument = (hasTM || callsTx);
       }
 
       if (shouldInstrument) {
@@ -360,6 +345,7 @@ public:
     // Declare transaction runtime hooks
     FunctionCallee tm_begin = declareHook("tm_begin", voidTy, {});
     FunctionCallee tm_end = declareHook("tm_end", voidTy, {});
+    FunctionCallee tm_set_jmpbuf = declareHook("tm_set_jmpbuf", voidTy, {i8PtrTy});
     FunctionCallee sigsetjmpFn = declareHook("sigsetjmp", i32Ty, {i8PtrTy, i32Ty});
     FunctionCallee tm_read_i1 = declareHook("tm_read_i1", i8Ty, {i8PtrTy});
     FunctionCallee tm_read_i2 = declareHook("tm_read_i2", i16Ty, {i8PtrTy});
@@ -428,13 +414,20 @@ public:
     BasicBlock *ContBB = Entry.splitBasicBlock(SplitPt, "cont");
     TM_DEBUG("Split entry block, created cont block");
     
+    // Create alloca for preserving return value across transaction exit blocks
+    // PURPOSE: Non-void @transaction functions need to preserve their return value
+    //          through the outer/nested exit branching
+    AllocaInst *RetValAlloca = nullptr;
+    if (!F.getReturnType()->isVoidTy()) {
+        IRBuilder<> EntryBuilder(&Entry, Entry.getFirstNonPHIIt());
+        RetValAlloca = EntryBuilder.CreateAlloca(F.getReturnType(), nullptr, "tx_retval");
+    }
+    
     // Remove the terminator from Entry (it was an unconditional branch to ContBB)
     Entry.getTerminator()->eraseFromParent();
     
     // Builder for inserting instructions at the end of Entry block
-    // Use the first instruction as insertion point to avoid end() issues
     IRBuilder<> Builder(&Entry);
-    Builder.SetInsertPoint(&Entry, Entry.getFirstNonPHIIt());
     
     // Load current nesting counter
     Value *CounterVal = Builder.CreateLoad(i32Ty, CounterGV, "counter");
@@ -460,14 +453,17 @@ public:
 
     // --- Outer transaction path ---
     // PURPOSE: For outermost transaction (or retry):
-    //   1. Call sigsetjmp to set jump point (allows retry via longjmp)
-    //   2. Store sigsetjmp's return value to detect retry vs first-time
-    //   3. Set counter to 1 (reset for retry case)
-    //   4. Call tm_begin() to start the transaction
+    //   1. Register jmpbuf with runtime via tm_set_jmpbuf (so abort_tx can
+    //      siglongjmp back to the correct buffer)
+    //   2. Call sigsetjmp to set jump point (allows retry via longjmp)
+    //   3. Store sigsetjmp's return value to detect retry vs first-time
+    //   4. Set counter to 1 (reset for retry case)
+    //   5. Call tm_begin() to start the transaction
     IRBuilder<> OuterBuilder(OuterBB);
     Value *JmpBufPtr = OuterBuilder.CreateBitCast(JmpBufGV,
                                                     PointerType::getUnqual(Ctx),
                                                     "jmpbuf_ptr");
+    OuterBuilder.CreateCall(tm_set_jmpbuf, {JmpBufPtr});
     Value *SetjmpRet = OuterBuilder.CreateCall(sigsetjmpFn,
                                                  {JmpBufPtr,
                                                   ConstantInt::get(i32Ty, 0)},
@@ -476,8 +472,11 @@ public:
     // Set counter to 1 (in case of retry, counter needs to be reset)
     OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 1), CounterGV);
     OuterBuilder.CreateCall(tm_begin, {});
+    // Clear jmpret so nested @transaction functions use counter-based nesting
+    // rather than incorrectly taking the outer path during retry
+    OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetGV);
     OuterBuilder.CreateBr(ContBB);
-    TM_DEBUG("Outer path: sigsetjmp + tm_begin");
+    TM_DEBUG("Outer path: sigsetjmp + tm_begin + clear jmpret");
 
     // --- Nested transaction path ---
     // PURPOSE: For nested transaction, just increment counter
@@ -502,8 +501,11 @@ public:
       OriginalBlocks.insert(&BB);
     }
     // Remove the blocks we just created (they shouldn't be instrumented)
+    // NOTE: ContBB is the continuation of the ORIGINAL body after splitBasicBlock,
+    // it's NOT a newly created block — it MUST be instrumented.
+    // Removing it would skip ALL load/store instrumentation (the root cause of
+    // bank correctness failures at 4+ threads: no tm_read/tm_write calls emitted).
     OriginalBlocks.erase(&Entry);
-    OriginalBlocks.erase(ContBB);
     OriginalBlocks.erase(OuterBB);
     OriginalBlocks.erase(NestedBB);
     TM_DEBUG("Collected %d original blocks for instrumentation", (int)OriginalBlocks.size());
@@ -533,8 +535,50 @@ public:
 
               if (touchesTM) {
                 TM_DEBUG("Instrumenting memory intrinsic: %s", Name.str().c_str());
-                // For now, mark for erasure to prevent uninstrumented access
-                // TODO: Implement per-byte loop replacement
+
+                Value *Dst = Call->getArgOperand(0);
+                Value *Len = Call->getArgOperand(2);
+                Value *SrcOrVal = Call->getArgOperand(1);
+                bool isMemset = (Name == "llvm.memset");
+
+                // Split the current block at the call so we can insert loop blocks
+                BasicBlock *OrigBB = Call->getParent();
+                BasicBlock *ContBB = OrigBB->splitBasicBlock(Call, "mem_after");
+
+                // Create loop blocks between OrigBB and ContBB
+                BasicBlock *LoopEntryBB = BasicBlock::Create(Ctx, "mem_loop_entry", &F, ContBB);
+                BasicBlock *LoopBodyBB = BasicBlock::Create(Ctx, "mem_loop_body", &F, ContBB);
+
+                // Replace OrigBB's terminator (br ContBB from split) with br LoopEntryBB
+                OrigBB->getTerminator()->eraseFromParent();
+                IRBuilder<> PreBuilder(OrigBB);
+                PreBuilder.CreateBr(LoopEntryBB);
+
+                // Loop entry: PHI for index + exit check
+                Type *i64MemTy = Type::getInt64Ty(Ctx);
+                IRBuilder<> EntryBuilder(LoopEntryBB);
+                PHINode *Idx = EntryBuilder.CreatePHI(i64MemTy, 2, "mem_idx");
+                Idx->addIncoming(ConstantInt::get(i64MemTy, 0), OrigBB);
+
+                Value *Done = EntryBuilder.CreateICmpEQ(Idx, Len, "mem_done");
+                EntryBuilder.CreateCondBr(Done, ContBB, LoopBodyBB);
+
+                // Loop body: per-byte tm_read/tm_write
+                IRBuilder<> BodyBuilder(LoopBodyBB);
+                Value *DstGEP = BodyBuilder.CreateGEP(i8Ty, Dst, Idx);
+
+                if (isMemset) {
+                  BodyBuilder.CreateCall(tm_write_i1, {DstGEP, SrcOrVal});
+                } else {
+                  Value *SrcGEP = BodyBuilder.CreateGEP(i8Ty, SrcOrVal, Idx);
+                  Value *Byte = BodyBuilder.CreateCall(tm_read_i1, {SrcGEP});
+                  BodyBuilder.CreateCall(tm_write_i1, {DstGEP, Byte});
+                }
+
+                Value *NextIdx = BodyBuilder.CreateAdd(Idx, ConstantInt::get(i64MemTy, 1), "mem_next");
+                Idx->addIncoming(NextIdx, LoopBodyBB);
+                BodyBuilder.CreateBr(LoopEntryBB);
+
                 ToErase.push_back(Call);
               }
             }
@@ -567,6 +611,8 @@ public:
             } else if (LoadTy->isPointerTy()) {
               Value *PtrVal = Builder.CreateCall(tm_read_ptr, {PtrCast});
               ReadValue = Builder.CreateBitCast(PtrVal, LoadTy);
+            } else {
+              // Unhandled load type — skip instrumentation
             }
 
             if (ReadValue) {
@@ -607,6 +653,8 @@ public:
               Value *ValCast = Builder.CreateBitCast(Val, i8PtrTy);
               Builder.CreateCall(tm_write_ptr, {PtrCast, ValCast});
               ToErase.push_back(Store);
+            } else {
+              // Unhandled store type — skip instrumentation
             }
           }
         }
@@ -655,19 +703,22 @@ public:
     //          else go to NestedEndBB. Both then go to CleanupBB.
     for (auto *Ret : Returns) {
       BasicBlock *RetBB = Ret->getParent();
-      Value *RetVal = Ret->getNumOperands() >0 ? Ret->getOperand(0) : nullptr;
-      
+      Value *RetVal = Ret->getNumOperands() > 0 ? Ret->getOperand(0) : nullptr;
+
       // Split block before return: RetBB -> NewBB (with check) -> [OuterEndBB/NestedEndBB] -> CleanupBB
       BasicBlock *NewBB = RetBB->splitBasicBlock(Ret, "ret_check");
-      TM_DEBUG("Split return block, created ret_check");
-      
+
+      // Preserve return value before erasing the return instruction
+      if (RetVal && RetValAlloca) {
+          IRBuilder<> StoreBuilder(Ret);
+          StoreBuilder.CreateStore(RetVal, RetValAlloca);
+      }
+
       // Remove the return instruction (we'll replace it with conditional branch)
       Ret->eraseFromParent();
-      
+
       // Create conditional branch based on nesting level
-      // Insert at the beginning of NewBB (after any PHI nodes)
       IRBuilder<> NewBBuilder(NewBB);
-      NewBBuilder.SetInsertPoint(NewBB, NewBB->getFirstNonPHIIt());
       Value *CounterAtEnd = NewBBuilder.CreateLoad(i32Ty, CounterGV, "counter_at_end");
       // is_outer_at_end = (counter == 1) meaning this is the outermost transaction ending
       Value *IsOuterAtEnd = NewBBuilder.CreateICmpEQ(CounterAtEnd,
@@ -693,9 +744,8 @@ public:
     if (F.getReturnType()->isVoidTy()) {
       CleanupBuilder.CreateRetVoid();
     } else {
-      // Create undef return (the actual return value handling is complex)
-      // TODO: Properly handle return values for transaction functions
-      CleanupBuilder.CreateRet(Constant::getNullValue(F.getReturnType()));
+      Value *RetVal = CleanupBuilder.CreateLoad(F.getReturnType(), RetValAlloca, "tx_retval");
+      CleanupBuilder.CreateRet(RetVal);
     }
     TM_DEBUG("Cleanup block: decrement counter and return");
 

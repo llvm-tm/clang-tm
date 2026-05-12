@@ -15,7 +15,9 @@
 #include <unistd.h>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 extern "C" {
 extern __thread unsigned char tm_jmpbuf[256];
@@ -61,7 +63,7 @@ TX void outer_retry_transaction()
 	printf("outer_retry_transaction: done, counter=%d\n", tm_counter);
 }
 
-int main()
+MAIN int main()
 {
 	printf("=== Test: Transaction retry with longjmp ===\n");
 

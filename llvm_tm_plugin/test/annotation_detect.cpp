@@ -2,7 +2,9 @@
 #include <iostream>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction")))
+#define TX __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
+#define MAIN __attribute__((annotate("main"), noinline))
 
 // TM-annotated global variables
 TM int tm_int = 0;
@@ -23,7 +25,7 @@ TX int tx_read_int() {
     return tm_int;
 }
 
-int main() {
+MAIN int main() {
     std::cout << "annotation_detect: starting" << std::endl;
     
     // Call transaction functions
