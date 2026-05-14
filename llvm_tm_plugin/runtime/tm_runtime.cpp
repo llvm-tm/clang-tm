@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <mutex>
 
 #define TM_BUFFER_SIZE 1024
 
@@ -107,6 +108,18 @@ void tm_exit_thread()
 		fflush(stdout);
 		is_tm_init_thread_ready = 0;
 	}
+}
+
+static std::recursive_mutex g_serialize_mutex;
+
+void tm_serialize_lock()
+{
+	g_serialize_mutex.lock();
+}
+
+void tm_serialize_unlock()
+{
+	g_serialize_mutex.unlock();
 }
 
 void tm_begin()

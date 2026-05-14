@@ -20,16 +20,26 @@ BANK_SRC := bank.cpp
 all: $(OUT_DIR) $(BIN_DIR) bank_uninstrumented bank_singlelock bank_tl2 \
      bank_tinystm bank_swiss bank_norec
 
-# Uninstrumented baseline
+# Uninstrumented baseline (no TM, direct access)
 bank_uninstrumented: $(BANK_SRC) | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(BANK_SRC) -o $(BIN_DIR)/$@
 
-# 5 backend variants sharing the same instrumented IR
+# 6 backend variants sharing the same instrumented IR
+# Pipeline: .cpp → .bc → .instr.bc (plugin) → .opt.bc (optimize) → binary (link with runtime)
 $(eval $(call tm_target, bank_singlelock, $(BANK_SRC), singlelock))
 $(eval $(call tm_target, bank_tl2, $(BANK_SRC), tl2))
 $(eval $(call tm_target, bank_tinystm, $(BANK_SRC), tinystm))
 $(eval $(call tm_target, bank_swiss, $(BANK_SRC), swisstm))
 $(eval $(call tm_target, bank_norec, $(BANK_SRC), norec))
+
+# Custom TinySTM variants (not in pipeline by default)
+bank_wbetl: $(OUT_DIR)/bank.opt.bc | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -DDESIGN_WBETL $< $(RUNTIMES_DIR)/TinySTM_runtime.cpp \
+	  -I$(TINYSTM_DIR) -I$(BACKENDS_DIR) -o $(BIN_DIR)/$@
+
+bank_wt: $(OUT_DIR)/bank.opt.bc | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -DDESIGN_WT $< $(RUNTIMES_DIR)/TinySTM_runtime.cpp \
+	  -I$(TINYSTM_DIR) -I$(BACKENDS_DIR) -o $(BIN_DIR)/$@
 
 # Test runtime (not a standard backend)
 bank_test: $(OUT_DIR)/bank.opt.bc src/tm_test_runtime.cpp | $(BIN_DIR)

@@ -223,6 +223,8 @@ inline word_t increment_clock()
 
 inline void init() { g_clock.store(1, std::memory_order_relaxed); }
 
+inline void exit() {}  // no-op, kept for compatibility with runtime wrapper
+
 inline void init_thread()
 {
 	if (!current_tx) {
@@ -276,6 +278,9 @@ inline bool begin()
 	tx->active = true;
 	tx->aborted = false;
 	tx->read_only = true;
+	tx->read_set.clear();
+	tx->write_set.clear();
+	tx->locks_held.clear();
 	TINYSTM_ASSERT(tx->start_version > 0, "begin: invalid start version");
 	TINYSTM_ASSERT(tx->end_version >= tx->start_version, "begin: invalid validity range");
 
@@ -375,7 +380,7 @@ inline bool active() { return current_tx && current_tx->active; }
 
 inline bool aborted() { return current_tx && current_tx->aborted; }
 
-static word_t read_word_wt(Transaction *tx, volatile word_t *addr, ValueType type)
+__attribute__((noinline)) static word_t read_word_wt(Transaction *tx, volatile word_t *addr, ValueType type)
 {
 	if (!tx || !tx->active)
 		return *addr;
@@ -458,7 +463,7 @@ static word_t read_word_wt(Transaction *tx, volatile word_t *addr, ValueType typ
 	}
 }
 
-static void write_word_wt(Transaction *tx,
+__attribute__((noinline)) static void write_word_wt(Transaction *tx,
                           volatile word_t *addr,
                           word_t value,
                           ValueType type)

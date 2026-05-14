@@ -27,7 +27,6 @@ static void collectDirectCalls(Function &F, SmallPtrSet<Function *, 32> &CalledF
     for (auto &I : BB) {
       if (auto *Call = dyn_cast<CallInst>(&I)) {
         if (Function *Callee = Call->getCalledFunction()) {
-          // Only add non-declarations (functions with bodies)
           if (!Callee->isDeclaration()) {
             CalledFuncs.insert(Callee);
           }
@@ -46,9 +45,8 @@ static bool callsTransactionFunctions(Function &F, Module &M)
     for (auto &I : BB) {
       if (auto *Call = dyn_cast<CallInst>(&I)) {
         if (Function *Callee = Call->getCalledFunction()) {
-          // Check if the called function has "transaction" annotation
           if (hasAnnotation(*Callee, "transaction")) {
-            TM_DEBUG("Function %s calls transaction function %s", 
+            TM_DEBUG("Function %s calls transaction function %s",
                      F.getName().str().c_str(), Callee->getName().str().c_str());
             return true;
           }

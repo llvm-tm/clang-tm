@@ -210,6 +210,8 @@ begin()     //
 	tx->active = true;
 	tx->read_only = true;
 	tx->abort_count = 0;
+	tx->read_set.clear();
+	tx->write_set.clear();
 
 	return true;
 }
@@ -228,7 +230,7 @@ abort_tx()  //
 	NOREC_ASSERT(false, "Did not jump");
 }
 
-inline word_t //
+__attribute__((noinline)) word_t //
 validate()    //
 {
 	auto *tx = current_tx;
@@ -262,6 +264,8 @@ commit()    //
 	NOREC_ASSERT(tx->active, "tx not active");
 
 	if (tx->read_only) {
+		tx->read_set.clear();
+		tx->write_set.clear();
 		return;
 	}
 
@@ -291,7 +295,7 @@ commit()    //
   * Stubs for Transaction read/write instrumentation.
   * ---------------------------------------------------- */
 
-inline any_type_t    //
+__attribute__((noinline)) any_type_t    //
 read_word_norec(     //
     Transaction *tx, //
     void *addr,      //
@@ -312,6 +316,10 @@ read_word_norec(     //
 	while (tx->snapshot != get_clock()) {
 		tx->snapshot = validate();
 		value = read_value_from_addr(addr, sz);
+		if (tx->read_set.size() > 1000000) {
+			fprintf(stderr, "FATAL: read_set overflow (%zu entries)\n", tx->read_set.size());
+			abort_tx();
+		}
 	}
 
 	ReadLogEntry r;
@@ -324,7 +332,7 @@ read_word_norec(     //
 	return value;
 }
 
-inline void          //
+__attribute__((noinline)) void  //
 write_word_norec(    //
     Transaction *tx, //
     void *addr,      //

@@ -3,9 +3,9 @@
 **/out/
 **/target/
 **/lib/*.a
-**/inputs/*.txt
-**/inputs/*.gz
+**/inputs/
 **/*.dSYM/
+**/tm_persist.bin
 
 # Compiled objects
 *.o
@@ -28,6 +28,7 @@
 .vscode/
 .idea/
 *.sublime-*
+*.backup
 
 # Build system
 debug.txt
@@ -40,3 +41,6 @@ compile_commands.json
 # Precompiled headers
 *.gch
 *.pch
+
+# Documents
+*.pdf

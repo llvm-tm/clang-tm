@@ -1,11 +1,24 @@
 /**
- * AVL Tree Benchmark - Modern C++17 Version
+ * AVL Tree Benchmark — Self-Balancing BST under TM
+ * =================================================
  *
- * Tests transactional memory with concurrent AVL tree operations.
- * Uses a node pool with TM-annotated arrays for transactional access.
+ * SPEC (standard AVL tree, Adelson-Velsky & Landis 1962):
+ *   - Height-balanced binary search tree.
+ *   - For every node, |height(left) − height(right)| ≤ 1.
+ *   - Operations: insert(key, val), erase(key), contains(key), rangeCount(min, max).
+ *   - Rebalancing via single/double rotations (rotateRight, rotateLeft).
  *
- * Compiler: C++17
- * Uses: C++ Standard Library threads, std::atomic
+ * TM-specific:
+ *   - Node pool is pre-allocated; TM annotations on node_keys/values/left/right.
+ *   - txn_insert / txn_erase / txn_contains are the TX entry points.
+ *   - Helper functions (height, getBalance, rotateRight, etc.) are cloned
+ *     by the plugin for TM instrumentation.
+ *   - Recursive helper functions (insert, erase, contains) add read-set entries
+ *     for every accessed node.
+ *
+ * Workloads (80% reads / 10% writes / 10% inserts by default):
+ *   - Transaction picks a random operation based on configured percentages,
+ *     then calls the corresponding TX function.
  */
 
 #include <iostream>
@@ -284,7 +297,6 @@ struct ThreadData {
 };
 
 THREAD void worker(ThreadData* data) {
-    FILE* f = fopen("/tmp/debug.log", "a");
     fprintf(f, "WORKER %d: starting\n", data->thread_id);
     fflush(f);
     

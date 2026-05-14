@@ -10,15 +10,16 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #define TM_BUFFER_SIZE 1024
 
 // Thread-local state
-__thread int32_t tm_nested_call_counter = 0;
+__thread int32_t tm_nested_call_counter;
 __thread unsigned char tm_jmpbuf[256];
-__thread int32_t tm_longjmp_ret = 0;
+__thread int32_t tm_longjmp_ret;
 __thread uint8_t is_tm_init_thread_ready = 0;
 thread_local uint8_t tm_buffer[TM_BUFFER_SIZE] = {0};
 
@@ -151,6 +152,18 @@ void tm_exit_thread()
 		fflush(stdout);
 		is_tm_init_thread_ready = 0;
 	}
+}
+
+static std::recursive_mutex g_serialize_mutex;
+
+void tm_serialize_lock()
+{
+	g_serialize_mutex.lock();
+}
+
+void tm_serialize_unlock()
+{
+	g_serialize_mutex.unlock();
 }
 
 // int tm_setjmp() { return sigsetjmp(*(sigjmp_buf *)tm_jmpbuf, 0); }

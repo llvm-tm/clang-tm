@@ -17,9 +17,17 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Value.h>
 
+#include "tm_annotation_utils.hpp"
 #include "tm_debug.hpp"
 
-using namespace llvm;
+// Collect all return instructions in a function (avoids iterator-invalidation bugs).
+static SmallVector<ReturnInst *, 4> collectReturns(Function &F) {
+    SmallVector<ReturnInst *, 4> Ret;
+    for (auto &BB : F)
+        if (auto *R = dyn_cast<ReturnInst>(BB.getTerminator()))
+            Ret.push_back(R);
+    return Ret;
+}
 
 // Get the base object from a pointer (follows GEP chains)
 static const Value *getBaseObject(const Value *Ptr)
@@ -197,6 +205,87 @@ static bool originatesFromLocal(Value *Ptr,
   return originatesFromLocal(Ptr, LocalVars, nullptr, Depth);
 }
 
+// Follow the definition chain of V backwards to check if it ultimately
+// comes from a TM-annotated global variable.  Handles iterators that
+// are local allocas initialized from TM globals via begin().
+static bool tracesFromTMGlobal(Value *V, Module &M,
+                               SmallPtrSetImpl<const AllocaInst *> *VisitedAllocas = nullptr,
+                               int Depth = 0)
+{
+  if (Depth > 15) return false;
+  if (!V) return false;
+
+  V = V->stripPointerCasts();
+
+  // Direct global access
+  if (auto *GV = dyn_cast<GlobalVariable>(V))
+    return isTMAnnotatedGlobal(GV, M);
+
+  // GEP: follow the pointer operand
+  if (auto *GEP = dyn_cast<GetElementPtrInst>(V))
+    return tracesFromTMGlobal(const_cast<Value *>(GEP->getPointerOperand()),
+                              M, VisitedAllocas, Depth + 1);
+  if (auto *GEPOp = dyn_cast<GEPOperator>(V))
+    return tracesFromTMGlobal(const_cast<Value *>(GEPOp->getPointerOperand()),
+                              M, VisitedAllocas, Depth + 1);
+
+  // Load: follow to the address being loaded from
+  if (auto *Load = dyn_cast<LoadInst>(V))
+    return tracesFromTMGlobal(const_cast<Value *>(Load->getPointerOperand()),
+                              M, VisitedAllocas, Depth + 1);
+
+  // Call returning a pointer (e.g. begin()).  If any argument traces to
+  // a TM global, the return value inherits that.
+  if (auto *Call = dyn_cast<CallInst>(V)) {
+    if (Function *Callee = Call->getCalledFunction()) {
+      if (Callee->getName().starts_with("tm_"))
+        return false;
+    }
+    for (unsigned i = 0; i < Call->arg_size(); i++)
+      if (tracesFromTMGlobal(Call->getArgOperand(i), M, VisitedAllocas, Depth + 1))
+        return true;
+    return false;
+  }
+
+  // PHI: any incoming value traces to a TM global
+  if (auto *Phi = dyn_cast<PHINode>(V)) {
+    for (Value *Inc : Phi->incoming_values())
+      if (tracesFromTMGlobal(Inc, M, VisitedAllocas, Depth + 1))
+        return true;
+    return false;
+  }
+
+  // Select: either operand traces to a TM global
+  if (auto *Sel = dyn_cast<SelectInst>(V))
+    return tracesFromTMGlobal(Sel->getTrueValue(), M, VisitedAllocas, Depth + 1) ||
+           tracesFromTMGlobal(Sel->getFalseValue(), M, VisitedAllocas, Depth + 1);
+
+  // Alloca: check if any store to this alloca stores a value that traces
+  // to a TM global.  This is the key case for iterators:
+  //   %__begin = alloca ptr
+  //   store ptr %begin_result, ptr %__begin
+  // where %begin_result comes from begin() on a TM global.
+  if (auto *AI = dyn_cast<AllocaInst>(V)) {
+    if (VisitedAllocas && VisitedAllocas->count(AI))
+      return false;
+    SmallPtrSet<const AllocaInst *, 4> LocalVisited;
+    if (!VisitedAllocas) {
+      VisitedAllocas = &LocalVisited;
+    }
+    VisitedAllocas->insert(AI);
+    for (User *U : AI->users()) {
+      if (auto *Store = dyn_cast<StoreInst>(U)) {
+        if (Store->getPointerOperand() == AI)
+          if (tracesFromTMGlobal(Store->getValueOperand(), M, VisitedAllocas, Depth + 1))
+            return true;
+      }
+    }
+    return false;
+  }
+
+  return false;
+}
+
 // Determine if a pointer accesses shared (non-local) data
 static bool isSharedPointer(Value *Ptr,
                            const SmallPtrSet<const Value *, 32> &LocalVars,
@@ -204,6 +293,17 @@ static bool isSharedPointer(Value *Ptr,
                            Module &M,
                            int DepthLimit = 15)
 {
+  // Check if the pointer ultimately traces to a TM-annotated global.
+  // This must run BEFORE originatesFromLocal, because the pointer may
+  // reach a TM global through a chain:  %__end_ → load ptr, %__begin
+  // → %__begin (alloca) → store from begin() → %__range (alloca) →
+  // store from &g_connections (TM global).  originatesFromLocal would
+  // stop at the first alloca and return true (local) — wrong.
+  if (tracesFromTMGlobal(Ptr, M)) {
+    TM_DEBUG("Pointer traces to TM global → shared");
+    return true;
+  }
+
   if (originatesFromLocal(Ptr, LocalVars, &F)) {
     TM_DEBUG("Pointer is local (from alloca or in-function allocation)");
     return false;
@@ -238,6 +338,14 @@ static bool isSharedPointer(Value *Ptr,
     return false;
   }
 
+  // Pointer neither traces to a TM global nor originates from a local alloca.
+  // Assume shared — this is correct for cloned functions where the
+  // hasSharedAccesses gatekeeper ensures `this` points to a TM global or
+  // heap reachable from one.  For TX functions (not cloned), direct access
+  // patterns like `g_connections[i]` pass through here and need instrumentation.
+  // The only false positive is heap pointers that aren't TM-tracked (e.g. tree
+  // nodes), but those are harmless — TM read/write on them adds correct entries
+  // to the read/write-sets without causing correctness issues.
   TM_DEBUG("Pointer assumed shared (heap/argument)");
   return true;
 }

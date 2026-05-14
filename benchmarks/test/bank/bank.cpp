@@ -1,12 +1,23 @@
 /**
- * Bank Benchmark - Modern C++17 Version
+ * Bank Benchmark — Money Conservation Correctness Test
+ * ======================================================
  *
- * Tests transactional memory correctness with concurrent bank transfers.
- * Verifies that the total money in the bank remains constant across multiple threads,
- * indicating proper transaction isolation and atomicity.
+ * SPECIFICATION:
+ *   - Accounts hold integer balance, initialized to 1000.
+ *   - Transfer(x, y, 1): atomic debit from x, credit to y.
+ *   - INVARIANT: sum(balances) must remain constant across all threads.
+ *   - Any deviation (money creation or destruction) = TM correctness failure.
  *
- * Compiler: C++17
- * Uses: C++ Standard Library threads
+ * Workloads:
+ *   - transfer (default 80%):   random 1-credit transfer between two accounts.
+ *   - read-all (default 20%):   scan all accounts, sum balances (read-only TX).
+ *   - write-all (default 0%):   reset all accounts to initial balance.
+ *   - disjoint mode:            partition accounts per thread (no conflict).
+ *
+ * Validation:
+ *   - Initial sum is computed and printed.
+ *   - After benchmark, final sum is compared to expected.
+ *   - The program returns 0 if conserved, 1 if violated.
  */
 
 #include <atomic>
@@ -68,7 +79,14 @@ TM Bank *bank;
 // =============================================================================
 
 /**
- * Transfer money from one account to another within a transaction
+ * Transfer money from one account to another within a transaction.
+ *
+ * SPEC: Atomic debit + credit across two accounts.
+ *       The TM system must ensure that either both operations commit or
+ *       neither does (atomicity). If isolation is violated, another thread
+ *       could observe a partial transfer (money disappears temporarily).
+ *
+ * INVARIANT: sum(balances) unchanged.
  */
 TX void transfer(int src, int dst, int amount)
 {
@@ -85,7 +103,10 @@ TX void transfer(int src, int dst, int amount)
 }
 
 /**
- * Read all account balances and compute total
+ * Read all account balances and sum them (read-only transaction).
+ *
+ * SPEC: Full table scan. If TM isolation is broken, this could see a
+ *       partial transfer (money in-flight) and report the wrong total.
  */
 TX int total_transactional()
 {
@@ -97,7 +118,10 @@ TX int total_transactional()
 }
 
 /**
- * Non-transactional total (for final verification)
+ * Non-transactional total (for final verification after all threads stop).
+ *
+ * SPEC: Runs after workers have joined and no concurrent access exists.
+ *       This is the ground-truth check against the initial total.
  */
 int total_non_transactional()
 {
@@ -109,8 +133,12 @@ int total_non_transactional()
 }
 
 /**
- * Reset all accounts to initial balance
+ * Reset all accounts to initial balance (write-all transaction).
+ *
+ * SPEC: Used in write-all workloads to stress TM write-set handling.
  */
+
+/**SPECIAL just for reset — write-all workload */
 TX void reset()
 {
 	for (int i = 0; i < bank->size(); ++i) {

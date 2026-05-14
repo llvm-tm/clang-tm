@@ -49,6 +49,12 @@ void tm_exit() {
 void tm_exit_thread() {
 }
 
+static std::recursive_mutex g_serialize_mutex;
+
+void tm_serialize_lock() { g_serialize_mutex.lock(); }
+
+void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
+
 int tm_setjmp() {
     return 0;
 }

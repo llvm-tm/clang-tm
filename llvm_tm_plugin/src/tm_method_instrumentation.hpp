@@ -13,15 +13,20 @@
 #ifndef TM_METHOD_INSTRUMENTATION_HPP
 #define TM_METHOD_INSTRUMENTATION_HPP
 
+#include <functional>
+
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/SmallSet.h>
 #include <llvm/ADT/SmallPtrSet.h>
-#include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 
 #include "tm_annotation_utils.hpp"
+#include "tm_call_graph.hpp"
 #include "tm_debug.hpp"
 #include "tm_local_vars.hpp"
+#include "tm_runtime_hooks.hpp"
 
 using namespace llvm;
 
@@ -90,6 +95,47 @@ static bool tracesToTMGlobal(Value *Ptr, Module &M)
     return false;
 }
 
+// Replace llvm.memcpy/memmove/memset on TM globals with per-byte instrumented loops.
+static void instrumentMemoryIntrinsic(CallInst *Call, Module &M,
+                                      const TMRuntimeHooks &H) {
+    LLVMContext &Ctx = M.getContext();
+    auto *i8Ty = Type::getInt8Ty(Ctx);
+    auto *i64Ty = Type::getInt64Ty(Ctx);
+    Function *F = Call->getFunction();
+    StringRef Name = Call->getCalledFunction()->getName();
+    bool isMemset = (Name == "llvm.memset");
+
+    Value *Dst = Call->getArgOperand(0);
+    Value *Len = Call->getArgOperand(2);
+    Value *SrcOrVal = Call->getArgOperand(1);
+
+    BasicBlock *OrigBB = Call->getParent();
+    BasicBlock *ContBB = OrigBB->splitBasicBlock(Call, "mem_after");
+    BasicBlock *LoopEntry = BasicBlock::Create(Ctx, "mem_loop_entry", F, ContBB);
+    BasicBlock *LoopBody  = BasicBlock::Create(Ctx, "mem_loop_body", F, ContBB);
+
+    OrigBB->getTerminator()->eraseFromParent();
+    IRBuilder<>(OrigBB).CreateBr(LoopEntry);
+
+    IRBuilder<> EB(LoopEntry);
+    PHINode *Idx = EB.CreatePHI(i64Ty, 2, "mem_idx");
+    Idx->addIncoming(ConstantInt::get(i64Ty, 0), OrigBB);
+    EB.CreateCondBr(EB.CreateICmpEQ(Idx, Len), ContBB, LoopBody);
+
+    IRBuilder<> BB(LoopBody);
+    Value *DG = BB.CreateGEP(i8Ty, Dst, Idx);
+    if (isMemset) {
+        BB.CreateCall(H.write_i1, {DG, SrcOrVal});
+    } else {
+        Value *SG = BB.CreateGEP(i8Ty, SrcOrVal, Idx);
+        BB.CreateCall(H.write_i1, {DG, BB.CreateCall(H.read_i1, {SG})});
+    }
+    Idx->addIncoming(BB.CreateAdd(Idx, ConstantInt::get(i64Ty, 1)), LoopBody);
+    BB.CreateBr(LoopEntry);
+
+    Call->eraseFromParent();
+}
+
 static bool isCallOnTMObject(CallBase *Call, Module &M)
 {
     if (Call->isIndirectCall()) return false;
@@ -112,114 +158,36 @@ static bool isCallOnTMObject(CallBase *Call, Module &M)
 }
 
 static void instrumentLoadsStoresInFunction(Function *F, Module *M,
-                                             FunctionCallee tm_read_i1,
-                                             FunctionCallee tm_read_i2,
-                                             FunctionCallee tm_read_i4,
-                                             FunctionCallee tm_read_i8,
-                                             FunctionCallee tm_read_f4,
-                                             FunctionCallee tm_read_f8,
-                                             FunctionCallee tm_read_ptr,
-                                             FunctionCallee tm_write_i1,
-                                             FunctionCallee tm_write_i2,
-                                             FunctionCallee tm_write_i4,
-                                             FunctionCallee tm_write_i8,
-                                             FunctionCallee tm_write_f4,
-                                             FunctionCallee tm_write_f8,
-                                             FunctionCallee tm_write_ptr)
+                                             const TMRuntimeHooks &H)
 {
     SmallVector<Instruction *, 16> ToErase;
-    Type *i8PtrTy = PointerType::getUnqual(M->getContext());
 
     for (auto &BB : *F) {
         for (auto &I : BB) {
             if (auto *Load = dyn_cast<LoadInst>(&I)) {
                 Value *Ptr = Load->getPointerOperand();
                 if (!isSharedPointer(Ptr, {}, *F, *M)) continue;
-
                 IRBuilder<> Builder(Load);
-                Value *PtrCast = Builder.CreateBitCast(Ptr, i8PtrTy);
-                Value *ReadValue = nullptr;
-                Type *LoadTy = Load->getType();
-
-                if (LoadTy->isIntegerTy(8)) {
-                    ReadValue = Builder.CreateCall(tm_read_i1, {PtrCast});
-                } else if (LoadTy->isIntegerTy(16)) {
-                    ReadValue = Builder.CreateCall(tm_read_i2, {PtrCast});
-                } else if (LoadTy->isIntegerTy(32)) {
-                    ReadValue = Builder.CreateCall(tm_read_i4, {PtrCast});
-                } else if (LoadTy->isIntegerTy(64)) {
-                    ReadValue = Builder.CreateCall(tm_read_i8, {PtrCast});
-                } else if (LoadTy->isFloatTy()) {
-                    ReadValue = Builder.CreateCall(tm_read_f4, {PtrCast});
-                } else if (LoadTy->isDoubleTy()) {
-                    ReadValue = Builder.CreateCall(tm_read_f8, {PtrCast});
-                } else if (LoadTy->isPointerTy()) {
-                    Value *PtrVal = Builder.CreateCall(tm_read_ptr, {PtrCast});
-                    ReadValue = Builder.CreateBitCast(PtrVal, LoadTy);
-                }
-
-                if (ReadValue) {
-                    Load->replaceAllUsesWith(ReadValue);
+                if (auto *Call = emitTMRead(Builder, Ptr, Load->getType(), H)) {
+                    Load->replaceAllUsesWith(Call);
                     ToErase.push_back(Load);
                 }
             } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
                 Value *Ptr = Store->getPointerOperand();
                 if (!isSharedPointer(Ptr, {}, *F, *M)) continue;
-
                 IRBuilder<> Builder(Store);
-                Value *PtrCast = Builder.CreateBitCast(Ptr, i8PtrTy);
-                Value *Val = Store->getValueOperand();
-                Type *ValTy = Val->getType();
-
-                if (ValTy->isIntegerTy(8)) {
-                    Builder.CreateCall(tm_write_i1, {PtrCast, Val});
-                    ToErase.push_back(Store);
-                } else if (ValTy->isIntegerTy(16)) {
-                    Builder.CreateCall(tm_write_i2, {PtrCast, Val});
-                    ToErase.push_back(Store);
-                } else if (ValTy->isIntegerTy(32)) {
-                    Builder.CreateCall(tm_write_i4, {PtrCast, Val});
-                    ToErase.push_back(Store);
-                } else if (ValTy->isIntegerTy(64)) {
-                    Builder.CreateCall(tm_write_i8, {PtrCast, Val});
-                    ToErase.push_back(Store);
-                } else if (ValTy->isFloatTy()) {
-                    Builder.CreateCall(tm_write_f4, {PtrCast, Val});
-                    ToErase.push_back(Store);
-                } else if (ValTy->isDoubleTy()) {
-                    Builder.CreateCall(tm_write_f8, {PtrCast, Val});
-                    ToErase.push_back(Store);
-                } else if (ValTy->isPointerTy()) {
-                    Value *ValCast = Builder.CreateBitCast(Val, i8PtrTy);
-                    Builder.CreateCall(tm_write_ptr, {PtrCast, ValCast});
-                    ToErase.push_back(Store);
-                }
+                emitTMWrite(Builder, Ptr, Store->getValueOperand(), H);
+                ToErase.push_back(Store);
             }
         }
     }
-
-    for (Instruction *I : ToErase) {
-        I->eraseFromParent();
-    }
+    for (auto *I : ToErase) I->eraseFromParent();
 }
 
 static Function *cloneMethodWithSuffix(Function *Original, const Twine &Suffix,
                                         Module *M, LLVMContext &Ctx,
                                         SmallPtrSetImpl<const GlobalVariable *> &TMG,
-                                        FunctionCallee tm_read_i1,
-                                        FunctionCallee tm_read_i2,
-                                        FunctionCallee tm_read_i4,
-                                        FunctionCallee tm_read_i8,
-                                        FunctionCallee tm_read_f4,
-                                        FunctionCallee tm_read_f8,
-                                        FunctionCallee tm_read_ptr,
-                                        FunctionCallee tm_write_i1,
-                                        FunctionCallee tm_write_i2,
-                                        FunctionCallee tm_write_i4,
-                                        FunctionCallee tm_write_i8,
-                                        FunctionCallee tm_write_f4,
-                                        FunctionCallee tm_write_f8,
-                                        FunctionCallee tm_write_ptr)
+                                        const TMRuntimeHooks &H)
 {
     FunctionType *FTy = Original->getFunctionType();
     Function *NewFunc = Function::Create(
@@ -241,11 +209,7 @@ static Function *cloneMethodWithSuffix(Function *Original, const Twine &Suffix,
     NewFunc->setDSOLocal(true);
     NewFunc->addFnAttr(llvm::Attribute::NoInline);
 
-    instrumentLoadsStoresInFunction(NewFunc, M,
-                                     tm_read_i1, tm_read_i2, tm_read_i4, tm_read_i8,
-                                     tm_read_f4, tm_read_f8, tm_read_ptr,
-                                     tm_write_i1, tm_write_i2, tm_write_i4, tm_write_i8,
-                                     tm_write_f4, tm_write_f8, tm_write_ptr);
+    instrumentLoadsStoresInFunction(NewFunc, M, H);
 
     TM_DEBUG("Cloned method %s -> %s",
             Original->getName().str().c_str(),
@@ -261,82 +225,235 @@ getClonedMethodsMap()
     return Map;
 }
 
-static void processMethodCalls(Module &M,
-                               FunctionCallee tm_read_i1,
-                               FunctionCallee tm_read_i2,
-                               FunctionCallee tm_read_i4,
-                               FunctionCallee tm_read_i8,
-                               FunctionCallee tm_read_f4,
-                               FunctionCallee tm_read_f8,
-                               FunctionCallee tm_read_ptr,
-                               FunctionCallee tm_write_i1,
-                               FunctionCallee tm_write_i2,
-                               FunctionCallee tm_write_i4,
-                               FunctionCallee tm_write_i8,
-                               FunctionCallee tm_write_f4,
-                               FunctionCallee tm_write_f8,
-                               FunctionCallee tm_write_ptr)
+// Check if a function has any stores to TM-annotated globals.
+// Read-only functions don't need cloning (no buffered writes to undo).
+static bool hasDirectTMWrites(Function &F, Module &M)
 {
-    SmallPtrSet<const GlobalVariable *, 16> TMG;
-    collectTMGlobalsCached(M, TMG);
+    for (auto &BB : F)
+        for (auto &I : BB)
+            if (auto *Store = dyn_cast<StoreInst>(&I))
+                if (tracesToTMGlobal(Store->getPointerOperand(), M))
+                    return true;
+    return false;
+}
 
-    SmallVector<CallBase *, 32> CallsToInstrument;
-    for (auto &F : M) {
-        for (auto &BB : F) {
-            for (auto &I : BB) {
-                if (auto *Call = dyn_cast<CallBase>(&I)) {
-                    if (isCallOnTMObject(Call, M)) {
-                        CallsToInstrument.push_back(Call);
+// Check if a function has any loads/stores that trace directly to a TM global.
+static bool hasDirectTMGlobal(Function &F, Module &M)
+{
+    for (auto &BB : F)
+        for (auto &I : BB) {
+            if (auto *Load = dyn_cast<LoadInst>(&I))
+                if (tracesToTMGlobal(Load->getPointerOperand(), M))
+                    return true;
+            if (auto *Store = dyn_cast<StoreInst>(&I))
+                if (tracesToTMGlobal(Store->getPointerOperand(), M))
+                    return true;
+        }
+    return false;
+}
+
+// Map from a Function* to the set of argument indices that are known to be
+// TM-traceable.  Propagated through the call graph: if F passes its arg i
+// (which is TM-traceable) to G at position j, then G's arg j is also
+// TM-traceable.  This handles deep chains like:
+//   TX → map::find(this=&g_apById) → tree::find(this) → __tree_left_rotate(...)
+// where internal tree functions take `this` (an Argument) that originates
+// from a TM global at the TX call site.
+using TMTraceableArgsMap = DenseMap<Function *, SmallSet<unsigned, 4>>;
+
+// Build the set of functions that should be cloned by propagating
+// TM-traceability through the call graph from TX functions.
+static SmallPtrSet<Function *, 32>
+computeClonableFunctions(Module &M,
+                         SmallPtrSetImpl<Function *> &TxReachableFuncs)
+{
+    // Step 1: seed with functions that have direct TM-global WRITES.
+    // Read-only functions don't need cloning (no buffered writes to undo on abort).
+    SmallPtrSet<Function *, 32> Clonable;
+    TMTraceableArgsMap TraceableArgs;
+    for (Function *F : TxReachableFuncs) {
+        if (F->isDeclaration()) continue;
+        if (F->getName().starts_with("tm_")) continue;
+        if (hasAnnotation(*F, "transaction")) continue;
+        if (hasDirectTMWrites(*F, M)) {
+            Clonable.insert(F);
+            // All arguments of a directly-writing function are potentially TM-traceable
+            SmallSet<unsigned, 4> Args;
+            for (unsigned i = 0; i < F->arg_size(); i++)
+                Args.insert(i);
+            TraceableArgs[F] = Args;
+        }
+    }
+
+    // Step 2: fixed-point propagation through the call graph.
+    // A function F is clonable if any caller C passes an argument to F
+    // where that argument either:
+    //   (a) traces directly to a TM global (e.g. &g_apById), OR
+    //   (b) is a TM-traceable argument of C (propagated from a previous iteration)
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto &CallerF : M) {
+            if (CallerF.isDeclaration()) continue;
+            if (!TxReachableFuncs.count(&CallerF)) continue;
+            for (auto &BB : CallerF) {
+                for (auto &I : BB) {
+                    auto *Call = dyn_cast<CallBase>(&I);
+                    if (!Call) continue;
+                    Function *Callee = Call->getCalledFunction();
+                    if (!Callee || Callee->isDeclaration()) continue;
+                    if (Callee->getName().starts_with("tm_")) continue;
+                    if (hasAnnotation(*Callee, "transaction")) continue;
+                    if (Clonable.count(Callee)) continue;
+
+                    // Check each argument at this call site.
+                    // Follow through GEPs, Loads, Calls, BitCasts to determine
+                    // if the argument traces to a TM-traceable value.
+                    // Recursive check: does Val trace to a TM-traceable value in CallerF?
+                    // Uses TraceableArgs for argument propagation through the call graph.
+                    std::function<bool(Value *, int)> isArgTraceable;
+                    isArgTraceable = [&](Value *Val, int Depth) -> bool {
+                        if (!Val || Depth > 10) return false;
+                        Val = Val->stripPointerCasts();
+
+                        if (tracesToTMGlobal(Val, M))
+                            return true;
+
+                        if (auto *ArgAsArg = dyn_cast<Argument>(Val)) {
+                            auto it = TraceableArgs.find(&CallerF);
+                            if (it != TraceableArgs.end() && it->second.count(ArgAsArg->getArgNo()))
+                                return true;
+                            return false;
+                        }
+
+                        if (auto *GEP = dyn_cast<GEPOperator>(Val))
+                            return isArgTraceable(GEP->getPointerOperand(), Depth + 1);
+
+                        if (auto *LI = dyn_cast<LoadInst>(Val))
+                            return isArgTraceable(LI->getPointerOperand(), Depth + 1);
+
+                        // Load from return of a function called on TM-traceable args
+                        if (auto *CB = dyn_cast<CallBase>(Val)) {
+                            for (unsigned j = 0; j < CB->arg_size(); j++)
+                                if (isArgTraceable(CB->getArgOperand(j), Depth + 1))
+                                    return true;
+                            return false;
+                        }
+
+                        if (auto *Phi = dyn_cast<PHINode>(Val)) {
+                            for (Value *Inc : Phi->incoming_values())
+                                if (isArgTraceable(Inc, Depth + 1)) return true;
+                            return false;
+                        }
+
+                        return false;
+                    };
+
+                    bool anyTraceable = false;
+                    SmallSet<unsigned, 4> newArgs;
+                    for (unsigned i = 0; i < Call->arg_size(); i++) {
+                        if (isArgTraceable(Call->getArgOperand(i), 0)) {
+                            anyTraceable = true;
+                            newArgs.insert(i);
+                        }
+                    }
+                    if (anyTraceable) {
+                        Clonable.insert(Callee);
+                        TraceableArgs[Callee] = newArgs;
+                        changed = true;
+                        TM_DEBUG("propagate: %s clonable via %s (args: %zu traceable)",
+                                Callee->getName().str().c_str(),
+                                CallerF.getName().str().c_str(),
+                                newArgs.size());
                     }
                 }
             }
         }
     }
 
-    if (CallsToInstrument.empty()) return;
+    TM_DEBUG("computeClonableFunctions: %d functions clonable", (int)Clonable.size());
+    return Clonable;
+}
 
-    TM_DEBUG("Found %d method calls on TM objects", (int)CallsToInstrument.size());
+// Redirect all direct function calls within F to their clones (if a clone exists).
+// Also detects unclonable callees for diagnostic purposes.
+static void redirectCallsToClones(Function &F,
+                                  SmallPtrSetImpl<Function *> &TxReachableFuncs,
+                                  SmallVectorImpl<std::pair<Function *, Function *>> &ClonedMap)
+{
+    // Two-pass approach to avoid iterator invalidation:
+    //   Pass 1: collect call sites that need redirecting (read-only)
+    //   Pass 2: apply the redirects
+    SmallVector<std::pair<CallBase *, Function *>, 32> ToRedirect;
 
-    SmallPtrSet<Function *, 16> MethodsToClone;
-    for (CallBase *Call : CallsToInstrument) {
-        Function *Callee = Call->getCalledFunction();
-        if (Callee && !Callee->isDeclaration()) {
-            MethodsToClone.insert(Callee);
+    for (auto &BB : F) {
+        for (auto &I : BB) {
+            auto *Call = dyn_cast<CallBase>(&I);
+            if (!Call) continue;
+            Function *Callee = Call->getCalledFunction();
+            if (!Callee || Callee->isDeclaration()) continue;
+            if (Callee->getName().starts_with("tm_")) continue;
+            if (!TxReachableFuncs.count(Callee)) continue;
+
+            for (auto &pair : ClonedMap) {
+                if (pair.first == Callee) {
+                    ToRedirect.push_back({Call, Callee});
+                    break;
+                }
+            }
         }
     }
 
-    auto &ClonedMap = getClonedMethodsMap();
-    for (Function *Method : MethodsToClone) {
-        bool alreadyCloned = false;
+    for (auto &P : ToRedirect) {
         for (auto &pair : ClonedMap) {
-            if (pair.first == Method) { alreadyCloned = true; break; }
-        }
-        if (alreadyCloned) continue;
-
-        Function *Cloned = cloneMethodWithSuffix(
-            Method, "_tm_uninst", &M, M.getContext(), TMG,
-            tm_read_i1, tm_read_i2, tm_read_i4, tm_read_i8,
-            tm_read_f4, tm_read_f8, tm_read_ptr,
-            tm_write_i1, tm_write_i2, tm_write_i4, tm_write_i8,
-            tm_write_f4, tm_write_f8, tm_write_ptr);
-
-        ClonedMap.push_back({Method, Cloned});
-    }
-
-    for (CallBase *Call : CallsToInstrument) {
-        Function *Callee = Call->getCalledFunction();
-        if (!Callee) continue;
-
-        for (auto &pair : ClonedMap) {
-            if (pair.first == Callee) {
-                Call->setCalledFunction(pair.second);
-                TM_DEBUG("Redirected %s -> %s",
-                        Callee->getName().str().c_str(),
-                        pair.second->getName().str().c_str());
+            if (pair.first == P.second) {
+                P.first->setCalledFunction(pair.second);
+                TM_DEBUG("redirectCallsToClones: %s -> %s in %s",
+                        P.second->getName().str().c_str(),
+                        pair.second->getName().str().c_str(),
+                        F.getName().str().c_str());
                 break;
             }
         }
     }
+}
+
+// Main entry point: clone all non-TX functions in the TX-reachable call graph.
+// Each clone gets instrumented loads/stores, and calls within clones are
+// redirected to their cloned callees.  This mirrors the paper's approach:
+// the transitive call tree from a transaction is fully instrumented, while
+// original functions stay clean for non-TM code.
+//
+// Returns the global clone map so callers can also redirect calls within
+// original TX functions to cloned callees.
+static SmallVector<std::pair<Function *, Function *>, 32> &
+cloneTxReachableGraph(Module &M,
+                      SmallPtrSetImpl<Function *> &TxReachableFuncs,
+                      const TMRuntimeHooks &H)
+{
+    SmallPtrSet<const GlobalVariable *, 16> TMG;
+    collectTMGlobalsCached(M, TMG);
+    auto &ClonedMap = getClonedMethodsMap();
+
+    SmallPtrSet<Function *, 32> ToClone = computeClonableFunctions(M, TxReachableFuncs);
+
+    for (Function *F : ToClone) {
+        if (F->isDeclaration()) continue;
+        if (F->getName().starts_with("tm_")) continue;
+        if (hasAnnotation(*F, "transaction")) continue;
+
+        bool alreadyCloned = false;
+        for (auto &pair : ClonedMap)
+            if (pair.first == F) { alreadyCloned = true; break; }
+        if (alreadyCloned) continue;
+
+        Function *Cloned = cloneMethodWithSuffix(F, "_tm_clone", &M, M.getContext(), TMG, H);
+        ClonedMap.push_back({F, Cloned});
+
+        redirectCallsToClones(*Cloned, TxReachableFuncs, ClonedMap);
+    }
+
+    return ClonedMap;
 }
 
 } // namespace tm_method_instrumentation

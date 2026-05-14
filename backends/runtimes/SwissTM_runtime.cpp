@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 
 #include "../SwissTM/SwissTM.hpp"
 
@@ -16,8 +17,8 @@ extern "C" {
 
 // Thread-local state
 static __thread int8_t tm_is_init_ready = 0;
-__thread int32_t tm_nested_call_counter = 0;
-__thread int32_t tm_longjmp_ret = 0;
+__thread int32_t tm_nested_call_counter;
+__thread int32_t tm_longjmp_ret;
 __thread sigjmp_buf tm_jmpbuf;
 
 #define TM_BUFFER_SIZE 1024
@@ -43,6 +44,12 @@ void tm_init_thread()
 
 void tm_exit_thread() { swisstm::exit_thread(); }
 
+static std::recursive_mutex g_serialize_mutex;
+
+void tm_serialize_lock() { g_serialize_mutex.lock(); }
+
+void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
+
 int tm_setjmp() { return 0; }
 
 void tm_set_jmpbuf(void *buf) { }
@@ -61,24 +68,16 @@ void tm_set_env(sigjmp_buf *env)
 
 void tm_begin()
 {
-	swisstm::begin();
-	fprintf(stderr, "tm_begin: active=%d\n", swisstm::active());
+	if (tm_nested_call_counter == 1)
+		swisstm::begin();
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
-	if (g_tm_begin_count.load() % 100000 == 0) {
-		fprintf(stderr, "tm_begin count: %lld\n", (long long)g_tm_begin_count.load());
-	}
 }
 
 void tm_end()
 {
-	fprintf(stderr, "tm_end called\n");
-	fflush(stderr);
-	bool result = swisstm::commit();
+	if (tm_nested_call_counter == 1)
+		swisstm::commit();
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
-	if (!result) {
-		fprintf(stderr, "tm_end: COMMIT FAILED\n");
-		fflush(stderr);
-	}
 }
 
 // Read wrappers with symbol_id

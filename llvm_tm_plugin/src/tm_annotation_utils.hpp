@@ -172,4 +172,82 @@ static bool hasTMGlobals(Function &F)
   return false;
 }
 
+// Check if a specific GlobalVariable has the "tm" annotation.
+// Uses a cached set for O(1) lookups.
+static bool isTMAnnotatedGlobal(const GlobalVariable *GV, Module &M)
+{
+  static SmallPtrSet<const GlobalVariable *, 16> *Cache = nullptr;
+  if (!Cache) {
+    Cache = new SmallPtrSet<const GlobalVariable *, 16>();
+    if (GlobalVariable *GVA = M.getNamedGlobal("llvm.global.annotations")) {
+      if (Constant *Init = GVA->getInitializer()) {
+        for (unsigned i = 0; i < Init->getNumOperands(); ++i) {
+          Constant *Annotation = cast<Constant>(Init->getOperand(i));
+          if (Annotation->getNumOperands() >= 2) {
+            Value *AnnotatedValue = Annotation->getOperand(0)->stripPointerCasts();
+            if (auto *AnnotatedGV = dyn_cast<GlobalVariable>(AnnotatedValue)) {
+              Value *StrOperand = Annotation->getOperand(1)->stripPointerCasts();
+              if (auto *StrGV = dyn_cast<GlobalVariable>(StrOperand)) {
+                if (auto *StrArray = dyn_cast<ConstantDataArray>(StrGV->getInitializer())) {
+                  if (StrArray->getAsCString() == "tm") {
+                    Cache->insert(AnnotatedGV);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return Cache->count(GV);
+}
+
+// Create symbol table globals in the module for the runtime.
+// Generates: tm_symbol_count, tm_symbol_names[], tm_symbol_addresses[], tm_symbol_sizes[].
+static void createTMSymbolTables(Module &M,
+    SmallVectorImpl<std::pair<GlobalVariable *, StringRef>> &Symbols)
+{
+  LLVMContext &Ctx = M.getContext();
+  auto *Int32Ty = Type::getInt32Ty(Ctx);
+  auto *Int64Ty = Type::getInt64Ty(Ctx);
+  auto *CharPtrTy = PointerType::getUnqual(Ctx);
+  auto *VoidPtrTy = PointerType::getUnqual(Ctx);
+  const DataLayout &DL = M.getDataLayout();
+
+  SmallVector<Constant *, 16> namePtrs, addrPtrs, sizesVals;
+
+  for (auto &Sym : Symbols) {
+    GlobalVariable *GV = Sym.first;
+    StringRef name = Sym.second;
+
+    auto *nameGV = new GlobalVariable(M,
+        ArrayType::get(Type::getInt8Ty(Ctx), name.size() + 1),
+        false, GlobalValue::PrivateLinkage,
+        ConstantDataArray::getString(Ctx, name, true),
+        Twine("tm_symbol_name_") + name);
+    nameGV->setDSOLocal(true);
+    nameGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
+
+    Constant *namePtr = ConstantExpr::getInBoundsGetElementPtr(
+        Type::getInt8Ty(Ctx), nameGV, ConstantInt::get(Int32Ty, 0));
+    namePtrs.push_back(ConstantExpr::getBitCast(namePtr, CharPtrTy));
+    addrPtrs.push_back(ConstantExpr::getBitCast(GV, VoidPtrTy));
+    sizesVals.push_back(ConstantInt::get(Int64Ty, DL.getTypeAllocSize(GV->getValueType())));
+  }
+
+  new GlobalVariable(M, Int32Ty, true, GlobalValue::ExternalLinkage,
+                     ConstantInt::get(Int32Ty, Symbols.size()), "tm_symbol_count");
+
+  auto mkArr = [&](Type *ElemTy, auto &Vals, StringRef Name) {
+    if (Vals.empty()) return;
+    auto *ArrTy = ArrayType::get(ElemTy, Vals.size());
+    new GlobalVariable(M, ArrTy, false, GlobalValue::ExternalLinkage,
+                       ConstantArray::get(ArrTy, Vals), Name);
+  };
+  mkArr(CharPtrTy, namePtrs,  "tm_symbol_names");
+  mkArr(VoidPtrTy, addrPtrs,  "tm_symbol_addresses");
+  mkArr(Int64Ty,   sizesVals, "tm_symbol_sizes");
+}
+
 #endif // TM_ANNOTATION_UTILS_HPP

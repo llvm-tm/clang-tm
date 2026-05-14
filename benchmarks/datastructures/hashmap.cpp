@@ -1,11 +1,21 @@
 /**
- * Hash Map Benchmark - Modern C++17 Version
+ * Hash Map Benchmark — Open-Addressing Hash Table under TM
+ * =========================================================
  *
- * Tests transactional memory with concurrent hash map operations.
- * Implements insert, erase, find, and iterate operations.
+ * SPEC (standard open-addressing hash table):
+ *   - Fixed-capacity array of buckets, TM-annotated.
+ *   - Operations: insert(key, val), erase(key), contains(key), get(key).
+ *   - Linear probing on collision.
+ *   - g_size tracks live entries; g_deleted_count tracks tombstones.
  *
- * Compiler: C++17
- * Uses: C++ Standard Library threads, std::atomic
+ * TM-specific:
+ *   - g_buckets, g_capacity, g_size, g_deleted_count are TM globals.
+ *   - txn_insert / txn_erase / txn_contains / txn_get are TX entry points.
+ *   - Helper functions (find, insert, erase) are cloned by the plugin.
+ *   - Iterative algorithms (no recursion) — flat call graph.
+ *
+ * Workloads (80% reads / 10% writes / 10% inserts by default):
+ *   - Same distribution as AVL tree for cross-comparison.
  */
 
 #include <iostream>

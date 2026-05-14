@@ -9,13 +9,14 @@
 #include <cstdio>
 #include <atomic>
 #include <cstring>
+#include <mutex>
 
 #include "../TL2/tl2_new.hpp"
 
 // Thread-local state
 static __thread int8_t tm_is_init_ready = 0;
-__thread int32_t tm_nested_call_counter = 0;
-__thread int32_t tm_longjmp_ret = 0;
+__thread int32_t tm_nested_call_counter;
+__thread int32_t tm_longjmp_ret;
 __thread sigjmp_buf tm_jmpbuf;
 
 #define TM_BUFFER_SIZE 1024
@@ -41,6 +42,12 @@ extern "C" void tm_exit_thread() {
     tl2::exit_thread();
 }
 
+static std::recursive_mutex g_serialize_mutex;
+
+extern "C" void tm_serialize_lock() { g_serialize_mutex.lock(); }
+
+extern "C" void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
+
 extern "C" int tm_setjmp() {
     return 0;
 }
@@ -61,12 +68,14 @@ extern "C" void tm_set_env(sigjmp_buf* env) {
 // Wrapper functions matching plugin interface (void return, symbol_id parameter)
 
 extern "C" void tm_begin() {
-    tl2::begin();
+    if (tm_nested_call_counter == 1)
+        tl2::begin();
     g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 extern "C" void tm_end() {
-    tl2::commit();
+    if (tm_nested_call_counter == 1)
+        tl2::commit();
     g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 }
 

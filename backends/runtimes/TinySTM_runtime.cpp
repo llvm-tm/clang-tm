@@ -9,14 +9,20 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <thread>
 
 #include "tinystm_globals.hpp"
 
 extern "C" {
 
-__thread int32_t tm_nested_call_counter = 0;
-__thread int32_t tm_longjmp_ret = 0;
+__thread int32_t tm_nested_call_counter;
+__thread int32_t tm_longjmp_ret;
 __thread unsigned char tm_jmpbuf[256];
+__thread int tm_init_thread_call_count = 0;
+
+// Mutex to protect tinystm begin/end operations 
+static std::mutex g_stm_mutex;
 
 #define TM_BUFFER_SIZE 1024
 static __thread uint8_t tm_buffer[TM_BUFFER_SIZE];
@@ -25,22 +31,29 @@ thread_local uint64_t tm_begin_count{0};
 thread_local uint64_t tm_end_count{0};
 thread_local uint64_t tm_tx_count{0};
 
+std::atomic<uint64_t> g_tm_max_read_set{0};
+std::atomic<uint64_t> g_tm_max_write_set{0};
+thread_local uint64_t g_tm_tx_read_set{0};
+thread_local uint64_t g_tm_tx_write_set{0};
 static std::atomic<uint64_t> g_tm_begin_count{0};
 static std::atomic<uint64_t> g_tm_end_count{0};
 static std::atomic<uint64_t> g_tm_tx_count{0};
 
-void tm_init()
-{
-	tinystm::init();
-}
+void tm_init() { tinystm::init(); }
 
-void tm_exit()
-{
+void tm_exit() {
 	tinystm::exit();
+	fprintf(stderr, "\n=== TinySTM max read-set = %llu, max write-set = %llu ===\n",
+		(unsigned long long)g_tm_max_read_set.load(),
+		(unsigned long long)g_tm_max_write_set.load());
 }
 
 void tm_init_thread()
 {
+	tm_init_thread_call_count++;
+	fprintf(stderr,
+	        "[DEBUG tm_init_thread] Call #%d in this thread\n",
+	        tm_init_thread_call_count);
 	tinystm::init_thread();
 }
 
@@ -49,21 +62,30 @@ void tm_exit_thread()
 	// no-op — Transaction object persists for the thread's lifetime
 }
 
-void tm_set_jmpbuf(void *buf)
+// Serialization lock for functions that couldn't be cloned.
+// Using recursive_mutex so the same thread can re-acquire after a longjmp retry.
+static std::recursive_mutex g_serialize_mutex;
+
+void tm_serialize_lock()
 {
-	tinystm::jmpbuf = (sigjmp_buf *)buf;
+	g_serialize_mutex.lock();
 }
 
-int tm_setjmp()
+void tm_serialize_unlock()
 {
-	return 0;
+	g_serialize_mutex.unlock();
 }
+
+void tm_set_jmpbuf(void *buf) { tinystm::jmpbuf = (sigjmp_buf *)buf; }
+
+int tm_setjmp() { return 0; }
 
 void tm_begin()
 {
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
-	if (tm_longjmp_ret == 0) {
+	if (tm_nested_call_counter == 1) {
+		std::lock_guard<std::mutex> lock(g_stm_mutex);
 		tinystm::begin();
 	}
 }
@@ -72,7 +94,26 @@ void tm_end()
 {
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 	tm_end_count++;
-	tinystm::commit();
+	if (tm_nested_call_counter == 1) {
+		// Record max read-set and write-set sizes for this TX
+#if defined(DESIGN_WBCTL)
+		auto *tx = tinystm::current_tx_wbctl;
+#elif defined(DESIGN_WBETL)
+		auto *tx = tinystm::current_tx_wbetl;
+#elif defined(DESIGN_WT)
+		auto *tx = tinystm::current_tx;
+#endif
+		if (tx) {
+			uint64_t rs = tx->read_set.size();
+			uint64_t ws = tx->write_set.size();
+			if (rs > g_tm_max_read_set.load()) g_tm_max_read_set.store(rs);
+			if (ws > g_tm_max_write_set.load()) g_tm_max_write_set.store(ws);
+			if (rs > 0) fprintf(stderr, "[RS=%llu WS=%llu]\n",
+				(unsigned long long)rs, (unsigned long long)ws);
+		}
+		std::lock_guard<std::mutex> lock(g_stm_mutex);
+		tinystm::commit();
+	}
 	tm_tx_count++;
 }
 
@@ -82,28 +123,27 @@ uint32_t tm_read_i4(uint32_t *addr) { return tinystm::tm_read_i4(addr); }
 uint64_t tm_read_i8(uint64_t *addr) { return tinystm::tm_read_i8(addr); }
 float tm_read_f4(float *addr) { return tinystm::tm_read_f4(addr); }
 double tm_read_f8(double *addr) { return tinystm::tm_read_f8(addr); }
-void *tm_read_ptr(void **addr) { return tinystm::tm_read_ptr(addr); }
-
-void *tm_read_z(uint8_t *addr, uint64_t len)
-{
-	assert(len < TM_BUFFER_SIZE);
-	for (uint64_t i = 0; i < len / 8; i++) {
-		tm_buffer[i] = tinystm::tm_read_i8(((uint64_t *)addr) + i);
-	}
-	uint64_t rem = len % 8;
-	for (uint64_t i = 0; i < rem; i++) {
-		tm_buffer[i] = tinystm::tm_read_i1(addr + (len - rem - 1) + i);
-	}
-	return tm_buffer;
+void *tm_read_ptr(void **addr) {
+#if defined(DESIGN_WT)
+	return tinystm::tm_read_ptr((volatile void **)addr);
+#else
+	return tinystm::tm_read_ptr(addr);
+#endif
 }
 
 void tm_write_i1(uint8_t *addr, uint8_t val) { tinystm::tm_write_i1(addr, val); }
-void tm_write_i2(uint16_t *addr, uint16_t val) { tinystm::tm_write_i2(addr, val); }
-void tm_write_i4(uint32_t *addr, uint32_t val) { tinystm::tm_write_i4(addr, val); }
-void tm_write_i8(uint64_t *addr, uint64_t val) { tinystm::tm_write_i8(addr, val); }
+void tm_write_i2(uint16_t *addr, int16_t val) { tinystm::tm_write_i2(addr, val); }
+void tm_write_i4(uint32_t *addr, int32_t val) { tinystm::tm_write_i4(addr, val); }
+void tm_write_i8(uint64_t *addr, int64_t val) { tinystm::tm_write_i8(addr, val); }
 void tm_write_f4(float *addr, float val) { tinystm::tm_write_f4(addr, val); }
 void tm_write_f8(double *addr, double val) { tinystm::tm_write_f8(addr, val); }
-void tm_write_ptr(void **addr, void *val) { tinystm::tm_write_ptr(addr, val); }
+void tm_write_ptr(void **addr, void *val) {
+#if defined(DESIGN_WT)
+	tinystm::tm_write_ptr((volatile void **)addr, val);
+#else
+	tinystm::tm_write_ptr(addr, val);
+#endif
+}
 
 void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len)
 {
@@ -125,5 +165,4 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {}
 void consume_ptr(volatile void *ptr) { (void)ptr; }
-
 }

@@ -4,14 +4,15 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 
 #include "NOrec_globals.hpp"
 
 extern "C" {
 // Thread-local state
 static __thread int8_t tm_is_init_ready = 0;
-__thread int32_t tm_nested_call_counter = 0;
-__thread int32_t tm_longjmp_ret = 0;
+__thread int32_t tm_nested_call_counter;
+__thread int32_t tm_longjmp_ret;
 // sigjmp_buf is typically ~200 bytes, use 256 to be safe
 __thread sigjmp_buf tm_jmpbuf;
 
@@ -54,6 +55,12 @@ void tm_init_thread()
 }
 
 void tm_exit_thread() { norec::exit_thread(); }
+
+static std::recursive_mutex g_serialize_mutex;
+
+void tm_serialize_lock() { g_serialize_mutex.lock(); }
+
+void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
 
 int tm_setjmp()
 {

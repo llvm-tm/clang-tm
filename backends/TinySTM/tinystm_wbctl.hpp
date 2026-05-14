@@ -102,7 +102,7 @@ begin()     //
 	auto *tx = current_tx_wbctl;
 
 	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(!tx->active, "nested not supported");
+	if (tx->active) return true;
 
 	tx->start_version = get_clock();
 	tx->end_version = tx->start_version;

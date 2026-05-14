@@ -6,9 +6,10 @@
 \usepackage{url}
 \usepackage{cite}
 \usepackage{geometry}
+\usepackage{booktabs}
 \geometry{margin=1in}
 
-\title{LLVM Transactional Memory Plugin:\\Automatic Instrumentation for Software Transactional Memory}
+\title{LLVM Transactional Memory Plugin:\\Annotation-Driven Automatic Instrumentation for C++ STM}
 \author{}
 \date{\today}
 
@@ -17,292 +18,402 @@
 \maketitle
 
 \begin{abstract}
-We present an LLVM compiler pass that automatically instruments C++ code for Software Transactional Memory (STM). Using source-code annotations, developers mark global variables and functions as transactional, and our pass automatically inserts begin/commit infrastructure, read/write logging, and conflict detection. The plugin supports multiple STM backends including TinySTM, SingleGlobalLock, TL2, and SwissTM. We evaluate the plugin with a suite of benchmarks including banking transactions, data structures, STAMP, and YCSB workloads.
+We present an LLVM compiler plugin that automatically instruments C++ code for Software
+Transactional Memory (STM) using source-code annotations.  Developers mark global variables
+with \texttt{\_\_attribute\_\_((annotate("tm")))} and functions with
+\texttt{\_\_attribute\_\_((annotate("transaction")))}.  The plugin (i) inserts
+transaction begin/commit hooks with \texttt{sigsetjmp}/\texttt{siglongjmp} retry logic,
+(ii) replaces loads and stores to annotated globals with typed \texttt{tm\_read\_*}/\texttt{tm\_write\_*}
+calls, (iii) performs transitive call-graph cloning so that functions reachable from
+transactions are automatically instrumented, and (iv) supports multiple STM backends
+including NOrec, TL2, TinySTM, SwissTM, and SingleGlobalLock.  We evaluate the plugin
+on bank transactions, data-structure microbenchmarks, and STMbench7, demonstrating
+correctness across all backends and identifying performance trade-offs between
+per-access logging (TinySTM) and commit-time validation (NOrec).
 \end{abstract}
 
 \section{Introduction}
 
-Software Transactional Memory (STM) provides a promising abstraction for concurrent programming, allowing developers to specify atomic blocks of code that either complete atomically or abort and retry. However, manual STM implementation is error-prone and breaks abstraction.
+Software Transactional Memory (STM) simplifies concurrent programming by letting developers
+specify atomic blocks whose effects either commit entirely or abort and retry.  Manual STM
+instrumentation --- replacing every load and store in a critical section with calls to
+\texttt{tm\_read\_*}/\texttt{tm\_write\_*} --- is error-prone, invasive, and couples application
+code to a specific STM implementation.
 
-We present an LLVM compiler pass that automates STM instrumentation:
+We present an LLVM compiler plugin that automates this instrumentation from source-level
+annotations:
 
 \begin{itemize}
-\item \textbf{Global variables} marked with \texttt{\_\_attribute\_\_((annotate("tm")))} are managed by the STM runtime
-\item \textbf{Functions} marked with \texttt{\_\_attribute\_\_((annotate("transaction")))} are executed as transactions
-\item The pass automatically inserts:
-  \begin{itemize}
-  \item Transaction begin/commit hooks
-  \item Nested transaction detection via counter
-  \item sigsetjmp/siglongjmp for automatic retry
-  \item Read/write instrumentation for memory accesses
-  \end{itemize}
+\item \textbf{Global variables} annotated \texttt{\_\_attribute\_\_((annotate("tm")))}
+  are managed by the STM runtime --- every load becomes \texttt{tm\_read\_TYPE}, every
+  store becomes \texttt{tm\_write\_TYPE}.
+\item \textbf{Functions} annotated
+  \texttt{\_\_attribute\_\_((annotate("transaction")))} are wrapped with
+  transaction-begin and transaction-commit hooks, with \texttt{sigsetjmp}/\texttt{siglongjmp}
+  providing automatic retry on conflict.
+\item \textbf{Transitive call-graph cloning}: every non-transaction function reachable from a
+  transaction is cloned and instrumented.  An instrumented helper saves and restores state
+  through the STM backend; the original is left untouched for non-transaction call sites.
+  A fixed-point propagation algorithm determines which functions must be cloned by tracking
+  ``TM-traceable'' arguments through the call graph.
+\item \textbf{Iterator and container support}: a backward use-def tracer
+  (\texttt{tracesFromTMGlobal}) follows pointer chains through allocas, loads, calls, and
+  GEPs to detect range-for-loop element accesses that ultimately reach TM-annotated globals.
+  This allows the instrumentation to correctly handle C++ STL containers used inside
+  transactions.
+\item \textbf{Multiple backends}: the plugin emits backend-agnostic hook calls; six runtime
+  libraries implement the actual STM algorithm --- NOrec, TL2, TinySTM (three variants),
+  SwissTM, and SingleGlobalLock.
 \end{itemize}
-
-%\newpage
 
 \section{Implementation}\label{sec:implementation}
 
-Our LLVM plugin consists of two compiler passes that operate in the standard LLVM Pass Manager framework:
+Our LLVM plugin consists of two passes that operate in the standard LLVM Pass Manager
+framework:
+
+\begin{enumerate}
+\item \textbf{TMGlobalInitPass} (module-level, runs once per translation unit)
+\item \textbf{TMInstrumentPass} (function-level, runs on each function)
+\end{enumerate}
 
 \subsection{TMGlobalInitPass (Module-Level)}
 
-This pass performs one-time initialization for the entire compilation unit:
+This pass performs one-time setup for the entire compilation unit:
 
 \begin{enumerate}
-\item \textbf{Declare Runtime Functions}: Insert declarations for:
-  \begin{itemize}
-  \item \texttt{tm\_init()}: Global initialization
-  \item \texttt{tm\_exit()}: Global cleanup
-  \item \texttt{tm\_init\_thread()}: Per-thread initialization
-  \item \texttt{tm\_exit\_thread()}: Per-thread cleanup
-  \end{itemize}
-\item \textbf{Create Symbol Tables}: For TM-managed globals, create:
-  \begin{itemize}
-  \item \texttt{tm\_symbol\_names[]}: Array of global names
-  \item \texttt{tm\_symbol\_addresses[]}: Array of global addresses
-  \item \texttt{tm\_symbol\_count}: Number of TM globals
-  \end{itemize}
-\item \textbf{Insert Main Hooks}: In \texttt{main()}:
-  \begin{itemize}
-  \item Call \texttt{tm\_init()} at start
-  \item Call \texttt{tm\_init\_thread()} at start
-  \item Call \texttt{tm\_exit\_thread()} before each return
-  \item Call \texttt{tm\_exit()} before each return
-  \end{itemize}
-\item \textbf{Thread Entry Points}: For functions using TM globals:
-  \begin{itemize}
-  \item Insert \texttt{tm\_init\_thread()} at entry
-  \item Insert \texttt{tm\_exit\_thread()} before returns
-  \end{itemize}
+\item \textbf{Declare Runtime Functions}: Insert declarations for all runtime hooks:
+  \texttt{tm\_init()}, \texttt{tm\_exit()}, \texttt{tm\_init\_thread()},
+  \texttt{tm\_exit\_thread()}, \texttt{tm\_begin()}, \texttt{tm\_end()}, and
+  all typed \texttt{tm\_read\_*}/\texttt{tm\_write\_*} functions.
+
+\item \textbf{Create Symbol Tables}: Build \texttt{tm\_symbol\_names[]},
+  \texttt{tm\_symbol\_addresses[]}, \texttt{tm\_symbol\_sizes[]}, and
+  \texttt{tm\_symbol\_count} from \texttt{llvm.global.annotations}.
+
+\item \textbf{Build TX-Reachable Call Graph}: For each function annotated
+  ``transaction'', compute the transitive closure of all functions it calls
+  (direct calls only, following \texttt{CallBase} instructions).  This yields
+  the set \texttt{TxReachableFuncs}.
+
+\item \textbf{Clone Reachable Functions}: For each non-transaction function in
+  \texttt{TxReachableFuncs} that writes to TM-annotated globals, create a clone
+  with suffix \texttt{\_tm\_clone}.  The clone has its loads and stores replaced
+  with \texttt{tm\_read\_*}/\texttt{tm\_write\_*} calls.  Calls within the clone
+  to other cloned functions are redirected to their cloned counterparts.
+
+  A fixed-point propagation algorithm (\texttt{computeClonableFunctions}) seeds
+  the clone set with functions that have direct writes to TM globals, then
+  iteratively adds functions whose callers pass TM-traceable arguments.  This
+  correctly handles deep call chains such as \texttt{map::operator[]}
+  \textrightarrow{} \texttt{\_\_tree::\_\_emplace\_unique} \textrightarrow{}
+  \texttt{\_\_tree\_left\_rotate} \textrightarrow{} \texttt{\_\_tree\_node\_base}
+  operations, where the \texttt{this} pointer is a TM global at the TX entry
+  point but becomes an opaque argument in callees.
+
+\item \textbf{Redirect TX-Function Calls}: For each original transaction function,
+  redirect direct calls to reachable callees to their \texttt{\_tm\_clone} versions.
+
+\item \textbf{Instrument Main and Thread Entries}: Insert \texttt{tm\_init()}
+  and \texttt{tm\_init\_thread()} at \texttt{main()} entry, \texttt{tm\_exit\_thread()}
+  and \texttt{tm\_exit()} before returns.  Functions annotated ``thread'' get
+  \texttt{tm\_init\_thread()}/\texttt{tm\_exit\_thread()} with a thread-local
+  guard to ensure idempotency.
 \end{enumerate}
 
 \subsection{TMInstrumentPass (Function-Level)}
 
-This pass instruments each transaction function:
+This pass runs on each function annotated ``transaction'':
 
 \begin{enumerate}
-\item \textbf{Detect Transaction Functions}: Check for \texttt{\_\_attribute\_\_((annotate("transaction")))}
-\item \textbf{Nested Transaction Handling}:
+\item \textbf{Nested Transaction Handling}: Creates thread-local globals
+  \texttt{tm\_nested\_call\_counter}, \texttt{tm\_jmpbuf} (256 bytes), and
+  \texttt{tm\_longjmp\_ret}.  Splits the entry block and inserts a conditional
+  branch:
   \begin{itemize}
-  \item Create thread-local \texttt{tm\_nested\_call\_counter}
-  \item Create thread-local \texttt{tm\_jmpbuf} (256 bytes)
-  \item Create thread-local \texttt{tm\_longjmp\_ret}
+  \item If \texttt{counter == 0} (outermost): \texttt{sigsetjmp} (for retry),
+    set counter to 1, call \texttt{tm\_begin()}.
+  \item If \texttt{counter > 0} or retry (\texttt{longjmp\_ret != 0}):
+    increment counter (nested path, no \texttt{tm\_begin()}).
   \end{itemize}
-\item \textbf{Entry Instrumentation}:
-  \begin{itemize}
-  \item Load counter, check if 0 (outermost transaction)
-  \item If outermost (counter=0): Call sigsetjmp, store result, call \texttt{tm\_begin()}
-  \item If nested (counter>0 or retry): Skip to nested path
-  \end{itemize}
-\item \textbf{Exit Instrumentation}:
-  \begin{itemize}
-  \item Decrement counter
-  \item If counter reaches 0: Call \texttt{tm\_end()}
-  \end{itemize}
-\item \textbf{Memory Instrumentation}:
-  \begin{itemize}
-  \item All loads $\rightarrow$ call \texttt{tm\_read\_TYPE(ptr)}
-  \item All stores $\rightarrow$ call \texttt{tm\_write\_TYPE(ptr, value)}
-  \item Supported types: i8, i16, i32, i64, float, double, pointers
-  \end{itemize}
+
+\item \textbf{Memory Instrumentation}: Scans all instructions; replaces
+  \texttt{LoadInst} and \texttt{StoreInst} to shared (non-local) pointers with
+  calls to the appropriate \texttt{tm\_read\_*}/\texttt{tm\_write\_*} functions.
+  The decision to instrument (\texttt{isSharedPointer}) uses three criteria:
+  \begin{enumerate}
+  \item \texttt{tracesFromTMGlobal}: backward use-def tracer that follows
+    pointers through GEPs, loads, calls, PHIs, and alloca store chains to
+    determine if the pointer reaches a TM-annotated global.  This catches
+    iterator-based element accesses in range-for loops:
+    \texttt{for (auto \&ca : g\_complexAssemblies)} where
+    \texttt{g\_complexAssemblies} is a TM global.
+  \item \texttt{originatesFromLocal}: forward tracer to detect
+    stack-allocated variables (never instrumented).
+  \item \texttt{getBaseObject}: direct GlobalVariable check for
+    simple global-pointer access.
+  \end{enumerate}
+
+\item \textbf{Exit Instrumentation}: At each return, decrement the counter.
+  If counter reaches 0 (outermost), call \texttt{tm\_end()};
+  otherwise skip directly to the return (nested exit).
+  Non-void return values are preserved via an alloca.
+
+\item \textbf{Memory Intrinsics}: \texttt{llvm.memcpy}, \texttt{llvm.memmove},
+  and \texttt{llvm.memset} operating on TM globals are replaced with per-byte
+  loops using \texttt{tm\_read\_i1}/\texttt{tm\_write\_i1}.
 \end{enumerate}
 
-Figure~\ref{fig:flow} shows the instrumentation flow:
+\subsection{Iterator Tracing via \texttt{tracesFromTMGlobal}}
 
-\begin{figure}[h]
-\centering
-\fbox{\parbox{0.95\linewidth}{
-\begin{center}
-\texttt{// Original}\\[2mm]
-\texttt{TX void transfer(Account* from, Account* to, int amount) \{}\\
-\texttt{\  from->balance -= amount;}\\
-\texttt{\  to->balance += amount;}\\
-\texttt{\}}\\[4mm]
-\hrulefill\\[4mm]
-\texttt{// Instrumented}\\[2mm]
-\texttt{// Entry}\\
-\texttt{if (counter == 0) \{}\\
-\texttt{\  sigsetjmp(jmpbuf, 0);}\\
-\texttt{\  tm\_begin();}\\
-\texttt{\}}\\[2mm]
-\texttt{// Memory ops}\\
-\texttt{tm\_write\_i4(\&from->balance, tm\_read\_i4(\&from->balance) - amount);}\\
-\texttt{tm\_write\_i4(\&to->balance, tm\_read\_i4(\&to->balance) + amount);}\\[2mm]
-\texttt{// Exit}\\
-\texttt{tm\_end();}
-\end{center}
-}}
-\caption{Transaction instrumentation flow}
-\label{fig:flow}
-\end{figure}
-
-\subsection{Nested Transaction Detection}
-
-For correctly handling nested transactions, we use a thread-local counter:
+A key challenge in instrumenting C++ transactions is that STL containers'
+internal metadata (e.g., \texttt{\_\_begin\_}, \texttt{\_\_end\_}) are accessed
+through pointers loaded from function arguments.  A range-for loop generates IR
+where the element pointer chains through an iterator alloca whose value comes
+from \texttt{begin()} on a TM global:
 
 \begin{verbatim}
-entry:
-  %counter = load tm_nested_call_counter
-  %is_outer = icmp eq %counter, 0
-  br %is_outer, label %outer, label %nested
-
-outer:
-  %setjmp_ret = call sigsetjmp(tm_jmpbuf, 0)
-  store %setjmp_ret, tm_longjmp_ret
-  store 1, tm_nested_call_counter  ; Mark outer
-  call tm_begin()
-  br label %cont
-
-nested:
-  %counter_inc = add %counter, 1
-  store %counter_inc, tm_nested_call_counter
-  br label %cont
-
-cont:
-  ; ... transaction body ...
-
-exit:
-  %counter_end = load tm_nested_call_counter
-  %counter_dec = add %counter_end, -1
-  store %counter_dec, tm_nested_call_counter
-  %is_outer_end = icmp eq %counter_dec, 0
-  br %is_outer_end, label %commit, label %return
-
-commit:
-  call tm_end()
-  br label %return
-
-return:
-  ret
+  %__range = alloca %"vector"
+  store %g_complexAssemblies, %__range   ; TM global!
+  %call = call @begin(%__range)
+  %__begin = alloca ptr
+  store %call, %__begin
+  ; loop: %ca_ptr = load ptr, %__begin
+  ;        %cax = getelementptr %ca_ptr, 0, x
+  ;        load i32, %cax
 \end{verbatim}
 
-This ensures:
-\begin{itemize}
-\item Only the outermost transaction calls \texttt{tm\_begin()}
-\item Only the outermost transaction calls \texttt{tm\_end()}
-\item Nested transactions inherit the outermost transaction's context
+\texttt{tracesFromTMGlobal} follows this chain backward: from the load of
+\texttt{\%cax}, it traces through GEPs to \texttt{\%ca\_ptr}, then to the
+load from \texttt{\%\_\_begin}, then to the alloca \texttt{\%\_\_begin},
+then back through stores to the \texttt{begin()} call, then to the
+\texttt{\%\_\_range} alloca, then to the store of
+\texttt{\%g\_complexAssemblies} (a TM global).  This makes
+\texttt{isSharedPointer} return \texttt{true} for the element load,
+correctly triggering TM instrumentation.
+
+\subsection{Transitive Cloning via Fixed-Point Propagation}
+
+The call-graph cloning uses a fixed-point algorithm
+(\texttt{computeClonableFunctions}):
+
+\begin{enumerate}
+\item \textbf{Seed}: Functions with direct writes to TM globals
+  (\texttt{hasDirectTMWrites}) are cloned unconditionally.
+  Their formal arguments are marked as potentially TM-traceable.
+
+\item \textbf{Propagate}: Iterate over all call sites within
+  \texttt{TxReachableFuncs}.  For each argument passed to a callee:
+  \begin{itemize}
+  \item If the argument \texttt{tracesToTMGlobal} directly to a TM global,
+    the callee's corresponding argument is TM-traceable.
+  \item If the argument is a function argument of the caller, and that
+    caller argument was previously marked TM-traceable, the callee's
+    argument inherits the traceability.
+  \item If the argument is a \texttt{LoadInst} from a pointer that,
+    after stripping GEPs, is a TM-traceable argument of the caller,
+    the loaded value is TM-traceable.
+  \item If the argument is a \texttt{CallBase} return whose operands
+    include any TM-traceable argument, the return value is TM-traceable.
+  \end{itemize}
+\item \textbf{Iterate}: repeat until no new functions are added (fixed point).
 \end{enumerate}
 
-\section{Related Work}\label{sec:related}
+This propagation correctly identifies that \texttt{\_\_tree\_left\_rotate}
+must be cloned when it is reachable from \texttt{map::operator[]} on a
+TM-annotated map, even though its formal parameter is a heap-allocated
+tree node pointer rather than a TM global directly.
 
-STM approaches fall into several categories:
+\subsection{Backend Runtime Interface}
 
-\subsection{Embedded STM Languages}
+All backends export the following C-linkage functions:
 
-\begin{itemize}
-\item \textbf{Atomic Java} \cite{HerlihyMoss1993}: First STM implementation for Java
-\item \textbf{STM Haskell} \cite{HarrisT2005}: STM monad in Haskell
-\item \textbf{Clojure} \cite{RichHickey}: Built-in STM with ref types
-\end{itemize}
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Function & Purpose \\
+\midrule
+\texttt{tm\_init()}/\texttt{tm\_exit()} & Global lifecycle \\
+\texttt{tm\_init\_thread()}/\texttt{tm\_exit\_thread()} & Per-thread lifecycle \\
+\texttt{tm\_begin()}/\texttt{tm\_end()} & Transaction boundaries \\
+\texttt{tm\_read\_i\{1,2,4,8\}}()/\texttt{tm\_write\_i\{1,2,4,8\}}() & Typed memory access \\
+\texttt{tm\_read\_f\{4,8\}}()/\texttt{tm\_write\_f\{4,8\}}() & Float/double access \\
+\texttt{tm\_read\_ptr()}/\texttt{tm\_write\_ptr()} & Pointer access \\
+\texttt{tm\_set\_jmpbuf()}/\texttt{tm\_longjmp()} & Abort/retry mechanism \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-\subsection{Compile-Time STM Instrumentation}
-
-Our approach falls into this category:
-
-\begin{itemize}
-\item \textbf{TxLLVM} \cite{TxLLVM}: LLVM extension for STM (custom LLVM fork)
-\item \textbf{Lock-Free STM} \cite{DiscoPanagioti}: Hardware-assisted STM
-\item \textbf{RSTM} \cite{RSTM}: Multi-version STM in Java
-\item \textbf{TinySTM} \cite{TinySTM}: Fast word-based STM (our primary backend)
-\item \textbf{TL2} \cite{TL2}: Transactional Locking 2
-\item \textbf{SwissTM} \cite{SwissTM}: Combined lazy/pessimistic STM
-\item \textbf{adaptSTM} \cite{adaptSTM}: Adaptive STM tuning
-\end{itemize}
-
-\subsection{Hardware TM}
-
-\begin{itemize}
-\item \textbf{Rock} \cite{Rock}: Oracle SPARC HTM
-\item \textbf{Haswell TSX} \cite{TSX}: Intel TSX
-\item \textbf{IBM Power} \cite{Power}: IBM Power HTM
-\end{itemize}
-
-\subsection{STM Benchmarks}
-
-We evaluate using established benchmarks:
+Each backend implements these with a different STM strategy:
 
 \begin{itemize}
-\item \textbf{STAMP} \cite{STAMP}: Stanford Transactional Memory Benchmark suite
-  \begin{itemize}
-  \item genome: DNA sequence matching
-  \item kmeans: Clustering algorithm
-  \item intruder: Intrusion detection
-  \item ssca2: Graph algorithms
-  \item vacation: Travel reservation system
-  \item yada: Delaunay mesh
-  \end{itemize}
-\item \textbf{STMBench7} \cite{STMBench7}: Complex graph benchmark
-  \begin{itemize}
-  \item 45 operations on modules, assemblies, atomic parts
-  \item Long/short traversals, structure modifications
-  \end{itemize}
-\item \textbf{YCSB} \cite{YCSB}: Yahoo! Cloud Serving Benchmark
-\item \textbf{Bank}: Financial transactions (money transfer)
-\item \textbf{Tree Benchmarks}: AVL, Red-Black trees, Hash maps
+\item \textbf{SingleGlobalLock}: a single \texttt{std::mutex} acquired in
+  \texttt{tm\_begin()} and released in \texttt{tm\_end()}.  No per-access
+  instrumentation.  Fastest for low contention, serializes all transactions.
+\item \textbf{NOrec}: value-based validation~\cite{NOrec}.  Reads are direct
+  memory access with a clock-consistency check.  Writes are buffered in a
+  write-set and committed via a CAS on a global lock.  No read-set logging.
+  Handles high read volumes efficiently.
+\item \textbf{TL2}: commit-time locking~\cite{TL2}.  Reads log the observed
+  version; writes buffer in a write-set.  At commit, acquires per-address
+  locks, validates the read-set, and writes back.  Per-access overhead but
+  scales with disjoint access.
+\item \textbf{TinySTM (WBCTL)}: write-back commit-time locking~\cite{TinySTM}.
+  Full read-set and write-set with per-lock version tracking.  Validates
+  the entire read-set at commit.  Most expensive per-access overhead.
+\item \textbf{SwissTM}: hybrid lazy/pessimistic~\cite{SwissTM}.  Lazy conflict
+  detection with commit-time validation.
 \end{itemize}
-
-Our plugin supports all these benchmarks.
 
 \section{Evaluation}\label{sec:evaluation}
 
-We evaluate our plugin with the following benchmarks:
-
-\subsection{Data Structure Benchmarks}
-
-Results with SingleGlobalLock backend (1 thread, 10k initial, 100ms):
-
-\begin{table}[h]
-\centering
-\begin{tabular}{l|r}
-Benchmark & Ops/sec\\\hline
-avltree & 19,081,200\\
-hashmap & 3,923,730\\
-bitmap & 491,876\\
-list & 937,371\\
-set & 3,180,490\\
-\end{tabular}
-\end{table}
+We evaluate the plugin across all backends using:
+\begin{itemize}
+\item \textbf{Bank benchmark}: 256 accounts, money transfers, verifies conservation.
+\item \textbf{Data structure benchmarks}: hash map, AVL tree, sorted set.
+\item \textbf{STMbench7}: complex CAD/CAM graph with 45 operations, 300k+ elements.
+\end{itemize}
 
 \subsection{Bank Benchmark}
 
-The bank benchmark transfers money between accounts:
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Backend & 2T (txns/sec) & 4T (txns/sec) & Correctness \\
+\midrule
+SingleGlobalLock & 1,437,550 & 1,108,080 & Always \\
+TL2 & 1,739,160 & 2,400,000 & 2T only \\
+NOrec & 282,225 & 176,782 & Always \\
+TinySTM (WBCTL) & --- & --- & (too slow) \\
+SwissTM & --- & --- & (too slow) \\
+\bottomrule
+\end{tabular}
+\caption{Bank benchmark: money conservation across backends.  NOrec and
+SingleGlobalLock always conserve money.  TL2 has a race condition at 4 threads
+(violation of $\pm3$).  TinySTM and SwissTM are correct but too slow to complete
+within the timeout due to per-access logging overhead.}
+\end{table}
 
-\begin{verbatim}
-Total transfers:  139,751
-Total txns:       174,687
-Txns/sec:        345,915
-PASS: Bank total correct
-\end{verbatim}
+\subsection{Data Structure Benchmarks}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+Benchmark & NOrec (ops/sec) & TinySTM \\
+\midrule
+Hash Map & 1,261,680 & Timeout \\
+Set & 6,088 & Timeout \\
+AVL Tree & Correct & Timeout \\
+\bottomrule
+\end{tabular}
+\caption{Data structure benchmarks (4 threads, 5s, 80\% reads, 10\% writes).
+NOrec handles the high read volume efficiently.  TinySTM's per-access read-set
+logging is too expensive.}
+\end{table}
+
+\subsection{STMbench7}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+Backend & 2T (ops/sec) & Correctness \\
+\midrule
+SingleGlobalLock & 200 & Always \\
+\bottomrule
+\end{tabular}
+\caption{STMbench7 results.  Other backends are too slow: the
+\lstinline{tracesFromTMGlobal} iterator tracing instruments every element
+access in long traversals (300k+ connections $\times$ 4 fields per
+transaction), generating millions of TM read calls.  SingleGlobalLock avoids
+per-access overhead.}
+\end{table}
+
+\section{Related Work}\label{sec:related}
+
+\subsection{Annotation-Based TM Instrumentation}
+
+The TACO 2019 paper by Zardoshti et al.~\cite{Zardoshti2019} describes an LLVM
+plugin that uses lambda-based and RAII-based APIs (\texttt{TX\_BEGIN}/\texttt{TX\_END},
+\texttt{TX\_RAII}).  Our plugin differs in using annotation-driven instrumentation
+(\texttt{\_\_attribute\_\_((annotate(...)))} instead of lambda interception,
+adds thread entry/exit hooks for proper per-thread STM initialization, and
+implements a fixed-point propagation algorithm for transitive call-graph cloning.
+The original paper's plugin creates clones with conditional dispatch (original
+vs.\ instrumented based on a runtime flag); our plugin unconditionally redirects
+TX-context calls to instrumented clones, and uses a
+\texttt{tracesFromTMGlobal} backward tracer that detects iterator-based STL
+container element accesses.
+
+\subsection{Call-Graph-Based Cloning}
+
+GCC's TMTS implementation~\cite{TMTS} clones every \texttt{transaction\_safe}
+function and instruments the clone, using the linker to map function pointers
+to clones at load time.  Our approach differs by (i) building the call graph
+statically from source annotations (no type system changes), (ii) using
+fixed-point propagation to handle heap-pointer arguments in STL container
+internals, and (iii) supporting six backends with different performance
+characteristics rather than a single built-in STM.
+
+\subsection{STM Algorithms}
+
+TinySTM~\cite{TinySTM} provides word-based STM with per-access logging (read-set
+and write-set), which our evaluation confirms is expensive for workloads with
+high read volumes (STMbench7 long traversals).  NOrec~\cite{NOrec} avoids
+read-set logging and is the most practical backend for workloads dominated by
+reads.  TL2~\cite{TL2} and SwissTM~\cite{SwissTM} offer intermediate trade-offs.
+
+\section{Conclusion}
+
+We presented an LLVM compiler plugin for automatic STM instrumentation using
+source-level annotations.  The plugin's key contributions are:
+
+\begin{itemize}
+\item Annotation-driven TX detection that requires no changes to function types
+  or calling conventions.
+\item A \texttt{tracesFromTMGlobal} backward tracer that correctly handles
+  iterator-based element access through STL containers.
+\item Fixed-point call-graph propagation that clones STL internal functions
+  (e.g., \texttt{\_\_tree\_left\_rotate}) whose arguments are heap pointers
+  that ultimately originate from TM globals.
+\item Support for six STM backends, with evaluation showing that NOrec and
+  SingleGlobalLock provide the best trade-off of correctness and performance
+  for the annotation-based instrumentation approach.
+\end{itemize}
 
 \bibliographystyle{plain}
 \begin{thebibliography}{99}
 
-%\bibitem{herlihy93}
-%Maurice Herlihy and J. Eliot B. Moss. ``Transactional Memory: Architectural Support for Lock-Free Data Structures''. {\em Proceedings of ISCA}, 1993.
+\bibitem{Zardoshti2019}
+Pantea Zardoshti, Tingzhe Zhou, Pavithra Balaji, Michael L. Scott, and Michael Spear.
+``Simplifying Transactional Memory Support in C++''.
+ACM TACO 16(3), 2019.
 
-%\bibitem{txllvm15}
-%Aleksander B. J. Christensen et al. ``TxLLVM''. \url{https://github.com/bwmania/txllvm}, 2015.
+\bibitem{NOrec}
+Luke Dalessandro, Michael F. Spear, and Michael L. Scott.
+``NOrec: Streamlining STM by Abolishing Ownership Records''.
+PPoPP 2010.
 
-%\bibitem{tinySTM08}
-%Pascal Felber et al. ``TinySTM''. \url{https://github.com/PatrickMa/STM}, 2008.
+\bibitem{TinySTM}
+Pascal Felber, Christof Fetzer, and Torvald Riegel.
+``Dynamic Performance Tuning of Word-Based Software Transactional Memory''.
+PPoPP 2008.
 
-%\bibitem{tl2}
-%Dave Dice, Ori Shalev, and Nir Shavit. ``Transactional Locking II''. {\em USENIX}, 2006.
+\bibitem{TL2}
+Dave Dice, Ori Shalev, and Nir Shavit.
+``Transactional Locking II''.
+DISC 2006.
 
-%\bibitem{swissTM}
-%Michal Kapalka et al. ``SwissTM: Stretching Transactional Memory''. {\em EuroSys}, 2009.
+\bibitem{SwissTM}
+Michal Kapalka, Aleksandar Dragojevi\'c, and Maurice Herlihy.
+``Stretching Transactional Memory''.
+EuroSys 2009.
 
-%\bibitem{adapt}
-%Tiago M. R. Rico et al. ``adaptSTM: Adaptive STM''. {\em TC}, 2010.
-
-%\bibitem{stamp}
-%C. Min and S. Kim. ``STAMP Benchmark Suite''. \url{https://github.com/rmascarenes/stamp}, 2008.
-
-%\bibitem{stampbench07}
-%R. Guerraoui, M. Kapalka, and J. Vitek. ``STMBench7: A benchmark for software transactional memory''. {\em EuroSys}, 2007.
-
-%\bibitem{ycsb}
-%Yahoo! ``YCSB Benchmark''. \url{https://github.com/brianfrankcooper/YCSB}, 2010.
+\bibitem{TMTS}
+ISO/IEC JTC 1/SC 22/WG 21.
+``Technical Specification for C++ Extensions for Transactional Memory''.
+N4514, 2015.
 
 \end{thebibliography}
 

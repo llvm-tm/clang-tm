@@ -110,13 +110,15 @@ begin()     //
 	       tm_nested_call_counter);
 
 	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(!tx->active, "nested not supported");
+	if (tx->active) return true;
 
 	tx->start_version = get_clock();
 	tx->end_version = tx->start_version;
 	tx->active = true;
 	tx->read_only = true;
 	tx->abort_count = 0;
+	tx->read_set.clear();
+	tx->write_set.clear();
 
 	return true;
 }
@@ -204,7 +206,7 @@ commit()    //
   * Stubs for Transaction read/write instrumentation.
   * ---------------------------------------------------- */
 
-inline any_type_t                                             //
+__attribute__((noinline)) any_type_t                           //
 read_word_etl(                                                //
     Transaction<ReadLogEntry_wbetl, WriteLogEntry_wbetl> *tx, //
     void *addr,                                               //
@@ -266,7 +268,7 @@ read_word_etl(                                                //
 	}
 }
 
-static void                                                   //
+__attribute__((noinline)) void                                 //
 write_word_etl(                                               //
     Transaction<ReadLogEntry_wbetl, WriteLogEntry_wbetl> *tx, //
     void *addr,                                               //
