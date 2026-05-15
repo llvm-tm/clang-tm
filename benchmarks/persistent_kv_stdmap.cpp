@@ -1,47 +1,21 @@
 /**
- * Persistent KV Store — std::map with explicit serialization
+ * Persistent KV Store — std::map with PSTATIC_REBUILD
  *
- * The challenge with std::map persistence is pointer relocation:
- * tree nodes contain absolute addresses of other nodes, which become
- * stale when the memory region moves between runs.
+ * Uses TM-annotated arrays as backing store and automatically
+ * rebuilds the std::map from them after each restart.
  *
- * Three approaches to heap-data persistence:
- *
- *   (a) Serialization  ← this file
- *       Walk the data structure, save key-value pairs to a TM-annotated
- *       array, restore them on next init.  Works for any container but
- *       needs explicit save/load logic.
- *
- *   (b) Custom allocator with fixed-address mmap
- *       std::map allocates from an mmap region mapped at a deterministic
- *       virtual address.  Nodes survive restart because the mapping is
- *       at the same address.  Fragile (ASLR, address conflicts).
- *
- *   (c) malloc/free instrumentation
- *       Replace malloc/free with persistent mmap allocations.
- *       Transparent to application code but requires LD_PRELOAD or
- *       deep compiler support, and still faces the pointer-relocation
- *       problem unless the mmap base address is fixed.
- *
- * We implement (a):
- *   - A TM-annotated array stores (key, value) pairs persistently
- *   - A TM integer tracks the entry count
- *   - On init, the std::map is populated from the array
- *   - On each mutation, the array is updated atomically
- *   - On restart, the array is restored from the persist file,
- *     then the std::map is rebuilt from it
- *
- * Build: see benchmarks/persistent_kv.cpp for the pipeline.
- * Run:   rm -f tm_persist.bin && ./bin/persistent_kv_stdmap
- *        ./bin/persistent_kv_stdmap   # persists!
+ * The PSTATIC_REBUILD annotation tells the plugin to call this
+ * function after tm_init() restores the TM-annotated arrays.
+ * The function is also TX, so it runs inside a transaction
+ * (allocations go to the persistent heap via tm_malloc).
  */
 
 #define TM __attribute__((annotate("tm")))
 #define TX __attribute__((annotate("transaction"), noinline))
+#define PSTATIC_REBUILD __attribute__((annotate("pstatic_rebuild"), noinline))
 #define MAIN __attribute__((annotate("main"), noinline))
 
 #include <cstdio>
-#include <cstdint>
 #include <map>
 
 constexpr int MAX_ENTRIES = 1024;
@@ -51,19 +25,19 @@ TM int      g_pkeys[MAX_ENTRIES];
 TM int      g_pvals[MAX_ENTRIES];
 TM int      g_pcount = 0;
 
-// In-memory std::map (rebuilt from persistent store on each init)
+// In-memory std::map (NOT TM-annotated — rebuilt on each restart)
 static std::map<int, int> g_map;
 
-static void rebuild_map() {
+// Called automatically after tm_init() restores persistent data.
+// TX ensures it runs inside a transaction (allocations → persistent heap).
+TX PSTATIC_REBUILD void rebuild_map() {
     g_map.clear();
     for (int i = 0; i < g_pcount; i++)
         g_map[g_pkeys[i]] = g_pvals[i];
 }
 
 TX void insert(int k, int v) {
-    // Update std::map
     g_map[k] = v;
-    // Persist to TM-annotated array
     for (int i = 0; i < g_pcount; i++) {
         if (g_pkeys[i] == k) {
             g_pvals[i] = v;
@@ -82,7 +56,7 @@ TX int lookup(int k) {
 }
 
 TX void show() {
-    printf("  map size: %zu, persistent entries: %d\n", g_map.size(), g_pcount);
+    printf("  map: %zu entries, persistent: %d entries\n", g_map.size(), g_pcount);
     int n = 0;
     for (auto& [k, v] : g_map) {
         printf("    %d → %d\n", k, v);
@@ -91,10 +65,7 @@ TX void show() {
 }
 
 MAIN int main() {
-    printf("=== Persistent std::map KV Store (serialized) ===\n");
-
-    // Rebuild std::map from persistent backing store
-    rebuild_map();
+    printf("=== Persistent std::map with PSTATIC_REBUILD ===\n");
 
     int prev = lookup(42);
     printf("Previous value for key 42: %d\n", prev);
@@ -104,5 +75,10 @@ MAIN int main() {
 
     printf("After insertion:\n");
     show();
+
+    // Clear the map before tm_exit() unmaps the persistent heap.
+    // Otherwise the std::map destructor (which runs after main)
+    // would try to free nodes on the unmapped mmap → segfault.
+    g_map.clear();
     return 0;
 }

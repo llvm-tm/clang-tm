@@ -191,6 +191,14 @@ void tm_init_thread() {
 
 void tm_exit() {
     if (g_mmap_base) {
+        // Save final TM symbol state to the mmap file before unmapping.
+        // This captures changes made both inside TX functions (via tm_write_*)
+        // and outside them (direct memory writes to TM globals).
+        for (uint32_t i = 0; i < g_sym_count; i++) {
+            memcpy(g_mmap_base + g_sym_ranges[i].file_off,
+                   (void*)g_sym_ranges[i].addr_start,
+                   g_sym_ranges[i].addr_end - g_sym_ranges[i].addr_start);
+        }
         msync(g_mmap_base, g_mmap_size, MS_SYNC);
         munmap(g_mmap_base, g_mmap_size);
         g_mmap_base = nullptr;

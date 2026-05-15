@@ -131,6 +131,18 @@ public:
       Builder.CreateCall(H.init, {});
       insertThreadInitWithGuard(Builder, H.init_thread, ThreadReadyGV);
 
+      // ---- Call pstatic_rebuild functions after tm_init ----
+      // These user-defined functions reconstruct pointer-based data structures
+      // (e.g. std::map) from TM-annotated arrays after the persistent state
+      // has been restored by tm_init().
+      for (auto &F : M) {
+        if (F.isDeclaration()) continue;
+        if (hasAnnotation(F, "pstatic_rebuild")) {
+          Builder.CreateCall(&F, {});
+          TM_DEBUG("Calling pstatic_rebuild: %s", F.getName().str().c_str());
+        }
+      }
+
       auto MainReturns = collectReturns(*MainFn);
       for (auto *Ret : MainReturns) {
         IRBuilder<> RetBuilder(Ret);
