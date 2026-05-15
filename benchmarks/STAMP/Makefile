@@ -1,7 +1,7 @@
 # STAMP Benchmark Makefile
 
 CXX := clang++
-CXXFLAGS := -std=c++17 -O1 -pthread
+CXXFLAGS := -std=c++20 -O1 -pthread
 LLVM_PLUGIN_DIR := ../../llvm_tm_plugin
 PLUGIN := $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
 PLUGIN_PASS := -load-pass-plugin=$(PLUGIN) -passes="tm-instrument"
@@ -29,7 +29,7 @@ $(BIN_DIR)/stamp_uninstrumented: STAMP.cpp $(HEADERS) | mkdirs
 
 # LLVM IR with -fno-inline to prevent inlining before plugin runs
 $(OUT_DIR)/stamp.bc: STAMP.cpp $(HEADERS) | mkdirs
-	$(CXX) -std=c++17 -O3 -fno-inline -emit-llvm -c STAMP.cpp -o $@ \
+	$(CXX) -std=c++20 -O3 -fno-inline -emit-llvm -c STAMP.cpp -o $@ \
 	  -fno-stack-protector -pthread
 
 # Apply plugin instrumentation (method cloning + TX instrumentation)

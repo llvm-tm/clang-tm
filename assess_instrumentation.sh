@@ -22,7 +22,7 @@ cd "$(dirname "$0")"
 
 PLUGIN="llvm_tm_plugin/bin/libTMInstrument.so"
 CXX="clang++"
-CXXFLAGS="-std=c++17 -O3 -fno-inline -fno-stack-protector"
+CXXFLAGS="-std=c++20 -O3 -fno-inline -fno-stack-protector"
 
 # ------------------------------------------------------------------
 # Configuration: benchmark name → source file (relative to repo root)

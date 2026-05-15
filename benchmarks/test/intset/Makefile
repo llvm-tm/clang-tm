@@ -1,7 +1,7 @@
 # IntSet Benchmark Makefile - Modern C++17 Version
 
 CXX := clang++
-CXXFLAGS := -std=c++17 -O2 -pthread
+CXXFLAGS := -std=c++20 -O2 -pthread
 
 SRC := intset.cpp
 BIN := bin/intset

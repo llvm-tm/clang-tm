@@ -19,7 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <thread>
-#include <vector>
+#include <unordered_map>
 
 #define TINYSTM_ASSERT(cond, msg)                                                        \
 	do {                                                                                 \
@@ -87,8 +87,6 @@ inline bool same_location(const ByteOffset &a, const ByteOffset &b)
 }
 
 struct ReadLogEntry {
-	word_t *lock_addr;
-	ByteOffset location;
 	word_t observed_version;
 	word_t observed_incarnation;
 	word_t observed_word;
@@ -96,7 +94,6 @@ struct ReadLogEntry {
 };
 
 struct WriteLogEntry {
-	ByteOffset location;
 	word_t old_word;
 	word_t new_word;
 	ValueType type;
@@ -114,8 +111,8 @@ public:
 	bool read_only = true;
 	int nesting = 1;
 	int abort_count = 0;
-	std::vector<ReadLogEntry> read_set;
-	std::vector<WriteLogEntry> write_set;
+	std::unordered_map<void *, ReadLogEntry> read_set;
+	std::unordered_map<void *, WriteLogEntry> write_set;
 	std::vector<word_t *> locks_held;
 
 	void reset()
@@ -127,6 +124,11 @@ public:
 		read_only = true;
 		nesting = 1;
 		abort_count = 0;
+		clear();
+	}
+
+	void clear()
+	{
 		read_set.clear();
 		write_set.clear();
 		locks_held.clear();
@@ -209,10 +211,10 @@ public:
 
 typedef LockTable::Lock Lock;
 
-static LockTable g_locks;
-static std::atomic<word_t> g_clock{1};
+inline LockTable g_locks;
+inline std::atomic<word_t> g_clock{1};
 
-thread_local Transaction *current_tx = nullptr;
+inline thread_local Transaction *current_tx = nullptr;
 
 inline word_t get_clock() { return g_clock.load(std::memory_order_acquire); }
 
@@ -223,7 +225,7 @@ inline word_t increment_clock()
 
 inline void init() { g_clock.store(1, std::memory_order_relaxed); }
 
-inline void exit() {}  // no-op, kept for compatibility with runtime wrapper
+inline void exit() {} // no-op, kept for compatibility with runtime wrapper
 
 inline void init_thread()
 {
@@ -235,7 +237,8 @@ inline void init_thread()
 
 inline void exit_thread()
 {
-	if (!current_tx) return;
+	if (!current_tx)
+		return;
 	delete current_tx;
 	current_tx = nullptr;
 }
@@ -252,17 +255,16 @@ inline bool begin()
 
 	if (tx->active) {
 		if (tx->aborted) {
-			for (auto &w : tx->write_set) {
-				word_t *addr = (word_t *)w.location.base_addr;
+			for (auto &it : tx->write_set) {
+				auto &w = it.second;
+				word_t *addr = (word_t *)it.first;
 				*addr = w.old_word;
 			}
 			for (word_t *lock_ptr : tx->locks_held) {
 				Lock *lock = (Lock *)lock_ptr;
 				lock->unlock(0, 0);
 			}
-			tx->locks_held.clear();
-			tx->write_set.clear();
-			tx->read_set.clear();
+			tx->clear();
 			tx->aborted = false;
 			tx->start_version = get_clock();
 			tx->end_version = tx->start_version;
@@ -278,9 +280,7 @@ inline bool begin()
 	tx->active = true;
 	tx->aborted = false;
 	tx->read_only = true;
-	tx->read_set.clear();
-	tx->write_set.clear();
-	tx->locks_held.clear();
+	tx->clear();
 	TINYSTM_ASSERT(tx->start_version > 0, "begin: invalid start version");
 	TINYSTM_ASSERT(tx->end_version >= tx->start_version, "begin: invalid validity range");
 
@@ -292,8 +292,9 @@ inline void abort_tx()
 	auto *tx = current_tx;
 	TINYSTM_ASSERT(tx != nullptr, "abort_tx: tx is null");
 
-	for (auto &w : tx->write_set) {
-		word_t *addr = (word_t *)w.location.base_addr;
+	for (auto &it : tx->write_set) {
+		auto &w = it.second;
+		word_t *addr = (word_t *)it.first;
 		*addr = w.old_word;
 	}
 
@@ -342,8 +343,10 @@ inline bool commit()
 
 		if (commit_version > tx->start_version + 1) {
 			word_t tx_id = (word_t)tx;
-			for (auto &r : tx->read_set) {
-				Lock *lock = g_locks.get(r.location.base_addr);
+			for (auto &it : tx->read_set) {
+				auto &r = it.second;
+				ByteOffset bo((word_t)it.first);
+				Lock *lock = g_locks.get(bo.base_addr);
 				TINYSTM_ASSERT(lock != nullptr, "commit: lock is null");
 
 				if (lock->is_locked_by(tx_id)) {
@@ -362,15 +365,15 @@ inline bool commit()
 			}
 		}
 
-		for (auto &w : tx->write_set) {
-			Lock *lock = g_locks.get(w.location.base_addr);
+		for (auto &it : tx->write_set) {
+			auto &w = it.second;
+			ByteOffset bo((word_t)it.first);
+			Lock *lock = g_locks.get(bo.base_addr);
 			lock->unlock(commit_version, 0);
 		}
 	}
 
-	tx->write_set.clear();
-	tx->read_set.clear();
-	tx->locks_held.clear();
+	tx->clear();
 
 	tx->active = false;
 	return true;
@@ -380,7 +383,9 @@ inline bool active() { return current_tx && current_tx->active; }
 
 inline bool aborted() { return current_tx && current_tx->aborted; }
 
-__attribute__((noinline)) static word_t read_word_wt(Transaction *tx, volatile word_t *addr, ValueType type)
+__attribute__((noinline)) static word_t read_word_wt(Transaction *tx,
+                                                     volatile word_t *addr,
+                                                     ValueType type)
 {
 	if (!tx || !tx->active)
 		return *addr;
@@ -388,18 +393,15 @@ __attribute__((noinline)) static word_t read_word_wt(Transaction *tx, volatile w
 	ByteOffset bo((word_t)addr);
 	Lock *lock = g_locks.get(bo.base_addr);
 
-	for (auto &w : tx->write_set) {
-		if (same_location(w.location, bo)) {
-			return w.new_word;
-		}
+	auto w = tx->write_set.find((void *)addr);
+	if (w != tx->write_set.end()) {
+		return w->second.new_word;
 	}
 
 	if (lock->is_locked_by((word_t)tx)) {
-		for (auto &w : tx->write_set) {
-			if (same_location(w.location, bo)) {
-				return w.new_word;
-			}
-		}
+		auto w2 = tx->write_set.find((void *)addr);
+		if (w2 != tx->write_set.end())
+			return w2->second.new_word;
 		return *addr;
 	}
 
@@ -429,8 +431,9 @@ __attribute__((noinline)) static word_t read_word_wt(Transaction *tx, volatile w
 			}
 
 			bool extended = false;
-			for (auto &r : tx->read_set) {
-				Lock *rl = g_locks.get(r.location.base_addr);
+			for (auto &it : tx->read_set) {
+				auto &r = it.second;
+				Lock *rl = g_locks.get(ByteOffset((word_t)it.first).base_addr);
 				word_t rv = rl->get_version();
 				if (rv > tx->start_version) {
 					extended = true;
@@ -451,22 +454,20 @@ __attribute__((noinline)) static word_t read_word_wt(Transaction *tx, volatile w
 		}
 
 		ReadLogEntry r;
-		r.lock_addr = (word_t *)lock;
-		r.location = bo;
 		r.observed_version = version;
 		r.observed_incarnation = incarnation;
 		r.observed_word = value;
 		r.type = type;
-		tx->read_set.push_back(r);
+		tx->read_set.insert(std::pair((void *)addr, r));
 
 		return value;
 	}
 }
 
 __attribute__((noinline)) static void write_word_wt(Transaction *tx,
-                          volatile word_t *addr,
-                          word_t value,
-                          ValueType type)
+                                                    volatile word_t *addr,
+                                                    word_t value,
+                                                    ValueType type)
 {
 	if (!tx || !tx->active) {
 		*addr = value;
@@ -477,15 +478,15 @@ __attribute__((noinline)) static void write_word_wt(Transaction *tx,
 	tx->read_only = false;
 
 	ByteOffset bo((word_t)addr);
+	Lock *lock = g_locks.get(bo.base_addr);
 
-	for (auto &w : tx->write_set) {
-		if (same_location(w.location, bo)) {
-			w.new_word = value;
-			return;
-		}
+	auto w = tx->write_set.find((void *)addr);
+	if (w != tx->write_set.end()) {
+		w->second.new_word = value;
+		*addr = value;
+		return;
 	}
 
-	Lock *lock = g_locks.get(bo.base_addr);
 	word_t l = lock->get();
 
 	if (!lock->is_locked()) {
@@ -493,13 +494,12 @@ __attribute__((noinline)) static void write_word_wt(Transaction *tx,
 		word_t incarnation = lock->get_incarnation();
 
 		WriteLogEntry w;
-		w.location = bo;
 		w.old_word = *addr;
 		w.new_word = value;
 		w.type = type;
 		w.version = version;
 		w.incarnation = incarnation;
-		tx->write_set.push_back(w);
+		tx->write_set.insert(std::pair((void *)addr, w));
 
 		word_t tx_id = (word_t)tx;
 		if (lock->try_lock(tx_id, 0)) {
@@ -511,13 +511,11 @@ __attribute__((noinline)) static void write_word_wt(Transaction *tx,
 			tx->aborted = true;
 		}
 	} else if (lock->is_locked_by((word_t)tx)) {
-		for (auto &w : tx->write_set) {
-			if (same_location(w.location, bo)) {
-				w.new_word = value;
-				*addr = value;
-				return;
-			}
+		auto w2 = tx->write_set.find((void *)addr);
+		if (w2 != tx->write_set.end()) {
+			w2->second.new_word = value;
 		}
+		*addr = value;
 	} else {
 		tx->aborted = true;
 	}

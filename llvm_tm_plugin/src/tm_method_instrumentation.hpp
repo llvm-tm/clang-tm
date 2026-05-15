@@ -208,6 +208,7 @@ static Function *cloneMethodWithSuffix(Function *Original, const Twine &Suffix,
 
     NewFunc->setDSOLocal(true);
     NewFunc->addFnAttr(llvm::Attribute::NoInline);
+    NewFunc->addFnAttr(llvm::Attribute::OptimizeNone);
 
     instrumentLoadsStoresInFunction(NewFunc, M, H);
 
@@ -371,7 +372,26 @@ computeClonableFunctions(Module &M,
         }
     }
 
-    TM_DEBUG("computeClonableFunctions: %d functions clonable", (int)Clonable.size());
+    TM_DEBUG("computeClonableFunctions: %d functions clonable before filtering", (int)Clonable.size());
+
+    // Step 3: filter out functions that don't actually access TM data.
+    // These are pure pointer-computation functions (e.g. __wrap_iter constructors,
+    // vector::begin/end, __tree::__root_ptr) that were propagated through
+    // TM-traceable arguments but never load or store to TM globals.
+    // Cloning them adds unnecessary TM instrumentation overhead without benefit.
+    SmallPtrSet<Function *, 32> ToRemove;
+    for (Function *F : Clonable) {
+        if (!hasDirectTMGlobal(*F, M)) {
+            ToRemove.insert(F);
+        }
+    }
+    for (Function *F : ToRemove) {
+        Clonable.erase(F);
+        TraceableArgs.erase(F);
+        TM_DEBUG("filter: %s removed (no direct TM access)", F->getName().str().c_str());
+    }
+
+    TM_DEBUG("computeClonableFunctions: %d functions clonable after filtering", (int)Clonable.size());
     return Clonable;
 }
 
@@ -437,6 +457,7 @@ cloneTxReachableGraph(Module &M,
 
     SmallPtrSet<Function *, 32> ToClone = computeClonableFunctions(M, TxReachableFuncs);
 
+    // Pass 1: clone all functions first (so ClonedMap is complete)
     for (Function *F : ToClone) {
         if (F->isDeclaration()) continue;
         if (F->getName().starts_with("tm_")) continue;
@@ -449,9 +470,12 @@ cloneTxReachableGraph(Module &M,
 
         Function *Cloned = cloneMethodWithSuffix(F, "_tm_clone", &M, M.getContext(), TMG, H);
         ClonedMap.push_back({F, Cloned});
-
-        redirectCallsToClones(*Cloned, TxReachableFuncs, ClonedMap);
     }
+
+    // Pass 2: redirect all cloned functions (ClonedMap is complete, so all
+    // intra-clone calls can be redirected regardless of processing order).
+    for (auto &pair : ClonedMap)
+        redirectCallsToClones(*pair.second, TxReachableFuncs, ClonedMap);
 
     return ClonedMap;
 }

@@ -230,7 +230,7 @@ abort_tx()  //
 	NOREC_ASSERT(false, "Did not jump");
 }
 
-__attribute__((noinline)) word_t //
+inline __attribute__((noinline)) word_t //
 validate()    //
 {
 	auto *tx = current_tx;
@@ -295,7 +295,7 @@ commit()    //
   * Stubs for Transaction read/write instrumentation.
   * ---------------------------------------------------- */
 
-__attribute__((noinline)) any_type_t    //
+inline __attribute__((noinline)) any_type_t    //
 read_word_norec(     //
     Transaction *tx, //
     void *addr,      //
@@ -332,7 +332,7 @@ read_word_norec(     //
 	return value;
 }
 
-__attribute__((noinline)) void  //
+inline __attribute__((noinline)) void  //
 write_word_norec(    //
     Transaction *tx, //
     void *addr,      //

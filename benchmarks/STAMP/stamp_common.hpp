@@ -70,13 +70,7 @@ extern int g_duration;
 void run_benchmark(BenchmarkType bench, int threads, int duration_ms);
 
 inline uint64_t rdtsc() {
-#if defined(__x86_64__) || defined(__i386__)
-    unsigned int lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-#else
     return std::chrono::steady_clock::now().time_since_epoch().count();
-#endif
 }
 
 template <typename Engine>

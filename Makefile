@@ -20,7 +20,7 @@ LLVM_CONFIG_ARGS := $(shell $(LLVM_CONFIG) --cxxflags --ldflags --system-libs --
 
 # Compiler settings
 CXX ?= clang++
-CXXFLAGS += -std=c++17 -pthread
+CXXFLAGS += -std=c++20 -pthread
 ifeq ($(DEBUG),1)
   CXXFLAGS += -O0 -g
 else
@@ -79,7 +79,7 @@ info:
 plugin: $(PLUGIN)
 
 $(PLUGIN): $(LLVM_PLUGIN_DIR)/src/TMInstrumentPass.cpp | $(LLVM_PLUGIN_DIR)/bin
-	$(CXX) -fPIC -std=c++17 -shared $< -o $@ $(LLVM_CONFIG_ARGS)
+	$(CXX) -fPIC -std=c++20 -shared $< -o $@ $(LLVM_CONFIG_ARGS)
 
 $(LLVM_PLUGIN_DIR)/bin:
 	mkdir -p $@

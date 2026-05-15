@@ -37,7 +37,7 @@
 
 .DEFAULT_GOAL   := all
 CXX              := clang++
-CXXFLAGS         ?= -std=c++17 -O1 -pthread
+CXXFLAGS         ?= -std=c++20 -O1 -pthread
 LLVM_PLUGIN_DIR  ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BACKENDS_DIR     ?= $(abspath $(LLVM_PLUGIN_DIR)/../backends)
 RUNTIMES_DIR     ?= $(BACKENDS_DIR)/runtimes
@@ -73,11 +73,11 @@ TM_INCLUDES_norec       = -I$(NOREC_DIR) -I$(BACKENDS_DIR)
 # ---- Canned recipes (individual steps) ----
 
 define tm_compile_ir
-$(CXX) -std=c++17 -O3 -fno-inline -emit-llvm -c $1 -o $2 -fno-stack-protector -pthread
+	$(CXX) -std=c++20 -O3 -fno-inline -emit-llvm -c $1 -o $2 -fno-stack-protector -pthread
 endef
 
 define tm_compile_ir_debug
-$(CXX) -std=c++17 -O0 -g -emit-llvm -c $1 -o $2 -fno-stack-protector -pthread
+	$(CXX) -std=c++20 -O0 -g -emit-llvm -c $1 -o $2 -fno-stack-protector -pthread
 endef
 
 define tm_instrument

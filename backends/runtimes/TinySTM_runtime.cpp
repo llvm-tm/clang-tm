@@ -9,7 +9,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <mutex>
 #include <thread>
 
 #include "tinystm_globals.hpp"
@@ -21,8 +20,8 @@ __thread int32_t tm_longjmp_ret;
 __thread unsigned char tm_jmpbuf[256];
 __thread int tm_init_thread_call_count = 0;
 
-// Mutex to protect tinystm begin/end operations 
-static std::mutex g_stm_mutex;
+// Mutex removed — TinySTM's own lock acquisition handles concurrency,
+// and a std::mutex around commit() leaks across siglongjmp from abort_tx()
 
 #define TM_BUFFER_SIZE 1024
 static __thread uint8_t tm_buffer[TM_BUFFER_SIZE];
@@ -85,7 +84,6 @@ void tm_begin()
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
 	if (tm_nested_call_counter == 1) {
-		std::lock_guard<std::mutex> lock(g_stm_mutex);
 		tinystm::begin();
 	}
 }
@@ -111,7 +109,6 @@ void tm_end()
 			if (rs > 0) fprintf(stderr, "[RS=%llu WS=%llu]\n",
 				(unsigned long long)rs, (unsigned long long)ws);
 		}
-		std::lock_guard<std::mutex> lock(g_stm_mutex);
 		tinystm::commit();
 	}
 	tm_tx_count++;

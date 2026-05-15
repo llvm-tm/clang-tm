@@ -8,12 +8,11 @@
  *   1. Each process sets TM_NPROCESSES=N (env var).
  *   2. tm_init waits until N processes have called tm_init (barrier).
  *   3. tm_begin acquires a global spinlock (PREPARE phase).
- *      Only one process holds the lock at a time.
  *   4. tm_end releases the lock and msyncs (COMMIT phase).
  *   5. tm_exit decrements the process count.
  *
- * The shared state (lock, counters, TM symbol data) is in a file
- * that maps to a git-ignored directory.
+ * All atomic operations use std::atomic<int> with sequential consistency.
+ * The shared state is in a file inside benchmark_results/ (git-ignored).
  *
  * Usage:
  *   export TM_NPROCESSES=2
@@ -25,34 +24,35 @@
 #include <cstring>
 #include <thread>
 #include <atomic>
+#include <chrono>
 #include <csetjmp>
 #include <cstdio>
 #include <cstdlib>
-#include <algorithm>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 
 // ── Shared state in mmap ────────────────────────────────────────
-// All fields are volatile + plain integers (not std::atomic) so the
-// struct is standard-layout and safe for placement in shared memory.
+// Uses std::atomic for cross-process synchronization.
+// std::atomic<int> and std::atomic<uint8_t> are standard-layout on
+// all major implementations and safe in MAP_SHARED memory when both
+// processes use the same C++ standard library.
 
 struct SharedState {
-    volatile int   ready_count;       // how many processes have called init
-    volatile int   process_count;     // total N (set by first process)
-    volatile uint8_t lock;            // spinlock: 0=free, 1=held
-    uint8_t        _pad1[7];
-    volatile int64_t epoch;           // incremented on each commit
+    std::atomic<int>      ready_count {0};
+    std::atomic<int>      process_count {0};
+    std::atomic<uint8_t>  lock_flag {0};    // spinlock: 0=free, 1=held
+    uint8_t               _pad[7];
+    std::atomic<int64_t>  epoch {0};
 };
+static_assert(sizeof(SharedState) == 24, "SharedState unexpected size");
 
 static const char* SHM_FILE = "benchmark_results/tm_2pc_state.bin";
-static int g_shm_fd = -1;
-
-static SharedState* g_state = nullptr;     // pointer into mmap
-static uint8_t*     g_data_base = nullptr;  // TM symbol data in mmap
+static SharedState* g_state = nullptr;
+static uint8_t*     g_data_base = nullptr;
 static size_t       g_mmap_size = 0;
-static size_t       g_data_off = 0;         // offset where TM data starts
+static size_t       g_data_off = 0;
 
 extern "C" {
 extern uint32_t tm_symbol_count;
@@ -60,29 +60,25 @@ extern const char* tm_symbol_names[];
 extern void* tm_symbol_addresses[];
 extern uint64_t tm_symbol_sizes[];
 
-// ── Spinlock helpers (shared-memory safe, portable) ────────────
+// ── Spinlock (shared-memory safe) ───────────────────────────────
+// Uses std::atomic<uint8_t> with sequential consistency.
+// No arch-specific pause instructions — uses yield.
 
-static void spin_pause() {
-#if defined(__x86_64__) || defined(__i386__)
-    __builtin_ia32_pause();
-#elif defined(__aarch64__)
-    __asm__ __volatile__("yield" ::: "memory");
-#endif
+static void spin_lock(std::atomic<uint8_t>* lk) {
+    uint8_t expected = 0;
+    while (!lk->compare_exchange_weak(expected, 1, std::memory_order_acquire)) {
+        expected = 0;
+        std::this_thread::yield();
+    }
 }
 
-static void spin_lock(volatile uint8_t* lk) {
-    while (__sync_lock_test_and_set(lk, 1))
-        while (*lk) spin_pause();
-}
-
-static void spin_unlock(volatile uint8_t* lk) {
-    __sync_lock_release(lk);
+static void spin_unlock(std::atomic<uint8_t>* lk) {
+    lk->store(0, std::memory_order_release);
 }
 
 // ── tm_init ─────────────────────────────────────────────────────
 
 void tm_init() {
-    // Compute total data size
     uint64_t data_size = 0;
     for (uint32_t i = 0; i < tm_symbol_count; i++)
         data_size += tm_symbol_sizes[i];
@@ -90,33 +86,31 @@ void tm_init() {
     g_data_off = sizeof(SharedState);
     g_mmap_size = g_data_off + data_size;
 
-    // Open / create the shared file (in git-ignored benchmark_results/)
-    g_shm_fd = open(SHM_FILE, O_RDWR | O_CREAT, 0644);
-    if (g_shm_fd < 0) { perror("open"); exit(1); }
-
-    if (ftruncate(g_shm_fd, g_mmap_size) < 0) { perror("ftruncate"); exit(1); }
+    int fd = open(SHM_FILE, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) { perror("open"); exit(1); }
+    if (ftruncate(fd, g_mmap_size) < 0) { perror("ftruncate"); exit(1); }
 
     void* base = mmap(nullptr, g_mmap_size, PROT_READ | PROT_WRITE,
-                      MAP_SHARED, g_shm_fd, 0);
+                      MAP_SHARED, fd, 0);
     if (base == MAP_FAILED) { perror("mmap"); exit(1); }
-    close(g_shm_fd);
+    close(fd);
 
     g_state = static_cast<SharedState*>(base);
     g_data_base = static_cast<uint8_t*>(base) + g_data_off;
 
-    // First process to init initialises the shared state
-    int expected = 0;
+    // Read TM_NPROCESSES from environment
     int nproc = 1;
-    char* env = getenv("TM_NPROCESSES");
-    if (env) nproc = atoi(env);
-    if (nproc < 1) nproc = 1;
+    if (char* env = getenv("TM_NPROCESSES")) {
+        nproc = atoi(env);
+        if (nproc < 1) nproc = 1;
+    }
 
-    // Atomically check-and-set process_count (first process wins)
-    if (__sync_bool_compare_and_swap(&g_state->process_count, 0, nproc)) {
-        g_state->ready_count = 0;
-        g_state->lock = 0;
-        g_state->epoch = 0;
-        // Snapshot initial TM symbol data
+    // First process wins: CAS process_count from 0 to nproc
+    int expected = 0;
+    if (g_state->process_count.compare_exchange_strong(expected, nproc,
+            std::memory_order_acq_rel)) {
+        // First process: snapshot initial TM data into the shared file
+        g_state->ready_count.store(0, std::memory_order_relaxed);
         uint64_t off = 0;
         for (uint32_t i = 0; i < tm_symbol_count; i++) {
             uint64_t sz = tm_symbol_sizes[i];
@@ -125,7 +119,7 @@ void tm_init() {
         }
         fprintf(stderr, "[DistSGL] init: process_count=%d\n", nproc);
     } else {
-        // Restore TM symbol data from shared state
+        // Subsequent processes: restore TM data from shared state
         uint64_t off = 0;
         for (uint32_t i = 0; i < tm_symbol_count; i++) {
             uint64_t sz = tm_symbol_sizes[i];
@@ -134,14 +128,16 @@ void tm_init() {
         }
     }
 
-    // Barrier: wait until all processes have inited
-    __sync_fetch_and_add(&g_state->ready_count, 1);
+    // Barrier: signal ready and wait
+    g_state->ready_count.fetch_add(1, std::memory_order_acq_rel);
     fprintf(stderr, "[DistSGL] barrier: %d/%d ready\n",
-            g_state->ready_count, g_state->process_count);
-    while (g_state->ready_count < g_state->process_count) {
-        usleep(1000);  // 1 ms
+            g_state->ready_count.load(std::memory_order_acquire),
+            g_state->process_count.load(std::memory_order_acquire));
+    while (g_state->ready_count.load(std::memory_order_acquire) <
+           g_state->process_count.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    fprintf(stderr, "[DistSGL] all %d processes ready, starting\n", nproc);
+    fprintf(stderr, "[DistSGL] all ready, starting\n");
 }
 
 void tm_exit() {
@@ -155,9 +151,8 @@ void tm_exit() {
         }
         msync(g_state, g_mmap_size, MS_SYNC);
     }
-    __sync_fetch_and_sub(&g_state->ready_count, 1);
-    if (g_state->ready_count <= 0) {
-        // Last process cleans up
+    g_state->ready_count.fetch_sub(1, std::memory_order_acq_rel);
+    if (g_state->ready_count.load(std::memory_order_acquire) <= 0) {
         munmap(g_state, g_mmap_size);
         unlink(SHM_FILE);
     }
@@ -181,8 +176,8 @@ void tm_begin() {
     if (tm_nested_call_counter == 1) {
         // PREPARE phase: acquire global lock
         fprintf(stderr, "[DistSGL] P%d PREPARE epoch=%lld\n",
-                getpid(), (long long)g_state->epoch);
-        spin_lock(&g_state->lock);
+                getpid(), (long long)g_state->epoch.load(std::memory_order_relaxed));
+        spin_lock(&g_state->lock_flag);
     }
 }
 
@@ -190,16 +185,16 @@ void tm_end() {
     if (tm_nested_call_counter == 1) {
         // COMMIT phase: msync, increment epoch, release lock
         msync(g_state, g_mmap_size, MS_SYNC);
-        __sync_fetch_and_add(&g_state->epoch, 1);
+        g_state->epoch.fetch_add(1, std::memory_order_release);
         fprintf(stderr, "[DistSGL] P%d COMMIT  epoch=%lld\n",
-                getpid(), (long long)g_state->epoch);
-        spin_unlock(&g_state->lock);
+                getpid(), (long long)g_state->epoch.load(std::memory_order_relaxed));
+        spin_unlock(&g_state->lock_flag);
     }
 }
 
 // ── Read/write hooks ───────────────────────────────────────────
 
-void   tm_load_symbols(void*, uint32_t) {}
+void tm_load_symbols(void*, uint32_t) {}
 
 uint8_t  tm_read_i1(volatile uint8_t*  a) { return *a; }
 uint16_t tm_read_i2(volatile uint16_t* a) { return *a; }

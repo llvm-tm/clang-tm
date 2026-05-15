@@ -10,7 +10,6 @@
 #include <cstring>
 #include <iostream>
 #include <thread>
-#include <vector>
 
 #include "tinystm_common.hpp"
 
@@ -24,14 +23,12 @@ namespace tinystm
 constexpr const char *VERSION = "0.2.0-wbetl";
 
 struct ReadLogEntry_wbetl {
-	void *addr;
 	volatile word_t observed_version;
 	any_type_t observed_val;
 	ValueType type;
 };
 
 struct WriteLogEntry_wbetl {
-	void *addr;
 	any_type_t old_val;
 	any_type_t new_val;
 	ValueType type;
@@ -91,7 +88,8 @@ init_thread() //
 inline void   //
 exit_thread() //
 {
-	if (!current_tx_wbetl) return;
+	if (!current_tx_wbetl)
+		return;
 	delete current_tx_wbetl;
 	current_tx_wbetl = nullptr;
 }
@@ -104,21 +102,16 @@ inline bool //
 begin()     //
 {
 	auto *tx = current_tx_wbetl;
-	printf("THR%llu begin: tx->abort_count=%i tm_nested_call_counter=%i\n",
-	       tx->id,
-	       tx->abort_count,
-	       tm_nested_call_counter);
 
 	TINYSTM_ASSERT(tx, "tx not defined");
-	if (tx->active) return true;
+	if (tx->active)
+		return true;
 
 	tx->start_version = get_clock();
 	tx->end_version = tx->start_version;
 	tx->active = true;
 	tx->read_only = true;
 	tx->abort_count = 0;
-	tx->read_set.clear();
-	tx->write_set.clear();
 
 	return true;
 }
@@ -128,17 +121,10 @@ abort_tx()  //
 {
 	auto *tx = current_tx_wbetl;
 
-	printf("THR%llu abort_tx\n", tx->id);
-
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
 	tx->unlock_held_locks_and_clear();
-
-	// for (auto &w : tx->write_set) {
-	// 	void *addr = (void *)w.location.base_addr;
-	// 	write_value_to_addr(addr, w.old_val, w.type);
-	// }
 
 	tx->abort_count++;
 	siglongjmp(*jmpbuf, 1);
@@ -149,8 +135,10 @@ inline bool //
 validate()  //
 {
 	auto *tx = current_tx_wbetl;
-	for (auto &r : tx->read_set) {
-		ByteOffset bo((word_t)r.addr);
+	for (auto &it : tx->read_set) {
+		auto &addr = it.first;
+		auto &r = it.second;
+		ByteOffset bo((word_t)addr);
 		Lock *lock = &g_locks_wbetl.get(bo.base_addr);
 
 		if (lock->is_locked() || lock->get_version() > r.observed_version) {
@@ -187,18 +175,21 @@ commit()    //
 		if (!extend())
 			abort_tx();
 
-		for (auto &w : tx->write_set) {
-			write_value_to_addr(w.addr, w.new_val, w.type);
+		for (auto &it : tx->write_set) {
+			auto &addr = it.first;
+			auto &w = it.second;
+			write_value_to_addr(addr, w.new_val, w.type);
 		}
-		for (auto &w : tx->write_set) {
-			ByteOffset bo((word_t)w.addr);
+		for (auto &it : tx->write_set) {
+			auto &addr = it.first;
+			auto &w = it.second;
+			ByteOffset bo((word_t)addr);
 			Lock *lock = &g_locks_wbetl.get(bo.base_addr);
 			lock->unlock_with_version(tx->id, commit_version);
 		}
 	}
 
 	tx->clear();
-	printf("THR%llu commit\n", tx->id);
 	return true;
 }
 
@@ -206,7 +197,7 @@ commit()    //
   * Stubs for Transaction read/write instrumentation.
   * ---------------------------------------------------- */
 
-__attribute__((noinline)) any_type_t                           //
+inline any_type_t                                              //
 read_word_etl(                                                //
     Transaction<ReadLogEntry_wbetl, WriteLogEntry_wbetl> *tx, //
     void *addr,                                               //
@@ -218,11 +209,9 @@ read_word_etl(                                                //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
-	for (auto &w : tx->write_set) {
-		ByteOffset bo2((word_t)w.addr);
-		if (w.type == sz && same_location(bo2, bo)) {
-			return w.new_val;
-		}
+	auto w = tx->write_set.find(addr);
+	if (w != tx->write_set.end() && w->second.type == sz) {
+		return w->second.new_val;
 	}
 
 	Lock *lock = &g_locks_wbetl.get(bo.base_addr);
@@ -258,17 +247,16 @@ read_word_etl(                                                //
 		any_type_t val = {.u8 = value.u8};
 
 		ReadLogEntry_wbetl r;
-		r.addr = addr;
 		r.observed_version = version;
 		r.observed_val = val;
 		r.type = sz;
-		tx->read_set.push_back(r);
+		tx->read_set.insert(std::pair(addr, r));
 
 		return val;
 	}
 }
 
-__attribute__((noinline)) void                                 //
+inline void                                                   //
 write_word_etl(                                               //
     Transaction<ReadLogEntry_wbetl, WriteLogEntry_wbetl> *tx, //
     void *addr,                                               //
@@ -283,12 +271,10 @@ write_word_etl(                                               //
 
 	tx->read_only = false; // TODO: shouldn't the TX abort?
 
-	for (auto &w : tx->write_set) {
-		ByteOffset bo2((word_t)w.addr);
-		if (w.type == sz && same_location(bo2, bo)) {
-			w.new_val = val;
-			return;
-		}
+	auto w = tx->write_set.find(addr);
+	if (w != tx->write_set.end() && w->second.type == sz) {
+		w->second.new_val = val;
+		return;
 	}
 
 	while (true) {
@@ -300,9 +286,6 @@ write_word_etl(                                               //
 			continue;
 		}
 
-		// TINYSTM_ASSERT(lock->is_locked_by(tx->id),
-		//                "Should not be locked and not in the write-set");
-
 		while (!lock->is_locked_by(tx->id) && !lock->try_lock(tx->id)) {
 			if (!validate())
 				abort_tx();
@@ -313,10 +296,9 @@ write_word_etl(                                               //
 		tx->locks_held.push_back(lock);
 
 		WriteLogEntry_wbetl w;
-		w.addr = addr;
 		w.new_val = val;
 		w.type = sz;
-		tx->write_set.push_back(w);
+		tx->write_set.insert(std::pair(addr, w));
 		break;
 	}
 }
@@ -387,7 +369,7 @@ tm_read_f8(      //
 )
 {
 	return tm_read<double,
-	               ValueType::FLOAT,
+	               ValueType::DOUBLE,
 	               ReadLogEntry_wbetl,
 	               WriteLogEntry_wbetl,
 	               read_word_etl>(current_tx_wbetl, addr);

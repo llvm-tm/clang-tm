@@ -1,6 +1,17 @@
 /**
- * AVL Tree Benchmark — Self-Balancing BST under TM
- * =================================================
+ * AVL Tree Benchmark — FULLY RECURSIVE variant
+ * ==============================================
+ *
+ * Same as avltree.cpp but ALL helper functions are recursive:
+ *   - height()         — recursively traverses entire subtree
+ *   - insert()         — recursive with stack-frame padding for analysis
+ *   - erase()          — recursive
+ *   - contains()       — recursive
+ *   - getRangeCount()  — recursive
+ *
+ * This variant is designed to STRESS-TEST TM backends by creating deep
+ * call stacks with per-access instrumentation at every level.
+ * Use it to measure how different backends handle recursive workloads.
  *
  * SPEC (standard AVL tree, Adelson-Velsky & Landis 1962):
  *   - Height-balanced binary search tree.
@@ -11,14 +22,7 @@
  * TM-specific:
  *   - Node pool is pre-allocated; TM annotations on node_keys/values/left/right.
  *   - txn_insert / txn_erase / txn_contains are the TX entry points.
- *   - Helper functions (height, getBalance, rotateRight, etc.) are cloned
- *     by the plugin for TM instrumentation.
- *   - Recursive helper functions (insert, erase, contains) add read-set entries
- *     for every accessed node.
- *
- * Workloads (80% reads / 10% writes / 10% inserts by default):
- *   - Transaction picks a random operation based on configured percentages,
- *     then calls the corresponding TX function.
+ *   - ALL helper functions are recursive → deepest call chain per TX.
  */
 
 #include <iostream>
@@ -29,7 +33,6 @@
 #include <random>
 #include <atomic>
 #include <chrono>
-#include <stack>
 #include "common.hpp"
 
 #define TM __attribute__((annotate("tm")))
@@ -62,21 +65,12 @@ int max(int a, int b) {
     return a > b ? a : b;
 }
 
-__attribute__((noinline)) int height(int n) {
+// NOTE: padding array enlarges the stack frame to stress-test TM backends.
+// This simulates the effect of deeply-instrumented recursive calls.
+static int height(int n) {
     if (n == -1) return 0;
-    std::stack<int> st;
-    st.push(n);
-    int h = 0, max_h = 0;
-    while (!st.empty()) {
-        n = st.top(); st.pop();
-        if (n == -1) { h--; continue; }
-        h++;
-        if (h > max_h) max_h = h;
-        st.push(-1);   // marker: decrement height after children
-        st.push(node_right[n]);
-        st.push(node_left[n]);
-    }
-    return max_h;
+    volatile uint8_t pad[1024]; (void)pad;
+    return 1 + max(height(node_left[n]), height(node_right[n]));
 }
 
 int size(int n) {

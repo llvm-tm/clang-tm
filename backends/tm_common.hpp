@@ -33,11 +33,11 @@ using word_t = uint64_t;
 enum class ValueType : uint8_t {
 	UINT8 = 1,
 	UINT16 = 2,
-	UINT32 = 4,
-	UINT64 = 8,
-	FLOAT = 16,
-	DOUBLE = 32,
-	POINTER = 64
+	UINT32 = 3,
+	UINT64 = 4,
+	FLOAT = 5,
+	DOUBLE = 6,
+	POINTER = 7
 };
 
 struct any_type_t {
@@ -60,11 +60,11 @@ template <typename T> struct any_type_mapping;
 		static void set(any_type_t &t, T v) { t.M = v; }                                 \
 		static void setp(any_type_t &t, void *a)                                         \
 		{                                                                                \
-			t.AM = __atomic_load_n(static_cast<AT *>(a), __ATOMIC_ACQUIRE);              \
+			t.AM = std::atomic_ref<AT>(*static_cast<AT *>(a)).load(std::memory_order_acquire); \
 		}                                                                                \
 		static void store(any_type_t &t, void *a)                                        \
 		{                                                                                \
-			__atomic_store_n(static_cast<AT *>(a), t.AM, __ATOMIC_RELEASE);              \
+			std::atomic_ref<AT>(*static_cast<AT *>(a)).store(t.AM, std::memory_order_release); \
 		}                                                                                \
 	};
 
@@ -144,6 +144,9 @@ write_value_to_addr( //
 	}
 }
 
+constexpr int OFFSET_BITS = 3; // for 64bit
+constexpr int OFFSET_MASK = 7;
+
 struct ByteOffset {
 	word_t base_addr;
 	word_t offset;
@@ -154,8 +157,8 @@ struct ByteOffset {
 	{
 	}
 	ByteOffset(word_t addr)
-	    : base_addr(addr & ~7),
-	      offset(addr & 7)
+	    : base_addr(addr & ~OFFSET_MASK),
+	      offset(addr & OFFSET_MASK)
 	{
 	}
 };

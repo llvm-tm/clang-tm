@@ -8,7 +8,7 @@ TL2_DIR := $(BACKENDS_DIR)/TL2
 TINYSTM_DIR := $(BACKENDS_DIR)/TinySTM
 SWISSTM_DIR := $(BACKENDS_DIR)/SwissTM
 NOREC_DIR := $(BACKENDS_DIR)/NOrec
-CXXFLAGS := -std=c++17 -O2 -pthread
+CXXFLAGS := -std=c++20 -O2 -pthread
 
 PLUGIN_LIB := $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
 
@@ -100,7 +100,20 @@ $(BIN_DIR)/ycsb_debug: $(OUT_DIR)/ycsb.opt.bc $(RUNTIMES_DIR)/test_runtime.cpp |
 $(BIN_DIR)/eigenbench_debug: $(OUT_DIR)/eigenbench.opt.bc $(RUNTIMES_DIR)/test_runtime.cpp | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) -O0 -g $< $(RUNTIMES_DIR)/test_runtime.cpp -o $@
 
-# SGL aliases (e.g., avltree_SGL -> avltree_SingleGlobalLock)
+# ---- Recursive AVL tree variant (for stress-testing TM backends) ----
+
+$(OUT_DIR)/avltree_recursive.opt.bc: avltree_recursive.cpp $(PLUGIN_LIB) $(OUT_DIR)
+	$(call tm_compile_ir,$<,$(OUT_DIR)/avltree_recursive.bc)
+	$(call tm_instrument,$(OUT_DIR)/avltree_recursive.bc,$(OUT_DIR)/avltree_recursive.instr.bc)
+	$(call tm_optimize,$(OUT_DIR)/avltree_recursive.instr.bc,$@)
+
+$(BIN_DIR)/avltree_recursive_%: $(OUT_DIR)/avltree_recursive.opt.bc | $(BIN_DIR)
+	$(call tm_link,$<,$(patsubst avltree_recursive_%,%,$*),$@)
+
+avltree_recursive_uninstrumented: avltree_recursive.cpp | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< -o $(BIN_DIR)/$@ -pthread
+
+# SGL aliases
 $(foreach b,$(ALL_BENCH),$(eval $(b)_SGL: $(BIN_DIR)/$(b)_SingleGlobalLock))
 
 # ---- Test targets ----

@@ -6,7 +6,6 @@
 
 #include <cstring>
 #include <thread>
-#include <vector>
 
 #include "tinystm_common.hpp"
 
@@ -64,7 +63,8 @@ init_thread() //
 inline void   //
 exit_thread() //
 {
-	if (!current_tx_wbctl) return;
+	if (!current_tx_wbctl)
+		return;
 	delete current_tx_wbctl;
 	current_tx_wbctl = nullptr;
 }
@@ -102,7 +102,8 @@ begin()     //
 	auto *tx = current_tx_wbctl;
 
 	TINYSTM_ASSERT(tx, "tx not defined");
-	if (tx->active) return true;
+	if (tx->active)
+		return true;
 
 	tx->start_version = get_clock();
 	tx->end_version = tx->start_version;
@@ -137,8 +138,10 @@ inline bool //
 validate()  //
 {
 	auto *tx = current_tx_wbctl;
-	for (auto &r : tx->read_set) {
-		ByteOffset bo((word_t)r.addr);
+	for (auto &it : tx->read_set) {
+		auto &addr = it.first;
+		auto &r = it.second;
+		ByteOffset bo((word_t)addr);
 		Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 		word_t l = lock->get();
 		word_t is_locked = (l & OWNED_MASK) != 0;
@@ -165,11 +168,11 @@ extend()    //
 
 static bool                       //
 compareByAddr(                    //
-    const WriteLogEntry_wbctl &a, //
-    const WriteLogEntry_wbctl &b  //
+    const void *a, //
+    const void *b  //
 )
 {
-	return (word_t)a.addr < (word_t)b.addr;
+	return (word_t)a < (word_t)b;
 }
 
 inline bool //
@@ -183,10 +186,15 @@ commit()    //
 
 	if (!tx->read_only) { // Acquire locks and write-back
 
-		// Lock acquisition phase — sort by address for global lock ordering
-		std::sort(tx->write_set.begin(), tx->write_set.end(), compareByAddr);
-		for (auto &w : tx->write_set) {
-			ByteOffset bo((word_t)w.addr);
+		// Lock acquisition phase — collect addresses and sort for global lock ordering
+		std::vector<void *> sorted_addrs;
+		sorted_addrs.reserve(tx->write_set.size());
+		for (auto &it : tx->write_set)
+			sorted_addrs.push_back(it.first);
+		std::sort(sorted_addrs.begin(), sorted_addrs.end(), compareByAddr);
+		for (void *addr : sorted_addrs) {
+			auto &w = tx->write_set[addr];
+			ByteOffset bo((word_t)addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 			volatile word_t l = lock->get();
 			word_t owner = (l & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS;
@@ -216,18 +224,18 @@ commit()    //
 		// increment_clock(tx->id); // Reading above and incrementing here does not work
 
 		// Write-back phase
-		for (auto &w : tx->write_set) {
-			ByteOffset bo((word_t)w.addr);
+		for (auto &it : tx->write_set) {
+			auto &addr = it.first;
+			auto &w = it.second;
+			ByteOffset bo((word_t)addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
-			// TINYSTM_ASSERT(lock->get_version() == w.version,
-			//                "Version of owned lock changed");
-			// TINYSTM_ASSERT(*(uint32_t *)w.addr == w.new_val.u4 - 1,
-			//                "Version of owned lock changed");
-			write_value_to_addr(w.addr, w.new_val, w.type);
+			write_value_to_addr(addr, w.new_val, w.type);
 		}
 
-		for (auto &w : tx->write_set) {
-			ByteOffset bo((word_t)w.addr);
+		for (auto &it : tx->write_set) {
+			auto &addr = it.first;
+			auto &w = it.second;
+			ByteOffset bo((word_t)addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 			if (!lock->is_locked_by(tx->id)) {
 				// Already unlocked by a previous write entry for the same
@@ -271,25 +279,21 @@ read_word_ctl(                                                //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
-	for (auto &w : tx->write_set) {
-		ByteOffset bo2((word_t)w.addr);
-		if (w.type == sz && same_location(bo2, bo)) {
-			return w.new_val;
-		}
+	auto w = tx->write_set.find(addr);
+	if (w != tx->write_set.end() && w->second.type == sz) { // found in write-set
+		return w->second.new_val;
 	}
 
 	Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 	TINYSTM_ASSERT(!lock->is_locked_by(tx->id), "wbctl locks at commit time");
 	volatile word_t l = lock->get();
 
-	for (auto &r : tx->read_set) {
-		ByteOffset bo2((word_t)r.addr);
-		if (r.type == sz && same_location(bo2, bo)) {
-			word_t current_version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
-			if (current_version > r.observed_version && !extend())
-				abort_tx();
-			return r.observed_val;
-		}
+	auto r = tx->read_set.find(addr);
+	if (r != tx->read_set.end() && r->second.type == sz) { // found in read-set
+		word_t current_version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
+		if (current_version > r->second.observed_version && !extend())
+			abort_tx();
+		return r->second.observed_val;
 	}
 
 	while (true) {
@@ -322,7 +326,7 @@ read_word_ctl(                                                //
 		r.observed_version = version;
 		r.observed_val = val;
 		r.type = sz;
-		tx->read_set.push_back(r);
+		tx->read_set.insert(std::pair(addr, r));
 
 		return val;
 	}
@@ -343,13 +347,18 @@ write_word_ctl(                                               //
 
 	tx->read_only = false; // TODO: shouldn't the TX abort?
 
-	for (auto &w : tx->write_set) {
-		ByteOffset bo2((word_t)w.addr);
-		if (w.type == sz && same_location(bo2, bo)) {
-			w.new_val = val;
-			return;
-		}
+	auto w = tx->write_set.find(addr);
+	if (w != tx->write_set.end() && w->second.type == sz) { // found in write-set
+		w->second.new_val = val;
+		return;
 	}
+	// for (auto &w : tx->write_set) {
+	// 	ByteOffset bo2((word_t)w.addr);
+	// 	if (w.type == sz && same_location(bo2, bo)) {
+	// 		w.new_val = val;
+	// 		return;
+	// 	}
+	// }
 
 	while (true) {
 		Lock *lock = &g_locks_wbctl.get(bo.base_addr);
@@ -370,7 +379,7 @@ write_word_ctl(                                               //
 		w.type = sz;
 		w.addr = addr;
 		w.version = lock->get_version();
-		tx->write_set.push_back(w);
+		tx->write_set.insert(std::pair(addr, w));
 		return;
 	}
 }

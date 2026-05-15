@@ -6,6 +6,7 @@
 **/inputs/
 **/*.dSYM/
 **/tm_persist.bin
+benchmark_results/
 
 # Compiled objects
 *.o
@@ -29,6 +30,7 @@
 .idea/
 *.sublime-*
 *.backup
+*.code-workspace
 
 # Build system
 debug.txt

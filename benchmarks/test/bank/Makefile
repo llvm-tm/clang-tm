@@ -7,7 +7,7 @@ NOREC_DIR := $(BACKENDS_DIR)/NOrec
 SWISSSTM_DIR := $(BACKENDS_DIR)/SwissTM
 
 # Bank uses -O3 (not -O1)
-CXXFLAGS := -std=c++17 -O3 -pthread
+CXXFLAGS := -std=c++20 -O3 -pthread
 
 include ../../../llvm_tm_plugin/tm_pipeline.mk
 $(eval $(call tm_define_rules))
@@ -93,3 +93,4 @@ help:
 	@echo "  test              - Run all tests"
 	@echo "  clean             - Clean build artifacts"
 $(eval $(call tm_target, bank_persistentsgl, $(BANK_SRC), persistentsgl))
+$(eval $(call tm_target, bank_distributedsgl, $(BANK_SRC), distributedsgl))

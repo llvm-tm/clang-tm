@@ -1,6 +1,6 @@
 # Makefile for STM backend tests
 CXX = clang++
-CXXFLAGS = -std=c++17 -O0 -pthread -g
+CXXFLAGS = -std=c++20 -O0 -pthread -g
 LDFLAGS = -pthread
 BIN_DIR = bin
 RUNTIME_DIR = ../runtimes

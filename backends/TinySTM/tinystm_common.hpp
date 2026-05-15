@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 #include "tm_common.hpp"
@@ -222,8 +223,8 @@ public:
 	bool read_only = true;
 	int abort_count = 0;
 	int nesting = 1;
-	std::vector<ReadLogEntry> read_set;
-	std::vector<WriteLogEntry> write_set;
+	std::unordered_map<void *, ReadLogEntry> read_set;
+	std::unordered_map<void *, WriteLogEntry> write_set;
 	std::vector<Lock *> locks_held;
 
 	void reset()

@@ -1,7 +1,7 @@
 LLVM_CONFIG_ARGS := $(shell ../llvm-config-args.sh)
 
 CXX := clang++
-CXXFLAGS := -fPIC -std=c++17
+CXXFLAGS := -fPIC -std=c++20
 CC := clang
 
 include tm_pipeline.mk
@@ -67,7 +67,7 @@ $(BIN_DIR)/persist_sgl: $(OUT_DIR)/persist.opt.bc $(RUNTIMES_DIR)/PersistentSGL_
 # TinySTM-backed test (use explicit link, not tm_link, because CXXFLAGS serves plugin build)
 $(BIN_DIR)/local_containers_test: $(OUT_DIR)/local_containers_test.opt.bc \
                                   $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp | $(BIN_DIR)
-	clang++ -std=c++17 -O1 -pthread -DDESIGN_WBCTL $< \
+	clang++ -std=c++20 -O1 -pthread -DDESIGN_WBCTL $< \
 	  $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) -o $@
 

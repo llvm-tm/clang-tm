@@ -166,7 +166,7 @@ STEP3_BC="$OUT_DIR/$BASENAME.opt.bc"
 # ---- Step 1: Generate LLVM IR ----
 
 log "Step 1: Generating LLVM IR ($STEP1_BC)..."
-clang++ -std=c++17 -O3 -fno-inline -emit-llvm -c "$SOURCE" -o "$STEP1_BC" \
+clang++ -std=c++20 -O3 -fno-inline -emit-llvm -c "$SOURCE" -o "$STEP1_BC" \
     -fno-stack-protector -pthread \
     "${EXTRA_INCLUDES[@]}" "${EXTRA_DEFINES[@]}"
 
@@ -183,7 +183,7 @@ opt -O3 "$STEP2_BC" -o "$STEP3_BC"
 # ---- Step 4: Link with runtime ----
 
 log "Step 4: Linking with $RUNTIME runtime..."
-clang++ -std=c++17 -O1 -pthread $RUNTIME_DEFINES "$STEP3_BC" "$RUNTIME_CPP" \
+clang++ -std=c++20 -O1 -pthread $RUNTIME_DEFINES "$STEP3_BC" "$RUNTIME_CPP" \
     -o "$OUTPUT" $RUNTIME_INCLUDES \
     "${EXTRA_INCLUDES[@]}" "${EXTRA_DEFINES[@]}"
 
