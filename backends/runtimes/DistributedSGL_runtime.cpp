@@ -7,12 +7,20 @@
  * Protocol:
  *   1. Each process sets TM_NPROCESSES=N (env var).
  *   2. tm_init waits until N processes have called tm_init (barrier).
- *   3. tm_begin acquires a global spinlock (PREPARE phase).
- *   4. tm_end releases the lock and msyncs (COMMIT phase).
- *   5. tm_exit decrements the process count.
+ *   3. tm_init sets RelPtr base so offset_ptr works in shared data.
+ *   4. tm_begin acquires the global spinlock (PREPARE), then syncs
+ *      TM symbol data FROM the shared mmap (read latest committed state).
+ *   5. tm_end syncs TM symbol data TO the shared mmap, msyncs,
+ *      increments epoch, then releases the lock (COMMIT).
+ *   6. tm_exit decrements the process count.
  *
- * All atomic operations use std::atomic<int> with sequential consistency.
- * The shared state is in a file inside benchmark_results/ (git-ignored).
+ * On every tm_begin → tm_end pair, ALL TM-annotated globals are
+ * copied between process-local memory and the shared mmap.  This
+ * ensures each transaction sees the latest committed state from any
+ * process, and publishes its own changes atomically.
+ *
+ * All atomic operations use std::atomic with sequential consistency.
+ * The shared state is in benchmark_results/ (git-ignored).
  *
  * Usage:
  *   export TM_NPROCESSES=2
@@ -33,24 +41,22 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
+#include "../rel_ptr.hpp"
+
 // ── Shared state in mmap ────────────────────────────────────────
-// Uses std::atomic for cross-process synchronization.
-// std::atomic<int> and std::atomic<uint8_t> are standard-layout on
-// all major implementations and safe in MAP_SHARED memory when both
-// processes use the same C++ standard library.
 
 struct SharedState {
     std::atomic<int>      ready_count {0};
     std::atomic<int>      process_count {0};
-    std::atomic<uint8_t>  lock_flag {0};    // spinlock: 0=free, 1=held
+    std::atomic<uint8_t>  lock_flag {0};
     uint8_t               _pad[7];
     std::atomic<int64_t>  epoch {0};
 };
 static_assert(sizeof(SharedState) == 24, "SharedState unexpected size");
 
-static const char* SHM_FILE = "benchmark_results/tm_2pc_state.bin";
+static constexpr const char* SHM_FILE = "benchmark_results/tm_2pc_state.bin";
 static SharedState* g_state = nullptr;
-static uint8_t*     g_data_base = nullptr;
+static uint8_t*     g_data_base = nullptr;   // TM data in mmap
 static size_t       g_mmap_size = 0;
 static size_t       g_data_off = 0;
 
@@ -60,9 +66,7 @@ extern const char* tm_symbol_names[];
 extern void* tm_symbol_addresses[];
 extern uint64_t tm_symbol_sizes[];
 
-// ── Spinlock (shared-memory safe) ───────────────────────────────
-// Uses std::atomic<uint8_t> with sequential consistency.
-// No arch-specific pause instructions — uses yield.
+// ── Spinlock ────────────────────────────────────────────────────
 
 static void spin_lock(std::atomic<uint8_t>* lk) {
     uint8_t expected = 0;
@@ -74,6 +78,27 @@ static void spin_lock(std::atomic<uint8_t>* lk) {
 
 static void spin_unlock(std::atomic<uint8_t>* lk) {
     lk->store(0, std::memory_order_release);
+}
+
+// ── Data transfer helpers ───────────────────────────────────────
+// Copy TM symbol data between process-local addresses and shared mmap.
+
+static void sync_local_to_shared() {
+    uint64_t off = 0;
+    for (uint32_t i = 0; i < tm_symbol_count; i++) {
+        uint64_t sz = tm_symbol_sizes[i];
+        memcpy(g_data_base + off, tm_symbol_addresses[i], sz);
+        off += sz;
+    }
+}
+
+static void sync_shared_to_local() {
+    uint64_t off = 0;
+    for (uint32_t i = 0; i < tm_symbol_count; i++) {
+        uint64_t sz = tm_symbol_sizes[i];
+        memcpy(tm_symbol_addresses[i], g_data_base + off, sz);
+        off += sz;
+    }
 }
 
 // ── tm_init ─────────────────────────────────────────────────────
@@ -98,37 +123,28 @@ void tm_init() {
     g_state = static_cast<SharedState*>(base);
     g_data_base = static_cast<uint8_t*>(base) + g_data_off;
 
-    // Read TM_NPROCESSES from environment
+    // Set the RelPtr base so offset_ptr works in shared data
+    RelPtr<void>::set_base(base);
+
     int nproc = 1;
     if (char* env = getenv("TM_NPROCESSES")) {
         nproc = atoi(env);
         if (nproc < 1) nproc = 1;
     }
 
-    // First process wins: CAS process_count from 0 to nproc
     int expected = 0;
     if (g_state->process_count.compare_exchange_strong(expected, nproc,
             std::memory_order_acq_rel)) {
-        // First process: snapshot initial TM data into the shared file
+        // First process: snapshot initial TM data into shared file
         g_state->ready_count.store(0, std::memory_order_relaxed);
-        uint64_t off = 0;
-        for (uint32_t i = 0; i < tm_symbol_count; i++) {
-            uint64_t sz = tm_symbol_sizes[i];
-            memcpy(g_data_base + off, tm_symbol_addresses[i], sz);
-            off += sz;
-        }
+        sync_local_to_shared();
         fprintf(stderr, "[DistSGL] init: process_count=%d\n", nproc);
     } else {
-        // Subsequent processes: restore TM data from shared state
-        uint64_t off = 0;
-        for (uint32_t i = 0; i < tm_symbol_count; i++) {
-            uint64_t sz = tm_symbol_sizes[i];
-            memcpy(tm_symbol_addresses[i], g_data_base + off, sz);
-            off += sz;
-        }
+        // Subsequent processes: load TM data from shared state
+        sync_shared_to_local();
     }
 
-    // Barrier: signal ready and wait
+    // Barrier
     g_state->ready_count.fetch_add(1, std::memory_order_acq_rel);
     fprintf(stderr, "[DistSGL] barrier: %d/%d ready\n",
             g_state->ready_count.load(std::memory_order_acquire),
@@ -142,14 +158,8 @@ void tm_init() {
 
 void tm_exit() {
     if (g_data_base && g_state) {
-        // Snapshot TM data back to shared state
-        uint64_t off = 0;
-        for (uint32_t i = 0; i < tm_symbol_count; i++) {
-            uint64_t sz = tm_symbol_sizes[i];
-            memcpy(g_data_base + off, tm_symbol_addresses[i], sz);
-            off += sz;
-        }
-        msync(g_state, g_mmap_size, MS_SYNC);
+        sync_local_to_shared();
+        msync(g_state, g_mmap_size, MS_ASYNC);
     }
     g_state->ready_count.fetch_sub(1, std::memory_order_acq_rel);
     if (g_state->ready_count.load(std::memory_order_acquire) <= 0) {
@@ -159,7 +169,7 @@ void tm_exit() {
     fprintf(stderr, "[DistSGL] exit\n");
 }
 
-// ── Transaction boundaries (2PC) ───────────────────────────────
+// ── Transaction boundaries (2PC with shared-memory sync) ────────
 
 __thread int32_t tm_nested_call_counter;
 __thread int32_t tm_longjmp_ret;
@@ -172,19 +182,31 @@ void tm_set_env(sigjmp_buf* env) {
     if (env) memcpy(&tm_jmpbuf, env, sizeof(sigjmp_buf));
 }
 
+// Per-thread: true until the first tm_begin publishes local state to mmap
+static thread_local bool g_first_begin = true;
+
 void tm_begin() {
     if (tm_nested_call_counter == 1) {
-        // PREPARE phase: acquire global lock
+        // First transaction in this thread: publish local init state
+        // (benchmarks initialize TM globals AFTER tm_init, so the mmap
+        //  has stale data until we publish here).
+        if (g_first_begin) {
+            sync_local_to_shared();
+            g_first_begin = false;
+        }
+
+        // PREPARE phase: acquire global lock, then read latest state
+        spin_lock(&g_state->lock_flag);
+        sync_shared_to_local();
         fprintf(stderr, "[DistSGL] P%d PREPARE epoch=%lld\n",
                 getpid(), (long long)g_state->epoch.load(std::memory_order_relaxed));
-        spin_lock(&g_state->lock_flag);
     }
 }
 
 void tm_end() {
     if (tm_nested_call_counter == 1) {
-        // COMMIT phase: msync, increment epoch, release lock
-        msync(g_state, g_mmap_size, MS_SYNC);
+        // COMMIT phase: publish state, advance epoch, release lock
+        sync_local_to_shared();
         g_state->epoch.fetch_add(1, std::memory_order_release);
         fprintf(stderr, "[DistSGL] P%d COMMIT  epoch=%lld\n",
                 getpid(), (long long)g_state->epoch.load(std::memory_order_relaxed));
@@ -192,7 +214,7 @@ void tm_end() {
     }
 }
 
-// ── Read/write hooks ───────────────────────────────────────────
+// ── Read/write hooks (direct memory, no instrumentation beyond serialization) ──
 
 void tm_load_symbols(void*, uint32_t) {}
 

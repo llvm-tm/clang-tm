@@ -12,6 +12,8 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
+#include "../rel_ptr.hpp"
+
 static std::mutex global_tx_lock;
 static std::atomic<bool> initialized{false};
 static std::atomic<int64_t> g_tm_begin_count{0};
@@ -22,7 +24,7 @@ __thread std::jmp_buf tm_jmpbuf;
 __thread int32_t tm_nested_call_counter;
 __thread int32_t tm_longjmp_ret;
 
-static const char* PERSIST_FILE = "tm_persist.bin";
+static const char* PERSIST_FILE = "benchmark_results/tm_persist.bin";
 
 static uint8_t* g_mmap_base = nullptr;
 static size_t g_mmap_size = 0;
@@ -80,6 +82,9 @@ void tm_init() {
         exit(1);
     }
     close(fd);
+
+    // Set RelPtr base so offset_ptr works in persisted data
+    RelPtr<void>::set_base(g_mmap_base);
 
     uint64_t magic = 0x53524550524D54ULL;
     uint32_t version = 1;
