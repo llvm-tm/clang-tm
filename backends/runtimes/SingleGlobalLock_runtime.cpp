@@ -7,11 +7,15 @@
  */
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 #include <mutex>
 #include <atomic>
 #include <csetjmp>
+
+#include "../tm_alloc_overrides.hpp"
+thread_local bool g_in_tx = false;
 
 static std::mutex global_tx_lock;
 static std::atomic<bool> initialized{false};

@@ -7,11 +7,14 @@
 #include <csetjmp>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <atomic>
 #include <cstring>
 #include <mutex>
 
 #include "../TL2/tl2.hpp"
+#include "../tm_alloc_overrides.hpp"
+thread_local bool g_in_tx = false;
 
 // Thread-local state
 static __thread int8_t tm_is_init_ready = 0;
@@ -162,16 +165,16 @@ extern "C" void tm_memset(uint8_t *addr, uint8_t val, uint64_t len, uint32_t sym
 extern "C" void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
 
-static void print_stats() {
-    fprintf(stderr, "=== TL2_new Runtime Stats ===\n");
-    fprintf(stderr, "tm_begin: %lld, tm_end: %lld\n", 
-        (long long)g_tm_begin_count.load(std::memory_order_relaxed), 
-        (long long)g_tm_end_count.load(std::memory_order_relaxed));
 void* tm_malloc(size_t size) { return g_in_tx ? malloc(size) : malloc(size); }
 void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
 void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
 void  tm_free(void* ptr) { free(ptr); }
 
+static void print_stats() {
+    fprintf(stderr, "=== TL2 Runtime Stats ===\n");
+    fprintf(stderr, "tm_begin: %lld, tm_end: %lld\n", 
+        (long long)g_tm_begin_count.load(std::memory_order_relaxed), 
+        (long long)g_tm_end_count.load(std::memory_order_relaxed));
 }
 
 static int init = (std::atexit(print_stats), 0);

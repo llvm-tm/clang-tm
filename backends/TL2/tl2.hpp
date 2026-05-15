@@ -1,5 +1,5 @@
 /**
- * TL2_new - Full Implementation per Paper Specification
+ * TL2 - Full Implementation per Paper Specification
  * 
  * Features:
  * - Global version-clock (incremented on each commit)

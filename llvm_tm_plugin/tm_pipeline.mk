@@ -68,6 +68,7 @@ TM_DEFINES_distributedsgl =
 
 TM_INCLUDES_persistentsgl =
 TM_INCLUDES_distributedsgl =
+TM_INCLUDES_tinystm     = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
 TM_INCLUDES_norec       = -I$(NOREC_DIR) -I$(BACKENDS_DIR)
 
 # ---- Canned recipes (individual steps) ----

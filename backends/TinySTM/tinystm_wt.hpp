@@ -1,5 +1,5 @@
 /**
- * TinySTM_new - WRITE_THROUGH Full Implementation per Paper Specification
+ * TinySTM - WRITE_THROUGH Full Implementation per Paper Specification
  *
  * Features:
  * - Encounter-time locking

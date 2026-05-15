@@ -1,4 +1,4 @@
-CXXFLAGS ?= -g
+CXXFLAGS ?= -g -std=c++20
 include ../../llvm_tm_plugin/tm_pipeline.mk
 $(eval $(call tm_define_rules))
 

@@ -3,10 +3,13 @@
 #include <csetjmp>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
 #include "NOrec_globals.hpp"
+#include "../tm_alloc_overrides.hpp"
+thread_local bool g_in_tx = false;
 
 extern "C" {
 // Thread-local state
