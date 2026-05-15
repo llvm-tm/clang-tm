@@ -162,4 +162,9 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {}
 void consume_ptr(volatile void *ptr) { (void)ptr; }
+void* tm_malloc(size_t size) { return malloc(size); }
+void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
+void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
+void  tm_free(void* ptr) { free(ptr); }
+
 }

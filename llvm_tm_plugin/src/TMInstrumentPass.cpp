@@ -273,6 +273,29 @@ public:
               }
               continue;
             }
+            // Replace malloc/calloc/realloc with tm_malloc
+            if (Callee && !Callee->getName().starts_with("tm_")) {
+              StringRef N = Callee->getName();
+              if (N == "malloc" || N == "calloc" || N == "realloc") {
+                Value *SizeArg = Call->getArgOperand(0);
+                auto *NewCall = B.CreateCall(H.malloc_fn, {SizeArg});
+                NewCall->setAttributes(AttributeList{});
+                Call->replaceAllUsesWith(NewCall);
+                ToErase.push_back(Call);
+                continue;
+              }
+            }
+            // Replace free with tm_free
+            if (Callee && !Callee->getName().starts_with("tm_")) {
+              StringRef N = Callee->getName();
+              if (N == "free") {
+                Value *PtrArg = Call->getArgOperand(0);
+                auto *BC = B.CreateBitCast(PtrArg, B.getPtrTy());
+                B.CreateCall(H.free_fn, {BC});
+                ToErase.push_back(Call);
+                continue;
+              }
+            }
           }
         }
 

@@ -36,6 +36,7 @@
 #include <csetjmp>
 #include <cstdio>
 #include <cstdlib>
+#include "../tm_alloc_overrides.hpp"
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -257,5 +258,11 @@ void tm_serialize_lock()   { g_serialize_mutex.lock(); }
 void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
 
 void consume_ptr(volatile void*) {}
+
+// TM allocator stubs (redirect to system allocator)
+void* tm_malloc(size_t size) { return malloc(size); }
+void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
+void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
+void  tm_free(void* ptr) { free(ptr); }
 
 } // extern "C"
