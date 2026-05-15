@@ -11,7 +11,7 @@
 #include <cstring>
 #include <mutex>
 
-#include "../TL2/tl2_new.hpp"
+#include "../TL2/tl2.hpp"
 
 // Thread-local state
 static __thread int8_t tm_is_init_ready = 0;

@@ -207,7 +207,7 @@ public:
     
     static word_t get_guard_version(word_t* addr) {
         word_t idx = get_guard_idx(addr);
-        return g_guards[idx].load(std::memory_order_acquire) & VERSION_MASK;
+        return (g_guards[idx].load(std::memory_order_acquire) & VERSION_MASK) >> 1;
     }
     
     static bool is_guard_locked(word_t* addr) {
@@ -225,32 +225,37 @@ public:
     }
     
     static bool is_locked_by_me(Transaction* tx, word_t* addr) {
+        (void)tx;
         word_t idx = get_guard_idx(addr);
         word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        return (guard & LOCK_MASK) && ((guard & VERSION_MASK) == (word_t)tx + 1);
+        return (guard & LOCK_MASK) != 0;
     }
     
     static bool try_acquire_guard(Transaction* tx, word_t* addr) {
         word_t idx = get_guard_idx(addr);
-        word_t expected = 0;
-        word_t desired = (word_t)tx + 1;
-        return g_guards[idx].compare_exchange_weak(expected, desired,
-                std::memory_order_acquire, std::memory_order_acquire);
+        word_t guard = g_guards[idx].load(std::memory_order_acquire);
+        while (!(guard & LOCK_MASK)) {
+            word_t desired = guard | LOCK_MASK;
+            if (g_guards[idx].compare_exchange_weak(guard, desired,
+                    std::memory_order_acquire, std::memory_order_acquire)) {
+                return true;
+            }
+        }
+        return false;
     }
     
     static void release_guard(word_t* addr) {
         word_t idx = get_guard_idx(addr);
-        g_guards[idx].store(0, std::memory_order_release);
+        g_guards[idx].fetch_and(~LOCK_MASK, std::memory_order_release);
     }
     
     static void set_guard_version(word_t* addr, word_t version) {
         word_t idx = get_guard_idx(addr);
-        g_guards[idx].store(version & VERSION_MASK, std::memory_order_release);
+        g_guards[idx].store((version << 1) & VERSION_MASK, std::memory_order_release);
     }
     
-    static word_t read_guard(word_t* addr) {
-        word_t idx = get_guard_idx(addr);
-        return g_guards[idx].load(std::memory_order_acquire);
+    static word_t read_guard(word_t* guard_addr) {
+        return reinterpret_cast<std::atomic<word_t>*>(guard_addr)->load(std::memory_order_acquire);
     }
     
     // Write functions with Bloom filter
@@ -401,16 +406,15 @@ public:
         
         word_t idx = get_guard_idx((word_t*)addr);
         word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = guard & VERSION_MASK;
+        word_t version = (guard & VERSION_MASK) >> 1;
         bool locked = (guard & LOCK_MASK) != 0;
-        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
         
         ReadSetEntry e;
         e.guard_addr = (word_t*)&g_guards[idx];
         e.data_addr = (word_t*)addr;
         e.observed_version = version;
         e.dtype = DataType::UINT8;
-        e.locked_by_me = locked_by_me;
+        e.locked_by_me = locked;
         tx->read_set.push_back(e);
         
         return *addr;
@@ -429,16 +433,15 @@ public:
         
         word_t idx = get_guard_idx((word_t*)addr);
         word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = guard & VERSION_MASK;
+        word_t version = (guard & VERSION_MASK) >> 1;
         bool locked = (guard & LOCK_MASK) != 0;
-        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
         
         ReadSetEntry e;
         e.guard_addr = (word_t*)&g_guards[idx];
         e.data_addr = (word_t*)addr;
         e.observed_version = version;
         e.dtype = DataType::UINT16;
-        e.locked_by_me = locked_by_me;
+        e.locked_by_me = locked;
         tx->read_set.push_back(e);
         
         return *addr;
@@ -457,16 +460,15 @@ public:
         
         word_t idx = get_guard_idx((word_t*)addr);
         word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = guard & VERSION_MASK;
+        word_t version = (guard & VERSION_MASK) >> 1;
         bool locked = (guard & LOCK_MASK) != 0;
-        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
         
         ReadSetEntry e;
         e.guard_addr = (word_t*)&g_guards[idx];
         e.data_addr = (word_t*)addr;
         e.observed_version = version;
         e.dtype = DataType::UINT32;
-        e.locked_by_me = locked_by_me;
+        e.locked_by_me = locked;
         tx->read_set.push_back(e);
         
         return *addr;
@@ -485,16 +487,15 @@ public:
         
         word_t idx = get_guard_idx((word_t*)addr);
         word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = guard & VERSION_MASK;
+        word_t version = (guard & VERSION_MASK) >> 1;
         bool locked = (guard & LOCK_MASK) != 0;
-        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
         
         ReadSetEntry e;
         e.guard_addr = (word_t*)&g_guards[idx];
         e.data_addr = (word_t*)addr;
         e.observed_version = version;
         e.dtype = DataType::UINT64;
-        e.locked_by_me = locked_by_me;
+        e.locked_by_me = locked;
         tx->read_set.push_back(e);
         
         return *addr;
@@ -514,16 +515,15 @@ public:
         
         word_t idx = get_guard_idx((word_t*)addr);
         word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = guard & VERSION_MASK;
+        word_t version = (guard & VERSION_MASK) >> 1;
         bool locked = (guard & LOCK_MASK) != 0;
-        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
         
         ReadSetEntry e;
         e.guard_addr = (word_t*)&g_guards[idx];
         e.data_addr = (word_t*)addr;
         e.observed_version = version;
         e.dtype = DataType::FLOAT;
-        e.locked_by_me = locked_by_me;
+        e.locked_by_me = locked;
         tx->read_set.push_back(e);
         
         return *addr;
@@ -543,16 +543,15 @@ public:
         
         word_t idx = get_guard_idx((word_t*)addr);
         word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = guard & VERSION_MASK;
+        word_t version = (guard & VERSION_MASK) >> 1;
         bool locked = (guard & LOCK_MASK) != 0;
-        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
         
         ReadSetEntry e;
         e.guard_addr = (word_t*)&g_guards[idx];
         e.data_addr = (word_t*)addr;
         e.observed_version = version;
         e.dtype = DataType::DOUBLE;
-        e.locked_by_me = locked_by_me;
+        e.locked_by_me = locked;
         tx->read_set.push_back(e);
         
         return *addr;
@@ -571,16 +570,15 @@ public:
         
         word_t idx = get_guard_idx((word_t*)addr);
         word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = guard & VERSION_MASK;
+        word_t version = (guard & VERSION_MASK) >> 1;
         bool locked = (guard & LOCK_MASK) != 0;
-        bool locked_by_me = locked && ((guard & VERSION_MASK) == (word_t)tx + 1);
         
         ReadSetEntry e;
         e.guard_addr = (word_t*)&g_guards[idx];
         e.data_addr = (word_t*)addr;
         e.observed_version = version;
         e.dtype = DataType::PTR;
-        e.locked_by_me = locked_by_me;
+        e.locked_by_me = locked;
         tx->read_set.push_back(e);
         
         return (void*)*addr;
@@ -594,11 +592,43 @@ public:
             return true;
         }
         
-        // Step 3: Acquire write-set locks
+        // Step 3: Acquire write-set locks, handling guard-table aliasing
+        bool held_guard[GUARD_TABLE_SIZE] = {false};
         for (auto& e : tx->write_set) {
+            word_t idx = get_guard_idx(e.addr);
+            if (held_guard[idx]) continue;
             if (!try_acquire_guard(tx, e.addr)) {
                 for (auto& e2 : tx->write_set) {
-                    release_guard(e2.addr);
+                    word_t idx2 = get_guard_idx(e2.addr);
+                    if (held_guard[idx2]) {
+                        release_guard(e2.addr);
+                        held_guard[idx2] = false;
+                    }
+                }
+                tx->active = false;
+                tx->aborted = true;
+                return false;
+            }
+            held_guard[idx] = true;
+        }
+        
+        // Step 4: Increment global version-clock
+        tx->commit_version = increment_clock();
+        
+        // Step 5: Validate ALL read-set entries — even those in our write-set,
+        // because a concurrent writer may have modified them between our read
+        // and our commit.
+        for (auto& re : tx->read_set) {
+            word_t current_guard = read_guard(re.guard_addr);
+            word_t current_version = (current_guard & VERSION_MASK) >> 1;
+            
+            if (current_version != re.observed_version) {
+                for (auto& e : tx->write_set) {
+                    word_t idx = get_guard_idx(e.addr);
+                    if (held_guard[idx]) {
+                        release_guard(e.addr);
+                        held_guard[idx] = false;
+                    }
                 }
                 tx->active = false;
                 tx->aborted = true;
@@ -606,30 +636,7 @@ public:
             }
         }
         
-        // Step 4: Increment global version-clock
-        tx->commit_version = increment_clock();
-        
-        // Step 5: Validate read-set using version numbers
-        if (tx->commit_version > tx->start_version + 1) {
-            for (auto& re : tx->read_set) {
-                if (re.locked_by_me) continue;
-                
-                word_t current_guard = read_guard(re.guard_addr);
-                word_t current_version = current_guard & VERSION_MASK;
-                bool locked = (current_guard & LOCK_MASK) != 0;
-                
-                if (locked || current_version > re.observed_version) {
-                    for (auto& e : tx->write_set) {
-                        release_guard(e.addr);
-                    }
-                    tx->active = false;
-                    tx->aborted = true;
-                    return false;
-                }
-            }
-        }
-        
-        // Step 6: Apply writes and release locks with version
+        // Step 7: Apply writes and release locks with version
         for (auto& e : tx->write_set) {
             switch (e.dtype) {
                 case DataType::UINT8:
@@ -663,7 +670,7 @@ public:
             
             // Release lock: store version number (unlocked state per TL2 spec)
             word_t idx = get_guard_idx(e.addr);
-            g_guards[idx].store(tx->commit_version, std::memory_order_release);
+            g_guards[idx].store((tx->commit_version << 1) & VERSION_MASK, std::memory_order_release);
         }
         
         tx->active = false;

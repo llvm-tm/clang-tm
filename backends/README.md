@@ -21,7 +21,7 @@ backends/
 │   ├── tinystm_wbetl.hpp   # Write-back encounter-time locking
 │   └── tinystm_wt.hpp      # Write-through
 ├── TL2/                   # Transactional Locking 2
-│   └── tl2_new.hpp
+│   └── tl2.hpp
 ├── NOrec/                 # Lazy value-based validation STM
 │   ├── NOrec.hpp
 │   └── NOrec_globals.hpp
