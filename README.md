@@ -187,6 +187,7 @@ int main() {
 | `TX` | Function executes as a transaction (wrapped with `tm_begin`/`tm_end`) |
 | `THREAD` | Thread entry point (gets `tm_init_thread`/`tm_exit_thread`) |
 | `MAIN` | Program entry point (gets `tm_init`/`tm_exit`) |
+| `PSTATIC_REBUILD` | Called automatically after `tm_init()` restores persistent data. Used with `TX` to rebuild data structures from TM-backed arrays. |
 
 ## Backend Reference
 
@@ -207,20 +208,42 @@ linking against the appropriate `*_runtime.cpp`.
 
 ### PersistentSGL
 
-File-backed persistence of TM globals. Each write updates both memory and
-`benchmark_results/tm_persist.bin` via `mmap`. On restart, data is restored.
+File-backed persistence of TM globals with automatic heap allocation.
 
+**Architecture:**
+- A 64 MB mmap file (`benchmark_results/tm_persist.bin`) stores TM globals and a bump allocator heap
+- Fixed-address mmap at `0x600000000000` (deterministic VA) so pointer-based data structures remain valid after restart
+- `tm_malloc`/`tm_free`/`tm_calloc`/`tm_realloc` are implemented in each runtime
+- `g_in_tx` thread-local flag: `tm_begin()` sets `true`, `tm_end()` sets `false`
+- Inside a TX function: `operator new` → `tm_malloc` → persistent heap bump allocator
+- Outside a TX function: `tm_malloc` falls back to system `malloc`
+- C++ `operator new`/`delete` are overridden for all 16 variants (plain, array, sized, aligned, nothrow)
+- The LLVM plugin replaces `malloc`/`free`/`calloc`/`realloc` calls inside TX functions with `tm_malloc`/`tm_free`
+
+**Simple types** (arrays, primitives) persist transparently:
 ```bash
 rm -f benchmark_results/tm_persist.bin
 ./bin/prog_persistentsgl    # first run: stores initial state
 ./bin/prog_persistentsgl    # second run: restores previous state
 ```
 
-Run repeatedly: each invocation sees the state from the previous run.
-Requires fixed-size data (arrays, primitives). Heap-based types (std::map)
-need explicit serialisation. A `RelPtr<T>` offset pointer
-(`backends/rel_ptr.hpp`) is available for building custom persistent data
-structures.
+**std::map persistence** requires `PSTATIC_REBUILD`:
+```cpp
+TM int      g_pkeys[1024];
+TM int      g_pvals[1024];
+TM int      g_pcount = 0;
+static std::map<int, int> g_map;   // NOT TM — rebuilt on restart
+
+TX PSTATIC_REBUILD void rebuild() {
+    g_map.clear();
+    for (int i = 0; i < g_pcount; i++)
+        g_map[g_pkeys[i]] = g_pvals[i];
+}
+```
+
+The plugin calls `rebuild()` automatically after `tm_init()` restores the arrays. Because it's `TX`, allocations go to the persistent heap. See `benchmarks/persistent_kv_stdmap.cpp`.
+
+**Important:** Call `g_map.clear()` before `main` returns to avoid the `std::map` destructor accessing the unmapped mmap after `tm_exit()`.
 
 ### DistributedSGL
 

@@ -358,17 +358,32 @@ Each backend implements these with a different STM strategy:
 \item \textbf{PersistentSGL}: a persistence backend that wraps
   SingleGlobalLock with file-backed \texttt{mmap}.  At
   \texttt{tm\_init()}, the current values of all TM-annotated globals are
-  snapshotted into a memory-mapped file.  Each \texttt{tm\_write\_*}
-  updates both the in-memory value and the mapped file transparently.
+  snapshotted into a memory-mapped file (64 MB, mapped at a deterministic
+  virtual address \texttt{0x600000000000} via \texttt{MAP\_FIXED}).
   On a subsequent run, \texttt{tm\_init()} detects the existing file and
-  restores the TM globals from it.  This enables TM application state to
-  survive process restarts with no programmer effort beyond the existing
-  \texttt{TM}/\texttt{TX} annotations.  Fixed-size data (arrays,
-  primitives) persists correctly; heap-based containers (\texttt{std::map},
-  \texttt{std::vector}) require serialisation because their node pointers are
-  absolute addresses that become stale after restart (a
-  position-independent \texttt{RelPtr} pointer abstraction is provided in
-  \texttt{backends/rel\_ptr.hpp} for custom persistent data structures).
+  restores the TM globals from it.
+
+  The backend provides a persistent bump allocator:
+  \texttt{tm\_malloc}/\texttt{tm\_free}/\texttt{tm\_calloc}/\texttt{tm\_realloc}
+  are implemented in each runtime.  A thread-local \texttt{g\_in\_tx} flag,
+  set by \texttt{tm\_begin()} and cleared by \texttt{tm\_end()}, distinguishes
+  allocations inside transactions (which go to the persistent mmap heap) from
+  those outside (which fall back to the system allocator).
+  All 16 C++ \texttt{operator new}/\texttt{delete} variants are overridden to
+  call \texttt{tm\_malloc}/\texttt{tm\_free}.  The LLVM plugin additionally
+  replaces \texttt{malloc}/\texttt{free}/\texttt{calloc}/\texttt{realloc}
+  calls inside TX functions with \texttt{tm\_malloc}/\texttt{tm\_free}.
+
+  For heap-based containers like \texttt{std::map}, the persistent allocator
+  alone is insufficient because the constructor allocates a sentinel node on
+  the system heap before \texttt{tm\_init()} restores tree pointers.  A
+  \textbf{\texttt{PSTATIC\_REBUILD}} annotation is provided: functions
+  annotated \texttt{TX PSTATIC\_REBUILD} store key-value pairs in
+  TM-annotated arrays during execution and are automatically called by the
+  plugin after \texttt{tm\_init()} to rebuild the in-memory container from the
+  persisted arrays.  Because the rebuild function is \texttt{TX}, allocations
+  go through \texttt{tm\_malloc} to the persistent heap, and the fixed-address
+  mmap ensures tree-node pointers remain valid across restarts.
 
 \item \textbf{DistributedSGL}: a distributed-transaction backend that
   simulates two-phase commit across multiple OS processes using a shared
