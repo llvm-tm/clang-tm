@@ -355,6 +355,36 @@ Each backend implements these with a different STM strategy:
   the entire read-set at commit.  Most expensive per-access overhead.
 \item \textbf{SwissTM}: hybrid lazy/pessimistic~\cite{SwissTM}.  Lazy conflict
   detection with commit-time validation.
+\item \textbf{PersistentSGL}: a persistence backend that wraps
+  SingleGlobalLock with file-backed \texttt{mmap}.  At
+  \texttt{tm\_init()}, the current values of all TM-annotated globals are
+  snapshotted into a memory-mapped file.  Each \texttt{tm\_write\_*}
+  updates both the in-memory value and the mapped file transparently.
+  On a subsequent run, \texttt{tm\_init()} detects the existing file and
+  restores the TM globals from it.  This enables TM application state to
+  survive process restarts with no programmer effort beyond the existing
+  \texttt{TM}/\texttt{TX} annotations.  Fixed-size data (arrays,
+  primitives) persists correctly; heap-based containers (\texttt{std::map},
+  \texttt{std::vector}) require serialisation because their node pointers are
+  absolute addresses that become stale after restart (a
+  position-independent \texttt{RelPtr} pointer abstraction is provided in
+  \texttt{backends/rel\_ptr.hpp} for custom persistent data structures).
+
+\item \textbf{DistributedSGL}: a distributed-transaction backend that
+  simulates two-phase commit across multiple OS processes using a shared
+  \texttt{mmap} file.  A configurable number of processes
+  (\texttt{TM\_NPROCESSES} environment variable) synchronise in a barrier
+  at \texttt{tm\_init()}.  On each \texttt{tm\_begin()} the process acquires
+  a global spinlock (PREPARE phase) and synchronises TM symbol data from
+  the shared file; on \texttt{tm\_end()} it writes its changes back,
+  advances an epoch counter, and releases the lock (COMMIT phase).
+  This ensures every process sees the latest committed state regardless
+  of address-space layout randomisation (ASLR) between processes, because
+  data is transferred by offset-based \texttt{memcpy} rather than by
+  shared pointers.  The backend demonstrates that the annotation-driven
+  plugin makes it straightforward to experiment with unconventional TM
+  semantics --- persistence and distribution --- without changing a single
+  line of plugin code.
 \end{itemize}
 
 \section{Evaluation}\label{sec:evaluation}

@@ -199,7 +199,44 @@ int main() {
 | TinySTM (WBETL) | `_tinystm` (WBETL) | Write-back ETL | Untested | Slow |
 | TinySTM (WT) | `_tinystm` (WT) | Write-through | Untested | Slow |
 | SwissTM | `_swiss` | Hybrid lazy/pessimistic | ✅ | Slow |
-| PersistentSGL | `_persistentsgl` | SGL + mmap persistence | N/A | N/A |
+| PersistentSGL | `_persistentsgl` | SGL + mmap persistence | ✅ Array types | Single-process persistence |
+| DistributedSGL | `_distributedsgl` | Shared mmap + 2PC | ✅ Cross-process | Inter-process sync via mmap |
 
 All backends share the same `tm_*` hook interface. Select at link time by
 linking against the appropriate `*_runtime.cpp`.
+
+### PersistentSGL
+
+File-backed persistence of TM globals. Each write updates both memory and
+`benchmark_results/tm_persist.bin` via `mmap`. On restart, data is restored.
+
+```bash
+rm -f benchmark_results/tm_persist.bin
+./bin/prog_persistentsgl    # first run: stores initial state
+./bin/prog_persistentsgl    # second run: restores previous state
+```
+
+Run repeatedly: each invocation sees the state from the previous run.
+Requires fixed-size data (arrays, primitives). Heap-based types (std::map)
+need explicit serialisation. A `RelPtr<T>` offset pointer
+(`backends/rel_ptr.hpp`) is available for building custom persistent data
+structures.
+
+### DistributedSGL
+
+Multi-process distributed transactions via shared mmap with two-phase commit.
+
+```bash
+export TM_NPROCESSES=2
+./bin/prog_distributedsgl &   # process 1 (blocks at barrier)
+./bin/prog_distributedsgl     # process 2 (both proceed)
+```
+
+Each process:
+1. Waits at a barrier until all `TM_NPROCESSES` processes have called `tm_init`.
+2. On `tm_begin()`: acquires a spinlock (PREPARE) and syncs TM data from the shared mmap.
+3. On `tm_end()`: writes TM data to the shared mmap, advances epoch, releases lock (COMMIT).
+
+Data is transferred by offset-based memcpy (not shared pointers), so it works
+across different virtual address spaces (ASLR-safe). The shared state file
+is at `benchmark_results/tm_2pc_state.bin` (gitignored).
