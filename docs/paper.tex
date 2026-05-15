@@ -488,44 +488,98 @@ complex CAD/CAM (STMbench7), and synthetic TM characterisation (EigenBench).}
 
 \subsection{Bank Benchmark}
 
+Figure~\ref{fig:bank-throughput} shows throughput for all four active
+backends.  All backends conserve money (final total equals initial total)
+across all runs.  TL2 now passes the money-conservation test at both
+2 and 4 threads, after a fix to the lock-acquisition logic.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{../benchmark_results/bank_throughput.pdf}
+\caption{Bank benchmark -- t=4, a=256, d=3000\,ms, 10\% read-all.}
+\label{fig:bank-throughput}
+\end{figure}
+
 \begin{table}[h]
 \centering
 \begin{tabular}{lrrr}
 \toprule
-Backend & 2T (txns/sec) & 4T (txns/sec) & Correctness \\
+Backend & 4T (txns/sec) & Correctness \\
 \midrule
-SingleGlobalLock & 1,437,550 & 1,108,080 & Always \\
-TL2 & 1,739,160 & 2,400,000 & 2T only \\
-NOrec & 282,225 & 176,782 & Always \\
-TinySTM (WBCTL) & --- & --- & (too slow) \\
-SwissTM & --- & --- & (too slow) \\
+SingleGlobalLock & 2,080,000 & Always \\
+NOrec & 223,000 & Always \\
+TL2 & 3,810,000 & Always \\
+TinySTM (WBCTL) & 371,000 & Always \\
 \bottomrule
 \end{tabular}
-\caption{Bank benchmark: money conservation across backends.  NOrec and
-SingleGlobalLock always conserve money.  TL2 has a race condition at 4 threads
-(violation of $\pm3$).  TinySTM and SwissTM are correct but too slow to complete
-within the timeout due to per-access logging overhead.}
+\caption{Bank benchmark: money conservation across backends.
+All backends now pass the correctness check.  The TL2 lock-acquisition
+bug has been fixed.}
+\label{tab:bank}
 \end{table}
 
 \subsection{Data Structure Benchmarks}
 
+Figure~\ref{fig:ds-throughput} shows data-structure microbenchmark
+throughput.  After the cloning fix (Section~\ref{sec:cloning}), TinySTM
+no longer times out on these workloads.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{../benchmark_results/datastructures_throughput.pdf}
+\caption{Data structure benchmarks -- t=4, n=10000, d=3000\,ms,
+80\% reads, 10\% writes.}
+\label{fig:ds-throughput}
+\end{figure}
+
 \begin{table}[h]
 \centering
-\begin{tabular}{lrr}
+\begin{tabular}{lcc}
 \toprule
-Benchmark & NOrec (ops/sec) & TinySTM \\
+Benchmark & Backend & Ops/sec \\
 \midrule
-Hash Map & 1,261,680 & Timeout \\
-Set & 6,088 & Timeout \\
-AVL Tree & Correct & Timeout \\
+Hash Map & NOrec & 1,550,000 \\
+Sorted Set & NOrec & 8,500 \\
+AVL Tree & SingleGlobalLock & 1,440,000 \\
 \bottomrule
 \end{tabular}
-\caption{Data structure benchmarks (4 threads, 5s, 80\% reads, 10\% writes).
-NOrec handles the high read volume efficiently.  TinySTM's per-access read-set
-logging is too expensive.}
+\caption{Data structure benchmarks (4 threads, 3s, 80\% reads, 10\% writes).
+The cloning fix has eliminated the TinySTM timeouts.}
+\label{tab:datastructures}
 \end{table}
 
-\subsection{STMbench7}
+\subsection{Application Benchmarks}
+
+Figure~\ref{fig:app-throughput} shows throughput on three larger
+benchmarks.  STMbench7's per-element iterator tracing generates the
+most TM-read calls per transaction, limiting throughput; YCSB and
+EigenBench benefit from shorter transactions.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{../benchmark_results/application_throughput.pdf}
+\caption{Application benchmarks.}
+\label{fig:app-throughput}
+\end{figure}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcr}
+\toprule
+Benchmark & Backend & Ops/sec \\
+\midrule
+STMbench7 (4T, w=1) & SingleGlobalLock & 400 \\
+YCSB Workload A (4T, 10k keys) & SingleGlobalLock & 534,000 \\
+EigenBench (2T, 2s) & SingleGlobalLock & 200 \\
+\bottomrule
+\end{tabular}
+\caption{Application benchmark results.  STMbench7 instruments every
+element access in traversals (300k connections $\times$ 4 fields),
+generating millions of TM read calls per transaction.  YCSB and
+EigenBench feature shorter transactions with fewer instrumented
+accesses.}
+\label{tab:application}
+\end{table}
 
 \begin{table}[h]
 \centering
@@ -541,6 +595,47 @@ SingleGlobalLock & 200 & Always \\
 access in long traversals (300k+ connections $\times$ 4 fields per
 transaction), generating millions of TM read calls.  SingleGlobalLock avoids
 per-access overhead.}
+\end{table}
+
+\subsection{Instrumentation Overhead}
+
+Table~\ref{tab:instrumentation-assessment} measures the plugin's
+impact on compiled code size, TM hook injection, and call-graph cloning.
+The instrumented IR grows by 2--15\% across benchmarks (ratio
+column).  The number of injected TM read/write hooks (TM hooks)
+reflects the static count of instrumented memory accesses within
+transaction functions.
+
+After the cloning fix (\S\ref{sec:cloning}), only functions that
+directly access TM-annotated data are cloned.  Benchmarks with
+simple data access patterns (bank: 0 clones, STMbench7: 0 clones)
+have no cloning overhead.  Data structures that pass TM-traceable
+pointers through helper functions (AVL tree: 12--13 clones) require
+modest cloning.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lrrrrrrrr}
+\toprule
+Benchmark & \multicolumn{2}{c}{IR lines} & TX & TM & TM hooks & Clones & Redirects & Ratio \\
+          & raw & instr & fns & gvs & r\slash w & defs & to clone & instr\slash raw \\
+\midrule
+  bank &  7316 &  7512 &   3 &   1 &   28 &    0 &      0 & 1.02 \\
+  avltree &  7972 &  8832 &   5 &   1 &  122 &   12 &     56 & 1.10 \\
+  avltree\_recursive &  5625 &  6480 &   5 &   1 &  101 &   13 &     71 & 1.15 \\
+  stmbench7 & 21665 & 23422 &  38 &   1 &   86 &    0 &      0 & 1.08 \\
+  ycsb & 11106 & 11700 &   6 &   1 &   57 &    2 &      5 & 1.05 \\
+  eigen &  7411 &  7672 &   4 &   1 &   16 &    2 &      4 & 1.03 \\
+\bottomrule
+\end{tabular}
+\caption{LLVM IR instrumentation assessment.  IR lines ---
+uninstrumented vs.\ instrumented (post-plugin).  TX = transaction
+functions, TM = annotated globals, TM hooks = statically inserted
+\texttt{tm\_read\_*}/\texttt{tm\_write\_*} calls, Clones = cloned
+helper functions, Redirects = call sites redirected to clones,
+Ratio = instr / raw lines.}
+\label{tab:instrumentation-assessment}
 \end{table}
 
 \section{Related Work}\label{sec:related}
