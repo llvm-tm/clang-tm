@@ -207,7 +207,7 @@ static void print_stats()
 static int init = (std::atexit(print_stats), 0);
 
 // TM allocator stubs (redirect to system allocator)
-void* tm_malloc(size_t size) { return malloc(size); }
+void* tm_malloc(size_t size) { return g_in_tx ? malloc(size) : malloc(size); }
 void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
 void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
 void  tm_free(void* ptr) { free(ptr); }

@@ -68,14 +68,16 @@ extern "C" void tm_set_env(sigjmp_buf* env) {
 // Wrapper functions matching plugin interface (void return, symbol_id parameter)
 
 extern "C" void tm_begin() {
-    if (tm_nested_call_counter == 1)
+    if (tm_nested_call_counter == 1) { g_in_tx = true;
         tl2::begin();
+    }
     g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 extern "C" void tm_end() {
-    if (tm_nested_call_counter == 1)
+    if (tm_nested_call_counter == 1) { g_in_tx = false;
         tl2::commit();
+    }
     g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -165,7 +167,7 @@ static void print_stats() {
     fprintf(stderr, "tm_begin: %lld, tm_end: %lld\n", 
         (long long)g_tm_begin_count.load(std::memory_order_relaxed), 
         (long long)g_tm_end_count.load(std::memory_order_relaxed));
-void* tm_malloc(size_t size) { return malloc(size); }
+void* tm_malloc(size_t size) { return g_in_tx ? malloc(size) : malloc(size); }
 void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
 void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
 void  tm_free(void* ptr) { free(ptr); }

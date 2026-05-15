@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "../tm_alloc_overrides.hpp"
+thread_local bool g_in_tx = false;
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -187,7 +188,7 @@ void tm_set_env(sigjmp_buf* env) {
 static thread_local bool g_first_begin = true;
 
 void tm_begin() {
-    if (tm_nested_call_counter == 1) {
+    if (tm_nested_call_counter == 1) { g_in_tx = true;
         // First transaction in this thread: publish local init state
         // (benchmarks initialize TM globals AFTER tm_init, so the mmap
         //  has stale data until we publish here).
@@ -205,7 +206,7 @@ void tm_begin() {
 }
 
 void tm_end() {
-    if (tm_nested_call_counter == 1) {
+    if (tm_nested_call_counter == 1) { g_in_tx = false;
         // COMMIT phase: publish state, advance epoch, release lock
         sync_local_to_shared();
         g_state->epoch.fetch_add(1, std::memory_order_release);
@@ -260,7 +261,7 @@ void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
 void consume_ptr(volatile void*) {}
 
 // TM allocator stubs (redirect to system allocator)
-void* tm_malloc(size_t size) { return malloc(size); }
+void* tm_malloc(size_t size) { return g_in_tx ? malloc(size) : malloc(size); }
 void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
 void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
 void  tm_free(void* ptr) { free(ptr); }

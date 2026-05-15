@@ -83,7 +83,7 @@ void tm_begin()
 {
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
-	if (tm_nested_call_counter == 1) {
+	if (tm_nested_call_counter == 1) { g_in_tx = true;
 		tinystm::begin();
 	}
 }
@@ -92,7 +92,7 @@ void tm_end()
 {
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 	tm_end_count++;
-	if (tm_nested_call_counter == 1) {
+	if (tm_nested_call_counter == 1) { g_in_tx = false;
 		// Record max read-set and write-set sizes for this TX
 #if defined(DESIGN_WBCTL)
 		auto *tx = tinystm::current_tx_wbctl;
@@ -162,7 +162,7 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {}
 void consume_ptr(volatile void *ptr) { (void)ptr; }
-void* tm_malloc(size_t size) { return malloc(size); }
+void* tm_malloc(size_t size) { return g_in_tx ? malloc(size) : malloc(size); }
 void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
 void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
 void  tm_free(void* ptr) { free(ptr); }

@@ -75,14 +75,14 @@ void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
 
 void tm_begin() {
-    if (tm_nested_call_counter == 1) {
+    if (tm_nested_call_counter == 1) { g_in_tx = true;
         g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
         global_tx_lock.lock();
     }
 }
 
 void tm_end() {
-    if (tm_nested_call_counter == 1) {
+    if (tm_nested_call_counter == 1) { g_in_tx = false;
         g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
         g_tm_tx_count.fetch_add(1, std::memory_order_relaxed);
         global_tx_lock.unlock();
@@ -136,7 +136,7 @@ static void print_stats()
 static int init = (std::atexit(print_stats), 0);
 
 // TM allocator stubs (redirect to system allocator)
-void* tm_malloc(size_t size) { return malloc(size); }
+void* tm_malloc(size_t size) { return g_in_tx ? malloc(size) : malloc(size); }
 void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
 void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
 void  tm_free(void* ptr) { free(ptr); }
