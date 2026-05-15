@@ -57,17 +57,17 @@ TM_RUNTIME_singlelock   = $(RUNTIMES_DIR)/SingleGlobalLock_runtime.cpp
 TM_RUNTIME_swisstm      = $(RUNTIMES_DIR)/SwissTM_runtime.cpp
 TM_RUNTIME_norec        = $(RUNTIMES_DIR)/NOrec_runtime.cpp
 TM_RUNTIME_persistentsgl = $(RUNTIMES_DIR)/PersistentSGL_runtime.cpp
+TM_RUNTIME_distributedsgl = $(RUNTIMES_DIR)/DistributedSGL_runtime.cpp
 
 TM_DEFINES_tinystm      = -DDESIGN_WBCTL
 TM_DEFINES_tl2          =
 TM_DEFINES_singlelock   =
 TM_DEFINES_norec        =
 TM_DEFINES_persistentsgl =
+TM_DEFINES_distributedsgl =
 
-TM_INCLUDES_tinystm     = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
-TM_INCLUDES_tl2         =
-TM_INCLUDES_singlelock  =
 TM_INCLUDES_persistentsgl =
+TM_INCLUDES_distributedsgl =
 TM_INCLUDES_norec       = -I$(NOREC_DIR) -I$(BACKENDS_DIR)
 
 # ---- Canned recipes (individual steps) ----
