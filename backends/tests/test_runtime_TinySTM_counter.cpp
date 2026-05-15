@@ -20,7 +20,7 @@ extern tinystm::LockTable<tinystm::Lock_wbetl> tinystm::g_locks_wbetl;
 extern tinystm::LockTable<tinystm::Lock_wbctl> tinystm::g_locks_wbctl;
 #elif defined(DESIGN_WT)
 #include "tinystm_wt.hpp"
-extern tinystm::LockTable<tinystm::Lock_wt> tinystm::g_locks_wt;
+// WT defines its own static LockTable g_locks internally — no extern needed
 #else
 #error "Define one of: DESIGN_WBETL, DESIGN_WBCTL, DESIGN_WT"
 #endif

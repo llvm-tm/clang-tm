@@ -92,3 +92,4 @@ help:
 	@echo "  bank_norec        - NOrec runtime"
 	@echo "  test              - Run all tests"
 	@echo "  clean             - Clean build artifacts"
+$(eval $(call tm_target, bank_persistentsgl, $(BANK_SRC), persistentsgl))

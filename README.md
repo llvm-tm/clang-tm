@@ -1,101 +1,173 @@
 # TM API C++ — LLVM Transactional Memory Plugin
 
-An LLVM compiler plugin that automatically instruments C++ code for Software Transactional Memory (STM). Uses source-code annotations (`__attribute__((annotate(...)))`) to mark global variables and functions as transactional.
+An LLVM compiler plugin that automatically instruments C++ code for Software
+Transactional Memory (STM) using source-level annotations. Mark globals with
+`__attribute__((annotate("tm")))` and function with
+`__attribute__((annotate("transaction")))` — the plugin handles the rest.
 
 ## Quick Start
 
 ```bash
-# Build the LLVM plugin and all benchmarks
+# Build the LLVM plugin and all benchmarks (default: SingleGlobalLock backend)
 make all
 
-# Run the bank benchmark with SingleGlobalLock (fastest backend)
+# Quick smoke test (Bank + AVL + STAMP with default backend)
 make test_run
 ```
 
-## Architecture
+## Prerequisites
+
+- **LLVM 16+** with the `opt` tool and development libraries
+- **Clang 16+** (matching LLVM version)
+- `make`, `gtimeout` (macOS: `brew install coreutils`)
+- `git-filter-repo` (optional, for history rewriting)
+
+## Building
+
+### 1. Build the plugin
+
+```bash
+make plugin
+```
+
+Produces `llvm_tm_plugin/bin/libTMInstrument.so`.
+
+### 2. Build a specific backend
+
+```bash
+make benchmarks BACKEND=tl2              # Build all benchmarks with TL2
+make benchmarks BACKEND=norec            # Build all benchmarks with NOrec
+make benchmarks BACKEND=tinystm          # Build all benchmarks with TinySTM
+make benchmarks BACKEND=singlelock       # Build all benchmarks with SingleGlobalLock
+```
+
+The default backend is **tinystm**. Supported values:
+`singlelock`, `norec`, `tl2`, `tinystm`, `swiss`.
+
+### 3. Build individual benchmarks
+
+Each benchmark directory has its own Makefile with targets named
+`<name>_<backend>`:
+
+```bash
+make -C benchmarks/test/bank bank_norec bank_tl2 bank_singlelock bank_tinystm
+make -C benchmarks/datastructures avltree_NOrec avltree_SingleGlobalLock
+make -C benchmarks/STMbench7 stmbench_singlelock stmbench_tl2 stmbench_tinystm
+make -C benchmarks/STAMP stamp_tinystm
+make -C benchmarks/YCSB ycsb_singlelock
+make -C benchmarks/EigenBench eigen_singlelock
+```
+
+### 4. Build backends unit tests
+
+```bash
+make -C backends/tests all
+make -C backends/tests run                    # Run all tests
+make -C backends/tests test_tl2_simple         # Single test
+make -C backends/tests tinystm_all             # All 3 TinySTM flavors
+```
+
+## The Compilation Pipeline
+
+The plugin transforms a source file into an instrumented binary in 4 steps,
+automated by `llvm_tm_plugin/tm_pipeline.mk`:
 
 ```
-tm_api_cpp/
-├── llvm_tm_plugin/       # LLVM plugin (the core)
-│   ├── src/              # Source: TMInstrumentPass.cpp + headers
-│   ├── test/             # Test programs (types, nested, threads, etc.)
-│   ├── runtime/          # Basic debug runtime (tm_runtime.cpp)
-│   └── tm_pipeline.mk    # Shared compilation pipeline (4 steps)
-├── backends/             # STM runtime backends
-│   ├── runtimes/         # Runtime wrappers (one per backend)
-│   ├── TinySTM/          # Write-back CTL/ETL + Write-through
-│   ├── TL2/              # Transactional Locking 2
-│   ├── NOrec/            # Lazy value-based validation
-│   ├── SwissTM/          # Hybrid lazy/pessimistic
-│   └── tests/            # Backend unit tests
-├── benchmarks/           # TM benchmarks
-│   ├── test/bank/        # Bank (money transfer, correctness check)
-│   ├── datastructures/   # AVL, RB tree, hashmap, list, set
-│   ├── STMbench7/        # Complex CAD/CAM graph benchmark
-│   ├── STAMP/            # Stanford TM benchmark suite
-│   ├── TPCC/             # OLTP benchmark
-│   ├── YCSB/             # Cloud serving benchmark
-│   └── EigenBench/       # Synthetic TM exploration
-└── docs/                 # Design docs and reports
+Step 1: clang++ -O3 -fno-inline -emit-llvm -c file.cpp → file.bc
+    Compile to LLVM bitcode (with -fno-inline to preserve annotations).
+
+Step 2: opt -load-pass-plugin=libTMInstrument.so \
+           -passes="tm-instrument" file.bc → file.instr.bc
+    TM instrumentation: replace loads/stores to TM globals with
+    tm_read_*/tm_write_* calls, wrap TX functions with tm_begin/tm_end,
+    clone reachable callees, redirect calls.
+
+Step 3: opt -O3 file.instr.bc → file.opt.bc
+    Optimize the instrumented IR (inlines TM runtime hooks).
+
+Step 4: clang++ file.opt.bc <runtime>.cpp → binary
+    Link with the chosen backend runtime.
 ```
+
+### Makefile helpers (tm_pipeline.mk)
+
+The shared Makefile include at `llvm_tm_plugin/tm_pipeline.mk` provides:
+
+| Function | Purpose |
+|----------|---------|
+| `$(call tm_compile_ir,src,out)` | Step 1: `.cpp` → `.bc` |
+| `$(call tm_instrument,in,out)` | Step 2: `.bc` → `.instr.bc` |
+| `$(call tm_optimize,in,out)` | Step 3: `.instr.bc` → `.opt.bc` |
+| `$(call tm_link,opt_bc,backend,out)` | Step 4: `.opt.bc` + runtime → binary |
+| `$(call tm_target,name,src,backend)` | Define a complete build target (`name_backend`) |
+
+Example usage in a benchmark Makefile:
+
+```makefile
+include ../../llvm_tm_plugin/tm_pipeline.mk
+
+SRC := mybench.cpp
+$(eval $(call tm_target, mybench, $(SRC), singlelock))
+$(eval $(call tm_target, mybench, $(SRC), tinystm))
+$(eval $(call tm_target, mybench, $(SRC), tl2))
+```
+
+This creates targets: `mybench_singlelock`, `mybench_tinystm`, `mybench_tl2`.
+
+## Running Benchmarks
+
+### Benchmark runner script
+
+```bash
+./run_benchmarks.sh fast       # Quick smoke test (3 samples, light params)
+./run_benchmarks.sh standard   # Standard run   (10 samples, realistic params)
+./run_benchmarks.sh            # Default: standard
+```
+
+Results go to `benchmark_results/<mode>_<timestamp>/` with a `SUMMARY.txt`.
+
+### Running individual benchmarks
+
+```bash
+# Bank (money conservation test)
+benchmarks/test/bank/bin/bank_singlelock -t 4 -a 256 -d 3000 -r 10 -w 0
+#   -t threads  -a accounts  -d duration_ms  -r %read-all  -w %write-all
+
+# Data structures
+benchmarks/datastructures/bin/avltree_SingleGlobalLock 4 10000 3000 80 10 10
+#   threads  init_size  duration_ms  %read  %insert  %remove
+
+# STMbench7 (complex CAD/CAM graph)
+benchmarks/STMbench7/bin/stmbench_singlelock -t 4 -d 3000 -w 1
+#   -t threads  -d duration_ms  -w workload(1=90%read/10%write)
+
+# STAMP (Stanford TM benchmarks, TinySTM only)
+benchmarks/STAMP/bin/stamp_tinystm -t 2 -d 5000 -b genome
+#   -t threads  -d duration_ms  -b benchmark
+
+# YCSB (cloud serving benchmark)
+benchmarks/YCSB/bin/ycsb_singlelock -t 4 -d 3000 -w A -k 10000 -i 1000
+#   -t threads  -d ms  -w workload  -k key_range  -i initial_records
+
+# EigenBench (synthetic TM characterization)
+benchmarks/EigenBench/bin/eigen_singlelock -t 2 -d 2000
+```
+
+## Assessing Instrumentation Overhead
+
+```bash
+./assess_instrumentation.sh              # All benchmarks
+./assess_instrumentation.sh bank stmbench7  # Specific benchmarks
+```
+
+Produces a LaTeX table with IR line counts, TM hook counts, clone counts, etc.
 
 ## Programming Model
 
-Mark globals and functions with annotations:
-
 ```cpp
 #define TM  __attribute__((annotate("tm")))
 #define TX  __attribute__((annotate("transaction"), noinline))
-
-TM int global_counter = 0;
-
-TX void increment() {
-    global_counter++;
-}
-```
-
-The plugin:
-1. Instruments `TM` globals with `tm_read_*`/`tm_write_*` calls
-2. Wraps `TX` functions in transaction begin/commit + retry logic
-3. Clones non-TX functions reachable from TX functions (with `_tm_clone` suffix)
-4. Redirects calls within TX code to instrumented clones
-
-## Annotations
-
-| Annotation | Purpose |
-|---|---|
-| `TM` | Variable is shared and needs TM tracking |
-| `TX` | Function executes as a transaction |
-| `THREAD` | Function is a thread entry point (gets tm_init_thread) |
-| `MAIN` | Entry point (gets tm_init/tm_exit) |
-
-## Backends
-
-| Backend | Build Target | Strategy | 2T Correct | 4T Correct |
-|---|---|---|---|---|
-| SingleGlobalLock | `_singlelock` | Global mutex | ✅ | ✅ |
-| NOrec | `_norec` | Value-based validation | ✅ | ✅ |
-| TL2 | `_tl2` | Commit-time locking | ✅ | ❌ (money off by ±3) |
-| TinySTM (wbctl) | `_tinystm` | Write-back CTL | ⚠️ Slow | ⚠️ Slow |
-| SwissTM | `_swiss` | Lazy commit-time | ⚠️ Slow | ⚠️ Slow |
-
-## Build Targets
-
-```bash
-make plugin          # Build libTMInstrument.so
-make benchmarks     # Build all benchmarks
-make tests          # Build plugin test suite
-make test_run       # Quick smoke test
-make clean          # Clean everything
-```
-
-## Writing a Transactional Program
-
-```cpp
-#include <cstdio>
-
-#define TM  __attribute__((annotate("tm")))
-#define TX  __attribute__((annotate("transaction"), noinline))
+#define THREAD __attribute__((annotate("thread"), noinline))
 #define MAIN __attribute__((annotate("main"), noinline))
 
 TM int counter = 0;
@@ -104,25 +176,30 @@ TX void increment() {
     counter++;
 }
 
-MAIN int main() {
+int main() {
     increment();
-    printf("counter = %d\n", counter);
-    return 0;
 }
 ```
 
-Compile with the pipeline:
-```bash
-clang++ -O3 -fno-inline -emit-llvm -c prog.cpp -o prog.bc
-opt -load-pass-plugin=libTMInstrument.so -passes="tm-instrument" prog.bc -o prog.instr.bc
-opt -O3 prog.instr.bc -o prog.opt.bc
-clang++ prog.opt.bc backends/runtimes/NOrec_runtime.cpp -o prog
-```
+| Annotation | Purpose |
+|------------|---------|
+| `TM` | Variable is managed by the STM runtime (every load/store instrumented) |
+| `TX` | Function executes as a transaction (wrapped with `tm_begin`/`tm_end`) |
+| `THREAD` | Thread entry point (gets `tm_init_thread`/`tm_exit_thread`) |
+| `MAIN` | Program entry point (gets `tm_init`/`tm_exit`) |
 
-## References
+## Backend Reference
 
-- Zardoshti et al., "Simplifying Transactional Memory Support in C++", ACM TACO 2019
-- STMbench7: Guerraoui, Kapalka, Vitek, EuroSys 2007
-- TinySTM: Felber, Fetzer, Riegel, PPoPP 2008
-- TL2: Dice, Shalev, Shavit, DISC 2006
-- NOrec: Dalessandro, Spear, Scott, PPoPP 2010
+| Backend | Build suffix | Strategy | Correctness | Speed |
+|---------|-------------|----------|-------------|-------|
+| SingleGlobalLock | `_singlelock` | Global `std::mutex` | Always | Fastest |
+| NOrec | `_norec` | Value-based validation | Always | Fast (read-heavy) |
+| TL2 | `_tl2` | Commit-time locking | ✅ | Fast (disjoint access) |
+| TinySTM (WBCTL) | `_tinystm` | Write-back CTL | ✅ | Slow (per-access logging) |
+| TinySTM (WBETL) | `_tinystm` (WBETL) | Write-back ETL | Untested | Slow |
+| TinySTM (WT) | `_tinystm` (WT) | Write-through | Untested | Slow |
+| SwissTM | `_swiss` | Hybrid lazy/pessimistic | ✅ | Slow |
+| PersistentSGL | `_persistentsgl` | SGL + mmap persistence | N/A | N/A |
+
+All backends share the same `tm_*` hook interface. Select at link time by
+linking against the appropriate `*_runtime.cpp`.

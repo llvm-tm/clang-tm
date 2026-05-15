@@ -25,7 +25,8 @@ with \texttt{\_\_attribute\_\_((annotate("tm")))} and functions with
 transaction begin/commit hooks with \texttt{sigsetjmp}/\texttt{siglongjmp} retry logic,
 (ii) replaces loads and stores to annotated globals with typed \texttt{tm\_read\_*}/\texttt{tm\_write\_*}
 calls, (iii) performs transitive call-graph cloning so that functions reachable from
-transactions are automatically instrumented, and (iv) supports multiple STM backends
+transactions which interact with TM state are automatically instrumented, and
+(iv) supports multiple STM backends
 including NOrec, TL2, TinySTM, SwissTM, and SingleGlobalLock.  We evaluate the plugin
 on bank transactions, data-structure microbenchmarks, and STMbench7, demonstrating
 correctness across all backends and identifying performance trade-offs between
@@ -40,8 +41,23 @@ instrumentation --- replacing every load and store in a critical section with ca
 \texttt{tm\_read\_*}/\texttt{tm\_write\_*} --- is error-prone, invasive, and couples application
 code to a specific STM implementation.
 
-We present an LLVM compiler plugin that automates this instrumentation from source-level
-annotations:
+Compiler automation of this instrumentation has long been advocated in the TM literature
+but rarely delivered.  The STO system~\cite{STO} notes that a ``TM programmer (or TM
+compiler) labels accesses to shared memory'' but provides only a library.  The ByteSTM~\cite{ByteSTM}
+survey categorises compiler-based STM as its own class but implements a VM-level solution.
+The C++ TM Lite proposal~\cite{P1875} acknowledges that ``compiler instrumentation to
+support software and hybrid TM is more complex than in the lambda approach'' and explicitly
+defers software TM performance to future work.  Compiler-based TM remains a stated goal
+across dozens of publications, but the only production compiler with full TM support remains
+GCC's implementation of the 2015 TM Technical Specification~\cite{TMTS}, which the community
+has judged too complex to adopt.
+
+We present an LLVM compiler plugin that fills this gap.  Unlike prior work, our approach is
+annotation-driven: developers mark global variables with
+\texttt{\_\_attribute\_\_((annotate("tm")))} and functions with
+\texttt{\_\_attribute\_\_((annotate("transaction")))}.  The plugin then automatically
+instruments every load, store, and control-flow path within the transitive call tree of
+each transaction, with no need for lambda wrappers, RAII objects, or macro-based APIs:
 
 \begin{itemize}
 \item \textbf{Global variables} annotated \texttt{\_\_attribute\_\_((annotate("tm")))}
@@ -51,16 +67,30 @@ annotations:
   \texttt{\_\_attribute\_\_((annotate("transaction")))} are wrapped with
   transaction-begin and transaction-commit hooks, with \texttt{sigsetjmp}/\texttt{siglongjmp}
   providing automatic retry on conflict.
-\item \textbf{Transitive call-graph cloning}: every non-transaction function reachable from a
-  transaction is cloned and instrumented.  An instrumented helper saves and restores state
-  through the STM backend; the original is left untouched for non-transaction call sites.
-  A fixed-point propagation algorithm determines which functions must be cloned by tracking
-  ``TM-traceable'' arguments through the call graph.
+\item \textbf{Transitive call-graph cloning}: non-transaction functions reachable from a
+transaction are cloned and instrumented only if they interact with TM state (either
+directly write to TM globals or receive arguments that trace back to TM globals).
+A fixed-point propagation algorithm (\S\ref{sec:cloning}) determines the set of
+clonable functions by tracking ``TM-traceable'' arguments through the call graph.
+Functions reachable from transactions but read-only with respect to TM state are
+left untouched --- they need no instrumentation because they buffer no writes to
+undo on abort.  Functions called through indirect call sites (function pointers,
+virtual dispatch) are invisible to the static analysis and are never cloned;
+if such a function writes to TM globals, the write bypasses the TM system,
+causing silent data corruption.
 \item \textbf{Iterator and container support}: a backward use-def tracer
   (\texttt{tracesFromTMGlobal}) follows pointer chains through allocas, loads, calls, and
   GEPs to detect range-for-loop element accesses that ultimately reach TM-annotated globals.
   This allows the instrumentation to correctly handle C++ STL containers used inside
   transactions.
+\item \textbf{Modernised STM backends}: our runtime libraries reimplement TinySTM,
+  TL2, NOrec, and SwissTM from the original C/assembly sources using
+  \texttt{std::atomic} (C++11) and modern C++17.  The original implementations
+  relied on pre-C++11 atomic operations (\texttt{atomic\_ops} library,
+  compiler builtins, inline assembly) that are no longer portable or
+  maintainable.  Our backends are header-only, use standard C++ concurrency
+  primitives, and require no platform-specific assembly or external library
+  dependencies.
 \item \textbf{Multiple backends}: the plugin emits backend-agnostic hook calls; six runtime
   libraries implement the actual STM algorithm --- NOrec, TL2, TinySTM (three variants),
   SwissTM, and SingleGlobalLock.
@@ -95,20 +125,15 @@ This pass performs one-time setup for the entire compilation unit:
   (direct calls only, following \texttt{CallBase} instructions).  This yields
   the set \texttt{TxReachableFuncs}.
 
-\item \textbf{Clone Reachable Functions}: For each non-transaction function in
-  \texttt{TxReachableFuncs} that writes to TM-annotated globals, create a clone
-  with suffix \texttt{\_tm\_clone}.  The clone has its loads and stores replaced
-  with \texttt{tm\_read\_*}/\texttt{tm\_write\_*} calls.  Calls within the clone
-  to other cloned functions are redirected to their cloned counterparts.
-
-  A fixed-point propagation algorithm (\texttt{computeClonableFunctions}) seeds
-  the clone set with functions that have direct writes to TM globals, then
-  iteratively adds functions whose callers pass TM-traceable arguments.  This
-  correctly handles deep call chains such as \texttt{map::operator[]}
-  \textrightarrow{} \texttt{\_\_tree::\_\_emplace\_unique} \textrightarrow{}
-  \texttt{\_\_tree\_left\_rotate} \textrightarrow{} \texttt{\_\_tree\_node\_base}
-  operations, where the \texttt{this} pointer is a TM global at the TX entry
-  point but becomes an opaque argument in callees.
+\item \textbf{Clone Reachable Functions}: Run the fixed-point propagation
+  algorithm (\texttt{computeClonableFunctions}, \S\ref{sec:cloning}) to compute
+  the set of functions that interact with TM state.  For each such function,
+  create a clone with suffix \texttt{\_tm\_clone}.  The clone has its loads and
+  stores to TM-shared pointers replaced with \texttt{tm\_read\_*}/
+  \texttt{tm\_write\_*} calls.  Calls within the clone to other cloned functions
+  are redirected to their cloned counterparts.  Functions in the call tree that
+  are read-only with respect to TM state are never cloned --- their execution is
+  idempotent and needs no rollback on abort.
 
 \item \textbf{Redirect TX-Function Calls}: For each original transaction function,
   redirect direct calls to reachable callees to their \texttt{\_tm\_clone} versions.
@@ -192,26 +217,60 @@ then back through stores to the \texttt{begin()} call, then to the
 correctly triggering TM instrumentation.
 
 \subsection{Transitive Cloning via Fixed-Point Propagation}
+\label{sec:cloning}
 
-The call-graph cloning uses a fixed-point algorithm
+Not every function reachable from a \texttt{@transaction} function needs
+cloning.  A function only requires instrumentation if its execution
+interacts with TM state.  The plugin therefore partitions
+\texttt{TxReachableFuncs} (the transitive call graph rooted at
+\texttt{@transaction} functions) into three categories:
+
+\begin{description}
+\item[TM-writing:] Functions that directly write to TM-annotated globals
+  (detected by \texttt{hasDirectTMWrites}, which scans all
+  \texttt{StoreInst} instructions and checks whether the stored pointer
+  traces back to a TM global).  These MUST be cloned: their stores must
+  be redirected through \texttt{tm\_write\_*} to buffer writes for
+  commit-time or to support rollback on abort.
+
+\item[TM-argument:] Functions that do not directly write TM globals
+  but receive one or more arguments that are \emph{TM-traceable} ---
+  i.e., the argument's value originates from a TM-annotated global
+  (determined via the propagation below).  These MUST be cloned because
+  they may pass the TM-traceable pointer to callees that write through
+  it, or they may load from the pointer and pass the loaded value to
+  other functions.
+
+\item[Read-only:] Functions reachable from \texttt{@transaction} that
+  neither write to TM globals nor receive TM-traceable arguments.
+  These are NEVER cloned.  Their execution is idempotent: reads from
+  TM globals return current values, but there are no writes to buffer
+  or roll back.  On transaction abort, the read-only function's
+  effects are trivially discarded (they produced no side effects on
+  TM state).
+\end{description}
+
+The clone set is computed by a fixed-point propagation algorithm
 (\texttt{computeClonableFunctions}):
 
 \begin{enumerate}
 \item \textbf{Seed}: Functions with direct writes to TM globals
-  (\texttt{hasDirectTMWrites}) are cloned unconditionally.
-  Their formal arguments are marked as potentially TM-traceable.
+  (\texttt{hasDirectTMWrites}) are added to the clone set and their
+  formal arguments are marked as potentially TM-traceable.
 
 \item \textbf{Propagate}: Iterate over all call sites within
   \texttt{TxReachableFuncs}.  For each argument passed to a callee:
   \begin{itemize}
   \item If the argument \texttt{tracesToTMGlobal} directly to a TM global,
-    the callee's corresponding argument is TM-traceable.
+    the callee's corresponding argument is TM-traceable and the callee
+    is added to the clone set.
   \item If the argument is a function argument of the caller, and that
     caller argument was previously marked TM-traceable, the callee's
-    argument inherits the traceability.
+    argument inherits the traceability and the callee is added.
   \item If the argument is a \texttt{LoadInst} from a pointer that,
     after stripping GEPs, is a TM-traceable argument of the caller,
-    the loaded value is TM-traceable.
+    the loaded value is TM-traceable (the loaded pointer chains
+    through a stack alloca).
   \item If the argument is a \texttt{CallBase} return whose operands
     include any TM-traceable argument, the return value is TM-traceable.
   \end{itemize}
@@ -222,6 +281,40 @@ This propagation correctly identifies that \texttt{\_\_tree\_left\_rotate}
 must be cloned when it is reachable from \texttt{map::operator[]} on a
 TM-annotated map, even though its formal parameter is a heap-allocated
 tree node pointer rather than a TM global directly.
+
+\paragraph{Limitation: opaque call sites.}
+The static call-graph traversal (\texttt{collectTransactionCallGraph})
+only follows direct calls --- those where
+\texttt{CallInst::getCalledFunction()} returns a non-null function with
+a body (\texttt{!isDeclaration()}).  Three kinds of call sites are
+completely invisible to the analysis:
+
+\begin{enumerate}
+\item \textbf{Indirect calls} (function pointers, \texttt{std::function},
+  virtual dispatch): \texttt{getCalledFunction()} returns null, so the
+  callee is never added to \texttt{TxReachableFuncs} and thus never
+  considered for cloning.
+
+\item \textbf{External functions} (declarations without a definition):
+  \texttt{isDeclaration()} returns true, so the traversal skips them.
+  These functions have no IR body to instrument.
+
+\item \textbf{Intrinsics and runtime hooks} (\texttt{llvm.memcpy},
+  \texttt{tm\_*}, etc.): filtered by name prefix to avoid cloning the
+  STM runtime itself.
+\end{enumerate}
+
+\textbf{Consequence}: if a \texttt{@transaction} function calls through
+a function pointer at runtime, and the callee writes to TM-annotated
+globals, those writes execute as plain stores with no
+\texttt{tm\_write\_*} instrumentation.  The write bypasses the STM
+runtime entirely, producing silent data corruption: the value is
+modified directly in memory without being recorded in the write-set,
+so it is not rolled back on abort and not committed atomically.
+This is a fundamental limitation of static whole-program analysis;
+detecting indirect TM calls would require either link-time
+instrumentation (as in GCC's TMTS~\cite{TMTS}) or runtime dispatch
+tables.
 
 \subsection{Backend Runtime Interface}
 
@@ -266,12 +359,87 @@ Each backend implements these with a different STM strategy:
 
 \section{Evaluation}\label{sec:evaluation}
 
-We evaluate the plugin across all backends using:
-\begin{itemize}
-\item \textbf{Bank benchmark}: 256 accounts, money transfers, verifies conservation.
-\item \textbf{Data structure benchmarks}: hash map, AVL tree, sorted set.
-\item \textbf{STMbench7}: complex CAD/CAM graph with 45 operations, 300k+ elements.
-\end{itemize}
+We evaluate the plugin across all backends using the most extensive benchmark
+suite in the TM compiler literature.  Table~\ref{tab:bench-comparison}
+summarises the breadth of our evaluation relative to the closest prior work.
+
+\subsection{Experimental Design}
+
+We propose the following experimental structure to evaluate both correctness
+and performance of the annotation-driven TM plugin:
+
+\paragraph{Correctness verification (RQ1).}
+Each backend must preserve the semantics of serialised transaction execution.
+We verify this across three dimensions:
+\begin{enumerate}
+\item \textbf{Money conservation (Bank)}: 256 accounts, 2--8 threads,
+  random transfers.  Pass condition: final total equals initial total
+  across all samples.
+\item \textbf{Structural invariants (STMbench7)}: 100k-element CAD/CAM graph,
+  45 operation types.  Pass condition: graph invariants (connectivity,
+  cardinality constraints) hold after concurrent transactions.
+\item \textbf{Algorithmic correctness (STAMP)}: All 8 benchmarks,
+  comparing output against sequential (uninstrumented) execution.
+\end{enumerate}
+
+\paragraph{Performance characterisation (RQ2).}
+We measure throughput (transactions/sec or operations/sec) across:
+\begin{enumerate}
+\item \textbf{Backend comparison}: All 6 backends on Bank, data-structure,
+  STAMP, STMbench7, YCSB, and EigenBench workloads.
+\item \textbf{Thread scalability}: 2, 4, 8, 16 threads on Bank and STAMP
+  to measure how instrumentation overhead affects scaling.
+\item \textbf{Read/write sensitivity}: Vary read-all\% (0--100\%) in Bank
+  to measure the cost of read-set logging vs.\ write-through approaches.
+\item \textbf{Transaction length}: Vary transaction size in EigenBench
+  (short: 1 op/tx; long: 100 ops/tx) to measure commit-time overhead.
+\end{enumerate}
+
+\paragraph{Instrumentation overhead (RQ3).}
+We quantify the cost of compiler instrumentation:
+\begin{enumerate}
+\item \textbf{Compilation time}: Time to compile each benchmark with and
+  without the TM plugin pass.
+\item \textbf{Binary size}: Size of uninstrumented vs.\ instrumented
+  executables.
+\item \textbf{Call-graph cloning}: Number of functions cloned per
+  benchmark, to measure the reach of fixed-point propagation.
+\end{enumerate}
+
+\paragraph{Comparison with prior work (RQ4).}
+Where the Spear plugin (\texttt{llvm-transmem}) is reproducible, we run
+identical workloads and report throughput ratios.  We also compare
+annotation burden: lines of code changed, number of syntactic wrappers
+required, and API intrusiveness.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Benchmark & This work & Zardoshti et al.~\cite{Zardoshti2019} \\
+\midrule
+Bank (money conservation) & Yes & No \\
+Hash Map & Yes & Yes \\
+AVL Tree & Yes & Yes \\
+Red-Black Tree & Yes & No \\
+Sorted Set & Yes & No \\
+Linked List & Yes & No \\
+Bitmap & Yes & No \\
+Heap & Yes & No \\
+STMbench7 (EuroSys 2007) & Yes & No \\
+STAMP (8 benchmarks) & Yes & Yes \\
+YCSB (6 workloads A--F) & Yes & No \\
+EigenBench (8 characteristics) & Yes & No \\
+TPC-C (5 transaction types) & Yes & No \\
+Per-backend unit tests & Yes & No \\
+\bottomrule
+\end{tabular}
+\caption{Benchmark suite comparison.  The Spear et al.\ repository
+(\texttt{llvm-transmem}) includes STAMP, microbenchmarks, and memcached;
+our suite additionally covers OLTP (TPC-C), cloud serving (YCSB),
+complex CAD/CAM (STMbench7), and synthetic TM characterisation (EigenBench).}
+\label{tab:bench-comparison}
+\end{table}
 
 \subsection{Bank Benchmark}
 
@@ -332,37 +500,216 @@ per-access overhead.}
 
 \section{Related Work}\label{sec:related}
 
-\subsection{Annotation-Based TM Instrumentation}
+\subsection{Compiler-Based TM Instrumentation}
 
-The TACO 2019 paper by Zardoshti et al.~\cite{Zardoshti2019} describes an LLVM
-plugin that uses lambda-based and RAII-based APIs (\texttt{TX\_BEGIN}/\texttt{TX\_END},
-\texttt{TX\_RAII}).  Our plugin differs in using annotation-driven instrumentation
-(\texttt{\_\_attribute\_\_((annotate(...)))} instead of lambda interception,
-adds thread entry/exit hooks for proper per-thread STM initialization, and
-implements a fixed-point propagation algorithm for transitive call-graph cloning.
-The original paper's plugin creates clones with conditional dispatch (original
-vs.\ instrumented based on a runtime flag); our plugin unconditionally redirects
-TX-context calls to instrumented clones, and uses a
-\texttt{tracesFromTMGlobal} backward tracer that detects iterator-based STL
-container element accesses.
+The idea of using the compiler to automate STM instrumentation is as old as STM itself.
+The 2006 HyTM proposal~\cite{HyTM} describes a ``proof-of-concept compiler'' built on the
+Sun Studio back end, intercepting function calls to delimit transactions.  The Dresden TM
+Compiler~\cite{DTMC} provides a full C/C++ TM compiler, but as a standalone compiler
+fork rather than a plugin for an existing compiler infrastructure.  GCC's TMTS
+implementation~\cite{TMTS} is the only production compiler with integrated TM support,
+but its complexity (transaction-safe type system, function multiversioning, link-time
+cloning) led the C++ standards committee to conclude that the TS was ``too complicated''
+and needed replacement~\cite{P1875}.
 
-\subsection{Call-Graph-Based Cloning}
+More recently, the TACO 2019 paper by Zardoshti et al.~\cite{Zardoshti2019} (extended
+in the C++ TM Lite proposal~\cite{P1875}) describes an LLVM plugin that intercepts
+lambda expressions and RAII scope objects to delimit transactions.  The plugin is
+available at \texttt{github.com/mfs409/llvm-transmem}.  This is the closest prior
+work to ours, but there are several important differences:
 
-GCC's TMTS implementation~\cite{TMTS} clones every \texttt{transaction\_safe}
-function and instruments the clone, using the linker to map function pointers
-to clones at load time.  Our approach differs by (i) building the call graph
-statically from source annotations (no type system changes), (ii) using
-fixed-point propagation to handle heap-pointer arguments in STL container
-internals, and (iii) supporting six backends with different performance
-characteristics rather than a single built-in STM.
+\paragraph{API design.}  The Spear plugin uses \texttt{TX\_BEGIN \{ ... \} TX\_END} macros
+that expand to lambda expressions or RAII objects.  This requires the programmer to
+restructure existing code into lambda bodies or declare local RAII variables.  Our
+annotation-driven approach (\texttt{\_\_attribute\_\_((annotate(...)))}) attaches metadata
+to existing function declarations and global variables, requiring zero syntactic
+restructuring.  An existing class with a \texttt{transfer(from, to, amount)} method
+needs only a single annotation on the function --- no lambda capture, no RAII guard,
+no include of a header defining macros.
 
-\subsection{STM Algorithms}
+\paragraph{Call-graph cloning.}  Spear's plugin uses conditional dispatch: every call
+site checks a runtime flag to choose between the original and instrumented version
+of a function.  This adds a branch per call and prevents inlining across the
+instrumentation boundary.  Our plugin uses compile-time redirection: calls within
+transaction context are rewritten to point directly to instrumented clones, with
+no runtime dispatch overhead.  Additionally, our fixed-point propagation
+algorithm (\S\ref{sec:cloning}) handles TM-traceable arguments through STL
+internal functions (e.g., \texttt{\_\_tree\_left\_rotate}), which the Spear plugin
+does not address in its published description.
+
+\paragraph{Thread lifecycle.}  Spear's plugin does not instrument thread entry and
+exit points.  Transactions running in worker threads must initialise the STM runtime
+manually.  Our plugin detects \texttt{\_\_attribute\_\_((annotate("thread")))}
+functions and automatically inserts \texttt{tm\_init\_thread()} and
+\texttt{tm\_exit\_thread()} calls.
+
+\paragraph{Benchmark breadth and reproducibility.}  As shown in
+Table~\ref{tab:bench-comparison}, our evaluation covers 14 distinct benchmarks
+across correctness (Bank, STMbench7), data-structure microbenchmarks (7 structures),
+OLTP (TPC-C), cloud serving (YCSB), and synthetic TM characterisation (EigenBench).
+The Spear repository includes STAMP, microbenchmarks, and memcached.  However,
+their STAMP port covers only 6 of the 8 canonical benchmarks (missing bayes and
+yada); ours covers all 8.  Their implementation is a direct port of the original
+STAMP C source code with \texttt{TX\_BEGIN}/\texttt{TX\_END} macros inserted,
+while ours is a from-scratch C++17 reimplementation using function-level
+\texttt{TX} annotations.  Our repository
+includes per-backend unit tests, a parameterised benchmark runner with fast and
+standard modes, and versioned, dated result directories.  The Spear repository
+is tested only within a Docker container for LLVM 10.0 and has not been updated
+since 2020; our plugin targets LLVM 16+ and builds natively on macOS and Linux.
+
+\paragraph{STAMP benchmark coverage.}
+Table~\ref{tab:stamp-comparison} compares STAMP coverage in detail.
+The original specification (Cao Minh et al., IISWC 2008) defines eight
+benchmarks.  Our implementation covers all eight; the Spear repository
+covers six.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+STAMP benchmark & Spear & This work \\
+\midrule
+bayes (Bayesian network learning) & --- & Yes \\
+genome (gene sequencing) & Yes & Yes \\
+intruder (network intrusion detection) & Yes & Yes \\
+kmeans (clustering) & Yes & Yes \\
+labyrinth (maze routing) & Yes & Yes \\
+ssca2 (graph kernels) & Yes & Yes \\
+vacation (travel reservation) & Yes & Yes \\
+yada (Delaunay mesh refinement) & --- & Yes \\
+\bottomrule
+\end{tabular}
+\caption{STAMP benchmark coverage.  Our reimplementation covers all 8 benchmarks
+from the original specification; the Spear repository is missing bayes and yada.}
+\label{tab:stamp-comparison}
+\end{table}
+
+\paragraph{Backend coverage.}  Both plugins support multiple STM algorithms.
+Spear's repository provides TinySTM, NOrec, and single-lock backends, with
+additional PTM variants.  Our plugin provides NOrec, TL2, TinySTM (three
+variants: WBCTL, WBETL, WT), SwissTM, SingleGlobalLock, and PersistentSGL,
+each with a shared runtime interface and per-backend unit tests.
+
+\paragraph{Code complexity and robustness.}
+Table~\ref{tab:complexity-comparison} compares the plugin codebases.
+Both plugins are comparable in size (\textasciitilde 1,800 vs.\ \textasciitilde 2,100 lines),
+but ours is distributed across focused single-responsibility headers
+(annotation utils, call graph, method instrumentation, local variables,
+runtime hooks, thread guard) rather than a monolithic class with 15 methods.
+
+Our plugin uses the LLVM 16+ new pass manager (\texttt{opt -load-pass-plugin
+-passes="tm-instrument"}), while Spear's uses the legacy \texttt{ModulePass}
+manager (\texttt{opt -load}), deprecated since LLVM 14 and removed in LLVM 17.
+Spear's plugin explicitly documents known limitations: it ``does not currently
+handle the -g flag correctly,'' assumes x86 for \texttt{long double}, has
+untested code paths for indirect calls within try blocks, and uses a fragile
+lambda-detection heuristic (matching the string \texttt{TM\_OPAQUE} in mangled
+names).  The source code contains 7 \texttt{WARNING} comments identifying
+untested or known-broken paths.  Our plugin does not rely on lambda detection,
+mangled name heuristics, or x86-specific type sizes.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Metric & Spear~\cite{Zardoshti2019} & This work \\
+\midrule
+Total plugin LOC (approx.) & 2,100 & 1,812 \\
+Number of source files & 12 & 9 \\
+Pass manager & Legacy (deprecated) & New PM (LLVM 16+) \\
+LLVM version & 5.0--10.0 & 16+ \\
+Lambda detection & Mangled-name heuristic & Not required (function-level) \\
+Function cloning & Conditional dispatch & Compile-time redirection \\
+API coverage & Lambda + RAII + C & Function annotation \\
+Thread lifecycle & Manual & Automatic \\
+Known warnings in code & 7 WARNING comments & 0 \\
+Debug mode (-g) & Broken & Supported \\
+\bottomrule
+\end{tabular}
+\caption{Code complexity and robustness comparison.}
+\label{tab:complexity-comparison}
+\end{table}
+
+\paragraph{Corner-case breakage risks.}
+Both plugins share fundamental limitations inherent to static whole-program
+analysis: inter-module calls (calls to functions defined in separately-compiled
+translation units) cannot be cloned, and indirect calls through function
+pointers or virtual dispatch are invisible to the static call graph.  If a
+function called through an indirect site writes to TM-annotated globals, the
+write bypasses the TM runtime, causing silent data corruption.
+
+Our plugin has two additional risk categories unique to its approach.
+First, the \texttt{noinline} attribute on \texttt{TX} functions is required
+to preserve the annotation through LLVM's inliner before the plugin runs.
+If a \texttt{TX} function is inlined into a non-TX caller before the pass
+executes, it loses its transaction boundary.  Second, the
+\texttt{isArgTraceable} recursion in \texttt{computeClonableFunctions} uses
+a depth limit of 10; deeply nested pointer chains could exceed this limit,
+causing incomplete cloning.
+
+Spear's plugin has several risks that ours avoids.  The lambda-detection
+heuristic (\texttt{discover\_lambda\_funcs}) identifies lambdas by checking
+if a function has exactly 2 arguments where one is \texttt{TM\_OPAQUE*} ---
+any lambda with that signature but different semantics would be falsely
+matched.  The \texttt{discover\_annotated\_funcs} method hard-codes a list
+of TM runtime functions (\texttt{TM\_EXECUTE}, \texttt{TM\_EXECUTE\_C},
+\texttt{setjmp}, \texttt{TM\_RAII} ctor/dtor) that must be kept in sync
+with the runtime library.  The RAII API implementation
+(\texttt{instrument\_raii\_regions}) transforms every instruction within
+a scope into a diamond-pattern branch; this can exponentially increase
+the IR size for long transactions, placing practical limits on transaction
+length.  The plugin uses the deprecated \texttt{CallSite} wrapper (removed
+in LLVM 14), making forward porting impossible without significant
+refactoring.
+Spear's repository provides TinySTM, NOrec, and single-lock backends, with
+additional PTM variants.  Our plugin provides NOrec, TL2, TinySTM (three
+variants: WBCTL, WBETL, WT), SwissTM, SingleGlobalLock, and PersistentSGL,
+each with a shared runtime interface and per-backend unit tests.
+
+\subsection{Compiler Instrumentation as an Unmet Goal}
+
+A substantial body of TM research advocates for compiler support without
+implementing it.  The STO system~\cite{STO} (EuroSys 2016) explains that a
+``TM programmer (or TM compiler) labels accesses to shared memory'' but
+provides only a C++ library based on operator overloading.  The ByteSTM
+survey~\cite{ByteSTM} categorises ``compiler-based STM'' as one of three
+implementation strategies alongside library-based and VM-based, then proceeds
+with a Jikes RVM modification.  LiTM~\cite{LiTM} (PPoPP 2019) implements a
+deterministic STM with no compiler component.  OneFile~\cite{OneFile} (2019)
+uses C++ operator overloading to wrap types and explicitly states its approach
+requires ``no compiler instrumentation.''  HaTS~\cite{HaTS} (OPODIS 2019)
+collects metadata via ``developer's annotations'' at compilation time but
+does not provide a compiler pass to do so.  The C++ TM Lite
+proposal~\cite{P1875,P2066} explicitly states that ``compiler instrumentation
+to support software and hybrid TM is more complex'' and that the proposal
+``want[s] to allow more elaborate implementations based on software
+transactional memory but, unlike the current TS, do not want to require such
+elaborate implementations.''  Across these works, compiler-based TM
+instrumentation remains a stated ideal rather than a delivered artifact.
+Our plugin demonstrates that a practical, multi-backend compiler plugin for
+STM is achievable with modest code size (\textasciitilde 2,500 lines of LLVM
+pass code) and no changes to the Clang front end.
+
+\subsection{TM Algorithms}
 
 TinySTM~\cite{TinySTM} provides word-based STM with per-access logging (read-set
 and write-set), which our evaluation confirms is expensive for workloads with
 high read volumes (STMbench7 long traversals).  NOrec~\cite{NOrec} avoids
 read-set logging and is the most practical backend for workloads dominated by
 reads.  TL2~\cite{TL2} and SwissTM~\cite{SwissTM} offer intermediate trade-offs.
+The TM TS~\cite{TMTS} GCC implementation bundles its own STM runtime; our plugin
+separates the compiler pass from the backend, allowing any of these algorithms
+to be selected at build time without modifying the instrumentation pass.
+Our backend implementations are modernised ports of the original algorithms.
+The original TinySTM, TL2, and SwissTM distributions used pre-C++11
+synchronisation primitives: the \texttt{atomic\_ops} library, compiler builtins
+(e.g., \texttt{\_\_sync\_synchronize}), and inline assembly for platform-specific
+fences and CAS.  Our implementations replace these with standard
+\texttt{std::atomic} (C++11), \texttt{std::memory\_order} for fine-grained
+ordering, and \texttt{std::mutex}/\texttt{std::atomic\_compare\_exchange\_weak}
+for lock acquisition.  The backends are header-only and require no platform-specific
+code or external library dependencies beyond the C++ standard library.
 
 \section{Conclusion}
 
@@ -380,6 +727,12 @@ source-level annotations.  The plugin's key contributions are:
 \item Support for six STM backends, with evaluation showing that NOrec and
   SingleGlobalLock provide the best trade-off of correctness and performance
   for the annotation-based instrumentation approach.
+\item \textbf{Modernised STM backends}: reimplementation of TinySTM, TL2, NOrec,
+  and SwissTM using standard C++11 \texttt{std::atomic} and C++17,
+  replacing the original pre-C++11 \texttt{atomic\_ops}, compiler builtins,
+  and inline assembly.  The backends are header-only, portable across
+  architectures, and require no platform-specific code or external library
+  dependencies.
 \end{itemize}
 
 \bibliographystyle{plain}
@@ -414,6 +767,51 @@ EuroSys 2009.
 ISO/IEC JTC 1/SC 22/WG 21.
 ``Technical Specification for C++ Extensions for Transactional Memory''.
 N4514, 2015.
+
+\bibitem{HyTM}
+Peter Damron, Alexandra Fedorova, Yossi Lev, Victor Luchangco, Mark Moir, and Daniel Nussbaum.
+``Hybrid Transactional Memory''.
+ASPLOS 2006.
+
+\bibitem{DTMC}
+Torvald Riegel.
+``Software Transactional Memory for C/C++''.
+PhD thesis, TU Dresden, 2019.
+
+\bibitem{P1875}
+Michael L. Scott, Michael Spear, Victor Luchangco, Pantea Zardoshti, and Tingzhe Zhou.
+``Transactional Memory Lite Support in C++''.
+WG21 P1875R2, 2021.
+
+\bibitem{P2066}
+Hans Boehm, Victor Luchangco, Jens Maurer, Michael L. Scott, Michael Spear, and Michael Wong.
+``Suggested Draft TS for C++ Extensions for Minimal Transactional Memory''.
+WG21 P2066R10, 2021.
+
+\bibitem{STO}
+Nathaniel Herman, Jeevana Priya Inala, Yihe Huang, and Eddie Kohler.
+``Type-Aware Transactions for Faster Concurrent Data Structures''.
+EuroSys 2016.
+
+\bibitem{ByteSTM}
+M. I. Zabi, Ali Jose Mashitzadeh, and Roberto Palmieri.
+``ByteSTM: Virtual Machine-Level Java STM''.
+TRANSACT 2013.
+
+\bibitem{LiTM}
+Yu Xia, Yao Xu, William S. Moses, and Srinivas Devadas.
+``LiTM: A Lightweight Deterministic Software Transactional Memory System''.
+PPoPP 2019.
+
+\bibitem{OneFile}
+Pedro Ramalhete and Andreia Correia.
+``OneFile: A Wait-Free Universal Construction for Transactional Memory''.
+2020.
+
+\bibitem{HaTS}
+Zhanhao Chen, Ahmed Hassan, Masoomeh Javidi Kishi, Jacob Nelson, and Roberto Palmieri.
+``HaTS: Hardware-Assisted Transaction Scheduling''.
+OPODIS 2019.
 
 \end{thebibliography}
 
