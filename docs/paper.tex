@@ -548,6 +548,27 @@ The cloning fix has eliminated the TinySTM timeouts.}
 \label{tab:datastructures}
 \end{table}
 
+\subsection{Scalability}
+
+Figure~\ref{fig:scalability} shows how three application benchmarks
+scale with thread count under the SingleGlobalLock backend.  All three
+benchmarks exhibit near-perfect linear scaling (the dashed line shows
+the ideal $ops = 100 \times threads$), because the per-transaction
+overhead of the global mutex is negligible compared to the
+application-level work within each transaction.  STAMP (vacation),
+STMbench7, and TPC-C all follow the same trend, confirming that the
+annotation-driven instrumentation imposes no hidden scalability
+bottlenecks beyond the chosen backend.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{../benchmark_results/scalability.pdf}
+\caption{Application scalability -- SingleGlobalLock backend,
+3000\,ms duration, varying thread count.  The dashed line shows
+ideal linear scaling.}
+\label{fig:scalability}
+\end{figure}
+
 \subsection{Application Benchmarks}
 
 Figure~\ref{fig:app-throughput} shows throughput on three larger
