@@ -215,8 +215,10 @@ public:
         return GV;
     };
     auto *CounterGV = getOrCreateTLS("tm_nested_call_counter", i32Ty);
+#ifndef DISABLE_SETJMP
     auto *JmpRetGV  = getOrCreateTLS("tm_longjmp_ret", i32Ty);
     auto *JmpBufGV  = getOrCreateTLS("tm_jmpbuf", ArrayType::get(Type::getInt8Ty(Ctx), 256));
+#endif
 
     // ---- Transaction entry ----
     BasicBlock &Entry = F.getEntryBlock();
@@ -234,24 +236,28 @@ public:
     IRBuilder<> Builder(&Entry);
     Value *CounterVal = Builder.CreateLoad(i32Ty, CounterGV, "counter");
     Value *IsOuter = Builder.CreateICmpEQ(CounterVal, ConstantInt::get(i32Ty, 0), "is_outer");
+#ifndef DISABLE_SETJMP
     Value *JmpRetVal = Builder.CreateLoad(i32Ty, JmpRetGV, "jmpret");
     IsOuter = Builder.CreateOr(IsOuter,
         Builder.CreateICmpNE(JmpRetVal, ConstantInt::get(i32Ty, 0), "is_retry"), "is_outer");
+#endif
 
     BasicBlock *OuterBB = BasicBlock::Create(Ctx, "outer", &F, ContBB);
     BasicBlock *NestedBB = BasicBlock::Create(Ctx, "nested", &F, ContBB);
     Builder.CreateCondBr(IsOuter, OuterBB, NestedBB);
 
-    // Outer path: sigsetjmp + tm_begin
+    // Outer path: tm_begin (with optional sigsetjmp for retry support)
     IRBuilder<> OuterBuilder(OuterBB);
+#ifndef DISABLE_SETJMP
     Value *JmpBufPtr = OuterBuilder.CreateBitCast(JmpBufGV, PointerType::getUnqual(Ctx));
     OuterBuilder.CreateCall(H.set_jmpbuf, {JmpBufPtr});
     OuterBuilder.CreateStore(
         OuterBuilder.CreateCall(H.sigsetjmp, {JmpBufPtr, ConstantInt::get(i32Ty, 0)}),
         JmpRetGV);
+    OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetGV);
+#endif
     OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 1), CounterGV);
     OuterBuilder.CreateCall(H.begin, {});
-    OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetGV);
     OuterBuilder.CreateBr(ContBB);
 
     // Nested path: increment counter
@@ -270,6 +276,7 @@ public:
         Instruction *I = &*InstIt++;
         IRBuilder<> B(I->getParent(), I->getIterator());
 
+#ifndef DISABLE_TM_READ_WRITE
         // Memory intrinsics (memcpy, memmove, memset)
         if (auto *Call = dyn_cast<CallInst>(I)) {
           if (Function *Callee = Call->getCalledFunction()) {
@@ -285,7 +292,14 @@ public:
               }
               continue;
             }
-            // Replace malloc/calloc/realloc with tm_malloc
+          }
+        }
+#endif
+
+#ifndef DISABLE_MALLOC_FREE
+        // Replace malloc/calloc/realloc with tm_malloc
+        if (auto *Call = dyn_cast<CallInst>(I)) {
+          if (Function *Callee = Call->getCalledFunction()) {
             if (Callee && !Callee->getName().starts_with("tm_")) {
               StringRef N = Callee->getName();
               if (N == "malloc" || N == "calloc" || N == "realloc") {
@@ -310,7 +324,9 @@ public:
             }
           }
         }
+#endif
 
+#ifndef DISABLE_TM_READ_WRITE
         // Loads and stores
         if (auto *Load = dyn_cast<LoadInst>(I)) {
           SmallPtrSet<const Value *, 32> LocalVars;
@@ -329,6 +345,7 @@ public:
             ToErase.push_back(Store);
           }
         }
+#endif
       }
     }
 
@@ -344,7 +361,9 @@ public:
 
     IRBuilder<> OuterEndBuilder(OuterEndBB);
     OuterEndBuilder.CreateCall(H.end, {});
+#ifndef DISABLE_SETJMP
     OuterEndBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetGV);
+#endif
     OuterEndBuilder.CreateBr(CleanupBB);
 
     IRBuilder<> NestedEndBuilder(NestedEndBB);

@@ -96,6 +96,7 @@ static bool tracesToTMGlobal(Value *Ptr, Module &M)
 }
 
 // Replace llvm.memcpy/memmove/memset on TM globals with per-byte instrumented loops.
+#ifndef DISABLE_TM_READ_WRITE
 static void instrumentMemoryIntrinsic(CallInst *Call, Module &M,
                                       const TMRuntimeHooks &H) {
     LLVMContext &Ctx = M.getContext();
@@ -135,6 +136,10 @@ static void instrumentMemoryIntrinsic(CallInst *Call, Module &M,
 
     Call->eraseFromParent();
 }
+#else
+static void instrumentMemoryIntrinsic(CallInst *, Module &,
+                                      const TMRuntimeHooks &) {}
+#endif
 
 static bool isCallOnTMObject(CallBase *Call, Module &M)
 {
@@ -157,6 +162,7 @@ static bool isCallOnTMObject(CallBase *Call, Module &M)
     return traced;
 }
 
+#ifndef DISABLE_TM_READ_WRITE
 static void instrumentLoadsStoresInFunction(Function *F, Module *M,
                                              const TMRuntimeHooks &H)
 {
@@ -183,6 +189,10 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
     }
     for (auto *I : ToErase) I->eraseFromParent();
 }
+#else
+static void instrumentLoadsStoresInFunction(Function *, Module *,
+                                             const TMRuntimeHooks &) {}
+#endif
 
 static Function *cloneMethodWithSuffix(Function *Original, const Twine &Suffix,
                                         Module *M, LLVMContext &Ctx,
