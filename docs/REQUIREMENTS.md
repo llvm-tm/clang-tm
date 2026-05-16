@@ -21,7 +21,7 @@ on a new machine (including remote machines accessed via SSH).
 
 ```sh
 sudo apt update
-sudo apt install -y llvm-dev clang++ make lld bash
+sudo apt install -y llvm-dev clang make lld bash
 ```
 
 ### macOS (Homebrew)
