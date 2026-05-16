@@ -60,19 +60,25 @@ available at compatible versions.
 
 ## Quick Setup on New Machine
 
+### One-liner install (requires LLVM/Clang 16+)
+
 ```sh
-# 1. Copy the project to the target machine
-scp -r tm_api_cpp user@remote-host:/path/to/projects/
+curl -fsSL https://raw.githubusercontent.com/llvm-tm/clang-tm/main/llvm_tm_plugin/bootstrap-install.sh | bash
+```
 
-# 2. SSH in
-ssh user@remote-host
+### Or from a local clone
 
-# 3. Build the plugin
-cd /path/to/projects/tm_api_cpp/llvm_tm_plugin
-make
+```sh
+git clone https://github.com/llvm-tm/clang-tm.git
+cd clang-tm/llvm_tm_plugin
+make variants
+./install.sh
+```
 
-# 4. Build and run a benchmark
-cd /path/to/projects/tm_api_cpp/benchmarks/test/bank
-make bank_singlelock
-./bin/bank_singlelock -d 3000 -n 4
+### Build and run a benchmark
+
+```sh
+clang-tm -std=c++20 -O3 -pthread --runtime SingleGlobalLock_runtime.cpp \
+    -o bank bank.cpp
+./bank -d 3000 -t 4
 ```
