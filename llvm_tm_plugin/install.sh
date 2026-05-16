@@ -90,6 +90,13 @@ INSTALL_DIR="${DESTDIR}${PREFIX}"
 need_cmd clang++
 need_cmd opt
 
+# Check LLVM version (22+ required)
+LLVM_VER="$(llvm-config --version 2>/dev/null || echo "0")"
+LLVM_MAJOR="${LLVM_VER%%.*}"
+if [ "$LLVM_MAJOR" -lt 22 ] 2>/dev/null; then
+    die "LLVM 22+ required, found $LLVM_VER.  Install llvm-22 from https://apt.llvm.org"
+fi
+
 if [ ! -f "$LLVM_TM_DIR/bin/libTMInstrument.so" ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
         info "Would build plugin with 'make variants'"
