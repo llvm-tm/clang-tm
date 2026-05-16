@@ -1,17 +1,19 @@
 /**
  * TSX+SGL Runtime for LLVM TM Plugin
  *
- * Standard TSX lock-elision pattern (Intel OPT-GUIDE ch. 12):
- *   1. _xbegin() and, if successful, read the "lock" (sgl_epoch).
- *      If the lock is held (epoch odd), _xabort() immediately.
- *   2. The lock cache-line in the TSX read set ensures that any
- *      concurrent SGL entry (which writes to the epoch) aborts the TSX.
+ * Standard TSX lock-elision pattern with a thread-ID lock variable:
+ *   1. _xbegin() and, if successful, read sgl_owner.  If sgl_owner != 0
+ *      (lock held), _xabort() immediately.
+ *   2. The sgl_owner cache-line in the TSX read set ensures that any
+ *      concurrent SGL entry (which writes to sgl_owner) aborts the TSX.
  *   3. After an explicit lock-busy abort, spin-wait for the lock to
  *      become free before retrying (anti-lemming effect).
- *   4. At tm_end() the epoch is re-read; if it changed an SGL
- *      transaction interleaved and we abort + fall back.
+ *   4. At tm_end() the sgl_owner is re-read; if it changed, the TSX
+ *      was aborted by the hardware already (first write to sgl_owner
+ *      triggers cache-coherence abort), but we _xabort() as a safety net.
  *   5. When all retries are exhausted we acquire global_tx_lock (SGL)
- *      and write to the epoch so concurrent TSX transactions abort.
+ *      and write 1 to sgl_owner so concurrent TSX transactions abort.
+ *      On SGL release we write 0 back.
  *
  * Build with:  clang-tm -mrtm --runtime TSXSGL_runtime.cpp ...
  *
@@ -34,24 +36,24 @@
 
 thread_local bool g_in_tx = false;
 thread_local bool in_tsx = false;
-thread_local uint64_t tsx_start_epoch = 0;
+thread_local uint64_t tsx_start_owner = 0;
 
 static std::mutex global_tx_lock;
-static std::atomic<uint64_t> sgl_epoch{0};
+static std::atomic<uint64_t> sgl_owner{0};
 
 // Plugin-required thread-local state
 __thread std::jmp_buf tm_jmpbuf;
 __thread int32_t tm_nested_call_counter;
 __thread int32_t tm_longjmp_ret;
 
-enum { EPOCH_LOCK_BUSY = 0xFF, EPOCH_CHANGED = 0x01 };
+enum { LOCK_BUSY = 0xFF, OWNER_CHANGED = 0x01 };
 
 // Stats counters (global, not per-thread)
 static std::atomic<uint64_t> stat_tsx_started{0};
 static std::atomic<uint64_t> stat_tsx_committed{0};
 static std::atomic<uint64_t> stat_tsx_aborted{0};
 static std::atomic<uint64_t> stat_tsx_lock_busy{0};
-static std::atomic<uint64_t> stat_tsx_epoch_changed{0};
+static std::atomic<uint64_t> stat_tsx_owner_changed{0};
 static std::atomic<uint64_t> stat_tsx_other_abort{0};
 static std::atomic<uint64_t> stat_sgl_entries{0};
 static std::atomic<uint64_t> stat_attempts_gt_1{0};
@@ -64,15 +66,15 @@ void tm_exit() {
     uint64_t committed = stat_tsx_committed.load();
     uint64_t aborted   = stat_tsx_aborted.load();
     uint64_t lock_busy = stat_tsx_lock_busy.load();
-    uint64_t epoch_chg = stat_tsx_epoch_changed.load();
+    uint64_t owner_chg = stat_tsx_owner_changed.load();
     uint64_t other_ab  = stat_tsx_other_abort.load();
     uint64_t sgl       = stat_sgl_entries.load();
     uint64_t att_gt_1  = stat_attempts_gt_1.load();
     fprintf(stderr,
         "TSXSTATS started=%lu committed=%lu aborted=%lu "
-        "lock_busy=%lu epoch_changed=%lu other_abort=%lu "
+        "lock_busy=%lu owner_changed=%lu other_abort=%lu "
         "sgl=%lu attempts_gt_1=%lu\n",
-        started, committed, aborted, lock_busy, epoch_chg, other_ab, sgl, att_gt_1);
+        started, committed, aborted, lock_busy, owner_chg, other_ab, sgl, att_gt_1);
 }
 void tm_init_thread() { tm_nested_call_counter = 0; in_tsx = false; }
 void tm_exit_thread() {}
@@ -102,23 +104,24 @@ void tm_begin() {
             stat_tsx_started.fetch_add(1, std::memory_order_relaxed);
             if (attempts > 0)
                 stat_attempts_gt_1.fetch_add(1, std::memory_order_relaxed);
-            // Read epoch into read set AND check if SGL is active.
-            uint64_t e = sgl_epoch.load(std::memory_order_seq_cst);
-            if (e & 1) {
-                _xabort(EPOCH_LOCK_BUSY);
+            // Read sgl_owner into the TSX read-set AND check if
+            // the lock is held.
+            uint64_t v = sgl_owner.load(std::memory_order_seq_cst);
+            if (v != 0) {
+                _xabort(LOCK_BUSY);
             }
-            tsx_start_epoch = e;
+            tsx_start_owner = v;
             in_tsx = true;
             return;
         }
 
         stat_tsx_aborted.fetch_add(1, std::memory_order_relaxed);
         if ((status & _XABORT_EXPLICIT) &&
-            _XABORT_CODE(status) == EPOCH_LOCK_BUSY) {
+            _XABORT_CODE(status) == LOCK_BUSY) {
             stat_tsx_lock_busy.fetch_add(1, std::memory_order_relaxed);
             // Lock was busy — wait for it to become free before retrying
             // to avoid the lemming effect (thundering herd into SGL).
-            while (sgl_epoch.load(std::memory_order_relaxed) & 1)
+            while (sgl_owner.load(std::memory_order_relaxed) != 0)
                 _mm_pause();
         } else if (!(status & _XABORT_RETRY)) {
             stat_tsx_other_abort.fetch_add(1, std::memory_order_relaxed);
@@ -128,10 +131,10 @@ void tm_begin() {
 #else
     (void)in_tsx;
 #endif
-    // Fallback: enter SGL (write to epoch so TSX threads abort).
+    // Fallback: enter SGL (write to sgl_owner so TSX threads abort).
     stat_sgl_entries.fetch_add(1, std::memory_order_relaxed);
     global_tx_lock.lock();
-    sgl_epoch.fetch_add(1, std::memory_order_seq_cst);
+    sgl_owner.store(1, std::memory_order_seq_cst);
     in_tsx = false;
 }
 
@@ -141,16 +144,16 @@ void tm_end() {
 
     if (in_tsx) {
 #if defined(__x86_64__) || defined(__i386__)
-        if (sgl_epoch.load(std::memory_order_seq_cst) != tsx_start_epoch) {
-            stat_tsx_epoch_changed.fetch_add(1, std::memory_order_relaxed);
-            _xabort(EPOCH_CHANGED);
+        if (sgl_owner.load(std::memory_order_seq_cst) != tsx_start_owner) {
+            stat_tsx_owner_changed.fetch_add(1, std::memory_order_relaxed);
+            _xabort(OWNER_CHANGED);
         }
         stat_tsx_committed.fetch_add(1, std::memory_order_relaxed);
         _xend();
 #endif
         return;
     }
-    sgl_epoch.fetch_add(1, std::memory_order_seq_cst);
+    sgl_owner.store(0, std::memory_order_seq_cst);
     global_tx_lock.unlock();
 }
 

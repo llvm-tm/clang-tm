@@ -8,7 +8,7 @@ backends in this repository.
 | File | Backend | Status |
 |------|---------|--------|
 | `SGL.tla` | Single Global Lock | **Fully verified** — TLAPS (42/42 obligations proved) |
-| `TSXSGL.tla` | TSX+SGL Hybrid | Specified for TLC — proof sketches, not mechanically checked |
+| `TSXSGL.tla` | TSX+SGL Hybrid | Lock-free + lock-owner invariants — TLAPS proof sketches (not mechanically checked) |
 | `TL2.tla` | TL2 | Specified for TLC — proof sketches, not mechanically checked |
 | `TinySTM_WBCTL.tla` | TinySTM Write-Back CTL | Specified for TLC — proof sketches, not mechanically checked |
 | `TinySTM_WBETL.tla` | TinySTM Write-Back ETL | Specified for TLC — proof sketches, not mechanically checked |
@@ -122,13 +122,15 @@ are proved mechanically by Zenon, Z3, and Isabelle.
 The following modeling abstractions and discrepancies exist between the TLA+
 specifications and the actual C++ implementations:
 
-**TSXSGL (TSXSGL.tla)** — The spec does not model the `global_tx_lock` mutex.
-The `SGLBegin` action can fire when another thread is already in SGL mode,
-because the epoch counter alone does not provide mutual exclusion.  In the real
-code, `global_tx_lock.lock()` prevents concurrent SGL entries.  The spec's
-`EpochParityInv` proof is therefore unsound as written — `SGLBegin` can fire
-when `epoch` is odd (SGL already active), breaking the invariant.  Correcting
-this would require adding a lock variable to the spec.
+**TSXSGL (TSXSGL.tla)** — Rewritten to use a thread-ID lock variable (`sgl`)
+instead of an epoch counter.  `SGLBegin` and `TSXFallback` now require
+`sgl = 0`, which fixes the earlier modeling bug (concurrent SGL entries).
+The `LockFreeInv` and `LockOwnerInv` invariants are formally stated with
+TLAPS proof sketches.  The C++ runtime correspondingly stores `1` (locked)
+/ `0` (free) to `sgl_owner` instead of toggling epoch parity.  The TSX
+hardware's cache-coherence conflict detection provides the safety guarantee
+(the first SGL write to `sgl_owner` aborts any concurrent TSX); the
+`tm_end()` double-check of `sgl_owner == tsx_start_owner` is a safety net.
 
 **TL2 (TL2.tla)** — The spec models per-address guards, while the real
 implementation uses a hash-based guard table (2^13 entries).  Guard-table

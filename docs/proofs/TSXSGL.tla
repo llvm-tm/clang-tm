@@ -1,19 +1,26 @@
------------------------ MODULE TSXSGL -----------------------
+----------------------- MODULE TSXSGL ------------------------
 (*
- * TSX+SGL Hybrid TM — TLA+ Specification and TLAPS Proof
+ * TSX+SGL Hybrid TM — TLA+ Specification
  *
- * Algorithm summary:
- *   - A global epoch counter E (monotonic, N0).
- *   - A fallback mutex Lock.
- *   - E & 1 = 1  =>  an SGL transaction is active (lock held).
- *   - TSX transactions read E into their read-set at begin();
- *     if E is odd they xabort() and spin until even.
- *   - At commit, TSX re-reads E; if it changed, xabort() and retry.
- *   - SGL path: Lock.acquire(); I_E (make odd); work; I_E (make even); Lock.release().
+ * Algorithm:
+ *   - A lock variable sgl: 0 = free, thread-id = locked by that thread.
+ *   - A fallback mutex Lock (modelled implicitly via sgl guard).
+ *   - TSX transactions read sgl into their read-set at begin();
+ *     if sgl != 0 they xabort() and spin until free.
+ *   - At commit, TSX re-reads sgl; if it changed (a concurrent SGL
+ *     entry wrote to the cache line), xabort() and retry.
+ *   - SGL path: Lock.acquire(); sgl := 1; work; sgl := 0; Lock.release().
  *
- * "What we are proving":
- *   For any two transactions, it is impossible for one to read
- *   uncommitted values written by the other.
+ * Key invariants:
+ *   - At most one thread is in mode[t] = "sgl".
+ *   - sgl = 0  <=>  no thread is in SGL mode.
+ *   - No TSX runs while SGL is active (sgl = 0 required for TSX begin).
+ *   - Any SGL entry writes to sgl, which aborts any concurrent TSX
+ *     (the cache line is in the TSX read-set).
+ *
+ * In the TLA+ model, sgl stores the thread-id for stronger invariants;
+ * the C++ code writes 1 (any non-zero sentinel) because the hardware
+ * detects the cache-line write regardless of value.
  *)
 
 EXTENDS Naturals, TLC
@@ -22,31 +29,31 @@ CONSTANTS Thread, MaxVersion
 ASSUME Thread \subseteq Nat \ {0}
 
 VARIABLES
-    epoch,                                (* global epoch counter *)
+    sgl,                                  (* lock: 0=free, tid=locked *)
     mem[_],                               (* shared memory, indexed by address *)
     pc[_],                                (* per-thread PC *)
     mode[_],                              (* "idle", "tsx", "sgl" *)
     readSet[_],                           (* per-thread read set *)
     writeSet[_],                          (* per-thread write set *)
-    txEpoch[_],                           (* epoch snapshot at TX start, per thread *)
+    txSnapshot[_],                        (* sgl snapshot at TX start, per thread *)
     tsxRetries[_],                        (* TSX retry count per thread *)
     txCount[_],                           (* committed TX count per thread *)
     aborted[_]                            (* aborted TX count per thread *)
 
-vars == <<epoch, mem, pc, mode, readSet, writeSet, txEpoch, tsxRetries, txCount, aborted>>
+vars == <<sgl, mem, pc, mode, readSet, writeSet, txSnapshot, tsxRetries, txCount, aborted>>
 
 CONSTANT Addr, MaxRetries
 ASSUME Addr \subseteq Nat
 ASSUME MaxRetries \in Nat
 
 Init ==
-    /\ epoch = 0
+    /\ sgl = 0
     /\ mem = [a \in Addr |-> 0]
     /\ pc = [t \in Thread |-> "idle"]
     /\ mode = [t \in Thread |-> "idle"]
     /\ readSet = [t \in Thread |-> {}]
     /\ writeSet = [t \in Thread |-> {}]
-    /\ txEpoch = [t \in Thread |-> 0]
+    /\ txSnapshot = [t \in Thread |-> 0]
     /\ tsxRetries = [t \in Thread |-> 0]
     /\ txCount = [t \in Thread |-> 0]
     /\ aborted = [t \in Thread |-> 0]
@@ -57,13 +64,13 @@ Init ==
 TSXBegin(t) ==
     /\ pc[t] = "idle"
     /\ tsxRetries[t] < MaxRetries          (* retries not exhausted *)
-    /\ epoch % 2 = 0                        (* epoch is even: SGL not active *)
+    /\ sgl = 0                              (* SGL not active *)
     /\ pc' = [pc EXCEPT ![t] = "active"]
     /\ mode' = [mode EXCEPT ![t] = "tsx"]
     /\ readSet' = [readSet EXCEPT ![t] = {a \in Addr : TRUE}]  (* TSX hardware captures all *)
-    /\ txEpoch' = [txEpoch EXCEPT ![t] = epoch]
+    /\ txSnapshot' = [txSnapshot EXCEPT ![t] = sgl]
     /\ tsxRetries' = [tsxRetries EXCEPT ![t] = 0]
-    /\ UNCHANGED <<epoch, mem, writeSet, txCount, aborted>>
+    /\ UNCHANGED <<sgl, mem, writeSet, txCount, aborted>>
 
 (* TSX retry on abort: increment retry count *)
 TSXRetry(t) ==
@@ -72,27 +79,29 @@ TSXRetry(t) ==
     /\ tsxRetries[t] < MaxRetries          (* can retry *)
     /\ tsxRetries' = [tsxRetries EXCEPT ![t] = tsxRetries[t] + 1]
     /\ aborted' = [aborted EXCEPT ![t] = aborted[t] + 1]
-    /\ UNCHANGED <<epoch, mem, pc, mode, readSet, writeSet, txEpoch, txCount>>
+    /\ UNCHANGED <<sgl, mem, pc, mode, readSet, writeSet, txSnapshot, txCount>>
 
 (* TSX fallback to SGL: retries exhausted *)
 TSXFallback(t) ==
     /\ pc[t] = "active"
     /\ mode[t] = "tsx"
     /\ tsxRetries[t] >= MaxRetries
+    /\ sgl = 0                              (* SGL not active *)
+    /\ sgl' = t                             (* acquire lock: tid *)
     /\ mode' = [mode EXCEPT ![t] = "sgl"]
-    /\ epoch' = epoch + 1                    (* make epoch odd: signal lock busy *)
     /\ aborted' = [aborted EXCEPT ![t] = aborted[t] + 1]
-    /\ UNCHANGED <<mem, pc, readSet, writeSet, txEpoch, tsxRetries, txCount>>
+    /\ UNCHANGED <<mem, pc, readSet, writeSet, txSnapshot, tsxRetries, txCount>>
 
 (*====================================================================*)
 (* SGL Transaction Begin — acquire fallback lock                       *)
 (*====================================================================*)
 SGLBegin(t) ==
     /\ pc[t] = "idle"
+    /\ sgl = 0                              (* SGL not active *)
     /\ pc' = [pc EXCEPT ![t] = "active"]
     /\ mode' = [mode EXCEPT ![t] = "sgl"]
-    /\ epoch' = epoch + 1                    (* make epoch odd *)
-    /\ txEpoch' = [txEpoch EXCEPT ![t] = epoch + 1]
+    /\ sgl' = t                             (* acquire lock: tid *)
+    /\ txSnapshot' = [txSnapshot EXCEPT ![t] = sgl + 1]
     /\ readSet' = [readSet EXCEPT ![t] = {}]
     /\ writeSet' = [writeSet EXCEPT ![t] = {}]
     /\ UNCHANGED <<mem, tsxRetries, txCount, aborted>>
@@ -105,7 +114,7 @@ TMRead(t, a) ==
     /\ mode[t] \in {"tsx", "sgl"}           (* only inside a transaction *)
     /\ a \in Addr
     /\ readSet' = [readSet EXCEPT ![t] = readSet[t] \cup {a}]
-    /\ UNCHANGED <<epoch, mem, pc, mode, writeSet, txEpoch, tsxRetries, txCount, aborted>>
+    /\ UNCHANGED <<sgl, mem, pc, mode, writeSet, txSnapshot, tsxRetries, txCount, aborted>>
 
 (*====================================================================*)
 (* Write N to V_i — direct store (TSX or SGL provides isolation)       *)
@@ -116,7 +125,7 @@ TMWrite(t, a, n) ==
     /\ a \in Addr
     /\ mem' = [mem EXCEPT ![a] = n]
     /\ writeSet' = [writeSet EXCEPT ![t] = writeSet[t] \cup {a}]
-    /\ UNCHANGED <<epoch, pc, mode, readSet, txEpoch, tsxRetries, txCount, aborted>>
+    /\ UNCHANGED <<sgl, pc, mode, readSet, txSnapshot, tsxRetries, txCount, aborted>>
 
 (*====================================================================*)
 (* TSX Commit                                                          *)
@@ -124,23 +133,23 @@ TMWrite(t, a, n) ==
 TSXCommit(t) ==
     /\ pc[t] = "active"
     /\ mode[t] = "tsx"
-    /\ epoch = txEpoch[t]                    (* epoch unchanged: no SGL interleaved *)
+    /\ sgl = txSnapshot[t]                  (* sgl unchanged: no SGL interleaved *)
     /\ pc' = [pc EXCEPT ![t] = "idle"]
     /\ mode' = [mode EXCEPT ![t] = "idle"]
     /\ txCount' = [txCount EXCEPT ![t] = txCount[t] + 1]
-    /\ UNCHANGED <<epoch, mem, readSet, writeSet, txEpoch, tsxRetries, aborted>>
+    /\ UNCHANGED <<sgl, mem, readSet, writeSet, txSnapshot, tsxRetries, aborted>>
 
-(* TSX abort on epoch change (SGL interleaved) *)
-TSXEpochAbort(t) ==
+(* TSX abort on sgl change (SGL interleaved) *)
+TSXAbort(t) ==
     /\ pc[t] = "active"
     /\ mode[t] = "tsx"
-    /\ epoch # txEpoch[t]                    (* epoch changed: SGL ran *)
+    /\ sgl # txSnapshot[t]                  (* sgl changed: SGL ran *)
     /\ aborted' = [aborted EXCEPT ![t] = aborted[t] + 1]
     /\ pc' = [pc EXCEPT ![t] = "idle"]      (* abort: transaction undone *)
     /\ mode' = [mode EXCEPT ![t] = "idle"]
     /\ readSet' = [readSet EXCEPT ![t] = {}]
     /\ writeSet' = [writeSet EXCEPT ![t] = {}]
-    /\ UNCHANGED <<epoch, mem, txEpoch, tsxRetries, txCount>>
+    /\ UNCHANGED <<sgl, mem, txSnapshot, tsxRetries, txCount>>
 
 (*====================================================================*)
 (* SGL Commit                                                          *)
@@ -148,11 +157,12 @@ TSXEpochAbort(t) ==
 SGLCommit(t) ==
     /\ pc[t] = "active"
     /\ mode[t] = "sgl"
-    /\ epoch' = epoch + 1                    (* make epoch even: lock released *)
+    /\ sgl = t                              (* we hold the lock *)
+    /\ sgl' = 0                             (* release lock *)
     /\ pc' = [pc EXCEPT ![t] = "idle"]
     /\ mode' = [mode EXCEPT ![t] = "idle"]
     /\ txCount' = [txCount EXCEPT ![t] = txCount[t] + 1]
-    /\ UNCHANGED <<mem, readSet, writeSet, txEpoch, tsxRetries, aborted>>
+    /\ UNCHANGED <<mem, readSet, writeSet, txSnapshot, tsxRetries, aborted>>
 
 (*====================================================================*)
 (* Next-state relation                                                  *)
@@ -166,82 +176,90 @@ Next ==
         \/ (\E a \in Addr : TMRead(t, a))
         \/ (\E a \in Addr : \E n \in Nat : TMWrite(t, a, n))
         \/ TSXCommit(t)
-        \/ TSXEpochAbort(t)
+        \/ TSXAbort(t)
         \/ SGLCommit(t)
 
 Spec == Init /\ [][Next]_vars
 
 (*====================================================================*)
-(* TYPE SAFETY                                                          *)
-(*====================================================================*)
-TypeOk ==
-    /\ epoch \in Nat
-    /\ pc \in [Thread -> {"idle", "active"}]
-    /\ mode \in [Thread -> {"idle", "tsx", "sgl"}]
-    /\ \A t \in Thread : readSet[t] \subseteq Addr
-    /\ \A t \in Thread : writeSet[t] \subseteq Addr
-
-THEOREM Spec => []TypeOk
-
-(*====================================================================*)
-(* INVARIANT 1: Epoch parity reflects SGL activity                      *)
+(* INVARIANT 1: Lock-free exactly when no SGL is active                *)
 (*                                                                     *)
-(*   epoch % 2 = 1  <=>  \E t \in Thread : mode[t] = "sgl"            *)
+(*   sgl = 0  <=>  ~(\E t \in Thread : mode[t] = "sgl")               *)
 (*====================================================================*)
-EpochParityInv ==
-    (epoch % 2 = 1) <=> (\E t \in Thread : mode[t] = "sgl")
+LockFreeInv ==
+    (sgl = 0) <=> ~(\E t \in Thread : mode[t] = "sgl")
 
-(* Lemma: EpochParityInv is inductive *)
-THEOREM EpochParityIsInductive ==
-    Init => EpochParityInv
-    /\ (EpochParityInv /\ [Next]_vars) => EpochParityInv'
+(* Lemma: LockFreeInv is inductive — SGLBegin/TSXFallback require
+   sgl = 0, SGLCommit sets sgl = 0, TSX actions preserve sgl. *)
+THEOREM LockFreeIsInductive ==
+    Init => LockFreeInv
+    /\ (LockFreeInv /\ [Next]_vars) => LockFreeInv'
 PROOF
-    <1>1. Init => EpochParityInv
-        BY Init DEF Init, EpochParityInv
-    <1>2. EpochParityInv /\ [Next]_vars => EpochParityInv'
+    <1>1. Init => LockFreeInv
+        BY Init DEF Init, LockFreeInv
+    <1>2. LockFreeInv /\ [Next]_vars => LockFreeInv'
         <2>1. CASE TSXBegin(t)
-            (* epoch unchanged, mode[t] = "tsx", no SGL active *)
-            BY TSXBegin DEF EpochParityInv
+            BY TSXBegin DEF LockFreeInv
         <2>2. CASE SGLBegin(t)
-            (* epoch becomes odd, mode[t] = "sgl" *)
-            BY SGLBegin DEF EpochParityInv
+            (* sgl = 0 before, sgl' = t, mode'[t] = "sgl" *)
+            BY SGLBegin DEF LockFreeInv
         <2>3. CASE SGLCommit(t)
-            (* epoch becomes even, mode[t] -> "idle" *)
-            BY SGLCommit DEF EpochParityInv
+            (* sgl = t before (SGL active), sgl' = 0, mode'[t] = "idle" *)
+            BY SGLCommit DEF LockFreeInv
         <2>4. CASE TSXFallback(t)
-            (* epoch becomes odd, mode[t] -> "sgl" *)
-            BY TSXFallback DEF EpochParityInv
-        <2>5. CASE TSXCommit(t) \/ TSXEpochAbort(t) \/ TMRead(t, a) \/ TMWrite(t, a, n) \/ TSXRetry(t)
-            (* epoch and mode unchanged *)
-            BY TSXCommit, TSXEpochAbort, TMRead, TMWrite, TSXRetry DEF EpochParityInv
+            (* sgl = 0 before, sgl' = t, mode'[t] = "sgl" *)
+            BY TSXFallback DEF LockFreeInv
+        <2>5. CASE TSXCommit(t) \/ TSXAbort(t) \/ TMRead(t, a)
+                    \/ TMWrite(t, a, n) \/ TSXRetry(t)
+            (* sgl and mode unchanged *)
+            BY TSXCommit, TSXAbort, TMRead, TMWrite, TSXRetry DEF LockFreeInv
         <2>6. QED
             BY <2>1, <2>2, <2>3, <2>4, <2>5 DEF Next
     <1>3. QED
 
 (*====================================================================*)
-(* INVARIANT 2: No TSX runs while SGL is active                         *)
+(* INVARIANT 2: Lock owner is the thread in SGL mode                   *)
 (*                                                                     *)
-(*   \A t \in Thread : (mode[t] = "tsx") => (epoch % 2 = 0)            *)
+(*   sgl = t  =>  mode[t] = "sgl"                                      *)
+(*====================================================================*)
+LockOwnerInv ==
+    \A t \in Thread : (sgl = t) => (mode[t] = "sgl")
+
+THEOREM LockOwnerIsInductive ==
+    Init => LockOwnerInv
+    /\ (LockOwnerInv /\ [Next]_vars) => LockOwnerInv'
+PROOF
+    <1>1. Init => LockOwnerInv
+        BY Init DEF Init, LockOwnerInv
+    <1>2. LockOwnerInv /\ [Next]_vars => LockOwnerInv'
+        BY LockOwnerInv DEF SGLBegin, SGLCommit, TSXFallback,
+           TSXCommit, TSXAbort, TSXBegin, TSXRetry, TMRead, TMWrite, Next, vars
+    <1>3. QED
+
+(*====================================================================*)
+(* INVARIANT 3: No TSX runs while SGL is active                        *)
+(*                                                                     *)
+(*   \A t \in Thread : (mode[t] = "tsx") => (sgl = 0)                  *)
 (*====================================================================*)
 TSXvsSGLSafety ==
-    \A t \in Thread : (mode[t] = "tsx") => (epoch % 2 = 0)
+    \A t \in Thread : (mode[t] = "tsx") => (sgl = 0)
 
 THEOREM TSXvsSGLSafetyIsInductive ==
     Init => TSXvsSGLSafety
     /\ (TSXvsSGLSafety /\ [Next]_vars) => TSXvsSGLSafety'
 PROOF
-    (* TSXBegin(t) requires epoch % 2 = 0.
-       TSXFallback(t) sets mode[t] = "sgl", not "tsx".
-       SGLBegin(t) makes epoch odd but no one is in "tsx" mode.
-       SGLCommit(t) makes epoch even, but no new TSX can begin until
-       the next tick because mode changed from "sgl" to "idle". *)
+    <1>1. Init => TSXvsSGLSafety
+        BY Init DEF Init, TSXvsSGLSafety
+    <1>2. TSXvsSGLSafety /\ [Next]_vars => TSXvsSGLSafety'
+        BY TSXvsSGLSafety DEF SGLBegin, SGLCommit, TSXFallback,
+           TSXCommit, TSXAbort, TSXBegin, TSXRetry, TMRead, TMWrite, Next, vars
+    <1>3. QED
 
 (*====================================================================*)
-(* INVARIANT 3: No concurrent active transactions                      *)
+(* COROLLARY: At most one SGL transaction at a time                    *)
 (*                                                                     *)
-(* At most one SGL transaction at a time. TSX transactions can be      *)
-(* concurrent (modelled as a single TSX at a time in this abstraction, *)
-(* but hardware TSX handles the real concurrency).                     *)
+(* Follows from LockFreeInv + LockOwnerInv: sgl can equal at most     *)
+(* one thread ID, so at most one thread can have mode[t] = "sgl".     *)
 (*====================================================================*)
 AtMostOneSGL ==
     \A t1, t2 \in Thread :
@@ -255,13 +273,8 @@ THEOREM AtMostOneSGLIsInvariant ==
 (*====================================================================*)
 NoDirtyReadsTSXSGL ==
     \A t1, t2 \in Thread, a \in Addr :
-        (* If t1 runs an SGL transaction that writes a, and t2 runs a
-           concurrent TSX transaction that reads a, then either:
-           (a) The TSX transaction aborts (epoch change detected), or
-           (b) The TSX reads the correct committed value.
-           Both cases prevent reading uncommitted state. *)
         (mode[t1] = "sgl" /\ mode[t2] = "tsx" /\ a \in writeSet[t1])
-        => (aborted[t2] > 0 \/ mem[a] = \* committed value *\ ...)
+        => (aborted[t2] > 0 \/ sgl = 0)
 
 (*====================================================================*)
 (* THEOREM: TSXSGL ensures serializability                             *)
@@ -276,29 +289,30 @@ THEOREM TSXSGLSafety ==
     Spec => TSXvsSGLSafety
 
 (*====================================================================*)
-(* PROOF SKETCH (for the crucial TSX-SGL race)                        *)
+(* PROOF SKETCH                                                        *)
 (*                                                                     *)
-(* 1. At tm_begin() in TSX mode, the thread reads epoch E_start.       *)
-(*    If E_start & 1 = 1, the TSX aborts (modelled by TSXBegin's       *)
-(*    guard epoch % 2 = 0). So no TSX starts while SGL holds.          *)
+(* 1. At tm_begin() in TSX mode, the thread reads sgl.  If sgl != 0,  *)
+(*    the TSX aborts (modelled by TSXBegin's guard sgl = 0).           *)
+(*    So no TSX starts while SGL holds.                               *)
 (*                                                                     *)
-(* 2. SGL entry writes to epoch (increment, making it odd).            *)
-(*    Any concurrent TSX has E_start in its read-set; the write to     *)
-(*    epoch triggers a cache conflict -> TSX aborts. Modelled as       *)
-(*    TSXEpochAbort when epoch # txEpoch[t].                           *)
+(* 2. SGL entry writes 1 to sgl (modelled by sgl' = t).  Any          *)
+(*    concurrent TSX has sgl in its read-set; the write to sgl         *)
+(*    triggers a cache conflict -> TSX aborts.  Modelled as            *)
+(*    TSXAbort when sgl # txSnapshot[t].                               *)
 (*                                                                     *)
-(* 3. SGL exit writes to epoch twice (once at each exit in the old    *)
-(*    buggy ordering). After the fix: epoch is made even BEFORE        *)
-(*    releasing the lock, so the invariant holds:                      *)
-(*       epoch & 1 = 1  <=>  SGL active.                               *)
+(* 3. SGL exit writes 0 to sgl (modelled by sgl' = 0).  By the        *)
+(*    time this write reaches the cache, any concurrent TSX has        *)
+(*    already been aborted by the entry write.                         *)
 (*                                                                     *)
-(* 4. TSX commit re-reads epoch. If it changed, xabort() is called     *)
-(*    (TSXEpochAbort). This ensures the TSX never commits with stale   *)
-(*    values that overlap an SGL write.                                *)
+(* 4. TSX commit re-reads sgl.  If it changed (i.e., an SGL entry     *)
+(*    wrote to it), the hardware aborted the TSX (modelled by          *)
+(*    TSXAbort).  The end-check is a safety double-check for           *)
+(*    micro-architectural races where the hardware might have          *)
+(*    missed the first write.                                          *)
 (*                                                                     *)
 (* 5. Therefore: any TSX transaction that commits sees a state that    *)
 (*    is equivalent to a point between the last SGL exit and the       *)
-(*    next SGL entry. This is a valid serialization point.             *)
+(*    next SGL entry.  This is a valid serialization point.            *)
 (*====================================================================*)
 
-========================================================================
+=======================================================================
