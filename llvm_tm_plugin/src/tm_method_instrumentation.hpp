@@ -238,6 +238,13 @@ getClonedMethodsMap()
 
 // Check if a function has any stores to TM-annotated globals.
 // Read-only functions don't need cloning (no buffered writes to undo).
+//
+// NOTE: shallow — only checks direct StoreInsts in F.  If F calls a
+// callee that writes TM data but F itself only passes the pointer through,
+// this returns false.  That is intentional for Step 1 seeding (we only
+// want functions that *actually* write), but the transitive case is
+// handled by Step 2 propagation + Step 3 filtering (see
+// computeClonableFunction's fragile-corner #1).
 static bool hasDirectTMWrites(Function &F, Module &M)
 {
     for (auto &BB : F)
@@ -249,6 +256,12 @@ static bool hasDirectTMWrites(Function &F, Module &M)
 }
 
 // Check if a function has any loads/stores that trace directly to a TM global.
+//
+// NOTE: shallow — only checks direct LoadInst/StoreInst in F's own body.
+// If F passes the pointer to a callee that does the actual load/store,
+// this returns false.  Used by Step 3 of computeClonableFunctions to
+// filter out pure pointer-computation functions, but see fragile-corner #1
+// for the case where a pointer-through function should stay clonable.
 static bool hasDirectTMGlobal(Function &F, Module &M)
 {
     for (auto &BB : F)
@@ -274,6 +287,81 @@ using TMTraceableArgsMap = DenseMap<Function *, SmallSet<unsigned, 4>>;
 
 // Build the set of functions that should be cloned by propagating
 // TM-traceability through the call graph from TX functions.
+//
+// == Algorithm ==
+//
+// Step 1 (seed): Functions with direct TM WRITES are clonable. Read-only
+//   functions are not seeded — they don't buffer writes, so there's nothing
+//   to undo on abort.
+//
+// Step 2 (propagation): A function F is clonable if any caller passes an
+//   argument that traces to a TM global or a TM-traceable argument of the
+//   caller. This follows the chain: TX → map::find(this=&g_x) →
+//   __tree::find(this) → ...
+//
+// Step 3 (filter): Pure pointer-computation functions (vector::begin,
+//   __wrap_iter ctors, etc.) that were propagated through TM-traceable
+//   arguments but never actually load/store TM data are removed.
+//
+// == Fragile / shallow corners ==
+//
+// 1. Shallow Step-3 filter (hasDirectTMGlobal).
+//    Only checks loads/stores *in the function itself*, not transitively
+//    through callees.  This can miss a function that passes a TM pointer
+//    through to a callee that actually writes TM data:
+//
+//      TX → helper(ptr) {
+//                internal_write(ptr);   // WRITES TM data via ptr
+//            }
+//
+//    Step 2 propagates "clonable" to helper because ptr is TM-traceable.
+//    But helper has no direct loads/stores → Step 3 removes it.
+//    Now the call to internal_write from inside TX calls the *original*
+//    internal_write instead of internal_write_tm_clone.
+//    The clone exists but is never used.
+//
+//    To fix this: Step 3 should check whether F transitively calls
+//    any function that has direct TM loads/stores (a transitive
+//    closure rather than a direct scan).
+//
+// 2. Depth limit in isArgTraceable (10).
+//    If the GEP/Load/Call chain exceeds 10 hops, traceability fails and
+//    the function is not cloned.  This can trigger on deeply nested
+//    pointer-to-pointer chains:
+//
+//      ptr = load(&g_x)           // depth 1
+//      ptr2 = load(ptr + offset)  // depth 2
+//      ptr3 = load(ptr2)          // depth 3 ... up to 10
+//      callee(ptr3)               // propagation stops here
+//
+// 3. Indirect calls are invisible.
+//    getCalledFunction() returns null for function pointers and virtual
+//    methods.  Any TM-traceable argument that only reaches callees through
+//    an indirect call site is silently dropped:
+//
+//      struct Base { virtual void visit(TM_data*); };
+//      TX → ptr->visit(&g_x);     // indirect call, no propagation
+//      Base::visit is never cloned.
+//
+// 4. Argument-only propagation.
+//    If a function loads a TM global directly (not via a parameter) and
+//    only reads it, it's never seeded (no writes) and never propagated
+//    (the TM global is not an argument).  This is usually fine (no
+//    writes = nothing to undo), but the function's reads are then not
+//    redirected to a clone.  If that function is also called from
+//    non-TX code this doesn't matter; if called from TX code the read
+//    still uses the original (non-TM-instrumented?) path.   Actually
+//    all TM loads/stores inside TX functions are replaced by the
+//    main instrumentation pass regardless of cloning, so this is
+//    only a concern for the clone/redirect mechanism itself.
+//
+// 5. hasDirectTMWrites seed seeder is write-only.
+//    A function that only reads TM data (no stores) is never seeded.
+//    If it is called with a TM-traceable argument from a TX function,
+//    Step 2 propagates it.  If it reaches TM data via a global load
+//    instead of a parameter it stays uncloned.  This is benign for
+//    correctness (no writes to undo) but means its reads go through
+//    the original function.
 static SmallPtrSet<Function *, 32>
 computeClonableFunctions(Module &M,
                          SmallPtrSetImpl<Function *> &TxReachableFuncs)
