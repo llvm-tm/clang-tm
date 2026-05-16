@@ -315,19 +315,15 @@ to operate over a network instead of shared mmap would require:
 
 **Future directions — state machine replication (SMR):**
 
-The plugin can be used to build a replicated state machine where each replica
-runs the same TM workload and decisions are agreed via consensus:
+The instrumented binary already exposes every memory operation to the runtime;
+replication needs no annotation or plugin change. All logic lives in the runtime hooks:
 
-1. **Deterministic replay** — since TM instrumentation produces deterministic
-   read/write sets, the same transaction can be replayed on multiple replicas.
-   The `tm_end()` commit decision (go/no-go) becomes the consensus proposal.
-2. **Raft integration** — wrap `tm_begin()`/`tm_end()` in a Raft state machine:
+1. **Deterministic replay** — TM instrumentation produces deterministic read/write
+   sets per transaction. The same TX can be replayed on multiple replicas;
+   `tm_end()`'s commit decision becomes the consensus proposal.
+2. **Raft integration** — a `replicated_runtime.cpp` wraps `tm_begin()`/`tm_end()`:
    - Leader executes the transaction and proposes the resulting write-set as a
-     log entry.
+     Raft log entry.
    - Followers apply the committed write-set to their local TM state.
 3. **Read-only fast path** — read-only transactions (no `tm_write` calls during
-   the transaction) can be served directly by any replica without going through
-   consensus, since they don't modify state.
-4. **Plugin annotation** — add a `REPLICATED` annotation (`__attribute__((annotate("replicated")))`)
-   so the plugin automatically routes TM operations through the consensus layer
-   without manual wiring.
+   the transaction) skip consensus entirely and are served directly by any replica.
