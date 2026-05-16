@@ -27,4 +27,4 @@ echo "==> Downloading clang-tm uninstall script..."
 git clone --depth 1 "$REPO" "$TMPDIR"
 
 echo "==> Running uninstall.sh..."
-exec "$TMPDIR/llvm_tm_plugin/uninstall.sh" "$@"
+exec "$TMPDIR/llvm_tm_plugin/uninstall.sh" -y "$@"

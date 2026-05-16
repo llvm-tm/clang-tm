@@ -19,4 +19,4 @@ echo "==> Downloading clang-tm..."
 git clone --depth 1 "$REPO" "$TMPDIR"
 
 echo "==> Running install.sh..."
-exec "$TMPDIR/llvm_tm_plugin/install.sh" "$@"
+exec "$TMPDIR/llvm_tm_plugin/install.sh" -y "$@"

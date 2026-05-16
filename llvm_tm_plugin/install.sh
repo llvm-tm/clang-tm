@@ -137,7 +137,13 @@ info "  headers   → ${INSTALL_INCLUDE}/"
 
 if [ "$YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     printf "Continue? [Y/n] "
-    read -r reply
+    if [ -t 0 ]; then
+        read -r reply
+    elif [ -e /dev/tty ]; then
+        read -r reply </dev/tty
+    else
+        reply="y"
+    fi
     case "$reply" in
         n|N|no|NO) die "Aborted." ;;
     esac
