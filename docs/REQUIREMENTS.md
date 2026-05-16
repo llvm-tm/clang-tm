@@ -17,7 +17,7 @@ on a new machine (including remote machines accessed via SSH).
 
 ## Installation by Platform
 
-### Ubuntu / Debian (inescpc)
+### Ubuntu / Debian
 
 ```sh
 sudo apt update
@@ -62,17 +62,17 @@ available at compatible versions.
 
 ```sh
 # 1. Copy the project to the target machine
-scp -r tm_api_cpp inescpc:/mnt/projects/
+scp -r tm_api_cpp user@remote-host:/path/to/projects/
 
 # 2. SSH in
-ssh inescpc
+ssh user@remote-host
 
 # 3. Build the plugin
-cd /mnt/projects/tm_api_cpp/llvm_tm_plugin
+cd /path/to/projects/tm_api_cpp/llvm_tm_plugin
 make
 
 # 4. Build and run a benchmark
-cd /mnt/projects/tm_api_cpp/benchmarks/test/bank
+cd /path/to/projects/tm_api_cpp/benchmarks/test/bank
 make bank_singlelock
 ./bin/bank_singlelock -d 3000 -n 4
 ```

@@ -46,3 +46,4 @@ compile_commands.json
 
 # Documents
 *.pdf
+*.log

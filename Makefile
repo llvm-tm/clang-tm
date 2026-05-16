@@ -16,7 +16,7 @@
 
 # Detect LLVM installation
 LLVM_CONFIG ?= llvm-config
-LLVM_CONFIG_ARGS := $(shell $(LLVM_CONFIG) --cxxflags --ldflags --system-libs --libs core analysis 2>/dev/null || echo "-I/opt/homebrew/Cellar/llvm/22.1.4/include -L/opt/homebrew/Cellar/llvm/22.1.4/lib -lLLVM-22")
+LLVM_CONFIG_ARGS := $(shell $(LLVM_CONFIG) --cxxflags --ldflags --system-libs --libs core analysis 2>/dev/null || echo "-I$(shell brew --prefix llvm 2>/dev/null || echo /usr/lib/llvm-22)/include -L$(shell brew --prefix llvm 2>/dev/null || echo /usr/lib/llvm-22)/lib -lLLVM-22")
 
 # Compiler settings
 CXX ?= clang++

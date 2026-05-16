@@ -84,7 +84,7 @@ In `TMGlobalInitPass`, replace the heuristic (hasTM || callsTx) with:
 ## Build & Test Commands
 
 ```bash
-cd /Users/daniel/Projects/TM/tm_api_cpp/llvm_tm_plugin
+cd llvm_tm_plugin
 make clean && make -j4
 make test && make run
 ```

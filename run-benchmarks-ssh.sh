@@ -7,14 +7,14 @@
 #   ./run-benchmarks-ssh.sh [host] [benchmark...]
 #
 # Examples:
-#   ./run-benchmarks-ssh.sh user@inescpc
-#   ./run-benchmarks-ssh.sh user@inescpc bank stmbench7
+#   ./run-benchmarks-ssh.sh user@remote-host
+#   ./run-benchmarks-ssh.sh user@remote-host bank stmbench7
 #   ./run-benchmarks-ssh.sh 192.168.1.100 bank
 
 set -euo pipefail
 
-HOST="${1:-inescpc}"
-REMOTE_DIR="/mnt/projects/tm_api_cpp"
+HOST="${1:-user@remote-host}"
+REMOTE_DIR="~/tm_api_cpp"
 SSH="ssh -o StrictHostKeyChecking=no"
 SCP="scp -o StrictHostKeyChecking=no"
 RSYNC="rsync -avz --delete"
