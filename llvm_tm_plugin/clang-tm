@@ -150,10 +150,14 @@ done
 # ---- Locate plugin ----
 
 if [ -z "$PLUGIN" ]; then
+    # Try bare name first (install.sh creates this), fall back to _release
     PLUGIN="$TM_PLUGIN_DIR/libTMInstrument.so"
+    if [ ! -f "$PLUGIN" ]; then
+        PLUGIN="$TM_PLUGIN_DIR/libTMInstrument_release.so"
+    fi
 fi
 if [ ! -f "$PLUGIN" ]; then
-    echo "clang-tm: plugin not found at $PLUGIN" >&2
+    echo "clang-tm: plugin not found at $TM_PLUGIN_DIR/libTMInstrument.so" >&2
     echo "  Set --plugin or run install.sh." >&2
     exit 1
 fi

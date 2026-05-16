@@ -178,6 +178,10 @@ for variant in "$LLVM_TM_DIR/bin/libTMInstrument"*.so; do
     [ -f "$variant" ] || continue
     cp "$variant" "$INSTALL_PLUGIN/"
 done
+# Ensure libTMInstrument.so exists (default alias for _release)
+if [ ! -f "$INSTALL_PLUGIN/libTMInstrument.so" ] && [ -f "$INSTALL_PLUGIN/libTMInstrument_release.so" ]; then
+    cp "$INSTALL_PLUGIN/libTMInstrument_release.so" "$INSTALL_PLUGIN/libTMInstrument.so"
+fi
 info "plugin → $INSTALL_PLUGIN/ ($(ls -1 "$INSTALL_PLUGIN" | wc -l | tr -d ' ') variants)"
 
 # ---- 3. Install runtime sources ----
