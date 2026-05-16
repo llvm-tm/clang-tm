@@ -71,7 +71,9 @@ public:
     TM_DEBUG("TMGlobalInitPass: processing module %s", M.getName().str().c_str());
     
     LLVMContext &Ctx = M.getContext();
-    auto H = TMRuntimeHooks::declareAll(M, Ctx);
+    const char *SetjmpFunc = M.getTargetTriple().str().find("linux") != std::string::npos
+                               ? "__sigsetjmp" : "sigsetjmp";
+    auto H = TMRuntimeHooks::declareAll(M, Ctx, SetjmpFunc);
     Type *i8Ty = Type::getInt8Ty(Ctx);
     Type *i32Ty = Type::getInt32Ty(Ctx);
 
@@ -204,7 +206,9 @@ public:
 
     Module *M = F.getParent();
     LLVMContext &Ctx = M->getContext();
-    auto H = TMRuntimeHooks::declareAll(*M, Ctx);
+    const char *SetjmpFunc = M->getTargetTriple().str().find("linux") != std::string::npos
+                               ? "__sigsetjmp" : "sigsetjmp";
+    auto H = TMRuntimeHooks::declareAll(*M, Ctx, SetjmpFunc);
     Type *i32Ty = Type::getInt32Ty(Ctx);
 
     // ---- Setup thread-local variables for transaction nesting ----

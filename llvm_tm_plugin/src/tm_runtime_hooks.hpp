@@ -24,7 +24,8 @@ struct TMRuntimeHooks {
 
     bool valid() { return read_i4.getCallee() && write_i4.getCallee(); }
 
-    static TMRuntimeHooks declareAll(Module &M, LLVMContext &Ctx) {
+    static TMRuntimeHooks declareAll(Module &M, LLVMContext &Ctx,
+                                     StringRef SetjmpFunc = "sigsetjmp") {
         TMRuntimeHooks h;
         auto *voidTy = Type::getVoidTy(Ctx);
         auto *i8Ty = Type::getInt8Ty(Ctx);
@@ -46,7 +47,7 @@ struct TMRuntimeHooks {
         h.begin        = hook("tm_begin", voidTy, {});
         h.end          = hook("tm_end", voidTy, {});
         h.set_jmpbuf   = hook("tm_set_jmpbuf", voidTy, {i8PtrTy});
-        h.sigsetjmp    = hook("sigsetjmp", i32Ty, {i8PtrTy, i32Ty});
+        h.sigsetjmp      = hook(SetjmpFunc, i32Ty, {i8PtrTy, i32Ty});
         h.serialize_lock   = hook("tm_serialize_lock", voidTy, {});
         h.serialize_unlock = hook("tm_serialize_unlock", voidTy, {});
         h.malloc_fn        = hook("tm_malloc", i8PtrTy, {i64Ty});

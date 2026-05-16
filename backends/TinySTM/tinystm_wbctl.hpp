@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <thread>
+#include <algorithm>
 
 #include "tinystm_common.hpp"
 
