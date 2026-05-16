@@ -7,7 +7,11 @@
 \usepackage{cite}
 \usepackage{geometry}
 \usepackage{booktabs}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning}
 \geometry{margin=1in}
+
+\newcommand{\ZardoshtiEtAl}{Zardoshti~et~al.}
 
 \title{LLVM Transactional Memory Plugin:\\Annotation-Driven Automatic Instrumentation for C++ STM}
 \author{}
@@ -405,8 +409,9 @@ Each backend implements these with a different STM strategy:
 \section{Evaluation}\label{sec:evaluation}
 
 We evaluate the plugin across all backends using the most extensive benchmark
-suite in the TM compiler literature.  Table~\ref{tab:bench-comparison}
-summarises the breadth of our evaluation relative to the closest prior work.
+suite in the TM compiler literature, including bank transactions, data-structure
+microbenchmarks (AVL tree, red-black tree, hash map, bitmap, linked list,
+sorted set, heap), STAMP (8 benchmarks), STMbench7, TPC-C, YCSB, and EigenBench.
 
 \subsection{Experimental Design}
 
@@ -452,39 +457,69 @@ We quantify the cost of compiler instrumentation:
 \end{enumerate}
 
 \paragraph{Comparison with prior work (RQ4).}
-Where the Spear plugin (\texttt{llvm-transmem}) is reproducible, we run
-identical workloads and report throughput ratios.  We also compare
-annotation burden: lines of code changed, number of syntactic wrappers
-required, and API intrusiveness.
+We compare the annotation burden of three approaches to transactional
+programming: manual instrumentation, the \ZardoshtiEtAl\ LLVM plugin
+(which uses a lambda-based API with \texttt{TX\_BEGIN...TX\_END}
+macros~\cite{Zardoshti2019}), and our annotation-driven plugin.
+Listings~\ref{lst:manual}--\ref{lst:ours} show the same atomic money
+transfer implemented with each approach.
 
-\begin{table}[h]
-\centering
-\begin{tabular}{lcc}
-\toprule
-Benchmark & This work & Zardoshti et al.~\cite{Zardoshti2019} \\
-\midrule
-Bank (money conservation) & Yes & No \\
-Hash Map & Yes & Yes \\
-AVL Tree & Yes & Yes \\
-Red-Black Tree & Yes & No \\
-Sorted Set & Yes & No \\
-Linked List & Yes & No \\
-Bitmap & Yes & No \\
-Heap & Yes & No \\
-STMbench7 (EuroSys 2007) & Yes & No \\
-STAMP (8 benchmarks) & Yes & Yes \\
-YCSB (6 workloads A--F) & Yes & No \\
-EigenBench (8 characteristics) & Yes & No \\
-TPC-C (5 transaction types) & Yes & No \\
-Per-backend unit tests & Yes & No \\
-\bottomrule
-\end{tabular}
-\caption{Benchmark suite comparison.  The Spear et al.\ repository
-(\texttt{llvm-transmem}) includes STAMP, microbenchmarks, and memcached;
-our suite additionally covers OLTP (TPC-C), cloud serving (YCSB),
-complex CAD/CAM (STMbench7), and synthetic TM characterisation (EigenBench).}
-\label{tab:bench-comparison}
-\end{table}
+\begin{lstlisting}[caption={Manual instrumentation.},label={lst:manual},language=C++,numbers=left,xleftmargin=2.5em]
+TM int accounts[256];
+
+void transfer(int from, int to, int amt) {
+    tm_begin();
+    int a = tm_read_i4(&accounts[from]);
+    tm_write_i4(&accounts[from], a - amt);
+    int b = tm_read_i4(&accounts[to]);
+    tm_write_i4(&accounts[to], b + amt);
+    tm_end();
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={\ZardoshtiEtAl\ plugin (lambda API~\cite{Zardoshti2019}).},label={lst:zardoshti},language=C++,numbers=left,xleftmargin=2.5em]
+TM int accounts[256];
+
+void transfer(int from, int to, int amt) {
+    TX_BEGIN {
+        accounts[from] -= amt;  // transparent tm_read_i4 + tm_write_i4
+        accounts[to]   += amt;
+    } TX_END;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Our plugin (annotation-driven API).},label={lst:ours},language=C++,numbers=left,xleftmargin=2.5em]
+TM int accounts[256];
+TX void transfer(int from, int to, int amt) {
+    accounts[from] -= amt;  // transparent tm_read_i4 + tm_write_i4
+    accounts[to]   += amt;
+}
+\end{lstlisting}
+
+The three listings illustrate the central benefit of our approach.
+Manual instrumentation~\ref{lst:manual} requires the developer to (i)
+explicitly call \texttt{tm\_begin()}/\texttt{tm\_end()}, (ii) replace
+every shared-memory load and store with a typed
+\texttt{tm\_read\_*}/\texttt{tm\_write\_*} call, and (iii) commit to a
+specific STM backend --- if the backend's read/write signatures change,
+every call site must be updated.  The \ZardoshtiEtAl\ plugin
+~\ref{lst:zardoshti} eliminates the per-access hook calls by
+automatically instrumenting loads and stores inside the
+\texttt{TX\_BEGIN...TX\_END} lambda, but it still requires the
+programmer to restructure code: the transaction body must be wrapped in
+a lambda expression, which prevents the use of non-capturable
+constructs (e.g., \texttt{return} from the enclosing function,
+\texttt{goto}, \texttt{break}) and adds syntactic noise for every
+transactional block.  Our plugin~\ref{lst:ours} requires only a single
+\texttt{TX} annotation on the function declaration and a \texttt{TM}
+annotation on the shared global --- the function body is plain C++ with
+no wrappers, no lambda captures, and no backend-specific calls.  The
+same annotated source compiles with any of the six backends without
+modification.  Transitive call-graph cloning (Section~\ref{sec:cloning})
+ensures that helper functions called from \texttt{TX} functions are
+automatically instrumented, matching the lambda-cloning capability of the
+\ZardoshtiEtAl\ plugin while keeping the developer annotation burden at
+zero lines of code changed inside function bodies.
 
 \subsection{Bank Benchmark}
 
@@ -679,7 +714,7 @@ lambda expressions and RAII scope objects to delimit transactions.  The plugin i
 available at \texttt{github.com/mfs409/llvm-transmem}.  This is the closest prior
 work to ours, but there are several important differences:
 
-\paragraph{API design.}  The Spear plugin uses \texttt{TX\_BEGIN \{ ... \} TX\_END} macros
+\paragraph{API design.}  The \ZardoshtiEtAl plugin uses \texttt{TX\_BEGIN \{ ... \} TX\_END} macros
 that expand to lambda expressions or RAII objects.  This requires the programmer to
 restructure existing code into lambda bodies or declare local RAII variables.  Our
 annotation-driven approach (\texttt{\_\_attribute\_\_((annotate(...)))}) attaches metadata
@@ -688,48 +723,82 @@ restructuring.  An existing class with a \texttt{transfer(from, to, amount)} met
 needs only a single annotation on the function --- no lambda capture, no RAII guard,
 no include of a header defining macros.
 
-\paragraph{Call-graph cloning.}  Spear's plugin uses conditional dispatch: every call
+\paragraph{Call-graph cloning.}  \ZardoshtiEtAl's plugin uses conditional dispatch: every call
 site checks a runtime flag to choose between the original and instrumented version
 of a function.  This adds a branch per call and prevents inlining across the
 instrumentation boundary.  Our plugin uses compile-time redirection: calls within
 transaction context are rewritten to point directly to instrumented clones, with
 no runtime dispatch overhead.  Additionally, our fixed-point propagation
 algorithm (\S\ref{sec:cloning}) handles TM-traceable arguments through STL
-internal functions (e.g., \texttt{\_\_tree\_left\_rotate}), which the Spear plugin
+internal functions (e.g., \texttt{\_\_tree\_left\_rotate}), which the \ZardoshtiEtAl plugin
 does not address in its published description.
 
-\paragraph{Thread lifecycle.}  Spear's plugin does not instrument thread entry and
+\paragraph{Thread lifecycle.}  \ZardoshtiEtAl's plugin does not instrument thread entry and
 exit points.  Transactions running in worker threads must initialise the STM runtime
 manually.  Our plugin detects \texttt{\_\_attribute\_\_((annotate("thread")))}
 functions and automatically inserts \texttt{tm\_init\_thread()} and
 \texttt{tm\_exit\_thread()} calls.
 
-\paragraph{Benchmark breadth and reproducibility.}  As shown in
-Table~\ref{tab:bench-comparison}, our evaluation covers 14 distinct benchmarks
-across correctness (Bank, STMbench7), data-structure microbenchmarks (7 structures),
-OLTP (TPC-C), cloud serving (YCSB), and synthetic TM characterisation (EigenBench).
-The Spear repository includes STAMP, microbenchmarks, and memcached.  However,
+\textbf{Pipeline-based build.}  Figure~\ref{fig:pipeline} shows the four-stage
+compilation pipeline that transforms annotated source code into a runnable binary.
+In stage~1, the Clang front end compiles the annotated \texttt{.cpp} to LLVM
+bitcode (\texttt{.bc}) with \texttt{-emit-llvm}.  Stage~2 loads the plugin via
+\texttt{opt -load-pass-plugin} and runs the \texttt{tm-instrument} pass pipeline,
+which performs both module-level initialisation and per-function load/store
+rewriting; the output is instrumented bitcode (\texttt{.instr.bc}).  Stage~3
+optimises the (deliberately uninlinable) instrumented IR with \texttt{opt -O3},
+producing \texttt{.opt.bc}.  Finally, stage~4 links the optimised bitcode against
+a single runtime \texttt{.cpp} file to produce the executable binary.  The
+\texttt{tm\_pipeline.mk} include file automates all four stages; a minimal
+Makefile needs only \texttt{\$(eval \$(call tm\_target, app, app.cpp, backend))}.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    node distance=1.2cm,
+    box/.style={rectangle, draw, minimum width=2.8cm, minimum height=0.9cm, align=center, font=\small},
+    arrow/.style={->, thick}
+]
+\node[box] (src) {app.cpp\\\small TM/TX annotations};
+\node[box, right=of src] (bc) {\texttt{.bc}\\LLVM IR};
+\node[box, right=of bc] (instr) {\texttt{.instr.bc}\\instrumented IR};
+\node[box, right=of instr] (opt) {\texttt{.opt.bc}\\optimised IR};
+\node[box, right=of opt] (bin) {app binary};
+\draw[arrow] (src) -- node[above,font=\tiny] {\texttt{clang++ -emit-llvm}} (bc);
+\draw[arrow] (bc) -- node[above,font=\tiny] {\texttt{opt -load-pass-plugin}} (instr);
+\draw[arrow] (instr) -- node[above,font=\tiny] {\texttt{opt -O3}} (opt);
+\draw[arrow] (opt) -- node[above,font=\tiny] {\texttt{clang++ + runtime}} (bin);
+\end{tikzpicture}
+\caption{Four-stage compilation pipeline.  The \texttt{TM} and \texttt{TX}
+annotations on the source survive into bitcode as
+\texttt{llvm.global.annotations} entries and are detected by the plugin in
+stage~2.  The runtime file (e.g., \texttt{SingleGlobalLock\_runtime.cpp}) is
+linked in stage~4; selecting a different backend changes only this file.}
+\label{fig:pipeline}
+\end{figure}
+
+The \ZardoshtiEtAl repository includes STAMP, microbenchmarks, and memcached, but
 their STAMP port covers only 6 of the 8 canonical benchmarks (missing bayes and
 yada); ours covers all 8.  Their implementation is a direct port of the original
 STAMP C source code with \texttt{TX\_BEGIN}/\texttt{TX\_END} macros inserted,
 while ours is a from-scratch C++17 reimplementation using function-level
 \texttt{TX} annotations.  Our repository
 includes per-backend unit tests, a parameterised benchmark runner with fast and
-standard modes, and versioned, dated result directories.  The Spear repository
+standard modes, and versioned, dated result directories.  The \ZardoshtiEtAl repository
 is tested only within a Docker container for LLVM 10.0 and has not been updated
 since 2020; our plugin targets LLVM 16+ and builds natively on macOS and Linux.
 
 \paragraph{STAMP benchmark coverage.}
 Table~\ref{tab:stamp-comparison} compares STAMP coverage in detail.
 The original specification (Cao Minh et al., IISWC 2008) defines eight
-benchmarks.  Our implementation covers all eight; the Spear repository
+benchmarks.  Our implementation covers all eight; the \ZardoshtiEtAl repository
 covers six.
 
 \begin{table}[h]
 \centering
 \begin{tabular}{lcc}
 \toprule
-STAMP benchmark & Spear & This work \\
+STAMP benchmark & \ZardoshtiEtAl & This work \\
 \midrule
 bayes (Bayesian network learning) & --- & Yes \\
 genome (gene sequencing) & Yes & Yes \\
@@ -742,12 +811,12 @@ yada (Delaunay mesh refinement) & --- & Yes \\
 \bottomrule
 \end{tabular}
 \caption{STAMP benchmark coverage.  Our reimplementation covers all 8 benchmarks
-from the original specification; the Spear repository is missing bayes and yada.}
+from the original specification; the \ZardoshtiEtAl repository is missing bayes and yada.}
 \label{tab:stamp-comparison}
 \end{table}
 
 \paragraph{Backend coverage.}  Both plugins support multiple STM algorithms.
-Spear's repository provides TinySTM, NOrec, and single-lock backends, with
+\ZardoshtiEtAl's repository provides TinySTM, NOrec, and single-lock backends, with
 additional PTM variants.  Our plugin provides NOrec, TL2, TinySTM (three
 variants: WBCTL, WBETL, WT), SwissTM, SingleGlobalLock, and PersistentSGL,
 each with a shared runtime interface and per-backend unit tests.
@@ -760,9 +829,9 @@ but ours is distributed across focused single-responsibility headers
 runtime hooks, thread guard) rather than a monolithic class with 15 methods.
 
 Our plugin uses the LLVM 16+ new pass manager (\texttt{opt -load-pass-plugin
--passes="tm-instrument"}), while Spear's uses the legacy \texttt{ModulePass}
+-passes="tm-instrument"}), while \ZardoshtiEtAl's uses the legacy \texttt{ModulePass}
 manager (\texttt{opt -load}), deprecated since LLVM 14 and removed in LLVM 17.
-Spear's plugin explicitly documents known limitations: it ``does not currently
+\ZardoshtiEtAl's plugin explicitly documents known limitations: it ``does not currently
 handle the -g flag correctly,'' assumes x86 for \texttt{long double}, has
 untested code paths for indirect calls within try blocks, and uses a fragile
 lambda-detection heuristic (matching the string \texttt{TM\_OPAQUE} in mangled
@@ -774,7 +843,7 @@ mangled name heuristics, or x86-specific type sizes.
 \centering
 \begin{tabular}{lcc}
 \toprule
-Metric & Spear~\cite{Zardoshti2019} & This work \\
+Metric & \ZardoshtiEtAl~\cite{Zardoshti2019} & This work \\
 \midrule
 Total plugin LOC (approx.) & 2,100 & 1,812 \\
 Number of source files & 12 & 9 \\
@@ -809,7 +878,7 @@ executes, it loses its transaction boundary.  Second, the
 a depth limit of 10; deeply nested pointer chains could exceed this limit,
 causing incomplete cloning.
 
-Spear's plugin has several risks that ours avoids.  The lambda-detection
+\ZardoshtiEtAl's plugin has several risks that ours avoids.  The lambda-detection
 heuristic (\texttt{discover\_lambda\_funcs}) identifies lambdas by checking
 if a function has exactly 2 arguments where one is \texttt{TM\_OPAQUE*} ---
 any lambda with that signature but different semantics would be falsely
@@ -823,7 +892,7 @@ the IR size for long transactions, placing practical limits on transaction
 length.  The plugin uses the deprecated \texttt{CallSite} wrapper (removed
 in LLVM 14), making forward porting impossible without significant
 refactoring.
-Spear's repository provides TinySTM, NOrec, and single-lock backends, with
+\ZardoshtiEtAl's repository provides TinySTM, NOrec, and single-lock backends, with
 additional PTM variants.  Our plugin provides NOrec, TL2, TinySTM (three
 variants: WBCTL, WBETL, WT), SwissTM, SingleGlobalLock, and PersistentSGL,
 each with a shared runtime interface and per-backend unit tests.
