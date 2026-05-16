@@ -1,15 +1,16 @@
-LLVM_CONFIG_ARGS := $(shell ../llvm-config-args.sh)
+# Discover LLVM config (handle versioned installs: llvm-config-22, llvm-config-22.1, llvm-config)
+LLVM_CONFIG := $(shell command -v llvm-config-22 2>/dev/null || command -v llvm-config-22.1 2>/dev/null || command -v llvm-config 2>/dev/null || echo "")
 
 # Check LLVM version (22+ required)
-LLVM_VER := $(shell llvm-config --version 2>/dev/null || echo "0")
+LLVM_VER := $(shell $(LLVM_CONFIG) --version 2>/dev/null || echo "0")
 LLVM_MAJOR := $(word 1,$(subst ., ,$(LLVM_VER)))
 OLD_VERSIONS := 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21
 ifneq ($(filter $(LLVM_MAJOR),$(OLD_VERSIONS)),)
   $(error LLVM 22+ required, found $(LLVM_VER))
 endif
 
-LLVM_BINDIR := $(shell llvm-config --bindir 2>/dev/null)
-LLVM_CONFIG_ARGS := $(shell $(or $(LLVM_BINDIR),/usr/bin)/llvm-config --cxxflags --ldflags --libs core passes 2>/dev/null || ../llvm-config-args.sh)
+LLVM_BINDIR := $(shell $(LLVM_CONFIG) --bindir 2>/dev/null)
+LLVM_CONFIG_ARGS := $(shell $(LLVM_CONFIG) --cxxflags --ldflags --libs core passes 2>/dev/null)
 
 CXX := $(LLVM_BINDIR)/clang++
 CXXFLAGS := -fPIC -std=c++20
