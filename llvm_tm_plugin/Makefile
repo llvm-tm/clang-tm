@@ -9,7 +9,11 @@ ifneq ($(filter $(LLVM_MAJOR),$(OLD_VERSIONS)),)
   $(error LLVM 22+ required, found $(LLVM_VER))
 endif
 
+# Derive tool paths from llvm-config --bindir; fall back to bare names
 LLVM_BINDIR := $(shell $(LLVM_CONFIG) --bindir 2>/dev/null)
+CXX := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/clang++,clang++)
+OPT := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/opt,opt)
+LLVM_LINK := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/llvm-link,llvm-link)
 LLVM_CONFIG_ARGS := $(shell $(LLVM_CONFIG) --cxxflags --ldflags --libs core passes 2>/dev/null)
 
 CXX := $(LLVM_BINDIR)/clang++

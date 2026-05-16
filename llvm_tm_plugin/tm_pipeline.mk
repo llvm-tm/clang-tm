@@ -38,10 +38,11 @@
 .DEFAULT_GOAL   := all
 
 # Discover LLVM tools via llvm-config (handles versioned installs)
-LLVM_BINDIR      := $(shell llvm-config --bindir 2>/dev/null)
-CXX              := $(LLVM_BINDIR)/clang++
-OPT              := $(LLVM_BINDIR)/opt
-LLVM_LINK        := $(LLVM_BINDIR)/llvm-link
+LLVM_CONFIG      := $(shell command -v llvm-config-22 2>/dev/null || command -v llvm-config-22.1 2>/dev/null || command -v llvm-config 2>/dev/null || echo "")
+LLVM_BINDIR      := $(shell $(LLVM_CONFIG) --bindir 2>/dev/null)
+CXX              := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/clang++,clang++)
+OPT              := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/opt,opt)
+LLVM_LINK        := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/llvm-link,llvm-link)
 CXXFLAGS         ?= -std=c++20 -O1 -pthread
 LLVM_PLUGIN_DIR  ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BACKENDS_DIR     ?= $(abspath $(LLVM_PLUGIN_DIR)/../backends)
