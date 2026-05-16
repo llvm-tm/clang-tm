@@ -37,6 +37,22 @@ message(STATUS "Using LLVMConfig.cmake at: ${LLVM_DIR}")
 # Setup LLVM (this creates the tablegen, etc.)
 include(${LLVM_USE_FILE})
 
+# Find LLVM tools (handles versioned installs like llvm-22-dev on Ubuntu)
+find_program(LLVM_CLANG clang-22 clang++-22 clang++ clang
+    PATHS ${LLVM_TOOLS_BINARY_DIR} /usr/lib/llvm-22/bin
+    NO_DEFAULT_PATH)
+find_program(LLVM_OPT opt-22 opt
+    PATHS ${LLVM_TOOLS_BINARY_DIR} /usr/lib/llvm-22/bin
+    NO_DEFAULT_PATH)
+if(NOT LLVM_CLANG)
+    find_program(LLVM_CLANG clang)
+endif()
+if(NOT LLVM_OPT)
+    find_program(LLVM_OPT opt)
+endif()
+message(STATUS "Using clang: ${LLVM_CLANG}")
+message(STATUS "Using opt:   ${LLVM_OPT}")
+
 # ============================================================================
 # Directories
 # ============================================================================
@@ -85,14 +101,14 @@ if(BUILD_TESTS)
 
         # Step 1: Compile to bitcode (with -fno-inline)
         add_custom_command(OUTPUT ${test_name}.bc
-            COMMAND clang -O1 -fno-inline -emit-llvm -c ${test_src} -o ${test_name}.bc
+            COMMAND ${LLVM_CLANG} -O1 -fno-inline -emit-llvm -c ${test_src} -o ${test_name}.bc
             DEPENDS ${test_src}
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         )
 
         # Step 2: Run TM instrumentation plugin
         add_custom_command(OUTPUT ${test_name}.instr.bc
-            COMMAND opt -load-pass-plugin=${CMAKE_SOURCE_DIR}/llvm_tm_plugin/bin/libTMInstrument.so
+            COMMAND ${LLVM_OPT} -load-pass-plugin=${CMAKE_SOURCE_DIR}/llvm_tm_plugin/bin/libTMInstrument.so
                 -passes=tm-instrument ${test_name}.bc -o ${test_name}.instr.bc
             DEPENDS ${test_name}.bc TMInstrument
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -100,7 +116,7 @@ if(BUILD_TESTS)
 
         # Step 3: Optimize instrumented IR (inline cloned methods)
         add_custom_command(OUTPUT ${test_name}.opt.bc
-            COMMAND opt -O3 ${test_name}.instr.bc -o ${test_name}.opt.bc
+            COMMAND ${LLVM_OPT} -O3 ${test_name}.instr.bc -o ${test_name}.opt.bc
             DEPENDS ${test_name}.instr.bc
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         )

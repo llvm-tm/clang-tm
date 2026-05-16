@@ -19,6 +19,7 @@ if [ ! -f "$BC_FILE" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/../llvm-tool-helper.sh"
 PLUGIN_LIB="$SCRIPT_DIR/../bin/libTMInstrument.so"
 
 if [ ! -f "$PLUGIN_LIB" ]; then
@@ -28,12 +29,12 @@ fi
 
 # Instrument to a temp file (don't use /dev/null so we can inspect the output)
 INSTR_BC="$(dirname "$BC_FILE")/$(basename "$BC_FILE" .bc)_verify.bc"
-opt -load-pass-plugin="$PLUGIN_LIB" \
+$LLVM_OPT -load-pass-plugin="$PLUGIN_LIB" \
     -passes="tm-instrument" \
     "$BC_FILE" -o "$INSTR_BC" 2>"$LOG_FILE"
 
 # Disassemble the instrumented IR and check for TM calls
-llvm-dis "$INSTR_BC" -o /dev/stdout 2>/dev/null > "${INSTR_BC}.ll" || true
+$LLVM_DIS "$INSTR_BC" -o /dev/stdout 2>/dev/null > "${INSTR_BC}.ll" || true
 
 if grep -qE "call.*@tm_begin|call.*@tm_init|call.*@tm_read_|call.*@tm_write_" "${INSTR_BC}.ll" 2>/dev/null; then
     echo "TM instrumentation verified for $BC_FILE" >&2

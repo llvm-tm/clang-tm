@@ -14,12 +14,12 @@
 #   BACKEND=singlelock Build with SingleGlobalLock backend
 #   DEBUG=1         Build with debug flags
 
-# Detect LLVM installation
-LLVM_CONFIG ?= llvm-config
+# Detect LLVM installation (handles versioned installs: llvm-config-22, llvm-config-22.1, llvm-config)
+include llvm_tm_plugin/llvm-tool-helper.mk
 LLVM_CONFIG_ARGS := $(shell $(LLVM_CONFIG) --cxxflags --ldflags --system-libs --libs core analysis 2>/dev/null || echo "-I$(shell brew --prefix llvm 2>/dev/null || echo /usr/lib/llvm-22)/include -L$(shell brew --prefix llvm 2>/dev/null || echo /usr/lib/llvm-22)/lib -lLLVM-22")
 
 # Compiler settings
-CXX ?= clang++
+CXX ?= $(LLVM_CXX)
 CXXFLAGS += -std=c++20 -pthread
 ifeq ($(DEBUG),1)
   CXXFLAGS += -O0 -g

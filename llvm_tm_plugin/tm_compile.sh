@@ -49,10 +49,11 @@ log() {
     fi
 }
 
-# ---- Locate plugin ----
+# ---- Locate plugin and LLVM tools ----
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/llvm-tool-helper.sh"
 
 # ---- Defaults ----
 
@@ -166,24 +167,24 @@ STEP3_BC="$OUT_DIR/$BASENAME.opt.bc"
 # ---- Step 1: Generate LLVM IR ----
 
 log "Step 1: Generating LLVM IR ($STEP1_BC)..."
-clang++ -std=c++20 -O3 -fno-inline -emit-llvm -c "$SOURCE" -o "$STEP1_BC" \
+$LLVM_CXX -std=c++20 -O3 -fno-inline -emit-llvm -c "$SOURCE" -o "$STEP1_BC" \
     -fno-stack-protector -pthread \
     "${EXTRA_INCLUDES[@]}" "${EXTRA_DEFINES[@]}"
 
 # ---- Step 2: Run plugin ----
 
 log "Step 2: Running TM instrumentation plugin..."
-opt -load-pass-plugin="$PLUGIN" -passes="tm-instrument" "$STEP1_BC" -o "$STEP2_BC"
+$LLVM_OPT -load-pass-plugin="$PLUGIN" -passes="tm-instrument" "$STEP1_BC" -o "$STEP2_BC"
 
 # ---- Step 3: Optimize instrumented IR ----
 
 log "Step 3: Optimizing instrumented IR..."
-opt -O3 "$STEP2_BC" -o "$STEP3_BC"
+$LLVM_OPT -O3 "$STEP2_BC" -o "$STEP3_BC"
 
 # ---- Step 4: Link with runtime ----
 
 log "Step 4: Linking with $RUNTIME runtime..."
-clang++ -std=c++20 -O1 -pthread $RUNTIME_DEFINES "$STEP3_BC" "$RUNTIME_CPP" \
+$LLVM_CXX -std=c++20 -O1 -pthread $RUNTIME_DEFINES "$STEP3_BC" "$RUNTIME_CPP" \
     -o "$OUTPUT" $RUNTIME_INCLUDES \
     "${EXTRA_INCLUDES[@]}" "${EXTRA_DEFINES[@]}"
 

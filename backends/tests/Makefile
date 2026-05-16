@@ -1,6 +1,7 @@
 # Backend unit tests — compile directly against runtimes (no LLVM plugin)
 
-CXX := clang++
+include ../../llvm_tm_plugin/llvm-tool-helper.mk
+CXX := $(LLVM_CXX)
 CXXFLAGS := -std=c++20 -O0 -pthread -g
 BIN_DIR := bin
 RUNTIME_DIR := ../runtimes

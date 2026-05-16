@@ -18,11 +18,14 @@
 # ============================================================================
 
 set -uo pipefail
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+source "$SCRIPT_DIR/llvm_tm_plugin/llvm-tool-helper.sh"
 
 PLUGIN="llvm_tm_plugin/bin/libTMInstrument.so"
-CXX="clang++"
+CXX="$LLVM_CXX"
 CXXFLAGS="-std=c++20 -O3 -fno-inline -fno-stack-protector"
+OPT="$LLVM_OPT"
 
 # ------------------------------------------------------------------
 # Configuration: benchmark name → source file (relative to repo root)
@@ -55,7 +58,7 @@ assess_one() {
     fi
 
     # 2. Instrument with TM plugin
-    if ! opt -load-pass-plugin="$PLUGIN" \
+    if ! $OPT -load-pass-plugin="$PLUGIN" \
              -passes="tm-instrument" \
              -S "$base_ll" -o "$instr_ll" 2>/dev/null; then
         return

@@ -23,6 +23,9 @@ results_*.png
 # dSYM (debug info for macOS)
 *.dSYM/
 
+# Installation / benchmark workspaces
+my-benchmarks/
+
 # macOS
 .DS_Store
 *.swp
@@ -36,6 +39,7 @@ results_*.png
 *.code-workspace
 
 # Build system
+install
 debug.txt
 CMakeCache.txt
 CMakeFiles/

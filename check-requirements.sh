@@ -15,24 +15,24 @@ fail() { echo -e "${RED}FAIL${NC}: $1"; exit 1; }
 echo "=== Checking software requirements ==="
 echo ""
 
-# LLVM / opt
-if command -v opt &>/dev/null; then
-    ver=$(opt --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/llvm_tm_plugin/llvm-tool-helper.sh"
+
+if command -v "$LLVM_OPT" &>/dev/null; then
+    ver=$("$LLVM_OPT" --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
     pass "opt found (version $ver)"
 else
     fail "opt not found (install llvm)"
 fi
 
-# clang++
-if command -v clang++ &>/dev/null; then
-    ver=$(clang++ --version 2>&1 | head -1)
+if command -v "$LLVM_CXX" &>/dev/null; then
+    ver=$("$LLVM_CXX" --version 2>&1 | head -1)
     pass "clang++ found ($ver)"
 else
     fail "clang++ not found"
 fi
 
-# llvm-link
-if command -v llvm-link &>/dev/null; then
+if command -v "$LLVM_LINK" &>/dev/null; then
     pass "llvm-link found"
 else
     fail "llvm-link not found"
@@ -82,7 +82,7 @@ fi
 echo "#include <atomic>" > /tmp/tm_test_cpp20.cpp
 echo "thread_local bool test_var = false;" >> /tmp/tm_test_cpp20.cpp
 echo "int main() { std::atomic<int> x{0}; return x.load(); }" >> /tmp/tm_test_cpp20.cpp
-if clang++ -std=c++20 /tmp/tm_test_cpp20.cpp -o /tmp/tm_test_cpp20 2>/dev/null; then
+if "$LLVM_CXX" -std=c++20 /tmp/tm_test_cpp20.cpp -o /tmp/tm_test_cpp20 2>/dev/null; then
     pass "C++20 compilation works"
     rm -f /tmp/tm_test_cpp20 /tmp/tm_test_cpp20.cpp
 else

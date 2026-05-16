@@ -1,6 +1,7 @@
 # IntSet Benchmark Makefile - Modern C++17 Version
 
-CXX := clang++
+include ../../../llvm_tm_plugin/llvm-tool-helper.mk
+CXX := $(LLVM_CXX)
 CXXFLAGS := -std=c++20 -O2 -pthread
 
 SRC := intset.cpp

@@ -1,3 +1,4 @@
+include ../../../llvm_tm_plugin/llvm-tool-helper.mk
 CLANG_TM   := ../../../llvm_tm_plugin/clang-tm
 RUNTIMES   := ../../../backends/runtimes
 BACKENDS   := ../../../backends
@@ -17,7 +18,7 @@ $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
 bank_uninstrumented: bank.cpp | $(BIN_DIR)
-	clang++ $(CXXFLAGS) $< -o $(BIN_DIR)/$@
+	$(LLVM_CXX) $(CXXFLAGS) $< -o $(BIN_DIR)/$@
 
 bank_singlelock: bank.cpp | $(BIN_DIR)
 	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/SingleGlobalLock_runtime.cpp -o $(BIN_DIR)/$@ $<

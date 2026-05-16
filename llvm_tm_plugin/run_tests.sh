@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+source "$SCRIPT_DIR/llvm-tool-helper.sh"
 
 if [ ! -x ./bin/types ] || [ ! -x ./bin/memtest ] || [ ! -x ./bin/nested ] || [ ! -x ./bin/threads ] || [ ! -x ./bin/persist ] || [ ! -x ./bin/retry ] || [ ! -x ./bin/test_stl_containers ] || [ ! -x ./bin/local_containers_test ]; then
   echo "Error: test binaries are missing. Run 'make test' first." >&2
@@ -36,9 +38,9 @@ run_test threads "tm_init" "tm_init_thread" "tm_exit_thread" "tm_exit" "threads 
 echo "===== Testing tm_call_order ====="
 mkdir -p out
 if [ ! -f ./out/threads.bc ]; then
-  clang++ -std=c++17 -O3 -fno-inline -emit-llvm -c test/threads.cpp -o out/threads.bc -fno-stack-protector
+  $LLVM_CXX -std=c++17 -O3 -fno-inline -emit-llvm -c test/threads.cpp -o out/threads.bc -fno-stack-protector
 fi
-opt -load-pass-plugin=./bin/libTMInstrument.so -passes="tm-instrument" out/threads.bc -S -o out/threads.ll
+$LLVM_OPT -load-pass-plugin=./bin/libTMInstrument.so -passes="tm-instrument" out/threads.bc -S -o out/threads.ll
 echo "Verifying call order in LLVM IR..."
 
 # Verify call order:
@@ -98,7 +100,7 @@ echo "===== Verifying annotation detection ====="
 for test_name in types memtest nested threads persist annotation_detect; do
     echo "Verifying annotations for $test_name..."
     if [ ! -f ./out/${test_name}.bc ]; then
-        clang -O1 -fno-inline -emit-llvm -c test/${test_name}.cpp -o out/${test_name}.bc -fno-stack-protector
+        $LLVM_CC -O1 -fno-inline -emit-llvm -c test/${test_name}.cpp -o out/${test_name}.bc -fno-stack-protector
     fi
     ./test/verify_annotations.sh out/${test_name}.bc out/${test_name}_annot.log
     if [ $? -eq 0 ]; then
