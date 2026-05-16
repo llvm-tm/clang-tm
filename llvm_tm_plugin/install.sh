@@ -45,7 +45,7 @@ die()   { err "$@"; exit 1; }
 
 # ---- Helper: check a command exists ----
 need_cmd() {
-    if ! command -v "$1" >/dev/null 2>&1; then
+    if ! command -v "$1" >/dev/null 2>&1 && ! [ -x "$1" ]; then
         die "Required command '$1' not found. See docs/REQUIREMENTS.md."
     fi
 }
@@ -87,11 +87,27 @@ done
 INSTALL_DIR="${DESTDIR}${PREFIX}"
 
 # ---- Prerequisites ----
-need_cmd clang++
-need_cmd opt
+# Find LLVM tools (supports versioned installs from apt.llvm.org)
+LLVM_BINDIR=""
+for cfg in llvm-config-22 llvm-config-22.1 llvm-config; do
+    if command -v "$cfg" &>/dev/null; then
+        LLVM_BINDIR="$("$cfg" --bindir 2>/dev/null || true)"
+        [ -n "$LLVM_BINDIR" ] && break
+    fi
+done
+
+CXX="${LLVM_BINDIR:+$LLVM_BINDIR/}clang++"
+OPT="${LLVM_BINDIR:+$LLVM_BINDIR/}opt"
+
+need_cmd "$CXX"
+need_cmd "$OPT"
 
 # Check LLVM version (22+ required)
-LLVM_VER="$(llvm-config --version 2>/dev/null || echo "0")"
+if [ -n "$LLVM_BINDIR" ] && [ -x "$LLVM_BINDIR/llvm-config" ]; then
+    LLVM_VER="$("$LLVM_BINDIR/llvm-config" --version 2>/dev/null || echo "0")"
+else
+    LLVM_VER="$(llvm-config --version 2>/dev/null || echo "0")"
+fi
 LLVM_MAJOR="${LLVM_VER%%.*}"
 if [ "$LLVM_MAJOR" -lt 22 ] 2>/dev/null; then
     die "LLVM 22+ required, found $LLVM_VER.  Install llvm-22 from https://apt.llvm.org"

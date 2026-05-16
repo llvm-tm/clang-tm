@@ -6,7 +6,10 @@
 **/inputs/
 **/*.dSYM/
 **/tm_persist.bin
+# Benchmark artifacts (never commit raw results or plots)
 benchmark_results/
+results_*.csv
+results_*.png
 
 # Compiled objects
 *.o

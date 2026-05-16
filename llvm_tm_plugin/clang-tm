@@ -79,6 +79,21 @@ else
     TM_PLUGIN_DIR="$SCRIPT_DIR/bin"
 fi
 
+# ---- Discover LLVM tools ----
+# Try versioned llvm-config first (apt.llvm.org installs
+# clang++-22 / opt-22), then bare llvm-config.
+LLVM_BINDIR=""
+for cfg in llvm-config-22 llvm-config-22.1 llvm-config; do
+    if command -v "$cfg" &>/dev/null; then
+        LLVM_BINDIR="$("$cfg" --bindir 2>/dev/null || true)"
+        [ -n "$LLVM_BINDIR" ] && break
+    fi
+done
+
+CXX="${LLVM_BINDIR:+$LLVM_BINDIR/}clang++"
+OPT="${LLVM_BINDIR:+$LLVM_BINDIR/}opt"
+LLVM_LINK="${LLVM_BINDIR:+$LLVM_BINDIR/}llvm-link"
+
 # ---- Defaults ----
 
 RUNTIME="runtime.cpp"
@@ -225,8 +240,13 @@ fi
 
 # ---- Build directory (unique per invocation for parallel safety) ----
 
-OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clang-tm.XXXXXXXX")"
-trap 'rm -rf "$OUT_DIR"' EXIT
+if [ "$KEEP_TEMPS" -eq 0 ]; then
+    OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clang-tm.XXXXXXXX")"
+    trap 'rm -rf "$OUT_DIR"' EXIT
+else
+    OUT_DIR="out"
+    mkdir -p "$OUT_DIR"
+fi
 
 LINK_BCS=()
 RUNTIME_BC=""
@@ -253,13 +273,13 @@ for src in "${SOURCES[@]}"; do
     # Step 1: Compile to LLVM bitcode
     bc="$OUT_DIR/$base_noext.bc"
     log "[1/4] $src → LLVM bitcode"
-    clang++ -std=c++20 -O3 -fno-inline -emit-llvm -c "$src" -o "$bc" \
+    $CXX -std=c++20 -O3 -fno-inline -emit-llvm -c "$src" -o "$bc" \
         -fno-stack-protector -pthread "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"
 
     # Step 2: Instrument
     instr_bc="$OUT_DIR/$base_noext.instr.bc"
     log "[2/4] $bc → instrumented IR"
-    opt -load-pass-plugin="$PLUGIN" -passes="tm-instrument" "$bc" -o "$instr_bc"
+    $OPT -load-pass-plugin="$PLUGIN" -passes="tm-instrument" "$bc" -o "$instr_bc"
 
     LINK_BCS+=("$instr_bc")
 done
@@ -272,7 +292,9 @@ if $RUNTIME_IS_SOURCE; then
     RUNTIME_BC="$OUT_DIR/${runtime_base_noext}.tm.bc"
 
     log "[rt] $RESOLVED_RUNTIME → LLVM bitcode"
-    clang++ -std=c++20 -O3 -fno-inline -emit-llvm -c "$RESOLVED_RUNTIME" -o "$RUNTIME_BC" \
+    # NOTE: no -fno-inline — runtime functions must be eligible for inlining
+    # by opt -O3 after llvm-link merge (otherwise tm_read/tm_write stay as calls)
+    $CXX -std=c++20 -O3 -emit-llvm -c "$RESOLVED_RUNTIME" -o "$RUNTIME_BC" \
         -fno-stack-protector -pthread "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"
 fi
 
@@ -290,24 +312,24 @@ if $RUNTIME_IS_SOURCE && [ -n "$RUNTIME_BC" ]; then
     if [ ${#LINK_BCS[@]} -eq 1 ]; then
         # Single source: just link with runtime BC
         log "[3/4] merging instrumented IR with runtime → $combined_bc"
-        llvm-link "${LINK_BCS[0]}" "$RUNTIME_BC" -o "$combined_bc"
+        $LLVM_LINK "${LINK_BCS[0]}" "$RUNTIME_BC" -o "$combined_bc"
     else
         # Multiple sources: link all instrumented BCs first, then with runtime
         merged_src_bc="$OUT_DIR/sources_merged.bc"
         log "[3/4] merging ${#LINK_BCS[@]} instrumented IR files → $merged_src_bc"
-        llvm-link "${LINK_BCS[@]+"${LINK_BCS[@]}"}" -o "$merged_src_bc"
+        $LLVM_LINK "${LINK_BCS[@]+"${LINK_BCS[@]}"}" -o "$merged_src_bc"
         log "[3/4] merging instrumented IR with runtime → $combined_bc"
-        llvm-link "$merged_src_bc" "$RUNTIME_BC" -o "$combined_bc"
+        $LLVM_LINK "$merged_src_bc" "$RUNTIME_BC" -o "$combined_bc"
     fi
 
     # Optimize the combined IR (sees both instrumented code and runtime)
     opt_bc="$OUT_DIR/combined.opt.bc"
     log "[4/4] optimizing combined IR → $opt_bc"
-    opt -O3 "$combined_bc" -o "$opt_bc"
+    $OPT -O3 "$combined_bc" -o "$opt_bc"
 
     # Final link: compile bitcode to native binary
     log "[fin] linking → $OUTPUT"
-    clang++ "${LINK_FLAGS[@]+"${LINK_FLAGS[@]}"}" "$opt_bc" -o "$OUTPUT"
+    $CXX "${LINK_FLAGS[@]+"${LINK_FLAGS[@]}"}" "$opt_bc" -o "$OUTPUT"
 else
     # Runtime is a library (.o/.a/.so/.dylib/.bc): optimize then link
 
@@ -315,20 +337,20 @@ else
         input_bc="${LINK_BCS[0]}"
         opt_bc="${input_bc%.*}.opt.bc"
         log "[3/4] optimizing instrumented IR → $opt_bc"
-        opt -O3 "$input_bc" -o "$opt_bc"
+        $OPT -O3 "$input_bc" -o "$opt_bc"
     else
         # Merge multiple sources first
         merged_src_bc="$OUT_DIR/sources_merged.bc"
         log "[3/4] merging ${#LINK_BCS[@]} instrumented IR files → $merged_src_bc"
-        llvm-link "${LINK_BCS[@]+"${LINK_BCS[@]}"}" -o "$merged_src_bc"
+        $LLVM_LINK "${LINK_BCS[@]+"${LINK_BCS[@]}"}" -o "$merged_src_bc"
         opt_bc="$OUT_DIR/sources_merged.opt.bc"
         log "[3/4] optimizing instrumented IR → $opt_bc"
-        opt -O3 "$merged_src_bc" -o "$opt_bc"
+        $OPT -O3 "$merged_src_bc" -o "$opt_bc"
     fi
 
     # Link with runtime library
     log "[4/4] linking → $OUTPUT"
-    clang++ "${LINK_FLAGS[@]+"${LINK_FLAGS[@]}"}" "$opt_bc" "$RESOLVED_RUNTIME" -o "$OUTPUT"
+    $CXX "${LINK_FLAGS[@]+"${LINK_FLAGS[@]}"}" "$opt_bc" "$RESOLVED_RUNTIME" -o "$OUTPUT"
 fi
 
 echo "clang-tm: built $OUTPUT" >&2

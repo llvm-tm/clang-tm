@@ -36,7 +36,12 @@
 # ---- Configurable paths (override before include if needed) ----
 
 .DEFAULT_GOAL   := all
-CXX              := clang++
+
+# Discover LLVM tools via llvm-config (handles versioned installs)
+LLVM_BINDIR      := $(shell llvm-config --bindir 2>/dev/null)
+CXX              := $(LLVM_BINDIR)/clang++
+OPT              := $(LLVM_BINDIR)/opt
+LLVM_LINK        := $(LLVM_BINDIR)/llvm-link
 CXXFLAGS         ?= -std=c++20 -O1 -pthread
 LLVM_PLUGIN_DIR  ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BACKENDS_DIR     ?= $(abspath $(LLVM_PLUGIN_DIR)/../backends)
@@ -82,15 +87,24 @@ define tm_compile_ir_debug
 endef
 
 define tm_instrument
-opt -load-pass-plugin=$(TM_PLUGIN) -passes="tm-instrument" $1 -o $2
+$(OPT) -load-pass-plugin=$(TM_PLUGIN) -passes="tm-instrument" $1 -o $2
 endef
 
 define tm_optimize
-opt -O3 $1 -o $2
+$(OPT) -O3 $1 -o $2
 endef
 
 define tm_link
-$(CXX) $(CXXFLAGS) $(TM_DEFINES_$(strip $2)) $1 $(TM_RUNTIME_$(strip $2)) -o $3 $(TM_INCLUDES_$(strip $2))
+# Compile runtime to bitcode (no -fno-inline — runtime must be eligible for inlining)
+$(CXX) -std=c++20 -O3 -emit-llvm -c $(TM_RUNTIME_$(strip $2)) -o $@.runtime.bc $(TM_DEFINES_$(strip $2)) $(TM_INCLUDES_$(strip $2)) -fno-stack-protector -pthread
+# Merge instrumented IR with runtime bitcode
+$(LLVM_LINK) $1 $@.runtime.bc -o $@.merged.bc
+# Optimize merged IR (inlines tm_read/tm_write etc.)
+$(OPT) -O3 $@.merged.bc -o $@.merged.opt.bc
+# Final link
+$(CXX) $(CXXFLAGS) $(TM_DEFINES_$(strip $2)) $@.merged.opt.bc -o $3 $(TM_INCLUDES_$(strip $2))
+# Cleanup intermediate files
+rm -f $@.runtime.bc $@.merged.bc $@.merged.opt.bc
 endef
 
 # ---- Convenience: create pattern rules ----
