@@ -57,8 +57,7 @@ make -C ~/tm-benchmarks test
 
 - **LLVM 16+** with the `opt` tool and development libraries
 - **Clang 16+** (matching LLVM version)
-- `make`, `gtimeout` (macOS: `brew install coreutils`)
-- `git-filter-repo` (optional, for history rewriting)
+- `make`, `gtimeout` (macOS: `brew install coreutils`) / `timeout` (Ubuntu: pre-installed in `coreutils`)
 
 ## Building
 
@@ -234,10 +233,8 @@ int main() {
 | SingleGlobalLock | `_singlelock` | Global `std::mutex` | Always | Fastest |
 | NOrec | `_norec` | Value-based validation | Always | Fast (read-heavy) |
 | TL2 | `_tl2` | Commit-time locking | ✅ | Fast (disjoint access) |
-| TinySTM (WBCTL) | `_tinystm` | Write-back CTL | ✅ | Slow (per-access logging) |
-| TinySTM (WBETL) | `_tinystm` (WBETL) | Write-back ETL | Untested | Slow |
-| TinySTM (WT) | `_tinystm` (WT) | Write-through | Untested | Slow |
-| SwissTM | `_swiss` | Hybrid lazy/pessimistic | ✅ | Slow |
+| TinySTM (WBCTL) | `_tinystm` | Write-back commit-time locking | ✅ | Slower (per-access logging) |
+| SwissTM | `_swiss` | Hybrid lazy/pessimistic | ✅ | Slower (per-access logging) |
 | PersistentSGL | `_persistentsgl` | SGL + mmap persistence | ✅ Array types | Single-process persistence |
 | DistributedSGL | `_distributedsgl` | Shared mmap + 2PC | ✅ Cross-process | Inter-process sync via mmap |
 
@@ -251,12 +248,9 @@ File-backed persistence of TM globals with automatic heap allocation.
 **Architecture:**
 - A 64 MB mmap file (`benchmark_results/tm_persist.bin`) stores TM globals and a bump allocator heap
 - Fixed-address mmap at `0x600000000000` (deterministic VA) so pointer-based data structures remain valid after restart
-- `tm_malloc`/`tm_free`/`tm_calloc`/`tm_realloc` are implemented in each runtime
-- `g_in_tx` thread-local flag: `tm_begin()` sets `true`, `tm_end()` sets `false`
-- Inside a TX function: `operator new` → `tm_malloc` → persistent heap bump allocator
-- Outside a TX function: `tm_malloc` falls back to system `malloc`
-- C++ `operator new`/`delete` are overridden for all 16 variants (plain, array, sized, aligned, nothrow)
-- The LLVM plugin replaces `malloc`/`free`/`calloc`/`realloc` calls inside TX functions with `tm_malloc`/`tm_free`
+- `tm_malloc`/`tm_free` service TX allocations from the persistent heap; outside TX they fall back to system `malloc`/`free`
+- Inside a TX function, `operator new` redirects to `tm_malloc`
+- The plugin replaces `malloc`/`free`/`calloc`/`realloc` calls inside TX functions with their `tm_*` equivalents
 
 **Simple types** (arrays, primitives) persist transparently:
 ```bash
@@ -301,3 +295,39 @@ Each process:
 Data is transferred by offset-based memcpy (not shared pointers), so it works
 across different virtual address spaces (ASLR-safe). The shared state file
 is at `benchmark_results/tm_2pc_state.bin` (gitignored).
+
+**Future directions — multi-machine distributed TM:**
+
+The plugin already provides the TM instrumentation layer; extending DistributedSGL
+to operate over a network instead of shared mmap would require:
+
+1. **Socket-based two-phase commit** — replace the local spinlock + mmap exchange
+   with `send()`/`recv()` messages between machines. The PREPARE phase sends
+   the write-set; COMMIT sends an apply signal; ABORT discards.
+2. **Serialisation** — flat buffers (e.g. `flatbuffers` or custom offset-based
+   serialisation) for the TM data segment, since pointer values are
+   machine-specific. The existing offset-based memcpy approach is already
+   position-independent and trivially serialisable.
+3. **Failure handling** — add timeouts, retry, and a failure detector so a
+   crashed participant doesn't block the system.
+4. **Epoch/clock sync** — replace the shared-memory epoch counter with a
+   logical clock or hybrid logical clock (HLC) for ordering across machines.
+
+**Future directions — state machine replication (SMR):**
+
+The plugin can be used to build a replicated state machine where each replica
+runs the same TM workload and decisions are agreed via consensus:
+
+1. **Deterministic replay** — since TM instrumentation produces deterministic
+   read/write sets, the same transaction can be replayed on multiple replicas.
+   The `tm_end()` commit decision (go/no-go) becomes the consensus proposal.
+2. **Raft integration** — wrap `tm_begin()`/`tm_end()` in a Raft state machine:
+   - Leader executes the transaction and proposes the resulting write-set as a
+     log entry.
+   - Followers apply the committed write-set to their local TM state.
+3. **Read-only fast path** — read-only transactions (no `tm_write` calls during
+   the transaction) can be served directly by any replica without going through
+   consensus, since they don't modify state.
+4. **Plugin annotation** — add a `REPLICATED` annotation (`__attribute__((annotate("replicated")))`)
+   so the plugin automatically routes TM operations through the consensus layer
+   without manual wiring.
