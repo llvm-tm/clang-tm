@@ -106,7 +106,13 @@ done
 
 if [ "$YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     printf "Continue? [Y/n] "
-    read -r reply
+    if [ -t 0 ]; then
+        read -r reply
+    elif [ -e /dev/tty ]; then
+        read -r reply </dev/tty
+    else
+        reply="y"
+    fi
     case "$reply" in
         n|N|no|NO) die "Aborted." ;;
     esac
@@ -122,7 +128,16 @@ mkdir -p "$BENCHDIR"
 
 # ---- Copy bank benchmark (simple correctness test) ----
 BENCH_SRC="$PROJECT_ROOT/benchmarks/test/bank/bank.cpp"
-cp "$BENCH_SRC" "$BENCHDIR/bank.cpp"
+if [ ! -f "$BENCH_SRC" ]; then
+    # Not in a repo checkout — fetch from GitHub
+    info "Downloading benchmark sources from GitHub..."
+    TMP_SRC="$BENCHDIR/.tmp_bank"
+    curl -fsSL -o "$TMP_SRC" \
+        "https://raw.githubusercontent.com/llvm-tm/clang-tm/main/benchmarks/test/bank/bank.cpp"
+    mv "$TMP_SRC" "$BENCHDIR/bank.cpp"
+else
+    cp "$BENCH_SRC" "$BENCHDIR/bank.cpp"
+fi
 
 # ---- Create Makefile ----
 cat > "$BENCHDIR/Makefile" << MAKEEOF
