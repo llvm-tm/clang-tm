@@ -3,17 +3,29 @@
 # TM Benchmarks Runner
 # ============================================================================
 # Usage:
-#   ./run_benchmarks.sh fast     — quick smoke test (3 samples, light args)
-#   ./run_benchmarks.sh standard — standard run   (10 samples, normal args)
-#
-# If no argument given, defaults to "standard".
+#   ./run_benchmarks.sh                          — standard mode, 4 threads
+#   ./run_benchmarks.sh fast                     — quick smoke test, 2 threads
+#   ./run_benchmarks.sh -t 8                     — standard mode, 8 threads
+#   ./run_benchmarks.sh -t "1 2 4 8 16" fast    — fast mode, thread sweep
+#   ./run_benchmarks.sh -t "1 2 4 8 16"         — standard mode, thread sweep
 # ============================================================================
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Parse -t flag (thread count(s)) before positional mode argument
+THREADS=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -t) THREADS="$2"; shift 2 ;;
+        -t=*) THREADS="${1#*=}"; shift ;;
+        *) break ;;
+    esac
+done
+
 MODE="${1:-standard}"
 SAMPLES=""
+DEF_THREADS=""
 BANK_ARGS=""
 DS_ARGS=""
 STM7_ARGS=""
@@ -21,29 +33,35 @@ STM7_ARGS=""
 case "$MODE" in
   fast)
     SAMPLES=3
-    BANK_ARGS="-t 2 -a 64 -d 500 -r 10 -w 0"
-    DS_ARGS="2 1000 500 80 10 10"
-    STM7_ARGS="-t 2 -d 500 -w 1"
-    STAMP_ARGS="-t 2 -d 500 -b genome"
+    DEF_THREADS=2
+    BANK_ARGS="-a 64 -d 500 -r 10 -w 0"
+    DS_ARGS="1000 500 80 10 10"      # no leading thread count
+    STM7_ARGS="-d 500 -w 1"
+    STAMP_ARGS="-d 500 -b genome"
     STAMP_BENCHES="-b genome"
-    YCSB_ARGS="-t 2 -d 500 -w A -k 100 -i 10"
-    EIGEN_ARGS="-t 2 -d 500"
+    YCSB_ARGS="-d 500 -w A -k 100 -i 10"
+    EIGEN_ARGS="-d 500"
     ;;
   standard)
     SAMPLES=10
-    BANK_ARGS="-t 4 -a 256 -d 3000 -r 10 -w 0"
-    DS_ARGS="4 10000 3000 80 10 10"
-      STM7_ARGS="-t 4 -d 3000 -w 1"
-      STAMP_ARGS="-t 2 -d 2000 -b genome"
-      STAMP_BENCHES="genome"
-      YCSB_ARGS="-t 4 -d 3000 -w A -k 10000 -i 1000"
-      EIGEN_ARGS="-t 2 -d 2000"
-      ;;
+    DEF_THREADS=4
+    BANK_ARGS="-a 256 -d 3000 -r 10 -w 0"
+    DS_ARGS="10000 3000 80 10 10"
+    STM7_ARGS="-d 3000 -w 1"
+    STAMP_ARGS="-d 2000 -b genome"
+    STAMP_BENCHES="genome"
+    YCSB_ARGS="-d 3000 -w A -k 10000 -i 1000"
+    EIGEN_ARGS="-d 2000"
+    ;;
   *)
-    echo "Usage: $0 {fast|standard}"
+    echo "Usage: $0 [-t threads] {fast|standard}"
     exit 1
     ;;
 esac
+
+# Allow -t flag to override default thread count(s).  A space-separated
+# list produces a sweep (one run per thread count).
+THREAD_LIST="${THREADS:-$DEF_THREADS}"
 
 RESULTS_DIR="benchmark_results/${MODE}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
@@ -52,9 +70,10 @@ SUMMARY="$RESULTS_DIR/SUMMARY.txt"
 echo "TM Benchmark Runner — Mode: $MODE"
 echo "========================================="
 echo "Samples:       $SAMPLES"
-echo "Bank args:     $BANK_ARGS"
-echo "DataStruct:    $DS_ARGS"
-echo "STMbench7:     $STM7_ARGS"
+echo "Threads:       $THREAD_LIST"
+echo "Bank args:     -t <thread> $BANK_ARGS"
+echo "DataStruct:    <thread> $DS_ARGS"
+echo "STMbench7:     -t <thread> $STM7_ARGS"
 echo "Results dir:   $RESULTS_DIR"
 echo ""
 
@@ -110,6 +129,9 @@ echo "=== Building benchmarks ==="
 build_if_needed bank_norec      benchmarks/test/bank
 build_if_needed bank_singlelock benchmarks/test/bank
 build_if_needed bank_tl2        benchmarks/test/bank
+if [ -x "$(command -v clang-tm 2>/dev/null)" ] && grep -q rtm /proc/cpuinfo 2>/dev/null; then
+    build_if_needed bank_tsxsgl   benchmarks/test/bank
+fi
 build_if_needed hashmap_NOrec   benchmarks/datastructures
 build_if_needed set_NOrec       benchmarks/datastructures
 build_if_needed avltree_NOrec   benchmarks/datastructures
@@ -125,12 +147,21 @@ echo ""
 # ────────────────────────────────────────────────────────────────────────────
 
 echo "=== Bank Benchmark ==="
-for backend in norec singlelock tl2; do
-    for s in $(seq 1 $SAMPLES); do
-        run_one "bank_${backend}_sample${s}" \
-            "benchmarks/test/bank/bin/bank_${backend}" \
-            $BANK_ARGS
+for t in $THREAD_LIST; do
+    for backend in norec singlelock tl2; do
+        for s in $(seq 1 $SAMPLES); do
+            run_one "bank_${backend}_${t}t_sample${s}" \
+                "benchmarks/test/bank/bin/bank_${backend}" \
+                -t "$t" $BANK_ARGS
+        done
     done
+    if [ -x "benchmarks/test/bank/bin/bank_tsxsgl" ]; then
+        for s in $(seq 1 $SAMPLES); do
+            run_one "bank_tsxsgl_${t}t_sample${s}" \
+                "benchmarks/test/bank/bin/bank_tsxsgl" \
+                -t "$t" $BANK_ARGS
+        done
+    fi
 done
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -138,36 +169,36 @@ done
 # ────────────────────────────────────────────────────────────────────────────
 
 echo "=== Data Structure Benchmarks ==="
-# Hashmap and set work well with NOrec (iterative, flat call graphs).
-for ds in hashmap set; do
-    for s in $(seq 1 $SAMPLES); do
-        run_one "ds_${ds}_sample${s}" \
-            "benchmarks/datastructures/bin/${ds}_NOrec" \
-            $DS_ARGS
+for t in $THREAD_LIST; do
+    for ds in hashmap set; do
+        for s in $(seq 1 $SAMPLES); do
+            run_one "ds_${ds}_${t}t_sample${s}" \
+                "benchmarks/datastructures/bin/${ds}_NOrec" \
+                "$t" $DS_ARGS
+        done
     done
+    if [ -x "benchmarks/datastructures/bin/avltree_SingleGlobalLock" ]; then
+        for s in $(seq 1 $SAMPLES); do
+            run_one "ds_avltree_${t}t_sample${s}" \
+                "benchmarks/datastructures/bin/avltree_SingleGlobalLock" \
+                "$t" $DS_ARGS
+        done
+    else
+        echo "  avltree_SingleGlobalLock not built, skipping"
+    fi
 done
-# AVL tree recomputes height via O(n) traversal per rebalance call,
-# which is too slow with NOrec (per-access read-set logging).
-# Use SingleGlobalLock (no per-access overhead) instead.
-if [ -x "benchmarks/datastructures/bin/avltree_SingleGlobalLock" ]; then
-    for s in $(seq 1 $SAMPLES); do
-        run_one "ds_avltree_sample${s}" \
-            "benchmarks/datastructures/bin/avltree_SingleGlobalLock" \
-            $DS_ARGS
-    done
-else
-    echo "  avltree_SingleGlobalLock not built, skipping"
-fi
 
 # ────────────────────────────────────────────────────────────────────────────
 # STMbench7 (SingleGlobalLock — only backend fast enough)
 # ────────────────────────────────────────────────────────────────────────────
 
 echo "=== STMbench7 (SingleGlobalLock) ==="
-for s in $(seq 1 $SAMPLES); do
-    run_one "stmbench7_sgl_sample${s}" \
-        "benchmarks/STMbench7/bin/stmbench_singlelock" \
-        $STM7_ARGS
+for t in $THREAD_LIST; do
+    for s in $(seq 1 $SAMPLES); do
+        run_one "stmbench7_sgl_${t}t_sample${s}" \
+            "benchmarks/STMbench7/bin/stmbench_singlelock" \
+            -t "$t" $STM7_ARGS
+    done
 done
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -182,10 +213,12 @@ echo "=== STAMP (skipped — TinySTM too slow with instrumentation) ==="
 # ────────────────────────────────────────────────────────────────────────────
 
 echo "=== YCSB (SingleGlobalLock) ==="
-for s in $(seq 1 $SAMPLES); do
-    run_one "ycsb_sgl_sample${s}" \
-        "benchmarks/YCSB/bin/ycsb_singlelock" \
-        $YCSB_ARGS
+for t in $THREAD_LIST; do
+    for s in $(seq 1 $SAMPLES); do
+        run_one "ycsb_sgl_${t}t_sample${s}" \
+            "benchmarks/YCSB/bin/ycsb_singlelock" \
+            -t "$t" $YCSB_ARGS
+    done
 done
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -193,10 +226,12 @@ done
 # ────────────────────────────────────────────────────────────────────────────
 
 echo "=== EigenBench (SingleGlobalLock) ==="
-for s in $(seq 1 $SAMPLES); do
-    run_one "eigen_sgl_sample${s}" \
-        "benchmarks/EigenBench/bin/eigen_singlelock" \
-        $EIGEN_ARGS
+for t in $THREAD_LIST; do
+    for s in $(seq 1 $SAMPLES); do
+        run_one "eigen_sgl_${t}t_sample${s}" \
+            "benchmarks/EigenBench/bin/eigen_singlelock" \
+            -t "$t" $EIGEN_ARGS
+    done
 done
 
 # ────────────────────────────────────────────────────────────────────────────

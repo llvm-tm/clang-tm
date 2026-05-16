@@ -37,6 +37,9 @@ bank_swiss: bank.cpp | $(BIN_DIR)
 bank_persistentsgl: bank.cpp | $(BIN_DIR)
 	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/PersistentSGL_runtime.cpp -o $(BIN_DIR)/$@ $<
 
+bank_tsxsgl: bank.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) -mrtm --runtime $(RUNTIMES)/TSXSGL_runtime.cpp -o $(BIN_DIR)/$@ $<
+
 clean:
 	rm -rf $(BIN_DIR)
 
