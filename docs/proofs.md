@@ -8,8 +8,6 @@
 - $L$: global lock variable
 - $T_{ID}$: current thread identifier, $T_{ID} > 0$
 - $L \leftarrow 0$: lock is free; $L \leftarrow T_{ID}$: thread $T_{ID}$ holds the lock
-- $I_{V_i}$: atomic increment of $V_i$ by 1
-- $I_{V_i,N}$: atomic increment of $V_i$ by $N$
 - $C_{V_i, O, N}$: compare-and-swap on $V_i$, comparing $O$ and swapping to $N$; returns $\top$ (success) or $\bot$ (failure)
 - $O \leftarrow^L V_i$: acquire-load of $V_i$ (C++ `memory_order_acquire`)
 - $N \rightarrow^S V_i$: release-store of $N$ to $V_i$ (C++ `memory_order_release`)
@@ -17,7 +15,6 @@
 - $F^L$: load fence (`atomic_thread_fence(memory_order_acquire)`)
 - $\mathcal{H} = \{R_{V_{a_1}}^{j_1}, W_{V_{b_1}}^{j_2}, \dots\}$: a transaction, i.e. a sequence of reads/writes to shared variables
 - $G$: global clock (monotonic, $\mathbb{N}_0$, even = unlocked)
-- $E$: global epoch counter (monotonic, $\mathbb{N}_0$)
 - $\text{rs}(\mathcal{H})$: read set of $\mathcal{H}$ (set of addresses read)
 - $\text{ws}(\mathcal{H})$: write set of $\mathcal{H}$ (set of addresses written)
 - $\text{orec}(V)$: ownership record for address $V$ (contains version $v$, read-lock $r$, write-lock $w$)
@@ -76,12 +73,12 @@ Construct a serial schedule $\sigma = \mathcal{H}_i, \mathcal{H}_j, \dots$ order
 ### Algorithm
 
 Shared state:
-- $E$: monotonic global epoch counter, initially $0$
 - $L$: mutex for SGL fallback
+- $S$: lock owner variable, $S \in \{0\} \cup \mathbb{N}_0$ ($0$ = free, non-zero = locked by that thread)
 
 Per-thread state:
 - $\text{in\_tsx}$: boolean, true while inside a hardware transaction
-- $E_{\text{start}}$: epoch snapshot at TSX begin
+- $S_{\text{start}}$: lock-owner snapshot at TSX begin
 
 ```
 transaction begin:
@@ -90,32 +87,32 @@ transaction begin:
     for attempt = 1..5:
         status = _xbegin()
         if status == _XBEGIN_STARTED:
-            e ←ᴸ E
-            if e & 1:                      // SGL active → abort
+            s ←ᴸ S
+            if s ≠ 0:                        // SGL active → abort
                 _xabort(0xFF)
-            E_start = e
+            S_start = s
             in_tsx = true
             return
         // Abort handling
         if explicit abort with code 0xFF:
-            while E & 1: pause()           // spin-wait for SGL to finish
+            while S ≠ 0: pause()             // spin-wait for SGL to finish
         else if retry bit not set: break
     // Fallback: SGL
     L.lock()
-    I_E                                     // make epoch odd
+    1 →ˢ S                                   // store non-zero (= locked)
     in_tsx = false
 
 transaction commit:
     if nested: return
     if in_tsx:
-        e ←ᴸ E
-        if e ≠ E_start:                     // SGL interleaved
-            _xabort(0x01)                   // must retry
+        s ←ᴸ S
+        if s ≠ S_start:                      // SGL interleaved
+            _xabort(0x01)                    // must retry (double-check)
         _xend()
         return
     // SGL path
-    I_E                                     // make epoch even FIRST
-    L.unlock()                              // then release lock
+    0 →ˢ S                                   // store 0 (= free)
+    L.unlock()
 ```
 
 Read/write hooks: plain loads/stores — TSX or SGL provides isolation.
@@ -126,16 +123,16 @@ Read/write hooks: plain loads/stores — TSX or SGL provides isolation.
 
 **Proof**: This is a property of Intel TSX (RTM). The hardware maintains a read-set and write-set. Reads are served from memory but tracked; if another thread writes to a read-set cache line, the transaction aborts on `_xend()` or on the next access. Writes are buffered in the L1 cache and not visible to other threads until `_xend()`. This satisfies opacity for hardware transactions. ∎
 
-### 2.2 Epoch-Based Serialization
+### 2.2 Lock-Variable Serialization
 
-**Claim**: The epoch $E$ together with the lock $L$ ensures that TSX and SGL transactions are serialized.
+**Claim**: The lock variable $S$ together with the hardware lock $L$ ensures that TSX and SGL transactions are serialized.
 
-**Proof**: Let $E_t$ be the epoch value at logical time $t$, with $E_0 = 0$.
+**Proof**:
 
-**Key invariant**: $E$ is odd $\iff$ an SGL transaction holds $L$. This holds because:
-- SGL entry: acquire $L$ first, then $I_E$ (odd).
-- SGL exit: $I_E$ (even) first, then release $L$.
-- No other action changes $E$.
+**Key invariant**: $S = 0 \iff$ no SGL transaction is active. This holds because:
+- SGL entry: acquire $L$ first, then store $1$ to $S$ (non-zero).
+- SGL exit: store $0$ to $S$, then release $L$.
+- TSX actions never modify $S$; they only read it.
 
 **SGL-SGL**: The lock $L$ is a standard mutex. Mutual exclusion ensures SGL transactions are serialized.
 
@@ -143,17 +140,17 @@ Read/write hooks: plain loads/stores — TSX or SGL provides isolation.
 
 **TSX-SGL**: Suppose $\mathcal{H}_{\text{TSX}}$ begins at $t_0$ and $\mathcal{H}_{\text{SGL}}$ runs between $t_1$ and $t_2$ with $t_0 < t_1 < t_2$.
 
-1. At $t_0$, $\mathcal{H}_{\text{TSX}}$ reads $E = E_{\text{start}}$. If $E_{\text{start}}$ is odd, $\mathcal{H}_{\text{TSX}}$ aborts immediately (line `if e & 1: _xabort(0xFF)`). No TSX runs while $E$ is odd.
-2. At $t_1$, $\mathcal{H}_{\text{SGL}}$ writes to $E$ (`I_E`). Since $E$ is in $\mathcal{H}_{\text{TSX}}$'s read set, this invalidates the cache line, causing $\mathcal{H}_{\text{TSX}}$ to abort at `_xend()` or on the next access.
-3. Even if the cache line invalidation does not immediately abort (e.g. the TSX commit check runs after SGL finishes), the epoch re-check at commit catches it: $\mathcal{H}_{\text{TSX}}$ reads $E$ again; if $E \neq E_{\text{start}}$, it calls `_xabort(0x01)`.
+1. At $t_0$, $\mathcal{H}_{\text{TSX}}$ reads $S = S_{\text{start}}$. If $S_{\text{start}} \neq 0$, $\mathcal{H}_{\text{TSX}}$ aborts immediately (line `if s ≠ 0: _xabort(0xFF)`). No TSX runs while $S$ is held.
+2. At $t_1$, $\mathcal{H}_{\text{SGL}}$ stores $1$ to $S$. Since $S$ is in $\mathcal{H}_{\text{TSX}}$'s read-set (the cache line was loaded at $t_0$), the MESI protocol sends an invalidation to $\mathcal{H}_{\text{TSX}}$'s core, aborting the hardware transaction immediately.
+3. The `_xend()` check $s \neq S_{\text{start}}$ is a safety double-check for micro-architectural races. In practice it never fires ($S$ was written at $t_1$, so the TSX aborted then and never reaches `_xend()`).
 
-Therefore no TSX transaction commits while an SGL transaction is active, and no SGL transaction runs while a TSX transaction could read stale data. The serialization order places committed TSX transactions between consecutive SGL transactions, ordered by their epoch-snapshot time. ∎
+Therefore no TSX transaction commits while an SGL transaction is active, and no SGL transaction runs while a TSX transaction could read stale data. The serialization order places committed TSX transactions between consecutive SGL transactions, ordered by their begin time. ∎
 
 ### 2.3 Opacity for TSX
 
 **Claim**: TSXSGL provides opacity: every transaction (TSX or SGL) reads values that are consistent with a prefix of some serial history.
 
-**Proof**: SGL transactions are trivially opaque (mutual exclusion). For a TSX transaction that commits, the epoch re-check at commit ensures that no SGL has interleaved; all values read by the TSX are from a state between the last SGL commit and the next SGL begin. If a TSX transaction aborts (due to SGL interleaving, hardware conflict, or epoch change), none of its writes become visible, and by the abort-gate property of TSX, the reads did not affect any other thread. Hence the transaction can be considered never to have executed. This satisfies opacity. ∎
+**Proof**: SGL transactions are trivially opaque (mutual exclusion). For a TSX transaction that commits, the `_xend()` re-check ensures that no SGL has interleaved; all values read by the TSX are from a state between the last SGL commit and the next SGL begin. If a TSX transaction aborts (due to SGL interleaving, hardware conflict, or lock-owner change), none of its writes become visible, and by the abort-gate property of TSX, the reads did not affect any other thread. Hence the transaction can be considered never to have executed. This satisfies opacity. ∎
 
 ---
 
@@ -498,7 +495,7 @@ NOrec uses **value-based validation** instead of version-based validation. Rathe
 | Backend | Serialization mechanism | Dirty read prevention | Scalability bottleneck |
 |---------|----------------------|---------------------|----------------------|
 | SGL | Mutual exclusion (lock) | Only one writer at a time | Single lock (O(1) throughput) |
-| TSXSGL | TSX read-set isolation + epoch synchronisation | TSX abort on conflict; epoch re-check at commit | TSX abort rate under contention; SGL fallback |
+| TSXSGL | TSX read-set isolation + lock-owner synchronisation | TSX abort on conflict; lock-owner re-check at commit | TSX abort rate under contention; SGL fallback |
 | TL2 | Commit-time lock ordering + global clock + read validation | Locked guard during write-back; double-check read protocol | Guard table contention; O(τ) validation |
 | TinySTM WBCTL | Commit-time lock ordering + global clock | Lock-based write-set protection + version validation | Lock table overhead; O($\|\mathcal{W}\| \log \|\mathcal{W}\|$) sorting |
 | TinySTM WBETL | Encounter-time lock acquisition (eager) + global clock | Same as WBCTL; earlier conflict detection | Same lock table; eager locking may abort earlier |
