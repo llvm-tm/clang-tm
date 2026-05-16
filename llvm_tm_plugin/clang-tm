@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+# ============================================================
+# clang-tm — one-command TM compilation pipeline
+#
+# A drop-in wrapper around clang++ that automatically runs the
+# 4-stage TM instrumentation pipeline.  Accepts the same flags
+# as clang++ for the final link step.
+#
+# The runtime is compiled to LLVM bitcode and merged with the
+# instrumented source before the final -O3 pass, so that
+# tm_read/tm_write calls are visible to the optimizer and can
+# be inlined.
+#
+# Usage:
+#   clang-tm [clang++ flags] source1.cpp [source2.cpp ...]
+#   clang-tm --runtime FILE [clang++ flags] source1.cpp ...
+#
+# Examples:
+#   clang-tm -std=c++20 -O3 -pthread -o myapp app.cpp
+#   clang-tm --runtime SingleGlobalLock_runtime.cpp -o myapp app.cpp
+#
+# Flags:
+#   --runtime FILE, -r FILE
+#       Path to the TM runtime.  Accepts:
+#         - .cpp/.cc/.cxx source  → compiled to bitcode, merged
+#           with instrumented IR so the optimizer can inline
+#         - .o/.a/.so/.dylib/.bc → linked as-is in the final step
+#       Default: runtime.cpp (looked up in CWD and backends/runtimes/)
+#   --plugin FILE, -p FILE
+#       Path to libTMInstrument.so (default: auto-located).
+#   --keep-temps, -k
+#       Keep intermediate .bc files (under out/).
+#   --verbose, -v
+#       Print each pipeline step.
+#   --help, -h
+#       Show this message.
+#
+# All other flags are forwarded to clang++ unchanged.
+# ============================================================
+
+set -euo pipefail
+
+# ---- Auto-discover paths ----
+#
+# Search order:
+#   1. Relative to SCRIPT_DIR (development layout)
+#   2. Installed layout (PREFIX/lib/clang-tm/)
+
+# Resolve the actual script path, even when invoked from PATH
+SCRIPT="$0"
+if ! [ -f "$SCRIPT" ]; then
+    SCRIPT="$(type -P "$0" 2>/dev/null || echo "$0")"
+fi
+# Resolve symlinks
+if command -v realpath &>/dev/null; then
+    SCRIPT="$(realpath "$SCRIPT")"
+elif command -v greadlink &>/dev/null && greadlink -f "$SCRIPT" &>/dev/null; then
+    SCRIPT="$(greadlink -f "$SCRIPT")"
+fi
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd 2>/dev/null || echo "$SCRIPT_DIR/..")"
+
+# Check if installed (script in PREFIX/bin, data in PREFIX/lib/clang-tm)
+if [ -d "$PROJECT_ROOT/lib/clang-tm" ]; then
+    # Installed layout: /usr/local/bin/clang-tm
+    #                    /usr/local/lib/clang-tm/{plugin,runtimes}
+    INSTALLED_PREFIX="$PROJECT_ROOT"
+    TM_INSTALL_DIR="$INSTALLED_PREFIX/lib/clang-tm"
+    TM_RUNTIMES_DIR="$TM_INSTALL_DIR/runtimes"
+    TM_BACKENDS_DIR="$TM_INSTALL_DIR"
+    TM_PLUGIN_DIR="$TM_INSTALL_DIR/plugin"
+else
+    # Development layout: llvm_tm_plugin/clang-tm
+    #                     llvm_tm_plugin/bin/libTMInstrument.so
+    #                     backends/runtimes/
+    TM_INSTALL_DIR=""
+    TM_RUNTIMES_DIR="$(cd "$SCRIPT_DIR/../backends/runtimes" && pwd)"
+    TM_BACKENDS_DIR="$(cd "$SCRIPT_DIR/../backends" && pwd)"
+    TM_PLUGIN_DIR="$SCRIPT_DIR/bin"
+fi
+
+# ---- Defaults ----
+
+RUNTIME="runtime.cpp"
+PLUGIN=""
+KEEP_TEMPS=0
+VERBOSE=0
+OUTPUT=""
+SOURCES=()
+CXXFLAGS=()
+
+# ---- Parse arguments ----
+
+DEBUG_MODE=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --runtime|-r)
+            RUNTIME="$2"; shift 2 ;;
+        --runtime=*)
+            RUNTIME="${1#*=}"; shift ;;
+        --plugin|-p)
+            PLUGIN="$2"; shift 2 ;;
+        --plugin=*)
+            PLUGIN="${1#*=}"; shift ;;
+        --debug|-g)
+            DEBUG_MODE=1; shift ;;
+        -k|--keep-temps)
+            KEEP_TEMPS=1; shift ;;
+        -v|--verbose)
+            VERBOSE=1; shift ;;
+        -o)
+            OUTPUT="$2"; shift 2 ;;
+        -h|--help)
+            sed -n '/^#/s/^# \?//p' "$0"; exit 0 ;;
+        --)
+            shift; break ;;
+        -*)
+            CXXFLAGS+=("$1"); shift ;;
+        *.cpp|*.cc|*.cxx)
+            SOURCES+=("$(realpath "$1")"); shift ;;
+        *)
+            CXXFLAGS+=("$1"); shift ;;
+    esac
+done
+
+while [ $# -gt 0 ]; do
+    SOURCES+=("$(realpath "$1")"); shift
+done
+
+# ---- Validate ----
+
+[ ${#SOURCES[@]} -eq 0 ] && { echo "clang-tm: no source files" >&2; exit 1; }
+
+# ---- Locate plugin ----
+
+if [ -z "$PLUGIN" ]; then
+    PLUGIN="$TM_PLUGIN_DIR/libTMInstrument.so"
+fi
+if [ ! -f "$PLUGIN" ]; then
+    echo "clang-tm: plugin not found at $PLUGIN" >&2
+    echo "  Set --plugin or run install.sh." >&2
+    exit 1
+fi
+
+# ---- Locate runtime ----
+
+RUNTIMES_DIR="${TM_RUNTIMES_DIR:-$TM_BACKENDS_DIR/runtimes}"
+BACKENDS_DIR="${TM_BACKENDS_DIR:-$PROJECT_ROOT/backends}"
+
+resolve_runtime() {
+    local path="$1"
+    # Absolute or relative path that exists
+    if [ -f "$path" ]; then
+        realpath "$path"
+        return 0
+    fi
+    local basename="$(basename "$path")"
+    # Search in runtimes directory
+    if [ -f "$RUNTIMES_DIR/$basename" ]; then
+        realpath "$RUNTIMES_DIR/$basename"
+        return 0
+    fi
+    return 1
+}
+
+RESOLVED_RUNTIME="$(resolve_runtime "$RUNTIME")" || {
+    echo "clang-tm: runtime not found: $RUNTIME" >&2
+    echo "  Tried: $(realpath "$RUNTIME" 2>/dev/null || echo "$RUNTIME") and $RUNTIMES_DIR/$(basename "$RUNTIME")" >&2
+    exit 1
+}
+
+# ---- Determine if runtime is source or library ----
+
+runtime_is_source() {
+    local path="$1"
+    case "$path" in
+        *.cpp|*.cc|*.cxx) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ---- Add backend include path and split flags ----
+
+COMPILE_FLAGS=("${CXXFLAGS[@]+"${CXXFLAGS[@]}"}")
+LINK_FLAGS=()
+
+# Suppress debug output in release mode (define NDEBUG for runtime compilation)
+if [ "$DEBUG_MODE" -eq 0 ]; then
+    COMPILE_FLAGS+=("-DNDEBUG")
+fi
+
+if [ -d "$BACKENDS_DIR" ]; then
+    COMPILE_FLAGS+=("-I$BACKENDS_DIR")
+fi
+
+# Separate link-only flags from the rest
+FILTERED_COMPILE=()
+for f in "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"; do
+    case "$f" in
+        -l*|-L*|-Wl,*)
+            LINK_FLAGS+=("$f") ;;
+        *)
+            FILTERED_COMPILE+=("$f") ;;
+    esac
+done
+COMPILE_FLAGS=("${FILTERED_COMPILE[@]+"${FILTERED_COMPILE[@]}"}")
+# Link flags get the remaining common flags too
+for f in "${CXXFLAGS[@]+"${CXXFLAGS[@]}"}"; do
+    case "$f" in
+        -I*|-D*|-std=*|-stdlib=*)
+            ;; # skip compile-only flags for linking
+        -l*|-L*|-Wl,*)
+            ;; # already added
+        *)
+            LINK_FLAGS+=("$f") ;;
+    esac
+done
+
+# ---- Default output name ----
+
+if [ -z "$OUTPUT" ]; then
+    OUTPUT="./a.out"
+fi
+
+# ---- Build directory (unique per invocation for parallel safety) ----
+
+OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clang-tm.XXXXXXXX")"
+trap 'rm -rf "$OUT_DIR"' EXIT
+
+LINK_BCS=()
+RUNTIME_BC=""
+RUNTIME_IS_SOURCE=false
+
+if runtime_is_source "$RESOLVED_RUNTIME"; then
+    RUNTIME_IS_SOURCE=true
+fi
+
+log() { if [ "$VERBOSE" = 1 ]; then echo "$*"; fi; }
+
+# --- Instrument each source file ---
+
+for src in "${SOURCES[@]}"; do
+    base="$(basename "$src")"
+    base_noext="${base%.*}"
+
+    # Check if this source IS the runtime (same resolved path)
+    if [ "$(realpath "$src" 2>/dev/null)" = "$RESOLVED_RUNTIME" ]; then
+        log "[skip] $src is the runtime — not instrumenting"
+        continue
+    fi
+
+    # Step 1: Compile to LLVM bitcode
+    bc="$OUT_DIR/$base_noext.bc"
+    log "[1/4] $src → LLVM bitcode"
+    clang++ -std=c++20 -O3 -fno-inline -emit-llvm -c "$src" -o "$bc" \
+        -fno-stack-protector -pthread "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"
+
+    # Step 2: Instrument
+    instr_bc="$OUT_DIR/$base_noext.instr.bc"
+    log "[2/4] $bc → instrumented IR"
+    opt -load-pass-plugin="$PLUGIN" -passes="tm-instrument" "$bc" -o "$instr_bc"
+
+    LINK_BCS+=("$instr_bc")
+done
+
+# --- Compile runtime to bitcode (if source) ---
+
+if $RUNTIME_IS_SOURCE; then
+    runtime_base="$(basename "$RESOLVED_RUNTIME")"
+    runtime_base_noext="${runtime_base%.*}"
+    RUNTIME_BC="$OUT_DIR/${runtime_base_noext}.tm.bc"
+
+    log "[rt] $RESOLVED_RUNTIME → LLVM bitcode"
+    clang++ -std=c++20 -O3 -fno-inline -emit-llvm -c "$RESOLVED_RUNTIME" -o "$RUNTIME_BC" \
+        -fno-stack-protector -pthread "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"
+fi
+
+# --- Merge and optimize ---
+
+if [ ${#LINK_BCS[@]} -eq 0 ]; then
+    echo "clang-tm: no source files to instrument" >&2
+    exit 1
+fi
+
+if $RUNTIME_IS_SOURCE && [ -n "$RUNTIME_BC" ]; then
+    # Merge all instrumented BCs + runtime BC
+    combined_bc="$OUT_DIR/combined.bc"
+
+    if [ ${#LINK_BCS[@]} -eq 1 ]; then
+        # Single source: just link with runtime BC
+        log "[3/4] merging instrumented IR with runtime → $combined_bc"
+        llvm-link "${LINK_BCS[0]}" "$RUNTIME_BC" -o "$combined_bc"
+    else
+        # Multiple sources: link all instrumented BCs first, then with runtime
+        merged_src_bc="$OUT_DIR/sources_merged.bc"
+        log "[3/4] merging ${#LINK_BCS[@]} instrumented IR files → $merged_src_bc"
+        llvm-link "${LINK_BCS[@]+"${LINK_BCS[@]}"}" -o "$merged_src_bc"
+        log "[3/4] merging instrumented IR with runtime → $combined_bc"
+        llvm-link "$merged_src_bc" "$RUNTIME_BC" -o "$combined_bc"
+    fi
+
+    # Optimize the combined IR (sees both instrumented code and runtime)
+    opt_bc="$OUT_DIR/combined.opt.bc"
+    log "[4/4] optimizing combined IR → $opt_bc"
+    opt -O3 "$combined_bc" -o "$opt_bc"
+
+    # Final link: compile bitcode to native binary
+    log "[fin] linking → $OUTPUT"
+    clang++ "${LINK_FLAGS[@]+"${LINK_FLAGS[@]}"}" "$opt_bc" -o "$OUTPUT"
+else
+    # Runtime is a library (.o/.a/.so/.dylib/.bc): optimize then link
+
+    if [ ${#LINK_BCS[@]} -eq 1 ]; then
+        input_bc="${LINK_BCS[0]}"
+        opt_bc="${input_bc%.*}.opt.bc"
+        log "[3/4] optimizing instrumented IR → $opt_bc"
+        opt -O3 "$input_bc" -o "$opt_bc"
+    else
+        # Merge multiple sources first
+        merged_src_bc="$OUT_DIR/sources_merged.bc"
+        log "[3/4] merging ${#LINK_BCS[@]} instrumented IR files → $merged_src_bc"
+        llvm-link "${LINK_BCS[@]+"${LINK_BCS[@]}"}" -o "$merged_src_bc"
+        opt_bc="$OUT_DIR/sources_merged.opt.bc"
+        log "[3/4] optimizing instrumented IR → $opt_bc"
+        opt -O3 "$merged_src_bc" -o "$opt_bc"
+    fi
+
+    # Link with runtime library
+    log "[4/4] linking → $OUTPUT"
+    clang++ "${LINK_FLAGS[@]+"${LINK_FLAGS[@]}"}" "$opt_bc" "$RESOLVED_RUNTIME" -o "$OUTPUT"
+fi
+
+echo "clang-tm: built $OUTPUT" >&2

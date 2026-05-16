@@ -13,6 +13,9 @@
 #include <mutex>
 
 #include "../SwissTM/SwissTM.hpp"
+#include "../tm_alloc_overrides.hpp"
+
+thread_local bool g_in_tx = false;
 
 extern "C" {
 
@@ -31,7 +34,9 @@ static std::atomic<int64_t> g_tm_end_count{0};
 
 void tm_init()
 {
+#ifndef NDEBUG
 	fprintf(stderr, "tm_init called\n");
+#endif
 	swisstm::init();
 }
 
@@ -39,7 +44,9 @@ void tm_exit() {}
 
 void tm_init_thread()
 {
+#ifndef NDEBUG
 	fprintf(stderr, "tm_init_thread called\n");
+#endif
 	swisstm::init_thread();
 }
 
@@ -72,6 +79,7 @@ void tm_begin()
 	if (tm_nested_call_counter == 1) { g_in_tx = true;
 		swisstm::begin();
     }
+    assert(tm_nested_call_counter >= 0);
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -80,6 +88,7 @@ void tm_end()
 	if (tm_nested_call_counter == 1) { g_in_tx = false;
 		swisstm::commit();
     }
+    assert(tm_nested_call_counter >= 0);
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -173,15 +182,17 @@ void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {}
 
 static void print_stats()
 {
+#ifndef NDEBUG
 	fprintf(stderr, "=== SwissTM_new Runtime Stats ===\n");
 	fprintf(stderr,
 	        "tm_begin: %lld, tm_end: %lld\n",
 	        (long long)g_tm_begin_count.load(std::memory_order_relaxed),
 	        (long long)g_tm_end_count.load(std::memory_order_relaxed));
+#endif
 }
 
 static int init = (std::atexit(print_stats), 0);
-void* tm_malloc(size_t size) { return g_in_tx ? malloc(size) : malloc(size); }
+void* tm_malloc(size_t size) { return malloc(size); }
 void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
 void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
 void  tm_free(void* ptr) { free(ptr); }

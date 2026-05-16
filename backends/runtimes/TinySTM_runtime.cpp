@@ -45,17 +45,21 @@ void tm_init() { tinystm::init(); }
 
 void tm_exit() {
 	tinystm::exit();
+#ifndef NDEBUG
 	fprintf(stderr, "\n=== TinySTM max read-set = %llu, max write-set = %llu ===\n",
 		(unsigned long long)g_tm_max_read_set.load(),
 		(unsigned long long)g_tm_max_write_set.load());
+#endif
 }
 
 void tm_init_thread()
 {
 	tm_init_thread_call_count++;
+#ifndef NDEBUG
 	fprintf(stderr,
 	        "[DEBUG tm_init_thread] Call #%d in this thread\n",
 	        tm_init_thread_call_count);
+#endif
 	tinystm::init_thread();
 }
 
@@ -89,6 +93,7 @@ void tm_begin()
 	if (tm_nested_call_counter == 1) { g_in_tx = true;
 		tinystm::begin();
 	}
+	assert(tm_nested_call_counter >= 0);
 }
 
 void tm_end()
@@ -107,13 +112,17 @@ void tm_end()
 		if (tx) {
 			uint64_t rs = tx->read_set.size();
 			uint64_t ws = tx->write_set.size();
+			assert(ws <= rs || ws == 0); // write-set is subset of read-set
 			if (rs > g_tm_max_read_set.load()) g_tm_max_read_set.store(rs);
 			if (ws > g_tm_max_write_set.load()) g_tm_max_write_set.store(ws);
+#ifndef NDEBUG
 			if (rs > 0) fprintf(stderr, "[RS=%llu WS=%llu]\n",
 				(unsigned long long)rs, (unsigned long long)ws);
+#endif
 		}
 		tinystm::commit();
 	}
+	assert(tm_nested_call_counter >= 0);
 	tm_tx_count++;
 }
 

@@ -322,7 +322,7 @@ inline void exit()
 
 inline word_t get_clock()
 {
-	volatile word_t res;
+	word_t res;
 	while ((res = g_clock.load(std::memory_order_acquire)) >= VERSION_MASK)
 		std::this_thread::sleep_for(
 		    std::chrono::microseconds(1000)); // someone is reseting the clock

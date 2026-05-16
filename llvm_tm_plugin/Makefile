@@ -14,12 +14,15 @@ TINYSTM_DIR := $(BACKENDS_DIR)/TinySTM
 SRC_DIR := src
 TEST_DIR := test
 
-PLUGIN_VARIANTS  = release no_setjmp no_rw no_malloc minimal
-PLUGIN_FLAGS_release       =
-PLUGIN_FLAGS_no_setjmp     = -DDISABLE_SETJMP
-PLUGIN_FLAGS_no_rw         = -DDISABLE_TM_READ_WRITE
-PLUGIN_FLAGS_no_malloc     = -DDISABLE_MALLOC_FREE
-PLUGIN_FLAGS_minimal       = -DDISABLE_SETJMP -DDISABLE_TM_READ_WRITE -DDISABLE_MALLOC_FREE
+PLUGIN_VARIANTS  = release no_setjmp no_rw no_malloc minimal debug
+PLUGIN_FLAGS_release       = -DNDEBUG
+PLUGIN_FLAGS_no_setjmp     = -DNDEBUG -DDISABLE_SETJMP
+PLUGIN_FLAGS_no_rw         = -DNDEBUG -DDISABLE_TM_READ_WRITE
+PLUGIN_FLAGS_no_malloc     = -DNDEBUG -DDISABLE_MALLOC_FREE
+PLUGIN_FLAGS_minimal       = -DNDEBUG -DDISABLE_SETJMP -DDISABLE_TM_READ_WRITE -DDISABLE_MALLOC_FREE
+
+# Debug variant (verbose output, assertions enabled)
+PLUGIN_FLAGS_debug         =
 
 # Default alias
 $(BIN_DIR)/libTMInstrument.so: $(BIN_DIR)/libTMInstrument_release.so

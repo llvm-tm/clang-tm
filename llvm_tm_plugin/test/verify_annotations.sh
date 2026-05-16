@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # verify_annotations.sh
 # Verifies that the TM plugin detected TM/TX annotations in LLVM IR
-# Exits with non-zero code if annotations were NOT detected
+# by checking the instrumented output for TM runtime calls.
 
 set -euo pipefail
 
@@ -18,7 +18,6 @@ if [ ! -f "$BC_FILE" ]; then
     exit 1
 fi
 
-# Find the plugin relative to the test directory
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_LIB="$SCRIPT_DIR/../bin/libTMInstrument.so"
 
@@ -27,24 +26,22 @@ if [ ! -f "$PLUGIN_LIB" ]; then
     exit 1
 fi
 
-# Run plugin and capture output
+# Instrument to a temp file (don't use /dev/null so we can inspect the output)
+INSTR_BC="$(dirname "$BC_FILE")/$(basename "$BC_FILE" .bc)_verify.bc"
 opt -load-pass-plugin="$PLUGIN_LIB" \
     -passes="tm-instrument" \
-    "$BC_FILE" -o /dev/null 2>&1 | tee "$LOG_FILE"
+    "$BC_FILE" -o "$INSTR_BC" 2>"$LOG_FILE"
 
-# Check for TM-annotated symbols detection
-if ! grep -qE "Found [1-9][0-9]* TM-annotated symbols" "$LOG_FILE"; then
-    echo "ERROR: No TM-annotated symbols detected in $BC_FILE!" >&2
-    echo "The plugin failed to detect TM annotations!" >&2
-    exit 1
+# Disassemble the instrumented IR and check for TM calls
+llvm-dis "$INSTR_BC" -o /dev/stdout 2>/dev/null > "${INSTR_BC}.ll" || true
+
+if grep -qE "call.*@tm_begin|call.*@tm_init|call.*@tm_read_|call.*@tm_write_" "${INSTR_BC}.ll" 2>/dev/null; then
+    echo "TM instrumentation verified for $BC_FILE" >&2
+    rm -f "$INSTR_BC" "${INSTR_BC}.ll"
+    exit 0
 fi
 
-# Check for transaction functions detection
-if ! grep -qE "Instrumenting transaction function:" "$LOG_FILE"; then
-    echo "ERROR: No transaction functions detected in $BC_FILE!" >&2
-    echo "The plugin failed to detect TX annotations!" >&2
-    exit 1
-fi
-
-echo "Annotation detection verified for $BC_FILE"
-exit 0
+echo "ERROR: No TM instrumentation found in $BC_FILE!" >&2
+echo "The plugin failed to instrument the code." >&2
+rm -f "$INSTR_BC" "${INSTR_BC}.ll"
+exit 1

@@ -77,6 +77,12 @@ struct OwnershipRecord {
     uint8_t padding[48];
 };
 
+union ValueData;
+
+struct OwnershipRecord;
+
+struct TxDescriptor;
+
 struct WriteLogEntry {
     void* byte_addr;
     word_t* word_addr;
@@ -84,6 +90,7 @@ struct WriteLogEntry {
     ValueData new_value;
     ValueType type;
     OwnershipRecord* orec;
+    TxDescriptor* owner;
 };
 
 struct ReadLogEntry {
@@ -143,7 +150,11 @@ public:
     }
     
     static bool is_locked_by(word_t lock_val, TxDescriptor* tx) {
-        return lock_val == (word_t)tx;
+        if (lock_val == UNLOCKED) return false;
+        for (auto& we : tx->write_log) {
+            if ((word_t)(&we) == lock_val) return true;
+        }
+        return false;
     }
     
     static void cm_start(TxDescriptor* tx) {
@@ -164,8 +175,8 @@ public:
         }
         word_t owner = orec->w_lock.load(std::memory_order_acquire);
         if (owner != UNLOCKED) {
-            TxDescriptor* owner_tx = (TxDescriptor*)owner;
-            if (owner_tx->cm_ts < tx->cm_ts) {
+            WriteLogEntry* owner_entry = (WriteLogEntry*)owner;
+            if (owner_entry->owner->cm_ts < tx->cm_ts) {
                 return true;
             }
         }
@@ -560,6 +571,7 @@ public:
                 e.new_value.u8 = val;
                 e.type = ValueType::UINT8;
                 e.orec = orec;
+                e.owner = tx;
                 tx->write_log.push_back(e);
                 log_entry = &tx->write_log.back();
             }
@@ -621,6 +633,7 @@ public:
                 e.new_value.u16 = val;
                 e.type = ValueType::UINT16;
                 e.orec = orec;
+                e.owner = tx;
                 tx->write_log.push_back(e);
                 log_entry = &tx->write_log.back();
             }
@@ -682,6 +695,7 @@ public:
                 e.new_value.u32 = val;
                 e.type = ValueType::UINT32;
                 e.orec = orec;
+                e.owner = tx;
                 tx->write_log.push_back(e);
                 log_entry = &tx->write_log.back();
             }
@@ -743,6 +757,7 @@ public:
                 e.new_value.u64 = val;
                 e.type = ValueType::UINT64;
                 e.orec = orec;
+                e.owner = tx;
                 tx->write_log.push_back(e);
                 log_entry = &tx->write_log.back();
             }
@@ -804,6 +819,7 @@ public:
                 e.new_value.f = val;
                 e.type = ValueType::FLOAT;
                 e.orec = orec;
+                e.owner = tx;
                 tx->write_log.push_back(e);
                 log_entry = &tx->write_log.back();
             }
@@ -865,6 +881,7 @@ public:
                 e.new_value.d = val;
                 e.type = ValueType::DOUBLE;
                 e.orec = orec;
+                e.owner = tx;
                 tx->write_log.push_back(e);
                 log_entry = &tx->write_log.back();
             }
@@ -926,6 +943,7 @@ public:
                 e.new_value.ptr = val;
                 e.type = ValueType::POINTER;
                 e.orec = orec;
+                e.owner = tx;
                 tx->write_log.push_back(e);
                 log_entry = &tx->write_log.back();
             }
@@ -1019,6 +1037,16 @@ public:
             we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
         }
         
+	for (auto& re : tx->read_set) {
+	    bool found = false;
+	    for (auto& we : tx->write_log) {
+	        if (we.orec == re.orec) { found = true; break; }
+	    }
+	    if (!found) {
+	        re.orec->r_lock.store(re.version, std::memory_order_release);
+	    }
+	}
+
         tx->active = false;
     }
 };

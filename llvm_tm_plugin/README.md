@@ -62,19 +62,86 @@ make run            # build + run all tests
 make check          # run tests and verify
 ```
 
+## Quick Start with `clang-tm`
+
+The **`clang-tm`** script wraps the full pipeline into a single
+command that looks and feels like `clang++`:
+
+```sh
+# Default: runtime.cpp in current directory
+clang-tm -std=c++20 -O3 -pthread -o myapp app.cpp
+
+# Specify runtime by path or bare name (looked up in backends/runtimes/)
+clang-tm --runtime SingleGlobalLock_runtime.cpp -o myapp app.cpp
+clang-tm --runtime ../backends/runtimes/TL2_runtime.cpp -o myapp app.cpp
+```
+
+The runtime source is compiled to LLVM bitcode and merged with the
+instrumented IR **before** the final `-O3` pass. This makes `tm_read`,
+`tm_write`, and other runtime functions visible to the optimizer so
+they can be inlined.  The final binary contains no `tm_read`/`tm_write`
+calls — every access is expanded directly.
+
+`clang-tm` also accepts pre-compiled runtime libraries (`.o`, `.a`,
+`.so`, `.dylib`, `.bc`) — these are linked as-is without merging.
+
+```sh
+# Runtime as a static library
+clang-tm --runtime libmyruntime.a -o myapp app.cpp
+
+# Runtime as a shared library
+clang-tm --runtime libmyruntime.so -o myapp app.cpp
+```
+
+The script auto-discovers the plugin `.so` and backend include paths
+relative to its own location.  All unrecognised flags are forwarded
+to `clang++` unchanged.
+
+## Install
+
+```sh
+cd llvm_tm_plugin
+make variants
+./install.sh                  # installs to /usr/local/
+PREFIX=~/.local ./install.sh  # installs to user-local prefix
+```
+
+Installs to `PREFIX/bin/clang-tm` and `PREFIX/lib/clang-tm/{plugin,runtimes,backends}/`.
+The `clang-tm` script auto-detects the installed layout, so after
+installation `clang-tm` works from any directory:
+
+```sh
+clang-tm --runtime SingleGlobalLock_runtime.cpp -o myapp app.cpp
+```
+
+Uninstall:
+
+```sh
+./llvm_tm_plugin/uninstall.sh
+```
+
+Additional flags:
+- `--runtime FILE, -r FILE` — path to runtime (`.cpp`/`.cc`/`.cxx`
+  source or `.o`/`.a`/`.so`/`.dylib`/`.bc` library; default: `runtime.cpp`)
+- `--plugin FILE, -p FILE`  — path to `libTMInstrument.so` (auto-detected)
+- `--keep-temps, -k`        — keep intermediate `.bc` files in a temp dir
+- `--verbose, -v`           — print each pipeline step
+- `--help, -h`              — show usage
+
 ## Instrumentation Levels
 
-The plugin supports five compile-time variants, selected by passing
+The plugin supports six compile-time variants, selected by passing
 `-D` flags during the plugin build.  Each produces a separate `.so`
 that can be used in the pipeline.
 
 | Variant     | `-D` flags                                          | What it does                                                  |
 |-------------|------------------------------------------------------|---------------------------------------------------------------|
-| `release`   | *(none)*                                             | Full instrumentation: setjmp, r/w, malloc, mem intrinsics     |
-| `no_setjmp` | `-DDISABLE_SETJMP`                                   | No sigsetjmp/longjmp — no retry on conflict                   |
-| `no_rw`     | `-DDISABLE_TM_READ_WRITE`                            | No tm_read/tm_write — keep setjmp + malloc interposition      |
-| `no_malloc` | `-DDISABLE_MALLOC_FREE`                              | No malloc/free replacement — keep setjmp + r/w                |
-| `minimal`   | `-DDISABLE_SETJMP -DDISABLE_TM_READ_WRITE -DDISABLE_MALLOC_FREE` | Transaction boundaries only — no data access instrumentation |
+| `release`   | `-DNDEBUG`                                           | Full instrumentation, no debug output (default)               |
+| `no_setjmp` | `-DNDEBUG -DDISABLE_SETJMP`                          | No sigsetjmp/longjmp — no retry on conflict                   |
+| `no_rw`     | `-DNDEBUG -DDISABLE_TM_READ_WRITE`                   | No tm_read/tm_write — keep setjmp + malloc interposition      |
+| `no_malloc` | `-DNDEBUG -DDISABLE_MALLOC_FREE`                     | No malloc/free replacement — keep setjmp + r/w                |
+| `minimal`   | `-DNDEBUG -DDISABLE_SETJMP -DDISABLE_TM_READ_WRITE -DDISABLE_MALLOC_FREE` | Transaction boundaries only — no data access instrumentation |
+| `debug`     | *(none)*                                             | Full instrumentation with verbose debug output to stderr      |
 
 ### What each flag controls
 

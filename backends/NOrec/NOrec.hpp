@@ -205,8 +205,7 @@ begin()     //
 	auto *tx = current_tx;
 	NOREC_ASSERT(tx, "tx not defined");
 
-	while ((tx->snapshot = get_clock()) & 1)
-		; // wait unlock
+	do { tx->snapshot = get_clock(); } while (tx->snapshot & 1);
 	tx->active = true;
 	tx->read_only = true;
 	tx->abort_count = 0;

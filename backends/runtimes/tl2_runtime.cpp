@@ -74,6 +74,7 @@ extern "C" void tm_begin() {
     if (tm_nested_call_counter == 1) { g_in_tx = true;
         tl2::begin();
     }
+    assert(tm_nested_call_counter >= 0);
     g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -81,6 +82,7 @@ extern "C" void tm_end() {
     if (tm_nested_call_counter == 1) { g_in_tx = false;
         tl2::commit();
     }
+    assert(tm_nested_call_counter >= 0);
     g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -171,10 +173,12 @@ void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
 void  tm_free(void* ptr) { free(ptr); }
 
 static void print_stats() {
+#ifndef NDEBUG
     fprintf(stderr, "=== TL2 Runtime Stats ===\n");
     fprintf(stderr, "tm_begin: %lld, tm_end: %lld\n", 
         (long long)g_tm_begin_count.load(std::memory_order_relaxed), 
         (long long)g_tm_end_count.load(std::memory_order_relaxed));
+#endif
 }
 
 static int init = (std::atexit(print_stats), 0);

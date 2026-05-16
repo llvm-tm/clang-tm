@@ -15,6 +15,34 @@ make all
 make test_run
 ```
 
+## Install (system-wide)
+
+Install `clang-tm` (the compilation pipeline wrapper) and TM runtime files to
+`/usr/local`. After installing, the `clang-tm` command works from any directory:
+
+```bash
+cd llvm_tm_plugin
+make variants                           # build all 7 plugin variants
+./install.sh                            # installs to /usr/local/
+PREFIX=~/.local ./install.sh            # user-local prefix
+```
+
+Then set up a standalone benchmark workspace:
+
+```bash
+./install-benchmarks.sh                 # creates ~/tm-benchmarks/
+./install-benchmarks.sh --benchdir ~/my-benchmarks   # custom location
+
+# Run the money-conservation test:
+make -C ~/tm-benchmarks test
+```
+
+Uninstall:
+
+```bash
+./llvm_tm_plugin/uninstall.sh
+```
+
 ## Prerequisites
 
 - **LLVM 16+** with the `opt` tool and development libraries

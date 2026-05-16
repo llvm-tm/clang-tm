@@ -6,6 +6,7 @@
  * No read/write instrumentation is needed - the global lock provides exclusive access.
  */
 
+#include <cassert>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -32,18 +33,24 @@ __thread int32_t tm_longjmp_ret;
 extern "C" {
 
 void tm_init() {
+#ifndef NDEBUG
     fprintf(stderr, "SingleGlobalLock: tm_init called\n");
     fflush(stderr);
+#endif
     if (!initialized.load(std::memory_order_relaxed)) {
         initialized.store(true, std::memory_order_seq_cst);
     }
+#ifndef NDEBUG
     fprintf(stderr, "SingleGlobalLock: tm_init done\n");
     fflush(stderr);
+#endif
 }
 
 void tm_init_thread() {
+#ifndef NDEBUG
     fprintf(stderr, "SingleGlobalLock: tm_init_thread called\n");
     fflush(stderr);
+#endif
 }
 
 void tm_exit() {
@@ -83,6 +90,7 @@ void tm_begin() {
         g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
         global_tx_lock.lock();
     }
+    assert(tm_nested_call_counter >= 0);
 }
 
 void tm_end() {
@@ -91,6 +99,7 @@ void tm_end() {
         g_tm_tx_count.fetch_add(1, std::memory_order_relaxed);
         global_tx_lock.unlock();
     }
+    assert(tm_nested_call_counter >= 0);
 }
 
 // Read functions without symbol_id parameter
@@ -129,12 +138,14 @@ void consume_ptr(volatile void *ptr) { (void)ptr; }
 
 static void print_stats()
 {
+#ifndef NDEBUG
 	fprintf(stderr, "=== SingleGlobalLock Runtime Stats ===\n");
 	fprintf(stderr,
 	        "tm_begin: %lld, tm_end: %lld, #TXs: %lld\n",
 	        (long long)g_tm_begin_count.load(std::memory_order_relaxed),
 	        (long long)g_tm_end_count.load(std::memory_order_relaxed),
 	        (long long)g_tm_tx_count.load(std::memory_order_relaxed));
+#endif
 }
 
 static int init = (std::atexit(print_stats), 0);

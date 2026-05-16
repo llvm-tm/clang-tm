@@ -211,7 +211,8 @@ commit()    //
 		}
 
 		// can commit, increase the global clock
-		if ((commit_version = increment_clock(tx->id)) < tx->end_version)
+		commit_version = increment_clock(tx->id);
+		if (commit_version < tx->end_version)
 			abort_tx(); // version overflow
 
 		// Check if there were transactions in between

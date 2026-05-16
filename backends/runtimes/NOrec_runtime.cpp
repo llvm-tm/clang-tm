@@ -89,8 +89,9 @@ void tm_set_env(sigjmp_buf *env)
 
 void tm_begin()
 {
-	// Always print to see if called
+#ifndef NDEBUG
 	fprintf(stderr, "NOrec tm_begin called\n");
+#endif
 	if (tm_longjmp_ret == 0)
 		norec::begin();
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
@@ -98,7 +99,9 @@ void tm_begin()
 
 void tm_end()
 {
+#ifndef NDEBUG
 	fprintf(stderr, "NOrec tm_end called\n");
+#endif
 	norec::commit();
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 	g_tm_tx_count.fetch_add(1, std::memory_order_relaxed);
@@ -199,12 +202,14 @@ void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {}
 
 static void print_stats()
 {
+#ifndef NDEBUG
 	fprintf(stderr, "=== NOrec Runtime Stats ===\n");
 	fprintf(stderr,
 	        "tm_begin: %lld, tm_end: %lld, #TXs: %lld\n",
 	        (long long)g_tm_begin_count.load(std::memory_order_relaxed),
 	        (long long)g_tm_end_count.load(std::memory_order_relaxed),
 	        (long long)g_tm_tx_count.load(std::memory_order_relaxed));
+#endif
 }
 
 static int init = (std::atexit(print_stats), 0);

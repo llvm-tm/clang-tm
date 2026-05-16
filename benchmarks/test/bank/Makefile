@@ -1,25 +1,42 @@
-include ../../../llvm_tm_plugin/tm_pipeline.mk
-$(eval $(call tm_define_rules))
+CLANG_TM   := ../../../llvm_tm_plugin/clang-tm
+RUNTIMES   := ../../../backends/runtimes
+BACKENDS   := ../../../backends
 
-CXXFLAGS := -std=c++20 -O3 -pthread
+CXXFLAGS   := -std=c++20 -O3 -pthread
+
+BIN_DIR    := bin
 
 .PHONY: all clean
 
-all: $(OUT_DIR) $(BIN_DIR) \
+all: $(BIN_DIR) \
 	bank_uninstrumented \
 	bank_singlelock bank_norec bank_tl2 bank_tinystm bank_swiss \
-	bank_persistentsgl bank_distributedsgl
+	bank_persistentsgl
+
+$(BIN_DIR):
+	mkdir -p $(BIN_DIR)
 
 bank_uninstrumented: bank.cpp | $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $< -o $(BIN_DIR)/$@
+	clang++ $(CXXFLAGS) $< -o $(BIN_DIR)/$@
 
-$(eval $(call tm_target, bank_singlelock, bank.cpp, singlelock))
-$(eval $(call tm_target, bank_norec, bank.cpp, norec))
-$(eval $(call tm_target, bank_tl2, bank.cpp, tl2))
-$(eval $(call tm_target, bank_tinystm, bank.cpp, tinystm))
-$(eval $(call tm_target, bank_swiss, bank.cpp, swisstm))
-$(eval $(call tm_target, bank_persistentsgl, bank.cpp, persistentsgl))
-$(eval $(call tm_target, bank_distributedsgl, bank.cpp, distributedsgl))
+bank_singlelock: bank.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/SingleGlobalLock_runtime.cpp -o $(BIN_DIR)/$@ $<
+
+bank_norec: bank.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/NOrec_runtime.cpp -I$(BACKENDS)/NOrec -o $(BIN_DIR)/$@ $<
+
+bank_tl2: bank.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/tl2_runtime.cpp -o $(BIN_DIR)/$@ $<
+
+bank_tinystm: bank.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/TinySTM_runtime.cpp -I$(BACKENDS)/TinySTM -DDESIGN_WBCTL -o $(BIN_DIR)/$@ $<
+
+bank_swiss: bank.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/SwissTM_runtime.cpp -I$(BACKENDS)/SwissTM -o $(BIN_DIR)/$@ $<
+
+bank_persistentsgl: bank.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/PersistentSGL_runtime.cpp -o $(BIN_DIR)/$@ $<
 
 clean:
-	rm -rf $(OUT_DIR) $(BIN_DIR)
+	rm -rf $(BIN_DIR)
+
