@@ -136,6 +136,14 @@ cp "$LLVM_TM_DIR/clang-tm" "$INSTALL_BIN/clang-tm"
 chmod 755 "$INSTALL_BIN/clang-tm"
 info "clang-tm → $INSTALL_BIN/clang-tm"
 
+# Install install-benchmarks.sh to lib directory
+cp "$LLVM_TM_DIR/install-benchmarks.sh" "$INSTALL_LIB/install-benchmarks.sh"
+chmod 755 "$INSTALL_LIB/install-benchmarks.sh"
+
+# Bootstrap scripts
+cp "$LLVM_TM_DIR/bootstrap-install.sh" "$INSTALL_LIB/" 2>/dev/null || true
+cp "$LLVM_TM_DIR/bootstrap-uninstall.sh" "$INSTALL_LIB/" 2>/dev/null || true
+
 # ---- 2. Install plugin .so files ----
 for variant in "$LLVM_TM_DIR/bin/libTMInstrument"*.so; do
     [ -f "$variant" ] || continue

@@ -7,40 +7,50 @@ Transactional Memory (STM) using source-level annotations. Mark globals with
 
 ## Quick Start
 
-```bash
-# Build the LLVM plugin and all benchmarks (default: SingleGlobalLock backend)
-make all
+## One-line install
 
-# Quick smoke test (Bank + AVL + STAMP with default backend)
-make test_run
+```bash
+curl -fsSL https://raw.githubusercontent.com/llvm-tm/clang-tm/main/llvm_tm_plugin/bootstrap-install.sh | bash
 ```
 
-## Install (system-wide)
+Custom prefix:
 
-Install `clang-tm` (the compilation pipeline wrapper) and TM runtime files to
-`/usr/local`. After installing, the `clang-tm` command works from any directory:
+```bash
+curl -fsSL ... | bash -s -- --prefix ~/.local
+```
+
+## One-line uninstall
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/llvm-tm/clang-tm/main/llvm_tm_plugin/bootstrap-uninstall.sh | bash
+```
+
+## Standalone benchmark workspace
+
+```bash
+/usr/local/lib/clang-tm/install-benchmarks.sh                # creates ~/tm-benchmarks/
+/usr/local/lib/clang-tm/install-benchmarks.sh --benchdir ~/my-benchmarks
+
+# Run the money-conservation test:
+make -C ~/tm-benchmarks test
+```
+
+## From a local clone
 
 ```bash
 cd llvm_tm_plugin
 make variants                           # build all 7 plugin variants
 ./install.sh                            # installs to /usr/local/
 PREFIX=~/.local ./install.sh            # user-local prefix
-```
 
-Then set up a standalone benchmark workspace:
+# Set up standalone benchmarks
+./install-benchmarks.sh
 
-```bash
-./install-benchmarks.sh                 # creates ~/tm-benchmarks/
-./install-benchmarks.sh --benchdir ~/my-benchmarks   # custom location
-
-# Run the money-conservation test:
+# Run correctness test:
 make -C ~/tm-benchmarks test
-```
 
-Uninstall:
-
-```bash
-./llvm_tm_plugin/uninstall.sh
+# Uninstall:
+./uninstall.sh
 ```
 
 ## Prerequisites
