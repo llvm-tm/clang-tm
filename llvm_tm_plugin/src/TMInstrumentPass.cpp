@@ -37,11 +37,7 @@
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/Type.h>
 #include <llvm/Passes/PassBuilder.h>
-#if __has_include(<llvm/Passes/PassPlugin.h>)
-  #include <llvm/Passes/PassPlugin.h>   // LLVM 19–21
-#else
-  #include <llvm/Plugins/PassPlugin.h>  // LLVM 22+
-#endif
+#include <llvm/Plugins/PassPlugin.h>
 
 #include "tm_annotation_utils.hpp"
 #include "tm_call_graph.hpp"

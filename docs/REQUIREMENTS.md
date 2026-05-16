@@ -7,7 +7,7 @@ on a new machine (including remote machines accessed via SSH).
 
 | Tool | Version | Notes |
 |------|---------|-------|
-| LLVM | 16+ | Including `opt`, `llvm-link`, `llvm-dis` |
+| LLVM | 22+ | Including `opt`, `llvm-link`, `llvm-dis` |
 | Clang / clang++ | matching LLVM version | Must support `-emit-llvm` and `-load-pass-plugin` |
 | GNU Make | 4+ | For the build system |
 | pthreads | — | System library (usually built-in) |
@@ -20,8 +20,10 @@ on a new machine (including remote machines accessed via SSH).
 ### Ubuntu / Debian
 
 ```sh
+wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+sudo add-apt-repository "deb https://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-22 main"
 sudo apt update
-sudo apt install -y llvm-dev clang make lld bash
+sudo apt install -y llvm-22-dev clang-22 lld make
 ```
 
 ### macOS (Homebrew)
@@ -60,7 +62,7 @@ available at compatible versions.
 
 ## Quick Setup on New Machine
 
-### One-liner install (requires LLVM/Clang 16+)
+### One-liner install (requires LLVM/Clang 22+)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/llvm-tm/clang-tm/main/llvm_tm_plugin/bootstrap-install.sh | bash

@@ -55,7 +55,7 @@ make -C ~/tm-benchmarks test
 
 ## Prerequisites
 
-- **LLVM 16+** with the `opt` tool and development libraries
+- **LLVM 22+** with the `opt` tool and development libraries
 - **Clang 16+** (matching LLVM version)
 - `make`, `gtimeout` (macOS: `brew install coreutils`) / `timeout` (Ubuntu: pre-installed in `coreutils`)
 
