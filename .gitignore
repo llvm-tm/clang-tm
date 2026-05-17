@@ -8,8 +8,13 @@
 **/tm_persist.bin
 # Benchmark artifacts (never commit raw results or plots)
 benchmark_results/
+benchmarks/test/bank/benchmark_results.csv
 results_*.csv
 results_*.png
+benchmarks/test/bank/*.png
+
+# TLA+ Proof System cache (auto-generated)
+.tlacache/
 
 # Compiled objects
 *.o
