@@ -20,6 +20,9 @@
 #   -k, --keep-temps     Keep intermediate .bc files
 #   -I, --include DIR    Extra include directories
 #   -D, --define DEF     Extra preprocessor defines
+#   -i, --inline         Use inline-first pipeline (tm-instrument-inline)
+#                        (inlines TX callees before instrumentation; better
+#                         for STL containers but may increase IR size)
 #   -v, --verbose        Print each step
 #   -h, --help           Show this help
 #
@@ -62,6 +65,7 @@ RUNTIME="tinystm"
 PLUGIN=""
 KEEP_TEMPS=0
 VERBOSE=0
+INLINE_PIPELINE=0
 EXTRA_INCLUDES=()
 EXTRA_DEFINES=()
 SOURCE=""
@@ -78,6 +82,8 @@ while [ $# -gt 0 ]; do
             PLUGIN="$2"; shift 2 ;;
         -k|--keep-temps)
             KEEP_TEMPS=1; shift ;;
+        -i|--inline)
+            INLINE_PIPELINE=1; shift ;;
         -v|--verbose)
             VERBOSE=1; shift ;;
         -I)
@@ -173,8 +179,13 @@ $LLVM_CXX -std=c++20 -O3 -fno-inline -emit-llvm -c "$SOURCE" -o "$STEP1_BC" \
 
 # ---- Step 2: Run plugin ----
 
-log "Step 2: Running TM instrumentation plugin..."
-$LLVM_OPT -load-pass-plugin="$PLUGIN" -passes="tm-instrument" "$STEP1_BC" -o "$STEP2_BC"
+PIPELINE="tm-instrument"
+if [ "$INLINE_PIPELINE" = 1 ]; then
+    PIPELINE="tm-instrument-inline"
+    log "  (using inline-first pipeline: $PIPELINE)"
+fi
+log "Step 2: Running TM instrumentation plugin ($PIPELINE)..."
+$LLVM_OPT -load-pass-plugin="$PLUGIN" -passes="$PIPELINE" "$STEP1_BC" -o "$STEP2_BC"
 
 # ---- Step 3: Optimize instrumented IR ----
 

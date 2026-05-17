@@ -113,6 +113,8 @@ CONTAINER_TYPES = {
     "std::vector": "tm_stl::vector",
     "std::set": "tm_stl::set",
     "std::unordered_map": "tm_stl::unordered_map",
+    "std::map": "tm_stl::map",
+    "std::multimap": "tm_stl::multimap",
 }
 
 _CONTAINER_KEYS = sorted(CONTAINER_TYPES.keys(), key=len, reverse=True)
@@ -375,6 +377,7 @@ class TMTransformer:
         has_vec = self._needs_container("vector")
         has_set = self._needs_container("set")
         has_umap = self._needs_container("unordered_map")
+        has_map = self._needs_container("map")
 
         # Header
         out.append("// ------------------------------------------------------------")
@@ -385,6 +388,7 @@ class TMTransformer:
         if has_vec: out.append('#include "tm_vector.h"')
         if has_set: out.append('#include "tm_set.h"')
         if has_umap: out.append('#include "tm_unordered_map.h"')
+        if has_map: out.append('#include "tm_map.h"')
         out.append("")
         out.append("#define TM /*tm*/")
         out.append("#define TX /*tx*/")
@@ -571,6 +575,16 @@ class TMTransformer:
           - TM struct ptr fields:  data->scalar = rhs → tm_write_*(&data->scalar, rhs)
           - Read-side uses:        x = g_counter + 1  → x = tm_read_*(&g_counter) + 1
         """
+        # Skip asm/__asm__ lines — variable references inside inline assembly
+        # constraints must remain lvalues (tm_read returns an rvalue).
+        if re.search(r'\b(asm|__asm__)\s*(volatile|__volatile__)?\s*\(', line):
+            return line
+
+        # Skip memcpy/memset lines — these operate on raw memory and shouldn't
+        # have individual arguments wrapped with tm_read/tm_write.
+        if re.search(r'\b(memcpy|memset)\s*\(', line):
+            return line
+
         out = line
 
         # Phase 1: Direct TM global variables
@@ -593,6 +607,24 @@ class TMTransformer:
             if g.spelling == name:
                 return g.type
         return None
+
+    def _get_elem_suffix(self, var_type):
+        """Get the tm suffix for the pointed-to / element type (not the container)."""
+        if var_type is None:
+            return "ptr"
+        try:
+            k = var_type.kind
+            if k in (TypeKind.CONSTANTARRAY, TypeKind.INCOMPLETEARRAY,
+                     TypeKind.VARIABLEARRAY, TypeKind.POINTER):
+                try:
+                    elem_type = var_type.element_type
+                    if elem_type is not None:
+                        return tm_suffix(elem_type)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return tm_suffix(var_type)
 
     def _is_container_type(self, type_obj):
         """Check if a clang Type is a container type (vector/set/unordered_map)."""
@@ -676,9 +708,36 @@ class TMTransformer:
         if self._is_container_type(var_type):
             return out
 
+        elem_suffix = self._get_elem_suffix(var_type)
         suffix = tm_suffix(var_type)
 
-        # Try write-side first
+        # Array/pointer subscript access — use element-level tm_read/tm_write
+        # with the correct address &var[idx] instead of wrapping the variable
+        # name alone.
+        if elem_suffix != suffix:
+            # Write: var[idx] = rhs ;
+            sub_write_pat = (re.escape(var_name)
+                             + r'\s*\[([^\]]+)\]\s*=' + r'(=?)\s*([^;]+);')
+            m = re.search(sub_write_pat, out)
+            if m:
+                idx_expr = m.group(1)
+                op = m.group(2)
+                if op == '':
+                    rhs = m.group(3).strip()
+                    wrap = (f"tm_write_{elem_suffix}(&{var_name}[{idx_expr}],"
+                            f" ({rhs}));")
+                    return out[:m.start()] + wrap + out[m.end():]
+
+            # Read: var[idx] (not on LHS, not inc/dec)
+            sub_read_pat = re.escape(var_name) + r'\s*\[([^\]]+)\]'
+            out = re.sub(
+                sub_read_pat + r'(?!\s*(?:=(?!=)|[+]{2}|[-]{2}))',
+                f"tm_read_{elem_suffix}(&{var_name}[\\1])",
+                out,
+            )
+            return out
+
+        # Non-array/non-pointer: try write-side first
         new_out, wrapped = self._wrap_write_side(out, var_name, suffix)
         if wrapped:
             return new_out
@@ -733,7 +792,7 @@ def write_output(inp: Path, out_dir: Path, lines: list, analyzer: TMAnalyzer):
                     break
     if has_container_usage and STL_CACHE_DIR.exists():
         import shutil
-        for fn in ["tm_vector.h", "tm_set.h", "tm_unordered_map.h"]:
+        for fn in ["tm_vector.h", "tm_set.h", "tm_unordered_map.h", "tm_map.h"]:
             src = STL_CACHE_DIR / fn
             if src.exists():
                 shutil.copy2(src, out_dir / fn)
@@ -766,14 +825,18 @@ def build_tm(inp: Path, out_path: Path, out_dir: Path):
         include_dirs.append(f"-I{PROJECT_ROOT / 'backends'}")
         include_dirs.append(f"-I{PROJECT_ROOT / 'backends' / 'TinySTM'}")
 
-    cmd = (
-        ["c++", "-std=c++20", "-O1", "-pthread"]
-        + include_dirs
-        + ["-DINSTRUMENTED", str(src), str(tinystm_src), "-o", str(binary)]
-    )
+    binary = out_dir / inp.stem
 
-    print(f"  compile: {' '.join(str(c) for c in cmd)}")
-    result = subprocess.run([str(c) for c in cmd], capture_output=True, text=True)
+    cmd = [
+        "c++", "-std=c++20", "-O1", "-pthread",
+        *include_dirs,
+        "-DINSTRUMENTED",
+        str(out_path), str(tinystm_src),
+        "-o", str(binary),
+    ]
+
+    print(f"  compile: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print("  compilation failed:", file=sys.stderr)
         print(result.stderr[:2000], file=sys.stderr)
