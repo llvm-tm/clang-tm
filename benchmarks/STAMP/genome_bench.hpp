@@ -56,6 +56,21 @@ TX static void genome_dedup(GenomeData* data, int start, int end) {
     }
 }
 
+// NOTE: genome_match calls std::string::compare on TM-managed GenomeData
+// strings inside a transaction.  string::compare reads the internal char
+// buffer via opaque library code that the TM pass cannot instrument.
+// This means the buffer reads bypass tm_read — they are non-transactional.
+//
+// This is accepted here because the genome benchmark's data layout
+// guarantees that compared strings are not concurrently modified:
+//   - unique_segments is populated during dedup (before transactions start)
+//   - genome_match only reads segments, never writes them
+//   - hash_table is a local (stack) variable, not TM-allocated
+// The reconstructed vector is the only TM-shared write destination.
+//
+// An ideal fix would replace string::compare with a hand-rolled inline
+// comparison that is visible to the TM instrumentation pass.
+__attribute__((annotate("tm_allow_opaque")))
 TX static void genome_match(GenomeData* data, int start, int end,
                              std::unordered_map<uint64_t, std::vector<std::string*>>& hash_table) {
     for (auto it = data->unique_segments.begin(); it != data->unique_segments.end(); ++it) {

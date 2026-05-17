@@ -179,6 +179,11 @@ static bool checkOpaqueFunctions(
                 Function *Callee = Call->getCalledFunction();
                 if (Callee && hasAnnotation(*Callee, "tm_allow_opaque")) continue;
 
+                // Check if the enclosing function is annotated (for cases
+                // where the whole function is verified safe despite opaque
+                // calls, e.g. genome_match in STAMP).
+                if (hasAnnotation(*F, "tm_allow_opaque")) continue;
+
                 if (!Callee) {
                     // Indirect call (virtual method, function pointer)
                     foundOpaque = true;

@@ -2,10 +2,9 @@ CXXFLAGS := -std=c++20 -O1 -pthread
 include ../../llvm_tm_plugin/tm_pipeline.mk
 $(eval $(call tm_define_rules))
 
-# STAMP has some opaque calls inside TX blocks (e.g. std::string::compare
-# in genome_match).  These are safe for the benchmark's data layout but
-# cannot be auto-instrumented.  Suppress the error with -tm-allow-opaque.
-TM_INSTRUMENT_FLAGS = -tm-allow-opaque
+# STAMP opaque functions: each TX-opaque call is annotated with
+# __attribute__((annotate("tm_allow_opaque"))) and a comment explaining
+# why it cannot be auto-instrumented. No blanket -tm-allow-opaque.
 
 .PHONY: all clean
 
