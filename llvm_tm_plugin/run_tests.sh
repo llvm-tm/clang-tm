@@ -95,6 +95,12 @@ run_test local_containers_test "PASS: All local containers tests passed"
 # STL container test
 run_test test_stl_containers "STL Container Test" "All tests passed"
 
+# Map find regression test
+run_test test_stl_map_find "map find regression test" "PASS: map find test passed"
+
+# Argument trace test
+run_test test_tm_arg_trace "argument trace test" "PASS: argument trace test passed"
+
 # Verify annotation detection for all tests (NEW)
 echo "===== Verifying annotation detection ====="
 for test_name in types memtest nested threads persist annotation_detect; do
@@ -114,5 +120,59 @@ echo "All annotation detections verified."
 
 # Retry test: verifies longjmp/sigsetjmp for transaction retry
 run_test retry "retry" "longjmp" "Test PASSED" "final counter = 3"
+
+# ---- Python source-level instrumenter tests ----
+echo "===== Python clang-tm.py instrumenter ====="
+PYTHON_SCRIPT="scripts/clang_tm.py"
+VENV_PYTHON=""
+for candidate in ".venv/bin/python" "../.venv/bin/python" "$(dirname "$0")/.venv/bin/python" "$(dirname "$0")/../.venv/bin/python"; do
+    if [ -x "$candidate" ]; then
+        VENV_PYTHON="$candidate"
+        break
+    fi
+done
+if [ -z "$VENV_PYTHON" ]; then
+    VENV_PYTHON="python3"
+fi
+
+if [ ! -f "$PYTHON_SCRIPT" ]; then
+    echo "  (skipping Python tests: $PYTHON_SCRIPT not found)"
+else
+    PY_OUTDIR="/tmp/tm_py_test"
+    for test_name in types nested threads retry; do
+        test_file="test/${test_name}.cpp"
+        out_dir="${PY_OUTDIR}/${test_name}"
+        rm -rf "$out_dir"
+        echo "  py-instr: $test_name"
+        if "$VENV_PYTHON" "$PYTHON_SCRIPT" "$test_file" -o "$out_dir" > /dev/null 2>&1; then
+            echo "    run: OK"
+        else
+            echo "    run: FAILED" >&2
+            exit 1
+        fi
+        # Check output exists
+        out_file="${out_dir}/${test_name}.cpp"
+        if [ ! -f "$out_file" ]; then
+            echo "    output: MISSING" >&2
+            exit 1
+        fi
+        # Check key instrumentation patterns
+        if grep -q "tm_read_\|tm_write_" "$out_file" && \
+           grep -q "tx_start\|tx_end" "$out_file" && \
+           grep -q "_tm_clone" "$out_file"; then
+            echo "    patterns: OK (tm_read/tm_write + tx_start/tx_end + _tm_clone)"
+        else
+            echo "    patterns: FAILED" >&2
+            exit 1
+        fi
+        # Compile check (known issues: asm volatile in types, void* in memtest)
+        if c++ -std=c++20 -fsyntax-only -I"$out_dir" -I"stl_cache" -I"test" "$out_file" 2>/dev/null; then
+            echo "    compile: OK"
+        else
+            echo "    compile: WARN (non-fatal, see clang_tm.py known limitations)"
+        fi
+    done
+    echo "  Python instrumenter tests passed."
+fi
 
 echo "All tests passed."

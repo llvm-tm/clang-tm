@@ -260,6 +260,25 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
     return tracesFromTMGlobal(Sel->getTrueValue(), M, VisitedAllocas, Depth + 1) ||
            tracesFromTMGlobal(Sel->getFalseValue(), M, VisitedAllocas, Depth + 1);
 
+  // Function argument: follow through call sites to check what's actually
+  // passed at this argument position.  This enables inter-procedural tracing:
+  // if a TX function takes a pointer param that was loaded from a TM global,
+  // accesses through that param inside callees can be traced back.
+  if (auto *Arg = dyn_cast<Argument>(V)) {
+    Function *Parent = Arg->getParent();
+    if (!Parent) return false;
+    for (User *U : Parent->users()) {
+      auto *Call = dyn_cast<CallBase>(U);
+      if (!Call) continue;
+      if (Call->getCalledFunction() != Parent) continue;
+      Value *ActualArg = Call->getArgOperand(Arg->getArgNo());
+      if (!ActualArg) continue;
+      if (tracesFromTMGlobal(ActualArg, M, VisitedAllocas, Depth + 1))
+        return true;
+    }
+    return false;
+  }
+
   // Alloca: check if any store to this alloca stores a value that traces
   // to a TM global.  This is the key case for iterators:
   //   %__begin = alloca ptr
@@ -293,12 +312,14 @@ static bool isSharedPointer(Value *Ptr,
                            Module &M,
                            int DepthLimit = 15)
 {
+  // Alloca instructions are always local (stack-allocated).  Returning false
+  // here prevents tm_write_ptr/tm_read_iN on local variables.  The VALUES
+  // loaded from allocas later still trace to TM globals through the normal
+  // tracesFromTMGlobal chain — see the GEP/Load handling there.
+  if (isa<AllocaInst>(Ptr))
+    return false;
+
   // Check if the pointer ultimately traces to a TM-annotated global.
-  // This must run BEFORE originatesFromLocal, because the pointer may
-  // reach a TM global through a chain:  %__end_ → load ptr, %__begin
-  // → %__begin (alloca) → store from begin() → %__range (alloca) →
-  // store from &g_connections (TM global).  originatesFromLocal would
-  // stop at the first alloca and return true (local) — wrong.
   if (tracesFromTMGlobal(Ptr, M)) {
     TM_DEBUG("Pointer traces to TM global → shared");
     return true;
