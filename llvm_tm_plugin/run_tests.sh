@@ -38,7 +38,7 @@ run_test threads "tm_init" "tm_init_thread" "tm_exit_thread" "tm_exit" "threads 
 echo "===== Testing tm_call_order ====="
 mkdir -p out
 if [ ! -f ./out/threads.bc ]; then
-  $LLVM_CXX -std=c++17 -O3 -fno-inline -emit-llvm -c test/threads.cpp -o out/threads.bc -fno-stack-protector
+  $LLVM_CXX -std=c++17 -O1 -fno-inline -emit-llvm -c test/threads.cpp -o out/threads.bc -fno-stack-protector
 fi
 $LLVM_OPT -load-pass-plugin=./bin/libTMInstrument.so -passes="tm-instrument" out/threads.bc -S -o out/threads.ll
 echo "Verifying call order in LLVM IR..."

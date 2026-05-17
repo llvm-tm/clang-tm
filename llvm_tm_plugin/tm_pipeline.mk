@@ -37,6 +37,14 @@
 
 .DEFAULT_GOAL   := all
 
+# Optimization level for the post-instrumentation pass.
+# Default: -O3 (inlines tm_read/tm_write). Set to -O0 for debugging.
+TM_OPT_LEVEL     ?= -O3
+
+# Compile flags for source → LLVM bitcode (step 1 of pipeline).
+TM_COMPILE_FLAGS ?= -O1 -fno-inline -fno-vectorize -fno-slp-vectorize \
+                    -fno-unroll-loops -fno-stack-protector -pthread
+
 # Discover LLVM tools via llvm-config (handles versioned installs)
 LLVM_CONFIG      := $(shell command -v llvm-config-22 2>/dev/null || command -v llvm-config-22.1 2>/dev/null || command -v llvm-config 2>/dev/null || echo "")
 LLVM_BINDIR      := $(shell $(LLVM_CONFIG) --bindir 2>/dev/null)
@@ -95,11 +103,13 @@ TM_INCLUDES_tinystm_wt    = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
 # ---- Canned recipes (individual steps) ----
 
 define tm_compile_ir
-	$(CXX) -std=c++20 -O3 -fno-inline -emit-llvm -c $1 -o $2 -fno-stack-protector -pthread
+	$(CXX) -std=c++20 $(TM_COMPILE_FLAGS) -emit-llvm -c $1 -o $2
 endef
 
 define tm_compile_ir_debug
-	$(CXX) -std=c++20 -O0 -g -emit-llvm -c $1 -o $2 -fno-stack-protector -pthread
+	$(CXX) -std=c++20 -O0 -g -fno-inline -emit-llvm -c $1 -o $2 \
+		-fno-vectorize -fno-slp-vectorize -fno-unroll-loops \
+		-fno-stack-protector -pthread
 endef
 
 define tm_instrument
@@ -107,16 +117,17 @@ $(OPT) -load-pass-plugin=$(TM_PLUGIN) -passes="tm-instrument" $1 -o $2
 endef
 
 define tm_optimize
-$(OPT) -O3 $1 -o $2
+$(OPT) $(TM_OPT_LEVEL) $1 -o $2
 endef
 
 define tm_link
 # Compile runtime to bitcode (no -fno-inline — runtime must be eligible for inlining)
-$(CXX) -std=c++20 -O3 -emit-llvm -c $(TM_RUNTIME_$(strip $2)) -o $@.runtime.bc $(TM_DEFINES_$(strip $2)) $(TM_INCLUDES_$(strip $2)) -fno-stack-protector -pthread
+# Use TM_RUNTIME_OPT (default -O1) so tm_read/tm_write can inline even at -O0
+$(CXX) -std=c++20 $(or $(TM_RUNTIME_OPT),-O1) -emit-llvm -c $(TM_RUNTIME_$(strip $2)) -o $@.runtime.bc $(TM_DEFINES_$(strip $2)) $(TM_INCLUDES_$(strip $2)) -fno-stack-protector -pthread
 # Merge instrumented IR with runtime bitcode
 $(LLVM_LINK) $1 $@.runtime.bc -o $@.merged.bc
 # Optimize merged IR (inlines tm_read/tm_write etc.)
-$(OPT) -O3 $@.merged.bc -o $@.merged.opt.bc
+$(OPT) $(TM_OPT_LEVEL) $@.merged.bc -o $@.merged.opt.bc
 # Final link
 $(CXX) $(CXXFLAGS) $(TM_DEFINES_$(strip $2)) $@.merged.opt.bc -o $3 $(TM_INCLUDES_$(strip $2))
 # Cleanup intermediate files
