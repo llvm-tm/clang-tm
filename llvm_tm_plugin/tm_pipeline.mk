@@ -113,7 +113,7 @@ define tm_compile_ir_debug
 endef
 
 define tm_instrument
-$(OPT) -load-pass-plugin=$(TM_PLUGIN) -passes="tm-instrument" $1 -o $2
+$(OPT) -load-pass-plugin=$(TM_PLUGIN) -passes="tm-instrument" $(TM_INSTRUMENT_FLAGS) $1 -o $2
 endef
 
 define tm_optimize

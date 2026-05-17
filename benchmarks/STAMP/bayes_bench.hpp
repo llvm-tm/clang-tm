@@ -1,5 +1,19 @@
 #pragma once
 
+// NOTE: Bayes avoids std::string and other complex STL types in TM structs.
+//
+// The TM instrumentation pass cannot see into opaque library functions
+// (e.g. std::string::compare, std::unordered_set::find).  If these are
+// called on TM-managed memory inside a transaction, the loads/stores
+// inside those opaque functions will NOT be instrumented with tm_read/
+// tm_write, leading to non-transactional access and potential corruption.
+//
+// Bayes keeps TM data as plain ints, vectors, and sets of ints — only
+// standard algorithms (which are header-only and therefore visible to
+// the instrumentation pass) are used inside TX blocks.  Any algorithm
+// whose implementation lives in the C++ standard library .so/.dylib is
+// opaque and must be avoided in TM context unless proven safe.
+
 #include "stamp_common.hpp"
 #include <algorithm>
 #include <cmath>
