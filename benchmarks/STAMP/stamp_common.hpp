@@ -108,7 +108,8 @@ extern int g_vacation_u;      // -u: percent of user tasks
 extern int g_vacation_t;      // -t: total number of tasks
 
 extern int g_yada_angle;      // -a: angle constraint
-extern const char* g_yada_i;  // -i: input file prefix
+extern double g_yada_jitter;  // -j: jitter magnitude for synthetic mesh
+extern const char* g_yada_i;  // -i: input file prefix (.mesh file)
 
 void run_benchmark(BenchmarkType bench, int threads);
 

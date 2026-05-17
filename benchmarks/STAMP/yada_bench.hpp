@@ -3,6 +3,8 @@
 #include "stamp_common.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <fstream>
 #include <map>
 #include <queue>
 #include <set>
@@ -90,54 +92,138 @@ static bool is_bad(const YadaElement& el, double angle_constraint) {
     return el.min_angle < angle_constraint || el.encroached;
 }
 
+static int yada_add_element(YadaData* data, const YadaPoint& a, const YadaPoint& b, const YadaPoint& c) {
+    YadaElement el;
+    el.pts[0] = a; el.pts[1] = b; el.pts[2] = c;
+    circumcircle_center(el.circum_x, el.circum_y, el.circum_r, a, b, c);
+    el.min_angle = triangle_min_angle(a, b, c);
+    el.encroached = false;
+    el.encroached_idx = -1;
+    el.is_garbage = false;
+    el.is_referenced = false;
+    for (int e = 0; e < 3; e++) {
+        int e1 = e, e2 = (e + 1) % 3;
+        if (is_encroached(el.pts[e1], el.pts[e2], el.pts[3 - e1 - e2])) {
+            el.encroached = true;
+            el.encroached_idx = e;
+            el.encroached_edge = {el.pts[e1], el.pts[e2]};
+        }
+    }
+    data->elements.push_back(el);
+    return (int)data->elements.size() - 1;
+}
+
 inline void yada_generate_mesh() {
     auto data = new YadaData();
     data->angle_constraint = g_yada_angle;
     data->total_added = 0;
 
-    PRNG rng(42);
     std::vector<YadaPoint> points;
-    int grid_size = 10;
-    double spacing = 4.0;
 
-    for (int i = 0; i < grid_size; i++) {
-        for (int j = 0; j < grid_size; j++) {
-            double px = i * spacing + rng.uniform(-0.5, 0.5);
-            double py = j * spacing + rng.uniform(-0.5, 0.5);
-            points.push_back({px, py});
-        }
-    }
+    if (g_yada_i && g_yada_i[0] != '\0') {
+        std::string prefix = g_yada_i;
+        // Check file extension to determine format
+        bool is_mesh = (prefix.rfind(".mesh") == prefix.size() - 5);
+        bool is_node = (prefix.rfind(".node") == prefix.size() - 5);
 
-    auto add_element = [&](const YadaPoint& a, const YadaPoint& b, const YadaPoint& c) {
-        YadaElement el;
-        el.pts[0] = a; el.pts[1] = b; el.pts[2] = c;
-        circumcircle_center(el.circum_x, el.circum_y, el.circum_r, a, b, c);
-        el.min_angle = triangle_min_angle(a, b, c);
-        el.encroached = false;
-        el.encroached_idx = -1;
-        el.is_garbage = false;
-        el.is_referenced = false;
-        for (int e = 0; e < 3; e++) {
-            int e1 = e, e2 = (e + 1) % 3;
-            if (is_encroached(el.pts[e1], el.pts[e2], el.pts[3 - e1 - e2])) {
-                el.encroached = true;
-                el.encroached_idx = e;
-                el.encroached_edge = {el.pts[e1], el.pts[e2]};
+        if (is_mesh) {
+            // Legacy single-file .mesh format
+            std::ifstream f(prefix);
+            if (!f.is_open()) {
+                std::cerr << "Error: could not open " << prefix << "\n";
+                std::exit(1);
+            }
+            int num_vertices = 0, num_triangles = 0;
+            f >> num_vertices >> num_triangles;
+            for (int i = 0; i < num_vertices; i++) {
+                double x, y;
+                f >> x >> y;
+                points.push_back({x, y});
+            }
+            for (int i = 0; i < num_triangles; i++) {
+                int v0, v1, v2;
+                f >> v0 >> v1 >> v2;
+                yada_add_element(data, points[v0], points[v1], points[v2]);
+            }
+        } else {
+            // Triangle-format files: <prefix>.node, <prefix>.ele, <prefix>.poly
+            // Strip .node extension if present to get base prefix
+            if (is_node)
+                prefix = prefix.substr(0, prefix.size() - 5);
+            std::string node_file = prefix + ".node";
+            std::string ele_file = prefix + ".ele";
+            // .poly is optional — boundaries computed algorithmically
+
+            std::ifstream fn(node_file);
+            if (!fn.is_open()) {
+                std::cerr << "Error: could not open " << node_file << "\n";
+                std::exit(1);
+            }
+            int num_vertices = 0;
+            int dim = 2, num_attrs = 0, num_markers = 0;
+            fn >> num_vertices >> dim >> num_attrs >> num_markers;
+            for (int i = 0; i < num_vertices; i++) {
+                int idx;
+                double x, y;
+                fn >> idx >> x >> y;
+                // Skip attributes if present
+                for (int a = 0; a < num_attrs; a++) {
+                    double attr;
+                    fn >> attr;
+                }
+                // Skip boundary marker if present
+                if (num_markers) {
+                    int marker;
+                    fn >> marker;
+                }
+                points.push_back({x, y});
+            }
+
+            std::ifstream fe(ele_file);
+            if (!fe.is_open()) {
+                std::cerr << "Error: could not open " << ele_file << "\n";
+                std::exit(1);
+            }
+            int num_triangles = 0, nodes_per_tri = 3, ele_attrs = 0;
+            fe >> num_triangles >> nodes_per_tri >> ele_attrs;
+            for (int i = 0; i < num_triangles; i++) {
+                int idx, v0, v1, v2;
+                fe >> idx >> v0 >> v1 >> v2;
+                // .ele uses 1-based indices
+                yada_add_element(data, points[v0-1], points[v1-1], points[v2-1]);
+                // Skip element attributes if present
+                for (int a = 0; a < ele_attrs; a++) {
+                    double attr;
+                    fe >> attr;
+                }
             }
         }
-        data->elements.push_back(el);
-    };
+    } else {
+        // Synthetic mesh generation
+        PRNG rng(42);
+        int grid_size = 10;
+        double spacing = 4.0;
 
-    for (int i = 0; i < grid_size - 1; i++) {
-        for (int j = 0; j < grid_size - 1; j++) {
-            int idx0 = i * grid_size + j;
-            int idx1 = i * grid_size + j + 1;
-            int idx2 = (i + 1) * grid_size + j;
-            int idx3 = (i + 1) * grid_size + j + 1;
-            add_element(points[idx0], points[idx1], points[idx3]);
-            add_element(points[idx0], points[idx3], points[idx2]);
+        for (int i = 0; i < grid_size; i++) {
+            for (int j = 0; j < grid_size; j++) {
+                double px = i * spacing + rng.uniform(-g_yada_jitter, g_yada_jitter);
+                double py = j * spacing + rng.uniform(-g_yada_jitter, g_yada_jitter);
+                points.push_back({px, py});
+            }
+        }
+
+        for (int i = 0; i < grid_size - 1; i++) {
+            for (int j = 0; j < grid_size - 1; j++) {
+                int idx0 = i * grid_size + j;
+                int idx1 = i * grid_size + j + 1;
+                int idx2 = (i + 1) * grid_size + j;
+                int idx3 = (i + 1) * grid_size + j + 1;
+                yada_add_element(data, points[idx0], points[idx1], points[idx3]);
+                yada_add_element(data, points[idx0], points[idx3], points[idx2]);
+            }
         }
     }
+
     data->num_elements = (int)data->elements.size();
 
     for (int i = 0; i < data->num_elements; i++) {
@@ -191,6 +277,10 @@ inline void yada_generate_mesh() {
         return false;
     };
     std::make_heap(data->work_heap.begin(), data->work_heap.end(), heap_cmp);
+
+    std::cout << "Yada mesh: " << data->num_elements << " elements, "
+              << data->work_heap.size() << " bad (angle constraint="
+              << data->angle_constraint << "°)\n";
 
     g_yada = data;
 }

@@ -85,6 +85,7 @@ int g_vacation_t = 4096;
 
 // Yada params
 int g_yada_angle = 20;
+double g_yada_jitter = 0.5;
 const char* g_yada_i = nullptr;
 
 static void print_usage() {
@@ -99,7 +100,7 @@ static void print_usage() {
               << "  labyrinth: -x <dim_x> -y <dim_y> -z <dim_z> -n <num_paths>\n"
               << "  ssca2:    -s <scale> -i <iterations> -u <uni_prob> -l <max_path> -p <max_edges>\n"
               << "  vacation: -n <queries> -q <pct_query> -r <relations> -u <pct_user> -t <tasks>\n"
-              << "  yada:     -a <angle> -i <file_prefix>\n";
+              << "  yada:     -a <angle> -j <jitter> -i <file_prefix>\n";
 }
 
 static bool parse_int(int argc, char* argv[], int& i, int& val) {
@@ -266,6 +267,7 @@ MAIN int main(int argc, char* argv[]) {
                     break;
                 case BenchmarkType::YADA:
                     if (strcmp(argv[i], "-a") == 0) parse_int(argc, argv, i, g_yada_angle);
+                    else if (strcmp(argv[i], "-j") == 0) parse_double(argc, argv, i, g_yada_jitter);
                     else if (strcmp(argv[i], "-i") == 0) { if (i + 1 < argc) g_yada_i = argv[++i]; }
                     else { std::cerr << "Unknown flag: " << argv[i] << "\n"; return 1; }
                     break;

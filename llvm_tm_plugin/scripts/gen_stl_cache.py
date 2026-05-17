@@ -727,6 +727,20 @@ def generate_headers(out_dir: Path):
         path = out_dir / name
         path.write_text(content.lstrip("\n"))
         print(f"  wrote {path}")
+
+    # tm_map.h and tm_multimap.h may not be embedded — check if they exist
+    # in the default stl_cache and copy them over
+    script_dir = Path(__file__).resolve().parent
+    project_dir = script_dir.parent
+    default_cache = project_dir / "stl_cache"
+    for extra in ["tm_map.h", "tm_multimap.h"]:
+        src = default_cache / extra
+        if src.exists():
+            dst = out_dir / extra
+            if not dst.exists() or dst.read_text() != src.read_text():
+                import shutil
+                shutil.copy2(src, dst)
+                print(f"  copied {dst}")
     return out_dir
 
 

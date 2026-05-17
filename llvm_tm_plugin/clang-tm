@@ -107,6 +107,7 @@ RUNTIME="runtime.cpp"
 PLUGIN=""
 KEEP_TEMPS=0
 VERBOSE=0
+INLINE_PIPELINE=0
 ALLOW_OPAQUE=0
 STRICT_OPAQUE=0
 OUTPUT=""
@@ -136,6 +137,8 @@ while [ $# -gt 0 ]; do
             STRICT_OPAQUE=1; shift ;;
         -k|--keep-temps)
             KEEP_TEMPS=1; shift ;;
+        -i|--inline)
+            INLINE_PIPELINE=1; shift ;;
         -v|--verbose)
             VERBOSE=1; shift ;;
         -o)
@@ -332,11 +335,15 @@ for src in "${SOURCES[@]}"; do
 
     # Step 2: Instrument
     instr_bc="$OUT_DIR/$base_noext.instr.bc"
-    log "[2/4] $bc → instrumented IR"
+    PIPELINE="tm-instrument"
+    if [ "$INLINE_PIPELINE" -eq 1 ]; then
+        PIPELINE="tm-instrument-inline"
+    fi
+    log "[2/4] $bc → instrumented IR ($PIPELINE)"
     OPTS=()
     [ "$ALLOW_OPAQUE" -eq 1 ] && OPTS+=("-tm-allow-opaque")
     [ "$STRICT_OPAQUE" -eq 1 ] && OPTS+=("-tm-strict-opaque")
-    $OPT -load-pass-plugin="$PLUGIN" -passes="tm-instrument" "${OPTS[@]}" "$bc" -o "$instr_bc"
+    $OPT -load-pass-plugin="$PLUGIN" -passes="$PIPELINE" "${OPTS[@]}" "$bc" -o "$instr_bc"
 
     LINK_BCS+=("$instr_bc")
 done

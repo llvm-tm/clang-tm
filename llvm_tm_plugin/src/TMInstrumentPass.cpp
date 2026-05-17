@@ -42,6 +42,7 @@
 #include <llvm/Passes/PassPlugin.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/IPO/AlwaysInliner.h>
 
 #include "tm_annotation_utils.hpp"
 #include "tm_call_graph.hpp"
@@ -219,6 +220,407 @@ static bool checkOpaqueFunctions(
 
     return !foundOpaque;
 }
+
+// ---------------------------------------------------------------------------
+// PASS 1 (inline pipeline): Module-level structural transformation
+//
+// This pass runs ONCE per module and handles:
+//   1. Collect all "tm" and "transaction" annotations, create symbol tables
+//   2. Build TX-reachable call graph; clone non-TX callees with alwaysinline
+//   3. Redirect calls in TX functions to the cloned (inlinable) callees
+//   4. Inject tm_init/tm_exit/tm_init_thread/tm_exit_thread
+//   5. For each TX function: inject tm_begin/tm_end + sigsetjmp nesting
+//   6. Check for opaque (uninstrumentable) function calls
+//
+// (Load/store instrumentation happens later in TMInstrumentInlinePass,
+//  after AlwaysInlinerPass has flattened the cloned callees.)
+// ---------------------------------------------------------------------------
+
+class TMInitInjectPass : public PassInfoMixin<TMInitInjectPass>
+{
+public:
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
+  {
+    TM_DEBUG("TMInitInjectPass: processing module %s", M.getName().str().c_str());
+
+    LLVMContext &Ctx = M.getContext();
+    const char *SetjmpFunc = M.getTargetTriple().str().find("linux") != std::string::npos
+                               ? "__sigsetjmp" : "sigsetjmp";
+    auto H = TMRuntimeHooks::declareAll(M, Ctx, SetjmpFunc);
+    Type *i8Ty = Type::getInt8Ty(Ctx);
+    Type *i32Ty = Type::getInt32Ty(Ctx);
+
+    // Create thread-ready guard variable (thread-local)
+    GlobalVariable *ThreadReadyGV = M.getGlobalVariable("tm_thread_ready");
+    if (!ThreadReadyGV) {
+      ThreadReadyGV = new GlobalVariable(M, i8Ty, false,
+                                       GlobalValue::ExternalLinkage,
+                                       ConstantInt::get(i8Ty, 0),
+                                       "tm_thread_ready");
+      ThreadReadyGV->setThreadLocal(true);
+    }
+
+    // ---- Collect "tm"-annotated globals and create symbol tables ----
+    SmallVector<std::pair<GlobalVariable *, StringRef>, 16> TMSymbols;
+    collectTMSymbols(M, TMSymbols);
+    TM_DEBUG("Found %d TM-annotated symbols", (int)TMSymbols.size());
+    createTMSymbolTables(M, TMSymbols);
+
+    // ---- Build TX-reachable call graph and clone non-TX callees (for inline) ----
+    bool modified = false;
+    SmallPtrSet<Function *, 32> TxReachableFuncs;
+    for (auto &F : M) {
+        if (!F.isDeclaration() && hasAnnotation(F, "transaction"))
+            collectTransactionCallGraph(F, M, TxReachableFuncs);
+    }
+    if (!TxReachableFuncs.empty()) {
+        TM_DEBUG("Tx-reachable call graph has %d functions", (int)TxReachableFuncs.size());
+        auto &ClonedMap = tm_method_instrumentation::cloneTxReachableGraphForInline(M, TxReachableFuncs, H);
+
+        for (auto &F : M) {
+            if (F.isDeclaration()) continue;
+            if (!hasAnnotation(F, "transaction")) continue;
+            tm_method_instrumentation::redirectCallsToClones(F, *F.getParent(), TxReachableFuncs, ClonedMap);
+        }
+        modified = true;
+    }
+
+    // ---- Check for opaque (uninstrumentable) function calls ----
+    if (!AllowOpaque && !TxReachableFuncs.empty()) {
+        if (!checkOpaqueFunctions(M, TxReachableFuncs)) {
+            errs() << "Aborting due to opaque function call(s) in TM context.\n"
+                   << "Use -tm-allow-opaque to disable this check.\n";
+            report_fatal_error("TM instrumentation: opaque function calls detected");
+        }
+    }
+
+    // ---- Explicit thread entry point detection ----
+    SmallPtrSet<Function *, 32> ExplicitThreadEntries;
+    for (auto &F : M) {
+        if (F.isDeclaration()) continue;
+        for (size_t i = 0; ThreadEntrySymbols[i] != nullptr; ++i) {
+            if (F.getName() == ThreadEntrySymbols[i]) {
+                ExplicitThreadEntries.insert(&F);
+                TM_DEBUG("Found explicit thread entry: %s", F.getName().str().c_str());
+                break;
+            }
+        }
+    }
+
+    // ---- Instrument main() ----
+    if (Function *MainFn = M.getFunction("main")) {
+      TM_DEBUG("Instrumenting main()");
+      BasicBlock &Entry = MainFn->getEntryBlock();
+      IRBuilder<> Builder(&Entry, Entry.begin());
+      Builder.CreateCall(H.init, {});
+      insertThreadInitWithGuard(Builder, H.init_thread, ThreadReadyGV);
+
+      for (auto &F : M) {
+        if (F.isDeclaration()) continue;
+        if (hasAnnotation(F, "pstatic_rebuild")) {
+          Builder.CreateCall(&F, {});
+          TM_DEBUG("Calling pstatic_rebuild: %s", F.getName().str().c_str());
+        }
+      }
+
+      auto MainReturns = collectReturns(*MainFn);
+      for (auto *Ret : MainReturns) {
+        IRBuilder<> RetBuilder(Ret);
+        insertThreadExitWithGuard(RetBuilder, H.exit_thread, ThreadReadyGV);
+        RetBuilder.CreateCall(H.exit_fn, {});
+      }
+      modified = true;
+    }
+
+    // ---- Instrument thread entry points ----
+    for (auto &F : M) {
+      if (F.isDeclaration() || F.getName() == "main") continue;
+      if (hasAnnotation(F, "transaction")) continue;
+      if (!hasAnnotation(F, "thread") && !ExplicitThreadEntries.count(&F)) continue;
+
+      TM_DEBUG("Instrumenting thread entry point: %s", F.getName().str().c_str());
+      BasicBlock &Entry = F.getEntryBlock();
+      IRBuilder<> Builder(&Entry, Entry.begin());
+      insertThreadInitWithGuard(Builder, H.init_thread, ThreadReadyGV);
+
+      for (auto *Ret : collectReturns(F)) {
+        if (!Ret) continue;
+        IRBuilder<> RetBuilder(Ret);
+        insertThreadExitWithGuard(RetBuilder, H.exit_thread, ThreadReadyGV);
+      }
+      modified = true;
+    }
+
+    // ---- For each TX function: inject tm_begin / tm_end + sigsetjmp nesting ----
+    auto getOrCreateTLS = [&](StringRef Name, Type *Ty) -> GlobalVariable * {
+        if (auto *GV = M.getGlobalVariable(Name)) return GV;
+        auto *GV = new GlobalVariable(M, Ty, false, GlobalValue::ExternalLinkage, nullptr, Name);
+        GV->setThreadLocal(true);
+        return GV;
+    };
+    auto *CounterGV = getOrCreateTLS("tm_nested_call_counter", i32Ty);
+#ifndef DISABLE_SETJMP
+    auto *JmpRetGV  = getOrCreateTLS("tm_longjmp_ret", i32Ty);
+    auto *JmpBufGV  = getOrCreateTLS("tm_jmpbuf", ArrayType::get(Type::getInt8Ty(Ctx), 256));
+#endif
+
+    for (auto &F : M) {
+      if (F.isDeclaration()) continue;
+      if (!hasAnnotation(F, "transaction")) continue;
+
+      TM_DEBUG("Injecting tm_begin/tm_end in transaction function: %s", F.getName().str().c_str());
+      F.addFnAttr(llvm::Attribute::NoInline);
+
+      // ---- Transaction entry ----
+      BasicBlock &Entry = F.getEntryBlock();
+      Instruction *SplitPt = &*Entry.getFirstNonPHIIt();
+      TM_ASSERT(SplitPt != nullptr, "Entry block has no non-PHI instruction");
+      BasicBlock *ContBB = Entry.splitBasicBlock(SplitPt, "tx_cont");
+
+      AllocaInst *RetValAlloca = nullptr;
+      if (!F.getReturnType()->isVoidTy()) {
+          IRBuilder<> EntryBuilder(&Entry, Entry.getFirstNonPHIIt());
+          RetValAlloca = EntryBuilder.CreateAlloca(F.getReturnType(), nullptr, "tx_retval");
+      }
+      Entry.getTerminator()->eraseFromParent();
+
+      IRBuilder<> Builder(&Entry);
+      Value *CounterVal = Builder.CreateLoad(i32Ty, CounterGV, "counter");
+      Value *IsOuter = Builder.CreateICmpEQ(CounterVal, ConstantInt::get(i32Ty, 0), "is_outer");
+#ifndef DISABLE_SETJMP
+      Value *JmpRetVal = Builder.CreateLoad(i32Ty, JmpRetGV, "jmpret");
+      IsOuter = Builder.CreateOr(IsOuter,
+          Builder.CreateICmpNE(JmpRetVal, ConstantInt::get(i32Ty, 0), "is_retry"), "is_outer");
+#endif
+
+      BasicBlock *OuterBB = BasicBlock::Create(Ctx, "tx_outer", &F, ContBB);
+      BasicBlock *NestedBB = BasicBlock::Create(Ctx, "tx_nested", &F, ContBB);
+      Builder.CreateCondBr(IsOuter, OuterBB, NestedBB);
+
+      // Outer path: tm_begin (with optional sigsetjmp for retry support)
+      IRBuilder<> OuterBuilder(OuterBB);
+#ifndef DISABLE_SETJMP
+      Value *JmpBufPtr = OuterBuilder.CreateBitCast(JmpBufGV, PointerType::getUnqual(Ctx));
+      OuterBuilder.CreateCall(H.set_jmpbuf, {JmpBufPtr});
+      OuterBuilder.CreateStore(
+          OuterBuilder.CreateCall(H.sigsetjmp, {JmpBufPtr, ConstantInt::get(i32Ty, 0)}),
+          JmpRetGV);
+      OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetGV);
+#endif
+      OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 1), CounterGV);
+      OuterBuilder.CreateCall(H.begin, {});
+      OuterBuilder.CreateBr(ContBB);
+
+      // Nested path: increment counter
+      IRBuilder<> NestedBuilder(NestedBB);
+      NestedBuilder.CreateStore(
+          NestedBuilder.CreateAdd(CounterVal, ConstantInt::get(i32Ty, 1)), CounterGV);
+      NestedBuilder.CreateBr(ContBB);
+
+      // ---- Transaction exit ----
+      SmallVector<ReturnInst *, 4> Returns;
+      for (auto &BB : F)
+        if (auto *Ret = dyn_cast<ReturnInst>(BB.getTerminator()))
+          Returns.push_back(Ret);
+
+      BasicBlock *OuterEndBB = BasicBlock::Create(Ctx, "tx_outer_end", &F);
+      BasicBlock *NestedEndBB = BasicBlock::Create(Ctx, "tx_nested_end", &F);
+      BasicBlock *CleanupBB = BasicBlock::Create(Ctx, "tx_cleanup", &F);
+
+      IRBuilder<> OuterEndBuilder(OuterEndBB);
+      OuterEndBuilder.CreateCall(H.end, {});
+#ifndef DISABLE_SETJMP
+      OuterEndBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetGV);
+#endif
+      OuterEndBuilder.CreateBr(CleanupBB);
+
+      IRBuilder<> NestedEndBuilder(NestedEndBB);
+      NestedEndBuilder.CreateBr(CleanupBB);
+
+      for (auto *Ret : Returns) {
+        BasicBlock *RetBB = Ret->getParent();
+        Value *RetVal = Ret->getNumOperands() > 0 ? Ret->getOperand(0) : nullptr;
+        BasicBlock *NewBB = RetBB->splitBasicBlock(Ret, "tx_ret_check");
+        if (RetVal && RetValAlloca) {
+            IRBuilder<> StoreBuilder(Ret);
+            StoreBuilder.CreateStore(RetVal, RetValAlloca);
+        }
+        Ret->eraseFromParent();
+        IRBuilder<> NewBBuilder(NewBB);
+        Value *CounterAtEnd = NewBBuilder.CreateLoad(i32Ty, CounterGV, "counter_at_end");
+        NewBBuilder.CreateCondBr(
+            NewBBuilder.CreateICmpEQ(CounterAtEnd, ConstantInt::get(i32Ty, 1), "is_outer_at_end"),
+            OuterEndBB, NestedEndBB);
+        NewBB->moveAfter(CleanupBB);
+      }
+
+      IRBuilder<> CleanupBuilder(CleanupBB);
+      Value *Cnt = CleanupBuilder.CreateLoad(i32Ty, CounterGV, "counter_cleanup");
+      CleanupBuilder.CreateStore(CleanupBuilder.CreateSub(Cnt, ConstantInt::get(i32Ty, 1)), CounterGV);
+      if (F.getReturnType()->isVoidTy())
+        CleanupBuilder.CreateRetVoid();
+      else
+        CleanupBuilder.CreateRet(CleanupBuilder.CreateLoad(F.getReturnType(), RetValAlloca));
+
+      modified = true;
+    }
+
+    TM_DEBUG("TMInitInjectPass: %s", modified ? "modified module" : "no changes");
+    if (modified) {
+      int n_clone_defs = 0;
+      for (auto &F : M) {
+        if (!F.isDeclaration() && F.getName().contains("_tm_clone"))
+          ++n_clone_defs;
+      }
+      errs() << "[BEFORE_INLINE] _tm_clone function definitions: " << n_clone_defs << "\n";
+    }
+    return modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
+  }
+
+  static bool isRequired() { return true; }
+};
+
+// ---------------------------------------------------------------------------
+// PASS 2 (inline pipeline): Function-level load/store instrumentation
+//
+// Runs on each TX function AFTER AlwaysInlinerPass has flattened all
+// cloned callees into the TX function body.  Only does load/store
+// wrapping (tm_read/tm_write) and malloc/memcpy replacement.
+// tm_begin/tm_end are already injected by TMInitInjectPass.
+// ---------------------------------------------------------------------------
+
+class TMInstrumentInlinePass : public PassInfoMixin<TMInstrumentInlinePass>
+{
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &)
+  {
+    TM_DEBUG("TMInstrumentInlinePass: processing function %s", F.getName().str().c_str());
+
+    if (!hasAnnotation(F, "transaction")) {
+      TM_DEBUG("%s is not a transaction function, skipping", F.getName().str().c_str());
+      return PreservedAnalyses::all();
+    }
+
+    TM_DEBUG("Instrumenting loads/stores in transaction function: %s", F.getName().str().c_str());
+
+    Module *M = F.getParent();
+    LLVMContext &Ctx = M->getContext();
+    const char *SetjmpFunc = M->getTargetTriple().str().find("linux") != std::string::npos
+                               ? "__sigsetjmp" : "sigsetjmp";
+    auto H = TMRuntimeHooks::declareAll(*M, Ctx, SetjmpFunc);
+
+    SmallVector<Instruction *, 16> ToErase;
+
+    for (auto &BB : F) {
+      for (auto InstIt = BB.begin(); InstIt != BB.end();) {
+        Instruction *I = &*InstIt++;
+        IRBuilder<> B(I->getParent(), I->getIterator());
+
+#ifndef DISABLE_TM_READ_WRITE
+        // Memory intrinsics (memcpy, memmove, memset)
+        if (auto *Call = dyn_cast<CallInst>(I)) {
+          if (Function *Callee = Call->getCalledFunction()) {
+            StringRef Name = Callee->getName();
+            if (Name == "llvm.memcpy" || Name == "llvm.memmove" || Name == "llvm.memset") {
+              bool touchesTM = false;
+              for (unsigned i = 0; i < Call->arg_size(); ++i)
+                if (tm_method_instrumentation::tracesToTMGlobal(Call->getArgOperand(i), *M))
+                  { touchesTM = true; break; }
+              if (touchesTM) {
+                tm_method_instrumentation::instrumentMemoryIntrinsic(Call, *M, H);
+                ToErase.push_back(Call);
+              }
+              continue;
+            }
+          }
+        }
+#endif
+
+#ifndef DISABLE_MALLOC_FREE
+        // Replace malloc/calloc/realloc with tm_* variants
+        if (auto *Call = dyn_cast<CallInst>(I)) {
+          if (Function *Callee = Call->getCalledFunction()) {
+            if (Callee && !Callee->getName().starts_with("tm_")) {
+              StringRef N = Callee->getName();
+              if (N == "malloc") {
+                Value *SizeArg = Call->getArgOperand(0);
+                auto *NewCall = B.CreateCall(H.malloc_fn, {SizeArg});
+                NewCall->setAttributes(AttributeList{});
+                Call->replaceAllUsesWith(NewCall);
+                ToErase.push_back(Call);
+                continue;
+              }
+              if (N == "calloc") {
+                Value *Nmemb = Call->getArgOperand(0);
+                Value *Size  = Call->getArgOperand(1);
+                auto *NewCall = B.CreateCall(H.calloc_fn, {Nmemb, Size});
+                NewCall->setAttributes(AttributeList{});
+                Call->replaceAllUsesWith(NewCall);
+                ToErase.push_back(Call);
+                continue;
+              }
+              if (N == "realloc") {
+                Value *Ptr  = Call->getArgOperand(0);
+                Value *Size = Call->getArgOperand(1);
+                auto *NewCall = B.CreateCall(H.realloc_fn, {Ptr, Size});
+                NewCall->setAttributes(AttributeList{});
+                Call->replaceAllUsesWith(NewCall);
+                ToErase.push_back(Call);
+                continue;
+              }
+            }
+            if (Callee && !Callee->getName().starts_with("tm_")) {
+              StringRef N = Callee->getName();
+              if (N == "free") {
+                Value *PtrArg = Call->getArgOperand(0);
+                auto *BC = B.CreateBitCast(PtrArg, B.getPtrTy());
+                B.CreateCall(H.free_fn, {BC});
+                ToErase.push_back(Call);
+                continue;
+              }
+            }
+          }
+        }
+#endif
+
+#ifndef DISABLE_TM_READ_WRITE
+        // Loads and stores
+        if (auto *Load = dyn_cast<LoadInst>(I)) {
+          SmallPtrSet<const Value *, 32> LocalVars;
+          collectLocalVariables(F, LocalVars);
+          bool isShared = isSharedPointer(Load->getPointerOperand(), LocalVars, F, *M);
+          if (isShared) {
+            errs() << "[LOAD_INSTR] Shared load: " << *Load << "\n";
+            if (auto *Call = emitTMRead(B, Load->getPointerOperand(), Load->getType(), H)) {
+              Load->replaceAllUsesWith(Call);
+              ToErase.push_back(Load);
+            }
+          }
+        } else if (auto *Store = dyn_cast<StoreInst>(I)) {
+          SmallPtrSet<const Value *, 32> LocalVars;
+          collectLocalVariables(F, LocalVars);
+          bool isShared = isSharedPointer(Store->getPointerOperand(), LocalVars, F, *M);
+          if (isShared) {
+            errs() << "[STORE_INSTR] Shared store: " << *Store << "\n";
+            if (emitTMWrite(B, Store->getPointerOperand(), Store->getValueOperand(), H))
+              ToErase.push_back(Store);
+          } else {
+            Value *Ptr = Store->getPointerOperand();
+            errs() << "[STORE_NOSHARED] " << *Store << "\n";
+            errs() << "  Ptr type: " << *Ptr << " [" << *Ptr->getType() << "]\n";
+          }
+        }
+#endif
+      }
+    }
+
+    for (Instruction *I : ToErase) I->eraseFromParent();
+
+    return PreservedAnalyses::none();
+  }
+
+  static bool isRequired() { return true; }
+};
 
 class TMGlobalInitPass : public PassInfoMixin<TMGlobalInitPass>
 {
@@ -612,11 +1014,21 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
                 [](StringRef Name,
                    ModulePassManager &MPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
+                  // ---- Legacy pipeline (no inlining) ----
                   if (Name == "tm-instrument") {
                     TM_DEBUG("Registering tm-instrument pass pipeline");
                     MPM.addPass(TMGlobalInitPass());
                     MPM.addPass(
                         createModuleToFunctionPassAdaptor(TMInstrumentPass()));
+                    return true;
+                  }
+                  // ---- Inline pipeline (inline callees first, then instrument) ----
+                  if (Name == "tm-instrument-inline") {
+                    TM_DEBUG("Registering tm-instrument-inline pass pipeline");
+                    MPM.addPass(TMInitInjectPass());
+                    MPM.addPass(AlwaysInlinerPass());
+                    MPM.addPass(
+                        createModuleToFunctionPassAdaptor(TMInstrumentInlinePass()));
                     return true;
                   }
                   return false;
