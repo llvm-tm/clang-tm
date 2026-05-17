@@ -2,15 +2,16 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
-#include <cstdlib>
 #include <iostream>
-#include <memory>
-#include <mutex>
 #include <random>
 #include <thread>
 #include <vector>
+
+extern "C" {
+void tm_serialize_lock();
+void tm_serialize_unlock();
+}
 
 #define TM __attribute__((annotate("tm")))
 #define TX __attribute__((annotate("transaction"), noinline))

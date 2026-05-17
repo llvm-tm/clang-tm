@@ -17,6 +17,7 @@
 #include "tinystm_globals.hpp"
 #include "../tm_alloc_overrides.hpp"
 thread_local bool g_in_tx = false;
+thread_local FreeNode* g_deferred_frees = nullptr;
 
 extern "C" {
 
@@ -91,6 +92,7 @@ void tm_begin()
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
 	if (tm_nested_call_counter == 1) { g_in_tx = true;
+		tm_clear_deferred_frees();
 		tinystm::begin();
 	}
 	assert(tm_nested_call_counter >= 0);
@@ -117,6 +119,7 @@ void tm_end()
             (void)0;
 		}
 		tinystm::commit();
+		tm_flush_deferred_frees();
 	}
 	assert(tm_nested_call_counter >= 0);
 	tm_tx_count++;
@@ -173,6 +176,15 @@ void consume_ptr(volatile void *ptr) { (void)ptr; }
 void* tm_malloc(size_t size) { return g_in_tx ? malloc(size) : malloc(size); }
 void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
 void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
-void  tm_free(void* ptr) { free(ptr); }
+void  tm_free(void* ptr) {
+	if (g_in_tx) {
+		auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));
+		node->ptr = ptr;
+		node->next = g_deferred_frees;
+		g_deferred_frees = node;
+	} else {
+		::free(ptr);
+	}
+}
 
 }

@@ -8,8 +8,8 @@ all: stamp_uninstrumented stamp_tinystm stamp_norec stamp_singlelock \
 	stamp_tsxsgl stamp_tl2 stamp_swisstm \
 	stamp_tinystm_wbctl stamp_tinystm_wbetl stamp_tinystm_wt
 
-stamp_uninstrumented: STAMP.cpp | $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $< -o $(BIN_DIR)/$@
+stamp_uninstrumented: STAMP.cpp tm_stubs.cpp | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $+ -o $(BIN_DIR)/$@
 
 $(eval $(call tm_target, stamp_tinystm, STAMP.cpp, tinystm))
 $(eval $(call tm_target, stamp_norec, STAMP.cpp, norec))

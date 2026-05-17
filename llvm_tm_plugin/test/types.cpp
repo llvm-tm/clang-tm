@@ -13,7 +13,7 @@ TM float tm_f4 = 1.5f;
 TM double tm_f8 = 2.5;
 TM volatile void* tm_ptr = nullptr;
 
-extern "C" void consume_ptr(volatile void* ptr);
+extern "C" void consume_ptr(volatile void* ptr) __attribute__((annotate("tm_allow_opaque")));
 
 TX void tm_types() {
     tm_i8 = tm_i8 + 1;

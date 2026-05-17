@@ -113,13 +113,16 @@ static inline bool detect_attack(const std::string& data, const std::vector<std:
 }
 
 TX static Packet get_packet(IntruderData* data) {
-    if (data->packet_queue.empty()) return {-1, -1, -1, -1, ""};
+    tm_serialize_lock();
+    if (data->packet_queue.empty()) { tm_serialize_unlock(); return {-1, -1, -1, -1, ""}; }
     Packet p = data->packet_queue.front();
     data->packet_queue.pop();
+    tm_serialize_unlock();
     return p;
 }
 
 TX static void process_decoder(IntruderData* data, const Packet& pkt) {
+    tm_serialize_lock();
     auto& decoder_map = data->decoder_map;
     auto it = decoder_map.find(pkt.flow_id);
     if (it == decoder_map.end()) {
@@ -143,12 +146,15 @@ TX static void process_decoder(IntruderData* data, const Packet& pkt) {
         data->decoded_queue.push(it->second);
         decoder_map.erase(it);
     }
+    tm_serialize_unlock();
 }
 
 TX static DecodedFlow get_complete(IntruderData* data) {
-    if (data->decoded_queue.empty()) return {-1, "", 0, {}};
+    tm_serialize_lock();
+    if (data->decoded_queue.empty()) { tm_serialize_unlock(); return {-1, "", 0, {}}; }
     DecodedFlow df = data->decoded_queue.front();
     data->decoded_queue.pop();
+    tm_serialize_unlock();
     return df;
 }
 

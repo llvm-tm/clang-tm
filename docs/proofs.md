@@ -504,3 +504,203 @@ NOrec uses **value-based validation** instead of version-based validation. Rathe
 | NOrec | Value-based validation + single commit lock (CAS on global clock) | Re-reads read-set before commit; CAS prevents concurrent commits | Global commit lock; O(\|R\|) validation per clock change |
 
 All backends provide **serializability** (conflict-serializable schedules equivalent to some serial execution) and **no dirty reads** (no transaction observes uncommitted intermediate state). The differences are in performance characteristics under contention.
+
+---
+
+## 8. Memory Allocation and Deallocation Correctness
+
+### 8.1 Domain
+
+Extend the model with heap operations:
+
+- $\text{malloc}(n) \to p$: allocate $n$ bytes, return pointer $p$
+- $\text{free}(p)$: deallocate the block at $p$
+- $\text{realloc}(p, n)$: resize block at $p$ to $n$ bytes
+
+Heap memory is **orthogonal** to TM-tracked shared variables. The TM manages
+reads/writes to memory locations; malloc/free manage the lifetime of those
+locations.  A block obtained from `malloc` is part of the TM's domain as soon
+as a TM-tracked pointer points into it (i.e. the block is **reachable** from a
+`TM`-annotated global).  Once the last TM-tracked pointer to the block is
+overwritten, the block is no longer in the TM's domain.
+
+### 8.2 Allocation Inside a Transaction
+
+```
+let p = malloc(n)   // p is fresh, not reachable from any TM global
+*p = 42             // plain store — not a TM write (p was allocated inside TX)
+q = tm_read_ptr(...) // some TM pointer
+                    // p becomes TM-reachable only when assigned into q's data structure
+```
+
+**Lemma 8.1 (Allocation freshness)**: A pointer returned by `malloc` inside a
+transaction does not alias any address currently in the TM's domain.
+
+*Proof*: `malloc` returns a block from the process heap.  By definition, the
+block is not part of any existing data structure (it is uninitialized).  The TM
+plugin's static pointer-tracking analysis cannot predict `p` before the
+allocation; writes to `*p` through the fresh pointer are **not** instrumented
+as TM writes.  After the block is linked into a TM-tracked data structure (e.g.
+assigned to a tree node's child pointer), subsequent accesses through the
+structure ARE TM instrumented (they are reachable from the TM global).  The
+boundary is the link operation.  ∎
+
+**Corollary 8.1 (Leak on abort)**: If a transaction links a freshly-allocated
+block into a TM-tracked structure and then aborts, the block is leaked.  The
+undo log restores the link target to its pre-transaction state (e.g. restores a
+parent's child pointer to `nullptr`), so the block is no longer reachable.  Its
+memory is not freed because there is no rollback of `malloc`.  This is a memory
+leak but does not affect correctness (no dangling pointers, no double-free).
+
+### 8.3 Deallocation Inside a Transaction — The Deferred-Free Pattern
+
+```
+free(p)   // inside a TX
+```
+
+A direct call to `free(p)` inside a transaction is dangerous: if the
+transaction aborts, the undo log restores the pointer that *pointed to* `p`
+(e.g. restores `_M_start` to `p`), but `p` has already been freed —
+a **dangling pointer**.  To prevent this, all backends implement the
+**deferred-free** pattern:
+
+```
+free(p):
+    if g_in_tx:
+        push p onto thread-local deferred-free list
+    else:
+        ::free(p)
+
+commit():
+    for each p in deferred-free list: ::free(p)    // flush
+
+abort/begin():
+    clear deferred-free list (drop all entries)     // leak
+```
+
+**Lemma 8.2 (No dangling pointer on abort)**: If a transaction frees `p` and
+then aborts, the undo log restores all TM-tracked pointers to their pre-free
+values.  The deferred-free list is cleared (entries dropped), so `p` is never
+actually freed.  No dangling pointer exists.
+
+*Proof*: By construction.  On abort, the undo-log rolled-back values include
+the container's internal pointers (e.g. `_M_start`, `_M_finish`).  The
+deferred-free list entry for `p` is dropped by `tm_clear_deferred_frees`,
+leaving `p` allocated and pointed-to by the restored container pointers.  ∎
+
+### 8.4 The Intrusive-Free-List Corruption Problem
+
+All current backends use an **intrusive** singly-linked list for deferred
+frees, threading the `next` pointer through the first word of the *freed block
+itself*:
+
+```cpp
+// tm_free — intrusive implementation (ALL BACKENDS)
+void tm_free(void* ptr) {
+    if (g_in_tx) {
+        auto* node = static_cast<DeferredFreeNode*>(ptr);
+        node->next = g_deferred_frees;    // ← OVERWRITES first 8 bytes of *ptr
+        g_deferred_frees = node;
+    } else {
+        ::free(ptr);
+    }
+}
+```
+
+This design avoids a recursive allocation inside `tm_free` (the alternative
+would be to allocate a separate list node, which risks calling `malloc` → …
+→ `tm_free` → … ad infinitum).  However, it introduces a correctness gap:
+
+**Lemma 8.3 (Intrusive-free-list corrupts live data on abort)**:
+
+Let $\mathcal{H}$ be a transaction that, during its execution:
+1. Reads $n$ bytes from address $p$ (e.g. vector `_M_start` = $p$).
+2. Copies the data from $p$ to a newly allocated buffer $q$ (`memcpy`).
+3. Calls $\text{free}(p)$, which the deferred-free implementation handles by
+   writing `node->next = g_deferred_frees` to the *first 8 bytes of $p$*.
+4. TM-writes the container's pointer to $q$ (`_M_start = q`).
+5. $\mathcal{H}$ aborts (version conflict).
+
+After abort:
+- TM undo log restores `_M_start` to $p$.
+- `tm_clear_deferred_frees` drops the deferred-free entry for $p$ — $p$ is
+  "resurrected" (still allocated, now pointed-to by `_M_start`).
+- **The first 8 bytes of $p$ have been overwritten** by the `next` pointer
+  from step 3.  The data at $p$ is corrupted.
+
+On retry, the container reads from $p$ and copies corrupted data into
+newly-committed state.  ∎
+
+**This is a memory consistency violation**: the TM rollback restores the
+container *pointers* but does not restore the container *data* that was
+corrupted by the intrusive free-list write.  The effect is equivalent to a
+dirty-read or torn-write: the first 8 bytes of the "resurrected" buffer contain
+a value that no committed transaction ever wrote there.
+
+### 8.5 Fix: Non-Intrusive Deferred Free
+
+Replace the intrusive linked list with a separately-allocated list node:
+
+```cpp
+struct FreeNode {
+    FreeNode* next;
+    void* ptr;
+};
+
+thread_local FreeNode* g_deferred_frees = nullptr;
+
+void tm_free(void* ptr) {
+    if (g_in_tx) {
+        // Allocate a separate node (plain malloc, not tm_malloc:
+        // this code runs in the runtime, not in instrumented code).
+        auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));
+        node->ptr = ptr;
+        node->next = g_deferred_frees;
+        g_deferred_frees = node;
+    } else {
+        ::free(ptr);
+    }
+}
+```
+
+**Lemma 8.4 (No corruption with non-intrusive nodes)**: Using a
+separately-allocated `FreeNode` for the deferred-free list eliminates the
+corruption described in Lemma 8.3.
+
+*Proof*: The write `node->next = g_deferred_frees` targets the
+newly-allocated `FreeNode`, not the freed block at $p$.  The content of $p$
+is never modified by the deferred-free machinery.  On abort, when $p$ is
+resurrected by the undo log, its data is intact as of the last TM write or
+plain store before `tm_free` was called.  ∎
+
+### 8.6 Deferred-Free Memory Overhead
+
+Each `free` inside a transaction allocates one `FreeNode` (16 bytes on 64-bit:
+next + ptr).  On commit, `tm_flush_deferred_frees` iterates the list, calls
+`::free` for each `FreeNode` and each user pointer.  On abort,
+`tm_clear_deferred_frees` must also free the `FreeNode` chain (not just drop
+it), to avoid leaking the `FreeNode` memory itself.
+
+```cpp
+void tm_clear_deferred_frees() {
+    auto* node = g_deferred_frees;
+    while (node) {
+        auto* next = node->next;
+        ::free(node);        // free the FreeNode
+        node = next;
+    }
+    g_deferred_frees = nullptr;
+}
+```
+
+The user's pointer $p$ is deliberately NOT freed (it is live after rollback).
+Only the bookkeeping `FreeNode` is reclaimed.
+
+### 8.7 Summary
+
+| Property | Intrusive list (current) | Non-intrusive list (proposed) |
+|----------|------------------------|------------------------------|
+| Data corruption on abort | Yes — first 8 bytes overwritten | No |
+| Extra allocation per `free` | 0 | 1 × `malloc(sizeof(FreeNode))` |
+| `FreeNode` leak on abort | N/A (no node) | Freed in `tm_clear_deferred_frees` |
+| Infinite-recursion safe | Yes (no allocation) | Yes (malloc in runtime bypasses tm_malloc) |

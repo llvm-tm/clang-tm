@@ -16,7 +16,7 @@
 #include "../tm_alloc_overrides.hpp"
 
 thread_local bool g_in_tx = false;
-thread_local DeferredFreeNode* g_deferred_frees = nullptr;
+thread_local FreeNode* g_deferred_frees = nullptr;
 
 extern "C" {
 
@@ -202,11 +202,12 @@ void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
 void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
 void  tm_free(void* ptr) {
     if (g_in_tx) {
-        auto* node = static_cast<DeferredFreeNode*>(ptr);
+        auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));
+        node->ptr = ptr;
         node->next = g_deferred_frees;
         g_deferred_frees = node;
     } else {
-        free(ptr);
+        ::free(ptr);
     }
 }
 

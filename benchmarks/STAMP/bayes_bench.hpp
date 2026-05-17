@@ -131,23 +131,28 @@ static bool has_path(BayesData* data, int from, int to) {
 }
 
 TX static Task pop_best_task(BayesData* data) {
-    if (data->task_list.empty()) return {-1, -1, -1, -1e100};
+    tm_serialize_lock();
+    if (data->task_list.empty()) { tm_serialize_unlock(); return {-1, -1, -1, -1e100}; }
     std::pop_heap(data->task_list.begin(), data->task_list.end());
     Task t = data->task_list.back();
     data->task_list.pop_back();
+    tm_serialize_unlock();
     return t;
 }
 
 TX static void insert_task(BayesData* data, const Task& t) {
+    tm_serialize_lock();
     data->task_list.push_back(t);
     std::push_heap(data->task_list.begin(), data->task_list.end());
+    tm_serialize_unlock();
 }
 
 TX static bool apply_insert(BayesData* data, int from, int to) {
-    if (data->parents[to].find(from) != data->parents[to].end()) return false;
-    if (has_path(data, to, from)) return false;
+    tm_serialize_lock();
+    if (data->parents[to].find(from) != data->parents[to].end()) { tm_serialize_unlock(); return false; }
+    if (has_path(data, to, from)) { tm_serialize_unlock(); return false; }
     if (data->global_max_edges > 0 && (int)data->parents[to].size() >= data->global_max_edges)
-        return false;
+        { tm_serialize_unlock(); return false; }
 
     data->parents[to].insert(from);
     data->children[from].insert(to);
@@ -157,11 +162,13 @@ TX static bool apply_insert(BayesData* data, int from, int to) {
     double new_ll = compute_density_ll(data, to, par);
     data->base_log_likelihood += (new_ll - data->local_ll[to]);
     data->local_ll[to] = new_ll;
+    tm_serialize_unlock();
 
     return true;
 }
 
 TX static Task find_best_insert(BayesData* data, int to) {
+    tm_serialize_lock();
     Task best = {-1, -1, -1, -1e100};
     double base_ll = data->local_ll[to];
 
@@ -182,6 +189,7 @@ TX static Task find_best_insert(BayesData* data, int to) {
         if (score > best.score)
             best = {0, from, to, score};
     }
+    tm_serialize_unlock();
     return best;
 }
 

@@ -18,6 +18,7 @@
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallSet.h>
 #include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Transforms/Utils/Cloning.h>
@@ -163,6 +164,26 @@ static bool isCallOnTMObject(CallBase *Call, Module &M)
 }
 
 #ifndef DISABLE_TM_READ_WRITE
+// Per-function map of which pointer arguments trace to TM globals.
+// Used by isTMTracedPtr to decide whether an Argument-based pointer
+// should be instrumented in a cloned function.
+static DenseMap<const Function *, SmallSet<unsigned, 4>> TMTracedArgs;
+
+// Check if a pointer's base argument is TM-traced.
+// In cloned functions, an Argument base that is NOT TM-traced
+// indicates a local/stack pointer (e.g. `this` of a local container)
+// that should not be instrumented.
+static bool isTMTracedPtr(const Value *Ptr)
+{
+    const Value *Base = getBaseObject(const_cast<Value *>(Ptr));
+    if (auto *Arg = dyn_cast<Argument>(const_cast<Value *>(Base))) {
+        auto it = TMTracedArgs.find(Arg->getParent());
+        if (it == TMTracedArgs.end() || !it->second.count(Arg->getArgNo()))
+            return false;
+    }
+    return true;
+}
+
 static void instrumentLoadsStoresInFunction(Function *F, Module *M,
                                              const TMRuntimeHooks &H)
 {
@@ -175,6 +196,7 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
             if (auto *Load = dyn_cast<LoadInst>(&I)) {
                 Value *Ptr = Load->getPointerOperand();
                 if (!isSharedPointer(Ptr, LocalVars, *F, *M)) continue;
+                if (!isTMTracedPtr(Ptr)) continue;
                 IRBuilder<> Builder(Load);
                 if (auto *Call = emitTMRead(Builder, Ptr, Load->getType(), H)) {
                     Load->replaceAllUsesWith(Call);
@@ -183,9 +205,10 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
             } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
                 Value *Ptr = Store->getPointerOperand();
                 if (!isSharedPointer(Ptr, LocalVars, *F, *M)) continue;
+                if (!isTMTracedPtr(Ptr)) continue;
                 IRBuilder<> Builder(Store);
-                emitTMWrite(Builder, Ptr, Store->getValueOperand(), H);
-                ToErase.push_back(Store);
+                if (emitTMWrite(Builder, Ptr, Store->getValueOperand(), H))
+                    ToErase.push_back(Store);
             }
         }
     }
@@ -238,267 +261,67 @@ getClonedMethodsMap()
     return Map;
 }
 
-// Check if a function has any stores to TM-annotated globals.
-// Read-only functions don't need cloning (no buffered writes to undo).
-//
-// NOTE: shallow — only checks direct StoreInsts in F.  If F calls a
-// callee that writes TM data but F itself only passes the pointer through,
-// this returns false.  That is intentional for Step 1 seeding (we only
-// want functions that *actually* write), but the transitive case is
-// handled by Step 2 propagation + Step 3 filtering (see
-// computeClonableFunction's fragile-corner #1).
-static bool hasDirectTMWrites(Function &F, Module &M)
+// Determine if an argument at a call site traces to a TM global.
+static bool callArgTracesToTMGlobal(CallBase *Call, unsigned ArgIdx, Module &M)
 {
-    for (auto &BB : F)
-        for (auto &I : BB)
-            if (auto *Store = dyn_cast<StoreInst>(&I))
-                if (tracesToTMGlobal(Store->getPointerOperand(), M))
-                    return true;
-    return false;
+    Value *Arg = Call->getArgOperand(ArgIdx)->stripPointerCasts();
+    Type *ArgTy = Arg->getType();
+    if (!ArgTy->isPointerTy()) return false;
+    return tracesFromTMGlobal(Arg, M);
 }
 
-// Check if a function has any loads/stores that trace directly to a TM global.
-//
-// NOTE: shallow — only checks direct LoadInst/StoreInst in F's own body.
-// If F passes the pointer to a callee that does the actual load/store,
-// this returns false.  Used by Step 3 of computeClonableFunctions to
-// filter out pure pointer-computation functions, but see fragile-corner #1
-// for the case where a pointer-through function should stay clonable.
-static bool hasDirectTMGlobal(Function &F, Module &M)
+// Build TMTracedArgs: for each call site in TxReachableFuncs, check
+// if any pointer argument traces to a TM global.  Record traced args.
+static void computeTMTracedArgs(Module &M,
+                                SmallPtrSetImpl<Function *> &TxReachableFuncs)
 {
-    for (auto &BB : F)
-        for (auto &I : BB) {
-            if (auto *Load = dyn_cast<LoadInst>(&I))
-                if (tracesToTMGlobal(Load->getPointerOperand(), M))
-                    return true;
-            if (auto *Store = dyn_cast<StoreInst>(&I))
-                if (tracesToTMGlobal(Store->getPointerOperand(), M))
-                    return true;
+    TMTracedArgs.clear();
+    for (auto *Caller : TxReachableFuncs) {
+        if (Caller->isDeclaration()) continue;
+        for (auto &BB : *Caller) {
+            for (auto &I : BB) {
+                auto *Call = dyn_cast<CallBase>(&I);
+                if (!Call) continue;
+                Function *Callee = Call->getCalledFunction();
+                if (!Callee || Callee->isDeclaration()) continue;
+                for (unsigned i = 0; i < Call->arg_size(); i++)
+                    if (callArgTracesToTMGlobal(Call, i, M))
+                        TMTracedArgs[Callee].insert(i);
+            }
         }
-    return false;
+    }
 }
 
-// Map from a Function* to the set of argument indices that are known to be
-// TM-traceable.  Propagated through the call graph: if F passes its arg i
-// (which is TM-traceable) to G at position j, then G's arg j is also
-// TM-traceable.  This handles deep chains like:
-//   TX → map::find(this=&g_apById) → tree::find(this) → __tree_left_rotate(...)
-// where internal tree functions take `this` (an Argument) that originates
-// from a TM global at the TX call site.
-using TMTraceableArgsMap = DenseMap<Function *, SmallSet<unsigned, 4>>;
-
-// Build the set of functions that should be cloned by propagating
-// TM-traceability through the call graph from TX functions.
-//
-// == Algorithm ==
-//
-// Step 1 (seed): Functions with direct TM WRITES are clonable. Read-only
-//   functions are not seeded — they don't buffer writes, so there's nothing
-//   to undo on abort.
-//
-// Step 2 (propagation): A function F is clonable if any caller passes an
-//   argument that traces to a TM global or a TM-traceable argument of the
-//   caller. This follows the chain: TX → map::find(this=&g_x) →
-//   __tree::find(this) → ...
-//
-// Step 3 (filter): Pure pointer-computation functions (vector::begin,
-//   __wrap_iter ctors, etc.) that were propagated through TM-traceable
-//   arguments but never actually load/store TM data are removed.
-//
-// == Fragile / shallow corners ==
-//
-// 1. Shallow Step-3 filter (hasDirectTMGlobal).
-//    Only checks loads/stores *in the function itself*, not transitively
-//    through callees.  This can miss a function that passes a TM pointer
-//    through to a callee that actually writes TM data:
-//
-//      TX → helper(ptr) {
-//                internal_write(ptr);   // WRITES TM data via ptr
-//            }
-//
-//    Step 2 propagates "clonable" to helper because ptr is TM-traceable.
-//    But helper has no direct loads/stores → Step 3 removes it.
-//    Now the call to internal_write from inside TX calls the *original*
-//    internal_write instead of internal_write_tm_clone.
-//    The clone exists but is never used.
-//
-//    To fix this: Step 3 should check whether F transitively calls
-//    any function that has direct TM loads/stores (a transitive
-//    closure rather than a direct scan).
-//
-// 2. Depth limit in isArgTraceable (10).
-//    If the GEP/Load/Call chain exceeds 10 hops, traceability fails and
-//    the function is not cloned.  This can trigger on deeply nested
-//    pointer-to-pointer chains:
-//
-//      ptr = load(&g_x)           // depth 1
-//      ptr2 = load(ptr + offset)  // depth 2
-//      ptr3 = load(ptr2)          // depth 3 ... up to 10
-//      callee(ptr3)               // propagation stops here
-//
-// 3. Indirect calls are invisible.
-//    getCalledFunction() returns null for function pointers and virtual
-//    methods.  Any TM-traceable argument that only reaches callees through
-//    an indirect call site is silently dropped:
-//
-//      struct Base { virtual void visit(TM_data*); };
-//      TX → ptr->visit(&g_x);     // indirect call, no propagation
-//      Base::visit is never cloned.
-//
-// 4. Argument-only propagation.
-//    If a function loads a TM global directly (not via a parameter) and
-//    only reads it, it's never seeded (no writes) and never propagated
-//    (the TM global is not an argument).  This is usually fine (no
-//    writes = nothing to undo), but the function's reads are then not
-//    redirected to a clone.  If that function is also called from
-//    non-TX code this doesn't matter; if called from TX code the read
-//    still uses the original (non-TM-instrumented?) path.   Actually
-//    all TM loads/stores inside TX functions are replaced by the
-//    main instrumentation pass regardless of cloning, so this is
-//    only a concern for the clone/redirect mechanism itself.
-//
-// 5. hasDirectTMWrites seed seeder is write-only.
-//    A function that only reads TM data (no stores) is never seeded.
-//    If it is called with a TM-traceable argument from a TX function,
-//    Step 2 propagates it.  If it reaches TM data via a global load
-//    instead of a parameter it stays uncloned.  This is benign for
-//    correctness (no writes to undo) but means its reads go through
-//    the original function.
 static SmallPtrSet<Function *, 32>
 computeClonableFunctions(Module &M,
                          SmallPtrSetImpl<Function *> &TxReachableFuncs)
 {
-    // Step 1: seed with functions that have direct TM-global WRITES.
-    // Read-only functions don't need cloning (no buffered writes to undo on abort).
     SmallPtrSet<Function *, 32> Clonable;
-    TMTraceableArgsMap TraceableArgs;
     for (Function *F : TxReachableFuncs) {
         if (F->isDeclaration()) continue;
         if (F->getName().starts_with("tm_")) continue;
         if (hasAnnotation(*F, "transaction")) continue;
-        if (hasDirectTMWrites(*F, M)) {
+        // Always clonable if no pointer args (value-type helpers like std::get<N>)
+        bool hasPtrArg = false;
+        for (auto &Arg : F->args())
+            if (Arg.getType()->isPointerTy()) { hasPtrArg = true; break; }
+        if (!hasPtrArg) {
             Clonable.insert(F);
-            // All arguments of a directly-writing function are potentially TM-traceable
-            SmallSet<unsigned, 4> Args;
-            for (unsigned i = 0; i < F->arg_size(); i++)
-                Args.insert(i);
-            TraceableArgs[F] = Args;
+            continue;
         }
+        // Clone only if at least one pointer arg is TM-traced at some call site
+        auto it = TMTracedArgs.find(F);
+        if (it != TMTracedArgs.end() && !it->second.empty())
+            Clonable.insert(F);
     }
-
-    // Step 2: fixed-point propagation through the call graph.
-    // A function F is clonable if any caller C passes an argument to F
-    // where that argument either:
-    //   (a) traces directly to a TM global (e.g. &g_apById), OR
-    //   (b) is a TM-traceable argument of C (propagated from a previous iteration)
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto &CallerF : M) {
-            if (CallerF.isDeclaration()) continue;
-            if (!TxReachableFuncs.count(&CallerF)) continue;
-            for (auto &BB : CallerF) {
-                for (auto &I : BB) {
-                    auto *Call = dyn_cast<CallBase>(&I);
-                    if (!Call) continue;
-                    Function *Callee = Call->getCalledFunction();
-                    if (!Callee || Callee->isDeclaration()) continue;
-                    if (Callee->getName().starts_with("tm_")) continue;
-                    if (hasAnnotation(*Callee, "transaction")) continue;
-                    if (Clonable.count(Callee)) continue;
-
-                    // Check each argument at this call site.
-                    // Follow through GEPs, Loads, Calls, BitCasts to determine
-                    // if the argument traces to a TM-traceable value.
-                    // Recursive check: does Val trace to a TM-traceable value in CallerF?
-                    // Uses TraceableArgs for argument propagation through the call graph.
-                    std::function<bool(Value *, int)> isArgTraceable;
-                    isArgTraceable = [&](Value *Val, int Depth) -> bool {
-                        if (!Val || Depth > 10) return false;
-                        Val = Val->stripPointerCasts();
-
-                        if (tracesToTMGlobal(Val, M))
-                            return true;
-
-                        if (auto *ArgAsArg = dyn_cast<Argument>(Val)) {
-                            // Check if this argument was propagated from a prior
-                            // call in the call graph.
-                            auto it = TraceableArgs.find(&CallerF);
-                            if (it != TraceableArgs.end() && it->second.count(ArgAsArg->getArgNo()))
-                                return true;
-                            // The CallerF is a TX function.
-                            // Treat all its pointer-type arguments as TM-traceable:
-                            // the programmer marked this function as "transaction",
-                            // so any pointer argument may point to shared TM data.
-                            if (hasAnnotation(CallerF, "transaction"))
-                                return true;
-                            return false;
-                        }
-
-                        if (auto *GEP = dyn_cast<GEPOperator>(Val))
-                            return isArgTraceable(GEP->getPointerOperand(), Depth + 1);
-
-                        if (auto *LI = dyn_cast<LoadInst>(Val))
-                            return isArgTraceable(LI->getPointerOperand(), Depth + 1);
-
-                        // Load from return of a function called on TM-traceable args
-                        if (auto *CB = dyn_cast<CallBase>(Val)) {
-                            for (unsigned j = 0; j < CB->arg_size(); j++)
-                                if (isArgTraceable(CB->getArgOperand(j), Depth + 1))
-                                    return true;
-                            return false;
-                        }
-
-                        if (auto *Phi = dyn_cast<PHINode>(Val)) {
-                            for (Value *Inc : Phi->incoming_values())
-                                if (isArgTraceable(Inc, Depth + 1)) return true;
-                            return false;
-                        }
-
-                        return false;
-                    };
-
-                    bool anyTraceable = false;
-                    SmallSet<unsigned, 4> newArgs;
-                    for (unsigned i = 0; i < Call->arg_size(); i++) {
-                        if (isArgTraceable(Call->getArgOperand(i), 0)) {
-                            anyTraceable = true;
-                            newArgs.insert(i);
-                        }
-                    }
-                    if (anyTraceable) {
-                        Clonable.insert(Callee);
-                        TraceableArgs[Callee] = newArgs;
-                        changed = true;
-                        TM_DEBUG("propagate: %s clonable via %s (args: %zu traceable)",
-                                Callee->getName().str().c_str(),
-                                CallerF.getName().str().c_str(),
-                                newArgs.size());
-                    }
-                }
-            }
-        }
-    }
-
-    TM_DEBUG("computeClonableFunctions: %d functions clonable before filtering", (int)Clonable.size());
-
-    // NOTE: Step 3 (filter by direct TM access) was removed because it is
-    // too aggressive.  Functions like std::vector::_M_realloc_insert access
-    // TM data through function arguments (this pointer) that trace to TM
-    // globals, but the hasDirectTMGlobal check only recognizes direct
-    // GlobalVariable accesses.  Removing this filter is safe: the worst
-    // case is a few extra cloned functions (minor overhead), but the
-    // alternative is that STL container internals run uninstrumented,
-    // causing undetected write-write conflicts and double-free crashes
-    // (see the TSXSGL/TinySTM STAMP/bayes bug).
-
-    TM_DEBUG("computeClonableFunctions: %d functions clonable after propagation", (int)Clonable.size());
+    TM_DEBUG("computeClonableFunctions: %d functions clonable (TM-traced args)",
+             (int)Clonable.size());
     return Clonable;
 }
 
 // Redirect all direct function calls within F to their clones (if a clone exists).
 // Also detects unclonable callees for diagnostic purposes.
-static void redirectCallsToClones(Function &F,
+static void redirectCallsToClones(Function &F, Module &M,
                                   SmallPtrSetImpl<Function *> &TxReachableFuncs,
                                   SmallVectorImpl<std::pair<Function *, Function *>> &ClonedMap)
 {
@@ -515,6 +338,15 @@ static void redirectCallsToClones(Function &F,
             if (!Callee || Callee->isDeclaration()) continue;
             if (Callee->getName().starts_with("tm_")) continue;
             if (!TxReachableFuncs.count(Callee)) continue;
+
+            // Only redirect this call site if at least one pointer argument
+            // traces to a TM global (i.e. this is a TM-data access, not a
+            // local-container operation within the same transaction).
+            bool hasTMArg = false;
+            for (unsigned i = 0; i < Call->arg_size(); i++)
+                if (callArgTracesToTMGlobal(Call, i, M))
+                    { hasTMArg = true; break; }
+            if (!hasTMArg) continue;
 
             for (auto &pair : ClonedMap) {
                 if (pair.first == Callee) {
@@ -556,6 +388,7 @@ cloneTxReachableGraph(Module &M,
     collectTMGlobalsCached(M, TMG);
     auto &ClonedMap = getClonedMethodsMap();
 
+    computeTMTracedArgs(M, TxReachableFuncs);
     SmallPtrSet<Function *, 32> ToClone = computeClonableFunctions(M, TxReachableFuncs);
 
     // Pass 1: clone all functions first (so ClonedMap is complete)
@@ -576,7 +409,7 @@ cloneTxReachableGraph(Module &M,
     // Pass 2: redirect all cloned functions (ClonedMap is complete, so all
     // intra-clone calls can be redirected regardless of processing order).
     for (auto &pair : ClonedMap)
-        redirectCallsToClones(*pair.second, TxReachableFuncs, ClonedMap);
+        redirectCallsToClones(*pair.second, M, TxReachableFuncs, ClonedMap);
 
     return ClonedMap;
 }

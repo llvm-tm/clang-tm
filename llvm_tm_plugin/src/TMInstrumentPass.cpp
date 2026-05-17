@@ -29,7 +29,9 @@
 
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/ADT/StringSet.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
@@ -38,6 +40,8 @@
 #include <llvm/IR/Type.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Plugins/PassPlugin.h>
+#include <llvm/Support/CommandLine.h>
+#include <llvm/Support/raw_ostream.h>
 
 #include "tm_annotation_utils.hpp"
 #include "tm_call_graph.hpp"
@@ -50,8 +54,166 @@
 
 using namespace llvm;
 
+// Runtime flag: allow opaque function calls in transactions.
+// Usage: opt -load-pass-plugin=... -passes="tm-instrument" -tm-allow-opaque ...
+static cl::opt<bool> AllowOpaque("tm-allow-opaque",
+    cl::desc("Allow opaque (uninstrumentable) function calls inside transactions"),
+    cl::init(false));
+
+// Strict mode: reject ALL opaque calls, even known-safe ones.
+// Usage: opt -load-pass-plugin=... -passes="tm-instrument" -tm-strict-opaque ...
+static cl::opt<bool> StrictOpaque("tm-strict-opaque",
+    cl::desc("Reject even known-safe opaque function calls (strict mode)"),
+    cl::init(false));
+
 namespace
 {
+
+// ---------------------------------------------------------------------------
+// Opaque function detection
+//
+// Detect calls to functions that are not visible to TM instrumentation
+// (declarations without a body in the current module). Calls marked with
+// the "tm_allow_opaque" attribute are exempt.
+//
+// Known-safe functions are listed in KnownSafeOpaqueTable below.  When
+// --tm-strict-opaque is passed the table is ignored and every opaque call
+// is an error.
+//
+// The error can be suppressed globally with --allow-opaque in clang-tm.
+// ---------------------------------------------------------------------------
+
+struct OpaqueSafeEntry {
+    StringRef Name;
+    bool     IsPrefix;   // true = match by starts_with, false = exact match
+};
+
+static const OpaqueSafeEntry KnownSafeOpaqueTable[] = {
+    // --- TM runtime hooks ---
+    {"tm_",                      true},
+
+    // --- setjmp / longjmp ---
+    {"sigsetjmp",                false},
+    {"siglongjmp",               false},
+    {"longjmp",                  false},
+
+    // --- Memory allocation (C) ---
+    {"malloc",                   false},
+    {"free",                     false},
+    {"calloc",                   false},
+    {"realloc",                  false},
+    {"aligned_alloc",            false},
+
+    // --- Memory allocation (C++: operator new / delete) ---
+    {"_Znw",                     true},   // operator new(unsigned long)
+    {"_Zna",                     true},   // operator new[](unsigned long)
+    {"_Zdl",                     true},   // operator delete(void*)
+    {"_Zda",                     true},   // operator delete[](void*)
+
+    // --- LLVM intrinsics ---
+    {"llvm.",                    true},
+
+    // --- C++ exception / runtime helpers ---
+    {"__cxa_",                   true},
+    {"_ZSt",                     true},   // std:: helpers
+    {"_ZNSt",                    true},   // nested std:: (std::logic_error, std::__1::, etc.)
+    {"_Unwind",                  true},   // libunwind
+
+    // --- pthread / thread primitives ---
+    {"pthread_",                 true},
+
+    // --- C I/O ---
+    {"printf",                   false},
+    {"fprintf",                  false},
+    {"fflush",                   false},
+    {"puts",                     false},
+    {"putchar",                  false},
+    {"putc",                     false},
+    {"snprintf",                 false},
+    {"sprintf",                  false},
+
+    // --- C stdlib ---
+    {"exit",                     false},
+    {"abort",                    false},
+
+    // --- C string (pure, no TM data access) ---
+    {"strlen",                   false},
+    {"strcmp",                   false},
+    {"strncmp",                  false},
+    {"memcmp",                   false},
+    {"memcpy",                   false},
+    {"memset",                   false},
+    {"memmove",                  false},
+};
+
+static bool isKnownSafeOpaque(const StringRef &Name)
+{
+    if (StrictOpaque) return false;
+
+    for (const auto &Entry : KnownSafeOpaqueTable)
+        if (Entry.IsPrefix ? Name.starts_with(Entry.Name) : Name == Entry.Name)
+            return true;
+    return false;
+}
+
+static bool checkOpaqueFunctions(
+    Module &M, SmallPtrSetImpl<Function *> &TxReachableFuncs)
+{
+    bool foundOpaque = false;
+
+    for (Function *F : TxReachableFuncs) {
+        if (F->isDeclaration()) continue;
+        if (F->getName().starts_with("tm_")) continue;
+
+        for (auto &BB : *F) {
+            for (auto &I : BB) {
+                auto *Call = dyn_cast<CallBase>(&I);
+                if (!Call) continue;
+
+                // Check if the call or callee has the exempt attribute
+                if (Call->hasFnAttr("tm_allow_opaque")) continue;
+
+                // Inline assembly is not a function call — skip
+                if (Call->isInlineAsm()) continue;
+
+                Function *Callee = Call->getCalledFunction();
+                if (Callee && hasAnnotation(*Callee, "tm_allow_opaque")) continue;
+
+                if (!Callee) {
+                    // Indirect call (virtual method, function pointer)
+                    foundOpaque = true;
+                    errs() << "error: indirect call in TM context";
+                    if (auto *DIL = I.getDebugLoc().get())
+                        if (auto *Scope = dyn_cast_or_null<DIScope>(DIL->getScope()))
+                            errs() << " at " << Scope->getFilename() << ":"
+                                   << DIL->getLine() << ":" << DIL->getColumn();
+                    errs() << "\n  Calls via function pointer or virtual method "
+                              "cannot be instrumented for TM.\n";
+                    continue;
+                }
+
+                if (!Callee->isDeclaration()) continue;
+                if (isKnownSafeOpaque(Callee->getName())) continue;
+
+                foundOpaque = true;
+                errs() << "error: call to '" << Callee->getName()
+                       << "' in TM context";
+                if (auto *DIL = I.getDebugLoc().get())
+                    if (auto *Scope = dyn_cast_or_null<DIScope>(DIL->getScope()))
+                        errs() << " at " << Scope->getFilename() << ":"
+                               << DIL->getLine() << ":" << DIL->getColumn();
+                errs() << "\n  This function is not visible to TM "
+                          "instrumentation (no body in this translation unit).\n"
+                       << "  Use __attribute__((annotate(\"tm_allow_opaque\"))) "
+                          "on the call to suppress, or\n"
+                        << "  pass -tm-allow-opaque to opt to disable this "
+                           "check globally.\n";
+            }
+        }
+    }
+
+    return !foundOpaque;
+}
 
 class TMGlobalInitPass : public PassInfoMixin<TMGlobalInitPass>
 {
@@ -107,9 +269,18 @@ public:
         for (auto &F : M) {
             if (F.isDeclaration()) continue;
             if (!hasAnnotation(F, "transaction")) continue;
-            tm_method_instrumentation::redirectCallsToClones(F, TxReachableFuncs, ClonedMap);
+            tm_method_instrumentation::redirectCallsToClones(F, *F.getParent(), TxReachableFuncs, ClonedMap);
         }
         modified = true;
+    }
+
+    // ---- Check for opaque (uninstrumentable) function calls ----
+    if (!AllowOpaque && !TxReachableFuncs.empty()) {
+        if (!checkOpaqueFunctions(M, TxReachableFuncs)) {
+            errs() << "Aborting due to opaque function call(s) in TM context.\n"
+                   << "Use -tm-allow-opaque to disable this check.\n";
+            report_fatal_error("TM instrumentation: opaque function calls detected");
+        }
     }
 
     // ---- Explicit thread entry point detection ----
@@ -363,8 +534,8 @@ public:
           SmallPtrSet<const Value *, 32> LocalVars;
           collectLocalVariables(F, LocalVars);
           if (isSharedPointer(Store->getPointerOperand(), LocalVars, F, *M)) {
-            emitTMWrite(B, Store->getPointerOperand(), Store->getValueOperand(), H);
-            ToErase.push_back(Store);
+            if (emitTMWrite(B, Store->getPointerOperand(), Store->getValueOperand(), H))
+              ToErase.push_back(Store);
           }
         }
 #endif

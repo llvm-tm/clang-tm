@@ -91,25 +91,29 @@ static CallInst *emitTMRead(IRBuilder<> &B, Value *Ptr, Type *Ty,
         Value *V = B.CreateCall(H.read_ptr, {PC});
         return cast<CallInst>(B.CreateBitCast(V, Ty));
     }
+    // TODO: FixedVectorType support (disabled — needs GEP with correct element type)
     return nullptr;
 }
 
-static void emitTMWrite(IRBuilder<> &B, Value *Ptr, Value *Val,
+static bool emitTMWrite(IRBuilder<> &B, Value *Ptr, Value *Val,
                         const TMRuntimeHooks &H) {
     auto *i8PtrTy = PointerType::getUnqual(B.getContext());
     Value *PC = B.CreateBitCast(Ptr, i8PtrTy);
     Type *Ty = Val->getType();
-    if (Ty->isIntegerTy(8))  { B.CreateCall(H.write_i1, {PC, Val}); return; }
-    if (Ty->isIntegerTy(16)) { B.CreateCall(H.write_i2, {PC, Val}); return; }
-    if (Ty->isIntegerTy(32)) { B.CreateCall(H.write_i4, {PC, Val}); return; }
-    if (Ty->isIntegerTy(64)) { B.CreateCall(H.write_i8, {PC, Val}); return; }
-    if (Ty->isFloatTy())     { B.CreateCall(H.write_f4, {PC, Val}); return; }
-    if (Ty->isDoubleTy())    { B.CreateCall(H.write_f8, {PC, Val}); return; }
+    if (Ty->isIntegerTy(8))  { B.CreateCall(H.write_i1, {PC, Val}); return true; }
+    if (Ty->isIntegerTy(16)) { B.CreateCall(H.write_i2, {PC, Val}); return true; }
+    if (Ty->isIntegerTy(32)) { B.CreateCall(H.write_i4, {PC, Val}); return true; }
+    if (Ty->isIntegerTy(64)) { B.CreateCall(H.write_i8, {PC, Val}); return true; }
+    if (Ty->isFloatTy())     { B.CreateCall(H.write_f4, {PC, Val}); return true; }
+    if (Ty->isDoubleTy())    { B.CreateCall(H.write_f8, {PC, Val}); return true; }
     if (Ty->isPointerTy()) {
         auto *i8PtrTy2 = PointerType::getUnqual(B.getContext());
         Value *VC = B.CreateBitCast(Val, i8PtrTy2);
         B.CreateCall(H.write_ptr, {PC, VC});
+        return true;
     }
+    // TODO: FixedVectorType support (disabled)
+    return false;
 }
 
 #endif // TM_RUNTIME_HOOKS_HPP

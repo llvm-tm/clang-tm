@@ -20,6 +20,13 @@
 #   clang-tm --runtime SingleGlobalLock_runtime.cpp -o myapp app.cpp
 #
 # Flags:
+#   --allow-opaque, -a
+#       Suppress compilation error for opaque (uninstrumentable) function
+#       calls inside transactions.  Use when external library functions
+#       are known to be safe in TM context.
+#   --strict-opaque, -s
+#       Reject even known-safe opaque functions (e.g. printf, malloc, std::*).
+#       Useful for auditing / strict validation.
 #   --runtime FILE, -r FILE
 #       Path to the TM runtime.  Accepts:
 #         - .cpp/.cc/.cxx source  → compiled to bitcode, merged
@@ -100,6 +107,8 @@ RUNTIME="runtime.cpp"
 PLUGIN=""
 KEEP_TEMPS=0
 VERBOSE=0
+ALLOW_OPAQUE=0
+STRICT_OPAQUE=0
 OUTPUT=""
 SOURCES=()
 CXXFLAGS=()
@@ -120,6 +129,10 @@ while [ $# -gt 0 ]; do
             PLUGIN="${1#*=}"; shift ;;
         --debug|-g)
             DEBUG_MODE=1; shift ;;
+        -a|--allow-opaque)
+            ALLOW_OPAQUE=1; shift ;;
+        --strict-opaque|-s)
+            STRICT_OPAQUE=1; shift ;;
         -k|--keep-temps)
             KEEP_TEMPS=1; shift ;;
         -v|--verbose)
@@ -209,6 +222,9 @@ if [ "$DEBUG_MODE" -eq 0 ]; then
     COMPILE_FLAGS+=("-DNDEBUG")
 fi
 
+# ALLOW_OPAQUE is now handled as -tm-allow-opaque passed to opt
+# (see Step 2 instrumentation below)
+
 if [ -d "$BACKENDS_DIR" ]; then
     COMPILE_FLAGS+=("-I$BACKENDS_DIR")
 fi
@@ -283,7 +299,10 @@ for src in "${SOURCES[@]}"; do
     # Step 2: Instrument
     instr_bc="$OUT_DIR/$base_noext.instr.bc"
     log "[2/4] $bc → instrumented IR"
-    $OPT -load-pass-plugin="$PLUGIN" -passes="tm-instrument" "$bc" -o "$instr_bc"
+    OPTS=()
+    [ "$ALLOW_OPAQUE" -eq 1 ] && OPTS+=("-tm-allow-opaque")
+    [ "$STRICT_OPAQUE" -eq 1 ] && OPTS+=("-tm-strict-opaque")
+    $OPT -load-pass-plugin="$PLUGIN" -passes="tm-instrument" "${OPTS[@]}" "$bc" -o "$instr_bc"
 
     LINK_BCS+=("$instr_bc")
 done

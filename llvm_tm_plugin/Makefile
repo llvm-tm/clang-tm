@@ -58,6 +58,8 @@ PLUGIN_SO_NAMES := $(addprefix $(BIN_DIR)/libTMInstrument_,$(addsuffix .so,$(PLU
 TEST_NAMES := types memtest nested threads persist retry test_stl_containers \
               test_stl_primitive annotation_detect local_containers_test \
               custom_class_test
+
+RACE_TEST_NAMES := task_queue_race parent_set_race counter_race
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))
 TEST_PROGS := $(addprefix $(BIN_DIR)/,$(TEST_NAMES))
 
@@ -104,7 +106,16 @@ $(BIN_DIR)/local_containers_test: $(OUT_DIR)/local_containers_test.opt.bc \
 
 ll: all $(TEST_LLS) $(OPT_LLS)
 
-test: all $(TEST_PROGS) $(BIN_DIR)/persist $(BIN_DIR)/persist_sgl $(BIN_DIR)/local_containers_test
+RACE_TEST_BINS := $(addprefix $(BIN_DIR)/,$(RACE_TEST_NAMES))
+
+$(BIN_DIR)/task_queue_race: $(OUT_DIR)/task_queue_race.opt.bc $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp | $(BIN_DIR)
+	$(CXX) $< $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp -I $(BACKENDS_DIR) -o $@ -pthread
+$(BIN_DIR)/parent_set_race: $(OUT_DIR)/parent_set_race.opt.bc $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp | $(BIN_DIR)
+	$(CXX) $< $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp -I $(BACKENDS_DIR) -o $@ -pthread
+$(BIN_DIR)/counter_race: $(OUT_DIR)/counter_race.opt.bc $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp | $(BIN_DIR)
+	$(CXX) $< $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp -I $(BACKENDS_DIR) -o $@ -pthread
+
+test: all $(TEST_PROGS) $(BIN_DIR)/persist $(BIN_DIR)/persist_sgl $(BIN_DIR)/local_containers_test $(RACE_TEST_BINS)
 
 test_noinst: $(TEST_SRCS) $(addprefix $(BIN_DIR)/,$(addsuffix _noinst,$(TEST_NAMES))) \
              $(addprefix $(BIN_DIR)/,persist_persistent)
