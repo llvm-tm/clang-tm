@@ -892,10 +892,117 @@ the IR size for long transactions, placing practical limits on transaction
 length.  The plugin uses the deprecated \texttt{CallSite} wrapper (removed
 in LLVM 14), making forward porting impossible without significant
 refactoring.
-\ZardoshtiEtAl's repository provides TinySTM, NOrec, and single-lock backends, with
-additional PTM variants.  Our plugin provides NOrec, TL2, TinySTM (three
-variants: WBCTL, WBETL, WT), SwissTM, SingleGlobalLock, and PersistentSGL,
-each with a shared runtime interface and per-backend unit tests.
+
+\subsection{Source-to-Source Instrumentation: Comparison and Limitations}
+
+\paragraph{Motivation.}
+As an alternative to the LLVM IR-level plugin, we developed a Python-based
+source-to-source instrumenter (\texttt{clang-tm.py}) that uses libclang to
+parse C++ source code and emit an instrumented C++ file.  The tool replaces
+the four-stage LLVM pipeline with a single Python invocation:
+\begin{verbatim}
+python3 clang-tm.py input.cpp -o output_dir
+\end{verbatim}
+Unlike the LLVM plugin, which modifies functions in-place at the IR level,
+the Python tool preserves the original source verbatim (via \texttt{\#include})
+and emits instrumented \texttt{\_tm\_clone} functions with
+\texttt{tx\_start}/\texttt{tx\_end} entry/exit wrapping and
+\texttt{tm\_read\_*}/\texttt{tm\_write\_*} access wrappers.
+
+\paragraph{Container handling.}
+Source-to-source tools face a fundamental challenge with C++ STL containers.
+At the source level, a call such as \texttt{data->queue.push\_back(x)} is an
+opaque function invocation --- the memory writes that occur \emph{inside}
+\texttt{push\_back} (to the vector's internal buffer, capacity fields, etc.)
+are invisible.  The LLVM plugin has no such blind spot because, after inlining
+and IR lowering, every store instruction inside \texttt{push\_back} is visible
+and individually instrumentable.
+
+To compensate, our Python tool performs \textbf{container type substitution}
+at struct-definition time: fields declared as \texttt{std::vector<T>} inside
+\texttt{struct TM X \{ ... \}} are rewritten to \texttt{tm\_stl::vector<T>},
+a thin wrapper that overrides mutating methods with TM-safe alternatives.
+This approach works for simple read-write patterns (push, pop, clear, insert)
+but has three limitations:
+
+\begin{enumerate}
+\item \textbf{Chained accesses}: \texttt{data->elements[i].field = value}
+  involves a vector indexing operation followed by a field store.  The source
+  instrumenter sees only the top-level expression and cannot decompose it
+  into the constituent pointer arithmetic and memory access --- these are
+  only visible after the compiler has lowered \texttt{operator[]} to
+  GEP + load/store.
+\item \textbf{Iterator invalidation}: the \texttt{tm\_stl} wrappers are
+  separate template instantiations that duplicate the original containers'
+  code.  Iterator-based patterns and STL algorithms (\texttt{std::find},
+  \texttt{std::sort}) that internally dereference iterators are not
+  instrumented inside the wrapper.
+\item \textbf{Nested containers}: \texttt{std::vector<std::set<int>>}
+  requires recursive substitution that is fragile to implement at the
+  source-text level.
+\end{enumerate}
+
+\paragraph{Empirical comparison.}
+Table~\ref{tab:source-vs-ir} compares the Python tool against the LLVM
+plugin across five test files from the plugin's test suite.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+Test & TM vars & Python & LLVM plugin \\
+\midrule
+\texttt{types.cpp} & 7 scalars & Compiles (warn) & Passes \\
+\texttt{nested.cpp} & 1 scalar & Compiles & Passes \\
+\texttt{threads.cpp} & 1 scalar & Compiles & Passes \\
+\texttt{retry.cpp} & 2 scalars & Compiles & Passes \\
+\texttt{memtest.cpp} & 3 arrays & Fails ($\dagger$) & Passes \\
+\bottomrule
+\end{tabular}
+\caption{Source-to-source vs.\ IR-level instrumentation.  ($\dagger$)
+\texttt{void*} indexing from \texttt{tm\_read\_ptr} wrapping; the
+LLVM plugin correctly lowers array-element accesses through GEP
+instructions.}
+\label{tab:source-vs-ir}
+\end{table}
+
+\paragraph{Why STL works at the IR level but not at the source level.}
+The LLVM plugin's advantage is architectural, not algorithmic.  After
+Clang generates LLVM IR from C++ source, every operation --- including
+those inside STL headers --- is lowered to a small set of IR instructions:
+load, store, getelementptr, call, and branch.  The plugin's
+\texttt{isSharedPointer} analysis traverses this IR backwards to determine
+if the accessed pointer ultimately reaches a TM-annotated global.  This
+trace is type-agnostic: it follows use-def chains through GEPs, loads,
+PHI nodes, and allocas without caring whether the original source code
+used \texttt{std::vector}, a plain array, or a hand-rolled linked list.
+
+At the source level, by contrast, \texttt{std::vector::operator[]} is a
+function call whose internals are not expanded until the compiler runs.
+A source-to-source tool cannot ``see through'' this call without either
+(i) replicating the compiler's name-mangling and template-instantiation
+logic, or (ii) maintaining separate wrapper implementations for every
+container type.  The \texttt{tm\_stl} approach pursues option~(ii) but
+cannot cover the full API surface of the STL.
+
+\paragraph{When source-to-source is sufficient.}
+Despite these limitations, the Python tool is useful for:
+\begin{itemize}
+\item \textbf{Prototyping}: generating readable instrumented C++ for
+  inspection and debugging, especially during early TM development.
+\item \textbf{Simple benchmarks}: benchmarks that access TM globals
+  through direct scalar assignment (e.g., bank transfers, counters)
+  are fully covered without container support.
+\item \textbf{Education}: the generated output is human-readable C++
+  in which every TM access is explicitly visible as a
+  \texttt{tm\_read\_*}/\texttt{tm\_write\_*} call.
+\end{itemize}
+For production use with complex data structures, opaque function calls,
+or performance-critical code, the LLVM IR plugin remains the correct
+choice.  The Python tool and the LLVM plugin share the same runtime
+interface (\texttt{tm\_read\_*}/\texttt{tm\_write\_*} signatures);
+output from either tool can be compiled against the same backend
+implementations.
 
 \subsection{Compiler Instrumentation as an Unmet Goal}
 
