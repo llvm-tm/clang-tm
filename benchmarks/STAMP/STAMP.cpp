@@ -29,15 +29,90 @@
 #include "vacation_bench.hpp"
 #include "yada_bench.hpp"
 
-std::atomic<bool> stop_workers{false};
+#include <cstring>
+
 std::atomic<uint64_t> total_ops{0};
 std::atomic<uint64_t> abort_count{0};
 
 BenchmarkType g_benchmark = BenchmarkType::BAYES;
 int g_num_threads = DEFAULT_NB_THREADS;
-int g_duration = DEFAULT_DURATION_MS;
 
-void run_benchmark(BenchmarkType bench, int threads, int duration_ms) {
+// Bayes params (defaults from STAMP spec)
+int g_bayes_v = 32;
+int g_bayes_r = 1024;
+int g_bayes_n = 2;
+int g_bayes_p = 20;
+int g_bayes_s = 0;
+int g_bayes_i = 2;
+int g_bayes_e = 2;
+
+// Genome params
+int g_genome_g = 16384;
+int g_genome_s = 64;
+int g_genome_n = 4096;
+
+// Intruder params
+int g_intruder_a = 10;
+int g_intruder_l = 16;
+int g_intruder_n = 1024;
+int g_intruder_s = 1;
+
+// KMeans params
+int g_kmeans_m = 40;
+int g_kmeans_n = 40;
+double g_kmeans_t = 0.00001;
+const char* g_kmeans_i = nullptr;
+
+// Labyrinth params
+int g_labyrinth_x = 32;
+int g_labyrinth_y = 32;
+int g_labyrinth_z = 3;
+int g_labyrinth_n = 64;
+
+// SSCA2 params
+int g_ssca2_s = 13;
+int g_ssca2_i = 10;
+double g_ssca2_u = 0.5;
+int g_ssca2_l = 3;
+int g_ssca2_p = 3;
+
+// Vacation params
+int g_vacation_n = 2;
+int g_vacation_q = 90;
+int g_vacation_r = 16384;
+int g_vacation_u = 98;
+int g_vacation_t = 4096;
+
+// Yada params
+int g_yada_angle = 20;
+const char* g_yada_i = nullptr;
+
+static void print_usage() {
+    std::cout << "Usage: stamp -b <benchmark> -t <threads> [benchmark-specific options]\n\n"
+              << "Benchmark-specific options:\n"
+              << "  bayes:    -v <vars> -r <records> -n <max_parents> -p <pct_parent>\n"
+              << "            -s <seed> -i <penalty> -e <max_edges>\n"
+              << "  genome:   -g <gene_len> -s <seg_len> -n <num_segments>\n"
+              << "  intruder: -a <pct_attack> -l <max_packets> -n <streams> -s <seed>\n"
+              << "  kmeans:   -m <max_clusters> -n <min_clusters> -t <threshold>\n"
+              << "            -i <input_file>\n"
+              << "  labyrinth: -x <dim_x> -y <dim_y> -z <dim_z> -n <num_paths>\n"
+              << "  ssca2:    -s <scale> -i <iterations> -u <uni_prob> -l <max_path> -p <max_edges>\n"
+              << "  vacation: -n <queries> -q <pct_query> -r <relations> -u <pct_user> -t <tasks>\n"
+              << "  yada:     -a <angle> -i <file_prefix>\n";
+}
+
+static bool parse_int(int argc, char* argv[], int& i, int& val) {
+    if (i + 1 < argc) { val = std::atoi(argv[++i]); return true; }
+    return false;
+}
+
+static bool parse_double(int argc, char* argv[], int& i, double& val) {
+    if (i + 1 < argc) { val = std::atof(argv[++i]); return true; }
+    return false;
+}
+
+void run_benchmark(BenchmarkType bench, int threads) {
     switch(bench) {
         case BenchmarkType::BAYES:
             bayes_generate_network();
@@ -65,9 +140,6 @@ void run_benchmark(BenchmarkType bench, int threads, int duration_ms) {
             break;
     }
 
-    int loops = duration_ms / 10;
-    if (loops < 10) loops = 10;
-
     Barrier barrier(threads);
     std::vector<ThreadData> td(threads);
     std::vector<std::thread> workers;
@@ -75,7 +147,7 @@ void run_benchmark(BenchmarkType bench, int threads, int duration_ms) {
     for (int i = 0; i < threads; i++) {
         td[i].barrier = &barrier;
         td[i].thread_id = i;
-        td[i].loops = loops;
+        td[i].loops = 0;
         td[i].benchmark = bench;
     }
 
@@ -102,9 +174,6 @@ void run_benchmark(BenchmarkType bench, int threads, int duration_ms) {
         }
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(duration_ms));
-    stop_workers = true;
-
     for (auto& w : workers) w.join();
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -116,31 +185,90 @@ void run_benchmark(BenchmarkType bench, int threads, int duration_ms) {
     std::cout << "=======\n";
     std::cout << "Elapsed:    " << ms << " ms\n";
     std::cout << "Total ops: " << ops << "\n";
-    std::cout << "Ops/sec:   " << (ops * 1000.0 / ms) << "\n";
     std::cout << "Aborts:    " << abort_count.load() << "\n";
 }
 
 MAIN int main(int argc, char* argv[]) {
     g_benchmark = BenchmarkType::BAYES;
     g_num_threads = DEFAULT_NB_THREADS;
-    g_duration = DEFAULT_DURATION_MS;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
-            g_num_threads = std::atoi(argv[++i]);
-        } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
-            g_duration = std::atoi(argv[++i]);
+        if (strcmp(argv[i], "-t") == 0) {
+            parse_int(argc, argv, i, g_num_threads);
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage(); return 0;
         } else if (strcmp(argv[i], "-b") == 0 && i + 1 < argc) {
-            char b = argv[++i][0];
-            switch(b) {
-                case 'b': case 'B': g_benchmark = BenchmarkType::BAYES; break;
-                case 'g': case 'G': g_benchmark = BenchmarkType::GENOME; break;
-                case 'i': case 'I': g_benchmark = BenchmarkType::INTRUDER; break;
-                case 'k': case 'K': g_benchmark = BenchmarkType::KMEANS; break;
-                case 'l': case 'L': g_benchmark = BenchmarkType::LABYRINTH; break;
-                case 's': case 'S': g_benchmark = BenchmarkType::SSCA2; break;
-                case 'v': case 'V': g_benchmark = BenchmarkType::VACATION; break;
-                case 'y': case 'Y': g_benchmark = BenchmarkType::YADA; break;
+            const char* name = argv[++i];
+            if (strcmp(name, "bayes") == 0)      g_benchmark = BenchmarkType::BAYES;
+            else if (strcmp(name, "genome") == 0) g_benchmark = BenchmarkType::GENOME;
+            else if (strcmp(name, "intruder") == 0) g_benchmark = BenchmarkType::INTRUDER;
+            else if (strcmp(name, "kmeans") == 0) g_benchmark = BenchmarkType::KMEANS;
+            else if (strcmp(name, "labyrinth") == 0) g_benchmark = BenchmarkType::LABYRINTH;
+            else if (strcmp(name, "ssca2") == 0)  g_benchmark = BenchmarkType::SSCA2;
+            else if (strcmp(name, "vacation") == 0) g_benchmark = BenchmarkType::VACATION;
+            else if (strcmp(name, "yada") == 0)   g_benchmark = BenchmarkType::YADA;
+            else { std::cerr << "Unknown benchmark: " << name << "\n"; return 1; }
+        } else {
+            // Benchmark-specific options
+            switch(g_benchmark) {
+                case BenchmarkType::BAYES:
+                    if (strcmp(argv[i], "-v") == 0) parse_int(argc, argv, i, g_bayes_v);
+                    else if (strcmp(argv[i], "-r") == 0) parse_int(argc, argv, i, g_bayes_r);
+                    else if (strcmp(argv[i], "-n") == 0) parse_int(argc, argv, i, g_bayes_n);
+                    else if (strcmp(argv[i], "-p") == 0) parse_int(argc, argv, i, g_bayes_p);
+                    else if (strcmp(argv[i], "-s") == 0) parse_int(argc, argv, i, g_bayes_s);
+                    else if (strcmp(argv[i], "-i") == 0) parse_int(argc, argv, i, g_bayes_i);
+                    else if (strcmp(argv[i], "-e") == 0) parse_int(argc, argv, i, g_bayes_e);
+                    else { std::cerr << "Unknown flag: " << argv[i] << "\n"; return 1; }
+                    break;
+                case BenchmarkType::GENOME:
+                    if (strcmp(argv[i], "-g") == 0) parse_int(argc, argv, i, g_genome_g);
+                    else if (strcmp(argv[i], "-s") == 0) parse_int(argc, argv, i, g_genome_s);
+                    else if (strcmp(argv[i], "-n") == 0) parse_int(argc, argv, i, g_genome_n);
+                    else { std::cerr << "Unknown flag: " << argv[i] << "\n"; return 1; }
+                    break;
+                case BenchmarkType::INTRUDER:
+                    if (strcmp(argv[i], "-a") == 0) parse_int(argc, argv, i, g_intruder_a);
+                    else if (strcmp(argv[i], "-l") == 0) parse_int(argc, argv, i, g_intruder_l);
+                    else if (strcmp(argv[i], "-n") == 0) parse_int(argc, argv, i, g_intruder_n);
+                    else if (strcmp(argv[i], "-s") == 0) parse_int(argc, argv, i, g_intruder_s);
+                    else { std::cerr << "Unknown flag: " << argv[i] << "\n"; return 1; }
+                    break;
+                case BenchmarkType::KMEANS:
+                    if (strcmp(argv[i], "-m") == 0) parse_int(argc, argv, i, g_kmeans_m);
+                    else if (strcmp(argv[i], "-n") == 0) parse_int(argc, argv, i, g_kmeans_n);
+                    else if (strcmp(argv[i], "-t") == 0) parse_double(argc, argv, i, g_kmeans_t);
+                    else if (strcmp(argv[i], "-i") == 0) { if (i + 1 < argc) g_kmeans_i = argv[++i]; }
+                    else { std::cerr << "Unknown flag: " << argv[i] << "\n"; return 1; }
+                    break;
+                case BenchmarkType::LABYRINTH:
+                    if (strcmp(argv[i], "-x") == 0) parse_int(argc, argv, i, g_labyrinth_x);
+                    else if (strcmp(argv[i], "-y") == 0) parse_int(argc, argv, i, g_labyrinth_y);
+                    else if (strcmp(argv[i], "-z") == 0) parse_int(argc, argv, i, g_labyrinth_z);
+                    else if (strcmp(argv[i], "-n") == 0) parse_int(argc, argv, i, g_labyrinth_n);
+                    else { std::cerr << "Unknown flag: " << argv[i] << "\n"; return 1; }
+                    break;
+                case BenchmarkType::SSCA2:
+                    if (strcmp(argv[i], "-s") == 0) parse_int(argc, argv, i, g_ssca2_s);
+                    else if (strcmp(argv[i], "-i") == 0) parse_int(argc, argv, i, g_ssca2_i);
+                    else if (strcmp(argv[i], "-u") == 0) parse_double(argc, argv, i, g_ssca2_u);
+                    else if (strcmp(argv[i], "-l") == 0) parse_int(argc, argv, i, g_ssca2_l);
+                    else if (strcmp(argv[i], "-p") == 0) parse_int(argc, argv, i, g_ssca2_p);
+                    else { std::cerr << "Unknown flag: " << argv[i] << "\n"; return 1; }
+                    break;
+                case BenchmarkType::VACATION:
+                    if (strcmp(argv[i], "-n") == 0) parse_int(argc, argv, i, g_vacation_n);
+                    else if (strcmp(argv[i], "-q") == 0) parse_int(argc, argv, i, g_vacation_q);
+                    else if (strcmp(argv[i], "-r") == 0) parse_int(argc, argv, i, g_vacation_r);
+                    else if (strcmp(argv[i], "-u") == 0) parse_int(argc, argv, i, g_vacation_u);
+                    else if (strcmp(argv[i], "-t") == 0) parse_int(argc, argv, i, g_vacation_t);
+                    else { std::cerr << "Unknown flag: " << argv[i] << "\n"; return 1; }
+                    break;
+                case BenchmarkType::YADA:
+                    if (strcmp(argv[i], "-a") == 0) parse_int(argc, argv, i, g_yada_angle);
+                    else if (strcmp(argv[i], "-i") == 0) { if (i + 1 < argc) g_yada_i = argv[++i]; }
+                    else { std::cerr << "Unknown flag: " << argv[i] << "\n"; return 1; }
+                    break;
             }
         }
     }
@@ -153,10 +281,9 @@ MAIN int main(int argc, char* argv[]) {
     std::cout << "STAMP Benchmark Suite (Full Specification)\n";
     std::cout << "========================================\n";
     std::cout << "Benchmark: " << bench_names[(int)g_benchmark] << "\n";
-    std::cout << "Threads:   " << g_num_threads << "\n";
-    std::cout << "Duration:  " << g_duration << " ms\n\n";
+    std::cout << "Threads:   " << g_num_threads << "\n\n";
 
-    run_benchmark(g_benchmark, g_num_threads, g_duration);
+    run_benchmark(g_benchmark, g_num_threads);
 
     return 0;
 }

@@ -44,7 +44,7 @@ CXX              := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/clang++,clang++)
 OPT              := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/opt,opt)
 LLVM_LINK        := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/llvm-link,llvm-link)
 CXXFLAGS         ?= -std=c++20 -O1 -pthread
-LLVM_PLUGIN_DIR  ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+LLVM_PLUGIN_DIR  := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BACKENDS_DIR     ?= $(abspath $(LLVM_PLUGIN_DIR)/../backends)
 RUNTIMES_DIR     ?= $(BACKENDS_DIR)/runtimes
 TINYSTM_DIR      ?= $(BACKENDS_DIR)/TinySTM
@@ -55,6 +55,10 @@ OUT_DIR          ?= out
 BIN_DIR          ?= bin
 TM_PLUGIN        ?= $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
 
+# Include machine-local config (if it exists) for arch-specific flags
+# e.g., TM_DEFINES_tsxsgl = -mrtm
+-include $(abspath $(LLVM_PLUGIN_DIR)/../machine_config.mk)
+
 # ---- Backend mappings ----
 
 TM_RUNTIME_tinystm      = $(RUNTIMES_DIR)/TinySTM_runtime.cpp
@@ -64,6 +68,10 @@ TM_RUNTIME_swisstm      = $(RUNTIMES_DIR)/SwissTM_runtime.cpp
 TM_RUNTIME_norec        = $(RUNTIMES_DIR)/NOrec_runtime.cpp
 TM_RUNTIME_persistentsgl = $(RUNTIMES_DIR)/PersistentSGL_runtime.cpp
 TM_RUNTIME_distributedsgl = $(RUNTIMES_DIR)/DistributedSGL_runtime.cpp
+TM_RUNTIME_tsxsgl        = $(RUNTIMES_DIR)/TSXSGL_runtime.cpp
+TM_RUNTIME_tinystm_wbctl = $(RUNTIMES_DIR)/TinySTM_runtime.cpp
+TM_RUNTIME_tinystm_wbetl = $(RUNTIMES_DIR)/TinySTM_runtime.cpp
+TM_RUNTIME_tinystm_wt    = $(RUNTIMES_DIR)/TinySTM_runtime.cpp
 
 TM_DEFINES_tinystm      = -DDESIGN_WBCTL
 TM_DEFINES_tl2          =
@@ -71,11 +79,18 @@ TM_DEFINES_singlelock   =
 TM_DEFINES_norec        =
 TM_DEFINES_persistentsgl =
 TM_DEFINES_distributedsgl =
+TM_DEFINES_tsxsgl       ?=
+TM_DEFINES_tinystm_wbctl = -DDESIGN_WBCTL -DNDEBUG
+TM_DEFINES_tinystm_wbetl = -DDESIGN_WBETL -DNDEBUG
+TM_DEFINES_tinystm_wt    = -DDESIGN_WT -DNDEBUG
 
 TM_INCLUDES_persistentsgl =
 TM_INCLUDES_distributedsgl =
 TM_INCLUDES_tinystm     = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
 TM_INCLUDES_norec       = -I$(NOREC_DIR) -I$(BACKENDS_DIR)
+TM_INCLUDES_tinystm_wbctl = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
+TM_INCLUDES_tinystm_wbetl = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
+TM_INCLUDES_tinystm_wt    = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
 
 # ---- Canned recipes (individual steps) ----
 

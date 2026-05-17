@@ -42,14 +42,14 @@ static LabyrinthData* g_labyrinth = nullptr;
 
 inline void labyrinth_generate_maze() {
     auto data = new LabyrinthData();
-    data->width = 32;
-    data->height = 32;
-    data->depth = 3;
+    data->width = g_labyrinth_x;
+    data->height = g_labyrinth_y;
+    data->depth = g_labyrinth_z;
     data->x_cost = 1;
     data->y_cost = 1;
     data->z_cost = 2;
     data->bend_cost = 1;
-    data->num_requests = 64;
+    data->num_requests = g_labyrinth_n;
 
     int gridsize = data->width * data->height * data->depth;
     data->grid.resize(gridsize, -1L);
@@ -236,15 +236,13 @@ THREAD void worker_labyrinth(ThreadData* td) {
     auto data = g_labyrinth;
     std::vector<long> local_grid(data->grid.size());
 
-    for (int iter = 0; iter < td->loops && !stop_workers; iter++) {
-        for (int i = td->thread_id; i < data->num_requests; i += g_num_threads) {
-            if (data->request_handled[i]) continue;
+    for (int i = td->thread_id; i < data->num_requests; i += g_num_threads) {
+        if (data->request_handled[i]) continue;
 
-            bool ok = labyrinth_route(data, i, local_grid);
-            if (ok) {
-                data->request_handled[i] = 1;
-                total_ops.fetch_add(1, std::memory_order_relaxed);
-            }
+        bool ok = labyrinth_route(data, i, local_grid);
+        if (ok) {
+            data->request_handled[i] = 1;
+            total_ops.fetch_add(1, std::memory_order_relaxed);
         }
     }
 }

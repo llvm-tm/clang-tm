@@ -166,13 +166,15 @@ static bool isCallOnTMObject(CallBase *Call, Module &M)
 static void instrumentLoadsStoresInFunction(Function *F, Module *M,
                                              const TMRuntimeHooks &H)
 {
+    SmallPtrSet<const Value *, 32> LocalVars;
+    collectLocalVariables(*F, LocalVars);
     SmallVector<Instruction *, 16> ToErase;
 
     for (auto &BB : *F) {
         for (auto &I : BB) {
             if (auto *Load = dyn_cast<LoadInst>(&I)) {
                 Value *Ptr = Load->getPointerOperand();
-                if (!isSharedPointer(Ptr, {}, *F, *M)) continue;
+                if (!isSharedPointer(Ptr, LocalVars, *F, *M)) continue;
                 IRBuilder<> Builder(Load);
                 if (auto *Call = emitTMRead(Builder, Ptr, Load->getType(), H)) {
                     Load->replaceAllUsesWith(Call);
@@ -180,7 +182,7 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
                 }
             } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
                 Value *Ptr = Store->getPointerOperand();
-                if (!isSharedPointer(Ptr, {}, *F, *M)) continue;
+                if (!isSharedPointer(Ptr, LocalVars, *F, *M)) continue;
                 IRBuilder<> Builder(Store);
                 emitTMWrite(Builder, Ptr, Store->getValueOperand(), H);
                 ToErase.push_back(Store);
@@ -419,8 +421,16 @@ computeClonableFunctions(Module &M,
                             return true;
 
                         if (auto *ArgAsArg = dyn_cast<Argument>(Val)) {
+                            // Check if this argument was propagated from a prior
+                            // call in the call graph.
                             auto it = TraceableArgs.find(&CallerF);
                             if (it != TraceableArgs.end() && it->second.count(ArgAsArg->getArgNo()))
+                                return true;
+                            // The CallerF is a TX function.
+                            // Treat all its pointer-type arguments as TM-traceable:
+                            // the programmer marked this function as "transaction",
+                            // so any pointer argument may point to shared TM data.
+                            if (hasAnnotation(CallerF, "transaction"))
                                 return true;
                             return false;
                         }
@@ -472,24 +482,17 @@ computeClonableFunctions(Module &M,
 
     TM_DEBUG("computeClonableFunctions: %d functions clonable before filtering", (int)Clonable.size());
 
-    // Step 3: filter out functions that don't actually access TM data.
-    // These are pure pointer-computation functions (e.g. __wrap_iter constructors,
-    // vector::begin/end, __tree::__root_ptr) that were propagated through
-    // TM-traceable arguments but never load or store to TM globals.
-    // Cloning them adds unnecessary TM instrumentation overhead without benefit.
-    SmallPtrSet<Function *, 32> ToRemove;
-    for (Function *F : Clonable) {
-        if (!hasDirectTMGlobal(*F, M)) {
-            ToRemove.insert(F);
-        }
-    }
-    for (Function *F : ToRemove) {
-        Clonable.erase(F);
-        TraceableArgs.erase(F);
-        TM_DEBUG("filter: %s removed (no direct TM access)", F->getName().str().c_str());
-    }
+    // NOTE: Step 3 (filter by direct TM access) was removed because it is
+    // too aggressive.  Functions like std::vector::_M_realloc_insert access
+    // TM data through function arguments (this pointer) that trace to TM
+    // globals, but the hasDirectTMGlobal check only recognizes direct
+    // GlobalVariable accesses.  Removing this filter is safe: the worst
+    // case is a few extra cloned functions (minor overhead), but the
+    // alternative is that STL container internals run uninstrumented,
+    // causing undetected write-write conflicts and double-free crashes
+    // (see the TSXSGL/TinySTM STAMP/bayes bug).
 
-    TM_DEBUG("computeClonableFunctions: %d functions clonable after filtering", (int)Clonable.size());
+    TM_DEBUG("computeClonableFunctions: %d functions clonable after propagation", (int)Clonable.size());
     return Clonable;
 }
 

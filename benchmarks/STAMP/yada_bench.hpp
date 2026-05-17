@@ -92,7 +92,7 @@ static bool is_bad(const YadaElement& el, double angle_constraint) {
 
 inline void yada_generate_mesh() {
     auto data = new YadaData();
-    data->angle_constraint = 20.0;
+    data->angle_constraint = g_yada_angle;
     data->total_added = 0;
 
     PRNG rng(42);
@@ -307,7 +307,7 @@ THREAD void worker_yada(ThreadData* td) {
         return false;
     };
 
-    for (int iter = 0; iter < td->loops && !stop_workers; iter++) {
+    for (;;) {
         int el_id = -1;
 
         if (!data->work_heap.empty()) {

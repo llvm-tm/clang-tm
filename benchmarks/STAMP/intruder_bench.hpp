@@ -37,9 +37,9 @@ static IntruderData* g_intruder = nullptr;
 
 inline void intruder_generate_packets() {
     auto data = new IntruderData();
-    data->num_flows = 1 << 14;
-    data->max_data_length = 16;
-    data->percent_attack = 10;
+    data->num_flows = g_intruder_n;
+    data->max_data_length = g_intruder_l;
+    data->percent_attack = g_intruder_a;
     data->total_attacks = 0;
 
     data->dictionary = {"about", "attack", "back", "root", "system", "access",
@@ -54,7 +54,7 @@ inline void intruder_generate_packets() {
                         "shell", "should", "site", "some", "such", "take",
                         "than", "that", "their", "them", "then", "there"};
 
-    PRNG rng(42);
+    PRNG rng(g_intruder_s);
     int total_packets = 0;
 
     for (long flow = 1; flow <= data->num_flows; flow++) {
@@ -155,18 +155,18 @@ TX static DecodedFlow get_complete(IntruderData* data) {
 THREAD void worker_intruder(ThreadData* td) {
     auto data = g_intruder;
 
-    for (int iter = 0; iter < td->loops && !stop_workers; iter++) {
-        if (!data->packet_queue.empty()) {
-            Packet pkt = get_packet(data);
-            if (pkt.flow_id >= 0) {
-                process_decoder(data, pkt);
-                DecodedFlow df = get_complete(data);
-                if (df.flow_id >= 0) {
-                    bool attack = detect_attack(df.data, data->dictionary);
-                    (void)attack;
-                    total_ops.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
+    for (;;) {
+        Packet pkt = get_packet(data);
+        if (pkt.flow_id >= 0) {
+            process_decoder(data, pkt);
+        }
+        DecodedFlow df = get_complete(data);
+        if (df.flow_id >= 0) {
+            bool attack = detect_attack(df.data, data->dictionary);
+            (void)attack;
+            total_ops.fetch_add(1, std::memory_order_relaxed);
+        } else if (pkt.flow_id < 0) {
+            break;
         }
     }
 }

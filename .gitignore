@@ -40,6 +40,7 @@ my-benchmarks/
 
 # Build system
 install
+machine_config.mk
 debug.txt
 CMakeCache.txt
 CMakeFiles/

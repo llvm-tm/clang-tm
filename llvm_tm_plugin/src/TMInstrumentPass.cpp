@@ -301,14 +301,32 @@ public:
 #endif
 
 #ifndef DISABLE_MALLOC_FREE
-        // Replace malloc/calloc/realloc with tm_malloc
+        // Replace malloc/calloc/realloc with tm_* variants
         if (auto *Call = dyn_cast<CallInst>(I)) {
           if (Function *Callee = Call->getCalledFunction()) {
             if (Callee && !Callee->getName().starts_with("tm_")) {
               StringRef N = Callee->getName();
-              if (N == "malloc" || N == "calloc" || N == "realloc") {
+              if (N == "malloc") {
                 Value *SizeArg = Call->getArgOperand(0);
                 auto *NewCall = B.CreateCall(H.malloc_fn, {SizeArg});
+                NewCall->setAttributes(AttributeList{});
+                Call->replaceAllUsesWith(NewCall);
+                ToErase.push_back(Call);
+                continue;
+              }
+              if (N == "calloc") {
+                Value *Nmemb = Call->getArgOperand(0);
+                Value *Size  = Call->getArgOperand(1);
+                auto *NewCall = B.CreateCall(H.calloc_fn, {Nmemb, Size});
+                NewCall->setAttributes(AttributeList{});
+                Call->replaceAllUsesWith(NewCall);
+                ToErase.push_back(Call);
+                continue;
+              }
+              if (N == "realloc") {
+                Value *Ptr  = Call->getArgOperand(0);
+                Value *Size = Call->getArgOperand(1);
+                auto *NewCall = B.CreateCall(H.realloc_fn, {Ptr, Size});
                 NewCall->setAttributes(AttributeList{});
                 Call->replaceAllUsesWith(NewCall);
                 ToErase.push_back(Call);

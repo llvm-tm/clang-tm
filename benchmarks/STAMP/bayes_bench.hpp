@@ -3,6 +3,7 @@
 #include "stamp_common.hpp"
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 #include <set>
 #include <vector>
 
@@ -33,6 +34,7 @@ struct TM BayesData {
 };
 
 static BayesData* g_bayes = nullptr;
+static std::mutex g_init_mutex;
 
 static double compute_density_ll(BayesData* data, int var,
                                   const std::vector<int>& parents_vec) {
@@ -62,23 +64,24 @@ static double compute_density_ll(BayesData* data, int var,
 
 inline void bayes_generate_network() {
     auto data = new BayesData();
-    data->num_var = 32;
-    data->num_record = 512;
+    data->num_var = g_bayes_v;
+    data->num_record = g_bayes_r;
     data->base_penalty = 0.0;
     data->base_log_likelihood = 0.0;
     data->total_parents = 0;
-    data->global_max_edges = -1;
+    data->global_max_edges = g_bayes_e;
     data->quality_factor = 1.0;
 
     data->parents.resize(data->num_var);
     data->children.resize(data->num_var);
     data->local_ll.resize(data->num_var, 0.0);
 
-    PRNG rng(42);
+    PRNG rng(g_bayes_s);
     data->records.resize(data->num_record, std::vector<int>(data->num_var));
 
     for (int v = 1; v < data->num_var; v++) {
-        int np = (int)(rng.next() % 3) + 1;
+        int max_np = std::min(g_bayes_n, v);
+        int np = (max_np > 0) ? (int)(rng.next() % max_np) + 1 : 0;
         for (int p = 0; p < np && p < v; p++) {
             int parent = (int)(rng.next() % v);
             if (data->parents[v].find(parent) == data->parents[v].end()) {
@@ -106,7 +109,9 @@ inline void bayes_generate_network() {
         }
     }
 
-    data->base_penalty = -0.5 * std::log((double)data->num_record);
+    data->base_penalty = g_bayes_i > 0
+        ? -0.5 * std::log((double)data->num_record) * g_bayes_i
+        : 0.0;
     g_bayes = data;
 }
 
@@ -180,19 +185,11 @@ TX static Task find_best_insert(BayesData* data, int to) {
     return best;
 }
 
-THREAD void worker_bayes(ThreadData* td) {
-    auto data = g_bayes;
-    int nvar = data->num_var;
-    int chunk = (nvar + g_num_threads - 1) / g_num_threads;
-    int start = td->thread_id * chunk;
-    int end = std::min(start + chunk, nvar);
-
-    int init_tasks = 0;
+static void init_worker(BayesData* data, int nvar, int start, int end) {
     for (int v = start; v < end; v++) {
         data->local_ll[v] = compute_density_ll(data, v, {});
         data->base_log_likelihood += data->local_ll[v];
     }
-
     for (int v = start; v < end; v++) {
         for (int from = 0; from < nvar; from++) {
             if (from == v) continue;
@@ -202,12 +199,25 @@ THREAD void worker_bayes(ThreadData* td) {
                 double score = data->base_penalty +
                                data->num_record * (data->base_log_likelihood + delta);
                 insert_task(data, {0, from, v, score});
-                init_tasks++;
             }
         }
     }
+}
 
-    for (int iter = 0; iter < td->loops && !stop_workers; iter++) {
+THREAD void worker_bayes(ThreadData* td) {
+    auto data = g_bayes;
+    int nvar = data->num_var;
+    int chunk = (nvar + g_num_threads - 1) / g_num_threads;
+    int start = td->thread_id * chunk;
+    int end = std::min(start + chunk, nvar);
+
+    // Serialize initialization to avoid data races on non-TX code
+    {
+        std::lock_guard<std::mutex> lock(g_init_mutex);
+        init_worker(data, nvar, start, end);
+    }
+
+    for (;;) {
         Task t = pop_best_task(data);
         if (t.op < 0) break;
 

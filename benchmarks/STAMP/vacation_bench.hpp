@@ -40,10 +40,10 @@ static VacationData* g_vacation = nullptr;
 
 inline void vacation_generate_prices() {
     auto data = new VacationData();
-    data->num_relations = 1 << 12;
+    data->num_relations = g_vacation_r;
     data->query_range = (int)(0.9 * data->num_relations);
-    data->num_queries_per_tx = 10;
-    data->percent_user = 80;
+    data->num_queries_per_tx = g_vacation_n;
+    data->percent_user = g_vacation_u;
 
     PRNG rng(42);
     for (int i = 1; i <= data->num_relations; i++) {
@@ -207,7 +207,12 @@ THREAD void worker_vacation(ThreadData* td) {
     auto data = g_vacation;
     PRNG rng(42 + td->thread_id);
 
-    for (int iter = 0; iter < td->loops && !stop_workers; iter++) {
+    int tasks_per_thread = g_vacation_t / g_num_threads;
+    int extra = g_vacation_t % g_num_threads;
+    int start = td->thread_id * tasks_per_thread + std::min(td->thread_id, extra);
+    int end = start + tasks_per_thread + (td->thread_id < extra ? 1 : 0);
+
+    for (int iter = start; iter < end; iter++) {
         int r = (int)(rng.next() % 100);
         int customer_id = (int)(rng.next() % data->query_range) + 1;
 

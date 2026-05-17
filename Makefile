@@ -184,6 +184,6 @@ test_run: benchmarks
 	@$(BENCHMARKS_DIR)/datastructures/bin/avltree_SingleGlobalLock 1 10 100 || echo "(timeout or error)"
 	@echo ""
 	@echo "STAMP benchmarks (uninstrumented):"
-	@$(BENCHMARKS_DIR)/STAMP/bin/stamp_uninstrumented -t 2 -d 500 || echo "(timeout or error)"
+	@$(BENCHMARKS_DIR)/STAMP/bin/stamp_uninstrumented -b kmeans -t 2 || echo "(timeout or error)"
 	@echo ""
 	@echo "Tests complete."

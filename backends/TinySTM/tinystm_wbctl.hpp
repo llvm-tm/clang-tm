@@ -106,6 +106,7 @@ begin()     //
 	if (tx->active)
 		return true;
 
+	tx->clear();
 	tx->start_version = get_clock();
 	tx->end_version = tx->start_version;
 	tx->active = true;
@@ -370,13 +371,14 @@ write_word_ctl(                                               //
 
 		TINYSTM_ASSERT(owner != tx->id, "WBCTL only locks at commit time");
 
-		// If is locked, but the read set is valid, just continue
 		if (is_locked && !validate()) {
 			abort_tx(); // returns to begin
 		}
 
+		if (is_locked)
+			continue; // spin until the lock is released
+
 		WriteLogEntry_wbctl w;          // Create a new entry in writeset
-		tx->locks_held.push_back(lock); // saves the lock for later unlock
 		w.new_val = val;                // new val to write-back on commit
 		w.type = sz;
 		w.addr = addr;

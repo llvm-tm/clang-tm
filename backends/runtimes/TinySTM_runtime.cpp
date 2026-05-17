@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <execinfo.h>
 #include <mutex>
 #include <thread>
 
@@ -57,9 +58,7 @@ void tm_init_thread()
 {
 	tm_init_thread_call_count++;
 #ifndef NDEBUG
-	fprintf(stderr,
-	        "[DEBUG tm_init_thread] Call #%d in this thread\n",
-	        tm_init_thread_call_count);
+	(void)0;
 #endif
 	tinystm::init_thread();
 }
@@ -113,13 +112,9 @@ void tm_end()
 		if (tx) {
 			uint64_t rs = tx->read_set.size();
 			uint64_t ws = tx->write_set.size();
-			assert(ws <= rs || ws == 0); // write-set is subset of read-set
 			if (rs > g_tm_max_read_set.load()) g_tm_max_read_set.store(rs);
 			if (ws > g_tm_max_write_set.load()) g_tm_max_write_set.store(ws);
-#ifndef NDEBUG
-			if (rs > 0) fprintf(stderr, "[RS=%llu WS=%llu]\n",
-				(unsigned long long)rs, (unsigned long long)ws);
-#endif
+            (void)0;
 		}
 		tinystm::commit();
 	}

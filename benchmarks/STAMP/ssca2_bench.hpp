@@ -84,12 +84,12 @@ static void build_csr(SSCA2Data* data) {
 
 inline void ssca2_generate_graph() {
     auto data = new SSCA2Data();
-    data->scale = 10;
-    data->max_paral_edges = 3;
+    data->scale = g_ssca2_s;
+    data->max_paral_edges = g_ssca2_p;
     data->perc_int_weights = 0.6;
-    data->prob_unidirectional = 0.1;
+    data->prob_unidirectional = g_ssca2_u;
     data->prob_intercl_edges = 0.5;
-    data->subgr_edge_length = 3;
+    data->subgr_edge_length = g_ssca2_l;
 
     uint64_t tot_vertices = (uint64_t)1 << data->scale;
     int max_clique_size = 1 << (data->scale / 3);
@@ -206,7 +206,7 @@ THREAD void worker_ssca2(ThreadData* td) {
     uint64_t end_v = std::min(start_v + chunk, data->num_vertices);
     uint64_t local_ops = 0;
 
-    for (int iter = 0; iter < td->loops && !stop_workers; iter++) {
+    for (int iter = 0; iter < g_ssca2_i; iter++) {
         for (uint64_t v = start_v; v < end_v; v++) {
             uint64_t start = row_ptr[v];
             uint64_t end = row_ptr[v + 1];

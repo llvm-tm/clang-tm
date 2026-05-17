@@ -21,15 +21,15 @@ struct TM KMeansData {
 static KMeansData* g_kmeans = nullptr;
 
 inline void kmeans_generate_points() {
-    int npoints = 10000;
-    int ndims = 8;
-    int nclusters = 8;
+    int npoints = g_kmeans_n;
+    int ndims = g_kmeans_m;
+    int nclusters = g_kmeans_m;
 
     auto data = new KMeansData();
     data->npoints = npoints;
     data->ndims = ndims;
     data->nclusters = nclusters;
-    data->threshold = 0.001;
+    data->threshold = g_kmeans_t;
     data->points.resize(npoints, std::vector<double>(ndims));
     data->centroids.resize(nclusters, std::vector<double>(ndims));
     data->new_centers_sum.resize(nclusters * ndims, 0.0);
@@ -104,7 +104,7 @@ THREAD void worker_kmeans(ThreadData* td) {
     bool converged = false;
     int max_iters = 100;
 
-    while (!converged && max_iters-- > 0 && !stop_workers) {
+    while (!converged && max_iters-- > 0) {
         std::fill(local_sum.begin(), local_sum.end(), 0.0);
         std::fill(local_count.begin(), local_count.end(), 0);
 

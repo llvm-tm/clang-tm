@@ -16,6 +16,7 @@
 #include "../tm_alloc_overrides.hpp"
 
 thread_local bool g_in_tx = false;
+thread_local DeferredFreeNode* g_deferred_frees = nullptr;
 
 extern "C" {
 
@@ -76,7 +77,9 @@ void tm_set_env(sigjmp_buf *env)
 
 void tm_begin()
 {
-	if (tm_nested_call_counter == 1) { g_in_tx = true;
+	if (tm_nested_call_counter == 1) {
+		tm_clear_deferred_frees();
+		g_in_tx = true;
 		swisstm::begin();
     }
     assert(tm_nested_call_counter >= 0);
@@ -85,8 +88,10 @@ void tm_begin()
 
 void tm_end()
 {
-	if (tm_nested_call_counter == 1) { g_in_tx = false;
+	if (tm_nested_call_counter == 1) {
 		swisstm::commit();
+		g_in_tx = false;
+		tm_flush_deferred_frees();
     }
     assert(tm_nested_call_counter >= 0);
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
@@ -195,6 +200,14 @@ static int init = (std::atexit(print_stats), 0);
 void* tm_malloc(size_t size) { return malloc(size); }
 void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
 void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
-void  tm_free(void* ptr) { free(ptr); }
+void  tm_free(void* ptr) {
+    if (g_in_tx) {
+        auto* node = static_cast<DeferredFreeNode*>(ptr);
+        node->next = g_deferred_frees;
+        g_deferred_frees = node;
+    } else {
+        free(ptr);
+    }
+}
 
 }

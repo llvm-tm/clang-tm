@@ -20,6 +20,7 @@
 #include <cstring>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #define TINYSTM_ASSERT(cond, msg)                                                        \
 	do {                                                                                 \

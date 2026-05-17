@@ -15,6 +15,18 @@
  * The C malloc/free/calloc/realloc are handled separately by the LLVM
  * plugin pass which replaces them with tm_malloc/tm_free calls.
  *
+ * DEFERRED FREE (transaction-safety):
+ * Inside a transaction, operator delete → tm_free pushes the pointer
+ * onto a thread-local deferred-free list rather than calling ::free
+ * immediately.  This prevents the "vector reallocation double-free"
+ * scenario: if a transaction aborts, the undo log restores container
+ * pointers to pre-reallocation values, and the old (deferred-free'd)
+ * buffer is still alive because the free was never executed.
+ *
+ * Each runtime must call:
+ *   tm_clear_deferred_frees()  at the start of tm_begin (outer)
+ *   tm_flush_deferred_frees()  after successful commit in tm_end (outer)
+ *
  * NOTE: Persistent pointers:
  * Even with allocations redirected to the persistent mmap, std::map's
  * internal tree nodes store RAW C++ POINTERS to other nodes.  After a
@@ -24,6 +36,7 @@
  */
 
 #include <cstddef>
+#include <cstdlib>
 #include <new>
 
 // Each runtime must define these two functions:
@@ -31,9 +44,44 @@ extern "C" void* tm_malloc(size_t size);
 extern "C" void  tm_free(void* ptr);
 
 // Thread-local flag: set by tm_begin/tm_end to distinguish TX vs non-TX context.
-// tm_malloc checks this to decide whether to allocate from the TM runtime
-// (in_transaction) or from the system heap (non-transactional).
 extern thread_local bool g_in_tx;
+
+// ── Deferred-free infrastructure ──────────────────────────
+//
+// Uses an intrusive singly-linked list threaded through the freed blocks
+// themselves.  This avoids the infinite recursion that would occur if we
+// used std::vector::push_back (whose _M_realloc_insert calls operator
+// delete → tm_free → push_back → …).
+//
+// Each freed block must be at least sizeof(void*) bytes (guaranteed by
+// malloc alignment).
+
+struct DeferredFreeNode {
+    DeferredFreeNode* next;
+};
+
+extern thread_local DeferredFreeNode* g_deferred_frees;
+
+// Flush (execute) all pending deferred frees — call after successful commit.
+inline void tm_flush_deferred_frees()
+{
+    auto* node = g_deferred_frees;
+    while (node) {
+        auto* next = node->next;
+        std::free(node);
+        node = next;
+    }
+    g_deferred_frees = nullptr;
+}
+
+// Discard all pending deferred frees — call at tm_begin (outer) to discard
+// entries from a previously aborted transaction attempt.  The undo log has
+// restored the container pointers, so the deferred buffer should not be
+// freed (it is live again).
+inline void tm_clear_deferred_frees()
+{
+    g_deferred_frees = nullptr;
+}
 
 // ── operator new ───────────────────────────────────────────
 

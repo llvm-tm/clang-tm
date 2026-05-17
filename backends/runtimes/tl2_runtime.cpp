@@ -15,6 +15,7 @@
 #include "../TL2/tl2.hpp"
 #include "../tm_alloc_overrides.hpp"
 thread_local bool g_in_tx = false;
+thread_local DeferredFreeNode* g_deferred_frees = nullptr;
 
 // Thread-local state
 static __thread int8_t tm_is_init_ready = 0;
@@ -71,7 +72,9 @@ extern "C" void tm_set_env(sigjmp_buf* env) {
 // Wrapper functions matching plugin interface (void return, symbol_id parameter)
 
 extern "C" void tm_begin() {
-    if (tm_nested_call_counter == 1) { g_in_tx = true;
+    if (tm_nested_call_counter == 1) {
+        tm_clear_deferred_frees();
+        g_in_tx = true;
         tl2::begin();
     }
     assert(tm_nested_call_counter >= 0);
@@ -79,8 +82,10 @@ extern "C" void tm_begin() {
 }
 
 extern "C" void tm_end() {
-    if (tm_nested_call_counter == 1) { g_in_tx = false;
+    if (tm_nested_call_counter == 1) {
         tl2::commit();
+        g_in_tx = false;
+        tm_flush_deferred_frees();
     }
     assert(tm_nested_call_counter >= 0);
     g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
@@ -167,10 +172,18 @@ extern "C" void tm_memset(uint8_t *addr, uint8_t val, uint64_t len, uint32_t sym
 extern "C" void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
 
-void* tm_malloc(size_t size) { return g_in_tx ? malloc(size) : malloc(size); }
+void* tm_malloc(size_t size) { return malloc(size); }
 void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
 void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
-void  tm_free(void* ptr) { free(ptr); }
+void  tm_free(void* ptr) {
+    if (g_in_tx) {
+        auto* node = static_cast<DeferredFreeNode*>(ptr);
+        node->next = g_deferred_frees;
+        g_deferred_frees = node;
+    } else {
+        free(ptr);
+    }
+}
 
 static void print_stats() {
 #ifndef NDEBUG

@@ -21,10 +21,10 @@ static GenomeData* g_genome = nullptr;
 
 inline void genome_generate_segments() {
     auto data = new GenomeData();
-    data->segment_length = 32;
-    data->num_segments = 1 << 12;
+    data->segment_length = g_genome_s;
+    data->num_segments = g_genome_n;
 
-    int gene_length = data->segment_length + data->num_segments + 100;
+    int gene_length = g_genome_g;
     data->gene.resize(gene_length);
     
     PRNG rng(42);

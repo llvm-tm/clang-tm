@@ -25,7 +25,7 @@ static void collectDirectCalls(Function &F, SmallPtrSet<Function *, 32> &CalledF
 {
   for (auto &BB : F) {
     for (auto &I : BB) {
-      if (auto *Call = dyn_cast<CallInst>(&I)) {
+      if (auto *Call = dyn_cast<CallBase>(&I)) {
         if (Function *Callee = Call->getCalledFunction()) {
           if (!Callee->isDeclaration()) {
             CalledFuncs.insert(Callee);
@@ -43,7 +43,7 @@ static bool callsTransactionFunctions(Function &F, Module &M)
 {
   for (auto &BB : F) {
     for (auto &I : BB) {
-      if (auto *Call = dyn_cast<CallInst>(&I)) {
+      if (auto *Call = dyn_cast<CallBase>(&I)) {
         if (Function *Callee = Call->getCalledFunction()) {
           if (hasAnnotation(*Callee, "transaction")) {
             TM_DEBUG("Function %s calls transaction function %s",
@@ -94,7 +94,7 @@ static void buildTransactionCallGraph(Function &TxFunc,
   // Recursively follow all direct calls
   for (auto &BB : TxFunc) {
     for (auto &I : BB) {
-      if (auto *Call = dyn_cast<CallInst>(&I)) {
+      if (auto *Call = dyn_cast<CallBase>(&I)) {
         if (Function *Callee = Call->getCalledFunction()) {
           // Skip external functions (declarations only - no body to analyze)
           if (!Callee->isDeclaration()) {
