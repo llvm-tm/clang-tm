@@ -40,6 +40,13 @@ inline void genome_generate_segments() {
     }
 
     g_genome = data;
+
+    printf("Creating gene and segments... done.\n");
+    printf("Gene length     = %i\n", g_genome_g);
+    printf("Segment length  = %i\n", g_genome_s);
+    printf("Number segments = %i\n", g_genome_n);
+    printf("Sequencing gene...\n");
+    fflush(stdout);
 }
 
 static inline uint64_t str_hash(const std::string& s, int start, int len) {
@@ -52,7 +59,9 @@ static inline uint64_t str_hash(const std::string& s, int start, int len) {
 
 TX static void genome_dedup(GenomeData* data, int start, int end) {
     for (int i = start; i < end; i++) {
+        tm_serialize_lock();
         data->unique_segments.insert(data->segments[i]);
+        tm_serialize_unlock();
     }
 }
 
@@ -112,7 +121,8 @@ THREAD void worker_genome(ThreadData* td) {
 
     if (start < end) {
         genome_match(data, start, end, hash_table);
+        if (td->thread_id == 0) {
+            total_ops.fetch_add(data->unique_segments.size(), std::memory_order_relaxed);
+        }
     }
-
-    total_ops.fetch_add(data->unique_segments.size(), std::memory_order_relaxed);
 }

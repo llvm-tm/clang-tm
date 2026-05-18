@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <iostream>
@@ -19,6 +20,26 @@ void tm_serialize_unlock();
 #define TX __attribute__((annotate("transaction"), noinline))
 #define THREAD __attribute__((annotate("thread"), noinline))
 #define MAIN __attribute__((annotate("main"), noinline))
+
+// TM-safe math — inline bodies visible to the TM instrumentation pass
+// (libm sqrt/acos are opaque shared-library calls with no IR body)
+static inline double tm_sqrt(double x) {
+    if (x <= 0) return 0;
+    double s = x;
+    for (int i = 0; i < 25; i++) s = (s + x / s) * 0.5;
+    return s;
+}
+
+static inline double tm_acos(double x) {
+    if (x >= 1.0) return 0.0;
+    if (x <= -1.0) return 3.14159265358979323846;
+    // acos(x) = 2 * asin(sqrt((1-x)/2))
+    // asin(z) ≈ z + z³/6 + 3z⁵/40 + 5z⁷/112 + 35z⁹/1152
+    double z = tm_sqrt((1.0 - x) * 0.5);
+    double z2 = z * z;
+    double asin_z = z * (1.0 + z2 * (1.0/6.0 + z2 * (3.0/40.0 + z2 * (5.0/112.0 + z2 * 35.0/1152.0))));
+    return 2.0 * asin_z;
+}
 
 constexpr int DEFAULT_NB_THREADS = 4;
 
@@ -61,6 +82,7 @@ struct ThreadData {
     void* data;
 };
 
+extern std::atomic<bool> stop_workers;
 extern std::atomic<uint64_t> total_ops;
 extern std::atomic<uint64_t> abort_count;
 

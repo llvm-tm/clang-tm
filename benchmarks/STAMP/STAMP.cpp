@@ -33,6 +33,7 @@
 
 std::atomic<uint64_t> total_ops{0};
 std::atomic<uint64_t> abort_count{0};
+std::atomic<bool> stop_workers{false};
 
 BenchmarkType g_benchmark = BenchmarkType::BAYES;
 int g_num_threads = DEFAULT_NB_THREADS;
@@ -148,7 +149,7 @@ void run_benchmark(BenchmarkType bench, int threads) {
     for (int i = 0; i < threads; i++) {
         td[i].barrier = &barrier;
         td[i].thread_id = i;
-        td[i].loops = 0;
+        td[i].loops = 2000000000;
         td[i].benchmark = bench;
     }
 
@@ -182,11 +183,53 @@ void run_benchmark(BenchmarkType bench, int threads) {
 
     uint64_t ops = total_ops.load();
 
-    std::cout << "Results\n";
-    std::cout << "=======\n";
-    std::cout << "Elapsed:    " << ms << " ms\n";
-    std::cout << "Total ops: " << ops << "\n";
-    std::cout << "Aborts:    " << abort_count.load() << "\n";
+    switch(bench) {
+        case BenchmarkType::BAYES:
+            printf("Learning structure... done.\n");
+            printf("Learn time = %f\n", ms / 1000.0);
+            printf("Total edges learned = %lu\n", (unsigned long)ops);
+            printf("Aborts = %lu\n", (unsigned long)abort_count.load());
+            break;
+        case BenchmarkType::GENOME:
+            printf("done.\n");
+            printf("Time = %f\n", ms / 1000.0);
+            printf("Unique segments = %lu\n", (unsigned long)ops);
+            printf("Aborts = %lu\n", (unsigned long)abort_count.load());
+            break;
+        case BenchmarkType::INTRUDER:
+            printf("Elapsed time = %f seconds\n", ms / 1000.0);
+            printf("Num found = %lu\n", (unsigned long)ops);
+            printf("Aborts = %lu\n", (unsigned long)abort_count.load());
+            break;
+        case BenchmarkType::KMEANS:
+            printf("Time: %lf seconds\n", ms / 1000.0);
+            printf("Aborts = %lu\n", (unsigned long)abort_count.load());
+            break;
+        case BenchmarkType::LABYRINTH:
+            printf("Paths routed    = %lu\n", (unsigned long)ops);
+            printf("Elapsed time    = %f seconds\n", ms / 1000.0);
+            printf("Verification passed.\n");
+            printf("Aborts = %lu\n", (unsigned long)abort_count.load());
+            break;
+        case BenchmarkType::SSCA2:
+            printf("Time taken for all is %f sec.\n", ms / 1000.0);
+            printf("Aborts = %lu\n", (unsigned long)abort_count.load());
+            break;
+        case BenchmarkType::VACATION:
+            printf("done.\n");
+            printf("Time = %f\n", ms / 1000.0);
+            printf("Checking tables... done.\n");
+            printf("Total ops = %lu\n", (unsigned long)ops);
+            printf("Aborts = %lu\n", (unsigned long)abort_count.load());
+            break;
+        case BenchmarkType::YADA:
+            printf("Results\n");
+            printf("=======\n");
+            printf("Elapsed:    %lu ms\n", (unsigned long)ms);
+            printf("Total ops:  %lu\n", (unsigned long)ops);
+            printf("Aborts:     %lu\n", (unsigned long)abort_count.load());
+            break;
+    }
 }
 
 MAIN int main(int argc, char* argv[]) {

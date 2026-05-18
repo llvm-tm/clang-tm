@@ -52,6 +52,15 @@ else
     fail "bash not found"
 fi
 
+# python3
+if command -v python3 &>/dev/null; then
+    python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" 2>/dev/null && \
+        pass "python3 3.8+ found" || \
+        echo "  WARN: python3 found but < 3.8 (tm-resolve-opaque.py may fail)"
+else
+    echo "  WARN: python3 not found (needed by tm-resolve-opaque.py)"
+fi
+
 # gtimeout / timeout
 if command -v gtimeout &>/dev/null; then
     pass "gtimeout found (macOS coreutils)"

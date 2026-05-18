@@ -1,11 +1,15 @@
 # ============================================================
 # tm_pipeline.mk — TM Plugin Compilation Pipeline
 #
-# Include in your Makefile to get the canonical 4-step pipeline:
-#   1. clang++ -O3 -fno-inline -emit-llvm       (.bc)
-#   2. opt -load-pass-plugin (instrumentation)   (.instr.bc)
-#   3. opt -O3 (optimize instrumented IR)        (.opt.bc)
-#   4. clang++ (link with STM runtime)           (binary)
+# Include in your Makefile to get the canonical pipeline:
+#   1. clang++ -fno-inline -emit-llvm              (.bc)
+#   2. opt -load-pass-plugin (instrumentation)     (.instr.bc)
+#   3. opt -O3 (optimize instrumented IR)          (.opt.bc)
+#   4. clang++ (link with STM runtime)             (binary)
+#
+# Optional: Opaque symbol resolution step (runs between 2 and 4):
+#   tm-resolve-opaque.py resolves system library symbols (e.g., sqrt, cos)
+#   and generates LLVM IR stub declarations for the link step.
 #
 # Usage:
 #   include path/to/tm_pipeline.mk
@@ -29,6 +33,14 @@
 #   bin/myapp: out/myapp.opt.bc
 #       $(call tm_link,$<,tinystm,$@)
 #
+#   # With opaque symbol resolution:
+#   TM_OPAQUE_SYMBOLS_FILE = out/opaque_symbols.txt
+#   TM_LINK_LIBS = -lm
+#   bin/myapp: out/myapp.opt.bc
+#       $(call tm_instrument,$<,$@)  # writes $(TM_OPAQUE_SYMBOLS_FILE)
+#       $(call tm_resolve_opaque,$(TM_OPAQUE_SYMBOLS_FILE))
+#       $(call tm_link,$<,tinystm,$@)
+#
 # Available backends:
 #   tinystm, tl2, singlelock, swisstm, norec
 # ============================================================
@@ -48,9 +60,10 @@ TM_COMPILE_FLAGS ?= -O1 -fno-inline -fno-vectorize -fno-slp-vectorize \
 # Discover LLVM tools via llvm-config (handles versioned installs)
 LLVM_CONFIG      := $(shell command -v llvm-config-22 2>/dev/null || command -v llvm-config-22.1 2>/dev/null || command -v llvm-config 2>/dev/null || echo "")
 LLVM_BINDIR      := $(shell $(LLVM_CONFIG) --bindir 2>/dev/null)
-CXX              := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/clang++,clang++)
-OPT              := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/opt,opt)
-LLVM_LINK        := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/llvm-link,llvm-link)
+LLVM_MAJOR       := $(firstword $(subst ., ,$(shell $(LLVM_CONFIG) --version 2>/dev/null)))
+CXX              := $(or $(wildcard $(LLVM_BINDIR)/clang++),$(shell command -v clang++-$(LLVM_MAJOR) 2>/dev/null),clang++)
+OPT              := $(or $(wildcard $(LLVM_BINDIR)/opt),$(shell command -v opt-$(LLVM_MAJOR) 2>/dev/null),opt)
+LLVM_LINK        := $(or $(wildcard $(LLVM_BINDIR)/llvm-link),$(shell command -v llvm-link-$(LLVM_MAJOR) 2>/dev/null),llvm-link)
 CXXFLAGS         ?= -std=c++20 -O1 -pthread
 LLVM_PLUGIN_DIR  := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BACKENDS_DIR     ?= $(abspath $(LLVM_PLUGIN_DIR)/../backends)
@@ -100,6 +113,18 @@ TM_INCLUDES_tinystm_wbctl = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
 TM_INCLUDES_tinystm_wbetl = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
 TM_INCLUDES_tinystm_wt    = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
 
+# ---- Opaque symbol resolution (external tools) ----
+
+TM_RESOLVE_OPAQUE ?= $(LLVM_PLUGIN_DIR)/tm-resolve-opaque.py
+TM_OPAQUE_SYMBOLS_FILE ?=
+TM_OPAQUE_STUBS_DIR  ?= $(OUT_DIR)/opaque-resolved
+TM_OPAQUE_STUBS      ?= $(TM_OPAQUE_STUBS_DIR)/tm-opaque-resolved.bc
+
+# Libraries added at the final link step (e.g., -lm for math functions).
+# These are only needed when opaque system library functions are called
+# inside TM transactions with -tm-allow-opaque.
+TM_LINK_LIBS ?=
+
 # ---- Canned recipes (individual steps) ----
 
 define tm_compile_ir
@@ -115,11 +140,16 @@ endef
 TM_INSTRUMENT_PIPELINE ?= tm-instrument
 
 define tm_instrument
-$(OPT) -load-pass-plugin=$(TM_PLUGIN) -passes="$(TM_INSTRUMENT_PIPELINE)" $(TM_INSTRUMENT_FLAGS) $1 -o $2
+$(OPT) -load-pass-plugin=$(TM_PLUGIN) -passes="$(TM_INSTRUMENT_PIPELINE)" $(TM_INSTRUMENT_FLAGS) $(if $(TM_OPAQUE_SYMBOLS_FILE),-tm-opaque-symbols-file=$(TM_OPAQUE_SYMBOLS_FILE)) $1 -o $2
 endef
 
 define tm_optimize
 $(OPT) $(TM_OPT_LEVEL) $1 -o $2
+endef
+
+define tm_resolve_opaque
+mkdir -p $(TM_OPAQUE_STUBS_DIR)
+$(TM_RESOLVE_OPAQUE) --symbols $1 --output $(TM_OPAQUE_STUBS_DIR)
 endef
 
 define tm_link
@@ -128,10 +158,12 @@ define tm_link
 $(CXX) -std=c++20 $(or $(TM_RUNTIME_OPT),-O1) -emit-llvm -c $(TM_RUNTIME_$(strip $2)) -o $@.runtime.bc $(TM_DEFINES_$(strip $2)) $(TM_INCLUDES_$(strip $2)) -fno-stack-protector -pthread
 # Merge instrumented IR with runtime bitcode
 $(LLVM_LINK) $1 $@.runtime.bc -o $@.merged.bc
+# Optionally link resolved opaque stubs
+$(if $(wildcard $(TM_OPAQUE_STUBS)),$(LLVM_LINK) $@.merged.bc $(TM_OPAQUE_STUBS) -o $@.merged.bc)
 # Optimize merged IR (inlines tm_read/tm_write etc.)
 $(OPT) $(TM_OPT_LEVEL) $@.merged.bc -o $@.merged.opt.bc
-# Final link
-$(CXX) $(CXXFLAGS) $(TM_DEFINES_$(strip $2)) $@.merged.opt.bc -o $3 $(TM_INCLUDES_$(strip $2))
+# Final link (TM_LINK_LIBS provides -lm, -lpthread, etc. for opaque functions)
+$(CXX) $(CXXFLAGS) $(TM_DEFINES_$(strip $2)) $@.merged.opt.bc -o $3 $(TM_INCLUDES_$(strip $2)) $(TM_LINK_LIBS)
 # Cleanup intermediate files
 rm -f $@.runtime.bc $@.merged.bc $@.merged.opt.bc
 endef

@@ -96,6 +96,13 @@ inline void intruder_generate_packets() {
 
     (void)total_packets;
     g_intruder = data;
+
+    printf("Percent attack  = %i\n", data->percent_attack);
+    printf("Max data length = %i\n", data->max_data_length);
+    printf("Num flow        = %i\n", data->num_flows);
+    printf("Random seed     = %i\n", g_intruder_s);
+    printf("Num attack      = %i\n", data->total_attacks);
+    fflush(stdout);
 }
 
 static inline bool detect_attack(const std::string& data, const std::vector<std::string>& dict) {

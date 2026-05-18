@@ -55,6 +55,15 @@ inline void vacation_generate_prices() {
     }
 
     g_vacation = data;
+
+    printf("Initializing manager... done.\n");
+    printf("Initializing clients... done.\n");
+    printf("    Relations = %i\n", data->num_relations);
+    printf("    Transactions = %i\n", g_vacation_t);
+    printf("    Queries/transaction = %i\n", data->num_queries_per_tx);
+    printf("    Percent user = %i\n", data->percent_user);
+    printf("Running clients...\n");
+    fflush(stdout);
 }
 
 TX static int query_reservation(std::map<int, Reservation>* table, int id) {

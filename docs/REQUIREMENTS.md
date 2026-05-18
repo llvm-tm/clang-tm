@@ -9,6 +9,7 @@ on a new machine (including remote machines accessed via SSH).
 |------|---------|-------|
 | LLVM | 22+ | Including `opt`, `llvm-link`, `llvm-dis` |
 | Clang / clang++ | matching LLVM version | Must support `-emit-llvm` and `-load-pass-plugin` |
+| Python | 3.8+ | For `tm-resolve-opaque.py` (opaque symbol resolution) |
 | GNU Make | 4+ | For the build system |
 | pthreads | — | System library (usually built-in) |
 | C++ Standard Library | — | Must support C++20 (`std::atomic`, `thread_local`) |
@@ -46,8 +47,10 @@ available at compatible versions.
 /path/to/project/
 ├── llvm_tm_plugin/
 │   ├── clang-tm              # Main compilation script
+│   ├── tm-resolve-opaque.py  # Opaque symbol resolution tool
 │   ├── bin/libTMInstrument.so  # Plugin binary (must be built first)
-│   ├── src/                  # Plugin source
+│   ├── src/                  # Plugin source (plugin + opaque_safe_table.hpp)
+│   ├── runtime/              # Generic TM runtime
 │   └── tm_pipeline.mk        # Build system include
 ├── backends/
 │   ├── runtimes/             # STM runtime implementations

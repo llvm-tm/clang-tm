@@ -84,6 +84,10 @@ inline void labyrinth_generate_maze() {
     }
 
     g_labyrinth = data;
+
+    printf("Maze size:    %ix%ix%i\n", data->width, data->height, data->depth);
+    printf("Paths to route: %i\n", data->num_requests);
+    fflush(stdout);
 }
 
 static inline int grid_idx(const LabyrinthData* data, int x, int y, int z) {

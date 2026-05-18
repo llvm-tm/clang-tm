@@ -57,6 +57,7 @@ make -C ~/tm-benchmarks test
 
 - **LLVM 22+** with the `opt` tool and development libraries
 - **Clang 16+** (matching LLVM version)
+- **Python 3.8+** (for `tm-resolve-opaque.py`)
 - `make`, `gtimeout` (macOS: `brew install coreutils`) / `timeout` (Ubuntu: pre-installed in `coreutils`)
 
 ## Building
@@ -110,7 +111,7 @@ The plugin transforms a source file into an instrumented binary in 4 steps,
 automated by `llvm_tm_plugin/tm_pipeline.mk`:
 
 ```
-Step 1: clang++ -O3 -fno-inline -emit-llvm -c file.cpp → file.bc
+Step 1: clang++ -O1 -fno-inline -emit-llvm -c file.cpp → file.bc
     Compile to LLVM bitcode (with -fno-inline to preserve annotations).
 
 Step 2: opt -load-pass-plugin=libTMInstrument.so \
@@ -118,38 +119,69 @@ Step 2: opt -load-pass-plugin=libTMInstrument.so \
     TM instrumentation: replace loads/stores to TM globals with
     tm_read_*/tm_write_* calls, wrap TX functions with tm_begin/tm_end,
     clone reachable callees, redirect calls.
+    Optional: -tm-opaque-symbols-file=<path> writes unresolved system
+    function calls to a file for external resolution.
 
 Step 3: opt -O3 file.instr.bc → file.opt.bc
     Optimize the instrumented IR (inlines TM runtime hooks).
 
 Step 4: clang++ file.opt.bc <runtime>.cpp → binary
-    Link with the chosen backend runtime.
+    Link with the chosen backend runtime and system libraries (-lm, etc.).
 ```
+
+### Opaque Symbol Resolution
+
+Some standard library functions (e.g., `sqrt`, `cos`, `sin`, `pow`) are called
+inside transactions but have no LLVM IR body — they are "opaque" to the plugin.
+By default the plugin rejects these. To allow them:
+
+1. Use `-tm-allow-opaque` during instrumentation to emit opaque calls as-is.
+2. Use `-tm-opaque-symbols-file=<path>` to dump unresolved symbols.
+3. Run `tm-resolve-opaque.py --symbols <file>` to locate symbols in system
+   libraries and generate LLVM IR stub declarations.
+4. Link the resulting `tm-opaque-resolved.bc` into the pipeline.
+
+The `tm-resolve-opaque.py` tool searches system shared libraries via `nm -D`
+and produces bitcode stub declarations for known functions (math, libc, pthread,
+syscalls). Common math functions are handled automatically without library search.
 
 ### Makefile helpers (tm_pipeline.mk)
 
 The shared Makefile include at `llvm_tm_plugin/tm_pipeline.mk` provides:
 
-| Function | Purpose |
-|----------|---------|
+| Function / Variable | Purpose |
+|---------------------|---------|
 | `$(call tm_compile_ir,src,out)` | Step 1: `.cpp` → `.bc` |
 | `$(call tm_instrument,in,out)` | Step 2: `.bc` → `.instr.bc` |
 | `$(call tm_optimize,in,out)` | Step 3: `.instr.bc` → `.opt.bc` |
+| `$(call tm_resolve_opaque,symbol_file)` | Resolve opaque symbols → `.bc` stubs |
 | `$(call tm_link,opt_bc,backend,out)` | Step 4: `.opt.bc` + runtime → binary |
-| `$(call tm_target,name,src,backend)` | Define a complete build target (`name_backend`) |
+| `$(call tm_target,name,src,backend)` | Define a complete build target |
+| `TM_OPAQUE_SYMBOLS_FILE` | If set, passed to plugin for symbol dump |
+| `TM_OPAQUE_STUBS` | Path to resolved opaque stub `.bc` |
+| `TM_LINK_LIBS` | Extra libs for final link (e.g., `-lm`) |
+| `TM_RESOLVE_OPAQUE` | Path to resolve script |
+| `TM_INSTRUMENT_FLAGS` | Extra flags for opt pass (e.g., `-tm-allow-opaque`) |
 
-Example usage in a benchmark Makefile:
+Example usage with opaque function resolution:
 
 ```makefile
 include ../../llvm_tm_plugin/tm_pipeline.mk
 
 SRC := mybench.cpp
-$(eval $(call tm_target, mybench, $(SRC), singlelock))
-$(eval $(call tm_target, mybench, $(SRC), tinystm))
-$(eval $(call tm_target, mybench, $(SRC), tl2))
-```
+TM_OPAQUE_SYMBOLS_FILE = out/mybench_opaque.txt
+TM_INSTRUMENT_FLAGS = -tm-allow-opaque
+TM_LINK_LIBS = -lm
 
-This creates targets: `mybench_singlelock`, `mybench_tinystm`, `mybench_tl2`.
+# Custom target with opaque resolution
+bin/mybench: out/mybench.opt.bc
+	$(call tm_instrument,out/mybench.bc,out/mybench.instr.bc)
+	$(call tm_resolve_opaque,$(TM_OPAQUE_SYMBOLS_FILE))
+	$(call tm_link,$<,tinystm,$@)
+
+# Or use the convenience target (opaque stubs linked automatically if present):
+$(eval $(call tm_target, mybench, $(SRC), singlelock))
+```
 
 ## Running Benchmarks
 

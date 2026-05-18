@@ -1,7 +1,6 @@
 #pragma once
 
 #include "stamp_common.hpp"
-#include <cmath>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -51,6 +50,12 @@ inline void kmeans_generate_points() {
     }
 
     g_kmeans = data;
+
+    printf("Points:    %i\n", npoints);
+    printf("Dims:      %i\n", ndims);
+    printf("Clusters:  %i\n", nclusters);
+    printf("Threshold: %f\n", data->threshold);
+    fflush(stdout);
 }
 
 static inline int find_nearest_cluster(const std::vector<double>& point,
@@ -137,7 +142,7 @@ THREAD void worker_kmeans(ThreadData* td) {
             data->new_centers_count[c] = 0;
         }
 
-        delta = std::sqrt(delta / (nclusters * ndims));
+        delta = tm_sqrt(delta / (nclusters * ndims));
         converged = (delta < threshold);
         total_ops.fetch_add(npoints, std::memory_order_relaxed);
     }
