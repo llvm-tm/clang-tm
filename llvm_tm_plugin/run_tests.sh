@@ -96,7 +96,7 @@ run_test local_containers_test "PASS: All local containers tests passed"
 run_test test_stl_containers "STL Container Test" "All tests passed"
 
 # Map find regression test
-run_test test_stl_map_find "map find regression test" "PASS: map find test passed"
+run_test test_stl_map_find "std::map::find regression test" "PASS: map find test passed"
 
 # Argument trace test
 run_test test_tm_arg_trace "argument trace test" "PASS: argument trace test passed"
@@ -120,6 +120,33 @@ echo "All annotation detections verified."
 
 # Retry test: verifies longjmp/sigsetjmp for transaction retry
 run_test retry "retry" "longjmp" "Test PASSED" "final counter = 3"
+
+# ---- Opaque symbol resolution test ----
+echo "===== Testing tm-resolve-opaque ====="
+if [ ! -x ./bin/test_math_opaque ]; then
+    echo "  Skipping (bin/test_math_opaque not built)"
+else
+    echo "  Running math opaque test..."
+    ./bin/test_math_opaque > out/test_math_opaque.actual.txt
+    if grep -q "Math opaque test PASSED" out/test_math_opaque.actual.txt; then
+        echo "  math_opaque binary: OK"
+    else
+        echo "  math_opaque binary: FAILED" >&2
+        exit 1
+    fi
+fi
+if [ -f /tmp/opaque_symbols.txt ] && command -v python3 &>/dev/null; then
+    echo "  Running tm-resolve-opaque.py..."
+    python3 tm-resolve-opaque.py --symbols /tmp/opaque_symbols.txt \
+        --output /tmp/tm-opaque-resolved --verbose > out/opaque_resolve.txt 2>&1
+    if grep -q "Resolved:   5" out/opaque_resolve.txt; then
+        echo "  Opaque symbol resolution: OK (5/5 resolved)"
+    else
+        echo "  Opaque symbol resolution: WARN (resolve incomplete)" >&2
+    fi
+else
+    echo "  Skipping resolve test (no symbol file or python3)"
+fi
 
 # ---- Python source-level instrumenter tests ----
 echo "===== Python clang-tm.py instrumenter ====="

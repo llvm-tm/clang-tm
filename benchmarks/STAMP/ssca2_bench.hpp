@@ -172,6 +172,15 @@ inline void ssca2_generate_graph() {
     build_csr(data);
     data->num_edges = data->edges.size();
     g_ssca2 = data;
+
+    printf("Number of processors:       %i\n", g_num_threads);
+    printf("Problem Scale:              %i\n", data->scale);
+    printf("Max parallel edges:         %i\n", data->max_paral_edges);
+    printf("Percent int weights:        %f\n", data->perc_int_weights);
+    printf("Probability unidirectional: %f\n", data->prob_unidirectional);
+    printf("Vertices: %lu  Edges: %lu\n",
+           (unsigned long)data->num_vertices, (unsigned long)data->num_edges);
+    fflush(stdout);
 }
 
 TX static bool ssca2_has_edge(SSCA2Data* data, uint64_t src, uint64_t dst) {

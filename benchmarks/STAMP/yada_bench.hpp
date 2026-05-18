@@ -2,8 +2,10 @@
 
 #include "stamp_common.hpp"
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <fstream>
 #include <map>
 #include <queue>
@@ -48,7 +50,7 @@ struct TM YadaData {
     int total_added;
 };
 
-static YadaData* g_yada = nullptr;
+TM static YadaData* g_yada = nullptr;
 
 static double point_dist2(const YadaPoint& a, const YadaPoint& b) {
     double dx = a.x - b.x, dy = a.y - b.y;
@@ -58,26 +60,26 @@ static double point_dist2(const YadaPoint& a, const YadaPoint& b) {
 static void circumcircle_center(double& cx, double& cy, double& cr,
                                  const YadaPoint& a, const YadaPoint& b, const YadaPoint& c) {
     double d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
-    if (std::abs(d) < 1e-15) { cr = 1e15; cx = cy = 0; return; }
+    if ((d < 0 ? -d : d) < 1e-15) { cr = 1e15; cx = cy = 0; return; }
     cx = ((a.x * a.x + a.y * a.y) * (b.y - c.y) +
           (b.x * b.x + b.y * b.y) * (c.y - a.y) +
           (c.x * c.x + c.y * c.y) * (a.y - b.y)) / d;
     cy = ((a.x * a.x + a.y * a.y) * (c.x - b.x) +
           (b.x * b.x + b.y * b.y) * (a.x - c.x) +
           (c.x * c.x + c.y * c.y) * (b.x - a.x)) / d;
-    cr = std::sqrt(point_dist2({cx, cy}, a));
+    cr = tm_sqrt(point_dist2({cx, cy}, a));
 }
 
 static double triangle_min_angle(const YadaPoint& a, const YadaPoint& b, const YadaPoint& c) {
     auto angle = [](const YadaPoint& p, const YadaPoint& q, const YadaPoint& r) {
-        double d1 = std::sqrt(point_dist2(p, q));
-        double d2 = std::sqrt(point_dist2(p, r));
-        double d3 = std::sqrt(point_dist2(q, r));
+        double d1 = tm_sqrt(point_dist2(p, q));
+        double d2 = tm_sqrt(point_dist2(p, r));
+        double d3 = tm_sqrt(point_dist2(q, r));
         if (d1 < 1e-15 || d2 < 1e-15) return 180.0;
         double dot = ((q.x - p.x) * (r.x - p.x) + (q.y - p.y) * (r.y - p.y)) / (d1 * d2);
         if (dot < -1.0) dot = -1.0;
         if (dot > 1.0) dot = 1.0;
-        return std::acos(dot) * 180.0 / M_PI;
+        return tm_acos(dot) * 180.0 / M_PI;
     };
     return std::min({angle(a, b, c), angle(b, a, c), angle(c, a, b)});
 }
@@ -383,7 +385,9 @@ TX static bool yada_retriangulate(YadaData* data, int el_id, Region& region) {
         data->total_added++;
     }
 
-    data->elements[new_id] = new_el;
+    if (border_count > 0) {
+        data->elements[new_id] = new_el;
+    }
     return true;
 }
 
@@ -397,7 +401,7 @@ THREAD void worker_yada(ThreadData* td) {
         return false;
     };
 
-    for (;;) {
+    for (int iter = 0; iter < td->loops && !stop_workers; iter++) {
         int el_id = -1;
 
         if (!data->work_heap.empty()) {

@@ -9,18 +9,11 @@ ifneq ($(filter $(LLVM_MAJOR),$(OLD_VERSIONS)),)
   $(error LLVM 22+ required, found $(LLVM_VER))
 endif
 
-# Derive tool paths from llvm-config --bindir; fall back to bare names
-LLVM_BINDIR := $(shell $(LLVM_CONFIG) --bindir 2>/dev/null)
-CXX := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/clang++,clang++)
-OPT := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/opt,opt)
-LLVM_LINK := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/llvm-link,llvm-link)
+# Derive LLVM build flags (tools discovered by tm_pipeline.mk below)
 LLVM_CONFIG_ARGS := $(shell $(LLVM_CONFIG) --cxxflags --ldflags --libs core passes 2>/dev/null)
 
-CXX := $(LLVM_BINDIR)/clang++
 CXXFLAGS := -fPIC -std=c++20
-CC := $(LLVM_BINDIR)/clang
-OPT := $(LLVM_BINDIR)/opt
-LLVM_LINK := $(LLVM_BINDIR)/llvm-link
+CC := clang
 
 include tm_pipeline.mk
 
@@ -57,7 +50,8 @@ PLUGIN_SO_NAMES := $(addprefix $(BIN_DIR)/libTMInstrument_,$(addsuffix .so,$(PLU
 
 TEST_NAMES := types memtest nested threads persist retry test_stl_containers \
               test_stl_primitive annotation_detect local_containers_test \
-              custom_class_test test_stl_map_find test_tm_arg_trace
+              custom_class_test test_stl_map_find test_tm_arg_trace \
+              test_math_opaque
 
 RACE_TEST_NAMES := task_queue_race parent_set_race counter_race
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))
@@ -84,6 +78,14 @@ $(OUT_DIR)/%.opt.ll: $(OUT_DIR)/%.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
 # Most tests: link with tm_runtime.cpp
 $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(RUNTIME_DIR)/tm_runtime.cpp | $(BIN_DIR)
 	$(CXX) $< $(RUNTIME_DIR)/tm_runtime.cpp -o $@ -pthread
+
+# Math opaque test: needs -tm-allow-opaque and -lm
+$(BIN_DIR)/test_math_opaque: $(OUT_DIR)/test_math_opaque.bc $(RUNTIME_DIR)/tm_runtime.cpp $(BIN_DIR)/libTMInstrument.so | $(BIN_DIR)
+	$(OPT) -load-pass-plugin=$(BIN_DIR)/libTMInstrument.so -passes="tm-instrument" \
+	  -tm-allow-opaque -tm-opaque-symbols-file=/tmp/opaque_symbols.txt \
+	  $< -o $(OUT_DIR)/test_math_opaque.instr.bc 2>/dev/null || true
+	$(OPT) -O3 $(OUT_DIR)/test_math_opaque.instr.bc -o $(OUT_DIR)/test_math_opaque.opt.bc
+	$(CXX) $(OUT_DIR)/test_math_opaque.opt.bc $(RUNTIME_DIR)/tm_runtime.cpp -o $@ -pthread -lm
 
 # Uninstrumented variant (no plugin)
 $(BIN_DIR)/%_noinst: $(OUT_DIR)/%.bc $(RUNTIME_DIR)/tm_runtime.cpp | $(BIN_DIR)

@@ -34,6 +34,9 @@ using namespace llvm;
 namespace tm_method_instrumentation
 {
 
+// Clone mode: Instrument clones immediately, or mark for later inlining
+enum class CloneMode { Instrument, AlwaysInline };
+
 struct TMMethodInfo {
     Function *Original;
     Function *Cloned;
@@ -219,10 +222,11 @@ static void instrumentLoadsStoresInFunction(Function *, Module *,
                                              const TMRuntimeHooks &) {}
 #endif
 
-static Function *cloneMethodWithSuffix(Function *Original, const Twine &Suffix,
-                                        Module *M, LLVMContext &Ctx,
-                                        SmallPtrSetImpl<const GlobalVariable *> &TMG,
-                                        const TMRuntimeHooks &H)
+static Function *cloneMethod(Function *Original, const Twine &Suffix,
+                              Module *M, LLVMContext &Ctx,
+                              SmallPtrSetImpl<const GlobalVariable *> &TMG,
+                              const TMRuntimeHooks &H,
+                              CloneMode Mode = CloneMode::Instrument)
 {
     FunctionType *FTy = Original->getFunctionType();
     Function *NewFunc = Function::Create(
@@ -242,14 +246,18 @@ static Function *cloneMethodWithSuffix(Function *Original, const Twine &Suffix,
                       nullptr);
 
     NewFunc->setDSOLocal(true);
-    NewFunc->addFnAttr(llvm::Attribute::NoInline);
-    NewFunc->addFnAttr(llvm::Attribute::OptimizeNone);
+    if (Mode == CloneMode::AlwaysInline) {
+        NewFunc->addFnAttr(llvm::Attribute::AlwaysInline);
+    } else {
+        NewFunc->addFnAttr(llvm::Attribute::NoInline);
+        NewFunc->addFnAttr(llvm::Attribute::OptimizeNone);
+        instrumentLoadsStoresInFunction(NewFunc, M, H);
+    }
 
-    instrumentLoadsStoresInFunction(NewFunc, M, H);
-
-    TM_DEBUG("Cloned method %s -> %s",
+    TM_DEBUG("Cloned method %s -> %s (%s)",
             Original->getName().str().c_str(),
-            NewFunc->getName().str().c_str());
+            NewFunc->getName().str().c_str(),
+            Mode == CloneMode::AlwaysInline ? "alwaysinline" : "instrumented");
 
     return NewFunc;
 }
@@ -380,18 +388,14 @@ static void redirectCallsToClones(Function &F, Module &M,
     }
 }
 
-// Main entry point: clone all non-TX functions in the TX-reachable call graph.
-// Each clone gets instrumented loads/stores, and calls within clones are
-// redirected to their cloned callees.  This mirrors the paper's approach:
-// the transitive call tree from a transaction is fully instrumented, while
-// original functions stay clean for non-TM code.
-//
-// Returns the global clone map so callers can also redirect calls within
-// original TX functions to cloned callees.
+// Clone all non-TX functions in the TX-reachable call graph.
+// Mode controls whether clones get full instrumentation or alwaysinline.
+// Returns the global clone map so callers can redirect TX function calls.
 static SmallVector<std::pair<Function *, Function *>, 32> &
 cloneTxReachableGraph(Module &M,
                       SmallPtrSetImpl<Function *> &TxReachableFuncs,
-                      const TMRuntimeHooks &H)
+                      const TMRuntimeHooks &H,
+                      CloneMode Mode = CloneMode::Instrument)
 {
     SmallPtrSet<const GlobalVariable *, 16> TMG;
     collectTMGlobalsCached(M, TMG);
@@ -411,87 +415,12 @@ cloneTxReachableGraph(Module &M,
             if (pair.first == F) { alreadyCloned = true; break; }
         if (alreadyCloned) continue;
 
-        Function *Cloned = cloneMethodWithSuffix(F, "_tm_clone", &M, M.getContext(), TMG, H);
+        Function *Cloned = cloneMethod(F, "_tm_clone", &M, M.getContext(), TMG, H, Mode);
         ClonedMap.push_back({F, Cloned});
     }
 
     // Pass 2: redirect all cloned functions (ClonedMap is complete, so all
     // intra-clone calls can be redirected regardless of processing order).
-    for (auto &pair : ClonedMap)
-        redirectCallsToClones(*pair.second, M, TxReachableFuncs, ClonedMap);
-
-    return ClonedMap;
-}
-
-// ---- Variants for the "inline-first-then-instrument" pipeline ----
-//
-// Unlike cloneTxReachableGraph which clones AND instruments, these
-// functions only clone (no instrumentation) and mark the clones with
-// `alwaysinline`.  The caller is expected to run AlwaysInlinerPass,
-// then TMInstrumentPass to instrument the now-expanded TX functions.
-
-static Function *cloneMethodForInline(Function *Original, const Twine &Suffix,
-                                       Module *M, LLVMContext &Ctx,
-                                       SmallPtrSetImpl<const GlobalVariable *> &TMG,
-                                       const TMRuntimeHooks &H)
-{
-    FunctionType *FTy = Original->getFunctionType();
-    Function *NewFunc = Function::Create(
-        FTy, GlobalValue::PrivateLinkage, Original->getAddressSpace(),
-        Original->getName() + Suffix, M);
-
-    ValueToValueMapTy VMap;
-    Function::arg_iterator DestI = NewFunc->arg_begin();
-    for (const Argument &I : Original->args()) {
-        DestI->setName(I.getName());
-        VMap[&I] = &*DestI++;
-    }
-
-    SmallVector<ReturnInst *, 8> Returns;
-    CloneFunctionInto(NewFunc, Original, VMap,
-                      CloneFunctionChangeType::LocalChangesOnly, Returns, "",
-                      nullptr);
-
-    NewFunc->setDSOLocal(true);
-    NewFunc->addFnAttr(llvm::Attribute::AlwaysInline);
-    // No instrumentLoadsStoresInFunction — the clone will be inlined
-    // and instrumented inside the TX function instead.
-
-    TM_DEBUG("Cloned method for inline %s -> %s",
-            Original->getName().str().c_str(),
-            NewFunc->getName().str().c_str());
-
-    return NewFunc;
-}
-
-static SmallVector<std::pair<Function *, Function *>, 32> &
-cloneTxReachableGraphForInline(Module &M,
-                               SmallPtrSetImpl<Function *> &TxReachableFuncs,
-                               const TMRuntimeHooks &H)
-{
-    SmallPtrSet<const GlobalVariable *, 16> TMG;
-    collectTMGlobalsCached(M, TMG);
-    auto &ClonedMap = getClonedMethodsMap();
-
-    computeTMTracedArgs(M, TxReachableFuncs);
-    SmallPtrSet<Function *, 32> ToClone = computeClonableFunctions(M, TxReachableFuncs);
-
-    // Pass 1: clone all functions first (so ClonedMap is complete)
-    for (Function *F : ToClone) {
-        if (F->isDeclaration()) continue;
-        if (F->getName().starts_with("tm_")) continue;
-        if (hasAnnotation(*F, "transaction")) continue;
-
-        bool alreadyCloned = false;
-        for (auto &pair : ClonedMap)
-            if (pair.first == F) { alreadyCloned = true; break; }
-        if (alreadyCloned) continue;
-
-        Function *Cloned = cloneMethodForInline(F, "_tm_clone", &M, M.getContext(), TMG, H);
-        ClonedMap.push_back({F, Cloned});
-    }
-
-    // Pass 2: redirect all cloned functions (ClonedMap is complete)
     for (auto &pair : ClonedMap)
         redirectCallsToClones(*pair.second, M, TxReachableFuncs, ClonedMap);
 

@@ -378,16 +378,6 @@ write_word_ctl(                                               //
 		if (is_locked)
 			continue; // spin until the lock is released
 
-		if (((uintptr_t)addr >> 40) == 0x7f) {
-			fprintf(stderr, "ERROR: tm_write called on stack-like address %p (sz=%d)\n", addr, (int)sz);
-			fprintf(stderr, "  CALL STACK:\n");
-			void *bt[16];
-			int bt_sz = backtrace(bt, 16);
-			backtrace_symbols_fd(bt, bt_sz, STDERR_FILENO);
-			fflush(stderr);
-			std::abort();
-		}
-
 		WriteLogEntry_wbctl w;          // Create a new entry in writeset
 		w.new_val = val;                // new val to write-back on commit
 		w.type = sz;

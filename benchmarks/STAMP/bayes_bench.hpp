@@ -127,6 +127,18 @@ inline void bayes_generate_network() {
         ? -0.5 * std::log((double)data->num_record) * g_bayes_i
         : 0.0;
     g_bayes = data;
+
+    printf("Random seed                = %i\n", g_bayes_s);
+    printf("Number of vars             = %i\n", g_bayes_v);
+    printf("Number of records          = %i\n", g_bayes_r);
+    printf("Max num parents            = %i\n", g_bayes_n);
+    printf("%% chance of parent         = %i\n", g_bayes_p);
+    printf("Insert penalty             = %i\n", g_bayes_i);
+    printf("Max num edge learned / var = %i\n", g_bayes_e);
+    printf("Operation quality factor   = %f\n", data->quality_factor);
+    printf("Generating data... done.\n");
+    printf("Learning structure...\n");
+    fflush(stdout);
 }
 
 static bool has_path(BayesData* data, int from, int to) {

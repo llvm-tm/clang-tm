@@ -1,0 +1,10 @@
+STAMP Benchmark Suite (Full Specification)
+========================================
+Benchmark: bayes
+Threads:   16
+
+Results
+=======
+Elapsed:    9 ms
+Total ops: 16
+Aborts:    0
