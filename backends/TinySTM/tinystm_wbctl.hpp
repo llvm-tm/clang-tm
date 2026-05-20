@@ -124,8 +124,9 @@ abort_tx()  //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
-	tx->unlock_held_locks_and_clear();
+		tx->unlock_held_locks_and_clear();
 	tx->abort_count++;
+	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
 	// printf("THR%llu abort_tx (%i)\n", tx->id, tx->abort_count);
 	// std::atomic_thread_fence(std::memory_order_acq_rel);
 	if (tx->abort_count > 5) { // Magic number
@@ -291,17 +292,10 @@ read_word_ctl(                                                //
 	TINYSTM_ASSERT(!lock->is_locked_by(tx->id), "wbctl locks at commit time");
 	volatile word_t l = lock->get();
 
-	auto r = tx->read_set.find(addr);
-	if (r != tx->read_set.end() && r->second.type == sz) { // found in read-set
-		word_t current_version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
-		if (current_version > r->second.observed_version && !extend())
-			abort_tx();
-		// Always re-read from memory — the value may have been modified via
-		// non-TM stores (e.g. iterator ++ on stack), making the cached value
-		// stale. Keeping the version validation ensures commit-time correctness.
-		any_type_t value = read_value_from_addr(addr, sz);
-		return value;
-	}
+	// NOTE: Every read goes through the full double-check protocol below.
+	// DO NOT add a read_set cache shortcut here — doing so skips the second
+	// lock read (double-check) and allows observing values written after the
+	// transaction's snapshot point, violating opacity (see docs/proofs.md §4.1).
 
 	while (true) {
 		if ((l & OWNED_MASK) != 0) {

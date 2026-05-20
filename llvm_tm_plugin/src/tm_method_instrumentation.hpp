@@ -92,6 +92,16 @@ static bool tracesToTMGlobal(Value *Ptr, Module &M)
             Current = const_cast<Value*>(GEP->getPointerOperand());
         } else if (const LoadInst *Load = dyn_cast<LoadInst>(Current)) {
             Current = const_cast<Value*>(Load->getPointerOperand());
+        } else if (auto *Call = dyn_cast<CallInst>(Current)) {
+            // Trace through TM clone call returns: if `this` (arg 0) of a
+            // TM-cloned method traces to a TM global, the return pointer does too.
+            Function *Callee = Call->getCalledFunction();
+            if (Callee && Callee->getName().ends_with("_tm_clone") &&
+                Call->arg_size() > 0) {
+                Current = Call->getArgOperand(0);
+            } else {
+                break;
+            }
         } else {
             break;
         }
@@ -251,6 +261,13 @@ static Function *cloneMethod(Function *Original, const Twine &Suffix,
     } else {
         NewFunc->addFnAttr(llvm::Attribute::NoInline);
         NewFunc->addFnAttr(llvm::Attribute::OptimizeNone);
+        // Propagate TMTracedArgs from original to clone BEFORE instrumentation.
+        // This is critical: isTMTracedPtr (called from instrumentLoadsStoresInFunction)
+        // needs the clone's entry to exist so that ALL pointer args (not just those
+        // directly tracing to TM globals) are treated as traced.
+        auto OrigIt = TMTracedArgs.find(Original);
+        if (OrigIt != TMTracedArgs.end())
+            TMTracedArgs[NewFunc] = OrigIt->second;
         instrumentLoadsStoresInFunction(NewFunc, M, H);
     }
 
@@ -296,6 +313,20 @@ static void computeTMTracedArgs(Module &M,
                     if (callArgTracesToTMGlobal(Call, i, M))
                         TMTracedArgs[Callee].insert(i);
             }
+        }
+    }
+    // Propagate: if a function has at least one TM-traced pointer arg,
+    // mark ALL pointer-type args as TM-traced.  This ensures cloned
+    // functions instrument accesses through ALL pointer args, not just
+    // those that directly trace to a TM global.  Without this, a cloned
+    // helper like __tree_balance_after_insert would skip instrumentation
+    // on the new heap node (arg 1), corrupting the tree under concurrent
+    // access.
+    for (auto &[F, TracedSet] : TMTracedArgs) {
+        if (TracedSet.empty() || F->isDeclaration()) continue;
+        for (unsigned i = 0; i < F->arg_size(); i++) {
+            if (F->getArg(i)->getType()->isPointerTy())
+                TracedSet.insert(i);
         }
     }
 }
@@ -354,6 +385,18 @@ static void redirectCallsToClones(Function &F, Module &M,
             for (unsigned i = 0; i < Call->arg_size(); i++)
                 if (callArgTracesToTMGlobal(Call, i, M))
                     { hasTMArg = true; break; }
+            // Fallback: in cloned functions, TM globals flow through
+            // tm_read_ptr/tm_write_ptr chains that tracesFromTMGlobal
+            // cannot follow (it deliberately stops at tm_ calls).  Use
+            // TMTracedArgs computed from the direct TX function calls
+            // instead.  If the callee has at least one TM-traced arg in
+            // the direct call graph, redirect — the clone exists for
+            // TM data access and all its callees should use clones too.
+            if (!hasTMArg) {
+                auto it = TMTracedArgs.find(Callee);
+                if (it != TMTracedArgs.end() && !it->second.empty())
+                    hasTMArg = true;
+            }
             if (!hasTMArg) continue;
 
             for (auto &pair : ClonedMap) {

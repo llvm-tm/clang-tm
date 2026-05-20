@@ -24,6 +24,7 @@ static const OpaqueSafeEntry KnownSafeOpaqueTable[] = {
     {"exit", false}, {"abort", false},
     {"strlen", false}, {"strcmp", false}, {"strncmp", false},
     {"memcmp", false}, {"memcpy", false}, {"memset", false}, {"memmove", false},
+    {"wmemchr", false},
 };
 
 static constexpr size_t KnownSafeOpaqueTableSize =
