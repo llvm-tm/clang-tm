@@ -296,7 +296,11 @@ read_word_ctl(                                                //
 		word_t current_version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
 		if (current_version > r->second.observed_version && !extend())
 			abort_tx();
-		return r->second.observed_val;
+		// Always re-read from memory — the value may have been modified via
+		// non-TM stores (e.g. iterator ++ on stack), making the cached value
+		// stale. Keeping the version validation ensures commit-time correctness.
+		any_type_t value = read_value_from_addr(addr, sz);
+		return value;
 	}
 
 	while (true) {
