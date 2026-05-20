@@ -43,7 +43,6 @@ thread_local uint64_t g_tm_tx_write_set{0};
 static std::atomic<uint64_t> g_tm_begin_count{0};
 static std::atomic<uint64_t> g_tm_end_count{0};
 static std::atomic<uint64_t> g_tm_tx_count{0};
-
 void tm_init() { tinystm::init(); }
 
 void tm_exit() {
@@ -53,6 +52,10 @@ void tm_exit() {
 		(unsigned long long)g_tm_max_read_set.load(),
 		(unsigned long long)g_tm_max_write_set.load());
 #endif
+	if (auto ac = tinystm::g_tm_abort_count.load(); ac > 0) {
+		fprintf(stderr, "\n=== TinySTM total aborts = %llu ===\n",
+			(unsigned long long)ac);
+	}
 }
 
 void tm_init_thread()

@@ -306,6 +306,7 @@ tm_write(                    //
 extern std::atomic<word_t> g_clock;
 extern std::atomic<tinystm::word_t> thr_counter;
 extern std::atomic<tinystm::word_t> reset_locks_thr;
+extern std::atomic<uint64_t> g_tm_abort_count;
 extern thread_local bool rng_initialized;
 extern thread_local std::mt19937 rng;
 

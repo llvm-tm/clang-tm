@@ -15,6 +15,7 @@ thread_local std::mt19937 rng;
 std::atomic<tinystm::word_t> reset_locks_thr{0};
 std::atomic<tinystm::word_t> g_clock{1};
 std::atomic<tinystm::word_t> thr_counter{1};
+std::atomic<uint64_t> g_tm_abort_count{0};
 __thread sigjmp_buf *jmpbuf;
 } // namespace tinystm
 #elif defined(DESIGN_WBCTL)
@@ -28,6 +29,7 @@ thread_local std::mt19937 rng;
 std::atomic<tinystm::word_t> reset_locks_thr{0};
 std::atomic<tinystm::word_t> g_clock{1};
 std::atomic<tinystm::word_t> thr_counter{1};
+std::atomic<uint64_t> g_tm_abort_count{0};
 __thread sigjmp_buf *jmpbuf;
 } // namespace tinystm
 #elif defined(DESIGN_WT)
