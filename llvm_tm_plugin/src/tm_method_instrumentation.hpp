@@ -101,7 +101,7 @@ static bool tracesToTMGlobal(Value *Ptr, Module &M)
 
 // Replace llvm.memcpy/memmove/memset on TM globals with per-byte instrumented loops.
 #ifndef DISABLE_TM_READ_WRITE
-static void instrumentMemoryIntrinsic(CallInst *Call, Module &M,
+static void instrumentMemoryIntrinsic(CallBase *Call, Module &M,
                                       const TMRuntimeHooks &H) {
     LLVMContext &Ctx = M.getContext();
     auto *i8Ty = Type::getInt8Ty(Ctx);
@@ -417,6 +417,17 @@ cloneTxReachableGraph(Module &M,
 
         Function *Cloned = cloneMethod(F, "_tm_clone", &M, M.getContext(), TMG, H, Mode);
         ClonedMap.push_back({F, Cloned});
+    }
+
+    // Pass 1.5: propagate TMTracedArgs from originals to clones.
+    // Since argument positions are preserved during cloning, the same
+    // argument indices apply to both original and clone. This ensures
+    // isTMTracedPtr works correctly inside cloned functions.
+    for (auto &pair : ClonedMap) {
+        auto OrigIt = TMTracedArgs.find(pair.first);
+        if (OrigIt != TMTracedArgs.end()) {
+            TMTracedArgs[pair.second] = OrigIt->second;
+        }
     }
 
     // Pass 2: redirect all cloned functions (ClonedMap is complete, so all

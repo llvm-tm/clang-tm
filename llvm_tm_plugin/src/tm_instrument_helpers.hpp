@@ -147,9 +147,9 @@ static void instrumentThreadEntries(Module &M,
 // Shared function-level helpers (used by both TMInstrumentPass and TMInstrumentInlinePass)
 // ===========================================================================
 
-static bool handleMemoryIntrinsic(CallInst *Call, Module &M,
-                                   const TMRuntimeHooks &H,
-                                   SmallVectorImpl<Instruction *> *ToErase = nullptr)
+static bool handleMemoryIntrinsic(CallBase *Call, Module &M,
+                                    const TMRuntimeHooks &H,
+                                    SmallVectorImpl<Instruction *> *ToErase = nullptr)
 {
     Function *Callee = Call->getCalledFunction();
     if (!Callee) return false;
@@ -167,20 +167,34 @@ static bool handleMemoryIntrinsic(CallInst *Call, Module &M,
     return true;
 }
 
-static bool handleMallocFree(CallInst *Call, IRBuilder<> &B,
+// Replace a malloc/free/operator-new call with the TM-aware equivalent.
+// Handles both CallInst and InvokeInst. For InvokeInst, the invoke is
+// replaced with a regular call + branch to the normal successor; the
+// unwind landing pad becomes dead code and is cleaned up by later passes.
+static bool handleMallocFree(CallBase *Call, IRBuilder<> &B,
                               const TMRuntimeHooks &H,
                               SmallVectorImpl<Instruction *> &ToErase)
 {
     Function *Callee = Call->getCalledFunction();
     if (!Callee || Callee->getName().starts_with("tm_")) return false;
 
+    bool isInvoke = isa<InvokeInst>(Call);
+    BasicBlock *NormalDest = isInvoke ? cast<InvokeInst>(Call)->getNormalDest() : nullptr;
+    BasicBlock *ParentBB = Call->getParent();
+
     StringRef N = Callee->getName();
-    if (N == "malloc") {
+    if (N == "malloc" || N == "_Znwm" || N == "_Znam" || N == "_Znwj" || N == "_Znaj") {
         Value *SizeArg = Call->getArgOperand(0);
         auto *NewCall = B.CreateCall(H.malloc_fn, {SizeArg});
         NewCall->setAttributes(AttributeList{});
         Call->replaceAllUsesWith(NewCall);
-        ToErase.push_back(Call);
+        if (isInvoke) {
+            Call->eraseFromParent();
+            IRBuilder<> TBuilder(ParentBB);
+            TBuilder.CreateBr(NormalDest);
+        } else {
+            ToErase.push_back(Call);
+        }
         return true;
     }
     if (N == "calloc") {
@@ -189,7 +203,13 @@ static bool handleMallocFree(CallInst *Call, IRBuilder<> &B,
         auto *NewCall = B.CreateCall(H.calloc_fn, {Nmemb, Size});
         NewCall->setAttributes(AttributeList{});
         Call->replaceAllUsesWith(NewCall);
-        ToErase.push_back(Call);
+        if (isInvoke) {
+            Call->eraseFromParent();
+            IRBuilder<> TBuilder(ParentBB);
+            TBuilder.CreateBr(NormalDest);
+        } else {
+            ToErase.push_back(Call);
+        }
         return true;
     }
     if (N == "realloc") {
@@ -198,14 +218,26 @@ static bool handleMallocFree(CallInst *Call, IRBuilder<> &B,
         auto *NewCall = B.CreateCall(H.realloc_fn, {Ptr, Size});
         NewCall->setAttributes(AttributeList{});
         Call->replaceAllUsesWith(NewCall);
-        ToErase.push_back(Call);
+        if (isInvoke) {
+            Call->eraseFromParent();
+            IRBuilder<> TBuilder(ParentBB);
+            TBuilder.CreateBr(NormalDest);
+        } else {
+            ToErase.push_back(Call);
+        }
         return true;
     }
-    if (N == "free") {
+    if (N == "free" || N == "_ZdlPv" || N == "_ZdlPvm" || N == "_ZdaPv" || N == "_ZdaPvm") {
         Value *PtrArg = Call->getArgOperand(0);
         auto *BC = B.CreateBitCast(PtrArg, B.getPtrTy());
         B.CreateCall(H.free_fn, {BC});
-        ToErase.push_back(Call);
+        if (isInvoke) {
+            Call->eraseFromParent();
+            IRBuilder<> TBuilder(ParentBB);
+            TBuilder.CreateBr(NormalDest);
+        } else {
+            ToErase.push_back(Call);
+        }
         return true;
     }
     return false;

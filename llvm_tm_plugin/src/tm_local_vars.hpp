@@ -48,7 +48,7 @@ static const Value *getBaseObject(const Value *Ptr)
 
 // Check if a call instruction is a heap allocation function
 static bool isHeapAllocationCall(const Value *V) {
-  const auto *Call = dyn_cast<CallInst>(V);
+  const auto *Call = dyn_cast<CallBase>(V);
   if (!Call) return false;
   const Function *F = Call->getCalledFunction();
   if (!F) return false;
@@ -61,7 +61,7 @@ static bool isHeapAllocationCall(const Value *V) {
 
 // Check if a call instruction is a heap deallocation function
 static bool isDeallocationCall(const Value *V) {
-  const auto *Call = dyn_cast<CallInst>(V);
+  const auto *Call = dyn_cast<CallBase>(V);
   if (!Call) return false;
   const Function *F = Call->getCalledFunction();
   if (!F) return false;
@@ -234,9 +234,9 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
     return tracesFromTMGlobal(const_cast<Value *>(Load->getPointerOperand()),
                               M, VisitedAllocas, Depth + 1);
 
-  // Call returning a pointer (e.g. begin()).  If any argument traces to
+  // Call/Invoke returning a pointer (e.g. begin()). If any argument traces to
   // a TM global, the return value inherits that.
-  if (auto *Call = dyn_cast<CallInst>(V)) {
+  if (auto *Call = dyn_cast<CallBase>(V)) {
     if (Function *Callee = Call->getCalledFunction()) {
       if (Callee->getName().starts_with("tm_"))
         return false;
