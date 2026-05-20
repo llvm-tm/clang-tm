@@ -214,12 +214,12 @@ public:
         Instruction *I = &*InstIt++;
         IRBuilder<> B(I->getParent(), I->getIterator());
 #ifndef DISABLE_TM_READ_WRITE
-        if (auto *Call = dyn_cast<CallInst>(I))
+        if (auto *Call = dyn_cast<CallBase>(I))
             if (handleMemoryIntrinsic(Call, *M, H, &ToErase))
                 continue;
 #endif
 #ifndef DISABLE_MALLOC_FREE
-        if (auto *Call = dyn_cast<CallInst>(I))
+        if (auto *Call = dyn_cast<CallBase>(I))
             if (handleMallocFree(Call, B, H, ToErase))
                 continue;
 #endif
@@ -298,12 +298,12 @@ public:
         Instruction *I = &*InstIt++;
         IRBuilder<> B(I->getParent(), I->getIterator());
 #ifndef DISABLE_TM_READ_WRITE
-        if (auto *Call = dyn_cast<CallInst>(I))
+        if (auto *Call = dyn_cast<CallBase>(I))
             if (handleMemoryIntrinsic(Call, *M, H, &ToErase))
                 continue;
 #endif
 #ifndef DISABLE_MALLOC_FREE
-        if (auto *Call = dyn_cast<CallInst>(I))
+        if (auto *Call = dyn_cast<CallBase>(I))
             if (handleMallocFree(Call, B, H, ToErase))
                 continue;
 #endif
