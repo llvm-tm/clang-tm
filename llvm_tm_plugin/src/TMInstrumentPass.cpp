@@ -143,6 +143,22 @@ static void checkOpaqueOrAbort(Module &M,
     }
 }
 
+static void redirectTXFunctionsToClones(Module &M,
+                                         SmallPtrSetImpl<Function *> &TxReachableFuncs,
+                                         SmallVectorImpl<std::pair<Function *, Function *>> &ClonedMap,
+                                         tm_method_instrumentation::CloneMode Mode = tm_method_instrumentation::CloneMode::Instrument)
+{
+    for (auto &F : M) {
+        if (F.isDeclaration()) continue;
+        if (!hasAnnotation(F, "transaction")) continue;
+        tm_method_instrumentation::redirectCallsToClones(F, M, TxReachableFuncs, ClonedMap, Mode);
+    }
+    // Re-redirect clones now that they have callers
+    for (int _r = 0; _r < 3; _r++)
+        for (auto &pair : ClonedMap)
+            tm_method_instrumentation::redirectCallsToClones(*pair.second, M, TxReachableFuncs, ClonedMap, Mode);
+}
+
 // ===========================================================================
 // PASS 1 (inline pipeline): clone-with-alwaysinline + tx_begin/end injection
 // ===========================================================================
@@ -223,7 +239,7 @@ class TMInstrumentInlinePass : public PassInfoMixin<TMInstrumentInlinePass>
 public:
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &)
   {
-    if (!hasAnnotation(F, "transaction")) {
+    if (!hasAnnotation(F, "transaction") && !F.getName().contains("_tm_clone")) {
         return PreservedAnalyses::all();
     }
     Module *M = F.getParent();

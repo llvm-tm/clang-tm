@@ -1,31 +1,50 @@
 #pragma once
 
 /**
- * tm_alloc_overrides.hpp — C++ operator new/delete overrides
+ * tm_alloc_overrides.hpp — Deferred-free / speculative allocation helpers
  *
- * Each runtime .cpp file should #include this header to redirect ALL
- * C++ heap allocations (new, delete, new[], delete[], and their sized,
- * aligned, nothrow variants) through the runtime's tm_malloc/tm_free.
+ * ╔══════════════════════════════════════════════════════════════════════╗
+ * ║  CRITICAL: The runtime's own data structures MUST NOT be tracked   ║
+ * ║  as speculative allocations.  The read_set, write_set, and their   ║
+ * ║  internal bucket arrays (std::unordered_map) use the STANDARD      ║
+ * ║  ::operator new/delete directly.  No operator new/delete overrides ║
+ * ║  are provided here — doing so caused a use-after-free on abort:    ║
+ * ║  the bucket arrays were spec-tracked via tm_malloc, then freed     ║
+ * ║  by tm_clear_spec_allocs() while the unordered_map still held      ║
+ * ║  pointers to them.  See commit <FIX>.                             ║
+ * ║                                                                    ║
+ * ║  User code (TX functions) IS instrumented by the LLVM plugin —     ║
+ * ║  the plugin replaces malloc/free/operator new/operator delete      ║
+ * ║  with tm_malloc/tm_free.  This is independent of the runtime       ║
+ * ║  and does NOT go through any header overrides.                     ║
+ * ╚══════════════════════════════════════════════════════════════════════╝
  *
- * This is necessary because std::map, std::vector, and other STL
- * containers allocate internally via operator new/delete.  Without this
- * override, those allocations go to the process heap and are invisible
- * to persistent/shared-memory backends.
+ * This header provides:
+ *   — tm_malloc / tm_free / tm_calloc / tm_realloc   (user alloc wrappers)
+ *   — tm_track_spec_alloc / tm_clear_spec_allocs / tm_flush_spec_allocs
+ *   — tm_flush_deferred_frees / tm_clear_deferred_frees
+ *   — operator new/delete overrides   (INTENTIONALLY OMITTED — see above)
  *
- * The C malloc/free/calloc/realloc are handled separately by the LLVM
- * plugin pass which replaces them with tm_malloc/tm_free calls.
+ * The runtime code (compiled in a separate clang++ invocation, NEVER fed
+ * through the plugin) uses the standard allocator for its internal data.
+ * The plugin-instrumented user code uses explicit tm_malloc/tm_free calls
+ * inserted by the pass, not hidden operator new/delete overrides.
  *
  * DEFERRED FREE (transaction-safety):
- * Inside a transaction, operator delete → tm_free pushes the pointer
- * onto a thread-local deferred-free list rather than calling ::free
- * immediately.  This prevents the "vector reallocation double-free"
- * scenario: if a transaction aborts, the undo log restores container
- * pointers to pre-reallocation values, and the old (deferred-free'd)
- * buffer is still alive because the free was never executed.
+ * Inside a transaction, tm_free pushes the pointer onto a thread-local
+ * deferred-free list rather than calling ::free immediately.
+ *
+ * SPECULATIVE ALLOCATION (abort rollback):
+ * Inside a transaction, tm_malloc adds the pointer to a thread-local
+ * spec-alloc list.  On abort, tm_clear_spec_allocs frees both the
+ * bookkeeping and the user data.  On commit, tm_flush_spec_allocs frees
+ * only the bookkeeping — the user data is now permanent.
  *
  * Each runtime must call:
- *   tm_clear_deferred_frees()  at the start of tm_begin (outer)
- *   tm_flush_deferred_frees()  after successful commit in tm_end (outer)
+ *   tm_clear_spec_allocs()    at the start of tm_begin (outer)
+ *   tm_clear_deferred_frees() at the start of tm_begin (outer)
+ *   tm_flush_spec_allocs()    after successful commit in tm_end (outer)
+ *   tm_flush_deferred_frees() after successful commit in tm_end (outer)
  *
  * NOTE: Persistent pointers:
  * Even with allocations redirected to the persistent mmap, std::map's
@@ -70,6 +89,7 @@ struct SpecAlloc {
 
 extern thread_local SpecAlloc* g_spec_allocs;
 
+#include <malloc/malloc.h>
 // Track a malloc/calloc/realloc result as a speculative allocation.
 inline void tm_track_spec_alloc(void* ptr)
 {
@@ -81,15 +101,33 @@ inline void tm_track_spec_alloc(void* ptr)
     }
 }
 
+// Mark a speculatively-allocated pointer as explicitly freed (via tm_free).
+// Sets node->ptr to nullptr so tm_clear_spec_allocs does NOT double-free it.
+inline void tm_untrack_spec_alloc(void* ptr)
+{
+    if (!g_in_tx || !ptr) return;
+    auto* node = g_spec_allocs;
+    while (node) {
+        if (node->ptr == ptr) {
+            node->ptr = nullptr;    // prevent double-free on abort
+            return;
+        }
+        node = node->next;
+    }
+}
+
 // Free all speculative allocations and their bookkeeping — call on abort
 // (from tm_begin, after a previous TX attempt failed).
+// Entries whose ptr is nullptr have been explicitly freed via tm_free
+// and are skipped — their deallocation will be handled on commit.
 inline void tm_clear_spec_allocs()
 {
     auto* node = g_spec_allocs;
     while (node) {
         auto* next = node->next;
-        std::free(node->ptr);   // free the speculatively-allocated memory
-        std::free(node);        // free the bookkeeping node
+        if (node->ptr)
+            std::free(node->ptr);   // free the speculatively-allocated memory
+        std::free(node);            // free the bookkeeping node
         node = next;
     }
     g_spec_allocs = nullptr;
@@ -161,43 +199,27 @@ inline void tm_clear_deferred_frees()
     g_deferred_frees = nullptr;
 }
 
-// ── operator new ───────────────────────────────────────────
-
-void* operator new(size_t size)                     { return tm_malloc(size); }
-void* operator new(size_t size, std::nothrow_t const&) noexcept { return tm_malloc(size); }
-void* operator new[](size_t size)                   { return tm_malloc(size); }
-void* operator new[](size_t size, std::nothrow_t const&) noexcept { return tm_malloc(size); }
-
-// C++17 aligned new
-void* operator new(size_t size, std::align_val_t align) {
-    (void)align;  // our tm_malloc returns sufficiently aligned memory
-    return tm_malloc(size);
-}
-void* operator new(size_t size, std::align_val_t align, std::nothrow_t const&) noexcept {
-    (void)align; return tm_malloc(size);
-}
-void* operator new[](size_t size, std::align_val_t align) {
-    (void)align; return tm_malloc(size);
-}
-void* operator new[](size_t size, std::align_val_t align, std::nothrow_t const&) noexcept {
-    (void)align; return tm_malloc(size);
-}
-
-// ── operator delete ────────────────────────────────────────
-
-void operator delete(void* ptr) noexcept                        { tm_free(ptr); }
-void operator delete(void* ptr, std::nothrow_t const&) noexcept { tm_free(ptr); }
-void operator delete[](void* ptr) noexcept                      { tm_free(ptr); }
-void operator delete[](void* ptr, std::nothrow_t const&) noexcept { tm_free(ptr); }
-
-// Sized delete (C++14)
-void operator delete(void* ptr, size_t) noexcept   { tm_free(ptr); }
-void operator delete[](void* ptr, size_t) noexcept { tm_free(ptr); }
-
-// Aligned delete (C++17)
-void operator delete(void* ptr, std::align_val_t) noexcept                  { tm_free(ptr); }
-void operator delete(void* ptr, std::align_val_t, std::nothrow_t const&) noexcept { tm_free(ptr); }
-void operator delete[](void* ptr, std::align_val_t) noexcept                { tm_free(ptr); }
-void operator delete[](void* ptr, std::align_val_t, std::nothrow_t const&) noexcept { tm_free(ptr); }
-void operator delete(void* ptr, size_t, std::align_val_t) noexcept          { tm_free(ptr); }
-void operator delete[](void* ptr, size_t, std::align_val_t) noexcept        { tm_free(ptr); }
+// ═══════════════════════════════════════════════════════════════════
+//  operator new / delete overrides are intentionally NOT provided.
+// ═══════════════════════════════════════════════════════════════════
+//
+// WHY: The runtime's own data structures (read_set, write_set,
+//      unordered_map bucket arrays) MUST NOT go through tm_malloc.
+//      If they do, every bucket-array allocation is spec-tracked, and
+//      on abort, tm_clear_spec_allocs() frees the bucket array while
+//      the unordered_map still holds a pointer to it → use-after-free
+//      on the next transaction's clear() → heap corruption → SIGABRT.
+//
+//      This is NOT just theoretical — it was the root cause of the
+//      bank benchmark crash at 2+ threads (all TinySTM variants).
+//
+// HOW user code allocs are handled: The LLVM TM plugin replaces
+//   malloc/free/operator new/operator delete in instrumented user
+//   code with explicit tm_malloc/tm_free calls.  This happens at the
+//   IR level via the plugin pass, NOT via header overrides.  The
+//   runtime code is compiled separately (no plugin), so its own
+//   new/delete go to the standard allocator.  This is correct and
+//   intentional.
+//
+// TL;DR: Runtime internals → standard allocator.
+//        User TM code      → tm_malloc/tm_free (via plugin).

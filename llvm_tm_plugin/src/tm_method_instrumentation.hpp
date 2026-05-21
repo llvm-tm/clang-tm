@@ -245,8 +245,16 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
 
     SmallVector<Instruction *, 16> ToErase;
     for (auto &BB : *F) {
-        for (auto &I : BB) {
-            if (auto *Load = dyn_cast<LoadInst>(&I)) {
+        for (auto InstIt = BB.begin(); InstIt != BB.end();) {
+            Instruction *I = &*InstIt++;
+#ifndef DISABLE_MALLOC_FREE
+            if (auto *Call = dyn_cast<CallBase>(I)) {
+                IRBuilder<> B(I);
+                if (handleMallocFree(Call, B, H, ToErase))
+                    continue;
+            }
+#endif
+            if (auto *Load = dyn_cast<LoadInst>(I)) {
                 Value *Ptr = Load->getPointerOperand();
                 if (!isSharedPointer(Ptr, LocalVars, *F, *M)) continue;
                 if (!isTMTracedPtr(Ptr)) continue;
@@ -255,7 +263,7 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
                     Load->replaceAllUsesWith(Call);
                     ToErase.push_back(Load);
                 }
-            } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
+            } else if (auto *Store = dyn_cast<StoreInst>(I)) {
                 Value *Ptr = Store->getPointerOperand();
                 if (!isSharedPointer(Ptr, LocalVars, *F, *M)) continue;
                 if (!isTMTracedPtr(Ptr)) continue;

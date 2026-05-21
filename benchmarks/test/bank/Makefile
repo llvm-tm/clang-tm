@@ -32,6 +32,12 @@ bank_tl2: bank.cpp | $(BIN_DIR)
 bank_tinystm: bank.cpp | $(BIN_DIR)
 	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/TinySTM_runtime.cpp -I$(BACKENDS)/TinySTM -DDESIGN_WBCTL -o $(BIN_DIR)/$@ $<
 
+bank_tinystm_wbetl: bank.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/TinySTM_runtime.cpp -I$(BACKENDS)/TinySTM -DDESIGN_WBETL -o $(BIN_DIR)/$@ $<
+
+bank_tinystm_wt: bank.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/TinySTM_runtime.cpp -I$(BACKENDS)/TinySTM -DDESIGN_WT -o $(BIN_DIR)/$@ $<
+
 bank_swiss: bank.cpp | $(BIN_DIR)
 	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/SwissTM_runtime.cpp -I$(BACKENDS)/SwissTM -o $(BIN_DIR)/$@ $<
 

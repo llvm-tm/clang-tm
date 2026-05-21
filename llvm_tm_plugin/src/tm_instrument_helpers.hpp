@@ -11,7 +11,6 @@
 #include "tm_annotation_utils.hpp"
 #include "tm_debug.hpp"
 #include "tm_local_vars.hpp"
-#include "tm_method_instrumentation.hpp"
 #include "tm_runtime_hooks.hpp"
 #include "tm_thread_guard.hpp"
 #include "tm_thread_symbols.hpp"
@@ -59,22 +58,6 @@ static ModulePassContext setupModulePass(Module &M)
             collectTransactionCallGraph(F, M, CtxOut.TxReachableFuncs);
     }
     return CtxOut;
-}
-
-static void redirectTXFunctionsToClones(Module &M,
-                                         SmallPtrSetImpl<Function *> &TxReachableFuncs,
-                                         SmallVectorImpl<std::pair<Function *, Function *>> &ClonedMap,
-                                         tm_method_instrumentation::CloneMode Mode = tm_method_instrumentation::CloneMode::Instrument)
-{
-    for (auto &F : M) {
-        if (F.isDeclaration()) continue;
-        if (!hasAnnotation(F, "transaction")) continue;
-        tm_method_instrumentation::redirectCallsToClones(F, M, TxReachableFuncs, ClonedMap, Mode);
-    }
-    // Re-redirect clones now that they have callers
-    for (int _r = 0; _r < 3; _r++)
-        for (auto &pair : ClonedMap)
-            tm_method_instrumentation::redirectCallsToClones(*pair.second, M, TxReachableFuncs, ClonedMap, Mode);
 }
 
 // checkOpaqueOrAbort is defined in TMInstrumentPass.cpp alongside checkOpaqueFunctions
@@ -304,7 +287,8 @@ static bool handleMallocFree(CallBase *Call, IRBuilder<> &B,
     BasicBlock *ParentBB = Call->getParent();
 
     StringRef N = Callee->getName();
-    if (N == "malloc" || N == "_Znwm" || N == "_Znam" || N == "_Znwj" || N == "_Znaj") {
+    if (N == "malloc" || N == "_Znwm" || N == "_Znam" || N == "_Znwj" || N == "_Znaj"
+        || N == "_ZnwmSt11align_val_t" || N == "_ZnamSt11align_val_t") {
         Value *SizeArg = Call->getArgOperand(0);
         auto *NewCall = B.CreateCall(H.malloc_fn, {SizeArg});
         NewCall->setAttributes(AttributeList{});
@@ -348,7 +332,9 @@ static bool handleMallocFree(CallBase *Call, IRBuilder<> &B,
         }
         return true;
     }
-    if (N == "free" || N == "_ZdlPv" || N == "_ZdlPvm" || N == "_ZdaPv" || N == "_ZdaPvm") {
+    if (N == "free" || N == "_ZdlPv" || N == "_ZdlPvm" || N == "_ZdaPv" || N == "_ZdaPvm"
+        || N == "_ZdlPvSt11align_val_t" || N == "_ZdlPvmSt11align_val_t"
+        || N == "_ZdaPvSt11align_val_t" || N == "_ZdaPvmSt11align_val_t") {
         Value *PtrArg = Call->getArgOperand(0);
         auto *BC = B.CreateBitCast(PtrArg, B.getPtrTy());
         B.CreateCall(H.free_fn, {BC});
@@ -386,6 +372,27 @@ static bool handleLoadStore(Instruction *I, Function &F, Module &M,
             if (emitTMWrite(B, Store->getPointerOperand(), Store->getValueOperand(), H))
                 ToErase.push_back(Store);
             return true;
+        }
+    } else if (auto *RMW = dyn_cast<AtomicRMWInst>(I)) {
+        if (isSharedPointer(RMW->getPointerOperand(), LocalVars, F, M)) {
+            IRBuilder<> B(RMW);
+            Value *Old = emitTMRead(B, RMW->getPointerOperand(), RMW->getType(), H);
+            if (!Old) return false;
+            Value *New = nullptr;
+            switch (RMW->getOperation()) {
+            case AtomicRMWInst::Add:    New = B.CreateAdd(Old, RMW->getValOperand()); break;
+            case AtomicRMWInst::Sub:    New = B.CreateSub(Old, RMW->getValOperand()); break;
+            case AtomicRMWInst::And:    New = B.CreateAnd(Old, RMW->getValOperand()); break;
+            case AtomicRMWInst::Or:     New = B.CreateOr(Old, RMW->getValOperand()); break;
+            case AtomicRMWInst::Xor:    New = B.CreateXor(Old, RMW->getValOperand()); break;
+            case AtomicRMWInst::Xchg:   New = RMW->getValOperand(); break;
+            default: return false;
+            }
+            if (emitTMWrite(B, RMW->getPointerOperand(), New, H)) {
+                RMW->replaceAllUsesWith(Old);
+                ToErase.push_back(RMW);
+                return true;
+            }
         }
     }
     return false;

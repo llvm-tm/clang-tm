@@ -39,6 +39,8 @@ static const Value *getBaseObject(const Value *Ptr)
       Result = GEP->getPointerOperand();
     } else if (const auto *GEP = dyn_cast<const GEPOperator>(Result)) {
       Result = GEP->getPointerOperand();
+    } else if (const auto *Load = dyn_cast<const LoadInst>(Result)) {
+      Result = Load->getPointerOperand();
     } else {
       break;
     }

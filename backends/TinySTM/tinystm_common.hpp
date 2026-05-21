@@ -223,6 +223,17 @@ public:
 	bool read_only = true;
 	int abort_count = 0;
 	int nesting = 1;
+	// ═══════════════════════════════════════════════════════════════
+	//  CRITICAL: These containers use the STANDARD allocator.
+	// ═══════════════════════════════════════════════════════════════
+	// They are part of the runtime (compiled separately, NEVER fed
+	// through the TM plugin).  Their internal bucket-array allocations
+	// go through ::operator new → direct heap (no tm_malloc, no spec
+	// tracking).  This is intentional: if they were spec-tracked, an
+	// abort would free the bucket arrays while the unordered_map still
+	// holds a pointer to them → use-after-free on the next begin().
+	//
+	// See tm_alloc_overrides.hpp for the full discussion.
 	std::unordered_map<void *, ReadLogEntry> read_set;
 	std::unordered_map<void *, WriteLogEntry> write_set;
 	std::vector<Lock *> locks_held;

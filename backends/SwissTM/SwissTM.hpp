@@ -21,6 +21,7 @@
 #include <random>
 #include <thread>
 #include <chrono>
+#include <type_traits>
 
 namespace swisstm {
 
@@ -222,753 +223,184 @@ public:
         cm_on_rollback(tx);
     }
     
+    // ---- ValueData helpers ----
+    template <typename T>
+    static void set_value(ValueData& vd, T val) {
+        if constexpr (std::is_same_v<T, uint8_t>) vd.u8 = val;
+        else if constexpr (std::is_same_v<T, uint16_t>) vd.u16 = val;
+        else if constexpr (std::is_same_v<T, uint32_t>) vd.u32 = val;
+        else if constexpr (std::is_same_v<T, uint64_t>) vd.u64 = val;
+        else if constexpr (std::is_same_v<T, float>) vd.f = val;
+        else if constexpr (std::is_same_v<T, double>) vd.d = val;
+        else vd.ptr = static_cast<void*>(val);
+    }
+    
+    template <typename T>
+    static T get_value(const ValueData& vd) {
+        if constexpr (std::is_same_v<T, uint8_t>) return vd.u8;
+        else if constexpr (std::is_same_v<T, uint16_t>) return vd.u16;
+        else if constexpr (std::is_same_v<T, uint32_t>) return vd.u32;
+        else if constexpr (std::is_same_v<T, uint64_t>) return vd.u64;
+        else if constexpr (std::is_same_v<T, float>) return vd.f;
+        else if constexpr (std::is_same_v<T, double>) return vd.d;
+        else return static_cast<T>(vd.ptr);
+    }
+    
+    // ---- Generic read implementation ----
+    template <typename T, ValueType VT>
+    static T read_impl(T* addr, TxDescriptor* tx) {
+        if (!tx || !tx->active) return *addr;
+        
+        word_t* waddr = get_word_addr(addr);
+        OwnershipRecord* orec = get_orec(waddr);
+        
+        for (auto& e : tx->write_log) {
+            if (e.byte_addr == addr && e.type == VT) {
+                return get_value<T>(e.new_value);
+            }
+        }
+        
+        word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
+        if (is_locked_by(w_lock_val, tx)) {
+            return get_value<T>(((WriteLogEntry*)w_lock_val)->new_value);
+        }
+        
+        word_t version;
+        while (true) {
+            version = orec->r_lock.load(std::memory_order_acquire);
+            if (version == READ_LOCKED) {
+                continue;
+            }
+            (void)*addr;
+            word_t version2 = orec->r_lock.load(std::memory_order_acquire);
+            if (version == version2) break;
+            version = version2;
+        }
+        
+        ReadLogEntry e;
+        e.byte_addr = addr;
+        e.word_addr = waddr;
+        e.version = version;
+        e.type = VT;
+        e.orec = orec;
+        tx->read_set.push_back(e);
+        
+        if (version > tx->valid_ts && !extend(tx)) {
+            rollback(tx);
+        }
+        
+        return *addr;
+    }
+    
+    // Read functions
     static uint8_t read_u8(uint8_t* addr, TxDescriptor* tx) {
-        if (!tx || !tx->active) return *addr;
-        
-        word_t* waddr = get_word_addr(addr);
-        OwnershipRecord* orec = get_orec(waddr);
-        
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::UINT8) {
-                return e.new_value.u8;
-            }
-        }
-        
-        word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-        if (is_locked_by(w_lock_val, tx)) {
-            return ((WriteLogEntry*)w_lock_val)->new_value.u8;
-        }
-        
-        word_t version;
-        while (true) {
-            version = orec->r_lock.load(std::memory_order_acquire);
-            if (version == READ_LOCKED) {
-                continue;
-            }
-            (void)*addr;
-            word_t version2 = orec->r_lock.load(std::memory_order_acquire);
-            if (version == version2) break;
-            version = version2;
-        }
-        
-        ReadLogEntry e;
-        e.byte_addr = addr;
-        e.word_addr = waddr;
-        e.version = version;
-        e.type = ValueType::UINT8;
-        e.orec = orec;
-        tx->read_set.push_back(e);
-        
-        if (version > tx->valid_ts && !extend(tx)) {
-            rollback(tx);
-        }
-        
-        return *addr;
+        return read_impl<uint8_t, ValueType::UINT8>(addr, tx);
     }
-    
     static uint16_t read_u16(uint16_t* addr, TxDescriptor* tx) {
-        if (!tx || !tx->active) return *addr;
-        
-        word_t* waddr = get_word_addr(addr);
-        OwnershipRecord* orec = get_orec(waddr);
-        
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::UINT16) {
-                return e.new_value.u16;
-            }
-        }
-        
-        word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-        if (is_locked_by(w_lock_val, tx)) {
-            return ((WriteLogEntry*)w_lock_val)->new_value.u16;
-        }
-        
-        word_t version;
-        while (true) {
-            version = orec->r_lock.load(std::memory_order_acquire);
-            if (version == READ_LOCKED) {
-                continue;
-            }
-            (void)*addr;
-            word_t version2 = orec->r_lock.load(std::memory_order_acquire);
-            if (version == version2) break;
-            version = version2;
-        }
-        
-        ReadLogEntry e;
-        e.byte_addr = addr;
-        e.word_addr = waddr;
-        e.version = version;
-        e.type = ValueType::UINT16;
-        e.orec = orec;
-        tx->read_set.push_back(e);
-        
-        if (version > tx->valid_ts && !extend(tx)) {
-            rollback(tx);
-        }
-        
-        return *addr;
+        return read_impl<uint16_t, ValueType::UINT16>(addr, tx);
     }
-    
     static uint32_t read_u32(uint32_t* addr, TxDescriptor* tx) {
-        if (!tx || !tx->active) return *addr;
-        
-        word_t* waddr = get_word_addr(addr);
-        OwnershipRecord* orec = get_orec(waddr);
-        
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::UINT32) {
-                return e.new_value.u32;
-            }
-        }
-        
-        word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-        if (is_locked_by(w_lock_val, tx)) {
-            return ((WriteLogEntry*)w_lock_val)->new_value.u32;
-        }
-        
-        word_t version;
-        while (true) {
-            version = orec->r_lock.load(std::memory_order_acquire);
-            if (version == READ_LOCKED) {
-                continue;
-            }
-            (void)*addr;
-            word_t version2 = orec->r_lock.load(std::memory_order_acquire);
-            if (version == version2) break;
-            version = version2;
-        }
-        
-        ReadLogEntry e;
-        e.byte_addr = addr;
-        e.word_addr = waddr;
-        e.version = version;
-        e.type = ValueType::UINT32;
-        e.orec = orec;
-        tx->read_set.push_back(e);
-        
-        if (version > tx->valid_ts && !extend(tx)) {
-            rollback(tx);
-        }
-        
-        return *addr;
+        return read_impl<uint32_t, ValueType::UINT32>(addr, tx);
     }
-    
     static uint64_t read_u64(uint64_t* addr, TxDescriptor* tx) {
-        if (!tx || !tx->active) return *addr;
-        
-        word_t* waddr = get_word_addr(addr);
-        OwnershipRecord* orec = get_orec(waddr);
-        
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::UINT64) {
-                return e.new_value.u64;
-            }
-        }
-        
-        word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-        if (is_locked_by(w_lock_val, tx)) {
-            return ((WriteLogEntry*)w_lock_val)->new_value.u64;
-        }
-        
-        word_t version;
-        while (true) {
-            version = orec->r_lock.load(std::memory_order_acquire);
-            if (version == READ_LOCKED) {
-                continue;
-            }
-            (void)*addr;
-            word_t version2 = orec->r_lock.load(std::memory_order_acquire);
-            if (version == version2) break;
-            version = version2;
-        }
-        
-        ReadLogEntry e;
-        e.byte_addr = addr;
-        e.word_addr = waddr;
-        e.version = version;
-        e.type = ValueType::UINT64;
-        e.orec = orec;
-        tx->read_set.push_back(e);
-        
-        if (version > tx->valid_ts && !extend(tx)) {
-            rollback(tx);
-        }
-        
-        return *addr;
+        return read_impl<uint64_t, ValueType::UINT64>(addr, tx);
     }
-    
     static float read_float(float* addr, TxDescriptor* tx) {
-        if (!tx || !tx->active) return *addr;
-        
-        word_t* waddr = get_word_addr(addr);
-        OwnershipRecord* orec = get_orec(waddr);
-        
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::FLOAT) {
-                return e.new_value.f;
-            }
-        }
-        
-        word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-        if (is_locked_by(w_lock_val, tx)) {
-            return ((WriteLogEntry*)w_lock_val)->new_value.f;
-        }
-        
-        word_t version;
-        while (true) {
-            version = orec->r_lock.load(std::memory_order_acquire);
-            if (version == READ_LOCKED) {
-                continue;
-            }
-            (void)*addr;
-            word_t version2 = orec->r_lock.load(std::memory_order_acquire);
-            if (version == version2) break;
-            version = version2;
-        }
-        
-        ReadLogEntry e;
-        e.byte_addr = addr;
-        e.word_addr = waddr;
-        e.version = version;
-        e.type = ValueType::FLOAT;
-        e.orec = orec;
-        tx->read_set.push_back(e);
-        
-        if (version > tx->valid_ts && !extend(tx)) {
-            rollback(tx);
-        }
-        
-        return *addr;
+        return read_impl<float, ValueType::FLOAT>(addr, tx);
     }
-    
     static double read_double(double* addr, TxDescriptor* tx) {
-        if (!tx || !tx->active) return *addr;
-        
-        word_t* waddr = get_word_addr(addr);
-        OwnershipRecord* orec = get_orec(waddr);
-        
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::DOUBLE) {
-                return e.new_value.d;
-            }
-        }
-        
-        word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-        if (is_locked_by(w_lock_val, tx)) {
-            return ((WriteLogEntry*)w_lock_val)->new_value.d;
-        }
-        
-        word_t version;
-        while (true) {
-            version = orec->r_lock.load(std::memory_order_acquire);
-            if (version == READ_LOCKED) {
-                continue;
-            }
-            (void)*addr;
-            word_t version2 = orec->r_lock.load(std::memory_order_acquire);
-            if (version == version2) break;
-            version = version2;
-        }
-        
-        ReadLogEntry e;
-        e.byte_addr = addr;
-        e.word_addr = waddr;
-        e.version = version;
-        e.type = ValueType::DOUBLE;
-        e.orec = orec;
-        tx->read_set.push_back(e);
-        
-        if (version > tx->valid_ts && !extend(tx)) {
-            rollback(tx);
-        }
-        
-        return *addr;
+        return read_impl<double, ValueType::DOUBLE>(addr, tx);
     }
-    
     static void* read_ptr(void** addr, TxDescriptor* tx) {
-        if (!tx || !tx->active) return *addr;
+        return read_impl<void*, ValueType::POINTER>(addr, tx);
+    }
+    
+    // ---- Generic write implementation ----
+    template <typename T, ValueType VT>
+    static void write_impl(T* addr, T val, TxDescriptor* tx) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        if (!tx || !tx->active) { *addr = val; return; }
         
         word_t* waddr = get_word_addr(addr);
         OwnershipRecord* orec = get_orec(waddr);
         
         for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::POINTER) {
-                return e.new_value.ptr;
+            if (e.byte_addr == addr && e.type == VT) {
+                set_value(e.new_value, val);
+                tx->write_count++;
+                cm_on_write(tx);
+                return;
             }
         }
         
-        word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-        if (is_locked_by(w_lock_val, tx)) {
-            return ((WriteLogEntry*)w_lock_val)->new_value.ptr;
-        }
-        
-        word_t version;
         while (true) {
-            version = orec->r_lock.load(std::memory_order_acquire);
-            if (version == READ_LOCKED) {
+            word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
+            if (is_locked(w_lock_val)) {
+                if (cm_should_abort(tx, orec)) {
+                    rollback(tx);
+                    return;
+                }
                 continue;
             }
-            (void)*addr;
-            word_t version2 = orec->r_lock.load(std::memory_order_acquire);
-            if (version == version2) break;
-            version = version2;
+            
+            WriteLogEntry* log_entry = nullptr;
+            for (auto& e : tx->write_log) {
+                if (e.orec == orec) {
+                    log_entry = &e;
+                    break;
+                }
+            }
+            
+            if (!log_entry) {
+                WriteLogEntry e;
+                e.byte_addr = addr;
+                e.word_addr = waddr;
+                set_value(e.old_value, *addr);
+                set_value(e.new_value, val);
+                e.type = VT;
+                e.orec = orec;
+                e.owner = tx;
+                tx->write_log.push_back(e);
+                log_entry = &tx->write_log.back();
+            }
+            
+            if (orec->w_lock.compare_exchange_strong(w_lock_val, (word_t)log_entry,
+                    std::memory_order_acquire, std::memory_order_acquire)) {
+                break;
+            }
         }
         
-        ReadLogEntry e;
-        e.byte_addr = addr;
-        e.word_addr = waddr;
-        e.version = version;
-        e.type = ValueType::POINTER;
-        e.orec = orec;
-        tx->read_set.push_back(e);
-        
-        if (version > tx->valid_ts && !extend(tx)) {
+        word_t r_lock_val = orec->r_lock.load(std::memory_order_acquire);
+        if (r_lock_val > tx->valid_ts && !extend(tx)) {
             rollback(tx);
+            return;
         }
         
-        return *addr;
+        tx->write_count++;
+        cm_on_write(tx);
     }
     
+    // Write functions
     static void write_u8(uint8_t* addr, uint8_t val, TxDescriptor* tx) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        word_t* waddr = get_word_addr(addr);
-        OwnershipRecord* orec = get_orec(waddr);
-        
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::UINT8) {
-                e.new_value.u8 = val;
-                tx->write_count++;
-                cm_on_write(tx);
-                return;
-            }
-        }
-        
-        while (true) {
-            word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-            if (is_locked(w_lock_val)) {
-                if (cm_should_abort(tx, orec)) {
-                    rollback(tx);
-                    return;
-                }
-                continue;
-            }
-            
-            WriteLogEntry* log_entry = nullptr;
-            for (auto& e : tx->write_log) {
-                if (e.orec == orec) {
-                    log_entry = &e;
-                    break;
-                }
-            }
-            
-            if (!log_entry) {
-                WriteLogEntry e;
-                e.byte_addr = addr;
-                e.word_addr = waddr;
-                e.old_value.u8 = *addr;
-                e.new_value.u8 = val;
-                e.type = ValueType::UINT8;
-                e.orec = orec;
-                e.owner = tx;
-                tx->write_log.push_back(e);
-                log_entry = &tx->write_log.back();
-            }
-            
-            if (orec->w_lock.compare_exchange_strong(w_lock_val, (word_t)log_entry,
-                    std::memory_order_acquire, std::memory_order_acquire)) {
-                break;
-            }
-        }
-        
-        word_t r_lock_val = orec->r_lock.load(std::memory_order_acquire);
-        if (r_lock_val > tx->valid_ts && !extend(tx)) {
-            rollback(tx);
-            return;
-        }
-        
-        tx->write_count++;
-        cm_on_write(tx);
+        write_impl<uint8_t, ValueType::UINT8>(addr, val, tx);
     }
-    
     static void write_u16(uint16_t* addr, uint16_t val, TxDescriptor* tx) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        word_t* waddr = get_word_addr(addr);
-        OwnershipRecord* orec = get_orec(waddr);
-        
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::UINT16) {
-                e.new_value.u16 = val;
-                tx->write_count++;
-                cm_on_write(tx);
-                return;
-            }
-        }
-        
-        while (true) {
-            word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-            if (is_locked(w_lock_val)) {
-                if (cm_should_abort(tx, orec)) {
-                    rollback(tx);
-                    return;
-                }
-                continue;
-            }
-            
-            WriteLogEntry* log_entry = nullptr;
-            for (auto& e : tx->write_log) {
-                if (e.orec == orec) {
-                    log_entry = &e;
-                    break;
-                }
-            }
-            
-            if (!log_entry) {
-                WriteLogEntry e;
-                e.byte_addr = addr;
-                e.word_addr = waddr;
-                e.old_value.u16 = *addr;
-                e.new_value.u16 = val;
-                e.type = ValueType::UINT16;
-                e.orec = orec;
-                e.owner = tx;
-                tx->write_log.push_back(e);
-                log_entry = &tx->write_log.back();
-            }
-            
-            if (orec->w_lock.compare_exchange_strong(w_lock_val, (word_t)log_entry,
-                    std::memory_order_acquire, std::memory_order_acquire)) {
-                break;
-            }
-        }
-        
-        word_t r_lock_val = orec->r_lock.load(std::memory_order_acquire);
-        if (r_lock_val > tx->valid_ts && !extend(tx)) {
-            rollback(tx);
-            return;
-        }
-        
-        tx->write_count++;
-        cm_on_write(tx);
+        write_impl<uint16_t, ValueType::UINT16>(addr, val, tx);
     }
-    
     static void write_u32(uint32_t* addr, uint32_t val, TxDescriptor* tx) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        word_t* waddr = get_word_addr(addr);
-        OwnershipRecord* orec = get_orec(waddr);
-        
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::UINT32) {
-                e.new_value.u32 = val;
-                tx->write_count++;
-                cm_on_write(tx);
-                return;
-            }
-        }
-        
-        while (true) {
-            word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-            if (is_locked(w_lock_val)) {
-                if (cm_should_abort(tx, orec)) {
-                    rollback(tx);
-                    return;
-                }
-                continue;
-            }
-            
-            WriteLogEntry* log_entry = nullptr;
-            for (auto& e : tx->write_log) {
-                if (e.orec == orec) {
-                    log_entry = &e;
-                    break;
-                }
-            }
-            
-            if (!log_entry) {
-                WriteLogEntry e;
-                e.byte_addr = addr;
-                e.word_addr = waddr;
-                e.old_value.u32 = *addr;
-                e.new_value.u32 = val;
-                e.type = ValueType::UINT32;
-                e.orec = orec;
-                e.owner = tx;
-                tx->write_log.push_back(e);
-                log_entry = &tx->write_log.back();
-            }
-            
-            if (orec->w_lock.compare_exchange_strong(w_lock_val, (word_t)log_entry,
-                    std::memory_order_acquire, std::memory_order_acquire)) {
-                break;
-            }
-        }
-        
-        word_t r_lock_val = orec->r_lock.load(std::memory_order_acquire);
-        if (r_lock_val > tx->valid_ts && !extend(tx)) {
-            rollback(tx);
-            return;
-        }
-        
-        tx->write_count++;
-        cm_on_write(tx);
+        write_impl<uint32_t, ValueType::UINT32>(addr, val, tx);
     }
-    
     static void write_u64(uint64_t* addr, uint64_t val, TxDescriptor* tx) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        word_t* waddr = get_word_addr(addr);
-        OwnershipRecord* orec = get_orec(waddr);
-        
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::UINT64) {
-                e.new_value.u64 = val;
-                tx->write_count++;
-                cm_on_write(tx);
-                return;
-            }
-        }
-        
-        while (true) {
-            word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-            if (is_locked(w_lock_val)) {
-                if (cm_should_abort(tx, orec)) {
-                    rollback(tx);
-                    return;
-                }
-                continue;
-            }
-            
-            WriteLogEntry* log_entry = nullptr;
-            for (auto& e : tx->write_log) {
-                if (e.orec == orec) {
-                    log_entry = &e;
-                    break;
-                }
-            }
-            
-            if (!log_entry) {
-                WriteLogEntry e;
-                e.byte_addr = addr;
-                e.word_addr = waddr;
-                e.old_value.u64 = *addr;
-                e.new_value.u64 = val;
-                e.type = ValueType::UINT64;
-                e.orec = orec;
-                e.owner = tx;
-                tx->write_log.push_back(e);
-                log_entry = &tx->write_log.back();
-            }
-            
-            if (orec->w_lock.compare_exchange_strong(w_lock_val, (word_t)log_entry,
-                    std::memory_order_acquire, std::memory_order_acquire)) {
-                break;
-            }
-        }
-        
-        word_t r_lock_val = orec->r_lock.load(std::memory_order_acquire);
-        if (r_lock_val > tx->valid_ts && !extend(tx)) {
-            rollback(tx);
-            return;
-        }
-        
-        tx->write_count++;
-        cm_on_write(tx);
+        write_impl<uint64_t, ValueType::UINT64>(addr, val, tx);
     }
-    
     static void write_float(float* addr, float val, TxDescriptor* tx) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        word_t* waddr = get_word_addr(addr);
-        OwnershipRecord* orec = get_orec(waddr);
-        
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::FLOAT) {
-                e.new_value.f = val;
-                tx->write_count++;
-                cm_on_write(tx);
-                return;
-            }
-        }
-        
-        while (true) {
-            word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-            if (is_locked(w_lock_val)) {
-                if (cm_should_abort(tx, orec)) {
-                    rollback(tx);
-                    return;
-                }
-                continue;
-            }
-            
-            WriteLogEntry* log_entry = nullptr;
-            for (auto& e : tx->write_log) {
-                if (e.orec == orec) {
-                    log_entry = &e;
-                    break;
-                }
-            }
-            
-            if (!log_entry) {
-                WriteLogEntry e;
-                e.byte_addr = addr;
-                e.word_addr = waddr;
-                e.old_value.f = *addr;
-                e.new_value.f = val;
-                e.type = ValueType::FLOAT;
-                e.orec = orec;
-                e.owner = tx;
-                tx->write_log.push_back(e);
-                log_entry = &tx->write_log.back();
-            }
-            
-            if (orec->w_lock.compare_exchange_strong(w_lock_val, (word_t)log_entry,
-                    std::memory_order_acquire, std::memory_order_acquire)) {
-                break;
-            }
-        }
-        
-        word_t r_lock_val = orec->r_lock.load(std::memory_order_acquire);
-        if (r_lock_val > tx->valid_ts && !extend(tx)) {
-            rollback(tx);
-            return;
-        }
-        
-        tx->write_count++;
-        cm_on_write(tx);
+        write_impl<float, ValueType::FLOAT>(addr, val, tx);
     }
-    
     static void write_double(double* addr, double val, TxDescriptor* tx) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        word_t* waddr = get_word_addr(addr);
-        OwnershipRecord* orec = get_orec(waddr);
-        
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::DOUBLE) {
-                e.new_value.d = val;
-                tx->write_count++;
-                cm_on_write(tx);
-                return;
-            }
-        }
-        
-        while (true) {
-            word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-            if (is_locked(w_lock_val)) {
-                if (cm_should_abort(tx, orec)) {
-                    rollback(tx);
-                    return;
-                }
-                continue;
-            }
-            
-            WriteLogEntry* log_entry = nullptr;
-            for (auto& e : tx->write_log) {
-                if (e.orec == orec) {
-                    log_entry = &e;
-                    break;
-                }
-            }
-            
-            if (!log_entry) {
-                WriteLogEntry e;
-                e.byte_addr = addr;
-                e.word_addr = waddr;
-                e.old_value.d = *addr;
-                e.new_value.d = val;
-                e.type = ValueType::DOUBLE;
-                e.orec = orec;
-                e.owner = tx;
-                tx->write_log.push_back(e);
-                log_entry = &tx->write_log.back();
-            }
-            
-            if (orec->w_lock.compare_exchange_strong(w_lock_val, (word_t)log_entry,
-                    std::memory_order_acquire, std::memory_order_acquire)) {
-                break;
-            }
-        }
-        
-        word_t r_lock_val = orec->r_lock.load(std::memory_order_acquire);
-        if (r_lock_val > tx->valid_ts && !extend(tx)) {
-            rollback(tx);
-            return;
-        }
-        
-        tx->write_count++;
-        cm_on_write(tx);
+        write_impl<double, ValueType::DOUBLE>(addr, val, tx);
     }
-    
     static void write_ptr(void** addr, void* val, TxDescriptor* tx) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        word_t* waddr = get_word_addr(addr);
-        OwnershipRecord* orec = get_orec(waddr);
-        
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == ValueType::POINTER) {
-                e.new_value.ptr = val;
-                tx->write_count++;
-                cm_on_write(tx);
-                return;
-            }
-        }
-        
-        while (true) {
-            word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-            if (is_locked(w_lock_val)) {
-                if (cm_should_abort(tx, orec)) {
-                    rollback(tx);
-                    return;
-                }
-                continue;
-            }
-            
-            WriteLogEntry* log_entry = nullptr;
-            for (auto& e : tx->write_log) {
-                if (e.orec == orec) {
-                    log_entry = &e;
-                    break;
-                }
-            }
-            
-            if (!log_entry) {
-                WriteLogEntry e;
-                e.byte_addr = addr;
-                e.word_addr = waddr;
-                e.old_value.ptr = *addr;
-                e.new_value.ptr = val;
-                e.type = ValueType::POINTER;
-                e.orec = orec;
-                e.owner = tx;
-                tx->write_log.push_back(e);
-                log_entry = &tx->write_log.back();
-            }
-            
-            if (orec->w_lock.compare_exchange_strong(w_lock_val, (word_t)log_entry,
-                    std::memory_order_acquire, std::memory_order_acquire)) {
-                break;
-            }
-        }
-        
-        word_t r_lock_val = orec->r_lock.load(std::memory_order_acquire);
-        if (r_lock_val > tx->valid_ts && !extend(tx)) {
-            rollback(tx);
-            return;
-        }
-        
-        tx->write_count++;
-        cm_on_write(tx);
+        write_impl<void*, ValueType::POINTER>(addr, val, tx);
     }
     
     static void begin(TxDescriptor* tx) {

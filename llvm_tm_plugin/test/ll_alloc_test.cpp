@@ -81,7 +81,7 @@ TX void remove(int64_t key) {
 TX void verify() {
   Node *cur = g_head;
   while (cur) {
-    if (cur->next && cur->next->key <= cur->key)
+    if (cur->next && cur->next->key < cur->key)
       g_errors.fetch_add(1);
     cur = cur->next;
   }

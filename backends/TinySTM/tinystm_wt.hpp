@@ -251,9 +251,6 @@ inline bool begin()
 	auto *tx = current_tx;
 	TINYSTM_ASSERT(tx != nullptr, "begin: tx is null");
 
-	fprintf(stderr, "TinySTM begin() called\n");
-	fflush(stderr);
-
 	if (tx->active) {
 		if (tx->aborted) {
 			for (auto &it : tx->write_set) {
