@@ -93,13 +93,28 @@ static bool checkOpaqueFunctions(
                         if (auto *Scope = dyn_cast_or_null<DIScope>(DIL->getScope()))
                             errs() << " at " << Scope->getFilename() << ":"
                                    << DIL->getLine() << ":" << DIL->getColumn();
-                    errs() << "\n  Calls via function pointer or virtual method "
+                    errs() << "\n  Called from: " << F->getName() << "\n"
+                              "  Calls via function pointer or virtual method "
                               "cannot be instrumented for TM.\n";
                     continue;
                 }
                 if (!Callee->isDeclaration()) continue;
-                if (isKnownSafeOpaque(Callee->getName(), StrictOpaque)) continue;
-                if (isSyscallSymbol(Callee->getName())) continue;
+                // Check if any pointer argument traces to a TM global.
+                // Even known-safe opaque functions (e.g., _ZSt prefix) are
+                // UNSAFE if they receive TM-shared pointers — they modify
+                // shared data without TM write-set tracking.
+                bool hasTMTracedArg = false;
+                for (unsigned i = 0; i < Call->arg_size(); i++) {
+                    if (Call->getArgOperand(i)->getType()->isPointerTy() &&
+                        tracesFromTMGlobal(Call->getArgOperand(i), M)) {
+                        hasTMTracedArg = true;
+                        break;
+                    }
+                }
+                if (!hasTMTracedArg) {
+                    if (isKnownSafeOpaque(Callee->getName(), StrictOpaque)) continue;
+                    if (isSyscallSymbol(Callee->getName())) continue;
+                }
                 foundOpaque = true;
                 UnresolvedSymbols.insert(Callee->getName());
                 errs() << "error: call to '" << Callee->getName()
@@ -108,8 +123,15 @@ static bool checkOpaqueFunctions(
                     if (auto *Scope = dyn_cast_or_null<DIScope>(DIL->getScope()))
                         errs() << " at " << Scope->getFilename() << ":"
                                << DIL->getLine() << ":" << DIL->getColumn();
-                errs() << "\n  This function is not visible to TM "
-                          "instrumentation (no body in this translation unit).\n";
+                errs() << "\n  Called from: " << F->getName() << "\n";
+                if (hasTMTracedArg)
+                    errs() << "  This function receives TM-shared pointer arguments "
+                              "but its body is not visible (defined in external library).\n"
+                              "  Its internal modifications bypass TM write-set tracking, "
+                              "causing data corruption with concurrent transactions.\n";
+                else
+                    errs() << "  This function is not visible to TM "
+                              "instrumentation (no body in this translation unit).\n";
                 emitOpaqueSuggestion(Callee->getName(), errs());
             }
         }

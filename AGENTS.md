@@ -16,25 +16,40 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - `__tree_deleter_tm_clone` recursive clone fix: `instrumentAllClones` propagates `TMTracedArgs` and runs `instrumentLoadsStoresInFunction` on every clone.
 - `tm_untrack_spec_alloc()` (in `tm_alloc_overrides.hpp`): marks freed ptrs in `g_spec_allocs` by nulling `node->ptr`. Called from `tm_free` in all 4 runtimes (TinySTM, NOrec, SwissTM, TL2).
 - `memset` detection: changed from exact match `"llvm.memset"` to `starts_with("llvm.memset")` for LLVM 22 type-suffixed intrinsic names.
-- `alloc_stress_test` root cause identified: `std::map` inside TM global causes crash in `read_word_ctl` with `tx` pointer corrupted to `0x80`. The `tm-instrument` pipeline does NOT call `handleMallocFree` on cloned functions (only `instrumentLoadsStoresInFunction`), so `_Znwm` inside clones uses standard allocator. The crash mechanism is a corrupted `current_tx_wbctl` TLS variable (value `0x80`), suggesting heap corruption or a write-set entry overlapping with the TLS storage address. Even a single-threaded map-insert worker crashes (exit 139, SIGSEGV).
-- `alloc_stress_test` status: NOT our regression — root cause is the `tm-instrument` pipeline's `instrumentLoadsStoresInFunction` not calling `handleMallocFree` (by design, it only instruments loads/stores). Tree rebalancing stores ARE instrumented (via `isSharedPointer` + `isTMTracedPtr`), so the crash is a runtime TM issue (corrupted `current_tx_wbctl`), not a missed-instrumentation issue.
-- Proofs (`docs/proofs.md`): Section 8 (memory allocation) is compatible with current code. Non-intrusive `FreeNode` pattern is used. No proof yet for `tm_untrack_spec_alloc` nullptr-skipping — this is a minor optimization (bookkeeping nodes always freed regardless) that doesn't affect the deferred-free correctness arguments.
+- **Allocator mismatch fix**: `tm_malloc`/`tm_calloc`/`tm_realloc` changed from `malloc`/`calloc`/`realloc` to `::operator new` to match `::operator delete` in `tm_free`. `tm_alloc_overrides.hpp` cleanup (`std::free` → `::operator delete` for `tm_clear_spec_allocs`/`tm_flush_deferred_frees`/`tm_clear_deferred_frees`).
+- **`tracesFromTMGlobal` fix**: `tm_malloc`/`tm_calloc`/`tm_realloc` return values now recognized as TM-traced pointers, so stores through heap-allocated nodes inside TX functions are instrumented.
+- **Reverted `handleUnsafeOpaqueCall` serialization**: per user preference, removed the serialization approach.
+- `alloc_stress_test` root cause identified: `_Rb_tree_insert_and_rebalance` from libstdc++ is an **external declaration** (body in shared library, not visible as IR), so the plugin cannot instrument its internal stores. This is a fundamental limitation — the function modifies tree structure (parent/left/right/color) without TM write-set tracking.
+- `alloc_stress_test` status: vec+raw tests **PASS**; mixed tests (map ops) show data corruption due to opaque `_Rb_tree_insert_and_rebalance`.
 
 ## In Progress
 - *(none)*
 
 ## Blocked
-- `alloc_stress_test` SIGSEGV: `current_tx_wbctl` corrupted to `0x80` in `read_word_ctl`. Likely heap corruption from write-set `unordered_map` operations interacting with standard `_Znwm` allocations (not replaced by `tm_malloc` in clones). Isolation: single map-insert worker in `tm-instrument` pipeline crashes; map-insert + vec in inline pipeline shows data corruption ("g_map[198] = 207 (expected 1980)").
+- `alloc_stress_test` map corruption: `std::map` operations call `_Rb_tree_insert_and_rebalance` from libstdc++ (shared library). The function body is never available as IR (even with `-O0`/`-O2`/`-flto`), so the plugin cannot instrument its stores. Any test using `std::map` inside __transaction_atomic with concurrent workers will exhibit data corruption. Solutions: (a) TM-safe map replacement, (b) serialize map operations, (c) LTO the entire libstdc++ for function body visibility, (d) accept limitation.
 
 ## Key Decisions
 - `tm_untrack_spec_alloc()` marks `node->ptr = nullptr` rather than unlinking: O(n) traversal is acceptable for small spec_alloc lists.
 - `__tree_deleter_tm_clone` can never be inlined (recursive), so must be handled by extending `TMInstrumentInlinePass` to non-TX clones.
 - Runtime `unordered_map` bucket allocations MUST NOT go through `tm_malloc`/`spec_alloc` — they'd be freed on abort while the map still references them.
 - `instrumentLoadsStoresInFunction` only handles loads/stores, NOT `handleMallocFree`. This is intentional — the clone functions' `_Znwm` calls stay using standard heap. For `std::map` tree nodes, this means no spec_alloc tracking, which is fine for single-thread but causes issues under the TM model.
+- Do NOT serialize STL container calls; the correct fix is to ensure heap allocations inside TX functions are traced as TM globals (via `tracesFromTMGlobal` + `tm_malloc`).
+- `tm_malloc` must use `::operator new` (not `::malloc`) so that global destructors' `operator delete` calls are consistent.
+- `_Rb_tree_insert_and_rebalance` is a fundamental opaque barrier: its stores bypass TM write-set regardless of pipeline (inline or non-inline). Tests using `std::map` in concurrent TM will not be correct.
+
+## Relevant Files
+- `backends/runtimes/TinySTM_runtime.cpp`: `tm_malloc`/`tm_free` definitions (use `::operator new/delete`).
+- `backends/tm_alloc_overrides.hpp`: speculative alloc tracking + deferred free.
+- `llvm_tm_plugin/src/tm_local_vars.hpp`: `tracesFromTMGlobal` — now tracks `tm_malloc`/`tm_calloc`/`tm_realloc`.
+- `llvm_tm_plugin/src/tm_instrument_helpers.hpp`: `handleMallocFree` intercepts `_Znwm`/`_ZdlPv` etc.
+- `llvm_tm_plugin/src/tm_method_instrumentation.hpp`: `instrumentLoadsStoresInFunction` — runs `handleMallocFree` in clones.
+- `llvm_tm_plugin/src/TMInstrumentPass.cpp`: both pipelines (`tm-instrument` and `tm-instrument-inline`).
+- `llvm_tm_plugin/test/alloc_stress_test.cpp`: failing test with vec+map+erase+raw new workers.
 
 ## Next Steps
-1. Investigate `alloc_stress_test` crash — hypothesize `write_set` `unordered_map` rehashing during TM write operation corrupts `current_tx_wbctl`. Try using a fixed-size write-set (e.g., `std::array` + open addressing) or validate `current_tx_wbctl` before every access.
-2. Fix `instrumentLoadsStoresInFunction` to also run `handleMallocFree`, OR document that clone functions use standard allocator (not `tm_malloc`/`tm_free`).
-3. Run full plugin test suite after each fix.
-4. Run STMbench7 / bank at all thread counts to confirm no regression.
-5. Track: `ll_alloc_test` hang (pre-existing).
+1. Run bank benchmark (-a 128 -r 0) to verify TinySTM WBCTL still preserves money correctly.
+2. Run vec+raw subset of `alloc_stress_test` to confirm allocated-mismatch fix.
+3. Document `_Rb_tree_insert_and_rebalance` limitation for `std::map` in TM contexts.
+4. Consider TM-safe `std::map` replacement or serialized fallback for std::map ops.
+5. Run STMbench7 / bank at all thread counts to confirm no regression.
+6. Track: `ll_alloc_test` hang (pre-existing).
