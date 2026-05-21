@@ -189,16 +189,18 @@ public:
       errs() << "[BEFORE_INLINE] _tm_clone function definitions: " << n << "\n";
     }
 
-    // Strip AlwaysInline from clones whose original carried noinline
-    // (e.g. __tree_deleter from libc++).  alwaysinline + noinline is
-    // incompatible and crashes the verifier inside AlwaysInlinerPass.
+    // When a clone inherits noinline from its original AND has
+    // alwaysinline (from the pass), keep alwaysinline and drop
+    // noinline.  The AlwaysInlinerPass will then succeed in inlining
+    // the clone.  This is essential for RAII helpers like
+    // _ConstructTransactionD2 whose plain store to g_vec.__end_
+    // must be inlined and instrumented.
     SmallVector<Function *, 8> DeadClones;
     for (auto &F : M) {
       if (F.isDeclaration() || !F.getName().contains("_tm_clone"))
         continue;
       if (F.hasFnAttribute(llvm::Attribute::NoInline) &&
           F.hasFnAttribute(llvm::Attribute::AlwaysInline)) {
-        F.removeFnAttr(llvm::Attribute::AlwaysInline);
         F.removeFnAttr(llvm::Attribute::NoInline);
         if (F.use_empty())
           DeadClones.push_back(&F);

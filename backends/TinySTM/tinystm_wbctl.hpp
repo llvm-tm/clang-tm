@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <execinfo.h>
 
 #include "tinystm_common.hpp"
 

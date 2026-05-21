@@ -46,6 +46,68 @@ extern "C" void  tm_free(void* ptr);
 // Thread-local flag: set by tm_begin/tm_end to distinguish TX vs non-TX context.
 extern thread_local bool g_in_tx;
 
+// ── Speculative-allocation tracking ───────────────────────
+//
+// When tm_malloc is called inside a transaction, the allocated memory
+// is "speculative": it will become permanent only if the transaction
+// commits.  If the transaction aborts, the undo log restores container
+// pointers to their pre-transaction values, and the speculatively-
+// allocated memory must be freed (otherwise it leaks).
+//
+// This is the symmetric counterpart of the deferred-free list:
+//
+//     Deferred-free (tm_free):  commit → execute free;  abort → leak (don't free)
+//     Speculative (tm_malloc):  commit → keep (don't free);  abort → execute free
+//
+// Each runtime must call:
+//   tm_clear_spec_allocs()   in tm_begin (outer), before tm_clear_deferred_frees
+//   tm_flush_spec_allocs()   in tm_end (outer), after commit, before tm_flush_deferred_frees
+
+struct SpecAlloc {
+    SpecAlloc* next;
+    void* ptr;             // the speculatively-allocated memory
+};
+
+extern thread_local SpecAlloc* g_spec_allocs;
+
+// Track a malloc/calloc/realloc result as a speculative allocation.
+inline void tm_track_spec_alloc(void* ptr)
+{
+    if (g_in_tx && ptr) {
+        auto* node = static_cast<SpecAlloc*>(std::malloc(sizeof(SpecAlloc)));
+        node->ptr = ptr;
+        node->next = g_spec_allocs;
+        g_spec_allocs = node;
+    }
+}
+
+// Free all speculative allocations and their bookkeeping — call on abort
+// (from tm_begin, after a previous TX attempt failed).
+inline void tm_clear_spec_allocs()
+{
+    auto* node = g_spec_allocs;
+    while (node) {
+        auto* next = node->next;
+        std::free(node->ptr);   // free the speculatively-allocated memory
+        std::free(node);        // free the bookkeeping node
+        node = next;
+    }
+    g_spec_allocs = nullptr;
+}
+
+// Free only the bookkeeping — call on commit.  The allocated memory is now
+// owned by the data structure and must NOT be freed here.
+inline void tm_flush_spec_allocs()
+{
+    auto* node = g_spec_allocs;
+    while (node) {
+        auto* next = node->next;
+        std::free(node);        // free only the bookkeeping node
+        node = next;
+    }
+    g_spec_allocs = nullptr;
+}
+
 // ── Deferred-free infrastructure ──────────────────────────
 //
 // Uses a NON-INTRUSIVE singly-linked list — each FreeNode is a
