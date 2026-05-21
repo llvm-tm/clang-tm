@@ -95,6 +95,12 @@ run_test local_containers_test "PASS: All local containers tests passed"
 # Vector concurrent reallocation test
 run_test vector_realloc_test "Result: PASS"
 
+# Alloc stress test (vector + map: new[]/delete[] + new/delete)
+run_test alloc_stress_test "Result: PASS"
+
+# Linked-list alloc test (speculative malloc + deferred free stress)
+run_test ll_alloc_test "Result: PASS"
+
 # STL container test
 run_test test_stl_containers "STL Container Test" "All tests passed"
 
