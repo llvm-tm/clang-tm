@@ -300,27 +300,26 @@ read_word_ctl(                                                //
 	static std::atomic<uint64_t> read_count{0};
 	uint64_t rc = read_count++;
 	uint64_t addr_bits = (uint64_t)addr;
-	if ((addr_bits >> 48) != 0) {
-		fprintf(stderr, "[BAD_ADDR] read_word_ctl: addr=%p sz=%d tx=%llu rc=%llu\n",
-		        (void*)addr_bits, (int)sz, (unsigned long long)tx->id, rc);
-		void *caller = __builtin_return_address(0);
-		Dl_info info;
-		const char *sym = nullptr;
-		if (dladdr(caller, &info) && info.dli_sname)
-			sym = info.dli_sname;
-		fprintf(stderr, "  caller: %s (%p)\n",
-		        sym ? sym : "?", caller);
-		// Also log the addr bits in hex with breakdown
-		fprintf(stderr, "  addr_bits=0x%016llx (hi32=0x%08x lo32=0x%08x)\n",
-		        (unsigned long long)addr_bits,
-		        (unsigned)(addr_bits >> 32),
-		        (unsigned)(addr_bits & 0xFFFFFFFF));
-		// Log the values in the write_set and read_set for debugging
-		fprintf(stderr, "  write_set.size=%zu read_set.size=%zu\n",
-		        tx->write_set.size(), tx->read_set.size());
+
+	// Trace all reads of g_vec+8 (__end_) to detect null return
+	static std::atomic<uint64_t> gvec8_reads{0};
+	if (addr_bits != 0 && (addr_bits & 0xfff) == 0x008) {
+		uint64_t gr = gvec8_reads++;
+		auto w = tx->write_set.find(addr);
+		uint64_t ws_val = 0, ws_type = 99;
+		if (w != tx->write_set.end()) {
+			ws_val = w->second.new_val.u8;
+			ws_type = (uint64_t)w->second.type;
+		}
+		fprintf(stderr, "[R_gv8 #%llu] addr=%p sz=%d ws_hit=%d ws_val=0x%llx ws_type=%llu\n",
+		        (unsigned long long)gr, addr, (int)sz,
+		        (int)(w != tx->write_set.end()),
+		        (unsigned long long)ws_val,
+		        (unsigned long long)ws_type);
 		fflush(stderr);
 	}
-	if ((rc & 0xFFFF) == 0) {
+
+	if ((addr_bits >> 48) != 0) {
 		fprintf(stderr, "[R%llu] addr=%p sz=%d tx=%llu\n",
 		        rc, (void*)addr_bits, (int)sz, (unsigned long long)tx->id);
 		fflush(stderr);
@@ -427,10 +426,10 @@ write_word_ctl(                                               //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
-	if (addr == nullptr) {
+	if (addr == nullptr || (uint64_t)addr < 0x1000) {
 		void *ret_addr = __builtin_return_address(0);
-		fprintf(stderr, "[NULL_WRITE] write_word_ctl: addr=nullptr sz=%d tx=%llu ws=%zu val=0x%llx ra=%p\n",
-		        (int)sz, (unsigned long long)tx->id, tx->write_set.size(), (unsigned long long)val.u8, ret_addr);
+		fprintf(stderr, "[BAD_WRITE] write_word_ctl: addr=%p sz=%d tx=%llu ws=%zu val=0x%llx ra=%p",
+		        addr, (int)sz, (unsigned long long)tx->id, tx->write_set.size(), (unsigned long long)val.u8, ret_addr);
 		// Backtrace to find the exact instruction
 		void *bt[16];
 		int bt_sz = backtrace(bt, 16);
@@ -443,6 +442,17 @@ write_word_ctl(                                               //
 
 	tx->read_only = false; // TODO: shouldn't the TX abort?
 
+	if (tx->write_set.size() >= 35 && tx->write_set.size() <= 42) {
+		static std::atomic<uint64_t> dbg_cnt{0};
+		uint64_t dc = dbg_cnt++;
+		if (dc < 20) {
+			fprintf(stderr, "[W#%llu] addr=%p sz=%d val=0x%llx ws=%zu\n",
+				(unsigned long long)dc, addr, (int)sz,
+				(unsigned long long)val.u8, tx->write_set.size());
+			fflush(stderr);
+		}
+	}
+	
 	// Found write-set entry at exact addr with matching type → update in place.
 	{
 		auto w = tx->write_set.find(addr);

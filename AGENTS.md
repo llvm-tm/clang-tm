@@ -123,9 +123,64 @@ Root cause: the `read_word_ctl` function in `tinystm_wbctl.hpp` checks `w->secon
 
 **Also fixed**: `instrumentMemoryIntrinsic` (`tm_method_instrumentation.hpp:121`) — `isMemset` used exact match `== "llvm.memset"` but LLVM 22 emits type-suffixed `"llvm.memset.p0.i8.i64"`. Changed to `starts_with("llvm.memset")`. (This caused the `memtest` test's "Broken module" error.)
 
+### 10. LLVM post-instrumentation `-O3` reorder: `vector::push_back` nullptr crash (ROOT CAUSE IDENTIFIED, NOT FIXED)
+
+**Crash**: Single‑threaded `std::vector<int64_t>` + `push_back(200)` in a single TM TX crashes at `ws=38` with `BAD_WRITE addr=nullptr`. Reproducible 100% with TinySTM WBCTL. SGL backend (global mutex, no write‑set) does NOT crash.
+
+**Root cause**: LLVM post‑instrumentation `-O3` pass reorders two inlined `write_word_ctl` calls to the same address (`g_vec+8`), making a stale‑value store happen AFTER the correct‑value store.
+
+The call chain for the first `push_back` on an empty vector goes through `__emplace_back_slow_path` → `__swap_out_circular_buffer`. In libc++ (LLVM 22) `__swap_out_circular_buffer`:
+
+```
+__end_ = __begin_;        // line 881: writes old __begin_ (= nullptr) to g_vec.__end_
+__swap_layouts(__v);       // line 882: swaps g_vec pointers with __v pointers
+                          //   g_vec.__end_ gets __v.__end_ (= buf+8, the correct value)
+                          //   __v.__end_ gets old g_vec.__end_ (= nullptr, from line 881)
+```
+
+Line 881 stores old `__begin_` (nullptr for empty vector) to `g_vec.__end_`. This value is immediately exchanged into `__v.__end_` by the `swap` in `__swap_layouts` — it ensures `__v`'s valid range is empty so its destructor does NOT double‑destroy elements that were just relocated.
+
+After TM instrumentation, both stores are replaced with `tm_write_ptr(g_vec+8, ...)` calls. Each call to `write_word_ctl` creates a write‑set entry (the write‑set is a hash map keyed by address). With LTO, `write_word_ctl` is inlined at each call site. The post‑instrumentation `-O3` pass sees two inlined blocks that write to the same address through the write‑set hash map:
+
+```llvm
+; body of __end_ = __begin_ (write A, via inlined write_word_ctl):
+%size1 = load %write_log_size
+; ... hash probe, insert into write_set ...
+store %nullptr, %write_set[...].val
+store %inc_size1, %write_log_size
+
+; body of __swap_layouts __end_ = __v.__end_ (write B, via inlined write_word_ctl):
+%size2 = load %write_log_size  (reads size1+1 after write A's increment)
+; ... hash probe, insert into write_set ...
+store %buf_plus_8, %write_set[...].val
+store %inc_size2, %write_log_size
+```
+
+The compiler **reorders** the two bodies (keeping the data dependency on `write_log_size` correct), so **write B** (the correct `buf+8` value) executes FIRST, then **write A** (the stale `nullptr`) executes SECOND. The backward‑iteration read in `read_word_ctl` returns the last‑written entry — which is now `nullptr`.
+
+After corruption:
+1. `__swap_out_circular_buffer` returns with `g_vec.__end_ = nullptr` (wrong)
+2. `__emplace_back_slow_path` returns `this->__end_` = nullptr
+3. `emplace_back` writes `this->__end_ = __end` = nullptr via `tm_write_ptr` (confirms null)
+4. Next `push_back`: capacity check `__end_ < __cap_` → `nullptr < buf+16` → fast path
+5. Element construct at `g_vec.__end_` = nullptr → `BAD_WRITE`
+
+**Debug trace** (from write‑set tracing at ws=35..42):
+```
+W#0: g_vec+8 = buf                ; from swap_layouts (correct — reordered FIRST)
+W#1: g_vec+16 = buf               ; from swap_layouts
+W#2: stack = buf                  ; captured __end_ in emplace_back's lambda
+W#3: g_vec+8 = nullptr            ; from __end_ = __begin_ (stale — reordered SECOND)
+W#4: addr=nullptr val=1           ; BAD_WRITE on next element construct
+```
+
+**Potential fix**: Add `asm volatile("" ::: "memory")` compiler barrier inside `write_word_ctl` in each backend. This barrier prevents LLVM from reordering the inlined write‑set insertion bodies at LTO time. When functions are NOT inlined, opaque external call semantics already preserve order. The fix must be applied to ALL backends (TinySTM WBCTL, WBETL, NOrec, SwissTM, TL2).
+
+Alternatively, make `write_word_ctl` / `read_word_ctl` `__attribute__((noinline))` to prevent LTO inlining.
+
 ## Next Steps
-1. ~~Identify the specific uninstrumented store in the `tm-instrument-inline` pipeline that corrupts vector state during concurrent access~~ **DONE — WBCTL write-set type-mismatch was the root cause**.
-2. ~~Verify the `tm-instrument` (no-inline) legacy pipeline with the instrument-after-redirect fix~~ **DONE — pipeline compiles and passes basic tests. Known limitation: memmove intrinsic replacement in clones uses `tracesToTMGlobal` which doesn't follow inter-procedural clone call chains, so per-byte TM copy loops aren't emitted for element relocation during vector reallocation. Simple `g_x++` test works fine.**
-3. ~~Extend `guess_declaration_ir()` with more function signatures as needed~~ **DONE — added 20+ math functions + libc utility functions (abs, labs, llabs, atoi, atol, atoll, atof, strtol, strtoul, strtoll, strtoull, strtof, strtod, strtold, drand48, srand48, bzero, posix_memalign). Also synced `KnownSafeOpaqueTable` in `opaque_safe_table.hpp`.**
-4. Run full benchmark suite to verify no regressions
-5. Test STMbench7 (3 workloads) + TPC-C at 16 threads
+1. Apply the compiler barrier fix to write_word_ctl in all backends
+2. Verify with `vector_realloc_test` (single TX, 200 elements, TinySTM WBCTL) — should pass without nullptr crash
+3. Run full plugin test suite (`make test` in `llvm_tm_plugin/`)
+4. Run `alloc_stress_test` and `ll_alloc_test` multi‑threaded
+5. Run STMbench7 (3 workloads) + TPC-C at 16 threads
