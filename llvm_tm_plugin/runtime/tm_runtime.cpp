@@ -70,6 +70,53 @@ __thread int32_t tm_longjmp_ret;
 __thread uint8_t is_tm_init_thread_ready = 0;
 thread_local uint8_t tm_buffer[TM_BUFFER_SIZE] = {0};
 
+thread_local bool g_in_tx = false;
+
+// ── Speculative-allocation tracking ───────────────────────
+// When tm_malloc is called inside a transaction, the allocated memory
+// is "speculative": it becomes permanent only if the transaction commits.
+// On abort, the undo log restores container pointers and the speculative
+// allocation must be freed to avoid leaks.
+struct SpecAlloc {
+    SpecAlloc* next;
+    void* ptr;
+};
+
+thread_local SpecAlloc* g_spec_allocs = nullptr;
+
+static void tm_track_spec_alloc(void* ptr)
+{
+    if (g_in_tx && ptr) {
+        auto* node = static_cast<SpecAlloc*>(::malloc(sizeof(SpecAlloc)));
+        node->ptr = ptr;
+        node->next = g_spec_allocs;
+        g_spec_allocs = node;
+    }
+}
+
+static void tm_clear_spec_allocs()
+{
+    auto* node = g_spec_allocs;
+    while (node) {
+        auto* next = node->next;
+        ::free(node->ptr);
+        ::free(node);
+        node = next;
+    }
+    g_spec_allocs = nullptr;
+}
+
+static void tm_flush_spec_allocs()
+{
+    auto* node = g_spec_allocs;
+    while (node) {
+        auto* next = node->next;
+        ::free(node);
+        node = next;
+    }
+    g_spec_allocs = nullptr;
+}
+
 // ── Deferred-free (transaction-safe free) ──────────────────
 // Inside a transaction, tm_free records the pointer in a thread-local
 // list instead of calling ::free immediately.  On commit, all pending
@@ -80,7 +127,6 @@ struct FreeNode {
     void* ptr;
 };
 
-thread_local bool g_in_tx = false;
 thread_local FreeNode* g_deferred_frees = nullptr;
 
 std::atomic<int8_t> tm_is_init_ready{0};
@@ -165,6 +211,7 @@ void tm_begin()
 	if (tm_nested_call_counter == 1) {
 		printf("tm_begin outer\n");
 		g_in_tx = true;
+		tm_clear_spec_allocs();
 		tm_clear_deferred_frees();
 	} else {
 		printf("tm_begin nested %d\n", tm_nested_call_counter);
@@ -175,6 +222,7 @@ void tm_end()
 {
 	printf("tm_nested_call_counter=%d  --  ", tm_nested_call_counter);
 	if (tm_nested_call_counter == 1) {
+		tm_flush_spec_allocs();
 		tm_flush_deferred_frees();
 		g_in_tx = false;
 		printf("tm_end outer\n");
@@ -312,9 +360,9 @@ void tm_memset(void *dst, uint8_t value, size_t sz)
 void consume_ptr(volatile void *ptr) { (void)ptr; }
 
 // TM-aware allocators
-void *tm_malloc(size_t size) { return malloc(size); }
-void *tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
-void *tm_realloc(void *ptr, size_t size) { return realloc(ptr, size); }
+void *tm_malloc(size_t size) { void* p = malloc(size); tm_track_spec_alloc(p); return p; }
+void *tm_calloc(size_t nmemb, size_t size) { void* p = calloc(nmemb, size); tm_track_spec_alloc(p); return p; }
+void *tm_realloc(void *ptr, size_t size) { void* p = realloc(ptr, size); tm_track_spec_alloc(p); return p; }
 
 // Deferred-free: inside a transaction, record the pointer for commit-time
 // free.  Outside a transaction, free immediately.

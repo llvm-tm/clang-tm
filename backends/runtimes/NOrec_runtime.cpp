@@ -11,6 +11,7 @@
 #include "../tm_alloc_overrides.hpp"
 thread_local bool g_in_tx = false;
 thread_local FreeNode* g_deferred_frees = nullptr;
+thread_local SpecAlloc* g_spec_allocs = nullptr;
 
 extern "C" {
 // Thread-local state
@@ -94,6 +95,7 @@ void tm_begin()
 	fprintf(stderr, "NOrec tm_begin called\n");
 #endif
 	if (tm_longjmp_ret == 0) {
+		tm_clear_spec_allocs();
 		tm_clear_deferred_frees();
 		g_in_tx = true;
 		norec::begin();
@@ -108,6 +110,7 @@ void tm_end()
 #endif
 	norec::commit();
 	g_in_tx = false;
+	tm_flush_spec_allocs();
 	tm_flush_deferred_frees();
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 	g_tm_tx_count.fetch_add(1, std::memory_order_relaxed);
@@ -221,9 +224,9 @@ static void print_stats()
 static int init = (std::atexit(print_stats), 0);
 
 // TM allocator stubs (redirect to system allocator)
-void* tm_malloc(size_t size) { return malloc(size); }
-void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
-void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
+void* tm_malloc(size_t size) { void* p = malloc(size); tm_track_spec_alloc(p); return p; }
+void* tm_calloc(size_t nmemb, size_t size) { void* p = calloc(nmemb, size); tm_track_spec_alloc(p); return p; }
+void* tm_realloc(void* ptr, size_t size) { void* p = realloc(ptr, size); tm_track_spec_alloc(p); return p; }
 void  tm_free(void* ptr) {
     if (g_in_tx) {
         auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));

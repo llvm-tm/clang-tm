@@ -430,41 +430,57 @@ static void redirectCallsToClones(Function &F, Module &M,
     //   Pass 2: apply the redirects
     SmallVector<std::pair<CallBase *, Function *>, 32> ToRedirect;
 
-    for (auto &BB : F) {
-        for (auto &I : BB) {
-            auto *Call = dyn_cast<CallBase>(&I);
-            if (!Call) continue;
-            Function *Callee = Call->getCalledFunction();
-            if (!Callee || Callee->isDeclaration()) continue;
-            if (Callee->getName().starts_with("tm_")) continue;
-            if (!TxReachableFuncs.count(Callee)) continue;
-
-            // Only redirect this call site if at least one pointer argument
-            // traces to a TM global (i.e. this is a TM-data access, not a
-            // local-container operation within the same transaction).
-            bool hasTMArg = false;
-            for (unsigned i = 0; i < Call->arg_size(); i++)
-                if (callArgTracesToTMGlobal(Call, i, M))
-                    { hasTMArg = true; break; }
-            // Fallback: in cloned functions, TM globals flow through
-            // tm_read_ptr/tm_write_ptr chains that tracesFromTMGlobal
-            // cannot follow (it deliberately stops at tm_ calls).  Use
-            // TMTracedArgs computed from the direct TX function calls
-            // instead.  If the callee has at least one TM-traced arg in
-            // the direct call graph, redirect — the clone exists for
-            // TM data access and all its callees should use clones too.
-            if (!hasTMArg) {
-                auto it = TMTracedArgs.find(Callee);
-                if (it != TMTracedArgs.end() && !it->second.empty())
-                    hasTMArg = true;
-            }
-            if (!hasTMArg) continue;
-
-            for (auto &pair : ClonedMap) {
-                if (pair.first == Callee) {
-                    ToRedirect.push_back({Call, Callee});
-                    break;
+    // In AlwaysInline mode, ALL reachable functions have clones and all
+    // calls between them must be redirected so the AlwaysInlinerPass can
+    // inline the full transitive closure into the TX body.  The
+    // hasTMArg check below is too conservative for RAII helpers like
+    // _ConstructTransactionD1/D2 whose `this` pointer is a local alloca
+    // — they write to g_vec.__end_ through a stored pointer, not a
+    // direct TM-traced argument.
+    if (Mode == CloneMode::AlwaysInline) {
+        for (auto &BB : F) {
+            for (auto &I : BB) {
+                auto *Call = dyn_cast<CallBase>(&I);
+                if (!Call) continue;
+                Function *Callee = Call->getCalledFunction();
+                if (!Callee || Callee->isDeclaration()) continue;
+                if (Callee->getName().starts_with("tm_")) continue;
+                if (!TxReachableFuncs.count(Callee)) continue;
+                for (auto &pair : ClonedMap) {
+                    if (pair.first == Callee && pair.second) {
+                        ToRedirect.push_back({Call, Callee});
+                        break;
+                    }
                 }
+            }
+        }
+    } else {
+        for (auto &BB : F) {
+            for (auto &I : BB) {
+                auto *Call = dyn_cast<CallBase>(&I);
+                if (!Call) continue;
+                Function *Callee = Call->getCalledFunction();
+                if (!Callee || Callee->isDeclaration()) continue;
+                if (Callee->getName().starts_with("tm_")) continue;
+                if (!TxReachableFuncs.count(Callee)) continue;
+
+                // Only redirect this call site if at least one pointer argument
+                // traces to a TM global (i.e. this is a TM-data access, not a
+                // local-container operation within the same transaction).
+                bool hasTMArg = false;
+                for (unsigned i = 0; i < Call->arg_size(); i++)
+                    if (callArgTracesToTMGlobal(Call, i, M))
+                        { hasTMArg = true; break; }
+                if (!hasTMArg) {
+                    auto it = TMTracedArgs.find(Callee);
+                    if (it != TMTracedArgs.end() && !it->second.empty())
+                        hasTMArg = true;
+                }
+                if (!hasTMArg) continue;
+
+                for (auto &pair : ClonedMap)
+                    if (pair.first == Callee && pair.second)
+                        { ToRedirect.push_back({Call, Callee}); break; }
             }
         }
     }

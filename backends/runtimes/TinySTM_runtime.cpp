@@ -18,6 +18,7 @@
 #include "../tm_alloc_overrides.hpp"
 thread_local bool g_in_tx = false;
 thread_local FreeNode* g_deferred_frees = nullptr;
+thread_local SpecAlloc* g_spec_allocs = nullptr;
 
 extern "C" {
 
@@ -95,6 +96,7 @@ void tm_begin()
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
 	if (tm_nested_call_counter == 1) { g_in_tx = true;
+		tm_clear_spec_allocs();
 		tm_clear_deferred_frees();
 		tinystm::begin();
 	}
@@ -122,6 +124,7 @@ void tm_end()
             (void)0;
 		}
 		tinystm::commit();
+		tm_flush_spec_allocs();
 		tm_flush_deferred_frees();
 	}
 	assert(tm_nested_call_counter >= 0);
@@ -176,9 +179,9 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {}
 void consume_ptr(volatile void *ptr) { (void)ptr; }
-void* tm_malloc(size_t size) { return g_in_tx ? malloc(size) : malloc(size); }
-void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
-void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
+void* tm_malloc(size_t size) { void* p = malloc(size); tm_track_spec_alloc(p); return p; }
+void* tm_calloc(size_t nmemb, size_t size) { void* p = calloc(nmemb, size); tm_track_spec_alloc(p); return p; }
+void* tm_realloc(void* ptr, size_t size) { void* p = realloc(ptr, size); tm_track_spec_alloc(p); return p; }
 void  tm_free(void* ptr) {
 	if (g_in_tx) {
 		auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));

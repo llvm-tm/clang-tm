@@ -95,9 +95,35 @@ The no-inline `tm-instrument` pipeline previously instrumented clones in `cloneM
 
 **Key files**: `tm_method_instrumentation.hpp:38` (CloneOnly enum), `:259-276` (CloneOnly branch), `:489-503` (instrumentAllClones), `TMInstrumentPass.cpp:250-257` (restructured TMGlobalInitPass)
 
+### 8. Fix `redirectCallsToClones` + `noinline` stripping for AlwaysInline mode (THIS SESSION)
+Two bugs in the `tm-instrument-inline` pipeline prevented proper inlining of `_ConstructTransactionD2`:
+
+**`redirectCallsToClones`**: In AlwaysInline mode, the redirect skipped calls whose callee had no TM-traced arguments (`hasTMArg` check). This left calls to `_ConstructTransactionD2` (which stores `__end_` back to the vector) pointing to the original, not the clone. The D2 clone was never inlined → its store bypassed TM barriers.
+
+**`noinline` stripping**: The `strip-alwaysinline-for-noinline` logic in `TMInstrumentPass.cpp` was stripping `alwaysinline` instead of `noinline` from clone attributes, preventing the `AlwaysInlinerPass` from inlining them.
+
+**Fixes**:
+- `tm_method_instrumentation.hpp`: `redirectCallsToClones` now ignores `hasTMArg` in AlwaysInline mode — redirects ALL calls unconditionally
+- `TMInstrumentPass.cpp`: strip `noinline` instead of `alwaysinline` from cloned functions' attributes
+- `tm_runtime.cpp`: add `tm_write_ptr` and `tm_write_word` barrier wrappers for generic pointer types; add `free` size awareness in `tm_free`
+- `NOrec_runtime.cpp`, `SwissTM_runtime.cpp`, `TinySTM_runtime.cpp`, `tl2_runtime.cpp`: add missing `tm_read_ptr` and `tm_write_ptr` exports
+- `tinystm_wbctl.hpp`: handle NULL address in `read_word_ctl` to avoid SEGV during instrumentation of partially-initialized writes
+- `tm_alloc_overrides.hpp`: new file — intercepts `malloc`/`free`/`new`/`delete` in TM tests to avoid using system allocator (which may deadlock under concurrent TM); uses `tm_malloc`/`tm_free` for allocations in instrumented code
+
+### 9. `vector_realloc_test` still crashes with `tm-instrument-inline` + WBCTL (INVESTIGATING)
+Even after the above fixes, the concurrent reader+writer `vector_realloc_test` crashes with `NULL_WRITE` at `tx=3, ws=38` under WBCTL backend.
+
+**What was checked**:
+- D2 (`_ConstructTransactionD2`) IS now cloned and inlined (D2_tm_clone created, then inlined into D1_tm_clone, then into `push_back_tm_clone`)
+- The store to `g_vec.__end_` in the fast path IS instrumented: `call void @tm_write_ptr(ptr getelementptr inbounds nuw (i8, ptr @g_vec, i64 8), ptr %389)` at instrumented IR line 668
+- Store inside `__split_buffer.clear()` (realloc path) writes to stack-allocated `__split_buffer` fields — not instrumented, but these are stack locals, not TM globals
+- Original D2 function definition still present (not instrumented) — used by the original (non-cloned) D1 in uninstrumented code paths
+
+**Hypothesis for remaining crash**: Non-instrumented stores to `__split_buffer` internals (or some other function not cloned/inlined) corrupt data that the instrumented fast path reads. Root cause still unknown — need to identify WHICH uninstrumented store causes the corruption.
+
 ## Next Steps
-1. Build STMbench7 with the new `tm-instrument-inline` pipeline (default) and verify multi-threaded stability
-2. Build STMbench7 with the fixed `tm-instrument` pipeline (CloneOnly + instrument-after-redirect) to confirm the fix works for the no-inline case too
+1. Identify the specific uninstrumented store in the `tm-instrument-inline` pipeline that corrupts vector state during concurrent access
+2. Verify the `tm-instrument` (no-inline) pipeline with the instrument-after-redirect fix
 3. Extend `guess_declaration_ir()` with more function signatures as needed
 4. Run full benchmark suite to verify no regressions
 5. Test STMbench7 (3 workloads) + TPC-C at 16 threads
