@@ -89,7 +89,6 @@ struct SpecAlloc {
 
 extern thread_local SpecAlloc* g_spec_allocs;
 
-#include <malloc/malloc.h>
 // Track a malloc/calloc/realloc result as a speculative allocation.
 inline void tm_track_spec_alloc(void* ptr)
 {
@@ -126,8 +125,8 @@ inline void tm_clear_spec_allocs()
     while (node) {
         auto* next = node->next;
         if (node->ptr)
-            std::free(node->ptr);   // free the speculatively-allocated memory
-        std::free(node);            // free the bookkeeping node
+            ::operator delete(node->ptr);   // free the speculatively-allocated memory
+        std::free(node);                   // free the bookkeeping node (std::malloc'd)
         node = next;
     }
     g_spec_allocs = nullptr;
@@ -177,8 +176,8 @@ inline void tm_flush_deferred_frees()
     auto* node = g_deferred_frees;
     while (node) {
         auto* next = node->next;
-        std::free(node->ptr);
-        std::free(node);
+        ::operator delete(node->ptr);  // user data (tm_malloc'd)
+        ::operator delete(node);       // FreeNode bookkeeping
         node = next;
     }
     g_deferred_frees = nullptr;
@@ -193,7 +192,7 @@ inline void tm_clear_deferred_frees()
     auto* node = g_deferred_frees;
     while (node) {
         auto* next = node->next;
-        std::free(node);   // free the FreeNode, NOT the user pointer
+        ::operator delete(node);   // free the FreeNode, NOT the user pointer
         node = next;
     }
     g_deferred_frees = nullptr;

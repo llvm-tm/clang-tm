@@ -179,18 +179,18 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {}
 void consume_ptr(volatile void *ptr) { (void)ptr; }
-void* tm_malloc(size_t size) { void* p = malloc(size); tm_track_spec_alloc(p); return p; }
-void* tm_calloc(size_t nmemb, size_t size) { void* p = calloc(nmemb, size); tm_track_spec_alloc(p); return p; }
-void* tm_realloc(void* ptr, size_t size) { void* p = realloc(ptr, size); tm_track_spec_alloc(p); return p; }
+void* tm_malloc(size_t size) { void* p = ::operator new(size); tm_track_spec_alloc(p); return p; }
+void* tm_calloc(size_t nmemb, size_t size) { void* p = ::operator new(nmemb * size); memset(p, 0, nmemb * size); tm_track_spec_alloc(p); return p; }
+void* tm_realloc(void* ptr, size_t size) { void* p = ::operator new(size); if (ptr) { memcpy(p, ptr, size); ::operator delete(ptr); } tm_track_spec_alloc(p); return p; }
 void  tm_free(void* ptr) {
 	if (g_in_tx) {
 		tm_untrack_spec_alloc(ptr);
-		auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));
+		auto* node = static_cast<FreeNode*>(::operator new(sizeof(FreeNode)));
 		node->ptr = ptr;
 		node->next = g_deferred_frees;
 		g_deferred_frees = node;
 	} else {
-		::free(ptr);
+		::operator delete(ptr);
 	}
 }
 
