@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 
@@ -69,6 +70,19 @@ __thread int32_t tm_longjmp_ret;
 __thread uint8_t is_tm_init_thread_ready = 0;
 thread_local uint8_t tm_buffer[TM_BUFFER_SIZE] = {0};
 
+// ── Deferred-free (transaction-safe free) ──────────────────
+// Inside a transaction, tm_free records the pointer in a thread-local
+// list instead of calling ::free immediately.  On commit, all pending
+// frees are executed.  On abort (discard without freeing), the undo log
+// has restored container pointers so the "freed" memory is still live.
+struct FreeNode {
+    FreeNode* next;
+    void* ptr;
+};
+
+thread_local bool g_in_tx = false;
+thread_local FreeNode* g_deferred_frees = nullptr;
+
 std::atomic<int8_t> tm_is_init_ready{0};
 
 void tm_init()
@@ -110,6 +124,29 @@ void tm_exit_thread()
 	}
 }
 
+void tm_flush_deferred_frees()
+{
+	auto* node = g_deferred_frees;
+	while (node) {
+		auto* next = node->next;
+		std::free(node->ptr);
+		std::free(node);
+		node = next;
+	}
+	g_deferred_frees = nullptr;
+}
+
+void tm_clear_deferred_frees()
+{
+	auto* node = g_deferred_frees;
+	while (node) {
+		auto* next = node->next;
+		std::free(node);
+		node = next;
+	}
+	g_deferred_frees = nullptr;
+}
+
 static std::recursive_mutex g_serialize_mutex;
 
 void tm_serialize_lock()
@@ -127,6 +164,8 @@ void tm_begin()
 	printf("tm_nested_call_counter=%d  --  ", tm_nested_call_counter);
 	if (tm_nested_call_counter == 1) {
 		printf("tm_begin outer\n");
+		g_in_tx = true;
+		tm_clear_deferred_frees();
 	} else {
 		printf("tm_begin nested %d\n", tm_nested_call_counter);
 	}
@@ -136,6 +175,8 @@ void tm_end()
 {
 	printf("tm_nested_call_counter=%d  --  ", tm_nested_call_counter);
 	if (tm_nested_call_counter == 1) {
+		tm_flush_deferred_frees();
+		g_in_tx = false;
 		printf("tm_end outer\n");
 	} else {
 		printf("tm_end nested %d\n", tm_nested_call_counter);
@@ -269,4 +310,23 @@ void tm_memset(void *dst, uint8_t value, size_t sz)
 }
 
 void consume_ptr(volatile void *ptr) { (void)ptr; }
+
+// TM-aware allocators
+void *tm_malloc(size_t size) { return malloc(size); }
+void *tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
+void *tm_realloc(void *ptr, size_t size) { return realloc(ptr, size); }
+
+// Deferred-free: inside a transaction, record the pointer for commit-time
+// free.  Outside a transaction, free immediately.
+void tm_free(void *ptr)
+{
+	if (g_in_tx) {
+		auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));
+		node->ptr = ptr;
+		node->next = g_deferred_frees;
+		g_deferred_frees = node;
+	} else {
+		::free(ptr);
+	}
+}
 }

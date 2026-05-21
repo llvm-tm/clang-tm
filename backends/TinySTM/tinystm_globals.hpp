@@ -35,7 +35,10 @@ __thread sigjmp_buf *jmpbuf;
 #elif defined(DESIGN_WT)
 #include "tinystm_wt.hpp"
 // wt.hpp defines its own globals (g_locks, current_tx, rng, g_clock, etc.)
-namespace tinystm { __thread sigjmp_buf *jmpbuf; }
+namespace tinystm {
+std::atomic<uint64_t> g_tm_abort_count{0};
+__thread sigjmp_buf *jmpbuf;
+}
 #else
 #error "Define one of the following: DESIGN_WBETL, DESIGN_WBCTL, DESIGN_WT"
 #endif

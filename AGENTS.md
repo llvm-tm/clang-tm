@@ -62,11 +62,42 @@ Valgrind confirmed: 0 errors (previously 10M+). All 14 plugin tests pass.
 - The earlier "crash at 2 threads" was caused by stale binary from partial file reverts during investigation.
   Clean rebuild works perfectly.
 - STMbench7: 1 thread wbctl FIXED (read_set cache stale-value bug).
-  Multi-threaded (4+ threads) crashes: pre-existing, in `_M_insert_unique_node` — likely unordered_map concurrent access issue or multithreaded TM coordination bug.
-  `SingleGlobalLock` backend works fine at all thread counts.
+  Multi-threaded (4+ threads) crashes: root cause identified.
+
+## Root Cause of Multi-threaded Crashes (THIS SESSION)
+
+### Missing instrumentation of `std::vector::push_back` internal stores
+
+The STMbench7 multi-threaded crash is a **use-after-free** caused by `std::vector::push_back` (and related operations like `emplace_back`, `__split_buffer`) making **direct stores** to vector internals (`__begin_`, `__end_`, `__end_cap_`) that bypass TM barriers.
+
+**Why stores are missed** (the `tm-instrument` legacy pipeline):
+1. Pipeline uses `-O1 -fno-inline` — vector internals are NOT inlined into TX function bodies
+2. `cloneTxReachableGraph` creates `_tm_clone` versions of vector internals, but clones are **instrumented BEFORE call redirection** (Pass 1 of `cloneTxReachableGraph`)
+3. At instrumentation time, clones have **zero callers** — `tracesFromTMGlobal` traces `this` → load from alloca → store of argument (to redirect target) → checks callers → **none** → returns false
+4. `isSharedPointer` falls through → returns false → store is NOT replaced with `tm_write_ptr`
+5. Original `push_back`'s direct stores to `__begin_`, `__end_` operate on unconrolled (non-TM-tracked) memory
+6. Concurrent reads in the range-for loop (`op_st3_traverse`) via `tm_read_ptr` get stale copies, then walk into **freed memory** when push_back reallocates the vector buffer
+
+**Fix applied** (`tm_pipeline.mk:140`):
+- Switched default pipeline from `tm-instrument` to `tm-instrument-inline`
+- The inline pipeline: `TMInitInjectPass` (clone with `alwaysinline` + redirect callers) → `AlwaysInlinerPass` (inline clones into TX body) → `TMInstrumentInlinePass` (instrument TX functions)
+- After inlining, stores directly GEP from TM globals → `tracesFromTMGlobal` traces → stores are correctly instrumented
+- The `tm-instrument-inline` pipeline was already implemented but not the default
+
+### 7. Fix `tm-instrument` legacy pipeline: instrument-after-redirect (THIS SESSION)
+The no-inline `tm-instrument` pipeline previously instrumented clones in `cloneMethod` (Pass 1 of `cloneTxReachableGraph`), **before** call redirection (Pass 2). At that point clones had zero callers, so `tracesFromTMGlobal` for argument values (`this` → alloca → store of arg) checked callers → none → returned false → `originatesFromLocal` found the alloca → returned false → stores skipped.
+
+**Fix** (`tm_method_instrumentation.hpp`, `TMInstrumentPass.cpp`):
+- Added `CloneMode::CloneOnly` — clones without instrumentation
+- `TMGlobalInitPass` now: `cloneTxReachableGraph(CloneOnly)` → `redirectTXFunctionsToClones` → `instrumentAllClones(ClonedMap)`
+- New `instrumentAllClones()` iterates all cloned functions post-redirect, propagates TMTracedArgs, adds `NoInline` attribute, and calls `instrumentLoadsStoresInFunction`
+- After redirect, `tracesFromTMGlobal` finds actual callers and traces `this` → GEP from TM global → correctly instruments stores to vector internals
+
+**Key files**: `tm_method_instrumentation.hpp:38` (CloneOnly enum), `:259-276` (CloneOnly branch), `:489-503` (instrumentAllClones), `TMInstrumentPass.cpp:250-257` (restructured TMGlobalInitPass)
 
 ## Next Steps
-1. Debug TinySTM backend multithreaded crash in STMbench7 (pre-existing, separate issue from the fixed 1t bug)
-2. Extend `guess_declaration_ir()` with more function signatures as needed
-3. Run full benchmark suite to verify no regressions
-4. Test STMbench7 (3 workloads) + TPC-C at 16 threads
+1. Build STMbench7 with the new `tm-instrument-inline` pipeline (default) and verify multi-threaded stability
+2. Build STMbench7 with the fixed `tm-instrument` pipeline (CloneOnly + instrument-after-redirect) to confirm the fix works for the no-inline case too
+3. Extend `guess_declaration_ir()` with more function signatures as needed
+4. Run full benchmark suite to verify no regressions
+5. Test STMbench7 (3 workloads) + TPC-C at 16 threads

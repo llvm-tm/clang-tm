@@ -5,8 +5,11 @@
 #pragma once
 
 #include <cstring>
+#include <cstdio>
 #include <thread>
 #include <algorithm>
+#include <dlfcn.h>
+#include <pthread.h>
 
 #include "tinystm_common.hpp"
 
@@ -213,6 +216,15 @@ commit()    //
 			               "Lock not locked or wrong owner");
 		}
 
+		// Debug: check for null addresses in write_set
+		for (auto &it : tx->write_set) {
+			if (it.first == nullptr) {
+				fprintf(stderr, "[CRASH_DEBUG] commit: null addr in write_set, type=%d\n",
+				        (int)it.second.type);
+				fflush(stderr);
+			}
+		}
+
 		// can commit, increase the global clock
 		commit_version = increment_clock(tx->id);
 		if (commit_version < tx->end_version)
@@ -283,6 +295,36 @@ read_word_ctl(                                                //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
+	// Debug: detect corrupted addresses (32-bit truncation)
+	static std::atomic<uint64_t> read_count{0};
+	uint64_t rc = read_count++;
+	uint64_t addr_bits = (uint64_t)addr;
+	if ((addr_bits >> 48) != 0) {
+		fprintf(stderr, "[BAD_ADDR] read_word_ctl: addr=%p sz=%d tx=%llu rc=%llu\n",
+		        (void*)addr_bits, (int)sz, (unsigned long long)tx->id, rc);
+		void *caller = __builtin_return_address(0);
+		Dl_info info;
+		const char *sym = nullptr;
+		if (dladdr(caller, &info) && info.dli_sname)
+			sym = info.dli_sname;
+		fprintf(stderr, "  caller: %s (%p)\n",
+		        sym ? sym : "?", caller);
+		// Also log the addr bits in hex with breakdown
+		fprintf(stderr, "  addr_bits=0x%016llx (hi32=0x%08x lo32=0x%08x)\n",
+		        (unsigned long long)addr_bits,
+		        (unsigned)(addr_bits >> 32),
+		        (unsigned)(addr_bits & 0xFFFFFFFF));
+		// Log the values in the write_set and read_set for debugging
+		fprintf(stderr, "  write_set.size=%zu read_set.size=%zu\n",
+		        tx->write_set.size(), tx->read_set.size());
+		fflush(stderr);
+	}
+	if ((rc & 0xFFFF) == 0) {
+		fprintf(stderr, "[R%llu] addr=%p sz=%d tx=%llu\n",
+		        rc, (void*)addr_bits, (int)sz, (unsigned long long)tx->id);
+		fflush(stderr);
+	}
+
 	auto w = tx->write_set.find(addr);
 	if (w != tx->write_set.end() && w->second.type == sz) { // found in write-set
 		return w->second.new_val;
@@ -345,6 +387,20 @@ write_word_ctl(                                               //
 
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
+
+	if (addr == nullptr) {
+		void *ret_addr = __builtin_return_address(0);
+		fprintf(stderr, "[NULL_WRITE] write_word_ctl: addr=nullptr sz=%d tx=%llu ws=%zu val=0x%llx ra=%p\n",
+		        (int)sz, (unsigned long long)tx->id, tx->write_set.size(), (unsigned long long)val.u8, ret_addr);
+		// Backtrace to find the exact instruction
+		void *bt[16];
+		int bt_sz = backtrace(bt, 16);
+		char **bt_syms = backtrace_symbols(bt, bt_sz);
+		for (int i = 0; i < bt_sz; i++)
+			fprintf(stderr, "  bt[%d] %s\n", i, bt_syms[i]);
+		free(bt_syms);
+		fflush(stderr);
+	}
 
 	tx->read_only = false; // TODO: shouldn't the TX abort?
 

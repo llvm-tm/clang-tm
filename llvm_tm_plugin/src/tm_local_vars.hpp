@@ -56,7 +56,9 @@ static bool isHeapAllocationCall(const Value *V) {
   return Name == "_Znwm" || Name == "_Znam" ||
          Name == "_Znwj" || Name == "_Znaj" ||
          Name == "malloc" || Name == "calloc" ||
-         Name == "realloc" || Name == "strdup";
+         Name == "realloc" || Name == "strdup" ||
+         Name == "tm_malloc" || Name == "tm_calloc" ||
+         Name == "tm_realloc";
 }
 
 // Check if a call instruction is a heap deallocation function
@@ -238,8 +240,15 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
   // a TM global, the return value inherits that.
   if (auto *Call = dyn_cast<CallBase>(V)) {
     if (Function *Callee = Call->getCalledFunction()) {
-      if (Callee->getName().starts_with("tm_"))
+      if (Callee->getName().starts_with("tm_")) {
+        // tm_read_ptr loads a pointer from shared memory — the returned value
+        // IS a shared pointer, so subsequent loads/stores through it must be
+        // instrumented. All other tm_* (read_i4, write_ptr, etc.) return
+        // integer/void and should stop the trace.
+        if (Callee->getName() == "tm_read_ptr")
+          return true;
         return false;
+      }
     }
     for (unsigned i = 0; i < Call->arg_size(); i++)
       if (tracesFromTMGlobal(Call->getArgOperand(i), M, VisitedAllocas, Depth + 1))
@@ -259,6 +268,35 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
   if (auto *Sel = dyn_cast<SelectInst>(V))
     return tracesFromTMGlobal(Sel->getTrueValue(), M, VisitedAllocas, Depth + 1) ||
            tracesFromTMGlobal(Sel->getFalseValue(), M, VisitedAllocas, Depth + 1);
+
+  // IntToPtr: the integer operand might come from PtrToInt of a pointer
+  // (common for aliasing barriers inserted by LLVM).  Strip through to the
+  // original pointer.  Without this, ptrtoint→inttoptr chains inserted
+  // during inlining break the trace from allocas to TM globals.
+  if (auto *ITP = dyn_cast<IntToPtrInst>(V)) {
+    Value *Src = ITP->getOperand(0);
+    if (auto *PTI = dyn_cast<PtrToIntInst>(Src))
+      return tracesFromTMGlobal(PTI->getPointerOperand(), M, VisitedAllocas, Depth + 1);
+    return false;
+  }
+
+  // ExtractValueInst: the extracted sub-value might contain a pointer that
+  // was embedded via insertvalue.  Trace back through the aggregate.
+  //     %ptr = extractvalue %struct %agg, 0
+  //     load i32, ptr %ptr
+  if (auto *EV = dyn_cast<ExtractValueInst>(V))
+    return tracesFromTMGlobal(EV->getAggregateOperand(), M, VisitedAllocas, Depth + 1);
+
+  // InsertValueInst: the aggregate value might contain a TM-traced pointer
+  // that was inserted into a struct field.  Check both the base aggregate
+  // and the inserted value.
+  //     %agg = insertvalue %struct undef, ptr %tm_ptr, 0
+  //     store %struct %agg, ptr %alloca
+  if (auto *IV = dyn_cast<InsertValueInst>(V)) {
+    if (tracesFromTMGlobal(IV->getAggregateOperand(), M, VisitedAllocas, Depth + 1))
+      return true;
+    return tracesFromTMGlobal(IV->getInsertedValueOperand(), M, VisitedAllocas, Depth + 1);
+  }
 
   // Function argument: follow through call sites to check what's actually
   // passed at this argument position.  This enables inter-procedural tracing:
@@ -281,22 +319,47 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
 
   // Alloca: check if any store to this alloca stores a value that traces
   // to a TM global.  This is the key case for iterators:
-  //   %__begin = alloca ptr
-  //   store ptr %begin_result, ptr %__begin
-  // where %begin_result comes from begin() on a TM global.
+  //   %__begin = alloca ptr                    (or %__iter = alloca %struct)
+  //   store ptr %begin_result, ptr %__begin    (or %f = GEP %__iter, 0, 0;
+  //                                             store ptr %result, ptr %f)
+  // where %begin_result traces to begin() on a TM global, or %result was
+  // loaded from a TM global during tree traversal.
+  //
+  // We walk ALL expressions rooted at the alloca (GEPs, bitcasts) to catch
+  // stores through struct field GEPs — this covers iterators whose internal
+  // pointer field is written via GEP+store rather than a direct store to the
+  // alloca itself.
   if (auto *AI = dyn_cast<AllocaInst>(V)) {
     if (VisitedAllocas && VisitedAllocas->count(AI))
       return false;
     SmallPtrSet<const AllocaInst *, 4> LocalVisited;
-    if (!VisitedAllocas) {
+    if (!VisitedAllocas)
       VisitedAllocas = &LocalVisited;
-    }
     VisitedAllocas->insert(AI);
-    for (User *U : AI->users()) {
-      if (auto *Store = dyn_cast<StoreInst>(U)) {
-        if (Store->getPointerOperand() == AI)
-          if (tracesFromTMGlobal(Store->getValueOperand(), M, VisitedAllocas, Depth + 1))
-            return true;
+
+    SmallVector<Value *, 8> AllocaExpr;
+    SmallPtrSet<Value *, 8> VisitedExpr;
+    AllocaExpr.push_back(const_cast<AllocaInst *>(AI));
+    VisitedExpr.insert(const_cast<AllocaInst *>(AI));
+    while (!AllocaExpr.empty()) {
+      Value *Cur = AllocaExpr.pop_back_val();
+      for (User *U : Cur->users()) {
+        if (!VisitedExpr.insert(U).second) continue;
+        if (auto *Store = dyn_cast<StoreInst>(U)) {
+          // The store writes to this alloca (directly or via GEP): trace the
+          // stored value back to see if it originates from a TM global.
+          Value *StorePtr = Store->getPointerOperand()->stripPointerCasts();
+          if (StorePtr == AI || getBaseObject(StorePtr) == AI)
+            if (tracesFromTMGlobal(Store->getValueOperand(), M, VisitedAllocas, Depth + 1))
+              return true;
+          continue;
+        }
+        // Follow pointer-typed expressions (GEPs, bitcasts) rooted at the
+        // alloca to find indirect stores.
+        if (isa<GetElementPtrInst>(U) || isa<BitCastInst>(U) ||
+            isa<AddrSpaceCastInst>(U)) {
+          AllocaExpr.push_back(U);
+        }
       }
     }
     return false;
@@ -316,7 +379,11 @@ static bool isSharedPointer(Value *Ptr,
   // here prevents tm_write_ptr/tm_read_iN on local variables.  The VALUES
   // loaded from allocas later still trace to TM globals through the normal
   // tracesFromTMGlobal chain — see the GEP/Load handling there.
+  // Also handle GEPs/bitcasts of allocas (e.g. iterator field access) —
+  // the address within a stack allocation is always thread-private.
   if (isa<AllocaInst>(Ptr))
+    return false;
+  if (isa<AllocaInst>(getBaseObject(Ptr)))
     return false;
 
   // Check if the pointer ultimately traces to a TM-annotated global.

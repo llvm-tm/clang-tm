@@ -137,7 +137,7 @@ define tm_compile_ir_debug
 		-fno-stack-protector -pthread
 endef
 
-TM_INSTRUMENT_PIPELINE ?= tm-instrument
+TM_INSTRUMENT_PIPELINE ?= tm-instrument-inline
 
 define tm_instrument
 $(OPT) -load-pass-plugin=$(TM_PLUGIN) -passes="$(TM_INSTRUMENT_PIPELINE)" $(TM_INSTRUMENT_FLAGS) $(if $(TM_OPAQUE_SYMBOLS_FILE),-tm-opaque-symbols-file=$(TM_OPAQUE_SYMBOLS_FILE)) $1 -o $2
