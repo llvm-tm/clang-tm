@@ -245,9 +245,15 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
       if (Callee->getName().starts_with("tm_")) {
         // tm_read_ptr loads a pointer from shared memory — the returned value
         // IS a shared pointer, so subsequent loads/stores through it must be
-        // instrumented. All other tm_* (read_i4, write_ptr, etc.) return
-        // integer/void and should stop the trace.
-        if (Callee->getName() == "tm_read_ptr")
+        // instrumented. tm_malloc/tm_calloc/tm_realloc allocate memory that
+        // WILL be linked into a TM global (e.g., std::map tree nodes), so
+        // stores through them must also be instrumented.
+        // All other tm_* (read_i4, write_ptr, etc.) return integer/void
+        // and should stop the trace.
+        if (Callee->getName() == "tm_read_ptr" ||
+            Callee->getName() == "tm_malloc" ||
+            Callee->getName() == "tm_calloc" ||
+            Callee->getName() == "tm_realloc")
           return true;
         return false;
       }
