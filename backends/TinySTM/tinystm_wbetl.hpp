@@ -209,9 +209,45 @@ read_word_etl(                                                //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
+	// Check write-set for this exact address
 	auto w = tx->write_set.find(addr);
-	if (w != tx->write_set.end() && w->second.type == sz) {
-		return w->second.new_val;
+	if (w != tx->write_set.end()) {
+		if (w->second.type == sz)
+			return w->second.new_val;
+		// Type mismatch: wider write covers this address, extract bytes.
+		if (w->second.type == ValueType::UINT64 && sz == ValueType::UINT8) {
+			any_type_t result;
+			result.u1 = static_cast<uint8_t>(w->second.new_val.u8 & 0xFF);
+			return result;
+		}
+	}
+
+	// For unaligned reads: check the 8-byte-aligned address.
+	if (bo.offset != 0) {
+		void *base_addr = reinterpret_cast<void *>(bo.base_addr);
+		auto w2 = tx->write_set.find(base_addr);
+		if (w2 != tx->write_set.end() && w2->second.type == ValueType::UINT64) {
+			unsigned shift = static_cast<unsigned>(bo.offset) * 8;
+			switch (sz) {
+			case ValueType::UINT8: {
+				any_type_t result;
+				result.u1 = static_cast<uint8_t>(w2->second.new_val.u8 >> shift);
+				return result;
+			}
+			case ValueType::UINT16: {
+				any_type_t result;
+				result.u2 = static_cast<uint16_t>(w2->second.new_val.u8 >> shift);
+				return result;
+			}
+			case ValueType::UINT32: {
+				any_type_t result;
+				result.u4 = static_cast<uint32_t>(w2->second.new_val.u8 >> shift);
+				return result;
+			}
+			default:
+				break;
+			}
+		}
 	}
 
 	Lock *lock = &g_locks_wbetl.get(bo.base_addr);
@@ -271,10 +307,58 @@ write_word_etl(                                               //
 
 	tx->read_only = false; // TODO: shouldn't the TX abort?
 
-	auto w = tx->write_set.find(addr);
-	if (w != tx->write_set.end() && w->second.type == sz) {
-		w->second.new_val = val;
-		return;
+	// Found write-set entry at exact addr with matching type → update in place.
+	{
+		auto w = tx->write_set.find(addr);
+		if (w != tx->write_set.end()) {
+			if (w->second.type == sz) {
+				w->second.new_val = val;
+				return;
+			}
+			// Type mismatch at same addr: merge sub-word write into wider entry.
+			if (w->second.type == ValueType::UINT64 && sz == ValueType::UINT8) {
+				uint64_t merged = (w->second.new_val.u8 & ~(uint64_t)0xFF);
+				merged |= (uint64_t)(val.u1);
+				w->second.new_val.u8 = merged;
+				return;
+			}
+		}
+	}
+
+	// For sub-word writes at an offset within an 8-byte word: if the aligned
+	// address already has a UINT64 entry, merge this write into it.
+	if (bo.offset != 0) {
+		void *base_addr = reinterpret_cast<void *>(bo.base_addr);
+		auto w2 = tx->write_set.find(base_addr);
+		if (w2 != tx->write_set.end() && w2->second.type == ValueType::UINT64) {
+			unsigned shift = static_cast<unsigned>(bo.offset) * 8;
+			uint64_t mask;
+			uint64_t write_val;
+			switch (sz) {
+			case ValueType::UINT8:
+				mask = (uint64_t)0xFF << shift;
+				write_val = val.u1;
+				break;
+			case ValueType::UINT16:
+				mask = (uint64_t)0xFFFF << shift;
+				write_val = val.u2;
+				break;
+			case ValueType::UINT32:
+				mask = (uint64_t)0xFFFFFFFF << shift;
+				write_val = val.u4;
+				break;
+			default:
+				mask = 0;
+				write_val = 0;
+				break;
+			}
+			if (mask) {
+				uint64_t merged = (w2->second.new_val.u8 & ~mask);
+				merged |= (write_val << shift);
+				w2->second.new_val.u8 = merged;
+				return;
+			}
+		}
 	}
 
 	while (true) {

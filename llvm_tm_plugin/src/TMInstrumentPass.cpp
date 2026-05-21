@@ -222,10 +222,8 @@ public:
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &)
   {
     if (!hasAnnotation(F, "transaction")) {
-        TM_DEBUG("%s is not a transaction function, skipping", F.getName().str().c_str());
         return PreservedAnalyses::all();
     }
-    TM_DEBUG("TMInstrumentInlinePass: processing function %s", F.getName().str().c_str());
     Module *M = F.getParent();
     LLVMContext &Ctx = M->getContext();
     const char *SetjmpFunc = M->getTargetTriple().str().find("linux") != std::string::npos
@@ -235,14 +233,18 @@ public:
     if (TMAudit) auditTXFunctionLoadsStores(F, *M);
 
     SmallVector<Instruction *, 16> ToErase;
+    SmallVector<CallBase *, 8> MemIntrinsics;
     for (auto &BB : F) {
       for (auto InstIt = BB.begin(); InstIt != BB.end();) {
         Instruction *I = &*InstIt++;
         IRBuilder<> B(I->getParent(), I->getIterator());
 #ifndef DISABLE_TM_READ_WRITE
-        if (auto *Call = dyn_cast<CallBase>(I))
-            if (handleMemoryIntrinsic(Call, *M, H, &ToErase))
+        if (auto *Call = dyn_cast<CallBase>(I)) {
+            if (needsMemIntrinsicInstrumentation(Call, *M)) {
+                MemIntrinsics.push_back(Call);
                 continue;
+            }
+        }
 #endif
 #ifndef DISABLE_MALLOC_FREE
         if (auto *Call = dyn_cast<CallBase>(I))
@@ -253,6 +255,12 @@ public:
         handleLoadStore(I, F, *M, H, ToErase);
 #endif
       }
+    }
+    // Instrument memory intrinsics AFTER all loops (they split basic blocks,
+    // which would invalidate the instruction iterators above).
+    for (auto *Call : MemIntrinsics) {
+        tm_method_instrumentation::instrumentMemoryIntrinsic(Call, *M, H);
+        ToErase.push_back(Call);
     }
     for (Instruction *I : ToErase) I->eraseFromParent();
     return PreservedAnalyses::none();
@@ -325,6 +333,7 @@ public:
     if (TMAudit) auditTXFunctionLoadsStores(F, *M);
 
     SmallVector<Instruction *, 16> ToErase;
+    SmallVector<CallBase *, 8> MemIntrinsics;
     for (auto &BB : F) {
       for (auto InstIt = BB.begin(); InstIt != BB.end();) {
         Instruction *I = &*InstIt++;

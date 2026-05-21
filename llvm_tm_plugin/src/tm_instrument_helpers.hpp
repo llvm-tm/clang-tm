@@ -148,24 +148,52 @@ static void instrumentThreadEntries(Module &M,
 // Shared function-level helpers (used by both TMInstrumentPass and TMInstrumentInlinePass)
 // ===========================================================================
 
-static bool handleMemoryIntrinsic(CallBase *Call, Module &M,
-                                    const TMRuntimeHooks &H,
-                                    SmallVectorImpl<Instruction *> *ToErase = nullptr)
+// Detect whether a memory intrinsic (memcpy/memmove/memset) touches TM-tracked
+// memory.  Returns true if so — the caller should defer instrumentation to
+// after the instruction loop (instrumentMemoryIntrinsic splits basic blocks,
+// which would invalidate the iterator).
+static bool needsMemIntrinsicInstrumentation(CallBase *Call, Module &M)
 {
     Function *Callee = Call->getCalledFunction();
     if (!Callee) return false;
     StringRef Name = Callee->getName();
-    if (Name != "llvm.memcpy" && Name != "llvm.memmove" && Name != "llvm.memset")
+    if (!Name.starts_with("llvm.memcpy") && !Name.starts_with("llvm.memmove")
+        && !Name.starts_with("llvm.memset"))
         return false;
-    bool touchesTM = false;
+
+    // Check each argument for TM-global provenance.
     for (unsigned i = 0; i < Call->arg_size(); ++i)
-        if (tm_method_instrumentation::tracesToTMGlobal(Call->getArgOperand(i), M))
-            { touchesTM = true; break; }
-    if (touchesTM) {
-        tm_method_instrumentation::instrumentMemoryIntrinsic(Call, M, H);
-        if (ToErase) ToErase->push_back(Call);
+        if (tracesFromTMGlobal(Call->getArgOperand(i), M))
+            return true;
+
+    // FALLBACK: tracesFromTMGlobal may miss inlined pointer chains (e.g.
+    // old buffer loaded via tm_read_ptr stored into an alloca).
+    if (Name.starts_with("llvm.memmove")) {
+        // Check if src came from a tm_read_ptr call
+        if (Value *Src = Call->getArgOperand(1))
+            if (auto *SrcCall = dyn_cast<CallBase>(Src->stripPointerCasts()))
+                if (Function *SrcCallee = SrcCall->getCalledFunction())
+                    if (SrcCallee->getName() == "tm_read_ptr")
+                        return true;
+        // Check if dest came from tm_malloc
+        if (Value *Dst = Call->getArgOperand(0))
+            if (auto *DstCall = dyn_cast<CallBase>(Dst->stripPointerCasts()))
+                if (Function *DstCallee = DstCall->getCalledFunction())
+                    if (DstCallee->getName() == "tm_malloc")
+                        return true;
     }
-    return true;
+    return false;
+}
+
+// Legacy detection — kept for ABI compatibility, new code should use
+// needsMemIntrinsicInstrumentation().
+static bool handleMemoryIntrinsic(CallBase *Call, Module &M,
+                                    const TMRuntimeHooks &H,
+                                    SmallVectorImpl<Instruction *> *ToErase = nullptr)
+{
+    (void)H;
+    (void)ToErase;
+    return needsMemIntrinsicInstrumentation(Call, M);
 }
 
 // ===========================================================================
