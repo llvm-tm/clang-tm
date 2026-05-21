@@ -23,8 +23,15 @@ static const OpaqueSafeEntry KnownSafeOpaqueTable[] = {
     {"putchar", false}, {"putc", false}, {"snprintf", false}, {"sprintf", false},
     {"exit", false}, {"abort", false},
     {"strlen", false}, {"strcmp", false}, {"strncmp", false},
+    {"strtol", false}, {"strtoul", false}, {"strtoll", false}, {"strtoull", false},
+    {"strtof", false}, {"strtod", false}, {"strtold", false},
+    {"atoi", false}, {"atol", false}, {"atoll", false}, {"atof", false},
+    {"abs", false}, {"labs", false}, {"llabs", false},
+    {"bzero", false},
     {"memcmp", false}, {"memcpy", false}, {"memset", false}, {"memmove", false},
     {"wmemchr", false},
+    {"posix_memalign", false},
+    {"drand48", false}, {"srand48", false},
 };
 
 static constexpr size_t KnownSafeOpaqueTableSize =
