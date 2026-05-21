@@ -1,5 +1,13 @@
 /**
  * TinySTM - WRITE_BACK_CTL (Commit-Time Locking)
+ *
+ * ══════════════════════════════════════════════════════════════════
+ *  This code runs in the RUNTIME, which is compiled SEPARATELY from
+ *  user code and is NEVER fed through the TM plugin.  Every function
+ *  and data structure here uses the STANDARD C++ allocator.
+ *  ⚠ Do NOT add operator new/delete overrides that route to tm_malloc
+ *    — see tm_alloc_overrides.hpp for the full explanation.
+ * ══════════════════════════════════════════════════════════════════
  */
 
 #pragma once
@@ -206,24 +214,15 @@ commit()    //
 			volatile word_t l = lock->get();
 			word_t owner = (l & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS;
 			if (owner != tx->id) {                // skip self-locks
-				while (!lock->try_lock(tx->id)) { // if lock is busy...
-					if (!extend()) {              // ... try to validate the read-set...
-						abort_tx();               // ... then, if fails, return to begin
-					}
+			while (!lock->try_lock(tx->id)) { // if lock is busy...
+				if (!extend()) {              // ... try to validate the read-set...
+					abort_tx();               // ... then, if fails, return to begin
+				}
 				}
 				tx->locks_held.push_back(lock); // keep track of locks
 			}
 			TINYSTM_ASSERT(lock->is_locked() && lock->get_owner() == tx->id,
 			               "Lock not locked or wrong owner");
-		}
-
-		// Debug: check for null addresses in write_set
-		for (auto &it : tx->write_set) {
-			if (it.first == nullptr) {
-				fprintf(stderr, "[CRASH_DEBUG] commit: null addr in write_set, type=%d\n",
-				        (int)it.second.type);
-				fflush(stderr);
-			}
 		}
 
 		// can commit, increase the global clock
@@ -297,34 +296,18 @@ read_word_ctl(                                                //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
+#ifdef DEBUG_WBCTL
 	// Debug: detect corrupted addresses (32-bit truncation)
 	static std::atomic<uint64_t> read_count{0};
 	uint64_t rc = read_count++;
 	uint64_t addr_bits = (uint64_t)addr;
-
-	// Trace all reads of g_vec+8 (__end_) to detect null return
-	static std::atomic<uint64_t> gvec8_reads{0};
-	if (addr_bits != 0 && (addr_bits & 0xfff) == 0x008) {
-		uint64_t gr = gvec8_reads++;
-		auto w = tx->write_set.find(addr);
-		uint64_t ws_val = 0, ws_type = 99;
-		if (w != tx->write_set.end()) {
-			ws_val = w->second.new_val.u8;
-			ws_type = (uint64_t)w->second.type;
-		}
-		fprintf(stderr, "[R_gv8 #%llu] addr=%p sz=%d ws_hit=%d ws_val=0x%llx ws_type=%llu\n",
-		        (unsigned long long)gr, addr, (int)sz,
-		        (int)(w != tx->write_set.end()),
-		        (unsigned long long)ws_val,
-		        (unsigned long long)ws_type);
-		fflush(stderr);
-	}
 
 	if ((addr_bits >> 48) != 0) {
 		fprintf(stderr, "[R%llu] addr=%p sz=%d tx=%llu\n",
 		        rc, (void*)addr_bits, (int)sz, (unsigned long long)tx->id);
 		fflush(stderr);
 	}
+#endif
 
 	// Check write-set for this exact address
 	auto w = tx->write_set.find(addr);
@@ -444,16 +427,17 @@ write_word_ctl(                                               //
 
 	tx->read_only = false; // TODO: shouldn't the TX abort?
 
-	if (tx->write_set.size() >= 35 && tx->write_set.size() <= 42) {
-		static std::atomic<uint64_t> dbg_cnt{0};
-		uint64_t dc = dbg_cnt++;
-		if (dc < 20) {
-			fprintf(stderr, "[W#%llu] addr=%p sz=%d val=0x%llx ws=%zu\n",
-				(unsigned long long)dc, addr, (int)sz,
-				(unsigned long long)val.u8, tx->write_set.size());
-			fflush(stderr);
-		}
+#ifdef DEBUG_WBCTL
+	static std::atomic<uint64_t> allw{0};
+	uint64_t aw = allw++;
+	if (aw < 200) {
+		fprintf(stderr, "[W_ALL#%llu] addr=%p sz=%d val=0x%llx ws=%zu addr_lo=%llx\n",
+			(unsigned long long)aw, addr, (int)sz,
+			(unsigned long long)val.u8, tx->write_set.size(),
+			(unsigned long long)((uint64_t)addr & 0xffff));
+		fflush(stderr);
 	}
+#endif
 	
 	// Found write-set entry at exact addr with matching type → update in place.
 	{

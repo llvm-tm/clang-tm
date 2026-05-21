@@ -343,7 +343,7 @@ for src in "${SOURCES[@]}"; do
     OPTS=()
     [ "$ALLOW_OPAQUE" -eq 1 ] && OPTS+=("-tm-allow-opaque")
     [ "$STRICT_OPAQUE" -eq 1 ] && OPTS+=("-tm-strict-opaque")
-    $OPT -load-pass-plugin="$PLUGIN" -passes="$PIPELINE" "${OPTS[@]}" "$bc" -o "$instr_bc"
+    $OPT -load-pass-plugin="$PLUGIN" -passes="$PIPELINE" ${OPTS[@]+"${OPTS[@]}"} "$bc" -o "$instr_bc"
 
     LINK_BCS+=("$instr_bc")
 done

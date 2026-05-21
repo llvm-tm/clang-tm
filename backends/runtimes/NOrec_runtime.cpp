@@ -229,6 +229,7 @@ void* tm_calloc(size_t nmemb, size_t size) { void* p = calloc(nmemb, size); tm_t
 void* tm_realloc(void* ptr, size_t size) { void* p = realloc(ptr, size); tm_track_spec_alloc(p); return p; }
 void  tm_free(void* ptr) {
     if (g_in_tx) {
+        tm_untrack_spec_alloc(ptr);
         auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));
         node->ptr = ptr;
         node->next = g_deferred_frees;

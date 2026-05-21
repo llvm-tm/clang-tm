@@ -18,6 +18,7 @@
 #include <vector>
 #include <string.h>
 #include <csetjmp>
+#include <type_traits>
 
 namespace tl2 {
 
@@ -258,337 +259,137 @@ public:
         return reinterpret_cast<std::atomic<word_t>*>(guard_addr)->load(std::memory_order_acquire);
     }
     
-    // Write functions with Bloom filter
+    // ---- Type conversion helpers ----
+    template <typename T>
+    static word_t to_word(T val) {
+        if constexpr (std::is_integral_v<T>) {
+            return static_cast<word_t>(val);
+        } else if constexpr (std::is_same_v<T, float>) {
+            uint32_t bits;
+            memcpy(&bits, &val, sizeof(bits));
+            return bits;
+        } else if constexpr (std::is_same_v<T, double>) {
+            uint64_t bits;
+            memcpy(&bits, &val, sizeof(bits));
+            return bits;
+        } else {
+            return reinterpret_cast<word_t>(val);
+        }
+    }
+
+    template <typename T>
+    static T from_word(word_t val) {
+        if constexpr (std::is_integral_v<T>) {
+            return static_cast<T>(val);
+        } else if constexpr (std::is_same_v<T, float>) {
+            uint32_t bits = static_cast<uint32_t>(val);
+            float result;
+            memcpy(&result, &bits, sizeof(result));
+            return result;
+        } else if constexpr (std::is_same_v<T, double>) {
+            double result;
+            memcpy(&result, &val, sizeof(result));
+            return result;
+        } else {
+            return reinterpret_cast<T>(val);
+        }
+    }
+
+    // ---- Generic write implementation ----
+    template <typename T, DataType DT, typename AddrT>
+    static void write_impl(Transaction* tx, AddrT addr, T val) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        if (!tx || !tx->active) { *addr = val; return; }
+
+        for (auto& e : tx->write_set) {
+            if (e.addr == (word_t*)addr && e.dtype == DT) {
+                e.set_new(to_word(val));
+                return;
+            }
+        }
+
+        WriteSetEntry e;
+        e.addr = (word_t*)addr;
+        e.dtype = DT;
+        e.set_old(to_word(*addr));
+        e.set_new(to_word(val));
+        tx->write_set.push_back(e);
+        bloom_set(tx, (word_t*)addr);
+    }
+
+    // Write functions
     static void write_uint8(Transaction* tx, volatile uint8_t* addr, uint8_t val) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        for (auto& e : tx->write_set) {
-            if (e.addr == (word_t*)addr && e.dtype == DataType::UINT8) {
-                e.set_new(val);
-                return;
-            }
-        }
-        
-        WriteSetEntry e;
-        e.addr = (word_t*)addr;
-        e.dtype = DataType::UINT8;
-        e.set_old(*addr);
-        e.set_new(val);
-        tx->write_set.push_back(e);
-        bloom_set(tx, (word_t*)addr);
+        write_impl<uint8_t, DataType::UINT8>(tx, addr, val);
     }
-    
     static void write_uint16(Transaction* tx, volatile uint16_t* addr, uint16_t val) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        for (auto& e : tx->write_set) {
-            if (e.addr == (word_t*)addr && e.dtype == DataType::UINT16) {
-                e.set_new(val);
-                return;
-            }
-        }
-        
-        WriteSetEntry e;
-        e.addr = (word_t*)addr;
-        e.dtype = DataType::UINT16;
-        e.set_old(*addr);
-        e.set_new(val);
-        tx->write_set.push_back(e);
-        bloom_set(tx, (word_t*)addr);
+        write_impl<uint16_t, DataType::UINT16>(tx, addr, val);
     }
-    
     static void write_uint32(Transaction* tx, volatile uint32_t* addr, uint32_t val) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        for (auto& e : tx->write_set) {
-            if (e.addr == (word_t*)addr && e.dtype == DataType::UINT32) {
-                e.set_new(val);
-                return;
-            }
-        }
-        
-        WriteSetEntry e;
-        e.addr = (word_t*)addr;
-        e.dtype = DataType::UINT32;
-        e.set_old(*addr);
-        e.set_new(val);
-        tx->write_set.push_back(e);
-        bloom_set(tx, (word_t*)addr);
+        write_impl<uint32_t, DataType::UINT32>(tx, addr, val);
     }
-    
     static void write_uint64(Transaction* tx, volatile uint64_t* addr, uint64_t val) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        for (auto& e : tx->write_set) {
-            if (e.addr == (word_t*)addr && e.dtype == DataType::UINT64) {
-                e.set_new(val);
-                return;
-            }
-        }
-        
-        WriteSetEntry e;
-        e.addr = (word_t*)addr;
-        e.dtype = DataType::UINT64;
-        e.set_old(*addr);
-        e.set_new(val);
-        tx->write_set.push_back(e);
-        bloom_set(tx, (word_t*)addr);
+        write_impl<uint64_t, DataType::UINT64>(tx, addr, val);
     }
-    
     static void write_float(Transaction* tx, volatile float* addr, float val) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        for (auto& e : tx->write_set) {
-            if (e.addr == (word_t*)addr && e.dtype == DataType::FLOAT) {
-                e.set_new(*(uint32_t*)&val);
-                return;
-            }
-        }
-        
-        WriteSetEntry e;
-        e.addr = (word_t*)addr;
-        e.dtype = DataType::FLOAT;
-        e.set_old(*(uint32_t*)addr);
-        e.set_new(*(uint32_t*)&val);
-        tx->write_set.push_back(e);
-        bloom_set(tx, (word_t*)addr);
+        write_impl<float, DataType::FLOAT>(tx, addr, val);
     }
-    
     static void write_double(Transaction* tx, volatile double* addr, double val) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        for (auto& e : tx->write_set) {
-            if (e.addr == (word_t*)addr && e.dtype == DataType::DOUBLE) {
-                e.set_new(*(uint64_t*)&val);
-                return;
-            }
-        }
-        
-        WriteSetEntry e;
-        e.addr = (word_t*)addr;
-        e.dtype = DataType::DOUBLE;
-        e.set_old(*(uint64_t*)addr);
-        e.set_new(*(uint64_t*)&val);
-        tx->write_set.push_back(e);
-        bloom_set(tx, (word_t*)addr);
+        write_impl<double, DataType::DOUBLE>(tx, addr, val);
     }
-    
     static void write_ptr(Transaction* tx, volatile void** addr, void* val) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
-        
-        for (auto& e : tx->write_set) {
-            if (e.addr == (word_t*)addr && e.dtype == DataType::PTR) {
-                e.set_new((word_t)val);
-                return;
-            }
-        }
-        
-        WriteSetEntry e;
-        e.addr = (word_t*)addr;
-        e.dtype = DataType::PTR;
-        e.set_old((word_t)*addr);
-        e.set_new((word_t)val);
-        tx->write_set.push_back(e);
-        bloom_set(tx, (word_t*)addr);
+        write_impl<void*, DataType::PTR>(tx, addr, val);
     }
     
-    // Read functions with Bloom filter check
+    // ---- Generic read implementation ----
+    template <typename T, DataType DT, typename AddrT>
+    static T read_impl(Transaction* tx, AddrT addr) {
+        if (!tx || !tx->active) return from_word<T>(to_word(*addr));
+
+        if (bloom_might_contain(tx, (word_t*)addr)) {
+            for (auto& e : tx->write_set) {
+                if (e.addr == (word_t*)addr && e.dtype == DT) {
+                    return from_word<T>(e.new_value());
+                }
+            }
+        }
+
+        word_t idx = get_guard_idx((word_t*)addr);
+        word_t guard = g_guards[idx].load(std::memory_order_acquire);
+        word_t version = (guard & VERSION_MASK) >> 1;
+        bool locked = (guard & LOCK_MASK) != 0;
+
+        ReadSetEntry e;
+        e.guard_addr = (word_t*)&g_guards[idx];
+        e.data_addr = (word_t*)addr;
+        e.observed_version = version;
+        e.dtype = DT;
+        e.locked_by_me = locked;
+        tx->read_set.push_back(e);
+
+        return from_word<T>(to_word(*addr));
+    }
+
+    // Read functions
     static uint8_t read_uint8(Transaction* tx, volatile uint8_t* addr) {
-        if (!tx || !tx->active) return *addr;
-        
-        if (bloom_might_contain(tx, (word_t*)addr)) {
-            for (auto& e : tx->write_set) {
-                if (e.addr == (word_t*)addr && e.dtype == DataType::UINT8) {
-                    return (uint8_t)e.new_value();
-                }
-            }
-        }
-        
-        word_t idx = get_guard_idx((word_t*)addr);
-        word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = (guard & VERSION_MASK) >> 1;
-        bool locked = (guard & LOCK_MASK) != 0;
-        
-        ReadSetEntry e;
-        e.guard_addr = (word_t*)&g_guards[idx];
-        e.data_addr = (word_t*)addr;
-        e.observed_version = version;
-        e.dtype = DataType::UINT8;
-        e.locked_by_me = locked;
-        tx->read_set.push_back(e);
-        
-        return *addr;
+        return read_impl<uint8_t, DataType::UINT8>(tx, addr);
     }
-    
     static uint16_t read_uint16(Transaction* tx, volatile uint16_t* addr) {
-        if (!tx || !tx->active) return *addr;
-        
-        if (bloom_might_contain(tx, (word_t*)addr)) {
-            for (auto& e : tx->write_set) {
-                if (e.addr == (word_t*)addr && e.dtype == DataType::UINT16) {
-                    return (uint16_t)e.new_value();
-                }
-            }
-        }
-        
-        word_t idx = get_guard_idx((word_t*)addr);
-        word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = (guard & VERSION_MASK) >> 1;
-        bool locked = (guard & LOCK_MASK) != 0;
-        
-        ReadSetEntry e;
-        e.guard_addr = (word_t*)&g_guards[idx];
-        e.data_addr = (word_t*)addr;
-        e.observed_version = version;
-        e.dtype = DataType::UINT16;
-        e.locked_by_me = locked;
-        tx->read_set.push_back(e);
-        
-        return *addr;
+        return read_impl<uint16_t, DataType::UINT16>(tx, addr);
     }
-    
     static uint32_t read_uint32(Transaction* tx, volatile uint32_t* addr) {
-        if (!tx || !tx->active) return *addr;
-        
-        if (bloom_might_contain(tx, (word_t*)addr)) {
-            for (auto& e : tx->write_set) {
-                if (e.addr == (word_t*)addr && e.dtype == DataType::UINT32) {
-                    return (uint32_t)e.new_value();
-                }
-            }
-        }
-        
-        word_t idx = get_guard_idx((word_t*)addr);
-        word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = (guard & VERSION_MASK) >> 1;
-        bool locked = (guard & LOCK_MASK) != 0;
-        
-        ReadSetEntry e;
-        e.guard_addr = (word_t*)&g_guards[idx];
-        e.data_addr = (word_t*)addr;
-        e.observed_version = version;
-        e.dtype = DataType::UINT32;
-        e.locked_by_me = locked;
-        tx->read_set.push_back(e);
-        
-        return *addr;
+        return read_impl<uint32_t, DataType::UINT32>(tx, addr);
     }
-    
     static uint64_t read_uint64(Transaction* tx, volatile uint64_t* addr) {
-        if (!tx || !tx->active) return *addr;
-        
-        if (bloom_might_contain(tx, (word_t*)addr)) {
-            for (auto& e : tx->write_set) {
-                if (e.addr == (word_t*)addr && e.dtype == DataType::UINT64) {
-                    return (uint64_t)e.new_value();
-                }
-            }
-        }
-        
-        word_t idx = get_guard_idx((word_t*)addr);
-        word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = (guard & VERSION_MASK) >> 1;
-        bool locked = (guard & LOCK_MASK) != 0;
-        
-        ReadSetEntry e;
-        e.guard_addr = (word_t*)&g_guards[idx];
-        e.data_addr = (word_t*)addr;
-        e.observed_version = version;
-        e.dtype = DataType::UINT64;
-        e.locked_by_me = locked;
-        tx->read_set.push_back(e);
-        
-        return *addr;
+        return read_impl<uint64_t, DataType::UINT64>(tx, addr);
     }
-    
     static float read_float(Transaction* tx, volatile float* addr) {
-        if (!tx || !tx->active) return *addr;
-        
-        if (bloom_might_contain(tx, (word_t*)addr)) {
-            for (auto& e : tx->write_set) {
-                if (e.addr == (word_t*)addr && e.dtype == DataType::FLOAT) {
-                    uint32_t bits = (uint32_t)e.new_value();
-                    return *(float*)&bits;
-                }
-            }
-        }
-        
-        word_t idx = get_guard_idx((word_t*)addr);
-        word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = (guard & VERSION_MASK) >> 1;
-        bool locked = (guard & LOCK_MASK) != 0;
-        
-        ReadSetEntry e;
-        e.guard_addr = (word_t*)&g_guards[idx];
-        e.data_addr = (word_t*)addr;
-        e.observed_version = version;
-        e.dtype = DataType::FLOAT;
-        e.locked_by_me = locked;
-        tx->read_set.push_back(e);
-        
-        return *addr;
+        return read_impl<float, DataType::FLOAT>(tx, addr);
     }
-    
     static double read_double(Transaction* tx, volatile double* addr) {
-        if (!tx || !tx->active) return *addr;
-        
-        if (bloom_might_contain(tx, (word_t*)addr)) {
-            for (auto& e : tx->write_set) {
-                if (e.addr == (word_t*)addr && e.dtype == DataType::DOUBLE) {
-                    uint64_t bits = e.new_value();
-                    return *(double*)&bits;
-                }
-            }
-        }
-        
-        word_t idx = get_guard_idx((word_t*)addr);
-        word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = (guard & VERSION_MASK) >> 1;
-        bool locked = (guard & LOCK_MASK) != 0;
-        
-        ReadSetEntry e;
-        e.guard_addr = (word_t*)&g_guards[idx];
-        e.data_addr = (word_t*)addr;
-        e.observed_version = version;
-        e.dtype = DataType::DOUBLE;
-        e.locked_by_me = locked;
-        tx->read_set.push_back(e);
-        
-        return *addr;
+        return read_impl<double, DataType::DOUBLE>(tx, addr);
     }
-    
     static void* read_ptr(Transaction* tx, volatile void** addr) {
-        if (!tx || !tx->active) return (void*)*addr;
-        
-        if (bloom_might_contain(tx, (word_t*)addr)) {
-            for (auto& e : tx->write_set) {
-                if (e.addr == (word_t*)addr && e.dtype == DataType::PTR) {
-                    return (void*)e.new_value();
-                }
-            }
-        }
-        
-        word_t idx = get_guard_idx((word_t*)addr);
-        word_t guard = g_guards[idx].load(std::memory_order_acquire);
-        word_t version = (guard & VERSION_MASK) >> 1;
-        bool locked = (guard & LOCK_MASK) != 0;
-        
-        ReadSetEntry e;
-        e.guard_addr = (word_t*)&g_guards[idx];
-        e.data_addr = (word_t*)addr;
-        e.observed_version = version;
-        e.dtype = DataType::PTR;
-        e.locked_by_me = locked;
-        tx->read_set.push_back(e);
-        
-        return (void*)*addr;
+        return read_impl<void*, DataType::PTR>(tx, addr);
     }
     
     static bool commit(Transaction* tx) {
