@@ -110,20 +110,22 @@ Two bugs in the `tm-instrument-inline` pipeline prevented proper inlining of `_C
 - `tinystm_wbctl.hpp`: handle NULL address in `read_word_ctl` to avoid SEGV during instrumentation of partially-initialized writes
 - `tm_alloc_overrides.hpp`: new file — intercepts `malloc`/`free`/`new`/`delete` in TM tests to avoid using system allocator (which may deadlock under concurrent TM); uses `tm_malloc`/`tm_free` for allocations in instrumented code
 
-### 9. `vector_realloc_test` still crashes with `tm-instrument-inline` + WBCTL (INVESTIGATING)
-Even after the above fixes, the concurrent reader+writer `vector_realloc_test` crashes with `NULL_WRITE` at `tx=3, ws=38` under WBCTL backend.
+### 9. WBCTL write-set type-mismatch: `vector_realloc_test` data corruption (FIXED)
 
-**What was checked**:
-- D2 (`_ConstructTransactionD2`) IS now cloned and inlined (D2_tm_clone created, then inlined into D1_tm_clone, then into `push_back_tm_clone`)
-- The store to `g_vec.__end_` in the fast path IS instrumented: `call void @tm_write_ptr(ptr getelementptr inbounds nuw (i8, ptr @g_vec, i64 8), ptr %389)` at instrumented IR line 668
-- Store inside `__split_buffer.clear()` (realloc path) writes to stack-allocated `__split_buffer` fields — not instrumented, but these are stack locals, not TM globals
-- Original D2 function definition still present (not instrumented) — used by the original (non-cloned) D1 in uninstrumented code paths
+Root cause: the `read_word_ctl` function in `tinystm_wbctl.hpp` checks `w->second.type == sz` before returning a write-set value. When `tm_write_i8(addr, val)` writes UINT64 to an address, and the per-byte memmove replacement loop later reads individual bytes via `tm_read_i1(addr + offset)`, the type check fails (UINT64 != UINT8), so the read falls through to memory — which is stale because WBCTL is write-back (writes never reach memory until commit).
 
-**Hypothesis for remaining crash**: Non-instrumented stores to `__split_buffer` internals (or some other function not cloned/inlined) corrupt data that the instrumented fast path reads. Root cause still unknown — need to identify WHICH uninstrumented store causes the corruption.
+**Fix** (`tinystm_wbctl.hpp:read_word_ctl` + `write_word_ctl`):
+- Read side: when exact address + type mismatch, extract byte 0 from UINT64 value. When sub-word address not found, check the 8-byte-aligned address for a wider UINT64 entry and extract the relevant byte(s) by shifting.
+- Write side: when writing a sub-word type to an address that already has a UINT64 entry at the aligned address, merge the bytes into the existing UINT64 entry rather than creating a separate entry.
+- Same fix applied to `tinystm_wbetl.hpp`.
+
+**Verification**: `vector_realloc_test` with WBCTL now stores all 400 elements correctly. 5-element and 16-element single-TX tests all PASS. All 14 plugin tests pass.
+
+**Also fixed**: `instrumentMemoryIntrinsic` (`tm_method_instrumentation.hpp:121`) — `isMemset` used exact match `== "llvm.memset"` but LLVM 22 emits type-suffixed `"llvm.memset.p0.i8.i64"`. Changed to `starts_with("llvm.memset")`. (This caused the `memtest` test's "Broken module" error.)
 
 ## Next Steps
-1. Identify the specific uninstrumented store in the `tm-instrument-inline` pipeline that corrupts vector state during concurrent access
-2. Verify the `tm-instrument` (no-inline) pipeline with the instrument-after-redirect fix
-3. Extend `guess_declaration_ir()` with more function signatures as needed
+1. ~~Identify the specific uninstrumented store in the `tm-instrument-inline` pipeline that corrupts vector state during concurrent access~~ **DONE — WBCTL write-set type-mismatch was the root cause**.
+2. ~~Verify the `tm-instrument` (no-inline) legacy pipeline with the instrument-after-redirect fix~~ **DONE — pipeline compiles and passes basic tests. Known limitation: memmove intrinsic replacement in clones uses `tracesToTMGlobal` which doesn't follow inter-procedural clone call chains, so per-byte TM copy loops aren't emitted for element relocation during vector reallocation. Simple `g_x++` test works fine.**
+3. ~~Extend `guess_declaration_ir()` with more function signatures as needed~~ **DONE — added 20+ math functions + libc utility functions (abs, labs, llabs, atoi, atol, atoll, atof, strtol, strtoul, strtoll, strtoull, strtof, strtod, strtold, drand48, srand48, bzero, posix_memalign). Also synced `KnownSafeOpaqueTable` in `opaque_safe_table.hpp`.**
 4. Run full benchmark suite to verify no regressions
 5. Test STMbench7 (3 workloads) + TPC-C at 16 threads
