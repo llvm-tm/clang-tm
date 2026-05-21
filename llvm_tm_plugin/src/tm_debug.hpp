@@ -7,6 +7,11 @@
 
 #include <cstdio>
 #include <cassert>
+#include <llvm/Support/CommandLine.h>
+
+// Audit flag: when enabled via -tm-audit, every load/store in TX functions
+// is enumerated with instrumentation analysis.  See auditTXFunctionLoadsStores().
+extern llvm::cl::opt<bool> TMAudit;
 
 // Debug output macro - prints function name and message
 #ifndef NDEBUG

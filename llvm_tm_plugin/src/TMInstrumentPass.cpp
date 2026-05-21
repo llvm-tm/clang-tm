@@ -64,6 +64,10 @@ cl::opt<std::string> OpaqueSymbolsFile("tm-opaque-symbols-file",
     cl::desc("Write unresolved opaque symbols to this file for external resolution"),
     cl::init(""));
 
+cl::opt<bool> TMAudit("tm-audit",
+    cl::desc("Print every load/store in TX functions with instrumentation analysis"),
+    cl::init(false));
+
 static bool checkOpaqueFunctions(
     Module &M, SmallPtrSetImpl<Function *> &TxReachableFuncs)
 {
@@ -156,7 +160,8 @@ public:
         TM_DEBUG("Tx-reachable call graph has %d functions", (int)Ctx.TxReachableFuncs.size());
         Ctx.ClonedMap = &tm_method_instrumentation::cloneTxReachableGraph(
             M, Ctx.TxReachableFuncs, Ctx.H, tm_method_instrumentation::CloneMode::AlwaysInline);
-        redirectTXFunctionsToClones(M, Ctx.TxReachableFuncs, *Ctx.ClonedMap);
+        redirectTXFunctionsToClones(M, Ctx.TxReachableFuncs, *Ctx.ClonedMap,
+                                      tm_method_instrumentation::CloneMode::AlwaysInline);
         modified = true;
     }
 
@@ -183,6 +188,25 @@ public:
         if (!F.isDeclaration() && F.getName().contains("_tm_clone")) ++n;
       errs() << "[BEFORE_INLINE] _tm_clone function definitions: " << n << "\n";
     }
+
+    // Strip AlwaysInline from clones whose original carried noinline
+    // (e.g. __tree_deleter from libc++).  alwaysinline + noinline is
+    // incompatible and crashes the verifier inside AlwaysInlinerPass.
+    SmallVector<Function *, 8> DeadClones;
+    for (auto &F : M) {
+      if (F.isDeclaration() || !F.getName().contains("_tm_clone"))
+        continue;
+      if (F.hasFnAttribute(llvm::Attribute::NoInline) &&
+          F.hasFnAttribute(llvm::Attribute::AlwaysInline)) {
+        F.removeFnAttr(llvm::Attribute::AlwaysInline);
+        F.removeFnAttr(llvm::Attribute::NoInline);
+        if (F.use_empty())
+          DeadClones.push_back(&F);
+      }
+    }
+    for (auto *F : DeadClones)
+      F->eraseFromParent();
+
     return modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
   }
   static bool isRequired() { return true; }
@@ -207,6 +231,8 @@ public:
     const char *SetjmpFunc = M->getTargetTriple().str().find("linux") != std::string::npos
                                ? "__sigsetjmp" : "sigsetjmp";
     auto H = TMRuntimeHooks::declareAll(*M, Ctx, SetjmpFunc);
+
+    if (TMAudit) auditTXFunctionLoadsStores(F, *M);
 
     SmallVector<Instruction *, 16> ToErase;
     for (auto &BB : F) {
@@ -249,9 +275,13 @@ public:
 
     if (!Ctx.TxReachableFuncs.empty()) {
         TM_DEBUG("Tx-reachable call graph has %d functions", (int)Ctx.TxReachableFuncs.size());
+        // CloneOnly: clones without instrumentation, so tracesFromTMGlobal
+        // can find actual callers and trace arguments through allocas to TM
+        // globals.  Then instrument ALL clones after call redirection.
         Ctx.ClonedMap = &tm_method_instrumentation::cloneTxReachableGraph(
-            M, Ctx.TxReachableFuncs, Ctx.H, tm_method_instrumentation::CloneMode::Instrument);
+            M, Ctx.TxReachableFuncs, Ctx.H, tm_method_instrumentation::CloneMode::CloneOnly);
         redirectTXFunctionsToClones(M, Ctx.TxReachableFuncs, *Ctx.ClonedMap);
+        tm_method_instrumentation::instrumentAllClones(*Ctx.ClonedMap, M, Ctx.H);
         modified = true;
     }
 
@@ -291,6 +321,8 @@ public:
     auto H = TMRuntimeHooks::declareAll(*M, Ctx, SetjmpFunc);
 
     injectTransactionBeginEnd(F, *M, H);
+
+    if (TMAudit) auditTXFunctionLoadsStores(F, *M);
 
     SmallVector<Instruction *, 16> ToErase;
     for (auto &BB : F) {

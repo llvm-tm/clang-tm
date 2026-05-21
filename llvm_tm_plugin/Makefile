@@ -51,7 +51,7 @@ PLUGIN_SO_NAMES := $(addprefix $(BIN_DIR)/libTMInstrument_,$(addsuffix .so,$(PLU
 TEST_NAMES := types memtest nested threads persist retry test_stl_containers \
               test_stl_primitive annotation_detect local_containers_test \
               custom_class_test test_stl_map_find test_tm_arg_trace \
-              test_math_opaque
+              test_math_opaque test_map_find_read
 
 RACE_TEST_NAMES := task_queue_race parent_set_race counter_race
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))

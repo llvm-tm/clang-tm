@@ -63,17 +63,18 @@ static ModulePassContext setupModulePass(Module &M)
 
 static void redirectTXFunctionsToClones(Module &M,
                                          SmallPtrSetImpl<Function *> &TxReachableFuncs,
-                                         SmallVectorImpl<std::pair<Function *, Function *>> &ClonedMap)
+                                         SmallVectorImpl<std::pair<Function *, Function *>> &ClonedMap,
+                                         tm_method_instrumentation::CloneMode Mode = tm_method_instrumentation::CloneMode::Instrument)
 {
     for (auto &F : M) {
         if (F.isDeclaration()) continue;
         if (!hasAnnotation(F, "transaction")) continue;
-        tm_method_instrumentation::redirectCallsToClones(F, M, TxReachableFuncs, ClonedMap);
+        tm_method_instrumentation::redirectCallsToClones(F, M, TxReachableFuncs, ClonedMap, Mode);
     }
     // Re-redirect clones now that they have callers
     for (int _r = 0; _r < 3; _r++)
         for (auto &pair : ClonedMap)
-            tm_method_instrumentation::redirectCallsToClones(*pair.second, M, TxReachableFuncs, ClonedMap);
+            tm_method_instrumentation::redirectCallsToClones(*pair.second, M, TxReachableFuncs, ClonedMap, Mode);
 }
 
 // checkOpaqueOrAbort is defined in TMInstrumentPass.cpp alongside checkOpaqueFunctions
@@ -165,6 +166,98 @@ static bool handleMemoryIntrinsic(CallBase *Call, Module &M,
         if (ToErase) ToErase->push_back(Call);
     }
     return true;
+}
+
+// ===========================================================================
+// Load/store audit (enabled with -tm-audit)
+// ===========================================================================
+//
+// When -tm-audit is passed to opt, this function enumerates every load and
+// store instruction in a TX function (after inlining) and reports whether
+// isSharedPointer() classifies it as shared (→ instrumented) or local (→
+// NOT instrumented).  Non-instrumented loads/stores are marked with "* " in
+// the output, so you can `grep "^* "` to find accesses that may be missed.
+//
+// The output shows:
+//   * LOAD/STORE — shared=Y/N  type/val
+//     ptr=   <LLVM pointer operand>
+//     base=  <LLVM base object>
+//
+// Shared-memory accesses that show "shared=N" are potentially missed
+// instrumentation targets.  Investigate why isSharedPointer returned false:
+//   - AllocaInst → isSharedPointer short-circuits to false (local).
+//     The value loaded from the alloca may later trace to a TM global
+//     through tracesFromTMGlobal — so the *data* behind the pointer
+//     IS instrumented, but the alloca dereference itself is not (correct).
+//   - originatesFromLocal returned true → the pointer originates from
+//     an alloca in this function.  Check if it points to TM-shared data
+//     (a known case: stack-allocated iterator that points into a TM map).
+//     If so, tracesFromTMGlobal may already handle it via the alloca-store
+//     tracing in line 305-321 of tm_local_vars.hpp.
+//   - Otherwise: tracesFromTMGlobal returned false AND
+//     originatesFromLocal returned false.  The base object is checked
+//     against TM globals.  If it's a heap pointer not traced to a TM
+//     global through LLVM's def-use chain, isSharedPointer falls back to
+//     "assumed shared" (line 389 of tm_local_vars.hpp), so it IS
+//     instrumented.  A "shared=N" here means it was classified as local.
+//     This is the case that needs investigation.
+//
+static void auditTXFunctionLoadsStores(Function &F, Module &M) {
+    if (!TMAudit) return;
+
+    SmallPtrSet<const Value *, 32> LocalVars;
+    collectLocalVariables(F, LocalVars);
+
+    int totalLoads = 0, sharedLoads = 0;
+    int totalStores = 0, sharedStores = 0;
+
+    errs() << "\n[AUDIT] === ALL loads in " << F.getName() << " ===\n";
+    for (auto &BB : F) {
+        for (auto &I : BB) {
+            auto *Load = dyn_cast<LoadInst>(&I);
+            if (!Load) continue;
+            totalLoads++;
+            Value *Ptr = Load->getPointerOperand();
+            bool shared = isSharedPointer(Ptr, LocalVars, F, M);
+            const Value *Base = getBaseObject(Ptr);
+            errs() << "[AUDIT] " << (shared ? "  " : "* ")
+                   << "LOAD"
+                   << " shared=" << (shared ? "Y" : "N")
+                   << " type=" << *Load->getType()
+                   << "\n    ptr=" << *Ptr
+                   << "\n    base=" << *Base
+                   << "\n";
+            if (shared) sharedLoads++;
+        }
+    }
+
+    errs() << "[AUDIT] === ALL stores in " << F.getName() << " ===\n";
+    for (auto &BB : F) {
+        for (auto &I : BB) {
+            auto *Store = dyn_cast<StoreInst>(&I);
+            if (!Store) continue;
+            totalStores++;
+            Value *Ptr = Store->getPointerOperand();
+            bool shared = isSharedPointer(Ptr, LocalVars, F, M);
+            const Value *Base = getBaseObject(Ptr);
+            errs() << "[AUDIT] " << (shared ? "  " : "* ")
+                   << "STORE"
+                   << " shared=" << (shared ? "Y" : "N")
+                   << " val=" << *Store->getValueOperand()
+                   << "\n    ptr=" << *Ptr
+                   << "\n    base=" << *Base
+                   << "\n";
+            if (shared) sharedStores++;
+        }
+    }
+
+    errs() << "[AUDIT] Summary for " << F.getName() << ": "
+           << "LOAD " << sharedLoads << "/" << totalLoads
+           << " STORE " << sharedStores << "/" << totalStores
+           << " NOT instrumented (LOCAL): "
+           << (totalLoads - sharedLoads) << " loads, "
+           << (totalStores - sharedStores) << " stores"
+           << "\n";
 }
 
 // Replace a malloc/free/operator-new call with the TM-aware equivalent.

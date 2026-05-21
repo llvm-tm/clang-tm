@@ -35,7 +35,7 @@ namespace tm_method_instrumentation
 {
 
 // Clone mode: Instrument clones immediately, or mark for later inlining
-enum class CloneMode { Instrument, AlwaysInline };
+enum class CloneMode { Instrument, AlwaysInline, CloneOnly };
 
 struct TMMethodInfo {
     Function *Original;
@@ -198,12 +198,50 @@ static bool isTMTracedPtr(const Value *Ptr)
 }
 
 static void instrumentLoadsStoresInFunction(Function *F, Module *M,
-                                             const TMRuntimeHooks &H)
+                                              const TMRuntimeHooks &H)
 {
     SmallPtrSet<const Value *, 32> LocalVars;
     collectLocalVariables(*F, LocalVars);
-    SmallVector<Instruction *, 16> ToErase;
 
+    if (TMAudit) {
+        // --- start: inline audit ---
+        int tLoads = 0, sLoads = 0, tStores = 0, sStores = 0;
+        errs() << "\n[AUDIT] === ALL loads in clone " << F->getName() << " ===\n";
+        for (auto &BB : *F) for (auto &I : BB) {
+            auto *L = dyn_cast<LoadInst>(&I); if (!L) continue;
+            tLoads++;
+            bool sh = isSharedPointer(L->getPointerOperand(), LocalVars, *F, *M);
+            bool tr = isTMTracedPtr(L->getPointerOperand());
+            errs() << "[AUDIT] " << ((sh && tr) ? "  " : "* ")
+                   << "LOAD shared=" << (sh ? "Y" : "N")
+                   << " traced=" << (tr ? "Y" : "N")
+                   << " type=" << *L->getType()
+                   << "\n    ptr=" << *L->getPointerOperand()
+                   << "\n    base=" << *getBaseObject(L->getPointerOperand()) << "\n";
+            if (sh && tr) sLoads++;
+        }
+        errs() << "[AUDIT] === ALL stores in clone " << F->getName() << " ===\n";
+        for (auto &BB : *F) for (auto &I : BB) {
+            auto *S = dyn_cast<StoreInst>(&I); if (!S) continue;
+            tStores++;
+            bool sh = isSharedPointer(S->getPointerOperand(), LocalVars, *F, *M);
+            bool tr = isTMTracedPtr(S->getPointerOperand());
+            errs() << "[AUDIT] " << ((sh && tr) ? "  " : "* ")
+                   << "STORE shared=" << (sh ? "Y" : "N")
+                   << " traced=" << (tr ? "Y" : "N")
+                   << " val=" << *S->getValueOperand()
+                   << "\n    ptr=" << *S->getPointerOperand()
+                   << "\n    base=" << *getBaseObject(S->getPointerOperand()) << "\n";
+            if (sh && tr) sStores++;
+        }
+        errs() << "[AUDIT] Summary for clone " << F->getName() << ": "
+               << "LOAD " << sLoads << "/" << tLoads
+               << " STORE " << sStores << "/" << tStores
+               << " NOT instr: LOAD " << (tLoads - sLoads)
+               << " STORE " << (tStores - sStores) << "\n";
+    }
+
+    SmallVector<Instruction *, 16> ToErase;
     for (auto &BB : *F) {
         for (auto &I : BB) {
             if (auto *Load = dyn_cast<LoadInst>(&I)) {
@@ -257,24 +295,32 @@ static Function *cloneMethod(Function *Original, const Twine &Suffix,
 
     NewFunc->setDSOLocal(true);
     if (Mode == CloneMode::AlwaysInline) {
+        // Strip noinline in case the original carried it (e.g. __tree_deleter
+        // from libc++).  alwaysinline + noinline is incompatible.
+        NewFunc->removeFnAttr(llvm::Attribute::NoInline);
         NewFunc->addFnAttr(llvm::Attribute::AlwaysInline);
-    } else {
+    } else if (Mode == CloneMode::Instrument) {
         NewFunc->addFnAttr(llvm::Attribute::NoInline);
         NewFunc->addFnAttr(llvm::Attribute::OptimizeNone);
-        // Propagate TMTracedArgs from original to clone BEFORE instrumentation.
-        // This is critical: isTMTracedPtr (called from instrumentLoadsStoresInFunction)
-        // needs the clone's entry to exist so that ALL pointer args (not just those
-        // directly tracing to TM globals) are treated as traced.
+        // Propagate TMTracedArgs BEFORE instrumentation so isTMTracedPtr works.
         auto OrigIt = TMTracedArgs.find(Original);
         if (OrigIt != TMTracedArgs.end())
             TMTracedArgs[NewFunc] = OrigIt->second;
         instrumentLoadsStoresInFunction(NewFunc, M, H);
+    } else { // CloneMode::CloneOnly
+        // Clone without instrumentation — instrument AFTER call redirection
+        // (done in TMGlobalInitPass) so tracesFromTMGlobal can find callers.
+        // Propagate TMTracedArgs now for later use by instrumentation.
+        auto OrigIt = TMTracedArgs.find(Original);
+        if (OrigIt != TMTracedArgs.end())
+            TMTracedArgs[NewFunc] = OrigIt->second;
     }
 
     TM_DEBUG("Cloned method %s -> %s (%s)",
             Original->getName().str().c_str(),
             NewFunc->getName().str().c_str(),
-            Mode == CloneMode::AlwaysInline ? "alwaysinline" : "instrumented");
+            Mode == CloneMode::AlwaysInline ? "alwaysinline" :
+            Mode == CloneMode::Instrument ? "instrumented" : "cloneonly");
 
     return NewFunc;
 }
@@ -333,7 +379,8 @@ static void computeTMTracedArgs(Module &M,
 
 static SmallPtrSet<Function *, 32>
 computeClonableFunctions(Module &M,
-                         SmallPtrSetImpl<Function *> &TxReachableFuncs)
+                         SmallPtrSetImpl<Function *> &TxReachableFuncs,
+                         CloneMode Mode = CloneMode::Instrument)
 {
     SmallPtrSet<Function *, 32> Clonable;
     for (Function *F : TxReachableFuncs) {
@@ -353,16 +400,19 @@ computeClonableFunctions(Module &M,
         if (it != TMTracedArgs.end() && !it->second.empty())
             Clonable.insert(F);
     }
-    TM_DEBUG("computeClonableFunctions: %d functions clonable (TM-traced args)",
-             (int)Clonable.size());
+    TM_DEBUG("computeClonableFunctions: %d functions clonable%s",
+             (int)Clonable.size(),
+             Mode == CloneMode::AlwaysInline ? " (AlwaysInline: ALL)" : " (TM-traced)");
     return Clonable;
 }
 
 // Redirect all direct function calls within F to their clones (if a clone exists).
 // Also detects unclonable callees for diagnostic purposes.
+// Mode controls redirection scope: AlwaysInline redirects all cloned calls.
 static void redirectCallsToClones(Function &F, Module &M,
                                   SmallPtrSetImpl<Function *> &TxReachableFuncs,
-                                  SmallVectorImpl<std::pair<Function *, Function *>> &ClonedMap)
+                                  SmallVectorImpl<std::pair<Function *, Function *>> &ClonedMap,
+                                  CloneMode Mode = CloneMode::Instrument)
 {
     // Two-pass approach to avoid iterator invalidation:
     //   Pass 1: collect call sites that need redirecting (read-only)
@@ -445,7 +495,7 @@ cloneTxReachableGraph(Module &M,
     auto &ClonedMap = getClonedMethodsMap();
 
     computeTMTracedArgs(M, TxReachableFuncs);
-    SmallPtrSet<Function *, 32> ToClone = computeClonableFunctions(M, TxReachableFuncs);
+    SmallPtrSet<Function *, 32> ToClone = computeClonableFunctions(M, TxReachableFuncs, Mode);
 
     // Pass 1: clone all functions first (so ClonedMap is complete)
     for (Function *F : ToClone) {
@@ -476,9 +526,31 @@ cloneTxReachableGraph(Module &M,
     // Pass 2: redirect all cloned functions (ClonedMap is complete, so all
     // intra-clone calls can be redirected regardless of processing order).
     for (auto &pair : ClonedMap)
-        redirectCallsToClones(*pair.second, M, TxReachableFuncs, ClonedMap);
+        redirectCallsToClones(*pair.second, M, TxReachableFuncs, ClonedMap, Mode);
 
     return ClonedMap;
+}
+
+// Instrument all cloned functions AFTER call redirection, so that
+// tracesFromTMGlobal can trace arguments through actual callers and
+// find TM globals as base objects. This fixes the case where vector
+// internal stores (push_back → __end_, __begin_) go through allocas
+// but the stored value is a TM-traced argument.
+static void instrumentAllClones(
+    SmallVectorImpl<std::pair<Function *, Function *>> &ClonedMap,
+    Module &M, const TMRuntimeHooks &H)
+{
+    for (auto &pair : ClonedMap) {
+        Function *Clone = pair.second;
+        Function *Original = pair.first;
+        auto OrigIt = TMTracedArgs.find(Original);
+        if (OrigIt != TMTracedArgs.end())
+            TMTracedArgs[Clone] = OrigIt->second;
+        Clone->addFnAttr(llvm::Attribute::NoInline);
+        Clone->addFnAttr(llvm::Attribute::OptimizeNone);
+        instrumentLoadsStoresInFunction(Clone, &M, H);
+        TM_DEBUG("After-redirect instrumented clone: %s", Clone->getName().str().c_str());
+    }
 }
 
 } // namespace tm_method_instrumentation
