@@ -92,6 +92,9 @@ fi
 # Local containers test (vector + map in transaction functions)
 run_test local_containers_test "PASS: All local containers tests passed"
 
+# Vector concurrent reallocation test
+run_test vector_realloc_test "Result: PASS"
+
 # STL container test
 run_test test_stl_containers "STL Container Test" "All tests passed"
 

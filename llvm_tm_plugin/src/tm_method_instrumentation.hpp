@@ -118,7 +118,7 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M,
     auto *i64Ty = Type::getInt64Ty(Ctx);
     Function *F = Call->getFunction();
     StringRef Name = Call->getCalledFunction()->getName();
-    bool isMemset = (Name == "llvm.memset");
+    bool isMemset = Name.starts_with("llvm.memset");
 
     Value *Dst = Call->getArgOperand(0);
     Value *Len = Call->getArgOperand(2);
@@ -147,8 +147,10 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M,
     }
     Idx->addIncoming(BB.CreateAdd(Idx, ConstantInt::get(i64Ty, 1)), LoopBody);
     BB.CreateBr(LoopEntry);
-
-    Call->eraseFromParent();
+    // NOTE: Call is NOT erased here — the caller handles erasure
+    // (it is now dead code, reachable only via splitBasicBlock debris;
+    //  the post-instrumentation -O3 pass removes it).  This avoids
+    //  double-erase when the caller also tracks it in ToErase.
 }
 #else
 static void instrumentMemoryIntrinsic(CallInst *, Module &,
@@ -387,6 +389,15 @@ computeClonableFunctions(Module &M,
         if (F->isDeclaration()) continue;
         if (F->getName().starts_with("tm_")) continue;
         if (hasAnnotation(*F, "transaction")) continue;
+        // In AlwaysInline mode, clone ALL reachable functions so they get
+        // alwaysinline and are inlined into the TX body.  Their loads/stores
+        // are then instrumented by TMInstrumentInlinePass.  Without this,
+        // accessor functions like vector::operator[] are never inlined and
+        // their internal loads bypass TM entirely.
+        if (Mode == CloneMode::AlwaysInline) {
+            Clonable.insert(F);
+            continue;
+        }
         // Always clonable if no pointer args (value-type helpers like std::get<N>)
         bool hasPtrArg = false;
         for (auto &Arg : F->args())

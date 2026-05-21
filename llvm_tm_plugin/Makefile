@@ -51,7 +51,7 @@ PLUGIN_SO_NAMES := $(addprefix $(BIN_DIR)/libTMInstrument_,$(addsuffix .so,$(PLU
 TEST_NAMES := types memtest nested threads persist retry test_stl_containers \
               test_stl_primitive annotation_detect local_containers_test \
               custom_class_test test_stl_map_find test_tm_arg_trace \
-              test_math_opaque test_map_find_read
+              test_math_opaque test_map_find_read vector_realloc_test
 
 RACE_TEST_NAMES := task_queue_race parent_set_race counter_race
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))
@@ -99,9 +99,15 @@ $(BIN_DIR)/persist: $(OUT_DIR)/persist.opt.bc $(RUNTIME_DIR)/persistent.cpp | $(
 $(BIN_DIR)/persist_sgl: $(OUT_DIR)/persist.opt.bc $(RUNTIMES_DIR)/PersistentSGL_runtime.cpp | $(BIN_DIR)
 	$(CXX) $< $(RUNTIMES_DIR)/PersistentSGL_runtime.cpp -o $@ -pthread
 
-# TinySTM-backed test
+# TinySTM-backed tests (vector reallocation + local containers)
 $(BIN_DIR)/local_containers_test: $(OUT_DIR)/local_containers_test.opt.bc \
                                   $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp | $(BIN_DIR)
+	$(CXX) -std=c++20 -O1 -pthread -DDESIGN_WBCTL $< \
+	  $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \
+	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) -o $@
+
+$(BIN_DIR)/vector_realloc_test: $(OUT_DIR)/vector_realloc_test.opt.bc \
+                                $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp | $(BIN_DIR)
 	$(CXX) -std=c++20 -O1 -pthread -DDESIGN_WBCTL $< \
 	  $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) -o $@
