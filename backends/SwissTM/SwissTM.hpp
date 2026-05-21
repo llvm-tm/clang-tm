@@ -531,6 +531,7 @@ public:
     }
     
     static void write_u8(uint8_t* addr, uint8_t val, TxDescriptor* tx) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         word_t* waddr = get_word_addr(addr);
@@ -593,6 +594,7 @@ public:
     }
     
     static void write_u16(uint16_t* addr, uint16_t val, TxDescriptor* tx) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         word_t* waddr = get_word_addr(addr);
@@ -655,6 +657,7 @@ public:
     }
     
     static void write_u32(uint32_t* addr, uint32_t val, TxDescriptor* tx) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         word_t* waddr = get_word_addr(addr);
@@ -717,6 +720,7 @@ public:
     }
     
     static void write_u64(uint64_t* addr, uint64_t val, TxDescriptor* tx) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         word_t* waddr = get_word_addr(addr);
@@ -779,6 +783,7 @@ public:
     }
     
     static void write_float(float* addr, float val, TxDescriptor* tx) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         word_t* waddr = get_word_addr(addr);
@@ -841,6 +846,7 @@ public:
     }
     
     static void write_double(double* addr, double val, TxDescriptor* tx) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         word_t* waddr = get_word_addr(addr);
@@ -903,6 +909,7 @@ public:
     }
     
     static void write_ptr(void** addr, void* val, TxDescriptor* tx) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         word_t* waddr = get_word_addr(addr);
