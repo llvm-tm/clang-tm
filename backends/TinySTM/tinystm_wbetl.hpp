@@ -204,6 +204,7 @@ read_word_etl(                                                //
     ValueType sz                                              //
 )
 {
+	std::atomic_signal_fence(std::memory_order_seq_cst);
 	ByteOffset bo((word_t)addr);
 
 	TINYSTM_ASSERT(tx, "tx not defined");
@@ -300,6 +301,7 @@ write_word_etl(                                               //
     ValueType sz                                              //
 )
 {
+	std::atomic_signal_fence(std::memory_order_seq_cst);
 	ByteOffset bo((word_t)addr);
 
 	TINYSTM_ASSERT(tx, "tx not defined");

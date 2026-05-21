@@ -260,6 +260,7 @@ public:
     
     // Write functions with Bloom filter
     static void write_uint8(Transaction* tx, volatile uint8_t* addr, uint8_t val) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         for (auto& e : tx->write_set) {
@@ -279,6 +280,7 @@ public:
     }
     
     static void write_uint16(Transaction* tx, volatile uint16_t* addr, uint16_t val) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         for (auto& e : tx->write_set) {
@@ -298,6 +300,7 @@ public:
     }
     
     static void write_uint32(Transaction* tx, volatile uint32_t* addr, uint32_t val) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         for (auto& e : tx->write_set) {
@@ -317,6 +320,7 @@ public:
     }
     
     static void write_uint64(Transaction* tx, volatile uint64_t* addr, uint64_t val) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         for (auto& e : tx->write_set) {
@@ -336,6 +340,7 @@ public:
     }
     
     static void write_float(Transaction* tx, volatile float* addr, float val) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         for (auto& e : tx->write_set) {
@@ -355,6 +360,7 @@ public:
     }
     
     static void write_double(Transaction* tx, volatile double* addr, double val) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         for (auto& e : tx->write_set) {
@@ -374,6 +380,7 @@ public:
     }
     
     static void write_ptr(Transaction* tx, volatile void** addr, void* val) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
         
         for (auto& e : tx->write_set) {

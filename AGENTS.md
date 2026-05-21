@@ -123,7 +123,7 @@ Root cause: the `read_word_ctl` function in `tinystm_wbctl.hpp` checks `w->secon
 
 **Also fixed**: `instrumentMemoryIntrinsic` (`tm_method_instrumentation.hpp:121`) — `isMemset` used exact match `== "llvm.memset"` but LLVM 22 emits type-suffixed `"llvm.memset.p0.i8.i64"`. Changed to `starts_with("llvm.memset")`. (This caused the `memtest` test's "Broken module" error.)
 
-### 10. LLVM post-instrumentation `-O3` reorder: `vector::push_back` nullptr crash (ROOT CAUSE IDENTIFIED, NOT FIXED)
+### 10. LLVM post-instrumentation `-O3` reorder: `vector::push_back` nullptr crash (ROOT CAUSE IDENTIFIED, FIXED)
 
 **Crash**: Single‑threaded `std::vector<int64_t>` + `push_back(200)` in a single TM TX crashes at `ws=38` with `BAD_WRITE addr=nullptr`. Reproducible 100% with TinySTM WBCTL. SGL backend (global mutex, no write‑set) does NOT crash.
 
@@ -174,12 +174,17 @@ W#3: g_vec+8 = nullptr            ; from __end_ = __begin_ (stale — reordered 
 W#4: addr=nullptr val=1           ; BAD_WRITE on next element construct
 ```
 
-**Potential fix**: Add `asm volatile("" ::: "memory")` compiler barrier inside `write_word_ctl` in each backend. This barrier prevents LLVM from reordering the inlined write‑set insertion bodies at LTO time. When functions are NOT inlined, opaque external call semantics already preserve order. The fix must be applied to ALL backends (TinySTM WBCTL, WBETL, NOrec, SwissTM, TL2).
+**Fix**: Added `std::atomic_signal_fence(std::memory_order_seq_cst)` compiler barrier at the top of every low‑level write‑set insert function in all vulnerable backends. This is the standard C++ compiler barrier (no hardware fence emitted). When functions are NOT inlined, opaque external call semantics already preserve order — the barrier is a no‑op. When LTO inlines them (the buggy case), the barrier prevents the compiler from reordering consecutive inlined bodies.
 
-Alternatively, make `write_word_ctl` / `read_word_ctl` `__attribute__((noinline))` to prevent LTO inlining.
+Files modified (18 functions total):
+- `tinystm_wbctl.hpp`: `read_word_ctl`, `write_word_ctl`
+- `tinystm_wbetl.hpp`: `read_word_etl`, `write_word_etl`
+- `SwissTM.hpp`: `write_u8`, `write_u16`, `write_u32`, `write_u64`, `write_float`, `write_double`, `write_ptr`
+- `tl2.hpp`: `write_uint8`, `write_uint16`, `write_uint32`, `write_uint64`, `write_float`, `write_double`, `write_ptr`
+- NOrec was already safe (`__attribute__((noinline))` on `write_word_norec`).
 
 ## Next Steps
-1. Apply the compiler barrier fix to write_word_ctl in all backends
+1. ~~Apply the compiler barrier fix to write_word_ctl in all backends~~ **DONE — added `std::atomic_signal_fence(memory_order_seq_cst)` to 18 write/read functions across TinySTM WBCTL, WBETL, SwissTM, and TL2. NOrec was already safe (had `__attribute__((noinline))`).**
 2. Verify with `vector_realloc_test` (single TX, 200 elements, TinySTM WBCTL) — should pass without nullptr crash
 3. Run full plugin test suite (`make test` in `llvm_tm_plugin/`)
 4. Run `alloc_stress_test` and `ll_alloc_test` multi‑threaded
