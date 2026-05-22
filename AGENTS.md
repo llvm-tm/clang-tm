@@ -19,8 +19,11 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - **Allocator mismatch fix**: `tm_malloc`/`tm_calloc`/`tm_realloc` changed from `malloc`/`calloc`/`realloc` to `::operator new` to match `::operator delete` in `tm_free`. `tm_alloc_overrides.hpp` cleanup (`std::free` → `::operator delete` for `tm_clear_spec_allocs`/`tm_flush_deferred_frees`/`tm_clear_deferred_frees`).
 - **`tracesFromTMGlobal` fix**: `tm_malloc`/`tm_calloc`/`tm_realloc` return values now recognized as TM-traced pointers, so stores through heap-allocated nodes inside TX functions are instrumented.
 - **Reverted `handleUnsafeOpaqueCall` serialization**: per user preference, removed the serialization approach.
-- `alloc_stress_test` root cause identified: `_Rb_tree_insert_and_rebalance` from libstdc++ is an **external declaration** (body in shared library, not visible as IR), so the plugin cannot instrument its internal stores. This is a fundamental limitation — the function modifies tree structure (parent/left/right/color) without TM write-set tracking.
-- `alloc_stress_test` status: vec+raw tests **PASS**; mixed tests (map ops) show data corruption due to opaque `_Rb_tree_insert_and_rebalance`.
+- **TMSafeMap**: created `backends/tm_safe_map.hpp` — sorted-vector map replacement for `std::map` to avoid libstdc++'s opaque `_Rb_tree_*` functions.
+- **`isSharedPointer` fix**: moved `tracesFromTMGlobal` check AFTER alloca-getBaseObject check, keeping correct order; added `getBaseObjectNoLoad` (omits LoadInst tracing) so pointers loaded from allocas that store TM-traced values are correctly identified as shared rather than falsely classified as local. Fixes iterator-alloca binary search instrumentation in TMSafeMap.
+- **WBCTL merge-bytes-on-read fix**: when `read_word_ctl` encounters a wider read (UINT64) whose write-set only has narrower entries (UINT8 from memcpy/memmove byte-by-byte copy), it now reconstructs the UINT64 value by merging all 8 byte entries instead of falling through to stale memory. Previously, vector element keys copied via byte-by-byte `tm_write_i1` were invisible to UINT64 TM reads (binary search), returning garbage from memory instead of the TX's own buffered key.
+- `alloc_stress_test` status: **FULL PASS** (vec + map insert/erase + raw new/delete + mixed workers), **PASS at 1t/2t/3t** concurrent.
+- Bank benchmark: **PASS at 1t/2t/4t** with correct total money preserved.
 
 ## In Progress
 - *(none)*

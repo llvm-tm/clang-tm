@@ -48,6 +48,30 @@ static const Value *getBaseObject(const Value *Ptr)
   return Result ? Result : Ptr;
 }
 
+// Like getBaseObject, but does NOT trace through LoadInst.  This is important
+// for cases like:
+//   %loaded_ptr = load ptr, ptr %alloca
+// getBaseObject(%loaded_ptr) traces through the load and returns %alloca,
+// making the loaded pointer appear local.  But %loaded_ptr is a VALUE that
+// POINTS TO shared memory — only the alloca's ADDRESS is local.
+// getBaseObjectNoLoad breaks at the load and returns %loaded_ptr itself,
+// allowing later checks (tracesFromTMGlobal) to correctly trace the VALUE.
+static const Value *getBaseObjectNoLoad(const Value *Ptr)
+{
+  const Value *Result = Ptr;
+  for (int i = 0; i < 10 && Result; i++) {
+    Result = Result->stripPointerCasts();
+    if (const auto *GEP = dyn_cast<const GetElementPtrInst>(Result)) {
+      Result = GEP->getPointerOperand();
+    } else if (const auto *GEP = dyn_cast<const GEPOperator>(Result)) {
+      Result = GEP->getPointerOperand();
+    } else {
+      break;
+    }
+  }
+  return Result ? Result : Ptr;
+}
+
 // Check if a call instruction is a heap allocation function
 static bool isHeapAllocationCall(const Value *V) {
   const auto *Call = dyn_cast<CallBase>(V);
@@ -277,6 +301,11 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
     return tracesFromTMGlobal(Sel->getTrueValue(), M, VisitedAllocas, Depth + 1) ||
            tracesFromTMGlobal(Sel->getFalseValue(), M, VisitedAllocas, Depth + 1);
 
+  // PtrToInt: the integer came from a pointer (common for iterator storage
+  // in allocas where the pointer is stored as an integer via ptrtoint).
+  if (auto *PTI = dyn_cast<PtrToIntInst>(V))
+    return tracesFromTMGlobal(PTI->getPointerOperand(), M, VisitedAllocas, Depth + 1);
+
   // IntToPtr: the integer operand might come from PtrToInt of a pointer
   // (common for aliasing barriers inserted by LLVM).  Strip through to the
   // original pointer.  Without this, ptrtoint→inttoptr chains inserted
@@ -391,7 +420,7 @@ static bool isSharedPointer(Value *Ptr,
   // the address within a stack allocation is always thread-private.
   if (isa<AllocaInst>(Ptr))
     return false;
-  if (isa<AllocaInst>(getBaseObject(Ptr)))
+  if (isa<AllocaInst>(getBaseObjectNoLoad(Ptr)))
     return false;
 
   // Check if the pointer ultimately traces to a TM-annotated global.
