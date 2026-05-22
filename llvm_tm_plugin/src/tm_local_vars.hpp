@@ -382,13 +382,20 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
       Value *Cur = AllocaExpr.pop_back_val();
       for (User *U : Cur->users()) {
         if (!VisitedExpr.insert(U).second) continue;
-        if (auto *Store = dyn_cast<StoreInst>(U)) {
-          // The store writes to this alloca (directly or via GEP): trace the
-          // stored value back to see if it originates from a TM global.
-          Value *StorePtr = Store->getPointerOperand()->stripPointerCasts();
-          if (StorePtr == AI || getBaseObject(StorePtr) == AI)
+          if (auto *Store = dyn_cast<StoreInst>(U)) {
+            // The store writes to this alloca (directly or via GEP): trace the
+            // stored value back to see if it originates from a TM global.
+            Value *StorePtr = Store->getPointerOperand()->stripPointerCasts();
+            if (StorePtr == AI || getBaseObject(StorePtr) == AI) {
+              // Skip stores of alloca addresses (stack addresses).
+              // Storing &inner_alloca into outer_alloca does NOT make the
+              // outer alloca trace to a TM global — the address is a stack
+              // address, not a heap pointer.
+              if (isa<AllocaInst>(getBaseObjectNoLoad(Store->getValueOperand())))
+                continue;
             if (tracesFromTMGlobal(Store->getValueOperand(), M, VisitedAllocas, Depth + 1))
               return true;
+          }
           continue;
         }
         // Follow pointer-typed expressions (GEPs, bitcasts) rooted at the

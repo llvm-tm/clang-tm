@@ -26,7 +26,7 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - Bank benchmark: **PASS at 1t/2t/4t** with correct total money preserved.
 
 ## In Progress
-- *(none)*
+- **`alloc_stress_test` crash (NULL-write, not map corruption)**: **ROOT CAUSE IDENTIFIED** — `tracesFromTMGlobal` false positive when an alloca stores the *address* of another alloca. The function recurses through stores: outer alloca → stores address of inner alloca (a stack address) → inner alloca stores TM-traced `_M_finish` pointer → incorrectly returns `true` for outer alloca. Effect: `tm_write_ptr` emitted for stores to outer alloca (a stack variable) → TM-buffered writes don't update stack → stale alloca load returns NULL → `_M_finish` is set to NULL → crash on next push. Fix: when checking a store's value operand in the alloca-stores-search, skip value operands whose base (stripping GEPs/bitcasts, NOT loads) is an `AllocaInst` — storing a stack address does not trace to a TM global.
 
 ## Blocked
 - `alloc_stress_test` map corruption: `std::map` operations call `_Rb_tree_insert_and_rebalance` from libstdc++ (shared library). The function body is never available as IR (even with `-O0`/`-O2`/`-flto`), so the plugin cannot instrument its stores. Any test using `std::map` inside __transaction_atomic with concurrent workers will exhibit data corruption. Solutions: (a) TM-safe map replacement, (b) serialize map operations, (c) LTO the entire libstdc++ for function body visibility, (d) accept limitation.
@@ -50,9 +50,8 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - `llvm_tm_plugin/test/alloc_stress_test.cpp`: failing test with vec+map+erase+raw new workers.
 
 ## Next Steps
-1. Run bank benchmark (-a 128 -r 0) to verify TinySTM WBCTL still preserves money correctly.
-2. Run vec+raw subset of `alloc_stress_test` to confirm allocated-mismatch fix.
-3. Document `_Rb_tree_insert_and_rebalance` limitation for `std::map` in TM contexts.
-4. Consider TM-safe `std::map` replacement or serialized fallback for std::map ops.
-5. Run STMbench7 / bank at all thread counts to confirm no regression.
-6. Track: `ll_alloc_test` hang (pre-existing).
+1. Apply fix in `tracesFromTMGlobal` (skip stores of alloca addresses in alloca-stores search) and rebuild.
+2. Re-run `alloc_stress_test -v 2 -i 0 -e 0 -r 0 -m 0` with and without ASan to verify fix.
+3. If fixed: re-run full test suite (types, nested, bank benchmarks).
+4. Run bank at all thread counts to confirm no regression.
+5. Debug STMbench7 null-write crash and `ll_alloc_test` hang (pre-existing).

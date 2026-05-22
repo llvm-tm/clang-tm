@@ -571,12 +571,44 @@ write_word_ctl(                                               //
 		if (is_locked)
 			continue; // spin until the lock is released
 
+		// Double-check: re-read lock to catch a concurrent writer that
+		// acquired the lock between our first read and this re-read.
+		volatile word_t l2 = lock->get();
+		if (l != l2) {
+			l = l2;
+			continue;
+		}
+
+		word_t version = (l2 & (VERSION_MASK << META_BITS)) >> META_BITS;
+
+		// Version-extension: if the observed version is newer than our
+		// snapshot, extend the read-set first.  This matches the read path
+		// protocol (read_word_ctl lines 411-417) and ensures opacity.
+		if (version > tx->end_version) {
+			if (extend()) {
+				continue;
+			} else {
+				abort_tx();
+			}
+		}
+
 		WriteLogEntry_wbctl w;          // Create a new entry in writeset
 		w.new_val = val;                // new val to write-back on commit
 		w.type = sz;
 		w.addr = addr;
-		w.version = lock->get_version();
+		w.version = version;
 		tx->write_set.insert(std::pair(addr, w));
+
+		// Also add to read-set so that validate() catches version changes
+		// from concurrent writers.  Without this, write-set-only addresses
+		// are never validated during commit, allowing lost updates.
+		ReadLogEntry_wbctl r;
+		r.addr = addr;
+		r.observed_version = version;
+		r.observed_val = val;
+		r.type = sz;
+		tx->read_set.insert(std::pair(addr, r));
+
 		return;
 	}
 }
