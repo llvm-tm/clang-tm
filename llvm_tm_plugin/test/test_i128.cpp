@@ -1,9 +1,7 @@
 #include <cstdint>
 #include <cstdio>
 
-#define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction"), noinline))
-#define MAIN __attribute__((annotate("main"), noinline))
+#include "tm_test_common.hpp"
 
 // Use __int128 to force a true 16-byte LLVM type
 TM __int128 g_i128_val = 0;
