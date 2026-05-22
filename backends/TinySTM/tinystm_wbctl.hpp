@@ -314,6 +314,37 @@ read_word_ctl(                                                //
 	if (w != tx->write_set.end()) {
 		if (w->second.type == sz)
 			return w->second.new_val;
+		// REVERSE-type check: existing is narrower (UINT8/16/32), reading wider
+		// (UINT64).  Try to reconstruct the wider value from sub-word write-set
+		// entries.  If all 8 byte addresses have UINT8 entries, merge them into
+		// a UINT64.  This handles the case where memmove/memcpy writes the key
+		// of a pair byte-by-byte (via tm_write_i1), and then the same TX reads
+		// the key as UINT64 during binary search — without this merge, the wider
+		// read would fall through to memory (which has stale/zero data) instead
+		// of seeing the TX's own buffered key.
+		if (sz == ValueType::UINT64 &&
+		    (w->second.type == ValueType::UINT8 ||
+		     w->second.type == ValueType::UINT16 ||
+		     w->second.type == ValueType::UINT32)) {
+			uint64_t merged = 0;
+			bool all_found = true;
+			for (unsigned i = 0; i < 8; i++) {
+				void *byte_addr = reinterpret_cast<void *>((uintptr_t)addr + i);
+				auto it = tx->write_set.find(byte_addr);
+				if (it != tx->write_set.end() && it->second.type == ValueType::UINT8) {
+					merged |= (static_cast<uint64_t>(it->second.new_val.u1)) << (i * 8);
+				} else {
+					all_found = false;
+					break;
+				}
+			}
+			if (all_found) {
+				any_type_t result;
+				result.u8 = merged;
+				return result;
+			}
+			goto read_from_memory;
+		}
 		// Type mismatch: if a wider write covers this address, extract bytes.
 		// Common case: prev tm_write_i8 (UINT64) at addr, now reading UINT8 bytes.
 		if (w->second.type == ValueType::UINT64 && sz == ValueType::UINT8) {
@@ -352,6 +383,7 @@ read_word_ctl(                                                //
 		}
 	}
 
+read_from_memory:
 	Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 	TINYSTM_ASSERT(!lock->is_locked_by(tx->id), "wbctl locks at commit time");
 	volatile word_t l = lock->get();
@@ -491,6 +523,35 @@ write_word_ctl(                                               //
 				merged |= (write_val << shift);
 				w2->second.new_val.u8 = merged;
 				return;
+			}
+		}
+	}
+
+	// If this write is wider than one byte, remove any overlapping sub-word
+	// entries to prevent write-back order conflicts (e.g., memcpy byte entries
+	// coexisting with a later UINT64 value write).
+	{
+		unsigned nbytes = 0;
+		switch (sz) {
+		case ValueType::UINT16: nbytes = 2; break;
+		case ValueType::UINT32: nbytes = 4; break;
+		case ValueType::UINT64: nbytes = 8; break;
+		default: break;
+		}
+		if (nbytes > 1) {
+			for (unsigned i = 0; i < nbytes; i++) {
+				void *sub_addr = reinterpret_cast<void *>((uintptr_t)addr + i);
+				auto it = tx->write_set.find(sub_addr);
+				if (it != tx->write_set.end() && it->second.type != sz)
+					tx->write_set.erase(it);
+			}
+			// Re-check for existing entry of matching type after cleanup
+			auto existing = tx->write_set.find(addr);
+			if (existing != tx->write_set.end()) {
+				if (existing->second.type == sz) {
+					existing->second.new_val = val;
+					return;
+				}
 			}
 		}
 	}

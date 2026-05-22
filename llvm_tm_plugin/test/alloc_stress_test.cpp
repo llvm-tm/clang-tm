@@ -3,7 +3,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
-#include <map>
+#include "../../backends/tm_safe_map.hpp"
 #include <random>
 #include <thread>
 #include <vector>
@@ -21,7 +21,7 @@ TM std::atomic<int64_t> g_vec_total{0};
 TM std::atomic<int64_t> g_vec_pushes{0};
 
 // 2. std::map + insert/erase => new/delete of tree nodes
-TM std::map<int64_t, int64_t> g_map;
+TM TMSafeMap<int64_t, int64_t> g_map;
 TM std::atomic<int64_t> g_map_ops{0};
 
 // 3. raw new/delete inside TX
@@ -78,7 +78,7 @@ TX void vec_and_map_tx(int64_t base) {
     g_vec.push_back(base + i);
   }
   for (int64_t i = 0; i < 10; i++) {
-    g_map[base + i] = base + i;
+    g_map[base + i] = (base + i) * 10;
   }
   g_vec_pushes.fetch_add(10);
   g_map_ops.fetch_add(10);

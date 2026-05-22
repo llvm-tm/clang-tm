@@ -98,6 +98,14 @@ static bool checkOpaqueFunctions(
                               "cannot be instrumented for TM.\n";
                     continue;
                 }
+                // LLVM intrinsics (llvm.memcpy, llvm.lifetime.start, etc.) are
+                // always safe — they are handled by the memory intrinsic
+                // instrumentation or are no-ops for TM purposes.
+                if (Callee->isIntrinsic()) continue;
+                // Heap allocation/deallocation functions are handled by
+                // handleMallocFree during instrumentation — skip them here.
+                if (isHeapAllocationCall(Call) || isDeallocationCall(Call))
+                    continue;
                 if (!Callee->isDeclaration()) continue;
                 // Check if any pointer argument traces to a TM global.
                 // Even known-safe opaque functions (e.g., _ZSt prefix) are
