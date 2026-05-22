@@ -86,14 +86,17 @@ static bool checkOpaqueFunctions(
                 Function *Callee = Call->getCalledFunction();
                 if (Callee && hasAnnotation(*Callee, "tm_allow_opaque")) continue;
                 if (hasAnnotation(*F, "tm_allow_opaque")) continue;
-                if (!Callee) {
-                    foundOpaque = true;
-                    errs() << "error: indirect call in TM context";
+                // Format location prefix consistently
+                auto locStr = [&](raw_ostream &OS) {
                     if (auto *DIL = I.getDebugLoc().get())
                         if (auto *Scope = dyn_cast_or_null<DIScope>(DIL->getScope()))
-                            errs() << " at " << Scope->getFilename() << ":"
-                                   << DIL->getLine() << ":" << DIL->getColumn();
-                    errs() << "\n  Called from: " << F->getName() << "\n"
+                            OS << Scope->getFilename() << ":"
+                               << DIL->getLine() << ":" << DIL->getColumn() << ": ";
+                };
+                if (!Callee) {
+                    foundOpaque = true;
+                    locStr(errs()); errs() << "error: indirect call in TM context\n"
+                           << "  Called from: " << F->getName() << "\n"
                               "  Calls via function pointer or virtual method "
                               "cannot be instrumented for TM.\n";
                     continue;
@@ -125,13 +128,9 @@ static bool checkOpaqueFunctions(
                 }
                 foundOpaque = true;
                 UnresolvedSymbols.insert(Callee->getName());
-                errs() << "error: call to '" << Callee->getName()
-                       << "' in TM context";
-                if (auto *DIL = I.getDebugLoc().get())
-                    if (auto *Scope = dyn_cast_or_null<DIScope>(DIL->getScope()))
-                        errs() << " at " << Scope->getFilename() << ":"
-                               << DIL->getLine() << ":" << DIL->getColumn();
-                errs() << "\n  Called from: " << F->getName() << "\n";
+                locStr(errs()); errs() << "error: call to '" << Callee->getName()
+                       << "' in TM context\n"
+                       << "  Called from: " << F->getName() << "\n";
                 if (hasTMTracedArg)
                     errs() << "  This function receives TM-shared pointer arguments "
                               "but its body is not visible (defined in external library).\n"
@@ -167,9 +166,9 @@ static void checkOpaqueOrAbort(Module &M,
         return;
     bool ok = checkOpaqueFunctions(M, TxReachableFuncs);
     if (!AllowOpaque && !ok) {
-        errs() << "Aborting due to opaque function call(s) in TM context.\n"
+        errs() << "error: opaque function call(s) in TM context\n"
                << "Use -tm-allow-opaque to disable this check.\n";
-        report_fatal_error("TM instrumentation: opaque function calls detected");
+        exit(1);
     }
 }
 
