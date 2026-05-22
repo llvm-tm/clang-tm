@@ -8,10 +8,7 @@
 #include <cstdio>
 #include <cstdint>
 
-#define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction"), noinline))
-#define THREAD __attribute__((annotate("thread"), noinline))
-#define MAIN __attribute__((annotate("main"), noinline))
+#include "tm_test_common.hpp"
 
 TM int32_t tm_array[8] = {1, 2, 3, 4, 5, 6, 7, 8};
 

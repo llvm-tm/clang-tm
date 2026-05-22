@@ -48,13 +48,14 @@ $(foreach v,$(PLUGIN_VARIANTS),$(eval $(call TMPluginTarget,$(v))))
 
 PLUGIN_SO_NAMES := $(addprefix $(BIN_DIR)/libTMInstrument_,$(addsuffix .so,$(PLUGIN_VARIANTS)))
 
-TEST_NAMES := types memtest nested threads persist retry test_stl_containers \
-              test_stl_primitive annotation_detect local_containers_test \
-              custom_class_test test_stl_map_find test_tm_arg_trace \
-              test_math_opaque test_map_find_read vector_realloc_test \
-              alloc_stress_test ll_alloc_test test_construct_tx_pattern
+TEST_NAMES := test_types test_memtest test_threads test_persist test_retry test_stl_containers \
+              test_stl_primitive test_annotation_detect test_local_containers \
+              test_custom_class test_stl_map_find test_tm_arg_trace \
+              test_math_opaque test_vector_realloc \
+              test_alloc_stress test_ll_alloc test_construct_tx_pattern \
+              test_nested_tx test_tm_simple test_tm_safe_map
 
-RACE_TEST_NAMES := task_queue_race parent_set_race counter_race
+RACE_TEST_NAMES := test_task_queue_race test_parent_set_race test_counter_race
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))
 TEST_PROGS := $(addprefix $(BIN_DIR)/,$(TEST_NAMES))
 
@@ -93,33 +94,33 @@ $(BIN_DIR)/%_noinst: $(OUT_DIR)/%.bc $(RUNTIME_DIR)/tm_runtime.cpp | $(BIN_DIR)
 	$(CXX) $< $(RUNTIME_DIR)/tm_runtime.cpp -o $@ -pthread
 
 # Persistent runtime (snapshot-based, saves on tm_exit)
-$(BIN_DIR)/persist: $(OUT_DIR)/persist.opt.bc $(RUNTIME_DIR)/persistent.cpp | $(BIN_DIR)
+$(BIN_DIR)/test_persist: $(OUT_DIR)/test_persist.opt.bc $(RUNTIME_DIR)/persistent.cpp | $(BIN_DIR)
 	$(CXX) $< $(RUNTIME_DIR)/persistent.cpp -o $@ -pthread
 
 # Persistent SGL runtime (write-through, uses mmap)
-$(BIN_DIR)/persist_sgl: $(OUT_DIR)/persist.opt.bc $(RUNTIMES_DIR)/PersistentSGL_runtime.cpp | $(BIN_DIR)
+$(BIN_DIR)/test_persist_sgl: $(OUT_DIR)/test_persist.opt.bc $(RUNTIMES_DIR)/PersistentSGL_runtime.cpp | $(BIN_DIR)
 	$(CXX) $< $(RUNTIMES_DIR)/PersistentSGL_runtime.cpp -o $@ -pthread
 
 # TinySTM-backed tests (vector reallocation + local containers + alloc stress)
-$(BIN_DIR)/local_containers_test: $(OUT_DIR)/local_containers_test.opt.bc \
+$(BIN_DIR)/test_local_containers: $(OUT_DIR)/test_local_containers.opt.bc \
                                   $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp | $(BIN_DIR)
 	$(CXX) -std=c++20 -O1 -pthread -DDESIGN_WBCTL $< \
 	  $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) -o $@
 
-$(BIN_DIR)/vector_realloc_test: $(OUT_DIR)/vector_realloc_test.opt.bc \
+$(BIN_DIR)/test_vector_realloc: $(OUT_DIR)/test_vector_realloc.opt.bc \
                                 $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp | $(BIN_DIR)
 	$(CXX) -std=c++20 -O1 -pthread -DDESIGN_WBCTL $< \
 	  $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) -o $@
 
-$(BIN_DIR)/alloc_stress_test: $(OUT_DIR)/alloc_stress_test.opt.bc \
+$(BIN_DIR)/test_alloc_stress: $(OUT_DIR)/test_alloc_stress.opt.bc \
                               $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp | $(BIN_DIR)
 	$(CXX) -std=c++20 -O1 -pthread -DDESIGN_WBCTL $< \
 	  $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) -o $@
 
-$(BIN_DIR)/ll_alloc_test: $(OUT_DIR)/ll_alloc_test.opt.bc \
+$(BIN_DIR)/test_ll_alloc: $(OUT_DIR)/test_ll_alloc.opt.bc \
                           $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp | $(BIN_DIR)
 	$(CXX) -std=c++20 -O1 -pthread -DDESIGN_WBCTL $< \
 	  $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \
@@ -135,16 +136,16 @@ ll: all $(TEST_LLS) $(OPT_LLS)
 
 RACE_TEST_BINS := $(addprefix $(BIN_DIR)/,$(RACE_TEST_NAMES))
 
-$(BIN_DIR)/task_queue_race: $(OUT_DIR)/task_queue_race.opt.bc $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp | $(BIN_DIR)
+$(BIN_DIR)/test_task_queue_race: $(OUT_DIR)/test_task_queue_race.opt.bc $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp | $(BIN_DIR)
 	$(CXX) $< $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp -I $(BACKENDS_DIR) -o $@ -pthread
-$(BIN_DIR)/parent_set_race: $(OUT_DIR)/parent_set_race.opt.bc $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp | $(BIN_DIR)
+$(BIN_DIR)/test_parent_set_race: $(OUT_DIR)/test_parent_set_race.opt.bc $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp | $(BIN_DIR)
 	$(CXX) $< $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp -I $(BACKENDS_DIR) -o $@ -pthread
-$(BIN_DIR)/counter_race: $(OUT_DIR)/counter_race.opt.bc $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp | $(BIN_DIR)
+$(BIN_DIR)/test_counter_race: $(OUT_DIR)/test_counter_race.opt.bc $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp | $(BIN_DIR)
 	$(CXX) $< $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp -I $(BACKENDS_DIR) -o $@ -pthread
 
-test: all $(TEST_PROGS) $(BIN_DIR)/persist $(BIN_DIR)/persist_sgl \
-      $(BIN_DIR)/local_containers_test $(BIN_DIR)/vector_realloc_test \
-      $(BIN_DIR)/alloc_stress_test $(BIN_DIR)/ll_alloc_test \
+test: all $(TEST_PROGS) $(BIN_DIR)/test_persist $(BIN_DIR)/test_persist_sgl \
+      $(BIN_DIR)/test_local_containers $(BIN_DIR)/test_vector_realloc \
+      $(BIN_DIR)/test_alloc_stress $(BIN_DIR)/test_ll_alloc \
       $(BIN_DIR)/test_construct_tx_pattern $(RACE_TEST_BINS)
 
 test_noinst: $(TEST_SRCS) $(addprefix $(BIN_DIR)/,$(addsuffix _noinst,$(TEST_NAMES))) \

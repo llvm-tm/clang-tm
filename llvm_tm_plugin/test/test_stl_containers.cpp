@@ -9,10 +9,7 @@
 #include <string>
 #include <cstdint>
 
-#define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction"), noinline))
-#define THREAD __attribute__((annotate("thread"), noinline))
-#define MAIN __attribute__((annotate("main"), noinline))
+#include "tm_test_common.hpp"
 
 // Global TM-annotated data structures
 TM std::vector<int> g_int_vector;

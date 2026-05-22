@@ -1,10 +1,7 @@
 #include <cstdio>
 #include <thread>
 
-#define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction"), noinline))
-#define THREAD __attribute__((annotate("thread"), noinline))
-#define MAIN __attribute__((annotate("main"), noinline))
+#include "tm_test_common.hpp"
 
 TM int g_counter = 0;
 

@@ -5,10 +5,7 @@
 #include <thread>
 #include <vector>
 
-#define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction"), noinline))
-#define THREAD __attribute__((annotate("thread"), noinline))
-#define MAIN __attribute__((annotate("main"), noinline))
+#include "tm_test_common.hpp"
 
 // Shared TM vector — starts with 0 capacity so every push triggers reallocation
 TM std::vector<int64_t> g_vec;

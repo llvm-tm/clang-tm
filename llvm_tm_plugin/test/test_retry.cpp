@@ -14,10 +14,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction"), noinline))
-#define THREAD __attribute__((annotate("thread"), noinline))
-#define MAIN __attribute__((annotate("main"), noinline))
+#include "tm_test_common.hpp"
 
 extern "C" {
 extern __thread unsigned char tm_jmpbuf[256];

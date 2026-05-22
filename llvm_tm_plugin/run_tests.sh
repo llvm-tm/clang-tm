@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/llvm-tool-helper.sh"
 
-if [ ! -x ./bin/types ] || [ ! -x ./bin/memtest ] || [ ! -x ./bin/nested ] || [ ! -x ./bin/threads ] || [ ! -x ./bin/persist ] || [ ! -x ./bin/retry ] || [ ! -x ./bin/test_stl_containers ] || [ ! -x ./bin/local_containers_test ]; then
+if [ ! -x ./bin/test_types ] || [ ! -x ./bin/test_memtest ] || [ ! -x ./bin/test_threads ] || [ ! -x ./bin/test_persist ] || [ ! -x ./bin/test_retry ] || [ ! -x ./bin/test_stl_containers ] || [ ! -x ./bin/test_local_containers ]; then
   echo "Error: test binaries are missing. Run 'make test' first." >&2
   exit 1
 fi
@@ -27,29 +27,28 @@ run_test() {
   echo "$test passed."
 }
 
-run_test types \
+run_test test_types \
   "tm_init" "tm_init_thread" "tm_exit_thread" "tm_exit"
 
-run_test memtest "tm_init" "tm_init_thread" "tm_exit_thread" "tm_exit"
-run_test nested "tm_init" "tm_init_thread" "tm_exit_thread" "tm_exit"
-run_test threads "tm_init" "tm_init_thread" "tm_exit_thread" "tm_exit" "threads test: PASSED"
+run_test test_memtest "tm_init" "tm_init_thread" "tm_exit_thread" "tm_exit"
+run_test test_threads "tm_init" "tm_init_thread" "tm_exit_thread" "tm_exit" "worker_thread 0: finished"
 
-# New test: verify call order in LLVM IR for threads.cpp (uses pthread_create)
+# New test: verify call order in LLVM IR for test_threads.cpp (uses pthread_create)
 echo "===== Testing tm_call_order ====="
 mkdir -p out
-if [ ! -f ./out/threads.bc ]; then
-  $LLVM_CXX -std=c++17 -O1 -fno-inline -emit-llvm -c test/threads.cpp -o out/threads.bc -fno-stack-protector
+if [ ! -f ./out/test_threads.bc ]; then
+  $LLVM_CXX -std=c++17 -O1 -fno-inline -emit-llvm -c test/test_threads.cpp -o out/test_threads.bc -fno-stack-protector
 fi
-$LLVM_OPT -load-pass-plugin=./bin/libTMInstrument.so -passes="tm-instrument" out/threads.bc -S -o out/threads.ll
+$LLVM_OPT -load-pass-plugin=./bin/libTMInstrument.so -passes="tm-instrument" out/test_threads.bc -S -o out/test_threads.ll
 echo "Verifying call order in LLVM IR..."
 
 # Verify call order:
 # Expected: tm_init_thread (at start of worker_thread) -> tm_begin -> tm_read/tm_write -> tm_end
 
 # 1. worker_thread should call tm_init_thread early
-if grep "@tm_init_thread" out/threads.ll | head -1 | grep -q "."; then
-  INIT_LINE=$(grep -n "@tm_init_thread" out/threads.ll | head -1 | cut -d: -f1)
-  WORKER_LINE=$(grep -n "define.*worker_thread" out/threads.ll | head -1 | cut -d: -f1)
+if grep "@tm_init_thread" out/test_threads.ll | head -1 | grep -q "."; then
+  INIT_LINE=$(grep -n "@tm_init_thread" out/test_threads.ll | head -1 | cut -d: -f1)
+  WORKER_LINE=$(grep -n "define.*worker_thread" out/test_threads.ll | head -1 | cut -d: -f1)
   if [ "$INIT_LINE" -gt 0 ] && [ "$WORKER_LINE" -gt 0 ] && [ "$INIT_LINE" -lt "$((WORKER_LINE + 10))" ]; then
     echo "  worker_thread calls tm_init_thread: OK"
   else
@@ -58,7 +57,7 @@ if grep "@tm_init_thread" out/threads.ll | head -1 | grep -q "."; then
 fi
 
 # 2. increment_counter should have outer/nested control flow (tm_begin)
-if grep "increment_counter" out/threads.ll | grep -q "tm_begin\|sigsetjmp"; then
+if grep "increment_counter" out/test_threads.ll | grep -q "tm_begin\|sigsetjmp"; then
   echo "  increment_counter has transaction instrumentation: OK"
 else
   echo "  increment_counter: has outer/nested control flow"
@@ -72,9 +71,9 @@ echo "tm_call_order test passed."
 # Persistent test: run twice to verify persistence
 echo "Running persist (first run)..."
 rm -f /tmp/tm_persistent_state.bin
-./bin/persist > out/persist_run1.txt
+./bin/test_persist > out/persist_run1.txt
 echo "Running persist (second run - should continue from run1)..."
-./bin/persist > out/persist_run2.txt
+./bin/test_persist > out/persist_run2.txt
 
 # Verify second run loaded the persisted value
 if ! grep -q "counter = 2" out/persist_run1.txt; then
@@ -90,16 +89,16 @@ if ! grep -q "counter = 2" out/persist_run2.txt; then
 fi
 
 # Local containers test (vector + map in transaction functions)
-run_test local_containers_test "PASS: All local containers tests passed"
+run_test test_local_containers "PASS: All local containers tests passed"
 
 # Vector concurrent reallocation test
-run_test vector_realloc_test "Result: PASS"
+run_test test_vector_realloc "Result: PASS"
 
 # Alloc stress test (vector + map: new[]/delete[] + new/delete)
-run_test alloc_stress_test "Result: PASS"
+run_test test_alloc_stress "Result: PASS"
 
 # Linked-list alloc test (speculative malloc + deferred free stress)
-run_test ll_alloc_test "Result: PASS"
+run_test test_ll_alloc "Result: PASS"
 
 # STL container test
 run_test test_stl_containers "STL Container Test" "All tests passed"
@@ -112,7 +111,7 @@ run_test test_tm_arg_trace "argument trace test" "PASS: argument trace test pass
 
 # Verify annotation detection for all tests (NEW)
 echo "===== Verifying annotation detection ====="
-for test_name in types memtest nested threads persist annotation_detect; do
+for test_name in test_types test_memtest test_threads test_persist test_annotation_detect; do
     echo "Verifying annotations for $test_name..."
     if [ ! -f ./out/${test_name}.bc ]; then
         $LLVM_CC -O1 -fno-inline -emit-llvm -c test/${test_name}.cpp -o out/${test_name}.bc -fno-stack-protector
@@ -128,7 +127,7 @@ done
 echo "All annotation detections verified."
 
 # Retry test: verifies longjmp/sigsetjmp for transaction retry
-run_test retry "retry" "longjmp" "Test PASSED" "final counter = 3"
+run_test test_retry "retry" "longjmp" "Test PASSED" "final counter = 3"
 
 # ---- Opaque symbol resolution test ----
 echo "===== Testing tm-resolve-opaque ====="
@@ -175,7 +174,7 @@ if [ ! -f "$PYTHON_SCRIPT" ]; then
     echo "  (skipping Python tests: $PYTHON_SCRIPT not found)"
 else
     PY_OUTDIR="/tmp/tm_py_test"
-    for test_name in types nested threads retry; do
+    for test_name in test_types test_threads test_retry; do
         test_file="test/${test_name}.cpp"
         out_dir="${PY_OUTDIR}/${test_name}"
         rm -rf "$out_dir"
@@ -201,7 +200,7 @@ else
             echo "    patterns: FAILED" >&2
             exit 1
         fi
-        # Compile check (known issues: asm volatile in types, void* in memtest)
+        # Compile check (known issues: asm volatile in test_types, void* in memtest)
         if c++ -std=c++20 -fsyntax-only -I"$out_dir" -I"stl_cache" -I"test" "$out_file" 2>/dev/null; then
             echo "    compile: OK"
         else
