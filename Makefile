@@ -100,6 +100,7 @@ benchmarks: plugin
 	@$(MAKE) -C $(BENCHMARKS_DIR)/test/bank clean 2>/dev/null || true
 	@$(MAKE) -C $(BENCHMARKS_DIR)/test/bank bank_tinystm BACKEND=$(BACKEND)
 	@$(MAKE) -C $(BENCHMARKS_DIR)/test/bank bank_singlelock BACKEND=$(BACKEND)
+	@$(MAKE) -C $(BENCHMARKS_DIR)/test/bank bank_dudetm BACKEND=$(BACKEND)
 	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures clean 2>/dev/null || true
 	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures bin/avltree_SingleGlobalLock
 	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures bin/rbtree_SingleGlobalLock

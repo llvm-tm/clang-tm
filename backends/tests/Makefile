@@ -43,7 +43,13 @@ $(BIN_DIR)/runtime__mt: test_runtime__mt.cpp | $(BIN_DIR)
 TINYSTM_FLAVORS = wbctl wbetl wt
 TINYSTM_BINS    = $(addprefix $(BIN_DIR)/runtime_tinystm_,$(TINYSTM_FLAVORS))
 
-tinystm_all: $(TINYSTM_BINS)
+# ---- Write-set validation test (WBCTL only) ----
+WRITE_SET_BINS = $(BIN_DIR)/runtime_ws_validation
+
+tinystm_all: $(TINYSTM_BINS) $(BIN_DIR)/runtime_ws_validation
+
+$(BIN_DIR)/runtime_ws_validation: test_runtime_write_set_validation.cpp | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(INC_TINYSTM) -DDESIGN_WBCTL -o $@ $< $(RUNTIME_DIR)/TinySTM_runtime.cpp
 
 $(BIN_DIR)/runtime_tinystm_wbctl: test_runtime_TinySTM_counter.cpp | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(INC_TINYSTM) -DDESIGN_WBCTL -o $@ $< $(RUNTIME_DIR)/TinySTM_runtime.cpp

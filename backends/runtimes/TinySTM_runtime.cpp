@@ -24,7 +24,7 @@ extern "C" {
 
 __thread int32_t tm_nested_call_counter;
 __thread int32_t tm_longjmp_ret;
-__thread unsigned char tm_jmpbuf[256];
+__thread sigjmp_buf tm_jmpbuf;
 __thread int tm_init_thread_call_count = 0;
 
 // Mutex removed — TinySTM's own lock acquisition handles concurrency,
@@ -44,7 +44,10 @@ thread_local uint64_t g_tm_tx_write_set{0};
 static std::atomic<uint64_t> g_tm_begin_count{0};
 static std::atomic<uint64_t> g_tm_end_count{0};
 static std::atomic<uint64_t> g_tm_tx_count{0};
-void tm_init() { tinystm::init(); }
+void tm_init() {
+	tinystm::init();
+	tinystm::reset_locks();
+}
 
 void tm_exit() {
 	tinystm::exit();
@@ -96,6 +99,7 @@ void tm_begin()
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
 	if (tm_nested_call_counter == 1) { g_in_tx = true;
+		tinystm::jmpbuf = (sigjmp_buf *)&tm_jmpbuf;
 		tm_clear_spec_allocs();
 		tm_clear_deferred_frees();
 		tinystm::begin();
