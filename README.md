@@ -115,19 +115,43 @@ Step 1: clang++ -O1 -fno-inline -emit-llvm -c file.cpp → file.bc
     Compile to LLVM bitcode (with -fno-inline to preserve annotations).
 
 Step 2: opt -load-pass-plugin=libTMInstrument.so \
-           -passes="tm-instrument" file.bc → file.instr.bc
+           -passes="tm-instrument-inline" file.bc → file.instr.bc
     TM instrumentation: replace loads/stores to TM globals with
     tm_read_*/tm_write_* calls, wrap TX functions with tm_begin/tm_end,
     clone reachable callees, redirect calls.
+    Default pipeline is tm-instrument-inline; use TM_INSTRUMENT_PIPELINE
+    to select tm-instrument (debug-friendly, preserves clones as separate
+    functions) or tm-instrument-then-inline (instrument clones individually
+    before inlining).
     Optional: -tm-opaque-symbols-file=<path> writes unresolved system
     function calls to a file for external resolution.
 
 Step 3: opt -O3 file.instr.bc → file.opt.bc
     Optimize the instrumented IR (inlines TM runtime hooks).
+    Override with TM_OPT_LEVEL=-O0 for debugging.
 
 Step 4: clang++ file.opt.bc <runtime>.cpp → binary
     Link with the chosen backend runtime and system libraries (-lm, etc.).
 ```
+
+### Debug builds
+
+```sh
+# Debug mode: noinline pipeline, -O0 post-opt, debug symbols, verbose plugin output
+BUILD_TYPE=DEBUG make test_foo
+
+# Or select pipeline manually (clone functions survive for breakpoints):
+TM_INSTRUMENT_PIPELINE=tm-instrument make test_foo
+```
+
+See `llvm_tm_plugin/DEBUG.md` for the complete debugging guide (GDB setup,
+symbol naming, intermediate IR inspection, pipeline comparison).
+
+| Pipeline | Clones survive? | TM ops | Best for |
+|----------|----------------|--------|----------|
+| `tm-instrument-inline` (default) | No — inlined | 176 | Production: inlined code maximizes optimization |
+| `tm-instrument` | Yes — `NoInline`+`OptimizeNone` | 38 | Debugging: clone functions are breakpoint-able |
+| `tm-instrument-then-inline` | No — inlined | 204 | Experiment: pre-inline clone instrumentation |
 
 ### Opaque Symbol Resolution
 
@@ -152,11 +176,15 @@ The shared Makefile include at `llvm_tm_plugin/tm_pipeline.mk` provides:
 | Function / Variable | Purpose |
 |---------------------|---------|
 | `$(call tm_compile_ir,src,out)` | Step 1: `.cpp` → `.bc` |
-| `$(call tm_instrument,in,out)` | Step 2: `.bc` → `.instr.bc` |
-| `$(call tm_optimize,in,out)` | Step 3: `.instr.bc` → `.opt.bc` |
+| `$(call tm_instrument,in,out)` | Step 2: `.bc` → `.instr.bc` (uses `$(TM_INSTRUMENT_PIPELINE)`) |
+| `$(call tm_optimize,in,out)` | Step 3: `.instr.bc` → `.opt.bc` (uses `$(TM_OPT_LEVEL)`) |
 | `$(call tm_resolve_opaque,symbol_file)` | Resolve opaque symbols → `.bc` stubs |
 | `$(call tm_link,opt_bc,backend,out)` | Step 4: `.opt.bc` + runtime → binary |
 | `$(call tm_target,name,src,backend)` | Define a complete build target |
+| `TM_INSTRUMENT_PIPELINE` | Pipeline name: `tm-instrument-inline` (default), `tm-instrument`, or `tm-instrument-then-inline` |
+| `TM_OPT_LEVEL` | Post-instrumentation opt level: `-O3` (default) or `-O0` (debug) |
+| `TM_LINK_OPT` | Link-time optimization: `-O1` (default) or `-O0 -g` (debug) |
+| `BUILD_TYPE` | `RELEASE` (default) or `DEBUG` — sets pipeline, opt level, and link flags together |
 | `TM_OPAQUE_SYMBOLS_FILE` | If set, passed to plugin for symbol dump |
 | `TM_OPAQUE_STUBS` | Path to resolved opaque stub `.bc` |
 | `TM_LINK_LIBS` | Extra libs for final link (e.g., `-lm`) |

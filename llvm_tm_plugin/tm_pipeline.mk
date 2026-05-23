@@ -7,6 +7,15 @@
 #   3. opt -O3 (optimize instrumented IR)          (.opt.bc)
 #   4. clang++ (link with STM runtime)             (binary)
 #
+# Pipeline variants (TM_INSTRUMENT_PIPELINE):
+#   tm-instrument-inline (default) — inlines then instruments (176 TM ops)
+#   tm-instrument             — clones survive as separate functions (38 TM ops)
+#   tm-instrument-then-inline — instruments clones pre-inline then inlines (204 TM ops)
+#
+# BUILD_TYPE:
+#   RELEASE (default) — tm-instrument-inline, -O3, -O1 link
+#   DEBUG             — tm-instrument, -O0, -O0 -g link (see llvm_tm_plugin/DEBUG.md)
+#
 # Optional: Opaque symbol resolution step (runs between 2 and 4):
 #   tm-resolve-opaque.py resolves system library symbols (e.g., sqrt, cos)
 #   and generates LLVM IR stub declarations for the link step.
