@@ -99,6 +99,8 @@ static bool isDeallocationCall(const Value *V) {
   StringRef Name = F->getName();
   return Name == "_ZdlPv" || Name == "_ZdlPvm" ||
          Name == "_ZdaPv" || Name == "_ZdaPvm" ||
+         Name == "_ZdlPvmSt11align_val_t" ||
+         Name == "_ZdaPvmSt11align_val_t" ||
          Name == "free" ||
          Name == "tm_free";
 }

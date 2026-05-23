@@ -13,6 +13,8 @@ Microbenchmarks for common concurrent data structures using TM.
 | **Set** | Ordered set | insert, erase, contains |
 | **Bitmap** | Atomic bitmap | set, clear, test |
 | **Heap** | Binary heap | push, pop, top |
+| **Treap Map** | Randomized BST (Aragon & Seidel 1989) | insert, find, operator[], erase, iterate |
+| **Treap MultiMap** | Duplicate-key treap | insert, lower_bound, iterate |
 
 ## Usage
 

@@ -26,6 +26,11 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - Bank benchmark: **PASS at 1t/2t/4t** with correct total money preserved.
 
 ## Done (this session)
+- **TMTreapMap / TMTreapMultiMap**: Created `benchmarks/datastructures/tm_treap_map.hpp` — treap-based (randomized BST, Aragon & Seidel 1989) map/multimap replacement for `std::map`/`std::multimap`. Uses `std::hash<K>` + Murmur3 finalizer mixing for priorities (avoids degenerate tree from identity hash). Parent pointers for O(log n) Iterator++. Stress tests (10 tests, insert/find/erase/iterate/lower_bound) all PASS.
+- **Hand-rolled RB tree (tm_rbtree.hpp)**: Buggy `erase()` (split-by-key logic wrong for separating == k from > k). Replaced by treap.
+- **STMbench7 integrated with treap**: Uses `TMTreapMap` (5 by-ID indexes) + `TMTreapMultiMap` (2 by-date indexes). Uninstrumented build works (100 ops in 1s).
+- **STMbench7 hangs with ALL TM backends (WBCTL, SwissTM, NOrec)**: Hang is NOT data-structure-specific — the first long traversal operation (e.g., `op_lt3` — range-for over `g_compositeParts`) hangs. Singlelock backend works (200 ops in 2s). Bank benchmark passes (verifies pipeline/toolchain intact). Root cause unknown — possibly `tm_read`/`tm_write` of vector iterator internals inside TX long loops. Needs further investigation with lldb backtrace when stuck.
+- **TMSafeMultiMap**: Added multimap variant to `backends/tm_safe_map.hpp` (sorted-vector with `std::upper_bound` for insert).
 - **Removed heuristic-based load/store classification**: `isSharedPointer` / `isTMTracedPtr` / `TMTracedArgs` were fundamentally flawed — they had false negatives (missing stores like `v_.end_ = pos_` in destructors) and false positives (instrumenting local alloca stores). The default is now **always-instrument**: every load/store in TX functions gets `tm_read`/`tm_write`.
 - **`tm_local` annotation support**: Users can annotate variables with `__attribute__((annotate("tm_local")))` to bypass TM instrumentation on known-private local variables. The plugin collects `@llvm.var.annotation` calls (using `starts_with("llvm.var.annotation")` for LLVM 22's mangled intrinsic names) and skips loads/stores to annotated allocas.
 - **`test_tm_local`**: New test verifying `tm_local` annotation works — all three sub-tests PASS (single increment, 100x increments, multiple tm_local variables).
@@ -44,7 +49,8 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - **Clone description**: "loads and stores to TM-shared pointers" → "every load and store (subject only to tm_local)".
 
 ## Blocked
-- `alloc_stress_test` map corruption: `std::map` operations call `_Rb_tree_insert_and_rebalance` from libstdc++ (shared library). The function body is never available as IR (even with `-O0`/`-O2`/`-flto`), so the plugin cannot instrument its stores. Any test using `std::map` inside __transaction_atomic with concurrent workers will exhibit data corruption. Solutions: (a) TM-safe map replacement, (b) serialize map operations, (c) LTO the entire libstdc++ for function body visibility, (d) accept limitation.
+- `alloc_stress_test` map corruption: `std::map` operations call `_Rb_tree_insert_and_rebalance` from libstdc++ (shared library). The function body is never available as IR (even with `-O0`/`-O2`/`-flto`), so the plugin cannot instrument its stores. Any test using `std::map` inside __transaction_atomic with concurrent workers will exhibit data corruption. Solutions: (a) TM-safe map replacement (treap now available), (b) serialize map operations, (c) LTO the entire libstdc++ for function body visibility, (d) accept limitation.
+- **STMbench7 hangs with ALL TM backends**: First long traversal operation (e.g., `op_lt3` — range-for over `g_compositeParts`) hangs with WBCTL/SwissTM/NOrec at 1 thread. Not data-structure-specific (occurs even without any map operations). Singlelock and uninstrumented work fine. Bank benchmark works fine (proves pipeline intact). Needs investigation — possible bug in tm_read during vector iterator operations inside long-running TX.
 
 ## Key Decisions
 - `tm_untrack_spec_alloc()` marks `node->ptr = nullptr` rather than unlinking: O(n) traversal is acceptable for small spec_alloc lists.
@@ -74,8 +80,7 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - `llvm_tm_plugin/test/test_tm_local.cpp`: new test verifying tm_local annotation.
 
 ## Next Steps
-1. Debug STMbench7 null-write crash and `ll_alloc_test` hang (pre-existing).
-2. Re-run `alloc_stress_test -v 2 -i 0 -e 0 -r 0 -m 0` with and without ASan to verify fix (the alloca-address-store skip in tracesFromTMGlobal).
-3. If fixed: re-run full test suite (types, nested, bank benchmarks).
+1. Debug STMbench7 hang — investigate `tm_read`/`tm_write` of vector iterator internals during long TX loops. Get lldb backtrace when stuck at op_lt3.
+2. Determine if the hang is a TM-backend bug in `read_word`/`write_word` for stack addresses, or something else.
+3. If fixed: run STMbench7 with treap maps at 1t/2t/4t across all backends.
 4. Run bank at all thread counts to confirm no regression.
-5. Run full bank comparison table with all TinySTM backends (WBCTL, WBETL, WT) at 1t/2t/4t/16t.

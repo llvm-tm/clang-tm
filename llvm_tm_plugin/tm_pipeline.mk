@@ -72,6 +72,7 @@ TINYSTM_DIR      ?= $(BACKENDS_DIR)/TinySTM
 TL2_DIR          ?= $(BACKENDS_DIR)/TL2
 SWISSTM_DIR      ?= $(BACKENDS_DIR)/SwissTM
 NOREC_DIR        ?= $(BACKENDS_DIR)/NOrec
+DUDETM_DIR       ?= $(BACKENDS_DIR)/DUDETM
 OUT_DIR          ?= out
 BIN_DIR          ?= bin
 TM_PLUGIN        ?= $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
@@ -93,6 +94,7 @@ TM_RUNTIME_tsxsgl        = $(RUNTIMES_DIR)/TSXSGL_runtime.cpp
 TM_RUNTIME_tinystm_wbctl = $(RUNTIMES_DIR)/TinySTM_runtime.cpp
 TM_RUNTIME_tinystm_wbetl = $(RUNTIMES_DIR)/TinySTM_runtime.cpp
 TM_RUNTIME_tinystm_wt    = $(RUNTIMES_DIR)/TinySTM_runtime.cpp
+TM_RUNTIME_dudetm        = $(RUNTIMES_DIR)/DUDETM_runtime.cpp
 
 TM_DEFINES_tinystm      = -DDESIGN_WBCTL
 TM_DEFINES_tl2          =
@@ -104,6 +106,7 @@ TM_DEFINES_tsxsgl       ?=
 TM_DEFINES_tinystm_wbctl = -DDESIGN_WBCTL -DNDEBUG
 TM_DEFINES_tinystm_wbetl = -DDESIGN_WBETL -DNDEBUG
 TM_DEFINES_tinystm_wt    = -DDESIGN_WT -DNDEBUG
+TM_DEFINES_dudetm        = -DDESIGN_WBCTL
 
 TM_INCLUDES_persistentsgl =
 TM_INCLUDES_distributedsgl =
@@ -112,6 +115,7 @@ TM_INCLUDES_norec       = -I$(NOREC_DIR) -I$(BACKENDS_DIR)
 TM_INCLUDES_tinystm_wbctl = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
 TM_INCLUDES_tinystm_wbetl = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
 TM_INCLUDES_tinystm_wt    = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
+TM_INCLUDES_dudetm        = -I$(TINYSTM_DIR) -I$(DUDETM_DIR) -I$(BACKENDS_DIR)
 
 # ---- Opaque symbol resolution (external tools) ----
 

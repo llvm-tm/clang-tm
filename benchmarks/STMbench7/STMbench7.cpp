@@ -31,7 +31,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <iostream>
-#include <map>
+#include "../datastructures/tm_treap_map.hpp"
 #include <mutex>
 #include <random>
 #include <set>
@@ -143,13 +143,13 @@ TM std::vector<Document>        g_documents;
 TM Manual                       g_manual;
 
 // Indexes (§3, Table 1): 6 ID‑based indexes + 2 date indexes
-TM std::map<int, int>           g_caById;          // ComplexAssembly ID → index
-TM std::map<int, int>           g_baById;          // BaseAssembly    ID → index
-TM std::map<int, int>           g_cpById;          // CompositePart   ID → index
-TM std::map<int, int>           g_apById;          // AtomicPart      ID → index
-TM std::map<int, int>           g_docById;         // Document        ID → index
-TM std::multimap<int, int>      g_cpByDate;        // buildDate → CP index
-TM std::multimap<int, int>      g_apByDate;        // buildDate → AP index
+TM TMTreapMap<int, int>           g_caById;          // ComplexAssembly ID → index
+TM TMTreapMap<int, int>           g_baById;          // BaseAssembly    ID → index
+TM TMTreapMap<int, int>           g_cpById;          // CompositePart   ID → index
+TM TMTreapMap<int, int>           g_apById;          // AtomicPart      ID → index
+TM TMTreapMap<int, int>           g_docById;         // Document        ID → index
+TM TMTreapMultiMap<int, int>      g_cpByDate;        // buildDate → CP index
+TM TMTreapMultiMap<int, int>      g_apByDate;        // buildDate → AP index
 
 TM int g_atomicPartCount = 0;
 TM int g_connectionCount = 0;
