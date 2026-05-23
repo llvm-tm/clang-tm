@@ -4,6 +4,7 @@
 Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures for LLVM 22.
 
 ## Done
+- **Makefile from-clean chain fix**: `TM_PLUGIN` in `tm_pipeline.mk` changed from absolute path (`$(LLVM_PLUGIN_DIR)/bin/...`) to relative (`$(BIN_DIR)/...`), matching the build rules. GNU Make 4.4 treats absolute and relative paths as different targets, so the pattern rule prerequisite `$(TM_PLUGIN)` never matched `bin/libTMInstrument.so` from clean state. Fixed — `make clean && make out/foo.instr.bc` now works in one invocation.
 - `test_single_push` hang: FIXED via `getBaseObject()` + `Use`-traversal in `handleLoadStore`.
 - `local_containers_test` SIGABRT: **FIXED** — recursive `__tree_deleter_tm_clone` stayed non-inlined, its `_ZdlPvmSt11align_val_t` calls invisible to `handleMallocFree`. Dual fix: (1) `tm_untrack_spec_alloc()` marks freed ptrs in spec_alloc list by setting `node->ptr = nullptr`; (2) `TMInstrumentInlinePass` extended to also process `_tm_clone` functions, intercepting deletes inside surviving clones. **PASS at 1t/2t/4t**.
 - `vector_realloc_test` data corruption: **FIXED** — write-set type-mismatch when sub-word TM reads hit UINT64 write-set entries. Read/write functions now merge/extract sub-word values from wider UINT64 entries.
@@ -34,24 +35,33 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 ## Key Decisions
 - `tm_untrack_spec_alloc()` marks `node->ptr = nullptr` rather than unlinking: O(n) traversal is acceptable for small spec_alloc lists.
 - `__tree_deleter_tm_clone` can never be inlined (recursive), so must be handled by extending `TMInstrumentInlinePass` to non-TX clones.
-- Runtime `unordered_map` bucket allocations MUST NOT go through `tm_malloc`/`spec_alloc` — they'd be freed on abort while the map still references them.
-- `instrumentLoadsStoresInFunction` only handles loads/stores, NOT `handleMallocFree`. This is intentional — the clone functions' `_Znwm` calls stay using standard heap. For `std::map` tree nodes, this means no spec_alloc tracking, which is fine for single-thread but causes issues under the TM model.
-- Do NOT serialize STL container calls; the correct fix is to ensure heap allocations inside TX functions are traced as TM globals (via `tracesFromTMGlobal` + `tm_malloc`).
+- Runtime `unordered_map` bucket allocations MUST NOT go through `tm_malloc`/`spec_alloc` — they'd be freed on abort while the map still references it.
+- `instrumentLoadsStoresInFunction` only handles loads/stores + MallocFree, NOT memory intrinsics (memcpy/memmove/memset). Memory intrinsics inside clones are caught by `TMInstrumentPass` after inlining.
 - `tm_malloc` must use `::operator new` (not `::malloc`) so that global destructors' `operator delete` calls are consistent.
-- `_Rb_tree_insert_and_rebalance` is a fundamental opaque barrier: its stores bypass TM write-set regardless of pipeline (inline or non-inline). Tests using `std::map` in concurrent TM will not be correct.
+- `_Rb_tree_insert_and_rebalance` is a fundamental opaque barrier: its stores bypass TM write-set regardless of pipeline. Tests using `std::map` in concurrent TM will not be correct. This is acceptable — the opaque check correctly detects it.
+- `CloneMode::CloneOnly` now clones ALL reachable functions (like `AlwaysInline` mode), fixing the non-inline pipeline for local containers.
+- Post-instrumentation `-O3` reordering remains a problem for the inline pipelines despite `atomic_signal_fence`. The non-inline pipeline avoids this by keeping clones as separate `NoInline`+`OptimizeNone` functions.
 
 ## Relevant Files
 - `backends/runtimes/TinySTM_runtime.cpp`: `tm_malloc`/`tm_free` definitions (use `::operator new/delete`).
 - `backends/tm_alloc_overrides.hpp`: speculative alloc tracking + deferred free.
 - `llvm_tm_plugin/src/tm_local_vars.hpp`: `tracesFromTMGlobal` — now tracks `tm_malloc`/`tm_calloc`/`tm_realloc`.
 - `llvm_tm_plugin/src/tm_instrument_helpers.hpp`: `handleMallocFree` intercepts `_Znwm`/`_ZdlPv` etc.
-- `llvm_tm_plugin/src/tm_method_instrumentation.hpp`: `instrumentLoadsStoresInFunction` — runs `handleMallocFree` in clones.
-- `llvm_tm_plugin/src/TMInstrumentPass.cpp`: both pipelines (`tm-instrument` and `tm-instrument-inline`).
-- `llvm_tm_plugin/test/alloc_stress_test.cpp`: failing test with vec+map+erase+raw new workers.
+- `llvm_tm_plugin/src/tm_method_instrumentation.hpp`: `computeClonableFunctions` / `redirectCallsToClones` — CloneOnly now clones all.
+- `llvm_tm_plugin/src/TMInstrumentPass.cpp`: three pipelines (`tm-instrument`, `tm-instrument-inline`, `tm-instrument-then-inline`).
+- `llvm_tm_plugin/DEBUG.md`: debugging guide (symbol names, pipelines, GDB breakpoints).
+- `llvm_tm_plugin/Makefile`: static pattern rules, `BUILD_TYPE`, `PLUGIN_CXXFLAGS`.
 
 ## Next Steps
-1. Apply fix in `tracesFromTMGlobal` (skip stores of alloca addresses in alloca-stores search) and rebuild.
-2. Re-run `alloc_stress_test -v 2 -i 0 -e 0 -r 0 -m 0` with and without ASan to verify fix.
-3. If fixed: re-run full test suite (types, nested, bank benchmarks).
-4. Run bank at all thread counts to confirm no regression.
-5. Debug STMbench7 null-write crash and `ll_alloc_test` hang (pre-existing).
+1. Run full test suite with `tm-instrument` pipeline to check for regressions.
+2. Investigate the `tm-instrument-then-inline` pipeline — similar `-O3` reorder issue as `tm-instrument-inline`.
+3. Debug STMbench7 null-write crash and `ll_alloc_test` hang (pre-existing).
+
+## Recent Refactoring
+- **`CloneOnly` fix**: `computeClonableFunctions` and `redirectCallsToClones` now treat `CloneMode::CloneOnly` like `AlwaysInline` — clone ALL reachable functions and redirect ALL calls. Previously, CloneOnly mode was too conservative (only cloned functions with TM-traced pointer args), producing 0 clones for local-container call graphs.
+- **`tm-instrument-then-inline` pipeline**: new pipeline that instruments each clone individually (pre-inline) then runs `AlwaysInlinerPass` + `TMInstrumentPass`. Produces 204 TM ops vs 179 for the inline pipeline, showing pre-inline instrumentation catches more loads/stores. Both fail due to `-O3` post-opt reordering.
+- **`BUILD_TYPE=DEBUG`**: now uses `tm-instrument` (non-inline) pipeline instead of `tm-instrument-inline`, preserving clone functions for breakpoints.
+- **Memory intrinsic fix in `TMInstrumentPass`**: `handleMemoryIntrinsic` → `needsMemIntrinsicInstrumentation` + push to `MemIntrinsics` vector (was a bug: detected but never instrumented).
+- **`TMStripLifetimePass`**: strips `llvm.lifetime.start/end` calls for LLVM 22 compat.
+- **Makefile refactoring**: static pattern rules, `PLUGIN_CXXFLAGS`, `TM_LINK_OPT`, `BUILD_TYPE`, convenience targets.
+- **`DEBUG.md`**: debugging guide with pipeline docs, symbol name resolution, and GDB breakpoint strategies.

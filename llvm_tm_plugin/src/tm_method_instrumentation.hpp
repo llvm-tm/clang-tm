@@ -397,12 +397,14 @@ computeClonableFunctions(Module &M,
         if (F->isDeclaration()) continue;
         if (F->getName().starts_with("tm_")) continue;
         if (hasAnnotation(*F, "transaction")) continue;
-        // In AlwaysInline mode, clone ALL reachable functions so they get
-        // alwaysinline and are inlined into the TX body.  Their loads/stores
-        // are then instrumented by TMInstrumentInlinePass.  Without this,
-        // accessor functions like vector::operator[] are never inlined and
-        // their internal loads bypass TM entirely.
-        if (Mode == CloneMode::AlwaysInline) {
+        // In AlwaysInline and CloneOnly modes, clone ALL reachable functions.
+        // AlwaysInline adds alwaysinline then inlines into the TX body.
+        // CloneOnly creates standalone clones for post-redirect instrumentation
+        // (TMGlobalInitPass's instrumentAllClones).  Without this, accessor
+        // functions like vector::operator[] are never cloned and their internal
+        // loads/stores bypass TM entirely.
+        if (Mode == CloneMode::AlwaysInline ||
+            Mode == CloneMode::CloneOnly) {
             Clonable.insert(F);
             continue;
         }
@@ -421,7 +423,8 @@ computeClonableFunctions(Module &M,
     }
     TM_DEBUG("computeClonableFunctions: %d functions clonable%s",
              (int)Clonable.size(),
-             Mode == CloneMode::AlwaysInline ? " (AlwaysInline: ALL)" : " (TM-traced)");
+             Mode == CloneMode::AlwaysInline ? " (AlwaysInline: ALL)" :
+             Mode == CloneMode::CloneOnly ? " (CloneOnly: ALL)" : " (TM-traced)");
     return Clonable;
 }
 
@@ -438,14 +441,14 @@ static void redirectCallsToClones(Function &F, Module &M,
     //   Pass 2: apply the redirects
     SmallVector<std::pair<CallBase *, Function *>, 32> ToRedirect;
 
-    // In AlwaysInline mode, ALL reachable functions have clones and all
-    // calls between them must be redirected so the AlwaysInlinerPass can
-    // inline the full transitive closure into the TX body.  The
-    // hasTMArg check below is too conservative for RAII helpers like
-    // _ConstructTransactionD1/D2 whose `this` pointer is a local alloca
-    // — they write to g_vec.__end_ through a stored pointer, not a
-    // direct TM-traced argument.
-    if (Mode == CloneMode::AlwaysInline) {
+    // In AlwaysInline and CloneOnly modes, ALL reachable functions have
+    // clones and all calls between them must be redirected.  For AlwaysInline,
+    // this lets the inliner inline the full transitive closure into the TX body.
+    // For CloneOnly, this ensures cloned functions call cloned callees (which
+    // are then instrumented by instrumentAllClones).  The hasTMArg check below
+    // is too conservative for RAII helpers and local-container internals.
+    if (Mode == CloneMode::AlwaysInline ||
+        Mode == CloneMode::CloneOnly) {
         for (auto &BB : F) {
             for (auto &I : BB) {
                 auto *Call = dyn_cast<CallBase>(&I);

@@ -52,6 +52,7 @@
 # Optimization level for the post-instrumentation pass.
 # Default: -O3 (inlines tm_read/tm_write). Set to -O0 for debugging.
 TM_OPT_LEVEL     ?= -O3
+TM_LINK_OPT      ?= -O1
 
 # Compile flags for source → LLVM bitcode (step 1 of pipeline).
 TM_COMPILE_FLAGS ?= -O1 -fno-inline -fno-vectorize -fno-slp-vectorize \
@@ -74,7 +75,7 @@ SWISSTM_DIR      ?= $(BACKENDS_DIR)/SwissTM
 NOREC_DIR        ?= $(BACKENDS_DIR)/NOrec
 OUT_DIR          ?= out
 BIN_DIR          ?= bin
-TM_PLUGIN        ?= $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
+TM_PLUGIN        ?= $(BIN_DIR)/libTMInstrument.so
 
 # Include machine-local config (if it exists) for arch-specific flags
 # e.g., TM_DEFINES_tsxsgl = -mrtm
@@ -163,7 +164,7 @@ $(if $(wildcard $(TM_OPAQUE_STUBS)),$(LLVM_LINK) $@.merged.bc $(TM_OPAQUE_STUBS)
 # Optimize merged IR (inlines tm_read/tm_write etc.)
 $(OPT) $(TM_OPT_LEVEL) $@.merged.bc -o $@.merged.opt.bc
 # Final link (TM_LINK_LIBS provides -lm, -lpthread, etc. for opaque functions)
-$(CXX) $(CXXFLAGS) $(TM_DEFINES_$(strip $2)) $@.merged.opt.bc -o $3 $(TM_INCLUDES_$(strip $2)) $(TM_LINK_LIBS)
+$(CXX) -std=c++20 $(TM_LINK_OPT) -pthread $(TM_DEFINES_$(strip $2)) $@.merged.opt.bc -o $3 $(TM_INCLUDES_$(strip $2)) $(TM_LINK_LIBS)
 # Cleanup intermediate files
 rm -f $@.runtime.bc $@.merged.bc $@.merged.opt.bc
 endef
