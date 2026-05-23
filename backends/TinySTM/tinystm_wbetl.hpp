@@ -44,7 +44,7 @@ public:
 	{
 		word_t old = state.load(std::memory_order_acquire);
 		while (true) {
-			word_t locked = old & LOCK_MASK;
+			word_t locked = old & OWNED_MASK;
 			word_t new_val = (v & VERSION_MASK) | locked;
 			if (state.compare_exchange_weak(old,
 			                                new_val,
@@ -57,12 +57,14 @@ public:
 
 	bool is_locked() const
 	{
-		return (state.load(std::memory_order_acquire) & LOCK_MASK) != 0;
+		return (state.load(std::memory_order_acquire) & OWNED_MASK) != 0;
 	}
 
 	word_t get_owner() const
 	{
-		return state.load(std::memory_order_acquire) & ~LOCK_MASK;
+		return (state.load(std::memory_order_acquire) &
+		        (THREAD_MASK << LOCK_BITS)) >>
+		       LOCK_BITS;
 	}
 };
 
@@ -98,6 +100,28 @@ exit_thread() //
   * Stubs for Transaction begin/end.
   * ---------------------------------------------------- */
 
+static void  //
+init_rand()  //
+{
+	if (!rng_initialized) {
+		std::random_device rd;
+		rng.seed(rd());
+		rng_initialized = true;
+	}
+}
+
+static void      //
+random_backoff() //
+{
+	if (!rng_initialized) {
+		init_rand();
+	}
+	std::exponential_distribution<> dist(
+	    (double)1 / (double)(current_tx_wbetl->abort_count + 1));
+	int delay = std::min(dist(rng), 100000.0);
+	std::this_thread::sleep_for(std::chrono::microseconds(delay));
+}
+
 inline bool //
 begin()     //
 {
@@ -106,6 +130,11 @@ begin()     //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	if (tx->active)
 		return true;
+
+	if (tx->aborted) {
+		tx->unlock_held_locks_and_clear();
+		tx->aborted = false;
+	}
 
 	tx->start_version = get_clock();
 	tx->end_version = tx->start_version;
@@ -125,8 +154,28 @@ abort_tx()  //
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
 	tx->unlock_held_locks_and_clear();
+	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
 
 	tx->abort_count++;
+	if (tx->abort_count > 5) {
+		random_backoff();
+	}
+	siglongjmp(*jmpbuf, 1);
+	TINYSTM_ASSERT(false, "Did not jump");
+}
+
+static void       //
+deferred_abort() //
+{
+	auto *tx = current_tx_wbetl;
+	TINYSTM_ASSERT(tx, "tx not defined");
+	tx->unlock_held_locks_and_clear();
+	tx->aborted = false;
+	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
+	tx->abort_count++;
+	if (tx->abort_count > 5) {
+		random_backoff();
+	}
 	siglongjmp(*jmpbuf, 1);
 	TINYSTM_ASSERT(false, "Did not jump");
 }
@@ -140,8 +189,12 @@ validate()  //
 		auto &r = it.second;
 		ByteOffset bo((word_t)addr);
 		Lock *lock = &g_locks_wbetl.get(bo.base_addr);
+		word_t l = lock->get();
+		bool is_locked = (l & OWNED_MASK) != 0;
+		word_t owner = (l & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS;
+		word_t current_version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
 
-		if (lock->is_locked() || lock->get_version() > r.observed_version) {
+		if ((is_locked && owner != tx->id) || current_version > r.observed_version) {
 			return false;
 		}
 	}
@@ -166,6 +219,10 @@ commit()    //
 
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
+
+	if (tx->aborted) {
+		deferred_abort();
+	}
 
 	// Locks already taken: write-back
 
@@ -251,6 +308,10 @@ read_word_etl(                                                //
 		}
 	}
 
+	if (tx->aborted) {
+		return read_value_from_addr(addr, sz);
+	}
+
 	Lock *lock = &g_locks_wbetl.get(bo.base_addr);
 	if (lock->is_locked_by(tx->id)) {
 		return read_value_from_addr(addr, sz);
@@ -260,8 +321,8 @@ read_word_etl(                                                //
 
 	while (true) {
 		if ((l & OWNED_MASK) != 0) {
-			l = lock->get();
-			continue;
+			tx->aborted = true;
+			return read_value_from_addr(addr, sz);
 		}
 
 		word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
@@ -307,7 +368,10 @@ write_word_etl(                                               //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
-	tx->read_only = false; // TODO: shouldn't the TX abort?
+	if (tx->aborted)
+		return;
+
+	tx->read_only = false;
 
 	// Found write-set entry at exact addr with matching type → update in place.
 	{
@@ -317,7 +381,6 @@ write_word_etl(                                               //
 				w->second.new_val = val;
 				return;
 			}
-			// Type mismatch at same addr: merge sub-word write into wider entry.
 			if (w->second.type == ValueType::UINT64 && sz == ValueType::UINT8) {
 				uint64_t merged = (w->second.new_val.u8 & ~(uint64_t)0xFF);
 				merged |= (uint64_t)(val.u1);
@@ -327,8 +390,6 @@ write_word_etl(                                               //
 		}
 	}
 
-	// For sub-word writes at an offset within an 8-byte word: if the aligned
-	// address already has a UINT64 entry, merge this write into it.
 	if (bo.offset != 0) {
 		void *base_addr = reinterpret_cast<void *>(bo.base_addr);
 		auto w2 = tx->write_set.find(base_addr);
@@ -363,30 +424,31 @@ write_word_etl(                                               //
 		}
 	}
 
-	while (true) {
-		Lock *lock = &g_locks_wbetl.get(bo.base_addr);
+	Lock *lock = &g_locks_wbetl.get(bo.base_addr);
 
-		if (lock->is_locked() && lock->get_owner() != tx->id) {
+	if (lock->is_locked()) {
+		if (lock->get_owner() != tx->id) {
+			tx->aborted = true;
+			return;
+		}
+	} else {
+		if (!lock->try_lock(tx->id)) {
 			if (!validate())
 				abort_tx();
-			continue;
+			if (!lock->try_lock(tx->id)) {
+				tx->aborted = true;
+				return;
+			}
 		}
-
-		while (!lock->is_locked_by(tx->id) && !lock->try_lock(tx->id)) {
-			if (!validate())
-				abort_tx();
-		}
-
-		// locked
-
-		tx->locks_held.push_back(lock);
-
-		WriteLogEntry_wbetl w;
-		w.new_val = val;
-		w.type = sz;
-		tx->write_set.insert(std::pair(addr, w));
-		break;
 	}
+
+	// locked
+	tx->locks_held.push_back(lock);
+
+	WriteLogEntry_wbetl w;
+	w.new_val = val;
+	w.type = sz;
+	tx->write_set.insert(std::pair(addr, w));
 }
 
 inline uint8_t    //

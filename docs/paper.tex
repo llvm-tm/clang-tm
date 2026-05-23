@@ -27,8 +27,8 @@ Transactional Memory (STM) using source-code annotations.  Developers mark globa
 with \texttt{\_\_attribute\_\_((annotate("tm")))} and functions with
 \texttt{\_\_attribute\_\_((annotate("transaction")))}.  The plugin (i) inserts
 transaction begin/commit hooks with \texttt{sigsetjmp}/\texttt{siglongjmp} retry logic,
-(ii) replaces loads and stores to annotated globals with typed \texttt{tm\_read\_*}/\texttt{tm\_write\_*}
-calls, (iii) performs transitive call-graph cloning so that functions reachable from
+(ii) replaces every load and store within transaction functions with typed \texttt{tm\_read\_*}/\texttt{tm\_write\_*}
+calls (with a \texttt{tm\_local} annotation to opt out per variable), (iii) performs transitive call-graph cloning so that functions reachable from
 transactions which interact with TM state are automatically instrumented, and
 (iv) supports multiple STM backends
 including NOrec, TL2, TinySTM, SwissTM, and SingleGlobalLock.  We evaluate the plugin
@@ -60,8 +60,10 @@ We present an LLVM compiler plugin that fills this gap.  Unlike prior work, our 
 annotation-driven: developers mark global variables with
 \texttt{\_\_attribute\_\_((annotate("tm")))} and functions with
 \texttt{\_\_attribute\_\_((annotate("transaction")))}.  The plugin then automatically
-instruments every load, store, and control-flow path within the transitive call tree of
-each transaction, with no need for lambda wrappers, RAII objects, or macro-based APIs:
+instruments every load and store within the transitive call tree of
+each transaction, with no need for lambda wrappers, RAII objects, or macro-based APIs.
+Local variables known to be thread-private can be exempted from instrumentation
+via \texttt{\_\_attribute\_\_((annotate("tm\_local")))}:
 
 \begin{itemize}
 \item \textbf{Global variables} annotated \texttt{\_\_attribute\_\_((annotate("tm")))}
@@ -132,9 +134,10 @@ This pass performs one-time setup for the entire compilation unit:
 \item \textbf{Clone Reachable Functions}: Run the fixed-point propagation
   algorithm (\texttt{computeClonableFunctions}, \S\ref{sec:cloning}) to compute
   the set of functions that interact with TM state.  For each such function,
-  create a clone with suffix \texttt{\_tm\_clone}.  The clone has its loads and
-  stores to TM-shared pointers replaced with \texttt{tm\_read\_*}/
-  \texttt{tm\_write\_*} calls.  Calls within the clone to other cloned functions
+  create a clone with suffix \texttt{\_tm\_clone}.  The clone has every load and
+  store replaced with \texttt{tm\_read\_*}/
+  \texttt{tm\_write\_*} calls (subject only to \texttt{tm\_local}
+  annotations on known-private variables).  Calls within the clone to other cloned functions
   are redirected to their cloned counterparts.  Functions in the call tree that
   are read-only with respect to TM state are never cloned --- their execution is
   idempotent and needs no rollback on abort.
@@ -166,21 +169,31 @@ This pass runs on each function annotated ``transaction'':
   \end{itemize}
 
 \item \textbf{Memory Instrumentation}: Scans all instructions; replaces
-  \texttt{LoadInst} and \texttt{StoreInst} to shared (non-local) pointers with
-  calls to the appropriate \texttt{tm\_read\_*}/\texttt{tm\_write\_*} functions.
-  The decision to instrument (\texttt{isSharedPointer}) uses three criteria:
-  \begin{enumerate}
-  \item \texttt{tracesFromTMGlobal}: backward use-def tracer that follows
-    pointers through GEPs, loads, calls, PHIs, and alloca store chains to
-    determine if the pointer reaches a TM-annotated global.  This catches
-    iterator-based element accesses in range-for loops:
-    \texttt{for (auto \&ca : g\_complexAssemblies)} where
-    \texttt{g\_complexAssemblies} is a TM global.
-  \item \texttt{originatesFromLocal}: forward tracer to detect
-    stack-allocated variables (never instrumented).
-  \item \texttt{getBaseObject}: direct GlobalVariable check for
-    simple global-pointer access.
-  \end{enumerate}
+  every \texttt{LoadInst} and \texttt{StoreInst} within TX function bodies
+  with calls to the appropriate \texttt{tm\_read\_*}/\texttt{tm\_write\_*}
+  functions.  The plugin does not attempt to classify pointers as ``shared''
+  or ``local'' --- heuristic load/store classification is fundamentally
+  unreliable at the IR level because pointer provenance is lost across
+  function boundaries (a destructor may write to a field whose allocation
+  site is in a different translation unit) and because STL internal
+  functions operate on heap-allocated tree nodes whose addresses do not
+  trace directly to any global variable.  The default is therefore
+  \textbf{always-instrument}: every memory access inside a transaction is
+  intercepted.
+
+  To avoid unnecessary instrumentation on known-private variables,
+  developers can annotate individual local variables with
+  \texttt{\_\_attribute\_\_((annotate("tm\_local")))}.  The plugin
+  detects these annotations by scanning calls to
+  \texttt{@llvm.var.annotation.p0.p0} (matched via
+  \texttt{starts\_with("llvm.var.annotation")} --- the LLVM 22 name
+  includes a type-suffix like \texttt{.p0.p0}).  Allocas referenced by
+  \texttt{"tm\_local"} annotations are collected into a module-level
+  cache; loads and stores to these allocas are skipped during
+  instrumentation.  This shifts the classification responsibility from
+  the compiler (which lacks sufficient information for correct per-access
+  decisions) to the developer, who knows which variables are
+  thread-private.
 
 \item \textbf{Exit Instrumentation}: At each return, decrement the counter.
   If counter reaches 0 (outermost), call \texttt{tm\_end()};
@@ -216,9 +229,13 @@ from \texttt{begin()} on a TM global:
 load from \texttt{\%\_\_begin}, then to the alloca \texttt{\%\_\_begin},
 then back through stores to the \texttt{begin()} call, then to the
 \texttt{\%\_\_range} alloca, then to the store of
-\texttt{\%g\_complexAssemblies} (a TM global).  This makes
-\texttt{isSharedPointer} return \texttt{true} for the element load,
-correctly triggering TM instrumentation.
+\texttt{\%g\_complexAssemblies} (a TM global).  This trace feeds into the
+fixed-point propagation that determines which helper functions receive
+TM-traceable arguments (\S\ref{sec:cloning}).  Within cloned helpers,
+every load and store is instrumented (subject only to \texttt{tm\_local}
+annotations), so the element access in the loop body is correctly
+intercepted regardless of whether the pointer chain passes through
+intermediate allocas or function boundaries.
 
 \subsection{Transitive Cloning via Fixed-Point Propagation}
 \label{sec:cloning}
@@ -971,11 +988,15 @@ The LLVM plugin's advantage is architectural, not algorithmic.  After
 Clang generates LLVM IR from C++ source, every operation --- including
 those inside STL headers --- is lowered to a small set of IR instructions:
 load, store, getelementptr, call, and branch.  The plugin's
-\texttt{isSharedPointer} analysis traverses this IR backwards to determine
-if the accessed pointer ultimately reaches a TM-annotated global.  This
-trace is type-agnostic: it follows use-def chains through GEPs, loads,
-PHI nodes, and allocas without caring whether the original source code
-used \texttt{std::vector}, a plain array, or a hand-rolled linked list.
+always-instrument approach simply replaces every such load and store in
+transaction functions with \texttt{tm\_read\_*}/\texttt{tm\_write\_*}
+calls.  The \texttt{tracesFromTMGlobal} backward tracer (\S\ref{sec:cloning})
+feeds the fixed-point propagation that determines which helper functions
+receive TM-traceable arguments; within those cloned helpers, the same
+always-instrument rule applies.  The trace is type-agnostic: it follows
+use-def chains through GEPs, loads, PHI nodes, and allocas without
+caring whether the original source code used \texttt{std::vector}, a
+plain array, or a hand-rolled linked list.
 
 At the source level, by contrast, \texttt{std::vector::operator[]} is a
 function call whose internals are not expanded until the compiler runs.

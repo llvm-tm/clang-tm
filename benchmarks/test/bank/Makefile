@@ -48,6 +48,15 @@ bank_persistentsgl: bank.cpp | $(BIN_DIR)
 bank_dudetm: bank.cpp | $(BIN_DIR)
 	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/DUDETM_runtime.cpp -I$(BACKENDS)/TinySTM -I$(BACKENDS)/DUDETM -DDESIGN_WBCTL -o $(BIN_DIR)/$@ $<
 
+bank_opt: bank_opt.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/TinySTM_runtime.cpp -I$(BACKENDS)/TinySTM -DDESIGN_WBCTL -o $(BIN_DIR)/$@ $<
+
+bank_opt_wbetl: bank_opt.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/TinySTM_runtime.cpp -I$(BACKENDS)/TinySTM -DDESIGN_WBETL -o $(BIN_DIR)/$@ $<
+
+bank_opt_wt: bank_opt.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/TinySTM_runtime.cpp -I$(BACKENDS)/TinySTM -DDESIGN_WT -o $(BIN_DIR)/$@ $<
+
 bank_tsxsgl: bank.cpp | $(BIN_DIR)
 	$(CLANG_TM) $(CXXFLAGS) -mrtm --runtime $(RUNTIMES)/TSXSGL_runtime.cpp -o $(BIN_DIR)/$@ $<
 

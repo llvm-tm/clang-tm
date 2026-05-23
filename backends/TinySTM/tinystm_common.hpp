@@ -127,7 +127,8 @@ public:
 		}
 		word_t expected = current_state & ~OWNED_MASK; // Lock must not be taken
 		word_t desired = (current_state & (VERSION_MASK << META_BITS)) |
-		                 (((tx_id & THREAD_MASK) << LOCK_BITS) | WRITE_MASK);
+		                 (((tx_id & THREAD_MASK) << LOCK_BITS) | WRITE_MASK) |
+		                 (current_state & (INCARNATION_MASK << OWNED_BITS));
 		TINYSTM_ASSERT((desired & WRITE_MASK) == 1 &&
 		                   ((desired & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS) == tx_id,
 		               "Wrong lock configuration");
@@ -175,7 +176,7 @@ public:
 	word_t get_incarnation() const
 	{
 		word_t s = state.load(std::memory_order_acquire);
-		return (s >> LOCK_BITS) & INCARNATION_MASK;
+		return (s >> OWNED_BITS) & INCARNATION_MASK;
 	}
 
 	void inc_abort(word_t current_incarnation) // also unlocks

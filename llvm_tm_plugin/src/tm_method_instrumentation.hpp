@@ -153,7 +153,7 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M,
     //  double-erase when the caller also tracks it in ToErase.
 }
 #else
-static void instrumentMemoryIntrinsic(CallInst *, Module &,
+static void instrumentMemoryIntrinsic(CallBase *, Module &,
                                       const TMRuntimeHooks &) {}
 #endif
 
@@ -178,69 +178,53 @@ static bool isCallOnTMObject(CallBase *Call, Module &M)
     return traced;
 }
 
-#ifndef DISABLE_TM_READ_WRITE
 // Per-function map of which pointer arguments trace to TM globals.
-// Used by isTMTracedPtr to decide whether an Argument-based pointer
-// should be instrumented in a cloned function.
+// Used by cloneMethod/computeClonableFunctions/redirectCallsToClones
+// to decide which functions to clone and which calls to redirect.
+// Not used for load/store instrumentation decisions (always-instrument default).
 static DenseMap<const Function *, SmallSet<unsigned, 4>> TMTracedArgs;
 
-// Check if a pointer's base argument is TM-traced.
-// In cloned functions, an Argument base that is NOT TM-traced
-// indicates a local/stack pointer (e.g. `this` of a local container)
-// that should not be instrumented.
-static bool isTMTracedPtr(const Value *Ptr)
-{
-    const Value *Base = getBaseObject(const_cast<Value *>(Ptr));
-    if (auto *Arg = dyn_cast<Argument>(const_cast<Value *>(Base))) {
-        auto it = TMTracedArgs.find(Arg->getParent());
-        if (it == TMTracedArgs.end() || !it->second.count(Arg->getArgNo()))
-            return false;
-    }
-    return true;
-}
+#ifndef DISABLE_TM_READ_WRITE
 
-static void instrumentLoadsStoresInFunction(Function *F, Module *M,
+// Instrument ALL loads/stores in a function, only skipping tm_local-annotated
+// variables. The old heuristic (isSharedPointer + isTMTracedPtr double-guard)
+// had false negatives: it skipped stores to pointers that appeared "local"
+// but actually pointed to shared memory (e.g., v_.end_ = pos_ in a vector
+// destructor).  Instrumenting everything is the safe default.
+static void instrumentLoadStoresInFunction(Function *F, Module *M,
                                               const TMRuntimeHooks &H)
 {
-    SmallPtrSet<const Value *, 32> LocalVars;
-    collectLocalVariables(*F, LocalVars);
-
     if (TMAudit) {
-        // --- start: inline audit ---
-        int tLoads = 0, sLoads = 0, tStores = 0, sStores = 0;
+        int tLoads = 0, iLoads = 0, tStores = 0, iStores = 0;
         errs() << "\n[AUDIT] === ALL loads in clone " << F->getName() << " ===\n";
         for (auto &BB : *F) for (auto &I : BB) {
             auto *L = dyn_cast<LoadInst>(&I); if (!L) continue;
             tLoads++;
-            bool sh = isSharedPointer(L->getPointerOperand(), LocalVars, *F, *M);
-            bool tr = isTMTracedPtr(L->getPointerOperand());
-            errs() << "[AUDIT] " << ((sh && tr) ? "  " : "* ")
-                   << "LOAD shared=" << (sh ? "Y" : "N")
-                   << " traced=" << (tr ? "Y" : "N")
+            bool local = isTMLocalVar(L->getPointerOperand(), *M);
+            errs() << "[AUDIT] " << (local ? "* " : "  ")
+                   << "LOAD tm_local=" << (local ? "Y" : "N")
                    << " type=" << *L->getType()
                    << "\n    ptr=" << *L->getPointerOperand()
                    << "\n    base=" << *getBaseObject(L->getPointerOperand()) << "\n";
-            if (sh && tr) sLoads++;
+            if (!local) iLoads++;
         }
         errs() << "[AUDIT] === ALL stores in clone " << F->getName() << " ===\n";
         for (auto &BB : *F) for (auto &I : BB) {
             auto *S = dyn_cast<StoreInst>(&I); if (!S) continue;
             tStores++;
-            bool sh = isSharedPointer(S->getPointerOperand(), LocalVars, *F, *M);
-            bool tr = isTMTracedPtr(S->getPointerOperand());
-            errs() << "[AUDIT] " << ((sh && tr) ? "  " : "* ")
-                   << "STORE shared=" << (sh ? "Y" : "N")
-                   << " traced=" << (tr ? "Y" : "N")
+            bool local = isTMLocalVar(S->getPointerOperand(), *M);
+            errs() << "[AUDIT] " << (local ? "* " : "  ")
+                   << "STORE tm_local=" << (local ? "Y" : "N")
                    << " val=" << *S->getValueOperand()
                    << "\n    ptr=" << *S->getPointerOperand()
                    << "\n    base=" << *getBaseObject(S->getPointerOperand()) << "\n";
-            if (sh && tr) sStores++;
+            if (!local) iStores++;
         }
         errs() << "[AUDIT] Summary for clone " << F->getName() << ": "
-               << "LOAD " << sLoads << "/" << tLoads
-               << " STORE " << sStores << "/" << tStores
-               << " NOT instr: LOAD " << (tLoads - sLoads)
-               << " STORE " << (tStores - sStores) << "\n";
+               << "LOAD " << iLoads << "/" << tLoads
+               << " STORE " << iStores << "/" << tStores
+               << " INSTRUMENTED; NOT instr (tm_local): LOAD "
+               << (tLoads - iLoads) << " STORE " << (tStores - iStores) << "\n";
     }
 
     SmallVector<Instruction *, 16> ToErase;
@@ -256,8 +240,7 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
 #endif
             if (auto *Load = dyn_cast<LoadInst>(I)) {
                 Value *Ptr = Load->getPointerOperand();
-                if (!isSharedPointer(Ptr, LocalVars, *F, *M)) continue;
-                if (!isTMTracedPtr(Ptr)) continue;
+                if (isTMLocalVar(Ptr, *M)) continue;
                 IRBuilder<> Builder(Load);
                 if (auto *Call = emitTMRead(Builder, Ptr, Load->getType(), H)) {
                     Load->replaceAllUsesWith(Call);
@@ -265,8 +248,7 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
                 }
             } else if (auto *Store = dyn_cast<StoreInst>(I)) {
                 Value *Ptr = Store->getPointerOperand();
-                if (!isSharedPointer(Ptr, LocalVars, *F, *M)) continue;
-                if (!isTMTracedPtr(Ptr)) continue;
+                if (isTMLocalVar(Ptr, *M)) continue;
                 IRBuilder<> Builder(Store);
                 if (emitTMWrite(Builder, Ptr, Store->getValueOperand(), H))
                     ToErase.push_back(Store);
@@ -276,8 +258,8 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
     for (auto *I : ToErase) I->eraseFromParent();
 }
 #else
-static void instrumentLoadsStoresInFunction(Function *, Module *,
-                                             const TMRuntimeHooks &) {}
+static void instrumentLoadStoresInFunction(Function *, Module *,
+                                              const TMRuntimeHooks &) {}
 #endif
 
 static Function *cloneMethod(Function *Original, const Twine &Suffix,
@@ -316,7 +298,7 @@ static Function *cloneMethod(Function *Original, const Twine &Suffix,
         auto OrigIt = TMTracedArgs.find(Original);
         if (OrigIt != TMTracedArgs.end())
             TMTracedArgs[NewFunc] = OrigIt->second;
-        instrumentLoadsStoresInFunction(NewFunc, M, H);
+        instrumentLoadStoresInFunction(NewFunc, M, H);
     } else { // CloneMode::CloneOnly
         // Clone without instrumentation — instrument AFTER call redirection
         // (done in TMGlobalInitPass) so tracesFromTMGlobal can find callers.
@@ -583,7 +565,7 @@ static void instrumentAllClones(
             TMTracedArgs[Clone] = OrigIt->second;
         Clone->addFnAttr(llvm::Attribute::NoInline);
         Clone->addFnAttr(llvm::Attribute::OptimizeNone);
-        instrumentLoadsStoresInFunction(Clone, &M, H);
+        instrumentLoadStoresInFunction(Clone, &M, H);
         TM_DEBUG("After-redirect instrumented clone: %s", Clone->getName().str().c_str());
     }
 }

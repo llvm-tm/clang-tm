@@ -184,43 +184,21 @@ static bool handleMemoryIntrinsic(CallBase *Call, Module &M,
 // ===========================================================================
 //
 // When -tm-audit is passed to opt, this function enumerates every load and
-// store instruction in a TX function (after inlining) and reports whether
-// isSharedPointer() classifies it as shared (→ instrumented) or local (→
-// NOT instrumented).  Non-instrumented loads/stores are marked with "* " in
-// the output, so you can `grep "^* "` to find accesses that may be missed.
+// store instruction in a TX function (after inlining) and reports which
+// are INSTRUMENTED (non-tm_local) vs NOT INSTRUMENTED (tm_local).
+// Non-instrumented loads/stores are marked with "* " in the output, so
+// you can `grep "^* "` to verify your tm_local annotations are correct.
 //
-// The output shows:
-//   * LOAD/STORE — shared=Y/N  type/val
+// Output shows:
+//   * LOAD/STORE — tm_local=Y/N  type/val
 //     ptr=   <LLVM pointer operand>
 //     base=  <LLVM base object>
-//
-// Shared-memory accesses that show "shared=N" are potentially missed
-// instrumentation targets.  Investigate why isSharedPointer returned false:
-//   - AllocaInst → isSharedPointer short-circuits to false (local).
-//     The value loaded from the alloca may later trace to a TM global
-//     through tracesFromTMGlobal — so the *data* behind the pointer
-//     IS instrumented, but the alloca dereference itself is not (correct).
-//   - originatesFromLocal returned true → the pointer originates from
-//     an alloca in this function.  Check if it points to TM-shared data
-//     (a known case: stack-allocated iterator that points into a TM map).
-//     If so, tracesFromTMGlobal may already handle it via the alloca-store
-//     tracing in line 305-321 of tm_local_vars.hpp.
-//   - Otherwise: tracesFromTMGlobal returned false AND
-//     originatesFromLocal returned false.  The base object is checked
-//     against TM globals.  If it's a heap pointer not traced to a TM
-//     global through LLVM's def-use chain, isSharedPointer falls back to
-//     "assumed shared" (line 389 of tm_local_vars.hpp), so it IS
-//     instrumented.  A "shared=N" here means it was classified as local.
-//     This is the case that needs investigation.
 //
 static void auditTXFunctionLoadsStores(Function &F, Module &M) {
     if (!TMAudit) return;
 
-    SmallPtrSet<const Value *, 32> LocalVars;
-    collectLocalVariables(F, LocalVars);
-
-    int totalLoads = 0, sharedLoads = 0;
-    int totalStores = 0, sharedStores = 0;
+    int totalLoads = 0, instrumentedLoads = 0;
+    int totalStores = 0, instrumentedStores = 0;
 
     errs() << "\n[AUDIT] === ALL loads in " << F.getName() << " ===\n";
     for (auto &BB : F) {
@@ -229,16 +207,16 @@ static void auditTXFunctionLoadsStores(Function &F, Module &M) {
             if (!Load) continue;
             totalLoads++;
             Value *Ptr = Load->getPointerOperand();
-            bool shared = isSharedPointer(Ptr, LocalVars, F, M);
+            bool local = isTMLocalVar(Ptr, M);
             const Value *Base = getBaseObject(Ptr);
-            errs() << "[AUDIT] " << (shared ? "  " : "* ")
+            errs() << "[AUDIT] " << (local ? "* " : "  ")
                    << "LOAD"
-                   << " shared=" << (shared ? "Y" : "N")
+                   << " tm_local=" << (local ? "Y" : "N")
                    << " type=" << *Load->getType()
                    << "\n    ptr=" << *Ptr
                    << "\n    base=" << *Base
                    << "\n";
-            if (shared) sharedLoads++;
+            if (!local) instrumentedLoads++;
         }
     }
 
@@ -249,25 +227,25 @@ static void auditTXFunctionLoadsStores(Function &F, Module &M) {
             if (!Store) continue;
             totalStores++;
             Value *Ptr = Store->getPointerOperand();
-            bool shared = isSharedPointer(Ptr, LocalVars, F, M);
+            bool local = isTMLocalVar(Ptr, M);
             const Value *Base = getBaseObject(Ptr);
-            errs() << "[AUDIT] " << (shared ? "  " : "* ")
+            errs() << "[AUDIT] " << (local ? "* " : "  ")
                    << "STORE"
-                   << " shared=" << (shared ? "Y" : "N")
+                   << " tm_local=" << (local ? "Y" : "N")
                    << " val=" << *Store->getValueOperand()
                    << "\n    ptr=" << *Ptr
                    << "\n    base=" << *Base
                    << "\n";
-            if (shared) sharedStores++;
+            if (!local) instrumentedStores++;
         }
     }
 
     errs() << "[AUDIT] Summary for " << F.getName() << ": "
-           << "LOAD " << sharedLoads << "/" << totalLoads
-           << " STORE " << sharedStores << "/" << totalStores
-           << " NOT instrumented (LOCAL): "
-           << (totalLoads - sharedLoads) << " loads, "
-           << (totalStores - sharedStores) << " stores"
+           << "LOAD " << instrumentedLoads << "/" << totalLoads
+           << " STORE " << instrumentedStores << "/" << totalStores
+           << " INSTRUMENTED; NOT instrumented (tm_local): "
+           << (totalLoads - instrumentedLoads) << " loads, "
+           << (totalStores - instrumentedStores) << " stores"
            << "\n";
 }
 
@@ -350,49 +328,51 @@ static bool handleMallocFree(CallBase *Call, IRBuilder<> &B,
     return false;
 }
 
+// Default: instrument ALL loads/stores in TM transaction functions.
+// Only skip if the user has annotated the variable with tm_local.
+// This replaces the old heuristic-based approach (isSharedPointer +
+// isTMTracedPtr) which had false negatives causing data corruption.
 static bool handleLoadStore(Instruction *I, Function &F, Module &M,
                              const TMRuntimeHooks &H,
                              SmallVectorImpl<Instruction *> &ToErase)
 {
-    SmallPtrSet<const Value *, 32> LocalVars;
-    collectLocalVariables(F, LocalVars);
-
     if (auto *Load = dyn_cast<LoadInst>(I)) {
-        if (isSharedPointer(Load->getPointerOperand(), LocalVars, F, M)) {
-            IRBuilder<> B(Load);
-            if (auto *Call = emitTMRead(B, Load->getPointerOperand(), Load->getType(), H)) {
-                Load->replaceAllUsesWith(Call);
-                ToErase.push_back(Load);
-                return true;
-            }
-        }
-    } else if (auto *Store = dyn_cast<StoreInst>(I)) {
-        if (isSharedPointer(Store->getPointerOperand(), LocalVars, F, M)) {
-            IRBuilder<> B(Store);
-            if (emitTMWrite(B, Store->getPointerOperand(), Store->getValueOperand(), H))
-                ToErase.push_back(Store);
+        // Skip tm_local-annotated variables — user asserts they are thread-private.
+        if (isTMLocalVar(Load->getPointerOperand(), M))
+            return false;
+        IRBuilder<> B(Load);
+        if (auto *Call = emitTMRead(B, Load->getPointerOperand(), Load->getType(), H)) {
+            Load->replaceAllUsesWith(Call);
+            ToErase.push_back(Load);
             return true;
         }
+    } else if (auto *Store = dyn_cast<StoreInst>(I)) {
+        if (isTMLocalVar(Store->getPointerOperand(), M))
+            return false;
+        IRBuilder<> B(Store);
+        if (emitTMWrite(B, Store->getPointerOperand(), Store->getValueOperand(), H))
+            ToErase.push_back(Store);
+        return true;
     } else if (auto *RMW = dyn_cast<AtomicRMWInst>(I)) {
-        if (isSharedPointer(RMW->getPointerOperand(), LocalVars, F, M)) {
-            IRBuilder<> B(RMW);
-            Value *Old = emitTMRead(B, RMW->getPointerOperand(), RMW->getType(), H);
-            if (!Old) return false;
-            Value *New = nullptr;
-            switch (RMW->getOperation()) {
-            case AtomicRMWInst::Add:    New = B.CreateAdd(Old, RMW->getValOperand()); break;
-            case AtomicRMWInst::Sub:    New = B.CreateSub(Old, RMW->getValOperand()); break;
-            case AtomicRMWInst::And:    New = B.CreateAnd(Old, RMW->getValOperand()); break;
-            case AtomicRMWInst::Or:     New = B.CreateOr(Old, RMW->getValOperand()); break;
-            case AtomicRMWInst::Xor:    New = B.CreateXor(Old, RMW->getValOperand()); break;
-            case AtomicRMWInst::Xchg:   New = RMW->getValOperand(); break;
-            default: return false;
-            }
-            if (emitTMWrite(B, RMW->getPointerOperand(), New, H)) {
-                RMW->replaceAllUsesWith(Old);
-                ToErase.push_back(RMW);
-                return true;
-            }
+        if (isTMLocalVar(RMW->getPointerOperand(), M))
+            return false;
+        IRBuilder<> B(RMW);
+        Value *Old = emitTMRead(B, RMW->getPointerOperand(), RMW->getType(), H);
+        if (!Old) return false;
+        Value *New = nullptr;
+        switch (RMW->getOperation()) {
+        case AtomicRMWInst::Add:    New = B.CreateAdd(Old, RMW->getValOperand()); break;
+        case AtomicRMWInst::Sub:    New = B.CreateSub(Old, RMW->getValOperand()); break;
+        case AtomicRMWInst::And:    New = B.CreateAnd(Old, RMW->getValOperand()); break;
+        case AtomicRMWInst::Or:     New = B.CreateOr(Old, RMW->getValOperand()); break;
+        case AtomicRMWInst::Xor:    New = B.CreateXor(Old, RMW->getValOperand()); break;
+        case AtomicRMWInst::Xchg:   New = RMW->getValOperand(); break;
+        default: return false;
+        }
+        if (emitTMWrite(B, RMW->getPointerOperand(), New, H)) {
+            RMW->replaceAllUsesWith(Old);
+            ToErase.push_back(RMW);
+            return true;
         }
     }
     return false;

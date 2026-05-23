@@ -25,8 +25,23 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - `alloc_stress_test` status: **FULL PASS** (vec + map insert/erase + raw new/delete + mixed workers), **PASS at 1t/2t/3t** concurrent.
 - Bank benchmark: **PASS at 1t/2t/4t** with correct total money preserved.
 
-## In Progress
-- **`alloc_stress_test` crash (NULL-write, not map corruption)**: **ROOT CAUSE IDENTIFIED** — `tracesFromTMGlobal` false positive when an alloca stores the *address* of another alloca. The function recurses through stores: outer alloca → stores address of inner alloca (a stack address) → inner alloca stores TM-traced `_M_finish` pointer → incorrectly returns `true` for outer alloca. Effect: `tm_write_ptr` emitted for stores to outer alloca (a stack variable) → TM-buffered writes don't update stack → stale alloca load returns NULL → `_M_finish` is set to NULL → crash on next push. Fix: when checking a store's value operand in the alloca-stores-search, skip value operands whose base (stripping GEPs/bitcasts, NOT loads) is an `AllocaInst` — storing a stack address does not trace to a TM global.
+## Done (this session)
+- **Removed heuristic-based load/store classification**: `isSharedPointer` / `isTMTracedPtr` / `TMTracedArgs` were fundamentally flawed — they had false negatives (missing stores like `v_.end_ = pos_` in destructors) and false positives (instrumenting local alloca stores). The default is now **always-instrument**: every load/store in TX functions gets `tm_read`/`tm_write`.
+- **`tm_local` annotation support**: Users can annotate variables with `__attribute__((annotate("tm_local")))` to bypass TM instrumentation on known-private local variables. The plugin collects `@llvm.var.annotation` calls (using `starts_with("llvm.var.annotation")` for LLVM 22's mangled intrinsic names) and skips loads/stores to annotated allocas.
+- **`test_tm_local`**: New test verifying `tm_local` annotation works — all three sub-tests PASS (single increment, 100x increments, multiple tm_local variables).
+- **`construct_tx_pattern`** passes at 1t/2t/4t on both `tm-instrument-inline` and `tm-instrument-then-inline` pipelines.
+- **Removed `force_all` plugin variant**: redundant now that always-instrument is the default. Removed `compare_force_all` Makefile target.
+- **WT backend refactored to use shared `tinystm_common.hpp` infrastructure**: removed local `Lock`/`LockTable`/`Transaction`/`ValueType`/`ByteOffset` copies; WT now uses common `Lock` (with incarnation bits preserved in `try_lock` and `get_incarnation()` bug fixed from `LOCK_BITS` to `OWNED_BITS`), shared `LockTable<Lock_wt>`, shared `Transaction` template, and shared `g_clock`/`thr_counter`/`jmpbuf`.
+- **WT matches WBCTL patterns**: `tx_id` is now `thr_counter.fetch_add(1)` (not `(word_t)tx`), `abort_tx()` uses unconditional `siglongjmp`, nesting in `begin()` follows WBCTL (no `init_thread` inside), `tx->aborted` never set in read/write instrumentation, random backoff added.
+- **WT tm_read/tm_write wrappers**: replaced `tm_read`/`tm_write` template usage with manual byte-extraction/merging wrappers (like the original WT) that pass 8-byte-aligned addresses to `read_word_wt`/`write_word_wt`, fixing unaligned `std::atomic_ref<uint64_t>` access and type-size mismatch bugs.
+- **Bank benchmark WT**: **PASS 1t/2t/4t** with correct money conservation, no hangs.
+
+## Done (paper)
+- **Updated `docs/paper.tex`**: Section 2.2 (Memory Instrumentation) now describes always-instrument approach, explains why heuristic classification is unreliable (pointer provenance lost across function boundaries, STL tree nodes), documents `tm_local` annotation detection via `@llvm.var.annotation.p0.p0` with `starts_with` matching for LLVM 22 type-suffixed names.
+- **Section 2.3 (Iterator Tracing)**: Updated to describe `tracesFromTMGlobal` as feeding fixed-point propagation (not load/store decisions).
+- **Section 4.2 (Source-to-source)**: Updated IR-level analysis description to reference always-instrument approach.
+- **Abstract/Introduction**: Updated to say "every load and store" instead of "loads and stores to annotated globals", mentions `tm_local` opt-out.
+- **Clone description**: "loads and stores to TM-shared pointers" → "every load and store (subject only to tm_local)".
 
 ## Blocked
 - `alloc_stress_test` map corruption: `std::map` operations call `_Rb_tree_insert_and_rebalance` from libstdc++ (shared library). The function body is never available as IR (even with `-O0`/`-O2`/`-flto`), so the plugin cannot instrument its stores. Any test using `std::map` inside __transaction_atomic with concurrent workers will exhibit data corruption. Solutions: (a) TM-safe map replacement, (b) serialize map operations, (c) LTO the entire libstdc++ for function body visibility, (d) accept limitation.
@@ -39,19 +54,28 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - Do NOT serialize STL container calls; the correct fix is to ensure heap allocations inside TX functions are traced as TM globals (via `tracesFromTMGlobal` + `tm_malloc`).
 - `tm_malloc` must use `::operator new` (not `::malloc`) so that global destructors' `operator delete` calls are consistent.
 - `_Rb_tree_insert_and_rebalance` is a fundamental opaque barrier: its stores bypass TM write-set regardless of pipeline (inline or non-inline). Tests using `std::map` in concurrent TM will not be correct.
+- **Heuristic is fundamentally wrong**: the `isSharedPointer` + `isTMTracedPtr` double-guard misses loads/stores that need instrumentation (destructor's `v_.end_ = pos_` store) and catches ones it shouldn't (local alloca stores). Default is now **always-instrument all loads/stores**; users opt out per-variable via `__attribute__((annotate("tm_local")))`.
+- `@llvm.var.annotation` has type-suffixed names (e.g., `llvm.var.annotation.p0.p0`) in LLVM 22 — use `starts_with("llvm.var.annotation")` for name matching, not exact equality.
+- **WT refactored to use common Lock**: `try_lock` now preserves incarnation bits (`INCARNATION_MASK << OWNED_BITS`), `get_incarnation()` reads from `OWNED_BITS` not `LOCK_BITS`. Safe for WBCTL/WBETL (incarnation always 0 there).
+- **WT tm_read/tm_write use manual byte merging**, not the `tm_read`/`tm_write` templates — because templates pass type-sized values to `read_value_from_addr`/`write_value_to_addr`, but WT works with full 8-byte words at aligned addresses. Sub-word wrappers (i1, i2, i4, f4) extract/merge bytes from the full word and pass aligned addresses to `read_word_wt`/`write_word_wt`.
 
 ## Relevant Files
+- `backends/TinySTM/tinystm_wt.hpp`: WT implementation — refactored to use shared `tinystm_common.hpp` infrastructure.
+- `backends/TinySTM/tinystm_common.hpp`: shared Lock/LockTable/Transaction templates, bit layout definitions, jmpbuf declaration.
+- `backends/TinySTM/tinystm_wbctl.hpp`: reference implementation for correct patterns.
+- `backends/TinySTM/tinystm_globals.hpp`: globals definitions for all three TinySTM backends.
 - `backends/runtimes/TinySTM_runtime.cpp`: `tm_malloc`/`tm_free` definitions (use `::operator new/delete`).
 - `backends/tm_alloc_overrides.hpp`: speculative alloc tracking + deferred free.
-- `llvm_tm_plugin/src/tm_local_vars.hpp`: `tracesFromTMGlobal` — now tracks `tm_malloc`/`tm_calloc`/`tm_realloc`.
-- `llvm_tm_plugin/src/tm_instrument_helpers.hpp`: `handleMallocFree` intercepts `_Znwm`/`_ZdlPv` etc.
-- `llvm_tm_plugin/src/tm_method_instrumentation.hpp`: `instrumentLoadsStoresInFunction` — runs `handleMallocFree` in clones.
-- `llvm_tm_plugin/src/TMInstrumentPass.cpp`: both pipelines (`tm-instrument` and `tm-instrument-inline`).
-- `llvm_tm_plugin/test/alloc_stress_test.cpp`: failing test with vec+map+erase+raw new workers.
+- `llvm_tm_plugin/src/tm_local_vars.hpp`: `tracesFromTMGlobal` — now tracks `tm_malloc`/`tm_calloc`/`tm_realloc`; also `collectTMLocalAllocas`/`isTMLocalVar` for tm_local support.
+- `llvm_tm_plugin/src/tm_instrument_helpers.hpp`: `handleMallocFree` intercepts `_Znwm`/`_ZdlPv` etc; `handleLoadStore` — always-instrument (skip only tm_local).
+- `llvm_tm_plugin/src/tm_method_instrumentation.hpp`: `instrumentLoadStoresInFunction` — always-instrument (skip only tm_local); `TMTracedArgs` kept for cloning/redirection decisions only.
+- `llvm_tm_plugin/src/TMInstrumentPass.cpp`: all three pipeline registrations.
+- `llvm_tm_plugin/src/opaque_safe_table.hpp`: known-safe opaque function table for `_ZSt`/`_ZNS`/`_ZNSt` functions.
+- `llvm_tm_plugin/test/test_tm_local.cpp`: new test verifying tm_local annotation.
 
 ## Next Steps
-1. Apply fix in `tracesFromTMGlobal` (skip stores of alloca addresses in alloca-stores search) and rebuild.
-2. Re-run `alloc_stress_test -v 2 -i 0 -e 0 -r 0 -m 0` with and without ASan to verify fix.
+1. Debug STMbench7 null-write crash and `ll_alloc_test` hang (pre-existing).
+2. Re-run `alloc_stress_test -v 2 -i 0 -e 0 -r 0 -m 0` with and without ASan to verify fix (the alloca-address-store skip in tracesFromTMGlobal).
 3. If fixed: re-run full test suite (types, nested, bank benchmarks).
 4. Run bank at all thread counts to confirm no regression.
-5. Debug STMbench7 null-write crash and `ll_alloc_test` hang (pre-existing).
+5. Run full bank comparison table with all TinySTM backends (WBCTL, WBETL, WT) at 1t/2t/4t/16t.
