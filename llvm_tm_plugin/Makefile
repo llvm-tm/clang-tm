@@ -35,6 +35,10 @@ PLUGIN_FLAGS_minimal       = -DNDEBUG -DDISABLE_SETJMP -DDISABLE_TM_READ_WRITE -
 # Debug variant (verbose output, assertions enabled)
 PLUGIN_FLAGS_debug         =
 
+# NOTE: The always-instrument default replaces the old force-all variant.
+# All variants now instrument every load/store unconditionally; only
+# tm_local-annotated variables are skipped.
+
 # Default alias
 $(BIN_DIR)/libTMInstrument.so: $(BIN_DIR)/libTMInstrument_release.so
 	cp $< $@
@@ -53,7 +57,7 @@ TEST_NAMES := test_types test_memtest test_threads test_persist test_retry test_
               test_custom_class test_stl_map_find test_tm_arg_trace \
               test_math_opaque test_vector_realloc \
               test_alloc_stress test_ll_alloc test_construct_tx_pattern \
-              test_nested_tx test_tm_simple test_tm_safe_map
+              test_nested_tx test_tm_simple test_tm_safe_map test_tm_local
 
 RACE_TEST_NAMES := test_task_queue_race test_parent_set_race test_counter_race
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))
@@ -80,6 +84,11 @@ $(OUT_DIR)/%.opt.ll: $(OUT_DIR)/%.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
 # Most tests: link with tm_runtime.cpp
 $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(RUNTIME_DIR)/tm_runtime.cpp | $(BIN_DIR)
 	$(CXX) $< $(RUNTIME_DIR)/tm_runtime.cpp -o $@ -pthread
+
+# stl_containers test: needs -tm-allow-opaque for std::string calls on TM-shared data
+$(OUT_DIR)/test_stl_containers.instr.bc: $(OUT_DIR)/test_stl_containers.bc $(TM_PLUGIN) | $(OUT_DIR)
+	$(OPT) -load-pass-plugin=$(TM_PLUGIN) -passes="$(TM_INSTRUMENT_PIPELINE)" \
+	  -tm-allow-opaque $< -o $@
 
 # Math opaque test: needs -tm-allow-opaque and -lm
 $(BIN_DIR)/test_math_opaque: $(OUT_DIR)/test_math_opaque.bc $(RUNTIME_DIR)/tm_runtime.cpp $(BIN_DIR)/libTMInstrument.so | $(BIN_DIR)

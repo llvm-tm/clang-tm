@@ -12,13 +12,13 @@
 
 #pragma once
 
-#include <cstring>
-#include <cstdio>
-#include <thread>
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
 #include <dlfcn.h>
-#include <pthread.h>
 #include <execinfo.h>
+#include <pthread.h>
+#include <thread>
 
 #include "tinystm_common.hpp"
 
@@ -136,7 +136,7 @@ abort_tx()  //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
-		tx->unlock_held_locks_and_clear();
+	tx->unlock_held_locks_and_clear();
 	tx->abort_count++;
 	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
 	// printf("THR%llu abort_tx (%i)\n", tx->id, tx->abort_count);
@@ -181,8 +181,8 @@ extend()    //
 	return true;
 }
 
-static bool                       //
-compareByAddr(                    //
+static bool        //
+compareByAddr(     //
     const void *a, //
     const void *b  //
 )
@@ -214,10 +214,10 @@ commit()    //
 			volatile word_t l = lock->get();
 			word_t owner = (l & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS;
 			if (owner != tx->id) {                // skip self-locks
-			while (!lock->try_lock(tx->id)) { // if lock is busy...
-				if (!extend()) {              // ... try to validate the read-set...
-					abort_tx();               // ... then, if fails, return to begin
-				}
+				while (!lock->try_lock(tx->id)) { // if lock is busy...
+					if (!extend()) {              // ... try to validate the read-set...
+						abort_tx();               // ... then, if fails, return to begin
+					}
 				}
 				tx->locks_held.push_back(lock); // keep track of locks
 			}
@@ -303,8 +303,12 @@ read_word_ctl(                                                //
 	uint64_t addr_bits = (uint64_t)addr;
 
 	if ((addr_bits >> 48) != 0) {
-		fprintf(stderr, "[R%llu] addr=%p sz=%d tx=%llu\n",
-		        rc, (void*)addr_bits, (int)sz, (unsigned long long)tx->id);
+		fprintf(stderr,
+		        "[R%llu] addr=%p sz=%d tx=%llu\n",
+		        rc,
+		        (void *)addr_bits,
+		        (int)sz,
+		        (unsigned long long)tx->id);
 		fflush(stderr);
 	}
 #endif
@@ -323,8 +327,7 @@ read_word_ctl(                                                //
 		// read would fall through to memory (which has stale/zero data) instead
 		// of seeing the TX's own buffered key.
 		if (sz == ValueType::UINT64 &&
-		    (w->second.type == ValueType::UINT8 ||
-		     w->second.type == ValueType::UINT16 ||
+		    (w->second.type == ValueType::UINT8 || w->second.type == ValueType::UINT16 ||
 		     w->second.type == ValueType::UINT32)) {
 			uint64_t merged = 0;
 			bool all_found = true;
@@ -445,8 +448,15 @@ write_word_ctl(                                               //
 
 	if (addr == nullptr || (uint64_t)addr < 0x1000) {
 		void *ret_addr = __builtin_return_address(0);
-		fprintf(stderr, "[BAD_WRITE] write_word_ctl: addr=%p sz=%d tx=%llu ws=%zu val=0x%llx ra=%p",
-		        addr, (int)sz, (unsigned long long)tx->id, tx->write_set.size(), (unsigned long long)val.u8, ret_addr);
+		fprintf(stderr,
+		        "[BAD_WRITE] write_word_ctl: addr=%p sz=%d tx=%llu ws=%zu val=0x%llx "
+		        "ra=%p",
+		        addr,
+		        (int)sz,
+		        (unsigned long long)tx->id,
+		        tx->write_set.size(),
+		        (unsigned long long)val.u8,
+		        ret_addr);
 		// Backtrace to find the exact instruction
 		void *bt[16];
 		int bt_sz = backtrace(bt, 16);
@@ -463,14 +473,18 @@ write_word_ctl(                                               //
 	static std::atomic<uint64_t> allw{0};
 	uint64_t aw = allw++;
 	if (aw < 200) {
-		fprintf(stderr, "[W_ALL#%llu] addr=%p sz=%d val=0x%llx ws=%zu addr_lo=%llx\n",
-			(unsigned long long)aw, addr, (int)sz,
-			(unsigned long long)val.u8, tx->write_set.size(),
-			(unsigned long long)((uint64_t)addr & 0xffff));
+		fprintf(stderr,
+		        "[W_ALL#%llu] addr=%p sz=%d val=0x%llx ws=%zu addr_lo=%llx\n",
+		        (unsigned long long)aw,
+		        addr,
+		        (int)sz,
+		        (unsigned long long)val.u8,
+		        tx->write_set.size(),
+		        (unsigned long long)((uint64_t)addr & 0xffff));
 		fflush(stderr);
 	}
 #endif
-	
+
 	// Found write-set entry at exact addr with matching type → update in place.
 	{
 		auto w = tx->write_set.find(addr);
@@ -481,7 +495,7 @@ write_word_ctl(                                               //
 			}
 			// Type mismatch at same addr.  If existing entry is UINT64 and this
 			// write is a sub-word type, merge the byte(s) into the wider entry.
-		if (w->second.type == ValueType::UINT64 && sz == ValueType::UINT8) {
+			if (w->second.type == ValueType::UINT64 && sz == ValueType::UINT8) {
 				uint64_t merged = (w->second.new_val.u8 & ~(uint64_t)0xFF);
 				merged |= (uint64_t)(val.u1);
 				w->second.new_val.u8 = merged;
@@ -533,10 +547,17 @@ write_word_ctl(                                               //
 	{
 		unsigned nbytes = 0;
 		switch (sz) {
-		case ValueType::UINT16: nbytes = 2; break;
-		case ValueType::UINT32: nbytes = 4; break;
-		case ValueType::UINT64: nbytes = 8; break;
-		default: break;
+		case ValueType::UINT16:
+			nbytes = 2;
+			break;
+		case ValueType::UINT32:
+			nbytes = 4;
+			break;
+		case ValueType::UINT64:
+			nbytes = 8;
+			break;
+		default:
+			break;
 		}
 		if (nbytes > 1) {
 			for (unsigned i = 0; i < nbytes; i++) {
@@ -592,8 +613,8 @@ write_word_ctl(                                               //
 			}
 		}
 
-		WriteLogEntry_wbctl w;          // Create a new entry in writeset
-		w.new_val = val;                // new val to write-back on commit
+		WriteLogEntry_wbctl w; // Create a new entry in writeset
+		w.new_val = val;       // new val to write-back on commit
 		w.type = sz;
 		w.addr = addr;
 		w.version = version;

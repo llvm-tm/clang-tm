@@ -34,8 +34,15 @@ __thread sigjmp_buf *jmpbuf;
 } // namespace tinystm
 #elif defined(DESIGN_WT)
 #include "tinystm_wt.hpp"
-// wt.hpp defines its own globals (g_locks, current_tx, rng, g_clock, etc.)
-namespace tinystm {
+namespace tinystm
+{
+LockTable<Lock_wt> g_locks_wt;
+__thread Transaction<ReadLogEntry_wt, WriteLogEntry_wt> *current_tx_wt = nullptr;
+thread_local bool rng_initialized = false;
+thread_local std::mt19937 rng;
+std::atomic<tinystm::word_t> reset_locks_thr{0};
+std::atomic<tinystm::word_t> g_clock{1};
+std::atomic<tinystm::word_t> thr_counter{1};
 std::atomic<uint64_t> g_tm_abort_count{0};
 __thread sigjmp_buf *jmpbuf;
 }

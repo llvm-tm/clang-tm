@@ -1,438 +1,296 @@
 /**
- * TinySTM - WRITE_THROUGH Full Implementation per Paper Specification
+ * TinySTM - WRITE_THROUGH per Paper Specification
  *
  * Features:
- * - Encounter-time locking
- * - Time-based design with global clock
- * - Versioned write-locks
- * - Double-check read protocol (lock → value → lock)
+ * - Encounter-time locking (lock on first write)
  * - Write-through strategy (direct writes to memory)
  * - Incarnation numbers for abort detection
- * - Multi-type support: 8, 16, 32, 64-bit integers, floats, doubles, pointers
+ * - Double-check read protocol (lock → value → lock)
+ * - Implements tinySTM's WT algorithm using the shared tinystm infrastructure
  */
 
 #pragma once
 
-#include <atomic>
-#include <cassert>
-#include <cstdint>
-#include <cstdio>
-#include <cstring>
-#include <thread>
-#include <unordered_map>
-#include <vector>
+#include <csetjmp>
+#include <csignal>
+#include <random>
 
-#define TINYSTM_ASSERT(cond, msg)                                                        \
-	do {                                                                                 \
-		if (!(cond)) {                                                                   \
-			fprintf(stderr,                                                              \
-			        "TINYSTM ASSERTION FAILED: %s (%s:%d)\n",                            \
-			        msg,                                                                 \
-			        __FILE__,                                                            \
-			        __LINE__);                                                           \
-			fflush(stderr);                                                              \
-			assert(cond);                                                                \
-		}                                                                                \
-	} while (0)
+#include "tinystm_common.hpp"
 
-#define TINYSTM_ASSERT_VALID_TX(tx, msg)                                                 \
-	TINYSTM_ASSERT((tx) != nullptr, msg);                                                \
-	TINYSTM_ASSERT((tx)->active, "Transaction must be active: " msg);                    \
-	TINYSTM_ASSERT(!(tx)->aborted, "Transaction must not be aborted: " msg)
+extern "C" {
+extern __thread int32_t tm_nested_call_counter;
+}
 
 namespace tinystm
 {
 
-constexpr const char *VERSION = "8.2.0-full-wt";
+constexpr const char *VERSION = "0.3.0-wt";
 
-using word_t = uintptr_t;
+/** -------------------------------------------------------
+  * Log entries.
+  * Both read- and write-sets are keyed by the aligned
+  * (8-byte) address.  All stored values are full 8-byte
+  * words — sub-word extraction/merging happens in the
+  * tm_read_i1/tm_write_i1 wrappers.
+  * ---------------------------------------------------- */
 
-constexpr unsigned LOCK_ARRAY_LOG_SIZE = 20;
-constexpr unsigned LOCK_ARRAY_SIZE = 1 << LOCK_ARRAY_LOG_SIZE;
-constexpr unsigned LOCK_EXTRA_BITS = 2;
-
-constexpr unsigned INCARNATION_BITS = 3;
-constexpr word_t LOCK_MASK = 1;
-constexpr word_t INCARNATION_MASK = 0x7;
-constexpr word_t VERSION_MASK = ~(LOCK_MASK | INCARNATION_MASK);
-
-enum class ValueType : uint8_t {
-	UINT8 = 1,
-	UINT16 = 2,
-	UINT32 = 4,
-	UINT64 = 8,
-	FLOAT = 16,
-	DOUBLE = 32,
-	POINTER = 64
-};
-
-struct ByteOffset {
-	word_t base_addr;
-	uint8_t offset;
-
-	ByteOffset()
-	    : base_addr(0),
-	      offset(0)
-	{
-	}
-	ByteOffset(word_t addr)
-	    : base_addr(addr & ~7),
-	      offset(addr & 7)
-	{
-	}
-};
-
-inline bool same_location(const ByteOffset &a, const ByteOffset &b)
-{
-	return a.base_addr == b.base_addr && a.offset == b.offset;
-}
-
-struct ReadLogEntry {
-	word_t observed_version;
+struct ReadLogEntry_wt {
+	volatile word_t observed_version;
 	word_t observed_incarnation;
-	word_t observed_word;
-	ValueType type;
+	any_type_t observed_val;
 };
 
-struct WriteLogEntry {
-	word_t old_word;
-	word_t new_word;
-	ValueType type;
-	word_t version;
-	word_t incarnation;
+struct WriteLogEntry_wt {
+	any_type_t old_val;
+	any_type_t new_val;
+	word_t version;     // version at lock-acquisition time
+	word_t incarnation; // incarnation at lock-acquisition time
 };
 
-class Transaction
+/** -------------------------------------------------------
+  * Lock class — inherits from the common Lock.
+  * No overrides needed; the base Lock now preserves
+  * incarnation in try_lock and has a correct
+  * get_incarnation().
+  * ---------------------------------------------------- */
+
+class Lock_wt : public Lock
 {
-public:
-	word_t start_version = 0;
-	word_t end_version = 0;
-	bool active = false;
-	bool aborted = false;
-	bool read_only = true;
-	int nesting = 1;
-	int abort_count = 0;
-	std::unordered_map<void *, ReadLogEntry> read_set;
-	std::unordered_map<void *, WriteLogEntry> write_set;
-	std::vector<word_t *> locks_held;
-
-	void reset()
-	{
-		start_version = 0;
-		end_version = 0;
-		active = false;
-		aborted = false;
-		read_only = true;
-		nesting = 1;
-		abort_count = 0;
-		clear();
-	}
-
-	void clear()
-	{
-		read_set.clear();
-		write_set.clear();
-		locks_held.clear();
-	}
 };
 
-class LockTable
+extern __thread Transaction<ReadLogEntry_wt, WriteLogEntry_wt> *current_tx_wt;
+extern LockTable<Lock_wt> g_locks_wt;
+
+/** -------------------------------------------------------
+  * Reset all lock versions (WT inherits Lock_wt from common
+  * Lock, so reset_versions() works).
+  * ---------------------------------------------------- */
+
+static void reset_locks() { g_locks_wt.reset_versions(); }
+
+/** -------------------------------------------------------
+  * Random backoff after repeated aborts.
+  * ---------------------------------------------------- */
+
+static void    //
+init_rand()    //
 {
-public:
-	struct Lock {
-		std::atomic<word_t> state{0};
-
-		word_t get() const { return state.load(std::memory_order_acquire); }
-
-		word_t get_version() const
-		{
-			return (state.load(std::memory_order_acquire) >>
-			        (LOCK_EXTRA_BITS + INCARNATION_BITS));
-		}
-
-		word_t get_incarnation() const
-		{
-			return (state.load(std::memory_order_acquire) >> LOCK_EXTRA_BITS) &
-			       INCARNATION_MASK;
-		}
-
-		bool is_locked() const
-		{
-			return (state.load(std::memory_order_acquire) & LOCK_MASK) != 0;
-		}
-
-		bool is_locked_by(word_t tx_id) const
-		{
-			word_t s = state.load(std::memory_order_acquire);
-			return (s & LOCK_MASK) &&
-			       ((s >> (LOCK_EXTRA_BITS + INCARNATION_BITS)) == tx_id);
-		}
-
-		bool try_lock(word_t tx_id, word_t incarnation)
-		{
-			word_t expected = 0;
-			word_t desired = (tx_id << (LOCK_EXTRA_BITS + INCARNATION_BITS)) |
-			                 (incarnation << LOCK_EXTRA_BITS) | LOCK_MASK;
-			return state.compare_exchange_strong(expected,
-			                                     desired,
-			                                     std::memory_order_acquire,
-			                                     std::memory_order_acquire);
-		}
-
-		void unlock(word_t new_version, word_t new_incarnation)
-		{
-			word_t desired = (new_version << (LOCK_EXTRA_BITS + INCARNATION_BITS)) |
-			                 (new_incarnation << LOCK_EXTRA_BITS);
-			state.store(desired, std::memory_order_release);
-		}
-
-		void inc_abort(word_t current_incarnation)
-		{
-			word_t current = state.load(std::memory_order_acquire);
-			word_t new_incarnation = ((current >> LOCK_EXTRA_BITS) & INCARNATION_MASK) +
-			                         1;
-			if (new_incarnation > INCARNATION_MASK) {
-				new_incarnation = 0;
-			}
-			word_t version = (current >> (LOCK_EXTRA_BITS + INCARNATION_BITS));
-			word_t desired = (version << (LOCK_EXTRA_BITS + INCARNATION_BITS)) |
-			                 (new_incarnation << LOCK_EXTRA_BITS);
-			state.store(desired, std::memory_order_release);
-		}
-	};
-
-	Lock locks[LOCK_ARRAY_SIZE];
-
-public:
-	Lock *get(word_t addr)
-	{
-		return &locks[(addr >> LOCK_EXTRA_BITS) & (LOCK_ARRAY_SIZE - 1)];
+	if (!rng_initialized) {
+		std::random_device rd;
+		rng.seed(rd());
+		rng_initialized = true;
 	}
-};
-
-typedef LockTable::Lock Lock;
-
-inline LockTable g_locks;
-inline std::atomic<word_t> g_clock{1};
-
-inline thread_local Transaction *current_tx = nullptr;
-
-inline word_t get_clock() { return g_clock.load(std::memory_order_acquire); }
-
-inline word_t increment_clock()
-{
-	return g_clock.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
-inline void init() { g_clock.store(1, std::memory_order_relaxed); }
-
-inline void exit() {} // no-op, kept for compatibility with runtime wrapper
-
-inline void init_thread()
+static void      //
+random_backoff() //
 {
-	if (!current_tx) {
-		current_tx = new Transaction();
+	if (!rng_initialized) {
+		init_rand();
 	}
-	current_tx->reset();
+	std::exponential_distribution<> dist(
+	    (double)1 / (double)(current_tx_wt->abort_count + 1));
+	int delay = std::min(dist(rng), 1e5);
+	std::this_thread::sleep_for(std::chrono::microseconds(delay));
 }
 
-inline void exit_thread()
+/** -------------------------------------------------------
+  * Thread init/destroy.
+  * ---------------------------------------------------- */
+
+inline void   //
+init_thread() //
 {
-	if (!current_tx)
+	if (!current_tx_wt) {
+		current_tx_wt = new Transaction<ReadLogEntry_wt, WriteLogEntry_wt>();
+		current_tx_wt->id = thr_counter.fetch_add(1, std::memory_order_acq_rel);
+	}
+	current_tx_wt->reset();
+}
+
+inline void   //
+exit_thread() //
+{
+	if (!current_tx_wt)
 		return;
-	delete current_tx;
-	current_tx = nullptr;
+	delete current_tx_wt;
+	current_tx_wt = nullptr;
 }
 
-inline bool begin()
+/** -------------------------------------------------------
+  * begin / abort / commit
+  * ---------------------------------------------------- */
+
+inline bool //
+begin()     //
 {
-	init_thread();
+	auto *tx = current_tx_wt;
 
-	auto *tx = current_tx;
-	TINYSTM_ASSERT(tx != nullptr, "begin: tx is null");
-
-	if (tx->active) {
-		if (tx->aborted) {
-			for (auto &it : tx->write_set) {
-				auto &w = it.second;
-				word_t *addr = (word_t *)it.first;
-				*addr = w.old_word;
-			}
-			for (word_t *lock_ptr : tx->locks_held) {
-				Lock *lock = (Lock *)lock_ptr;
-				lock->unlock(0, 0);
-			}
-			tx->clear();
-			tx->aborted = false;
-			tx->start_version = get_clock();
-			tx->end_version = tx->start_version;
-			TINYSTM_ASSERT(tx->start_version > 0,
-			               "begin: invalid start version after abort");
-		}
-		tx->nesting++;
+	TINYSTM_ASSERT(tx, "begin: tx is null");
+	if (tx->active)
 		return true;
-	}
 
+	tx->clear();
 	tx->start_version = get_clock();
 	tx->end_version = tx->start_version;
 	tx->active = true;
-	tx->aborted = false;
 	tx->read_only = true;
-	tx->clear();
-	TINYSTM_ASSERT(tx->start_version > 0, "begin: invalid start version");
-	TINYSTM_ASSERT(tx->end_version >= tx->start_version, "begin: invalid validity range");
+	tx->abort_count = 0;
 
 	return true;
 }
 
-inline void abort_tx()
+inline void //
+abort_tx()  //
 {
-	auto *tx = current_tx;
-	TINYSTM_ASSERT(tx != nullptr, "abort_tx: tx is null");
+	auto *tx = current_tx_wt;
 
+	TINYSTM_ASSERT(tx, "abort_tx: tx is null");
+	TINYSTM_ASSERT(tx->active, "abort_tx: tx not active");
+
+	// Restore old values from write-set
 	for (auto &it : tx->write_set) {
-		auto &w = it.second;
-		word_t *addr = (word_t *)it.first;
-		*addr = w.old_word;
+		write_value_to_addr(it.first, it.second.old_val, ValueType::UINT64);
 	}
 
-	for (word_t *lock_addr : tx->locks_held) {
-		Lock *lock = g_locks.get((word_t)lock_addr);
-		TINYSTM_ASSERT(lock != nullptr, "abort_tx: lock is null");
-		lock->inc_abort(tx->abort_count);
+	// Release locks with incarnation-increment
+	for (Lock *l : tx->locks_held) {
+		static_cast<Lock_wt *>(l)->inc_abort(0);
 	}
-	tx->locks_held.clear();
 
-	tx->aborted = true;
+	tx->clear();
+	tx->active = false;
 	tx->abort_count++;
-	TINYSTM_ASSERT(tx->abort_count >= 0 && tx->abort_count < 1000,
-	               "abort_tx: excessive abort count");
+	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
+
+	if (tx->abort_count > 5) {
+		random_backoff();
+	}
+
+	siglongjmp(*jmpbuf, 1);
+	TINYSTM_ASSERT(false, "Did not jump");
 }
 
-inline bool commit()
+inline bool //
+commit()    //
 {
-	auto *tx = current_tx;
-	TINYSTM_ASSERT(tx != nullptr, "commit: tx is null");
-
-	if (!tx || !tx->active) {
-		return false;
-	}
-
-	if (tx->nesting > 1) {
-		tx->nesting--;
-		return true;
-	}
-
-	TINYSTM_ASSERT(tx->start_version > 0, "commit: invalid start version");
-	TINYSTM_ASSERT(tx->end_version >= tx->start_version,
-	               "commit: invalid validity range");
-
-	if (tx->aborted) {
-		abort_tx();
-		tx->active = false;
-		return false;
-	}
-
+	auto *tx = current_tx_wt;
 	word_t commit_version = 0;
 
-	if (!tx->read_only && !tx->write_set.empty()) {
-		TINYSTM_ASSERT(tx->write_set.size() > 0, "commit: write_set empty for update tx");
-		commit_version = increment_clock();
+	TINYSTM_ASSERT(tx, "commit: tx is null");
+	TINYSTM_ASSERT(tx->active, "commit: tx not active");
 
+	if (!tx->read_only && !tx->write_set.empty()) {
+
+		commit_version = increment_clock(tx->id);
+		if (commit_version < tx->end_version) {
+			abort_tx();
+		}
+
+		// Validate read-set — detect concurrent commits between read and write
 		if (commit_version > tx->start_version + 1) {
-			word_t tx_id = (word_t)tx;
 			for (auto &it : tx->read_set) {
 				auto &r = it.second;
 				ByteOffset bo((word_t)it.first);
-				Lock *lock = g_locks.get(bo.base_addr);
-				TINYSTM_ASSERT(lock != nullptr, "commit: lock is null");
+				Lock_wt *lock = &g_locks_wt.get(bo.base_addr);
 
-				if (lock->is_locked_by(tx_id)) {
-					continue;
-				}
+				word_t l = lock->get();
+				word_t owner = (l & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS;
+				bool is_locked = (l & OWNED_MASK) != 0;
+				word_t current_version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
+				word_t current_incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
 
-				word_t current_version = lock->get_version();
-				word_t current_incarnation = lock->get_incarnation();
-
-				if (current_version != r.observed_version ||
-				    current_incarnation != r.observed_incarnation) {
+				if (is_locked && owner != tx->id) {
 					abort_tx();
-					tx->active = false;
-					return false;
+				}
+				if (!is_locked &&
+				    (current_version != r.observed_version ||
+				     current_incarnation != r.observed_incarnation)) {
+					abort_tx();
 				}
 			}
 		}
 
+		// Release write-locks with the commit version
 		for (auto &it : tx->write_set) {
-			auto &w = it.second;
 			ByteOffset bo((word_t)it.first);
-			Lock *lock = g_locks.get(bo.base_addr);
-			lock->unlock(commit_version, 0);
+			Lock_wt *lock = &g_locks_wt.get(bo.base_addr);
+			if (lock->is_locked_by(tx->id)) {
+				lock->unlock_with_version(tx->id, commit_version);
+			}
 		}
 	}
 
-	tx->clear();
-
-	tx->active = false;
+	tx->reset();
 	return true;
 }
 
-inline bool active() { return current_tx && current_tx->active; }
+/** -------------------------------------------------------
+  * read_word / write_word
+  *
+  * Both functions work at the 8-byte-word granularity.
+  * The `addr` parameter MUST be the ALIGNED (8-byte) address.
+  * Sub-word extraction/merging is the caller's responsibility
+  * (see tm_read_i1/tm_write_i1 below).
+  * ---------------------------------------------------- */
 
-inline bool aborted() { return current_tx && current_tx->aborted; }
-
-__attribute__((noinline)) static word_t read_word_wt(Transaction *tx,
-                                                     volatile word_t *addr,
-                                                     ValueType type)
+static any_type_t                                              //
+read_word_wt(                                                  //
+    Transaction<ReadLogEntry_wt, WriteLogEntry_wt> *tx,        //
+    void *addr,                                                //
+    ValueType /*sz*/                                           //
+)
 {
-	if (!tx || !tx->active)
-		return *addr;
+	std::atomic_signal_fence(std::memory_order_seq_cst);
 
-	ByteOffset bo((word_t)addr);
-	Lock *lock = g_locks.get(bo.base_addr);
+	TINYSTM_ASSERT(tx, "read_word_wt: tx is null");
+	TINYSTM_ASSERT(tx->active, "read_word_wt: tx not active");
 
-	auto w = tx->write_set.find((void *)addr);
-	if (w != tx->write_set.end()) {
-		return w->second.new_word;
+	// Write-set lookup — return the buffered new value if we wrote here
+	{
+		auto w = tx->write_set.find(addr);
+		if (w != tx->write_set.end()) {
+			return w->second.new_val;
+		}
 	}
 
-	if (lock->is_locked_by((word_t)tx)) {
-		auto w2 = tx->write_set.find((void *)addr);
-		if (w2 != tx->write_set.end())
-			return w2->second.new_word;
-		return *addr;
+	Lock_wt *lock = &g_locks_wt.get(ByteOffset((word_t)addr).base_addr);
+
+	if (lock->is_locked_by(tx->id)) {
+		// Self-locked: read directly (write-through => memory has our value)
+		return read_value_from_addr(addr, ValueType::UINT64);
 	}
 
-	word_t l = lock->get();
-
+	// Double-check protocol
+	volatile word_t l = lock->get();
 	while (true) {
-		if (lock->is_locked()) {
-			l = lock->get();
-			continue;
+		// Locked by another — abort immediately (no spinning)
+		if ((l & OWNED_MASK) != 0) {
+			abort_tx();
 		}
 
-		word_t value = *addr;
-		word_t l2 = lock->get();
+		word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
+		word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
+		volatile any_type_t val = read_value_from_addr(addr, ValueType::UINT64);
+		volatile word_t l2 = lock->get();
 
 		if (l != l2) {
 			l = l2;
 			continue;
 		}
 
-		word_t version = lock->get_version();
-		word_t incarnation = lock->get_incarnation();
-
 		if (version > tx->end_version) {
+			// Version-extension (same pattern as WBCTL)
 			if (tx->read_only) {
-				tx->aborted = true;
-				return value;
+				abort_tx();
 			}
 
 			bool extended = false;
 			for (auto &it : tx->read_set) {
 				auto &r = it.second;
-				Lock *rl = g_locks.get(ByteOffset((word_t)it.first).base_addr);
-				word_t rv = rl->get_version();
+				Lock_wt *rl = &g_locks_wt.get(
+				    ByteOffset((word_t)it.first).base_addr);
+				word_t rv = (rl->get() & (VERSION_MASK << META_BITS)) >> META_BITS;
 				if (rv > tx->start_version) {
 					extended = true;
 					break;
@@ -440,243 +298,368 @@ __attribute__((noinline)) static word_t read_word_wt(Transaction *tx,
 			}
 
 			if (!extended) {
-				tx->aborted = true;
-				return value;
-			}
-
-			tx->end_version = get_clock();
-			if (tx->end_version < version) {
-				tx->aborted = true;
-				return value;
+				// Try full extend or abort
+				word_t last_version = get_clock();
+				bool valid = true;
+				for (auto &it : tx->read_set) {
+					auto &r = it.second;
+					Lock_wt *rl = &g_locks_wt.get(
+					    ByteOffset((word_t)it.first).base_addr);
+					word_t lv = rl->get();
+					word_t rv = (lv & (VERSION_MASK << META_BITS)) >> META_BITS;
+					if (rv > r.observed_version) {
+						valid = false;
+						break;
+					}
+				}
+				if (!valid) {
+					abort_tx();
+				}
+				tx->end_version = last_version;
+				if (tx->end_version < version) {
+					abort_tx();
+				}
+			} else {
+				tx->end_version = get_clock();
+				if (tx->end_version < version) {
+					abort_tx();
+				}
 			}
 		}
 
-		ReadLogEntry r;
+		any_type_t result = {.u8 = val.u8};
+
+		ReadLogEntry_wt r;
 		r.observed_version = version;
 		r.observed_incarnation = incarnation;
-		r.observed_word = value;
-		r.type = type;
-		tx->read_set.insert(std::pair((void *)addr, r));
+		r.observed_val = result;
+		tx->read_set.insert(std::pair(addr, r));
 
-		return value;
+		return result;
 	}
 }
 
-__attribute__((noinline)) static void write_word_wt(Transaction *tx,
-                                                    volatile word_t *addr,
-                                                    word_t value,
-                                                    ValueType type)
+static void                                                    //
+write_word_wt(                                                 //
+    Transaction<ReadLogEntry_wt, WriteLogEntry_wt> *tx,        //
+    void *addr,                                                //
+    any_type_t val,                                            //
+    ValueType /*sz*/                                           //
+)
 {
-	if (!tx || !tx->active) {
-		*addr = value;
-		return;
-	}
+	std::atomic_signal_fence(std::memory_order_seq_cst);
 
-	bool was_read_only = tx->read_only;
+	TINYSTM_ASSERT(tx, "write_word_wt: tx is null");
+	TINYSTM_ASSERT(tx->active, "write_word_wt: tx not active");
+
 	tx->read_only = false;
 
-	ByteOffset bo((word_t)addr);
-	Lock *lock = g_locks.get(bo.base_addr);
-
-	auto w = tx->write_set.find((void *)addr);
-	if (w != tx->write_set.end()) {
-		w->second.new_word = value;
-		*addr = value;
-		return;
+	// Existing write-set entry at the same aligned address → update in place
+	{
+		auto w = tx->write_set.find(addr);
+		if (w != tx->write_set.end()) {
+			w->second.new_val = val;
+			write_value_to_addr(addr, val, ValueType::UINT64);
+			return;
+		}
 	}
 
-	word_t l = lock->get();
+	Lock_wt *lock = &g_locks_wt.get(ByteOffset((word_t)addr).base_addr);
+	volatile word_t l = lock->get();
 
-	if (!lock->is_locked()) {
-		word_t version = lock->get_version();
-		word_t incarnation = lock->get_incarnation();
+	if ((l & OWNED_MASK) == 0) {
+		// Lock is free — try to acquire
+		word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
+		word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
 
-		WriteLogEntry w;
-		w.old_word = *addr;
-		w.new_word = value;
-		w.type = type;
+		if (lock->try_lock(tx->id)) {
+			// Acquired — save old value and write through
+			any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
+
+			WriteLogEntry_wt w;
+			w.old_val = old_val;
+			w.new_val = val;
+			w.version = version;
+			w.incarnation = incarnation;
+			tx->write_set.insert(std::pair(addr, w));
+			tx->locks_held.push_back(lock);
+
+			write_value_to_addr(addr, val, ValueType::UINT64);
+		} else if (lock->is_locked_by(tx->id)) {
+			// CAS failed but the lock is ours — another sub-address in this
+			// TX acquired the same lock between our l check and the CAS.
+			any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
+
+			WriteLogEntry_wt w;
+			w.old_val = old_val;
+			w.new_val = val;
+			w.version = version;
+			w.incarnation = incarnation;
+			tx->write_set.insert(std::pair(addr, w));
+
+			write_value_to_addr(addr, val, ValueType::UINT64);
+		} else {
+			abort_tx();
+		}
+	} else if (lock->is_locked_by(tx->id)) {
+		// Lock already held by us
+		word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
+		word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
+		any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
+
+		WriteLogEntry_wt w;
+		w.old_val = old_val;
+		w.new_val = val;
 		w.version = version;
 		w.incarnation = incarnation;
-		tx->write_set.insert(std::pair((void *)addr, w));
+		tx->write_set.insert(std::pair(addr, w));
 
-		word_t tx_id = (word_t)tx;
-		if (lock->try_lock(tx_id, 0)) {
-			*addr = value;
-			tx->locks_held.push_back((word_t *)lock);
-		} else if (lock->is_locked_by(tx_id)) {
-			*addr = value;
-		} else {
-			tx->aborted = true;
-		}
-	} else if (lock->is_locked_by((word_t)tx)) {
-		auto w2 = tx->write_set.find((void *)addr);
-		if (w2 != tx->write_set.end()) {
-			w2->second.new_word = value;
-		}
-		*addr = value;
+		write_value_to_addr(addr, val, ValueType::UINT64);
 	} else {
-		tx->aborted = true;
+		abort_tx();
 	}
 }
 
-inline uint8_t tm_read_i1(volatile uint8_t *addr)
+/** -------------------------------------------------------
+  * tm_read / tm_write wrappers.
+  *
+  * Sub-word types (i1, i2) merge/extract bytes from the
+  * full 8-byte word at the aligned address.
+  * ---------------------------------------------------- */
+
+inline uint8_t    //
+tm_read_i1(       //
+    uint8_t *addr //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active)
 		return *addr;
 
-	word_t word = read_word_wt(tx,
-	                           (volatile word_t *)((word_t)addr & ~7),
-	                           ValueType::UINT8);
+	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
+	any_type_t word = read_word_wt(tx, word_addr, ValueType::UINT8);
 	uint8_t off = (word_t)addr & 7;
-	return (word >> (off * 8)) & 0xFF;
+	return (word.u8 >> (off * 8)) & 0xFF;
 }
 
-inline uint16_t tm_read_i2(volatile uint16_t *addr)
+inline uint16_t    //
+tm_read_i2(        //
+    uint16_t *addr //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active)
 		return *addr;
 
-	word_t word = read_word_wt(tx,
-	                           (volatile word_t *)((word_t)addr & ~7),
-	                           ValueType::UINT16);
+	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
+	any_type_t word = read_word_wt(tx, word_addr, ValueType::UINT16);
 	uint8_t off = (word_t)addr & 7;
-	return (word >> (off * 8)) & 0xFFFF;
+	return (word.u8 >> (off * 8)) & 0xFFFF;
 }
 
-inline uint32_t tm_read_i4(volatile uint32_t *addr)
+inline uint32_t    //
+tm_read_i4(        //
+    uint32_t *addr //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active)
 		return *addr;
 
-	return (uint32_t)read_word_wt(tx, (volatile word_t *)addr, ValueType::UINT32);
+	any_type_t w = read_word_wt(tx, (void *)((word_t)addr & ~(word_t)7), ValueType::UINT32);
+	uint8_t off = (word_t)addr & 7;
+	return (uint32_t)(w.u8 >> (off * 8));
 }
 
-inline uint64_t tm_read_i8(volatile uint64_t *addr)
+inline uint64_t    //
+tm_read_i8(        //
+    uint64_t *addr //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active)
 		return *addr;
 
-	return (uint64_t)read_word_wt(tx, (volatile word_t *)addr, ValueType::UINT64);
+	return read_word_wt(tx, (void *)addr, ValueType::UINT64).u8;
 }
 
-inline float tm_read_f4(volatile float *addr)
+inline float    //
+tm_read_f4(     //
+    float *addr //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active)
 		return *addr;
 
-	word_t bits = read_word_wt(tx, (volatile word_t *)addr, ValueType::FLOAT);
+	any_type_t w = read_word_wt(tx, (void *)((word_t)addr & ~(word_t)7), ValueType::FLOAT);
+	uint8_t off = (word_t)addr & 7;
+	uint32_t bits = (uint32_t)(w.u8 >> (off * 8));
 	return *(float *)&bits;
 }
 
-inline double tm_read_f8(volatile double *addr)
+inline double    //
+tm_read_f8(      //
+    double *addr //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active)
 		return *addr;
 
-	word_t bits = read_word_wt(tx, (volatile word_t *)addr, ValueType::DOUBLE);
-	return *(double *)&bits;
+	any_type_t w = read_word_wt(tx, (void *)addr, ValueType::DOUBLE);
+	return w.f8;
 }
 
-inline void *tm_read_ptr(volatile void **addr)
+inline void *   //
+tm_read_ptr(    //
+    void **addr //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active)
-		return (void *)*addr;
+		return *addr;
 
-	return (void *)read_word_wt(tx, (volatile word_t *)addr, ValueType::POINTER);
+	any_type_t w = read_word_wt(tx, (void *)addr, ValueType::POINTER);
+	return w.ptr;
 }
 
-inline void tm_write_i1(volatile uint8_t *addr, uint8_t val)
+inline void        //
+tm_write_i1(       //
+    uint8_t *addr, //
+    uint8_t val    //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active) {
 		*addr = val;
 		return;
 	}
 
-	word_t *word_addr = (word_t *)((word_t)addr & ~7);
-	word_t word = *word_addr;
+	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
 	uint8_t off = (word_t)addr & 7;
-	word_t mask = (0xFFULL << (off * 8));
+	word_t mask = (word_t)0xFF << (off * 8);
+	// NOTE: we read the current memory word directly (not through
+	// read_word_wt) because the write-through ensures the latest
+	// value is in memory.  The read_word_wt path would add a
+	// read-set entry that we don't want (we're about to write).
+	word_t word = *(volatile word_t *)word_addr;
 	word = (word & ~mask) | ((word_t)val << (off * 8));
-	write_word_wt(tx, (volatile word_t *)word_addr, word, ValueType::UINT8);
+	any_type_t w = {.u8 = word};
+	write_word_wt(tx, word_addr, w, ValueType::UINT8);
 }
 
-inline void tm_write_i2(volatile uint16_t *addr, uint16_t val)
+inline void         //
+tm_write_i2(        //
+    uint16_t *addr, //
+    uint16_t val    //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active) {
 		*addr = val;
 		return;
 	}
 
-	word_t *word_addr = (word_t *)((word_t)addr & ~7);
-	word_t word = *word_addr;
+	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
 	uint8_t off = (word_t)addr & 7;
-	word_t mask = (0xFFFFULL << (off * 8));
+	word_t mask = (word_t)0xFFFF << (off * 8);
+	word_t word = *(volatile word_t *)word_addr;
 	word = (word & ~mask) | ((word_t)val << (off * 8));
-	write_word_wt(tx, (volatile word_t *)word_addr, word, ValueType::UINT16);
+	any_type_t w = {.u8 = word};
+	write_word_wt(tx, word_addr, w, ValueType::UINT16);
 }
 
-inline void tm_write_i4(volatile uint32_t *addr, uint32_t val)
+inline void         //
+tm_write_i4(        //
+    uint32_t *addr, //
+    uint32_t val    //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active) {
 		*addr = val;
 		return;
 	}
 
-	write_word_wt(tx, (volatile word_t *)addr, (word_t)val, ValueType::UINT32);
+	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
+	uint8_t off = (word_t)addr & 7;
+	word_t mask = (word_t)0xFFFFFFFF << (off * 8);
+	word_t word = *(volatile word_t *)word_addr;
+	word = (word & ~mask) | ((word_t)val << (off * 8));
+	any_type_t w = {.u8 = word};
+	write_word_wt(tx, word_addr, w, ValueType::UINT32);
 }
 
-inline void tm_write_i8(volatile uint64_t *addr, uint64_t val)
+inline void         //
+tm_write_i8(        //
+    uint64_t *addr, //
+    uint64_t val    //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active) {
 		*addr = val;
 		return;
 	}
 
-	write_word_wt(tx, (volatile word_t *)addr, (word_t)val, ValueType::UINT64);
+	any_type_t w = {.u8 = val};
+	write_word_wt(tx, (void *)addr, w, ValueType::UINT64);
 }
 
-inline void tm_write_f4(volatile float *addr, float val)
+inline void      //
+tm_write_f4(     //
+    float *addr, //
+    float val    //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active) {
 		*addr = val;
 		return;
 	}
 
-	write_word_wt(tx, (volatile word_t *)addr, *(word_t *)&val, ValueType::FLOAT);
+	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
+	uint8_t off = (word_t)addr & 7;
+	word_t mask = (word_t)0xFFFFFFFF << (off * 8);
+	word_t word = *(volatile word_t *)word_addr;
+	word_t fbits;
+	memcpy(&fbits, &val, sizeof(float));
+	word = (word & ~mask) | (fbits << (off * 8));
+	any_type_t w = {.u8 = word};
+	write_word_wt(tx, word_addr, w, ValueType::FLOAT);
 }
 
-inline void tm_write_f8(volatile double *addr, double val)
+inline void       //
+tm_write_f8(      //
+    double *addr, //
+    double val    //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active) {
 		*addr = val;
 		return;
 	}
 
-	write_word_wt(tx, (volatile word_t *)addr, *(word_t *)&val, ValueType::DOUBLE);
+	any_type_t w = {.f8 = val};
+	write_word_wt(tx, (void *)addr, w, ValueType::DOUBLE);
 }
 
-inline void tm_write_ptr(volatile void **addr, void *val)
+inline void      //
+tm_write_ptr(    //
+    void **addr, //
+    void *val    //
+)
 {
-	auto *tx = current_tx;
+	auto *tx = current_tx_wt;
 	if (!tx || !tx->active) {
 		*addr = val;
 		return;
 	}
 
-	write_word_wt(tx, (volatile word_t *)addr, (word_t)val, ValueType::POINTER);
+	any_type_t w = {.ptr = val};
+	write_word_wt(tx, (void *)addr, w, ValueType::POINTER);
 }
 
 } // namespace tinystm
