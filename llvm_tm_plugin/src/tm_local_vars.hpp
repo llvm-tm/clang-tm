@@ -238,6 +238,7 @@ static bool originatesFromLocal(Value *Ptr,
 // are local allocas initialized from TM globals via begin().
 static bool tracesFromTMGlobal(Value *V, Module &M,
                                SmallPtrSetImpl<const AllocaInst *> *VisitedAllocas = nullptr,
+                               SmallPtrSetImpl<const PHINode *> *VisitedPHIs = nullptr,
                                int Depth = 0)
 {
   if (Depth > 15) return false;
@@ -252,15 +253,15 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
   // GEP: follow the pointer operand
   if (auto *GEP = dyn_cast<GetElementPtrInst>(V))
     return tracesFromTMGlobal(const_cast<Value *>(GEP->getPointerOperand()),
-                              M, VisitedAllocas, Depth + 1);
+                              M, VisitedAllocas, VisitedPHIs, Depth + 1);
   if (auto *GEPOp = dyn_cast<GEPOperator>(V))
     return tracesFromTMGlobal(const_cast<Value *>(GEPOp->getPointerOperand()),
-                              M, VisitedAllocas, Depth + 1);
+                              M, VisitedAllocas, VisitedPHIs, Depth + 1);
 
   // Load: follow to the address being loaded from
   if (auto *Load = dyn_cast<LoadInst>(V))
     return tracesFromTMGlobal(const_cast<Value *>(Load->getPointerOperand()),
-                              M, VisitedAllocas, Depth + 1);
+                              M, VisitedAllocas, VisitedPHIs, Depth + 1);
 
   // Call/Invoke returning a pointer (e.g. begin()). If any argument traces to
   // a TM global, the return value inherits that.
@@ -283,28 +284,34 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
       }
     }
     for (unsigned i = 0; i < Call->arg_size(); i++)
-      if (tracesFromTMGlobal(Call->getArgOperand(i), M, VisitedAllocas, Depth + 1))
+      if (tracesFromTMGlobal(Call->getArgOperand(i), M, VisitedAllocas, VisitedPHIs, Depth + 1))
         return true;
     return false;
   }
 
-  // PHI: any incoming value traces to a TM global
+  // PHI: any incoming value traces to a TM global (with cycle detection)
   if (auto *Phi = dyn_cast<PHINode>(V)) {
+    if (VisitedPHIs && VisitedPHIs->count(Phi))
+      return false;
+    SmallPtrSet<const PHINode *, 4> LocalVisitedPHIs;
+    if (!VisitedPHIs)
+      VisitedPHIs = &LocalVisitedPHIs;
+    VisitedPHIs->insert(Phi);
     for (Value *Inc : Phi->incoming_values())
-      if (tracesFromTMGlobal(Inc, M, VisitedAllocas, Depth + 1))
+      if (tracesFromTMGlobal(Inc, M, VisitedAllocas, VisitedPHIs, Depth + 1))
         return true;
     return false;
   }
 
   // Select: either operand traces to a TM global
   if (auto *Sel = dyn_cast<SelectInst>(V))
-    return tracesFromTMGlobal(Sel->getTrueValue(), M, VisitedAllocas, Depth + 1) ||
-           tracesFromTMGlobal(Sel->getFalseValue(), M, VisitedAllocas, Depth + 1);
+    return tracesFromTMGlobal(Sel->getTrueValue(), M, VisitedAllocas, VisitedPHIs, Depth + 1) ||
+           tracesFromTMGlobal(Sel->getFalseValue(), M, VisitedAllocas, VisitedPHIs, Depth + 1);
 
   // PtrToInt: the integer came from a pointer (common for iterator storage
   // in allocas where the pointer is stored as an integer via ptrtoint).
   if (auto *PTI = dyn_cast<PtrToIntInst>(V))
-    return tracesFromTMGlobal(PTI->getPointerOperand(), M, VisitedAllocas, Depth + 1);
+    return tracesFromTMGlobal(PTI->getPointerOperand(), M, VisitedAllocas, VisitedPHIs, Depth + 1);
 
   // IntToPtr: the integer operand might come from PtrToInt of a pointer
   // (common for aliasing barriers inserted by LLVM).  Strip through to the
@@ -313,7 +320,7 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
   if (auto *ITP = dyn_cast<IntToPtrInst>(V)) {
     Value *Src = ITP->getOperand(0);
     if (auto *PTI = dyn_cast<PtrToIntInst>(Src))
-      return tracesFromTMGlobal(PTI->getPointerOperand(), M, VisitedAllocas, Depth + 1);
+      return tracesFromTMGlobal(PTI->getPointerOperand(), M, VisitedAllocas, VisitedPHIs, Depth + 1);
     return false;
   }
 
@@ -322,7 +329,7 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
   //     %ptr = extractvalue %struct %agg, 0
   //     load i32, ptr %ptr
   if (auto *EV = dyn_cast<ExtractValueInst>(V))
-    return tracesFromTMGlobal(EV->getAggregateOperand(), M, VisitedAllocas, Depth + 1);
+    return tracesFromTMGlobal(EV->getAggregateOperand(), M, VisitedAllocas, VisitedPHIs, Depth + 1);
 
   // InsertValueInst: the aggregate value might contain a TM-traced pointer
   // that was inserted into a struct field.  Check both the base aggregate
@@ -330,9 +337,9 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
   //     %agg = insertvalue %struct undef, ptr %tm_ptr, 0
   //     store %struct %agg, ptr %alloca
   if (auto *IV = dyn_cast<InsertValueInst>(V)) {
-    if (tracesFromTMGlobal(IV->getAggregateOperand(), M, VisitedAllocas, Depth + 1))
+    if (tracesFromTMGlobal(IV->getAggregateOperand(), M, VisitedAllocas, VisitedPHIs, Depth + 1))
       return true;
-    return tracesFromTMGlobal(IV->getInsertedValueOperand(), M, VisitedAllocas, Depth + 1);
+    return tracesFromTMGlobal(IV->getInsertedValueOperand(), M, VisitedAllocas, VisitedPHIs, Depth + 1);
   }
 
   // Function argument: follow through call sites to check what's actually
@@ -348,7 +355,7 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
       if (Call->getCalledFunction() != Parent) continue;
       Value *ActualArg = Call->getArgOperand(Arg->getArgNo());
       if (!ActualArg) continue;
-      if (tracesFromTMGlobal(ActualArg, M, VisitedAllocas, Depth + 1))
+      if (tracesFromTMGlobal(ActualArg, M, VisitedAllocas, VisitedPHIs, Depth + 1))
         return true;
     }
     return false;
@@ -393,7 +400,7 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
               // address, not a heap pointer.
               if (isa<AllocaInst>(getBaseObjectNoLoad(Store->getValueOperand())))
                 continue;
-            if (tracesFromTMGlobal(Store->getValueOperand(), M, VisitedAllocas, Depth + 1))
+            if (tracesFromTMGlobal(Store->getValueOperand(), M, VisitedAllocas, VisitedPHIs, Depth + 1))
               return true;
           }
           continue;

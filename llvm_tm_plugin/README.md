@@ -31,10 +31,11 @@ llvm_tm_plugin/
 - Instruments reads/writes to globals annotated with `__attribute__((annotate("tm")))`
   (convenience macro: `TM`).
 - Supports 1-, 2-, 4-, 8-byte integer, float, double, and pointer access.
-- **Transitive instrumentation**: all functions reachable from TX
-  functions are automatically cloned and instrumented.
-- **Function versioning**: instrumented (`_tm_clone`) versions coexist
-  with originals; non-TX code paths have zero overhead.
+- **Three pipeline variants** (select via `TM_INSTRUMENT_PIPELINE`):
+  - `tm-instrument-inline` (default): inlines all clones then instruments post-inline
+  - `tm-instrument`: non-inline, clones survive as `NoInline`+`OptimizeNone` (debug-friendly)
+  - `tm-instrument-then-inline`: instruments clones individually then inlines
+- **BUILD_TYPE=DEBUG** auto-selects `tm-instrument` pipeline with `-O0` post-opt.
 - **Smart variable detection**: local (stack) variables are not
   instrumented; only shared globals.
 - **STL support**: container internals are cloned through the call
@@ -209,32 +210,49 @@ The pipeline provides:
 | `$(call tm_optimize,in,out)`     | `opt -O3` on `.instr.bc` → `.opt.bc`               |
 | `$(call tm_link,in,backend,out)` | Link `.opt.bc` + runtime → binary                   |
 | `TM_PLUGIN`                      | Path to the plugin `.so` (override to use variants) |
+| `TM_INSTRUMENT_PIPELINE`         | Pipeline: `tm-instrument-inline` (default), `tm-instrument`, or `tm-instrument-then-inline` |
+| `TM_OPT_LEVEL`                   | Post-instrumentation opt level: `-O3` (default), `-O0` |
+| `TM_LINK_OPT`                    | Link optimization: `-O1` (default), `-O0 -g` (debug) |
+| `BUILD_TYPE`                     | `RELEASE` (default) or `DEBUG` — sets pipeline, opt, and link together |
 
 Available backends: `singlelock`, `norec`, `tl2`, `tinystm`,
 `swisstm`, `persistentsgl`, `distributedsgl`.
 
-## Two-Pass Design
+## Pipeline Design
 
-The plugin runs as two LLVM passes:
+Three pipelines are available (select via `TM_INSTRUMENT_PIPELINE`):
 
-### Pass 1: TMGlobalInitPass (module-level)
-- Collects `TM`-annotated globals and creates symbol tables.
-- Builds the TX-reachable call graph.
-- Clones all reachable non-TX functions and instruments them.
-- Injects `tm_init`/`tm_exit` into `main()` and thread entry points.
-- Calls `"pstatic_rebuild"` functions after `tm_init`.
+### `tm-instrument-inline` (default)
+1. **TMInitInjectPass** — injects `tm_begin`/`tm_end` into TX functions.
+2. **AlwaysInlinerPass** — inlines all reachable callees into TX functions.
+3. **TMInstrumentInlinePass** — instruments loads/stores/malloc/mem intrinsic inside inlined TX code.
+4. **TMStripLifetimePass** — strips `llvm.lifetime.start/end` (LLVM 22 compat).
 
-### Pass 2: TMInstrumentPass (function-level, per TX function)
-- Inserts nested transaction counter logic.
-- (Optional) Inserts `sigsetjmp`/`tm_set_jmpbuf` for retry.
-- (Optional) Replaces loads/stores with `tm_read_*`/`tm_write_*`.
-- (Optional) Replaces `malloc`/`free` with `tm_malloc`/`tm_free`.
-- (Optional) Replaces `memcpy`/`memmove`/`memset` on TM data.
+Best for production: 176 TM ops, maximal optimization. Post-instrumentation `-O3` required.
 
-The separation is required because:
-- Module-level work (symbol tables, global init) must happen once.
-- Function-level passes run per-function; they can modify the IR of
-  individual transaction functions independently.
+### `tm-instrument` (non-inline, debug-friendly)
+1. **TMGlobalInitPass** — collects globals, builds call graph, clones reachable functions,
+   instruments `_tm_clone` functions (loads/stores/malloc/mem intrinsic).
+2. **TMInstrumentPass** — injects `tm_begin`/`tm_end`, nested counter, setjmp/retry
+   into TX functions.
+3. **TMStripLifetimePass** — strips `llvm.lifetime.start/end`.
+
+Clones survive as `NoInline`+`OptimizeNone` — 38 TM ops. Selected by `BUILD_TYPE=DEBUG`.
+Breakpoints on individual clones work because they are not inlined.
+
+### `tm-instrument-then-inline` (experimental)
+1. **TMGlobalInitThenInlinePass** — clones and instruments each clone individually.
+2. **AlwaysInlinerPass** — inlines instrumented clones into TX functions.
+3. **TMInstrumentPass** — instruments remaining loads/stores in TX functions.
+4. **TMStripLifetimePass** — strips `llvm.lifetime.start/end`.
+
+Produces 204 TM ops (more than `tm-instrument-inline`). Fails identically to inline
+pipeline on some tests — root cause under investigation.
+
+### Shared utilities (all pipelines)
+- **`TMStripLifetimePass`**: strips `llvm.lifetime.start`/`end` calls everywhere (LLVM 22 compat).
+- Module-level work (symbol tables, global init) is done once.
+- Function passes run per-function, modifying IR of individual transaction functions independently.
 
 ## Annotation Reference
 

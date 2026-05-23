@@ -39,6 +39,22 @@ The build uses the `tm_pipeline.mk` shared include
 3. `opt -O3` → optimised bitcode (`.opt.bc`)
 4. `clang++` + runtime file → executable (under `bin/`)
 
+### Selecting a pipeline variant
+
+Default pipeline is `tm-instrument-inline` (inlines all clones then instruments).
+Override via `TM_INSTRUMENT_PIPELINE`:
+
+```sh
+# Non-inline pipeline (debug-friendly, clones survive as separate functions)
+make TM_INSTRUMENT_PIPELINE=tm-instrument bank_singlelock
+
+# Or BUILD_TYPE=DEBUG (also sets -O0 post-opt, debug link flags)
+BUILD_TYPE=DEBUG make bank_singlelock
+
+# Experimental: instrument clones individually before inlining
+make TM_INSTRUMENT_PIPELINE=tm-instrument-then-inline bank_singlelock
+```
+
 ### Using a different plugin variant
 
 ```sh

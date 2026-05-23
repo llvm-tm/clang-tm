@@ -440,8 +440,35 @@ public:
 
     if (TMAudit) auditTXFunctionLoadsStores(F, *M);
 
+    // Check if this function already contains clone-instrumented tm_read/tm_write
+    // calls (from inlined instrumented clones). If so, skip handleLoadStore to
+    // avoid over-instrumentation: the clone instrumentation already applied the
+    // correct double-guard (isSharedPointer + isTMTracedPtr), and adding more
+    // instrumentation via handleLoadStore (single guard: isSharedPointer) would
+    // create inconsistencies between tm-buffered and raw accesses to the same
+    // memory (e.g. local std::map tree nodes).
     SmallVector<Instruction *, 16> ToErase;
     SmallVector<CallBase *, 8> MemIntrinsics;
+    bool hasCloneInstrumentation = false;
+    for (auto &BB : F) {
+      for (auto &I : BB) {
+        if (auto *Call = dyn_cast<CallBase>(&I)) {
+          if (Function *Callee = Call->getCalledFunction()) {
+            StringRef N = Callee->getName();
+            if (N.starts_with("tm_read_") || N.starts_with("tm_write_")) {
+              hasCloneInstrumentation = true;
+              break;
+            }
+          }
+        }
+      }
+      if (hasCloneInstrumentation) break;
+    }
+    if (hasCloneInstrumentation) {
+      TM_DEBUG("  Function has clone-instrumented tm_read/tm_write calls, "
+               "skipping handleLoadStore");
+    }
+
     for (auto &BB : F) {
       for (auto InstIt = BB.begin(); InstIt != BB.end();) {
         Instruction *I = &*InstIt++;
@@ -459,7 +486,8 @@ public:
                 continue;
 #endif
 #ifndef DISABLE_TM_READ_WRITE
-        handleLoadStore(I, F, *M, H, ToErase);
+        if (!hasCloneInstrumentation)
+            handleLoadStore(I, F, *M, H, ToErase);
 #endif
       }
     }
