@@ -28,6 +28,7 @@
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/Type.h>
@@ -335,7 +336,8 @@ public:
         // globals.  Then instrument ALL clones after call redirection.
         Ctx.ClonedMap = &tm_method_instrumentation::cloneTxReachableGraph(
             M, Ctx.TxReachableFuncs, Ctx.H, tm_method_instrumentation::CloneMode::CloneOnly);
-        redirectTXFunctionsToClones(M, Ctx.TxReachableFuncs, *Ctx.ClonedMap);
+        redirectTXFunctionsToClones(M, Ctx.TxReachableFuncs, *Ctx.ClonedMap,
+                                      tm_method_instrumentation::CloneMode::CloneOnly);
         tm_method_instrumentation::instrumentAllClones(*Ctx.ClonedMap, M, Ctx.H);
         modified = true;
     }
@@ -350,6 +352,65 @@ public:
     instrumentThreadEntries(M, ExplicitThreadEntries, Ctx);
 
     TM_DEBUG("TMGlobalInitPass: %s", modified ? "modified module" : "no changes");
+    return modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
+  }
+  static bool isRequired() { return true; }
+};
+
+// ===========================================================================
+// PASS 1 (combined pipeline): clone + instrument + prepare for inlining
+//   Clones ALL reachable callees (AlwaysInline mode), instruments each clone
+//   individually (without NoInline/OptimizeNone), and ensures AlwaysInline
+//   is set so the subsequent AlwaysInlinerPass will inline them into the TX
+//   function body.  After inlining, TMInstrumentPass handles the TX body
+//   (tx_begin/end, residual loads/stores, memory intrinsics).
+//
+//   This gives the debugging benefit of per-clone instrumentation
+//   (isolated, easy to verify) with the runtime correctness of the inline
+//   pipeline (all callee internals visible for TM instrumentation).
+// ===========================================================================
+
+class TMGlobalInitThenInlinePass : public PassInfoMixin<TMGlobalInitThenInlinePass>
+{
+public:
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
+  {
+    TM_DEBUG("TMGlobalInitThenInlinePass: processing module %s", M.getName().str().c_str());
+    auto Ctx = setupModulePass(M);
+    bool &modified = Ctx.modified;
+    using namespace tm_method_instrumentation;
+
+    if (!Ctx.TxReachableFuncs.empty()) {
+        TM_DEBUG("Tx-reachable call graph has %d functions", (int)Ctx.TxReachableFuncs.size());
+        // Clone with AlwaysInline mode so ALL reachable functions are cloned
+        Ctx.ClonedMap = &cloneTxReachableGraph(
+            M, Ctx.TxReachableFuncs, Ctx.H, CloneMode::AlwaysInline);
+        redirectTXFunctionsToClones(M, Ctx.TxReachableFuncs, *Ctx.ClonedMap,
+                                      CloneMode::AlwaysInline);
+        // Instrument each clone individually (before inlining).
+        // Unlike instrumentAllClones, we do NOT add NoInline/OptimizeNone —
+        // these clones will be inlined into the TX function body afterwards.
+        for (auto &pair : *Ctx.ClonedMap) {
+            Function *Clone = pair.second;
+            auto OrigIt = TMTracedArgs.find(pair.first);
+            if (OrigIt != TMTracedArgs.end())
+                TMTracedArgs[Clone] = OrigIt->second;
+            instrumentLoadsStoresInFunction(Clone, &M, Ctx.H);
+            TM_DEBUG("Pre-inline instrumented clone: %s", Clone->getName().str().c_str());
+        }
+        modified = true;
+    }
+
+    checkOpaqueOrAbort(M, Ctx.TxReachableFuncs);
+
+    auto ExplicitThreadEntries = detectExplicitThreadEntries(M);
+
+    if (Function *MainFn = M.getFunction("main"))
+        instrumentMainInitExit(MainFn, Ctx);
+
+    instrumentThreadEntries(M, ExplicitThreadEntries, Ctx);
+
+    TM_DEBUG("TMGlobalInitThenInlinePass: %s", modified ? "modified module" : "no changes");
     return modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
   }
   static bool isRequired() { return true; }
@@ -387,8 +448,10 @@ public:
         IRBuilder<> B(I->getParent(), I->getIterator());
 #ifndef DISABLE_TM_READ_WRITE
         if (auto *Call = dyn_cast<CallBase>(I))
-            if (handleMemoryIntrinsic(Call, *M, H, &ToErase))
+            if (needsMemIntrinsicInstrumentation(Call, *M)) {
+                MemIntrinsics.push_back(Call);
                 continue;
+            }
 #endif
 #ifndef DISABLE_MALLOC_FREE
         if (auto *Call = dyn_cast<CallBase>(I))
@@ -402,6 +465,38 @@ public:
     }
     for (Instruction *I : ToErase) I->eraseFromParent();
     return PreservedAnalyses::none();
+  }
+  static bool isRequired() { return true; }
+};
+
+// ===========================================================================
+// Utility pass: Strip llvm.lifetime.start/end intrinsics for LLVM version
+// portability. LLVM 21 -> 22 changed these from (i64, ptr) to (ptr), causing
+// "Intrinsic has incorrect argument type!" when linking with older LLVM.
+// Lifetime intrinsics are optimization hints only — removing them is always
+// safe.
+// ===========================================================================
+class TMStripLifetimePass : public PassInfoMixin<TMStripLifetimePass>
+{
+public:
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
+  {
+    bool changed = false;
+    for (auto &F : M) {
+      for (auto &BB : F) {
+        for (auto InstIt = BB.begin(); InstIt != BB.end(); ) {
+          Instruction *I = &*InstIt++;
+          if (auto *CI = dyn_cast<CallInst>(I)) {
+            if (CI->getIntrinsicID() == Intrinsic::lifetime_start ||
+                CI->getIntrinsicID() == Intrinsic::lifetime_end) {
+              I->eraseFromParent();
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
   }
   static bool isRequired() { return true; }
 };
@@ -422,6 +517,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
                     MPM.addPass(TMGlobalInitPass());
                     MPM.addPass(
                         createModuleToFunctionPassAdaptor(TMInstrumentPass()));
+                    MPM.addPass(TMStripLifetimePass());
                     return true;
                   }
                   // ---- Inline pipeline (inline callees first, then instrument) ----
@@ -431,6 +527,17 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
                     MPM.addPass(AlwaysInlinerPass());
                     MPM.addPass(
                         createModuleToFunctionPassAdaptor(TMInstrumentInlinePass()));
+                    MPM.addPass(TMStripLifetimePass());
+                    return true;
+                  }
+                  // ---- Combined pipeline (instrument clones, then inline) ----
+                  if (Name == "tm-instrument-then-inline") {
+                    TM_DEBUG("Registering tm-instrument-then-inline pass pipeline");
+                    MPM.addPass(TMGlobalInitThenInlinePass());
+                    MPM.addPass(AlwaysInlinerPass());
+                    MPM.addPass(
+                        createModuleToFunctionPassAdaptor(TMInstrumentPass()));
+                    MPM.addPass(TMStripLifetimePass());
                     return true;
                   }
                   return false;
