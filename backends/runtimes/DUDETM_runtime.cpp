@@ -106,7 +106,7 @@ void tm_end()
         tinystm::commit();  // on abort, longjmps past here
 
         // ── Build committed batch: COMMIT_BEGIN + writes + alloc/free ──
-        uint64_t seq = dudetm::g_shared->global_commit_seq.fetch_add(
+        uint64_t seq = dudetm::g_ctrl->global_commit_seq.fetch_add(
             1, std::memory_order_relaxed) + 1;
 
         std::vector<dudetm::DUDERedoEntry> batch;

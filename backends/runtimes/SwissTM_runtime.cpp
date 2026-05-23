@@ -1,8 +1,3 @@
-/**
- * SwissTM Runtime Wrapper for LLVM TM Plugin
- * Uses SwissTM for transactional memory
- */
-
 #include <atomic>
 #include <cassert>
 #include <csetjmp>
@@ -22,7 +17,10 @@ thread_local SpecAlloc* g_spec_allocs = nullptr;
 extern "C" {
 
 // Thread-local state
-static __thread int8_t tm_is_init_ready = 0;
+// NOTE: tm_jmpbuf must NOT be static — the plugin creates its own
+// thread-local symbol with the same name, and the linker aliases them.
+// siglongjmp to this buffer jumps back to the plugin's sigsetjmp.
+__thread int8_t tm_is_init_ready = 0;
 __thread int32_t tm_nested_call_counter;
 __thread int32_t tm_longjmp_ret;
 __thread sigjmp_buf tm_jmpbuf;
@@ -62,7 +60,7 @@ void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
 
 int tm_setjmp() { return 0; }
 
-void tm_set_jmpbuf(void *buf) { }
+void tm_set_jmpbuf(void *buf) { swisstm::set_jmpbuf((sigjmp_buf *)buf); }
 
 sigjmp_buf *tm_get_env() { return &tm_jmpbuf; }
 

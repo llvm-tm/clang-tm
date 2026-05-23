@@ -39,6 +39,21 @@ bank_tinystm_wbetl: bank.cpp | $(BIN_DIR)
 bank_tinystm_wt: bank.cpp | $(BIN_DIR)
 	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/TinySTM_runtime.cpp -I$(BACKENDS)/TinySTM -DDESIGN_WT -o $(BIN_DIR)/$@ $<
 
+test_swiss: test_swiss.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/SwissTM_runtime.cpp -I$(BACKENDS)/SwissTM -o $(BIN_DIR)/$@ $<
+
+test_tx: test_tx.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/SwissTM_runtime.cpp -I$(BACKENDS)/SwissTM -o $(BIN_DIR)/$@ $<
+
+test_loop: test_loop.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/SwissTM_runtime.cpp -I$(BACKENDS)/SwissTM -o $(BIN_DIR)/$@ $<
+
+test_ptr: test_ptr.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/SwissTM_runtime.cpp -I$(BACKENDS)/SwissTM -o $(BIN_DIR)/$@ $<
+
+test_global: test_global.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/SwissTM_runtime.cpp -I$(BACKENDS)/SwissTM -o $(BIN_DIR)/$@ $<
+
 bank_swiss: bank.cpp | $(BIN_DIR)
 	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/SwissTM_runtime.cpp -I$(BACKENDS)/SwissTM -o $(BIN_DIR)/$@ $<
 
