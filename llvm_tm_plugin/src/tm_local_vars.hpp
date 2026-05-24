@@ -148,9 +148,6 @@ static void ensureTMLocalAllocasCollected(Module &M) {
         collectTMLocalAllocas(M, TMLocalAllocas);
 }
 
-// Check if a pointer's base alloca is annotated with tm_local.
-// Returns true if the pointer targets a user-declared local variable
-// that should NOT be instrumented with tm_read/tm_write.
 static bool isTMLocalVar(const Value *Ptr, Module &M) {
     ensureTMLocalAllocasCollected(M);
     const Value *Base = getBaseObjectNoLoad(Ptr);

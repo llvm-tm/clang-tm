@@ -21,7 +21,9 @@ class TMSafeMap {
     }
 
 public:
-    iterator find(const K& k) const {
+    using const_iterator = typename std::vector<std::pair<K, V>>::const_iterator;
+
+    const_iterator find(const K& k) const {
         auto it = find_pos(k);
         if (it != m_data.end() && it->first == k)
             return it;

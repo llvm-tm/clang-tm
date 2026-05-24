@@ -41,16 +41,17 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - **WT tm_read/tm_write wrappers**: replaced `tm_read`/`tm_write` template usage with manual byte-extraction/merging wrappers (like the original WT) that pass 8-byte-aligned addresses to `read_word_wt`/`write_word_wt`, fixing unaligned `std::atomic_ref<uint64_t>` access and type-size mismatch bugs.
 - **Bank benchmark WT**: **PASS 1t/2t/4t** with correct money conservation, no hangs.
 
+## Done (this session)
+- **`instrumentMemoryIntrinsic` refactored**: Replaced byte-level (UINT8) memcpy expansion with 8-byte (UINT64) loop. Wide path reads/writes 8 bytes at a time via `tm_read_i8`/`tm_write_i8`, reducing TM operations 8× (e.g., 49152→6144 for 24576-byte labyrinth grid memcpy). Memset: broadcasts fill byte across 8 positions via multiplication by `0x0101010101010101`. Uses `tm_write_i8` (not direct store) for destinations, preserving TM write-set participation and avoiding test crashes.
+- **Fixed memset GEP crash**: For `memset(dst, 0, n)`, `SrcOrVal` is `i8 0` (an integer constant, not a pointer). Previous wide-path code tried `GEP(i8, 0, Idx)`, producing invalid IR. Now memset uses a dedicated broadcast path that never GEPs from the constant value.
+- **`TMSafeMap` `iterator` type fix**: Added `using const_iterator` before `find()` method (was missing in public section, causing build error in `test_alloc_stress`).
+
 ## Done (paper)
-- **Updated `docs/paper.tex`**: Section 2.2 (Memory Instrumentation) now describes always-instrument approach, explains why heuristic classification is unreliable (pointer provenance lost across function boundaries, STL tree nodes), documents `tm_local` annotation detection via `@llvm.var.annotation.p0.p0` with `starts_with` matching for LLVM 22 type-suffixed names.
-- **Section 2.3 (Iterator Tracing)**: Updated to describe `tracesFromTMGlobal` as feeding fixed-point propagation (not load/store decisions).
-- **Section 4.2 (Source-to-source)**: Updated IR-level analysis description to reference always-instrument approach.
-- **Abstract/Introduction**: Updated to say "every load and store" instead of "loads and stores to annotated globals", mentions `tm_local` opt-out.
-- **Clone description**: "loads and stores to TM-shared pointers" → "every load and store (subject only to tm_local)".
 
 ## Blocked
 - `alloc_stress_test` map corruption: `std::map` operations call `_Rb_tree_insert_and_rebalance` from libstdc++ (shared library). The function body is never available as IR (even with `-O0`/`-O2`/`-flto`), so the plugin cannot instrument its stores. Any test using `std::map` inside __transaction_atomic with concurrent workers will exhibit data corruption. Solutions: (a) TM-safe map replacement (treap now available), (b) serialize map operations, (c) LTO the entire libstdc++ for function body visibility, (d) accept limitation.
 - **STMbench7 hangs with ALL TM backends**: First long traversal operation (e.g., `op_lt3` — range-for over `g_compositeParts`) hangs with WBCTL/SwissTM/NOrec at 1 thread. Not data-structure-specific (occurs even without any map operations). Singlelock and uninstrumented work fine. Bank benchmark works fine (proves pipeline intact). Needs investigation — possible bug in tm_read during vector iterator operations inside long-running TX.
+- **STAMP Labyrinth still slow with inline pipeline**: Even with 8× reduction from UINT64 memcpy, the first labyrinth path doesn't complete within 60s. The `do_expansion` BFS loop generates thousands of TM read/write operations per path. Non-inline pipeline completes in ~5ms. Root cause: inline pipeline instruments ALL STL code (vector, deque iterators, queue internals) inside the TX, creating additional TM operations beyond the grid memcpy. Possible solutions: (a) apply `tm_local` annotations to labyrinth helper functions' internal variables, (b) use the non-inline pipeline for long-running TX functions, (c) add a per-benchmark pipeline override.
 
 ## Key Decisions
 - `tm_untrack_spec_alloc()` marks `node->ptr = nullptr` rather than unlinking: O(n) traversal is acceptable for small spec_alloc lists.
@@ -80,7 +81,10 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - `llvm_tm_plugin/test/test_tm_local.cpp`: new test verifying tm_local annotation.
 
 ## Next Steps
-1. Debug STMbench7 hang — investigate `tm_read`/`tm_write` of vector iterator internals during long TX loops. Get lldb backtrace when stuck at op_lt3.
-2. Determine if the hang is a TM-backend bug in `read_word`/`write_word` for stack addresses, or something else.
-3. If fixed: run STMbench7 with treap maps at 1t/2t/4t across all backends.
+1. Address STAMP Labyrinth inline-pipeline slowness. Options:
+   (a) Per-benchmark pipeline override (use non-inline for labyrinth).
+   (b) `tm_local` annotations on labyrinth helpers to reduce STL instruction count.
+   (c) Profile to find hot spots beyond memcpy (BFS loop, deque operations).
+2. Debug STMbench7 hang — investigate `tm_read`/`tm_write` of vector iterator internals during long TX loops. Get lldb backtrace when stuck at op_lt3.
+3. If hang fixed: run STMbench7 with treap maps at 1t/2t/4t across all backends.
 4. Run bank at all thread counts to confirm no regression.
