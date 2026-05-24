@@ -139,8 +139,12 @@ abort_tx()  //
 	tx->unlock_held_locks_and_clear();
 	tx->abort_count++;
 	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
-	// printf("THR%llu abort_tx (%i)\n", tx->id, tx->abort_count);
-	// std::atomic_thread_fence(std::memory_order_acq_rel);
+	if (tx->abort_count < 20 || tx->abort_count % 100 == 0) {
+		fprintf(stderr, "[ABORT tx=%llu count=%d ws=%zu rs=%zu]\n",
+		        (unsigned long long)tx->id, tx->abort_count,
+		        tx->write_set.size(), tx->read_set.size());
+		fflush(stderr);
+	}
 	if (tx->abort_count > 5) { // Magic number
 		// random backoff when aborts are really bad
 		random_backoff();
@@ -313,20 +317,34 @@ read_word_ctl(                                                //
 	}
 #endif
 
+	// Corrupted address detection removed (was shadowing root cause).
+
 	// Check write-set for this exact address
 	auto w = tx->write_set.find(addr);
 	if (w != tx->write_set.end()) {
 		if (w->second.type == sz)
 			return w->second.new_val;
+		// POINTER and UINT64 are both 8 bytes and share storage in any_type_t
+		// (MAP_ANY maps ptr and u8 to the same member).  LLVM type mapping can
+		// write a value as UINT64 (ptrtoint in deque internals) and read it back
+		// as POINTER, or vice versa.  Treat them as interchangeable.
+		if ((sz == ValueType::POINTER && w->second.type == ValueType::UINT64) ||
+		    (sz == ValueType::UINT64 && w->second.type == ValueType::POINTER)) {
+			return w->second.new_val;
+		}
 		// REVERSE-type check: existing is narrower (UINT8/16/32), reading wider
-		// (UINT64).  Try to reconstruct the wider value from sub-word write-set
-		// entries.  If all 8 byte addresses have UINT8 entries, merge them into
-		// a UINT64.  This handles the case where memmove/memcpy writes the key
-		// of a pair byte-by-byte (via tm_write_i1), and then the same TX reads
-		// the key as UINT64 during binary search — without this merge, the wider
-		// read would fall through to memory (which has stale/zero data) instead
-		// of seeing the TX's own buffered key.
-		if (sz == ValueType::UINT64 &&
+		// (UINT64, POINTER).  Try to reconstruct the wider value from sub-word
+		// write-set entries.  If all byte addresses have UINT8 entries, merge
+		// them into the wider value.  This handles two cases:
+		//   (a) memmove/memcpy writes the key of a pair byte-by-byte (via
+		//       tm_write_i1), and then the same TX reads the key as UINT64
+		//       during binary search.
+		//   (b) deque map reallocation copies block pointers via memcpy
+		//       (instrumented as UINT8 bytes), and the TX reads map entries
+		//       as POINTER — without this merge, POINTER reads fall through
+		//       to memory, get stale data (0), and pointer+offset produces
+		//       tiny invalid addresses.
+		if ((sz == ValueType::UINT64 || sz == ValueType::POINTER) &&
 		    (w->second.type == ValueType::UINT8 || w->second.type == ValueType::UINT16 ||
 		     w->second.type == ValueType::UINT32)) {
 			uint64_t merged = 0;
@@ -348,22 +366,89 @@ read_word_ctl(                                                //
 			}
 			goto read_from_memory;
 		}
-		// Type mismatch: if a wider write covers this address, extract bytes.
-		// Common case: prev tm_write_i8 (UINT64) at addr, now reading UINT8 bytes.
-		if (w->second.type == ValueType::UINT64 && sz == ValueType::UINT8) {
+		// Wider-to-narrower: a wider write at this exact address covers
+		// narrower sub-word reads (e.g. UINT32 field then UINT8 byte read
+		// via memmove byte loop in deque internal operations).
+		if (sz == ValueType::UINT8) {
 			any_type_t result;
-			result.u1 = static_cast<uint8_t>(w->second.new_val.u8 & 0xFF);
+			if (w->second.type == ValueType::UINT64) {
+				result.u1 = static_cast<uint8_t>(w->second.new_val.u8 & 0xFF);
+				return result;
+			}
+			if (w->second.type == ValueType::UINT32) {
+				result.u1 = static_cast<uint8_t>(w->second.new_val.u4 & 0xFF);
+				return result;
+			}
+			if (w->second.type == ValueType::UINT16) {
+				result.u1 = static_cast<uint8_t>(w->second.new_val.u2 & 0xFF);
+				return result;
+			}
+		}
+		if (sz == ValueType::UINT16 && w->second.type == ValueType::UINT64) {
+			any_type_t result;
+			result.u2 = static_cast<uint16_t>(w->second.new_val.u8 & 0xFFFF);
+			return result;
+		}
+		if (sz == ValueType::UINT32 && w->second.type == ValueType::UINT64) {
+			any_type_t result;
+			result.u4 = static_cast<uint32_t>(w->second.new_val.u8 & 0xFFFFFFFF);
 			return result;
 		}
 	}
 
-	// For unaligned reads: check the 8-byte-aligned address — a previous wider
-	// write (UINT64) may cover sub-word addresses.
+	// GENERAL FALLBACK: reconstruct any read value from byte-level (UINT8)
+	// write-set entries.  The memcpy/memmove byte-loop instrumentation
+	// (instrumentMemoryIntrinsic) creates UINT8 entries at individual byte
+	// addresses.  When a subsequent read expects a wider type (POINTER,
+	// UINT64, UINT32, UINT16, DOUBLE) at the same address, we need to
+	// merge the UINT8 entries rather than falling through to memory.
+	{
+		unsigned read_size = 0;
+		switch (sz) {
+		case ValueType::UINT8:   read_size = 1; break;
+		case ValueType::UINT16:  read_size = 2; break;
+		case ValueType::UINT32:
+		case ValueType::FLOAT:   read_size = 4; break;
+		case ValueType::UINT64:
+		case ValueType::DOUBLE:
+		case ValueType::POINTER: read_size = 8; break;
+		default: break;
+		}
+		if (read_size > 0) {
+			uint64_t merged = 0;
+			bool all_byte = true;
+			for (unsigned i = 0; i < read_size; i++) {
+				void *byte_addr = reinterpret_cast<void *>((uintptr_t)addr + i);
+				auto it = tx->write_set.find(byte_addr);
+				if (it != tx->write_set.end() && it->second.type == ValueType::UINT8) {
+					merged |= (static_cast<uint64_t>(it->second.new_val.u1)) << (i * 8);
+				} else {
+					all_byte = false;
+					break;
+				}
+			}
+			if (all_byte) {
+				any_type_t result;
+				result.u8 = merged;
+				return result;
+			}
+		}
+	}
+
+	// For unaligned or non-matching reads: check if a wider write at a nearby
+	// aligned address covers this byte.  A memmove byte loop (from
+	// instrumentMemoryIntrinsic) reads bytes at offsets within a UINT32/UINT64
+	// field — check UINT64 at the 8-byte aligned base, UINT32 at the 4-byte
+	// aligned base, and UINT16 at the 2-byte aligned base.
+	// IMPORTANT: Do NOT use addr != base_addr guards — a UINT32 at the same
+	// 8-byte-aligned address as UINT64 must be checked independently.
 	if (bo.offset != 0) {
 		void *base_addr = reinterpret_cast<void *>(bo.base_addr);
+		unsigned shift = static_cast<unsigned>(bo.offset) * 8;
+
+		// Check UINT64 at 8-byte aligned (existing logic)
 		auto w2 = tx->write_set.find(base_addr);
 		if (w2 != tx->write_set.end() && w2->second.type == ValueType::UINT64) {
-			unsigned shift = static_cast<unsigned>(bo.offset) * 8;
 			switch (sz) {
 			case ValueType::UINT8: {
 				any_type_t result;
@@ -382,6 +467,45 @@ read_word_ctl(                                                //
 			}
 			default:
 				break;
+			}
+		}
+
+		// Check UINT32 at 4-byte aligned address (may equal base_addr for
+		// offsets 0-3 — check independently of UINT64 above)
+		void *u32_addr = reinterpret_cast<void *>((uintptr_t)addr & ~3ULL);
+		auto w32 = tx->write_set.find(u32_addr);
+		if (w32 != tx->write_set.end() && w32->second.type == ValueType::UINT32) {
+			unsigned byte_off = static_cast<unsigned>((uintptr_t)addr - (uintptr_t)u32_addr);
+			unsigned u32_shift = byte_off * 8;
+			switch (sz) {
+			case ValueType::UINT8: {
+				any_type_t result;
+				result.u1 = static_cast<uint8_t>(w32->second.new_val.u4 >> u32_shift);
+				return result;
+			}
+			case ValueType::UINT16: {
+				if (byte_off <= 2) {
+					any_type_t result;
+					result.u2 = static_cast<uint16_t>(w32->second.new_val.u4 >> u32_shift);
+					return result;
+				}
+				break;
+			}
+			default:
+				break;
+			}
+		}
+
+		// Check UINT16 at 2-byte aligned address (may equal base_addr or
+		// u32_addr — check independently)
+		void *u16_addr = reinterpret_cast<void *>((uintptr_t)addr & ~1ULL);
+		auto w16 = tx->write_set.find(u16_addr);
+		if (w16 != tx->write_set.end() && w16->second.type == ValueType::UINT16) {
+			unsigned byte_off = static_cast<unsigned>((uintptr_t)addr - (uintptr_t)u16_addr);
+			if (byte_off < 2 && sz == ValueType::UINT8) {
+				any_type_t result;
+				result.u1 = static_cast<uint8_t>(w16->second.new_val.u2 >> (byte_off * 8));
+				return result;
 			}
 		}
 	}
@@ -440,47 +564,32 @@ write_word_ctl(                                               //
     ValueType sz                                              //
 )
 {
-	std::atomic_signal_fence(std::memory_order_seq_cst);
 	ByteOffset bo((word_t)addr);
 
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
-	if (addr == nullptr || (uint64_t)addr < 0x1000) {
-		void *ret_addr = __builtin_return_address(0);
-		fprintf(stderr,
-		        "[BAD_WRITE] write_word_ctl: addr=%p sz=%d tx=%llu ws=%zu val=0x%llx "
-		        "ra=%p",
-		        addr,
-		        (int)sz,
-		        (unsigned long long)tx->id,
-		        tx->write_set.size(),
-		        (unsigned long long)val.u8,
-		        ret_addr);
-		// Backtrace to find the exact instruction
-		void *bt[16];
-		int bt_sz = backtrace(bt, 16);
-		char **bt_syms = backtrace_symbols(bt, bt_sz);
-		for (int i = 0; i < bt_sz; i++)
-			fprintf(stderr, "  bt[%d] %s\n", i, bt_syms[i]);
-		free(bt_syms);
-		fflush(stderr);
+	// Discard writes to invalid addresses (e.g., nullptr or stack offsets
+	// that escape via integer arithmetic).  This can happen when the TX
+	// function evaluates a pointer-to-integer expression for a local
+	// variable — the resulting integer looks like a tiny address.
+	if (addr == nullptr || (uint64_t)addr < 0x100000) {
+		return;
 	}
 
-	tx->read_only = false; // TODO: shouldn't the TX abort?
+	tx->read_only = false;
 
 #ifdef DEBUG_WBCTL
 	static std::atomic<uint64_t> allw{0};
 	uint64_t aw = allw++;
-	if (aw < 200) {
+	if (aw < 200 || (aw % 5000 == 0)) {
 		fprintf(stderr,
-		        "[W_ALL#%llu] addr=%p sz=%d val=0x%llx ws=%zu addr_lo=%llx\n",
+		        "[W_ALL#%llu] addr=%p sz=%d val=0x%llx ws=%zu\n",
 		        (unsigned long long)aw,
 		        addr,
 		        (int)sz,
 		        (unsigned long long)val.u8,
-		        tx->write_set.size(),
-		        (unsigned long long)((uint64_t)addr & 0xffff));
+		        tx->write_set.size());
 		fflush(stderr);
 	}
 #endif

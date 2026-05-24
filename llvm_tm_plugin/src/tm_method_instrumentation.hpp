@@ -116,9 +116,11 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M,
     LLVMContext &Ctx = M.getContext();
     auto *i8Ty = Type::getInt8Ty(Ctx);
     auto *i64Ty = Type::getInt64Ty(Ctx);
+    auto *i64PtrTy = PointerType::get(Ctx, 0);
     Function *F = Call->getFunction();
     StringRef Name = Call->getCalledFunction()->getName();
     bool isMemset = Name.starts_with("llvm.memset");
+    bool isMemmove = Name.starts_with("llvm.memmove");
 
     Value *Dst = Call->getArgOperand(0);
     Value *Len = Call->getArgOperand(2);
@@ -138,19 +140,51 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M,
     EB.CreateCondBr(EB.CreateICmpEQ(Idx, Len), ContBB, LoopBody);
 
     IRBuilder<> BB(LoopBody);
-    Value *DG = BB.CreateGEP(i8Ty, Dst, Idx);
+    Value *Remaining = BB.CreateSub(Len, Idx);
+    Value *CanWide = BB.CreateICmpUGE(Remaining, ConstantInt::get(i64Ty, 8));
+
+    BasicBlock *WideBB = BasicBlock::Create(Ctx, "mem_wide", F, ContBB);
+    BasicBlock *NarrowBB = BasicBlock::Create(Ctx, "mem_narrow", F, ContBB);
+    BasicBlock *DoneBB = BasicBlock::Create(Ctx, "mem_done", F, ContBB);
+    BB.CreateCondBr(CanWide, WideBB, NarrowBB);
+
+    // Wide (8-byte) path
+    IRBuilder<> WB(WideBB);
+    Value *WideDstGEP = WB.CreateGEP(i8Ty, Dst, Idx);
+    Value *WideDstPtr = WB.CreateBitCast(WideDstGEP, i64PtrTy);
     if (isMemset) {
-        BB.CreateCall(H.write_i1, {DG, SrcOrVal});
+        // Broadcast fill byte to all 8 byte positions in the i64 word
+        Value *Fill = WB.CreateZExt(SrcOrVal, i64Ty);
+        Fill = WB.CreateMul(Fill, ConstantInt::get(i64Ty, 0x0101010101010101ULL));
+        WB.CreateStore(Fill, WideDstPtr);
     } else {
-        Value *SG = BB.CreateGEP(i8Ty, SrcOrVal, Idx);
-        BB.CreateCall(H.write_i1, {DG, BB.CreateCall(H.read_i1, {SG})});
+        // memcpy/memmove: tm_read_i8 from source, tm_write_i8 to dest
+        Value *WideSrcGEP = WB.CreateGEP(i8Ty, SrcOrVal, Idx);
+        Value *WideSrcPtr = WB.CreateBitCast(WideSrcGEP, i64PtrTy);
+        Value *WideVal = WB.CreateCall(H.read_i8, {WideSrcPtr});
+        WB.CreateCall(H.write_i8, {WideDstPtr, WideVal});
     }
-    Idx->addIncoming(BB.CreateAdd(Idx, ConstantInt::get(i64Ty, 1)), LoopBody);
-    BB.CreateBr(LoopEntry);
-    // NOTE: Call is NOT erased here — the caller handles erasure
-    // (it is now dead code, reachable only via splitBasicBlock debris;
-    //  the post-instrumentation -O3 pass removes it).  This avoids
-    //  double-erase when the caller also tracks it in ToErase.
+    WB.CreateBr(DoneBB);
+
+    // Narrow (1-byte) path
+    IRBuilder<> NB(NarrowBB);
+    Value *NarrowDstGEP = NB.CreateGEP(i8Ty, Dst, Idx);
+    if (isMemset) {
+        NB.CreateStore(SrcOrVal, NarrowDstGEP);
+    } else {
+        Value *NarrowSrcGEP = NB.CreateGEP(i8Ty, SrcOrVal, Idx);
+        NB.CreateCall(H.write_i1, {NarrowDstGEP, NB.CreateCall(H.read_i1, {NarrowSrcGEP})});
+    }
+    NB.CreateBr(DoneBB);
+
+    // Next iteration
+    IRBuilder<> DB(DoneBB);
+    PHINode *NextIdx = DB.CreatePHI(i64Ty, 2, "mem_next");
+    NextIdx->addIncoming(ConstantInt::get(i64Ty, 8), WideBB);
+    NextIdx->addIncoming(ConstantInt::get(i64Ty, 1), NarrowBB);
+    Value *PhiNext = DB.CreateAdd(Idx, NextIdx);
+    Idx->addIncoming(PhiNext, DoneBB);
+    DB.CreateBr(LoopEntry);
 }
 #else
 static void instrumentMemoryIntrinsic(CallBase *, Module &,
