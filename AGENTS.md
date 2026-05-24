@@ -32,6 +32,32 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 ## Blocked
 - `alloc_stress_test` map corruption: `std::map` operations call `_Rb_tree_insert_and_rebalance` from libstdc++ (shared library). The function body is never available as IR (even with `-O0`/`-O2`/`-flto`), so the plugin cannot instrument its stores. Any test using `std::map` inside __transaction_atomic with concurrent workers will exhibit data corruption. Solutions: (a) TM-safe map replacement, (b) serialize map operations, (c) LTO the entire libstdc++ for function body visibility, (d) accept limitation.
 
+## REGRESSION: CloneOnly ALL-functions mode (f35d19e) breaks tm-instrument pipeline
+
+### SYMPTOMS
+`stamp_tinystm -t 1 -b labyrinth` crashes with SIGSEGV (NULL pointer deref in `labyrinth_route`). Affects ALL 3 pipelines that use CloneOnly mode: `tm-instrument`, `tm-instrument-inline`, `tm-instrument-then-inline`. Crash is at runtime inside the TX function when a clone returns a null pointer (failed tm_read or stale data).
+
+### ROOT CAUSE
+Commit `f35d19e` changed `CloneMode::CloneOnly` in `computeClonableFunctions()` to clone ALL reachable functions (same as `AlwaysInline`). Before: only functions with TM-traced pointer args were cloned (152 clones in STAMP). After: ALL reachable functions cloned (1045 clones in STAMP).
+
+### WHY IT FAILS
+The extra 893 clones cause two problems:
+
+1. **Double instrumentation (major)**: `instrumentAllClones` (PASS 1) adds `NoInline`+`OptimizeNone` to each clone and instruments loads/stores using BOTH `isSharedPointer` AND `isTMTracedPtr` checks. Then `TMInstrumentPass` (PASS 2) runs `handleLoadStore` on the SAME clones using ONLY `isSharedPointer` (no `isTMTracedPtr`). This over-instruments loads/stores that PASS 1 correctly skipped — writing TM-buffered values instead of directly to memory, causing data corruption. The `hasCloneInstrumentation` skip (7d06858) was added to fix this but is insufficient.
+
+2. **Clone explosion (performance)**: 1045 clones with `NoInline`+`OptimizeNone` means `-O3` cannot inline or optimize any of them. The TX function calls through a deep chain of non-inlinable clones, each with TM reads/writes. Even `tm-instrument-then-inline` (which inlines clones without NoInline/OptimizeNone) produces a TX function with 1045 functions inlined — an enormous body that `-O3` cannot sensibly optimize.
+
+### BISECTION CONFIRMATION
+- 4d99358 (pre-f35d19e): CloneOnly clones 152 functions → WORKS
+- f35d19e (introduced): CloneOnly clones 1045 functions → CRASHES
+- 7d06858 (HEAD): hasCloneInstrumentation skip added → STILL CRASHES
+- tm-instrument-inline pipeline (same commit, different pipeline) → WORKS (because AlwaysInliner inlines clones back in before handleLoadStore)
+- -O3 vs -O0 post-instrumentation → both crash, ruling out optimizer bug
+- Debug plugin + GDB confirmed: crash is NULL-pointer deref inside labyrinth_route while reading data through instrumented vector operations
+
+### FIX REQUIRED
+Revert the CloneOnly change: only clone functions with TM-traced pointer args (pre-f35d19e behavior). The ALL-functions cloning was introduced to fix `test_local_containers` in the non-inline pipeline, but a more targeted fix is needed.
+
 ## Key Decisions
 - `tm_untrack_spec_alloc()` marks `node->ptr = nullptr` rather than unlinking: O(n) traversal is acceptable for small spec_alloc lists.
 - `__tree_deleter_tm_clone` can never be inlined (recursive), so must be handled by extending `TMInstrumentInlinePass` to non-TX clones.
