@@ -79,13 +79,11 @@ void tm_begin()
 {
     g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
     tm_begin_count++;
-    if (tm_nested_call_counter == 1) {
-        g_in_tx = true;
-        tm_clear_spec_allocs();
-        tm_clear_deferred_frees();
-        tls_redo_batch.clear();  // clear stale entries from a prior abort
-        tinystm::begin();
-    }
+    g_in_tx = true;
+    tm_clear_spec_allocs();
+    tm_clear_deferred_frees();
+    tls_redo_batch.clear();  // clear stale entries from a prior abort
+    tinystm::begin();
     assert(tm_nested_call_counter >= 0);
 }
 
@@ -93,55 +91,53 @@ void tm_end()
 {
     g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
     tm_end_count++;
-    if (tm_nested_call_counter == 1) {
-        g_in_tx = false;
-        auto *tx = tinystm::current_tx_wbctl;
-        if (tx) {
-            uint64_t rs = tx->read_set.size();
-            uint64_t ws = tx->write_set.size();
-            if (rs > g_tm_max_read_set.load()) g_tm_max_read_set.store(rs);
-            if (ws > g_tm_max_write_set.load()) g_tm_max_write_set.store(ws);
-        }
-
-        tinystm::commit();  // on abort, longjmps past here
-
-        // ── Build committed batch: COMMIT_BEGIN + writes + alloc/free ──
-        uint64_t seq = dudetm::g_ctrl->global_commit_seq.fetch_add(
-            1, std::memory_order_relaxed) + 1;
-
-        std::vector<dudetm::DUDERedoEntry> batch;
-        batch.reserve(1 + (tx ? tx->write_set.size() : 0) + tls_redo_batch.size());
-
-        dudetm::DUDERedoEntry marker;
-        marker.op_type = dudetm::OP_COMMIT_BEGIN;
-        memset(marker._pad, 0, sizeof(marker._pad));
-        marker.addr = seq;
-        marker.val.u8 = 0;
-        marker.type = stm::ValueType::UINT64;
-        batch.push_back(marker);
-
-        // Write-set entries
-        if (tx) {
-            for (auto &entry : tx->write_set) {
-                dudetm::DUDERedoEntry re;
-                re.op_type = dudetm::OP_WRITE;
-                memset(re._pad, 0, sizeof(re._pad));
-                re.addr = reinterpret_cast<uint64_t>(entry.first);
-                re.val  = entry.second.new_val;
-                re.type = entry.second.type;
-                batch.push_back(re);
-            }
-        }
-
-        // Alloc/free entries from the thread-local batch
-        batch.insert(batch.end(), tls_redo_batch.begin(), tls_redo_batch.end());
-        tls_redo_batch.clear();
-
-        dudetm::publish_batch(batch.data(), batch.size());
-
-        tm_flush_spec_allocs();
-        tm_flush_deferred_frees();
+    g_in_tx = false;
+    auto *tx = tinystm::current_tx_wbctl;
+    if (tx) {
+        uint64_t rs = tx->read_set.size();
+        uint64_t ws = tx->write_set.size();
+        if (rs > g_tm_max_read_set.load()) g_tm_max_read_set.store(rs);
+        if (ws > g_tm_max_write_set.load()) g_tm_max_write_set.store(ws);
     }
+
+    tinystm::commit();  // on abort, longjmps past here
+
+    // ── Build committed batch: COMMIT_BEGIN + writes + alloc/free ──
+    uint64_t seq = dudetm::g_ctrl->global_commit_seq.fetch_add(
+        1, std::memory_order_relaxed) + 1;
+
+    std::vector<dudetm::DUDERedoEntry> batch;
+    batch.reserve(1 + (tx ? tx->write_set.size() : 0) + tls_redo_batch.size());
+
+    dudetm::DUDERedoEntry marker;
+    marker.op_type = dudetm::OP_COMMIT_BEGIN;
+    memset(marker._pad, 0, sizeof(marker._pad));
+    marker.addr = seq;
+    marker.val.u8 = 0;
+    marker.type = stm::ValueType::UINT64;
+    batch.push_back(marker);
+
+    // Write-set entries
+    if (tx) {
+        for (auto &entry : tx->write_set) {
+            dudetm::DUDERedoEntry re;
+            re.op_type = dudetm::OP_WRITE;
+            memset(re._pad, 0, sizeof(re._pad));
+            re.addr = reinterpret_cast<uint64_t>(entry.first);
+            re.val  = entry.second.new_val;
+            re.type = entry.second.type;
+            batch.push_back(re);
+        }
+    }
+
+    // Alloc/free entries from the thread-local batch
+    batch.insert(batch.end(), tls_redo_batch.begin(), tls_redo_batch.end());
+    tls_redo_batch.clear();
+
+    dudetm::publish_batch(batch.data(), batch.size());
+
+    tm_flush_spec_allocs();
+    tm_flush_deferred_frees();
     assert(tm_nested_call_counter >= 0);
     tm_tx_count++;
 }

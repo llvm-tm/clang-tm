@@ -87,19 +87,17 @@ void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
 
 void tm_begin() {
-    if (tm_nested_call_counter == 1) { g_in_tx = true;
-        g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
-        global_tx_lock.lock();
-    }
+    g_in_tx = true;
+    g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
+    global_tx_lock.lock();
     assert(tm_nested_call_counter >= 0);
 }
 
 void tm_end() {
-    if (tm_nested_call_counter == 1) { g_in_tx = false;
-        g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
-        g_tm_tx_count.fetch_add(1, std::memory_order_relaxed);
-        global_tx_lock.unlock();
-    }
+    g_in_tx = false;
+    g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
+    g_tm_tx_count.fetch_add(1, std::memory_order_relaxed);
+    global_tx_lock.unlock();
     assert(tm_nested_call_counter >= 0);
 }
 

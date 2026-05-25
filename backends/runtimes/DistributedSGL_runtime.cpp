@@ -196,36 +196,34 @@ void tm_set_env(sigjmp_buf* env) {
 static thread_local bool g_first_begin = true;
 
 void tm_begin() {
-    if (tm_nested_call_counter == 1) { g_in_tx = true;
-        // First transaction in this thread: publish local init state
-        // (benchmarks initialize TM globals AFTER tm_init, so the mmap
-        //  has stale data until we publish here).
-        if (g_first_begin) {
-            sync_local_to_shared();
-            g_first_begin = false;
-        }
-
-        // PREPARE phase: acquire global lock, then read latest state
-        spin_lock(&g_state->lock_flag);
-        sync_shared_to_local();
-#ifndef NDEBUG
-        fprintf(stderr, "[DistSGL] P%d PREPARE epoch=%lld\n",
-                getpid(), (long long)g_state->epoch.load(std::memory_order_relaxed));
-#endif
+    g_in_tx = true;
+    // First transaction in this thread: publish local init state
+    // (benchmarks initialize TM globals AFTER tm_init, so the mmap
+    //  has stale data until we publish here).
+    if (g_first_begin) {
+        sync_local_to_shared();
+        g_first_begin = false;
     }
+
+    // PREPARE phase: acquire global lock, then read latest state
+    spin_lock(&g_state->lock_flag);
+    sync_shared_to_local();
+#ifndef NDEBUG
+    fprintf(stderr, "[DistSGL] P%d PREPARE epoch=%lld\n",
+            getpid(), (long long)g_state->epoch.load(std::memory_order_relaxed));
+#endif
 }
 
 void tm_end() {
-    if (tm_nested_call_counter == 1) { g_in_tx = false;
-        // COMMIT phase: publish state, advance epoch, release lock
-        sync_local_to_shared();
-        g_state->epoch.fetch_add(1, std::memory_order_release);
+    g_in_tx = false;
+    // COMMIT phase: publish state, advance epoch, release lock
+    sync_local_to_shared();
+    g_state->epoch.fetch_add(1, std::memory_order_release);
 #ifndef NDEBUG
-        fprintf(stderr, "[DistSGL] P%d COMMIT  epoch=%lld\n",
-                getpid(), (long long)g_state->epoch.load(std::memory_order_relaxed));
+    fprintf(stderr, "[DistSGL] P%d COMMIT  epoch=%lld\n",
+            getpid(), (long long)g_state->epoch.load(std::memory_order_relaxed));
 #endif
-        spin_unlock(&g_state->lock_flag);
-    }
+    spin_unlock(&g_state->lock_flag);
 }
 
 // ── Read/write hooks (direct memory, no instrumentation beyond serialization) ──
