@@ -42,6 +42,7 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - **Bank benchmark WT**: **PASS 1t/2t/4t** with correct money conservation, no hangs.
 
 ## Done (this session)
+- **Full test run (2026-05-25)**: Ran `make -C llvm_tm_plugin run` + `make -C backends/tests run`. Results below captured as baseline before fixes.
 - **`instrumentMemoryIntrinsic` refactored**: Replaced byte-level (UINT8) memcpy expansion with 8-byte (UINT64) loop. Wide path reads/writes 8 bytes at a time via `tm_read_i8`/`tm_write_i8`, reducing TM operations 8× (e.g., 49152→6144 for 24576-byte labyrinth grid memcpy). Memset: broadcasts fill byte across 8 positions via multiplication by `0x0101010101010101`. Uses `tm_write_i8` (not direct store) for destinations, preserving TM write-set participation and avoiding test crashes.
 - **Fixed memset GEP crash**: For `memset(dst, 0, n)`, `SrcOrVal` is `i8 0` (an integer constant, not a pointer). Previous wide-path code tried `GEP(i8, 0, Idx)`, producing invalid IR. Now memset uses a dedicated broadcast path that never GEPs from the constant value.
 - **`TMSafeMap` `iterator` type fix**: Added `using const_iterator` before `find()` method (was missing in public section, causing build error in `test_alloc_stress`).
@@ -51,7 +52,7 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - **WT counter test**: own-lock validation fix improved from 709840/800000 (90160 lost) → 797703/800000 (2297 lost). Remaining gap from WT's inherent write-through race — lock-entent adjacent updates. WBCTL/WBETL pass 800000/800000.
 
 ## Blocked
-- `alloc_stress_test` map corruption: `std::map` operations call `_Rb_tree_insert_and_rebalance` from libstdc++ (shared library). The function body is never available as IR (even with `-O0`/`-O2`/`-flto`), so the plugin cannot instrument its stores. Any test using `std::map` inside __transaction_atomic with concurrent workers will exhibit data corruption. Solutions: (a) TM-safe map replacement (treap now available), (b) serialize map operations, (c) LTO the entire libstdc++ for function body visibility, (d) accept limitation.
+- `test_alloc_stress` SIGSEGV: test crashes with exit code 139 (was FULL PASS before always-instrument transition). Needs investigation — root cause may be always-instrument hitting vector/map internal operations that trigger TM write-set corruption, or regressed from the 8-byte memcpy/memset rewrite.
 - **STMbench7 hangs with ALL TM backends**: First long traversal operation (e.g., `op_lt3` — range-for over `g_compositeParts`) hangs with WBCTL/SwissTM/NOrec at 1 thread. Not data-structure-specific (occurs even without any map operations). Singlelock and uninstrumented work fine. Bank benchmark works fine (proves pipeline intact). Needs investigation — possible bug in tm_read during vector iterator operations inside long-running TX.
 - **STAMP Labyrinth still slow with inline pipeline**: Even with 8× reduction from UINT64 memcpy, the first labyrinth path doesn't complete within 60s. The `do_expansion` BFS loop generates thousands of TM read/write operations per path. Non-inline pipeline completes in ~5ms. Root cause: inline pipeline instruments ALL STL code (vector, deque iterators, queue internals) inside the TX, creating additional TM operations beyond the grid memcpy. Possible solutions: (a) apply `tm_local` annotations to labyrinth helper functions' internal variables, (b) use the non-inline pipeline for long-running TX functions, (c) add a per-benchmark pipeline override.
 
@@ -83,10 +84,14 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - `llvm_tm_plugin/test/test_tm_local.cpp`: new test verifying tm_local annotation.
 
 ## Next Steps
-1. Address STAMP Labyrinth inline-pipeline slowness. Options:
+1. **Fix `test_local_containers` Bus error**: test crashes with SIGBUS immediately on `make run`. Likely TM write-set or read-set corruption from always-instrument policy instrumenting vector internals that shouldn't be TM-tracked. Investigate with lldb.
+2. **Fix `test_vector_realloc` SIGSEGV**: test_vector_realloc crashes with exit code 139. Previously had data corruption fix — may have regressed with always-instrument or the 8-byte memcpy refactor.
+3. **Fix `test_alloc_stress` SIGSEGV**: test_alloc_stress crashes with exit code 139. Previously had FULL PASS status; likely regressed from always-instrument transition or memcpy/memset changes.
+4. **Fix SwissTM `test_counter` and `test_fp` failures**: SwissTM backend shows `test_multi` counter flakiness — expected 8000 got 7985 (counter test) and f8 counter failure in FP test. May be a SwissTM-specific validation bug or race condition.
+5. Address STAMP Labyrinth inline-pipeline slowness. Options:
    (a) Per-benchmark pipeline override (use non-inline for labyrinth).
    (b) `tm_local` annotations on labyrinth helpers to reduce STL instruction count.
    (c) Profile to find hot spots beyond memcpy (BFS loop, deque operations).
-2. Debug STMbench7 hang — investigate `tm_read`/`tm_write` of vector iterator internals during long TX loops. Get lldb backtrace when stuck at op_lt3.
-3. If hang fixed: run STMbench7 with treap maps at 1t/2t/4t across all backends.
-4. Run bank at all thread counts to confirm no regression.
+6. Debug STMbench7 hang — investigate `tm_read`/`tm_write` of vector iterator internals during long TX loops. Get lldb backtrace when stuck at op_lt3.
+7. If hang fixed: run STMbench7 with treap maps at 1t/2t/4t across all backends.
+8. Run bank at all thread counts to confirm no regression.
