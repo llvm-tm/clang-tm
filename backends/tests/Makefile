@@ -33,15 +33,21 @@ $(eval $(call BACKEND_template,sgl,-I.. -DTM_BACKEND_SGL,$(RUNTIME_DIR)/SingleGl
 
 BACKENDS := tinystm_wbctl tinystm_wbetl tinystm_wt tl2 norec swisstm sgl
 TESTS := test_single test_multi
+COUNTER_TESTS := test_counter
+STRESS_TESTS := test_stress
+OPACITY_TESTS := test_opacity
 
 # ── Build rules ───────────────────────────────────────────────────────
 
-.PHONY: all clean run
+.PHONY: all clean run run-counter run-stress run-opacity
 
 # All backends × all tests
 TARGETS := $(foreach B,$(BACKENDS),$(foreach T,$(TESTS),$(BIN_DIR)/$(B)_$(T)))
+COUNTER_TARGETS := $(foreach B,$(BACKENDS),$(BIN_DIR)/$(B)_$(COUNTER_TESTS))
+STRESS_TARGETS := $(foreach B,$(BACKENDS),$(BIN_DIR)/$(B)_$(STRESS_TESTS))
+OPACITY_TARGETS := $(foreach B,$(BACKENDS),$(BIN_DIR)/$(B)_$(OPACITY_TESTS))
 
-all: $(BIN_DIR) $(TARGETS)
+all: $(BIN_DIR) $(TARGETS) $(COUNTER_TARGETS) $(STRESS_TARGETS) $(OPACITY_TARGETS)
 
 # Pattern rule: $(BIN_DIR)/{backend}_{test} → test_{test}.cpp + runtime
 # $* is the full backend name, e.g. "tinystm_wbctl".
@@ -50,6 +56,18 @@ $(BIN_DIR)/%_test_single: test_single.cpp | $(BIN_DIR)
 		-o $@ $< $($*_RUNTIME)
 
 $(BIN_DIR)/%_test_multi: test_multi.cpp | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $($*_CXXFLAGS) \
+		-o $@ $< $($*_RUNTIME)
+
+$(BIN_DIR)/%_test_counter: test_counter.cpp | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $($*_CXXFLAGS) \
+		-o $@ $< $($*_RUNTIME)
+
+$(BIN_DIR)/%_test_stress: test_stress.cpp | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $($*_CXXFLAGS) \
+		-o $@ $< $($*_RUNTIME)
+
+$(BIN_DIR)/%_test_opacity: test_opacity.cpp | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $($*_CXXFLAGS) \
 		-o $@ $< $($*_RUNTIME)
 
@@ -72,6 +90,39 @@ run: all
 	echo "================================================"; \
 	echo "  ALL TESTS COMPLETE"; \
 	echo "================================================"
+
+# Run counter tests for all backends
+run-counter: $(COUNTER_TARGETS)
+	@set -e; \
+	for b in $(BACKENDS); do \
+		echo ""; \
+		echo "================================================"; \
+		echo "  Backend: $$b"; \
+		echo "================================================"; \
+		$(BIN_DIR)/$${b}_test_counter; \
+	done
+
+# Run stress tests for all backends
+run-stress: $(STRESS_TARGETS)
+	@set -e; \
+	for b in $(BACKENDS); do \
+		echo ""; \
+		echo "================================================"; \
+		echo "  Backend: $$b"; \
+		echo "================================================"; \
+		$(BIN_DIR)/$${b}_test_stress; \
+	done
+
+# Run opacity tests for all backends
+run-opacity: $(OPACITY_TARGETS)
+	@set -e; \
+	for b in $(BACKENDS); do \
+		echo ""; \
+		echo "================================================"; \
+		echo "  Backend: $$b"; \
+		echo "================================================"; \
+		$(BIN_DIR)/$${b}_test_opacity; \
+	done
 
 # Run a single backend
 run_%: $(BIN_DIR)/%_test_single $(BIN_DIR)/%_test_multi

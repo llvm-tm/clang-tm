@@ -1,45 +1,46 @@
-# Backend Runtimes Analysis
+# Backend Test Suite Results
 
-## Runtime Status (Updated)
+## Test Suites
 
-| Runtime | Has tm_get_env | Has tm_set_env | Symbol ID Params | Notes |
-|---------|---------------|----------------|------------------|-------|
-| TinySTM | ✅ | ✅ | ✅ | Working correctly |
-| TL2 | ❌ Added | ❌ Added | ❌ Fixed | Fixed now |
-| SwissTM | ❌ Added | ❌ Added | ✅ | Fixed now |
-| SingleGlobalLock | ❌ Added | ❌ Added | ✅ | Fixed now |
+| Suite | Description | Per-backend binaries |
+|---|---|---|
+| `test_single` | Basic types, sequential TX, malloc/free, serial lock, ptr null (10 tests) | 7 |
+| `test_multi` | Counter, write-set validation, read-set caching, write-write, abort stress, concurrent, alloc stress, FP (8 tests, 4-8 threads) | 7 |
+| `test_counter` | Heavy counter stress: 8 threads × 10000 iterations = 80000 increments | 7 |
+| `test_stress` | Read-only TX, mixed types, adjacent cache-line, abort+alloc, many reads, many writes, invariant (7 tests, 4-8 threads) | 7 |
+| `test_opacity` | Write-skew (1000 rounds), read-set validation, high-contention (3 tests, 2-8 threads) | 7 |
 
-## TinySTM Flavors Jump-Back Support
+## Results (all backends: 0 failures)
 
-| Flavor | File | Uses siglongjmp? | Abort Mechanism |
-|--------|------|------------------|------------------|
-| Base | `tinystm.hpp` | ✅ Yes (line 220) | Undo log + longjmp |
-| WB-ETL | `tinystm_wbetl.hpp` | ❌ No | Sets aborted flag + sleep |
-| WT | `tinystm_wt.hpp` | ❌ No | Undo write + abort counter |
-| WB-CTL | `tinystm_wbctl.hpp` | ❌ No | Just clears state |
+| Backend | test_single | test_multi | test_counter | test_stress | test_opacity |
+|---|---|---|---|---|---|
+| TinySTM WBCTL | 0 failures | 0 failures | 0 failures | 0 failures | 0 failures |
+| TinySTM WBETL | 0 failures | 0 failures | 0 failures | 0 failures | 0 failures |
+| TinySTM WT | 0 failures | 0 failures | 0 failures | 0 failures | 0 failures |
+| TL2 | 0 failures | 0 failures | 0 failures | 0 failures | 0 failures |
+| NOrec | 0 failures | 0 failures | 0 failures | 0 failures | 0 failures |
+| SwissTM | 0 failures | 0 failures | 0 failures | 0 failures | 0 failures |
+| SGL | 0 failures | 0 failures | 0 failures | 0 failures | 0 failures |
 
-**Only the base `tinystm.hpp` implements proper jump-back via siglongjmp.**
+## Existing Heavy Counter Tests (TinySTM-specific, 16 threads × 50000 = 800000)
 
-All other flavors rely on flag-based retry (while loop).
+| Design | Result |
+|---|---|
+| WBCTL | PASS (1559 ms) |
+| WBETL | PASS (624 ms) |
+| WT | PASS (1369 ms) |
 
-## Tests in backends/tests
+## Running
 
-| Test | Retry Mechanism | Status |
-|------|-----------------|--------|
-| test_runtime_simple.cpp | `while (!committed)` | Works (lost updates bug) |
-| test_runtime_simple2.cpp | `setjmp` + `while` | Works |
-| test_jump_back.cpp | `sigsetjmp` + `siglongjmp` | Needs testing |
-| test_tinystm_simple.cpp | `setjmp` + `stm_set_env` | Works |
-| Other tests | Various setjmp patterns | Not tested |
+```sh
+# All test suites, all backends
+make run
 
-## Files Changed
+# Individual suites
+make run-counter    # Counter tests
+make run-stress     # Stress tests
+make run-opacity    # Opacity tests
 
-1. `TL2_runtime.cpp` - Added tm_get_env, tm_set_env, fixed symbol_id params
-2. `SwissTM_runtime.cpp` - Added tm_get_env, tm_set_env
-3. `SingleGlobalLock_runtime.cpp` - Added tm_get_env, tm_set_env
-
-## Known Issues
-
-1. **TinySTM lost updates bug**: Read-set validation doesn't properly detect concurrent modifications in multi-threaded tests
-2. **TinySTM WT and WB-CTL**: Don't compile (missing Lock type definitions)
-3. **WB-ETL, WT, WB-CTL**: Don't use siglongjmp - rely on flag-based retry
+# Single backend
+make run_tl2        # test_single + test_multi for tl2
+```
