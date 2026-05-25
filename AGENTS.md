@@ -113,8 +113,21 @@ Revert the CloneOnly change: only clone functions with TM-traced pointer args (p
 - `llvm_tm_plugin/Makefile`: static pattern rules, `BUILD_TYPE`, `PLUGIN_CXXFLAGS`.
 - `llvm_tm_plugin/test/test_tm_local.cpp`: test verifying tm_local annotation.
 
+## Done (this session — 2026-05-25)
+- **Merged origin/master** (CloneOnly fix, then-inline pipeline, refactored backends) into main. Resolved conflicts in `AGENTS.md`, source files, Makefiles.
+- **Restored `collectTMLocalAllocas`/`isTMLocalVar`** — they were lost in the merge. Added them to `tm_local_vars.hpp` with `DenseMap`-based per-function caching.
+- **Fixed `instrumentLoadsStoresInFunction`**: post-merge version was still using the old heuristic (`isSharedPointer` + `isTMTracedPtr`), which missed ALL push_back/emplace_back clone instrumentation (0 tm_ calls in those clones). Changed to always-instrument with only `isTMLocalVar` skip. tm_ calls increased from 180→550 (466 inside clones).
+- **Enabled `run_tests.sh` auto-build**: instead of erroring when tests are missing, it now runs `make test` automatically.
+
+## Crash Analysis (test_local_containers with fix)
+After the instrumentation fix, `test_local_containers` crashes with `SIGTRAP` in `libsystem_malloc.dylib` during `flat_hash_map::begin()` on the write-set. The hash table's `this` pointer is corrupted to `0x400000000000004f` — which is a **TinySTM lock word value** (bit 0 = WRITE_MASK, bits 2-4 = incarnation 3, bits 18+ = high version number). The lock word was likely written by a TM write-set entry that got flushed to freed heap memory, then the corrupted heap chunk was reallocated as the Transaction struct's write-set bucket array.
+
+Root cause hypothesis: always-instrument on clones causes the vector destructor (inside the TX) to call `tm_free` on the buffer. While `tm_free` defers the `::operator delete` correctly, the **write-set still holds 50+ entries pointing into the buffer** (element values). On commit, `tinystm::commit()` flushes these entries to the buffer addresses before `tm_flush_deferred_frees()` runs — but `tm_untrack_spec_alloc()` in `tm_free` may be removing the spec_alloc tracking while the buffer still has live write-set references, or the write-back writes through stale pointers.
+
+Alternative hypothesis: the `std::unordered_map` write-set (line 239 of `tinystm_common.hpp`) uses `std::pair<const void*, WriteLogEntry>` as elements. The `WriteLogEntry` contains a `value_union` (UINT8/UINT16/UINT32/UINT64/PTR/float/double). A **type-size mismatch** between how a pointer is stored (`tm_write_ptr` → `value_union.ptr`, 8 bytes) and how it's read back or merged (byte-level from memcpy expansion or aligned-UINT64 from wider path) could put a lock-word bitpattern into the pointer field of the write-set entry itself. The `0x400000000000004f` pattern exactly matches a locked-TinySTM lock word — suggesting the write-set entry stored a lock word instead of a pointer value.
+
 ## Next Steps
-1. **Fix `test_local_containers` Bus error**: SIGBUS immediately — likely TM write-set/read-set corruption from always-instrument hitting vector internals. Investigate with lldb.
+1. **Find root cause of write-set hash table corruption**: The `0x400000000000004f` == locked TinySTM lock word. Determine whether this comes from (a) type-mismatch in `value_union` reads/writes (cast between structs of different sizes), (b) write-set flush to freed buffer, or (c) `tm_untrack_spec_alloc` / `tm_flush_deferred_frees` ordering issue.
 2. **Fix `test_vector_realloc` SIGSEGV**: exit code 139 — may have regressed with always-instrument or 8-byte memcpy.
 3. **Fix `test_alloc_stress` SIGSEGV**: exit code 139 — was FULL PASS before always-instrument transition.
 4. **Fix SwissTM `test_counter`/`test_fp` flaky failures**: expected 8000 got 7985; f8 counter failure.

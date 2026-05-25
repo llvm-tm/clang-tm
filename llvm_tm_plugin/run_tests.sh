@@ -5,8 +5,8 @@ cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/llvm-tool-helper.sh"
 
 if [ ! -x ./bin/test_types ] || [ ! -x ./bin/test_memtest ] || [ ! -x ./bin/test_threads ] || [ ! -x ./bin/test_persist ] || [ ! -x ./bin/test_retry ] || [ ! -x ./bin/test_stl_containers ] || [ ! -x ./bin/test_local_containers ]; then
-  echo "Error: test binaries are missing. Run 'make test' first." >&2
-  exit 1
+  echo "Test binaries missing. Building with 'make test'..." >&2
+  make test 2>&1 || { echo "Build failed." >&2; exit 1; }
 fi
 
 mkdir -p out

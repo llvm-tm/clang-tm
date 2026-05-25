@@ -301,18 +301,20 @@ read_word_ctl(                                                //
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
 #ifdef DEBUG_WBCTL
-	// Debug: detect corrupted addresses (32-bit truncation)
+	// Debug: detect corrupted addresses
 	static std::atomic<uint64_t> read_count{0};
 	uint64_t rc = read_count++;
 	uint64_t addr_bits = (uint64_t)addr;
 
-	if ((addr_bits >> 48) != 0) {
+	if (addr_bits < 0x100000 || (addr_bits >> 48) != 0) {
 		fprintf(stderr,
-		        "[R%llu] addr=%p sz=%d tx=%llu\n",
+		        "[R%llu] addr=%p sz=%d tx=%llu ws=%zu rs=%zu\n",
 		        rc,
 		        (void *)addr_bits,
 		        (int)sz,
-		        (unsigned long long)tx->id);
+		        (unsigned long long)tx->id,
+		        tx->write_set.size(),
+		        tx->read_set.size());
 		fflush(stderr);
 	}
 #endif
