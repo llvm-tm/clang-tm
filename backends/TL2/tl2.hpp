@@ -160,6 +160,8 @@ public:
     uint64_t bloom_filter = 0;
 };
 
+extern thread_local Transaction* current_tx;
+
 class STM {
 private:
     static std::atomic<word_t> g_clock;

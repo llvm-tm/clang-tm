@@ -522,12 +522,12 @@ static void redirectCallsToClones(Function &F, Module &M,
         }
     }
     if (!ToRedirect.empty()) {
-        errs() << "[VERIFY] redirectCallsToClones: " << ToRedirect.size()
-               << " calls redirected in " << F.getName() << "\n";
+        TM_DEBUG("[VERIFY] redirectCallsToClones: %zu calls redirected in %s",
+                 (size_t)ToRedirect.size(), F.getName().str().c_str());
         for (auto &P : ToRedirect) {
             CallBase *CB = P.first;
             Function *Callee = CB->getCalledFunction();
-            errs() << "  -> now calls: " << (Callee ? Callee->getName() : "null") << "\n";
+            TM_DEBUG("  -> now calls: %s", Callee ? Callee->getName().str().c_str() : "null");
         }
     }
 }
