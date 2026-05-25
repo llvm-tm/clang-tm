@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <vector>
+#include <list>
 #include <cstring>
 #include <csetjmp>
 #include <random>
@@ -66,7 +67,7 @@ struct TxDescriptor {
     word_t cm_ts = 0;
     int write_count = 0;
     int succ_abort_count = 0;
-    std::vector<WriteLogEntry> write_log;
+    std::list<WriteLogEntry> write_log;
     std::vector<OwnershipRecord*> write_set;
     std::vector<ReadLogEntry> read_set;
 };

@@ -263,8 +263,7 @@ commit()    //
 	NOREC_ASSERT(tx->active, "tx not active");
 
 	if (tx->read_only) {
-		tx->read_set.clear();
-		tx->write_set.clear();
+		tx->reset();
 		return;
 	}
 
