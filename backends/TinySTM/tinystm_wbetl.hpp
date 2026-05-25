@@ -237,16 +237,12 @@ commit()    //
 			auto &w = it.second;
 			write_value_to_addr(addr, w.new_val, w.type);
 		}
-		for (auto &it : tx->write_set) {
-			auto &addr = it.first;
-			auto &w = it.second;
-			ByteOffset bo((word_t)addr);
-			Lock *lock = &g_locks_wbetl.get(bo.base_addr);
+		for (Lock *lock : tx->locks_held) {
 			lock->unlock_with_version(tx->id, commit_version);
 		}
 	}
 
-	tx->clear();
+	tx->reset();
 	return true;
 }
 
@@ -442,8 +438,16 @@ write_word_etl(                                               //
 		}
 	}
 
-	// locked
-	tx->locks_held.push_back(lock);
+	// locked — deduplicate locks_held
+	{
+		bool already_held = false;
+		for (Lock *hl : tx->locks_held) {
+			if (hl == lock) { already_held = true; break; }
+		}
+		if (!already_held) {
+			tx->locks_held.push_back(lock);
+		}
+	}
 
 	WriteLogEntry_wbetl w;
 	w.new_val = val;

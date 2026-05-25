@@ -494,6 +494,10 @@ public:
         
         tx->active = false;
         tx->aborted = true;
+        
+        if (tm_jmpbuf_initialized) {
+            siglongjmp(tm_jmpbuf, 1);
+        }
     }
 };
 

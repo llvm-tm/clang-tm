@@ -208,6 +208,15 @@ commit()    //
 				     current_incarnation != r.observed_incarnation)) {
 					abort_tx();
 				}
+				if (is_locked && owner == tx->id) {
+					// Our own write-lock — check for stale read between
+					// read_time and lock_acquisition_time.
+					auto w = tx->write_set.find(it.first);
+					if (w != tx->write_set.end() &&
+					    r.observed_version != w->second.version) {
+						abort_tx();
+					}
+				}
 			}
 		}
 
