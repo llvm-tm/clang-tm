@@ -1,9 +1,9 @@
 // TMInstrumentPass.cpp
 // Main plugin file for Transactional Memory instrumentation
 //
-// Three pipelines:
+// Two pipelines:
 //
-//   tm-instrument (debug-friendly):
+//   tm-instrument (legacy, debug-friendly):
 //     TMGlobalInitPass + TMInstrumentPass
 //     - Clones and instruments non-TX callees in one shot
 //     - No aggressive inlining — works with -O0 -g
@@ -12,21 +12,8 @@
 //   tm-instrument-inline:
 //     TMInitInjectPass + AlwaysInlinerPass + TMInstrumentInlinePass
 //     - Clones callees with alwaysinline, then inlines them into TX body
-//     - Instrumentation happens AFTER inlining (post-inline)
+//     - Enables load/store visibility for inlined callee internals
 //     - Requires -O1+ for AlwaysInlinerPass to work
-//
-//   tm-instrument-then-inline:
-//     TMGlobalInitThenInlinePass + TMInstrumentPass + AlwaysInlinerPass + TMInstrumentInlinePass
-//     - Clones + redirect (no pre-instrumentation), then TMInstrumentPass
-//       instruments TX body + injects tx_begin/end, then AlwaysInlinerPass
-//       inlines clones, then TMInstrumentInlinePass catches residual
-//       loads/stores in the inlined code.
-//     - All loads/stores are instrumented by default (no heuristic filtering).
-//     - Users can opt out per-variable via __attribute__((annotate("tm_local"))).
-//
-// All pipelines use the "always instrument, skip tm_local" strategy:
-// the old heuristic (isSharedPointer + isTMTracedPtr) had false negatives
-// and was removed.  Instrumenting everything is the safe default.
 //
 // This two-pass-per-pipeline design is REQUIRED because:
 //   - Module-level changes (symbol tables, main init) must happen once
@@ -41,6 +28,7 @@
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/Type.h>
@@ -244,7 +232,7 @@ public:
       int n = 0;
       for (auto &F : M)
         if (!F.isDeclaration() && F.getName().contains("_tm_clone")) ++n;
-      TM_DEBUG("[BEFORE_INLINE] _tm_clone function definitions: %d", n);
+      errs() << "[BEFORE_INLINE] _tm_clone function definitions: " << n << "\n";
     }
 
     // When a clone inherits noinline from its original AND has
@@ -348,7 +336,8 @@ public:
         // globals.  Then instrument ALL clones after call redirection.
         Ctx.ClonedMap = &tm_method_instrumentation::cloneTxReachableGraph(
             M, Ctx.TxReachableFuncs, Ctx.H, tm_method_instrumentation::CloneMode::CloneOnly);
-        redirectTXFunctionsToClones(M, Ctx.TxReachableFuncs, *Ctx.ClonedMap);
+        redirectTXFunctionsToClones(M, Ctx.TxReachableFuncs, *Ctx.ClonedMap,
+                                      tm_method_instrumentation::CloneMode::CloneOnly);
         tm_method_instrumentation::instrumentAllClones(*Ctx.ClonedMap, M, Ctx.H);
         modified = true;
     }
@@ -369,17 +358,16 @@ public:
 };
 
 // ===========================================================================
-// PASS 1 (then-inline pipeline): clone + redirect (NO pre-instrumentation)
-//   Clones ALL reachable callees (AlwaysInline mode) without pre-instr. The
-//   subsequent TMInstrumentPass adds tx_begin/end and instruments the TX body
-//   (all loads/stores via the always-instrument default).  Then
-//   AlwaysInlinerPass inlines clones, and TMInstrumentInlinePass catches any
-//   residual loads/stores that weren't in the original TX body.
+// PASS 1 (combined pipeline): clone + instrument + prepare for inlining
+//   Clones ALL reachable callees (AlwaysInline mode), instruments each clone
+//   individually (without NoInline/OptimizeNone), and ensures AlwaysInline
+//   is set so the subsequent AlwaysInlinerPass will inline them into the TX
+//   function body.  After inlining, TMInstrumentPass handles the TX body
+//   (tx_begin/end, residual loads/stores, memory intrinsics).
 //
-//   Pre-inline instrumentation was removed because it buffered local alloca
-//   addresses in the TM write set (e.g., ++tx.pos_ where tx is stack-local),
-//   corrupting local state.  With the always-instrument approach, every
-//   load/store in the TX body and inlined clones gets tm_read/tm_write.
+//   This gives the debugging benefit of per-clone instrumentation
+//   (isolated, easy to verify) with the runtime correctness of the inline
+//   pipeline (all callee internals visible for TM instrumentation).
 // ===========================================================================
 
 class TMGlobalInitThenInlinePass : public PassInfoMixin<TMGlobalInitThenInlinePass>
@@ -394,27 +382,21 @@ public:
 
     if (!Ctx.TxReachableFuncs.empty()) {
         TM_DEBUG("Tx-reachable call graph has %d functions", (int)Ctx.TxReachableFuncs.size());
+        // Clone with AlwaysInline mode so ALL reachable functions are cloned
         Ctx.ClonedMap = &cloneTxReachableGraph(
             M, Ctx.TxReachableFuncs, Ctx.H, CloneMode::AlwaysInline);
         redirectTXFunctionsToClones(M, Ctx.TxReachableFuncs, *Ctx.ClonedMap,
                                       CloneMode::AlwaysInline);
-        // NOTE: We intentionally do NOT instrument clones pre-inline.
-        // Pre-inline instrumentation of clones would buffer local alloca
-        // addresses (e.g., ++tx.pos_) in the TM write set, corrupting
-        // local state. Instead, we rely on the post-inline pass
-        // (TMInstrumentInlinePass) that runs after AlwaysInlinerPass to
-        // instrument loads/stores in the inlined clone code.
-        //
-        // With the always-instrument default, every load/store is
-        // instrumented regardless of pointer provenance — no heuristic
-        // filtering.  Only tm_local-annotated variables are skipped.
-        //
-        // handleMallocFree is also handled post-inline (after inlining,
-        // operator new/delete calls in clone code are inside the TX
-        // function body and caught by TMInstrumentPass or
-        // TMInstrumentInlinePass).
+        // Instrument each clone individually (before inlining).
+        // Unlike instrumentAllClones, we do NOT add NoInline/OptimizeNone —
+        // these clones will be inlined into the TX function body afterwards.
         for (auto &pair : *Ctx.ClonedMap) {
-            TM_DEBUG("Clone-created (no pre-instr): %s", pair.second->getName().str().c_str());
+            Function *Clone = pair.second;
+            auto OrigIt = TMTracedArgs.find(pair.first);
+            if (OrigIt != TMTracedArgs.end())
+                TMTracedArgs[Clone] = OrigIt->second;
+            instrumentLoadsStoresInFunction(Clone, &M, Ctx.H);
+            TM_DEBUG("Pre-inline instrumented clone: %s", Clone->getName().str().c_str());
         }
         modified = true;
     }
@@ -435,36 +417,7 @@ public:
 };
 
 // ===========================================================================
-// PASS 2a (then-inline DEBUG pipeline): inject tx_begin/tx_end into clones
-//   Required when clones are NOT inlined (debug mode) — each clone needs its
-//   own transaction scope for tm_malloc/tm_read/tm_write to work.
-// ===========================================================================
-
-class TMCloneInitPass : public PassInfoMixin<TMCloneInitPass>
-{
-public:
-  PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
-  {
-    TM_DEBUG("TMCloneInitPass: injecting tx_begin/tx_end into clones");
-    const char *SetjmpFunc = M.getTargetTriple().str().find("linux") != std::string::npos
-                               ? "__sigsetjmp" : "sigsetjmp";
-    auto H = TMRuntimeHooks::declareAll(M, M.getContext(), SetjmpFunc);
-    bool modified = false;
-    for (auto &F : M) {
-      if (F.isDeclaration()) continue;
-      if (!F.getName().contains("_tm_clone")) continue;
-      injectTransactionBeginEnd(F, M, H);
-      F.removeFnAttr(llvm::Attribute::NoInline);
-      modified = true;
-    }
-    return modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
-  }
-  static bool isRequired() { return true; }
-};
-
-// ===========================================================================
-// PASS 2 (legacy + then-inline pipeline): tx_begin/end + load/store instrument
-//   Also handles residual loads/stores after then-inline inlining.
+// PASS 2 (legacy pipeline): tx_begin/end + load/store instrument
 // ===========================================================================
 
 class TMInstrumentPass : public PassInfoMixin<TMInstrumentPass>
@@ -487,19 +440,45 @@ public:
 
     if (TMAudit) auditTXFunctionLoadsStores(F, *M);
 
+    // Check if this function already contains clone-instrumented tm_read/tm_write
+    // calls (from inlined instrumented clones). If so, skip handleLoadStore to
+    // avoid over-instrumentation: the clone instrumentation already applied the
+    // correct double-guard (isSharedPointer + isTMTracedPtr), and adding more
+    // instrumentation via handleLoadStore (single guard: isSharedPointer) would
+    // create inconsistencies between tm-buffered and raw accesses to the same
+    // memory (e.g. local std::map tree nodes).
     SmallVector<Instruction *, 16> ToErase;
     SmallVector<CallBase *, 8> MemIntrinsics;
+    bool hasCloneInstrumentation = false;
+    for (auto &BB : F) {
+      for (auto &I : BB) {
+        if (auto *Call = dyn_cast<CallBase>(&I)) {
+          if (Function *Callee = Call->getCalledFunction()) {
+            StringRef N = Callee->getName();
+            if (N.starts_with("tm_read_") || N.starts_with("tm_write_")) {
+              hasCloneInstrumentation = true;
+              break;
+            }
+          }
+        }
+      }
+      if (hasCloneInstrumentation) break;
+    }
+    if (hasCloneInstrumentation) {
+      TM_DEBUG("  Function has clone-instrumented tm_read/tm_write calls, "
+               "skipping handleLoadStore");
+    }
+
     for (auto &BB : F) {
       for (auto InstIt = BB.begin(); InstIt != BB.end();) {
         Instruction *I = &*InstIt++;
         IRBuilder<> B(I->getParent(), I->getIterator());
 #ifndef DISABLE_TM_READ_WRITE
-        if (auto *Call = dyn_cast<CallBase>(I)) {
+        if (auto *Call = dyn_cast<CallBase>(I))
             if (needsMemIntrinsicInstrumentation(Call, *M)) {
                 MemIntrinsics.push_back(Call);
                 continue;
             }
-        }
 #endif
 #ifndef DISABLE_MALLOC_FREE
         if (auto *Call = dyn_cast<CallBase>(I))
@@ -507,18 +486,45 @@ public:
                 continue;
 #endif
 #ifndef DISABLE_TM_READ_WRITE
-        handleLoadStore(I, F, *M, H, ToErase);
+        if (!hasCloneInstrumentation)
+            handleLoadStore(I, F, *M, H, ToErase);
 #endif
       }
     }
-    // Instrument memory intrinsics AFTER all loops (they split basic blocks,
-    // which would invalidate the instruction iterators above).
-    for (auto *Call : MemIntrinsics) {
-        tm_method_instrumentation::instrumentMemoryIntrinsic(Call, *M, H);
-        ToErase.push_back(Call);
-    }
     for (Instruction *I : ToErase) I->eraseFromParent();
     return PreservedAnalyses::none();
+  }
+  static bool isRequired() { return true; }
+};
+
+// ===========================================================================
+// Utility pass: Strip llvm.lifetime.start/end intrinsics for LLVM version
+// portability. LLVM 21 -> 22 changed these from (i64, ptr) to (ptr), causing
+// "Intrinsic has incorrect argument type!" when linking with older LLVM.
+// Lifetime intrinsics are optimization hints only — removing them is always
+// safe.
+// ===========================================================================
+class TMStripLifetimePass : public PassInfoMixin<TMStripLifetimePass>
+{
+public:
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
+  {
+    bool changed = false;
+    for (auto &F : M) {
+      for (auto &BB : F) {
+        for (auto InstIt = BB.begin(); InstIt != BB.end(); ) {
+          Instruction *I = &*InstIt++;
+          if (auto *CI = dyn_cast<CallInst>(I)) {
+            if (CI->getIntrinsicID() == Intrinsic::lifetime_start ||
+                CI->getIntrinsicID() == Intrinsic::lifetime_end) {
+              I->eraseFromParent();
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
   }
   static bool isRequired() { return true; }
 };
@@ -539,6 +545,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
                     MPM.addPass(TMGlobalInitPass());
                     MPM.addPass(
                         createModuleToFunctionPassAdaptor(TMInstrumentPass()));
+                    MPM.addPass(TMStripLifetimePass());
                     return true;
                   }
                   // ---- Inline pipeline (inline callees first, then instrument) ----
@@ -548,30 +555,17 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
                     MPM.addPass(AlwaysInlinerPass());
                     MPM.addPass(
                         createModuleToFunctionPassAdaptor(TMInstrumentInlinePass()));
+                    MPM.addPass(TMStripLifetimePass());
                     return true;
                   }
-                   // ---- Then-inline pipeline (clone + redirect → instrument TX → inline → post-inline) ----
-                  // No pre-instrumentation of clones.  TMInstrumentPass instruments the TX
-                  // body (always-instrument default), then AlwaysInlinerPass inlines clones,
-                  // then TMInstrumentInlinePass catches residual loads/stores in inlined code.
-                  // tm_local annotations are respected to skip known-private variables.
+                  // ---- Combined pipeline (instrument clones, then inline) ----
                   if (Name == "tm-instrument-then-inline") {
                     TM_DEBUG("Registering tm-instrument-then-inline pass pipeline");
                     MPM.addPass(TMGlobalInitThenInlinePass());
-                    MPM.addPass(
-                        createModuleToFunctionPassAdaptor(TMInstrumentPass()));
                     MPM.addPass(AlwaysInlinerPass());
                     MPM.addPass(
-                        createModuleToFunctionPassAdaptor(TMInstrumentInlinePass()));
-                    return true;
-                  }
-                  // ---- Then-inline debug pipeline (instrument clones, instrument TX, no inline) ----
-                  if (Name == "tm-instrument-then-inline-debug") {
-                    TM_DEBUG("Registering tm-instrument-then-inline-debug pass pipeline");
-                    MPM.addPass(TMGlobalInitThenInlinePass());
-                    MPM.addPass(TMCloneInitPass());
-                    MPM.addPass(
                         createModuleToFunctionPassAdaptor(TMInstrumentPass()));
+                    MPM.addPass(TMStripLifetimePass());
                     return true;
                   }
                   return false;

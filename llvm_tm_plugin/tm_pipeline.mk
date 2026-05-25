@@ -7,6 +7,15 @@
 #   3. opt -O3 (optimize instrumented IR)          (.opt.bc)
 #   4. clang++ (link with STM runtime)             (binary)
 #
+# Pipeline variants (TM_INSTRUMENT_PIPELINE):
+#   tm-instrument-inline (default) — inlines then instruments (176 TM ops)
+#   tm-instrument             — clones survive as separate functions (38 TM ops)
+#   tm-instrument-then-inline — instruments clones pre-inline then inlines (204 TM ops)
+#
+# BUILD_TYPE:
+#   RELEASE (default) — tm-instrument-inline, -O3, -O1 link
+#   DEBUG             — tm-instrument, -O0, -O0 -g link (see llvm_tm_plugin/DEBUG.md)
+#
 # Optional: Opaque symbol resolution step (runs between 2 and 4):
 #   tm-resolve-opaque.py resolves system library symbols (e.g., sqrt, cos)
 #   and generates LLVM IR stub declarations for the link step.
@@ -52,6 +61,7 @@
 # Optimization level for the post-instrumentation pass.
 # Default: -O3 (inlines tm_read/tm_write). Set to -O0 for debugging.
 TM_OPT_LEVEL     ?= -O3
+TM_LINK_OPT      ?= -O1
 
 # Compile flags for source → LLVM bitcode (step 1 of pipeline).
 TM_COMPILE_FLAGS ?= -O1 -fno-inline -fno-vectorize -fno-slp-vectorize \
@@ -75,7 +85,7 @@ NOREC_DIR        ?= $(BACKENDS_DIR)/NOrec
 DUDETM_DIR       ?= $(BACKENDS_DIR)/DUDETM
 OUT_DIR          ?= out
 BIN_DIR          ?= bin
-TM_PLUGIN        ?= $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
+TM_PLUGIN        ?= $(BIN_DIR)/libTMInstrument.so
 
 # Include machine-local config (if it exists) for arch-specific flags
 # e.g., TM_DEFINES_tsxsgl = -mrtm
@@ -141,7 +151,9 @@ define tm_compile_ir_debug
 		-fno-stack-protector -pthread
 endef
 
-TM_INSTRUMENT_PIPELINE ?= tm-instrument-inline
+# Default: non-inline pipeline avoids write-set/memory asymmetry for local containers.
+# See AGENTS.md "Key Decisions" for reasoning.
+TM_INSTRUMENT_PIPELINE ?= tm-instrument
 
 define tm_instrument
 $(OPT) -load-pass-plugin=$(TM_PLUGIN) -passes="$(TM_INSTRUMENT_PIPELINE)" $(TM_INSTRUMENT_FLAGS) $(if $(TM_OPAQUE_SYMBOLS_FILE),-tm-opaque-symbols-file=$(TM_OPAQUE_SYMBOLS_FILE)) $1 -o $2
@@ -167,7 +179,7 @@ $(if $(wildcard $(TM_OPAQUE_STUBS)),$(LLVM_LINK) $@.merged.bc $(TM_OPAQUE_STUBS)
 # Optimize merged IR (inlines tm_read/tm_write etc.)
 $(OPT) $(TM_OPT_LEVEL) $@.merged.bc -o $@.merged.opt.bc
 # Final link (TM_LINK_LIBS provides -lm, -lpthread, etc. for opaque functions)
-$(CXX) $(CXXFLAGS) $(TM_DEFINES_$(strip $2)) $@.merged.opt.bc -o $3 $(TM_INCLUDES_$(strip $2)) $(TM_LINK_LIBS)
+$(CXX) -std=c++20 $(TM_LINK_OPT) -pthread $(TM_DEFINES_$(strip $2)) $@.merged.opt.bc -o $3 $(TM_INCLUDES_$(strip $2)) $(TM_LINK_LIBS)
 # Cleanup intermediate files
 rm -f $@.runtime.bc $@.merged.bc $@.merged.opt.bc
 endef

@@ -230,29 +230,31 @@ void tm_end() {
 
 void tm_load_symbols(void*, uint32_t) {}
 
-uint8_t  tm_read_i1(volatile uint8_t*  a) { return *a; }
-uint16_t tm_read_i2(volatile uint16_t* a) { return *a; }
-uint32_t tm_read_i4(volatile uint32_t* a) { return *a; }
-uint64_t tm_read_i8(volatile uint64_t* a) { return *a; }
-float    tm_read_f4(volatile float*    a) { return *a; }
-double   tm_read_f8(volatile double*   a) { return *a; }
-void*    tm_read_ptr(volatile void**   a) { return (void*)*a; }
+uint8_t  tm_read_i1(volatile uint8_t*  a, uint32_t symbol_id) { (void)symbol_id; return *a; }
+uint16_t tm_read_i2(volatile uint16_t* a, uint32_t symbol_id) { (void)symbol_id; return *a; }
+uint32_t tm_read_i4(volatile uint32_t* a, uint32_t symbol_id) { (void)symbol_id; return *a; }
+uint64_t tm_read_i8(volatile uint64_t* a, uint32_t symbol_id) { (void)symbol_id; return *a; }
+float    tm_read_f4(volatile float*    a, uint32_t symbol_id) { (void)symbol_id; return *a; }
+double   tm_read_f8(volatile double*   a, uint32_t symbol_id) { (void)symbol_id; return *a; }
+void*    tm_read_ptr(volatile void**   a, uint32_t symbol_id) { (void)symbol_id; return (void*)*a; }
 
-void* tm_read_z(volatile uint8_t* src, uint64_t len) {
+void* tm_read_z(volatile uint8_t* src, uint64_t len, uint32_t symbol_id) {
+    (void)symbol_id;
     void* buf = malloc(len);
     memcpy(buf, (const void*)src, len);
     return buf;
 }
 
-void tm_write_i1(volatile uint8_t*  a, uint8_t  v) { *a = v; }
-void tm_write_i2(volatile uint16_t* a, uint16_t v) { *a = v; }
-void tm_write_i4(volatile uint32_t* a, uint32_t v) { *a = v; }
-void tm_write_i8(volatile uint64_t* a, uint64_t v) { *a = v; }
-void tm_write_f4(volatile float*    a, float    v) { *a = v; }
-void tm_write_f8(volatile double*   a, double   v) { *a = v; }
-void tm_write_ptr(volatile void**   a, void*    v) { *a = v; }
+void tm_write_i1(volatile uint8_t*  a, uint8_t  v, uint32_t symbol_id) { (void)symbol_id; *a = v; }
+void tm_write_i2(volatile uint16_t* a, uint16_t v, uint32_t symbol_id) { (void)symbol_id; *a = v; }
+void tm_write_i4(volatile uint32_t* a, uint32_t v, uint32_t symbol_id) { (void)symbol_id; *a = v; }
+void tm_write_i8(volatile uint64_t* a, uint64_t v, uint32_t symbol_id) { (void)symbol_id; *a = v; }
+void tm_write_f4(volatile float*    a, float    v, uint32_t symbol_id) { (void)symbol_id; *a = v; }
+void tm_write_f8(volatile double*   a, double   v, uint32_t symbol_id) { (void)symbol_id; *a = v; }
+void tm_write_ptr(volatile void**   a, void*    v, uint32_t symbol_id) { (void)symbol_id; *a = v; }
 
-void tm_write_z(volatile uint8_t* d, volatile uint8_t* s, uint64_t l) {
+void tm_write_z(volatile uint8_t* d, volatile uint8_t* s, uint64_t l, uint32_t symbol_id) {
+    (void)symbol_id;
     memcpy((void*)d, (const void*)s, l);
 }
 void tm_memset(volatile uint8_t* a, uint8_t v, uint64_t l) {
