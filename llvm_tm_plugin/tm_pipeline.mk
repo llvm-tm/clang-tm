@@ -67,16 +67,19 @@ TM_LINK_OPT      ?= -O1
 TM_COMPILE_FLAGS ?= -O1 -fno-inline -fno-vectorize -fno-slp-vectorize \
                     -fno-unroll-loops -fno-stack-protector -pthread
 
-# Discover LLVM tools via llvm-config (handles versioned installs)
-LLVM_CONFIG      := $(shell command -v llvm-config-22 2>/dev/null || command -v llvm-config-22.1 2>/dev/null || command -v llvm-config 2>/dev/null || echo "")
-LLVM_BINDIR      := $(shell $(LLVM_CONFIG) --bindir 2>/dev/null)
-LLVM_MAJOR       := $(firstword $(subst ., ,$(shell $(LLVM_CONFIG) --version 2>/dev/null)))
-CXX              := $(or $(wildcard $(LLVM_BINDIR)/clang++),$(shell command -v clang++-$(LLVM_MAJOR) 2>/dev/null),clang++)
-OPT              := $(or $(wildcard $(LLVM_BINDIR)/opt),$(shell command -v opt-$(LLVM_MAJOR) 2>/dev/null),opt)
-LLVM_LINK        := $(or $(wildcard $(LLVM_BINDIR)/llvm-link),$(shell command -v llvm-link-$(LLVM_MAJOR) 2>/dev/null),llvm-link)
 CXXFLAGS         ?= -std=c++20 -O1 -pthread
 LLVM_PLUGIN_DIR  := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BACKENDS_DIR     ?= $(abspath $(LLVM_PLUGIN_DIR)/../backends)
+
+# Discover LLVM tools via clang-tm script (handles versioned installs robustly)
+# clang-tm auto-discovers the correct clang++, opt, and llvm-link via llvm-config
+CLANG_TM         := $(LLVM_PLUGIN_DIR)/clang-tm
+CXX              := $(shell $(CLANG_TM) --print-tool cxx 2>/dev/null || \
+                       $(or $(shell command -v clang++-22 2>/dev/null),clang++))
+OPT              := $(shell $(CLANG_TM) --print-tool opt 2>/dev/null || \
+                       $(or $(shell command -v opt-22 2>/dev/null),opt))
+LLVM_LINK        := $(shell $(CLANG_TM) --print-tool llvm-link 2>/dev/null || \
+                       $(or $(shell command -v llvm-link-22 2>/dev/null),llvm-link))
 RUNTIMES_DIR     ?= $(BACKENDS_DIR)/runtimes
 TINYSTM_DIR      ?= $(BACKENDS_DIR)/TinySTM
 TL2_DIR          ?= $(BACKENDS_DIR)/TL2
@@ -142,13 +145,13 @@ TM_LINK_LIBS ?=
 # ---- Canned recipes (individual steps) ----
 
 define tm_compile_ir
-	$(CXX) -std=c++20 $(TM_COMPILE_FLAGS) -emit-llvm -c $1 -o $2
+	$(CLANG_TM) --compile-only -std=c++20 $(TM_COMPILE_FLAGS) $1 -o $2
 endef
 
 define tm_compile_ir_debug
-	$(CXX) -std=c++20 -O0 -g -fno-inline -emit-llvm -c $1 -o $2 \
+	$(CLANG_TM) --compile-only -std=c++20 -O0 -g -fno-inline \
 		-fno-vectorize -fno-slp-vectorize -fno-unroll-loops \
-		-fno-stack-protector -pthread
+		-fno-stack-protector -pthread $1 -o $2
 endef
 
 # Default: non-inline pipeline avoids write-set/memory asymmetry for local containers.
@@ -156,11 +159,14 @@ endef
 TM_INSTRUMENT_PIPELINE ?= tm-instrument
 
 define tm_instrument
-$(OPT) -load-pass-plugin=$(TM_PLUGIN) -passes="$(TM_INSTRUMENT_PIPELINE)" $(TM_INSTRUMENT_FLAGS) $(if $(TM_OPAQUE_SYMBOLS_FILE),-tm-opaque-symbols-file=$(TM_OPAQUE_SYMBOLS_FILE)) $1 -o $2
+$(CLANG_TM) --instrument-only --plugin=$(TM_PLUGIN) \
+    -passes="$(TM_INSTRUMENT_PIPELINE)" $(TM_INSTRUMENT_FLAGS) \
+    $(if $(TM_OPAQUE_SYMBOLS_FILE),--opaque-symbols-file=$(TM_OPAQUE_SYMBOLS_FILE)) \
+    $1 -o $2
 endef
 
 define tm_optimize
-$(OPT) $(TM_OPT_LEVEL) $1 -o $2
+$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $1 -o $2
 endef
 
 define tm_resolve_opaque
@@ -169,19 +175,12 @@ $(TM_RESOLVE_OPAQUE) --symbols $1 --output $(TM_OPAQUE_STUBS_DIR)
 endef
 
 define tm_link
-# Compile runtime to bitcode (no -fno-inline — runtime must be eligible for inlining)
-# Use TM_RUNTIME_OPT (default -O1) so tm_read/tm_write can inline even at -O0
-$(CXX) -std=c++20 $(or $(TM_RUNTIME_OPT),-O1) -emit-llvm -c $(TM_RUNTIME_$(strip $2)) -o $@.runtime.bc $(TM_DEFINES_$(strip $2)) $(TM_INCLUDES_$(strip $2)) -fno-stack-protector -pthread
-# Merge instrumented IR with runtime bitcode
-$(LLVM_LINK) $1 $@.runtime.bc -o $@.merged.bc
-# Optionally link resolved opaque stubs
-$(if $(wildcard $(TM_OPAQUE_STUBS)),$(LLVM_LINK) $@.merged.bc $(TM_OPAQUE_STUBS) -o $@.merged.bc)
-# Optimize merged IR (inlines tm_read/tm_write etc.)
-$(OPT) $(TM_OPT_LEVEL) $@.merged.bc -o $@.merged.opt.bc
-# Final link (TM_LINK_LIBS provides -lm, -lpthread, etc. for opaque functions)
-$(CXX) -std=c++20 $(TM_LINK_OPT) -pthread $(TM_DEFINES_$(strip $2)) $@.merged.opt.bc -o $3 $(TM_INCLUDES_$(strip $2)) $(TM_LINK_LIBS)
-# Cleanup intermediate files
-rm -f $@.runtime.bc $@.merged.bc $@.merged.opt.bc
+# Use clang-tm in link-only mode: compiles runtime to BC, merges, optimizes, links.
+# $(1) = .opt.bc input, $(2) = backend name, $(3) = output binary
+$(CLANG_TM) --link-only --runtime=$(TM_RUNTIME_$(strip $2)) \
+    $(TM_LINK_OPT) -pthread \
+    $(TM_DEFINES_$(strip $2)) $(TM_INCLUDES_$(strip $2)) \
+    $(strip $1) -o $(strip $3)
 endef
 
 # ---- Convenience: create pattern rules ----

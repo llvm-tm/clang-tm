@@ -172,6 +172,8 @@ fi
 
 if [ ! -f "$PYTHON_SCRIPT" ]; then
     echo "  (skipping Python tests: $PYTHON_SCRIPT not found)"
+elif ! "$VENV_PYTHON" -c "import clang" 2>/dev/null; then
+    echo "  (skipping Python tests: 'clang' module not available; install libclang Python bindings)"
 else
     PY_OUTDIR="/tmp/tm_py_test"
     for test_name in test_types test_threads test_retry; do

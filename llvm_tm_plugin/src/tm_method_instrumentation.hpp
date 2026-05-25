@@ -257,6 +257,30 @@ static void instrumentLoadsStoresInFunction(Function *F,
                << " STORE " << (tStores - sStores) << "\n";
     }
 
+    // Helper: check if a function Argument only ever receives alloca addresses
+    // at all call sites.  If so, stores to this raw Argument are writing to the
+    // caller's stack — use a regular store (no tm_write) to avoid stack
+    // corruption during write-back at commit time.
+    DenseMap<unsigned, bool> ArgIsAllocaDestCache;
+    auto argIsAllocaDest = [&](const Argument *Arg) -> bool {
+        auto It = ArgIsAllocaDestCache.find(Arg->getArgNo());
+        if (It != ArgIsAllocaDestCache.end()) return It->second;
+        bool allAlloca = true;
+        const Function *Parent = Arg->getParent();
+        for (const User *U : Parent->users()) {
+            auto *CB = dyn_cast<const CallBase>(U);
+            if (!CB || CB->getCalledFunction() != Parent) continue;
+            if (Arg->getArgNo() >= CB->arg_size()) { allAlloca = false; break; }
+            const Value *Actual = CB->getArgOperand(Arg->getArgNo())->stripPointerCasts();
+            if (!isa<AllocaInst>(getBaseObjectNoLoad(Actual))) {
+                allAlloca = false;
+                break;
+            }
+        }
+        ArgIsAllocaDestCache[Arg->getArgNo()] = allAlloca;
+        return allAlloca;
+    };
+
     SmallVector<Instruction *, 16> ToErase;
     SmallVector<CallBase *, 8> MemIntrinsics;
     for (auto &BB : *F) {
@@ -279,7 +303,10 @@ static void instrumentLoadsStoresInFunction(Function *F,
 #ifndef DISABLE_TM_READ_WRITE
             if (auto *Load = dyn_cast<LoadInst>(I)) {
                 Value *Ptr = Load->getPointerOperand();
-                if (isa<AllocaInst>(getBaseObject(Ptr))) continue;
+                // Skip loads from alloca ADDRESSES (stack is per-thread, no TM needed).
+                // Use getBaseObjectNoLoad to avoid tracing through LoadInst, which
+                // would incorrectly skip loads from heap addresses loaded from allocas.
+                if (isa<AllocaInst>(getBaseObjectNoLoad(Ptr))) continue;
                 if (isTMLocalVar(Ptr, *M)) continue;
                 IRBuilder<> Builder(Load);
                 if (auto *Call = emitTMRead(Builder, Ptr, Load->getType(), H)) {
@@ -288,8 +315,15 @@ static void instrumentLoadsStoresInFunction(Function *F,
                 }
             } else if (auto *Store = dyn_cast<StoreInst>(I)) {
                 Value *Ptr = Store->getPointerOperand();
-                if (isa<AllocaInst>(getBaseObject(Ptr))) continue;
+                // Skip stores to alloca ADDRESSES (stack is per-thread, no TM needed).
+                if (isa<AllocaInst>(getBaseObjectNoLoad(Ptr))) continue;
                 if (isTMLocalVar(Ptr, *M)) continue;
+                // Skip stores to alloca-derived addresses (including GEP'd fields of
+                // an alloca-only Argument).  These are callees writing to the caller's
+                // stack — tm_write would create write-set entries with INVALID stack
+                // addresses, corrupting the stack on commit.
+                if (auto *Arg = dyn_cast<Argument>(getBaseObjectNoLoad(Ptr)))
+                    if (argIsAllocaDest(Arg)) continue;
                 IRBuilder<> Builder(Store);
                 if (emitTMWrite(Builder, Ptr, Store->getValueOperand(), H))
                     ToErase.push_back(Store);
@@ -425,17 +459,14 @@ computeClonableFunctions(Module &M,
         if (F->isDeclaration()) continue;
         if (F->getName().starts_with("tm_")) continue;
         if (hasAnnotation(*F, "transaction")) continue;
-        // In AlwaysInline mode, clone ALL reachable functions.
-        // alwaysinline + inlining into the TX body ensures stack-allocated
-        // variables' addresses never outlive the inline frame, so TM
-        // instrumentation of all loads/stores is safe.
-        // CloneOnly mode must NOT do this — it creates standalone clones
-        // with NoInline+OptimizeNone that live beyond the calling function's
-        // stack frame.  Instrumenting all loads/stores in those clones would
-        // write TM-buffered values to stack addresses that become invalid
-        // after the clone returns, corrupting memory.  CloneOnly should only
-        // clone functions with TM-traced pointer args.
-        if (Mode == CloneMode::AlwaysInline) {
+        // Clone ALL reachable functions.  This ensures functions like
+        // destructors that write to TM globals through internal references
+        // (e.g., v_.end_ = pos_) are cloned and instrumented, so their
+        // stores go through tm_write and are properly rollback-safe.
+        // The argIsAllocaDest guard (with getBaseObjectNoLoad) prevents
+        // stack-address write-set entries by skipping tm_write for stores
+        // to alloca-only Argument destinations (including GEP'd fields).
+        if (Mode == CloneMode::AlwaysInline || Mode == CloneMode::CloneOnly) {
             Clonable.insert(F);
             continue;
         }
@@ -455,7 +486,7 @@ computeClonableFunctions(Module &M,
     TM_DEBUG("computeClonableFunctions: %d functions clonable%s",
              (int)Clonable.size(),
              Mode == CloneMode::AlwaysInline ? " (AlwaysInline: ALL)" :
-             Mode == CloneMode::CloneOnly ? " (CloneOnly: TM-traced)" : " (TM-traced)");
+             Mode == CloneMode::CloneOnly ? " (CloneOnly: ALL)" : " (TM-traced)");
     return Clonable;
 }
 
@@ -472,13 +503,12 @@ static void redirectCallsToClones(Function &F, Module &M,
     //   Pass 2: apply the redirects
     SmallVector<std::pair<CallBase *, Function *>, 32> ToRedirect;
 
-    // In AlwaysInline mode, ALL reachable functions have clones and all
-    // calls between them must be redirected.  This lets the inliner inline
-    // the full transitive closure into the TX body.  CloneOnly must NOT do
-    // this: it creates standalone clones with NoInline+OptimizeNone, and
-    // redirecting all calls would route stack-local function calls through
-    // instrumented clones, causing TM writes to stale stack addresses.
-    if (Mode == CloneMode::AlwaysInline) {
+    // Redirect ALL cloned calls unconditionally.  The argIsAllocaDest
+    // guard (with getBaseObjectNoLoad) prevents stack-address write-set
+    // entries by skipping tm_write for stores to alloca-only Arguments
+    // (including GEP'd fields), so both AlwaysInline and CloneOnly modes
+    // are safe to redirect all calls.
+    if (Mode == CloneMode::AlwaysInline || Mode == CloneMode::CloneOnly) {
         for (auto &BB : F) {
             for (auto &I : BB) {
                 auto *Call = dyn_cast<CallBase>(&I);
@@ -538,15 +568,6 @@ static void redirectCallsToClones(Function &F, Module &M,
             }
         }
     }
-    // if (!ToRedirect.empty()) { // TODO: put inside TM_DEBUG or other debug guard
-    //     errs() << "[VERIFY] redirectCallsToClones: " << ToRedirect.size()
-    //            << " calls redirected in " << F.getName() << "\n";
-    //     for (auto &P : ToRedirect) {
-    //         CallBase *CB = P.first;
-    //         Function *Callee = CB->getCalledFunction();
-    //         errs() << "  -> now calls: " << (Callee ? Callee->getName() : "null") << "\n";
-    //     }
-    // }
 }
 
 // Clone all non-TX functions in the TX-reachable call graph.

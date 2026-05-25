@@ -248,12 +248,30 @@ commit()    //
 			}
 		}
 
+		// Unconditional read-set validation — prevents lost updates when
+		// two concurrent TXs both read and write the same address without
+		// lock contention or clock gaps.  Without this check, both TXs
+		// commit with stale read-set entries (e.g., g_sum read as 100 by
+		// both, each adds 50, both write 150 — one increment is lost).
+		if (!validate()) {
+			abort_tx("read_validation");
+		}
+
 		// increment_clock(tx->id); // Reading above and incrementing here does not work
 
 		// Write-back phase
 		for (auto &it : tx->write_set) {
 			auto &addr = it.first;
 			auto &w = it.second;
+			if ((uintptr_t)addr > 0x7FFFFFFFFFFFULL) {
+				fprintf(stderr, "BAD WRITE-BACK ADDR: addr=%p type=%d val.u8=%llu\n",
+				        addr, (int)w.type, (unsigned long long)w.new_val.u8);
+				void *bt[16];
+				int n = backtrace(bt, 16);
+				backtrace_symbols_fd(bt, n, 2);
+				// Skip this entry but continue (to see how many more bad entries exist)
+				continue;
+			}
 			ByteOffset bo((word_t)addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 			write_value_to_addr(addr, w.new_val, w.type);
@@ -592,6 +610,21 @@ write_word_ctl(                                               //
 	// function evaluates a pointer-to-integer expression for a local
 	// variable — the resulting integer looks like a tiny address.
 	if (addr == nullptr || (uint64_t)addr < 0x100000) {
+		return;
+	}
+
+	// Detect kernel-space addresses (typical vector-internal pointer corruption)
+	// and dump a stack trace for debugging.
+	if ((uintptr_t)addr > 0x7FFFFFFFFFFFULL) {
+		static std::atomic<int> g_dbg_once{0};
+		if (g_dbg_once.fetch_add(1) == 0) {
+			fprintf(stderr, "\n[DBG] BAD WRITE addr=%p type=%d val.u8=%llu\n",
+			        addr, (int)sz, (unsigned long long)val.u8);
+			void *bt[32];
+			int n = backtrace(bt, 32);
+			backtrace_symbols_fd(bt, n, 2);
+			fprintf(stderr, "[DBG] Continuing...\n");
+		}
 		return;
 	}
 

@@ -19,6 +19,8 @@ static const OpaqueSafeEntry KnownSafeOpaqueTable[] = {
     {"llvm.", true},
     {"__cxa_", true}, {"_ZSt", true}, {"_ZNSt", true}, {"_ZNKSt", true}, {"_Unwind", true},
     {"pthread_", true},
+    {"_ZNSaIcE", true},
+    {"_ZNSaIcEC2ERKS_", false},
     {"printf", false}, {"fprintf", false}, {"fflush", false}, {"puts", false},
     {"putchar", false}, {"putc", false}, {"snprintf", false}, {"sprintf", false},
     {"exit", false}, {"abort", false},
@@ -28,7 +30,7 @@ static const OpaqueSafeEntry KnownSafeOpaqueTable[] = {
     {"atoi", false}, {"atol", false}, {"atoll", false}, {"atof", false},
     {"abs", false}, {"labs", false}, {"llabs", false},
     {"bzero", false},
-    {"memcpy", false}, {"memset", false}, {"memmove", false},
+    {"memcpy", false}, {"memset", false}, {"memmove", false}, {"memcmp", false},
     {"wmemchr", false},
     {"posix_memalign", false},
     {"drand48", false}, {"srand48", false},
@@ -46,6 +48,9 @@ static const OpaqueSafeEntry KnownSafeWithTMArgsTable[] = {
     {"memcmp", false},
     {"_ZNKSt8__detail20_Prime_rehash_policy14_M_need_rehashEmmm", false},
     {"strlen", false},
+    {"_ZSt11_Hash_bytesPKvmm", false},
+    {"_ZNSaIcEC2ERKS_", false},
+    {"_ZNSaIcED2Ev", false},
 };
 
 // Syscall patterns — symbols matching these patterns are safe (kernel handles races)

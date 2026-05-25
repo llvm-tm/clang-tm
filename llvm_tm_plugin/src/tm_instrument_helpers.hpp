@@ -329,7 +329,8 @@ static bool handleMallocFree(CallBase *Call, IRBuilder<> &B,
 }
 
 // Default: instrument ALL loads/stores in TM transaction functions.
-// Only skip if the user has annotated the variable with tm_local.
+// Skip stack-allocated variables (allocas) — they are thread-private and
+// their addresses change after setjmp restart.  Also skip tm_local.
 // This replaces the old heuristic-based approach (isSharedPointer +
 // isTMTracedPtr) which had false negatives causing data corruption.
 static bool handleLoadStore(Instruction *I, Function &F, Module &M,
@@ -337,6 +338,8 @@ static bool handleLoadStore(Instruction *I, Function &F, Module &M,
                              SmallVectorImpl<Instruction *> &ToErase)
 {
     if (auto *Load = dyn_cast<LoadInst>(I)) {
+        if (isa<AllocaInst>(getBaseObject(Load->getPointerOperand())))
+            return false;
         // Skip tm_local-annotated variables — user asserts they are thread-private.
         if (isTMLocalVar(Load->getPointerOperand(), M))
             return false;
@@ -347,33 +350,21 @@ static bool handleLoadStore(Instruction *I, Function &F, Module &M,
             return true;
         }
     } else if (auto *Store = dyn_cast<StoreInst>(I)) {
+        if (isa<AllocaInst>(getBaseObject(Store->getPointerOperand())))
+            return false;
         if (isTMLocalVar(Store->getPointerOperand(), M))
             return false;
         IRBuilder<> B(Store);
         if (emitTMWrite(B, Store->getPointerOperand(), Store->getValueOperand(), H))
             ToErase.push_back(Store);
         return true;
-    } else if (auto *RMW = dyn_cast<AtomicRMWInst>(I)) {
-        if (isTMLocalVar(RMW->getPointerOperand(), M))
-            return false;
-        IRBuilder<> B(RMW);
-        Value *Old = emitTMRead(B, RMW->getPointerOperand(), RMW->getType(), H);
-        if (!Old) return false;
-        Value *New = nullptr;
-        switch (RMW->getOperation()) {
-        case AtomicRMWInst::Add:    New = B.CreateAdd(Old, RMW->getValOperand()); break;
-        case AtomicRMWInst::Sub:    New = B.CreateSub(Old, RMW->getValOperand()); break;
-        case AtomicRMWInst::And:    New = B.CreateAnd(Old, RMW->getValOperand()); break;
-        case AtomicRMWInst::Or:     New = B.CreateOr(Old, RMW->getValOperand()); break;
-        case AtomicRMWInst::Xor:    New = B.CreateXor(Old, RMW->getValOperand()); break;
-        case AtomicRMWInst::Xchg:   New = RMW->getValOperand(); break;
-        default: return false;
-        }
-        if (emitTMWrite(B, RMW->getPointerOperand(), New, H)) {
-            RMW->replaceAllUsesWith(Old);
-            ToErase.push_back(RMW);
-            return true;
-        }
+    } else if (isa<AtomicRMWInst>(I) || isa<AtomicCmpXchgInst>(I)) {
+        // Atomic instructions (fetch_add, cmpxchg, etc.) must NOT be broken
+        // into non-atomic tm_read + op + tm_write — that would lose the
+        // atomicity guarantee, causing lost updates under concurrent TXs.
+        // The TM protocol cannot provide atomicity for compound operations;
+        // only the hardware can via atomic instructions.  Skip them entirely.
+        return false;
     }
     return false;
 }
