@@ -126,13 +126,15 @@ $(eval $(call tm_target, myapp_tinystm, myapp.cpp, tinystm))
 
 ### Manual build (without tm_pipeline.mk)
 
+Default pipeline `tm-instrument-inline` (inlines clones then instruments):
+
 ```sh
 # Step 1: compile to LLVM IR
 clang++ -std=c++20 -O3 -fno-inline -emit-llvm -c myapp.cpp -o out/myapp.bc
 
 # Step 2: instrument with the TM plugin
 opt -load-pass-plugin=bin/libTMInstrument.so \
-    -passes="tm-instrument" out/myapp.bc -o out/myapp.instr.bc
+    -passes="tm-instrument-inline" out/myapp.bc -o out/myapp.instr.bc
 
 # Step 3: optimise the instrumented IR
 opt -O3 out/myapp.instr.bc -o out/myapp.opt.bc
@@ -143,6 +145,19 @@ clang++ -std=c++20 -O3 out/myapp.opt.bc \
     -DDESIGN_WBCTL -Ibackends/TinySTM -Ibackends \
     -o bin/myapp_tinystm
 ```
+
+Non-inline pipeline (for debugging, clones survive as separate functions):
+
+```sh
+# Step 2: use tm-instrument pipeline
+opt -load-pass-plugin=bin/libTMInstrument.so \
+    -passes="tm-instrument" out/myapp.bc -o out/myapp.instr.bc
+
+# Step 3: use -O0 to preserve clone functions for breakpoints
+opt -O0 out/myapp.instr.bc -o out/myapp.opt.bc
+```
+
+See `llvm_tm_plugin/DEBUG.md` for the full debugging guide.
 
 ## Thread-Local Variables
 

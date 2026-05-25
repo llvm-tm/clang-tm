@@ -55,21 +55,21 @@ struct TMRuntimeHooks {
         h.realloc_fn       = hook("tm_realloc", i8PtrTy, {i8PtrTy, i64Ty});
         h.free_fn          = hook("tm_free", voidTy, {i8PtrTy});
 
-        h.read_i1  = hook("tm_read_i1", i8Ty, {i8PtrTy});
-        h.read_i2  = hook("tm_read_i2", i16Ty, {i8PtrTy});
-        h.read_i4  = hook("tm_read_i4", i32Ty, {i8PtrTy});
-        h.read_i8  = hook("tm_read_i8", i64Ty, {i8PtrTy});
-        h.read_f4  = hook("tm_read_f4", f32Ty, {i8PtrTy});
-        h.read_f8  = hook("tm_read_f8", f64Ty, {i8PtrTy});
-        h.read_ptr = hook("tm_read_ptr", i8PtrTy, {i8PtrTy});
+        h.read_i1  = hook("tm_read_i1", i8Ty, {i8PtrTy, i32Ty});
+        h.read_i2  = hook("tm_read_i2", i16Ty, {i8PtrTy, i32Ty});
+        h.read_i4  = hook("tm_read_i4", i32Ty, {i8PtrTy, i32Ty});
+        h.read_i8  = hook("tm_read_i8", i64Ty, {i8PtrTy, i32Ty});
+        h.read_f4  = hook("tm_read_f4", f32Ty, {i8PtrTy, i32Ty});
+        h.read_f8  = hook("tm_read_f8", f64Ty, {i8PtrTy, i32Ty});
+        h.read_ptr = hook("tm_read_ptr", i8PtrTy, {i8PtrTy, i32Ty});
 
-        h.write_i1  = hook("tm_write_i1", voidTy, {i8PtrTy, i8Ty});
-        h.write_i2  = hook("tm_write_i2", voidTy, {i8PtrTy, i16Ty});
-        h.write_i4  = hook("tm_write_i4", voidTy, {i8PtrTy, i32Ty});
-        h.write_i8  = hook("tm_write_i8", voidTy, {i8PtrTy, i64Ty});
-        h.write_f4  = hook("tm_write_f4", voidTy, {i8PtrTy, f32Ty});
-        h.write_f8  = hook("tm_write_f8", voidTy, {i8PtrTy, f64Ty});
-        h.write_ptr = hook("tm_write_ptr", voidTy, {i8PtrTy, i8PtrTy});
+        h.write_i1  = hook("tm_write_i1", voidTy, {i8PtrTy, i8Ty, i32Ty});
+        h.write_i2  = hook("tm_write_i2", voidTy, {i8PtrTy, i16Ty, i32Ty});
+        h.write_i4  = hook("tm_write_i4", voidTy, {i8PtrTy, i32Ty, i32Ty});
+        h.write_i8  = hook("tm_write_i8", voidTy, {i8PtrTy, i64Ty, i32Ty});
+        h.write_f4  = hook("tm_write_f4", voidTy, {i8PtrTy, f32Ty, i32Ty});
+        h.write_f8  = hook("tm_write_f8", voidTy, {i8PtrTy, f64Ty, i32Ty});
+        h.write_ptr = hook("tm_write_ptr", voidTy, {i8PtrTy, i8PtrTy, i32Ty});
 
         return h;
     }
@@ -81,14 +81,15 @@ static CallInst *emitTMRead(IRBuilder<> &B, Value *Ptr, Type *Ty,
                             const TMRuntimeHooks &H) {
     auto *i8PtrTy = PointerType::getUnqual(B.getContext());
     Value *PC = B.CreateBitCast(Ptr, i8PtrTy);
-    if (Ty->isIntegerTy(8))  return B.CreateCall(H.read_i1, {PC});
-    if (Ty->isIntegerTy(16)) return B.CreateCall(H.read_i2, {PC});
-    if (Ty->isIntegerTy(32)) return B.CreateCall(H.read_i4, {PC});
-    if (Ty->isIntegerTy(64)) return B.CreateCall(H.read_i8, {PC});
-    if (Ty->isFloatTy())     return B.CreateCall(H.read_f4, {PC});
-    if (Ty->isDoubleTy())    return B.CreateCall(H.read_f8, {PC});
+    Value *SID = B.getInt32(0);
+    if (Ty->isIntegerTy(8))  return B.CreateCall(H.read_i1, {PC, SID});
+    if (Ty->isIntegerTy(16)) return B.CreateCall(H.read_i2, {PC, SID});
+    if (Ty->isIntegerTy(32)) return B.CreateCall(H.read_i4, {PC, SID});
+    if (Ty->isIntegerTy(64)) return B.CreateCall(H.read_i8, {PC, SID});
+    if (Ty->isFloatTy())     return B.CreateCall(H.read_f4, {PC, SID});
+    if (Ty->isDoubleTy())    return B.CreateCall(H.read_f8, {PC, SID});
     if (Ty->isPointerTy()) {
-        Value *V = B.CreateCall(H.read_ptr, {PC});
+        Value *V = B.CreateCall(H.read_ptr, {PC, SID});
         return cast<CallInst>(B.CreateBitCast(V, Ty));
     }
     // TODO: FixedVectorType support (disabled — needs GEP with correct element type)
@@ -99,17 +100,18 @@ static bool emitTMWrite(IRBuilder<> &B, Value *Ptr, Value *Val,
                         const TMRuntimeHooks &H) {
     auto *i8PtrTy = PointerType::getUnqual(B.getContext());
     Value *PC = B.CreateBitCast(Ptr, i8PtrTy);
+    Value *SID = B.getInt32(0);
     Type *Ty = Val->getType();
-    if (Ty->isIntegerTy(8))  { B.CreateCall(H.write_i1, {PC, Val}); return true; }
-    if (Ty->isIntegerTy(16)) { B.CreateCall(H.write_i2, {PC, Val}); return true; }
-    if (Ty->isIntegerTy(32)) { B.CreateCall(H.write_i4, {PC, Val}); return true; }
-    if (Ty->isIntegerTy(64)) { B.CreateCall(H.write_i8, {PC, Val}); return true; }
-    if (Ty->isFloatTy())     { B.CreateCall(H.write_f4, {PC, Val}); return true; }
-    if (Ty->isDoubleTy())    { B.CreateCall(H.write_f8, {PC, Val}); return true; }
+    if (Ty->isIntegerTy(8))  { B.CreateCall(H.write_i1, {PC, Val, SID}); return true; }
+    if (Ty->isIntegerTy(16)) { B.CreateCall(H.write_i2, {PC, Val, SID}); return true; }
+    if (Ty->isIntegerTy(32)) { B.CreateCall(H.write_i4, {PC, Val, SID}); return true; }
+    if (Ty->isIntegerTy(64)) { B.CreateCall(H.write_i8, {PC, Val, SID}); return true; }
+    if (Ty->isFloatTy())     { B.CreateCall(H.write_f4, {PC, Val, SID}); return true; }
+    if (Ty->isDoubleTy())    { B.CreateCall(H.write_f8, {PC, Val, SID}); return true; }
     if (Ty->isPointerTy()) {
         auto *i8PtrTy2 = PointerType::getUnqual(B.getContext());
         Value *VC = B.CreateBitCast(Val, i8PtrTy2);
-        B.CreateCall(H.write_ptr, {PC, VC});
+        B.CreateCall(H.write_ptr, {PC, VC, SID});
         return true;
     }
     // TODO: FixedVectorType support (disabled)

@@ -4,6 +4,7 @@
 Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures for LLVM 22.
 
 ## Done
+- **Makefile from-clean chain fix**: `TM_PLUGIN` in `tm_pipeline.mk` changed from absolute path (`$(LLVM_PLUGIN_DIR)/bin/...`) to relative (`$(BIN_DIR)/...`), matching the build rules. GNU Make 4.4 treats absolute and relative paths as different targets, so the pattern rule prerequisite `$(TM_PLUGIN)` never matched `bin/libTMInstrument.so` from clean state. Fixed — `make clean && make out/foo.instr.bc` now works in one invocation.
 - `test_single_push` hang: FIXED via `getBaseObject()` + `Use`-traversal in `handleLoadStore`.
 - `local_containers_test` SIGABRT: **FIXED** — recursive `__tree_deleter_tm_clone` stayed non-inlined, its `_ZdlPvmSt11align_val_t` calls invisible to `handleMallocFree`. Dual fix: (1) `tm_untrack_spec_alloc()` marks freed ptrs in spec_alloc list by setting `node->ptr = nullptr`; (2) `TMInstrumentInlinePass` extended to also process `_tm_clone` functions, intercepting deletes inside surviving clones. **PASS at 1t/2t/4t**.
 - `vector_realloc_test` data corruption: **FIXED** — write-set type-mismatch when sub-word TM reads hit UINT64 write-set entries. Read/write functions now merge/extract sub-word values from wider UINT64 entries.
@@ -56,18 +57,45 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - **STMbench7 hangs with ALL TM backends**: First long traversal operation (e.g., `op_lt3` — range-for over `g_compositeParts`) hangs with WBCTL/SwissTM/NOrec at 1 thread. Not data-structure-specific (occurs even without any map operations). Singlelock and uninstrumented work fine. Bank benchmark works fine (proves pipeline intact). Needs investigation — possible bug in tm_read during vector iterator operations inside long-running TX.
 - **STAMP Labyrinth still slow with inline pipeline**: Even with 8× reduction from UINT64 memcpy, the first labyrinth path doesn't complete within 60s. The `do_expansion` BFS loop generates thousands of TM read/write operations per path. Non-inline pipeline completes in ~5ms. Root cause: inline pipeline instruments ALL STL code (vector, deque iterators, queue internals) inside the TX, creating additional TM operations beyond the grid memcpy. Possible solutions: (a) apply `tm_local` annotations to labyrinth helper functions' internal variables, (b) use the non-inline pipeline for long-running TX functions, (c) add a per-benchmark pipeline override.
 
+## REGRESSION: CloneOnly ALL-functions mode (f35d19e) breaks tm-instrument pipeline
+
+### SYMPTOMS
+`stamp_tinystm -t 1 -b labyrinth` crashes with SIGSEGV (NULL pointer deref in `labyrinth_route`). Affects ALL 3 pipelines that use CloneOnly mode: `tm-instrument`, `tm-instrument-inline`, `tm-instrument-then-inline`. Crash is at runtime inside the TX function when a clone returns a null pointer (failed tm_read or stale data).
+
+### ROOT CAUSE
+Commit `f35d19e` changed `CloneMode::CloneOnly` in `computeClonableFunctions()` to clone ALL reachable functions (same as `AlwaysInline`). Before: only functions with TM-traced pointer args were cloned (152 clones in STAMP). After: ALL reachable functions cloned (1045 clones in STAMP).
+
+### WHY IT FAILS
+The extra 893 clones cause two problems:
+
+1. **Double instrumentation (major)**: `instrumentAllClones` (PASS 1) adds `NoInline`+`OptimizeNone` to each clone and instruments loads/stores using BOTH `isSharedPointer` AND `isTMTracedPtr` checks. Then `TMInstrumentPass` (PASS 2) runs `handleLoadStore` on the SAME clones using ONLY `isSharedPointer` (no `isTMTracedPtr`). This over-instruments loads/stores that PASS 1 correctly skipped — writing TM-buffered values instead of directly to memory, causing data corruption. The `hasCloneInstrumentation` skip (7d06858) was added to fix this but is insufficient.
+
+2. **Clone explosion (performance)**: 1045 clones with `NoInline`+`OptimizeNone` means `-O3` cannot inline or optimize any of them. The TX function calls through a deep chain of non-inlinable clones, each with TM reads/writes. Even `tm-instrument-then-inline` (which inlines clones without NoInline/OptimizeNone) produces a TX function with 1045 functions inlined — an enormous body that `-O3` cannot sensibly optimize.
+
+### BISECTION CONFIRMATION
+- 4d99358 (pre-f35d19e): CloneOnly clones 152 functions → WORKS
+- f35d19e (introduced): CloneOnly clones 1045 functions → CRASHES
+- 7d06858 (HEAD): hasCloneInstrumentation skip added → STILL CRASHES
+- tm-instrument-inline pipeline (same commit, different pipeline) → WORKS (because AlwaysInliner inlines clones back in before handleLoadStore)
+- -O3 vs -O0 post-instrumentation → both crash, ruling out optimizer bug
+- Debug plugin + GDB confirmed: crash is NULL-pointer deref inside labyrinth_route while reading data through instrumented vector operations
+
+### FIX REQUIRED
+Revert the CloneOnly change: only clone functions with TM-traced pointer args (pre-f35d19e behavior). The ALL-functions cloning was introduced to fix `test_local_containers` in the non-inline pipeline, but a more targeted fix is needed.
+
 ## Key Decisions
 - `tm_untrack_spec_alloc()` marks `node->ptr = nullptr` rather than unlinking: O(n) traversal is acceptable for small spec_alloc lists.
 - `__tree_deleter_tm_clone` can never be inlined (recursive), so must be handled by extending `TMInstrumentInlinePass` to non-TX clones.
-- Runtime `unordered_map` bucket allocations MUST NOT go through `tm_malloc`/`spec_alloc` — they'd be freed on abort while the map still references them.
-- `instrumentLoadsStoresInFunction` only handles loads/stores, NOT `handleMallocFree`. This is intentional — the clone functions' `_Znwm` calls stay using standard heap. For `std::map` tree nodes, this means no spec_alloc tracking, which is fine for single-thread but causes issues under the TM model.
-- Do NOT serialize STL container calls; the correct fix is to ensure heap allocations inside TX functions are traced as TM globals (via `tracesFromTMGlobal` + `tm_malloc`).
+- Runtime `unordered_map` bucket allocations MUST NOT go through `tm_malloc`/`spec_alloc` — they'd be freed on abort while the map still references it.
+- `instrumentLoadsStoresInFunction` only handles loads/stores + MallocFree, NOT memory intrinsics (memcpy/memmove/memset). Memory intrinsics inside clones are caught by `TMInstrumentPass` after inlining.
 - `tm_malloc` must use `::operator new` (not `::malloc`) so that global destructors' `operator delete` calls are consistent.
 - `_Rb_tree_insert_and_rebalance` is a fundamental opaque barrier: its stores bypass TM write-set regardless of pipeline (inline or non-inline). Tests using `std::map` in concurrent TM will not be correct.
 - **Heuristic is fundamentally wrong**: the `isSharedPointer` + `isTMTracedPtr` double-guard misses loads/stores that need instrumentation (destructor's `v_.end_ = pos_` store) and catches ones it shouldn't (local alloca stores). Default is now **always-instrument all loads/stores**; users opt out per-variable via `__attribute__((annotate("tm_local")))`.
 - `@llvm.var.annotation` has type-suffixed names (e.g., `llvm.var.annotation.p0.p0`) in LLVM 22 — use `starts_with("llvm.var.annotation")` for name matching, not exact equality.
 - **WT refactored to use common Lock**: `try_lock` now preserves incarnation bits (`INCARNATION_MASK << OWNED_BITS`), `get_incarnation()` reads from `OWNED_BITS` not `LOCK_BITS`. Safe for WBCTL/WBETL (incarnation always 0 there).
 - **WT tm_read/tm_write use manual byte merging**, not the `tm_read`/`tm_write` templates — because templates pass type-sized values to `read_value_from_addr`/`write_value_to_addr`, but WT works with full 8-byte words at aligned addresses. Sub-word wrappers (i1, i2, i4, f4) extract/merge bytes from the full word and pass aligned addresses to `read_word_wt`/`write_word_wt`.
+- `CloneMode::CloneOnly` now clones ALL reachable functions (like `AlwaysInline` mode), fixing the non-inline pipeline for local containers.
+- Post-instrumentation `-O3` reordering remains a problem for the inline pipelines despite `atomic_signal_fence`. The non-inline pipeline avoids this by keeping clones as separate `NoInline`+`OptimizeNone` functions.
 
 ## Relevant Files
 - `backends/TinySTM/tinystm_wt.hpp`: WT implementation — refactored to use shared `tinystm_common.hpp` infrastructure.
@@ -76,22 +104,28 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - `backends/TinySTM/tinystm_globals.hpp`: globals definitions for all three TinySTM backends.
 - `backends/runtimes/TinySTM_runtime.cpp`: `tm_malloc`/`tm_free` definitions (use `::operator new/delete`).
 - `backends/tm_alloc_overrides.hpp`: speculative alloc tracking + deferred free.
-- `llvm_tm_plugin/src/tm_local_vars.hpp`: `tracesFromTMGlobal` — now tracks `tm_malloc`/`tm_calloc`/`tm_realloc`; also `collectTMLocalAllocas`/`isTMLocalVar` for tm_local support.
+- `llvm_tm_plugin/src/tm_local_vars.hpp`: `tracesFromTMGlobal` — tracks `tm_malloc`/`tm_calloc`/`tm_realloc`; `collectTMLocalAllocas`/`isTMLocalVar` for tm_local.
 - `llvm_tm_plugin/src/tm_instrument_helpers.hpp`: `handleMallocFree` intercepts `_Znwm`/`_ZdlPv` etc; `handleLoadStore` — always-instrument (skip only tm_local).
-- `llvm_tm_plugin/src/tm_method_instrumentation.hpp`: `instrumentLoadStoresInFunction` — always-instrument (skip only tm_local); `TMTracedArgs` kept for cloning/redirection decisions only.
+- `llvm_tm_plugin/src/tm_method_instrumentation.hpp`: `computeClonableFunctions` / `redirectCallsToClones` — CloneOnly clones all; `instrumentLoadStoresInFunction` — always-instrument.
 - `llvm_tm_plugin/src/TMInstrumentPass.cpp`: all three pipeline registrations.
-- `llvm_tm_plugin/src/opaque_safe_table.hpp`: known-safe opaque function table for `_ZSt`/`_ZNS`/`_ZNSt` functions.
-- `llvm_tm_plugin/test/test_tm_local.cpp`: new test verifying tm_local annotation.
+- `llvm_tm_plugin/src/opaque_safe_table.hpp`: known-safe opaque function table.
+- `llvm_tm_plugin/DEBUG.md`: debugging guide (symbol names, pipelines, GDB breakpoints).
+- `llvm_tm_plugin/Makefile`: static pattern rules, `BUILD_TYPE`, `PLUGIN_CXXFLAGS`.
+- `llvm_tm_plugin/test/test_tm_local.cpp`: test verifying tm_local annotation.
 
 ## Next Steps
-1. **Fix `test_local_containers` Bus error**: test crashes with SIGBUS immediately on `make run`. Likely TM write-set or read-set corruption from always-instrument policy instrumenting vector internals that shouldn't be TM-tracked. Investigate with lldb.
-2. **Fix `test_vector_realloc` SIGSEGV**: test_vector_realloc crashes with exit code 139. Previously had data corruption fix — may have regressed with always-instrument or the 8-byte memcpy refactor.
-3. **Fix `test_alloc_stress` SIGSEGV**: test_alloc_stress crashes with exit code 139. Previously had FULL PASS status; likely regressed from always-instrument transition or memcpy/memset changes.
-4. **Fix SwissTM `test_counter` and `test_fp` failures**: SwissTM backend shows `test_multi` counter flakiness — expected 8000 got 7985 (counter test) and f8 counter failure in FP test. May be a SwissTM-specific validation bug or race condition.
-5. Address STAMP Labyrinth inline-pipeline slowness. Options:
-   (a) Per-benchmark pipeline override (use non-inline for labyrinth).
-   (b) `tm_local` annotations on labyrinth helpers to reduce STL instruction count.
-   (c) Profile to find hot spots beyond memcpy (BFS loop, deque operations).
-6. Debug STMbench7 hang — investigate `tm_read`/`tm_write` of vector iterator internals during long TX loops. Get lldb backtrace when stuck at op_lt3.
-7. If hang fixed: run STMbench7 with treap maps at 1t/2t/4t across all backends.
-8. Run bank at all thread counts to confirm no regression.
+1. **Fix `test_local_containers` Bus error**: SIGBUS immediately — likely TM write-set/read-set corruption from always-instrument hitting vector internals. Investigate with lldb.
+2. **Fix `test_vector_realloc` SIGSEGV**: exit code 139 — may have regressed with always-instrument or 8-byte memcpy.
+3. **Fix `test_alloc_stress` SIGSEGV**: exit code 139 — was FULL PASS before always-instrument transition.
+4. **Fix SwissTM `test_counter`/`test_fp` flaky failures**: expected 8000 got 7985; f8 counter failure.
+5. Run full test suite with `tm-instrument` pipeline to check for regressions after merge.
+6. Debug STMbench7 null-write crash + `ll_alloc_test` hang (pre-existing).
+
+## Recent Refactoring
+- **`CloneOnly` fix**: `computeClonableFunctions`/`redirectCallsToClones` now treat `CloneMode::CloneOnly` like `AlwaysInline` — clone ALL reachable functions. Previously too conservative (only TM-traced pointer args), producing 0 clones for local-container call graphs.
+- **`tm-instrument-then-inline` pipeline**: new pipeline — instruments each clone individually then runs `AlwaysInlinerPass` + `TMInstrumentPass`. Produces 204 TM ops vs 179 for inline pipeline.
+- **`BUILD_TYPE=DEBUG`**: now uses `tm-instrument` (non-inline) to preserve clone functions for breakpoints.
+- **Memory intrinsic fix**: `needsMemIntrinsicInstrumentation` + push to `MemIntrinsics` vector (was previously detected but never instrumented).
+- **`TMStripLifetimePass`**: strips `llvm.lifetime.start/end` calls for LLVM 22 compat.
+- **Makefile refactoring**: static pattern rules, `PLUGIN_CXXFLAGS`, `TM_LINK_OPT`, `BUILD_TYPE`, convenience targets.
+- **`DEBUG.md`**: debugging guide with pipeline docs, symbol name resolution, GDB breakpoint strategies.

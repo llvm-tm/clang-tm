@@ -116,11 +116,9 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M,
     LLVMContext &Ctx = M.getContext();
     auto *i8Ty = Type::getInt8Ty(Ctx);
     auto *i64Ty = Type::getInt64Ty(Ctx);
-    auto *i64PtrTy = PointerType::get(Ctx, 0);
     Function *F = Call->getFunction();
     StringRef Name = Call->getCalledFunction()->getName();
     bool isMemset = Name.starts_with("llvm.memset");
-    bool isMemmove = Name.starts_with("llvm.memmove");
 
     Value *Dst = Call->getArgOperand(0);
     Value *Len = Call->getArgOperand(2);
@@ -140,54 +138,22 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M,
     EB.CreateCondBr(EB.CreateICmpEQ(Idx, Len), ContBB, LoopBody);
 
     IRBuilder<> BB(LoopBody);
-    Value *Remaining = BB.CreateSub(Len, Idx);
-    Value *CanWide = BB.CreateICmpUGE(Remaining, ConstantInt::get(i64Ty, 8));
-
-    BasicBlock *WideBB = BasicBlock::Create(Ctx, "mem_wide", F, ContBB);
-    BasicBlock *NarrowBB = BasicBlock::Create(Ctx, "mem_narrow", F, ContBB);
-    BasicBlock *DoneBB = BasicBlock::Create(Ctx, "mem_done", F, ContBB);
-    BB.CreateCondBr(CanWide, WideBB, NarrowBB);
-
-    // Wide (8-byte) path
-    IRBuilder<> WB(WideBB);
-    Value *WideDstGEP = WB.CreateGEP(i8Ty, Dst, Idx);
-    Value *WideDstPtr = WB.CreateBitCast(WideDstGEP, i64PtrTy);
+    Value *DG = BB.CreateGEP(i8Ty, Dst, Idx);
     if (isMemset) {
-        // Broadcast fill byte to all 8 byte positions in the i64 word
-        Value *Fill = WB.CreateZExt(SrcOrVal, i64Ty);
-        Fill = WB.CreateMul(Fill, ConstantInt::get(i64Ty, 0x0101010101010101ULL));
-        WB.CreateStore(Fill, WideDstPtr);
+        BB.CreateCall(H.write_i1, {DG, SrcOrVal, BB.getInt32(0)});
     } else {
-        // memcpy/memmove: tm_read_i8 from source, tm_write_i8 to dest
-        Value *WideSrcGEP = WB.CreateGEP(i8Ty, SrcOrVal, Idx);
-        Value *WideSrcPtr = WB.CreateBitCast(WideSrcGEP, i64PtrTy);
-        Value *WideVal = WB.CreateCall(H.read_i8, {WideSrcPtr});
-        WB.CreateCall(H.write_i8, {WideDstPtr, WideVal});
+        Value *SG = BB.CreateGEP(i8Ty, SrcOrVal, Idx);
+        BB.CreateCall(H.write_i1, {DG, BB.CreateCall(H.read_i1, {SG, BB.getInt32(0)}), BB.getInt32(0)});
     }
-    WB.CreateBr(DoneBB);
-
-    // Narrow (1-byte) path
-    IRBuilder<> NB(NarrowBB);
-    Value *NarrowDstGEP = NB.CreateGEP(i8Ty, Dst, Idx);
-    if (isMemset) {
-        NB.CreateStore(SrcOrVal, NarrowDstGEP);
-    } else {
-        Value *NarrowSrcGEP = NB.CreateGEP(i8Ty, SrcOrVal, Idx);
-        NB.CreateCall(H.write_i1, {NarrowDstGEP, NB.CreateCall(H.read_i1, {NarrowSrcGEP})});
-    }
-    NB.CreateBr(DoneBB);
-
-    // Next iteration
-    IRBuilder<> DB(DoneBB);
-    PHINode *NextIdx = DB.CreatePHI(i64Ty, 2, "mem_next");
-    NextIdx->addIncoming(ConstantInt::get(i64Ty, 8), WideBB);
-    NextIdx->addIncoming(ConstantInt::get(i64Ty, 1), NarrowBB);
-    Value *PhiNext = DB.CreateAdd(Idx, NextIdx);
-    Idx->addIncoming(PhiNext, DoneBB);
-    DB.CreateBr(LoopEntry);
+    Idx->addIncoming(BB.CreateAdd(Idx, ConstantInt::get(i64Ty, 1)), LoopBody);
+    BB.CreateBr(LoopEntry);
+    // NOTE: Call is NOT erased here — the caller handles erasure
+    // (it is now dead code, reachable only via splitBasicBlock debris;
+    //  the post-instrumentation -O3 pass removes it).  This avoids
+    //  double-erase when the caller also tracks it in ToErase.
 }
 #else
-static void instrumentMemoryIntrinsic(CallBase *, Module &,
+static void instrumentMemoryIntrinsic(CallInst *, Module &,
                                       const TMRuntimeHooks &) {}
 #endif
 
@@ -212,53 +178,69 @@ static bool isCallOnTMObject(CallBase *Call, Module &M)
     return traced;
 }
 
+#ifndef DISABLE_TM_READ_WRITE
 // Per-function map of which pointer arguments trace to TM globals.
-// Used by cloneMethod/computeClonableFunctions/redirectCallsToClones
-// to decide which functions to clone and which calls to redirect.
-// Not used for load/store instrumentation decisions (always-instrument default).
+// Used by isTMTracedPtr to decide whether an Argument-based pointer
+// should be instrumented in a cloned function.
 static DenseMap<const Function *, SmallSet<unsigned, 4>> TMTracedArgs;
 
-#ifndef DISABLE_TM_READ_WRITE
+// Check if a pointer's base argument is TM-traced.
+// In cloned functions, an Argument base that is NOT TM-traced
+// indicates a local/stack pointer (e.g. `this` of a local container)
+// that should not be instrumented.
+static bool isTMTracedPtr(const Value *Ptr)
+{
+    const Value *Base = getBaseObject(const_cast<Value *>(Ptr));
+    if (auto *Arg = dyn_cast<Argument>(const_cast<Value *>(Base))) {
+        auto it = TMTracedArgs.find(Arg->getParent());
+        if (it == TMTracedArgs.end() || !it->second.count(Arg->getArgNo()))
+            return false;
+    }
+    return true;
+}
 
-// Instrument ALL loads/stores in a function, only skipping tm_local-annotated
-// variables. The old heuristic (isSharedPointer + isTMTracedPtr double-guard)
-// had false negatives: it skipped stores to pointers that appeared "local"
-// but actually pointed to shared memory (e.g., v_.end_ = pos_ in a vector
-// destructor).  Instrumenting everything is the safe default.
-static void instrumentLoadStoresInFunction(Function *F, Module *M,
+static void instrumentLoadsStoresInFunction(Function *F, Module *M,
                                               const TMRuntimeHooks &H)
 {
+    SmallPtrSet<const Value *, 32> LocalVars;
+    collectLocalVariables(*F, LocalVars);
+
     if (TMAudit) {
-        int tLoads = 0, iLoads = 0, tStores = 0, iStores = 0;
+        // --- start: inline audit ---
+        int tLoads = 0, sLoads = 0, tStores = 0, sStores = 0;
         errs() << "\n[AUDIT] === ALL loads in clone " << F->getName() << " ===\n";
         for (auto &BB : *F) for (auto &I : BB) {
             auto *L = dyn_cast<LoadInst>(&I); if (!L) continue;
             tLoads++;
-            bool local = isTMLocalVar(L->getPointerOperand(), *M);
-            errs() << "[AUDIT] " << (local ? "* " : "  ")
-                   << "LOAD tm_local=" << (local ? "Y" : "N")
+            bool sh = isSharedPointer(L->getPointerOperand(), LocalVars, *F, *M);
+            bool tr = isTMTracedPtr(L->getPointerOperand());
+            errs() << "[AUDIT] " << ((sh && tr) ? "  " : "* ")
+                   << "LOAD shared=" << (sh ? "Y" : "N")
+                   << " traced=" << (tr ? "Y" : "N")
                    << " type=" << *L->getType()
                    << "\n    ptr=" << *L->getPointerOperand()
                    << "\n    base=" << *getBaseObject(L->getPointerOperand()) << "\n";
-            if (!local) iLoads++;
+            if (sh && tr) sLoads++;
         }
         errs() << "[AUDIT] === ALL stores in clone " << F->getName() << " ===\n";
         for (auto &BB : *F) for (auto &I : BB) {
             auto *S = dyn_cast<StoreInst>(&I); if (!S) continue;
             tStores++;
-            bool local = isTMLocalVar(S->getPointerOperand(), *M);
-            errs() << "[AUDIT] " << (local ? "* " : "  ")
-                   << "STORE tm_local=" << (local ? "Y" : "N")
+            bool sh = isSharedPointer(S->getPointerOperand(), LocalVars, *F, *M);
+            bool tr = isTMTracedPtr(S->getPointerOperand());
+            errs() << "[AUDIT] " << ((sh && tr) ? "  " : "* ")
+                   << "STORE shared=" << (sh ? "Y" : "N")
+                   << " traced=" << (tr ? "Y" : "N")
                    << " val=" << *S->getValueOperand()
                    << "\n    ptr=" << *S->getPointerOperand()
                    << "\n    base=" << *getBaseObject(S->getPointerOperand()) << "\n";
-            if (!local) iStores++;
+            if (sh && tr) sStores++;
         }
         errs() << "[AUDIT] Summary for clone " << F->getName() << ": "
-               << "LOAD " << iLoads << "/" << tLoads
-               << " STORE " << iStores << "/" << tStores
-               << " INSTRUMENTED; NOT instr (tm_local): LOAD "
-               << (tLoads - iLoads) << " STORE " << (tStores - iStores) << "\n";
+               << "LOAD " << sLoads << "/" << tLoads
+               << " STORE " << sStores << "/" << tStores
+               << " NOT instr: LOAD " << (tLoads - sLoads)
+               << " STORE " << (tStores - sStores) << "\n";
     }
 
     SmallVector<Instruction *, 16> ToErase;
@@ -274,7 +256,8 @@ static void instrumentLoadStoresInFunction(Function *F, Module *M,
 #endif
             if (auto *Load = dyn_cast<LoadInst>(I)) {
                 Value *Ptr = Load->getPointerOperand();
-                if (isTMLocalVar(Ptr, *M)) continue;
+                if (!isSharedPointer(Ptr, LocalVars, *F, *M)) continue;
+                if (!isTMTracedPtr(Ptr)) continue;
                 IRBuilder<> Builder(Load);
                 if (auto *Call = emitTMRead(Builder, Ptr, Load->getType(), H)) {
                     Load->replaceAllUsesWith(Call);
@@ -282,7 +265,8 @@ static void instrumentLoadStoresInFunction(Function *F, Module *M,
                 }
             } else if (auto *Store = dyn_cast<StoreInst>(I)) {
                 Value *Ptr = Store->getPointerOperand();
-                if (isTMLocalVar(Ptr, *M)) continue;
+                if (!isSharedPointer(Ptr, LocalVars, *F, *M)) continue;
+                if (!isTMTracedPtr(Ptr)) continue;
                 IRBuilder<> Builder(Store);
                 if (emitTMWrite(Builder, Ptr, Store->getValueOperand(), H))
                     ToErase.push_back(Store);
@@ -292,8 +276,8 @@ static void instrumentLoadStoresInFunction(Function *F, Module *M,
     for (auto *I : ToErase) I->eraseFromParent();
 }
 #else
-static void instrumentLoadStoresInFunction(Function *, Module *,
-                                              const TMRuntimeHooks &) {}
+static void instrumentLoadsStoresInFunction(Function *, Module *,
+                                             const TMRuntimeHooks &) {}
 #endif
 
 static Function *cloneMethod(Function *Original, const Twine &Suffix,
@@ -332,7 +316,7 @@ static Function *cloneMethod(Function *Original, const Twine &Suffix,
         auto OrigIt = TMTracedArgs.find(Original);
         if (OrigIt != TMTracedArgs.end())
             TMTracedArgs[NewFunc] = OrigIt->second;
-        instrumentLoadStoresInFunction(NewFunc, M, H);
+        instrumentLoadsStoresInFunction(NewFunc, M, H);
     } else { // CloneMode::CloneOnly
         // Clone without instrumentation — instrument AFTER call redirection
         // (done in TMGlobalInitPass) so tracesFromTMGlobal can find callers.
@@ -413,12 +397,14 @@ computeClonableFunctions(Module &M,
         if (F->isDeclaration()) continue;
         if (F->getName().starts_with("tm_")) continue;
         if (hasAnnotation(*F, "transaction")) continue;
-        // In AlwaysInline mode, clone ALL reachable functions so they get
-        // alwaysinline and are inlined into the TX body.  Their loads/stores
-        // are then instrumented by TMInstrumentInlinePass.  Without this,
-        // accessor functions like vector::operator[] are never inlined and
-        // their internal loads bypass TM entirely.
-        if (Mode == CloneMode::AlwaysInline) {
+        // In AlwaysInline and CloneOnly modes, clone ALL reachable functions.
+        // AlwaysInline adds alwaysinline then inlines into the TX body.
+        // CloneOnly creates standalone clones for post-redirect instrumentation
+        // (TMGlobalInitPass's instrumentAllClones).  Without this, accessor
+        // functions like vector::operator[] are never cloned and their internal
+        // loads/stores bypass TM entirely.
+        if (Mode == CloneMode::AlwaysInline ||
+            Mode == CloneMode::CloneOnly) {
             Clonable.insert(F);
             continue;
         }
@@ -437,7 +423,8 @@ computeClonableFunctions(Module &M,
     }
     TM_DEBUG("computeClonableFunctions: %d functions clonable%s",
              (int)Clonable.size(),
-             Mode == CloneMode::AlwaysInline ? " (AlwaysInline: ALL)" : " (TM-traced)");
+             Mode == CloneMode::AlwaysInline ? " (AlwaysInline: ALL)" :
+             Mode == CloneMode::CloneOnly ? " (CloneOnly: ALL)" : " (TM-traced)");
     return Clonable;
 }
 
@@ -454,14 +441,14 @@ static void redirectCallsToClones(Function &F, Module &M,
     //   Pass 2: apply the redirects
     SmallVector<std::pair<CallBase *, Function *>, 32> ToRedirect;
 
-    // In AlwaysInline mode, ALL reachable functions have clones and all
-    // calls between them must be redirected so the AlwaysInlinerPass can
-    // inline the full transitive closure into the TX body.  The
-    // hasTMArg check below is too conservative for RAII helpers like
-    // _ConstructTransactionD1/D2 whose `this` pointer is a local alloca
-    // — they write to g_vec.__end_ through a stored pointer, not a
-    // direct TM-traced argument.
-    if (Mode == CloneMode::AlwaysInline) {
+    // In AlwaysInline and CloneOnly modes, ALL reachable functions have
+    // clones and all calls between them must be redirected.  For AlwaysInline,
+    // this lets the inliner inline the full transitive closure into the TX body.
+    // For CloneOnly, this ensures cloned functions call cloned callees (which
+    // are then instrumented by instrumentAllClones).  The hasTMArg check below
+    // is too conservative for RAII helpers and local-container internals.
+    if (Mode == CloneMode::AlwaysInline ||
+        Mode == CloneMode::CloneOnly) {
         for (auto &BB : F) {
             for (auto &I : BB) {
                 auto *Call = dyn_cast<CallBase>(&I);
@@ -522,12 +509,12 @@ static void redirectCallsToClones(Function &F, Module &M,
         }
     }
     if (!ToRedirect.empty()) {
-        TM_DEBUG("[VERIFY] redirectCallsToClones: %zu calls redirected in %s",
-                 (size_t)ToRedirect.size(), F.getName().str().c_str());
+        errs() << "[VERIFY] redirectCallsToClones: " << ToRedirect.size()
+               << " calls redirected in " << F.getName() << "\n";
         for (auto &P : ToRedirect) {
             CallBase *CB = P.first;
             Function *Callee = CB->getCalledFunction();
-            TM_DEBUG("  -> now calls: %s", Callee ? Callee->getName().str().c_str() : "null");
+            errs() << "  -> now calls: " << (Callee ? Callee->getName() : "null") << "\n";
         }
     }
 }
@@ -599,7 +586,7 @@ static void instrumentAllClones(
             TMTracedArgs[Clone] = OrigIt->second;
         Clone->addFnAttr(llvm::Attribute::NoInline);
         Clone->addFnAttr(llvm::Attribute::OptimizeNone);
-        instrumentLoadStoresInFunction(Clone, &M, H);
+        instrumentLoadsStoresInFunction(Clone, &M, H);
         TM_DEBUG("After-redirect instrumented clone: %s", Clone->getName().str().c_str());
     }
 }
