@@ -326,6 +326,7 @@ inline void init()
 {
 	g_clock.store(1, std::memory_order_release);
 	thr_counter.store(1, std::memory_order_release);
+	fprintf(stderr, "[INIT] g_clock=%llu\n", (unsigned long long)g_clock.load(std::memory_order_acquire));
 }
 
 inline void exit()
@@ -347,12 +348,21 @@ static void reset_locks();
 inline word_t increment_clock(word_t tx_id)
 {
 	word_t res = g_clock.fetch_add(1, std::memory_order_acq_rel) + 1;
+	static std::atomic<int> dbg_cnt{0};
+	if (dbg_cnt.fetch_add(1) < 5) {
+		fprintf(stderr, "[INCR_CLOCK] tx=%llu res=%llu\n",
+		        (unsigned long long)tx_id, (unsigned long long)res);
+	}
 	if (res >= VERSION_MAX) {
 		word_t expect = 0L;
 		word_t desired = tx_id;
 		if (reset_locks_thr.compare_exchange_strong(expect, desired)) {
+			fprintf(stderr, "[OVERFLOW] tx=%llu resetting, pre-reset clock=%llu\n",
+			        (unsigned long long)tx_id, (unsigned long long)res);
 			reset_locks();
+			g_clock.store(1, std::memory_order_release);
 			reset_locks_thr.store(expect, std::memory_order_release);
+			res = g_clock.load(std::memory_order_acquire);
 		} else {
 			while ((res = get_clock()) >= VERSION_MASK)
 				std::this_thread::sleep_for(

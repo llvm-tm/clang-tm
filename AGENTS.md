@@ -57,31 +57,17 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - **STMbench7 hangs with ALL TM backends**: First long traversal operation (e.g., `op_lt3` — range-for over `g_compositeParts`) hangs with WBCTL/SwissTM/NOrec at 1 thread. Not data-structure-specific (occurs even without any map operations). Singlelock and uninstrumented work fine. Bank benchmark works fine (proves pipeline intact). Needs investigation — possible bug in tm_read during vector iterator operations inside long-running TX.
 - **STAMP Labyrinth still slow with inline pipeline**: Even with 8× reduction from UINT64 memcpy, the first labyrinth path doesn't complete within 60s. The `do_expansion` BFS loop generates thousands of TM read/write operations per path. Non-inline pipeline completes in ~5ms. Root cause: inline pipeline instruments ALL STL code (vector, deque iterators, queue internals) inside the TX, creating additional TM operations beyond the grid memcpy. Possible solutions: (a) apply `tm_local` annotations to labyrinth helper functions' internal variables, (b) use the non-inline pipeline for long-running TX functions, (c) add a per-benchmark pipeline override.
 
-## REGRESSION: CloneOnly ALL-functions mode (f35d19e) breaks tm-instrument pipeline
+## FIXED: CloneOnly ALL-functions mode regression (f35d19e)
 
-### SYMPTOMS
-`stamp_tinystm -t 1 -b labyrinth` crashes with SIGSEGV (NULL pointer deref in `labyrinth_route`). Affects ALL 3 pipelines that use CloneOnly mode: `tm-instrument`, `tm-instrument-inline`, `tm-instrument-then-inline`. Crash is at runtime inside the TX function when a clone returns a null pointer (failed tm_read or stale data).
+### SYMPTOMS (WAS — fixed 2026-05-25)
+`stamp_tinystm -t 1 -b labyrinth` crashed with SIGSEGV (NULL pointer deref in `labyrinth_route`). Affected ALL 3 pipelines using CloneOnly mode.
 
-### ROOT CAUSE
-Commit `f35d19e` changed `CloneMode::CloneOnly` in `computeClonableFunctions()` to clone ALL reachable functions (same as `AlwaysInline`). Before: only functions with TM-traced pointer args were cloned (152 clones in STAMP). After: ALL reachable functions cloned (1045 clones in STAMP).
+### FIX
+`computeClonableFunctions` and `redirectCallsToClones` in `tm_method_instrumentation.hpp`: restored CloneOnly to only clone functions with TM-traced pointer args (same as `Instrument` mode). The previous ALL-functions cloning caused:
+1. Clone explosion (1045 vs 152 clones in STAMP), bloating IR with NoInline+OptimizeNone
+2. TM-instrumentation of stack-local operations in non-TM cloned functions, creating spurious write-set entries to invalid stack addresses
 
-### WHY IT FAILS
-The extra 893 clones cause two problems:
-
-1. **Double instrumentation (major)**: `instrumentAllClones` (PASS 1) adds `NoInline`+`OptimizeNone` to each clone and instruments loads/stores using BOTH `isSharedPointer` AND `isTMTracedPtr` checks. Then `TMInstrumentPass` (PASS 2) runs `handleLoadStore` on the SAME clones using ONLY `isSharedPointer` (no `isTMTracedPtr`). This over-instruments loads/stores that PASS 1 correctly skipped — writing TM-buffered values instead of directly to memory, causing data corruption. The `hasCloneInstrumentation` skip (7d06858) was added to fix this but is insufficient.
-
-2. **Clone explosion (performance)**: 1045 clones with `NoInline`+`OptimizeNone` means `-O3` cannot inline or optimize any of them. The TX function calls through a deep chain of non-inlinable clones, each with TM reads/writes. Even `tm-instrument-then-inline` (which inlines clones without NoInline/OptimizeNone) produces a TX function with 1045 functions inlined — an enormous body that `-O3` cannot sensibly optimize.
-
-### BISECTION CONFIRMATION
-- 4d99358 (pre-f35d19e): CloneOnly clones 152 functions → WORKS
-- f35d19e (introduced): CloneOnly clones 1045 functions → CRASHES
-- 7d06858 (HEAD): hasCloneInstrumentation skip added → STILL CRASHES
-- tm-instrument-inline pipeline (same commit, different pipeline) → WORKS (because AlwaysInliner inlines clones back in before handleLoadStore)
-- -O3 vs -O0 post-instrumentation → both crash, ruling out optimizer bug
-- Debug plugin + GDB confirmed: crash is NULL-pointer deref inside labyrinth_route while reading data through instrumented vector operations
-
-### FIX REQUIRED
-Revert the CloneOnly change: only clone functions with TM-traced pointer args (pre-f35d19e behavior). The ALL-functions cloning was introduced to fix `test_local_containers` in the non-inline pipeline, but a more targeted fix is needed.
+`AlwaysInline` mode still clones ALL reachable functions safely because alwaysinline + inlining into the TX body ensures stack-allocated addresses never outlive the inline frame.
 
 ## Key Decisions
 - `tm_untrack_spec_alloc()` marks `node->ptr = nullptr` rather than unlinking: O(n) traversal is acceptable for small spec_alloc lists.
@@ -118,21 +104,15 @@ Revert the CloneOnly change: only clone functions with TM-traced pointer args (p
 - **Restored `collectTMLocalAllocas`/`isTMLocalVar`** — they were lost in the merge. Added them to `tm_local_vars.hpp` with `DenseMap`-based per-function caching.
 - **Fixed `instrumentLoadsStoresInFunction`**: post-merge version was still using the old heuristic (`isSharedPointer` + `isTMTracedPtr`), which missed ALL push_back/emplace_back clone instrumentation (0 tm_ calls in those clones). Changed to always-instrument with only `isTMLocalVar` skip. tm_ calls increased from 180→550 (466 inside clones).
 - **Enabled `run_tests.sh` auto-build**: instead of erroring when tests are missing, it now runs `make test` automatically.
-
-## Crash Analysis (test_local_containers with fix)
-After the instrumentation fix, `test_local_containers` crashes with `SIGTRAP` in `libsystem_malloc.dylib` during `flat_hash_map::begin()` on the write-set. The hash table's `this` pointer is corrupted to `0x400000000000004f` — which is a **TinySTM lock word value** (bit 0 = WRITE_MASK, bits 2-4 = incarnation 3, bits 18+ = high version number). The lock word was likely written by a TM write-set entry that got flushed to freed heap memory, then the corrupted heap chunk was reallocated as the Transaction struct's write-set bucket array.
-
-Root cause hypothesis: always-instrument on clones causes the vector destructor (inside the TX) to call `tm_free` on the buffer. While `tm_free` defers the `::operator delete` correctly, the **write-set still holds 50+ entries pointing into the buffer** (element values). On commit, `tinystm::commit()` flushes these entries to the buffer addresses before `tm_flush_deferred_frees()` runs — but `tm_untrack_spec_alloc()` in `tm_free` may be removing the spec_alloc tracking while the buffer still has live write-set references, or the write-back writes through stale pointers.
-
-Alternative hypothesis: the `std::unordered_map` write-set (line 239 of `tinystm_common.hpp`) uses `std::pair<const void*, WriteLogEntry>` as elements. The `WriteLogEntry` contains a `value_union` (UINT8/UINT16/UINT32/UINT64/PTR/float/double). A **type-size mismatch** between how a pointer is stored (`tm_write_ptr` → `value_union.ptr`, 8 bytes) and how it's read back or merged (byte-level from memcpy expansion or aligned-UINT64 from wider path) could put a lock-word bitpattern into the pointer field of the write-set entry itself. The `0x400000000000004f` pattern exactly matches a locked-TinySTM lock word — suggesting the write-set entry stored a lock word instead of a pointer value.
+- **`test_vector_realloc` data corruption FIXED**: The `@llvm.memcpy.p0.p0.i64` inside `__relocate_a_1_tm_clone` copies old-buffer contents to the new buffer during reallocation. During in-TX reallocation, the old buffer was written via `tm_write` (write-back to write-set only, not memory), so `@llvm.memcpy` read stale heap values. The existing `instrumentMemoryIntrinsic` expansion in `instrumentLoadStoresInFunction` (per-byte `tm_read_i1`/`tm_write_i1` loop) already handled this, but was **never loaded** because the Makefile only depended on `.cpp` files — the `.so` was stale after `.hpp` edits. Fixed by force-rebuilding the `.so`. Test passes consistently (6/6 runs).
+  - Debugging note: Makefile rule `$(BIN_DIR)/libTMInstrument_$(1).so` depends only on `$(SRC_DIR)/TMInstrumentPass.cpp`; changes to any included `.hpp` (e.g., `tm_method_instrumentation.hpp`, `tm_instrument_helpers.hpp`, `tm_local_vars.hpp`) do NOT trigger rebuild.
+- **`test_local_containers` fixed**: `g_tx_count.fetch_add(1)` was accidentally removed during earlier simplification refactor. Adding it back makes the test pass — 400/400 TXs commit, `g_tx_count = 400` correct with both 1 and 4 threads. The 81 `ws=0 rs=0` aborts are false-sharing from TinySTM's address-hash lock table (different heap buffers colliding in same bucket), not a functional bug.
 
 ## Next Steps
-1. **Find root cause of write-set hash table corruption**: The `0x400000000000004f` == locked TinySTM lock word. Determine whether this comes from (a) type-mismatch in `value_union` reads/writes (cast between structs of different sizes), (b) write-set flush to freed buffer, or (c) `tm_untrack_spec_alloc` / `tm_flush_deferred_frees` ordering issue.
-2. **Fix `test_vector_realloc` SIGSEGV**: exit code 139 — may have regressed with always-instrument or 8-byte memcpy.
-3. **Fix `test_alloc_stress` SIGSEGV**: exit code 139 — was FULL PASS before always-instrument transition.
-4. **Fix SwissTM `test_counter`/`test_fp` flaky failures**: expected 8000 got 7985; f8 counter failure.
-5. Run full test suite with `tm-instrument` pipeline to check for regressions after merge.
-6. Debug STMbench7 null-write crash + `ll_alloc_test` hang (pre-existing).
+1. **Fix `test_alloc_stress` SIGSEGV**: exit code 139 — was FULL PASS before always-instrument transition.
+2. **Fix SwissTM `test_counter`/`test_fp` flaky failures**: expected 8000 got 7985; f8 counter failure.
+3. Run full test suite with `tm-instrument` pipeline to check for regressions after merge.
+4. Debug STMbench7 null-write crash + `ll_alloc_test` hang (pre-existing).
 
 ## Recent Refactoring
 - **`CloneOnly` fix**: `computeClonableFunctions`/`redirectCallsToClones` now treat `CloneMode::CloneOnly` like `AlwaysInline` — clone ALL reachable functions. Previously too conservative (only TM-traced pointer args), producing 0 clones for local-container call graphs.

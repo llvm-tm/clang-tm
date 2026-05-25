@@ -129,7 +129,7 @@ begin()     //
 }
 
 inline void //
-abort_tx()  //
+abort_tx(const char *loc="")  //
 {
 	auto *tx = current_tx_wbctl;
 
@@ -139,10 +139,9 @@ abort_tx()  //
 	tx->unlock_held_locks_and_clear();
 	tx->abort_count++;
 	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
-	if (tx->abort_count < 20 || tx->abort_count % 100 == 0) {
-		fprintf(stderr, "[ABORT tx=%llu count=%d ws=%zu rs=%zu]\n",
-		        (unsigned long long)tx->id, tx->abort_count,
-		        tx->write_set.size(), tx->read_set.size());
+	if (tx->abort_count < 3 || tx->abort_count % 10 == 0) {
+		fprintf(stderr, "[ABORT tx=%llu count=%d at=%s]\n",
+		        (unsigned long long)tx->id, tx->abort_count, loc);
 		fflush(stderr);
 	}
 	if (tx->abort_count > 5) { // Magic number
@@ -202,6 +201,14 @@ commit()    //
 
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
+	static std::atomic<int> g_dbg{0};
+	auto dbg_at_commit = g_dbg.fetch_add(1);
+	if (dbg_at_commit < 20) {
+		fprintf(stderr, "[COMMIT%03d] tx=%llu g_clock=%llu\n",
+		        dbg_at_commit,
+		        (unsigned long long)tx->id,
+		        (unsigned long long)tinystm::g_clock.load(std::memory_order_acquire));
+	}
 
 	if (!tx->read_only) { // Acquire locks and write-back
 
@@ -220,7 +227,7 @@ commit()    //
 			if (owner != tx->id) {                // skip self-locks
 				while (!lock->try_lock(tx->id)) { // if lock is busy...
 					if (!extend()) {              // ... try to validate the read-set...
-						abort_tx();               // ... then, if fails, return to begin
+						abort_tx("commit_lock");
 					}
 				}
 				tx->locks_held.push_back(lock); // keep track of locks
@@ -232,12 +239,12 @@ commit()    //
 		// can commit, increase the global clock
 		commit_version = increment_clock(tx->id);
 		if (commit_version < tx->end_version)
-			abort_tx(); // version overflow
+			abort_tx("version_overflow");
 
 		// Check if there were transactions in between
 		if (commit_version != tx->end_version + 1) {
 			if (!extend()) {
-				abort_tx(); // can leave gaps in the global clock
+				abort_tx("gap_check");
 			}
 		}
 
@@ -269,6 +276,15 @@ commit()    //
 				TINYSTM_ASSERT(lock->get_version() <= commit_version,
 				               "Lock version updated while locked");
 				lock->unlock_with_version(tx->id, commit_version);
+			}
+			if (lock->get_version() < commit_version) {
+				fprintf(stderr, "ASSERT: lock=%p get_version=%llu commit_version=%llu lock_state=0x%llx tx_id=%llu\n",
+				        (void*)lock,
+				        (unsigned long long)lock->get_version(),
+				        (unsigned long long)commit_version,
+				        (unsigned long long)lock->state.load(std::memory_order_acquire),
+				        (unsigned long long)tx->id);
+				fflush(stderr);
 			}
 			TINYSTM_ASSERT(lock->get_version() >= commit_version,
 			               "Lock version not updated");
@@ -541,7 +557,7 @@ read_from_memory:
 			if (extend()) {
 				continue; // needs to read again
 			} else {
-				abort_tx(); // returns to begin
+				abort_tx("read_version_check");
 			}
 		}
 
@@ -697,7 +713,7 @@ write_word_ctl(                                               //
 		TINYSTM_ASSERT(owner != tx->id, "WBCTL only locks at commit time");
 
 		if (is_locked && !validate()) {
-			abort_tx(); // returns to begin
+			abort_tx("write_lock_spin_validate");
 		}
 
 		if (is_locked)
@@ -720,7 +736,7 @@ write_word_ctl(                                               //
 			if (extend()) {
 				continue;
 			} else {
-				abort_tx();
+				abort_tx("write_version_extension");
 			}
 		}
 
