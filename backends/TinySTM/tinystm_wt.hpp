@@ -382,7 +382,17 @@ write_word_wt(                                                 //
 		word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
 
 		if (lock->try_lock(tx->id)) {
-			// Acquired — save old value and write through
+			// Acquired — save old value and write through.
+			// Re-read version from the lock AFTER acquisition: the
+			// version cached in `l` (from line 377) may be stale if
+			// another thread committed and unlocked between line 377
+			// and the successful try_lock.  Since try_lock preserves
+			// the version bits, reading after CAS gives the true
+			// version at lock-acquisition time.
+			word_t acquired_state = lock->get();
+			version = (acquired_state & (VERSION_MASK << META_BITS)) >> META_BITS;
+			incarnation = (acquired_state >> OWNED_BITS) & INCARNATION_MASK;
+
 			any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
 
 			WriteLogEntry_wt w;
@@ -548,11 +558,13 @@ tm_write_i1(       //
 	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
 	uint8_t off = (word_t)addr & 7;
 	word_t mask = (word_t)0xFF << (off * 8);
-	// NOTE: we read the current memory word directly (not through
-	// read_word_wt) because the write-through ensures the latest
-	// value is in memory.  The read_word_wt path would add a
-	// read-set entry that we don't want (we're about to write).
-	word_t word = *(volatile word_t *)word_addr;
+	// Read the full 8-byte word through the TM read path so that a
+	// read-set entry is added with the observed lock version.  This
+	// enables the own-lock validation at commit to detect concurrent
+	// commits between this RMW read and the lock acquisition inside
+	// write_word_wt.
+	any_type_t full = read_word_wt(tx, word_addr, ValueType::UINT64);
+	word_t word = full.u8;
 	word = (word & ~mask) | ((word_t)val << (off * 8));
 	any_type_t w = {.u8 = word};
 	write_word_wt(tx, word_addr, w, ValueType::UINT8);
@@ -573,7 +585,8 @@ tm_write_i2(        //
 	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
 	uint8_t off = (word_t)addr & 7;
 	word_t mask = (word_t)0xFFFF << (off * 8);
-	word_t word = *(volatile word_t *)word_addr;
+	any_type_t full = read_word_wt(tx, word_addr, ValueType::UINT64);
+	word_t word = full.u8;
 	word = (word & ~mask) | ((word_t)val << (off * 8));
 	any_type_t w = {.u8 = word};
 	write_word_wt(tx, word_addr, w, ValueType::UINT16);
@@ -594,7 +607,8 @@ tm_write_i4(        //
 	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
 	uint8_t off = (word_t)addr & 7;
 	word_t mask = (word_t)0xFFFFFFFF << (off * 8);
-	word_t word = *(volatile word_t *)word_addr;
+	any_type_t full = read_word_wt(tx, word_addr, ValueType::UINT64);
+	word_t word = full.u8;
 	word = (word & ~mask) | ((word_t)val << (off * 8));
 	any_type_t w = {.u8 = word};
 	write_word_wt(tx, word_addr, w, ValueType::UINT32);
@@ -631,7 +645,8 @@ tm_write_f4(     //
 	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
 	uint8_t off = (word_t)addr & 7;
 	word_t mask = (word_t)0xFFFFFFFF << (off * 8);
-	word_t word = *(volatile word_t *)word_addr;
+	any_type_t full = read_word_wt(tx, word_addr, ValueType::UINT64);
+	word_t word = full.u8;
 	word_t fbits;
 	memcpy(&fbits, &val, sizeof(float));
 	word = (word & ~mask) | (fbits << (off * 8));
