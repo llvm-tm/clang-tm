@@ -120,6 +120,17 @@ $(BIN_DIR)/%_noinst: $(OUT_DIR)/%.bc $(RUNTIME_DIR)/tm_runtime.cpp | $(BIN_DIR)
 
 # TinySTM-backed tests (WBCTL write-back commit-time locking)
 TINYSTM_TESTS := test_local_containers test_vector_realloc test_alloc_stress test_ll_alloc test_construct_tx_pattern
+
+# test_local_containers uses local containers inside TX functions,
+# which requires the inline pipeline (AlwaysInline clones all reachable
+# functions and inlines them into the TX body, ensuring all internal
+# loads/stores are visible for TM instrumentation).  The non-inline
+# pipeline can't handle this because local container `this` pointers
+# don't trace to TM globals.
+$(OUT_DIR)/test_local_containers.opt.bc: $(OUT_DIR)/test_local_containers.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
+	$(OPT) -load-pass-plugin=$(BIN_DIR)/libTMInstrument.so -passes="tm-instrument-inline" $< -o $(OUT_DIR)/test_local_containers.instr.bc
+	$(OPT) $(TM_OPT_LEVEL) $(OUT_DIR)/test_local_containers.instr.bc -o $@
+
 $(addprefix $(BIN_DIR)/,$(TINYSTM_TESTS)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp | $(BIN_DIR)
 	$(CXX) $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL $< \
 	  $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \

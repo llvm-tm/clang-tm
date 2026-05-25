@@ -126,6 +126,10 @@ static bool checkOpaqueFunctions(
                 if (!hasTMTracedArg) {
                     if (isKnownSafeOpaque(Callee->getName(), StrictOpaque)) continue;
                     if (isSyscallSymbol(Callee->getName())) continue;
+                } else {
+                    // Even with TM-traced args, some pure/read-only functions
+                    // are safe (they don't modify shared memory).
+                    if (isKnownSafeWithTMArgs(Callee->getName())) continue;
                 }
                 foundOpaque = true;
                 UnresolvedSymbols.insert(Callee->getName());

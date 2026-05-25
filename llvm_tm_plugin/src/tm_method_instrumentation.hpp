@@ -26,6 +26,7 @@
 #include "tm_annotation_utils.hpp"
 #include "tm_call_graph.hpp"
 #include "tm_debug.hpp"
+#include "tm_instrument_helpers.hpp"
 #include "tm_local_vars.hpp"
 #include "tm_runtime_hooks.hpp"
 
@@ -244,9 +245,17 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
     }
 
     SmallVector<Instruction *, 16> ToErase;
+    SmallVector<CallBase *, 8> MemIntrinsics;
     for (auto &BB : *F) {
         for (auto InstIt = BB.begin(); InstIt != BB.end();) {
             Instruction *I = &*InstIt++;
+#ifndef DISABLE_TM_READ_WRITE
+            if (auto *Call = dyn_cast<CallBase>(I))
+                if (needsMemIntrinsicInstrumentation(Call, *M)) {
+                    MemIntrinsics.push_back(Call);
+                    continue;
+                }
+#endif
 #ifndef DISABLE_MALLOC_FREE
             if (auto *Call = dyn_cast<CallBase>(I)) {
                 IRBuilder<> B(I);
@@ -254,8 +263,10 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
                     continue;
             }
 #endif
+#ifndef DISABLE_TM_READ_WRITE
             if (auto *Load = dyn_cast<LoadInst>(I)) {
                 Value *Ptr = Load->getPointerOperand();
+                if (isa<AllocaInst>(getBaseObject(Ptr))) continue;
                 if (isTMLocalVar(Ptr, *M)) continue;
                 IRBuilder<> Builder(Load);
                 if (auto *Call = emitTMRead(Builder, Ptr, Load->getType(), H)) {
@@ -264,12 +275,18 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
                 }
             } else if (auto *Store = dyn_cast<StoreInst>(I)) {
                 Value *Ptr = Store->getPointerOperand();
+                if (isa<AllocaInst>(getBaseObject(Ptr))) continue;
                 if (isTMLocalVar(Ptr, *M)) continue;
                 IRBuilder<> Builder(Store);
                 if (emitTMWrite(Builder, Ptr, Store->getValueOperand(), H))
                     ToErase.push_back(Store);
             }
+#endif
         }
+    }
+    for (auto *Call : MemIntrinsics) {
+        instrumentMemoryIntrinsic(Call, *M, H);
+        ToErase.push_back(Call);
     }
     for (auto *I : ToErase) I->eraseFromParent();
 }
@@ -395,14 +412,17 @@ computeClonableFunctions(Module &M,
         if (F->isDeclaration()) continue;
         if (F->getName().starts_with("tm_")) continue;
         if (hasAnnotation(*F, "transaction")) continue;
-        // In AlwaysInline and CloneOnly modes, clone ALL reachable functions.
-        // AlwaysInline adds alwaysinline then inlines into the TX body.
-        // CloneOnly creates standalone clones for post-redirect instrumentation
-        // (TMGlobalInitPass's instrumentAllClones).  Without this, accessor
-        // functions like vector::operator[] are never cloned and their internal
-        // loads/stores bypass TM entirely.
-        if (Mode == CloneMode::AlwaysInline ||
-            Mode == CloneMode::CloneOnly) {
+        // In AlwaysInline mode, clone ALL reachable functions.
+        // alwaysinline + inlining into the TX body ensures stack-allocated
+        // variables' addresses never outlive the inline frame, so TM
+        // instrumentation of all loads/stores is safe.
+        // CloneOnly mode must NOT do this — it creates standalone clones
+        // with NoInline+OptimizeNone that live beyond the calling function's
+        // stack frame.  Instrumenting all loads/stores in those clones would
+        // write TM-buffered values to stack addresses that become invalid
+        // after the clone returns, corrupting memory.  CloneOnly should only
+        // clone functions with TM-traced pointer args.
+        if (Mode == CloneMode::AlwaysInline) {
             Clonable.insert(F);
             continue;
         }
@@ -422,7 +442,7 @@ computeClonableFunctions(Module &M,
     TM_DEBUG("computeClonableFunctions: %d functions clonable%s",
              (int)Clonable.size(),
              Mode == CloneMode::AlwaysInline ? " (AlwaysInline: ALL)" :
-             Mode == CloneMode::CloneOnly ? " (CloneOnly: ALL)" : " (TM-traced)");
+             Mode == CloneMode::CloneOnly ? " (CloneOnly: TM-traced)" : " (TM-traced)");
     return Clonable;
 }
 
@@ -439,14 +459,13 @@ static void redirectCallsToClones(Function &F, Module &M,
     //   Pass 2: apply the redirects
     SmallVector<std::pair<CallBase *, Function *>, 32> ToRedirect;
 
-    // In AlwaysInline and CloneOnly modes, ALL reachable functions have
-    // clones and all calls between them must be redirected.  For AlwaysInline,
-    // this lets the inliner inline the full transitive closure into the TX body.
-    // For CloneOnly, this ensures cloned functions call cloned callees (which
-    // are then instrumented by instrumentAllClones).  The hasTMArg check below
-    // is too conservative for RAII helpers and local-container internals.
-    if (Mode == CloneMode::AlwaysInline ||
-        Mode == CloneMode::CloneOnly) {
+    // In AlwaysInline mode, ALL reachable functions have clones and all
+    // calls between them must be redirected.  This lets the inliner inline
+    // the full transitive closure into the TX body.  CloneOnly must NOT do
+    // this: it creates standalone clones with NoInline+OptimizeNone, and
+    // redirecting all calls would route stack-local function calls through
+    // instrumented clones, causing TM writes to stale stack addresses.
+    if (Mode == CloneMode::AlwaysInline) {
         for (auto &BB : F) {
             for (auto &I : BB) {
                 auto *Call = dyn_cast<CallBase>(&I);

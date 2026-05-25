@@ -28,7 +28,7 @@ static const OpaqueSafeEntry KnownSafeOpaqueTable[] = {
     {"atoi", false}, {"atol", false}, {"atoll", false}, {"atof", false},
     {"abs", false}, {"labs", false}, {"llabs", false},
     {"bzero", false},
-    {"memcmp", false}, {"memcpy", false}, {"memset", false}, {"memmove", false},
+    {"memcpy", false}, {"memset", false}, {"memmove", false},
     {"wmemchr", false},
     {"posix_memalign", false},
     {"drand48", false}, {"srand48", false},
@@ -36,6 +36,17 @@ static const OpaqueSafeEntry KnownSafeOpaqueTable[] = {
 
 static constexpr size_t KnownSafeOpaqueTableSize =
     sizeof(KnownSafeOpaqueTable) / sizeof(KnownSafeOpaqueTable[0]);
+
+// Pure functions that are safe even when called with TM-traced pointer args.
+// These are read-only (or stateless) operations that don't modify TM-shared
+// memory — their internal loads go through TM reads if needed, and they have
+// no stores to TM-shared data.  Separated from KnownSafeOpaqueTable because
+// the default check rejects ALL functions with TM-traced args as unsafe.
+static const OpaqueSafeEntry KnownSafeWithTMArgsTable[] = {
+    {"memcmp", false},
+    {"_ZNKSt8__detail20_Prime_rehash_policy14_M_need_rehashEmmm", false},
+    {"strlen", false},
+};
 
 // Syscall patterns — symbols matching these patterns are safe (kernel handles races)
 static const char *SyscallPrefixes[] = {
@@ -61,6 +72,20 @@ static bool isKnownSafeOpaque(const StringRef &Name, bool StrictOpaque = false)
     for (size_t i = 0; i < KnownSafeOpaqueTableSize; i++)
         if (KnownSafeOpaqueTable[i].IsPrefix ? Name.starts_with(KnownSafeOpaqueTable[i].Name)
                                               : Name == KnownSafeOpaqueTable[i].Name)
+            return true;
+    return false;
+}
+
+// Like isKnownSafeOpaque, but for functions that are safe even with
+// TM-traced pointer args (pure/read-only functions with no side effects).
+// These are checked separately — when a function has TM-traced args but is
+// known to be pure (e.g. memcmp, Prime_rehash_policy::_M_need_rehash),
+// it is still allowed as safe.
+static bool isKnownSafeWithTMArgs(const StringRef &Name)
+{
+    for (size_t i = 0; i < sizeof(KnownSafeWithTMArgsTable) / sizeof(KnownSafeWithTMArgsTable[0]); i++)
+        if (KnownSafeWithTMArgsTable[i].IsPrefix ? Name.starts_with(KnownSafeWithTMArgsTable[i].Name)
+                                                  : Name == KnownSafeWithTMArgsTable[i].Name)
             return true;
     return false;
 }
