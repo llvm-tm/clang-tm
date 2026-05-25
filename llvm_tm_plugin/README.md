@@ -213,28 +213,88 @@ The pipeline provides:
 Available backends: `singlelock`, `norec`, `tl2`, `tinystm`,
 `swisstm`, `persistentsgl`, `distributedsgl`.
 
+## Pipelines
+
+The plugin provides three pipelines, selected via `-passes=<name>`:
+
+| Pipeline | Steps | Best for |
+|----------|-------|----------|
+| `tm-instrument` | Clone → instrument clones → instrument TX body | Debugging (`-O0`/`-g`); simplest IR |
+| `tm-instrument-inline` | Clone with `alwaysinline` → inline into TX body → instrument | Maximum performance; requires `-O1+` |
+| `tm-instrument-then-inline` | Clone + redirect → instrument TX body → inline → post-inline instrument | Cleaner separation; no pre-inline instrumentation of clones |
+
+Default in `tm_pipeline.mk`: `tm-instrument-inline`.
+
 ## Two-Pass Design
 
-The plugin runs as two LLVM passes:
+Each pipeline operates as multiple LLVM passes:
 
-### Pass 1: TMGlobalInitPass (module-level)
+### Module-level work (runs once per module)
 - Collects `TM`-annotated globals and creates symbol tables.
 - Builds the TX-reachable call graph.
-- Clones all reachable non-TX functions and instruments them.
+- Clones all reachable non-TX functions.
+- Redirects calls in TX functions to clones.
 - Injects `tm_init`/`tm_exit` into `main()` and thread entry points.
 - Calls `"pstatic_rebuild"` functions after `tm_init`.
 
-### Pass 2: TMInstrumentPass (function-level, per TX function)
+### Function-level passes (per function)
 - Inserts nested transaction counter logic.
 - (Optional) Inserts `sigsetjmp`/`tm_set_jmpbuf` for retry.
-- (Optional) Replaces loads/stores with `tm_read_*`/`tm_write_*`.
-- (Optional) Replaces `malloc`/`free` with `tm_malloc`/`tm_free`.
-- (Optional) Replaces `memcpy`/`memmove`/`memset` on TM data.
+- Replaces loads/stores with `tm_read_*`/`tm_write_*`.
+- Replaces `malloc`/`free` with `tm_malloc`/`tm_free`.
+- Replaces `memcpy`/`memmove`/`memset` on TM data.
 
-The separation is required because:
+The module/function split is required because:
 - Module-level work (symbol tables, global init) must happen once.
 - Function-level passes run per-function; they can modify the IR of
   individual transaction functions independently.
+
+### Thread entry auto-detection
+
+In addition to the `THREAD` annotation, the plugin auto-detects common
+thread-entry patterns by symbol name (defined in `tm_thread_symbols.hpp`):
+
+| Pattern | Examples |
+|---------|----------|
+| `pthread_create` | `pthread_create`, `start_thread` |
+| `std::thread` | `_State_impl`, `execute_native_thread_routine` |
+| OpenMP | `__kmp_launch_thread` |
+| TBB | `tbb::internal::start_thread` |
+| `clone` | `clone`, `fork_by_syscall_clone` |
+
+Any function matching one of these patterns OR annotated with `THREAD`
+gets `tm_init_thread`/`tm_exit_thread` injected.
+
+## `tm_local` Annotation
+
+Every load/store inside a TX function is instrumented by default. For
+thread-private stack variables that never escape the function, add
+`tm_local` to skip instrumentation and reduce overhead:
+
+```cpp
+#define TM_LOCAL __attribute__((annotate("tm_local")))
+
+TX void worker() {
+    TM_LOCAL int i;
+    for (i = 0; i < 1000; i++)
+        g_shared++;   // still instrumented
+}
+```
+
+Only stack variables (allocas). Pointers to shared memory must NOT be
+marked `tm_local`.
+
+## Nesting Mechanism
+
+When a TX function calls another TX function, the plugin flattens the
+nesting using a thread-local counter (`tm_nested_call_counter`):
+
+- **Outermost call**: counter 0→1, calls `tm_begin`, runs body, calls `tm_end`
+- **Nested call**: counter 1→2→..., skips `tm_begin`/`tm_end` entirely
+- **On abort** (`siglongjmp`): execution restarts from the outermost
+  `sigsetjmp` point
+- The runtime's `tm_begin`/`tm_end` are **only ever called** as outermost;
+  they unconditionally execute the full begin/commit logic
 
 ## Annotation Reference
 
@@ -243,6 +303,7 @@ The separation is required because:
 #define TX  __attribute__((annotate("transaction"), noinline))  // transaction
 #define THREAD __attribute__((annotate("thread"), noinline))    // thread entry
 #define MAIN __attribute__((annotate("main"), noinline))        // main alternative
+#define TM_LOCAL __attribute__((annotate("tm_local")))          // private local
 #define PSTATIC_REBUILD __attribute__((annotate("pstatic_rebuild")))  // restore fn
 ```
 

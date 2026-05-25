@@ -238,6 +238,7 @@ Produces a LaTeX table with IR line counts, TM hook counts, clone counts, etc.
 #define TX  __attribute__((annotate("transaction"), noinline))
 #define THREAD __attribute__((annotate("thread"), noinline))
 #define MAIN __attribute__((annotate("main"), noinline))
+#define TM_LOCAL __attribute__((annotate("tm_local")))
 
 TM int counter = 0;
 
@@ -250,12 +251,70 @@ int main() {
 }
 ```
 
+### Step-by-step user workflow
+
+| Step | What to do | Why |
+|------|-----------|-----|
+| 1 | Declare shared globals with `TM` | Plugin instruments every load/store to these variables |
+| 2 | Mark TX functions with `TX` | Plugin wraps them with `tm_begin`/`tm_end`, replaces loads/stores with `tm_read`/`tm_write` |
+| 3 | Mark thread entry points with `THREAD` | Plugin injects `tm_init_thread`/`tm_exit_thread`. Auto-detection also works for `pthread_create`, `std::thread`, OpenMP, and TBB patterns |
+| 4 | `main` is auto-detected | Plugin injects `tm_init`/`tm_exit` automatically — no annotation needed |
+| 5 | (Optional) Annotate private locals with `TM_LOCAL` | Skips expensive TM instrumentation on known-private stack variables |
+| 6 | Link with a backend runtime | Pick a `.cpp` from `backends/runtimes/` (e.g., `TinySTM_runtime.cpp`) |
+
+### How nesting works
+
+When a `TX` function calls another `TX` function, the plugin **flattens** the nesting:
+
+```
+Outer TX function
+  ├─ tm_begin() called here ── counter=1 → outermost
+  ├─ tm_read/tm_write         ← all loads/stores instrumented
+  ├─ calls inner TX function
+  │   └─ counter incremented (skips tm_begin)  ← nested: no tm_begin
+  │      └─ tm_read/tm_write  ← still instrumented
+  └─ tm_end() called here    ── counter=1 → outermost
+```
+
+Only the outermost transaction calls `tm_begin`/`tm_end`. Nested calls skip them entirely — the hook counter (`tm_nested_call_counter`) handles this transparently. On abort (via `sigsetjmp`/`siglongjmp`), execution restarts from the outermost `tm_begin`.
+
+### Optimizing with `tm_local`
+
+Every load/store inside a TX function is instrumented by default. For thread-private locals that never escape, annotation eliminates the overhead:
+
+```cpp
+TX void worker() {
+    TM_LOCAL int i;
+    for (i = 0; i < 1000; i++) {  // i is plain load/store
+        g_shared_counter++;        // g_shared_counter is tm_read/tm_write
+    }
+}
+```
+
+Only `__attribute__((annotate("tm_local")))` on stack **variables** (not types). Pointers to shared memory must NOT be marked `tm_local`.
+
+### Thread entry auto-detection
+
+In addition to the `THREAD` annotation, the plugin auto-detects common thread-entry patterns by symbol name:
+
+| Pattern | Example symbols |
+|---------|----------------|
+| `pthread_create` | `pthread_create`, `start_thread` |
+| `std::thread` | `std::thread::_State_impl`, `execute_native_thread_routine` |
+| OpenMP | `__kmp_launch_thread`, `__kmp_fork_call` |
+| TBB | `tbb::internal::start_thread` |
+
+Any function that matches one of these patterns OR has the `THREAD` annotation gets `tm_init_thread`/`tm_exit_thread` injected.
+
+### Annotation Reference
+
 | Annotation | Purpose |
 |------------|---------|
 | `TM` | Variable is managed by the STM runtime (every load/store instrumented) |
 | `TX` | Function executes as a transaction (wrapped with `tm_begin`/`tm_end`) |
 | `THREAD` | Thread entry point (gets `tm_init_thread`/`tm_exit_thread`) |
 | `MAIN` | Program entry point (gets `tm_init`/`tm_exit`) |
+| `TM_LOCAL` | Stack variable is thread-private — skip TM instrumentation |
 | `PSTATIC_REBUILD` | Called automatically after `tm_init()` restores persistent data. Used with `TX` to rebuild data structures from TM-backed arrays. |
 
 ## Backend Reference
