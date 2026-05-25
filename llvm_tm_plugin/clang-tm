@@ -335,7 +335,7 @@ for src in "${SOURCES[@]}"; do
 
     # Step 2: Instrument
     instr_bc="$OUT_DIR/$base_noext.instr.bc"
-    PIPELINE="tm-instrument"
+    PIPELINE="tm-instrument-then-inline"
     if [ "$INLINE_PIPELINE" -eq 1 ]; then
         PIPELINE="tm-instrument-inline"
     fi

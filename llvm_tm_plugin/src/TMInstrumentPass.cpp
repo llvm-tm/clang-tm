@@ -244,7 +244,7 @@ public:
       int n = 0;
       for (auto &F : M)
         if (!F.isDeclaration() && F.getName().contains("_tm_clone")) ++n;
-      errs() << "[BEFORE_INLINE] _tm_clone function definitions: " << n << "\n";
+      TM_DEBUG("[BEFORE_INLINE] _tm_clone function definitions: %d", n);
     }
 
     // When a clone inherits noinline from its original AND has

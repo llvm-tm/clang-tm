@@ -70,7 +70,7 @@ extern "C" void tm_set_env(sigjmp_buf* env) {
     }
 }
 
-// Wrapper functions matching plugin interface (void return, symbol_id parameter)
+// Wrapper functions matching plugin interface (2-arg read/write, no symbol_id)
 
 extern "C" void tm_begin() {
     tl2::set_jmp_env_external(&tm_jmpbuf);
@@ -93,36 +93,36 @@ extern "C" void tm_end() {
     g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 }
 
-// Read wrappers with symbol_id
-extern "C" uint8_t tm_read_i1(uint8_t *addr, uint32_t symbol_id) {
+// Read wrappers — 1 arg (no symbol_id)
+extern "C" uint8_t tm_read_i1(uint8_t *addr) {
     return tl2::tm_read_i1(addr);
 }
 
-extern "C" uint16_t tm_read_i2(uint16_t *addr, uint32_t symbol_id) {
+extern "C" uint16_t tm_read_i2(uint16_t *addr) {
     return tl2::tm_read_i2(addr);
 }
 
-extern "C" uint32_t tm_read_i4(uint32_t *addr, uint32_t symbol_id) {
+extern "C" uint32_t tm_read_i4(uint32_t *addr) {
     return tl2::tm_read_i4(addr);
 }
 
-extern "C" uint64_t tm_read_i8(uint64_t *addr, uint32_t symbol_id) {
+extern "C" uint64_t tm_read_i8(uint64_t *addr) {
     return tl2::tm_read_i8(addr);
 }
 
-extern "C" float tm_read_f4(float *addr, uint32_t symbol_id) {
+extern "C" float tm_read_f4(float *addr) {
     return tl2::tm_read_f4(addr);
 }
 
-extern "C" double tm_read_f8(double *addr, uint32_t symbol_id) {
+extern "C" double tm_read_f8(double *addr) {
     return tl2::tm_read_f8(addr);
 }
 
-extern "C" void *tm_read_ptr(void **addr, uint32_t symbol_id) {
+extern "C" void *tm_read_ptr(void **addr) {
     return tl2::tm_read_ptr((volatile void**)addr);
 }
 
-extern "C" void *tm_read_z(uint8_t *addr, uint64_t len, uint32_t symbol_id) {
+extern "C" void *tm_read_z(uint8_t *addr, uint64_t len) {
     assert(len < TM_BUFFER_SIZE);
     for (uint64_t i = 0; i < len; i++) {
         tm_buffer[i] = tl2::tm_read_i1(&addr[i]);
@@ -130,42 +130,42 @@ extern "C" void *tm_read_z(uint8_t *addr, uint64_t len, uint32_t symbol_id) {
     return tm_buffer;
 }
 
-// Write wrappers with symbol_id
-extern "C" void tm_write_i1(uint8_t *addr, uint8_t val, uint32_t symbol_id) {
+// Write wrappers — 2 args (no symbol_id)
+extern "C" void tm_write_i1(uint8_t *addr, uint8_t val) {
     tl2::tm_write_i1(addr, val);
 }
 
-extern "C" void tm_write_i2(uint16_t *addr, uint16_t val, uint32_t symbol_id) {
+extern "C" void tm_write_i2(uint16_t *addr, uint16_t val) {
     tl2::tm_write_i2(addr, val);
 }
 
-extern "C" void tm_write_i4(uint32_t *addr, uint32_t val, uint32_t symbol_id) {
+extern "C" void tm_write_i4(uint32_t *addr, uint32_t val) {
     tl2::tm_write_i4(addr, val);
 }
 
-extern "C" void tm_write_i8(uint64_t *addr, uint64_t val, uint32_t symbol_id) {
+extern "C" void tm_write_i8(uint64_t *addr, uint64_t val) {
     tl2::tm_write_i8(addr, val);
 }
 
-extern "C" void tm_write_f4(float *addr, float val, uint32_t symbol_id) {
+extern "C" void tm_write_f4(float *addr, float val) {
     tl2::tm_write_f4(addr, val);
 }
 
-extern "C" void tm_write_f8(double *addr, double val, uint32_t symbol_id) {
+extern "C" void tm_write_f8(double *addr, double val) {
     tl2::tm_write_f8(addr, val);
 }
 
-extern "C" void tm_write_ptr(void **addr, void *val, uint32_t symbol_id) {
+extern "C" void tm_write_ptr(void **addr, void *val) {
     tl2::tm_write_ptr((volatile void**)addr, val);
 }
 
-extern "C" void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len, uint32_t symbol_id) {
+extern "C" void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len) {
     for (uint64_t i = 0; i < len; i++) {
         tl2::tm_write_i1(&dst[i], src[i]);
     }
 }
 
-extern "C" void tm_memset(uint8_t *addr, uint8_t val, uint64_t len, uint32_t symbol_id) {
+extern "C" void tm_memset(uint8_t *addr, uint8_t val, uint64_t len) {
     for (uint64_t i = 0; i < len; i++) {
         tl2::tm_write_i1(&addr[i], val);
     }
