@@ -66,18 +66,22 @@ extern "C" void tm_begin() {
 extern "C" void tm_end() {
 }
 
-extern "C" int8_t tm_read_i1(int8_t* addr) {
+extern "C" int8_t tm_read_i1(int8_t* addr, int32_t symbol_id) {
+    (void)symbol_id;
     return *addr;
 }
 
-extern "C" void tm_write_i1(int8_t* addr, int8_t val) {
+extern "C" void tm_write_i1(int8_t* addr, int8_t val, int32_t symbol_id) {
+    (void)symbol_id;
     *addr = val;
 }
 
-extern "C" int32_t tm_read_i4(int32_t* addr) {
+extern "C" int32_t tm_read_i4(int32_t* addr, int32_t symbol_id) {
+    (void)symbol_id;
     return *addr;
 }
 
-extern "C" void tm_write_i4(int32_t* addr, int32_t val) {
+extern "C" void tm_write_i4(int32_t* addr, int32_t val, int32_t symbol_id) {
+    (void)symbol_id;
     *addr = val;
 }

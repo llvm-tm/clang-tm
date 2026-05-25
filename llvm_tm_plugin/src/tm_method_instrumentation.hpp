@@ -140,10 +140,10 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M,
     IRBuilder<> BB(LoopBody);
     Value *DG = BB.CreateGEP(i8Ty, Dst, Idx);
     if (isMemset) {
-        BB.CreateCall(H.write_i1, {DG, SrcOrVal});
+        BB.CreateCall(H.write_i1, {DG, SrcOrVal, BB.getInt32(0)});
     } else {
         Value *SG = BB.CreateGEP(i8Ty, SrcOrVal, Idx);
-        BB.CreateCall(H.write_i1, {DG, BB.CreateCall(H.read_i1, {SG})});
+        BB.CreateCall(H.write_i1, {DG, BB.CreateCall(H.read_i1, {SG, BB.getInt32(0)}), BB.getInt32(0)});
     }
     Idx->addIncoming(BB.CreateAdd(Idx, ConstantInt::get(i64Ty, 1)), LoopBody);
     BB.CreateBr(LoopEntry);
