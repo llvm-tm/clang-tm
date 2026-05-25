@@ -16,8 +16,8 @@
 #include <functional>
 
 #include <llvm/ADT/DenseMap.h>
-#include <llvm/ADT/SmallSet.h>
 #include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/ADT/SmallSet.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
@@ -39,144 +39,156 @@ namespace tm_method_instrumentation
 enum class CloneMode { Instrument, AlwaysInline, CloneOnly };
 
 struct TMMethodInfo {
-    Function *Original;
-    Function *Cloned;
-    Value *TMGlobal;
+	Function *Original;
+	Function *Cloned;
+	Value *TMGlobal;
 };
 
 static SmallPtrSet<const GlobalVariable *, 16> *TMGlobalsCache = nullptr;
 
-static void collectTMGlobalsCached(Module &M, SmallPtrSetImpl<const GlobalVariable *> &TMG)
+static void collectTMGlobalsCached(Module &M,
+                                   SmallPtrSetImpl<const GlobalVariable *> &TMG)
 {
-    if (TMGlobalsCache && TMGlobalsCache->empty() == false) {
-        TMG.insert(TMGlobalsCache->begin(), TMGlobalsCache->end());
-        return;
-    }
-    if (GlobalVariable *GVA = M.getNamedGlobal("llvm.global.annotations")) {
-        if (Constant *Init = GVA->getInitializer()) {
-            for (unsigned i = 0; i < Init->getNumOperands(); ++i) {
-                Constant *Annotation = cast<Constant>(Init->getOperand(i));
-                if (Annotation->getNumOperands() >= 2) {
-                    Value *AnnotatedValue = Annotation->getOperand(0)->stripPointerCasts();
-                    if (auto *AnnotatedGV = dyn_cast<GlobalVariable>(AnnotatedValue)) {
-                        Value *StrOperand = Annotation->getOperand(1)->stripPointerCasts();
-                        if (auto *StrGV = dyn_cast<GlobalVariable>(StrOperand)) {
-                            if (auto *StrArray = dyn_cast<ConstantDataArray>(StrGV->getInitializer())) {
-                                if (StrArray->getAsCString() == "tm") {
-                                    TMG.insert(AnnotatedGV);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    TMGlobalsCache = new SmallPtrSet<const GlobalVariable *, 16>();
-    TMGlobalsCache->insert(TMG.begin(), TMG.end());
+	if (TMGlobalsCache && TMGlobalsCache->empty() == false) {
+		TMG.insert(TMGlobalsCache->begin(), TMGlobalsCache->end());
+		return;
+	}
+	if (GlobalVariable *GVA = M.getNamedGlobal("llvm.global.annotations")) {
+		if (Constant *Init = GVA->getInitializer()) {
+			for (unsigned i = 0; i < Init->getNumOperands(); ++i) {
+				Constant *Annotation = cast<Constant>(Init->getOperand(i));
+				if (Annotation->getNumOperands() >= 2) {
+					Value *AnnotatedValue = Annotation->getOperand(0)
+					                            ->stripPointerCasts();
+					if (auto *AnnotatedGV = dyn_cast<GlobalVariable>(AnnotatedValue)) {
+						Value *StrOperand = Annotation->getOperand(1)
+						                        ->stripPointerCasts();
+						if (auto *StrGV = dyn_cast<GlobalVariable>(StrOperand)) {
+							if (auto *StrArray = dyn_cast<ConstantDataArray>(
+							        StrGV->getInitializer())) {
+								if (StrArray->getAsCString() == "tm") {
+									TMG.insert(AnnotatedGV);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	TMGlobalsCache = new SmallPtrSet<const GlobalVariable *, 16>();
+	TMGlobalsCache->insert(TMG.begin(), TMG.end());
 }
 
 static bool tracesToTMGlobal(Value *Ptr, Module &M)
 {
-    SmallPtrSet<const GlobalVariable *, 8> TMG;
-    collectTMGlobalsCached(M, TMG);
+	SmallPtrSet<const GlobalVariable *, 8> TMG;
+	collectTMGlobalsCached(M, TMG);
 
-    Value *Current = Ptr->stripPointerCasts();
-    for (int depth = 0; depth < 20 && Current != nullptr; ++depth) {
-        Current = Current->stripPointerCasts();
+	Value *Current = Ptr->stripPointerCasts();
+	for (int depth = 0; depth < 20 && Current != nullptr; ++depth) {
+		Current = Current->stripPointerCasts();
 
-        if (const GlobalVariable *GV = dyn_cast<GlobalVariable>(Current)) {
-            if (TMG.count(GV)) return true;
-        }
+		if (const GlobalVariable *GV = dyn_cast<GlobalVariable>(Current)) {
+			if (TMG.count(GV))
+				return true;
+		}
 
-        if (const GEPOperator *GEP = dyn_cast<GEPOperator>(Current)) {
-            Current = const_cast<Value*>(GEP->getPointerOperand());
-        } else if (const LoadInst *Load = dyn_cast<LoadInst>(Current)) {
-            Current = const_cast<Value*>(Load->getPointerOperand());
-        } else if (auto *Call = dyn_cast<CallInst>(Current)) {
-            // Trace through TM clone call returns: if `this` (arg 0) of a
-            // TM-cloned method traces to a TM global, the return pointer does too.
-            Function *Callee = Call->getCalledFunction();
-            if (Callee && Callee->getName().ends_with("_tm_clone") &&
-                Call->arg_size() > 0) {
-                Current = Call->getArgOperand(0);
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-    return false;
+		if (const GEPOperator *GEP = dyn_cast<GEPOperator>(Current)) {
+			Current = const_cast<Value *>(GEP->getPointerOperand());
+		} else if (const LoadInst *Load = dyn_cast<LoadInst>(Current)) {
+			Current = const_cast<Value *>(Load->getPointerOperand());
+		} else if (auto *Call = dyn_cast<CallInst>(Current)) {
+			// Trace through TM clone call returns: if `this` (arg 0) of a
+			// TM-cloned method traces to a TM global, the return pointer does too.
+			Function *Callee = Call->getCalledFunction();
+			if (Callee && Callee->getName().ends_with("_tm_clone") &&
+			    Call->arg_size() > 0) {
+				Current = Call->getArgOperand(0);
+			} else {
+				break;
+			}
+		} else {
+			break;
+		}
+	}
+	return false;
 }
 
 // Replace llvm.memcpy/memmove/memset on TM globals with per-byte instrumented loops.
 #ifndef DISABLE_TM_READ_WRITE
-static void instrumentMemoryIntrinsic(CallBase *Call, Module &M,
-                                      const TMRuntimeHooks &H) {
-    LLVMContext &Ctx = M.getContext();
-    auto *i8Ty = Type::getInt8Ty(Ctx);
-    auto *i64Ty = Type::getInt64Ty(Ctx);
-    Function *F = Call->getFunction();
-    StringRef Name = Call->getCalledFunction()->getName();
-    bool isMemset = Name.starts_with("llvm.memset");
+static void instrumentMemoryIntrinsic(CallBase *Call, Module &M, const TMRuntimeHooks &H)
+{
+	LLVMContext &Ctx = M.getContext();
+	auto *i8Ty = Type::getInt8Ty(Ctx);
+	auto *i64Ty = Type::getInt64Ty(Ctx);
+	Function *F = Call->getFunction();
+	StringRef Name = Call->getCalledFunction()->getName();
+	bool isMemset = Name.starts_with("llvm.memset");
 
-    Value *Dst = Call->getArgOperand(0);
-    Value *Len = Call->getArgOperand(2);
-    Value *SrcOrVal = Call->getArgOperand(1);
+	Value *Dst = Call->getArgOperand(0);
+	Value *Len = Call->getArgOperand(2);
+	Value *SrcOrVal = Call->getArgOperand(1);
 
-    BasicBlock *OrigBB = Call->getParent();
-    BasicBlock *ContBB = OrigBB->splitBasicBlock(Call, "mem_after");
-    BasicBlock *LoopEntry = BasicBlock::Create(Ctx, "mem_loop_entry", F, ContBB);
-    BasicBlock *LoopBody  = BasicBlock::Create(Ctx, "mem_loop_body", F, ContBB);
+	BasicBlock *OrigBB = Call->getParent();
+	BasicBlock *ContBB = OrigBB->splitBasicBlock(Call, "mem_after");
+	BasicBlock *LoopEntry = BasicBlock::Create(Ctx, "mem_loop_entry", F, ContBB);
+	BasicBlock *LoopBody = BasicBlock::Create(Ctx, "mem_loop_body", F, ContBB);
 
-    OrigBB->getTerminator()->eraseFromParent();
-    IRBuilder<>(OrigBB).CreateBr(LoopEntry);
+	OrigBB->getTerminator()->eraseFromParent();
+	IRBuilder<>(OrigBB).CreateBr(LoopEntry);
 
-    IRBuilder<> EB(LoopEntry);
-    PHINode *Idx = EB.CreatePHI(i64Ty, 2, "mem_idx");
-    Idx->addIncoming(ConstantInt::get(i64Ty, 0), OrigBB);
-    EB.CreateCondBr(EB.CreateICmpEQ(Idx, Len), ContBB, LoopBody);
+	IRBuilder<> EB(LoopEntry);
+	PHINode *Idx = EB.CreatePHI(i64Ty, 2, "mem_idx");
+	Idx->addIncoming(ConstantInt::get(i64Ty, 0), OrigBB);
+	EB.CreateCondBr(EB.CreateICmpEQ(Idx, Len), ContBB, LoopBody);
 
-    IRBuilder<> BB(LoopBody);
-    Value *DG = BB.CreateGEP(i8Ty, Dst, Idx);
-    if (isMemset) {
-        BB.CreateCall(H.write_i1, {DG, SrcOrVal, BB.getInt32(0)});
-    } else {
-        Value *SG = BB.CreateGEP(i8Ty, SrcOrVal, Idx);
-        BB.CreateCall(H.write_i1, {DG, BB.CreateCall(H.read_i1, {SG, BB.getInt32(0)}), BB.getInt32(0)});
-    }
-    Idx->addIncoming(BB.CreateAdd(Idx, ConstantInt::get(i64Ty, 1)), LoopBody);
-    BB.CreateBr(LoopEntry);
-    // NOTE: Call is NOT erased here — the caller handles erasure
-    // (it is now dead code, reachable only via splitBasicBlock debris;
-    //  the post-instrumentation -O3 pass removes it).  This avoids
-    //  double-erase when the caller also tracks it in ToErase.
+	IRBuilder<> BB(LoopBody);
+	Value *DG = BB.CreateGEP(i8Ty, Dst, Idx);
+	if (isMemset) {
+		BB.CreateCall(H.write_i1, {DG, SrcOrVal, BB.getInt32(0)});
+	} else {
+		Value *SG = BB.CreateGEP(i8Ty, SrcOrVal, Idx);
+		BB.CreateCall(H.write_i1,
+		              {DG,
+		               BB.CreateCall(H.read_i1, {SG, BB.getInt32(0)}),
+		               BB.getInt32(0)});
+	}
+	Idx->addIncoming(BB.CreateAdd(Idx, ConstantInt::get(i64Ty, 1)), LoopBody);
+	BB.CreateBr(LoopEntry);
+	// NOTE: Call is NOT erased here — the caller handles erasure
+	// (it is now dead code, reachable only via splitBasicBlock debris;
+	//  the post-instrumentation -O3 pass removes it).  This avoids
+	//  double-erase when the caller also tracks it in ToErase.
 }
 #else
-static void instrumentMemoryIntrinsic(CallInst *, Module &,
-                                      const TMRuntimeHooks &) {}
+static void instrumentMemoryIntrinsic(CallInst *, Module &, const TMRuntimeHooks &) {}
 #endif
 
 static bool isCallOnTMObject(CallBase *Call, Module &M)
 {
-    if (Call->isIndirectCall()) return false;
+	if (Call->isIndirectCall())
+		return false;
 
-    Function *Callee = Call->getCalledFunction();
-    if (!Callee || Callee->isDeclaration()) return false;
-    if (Callee->getName().starts_with("tm_")) return false;
+	Function *Callee = Call->getCalledFunction();
+	if (!Callee || Callee->isDeclaration())
+		return false;
+	if (Callee->getName().starts_with("tm_"))
+		return false;
 
-    if (Call->arg_size() == 0) return false;
+	if (Call->arg_size() == 0)
+		return false;
 
-    Value *ThisPtr = Call->getArgOperand(0);
-    if (!ThisPtr) return false;
+	Value *ThisPtr = Call->getArgOperand(0);
+	if (!ThisPtr)
+		return false;
 
-    bool traced = tracesToTMGlobal(ThisPtr, M);
-    if (traced) {
-        TM_DEBUG("isCallOnTMObject: found call to %s on TM object",
-                Callee->getName().str().c_str());
-    }
-    return traced;
+	bool traced = tracesToTMGlobal(ThisPtr, M);
+	if (traced) {
+		TM_DEBUG("isCallOnTMObject: found call to %s on TM object",
+		         Callee->getName().str().c_str());
+	}
+	return traced;
 }
 
 #ifndef DISABLE_TM_READ_WRITE
@@ -191,22 +203,23 @@ static DenseMap<const Function *, SmallSet<unsigned, 4>> TMTracedArgs;
 // that should not be instrumented.
 static bool isTMTracedPtr(const Value *Ptr)
 {
-    const Value *Base = getBaseObject(const_cast<Value *>(Ptr));
-    if (auto *Arg = dyn_cast<Argument>(const_cast<Value *>(Base))) {
-        auto it = TMTracedArgs.find(Arg->getParent());
-        if (it == TMTracedArgs.end() || !it->second.count(Arg->getArgNo()))
-            return false;
-    }
-    return true;
+	const Value *Base = getBaseObject(const_cast<Value *>(Ptr));
+	if (auto *Arg = dyn_cast<Argument>(const_cast<Value *>(Base))) {
+		auto it = TMTracedArgs.find(Arg->getParent());
+		if (it == TMTracedArgs.end() || !it->second.count(Arg->getArgNo()))
+			return false;
+	}
+	return true;
 }
 
-static void instrumentLoadsStoresInFunction(Function *F, Module *M,
-                                              const TMRuntimeHooks &H)
+static void instrumentLoadsStoresInFunction(Function *F,
+                                            Module *M,
+                                            const TMRuntimeHooks &H)
 {
-    if (TMAudit) {
-        SmallPtrSet<const Value *, 32> LocalVars;
-        collectLocalVariables(*F, LocalVars);
-        // clang-format off
+	if (TMAudit) {
+		SmallPtrSet<const Value *, 32> LocalVars;
+		collectLocalVariables(*F, LocalVars);
+		// clang-format off
         // --- start: inline audit ---
         int tLoads = 0, sLoads = 0, tStores = 0, sStores = 0;
         errs() << "\n[AUDIT] === ALL loads in clone " << F->getName() << " ===\n";
@@ -525,15 +538,15 @@ static void redirectCallsToClones(Function &F, Module &M,
             }
         }
     }
-    if (!ToRedirect.empty()) {
-        errs() << "[VERIFY] redirectCallsToClones: " << ToRedirect.size()
-               << " calls redirected in " << F.getName() << "\n";
-        for (auto &P : ToRedirect) {
-            CallBase *CB = P.first;
-            Function *Callee = CB->getCalledFunction();
-            errs() << "  -> now calls: " << (Callee ? Callee->getName() : "null") << "\n";
-        }
-    }
+    // if (!ToRedirect.empty()) { // TODO: put inside TM_DEBUG or other debug guard
+    //     errs() << "[VERIFY] redirectCallsToClones: " << ToRedirect.size()
+    //            << " calls redirected in " << F.getName() << "\n";
+    //     for (auto &P : ToRedirect) {
+    //         CallBase *CB = P.first;
+    //         Function *Callee = CB->getCalledFunction();
+    //         errs() << "  -> now calls: " << (Callee ? Callee->getName() : "null") << "\n";
+    //     }
+    // }
 }
 
 // Clone all non-TX functions in the TX-reachable call graph.
