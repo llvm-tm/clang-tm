@@ -202,10 +202,10 @@ static bool isTMTracedPtr(const Value *Ptr)
 static void instrumentLoadsStoresInFunction(Function *F, Module *M,
                                               const TMRuntimeHooks &H)
 {
-    SmallPtrSet<const Value *, 32> LocalVars;
-    collectLocalVariables(*F, LocalVars);
-
     if (TMAudit) {
+        SmallPtrSet<const Value *, 32> LocalVars;
+        collectLocalVariables(*F, LocalVars);
+        // clang-format off
         // --- start: inline audit ---
         int tLoads = 0, sLoads = 0, tStores = 0, sStores = 0;
         errs() << "\n[AUDIT] === ALL loads in clone " << F->getName() << " ===\n";
@@ -256,8 +256,7 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
 #endif
             if (auto *Load = dyn_cast<LoadInst>(I)) {
                 Value *Ptr = Load->getPointerOperand();
-                if (!isSharedPointer(Ptr, LocalVars, *F, *M)) continue;
-                if (!isTMTracedPtr(Ptr)) continue;
+                if (isTMLocalVar(Ptr, *M)) continue;
                 IRBuilder<> Builder(Load);
                 if (auto *Call = emitTMRead(Builder, Ptr, Load->getType(), H)) {
                     Load->replaceAllUsesWith(Call);
@@ -265,8 +264,7 @@ static void instrumentLoadsStoresInFunction(Function *F, Module *M,
                 }
             } else if (auto *Store = dyn_cast<StoreInst>(I)) {
                 Value *Ptr = Store->getPointerOperand();
-                if (!isSharedPointer(Ptr, LocalVars, *F, *M)) continue;
-                if (!isTMTracedPtr(Ptr)) continue;
+                if (isTMLocalVar(Ptr, *M)) continue;
                 IRBuilder<> Builder(Store);
                 if (emitTMWrite(Builder, Ptr, Store->getValueOperand(), H))
                     ToErase.push_back(Store);

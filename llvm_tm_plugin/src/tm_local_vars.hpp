@@ -13,6 +13,7 @@
 #ifndef TM_LOCAL_VARS_HPP
 #define TM_LOCAL_VARS_HPP
 
+#include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Value.h>
@@ -487,6 +488,61 @@ static bool isSharedPointer(Value *Ptr,
   // to the read/write-sets without causing correctness issues.
   TM_DEBUG("Pointer assumed shared (heap/argument)");
   return true;
+}
+
+// Collect all tm_local-annotated allocas in a function by scanning for
+// @llvm.var.annotation calls. In LLVM 22, var.annotation has type-suffixed
+// names (e.g., llvm.var.annotation.p0.p0), so we use starts_with.
+static void collectTMLocalAllocas(Function &F, Module &M,
+                                   SmallPtrSetImpl<const AllocaInst *> &TMLocalAllocas)
+{
+    for (auto &BB : F) {
+        for (auto &I : BB) {
+            auto *Call = dyn_cast<CallInst>(&I);
+            if (!Call) continue;
+            Function *Callee = Call->getCalledFunction();
+            if (!Callee) continue;
+            if (!Callee->getName().starts_with("llvm.var.annotation")) continue;
+            if (Call->arg_size() < 2) continue;
+            Value *AnnotatedVal = Call->getArgOperand(0)->stripPointerCasts();
+            // Get annotation string: arg(1) is a pointer to the annotation string
+            Value *StrOperand = Call->getArgOperand(1)->stripPointerCasts();
+            if (auto *StrGV = dyn_cast<GlobalVariable>(StrOperand)) {
+                if (auto *StrArray = dyn_cast<ConstantDataArray>(StrGV->getInitializer())) {
+                    if (StrArray->getAsCString() == "tm_local") {
+                        if (auto *AI = dyn_cast<AllocaInst>(AnnotatedVal)) {
+                            TMLocalAllocas.insert(AI);
+                            TM_DEBUG("  tm_local alloca: %s", AI->getName().str().c_str());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Check if a pointer refers to a tm_local-annotated alloca.
+// Follows GEP chains to find the base alloca.
+static bool isTMLocalVar(Value *Ptr, Module &M)
+{
+    Ptr = Ptr->stripPointerCasts();
+    const Value *Base = getBaseObjectNoLoad(Ptr);
+    auto *AI = dyn_cast<const AllocaInst>(Base);
+    if (!AI) return false;
+    // Walk the function to find tm_local annotations — cache in a static
+    // per-function set for efficiency.
+    Function *F = const_cast<Function *>(AI->getFunction());
+    if (!F) return false;
+    static DenseMap<Function *, SmallPtrSet<const AllocaInst *, 8>> *Cache = nullptr;
+    if (!Cache)
+        Cache = new DenseMap<Function *, SmallPtrSet<const AllocaInst *, 8>>();
+    auto It = Cache->find(F);
+    if (It == Cache->end()) {
+        SmallPtrSet<const AllocaInst *, 8> TMLocals;
+        collectTMLocalAllocas(*F, M, TMLocals);
+        It = Cache->insert({F, std::move(TMLocals)}).first;
+    }
+    return It->second.count(AI);
 }
 
 #endif // TM_LOCAL_VARS_HPP
