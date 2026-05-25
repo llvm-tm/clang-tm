@@ -98,43 +98,38 @@ void tm_begin()
 {
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
-	if (tm_nested_call_counter == 1) {
-		g_in_tx = true;
-		tinystm::jmpbuf = (sigjmp_buf *)&tm_jmpbuf;
-		tm_clear_spec_allocs();
-		tm_clear_deferred_frees();
-		tinystm::begin();
-	}
-	assert(tm_nested_call_counter >= 0);
+	g_in_tx = true;
+	tinystm::jmpbuf = (sigjmp_buf *)&tm_jmpbuf;
+	tm_clear_spec_allocs();
+	tm_clear_deferred_frees();
+	tinystm::begin();
 }
 
 void tm_end()
 {
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 	tm_end_count++;
-	if (tm_nested_call_counter == 1) {
-		g_in_tx = false;
-		// Record max read-set and write-set sizes for this TX
+	g_in_tx = false;
+	// Record max read-set and write-set sizes for this TX
 #if defined(DESIGN_WBCTL)
-		auto *tx = tinystm::current_tx_wbctl;
+	auto *tx = tinystm::current_tx_wbctl;
 #elif defined(DESIGN_WBETL)
-		auto *tx = tinystm::current_tx_wbetl;
+	auto *tx = tinystm::current_tx_wbetl;
 #elif defined(DESIGN_WT)
-		auto *tx = tinystm::current_tx_wt;
+	auto *tx = tinystm::current_tx_wt;
 #endif
-		if (tx) {
-			uint64_t rs = tx->read_set.size();
-			uint64_t ws = tx->write_set.size();
-			if (rs > g_tm_max_read_set.load())
-				g_tm_max_read_set.store(rs);
-			if (ws > g_tm_max_write_set.load())
-				g_tm_max_write_set.store(ws);
-			(void)0;
-		}
-		tinystm::commit();
-		tm_flush_spec_allocs();
-		tm_flush_deferred_frees();
+	if (tx) {
+		uint64_t rs = tx->read_set.size();
+		uint64_t ws = tx->write_set.size();
+		if (rs > g_tm_max_read_set.load())
+			g_tm_max_read_set.store(rs);
+		if (ws > g_tm_max_write_set.load())
+			g_tm_max_write_set.store(ws);
+		(void)0;
 	}
+	tinystm::commit();
+	tm_flush_spec_allocs();
+	tm_flush_deferred_frees();
 	assert(tm_nested_call_counter >= 0);
 	tm_tx_count++;
 }

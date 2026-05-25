@@ -76,25 +76,22 @@ void tm_set_env(sigjmp_buf *env)
 
 void tm_begin()
 {
-	if (tm_nested_call_counter == 1) {
-		tm_clear_spec_allocs();
-		tm_clear_deferred_frees();
-		g_in_tx = true;
-		swisstm::begin();
-    }
-    assert(tm_nested_call_counter >= 0);
+	swisstm::set_jmpbuf(&tm_jmpbuf);
+	tm_clear_spec_allocs();
+	tm_clear_deferred_frees();
+	g_in_tx = true;
+	swisstm::begin();
+	assert(tm_nested_call_counter >= 0);
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 void tm_end()
 {
-	if (tm_nested_call_counter == 1) {
-		swisstm::commit();
-		g_in_tx = false;
-		tm_flush_spec_allocs();
-		tm_flush_deferred_frees();
-    }
-    assert(tm_nested_call_counter >= 0);
+	swisstm::commit();
+	g_in_tx = false;
+	tm_flush_spec_allocs();
+	tm_flush_deferred_frees();
+	assert(tm_nested_call_counter >= 0);
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 }
 

@@ -262,18 +262,16 @@ static void persist_write(size_t file_off, const void* val, size_t sz) {
 }
 
 void tm_begin() {
-    if (tm_nested_call_counter == 1) { g_in_tx = true;
-        g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
-        global_tx_lock.lock();
-    }
+    g_in_tx = true;
+    g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
+    global_tx_lock.lock();
 }
 
 void tm_end() {
-    if (tm_nested_call_counter == 1) { g_in_tx = false;
-        g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
-        g_tm_tx_count.fetch_add(1, std::memory_order_relaxed);
-        global_tx_lock.unlock();
-    }
+    g_in_tx = false;
+    g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
+    g_tm_tx_count.fetch_add(1, std::memory_order_relaxed);
+    global_tx_lock.unlock();
 }
 
 uint8_t tm_read_i1(volatile uint8_t* addr) { return *addr; }

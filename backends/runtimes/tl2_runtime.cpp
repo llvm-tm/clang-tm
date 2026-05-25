@@ -73,23 +73,22 @@ extern "C" void tm_set_env(sigjmp_buf* env) {
 // Wrapper functions matching plugin interface (void return, symbol_id parameter)
 
 extern "C" void tm_begin() {
-    if (tm_nested_call_counter == 1) {
-        tm_clear_spec_allocs();
-        tm_clear_deferred_frees();
-        g_in_tx = true;
-        tl2::begin();
-    }
+    tl2::set_jmp_env_external(&tm_jmpbuf);
+    tm_clear_spec_allocs();
+    tm_clear_deferred_frees();
+    g_in_tx = true;
+    tl2::begin();
     assert(tm_nested_call_counter >= 0);
     g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 extern "C" void tm_end() {
-    if (tm_nested_call_counter == 1) {
-        tl2::commit();
-        g_in_tx = false;
-        tm_flush_spec_allocs();
-        tm_flush_deferred_frees();
+    if (!tl2::commit()) {
+        siglongjmp(tm_jmpbuf, 1);
     }
+    g_in_tx = false;
+    tm_flush_spec_allocs();
+    tm_flush_deferred_frees();
     assert(tm_nested_call_counter >= 0);
     g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 }
@@ -175,10 +174,10 @@ extern "C" void tm_memset(uint8_t *addr, uint8_t val, uint64_t len, uint32_t sym
 extern "C" void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
 
-void* tm_malloc(size_t size) { void* p = malloc(size); tm_track_spec_alloc(p); return p; }
-void* tm_calloc(size_t nmemb, size_t size) { void* p = calloc(nmemb, size); tm_track_spec_alloc(p); return p; }
-void* tm_realloc(void* ptr, size_t size) { void* p = realloc(ptr, size); tm_track_spec_alloc(p); return p; }
-void  tm_free(void* ptr) {
+extern "C" void* tm_malloc(size_t size) { void* p = malloc(size); tm_track_spec_alloc(p); return p; }
+extern "C" void* tm_calloc(size_t nmemb, size_t size) { void* p = calloc(nmemb, size); tm_track_spec_alloc(p); return p; }
+extern "C" void* tm_realloc(void* ptr, size_t size) { void* p = realloc(ptr, size); tm_track_spec_alloc(p); return p; }
+extern "C" void  tm_free(void* ptr) {
     if (g_in_tx) {
         tm_untrack_spec_alloc(ptr);
         auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));
