@@ -100,25 +100,10 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - `llvm_tm_plugin/test/test_tm_local.cpp`: test verifying tm_local annotation.
 
 ## Done (this session — 2026-05-25)
-- **Merged origin/master** (CloneOnly fix, then-inline pipeline, refactored backends) into main. Resolved conflicts in `AGENTS.md`, source files, Makefiles.
-- **Restored `collectTMLocalAllocas`/`isTMLocalVar`** — they were lost in the merge. Added them to `tm_local_vars.hpp` with `DenseMap`-based per-function caching.
-- **Fixed `instrumentLoadsStoresInFunction`**: post-merge version was still using the old heuristic (`isSharedPointer` + `isTMTracedPtr`), which missed ALL push_back/emplace_back clone instrumentation (0 tm_ calls in those clones). Changed to always-instrument with only `isTMLocalVar` skip. tm_ calls increased from 180→550 (466 inside clones).
-- **Enabled `run_tests.sh` auto-build**: instead of erroring when tests are missing, it now runs `make test` automatically.
-- **`test_vector_realloc` data corruption FIXED**: The `@llvm.memcpy.p0.p0.i64` inside `__relocate_a_1_tm_clone` copies old-buffer contents to the new buffer during reallocation. During in-TX reallocation, the old buffer was written via `tm_write` (write-back to write-set only, not memory), so `@llvm.memcpy` read stale heap values. The existing `instrumentMemoryIntrinsic` expansion in `instrumentLoadStoresInFunction` (per-byte `tm_read_i1`/`tm_write_i1` loop) already handled this, but was **never loaded** because the Makefile only depended on `.cpp` files — the `.so` was stale after `.hpp` edits. Fixed by force-rebuilding the `.so`. Test passes consistently (6/6 runs).
-  - Debugging note: Makefile rule `$(BIN_DIR)/libTMInstrument_$(1).so` depends only on `$(SRC_DIR)/TMInstrumentPass.cpp`; changes to any included `.hpp` (e.g., `tm_method_instrumentation.hpp`, `tm_instrument_helpers.hpp`, `tm_local_vars.hpp`) do NOT trigger rebuild.
-- **`test_local_containers` fixed**: `g_tx_count.fetch_add(1)` was accidentally removed during earlier simplification refactor. Adding it back makes the test pass — 400/400 TXs commit, `g_tx_count = 400` correct with both 1 and 4 threads. The 81 `ws=0 rs=0` aborts are false-sharing from TinySTM's address-hash lock table (different heap buffers colliding in same bucket), not a functional bug.
+- **`test_stl_containers` opaque symbol fix**: `CloneOnly` ALL-functions cloning exposed new opaque symbols from cloned `std::string` internals. Added `_ZNSaIcE` prefix (std::allocator) to `KnownSafeOpaqueTable`, `_ZSt11_Hash_bytesPKvmm`, `_ZNSaIcEC2ERKS_`, and `_ZNSaIcED2Ev` to `KnownSafeWithTMArgsTable` in `opaque_safe_table.hpp`. `test_stl_containers` now builds and passes.
+- **All LLVM plugin tests PASS**: `test_types`, `test_memtest`, `test_retry`, `test_threads`, `test_local_containers`, `test_vector_realloc`, `test_alloc_stress`, `test_ll_alloc`, `test_stl_containers`, `test_stl_map_find`, `test_tm_arg_trace`, `test_construct_tx_pattern` — all EXIT:0 with correct output.
+- **Python instrumenter failure**: pre-existing environment issue (`ModuleNotFoundError: No module named 'clang'` — missing `libclang` Python bindings), unrelated to plugin changes.
 
-## Next Steps
-1. **Fix `test_alloc_stress` SIGSEGV**: exit code 139 — was FULL PASS before always-instrument transition.
-2. **Fix SwissTM `test_counter`/`test_fp` flaky failures**: expected 8000 got 7985; f8 counter failure.
-3. Run full test suite with `tm-instrument` pipeline to check for regressions after merge.
-4. Debug STMbench7 null-write crash + `ll_alloc_test` hang (pre-existing).
-
-## Recent Refactoring
-- **`CloneOnly` fix**: `computeClonableFunctions`/`redirectCallsToClones` now treat `CloneMode::CloneOnly` like `AlwaysInline` — clone ALL reachable functions. Previously too conservative (only TM-traced pointer args), producing 0 clones for local-container call graphs.
-- **`tm-instrument-then-inline` pipeline**: new pipeline — instruments each clone individually then runs `AlwaysInlinerPass` + `TMInstrumentPass`. Produces 204 TM ops vs 179 for inline pipeline.
-- **`BUILD_TYPE=DEBUG`**: now uses `tm-instrument` (non-inline) to preserve clone functions for breakpoints.
-- **Memory intrinsic fix**: `needsMemIntrinsicInstrumentation` + push to `MemIntrinsics` vector (was previously detected but never instrumented).
-- **`TMStripLifetimePass`**: strips `llvm.lifetime.start/end` calls for LLVM 22 compat.
-- **Makefile refactoring**: static pattern rules, `PLUGIN_CXXFLAGS`, `TM_LINK_OPT`, `BUILD_TYPE`, convenience targets.
-- **`DEBUG.md`**: debugging guide with pipeline docs, symbol name resolution, GDB breakpoint strategies.
+## Blocked
+- **STMbench7 hangs with ALL TM backends**: First long traversal operation (e.g., `op_lt3` — range-for over `g_compositeParts`) hangs with WBCTL/SwissTM/NOrec at 1 thread. Not data-structure-specific (occurs even without any map operations). Singlelock and uninstrumented work fine. Bank benchmark works fine (proves pipeline intact). Needs investigation — possible bug in tm_read during vector iterator operations inside long-running TX.
+- **STAMP Labyrinth still slow with inline pipeline**: Even with 8× reduction from UINT64 memcpy, the first labyrinth path doesn't complete within 60s. The `do_expansion` BFS loop generates thousands of TM read/write operations per path. Non-inline pipeline completes in ~5ms. Root cause: inline pipeline instruments ALL STL code (vector, deque iterators, queue internals) inside the TX, creating additional TM operations beyond the grid memcpy. Possible solutions: (a) apply `tm_local` annotations to labyrinth helper functions' internal variables, (b) use the non-inline pipeline for long-running TX functions, (c) add a per-benchmark pipeline override.

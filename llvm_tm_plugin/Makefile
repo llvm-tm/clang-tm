@@ -91,10 +91,10 @@ $(eval $(call tm_define_rules, $(TEST_DIR)/))
 
 # Text IR for debugging
 $(OUT_DIR)/%.ll: $(TEST_DIR)/%.cpp | $(OUT_DIR)
-	$(CC) -O1 -fno-inline -fno-inline-functions -emit-llvm -S $< -o $@ -fno-stack-protector
+	$(CLANG_TM) --compile-only -O1 -fno-inline -fno-inline-functions -emit-llvm -S $< -o $@ -fno-stack-protector
 
 $(OUT_DIR)/%.opt.ll: $(OUT_DIR)/%.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
-	$(OPT) -load-pass-plugin=$(BIN_DIR)/libTMInstrument.so -passes="tm-instrument" $< -S -o $@
+	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so -passes="tm-instrument" $< -S -o $@
 
 # ---- Link rules ----
 
@@ -102,19 +102,23 @@ DEFAULT_LINK_FLAGS = -std=c++20 $(TM_LINK_OPT) -pthread
 
 # Most tests: link with tm_runtime.cpp
 $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(RUNTIME_DIR)/tm_runtime.cpp | $(BIN_DIR)
-	$(CXX) $(DEFAULT_LINK_FLAGS) $< $(RUNTIME_DIR)/tm_runtime.cpp -o $@
+	$(CLANG_TM) --link-only --runtime=$(RUNTIME_DIR)/tm_runtime.cpp \
+	  $(DEFAULT_LINK_FLAGS) $< -o $@
 
 # Math opaque test: needs -tm-allow-opaque and -lm
 $(BIN_DIR)/test_math_opaque: $(OUT_DIR)/test_math_opaque.bc $(RUNTIME_DIR)/tm_runtime.cpp $(BIN_DIR)/libTMInstrument.so | $(BIN_DIR)
-	$(OPT) -load-pass-plugin=$(BIN_DIR)/libTMInstrument.so -passes="tm-instrument" \
-	  -tm-allow-opaque -tm-opaque-symbols-file=/tmp/opaque_symbols.txt \
+	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so \
+	  -passes="tm-instrument" -a \
+	  -tm-opaque-symbols-file=/tmp/opaque_symbols.txt \
 	  $< -o $(OUT_DIR)/test_math_opaque.instr.bc 2>/dev/null || true
-	$(OPT) -O3 $(OUT_DIR)/test_math_opaque.instr.bc -o $(OUT_DIR)/test_math_opaque.opt.bc
-	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/test_math_opaque.opt.bc $(RUNTIME_DIR)/tm_runtime.cpp -o $@ -lm
+	$(CLANG_TM) --optimize-only -O3 $(OUT_DIR)/test_math_opaque.instr.bc -o $(OUT_DIR)/test_math_opaque.opt.bc
+	$(CLANG_TM) --link-only --runtime=$(RUNTIME_DIR)/tm_runtime.cpp \
+	  $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/test_math_opaque.opt.bc -o $@ -lm
 
 # Uninstrumented variant (no plugin)
 $(BIN_DIR)/%_noinst: $(OUT_DIR)/%.bc $(RUNTIME_DIR)/tm_runtime.cpp | $(BIN_DIR)
-	$(CXX) $(DEFAULT_LINK_FLAGS) $< $(RUNTIME_DIR)/tm_runtime.cpp -o $@
+	$(CLANG_TM) --link-only --runtime=$(RUNTIME_DIR)/tm_runtime.cpp \
+	  $(DEFAULT_LINK_FLAGS) $< -o $@
 
 # ---- Specialized backends ----
 
@@ -128,26 +132,30 @@ TINYSTM_TESTS := test_local_containers test_vector_realloc test_alloc_stress tes
 # pipeline can't handle this because local container `this` pointers
 # don't trace to TM globals.
 $(OUT_DIR)/test_local_containers.opt.bc: $(OUT_DIR)/test_local_containers.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
-	$(OPT) -load-pass-plugin=$(BIN_DIR)/libTMInstrument.so -passes="tm-instrument-inline" $< -o $(OUT_DIR)/test_local_containers.instr.bc
-	$(OPT) $(TM_OPT_LEVEL) $(OUT_DIR)/test_local_containers.instr.bc -o $@
+	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so \
+	  -passes="tm-instrument-inline" $< -o $(OUT_DIR)/test_local_containers.instr.bc
+	$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $(OUT_DIR)/test_local_containers.instr.bc -o $@
 
 $(addprefix $(BIN_DIR)/,$(TINYSTM_TESTS)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp | $(BIN_DIR)
-	$(CXX) $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL $< \
-	  $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \
-	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) -o $@
+	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \
+	  $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
+	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
 
 # Race tests (SingleGlobalLock runtime)
 RACE_TEST_BINS := $(addprefix $(BIN_DIR)/,$(RACE_TEST_NAMES))
 $(RACE_TEST_BINS): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp | $(BIN_DIR)
-	$(CXX) $(DEFAULT_LINK_FLAGS) $< $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp -I $(BACKENDS_DIR) -o $@
+	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp \
+	  $(DEFAULT_LINK_FLAGS) -I $(BACKENDS_DIR) $< -o $@
 
 # Persistent runtime (snapshot-based, saves on tm_exit)
 $(BIN_DIR)/test_persist: $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(RUNTIME_DIR)/persistent.cpp | $(BIN_DIR)
-	$(CXX) $(DEFAULT_LINK_FLAGS) $< $(RUNTIME_DIR)/persistent.cpp -o $@
+	$(CLANG_TM) --link-only --runtime=$(RUNTIME_DIR)/persistent.cpp \
+	  $(DEFAULT_LINK_FLAGS) $< -o $@
 
 # Persistent SGL runtime (write-through, uses mmap) — different .opt.bc than target name
 $(BIN_DIR)/test_persist_sgl: $(OUT_DIR)/test_persist.opt.bc $(BACKENDS_DIR)/runtimes/PersistentSGL_runtime.cpp | $(BIN_DIR)
-	$(CXX) $(DEFAULT_LINK_FLAGS) $< $(BACKENDS_DIR)/runtimes/PersistentSGL_runtime.cpp -o $@
+	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/runtimes/PersistentSGL_runtime.cpp \
+	  $(DEFAULT_LINK_FLAGS) $< -o $@
 
 ll: all $(TEST_LLS) $(OPT_LLS)
 
