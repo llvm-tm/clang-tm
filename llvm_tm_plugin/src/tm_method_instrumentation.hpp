@@ -458,6 +458,11 @@ computeClonableFunctions(Module &M,
         if (F->isDeclaration()) continue;
         if (F->getName().starts_with("tm_")) continue;
         if (hasAnnotation(*F, "transaction")) continue;
+        // Skip thread entry points and main — they are not part of TX logic
+        // and should not be cloned.  "thread" functions may call transaction
+        // functions but must not themselves be cloned.
+        if (hasAnnotation(*F, "thread")) continue;
+        if (F->getName() == "main" || hasAnnotation(*F, "main")) continue;
         // Clone ALL reachable functions.  This ensures functions like
         // destructors that write to TM globals through internal references
         // (e.g., v_.end_ = pos_) are cloned and instrumented, so their

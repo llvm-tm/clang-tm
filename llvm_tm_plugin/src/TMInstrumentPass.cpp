@@ -177,6 +177,34 @@ static void checkOpaqueOrAbort(Module &M,
     }
 }
 
+// Validate that no function is annotated with both "thread"/"main" and
+// "transaction".  A function marked as both is a programming error:
+// "thread" functions are entry points that may call transaction functions,
+// but must not themselves be transactional.  "main" is also an entry point
+// and must not be transactional.  If a function has both annotations, the
+// compiler emits an error and exits.
+static void checkAnnotationConsistency(Module &M)
+{
+    for (auto &F : M) {
+        if (F.isDeclaration()) continue;
+        bool isThread = hasAnnotation(F, "thread");
+        bool isMain = (F.getName() == "main") || hasAnnotation(F, "main");
+        bool isTx = hasAnnotation(F, "transaction");
+        if (isThread && isTx) {
+            errs() << "error: function '" << F.getName()
+                   << "' has both 'thread' and 'transaction' annotations. "
+                   << "A thread entry function cannot be a transaction function.\n";
+            exit(1);
+        }
+        if (isMain && isTx) {
+            errs() << "error: function '" << F.getName()
+                   << "' has both 'main' and 'transaction' annotations. "
+                   << "The main function cannot be a transaction function.\n";
+            exit(1);
+        }
+    }
+}
+
 static void redirectTXFunctionsToClones(Module &M,
                                          SmallPtrSetImpl<Function *> &TxReachableFuncs,
                                          SmallVectorImpl<std::pair<Function *, Function *>> &ClonedMap,
@@ -203,6 +231,7 @@ public:
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
   {
     TM_DEBUG("TMInitInjectPass: processing module %s", M.getName().str().c_str());
+    checkAnnotationConsistency(M);
     auto Ctx = setupModulePass(M);
     bool &modified = Ctx.modified;
 
@@ -330,6 +359,7 @@ public:
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
   {
     TM_DEBUG("TMGlobalInitPass: processing module %s", M.getName().str().c_str());
+    checkAnnotationConsistency(M);
     auto Ctx = setupModulePass(M);
     bool &modified = Ctx.modified;
 
@@ -447,39 +477,6 @@ public:
     SmallVector<Instruction *, 16> ToErase;
     SmallVector<CallBase *, 8> MemIntrinsics;
 
-    // Check if this function already has tm_read/tm_write calls from inlined
-    // instrumented clones.  If so, skip handleLoadStore to avoid creating
-    // redundant write-set entries.
-    //
-    // The always-instrument pipeline instruments clone functions via
-    // instrumentLoadsStoresInFunction, and those clones are then inlined into
-    // the TX function.  After inlining, handleLoadStore would see the original
-    // LoadInst/StoreInst inside the inlined clone code and wrap them again,
-    // producing two tm_write calls per store: one from the clone and one from
-    // handleLoadStore.  Each extra entry inflates the write-set, extending
-    // lock-hold time during commit and increasing abort rates for concurrent
-    // threads (observed 2× abort rate in test_local_containers).
-    //
-    // Do NOT remove this guard.  It must coexist with getBaseObjectNoLoad
-    // (handleLoadStore's alloca check).  getBaseObjectNoLoad catches more
-    // shared-heap stores; hasCloneInstrumentation prevents double-wrapping
-    // when clones supply the first layer of instrumentation.
-    bool hasCloneInstrumentation = false;
-    for (auto &BB : F) {
-      for (auto &I : BB) {
-        if (auto *Call = dyn_cast<CallBase>(&I)) {
-          if (Function *Callee = Call->getCalledFunction()) {
-            StringRef N = Callee->getName();
-            if (N.starts_with("tm_read_") || N.starts_with("tm_write_")) {
-              hasCloneInstrumentation = true;
-              break;
-            }
-          }
-        }
-      }
-      if (hasCloneInstrumentation) break;
-    }
-
     for (auto &BB : F) {
       for (auto InstIt = BB.begin(); InstIt != BB.end();) {
         Instruction *I = &*InstIt++;
@@ -497,8 +494,7 @@ public:
                 continue;
 #endif
 #ifndef DISABLE_TM_READ_WRITE
-        if (!hasCloneInstrumentation)
-            handleLoadStore(I, F, *M, H, ToErase);
+        handleLoadStore(I, F, *M, H, ToErase);
 #endif
       }
     }
