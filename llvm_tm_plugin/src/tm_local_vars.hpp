@@ -420,6 +420,66 @@ static bool tracesFromTMGlobal(Value *V, Module &M,
   return false;
 }
 
+// Trace whether a pointer value ultimately derives from a stack alloca.
+// Like tracesFromTMGlobal but follows through function arguments to their
+// call-site values. This catches the case where a tm_clone function receives
+// a stack alloca as an argument, and its internal stores/loads to that
+// address should NOT be TM-instrumented (the alloca check in handleLoadStore
+// only catches direct alloca references, not arguments from allocas).
+// DEPTH LIMIT: 10 iterations.
+static bool tracesFromAlloca(Value *V, Module &M, int Depth = 0)
+{
+  if (Depth > 10) return false;
+  if (!V) return false;
+
+  V = V->stripPointerCasts();
+
+  // Direct alloca access
+  if (isa<AllocaInst>(V))
+    return true;
+
+  // GEP from alloca
+  if (auto *GEP = dyn_cast<GetElementPtrInst>(V))
+    return tracesFromAlloca(GEP->getPointerOperand(), M, Depth + 1);
+  if (auto *GEPOp = dyn_cast<GEPOperator>(V))
+    return tracesFromAlloca(const_cast<Value *>(GEPOp->getPointerOperand()), M, Depth + 1);
+
+  // Load: follow the operand
+  if (auto *Load = dyn_cast<LoadInst>(V))
+    return tracesFromAlloca(Load->getPointerOperand(), M, Depth + 1);
+
+  // Function argument: check all call sites. If ANY call site passes a
+  // non-alloca value, the pointer MIGHT point to shared memory and should
+  // NOT be treated as stack-only.
+  if (auto *Arg = dyn_cast<Argument>(V)) {
+    Function *Parent = Arg->getParent();
+    if (!Parent) return false;
+    // Collect call sites — only direct calls to this function.
+    SmallPtrSet<CallBase *, 8> Calls;
+    for (User *U : Parent->users()) {
+      if (auto *Call = dyn_cast<CallBase>(U)) {
+        if (Call->getCalledFunction() == Parent)
+          Calls.insert(Call);
+      }
+    }
+    // No call sites: conservatively return false (we cannot prove it is
+    // always stack-allocated).  Dead functions should not be instrumented
+    // anyway, but this prevents false skips.
+    if (Calls.empty())
+      return false;
+    // All call sites must pass an alloca-derived argument for this to be safe.
+    for (CallBase *Call : Calls) {
+      if (Arg->getArgNo() >= Call->arg_size())
+        continue;
+      if (!tracesFromAlloca(Call->getArgOperand(Arg->getArgNo()), M, Depth + 1))
+        return false;
+    }
+    return true;
+  }
+
+  return false;
+}
+
 // Determine if a pointer accesses shared (non-local) data
 static bool isSharedPointer(Value *Ptr,
                            const SmallPtrSet<const Value *, 32> &LocalVars,
