@@ -104,6 +104,32 @@ CXX="${LLVM_BINDIR:+$LLVM_BINDIR/}clang++"
 OPT="${LLVM_BINDIR:+$LLVM_BINDIR/}opt"
 LLVM_LINK="${LLVM_BINDIR:+$LLVM_BINDIR/}llvm-link"
 
+# ---- Dependency check ----
+
+check_deps() {
+    local missing=0
+    for tool in "$CXX" "$OPT" "$LLVM_LINK"; do
+        if ! command -v "$tool" &>/dev/null; then
+            echo "clang-tm: ERROR: required tool not found: $tool" >&2
+            missing=1
+        fi
+    done
+    # opt and llvm-link may be separate binaries — also accept bare names
+    if ! command -v "$OPT" &>/dev/null && ! command -v "opt" &>/dev/null; then
+        echo "clang-tm: ERROR: opt not found (tried: $OPT)" >&2
+        missing=1
+    fi
+    if ! command -v "$LLVM_LINK" &>/dev/null && ! command -v "llvm-link" &>/dev/null; then
+        echo "clang-tm: ERROR: llvm-link not found (tried: $LLVM_LINK)" >&2
+        missing=1
+    fi
+    if [ "$missing" -eq 1 ]; then
+        echo "clang-tm: Install the LLVM toolchain (apt install clang++-22 llvm-22-dev)" >&2
+        exit 1
+    fi
+}
+check_deps
+
 # ---- Defaults ----
 
 RUNTIME="runtime.cpp"
@@ -212,6 +238,14 @@ resolve_runtime() {
     return 1
 }
 
+# Check if a path is a source file (not a precompiled .o/.a/.so/.bc)
+runtime_is_source() {
+    case "$1" in
+        *.cpp|*.cc|*.cxx|*.c) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # ---- Handle --print-tool ----
 
 if [ -n "$PRINT_TOOL" ]; then
@@ -300,7 +334,7 @@ if [ "$MODE" = "link-only" ]; then
     if runtime_is_source "$RESOLVED_RUNTIME"; then
         RUNTIME_O="${OUT_DIR:?}/tm_runtime.o"
         $CXX -std=c++20 ${OPT_LEVEL:--O1} -c "$RESOLVED_RUNTIME" -o "$RUNTIME_O" \
-            -fno-stack-protector -pthread
+            -fno-stack-protector -pthread "${CXXFLAGS[@]+"${CXXFLAGS[@]}"}"
         $CXX "${LINK_CXXFLAGS[@]}" "$INPUT" "$RUNTIME_O" -o "$OUTPUT"
     else
         $CXX "${LINK_CXXFLAGS[@]}" "$INPUT" "$RESOLVED_RUNTIME" -o "$OUTPUT"
@@ -329,16 +363,6 @@ RESOLVED_RUNTIME="$(resolve_runtime "$RUNTIME")" || {
     echo "clang-tm: runtime not found: $RUNTIME" >&2
     echo "  Tried: $(realpath "$RUNTIME" 2>/dev/null || echo "$RUNTIME") and $RUNTIMES_DIR/$(basename "$RUNTIME")" >&2
     exit 1
-}
-
-# ---- Determine if runtime is source or library ----
-
-runtime_is_source() {
-    local path="$1"
-    case "$path" in
-        *.cpp|*.cc|*.cxx) return 0 ;;
-        *) return 1 ;;
-    esac
 }
 
 # ---- Add backend include path and split flags ----

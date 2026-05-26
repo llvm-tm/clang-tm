@@ -249,10 +249,31 @@ static void auditTXFunctionLoadsStores(Function &F, Module &M) {
            << "\n";
 }
 
+// Check if a function (possibly cloned with _tm_clone suffix) originates from
+// an STL container whose internal new/delete must not go through tm_malloc.
+// STL container functions have mangled names starting with _ZNSt (std::) or
+// _ZNKSt (const std::).  Their internal buffer allocations (vector realloc,
+// string _M_create, etc.) must use the regular heap to avoid spec_alloc being
+// freed on TX abort while the container's in-memory pointer still references it.
+static bool isSTLContainerAllocSite(CallBase *Call)
+{
+    Function *Parent = Call->getFunction();
+    if (!Parent) return false;
+    StringRef Name = Parent->getName();
+    // Strip _tm_clone suffix to check the original function name
+    if (Name.ends_with("_tm_clone"))
+        Name = Name.drop_back(10); // strlen("_tm_clone")
+    // Itanium ABI: _ZNSt = std::, _ZNKSt = const std::, _ZN9__gnu_cxx = __gnu_cxx::
+    return Name.starts_with("_ZNSt") || Name.starts_with("_ZNKSt")
+        || Name.starts_with("_ZN9__gnu_cxx");
+}
+
 // Replace a malloc/free/operator-new call with the TM-aware equivalent.
 // Handles both CallInst and InvokeInst. For InvokeInst, the invoke is
 // replaced with a regular call + branch to the normal successor; the
 // unwind landing pad becomes dead code and is cleaned up by later passes.
+// SKIPS interception for calls inside STL container functions (vector, string,
+// deque, etc.) whose internal buffer allocations must use the regular heap.
 static bool handleMallocFree(CallBase *Call, IRBuilder<> &B,
                               const TMRuntimeHooks &H,
                               SmallVectorImpl<Instruction *> &ToErase)
@@ -265,8 +286,30 @@ static bool handleMallocFree(CallBase *Call, IRBuilder<> &B,
     BasicBlock *ParentBB = Call->getParent();
 
     StringRef N = Callee->getName();
-    if (N == "malloc" || N == "_Znwm" || N == "_Znam" || N == "_Znwj" || N == "_Znaj"
-        || N == "_ZnwmSt11align_val_t" || N == "_ZnamSt11align_val_t") {
+
+    // STL container internal allocations (vector realloc, string _M_create, etc.)
+    // must NOT go through tm_malloc — their buffers persist across TX boundaries
+    // and must not be freed on TX abort while the container's in-memory pointer
+    // still references them.  HOWEVER, deallocation (operator delete/free) must
+    // STILL go through tm_free so the deallocation is deferred to commit time,
+    // preventing concurrent readers from accessing freed memory during the TX.
+    bool isSTL = isSTLContainerAllocSite(Call);
+
+    // For STL container allocation sites: skip new/malloc/calloc/realloc
+    // interception (use regular heap allocator), but still intercept
+    // delete/free to defer deallocation to commit time.
+    bool isNew = N == "malloc" || N == "_Znwm" || N == "_Znam" || N == "_Znwj" || N == "_Znaj"
+        || N == "_ZnwmSt11align_val_t" || N == "_ZnamSt11align_val_t";
+    bool isFree = N == "free" || N == "_ZdlPv" || N == "_ZdlPvm" || N == "_ZdaPv" || N == "_ZdaPvm"
+        || N == "_ZdlPvSt11align_val_t" || N == "_ZdlPvmSt11align_val_t"
+        || N == "_ZdaPvSt11align_val_t" || N == "_ZdaPvmSt11align_val_t";
+
+    // STL container new/malloc: use regular heap (skip tm_malloc).
+    // STL container delete/free: still redirect to tm_free for deferred free.
+    if ((isNew || N == "calloc" || N == "realloc") && isSTL)
+        return false;
+
+    if (isNew) {
         Value *SizeArg = Call->getArgOperand(0);
         auto *NewCall = B.CreateCall(H.malloc_fn, {SizeArg});
         NewCall->setAttributes(AttributeList{});
@@ -310,9 +353,7 @@ static bool handleMallocFree(CallBase *Call, IRBuilder<> &B,
         }
         return true;
     }
-    if (N == "free" || N == "_ZdlPv" || N == "_ZdlPvm" || N == "_ZdaPv" || N == "_ZdaPvm"
-        || N == "_ZdlPvSt11align_val_t" || N == "_ZdlPvmSt11align_val_t"
-        || N == "_ZdaPvSt11align_val_t" || N == "_ZdaPvmSt11align_val_t") {
+    if (isFree) {
         Value *PtrArg = Call->getArgOperand(0);
         auto *BC = B.CreateBitCast(PtrArg, B.getPtrTy());
         B.CreateCall(H.free_fn, {BC});
@@ -359,23 +400,25 @@ static bool handleLoadStore(Instruction *I, Function &F, Module &M,
     // loaded pointers — for that, the hasCloneInstrumentation guard handles
     // the double-instrumentation concern.
     if (auto *Load = dyn_cast<LoadInst>(I)) {
-        if (isa<AllocaInst>(getBaseObject(Load->getPointerOperand())))
+        Value *Ptr = Load->getPointerOperand();
+        if (isa<AllocaInst>(getBaseObject(Ptr)))
             return false;
-        if (isTMLocalVar(Load->getPointerOperand(), M))
+        if (isTMLocalVar(Ptr, M))
             return false;
         IRBuilder<> B(Load);
-        if (auto *Call = emitTMRead(B, Load->getPointerOperand(), Load->getType(), H)) {
+        if (auto *Call = emitTMRead(B, Ptr, Load->getType(), H)) {
             Load->replaceAllUsesWith(Call);
             ToErase.push_back(Load);
             return true;
         }
     } else if (auto *Store = dyn_cast<StoreInst>(I)) {
-        if (isa<AllocaInst>(getBaseObject(Store->getPointerOperand())))
+        Value *Ptr = Store->getPointerOperand();
+        if (isa<AllocaInst>(getBaseObject(Ptr)))
             return false;
-        if (isTMLocalVar(Store->getPointerOperand(), M))
+        if (isTMLocalVar(Ptr, M))
             return false;
         IRBuilder<> B(Store);
-        if (emitTMWrite(B, Store->getPointerOperand(), Store->getValueOperand(), H))
+        if (emitTMWrite(B, Ptr, Store->getValueOperand(), H))
             ToErase.push_back(Store);
         return true;
     } else if (isa<AtomicRMWInst>(I) || isa<AtomicCmpXchgInst>(I)) {

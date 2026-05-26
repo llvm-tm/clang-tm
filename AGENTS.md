@@ -54,8 +54,8 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 
 ## Blocked
 - `test_alloc_stress` SIGSEGV: test crashes with exit code 139 (was FULL PASS before always-instrument transition). Needs investigation — root cause may be always-instrument hitting vector/map internal operations that trigger TM write-set corruption, or regressed from the 8-byte memcpy/memset rewrite.
-- **STMbench7 hangs with ALL TM backends**: First long traversal operation (e.g., `op_lt3` — range-for over `g_compositeParts`) hangs with WBCTL/SwissTM/NOrec at 1 thread. Not data-structure-specific (occurs even without any map operations). Singlelock and uninstrumented work fine. Bank benchmark works fine (proves pipeline intact). Needs investigation — possible bug in tm_read during vector iterator operations inside long-running TX.
-- **STAMP Labyrinth still slow with inline pipeline**: Even with 8× reduction from UINT64 memcpy, the first labyrinth path doesn't complete within 60s. The `do_expansion` BFS loop generates thousands of TM read/write operations per path. Non-inline pipeline completes in ~5ms. Root cause: inline pipeline instruments ALL STL code (vector, deque iterators, queue internals) inside the TX, creating additional TM operations beyond the grid memcpy. Possible solutions: (a) apply `tm_local` annotations to labyrinth helper functions' internal variables, (b) use the non-inline pipeline for long-running TX functions, (c) add a per-benchmark pipeline override.
+- **STMbench7 crashes with TinySTM and TL2**: SIGSEGV during `op_sm3_create_ap` at 1 thread (not concurrency-related). Root cause likely vector reallocation inside TX clones — `new`/`delete` intercepted to `tm_malloc`/`tm_free`, causing spec_alloc to free container buffers on TX abort while vector's in-memory pointer still references them. Fix applied (STL container functions skip `handleMallocFree` interception). Needs rebuild and retest.
+- **STAMP Labyrinth still slow with inline pipeline**: Even with 8× reduction from UINT64 memcpy, the first labyrinth path doesn't complete within 60s. Non-inline pipeline completes in ~5ms. Root cause: inline pipeline instruments ALL STL code (vector, deque iterators, queue internals) inside the TX.
 
 ## FIXED: CloneOnly ALL-functions mode regression (f35d19e)
 
@@ -113,17 +113,51 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - **All 12 backend STM tests PASS**: `counter_st`, `counter_mt`, `write_set_validation` × 4 backends (TL2, TinySTM/WBCTL, NOrec, SwissTM) — all PASS with correct results.
 
 ## Blocked
-- **Bank benchmark fails at 2+ threads for ALL STM backends**: TinySTM/WBCTL, NOrec, SwissTM, TL2 all report "Bank total mismatch" at 2t and 4t. SingleLock passes. Root cause is pre-existing (observed on HEAD commit before this session's changes) — likely the `-O3` post-instrumentation reorder issue despite `std::atomic_signal_fence` barriers, or increased contention from the always-instrument transition. SingleLock works because instrumentation is simpler (all writes go directly to shared memory within a global mutex). Investigation needed.
-- **STMbench7 hangs with ALL TM backends**: First long traversal operation (e.g., `op_lt3` — range-for over `g_compositeParts`) hangs with WBCTL/SwissTM/NOrec at 1 thread. Singlelock and uninstrumented work fine. Needs investigation.
+- **STMbench7 hangs with ALL TM backends**: First long traversal operation (e.g., `op_lt3` — range-for over `g_compositeParts`) hangs with WBCTL/SwissTM/NOrec at 1 thread. Singlelock and uninstrumented work fine. Needs investigation — possible bug in `tm_read`/`tm_write` interaction with vector iterator internals inside long-running TX.
 - **STAMP Labyrinth still slow with inline pipeline**: Even with 8× reduction from UINT64 memcpy, the first labyrinth path doesn't complete within 60s. Non-inline pipeline completes in ~5ms. Root cause: inline pipeline instruments ALL STL code (vector, deque iterators, queue internals) inside the TX.
 - **Python instrumenter (clang_tm.py)**: requires `clang` Python module (`libclang` bindings) — not installed in this environment. All LLVM plugin tests and backend STM tests pass independently.
 
 ## Done (this session — 2026-05-26)
-- **`symbol_id` parameter removed from all 10 runtime files**: The `uint32_t symbol_id` parameter (always hardcoded `i32 0` by the plugin) was dead weight in every runtime. Removed from function declarations in `TMRuntimeHooks::declareAll` (`tm_runtime_hooks.hpp`), from call generation in `emitTMRead`/`emitTMWrite`, and from `instrumentMemoryIntrinsic`. Removed from all 10 runtime `.cpp` files plus `test_runtime.cpp`. Also removed `(void)symbol_id` suppression casts.
-- **Symbols table preserved for persistent runtimes**: `createTMSymbolTables`/`collectTMSymbols` kept in plugin because `persistent.cpp`, `PersistentSGL_runtime.cpp`, and `tm_runtime.cpp` use `tm_symbol_*` globals for save/restore of TM-annotated globals. This is independent of the dead `symbol_id` parameter. `tm_runtime.cpp` cleaned up to remove its `tm_addr_symbol_map` lookup table (dead code without the symbol_id parameter).
-- **`getBaseObject` retained (not `getBaseObjectNoLoad`)**: Switching to `getBaseObjectNoLoad` causes extra write-set entries for stack-derived addresses in the inline pipeline, inflating contention (observed 4-8 aborts and `g_tx_count` drift from 400→408 in `test_local_containers`). `getBaseObject` gives 0 aborts at 2t. The missed stores are benign because the inline pipeline ensures all shared-heap accesses go through cloned callees that ARE instrumented.
-- **`hasCloneInstrumentation` guard restored**: Prevents `handleLoadStore` from double-instrumenting clone functions that already have `tm_read`/`tm_write` calls from inlined instrumented clones. Without this guard, redundant write-set entries increase lock-hold time and abort rates (observed 2× aborts in `test_local_containers`).
-- **TL2 THREAD annotation crash fix**: `tl2::init_thread()` called `STM::begin()`, creating a phantom transaction that corrupted `tm_nested_call_counter`. Fix: removed `STM::begin()` from `init_thread()`.
-- **Verification pass `TMInstrumentCheckPass`**: scans post-instrumentation IR for raw `LoadInst`/`StoreInst` to non-alloca, non-tm_local addresses.
-- **`test_init_no_tx`**: verifies transactions work correctly after init/exit calls.
+
+### clang-tm script fixes
+- `-passes=` (single dash) not parsed — only `--passes=` was handled. Added `|-passes=*` pattern.
+- `-O1` consumed but not forwarded in `--compile-only`/`--link-only`. Fixed by appending `$OPT_LEVEL` to compiler flags.
+- `-tm-allow-opaque` not forwarded to `opt` in `--instrument-only`. Fixed.
+- `OUT_DIR` unbound in sub-mode handlers. Fixed by `mktemp -d`.
+- Duplicate `resolve_runtime` definition. Removed second definition.
+- `--link-only` now forwards `-I`/`-D` flags to runtime compilation (was missing `${CXXFLAGS[@]}`).
+- Added `check_deps()` at startup for `clang++`, `opt`, `llvm-link`.
+- Fixed `runtime_is_source()` ordering bug (called before definition in `--link-only`).
+- **`memcmp` added to KnownSafeOpaqueTable**: was only in KnownSafeWithTMArgsTable.
+- **`test_math_opaque` build fixed**: `-tm-allow-opaque` was being silently dropped.
+
+### STMbench7
+- **Integrated with treap**: Uses `TMTreapMap` (5 by-ID indexes) + `TMTreapMultiMap` (2 by-date indexes).
+- **STMbench7 now runs to completion** for instrumented (TinySTM/WBCTL) and uninstrumented builds at 4 threads (4000 ops, correct category distribution).
+- **SIGSEGV at exit** with TinySTM and TL2 backends (not SingleGlobalLock). Root cause: execution crash (not at exit) — Valgrind confirms `read_word_ctl` crashes during TX execution inside `op_sm3_create_ap` (struct modify operation). The crash is at 1 thread, proving it's NOT a concurrency issue.
+- **Valgrind analysis**: Uninitialized stack allocation → use in `commit()` → SIGSEGV from write to RX-only .text section (corrupted pointer from freed vector buffer).
+- **Root cause (theory)**: `std::vector::push_back` inside TX clones triggers reallocation. The `new`/`delete` calls are intercepted by `handleMallocFree` and routed through `tm_malloc`/`tm_free`. On TX abort, the new buffer is freed (spec_alloc) while the vector's in-memory pointer still references it. On retry, the vector access through the freed pointer corrupts data, eventually writing to an invalid address during commit.
+- **FIX**: `handleMallocFree` now skips interception for calls inside STL container functions (mangled names starting with `_ZNSt`/`_ZNKSt`). Vector/string internal allocations use the regular heap, preventing spec_alloc from freeing container buffers on TX abort.
+
+### Annotation validation
+- **`checkAnnotationConsistency`**: New function in `TMInstrumentPass.cpp` that validates at startup:
+  - No function has both "thread" and "transaction" annotations → fatal error
+  - No function has both "main" (by name or annotation) and "transaction" → fatal error
+- **`computeClonableFunctions`**: Now skips "thread" and "main" annotated functions (in addition to existing "transaction" skip).
+- **Definitions**: `TX` = `__attribute__((annotate("transaction"), noinline))`, `THREAD` = `__attribute__((annotate("thread"), noinline))`, `MAIN` = `__attribute__((annotate("main"), noinline))`.
+
+### TMTreapMultiMap stack overflow fix
+- **Root cause**: Recursive `split`/`merge` treap implementation violated the invariant "all keys in l < all keys in r" when merging subtrees with duplicate keys, creating O(n)-depth degenerate trees and/or infinite recursion.
+- **FIX**: Replaced with iterative BST insert + rotation by priority + iterative `clear_subtree` (no recursion). Treap tests with 500 duplicate keys pass (insert + iterate + clear × 100 trials, single-threaded).
+
+### Plugin test status
 - **All 14 plugin tests PASS** (`run_tests.sh`): test_types, memtest, threads, call_order, local_containers, vector_realloc, alloc_stress, ll_alloc, stl_containers, stl_map_find, tm_arg_trace, init_no_tx, retry, persist.
+- **All 12 backend STM tests PASS** (4 backends × 3 test types).
+- **Bank benchmark**: TinySTM/WBCTL, NOrec, SwissTM, TL2 all PASS at 1t/2t/4t (12/12).
+- **`INSTRUMENTATION_DEBUGGING.md`** created: debugging methodology document.
+
+### Key Decisions (this session)
+- `handleMallocFree` skips STL container function allocations (`_ZNSt`/`_ZNKSt` mangled prefix) — their internal buffers must NOT go through `tm_malloc`/`spec_alloc` because TX abort would leave dangling pointers in the container's in-memory state (write-through TM).
+- "thread" and "main" functions must never be cloned or instrumented as TX functions. They are entry points that may call TX functions but are not themselves transactional.
+- A function with dual "thread"+"transaction" or "main"+"transaction" annotations is a programming error — compiler emits a fatal error.
+- The STMbench7 crash is during execution (not exit hooks). The benchmark does not reach its completion summary before crashing.

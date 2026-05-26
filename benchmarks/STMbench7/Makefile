@@ -1,3 +1,4 @@
+TM_PLUGIN := $(abspath ../../llvm_tm_plugin/bin/libTMInstrument.so)
 include ../../llvm_tm_plugin/tm_pipeline.mk
 $(eval $(call tm_define_rules))
 

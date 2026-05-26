@@ -3,6 +3,7 @@
 // Every load/store is inline and visible to the TM plugin.
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -86,9 +87,22 @@ class TMTreapMap {
 
     void clear_subtree(Node *n) {
         if (!n) return;
-        clear_subtree(n->left);
-        clear_subtree(n->right);
-        delete n;
+        Node *x = n;
+        while (x) {
+            if (x->left) {
+                x = x->left;
+            } else if (x->right) {
+                x = x->right;
+            } else {
+                Node *p = x->parent;
+                if (p) {
+                    if (p->left == x) p->left = nullptr;
+                    else              p->right = nullptr;
+                }
+                delete x;
+                x = p;
+            }
+        }
     }
 
 public:
@@ -198,18 +212,20 @@ class TMTreapMultiMap {
         Node * right;
         Node * parent;
 
-        static int prio_from_key(const K &k) {
-            uint64_t h = (uint64_t)std::hash<K>{}(k);
-            h ^= h >> 33;
-            h *= 0xFF51AFD7ED558CCDULL;
-            h ^= h >> 33;
-            h *= 0xC4CEB9FE1A85EC53ULL;
-            h ^= h >> 33;
-            return (int)(h & 0x7FFFFFFF);
+        static inline std::atomic<uint64_t> s_counter{0};
+
+        static int random_prio() {
+            uint64_t v = s_counter.fetch_add(1, std::memory_order_relaxed);
+            v ^= v >> 33;
+            v *= 0xFF51AFD7ED558CCDULL;
+            v ^= v >> 33;
+            v *= 0xC4CEB9FE1A85EC53ULL;
+            v ^= v >> 33;
+            return (int)(v & 0x7FFFFFFF);
         }
 
         Node(const K &k, const V &v)
-            : data(k, v), prio(prio_from_key(k)),
+            : data(k, v), prio(random_prio()),
               left(nullptr), right(nullptr), parent(nullptr) {}
     };
 
@@ -220,44 +236,24 @@ class TMTreapMultiMap {
         if (n) n->parent = p;
     }
 
-    static void split(Node *t, const K &k, Node *&l, Node *&r) {
-        if (!t) { l = r = nullptr; return; }
-        if (t->data.first < k) {
-            split(t->right, k, t->right, r);
-            l = t;
-            set_parent(l->right, l);
-            set_parent(r, nullptr);
-        } else {
-            split(t->left, k, l, t->left);
-            r = t;
-            set_parent(r->left, r);
-            set_parent(l, nullptr);
-        }
-    }
-
-    static Node *merge(Node *l, Node *r) {
-        if (!l) { set_parent(r, nullptr); return r; }
-        if (!r) { set_parent(l, nullptr); return l; }
-        if (l->prio > r->prio) {
-            l->right = merge(l->right, r);
-            set_parent(l->right, l);
-            set_parent(l, nullptr);
-            return l;
-        } else {
-            r->left = merge(l, r->left);
-            set_parent(r->left, r);
-            set_parent(r, nullptr);
-            return r;
-        }
-    }
-
-
-
     void clear_subtree(Node *n) {
         if (!n) return;
-        clear_subtree(n->left);
-        clear_subtree(n->right);
-        delete n;
+        Node *x = n;
+        while (x) {
+            if (x->left) {
+                x = x->left;
+            } else if (x->right) {
+                x = x->right;
+            } else {
+                Node *p = x->parent;
+                if (p) {
+                    if (p->left == x) p->left = nullptr;
+                    else              p->right = nullptr;
+                }
+                delete x;
+                x = p;
+            }
+        }
     }
 
 public:
@@ -328,9 +324,50 @@ public:
 
     void insert(const std::pair<K, V> &p) {
         auto *z = new Node(p.first, p.second);
-        Node *l, *r;
-        split(m_root, p.first, l, r);   // l: keys < p.first, r: keys >= p.first
-        m_root = merge(merge(l, z), r);
+        if (!m_root) {
+            m_root = z;
+            m_size = 1;
+            return;
+        }
+        // Standard BST insert as leaf, then rotate up by priority
+        Node *x = m_root, *y = nullptr;
+        while (x) {
+            y = x;
+            if (p.first < x->data.first)
+                x = x->left;
+            else
+                x = x->right;
+        }
+        // y is the parent
+        z->parent = y;
+        if (p.first < y->data.first)
+            y->left = z;
+        else
+            y->right = z;
+        // Rotate z up while its priority exceeds its parent's
+        while (z->parent && z->prio > z->parent->prio) {
+            Node *p = z->parent;
+            Node *g = p->parent;
+            if (p->left == z) {
+                // Right rotation at p
+                p->left = z->right;
+                if (z->right) z->right->parent = p;
+                z->right = p;
+            } else {
+                // Left rotation at p
+                p->right = z->left;
+                if (z->left) z->left->parent = p;
+                z->left = p;
+            }
+            p->parent = z;
+            z->parent = g;
+            if (g) {
+                if (g->left == p) g->left = z;
+                else g->right = z;
+            }
+        }
+        if (!z->parent)
+            m_root = z;
         m_size++;
     }
 

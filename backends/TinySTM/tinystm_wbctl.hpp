@@ -13,6 +13,7 @@
 #pragma once
 
 #include <algorithm>
+#include <dlfcn.h>
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
@@ -271,6 +272,20 @@ commit()    //
 				backtrace_symbols_fd(bt, n, 2);
 				// Skip this entry but continue (to see how many more bad entries exist)
 				continue;
+			}
+			// Debug: detect writes to code section at write-back time
+			{
+				Dl_info ai;
+				if (dladdr(addr, &ai) && ai.dli_fbase) {
+					const char *sname = ai.dli_sname ? ai.dli_sname : "?";
+					if ((uintptr_t)addr >= (uintptr_t)ai.dli_fbase + 0x4000 &&
+					    ((uintptr_t)addr - (uintptr_t)ai.dli_fbase) < 0x100000) {
+						static std::atomic<int> g_wb_once{0};
+						if (g_wb_once.fetch_add(1) < 3)
+							fprintf(stderr, "WRITE-BACK TO CODE: addr=%p sym=%s type=%d val=0x%llx\n",
+							        addr, sname, (int)w.type, (unsigned long long)w.new_val.u8);
+					}
+				}
 			}
 			ByteOffset bo((word_t)addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
@@ -626,6 +641,45 @@ write_word_ctl(                                               //
 			fprintf(stderr, "[DBG] Continuing...\n");
 		}
 		return;
+	}
+
+	// Debug: check if addr points into the main binary's executable segment
+	// (indicating a corrupted treap node pointer).
+	{
+		static int s_cs_warn = 0;
+		static void *s_text_start = nullptr;
+		static void *s_text_end = nullptr;
+		if (!s_text_start) {
+			Dl_info info;
+			// Use a known function in the text section as anchor
+			if (dladdr((void *)&tinystm::write_word_ctl, &info) && info.dli_fbase) {
+				s_text_start = info.dli_fbase;
+				// Scan for _end or use the executable's address range
+				s_text_end = (void *)((uintptr_t)s_text_start + 0x200000); // 2MB should cover it
+			}
+		}
+		if (s_text_start) {
+			uintptr_t uaddr = (uintptr_t)addr;
+			uintptr_t base = (uintptr_t)s_text_start;
+			uintptr_t end = (uintptr_t)s_text_end;
+			// Check a broad range around the PIE executable load address.
+			// PIE base is typically 0x55xxxx or 0x56xxxx on Linux.
+			if (uaddr >= base && uaddr < end) {
+				static std::atomic<int> g_cs_once{0};
+				if (g_cs_once.fetch_add(1) < 5) {
+					Dl_info ai;
+					const char *sym = nullptr;
+					if (dladdr(addr, &ai) && ai.dli_sname)
+						sym = ai.dli_sname;
+					fprintf(stderr, "\n[DBG CODE-SECTION WRITE] addr=%p sym=%s type=%d val.u8=%llu\n",
+					        addr, sym ? sym : "?", (int)sz, (unsigned long long)val.u8);
+					void *bt[32];
+					int n = backtrace(bt, 32);
+					backtrace_symbols_fd(bt, n, 2);
+					fprintf(stderr, "[DBG CODE-SECTION] Continuing...\n");
+				}
+			}
+		}
 	}
 
 	tx->read_only = false;
