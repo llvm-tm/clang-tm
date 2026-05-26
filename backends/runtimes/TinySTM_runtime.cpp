@@ -118,7 +118,7 @@ void tm_end()
 #elif defined(DESIGN_WBETL)
 		auto *tx = tinystm::current_tx_wbetl;
 #elif defined(DESIGN_WT)
-		auto *tx = tinystm::current_tx;
+		auto *tx = tinystm::current_tx_wt;
 #endif
 		if (tx) {
 			uint64_t rs = tx->read_set.size();
@@ -135,13 +135,13 @@ void tm_end()
 	tm_tx_count++;
 }
 
-uint8_t tm_read_i1(uint8_t *addr, uint32_t symbol_id) { (void)symbol_id; return tinystm::tm_read_i1(addr); }
-uint16_t tm_read_i2(uint16_t *addr, uint32_t symbol_id) { (void)symbol_id; return tinystm::tm_read_i2(addr); }
-uint32_t tm_read_i4(uint32_t *addr, uint32_t symbol_id) { (void)symbol_id; return tinystm::tm_read_i4(addr); }
-uint64_t tm_read_i8(uint64_t *addr, uint32_t symbol_id) { (void)symbol_id; return tinystm::tm_read_i8(addr); }
-float tm_read_f4(float *addr, uint32_t symbol_id) { (void)symbol_id; return tinystm::tm_read_f4(addr); }
-double tm_read_f8(double *addr, uint32_t symbol_id) { (void)symbol_id; return tinystm::tm_read_f8(addr); }
-void *tm_read_ptr(void **addr, uint32_t symbol_id) { (void)symbol_id;
+uint8_t tm_read_i1(uint8_t *addr) { return tinystm::tm_read_i1(addr); }
+uint16_t tm_read_i2(uint16_t *addr) { return tinystm::tm_read_i2(addr); }
+uint32_t tm_read_i4(uint32_t *addr) { return tinystm::tm_read_i4(addr); }
+uint64_t tm_read_i8(uint64_t *addr) { return tinystm::tm_read_i8(addr); }
+float tm_read_f4(float *addr) { return tinystm::tm_read_f4(addr); }
+double tm_read_f8(double *addr) { return tinystm::tm_read_f8(addr); }
+void *tm_read_ptr(void **addr) {
 #if defined(DESIGN_WT)
 	return tinystm::tm_read_ptr((volatile void **)addr);
 #else
@@ -149,13 +149,13 @@ void *tm_read_ptr(void **addr, uint32_t symbol_id) { (void)symbol_id;
 #endif
 }
 
-void tm_write_i1(uint8_t *addr, uint8_t val, uint32_t symbol_id) { (void)symbol_id; tinystm::tm_write_i1(addr, val); }
-void tm_write_i2(uint16_t *addr, int16_t val, uint32_t symbol_id) { (void)symbol_id; tinystm::tm_write_i2(addr, val); }
-void tm_write_i4(uint32_t *addr, int32_t val, uint32_t symbol_id) { (void)symbol_id; tinystm::tm_write_i4(addr, val); }
-void tm_write_i8(uint64_t *addr, int64_t val, uint32_t symbol_id) { (void)symbol_id; tinystm::tm_write_i8(addr, val); }
-void tm_write_f4(float *addr, float val, uint32_t symbol_id) { (void)symbol_id; tinystm::tm_write_f4(addr, val); }
-void tm_write_f8(double *addr, double val, uint32_t symbol_id) { (void)symbol_id; tinystm::tm_write_f8(addr, val); }
-void tm_write_ptr(void **addr, void *val, uint32_t symbol_id) { (void)symbol_id;
+void tm_write_i1(uint8_t *addr, uint8_t val) { tinystm::tm_write_i1(addr, val); }
+void tm_write_i2(uint16_t *addr, int16_t val) { tinystm::tm_write_i2(addr, val); }
+void tm_write_i4(uint32_t *addr, int32_t val) { tinystm::tm_write_i4(addr, val); }
+void tm_write_i8(uint64_t *addr, int64_t val) { tinystm::tm_write_i8(addr, val); }
+void tm_write_f4(float *addr, float val) { tinystm::tm_write_f4(addr, val); }
+void tm_write_f8(double *addr, double val) { tinystm::tm_write_f8(addr, val); }
+void tm_write_ptr(void **addr, void *val) {
 #if defined(DESIGN_WT)
 	tinystm::tm_write_ptr((volatile void **)addr, val);
 #else
@@ -163,8 +163,7 @@ void tm_write_ptr(void **addr, void *val, uint32_t symbol_id) { (void)symbol_id;
 #endif
 }
 
-void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len, uint32_t symbol_id) {
-	(void)symbol_id;
+void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len) {
 	for (uint64_t i = 0; i < len / 8; i++) {
 		tinystm::tm_write_i8(((uint64_t *)dst) + i, *(((uint64_t *)src) + i));
 	}
@@ -174,8 +173,7 @@ void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len, uint32_t symbol_id) {
 	}
 }
 
-void tm_memset(uint8_t *addr, uint8_t val, uint64_t len, uint32_t symbol_id) {
-	(void)symbol_id;
+void tm_memset(uint8_t *addr, uint8_t val, uint64_t len) {
 	for (uint64_t i = 0; i < len; i++) {
 		tinystm::tm_write_i1(&addr[i], val);
 	}

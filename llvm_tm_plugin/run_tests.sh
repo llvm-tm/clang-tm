@@ -126,6 +126,9 @@ for test_name in test_types test_memtest test_threads test_persist test_annotati
 done
 echo "All annotation detections verified."
 
+# Init/exit don't start transactions test
+run_test test_init_no_tx "Test 1: g_value = 1 (expected 1) PASS" "Test 3: g_value = 1 (expected 1) PASS" "PASS"
+
 # Retry test: verifies longjmp/sigsetjmp for transaction retry
 run_test test_retry "retry" "longjmp" "Test PASSED" "final counter = 3"
 
