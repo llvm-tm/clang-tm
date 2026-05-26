@@ -161,3 +161,20 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - "thread" and "main" functions must never be cloned or instrumented as TX functions. They are entry points that may call TX functions but are not themselves transactional.
 - A function with dual "thread"+"transaction" or "main"+"transaction" annotations is a programming error — compiler emits a fatal error.
 - The STMbench7 crash is during execution (not exit hooks). The benchmark does not reach its completion summary before crashing.
+
+## Done (this session — 2026-05-26 second session)
+
+### test_alloc_stress SIGSEGV analysis (TWP debug session)
+- **Pipeline confirmed**: `test_alloc_stress` uses generic `tm_define_rules` pipeline: `.bc → .instr.bc (tm-instrument) → .opt.bc (-O3 via TM_OPT_LEVEL) → link (TinySTM_runtime.cpp WBCTL)`. The `-O3` post-pass IS applied to the final binary.
+- **`-O3` hardcodes `@g_vec` in `emplace_back_tm_clone`**: The optimizer recognized `this` is always `@g_vec` for `push_back_tm_clone` call sites and hardcoded it, removing the `this` parameter. The function went from `emplace_back_tm_clone(ptr this, ptr value_ref)` to `emplace_back_tm_clone(ptr value_ref)` with `@g_vec` substituted directly. This changed the capture struct layout — `capture[0]` became `value_ref` (stack alloca) instead of `@g_vec`.
+- **Slow lambda corrupts capture[0] write**: The slow lambda (opt.ll:6537) does `tm_write_ptr(ptr %7, ptr %6)` where `%7 = tm_read_ptr(capture[0])` = value_ref address (stack alloca), writing the slow path return value (old `__end_` ptr) to the stack instead of g_vec. This is harmless — a stack address in the write-set gets written back to dead stack memory at commit.
+- **`_ConstructTransactionD2_tm_clone` still correct**: At opt.ll:4952-4974, this function correctly reads `g_vec` from `capture[0]`, computes `g_vec.__end_` offset, and calls `tm_write_ptr(g_vec+8, end_ptr)`. Fast-path push_backs should produce correct TM writes to `g_vec.__end_`.
+- **`__swap_layouts_tm_clone` for `vector<long>` still correct**: At opt.ll:5471, directly uses `@g_vec` (hardcoded) for all three `tm_write_ptr` calls (`__begin_`, `__end_`, `__end_cap_`).
+- **`__swap_out_circular_buffer_tm_clone` for `vector<long>`**: At opt.ll:5372-5395, has an intermediate `tm_write_ptr(g_vec.__end_, old_g_vec.__begin_)` at line 5388 (before `__swap_layouts`), but `__swap_layouts` later overwrites this write-set entry with the correct `__end_` value. No deduplication in write-set means the LAST entry wins at commit.
+- **TWP shows only 20 `tm_write_ptr` calls**: Added TWP debug counter to `tm_write_ptr` entry (prints first 500 calls). With 6 threads × 3 seconds × 200 push_backs/TX, expected thousands of calls. Observed only 20 — ALL for STACK addresses. This means the slow-path `capture[0]` writes (harmless) are the ONLY `tm_write_ptr` calls reaching the runtime. The `_ConstructTransactionD2_tm_clone` and `__swap_layouts_tm_clone` calls either never execute (dead code elimination despite `noinline`) or the test crashes before most TXs complete.
+- **Key hypothesis**: The SIGSEGV crash happens during the first TX's first push_back (or very early). The `_ConstructTransactionD2` `tm_write_ptr` to `g_vec+8` either corrupts state or the write-back triggers a crash. Only 20 total `tm_write_ptr` calls suggests the test fails before making significant progress.
+
+### Key Debugging Tools
+- `opt -O3 out/test_foo.instr.bc -S -o /tmp/opt.ll` — converts post-instrumentation bytecode to final optimized IR for analysis.
+- `llvm-objdump -d bin/test_foo` — disassemble final binary to verify what code is actually present.
+- TWP (Transaction Write Pointer) debug: static atomic counter at top of `tm_write_ptr` prints first 500 calls with caller, address, tx state.

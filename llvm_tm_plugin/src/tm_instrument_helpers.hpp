@@ -149,6 +149,15 @@ static bool needsMemIntrinsicInstrumentation(CallBase *Call, Module &M)
         if (tracesFromTMGlobal(Call->getArgOperand(i), M))
             return true;
 
+    // If the DESTINATION (arg 0) is a stack alloca, the intrinsic writes to
+    // thread-private memory and should NOT be instrumented.  This prevents
+    // memset expansion in split_buffer_pointer_layout constructors from
+    // creating byte-level tm_write_i1 entries at stack addresses, which would
+    // then not update memory (write-set only) and cause subsequent raw loads
+    // to read stale data.
+    if (tracesFromAlloca(Call->getArgOperand(0), M))
+        return false;
+
     // FALLBACK: tracesFromTMGlobal may miss inlined pointer chains (e.g.
     // old buffer loaded via tm_read_ptr stored into an alloca).
     if (Name.starts_with("llvm.memmove")) {
@@ -403,6 +412,8 @@ static bool handleLoadStore(Instruction *I, Function &F, Module &M,
         Value *Ptr = Load->getPointerOperand();
         if (isa<AllocaInst>(getBaseObject(Ptr)))
             return false;
+        if (tracesFromAlloca(Ptr, M))
+            return false;
         if (isTMLocalVar(Ptr, M))
             return false;
         IRBuilder<> B(Load);
@@ -414,6 +425,8 @@ static bool handleLoadStore(Instruction *I, Function &F, Module &M,
     } else if (auto *Store = dyn_cast<StoreInst>(I)) {
         Value *Ptr = Store->getPointerOperand();
         if (isa<AllocaInst>(getBaseObject(Ptr)))
+            return false;
+        if (tracesFromAlloca(Ptr, M))
             return false;
         if (isTMLocalVar(Ptr, M))
             return false;
