@@ -401,6 +401,7 @@ public:
             tx->active = false;
             return true;
         }
+        //fprintf(stderr, "TL2 commit: ws=%zu rs=%zu\n", tx->write_set.size(), tx->read_set.size());
         
         // Step 3: Acquire write-set locks, handling guard-table aliasing
         bool held_guard[GUARD_TABLE_SIZE] = {false};
@@ -513,7 +514,6 @@ inline void init() { STM::init(); }
 
 inline void init_thread() { 
     if (!current_tx) current_tx = new Transaction(); 
-    STM::begin(current_tx); 
 }
 
 inline void exit_thread() { 

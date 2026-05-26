@@ -74,7 +74,8 @@ TEST_NAMES := test_types test_memtest test_threads test_persist test_retry test_
               test_custom_class test_stl_map_find test_tm_arg_trace \
               test_math_opaque test_vector_realloc \
               test_alloc_stress test_ll_alloc test_construct_tx_pattern \
-              test_nested_tx test_tm_simple test_tm_safe_map
+              test_nested_tx test_tm_simple test_tm_safe_map \
+              test_init_no_tx
 
 RACE_TEST_NAMES := test_task_queue_race test_parent_set_race test_counter_race
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))

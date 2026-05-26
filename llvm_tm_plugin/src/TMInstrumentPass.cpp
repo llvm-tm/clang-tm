@@ -444,15 +444,26 @@ public:
 
     if (TMAudit) auditTXFunctionLoadsStores(F, *M);
 
-    // Check if this function already contains clone-instrumented tm_read/tm_write
-    // calls (from inlined instrumented clones). If so, skip handleLoadStore to
-    // avoid over-instrumentation: the clone instrumentation already applied the
-    // correct double-guard (isSharedPointer + isTMTracedPtr), and adding more
-    // instrumentation via handleLoadStore (single guard: isSharedPointer) would
-    // create inconsistencies between tm-buffered and raw accesses to the same
-    // memory (e.g. local std::map tree nodes).
     SmallVector<Instruction *, 16> ToErase;
     SmallVector<CallBase *, 8> MemIntrinsics;
+
+    // Check if this function already has tm_read/tm_write calls from inlined
+    // instrumented clones.  If so, skip handleLoadStore to avoid creating
+    // redundant write-set entries.
+    //
+    // The always-instrument pipeline instruments clone functions via
+    // instrumentLoadsStoresInFunction, and those clones are then inlined into
+    // the TX function.  After inlining, handleLoadStore would see the original
+    // LoadInst/StoreInst inside the inlined clone code and wrap them again,
+    // producing two tm_write calls per store: one from the clone and one from
+    // handleLoadStore.  Each extra entry inflates the write-set, extending
+    // lock-hold time during commit and increasing abort rates for concurrent
+    // threads (observed 2× abort rate in test_local_containers).
+    //
+    // Do NOT remove this guard.  It must coexist with getBaseObjectNoLoad
+    // (handleLoadStore's alloca check).  getBaseObjectNoLoad catches more
+    // shared-heap stores; hasCloneInstrumentation prevents double-wrapping
+    // when clones supply the first layer of instrumentation.
     bool hasCloneInstrumentation = false;
     for (auto &BB : F) {
       for (auto &I : BB) {
@@ -467,10 +478,6 @@ public:
         }
       }
       if (hasCloneInstrumentation) break;
-    }
-    if (hasCloneInstrumentation) {
-      TM_DEBUG("  Function has clone-instrumented tm_read/tm_write calls, "
-               "skipping handleLoadStore");
     }
 
     for (auto &BB : F) {
@@ -533,6 +540,88 @@ public:
   static bool isRequired() { return true; }
 };
 
+// ===========================================================================
+// Verification pass: detect missed load/store instrumentation
+// PURPOSE: Run AFTER TM instrumentation to verify that all loads and stores
+//          in TX functions (and _tm_clone functions) have been wrapped in
+//          tm_read/tm_write calls. Reports any remaining raw LoadInst/StoreInst
+//          whose base pointer is not an alloca (local variable) or tm_local
+//          annotation.
+// USAGE:  Append "tm-instrument-check" to any pipeline, e.g.:
+//           -passes="tm-instrument,tm-instrument-check"
+// ===========================================================================
+
+class TMInstrumentCheckPass : public PassInfoMixin<TMInstrumentCheckPass>
+{
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &)
+  {
+    if (!hasAnnotation(F, "transaction") && !F.getName().contains("_tm_clone")) {
+      return PreservedAnalyses::all();
+    }
+    Module *M = F.getParent();
+    bool found = false;
+
+    for (auto &BB : F) {
+      for (auto &I : BB) {
+        // AtomicRMW/CmpXchg are intentionally skipped by the instrumenter
+        if (isa<AtomicRMWInst>(I) || isa<AtomicCmpXchgInst>(I))
+          continue;
+
+        Value *Addr = nullptr;
+        bool isLoad = false;
+        bool isStore = false;
+
+        if (auto *LI = dyn_cast<LoadInst>(&I)) {
+          Addr = LI->getPointerOperand();
+          isLoad = true;
+        } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
+          Addr = SI->getPointerOperand();
+          isStore = true;
+        }
+
+        if (!Addr) continue;
+
+        // Check if this is an alloca-based address (local stack variable)
+        if (isa<AllocaInst>(Addr->stripInBoundsConstantOffsets()))
+          continue;
+
+        // Check for tm_local annotation
+        if (isTMLocalVar(Addr, *M))
+          continue;
+
+        // Uninstrumented load/store found
+        found = true;
+        errs() << "TM-CHECK: UNINSTRUMENTED "
+               << (isLoad ? "LOAD" : "STORE")
+               << " in " << F.getName() << "\n";
+        errs() << "  ";
+        I.print(errs());
+        errs() << "\n";
+        if (auto *DIL = I.getDebugLoc().get()) {
+          if (auto *Scope = dyn_cast_or_null<DIScope>(DIL->getScope()))
+            errs() << "  at " << Scope->getFilename() << ":"
+                   << DIL->getLine() << ":" << DIL->getColumn() << "\n";
+        }
+      }
+    }
+
+    if (found) {
+      errs() << "TM-CHECK: FAIL - " << F.getName()
+             << " has uninstrumented loads/stores\n";
+    }
+
+    if (found && !AllowOpaque) {
+      errs() << "error: TM instrumentation check failed. "
+                "Use -tm-allow-opaque to suppress.\n";
+      exit(1);
+    }
+
+    return PreservedAnalyses::all();
+  }
+  static bool isRequired() { return true; }
+};
+
 extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
 {
   return {LLVM_PLUGIN_API_VERSION,
@@ -570,6 +659,13 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
                     MPM.addPass(
                         createModuleToFunctionPassAdaptor(TMInstrumentPass()));
                     MPM.addPass(TMStripLifetimePass());
+                    return true;
+                  }
+                  // ---- Standalone check pass (append to any pipeline) ----
+                  if (Name == "tm-instrument-check") {
+                    TM_DEBUG("Registering tm-instrument-check pass");
+                    MPM.addPass(
+                        createModuleToFunctionPassAdaptor(TMInstrumentCheckPass()));
                     return true;
                   }
                   return false;

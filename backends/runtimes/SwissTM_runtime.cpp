@@ -95,34 +95,33 @@ void tm_end()
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 }
 
-// Read wrappers with symbol_id
-uint8_t tm_read_i1(uint8_t *addr, uint32_t symbol_id)
+uint8_t tm_read_i1(uint8_t *addr)
 {
 	return swisstm::tm_read_i1(addr);
 }
 
-uint16_t tm_read_i2(uint16_t *addr, uint32_t symbol_id)
+uint16_t tm_read_i2(uint16_t *addr)
 {
 	return swisstm::tm_read_i2(addr);
 }
 
-uint32_t tm_read_i4(uint32_t *addr, uint32_t symbol_id)
+uint32_t tm_read_i4(uint32_t *addr)
 {
 	return swisstm::tm_read_i4(addr);
 }
 
-uint64_t tm_read_i8(uint64_t *addr, uint32_t symbol_id)
+uint64_t tm_read_i8(uint64_t *addr)
 {
 	return swisstm::tm_read_i8(addr);
 }
 
-float tm_read_f4(float *addr, uint32_t symbol_id) { return swisstm::tm_read_f4(addr); }
+float tm_read_f4(float *addr) { return swisstm::tm_read_f4(addr); }
 
-double tm_read_f8(double *addr, uint32_t symbol_id) { return swisstm::tm_read_f8(addr); }
+double tm_read_f8(double *addr) { return swisstm::tm_read_f8(addr); }
 
-void *tm_read_ptr(void **addr, uint32_t symbol_id) { return swisstm::tm_read_ptr(addr); }
+void *tm_read_ptr(void **addr) { return swisstm::tm_read_ptr(addr); }
 
-void *tm_read_z(uint8_t *addr, uint64_t len, uint32_t symbol_id)
+void *tm_read_z(uint8_t *addr, uint64_t len)
 {
 	assert(len < TM_BUFFER_SIZE);
 	for (uint64_t i = 0; i < len; i++) {
@@ -131,50 +130,49 @@ void *tm_read_z(uint8_t *addr, uint64_t len, uint32_t symbol_id)
 	return tm_buffer;
 }
 
-// Write wrappers with symbol_id
-void tm_write_i1(uint8_t *addr, uint8_t val, uint32_t symbol_id)
+void tm_write_i1(uint8_t *addr, uint8_t val)
 {
 	swisstm::tm_write_i1(addr, val);
 }
 
-void tm_write_i2(uint16_t *addr, uint16_t val, uint32_t symbol_id)
+void tm_write_i2(uint16_t *addr, uint16_t val)
 {
 	swisstm::tm_write_i2(addr, val);
 }
 
-void tm_write_i4(uint32_t *addr, uint32_t val, uint32_t symbol_id)
+void tm_write_i4(uint32_t *addr, uint32_t val)
 {
 	swisstm::tm_write_i4(addr, val);
 }
 
-void tm_write_i8(uint64_t *addr, uint64_t val, uint32_t symbol_id)
+void tm_write_i8(uint64_t *addr, uint64_t val)
 {
 	swisstm::tm_write_i8(addr, val);
 }
 
-void tm_write_f4(float *addr, float val, uint32_t symbol_id)
+void tm_write_f4(float *addr, float val)
 {
 	swisstm::tm_write_f4(addr, val);
 }
 
-void tm_write_f8(double *addr, double val, uint32_t symbol_id)
+void tm_write_f8(double *addr, double val)
 {
 	swisstm::tm_write_f8(addr, val);
 }
 
-void tm_write_ptr(void **addr, void *val, uint32_t symbol_id)
+void tm_write_ptr(void **addr, void *val)
 {
 	swisstm::tm_write_ptr(addr, val);
 }
 
-void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len, uint32_t symbol_id)
+void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len)
 {
 	for (uint64_t i = 0; i < len; i++) {
 		swisstm::tm_write_i1(&dst[i], src[i]);
 	}
 }
 
-void tm_memset(uint8_t *addr, uint8_t val, uint64_t len, uint32_t symbol_id)
+void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 {
 	for (uint64_t i = 0; i < len; i++) {
 		swisstm::tm_write_i1(&addr[i], val);

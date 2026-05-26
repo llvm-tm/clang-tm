@@ -65,28 +65,24 @@ static bool hasAnnotation(Function &F, StringRef annot)
 }
 
 // Collect all globals annotated with "tm"
-// PURPOSE: Build a list of TM-annotated globals so the runtime can
-//          track them for initialization and conflict detection
-// NOTE: Annotations are stored in @llvm.global.annotations
+// PURPOSE: Build a list of TM-annotated globals for the symbol tables used
+//          by persistent runtimes (PersistentSGL_runtime.cpp, persistent.cpp).
+//          These tables let persistence code save/restore global state across
+//          program restarts.  NOT related to the (now-removed) symbol_id
+//          parameter in read/write function signatures.
 static void collectTMSymbols(Module &M,
                              SmallVectorImpl<std::pair<GlobalVariable *, StringRef>> &Symbols)
 {
-  // Look for @llvm.global.annotations in the module
   if (GlobalVariable *GVA = M.getNamedGlobal("llvm.global.annotations")) {
     if (Constant *Init = GVA->getInitializer()) {
-      // Iterate through the array of annotations
       for (unsigned i = 0; i < Init->getNumOperands(); ++i) {
         Constant *Annotation = cast<Constant>(Init->getOperand(i));
-        // Each annotation is a struct: {ptr to annotated, ptr to annotation string, ptr to source file, line, ptr to null}
         if (Annotation->getNumOperands() >= 2) {
-          // Get the annotated global
           Value *AnnotatedValue = Annotation->getOperand(0)->stripPointerCasts();
           if (GlobalVariable *AnnotatedGV = dyn_cast<GlobalVariable>(AnnotatedValue)) {
-            // Check the annotation string
             Value *StrOperand = Annotation->getOperand(1)->stripPointerCasts();
             if (GlobalVariable *StrGV = dyn_cast<GlobalVariable>(StrOperand)) {
               if (ConstantDataArray *StrArray = dyn_cast<ConstantDataArray>(StrGV->getInitializer())) {
-                // Use getAsCString() which properly handles null terminator
                 StringRef AnnotationStr = StrArray->getAsCString();
                 if (AnnotationStr == "tm") {
                   StringRef name = AnnotatedGV->getName();
@@ -103,9 +99,6 @@ static void collectTMSymbols(Module &M,
 }
 
 // Collect all TM-annotated globals into a set for quick lookup
-// PURPOSE: Used to check if a pointer refers to a TM-annotated global
-//          during load/store instrumentation
-// NOTE: Annotations are stored in @llvm.global.annotations
 static void collectTMGlobals(Module &M, SmallPtrSetImpl<const Value *> &TMValues)
 {
   // Look for @llvm.global.annotations in the module
@@ -203,8 +196,11 @@ static bool isTMAnnotatedGlobal(const GlobalVariable *GV, Module &M)
   return Cache->count(GV);
 }
 
-// Create symbol table globals in the module for the runtime.
+// Create symbol table globals in the module for persistent runtimes.
 // Generates: tm_symbol_count, tm_symbol_names[], tm_symbol_addresses[], tm_symbol_sizes[].
+// Used by PersistentSGL_runtime.cpp and persistent.cpp to save/restore TM-annotated
+// globals across program restarts.  NOT related to the (now-removed) symbol_id
+// parameter in read/write functions.
 static void createTMSymbolTables(Module &M,
     SmallVectorImpl<std::pair<GlobalVariable *, StringRef>> &Symbols)
 {
