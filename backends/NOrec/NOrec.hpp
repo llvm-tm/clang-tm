@@ -343,6 +343,29 @@ write_word_norec(    //
 
 	tx->read_only = false; // TODO: shouldn't the TX abort?
 
+	auto typeSize = [](ValueType t) -> unsigned {
+		switch (t) {
+		case ValueType::UINT8:   return 1;
+		case ValueType::UINT16:  return 2;
+		case ValueType::UINT32:  return 4;
+		case ValueType::FLOAT:   return 4;
+		case ValueType::UINT64:  return 8;
+		case ValueType::POINTER: return 8;
+		case ValueType::DOUBLE:  return 8;
+		default:                 return 0;
+		}
+	};
+	unsigned sz_bytes = typeSize(sz);
+
+	// If a wider (or equal-width) entry already covers this address, skip.
+	for (auto &w : tx->write_set) {
+		if (w.addr == addr) {
+			if (typeSize(w.type) >= sz_bytes) {
+				return; // existing wider entry covers this address
+			}
+		}
+	}
+
 	WriteLogEntry w; // Create a new entry in write set
 	w.new_val = val; // new val to write-back on commit
 	w.type = sz;

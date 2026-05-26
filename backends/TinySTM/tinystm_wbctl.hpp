@@ -924,51 +924,65 @@ write_word_ctl(                                               //
 		}
 	}
 
-	// If this write is wider than one byte, remove any overlapping sub-word
-	// entries to prevent write-back order conflicts (e.g., memcpy byte entries
-	// coexisting with a later UINT64 value write).
-	{
-		unsigned nbytes = 0;
-		switch (sz) {
-		case ValueType::UINT16:
-			nbytes = 2;
-			break;
-		case ValueType::UINT32:
-			nbytes = 4;
-			break;
-		case ValueType::UINT64:
-			nbytes = 8;
-			break;
-		default:
-			break;
+	// Helper: byte width of a ValueType
+	auto typeSize = [](ValueType t) -> unsigned {
+		switch (t) {
+		case ValueType::UINT8:   return 1;
+		case ValueType::UINT16:  return 2;
+		case ValueType::UINT32:  return 4;
+		case ValueType::FLOAT:   return 4;
+		case ValueType::UINT64:  return 8;
+		case ValueType::POINTER: return 8;
+		case ValueType::DOUBLE:  return 8;
+		default:                 return 0;
 		}
+	};
+
+	unsigned sz_bytes = typeSize(sz);
+
+	// Generic guard: if a wider (or equal-width) entry already exists at this
+	// exact address, skip the write — the existing entry already covers the
+	// full range.  This prevents type-conflict write-set corruption (e.g., a
+	// narrower UINT32 entry later overwriting only the lower 4 bytes of a
+	// POINTER entry at commit, corrupting the pointer).
+	{
+		auto existing = tx->write_set.find(addr);
+		if (existing != tx->write_set.end() && existing->second.type != sz) {
+			if (typeSize(existing->second.type) >= sz_bytes) {
+				return;
+			}
+		}
+	}
+
+	// Also guard against the offset case: a write at byte-offset within an
+	// 8-byte word where a wider entry exists at the aligned base address
+	// (e.g., UINT16 at base+2 when a POINTER entry exists at base).
+	if (bo.offset != 0) {
+		void *base_addr = reinterpret_cast<void *>(bo.base_addr);
+		auto base_entry = tx->write_set.find(base_addr);
+		if (base_entry != tx->write_set.end() && base_entry->second.type != sz) {
+			if (typeSize(base_entry->second.type) >= sz_bytes + bo.offset) {
+				return;
+			}
+		}
+	}
+
+	// If this write is wider than one byte, remove any overlapping narrower
+	// sub-word entries to prevent write-back order conflicts (e.g., memcpy
+	// byte entries coexisting with a later UINT64 value write).  Only erase
+	// entries that are strictly narrower than this write — wider entries are
+	// kept and this write is skipped (handled by the guards above).
+	{
+		unsigned nbytes = sz_bytes;
 		if (nbytes > 1) {
 			for (unsigned i = 0; i < nbytes; i++) {
 				void *sub_addr = reinterpret_cast<void *>((uintptr_t)addr + i);
 				auto it = tx->write_set.find(sub_addr);
 				if (it != tx->write_set.end() && it->second.type != sz) {
-					// DEBUG: log deletions of g_vec entries
-					{
-						Dl_info di;
-						const char *sub_sym = "?";
-						if (dladdr(sub_addr, &di) && di.dli_sname) sub_sym = di.dli_sname;
-						const char *wider_sym = "?";
-						if (dladdr(addr, &di) && di.dli_sname) wider_sym = di.dli_sname;
-						static std::atomic<int> g_del_cnt{0};
-						int dn = g_del_cnt.fetch_add(1);
-						if (dn < 30 || (strcmp(sub_sym, "g_vec") == 0))
-							fprintf(stderr, "[DEL#%d] erasing sub_addr=%p sym=%s type=%d from wider addr=%p sym=%s sz=%d ws_size_before=%zu\n",
-							        dn, sub_addr, sub_sym, (int)it->second.type, addr, wider_sym, (int)sz, tx->write_set.size());
+					if (typeSize(it->second.type) < nbytes) {
+						// Existing entry is narrower — erase (wider write replaces it)
+						tx->write_set.erase(it);
 					}
-					tx->write_set.erase(it);
-				}
-			}
-			// Re-check for existing entry of matching type after cleanup
-			auto existing = tx->write_set.find(addr);
-			if (existing != tx->write_set.end()) {
-				if (existing->second.type == sz) {
-					existing->second.new_val = val;
-					return;
 				}
 			}
 		}
