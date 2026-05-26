@@ -369,6 +369,22 @@ write_word_etl(                                               //
 
 	tx->read_only = false;
 
+	// Helper: byte width of a ValueType
+	auto typeSize = [](ValueType t) -> unsigned {
+		switch (t) {
+		case ValueType::UINT8:   return 1;
+		case ValueType::UINT16:  return 2;
+		case ValueType::UINT32:  return 4;
+		case ValueType::FLOAT:   return 4;
+		case ValueType::UINT64:  return 8;
+		case ValueType::POINTER: return 8;
+		case ValueType::DOUBLE:  return 8;
+		default:                 return 0;
+		}
+	};
+
+	unsigned sz_bytes = typeSize(sz);
+
 	// Found write-set entry at exact addr with matching type → update in place.
 	{
 		auto w = tx->write_set.find(addr);
@@ -383,9 +399,16 @@ write_word_etl(                                               //
 				w->second.new_val.u8 = merged;
 				return;
 			}
+			// Generic guard: if a wider entry already exists at this address,
+			// skip the narrower write — the existing entry covers the range.
+			if (typeSize(w->second.type) >= sz_bytes) {
+				return;
+			}
 		}
 	}
 
+	// Also guard against the offset case: a write at byte-offset within an
+	// 8-byte word where a wider entry exists at the aligned base address.
 	if (bo.offset != 0) {
 		void *base_addr = reinterpret_cast<void *>(bo.base_addr);
 		auto w2 = tx->write_set.find(base_addr);

@@ -303,10 +303,37 @@ public:
         std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
 
+        // Real byte width of each DataType (NOT dtype_size(), which returns
+        // 4 for PTR but PTR write-back writes 8 bytes as word_t).
+        auto dataWidth = [](DataType dt) -> unsigned {
+            switch (dt) {
+                case DataType::UINT8:   return 1;
+                case DataType::UINT16:  return 2;
+                case DataType::UINT32:  return 4;
+                case DataType::FLOAT:   return 4;
+                case DataType::UINT64:  return 8;
+                case DataType::DOUBLE:  return 8;
+                case DataType::PTR:     return 8;
+                default:                return 0;
+            }
+        };
+
         for (auto& e : tx->write_set) {
             if (e.addr == (word_t*)addr && e.dtype == DT) {
                 e.set_new(to_word(val));
                 return;
+            }
+        }
+
+        // If a wider (or equal-width) entry already covers this address, skip
+        // (prevents narrower writes from partially overwriting a wider
+        // write-back at commit).
+        unsigned sz_bytes = dataWidth(DT);
+        for (auto& e : tx->write_set) {
+            if (e.addr == (word_t*)addr && e.dtype != DT) {
+                if (dataWidth(e.dtype) >= sz_bytes) {
+                    return; // existing wider entry covers this address
+                }
             }
         }
 

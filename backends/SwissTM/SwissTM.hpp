@@ -304,6 +304,34 @@ public:
             }
         }
 
+        // If a wider (or equal-width) entry already covers this address, skip
+        // (prevents narrower entries from partially overwriting a wider write
+        // during commit write-back, which corrupts data like pointers).
+        {
+            auto typeSize = [](ValueType t) -> unsigned {
+                switch (t) {
+                case ValueType::UINT8:   return 1;
+                case ValueType::UINT16:  return 2;
+                case ValueType::UINT32:  return 4;
+                case ValueType::FLOAT:   return 4;
+                case ValueType::UINT64:  return 8;
+                case ValueType::POINTER: return 8;
+                case ValueType::DOUBLE:  return 8;
+                default:                 return 0;
+                }
+            };
+            unsigned sz_bytes = typeSize(VT);
+            for (auto& e : tx->write_log) {
+                if (e.byte_addr == addr && e.type != VT) {
+                    if (typeSize(e.type) >= sz_bytes) {
+                        tx->write_count++;
+                        cm_on_write(tx);
+                        return; // existing wider entry covers this address
+                    }
+                }
+            }
+        }
+
         // Create write log entry
         WriteLogEntry e;
         e.byte_addr = addr;
