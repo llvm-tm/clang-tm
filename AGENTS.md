@@ -251,3 +251,16 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - `backends/TinySTM/tinystm_common.hpp`: Removed INCR_CLOCK debug print
 - `llvm_tm_plugin/src/tm_instrument_helpers.hpp`: Added `isEscapedAlloca` function, modified `handleLoadStore`
 - `llvm_tm_plugin/src/tm_method_instrumentation.hpp`: EscapedAllocas load check + argIsAllocaDest store guard
+
+## Done (this session — 2026-05-27)
+### Root cause: `llvm.memset` in move-constructor clone not instrumented
+- **Symptom**: `test_realloc_crash` (minimal reproducer, `std::vector<StructWithVector<int>>` push_back inside TX) crashes with double-free of `ids` buffer (element's inner `vector<int>` buffer).
+- **Valgrind confirmation**: "Invalid free" — 4-byte block allocated by `AtomicPart::AtomicPart(int,int)` (in `main()`) was freed by `tm_end` (deferred-free flush) AND again by `~_Vector_base<int>()` at exit.
+- **Root cause**: The `llvm.memset` in `_Vector_impl_dataC2EOS2__tm_clone` (vector<int> move constructor's zeroing of source) is NOT expanded by the plugin. The `needsMemIntrinsicInstrumentation` check should detect this via argument backtracing through clone functions (`tracesFromTMGlobal` tracing Argument → call-site → ... → `tm_read_ptr`), but the backtrace fails (depth ~11 but should be within 15; exact failure reason still under investigation).
+- **Impact**: The memset writes zeros to memory (source vector's `_M_start`, `_M_finish`, `_M_end_of_storage`) but NOT to the TM write-set. The moved-from vector's destructor `~vector<int>_tm_clone` reads via `tm_read_ptr`, which returns the STAGED (non-zero) value from the write-set (written by `tm_write_ptr` in the move constructor BEFORE the memset). The destructor thinks it owns the buffer and frees it (deferred free), while the new vector also owns it → double-free at `tm_end` + program exit.
+- **Vectors with trivially-copyable elements (e.g. `vector<int64_t>`) are NOT affected** because `_S_relocate` uses bitwise memcpy (not per-element move+destroy), bypassing the instrumented move constructor entirely.
+- **Fix plan**: Add `tm_memset` runtime hook + always instrument `llvm.memset` in clone functions. Clone functions only operate on TM-tracked memory, so unconditional replacement is safe. The hook calls `tm_write_i1` in a loop in the runtime (avoids plugin expansion issues).
+
+### Key Decisions
+- `tm_memset` hook: simpler than fixing `tracesFromTMGlobal` depth limit / argument backtracing. The plugin just replaces `llvm.memset(ptr, val, len)` with `tm_memset(ptr, val, len)`; the runtime handles the byte-by-byte expansion.
+- For non-clone functions: keep existing `needsMemIntrinsicInstrumentation` heuristic (don't unconditionally instrument memsets in non-clone code).
