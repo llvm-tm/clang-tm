@@ -60,7 +60,8 @@ static const Value *getBaseObject(const Value *Ptr)
 static const Value *getBaseObjectNoLoad(const Value *Ptr)
 {
   const Value *Result = Ptr;
-  for (int i = 0; i < 10 && Result; i++) {
+  SmallPtrSet<const Value *, 16> Visited;
+  while (Result && Visited.insert(Result).second) {
     Result = Result->stripPointerCasts();
     if (const auto *GEP = dyn_cast<const GetElementPtrInst>(Result)) {
       Result = GEP->getPointerOperand();
@@ -444,9 +445,10 @@ static bool tracesFromAlloca(Value *V, Module &M, int Depth = 0)
   if (auto *GEPOp = dyn_cast<GEPOperator>(V))
     return tracesFromAlloca(const_cast<Value *>(GEPOp->getPointerOperand()), M, Depth + 1);
 
-  // Load: follow the operand
-  if (auto *Load = dyn_cast<LoadInst>(V))
-    return tracesFromAlloca(Load->getPointerOperand(), M, Depth + 1);
+  // Load: do NOT follow — the loaded value is a heap pointer stored in an
+  // alloca (e.g., vector.__begin_), not the alloca's address.  Tracing
+  // through LoadInst would incorrectly classify element accesses through
+  // the loaded pointer as stack-local.
 
   // Function argument: check all call sites. If ANY call site passes a
   // non-alloca value, the pointer MIGHT point to shared memory and should
@@ -484,8 +486,7 @@ static bool tracesFromAlloca(Value *V, Module &M, int Depth = 0)
 static bool isSharedPointer(Value *Ptr,
                            const SmallPtrSet<const Value *, 32> &LocalVars,
                            Function &F,
-                           Module &M,
-                           int DepthLimit = 15)
+                           Module &M)
 {
   // Alloca instructions are always local (stack-allocated).  Returning false
   // here prevents tm_write_ptr/tm_read_iN on local variables.  The VALUES

@@ -53,20 +53,32 @@ static const OpaqueSafeEntry KnownSafeWithTMArgsTable[] = {
     {"_ZNSaIcED2Ev", false},
 };
 
-// Syscall patterns — symbols matching these patterns are safe (kernel handles races)
-static const char *SyscallPrefixes[] = {
-    "syscall", "__NR_", "sys_", "__sys_",
-    "read", "write", "open", "close", "stat", "fstat", "lstat",
+// Syscall-related symbols — these are safe inside transactions because
+// the kernel handles races for syscalls.  Entries are split into:
+//   - ExactMatchSyscallSymbols: exact-name match (prevents false positives
+//     like matching user function "read_config" against prefix "read")
+//   - SyscallPrefixes: prefix match for obviously syscall-specific prefixes
+//     like "syscall", "sys_", "__NR_", "__sys_"
+static const char *ExactMatchSyscallSymbols[] = {
+    "read", "write", "open", "close",
+    "stat", "fstat", "lstat",
     "mmap", "munmap", "mprotect", "brk", "sbrk",
     "clone", "fork", "vfork", "execve", "wait", "waitpid",
-    "getpid", "gettid", "gettid", "getuid", "geteuid", "getgid",
+    "getpid", "gettid", "getuid", "geteuid", "getgid",
     "nanosleep", "clock_gettime", "gettimeofday", "time",
     "socket", "connect", "bind", "listen", "accept", "send", "recv",
 };
 
+static const char *SyscallPrefixes[] = {
+    "syscall", "sys_", "__NR_", "__sys_",
+};
+
 static bool isSyscallSymbol(StringRef Name) {
+    for (auto *S : ExactMatchSyscallSymbols)
+        if (Name == S)
+            return true;
     for (auto *Prefix : SyscallPrefixes)
-        if (Name == Prefix || Name.starts_with(Prefix))
+        if (Name.starts_with(Prefix))
             return true;
     return false;
 }

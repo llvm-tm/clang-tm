@@ -133,6 +133,24 @@ uint64_t tm_read_i8(uint64_t *addr)
 	return norec::tm_read_i8(addr);
 }
 
+void tm_read_i16(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    out_words[0] = norec::tm_read_i8(static_cast<uint64_t *>(addr) + 0);
+    out_words[1] = norec::tm_read_i8(static_cast<uint64_t *>(addr) + 1);
+}
+
+void tm_read_i32(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    for (int i = 0; i < 4; i++)
+        out_words[i] = norec::tm_read_i8(static_cast<uint64_t *>(addr) + i);
+}
+
+void tm_read_i64(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    for (int i = 0; i < 8; i++)
+        out_words[i] = norec::tm_read_i8(static_cast<uint64_t *>(addr) + i);
+}
+
 float tm_read_f4(float *addr) { return norec::tm_read_f4(addr); }
 
 double tm_read_f8(double *addr) { return norec::tm_read_f8(addr); }
@@ -170,6 +188,24 @@ void tm_write_i4(uint32_t *addr, uint32_t val)
 void tm_write_i8(uint64_t *addr, uint64_t val)
 {
 	norec::tm_write_i8(addr, val);
+}
+
+void tm_write_i16(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    for (int i = 0; i < 2; i++)
+        norec::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
+}
+
+void tm_write_i32(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    for (int i = 0; i < 4; i++)
+        norec::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
+}
+
+void tm_write_i64(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    for (int i = 0; i < 8; i++)
+        norec::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
 }
 
 void tm_write_f4(float *addr, float val)

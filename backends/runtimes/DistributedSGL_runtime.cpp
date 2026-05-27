@@ -234,6 +234,22 @@ uint8_t  tm_read_i1(volatile uint8_t*  a) { return *a; }
 uint16_t tm_read_i2(volatile uint16_t* a) { return *a; }
 uint32_t tm_read_i4(volatile uint32_t* a) { return *a; }
 uint64_t tm_read_i8(volatile uint64_t* a) { return *a; }
+void tm_read_i16(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    auto *vaddr = static_cast<volatile uint64_t *>(addr);
+    out_words[0] = vaddr[0];
+    out_words[1] = vaddr[1];
+}
+void tm_read_i32(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    auto *vaddr = static_cast<volatile uint64_t *>(addr);
+    for (int i = 0; i < 4; i++) out_words[i] = vaddr[i];
+}
+void tm_read_i64(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    auto *vaddr = static_cast<volatile uint64_t *>(addr);
+    for (int i = 0; i < 8; i++) out_words[i] = vaddr[i];
+}
 float    tm_read_f4(volatile float*    a) { return *a; }
 double   tm_read_f8(volatile double*   a) { return *a; }
 void*    tm_read_ptr(volatile void**   a) { return (void*)*a; }
@@ -248,6 +264,21 @@ void tm_write_i1(volatile uint8_t*  a, uint8_t  v) { *a = v; }
 void tm_write_i2(volatile uint16_t* a, uint16_t v) { *a = v; }
 void tm_write_i4(volatile uint32_t* a, uint32_t v) { *a = v; }
 void tm_write_i8(volatile uint64_t* a, uint64_t v) { *a = v; }
+void tm_write_i16(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    auto *vaddr = static_cast<volatile uint64_t *>(addr);
+    for (int i = 0; i < 2; i++) vaddr[i] = val_words[i];
+}
+void tm_write_i32(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    auto *vaddr = static_cast<volatile uint64_t *>(addr);
+    for (int i = 0; i < 4; i++) vaddr[i] = val_words[i];
+}
+void tm_write_i64(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    auto *vaddr = static_cast<volatile uint64_t *>(addr);
+    for (int i = 0; i < 8; i++) vaddr[i] = val_words[i];
+}
 void tm_write_f4(volatile float*    a, float    v) { *a = v; }
 void tm_write_f8(volatile double*   a, double   v) { *a = v; }
 void tm_write_ptr(volatile void**   a, void*    v) { *a = v; }

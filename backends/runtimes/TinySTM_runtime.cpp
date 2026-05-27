@@ -139,28 +139,50 @@ uint8_t tm_read_i1(uint8_t *addr) { return tinystm::tm_read_i1(addr); }
 uint16_t tm_read_i2(uint16_t *addr) { return tinystm::tm_read_i2(addr); }
 uint32_t tm_read_i4(uint32_t *addr) { return tinystm::tm_read_i4(addr); }
 uint64_t tm_read_i8(uint64_t *addr) { return tinystm::tm_read_i8(addr); }
+void tm_read_i16(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    out_words[0] = tinystm::tm_read_i8(static_cast<uint64_t *>(addr) + 0);
+    out_words[1] = tinystm::tm_read_i8(static_cast<uint64_t *>(addr) + 1);
+}
+void tm_read_i32(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    for (int i = 0; i < 4; i++)
+        out_words[i] = tinystm::tm_read_i8(static_cast<uint64_t *>(addr) + i);
+}
+void tm_read_i64(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    for (int i = 0; i < 8; i++)
+        out_words[i] = tinystm::tm_read_i8(static_cast<uint64_t *>(addr) + i);
+}
 float tm_read_f4(float *addr) { return tinystm::tm_read_f4(addr); }
 double tm_read_f8(double *addr) { return tinystm::tm_read_f8(addr); }
 void *tm_read_ptr(void **addr) {
-#if defined(DESIGN_WT)
-	return tinystm::tm_read_ptr((volatile void **)addr);
-#else
 	return tinystm::tm_read_ptr(addr);
-#endif
 }
 
 void tm_write_i1(uint8_t *addr, uint8_t val) { tinystm::tm_write_i1(addr, val); }
 void tm_write_i2(uint16_t *addr, int16_t val) { tinystm::tm_write_i2(addr, val); }
 void tm_write_i4(uint32_t *addr, int32_t val) { tinystm::tm_write_i4(addr, val); }
 void tm_write_i8(uint64_t *addr, int64_t val) { tinystm::tm_write_i8(addr, val); }
+void tm_write_i16(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    for (int i = 0; i < 2; i++)
+        tinystm::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
+}
+void tm_write_i32(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    for (int i = 0; i < 4; i++)
+        tinystm::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
+}
+void tm_write_i64(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    for (int i = 0; i < 8; i++)
+        tinystm::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
+}
 void tm_write_f4(float *addr, float val) { tinystm::tm_write_f4(addr, val); }
 void tm_write_f8(double *addr, double val) { tinystm::tm_write_f8(addr, val); }
 void tm_write_ptr(void **addr, void *val) {
-#if defined(DESIGN_WT)
-	tinystm::tm_write_ptr((volatile void **)addr, val);
-#else
 	tinystm::tm_write_ptr(addr, val);
-#endif
 }
 
 void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len) {

@@ -280,6 +280,8 @@ static void instrumentLoadsStoresInFunction(Function *F,
         return allAlloca;
     };
 
+
+
     SmallVector<Instruction *, 16> ToErase;
     SmallVector<CallBase *, 8> MemIntrinsics;
     for (auto &BB : *F) {
@@ -302,10 +304,14 @@ static void instrumentLoadsStoresInFunction(Function *F,
 #ifndef DISABLE_TM_READ_WRITE
             if (auto *Load = dyn_cast<LoadInst>(I)) {
                 Value *Ptr = Load->getPointerOperand();
-                // Skip loads from alloca ADDRESSES (stack is per-thread, no TM needed).
-                // Use getBaseObjectNoLoad to avoid tracing through LoadInst, which
-                // would incorrectly skip loads from heap addresses loaded from allocas.
-                if (isa<AllocaInst>(getBaseObjectNoLoad(Ptr))) continue;
+                if (auto *AI = dyn_cast<AllocaInst>(getBaseObjectNoLoad(Ptr))) {
+                    // Skip non-escaped alloca loads (local variables).
+                    // For escaped allocas (address passed as function arg),
+                    // instrument the load so tm_read can find write-set
+                    // values written by the callee via tm_write_ptr.
+                    if (!isEscapedAlloca(AI, F))
+                        continue;
+                }
                 if (isTMLocalVar(Ptr, *M)) continue;
                 IRBuilder<> Builder(Load);
                 if (auto *Call = emitTMRead(Builder, Ptr, Load->getType(), H)) {
@@ -314,15 +320,17 @@ static void instrumentLoadsStoresInFunction(Function *F,
                 }
             } else if (auto *Store = dyn_cast<StoreInst>(I)) {
                 Value *Ptr = Store->getPointerOperand();
-                // Skip stores to alloca ADDRESSES (stack is per-thread, no TM needed).
-                if (isa<AllocaInst>(getBaseObjectNoLoad(Ptr))) continue;
-                if (isTMLocalVar(Ptr, *M)) continue;
-                // Skip stores to alloca-derived addresses (including GEP'd fields of
-                // an alloca-only Argument).  These are callees writing to the caller's
-                // stack — tm_write would create write-set entries with INVALID stack
-                // addresses, corrupting the stack on commit.
+                if (auto *AI = dyn_cast<AllocaInst>(getBaseObjectNoLoad(Ptr)))
+                    continue;
+                // Skip stores through reference parameters that always receive
+                // alloca addresses (e.g., split/merge Node*&).  Writing through
+                // such a pointer would create a write-set entry for a stack
+                // address, and the write-back at commit would corrupt active
+                // stack data when the stack frame has been popped.
                 if (auto *Arg = dyn_cast<Argument>(getBaseObjectNoLoad(Ptr)))
-                    if (argIsAllocaDest(Arg)) continue;
+                    if (argIsAllocaDest(Arg))
+                        continue;
+                if (isTMLocalVar(Ptr, *M)) continue;
                 IRBuilder<> Builder(Store);
                 if (emitTMWrite(Builder, Ptr, Store->getValueOperand(), H))
                     ToErase.push_back(Store);

@@ -202,14 +202,6 @@ commit()    //
 
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
-	static std::atomic<int> g_dbg{0};
-	auto dbg_at_commit = g_dbg.fetch_add(1);
-	if (dbg_at_commit < 20) {
-		fprintf(stderr, "[COMMIT%03d] tx=%llu g_clock=%llu\n",
-		        dbg_at_commit,
-		        (unsigned long long)tx->id,
-		        (unsigned long long)tinystm::g_clock.load(std::memory_order_acquire));
-	}
 
 	if (!tx->read_only) { // Acquire locks and write-back
 
@@ -264,68 +256,13 @@ commit()    //
 		for (auto &it : tx->write_set) {
 			auto &addr = it.first;
 			auto &w = it.second;
-			{ // DEBUG: show g_vec entries at EVERY commit (not just first)
-				static std::atomic<int> g_wb_dump{0};
-				int dump_n = g_wb_dump.fetch_add(1);
-				bool first_dump = (dump_n == 0);
-				// Also always show g_vec entries
-				bool found_gvec = false;
-				for (auto &dit : tx->write_set) {
-					auto &da = dit.first;
-					uintptr_t ua = (uintptr_t)da;
-					Dl_info ai;
-					if (dladdr(da, &ai) && ai.dli_sname && strcmp(ai.dli_sname, "g_vec") == 0) {
-						if (!found_gvec) {
-							found_gvec = true;
-							fprintf(stderr, "[COMMIT#%d WS] write_set.size=%zu\n",
-							        dump_n, tx->write_set.size());
-						}
-						Dl_info ai2;
-						const char *sym2 = "?";
-						if (dladdr(da, &ai2) && ai2.dli_sname) sym2 = ai2.dli_sname;
-						fprintf(stderr, "  gvec addr=%p (%s) off=%ld type=%d val=0x%016llx\n",
-						        da, sym2, (long)(ua - (uintptr_t)ai.dli_fbase - (ua - (uintptr_t)ai.dli_saddr)),
-						        (int)dit.second.type,
-						        (unsigned long long)dit.second.new_val.u8);
-					}
-				}
-				if (found_gvec) fflush(stderr);
-				if (first_dump) {
-					fprintf(stderr, "[WB-DUMP] (first) write_set.size=%zu\n", tx->write_set.size());
-					for (auto &dit : tx->write_set) {
-						auto &da = dit.first;
-						auto &dw = dit.second;
-						Dl_info ai;
-						const char *sname = "?";
-						if (dladdr(da, &ai) && ai.dli_sname) sname = ai.dli_sname;
-						fprintf(stderr, "  addr=%p sym=%s type=%d val=0x%016llx\n",
-						        da, sname, (int)dw.type, (unsigned long long)dw.new_val.u8);
-					}
-					fflush(stderr);
-				}
-			}
 			if ((uintptr_t)addr > 0x7FFFFFFFFFFFULL) {
 				fprintf(stderr, "BAD WRITE-BACK ADDR: addr=%p type=%d val.u8=%llu\n",
 				        addr, (int)w.type, (unsigned long long)w.new_val.u8);
 				void *bt[16];
 				int n = backtrace(bt, 16);
 				backtrace_symbols_fd(bt, n, 2);
-				// Skip this entry but continue (to see how many more bad entries exist)
 				continue;
-			}
-			// Debug: detect writes to code section at write-back time
-			{
-				Dl_info ai;
-				if (dladdr(addr, &ai) && ai.dli_fbase) {
-					const char *sname = ai.dli_sname ? ai.dli_sname : "?";
-					if ((uintptr_t)addr >= (uintptr_t)ai.dli_fbase + 0x4000 &&
-					    ((uintptr_t)addr - (uintptr_t)ai.dli_fbase) < 0x100000) {
-						static std::atomic<int> g_wb_once{0};
-						if (g_wb_once.fetch_add(1) < 3)
-							fprintf(stderr, "WRITE-BACK TO CODE: addr=%p sym=%s type=%d val=0x%llx\n",
-							        addr, sname, (int)w.type, (unsigned long long)w.new_val.u8);
-					}
-				}
 			}
 			ByteOffset bo((word_t)addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
@@ -647,53 +584,6 @@ read_from_memory:
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Debug: log write-set operations for g_vec-range addresses.
-// Caches the g_vec symbol range via dladdr on first successful resolution.
-// ---------------------------------------------------------------------------
-static void
-dbg_gvec_op(const char *op, void *addr, ValueType sz, any_type_t val,
-            size_t ws_before, size_t ws_after)
-{
-	static uintptr_t s_gv_start = 0;
-	static uintptr_t s_gv_end = 0;
-	uintptr_t ua = (uintptr_t)addr;
-
-	if (s_gv_start == 0) {
-		if (ua > 0x100000000ULL && ua < 0x200000000ULL) {
-			Dl_info di;
-			if (dladdr(addr, &di) && di.dli_sname &&
-			    strcmp(di.dli_sname, "g_vec") == 0) {
-				s_gv_start = (uintptr_t)di.dli_saddr;
-				s_gv_end = s_gv_start + 64;
-			}
-		}
-		if (s_gv_start == 0)
-			return; // not found yet — try again with next address
-	}
-
-	if (ua < s_gv_start || ua >= s_gv_end)
-		return;
-
-	Dl_info di;
-	const char *sym = "?";
-	if (dladdr(addr, &di) && di.dli_sname)
-		sym = di.dli_sname;
-	long off = (long)(ua - s_gv_start);
-
-	static std::atomic<int> s_gv_cnt{0};
-	int n = s_gv_cnt.fetch_add(1);
-	if (n < 1000) {
-		fprintf(stderr,
-		        "[GVEC#%d %s] addr=%p (%s+%ld) sz=%d val=0x%016llx "
-		        "ws=%zu->%zu\n",
-		        n, op, addr, sym, off,
-		        (int)sz, (unsigned long long)val.u8,
-		        ws_before, ws_after);
-		fflush(stderr);
-	}
-}
-
 inline void                                                   //
 write_word_ctl(                                               //
     Transaction<ReadLogEntry_wbctl, WriteLogEntry_wbctl> *tx, //
@@ -741,126 +631,42 @@ write_word_ctl(                                               //
 		return;
 	}
 
-	// Detect kernel-space addresses (typical vector-internal pointer corruption)
-	// and dump a stack trace for debugging.
-	if ((uintptr_t)addr > 0x7FFFFFFFFFFFULL) {
-		static std::atomic<int> g_dbg_once{0};
-		if (g_dbg_once.fetch_add(1) == 0) {
-			fprintf(stderr, "\n[DBG BAD WRITE] addr=%p type=%d val.u8=%llu\n",
-			        addr, (int)sz, (unsigned long long)val.u8);
-			void *bt[32];
-			int n = backtrace(bt, 32);
-			backtrace_symbols_fd(bt, n, 2);
-			fprintf(stderr, "[DBG] Continuing...\n");
-		}
-		return;
-	}
-
-	// Debug: check if addr points into the main binary's executable segment
-	// (indicating a corrupted treap node pointer).
+	// Stack-address detection: writing to the stack via tm_write would create
+	// a write-set entry that gets written back at commit time — by then the
+	// stack frame has been popped and the write corrupts active stack data.
+	// This happens when a TX-internal function uses reference parameters
+	// (e.g., treap split/merge Node*&) to write back to the caller's allocas.
+	// Use a raw store (no write-set entry) for any address on this thread's
+	// stack to avoid post-commit stack corruption.
 	{
-		static int s_cs_warn = 0;
-		static void *s_text_start = nullptr;
-		static void *s_text_end = nullptr;
-		if (!s_text_start) {
-			Dl_info info;
-			// Use a known function in the text section as anchor
-			if (dladdr((void *)&tinystm::write_word_ctl, &info) && info.dli_fbase) {
-				s_text_start = info.dli_fbase;
-				// Scan for _end or use the executable's address range
-				s_text_end = (void *)((uintptr_t)s_text_start + 0x200000); // 2MB should cover it
+		thread_local bool s_stack_init = false;
+		thread_local void *s_stack_base = nullptr;
+		thread_local size_t s_stack_size = 0;
+		if (!s_stack_init) {
+			pthread_attr_t attr;
+			if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+				pthread_attr_getstack(&attr, &s_stack_base, &s_stack_size);
+				pthread_attr_destroy(&attr);
 			}
+			s_stack_init = true;
 		}
-		if (s_text_start && val.u8 == 0) {
-			uintptr_t uaddr = (uintptr_t)addr;
-			uintptr_t base = (uintptr_t)s_text_start;
-			uintptr_t end = (uintptr_t)s_text_end;
-			if (uaddr >= base && uaddr < end) {
-				static std::atomic<int> g_null_once{0};
-				if (g_null_once.fetch_add(1) < 20) {
-					Dl_info ai;
-					const char *sym = nullptr;
-					const char *sym2 = nullptr;
-					if (dladdr(addr, &ai) && ai.dli_sname)
-						sym = ai.dli_sname;
-					void *caller = __builtin_return_address(0);
-					Dl_info ci;
-					if (dladdr(caller, &ci) && ci.dli_sname)
-						sym2 = ci.dli_sname;
-					fprintf(stderr, "\n[DBG NULL-WRITE] addr=%p sym=%s caller=%p caller_sym=%s type=%d val.u8=%llu\n",
-					        addr, sym ? sym : "?", caller, sym2 ? sym2 : "?", (int)sz, (unsigned long long)val.u8);
-					void *bt[32];
-					int n = backtrace(bt, 32);
-					backtrace_symbols_fd(bt, n, 2);
-					fprintf(stderr, "[DBG NULL-WRITE] Continuing...\n");
-				}
+		if (s_stack_base) {
+			uintptr_t a = (uintptr_t)addr;
+			uintptr_t base = (uintptr_t)s_stack_base;
+			if (a >= base && a < base + s_stack_size) {
+				write_value_to_addr(addr, val, sz);
+				return;
 			}
-		}
-	}
-
-	// DEBUG: count every entry into write_word_ctl
-	{
-		static std::atomic<int> g_wwc_cnt{0};
-		int n = g_wwc_cnt.fetch_add(1);
-		if (n < 30) {
-			Dl_info di;
-			const char *sym = "?";
-			if (dladdr(addr, &di) && di.dli_sname) sym = di.dli_sname;
-			fprintf(stderr, "[WWC#%d] addr=%p sym=%s sz=%d val.u8=0x%016llx tx=%llu rs=%zu ws=%zu\n",
-			        n, addr, sym, (int)sz, (unsigned long long)val.u8,
-			        (unsigned long long)(tx ? tx->id : 0),
-			        tx ? tx->read_set.size() : 0,
-			        tx ? tx->write_set.size() : 0);
 		}
 	}
 
 	tx->read_only = false;
-
-	// DEBUG: track EVERY write-set insert/modify for g_vec-range addresses.
-	{
-		thread_local uintptr_t s_gvec_base = 0;
-		if (!s_gvec_base) {
-			// Only scan when we see an address in the data section
-			if ((uintptr_t)addr > 0x100000000ULL && (uintptr_t)addr < 0x200000000ULL) {
-				Dl_info di;
-				// Use a sentinel address we know is inside g_vec: try the address
-				// at off=152 first (observed from earlier runs), but prefer dli_saddr
-				if (dladdr(addr, &di) && di.dli_sname &&
-				    (strcmp(di.dli_sname, "g_vec") == 0) && di.dli_saddr)
-					s_gvec_base = (uintptr_t)di.dli_saddr;
-			}
-		}
-		if (s_gvec_base) {
-			uintptr_t ua = (uintptr_t)addr;
-			uintptr_t base = (uintptr_t)s_gvec_base;
-			if (ua >= base && ua < base + 256) {
-				static std::atomic<int> g_cnt{0};
-				int n = g_cnt.fetch_add(1);
-				if (n < 80) {
-					long off = (long)(ua - base);
-					Dl_info di;
-					const char *sym = "?";
-					if (dladdr(addr, &di) && di.dli_sname) sym = di.dli_sname;
-					auto old_w = tx->write_set.find(addr);
-					fprintf(stderr, "[WCTL#%d] addr=%p g_vec%+ld sym=%s sz=%d val=0x%016llx "
-					        "ws_find=%d ws_size=%zu\n",
-					        n, addr, off, sym, (int)sz, (unsigned long long)val.u8,
-					        old_w != tx->write_set.find(addr) ? 1 : 0, tx->write_set.size());
-					fflush(stderr);
-				}
-			}
-		}
-	}
 
 	// Found write-set entry at exact addr with matching type → update in place.
 	{
 		auto w = tx->write_set.find(addr);
 		if (w != tx->write_set.end()) {
 			if (w->second.type == sz) {
-				{ // DBG: g_vec modify (same type)
-					size_t ws = tx->write_set.size();
-					dbg_gvec_op("MODIFY", addr, sz, val, ws, ws);
-				}
 				w->second.new_val = val;
 				return;
 			}
@@ -869,12 +675,6 @@ write_word_ctl(                                               //
 			if (w->second.type == ValueType::UINT64 && sz == ValueType::UINT8) {
 				uint64_t merged = (w->second.new_val.u8 & ~(uint64_t)0xFF);
 				merged |= (uint64_t)(val.u1);
-				{ // DBG: g_vec modify (merge UINT8 into wider UINT64 at addr)
-					size_t ws = tx->write_set.size();
-					any_type_t mv;
-					mv.u8 = merged;
-					dbg_gvec_op("MODIFY-MERGE", addr, ValueType::UINT64, mv, ws, ws);
-				}
 				w->second.new_val.u8 = merged;
 				return;
 			}
@@ -912,12 +712,6 @@ write_word_ctl(                                               //
 			if (mask) {
 				uint64_t merged = (w2->second.new_val.u8 & ~mask);
 				merged |= (write_val << shift);
-				{ // DBG: g_vec modify (merge sub-word into wider UINT64 at base_addr)
-					size_t ws = tx->write_set.size();
-					any_type_t mv;
-					mv.u8 = merged;
-					dbg_gvec_op("MODIFY-MERGE", base_addr, ValueType::UINT64, mv, ws, ws);
-				}
 				w2->second.new_val.u8 = merged;
 				return;
 			}
@@ -1218,16 +1012,6 @@ tm_write_ptr(    //
     void *val    //
 )
 {
-	// DEBUG: check if current_tx_wbctl is set
-	{
-		static std::atomic<int> g_twp_cnt{0};
-		int n = g_twp_cnt.fetch_add(1);
-		if (n < 20)
-			fprintf(stderr, "[TWP#%d] addr=%p val=%p tx=%p tx_active=%d\n",
-			        n, (void*)addr, (void*)val,
-			        (void*)current_tx_wbctl,
-			        current_tx_wbctl ? (int)current_tx_wbctl->active : -1);
-	}
 	tm_write<void *,
 	         ValueType::POINTER,
 	         ReadLogEntry_wbctl,

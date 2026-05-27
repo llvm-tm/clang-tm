@@ -271,16 +271,17 @@ static bool isSTLContainerAllocSite(CallBase *Call)
     StringRef Name = Parent->getName();
     // Strip _tm_clone suffix to check the original function name
     if (Name.ends_with("_tm_clone"))
-        Name = Name.drop_back(10); // strlen("_tm_clone")
+        Name = Name.drop_back(StringRef("_tm_clone").size());
     // Itanium ABI: _ZNSt = std::, _ZNKSt = const std::, _ZN9__gnu_cxx = __gnu_cxx::
     return Name.starts_with("_ZNSt") || Name.starts_with("_ZNKSt")
         || Name.starts_with("_ZN9__gnu_cxx");
 }
 
 // Replace a malloc/free/operator-new call with the TM-aware equivalent.
-// Handles both CallInst and InvokeInst. For InvokeInst, the invoke is
-// replaced with a regular call + branch to the normal successor; the
-// unwind landing pad becomes dead code and is cleaned up by later passes.
+// Handles both CallInst and InvokeInst. For InvokeInst, the callee is
+// changed in-place (via setCalledFunction) to preserve the unwind
+// destination — converting to a CallInst + branch would lose exception
+// semantics (e.g., std::bad_alloc from operator new).
 // SKIPS interception for calls inside STL container functions (vector, string,
 // deque, etc.) whose internal buffer allocations must use the regular heap.
 static bool handleMallocFree(CallBase *Call, IRBuilder<> &B,
@@ -291,10 +292,26 @@ static bool handleMallocFree(CallBase *Call, IRBuilder<> &B,
     if (!Callee || Callee->getName().starts_with("tm_")) return false;
 
     bool isInvoke = isa<InvokeInst>(Call);
-    BasicBlock *NormalDest = isInvoke ? cast<InvokeInst>(Call)->getNormalDest() : nullptr;
-    BasicBlock *ParentBB = Call->getParent();
 
     StringRef N = Callee->getName();
+
+    // Helper: change the callee of the call/invoke to the TM runtime function.
+    // For InvokeInst, setCalledFunction preserves the unwind destination.
+    // For CallInst, create a new call and mark the old one for erasure.
+    auto redirectTo = [&](FunctionCallee Target, Value *RetCastTy = nullptr) {
+        if (isInvoke) {
+            Call->setCalledFunction(Target);
+            Call->setAttributes(AttributeList{});
+        } else {
+            SmallVector<Value *, 4> Args;
+            for (unsigned i = 0; i < Call->arg_size(); i++)
+                Args.push_back(Call->getArgOperand(i));
+            auto *NewCall = B.CreateCall(Target, Args);
+            NewCall->setAttributes(AttributeList{});
+            Call->replaceAllUsesWith(NewCall);
+            ToErase.push_back(Call);
+        }
+    };
 
     // STL container internal allocations (vector realloc, string _M_create, etc.)
     // must NOT go through tm_malloc — their buffers persist across TX boundaries
@@ -319,63 +336,71 @@ static bool handleMallocFree(CallBase *Call, IRBuilder<> &B,
         return false;
 
     if (isNew) {
-        Value *SizeArg = Call->getArgOperand(0);
-        auto *NewCall = B.CreateCall(H.malloc_fn, {SizeArg});
-        NewCall->setAttributes(AttributeList{});
-        Call->replaceAllUsesWith(NewCall);
-        if (isInvoke) {
-            Call->eraseFromParent();
-            IRBuilder<> TBuilder(ParentBB);
-            TBuilder.CreateBr(NormalDest);
-        } else {
-            ToErase.push_back(Call);
-        }
+        redirectTo(H.malloc_fn);
         return true;
     }
     if (N == "calloc") {
-        Value *Nmemb = Call->getArgOperand(0);
-        Value *Size  = Call->getArgOperand(1);
-        auto *NewCall = B.CreateCall(H.calloc_fn, {Nmemb, Size});
-        NewCall->setAttributes(AttributeList{});
-        Call->replaceAllUsesWith(NewCall);
-        if (isInvoke) {
-            Call->eraseFromParent();
-            IRBuilder<> TBuilder(ParentBB);
-            TBuilder.CreateBr(NormalDest);
-        } else {
-            ToErase.push_back(Call);
-        }
+        redirectTo(H.calloc_fn);
         return true;
     }
     if (N == "realloc") {
-        Value *Ptr  = Call->getArgOperand(0);
-        Value *Size = Call->getArgOperand(1);
-        auto *NewCall = B.CreateCall(H.realloc_fn, {Ptr, Size});
-        NewCall->setAttributes(AttributeList{});
-        Call->replaceAllUsesWith(NewCall);
-        if (isInvoke) {
-            Call->eraseFromParent();
-            IRBuilder<> TBuilder(ParentBB);
-            TBuilder.CreateBr(NormalDest);
-        } else {
-            ToErase.push_back(Call);
-        }
+        redirectTo(H.realloc_fn);
         return true;
     }
     if (isFree) {
-        Value *PtrArg = Call->getArgOperand(0);
-        auto *BC = B.CreateBitCast(PtrArg, B.getPtrTy());
-        B.CreateCall(H.free_fn, {BC});
+        // For InvokeInst, change the callee to tm_free in-place.
+        // For CallInst, create a new tm_free call with a bitcast pointer,
+        // matching the existing CallInst pattern.
         if (isInvoke) {
-            Call->eraseFromParent();
-            IRBuilder<> TBuilder(ParentBB);
-            TBuilder.CreateBr(NormalDest);
+            Call->setCalledFunction(H.free_fn);
+            Call->setAttributes(AttributeList{});
         } else {
+            Value *PtrArg = Call->getArgOperand(0);
+            auto *BC = B.CreateBitCast(PtrArg, B.getPtrTy());
+            B.CreateCall(H.free_fn, {BC});
             ToErase.push_back(Call);
         }
         return true;
     }
     return false;
+}
+
+// Check if an AllocaInst's address escapes by being passed as a function argument
+// (other than lifetime.start/end intrinsics).  This catches the reference-parameter
+// pattern (e.g., split/merge Node*&) where the callee writes to the stack alloca via
+// tm_write_ptr and the caller needs tm_read to see the value within the same TX.
+static bool isEscapedAlloca(const AllocaInst *AI, const Function *F)
+{
+	SmallPtrSet<const Value *, 16> Visited;
+	SmallVector<const Value *, 16> Worklist;
+	Worklist.push_back(AI);
+	Visited.insert(AI);
+
+	while (!Worklist.empty()) {
+		const Value *V = Worklist.pop_back_val();
+		for (const User *U : V->users()) {
+			if (!Visited.insert(U).second)
+				continue;
+
+			if (auto *CB = dyn_cast<const CallBase>(U)) {
+				Function *Callee = CB->getCalledFunction();
+				if (Callee && Callee->isIntrinsic() &&
+				    (Callee->getName().starts_with("llvm.lifetime.start") ||
+				     Callee->getName().starts_with("llvm.lifetime.end")))
+					continue;
+				return true;
+			}
+
+			// Follow pointer-compatible casts (GEP, bitcast, addrspacecast)
+			if (isa<GEPOperator>(U) || isa<BitCastInst>(U) ||
+			    isa<AddrSpaceCastInst>(U)) {
+				Worklist.push_back(U);
+			}
+			// StoreInst is a dead-end for direct-escape detection (the stored
+			// value propagates but we don't follow stores for this simple check).
+		}
+	}
+	return false;
 }
 
 // Default: instrument ALL loads/stores in TM transaction functions.
@@ -387,31 +412,22 @@ static bool handleLoadStore(Instruction *I, Function &F, Module &M,
                              const TMRuntimeHooks &H,
                              SmallVectorImpl<Instruction *> &ToErase)
 {
-    // Use getBaseObject (not getBaseObjectNoLoad) for the alloca check.
+    // Use getBaseObjectNoLoad (not getBaseObject) for the alloca check.
     //
-    // getBaseObjectNoLoad (tracing all the way through LoadInst instructions
-    // to find an alloca) would make MORE stores instrumented — including stores
-    // through pointers loaded from allocas that hold heap addresses.  While
-    // that is sound for correctness, it adds write-set entries for what are
-    // often stack-derived addresses in the inline pipeline (where every callee
-    // is inlined into the TX body, producing LoadInst-based pointer chains from
-    // allocas to shared-heap references).  The extra entries inflate the
-    // write-set and extend lock-hold time during commit, causing contention
-    // aborts even in well-structured single-thread-per-data tests.
-    //
-    // Empirically, getBaseObject gives 0 aborts for test_local_containers at
-    // 2t with the tm-instrument-inline pipeline.  Switching to
-    // getBaseObjectNoLoad adds 4-8 aborts and inflates g_tx_count from 400 to
-    // 404-408.  The missed stores are benign in practice because the inlining
-    // pipeline ensures all shared-heap accesses go through cloned callees that
-    // ARE instrumented.  Use getBaseObjectNoLoad only when the non-inline
-    // pipeline (tm-instrument) needs to instrument heap stores through alloca-
-    // loaded pointers — for that, the hasCloneInstrumentation guard handles
-    // the double-instrumentation concern.
+    // getBaseObject traces through LoadInst, so a heap pointer stored in an
+    // alloca (e.g., vector.__begin_) traces back to the alloca itself.
+    // This causes element stores/loads through the pointer to be falsely
+    // classified as stack-local and skipped — the modify loop's tm_write_i4
+    // (write-set only) is then invisible to the verification loop's raw
+    // load i32 (reads stale memory).  getBaseObjectNoLoad stops at LoadInst,
+    // treating the loaded value as the base (a heap address), which is
+    // correctly instrumented.
     if (auto *Load = dyn_cast<LoadInst>(I)) {
         Value *Ptr = Load->getPointerOperand();
-        if (isa<AllocaInst>(getBaseObject(Ptr)))
-            return false;
+        if (auto *AI = dyn_cast<AllocaInst>(getBaseObjectNoLoad(Ptr))) {
+            if (!isEscapedAlloca(AI, &F))
+                return false;
+        }
         if (tracesFromAlloca(Ptr, M))
             return false;
         if (isTMLocalVar(Ptr, M))
@@ -424,7 +440,7 @@ static bool handleLoadStore(Instruction *I, Function &F, Module &M,
         }
     } else if (auto *Store = dyn_cast<StoreInst>(I)) {
         Value *Ptr = Store->getPointerOperand();
-        if (isa<AllocaInst>(getBaseObject(Ptr)))
+        if (isa<AllocaInst>(getBaseObjectNoLoad(Ptr)))
             return false;
         if (tracesFromAlloca(Ptr, M))
             return false;
