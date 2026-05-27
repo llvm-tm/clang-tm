@@ -144,6 +144,16 @@ static bool needsMemIntrinsicInstrumentation(CallBase *Call, Module &M)
         && !Name.starts_with("llvm.memset"))
         return false;
 
+    // Clone functions (suffixed _tm_clone) ONLY operate on TM-tracked memory.
+    // Any memory intrinsic inside a clone MUST go through the TM write set,
+    // otherwise tm_read in destructors sees stale write-set values while the
+    // underlying memory has been mutated by the intrinsic (e.g., memset in
+    // vector<int> move constructor zeroes source pointers in memory but not
+    // in the write set, causing the moved-from destructor to free the buffer).
+    if (Function *F = Call->getFunction())
+        if (F->getName().ends_with("_tm_clone"))
+            return true;
+
     // Check each argument for TM-global provenance.
     for (unsigned i = 0; i < Call->arg_size(); ++i)
         if (tracesFromTMGlobal(Call->getArgOperand(i), M))
