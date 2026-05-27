@@ -200,6 +200,21 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - **All 15 plugin tests PASS**, **all 12 backend STM tests PASS**.
 
 ## Done (this session — 2026-05-27 second session)
+### SwissTM hash-index fix + STMbench7 crash analysis
+- **SwissTM hash-index fix**: Added `std::unordered_map<void*, WriteLogEntry*>` hash index (`write_log_index`) + `std::unordered_set<OwnershipRecord*>` (`owned_orecs`) to `TxDescriptor`. Replaced 3 O(n) scans (`is_locked_by` over write_log list, `find_in_write_log` linear search, `release_all_locks` full list scan) with O(1) hash lookups. Tested: `counter_st`, `counter_mt`, `write_set_validation` (all backend tests) PASS; push_back test (100k-element vector resize inside TX) completes in 454K cycles (previously hung).
+- **STMbench7 `bad_alloc` crash analysis**: ALL eager-locking backends (SwissTM, TL2, NOrec) crash with `std::bad_alloc` in `op_sm3_create_ap`; WBCTL works (1000 ops, correct distribution). Key findings:
+  - Crash is NOT optimizer-related (same with `-O0` on `.instr.bc`)
+  - `bad_alloc` thrown from `__throw_bad_alloc()` inside `__new_allocator::allocate_tm_clone` when `_M_check_len` returns `n > max_size/2` (~1.6e17)
+  - `tm_read_ptr` returns CORRECT values for `g_atomicParts.__begin_`/`__end_` (valid heap pointers within 48-bit address space) — debug logging confirms no corruption
+  - Simple `vector<AtomicPart>` realloc test works with SwissTM at 100k elements
+  - Root cause remains elusive — possible `read_set` vector reallocation side-effect, hash map corruption from concurrent heap operations, or subtle interaction between `_S_relocate` per-element `construct_at`/`destroy_at` and the runtime's internal data structures
+  - The difference from the working simple test: STMbench7's `AtomicPart` has a `std::vector<int>` member (non-trivially-copyable), forcing per-element `construct_at`+`destroy_at` in `_S_relocate` (not memmove), creating ~6.2M TM operations + 100k `operator delete`(nullptr) calls during realloc
+- **Reverted SwissTM debug logging** in `tm_read_ptr`.
+
+## Next up
+- Create a minimal reproducer: `std::vector<StructWithVector>` realloc inside TX, matching the STMbench7 `AtomicPart` pattern, to see if SwissTM crashes with a MUCH simpler test case.
+- If reproducible, isolate whether the crash requires the specific struct size/destructor pattern or if any non-trivially-copyable vector element triggers it.
+- If not reproducible with minimal test, the issue may be specific to the interaction of multiple containers (treap maps + vectors) or the copy elision/optimization of specific STL functions within the TX clone.
 
 ### Reference-alloca fix: 3-layer approach
 **Root cause confirmed**: write-back TM (WBCTL) `tm_write_*` creates write-set entries for stack addresses when reference parameters (`Node*&` in treap `split`) are used to write back to the caller's allocas. At commit time, these stack-address write-backs corrupt the stack. For `split_tm_clone` (recursive), `argIsAllocaDest` fails because recursive callers pass heap addresses (`&t->right`) through the same parameter.

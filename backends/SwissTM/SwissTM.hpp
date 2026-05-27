@@ -7,6 +7,8 @@
 #include <cstring>
 #include <csetjmp>
 #include <random>
+#include <unordered_map>
+#include <unordered_set>
 #include <thread>
 #include <chrono>
 #include <type_traits>
@@ -68,6 +70,10 @@ struct TxDescriptor {
     int write_count = 0;
     int succ_abort_count = 0;
     std::list<WriteLogEntry> write_log;
+    // Hash index mapping byte_addr → WriteLogEntry* for O(1) lookups
+    std::unordered_map<void*, WriteLogEntry*> write_log_index;
+    // Set of ORECs for which we already hold the w_lock
+    std::unordered_set<OwnershipRecord*> owned_orecs;
     std::vector<OwnershipRecord*> write_set;
     std::vector<ReadLogEntry> read_set;
 };
@@ -207,15 +213,17 @@ public:
         word_t* waddr = get_word_addr(addr);
         OwnershipRecord* orec = get_orec(waddr);
 
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == VT) {
-                if constexpr (std::is_same_v<T, uint8_t>) return e.new_value.u1;
-                else if constexpr (std::is_same_v<T, uint16_t>) return e.new_value.u2;
-                else if constexpr (std::is_same_v<T, uint32_t>) return e.new_value.u4;
-                else if constexpr (std::is_same_v<T, uint64_t>) return e.new_value.u8;
-                else if constexpr (std::is_same_v<T, float>) return e.new_value.f4;
-                else if constexpr (std::is_same_v<T, double>) return e.new_value.f8;
-                else return static_cast<T>(e.new_value.ptr);
+        {
+            auto idx_it = tx->write_log_index.find(addr);
+            if (idx_it != tx->write_log_index.end() && idx_it->second->type == VT) {
+                WriteLogEntry* e = idx_it->second;
+                if constexpr (std::is_same_v<T, uint8_t>) return e->new_value.u1;
+                else if constexpr (std::is_same_v<T, uint16_t>) return e->new_value.u2;
+                else if constexpr (std::is_same_v<T, uint32_t>) return e->new_value.u4;
+                else if constexpr (std::is_same_v<T, uint64_t>) return e->new_value.u8;
+                else if constexpr (std::is_same_v<T, float>) return e->new_value.f4;
+                else if constexpr (std::is_same_v<T, double>) return e->new_value.f8;
+                else return static_cast<T>(e->new_value.ptr);
             }
         }
 
@@ -295,44 +303,44 @@ public:
         word_t* waddr = get_word_addr(addr);
         OwnershipRecord* orec = get_orec(waddr);
 
-        for (auto& e : tx->write_log) {
-            if (e.byte_addr == addr && e.type == VT) {
-                set_value(e.new_value, val);
+        auto typeSize = [](ValueType t) -> unsigned {
+            switch (t) {
+            case ValueType::UINT8:   return 1;
+            case ValueType::UINT16:  return 2;
+            case ValueType::UINT32:  return 4;
+            case ValueType::FLOAT:   return 4;
+            case ValueType::UINT64:  return 8;
+            case ValueType::POINTER: return 8;
+            case ValueType::DOUBLE:  return 8;
+            default:                 return 0;
+            }
+        };
+
+        // Step 1: O(1) hash map lookup for existing (addr, type) entry
+        {
+            auto idx_it = tx->write_log_index.find(addr);
+            if (idx_it != tx->write_log_index.end() && idx_it->second->type == VT) {
+                set_value(idx_it->second->new_value, val);
                 tx->write_count++;
                 cm_on_write(tx);
                 return;
             }
         }
 
-        // If a wider (or equal-width) entry already covers this address, skip
-        // (prevents narrower entries from partially overwriting a wider write
-        // during commit write-back, which corrupts data like pointers).
+        // Step 2: Check if a wider entry already covers this address
         {
-            auto typeSize = [](ValueType t) -> unsigned {
-                switch (t) {
-                case ValueType::UINT8:   return 1;
-                case ValueType::UINT16:  return 2;
-                case ValueType::UINT32:  return 4;
-                case ValueType::FLOAT:   return 4;
-                case ValueType::UINT64:  return 8;
-                case ValueType::POINTER: return 8;
-                case ValueType::DOUBLE:  return 8;
-                default:                 return 0;
-                }
-            };
             unsigned sz_bytes = typeSize(VT);
-            for (auto& e : tx->write_log) {
-                if (e.byte_addr == addr && e.type != VT) {
-                    if (typeSize(e.type) >= sz_bytes) {
-                        tx->write_count++;
-                        cm_on_write(tx);
-                        return; // existing wider entry covers this address
-                    }
+            auto idx_it = tx->write_log_index.find(addr);
+            if (idx_it != tx->write_log_index.end() && idx_it->second->type != VT) {
+                if (typeSize(idx_it->second->type) >= sz_bytes) {
+                    tx->write_count++;
+                    cm_on_write(tx);
+                    return;
                 }
             }
         }
 
-        // Create write log entry
+        // Step 3: Create write log entry
         WriteLogEntry e;
         e.byte_addr = addr;
         e.word_addr = waddr;
@@ -345,26 +353,33 @@ public:
         e.owner = tx;
         tx->write_log.push_back(e);
         WriteLogEntry* log_entry = &tx->write_log.back();
+        tx->write_log_index[addr] = log_entry;
 
-        // Acquire w_lock (or skip if already held by us)
-        word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-        if (!is_locked_by(w_lock_val, tx)) {
-            while (true) {
-                if (is_locked(w_lock_val)) {
-                    if (cm_should_abort(tx, orec)) {
-                        rollback(tx);
-                        return;
+        // Step 4: Acquire w_lock (or skip if already held by us).
+        // Multiple addresses may map to the same OREC (LOCK_EXTENT=4, 16-byte
+        // granule).  If we already hold the w_lock from a previous write to the
+        // same OREC, skip acquisition to avoid self-conflict → abort → livelock.
+        if (tx->owned_orecs.find(orec) == tx->owned_orecs.end()) {
+            word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
+            if (!is_locked_by(w_lock_val, tx)) {
+                while (true) {
+                    if (is_locked(w_lock_val)) {
+                        if (cm_should_abort(tx, orec)) {
+                            rollback(tx);
+                            return;
+                        }
+                        TM_SPIN_BACKOFF();
+                        w_lock_val = orec->w_lock.load(std::memory_order_relaxed);
+                        continue;
                     }
-                    TM_SPIN_BACKOFF();
-                    w_lock_val = orec->w_lock.load(std::memory_order_relaxed);
-                    continue;
-                }
 
-                if (orec->w_lock.compare_exchange_strong(w_lock_val, (word_t)log_entry,
-                        std::memory_order_acquire, std::memory_order_acquire)) {
-                    break;
+                    if (orec->w_lock.compare_exchange_strong(w_lock_val, (word_t)log_entry,
+                            std::memory_order_acquire, std::memory_order_acquire)) {
+                        break;
+                    }
                 }
             }
+            tx->owned_orecs.insert(orec);
         }
 
         word_t r_lock_val = orec->r_lock.load(std::memory_order_acquire);
@@ -408,6 +423,8 @@ public:
         tx->write_count = 0;
         tx->succ_abort_count = 0;
         tx->write_log.clear();
+        tx->write_log_index.clear();
+        tx->owned_orecs.clear();
         tx->write_set.clear();
         tx->read_set.clear();
         cm_start(tx);
