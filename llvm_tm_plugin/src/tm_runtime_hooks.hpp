@@ -24,6 +24,7 @@ struct TMRuntimeHooks {
     FunctionCallee init_thread, exit_thread;
     FunctionCallee serialize_lock, serialize_unlock;
     FunctionCallee malloc_fn, calloc_fn, realloc_fn, free_fn;
+    FunctionCallee memset_fn;
 
     bool valid() { return read_i4.getCallee() && write_i4.getCallee(); }
 
@@ -63,6 +64,7 @@ struct TMRuntimeHooks {
         h.calloc_fn        = hook("tm_calloc", i8PtrTy, {i64Ty, i64Ty});
         h.realloc_fn       = hook("tm_realloc", i8PtrTy, {i8PtrTy, i64Ty});
         h.free_fn          = hook("tm_free", voidTy, {i8PtrTy});
+        h.memset_fn        = hook("tm_memset", voidTy, {i8PtrTy, i8Ty, i64Ty});
 
         h.read_i1  = hook("tm_read_i1", i8Ty, {i8PtrTy});
         h.read_i2  = hook("tm_read_i2", i16Ty, {i8PtrTy});

@@ -204,6 +204,12 @@ extern "C" void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len) {
     }
 }
 
+extern "C" void tm_memset(uint8_t *addr, uint8_t val, uint64_t len) {
+    for (uint64_t i = 0; i < len; i++) {
+        tl2::tm_write_i1(&addr[i], val);
+    }
+}
+
 extern "C" void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
 
