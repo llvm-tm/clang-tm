@@ -78,7 +78,7 @@ TEST_NAMES := test_types test_memtest test_threads test_persist test_retry test_
               test_init_no_tx \
               test_simple_vector test_vec_push \
                test_alloc_stress_manual test_manual_tx \
-               test_treap_tx
+               test_treap_tx test_realloc_crash
 
 RACE_TEST_NAMES := test_task_queue_race test_parent_set_race test_counter_race
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))
@@ -165,6 +165,14 @@ $(addprefix $(BIN_DIR)/,$(TINYSTM_TESTS)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(B
 	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \
 	  $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
+
+# SwissTM-backed test (reproducer for STMbench7 bad_alloc crash)
+SWISSTM_TESTS := test_realloc_crash
+
+$(addprefix $(BIN_DIR)/,$(SWISSTM_TESTS)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(BACKENDS_DIR)/runtimes/SwissTM_runtime.cpp | $(BIN_DIR)
+	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/runtimes/SwissTM_runtime.cpp \
+	  $(DEFAULT_LINK_FLAGS) \
+	  -I $(BACKENDS_DIR)/SwissTM -I $(BACKENDS_DIR) $< -o $@
 
 # Race tests (SingleGlobalLock runtime)
 RACE_TEST_BINS := $(addprefix $(BIN_DIR)/,$(RACE_TEST_NAMES))
