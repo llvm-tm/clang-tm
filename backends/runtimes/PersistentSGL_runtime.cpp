@@ -278,6 +278,22 @@ uint8_t tm_read_i1(volatile uint8_t* addr) { return *addr; }
 uint16_t tm_read_i2(volatile uint16_t* addr) { return *addr; }
 uint32_t tm_read_i4(volatile uint32_t* addr) { return *addr; }
 uint64_t tm_read_i8(volatile uint64_t* addr) { return *addr; }
+void tm_read_i16(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    auto *vaddr = static_cast<volatile uint64_t *>(addr);
+    out_words[0] = vaddr[0];
+    out_words[1] = vaddr[1];
+}
+void tm_read_i32(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    auto *vaddr = static_cast<volatile uint64_t *>(addr);
+    for (int i = 0; i < 4; i++) out_words[i] = vaddr[i];
+}
+void tm_read_i64(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    auto *vaddr = static_cast<volatile uint64_t *>(addr);
+    for (int i = 0; i < 8; i++) out_words[i] = vaddr[i];
+}
 float tm_read_f4(volatile float* addr) { return *addr; }
 double tm_read_f8(volatile double* addr) { return *addr; }
 void* tm_read_ptr(volatile void** addr) { return (void*)*addr; }
@@ -310,6 +326,34 @@ void tm_write_i8(volatile uint64_t* addr, uint64_t val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
     if (off != (size_t)-1) persist_write(off, &val, 8);
+}
+
+void tm_write_i16(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    auto *vaddr = static_cast<volatile uint64_t *>(addr);
+    for (int i = 0; i < 2; i++) {
+        size_t off = addr_to_file_off((uintptr_t)(vaddr + i));
+        vaddr[i] = val_words[i];
+        if (off != (size_t)-1) persist_write(off, &val_words[i], 8);
+    }
+}
+void tm_write_i32(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    auto *vaddr = static_cast<volatile uint64_t *>(addr);
+    for (int i = 0; i < 4; i++) {
+        size_t off = addr_to_file_off((uintptr_t)(vaddr + i));
+        vaddr[i] = val_words[i];
+        if (off != (size_t)-1) persist_write(off, &val_words[i], 8);
+    }
+}
+void tm_write_i64(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    auto *vaddr = static_cast<volatile uint64_t *>(addr);
+    for (int i = 0; i < 8; i++) {
+        size_t off = addr_to_file_off((uintptr_t)(vaddr + i));
+        vaddr[i] = val_words[i];
+        if (off != (size_t)-1) persist_write(off, &val_words[i], 8);
+    }
 }
 
 void tm_write_f4(volatile float* addr, float val) {

@@ -117,6 +117,22 @@ extern "C" uint64_t tm_read_i8(uint64_t *addr) {
     return tl2::tm_read_i8(addr);
 }
 
+extern "C" void tm_read_i16(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    out_words[0] = tl2::tm_read_i8(static_cast<uint64_t *>(addr) + 0);
+    out_words[1] = tl2::tm_read_i8(static_cast<uint64_t *>(addr) + 1);
+}
+extern "C" void tm_read_i32(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    for (int i = 0; i < 4; i++)
+        out_words[i] = tl2::tm_read_i8(static_cast<uint64_t *>(addr) + i);
+}
+extern "C" void tm_read_i64(void *addr, void *out) {
+    auto *out_words = static_cast<uint64_t *>(out);
+    for (int i = 0; i < 8; i++)
+        out_words[i] = tl2::tm_read_i8(static_cast<uint64_t *>(addr) + i);
+}
+
 extern "C" float tm_read_f4(float *addr) {
     return tl2::tm_read_f4(addr);
 }
@@ -152,6 +168,22 @@ extern "C" void tm_write_i4(uint32_t *addr, uint32_t val) {
 
 extern "C" void tm_write_i8(uint64_t *addr, uint64_t val) {
     tl2::tm_write_i8(addr, val);
+}
+
+extern "C" void tm_write_i16(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    for (int i = 0; i < 2; i++)
+        tl2::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
+}
+extern "C" void tm_write_i32(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    for (int i = 0; i < 4; i++)
+        tl2::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
+}
+extern "C" void tm_write_i64(void *addr, void *val) {
+    auto *val_words = static_cast<const uint64_t *>(val);
+    for (int i = 0; i < 8; i++)
+        tl2::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
 }
 
 extern "C" void tm_write_f4(float *addr, float val) {

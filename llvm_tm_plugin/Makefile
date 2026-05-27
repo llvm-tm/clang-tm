@@ -77,7 +77,8 @@ TEST_NAMES := test_types test_memtest test_threads test_persist test_retry test_
               test_nested_tx test_tm_simple test_tm_safe_map \
               test_init_no_tx \
               test_simple_vector test_vec_push \
-              test_alloc_stress_manual test_manual_tx
+               test_alloc_stress_manual test_manual_tx \
+               test_treap_tx
 
 RACE_TEST_NAMES := test_task_queue_race test_parent_set_race test_counter_race
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))
@@ -147,7 +148,7 @@ $(BIN_DIR)/%_noinst: $(OUT_DIR)/%.bc $(RUNTIME_DIR)/tm_runtime.cpp | $(BIN_DIR)
 
 # TinySTM-backed tests (WBCTL write-back commit-time locking)
 TINYSTM_TESTS := test_local_containers test_vector_realloc test_alloc_stress test_ll_alloc test_construct_tx_pattern \
-                 test_simple_vector test_vec_push
+                 test_simple_vector test_vec_push test_treap_tx
 
 # test_local_containers uses local containers inside TX functions,
 # which requires the inline pipeline (AlwaysInline clones all reachable

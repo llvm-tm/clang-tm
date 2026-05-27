@@ -348,11 +348,6 @@ static void reset_locks();
 inline word_t increment_clock(word_t tx_id)
 {
 	word_t res = g_clock.fetch_add(1, std::memory_order_acq_rel) + 1;
-	static std::atomic<int> dbg_cnt{0};
-	if (dbg_cnt.fetch_add(1) < 5) {
-		fprintf(stderr, "[INCR_CLOCK] tx=%llu res=%llu\n",
-		        (unsigned long long)tx_id, (unsigned long long)res);
-	}
 	if (res >= VERSION_MAX) {
 		word_t expect = 0L;
 		word_t desired = tx_id;
