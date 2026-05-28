@@ -53,8 +53,6 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - **WT counter test**: own-lock validation fix improved from 709840/800000 (90160 lost) → 797703/800000 (2297 lost). Remaining gap from WT's inherent write-through race — lock-entent adjacent updates. WBCTL/WBETL pass 800000/800000.
 
 ## Blocked
-- **test_local_containers post-modify verification FAIL**: `getBaseObject` + `tracesFromAlloca` both trace through `LoadInst`, incorrectly classifying heap pointers stored in stack allocas (e.g., `vector.__begin_`) as stack-local. This causes the modify loop's `tm_write_i4` (write-set only) to be invisible to the verification loop's raw `load i32` (reads stale memory). Fix: use `getBaseObjectNoLoad` and stop `tracesFromAlloca` at `LoadInst`. Not applied yet — reverted before commit.
-- **STMbench7 crashes with TinySTM and TL2**: SIGSEGV during `op_sm3_create_ap` at 1 thread. Fix applied (STL container functions skip `handleMallocFree` interception) but needs rebuild and retest.
 - **STAMP Labyrinth still slow with inline pipeline**: Even with 8× reduction from UINT64 memcpy, the first labyrinth path doesn't complete within 60s. Non-inline pipeline completes in ~5ms. Root cause: inline pipeline instruments ALL STL code (vector, deque iterators, queue internals) inside the TX.
 
 ## FIXED: CloneOnly ALL-functions mode regression (f35d19e)
@@ -115,7 +113,7 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - **All 12 backend STM tests PASS**: `counter_st`, `counter_mt`, `write_set_validation` × 4 backends (TL2, TinySTM/WBCTL, NOrec, SwissTM) — all PASS with correct results.
 
 ## Blocked
-- **STMbench7 hangs with ALL TM backends**: First long traversal operation (e.g., `op_lt3` — range-for over `g_compositeParts`) hangs with WBCTL/SwissTM/NOrec at 1 thread. Singlelock and uninstrumented work fine. Needs investigation — possible bug in `tm_read`/`tm_write` interaction with vector iterator internals inside long-running TX.
+- **STMbench7 bad_alloc crash with SwissTM/TL2/NOrec**: `op_sm3_create_ap` throws `std::bad_alloc` during vector reallocation inside TX. Not a `_tm_clone` survival issue — bank binary confirms TM hooks survive `-O3` inlining (43 `call.*tm_` instructions present). Root cause is likely in the runtime's data structures (read_set reallocation, write_log, owned_orecs) being corrupted by the element-by-element `construct_at`/`destroy_at` during `_S_do_relocate` of `vector<CompositePart>`.
 - **STAMP Labyrinth still slow with inline pipeline**: Even with 8× reduction from UINT64 memcpy, the first labyrinth path doesn't complete within 60s. Non-inline pipeline completes in ~5ms. Root cause: inline pipeline instruments ALL STL code (vector, deque iterators, queue internals) inside the TX.
 - **Python instrumenter (clang_tm.py)**: requires `clang` Python module (`libclang` bindings) — not installed in this environment. All LLVM plugin tests and backend STM tests pass independently.
 
@@ -298,10 +296,9 @@ The 8-byte chunk approach works because:
 #### Performance note
 For 10000 elements, the byte-level memmove expansion inside `_S_do_relocate` creates ~960K TM operations, overwhelming SwissTM. The `tm-instrument-inline` pipeline would inline these into the TX body, making them faster, but would also instrument ALL STL internals (vector, deque iterators, etc.) causing even slower performance in other scenarios (STAMP Labyrinth). The non-inline pipeline keeps clones separate with `NoInline`+`OptimizeNone`, which is correct but slow for bulk operations.
 
-### Next Steps
+### Next Steps (this session)
 - Consider optimizing `_S_do_relocate` memmove to use 8-byte chunks as well (same broadcast/merge pattern as memset)
 - Add full byte-merge support to SwissTM (like WBCTL already has — lines 397-492 in `tinystm_wbctl.hpp`)
-- Investigate STMbench7 crash with the 8-byte memset fix applied (was previously blocked by the same double-free)
 
 ### PHI node fix + leftover TWP debug code cleanup
 - **PHI node fix**: `instrumentMemoryIntrinsic` computed `AlignedMax = Len - (Len % 8)` in the `AlignedLE` basic block before creating the PHI node. LLVM requires PHI nodes grouped at the top of the basic block. Moved `URem`/`Sub` to `OrigBB` before the branch to `AlignedLE`, so `CreatePHI` inserts at the start of an empty block.
@@ -327,11 +324,17 @@ For 10000 elements, the byte-level memmove expansion inside `_S_do_relocate` cre
 ### Key Decisions
 - Centralized `g_deferred_frees_set` lifecycle in `tm_alloc_overrides.hpp` so the set is always cleared alongside the linked list — no risk of the set accumulating stale entries.
 - Simple backends (SingleGlobalLock, DistributedSGL, PersistentSGL) don't use deferred frees at all and don't need `g_deferred_frees_set` (their `tm_free` just calls `free`/`::operator delete` directly; no inline functions in the header that reference the set are called from these TUs).
-- **The `add $0x10` theory is dead** — binary analysis now shows correct `add $0x40` in `g_compositeParts.push_back`. The real problem is code generation strips `_tm_clone` functions.
-- `private` linkage + `fastcc` calling convention on `_tm_clone` functions may trigger LLVM's dead-function elimination even with `optnone`. Need to experiment with linkage type, calling convention, or backend flags.
+- **`_tm_clone` elimination is NOT a bug** — `-O3` post-pass inlines `_tm_clone` functions into their callers, stripping private-linkage symbols, but TM hooks (`tm_read_i4`, `tm_write_i4`, etc.) survive as inlined code in the resulting binary confirmed by objdump (43 `call.*tm_` instructions in `bank_tinystm`). At `-O1` (plugin default), `_tm_clone` symbols remain as separate functions (e.g., 16 in `test_treap_tx`, 70 in `test_realloc_crash`). Both paths produce working TM instrumentation.
 
 ## Next Steps
-1. **Verify `_tm_clone` elimination mechanism**: Check if `llc` inlines the functions despite `optnone` or strips them as dead code. Add `volatile asm` barrier or call to opaque extern to prevent elimination.
-2. **Experiment with linkage/calling convention**: Change from `private`/`fastcc` to `internal`/`C` calling convention. Try `llc -no-discard-value-names -preserve-llvm-optnone`.
-3. **If `_tm_clone` cannot survive llc**: Use `-mllvm -force-attribute=_tm_clone:noinline` or add a separate compilation step (compile `.opt.bc` directly with `llc -O0` and link the object).
-4. **Once `_tm_clone` survives**: Test reproducer + STMbench7 with NOrec + hardened runtime. The `bad_alloc` / SIGSEGV should resolve because TM writes/reads will actually execute.
+1. **Investigate STMbench7 bad_alloc crash with eager-locking backends** — vector reallocation inside TX creates ~6.2M TM operations for element-by-element `construct_at`/`destroy_at`. Create a minimal reproducer matching the `CompositePart`/`AtomicPart` pattern to isolate whether the crash is in runtime data structure corruption or something else.
+2. **Optimize STAMP Labyrinth inline pipeline** — consider adding `tm_local` annotations to STAMP code's stack-local data, or have the inline pipeline skip trivial accessors/iterators.
+3. **Consider `-O3` as default post-pass** — currently `TM_OPT_LEVEL = -O1`. `-O3` inlines the clones, which is actually desirable for performance (eliminates function-call overhead). Test bank/TinySTM at `-O3` to confirm no regressions.
+
+## Done (this session — 2026-05-28 +)
+### `test_treap_tx` FAIL → PASS: `write_set.insert` silent-drop of POINTER writes after UINT64 init
+- **Symptom**: `test_treap_tx` TX inserted 10 keys (100-109) into treap; CHECK TX found `root->right`'s left child = null instead of key=100's node. Crash.
+- **Root cause**: Constructor `NodeC2_tm_clone` writes UINT64(0) to all 5 node fields. Merge later writes POINTER to same addresses. `std::unordered_map::insert` does NOT overwrite existing keys → merge's POINTER writes silently dropped.
+- **Fix**: `tinystm_wbctl.hpp` line 803: `insert` → `operator[]`; guard line 722: `>=` → `>` (same-width type changes allowed). `tinystm_wbetl.hpp` line 478: `insert` → `operator[]`. `tinystm_wt.hpp` lines 403, 417, 434: `insert` → `operator[]`.
+- **Verification**: 15/15 plugin tests PASS, 12/12 backend STM tests PASS, bank benchmark PASS.
+- **Key insight**: `std::unordered_map<void*, ...>::insert` silently drops same-address overwrites — the write_set must use `operator[]` so the LAST write (correct type) wins.

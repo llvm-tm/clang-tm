@@ -407,8 +407,13 @@ static Function *cloneMethod(Function *Original, const Twine &Suffix,
                               CloneMode Mode = CloneMode::Instrument)
 {
     FunctionType *FTy = Original->getFunctionType();
+    // Use InternalLinkage (not PrivateLinkage) so llc emits a proper ELF
+    // symbol table entry (local 't' symbol) instead of a .L local label.
+    // PrivateLinkage produces .L labels with no ELF symbol entry, making
+    // clone functions invisible to nm/readelf/objdump and preventing
+    // debuggers from symbolizing their stack frames.
     Function *NewFunc = Function::Create(
-        FTy, GlobalValue::PrivateLinkage, Original->getAddressSpace(),
+        FTy, GlobalValue::InternalLinkage, Original->getAddressSpace(),
         Original->getName() + Suffix, M);
 
     ValueToValueMapTy VMap;

@@ -287,7 +287,13 @@ inline T tm_read(            //
 	}
 
 	any_type_t r = read_word(tx, (void *)addr, SZ);
-	return return_any_type<T>(r);
+	T val = return_any_type<T>(r);
+	{
+		fprintf(stderr, "TRACE tm_read(%p) sz=%d val=", (void*)addr, (int)SZ);
+		if constexpr (SZ == ValueType::POINTER) fprintf(stderr, "%p\n", (void*)val);
+		else fprintf(stderr, "%llu\n", (unsigned long long)val);
+	}
+	return val;
 }
 
 template <typename T,
@@ -313,6 +319,9 @@ tm_write(                    //
 	any_type_t w;
 	fill_any_type(w, &val, SZ);
 	write_word(tx, (void *)addr, w, SZ);
+	fprintf(stderr, "TRACE tm_write(%p) sz=%d val=", (void*)addr, (int)SZ);
+	if constexpr (SZ == ValueType::POINTER) fprintf(stderr, "%p\n", (void*)val);
+	else fprintf(stderr, "%llu\n", (unsigned long long)val);
 }
 
 extern std::atomic<word_t> g_clock;
