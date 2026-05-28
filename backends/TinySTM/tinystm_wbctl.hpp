@@ -326,6 +326,12 @@ read_word_ctl(                                                //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
+	// Stack-address detection: reading from the stack would create read-set
+	// entries for stack addresses that hash to random locks, causing spurious
+	// validation failures and aborts.  Use a raw load for thread-private data.
+	if (isStackAddress(addr))
+		return read_value_from_addr(addr, sz);
+
 #ifdef DEBUG_WBCTL
 	// Debug: detect corrupted addresses
 	static std::atomic<uint64_t> read_count{0};
@@ -606,35 +612,9 @@ write_word_ctl(                                               //
 	// Stack-address detection: writing to the stack via tm_write would create
 	// a write-set entry that gets written back at commit time — by then the
 	// stack frame has been popped and the write corrupts active stack data.
-	// This happens when a TX-internal function uses reference parameters
-	// (e.g., treap split/merge Node*&) to write back to the caller's allocas.
-	// Use a raw store (no write-set entry) for any address on this thread's
-	// stack to avoid post-commit stack corruption.
-	{
-		thread_local bool s_stack_init = false;
-		thread_local void *s_stack_base = nullptr;
-		thread_local size_t s_stack_size = 0;
-		if (!s_stack_init) {
-#if defined(__APPLE__)
-			s_stack_base = pthread_get_stackaddr_np(pthread_self());
-			s_stack_size = pthread_get_stacksize_np(pthread_self());
-#else
-			pthread_attr_t attr;
-			if (pthread_getattr_np(pthread_self(), &attr) == 0) {
-				pthread_attr_getstack(&attr, &s_stack_base, &s_stack_size);
-				pthread_attr_destroy(&attr);
-			}
-#endif
-			s_stack_init = true;
-		}
-		if (s_stack_base) {
-			uintptr_t a = (uintptr_t)addr;
-			uintptr_t base = (uintptr_t)s_stack_base;
-			if (a >= base && a < base + s_stack_size) {
-				write_value_to_addr(addr, val, sz);
-				return;
-			}
-		}
+	if (isStackAddress(addr)) {
+		write_value_to_addr(addr, val, sz);
+		return;
 	}
 
 	tx->read_only = false;

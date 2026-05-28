@@ -12,6 +12,9 @@
 #include <thread>
 #include <chrono>
 #include <type_traits>
+#include <cstdlib>
+#include <execinfo.h>
+#include <unistd.h>
 
 #include "../tm_common.hpp"
 
@@ -26,6 +29,7 @@ using stm::ValueType;
 #define TM_SPIN_BACKOFF() std::this_thread::sleep_for(std::chrono::microseconds(1))
 using stm::read_value_from_addr;
 using stm::write_value_to_addr;
+using stm::isStackAddress;
 
 extern __thread sigjmp_buf *jmpbuf;
 
@@ -182,6 +186,31 @@ public:
 
     static void rollback(TxDescriptor* tx) {
         for (auto& we : tx->write_log) {
+            // Restore old value before releasing lock (write-through TM
+            // updates memory immediately, so on abort we must undo it).
+            switch (we.type) {
+                case ValueType::UINT8:
+                    *reinterpret_cast<uint8_t*>(we.byte_addr) = we.old_value.u1;
+                    break;
+                case ValueType::UINT16:
+                    *reinterpret_cast<uint16_t*>(we.byte_addr) = we.old_value.u2;
+                    break;
+                case ValueType::UINT32:
+                    *reinterpret_cast<uint32_t*>(we.byte_addr) = we.old_value.u4;
+                    break;
+                case ValueType::UINT64:
+                    *reinterpret_cast<uint64_t*>(we.byte_addr) = we.old_value.u8;
+                    break;
+                case ValueType::FLOAT:
+                    *reinterpret_cast<float*>(we.byte_addr) = we.old_value.f4;
+                    break;
+                case ValueType::DOUBLE:
+                    *reinterpret_cast<double*>(we.byte_addr) = we.old_value.f8;
+                    break;
+                case ValueType::POINTER:
+                    *reinterpret_cast<void**>(we.byte_addr) = we.old_value.ptr;
+                    break;
+            }
             we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
         }
         tx->aborted = true;
@@ -354,6 +383,9 @@ public:
             unsigned sz_bytes = typeSize(VT);
             auto idx_it = tx->write_log_index.find(addr);
             if (idx_it != tx->write_log_index.end() && idx_it->second->type != VT) {
+                // Even though types differ, if the existing type spans the same
+                // or more bytes at this word-aligned address, skipping this narrower
+                // write is safe — the wider entry already captures the full value.
                 if (typeSize(idx_it->second->type) >= sz_bytes) {
                     tx->write_count++;
                     cm_on_write(tx);
@@ -362,7 +394,7 @@ public:
             }
         }
 
-        // Step 3: Create write log entry
+        // Create write log entry
         WriteLogEntry e;
         e.byte_addr = addr;
         e.word_addr = waddr;
