@@ -24,6 +24,7 @@ namespace swisstm
 using word_t = uint64_t;
 
 using stm::any_type_t;
+using stm::isStackAddress;
 using stm::ValueType;
 
 #define TM_SPIN_BACKOFF() std::this_thread::sleep_for(std::chrono::microseconds(1))
