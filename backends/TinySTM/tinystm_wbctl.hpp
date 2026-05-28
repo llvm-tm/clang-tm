@@ -326,12 +326,6 @@ read_word_ctl(                                                //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
-	// Stack-address detection: reading from the stack would create read-set
-	// entries for stack addresses that hash to random locks, causing spurious
-	// validation failures and aborts.  Use a raw load for thread-private data.
-	if (isStackAddress(addr))
-		return read_value_from_addr(addr, sz);
-
 #ifdef DEBUG_WBCTL
 	// Debug: detect corrupted addresses
 	static std::atomic<uint64_t> read_count{0};
@@ -606,14 +600,6 @@ write_word_ctl(                                               //
 
 
 	if (addr == nullptr || (uint64_t)addr < 0x100000) {
-		return;
-	}
-
-	// Stack-address detection: writing to the stack via tm_write would create
-	// a write-set entry that gets written back at commit time — by then the
-	// stack frame has been popped and the write corrupts active stack data.
-	if (isStackAddress(addr)) {
-		write_value_to_addr(addr, val, sz);
 		return;
 	}
 

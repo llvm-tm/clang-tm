@@ -304,9 +304,6 @@ public:
         std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
 
-        // Stack-address detection
-        if (stm::isStackAddress((void*)addr)) { *addr = val; return; }
-
         // Real byte width of each DataType (NOT dtype_size(), which returns
         // 4 for PTR but PTR write-back writes 8 bytes as word_t).
         auto dataWidth = [](DataType dt) -> unsigned {
@@ -371,15 +368,72 @@ public:
     static T read_impl(Transaction* tx, AddrT addr) {
         if (!tx || !tx->active) return from_word<T>(to_word(*addr));
 
-        // Stack-address detection
-        if (stm::isStackAddress((void*)addr))
-            return from_word<T>(to_word(*addr));
-
         if (bloom_might_contain(tx, (word_t*)addr)) {
+            // Exact type match (fast path)
             for (auto& e : tx->write_set) {
                 if (e.addr == (word_t*)addr && e.dtype == DT) {
                     return from_word<T>(e.new_value());
                 }
+            }
+            // Type-interchange fallback: same address, compatible size
+            auto swapSize = [](DataType dt) -> unsigned {
+                switch (dt) {
+                    case DataType::UINT8:  return 1;
+                    case DataType::UINT16: return 2;
+                    case DataType::UINT32: return 4;
+                    case DataType::FLOAT:  return 4;
+                    case DataType::UINT64: return 8;
+                    case DataType::DOUBLE: return 8;
+                    case DataType::PTR:    return 8;
+                    default:               return 0;
+                }
+            };
+            unsigned req_sz = swapSize(DT);
+            for (auto& e : tx->write_set) {
+                if (e.addr != (word_t*)addr) continue;
+                unsigned entry_sz = swapSize(e.dtype);
+                // Same-size interchange (POINTER ↔ UINT64)
+                if (entry_sz == req_sz && entry_sz == 8) {
+                    return from_word<T>(e.new_value());
+                }
+                // Wider to narrower extraction
+                if (entry_sz == 8 && req_sz == 4) {
+                    return from_word<T>((uint32_t)(e.new_value() & 0xFFFFFFFF));
+                }
+                if (entry_sz == 8 && req_sz == 2) {
+                    return from_word<T>((uint16_t)(e.new_value() & 0xFFFF));
+                }
+                if (entry_sz == 8 && req_sz == 1) {
+                    return from_word<T>((uint8_t)(e.new_value() & 0xFF));
+                }
+                if (entry_sz == 4 && req_sz == 2) {
+                    return from_word<T>((uint16_t)(e.new_value() & 0xFFFF));
+                }
+                if (entry_sz == 4 && req_sz == 1) {
+                    return from_word<T>((uint8_t)(e.new_value() & 0xFF));
+                }
+                if (entry_sz == 2 && req_sz == 1) {
+                    return from_word<T>((uint8_t)(e.new_value() & 0xFF));
+                }
+            }
+            // General byte-merge: wider read from UINT8 entries at consecutive bytes
+            if (swapSize(DT) == 8) {
+                uint64_t merged = 0;
+                bool all_byte = true;
+                for (unsigned i = 0; i < 8; i++) {
+                    void *byte_addr = (void*)((uintptr_t)addr + i);
+                    bool found = false;
+                    for (auto& e : tx->write_set) {
+                        if (e.addr == (word_t*)byte_addr && e.dtype == DataType::UINT8) {
+                            merged |= (uint64_t)(e.new_value() & 0xFF) << (i * 8);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) { all_byte = false; break; }
+                }
+                if (all_byte)
+                    return from_word<T>(merged);
             }
         }
 

@@ -508,3 +508,42 @@ The fundamental issue is that **stack-local variables inside TX functions must n
 3. **Change memmove to 8-byte operations** (like memset was fixed) so `_S_do_relocate` produces UINT64 entries that can be interchanged with POINTER/UINT32 reads.
 
 **Alternative fix**: Mark the local struct with `tm_local` annotation. Test: `__attribute__((annotate("tm_local"))) CompositePart cp;` would skip TM instrumentation for all stores/loads to `cp`'s fields.
+
+## Done (this session — 2026-05-28)
+
+### Removed runtime `isStackAddress()` — moved to plugin-level alloca detection
+
+**Problem**: Runtime `isStackAddress()` was a safety net preventing TM reads/writes on stack addresses, but the user wanted this handled entirely at the plugin level (trace load/store pointer operands back to `AllocaInst` and skip instrumentation).
+
+**Plugin fix** (`instrumentLoadStoresInFunction` in `tm_method_instrumentation.hpp`):
+- Added `argIsAllocaDest` check for **loads** (previously only stores were guarded). When a load's pointer base is a function Argument and all callers pass alloca addresses for that argument, the load is skipped (raw load, no `tm_read`). This prevents creating read-set entries for stack addresses like `this->__begin_` inside `push_back_tm_clone` when the vector is stack-local.
+
+**Runtime changes** (removed `isStackAddress` from 8 files):
+- `backends/tm_common.hpp`: Removed `isStackAddress()` function + `tm_platform.hpp` include
+- `backends/TinySTM/tinystm_wbctl.hpp`: Removed from `read_word_ctl` + `write_word_ctl`
+- `backends/TinySTM/tinystm_wbetl.hpp`: Removed from `read_word_etl` + `write_word_etl`
+- `backends/TinySTM/tinystm_wt.hpp`: Removed from `read_word_wt` + `write_word_wt`
+- `backends/TinySTM/tinystm_common.hpp`: Removed `using stm::isStackAddress`
+- `backends/NOrec/NOrec.hpp`: Removed `using` + both `read_word_norec`/`write_word_norec` guards
+- `backends/SwissTM/SwissTM.hpp`: Removed unused `using stm::isStackAddress`
+- `backends/TL2/tl2.hpp`: Removed from `read_impl` + `write_impl`
+- `backends/runtimes/tl2_runtime.cpp`: Removed from `tm_free`
+
+**Test results**: 10/12 backend STM tests PASS (TL2, TinySTM, NOrec all 3/3; SwissTM 1/3 — `counter_mt` and `write_set_validation` are pre-existing failures).
+
+### SwissTM specification verification
+- Compared code (`SwissTM.hpp`) against spec (`docs/proofs.md` Section 5)
+- Substantially faithful — deviations are sound optimizations (skip-validation check, `owned_orecs` dedup, type-size broadness override) or plugin compatibility (POINTER↔UINT64 type interchange)
+- The pre-existing SwissTM failures are NOT caused by any spec deviation
+
+## Debugging SwissTM (`counter_mt` + `write_set_validation` failures) — In Progress
+
+### `counter_mt` failure (multi-threaded)
+- Symptom: got ~3500-4400 out of 8000 expected increments
+- The multi-threaded counter test spawns 4 threads, each doing 2000 increments inside a TX. 3500/8000 = ~44% success rate, which matches the expected contention loss for an eager-locking backend.
+- **Hypothesis**: SwissTM's eager write-lock + contention manager (`cm_should_abort`) causes many more aborts than the other backends. Other backends (TL2, WBCTL) are commit-time locking, which means writers never block each other until commit — they all succeed in parallel. SwissTM locks at write time, so concurrent increments to the same counter cause immediate contention and aborts.
+- **Possible fix**: Reduce contention by using a TM global per-thread counter (array of counters, like the bank benchmark), or validate that the contention manager isn't too aggressive.
+
+### `write_set_validation` failure
+- Likely same root cause: eager locking causes aborts that leave partial write-log state.
+- Need to investigate whether the `owned_orecs` + `write_log_index` hash table is correctly cleared on rollback/retry.

@@ -6,8 +6,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <pthread.h>
 #include <vector>
+
+
 
 #ifndef NDEBUG
 #define TM_ASSERT(cond, msg)                                                             \
@@ -143,59 +144,6 @@ write_value_to_addr( //
 	default:
 		break;
 	}
-}
-
-// ===========================================================================
-// Stack-address detection: check if a pointer is on the current thread's
-// stack.  Stack data is thread-private and must NEVER go through TM reads/
-// writes — doing so creates write-set entries for addresses that will be
-// popped on function return, causing post-commit stack corruption.  Also,
-// using TM reads on stack addresses causes spurious lock conflicts in
-// lock-based backends (WBCTL) because stack addresses hash to random locks.
-//
-// Returns true if the address is on the calling thread's stack.
-// Uses pthread_getattr_np on Linux, pthread_get_stackaddr_np on macOS.
-// Caches the stack bounds in a thread_local variable (first call only).
-// ===========================================================================
-inline bool isStackAddress(void *addr)
-{
-	// Method 1: pthread-based stack bounds (cached thread-local).
-	thread_local bool init = false;
-	thread_local void *stack_base = nullptr;
-	thread_local size_t stack_size = 0;
-	if (!init) {
-#if defined(__APPLE__)
-		stack_base = pthread_get_stackaddr_np(pthread_self());
-		stack_size = pthread_get_stacksize_np(pthread_self());
-#else
-		pthread_attr_t attr;
-		if (pthread_getattr_np(pthread_self(), &attr) == 0) {
-			pthread_attr_getstack(&attr, &stack_base, &stack_size);
-			pthread_attr_destroy(&attr);
-		}
-#endif
-		init = true;
-	}
-	if (stack_base) {
-		uintptr_t a = (uintptr_t)addr;
-		uintptr_t base = (uintptr_t)stack_base;
-		if (a >= base && a < base + stack_size)
-			return true;
-	}
-
-	// Method 2 (fallback): compare with current stack pointer.
-	// A thread's stack grows downward; any address between the current
-	// stack pointer and the top of the stack (highest address) is on
-	// this thread's stack.  We use __builtin_frame_address to get a
-	// conservative lower bound.
-	void *frame = __builtin_frame_address(0);
-	uintptr_t a = (uintptr_t)addr;
-	uintptr_t fp = (uintptr_t)frame;
-	// Stack grows downward: addresses >= fp (toward the top) are on
-	// the stack.  Pad by 256KB to account for frames deeper than the
-	// current call chain (e.g., signal handlers, stack overflow guard).
-	uintptr_t top = fp + 256UL * 1024;
-	return a >= fp && a <= top;
 }
 
 constexpr int OFFSET_BITS = 3; // for 64bit

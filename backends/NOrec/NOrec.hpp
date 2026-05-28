@@ -46,7 +46,6 @@ using stm::read_value_from_addr;
 using stm::return_any_type;
 using stm::ValueType;
 using stm::write_value_to_addr;
-using stm::isStackAddress;
 
 struct ReadLogEntry {
 	ValueType type;
@@ -304,13 +303,6 @@ read_word_norec(     //
 	NOREC_ASSERT(tx, "tx not defined");
 	NOREC_ASSERT(tx->active, "tx not active");
 
-	// Stack-address detection: stack data is thread-private.  Reading via
-	// tm_read would either return stale values (if write-back and no write-
-	// set entry) or create spurious read-set entries that cause validation
-	// failures (lock-based backends hash stack addresses to random locks).
-	if (isStackAddress(addr))
-		return read_value_from_addr(addr, sz);
-
 	// Scan from the END (most recent write) so that addresses written
 	// multiple times (e.g., vector _M_finish on each push_back) return
 	// the latest value, not the oldest.
@@ -322,6 +314,80 @@ read_word_norec(     //
 				       "read_word_norec: POINTER from write-set is kernel-space");
 			}
 			return it->new_val;
+		}
+	}
+
+	// Type-interchange fallback: scan for same-address entries with compatible
+	// types.  The 8-byte memcpy/memmove expansion produces UINT64 entries,
+	// but subsequent POINTER reads need POINTER↔UINT64 interchange.
+	// Also handles wider-to-narrower extraction (UINT64→UINT8/16/32) and
+	// byte-level merge (8× UINT8 entries → POINTER/UINT64).
+	for (auto it = tx->write_set.rbegin(); it != tx->write_set.rend(); ++it) {
+		if (it->addr != addr) continue;
+
+		auto entrySize = [](ValueType t) -> unsigned {
+			switch (t) {
+			case ValueType::UINT8:   return 1;
+			case ValueType::UINT16:  return 2;
+			case ValueType::UINT32:
+			case ValueType::FLOAT:   return 4;
+			case ValueType::UINT64:
+			case ValueType::DOUBLE:
+			case ValueType::POINTER: return 8;
+			default:                 return 0;
+			}
+		};
+		unsigned es = entrySize(it->type);
+		unsigned rs = entrySize(sz);
+
+		// POINTER ↔ UINT64 interchange (both 8 bytes)
+		if (rs == 8 && es == 8 && sz != it->type)
+			return it->new_val;
+
+		// Wider to narrower: extract sub-word from wider entry
+		if (es == 8 && rs == 4 && (sz == ValueType::UINT32 || sz == ValueType::FLOAT)) {
+			any_type_t r; r.u4 = (uint32_t)(it->new_val.u8 & 0xFFFFFFFF); return r;
+		}
+		if (es == 8 && rs == 2 && sz == ValueType::UINT16) {
+			any_type_t r; r.u2 = (uint16_t)(it->new_val.u8 & 0xFFFF); return r;
+		}
+		if (es == 8 && rs == 1 && sz == ValueType::UINT8) {
+			any_type_t r; r.u1 = (uint8_t)(it->new_val.u8 & 0xFF); return r;
+		}
+		if (es == 4 && rs == 2 && sz == ValueType::UINT16) {
+			any_type_t r; r.u2 = (uint16_t)(it->new_val.u4 & 0xFFFF); return r;
+		}
+		if (es == 4 && rs == 1 && sz == ValueType::UINT8) {
+			any_type_t r; r.u1 = (uint8_t)(it->new_val.u4 & 0xFF); return r;
+		}
+		if (es == 2 && rs == 1 && sz == ValueType::UINT8) {
+			any_type_t r; r.u1 = (uint8_t)(it->new_val.u2 & 0xFF); return r;
+		}
+	}
+
+	// General byte-merge: if a wider read (UINT64/POINTER) has no matching
+	// write-set entry at the start address, check if all sub-bytes have
+	// UINT8 entries and merge them.  This handles memcpy/memmove byte-loop
+	// instrumentation that creates UINT8 entries at every byte offset.
+	if (sz == ValueType::UINT64 || sz == ValueType::POINTER || sz == ValueType::DOUBLE) {
+		uint64_t merged = 0;
+		bool all_byte = true;
+		for (unsigned i = 0; i < 8; i++) {
+			void *byte_addr = (void*)((uintptr_t)addr + i);
+			bool found = false;
+			for (auto it = tx->write_set.rbegin(); it != tx->write_set.rend(); ++it) {
+				if (it->addr == byte_addr && it->type == ValueType::UINT8) {
+					merged |= ((uint64_t)it->new_val.u1) << (i * 8);
+					found = true;
+					break;
+				}
+			}
+			if (!found) { all_byte = false; break; }
+		}
+		if (all_byte) {
+			any_type_t result;
+			result.u8 = merged;
+			return result;
 		}
 	}
 
@@ -367,14 +433,6 @@ write_word_norec(    //
 {
 	NOREC_ASSERT(tx, "tx not defined");
 	NOREC_ASSERT(tx->active, "tx not active");
-
-	// Stack-address detection: writing to the stack creates write-set entries
-	// for addresses that will be popped on function return.  At commit time,
-	// the write-back would corrupt the active stack frame.
-	if (isStackAddress(addr)) {
-		write_value_to_addr(addr, val, sz);
-		return;
-	}
 
 	tx->read_only = false; // TODO: shouldn't the TX abort?
 

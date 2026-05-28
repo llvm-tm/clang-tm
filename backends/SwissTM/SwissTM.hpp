@@ -29,7 +29,6 @@ using stm::ValueType;
 #define TM_SPIN_BACKOFF() std::this_thread::sleep_for(std::chrono::microseconds(1))
 using stm::read_value_from_addr;
 using stm::write_value_to_addr;
-using stm::isStackAddress;
 
 extern __thread sigjmp_buf *jmpbuf;
 

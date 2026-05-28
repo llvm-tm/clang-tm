@@ -222,12 +222,6 @@ extern "C" void* tm_calloc(size_t nmemb, size_t size) { void* p = ::operator new
 extern "C" void* tm_realloc(void* ptr, size_t size) { void* p = ::operator new(size); if (ptr) { memcpy(p, ptr, size); ::operator delete(ptr); } tm_track_spec_alloc(p); return p; }
 extern "C" void  tm_free(void* ptr) {
     if (!ptr) return;
-    // Safety: stack addresses must never be deferred-freed or delete'd.
-    // TM writes to stack-allocated objects are trapped by isStackAddress
-    // in the backend, but the plugin may still pass stack pointers to
-    // tm_free on some code paths (e.g., STL temporary vectors on stack
-    // whose internal pointers were set to stack addresses by optimization).
-    if (stm::isStackAddress(ptr)) return;
     if (g_in_tx) {
         // Detect double-free: same pointer freed twice in the same TX
         if (g_deferred_frees_set.count(ptr)) {

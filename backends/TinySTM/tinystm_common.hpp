@@ -49,7 +49,6 @@ using stm::read_value_from_addr;
 using stm::return_any_type;
 using stm::ValueType;
 using stm::write_value_to_addr;
-using stm::isStackAddress;
 
 extern __thread sigjmp_buf *jmpbuf;
 
