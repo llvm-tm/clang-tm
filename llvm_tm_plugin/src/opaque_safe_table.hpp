@@ -51,6 +51,10 @@ static const OpaqueSafeEntry KnownSafeWithTMArgsTable[] = {
     {"_ZSt11_Hash_bytesPKvmm", false},
     {"_ZNSaIcEC2ERKS_", false},
     {"_ZNSaIcED2Ev", false},
+    // basic_string destructor + append: these call operator delete (intercepted
+    // by handleMallocFree) and do not modify TM-shared memory directly.
+    {"_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEED1Ev", false},
+    {"_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6appendEPKc", false},
 };
 
 // Syscall-related symbols — these are safe inside transactions because

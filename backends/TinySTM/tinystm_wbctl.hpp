@@ -351,8 +351,6 @@ read_word_ctl(                                                //
 	auto w = tx->write_set.find(addr);
 	if (w != tx->write_set.end()) {
 		if (w->second.type == sz) {
-			fprintf(stderr, "TRACE write_set_hit(%p) sz=%d/%d val.u8=%llu\n",
-			        addr, (int)sz, (int)w->second.type, (unsigned long long)w->second.new_val.u8);
 			return w->second.new_val;
 		}
 		// POINTER and UINT64 are both 8 bytes and share storage in any_type_t
@@ -576,9 +574,6 @@ read_from_memory:
 
 		any_type_t val = {.u8 = value.u8};
 
-		fprintf(stderr, "TRACE read_from_memory(%p) sz=%d val.u8=%llu (l=%llx)\n",
-		        addr, (int)sz, (unsigned long long)val.u8, (unsigned long long)l);
-
 		ReadLogEntry_wbctl r;
 		r.addr = addr;
 		r.observed_version = version;
@@ -620,11 +615,16 @@ write_word_ctl(                                               //
 		thread_local void *s_stack_base = nullptr;
 		thread_local size_t s_stack_size = 0;
 		if (!s_stack_init) {
+#if defined(__APPLE__)
+			s_stack_base = pthread_get_stackaddr_np(pthread_self());
+			s_stack_size = pthread_get_stacksize_np(pthread_self());
+#else
 			pthread_attr_t attr;
 			if (pthread_getattr_np(pthread_self(), &attr) == 0) {
 				pthread_attr_getstack(&attr, &s_stack_base, &s_stack_size);
 				pthread_attr_destroy(&attr);
 			}
+#endif
 			s_stack_init = true;
 		}
 		if (s_stack_base) {
@@ -850,13 +850,11 @@ tm_read_i4(        //
     uint32_t *addr //
 )
 {
-	uint32_t v = tm_read<uint32_t,
+	return tm_read<uint32_t,
 	               ValueType::UINT32,
 	               ReadLogEntry_wbctl,
 	               WriteLogEntry_wbctl,
 	               read_word_ctl>(current_tx_wbctl, addr);
-	fprintf(stderr, "TRACE tm_read_i4(%p) = %u\n", (void*)addr, v);
-	return v;
 }
 
 inline uint64_t    //
@@ -900,13 +898,11 @@ tm_read_ptr(    //
     void **addr //
 )
 {
-	void *v = tm_read<void *,
-    ValueType::POINTER,
-               ReadLogEntry_wbctl,
-               WriteLogEntry_wbctl,
-               read_word_ctl>(current_tx_wbctl, addr);
-	fprintf(stderr, "TRACE tm_read_ptr(%p) = %p\n", (void*)addr, (void*)v);
-	return v;
+	return tm_read<void *,
+	               ValueType::POINTER,
+	               ReadLogEntry_wbctl,
+	               WriteLogEntry_wbctl,
+	               read_word_ctl>(current_tx_wbctl, addr);
 }
 
 inline void        //
