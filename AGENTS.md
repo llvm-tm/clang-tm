@@ -362,43 +362,55 @@ For 10000 elements, the byte-level memmove expansion inside `_S_do_relocate` cre
 The reproducer crash is the STMbench7 bad_alloc pattern confirmed with a minimal test case. Root cause remains under investigation — suspected runtime data structure corruption during vector reallocation inside TX (element-by-element `construct_at`/`destroy_at` generating millions of TM operations).
 
 ## Next up
-### Root cause investigation plan (backtrace / valgrind access needed)
+### Root cause investigation plan
 
-**Step 1: Narrow with `-O0` on `.instr.bc`**
-```bash
-# Rebuild .instr.bc with no post-pass optimization
-cd benchmarks/test/minimal_repro
-../../../llvm_tm_plugin/clang-tm --compile-only -std=c++20 -O0 \
-  -pthread -fno-inline repro2.cpp -o /tmp/repro2.bc
-../../../llvm_tm_plugin/clang-tm --instrument-only \
-  --plugin=../../../llvm_tm_plugin/bin/libTMInstrument.so \
-  -passes="tm-instrument" /tmp/repro2.bc -o /tmp/repro2.instr.bc
-# Link with NOrec runtime at -O0
-../../../llvm_tm_plugin/clang-tm --link-only -O0 --runtime \
-  ../../../backends/runtimes/NOrec_runtime.cpp \
-  -I../../../backends/NOrec -I../../../backends \
-  /tmp/repro2.instr.bc -o /tmp/repro2_norec_O0
-lldb -b -o "run" -o "bt all" -o "frame variable" -o "quit" \
-  /tmp/repro2_norec_O0 -- 5
-```
-If the crash reproduces at `-O0`, optimizer interactions are ruled out.
-
-**Step 2: Trace the corrupted `addr=0x100` in NOrec**
-Check which instrumented load produces `addr=0x100`. Add assertion in `read_word_norec`:
-```cpp
-assert((uintptr_t)addr > 0x100000 && "read_word_norec: suspicious low address");
-```
-Or add a crash-catching wrapper:
+**Step 1: Catch the first corrupted address in NOrec (highest value)**
+The NOrec crash at `addr=0x100` gives us a direct clue. Add this crash-catcher at the top of `read_word_norec` in `NOrec.hpp`:
 ```cpp
 if ((uintptr_t)addr < 0x100000) {
-    fprintf(stderr, "FATAL: read_word_norec(%p) from tx function: ", addr);
-    backtrace_symbols_fd(backtrace(frames, 64), 64);
+    fprintf(stderr, "FATAL: read_word_norec(%p) sz=%d from ", addr, (int)sz);
+    void *frames[64]; int n = backtrace(frames, 64);
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    fprintf(stderr, "  tx->snapshot=%llu read_set.size=%zu write_set.size=%zu\n",
+            (unsigned long long)tx->snapshot, tx->read_set.size(), tx->write_set.size());
     _exit(1);
 }
 ```
+This will immediately show:
+- Which LLVM-instrumented source line is passing the corrupted address
+- Whether the write-set or read-set is already corrupted (size or snapshot garbage)
+- Whether the corrupted address came from memory (stale heap pointer) or was computed
 
-**Step 3: Find the first invalid write-set entry in WBCTL**
-WBCTL's hang (single-threaded, no contention) suggests a corrupted clock or a lock-word loop in `extend()`. Add in `write_word_ctl`:
+**Step 2: Trace the first N `tm_read_ptr`/`tm_read_i4` calls**
+Add a static atomic counter in `tm_read_ptr` and `tm_read_i4` in `NOrec.hpp` to log the first 100 calls:
+```cpp
+static std::atomic<int> dbg_cnt{0};
+int c = dbg_cnt.fetch_add(1);
+if (c < 100) {
+    fprintf(stderr, "TRACE tm_read_ptr #%d: addr=%p tx=%p rs=%zu ws=%zu snap=%llu\n",
+            c, (void*)addr, (void*)tx, tx->read_set.size(), tx->write_set.size(),
+            (unsigned long long)tx->snapshot);
+}
+```
+This shows whether vector internal pointers (`__begin_`, `__end_`, `__end_cap_`) are returning valid values, and whether the write-set actually has entries for those addresses. A write-set size of 0 after the first push_back means the TM hooks are never called.
+
+**Step 3: Valgrind (Linux only — fastest path to root cause)**
+```bash
+valgrind --tool=memcheck --track-origins=yes \
+  ./bin/test_repro_norec 5 2>&1 | head -100
+```
+The first "Invalid read/write" is the root cause — check whether it's:
+- Accessing a freed read_set/write_set buffer (runtime data structure corruption)
+- Dereferencing a freed vector internal buffer (stale `__begin_` pointing to freed memory)
+- Reading from a stack address that went out of scope
+
+**Step 4: Verify `_tm_clone` functions survived linking**
+```bash
+nm -a bin/test_repro_norec | grep _tm_clone | head -20
+```
+If zero, the instrumented clones vanished during `-O1` optimization and raw reads/writes go to memory without TM tracking — TX abort then frees speculated memory while write-through state still references it.
+
+**Step 5: WBCTL hang — catch the first invalid write-set entry**
 ```cpp
 if (g_clock.load() == 0) {
     fprintf(stderr, "FATAL: g_clock=0 at write_word_ctl(%p)\n", addr);
@@ -406,38 +418,34 @@ if (g_clock.load() == 0) {
     _exit(1);
 }
 ```
-
-**Step 4: `read_set`/`write_set` reallocation corruption hypothesis**
-If the `std::unordered_map` or `std::vector` backing the read-set/write-set gets reallocated inside the TX (because `tm_malloc`/`tm_free` calls inside element constructors/destructors trigger the runtime's own container resizing), then the runtime's internal data structures reference freed memory.
-
-Mitigation: pre-allocate read_set/write_set capacity at `begin()`:
+If `g_clock` is zero, someone corrupted the global clock. If `g_clock` is fine, the hang is in the validation loop — add a counter to `extend()`:
 ```cpp
-void begin() {
-    tx->read_set.reserve(65536);
-    tx->write_set.reserve(65536);
-    // ...
+if (tx->extend_count++ > 1000000) {
+    fprintf(stderr, "FATAL: extend loop detected at addr=%p\n", addr);
+    _exit(1);
 }
 ```
 
-**Step 5: Valgrind (Linux) or LeakSanitizer**
-```bash
-valgrind --tool=memcheck --track-origins=yes \
-  ./bin/test_repro_norec 5 2>&1 | head -100
-```
-Focus on "Invalid read/write" errors — the first one is the root cause. Check:
-- Does the read_set or write_set container access freed memory?
-- Does `tm_read_ptr` on a vector's `__begin_` return a pointer to freed buffer?
-- Is the issue in the runtime's `std::unordered_map` (write_set) being corrupted?
-
-**Step 6: SwissTM specific — orec table corruption**
-SwissTM uses a hash of `addr` to select an ownership record. If the hash table is corrupted (e.g., `read_orecs` vector reallocates while holding raw pointers), `read_impl` accesses freed orecs. Add bounds check:
+**Step 6: Write-set/read-set type mismatch detection**
+Add a check in NOrec's `read_word_norec` for when the write-set has entries at `addr` but none with matching type:
 ```cpp
-void *orec = &orec_table[hash(addr) % orec_table.size()];
-assert(orec >= &orec_table[0] && orec < &orec_table[0] + orec_table.size());
+bool has_entry = false;
+for (auto &w : tx->write_set)
+    if (w.addr == addr) has_entry = true;
+if (has_entry) {
+    // Entry exists but no matching type — could be UINT64 entry hiding
+    // from a POINTER read.  Return the UINT64 value cast to POINTER.
+    for (auto &w : tx->write_set)
+        if (w.addr == addr && w.type == ValueType::UINT64) {
+            if (c < 100) fprintf(stderr, "TRACE: POINTER fallback from UINT64 at %p\n", addr);
+            any_type_t v; v.u8 = w.new_val.u8; return v;
+        }
+}
 ```
 
-### Suspect priority list
-1. **Runtime data-structure reallocation inside TM ops** (highest priority) — `read_set`, `write_set`, `owned_orecs`, `write_log` use STL containers that may realloc during `begin()` or the `tm_*` call itself, creating ABA issues with raw pointers.
-2. **`_tm_clone` function vanishing at -O1** — verify `nm -a bin/test_repro_norec | grep _tm_clone` to confirm instrumented clones survived linking. If zero, the TM hooks never execute.
-3. **Write-set/read-set type mismatch** — sub-word writes (UINT8 from `memcpy` expansion) invisible to wider reads (POINTER/UINT64). NOrec and SwissTM lack the byte-merge logic that WBCTL has.
-4. **Stack-address writes corrupting heap state** — if the stack-detection in `write_word_ctl` is too aggressive (false-positive on macOS `pthread_get_stackaddr_np`), TM writes to heap addresses are silently turned into raw stores.
+### Suspect priority list (revised)
+1. **Corrupted address from memory (highest)** — a `tm_read_ptr` on a vector's `__begin_` returns a pointer to freed heap (spec_alloc freed on earlier TX abort). The TX retries but the vector's internal pointer still references freed memory. Step 1 catches this.
+2. **`_tm_clone` functions absent from binary** — no TM hooks execute, raw stack/heap reads/writes bypass write-set, TX abort frees memory while write-through state references it. Step 4 catches this.
+3. **Write-set/read-set type mismatch** — UINT64 entries from `memcpy`/`memset` expansion invisible to POINTER reads in NOrec/SwissTM (WBCTL has byte-merge). Step 6 catches this.
+4. **Runtime data-structure reallocation inside TM ops** — `read_set`/`write_set` use STL containers that may realloc during `begin()` or `tm_*` calls, but this is **unlikely** because the runtime is compiled separately without the TM plugin — its containers use the standard heap, not `tm_malloc`.
+5. **Stack-address detection false-positive on macOS** — `pthread_get_stackaddr_np` may return wrong bounds, causing `write_word_ctl` to silently use raw stores on heap addresses. Only affects WBCTL. Check by comparing stack detection result against `__builtin_frame_address(0)`.
