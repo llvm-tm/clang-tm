@@ -263,6 +263,10 @@ read_word_etl(                                                //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
+	// Stack-address detection
+	if (isStackAddress(addr))
+		return read_value_from_addr(addr, sz);
+
 	// Check write-set for this exact address
 	auto w = tx->write_set.find(addr);
 	if (w != tx->write_set.end()) {
@@ -363,6 +367,12 @@ write_word_etl(                                               //
 
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
+
+	// Stack-address detection
+	if (isStackAddress(addr)) {
+		write_value_to_addr(addr, val, sz);
+		return;
+	}
 
 	if (tx->aborted)
 		return;

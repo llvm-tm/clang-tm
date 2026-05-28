@@ -217,10 +217,17 @@ extern "C" void tm_memset(uint8_t *addr, uint8_t val, uint64_t len) {
 extern "C" void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
 
-extern "C" void* tm_malloc(size_t size) { void* p = malloc(size); tm_track_spec_alloc(p); return p; }
-extern "C" void* tm_calloc(size_t nmemb, size_t size) { void* p = calloc(nmemb, size); tm_track_spec_alloc(p); return p; }
-extern "C" void* tm_realloc(void* ptr, size_t size) { void* p = realloc(ptr, size); tm_track_spec_alloc(p); return p; }
+extern "C" void* tm_malloc(size_t size) { void* p = ::operator new(size); tm_track_spec_alloc(p); return p; }
+extern "C" void* tm_calloc(size_t nmemb, size_t size) { void* p = ::operator new(nmemb * size); memset(p, 0, nmemb * size); tm_track_spec_alloc(p); return p; }
+extern "C" void* tm_realloc(void* ptr, size_t size) { void* p = ::operator new(size); if (ptr) { memcpy(p, ptr, size); ::operator delete(ptr); } tm_track_spec_alloc(p); return p; }
 extern "C" void  tm_free(void* ptr) {
+    if (!ptr) return;
+    // Safety: stack addresses must never be deferred-freed or delete'd.
+    // TM writes to stack-allocated objects are trapped by isStackAddress
+    // in the backend, but the plugin may still pass stack pointers to
+    // tm_free on some code paths (e.g., STL temporary vectors on stack
+    // whose internal pointers were set to stack addresses by optimization).
+    if (stm::isStackAddress(ptr)) return;
     if (g_in_tx) {
         // Detect double-free: same pointer freed twice in the same TX
         if (g_deferred_frees_set.count(ptr)) {
@@ -238,7 +245,7 @@ extern "C" void  tm_free(void* ptr) {
         node->next = g_deferred_frees;
         g_deferred_frees = node;
     } else {
-        ::free(ptr);
+        ::operator delete(ptr);
     }
 }
 

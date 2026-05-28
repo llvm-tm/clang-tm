@@ -181,7 +181,7 @@ inline void tm_flush_deferred_frees()
     while (node) {
         auto* next = node->next;
         ::operator delete(node->ptr);  // user data (tm_malloc'd)
-        ::operator delete(node);       // FreeNode bookkeeping
+        std::free(node);               // FreeNode bookkeeping (::malloc'd)
         node = next;
     }
     g_deferred_frees = nullptr;
@@ -197,7 +197,7 @@ inline void tm_clear_deferred_frees()
     auto* node = g_deferred_frees;
     while (node) {
         auto* next = node->next;
-        ::operator delete(node);   // free the FreeNode, NOT the user pointer
+        std::free(node);   // free the FreeNode (::malloc'd), NOT the user pointer
         node = next;
     }
     g_deferred_frees = nullptr;

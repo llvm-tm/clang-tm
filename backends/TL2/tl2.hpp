@@ -18,6 +18,7 @@
 #include <vector>
 #include <string.h>
 #include <csetjmp>
+#include "../tm_common.hpp"
 #include <type_traits>
 
 namespace tl2 {
@@ -303,6 +304,9 @@ public:
         std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
 
+        // Stack-address detection
+        if (stm::isStackAddress((void*)addr)) { *addr = val; return; }
+
         // Real byte width of each DataType (NOT dtype_size(), which returns
         // 4 for PTR but PTR write-back writes 8 bytes as word_t).
         auto dataWidth = [](DataType dt) -> unsigned {
@@ -318,22 +322,15 @@ public:
             }
         };
 
+        // Step 1: One entry per address — if any entry already exists at this
+        // address (any type), reuse it by updating dtype and new_value. The
+        // old_value stays (captured from original memory on first write),
+        // preventing rollback from restoring a stale intermediate value.
         for (auto& e : tx->write_set) {
-            if (e.addr == (word_t*)addr && e.dtype == DT) {
+            if (e.addr == (word_t*)addr) {
+                e.dtype = DT;
                 e.set_new(to_word(val));
                 return;
-            }
-        }
-
-        // If a wider (or equal-width) entry already covers this address, skip
-        // (prevents narrower writes from partially overwriting a wider
-        // write-back at commit).
-        unsigned sz_bytes = dataWidth(DT);
-        for (auto& e : tx->write_set) {
-            if (e.addr == (word_t*)addr && e.dtype != DT) {
-                if (dataWidth(e.dtype) >= sz_bytes) {
-                    return; // existing wider entry covers this address
-                }
             }
         }
 
@@ -373,6 +370,10 @@ public:
     template <typename T, DataType DT, typename AddrT>
     static T read_impl(Transaction* tx, AddrT addr) {
         if (!tx || !tx->active) return from_word<T>(to_word(*addr));
+
+        // Stack-address detection
+        if (stm::isStackAddress((void*)addr))
+            return from_word<T>(to_word(*addr));
 
         if (bloom_might_contain(tx, (word_t*)addr)) {
             for (auto& e : tx->write_set) {
@@ -505,8 +506,6 @@ public:
                     *(word_t*)e.addr = e.new_value();
                     break;
             }
-            
-            // Release lock: store version number (unlocked state per TL2 spec)
             word_t idx = get_guard_idx(e.addr);
             g_guards[idx].store((tx->commit_version << 1) & VERSION_MASK, std::memory_order_release);
         }
@@ -519,6 +518,38 @@ public:
         if (!tx) return;
         
         for (auto& e : tx->write_set) {
+            // Restore old value before releasing lock. TL2 is write-through
+            // (writes applied to memory during commit), so on abort we must
+            // undo any writes that may have been applied before the abort.
+            switch (e.dtype) {
+                case DataType::UINT8:
+                    *(uint8_t*)e.addr = (uint8_t)e.old_value();
+                    break;
+                case DataType::UINT16:
+                    *(uint16_t*)e.addr = (uint16_t)e.old_value();
+                    break;
+                case DataType::UINT32:
+                    *(uint32_t*)e.addr = (uint32_t)e.old_value();
+                    break;
+                case DataType::FLOAT:
+                {
+                    uint32_t bits = (uint32_t)e.old_value();
+                    *(float*)e.addr = *(float*)&bits;
+                }
+                    break;
+                case DataType::UINT64:
+                    *(uint64_t*)e.addr = (uint64_t)e.old_value();
+                    break;
+                case DataType::DOUBLE:
+                {
+                    uint64_t bits = e.old_value();
+                    *(double*)e.addr = *(double*)&bits;
+                }
+                    break;
+                case DataType::PTR:
+                    *(word_t*)e.addr = e.old_value();
+                    break;
+            }
             release_guard(e.addr);
         }
         

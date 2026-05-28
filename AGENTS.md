@@ -443,9 +443,68 @@ if (has_entry) {
 }
 ```
 
-### Suspect priority list (revised)
-1. **Corrupted address from memory (highest)** — a `tm_read_ptr` on a vector's `__begin_` returns a pointer to freed heap (spec_alloc freed on earlier TX abort). The TX retries but the vector's internal pointer still references freed memory. Step 1 catches this.
-2. **`_tm_clone` functions absent from binary** — no TM hooks execute, raw stack/heap reads/writes bypass write-set, TX abort frees memory while write-through state references it. Step 4 catches this.
-3. **Write-set/read-set type mismatch** — UINT64 entries from `memcpy`/`memset` expansion invisible to POINTER reads in NOrec/SwissTM (WBCTL has byte-merge). Step 6 catches this.
-4. **Runtime data-structure reallocation inside TM ops** — `read_set`/`write_set` use STL containers that may realloc during `begin()` or `tm_*` calls, but this is **unlikely** because the runtime is compiled separately without the TM plugin — its containers use the standard heap, not `tm_malloc`.
-5. **Stack-address detection false-positive on macOS** — `pthread_get_stackaddr_np` may return wrong bounds, causing `write_word_ctl` to silently use raw stores on heap addresses. Only affects WBCTL. Check by comparing stack detection result against `__builtin_frame_address(0)`.
+## ROOT CAUSE FOUND (2026-05-28)
+
+### Root cause investigation
+All 6 steps of the investigation plan implemented. Results:
+
+**Step 1 (corrupted address catcher)**: Triggered for `addr=0x100000008` — a corrupt pointer slightly above the 1MB threshold. Tightened threshold to 32MB.
+
+**Step 2 (trace first 100 reads)**: Revealed the exact read pattern — ALL `tm_read_ptr` calls are for STACK addresses (0x7ffe...) or for heap addresses affected by type mismatches. The stack-local `CompositePart cp` is being instrumented for every load/store.
+
+**Step 3 (valgrind)**: Confirmed the error chain:
+```
+Uninitialised value was created by a stack allocation
+    at create_composite  ← CompositePart cp; on stack
+```
+→ `read_word_norec` reads uninitialized stack via `read_value_from_addr`
+→ `memset` writes through corrupted pointer → SIGSEGV `Address 0x6d7420454341525c` (ASCII text = corrupted pointer from uninitialized data)
+
+**Step 4 (nm)**: 0 instrumented `_tm_clone` symbols (stripped/linked away). But `objdump` confirms 495 `call.*tm_` instructions exist — TM hooks survive as inlined code. **This is NOT the crash cause.**
+
+**Step 5 (WBCTL g_clock+extend)**: g_clock check didn't fire. Extend loop didn't fire. WBCTL crashes with same double-free.
+
+**Step 6 (type mismatch in NOrec)**: **Massively triggering** — reveals the core mechanism:
+```
+TRACE: read_word_norec type-mismatch at 0x7ffe73346a90 (sz=7) — falling through to memory
+TRACE: read_word_norec type-mismatch at 0x5b38d15db400 (sz=1) — falling through to memory
+```
+POINTER reads (sz=7) at stack addresses find UINT8 entries (from memmove byte-level expansion). UINT8 reads at heap addresses find... nothing matching.
+
+### CORRECTED root cause
+
+**Chain of causation:**
+
+1. **Always-instrument policy instruments stack-local variables** → `CompositePart cp` on the stack has ALL field stores instrumented via `tm_write_*`, creating stack-address write-set entries.
+
+2. **Byte-level `llvm.memmove` expansion** → During vector reallocation (`_S_do_relocate`), element-by-element copying goes through `llvm.memmove`, which the plugin expands as byte-level `tm_write_i1`/`tm_read_i1` calls, creating UINT8 entries at EVERY BYTE of the struct (e.g., 24 UINT8 entries for a 24-byte vector).
+
+3. **UINT8 entries hide typed entries from write-set scans** → `read_word_norec` scans the write_set for entries matching BOTH `type==sz && addr==addr`. A POINTER read (sz=7) at a pointer-field address finds only UINT8 entries (sz=1) — type mismatch → falls through to `read_value_from_addr(addr, sz)` which reads from MEMORY.
+
+4. **NOrec is write-back (doesn't update memory)** → Memory has STALE values. For write-back NOrec, the actual memory is never updated during the TX. The `read_value_from_addr` returns the ORIGINAL uninitialized stack value or a stale heap pointer.
+
+5. **Stale/uninitialized pointers get used** → The destructor reads a stale pointer via fall-through → tries to free it → double-free detected by `g_deferred_frees_set`. Or the stale pointer is used as a target for `memset` → SIGSEGV.
+
+### Why WBCTL also crashes (different mechanism)
+WBCTL has stack-address detection on WRITES (bypasses TM for stack stores) + POINTER↔UINT64 interchange + byte-merge. BUT:
+- **Reads from stack are NOT bypassed** — `read_word_ctl` does NOT have stack-address detection. It goes through the full lock-acquire/version-check protocol for stack addresses.
+- The lock for a stack address may have a version > tx->end_version → `extend()` → `validate()` →
+- `validate()` scans the read_set and checks if locks have changed. Stack-address entries in the read_set don't correspond to real shared locks → validation may fail → `abort_tx()` → retry with stale stack values from first attempt.
+
+### What was ruled out
+- **`_tm_clone` not surviving**: FALSE — 495 `tm_*` calls confirmed in final binary
+- **Corrupted heap pointer**: FALSE — the first reads are all to stack addresses (valid stack region)
+- **Concurrency bug**: FALSE — single-threaded reproducer crashes at n=5
+
+### Fix strategy
+The fundamental issue is that **stack-local variables inside TX functions must not be instrumented**. Three existing mechanisms should handle this but don't:
+1. `argIsAllocaDest` — only handles reference parameters that ALWAYS receive alloca addresses. Fails for direct stack locals.
+2. `isEscapedAlloca` — checks if ALLOCA escapes as an argument, but the local `cp` is used directly (not passed to sub-functions).
+3. Runtime stack detection in `write_word_ctl` — only handles WRITES, not reads. Not present in NOrec at all.
+
+**Required fixes:**
+1. **Extend `isEscapedAlloca` / similar** to detect stack variables that never escape the TX function → skip TM instrumentation for their loads/stores.
+2. **Add stack-address detection to reads** in ALL backends (NOrec, SwissTM, TL2, WBCTL) — when reading from a stack address, bypass TM and read directly from memory.
+3. **Change memmove to 8-byte operations** (like memset was fixed) so `_S_do_relocate` produces UINT64 entries that can be interchanged with POINTER/UINT32 reads.
+
+**Alternative fix**: Mark the local struct with `tm_local` annotation. Test: `__attribute__((annotate("tm_local"))) CompositePart cp;` would skip TM instrumentation for all stores/loads to `cp`'s fields.

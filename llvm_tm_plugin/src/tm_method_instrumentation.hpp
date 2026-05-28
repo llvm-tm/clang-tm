@@ -184,28 +184,52 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M, const TMRuntime
 		Value *RNext = RBB.CreateAdd(RIdx, ConstantInt::get(LenTy, 1));
 		RIdx->addIncoming(RNext, RemLB);
 		RBB.CreateBr(RemLE);
-	} else {
-		// Memcpy/memmove: byte-level loop
-		BasicBlock *LoopEntry = BasicBlock::Create(Ctx, "mem_loop_entry", F, ContBB);
-		BasicBlock *LoopBody = BasicBlock::Create(Ctx, "mem_loop_body", F, ContBB);
-
-		OrigBB->getTerminator()->eraseFromParent();
-		IRBuilder<>(OrigBB).CreateBr(LoopEntry);
-
-		IRBuilder<> EB(LoopEntry);
-		PHINode *Idx = EB.CreatePHI(LenTy, 2, "mem_idx");
-		Idx->addIncoming(ConstantInt::get(LenTy, 0), OrigBB);
-		EB.CreateCondBr(EB.CreateICmpEQ(Idx, Len), ContBB, LoopBody);
-
-		IRBuilder<> BB(LoopBody);
-		Value *DG = BB.CreateGEP(i8Ty, Dst, Idx);
-		Value *SG = BB.CreateGEP(i8Ty, SrcOrVal, Idx);
-		BB.CreateCall(H.write_i1,
-		              {DG,
-		               BB.CreateCall(H.read_i1, {SG})});
-		Idx->addIncoming(BB.CreateAdd(Idx, ConstantInt::get(LenTy, 1)), LoopBody);
-		BB.CreateBr(LoopEntry);
-	}
+ 	} else {
+ 		// Memcpy/memmove: 8-byte chunk loop producing UINT64 write-set entries
+ 		// so that subsequent POINTER reads can find pointer field values via
+ 		// type interchange (POINTER ↔ UINT64) in eager-locking backends.
+ 		Constant *Eight = ConstantInt::get(LenTy, 8);
+ 
+ 		BasicBlock *LoopEntry = BasicBlock::Create(Ctx, "mem_loop_entry", F, ContBB);
+ 		BasicBlock *LoopBody = BasicBlock::Create(Ctx, "mem_loop_body", F, ContBB);
+ 		BasicBlock *RemEntry = BasicBlock::Create(Ctx, "mem_rem_entry", F, ContBB);
+ 		BasicBlock *RemBody = BasicBlock::Create(Ctx, "mem_rem_body", F, ContBB);
+ 
+ 		OrigBB->getTerminator()->eraseFromParent();
+ 		IRBuilder<> OrigB(OrigBB);
+ 		Value *Remainder = OrigB.CreateURem(Len, Eight, "mem_rem");
+ 		Value *AlignedMax = OrigB.CreateSub(Len, Remainder, "aligned_max");
+ 		OrigB.CreateBr(LoopEntry);
+ 
+ 		// 8-byte aligned loop: reads from source, writes to destination
+ 		IRBuilder<> EB(LoopEntry);
+ 		PHINode *AIdx = EB.CreatePHI(LenTy, 2, "mem_ai");
+ 		AIdx->addIncoming(ConstantInt::get(LenTy, 0), OrigBB);
+ 		EB.CreateCondBr(EB.CreateICmpEQ(AIdx, AlignedMax), RemEntry, LoopBody);
+ 
+ 		IRBuilder<> BB(LoopBody);
+ 		Value *DG = BB.CreateGEP(i8Ty, Dst, AIdx);
+ 		Value *SG = BB.CreateGEP(i8Ty, SrcOrVal, AIdx);
+ 		Value *ReadVal = BB.CreateCall(H.read_i8, {SG});
+ 		BB.CreateCall(H.write_i8, {DG, ReadVal});
+ 		Value *ANext = BB.CreateAdd(AIdx, Eight);
+ 		AIdx->addIncoming(ANext, LoopBody);
+ 		BB.CreateBr(LoopEntry);
+ 
+ 		// Remainder bytes loop
+ 		IRBuilder<> REB(RemEntry);
+ 		PHINode *RIdx = REB.CreatePHI(LenTy, 2, "mem_ri");
+ 		RIdx->addIncoming(AlignedMax, LoopEntry);
+ 		REB.CreateCondBr(REB.CreateICmpEQ(RIdx, Len), ContBB, RemBody);
+ 
+ 		IRBuilder<> RBB(RemBody);
+ 		Value *RDG = RBB.CreateGEP(i8Ty, Dst, RIdx);
+ 		Value *RSG = RBB.CreateGEP(i8Ty, SrcOrVal, RIdx);
+ 		RBB.CreateCall(H.write_i1, {RDG, RBB.CreateCall(H.read_i1, {RSG})});
+ 		Value *RNext = RBB.CreateAdd(RIdx, 		ConstantInt::get(LenTy, 1));
+ 		RIdx->addIncoming(RNext, RemBody);
+ 		RBB.CreateBr(RemEntry);
+  	}
 	// NOTE: Call is NOT erased here — the caller handles erasure
 	// (it is now dead code, reachable only via splitBasicBlock debris;
 	//  the post-instrumentation -O3 pass removes it).  This avoids
