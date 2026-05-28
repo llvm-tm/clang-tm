@@ -11,6 +11,7 @@
 #include "tm_annotation_utils.hpp"
 #include "tm_debug.hpp"
 #include "tm_local_vars.hpp"
+#include "tm_platform.hpp"
 #include "tm_runtime_hooks.hpp"
 #include "tm_thread_guard.hpp"
 #include "tm_thread_symbols.hpp"
@@ -32,8 +33,7 @@ struct ModulePassContext {
 static ModulePassContext setupModulePass(Module &M)
 {
     LLVMContext &Ctx = M.getContext();
-    const char *SetjmpFunc = M.getTargetTriple().str().find("linux") != std::string::npos
-                               ? "__sigsetjmp" : "sigsetjmp";
+    const char *SetjmpFunc = tm_platform::sigsetjmpName(M);
     ModulePassContext CtxOut;
     CtxOut.H = TMRuntimeHooks::declareAll(M, Ctx, SetjmpFunc);
     Type *i8Ty = Type::getInt8Ty(Ctx);

@@ -46,6 +46,7 @@
 #include "tm_instrument_helpers.hpp"
 #include "tm_local_vars.hpp"
 #include "tm_method_instrumentation.hpp"
+#include "tm_platform.hpp"
 #include "tm_runtime_hooks.hpp"
 #include "tm_thread_guard.hpp"
 #include "tm_thread_symbols.hpp"
@@ -307,9 +308,7 @@ public:
     }
     Module *M = F.getParent();
     LLVMContext &Ctx = M->getContext();
-    const char *SetjmpFunc = M->getTargetTriple().str().find("linux") != std::string::npos
-                               ? "__sigsetjmp" : "sigsetjmp";
-    auto H = TMRuntimeHooks::declareAll(*M, Ctx, SetjmpFunc);
+    auto H = TMRuntimeHooks::declareAll(*M, Ctx, tm_platform::sigsetjmpName(*M));
 
     if (TMAudit) auditTXFunctionLoadsStores(F, *M);
 
