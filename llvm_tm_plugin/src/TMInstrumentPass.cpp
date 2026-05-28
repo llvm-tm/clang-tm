@@ -498,6 +498,12 @@ public:
 #endif
       }
     }
+    // Instrument memory intrinsics AFTER all loops (they split basic blocks,
+    // which would invalidate the instruction iterators above).
+    for (auto *Call : MemIntrinsics) {
+        tm_method_instrumentation::instrumentMemoryIntrinsic(Call, *M, H);
+        ToErase.push_back(Call);
+    }
     for (Instruction *I : ToErase) I->eraseFromParent();
     return PreservedAnalyses::none();
   }

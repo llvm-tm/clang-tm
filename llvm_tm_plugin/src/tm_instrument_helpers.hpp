@@ -432,8 +432,21 @@ static bool handleLoadStore(Instruction *I, Function &F, Module &M,
     // load i32 (reads stale memory).  getBaseObjectNoLoad stops at LoadInst,
     // treating the loaded value as the base (a heap address), which is
     // correctly instrumented.
+    // Skip TLS globals — they are thread-private runtime state (e.g.,
+    // tm_nested_call_counter, tm_longjmp_ret) that must use raw loads/stores.
+    // Routing them through tm_read/tm_write would fail in backends that
+    // validate tx->active (NOrec), since reads/writes to these globals
+    // happen before tm_begin() and after tm_end().
+    auto isTLSGlobal = [](Value *Ptr) -> bool {
+        if (auto *GV = dyn_cast<GlobalVariable>(getBaseObjectNoLoad(Ptr)))
+            return GV->isThreadLocal();
+        return false;
+    };
+
     if (auto *Load = dyn_cast<LoadInst>(I)) {
         Value *Ptr = Load->getPointerOperand();
+        if (isTLSGlobal(Ptr))
+            return false;
         if (auto *AI = dyn_cast<AllocaInst>(getBaseObjectNoLoad(Ptr))) {
             if (!isEscapedAlloca(AI, &F))
                 return false;
@@ -450,6 +463,8 @@ static bool handleLoadStore(Instruction *I, Function &F, Module &M,
         }
     } else if (auto *Store = dyn_cast<StoreInst>(I)) {
         Value *Ptr = Store->getPointerOperand();
+        if (isTLSGlobal(Ptr))
+            return false;
         if (isa<AllocaInst>(getBaseObjectNoLoad(Ptr)))
             return false;
         if (tracesFromAlloca(Ptr, M))

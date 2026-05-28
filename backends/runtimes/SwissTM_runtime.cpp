@@ -5,13 +5,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <execinfo.h>
 #include <mutex>
+#include <unistd.h>
+#include <unordered_set>
 
 #include "../SwissTM/SwissTM.hpp"
 #include "../tm_alloc_overrides.hpp"
 
 thread_local bool g_in_tx = false;
 thread_local FreeNode* g_deferred_frees = nullptr;
+thread_local std::unordered_set<void*> g_deferred_frees_set;
 thread_local SpecAlloc* g_spec_allocs = nullptr;
 
 extern "C" {
@@ -234,7 +238,17 @@ void* tm_calloc(size_t nmemb, size_t size) { void* p = calloc(nmemb, size); tm_t
 void* tm_realloc(void* ptr, size_t size) { void* p = realloc(ptr, size); tm_track_spec_alloc(p); return p; }
 void  tm_free(void* ptr) {
     if (g_in_tx) {
+        // Detect double-free: same pointer freed twice in the same TX
+        if (g_deferred_frees_set.count(ptr)) {
+            fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
+            void* buf[64];
+            int n = backtrace(buf, 64);
+            backtrace_symbols_fd(buf, n, 2);
+            fflush(stderr);
+            _exit(1);
+        }
         tm_untrack_spec_alloc(ptr);
+        g_deferred_frees_set.insert(ptr);
         auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));
         node->ptr = ptr;
         node->next = g_deferred_frees;

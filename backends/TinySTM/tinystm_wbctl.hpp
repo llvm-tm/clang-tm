@@ -597,35 +597,6 @@ write_word_ctl(                                               //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
-	// Discard writes to invalid addresses (e.g., nullptr or stack offsets
-	// that escape via integer arithmetic).  This can happen when the TX
-	// function evaluates a pointer-to-integer expression for a local
-	// variable — the resulting integer looks like a tiny address.
-	// Track writes to global g_vec for debugging reallocation issues.
-	{
-		static uintptr_t s_gvec = 0;
-		if (!s_gvec) {
-			Dl_info di;
-			if (dladdr((void *)&tinystm::write_word_ctl, &di) && di.dli_fbase) {
-				uintptr_t base = (uintptr_t)di.dli_fbase;
-				s_gvec = base + 0x54df8;
-			}
-		}
-		if (s_gvec) {
-			uintptr_t ua = (uintptr_t)addr;
-			if (ua >= s_gvec && ua < s_gvec + 0x100) {
-				static std::atomic<int> g_gv_once{0};
-				if (g_gv_once.fetch_add(1) < 40) {
-					Dl_info ai;
-					const char *sym = nullptr;
-					if (dladdr(addr, &ai) && ai.dli_sname) sym = ai.dli_sname;
-					long long off = (long long)(ua - s_gvec);
-					fprintf(stderr, "\n[DBG g_vec WRITE] addr=%p off=%+lld sym=%s type=%d val.u8=0x%llx\n",
-					        addr, off, sym ? sym : "?", (int)sz, (unsigned long long)val.u8);
-				}
-			}
-		}
-	}
 
 	if (addr == nullptr || (uint64_t)addr < 0x100000) {
 		return;

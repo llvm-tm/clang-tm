@@ -213,34 +213,56 @@ public:
         word_t* waddr = get_word_addr(addr);
         OwnershipRecord* orec = get_orec(waddr);
 
-        {
-            auto idx_it = tx->write_log_index.find(addr);
-            if (idx_it != tx->write_log_index.end() && idx_it->second->type == VT) {
-                WriteLogEntry* e = idx_it->second;
-                if constexpr (std::is_same_v<T, uint8_t>) return e->new_value.u1;
-                else if constexpr (std::is_same_v<T, uint16_t>) return e->new_value.u2;
-                else if constexpr (std::is_same_v<T, uint32_t>) return e->new_value.u4;
-                else if constexpr (std::is_same_v<T, uint64_t>) return e->new_value.u8;
-                else if constexpr (std::is_same_v<T, float>) return e->new_value.f4;
-                else if constexpr (std::is_same_v<T, double>) return e->new_value.f8;
-                else return static_cast<T>(e->new_value.ptr);
-            }
-        }
+	{
+	    auto idx_it = tx->write_log_index.find(addr);
+	    if (idx_it != tx->write_log_index.end()) {
+	        WriteLogEntry* e = idx_it->second;
+	        if (e->type == VT) {
+	            if constexpr (std::is_same_v<T, uint8_t>) return e->new_value.u1;
+	            else if constexpr (std::is_same_v<T, uint16_t>) return e->new_value.u2;
+	            else if constexpr (std::is_same_v<T, uint32_t>) return e->new_value.u4;
+	            else if constexpr (std::is_same_v<T, uint64_t>) return e->new_value.u8;
+	            else if constexpr (std::is_same_v<T, float>) return e->new_value.f4;
+	            else if constexpr (std::is_same_v<T, double>) return e->new_value.f8;
+	            else return static_cast<T>(e->new_value.ptr);
+	        }
+	        // Type interchange: POINTER ↔ UINT64 (both 8 bytes, same union storage)
+	        if constexpr (std::is_same_v<T, uint64_t>) {
+	            if (e->type == ValueType::POINTER)
+	                return reinterpret_cast<uint64_t>(e->new_value.ptr);
+	        }
+	        if constexpr (std::is_same_v<T, void*>) {
+	            if (e->type == ValueType::UINT64)
+	                return reinterpret_cast<void*>(e->new_value.u8);
+	        }
+	    }
+	}
 
-        word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
-        if (is_locked_by(w_lock_val, tx)) {
-            WriteLogEntry* log_entry = (WriteLogEntry*)w_lock_val;
-            if (log_entry->byte_addr == addr && log_entry->type == VT) {
-                any_type_t& nv = log_entry->new_value;
-                if constexpr (std::is_same_v<T, uint8_t>) return nv.u1;
-                else if constexpr (std::is_same_v<T, uint16_t>) return nv.u2;
-                else if constexpr (std::is_same_v<T, uint32_t>) return nv.u4;
-                else if constexpr (std::is_same_v<T, uint64_t>) return nv.u8;
-                else if constexpr (std::is_same_v<T, float>) return nv.f4;
-                else if constexpr (std::is_same_v<T, double>) return nv.f8;
-                else return static_cast<T>(nv.ptr);
-            }
-        }
+	word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
+	if (is_locked_by(w_lock_val, tx)) {
+	    WriteLogEntry* log_entry = (WriteLogEntry*)w_lock_val;
+	    if (log_entry->byte_addr == addr) {
+	        if (log_entry->type == VT) {
+	            any_type_t& nv = log_entry->new_value;
+	            if constexpr (std::is_same_v<T, uint8_t>) return nv.u1;
+	            else if constexpr (std::is_same_v<T, uint16_t>) return nv.u2;
+	            else if constexpr (std::is_same_v<T, uint32_t>) return nv.u4;
+	            else if constexpr (std::is_same_v<T, uint64_t>) return nv.u8;
+	            else if constexpr (std::is_same_v<T, float>) return nv.f4;
+	            else if constexpr (std::is_same_v<T, double>) return nv.f8;
+	            else return static_cast<T>(nv.ptr);
+	        }
+	        // Type interchange: POINTER ↔ UINT64
+	        if constexpr (std::is_same_v<T, uint64_t>) {
+	            if (log_entry->type == ValueType::POINTER)
+	                return reinterpret_cast<uint64_t>(log_entry->new_value.ptr);
+	        }
+	        if constexpr (std::is_same_v<T, void*>) {
+	            if (log_entry->type == ValueType::UINT64)
+	                return reinterpret_cast<void*>(log_entry->new_value.u8);
+	        }
+	    }
+	}
 
         word_t version;
         while (true) {

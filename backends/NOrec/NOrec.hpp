@@ -303,17 +303,36 @@ read_word_norec(     //
 	NOREC_ASSERT(tx, "tx not defined");
 	NOREC_ASSERT(tx->active, "tx not active");
 
-	for (auto &w : tx->write_set) {
-		if (w.type == sz && w.addr == addr) {
-			return w.new_val;
+	// Scan from the END (most recent write) so that addresses written
+	// multiple times (e.g., vector _M_finish on each push_back) return
+	// the latest value, not the oldest.
+	for (auto it = tx->write_set.rbegin(); it != tx->write_set.rend(); ++it) {
+		if (it->type == sz && it->addr == addr) {
+			if (sz == ValueType::POINTER) {
+				uint64_t ptr_val = reinterpret_cast<uint64_t>(it->new_val.ptr);
+				assert(ptr_val < 0x800000000000ULL &&
+				       "read_word_norec: POINTER from write-set is kernel-space");
+			}
+			return it->new_val;
 		}
 	}
 
 	any_type_t value = read_value_from_addr(addr, sz);
 
+	if (sz == ValueType::POINTER) {
+		uint64_t ptr_val = reinterpret_cast<uint64_t>(value.ptr);
+		assert(ptr_val < 0x800000000000ULL &&
+		       "read_word_norec: POINTER from memory is kernel-space");
+	}
+
 	while (tx->snapshot != get_clock()) {
 		tx->snapshot = validate();
 		value = read_value_from_addr(addr, sz);
+		if (sz == ValueType::POINTER) {
+			uint64_t ptr_val = reinterpret_cast<uint64_t>(value.ptr);
+			assert(ptr_val < 0x800000000000ULL &&
+			       "read_word_norec: POINTER re-read from memory is kernel-space");
+		}
 		if (tx->read_set.size() > 1000000) {
 			fprintf(stderr, "FATAL: read_set overflow (%zu entries)\n", tx->read_set.size());
 			abort_tx();
@@ -357,11 +376,30 @@ write_word_norec(    //
 	};
 	unsigned sz_bytes = typeSize(sz);
 
-	// If a wider (or equal-width) entry already covers this address, skip.
-	for (auto &w : tx->write_set) {
-		if (w.addr == addr) {
-			if (typeSize(w.type) >= sz_bytes) {
-				return; // existing wider entry covers this address
+	// Assert: POINTER values must be in user space (below 0x800000000000)
+	if (sz == ValueType::POINTER) {
+		uint64_t ptr_val = reinterpret_cast<uint64_t>(val.ptr);
+		assert(ptr_val < 0x800000000000ULL && "write_word_norec: POINTER value in kernel space");
+	}
+
+	// Scan from end (most recent) so repeated writes to the same address
+	// update the existing entry rather than being silently dropped.
+	// (e.g., vector _M_finish updated on every push_back)
+	for (auto it = tx->write_set.rbegin(); it != tx->write_set.rend(); ++it) {
+		if (it->addr == addr) {
+			if (typeSize(it->type) == sz_bytes) {
+				// Assert: when updating a POINTER entry with a same-size non-POINTER type,
+				// the new value might be a non-pointer value. This is only safe if the
+				// non-POINTER value is a valid user-space address (for type interchange).
+				if (it->type == ValueType::POINTER && sz_bytes == 8 && sz != ValueType::POINTER) {
+					assert(val.u8 < 0x800000000000ULL &&
+					       "write_word_norec: non-POINTER update to POINTER entry got kernel-space value");
+				}
+				it->new_val = val; // same type: update most recent entry
+				return;
+			}
+			if (typeSize(it->type) > sz_bytes) {
+				return; // wider entry covers this address — skip
 			}
 		}
 	}

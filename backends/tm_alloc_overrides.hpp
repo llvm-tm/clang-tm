@@ -57,6 +57,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <new>
+#include <unordered_set>
 
 // Each runtime must define these two functions:
 extern "C" void* tm_malloc(size_t size);
@@ -169,6 +170,9 @@ struct FreeNode {
 
 extern thread_local FreeNode* g_deferred_frees;
 
+// Duplicate-detection set for deferred frees.
+extern thread_local std::unordered_set<void*> g_deferred_frees_set;
+
 // Flush (execute) all pending deferred frees — call after successful commit.
 // Frees both the user pointer AND the bookkeeping FreeNode.
 inline void tm_flush_deferred_frees()
@@ -181,6 +185,7 @@ inline void tm_flush_deferred_frees()
         node = next;
     }
     g_deferred_frees = nullptr;
+    g_deferred_frees_set.clear();
 }
 
 // Discard all pending deferred frees — call at tm_begin (outer) to discard
@@ -196,6 +201,7 @@ inline void tm_clear_deferred_frees()
         node = next;
     }
     g_deferred_frees = nullptr;
+    g_deferred_frees_set.clear();
 }
 
 // ═══════════════════════════════════════════════════════════════════
