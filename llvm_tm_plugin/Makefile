@@ -3,10 +3,15 @@
 BUILD_TYPE ?= RELEASE
 
 # Post-instrumentation optimization (set before include so tm_pipeline.mk's ?= doesn't override)
+# NOTE: -O2/-O3 include GlobalOpt/IPSCCP etc. that do NOT respect optnone and
+# can corrupt clone function signatures (dead-argument elimination removes the
+# `this` parameter from _tm_clone functions, changing their ABI). Use -O1 to
+# avoid these passes. The tm-instrument pipeline has optnone clones anyway
+# (function passes skip them), so -O3 adds no benefit for clone code.
 ifeq ($(BUILD_TYPE),DEBUG)
   TM_OPT_LEVEL = -O0
 else
-  TM_OPT_LEVEL = -O3
+  TM_OPT_LEVEL = -O1
 endif
 
 # Plugin variant, link optimization, and pipeline (set before include so ?= doesn't override)

@@ -400,8 +400,8 @@ write_word_wt(                                                 //
 			w.new_val = val;
 			w.version = version;
 			w.incarnation = incarnation;
-			tx->write_set.insert(std::pair(addr, w));
-			tx->locks_held.push_back(lock);
+		tx->write_set[addr] = w;
+		tx->locks_held.push_back(lock);
 
 			write_value_to_addr(addr, val, ValueType::UINT64);
 		} else if (lock->is_locked_by(tx->id)) {
@@ -409,15 +409,15 @@ write_word_wt(                                                 //
 			// TX acquired the same lock between our l check and the CAS.
 			any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
 
-			WriteLogEntry_wt w;
-			w.old_val = old_val;
-			w.new_val = val;
-			w.version = version;
-			w.incarnation = incarnation;
-			tx->write_set.insert(std::pair(addr, w));
+		WriteLogEntry_wt w;
+		w.old_val = old_val;
+		w.new_val = val;
+		w.version = version;
+		w.incarnation = incarnation;
+		tx->write_set[addr] = w;
 
-			write_value_to_addr(addr, val, ValueType::UINT64);
-		} else {
+		write_value_to_addr(addr, val, ValueType::UINT64);
+	} else {
 			abort_tx();
 		}
 	} else if (lock->is_locked_by(tx->id)) {
@@ -431,7 +431,7 @@ write_word_wt(                                                 //
 		w.new_val = val;
 		w.version = version;
 		w.incarnation = incarnation;
-		tx->write_set.insert(std::pair(addr, w));
+		tx->write_set[addr] = w;
 
 		write_value_to_addr(addr, val, ValueType::UINT64);
 	} else {

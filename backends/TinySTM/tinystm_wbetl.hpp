@@ -475,7 +475,7 @@ write_word_etl(                                               //
 	WriteLogEntry_wbetl w;
 	w.new_val = val;
 	w.type = sz;
-	tx->write_set.insert(std::pair(addr, w));
+	tx->write_set[addr] = w;
 }
 
 inline uint8_t    //
