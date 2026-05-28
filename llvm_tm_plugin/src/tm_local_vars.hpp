@@ -83,6 +83,7 @@ static bool isHeapAllocationCall(const Value *V) {
   StringRef Name = F->getName();
   return Name == "_Znwm" || Name == "_Znam" ||
          Name == "_Znwj" || Name == "_Znaj" ||
+         Name == "_ZnwmSt11align_val_t" || Name == "_ZnamSt11align_val_t" ||
          Name == "malloc" || Name == "calloc" ||
          Name == "realloc" || Name == "strdup" ||
          Name == "tm_malloc" || Name == "tm_calloc" ||
@@ -98,6 +99,8 @@ static bool isDeallocationCall(const Value *V) {
   StringRef Name = F->getName();
   return Name == "_ZdlPv" || Name == "_ZdlPvm" ||
          Name == "_ZdaPv" || Name == "_ZdaPvm" ||
+         Name == "_ZdlPvSt11align_val_t" || Name == "_ZdlPvmSt11align_val_t" ||
+         Name == "_ZdaPvSt11align_val_t" || Name == "_ZdaPvmSt11align_val_t" ||
          Name == "free";
 }
 

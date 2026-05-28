@@ -306,16 +306,27 @@ static bool handleMallocFree(CallBase *Call, IRBuilder<> &B,
     StringRef N = Callee->getName();
 
     // Helper: change the callee of the call/invoke to the TM runtime function.
-    // For InvokeInst, setCalledFunction preserves the unwind destination.
-    // For CallInst, create a new call and mark the old one for erasure.
-    auto redirectTo = [&](FunctionCallee Target, Value *RetCastTy = nullptr) {
+    // For InvokeInst, creates a new invoke preserving the unwind destination.
+    // For CallInst, creates a new call and marks the old one for erasure.
+    // If NumArgs is specified, only forward the first NumArgs arguments
+    // (needed for operator new with alignment which passes 2 args to
+    //  tm_malloc which only expects 1).
+    auto redirectTo = [&](FunctionCallee Target, unsigned NumArgs = ~0u) {
+        SmallVector<Value *, 4> Args;
+        unsigned N = std::min((unsigned)Call->arg_size(), NumArgs);
+        for (unsigned i = 0; i < N; i++)
+            Args.push_back(Call->getArgOperand(i));
         if (isInvoke) {
-            Call->setCalledFunction(Target);
-            Call->setAttributes(AttributeList{});
+            auto *II = cast<InvokeInst>(Call);
+            auto *FTy = Target.getFunctionType();
+            auto *NewInvoke = InvokeInst::Create(
+                FTy, Target.getCallee(), II->getNormalDest(),
+                II->getUnwindDest(), Args, {}, Call->getName(),
+                Call->getParent());
+            NewInvoke->setAttributes(AttributeList{});
+            Call->replaceAllUsesWith(NewInvoke);
+            ToErase.push_back(Call);
         } else {
-            SmallVector<Value *, 4> Args;
-            for (unsigned i = 0; i < Call->arg_size(); i++)
-                Args.push_back(Call->getArgOperand(i));
             auto *NewCall = B.CreateCall(Target, Args);
             NewCall->setAttributes(AttributeList{});
             Call->replaceAllUsesWith(NewCall);
@@ -346,7 +357,9 @@ static bool handleMallocFree(CallBase *Call, IRBuilder<> &B,
         return false;
 
     if (isNew) {
-        redirectTo(H.malloc_fn);
+        // operator new with alignment (e.g. _ZnwmSt11align_val_t) has
+        // 2 args (size + alignment). tm_malloc only expects size (1 arg).
+        redirectTo(H.malloc_fn, 1);
         return true;
     }
     if (N == "calloc") {

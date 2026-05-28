@@ -338,3 +338,106 @@ For 10000 elements, the byte-level memmove expansion inside `_S_do_relocate` cre
 - **Fix**: `tinystm_wbctl.hpp` line 803: `insert` → `operator[]`; guard line 722: `>=` → `>` (same-width type changes allowed). `tinystm_wbetl.hpp` line 478: `insert` → `operator[]`. `tinystm_wt.hpp` lines 403, 417, 434: `insert` → `operator[]`.
 - **Verification**: 15/15 plugin tests PASS, 12/12 backend STM tests PASS, bank benchmark PASS.
 - **Key insight**: `std::unordered_map<void*, ...>::insert` silently drops same-address overwrites — the write_set must use `operator[]` so the LAST write (correct type) wins.
+
+### Build fixes (this session — 2026-05-28)
+- **macOS stack detection**: `pthread_getattr_np` is Linux-only. Changed to `pthread_get_stackaddr_np`/`pthread_get_stacksize_np` on Apple platforms (`#if defined(__APPLE__)`).
+- **Debug TRACE fprintf removal**: Removed 6 `TRACE` fprintf debugging statements from `tinystm_wbctl.hpp` and `tinystm_common.hpp` that were accidentally committed.
+- **Aligned new/delete in opaque checker**: Added `_ZnwmSt11align_val_t`/`_ZnamSt11align_val_t` to `isHeapAllocationCall` and `_ZdlPvSt11align_val_t`/`_ZdlPvmSt11align_val_t`/`_ZdaPvSt11align_val_t`/`_ZdaPvmSt11align_val_t` to `isDeallocationCall` in `tm_local_vars.hpp`. Without these, the opaque checker flags aligned operator new/delete as opaque errors.
+- **InvokeInst arg count mismatch**: When `operator new` with alignment (`_ZnwmSt11align_val_t`, 2 args: size + alignment) is redirected to `tm_malloc(i64)` via `InvokeInst`, `setCalledFunction` preserves the original 2 args but `tm_malloc` only expects 1, causing LLVM IR verifier error. Fixed by creating a new `InvokeInst` with the correct arg count via `InvokeInst::Create`.
+- **std::string opaque errors**: Added `basic_string::~basic_string()` and `basic_string::append(char const*)` to `KnownSafeWithTMArgsTable` — these are opaque library functions called with TM-traced `this` pointers (from `TM std::vector<std::string>`).
+
+### STMbench7 reproducer confirmed
+- `benchmarks/test/minimal_repro/repro2.cpp`: Minimal STMbench7-like reproducer with global `vector<CompositePart>` and `vector<AtomicPart>` with inner `vector<int>`. TX function creates composite parts, pushes to inner/outer vectors, reads back.
+- `benchmarks/test/minimal_repro/repro.cpp`: Simpler reproducer with local `vector<StructWithVector>` passed by reference to TX.
+- **Crash confirmed on ALL 4 backends at n=5**:
+  - **WBCTL**: Hangs after `[INIT] g_clock=1` (infinite loop in read/write-set validation)
+  - **NOrec**: SIGSEGV (NULL deref at `__atomic_ref_base<uint8_t>::load`)
+  - **SwissTM**: Silent crash (no output)
+  - **TL2**: Silent crash (no output)
+- `test_realloc_crash` (plugin test with SwissTM): Crashes with exit code 139 (SIGSEGV) — builds but crashes at runtime with SwissTM.
+- `test_vector_realloc`: Bus error (pre-existing on macOS, also broken before these changes due to `pthread_getattr_np` build failure).
+- **Backend STM tests**: All 12 PASS (counter_st, counter_mt, write_set_validation × 4 backends).
+
+#### Key insight
+The reproducer crash is the STMbench7 bad_alloc pattern confirmed with a minimal test case. Root cause remains under investigation — suspected runtime data structure corruption during vector reallocation inside TX (element-by-element `construct_at`/`destroy_at` generating millions of TM operations).
+
+## Next up
+### Root cause investigation plan (backtrace / valgrind access needed)
+
+**Step 1: Narrow with `-O0` on `.instr.bc`**
+```bash
+# Rebuild .instr.bc with no post-pass optimization
+cd benchmarks/test/minimal_repro
+../../../llvm_tm_plugin/clang-tm --compile-only -std=c++20 -O0 \
+  -pthread -fno-inline repro2.cpp -o /tmp/repro2.bc
+../../../llvm_tm_plugin/clang-tm --instrument-only \
+  --plugin=../../../llvm_tm_plugin/bin/libTMInstrument.so \
+  -passes="tm-instrument" /tmp/repro2.bc -o /tmp/repro2.instr.bc
+# Link with NOrec runtime at -O0
+../../../llvm_tm_plugin/clang-tm --link-only -O0 --runtime \
+  ../../../backends/runtimes/NOrec_runtime.cpp \
+  -I../../../backends/NOrec -I../../../backends \
+  /tmp/repro2.instr.bc -o /tmp/repro2_norec_O0
+lldb -b -o "run" -o "bt all" -o "frame variable" -o "quit" \
+  /tmp/repro2_norec_O0 -- 5
+```
+If the crash reproduces at `-O0`, optimizer interactions are ruled out.
+
+**Step 2: Trace the corrupted `addr=0x100` in NOrec**
+Check which instrumented load produces `addr=0x100`. Add assertion in `read_word_norec`:
+```cpp
+assert((uintptr_t)addr > 0x100000 && "read_word_norec: suspicious low address");
+```
+Or add a crash-catching wrapper:
+```cpp
+if ((uintptr_t)addr < 0x100000) {
+    fprintf(stderr, "FATAL: read_word_norec(%p) from tx function: ", addr);
+    backtrace_symbols_fd(backtrace(frames, 64), 64);
+    _exit(1);
+}
+```
+
+**Step 3: Find the first invalid write-set entry in WBCTL**
+WBCTL's hang (single-threaded, no contention) suggests a corrupted clock or a lock-word loop in `extend()`. Add in `write_word_ctl`:
+```cpp
+if (g_clock.load() == 0) {
+    fprintf(stderr, "FATAL: g_clock=0 at write_word_ctl(%p)\n", addr);
+    backtrace_symbols_fd(backtrace(frames, 64), 64);
+    _exit(1);
+}
+```
+
+**Step 4: `read_set`/`write_set` reallocation corruption hypothesis**
+If the `std::unordered_map` or `std::vector` backing the read-set/write-set gets reallocated inside the TX (because `tm_malloc`/`tm_free` calls inside element constructors/destructors trigger the runtime's own container resizing), then the runtime's internal data structures reference freed memory.
+
+Mitigation: pre-allocate read_set/write_set capacity at `begin()`:
+```cpp
+void begin() {
+    tx->read_set.reserve(65536);
+    tx->write_set.reserve(65536);
+    // ...
+}
+```
+
+**Step 5: Valgrind (Linux) or LeakSanitizer**
+```bash
+valgrind --tool=memcheck --track-origins=yes \
+  ./bin/test_repro_norec 5 2>&1 | head -100
+```
+Focus on "Invalid read/write" errors — the first one is the root cause. Check:
+- Does the read_set or write_set container access freed memory?
+- Does `tm_read_ptr` on a vector's `__begin_` return a pointer to freed buffer?
+- Is the issue in the runtime's `std::unordered_map` (write_set) being corrupted?
+
+**Step 6: SwissTM specific — orec table corruption**
+SwissTM uses a hash of `addr` to select an ownership record. If the hash table is corrupted (e.g., `read_orecs` vector reallocates while holding raw pointers), `read_impl` accesses freed orecs. Add bounds check:
+```cpp
+void *orec = &orec_table[hash(addr) % orec_table.size()];
+assert(orec >= &orec_table[0] && orec < &orec_table[0] + orec_table.size());
+```
+
+### Suspect priority list
+1. **Runtime data-structure reallocation inside TM ops** (highest priority) — `read_set`, `write_set`, `owned_orecs`, `write_log` use STL containers that may realloc during `begin()` or the `tm_*` call itself, creating ABA issues with raw pointers.
+2. **`_tm_clone` function vanishing at -O1** — verify `nm -a bin/test_repro_norec | grep _tm_clone` to confirm instrumented clones survived linking. If zero, the TM hooks never execute.
+3. **Write-set/read-set type mismatch** — sub-word writes (UINT8 from `memcpy` expansion) invisible to wider reads (POINTER/UINT64). NOrec and SwissTM lack the byte-merge logic that WBCTL has.
+4. **Stack-address writes corrupting heap state** — if the stack-detection in `write_word_ctl` is too aggressive (false-positive on macOS `pthread_get_stackaddr_np`), TM writes to heap addresses are silently turned into raw stores.
