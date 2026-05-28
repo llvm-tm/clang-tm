@@ -5,12 +5,49 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <execinfo.h>
+#include <unordered_set>
+#include <unistd.h>
 #include <mutex>
-
+#include <new>
 #include "NOrec_globals.hpp"
 #include "../tm_alloc_overrides.hpp"
+
+// Debug: catch absurd operator new sizes with backtrace
+void* operator new(size_t size) {
+    if (size > (1ULL << 42)) { // > 4TB
+        fprintf(stderr, "\nFATAL: operator new(%zu) called with absurd size! Backtrace:\n", size);
+        void* buffer[64];
+        int n = backtrace(buffer, 64);
+        backtrace_symbols_fd(buffer, n, 2);
+        fflush(stderr);
+        _exit(1);
+    }
+    void* p = std::malloc(size);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+void* operator new[](size_t size) {
+    if (size > (1ULL << 42)) {
+        fprintf(stderr, "\nFATAL: operator new[](%zu) called with absurd size! Backtrace:\n", size);
+        void* buffer[64];
+        int n = backtrace(buffer, 64);
+        backtrace_symbols_fd(buffer, n, 2);
+        fflush(stderr);
+        _exit(1);
+    }
+    void* p = std::malloc(size);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, size_t) noexcept { std::free(p); }
+void operator delete[](void* p, size_t) noexcept { std::free(p); }
+
 thread_local bool g_in_tx = false;
 thread_local FreeNode* g_deferred_frees = nullptr;
+thread_local std::unordered_set<void*> g_deferred_frees_set;
 thread_local SpecAlloc* g_spec_allocs = nullptr;
 
 extern "C" {
@@ -100,7 +137,9 @@ void tm_begin()
 		g_in_tx = true;
 		norec::begin();
 	}
-	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
+	int64_t count = g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
+	if (count > 0 && count % 1000 == 0)
+		fprintf(stderr, "DEBUG tm_begin count = %lld\n", (long long)count);
 }
 
 void tm_end()
@@ -155,7 +194,9 @@ float tm_read_f4(float *addr) { return norec::tm_read_f4(addr); }
 
 double tm_read_f8(double *addr) { return norec::tm_read_f8(addr); }
 
-void *tm_read_ptr(void **addr) { return norec::tm_read_ptr(addr); }
+void *tm_read_ptr(void **addr) {
+    return norec::tm_read_ptr(addr);
+}
 
 void *tm_read_z(uint8_t *addr, uint64_t len)
 {
@@ -263,7 +304,17 @@ void* tm_calloc(size_t nmemb, size_t size) { void* p = calloc(nmemb, size); tm_t
 void* tm_realloc(void* ptr, size_t size) { void* p = realloc(ptr, size); tm_track_spec_alloc(p); return p; }
 void  tm_free(void* ptr) {
     if (g_in_tx) {
+        // Detect double-free: same pointer freed twice in the same TX
+        if (g_deferred_frees_set.count(ptr)) {
+            fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
+            void* buf[64];
+            int n = backtrace(buf, 64);
+            backtrace_symbols_fd(buf, n, 2);
+            fflush(stderr);
+            _exit(1);
+        }
         tm_untrack_spec_alloc(ptr);
+        g_deferred_frees_set.insert(ptr);
         auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));
         node->ptr = ptr;
         node->next = g_deferred_frees;

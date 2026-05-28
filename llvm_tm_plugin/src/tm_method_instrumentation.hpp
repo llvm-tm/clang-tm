@@ -129,32 +129,83 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M, const TMRuntime
 	Value *Dst = Call->getArgOperand(0);
 	Value *Len = Call->getArgOperand(2);
 	Value *SrcOrVal = Call->getArgOperand(1);
+	Type *LenTy = Len->getType();
 
 	BasicBlock *OrigBB = Call->getParent();
 	BasicBlock *ContBB = OrigBB->splitBasicBlock(Call, "mem_after");
-	BasicBlock *LoopEntry = BasicBlock::Create(Ctx, "mem_loop_entry", F, ContBB);
-	BasicBlock *LoopBody = BasicBlock::Create(Ctx, "mem_loop_body", F, ContBB);
 
-	OrigBB->getTerminator()->eraseFromParent();
-	IRBuilder<>(OrigBB).CreateBr(LoopEntry);
-
-	IRBuilder<> EB(LoopEntry);
-	PHINode *Idx = EB.CreatePHI(i64Ty, 2, "mem_idx");
-	Idx->addIncoming(ConstantInt::get(i64Ty, 0), OrigBB);
-	EB.CreateCondBr(EB.CreateICmpEQ(Idx, Len), ContBB, LoopBody);
-
-	IRBuilder<> BB(LoopBody);
-	Value *DG = BB.CreateGEP(i8Ty, Dst, Idx);
 	if (isMemset) {
-		BB.CreateCall(H.write_i1, {DG, SrcOrVal});
+		// 8-byte aligned memset: write in UINT64 chunks so that
+		// subsequent POINTER reads can find zeroed pointer fields
+		// via type interchange (POINTER ↔ UINT64) in eager-locking
+		// backends.  Remainder bytes use byte-level tm_write_i1.
+		Constant *Eight = ConstantInt::get(LenTy, 8);
+
+		BasicBlock *AlignedLE = BasicBlock::Create(Ctx, "mem_aligned_entry", F, ContBB);
+		BasicBlock *AlignedLB = BasicBlock::Create(Ctx, "mem_aligned_body", F, ContBB);
+		BasicBlock *RemLE = BasicBlock::Create(Ctx, "mem_rem_entry", F, ContBB);
+		BasicBlock *RemLB = BasicBlock::Create(Ctx, "mem_rem_body", F, ContBB);
+
+		OrigBB->getTerminator()->eraseFromParent();
+		// Compute AlignedMax = Len - (Len % 8) in OrigBB so the PHI node
+		// in AlignedLE is the first instruction in that block (LLVM requires
+		// PHI nodes grouped at the top of the basic block).
+		IRBuilder<> OrigB(OrigBB);
+		Value *Remainder = OrigB.CreateURem(Len, Eight, "mem_rem");
+		Value *AlignedMax = OrigB.CreateSub(Len, Remainder, "aligned_max");
+		OrigB.CreateBr(AlignedLE);
+
+		// 8-byte aligned loop: writes 8 bytes per iteration via tm_write_i8
+		IRBuilder<> AEB(AlignedLE);
+		PHINode *AIdx = AEB.CreatePHI(LenTy, 2, "mem_ai");
+		AIdx->addIncoming(ConstantInt::get(LenTy, 0), OrigBB);
+		AEB.CreateCondBr(AEB.CreateICmpEQ(AIdx, AlignedMax), RemLE, AlignedLB);
+
+		IRBuilder<> ABB(AlignedLB);
+		Value *ADst = ABB.CreateGEP(i8Ty, Dst, AIdx);
+		// Broadcast byte value across 8 bytes: val * 0x0101010101010101
+		Value *WideVal = ABB.CreateZExt(SrcOrVal, i64Ty, "wide_val");
+		Constant *BCMagic = ConstantInt::get(i64Ty, 0x0101010101010101ULL);
+		Value *Broadcast = ABB.CreateMul(WideVal, BCMagic, "broadcast");
+		ABB.CreateCall(H.write_i8, {ADst, Broadcast});
+		Value *ANext = ABB.CreateAdd(AIdx, Eight);
+		AIdx->addIncoming(ANext, AlignedLB);
+		ABB.CreateBr(AlignedLE);
+
+		// Remainder loop: bytes at the tail for (len % 8)
+		IRBuilder<> REB(RemLE);
+		PHINode *RIdx = REB.CreatePHI(LenTy, 2, "mem_ri");
+		RIdx->addIncoming(AlignedMax, AlignedLE);
+		REB.CreateCondBr(REB.CreateICmpEQ(RIdx, Len), ContBB, RemLB);
+
+		IRBuilder<> RBB(RemLB);
+		Value *RDst = RBB.CreateGEP(i8Ty, Dst, RIdx);
+		RBB.CreateCall(H.write_i1, {RDst, SrcOrVal});
+		Value *RNext = RBB.CreateAdd(RIdx, ConstantInt::get(LenTy, 1));
+		RIdx->addIncoming(RNext, RemLB);
+		RBB.CreateBr(RemLE);
 	} else {
+		// Memcpy/memmove: byte-level loop
+		BasicBlock *LoopEntry = BasicBlock::Create(Ctx, "mem_loop_entry", F, ContBB);
+		BasicBlock *LoopBody = BasicBlock::Create(Ctx, "mem_loop_body", F, ContBB);
+
+		OrigBB->getTerminator()->eraseFromParent();
+		IRBuilder<>(OrigBB).CreateBr(LoopEntry);
+
+		IRBuilder<> EB(LoopEntry);
+		PHINode *Idx = EB.CreatePHI(LenTy, 2, "mem_idx");
+		Idx->addIncoming(ConstantInt::get(LenTy, 0), OrigBB);
+		EB.CreateCondBr(EB.CreateICmpEQ(Idx, Len), ContBB, LoopBody);
+
+		IRBuilder<> BB(LoopBody);
+		Value *DG = BB.CreateGEP(i8Ty, Dst, Idx);
 		Value *SG = BB.CreateGEP(i8Ty, SrcOrVal, Idx);
 		BB.CreateCall(H.write_i1,
 		              {DG,
 		               BB.CreateCall(H.read_i1, {SG})});
+		Idx->addIncoming(BB.CreateAdd(Idx, ConstantInt::get(LenTy, 1)), LoopBody);
+		BB.CreateBr(LoopEntry);
 	}
-	Idx->addIncoming(BB.CreateAdd(Idx, ConstantInt::get(i64Ty, 1)), LoopBody);
-	BB.CreateBr(LoopEntry);
 	// NOTE: Call is NOT erased here — the caller handles erasure
 	// (it is now dead code, reachable only via splitBasicBlock debris;
 	//  the post-instrumentation -O3 pass removes it).  This avoids

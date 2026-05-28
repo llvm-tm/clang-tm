@@ -264,3 +264,74 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 ### Key Decisions
 - `tm_memset` hook: simpler than fixing `tracesFromTMGlobal` depth limit / argument backtracing. The plugin just replaces `llvm.memset(ptr, val, len)` with `tm_memset(ptr, val, len)`; the runtime handles the byte-by-byte expansion.
 - For non-clone functions: keep existing `needsMemIntrinsicInstrumentation` heuristic (don't unconditionally instrument memsets in non-clone code).
+
+## Done (this session — 2026-05-27)
+### SwissTM double-free fix: 8-byte memset + POINTER↔UINT64 interchange
+
+#### CORRECTED Root cause
+The previous analysis was wrong. The `llvm.memset` WAS being expanded by the plugin — but as a **byte-level** `tm_write_i1` loop producing UINT8 write-set entries. SwissTM's `read_impl` requires exact `(addr, type)` matching. When the destructor's `tm_read_ptr` looked for a POINTER entry at the source's pointer field address, it found the UINT8 entries from the byte-level memset — but the type mismatch (UINT8 ≠ POINTER) caused a fall-through to memory, returning the stale old pointer value and triggering a double-free.
+
+**Two-part root cause:**
+1. Write-side: Byte-level `tm_write_i1` loop produces 24 UINT8 entries per memset(0, 24). These entries are invisible to POINTER-type reads.
+2. Read-side: SwissTM's `read_impl` (both hash-index and orec-lock paths) requires exact `(addr, type)` matching — no type interchange at all, unlike WBCTL which has full POINTER↔UINT64 interchange + byte-merge.
+
+#### FIX
+1. **Plugin** (`instrumentMemoryIntrinsic` in `tm_method_instrumentation.hpp`): Changed `llvm.memset` expansion from byte-level `tm_write_i1` to 8-byte chunks via `tm_write_i8` (fill-byte broadcast: `val * 0x0101010101010101`). Three 8-byte writes for 24 bytes instead of 24 byte-level writes. Remainder bytes still use `tm_write_i1`. IR confirms: 3× `tm_write_i8(ptr, i64 0)` at `%1+0`, `%1+8`, `%1+16`; remainder loop jumps directly to `mem_after` (24 is exactly 3×8).
+
+2. **SwissTM** (`read_impl` in `SwissTM.hpp`): Added POINTER↔UINT64 type interchange in both the hash-index path (line 217) and the orec-lock path (line 230). When `tm_read_ptr` finds a UINT64 entry at the same address, it returns `reinterpret_cast<void*>(entry->new_value.u8)` = `nullptr`. When `tm_read_u64` finds a POINTER entry, it returns `reinterpret_cast<uint64_t>(entry->new_value.ptr)`.
+
+#### Verification
+- `test_realloc_crash 50` and `test_realloc_crash 1000` — both PASS (no double-free)
+- `test_realloc_crash 10000` — times out after 30s (performance issue, not correctness): `_S_do_relocate_tm_clone` for `int` still uses byte-level memmove expansion (`_ZNSt6vectorIiSaIiEE14_S_do_relocateE` is `linkonce_odr`, NOT cloned, so `_ZSt12__relocate_aIPiS0_SaIiEET0_T_S3_S2_RT1_` calls raw `llvm.memmove` which IS expanded in the cloned caller via the `needsMemIntrinsicInstrumentation` path, creating 960K TM operations for 10000×48 bytes)
+
+#### Key Insight
+The byte-level memset approach inherently cannot work with SwissTM (or any eager-locking backend without byte-merge) because:
+- Byte-level writes create UINT8 entries keyed by individual byte addresses
+- Pointer reads look for POINTER entries at the address of the pointer (8-byte aligned)
+- The type mismatch causes fall-through to memory, returning stale values
+
+The 8-byte chunk approach works because:
+- `tm_write_i8` creates UINT64 entries at 8-byte aligned addresses
+- `tm_read_ptr` with POINTER↔UINT64 interchange finds the entry and returns 0
+- The `any_type_t` union has `u8` and `ptr` sharing the same 8 bytes, so the value is correct
+
+#### Performance note
+For 10000 elements, the byte-level memmove expansion inside `_S_do_relocate` creates ~960K TM operations, overwhelming SwissTM. The `tm-instrument-inline` pipeline would inline these into the TX body, making them faster, but would also instrument ALL STL internals (vector, deque iterators, etc.) causing even slower performance in other scenarios (STAMP Labyrinth). The non-inline pipeline keeps clones separate with `NoInline`+`OptimizeNone`, which is correct but slow for bulk operations.
+
+### Next Steps
+- Consider optimizing `_S_do_relocate` memmove to use 8-byte chunks as well (same broadcast/merge pattern as memset)
+- Add full byte-merge support to SwissTM (like WBCTL already has — lines 397-492 in `tinystm_wbctl.hpp`)
+- Investigate STMbench7 crash with the 8-byte memset fix applied (was previously blocked by the same double-free)
+
+### PHI node fix + leftover TWP debug code cleanup
+- **PHI node fix**: `instrumentMemoryIntrinsic` computed `AlignedMax = Len - (Len % 8)` in the `AlignedLE` basic block before creating the PHI node. LLVM requires PHI nodes grouped at the top of the basic block. Moved `URem`/`Sub` to `OrigBB` before the branch to `AlignedLE`, so `CreatePHI` inserts at the start of an empty block.
+- **TWP debug code**: `tinystm_wbctl.hpp` still had `dladdr`-based g_vec tracking from the TWP debug session (lines 605-628) that was supposed to have been cleaned up. Removed. This was causing linker errors for test builds without `-ldl`.
+- **Full test suite (run_tests.sh)**: ALL plugin tests PASS after both fixes.
+
+## Done (this session — 2026-05-28)
+### Deferred-free duplicate filtering + assertions across all runtimes
+- **Duplicate-free detection**: Added thread-local `std::unordered_set<void*> g_deferred_frees_set` to each runtime (TinySTM, NOrec, SwissTM, TL2, DUDETM) that uses deferred frees. Before inserting into the deferred-free linked list, `tm_free` checks `g_deferred_frees_set.count(ptr)` and calls `_exit(1)` with backtrace if a double-free is detected.
+- **Set lifecycle**: `g_deferred_frees_set.clear()` called in `tm_flush_deferred_frees()` and `tm_clear_deferred_frees()` (centralized in `tm_alloc_overrides.hpp`), keeping the set in sync with the linked list.
+- **`_exit` fix**: Added `#include <unistd.h>` to TinySTM/SwissSTM/TL2 runtime files (undeclared `_exit` in the new double-free detection assertion).
+- **Removed `tm_read_ptr` debug logging** from NOrec_runtime.cpp (per-call `fprintf` caused thread contention and made GDB backtraces unreliable).
+- **Operator new size check**: NOrec_runtime.cpp overrides `operator new`/`new[]` with absurd-size guard (> 4TB triggers `backtrace_symbols_fd` + `_exit(1)`).
+- **Build verification**: All 15+ plugin tests PASS, all 12 backend STM tests PASS (4 backends × 3 test types).
+
+### Root cause: `_tm_clone` functions vanish from final binary
+- **Minimal reproducer `repro2.cpp` built**: `vector<CompositePart>` with inner `vector<int>` push_back inside TX (matching STMbench7 same data-flow pattern). Crashes with **SIGSEGV** at `__atomic_ref<uint8_t>::load` inside `read_word_norec` — NOT NOrec-specific, also crashes with TinySTM WBCTL.
+- **`create_composite` NOT cloned** — plugin only instrumented inline + redirected calls to `_tm_clone` versions of STL functions (`push_back`, `size`, `operator[]`, etc.).
+- **`_tm_clone` functions vanish in final binary**: 194 definitions + 282 call sites in `.opt.ll` IR after `-O3` (with `optnone`+`noinline`), but **0 symbols** in the `.o` / final binary. `nm -a` shows only original uninstrumented functions, plus unresolved UND references to `tm_read_ptr`, `tm_write_i1`, etc.
+- **Disassembly confirms**: `create_composite` has `callq` instructions referencing the `_tm_clone` functions (offsets like 0x25e0, 0x2170, 0x2490 within `.text`), but these code blocks have NO symbol names — `llc` either inlines them silently or strips them as dead code. The TM hooks never execute.
+- **Implication**: The crash in all reproducers and STMbench7 is because the TM-instrumented code is absent — raw reads/writes go to memory without TM tracking, and TX abort frees speculated memory while the write-through state still references it.
+
+### Key Decisions
+- Centralized `g_deferred_frees_set` lifecycle in `tm_alloc_overrides.hpp` so the set is always cleared alongside the linked list — no risk of the set accumulating stale entries.
+- Simple backends (SingleGlobalLock, DistributedSGL, PersistentSGL) don't use deferred frees at all and don't need `g_deferred_frees_set` (their `tm_free` just calls `free`/`::operator delete` directly; no inline functions in the header that reference the set are called from these TUs).
+- **The `add $0x10` theory is dead** — binary analysis now shows correct `add $0x40` in `g_compositeParts.push_back`. The real problem is code generation strips `_tm_clone` functions.
+- `private` linkage + `fastcc` calling convention on `_tm_clone` functions may trigger LLVM's dead-function elimination even with `optnone`. Need to experiment with linkage type, calling convention, or backend flags.
+
+## Next Steps
+1. **Verify `_tm_clone` elimination mechanism**: Check if `llc` inlines the functions despite `optnone` or strips them as dead code. Add `volatile asm` barrier or call to opaque extern to prevent elimination.
+2. **Experiment with linkage/calling convention**: Change from `private`/`fastcc` to `internal`/`C` calling convention. Try `llc -no-discard-value-names -preserve-llvm-optnone`.
+3. **If `_tm_clone` cannot survive llc**: Use `-mllvm -force-attribute=_tm_clone:noinline` or add a separate compilation step (compile `.opt.bc` directly with `llc -O0` and link the object).
+4. **Once `_tm_clone` survives**: Test reproducer + STMbench7 with NOrec + hardened runtime. The `bad_alloc` / SIGSEGV should resolve because TM writes/reads will actually execute.
