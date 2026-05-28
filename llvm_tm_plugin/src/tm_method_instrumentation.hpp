@@ -335,10 +335,16 @@ static void instrumentLoadsStoresInFunction(Function *F,
     // at all call sites.  If so, stores to this raw Argument are writing to the
     // caller's stack — use a regular store (no tm_write) to avoid stack
     // corruption during write-back at commit time.
-    DenseMap<unsigned, bool> ArgIsAllocaDestCache;
-    auto argIsAllocaDest = [&](const Argument *Arg) -> bool {
-        auto It = ArgIsAllocaDestCache.find(Arg->getArgNo());
+    // Also recurses through intermediate function arguments (e.g., a lambda
+    // capture forwarded through __if_likely_else to the lambda clone), so
+    // inlined lambda captures via tm_read_ptr/tm_write_ptr are also skipped.
+    DenseMap<const Argument *, bool> ArgIsAllocaDestCache;
+    SmallPtrSet<const Argument *, 8> ArgIsAllocaDestVisited;
+    std::function<bool(const Argument *)> argIsAllocaDest;
+    argIsAllocaDest = [&](const Argument *Arg) -> bool {
+        auto It = ArgIsAllocaDestCache.find(Arg);
         if (It != ArgIsAllocaDestCache.end()) return It->second;
+        if (!ArgIsAllocaDestVisited.insert(Arg).second) return false;
         bool allAlloca = true;
         const Function *Parent = Arg->getParent();
         for (const User *U : Parent->users()) {
@@ -346,12 +352,21 @@ static void instrumentLoadsStoresInFunction(Function *F,
             if (!CB || CB->getCalledFunction() != Parent) continue;
             if (Arg->getArgNo() >= CB->arg_size()) { allAlloca = false; break; }
             const Value *Actual = CB->getArgOperand(Arg->getArgNo())->stripPointerCasts();
-            if (!isa<AllocaInst>(getBaseObjectNoLoad(Actual))) {
-                allAlloca = false;
-                break;
+            Value *Base = getBaseObjectNoLoad(const_cast<Value *>(Actual));
+            if (isa<AllocaInst>(Base)) {
+                continue;
             }
+            if (auto *InnerArg = dyn_cast<Argument>(Base)) {
+                if (!argIsAllocaDest(InnerArg)) {
+                    allAlloca = false;
+                    break;
+                }
+                continue;
+            }
+            allAlloca = false;
+            break;
         }
-        ArgIsAllocaDestCache[Arg->getArgNo()] = allAlloca;
+        ArgIsAllocaDestCache[Arg] = allAlloca;
         return allAlloca;
     };
 

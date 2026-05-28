@@ -45,6 +45,7 @@ using stm::any_type_mapping;
 using stm::any_type_t;
 using stm::ByteOffset;
 using stm::fill_any_type;
+using stm::isStackAddress;
 using stm::read_value_from_addr;
 using stm::return_any_type;
 using stm::ValueType;

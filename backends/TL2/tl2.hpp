@@ -304,6 +304,11 @@ public:
         std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
 
+        // Stack-address detection: writing to the stack would create write-set
+        // entries for addresses that will be popped on function return, causing
+        // post-commit stack corruption.
+        if (stm::isStackAddress((void*)addr)) { *addr = val; return; }
+
         // Real byte width of each DataType (NOT dtype_size(), which returns
         // 4 for PTR but PTR write-back writes 8 bytes as word_t).
         auto dataWidth = [](DataType dt) -> unsigned {
@@ -367,6 +372,12 @@ public:
     template <typename T, DataType DT, typename AddrT>
     static T read_impl(Transaction* tx, AddrT addr) {
         if (!tx || !tx->active) return from_word<T>(to_word(*addr));
+
+        // Stack-address detection: reading from the stack would create read-set
+        // entries for stack addresses that hash to random locks, causing spurious
+        // validation failures.
+        if (stm::isStackAddress((void*)addr))
+            return from_word<T>(to_word(*addr));
 
         if (bloom_might_contain(tx, (word_t*)addr)) {
             // Exact type match (fast path)

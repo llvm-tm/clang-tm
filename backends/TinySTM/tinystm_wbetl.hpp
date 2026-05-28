@@ -263,6 +263,12 @@ read_word_etl(                                                //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
+	// Stack-address detection: reading from the stack would create read-set
+	// entries for stack addresses that hash to random locks, causing spurious
+	// validation failures and aborts.
+	if (isStackAddress(addr))
+		return read_value_from_addr(addr, sz);
+
 	// Check write-set for this exact address
 	auto w = tx->write_set.find(addr);
 	if (w != tx->write_set.end()) {
@@ -363,6 +369,14 @@ write_word_etl(                                               //
 
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
+
+	// Stack-address detection: writing to the stack via tm_write would create
+	// a write-set entry that gets written back at commit time — by then the
+	// stack frame has been popped and the write corrupts active stack data.
+	if (isStackAddress(addr)) {
+		write_value_to_addr(addr, val, sz);
+		return;
+	}
 
 	if (tx->aborted)
 		return;
