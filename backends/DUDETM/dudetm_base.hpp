@@ -69,7 +69,7 @@ static PerThreadLog*    g_logs          = nullptr;   // mmap'd shared
 static uint8_t*          g_persist_base  = nullptr;   // mmap'd file-backed
 static size_t            g_persist_size  = 0;
 static size_t            g_heap_start_off = 0;
-static pid_t             g_replayer_pid  = 0;
+static pid_t      g_replayer_pid  = 0;
 
 // Thread-local log index (process-local, not shared)
 static thread_local int tls_log_idx = -1;
@@ -250,6 +250,40 @@ replayer_loop()
             msync(local_persist, g_persist_size, MS_ASYNC);
             last_sync = total_replayed;
         }
+    }
+
+    // ── Final drain: process any remaining entries ──────────────
+    for (size_t i = 0; i < MAX_THREADS; i++) {
+        auto* slog = &g_logs[i];
+        auto& c = cursors[i];
+        uint64_t h = slog->head.load(std::memory_order_acquire);
+
+        // Scan for pending commits
+        while (!c.has_pending && c.tail < h) {
+            DUDERedoEntry e = slog->entries[c.tail & RING_LOG_MASK];
+            if (e.op_type == OP_COMMIT_BEGIN) {
+                c.has_pending = true;
+                c.tail++;
+                break;
+            }
+            c.tail++;
+        }
+
+        // Replay remaining entries
+        while (c.tail < h) {
+            DUDERedoEntry e = slog->entries[c.tail & RING_LOG_MASK];
+            if (e.op_type == OP_COMMIT_BEGIN) {
+                c.tail++;  // skip marker
+                continue;
+            }
+            replay_op(e, local_persist);
+            total_replayed++;
+            c.tail++;
+            if ((c.tail & 0xFF) == 0)
+                h = slog->head.load(std::memory_order_acquire);
+        }
+
+        slog->tail.store(c.tail, std::memory_order_release);
     }
 
     msync(local_persist, g_persist_size, MS_SYNC);

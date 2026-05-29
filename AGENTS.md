@@ -749,3 +749,10 @@ done
 ### New test
 `backends/tests/test_eager_read_null_address.cpp`: 126 lines — fork-based isolation for 6 test addresses (0x0, 0x4, 0x8, 0x10, 0x100, 0xFFFFFFE8). Each child process calls `tm_write_i4` inside a TX. SIGSEGV handler uses `siglongjmp` for clean exit. Parent reports PASS/CRASH per address. Tests all 5 backends (tl2, tinystm, wt, norec, swisstm).
 
+## Done (this session — 2026-05-29)
+### DUDETM persistence bugfix
+- **`tm_end()` in DUDETM runtime reads write_set AFTER `tinystm::commit()` cleared it**: `commit()` calls `tx->reset()` which calls `tx->clear()` removing all write_set entries. The runtime then built the redo batch from an empty write_set, producing only `OP_COMMIT_BEGIN` markers. **Fix**: snapshot `tx->write_set` into a local vector BEFORE calling `commit()`.
+- **Replayer exits before processing ring buffer entries**: The main loop checks `g_ctrl->shutdown` before scanning logs — if the parent finishes all TXs and sets shutdown between iterations, the replayer exits with entries still in the ring buffer. **Fix**: added a final drain pass after the main loop exits that replays all remaining entries in every log.
+- **Verify arg parsing**: `--mode verify <n>` placed the expected value at `argv[argc-1]` but the code read `argv[2]`, getting `"verify"` → 0. **Fix**: read `argv[argc-1]` as the expected value.
+- **Persistence chain verified**: INIT → RUN (10 iterations) → VERIFY(10) → RUN (10 more) → VERIFY(20) — all PASS. Replayer sees 20 ops per RUN (10 TXs × 2 writes). Accumulation across restarts works.
+

@@ -96,21 +96,27 @@ void tm_end()
     tm_end_count++;
     g_in_tx = false;
     auto *tx = tinystm::current_tx_wbctl;
+
+    // Snapshot write-set BEFORE commit — commit() calls tx->reset() which clears it.
+    std::vector<std::pair<void *, tinystm::WriteLogEntry_wbctl>> local_writes;
     if (tx) {
         uint64_t rs = tx->read_set.size();
         uint64_t ws = tx->write_set.size();
         if (rs > g_tm_max_read_set.load()) g_tm_max_read_set.store(rs);
         if (ws > g_tm_max_write_set.load()) g_tm_max_write_set.store(ws);
+        local_writes.reserve(ws);
+        for (auto &entry : tx->write_set)
+            local_writes.emplace_back(entry.first, entry.second);
     }
 
-    tinystm::commit();  // on abort, longjmps past here
+    tinystm::commit();  // on abort, longjmps past here — write_set now cleared
 
     // ── Build committed batch: COMMIT_BEGIN + writes + alloc/free ──
     uint64_t seq = dudetm::g_ctrl->global_commit_seq.fetch_add(
         1, std::memory_order_relaxed) + 1;
 
     std::vector<dudetm::DUDERedoEntry> batch;
-    batch.reserve(1 + (tx ? tx->write_set.size() : 0) + tls_redo_batch.size());
+    batch.reserve(1 + local_writes.size() + tls_redo_batch.size());
 
     dudetm::DUDERedoEntry marker;
     marker.op_type = dudetm::OP_COMMIT_BEGIN;
@@ -120,17 +126,15 @@ void tm_end()
     marker.type = stm::ValueType::UINT64;
     batch.push_back(marker);
 
-    // Write-set entries
-    if (tx) {
-        for (auto &entry : tx->write_set) {
-            dudetm::DUDERedoEntry re;
-            re.op_type = dudetm::OP_WRITE;
-            memset(re._pad, 0, sizeof(re._pad));
-            re.addr = reinterpret_cast<uint64_t>(entry.first);
-            re.val  = entry.second.new_val;
-            re.type = entry.second.type;
-            batch.push_back(re);
-        }
+    // Write-set entries (from snapshot before commit cleared them)
+    for (auto &entry : local_writes) {
+        dudetm::DUDERedoEntry re;
+        re.op_type = dudetm::OP_WRITE;
+        memset(re._pad, 0, sizeof(re._pad));
+        re.addr = reinterpret_cast<uint64_t>(entry.first);
+        re.val  = entry.second.new_val;
+        re.type = entry.second.type;
+        batch.push_back(re);
     }
 
     // Alloc/free entries from the thread-local batch
