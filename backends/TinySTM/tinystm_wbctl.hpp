@@ -617,6 +617,8 @@ write_word_ctl(                                               //
 		return;
 	}
 
+
+
 	tx->read_only = false;
 
 	// Found write-set entry at exact addr with matching type → update in place.

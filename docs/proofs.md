@@ -688,14 +688,14 @@ the container's internal pointers (e.g. `_M_start`, `_M_finish`).  The
 deferred-free list entry for `p` is dropped by `tm_clear_deferred_frees`,
 leaving `p` allocated and pointed-to by the restored container pointers.  ∎
 
-### 8.6 The Intrusive-Free-List Corruption Problem
+### 8.6 The Intrusive-Free-List Corruption (Historical)
 
-All current backends use an **intrusive** singly-linked list for deferred
-frees, threading the `next` pointer through the first word of the *freed block
-itself*:
+Earlier versions of the runtime used an **intrusive** singly-linked list for
+deferred frees, threading the `next` pointer through the first word of the
+*freed block itself*:
 
 ```cpp
-// tm_free — intrusive implementation (ALL BACKENDS)
+// tm_free — intrusive implementation (REMOVED)
 void tm_free(void* ptr) {
     if (g_in_tx) {
         auto* node = static_cast<DeferredFreeNode*>(ptr);
@@ -706,10 +706,6 @@ void tm_free(void* ptr) {
     }
 }
 ```
-
-This design avoids a recursive allocation inside `tm_free` (the alternative
-would be to allocate a separate list node, which risks calling `malloc` → …
-→ `tm_free` → … ad infinitum).  However, it introduces a correctness gap:
 
 **Lemma 8.7 (Intrusive-free-list corrupts live data on abort)**:
 
@@ -731,15 +727,13 @@ After abort:
 On retry, the container reads from $p$ and copies corrupted data into
 newly-committed state.  ∎
 
-**This is a memory consistency violation**: the TM rollback restores the
-container *pointers* but does not restore the container *data* that was
-corrupted by the intrusive free-list write.  The effect is equivalent to a
-dirty-read or torn-write: the first 8 bytes of the "resurrected" buffer contain
-a value that no committed transaction ever wrote there.
+This was a memory consistency violation.  **As of commit `e32012b`, all backends
+use a non-intrusive deferred-free list** (Section 8.7), eliminating the
+corruption.  The lemma is retained for historical reference.
 
-### 8.7 Fix: Non-Intrusive Deferred Free
+### 8.7 Fix: Non-Intrusive Deferred Free (Current Implementation)
 
-Replace the intrusive linked list with a separately-allocated list node:
+All backends now use a separately-allocated list node:
 
 ```cpp
 struct FreeNode {
@@ -751,8 +745,6 @@ thread_local FreeNode* g_deferred_frees = nullptr;
 
 void tm_free(void* ptr) {
     if (g_in_tx) {
-        // Allocate a separate node (plain malloc, not tm_malloc:
-        // this code runs in the runtime, not in instrumented code).
         auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));
         node->ptr = ptr;
         node->next = g_deferred_frees;
@@ -777,29 +769,14 @@ plain store before `tm_free` was called.  ∎
 
 Each `free` inside a transaction allocates one `FreeNode` (16 bytes on 64-bit:
 next + ptr).  On commit, `tm_flush_deferred_frees` iterates the list, calls
-`::free` for each `FreeNode` and each user pointer.  On abort,
-`tm_clear_deferred_frees` must also free the `FreeNode` chain (not just drop
-it), to avoid leaking the `FreeNode` memory itself.
-
-```cpp
-void tm_clear_deferred_frees() {
-    auto* node = g_deferred_frees;
-    while (node) {
-        auto* next = node->next;
-        ::free(node);        // free the FreeNode
-        node = next;
-    }
-    g_deferred_frees = nullptr;
-}
-```
-
-The user's pointer $p$ is deliberately NOT freed (it is live after rollback).
-Only the bookkeeping `FreeNode` is reclaimed.
+`::operator delete` for each user pointer and `::free` for each `FreeNode`.
+On abort, `tm_clear_deferred_frees` frees only the `FreeNode` chain; user
+pointers are preserved (resurrected by the undo log).
 
 ### 8.9 Summary
 
-| Property | Intrusive list (current) | Non-intrusive list (proposed) |
-|----------|------------------------|------------------------------|
+| Property | Intrusive list (historical) | Non-intrusive list (current) |
+|----------|------------------------------|------------------------------|
 | Data corruption on abort | Yes — first 8 bytes overwritten | No |
 | Extra allocation per `free` | 0 | 1 × `malloc(sizeof(FreeNode))` |
 | `FreeNode` leak on abort | N/A (no node) | Freed in `tm_clear_deferred_frees` |
@@ -975,4 +952,141 @@ The `std::atomic_signal_fence` approach is chosen because it is:
 - **Portable**: Standard C++20 (backported to C++11 as `std::atomic_signal_fence`).
 - **Zero cost when not inlined**: No hardware fence; no effect when the
   function is a regular call.
+
+---
+
+## 10. Eager-Read Design Limitation (Write-Through / Undo-Log Backends)
+
+### 10.1 Problem: Address Dereference at Write Time
+
+In write-through (TinySTM WT) and eager-locking (SwissTM) backends, every
+write operation captures the **old value** at the target address for a
+write-set undo log.  This requires reading from $\ast\text{addr}$ at write
+time, before commit:
+
+**TinySTM WT** (`tinystm_wt.hpp:410`):
+```cpp
+// capture old value for undo log
+any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
+// write through to memory
+write_value_to_addr(addr, val, ValueType::UINT64);
+```
+
+**SwissTM** (`SwissTM.hpp:416`):
+```cpp
+e.old_value = read_value_from_addr((void*)addr, VT);
+// new value is buffered for lazy write-back at commit
+```
+
+If $\text{addr}$ is an invalid address (unmapped page, null, or
+wrap-around), the `read_value_from_addr` dereference produces a hardware
+fault (SIGSEGV or SIGBUS).  Write-back backends (WBCTL, TL2, NOrec) are
+**immune** because they buffer only the address in a write-set without
+dereferencing it:
+
+```cpp
+// WBCTL write_word_ctl — no dereference of addr
+tx->write_set[addr] = w;        // just store in map
+// actual dereference happens only at commit, after validation
+```
+
+### 10.2 Source of Invalid Addresses
+
+The always-instrument plugin policy replaces **all** load/store instructions
+in TX-annotated functions and their transitive clones with
+$\text{tm\_read}()$ / $\text{tm\_write}()$ calls.  When STL containers
+inside a TX undergo reallocation, the STL move constructor writes to
+moved-from object fields to set them to a valid empty state (e.g.
+$\text{M\_start} \leftarrow \text{nullptr}$).  These writes go through the
+instrumented clone of the move constructor and are TM-tracked to valid heap
+addresses (within the old buffer).
+
+However, subsequent code may compute addresses via $\text{GEP}$ from
+nullified pointers.  The LLVM optimiser or the post-instrumentation $-O3$
+pass can create code paths that generate addresses like
+$(\text{null}\;+\;4)$, $(\text{null}\;-\;24)$ (wrap-around to
+$0\text{xffffffffffffffe8}$), or $\text{null}$ itself.  When the TM runtime
+receives such an address in $\text{tm\_write}()$, the eager-read for the
+undo log dereferences it and crashes.
+
+**This is not a backend bug** — the addresses are genuinely invalid.  The
+write-back backends survive because they never dereference at write time;
+the invalid address sits harmlessly in a $\text{std::map}$ until commit,
+at which point write-back backends also skip low addresses via address
+guards (Section 10.4).
+
+### 10.3 Low-Address Safety Net and Its Correctness Gap
+
+All backends have a low-address guard in the write path:
+
+```cpp
+// WBCTL (tinystm_wbctl.hpp:608):
+if (addr == nullptr || (uint64_t)addr < 0x100000) return;
+
+// SwissTM (SwissTM.hpp:368):
+if ((uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 63)) return;
+
+// WT (tinystm_wt.hpp: — implicit via isStackAddress / lock lookup
+```
+
+For **write-back** backends, this guard is safe: addresses below 1 MB are
+simply not added to the write-set.  The corresponding stores (e.g. setting a
+moved-from container's internal pointer to null) are **silently dropped**.
+This is correct because:
+
+- If the TX **commits**, the null-pointer writes were to objects about to be
+  destroyed (moved-from elements in the old buffer).  The old buffer is freed
+  at commit time anyway, so the writes had no observable effect.
+- If the TX **aborts**, the undo log restores all container pointers to their
+  pre-transaction values, and the null-pointer writes on the moved-from
+  objects are irrelevant (the objects are "resurrected" with their original
+  pointer values).
+
+For **eager-read** backends (SwissTM, WT), the guard prevents the SIGSEGV
+but introduces a **correctness gap**: dropping the write means the undo log
+does not record the old value for that address.  If the TX later aborts, the
+undo log won't restore it, potentially leaving stale data.  More critically,
+the guard makes the backend silently skip writes that the TM protocol was
+expected to track, violating opacity for those addresses.
+
+### 10.4 Spec_Alloc / Deferred-Free Cleanup Ordering
+
+The ordering of cleanup on abort is:
+
+1. **Undo log rollback**: the backend iterates its write-log/undo-log and
+   writes old values back to memory.
+2. **siglongjmp** to the retry point in the TX function.
+3. **tm\_clear\_spec\_allocs**: frees all speculatively-allocated memory
+   (new buffers allocated during the TX).
+4. **tm\_clear\_deferred\_frees**: drops deferred-free entries (old buffers
+   freed during the TX are NOT freed — they are "resurrected").
+
+This ordering is correct for both write-through and write-back backends:
+- At step 1, all memory referenced by the undo log is still allocated
+  (spec-alloc buffers are not freed until step 3; deferred-free buffers were
+  never actually freed).
+- At step 3, the undo log has already restored container pointers to their
+  pre-transaction values, so freeing the new buffers is safe.
+- At step 4, the old buffers are now pointed-to by the restored container
+  pointers, so dropping their deferred-free entries (keeping them allocated)
+  is correct.
+
+The intrusive deferred-free-list corruption (Lemma 8.7) is orthogonal — it
+was a bug in the list data structure, not in the cleanup ordering.
+
+### 10.5 Summary
+
+| Property | Write-back (WBCTL, TL2, NOrec) | Eager-read / Write-through (SwissTM, WT) |
+|----------|--------|---------|
+| Dereference at write time | No | Yes (undo-log capture) |
+| Invalid address tolerance | Full (buffered, never read) | Crash (SIGSEGV) or guard-skip → correctness gap |
+| Spec_alloc/deferred-free ordering | Safe | Safe (same ordering) |
+| Low-address guard correctness | Safe (writes dropped) | Partial (crash prevention, but semantic gap) |
+| Intrusive free-list corruption | Orthogonal (already fixed) | Same |
+
+The fundamental limitation is that **eager-read for undo log** requires
+dereferencing the target address at write time, making it incompatible with
+the always-instrument approach when STL move operations create null-pointer
+addresses.  Write-back backends avoid this by deferring all address
+dereference to commit time.
 - **Simple**: One line per function.

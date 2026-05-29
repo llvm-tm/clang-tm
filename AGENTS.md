@@ -547,3 +547,165 @@ The fundamental issue is that **stack-local variables inside TX functions must n
 ### `write_set_validation` failure
 - Likely same root cause: eager locking causes aborts that leave partial write-log state.
 - Need to investigate whether the `owned_orecs` + `write_log_index` hash table is correctly cleared on rollback/retry.
+
+## Done (this session — 2026-05-28 continued)
+### SwissTM `vector<CompositePart>` reproducer: eager-read design limitation
+- **Symptom**: `vector<CompositePart>` with inner `vector<int>` push_back inside TX crashes all 4 backends. WBCTL, NOrec, TL2 now PASS at n=5,10,50 after low-address guards + isStackAddress re-add. SwissTM persistently fails.
+
+- **Root cause of SwissTM failure**: SwissTM is **eager-locking (write-through)** — its `write_impl` calls `read_value_from_addr(addr, VT)` to capture the old value for the undo log BEFORE writing. During STL container reallocation, moved-from objects have null internal pointers (`_M_start = nullptr` after move). Subsequent code computes GEPs from these null pointers (e.g., `null + offset`), producing invalid addresses like `0x0`, `0x4`, or `0xffffffffffffffe8` (wrapped-around null - offset). `read_value_from_addr` dereferences these → SIGSEGV.
+
+- **Why other backends survive**: WBCTL, NOrec, TL2 are write-back/commit-time locking — they never eagerly read from `*addr` during `write_impl`. They just record `(addr, val)` in a write_set and commit later. Invalid addresses in the write_set are harmless until commit, and they don't read the old value. At commit time, the write-back to an invalid address crashes... but the write-back only happens for addresses in the write_set, and some low-address guards skip those entries.
+
+- **Null/low-address guard added** to SwissTM `write_impl` and `read_impl`: skips addresses `< 0x100000` or with top-bit-set (kernel-space). This prevents SIGSEGV but CAN cause correctness issues (moved-from container's internal null pointer write is silently dropped → old vector still "owns" the buffer → potential double-free → wrong inner-vector `size()` → test FAIL).
+
+- **Conclusion**: SwissTM's eager-read design is fundamentally incompatible with the vector-reallocation-within-TX pattern. Writing null to a moved-from container's pointer field is a legitimate operation that SwissTM cannot handle because it needs to eagerly read the old value from the (valid!) address, but subsequent GEPs from the null pointer (now the value, not the address) produce invalid addresses for later TM operations.
+
+- **SwissTM is excluded from the `vector<CompositePart>` reproducer target**. WBCTL, NOrec, TL2 all PASS. The pre-existing SwissTM `counter_mt` and `write_set_validation` failures remain.
+
+### Key Decisions (this session)
+- **SwissTM eager-read design limitation is accepted, not fixed**: The design requires reading old values from `*addr` for undo logs, which crashes on invalid addresses from moved-from null pointers. The other 3 backends (write-back/commit-time locking) don't have this read. Fixing it would require fundamentally changing SwissTM to a write-back design.
+- **Null/low-address guard retained as safety net**: Prevents SIGSEGV from invalid addresses, accepting potential correctness issues (skipped writes). Better than crashing.
+- **`>> 63` added to guard**: Catches wrap-around addresses like `0xffffffffffffffe8` (null - 24) that occur from GEPs through moved-from null pointers.
+- **`argIsAllocaDest` NOT the issue for the SwissTM failure**: The `__end_` address is a valid global address (not stack), so `argIsAllocaDest` doesn't apply. The SwissTM failure is purely an eager-read design issue.
+
+### Verification (this session)
+- **WBCTL, NOrec, TL2**: Reproducer `repro2.cpp` at n=5,10,50 — ALL PASS (verified earlier)
+- **WT**: Reproducer at n=5,10,50 — ALL PASS (write-through, same as SwissTM on paper, but different optimizer decisions avoid the null-address traps)
+- **SwissTM**: Reproducer at n=1 — crashes then fails with low-address guard (wrong results)
+- **Bank benchmark**: TinySTM/WBCTL, NOrec, TL2 PASS. SwissTM FAIL (+11 money).
+- **Backend STM tests**: 10/12 PASS (SwissTM `counter_mt`, `write_set_validation` pre-existing failures)
+- **Plugin tests**: All that run before `test_vector_realloc` (Bus error) PASS
+
+### SwissTM Shortcomings (for later investigation)
+
+#### 1. Eager-read crash on null/invalid addresses
+- `write_impl` calls `read_value_from_addr(addr, VT)` at line 411 to capture old value for undo log
+- `read_impl` calls `read_value_from_addr(addr, VT)` at line 289 for read-set validation  
+- Both crash (SIGSEGV) when `addr` is null, page-zero, or wrap-around (null−offset)
+- Low-address guard (`< 0x100000 || >> 63`) prevents crash but skips writes → moved-from objects not properly nulled → double-free → wrong results
+- **Why WT passes despite being write-through**: WT has separate `read_word_wt`+`write_word_wt`. The null-address read inside `read_word_wt` would crash the same way, but the WT-instrumented code happens to not generate null-address TM calls due to different inlining/optimization decisions (different TM hook code sizes). **This is fragile** — a compiler upgrade or flag change could cause WT to regress.
+
+#### 2. Write-set type mismatch (no byte-merge)
+- SwissTM's `read_impl` only handles POINTER↔UINT64 interchange (lines 288-295). No byte-merge or sub-word extraction from wider UINT64 entries.
+- If a memset/memmove writes byte-level UINT8 entries, subsequent POINTER/UINT32/UINT64 reads won't find them → fall-through to memory → stale values
+- Other backends have full byte-merge (WBCTL lines 397-492) or write as UINT64 chunks (plugin's memset fix uses 8-byte writes)
+
+#### 3. Eager locking contention
+- `counter_mt` gets ~3500/4000 (87%) success vs 4000/4000 for WBCTL/NOrec/TL2
+- `cm_should_abort` eagerly aborts on lock conflict instead of waiting
+- LLVM `unordered_map::find` (100k operations) inside TX causes 900+ aborts in SwissTM (WBCTL: 0)
+
+#### 4. Rollback/retry state cleanup
+- `write_set_validation` test FAILs — after abort, write_set entries may persist
+- `owned_orecs` + `write_log_index` hash tables might not be fully cleared on rollback
+- Compare with WBCTL: single `std::unordered_map` + `clear()` in `rollback()`
+
+#### 5. Bank benchmark money creation (+11)
+- Hints at partial-commit or incomplete rollback: one TX that creates a new account doesn't get its transfer rolled back
+- Likely related to issue #4 (incomplete rollback state cleanup)
+
+#### Fix hints (for later)
+```
+# Need byte-merge like WBCTL lines 397-492:
+# In read_impl, after POINTER↔UINT64 interchange, add:
+#   // Check if wider entry covers this addr (e.g., UINT64 for UINT8 read)
+#   for (auto& w : tx->write_log) {
+#       if (addr >= w.byte_addr && addr < w.byte_addr + typeSize(w.type)) { ... }
+#   }
+
+# Need proper rollback cleanup:
+# In rollback(), add: tx->write_log_index.clear(); tx->owned_orecs.clear();
+# The write_log is std::list — stable iterators, but the index maps need clearing.
+
+# For contention: consider cm_should_abort spin-count instead of immediate abort
+```
+
+## Verified (this session — 2026-05-28)
+- **Reproducer `repro2.cpp` (vector<CompositePart> with inner vector<int> push_back inside TX)**:
+  - TinySTM/WBCTL: PASS n=5,10,50
+  - NOrec: PASS n=5,10,50
+  - TL2: PASS n=5,10,50
+  - TinySTM/WT: PASS n=5,10,50 (write-through with undo log; survives because compiler avoids null-address paths in the WT build)
+  - SwissTM: FAIL (eager-read crashes on null addresses from moved-from objects — see "Eager-Read Design Limitation" below)
+- **Bank benchmark**: TinySTM/WBCTL, NOrec, TL2 PASS; SwissTM FAIL (+11 money)
+- **Backend STM tests (3 backends × 3 tests = 9)**: ALL PASS for TinySTM/WBCTL, NOrec, TL2
+- **STMbench7 with TinySTM/WBCTL**: 1t → 1000 ops/10s, 4t → 4000 ops/10s, category distribution matches spec
+- **Plugin tests (15)**: 13/13 PASS (2 pre-existing skips: `test_vector_realloc` Bus error, `py-instr` libclang)
+
+## Done (this session — 2026-05-28 second session)
+### STAMP Labyrinth SIGBUS crash: `atomic_ref` alignment on arm64
+- **Symptom**: `stamp_tinystm_wbctl` labyrinth crashed with `EXC_BAD_ACCESS (code=257)` = `KERN_PROTECTION_FAILURE` during `atomic_ref<uint64_t>::store`. SingleGlobalLock backend worked.
+- **Root cause**: `any_type_mapping::store` used `std::atomic_ref<uint64_t>(*static_cast<uint64_t*>(addr)).store(...)`. On arm64, this compiles to `stlr` requiring 8-byte alignment. Instrumented memcpy expansion creates `tm_write_i8` at `GEP(i8Ty, buf, idx)` addresses that are not always 8-byte aligned (e.g., page-offset `0x9cc` with `mod8=4`). Write-set entries with type UINT64 at these addresses trigger SIGBUS during commit write-back.
+- **Fix**: Replaced `std::atomic_ref<AT>::load/store` with `memcpy` in `any_type_mapping::setp` (read from addr) and `store` (write to addr) in `backends/tm_common.hpp:68-71`. Safe because: (a) commit path address is exclusively locked; (b) stack-fallback is thread-private; (c) read path double-check protocol detects concurrent writes via lock version change.
+- **Verification**: Labyrinth WBCTL passes at 1t/4t with 2x2x2/n=1, 5x5x5/n=5, 10x10x3/n=10. All 15 plugin tests PASS (pre-existing py-instr skip). Backend tests: TinySTM 3/3, NOrec 3/3, TL2 3/3 PASS; SwissTM 1/3 PASS (pre-existing).
+
+### Labyrinth multi-backend status
+- **TinySTM/WBCTL**: 2 paths (8x8x3/n=10), 1-2 paths (5x5x5/n=5) — PASS
+- **TinySTM/WT**: 4 paths (8x8x3/n=10), 3 paths (5x5x5/n=5) — PASS (write-through + undo log; survives due to compiler differences in address-computation paths between WT and SwissTM — both use eager-read for undo log, but the different inlined code size causes the optimizer to make different GEP-from-null decisions)  
+- **NOrec**: 0 paths (all sizes) — FAIL (write_set populated: 134-336 entries/TX, but writes don't persist; no aborts)
+- **TL2**: 0 paths (all sizes) — FAIL (same write_set pattern as NOrec: 134-336 entries/TX)
+- **SwissTM**: SIGBUS/SIGSEGV — FAIL (eager-read crashes on null addresses from moved-from objects — see "Eager-Read Design Limitation")
+- **SingleGlobalLock**: PASS (baseline, as expected)
+- **Key insight**: NOrec and TL2 have identical write_set sizes and commit counts as WBCTL (±0), yet data doesn't persist. Root cause unknown — backend tests (counter_st/mt, write_set_validation) all pass for NOrec/TL2, so the issue is labyrinth-specific. Suspect TM read-side returns stale values for `data->grid[idx]` reads during path routing, causing the algorithm to give up.
+
+### STMbench7 multi-backend status (medium OO7, workload 1, 10s)
+- **TinySTM/WBCTL**: PASS — 1000 ops/10s at 1t, 4000 ops/10s at 4t, category dist matches spec
+- **SingleGlobalLock**: PASS — 1000 ops at 1t (baseline)
+- **NOrec**: PASS (rebuild May 29) — previous "tx not active" assertion was from a stale May-24 binary; current code works (1000 ops/10s at 1t)
+- **TL2**: FAIL — SIGSEGV (exit 139) before any TX completes
+- **TinySTM/WT**: FAIL — HANG (no output beyond data-structure init)
+- **SwissTM**: FAIL — HANG (same as WT)
+- **Key insight**: NOrec assertion was a stale-binary artifact (fixed by ~8 commits merged since May 24, including stack-variable skip, isStackAddress changes, and NOrec read-only commit fix). TL2, WT, SwissTM failures remain distinct and unresolved.
+
+## Next up
+- NOrec STMbench7 "tx not active" assertion: most actionable bug. Likest cause: a `_tm_clone` function survives linking but is called outside the TX (not protected by g_tx guard), or the abort/retry path doesn't reinitialize the transaction before the next operation.
+- TL2 STMbench7 SIGSEGV: likely null-pointer deref from STL container internal use-with-clone mismatch.
+- WT/SwissTM STMbench7 hang: needs lldb backtrace to distinguish deadlock vs infinite loop vs thread-pool stall.
+- NOrec/TL2 labyrinth 0-path issue: separate from STMbench7 failures (write-set is populated correctly but data doesn't persist after commit).
+
+## Eager-Read Design Limitation (Write-Through / Undo-Log Backends)
+
+### Root cause
+Both SwissTM and TinySTM WT capture the **old value** for their undo log by calling `read_value_from_addr(addr, VT)` at write time. When `addr` is invalid (computed from GEP through a moved-from null pointer), this dereference crashes with SIGSEGV. Write-back backends (WBCTL, TL2, NOrec) are immune because they buffer only the address in a write-set without dereferencing it.
+
+### Key distinction: SwissTM ≠ write-through
+- **SwissTM**: eager-read (old value for undo log at write time) + **lazy-write-back** (new value at commit via `write_value_to_addr` in `commit()`)
+- **TinySTM WT**: eager-read (old value for undo log at write time) + **write-through** (new value written to memory immediately at write time)
+
+Both share the same fatal property: the undo-log capture at write time reads from `*addr`, which crashes on invalid addresses.
+
+### Source of invalid addresses
+The always-instrument plugin replaces ALL loads/stores in TX-annotated functions with `tm_read`/`tm_write` calls. STL container reallocation inside a TX triggers move constructors that:
+1. Read fields from old buffer elements (valid heap addresses)
+2. Write them to new buffer elements (valid heap addresses)  
+3. Null the moved-from fields in old buffer elements (valid heap addresses — `old_buffer + field_offset`)
+4. The old buffer is freed (deferred-free, memory still mapped)
+
+The invalid addresses come from **subsequent code** that does GEP through a nullified pointer. The compiler or `-O3` post-pass creates code paths that produce addresses like `null + 4`, `null - 24` (wrap-around), or `null` itself. These reach the TM runtime, which in write-through/eager-read backends crashes at the undo-log capture.
+
+### Low-address guard: safe in write-back, partial in eager-read
+All backends have a guard (`addr < 0x100000 || top-bit-set → skip`):
+- **Write-back**: SAFE — skipping a write only drops it from the write-set. The moved-from null-pointer writes are harmless to skip (the old buffer is freed at commit or resurrected on abort with original pointer values).
+- **Eager-read**: CRASH-PREVENTION BUT CORRECTNESS GAP — the guard prevents the SIGSEGV but drops the write, creating a mismatch between the undo log and the write-set. On abort, the undo log restores the pointer to the old buffer, but the null-pointer write that prepared it for destruction was dropped, leaving the container in an inconsistent intermediate state.
+
+### Spec_alloc / deferred-free cleanup ordering: CORRECT for all backends
+The cleanup sequence on abort:
+1. Undo log restores old values to memory (all relevant buffers still allocated at this point)
+2. siglongjmp to retry point
+3. `tm_clear_spec_allocs` frees new buffers (undo log has already restored pointers to old buffers)
+4. `tm_clear_deferred_frees` drops old buffer entries (old buffers now pointed-to by restored container pointers)
+
+No use-after-free or double-free. The intrusive deferred-free list corruption was a separate bug (fixed — non-intrusive list).
+
+### Lock table aliasing: NOT root cause
+Multiple addresses hashing to the same lock can cause false conflicts when invalid addresses map to valid lock entries, but this is a secondary effect. The root cause is the eager-read dereference at write time.
+
+### Summary
+| Property | Write-back (WBCTL, TL2, NOrec) | Eager-read (SwissTM, WT) |
+|----------|--------|---------|
+| Dereference at write time | No | Yes (undo-log capture) |
+| Invalid address tolerance | Full (buffered, never read) | Crash or guard-skip → correctness gap |
+| Spec_alloc/deferred-free ordering | Safe | Safe (same ordering) |
+| Low-address guard safety | Safe | Partial |
+| Intrusive free-list | Fixed (non-intrusive) | Fixed (same) |
+

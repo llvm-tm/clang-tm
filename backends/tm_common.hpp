@@ -63,11 +63,11 @@ template <typename T> struct any_type_mapping;
 		static void set(any_type_t &t, T v) { t.M = v; }                                 \
 		static void setp(any_type_t &t, void *a)                                         \
 		{                                                                                \
-			t.AM = std::atomic_ref<AT>(*static_cast<AT *>(a)).load(std::memory_order_acquire); \
+			memcpy(&t.AM, a, sizeof(AT));                                                \
 		}                                                                                \
 		static void store(any_type_t &t, void *a)                                        \
 		{                                                                                \
-			std::atomic_ref<AT>(*static_cast<AT *>(a)).store(t.AM, std::memory_order_release); \
+			memcpy(a, &t.AM, sizeof(AT));                                                \
 		}                                                                                \
 	};
 
