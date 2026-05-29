@@ -14,6 +14,7 @@
 #define TL2_NEW_HPP
 
 #include <atomic>
+#include <cassert>
 #include <cstdint>
 #include <vector>
 #include <string.h>
@@ -302,7 +303,7 @@ public:
     template <typename T, DataType DT, typename AddrT>
     static void write_impl(Transaction* tx, AddrT addr, T val) {
         std::atomic_signal_fence(std::memory_order_seq_cst);
-        if (!tx || !tx->active) { *addr = val; return; }
+        assert(tx && tx->active);
 
         // Stack-address detection: writing to the stack would create write-set
         // entries for addresses that will be popped on function return, causing
@@ -371,7 +372,7 @@ public:
     // ---- Generic read implementation ----
     template <typename T, DataType DT, typename AddrT>
     static T read_impl(Transaction* tx, AddrT addr) {
-        if (!tx || !tx->active) return from_word<T>(to_word(*addr));
+        assert(tx && tx->active);
 
         // Stack-address detection: reading from the stack would create read-set
         // entries for stack addresses that hash to random locks, causing spurious

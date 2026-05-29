@@ -43,6 +43,19 @@ enum class ValueType : uint8_t {
 	POINTER = 7
 };
 
+inline unsigned type_size(ValueType t) {
+    switch (t) {
+        case ValueType::UINT8:   return 1;
+        case ValueType::UINT16:  return 2;
+        case ValueType::UINT32:
+        case ValueType::FLOAT:   return 4;
+        case ValueType::UINT64:
+        case ValueType::DOUBLE:
+        case ValueType::POINTER: return 8;
+    }
+    return 0;
+}
+
 struct any_type_t {
 	union {
 		uint8_t u1;

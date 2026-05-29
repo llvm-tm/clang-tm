@@ -140,7 +140,8 @@ begin()     //
 	tx->end_version = tx->start_version;
 	tx->active = true;
 	tx->read_only = true;
-	tx->abort_count = 0;
+	if (!tx->is_retry) tx->abort_count = 0;
+	tx->is_retry = false;
 
 	return true;
 }
@@ -154,9 +155,11 @@ abort_tx()  //
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
 	tx->unlock_held_locks_and_clear();
+	tx->abort_count++;
+	tx->is_retry = true;
+	stm::tm_token_release_if_held(tx->id);
 	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
 
-	tx->abort_count++;
 	if (tx->abort_count > 5) {
 		random_backoff();
 	}
@@ -171,8 +174,10 @@ deferred_abort() //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	tx->unlock_held_locks_and_clear();
 	tx->aborted = false;
-	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
 	tx->abort_count++;
+	tx->is_retry = true;
+	stm::tm_token_release_if_held(tx->id);
+	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
 	if (tx->abort_count > 5) {
 		random_backoff();
 	}
@@ -242,6 +247,7 @@ commit()    //
 		}
 	}
 
+	stm::tm_token_release();
 	tx->reset();
 	return true;
 }
@@ -323,6 +329,14 @@ read_word_etl(                                                //
 
 	while (true) {
 		if ((l & OWNED_MASK) != 0) {
+			// ── Soft-spin on held lock (token as tie-breaker) ──
+			if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 3)) {
+				while ((lock->get() & OWNED_MASK) != 0) {
+					TINY_STM_PAUSE();
+				}
+				l = lock->get();
+				continue;
+			}
 			tx->aborted = true;
 			return read_value_from_addr(addr, sz);
 		}
@@ -461,6 +475,17 @@ write_word_etl(                                               //
 
 	if (lock->is_locked()) {
 		if (lock->get_owner() != tx->id) {
+			// Soft-spin (token as tie-breaker for deadlocks)
+			if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 3)) {
+				while (lock->is_locked() && lock->get_owner() != tx->id) {
+					TINY_STM_PAUSE();
+				}
+				if (lock->get_owner() != tx->id) {
+					if (!lock->try_lock(tx->id))
+						abort_tx();
+				}
+				goto acquired_or_self;
+			}
 			tx->aborted = true;
 			return;
 		}
@@ -469,12 +494,21 @@ write_word_etl(                                               //
 			if (!validate())
 				abort_tx();
 			if (!lock->try_lock(tx->id)) {
-				tx->aborted = true;
-				return;
+				if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 3)) {
+					while (lock->is_locked()) {
+						TINY_STM_PAUSE();
+					}
+					if (!lock->try_lock(tx->id))
+						abort_tx();
+				} else {
+					tx->aborted = true;
+					return;
+				}
 			}
 		}
 	}
 
+acquired_or_self:
 	// locked — deduplicate locks_held
 	{
 		bool already_held = false;

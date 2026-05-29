@@ -284,6 +284,7 @@ fi
 if [ "$MODE" = "compile-only" ]; then
     # Compile source to bitcode (no instrumentation)
     COMPILE_CXXFLAGS=("${CXXFLAGS[@]+"${CXXFLAGS[@]}"}")
+    [ -d "$BACKENDS_DIR" ] && COMPILE_CXXFLAGS+=("-I$BACKENDS_DIR")
     [ -n "${OPT_LEVEL:-}" ] && COMPILE_CXXFLAGS+=("$OPT_LEVEL")
     $CXX -std=c++20 "${COMPILE_CXXFLAGS[@]}" -emit-llvm -c "$INPUT" -o "$OUTPUT"
     exit $?

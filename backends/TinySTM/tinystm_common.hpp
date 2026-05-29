@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "tm_common.hpp"
+#include "../tm_spin_token.hpp"
 #include <random>
 #include <thread>
 
@@ -224,6 +225,7 @@ public:
 	bool aborted = false;
 	bool read_only = true;
 	int abort_count = 0;
+	bool is_retry = false;
 	int nesting = 1;
 	// ═══════════════════════════════════════════════════════════════
 	//  CRITICAL: These containers use the STANDARD allocator.
@@ -247,6 +249,7 @@ public:
 		active = false;
 		read_only = true;
 		abort_count = 0;
+		is_retry = false;
 		clear();
 	}
 
@@ -283,9 +286,7 @@ inline T tm_read(            //
     T *addr                  //
 )
 {
-	if (!tx || !tx->active) {
-		return *addr;
-	}
+	assert(tx && tx->active);
 
 	any_type_t r = read_word(tx, (void *)addr, SZ);
 	return return_any_type<T>(r);
@@ -306,10 +307,7 @@ tm_write(                    //
     T val                    //
 )
 {
-	if (!tx || !tx->active) {
-		*addr = val;
-		return;
-	}
+	assert(tx && tx->active);
 
 	any_type_t w;
 	fill_any_type(w, &val, SZ);

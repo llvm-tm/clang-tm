@@ -124,7 +124,8 @@ begin()     //
 	tx->end_version = tx->start_version;
 	tx->active = true;
 	tx->read_only = true;
-	tx->abort_count = 0;
+	if (!tx->is_retry) tx->abort_count = 0;
+	tx->is_retry = false;
 
 	return true;
 }
@@ -139,6 +140,8 @@ abort_tx(const char *loc="")  //
 
 	tx->unlock_held_locks_and_clear();
 	tx->abort_count++;
+	tx->is_retry = true;
+	stm::tm_token_release_if_held(tx->id);
 	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
 	if (tx->abort_count < 3 || tx->abort_count % 10 == 0) {
 		fprintf(stderr, "[ABORT tx=%llu count=%d at=%s]\n",
@@ -220,6 +223,9 @@ commit()    //
 			if (owner != tx->id) {                // skip self-locks
 				while (!lock->try_lock(tx->id)) { // if lock is busy...
 					if (!extend()) {              // ... try to validate the read-set...
+						if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 5)) {
+							continue;
+						}
 						abort_tx("commit_lock");
 					}
 				}
@@ -304,6 +310,7 @@ commit()    //
 		tx->locks_held.clear();
 	}
 
+	stm::tm_token_release();
 	tx->reset();
 	// printf("THR%llu commit, active=%i\n", tx->id, tx->active);
 	return true;
@@ -574,6 +581,9 @@ read_from_memory:
 			if (extend()) {
 				continue; // needs to read again
 			} else {
+				if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 5)) {
+					continue;
+				}
 				abort_tx("read_version_check");
 			}
 		}
@@ -604,10 +614,6 @@ write_word_ctl(                                               //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
-
-	if (addr == nullptr || (uint64_t)addr < 0x100000) {
-		return;
-	}
 
 	// Stack-address detection: writing to the stack via tm_write would create
 	// a write-set entry that gets written back at commit time — by then the
@@ -750,6 +756,10 @@ write_word_ctl(                                               //
 		TINYSTM_ASSERT(owner != tx->id, "WBCTL only locks at commit time");
 
 		if (is_locked && !validate()) {
+			// Read-set invalid — try token before aborting
+			if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 5)) {
+				continue;
+			}
 			abort_tx("write_lock_spin_validate");
 		}
 

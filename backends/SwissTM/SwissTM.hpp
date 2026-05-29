@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cassert>
 #include <cstdint>
 #include <vector>
 #include <list>
@@ -15,8 +16,10 @@
 #include <cstdlib>
 #include <execinfo.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include "../tm_common.hpp"
+#include "../tm_spin_token.hpp"
 
 namespace swisstm
 {
@@ -59,16 +62,18 @@ struct WriteLogEntry {
 };
 
 struct ReadLogEntry {
+    OwnershipRecord* orec;
     void* byte_addr;
     word_t* word_addr;
     word_t version;
+    word_t old_version; // pre-lock r_lock value captured at Phase 1
     ValueType type;
-    OwnershipRecord* orec;
 };
 
 struct TxDescriptor {
     bool active = false;
     bool aborted = false;
+    int64_t id = 0;
     word_t valid_ts = 0;
     word_t cm_ts = 0;
     int write_count = 0;
@@ -215,6 +220,7 @@ public:
         }
         tx->aborted = true;
         tx->succ_abort_count++;
+        stm::tm_token_release_if_held(tx->id);
         if (tx->succ_abort_count > 5) {
             cm_on_rollback(tx);
         }
@@ -238,9 +244,6 @@ public:
     template <typename T, ValueType VT>
     static T read_impl(T* addr, TxDescriptor* tx) {
         if (!tx || !tx->active) return *addr;
-        // Low-address guard: moved-from null internal pointers may cause reads
-        // from page-zero or wrap-around (null - small_offset) addresses.
-        if ((uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 63)) return T{};
 
         word_t* waddr = get_word_addr(addr);
         OwnershipRecord* orec = get_orec(waddr);
@@ -293,10 +296,29 @@ public:
 	            if (log_entry->type == ValueType::UINT64)
 	                return reinterpret_cast<void*>(log_entry->new_value.u8);
 	        }
-	    }
-	}
+        }
+    }
 
-        word_t version;
+    // Byte-merge: scan write_log for entries whose address range
+    // covers `addr`.  This handles the common case where the plugin
+    // writes UINT64 via tm_write_i8 (memset/memmove expansion) and
+    // a subsequent tm_read_i4/tm_read_ptr reads a sub-range.
+    {
+        uintptr_t r = (uintptr_t)addr;
+        unsigned rsz = stm::type_size(VT);
+        for (auto& w : tx->write_log) {
+            uintptr_t wa = (uintptr_t)w.byte_addr;
+            unsigned wsz = stm::type_size(w.type);
+            if (r >= wa && r + rsz <= wa + wsz) {
+                size_t off = r - wa;
+                T result;
+                memcpy(&result, (uint8_t*)&w.new_value + off, sizeof(T));
+                return result;
+            }
+        }
+    }
+
+    word_t version;
         while (true) {
             version = orec->r_lock.load(std::memory_order_acquire);
             if (version == READ_LOCKED) {
@@ -353,35 +375,14 @@ public:
     static void write_impl(T* addr, T val, TxDescriptor* tx) {
         std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
-        // Low-address guard: moved-from objects during vector reallocation
-        // may have null internal pointers.  When the moved-from object is
-        // later accessed, code may try to read/write through these null
-        // pointers (including at small offsets like 0x4, 0x8).  SwissTM
-        // eagerly reads the old value from *addr for the undo log — a
-        // page-zero address would crash.
-        // NOTE: This guard is a safety net.  It prevents SIGSEGV but may
-        // cause correctness issues (e.g., the null-pointer write that clears
-        // a moved-from container's internal state is silently dropped, which
-        // can lead to double-free).  The fundamental issue is SwissTM's
-        // eager-read design: it cannot safely handle writes to invalid
-        // addresses that arise during STL container reallocation inside TXs.
-        if ((uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 63)) return;
+        // SwissTM eagerly reads *addr for the undo log.  The plugin never
+        // generates null-address TM calls (verified via IR analysis), so
+        // any null-address reaching here is a bug elsewhere, not something
+        // to silently swallow.
         word_t* waddr = get_word_addr(addr);
         OwnershipRecord* orec = get_orec(waddr);
 
-        auto typeSize = [](ValueType t) -> unsigned {
-            switch (t) {
-            case ValueType::UINT8:   return 1;
-            case ValueType::UINT16:  return 2;
-            case ValueType::UINT32:  return 4;
-            case ValueType::FLOAT:   return 4;
-            case ValueType::UINT64:  return 8;
-            case ValueType::POINTER: return 8;
-            case ValueType::DOUBLE:  return 8;
-            default:                 return 0;
-            }
-        };
-
+        unsigned sz_bytes = stm::type_size(VT);
         // Step 1: O(1) hash map lookup for existing (addr, type) entry
         {
             auto idx_it = tx->write_log_index.find(addr);
@@ -395,13 +396,10 @@ public:
 
         // Step 2: Check if a wider entry already covers this address
         {
-            unsigned sz_bytes = typeSize(VT);
+            unsigned sz_bytes = stm::type_size(VT);
             auto idx_it = tx->write_log_index.find(addr);
             if (idx_it != tx->write_log_index.end() && idx_it->second->type != VT) {
-                // Even though types differ, if the existing type spans the same
-                // or more bytes at this word-aligned address, skipping this narrower
-                // write is safe — the wider entry already captures the full value.
-                if (typeSize(idx_it->second->type) >= sz_bytes) {
+                if (stm::type_size(idx_it->second->type) >= sz_bytes) {
                     tx->write_count++;
                     cm_on_write(tx);
                     return;
@@ -433,6 +431,14 @@ public:
             if (!is_locked_by(w_lock_val, tx)) {
                 while (true) {
                     if (is_locked(w_lock_val)) {
+                        // Token as tie-breaker for deadlocks/livelocks
+                        if (stm::tm_token_soft_spin(tx->succ_abort_count, tx->id, 3)) {
+                            while (is_locked(orec->w_lock.load(std::memory_order_relaxed))) {
+                                TINY_STM_PAUSE();
+                            }
+                            w_lock_val = orec->w_lock.load(std::memory_order_acquire);
+                            continue;
+                        }
                         if (cm_should_abort(tx, orec)) {
                             rollback(tx);
                             return;
@@ -506,38 +512,80 @@ public:
             for (auto& we : tx->write_log) {
                 we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
             }
+            stm::tm_token_release_if_held(tx->id);
             tx->active = false;
             return;
         }
 
         if (tx->write_log.empty()) {
             tx->active = false;
+            stm::tm_token_release_if_held(tx->id);
             return;
         }
 
+        // Phase 1: acquire read-locks and capture pre-lock version.
+        // Track already-locked orecs to handle duplicate read_set entries
+        // (adjacent 4-byte values in the same 8-byte word map to the same
+        // orec).  Without dedup, the second load gets READ_LOCKED from our
+        // own store, giving old_version=READ_LOCKED ≠ re.version → false
+        // abort → siglongjmp retry → infinite loop at 1+ threads.
+        std::unordered_map<OwnershipRecord*, word_t> locked_orecs;
         for (auto& re : tx->read_set) {
-            re.orec->r_lock.store(READ_LOCKED, std::memory_order_release);
+            auto it = locked_orecs.find(re.orec);
+            if (it != locked_orecs.end()) {
+                re.old_version = it->second;
+            } else {
+                word_t old = re.orec->r_lock.load(
+                    std::memory_order_relaxed);
+                re.orec->r_lock.store(
+                    READ_LOCKED,
+                    std::memory_order_release);
+                re.old_version = old;
+                locked_orecs[re.orec] = old;
+            }
         }
 
-        word_t ts = commit_ts.fetch_add(1, std::memory_order_relaxed) + 1;
+        word_t ts = commit_ts.fetch_add(1, std::memory_order_acq_rel) + 1;
 
-        if (ts > tx->valid_ts + 1 && !validate(tx)) {
+        // Phase 3: validate read-set using captured old_versions.
+        // If another TX committed since our last extend (ts > valid_ts + 1),
+        // check each entry's old_version against the observed version.
+        if (ts > tx->valid_ts + 1) {
             for (auto& re : tx->read_set) {
-                re.orec->r_lock.store(re.version, std::memory_order_release);
+                if (re.old_version == re.version)
+                    continue;
+                // old_version might be READ_LOCKED (concurrent TX's Phase 1)
+                // or a different version (concurrent commit).  In either case
+                // the orec was touched by another TX.  If we hold the
+                // write-lock ourselves, it's fine — otherwise abort.
+                bool self_locked = false;
+                for (auto& we : tx->write_log) {
+                    if (we.orec == re.orec) { self_locked = true; break; }
+                }
+                if (!self_locked) {
+                    for (auto& re2 : tx->read_set) {
+                        re2.orec->r_lock.store(
+                            re2.old_version,
+                            std::memory_order_release);
+                    }
+                    for (auto& we : tx->write_log) {
+                        we.orec->w_lock.store(
+                            UNLOCKED, std::memory_order_release);
+                    }
+                    rollback(tx);
+                    return;
+                }
             }
-            for (auto& we : tx->write_log) {
-                we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
-            }
-            rollback(tx);
-            return;
         }
 
+        // Phase 4 + 5: write-back and release locks
         for (auto& we : tx->write_log) {
             write_value_to_addr(we.byte_addr, we.new_value, we.type);
             we.orec->r_lock.store(ts, std::memory_order_release);
             we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
         }
 
+        // Release read-only orecs (not in write-log)
         for (auto& re : tx->read_set) {
             bool found = false;
             for (auto& we : tx->write_log) {
@@ -548,6 +596,7 @@ public:
             }
         }
 
+        stm::tm_token_release();
         tx->active = false;
     }
 };
@@ -566,7 +615,10 @@ __thread sigjmp_buf *jmpbuf = nullptr;
 inline void init() { STM::init(); }
 
 inline void init_thread() {
-    if (!current_tx) current_tx = new TxDescriptor();
+    if (!current_tx) {
+        current_tx = new TxDescriptor();
+        current_tx->id = (int64_t)pthread_self();
+    }
 }
 
 inline void exit_thread() {
