@@ -83,7 +83,7 @@ TEST_NAMES := test_types test_memtest test_threads test_persist test_retry test_
               test_init_no_tx \
               test_simple_vector test_vec_push \
                test_alloc_stress_manual test_manual_tx \
-               test_treap_tx test_realloc_crash
+               test_treap_tx test_realloc_crash test_std_queue
 
 RACE_TEST_NAMES := test_task_queue_race test_parent_set_race test_counter_race
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))
@@ -179,6 +179,11 @@ $(addprefix $(BIN_DIR)/,$(SWISSTM_TESTS)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(B
 	  $(DEFAULT_LINK_FLAGS) \
 	  -I $(BACKENDS_DIR)/SwissTM -I $(BACKENDS_DIR) $< -o $@
 
+# TL2-backed test (std::queue reproducer — separate target from WBCTL default)
+$(BIN_DIR)/test_std_queue_tl2: $(OUT_DIR)/test_std_queue.opt.bc $(BACKENDS_DIR)/runtimes/tl2_runtime.cpp | $(BIN_DIR)
+	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/runtimes/tl2_runtime.cpp \
+	  $(DEFAULT_LINK_FLAGS) -I $(BACKENDS_DIR)/TL2 -I $(BACKENDS_DIR) $< -o $@
+
 # Race tests (SingleGlobalLock runtime)
 RACE_TEST_BINS := $(addprefix $(BIN_DIR)/,$(RACE_TEST_NAMES))
 $(RACE_TEST_BINS): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp | $(BIN_DIR)
@@ -198,8 +203,8 @@ $(BIN_DIR)/test_persist_sgl: $(OUT_DIR)/test_persist.opt.bc $(BACKENDS_DIR)/runt
 ll: all $(TEST_LLS) $(OPT_LLS)
 
 # Convenience targets: make test_foo -> make bin/test_foo
-.PHONY: $(TEST_NAMES) $(RACE_TEST_NAMES) test_persist_sgl
-$(TEST_NAMES) $(RACE_TEST_NAMES) test_persist_sgl: %: $(BIN_DIR)/%
+.PHONY: $(TEST_NAMES) $(RACE_TEST_NAMES) test_persist_sgl test_std_queue_tl2
+$(TEST_NAMES) $(RACE_TEST_NAMES) test_persist_sgl test_std_queue_tl2: %: $(BIN_DIR)/%
 
 test: all $(TEST_PROGS) $(RACE_TEST_BINS) $(BIN_DIR)/test_persist_sgl
 

@@ -181,8 +181,13 @@ private:
     
     static void bloom_set(Transaction* tx, word_t* addr) {
         uintptr_t a = (uintptr_t)addr;
-        uint64_t hash = (a ^ (a >> 17)) & 63;
-        tx->bloom_filter |= (1ULL << hash);
+        // Set bloom bits for all 8 bytes that the write covers (max width).
+        // Without this, sub-offset reads (e.g., UINT32 at addr+4 from a UINT64
+        // write at addr+0) miss the bloom filter and skip the write-set scan.
+        for (unsigned off = 0; off < 8; off++) {
+            uint64_t hash = ((a + off) ^ ((a + off) >> 17)) & 63;
+            tx->bloom_filter |= (1ULL << hash);
+        }
     }
     
     static bool bloom_might_contain(Transaction* tx, word_t* addr) {
@@ -423,6 +428,28 @@ public:
                 }
                 if (entry_sz == 2 && req_sz == 1) {
                     return from_word<T>((uint8_t)(e.new_value() & 0xFF));
+                }
+            }
+            // Wider-entry covering: scan for entries that START BEFORE the read
+            // address and span past it (e.g., UINT64 at addr+0 covering UINT32 at
+            // addr+4).  This happens when the plugin expands memcpy/memset as
+            // 8-byte UINT64 writes but individual fields are read at sub-offsets.
+            {
+                unsigned req_sz2 = swapSize(DT);
+                for (auto& e : tx->write_set) {
+                    if (e.addr == (word_t*)addr) continue; // handled above
+                    unsigned entry_sz = swapSize(e.dtype);
+                    if (entry_sz == 0 || entry_sz <= req_sz2) continue;
+                    // Check if addr falls within [e.addr, e.addr+entry_sz)
+                    auto e_start = (uintptr_t)e.addr;
+                    auto r_addr  = (uintptr_t)addr;
+                    if (r_addr >= e_start && r_addr < e_start + entry_sz) {
+                        unsigned offset = (unsigned)(r_addr - e_start);
+                        word_t shifted = e.new_value() >> (offset * 8);
+                        word_t mask = (req_sz2 == 8) ? ~0ULL :
+                                      ((1ULL << (req_sz2 * 8)) - 1);
+                        return from_word<T>(shifted & mask);
+                    }
                 }
             }
             // General byte-merge: wider read from UINT8 entries at consecutive bytes
