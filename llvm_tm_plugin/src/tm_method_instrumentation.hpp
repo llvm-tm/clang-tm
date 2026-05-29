@@ -352,7 +352,7 @@ static void instrumentLoadsStoresInFunction(Function *F,
             if (!CB || CB->getCalledFunction() != Parent) continue;
             if (Arg->getArgNo() >= CB->arg_size()) { allAlloca = false; break; }
             const Value *Actual = CB->getArgOperand(Arg->getArgNo())->stripPointerCasts();
-            Value *Base = getBaseObjectNoLoad(const_cast<Value *>(Actual));
+            const Value *Base = getBaseObjectNoLoad(Actual);
             if (isa<AllocaInst>(Base)) {
                 continue;
             }

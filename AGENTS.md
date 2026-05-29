@@ -709,3 +709,43 @@ Multiple addresses hashing to the same lock can cause false conflicts when inval
 | Low-address guard safety | Safe | Partial |
 | Intrusive free-list | Fixed (non-intrusive) | Fixed (same) |
 
+## Done (this session — 2026-05-28)
+
+### Root cause verified: plugin does NOT generate null-address TM calls
+
+Instrumented IR analysis of `test_realloc_crash` (`/tmp/test_realloc_crash.instr.ll` — 4280 lines) was traced through every cloned function in the reallocation chain. **Conclusion: the current plugin generates zero null-address TM calls for the `vector<CompositePart>` realloc pattern.** Every GEP uses valid heap addresses.
+
+**Key functions verified no null addresses:**
+- `_M_realloc_insert_tm_clone` for `vector<AtomicPart>` (line 3773): reads `_M_start`/`_M_finish` from vector metadata (valid heap), allocates new buffer, constructs at insertion point, calls `_S_relocate_tm_clone` twice (old→new), deallocates old buffer, writes back pointers to vector.
+- `_S_relocate_tm_clone` → `__relocate_a_1_tm_clone` for `AtomicPart` (line 3713): per-element loop calls `__relocate_object_a_tm_clone(dest=new_buffer, src=old_buffer)`. Both dest and src are valid heap addresses. Old buffer not freed until after both relocates complete.
+- `AtomicPartC2EOS__tm_clone` (line 3015): copies 24 scalar bytes via 8-byte TM reads/writes, then calls `vector<int>::move_constructor_tm_clone` (line 3867) which copies 3 pointer fields then zeroes source via `tm_write_i8(source_addr+0/8/16, 0)`. All valid heap addresses — source is within old buffer.
+- `__new_allocator::deallocate_tm_clone` (line 3058): calls `tm_free` on old buffer (deferred free). Null check present.
+- `__relocate_a_1_tm_clone` for `int` (bitwise-relocatable, line 4064): reads from old buffer (valid) via `tm_read_i8`, writes to new buffer (valid) via `tm_write_i8`.
+
+**The null-address vulnerability is purely a backend issue** — if ANY TM call (from any source) receives an address `< 0x100000` or wrap-around null, the backends respond differently:
+
+| Backend | r/w design | null-addr guard | Result |
+|---------|-----------|----------------|--------|
+| WBCTL | write-back (locks at commit) | `addr < 0x100000` skip | PASS — write silently dropped (safe for moved-from null ptr writes) |
+| SwissTM | eager-read + lazy-write-back | `addr < 0x100000 \|\| >> 63` skip | PASS but correctness gap (write dropped, undo-log mismatch on abort) |
+| WT | eager-read + write-through | **NONE** | CRASH — `read_word_wt` calls `read_value_from_addr(aligned, UINT64)` which dereferences null |
+| TL2 | write-back (locks at commit) | **NONE** | CRASH — `write_impl` calls `to_word(*addr)` for undo-log, dereferences null |
+| NOrec | write-back (no locks) | **NONE** | CRASH — `commit()` calls `write_value_to_addr(w.addr)` writes back to null while holding global_lock |
+
+**Reproducer**: `test_eager_read_null_address.cpp` (fork-based, 6 near-null addresses). Build and run:
+```bash
+make -C backends/tests all -j4
+for b in tl2 tinystm wt norec swisstm; do
+  echo "=== $b ==="; ./backends/tests/bin/$b/eager_read_null_address; echo
+done
+```
+
+### Const-cast compilation fix
+`llvm_tm_plugin/src/tm_method_instrumentation.hpp:355`: Changed `Value *Base = getBaseObjectNoLoad(const_cast<Value *>(Actual))` to `const Value *Base = getBaseObjectNoLoad(Actual)` — LLVM 22's `const Value *` overload matched instead of the `Value *` overload, fixing a const-correctness compilation error.
+
+### Updated Makefile
+`backends/tests/Makefile`: Added `wt` backend (`-DDESIGN_WT -DTM_BACKEND_TINYSTM`, using `TinySTM_runtime.cpp`), `TM_BACKEND_*` defines for all non-TinySTM backends, `eager_read_null_address` to `TESTS`, removed `tail -1` from `run-%` target for full output.
+
+### New test
+`backends/tests/test_eager_read_null_address.cpp`: 126 lines — fork-based isolation for 6 test addresses (0x0, 0x4, 0x8, 0x10, 0x100, 0xFFFFFFE8). Each child process calls `tm_write_i4` inside a TX. SIGSEGV handler uses `siglongjmp` for clean exit. Parent reports PASS/CRASH per address. Tests all 5 backends (tl2, tinystm, wt, norec, swisstm).
+
