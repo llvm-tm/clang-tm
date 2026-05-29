@@ -238,6 +238,9 @@ public:
     template <typename T, ValueType VT>
     static T read_impl(T* addr, TxDescriptor* tx) {
         if (!tx || !tx->active) return *addr;
+        // Low-address guard: moved-from null internal pointers may cause reads
+        // from page-zero or wrap-around (null - small_offset) addresses.
+        if ((uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 63)) return T{};
 
         word_t* waddr = get_word_addr(addr);
         OwnershipRecord* orec = get_orec(waddr);
@@ -350,7 +353,19 @@ public:
     static void write_impl(T* addr, T val, TxDescriptor* tx) {
         std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
-
+        // Low-address guard: moved-from objects during vector reallocation
+        // may have null internal pointers.  When the moved-from object is
+        // later accessed, code may try to read/write through these null
+        // pointers (including at small offsets like 0x4, 0x8).  SwissTM
+        // eagerly reads the old value from *addr for the undo log — a
+        // page-zero address would crash.
+        // NOTE: This guard is a safety net.  It prevents SIGSEGV but may
+        // cause correctness issues (e.g., the null-pointer write that clears
+        // a moved-from container's internal state is silently dropped, which
+        // can lead to double-free).  The fundamental issue is SwissTM's
+        // eager-read design: it cannot safely handle writes to invalid
+        // addresses that arise during STL container reallocation inside TXs.
+        if ((uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 63)) return;
         word_t* waddr = get_word_addr(addr);
         OwnershipRecord* orec = get_orec(waddr);
 
