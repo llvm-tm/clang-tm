@@ -9,7 +9,7 @@ RUNTIME_DIR := ../runtimes
 INC_BASE := -I.. -I$(RUNTIME_DIR)
 
 # ── Backend definitions ────────────────────────────────────────────
-BACKENDS := tl2 tinystm wt norec swisstm nvhtm spht
+BACKENDS := tl2 tinystm wt wbetl norec swisstm nvhtm spht
 
 INC_tl2     := $(INC_BASE) -I../TL2
 RUNTIME_tl2 := $(RUNTIME_DIR)/tl2_runtime.cpp
@@ -22,6 +22,10 @@ FLAGS_tinystm := -DDESIGN_WBCTL -DTM_BACKEND_TINYSTM
 INC_wt := $(INC_BASE) -I../TinySTM
 RUNTIME_wt := $(RUNTIME_DIR)/TinySTM_runtime.cpp
 FLAGS_wt := -DDESIGN_WT -DTM_BACKEND_TINYSTM
+
+INC_wbetl := $(INC_BASE) -I../TinySTM
+RUNTIME_wbetl := $(RUNTIME_DIR)/TinySTM_runtime.cpp
+FLAGS_wbetl := -DDESIGN_WBETL -DTM_BACKEND_TINYSTM
 
 INC_norec   := $(INC_BASE) -I../NOrec
 RUNTIME_norec := $(RUNTIME_DIR)/NOrec_runtime.cpp

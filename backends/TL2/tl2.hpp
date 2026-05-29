@@ -325,10 +325,8 @@ public:
             }
         };
 
-        // Step 1: One entry per address — if any entry already exists at this
-        // address (any type), reuse it by updating dtype and new_value. The
-        // old_value stays (captured from original memory on first write),
-        // preventing rollback from restoring a stale intermediate value.
+        // One entry per address — if any entry already exists at this address,
+        // reuse it by updating dtype and new_value.
         for (auto& e : tx->write_set) {
             if (e.addr == (word_t*)addr) {
                 e.dtype = DT;
@@ -340,7 +338,6 @@ public:
         WriteSetEntry e;
         e.addr = (word_t*)addr;
         e.dtype = DT;
-        e.set_old(to_word(*addr));
         e.set_new(to_word(val));
         tx->write_set.push_back(e);
         bloom_set(tx, (word_t*)addr);
@@ -583,39 +580,10 @@ public:
     static void abort_tx(Transaction* tx) {
         if (!tx) return;
         
+        // TL2 is write-back — values only reach memory during commit step 7.
+        // On abort, no writes were applied to memory, so we just release guards
+        // and retry.  No old-value restore needed.
         for (auto& e : tx->write_set) {
-            // Restore old value before releasing lock. TL2 is write-through
-            // (writes applied to memory during commit), so on abort we must
-            // undo any writes that may have been applied before the abort.
-            switch (e.dtype) {
-                case DataType::UINT8:
-                    *(uint8_t*)e.addr = (uint8_t)e.old_value();
-                    break;
-                case DataType::UINT16:
-                    *(uint16_t*)e.addr = (uint16_t)e.old_value();
-                    break;
-                case DataType::UINT32:
-                    *(uint32_t*)e.addr = (uint32_t)e.old_value();
-                    break;
-                case DataType::FLOAT:
-                {
-                    uint32_t bits = (uint32_t)e.old_value();
-                    *(float*)e.addr = *(float*)&bits;
-                }
-                    break;
-                case DataType::UINT64:
-                    *(uint64_t*)e.addr = (uint64_t)e.old_value();
-                    break;
-                case DataType::DOUBLE:
-                {
-                    uint64_t bits = e.old_value();
-                    *(double*)e.addr = *(double*)&bits;
-                }
-                    break;
-                case DataType::PTR:
-                    *(word_t*)e.addr = e.old_value();
-                    break;
-            }
             release_guard(e.addr);
         }
         
