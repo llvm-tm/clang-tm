@@ -9,7 +9,7 @@ RUNTIME_DIR := ../runtimes
 INC_BASE := -I.. -I$(RUNTIME_DIR)
 
 # ── Backend definitions ────────────────────────────────────────────
-BACKENDS := tl2 tinystm wt norec swisstm
+BACKENDS := tl2 tinystm wt norec swisstm nvhtm spht
 
 INC_tl2     := $(INC_BASE) -I../TL2
 RUNTIME_tl2 := $(RUNTIME_DIR)/tl2_runtime.cpp
@@ -30,6 +30,14 @@ FLAGS_norec := -DTM_BACKEND_NOREC
 INC_swisstm := $(INC_BASE) -I../SwissTM
 RUNTIME_swisstm := $(RUNTIME_DIR)/SwissTM_runtime.cpp
 FLAGS_swisstm := -DTM_BACKEND_SWISSTM
+
+INC_nvhtm := $(INC_BASE) -I../NVHTM
+RUNTIME_nvhtm := $(RUNTIME_DIR)/NVHTM_runtime.cpp
+FLAGS_nvhtm := -DTM_BACKEND_NVHTM -mrtm
+
+INC_spht := $(INC_BASE) -I../SPHT
+RUNTIME_spht := $(RUNTIME_DIR)/SPHT_runtime.cpp
+FLAGS_spht := -DTM_BACKEND_SPHT -mrtm
 
 # ── Test source files ──────────────────────────────────────────────
 TESTS := counter_st counter_mt write_set_validation eager_read_null_address
