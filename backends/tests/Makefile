@@ -9,23 +9,30 @@ RUNTIME_DIR := ../runtimes
 INC_BASE := -I.. -I$(RUNTIME_DIR)
 
 # ── Backend definitions ────────────────────────────────────────────
-BACKENDS := tl2 tinystm norec swisstm
+BACKENDS := tl2 tinystm wt norec swisstm
 
 INC_tl2     := $(INC_BASE) -I../TL2
 RUNTIME_tl2 := $(RUNTIME_DIR)/tl2_runtime.cpp
+FLAGS_tl2   := -DTM_BACKEND_TL2
 
 INC_tinystm := $(INC_BASE) -I../TinySTM
 RUNTIME_tinystm := $(RUNTIME_DIR)/TinySTM_runtime.cpp
-FLAGS_tinystm := -DDESIGN_WBCTL
+FLAGS_tinystm := -DDESIGN_WBCTL -DTM_BACKEND_TINYSTM
+
+INC_wt := $(INC_BASE) -I../TinySTM
+RUNTIME_wt := $(RUNTIME_DIR)/TinySTM_runtime.cpp
+FLAGS_wt := -DDESIGN_WT -DTM_BACKEND_TINYSTM
 
 INC_norec   := $(INC_BASE) -I../NOrec
 RUNTIME_norec := $(RUNTIME_DIR)/NOrec_runtime.cpp
+FLAGS_norec := -DTM_BACKEND_NOREC
 
 INC_swisstm := $(INC_BASE) -I../SwissTM
 RUNTIME_swisstm := $(RUNTIME_DIR)/SwissTM_runtime.cpp
+FLAGS_swisstm := -DTM_BACKEND_SWISSTM
 
 # ── Test source files ──────────────────────────────────────────────
-TESTS := counter_st counter_mt write_set_validation
+TESTS := counter_st counter_mt write_set_validation eager_read_null_address
 
 .PHONY: all clean list run% list-backends
 
@@ -53,7 +60,7 @@ $(RUN_TARGETS): run-%:
 	@echo "=== Backend: $* ==="
 	@$(foreach t,$(TESTS),\
 		echo "--- $(t) ---"; \
-		bin/$*/$(t) 2>&1 | tail -1; \
+		bin/$*/$(t) 2>&1; \
 		echo;)
 
 run: $(RUN_TARGETS)
