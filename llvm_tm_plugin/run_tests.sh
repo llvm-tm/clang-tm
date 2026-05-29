@@ -132,6 +132,8 @@ run_test test_init_no_tx "Test 1: g_value = 1 (expected 1) PASS" "Test 3: g_valu
 # Retry test: verifies longjmp/sigsetjmp for transaction retry
 run_test test_retry "retry" "longjmp" "Test PASSED" "final counter = 3"
 
+run_test test_std_queue "PASS: std::queue and raw array both work"
+
 # ---- Opaque symbol resolution test ----
 echo "===== Testing tm-resolve-opaque ====="
 if [ ! -x ./bin/test_math_opaque ]; then

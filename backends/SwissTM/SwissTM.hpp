@@ -191,8 +191,18 @@ public:
 
     static void rollback(TxDescriptor* tx) {
         for (auto& we : tx->write_log) {
-            // Restore old value before releasing lock (write-through TM
-            // updates memory immediately, so on abort we must undo it).
+            // Only restore old value and release w_lock if we actually
+            // acquired it.  write_impl pushes the entry to write_log
+            // BEFORE the CAS on w_lock.  If rollback is called from
+            // cm_should_abort within the CAS loop, the entry has no
+            // lock — restoring/releasing would corrupt another TX's
+            // lock ownership and lose updates.
+            if (tx->owned_orecs.find(we.orec) == tx->owned_orecs.end())
+                continue;
+            // Restore old value before releasing lock (SwissTM is
+            // lazy-write-back: value in memory is still the original,
+            // so restoring from undo-log is a no-op for the value,
+            // but we must release the w_lock).
             switch (we.type) {
                 case ValueType::UINT8:
                     *reinterpret_cast<uint8_t*>(we.byte_addr) = we.old_value.u1;
@@ -523,23 +533,26 @@ public:
             return;
         }
 
-        // Phase 1: acquire read-locks and capture pre-lock version.
+        // Phase 1: acquire read-locks via atomic exchange, capturing the
+        // pre-lock version for Phase 3 validation.  Using a single atomic
+        // exchange (not load-then-store) prevents two TXs from both seeing
+        // old_version=0 and both passing Phase 3 — the second exchange
+        // returns READ_LOCKED.
+        //
         // Track already-locked orecs to handle duplicate read_set entries
         // (adjacent 4-byte values in the same 8-byte word map to the same
-        // orec).  Without dedup, the second load gets READ_LOCKED from our
-        // own store, giving old_version=READ_LOCKED ≠ re.version → false
-        // abort → siglongjmp retry → infinite loop at 1+ threads.
+        // orec).  Without dedup, the second exchange returns READ_LOCKED
+        // (our own store), giving old_version=READ_LOCKED ≠ re.version
+        // → false abort → siglongjmp retry → infinite loop at 1+ threads.
         std::unordered_map<OwnershipRecord*, word_t> locked_orecs;
         for (auto& re : tx->read_set) {
             auto it = locked_orecs.find(re.orec);
             if (it != locked_orecs.end()) {
                 re.old_version = it->second;
             } else {
-                word_t old = re.orec->r_lock.load(
-                    std::memory_order_relaxed);
-                re.orec->r_lock.store(
+                word_t old = re.orec->r_lock.exchange(
                     READ_LOCKED,
-                    std::memory_order_release);
+                    std::memory_order_acq_rel);
                 re.old_version = old;
                 locked_orecs[re.orec] = old;
             }
@@ -547,36 +560,38 @@ public:
 
         word_t ts = commit_ts.fetch_add(1, std::memory_order_acq_rel) + 1;
 
-        // Phase 3: validate read-set using captured old_versions.
-        // If another TX committed since our last extend (ts > valid_ts + 1),
-        // check each entry's old_version against the observed version.
-        if (ts > tx->valid_ts + 1) {
-            for (auto& re : tx->read_set) {
-                if (re.old_version == re.version)
-                    continue;
-                // old_version might be READ_LOCKED (concurrent TX's Phase 1)
-                // or a different version (concurrent commit).  In either case
-                // the orec was touched by another TX.  If we hold the
-                // write-lock ourselves, it's fine — otherwise abort.
-                bool self_locked = false;
+        // Phase 3: validate read-set unconditionally.
+        // Every orec with old_version != version means a concurrent TX
+        // touched it: old_version==READ_LOCKED means another Phase-1
+        // exchange acquired this orec after our read; old_version is a
+        // commit timestamp means another TX committed and released.
+        // In either case the value we read is stale and we must abort.
+        //
+        // CRITICAL: When old_version == READ_LOCKED, someone ELSE holds
+        // the exchange lock — we must NOT release it in our abort path.
+        // Doing so would overwrite the lock-holding TX's commit version
+        // with 0, making subsequent TXs think no commit happened and
+        // pass Phase 3 with stale values → lost updates.
+        for (auto& re : tx->read_set) {
+            if (re.old_version == re.version)
+                continue;
+                // Release only the orecs WE locked (old_version != READ_LOCKED).
+                // Orecs with old_version == READ_LOCKED were locked by
+                // another concurrent TX; leave them for that TX's Phase 5.
+                for (auto& re2 : tx->read_set) {
+                    if (re2.old_version == READ_LOCKED)
+                        continue;
+                    re2.orec->r_lock.store(
+                        re2.old_version,
+                        std::memory_order_release);
+                }
                 for (auto& we : tx->write_log) {
-                    if (we.orec == re.orec) { self_locked = true; break; }
+                    we.orec->w_lock.store(
+                        UNLOCKED, std::memory_order_release);
                 }
-                if (!self_locked) {
-                    for (auto& re2 : tx->read_set) {
-                        re2.orec->r_lock.store(
-                            re2.old_version,
-                            std::memory_order_release);
-                    }
-                    for (auto& we : tx->write_log) {
-                        we.orec->w_lock.store(
-                            UNLOCKED, std::memory_order_release);
-                    }
-                    rollback(tx);
-                    return;
-                }
+                rollback(tx);
+                return;
             }
-        }
 
         // Phase 4 + 5: write-back and release locks
         for (auto& we : tx->write_log) {
