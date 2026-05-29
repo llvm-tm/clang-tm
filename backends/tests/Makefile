@@ -40,7 +40,7 @@ RUNTIME_spht := $(RUNTIME_DIR)/SPHT_runtime.cpp
 FLAGS_spht := -DTM_BACKEND_SPHT -mrtm
 
 # ── Test source files ──────────────────────────────────────────────
-TESTS := counter_st counter_mt write_set_validation eager_read_null_address
+TESTS := counter_st counter_mt write_set_validation
 
 .PHONY: all clean list run% list-backends
 

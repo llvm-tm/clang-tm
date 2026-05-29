@@ -746,7 +746,7 @@ done
 ### Updated Makefile
 `backends/tests/Makefile`: Added `wt` backend (`-DDESIGN_WT -DTM_BACKEND_TINYSTM`, using `TinySTM_runtime.cpp`), `TM_BACKEND_*` defines for all non-TinySTM backends, `eager_read_null_address` to `TESTS`, removed `tail -1` from `run-%` target for full output.
 
-### New test
+### New test (REMOVED — 2026-05-29)
 `backends/tests/test_eager_read_null_address.cpp`: 126 lines — fork-based isolation for 6 test addresses (0x0, 0x4, 0x8, 0x10, 0x100, 0xFFFFFFE8). Each child process calls `tm_write_i4` inside a TX. SIGSEGV handler uses `siglongjmp` for clean exit. Parent reports PASS/CRASH per address. Tests all 5 backends (tl2, tinystm, wt, norec, swisstm).
 
 ## Done (this session — 2026-05-29)
@@ -755,4 +755,47 @@ done
 - **Replayer exits before processing ring buffer entries**: The main loop checks `g_ctrl->shutdown` before scanning logs — if the parent finishes all TXs and sets shutdown between iterations, the replayer exits with entries still in the ring buffer. **Fix**: added a final drain pass after the main loop exits that replays all remaining entries in every log.
 - **Verify arg parsing**: `--mode verify <n>` placed the expected value at `argv[argc-1]` but the code read `argv[2]`, getting `"verify"` → 0. **Fix**: read `argv[argc-1]` as the expected value.
 - **Persistence chain verified**: INIT → RUN (10 iterations) → VERIFY(10) → RUN (10 more) → VERIFY(20) — all PASS. Replayer sees 20 ops per RUN (10 TXs × 2 writes). Accumulation across restarts works.
+
+**Removed 2026-05-29**: The test fabricated null addresses that never occur in real workloads. IR analysis confirmed the plugin generates zero null-address TM calls for the `vector<CompositePart>` realloc pattern (every GEP uses valid heap addresses). The test was testing an artificial scenario, not the actual bug.
+
+### Null-address guards removed (2026-05-29)
+Removed `addr < 0x100000 || >> 63` guards from:
+- **WBCTL** `write_word_ctl`: removed `if (addr == nullptr || (uint64_t)addr < 0x100000) return;`
+- **SwissTM** `read_impl`: removed `if ((uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 63)) return T{};`
+- **SwissTM** `write_impl`: removed `if ((uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 63)) return;`
+
+Rationale: the plugin never generates null-address TM calls. Any null-address reaching the runtime is a bug that should crash visibly, not be silently swallowed. The WBCTL `read_word_ctl` `#ifdef DEBUG_WBCTL` guard is retained (debug-only tracing, not a functional skip).
+
+### WT hang in STMbench7: root cause identified
+
+**Symptom**: WT produces no output past data-structure init in STMbench7. All threads hang.
+
+**Root cause**: Encounter-time locking + write-through + immediate-abort-on-conflict + `abort_count` reset on retry creates a TX-level livelock.
+
+### Token integration (all backends)
+- `backends/tm_spin_token.hpp`: CAS-based global spin token with acq_rel on release.
+- `tm_token_soft_spin` / `tm_token_release` / `tm_token_release_if_held` added to contention paths of WBCTL, WT, WBETL, SwissTM.
+
+### SwissTM correctness investigation
+- **Phase 1 fix**: Changed `store(READ_LOCKED)` → `load(relaxed) + store(release)` with orec dedup map, saving pre-lock version in `ReadLogEntry::old_version`.
+- **Phase 3 fix**: Uses `old_version` (pre-lock) instead of `validate()` (which always fails after Phase 1). When `ts > valid_ts + 1`, compares `old_version` vs `re.version`.
+- **commit_ts**: `fetch_add(1, relaxed → acq_rel)` — ensures `begin()`'s acquire load sees true committed version.
+- **`type_size`**: Moved from SwissTM `STM::type_size` to shared `stm::type_size` in `tm_common.hpp`.
+- **Byte-merge** in `read_impl`: linear scan of write_log for wider entries covering the read address before falling through to memory.
+
+#### SwissTM hang at 2+ threads (pre-existing 1-cent money loss NOT fixed)
+- **Root cause of hang with my changes**: `commit_ts.fetch_add(1, acq_rel)` makes every concurrent commit visible, so `ts > valid_ts + 1` is always true → Phase 3 runs on every commit. When threads touch overlapping orecs (both read the same accounts), `old_version != re.version` → abort → `siglongjmp` → retry → same again → livelock. The original `relaxed` increment was a "feature": threads often skip Phase 3 (increment less visible), reducing aborts.
+- **Same-orec read_set duplicates**: Adjacent 4-byte accounts in an 8-byte word share one orec. `load(relaxed)` after a previous iteration's `store(READ_LOCKED)` returns READ_LOCKED, making `old_version = READ_LOCKED ≠ re.version` → false abort → siglongjmp → retry → infinite loop at 1+ threads. Fixed: `std::unordered_map<OwnershipRecord*, word_t>` tracks already-locked orecs; subsequent entries reuse the first match's old_version.
+- **Conclusion**: The siglongjmp-based abort makes normal retries expensive, and acq_rel ensures every concurrent commit triggers Phase 3 → the overlap probability creates a livelock at 2+ threads on longer runs (5s). The 1-cent money loss remains unfixed; the hang with my Phase 1/3 changes is a fundamental livelock from stricter ordering + siglongjmp retry overhead.
+- **Reverted**: `assert(tx && tx->active)` → `if (!tx || !tx->active)` guard in read_impl/write_impl (assertion caused SIGABRT if a TM hook fires during nested siglongjmp cleanup).
+
+## Blocked (updated this session)
+- **SwissTM bank 1-cent money loss**: Root cause identified (Phase 1 `store(READ_LOCKED)` overwrites version, Phase 3 `validate()` always fails, `ts > valid_ts + 1` is only gate — allows inconsistent read-sets when relaxed ordering hides concurrent commits). Fix is load-then-store + old_version + orec dedup, but this introduces livelock at 2+ threads from acq_rel + siglongjmp overhead. Needs a non-siglongjmp retry mechanism or relaxed ordering (which re-introduces the original race).
+
+- **WT counter_mt remaining loss**: 2297/800000 counts lost after own-lock validation fix. Root cause is NOT incarnation overflow (3-bit incarnation, shared by WBCTL/WBETL which pass 0/800000). The gap is from WT's write-through race: lock-extent (64 bytes) allows a write-through to be visible in memory before the lock's version/clock has advanced, creating a window where the validation gate (`commit_version > start_version + 1`) is false. Write-back backends are immune (values only reach memory at commit time, after clock advances).
+
+## Relevant Files (updated)
+- `backends/tm_spin_token.hpp`: new — global spin token for fair contention.
+- `backends/tm_common.hpp`: `type_size(ValueType)` free function.
+- `backends/SwissTM/SwissTM.hpp`: load-then-store Phase 1 with orec dedup, old_version Phase 3, byte-merge, token integration, `type_size` → `stm::type_size`.
 

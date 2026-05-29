@@ -32,6 +32,7 @@
 #include <cstring>
 #include <iostream>
 #include "../datastructures/tm_treap_map.hpp"
+#include "tm_spin_token.hpp"
 #include <mutex>
 #include <random>
 #include <set>
@@ -1097,6 +1098,7 @@ MAIN int main(int argc, char *argv[]) {
               << "Locking:    " << (locking_mode == 0 ? "TM (plugin)" : "Medium-grained") << "\n"
               << std::endl;
 
+    stm::tm_token_set_num_threads(nb_threads);
     init_data();
 
     std::cout << "Data structure (§2: medium OO7 size):\n"
