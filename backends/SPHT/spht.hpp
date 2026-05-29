@@ -111,11 +111,8 @@ inline bool rtm_available()
 	static int cached = -1;
 	if (cached < 0) {
 		unsigned int a = 0, b = 0, c = 0, d = 0;
-		if (__get_cpuid(7, &a, &b, &c, &d)) {
-			cached = (b & (1 << 11)) ? 1 : 0;
-		} else {
-			cached = 0;
-		}
+		__cpuid_count(7, 0, a, b, c, d);
+		cached = (b & (1 << 11)) ? 1 : 0;
 		if (!cached)
 			fprintf(stderr, "[SPHT] RTM not available — running without HTM\n");
 	}

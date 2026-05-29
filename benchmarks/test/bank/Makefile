@@ -13,7 +13,7 @@ all: $(BIN_DIR) \
 	bank_uninstrumented \
 	bank_singlelock bank_norec bank_tl2 bank_tinystm bank_swiss \
 	bank_persistentsgl \
-	bank_dudetm
+	bank_dudetm bank_nvhtm bank_spht
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
@@ -62,6 +62,12 @@ bank_persistentsgl: bank.cpp | $(BIN_DIR)
 
 bank_dudetm: bank.cpp | $(BIN_DIR)
 	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/DUDETM_runtime.cpp -I$(BACKENDS)/TinySTM -I$(BACKENDS)/DUDETM -DDESIGN_WBCTL -o $(BIN_DIR)/$@ $<
+
+bank_nvhtm: bank.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) -mrtm --runtime $(RUNTIMES)/NVHTM_runtime.cpp -I$(BACKENDS)/NVHTM -o $(BIN_DIR)/$@ $<
+
+bank_spht: bank.cpp | $(BIN_DIR)
+	$(CLANG_TM) $(CXXFLAGS) -mrtm --runtime $(RUNTIMES)/SPHT_runtime.cpp -I$(BACKENDS)/SPHT -o $(BIN_DIR)/$@ $<
 
 bank_opt: bank_opt.cpp | $(BIN_DIR)
 	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/TinySTM_runtime.cpp -I$(BACKENDS)/TinySTM -DDESIGN_WBCTL -o $(BIN_DIR)/$@ $<
