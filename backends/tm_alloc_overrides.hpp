@@ -4,19 +4,19 @@
  * tm_alloc_overrides.hpp — Deferred-free / speculative allocation helpers
  *
  * ╔══════════════════════════════════════════════════════════════════════╗
- * ║  CRITICAL: The runtime's own data structures MUST NOT be tracked   ║
- * ║  as speculative allocations.  The read_set, write_set, and their   ║
- * ║  internal bucket arrays (std::unordered_map) use the STANDARD      ║
- * ║  ::operator new/delete directly.  No operator new/delete overrides ║
- * ║  are provided here — doing so caused a use-after-free on abort:    ║
- * ║  the bucket arrays were spec-tracked via tm_malloc, then freed     ║
- * ║  by tm_clear_spec_allocs() while the unordered_map still held      ║
- * ║  pointers to them.  See commit <FIX>.                             ║
- * ║                                                                    ║
- * ║  User code (TX functions) IS instrumented by the LLVM plugin —     ║
- * ║  the plugin replaces malloc/free/operator new/operator delete      ║
- * ║  with tm_malloc/tm_free.  This is independent of the runtime       ║
- * ║  and does NOT go through any header overrides.                     ║
+ * ║  CRITICAL: The runtime's own data structures MUST NOT be tracked					║
+ * ║  as speculative allocations.  The read_set, write_set, and their					║
+ * ║  internal bucket arrays (std::unordered_map) use the STANDARD						║
+ * ║  ::operator new/delete directly.  No operator new/delete overrides					║
+ * ║  are provided here - doing so caused a use-after-free on abort:					║
+ * ║  the bucket arrays were spec-tracked via tm_malloc, then freed						║
+ * ║  by tm_clear_spec_allocs() while the unordered_map still held						║
+ * ║  pointers to them.  See commit <FIX>.												║
+ * ║																					║
+ * ║  User code (TX functions) IS instrumented by the LLVM plugin -						║
+ * ║  the plugin replaces malloc/free/operator new/operator delete						║
+ * ║  with tm_malloc/tm_free.  This is independent of the runtime						║
+ * ║  and does NOT go through any header overrides.										║
  * ╚══════════════════════════════════════════════════════════════════════╝
  *
  * This header provides:
@@ -60,8 +60,8 @@
 #include <unordered_set>
 
 // Each runtime must define these two functions:
-extern "C" void* tm_malloc(size_t size);
-extern "C" void  tm_free(void* ptr);
+extern "C" void *tm_malloc(size_t size);
+extern "C" void tm_free(void *ptr);
 
 // Thread-local flag: set by tm_begin/tm_end to distinguish TX vs non-TX context.
 extern thread_local bool g_in_tx;
@@ -84,36 +84,37 @@ extern thread_local bool g_in_tx;
 //   tm_flush_spec_allocs()   in tm_end (outer), after commit, before tm_flush_deferred_frees
 
 struct SpecAlloc {
-    SpecAlloc* next;
-    void* ptr;             // the speculatively-allocated memory
+	SpecAlloc *next;
+	void *ptr; // the speculatively-allocated memory
 };
 
-extern thread_local SpecAlloc* g_spec_allocs;
+extern thread_local SpecAlloc *g_spec_allocs;
 
 // Track a malloc/calloc/realloc result as a speculative allocation.
-inline void tm_track_spec_alloc(void* ptr)
+inline void tm_track_spec_alloc(void *ptr)
 {
-    if (g_in_tx && ptr) {
-        auto* node = static_cast<SpecAlloc*>(std::malloc(sizeof(SpecAlloc)));
-        node->ptr = ptr;
-        node->next = g_spec_allocs;
-        g_spec_allocs = node;
-    }
+	if (g_in_tx && ptr) {
+		auto *node = static_cast<SpecAlloc *>(std::malloc(sizeof(SpecAlloc)));
+		node->ptr = ptr;
+		node->next = g_spec_allocs;
+		g_spec_allocs = node;
+	}
 }
 
 // Mark a speculatively-allocated pointer as explicitly freed (via tm_free).
 // Sets node->ptr to nullptr so tm_clear_spec_allocs does NOT double-free it.
-inline void tm_untrack_spec_alloc(void* ptr)
+inline void tm_untrack_spec_alloc(void *ptr)
 {
-    if (!g_in_tx || !ptr) return;
-    auto* node = g_spec_allocs;
-    while (node) {
-        if (node->ptr == ptr) {
-            node->ptr = nullptr;    // prevent double-free on abort
-            return;
-        }
-        node = node->next;
-    }
+	if (!g_in_tx || !ptr)
+		return;
+	auto *node = g_spec_allocs;
+	while (node) {
+		if (node->ptr == ptr) {
+			node->ptr = nullptr; // prevent double-free on abort
+			return;
+		}
+		node = node->next;
+	}
 }
 
 // Free all speculative allocations and their bookkeeping — call on abort
@@ -122,28 +123,28 @@ inline void tm_untrack_spec_alloc(void* ptr)
 // and are skipped — their deallocation will be handled on commit.
 inline void tm_clear_spec_allocs()
 {
-    auto* node = g_spec_allocs;
-    while (node) {
-        auto* next = node->next;
-        if (node->ptr)
-            ::operator delete(node->ptr);   // free the speculatively-allocated memory
-        std::free(node);                   // free the bookkeeping node (std::malloc'd)
-        node = next;
-    }
-    g_spec_allocs = nullptr;
+	auto *node = g_spec_allocs;
+	while (node) {
+		auto *next = node->next;
+		if (node->ptr)
+			::operator delete(node->ptr); // free the speculatively-allocated memory
+		std::free(node);                  // free the bookkeeping node (std::malloc'd)
+		node = next;
+	}
+	g_spec_allocs = nullptr;
 }
 
 // Free only the bookkeeping — call on commit.  The allocated memory is now
 // owned by the data structure and must NOT be freed here.
 inline void tm_flush_spec_allocs()
 {
-    auto* node = g_spec_allocs;
-    while (node) {
-        auto* next = node->next;
-        std::free(node);        // free only the bookkeeping node
-        node = next;
-    }
-    g_spec_allocs = nullptr;
+	auto *node = g_spec_allocs;
+	while (node) {
+		auto *next = node->next;
+		std::free(node); // free only the bookkeeping node
+		node = next;
+	}
+	g_spec_allocs = nullptr;
 }
 
 // ── Deferred-free infrastructure ──────────────────────────
@@ -164,28 +165,28 @@ inline void tm_flush_spec_allocs()
 //     delete → tm_free on reallocation, causing infinite recursion.
 
 struct FreeNode {
-    FreeNode* next;
-    void* ptr;           // the user pointer to be freed on commit
+	FreeNode *next;
+	void *ptr; // the user pointer to be freed on commit
 };
 
-extern thread_local FreeNode* g_deferred_frees;
+extern thread_local FreeNode *g_deferred_frees;
 
 // Duplicate-detection set for deferred frees.
-extern thread_local std::unordered_set<void*> g_deferred_frees_set;
+extern thread_local std::unordered_set<void *> g_deferred_frees_set;
 
 // Flush (execute) all pending deferred frees — call after successful commit.
 // Frees both the user pointer AND the bookkeeping FreeNode.
 inline void tm_flush_deferred_frees()
 {
-    auto* node = g_deferred_frees;
-    while (node) {
-        auto* next = node->next;
-        ::operator delete(node->ptr);  // user data (tm_malloc'd)
-        std::free(node);               // FreeNode bookkeeping (::malloc'd)
-        node = next;
-    }
-    g_deferred_frees = nullptr;
-    g_deferred_frees_set.clear();
+	auto *node = g_deferred_frees;
+	while (node) {
+		auto *next = node->next;
+		::operator delete(node->ptr); // user data (tm_malloc'd)
+		std::free(node);              // FreeNode bookkeeping (::malloc'd)
+		node = next;
+	}
+	g_deferred_frees = nullptr;
+	g_deferred_frees_set.clear();
 }
 
 // Discard all pending deferred frees — call at tm_begin (outer) to discard
@@ -194,14 +195,14 @@ inline void tm_flush_deferred_frees()
 // freed (it is live again).  Only the bookkeeping FreeNode is reclaimed.
 inline void tm_clear_deferred_frees()
 {
-    auto* node = g_deferred_frees;
-    while (node) {
-        auto* next = node->next;
-        std::free(node);   // free the FreeNode (::malloc'd), NOT the user pointer
-        node = next;
-    }
-    g_deferred_frees = nullptr;
-    g_deferred_frees_set.clear();
+	auto *node = g_deferred_frees;
+	while (node) {
+		auto *next = node->next;
+		std::free(node); // free the FreeNode (::malloc'd), NOT the user pointer
+		node = next;
+	}
+	g_deferred_frees = nullptr;
+	g_deferred_frees_set.clear();
 }
 
 // ═══════════════════════════════════════════════════════════════════

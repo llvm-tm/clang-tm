@@ -308,7 +308,7 @@ public:
     template <typename T, DataType DT, typename AddrT>
     static void write_impl(Transaction* tx, AddrT addr, T val) {
         std::atomic_signal_fence(std::memory_order_seq_cst);
-        assert(tx && tx->active);
+        TM_ASSERT_VALID_TX(tx, "TL2 read_impl");
 
         // Stack-address detection: writing to the stack would create write-set
         // entries for addresses that will be popped on function return, causing
@@ -374,7 +374,7 @@ public:
     // ---- Generic read implementation ----
     template <typename T, DataType DT, typename AddrT>
     static T read_impl(Transaction* tx, AddrT addr) {
-        assert(tx && tx->active);
+        TM_ASSERT_VALID_TX(tx, "TL2 read_impl");
 
         // Stack-address detection: reading from the stack would create read-set
         // entries for stack addresses that hash to random locks, causing spurious

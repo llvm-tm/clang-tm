@@ -115,7 +115,7 @@ begin()     //
 {
 	auto *tx = current_tx_wbctl;
 
-	TINYSTM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx, "tx not defined");
 	if (tx->active)
 		return true;
 
@@ -135,8 +135,8 @@ abort_tx(const char *loc="")  //
 {
 	auto *tx = current_tx_wbctl;
 
-	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	tx->unlock_held_locks_and_clear();
 	tx->abort_count++;
@@ -153,7 +153,7 @@ abort_tx(const char *loc="")  //
 		random_backoff();
 	}
 	siglongjmp(*jmpbuf, 1);
-	TINYSTM_ASSERT(false, "Did not jump");
+	TM_ASSERT(false, "Did not jump");
 }
 
 inline bool //
@@ -203,8 +203,8 @@ commit()    //
 	auto *tx = current_tx_wbctl;
 	volatile word_t commit_version = 0;
 
-	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	if (!tx->read_only) { // Acquire locks and write-back
 
@@ -231,7 +231,7 @@ commit()    //
 				}
 				tx->locks_held.push_back(lock); // keep track of locks
 			}
-			TINYSTM_ASSERT(lock->is_locked() && lock->get_owner() == tx->id,
+			TM_ASSERT(lock->is_locked() && lock->get_owner() == tx->id,
 			               "Lock not locked or wrong owner");
 		}
 
@@ -289,7 +289,7 @@ commit()    //
 			if (lock->get_version() > commit_version) {
 				lock->unlock(tx->id);
 			} else {
-				TINYSTM_ASSERT(lock->get_version() <= commit_version,
+				TM_ASSERT(lock->get_version() <= commit_version,
 				               "Lock version updated while locked");
 				lock->unlock_with_version(tx->id, commit_version);
 			}
@@ -302,7 +302,7 @@ commit()    //
 				        (unsigned long long)tx->id);
 				fflush(stderr);
 			}
-			TINYSTM_ASSERT(lock->get_version() >= commit_version,
+			TM_ASSERT(lock->get_version() >= commit_version,
 			               "Lock version not updated");
 		}
 
@@ -330,8 +330,8 @@ read_word_ctl(                                                //
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 	ByteOffset bo((word_t)addr);
 
-	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	// Stack-address detection: reading from the stack would create read-set
 	// entries for stack addresses that hash to random locks, causing spurious
@@ -406,7 +406,7 @@ read_word_ctl(                                                //
 				result.u8 = merged;
 				return result;
 			}
-			goto read_from_memory;
+		// Fall through to general fallback / unaligned checks below.
 		}
 		// Wider-to-narrower: a wider write at this exact address covers
 		// narrower sub-word reads (e.g. UINT32 field then UINT8 byte read
@@ -552,9 +552,8 @@ read_word_ctl(                                                //
 		}
 	}
 
-read_from_memory:
 	Lock *lock = &g_locks_wbctl.get(bo.base_addr);
-	TINYSTM_ASSERT(!lock->is_locked_by(tx->id), "wbctl locks at commit time");
+	TM_ASSERT(!lock->is_locked_by(tx->id), "wbctl locks at commit time");
 	volatile word_t l = lock->get();
 
 	// NOTE: Every read goes through the full double-check protocol below.
@@ -611,8 +610,8 @@ write_word_ctl(                                               //
 {
 	ByteOffset bo((word_t)addr);
 
-	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 
 	// Stack-address detection: writing to the stack via tm_write would create
@@ -683,21 +682,8 @@ write_word_ctl(                                               //
 		}
 	}
 
-	// Helper: byte width of a ValueType
-	auto typeSize = [](ValueType t) -> unsigned {
-		switch (t) {
-		case ValueType::UINT8:   return 1;
-		case ValueType::UINT16:  return 2;
-		case ValueType::UINT32:  return 4;
-		case ValueType::FLOAT:   return 4;
-		case ValueType::UINT64:  return 8;
-		case ValueType::POINTER: return 8;
-		case ValueType::DOUBLE:  return 8;
-		default:                 return 0;
-		}
-	};
 
-	unsigned sz_bytes = typeSize(sz);
+	unsigned sz_bytes = stm::type_size(sz);
 
 	// Generic guard: if a wider (or equal-width) entry already exists at this
 	// exact address, skip the write — the existing entry already covers the
@@ -707,7 +693,7 @@ write_word_ctl(                                               //
 	{
 		auto existing = tx->write_set.find(addr);
 		if (existing != tx->write_set.end() && existing->second.type != sz) {
-			if (typeSize(existing->second.type) > sz_bytes) {
+			if (stm::type_size(existing->second.type) > sz_bytes) {
 				return;
 			}
 		}
@@ -720,7 +706,7 @@ write_word_ctl(                                               //
 		void *base_addr = reinterpret_cast<void *>(bo.base_addr);
 		auto base_entry = tx->write_set.find(base_addr);
 		if (base_entry != tx->write_set.end() && base_entry->second.type != sz) {
-			if (typeSize(base_entry->second.type) >= sz_bytes + bo.offset) {
+			if (stm::type_size(base_entry->second.type) >= sz_bytes + bo.offset) {
 				return;
 			}
 		}
@@ -738,7 +724,7 @@ write_word_ctl(                                               //
 				void *sub_addr = reinterpret_cast<void *>((uintptr_t)addr + i);
 				auto it = tx->write_set.find(sub_addr);
 				if (it != tx->write_set.end() && it->second.type != sz) {
-					if (typeSize(it->second.type) < nbytes) {
+					if (stm::type_size(it->second.type) < nbytes) {
 						// Existing entry is narrower — erase (wider write replaces it)
 						tx->write_set.erase(it);
 					}
@@ -753,7 +739,7 @@ write_word_ctl(                                               //
 		word_t owner = (l & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS;
 		bool is_locked = (l & OWNED_MASK) != 0;
 
-		TINYSTM_ASSERT(owner != tx->id, "WBCTL only locks at commit time");
+		TM_ASSERT(owner != tx->id, "WBCTL only locks at commit time");
 
 		if (is_locked && !validate()) {
 			// Read-set invalid — try token before aborting

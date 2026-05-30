@@ -53,29 +53,13 @@ static void collectTMGlobalsCached(Module &M,
 		TMG.insert(TMGlobalsCache->begin(), TMGlobalsCache->end());
 		return;
 	}
-	if (GlobalVariable *GVA = M.getNamedGlobal("llvm.global.annotations")) {
-		if (Constant *Init = GVA->getInitializer()) {
-			for (unsigned i = 0; i < Init->getNumOperands(); ++i) {
-				Constant *Annotation = cast<Constant>(Init->getOperand(i));
-				if (Annotation->getNumOperands() >= 2) {
-					Value *AnnotatedValue = Annotation->getOperand(0)
-					                            ->stripPointerCasts();
-					if (auto *AnnotatedGV = dyn_cast<GlobalVariable>(AnnotatedValue)) {
-						Value *StrOperand = Annotation->getOperand(1)
-						                        ->stripPointerCasts();
-						if (auto *StrGV = dyn_cast<GlobalVariable>(StrOperand)) {
-							if (auto *StrArray = dyn_cast<ConstantDataArray>(
-							        StrGV->getInitializer())) {
-								if (StrArray->getAsCString() == "tm") {
-									TMG.insert(AnnotatedGV);
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
+	forEachAnnotation(M, [&](Constant *, Value *V, StringRef S) -> bool {
+		if (S != TM_ANNOT)
+			return true;
+		if (auto *AnnotatedGV = dyn_cast<GlobalVariable>(V))
+			TMG.insert(AnnotatedGV);
+		return true;
+	});
 	TMGlobalsCache = new SmallPtrSet<const GlobalVariable *, 16>();
 	TMGlobalsCache->insert(TMG.begin(), TMG.end());
 }
@@ -102,7 +86,7 @@ static bool tracesToTMGlobal(Value *Ptr, Module &M)
 			// Trace through TM clone call returns: if `this` (arg 0) of a
 			// TM-cloned method traces to a TM global, the return pointer does too.
 			Function *Callee = Call->getCalledFunction();
-			if (Callee && Callee->getName().ends_with("_tm_clone") &&
+			if (Callee && Callee->getName().ends_with(TM_CLONE_SUFFIX) &&
 			    Call->arg_size() > 0) {
 				Current = Call->getArgOperand(0);
 			} else {
@@ -184,52 +168,52 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M, const TMRuntime
 		Value *RNext = RBB.CreateAdd(RIdx, ConstantInt::get(LenTy, 1));
 		RIdx->addIncoming(RNext, RemLB);
 		RBB.CreateBr(RemLE);
- 	} else {
- 		// Memcpy/memmove: 8-byte chunk loop producing UINT64 write-set entries
- 		// so that subsequent POINTER reads can find pointer field values via
- 		// type interchange (POINTER ↔ UINT64) in eager-locking backends.
- 		Constant *Eight = ConstantInt::get(LenTy, 8);
- 
- 		BasicBlock *LoopEntry = BasicBlock::Create(Ctx, "mem_loop_entry", F, ContBB);
- 		BasicBlock *LoopBody = BasicBlock::Create(Ctx, "mem_loop_body", F, ContBB);
- 		BasicBlock *RemEntry = BasicBlock::Create(Ctx, "mem_rem_entry", F, ContBB);
- 		BasicBlock *RemBody = BasicBlock::Create(Ctx, "mem_rem_body", F, ContBB);
- 
- 		OrigBB->getTerminator()->eraseFromParent();
- 		IRBuilder<> OrigB(OrigBB);
- 		Value *Remainder = OrigB.CreateURem(Len, Eight, "mem_rem");
- 		Value *AlignedMax = OrigB.CreateSub(Len, Remainder, "aligned_max");
- 		OrigB.CreateBr(LoopEntry);
- 
- 		// 8-byte aligned loop: reads from source, writes to destination
- 		IRBuilder<> EB(LoopEntry);
- 		PHINode *AIdx = EB.CreatePHI(LenTy, 2, "mem_ai");
- 		AIdx->addIncoming(ConstantInt::get(LenTy, 0), OrigBB);
- 		EB.CreateCondBr(EB.CreateICmpEQ(AIdx, AlignedMax), RemEntry, LoopBody);
- 
- 		IRBuilder<> BB(LoopBody);
- 		Value *DG = BB.CreateGEP(i8Ty, Dst, AIdx);
- 		Value *SG = BB.CreateGEP(i8Ty, SrcOrVal, AIdx);
- 		Value *ReadVal = BB.CreateCall(H.read_i8, {SG});
- 		BB.CreateCall(H.write_i8, {DG, ReadVal});
- 		Value *ANext = BB.CreateAdd(AIdx, Eight);
- 		AIdx->addIncoming(ANext, LoopBody);
- 		BB.CreateBr(LoopEntry);
- 
- 		// Remainder bytes loop
- 		IRBuilder<> REB(RemEntry);
- 		PHINode *RIdx = REB.CreatePHI(LenTy, 2, "mem_ri");
- 		RIdx->addIncoming(AlignedMax, LoopEntry);
- 		REB.CreateCondBr(REB.CreateICmpEQ(RIdx, Len), ContBB, RemBody);
- 
- 		IRBuilder<> RBB(RemBody);
- 		Value *RDG = RBB.CreateGEP(i8Ty, Dst, RIdx);
- 		Value *RSG = RBB.CreateGEP(i8Ty, SrcOrVal, RIdx);
- 		RBB.CreateCall(H.write_i1, {RDG, RBB.CreateCall(H.read_i1, {RSG})});
- 		Value *RNext = RBB.CreateAdd(RIdx, 		ConstantInt::get(LenTy, 1));
- 		RIdx->addIncoming(RNext, RemBody);
- 		RBB.CreateBr(RemEntry);
-  	}
+	} else {
+		// Memcpy/memmove: 8-byte chunk loop producing UINT64 write-set entries
+		// so that subsequent POINTER reads can find pointer field values via
+		// type interchange (POINTER ↔ UINT64) in eager-locking backends.
+		Constant *Eight = ConstantInt::get(LenTy, 8);
+
+		BasicBlock *LoopEntry = BasicBlock::Create(Ctx, "mem_loop_entry", F, ContBB);
+		BasicBlock *LoopBody = BasicBlock::Create(Ctx, "mem_loop_body", F, ContBB);
+		BasicBlock *RemEntry = BasicBlock::Create(Ctx, "mem_rem_entry", F, ContBB);
+		BasicBlock *RemBody = BasicBlock::Create(Ctx, "mem_rem_body", F, ContBB);
+
+		OrigBB->getTerminator()->eraseFromParent();
+		IRBuilder<> OrigB(OrigBB);
+		Value *Remainder = OrigB.CreateURem(Len, Eight, "mem_rem");
+		Value *AlignedMax = OrigB.CreateSub(Len, Remainder, "aligned_max");
+		OrigB.CreateBr(LoopEntry);
+
+		// 8-byte aligned loop: reads from source, writes to destination
+		IRBuilder<> EB(LoopEntry);
+		PHINode *AIdx = EB.CreatePHI(LenTy, 2, "mem_ai");
+		AIdx->addIncoming(ConstantInt::get(LenTy, 0), OrigBB);
+		EB.CreateCondBr(EB.CreateICmpEQ(AIdx, AlignedMax), RemEntry, LoopBody);
+
+		IRBuilder<> BB(LoopBody);
+		Value *DG = BB.CreateGEP(i8Ty, Dst, AIdx);
+		Value *SG = BB.CreateGEP(i8Ty, SrcOrVal, AIdx);
+		Value *ReadVal = BB.CreateCall(H.read_i8, {SG});
+		BB.CreateCall(H.write_i8, {DG, ReadVal});
+		Value *ANext = BB.CreateAdd(AIdx, Eight);
+		AIdx->addIncoming(ANext, LoopBody);
+		BB.CreateBr(LoopEntry);
+
+		// Remainder bytes loop
+		IRBuilder<> REB(RemEntry);
+		PHINode *RIdx = REB.CreatePHI(LenTy, 2, "mem_ri");
+		RIdx->addIncoming(AlignedMax, LoopEntry);
+		REB.CreateCondBr(REB.CreateICmpEQ(RIdx, Len), ContBB, RemBody);
+
+		IRBuilder<> RBB(RemBody);
+		Value *RDG = RBB.CreateGEP(i8Ty, Dst, RIdx);
+		Value *RSG = RBB.CreateGEP(i8Ty, SrcOrVal, RIdx);
+		RBB.CreateCall(H.write_i1, {RDG, RBB.CreateCall(H.read_i1, {RSG})});
+		Value *RNext = RBB.CreateAdd(RIdx, ConstantInt::get(LenTy, 1));
+		RIdx->addIncoming(RNext, RemBody);
+		RBB.CreateBr(RemEntry);
+	}
 	// NOTE: Call is NOT erased here — the caller handles erasure
 	// (it is now dead code, reachable only via splitBasicBlock debris;
 	//  the post-instrumentation -O3 pass removes it).  This avoids
@@ -565,12 +549,9 @@ computeClonableFunctions(Module &M,
     for (Function *F : TxReachableFuncs) {
         if (F->isDeclaration()) continue;
         if (F->getName().starts_with("tm_")) continue;
-        if (hasAnnotation(*F, "transaction")) continue;
-        // Skip thread entry points and main — they are not part of TX logic
-        // and should not be cloned.  "thread" functions may call transaction
-        // functions but must not themselves be cloned.
-        if (hasAnnotation(*F, "thread")) continue;
-        if (F->getName() == "main" || hasAnnotation(*F, "main")) continue;
+        if (hasAnnotation(*F, TX_ANNOT)) continue;
+        if (hasAnnotation(*F, THREAD_ANNOT)) continue;
+        if (F->getName() == MAIN_ANNOT || hasAnnotation(*F, MAIN_ANNOT)) continue;
         // Clone ALL reachable functions.  This ensures functions like
         // destructors that write to TM globals through internal references
         // (e.g., v_.end_ = pos_) are cloned and instrumented, so their
@@ -702,14 +683,14 @@ cloneTxReachableGraph(Module &M,
     for (Function *F : ToClone) {
         if (F->isDeclaration()) continue;
         if (F->getName().starts_with("tm_")) continue;
-        if (hasAnnotation(*F, "transaction")) continue;
+        if (hasAnnotation(*F, TX_ANNOT)) continue;
 
         bool alreadyCloned = false;
         for (auto &pair : ClonedMap)
             if (pair.first == F) { alreadyCloned = true; break; }
         if (alreadyCloned) continue;
 
-        Function *Cloned = cloneMethod(F, "_tm_clone", &M, M.getContext(), TMG, H, Mode);
+        Function *Cloned = cloneMethod(F, TM_CLONE_SUFFIX, &M, M.getContext(), TMG, H, Mode);
         ClonedMap.push_back({F, Cloned});
     }
 
