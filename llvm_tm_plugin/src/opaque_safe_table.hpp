@@ -7,37 +7,73 @@
 using namespace llvm;
 
 struct OpaqueSafeEntry {
-    StringRef Name;
-    bool     IsPrefix;
+	StringRef Name;
+	bool IsPrefix;
 };
 
 static const OpaqueSafeEntry KnownSafeOpaqueTable[] = {
-    {"tm_",                      true},
-    {"sigsetjmp",                false}, {"siglongjmp", false}, {"longjmp", false},
-    {"malloc", false}, {"free", false}, {"calloc", false}, {"realloc", false}, {"aligned_alloc", false},
-    {"_Znw", true}, {"_Zna", true}, {"_Zdl", true}, {"_Zda", true},
+    {"tm_", true},
+    {"sigsetjmp", false},
+    {"siglongjmp", false},
+    {"longjmp", false},
+    {"malloc", false},
+    {"free", false},
+    {"calloc", false},
+    {"realloc", false},
+    {"aligned_alloc", false},
+    {"_Znw", true},
+    {"_Zna", true},
+    {"_Zdl", true},
+    {"_Zda", true},
     {"llvm.", true},
-    {"__cxa_", true}, {"_ZSt", true}, {"_ZNSt", true}, {"_ZNKSt", true}, {"_Unwind", true},
+    {"__cxa_", true},
+    {"_ZSt", true},
+    {"_ZNSt", true},
+    {"_ZNKSt", true},
+    {"_Unwind", true},
     {"pthread_", true},
     {"_ZNSaIcE", true},
     {"_ZNSaIcEC2ERKS_", false},
-    {"printf", false}, {"fprintf", false}, {"fflush", false}, {"puts", false},
-    {"putchar", false}, {"putc", false}, {"snprintf", false}, {"sprintf", false},
-    {"exit", false}, {"abort", false},
-    {"strlen", false}, {"strcmp", false}, {"strncmp", false},
-    {"strtol", false}, {"strtoul", false}, {"strtoll", false}, {"strtoull", false},
-    {"strtof", false}, {"strtod", false}, {"strtold", false},
-    {"atoi", false}, {"atol", false}, {"atoll", false}, {"atof", false},
-    {"abs", false}, {"labs", false}, {"llabs", false},
+    {"printf", false},
+    {"fprintf", false},
+    {"fflush", false},
+    {"puts", false},
+    {"putchar", false},
+    {"putc", false},
+    {"snprintf", false},
+    {"sprintf", false},
+    {"exit", false},
+    {"abort", false},
+    {"strlen", false},
+    {"strcmp", false},
+    {"strncmp", false},
+    {"strtol", false},
+    {"strtoul", false},
+    {"strtoll", false},
+    {"strtoull", false},
+    {"strtof", false},
+    {"strtod", false},
+    {"strtold", false},
+    {"atoi", false},
+    {"atol", false},
+    {"atoll", false},
+    {"atof", false},
+    {"abs", false},
+    {"labs", false},
+    {"llabs", false},
     {"bzero", false},
-    {"memcpy", false}, {"memset", false}, {"memmove", false}, {"memcmp", false},
+    {"memcpy", false},
+    {"memset", false},
+    {"memmove", false},
+    {"memcmp", false},
     {"wmemchr", false},
     {"posix_memalign", false},
-    {"drand48", false}, {"srand48", false},
+    {"drand48", false},
+    {"srand48", false},
 };
 
-static constexpr size_t KnownSafeOpaqueTableSize =
-    sizeof(KnownSafeOpaqueTable) / sizeof(KnownSafeOpaqueTable[0]);
+static constexpr size_t KnownSafeOpaqueTableSize = sizeof(KnownSafeOpaqueTable) /
+                                                   sizeof(KnownSafeOpaqueTable[0]);
 
 // Pure functions that are safe even when called with TM-traced pointer args.
 // These are read-only (or stateless) operations that don't modify TM-shared
@@ -64,37 +100,41 @@ static const OpaqueSafeEntry KnownSafeWithTMArgsTable[] = {
 //   - SyscallPrefixes: prefix match for obviously syscall-specific prefixes
 //     like "syscall", "sys_", "__NR_", "__sys_"
 static const char *ExactMatchSyscallSymbols[] = {
-    "read", "write", "open", "close",
-    "stat", "fstat", "lstat",
-    "mmap", "munmap", "mprotect", "brk", "sbrk",
-    "clone", "fork", "vfork", "execve", "wait", "waitpid",
-    "getpid", "gettid", "getuid", "geteuid", "getgid",
-    "nanosleep", "clock_gettime", "gettimeofday", "time",
-    "socket", "connect", "bind", "listen", "accept", "send", "recv",
+    "read",    "write",  "open",      "close",         "stat",         "fstat",  "lstat",
+    "mmap",    "munmap", "mprotect",  "brk",           "sbrk",         "clone",  "fork",
+    "vfork",   "execve", "wait",      "waitpid",       "getpid",       "gettid", "getuid",
+    "geteuid", "getgid", "nanosleep", "clock_gettime", "gettimeofday", "time",   "socket",
+    "connect", "bind",   "listen",    "accept",        "send",         "recv",
 };
 
 static const char *SyscallPrefixes[] = {
-    "syscall", "sys_", "__NR_", "__sys_",
+    "syscall",
+    "sys_",
+    "__NR_",
+    "__sys_",
 };
 
-static bool isSyscallSymbol(StringRef Name) {
-    for (auto *S : ExactMatchSyscallSymbols)
-        if (Name == S)
-            return true;
-    for (auto *Prefix : SyscallPrefixes)
-        if (Name.starts_with(Prefix))
-            return true;
-    return false;
+static bool isSyscallSymbol(StringRef Name)
+{
+	for (auto *S : ExactMatchSyscallSymbols)
+		if (Name == S)
+			return true;
+	for (auto *Prefix : SyscallPrefixes)
+		if (Name.starts_with(Prefix))
+			return true;
+	return false;
 }
 
 static bool isKnownSafeOpaque(const StringRef &Name, bool StrictOpaque = false)
 {
-    if (StrictOpaque) return false;
-    for (size_t i = 0; i < KnownSafeOpaqueTableSize; i++)
-        if (KnownSafeOpaqueTable[i].IsPrefix ? Name.starts_with(KnownSafeOpaqueTable[i].Name)
-                                              : Name == KnownSafeOpaqueTable[i].Name)
-            return true;
-    return false;
+	if (StrictOpaque)
+		return false;
+	for (size_t i = 0; i < KnownSafeOpaqueTableSize; i++)
+		if (KnownSafeOpaqueTable[i].IsPrefix
+		        ? Name.starts_with(KnownSafeOpaqueTable[i].Name)
+		        : Name == KnownSafeOpaqueTable[i].Name)
+			return true;
+	return false;
 }
 
 // Like isKnownSafeOpaque, but for functions that are safe even with
@@ -104,19 +144,24 @@ static bool isKnownSafeOpaque(const StringRef &Name, bool StrictOpaque = false)
 // it is still allowed as safe.
 static bool isKnownSafeWithTMArgs(const StringRef &Name)
 {
-    for (size_t i = 0; i < sizeof(KnownSafeWithTMArgsTable) / sizeof(KnownSafeWithTMArgsTable[0]); i++)
-        if (KnownSafeWithTMArgsTable[i].IsPrefix ? Name.starts_with(KnownSafeWithTMArgsTable[i].Name)
-                                                  : Name == KnownSafeWithTMArgsTable[i].Name)
-            return true;
-    return false;
+	for (size_t i = 0;
+	     i < sizeof(KnownSafeWithTMArgsTable) / sizeof(KnownSafeWithTMArgsTable[0]);
+	     i++)
+		if (KnownSafeWithTMArgsTable[i].IsPrefix
+		        ? Name.starts_with(KnownSafeWithTMArgsTable[i].Name)
+		        : Name == KnownSafeWithTMArgsTable[i].Name)
+			return true;
+	return false;
 }
 
 // Emit suggestion flag for a given opaque symbol
-static void emitOpaqueSuggestion(StringRef Name, raw_ostream &OS) {
-    OS << "  Use one of the following to resolve:\n"
-       << "    - Add '" << Name << "' to KnownSafeOpaqueTable in opaque_safe_table.hpp\n"
-       << "    - Add __attribute__((annotate(\"tm_allow_opaque\"))) to the call site\n"
-       << "    - Pass -tm-allow-opaque to opt to disable opaque checks globally (DANGEROUS)\n";
+static void emitOpaqueSuggestion(StringRef Name, raw_ostream &OS)
+{
+	OS << "  Use one of the following to resolve:\n"
+	   << "    - Add '" << Name << "' to KnownSafeOpaqueTable in opaque_safe_table.hpp\n"
+	   << "    - Add __attribute__((annotate(\"tm_allow_opaque\"))) to the call site\n"
+	   << "    - Pass -tm-allow-opaque to opt to disable opaque checks globally "
+	      "(DANGEROUS)\n";
 }
 
 #endif // OPAQUE_SAFE_TABLE_HPP

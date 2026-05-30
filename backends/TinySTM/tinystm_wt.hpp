@@ -134,7 +134,7 @@ begin()     //
 {
 	auto *tx = current_tx_wt;
 
-	TINYSTM_ASSERT(tx, "begin: tx is null");
+	TM_ASSERT(tx, "begin: tx is null");
 	if (tx->active)
 		return true;
 
@@ -154,8 +154,8 @@ abort_tx()  //
 {
 	auto *tx = current_tx_wt;
 
-	TINYSTM_ASSERT(tx, "abort_tx: tx is null");
-	TINYSTM_ASSERT(tx->active, "abort_tx: tx not active");
+	TM_ASSERT(tx, "abort_tx: tx is null");
+	TM_ASSERT(tx->active, "abort_tx: tx not active");
 
 	// Restore old values from write-set
 	for (auto &it : tx->write_set) {
@@ -180,7 +180,7 @@ abort_tx()  //
 	}
 
 	siglongjmp(*jmpbuf, 1);
-	TINYSTM_ASSERT(false, "Did not jump");
+	TM_ASSERT(false, "Did not jump");
 }
 
 inline bool //
@@ -189,8 +189,8 @@ commit()    //
 	auto *tx = current_tx_wt;
 	word_t commit_version = 0;
 
-	TINYSTM_ASSERT(tx, "commit: tx is null");
-	TINYSTM_ASSERT(tx->active, "commit: tx not active");
+	TM_ASSERT(tx, "commit: tx is null");
+	TM_ASSERT(tx->active, "commit: tx not active");
 
 	if (!tx->read_only && !tx->write_set.empty()) {
 
@@ -283,8 +283,8 @@ read_word_wt(                                                  //
 {
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 
-	TINYSTM_ASSERT(tx, "read_word_wt: tx is null");
-	TINYSTM_ASSERT(tx->active, "read_word_wt: tx not active");
+	TM_ASSERT(tx, "read_word_wt: tx is null");
+	TM_ASSERT(tx->active, "read_word_wt: tx not active");
 
 	// Stack-address detection: reading from the stack would create read-set
 	// entries for stack addresses that hash to random locks, causing spurious
@@ -399,8 +399,8 @@ write_word_wt(                                                 //
 {
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 
-	TINYSTM_ASSERT(tx, "write_word_wt: tx is null");
-	TINYSTM_ASSERT(tx->active, "write_word_wt: tx not active");
+	TM_ASSERT(tx, "write_word_wt: tx is null");
+	TM_ASSERT(tx->active, "write_word_wt: tx not active");
 
 	// Stack-address detection: writing to the stack via tm_write would create
 	// a write-set entry that gets written back at commit time — by then the
@@ -508,7 +508,7 @@ tm_read_i1(       //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
 	any_type_t word = read_word_wt(tx, word_addr, ValueType::UINT8);
@@ -522,7 +522,7 @@ tm_read_i2(        //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
 	any_type_t word = read_word_wt(tx, word_addr, ValueType::UINT16);
@@ -536,7 +536,7 @@ tm_read_i4(        //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	any_type_t w = read_word_wt(tx, (void *)((word_t)addr & ~(word_t)7), ValueType::UINT32);
 	uint8_t off = (word_t)addr & 7;
@@ -549,7 +549,7 @@ tm_read_i8(        //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	return read_word_wt(tx, (void *)addr, ValueType::UINT64).u8;
 }
@@ -560,7 +560,7 @@ tm_read_f4(     //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	any_type_t w = read_word_wt(tx, (void *)((word_t)addr & ~(word_t)7), ValueType::FLOAT);
 	uint8_t off = (word_t)addr & 7;
@@ -574,7 +574,7 @@ tm_read_f8(      //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	any_type_t w = read_word_wt(tx, (void *)addr, ValueType::DOUBLE);
 	return w.f8;
@@ -586,7 +586,7 @@ tm_read_ptr(    //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	any_type_t w = read_word_wt(tx, (void *)addr, ValueType::POINTER);
 	return w.ptr;
@@ -599,7 +599,7 @@ tm_write_i1(       //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
 	uint8_t off = (word_t)addr & 7;
@@ -623,7 +623,7 @@ tm_write_i2(        //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
 	uint8_t off = (word_t)addr & 7;
@@ -642,7 +642,7 @@ tm_write_i4(        //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
 	uint8_t off = (word_t)addr & 7;
@@ -661,7 +661,7 @@ tm_write_i8(        //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	any_type_t w = {.u8 = val};
 	write_word_wt(tx, (void *)addr, w, ValueType::UINT64);
@@ -674,7 +674,7 @@ tm_write_f4(     //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	void *word_addr = (void *)((word_t)addr & ~(word_t)7);
 	uint8_t off = (word_t)addr & 7;
@@ -695,7 +695,7 @@ tm_write_f8(      //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	any_type_t w = {.f8 = val};
 	write_word_wt(tx, (void *)addr, w, ValueType::DOUBLE);
@@ -708,7 +708,7 @@ tm_write_ptr(    //
 )
 {
 	auto *tx = current_tx_wt;
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
 	any_type_t w = {.ptr = val};
 	write_word_wt(tx, (void *)addr, w, ValueType::POINTER);

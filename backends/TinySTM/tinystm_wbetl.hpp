@@ -127,7 +127,7 @@ begin()     //
 {
 	auto *tx = current_tx_wbetl;
 
-	TINYSTM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx, "tx not defined");
 	if (tx->active)
 		return true;
 
@@ -151,8 +151,8 @@ abort_tx()  //
 {
 	auto *tx = current_tx_wbetl;
 
-	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	tx->unlock_held_locks_and_clear();
 	tx->abort_count++;
@@ -164,14 +164,14 @@ abort_tx()  //
 		random_backoff();
 	}
 	siglongjmp(*jmpbuf, 1);
-	TINYSTM_ASSERT(false, "Did not jump");
+	TM_ASSERT(false, "Did not jump");
 }
 
 static void       //
 deferred_abort() //
 {
 	auto *tx = current_tx_wbetl;
-	TINYSTM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx, "tx not defined");
 	tx->unlock_held_locks_and_clear();
 	tx->aborted = false;
 	tx->abort_count++;
@@ -182,7 +182,7 @@ deferred_abort() //
 		random_backoff();
 	}
 	siglongjmp(*jmpbuf, 1);
-	TINYSTM_ASSERT(false, "Did not jump");
+	TM_ASSERT(false, "Did not jump");
 }
 
 inline bool //
@@ -222,8 +222,8 @@ commit()    //
 {
 	auto *tx = current_tx_wbetl;
 
-	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	if (tx->aborted) {
 		deferred_abort();
@@ -266,8 +266,8 @@ read_word_etl(                                                //
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 	ByteOffset bo((word_t)addr);
 
-	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	// Stack-address detection: reading from the stack would create read-set
 	// entries for stack addresses that hash to random locks, causing spurious
@@ -381,8 +381,8 @@ write_word_etl(                                               //
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 	ByteOffset bo((word_t)addr);
 
-	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	// Stack-address detection: writing to the stack via tm_write would create
 	// a write-set entry that gets written back at commit time — by then the
@@ -397,21 +397,7 @@ write_word_etl(                                               //
 
 	tx->read_only = false;
 
-	// Helper: byte width of a ValueType
-	auto typeSize = [](ValueType t) -> unsigned {
-		switch (t) {
-		case ValueType::UINT8:   return 1;
-		case ValueType::UINT16:  return 2;
-		case ValueType::UINT32:  return 4;
-		case ValueType::FLOAT:   return 4;
-		case ValueType::UINT64:  return 8;
-		case ValueType::POINTER: return 8;
-		case ValueType::DOUBLE:  return 8;
-		default:                 return 0;
-		}
-	};
-
-	unsigned sz_bytes = typeSize(sz);
+	unsigned sz_bytes = stm::type_size(sz);
 
 	// Found write-set entry at exact addr with matching type → update in place.
 	{
@@ -429,7 +415,7 @@ write_word_etl(                                               //
 			}
 			// Generic guard: if a wider entry already exists at this address,
 			// skip the narrower write — the existing entry covers the range.
-			if (typeSize(w->second.type) >= sz_bytes) {
+			if (stm::type_size(w->second.type) >= sz_bytes) {
 				return;
 			}
 		}
@@ -473,6 +459,8 @@ write_word_etl(                                               //
 
 	Lock *lock = &g_locks_wbetl.get(bo.base_addr);
 
+	bool need_write = true;
+
 	if (lock->is_locked()) {
 		if (lock->get_owner() != tx->id) {
 			// Soft-spin (token as tie-breaker for deadlocks)
@@ -484,10 +472,10 @@ write_word_etl(                                               //
 					if (!lock->try_lock(tx->id))
 						abort_tx();
 				}
-				goto acquired_or_self;
+			} else {
+				tx->aborted = true;
+				return;
 			}
-			tx->aborted = true;
-			return;
 		}
 	} else {
 		if (!lock->try_lock(tx->id)) {
@@ -502,13 +490,15 @@ write_word_etl(                                               //
 						abort_tx();
 				} else {
 					tx->aborted = true;
-					return;
+					need_write = false;
 				}
 			}
 		}
 	}
 
-acquired_or_self:
+	if (!need_write)
+		return;
+
 	// locked — deduplicate locks_held
 	{
 		bool already_held = false;

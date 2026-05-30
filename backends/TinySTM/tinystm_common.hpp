@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <cassert>
 #include <csetjmp>
 #include <cstdint>
 #include <cstdio>
@@ -14,28 +13,7 @@
 #include <random>
 #include <thread>
 
-#ifndef NDEBUG
-#define TINYSTM_ASSERT(cond, msg)                                                        \
-	do {                                                                                 \
-		if (!(cond)) {                                                                   \
-			fprintf(stderr,                                                              \
-			        "TINYSTM ASSERTION FAILED: %s (%s:%d)\n",                            \
-			        msg,                                                                 \
-			        __FILE__,                                                            \
-			        __LINE__);                                                           \
-			fflush(stderr);                                                              \
-			assert(cond);                                                                \
-		}                                                                                \
-	} while (0)
-
-#define TINYSTM_ASSERT_VALID_TX(tx, msg)                                                 \
-	TINYSTM_ASSERT((tx) != nullptr, msg);                                                \
-	TINYSTM_ASSERT((tx)->active, "Transaction must be active: " msg);                    \
-	TINYSTM_ASSERT(!(tx)->aborted, "Transaction must not be aborted: " msg)
-#else                                    /* !NDEBUG */
-#define TINYSTM_ASSERT(cond, msg)        /* EMPTY */
-#define TINYSTM_ASSERT_VALID_TX(tx, msg) /* EMPTY */
-#endif                                   /* NDEBUG */
+// Assertions: use TM_ASSERT / TM_ASSERT_VALID_TX from tm_common.hpp.
 
 namespace tinystm
 {
@@ -49,6 +27,7 @@ using stm::fill_any_type;
 using stm::isStackAddress;
 using stm::read_value_from_addr;
 using stm::return_any_type;
+using stm::type_size;
 using stm::ValueType;
 using stm::write_value_to_addr;
 
@@ -107,7 +86,7 @@ public:
 
 	void unlock_with_version(word_t tx_id, word_t v)
 	{
-		TINYSTM_ASSERT(get_owner() == tx_id, "Not the owner of the lock");
+		TM_ASSERT(get_owner() == tx_id, "Not the owner of the lock");
 		state.store(((v & VERSION_MASK) << META_BITS), std::memory_order_release);
 	}
 
@@ -115,7 +94,7 @@ public:
 	                                         word_t new_version,
 	                                         word_t new_incarnation)
 	{
-		TINYSTM_ASSERT(get_owner() == tx_id, "Not the owner of the lock");
+		TM_ASSERT(get_owner() == tx_id, "Not the owner of the lock");
 		word_t desired = ((new_version & VERSION_MASK) << META_BITS) |
 		                 ((new_incarnation & INCARNATION_MASK) << OWNED_BITS);
 		state.store(desired, std::memory_order_release);
@@ -131,16 +110,16 @@ public:
 		word_t desired = (current_state & (VERSION_MASK << META_BITS)) |
 		                 (((tx_id & THREAD_MASK) << LOCK_BITS) | WRITE_MASK) |
 		                 (current_state & (INCARNATION_MASK << OWNED_BITS));
-		TINYSTM_ASSERT((desired & WRITE_MASK) == 1 &&
+		TM_ASSERT((desired & WRITE_MASK) == 1 &&
 		                   ((desired & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS) == tx_id,
 		               "Wrong lock configuration");
 		if ((expected & OWNED_MASK) != 0) {
 			return false;
 		}
-		TINYSTM_ASSERT(((expected & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS) == 0,
+		TM_ASSERT(((expected & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS) == 0,
 		               "Lock is unlocked with a owner");
 		bool res = state.compare_exchange_strong(expected, desired);
-		TINYSTM_ASSERT(!res || (res && state.load(std::memory_order_acquire) == desired),
+		TM_ASSERT(!res || (res && state.load(std::memory_order_acquire) == desired),
 		               "CAS did not work as expected");
 		return res;
 	}
@@ -286,7 +265,7 @@ inline T tm_read(            //
     T *addr                  //
 )
 {
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm tm_read");
 
 	any_type_t r = read_word(tx, (void *)addr, SZ);
 	return return_any_type<T>(r);
@@ -307,7 +286,7 @@ tm_write(                    //
     T val                    //
 )
 {
-	assert(tx && tx->active);
+	TM_ASSERT_VALID_TX(tx, "tinystm tm_write");
 
 	any_type_t w;
 	fill_any_type(w, &val, SZ);

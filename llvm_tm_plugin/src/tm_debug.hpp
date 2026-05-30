@@ -5,8 +5,8 @@
 #ifndef TM_DEBUG_HPP
 #define TM_DEBUG_HPP
 
-#include <cstdio>
 #include <cassert>
+#include <cstdio>
 #include <llvm/Support/CommandLine.h>
 
 // Audit flag: when enabled via -tm-audit, every load/store in TX functions
@@ -15,26 +15,30 @@ extern llvm::cl::opt<bool> TMAudit;
 
 // Debug output macro - prints function name and message
 #ifndef NDEBUG
-#define TM_DEBUG(fmt, ...)                                                     \
-  do {                                                                         \
-    fprintf(stderr, "[TM Plugin] %s: " fmt "\n", __func__, ##__VA_ARGS__);    \
-    fflush(stderr);                                                            \
-  } while (0)
+#define TM_DEBUG(fmt, ...)                                                               \
+	do {                                                                                 \
+		fprintf(stderr, "[TM Plugin] %s: " fmt "\n", __func__, ##__VA_ARGS__);           \
+		fflush(stderr);                                                                  \
+	} while (0)
 #else
 #define TM_DEBUG(fmt, ...) /* EMPTY */
 #endif
 
 // Assert macro with message - only active when NDEBUG is not defined
 #ifndef NDEBUG
-#define TM_ASSERT(cond, msg)                                                   \
-  do {                                                                         \
-    if (!(cond)) {                                                             \
-      fprintf(stderr, "[TM Plugin ASSERTION FAILED] %s (%s:%d): %s\n",         \
-              __func__, __FILE__, __LINE__, msg);                              \
-      fflush(stderr);                                                          \
-      assert(cond);                                                            \
-    }                                                                          \
-  } while (0)
+#define TM_ASSERT(cond, msg)                                                             \
+	do {                                                                                 \
+		if (!(cond)) {                                                                   \
+			fprintf(stderr,                                                              \
+			        "[TM Plugin ASSERTION FAILED] %s (%s:%d): %s\n",                     \
+			        __func__,                                                            \
+			        __FILE__,                                                            \
+			        __LINE__,                                                            \
+			        msg);                                                                \
+			fflush(stderr);                                                              \
+			assert(cond);                                                                \
+		}                                                                                \
+	} while (0)
 #else
 #define TM_ASSERT(cond, msg) /* EMPTY */
 #endif

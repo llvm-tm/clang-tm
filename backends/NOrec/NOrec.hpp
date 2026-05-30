@@ -10,28 +10,7 @@
 
 #include "tm_common.hpp"
 
-#ifndef NDEBUG
-#define NOREC_ASSERT(cond, msg)                                                          \
-	do {                                                                                 \
-		if (!(cond)) {                                                                   \
-			fprintf(stderr,                                                              \
-			        "NOREC ASSERTION FAILED: %s (%s:%d)\n",                              \
-			        msg,                                                                 \
-			        __FILE__,                                                            \
-			        __LINE__);                                                           \
-			fflush(stderr);                                                              \
-			assert(cond);                                                                \
-		}                                                                                \
-	} while (0)
-
-#define NOREC_ASSERT_VALID_TX(tx, msg)                                                   \
-	NOREC_ASSERT((tx) != nullptr, msg);                                                  \
-	NOREC_ASSERT((tx)->active, "Transaction must be active: " msg);                      \
-	NOREC_ASSERT(!(tx)->aborted, "Transaction must not be aborted: " msg)
-#else                                  /* !NDEBUG */
-#define NOREC_ASSERT(cond, msg)        /* EMPTY */
-#define NOREC_ASSERT_VALID_TX(tx, msg) /* EMPTY */
-#endif                                 /* NDEBUG */
+// Assertions: use TM_ASSERT / TM_ASSERT_VALID_TX from tm_common.hpp.
 
 namespace norec
 {
@@ -45,6 +24,7 @@ using stm::fill_any_type;
 using stm::isStackAddress;
 using stm::read_value_from_addr;
 using stm::return_any_type;
+using stm::type_size;
 using stm::ValueType;
 using stm::write_value_to_addr;
 
@@ -113,8 +93,8 @@ inline T tm_read(    //
     T *addr          //
 )
 {
-	NOREC_ASSERT(tx != nullptr, "tx is null");
-	NOREC_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx != nullptr, "tx is null");
+	TM_ASSERT(tx->active, "tx not active");
 
 	any_type_t r = read_word(tx, (void *)addr, SZ);
 	return return_any_type<T>(r);
@@ -133,8 +113,8 @@ tm_write(            //
     T val            //
 )
 {
-	NOREC_ASSERT(tx != nullptr, "tx is null");
-	NOREC_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx != nullptr, "tx is null");
+	TM_ASSERT(tx->active, "tx not active");
 
 	any_type_t w;
 	fill_any_type(w, &val, SZ);
@@ -204,7 +184,7 @@ inline bool //
 begin()     //
 {
 	auto *tx = current_tx;
-	NOREC_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx, "tx not defined");
 
 	do { tx->snapshot = get_clock(); } while (tx->snapshot & 1);
 	tx->active = true;
@@ -221,13 +201,13 @@ abort_tx()  //
 {
 	auto *tx = current_tx;
 
-	NOREC_ASSERT(tx, "tx not defined");
-	NOREC_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	tx->abort_count++;
 	tx->clear();
 	siglongjmp(*jmpbuf, 1);
-	NOREC_ASSERT(false, "Did not jump");
+	TM_ASSERT(false, "Did not jump");
 }
 
 inline __attribute__((noinline)) word_t //
@@ -260,8 +240,8 @@ commit()    //
 	auto *tx = current_tx;
 	volatile word_t commit_version = 0;
 
-	NOREC_ASSERT(tx, "tx not defined");
-	NOREC_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	if (tx->read_only) {
 		tx->reset();
@@ -270,7 +250,7 @@ commit()    //
 
 	word_t expect = tx->snapshot;
 	word_t desire = tx->snapshot + 1;
-	NOREC_ASSERT((expect & 1) == 0, "Already locked");
+	TM_ASSERT((expect & 1) == 0, "Already locked");
 	while (!global_lock.compare_exchange_strong(expect, desire)) {
 		tx->snapshot = validate();
 		expect = tx->snapshot;
@@ -301,8 +281,8 @@ read_word_norec(     //
     ValueType sz     //
 )
 {
-	NOREC_ASSERT(tx, "tx not defined");
-	NOREC_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	// Stack-address detection: stack data is thread-private.  Reading via
 	// tm_read would either return stale values (if write-back and no write-
@@ -439,8 +419,8 @@ write_word_norec(    //
     ValueType sz     //
 )
 {
-	NOREC_ASSERT(tx, "tx not defined");
-	NOREC_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	// Stack-address detection: writing to the stack creates write-set entries
 	// for addresses that will be popped on function return.  At commit time,
@@ -452,19 +432,7 @@ write_word_norec(    //
 
 	tx->read_only = false; // TODO: shouldn't the TX abort?
 
-	auto typeSize = [](ValueType t) -> unsigned {
-		switch (t) {
-		case ValueType::UINT8:   return 1;
-		case ValueType::UINT16:  return 2;
-		case ValueType::UINT32:  return 4;
-		case ValueType::FLOAT:   return 4;
-		case ValueType::UINT64:  return 8;
-		case ValueType::POINTER: return 8;
-		case ValueType::DOUBLE:  return 8;
-		default:                 return 0;
-		}
-	};
-	unsigned sz_bytes = typeSize(sz);
+	unsigned sz_bytes = stm::type_size(sz);
 
 	// Assert: POINTER values must be in user space (below 0x800000000000)
 	if (sz == ValueType::POINTER) {
@@ -477,7 +445,7 @@ write_word_norec(    //
 	// (e.g., vector _M_finish updated on every push_back)
 	for (auto it = tx->write_set.rbegin(); it != tx->write_set.rend(); ++it) {
 		if (it->addr == addr) {
-			if (typeSize(it->type) == sz_bytes) {
+			if (stm::type_size(it->type) == sz_bytes) {
 				// Assert: when updating a POINTER entry with a same-size non-POINTER type,
 				// the new value might be a non-pointer value. This is only safe if the
 				// non-POINTER value is a valid user-space address (for type interchange).
@@ -488,7 +456,7 @@ write_word_norec(    //
 				it->new_val = val; // same type: update most recent entry
 				return;
 			}
-			if (typeSize(it->type) > sz_bytes) {
+			if (stm::type_size(it->type) > sz_bytes) {
 				return; // wider entry covers this address — skip
 			}
 		}

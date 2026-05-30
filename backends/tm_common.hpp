@@ -9,8 +9,6 @@
 #include <pthread.h>
 #include <vector>
 
-
-
 #ifndef NDEBUG
 #define TM_ASSERT(cond, msg)                                                             \
 	do {                                                                                 \
@@ -28,6 +26,10 @@
 #define TM_ASSERT(cond, msg) /* EMPTY */
 #endif
 
+#define TM_ASSERT_VALID_TX(tx, msg)                                                    \
+	TM_ASSERT((tx) != nullptr, msg);                                                   \
+	TM_ASSERT((tx)->active, "Transaction must be active: " msg)
+
 namespace stm
 {
 
@@ -43,17 +45,22 @@ enum class ValueType : uint8_t {
 	POINTER = 7
 };
 
-inline unsigned type_size(ValueType t) {
-    switch (t) {
-        case ValueType::UINT8:   return 1;
-        case ValueType::UINT16:  return 2;
-        case ValueType::UINT32:
-        case ValueType::FLOAT:   return 4;
-        case ValueType::UINT64:
-        case ValueType::DOUBLE:
-        case ValueType::POINTER: return 8;
-    }
-    return 0;
+inline unsigned type_size(ValueType t)
+{
+	switch (t) {
+	case ValueType::UINT8:
+		return 1;
+	case ValueType::UINT16:
+		return 2;
+	case ValueType::UINT32:
+	case ValueType::FLOAT:
+		return 4;
+	case ValueType::UINT64:
+	case ValueType::DOUBLE:
+	case ValueType::POINTER:
+		return 8;
+	}
+	return 0;
 }
 
 struct any_type_t {
@@ -74,14 +81,8 @@ template <typename T> struct any_type_mapping;
 	template <> struct any_type_mapping<T> {                                             \
 		static T &get(any_type_t &t) { return t.M; }                                     \
 		static void set(any_type_t &t, T v) { t.M = v; }                                 \
-		static void setp(any_type_t &t, void *a)                                         \
-		{                                                                                \
-			memcpy(&t.AM, a, sizeof(AT));                                                \
-		}                                                                                \
-		static void store(any_type_t &t, void *a)                                        \
-		{                                                                                \
-			memcpy(a, &t.AM, sizeof(AT));                                                \
-		}                                                                                \
+		static void setp(any_type_t &t, void *a) { memcpy(&t.AM, a, sizeof(AT)); }       \
+		static void store(any_type_t &t, void *a) { memcpy(a, &t.AM, sizeof(AT)); }      \
 	};
 
 MAP_ANY(uint8_t, uint8_t, u1, u1)
@@ -181,43 +182,43 @@ write_value_to_addr( //
 // ===========================================================================
 inline bool isStackAddress(void *addr)
 {
-    // Method 1: pthread-based stack bounds (cached thread-local).
-    thread_local bool init = false;
-    thread_local void *stack_base = nullptr;
-    thread_local size_t stack_size = 0;
-    if (!init) {
+	// Method 1: pthread-based stack bounds (cached thread-local).
+	thread_local bool init = false;
+	thread_local void *stack_base = nullptr;
+	thread_local size_t stack_size = 0;
+	if (!init) {
 #if defined(__APPLE__)
-        stack_base = pthread_get_stackaddr_np(pthread_self());
-        stack_size = pthread_get_stacksize_np(pthread_self());
+		stack_base = pthread_get_stackaddr_np(pthread_self());
+		stack_size = pthread_get_stacksize_np(pthread_self());
 #else
-        pthread_attr_t attr;
-        if (pthread_getattr_np(pthread_self(), &attr) == 0) {
-            pthread_attr_getstack(&attr, &stack_base, &stack_size);
-            pthread_attr_destroy(&attr);
-        }
+		pthread_attr_t attr;
+		if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+			pthread_attr_getstack(&attr, &stack_base, &stack_size);
+			pthread_attr_destroy(&attr);
+		}
 #endif
-        init = true;
-    }
-    if (stack_base) {
-        uintptr_t a = (uintptr_t)addr;
-        uintptr_t base = (uintptr_t)stack_base;
-        if (a >= base && a < base + stack_size)
-            return true;
-    }
+		init = true;
+	}
+	if (stack_base) {
+		uintptr_t a = (uintptr_t)addr;
+		uintptr_t base = (uintptr_t)stack_base;
+		if (a >= base && a < base + stack_size)
+			return true;
+	}
 
-    // Method 2 (fallback): compare with current stack pointer.
-    // A thread's stack grows downward; any address between the current
-    // stack pointer and the top of the stack (highest address) is on
-    // this thread's stack.  We use __builtin_frame_address to get a
-    // conservative lower bound.
-    void *frame = __builtin_frame_address(0);
-    uintptr_t a = (uintptr_t)addr;
-    uintptr_t fp = (uintptr_t)frame;
-    // Stack grows downward: addresses >= fp (toward the top) are on
-    // the stack.  Pad by 256KB to account for frames deeper than the
-    // current call chain (e.g., signal handlers, stack overflow guard).
-    uintptr_t top = fp + 256UL * 1024;
-    return a >= fp && a <= top;
+	// Method 2 (fallback): compare with current stack pointer.
+	// A thread's stack grows downward; any address between the current
+	// stack pointer and the top of the stack (highest address) is on
+	// this thread's stack.  We use __builtin_frame_address to get a
+	// conservative lower bound.
+	void *frame = __builtin_frame_address(0);
+	uintptr_t a = (uintptr_t)addr;
+	uintptr_t fp = (uintptr_t)frame;
+	// Stack grows downward: addresses >= fp (toward the top) are on
+	// the stack.  Pad by 256KB to account for frames deeper than the
+	// current call chain (e.g., signal handlers, stack overflow guard).
+	uintptr_t top = fp + 256UL * 1024;
+	return a >= fp && a <= top;
 }
 
 constexpr int OFFSET_BITS = 3; // for 64bit
@@ -250,9 +251,7 @@ inline bool same_location( //
 #define GENERATE_TM_READ(TYPE, SZ)                                                       \
 	template <typename TX> inline TYPE tm_read_##TYPE(TX *tx, TYPE *addr)                \
 	{                                                                                    \
-		if (!tx || !tx->active) {                                                        \
-			return *addr;                                                                \
-		}                                                                                \
+		TM_ASSERT(tx && tx->active, "tm_read: tx not active");                                                     \
 		any_type_t r = tx->read_word((void *)addr, SZ);                                  \
 		return return_any_type<TYPE>(r);                                                 \
 	}
@@ -260,10 +259,7 @@ inline bool same_location( //
 #define GENERATE_TM_WRITE(TYPE, SZ)                                                      \
 	template <typename TX> inline void tm_write_##TYPE(TX *tx, TYPE *addr, TYPE val)     \
 	{                                                                                    \
-		if (!tx || !tx->active) {                                                        \
-			*addr = val;                                                                 \
-			return;                                                                      \
-		}                                                                                \
+		TM_ASSERT(tx && tx->active, "tm_write: tx not active");                                                     \
 		any_type_t w;                                                                    \
 		fill_any_type(w, &val, SZ);                                                      \
 		tx->write_word((void *)addr, w, SZ);                                             \
