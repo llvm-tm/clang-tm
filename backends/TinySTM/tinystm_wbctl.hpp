@@ -126,6 +126,7 @@ begin()     //
 	tx->read_only = true;
 	if (!tx->is_retry) tx->abort_count = 0;
 	tx->is_retry = false;
+	TM_EVENT(TX_BEGIN, tx->id, tx->start_version);
 
 	return true;
 }
@@ -138,6 +139,7 @@ abort_tx(const char *loc="")  //
 	TINYSTM_ASSERT(tx, "tx not defined");
 	TINYSTM_ASSERT(tx->active, "tx not active");
 
+	TM_EVENT(TX_ABORT, tx->id, tx->abort_count);
 	tx->unlock_held_locks_and_clear();
 	tx->abort_count++;
 	tx->is_retry = true;
@@ -171,6 +173,7 @@ validate()  //
 		word_t current_version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
 
 		if ((is_locked && owner != tx->id) || current_version > r.observed_version) {
+			TM_EVENT2(GAP_CHECK, (uint64_t)addr, r.observed_version, current_version);
 			return false;
 		}
 	}
@@ -230,6 +233,7 @@ commit()    //
 					}
 				}
 				tx->locks_held.push_back(lock); // keep track of locks
+				TM_EVENT2(COMMIT_LOCK_ACQUIRE, (uint64_t)lock, (uint64_t)addr, (uint64_t)w.type);
 			}
 			TINYSTM_ASSERT(lock->is_locked() && lock->get_owner() == tx->id,
 			               "Lock not locked or wrong owner");
@@ -242,6 +246,7 @@ commit()    //
 
 		// Check if there were transactions in between
 		if (commit_version != tx->end_version + 1) {
+			TM_EVENT2(GAP_CHECK, tx->id, tx->end_version, commit_version);
 			if (!extend()) {
 				abort_tx("gap_check");
 			}
@@ -256,9 +261,8 @@ commit()    //
 			abort_tx("read_validation");
 		}
 
-		// increment_clock(tx->id); // Reading above and incrementing here does not work
-
 		// Write-back phase
+		TM_EVENT(COMMIT_WRITEBACK, tx->id, tx->write_set.size());
 		for (auto &it : tx->write_set) {
 			auto &addr = it.first;
 			auto &w = it.second;
@@ -293,6 +297,7 @@ commit()    //
 				               "Lock version updated while locked");
 				lock->unlock_with_version(tx->id, commit_version);
 			}
+			TM_EVENT2(LOCK_RELEASE, (uint64_t)lock, (uint64_t)addr, commit_version);
 			if (lock->get_version() < commit_version) {
 				fprintf(stderr, "ASSERT: lock=%p get_version=%llu commit_version=%llu lock_state=0x%llx tx_id=%llu\n",
 				        (void*)lock,
@@ -312,7 +317,7 @@ commit()    //
 
 	stm::tm_token_release();
 	tx->reset();
-	// printf("THR%llu commit, active=%i\n", tx->id, tx->active);
+	TM_EVENT(COMMIT_SUCCESS, tx->id, commit_version);
 	return true;
 }
 
@@ -579,8 +584,10 @@ read_from_memory:
 
 		if (version > tx->end_version) {
 			if (extend()) {
+				TM_EVENT2(READ_VERSION_CHECK, (uint64_t)addr, (uint64_t)lock, version);
 				continue; // needs to read again
 			} else {
+				TM_EVENT2(READ_VERSION_CHECK, (uint64_t)addr, (uint64_t)lock, version);
 				if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 5)) {
 					continue;
 				}
@@ -589,6 +596,8 @@ read_from_memory:
 		}
 
 		any_type_t val = {.u8 = value.u8};
+
+		TM_EVENT2(READ_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, version);
 
 		ReadLogEntry_wbctl r;
 		r.addr = addr;
@@ -756,6 +765,7 @@ write_word_ctl(                                               //
 		TINYSTM_ASSERT(owner != tx->id, "WBCTL only locks at commit time");
 
 		if (is_locked && !validate()) {
+			TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, l);
 			// Read-set invalid — try token before aborting
 			if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 5)) {
 				continue;
@@ -793,6 +803,7 @@ write_word_ctl(                                               //
 		w.addr = addr;
 		w.version = version;
 		tx->write_set[addr] = w;
+		TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)sz);
 
 		// Also add to read-set so that validate() catches version changes
 		// from concurrent writers.  Without this, write-set-only addresses

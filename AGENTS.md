@@ -839,3 +839,33 @@ On x86 this race is unlikely (strong memory model + store buffer forwarding). On
 - `benchmarks/TPCC/TPCC_opt.cpp` — dead code, no tm_local annotations
 - Cleaned up bank Makefile bank_opt/bank_opt_wbetl/bank_opt_wt targets
 
+## Done (this session — 2026-05-31)
+### Event logger created (backends/tm_event_logger.hpp)
+- Created per-thread ring-buffer event logger (16384 entries, lock-free)
+- Event types: TX_BEGIN, TX_END, TX_ABORT, TX_RETRY, READ_LOCK_ACQUIRE, READ_VERSION_CHECK, WRITE_LOCK_ACQUIRE, WRITE_SET_INSERT, COMMIT_LOCK_ACQUIRE, COMMIT_WRITEBACK, COMMIT_SUCCESS, GAP_CHECK, LOCK_RELEASE
+- Gated by `#define TM_EVENT_LOG` — when undefined, all macros expand to no-ops
+- SIGSEGV handler automatically dumps last 512 events on crash
+- Uses `rdtsc` (x86_64) or `cntvct_el0` (aarch64) for timestamps
+- Integrated into TinySTM/WBCTL: events at begin(), abort_tx(), read_word_ctl(), write_word_ctl(), commit() (lock acquire, gap check, write-back, lock release, success), validate()
+- SIGSEGV handler installed in `tinystm::init()` when `TM_EVENT_LOG` defined
+
+### run_tests.sh fixed
+- `test_std_queue` expected pattern mismatch: `"PASS: std::queue and raw array both work"` → `"PASS: std::queue<Cell> and raw array both work"` (missing `<Cell>` caused false FAIL)
+
+### READMEs updated
+- `backends/README.md`: new Event Logger section with usage, event type table, activation instructions, lldb dump command
+- `root README.md`: new "Event Logger Debugging" subsection under Backend Reference
+
+### Full test verification
+- **Backend STM tests**: tl2, tinystm, wt, wbetl, norec — 6/6 PASS; swisstm/nvhtm/spht — pre-existing counter_mt+write_set_validation FAIL (unchanged)
+- **Plugin tests**: 14/14 PASS (test_std_queue pattern fixed)
+- Event logger adds zero overhead when `TM_EVENT_LOG` is not defined
+
+## Relevant Files (this session)
+- `backends/tm_event_logger.hpp`: new — per-thread ring-buffer event logger
+- `backends/TinySTM/tinystm_wbctl.hpp`: TM_EVENT calls at 8 key locations
+- `backends/TinySTM/tinystm_common.hpp`: TM_EVENT_INSTALL_SIGSEGV() in init()
+- `llvm_tm_plugin/run_tests.sh`: test_std_queue pattern fix
+- `backends/README.md`: event logger documentation
+- `README.md`: event logger debugging subsection
+

@@ -20,6 +20,7 @@
 
 #include "../tm_common.hpp"
 #include "../tm_spin_token.hpp"
+#include "../tm_event_logger.hpp"
 
 namespace swisstm
 {
@@ -113,6 +114,7 @@ public:
             greedy_ts.store(0, std::memory_order_relaxed);
             initialized.store(true);
         }
+        TM_EVENT_INSTALL_SIGSEGV();
     }
 
     static word_t* get_word_addr(void* addr) {
@@ -349,6 +351,7 @@ public:
         e.type = VT;
         e.orec = orec;
         tx->read_set.push_back(e);
+        TM_EVENT(READ_LOCK_ACQUIRE, (word_t)addr, version);
 
         if (version > tx->valid_ts && !extend(tx)) {
             rollback(tx);
@@ -431,6 +434,7 @@ public:
         tx->write_log.push_back(e);
         WriteLogEntry* log_entry = &tx->write_log.back();
         tx->write_log_index[addr] = log_entry;
+        TM_EVENT2(WRITE_SET_INSERT, (word_t)addr, (word_t)VT, 0);
 
         // Step 4: Acquire w_lock (or skip if already held by us).
         // Multiple addresses may map to the same OREC (LOCK_EXTENT=4, 16-byte
@@ -460,6 +464,7 @@ public:
 
                     if (orec->w_lock.compare_exchange_strong(w_lock_val, (word_t)log_entry,
                             std::memory_order_acquire, std::memory_order_acquire)) {
+                        TM_EVENT2(WRITE_LOCK_ACQUIRE, (word_t)addr, (word_t)orec, w_lock_val);
                         break;
                     }
                 }
@@ -513,6 +518,7 @@ public:
         tx->write_set.clear();
         tx->read_set.clear();
         cm_start(tx);
+        TM_EVENT(TX_BEGIN, tx->id, tx->valid_ts);
     }
 
     static void commit(TxDescriptor* tx) {
@@ -555,6 +561,7 @@ public:
                     std::memory_order_acq_rel);
                 re.old_version = old;
                 locked_orecs[re.orec] = old;
+                TM_EVENT2(COMMIT_LOCK_ACQUIRE, (word_t)re.byte_addr, (word_t)re.orec, old);
             }
         }
 
@@ -595,9 +602,11 @@ public:
 
         // Phase 4 + 5: write-back and release locks
         for (auto& we : tx->write_log) {
+            TM_EVENT2(COMMIT_WRITEBACK, (word_t)we.byte_addr, (word_t)we.type, ts);
             write_value_to_addr(we.byte_addr, we.new_value, we.type);
             we.orec->r_lock.store(ts, std::memory_order_release);
             we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
+            TM_EVENT2(LOCK_RELEASE, (word_t)we.byte_addr, ts, 0);
         }
 
         // Release read-only orecs (not in write-log)
@@ -608,11 +617,13 @@ public:
             }
             if (!found) {
                 re.orec->r_lock.store(re.version, std::memory_order_release);
+                TM_EVENT2(LOCK_RELEASE, (word_t)re.byte_addr, re.version, 0);
             }
         }
 
         stm::tm_token_release();
         tx->active = false;
+        TM_EVENT(COMMIT_SUCCESS, 0, ts);
     }
 };
 
@@ -650,6 +661,7 @@ inline bool begin() {
 
 inline void abort_tx() {
     if (current_tx && !current_tx->aborted) {
+        TM_EVENT(TX_ABORT, current_tx->id, current_tx->succ_abort_count);
         current_tx->aborted = true;
         STM::rollback(current_tx);
     }

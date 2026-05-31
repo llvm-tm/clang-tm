@@ -20,6 +20,7 @@
 #include <string.h>
 #include <csetjmp>
 #include "../tm_common.hpp"
+#include "../tm_event_logger.hpp"
 #include <type_traits>
 
 namespace tl2 {
@@ -232,6 +233,7 @@ public:
         tx->write_set.clear();
         tx->read_set.clear();
         tx->bloom_filter = 0;
+        TM_EVENT(TX_BEGIN, (word_t)tx, tx->start_version);
     }
     
     static bool is_locked_by_me(Transaction* tx, word_t* addr) {
@@ -346,6 +348,7 @@ public:
         e.set_new(to_word(val));
         tx->write_set.push_back(e);
         bloom_set(tx, (word_t*)addr);
+        TM_EVENT(WRITE_SET_INSERT, (word_t)addr, (word_t)e.dtype);
     }
 
     // Write functions
@@ -477,6 +480,7 @@ public:
         word_t guard = g_guards[idx].load(std::memory_order_acquire);
         word_t version = (guard & VERSION_MASK) >> 1;
         bool locked = (guard & LOCK_MASK) != 0;
+        TM_EVENT2(READ_LOCK_ACQUIRE, (word_t)addr, (word_t)&g_guards[idx], version);
 
         ReadSetEntry e;
         e.guard_addr = (word_t*)&g_guards[idx];
@@ -530,6 +534,7 @@ public:
                 for (auto& e2 : tx->write_set) {
                     word_t idx2 = get_guard_idx(e2.addr);
                     if (held_guard[idx2]) {
+                        TM_EVENT2(LOCK_RELEASE, (word_t)e2.addr, idx2, 0);
                         release_guard(e2.addr);
                         held_guard[idx2] = false;
                     }
@@ -539,6 +544,7 @@ public:
                 return false;
             }
             held_guard[idx] = true;
+            TM_EVENT2(COMMIT_LOCK_ACQUIRE, (word_t)e.addr, idx, 0);
         }
         
         // Step 4: Increment global version-clock
@@ -555,6 +561,7 @@ public:
                 for (auto& e : tx->write_set) {
                     word_t idx = get_guard_idx(e.addr);
                     if (held_guard[idx]) {
+                        TM_EVENT2(LOCK_RELEASE, (word_t)e.addr, idx, 0);
                         release_guard(e.addr);
                         held_guard[idx] = false;
                     }
@@ -567,6 +574,7 @@ public:
         
         // Step 7: Apply writes and release locks with version
         for (auto& e : tx->write_set) {
+            TM_EVENT2(COMMIT_WRITEBACK, (word_t)e.addr, (word_t)e.dtype, 0);
             switch (e.dtype) {
                 case DataType::UINT8:
                     *(uint8_t*)e.addr = (uint8_t)e.new_value();
@@ -598,19 +606,24 @@ public:
             }
             word_t idx = get_guard_idx(e.addr);
             g_guards[idx].store((tx->commit_version << 1) & VERSION_MASK, std::memory_order_release);
+            TM_EVENT2(LOCK_RELEASE, (word_t)e.addr, tx->commit_version, 0);
         }
         
         tx->active = false;
+        TM_EVENT(COMMIT_SUCCESS, (word_t)tx, tx->commit_version);
         return true;
     }
     
     static void abort_tx(Transaction* tx) {
         if (!tx) return;
         
+        TM_EVENT(TX_ABORT, (word_t)tx, tx->start_version);
+        
         // TL2 is write-back — values only reach memory during commit step 7.
         // On abort, no writes were applied to memory, so we just release guards
         // and retry.  No old-value restore needed.
         for (auto& e : tx->write_set) {
+            TM_EVENT2(LOCK_RELEASE, (word_t)e.addr, 0, 0);
             release_guard(e.addr);
         }
         
