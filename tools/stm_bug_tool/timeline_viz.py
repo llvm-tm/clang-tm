@@ -29,7 +29,7 @@ from invariant_checker import check_all
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Patch
 from matplotlib.lines import Line2D
 
 # ── Color map by event type ─────────────────────────────────────
@@ -46,6 +46,25 @@ EVENT_COLORS = {
     "READ_VERSION_CHECK": "#c0392b",
     "GAP_CHECK":          "#e91e63",
 }
+
+# ── Marker shape by event type ──────────────────────────────────
+# p=pentagon o=circle ^=up-triangle v=down-triangle
+EVENT_MARKERS = {
+    "TX_BEGIN":            "p",
+    "TX_ABORT":            "p",
+    "TX_END":              "p",
+    "RETRY_END":           "p",
+    "COMMIT_SUCCESS":      "o",
+    "COMMIT_LOCK_ACQUIRE": "o",
+    "COMMIT_WRITEBACK":    "v",
+    "READ_LOCK_ACQUIRE":   "^",
+    "READ_VERSION_CHECK":  "^",
+    "WRITE_LOCK_ACQUIRE":  "v",
+    "WRITE_SET_INSERT":    "v",
+    "LOCK_RELEASE":        "v",
+    "GAP_CHECK":           "v",
+}
+DEFAULT_MARKER = "o"
 
 # ── Find violation events ──────────────────────────────────────
 def find_violation_events(parsed: dict, violations: list) -> dict:
@@ -85,7 +104,8 @@ def annotate_violation_events(violations: list, parsed: dict):
 
 # ── Timeline plot ──────────────────────────────────────────────
 def build_timeline(parsed: dict, violations: list,
-                   window_events: int = 80, output: str = "timeline.pdf"):
+                   window_events: int = 80, output: str = "timeline.pdf",
+                   center_event: int = None):
     """Build and save a timeline PDF."""
     annotate_event_indices(parsed)
     annotate_violation_events(violations, parsed)
@@ -96,12 +116,18 @@ def build_timeline(parsed: dict, violations: list,
         print("No events to plot.")
         return
 
-    # Focus window around first violation, or last events
-    violation_idxs = sorted(flagged.keys())
-    if violation_idxs:
-        center = violation_idxs[0]
+    # Focus window around first violation, or middle of log
+    if center_event is not None:
+        center = center_event
     else:
-        center = len(events) - 1
+        violation_idxs = sorted(flagged.keys())
+        if violation_idxs:
+            # prefer the first violation not in the first 1% of events (likely warmup)
+            early_cut = max(1, len(events) // 100)
+            candidates = [i for i in violation_idxs if i >= early_cut]
+            center = candidates[0] if candidates else violation_idxs[0]
+        else:
+            center = len(events) // 2
     start = max(0, center - window_events // 2)
     end = min(len(events), center + window_events // 2)
     window = events[start:end]
@@ -128,11 +154,15 @@ def build_timeline(parsed: dict, violations: list,
     n_threads = len(thread_ids)
     n_events = end - start
     fig_w = max(16, n_events * 0.08)
-    fig_h = max(3.5, n_threads * 1.5 + 1.5)
+    fig_h = max(4.0, n_threads * 1.5 + 1.8)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     ax.set_yticks(range(n_threads))
     ax.set_yticklabels([f"thr=0x{t}" for t in thread_ids], fontsize=8)
-    ax.set_ylim(-0.5, n_threads + 0.8)
+
+    # Tight ylim — just enough for top thread's event ID + timestamp axis
+    y_top_base = n_threads - 1
+    y_eventid_top = y_top_base + 0.22
+    ax.set_ylim(-0.5, y_eventid_top + 0.18)
     ax.set_xlim(-1, n_events)
     ax.set_xlabel("Event sequence (dense)", fontsize=9)
     ax.set_title("STM Event Timeline", fontsize=11, fontweight="bold")
@@ -163,16 +193,20 @@ def build_timeline(parsed: dict, violations: list,
         ax2.set_xlabel("Timestamp (μs)", fontsize=7)
 
     # ── Draw TX bands + baselines for each thread ─────────────
+    # Compute axes-fraction mapping for correct y alignment
+    y_lo, y_hi = ax.get_ylim()
+    y_range = y_hi - y_lo
     for ti, tid in enumerate(thread_ids):
         t_events = by_thread[tid]
         ax.axhline(y=ti, color="#e0e0e0", linewidth=0.8, zorder=0)
+        band_lo = (ti - 0.3 - y_lo) / y_range
+        band_hi = (ti + 0.3 - y_lo) / y_range
 
         for begin_i, end_i, end_type in tx_ranges[tid]:
             p_begin = t_events[begin_i]["_pos"]
             p_end = t_events[end_i]["_pos"]
             bg = "#2ecc71" if end_type == "COMMIT_SUCCESS" else "#e74c3c"
-            ax.axvspan(p_begin, p_end, ymin=(ti - 0.3) / n_threads if n_threads > 1 else 0,
-                       ymax=(ti + 0.3) / n_threads if n_threads > 1 else 1,
+            ax.axvspan(p_begin, p_end, ymin=band_lo, ymax=band_hi,
                        alpha=0.06, color=bg, zorder=1)
             ax.plot([p_begin, p_begin], [ti - 0.25, ti + 0.25],
                     color=bg, linewidth=1.2, zorder=3)
@@ -194,60 +228,76 @@ def build_timeline(parsed: dict, violations: list,
         color = EVENT_COLORS.get(et, "#666")
         plotted_types.add(et)
 
-        # Base dot
-        ax.plot([x], [y], marker="o", color=color,
-                markersize=3, alpha=0.7, zorder=2)
+        # Base marker
+        mkr = EVENT_MARKERS.get(et, DEFAULT_MARKER)
+        msize = {"p": 4, "o": 3, "^": 4, "v": 4}.get(mkr, 3)
+        ax.plot([x], [y], marker=mkr, color=color,
+                markersize=msize, alpha=0.7, zorder=2)
 
-        # Violation: red ring + vertical dashed line to top
+        # Violation: red ring + cross (connecting line+label done in figure space below)
         if is_violation:
-            ax.plot([x], [y], marker="o", color="#e74c3c",
+            vmrk = mkr  # same shape as base marker
+            ax.plot([x], [y], marker=vmrk, color="#e74c3c",
                     markersize=8, markeredgewidth=2, markerfacecolor="none",
                     zorder=5)
             ax.plot([x], [y], marker="x", color="#e74c3c",
                     markersize=9, markeredgewidth=1.8,
                     zorder=6)
 
-            # Vertical dashed line from event up to label area
-            top_y = n_threads - 0.1
-            ax.plot([x, x], [y, top_y], color="#e74c3c", linestyle=":",
-                    linewidth=0.6, alpha=0.4, zorder=1)
+        # Event ID label (event index, small, above lane, closer to timeline)
+        ei = ev["_event_idx"]
+        ax.annotate(f"#{ei}", (x, y), (x, min(ti + 0.22, n_threads - 0.3)),
+                    fontsize=3.5, color="#666", alpha=0.5,
+                    rotation=90, va="bottom", ha="center",
+                    annotation_clip=False, zorder=2)
 
-            # Rotated (90°) annotation above all lanes
-            desc = flagged[ev["_event_idx"]]
-            label = f"#{ev['_event_idx']} {desc[:50]}"
-            ax.annotate(label, (x, top_y),
-                        xytext=(x, n_threads + 0.3),
-                        fontsize=5, color="#c0392b",
-                        rotation=90, va="bottom", ha="center",
-                        annotation_clip=False,
-                        bbox=dict(boxstyle="round,pad=0.1", fc="#fff0f0",
-                                  ec="#c0392b", lw=0.5),
-                        zorder=10)
-
-        # Event type label (rotated 90°, faint, for key events)
-        if et in ("TX_BEGIN", "COMMIT_SUCCESS", "TX_ABORT"):
-            short = et[4:] if et.startswith("TX_") else (et[:4] if et == "COMMIT_SUCCESS" else et[:4])
-            ax.annotate(short, (x, y), (x, max(ti - 0.6, -0.45)),
-                        fontsize=4, color=color, alpha=0.6,
-                        rotation=90, va="top", ha="center",
-                        annotation_clip=False, zorder=2)
+    # ── Violation annotations: dashed line up from event + text block below ──
+    if flagged:
+        sorted_v = sorted(flagged.items(), key=lambda x: x[0])
+        nv = len(sorted_v)
+        # Vertical dashed line from each violation event to top of axes
+        for ev_idx, desc in sorted_v:
+            for ev in window:
+                if ev["_event_idx"] == ev_idx:
+                    xd = ev["_pos"]
+                    yd = thread_ids.index(ev["thread_id"])
+                    ax.plot([xd, xd], [yd, n_threads - 0.3],
+                            color="#e74c3c", linestyle=":", linewidth=0.6,
+                            alpha=0.4, zorder=1, clip_on=False)
+                    break
+        # Text block below the plot footer
+        vio_lines = [f"#{i} {d[:80]}" for i, d in sorted_v]
+        vio_text = " | ".join(vio_lines[:5])
+        if nv > 5: vio_text += f" (+{nv - 5} more)"
+        fig.text(0.5, -0.40, "Violations: " + vio_text,
+                 ha="center", fontsize=4.5, color="#c0392b",
+                 transform=ax.transAxes,
+                 bbox=dict(boxstyle="round,pad=0.2", fc="#fff0f0",
+                           ec="#e74c3c", lw=0.5))
 
     # ── Legend ─────────────────────────────────────────────────
     legend_handles = []
     for et in sorted(plotted_types):
         c = EVENT_COLORS.get(et, "#666")
-        legend_handles.append(Line2D([0], [0], marker="o", color="w",
+        mkr = EVENT_MARKERS.get(et, DEFAULT_MARKER)
+        legend_handles.append(Line2D([0], [0], marker=mkr, color="w",
                                      markerfacecolor=c, markersize=5,
                                      label=et))
-    legend_handles.append(Line2D([0], [0], marker="o", color="w",
+    legend_handles.append(Line2D([0], [0], marker=DEFAULT_MARKER, color="w",
                                  markerfacecolor="none", markeredgecolor="#e74c3c",
                                  markeredgewidth=2, markersize=7,
                                  label="INVARIANT"))
     legend_handles.append(Line2D([0], [0], marker="x", color="#e74c3c",
                                  markersize=7, label="violation detail"))
-    ax.legend(handles=legend_handles, loc="upper left",
-              fontsize=5.5, ncol=5, framealpha=0.85,
-              handletextpad=0.5, columnspacing=1)
+    # TX band legend entry (green/red commit/abort boxes)
+    legend_handles.append(Patch(facecolor="#2ecc71", alpha=0.15, edgecolor="#2ecc71",
+                                linewidth=0.5, label="TX active (→commit)"))
+    legend_handles.append(Patch(facecolor="#e74c3c", alpha=0.15, edgecolor="#e74c3c",
+                                linewidth=0.5, label="TX active (→abort)"))
+    ax.legend(handles=legend_handles, loc="lower center",
+              bbox_to_anchor=(0.5, -0.22), ncol=6,
+              fontsize=5.5, framealpha=0.85,
+              handletextpad=0.5, columnspacing=0.8)
 
     # ── Footer summary ─────────────────────────────────────────
     n_beg = len(filter_by_type(window, "TX_BEGIN"))
@@ -255,9 +305,9 @@ def build_timeline(parsed: dict, violations: list,
     n_abr = len(filter_by_type(window, "TX_ABORT"))
     n_vio = len(flagged)
     txt = f"Events #{start}–{end-1}  TX={n_beg}  OK={n_cmt}  ABORT={n_abr}  VIOLATIONS={n_vio}"
-    fig.text(0.5, 0.005, txt, ha="center", fontsize=6, color="#666")
+    fig.text(0.5, 0.01, txt, ha="center", fontsize=6, color="#666")
 
-    plt.tight_layout(rect=[0, 0.02, 1, 1])
+    plt.tight_layout(rect=[0, 0.12, 1, 0.96])
     fig.savefig(output, format="pdf", bbox_inches="tight", dpi=200)
     plt.close(fig)
     print(f"Timeline saved to {output} (events {start}–{end-1})")
@@ -271,6 +321,8 @@ def main():
                     help="Output PDF path")
     ap.add_argument("--window", type=int, default=200,
                     help="Number of events in the focused window")
+    ap.add_argument("--center", type=int, default=None,
+                    help="Center the window on this event index (default: first non-warmup violation or middle)")
     ap.add_argument("--backend", help="Backend name (swisstm, tinystm, ...)")
     ap.add_argument("--benchmark", default="counter",
                     help="Benchmark name (counter, bank)")
@@ -295,7 +347,7 @@ def main():
         else:
             print("No violations detected.")
         build_timeline(parsed, violations, window_events=args.window,
-                       output=args.output)
+                       output=args.output, center_event=args.center)
         return
 
     # Live run: build & run benchmark, parse output, generate timeline
@@ -381,7 +433,7 @@ def main():
         print("\nNo violations detected.")
 
     build_timeline(parsed, violations, window_events=args.window,
-                   output=args.output)
+                   output=args.output, center_event=args.center)
 
 
 if __name__ == "__main__":

@@ -200,6 +200,7 @@ private:
 public:
     static void init() {
         if (!initialized.load(std::memory_order_seq_cst)) {
+            TM_EVENT_INSTALL_SIGSEGV();
             g_clock.store(1, std::memory_order_relaxed);
             for (auto& g : g_guards) {
                 g.store(0, std::memory_order_relaxed);
