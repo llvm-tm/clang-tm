@@ -336,29 +336,31 @@ def check_address_validity(parsed: dict) -> list:
         if ev["type"] not in MEM_ADDR_EVENTS:
             continue
 
-        for field in ("addr1", "addr2"):
-            addr = ev.get(field, 0)
-            if addr == 0:
-                continue
+        # Only check addr1 — it's always the primary data address.
+        # addr2 is often metadata (ValueType enum, version, etc.) and
+        # would produce false positives (e.g., VT=4 → "page-zero").
+        addr = ev.get("addr1", 0)
+        if addr == 0:
+            continue
 
-            cat = addr_category(addr)
+        cat = addr_category(addr)
 
-            if cat == "null" and field == "addr1":
-                critical_suspicious.append(ev)
+        if cat == "null":
+            critical_suspicious.append(ev)
 
-            elif cat == "page_zero":
-                critical_suspicious.append(ev)
+        elif cat == "page_zero":
+            critical_suspicious.append(ev)
 
-            elif cat == "kernel":
-                critical_suspicious.append(ev)
+        elif cat == "kernel":
+            critical_suspicious.append(ev)
 
-            elif cat == "stack":
-                tid = ev.get("thread_id", "?")
-                stack_warnings.setdefault(tid, []).append((addr, ev["type"], ev))
+        elif cat == "stack":
+            tid = ev.get("thread_id", "?")
+            stack_warnings.setdefault(tid, []).append((addr, ev["type"], ev))
 
-            # Correlate with SIGSEGV address
-            if crash_addr_int and abs(addr - crash_addr_int) < 0x1000:
-                crash_related.append(ev)
+        # Correlate with SIGSEGV address
+        if crash_addr_int and abs(addr - crash_addr_int) < 0x1000:
+            crash_related.append(ev)
 
     # Emit critical violations
     for ev in critical_suspicious:

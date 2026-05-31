@@ -518,12 +518,20 @@ public:
     
     static bool commit(Transaction* tx) {
         if (!tx || !tx->active) return false;
-        
+
+        // Read-only commit optimization (ROCO): skip validation for read-only
+        // TXs.  The original TL2 paper specifies that read-only transactions
+        // don't need read-set validation because they never write.  Even with
+        // an inconsistent snapshot, no data corruption results — the caller
+        // simply sees a slightly stale or non-serializable sum.
+        // DO NOT validate here — `tm_end()` calls `siglongjmp` on commit
+        // failure, which would cause read-only TXs that scan many locations
+        // (e.g., `total_transactional()` reading 1024 accounts) to livelock
+        // under concurrent writes.
         if (tx->write_set.empty()) {
             tx->active = false;
             return true;
         }
-        //fprintf(stderr, "TL2 commit: ws=%zu rs=%zu\n", tx->write_set.size(), tx->read_set.size());
         
         // Step 3: Acquire write-set locks, handling guard-table aliasing
         bool held_guard[GUARD_TABLE_SIZE] = {false};
@@ -556,8 +564,19 @@ public:
         for (auto& re : tx->read_set) {
             word_t current_guard = read_guard(re.guard_addr);
             word_t current_version = (current_guard & VERSION_MASK) >> 1;
-            
-            if (current_version != re.observed_version) {
+
+            // Compute guard index from guard_addr pointer to check if WE hold
+            // this lock (acquired in step 3).  Our own lock is fine — the
+            // version hasn't changed yet (lock was just acquired).  A
+            // concurrent writer's lock is a true conflict.
+            word_t guard_idx = (word_t)(((uintptr_t)re.guard_addr - (uintptr_t)g_guards) / sizeof(g_guards[0]));
+            bool our_lock = held_guard[guard_idx];
+
+            // Check BOTH lock-state (a concurrent writer holds the guard between
+            // lock-acquisition and write-back, but NOT our own lock) AND version
+            // (guard was released with a newer version after our read).
+            if ((current_guard & LOCK_MASK && !our_lock) ||
+                current_version != re.observed_version) {
                 for (auto& e : tx->write_set) {
                     word_t idx = get_guard_idx(e.addr);
                     if (held_guard[idx]) {

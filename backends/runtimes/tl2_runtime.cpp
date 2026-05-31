@@ -90,7 +90,6 @@ extern "C" void tm_begin() {
 }
 
 extern "C" void tm_end() {
-    //fprintf(stderr, "TL2 tm_end called (thr=%ld)\n", (long)pthread_self());
     if (!tl2::commit()) {
         g_tm_commit_fail_count.fetch_add(1, std::memory_order_relaxed);
         siglongjmp(tm_jmpbuf, 1);
