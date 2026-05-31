@@ -179,3 +179,22 @@ p ((stm::EventRing*)&stm::get_event_ring())->dump(0, stderr)
 | `backends/tm_event_logger.hpp`    | Ring buffer + event macros  |
 | `backends/TinySTM/tinystm_wbctl.hpp` | Instrumented with events  |
 | `backends/TinySTM/tinystm_common.hpp` | SIGSEGV handler install   |
+| `tools/stm_bug_tool/timeline_viz.py` | PDF timeline visualizer   |
+
+### Timeline PDF Visualization
+
+`timeline_viz.py` produces a PDF timeline from event logs with one lane per
+thread, TX boundaries as colored bands, and invariant violations highlighted
+with vertical dashed lines and annotation labels above the plot.
+
+```bash
+# From an existing event log:
+python3 tools/stm_bug_tool/timeline_viz.py --log <event_log.txt> --output timeline.pdf
+
+# Or run a benchmark live (builds + runs + parses + plots):
+python3 tools/stm_bug_tool/timeline_viz.py --backend swisstm --benchmark counter \\
+    --threads 4 --iters 2000 --output swisstm_counter.pdf
+
+# Adjust the event window around the first violation:
+python3 tools/stm_bug_tool/timeline_viz.py --log <log> --window 160 --output focused.pdf
+```

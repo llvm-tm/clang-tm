@@ -175,7 +175,11 @@ public:
     static bool validate(TxDescriptor* tx) {
         for (auto& re : tx->read_set) {
             word_t current_version = re.orec->r_lock.load(std::memory_order_acquire);
-            if (current_version != re.version && !is_locked_by(re.orec->r_lock, tx)) {
+            if (current_version != re.version) {
+                if (is_locked_by(re.orec->r_lock, tx)) {
+                    continue;
+                }
+                TM_EVENT2(READ_VERSION_CHECK, (word_t)re.byte_addr, re.version, current_version);
                 return false;
             }
         }
@@ -192,6 +196,7 @@ public:
     }
 
     static void rollback(TxDescriptor* tx) {
+        TM_EVENT(TX_ABORT, tx->id, tx->succ_abort_count);
         for (auto& we : tx->write_log) {
             // Only restore old value and release w_lock if we actually
             // acquired it.  write_impl pushes the entry to write_log
@@ -424,7 +429,7 @@ public:
         WriteLogEntry e;
         e.byte_addr = addr;
         e.word_addr = waddr;
-        e.old_value = read_value_from_addr((void*)addr, VT);
+        // old_value filled after w_lock acquisition (ARM64 ordering fix)
         any_type_t new_val{};
         set_value(new_val, val);
         e.new_value = new_val;
@@ -437,15 +442,11 @@ public:
         TM_EVENT2(WRITE_SET_INSERT, (word_t)addr, (word_t)VT, 0);
 
         // Step 4: Acquire w_lock (or skip if already held by us).
-        // Multiple addresses may map to the same OREC (LOCK_EXTENT=4, 16-byte
-        // granule).  If we already hold the w_lock from a previous write to the
-        // same OREC, skip acquisition to avoid self-conflict → abort → livelock.
         if (tx->owned_orecs.find(orec) == tx->owned_orecs.end()) {
             word_t w_lock_val = orec->w_lock.load(std::memory_order_acquire);
             if (!is_locked_by(w_lock_val, tx)) {
                 while (true) {
                     if (is_locked(w_lock_val)) {
-                        // Token as tie-breaker for deadlocks/livelocks
                         if (stm::tm_token_soft_spin(tx->succ_abort_count, tx->id, 3)) {
                             while (is_locked(orec->w_lock.load(std::memory_order_relaxed))) {
                                 TINY_STM_PAUSE();
@@ -471,6 +472,17 @@ public:
             }
             tx->owned_orecs.insert(orec);
         }
+
+        // ARM64 ordering fix: fill old_value NOW (under w_lock) with
+        // an acquire load.  A plain load (eager-read) could observe
+        // stale data that was overwritten by a concurrent TX's Phase 4
+        // write-back between the load and the acquire-CAS.  rollback()
+        // restores old_value on abort; a stale old_value would
+        // silently LOSE the concurrent TX's committed update.
+        uint64_t locked_word = __atomic_load_n(waddr, __ATOMIC_ACQUIRE);
+        size_t byte_off = (uintptr_t)addr & (sizeof(uint64_t) - 1);
+        unsigned old_sz = stm::type_size(VT);
+        memcpy(&log_entry->old_value, (const char*)&locked_word + byte_off, old_sz);
 
         word_t r_lock_val = orec->r_lock.load(std::memory_order_acquire);
         if (r_lock_val > tx->valid_ts && !extend(tx)) {
@@ -600,13 +612,26 @@ public:
                 return;
             }
 
-        // Phase 4 + 5: write-back and release locks
+        // Phase 4: write-back all entries (no lock release yet).
+        // Doing all write-backs before any lock release ensures that
+        // concurrent readers see an atomic (per-OREC) snapshot when
+        // the lock transitions from READ_LOCKED to ts.
         for (auto& we : tx->write_log) {
             TM_EVENT2(COMMIT_WRITEBACK, (word_t)we.byte_addr, (word_t)we.type, ts);
             write_value_to_addr(we.byte_addr, we.new_value, we.type);
-            we.orec->r_lock.store(ts, std::memory_order_release);
-            we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
-            TM_EVENT2(LOCK_RELEASE, (word_t)we.byte_addr, ts, 0);
+        }
+
+        // Phase 5: release locks (once per unique OREC, after all write-backs)
+        {
+            std::unordered_set<OwnershipRecord*> released_orecs;
+            for (auto& we : tx->write_log) {
+                if (released_orecs.find(we.orec) == released_orecs.end()) {
+                    we.orec->r_lock.store(ts, std::memory_order_release);
+                    we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
+                    released_orecs.insert(we.orec);
+                    TM_EVENT2(LOCK_RELEASE, (word_t)we.byte_addr, ts, 0);
+                }
+            }
         }
 
         // Release read-only orecs (not in write-log)
@@ -661,7 +686,6 @@ inline bool begin() {
 
 inline void abort_tx() {
     if (current_tx && !current_tx->aborted) {
-        TM_EVENT(TX_ABORT, current_tx->id, current_tx->succ_abort_count);
         current_tx->aborted = true;
         STM::rollback(current_tx);
     }

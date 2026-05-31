@@ -60,6 +60,10 @@ compile_commands.json
 *.gch
 *.pch
 
+# Python
+__pycache__/
+*.pyc
+
 # Documents
 *.pdf
 *.log
