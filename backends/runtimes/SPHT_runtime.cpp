@@ -215,8 +215,14 @@ void *tm_realloc(void *ptr, size_t size)
 
 void tm_free(void *ptr)
 {
+	if (!ptr) return;
+	if (stm::isStackAddress(ptr)) return;
 	if (g_in_tx) {
+		// Dummy write: add freed address to write_set so commit acquires
+		// its lock, causing concurrent readers to abort on validation.
+		spht::tm_write_i1(reinterpret_cast<uint8_t *>(ptr), 0);
 		if (g_deferred_frees_set.count(ptr)) {
+			TM_EVENT(DOUBLE_FREE, ptr, 0);
 			fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
 			void *buf[64];
 			int n = backtrace(buf, 64);
