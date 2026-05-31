@@ -14,6 +14,20 @@
 #include <random>
 #include <thread>
 
+// ── TinySTM assertion macro ────────────────────────────────
+#ifndef NDEBUG
+#include <cassert>
+#define TINYSTM_ASSERT(cond, msg) do { \
+	if (!(cond)) { \
+		fprintf(stderr, "TINYSTM ASSERT: %s (%s:%d)\n", msg, __FILE__, __LINE__); \
+		fflush(stderr); \
+		assert(cond); \
+	} \
+} while(0)
+#else
+#define TINYSTM_ASSERT(cond, msg) ((void)0)
+#endif
+
 // Assertions: use TM_ASSERT / TM_ASSERT_VALID_TX from tm_common.hpp.
 
 namespace tinystm
