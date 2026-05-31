@@ -282,7 +282,7 @@ def check_version_ordering(parsed: dict) -> list:
 MEM_ADDR_EVENTS = {
     "READ_LOCK_ACQUIRE", "READ_VERSION_CHECK", "WRITE_LOCK_ACQUIRE",
     "WRITE_SET_INSERT", "COMMIT_LOCK_ACQUIRE", "COMMIT_WRITEBACK",
-    "LOCK_RELEASE",
+    "LOCK_RELEASE", "DOUBLE_FREE",
 }
 
 def addr_category(addr: int) -> str:
@@ -506,6 +506,283 @@ def check_no_commit_after_abort(parsed: dict) -> list:
     return violations
 
 
+# ── Invariant 10: MALLOC/FREE Lifecycle ─────────────────────────────
+
+# Memory event types
+MEM_ALLOC_EVENTS = {"MALLOC"}
+MEM_FREE_EVENTS = {"FREE"}
+MEM_FLUSH_EVENTS = {"FLUSH_DEFERRED"}
+MEM_CLEAR_SPEC_EVENTS = {"CLEAR_SPEC_ALLOC"}
+MEM_DOUBLE_FREE_EVENT = "DOUBLE_FREE"
+
+
+def has_double_free_event(parsed: dict) -> bool:
+    """Return True if a DOUBLE_FREE event was captured in the log."""
+    return any(ev["type"] == MEM_DOUBLE_FREE_EVENT for ev in parsed["events"])
+
+
+def check_memory_lifecycle(parsed: dict) -> list:
+    """Every FREE must have a matching MALLOC for the same address
+    within the same thread.  Detect double-frees and orphan frees.
+
+    Within a TX:
+      MALLOC(A) ... FREE(A) ✓
+      FREE(A) ... FREE(A)   ✗ double-free
+      FREE(A)               ✗ orphan (no prior MALLOC in events)
+      FLUSH_DEFERRED(A)     ✓ (if matched with prior FREE)
+
+    Cross-TX (same thread): addresses can be reused after a flush,
+    so we reset the tracking after FLUSH_DEFERRED or CLEAR_SPEC_ALLOC.
+    """
+    violations = []
+    events = parsed["events"]
+
+    for tid, thread_events in group_by_thread(events).items():
+        # addr → {"mcount": int, "fcount": int, "flushed": bool}
+        state = {}
+
+        for ev in thread_events:
+            addr = ev.get("addr1", 0)
+            if addr == 0:
+                continue
+            etype = ev["type"]
+
+            if etype in MEM_ALLOC_EVENTS:
+                if addr not in state:
+                    state[addr] = {"mcount": 0, "fcount": 0, "flushed": False}
+                state[addr]["mcount"] += 1
+                state[addr]["flushed"] = False
+
+            elif etype in MEM_FREE_EVENTS:
+                if addr not in state or state[addr]["mcount"] == state[addr]["fcount"]:
+                    # No outstanding allocation → potential double-free or orphan.
+                    # Check for DOUBLE_FREE event in log: if the runtime asserted
+                    # double-free, this is a genuine double-free (CRITICAL).
+                    # Otherwise if ring wrapped, it's likely a lost MALLOC (WARNING).
+                    genuine = has_double_free_event(parsed)
+                    wrapped = is_ring_wrapped(parsed)
+
+                    if addr in state and state[addr]["flushed"]:
+                        severity = "CRITICAL" if genuine else "WARNING"
+                        violations.append({
+                            "invariant": "memory_lifecycle",
+                            "severity": severity,
+                            "description": (
+                                f"FREE at 0x{addr:x} on thread {tid} "
+                                f"without matching MALLOC in this TX"
+                                + (" [DOUBLE_FIRE event confirmed]" if genuine else
+                                   " (last flush — ring may have wrapped)")
+                            ),
+                            "events": [ev],
+                        })
+                    else:
+                        severity = "CRITICAL" if genuine else ("WARNING" if wrapped else "CRITICAL")
+                        violations.append({
+                            "invariant": "memory_lifecycle",
+                            "severity": severity,
+                            "description": (
+                                f"FREE at 0x{addr:x} on thread {tid} "
+                                f"with no prior MALLOC"
+                                + (" [DOUBLE_FREE event confirmed]" if genuine else
+                                   " (orphan free — ring wrap may have lost MALLOC)" if wrapped else
+                                   " (orphan free — likely double-free)")
+                            ),
+                            "events": [ev],
+                        })
+                    continue
+                state[addr]["fcount"] += 1
+
+            elif etype in MEM_FLUSH_EVENTS:
+                if addr not in state:
+                    wrapped = is_ring_wrapped(parsed)
+                    genuine = has_double_free_event(parsed)
+                    severity = "CRITICAL" if (genuine or not wrapped) else "WARNING"
+                    violations.append({
+                        "invariant": "memory_lifecycle",
+                        "severity": severity,
+                        "description": (
+                            f"FLUSH_DEFERRED at 0x{addr:x} on thread {tid} "
+                            f"with no prior MALLOC/FREE tracking"
+                            + (" [DOUBLE_FREE event confirmed]" if genuine else
+                               " (ring wrap may have lost MALLOC)" if wrapped else "")
+                        ),
+                        "events": [ev],
+                    })
+                    continue
+                # Mark as flushed — next FREE without MALLOC is a re-free
+                state[addr]["flushed"] = True
+                state[addr]["flush_event_idx"] = [
+                    i for i, e in enumerate(events) if e is ev
+                ][0] if len(events) < 100000 else 0
+
+            elif etype in MEM_CLEAR_SPEC_EVENTS:
+                if addr not in state:
+                    violations.append({
+                        "invariant": "memory_lifecycle",
+                        "severity": "CRITICAL",
+                        "description": (
+                            f"CLEAR_SPEC_ALLOC at 0x{addr:x} on thread {tid} "
+                            f"with no prior MALLOC tracking"
+                        ),
+                        "events": [ev],
+                    })
+                    continue
+                # CLEAR_SPEC_ALLOC closes one MALLOC (aborted TX →
+                # the speculatively-allocated memory is freed).  Decrement
+                # mcount so subsequent FREE/FLUSH sees the correct balance.
+                if state[addr]["mcount"] > 0:
+                    state[addr]["mcount"] -= 1
+                state[addr]["flushed"] = True
+
+        # Check for leaks: outstanding MALLOCs with no matching FREE at end of log
+        # Only flag if we have the complete log (no SIGSEGV and no wrap)
+        if not sigsegv_detected(parsed) and not is_ring_wrapped(parsed):
+            for addr, s in state.items():
+                outstanding = s["mcount"] - s["fcount"]
+                if outstanding > 0:
+                    violations.append({
+                        "invariant": "memory_lifecycle",
+                        "severity": "WARNING",
+                        "description": (
+                            f"MALLOC leak at 0x{addr:x} on thread {tid}: "
+                            f"{outstanding} outstanding free(s) at end of log"
+                        ),
+                        "events": [],
+                    })
+
+    return violations
+
+
+# ── Invariant 11: TX-Local Memory Balance ─────────────────────────
+
+def check_tx_memory_balance(parsed: dict) -> list:
+    """Within each TX, the count of successful MALLOCs that survived
+    to commit (not cleared by spec_alloc on abort) should equal the
+    count of FREEs that were flushed.
+
+    This detects TX-level alloc/free imbalances that may indicate
+    memory corruption (freed pointers still in use).
+    """
+    violations = []
+    events = parsed["events"]
+    tx_ranges = extract_tx_ranges(events)
+
+    for start_idx, end_idx, end_type in tx_ranges:
+        if end_type != "COMMIT_SUCCESS":
+            continue  # aborted TX: spec_alloc cleared, no problem
+
+        tx_events = events[start_idx:end_idx + 1]
+        mallocs = {}
+        frees = {}
+        flushes = {}
+        spec_clears = {}
+
+        for ev in tx_events:
+            addr = ev.get("addr1", 0)
+            if addr == 0:
+                continue
+            if ev["type"] in MEM_ALLOC_EVENTS:
+                mallocs[addr] = mallocs.get(addr, 0) + 1
+            elif ev["type"] in MEM_FREE_EVENTS:
+                frees[addr] = frees.get(addr, 0) + 1
+            elif ev["type"] in MEM_FLUSH_EVENTS:
+                flushes[addr] = flushes.get(addr, 0) + 1
+            elif ev["type"] in MEM_CLEAR_SPEC_EVENTS:
+                spec_clears[addr] = spec_clears.get(addr, 0) + 1
+
+        # After a committed TX: every FLUSH_DEFERRED(addr) should
+        # correspond to a FREE(addr).  Spec-clear is only on abort.
+        for addr, fcount in frees.items():
+            flush_count = flushes.get(addr, 0)
+            if flush_count > fcount:
+                violations.append({
+                    "invariant": "tx_memory_balance",
+                    "severity": "CRITICAL",
+                    "description": (
+                        f"TX #{start_idx}—#{end_idx}: FLUSH_DEFERRED({flush_count}) "
+                        f"> FREE({fcount}) for addr 0x{addr:x} — "
+                        f"flush without prior free (double-free risk)"
+                    ),
+                    "events": [],
+                })
+
+        # Spec-cleared addresses should NOT also be freed (double-free)
+        for addr in spec_clears:
+            if addr in frees:
+                violations.append({
+                    "invariant": "tx_memory_balance",
+                    "severity": "CRITICAL",
+                    "description": (
+                        f"TX #{start_idx}—#{end_idx}: CLEAR_SPEC_ALLOC + FREE "
+                        f"for addr 0x{addr:x} — double-free risk"
+                    ),
+                    "events": [],
+                })
+
+    return violations
+
+
+# ── Invariant 12: Address Reuse Cross-Check ──────────────────────
+
+def check_address_reuse(parsed: dict) -> list:
+    """Detect use-after-free: READ/WRITE on a freed address that was
+    not re-allocated.
+
+    For each thread: track MALLOC → FREE → FLUSH_DEFERRED cycles.
+    Flag any READ_LOCK_ACQUIRE or WRITE_SET_INSERT or WRITE_SET_INSERT
+    or COMMIT_WRITEBACK at an address that was FLUSH_DEFERRED but
+    not re-MALLOC'd within that thread's event window.
+
+    Only checks single-thread reuse (cross-thread requires global
+    timeline not available in per-thread ring buffers).
+    """
+    violations = []
+    events = parsed["events"]
+
+    for tid, thread_events in group_by_thread(events).items():
+        # Track the set of addresses that are "freed and not re-allocated"
+        freed_not_reallocd = {}  # addr -> flush_event
+
+        for ev in thread_events:
+            addr = ev.get("addr1", 0)
+            if addr == 0:
+                continue
+            etype = ev["type"]
+
+            if etype in MEM_ALLOC_EVENTS:
+                # Re-allocated: remove from freed set
+                if addr in freed_not_reallocd:
+                    del freed_not_reallocd[addr]
+
+            elif etype in MEM_FLUSH_EVENTS:
+                # Flushed: track as freed until re-allocated
+                freed_not_reallocd[addr] = ev
+
+            elif etype in MEM_CLEAR_SPEC_EVENTS:
+                # Spec alloc cleared (abort): also tracked as freed
+                freed_not_reallocd[addr] = ev
+
+            elif etype in {"READ_LOCK_ACQUIRE", "WRITE_SET_INSERT",
+                           "COMMIT_WRITEBACK"}:
+                if addr in freed_not_reallocd:
+                    violations.append({
+                        "invariant": "address_reuse",
+                        "severity": "CRITICAL",
+                        "description": (
+                            f"{etype} at 0x{addr:x} on thread {tid} "
+                            f"after FLUSH_DEFERRED/CLEAR_SPEC_ALLOC — "
+                            f"use-after-free risk"
+                        ),
+                        "events": [freed_not_reallocd[addr], ev],
+                    })
+
+            elif etype in MEM_FREE_EVENTS:
+                # FREE doesn't free immediately; just check double-free
+                pass
+
+    return violations
+
+
 # ── Run all checks ────────────────────────────────────────────────────
 
 ALL_INVARIANTS = [
@@ -518,6 +795,9 @@ ALL_INVARIANTS = [
     ("Address validity", check_address_validity),
     ("Crash signature", check_crash_signature),
     ("No commit after abort", check_no_commit_after_abort),
+    ("Memory lifecycle", check_memory_lifecycle),
+    ("TX memory balance", check_tx_memory_balance),
+    ("Address reuse check", check_address_reuse),
 ]
 
 

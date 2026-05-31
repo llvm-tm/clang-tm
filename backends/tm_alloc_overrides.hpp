@@ -56,14 +56,20 @@
 
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <new>
 #include <unordered_set>
 
-// Each runtime must define these two functions:
-extern "C" void* tm_malloc(size_t size);
-extern "C" void  tm_free(void* ptr);
+#include "tm_event_logger.hpp"
 
-// Thread-local flag: set by tm_begin/tm_end to distinguish TX vs non-TX context.
+// ── Thread-local state ───────────────────────────────────
+// Each runtime file MUST define these (with `thread_local` not `extern`):
+//
+//   thread_local bool g_in_tx = false;
+//   thread_local FreeNode* g_deferred_frees = nullptr;
+//   thread_local std::unordered_set<void*> g_deferred_frees_set;
+//   thread_local SpecAlloc* g_spec_allocs = nullptr;
+
 extern thread_local bool g_in_tx;
 
 // ── Speculative-allocation tracking ───────────────────────
@@ -125,8 +131,10 @@ inline void tm_clear_spec_allocs()
     auto* node = g_spec_allocs;
     while (node) {
         auto* next = node->next;
-        if (node->ptr)
+        if (node->ptr) {
+            TM_EVENT(CLEAR_SPEC_ALLOC, node->ptr, 0);
             ::operator delete(node->ptr);   // free the speculatively-allocated memory
+        }
         std::free(node);                   // free the bookkeeping node (std::malloc'd)
         node = next;
     }
@@ -180,6 +188,7 @@ inline void tm_flush_deferred_frees()
     auto* node = g_deferred_frees;
     while (node) {
         auto* next = node->next;
+        TM_EVENT(FLUSH_DEFERRED, node->ptr, 0);
         ::operator delete(node->ptr);  // user data (tm_malloc'd)
         std::free(node);               // FreeNode bookkeeping (::malloc'd)
         node = next;
@@ -202,6 +211,61 @@ inline void tm_clear_deferred_frees()
     }
     g_deferred_frees = nullptr;
     g_deferred_frees_set.clear();
+}
+
+// ── Shared alloc/free bookkeeping ────────────────────────
+//
+// These functions encapsulate the deferred-free and spec-alloc bookkeeping
+// that is identical across all TM backends (TinySTM, NOrec, SwissTM, TL2,
+// DUDETM, NVHTM, SPHT).  Each runtime calls them from its per-backend thin
+// wrapper, eliminating 7 copies of the same 30-line tm_free body.
+//
+// Usage in each runtime:
+//
+//   extern "C" void* tm_malloc(size_t s) {
+//       return tm_track_alloc_result(::operator new(s), s);
+//   }
+//   extern "C" void  tm_free(void* ptr) {
+//       if (!ptr || stm::isStackAddress(ptr)) return;
+//       TM_EVENT(FREE, ptr, 0);
+//       if (g_in_tx) {
+//           BACKEND::tm_write_i1((uint8_t*)ptr, 0);   // backend-specific
+//           tm_free_append_deferred(ptr);
+//       } else {
+//           ::operator delete(ptr);                    // backend-specific
+//       }
+//   }
+
+// Inside a TX, tm_malloc / tm_calloc / tm_realloc call this to record
+// the allocation as speculative (freed on abort, kept on commit).
+inline void* tm_track_alloc_result(void* p, size_t size) {
+    TM_EVENT(MALLOC, p, size);
+    tm_track_spec_alloc(p);
+    return p;
+}
+
+// Inside a TX, tm_free calls this AFTER the backend-specific dummy write
+// to append the address to the deferred-free list.  Shared logic:
+//   - double-free detection (g_deferred_frees_set)
+//   - untrack spec_alloc
+//   - insert into g_deferred_frees_set
+//   - push FreeNode onto g_deferred_frees
+inline void tm_free_append_deferred(void* ptr) {
+    if (g_deferred_frees_set.count(ptr)) {
+        TM_EVENT(DOUBLE_FREE, ptr, 0);
+        fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
+        void* buf[64];
+        int n = backtrace(buf, 64);
+        backtrace_symbols_fd(buf, n, 2);
+        fflush(stderr);
+        _exit(1);
+    }
+    tm_untrack_spec_alloc(ptr);
+    g_deferred_frees_set.insert(ptr);
+    auto* node = static_cast<FreeNode*>(std::malloc(sizeof(FreeNode)));
+    node->ptr = ptr;
+    node->next = g_deferred_frees;
+    g_deferred_frees = node;
 }
 
 // ═══════════════════════════════════════════════════════════════════

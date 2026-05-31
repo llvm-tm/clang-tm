@@ -235,15 +235,24 @@ def run_fuzz(binary: str, threads: int, iters: int,
     return output
 
 
-def generate_params(runs: int, seed: int = 0) -> list:
-    """Generate random fuzz parameter sets."""
+def generate_params(runs: int, seed: int = 0, benchmark: str = "counter") -> list:
+    """Generate random fuzz parameter sets.
+
+    For 'alloc' benchmark: uses larger key_range (counters parameter)
+    to ensure the linked list exercises multiple nodes.
+    """
     rng = random.Random(seed)
     param_sets = []
+
+    is_alloc = (benchmark == "alloc")
 
     for _ in range(runs):
         threads = rng.choice([1, 2, 3, 4, 6, 8])
         iters = rng.choice([100, 500, 1000, 2000, 5000])
-        counters = rng.choice([1, 2, 4, 8, 16])
+        if is_alloc:
+            counters = rng.choice([16, 32, 64, 128])
+        else:
+            counters = rng.choice([1, 2, 4, 8, 16])
         param_seed = rng.randint(0, 1000000)
         param_sets.append({
             "threads": threads,
@@ -376,7 +385,7 @@ def main():
     if is_stm7:
         params = generate_stm7_params(args.runs, args.seed)
     else:
-        params = generate_params(args.runs, args.seed)
+        params = generate_params(args.runs, args.seed, args.benchmark)
 
     print(f"Fuzz plan: {len(params)} runs x {len(backends)} backends = "
           f"{len(params) * len(backends)} total executions", file=sys.stderr)
