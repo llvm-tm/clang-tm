@@ -4,8 +4,6 @@
 #include <chrono>
 #include <cstdint>
 
-extern "C" void tm_dbg_set_counter_ptr(const volatile uint64_t *);
-
 static constexpr int NUM_THREADS = 4;
 static constexpr int ITERATIONS = 2000;
 
@@ -18,7 +16,6 @@ int main() {
     printf("Expected:   %d\n\n", NUM_THREADS * ITERATIONS);
 
     tm_init();
-    tm_dbg_set_counter_ptr(&shared_counter);
 
     auto start = std::chrono::high_resolution_clock::now();
 

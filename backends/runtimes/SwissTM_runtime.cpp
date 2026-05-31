@@ -43,10 +43,6 @@ void tm_init()
 
 void tm_exit() {}
 
-void tm_dbg_set_counter_ptr(const volatile uint64_t *p) {
-    swisstm::dbg_set_counter_ptr(p);
-}
-
 void tm_init_thread()
 {
 	swisstm::init_thread();
@@ -244,9 +240,4 @@ void  tm_free(void* ptr) {
 		::operator delete(ptr);
 	}
 }
-
-// ── Debug hooks ──────────────────────────────────────────────
-#ifndef NDEBUG
-#include "backends/tm_debug.hpp"
-void tm_dbg_set_counter_ptr(const volatile uint64_t *p) { swisstm::g_dbg_pcounter = p; }
-#endif
+}
