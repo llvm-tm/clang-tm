@@ -13,11 +13,8 @@
 #pragma once
 
 #include <algorithm>
-#include <dlfcn.h>
 #include <cstdio>
 #include <cstring>
-#include <dlfcn.h>
-#include <execinfo.h>
 #include <pthread.h>
 #include <thread>
 
@@ -122,12 +119,7 @@ abort_tx(const char *loc="")  //
 	tx->is_retry = true;
 	stm::tm_token_release_if_held(tx->id);
 	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
-	if (tx->abort_count < 3 || tx->abort_count % 10 == 0) {
-		fprintf(stderr, "[ABORT tx=%llu count=%d at=%s]\n",
-		        (unsigned long long)tx->id, tx->abort_count, loc);
-		fflush(stderr);
-	}
-	if (tx->abort_count > 5) { // Magic number
+	if (tx->abort_count > 5) {
 		// random backoff when aborts are really bad
 		random_backoff(tx->abort_count);
 	}
@@ -246,9 +238,7 @@ commit()    //
 			if ((uintptr_t)addr > 0x7FFFFFFFFFFFULL) {
 				fprintf(stderr, "BAD WRITE-BACK ADDR: addr=%p type=%d val.u8=%llu\n",
 				        addr, (int)w.type, (unsigned long long)w.new_val.u8);
-				void *bt[16];
-				int n = backtrace(bt, 16);
-				backtrace_symbols_fd(bt, n, 2);
+						stm::tm_backtrace_print(2);
 				continue;
 			}
 			ByteOffset bo((word_t)addr);

@@ -291,6 +291,40 @@ write-set entries by skipping \texttt{tm\_write} for stores whose pointer
 base is a function argument that always receives a stack-alloca address
 at all call sites.
 
+\paragraph{Stack-address safety net.}
+The \texttt{argIsAllocaDest} guard is a compile-time check: it proves that
+every caller passes an alloca address for a given reference parameter.
+When this proof holds, stores through that reference are not instrumented
+(to prevent write-set entries for stack addresses).  However, the proof
+fails for \emph{recursive} reference parameters: in treap
+\texttt{split}/\texttt{merge} functions, the initial call from
+\texttt{operator[]} passes a stack alloca for \texttt{Node*\& l}, but
+recursive internal calls pass a GEP of a heap tree node
+(\texttt{\&t-\/right}).  Because not all call sites pass an alloca,
+\texttt{argIsAllocaDest} conservatively allows instrumentation, creating a
+write-set entry whose address is on the calling thread's stack.
+
+At commit time, the write-back phase writes the staged value back to this
+stack address.  But the inner function's stack frame has already been
+popped; the write corrupts whatever frame now occupies that location.
+After 15--20 transactions, this cumulative stack corruption overwrites a
+return-address slot, and the function returns to a garbage program counter
+(\texttt{EXC\_BAD\_ACCESS} at unmapped addresses like~\texttt{0xba6c12324}).
+
+Rather than extending the plugin's static analysis to handle every
+reference-parameter pattern (a fundamentally unbounded problem), we provide
+a \textbf{runtime safety net}: every backend's \texttt{read\_word\_XX}/
+\texttt{write\_word\_XX} calls \texttt{isStackAddress(addr)} as its first
+action.  If the address falls within the calling thread's stack bounds, the
+function bypasses all TM protocol---no lock acquisition, no read-set/
+write-set entry---and performs a raw memory load or store.  The check uses
+platform-specific thread APIs (\texttt{pthread\_get\_stackaddr\_np} on
+macOS, \texttt{pthread\_getattr\_np} on Linux,
+\texttt{GetCurrentThreadStackLimits} on Windows, etc.) and is isolated in
+\texttt{backends/tm\_platform.hpp} for easy porting.  The performance cost
+is negligible (two pointer comparisons) compared with the atomic CAS
+operations in the TM protocol.
+
 \paragraph{Opaque call sites.}
 The static call-graph traversal only follows direct calls --- those where
 \texttt{CallInst::getCalledFunction()} returns a non-null function with

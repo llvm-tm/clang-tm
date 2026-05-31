@@ -10,7 +10,6 @@
 #include <cstdlib>
 #include <atomic>
 #include <cstring>
-#include <execinfo.h>
 #include <mutex>
 #include <unistd.h>
 #include <unordered_set>
@@ -35,7 +34,7 @@ static __thread uint8_t tm_buffer[TM_BUFFER_SIZE];
 static std::atomic<int64_t> g_tm_begin_count{0};
 static std::atomic<int64_t> g_tm_end_count{0};
 static std::atomic<int64_t> g_tm_commit_fail_count{0};
-static std::atomic<int64_t> g_tm_abort_count{0};
+std::atomic<uint64_t> g_tm_abort_count{0};
 
 extern "C" void tm_init() {
     tl2::init();

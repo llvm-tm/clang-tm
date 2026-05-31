@@ -22,10 +22,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <execinfo.h>
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
+
+#include "tm_platform.hpp"
 
 namespace stm {
 
@@ -140,19 +141,7 @@ struct EventRing {
     }
 
 private:
-    static inline uint64_t rdtsc() {
-#if defined(__x86_64__)
-        uint32_t lo, hi;
-        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-        return ((uint64_t)hi << 32) | lo;
-#elif defined(__aarch64__)
-        uint64_t val;
-        asm volatile("isb; mrs %0, cntvct_el0" : "=r"(val));
-        return val;
-#else
-        return 0;
-#endif
-    }
+    static inline uint64_t rdtsc() { return stm::tm_timestamp(); }
 };
 
 // ---------------------------------------------------------------------------
@@ -168,9 +157,7 @@ inline EventRing& get_event_ring() {
 // ---------------------------------------------------------------------------
 static inline void sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
     fprintf(stderr, "\n=== SIGSEGV at address %p ===\n", info->si_addr);
-    void *frames[64];
-    int n = backtrace(frames, 64);
-    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    stm::tm_backtrace_print(STDERR_FILENO);
     get_event_ring().dump(512, stderr);
     _exit(1);
 }

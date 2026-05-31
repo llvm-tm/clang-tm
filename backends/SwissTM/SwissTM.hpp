@@ -14,7 +14,6 @@
 #include <chrono>
 #include <type_traits>
 #include <cstdlib>
-#include <execinfo.h>
 #include <unistd.h>
 #include <pthread.h>
 
@@ -36,6 +35,7 @@ using stm::read_value_from_addr;
 using stm::write_value_to_addr;
 
 extern __thread sigjmp_buf *jmpbuf;
+inline std::atomic<uint64_t> g_tm_abort_count{0};
 
 constexpr unsigned OREC_TABLE_LOG_SIZE = 22;
 constexpr unsigned OREC_TABLE_SIZE = 1 << OREC_TABLE_LOG_SIZE;
@@ -114,7 +114,6 @@ public:
             greedy_ts.store(0, std::memory_order_relaxed);
             initialized.store(true);
         }
-        TM_EVENT_INSTALL_SIGSEGV();
     }
 
     static word_t* get_word_addr(void* addr) {
@@ -237,6 +236,7 @@ public:
         }
         tx->aborted = true;
         tx->succ_abort_count++;
+        g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
         stm::tm_token_release_if_held(tx->id);
         if (tx->succ_abort_count > 5) {
             cm_on_rollback(tx);
@@ -449,7 +449,7 @@ public:
                     if (is_locked(w_lock_val)) {
                         if (stm::tm_token_soft_spin(tx->succ_abort_count, tx->id, 3)) {
                             while (is_locked(orec->w_lock.load(std::memory_order_relaxed))) {
-                                TINY_STM_PAUSE();
+                                stm::tm_cpu_relax();
                             }
                             w_lock_val = orec->w_lock.load(std::memory_order_acquire);
                             continue;

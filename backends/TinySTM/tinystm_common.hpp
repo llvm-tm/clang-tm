@@ -334,8 +334,7 @@ inline void init()
 {
 	g_clock.store(1, std::memory_order_release);
 	thr_counter.store(1, std::memory_order_release);
-	TM_EVENT_INSTALL_SIGSEGV();
-	fprintf(stderr, "[INIT] g_clock=%llu\n", (unsigned long long)g_clock.load(std::memory_order_acquire));
+	// Events already no-ops unless TM_EVENT_LOG defined.
 }
 
 inline void exit()
