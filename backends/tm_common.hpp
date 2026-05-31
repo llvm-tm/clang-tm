@@ -29,7 +29,8 @@
 
 #define TM_ASSERT_VALID_TX(tx, msg)                                                    \
 	TM_ASSERT((tx) != nullptr, msg);                                                   \
-	TM_ASSERT((tx)->active, "Transaction must be active: " msg)
+	TM_ASSERT((tx)->active, "Transaction must be active: " msg);                        \
+	TM_ASSERT(!(tx)->aborted, "Transaction must not be aborted: " msg)
 
 namespace stm
 {
@@ -52,19 +53,19 @@ random_backoff(  //
 	std::this_thread::sleep_for(std::chrono::microseconds(delay));
 }
 
-// ── Stack-address detection ──────────────────────────────────
-// Returns true if `addr` is on the current thread's stack.
-// Used by runtime tm_free implementations to skip TM bookkeeping
-// for stack-local addresses (never need deferred-free or spec-alloc).
+// ── Stack-address detection (optimization/debug) ────────────
+// Enabled only when compiled with -DNO_INST_STACK_VARS.
+// When disabled, always returns false (no optimization applied).
 inline bool isStackAddress(void const *addr)
 {
-#if defined(__APPLE__)
+#ifdef NO_INST_STACK_VARS
+	#if defined(__APPLE__)
 	pthread_t self = pthread_self();
 	void *stack_addr = pthread_get_stackaddr_np(self);
 	size_t stack_size = pthread_get_stacksize_np(self);
 	void *stack_bottom = (char *)stack_addr - stack_size;
 	return (addr >= stack_bottom && addr < stack_addr);
-#else
+	#else
 	pthread_attr_t attr;
 	void *stack_addr;
 	size_t stack_size;
@@ -73,6 +74,10 @@ inline bool isStackAddress(void const *addr)
 	pthread_attr_destroy(&attr);
 	void *stack_end = (char *)stack_addr + stack_size;
 	return (addr >= stack_addr && addr < stack_end);
+	#endif
+#else
+	(void)addr;
+	return false;
 #endif
 }
 

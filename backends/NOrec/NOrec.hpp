@@ -11,28 +11,15 @@
 #include "tm_common.hpp"
 #include "tm_event_logger.hpp"
 
+// NOrec uses shared TM_ASSERT / TM_ASSERT_VALID_TX from tm_common.hpp.
 #ifndef NDEBUG
-#define NOREC_ASSERT(cond, msg)                                                          \
-	do {                                                                                 \
-		if (!(cond)) {                                                                   \
-			fprintf(stderr,                                                              \
-			        "NOREC ASSERTION FAILED: %s (%s:%d)\n",                              \
-			        msg,                                                                 \
-			        __FILE__,                                                            \
-			        __LINE__);                                                           \
-			fflush(stderr);                                                              \
-			assert(cond);                                                                \
-		}                                                                                \
-	} while (0)
-
 #define NOREC_ASSERT_VALID_TX(tx, msg)                                                   \
-	NOREC_ASSERT((tx) != nullptr, msg);                                                  \
-	NOREC_ASSERT((tx)->active, "Transaction must be active: " msg);                      \
-	NOREC_ASSERT(!(tx)->aborted, "Transaction must not be aborted: " msg)
-#else                                  /* !NDEBUG */
-#define NOREC_ASSERT(cond, msg)        /* EMPTY */
+	TM_ASSERT((tx) != nullptr, msg);                                                     \
+	TM_ASSERT((tx)->active, "Transaction must be active: " msg);                         \
+	TM_ASSERT(!(tx)->aborted, "Transaction must not be aborted: " msg)
+#else
 #define NOREC_ASSERT_VALID_TX(tx, msg) /* EMPTY */
-#endif                                 /* NDEBUG */
+#endif
 
 namespace norec
 {
@@ -114,8 +101,8 @@ inline T tm_read(    //
     T *addr          //
 )
 {
-	NOREC_ASSERT(tx != nullptr, "tx is null");
-	NOREC_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx != nullptr, "tx is null");
+	TM_ASSERT(tx->active, "tx not active");
 
 	any_type_t r = read_word(tx, (void *)addr, SZ);
 	return return_any_type<T>(r);
@@ -134,8 +121,8 @@ tm_write(            //
     T val            //
 )
 {
-	NOREC_ASSERT(tx != nullptr, "tx is null");
-	NOREC_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx != nullptr, "tx is null");
+	TM_ASSERT(tx->active, "tx not active");
 
 	any_type_t w;
 	fill_any_type(w, &val, SZ);
@@ -206,7 +193,7 @@ inline bool //
 begin()     //
 {
 	auto *tx = current_tx;
-	NOREC_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx, "tx not defined");
 
 	do { tx->snapshot = get_clock(); } while (tx->snapshot & 1);
 	tx->active = true;
@@ -224,14 +211,14 @@ abort_tx()  //
 {
 	auto *tx = current_tx;
 
-	NOREC_ASSERT(tx, "tx not defined");
-	NOREC_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	TM_EVENT(TX_ABORT, tx->id, tx->abort_count);
 	tx->abort_count++;
 	tx->clear();
 	siglongjmp(*jmpbuf, 1);
-	NOREC_ASSERT(false, "Did not jump");
+	TM_ASSERT(false, "Did not jump");
 }
 
 inline __attribute__((noinline)) word_t //
@@ -264,8 +251,8 @@ commit()    //
 	auto *tx = current_tx;
 	volatile word_t commit_version = 0;
 
-	NOREC_ASSERT(tx, "tx not defined");
-	NOREC_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	if (tx->read_only) {
 		tx->reset();
@@ -274,7 +261,7 @@ commit()    //
 
 	word_t expect = tx->snapshot;
 	word_t desire = tx->snapshot + 1;
-	NOREC_ASSERT((expect & 1) == 0, "Already locked");
+	TM_ASSERT((expect & 1) == 0, "Already locked");
 	while (!global_lock.compare_exchange_strong(expect, desire)) {
 		tx->snapshot = validate();
 		expect = tx->snapshot;
@@ -308,8 +295,8 @@ read_word_norec(     //
     ValueType sz     //
 )
 {
-	NOREC_ASSERT(tx, "tx not defined");
-	NOREC_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	// Stack-address detection: stack data is thread-private.  Reading via
 	// tm_read would either return stale values (if write-back and no write-
@@ -447,8 +434,8 @@ write_word_norec(    //
     ValueType sz     //
 )
 {
-	NOREC_ASSERT(tx, "tx not defined");
-	NOREC_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	// Stack-address detection: writing to the stack creates write-set entries
 	// for addresses that will be popped on function return.  At commit time,

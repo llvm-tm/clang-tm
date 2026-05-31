@@ -15,18 +15,7 @@
 #include <thread>
 
 // ── TinySTM assertion macro ────────────────────────────────
-#ifndef NDEBUG
-#include <cassert>
-#define TINYSTM_ASSERT(cond, msg) do { \
-	if (!(cond)) { \
-		fprintf(stderr, "TINYSTM ASSERT: %s (%s:%d)\n", msg, __FILE__, __LINE__); \
-		fflush(stderr); \
-		assert(cond); \
-	} \
-} while(0)
-#else
-#define TINYSTM_ASSERT(cond, msg) ((void)0)
-#endif
+// Uses shared TM_ASSERT from tm_common.hpp
 
 // Assertions: use TM_ASSERT / TM_ASSERT_VALID_TX from tm_common.hpp.
 
@@ -39,6 +28,7 @@ using stm::any_type_mapping;
 using stm::any_type_t;
 using stm::ByteOffset;
 using stm::fill_any_type;
+using stm::isStackAddress;
 using stm::read_value_from_addr;
 using stm::return_any_type;
 using stm::type_size;

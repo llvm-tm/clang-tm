@@ -83,29 +83,6 @@ exit_thread() //
 	current_tx_wbctl = nullptr;
 }
 
-static void //
-init_rand() //
-{
-	if (!rng_initialized) {
-		std::random_device rd;
-		rng.seed(rd());
-		rng_initialized = true;
-	}
-}
-
-static void      //
-random_backoff() //
-{
-	if (!rng_initialized) {
-		init_rand();
-	}
-	std::exponential_distribution<> dist((double)1 /
-	                                     (double)(current_tx_wbctl->abort_count + 1));
-	int delay = std::min(dist(rng), 1e5); // max delay is 100ms
-	// printf("THR%llu Sleep for %i\n", current_tx_wbctl->id, delay);
-	std::this_thread::sleep_for(std::chrono::microseconds(delay));
-}
-
 /** -------------------------------------------------------
   * Stubs for Transaction begin/end.
   * ---------------------------------------------------- */
@@ -115,7 +92,7 @@ begin()     //
 {
 	auto *tx = current_tx_wbctl;
 
-	TINYSTM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx, "tx not defined");
 	if (tx->active)
 		return true;
 
@@ -136,8 +113,8 @@ abort_tx(const char *loc="")  //
 {
 	auto *tx = current_tx_wbctl;
 
-	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	TM_EVENT(TX_ABORT, tx->id, tx->abort_count);
 	tx->unlock_held_locks_and_clear();
@@ -152,10 +129,10 @@ abort_tx(const char *loc="")  //
 	}
 	if (tx->abort_count > 5) { // Magic number
 		// random backoff when aborts are really bad
-		random_backoff();
+		random_backoff(tx->abort_count);
 	}
 	siglongjmp(*jmpbuf, 1);
-	TINYSTM_ASSERT(false, "Did not jump");
+	TM_ASSERT(false, "Did not jump");
 }
 
 inline bool //
@@ -206,8 +183,8 @@ commit()    //
 	auto *tx = current_tx_wbctl;
 	volatile word_t commit_version = 0;
 
-	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	if (!tx->read_only) { // Acquire locks and write-back
 
@@ -235,7 +212,7 @@ commit()    //
 				tx->locks_held.push_back(lock); // keep track of locks
 				TM_EVENT2(COMMIT_LOCK_ACQUIRE, (uint64_t)lock, (uint64_t)addr, (uint64_t)w.type);
 			}
-			TINYSTM_ASSERT(lock->is_locked() && lock->get_owner() == tx->id,
+			TM_ASSERT(lock->is_locked() && lock->get_owner() == tx->id,
 			               "Lock not locked or wrong owner");
 		}
 
@@ -293,7 +270,7 @@ commit()    //
 			if (lock->get_version() > commit_version) {
 				lock->unlock(tx->id);
 			} else {
-				TINYSTM_ASSERT(lock->get_version() <= commit_version,
+				TM_ASSERT(lock->get_version() <= commit_version,
 				               "Lock version updated while locked");
 				lock->unlock_with_version(tx->id, commit_version);
 			}
@@ -307,7 +284,7 @@ commit()    //
 				        (unsigned long long)tx->id);
 				fflush(stderr);
 			}
-			TINYSTM_ASSERT(lock->get_version() >= commit_version,
+			TM_ASSERT(lock->get_version() >= commit_version,
 			               "Lock version not updated");
 		}
 
@@ -335,8 +312,8 @@ read_word_ctl(                                                //
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 	ByteOffset bo((word_t)addr);
 
-	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 	// Stack-address detection: reading from the stack would create read-set
 	// entries for stack addresses that hash to random locks, causing spurious
@@ -559,7 +536,7 @@ read_word_ctl(                                                //
 
 read_from_memory:
 	Lock *lock = &g_locks_wbctl.get(bo.base_addr);
-	TINYSTM_ASSERT(!lock->is_locked_by(tx->id), "wbctl locks at commit time");
+	TM_ASSERT(!lock->is_locked_by(tx->id), "wbctl locks at commit time");
 	volatile word_t l = lock->get();
 
 	// NOTE: Every read goes through the full double-check protocol below.
@@ -620,8 +597,8 @@ write_word_ctl(                                               //
 {
 	ByteOffset bo((word_t)addr);
 
-	TINYSTM_ASSERT(tx, "tx not defined");
-	TINYSTM_ASSERT(tx->active, "tx not active");
+	TM_ASSERT(tx, "tx not defined");
+	TM_ASSERT(tx->active, "tx not active");
 
 
 	// Stack-address detection: writing to the stack via tm_write would create
@@ -762,7 +739,7 @@ write_word_ctl(                                               //
 		word_t owner = (l & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS;
 		bool is_locked = (l & OWNED_MASK) != 0;
 
-		TINYSTM_ASSERT(owner != tx->id, "WBCTL only locks at commit time");
+		TM_ASSERT(owner != tx->id, "WBCTL only locks at commit time");
 
 		if (is_locked && !validate()) {
 			TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, l);
