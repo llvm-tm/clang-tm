@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "tm_common.hpp"
+#include "tm_event_logger.hpp"
 
 #ifndef NDEBUG
 #define NOREC_ASSERT(cond, msg)                                                          \
@@ -149,6 +150,7 @@ inline void init()
 {
 	global_lock.store(0, std::memory_order_release);
 	thr_counter.store(1, std::memory_order_release);
+	TM_EVENT_INSTALL_SIGSEGV();
 }
 
 inline void exit()
@@ -213,6 +215,7 @@ begin()     //
 	tx->read_set.clear();
 	tx->write_set.clear();
 
+	TM_EVENT(TX_BEGIN, tx->id, tx->snapshot);
 	return true;
 }
 
@@ -224,6 +227,7 @@ abort_tx()  //
 	NOREC_ASSERT(tx, "tx not defined");
 	NOREC_ASSERT(tx->active, "tx not active");
 
+	TM_EVENT(TX_ABORT, tx->id, tx->abort_count);
 	tx->abort_count++;
 	tx->clear();
 	siglongjmp(*jmpbuf, 1);
@@ -276,8 +280,10 @@ commit()    //
 		expect = tx->snapshot;
 		desire = expect + 1;
 	}
+	TM_EVENT2(COMMIT_LOCK_ACQUIRE, expect, desire, 0);
 
 	for (auto &w : tx->write_set) {
+		TM_EVENT2(COMMIT_WRITEBACK, (word_t)w.addr, (word_t)w.type, 0);
 		write_value_to_addr(w.addr, w.new_val, w.type);
 	}
 
@@ -287,6 +293,7 @@ commit()    //
 	set_clock(expect + 2);
 
 	tx->reset();
+	TM_EVENT2(COMMIT_SUCCESS, tx->id, expect + 2, 0);
 	return;
 }
 
@@ -428,6 +435,7 @@ read_word_norec(     //
 	r.type = sz;
 	tx->read_set.push_back(r);
 
+	TM_EVENT(READ_LOCK_ACQUIRE, (word_t)addr, tx->snapshot);
 	return value;
 }
 
@@ -499,6 +507,7 @@ write_word_norec(    //
 	w.type = sz;
 	w.addr = addr;
 	tx->write_set.push_back(w);
+	TM_EVENT2(WRITE_SET_INSERT, (word_t)addr, (word_t)sz, 0);
 }
 
 /** -------------------------------------------------------

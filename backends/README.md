@@ -114,3 +114,68 @@ Available targets:
 
 Each test verifies basic TM operations (reads, writes, atomicity) and
 reports `PASS`/`FAIL` on exit.
+
+## Event Logger
+
+The file `tm_event_logger.hpp` provides a per-thread ring-buffer event
+logger for debugging TM backend crashes (e.g., the WBCTL SIGSEGV at
+4 threads).  It is activated by defining `TM_EVENT_LOG` before including
+the header; when inactive, all event macros compile to nothing.
+
+### Usage
+
+```cpp
+#define TM_EVENT_LOG                        // enable (must be before includes)
+#include "tm_event_logger.hpp"
+
+TM_EVENT(TX_BEGIN, tx->id, tx->start_version);
+TM_EVENT2(READ_LOCK_ACQUIRE, addr, lock, version);
+
+TM_EVENT_DUMP(256);                         // dump last 256 events per thread
+TM_EVENT_INSTALL_SIGSEGV();                 // auto-dump on crash
+```
+
+Events are logged to a lock-free per-thread ring buffer (16384 entries).
+On SIGSEGV (or by calling `dump()`), the ring buffer is printed to stderr
+with timestamps, thread IDs, and event payloads.
+
+### Event Types
+
+| Event                 | `addr1`      | `addr2`       | `data`            |
+|-----------------------|--------------|---------------|-------------------|
+| `TX_BEGIN`            | tx id        | —             | start_version     |
+| `TX_END`              | tx id        | —             | —                 |
+| `TX_ABORT`            | tx id        | —             | abort_count       |
+| `READ_LOCK_ACQUIRE`   | addr         | lock          | version           |
+| `READ_VERSION_CHECK`  | addr         | lock          | version           |
+| `WRITE_LOCK_ACQUIRE`  | addr         | lock          | lock_state        |
+| `WRITE_SET_INSERT`    | addr         | lock          | type_size         |
+| `COMMIT_LOCK_ACQUIRE` | lock         | addr          | type_size         |
+| `COMMIT_WRITEBACK`    | tx id        | —             | write_set_size    |
+| `COMMIT_SUCCESS`      | tx id        | —             | commit_version    |
+| `GAP_CHECK`           | tx id        | end_version   | commit_version    |
+| `LOCK_RELEASE`        | lock         | addr          | commit_version    |
+| `RETRY_END`           | tx id        | —             | abort_count       |
+
+### Activating for WBCTL Debugging
+
+```bash
+# Add -DTM_EVENT_LOG to CXXFLAGS when compiling the runtime:
+cd backends/tests
+make CXXFLAGS="-std=c++20 -O0 -pthread -g -DTM_EVENT_LOG" run
+```
+
+The SIGSEGV handler is installed automatically by `tinystm::init()` when
+`TM_EVENT_LOG` is defined.  To dump events on demand from lldb:
+
+```
+p ((stm::EventRing*)&stm::get_event_ring())->dump(0, stderr)
+```
+
+### Files
+
+| File                              | Role                        |
+|-----------------------------------|-----------------------------|
+| `backends/tm_event_logger.hpp`    | Ring buffer + event macros  |
+| `backends/TinySTM/tinystm_wbctl.hpp` | Instrumented with events  |
+| `backends/TinySTM/tinystm_common.hpp` | SIGSEGV handler install   |
