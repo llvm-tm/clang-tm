@@ -128,25 +128,17 @@ void tm_set_env(sigjmp_buf *env)
 
 void tm_begin()
 {
-#ifndef NDEBUG
-	fprintf(stderr, "NOrec tm_begin called\n");
-#endif
 	if (tm_longjmp_ret == 0) {
 		tm_clear_spec_allocs();
 		tm_clear_deferred_frees();
 		g_in_tx = true;
 		norec::begin();
 	}
-	int64_t count = g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
-	if (count > 0 && count % 1000 == 0)
-		fprintf(stderr, "DEBUG tm_begin count = %lld\n", (long long)count);
+	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 void tm_end()
 {
-#ifndef NDEBUG
-	fprintf(stderr, "NOrec tm_end called\n");
-#endif
 	norec::commit();
 	g_in_tx = false;
 	tm_flush_spec_allocs();
@@ -281,22 +273,6 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 		norec::tm_write_i1(&addr[i], val);
 	}
 }
-
-void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {}
-
-static void print_stats()
-{
-#ifndef NDEBUG
-	fprintf(stderr, "=== NOrec Runtime Stats ===\n");
-	fprintf(stderr,
-	        "tm_begin: %lld, tm_end: %lld, #TXs: %lld\n",
-	        (long long)g_tm_begin_count.load(std::memory_order_relaxed),
-	        (long long)g_tm_end_count.load(std::memory_order_relaxed),
-	        (long long)g_tm_tx_count.load(std::memory_order_relaxed));
-#endif
-}
-
-static int init = (std::atexit(print_stats), 0);
 
 // TM allocator stubs (redirect to system allocator)
 void* tm_malloc(size_t size) { void* p = malloc(size); tm_track_spec_alloc(p); return p; }

@@ -790,7 +790,7 @@ Rationale: the plugin never generates null-address TM calls. Any null-address re
 - **Reverted**: `assert(tx && tx->active)` → `if (!tx || !tx->active)` guard in read_impl/write_impl (assertion caused SIGABRT if a TM hook fires during nested siglongjmp cleanup).
 
 ## Blocked (updated this session)
-- **SwissTM bank 1-cent money loss**: Root cause identified (Phase 1 `store(READ_LOCKED)` overwrites version, Phase 3 `validate()` always fails, `ts > valid_ts + 1` is only gate — allows inconsistent read-sets when relaxed ordering hides concurrent commits). Fix is load-then-store + old_version + orec dedup, but this introduces livelock at 2+ threads from acq_rel + siglongjmp overhead. Needs a non-siglongjmp retry mechanism or relaxed ordering (which re-introduces the original race).
+- **SwissTM write_set_validation failure (pre-existing, ~3.5% loss)**: test writes to two addresses (A and B); only A enters the read-set. On abort/retry, B's value may be stale. May require write-set-to-read-set propagation in `write_impl`.
 
 - **WT counter_mt remaining loss**: 2297/800000 counts lost after own-lock validation fix. Root cause is NOT incarnation overflow (3-bit incarnation, shared by WBCTL/WBETL which pass 0/800000). The gap is from WT's write-through race: lock-extent (64 bytes) allows a write-through to be visible in memory before the lock's version/clock has advanced, creating a window where the validation gate (`commit_version > start_version + 1`) is false. Write-back backends are immune (values only reach memory at commit time, after clock advances).
 
@@ -827,7 +827,7 @@ Rationale: the plugin never generates null-address TM calls. Any null-address re
 
 On x86 this race is unlikely (strong memory model + store buffer forwarding). On ARM64 the weak ordering makes it visible as 3-4% lost increments.
 
-**SwissTM excluded from correctness-critical tests**: counter_mt (always loses 3-4%), write_set_validation (loses counts), bank 2t (loses/creates ±1¢).
+**SwissTM excluded from correctness-critical tests (write_set_validation only)**: write_set_validation (loses ~3.5% of B counts). counter_mt and bank now PASS after rollback fix (see 2026-05-31 session).
 
 ### Removed dead `_opt` benchmark files
 - `benchmarks/test/bank/bank_opt.cpp` — had tm_local annotations but was never benchmarked for improvement
@@ -838,4 +838,74 @@ On x86 this race is unlikely (strong memory model + store buffer forwarding). On
 - `benchmarks/STMbench7/STMbench7_opt.cpp` — dead code, no tm_local annotations
 - `benchmarks/TPCC/TPCC_opt.cpp` — dead code, no tm_local annotations
 - Cleaned up bank Makefile bank_opt/bank_opt_wbetl/bank_opt_wt targets
+
+## Done (this session — 2026-05-31)
+
+### SwissTM counter_mt and bank benchmark FIXED: rollback undo-restore race
+
+**Symptom**: `counter_mt` lost 3-6% of increments (got ~3760/4000 instead of 4000/4000). Bank benchmark created +11 money at 4 threads. These were believed to be a design-level limitation of SwissTM's eager-read protocol on ARM64.
+
+**Root cause**: `rollback()` unconditionally restored the undo-log old value (e.g. 4) to memory, overwriting a higher value (e.g. 5) that another TX had already committed to the same address. This made the committed TX's increment permanently invisible.
+
+**The race window**:
+1. TX A reads counter=4 via `read_impl` (adds to read-set with orec version v)
+2. TX B reads counter=4 via `read_impl` (adds to read-set with orec version v)
+3. TX A: `write_impl(counter, 5)` → captures undo=4, acquires w_lock
+4. TX A: commit() → Phase 4 writes counter=5, releases orec (r_lock=v+1, w_lock=UNLOCKED)
+5. TX B: `write_impl(counter, 5)` → captures undo=5 (already committed), acquires w_lock (retry)
+6. TX B: commit() → Phase 3 detects read-set conflict (orec version != old_version)
+7. TX B: `rollback()` → **writes undo=5 back to memory** (correct — line 6 captured the already-committed value 5)
+
+The 3-4% loss case: step 5 captures undo=4 (stale, before TX A's write-back became visible), then rollback overwrites counter=5 with counter=4.
+
+**Fix**: In `rollback()`, before restoring the undo value:
+1. Verify we still own `w_lock` (load, not CAS — no concurrent owner while we hold it)
+2. Read the current memory value and compare to the undo value
+3. If they differ, another TX committed — skip restore, just release w_lock
+
+**Also removed**: premature `w_lock.store(UNLOCKED, release)` from `validate_read_set()` Phase-3 else branch. rollback now handles lock release together with the ownership check, ensuring only rollback's release path is correct.
+
+### Per-thread debug ring buffer (`tm_debug.hpp`)
+- Created `backends/tm_debug.hpp` with per-thread ring buffer (no I/O, `#ifndef NDEBUG` guard)
+- `DBG_EVT(type, val)` records wall-clock timestamp + type + value without printf
+- `tm_dbg_dump_all()` sorts all threads' events by wall clock and prints interleaved timeline
+- Added `DBG_EVT` calls to SwissTM read, write, commit, abort, Phase 3 ok/fail, and eager-read paths
+- `test_counter_mt.cpp` calls `tm_dbg_set_counter_ptr(&shared_counter)` for auto-check after commit
+- Build with `-UNDEBUG` to enable; release build (`-DNDEBUG` or default) disables all debug instrumentation
+
+### Refactoring (no functional change)
+- `write_back_and_release()` broken out of `commit()` in SwissTM (same for WBCTL, TL2, WT)
+- `acquire_read_locks()` broken out of `commit()` in SwissTM
+- `validate_read_set()` broken out of `commit()` in SwissTM
+- WBCTL `read_word_ctl`/`write_word_ctl` — extracted lock-acquire/validate/release helpers
+- TL2 `read_impl`/`write_impl` — extracted lock-table helpers
+- WT `read_word_wt`/`write_word_wt` — extracted helpers
+
+### Verification
+- `counter_mt` SwissTM: **8000/8000**, 20/20 runs (was losing 1-3 per run)
+- Bank SwissTM: **PASS** correct money conservation at 4 threads (was creating +11)
+- All 15+ plugin tests: PASS
+- All 12 backend STM tests: TinySTM 3/3, NOrec 3/3, TL2 3/3, SwissTM 2/3 (write_set_validation pre-existing failure)
+
+### Key Decisions (this session)
+- The undo-restore guard is a general `u8` comparison (works for any type, not counter-specific)
+- w_lock ownership is checked with a plain load (not CAS) — while we hold the lock, no other thread can concurrently acquire it, so a simple load suffices
+- Phase-3 else branch no longer releases write-locks; rollback owns both the ownership check and the release, removing the window where rollback could race with another TX's write-back
+- `tm_debug.hpp` is designed for **printf-free debugging** of event-ordering bugs — the sorted timeline reveals interleavings that serializing I/O would hide
+
+## Next Steps (updated this session)
+1. Investigate write_set_validation failure for SwissTM (~3.5% loss): likely write-set-to-read-set propagation in `write_impl`
+2. Build with `-DNDEBUG` and run full suite to confirm release-mode correctness
+
+## Critical Context (updated)
+- SwissTM counter_mt and bank bugs are now FIXED. Root cause was `rollback()` writing stale undo values over committed values.
+- The fix is general-purpose (compares u8 of undo vs memory), not counter-specific.
+- write_set_validation remains the only pre-existing SwissTM failure (~3.5%).
+- `tm_debug.hpp` provides printf-free event recording + sorted interleaved timeline for diagnosing event-ordering bugs.
+
+## Relevant Files
+- `backends/SwissTM/SwissTM.hpp`: `rollback()` fix (ownership check + memory-value guard), `write_back_and_release()`, `acquire_read_locks()`, `validate_read_set()`; DBG_EVT instrumentation; removed premature w_lock release from Phase 3 else branch.
+- `backends/tm_debug.hpp`: per-thread ring buffer + `DBG_EVT` + `tm_dbg_dump_all()` (sorted interleaved timeline).
+- `backends/runtimes/SwissTM_runtime.cpp`: `tm_dbg_set_counter_ptr()` stub.
+- `backends/tests/test_counter_mt.cpp`: calls `tm_dbg_set_counter_ptr` before threads start.
 

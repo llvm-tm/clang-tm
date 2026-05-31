@@ -12,6 +12,8 @@
 #include <thread>
 
 #include "tinystm_common.hpp"
+#include "../tm_log_entries.hpp"
+#include "../tm_log_merge.hpp"
 
 extern "C" {
 extern __thread int32_t tm_nested_call_counter;
@@ -22,16 +24,9 @@ namespace tinystm
 
 constexpr const char *VERSION = "0.2.0-wbetl";
 
-struct ReadLogEntry_wbetl {
-	volatile word_t observed_version;
-	any_type_t observed_val;
-	ValueType type;
-};
+struct ReadLogEntry_wbetl : stm::BitmapReadEntry<void *> {};
 
-struct WriteLogEntry_wbetl {
-	any_type_t old_val;
-	any_type_t new_val;
-	ValueType type;
+struct WriteLogEntry_wbetl : stm::BitmapRedoEntry<void *> {
 	volatile word_t version;
 };
 
@@ -62,8 +57,7 @@ public:
 
 	word_t get_owner() const
 	{
-		return (state.load(std::memory_order_acquire) &
-		        (THREAD_MASK << LOCK_BITS)) >>
+		return (state.load(std::memory_order_acquire) & (THREAD_MASK << LOCK_BITS)) >>
 		       LOCK_BITS;
 	}
 };
@@ -100,26 +94,10 @@ exit_thread() //
   * Stubs for Transaction begin/end.
   * ---------------------------------------------------- */
 
-static void  //
-init_rand()  //
-{
-	if (!rng_initialized) {
-		std::random_device rd;
-		rng.seed(rd());
-		rng_initialized = true;
-	}
-}
-
 static void      //
 random_backoff() //
 {
-	if (!rng_initialized) {
-		init_rand();
-	}
-	std::exponential_distribution<> dist(
-	    (double)1 / (double)(current_tx_wbetl->abort_count + 1));
-	int delay = std::min(dist(rng), 100000.0);
-	std::this_thread::sleep_for(std::chrono::microseconds(delay));
+	tinystm::random_backoff(current_tx_wbetl->abort_count);
 }
 
 inline bool //
@@ -131,23 +109,21 @@ begin()     //
 	if (tx->active)
 		return true;
 
-	if (tx->aborted) {
-		tx->unlock_held_locks_and_clear();
-		tx->aborted = false;
-	}
+	TM_ASSERT(!tx->aborted, "begin: stale aborted flag");
 
 	tx->start_version = get_clock();
 	tx->end_version = tx->start_version;
 	tx->active = true;
 	tx->read_only = true;
-	if (!tx->is_retry) tx->abort_count = 0;
+	if (!tx->is_retry)
+		tx->abort_count = 0;
 	tx->is_retry = false;
 
 	return true;
 }
 
-inline void //
-abort_tx()  //
+inline void                    //
+abort_tx(const char *loc = "") //
 {
 	auto *tx = current_tx_wbetl;
 
@@ -160,24 +136,6 @@ abort_tx()  //
 	stm::tm_token_release_if_held(tx->id);
 	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
 
-	if (tx->abort_count > 5) {
-		random_backoff();
-	}
-	siglongjmp(*jmpbuf, 1);
-	TM_ASSERT(false, "Did not jump");
-}
-
-static void       //
-deferred_abort() //
-{
-	auto *tx = current_tx_wbetl;
-	TM_ASSERT(tx, "tx not defined");
-	tx->unlock_held_locks_and_clear();
-	tx->aborted = false;
-	tx->abort_count++;
-	tx->is_retry = true;
-	stm::tm_token_release_if_held(tx->id);
-	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
 	if (tx->abort_count > 5) {
 		random_backoff();
 	}
@@ -225,9 +183,7 @@ commit()    //
 	TM_ASSERT(tx, "tx not defined");
 	TM_ASSERT(tx->active, "tx not active");
 
-	if (tx->aborted) {
-		deferred_abort();
-	}
+	TM_ASSERT(!tx->aborted, "commit: stale aborted flag");
 
 	// Locks already taken: write-back
 
@@ -235,12 +191,22 @@ commit()    //
 		word_t commit_version = increment_clock(tx->id);
 
 		if (!extend())
-			abort_tx();
+			abort_tx("extend_failed");
 
 		for (auto &it : tx->write_set) {
-			auto &addr = it.first;
+			auto *aligned = static_cast<void *>(it.first);
 			auto &w = it.second;
-			write_value_to_addr(addr, w.new_val, w.type);
+			for (unsigned byte_off = 0; byte_off < 8; byte_off++) {
+				if (w.valid & (1 << byte_off)) {
+					void *byte_addr =
+					    reinterpret_cast<void *>((uintptr_t)aligned + byte_off);
+					uint8_t byte_val =
+					    static_cast<uint8_t>((w.value >> (byte_off * 8)) & 0xFF);
+					write_value_to_addr(byte_addr,
+					                    any_type_t{.u1 = byte_val},
+					                    ValueType::UINT8);
+				}
+			}
 		}
 		for (Lock *lock : tx->locks_held) {
 			lock->unlock_with_version(tx->id, commit_version);
@@ -256,7 +222,7 @@ commit()    //
   * Stubs for Transaction read/write instrumentation.
   * ---------------------------------------------------- */
 
-inline any_type_t                                              //
+inline any_type_t                                             //
 read_word_etl(                                                //
     Transaction<ReadLogEntry_wbetl, WriteLogEntry_wbetl> *tx, //
     void *addr,                                               //
@@ -264,61 +230,25 @@ read_word_etl(                                                //
 )
 {
 	std::atomic_signal_fence(std::memory_order_seq_cst);
-	ByteOffset bo((word_t)addr);
+	void *aligned = stm::merge::align_down_8(addr);
+	ByteOffset bo((word_t)aligned);
 
 	TM_ASSERT(tx, "tx not defined");
 	TM_ASSERT(tx->active, "tx not active");
 
-	// Stack-address detection: reading from the stack would create read-set
-	// entries for stack addresses that hash to random locks, causing spurious
-	// validation failures and aborts.
-	if (isStackAddress(addr))
-		return read_value_from_addr(addr, sz);
-
-	// Check write-set for this exact address
-	auto w = tx->write_set.find(addr);
-	if (w != tx->write_set.end()) {
-		if (w->second.type == sz)
-			return w->second.new_val;
-		// Type mismatch: wider write covers this address, extract bytes.
-		if (w->second.type == ValueType::UINT64 && sz == ValueType::UINT8) {
+	// Check write-set by aligned address → bitmap extract
+	{
+		auto w = tx->write_set.find(aligned);
+		if (w != tx->write_set.end()) {
 			any_type_t result;
-			result.u1 = static_cast<uint8_t>(w->second.new_val.u8 & 0xFF);
-			return result;
-		}
-	}
-
-	// For unaligned reads: check the 8-byte-aligned address.
-	if (bo.offset != 0) {
-		void *base_addr = reinterpret_cast<void *>(bo.base_addr);
-		auto w2 = tx->write_set.find(base_addr);
-		if (w2 != tx->write_set.end() && w2->second.type == ValueType::UINT64) {
-			unsigned shift = static_cast<unsigned>(bo.offset) * 8;
-			switch (sz) {
-			case ValueType::UINT8: {
-				any_type_t result;
-				result.u1 = static_cast<uint8_t>(w2->second.new_val.u8 >> shift);
+			if (stm::merge::bitmap_read(result, w->second.value, w->second.valid,
+			                           sz, addr)) {
 				return result;
-			}
-			case ValueType::UINT16: {
-				any_type_t result;
-				result.u2 = static_cast<uint16_t>(w2->second.new_val.u8 >> shift);
-				return result;
-			}
-			case ValueType::UINT32: {
-				any_type_t result;
-				result.u4 = static_cast<uint32_t>(w2->second.new_val.u8 >> shift);
-				return result;
-			}
-			default:
-				break;
 			}
 		}
 	}
 
-	if (tx->aborted) {
-		return read_value_from_addr(addr, sz);
-	}
+	TM_ASSERT(!tx->aborted, "read_word_etl: stale aborted flag");
 
 	Lock *lock = &g_locks_wbetl.get(bo.base_addr);
 	if (lock->is_locked_by(tx->id)) {
@@ -329,7 +259,6 @@ read_word_etl(                                                //
 
 	while (true) {
 		if ((l & OWNED_MASK) != 0) {
-			// ── Soft-spin on held lock (token as tie-breaker) ──
 			if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 3)) {
 				while ((lock->get() & OWNED_MASK) != 0) {
 					TINY_STM_PAUSE();
@@ -337,8 +266,7 @@ read_word_etl(                                                //
 				l = lock->get();
 				continue;
 			}
-			tx->aborted = true;
-			return read_value_from_addr(addr, sz);
+			abort_tx("read_lock_spin");
 		}
 
 		word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
@@ -352,26 +280,27 @@ read_word_etl(                                                //
 
 		if (version > tx->end_version) {
 			if (extend()) {
-				continue; // needs to read again
+				continue;
 			} else {
-				abort_tx(); // returns to begin
+				abort_tx("read_version_extend");
 			}
 		}
 
 		any_type_t val = {.u8 = value.u8};
 
-		ReadLogEntry_wbetl r;
-		r.observed_version = version;
-		r.observed_val = val;
-		r.type = sz;
-		tx->read_set.insert(std::pair(addr, r));
+		auto r_it = tx->read_set.find(aligned);
+		if (r_it != tx->read_set.end()) {
+			stm::merge::merge_read(r_it->second, version, val, sz, addr);
+		} else {
+			tx->read_set.insert(std::pair(aligned, stm::merge::make_read_entry<ReadLogEntry_wbetl>(aligned, version, val, sz, addr)));
+		}
 
 		return val;
 	}
 }
 
 inline void                                                   //
-write_word_etl(                                               //
+write_word_etl(                                                //
     Transaction<ReadLogEntry_wbetl, WriteLogEntry_wbetl> *tx, //
     void *addr,                                               //
     any_type_t val,                                           //
@@ -379,316 +308,80 @@ write_word_etl(                                               //
 )
 {
 	std::atomic_signal_fence(std::memory_order_seq_cst);
-	ByteOffset bo((word_t)addr);
+	void *aligned = stm::merge::align_down_8(addr);
+	ByteOffset bo((word_t)aligned);
 
 	TM_ASSERT(tx, "tx not defined");
-	TM_ASSERT(tx->active, "tx not active");
+	TM_ASSERT_VALID_TX(tx, "write_word_etl");
 
-	// Stack-address detection: writing to the stack via tm_write would create
-	// a write-set entry that gets written back at commit time — by then the
-	// stack frame has been popped and the write corrupts active stack data.
-	if (isStackAddress(addr)) {
-		write_value_to_addr(addr, val, sz);
-		return;
-	}
-
-	if (tx->aborted)
-		return;
+	TM_ASSERT(!tx->aborted, "write_word_etl: stale aborted flag");
 
 	tx->read_only = false;
 
-	unsigned sz_bytes = stm::type_size(sz);
-
-	// Found write-set entry at exact addr with matching type → update in place.
 	{
-		auto w = tx->write_set.find(addr);
+		auto w = tx->write_set.find(aligned);
 		if (w != tx->write_set.end()) {
-			if (w->second.type == sz) {
-				w->second.new_val = val;
-				return;
-			}
-			if (w->second.type == ValueType::UINT64 && sz == ValueType::UINT8) {
-				uint64_t merged = (w->second.new_val.u8 & ~(uint64_t)0xFF);
-				merged |= (uint64_t)(val.u1);
-				w->second.new_val.u8 = merged;
-				return;
-			}
-			// Generic guard: if a wider entry already exists at this address,
-			// skip the narrower write — the existing entry covers the range.
-			if (stm::type_size(w->second.type) >= sz_bytes) {
-				return;
-			}
-		}
-	}
-
-	// Also guard against the offset case: a write at byte-offset within an
-	// 8-byte word where a wider entry exists at the aligned base address.
-	if (bo.offset != 0) {
-		void *base_addr = reinterpret_cast<void *>(bo.base_addr);
-		auto w2 = tx->write_set.find(base_addr);
-		if (w2 != tx->write_set.end() && w2->second.type == ValueType::UINT64) {
-			unsigned shift = static_cast<unsigned>(bo.offset) * 8;
-			uint64_t mask;
-			uint64_t write_val;
-			switch (sz) {
-			case ValueType::UINT8:
-				mask = (uint64_t)0xFF << shift;
-				write_val = val.u1;
-				break;
-			case ValueType::UINT16:
-				mask = (uint64_t)0xFFFF << shift;
-				write_val = val.u2;
-				break;
-			case ValueType::UINT32:
-				mask = (uint64_t)0xFFFFFFFF << shift;
-				write_val = val.u4;
-				break;
-			default:
-				mask = 0;
-				write_val = 0;
-				break;
-			}
-			if (mask) {
-				uint64_t merged = (w2->second.new_val.u8 & ~mask);
-				merged |= (write_val << shift);
-				w2->second.new_val.u8 = merged;
-				return;
-			}
+			stm::merge::bitmap_write(w->second.value, w->second.valid, val, sz, addr);
+			return;
 		}
 	}
 
 	Lock *lock = &g_locks_wbetl.get(bo.base_addr);
 
-	bool need_write = true;
-
 	if (lock->is_locked()) {
 		if (lock->get_owner() != tx->id) {
-			// Soft-spin (token as tie-breaker for deadlocks)
 			if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 3)) {
 				while (lock->is_locked() && lock->get_owner() != tx->id) {
 					TINY_STM_PAUSE();
 				}
 				if (lock->get_owner() != tx->id) {
 					if (!lock->try_lock(tx->id))
-						abort_tx();
+						abort_tx("write_try_lock_after_spin");
 				}
 			} else {
-				tx->aborted = true;
-				return;
+				abort_tx("write_lock_contention");
 			}
 		}
 	} else {
 		if (!lock->try_lock(tx->id)) {
 			if (!validate())
-				abort_tx();
+				abort_tx("write_validate_fail");
 			if (!lock->try_lock(tx->id)) {
 				if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 3)) {
 					while (lock->is_locked()) {
 						TINY_STM_PAUSE();
 					}
 					if (!lock->try_lock(tx->id))
-						abort_tx();
+						abort_tx("write_unlock_race");
 				} else {
-					tx->aborted = true;
-					need_write = false;
+					abort_tx("write_lock_spin_exhausted");
 				}
 			}
 		}
 	}
 
-	if (!need_write)
-		return;
-
-	// locked — deduplicate locks_held
 	{
 		bool already_held = false;
 		for (Lock *hl : tx->locks_held) {
-			if (hl == lock) { already_held = true; break; }
+			if (hl == lock) {
+				already_held = true;
+				break;
+			}
 		}
 		if (!already_held) {
 			tx->locks_held.push_back(lock);
 		}
 	}
 
-	WriteLogEntry_wbetl w;
-	w.new_val = val;
-	w.type = sz;
-	tx->write_set[addr] = w;
+	tx->write_set[aligned] = stm::merge::make_write_entry<WriteLogEntry_wbetl>(aligned, val, sz, addr, lock->get_version());
 }
 
-inline uint8_t    //
-tm_read_i1(       //
-    uint8_t *addr //
-)
-{
-	return tm_read<uint8_t,
-	               ValueType::UINT8,
-	               ReadLogEntry_wbetl,
-	               WriteLogEntry_wbetl,
-	               read_word_etl>(current_tx_wbetl, addr);
-}
-
-inline uint16_t    //
-tm_read_i2(        //
-    uint16_t *addr //
-)
-{
-	return tm_read<uint16_t,
-	               ValueType::UINT16,
-	               ReadLogEntry_wbetl,
-	               WriteLogEntry_wbetl,
-	               read_word_etl>(current_tx_wbetl, addr);
-}
-
-inline uint32_t    //
-tm_read_i4(        //
-    uint32_t *addr //
-)
-{
-	return tm_read<uint32_t,
-	               ValueType::UINT32,
-	               ReadLogEntry_wbetl,
-	               WriteLogEntry_wbetl,
-	               read_word_etl>(current_tx_wbetl, addr);
-}
-
-inline uint64_t    //
-tm_read_i8(        //
-    uint64_t *addr //
-)
-{
-	return tm_read<uint64_t,
-	               ValueType::UINT64,
-	               ReadLogEntry_wbetl,
-	               WriteLogEntry_wbetl,
-	               read_word_etl>(current_tx_wbetl, addr);
-}
-
-inline float    //
-tm_read_f4(     //
-    float *addr //
-)
-{
-	return tm_read<float,
-	               ValueType::FLOAT,
-	               ReadLogEntry_wbetl,
-	               WriteLogEntry_wbetl,
-	               read_word_etl>(current_tx_wbetl, addr);
-}
-
-inline double    //
-tm_read_f8(      //
-    double *addr //
-)
-{
-	return tm_read<double,
-	               ValueType::DOUBLE,
-	               ReadLogEntry_wbetl,
-	               WriteLogEntry_wbetl,
-	               read_word_etl>(current_tx_wbetl, addr);
-}
-
-inline void *   //
-tm_read_ptr(    //
-    void **addr //
-)
-{
-	return tm_read<void *,
-	               ValueType::POINTER,
-	               ReadLogEntry_wbetl,
-	               WriteLogEntry_wbetl,
-	               read_word_etl>(current_tx_wbetl, addr);
-}
-
-inline void        //
-tm_write_i1(       //
-    uint8_t *addr, //
-    uint8_t val    //
-)
-{
-	tm_write<uint8_t,
-	         ValueType::UINT8,
-	         ReadLogEntry_wbetl,
-	         WriteLogEntry_wbetl,
-	         write_word_etl>(current_tx_wbetl, addr, val);
-}
-
-inline void         //
-tm_write_i2(        //
-    uint16_t *addr, //
-    uint16_t val    //
-)
-{
-	tm_write<uint16_t,
-	         ValueType::UINT16,
-	         ReadLogEntry_wbetl,
-	         WriteLogEntry_wbetl,
-	         write_word_etl>(current_tx_wbetl, addr, val);
-}
-
-inline void         //
-tm_write_i4(        //
-    uint32_t *addr, //
-    uint32_t val    //
-)
-{
-	tm_write<uint32_t,
-	         ValueType::UINT32,
-	         ReadLogEntry_wbetl,
-	         WriteLogEntry_wbetl,
-	         write_word_etl>(current_tx_wbetl, addr, val);
-}
-
-inline void         //
-tm_write_i8(        //
-    uint64_t *addr, //
-    uint64_t val    //
-)
-{
-	tm_write<uint64_t,
-	         ValueType::UINT64,
-	         ReadLogEntry_wbetl,
-	         WriteLogEntry_wbetl,
-	         write_word_etl>(current_tx_wbetl, addr, val);
-}
-
-inline void      //
-tm_write_f4(     //
-    float *addr, //
-    float val    //
-)
-{
-	tm_write<float,
-	         ValueType::FLOAT,
-	         ReadLogEntry_wbetl,
-	         WriteLogEntry_wbetl,
-	         write_word_etl>(current_tx_wbetl, addr, val);
-}
-
-inline void       //
-tm_write_f8(      //
-    double *addr, //
-    double val    //
-)
-{
-	tm_write<double,
-	         ValueType::DOUBLE,
-	         ReadLogEntry_wbetl,
-	         WriteLogEntry_wbetl,
-	         write_word_etl>(current_tx_wbetl, addr, val);
-}
-
-inline void      //
-tm_write_ptr(    //
-    void **addr, //
-    void *val    //
-)
-{
-	tm_write<void *,
-	         ValueType::POINTER,
-	         ReadLogEntry_wbetl,
-	         WriteLogEntry_wbetl,
-	         write_word_etl>(current_tx_wbetl, addr, val);
-}
+#define TM_STUB_TX current_tx_wbetl
+#define TM_STUB_READ_FN read_word_etl
+#define TM_STUB_WRITE_FN write_word_etl
+#define TM_STUB_HAVE_TYPES
+#define TM_STUB_RL ReadLogEntry_wbetl
+#define TM_STUB_WL WriteLogEntry_wbetl
+#include "../tm_stubs.hpp"
 
 } // namespace tinystm

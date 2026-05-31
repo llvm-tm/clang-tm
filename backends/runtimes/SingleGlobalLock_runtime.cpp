@@ -34,24 +34,12 @@ __thread int32_t tm_longjmp_ret;
 extern "C" {
 
 void tm_init() {
-#ifndef NDEBUG
-    fprintf(stderr, "SingleGlobalLock: tm_init called\n");
-    fflush(stderr);
-#endif
     if (!initialized.load(std::memory_order_relaxed)) {
         initialized.store(true, std::memory_order_seq_cst);
     }
-#ifndef NDEBUG
-    fprintf(stderr, "SingleGlobalLock: tm_init done\n");
-    fflush(stderr);
-#endif
 }
 
 void tm_init_thread() {
-#ifndef NDEBUG
-    fprintf(stderr, "SingleGlobalLock: tm_init_thread called\n");
-    fflush(stderr);
-#endif
 }
 
 void tm_exit() {
@@ -165,20 +153,6 @@ void tm_memset(volatile uint8_t *addr, uint8_t val, uint64_t len) {
 }
 
 void consume_ptr(volatile void *ptr) { (void)ptr; }
-
-static void print_stats()
-{
-#ifndef NDEBUG
-	fprintf(stderr, "=== SingleGlobalLock Runtime Stats ===\n");
-	fprintf(stderr,
-	        "tm_begin: %lld, tm_end: %lld, #TXs: %lld\n",
-	        (long long)g_tm_begin_count.load(std::memory_order_relaxed),
-	        (long long)g_tm_end_count.load(std::memory_order_relaxed),
-	        (long long)g_tm_tx_count.load(std::memory_order_relaxed));
-#endif
-}
-
-static int init = (std::atexit(print_stats), 0);
 
 // TM allocator stubs (redirect to system allocator)
 void* tm_malloc(size_t size) { return g_in_tx ? malloc(size) : malloc(size); }

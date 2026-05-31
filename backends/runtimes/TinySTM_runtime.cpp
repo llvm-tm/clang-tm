@@ -54,23 +54,11 @@ void tm_init() {
 
 void tm_exit() {
 	tinystm::exit();
-#ifndef NDEBUG
-	fprintf(stderr, "\n=== TinySTM max read-set = %llu, max write-set = %llu ===\n",
-		(unsigned long long)g_tm_max_read_set.load(),
-		(unsigned long long)g_tm_max_write_set.load());
-#endif
-	if (auto ac = tinystm::g_tm_abort_count.load(); ac > 0) {
-		fprintf(stderr, "\n=== TinySTM total aborts = %llu ===\n",
-			(unsigned long long)ac);
-	}
 }
 
 void tm_init_thread()
 {
 	tm_init_thread_call_count++;
-#ifndef NDEBUG
-	(void)0;
-#endif
 	tinystm::init_thread();
 }
 

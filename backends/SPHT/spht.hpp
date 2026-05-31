@@ -24,21 +24,12 @@
 
 #include <atomic>
 #include <cstdint>
-#include <cstdio>
-#include <cstring>
-#include <csetjmp>
+#include <cstddef>
 #include <cstdlib>
-#include <thread>
-#include <chrono>
-#include <vector>
-
-#if defined(__x86_64__) || defined(__i386__)
-#include <cpuid.h>
-#include <immintrin.h>
-#endif
-
-#include "../tm_common.hpp"
-#include "../tm_platform.hpp"
+#include <cstring>
+#include <atomic>
+#include <new>
+#include <cstdio>
 
 namespace spht
 {
@@ -49,7 +40,6 @@ using stm::fill_any_type;
 using stm::return_any_type;
 using stm::read_value_from_addr;
 using stm::write_value_to_addr;
-using stm::isStackAddress;
 
 constexpr const char *VERSION = "1.0.0-spht";
 
@@ -270,8 +260,6 @@ inline T tm_read(T *addr)
 {
 	if (!current_tx || !current_tx->active)
 		return *addr;
-	if (isStackAddress((void *)addr))
-		return *addr;
 	return *addr;
 }
 
@@ -283,10 +271,6 @@ inline void tm_write(T *addr, T val)
 		return;
 
 	if (!current_tx || !current_tx->active) {
-		*addr = val;
-		return;
-	}
-	if (isStackAddress((void *)addr)) {
 		*addr = val;
 		return;
 	}

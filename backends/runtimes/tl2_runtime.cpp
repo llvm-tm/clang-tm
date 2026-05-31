@@ -79,7 +79,6 @@ extern "C" void tm_set_env(sigjmp_buf* env) {
 // Wrapper functions matching plugin interface (2-arg read/write, no symbol_id)
 
 extern "C" void tm_begin() {
-    //fprintf(stderr, "TL2 tm_begin called (thr=%ld)\n", (long)pthread_self());
     tl2::set_jmp_env_external(&tm_jmpbuf);
     tm_clear_spec_allocs();
     tm_clear_deferred_frees();
@@ -90,7 +89,6 @@ extern "C" void tm_begin() {
 }
 
 extern "C" void tm_end() {
-    //fprintf(stderr, "TL2 tm_end called (thr=%ld)\n", (long)pthread_self());
     if (!tl2::commit()) {
         g_tm_commit_fail_count.fetch_add(1, std::memory_order_relaxed);
         siglongjmp(tm_jmpbuf, 1);
@@ -222,10 +220,6 @@ extern "C" void* tm_calloc(size_t nmemb, size_t size) { void* p = ::operator new
 extern "C" void* tm_realloc(void* ptr, size_t size) { void* p = ::operator new(size); if (ptr) { memcpy(p, ptr, size); ::operator delete(ptr); } tm_track_spec_alloc(p); return p; }
 extern "C" void  tm_free(void* ptr) {
     if (!ptr) return;
-    // Safety: stack addresses must never be deferred-freed.  The plugin
-    // should skip stack pointer deletes, but the runtime catches whatever
-    // the static analysis misses (e.g., pointers loaded from allocas).
-    if (stm::isStackAddress(ptr)) return;
     if (g_in_tx) {
         // Detect double-free: same pointer freed twice in the same TX
         if (g_deferred_frees_set.count(ptr)) {
@@ -246,16 +240,3 @@ extern "C" void  tm_free(void* ptr) {
         ::operator delete(ptr);
     }
 }
-
-static void print_stats() {
-#ifndef NDEBUG
-    fprintf(stderr, "=== TL2 Runtime Stats ===\n");
-    fprintf(stderr, "tm_begin: %lld, tm_end: %lld, commit_fail: %lld, abort_count: %lld\n", 
-        (long long)g_tm_begin_count.load(std::memory_order_relaxed), 
-        (long long)g_tm_end_count.load(std::memory_order_relaxed),
-        (long long)g_tm_commit_fail_count.load(std::memory_order_relaxed),
-        (long long)g_tm_abort_count.load(std::memory_order_relaxed));
-#endif
-}
-
-static int init = (std::atexit(print_stats), 0);

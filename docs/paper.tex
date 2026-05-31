@@ -28,8 +28,10 @@ with \texttt{\_\_attribute\_\_((annotate("tm")))} and functions with
 \texttt{\_\_attribute\_\_((annotate("transaction")))}.  The plugin (i) inserts
 transaction begin/commit hooks with \texttt{sigsetjmp}/\texttt{siglongjmp} retry logic,
 (ii) replaces every load and store within transaction functions with typed \texttt{tm\_read\_*}/\texttt{tm\_write\_*}
-calls (with a \texttt{tm\_local} annotation to opt out per variable), (iii) performs transitive call-graph cloning so that functions reachable from
-transactions which interact with TM state are automatically instrumented, and
+calls (with a \texttt{tm\_local} annotation to opt out per variable), (iii) performs transitive call-graph cloning so that \emph{all} functions reachable from
+transactions are automatically instrumented (with two modes: \texttt{CloneOnly} keeps
+clones as separate functions; \texttt{AlwaysInline} marks them for inlining into the
+transaction body), and
 (iv) supports multiple STM backends
 including NOrec, TL2, TinySTM, SwissTM, and SingleGlobalLock.  We evaluate the plugin
 on bank transactions, data-structure microbenchmarks, and STMbench7, demonstrating
@@ -73,22 +75,25 @@ via \texttt{\_\_attribute\_\_((annotate("tm\_local")))}:
   \texttt{\_\_attribute\_\_((annotate("transaction")))} are wrapped with
   transaction-begin and transaction-commit hooks, with \texttt{sigsetjmp}/\texttt{siglongjmp}
   providing automatic retry on conflict.
-\item \textbf{Transitive call-graph cloning}: non-transaction functions reachable from a
-transaction are cloned and instrumented only if they interact with TM state (either
-directly write to TM globals or receive arguments that trace back to TM globals).
+\item \textbf{Transitive call-graph cloning}: every function reachable from a
+transaction is unconditionally cloned and instrumented.  Two modes are available:
+\texttt{CloneOnly} preserves each clone as a separate \texttt{noinline} function
+(correct under any optimisation level), while \texttt{AlwaysInline} marks clones
+for inlining into the transaction body (faster, but requires the inliner to
+preserve TM hook calls through post-instrumentation optimisation).
 A fixed-point propagation algorithm (\S\ref{sec:cloning}) determines the set of
-clonable functions by tracking ``TM-traceable'' arguments through the call graph.
-Functions reachable from transactions but read-only with respect to TM state are
-left untouched --- they need no instrumentation because they buffer no writes to
-undo on abort.  Functions called through indirect call sites (function pointers,
-virtual dispatch) are invisible to the static analysis and are never cloned;
-if such a function writes to TM globals, the write bypasses the TM system,
-causing silent data corruption.
-\item \textbf{Iterator and container support}: a backward use-def tracer
-  (\texttt{tracesFromTMGlobal}) follows pointer chains through allocas, loads, calls, and
-  GEPs to detect range-for-loop element accesses that ultimately reach TM-annotated globals.
-  This allows the instrumentation to correctly handle C++ STL containers used inside
-  transactions.
+reachable functions by following direct call sites through the call graph.
+
+\item \textbf{Always-instrument policy}: the plugin makes no attempt to
+classify pointers as ``shared'' or ``local'' at the IR level.  Heuristic
+approaches (\texttt{isSharedPointer}, \texttt{isTMTracedPtr}) are fundamentally
+unreliable because pointer provenance is lost across function boundaries and STL
+internal functions operate on heap-allocated tree nodes whose addresses do not
+trace to any global variable.  Every load and store inside every cloned function
+is replaced with \texttt{tm\_read\_*}/\texttt{tm\_write\_*} calls.  Variables known
+to be thread-private can opt out via
+\texttt{\_\_attribute\_\_((annotate("tm\_local")))}.
+
 \item \textbf{Modernised STM backends}: our runtime libraries reimplement TinySTM,
   TL2, NOrec, and SwissTM from the original C/assembly sources using
   \texttt{std::atomic} (C++11) and modern C++17.  The original implementations
@@ -201,8 +206,10 @@ This pass runs on each function annotated ``transaction'':
   Non-void return values are preserved via an alloca.
 
 \item \textbf{Memory Intrinsics}: \texttt{llvm.memcpy}, \texttt{llvm.memmove},
-  and \texttt{llvm.memset} operating on TM globals are replaced with per-byte
-  loops using \texttt{tm\_read\_i1}/\texttt{tm\_write\_i1}.
+  and \texttt{llvm.memset} are expanded into 8-byte-aligned \texttt{tm\_read\_i8}/
+  \texttt{tm\_write\_i8} loops (with a single-character broadcast for memset).
+  This reduces TM operations by~8$\times$ compared with a naive per-byte expansion
+  and is critical for bulk-copy operations such as STL vector reallocation.
 \end{enumerate}
 
 \subsection{Iterator Tracing via \texttt{tracesFromTMGlobal}}
@@ -237,101 +244,65 @@ annotations), so the element access in the loop body is correctly
 intercepted regardless of whether the pointer chain passes through
 intermediate allocas or function boundaries.
 
-\subsection{Transitive Cloning via Fixed-Point Propagation}
+\subsection{Transitive Call-Graph Cloning}
 \label{sec:cloning}
 
-Not every function reachable from a \texttt{@transaction} function needs
-cloning.  A function only requires instrumentation if its execution
-interacts with TM state.  The plugin therefore partitions
-\texttt{TxReachableFuncs} (the transitive call graph rooted at
-\texttt{@transaction} functions) into three categories:
+The plugin interposes on every load and store inside a transaction
+by cloning every function reachable from \texttt{@transaction} functions
+and instrumenting the clones.  Three clone modes are available:
 
 \begin{description}
-\item[TM-writing:] Functions that directly write to TM-annotated globals
-  (detected by \texttt{hasDirectTMWrites}, which scans all
-  \texttt{StoreInst} instructions and checks whether the stored pointer
-  traces back to a TM global).  These MUST be cloned: their stores must
-  be redirected through \texttt{tm\_write\_*} to buffer writes for
-  commit-time or to support rollback on abort.
+\item[AlwaysInline (recommended for performance):] Every function reachable
+  from a transaction is cloned unconditionally, and the clone is marked
+  with \texttt{AlwaysInline}.  After instrumentation, an
+  \texttt{AlwaysInlinerPass} inlines the clones into the transaction body,
+  eliminating function-call overhead.  This mode is safe because inlining
+  ensures stack-allocated values never outlive the inline frame: a
+  write-set entry for a stack address created within the cloned function
+  is written back before the stack frame is destroyed.
 
-\item[TM-argument:] Functions that do not directly write TM globals
-  but receive one or more arguments that are \emph{TM-traceable} ---
-  i.e., the argument's value originates from a TM-annotated global
-  (determined via the propagation below).  These MUST be cloned because
-  they may pass the TM-traceable pointer to callees that write through
-  it, or they may load from the pointer and pass the loaded value to
-  other functions.
+\item[CloneOnly:] Every reachable function is cloned and instrumented,
+  but the clones are marked \texttt{NoInline} + \texttt{OptimizeNone}.
+  No inlining is performed.  This is the safest mode: clones remain as
+  separate functions, so post-instrumentation optimisation (\eg,
+  \texttt{-O3}) cannot reorder TM hook calls or eliminate cloned
+  function bodies.  It is slower due to the function-call overhead at
+  every helper invoked within a transaction.
 
-\item[Read-only:] Functions reachable from \texttt{@transaction} that
-  neither write to TM globals nor receive TM-traceable arguments.
-  These are NEVER cloned.  Their execution is idempotent: reads from
-  TM globals return current values, but there are no writes to buffer
-  or roll back.  On transaction abort, the read-only function's
-  effects are trivially discarded (they produced no side effects on
-  TM state).
+\item[Instrument (selective):] Only functions that receive at least one
+  pointer argument tracing back to a TM-annotated global are cloned,
+  determined by a fixed-point propagation of ``TM-traced argument''
+  annotations through the call graph.  This was the original
+  implementation and is retained as a reference variant, but it has
+  proven unreliable: destructors of TM-typed local variables write to
+  TM-global internal fields through reference-to-member patterns that
+  the static analysis fails to detect, causing silent write-set misses.
 \end{description}
 
-The clone set is computed by a fixed-point propagation algorithm
-(\texttt{computeClonableFunctions}):
+The set of reachable functions is computed via
+\texttt{collectTransactionCallGraph}, which traverses all direct call
+sites within each \texttt{@transaction} function's IR until it reaches
+declarations or filtered functions (\texttt{tm\_*} runtime hooks,
+intrinsic functions).  With \texttt{AlwaysInline} and \texttt{CloneOnly}
+modes, every function in this reachable set is cloned and every load
+and store in the clone is replaced with \texttt{tm\_read\_*}/\texttt{tm\_write\_*}.  The
+\texttt{argIsAllocaDest} guard described below prevents stack-address
+write-set entries by skipping \texttt{tm\_write} for stores whose pointer
+base is a function argument that always receives a stack-alloca address
+at all call sites.
 
-\begin{enumerate}
-\item \textbf{Seed}: Functions with direct writes to TM globals
-  (\texttt{hasDirectTMWrites}) are added to the clone set and their
-  formal arguments are marked as potentially TM-traceable.
-
-\item \textbf{Propagate}: Iterate over all call sites within
-  \texttt{TxReachableFuncs}.  For each argument passed to a callee:
-  \begin{itemize}
-  \item If the argument \texttt{tracesToTMGlobal} directly to a TM global,
-    the callee's corresponding argument is TM-traceable and the callee
-    is added to the clone set.
-  \item If the argument is a function argument of the caller, and that
-    caller argument was previously marked TM-traceable, the callee's
-    argument inherits the traceability and the callee is added.
-  \item If the argument is a \texttt{LoadInst} from a pointer that,
-    after stripping GEPs, is a TM-traceable argument of the caller,
-    the loaded value is TM-traceable (the loaded pointer chains
-    through a stack alloca).
-  \item If the argument is a \texttt{CallBase} return whose operands
-    include any TM-traceable argument, the return value is TM-traceable.
-  \end{itemize}
-\item \textbf{Iterate}: repeat until no new functions are added (fixed point).
-\end{enumerate}
-
-This propagation correctly identifies that \texttt{\_\_tree\_left\_rotate}
-must be cloned when it is reachable from \texttt{map::operator[]} on a
-TM-annotated map, even though its formal parameter is a heap-allocated
-tree node pointer rather than a TM global directly.
-
-\paragraph{Limitation: opaque call sites.}
-The static call-graph traversal (\texttt{collectTransactionCallGraph})
-only follows direct calls --- those where
+\paragraph{Opaque call sites.}
+The static call-graph traversal only follows direct calls --- those where
 \texttt{CallInst::getCalledFunction()} returns a non-null function with
-a body (\texttt{!isDeclaration()}).  Three kinds of call sites are
-completely invisible to the analysis:
-
-\begin{enumerate}
-\item \textbf{Indirect calls} (function pointers, \texttt{std::function},
-  virtual dispatch): \texttt{getCalledFunction()} returns null, so the
-  callee is never added to \texttt{TxReachableFuncs} and thus never
-  considered for cloning.
-
-\item \textbf{External functions} (declarations without a definition):
-  \texttt{isDeclaration()} returns true, so the traversal skips them.
-  These functions have no IR body to instrument.
-
-\item \textbf{Intrinsics and runtime hooks} (\texttt{llvm.memcpy},
-  \texttt{tm\_*}, etc.): filtered by name prefix to avoid cloning the
-  STM runtime itself.
-\end{enumerate}
-
-\textbf{Consequence}: if a \texttt{@transaction} function calls through
-a function pointer at runtime, and the callee writes to TM-annotated
-globals, those writes execute as plain stores with no
-\texttt{tm\_write\_*} instrumentation.  The write bypasses the STM
-runtime entirely, producing silent data corruption: the value is
-modified directly in memory without being recorded in the write-set,
-so it is not rolled back on abort and not committed atomically.
+a body.  Indirect calls (function pointers, \texttt{std::function},
+virtual dispatch), external library functions without IR definitions,
+and the \texttt{tm\_*} runtime itself are invisible to the analysis.
+If such an opaque function writes to TM-annotated globals, those writes
+execute as plain stores with no \texttt{tm\_write\_*} instrumentation,
+bypassing the STM runtime entirely.  The plugin provides an optional
+\texttt{-tm-allow-opaque} flag that suppresses the error diagnostic for
+these cases, and a \texttt{KnownSafeOpaqueTable} lists library functions
+verified not to modify TM state.
 This is a fundamental limitation of static whole-program analysis;
 detecting indirect TM calls would require either link-time
 instrumentation (as in GCC's TMTS~\cite{TMTS}) or runtime dispatch
@@ -641,6 +612,7 @@ EigenBench benefit from shorter transactions.
 \toprule
 Benchmark & Backend & Ops/sec \\
 \midrule
+STMbench7 (4T, w=1) & TinySTM/WBCTL & 400 \\
 STMbench7 (4T, w=1) & SingleGlobalLock & 400 \\
 YCSB Workload A (4T, 10k keys) & SingleGlobalLock & 534,000 \\
 EigenBench (2T, 2s) & SingleGlobalLock & 200 \\
@@ -661,30 +633,33 @@ accesses.}
 Backend & 2T (ops/sec) & Correctness \\
 \midrule
 SingleGlobalLock & 200 & Always \\
+TinySTM/WBCTL & 200 & Always \\
 \bottomrule
 \end{tabular}
-\caption{STMbench7 results.  Other backends are too slow: the
-\lstinline{tracesFromTMGlobal} iterator tracing instruments every element
-access in long traversals (300k+ connections $\times$ 4 fields per
-transaction), generating millions of TM read calls.  SingleGlobalLock avoids
-per-access overhead.}
+\caption{STMbench7 results.  TinySTM/WBCTL matches SingleGlobalLock throughput
+(200 ops/sec at 2T) with identical correctness --- write-back encounter-time
+locking is fast enough for the read-dominated traversal workload.
+Other eager-locking backends are too slow.}
 \end{table}
 
 \subsection{Instrumentation Overhead}
 
 Table~\ref{tab:instrumentation-assessment} measures the plugin's
 impact on compiled code size, TM hook injection, and call-graph cloning.
-The instrumented IR grows by 2--15\% across benchmarks (ratio
+The instrumented IR grows by 1--46\% across benchmarks (ratio
 column).  The number of injected TM read/write hooks (TM hooks)
 reflects the static count of instrumented memory accesses within
 transaction functions.
 
-After the cloning fix (\S\ref{sec:cloning}), only functions that
-directly access TM-annotated data are cloned.  Benchmarks with
-simple data access patterns (bank: 0 clones, STMbench7: 0 clones)
-have no cloning overhead.  Data structures that pass TM-traceable
-pointers through helper functions (AVL tree: 12--13 clones) require
-modest cloning.
+All measurements use the \texttt{CloneOnly} mode, which clones every
+function reachable from a transaction and annotates the clone with
+\texttt{NoInline} + \texttt{OptimizeNone}.  Benchmarks with complex
+STL usage (STMbench7: 580 clones) incur significant cloning overhead
+because every helper reachable from a transaction --- including
+\texttt{std::vector} internal functions, \texttt{std::unordered\_map}
+iterators, and wrapper-type constructors --- generates a separate
+\texttt{\_tm\_clone} definition.  Simpler benchmarks (bank: 3 clones)
+clone only the few helpers that the transaction calls directly.
 
 \begin{table}[t]
 \centering
@@ -694,15 +669,22 @@ modest cloning.
 Benchmark & \multicolumn{2}{c}{IR lines} & TX & TM & TM hooks & Clones & Redirects & Ratio \\
           & raw & instr & fns & gvs & r\slash w & defs & to clone & instr\slash raw \\
 \midrule
-  bank &  7316 &  7512 &   3 &   1 &   28 &    0 &      0 & 1.02 \\
-  avltree &  7972 &  8832 &   5 &   1 &  122 &   12 &     56 & 1.10 \\
-  avltree\_recursive &  5625 &  6480 &   5 &   1 &  101 &   13 &     71 & 1.15 \\
-  stmbench7 & 21665 & 23422 &  38 &   1 &   86 &    0 &      0 & 1.08 \\
-  ycsb & 11106 & 11700 &   6 &   1 &   57 &    2 &      5 & 1.05 \\
-  eigen &  7411 &  7672 &   4 &   1 &   16 &    2 &      4 & 1.03 \\
+  bank &  7371 &  7407 &   3 &   1 &   38 &    3 &      9 & 1.00 \\
+  avltree &  7999 & 11031 &   5 &   1 &  213 &  178 &    410 & 1.37 \\
+  avltree\_recursive &  5646 &  6369 &   5 &   1 &  110 &   14 &     64 & 1.12 \\
+  stmbench7 & 20637 & 30221 &  38 &   1 &  582 &  580 &   1262 & 1.46 \\
+  ycsb & 10225 & 12913 &   6 &   1 &  160 &  179 &    329 & 1.26 \\
+  eigen &  7331 &  7420 &   4 &   1 &   25 &    4 &      4 & 1.01 \\
+  stamp & 53241 & 75573 &  23 &   1 & 1404 & 1546 &   3072 & 1.41 \\
+  bitmap &  5142 &  5293 &   3 &   1 &   30 &    5 &      9 & 1.02 \\
+  hashmap &  5369 &  5804 &   5 &   1 &   64 &    9 &     11 & 1.08 \\
+  list &  5269 &  5522 &   3 &   1 &   58 &    6 &      7 & 1.04 \\
+  set &  5170 &  5358 &   3 &   1 &   32 &    4 &      6 & 1.03 \\
+  heap &  5205 &  5426 &   3 &   1 &   42 &    9 &     10 & 1.04 \\
+  rbtree &  5981 &  7034 &   5 &   1 &  210 &   15 &     44 & 1.17 \\
 \bottomrule
 \end{tabular}
-\caption{LLVM IR instrumentation assessment.  IR lines ---
+\caption{LLVM IR instrumentation assessment (CloneOnly mode).  IR lines ---
 uninstrumented vs.\ instrumented (post-plugin).  TX = transaction
 functions, TM = annotated globals, TM hooks = statically inserted
 \texttt{tm\_read\_*}/\texttt{tm\_write\_*} calls, Clones = cloned
@@ -909,121 +891,6 @@ the IR size for long transactions, placing practical limits on transaction
 length.  The plugin uses the deprecated \texttt{CallSite} wrapper (removed
 in LLVM 14), making forward porting impossible without significant
 refactoring.
-
-\subsection{Source-to-Source Instrumentation: Comparison and Limitations}
-
-\paragraph{Motivation.}
-As an alternative to the LLVM IR-level plugin, we developed a Python-based
-source-to-source instrumenter (\texttt{clang-tm.py}) that uses libclang to
-parse C++ source code and emit an instrumented C++ file.  The tool replaces
-the four-stage LLVM pipeline with a single Python invocation:
-\begin{verbatim}
-python3 clang-tm.py input.cpp -o output_dir
-\end{verbatim}
-Unlike the LLVM plugin, which modifies functions in-place at the IR level,
-the Python tool preserves the original source verbatim (via \texttt{\#include})
-and emits instrumented \texttt{\_tm\_clone} functions with
-\texttt{tx\_start}/\texttt{tx\_end} entry/exit wrapping and
-\texttt{tm\_read\_*}/\texttt{tm\_write\_*} access wrappers.
-
-\paragraph{Container handling.}
-Source-to-source tools face a fundamental challenge with C++ STL containers.
-At the source level, a call such as \texttt{data->queue.push\_back(x)} is an
-opaque function invocation --- the memory writes that occur \emph{inside}
-\texttt{push\_back} (to the vector's internal buffer, capacity fields, etc.)
-are invisible.  The LLVM plugin has no such blind spot because, after inlining
-and IR lowering, every store instruction inside \texttt{push\_back} is visible
-and individually instrumentable.
-
-To compensate, our Python tool performs \textbf{container type substitution}
-at struct-definition time: fields declared as \texttt{std::vector<T>} inside
-\texttt{struct TM X \{ ... \}} are rewritten to \texttt{tm\_stl::vector<T>},
-a thin wrapper that overrides mutating methods with TM-safe alternatives.
-This approach works for simple read-write patterns (push, pop, clear, insert)
-but has three limitations:
-
-\begin{enumerate}
-\item \textbf{Chained accesses}: \texttt{data->elements[i].field = value}
-  involves a vector indexing operation followed by a field store.  The source
-  instrumenter sees only the top-level expression and cannot decompose it
-  into the constituent pointer arithmetic and memory access --- these are
-  only visible after the compiler has lowered \texttt{operator[]} to
-  GEP + load/store.
-\item \textbf{Iterator invalidation}: the \texttt{tm\_stl} wrappers are
-  separate template instantiations that duplicate the original containers'
-  code.  Iterator-based patterns and STL algorithms (\texttt{std::find},
-  \texttt{std::sort}) that internally dereference iterators are not
-  instrumented inside the wrapper.
-\item \textbf{Nested containers}: \texttt{std::vector<std::set<int>>}
-  requires recursive substitution that is fragile to implement at the
-  source-text level.
-\end{enumerate}
-
-\paragraph{Empirical comparison.}
-Table~\ref{tab:source-vs-ir} compares the Python tool against the LLVM
-plugin across five test files from the plugin's test suite.
-
-\begin{table}[h]
-\centering
-\begin{tabular}{lccc}
-\toprule
-Test & TM vars & Python & LLVM plugin \\
-\midrule
-\texttt{types.cpp} & 7 scalars & Compiles (warn) & Passes \\
-\texttt{nested.cpp} & 1 scalar & Compiles & Passes \\
-\texttt{threads.cpp} & 1 scalar & Compiles & Passes \\
-\texttt{retry.cpp} & 2 scalars & Compiles & Passes \\
-\texttt{memtest.cpp} & 3 arrays & Fails ($\dagger$) & Passes \\
-\bottomrule
-\end{tabular}
-\caption{Source-to-source vs.\ IR-level instrumentation.  ($\dagger$)
-\texttt{void*} indexing from \texttt{tm\_read\_ptr} wrapping; the
-LLVM plugin correctly lowers array-element accesses through GEP
-instructions.}
-\label{tab:source-vs-ir}
-\end{table}
-
-\paragraph{Why STL works at the IR level but not at the source level.}
-The LLVM plugin's advantage is architectural, not algorithmic.  After
-Clang generates LLVM IR from C++ source, every operation --- including
-those inside STL headers --- is lowered to a small set of IR instructions:
-load, store, getelementptr, call, and branch.  The plugin's
-always-instrument approach simply replaces every such load and store in
-transaction functions with \texttt{tm\_read\_*}/\texttt{tm\_write\_*}
-calls.  The \texttt{tracesFromTMGlobal} backward tracer (\S\ref{sec:cloning})
-feeds the fixed-point propagation that determines which helper functions
-receive TM-traceable arguments; within those cloned helpers, the same
-always-instrument rule applies.  The trace is type-agnostic: it follows
-use-def chains through GEPs, loads, PHI nodes, and allocas without
-caring whether the original source code used \texttt{std::vector}, a
-plain array, or a hand-rolled linked list.
-
-At the source level, by contrast, \texttt{std::vector::operator[]} is a
-function call whose internals are not expanded until the compiler runs.
-A source-to-source tool cannot ``see through'' this call without either
-(i) replicating the compiler's name-mangling and template-instantiation
-logic, or (ii) maintaining separate wrapper implementations for every
-container type.  The \texttt{tm\_stl} approach pursues option~(ii) but
-cannot cover the full API surface of the STL.
-
-\paragraph{When source-to-source is sufficient.}
-Despite these limitations, the Python tool is useful for:
-\begin{itemize}
-\item \textbf{Prototyping}: generating readable instrumented C++ for
-  inspection and debugging, especially during early TM development.
-\item \textbf{Simple benchmarks}: benchmarks that access TM globals
-  through direct scalar assignment (e.g., bank transfers, counters)
-  are fully covered without container support.
-\item \textbf{Education}: the generated output is human-readable C++
-  in which every TM access is explicitly visible as a
-  \texttt{tm\_read\_*}/\texttt{tm\_write\_*} call.
-\end{itemize}
-For production use with complex data structures, opaque function calls,
-or performance-critical code, the LLVM IR plugin remains the correct
-choice.  The Python tool and the LLVM plugin share the same runtime
-interface (\texttt{tm\_read\_*}/\texttt{tm\_write\_*} signatures);
-output from either tool can be compiled against the same backend
-implementations.
 
 \subsection{Compiler Instrumentation as an Unmet Goal}
 
