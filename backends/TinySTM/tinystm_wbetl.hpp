@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "tinystm_common.hpp"
+#include "../tm_event_logger.hpp"
 #include "../tm_log_entries.hpp"
 #include "../tm_log_merge.hpp"
 
@@ -119,6 +120,8 @@ begin()     //
 		tx->abort_count = 0;
 	tx->is_retry = false;
 
+	TM_EVENT(TX_BEGIN, tx->id, tx->start_version);
+
 	return true;
 }
 
@@ -130,6 +133,7 @@ abort_tx(const char *loc = "") //
 	TM_ASSERT(tx, "tx not defined");
 	TM_ASSERT(tx->active, "tx not active");
 
+	TM_EVENT(TX_ABORT, tx->id, tx->abort_count);
 	tx->unlock_held_locks_and_clear();
 	tx->abort_count++;
 	tx->is_retry = true;
@@ -190,9 +194,16 @@ commit()    //
 	if (!tx->read_only) {
 		word_t commit_version = increment_clock(tx->id);
 
+		TM_EVENT2(COMMIT_LOCK_ACQUIRE, tx->id, commit_version, tx->write_set.size());
+
+		if (commit_version > tx->end_version + 1) {
+			TM_EVENT2(GAP_CHECK, tx->id, tx->end_version, commit_version);
+		}
+
 		if (!extend())
 			abort_tx("extend_failed");
 
+		TM_EVENT(COMMIT_WRITEBACK, tx->id, tx->write_set.size());
 		for (auto &it : tx->write_set) {
 			auto *aligned = static_cast<void *>(it.first);
 			auto &w = it.second;
@@ -209,12 +220,14 @@ commit()    //
 			}
 		}
 		for (Lock *lock : tx->locks_held) {
+			TM_EVENT2(LOCK_RELEASE, (uint64_t)lock, (uint64_t)0, commit_version);
 			lock->unlock_with_version(tx->id, commit_version);
 		}
 	}
 
 	stm::tm_token_release();
 	tx->reset();
+	TM_EVENT(COMMIT_SUCCESS, tx->id, 0);
 	return true;
 }
 
@@ -259,14 +272,8 @@ read_word_etl(                                                //
 
 	while (true) {
 		if ((l & OWNED_MASK) != 0) {
-			if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 3)) {
-				while ((lock->get() & OWNED_MASK) != 0) {
-					TINY_STM_PAUSE();
-				}
-				l = lock->get();
-				continue;
-			}
-			abort_tx("read_lock_spin");
+			l = lock->get();
+			continue;
 		}
 
 		word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
@@ -279,6 +286,7 @@ read_word_etl(                                                //
 		}
 
 		if (version > tx->end_version) {
+			TM_EVENT2(READ_VERSION_CHECK, (uint64_t)addr, (uint64_t)lock, version);
 			if (extend()) {
 				continue;
 			} else {
@@ -287,6 +295,8 @@ read_word_etl(                                                //
 		}
 
 		any_type_t val = {.u8 = value.u8};
+
+		TM_EVENT2(READ_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, version);
 
 		auto r_it = tx->read_set.find(aligned);
 		if (r_it != tx->read_set.end()) {
@@ -328,19 +338,25 @@ write_word_etl(                                                //
 
 	Lock *lock = &g_locks_wbetl.get(bo.base_addr);
 
+	bool acquired = false;
 	if (lock->is_locked()) {
 		if (lock->get_owner() != tx->id) {
 			if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 3)) {
 				while (lock->is_locked() && lock->get_owner() != tx->id) {
-					TINY_STM_PAUSE();
+					stm::tm_cpu_relax();
 				}
 				if (lock->get_owner() != tx->id) {
 					if (!lock->try_lock(tx->id))
 						abort_tx("write_try_lock_after_spin");
+					acquired = true;
+				} else {
+					acquired = true; // lock was already ours
 				}
 			} else {
 				abort_tx("write_lock_contention");
 			}
+		} else {
+			acquired = true; // already ours
 		}
 	} else {
 		if (!lock->try_lock(tx->id)) {
@@ -349,7 +365,7 @@ write_word_etl(                                                //
 			if (!lock->try_lock(tx->id)) {
 				if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 3)) {
 					while (lock->is_locked()) {
-						TINY_STM_PAUSE();
+					stm::tm_cpu_relax();
 					}
 					if (!lock->try_lock(tx->id))
 						abort_tx("write_unlock_race");
@@ -358,6 +374,18 @@ write_word_etl(                                                //
 				}
 			}
 		}
+		acquired = true;
+	}
+
+	if (acquired && !lock->is_locked_by(tx->id)) {
+		acquired = false;
+	}
+
+	if (acquired) {
+		TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock,
+		          lock->get());
+	} else {
+		TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, 0);
 	}
 
 	{
@@ -374,6 +402,7 @@ write_word_etl(                                                //
 	}
 
 	tx->write_set[aligned] = stm::merge::make_write_entry<WriteLogEntry_wbetl>(aligned, val, sz, addr, lock->get_version());
+	TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)sz);
 }
 
 #define TM_STUB_TX current_tx_wbetl

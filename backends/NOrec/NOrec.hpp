@@ -36,6 +36,8 @@ using stm::return_any_type;
 using stm::ValueType;
 using stm::write_value_to_addr;
 
+extern std::atomic<uint64_t> g_tm_abort_count;
+
 struct ReadLogEntry {
 	ValueType type;
 	void *addr;
@@ -137,7 +139,6 @@ inline void init()
 {
 	global_lock.store(0, std::memory_order_release);
 	thr_counter.store(1, std::memory_order_release);
-	TM_EVENT_INSTALL_SIGSEGV();
 }
 
 inline void exit()
@@ -216,6 +217,7 @@ abort_tx()  //
 
 	TM_EVENT(TX_ABORT, tx->id, tx->abort_count);
 	tx->abort_count++;
+	g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
 	tx->clear();
 	siglongjmp(*jmpbuf, 1);
 	TM_ASSERT(false, "Did not jump");

@@ -33,6 +33,11 @@ using word_t = uintptr_t;
 thread_local sigjmp_buf tm_jmpbuf;
 thread_local bool tm_jmpbuf_initialized = false;
 
+// Global abort counter — defined in tl2_runtime.cpp
+} // namespace tl2
+extern std::atomic<uint64_t> g_tm_abort_count;
+namespace tl2 {
+
 // Copy jump buffer - needed for external integration with LLVM plugin
 inline void copy_jmp_env(sigjmp_buf* dest) {
     if (dest) {
@@ -200,7 +205,6 @@ private:
 public:
     static void init() {
         if (!initialized.load(std::memory_order_seq_cst)) {
-            TM_EVENT_INSTALL_SIGSEGV();
             g_clock.store(1, std::memory_order_relaxed);
             for (auto& g : g_guards) {
                 g.store(0, std::memory_order_relaxed);
@@ -650,6 +654,7 @@ public:
         if (!tx) return;
         
         TM_EVENT(TX_ABORT, (word_t)tx, tx->start_version);
+        g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
         
         // TL2 is write-back — values only reach memory during commit step 7.
         // On abort, no writes were applied to memory, so we just release guards

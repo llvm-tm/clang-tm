@@ -17,6 +17,7 @@
 #include <random>
 
 #include "../tm_spin_token.hpp"
+#include "../tm_event_logger.hpp"
 #include "tinystm_common.hpp"
 
 extern "C" {
@@ -143,6 +144,8 @@ begin()     //
 		tx->abort_count = 0;
 	tx->is_retry = false;
 
+	TM_EVENT(TX_BEGIN, tx->id, tx->start_version);
+
 	return true;
 }
 
@@ -153,6 +156,8 @@ abort_tx(const char *loc = "") //
 
 	TM_ASSERT(tx, "abort_tx: tx is null");
 	TM_ASSERT(tx->active, "abort_tx: tx not active");
+
+	TM_EVENT(TX_ABORT, tx->id, tx->abort_count);
 
 	// Restore old values from write-set
 	for (auto &it : tx->write_set) {
@@ -221,8 +226,10 @@ release_write_locks_wt(word_t commit_version)
 	for (auto &it : tx->write_set) {
 		ByteOffset bo((word_t)it.first);
 		Lock_wt *lock = &g_locks_wt.get(bo.base_addr);
-		if (lock->is_locked_by(tx->id))
+		if (lock->is_locked_by(tx->id)) {
+			TM_EVENT2(LOCK_RELEASE, (uint64_t)lock, (uint64_t)it.first, commit_version);
 			lock->unlock_with_version(tx->id, commit_version);
+		}
 	}
 }
 
@@ -236,10 +243,22 @@ commit()    //
 
 	if (!tx->read_only && !tx->write_set.empty()) {
 		word_t commit_version = increment_clock(tx->id);
+
+		TM_EVENT2(COMMIT_LOCK_ACQUIRE, tx->id, commit_version, tx->write_set.size());
+
 		if (commit_version < tx->end_version)
 			abort_tx("commit_version_stale");
+
+		if (commit_version > tx->end_version + 1) {
+			TM_EVENT2(GAP_CHECK, tx->id, tx->end_version, commit_version);
+		}
+
 		validate_read_set_wt(commit_version);
+
+		TM_EVENT(COMMIT_WRITEBACK, tx->id, tx->write_set.size());
 		release_write_locks_wt(commit_version);
+
+		TM_EVENT(COMMIT_SUCCESS, tx->id, commit_version);
 	}
 
 	tx->reset();
@@ -260,7 +279,7 @@ try_soft_spin(                                          //
 	if (!stm::tm_token_try_acquire(tx->id))
 		return false;
 	while ((lock->get() & OWNED_MASK) != 0) {
-		TINY_STM_PAUSE();
+		stm::tm_cpu_relax();
 	}
 	return true;
 }
@@ -304,13 +323,10 @@ read_word_wt(                                           //
 	// Double-check protocol
 	volatile word_t l = lock->get();
 	while (true) {
-		// Locked by another — soft-spin if abort_count >= threshold
+		// Locked by another — re-read until released
 		if ((l & OWNED_MASK) != 0) {
-			if (try_soft_spin(tx, lock)) {
-				l = lock->get();
-				continue;
-			}
-			abort_tx("read_lock_spin");
+			l = lock->get();
+			continue;
 		}
 
 		word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
@@ -324,6 +340,7 @@ read_word_wt(                                           //
 		}
 
 		if (version > tx->end_version) {
+			TM_EVENT2(READ_VERSION_CHECK, (uint64_t)addr, (uint64_t)lock, version);
 			// Version-extension (same pattern as WBCTL)
 			if (tx->read_only) {
 				abort_tx("read_only_version_overflow");
@@ -367,9 +384,12 @@ read_word_wt(                                           //
 					abort_tx("read_extend_version_stale_shared");
 				}
 			}
+			continue;
 		}
 
 		any_type_t result = {.u8 = val.u8};
+
+		TM_EVENT2(READ_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, version);
 
 		tx->read_set.insert(std::pair(addr, make_read_entry(version, incarnation, result)));
 
@@ -429,6 +449,9 @@ write_word_wt(                                          //
 				tx->write_set[addr] = w;
 				tx->locks_held.push_back(lock);
 
+				TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, l);
+				TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)8);
+
 				write_value_to_addr(addr, val, ValueType::UINT64);
 				return;
 			} else if (lock->is_locked_by(tx->id)) {
@@ -438,6 +461,8 @@ write_word_wt(                                          //
 
 				WriteLogEntry_wt w = make_write_entry(old_val, val, version, incarnation);
 				tx->write_set[addr] = w;
+
+				TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)8);
 
 				write_value_to_addr(addr, val, ValueType::UINT64);
 				return;
@@ -454,8 +479,11 @@ write_word_wt(                                          //
 
 			tx->write_set[addr] = make_write_entry(old_val, val, version, incarnation);
 			write_value_to_addr(addr, val, ValueType::UINT64);
+			TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)8);
 			return;
 		}
+		// Lock held by someone else → busy-wait (falls through while loop)
+		stm::tm_cpu_relax();
 	}
 }
 

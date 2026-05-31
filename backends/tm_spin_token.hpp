@@ -26,14 +26,7 @@
 // so that any stray thread exit naturally leaves g_tx_token=-1.
 // On abort, tm_token_release_if_held() cleans up.
 //
-// Architecture-appropriate spin-loop hint
-#if defined(__x86_64__) || defined(__i386__)
-#define TINY_STM_PAUSE() __builtin_ia32_pause()
-#elif defined(__aarch64__)
-#define TINY_STM_PAUSE() __builtin_arm_yield()
-#else
-#define TINY_STM_PAUSE() ((void)0)
-#endif
+#include "tm_platform.hpp"
 
 namespace stm
 {

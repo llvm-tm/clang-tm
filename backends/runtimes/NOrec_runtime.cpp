@@ -5,7 +5,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <execinfo.h>
 #include <unordered_set>
 #include <unistd.h>
 #include <mutex>
@@ -16,11 +15,9 @@
 // Debug: catch absurd operator new sizes with backtrace
 void* operator new(size_t size) {
     if (size > (1ULL << 42)) { // > 4TB
-        fprintf(stderr, "\nFATAL: operator new(%zu) called with absurd size! Backtrace:\n", size);
-        void* buffer[64];
-        int n = backtrace(buffer, 64);
-        backtrace_symbols_fd(buffer, n, 2);
+        fprintf(stderr, "\nFATAL: operator new(%zu) called with absurd size!\n", size);
         fflush(stderr);
+        stm::tm_backtrace_print(2);
         _exit(1);
     }
     void* p = std::malloc(size);
@@ -29,11 +26,9 @@ void* operator new(size_t size) {
 }
 void* operator new[](size_t size) {
     if (size > (1ULL << 42)) {
-        fprintf(stderr, "\nFATAL: operator new[](%zu) called with absurd size! Backtrace:\n", size);
-        void* buffer[64];
-        int n = backtrace(buffer, 64);
-        backtrace_symbols_fd(buffer, n, 2);
+        fprintf(stderr, "\nFATAL: operator new[](%zu) called with absurd size!\n", size);
         fflush(stderr);
+        stm::tm_backtrace_print(2);
         _exit(1);
     }
     void* p = std::malloc(size);

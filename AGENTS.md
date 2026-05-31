@@ -936,3 +936,45 @@ The 3-4% loss case: step 5 captures undo=4 (stale, before TX A's write-back beca
 - `backends/README.md`: event logger documentation
 - `README.md`: event logger debugging subsection
 
+## Done (this session — 2026-05-31)
+
+### Platform-abstraction consolidation
+- **Created `backends/tm_platform.hpp`** — single header for ALL platform-dependent code, with documented `// Adding a new platform` instructions. Wraps:
+  - `stm::isStackAddress(addr)` — macOS pthread, Linux pthread, BSD pthread, Windows `GetCurrentThreadStackLimits`, Solaris `thr_stksegment`
+  - `stm::tm_backtrace(buf, size)` / `stm::tm_backtrace_print(fd)` — portable backtrace (glibc/macOS `execinfo.h`; fallback `__builtin_return_address(0)`)
+  - `stm::tm_cpu_relax()` — x86 `pause`, ARM `yield`
+  - `stm::tm_timestamp()` — x86 `rdtsc`, ARM `cntvct_el0`
+- **Updated all consumers** to use `tm_platform.hpp`:
+  - `tinystm_wbctl.hpp`: removed duplicate `<dlfcn.h>`, removed `<execinfo.h>`, replaced raw `backtrace`+`backtrace_symbols_fd` with `stm::tm_backtrace_print()`
+  - `tm_spin_token.hpp`: removed `TINY_STM_PAUSE()` macro, replaced with `stm::tm_cpu_relax()`
+  - `tm_event_logger.hpp`: removed `<execinfo.h>`, inline asm `rdtsc()` → `stm::tm_timestamp()`, raw backtrace calls → `stm::tm_backtrace_print()`
+  - `tinystm_wt.hpp`, `tinystm_wbetl.hpp`, `SwissTM.hpp`: `TINY_STM_PAUSE()` → `stm::tm_cpu_relax()`
+  - `tm_alloc_overrides.hpp`: raw backtrace → `stm::tm_backtrace_print()`
+  - `NOrec_runtime.cpp`, `TinySTM_runtime.cpp`, `tl2_runtime.cpp`, `SwissTM_runtime.cpp`, `DUDETM_runtime.cpp`, `SwissTM.hpp`: removed `<execinfo.h>` (unused or replaced)
+
+### Debug code cleanup
+- **Removed per-abort `fprintf(stderr, "[ABORT...")`** from WBCTL (`tinystm_wbctl.hpp:122-126`), WBETL (`tinystm_wbetl.hpp:143-147`), WT (`tinystm_wt.hpp:180-184`) — these prints spammed stderr on every Nth abort, slowing retry paths.
+- **Removed `[INIT] g_clock=` startup print** from `tinystm_common.hpp:338`.
+- **Removed `TM_EVENT_INSTALL_SIGSEGV()`** calls from WBCTL, NOrec, TL2, SwissTM `init()` functions (already compile-time no-ops unless `TM_EVENT_LOG` defined — kept for clarity).
+
+### Abort statistics across all backends
+- **Added `g_tm_abort_count` global atomic counter** to **NOrec** (`NOrec_globals.hpp`, `NOrec.hpp` abort function), **TL2** (`tl2.hpp` extern + `tl2_runtime.cpp` definition), **SwissTM** (`SwissTM.hpp` inline definition + `SwissTM.hpp` rollback function). TinySTM backends (WBCTL/WBETL/WT) already had it.
+- Counter is incremented (`fetch_add(1, relaxed)`) on every abort in all 6 non-TSX backends.
+
+### Full benchmark test run
+Ran all 7 non-TSX backends × 3 benchmarks at 1t and 4t:
+
+| Benchmark | WBCTL | WBETL | WT | NOrec | TL2 | SwissTM | Singlelock |
+|-----------|:-----:|:-----:|:--:|:-----:|:---:|:-------:|:----------:|
+| Bank | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Labyrinth | ✓ | ✗(crash) | ✗(0p) | ✓ | ✓ | ✗(crash) | ✓ |
+| STMbench7 | ✓ | ✗(crash) | ✗(crash) | ⚠(4t slow) | ✗(4t hang) | ✗(hang) | ✓ |
+
+### Conclusions
+- **2 backends pass the full suite**: WBCTL and Singlelock.
+- **NOrec** passes small benchmarks but is 4× slower than WBCTL at 4t on STMbench7 (O(n) write-set scans).
+- **TL2** passes bank and labyrinth but hangs on STMbench7 at 4t (livelock in commit validation).
+- **WBETL, WT, SwissTM** have pre-existing correctness failures with complex workloads.
+- Bank throughput data collected (all backends PASS, singlelock fastest at 1t at 1M txns/s, TL2 best scaling at 3.2×).
+
+

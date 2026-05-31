@@ -259,10 +259,8 @@ inline void tm_free_append_deferred(void* ptr) {
     if (g_deferred_frees_set.count(ptr)) {
         TM_EVENT(DOUBLE_FREE, ptr, 0);
         fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
-        void* buf[64];
-        int n = backtrace(buf, 64);
-        backtrace_symbols_fd(buf, n, 2);
         fflush(stderr);
+        stm::tm_backtrace_print(2);
         _exit(1);
     }
     tm_untrack_spec_alloc(ptr);

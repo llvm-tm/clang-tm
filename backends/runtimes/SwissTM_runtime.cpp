@@ -5,7 +5,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <execinfo.h>
 #include <mutex>
 #include <unistd.h>
 #include <unordered_set>
@@ -35,7 +34,6 @@ static __thread uint8_t tm_buffer[TM_BUFFER_SIZE];
 // Global transaction counters
 static std::atomic<int64_t> g_tm_begin_count{0};
 static std::atomic<int64_t> g_tm_end_count{0};
-
 void tm_init()
 {
 	swisstm::init();

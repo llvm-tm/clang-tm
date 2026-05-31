@@ -10,6 +10,12 @@
 #include <thread>
 #include <vector>
 
+#include "tm_platform.hpp"
+
+// Global abort counter — each runtime defines its own.
+// Use `extern` in benchmark code to read it from the runtime.
+// (Not `inline` because std::atomic is not constexpr.)
+
 #ifndef NDEBUG
 #define TM_ASSERT(cond, msg)                                                             \
 	do {                                                                                 \
@@ -51,34 +57,6 @@ random_backoff(  //
 	std::exponential_distribution<> dist((double)1 / (double)(abort_count + 1));
 	int delay = std::min(dist(rng), (double)K_MAX_BACKOFF_DELAY_US);
 	std::this_thread::sleep_for(std::chrono::microseconds(delay));
-}
-
-// ── Stack-address detection (optimization/debug) ────────────
-// Enabled only when compiled with -DNO_INST_STACK_VARS.
-// When disabled, always returns false (no optimization applied).
-inline bool isStackAddress(void const *addr)
-{
-#ifdef NO_INST_STACK_VARS
-	#if defined(__APPLE__)
-	pthread_t self = pthread_self();
-	void *stack_addr = pthread_get_stackaddr_np(self);
-	size_t stack_size = pthread_get_stacksize_np(self);
-	void *stack_bottom = (char *)stack_addr - stack_size;
-	return (addr >= stack_bottom && addr < stack_addr);
-	#else
-	pthread_attr_t attr;
-	void *stack_addr;
-	size_t stack_size;
-	pthread_getattr_np(pthread_self(), &attr);
-	pthread_attr_getstack(&attr, &stack_addr, &stack_size);
-	pthread_attr_destroy(&attr);
-	void *stack_end = (char *)stack_addr + stack_size;
-	return (addr >= stack_addr && addr < stack_end);
-	#endif
-#else
-	(void)addr;
-	return false;
-#endif
 }
 
 enum class ValueType : uint8_t {
