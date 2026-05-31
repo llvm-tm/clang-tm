@@ -24,7 +24,6 @@ using stm::any_type_mapping;
 using stm::any_type_t;
 using stm::ByteOffset;
 using stm::fill_any_type;
-using stm::isStackAddress;
 using stm::read_value_from_addr;
 using stm::return_any_type;
 using stm::type_size;
@@ -300,11 +299,36 @@ extern std::atomic<uint64_t> g_tm_abort_count;
 extern thread_local bool rng_initialized;
 extern thread_local std::mt19937 rng;
 
+// ── Random Exponential Backoff ────────────────────────────────
+// Thread-local Mersenne Twister seeded once per thread.
+constexpr int K_MAX_BACKOFF_DELAY_US = 100000;
+
+inline void  //
+init_rand()  //
+{
+	if (!rng_initialized) {
+		std::random_device rd;
+		rng.seed(rd());
+		rng_initialized = true;
+	}
+}
+
+// Exponential backoff using the thread-local RNG.  Callers pass their
+// per-tx abort_count so the mean delay decreases as the TX retries.
+inline void      //
+random_backoff(  //
+    unsigned abort_count)
+{
+	init_rand();
+	std::exponential_distribution<> dist((double)1 / (double)(abort_count + 1));
+	int delay = std::min(dist(rng), (double)K_MAX_BACKOFF_DELAY_US);
+	std::this_thread::sleep_for(std::chrono::microseconds(delay));
+}
+
 inline void init()
 {
 	g_clock.store(1, std::memory_order_release);
 	thr_counter.store(1, std::memory_order_release);
-	fprintf(stderr, "[INIT] g_clock=%llu\n", (unsigned long long)g_clock.load(std::memory_order_acquire));
 }
 
 inline void exit()
@@ -330,8 +354,6 @@ inline word_t increment_clock(word_t tx_id)
 		word_t expect = 0L;
 		word_t desired = tx_id;
 		if (reset_locks_thr.compare_exchange_strong(expect, desired)) {
-			fprintf(stderr, "[OVERFLOW] tx=%llu resetting, pre-reset clock=%llu\n",
-			        (unsigned long long)tx_id, (unsigned long long)res);
 			reset_locks();
 			g_clock.store(1, std::memory_order_release);
 			reset_locks_thr.store(expect, std::memory_order_release);

@@ -49,10 +49,6 @@ extern void* tm_symbol_addresses[];
 extern uint64_t tm_symbol_sizes[];
 
 void tm_init() {
-#ifndef NDEBUG
-    fprintf(stderr, "PersistentSGL: tm_init called\n");
-    fflush(stderr);
-#endif
 
     uint32_t n = tm_symbol_count;
     if (n == 0) {
@@ -182,17 +178,9 @@ static constexpr uintptr_t PERSIST_MMAP_FIXED_ADDR = 0x600000000000ULL;
     }
 
     initialized.store(true, std::memory_order_seq_cst);
-#ifndef NDEBUG
-    fprintf(stderr, "PersistentSGL: tm_init done\n");
-    fflush(stderr);
-#endif
 }
 
 void tm_init_thread() {
-#ifndef NDEBUG
-    fprintf(stderr, "PersistentSGL: tm_init_thread called\n");
-    fflush(stderr);
-#endif
 }
 
 void tm_exit() {
@@ -213,9 +201,6 @@ void tm_exit() {
     g_sym_ranges = nullptr;
     g_sym_count = 0;
     initialized.store(false, std::memory_order_seq_cst);
-#ifndef NDEBUG
-    fprintf(stderr, "PersistentSGL: tm_exit done\n");
-#endif
 }
 
 void tm_exit_thread() {}
@@ -392,19 +377,6 @@ void tm_memset(volatile uint8_t* addr, uint8_t val, uint64_t len) {
 }
 
 void consume_ptr(volatile void* ptr) { (void)ptr; }
-
-static void print_stats() {
-#ifndef NDEBUG
-    fprintf(stderr, "=== PersistentSGL Runtime Stats ===\n");
-    fprintf(stderr,
-            "tm_begin: %lld, tm_end: %lld, #TXs: %lld\n",
-            (long long)g_tm_begin_count.load(std::memory_order_relaxed),
-            (long long)g_tm_end_count.load(std::memory_order_relaxed),
-            (long long)g_tm_tx_count.load(std::memory_order_relaxed));
-#endif
-}
-
-static int init = (std::atexit(print_stats), 0);
 
 // TM allocator stubs (redirect to system allocator)
 // ── Persistent allocator ────────────────────────────────────

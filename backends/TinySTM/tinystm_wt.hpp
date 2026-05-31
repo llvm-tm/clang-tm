@@ -16,8 +16,8 @@
 #include <csignal>
 #include <random>
 
-#include "tinystm_common.hpp"
 #include "../tm_spin_token.hpp"
+#include "tinystm_common.hpp"
 
 extern "C" {
 extern __thread int32_t tm_nested_call_counter;
@@ -55,6 +55,18 @@ struct WriteLogEntry_wt {
 	word_t incarnation; // incarnation at lock-acquisition time
 };
 
+// ── Factory functions ──────────────────────────────────────────
+inline ReadLogEntry_wt make_read_entry(word_t version, word_t incarnation,
+                                       const any_type_t &val) {
+	return {version, incarnation, val};
+}
+
+inline WriteLogEntry_wt make_write_entry(const any_type_t &old_val,
+                                         const any_type_t &new_val,
+                                         word_t version, word_t incarnation) {
+	return {old_val, new_val, version, incarnation};
+}
+
 /** -------------------------------------------------------
   * Lock class — inherits from the common Lock.
   * No overrides needed; the base Lock now preserves
@@ -80,26 +92,10 @@ static void reset_locks() { g_locks_wt.reset_versions(); }
   * Random backoff after repeated aborts.
   * ---------------------------------------------------- */
 
-static void    //
-init_rand()    //
-{
-	if (!rng_initialized) {
-		std::random_device rd;
-		rng.seed(rd());
-		rng_initialized = true;
-	}
-}
-
 static void      //
 random_backoff() //
 {
-	if (!rng_initialized) {
-		init_rand();
-	}
-	std::exponential_distribution<> dist(
-	    (double)1 / (double)(current_tx_wt->abort_count + 1));
-	int delay = std::min(dist(rng), 1e5);
-	std::this_thread::sleep_for(std::chrono::microseconds(delay));
+	tinystm::random_backoff(current_tx_wt->abort_count);
 }
 
 /** -------------------------------------------------------
@@ -143,14 +139,15 @@ begin()     //
 	tx->end_version = tx->start_version;
 	tx->active = true;
 	tx->read_only = true;
-	if (!tx->is_retry) tx->abort_count = 0;
+	if (!tx->is_retry)
+		tx->abort_count = 0;
 	tx->is_retry = false;
 
 	return true;
 }
 
-inline void //
-abort_tx()  //
+inline void                    //
+abort_tx(const char *loc = "") //
 {
 	auto *tx = current_tx_wt;
 
@@ -183,63 +180,66 @@ abort_tx()  //
 	TM_ASSERT(false, "Did not jump");
 }
 
+// ── Validate read-set after clock increment ────────────────
+// Detects concurrent commits between read and write time.
+inline void
+validate_read_set_wt(word_t commit_version)
+{
+	auto *tx = current_tx_wt;
+	if (commit_version <= tx->start_version + 1)
+		return;
+	for (auto &it : tx->read_set) {
+		auto &r = it.second;
+		ByteOffset bo((word_t)it.first);
+		Lock_wt *lock = &g_locks_wt.get(bo.base_addr);
+
+		word_t l = lock->get();
+		word_t owner = (l & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS;
+		bool is_locked = (l & OWNED_MASK) != 0;
+		word_t current_version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
+		word_t current_incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
+
+		if (is_locked && owner != tx->id)
+			abort_tx("read_lock_contention");
+		if (!is_locked && (current_version != r.observed_version ||
+		                   current_incarnation != r.observed_incarnation))
+			abort_tx("version_mismatch");
+		if (is_locked && owner == tx->id) {
+			auto w = tx->write_set.find(it.first);
+			if (w != tx->write_set.end() &&
+			    r.observed_version != w->second.version)
+				abort_tx("stale_read_own_lock");
+		}
+	}
+}
+
+// ── Release write-locks with commit version ────────────────
+inline void
+release_write_locks_wt(word_t commit_version)
+{
+	auto *tx = current_tx_wt;
+	for (auto &it : tx->write_set) {
+		ByteOffset bo((word_t)it.first);
+		Lock_wt *lock = &g_locks_wt.get(bo.base_addr);
+		if (lock->is_locked_by(tx->id))
+			lock->unlock_with_version(tx->id, commit_version);
+	}
+}
+
 inline bool //
 commit()    //
 {
 	auto *tx = current_tx_wt;
-	word_t commit_version = 0;
 
 	TM_ASSERT(tx, "commit: tx is null");
 	TM_ASSERT(tx->active, "commit: tx not active");
 
 	if (!tx->read_only && !tx->write_set.empty()) {
-
-		commit_version = increment_clock(tx->id);
-		if (commit_version < tx->end_version) {
-			abort_tx();
-		}
-
-		// Validate read-set — detect concurrent commits between read and write
-		if (commit_version > tx->start_version + 1) {
-			for (auto &it : tx->read_set) {
-				auto &r = it.second;
-				ByteOffset bo((word_t)it.first);
-				Lock_wt *lock = &g_locks_wt.get(bo.base_addr);
-
-				word_t l = lock->get();
-				word_t owner = (l & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS;
-				bool is_locked = (l & OWNED_MASK) != 0;
-				word_t current_version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
-				word_t current_incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
-
-				if (is_locked && owner != tx->id) {
-					abort_tx();
-				}
-				if (!is_locked &&
-				    (current_version != r.observed_version ||
-				     current_incarnation != r.observed_incarnation)) {
-					abort_tx();
-				}
-				if (is_locked && owner == tx->id) {
-					// Our own write-lock — check for stale read between
-					// read_time and lock_acquisition_time.
-					auto w = tx->write_set.find(it.first);
-					if (w != tx->write_set.end() &&
-					    r.observed_version != w->second.version) {
-						abort_tx();
-					}
-				}
-			}
-		}
-
-		// Release write-locks with the commit version
-		for (auto &it : tx->write_set) {
-			ByteOffset bo((word_t)it.first);
-			Lock_wt *lock = &g_locks_wt.get(bo.base_addr);
-			if (lock->is_locked_by(tx->id)) {
-				lock->unlock_with_version(tx->id, commit_version);
-			}
-		}
+		word_t commit_version = increment_clock(tx->id);
+		if (commit_version < tx->end_version)
+			abort_tx("commit_version_stale");
+		validate_read_set_wt(commit_version);
+		release_write_locks_wt(commit_version);
 	}
 
 	tx->reset();
@@ -247,10 +247,10 @@ commit()    //
 	return true;
 }
 
-static bool                                                     //
-try_soft_spin(                                                  //
-    Transaction<ReadLogEntry_wt, WriteLogEntry_wt> *tx,         //
-    Lock_wt *lock                                               //
+static bool                                             //
+try_soft_spin(                                          //
+    Transaction<ReadLogEntry_wt, WriteLogEntry_wt> *tx, //
+    Lock_wt *lock                                       //
 )
 {
 	if (tx->abort_count < TOKEN_SOFT_SPIN_THRESHOLD)
@@ -274,23 +274,17 @@ try_soft_spin(                                                  //
   * (see tm_read_i1/tm_write_i1 below).
   * ---------------------------------------------------- */
 
-static any_type_t                                              //
-read_word_wt(                                                  //
-    Transaction<ReadLogEntry_wt, WriteLogEntry_wt> *tx,        //
-    void *addr,                                                //
-    ValueType /*sz*/                                           //
+static any_type_t                                       //
+read_word_wt(                                           //
+    Transaction<ReadLogEntry_wt, WriteLogEntry_wt> *tx, //
+    void *addr,                                         //
+    ValueType /*sz*/                                    //
 )
 {
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 
 	TM_ASSERT(tx, "read_word_wt: tx is null");
 	TM_ASSERT(tx->active, "read_word_wt: tx not active");
-
-	// Stack-address detection: reading from the stack would create read-set
-	// entries for stack addresses that hash to random locks, causing spurious
-	// validation failures and aborts.
-	if (isStackAddress(addr))
-		return read_value_from_addr(addr, ValueType::UINT64);
 
 	// Write-set lookup — return the buffered new value if we wrote here
 	{
@@ -316,7 +310,7 @@ read_word_wt(                                                  //
 				l = lock->get();
 				continue;
 			}
-			abort_tx();
+			abort_tx("read_lock_spin");
 		}
 
 		word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
@@ -332,14 +326,13 @@ read_word_wt(                                                  //
 		if (version > tx->end_version) {
 			// Version-extension (same pattern as WBCTL)
 			if (tx->read_only) {
-				abort_tx();
+				abort_tx("read_only_version_overflow");
 			}
 
 			bool extended = false;
 			for (auto &it : tx->read_set) {
 				auto &r = it.second;
-				Lock_wt *rl = &g_locks_wt.get(
-				    ByteOffset((word_t)it.first).base_addr);
+				Lock_wt *rl = &g_locks_wt.get(ByteOffset((word_t)it.first).base_addr);
 				word_t rv = (rl->get() & (VERSION_MASK << META_BITS)) >> META_BITS;
 				if (rv > tx->start_version) {
 					extended = true;
@@ -353,8 +346,7 @@ read_word_wt(                                                  //
 				bool valid = true;
 				for (auto &it : tx->read_set) {
 					auto &r = it.second;
-					Lock_wt *rl = &g_locks_wt.get(
-					    ByteOffset((word_t)it.first).base_addr);
+					Lock_wt *rl = &g_locks_wt.get(ByteOffset((word_t)it.first).base_addr);
 					word_t lv = rl->get();
 					word_t rv = (lv & (VERSION_MASK << META_BITS)) >> META_BITS;
 					if (rv > r.observed_version) {
@@ -363,53 +355,40 @@ read_word_wt(                                                  //
 					}
 				}
 				if (!valid) {
-					abort_tx();
+					abort_tx("read_extend_validation");
 				}
 				tx->end_version = last_version;
 				if (tx->end_version < version) {
-					abort_tx();
+					abort_tx("read_extend_version_stale");
 				}
 			} else {
 				tx->end_version = get_clock();
 				if (tx->end_version < version) {
-					abort_tx();
+					abort_tx("read_extend_version_stale_shared");
 				}
 			}
 		}
 
 		any_type_t result = {.u8 = val.u8};
 
-		ReadLogEntry_wt r;
-		r.observed_version = version;
-		r.observed_incarnation = incarnation;
-		r.observed_val = result;
-		tx->read_set.insert(std::pair(addr, r));
+		tx->read_set.insert(std::pair(addr, make_read_entry(version, incarnation, result)));
 
 		return result;
 	}
 }
 
-static void                                                    //
-write_word_wt(                                                 //
-    Transaction<ReadLogEntry_wt, WriteLogEntry_wt> *tx,        //
-    void *addr,                                                //
-    any_type_t val,                                            //
-    ValueType /*sz*/                                           //
+static void                                             //
+write_word_wt(                                          //
+    Transaction<ReadLogEntry_wt, WriteLogEntry_wt> *tx, //
+    void *addr,                                         //
+    any_type_t val,                                     //
+    ValueType /*sz*/                                    //
 )
 {
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 
 	TM_ASSERT(tx, "write_word_wt: tx is null");
 	TM_ASSERT(tx->active, "write_word_wt: tx not active");
-
-	// Stack-address detection: writing to the stack via tm_write would create
-	// a write-set entry that gets written back at commit time — by then the
-	// stack frame has been popped and the write corrupts active stack data.
-	if (isStackAddress(addr)) {
-		write_value_to_addr(addr, val, ValueType::UINT64);
-		return;
-	}
-
 	tx->read_only = false;
 
 	// Existing write-set entry at the same aligned address → update in place
@@ -446,13 +425,9 @@ write_word_wt(                                                 //
 
 				any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
 
-				WriteLogEntry_wt w;
-				w.old_val = old_val;
-				w.new_val = val;
-				w.version = version;
-				w.incarnation = incarnation;
-			tx->write_set[addr] = w;
-			tx->locks_held.push_back(lock);
+				WriteLogEntry_wt w = make_write_entry(old_val, val, version, incarnation);
+				tx->write_set[addr] = w;
+				tx->locks_held.push_back(lock);
 
 				write_value_to_addr(addr, val, ValueType::UINT64);
 				return;
@@ -461,36 +436,25 @@ write_word_wt(                                                 //
 				// TX acquired the same lock between our l check and the CAS.
 				any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
 
-			WriteLogEntry_wt w;
-			w.old_val = old_val;
-			w.new_val = val;
-			w.version = version;
-			w.incarnation = incarnation;
-			tx->write_set[addr] = w;
+				WriteLogEntry_wt w = make_write_entry(old_val, val, version, incarnation);
+				tx->write_set[addr] = w;
 
-			write_value_to_addr(addr, val, ValueType::UINT64);
-			return;
-		} else {
-			if (try_soft_spin(tx, lock))
-				continue;
-			abort_tx();
-		}
-	} else if (lock->is_locked_by(tx->id)) {
-		// Lock already held by us
+				write_value_to_addr(addr, val, ValueType::UINT64);
+				return;
+			} else {
+				if (try_soft_spin(tx, lock))
+					continue;
+				abort_tx("write_lock_contention");
+			}
+		} else if (lock->is_locked_by(tx->id)) {
+			// Lock already held by us
 			word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
 			word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
 			any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
 
-			WriteLogEntry_wt w;
-			w.old_val = old_val;
-			w.new_val = val;
-			w.version = version;
+			tx->write_set[addr] = make_write_entry(old_val, val, version, incarnation);
 			write_value_to_addr(addr, val, ValueType::UINT64);
 			return;
-		} else {
-			if (try_soft_spin(tx, lock))
-				continue;
-			abort_tx();
 		}
 	}
 }
@@ -538,7 +502,9 @@ tm_read_i4(        //
 	auto *tx = current_tx_wt;
 	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
-	any_type_t w = read_word_wt(tx, (void *)((word_t)addr & ~(word_t)7), ValueType::UINT32);
+	any_type_t w = read_word_wt(tx,
+	                            (void *)((word_t)addr & ~(word_t)7),
+	                            ValueType::UINT32);
 	uint8_t off = (word_t)addr & 7;
 	return (uint32_t)(w.u8 >> (off * 8));
 }
@@ -562,7 +528,9 @@ tm_read_f4(     //
 	auto *tx = current_tx_wt;
 	TM_ASSERT_VALID_TX(tx, "tinystm wt");
 
-	any_type_t w = read_word_wt(tx, (void *)((word_t)addr & ~(word_t)7), ValueType::FLOAT);
+	any_type_t w = read_word_wt(tx,
+	                            (void *)((word_t)addr & ~(word_t)7),
+	                            ValueType::FLOAT);
 	uint8_t off = (word_t)addr & 7;
 	uint32_t bits = (uint32_t)(w.u8 >> (off * 8));
 	return *(float *)&bits;

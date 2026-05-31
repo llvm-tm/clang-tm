@@ -48,34 +48,10 @@ __thread int32_t tm_longjmp_ret;
 
 enum { LOCK_BUSY = 0xFF, OWNER_CHANGED = 0x01 };
 
-// Stats counters (global, not per-thread)
-static std::atomic<uint64_t> stat_tsx_started{0};
-static std::atomic<uint64_t> stat_tsx_committed{0};
-static std::atomic<uint64_t> stat_tsx_aborted{0};
-static std::atomic<uint64_t> stat_tsx_lock_busy{0};
-static std::atomic<uint64_t> stat_tsx_owner_changed{0};
-static std::atomic<uint64_t> stat_tsx_other_abort{0};
-static std::atomic<uint64_t> stat_sgl_entries{0};
-static std::atomic<uint64_t> stat_attempts_gt_1{0};
-
 extern "C" {
 
 void tm_init() {}
-void tm_exit() {
-    uint64_t started  = stat_tsx_started.load();
-    uint64_t committed = stat_tsx_committed.load();
-    uint64_t aborted   = stat_tsx_aborted.load();
-    uint64_t lock_busy = stat_tsx_lock_busy.load();
-    uint64_t owner_chg = stat_tsx_owner_changed.load();
-    uint64_t other_ab  = stat_tsx_other_abort.load();
-    uint64_t sgl       = stat_sgl_entries.load();
-    uint64_t att_gt_1  = stat_attempts_gt_1.load();
-    fprintf(stderr,
-        "TSXSTATS started=%lu committed=%lu aborted=%lu "
-        "lock_busy=%lu owner_changed=%lu other_abort=%lu "
-        "sgl=%lu attempts_gt_1=%lu\n",
-        started, committed, aborted, lock_busy, owner_chg, other_ab, sgl, att_gt_1);
-}
+void tm_exit() {}
 void tm_init_thread() { tm_nested_call_counter = 0; in_tsx = false; }
 void tm_exit_thread() {}
 
@@ -101,9 +77,6 @@ void tm_begin() {
     for (int attempts = 0; attempts < 5; attempts++) {
         unsigned status = _xbegin();
         if (status == _XBEGIN_STARTED) {
-            stat_tsx_started.fetch_add(1, std::memory_order_relaxed);
-            if (attempts > 0)
-                stat_attempts_gt_1.fetch_add(1, std::memory_order_relaxed);
             // Read sgl_owner into the TSX read-set AND check if
             // the lock is held.
             uint64_t v = sgl_owner.load(std::memory_order_seq_cst);
@@ -115,16 +88,14 @@ void tm_begin() {
             return;
         }
 
-        stat_tsx_aborted.fetch_add(1, std::memory_order_relaxed);
+
         if ((status & _XABORT_EXPLICIT) &&
             _XABORT_CODE(status) == LOCK_BUSY) {
-            stat_tsx_lock_busy.fetch_add(1, std::memory_order_relaxed);
             // Lock was busy — wait for it to become free before retrying
             // to avoid the lemming effect (thundering herd into SGL).
             while (sgl_owner.load(std::memory_order_relaxed) != 0)
                 _mm_pause();
         } else if (!(status & _XABORT_RETRY)) {
-            stat_tsx_other_abort.fetch_add(1, std::memory_order_relaxed);
             break;
         }
     }
@@ -132,7 +103,6 @@ void tm_begin() {
     (void)in_tsx;
 #endif
     // Fallback: enter SGL (write to sgl_owner so TSX threads abort).
-    stat_sgl_entries.fetch_add(1, std::memory_order_relaxed);
     global_tx_lock.lock();
     sgl_owner.store(1, std::memory_order_seq_cst);
     in_tsx = false;
@@ -145,10 +115,8 @@ void tm_end() {
     if (in_tsx) {
 #if defined(__x86_64__) || defined(__i386__)
         if (sgl_owner.load(std::memory_order_seq_cst) != tsx_start_owner) {
-            stat_tsx_owner_changed.fetch_add(1, std::memory_order_relaxed);
             _xabort(OWNER_CHANGED);
         }
-        stat_tsx_committed.fetch_add(1, std::memory_order_relaxed);
         _xend();
 #endif
         return;

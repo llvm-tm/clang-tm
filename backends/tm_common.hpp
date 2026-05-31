@@ -6,7 +6,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <pthread.h>
+#include <random>
+#include <thread>
 #include <vector>
 
 #ifndef NDEBUG
@@ -34,6 +35,22 @@ namespace stm
 {
 
 using word_t = uint64_t;
+
+// ── Random Exponential Backoff ────────────────────────────────
+constexpr int K_MAX_BACKOFF_DELAY_US = 100000;
+
+inline void      //
+random_backoff(  //
+    unsigned abort_count)
+{
+	thread_local std::mt19937 rng = [] {
+		std::random_device rd;
+		return std::mt19937(rd());
+	}();
+	std::exponential_distribution<> dist((double)1 / (double)(abort_count + 1));
+	int delay = std::min(dist(rng), (double)K_MAX_BACKOFF_DELAY_US);
+	std::this_thread::sleep_for(std::chrono::microseconds(delay));
+}
 
 enum class ValueType : uint8_t {
 	UINT8 = 1,
@@ -63,6 +80,28 @@ inline unsigned type_size(ValueType t)
 	return 0;
 }
 
+// ── Map TL2-style DataType uint8_t value to byte width ─────────
+// Values: UINT8=1 → 1, UINT16=2 → 2, UINT32=4 → 4, UINT64=8 → 8,
+//         PTR=16 → 8, FLOAT=32 → 4, DOUBLE=64 → 8
+inline unsigned data_type_size(uint8_t dt_val) {
+	if (dt_val == 1)  return 1;  // UINT8
+	if (dt_val == 2)  return 2;  // UINT16
+	if (dt_val == 4)  return 4;  // UINT32 / FLOAT
+	if (dt_val == 8)  return 8;  // UINT64 / DOUBLE
+	if (dt_val == 16) return 8;  // PTR
+	if (dt_val == 32) return 4;  // FLOAT
+	if (dt_val == 64) return 8;  // DOUBLE
+	return 0;
+}
+
+// All bits set (e.g., for 8-byte writes where shift-by-64 would be UB).
+static constexpr uint64_t ALL_ONES = ~0ULL;
+
+// Generate a bitmask covering `nbytes` bytes in the lowest positions.
+// Example: BYTE_MASK(2) = 0xFFFF.  For nbytes >= 8, returns ALL_ONES
+// (avoids UB from 1ULL << 64).
+#define BYTE_MASK(nbytes) ((nbytes) >= 8 ? stm::ALL_ONES : ((1ULL << ((nbytes) * 8)) - 1))
+
 struct any_type_t {
 	union {
 		uint8_t u1;
@@ -74,6 +113,71 @@ struct any_type_t {
 		void *ptr;
 	};
 };
+
+template <typename T> inline T get_any_value(const any_type_t &nv) {
+	if constexpr (std::is_same_v<T, uint8_t>)
+		return nv.u1;
+	else if constexpr (std::is_same_v<T, uint16_t>)
+		return nv.u2;
+	else if constexpr (std::is_same_v<T, uint32_t>)
+		return nv.u4;
+	else if constexpr (std::is_same_v<T, uint64_t>)
+		return nv.u8;
+	else if constexpr (std::is_same_v<T, float>)
+		return nv.f4;
+	else if constexpr (std::is_same_v<T, double>)
+		return nv.f8;
+	else
+		return static_cast<T>(nv.ptr);
+}
+
+// Extract sub-word of type T from any_type_t at byte offset.
+// All union members share the same starting address, so memcpy
+// from (uint8_t*)&val + offset reads the correct raw bytes
+// regardless of which member was last written.
+// e.g., extract_sub_value<uint16_t>(nv, 2) reads bytes 2-3 of
+// the union (the top half of a UINT32, or bytes 2-3 of a UINT64).
+template <typename T>
+inline T extract_sub_value(const any_type_t &val, unsigned offset = 0) {
+	T result{};
+	memcpy(&result, reinterpret_cast<const uint8_t *>(&val) + offset, sizeof(T));
+	return result;
+}
+
+// Extract raw uint64 from any typed value (bit pattern).
+inline uint64_t any_to_u64(const any_type_t &val, ValueType type) {
+	switch (type) {
+	case ValueType::UINT8:   return val.u1;
+	case ValueType::UINT16:  return val.u2;
+	case ValueType::UINT32:  return val.u4;
+	case ValueType::UINT64:  return val.u8;
+	case ValueType::FLOAT:   return val.u4;
+	case ValueType::DOUBLE:  return val.u8;
+	case ValueType::POINTER: return reinterpret_cast<uint64_t>(val.ptr);
+	default:                 return 0;
+	}
+}
+
+// Store a uint64 bit-pattern back into an any_type_t for the given type.
+inline void u64_to_any(any_type_t &t, uint64_t v, ValueType type) {
+	switch (type) {
+	case ValueType::UINT8:   t.u1  = static_cast<uint8_t>(v);   break;
+	case ValueType::UINT16:  t.u2  = static_cast<uint16_t>(v);  break;
+	case ValueType::UINT32:  t.u4  = static_cast<uint32_t>(v);  break;
+	case ValueType::UINT64:  t.u8  = v;                          break;
+	case ValueType::FLOAT:   t.u4  = static_cast<uint32_t>(v);  break;
+	case ValueType::DOUBLE:  memcpy(&t.f8, &v, 8);              break;
+	case ValueType::POINTER: t.ptr = reinterpret_cast<void *>(v); break;
+	default: break;
+	}
+}
+
+// Extract uint64 from any_type_t via memcpy (avoids unaligned atomic_ref on ARM64).
+template <typename AT> //
+inline void any_to_word(any_type_t &t, AT v)
+{
+	memcpy(&t.u8, &v, sizeof(AT));
+}
 
 template <typename T> struct any_type_mapping;
 
@@ -159,66 +263,6 @@ write_value_to_addr( //
 	default:
 		break;
 	}
-}
-
-// ===========================================================================
-// Stack-address detection: check if a pointer is on the current thread's
-// stack.  Stack data is thread-private and must NEVER go through TM reads/
-// writes — doing so creates write-set entries for addresses that will be
-// popped on function return, causing post-commit stack corruption.  Also,
-// using TM reads on stack addresses causes spurious lock conflicts in
-// lock-based backends because stack addresses hash to random locks.
-//
-// The plugin performs static analysis to skip stack-loaded/store from non-
-// escaping allocas (alloca + GEP chains + recursive argIsAllocaDest for
-// forwarded function parameters).  However, pointers LOADED from allocas
-// (e.g., lambda capture result_ptr) have runtime values that the static
-// analysis cannot determine.  This runtime check catches those remaining
-// cases as a safety net.
-//
-// Returns true if the address is on the calling thread's stack.
-// Uses pthread_getattr_np on Linux, pthread_get_stackaddr_np on macOS.
-// Caches the stack bounds in a thread_local variable (first call only).
-// ===========================================================================
-inline bool isStackAddress(void *addr)
-{
-	// Method 1: pthread-based stack bounds (cached thread-local).
-	thread_local bool init = false;
-	thread_local void *stack_base = nullptr;
-	thread_local size_t stack_size = 0;
-	if (!init) {
-#if defined(__APPLE__)
-		stack_base = pthread_get_stackaddr_np(pthread_self());
-		stack_size = pthread_get_stacksize_np(pthread_self());
-#else
-		pthread_attr_t attr;
-		if (pthread_getattr_np(pthread_self(), &attr) == 0) {
-			pthread_attr_getstack(&attr, &stack_base, &stack_size);
-			pthread_attr_destroy(&attr);
-		}
-#endif
-		init = true;
-	}
-	if (stack_base) {
-		uintptr_t a = (uintptr_t)addr;
-		uintptr_t base = (uintptr_t)stack_base;
-		if (a >= base && a < base + stack_size)
-			return true;
-	}
-
-	// Method 2 (fallback): compare with current stack pointer.
-	// A thread's stack grows downward; any address between the current
-	// stack pointer and the top of the stack (highest address) is on
-	// this thread's stack.  We use __builtin_frame_address to get a
-	// conservative lower bound.
-	void *frame = __builtin_frame_address(0);
-	uintptr_t a = (uintptr_t)addr;
-	uintptr_t fp = (uintptr_t)frame;
-	// Stack grows downward: addresses >= fp (toward the top) are on
-	// the stack.  Pad by 256KB to account for frames deeper than the
-	// current call chain (e.g., signal handlers, stack overflow guard).
-	uintptr_t top = fp + 256UL * 1024;
-	return a >= fp && a <= top;
 }
 
 constexpr int OFFSET_BITS = 3; // for 64bit

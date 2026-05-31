@@ -140,9 +140,6 @@ void tm_init() {
         // First process: snapshot initial TM data into shared file
         g_state->ready_count.store(0, std::memory_order_relaxed);
         sync_local_to_shared();
-#ifndef NDEBUG
-        fprintf(stderr, "[DistSGL] init: process_count=%d\n", nproc);
-#endif
     } else {
         // Subsequent processes: load TM data from shared state
         sync_shared_to_local();
@@ -150,18 +147,10 @@ void tm_init() {
 
     // Barrier
     g_state->ready_count.fetch_add(1, std::memory_order_acq_rel);
-#ifndef NDEBUG
-    fprintf(stderr, "[DistSGL] barrier: %d/%d ready\n",
-            g_state->ready_count.load(std::memory_order_acquire),
-            g_state->process_count.load(std::memory_order_acquire));
-#endif
     while (g_state->ready_count.load(std::memory_order_acquire) <
            g_state->process_count.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-#ifndef NDEBUG
-    fprintf(stderr, "[DistSGL] all ready, starting\n");
-#endif
 }
 
 void tm_exit() {
@@ -174,9 +163,6 @@ void tm_exit() {
         munmap(g_state, g_mmap_size);
         unlink(SHM_FILE);
     }
-#ifndef NDEBUG
-    fprintf(stderr, "[DistSGL] exit\n");
-#endif
 }
 
 // ── Transaction boundaries (2PC with shared-memory sync) ────────
@@ -208,10 +194,6 @@ void tm_begin() {
     // PREPARE phase: acquire global lock, then read latest state
     spin_lock(&g_state->lock_flag);
     sync_shared_to_local();
-#ifndef NDEBUG
-    fprintf(stderr, "[DistSGL] P%d PREPARE epoch=%lld\n",
-            getpid(), (long long)g_state->epoch.load(std::memory_order_relaxed));
-#endif
 }
 
 void tm_end() {
@@ -219,10 +201,6 @@ void tm_end() {
     // COMMIT phase: publish state, advance epoch, release lock
     sync_local_to_shared();
     g_state->epoch.fetch_add(1, std::memory_order_release);
-#ifndef NDEBUG
-    fprintf(stderr, "[DistSGL] P%d COMMIT  epoch=%lld\n",
-            getpid(), (long long)g_state->epoch.load(std::memory_order_relaxed));
-#endif
     spin_unlock(&g_state->lock_flag);
 }
 

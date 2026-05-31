@@ -38,19 +38,17 @@ static std::atomic<int64_t> g_tm_end_count{0};
 
 void tm_init()
 {
-#ifndef NDEBUG
-	fprintf(stderr, "tm_init called\n");
-#endif
 	swisstm::init();
 }
 
 void tm_exit() {}
 
+void tm_dbg_set_counter_ptr(const volatile uint64_t *p) {
+    swisstm::dbg_set_counter_ptr(p);
+}
+
 void tm_init_thread()
 {
-#ifndef NDEBUG
-	fprintf(stderr, "tm_init_thread called\n");
-#endif
 	swisstm::init_thread();
 }
 
@@ -219,20 +217,6 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 	}
 }
 
-void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {}
-
-static void print_stats()
-{
-#ifndef NDEBUG
-	fprintf(stderr, "=== SwissTM_new Runtime Stats ===\n");
-	fprintf(stderr,
-	        "tm_begin: %lld, tm_end: %lld\n",
-	        (long long)g_tm_begin_count.load(std::memory_order_relaxed),
-	        (long long)g_tm_end_count.load(std::memory_order_relaxed));
-#endif
-}
-
-static int init = (std::atexit(print_stats), 0);
 void* tm_malloc(size_t size) { void* p = malloc(size); tm_track_spec_alloc(p); return p; }
 void* tm_calloc(size_t nmemb, size_t size) { void* p = calloc(nmemb, size); tm_track_spec_alloc(p); return p; }
 void* tm_realloc(void* ptr, size_t size) { void* p = realloc(ptr, size); tm_track_spec_alloc(p); return p; }
