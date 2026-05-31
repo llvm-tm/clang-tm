@@ -446,3 +446,16 @@ replication needs no annotation or plugin change. All logic lives in the runtime
    - Followers apply the committed write-set to their local TM state.
 3. **Read-only fast path** — read-only transactions (no `tm_write` calls during
    the transaction) skip consensus entirely and are served directly by any replica.
+
+### Event Logger Debugging
+
+The `backends/tm_event_logger.hpp` header provides a per-thread ring-buffer
+event logger for debugging TM backend crashes.  Activate with `-DTM_EVENT_LOG`:
+
+```bash
+make CXXFLAGS="-std=c++20 -O0 -pthread -g -DTM_EVENT_LOG" -C backends/tests run
+```
+
+The logger records TX begin/abort/commit, lock acquire/release, read/write-set
+events, and gap checks.  On SIGSEGV, the last 512 events are dumped
+automatically.  See `backends/README.md` for the full event type reference.

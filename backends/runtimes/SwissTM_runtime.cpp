@@ -217,29 +217,36 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 	}
 }
 
-void* tm_malloc(size_t size) { void* p = malloc(size); tm_track_spec_alloc(p); return p; }
-void* tm_calloc(size_t nmemb, size_t size) { void* p = calloc(nmemb, size); tm_track_spec_alloc(p); return p; }
-void* tm_realloc(void* ptr, size_t size) { void* p = realloc(ptr, size); tm_track_spec_alloc(p); return p; }
-void  tm_free(void* ptr) {
-    if (g_in_tx) {
-        // Detect double-free: same pointer freed twice in the same TX
-        if (g_deferred_frees_set.count(ptr)) {
-            fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
-            void* buf[64];
-            int n = backtrace(buf, 64);
-            backtrace_symbols_fd(buf, n, 2);
-            fflush(stderr);
-            _exit(1);
-        }
-        tm_untrack_spec_alloc(ptr);
-        g_deferred_frees_set.insert(ptr);
-        auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));
-        node->ptr = ptr;
-        node->next = g_deferred_frees;
-        g_deferred_frees = node;
-    } else {
-        ::free(ptr);
-    }
+void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {}
+
+static void print_stats()
+{
+#ifndef NDEBUG
+	fprintf(stderr, "=== SwissTM_new Runtime Stats ===\n");
+	fprintf(stderr,
+	        "tm_begin: %lld, tm_end: %lld\n",
+	        (long long)g_tm_begin_count.load(std::memory_order_relaxed),
+	        (long long)g_tm_end_count.load(std::memory_order_relaxed));
+#endif
 }
 
+static int init = (std::atexit(print_stats), 0);
+void* tm_malloc(size_t size) { return tm_track_alloc_result(::operator new(size), size); }
+void* tm_calloc(size_t nmemb, size_t size) { void* p = ::operator new(nmemb * size); memset(p, 0, nmemb * size); return tm_track_alloc_result(p, nmemb * size); }
+void* tm_realloc(void* ptr, size_t size) { void* p = ::operator new(size); if (ptr) { memcpy(p, ptr, size); ::operator delete(ptr); } return tm_track_alloc_result(p, size); }
+void  tm_free(void* ptr) {
+	if (!ptr || stm::isStackAddress(ptr)) return;
+	TM_EVENT(FREE, ptr, 0);
+	if (g_in_tx) {
+		swisstm::tm_write_i1(reinterpret_cast<uint8_t*>(ptr), 0);
+		tm_free_append_deferred(ptr);
+	} else {
+		::operator delete(ptr);
+	}
 }
+
+// ── Debug hooks ──────────────────────────────────────────────
+#ifndef NDEBUG
+#include "backends/tm_debug.hpp"
+void tm_dbg_set_counter_ptr(const volatile uint64_t *p) { swisstm::g_dbg_pcounter = p; }
+#endif

@@ -10,6 +10,7 @@
 
 #include "tm_common.hpp"
 #include "../tm_spin_token.hpp"
+#include "tm_event_logger.hpp"
 #include <random>
 #include <thread>
 
@@ -329,6 +330,8 @@ inline void init()
 {
 	g_clock.store(1, std::memory_order_release);
 	thr_counter.store(1, std::memory_order_release);
+	TM_EVENT_INSTALL_SIGSEGV();
+	fprintf(stderr, "[INIT] g_clock=%llu\n", (unsigned long long)g_clock.load(std::memory_order_acquire));
 }
 
 inline void exit()

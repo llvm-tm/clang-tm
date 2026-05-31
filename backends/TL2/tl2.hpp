@@ -20,7 +20,7 @@
 #include <string.h>
 #include <csetjmp>
 #include "../tm_common.hpp"
-#include "../tm_log_merge.hpp"
+#include "../tm_event_logger.hpp"
 #include <type_traits>
 
 namespace tl2 {
@@ -66,26 +66,14 @@ enum class DataType : uint8_t {
 };
 
 inline size_t dtype_size(DataType dt) {
-    return stm::data_type_size(static_cast<uint8_t>(dt));
-}
-
-// Map TL2 DataType to common ValueType
-inline stm::ValueType dt_to_vt(DataType dt) {
     switch (dt) {
-        case DataType::UINT8:  return stm::ValueType::UINT8;
-        case DataType::UINT16: return stm::ValueType::UINT16;
-        case DataType::UINT32: return stm::ValueType::UINT32;
-        case DataType::FLOAT:  return stm::ValueType::FLOAT;
-        case DataType::UINT64: return stm::ValueType::UINT64;
-        case DataType::DOUBLE: return stm::ValueType::DOUBLE;
-        case DataType::PTR:    return stm::ValueType::POINTER;
-        default:               return stm::ValueType::UINT64;
+        case DataType::UINT8: case DataType::FLOAT: return 1;
+        case DataType::UINT16: return 2;
+        case DataType::UINT32: case DataType::PTR: return 4;
+        case DataType::UINT64: case DataType::DOUBLE: return 8;
+        default: return 0;
     }
 }
-
-// Write-set redo entry: stores old + new value as union, used by commit() to
-// write back.  The to_any_type() method converts the new value to a common
-// stm::any_type_t for use with write_value_to_addr().
 
 struct WriteSetEntry {
     word_t* addr;
@@ -154,12 +142,6 @@ struct WriteSetEntry {
             default: break;
         }
     }
-    
-    stm::any_type_t to_any_type() const {
-        stm::any_type_t val{};
-        stm::u64_to_any(val, new_value(), dt_to_vt(dtype));
-        return val;
-    }
 };
 
 struct ReadSetEntry {
@@ -169,21 +151,6 @@ struct ReadSetEntry {
     DataType dtype;
     bool locked_by_me;
 };
-
-// ── Factory functions ──────────────────────────────────────────
-inline WriteSetEntry make_write_set_entry(word_t* addr, DataType dtype, word_t val) {
-    WriteSetEntry e;
-    e.addr = addr;
-    e.dtype = dtype;
-    e.set_new(val);
-    return e;
-}
-
-inline ReadSetEntry make_read_set_entry(word_t* guard_addr, word_t* data_addr,
-                                        word_t observed_version, DataType dtype,
-                                        bool locked_by_me) {
-    return {guard_addr, data_addr, observed_version, dtype, locked_by_me};
-}
 
 class Transaction {
 public:
@@ -233,6 +200,7 @@ private:
 public:
     static void init() {
         if (!initialized.load(std::memory_order_seq_cst)) {
+            TM_EVENT_INSTALL_SIGSEGV();
             g_clock.store(1, std::memory_order_relaxed);
             for (auto& g : g_guards) {
                 g.store(0, std::memory_order_relaxed);
@@ -266,6 +234,7 @@ public:
         tx->write_set.clear();
         tx->read_set.clear();
         tx->bloom_filter = 0;
+        TM_EVENT(TX_BEGIN, (word_t)tx, tx->start_version);
     }
     
     static bool is_locked_by_me(Transaction* tx, word_t* addr) {
@@ -342,28 +311,45 @@ public:
     template <typename T, DataType DT, typename AddrT>
     static void write_impl(Transaction* tx, AddrT addr, T val) {
         std::atomic_signal_fence(std::memory_order_seq_cst);
-        TM_ASSERT_VALID_TX(tx, "TL2 read_impl");
+        assert(tx && tx->active);
 
-        // Real byte width of each DataType.
+        // Stack-address detection: writing to the stack would create write-set
+        // entries for addresses that will be popped on function return, causing
+        // post-commit stack corruption.
+        if (stm::isStackAddress((void*)addr)) { *addr = val; return; }
+
+        // Real byte width of each DataType (NOT dtype_size(), which returns
+        // 4 for PTR but PTR write-back writes 8 bytes as word_t).
+        auto dataWidth = [](DataType dt) -> unsigned {
+            switch (dt) {
+                case DataType::UINT8:   return 1;
+                case DataType::UINT16:  return 2;
+                case DataType::UINT32:  return 4;
+                case DataType::FLOAT:   return 4;
+                case DataType::UINT64:  return 8;
+                case DataType::DOUBLE:  return 8;
+                case DataType::PTR:     return 8;
+                default:                return 0;
+            }
+        };
+
+        // One entry per address — if any entry already exists at this address,
+        // reuse it by updating dtype and new_value.
         for (auto& e : tx->write_set) {
             if (e.addr == (word_t*)addr) {
-                unsigned entry_sz = stm::data_type_size(static_cast<uint8_t>(e.dtype));
-                unsigned write_sz = stm::data_type_size(static_cast<uint8_t>(DT));
-                if (entry_sz > write_sz) {
-                    word_t base_val = e.new_value();
-                    word_t write_val = to_word(val);
-                    e.set_new(stm::merge::merge_words(
-                        base_val, write_val, write_sz, 0));
-                    return;
-                }
                 e.dtype = DT;
                 e.set_new(to_word(val));
                 return;
             }
         }
 
-        tx->write_set.push_back(make_write_set_entry((word_t*)addr, DT, to_word(val)));
+        WriteSetEntry e;
+        e.addr = (word_t*)addr;
+        e.dtype = DT;
+        e.set_new(to_word(val));
+        tx->write_set.push_back(e);
         bloom_set(tx, (word_t*)addr);
+        TM_EVENT(WRITE_SET_INSERT, (word_t)addr, (word_t)e.dtype);
     }
 
     // Write functions
@@ -392,7 +378,13 @@ public:
     // ---- Generic read implementation ----
     template <typename T, DataType DT, typename AddrT>
     static T read_impl(Transaction* tx, AddrT addr) {
-        TM_ASSERT_VALID_TX(tx, "TL2 read_impl");
+        assert(tx && tx->active);
+
+        // Stack-address detection: reading from the stack would create read-set
+        // entries for stack addresses that hash to random locks, causing spurious
+        // validation failures.
+        if (stm::isStackAddress((void*)addr))
+            return from_word<T>(to_word(*addr));
 
         if (bloom_might_contain(tx, (word_t*)addr)) {
             // Exact type match (fast path)
@@ -402,10 +394,22 @@ public:
                 }
             }
             // Type-interchange fallback: same address, compatible size
-            unsigned req_sz = stm::data_type_size(static_cast<uint8_t>(DT));
+            auto swapSize = [](DataType dt) -> unsigned {
+                switch (dt) {
+                    case DataType::UINT8:  return 1;
+                    case DataType::UINT16: return 2;
+                    case DataType::UINT32: return 4;
+                    case DataType::FLOAT:  return 4;
+                    case DataType::UINT64: return 8;
+                    case DataType::DOUBLE: return 8;
+                    case DataType::PTR:    return 8;
+                    default:               return 0;
+                }
+            };
+            unsigned req_sz = swapSize(DT);
             for (auto& e : tx->write_set) {
                 if (e.addr != (word_t*)addr) continue;
-                unsigned entry_sz = stm::data_type_size(static_cast<uint8_t>(e.dtype));
+                unsigned entry_sz = swapSize(e.dtype);
                 // Same-size interchange (POINTER ↔ UINT64)
                 if (entry_sz == req_sz && entry_sz == 8) {
                     return from_word<T>(e.new_value());
@@ -435,10 +439,10 @@ public:
             // addr+4).  This happens when the plugin expands memcpy/memset as
             // 8-byte UINT64 writes but individual fields are read at sub-offsets.
             {
-                unsigned req_sz2 = stm::data_type_size(static_cast<uint8_t>(DT));
+                unsigned req_sz2 = swapSize(DT);
                 for (auto& e : tx->write_set) {
                     if (e.addr == (word_t*)addr) continue; // handled above
-                    unsigned entry_sz = stm::data_type_size(static_cast<uint8_t>(e.dtype));
+                    unsigned entry_sz = swapSize(e.dtype);
                     if (entry_sz == 0 || entry_sz <= req_sz2) continue;
                     // Check if addr falls within [e.addr, e.addr+entry_sz)
                     auto e_start = (uintptr_t)e.addr;
@@ -446,13 +450,14 @@ public:
                     if (r_addr >= e_start && r_addr < e_start + entry_sz) {
                         unsigned offset = (unsigned)(r_addr - e_start);
                         word_t shifted = e.new_value() >> (offset * 8);
-                        word_t mask = BYTE_MASK(req_sz2);
+                        word_t mask = (req_sz2 == 8) ? ~0ULL :
+                                      ((1ULL << (req_sz2 * 8)) - 1);
                         return from_word<T>(shifted & mask);
                     }
                 }
             }
             // General byte-merge: wider read from UINT8 entries at consecutive bytes
-            if (stm::data_type_size(static_cast<uint8_t>(DT)) == 8) {
+            if (swapSize(DT) == 8) {
                 uint64_t merged = 0;
                 bool all_byte = true;
                 for (unsigned i = 0; i < 8; i++) {
@@ -476,8 +481,15 @@ public:
         word_t guard = g_guards[idx].load(std::memory_order_acquire);
         word_t version = (guard & VERSION_MASK) >> 1;
         bool locked = (guard & LOCK_MASK) != 0;
+        TM_EVENT2(READ_LOCK_ACQUIRE, (word_t)addr, (word_t)&g_guards[idx], version);
 
-        tx->read_set.push_back(make_read_set_entry((word_t*)&g_guards[idx], (word_t*)addr, version, DT, locked));
+        ReadSetEntry e;
+        e.guard_addr = (word_t*)&g_guards[idx];
+        e.data_addr = (word_t*)addr;
+        e.observed_version = version;
+        e.dtype = DT;
+        e.locked_by_me = locked;
+        tx->read_set.push_back(e);
 
         return from_word<T>(to_word(*addr));
     }
@@ -505,9 +517,25 @@ public:
         return read_impl<void*, DataType::PTR>(tx, addr);
     }
     
-    static bool acquire_write_locks(Transaction* tx,
-                                    bool (&held_guard)[GUARD_TABLE_SIZE])
-    {
+    static bool commit(Transaction* tx) {
+        if (!tx || !tx->active) return false;
+
+        // Read-only commit optimization (ROCO): skip validation for read-only
+        // TXs.  The original TL2 paper specifies that read-only transactions
+        // don't need read-set validation because they never write.  Even with
+        // an inconsistent snapshot, no data corruption results — the caller
+        // simply sees a slightly stale or non-serializable sum.
+        // DO NOT validate here — `tm_end()` calls `siglongjmp` on commit
+        // failure, which would cause read-only TXs that scan many locations
+        // (e.g., `total_transactional()` reading 1024 accounts) to livelock
+        // under concurrent writes.
+        if (tx->write_set.empty()) {
+            tx->active = false;
+            return true;
+        }
+        
+        // Step 3: Acquire write-set locks, handling guard-table aliasing
+        bool held_guard[GUARD_TABLE_SIZE] = {false};
         for (auto& e : tx->write_set) {
             word_t idx = get_guard_idx(e.addr);
             if (held_guard[idx]) continue;
@@ -515,84 +543,107 @@ public:
                 for (auto& e2 : tx->write_set) {
                     word_t idx2 = get_guard_idx(e2.addr);
                     if (held_guard[idx2]) {
+                        TM_EVENT2(LOCK_RELEASE, (word_t)e2.addr, idx2, 0);
                         release_guard(e2.addr);
                         held_guard[idx2] = false;
                     }
                 }
+                tx->active = false;
+                tx->aborted = true;
                 return false;
             }
             held_guard[idx] = true;
+            TM_EVENT2(COMMIT_LOCK_ACQUIRE, (word_t)e.addr, idx, 0);
         }
-        return true;
-    }
-
-    static bool validate_read_set(Transaction* tx,
-                                  bool (&held_guard)[GUARD_TABLE_SIZE])
-    {
+        
+        // Step 4: Increment global version-clock
+        tx->commit_version = increment_clock();
+        
+        // Step 5: Validate ALL read-set entries — even those in our write-set,
+        // because a concurrent writer may have modified them between our read
+        // and our commit.
         for (auto& re : tx->read_set) {
             word_t current_guard = read_guard(re.guard_addr);
             word_t current_version = (current_guard & VERSION_MASK) >> 1;
 
-            if (current_version != re.observed_version) {
+            // Compute guard index from guard_addr pointer to check if WE hold
+            // this lock (acquired in step 3).  Our own lock is fine — the
+            // version hasn't changed yet (lock was just acquired).  A
+            // concurrent writer's lock is a true conflict.
+            word_t guard_idx = (word_t)(((uintptr_t)re.guard_addr - (uintptr_t)g_guards) / sizeof(g_guards[0]));
+            bool our_lock = held_guard[guard_idx];
+
+            // Check BOTH lock-state (a concurrent writer holds the guard between
+            // lock-acquisition and write-back, but NOT our own lock) AND version
+            // (guard was released with a newer version after our read).
+            if ((current_guard & LOCK_MASK && !our_lock) ||
+                current_version != re.observed_version) {
                 for (auto& e : tx->write_set) {
                     word_t idx = get_guard_idx(e.addr);
                     if (held_guard[idx]) {
+                        TM_EVENT2(LOCK_RELEASE, (word_t)e.addr, idx, 0);
                         release_guard(e.addr);
                         held_guard[idx] = false;
                     }
                 }
+                tx->active = false;
+                tx->aborted = true;
                 return false;
             }
         }
-        return true;
-    }
-
-    static void write_back_and_release(Transaction* tx)
-    {
-        for (auto& e : tx->write_set) {
-            stm::write_value_to_addr(e.addr, e.to_any_type(), dt_to_vt(e.dtype));
-            word_t idx = get_guard_idx(e.addr);
-            g_guards[idx].store((tx->commit_version << 1) & VERSION_MASK,
-                                std::memory_order_release);
-        }
-    }
-
-    static bool commit(Transaction* tx) {
-        if (!tx || !tx->active) return false;
         
-        if (tx->write_set.empty()) {
-            tx->active = false;
-            return true;
+        // Step 7: Apply writes and release locks with version
+        for (auto& e : tx->write_set) {
+            TM_EVENT2(COMMIT_WRITEBACK, (word_t)e.addr, (word_t)e.dtype, 0);
+            switch (e.dtype) {
+                case DataType::UINT8:
+                    *(uint8_t*)e.addr = (uint8_t)e.new_value();
+                    break;
+                case DataType::UINT16:
+                    *(uint16_t*)e.addr = (uint16_t)e.new_value();
+                    break;
+                case DataType::UINT32:
+                    *(uint32_t*)e.addr = (uint32_t)e.new_value();
+                    break;
+                case DataType::FLOAT:
+                {
+                    uint32_t bits = (uint32_t)e.new_value();
+                    *(float*)e.addr = *(float*)&bits;
+                }
+                    break;
+                case DataType::UINT64:
+                    *(uint64_t*)e.addr = (uint64_t)e.new_value();
+                    break;
+                case DataType::DOUBLE:
+                {
+                    uint64_t bits = e.new_value();
+                    *(double*)e.addr = *(double*)&bits;
+                }
+                    break;
+                case DataType::PTR:
+                    *(word_t*)e.addr = e.new_value();
+                    break;
+            }
+            word_t idx = get_guard_idx(e.addr);
+            g_guards[idx].store((tx->commit_version << 1) & VERSION_MASK, std::memory_order_release);
+            TM_EVENT2(LOCK_RELEASE, (word_t)e.addr, tx->commit_version, 0);
         }
-
-        bool held_guard[GUARD_TABLE_SIZE] = {false};
-        if (!acquire_write_locks(tx, held_guard)) {
-            tx->active = false;
-            tx->aborted = true;
-            return false;
-        }
-
-        tx->commit_version = increment_clock();
-
-        if (!validate_read_set(tx, held_guard)) {
-            tx->active = false;
-            tx->aborted = true;
-            return false;
-        }
-
-        write_back_and_release(tx);
-
+        
         tx->active = false;
+        TM_EVENT(COMMIT_SUCCESS, (word_t)tx, tx->commit_version);
         return true;
     }
     
     static void abort_tx(Transaction* tx) {
         if (!tx) return;
         
+        TM_EVENT(TX_ABORT, (word_t)tx, tx->start_version);
+        
         // TL2 is write-back — values only reach memory during commit step 7.
         // On abort, no writes were applied to memory, so we just release guards
         // and retry.  No old-value restore needed.
         for (auto& e : tx->write_set) {
+            TM_EVENT2(LOCK_RELEASE, (word_t)e.addr, 0, 0);
             release_guard(e.addr);
         }
         

@@ -114,3 +114,142 @@ Available targets:
 
 Each test verifies basic TM operations (reads, writes, atomicity) and
 reports `PASS`/`FAIL` on exit.
+
+## Event Logger
+
+The file `tm_event_logger.hpp` provides a per-thread ring-buffer event
+logger for debugging TM backend crashes (e.g., the WBCTL SIGSEGV at
+4 threads).  It is activated by defining `TM_EVENT_LOG` before including
+the header; when inactive, all event macros compile to nothing.
+
+### Usage
+
+```cpp
+#define TM_EVENT_LOG                        // enable (must be before includes)
+#include "tm_event_logger.hpp"
+
+TM_EVENT(TX_BEGIN, tx->id, tx->start_version);
+TM_EVENT2(READ_LOCK_ACQUIRE, addr, lock, version);
+
+TM_EVENT_DUMP(256);                         // dump last 256 events per thread
+TM_EVENT_INSTALL_SIGSEGV();                 // auto-dump on crash
+```
+
+Events are logged to a lock-free per-thread ring buffer (16384 entries).
+On SIGSEGV (or by calling `dump()`), the ring buffer is printed to stderr
+with timestamps, thread IDs, and event payloads.
+
+### Event Types
+
+| Event                 | `addr1`      | `addr2`       | `data`            |
+|-----------------------|--------------|---------------|-------------------|
+| `TX_BEGIN`            | tx id        | —             | start_version     |
+| `TX_END`              | tx id        | —             | —                 |
+| `TX_ABORT`            | tx id        | —             | abort_count       |
+| `READ_LOCK_ACQUIRE`   | addr         | lock          | version           |
+| `READ_VERSION_CHECK`  | addr         | lock          | version           |
+| `WRITE_LOCK_ACQUIRE`  | addr         | lock          | lock_state        |
+| `WRITE_SET_INSERT`    | addr         | lock          | type_size         |
+| `COMMIT_LOCK_ACQUIRE` | lock         | addr          | type_size         |
+| `COMMIT_WRITEBACK`    | tx id        | —             | write_set_size    |
+| `COMMIT_SUCCESS`      | tx id        | —             | commit_version    |
+| `GAP_CHECK`           | tx id        | end_version   | commit_version    |
+| `LOCK_RELEASE`        | lock         | addr          | commit_version    |
+| `RETRY_END`           | tx id        | —             | abort_count       |
+
+### Activating for WBCTL Debugging
+
+```bash
+# Add -DTM_EVENT_LOG to CXXFLAGS when compiling the runtime:
+cd backends/tests
+make CXXFLAGS="-std=c++20 -O0 -pthread -g -DTM_EVENT_LOG" run
+```
+
+The SIGSEGV handler is installed automatically by `tinystm::init()` when
+`TM_EVENT_LOG` is defined.  To dump events on demand from lldb:
+
+```
+p ((stm::EventRing*)&stm::get_event_ring())->dump(0, stderr)
+```
+
+### Files
+
+| File                              | Role                        |
+|-----------------------------------|-----------------------------|
+| `backends/tm_event_logger.hpp`    | Ring buffer + event macros  |
+| `backends/TinySTM/tinystm_wbctl.hpp` | Instrumented with events  |
+| `backends/TinySTM/tinystm_common.hpp` | SIGSEGV handler install   |
+| `tools/stm_bug_tool/timeline_viz.py` | PDF timeline visualizer   |
+
+### Timeline PDF Visualization
+
+`timeline_viz.py` produces a PDF timeline from event logs with one lane per
+thread, TX boundaries as colored bands, and invariant violations highlighted
+with red rings and annotation labels above the plot.
+
+The plot uses a dense event-index x-axis that compresses time gaps, ensuring
+events are evenly spaced regardless of silent periods between clusters.
+
+**Prerequisites:** `matplotlib` (Python package). The tool auto-detects and
+reports any invariant violations before generating the timeline.
+
+**Usage:**
+
+```bash
+# 1. Generate a raw event log from a benchmark with TM_EVENT_LOG:
+cd benchmarks/STMbench7
+rm -f bin/stmbench_tl2 && make stmbench_tl2 TM_DEFINES_tl2="-DTM_EVENT_LOG"
+./bin/stmbench_tl2 -t 4 -d 5000 -w 1 2>/tmp/event_log.txt
+
+# 2. Generate a timeline PDF from the log:
+python3 tools/stm_bug_tool/timeline_viz.py --log /tmp/event_log.txt \
+    --output timeline.pdf
+
+# 3. Or run a benchmark live (build + run + parse + plot in one command):
+python3 tools/stm_bug_tool/timeline_viz.py --backend swisstm \
+    --benchmark counter --threads 4 --iters 2000 \
+    --output counter_timeline.pdf
+
+# 4. Adjust the event window around the first violation:
+python3 tools/stm_bug_tool/timeline_viz.py --log /tmp/event_log.txt \
+    --window 160 --output focused.pdf
+
+# 5. Center the window on a specific event index (e.g., after all threads start):
+python3 tools/stm_bug_tool/timeline_viz.py --log /tmp/event_log.txt \
+    --center 35000 --window 160 --output multi_threaded.pdf
+
+# 6. Pass --keep-bin to preserve the built binary between runs:
+python3 tools/stm_bug_tool/timeline_viz.py --backend tl2 \
+    --benchmark bank --threads 4 --iters 1000 \
+    --keep-bin --output bank_tl2.pdf
+```
+
+**CLI options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--log PATH` | — | Event log file (overrides live run) |
+| `--backend NAME` | — | Backend: `tinystm`, `swisstm`, `tl2`, `norec` |
+| `--benchmark NAME` | `counter` | Benchmark: `counter`, `bank` |
+| `--threads N` | `4` | Number of threads |
+| `--iters N` | `2000` | Iterations per thread |
+| `--counters N` | `1` | Number of counters (counter benchmark) |
+| `--window N` | `200` | Number of events in the focused window |
+| `--center N` | — | Center window on this event index (default: first non-warmup violation or middle of log) |
+| `--keep-bin` | — | Keep built binary after run |
+| `--output PATH` | `timeline.pdf` | Output PDF path |
+
+**Backend names:** `tinystm`, `swisstm`, `tl2`, `norec`, `wt`, `wbetl`
+
+**What the PDF shows:**
+- **Lanes**: one horizontal lane per thread, labeled by thread ID
+- **TX bands**: vertical spans (green=commit, red=abort) showing the lifetime of each transaction from TX_BEGIN to COMMIT_SUCCESS/TX_ABORT. The band spans events from begin to end on that thread's lane — wide bands mean the TX was long (many interleaved events from other threads)
+- **Markers**: color-coded by event type, shape-coded by role:
+  - Pentagons: TX_BEGIN / TX_ABORT
+  - Circles: COMMIT_SUCCESS / COMMIT_LOCK_ACQUIRE
+  - Triangles up: READ_LOCK_ACQUIRE / READ_VERSION_CHECK (reads)
+  - Triangles down: WRITE_SET_INSERT / WRITE_LOCK_ACQUIRE / COMMIT_WRITEBACK (writes)
+- **Violations**: red ring (same shape as base marker) + cross, vertical dotted line to top label
+- **Labels**: rotated 90° description text above the plot for each violation
+- **Footer**: event range, TX count, commit/abort/violation counts
+- **Dual x-axis**: top axis shows timestamps (μs), bottom shows event sequence
