@@ -592,7 +592,11 @@ public:
             }
         }
         
-        // Step 7: Apply writes and release locks with version
+        // Step 7: Apply writes — write ALL values first without releasing
+        // guards, then release each guard ONCE with the commit version.
+        // Releasing a guard while other entries share the same guard (aliasing)
+        // would allow concurrent readers to see the guard as unlocked with the
+        // new version but only a subset of the values written (stale read).
         for (auto& e : tx->write_set) {
             TM_EVENT2(COMMIT_WRITEBACK, (word_t)e.addr, (word_t)e.dtype, 0);
             switch (e.dtype) {
@@ -624,9 +628,17 @@ public:
                     *(word_t*)e.addr = e.new_value();
                     break;
             }
-            word_t idx = get_guard_idx(e.addr);
-            g_guards[idx].store((tx->commit_version << 1) & VERSION_MASK, std::memory_order_release);
-            TM_EVENT2(LOCK_RELEASE, (word_t)e.addr, tx->commit_version, 0);
+        }
+        // Release each unique guard exactly once
+        {
+            bool released_guard[GUARD_TABLE_SIZE] = {false};
+            for (auto& e : tx->write_set) {
+                word_t idx = get_guard_idx(e.addr);
+                if (released_guard[idx]) continue;
+                released_guard[idx] = true;
+                g_guards[idx].store((tx->commit_version << 1) & VERSION_MASK, std::memory_order_release);
+                TM_EVENT2(LOCK_RELEASE, (word_t)e.addr, tx->commit_version, 0);
+            }
         }
         
         tx->active = false;
