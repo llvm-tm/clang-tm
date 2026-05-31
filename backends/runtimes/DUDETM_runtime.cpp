@@ -241,7 +241,7 @@ push_free_entry(void* ptr)
 void* tm_malloc(size_t size)
 {
     void* p = ::operator new(size);
-    tm_track_spec_alloc(p);
+    tm_track_alloc_result(p, size);
     if (g_in_tx) push_alloc_entry(p, size);
     return p;
 }
@@ -250,7 +250,7 @@ void* tm_calloc(size_t nmemb, size_t size)
 {
     void* p = ::operator new(nmemb * size);
     memset(p, 0, nmemb * size);
-    tm_track_spec_alloc(p);
+    tm_track_alloc_result(p, nmemb * size);
     if (g_in_tx) push_alloc_entry(p, nmemb * size);
     return p;
 }
@@ -263,30 +263,19 @@ void* tm_realloc(void* ptr, size_t size)
         if (g_in_tx) push_free_entry(ptr);
         ::operator delete(ptr);
     }
-    tm_track_spec_alloc(p);
+    tm_track_alloc_result(p, size);
     if (g_in_tx) push_alloc_entry(p, size);
     return p;
 }
 
 void tm_free(void* ptr)
 {
+    if (!ptr || stm::isStackAddress(ptr)) return;
+    TM_EVENT(FREE, ptr, 0);
     if (g_in_tx) {
-        // Detect double-free: same pointer freed twice in the same TX
-        if (g_deferred_frees_set.count(ptr)) {
-            fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
-            void* buf[64];
-            int n = backtrace(buf, 64);
-            backtrace_symbols_fd(buf, n, 2);
-            fflush(stderr);
-            _exit(1);
-        }
-        tm_untrack_spec_alloc(ptr);
-        g_deferred_frees_set.insert(ptr);
+        tinystm::tm_write_i1(reinterpret_cast<uint8_t*>(ptr), 0);
+        tm_free_append_deferred(ptr);
         push_free_entry(ptr);
-        auto* node = static_cast<FreeNode*>(::operator new(sizeof(FreeNode)));
-        node->ptr = ptr;
-        node->next = g_deferred_frees;
-        g_deferred_frees = node;
     } else {
         ::operator delete(ptr);
     }
