@@ -345,6 +345,145 @@ Any function that matches one of these patterns OR has the `THREAD` annotation g
 | `TM_LOCAL` | Stack variable is thread-private — skip TM instrumentation |
 | `PSTATIC_REBUILD` | Called automatically after `tm_init()` restores persistent data. Used with `TX` to rebuild data structures from TM-backed arrays. |
 
+## Explicit TM API (No Plugin Required)
+
+For projects that cannot or should not use an LLVM plugin, the `expli_tm_api/`
+directory provides a header-only C++ API that wraps the STM runtime directly.
+No compiler instrumentation needed — just `#include "tm_api.hpp"` and link a
+backend runtime.
+
+### Quick Start
+
+```cpp
+#include "expli_tm_api/tm_api.hpp"
+#include <cstdio>
+
+int main() {
+    expli::TM<int>::init();
+    expli::TM<int>::thread_init();
+
+    expli::TM<int> x;
+    x.poke(0);
+
+    expli::TM<int>::begin();
+    x.write(42);
+    int r = x.read();                       // sees own write
+    expli::TM<int>::end();
+
+    printf("%d\n", x.peek());               // 42 (committed)
+    expli::TM<int>::exit();
+}
+```
+
+Compile:
+```bash
+c++ -std=c++20 -O2 -pthread -I/path/to/tm_api_cpp  \
+    -DTM_BACKEND_TINYSTM -DDESIGN_WBCTL           \
+    my_prog.cpp backends/runtimes/TinySTM_runtime.cpp -pthread
+```
+
+### Core Types
+
+| Type | Purpose |
+|------|---------|
+| `TM<T>` | Transactional wrapper for a value of type `T`. Reads/writes go through the STM runtime. |
+| `TM<T*>` | Pointer specialization. Manages a TM-tracked pointer + optional buffer. |
+| `my::vector<T>` | `std::vector`-like container (uses `TM<T>::malloc`/`free` internally). |
+| `my::pair<A,B>` | Lightweight pair. |
+| `flat_map<K,V>` | Sorted-vector map with binary search. |
+| `flat_multimap<K,V>` | Sorted-vector multimap. |
+| `flat_set<K>` | Sorted-vector set. |
+
+### Lifecycle
+
+```cpp
+TM<int>::init();            // one-time global init
+TM<int>::thread_init();     // per-thread (before any begin)
+TM<int>::begin();           // start transaction
+// ... reads/writes ...
+TM<int>::end();             // commit
+TM<int>::thread_exit();     // per-thread cleanup
+TM<int>::exit();            // global cleanup
+```
+
+### `TM<T>` methods
+
+| Method | Inside TX | Outside TX |
+|--------|-----------|-----------|
+| `v.read()` | TM read (sees write-set) | — |
+| `v.write(val)` | TM write (write-set) | — |
+| `v.peek()` | — | Direct read of `value_` |
+| `v.poke(val)` | — | Direct write to `value_` |
+| `T::begin()` / `T::end()` | Nesting-aware TX control | — |
+| `T::malloc(s)` / `T::free(p)` | TM-tracked alloc/free | Regular alloc/free |
+
+### `TM<T*>` — Pointer & Array Management
+
+Manages a TM-tracked pointer (the address is protected). The pointed-to buffer
+is managed separately. Element access can go through static helpers or through
+nested `TM<TM<T>*>` for `operator[]` syntax.
+
+**Buffer management** (uses `::operator new`/`delete` — no spec_alloc tracking):
+```cpp
+TM<int*> buf;
+buf.alloc(100);                 // ::operator new(100 * sizeof(int))
+buf.free_ptr();                 // ::operator delete + set nullptr
+```
+
+**Element access (static helpers):**
+```cpp
+TM<int>::begin();
+TM<int>::write_at(&buf.read()[i], 42);
+int x = TM<int>::read_at(&buf.read()[i]);
+TM<int>::end();
+```
+
+**Nicer syntax via `TM<TM<T>*>`** (each element is a `TM<T>` object):
+```cpp
+TM<TM<int>*> buf;
+buf.alloc(100);
+TM<int>::begin();
+buf[i].write(42);               // operator[] returns TM<int>&
+int x = buf[i].read();          // read via TM
+TM<int>::end();
+buf.free_ptr();
+```
+
+Does **not** compile for `TM<void*>` (void& is ill-formed).
+
+### Data Structures
+
+`my::vector<T>` uses `TM<T>::malloc`/`free` internally, so its buffer is
+TM-tracked (spec_alloc) when allocated inside a TX, and regular heap when
+allocated outside:
+
+```cpp
+TM<int>::begin();
+my::vector<int> v;
+v.push_back(42);                // buffer allocated via TM<int>::malloc
+int x = v[0];                   // raw read (not TM-tracked — for demo only)
+TM<int>::end();
+```
+
+`flat_map`, `flat_multimap`, `flat_set` provide sorted-vector containers
+suitable for TM workloads (no pointer-based data structures like red-black trees).
+
+### Known Limitations
+
+- **Single-thread correctness only** for the WBCTL backend when the runtime
+  lacks `sigsetjmp`/`siglongjmp` retry. The explicit API relies on the
+  backend runtime's `tm_begin`/`tm_end` — if the runtime does not set up a
+  `sigsetjmp`, TX abort will `siglongjmp` to uninitalized state. Multi-threaded
+  use requires a backend that handles retry in `tm_begin` (e.g., `SingleGlobalLock`).
+- `tm_realloc` has a spec_alloc tracking limitation — use `malloc`+`memcpy`+`free` instead.
+
+### Test Suite
+
+```bash
+make -C expli_benchmarks test         # 207 ds tests + 114 tx tests
+make -C expli_benchmarks run-tests    # same
+```
+
 ## Backend Reference
 
 | Backend | Build suffix | Strategy | Correctness | Speed |
