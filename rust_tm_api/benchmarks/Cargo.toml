@@ -31,11 +31,23 @@ path = "src/tpcc.rs"
 name = "ycsb"
 path = "src/ycsb.rs"
 
+[[bin]]
+name = "fuzz_counter"
+path = "src/fuzz_counter.rs"
+
+[[bin]]
+name = "fuzz_bank"
+path = "src/fuzz_bank.rs"
+
 [features]
 default = ["wbctl"]
 wbctl = ["tm/wbctl"]
 wbetl = ["tm/wbetl"]
 wt    = ["tm/wt"]
+norec   = ["tm/norec"]
+tl2     = ["tm/tl2"]
+swisstm = ["tm/swisstm"]
+dudetm  = ["tm/dudetm"]
 
 [dependencies]
 tm = { path = "../tm", default-features = false }

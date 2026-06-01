@@ -9,7 +9,18 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         tx.borrow().as_ref().and_then(|t| t.write_set.get(&addr)).map(|e| e.value.clone())
     }) { return T::from_typed(&entry); }
     loop {
-        while is_locked(addr) { std::hint::spin_loop(); }
+        {
+            let mut rspins = 0u64;
+            while is_locked(addr) {
+                if with_tx(|tx| tx.locked_addrs.contains(&lock_index(addr))) { break; }
+                rspins += 1;
+                if rspins > 5000 {
+                    with_tx(|tx| tx.aborted = true);
+                    return unsafe { (addr as *const T).read() };
+                }
+                std::hint::spin_loop();
+            }
+        }
         let version = read_version(addr);
         let value: T = unsafe { (addr as *const T).read() };
         if read_version(addr) != version { continue; }
@@ -23,18 +34,41 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 
 fn write_word<T: Primitive>(addr: usize, val: T) {
     fence(Ordering::SeqCst);
+    if tx_aborted() { return; }
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
-    while is_locked(addr) { std::hint::spin_loop(); }
+    let tv = val.to_typed();
+    // Existing write-set entry → update in-place, no lock needed
+    if with_tx(|tx| tx.write_set.contains_key(&addr)) {
+        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()); });
+        return;
+    }
+    // Wait for lock with bounded spin (prevents deadlock)
+    {
+        let mut spins = 0u64;
+        while is_locked(addr) {
+            spins += 1;
+            if spins > 5000 { with_tx(|tx| tx.aborted = true); return; }
+            std::hint::spin_loop();
+        }
+    }
     let version = read_version(addr);
     if version > with_tx(|tx| tx.start_version) { with_tx(|tx| tx.aborted = true); return; }
     let lock_idx = lock_index(addr);
+    // Self-ownership check: different addresses may hash to the same lock
+    if with_tx(|tx| tx.locked_addrs.contains(&lock_idx)) {
+        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
+        return;
+    }
+    let mut lock_spins = 0u64;
     while !try_lock_at_index(lock_idx) {
-        if is_locked(addr) && read_version(addr) > with_tx(|tx| tx.start_version) {
+        lock_spins += 1;
+        if lock_spins > 10000
+            || (is_locked(addr) && read_version(addr) > with_tx(|tx| tx.start_version))
+        {
             with_tx(|tx| tx.aborted = true); return;
         }
         std::hint::spin_loop();
     }
-    let tv = val.to_typed();
     with_tx(|tx| { tx.locked_addrs.push(lock_idx);
         tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
 }
@@ -45,13 +79,37 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
     fence(Ordering::SeqCst);
+    if tx_aborted() { return; }
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
-    while is_locked(addr) { std::hint::spin_loop(); }
+    // Existing write-set entry → update in-place, no lock needed
+    if with_tx(|tx| tx.write_set.contains_key(&addr)) {
+        let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
+        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()); });
+        return;
+    }
+    {
+        let mut spins = 0u64;
+        while is_locked(addr) {
+            spins += 1;
+            if spins > 5000 { with_tx(|tx| tx.aborted = true); return; }
+            std::hint::spin_loop();
+        }
+    }
     let version = read_version(addr);
     if version > with_tx(|tx| tx.start_version) { with_tx(|tx| tx.aborted = true); return; }
     let lock_idx = lock_index(addr);
+    // Self-ownership check: different addresses may hash to the same lock
+    if with_tx(|tx| tx.locked_addrs.contains(&lock_idx)) {
+        let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
+        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
+        return;
+    }
+    let mut lock_spins = 0u64;
     while !try_lock_at_index(lock_idx) {
-        if is_locked(addr) && read_version(addr) > with_tx(|tx| tx.start_version) {
+        lock_spins += 1;
+        if lock_spins > 10000
+            || (is_locked(addr) && read_version(addr) > with_tx(|tx| tx.start_version))
+        {
             with_tx(|tx| tx.aborted = true); return;
         }
         std::hint::spin_loop();
@@ -64,7 +122,7 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
 pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
     fence(Ordering::SeqCst);
-    if tx.aborted { for &idx in &tx.locked_addrs { unlock_at_index(idx); } TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
+    if tx.aborted { unlock_indices(&tx.locked_addrs); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
     if tx.write_set.is_empty() { return true; }
     let (raw, raw_bytes) = flatten_write_set(&tx.write_set);
     gc_acquire(); fence(Ordering::SeqCst);

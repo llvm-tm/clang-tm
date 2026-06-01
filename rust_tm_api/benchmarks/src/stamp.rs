@@ -5,7 +5,6 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 use tm::{transaction, TmCell, Transaction};
 
@@ -151,6 +150,7 @@ fn kmeans_worker(
 fn run_kmeans(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
     println!("\n=== KMeans ===");
     let state = KMeansState::new(config);
+    let dur = std::time::Duration::from_millis(config.duration as u64);
     std::thread::scope(|s| {
         for tid in 0..config.threads {
             let sref = &state;
@@ -158,6 +158,8 @@ fn run_kmeans(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
                 kmeans_worker(tid, sref, stop, ops);
             });
         }
+        std::thread::sleep(dur);
+        stop.store(true, Ordering::Relaxed);
     });
     println!("  Final centroids computed (KMeans complete)");
 }
@@ -255,6 +257,7 @@ fn run_labyrinth(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
     println!("\n=== Labyrinth ===");
     println!("  Grid: {}x{}x{}", config.grid_x, config.grid_y, config.grid_z);
     let grid = Arc::new(LabyrinthGrid::new(config.grid_x, config.grid_y, config.grid_z));
+    let dur = std::time::Duration::from_millis(config.duration as u64);
     std::thread::scope(|s| {
         for tid in 0..config.threads {
             let g = grid.clone();
@@ -262,6 +265,8 @@ fn run_labyrinth(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
                 labyrinth_worker(tid, &g, config, stop, ops);
             });
         }
+        std::thread::sleep(dur);
+        stop.store(true, Ordering::Relaxed);
     });
     println!("  Labyrinth complete");
 }
@@ -349,6 +354,7 @@ fn vacation_worker(
 fn run_vacation(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
     println!("\n=== Vacation ===");
     let rm = Arc::new(ReservationManager::new(config));
+    let dur = std::time::Duration::from_millis(config.duration as u64);
     std::thread::scope(|s| {
         for tid in 0..config.threads {
             let r = rm.clone();
@@ -356,6 +362,8 @@ fn run_vacation(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
                 vacation_worker(tid, &r, config, stop, ops);
             });
         }
+        std::thread::sleep(dur);
+        stop.store(true, Ordering::Relaxed);
     });
     println!("  Vacation complete");
 }

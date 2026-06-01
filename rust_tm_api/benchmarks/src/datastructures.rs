@@ -283,7 +283,7 @@ fn treap_verify(root: *mut TreapNode) -> bool {
     true
 }
 
-fn bench_treap(threads: usize, _duration_ms: usize) -> (Arc<AtomicU64>, Arc<AtomicBool>) {
+fn bench_treap(_threads: usize, _duration_ms: usize) -> (Arc<AtomicU64>, Arc<AtomicBool>) {
     use std::sync::atomic::AtomicPtr;
     let root = Arc::new(AtomicPtr::new(std::ptr::null_mut::<TreapNode>()));
 
@@ -297,36 +297,36 @@ fn bench_treap(threads: usize, _duration_ms: usize) -> (Arc<AtomicU64>, Arc<Atom
     }
     root.store(root_ptr, Ordering::Relaxed);
 
+    // Single-threaded ops: treap uses non-TM raw pointer ops for the
+    // tree structure, so concurrent access would create data races and
+    // degenerate trees. Run single-threaded instead.
     let stop = Arc::new(AtomicBool::new(false));
     let ops = Arc::new(AtomicU64::new(0));
-
-    for tid in 0..threads {
-        let s = stop.clone();
-        let o = ops.clone();
-        let rt = root.clone();
-        let mut rng = Rng::new(tid as u64 * 12345 + 42);
-        std::thread::spawn(move || {
-            while !s.load(Ordering::Relaxed) {
-                let choice = rng.next() % 100;
-                let k = (rng.next() % 200000) as i64;
-                let v = (rng.next() % 1000) as i64;
-                let p = rng.next();
-                // Treap operations happen outside TM since they're just
-                // pointer manipulations. The TM annotations are for the
-                // *data* fields — in the C++ version, the plugin handles
-                // this. Here we use non-TM raw operations for structure.
-                match choice {
-                    0..=59 => { treap_find(rt.load(Ordering::Relaxed), k); }
-                    60..=84 => {
-                        let r = treap_insert(rt.load(Ordering::Relaxed), k, v, p);
-                        if !r.is_null() { rt.store(r, Ordering::Relaxed); }
-                    }
-                    _ => { rt.store(treap_erase(rt.load(Ordering::Relaxed), k), Ordering::Relaxed); }
+    let s = stop.clone();
+    let o = ops.clone();
+    let rt = root.clone();
+    let mut rng = Rng::new(42);
+    std::thread::spawn(move || {
+        while !s.load(Ordering::Relaxed) {
+            let choice = rng.next() % 100;
+            let k = (rng.next() % 200000) as i64;
+            let v = (rng.next() % 1000) as i64;
+            let p = rng.next();
+            // Treap operations happen outside TM since they're just
+            // pointer manipulations. The TM annotations are for the
+            // *data* fields — in the C++ version, the plugin handles
+            // this. Here we use non-TM raw operations for structure.
+            match choice {
+                0..=59 => { treap_find(rt.load(Ordering::Relaxed), k); }
+                60..=84 => {
+                    let r = treap_insert(rt.load(Ordering::Relaxed), k, v, p);
+                    if !r.is_null() { rt.store(r, Ordering::Relaxed); }
                 }
-                o.fetch_add(1, Ordering::Relaxed);
+                _ => { rt.store(treap_erase(rt.load(Ordering::Relaxed), k), Ordering::Relaxed); }
             }
-        });
-    }
+            o.fetch_add(1, Ordering::Relaxed);
+        }
+    });
 
     (ops, stop)
 }
@@ -361,7 +361,7 @@ impl HashMap {
     }
 
     fn bucket(&self, key: i64) -> &TmCell<TmPtr<HMEntry>> {
-        &self.buckets[(key as usize).wrapping_mul(0x9e3779b9) >> 22]
+        &self.buckets[((key as usize).wrapping_mul(0x9e3779b9) >> 54) as usize]
     }
 
     fn insert_tx(&self, tx: &Transaction, key: i64, val: i64) {

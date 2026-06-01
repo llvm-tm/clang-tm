@@ -23,6 +23,7 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 
 fn write_word<T: Primitive>(addr: usize, val: T) {
     fence(Ordering::SeqCst);
+    if tx_aborted() { return; }
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
     let tv = val.to_typed();
     with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
@@ -34,6 +35,7 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
     fence(Ordering::SeqCst);
+    if tx_aborted() { return; }
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
