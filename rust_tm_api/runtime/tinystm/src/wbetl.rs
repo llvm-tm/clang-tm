@@ -64,11 +64,11 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
 pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
     fence(Ordering::SeqCst);
-    if tx.aborted { for &idx in &tx.locked_addrs { unlock_at_index(idx); } return false; }
+    if tx.aborted { for &idx in &tx.locked_addrs { unlock_at_index(idx); } TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
     if tx.write_set.is_empty() { return true; }
     let (raw, raw_bytes) = flatten_write_set(&tx.write_set);
     gc_acquire(); fence(Ordering::SeqCst);
-    if !validate_read_set(&tx.read_set) { unlock_indices(&tx.locked_addrs); gc_release_and_inc(); return false; }
+    if !validate_read_set(&tx.read_set) { unlock_indices(&tx.locked_addrs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
     unsafe { for &(a, v, sz) in &raw { write_mem(a, v, sz); } }
     unsafe { for &(a, ref buf) in &raw_bytes { write_mem_bytes(a, buf); } }
     fence(Ordering::SeqCst);

@@ -223,6 +223,7 @@ fn main() {
     println!("=======");
     println!("Total TXs: {ops}");
     println!("Throughput: {:.0} tx/s", ops as f64 / secs);
+    println!("TM aborts: {}", tm::tm_abort_count());
 
     tm::tm_exit();
 }

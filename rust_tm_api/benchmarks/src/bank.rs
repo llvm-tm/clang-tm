@@ -172,9 +172,10 @@ fn main() {
     let final_total = total_non_transactional(&bank);
     let total_txns = total_txfer + total_reads;
 
+    let aborts = tm::tm_abort_count();
     println!(
-        "\nResults:\n  Final total: {}  Expected: {}\n  Transfers: {}  Read-all: {}\n  Total txns: {}",
-        final_total, expected_total, total_txfer, total_reads, total_txns
+        "\nResults:\n  Final total: {}  Expected: {}\n  Transfers: {}  Read-all: {}\n  Total txns: {}\n  TM aborts: {}",
+        final_total, expected_total, total_txfer, total_reads, total_txns, aborts
     );
 
     tm_exit();
