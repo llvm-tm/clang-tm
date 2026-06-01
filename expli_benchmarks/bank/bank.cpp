@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <condition_variable>
 #include <mutex>
 #include <random>
 #include <thread>
@@ -39,35 +40,35 @@ Bank *g_bank;   // set once in main, never modified
 
 // ── TX functions ────────────────────────────────────────────
 void transfer(int src, int dst, int amount) {
-    expli::TM<int>::begin();
-    Account *a_src = &g_bank->accounts[src];
-    Account *a_dst = &g_bank->accounts[dst];
+    expli::TM<int>::transaction([&]() {
+        Account *a_src = &g_bank->accounts[src];
+        Account *a_dst = &g_bank->accounts[dst];
 
-    int bal = a_src->balance.read();
-    bal -= amount;
-    a_src->balance.write(bal);
+        int bal = a_src->balance.read();
+        bal -= amount;
+        a_src->balance.write(bal);
 
-    bal = a_dst->balance.read();
-    bal += amount;
-    a_dst->balance.write(bal);
-
-    expli::TM<int>::end();
+        bal = a_dst->balance.read();
+        bal += amount;
+        a_dst->balance.write(bal);
+    });
 }
 
 int total_transactional() {
-    expli::TM<int>::begin();
     int total = 0;
-    for (int i = 0; i < g_bank->size(); ++i)
-        total += g_bank->accounts[i].balance.read();
-    expli::TM<int>::end();
+    expli::TM<int>::transaction([&]() {
+        total = 0;
+        for (int i = 0; i < g_bank->size(); ++i)
+            total += g_bank->accounts[i].balance.read();
+    });
     return total;
 }
 
 void reset() {
-    expli::TM<int>::begin();
-    for (int i = 0; i < g_bank->size(); ++i)
-        g_bank->accounts[i].balance.write(DEFAULT_INITIAL_BALANCE);
-    expli::TM<int>::end();
+    expli::TM<int>::transaction([&]() {
+        for (int i = 0; i < g_bank->size(); ++i)
+            g_bank->accounts[i].balance.write(DEFAULT_INITIAL_BALANCE);
+    });
 }
 
 int total_non_transactional() {

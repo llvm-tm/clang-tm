@@ -148,6 +148,10 @@ pub fn tx_active() -> bool {
     TX.with(|tx| match *tx.borrow() { Some(ref t) => !t.aborted, None => false })
 }
 
+pub fn tx_aborted() -> bool {
+    TX.with(|tx| match *tx.borrow() { Some(ref t) => t.aborted, None => false })
+}
+
 pub fn flush_tx() -> Option<Box<TxState>> { TX.with(|tx| tx.borrow_mut().take()) }
 
 // ── Memory operations ───────────────────────────────────
@@ -204,7 +208,13 @@ pub fn validate_read_set(read_set: &[(usize, u64)]) -> bool {
 }
 
 pub fn unlock_indices(idxs: &[usize]) {
-    for &idx in idxs { unlock_at_index(idx); }
+    // Dedup: lock aliasing (two addresses → same lock index) causes
+    // duplicates in WT/WBETL locked_addrs.  Each lock must be released
+    // exactly once or the version counter is inflated.
+    let mut deduped: Vec<usize> = idxs.to_vec();
+    deduped.sort_unstable();
+    deduped.dedup();
+    for &idx in &deduped { unlock_at_index(idx); }
     fence(Ordering::SeqCst);
 }
 

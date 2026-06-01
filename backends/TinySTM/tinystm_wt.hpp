@@ -281,8 +281,12 @@ try_soft_spin(                                          //
 		return false;
 	if (!stm::tm_token_try_acquire(tx->id))
 		return false;
-	while ((lock->get() & OWNED_MASK) != 0) {
-		stm::tm_cpu_relax();
+	{
+		int ts_spin = 0;
+		while ((lock->get() & OWNED_MASK) != 0) {
+			if (++ts_spin > 5000) return false;
+			stm::tm_cpu_relax();
+		}
 	}
 	return true;
 }
@@ -331,12 +335,17 @@ read_word_wt(                                           //
 
 	// Double-check protocol
 	volatile word_t l = lock->get();
-	while (true) {
-		// Locked by another — re-read until released
-		if ((l & OWNED_MASK) != 0) {
-			l = lock->get();
-			continue;
-		}
+	{
+		int spin_count = 0;
+		while (true) {
+			// Locked by another — re-read until released
+			if ((l & OWNED_MASK) != 0) {
+				if (++spin_count > 5000) {
+					abort_tx("read_spin_timeout");
+				}
+				l = lock->get();
+				continue;
+			}
 
 		word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
 		word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
@@ -404,6 +413,7 @@ read_word_wt(                                           //
 
 		return result;
 	}
+	}
 }
 
 static void                                             //
@@ -441,10 +451,12 @@ write_word_wt(                                           //
 
 	Lock_wt *lock = &g_locks_wt.get(ByteOffset((word_t)addr).base_addr);
 
-	while (true) {
-		volatile word_t l = lock->get();
+	{
+		int write_spin_count = 0;
+		while (true) {
+			volatile word_t l = lock->get();
 
-		if ((l & OWNED_MASK) == 0) {
+			if ((l & OWNED_MASK) == 0) {
 			// Lock is free — try to acquire
 			word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
 			word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
@@ -500,8 +512,12 @@ write_word_wt(                                           //
 			TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)8);
 			return;
 		}
-		// Lock held by someone else → busy-wait (falls through while loop)
+		// Lock held by someone else → bounded busy-wait with abort
+		if (++write_spin_count > 5000) {
+			abort_tx("write_spin_timeout");
+		}
 		stm::tm_cpu_relax();
+	}
 	}
 }
 

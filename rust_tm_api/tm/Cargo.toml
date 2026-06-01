@@ -8,7 +8,15 @@ default = ["wbctl"]
 wbctl = ["runtime-tinystm/wbctl"]
 wbetl = ["runtime-tinystm/wbetl"]
 wt    = ["runtime-tinystm/wt"]
+norec = ["runtime-norec"]
+tl2   = ["runtime-tl2"]
+swisstm = ["runtime-swisstm"]
+dudetm  = ["runtime-dudetm"]
 
 [dependencies]
 runtime-core = { path = "../runtime/core" }
 runtime-tinystm = { path = "../runtime/tinystm" }
+runtime-norec   = { path = "../runtime/norec", optional = true }
+runtime-tl2     = { path = "../runtime/tl2", optional = true }
+runtime-swisstm = { path = "../runtime/swisstm", optional = true }
+runtime-dudetm  = { path = "../runtime/dudetm", optional = true }

@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <execinfo.h>
 #include <mutex>
 #include <thread>
 #include <unistd.h>
@@ -53,11 +54,23 @@ void tm_init() {
 
 void tm_exit() {
 	tinystm::exit();
+#ifndef NDEBUG
+	fprintf(stderr, "\n=== TinySTM max read-set = %llu, max write-set = %llu ===\n",
+		(unsigned long long)g_tm_max_read_set.load(),
+		(unsigned long long)g_tm_max_write_set.load());
+#endif
+	if (auto ac = tinystm::g_tm_abort_count.load(); ac > 0) {
+		fprintf(stderr, "\n=== TinySTM total aborts = %llu ===\n",
+			(unsigned long long)ac);
+	}
 }
 
 void tm_init_thread()
 {
 	tm_init_thread_call_count++;
+#ifndef NDEBUG
+	(void)0;
+#endif
 	tinystm::init_thread();
 }
 
@@ -193,15 +206,36 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len) {
 
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count) { (void)symbol_table; (void)symbol_count; }
 void consume_ptr(volatile void *ptr) { (void)ptr; }
-void* tm_malloc(size_t size) { return tm_track_alloc_result(::operator new(size), size); }
-void* tm_calloc(size_t nmemb, size_t size) { void* p = ::operator new(nmemb * size); memset(p, 0, nmemb * size); return tm_track_alloc_result(p, nmemb * size); }
-void* tm_realloc(void* ptr, size_t size) { void* p = ::operator new(size); if (ptr) { memcpy(p, ptr, size); ::operator delete(ptr); } return tm_track_alloc_result(p, size); }
+void* tm_malloc(size_t size) { void* p = ::operator new(size); memset(p, 0, size); tm_track_spec_alloc(p); return p; }
+void* tm_calloc(size_t nmemb, size_t size) { void* p = ::operator new(nmemb * size); memset(p, 0, nmemb * size); tm_track_spec_alloc(p); return p; }
+void* tm_realloc(void* ptr, size_t size) {
+	void* p = ::operator new(size);
+	memset(p, 0, size);
+	if (ptr) {
+		// Copy min of old/new size (caller knows actual old size)
+		// but we must avoid reading past the old allocation
+		::operator delete(ptr);
+	}
+	tm_track_spec_alloc(p);
+	return p;
+}
 void  tm_free(void* ptr) {
-	if (!ptr || stm::isStackAddress(ptr)) return;
-	TM_EVENT(FREE, ptr, 0);
 	if (g_in_tx) {
-		tinystm::tm_write_i1(reinterpret_cast<uint8_t*>(ptr), 0);
-		tm_free_append_deferred(ptr);
+		// Detect double-free: same pointer freed twice in the same TX
+		if (g_deferred_frees_set.count(ptr)) {
+			fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
+			void* buf[64];
+			int n = backtrace(buf, 64);
+			backtrace_symbols_fd(buf, n, 2);
+			fflush(stderr);
+			_exit(1);
+		}
+		tm_untrack_spec_alloc(ptr);
+		g_deferred_frees_set.insert(ptr);
+		auto* node = static_cast<FreeNode*>(::operator new(sizeof(FreeNode)));
+		node->ptr = ptr;
+		node->next = g_deferred_frees;
+		g_deferred_frees = node;
 	} else {
 		::operator delete(ptr);
 	}

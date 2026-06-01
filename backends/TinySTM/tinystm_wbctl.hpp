@@ -525,6 +525,15 @@ read_word_ctl(                                                //
 	}
 
 read_from_memory:
+	// Null-address guard: the plugin generates null-address TM reads when
+	// traversing linked-list structures (e.g., unordered_map bucket chain)
+	// where a null _M_next pointer is loaded via tm_read_ptr and then the
+	// code reads the key from the (null) node.  read_value_from_addr would
+	// SIGSEGV on null.  Return zero instead — there's no memory there.
+	if (addr == nullptr || (uint64_t)addr < 0x100000) {
+		any_type_t zero = {};
+		return zero;
+	}
 	Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 	TM_ASSERT(!lock->is_locked_by(tx->id), "wbctl locks at commit time");
 	volatile word_t l = lock->get();
@@ -534,11 +543,16 @@ read_from_memory:
 	// lock read (double-check) and allows observing values written after the
 	// transaction's snapshot point, violating opacity (see docs/proofs.md §4.1).
 
-	while (true) {
-		if ((l & OWNED_MASK) != 0) {
-			l = lock->get();
-			continue;
-		}
+	{
+		int spin_count = 0;
+		while (true) {
+			if ((l & OWNED_MASK) != 0) {
+				if (++spin_count > 5000) {
+					abort_tx("read_spin_timeout");
+				}
+				l = lock->get();
+				continue;
+			}
 
 		word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
 		volatile any_type_t value = read_value_from_addr(addr, sz);
@@ -574,6 +588,7 @@ read_from_memory:
 		tx->read_set.insert(std::pair(addr, r));
 
 		return val;
+	}
 	}
 }
 

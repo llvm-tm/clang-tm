@@ -138,7 +138,7 @@ fn run_worker(
 
             // R1: shared array reads
             for &idx in &r1_idxs {
-                sum += tx.read(&arrays.a1[idx % config.a1]);
+                sum = sum.wrapping_add(tx.read(&arrays.a1[idx % config.a1]));
             }
 
             // W1: shared array writes
@@ -153,7 +153,7 @@ fn run_worker(
                     let idx = if config.locality > 0.8 { base + j % config.a2 }
                               else if config.locality > 0.5 { base + r1_idxs[j % r1_idxs.len()] % config.a2 }
                               else { base + (j * 137) % config.a2 };
-                    sum += tx.read(&arrays.a2[tid][idx % config.a2]);
+                    sum = sum.wrapping_add(tx.read(&arrays.a2[tid][idx % config.a2]));
                 }
                 for j in 0..config.w2 {
                     let idx = if config.density > 0.8 { base + j }

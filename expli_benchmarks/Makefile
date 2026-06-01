@@ -51,9 +51,31 @@ endif
 BANK_SRC = bank/bank.cpp
 BANK_BIN = bin/bank
 
+# --- EigenBench --------------------------------------------------
+EIGEN_SRC = eigenbench/eigenbench.cpp
+EIGEN_BIN = bin/eigenbench
+
 # --- STMbench7 ----------------------------------------------------
 BENCH7_SRC = STMbench7/STMbench7.cpp
 BENCH7_BIN = bin/stmbench7
+
+# --- Fuzz benchmarks (explicit TM API) ---------------------------
+FUZZ_CTR_SRC = fuzz/fuzz_counter.cpp
+FUZZ_CTR_BIN = bin/fuzz_counter
+FUZZ_BANK_SRC = fuzz/fuzz_bank.cpp
+FUZZ_BANK_BIN = bin/fuzz_bank
+
+# --- Vacation (simplified STAMP) ---------------------------------
+VACATION_SRC = vacation/vacation.cpp
+VACATION_BIN = bin/vacation
+
+# --- TPCC --------------------------------------------------------
+TPCC_SRC = tpcc/tpcc.cpp
+TPCC_BIN = bin/tpcc
+
+# --- YCSB --------------------------------------------------------
+YCSB_SRC = ycsb/ycsb.cpp
+YCSB_BIN = bin/ycsb
 
 # --- expli_tm_api tests ------------------------------------------
 TEST_DS_SRC = ../expli_tm_api/tests/test_ds.cpp
@@ -69,9 +91,9 @@ BUILTINS += ../backends/tm_alloc_overrides.hpp \
             ../backends/tm_debug.hpp
 
 # Rules
-.PHONY: all clean run-bank run-test-ds run-test-tx run-tests run
+.PHONY: all clean run-bank run-bench7 run-vacation run-fuzz-counter run-fuzz-bank run-fuzz run-test-ds run-test-tx run-tests run
 
-all: bin $(BANK_BIN) $(BENCH7_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN)
+all: bin $(BANK_BIN) $(EIGEN_BIN) $(BENCH7_BIN) $(VACATION_BIN) $(FUZZ_CTR_BIN) $(FUZZ_BANK_BIN) $(TPCC_BIN) $(YCSB_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN)
 
 bin:
 	mkdir -p bin
@@ -79,8 +101,26 @@ bin:
 $(BANK_BIN): bin $(BANK_SRC) $(RUNTIME) $(BUILTINS) Makefile
 	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(BANK_SRC) $(RUNTIME) $(LDFLAGS)
 
+$(EIGEN_BIN): bin $(EIGEN_SRC) $(RUNTIME) $(BUILTINS) Makefile
+	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(EIGEN_SRC) $(RUNTIME) $(LDFLAGS)
+
 $(BENCH7_BIN): bin $(BENCH7_SRC) $(RUNTIME) $(BUILTINS) Makefile
 	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(BENCH7_SRC) $(RUNTIME) $(LDFLAGS)
+
+$(FUZZ_CTR_BIN): bin $(FUZZ_CTR_SRC) $(RUNTIME) $(BUILTINS) Makefile
+	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(FUZZ_CTR_SRC) $(RUNTIME) $(LDFLAGS)
+
+$(FUZZ_BANK_BIN): bin $(FUZZ_BANK_SRC) $(RUNTIME) $(BUILTINS) Makefile
+	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(FUZZ_BANK_SRC) $(RUNTIME) $(LDFLAGS)
+
+$(VACATION_BIN): bin $(VACATION_SRC) $(RUNTIME) $(BUILTINS) Makefile
+	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(VACATION_SRC) $(RUNTIME) $(LDFLAGS)
+
+$(TPCC_BIN): bin $(TPCC_SRC) $(RUNTIME) $(BUILTINS) Makefile
+	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(TPCC_SRC) $(RUNTIME) $(LDFLAGS)
+
+$(YCSB_BIN): bin $(YCSB_SRC) $(RUNTIME) $(BUILTINS) Makefile
+	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(YCSB_SRC) $(RUNTIME) $(LDFLAGS)
 
 $(TEST_DS_BIN): bin $(TEST_DS_SRC) $(RUNTIME) $(BUILTINS) Makefile
 	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(TEST_DS_SRC) $(RUNTIME) $(LDFLAGS)
@@ -91,6 +131,20 @@ $(TEST_TX_BIN): bin $(TEST_TX_SRC) $(RUNTIME) $(BUILTINS) Makefile
 run-bank: $(BANK_BIN)
 	./$(BANK_BIN) -d 3000 -a 512 -t 4
 
+run-eigenbench: $(EIGEN_BIN)
+	./$(EIGEN_BIN) -d 3000 -t 4
+
+run-fuzz-counter: $(FUZZ_CTR_BIN)
+	./$(FUZZ_CTR_BIN) 4 1000 8 42
+
+run-fuzz-bank: $(FUZZ_BANK_BIN)
+	./$(FUZZ_BANK_BIN) 4 1000 64 42
+
+run-fuzz: run-fuzz-counter run-fuzz-bank
+
+run-vacation: $(VACATION_BIN)
+	./$(VACATION_BIN) 4 5000 1000 100 42
+
 run-test-ds: $(TEST_DS_BIN)
 	./$(TEST_DS_BIN)
 
@@ -100,8 +154,14 @@ run-test-tx: $(TEST_TX_BIN)
 run-bench7: $(BENCH7_BIN)
 	./$(BENCH7_BIN) 4 5000
 
+run-tpcc: $(TPCC_BIN)
+	./$(TPCC_BIN) -t 4 -d 3000
+
+run-ycsb: $(YCSB_BIN)
+	./$(YCSB_BIN) -t 4 -d 3000
+
 run-tests: run-test-ds run-test-tx
-run: run-bank run-bench7 run-tests
+run: run-bank run-eigenbench run-bench7 run-vacation run-fuzz run-tpcc run-ycsb run-tests
 
 clean:
 	rm -rf bin

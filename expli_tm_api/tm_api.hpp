@@ -91,29 +91,45 @@ public:
     // Nesting protocol: the plugin normally increments tm_nested_call_counter
     // before calling tm_begin/tm_end.  We replicate that here so the runtime
     // sees counter==1 on the outermost tx and 0 after it commits.
+    //
+    // ⚠  IMPORTANT: begin() and end() do NOT call sigsetjmp/siglongjmp.
+    //    Those calls must live in a frame that stays alive across the entire
+    //    TX.  See transaction() below for a safe retry loop.
+    //
     static void begin() {
         if (tm_nested_call_counter == 0) {
             tm_nested_call_counter = 1;
-            tm_longjmp_ret = sigsetjmp(tm_jmpbuf, 0);
             tm_begin();
-            if (tm_longjmp_ret != 0) {
-                // Abort — siglongjmp from backend's abort_tx() jumped back
-                // here.  tm_begin() above already re-initialized the TX
-                // (it checks counter == 1 and runs the full init path).
-                // Return to caller which re-executes the TX body.
-                return;
-            }
         } else {
             tm_nested_call_counter++;
         }
     }
     static void end() {
         if (tm_nested_call_counter == 1) {
-            tm_end();                       // commit FIRST
-            tm_nested_call_counter = 0;     // then decrement (tm_end checks counter==1)
+            tm_end();                       // may siglongjmp to caller's sigsetjmp
+            tm_nested_call_counter = 0;     // reached only on successful commit
         } else {
             tm_nested_call_counter--;
         }
+    }
+
+    // ── Safe retry loop — sigsetjmp lives in this frame ──
+    // The caller provides a lambda/function with the TX body.
+    // sigsetjmp is called from this frame, which does NOT return
+    // between sigsetjmp and siglongjmp (undoing the UB in the old
+    // begin() approach).
+    template<typename F>
+    static void transaction(F&& body) {
+        volatile bool done = false;
+        while (!done) {
+            sigsetjmp(tm_jmpbuf, 0);
+            tm_nested_call_counter = 1;
+            tm_begin();
+            body();
+            tm_end();
+            done = true;  // commit succeeded
+        }
+        tm_nested_call_counter = 0;
     }
     static void init()         { tm_init(); }
     static void exit()         { tm_exit(); }
@@ -152,8 +168,22 @@ template<typename T>
 class TM<T*> {
     T *value_ = nullptr;
 public:
-    static void begin()        { tm_begin(); }
-    static void end()          { tm_end(); }
+    static void begin()        { tm_nested_call_counter = 1; tm_begin(); }
+    static void end()          { tm_end(); tm_nested_call_counter = 0; }
+
+    template<typename F>
+    static void transaction(F&& body) {
+        volatile bool done = false;
+        while (!done) {
+            sigsetjmp(tm_jmpbuf, 0);
+            tm_nested_call_counter = 1;
+            tm_begin();
+            body();
+            tm_end();
+            done = true;
+        }
+        tm_nested_call_counter = 0;
+    }
     static void init()         { tm_init(); }
     static void exit()         { tm_exit(); }
     static void thread_init()  { tm_init_thread(); }
