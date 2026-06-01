@@ -1,5 +1,6 @@
 #pragma once
 
+#include <csetjmp>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -9,6 +10,8 @@
 // The LLVM plugin increments it before calling tm_begin/tm_end.
 // In the explicit API we set it manually.
 extern __thread int32_t tm_nested_call_counter;
+extern __thread int32_t tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
 
 extern "C" {
 void     tm_init();
@@ -91,7 +94,15 @@ public:
     static void begin() {
         if (tm_nested_call_counter == 0) {
             tm_nested_call_counter = 1;
+            tm_longjmp_ret = sigsetjmp(tm_jmpbuf, 0);
             tm_begin();
+            if (tm_longjmp_ret != 0) {
+                // Abort — siglongjmp from backend's abort_tx() jumped back
+                // here.  tm_begin() above already re-initialized the TX
+                // (it checks counter == 1 and runs the full init path).
+                // Return to caller which re-executes the TX body.
+                return;
+            }
         } else {
             tm_nested_call_counter++;
         }

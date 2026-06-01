@@ -970,7 +970,24 @@ Ran all 7 non-TSX backends × 3 benchmarks at 1t and 4t:
 | Labyrinth | ✓ | ✗(crash) | ✗(0p) | ✓ | ✓ | ✗(crash) | ✓ |
 | STMbench7 | ✓ | ✗(crash) | ✗(crash) | ⚠(4t slow) | ✗(4t hang) | ✗(hang) | ✓ |
 
-### Conclusions
+## Done (this session — 2026-06-01)
+### Rust TM API enhancements
+- **Bytes variant for arbitrary types**: `TypedValue::Bytes(Box<[u8]>)` for buffers > 8 bytes.
+- **TmRaw trait**: byte-serialization trait for arbitrary user types; blanket impl for all `Primitive` types.
+- **f32/f64 support**: `Primitive` for `f32`/`f64` via `to_bits()`/`from_bits()` (stored as U32/U64).
+- **TinySTM crate restructured**: `common.rs` + 3 variant files (`wbctl.rs`, `wbetl.rs`, `wt.rs`) sharing Lock table, Lock, TxState, clock, thread-local. Feature flags select which variant is compiled.
+- **`def_read!`/`def_write!` macros**: reduce repetitive typed-function boilerplate.
+- **Rust `try_lock_exclusive` CAS fix**: Changed from `compare_exchange(0, 1, ...)` to `compare_exchange(cur, cur|1, ...)`, preserving version bits after first unlock. C++ version was already correct (loaded `current_state & ~OWNED_MASK`).
+- **Feature priority fix**: `runtime-tinystm` lib.rs uses `#[cfg(all(feature = "wbctl", not(any(feature = "wbetl", feature = "wt"))))]` to prevent ambiguous glob re-exports when `--features wt` is passed on top of default `wbctl`.
+- **`TmPtr<T>`**: Pointer wrapper with `TmPrimitive` impl (delegates to `tm_read_ptr`/`tm_write_ptr`).
+- **`TmCell<T>::read_raw/write_raw`**: byte-buffer I/O for arbitrary types stored in `TmCell<u8>`.
+- **All 3 TinySTM variants (wbctl/wbetl/wt) PASS bank benchmark**: `cargo run -p benchmarks --bin bank --features {variant} -- -t 1 -d 1000` → "PASS: Money conserved" for all three.
+
+## Blocked
+- **Additional Rust runtimes**: Only TinySTM/WBCTL implemented. Need TL2, NOrec, SwissTM backends added as `runtime/tl2/`, `runtime/norec/`, etc.
+- **C++ STMbench7**: Still hangs on TL2/WT/SwissTM at 4t.
+
+## Conclusions
 - **2 backends pass the full suite**: WBCTL and Singlelock.
 - **NOrec** passes small benchmarks but is 4× slower than WBCTL at 4t on STMbench7 (O(n) write-set scans).
 - **TL2** passes bank and labyrinth but hangs on STMbench7 at 4t (livelock in commit validation).

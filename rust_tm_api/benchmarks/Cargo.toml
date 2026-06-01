@@ -1,0 +1,42 @@
+[package]
+name = "benchmarks"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bank"
+path = "src/bank.rs"
+
+[[bin]]
+name = "stmbench7"
+path = "src/stmbench7.rs"
+
+[[bin]]
+name = "datastructures"
+path = "src/datastructures.rs"
+
+[[bin]]
+name = "eigenbench"
+path = "src/eigenbench.rs"
+
+[[bin]]
+name = "stamp"
+path = "src/stamp.rs"
+
+[[bin]]
+name = "tpcc"
+path = "src/tpcc.rs"
+
+[[bin]]
+name = "ycsb"
+path = "src/ycsb.rs"
+
+[features]
+default = ["wbctl"]
+wbctl = ["tm/wbctl"]
+wbetl = ["tm/wbetl"]
+wt    = ["tm/wt"]
+
+[dependencies]
+tm = { path = "../tm", default-features = false }
+fastrand = "2"
