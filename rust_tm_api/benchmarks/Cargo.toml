@@ -48,6 +48,9 @@ norec   = ["tm/norec"]
 tl2     = ["tm/tl2"]
 swisstm = ["tm/swisstm"]
 dudetm  = ["tm/dudetm"]
+tsxsgl  = ["tm/tsxsgl"]
+nvhtm   = ["tm/nvhtm"]
+spht    = ["tm/spht"]
 
 [dependencies]
 tm = { path = "../tm", default-features = false }

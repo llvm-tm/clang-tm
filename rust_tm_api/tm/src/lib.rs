@@ -57,6 +57,45 @@ pub use runtime_dudetm::{
     tm_read_raw, tm_write_raw,
 };
 
+#[cfg(feature = "tsxsgl")]
+pub use runtime_tsxsgl::{
+    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
+    tm_begin, tm_commit, tm_abort_count,
+    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
+    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
+    tm_read_f32, tm_read_f64, tm_read_ptr,
+    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
+    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
+    tm_write_f32, tm_write_f64, tm_write_ptr,
+    tm_read_raw, tm_write_raw,
+};
+
+#[cfg(feature = "nvhtm")]
+pub use runtime_nvhtm::{
+    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
+    tm_begin, tm_commit, tm_abort_count,
+    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
+    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
+    tm_read_f32, tm_read_f64, tm_read_ptr,
+    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
+    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
+    tm_write_f32, tm_write_f64, tm_write_ptr,
+    tm_read_raw, tm_write_raw,
+};
+
+#[cfg(feature = "spht")]
+pub use runtime_spht::{
+    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
+    tm_begin, tm_commit, tm_abort_count,
+    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
+    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
+    tm_read_f32, tm_read_f64, tm_read_ptr,
+    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
+    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
+    tm_write_f32, tm_write_f64, tm_write_ptr,
+    tm_read_raw, tm_write_raw,
+};
+
 #[cfg(any(feature = "wbctl", feature = "wbetl", feature = "wt"))]
 pub use runtime_tinystm::{
     tm_init, tm_exit, tm_init_thread, tm_exit_thread,
@@ -72,10 +111,11 @@ pub use runtime_tinystm::{
 
 #[cfg(not(any(
     feature = "wbctl", feature = "wbetl", feature = "wt",
-    feature = "norec", feature = "tl2", feature = "swisstm", feature = "dudetm"
+    feature = "norec", feature = "tl2", feature = "swisstm", feature = "dudetm",
+    feature = "tsxsgl", feature = "nvhtm", feature = "spht"
 )))]
 compile_error!(
-    "At least one backend feature must be enabled: wbctl, wbetl, wt, norec, tl2, swisstm, dudetm"
+    "At least one backend feature must be enabled: wbctl, wbetl, wt, norec, tl2, swisstm, dudetm, tsxsgl, nvhtm, spht"
 );
 
 // ── TmPrimitive trait ──────────────────────────────────

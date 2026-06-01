@@ -12,6 +12,9 @@ norec = ["runtime-norec"]
 tl2   = ["runtime-tl2"]
 swisstm = ["runtime-swisstm"]
 dudetm  = ["runtime-dudetm"]
+tsxsgl  = ["runtime-tsxsgl"]
+nvhtm   = ["runtime-nvhtm"]
+spht    = ["runtime-spht"]
 
 [dependencies]
 runtime-core = { path = "../runtime/core" }
@@ -20,3 +23,6 @@ runtime-norec   = { path = "../runtime/norec", optional = true }
 runtime-tl2     = { path = "../runtime/tl2", optional = true }
 runtime-swisstm = { path = "../runtime/swisstm", optional = true }
 runtime-dudetm  = { path = "../runtime/dudetm", optional = true }
+runtime-tsxsgl  = { path = "../runtime/tsxsgl", optional = true }
+runtime-nvhtm   = { path = "../runtime/nvhtm", optional = true }
+runtime-spht    = { path = "../runtime/spht", optional = true }

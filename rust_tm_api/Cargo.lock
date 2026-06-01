@@ -35,6 +35,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-nvhtm"
+version = "0.1.0"
+dependencies = [
+ "runtime-core",
+]
+
+[[package]]
+name = "runtime-spht"
+version = "0.1.0"
+dependencies = [
+ "runtime-core",
+]
+
+[[package]]
 name = "runtime-swisstm"
 version = "0.1.0"
 dependencies = [
@@ -56,13 +70,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-tsxsgl"
+version = "0.1.0"
+dependencies = [
+ "runtime-core",
+]
+
+[[package]]
 name = "tm"
 version = "0.1.0"
 dependencies = [
  "runtime-core",
  "runtime-dudetm",
  "runtime-norec",
+ "runtime-nvhtm",
+ "runtime-spht",
  "runtime-swisstm",
  "runtime-tinystm",
  "runtime-tl2",
+ "runtime-tsxsgl",
 ]
