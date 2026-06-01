@@ -19,7 +19,7 @@ struct TMRuntimeHooks {
 	FunctionCallee write_i16, write_i32, write_i64;
 	FunctionCallee write_f4, write_f8, write_ptr;
 	FunctionCallee begin, end;
-	FunctionCallee set_jmpbuf, sigsetjmp;
+	FunctionCallee set_jmpbuf, get_env, sigsetjmp;
 	FunctionCallee init, exit_fn;
 	FunctionCallee init_thread, exit_thread;
 	FunctionCallee serialize_lock, serialize_unlock;
@@ -53,6 +53,7 @@ struct TMRuntimeHooks {
 		h.begin = hook("tm_begin", voidTy, {});
 		h.end = hook("tm_end", voidTy, {});
 		h.set_jmpbuf = hook("tm_set_jmpbuf", voidTy, {i8PtrTy});
+		h.get_env = hook("tm_get_env", i8PtrTy, {});
 
 		{ // declare sigsetjmp/setjmp with returns_twice attribute
 			auto *SJF = cast<Function>(

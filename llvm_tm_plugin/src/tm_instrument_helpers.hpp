@@ -510,8 +510,6 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 	auto *CounterGV = getOrCreateTLS("tm_nested_call_counter", i32Ty);
 #ifndef DISABLE_SETJMP
 	auto *JmpRetGV = getOrCreateTLS("tm_longjmp_ret", i32Ty);
-	auto *JmpBufGV = getOrCreateTLS("tm_jmpbuf",
-	                                ArrayType::get(Type::getInt8Ty(Ctx), 256));
 #endif
 
 	TM_DEBUG("Injecting tm_begin/tm_end in transaction function: %s",
@@ -550,7 +548,7 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 
 	IRBuilder<> OuterBuilder(OuterBB);
 #ifndef DISABLE_SETJMP
-	Value *JmpBufPtr = OuterBuilder.CreateBitCast(JmpBufGV, PointerType::getUnqual(Ctx));
+	Value *JmpBufPtr = OuterBuilder.CreateCall(H.get_env);
 	OuterBuilder.CreateCall(H.set_jmpbuf, {JmpBufPtr});
 	OuterBuilder.CreateStore(OuterBuilder.CreateCall(H.sigsetjmp,
 	                                                 {JmpBufPtr,
