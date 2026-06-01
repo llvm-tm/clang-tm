@@ -117,7 +117,6 @@ impl Database {
 // ── Worker ──────────────────────────────────────────────
 struct WorkerStats {
     committed: u64,
-    aborted: u64,
 }
 
 fn worker(
@@ -128,7 +127,6 @@ fn worker(
     let mut rng = fastrand::Rng::new();
     rng.seed(tid as u64 + 1000);
     let mut committed = 0u64;
-    let aborted = 0u64;
 
     while !stop.load(Ordering::Relaxed) {
         let roll = rng.f64() * 100.0;
@@ -185,7 +183,7 @@ fn worker(
         committed += 1;
     }
 
-    WorkerStats { committed, aborted }
+    WorkerStats { committed }
 }
 
 // ── Main ────────────────────────────────────────────────
@@ -238,23 +236,22 @@ fn main() {
     stop.store(true, Ordering::Relaxed);
 
     let mut total_committed = 0u64;
-    let mut total_aborted = 0u64;
     for (tid, h) in handles.into_iter().enumerate() {
         let stats = h.join().unwrap();
         total_committed += stats.committed;
-        total_aborted += stats.aborted;
         println!(
-            "  Thread {}: committed={} aborted={}",
-            tid, stats.committed, stats.aborted
+            "  Thread {}: committed={} aborted=n/a(use tm_abort_count)",
+            tid, stats.committed
         );
     }
 
+    let aborts = tm::tm_abort_count();
     println!(
-        "\n  Total committed: {}  Total aborted: {}  Ratio: {:.2}%",
+        "\n  Total committed: {}  TM aborts: {}  Ratio: {:.2}%",
         total_committed,
-        total_aborted,
+        aborts,
         if total_committed > 0 {
-            total_aborted as f64 / total_committed as f64 * 100.0
+            aborts as f64 / total_committed as f64 * 100.0
         } else {
             0.0
         }

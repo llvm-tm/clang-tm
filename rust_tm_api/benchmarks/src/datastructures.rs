@@ -496,5 +496,7 @@ fn main() {
     let hm_total = hm_ops.load(Ordering::Relaxed);
     println!("  Ops: {hm_total}  Throughput: {:.0} ops/s\n", hm_total as f64 * 1000.0 / duration as f64);
 
+    let aborts = tm::tm_abort_count();
+    println!("\nTotal TM aborts across all stages: {aborts}");
     tm::tm_exit();
 }

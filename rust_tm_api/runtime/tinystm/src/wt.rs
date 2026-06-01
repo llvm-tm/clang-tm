@@ -79,10 +79,10 @@ fn undo_restore(undo_log: &[(usize, TypedValue)]) {
 pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
     fence(Ordering::SeqCst);
-    if tx.aborted { undo_restore(&tx.undo_log); for &idx in &tx.locked_addrs { unlock_at_index(idx); } return false; }
+    if tx.aborted { undo_restore(&tx.undo_log); for &idx in &tx.locked_addrs { unlock_at_index(idx); } TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
     if tx.write_set.is_empty() { return true; }
     gc_acquire(); fence(Ordering::SeqCst);
-    if !validate_read_set(&tx.read_set) { undo_restore(&tx.undo_log); unlock_indices(&tx.locked_addrs); gc_release_and_inc(); return false; }
+    if !validate_read_set(&tx.read_set) { undo_restore(&tx.undo_log); unlock_indices(&tx.locked_addrs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
     unlock_indices(&tx.locked_addrs);
     gc_release_and_inc();
     true

@@ -356,6 +356,7 @@ fn main() {
     println!("Elapsed:  {:.1}s", elapsed);
     println!("Total ops: {ops}");
     println!("Throughput: {:.0} ops/s", ops as f64 / elapsed);
+    println!("TM aborts: {}", tm::tm_abort_count());
 
     tm::tm_exit();
 }

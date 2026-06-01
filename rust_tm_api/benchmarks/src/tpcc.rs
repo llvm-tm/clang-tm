@@ -464,5 +464,6 @@ fn main() {
     println!("  Delivery:     {}", tx_counts.c3.load(Ordering::Relaxed));
     println!("  Stock-Level:  {}", tx_counts.c4.load(Ordering::Relaxed));
 
+    println!("\nTM aborts: {}", tm::tm_abort_count());
     tm::tm_exit();
 }

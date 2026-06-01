@@ -18,4 +18,4 @@ pub use wbetl::*;
 #[cfg(feature = "wt")]
 pub use wt::*;
 
-pub use common::{tm_init, tm_exit, tm_begin, tm_init_thread, tm_exit_thread};
+pub use common::{tm_init, tm_exit, tm_begin, tm_init_thread, tm_exit_thread, tm_abort_count};

@@ -395,5 +395,6 @@ fn main() {
         run_vacation(&config, &stop, &ops);
     }
 
+    println!("\nTM aborts: {}", tm::tm_abort_count());
     tm::tm_exit();
 }
