@@ -18,6 +18,7 @@
 
 #include "../tm_spin_token.hpp"
 #include "../tm_event_logger.hpp"
+#include "../tm_platform.hpp"
 #include "tinystm_common.hpp"
 
 extern "C" {
@@ -233,6 +234,8 @@ release_write_locks_wt(word_t commit_version)
 	}
 }
 
+
+
 inline bool //
 commit()    //
 {
@@ -305,6 +308,11 @@ read_word_wt(                                           //
 	TM_ASSERT(tx, "read_word_wt: tx is null");
 	TM_ASSERT(tx->active, "read_word_wt: tx not active");
 
+	// Stack addresses: bypass TM entirely (thread-private, never shared)
+	if (stm::isStackAddress(addr)) {
+		return read_value_from_addr(addr, ValueType::UINT64);
+	}
+
 	// Write-set lookup — return the buffered new value if we wrote here
 	{
 		auto w = tx->write_set.find(addr);
@@ -312,6 +320,7 @@ read_word_wt(                                           //
 			return w->second.new_val;
 		}
 	}
+
 
 	Lock_wt *lock = &g_locks_wt.get(ByteOffset((word_t)addr).base_addr);
 
@@ -398,7 +407,7 @@ read_word_wt(                                           //
 }
 
 static void                                             //
-write_word_wt(                                          //
+write_word_wt(                                           //
     Transaction<ReadLogEntry_wt, WriteLogEntry_wt> *tx, //
     void *addr,                                         //
     any_type_t val,                                     //
@@ -409,6 +418,13 @@ write_word_wt(                                          //
 
 	TM_ASSERT(tx, "write_word_wt: tx is null");
 	TM_ASSERT(tx->active, "write_word_wt: tx not active");
+
+	// Stack addresses: bypass TM entirely (thread-private, never shared)
+	if (stm::isStackAddress(addr)) {
+		write_value_to_addr(addr, val, ValueType::UINT64);
+		return;
+	}
+
 	tx->read_only = false;
 
 	// Existing write-set entry at the same aligned address → update in place
@@ -420,6 +436,8 @@ write_word_wt(                                          //
 			return;
 		}
 	}
+
+
 
 	Lock_wt *lock = &g_locks_wt.get(ByteOffset((word_t)addr).base_addr);
 
