@@ -125,8 +125,8 @@ begin()     //
 	return true;
 }
 
-inline void                    //
-abort_tx(const char *loc = "") //
+__attribute__((noreturn)) inline void //
+abort_tx(const char *loc = "")       //
 {
 	auto *tx = current_tx_wbetl;
 
@@ -272,8 +272,12 @@ read_word_etl(                                                //
 
 	while (true) {
 		if ((l & OWNED_MASK) != 0) {
-			l = lock->get();
-			continue;
+			/* Lock owned by another TX — abort (no CM).
+			 * NB: __builtin_unreachable() prevents -O3 from moving
+			 * the abort_tx call to a cold section and replacing it
+			 * with an unbounded backward-branch (spin). */
+			abort_tx("read_locked");
+			__builtin_unreachable();
 		}
 
 		word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
@@ -291,6 +295,7 @@ read_word_etl(                                                //
 				continue;
 			} else {
 				abort_tx("read_version_extend");
+				__builtin_unreachable();
 			}
 		}
 

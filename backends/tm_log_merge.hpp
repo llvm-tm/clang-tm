@@ -33,12 +33,13 @@ inline void bitmap_write(word_t &entry_value,
                          void *raw_addr)
 {
 	unsigned nbytes = type_size(sz);
-	unsigned shift = byte_offset(raw_addr) << K_BITS_PER_BYTE_SHIFT;
-	uint8_t need = static_cast<uint8_t>(BYTE_MASK(nbytes) << shift);
+	unsigned byte_off = byte_offset(raw_addr);
+	unsigned shift = byte_off << K_BITS_PER_BYTE_SHIFT;
+	uint8_t byte_mask = static_cast<uint8_t>(((1u << nbytes) - 1u) << byte_off);
 	word_t write_word = any_to_u64(val, sz) & BYTE_MASK(nbytes);
 	word_t clr_mask = static_cast<word_t>(BYTE_MASK(nbytes)) << shift;
 	entry_value = (entry_value & ~clr_mask) | (write_word << shift);
-	entry_valid |= need;
+	entry_valid |= byte_mask;
 }
 
 // ── Read typed value from a bitmap entry ───────────────────────
@@ -51,8 +52,9 @@ inline bool bitmap_read(any_type_t &out,
                         void *raw_addr)
 {
 	unsigned nbytes = type_size(sz);
-	unsigned shift = byte_offset(raw_addr) << K_BITS_PER_BYTE_SHIFT;
-	uint8_t need = static_cast<uint8_t>(BYTE_MASK(nbytes) << shift);
+	unsigned byte_off = byte_offset(raw_addr);
+	unsigned shift = byte_off << K_BITS_PER_BYTE_SHIFT;
+	uint8_t need = static_cast<uint8_t>(((1u << nbytes) - 1u) << byte_off);
 	if ((entry_valid & need) != need)
 		return false;
 	u64_to_any(out, (entry_value >> shift) & BYTE_MASK(nbytes), sz);
@@ -87,8 +89,9 @@ inline void init_read(E &entry,
 	entry.addr = aligned;
 	entry.observed_version = version;
 	unsigned nbytes = type_size(sz);
-	unsigned shift = byte_offset(raw_addr) << K_BITS_PER_BYTE_SHIFT;
-	entry.valid = static_cast<uint8_t>(BYTE_MASK(nbytes) << shift);
+	unsigned byte_off = byte_offset(raw_addr);
+	unsigned shift = byte_off << K_BITS_PER_BYTE_SHIFT;
+	entry.valid = static_cast<uint8_t>(((1u << nbytes) - 1u) << byte_off);
 	entry.value = any_to_u64(val, sz) << shift;
 }
 
@@ -102,8 +105,9 @@ inline void merge_read(E &entry,
 {
 	entry.observed_version = version;
 	unsigned nbytes = type_size(sz);
-	unsigned shift = byte_offset(raw_addr) << K_BITS_PER_BYTE_SHIFT;
-	uint8_t need = static_cast<uint8_t>(BYTE_MASK(nbytes) << shift);
+	unsigned byte_off = byte_offset(raw_addr);
+	unsigned shift = byte_off << K_BITS_PER_BYTE_SHIFT;
+	uint8_t need = static_cast<uint8_t>(((1u << nbytes) - 1u) << byte_off);
 	entry.valid |= need;
 	uint64_t clr = static_cast<uint64_t>(BYTE_MASK(nbytes)) << shift;
 	entry.value = (entry.value & ~clr) | (any_to_u64(val, sz) << shift);

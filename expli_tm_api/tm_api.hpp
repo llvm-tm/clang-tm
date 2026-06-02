@@ -263,12 +263,12 @@ class vector {
     void grow(size_t min_cap) {
         size_t nc = m_cap ? m_cap : 4;
         while (nc < min_cap) nc *= 2;
-        T *nd = (T*)TM<T>::malloc(nc * sizeof(T));
+        T *nd = static_cast<T *>(::operator new(nc * sizeof(T)));
         for (size_t i = 0; i < m_size; i++) {
             new (&nd[i]) T(m_data[i]);
             m_data[i].~T();
         }
-        TM<T>::free(m_data);
+        ::operator delete(m_data);
         m_data = nd;
         m_cap = nc;
     }
@@ -284,7 +284,7 @@ public:
     explicit vector(size_t n) : m_data(nullptr), m_size(0), m_cap(0) { resize(n); }
     vector(const vector &o) : m_data(nullptr), m_size(0), m_cap(0) { reserve(o.m_size); for (size_t i=0;i<o.m_size;i++) new (&m_data[i]) T(o.m_data[i]); m_size=o.m_size; }
     vector &operator=(const vector &o) { if (this!=&o) { clear(); reserve(o.m_size); for (size_t i=0;i<o.m_size;i++) new (&m_data[i]) T(o.m_data[i]); m_size=o.m_size; } return *this; }
-    ~vector() { clear(); TM<T>::free(m_data); }
+    ~vector() { clear(); ::operator delete(m_data); }
 
     void reserve(size_t n) { if (n > m_cap) grow(n); }
     void resize(size_t n) {
@@ -337,15 +337,15 @@ public:
     string(const char *s) : m_data(nullptr), m_len(0) { *this = s; }
     string(const string &o) : m_data(nullptr), m_len(0) { *this = o.c_str(); }
     string &operator=(const char *s) {
-        TM<char>::free(m_data);
+        ::operator delete(m_data);
         m_len = s ? std::strlen(s) : 0;
-        m_data = (char*)TM<char>::malloc(m_len + 1);
+        m_data = static_cast<char *>(::operator new(m_len + 1));
         if (s) std::memcpy(m_data, s, m_len + 1);
         else m_data[0] = 0;
         return *this;
     }
     string &operator=(const string &o) { return *this = o.c_str(); }
-    ~string() { TM<char>::free(m_data); }
+    ~string() { ::operator delete(m_data); }
 
     const char *c_str() const { return m_data ? m_data : ""; }
     size_t size() const { return m_len; }
