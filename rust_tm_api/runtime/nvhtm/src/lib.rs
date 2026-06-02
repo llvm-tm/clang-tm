@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-pub use runtime_core::{Primitive, TypedValue};
+pub use runtime_core::{Primitive, TypedValue, WriteBack};
 
 // ── Constants ───────────────────────────────────────────
 const TABLE_BITS: u64 = 20;
@@ -97,6 +97,8 @@ fn gc_release_and_inc() { G_CLOCK.fetch_add(1, Ordering::Release); }
 // ── Transaction state ───────────────────────────────────
 struct TxState {
     write_set: HashMap<usize, TypedValue>,
+    /// Deferred write-back closures (safe to apply at commit).
+    write_backs: Vec<WriteBack>,
     read_set: Vec<(usize, u64)>, // (address, version_at_read_time)
     snapshot: u64,
     aborted: bool,
@@ -106,6 +108,7 @@ impl TxState {
     fn new(snapshot: u64) -> Self {
         TxState {
             write_set: HashMap::with_capacity(8),
+            write_backs: Vec::new(),
             read_set: Vec::with_capacity(64),
             snapshot,
             aborted: false,
@@ -210,7 +213,8 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
 
     let tv = val.to_typed();
     with_tx(|tx| {
-        tx.write_set.insert(addr, tv);
+        tx.write_set.insert(addr, tv.clone());
+        tx.write_backs.push(tv.into_write_back(addr));
     });
 }
 
@@ -229,8 +233,10 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
         return;
     }
     if is_null_addr(addr) { return; }
+    let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| {
-        tx.write_set.insert(addr, TypedValue::Bytes(src.to_vec().into_boxed_slice()));
+        tx.write_set.insert(addr, tv.clone());
+        tx.write_backs.push(tv.into_write_back(addr));
     });
 }
 
@@ -286,17 +292,9 @@ pub fn tm_commit() -> bool {
         }
     }
 
-    // Phase 4: write-back all entries
-    for (&addr, ref tv) in &tx.write_set {
-        match tv {
-            TypedValue::U8(v) => unsafe { (addr as *mut u8).write(*v); },
-            TypedValue::U16(v) => unsafe { (addr as *mut u16).write(*v); },
-            TypedValue::U32(v) => unsafe { (addr as *mut u32).write(*v); },
-            TypedValue::U64(v) => unsafe { (addr as *mut u64).write(*v); },
-            TypedValue::Bytes(ref b) => unsafe {
-                std::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, b.len());
-            },
-        }
+    // Phase 4: write-back all entries (safe — WriteBack::apply() encapsulates the unsafe)
+    for wb in tx.write_backs {
+        wb.apply();
     }
 
     // Durability: flush cachelines (SeqCst fence as approximation)

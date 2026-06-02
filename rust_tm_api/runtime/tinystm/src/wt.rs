@@ -39,8 +39,13 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     let tv = val.to_typed();
     // Existing write-set entry → update in-place, no lock needed
     if with_tx(|tx| tx.write_set.contains_key(&addr)) {
-        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()); });
+        // Capture old value for undo (write-through modifies memory)
+        let old_val: T = unsafe { (addr as *const T).read() };
         unsafe { (addr as *mut T).write(val); }
+        with_tx(|tx| {
+            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone());
+            tx.undo_backs.push(old_val.to_typed().into_write_back(addr));
+        });
         return;
     }
     // Wait for lock with bounded spin (prevents deadlock from circular wait)
@@ -60,8 +65,10 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         let old_val: T = unsafe { (addr as *const T).read() };
         unsafe { (addr as *mut T).write(val); }
         let old_tv = old_val.to_typed();
-        with_tx(|tx| { tx.undo_log.push((addr, old_tv));
-            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
+        with_tx(|tx| {
+            tx.undo_backs.push(old_tv.into_write_back(addr));
+            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv });
+        });
         return;
     }
     let mut lock_spins = 0u64;
@@ -77,8 +84,10 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     let old_val: T = unsafe { (addr as *const T).read() };
     unsafe { (addr as *mut T).write(val); }
     let old_tv = old_val.to_typed();
-    with_tx(|tx| { tx.locked_addrs.push(lock_idx); tx.undo_log.push((addr, old_tv));
-        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
+    with_tx(|tx| { tx.locked_addrs.push(lock_idx);
+        tx.undo_backs.push(old_tv.into_write_back(addr));
+        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv });
+    });
 }
 
 fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
@@ -91,9 +100,16 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     // Existing write-set entry → update in-place, no lock needed
     if with_tx(|tx| tx.write_set.contains_key(&addr)) {
-        let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
+        // Save old bytes for undo (write-through modifies memory)
+        let mut old_buf = vec![0u8; src.len()];
+        unsafe { std::ptr::copy_nonoverlapping(addr as *const u8, old_buf.as_mut_ptr(), src.len()); }
         unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); }
-        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()); });
+        let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
+        let old_tv = TypedValue::Bytes(old_buf.into_boxed_slice());
+        with_tx(|tx| {
+            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone());
+            tx.undo_backs.push(old_tv.into_write_back(addr));
+        });
         return;
     }
     {
@@ -114,8 +130,10 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
         unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); }
         let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
         let old_tv = TypedValue::Bytes(old_buf.into_boxed_slice());
-        with_tx(|tx| { tx.undo_log.push((addr, old_tv));
-            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
+        with_tx(|tx| {
+            tx.undo_backs.push(old_tv.into_write_back(addr));
+            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv });
+        });
         return;
     }
     let mut lock_spins = 0u64;
@@ -128,31 +146,26 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
         }
         std::hint::spin_loop();
     }
-    // Save old bytes for undo log
+    // Save old bytes for undo
     let mut old_buf = vec![0u8; src.len()];
     unsafe { std::ptr::copy_nonoverlapping(addr as *const u8, old_buf.as_mut_ptr(), src.len()); }
     // Write through
     unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     let old_tv = TypedValue::Bytes(old_buf.into_boxed_slice());
-    with_tx(|tx| { tx.locked_addrs.push(lock_idx); tx.undo_log.push((addr, old_tv));
-        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
-}
-
-fn undo_restore(undo_log: &[(usize, TypedValue)]) {
-    unsafe { for &(addr, ref old) in undo_log {
-        match *old { TypedValue::Bytes(ref b) => write_mem_bytes(addr, b),
-            _ => write_mem(addr, old.as_u64(), old.byte_size() as u8), }
-    }}
+    with_tx(|tx| { tx.locked_addrs.push(lock_idx);
+        tx.undo_backs.push(old_tv.into_write_back(addr));
+        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv });
+    });
 }
 
 pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
     fence(Ordering::SeqCst);
-    if tx.aborted { undo_restore(&tx.undo_log); unlock_indices(&tx.locked_addrs); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
+    if tx.aborted { for u in tx.undo_backs { u.apply(); } unlock_indices(&tx.locked_addrs); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
     if tx.write_set.is_empty() { return true; }
     gc_acquire(); fence(Ordering::SeqCst);
-    if !validate_read_set(&tx.read_set) { undo_restore(&tx.undo_log); unlock_indices(&tx.locked_addrs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
+    if !validate_read_set(&tx.read_set) { for u in tx.undo_backs { u.apply(); } unlock_indices(&tx.locked_addrs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
     unlock_indices(&tx.locked_addrs);
     gc_release_and_inc();
     true

@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{fence, AtomicU64, Ordering};
 use std::cell::RefCell;
-pub use runtime_core::{Primitive, TypedValue};
+pub use runtime_core::{Primitive, TypedValue, WriteBack};
 
 // ── Global lock ─────────────────────────────────────────
 // Even = unlocked (version), Odd = locked.
@@ -32,6 +32,8 @@ struct WriteEntry {
 struct TxState {
     read_set: Vec<ReadEntry>,
     write_set: Vec<WriteEntry>,
+    /// Deferred write-back closures (safe to apply at commit).
+    write_backs: Vec<WriteBack>,
     snapshot: u64,
     read_only: bool,
     aborted: bool,
@@ -42,6 +44,7 @@ impl TxState {
         TxState {
             read_set: Vec::with_capacity(64),
             write_set: Vec::with_capacity(8),
+            write_backs: Vec::new(),
             snapshot,
             read_only: true,
             aborted: false,
@@ -99,23 +102,6 @@ fn byte_size_of_tv(tv: &TypedValue) -> u8 {
         TypedValue::U32(_) => 4,
         TypedValue::U64(_) => 8,
         TypedValue::Bytes(b) => b.len() as u8,
-    }
-}
-
-fn write_mem(addr: usize, tv: &TypedValue) {
-    unsafe {
-        match tv {
-            TypedValue::U8(v) => (addr as *mut u8).write(*v),
-            TypedValue::U16(v) => (addr as *mut u16).write(*v),
-            TypedValue::U32(v) => (addr as *mut u32).write(*v),
-            TypedValue::U64(v) => (addr as *mut u64).write(*v),
-            TypedValue::Bytes(b) => {
-                let dst = addr as *mut u8;
-                for (i, &byte) in b.iter().enumerate() {
-                    dst.add(i).write(byte);
-                }
-            }
-        }
     }
 }
 
@@ -223,6 +209,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
 
     with_tx(|tx| {
         tx.read_only = false;
+        tx.write_backs.push(tv.clone().into_write_back(addr));
 
         // Scan from end for existing entry at this address
         for i in (0..tx.write_set.len()).rev() {
@@ -268,6 +255,7 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| {
         tx.read_only = false;
+        tx.write_backs.push(tv.clone().into_write_back(addr));
         // Remove/existing entry at this addr for raw bytes
         tx.write_set.retain(|e| e.addr != addr);
         tx.write_set.push(WriteEntry { addr, value: tv });
@@ -342,8 +330,8 @@ pub fn tm_commit() -> bool {
     }
 
     // We hold the global lock. Write-back all entries.
-    for e in &tx.write_set {
-        write_mem(e.addr, &e.value);
+    for wb in tx.write_backs {
+        wb.apply();
     }
 
     // Release lock and advance version (even → next even)
