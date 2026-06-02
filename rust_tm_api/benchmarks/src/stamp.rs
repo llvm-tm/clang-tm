@@ -305,43 +305,41 @@ fn vacation_worker(
         let choice = rng.borrow_mut().next() % 100;
         let customer = (rng.borrow_mut().next() % config.num_customers as u64) as usize;
 
+        // Pre-generate all random values for all branches
+        let make_rtype = rng.borrow_mut().next() % 3;
+        let make_item = (rng.borrow_mut().next() % 100) as usize;
+        let cancel_rtype = rng.borrow_mut().next() % 3;
+        let cancel_item = (rng.borrow_mut().next() % 100) as usize;
+
         transaction(|tx| {
-            let mut r = rng.borrow_mut();
             match choice {
                 0..=39 => {
-                    // Make reservation
-                    let rtype = r.next() % 3;
-                    let item = (r.next() % 100) as usize;
                     let cost = 50i64;
                     let bal = tx.read(&rm.customers[customer]) - cost;
                     if bal >= 0 {
                         tx.write(&rm.customers[customer], bal);
-                        let remaining = match rtype {
-                            0 => tx.read(&rm.rooms[item % rm.num_rooms]) - 1,
-                            1 => tx.read(&rm.cars[item % rm.num_cars]) - 1,
-                            _ => tx.read(&rm.flights[item % rm.num_flights]) - 1,
+                        let remaining = match make_rtype {
+                            0 => tx.read(&rm.rooms[make_item % rm.num_rooms]) - 1,
+                            1 => tx.read(&rm.cars[make_item % rm.num_cars]) - 1,
+                            _ => tx.read(&rm.flights[make_item % rm.num_flights]) - 1,
                         };
-                        match rtype {
-                            0 => tx.write(&rm.rooms[item % rm.num_rooms], remaining),
-                            1 => tx.write(&rm.cars[item % rm.num_cars], remaining),
-                            _ => tx.write(&rm.flights[item % rm.num_flights], remaining),
+                        match make_rtype {
+                            0 => tx.write(&rm.rooms[make_item % rm.num_rooms], remaining),
+                            1 => tx.write(&rm.cars[make_item % rm.num_cars], remaining),
+                            _ => tx.write(&rm.flights[make_item % rm.num_flights], remaining),
                         }
                     }
                 }
                 40..=79 => {
-                    // Cancel reservation
-                    let rtype = r.next() % 3;
-                    let item = (r.next() % 100) as usize;
                     let refund = 50i64;
                     tx.write(&rm.customers[customer], tx.read(&rm.customers[customer]) + refund);
-                    match rtype {
-                        0 => tx.write(&rm.rooms[item % rm.num_rooms], tx.read(&rm.rooms[item % rm.num_rooms]) + 1),
-                        1 => tx.write(&rm.cars[item % rm.num_cars], tx.read(&rm.cars[item % rm.num_cars]) + 1),
-                        _ => tx.write(&rm.flights[item % rm.num_flights], tx.read(&rm.flights[item % rm.num_flights]) + 1),
+                    match cancel_rtype {
+                        0 => tx.write(&rm.rooms[cancel_item % rm.num_rooms], tx.read(&rm.rooms[cancel_item % rm.num_rooms]) + 1),
+                        1 => tx.write(&rm.cars[cancel_item % rm.num_cars], tx.read(&rm.cars[cancel_item % rm.num_cars]) + 1),
+                        _ => tx.write(&rm.flights[cancel_item % rm.num_flights], tx.read(&rm.flights[cancel_item % rm.num_flights]) + 1),
                     }
                 }
                 _ => {
-                    // Query: read customer balance
                     let _bal = tx.read(&rm.customers[customer]);
                 }
             }
