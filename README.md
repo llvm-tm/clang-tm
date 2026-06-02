@@ -598,3 +598,90 @@ make CXXFLAGS="-std=c++20 -O0 -pthread -g -DTM_EVENT_LOG" -C backends/tests run
 The logger records TX begin/abort/commit, lock acquire/release, read/write-set
 events, and gap checks.  On SIGSEGV, the last 512 events are dumped
 automatically.  See `backends/README.md` for the full event type reference.
+
+## Rust TM API
+
+The `rust_tm_api/` directory provides a Rust port of the same TM backends with
+a safe `transaction()` API.  All 10 backends share the same interface:
+
+```rust
+use tm::{transaction, TmCell};
+
+let counter = TmCell::new(0);
+transaction(|tx| {
+    let val = tx.read(&counter);
+    tx.write(&counter, val + 1);
+});
+```
+
+### WriteBack — Safe Commit via Deferred Writes
+
+In the Rust implementation, the `unsafe` inherent in TM commit is encapsulated
+using a `WriteBack` enum defined in `runtime_core`:
+
+```rust
+pub enum WriteBack {
+    U8(usize, u8),
+    U16(usize, u16),
+    U32(usize, u32),
+    U64(usize, u64),
+    Bytes(usize, Box<[u8]>),
+}
+
+impl WriteBack {
+    /// Apply this write-back to memory.
+    ///
+    /// # Safety
+    /// The caller must guarantee exclusive access to `addr` (the TM commit
+    /// protocol provides this — locks held, read-set validated, global
+    /// commit lock acquired).
+    pub fn apply(self) {
+        unsafe { /* ptr::write or copy_nonoverlapping */ }
+    }
+}
+```
+
+Each `write_word` pushes a `WriteBack` entry (instead of storing `(addr, value)`
+and writing at commit).  `tm_commit()` iterates over `write_backs` and calls
+`wb.apply()` — no `unsafe` blocks in commit. The `unsafe` is confined to
+`WriteBack::apply()`, a small auditable function.
+
+For write-through backends (WT, SwissTM), the same pattern applies to the undo
+log: `undo_backs: Vec<WriteBack>` captures old values at write time; rollback
+calls `u.apply()` safely.
+
+### Limitations
+
+- **TSXSGL backends** (`tsxsgl`, and by extension NVHTM/SPHT when using RTM)
+  cannot use `WriteBack` for all paths — their `tm_write_*` functions do
+  direct `unsafe { addr.write(val) }` because writes reach memory immediately
+  under a spinlock (no buffering).
+- **Write-through backends** (WT, SwissTM) still require `unsafe` blocks in
+  `write_word` for the immediate memory write — the write-through itself
+  cannot be deferred.
+- **`TmPrimitive` trait** (`tm_read` / `tm_write`) is `unsafe fn` because it
+  operates on raw pointers `*mut T`.  The safe API is `Transaction::read`
+  / `Transaction::write` which takes `&TmCell<T>`.
+
+### Performance Comparison
+
+All tests on 2 threads, 5000ms duration (bank: 2000ms).
+
+| Backend | EigenBench (tx/s) | Bank (tx/s) | Aborts | Type |
+|---------|:-----------------:|:-----------:|:------:|:----:|
+| Rust TSXSGL | 5,336,219 | — | 0 | SGL |
+| Rust NOrec | 1,188,465 | — | 67K | Value-based |
+| Rust TL2 | 1,009,388 | — | 77 | Commit-time |
+| Rust NVHTM | 983,977 | — | 40 | Commit-time |
+| Rust WBCTL | 968,246 | 430,858 | 69 | Encounter-time |
+| Rust SwissTM | 899,750 | — | 13K | Write-through |
+| Rust WT | 852,271 | — | — | Write-through |
+| Rust SPHT | 834,213 | — | 58 | Commit-time |
+| Rust WBETL | 791,849 | — | 19 | Encounter-time |
+| C++ expli WBCTL | 524,527 | 130,281 | 12K | Encounter-time |
+| C++ LLVM plugin | — | 36,013 | 2.7K | Plugin-instr. |
+
+Rust is consistently 1.5–12× faster than the equivalent C++ backend due to:
+lower type-erasure overhead (native enums vs `any_type_t` unions), more
+efficient `HashMap` for write-sets, and aggressive monomorphization of
+generic read/write paths.

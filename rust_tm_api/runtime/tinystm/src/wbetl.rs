@@ -39,7 +39,10 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     let tv = val.to_typed();
     // Existing write-set entry → update in-place, no lock needed
     if with_tx(|tx| tx.write_set.contains_key(&addr)) {
-        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()); });
+        with_tx(|tx| {
+            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone());
+            tx.write_backs.push(tv.clone().into_write_back(addr));
+        });
         return;
     }
     // Wait for lock with bounded spin (prevents deadlock)
@@ -56,7 +59,10 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     let lock_idx = lock_index(addr);
     // Self-ownership check: different addresses may hash to the same lock
     if with_tx(|tx| tx.locked_addrs.contains(&lock_idx)) {
-        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
+        with_tx(|tx| {
+            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv.clone() });
+            tx.write_backs.push(tv.into_write_back(addr));
+        });
         return;
     }
     let mut lock_spins = 0u64;
@@ -70,7 +76,9 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         std::hint::spin_loop();
     }
     with_tx(|tx| { tx.locked_addrs.push(lock_idx);
-        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
+        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv.clone() });
+        tx.write_backs.push(tv.into_write_back(addr));
+    });
 }
 
 fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
@@ -84,7 +92,10 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     // Existing write-set entry → update in-place, no lock needed
     if with_tx(|tx| tx.write_set.contains_key(&addr)) {
         let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
-        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()); });
+        with_tx(|tx| {
+            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone());
+            tx.write_backs.push(tv.clone().into_write_back(addr));
+        });
         return;
     }
     {
@@ -101,7 +112,10 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     // Self-ownership check: different addresses may hash to the same lock
     if with_tx(|tx| tx.locked_addrs.contains(&lock_idx)) {
         let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
-        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
+        with_tx(|tx| {
+            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv.clone() });
+            tx.write_backs.push(tv.into_write_back(addr));
+        });
         return;
     }
     let mut lock_spins = 0u64;
@@ -116,7 +130,9 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| { tx.locked_addrs.push(lock_idx);
-        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
+        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv.clone() });
+        tx.write_backs.push(tv.into_write_back(addr));
+    });
 }
 
 pub fn tm_commit() -> bool {
@@ -124,11 +140,9 @@ pub fn tm_commit() -> bool {
     fence(Ordering::SeqCst);
     if tx.aborted { unlock_indices(&tx.locked_addrs); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
     if tx.write_set.is_empty() { return true; }
-    let (raw, raw_bytes) = flatten_write_set(&tx.write_set);
     gc_acquire(); fence(Ordering::SeqCst);
     if !validate_read_set(&tx.read_set) { unlock_indices(&tx.locked_addrs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
-    unsafe { for &(a, v, sz) in &raw { write_mem(a, v, sz); } }
-    unsafe { for &(a, ref buf) in &raw_bytes { write_mem_bytes(a, buf); } }
+    for wb in tx.write_backs { wb.apply(); }
     fence(Ordering::SeqCst);
     unlock_indices(&tx.locked_addrs);
     gc_release_and_inc();

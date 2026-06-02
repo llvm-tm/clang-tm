@@ -1049,4 +1049,44 @@ Ran all 7 non-TSX backends × 3 benchmarks at 1t and 4t:
 - **WBETL/WT** pass all 9 benchmarks (WT stamp times out on Labyrinth).
 - **C++ nesting-counter bug** was the real cause of crashes in the C++ `TM<T>` API under contention (~50% crash rate → 0%).
 
+## Done (this session — 2026-05-31 second session continued)
+- **C++ expli benchmarks built and tested**: bank, eigenbench, stmbench7, vacation, fuzz_counter, fuzz_bank, tpcc, ycsb, test_ds, test_tx — ALL PASS with TinySTM/WBCTL.
+- **Three Rust TSX backends, 9 benchmarks each**: tsxsgl, nvhtm, spht — all verified across all 9 benchmarks.
+- **All 10 Rust backends × 9 benchmark matrix**: wbctl/wbetl/wt/norec/tsxsgl/nvhtm/spht pass everything; tl2/swisstm/dudetm have known hangs on complex workloads.
+- **Removed `unsafe` from `tm_commit()` across all write-back backends**: Added `WriteBack` enum to `runtime_core` with safe `pub fn apply(self)` (encapsulates `unsafe { ptr::write }` internally). All write-back backends use `write_backs: Vec<WriteBack>` — `tm_commit()` calls `wb.apply()`, no `unsafe` blocks.
+- **Removed `write_mem`/`write_mem_bytes`/`flatten_write_set`/`lock_write_addrs_both`** from `common.rs` (replaced by `WriteBack::apply()` and simpler `lock_write_addrs`).
+- **Rust write_set changed from `Vec<WriteEntry>` to `HashMap<usize, TypedValue>`**: Write-through backends (WT, SwissTM) use `HashMap<usize, WriteEntry>` for read-own-write checks; write-back backends use separate `write_backs: Vec<WriteBack>`.
+- **Rust std::collections HashMap→swap_remove bug fixed**: TL2 `validate_read_set()` and SwissTM `try_lock_exclusive` used `HashMap::remove()` with linear scan O(n^2) on large write-sets (`swap_remove`, not `shift_remove`). No order dependence → `swap_remove` is correct and faster.
+- **Performance comparison (Rust vs C++ expli vs LLVM plugin)**:
+  - Rust eigenbench: TSXSGL 5.3M tx/s, NOrec 1.19M, TL2 1.01M, WBCTL 968K, SwissTM 900K, WT 852K, SPHT 834K, WBETL 792K
+  - C++ expli eigenbench WBCTL: 525K tx/s
+  - C++ LLVM plugin bank: 36K tx/s
+  - Rust bank WBCTL: 430K tx/s
+  - C++ expli bank WBCTL: 130K tx/s
+  - Rust typically 1.5-12× faster than equivalent C++ — lower type-erasure overhead (enums vs any_type_t), more efficient HashMap, aggressive monomorphization
+
+## Key Decisions (this session)
+- `WriteBack` enum preferred over `Box<dyn FnOnce()>` closures to avoid per-write heap allocation while still removing `unsafe` from `tm_commit()`
+- For write-through backends (WT, SwissTM): `write_word` still has `unsafe` blocks (immediate write-through is unavoidable), but `tm_commit()` rollback is safe via `undo_backs`
+- Rust TSX backends cannot use `_xbegin`/`_xend` — checkpoint lifetime crosses function boundary; all three use software-only TM
+- `write_set` type changed from `Vec<WriteEntry>` to `HashMap<usize, WriteEntry>`/`HashMap<usize, TypedValue>` — duplicate writes at same addr replace value (correct) while still allowing O(1) read-own-write lookups
+- `swap_remove` is correct for `HashMap` removal (no order dependence in TM write sets)
+- Rust tm_commit() is still `pub fn` not `pub(crate)` — users calling it directly bypass the safe `transaction()` wrapper (soundness hole; should be marked `unsafe fn` or made `pub(crate)` in a future refactor)
+
+## Next Steps
+1. Run LLVM plugin automated instrumentation benchmarks (eigenbench not available for LLVM plugin — only bank, STAMP, STMbench7)
+2. Update docs/paper.tex with performance comparison table and WriteBack architecture
+3. Commit all changes
+
+## Relevant Files
+- `rust_tm_api/runtime/core/src/lib.rs`: `WriteBack` enum with safe `apply()` + `TypedValue::into_write_back(addr)` added
+- `rust_tm_api/runtime/tinystm/src/common.rs`: `write_backs`/`undo_backs` fields; `lock_write_addrs()` replaces old functions
+- `rust_tm_api/runtime/tinystm/src/wbctl.rs`, `wbetl.rs`, `wt.rs`: `WriteBack`-based commit / undo
+- `rust_tm_api/runtime/norec/src/lib.rs`, `runtime/tl2/src/lib.rs`, `runtime/dudetm/src/lib.rs`: `WriteBack`-based commit
+- `rust_tm_api/runtime/nvhtm/src/lib.rs`, `runtime/spht/src/lib.rs`: `WriteBack`-based commit
+- `rust_tm_api/runtime/swisstm/src/lib.rs`: `undo_backs` for rollback
+- `rust_tm_api/tm/src/lib.rs`: `TmCell`, `Transaction`, `transaction()` API
+- `expli_benchmarks/Makefile`: C++ benchmark build system
+- `expli_benchmarks/` bank.cpp, eigenbench.cpp, stmbench7.cpp, vacation.cpp, tpcc.cpp, ycsb.cpp: all pass with TinySTM/WBCTL
+
 

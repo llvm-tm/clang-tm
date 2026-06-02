@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::sync::atomic::AtomicU32;
 use std::sync::OnceLock;
 
-pub use runtime_core::{Primitive, TypedValue};
+pub use runtime_core::{Primitive, TypedValue, WriteBack};
 
 // ── Constants ───────────────────────────────────────────
 const LOCK_MASK: u64 = 0xFF;
@@ -104,12 +104,16 @@ pub struct WriteEntry {
 pub struct TxState {
     pub read_set: Vec<(usize, u64)>,
     pub write_set: HashMap<usize, WriteEntry>,
+    /// Deferred write-back closures (safe to apply at commit).
+    /// Used by write-back backends (WBCTL, WBETL).
+    pub write_backs: Vec<WriteBack>,
+    /// Deferred undo closures (safe to apply on abort/rollback).
+    /// Used by write-through backends (WT).
+    pub undo_backs: Vec<WriteBack>,
     pub start_version: u64,
     pub aborted: bool,
     /// Lock indices held by encounter-time locking variants (WBETL, WT).
     pub locked_addrs: Vec<usize>,
-    /// Undo log for write-through variants (WT) — restored on abort.
-    pub undo_log: Vec<(usize, TypedValue)>,
 }
 
 impl TxState {
@@ -117,10 +121,11 @@ impl TxState {
         TxState {
             read_set: Vec::with_capacity(64),
             write_set: HashMap::with_capacity(8),
+            write_backs: Vec::new(),
+            undo_backs: Vec::new(),
             start_version,
             aborted: false,
             locked_addrs: Vec::new(),
-            undo_log: Vec::new(),
         }
     }
 }
@@ -154,48 +159,11 @@ pub fn tx_aborted() -> bool {
 
 pub fn flush_tx() -> Option<Box<TxState>> { TX.with(|tx| tx.borrow_mut().take()) }
 
-// ── Memory operations ───────────────────────────────────
-#[inline]
-pub unsafe fn write_mem(addr: usize, val: u64, nbytes: u8) {
-    let ptr = addr as *mut u64;
-    match nbytes {
-        1 => (ptr as *mut u8).write(val as u8),
-        2 => (ptr as *mut u16).write(val as u16),
-        4 => (ptr as *mut u32).write(val as u32),
-        8 => ptr.write(val),
-        _ => panic!("write_mem: unsupported size {nbytes}"),
-    }
-}
-
-#[inline]
-pub unsafe fn write_mem_bytes(addr: usize, buf: &[u8]) {
-    let dst = addr as *mut u8;
-    for (i, &b) in buf.iter().enumerate() {
-        dst.add(i).write(b);
-    }
-}
-
 // ── Commit helpers ──────────────────────────────────────
-pub type RawWriteSet = Vec<(usize, u64, u8)>;
-pub type RawByteWriteSet = Vec<(usize, Box<[u8]>)>;
 
-/// Flatten the typed write-set into primitive and byte halves.
-pub fn flatten_write_set(write_set: &HashMap<usize, WriteEntry>) -> (RawWriteSet, RawByteWriteSet) {
-    let mut raw = Vec::new();
-    let mut raw_bytes = Vec::new();
-    for (&addr, entry) in write_set {
-        match entry.value {
-            TypedValue::Bytes(ref b) => raw_bytes.push((addr, b.clone())),
-            _ => raw.push((addr, entry.value.as_u64(), entry.value.byte_size() as u8)),
-        }
-    }
-    (raw, raw_bytes)
-}
-
-/// Lock lock-indices for both primitive and byte write sets.
-pub fn lock_write_addrs_both(raw: &RawWriteSet, raw_bytes: &RawByteWriteSet) -> Vec<usize> {
-    let mut idxs: Vec<usize> = raw.iter().map(|(a, _, _)| lock_index(*a)).collect();
-    idxs.extend(raw_bytes.iter().map(|(a, _)| lock_index(*a)));
+/// Lock lock-indices for a set of write-addresses.
+pub fn lock_write_addrs(addrs: &[usize]) -> Vec<usize> {
+    let mut idxs: Vec<usize> = addrs.iter().map(|&a| lock_index(a)).collect();
     idxs.sort_unstable();
     idxs.dedup();
     for &idx in &idxs { lock_at_index(idx); }

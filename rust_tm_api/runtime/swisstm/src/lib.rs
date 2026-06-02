@@ -7,7 +7,7 @@ use core::sync::atomic::{fence, AtomicU64, Ordering};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-pub use runtime_core::{Primitive, TypedValue};
+pub use runtime_core::{Primitive, TypedValue, WriteBack};
 
 // ── Constants ───────────────────────────────────────────
 const OWNED_BIT: u64 = 0;
@@ -78,7 +78,8 @@ pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
 struct TxState {
     read_set: Vec<(usize, u64)>,        // (addr, observed_version)
     write_set: HashMap<usize, TypedValue>,
-    undo_log: Vec<(usize, u64, u8)>,    // (addr, old_val_u64, byte_size)
+    /// Deferred undo closures (safe to apply on rollback).
+    undo_backs: Vec<WriteBack>,
     locked_orecs: Vec<usize>,           // orec indices locked for writing
     start_version: u64,
     aborted: bool,
@@ -90,7 +91,7 @@ impl TxState {
         TxState {
             read_set: Vec::with_capacity(64),
             write_set: HashMap::with_capacity(8),
-            undo_log: Vec::new(),
+            undo_backs: Vec::new(),
             locked_orecs: Vec::new(),
             start_version,
             aborted: false,
@@ -135,18 +136,6 @@ fn read_mem_val(addr: usize, sz: u8) -> u64 {
             4 => (addr as *const u32).read() as u64,
             8 => (addr as *const u64).read(),
             _ => 0,
-        }
-    }
-}
-
-fn write_mem_u64(addr: usize, val: u64, sz: u8) {
-    unsafe {
-        match sz {
-            1 => (addr as *mut u8).write(val as u8),
-            2 => (addr as *mut u16).write(val as u16),
-            4 => (addr as *mut u32).write(val as u32),
-            8 => (addr as *mut u64).write(val),
-            _ => {}
         }
     }
 }
@@ -256,7 +245,13 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         // Save old value in undo log (first write only)
         if !tx.write_set.contains_key(&addr) {
             let old_val = read_mem_val(addr, sz);
-            tx.undo_log.push((addr, old_val, sz));
+            let wb = match sz {
+                1 => WriteBack::U8(addr, old_val as u8),
+                2 => WriteBack::U16(addr, old_val as u16),
+                4 => WriteBack::U32(addr, old_val as u32),
+                _ => WriteBack::U64(addr, old_val),
+            };
+            tx.undo_backs.push(wb);
         }
 
         // Write through to memory
@@ -293,7 +288,7 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
             let byte_addr = addr + i;
             if !tx.write_set.contains_key(&byte_addr) {
                 let old_val = unsafe { (byte_addr as *const u8).read() };
-                tx.undo_log.push((byte_addr, old_val as u64, 1));
+                tx.undo_backs.push(old_val.to_typed().into_write_back(byte_addr));
             }
         }
 
@@ -304,13 +299,6 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
         }
         tx.write_set.insert(addr, tv);
     });
-}
-
-// ── Undo restore ───────────────────────────────────────
-fn undo_restore(tx: &TxState) {
-    for &(addr, old_val, sz) in tx.undo_log.iter().rev() {
-        write_mem_u64(addr, old_val, sz);
-    }
 }
 
 // ── Validate read-set ──────────────────────────────────
@@ -330,7 +318,7 @@ pub fn tm_commit() -> bool {
     fence(Ordering::SeqCst);
 
     if tx.aborted {
-        undo_restore(&tx);
+        for u in tx.undo_backs { u.apply(); }
         for &idx in &tx.locked_orecs {
             orecs()[idx].unlock_exclusive_and_inc_version();
         }
@@ -347,7 +335,7 @@ pub fn tm_commit() -> bool {
 
     // Validate read-set
     if !validate(&tx) {
-        undo_restore(&tx);
+        for u in tx.undo_backs { u.apply(); }
         for &idx in &tx.locked_orecs {
             orecs()[idx].unlock_exclusive_and_inc_version();
         }

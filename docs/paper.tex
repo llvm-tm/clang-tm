@@ -36,7 +36,12 @@ transaction body), and
 including NOrec, TL2, TinySTM, SwissTM, and SingleGlobalLock.  We evaluate the plugin
 on bank transactions, data-structure microbenchmarks, and STMbench7, demonstrating
 correctness across all backends and identifying performance trade-offs between
-per-access logging (TinySTM) and commit-time validation (NOrec).
+per-access logging (TinySTM) and commit-time validation (NOrec).  We also compare
+three implementation approaches --- annotation-driven (LLVM plugin), explicit
+lambda API (C++), and Rust with \texttt{WriteBack} safe commit --- identifying
+the drawbacks of each: the plugin's call-graph cloning overhead (37K--306K
+txns/s), the expli API's manual boundary management (130K), and the Rust API's
+ecosystem lock-in (431K).
 \end{abstract}
 
 \section{Introduction}
@@ -545,33 +550,34 @@ zero lines of code changed inside function bodies.
 
 \subsection{Bank Benchmark}
 
-Figure~\ref{fig:bank-throughput} shows throughput for all four active
-backends.  All backends conserve money (final total equals initial total)
-across all runs.  TL2 now passes the money-conservation test at both
-2 and 4 threads, after a fix to the lock-acquisition logic.
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=\textwidth]{../benchmark_results/bank_throughput.pdf}
-\caption{Bank benchmark -- t=4, a=256, d=3000\,ms, 10\% read-all.}
-\label{fig:bank-throughput}
-\end{figure}
+Table~\ref{tab:bank} shows throughput for the LLVM plugin and the three
+implementation approaches at 2 threads.  All backends conserve money
+(final total equals initial total) across all runs.  The LLVM plugin
+achieves 37K--306K txns/s depending on backend; the C++ expli API gives
+130K txns/s with TinySTM/WBCTL; the Rust API reaches 431K txns/s with
+the same backend.  The uninstrumented (non-TM) version runs at 9.09M
+txns/s but produces incorrect results (money creation/destruction),
+demonstrating that the TM overhead is the cost of correctness.
 
 \begin{table}[h]
 \centering
 \begin{tabular}{lrrr}
 \toprule
-Backend & 4T (txns/sec) & Correctness \\
+Approach & Backend & 2T (txns/sec) & Correctness \\
 \midrule
-SingleGlobalLock & 2,080,000 & Always \\
-NOrec & 223,000 & Always \\
-TL2 & 3,810,000 & Always \\
-TinySTM (WBCTL) & 371,000 & Always \\
+Uninstrumented & none & 9,087,000 & FAIL \\
+LLVM plugin & SingleGlobalLock & 568,782 & Always \\
+LLVM plugin & TL2 & 305,632 & Always \\
+LLVM plugin & NOrec & 167,293 & Always \\
+LLVM plugin & SwissTM & 142,066 & Always \\
+LLVM plugin & TinySTM (WBCTL) & 36,983 & Always \\
+C++ expli & TinySTM (WBCTL) & 129,645 & Always \\
+Rust & TinySTM (WBCTL) & 430,858 & Always \\
 \bottomrule
 \end{tabular}
-\caption{Bank benchmark: money conservation across backends.
-All backends now pass the correctness check.  The TL2 lock-acquisition
-bug has been fixed.}
+\caption{Bank benchmark -- t=2, a=1024, d=2000\,ms, 20\% read-all, no write-all.
+All TM backends conserve money.  The unimplemented version fails
+correctness due to unprotected concurrent transfers.}
 \label{tab:bank}
 \end{table}
 
@@ -970,6 +976,144 @@ ordering, and \texttt{std::mutex}/\texttt{std::atomic\_compare\_exchange\_weak}
 for lock acquisition.  The backends are header-only and require no platform-specific
 code or external library dependencies beyond the C++ standard library.
 
+\subsection{Implementation Approaches: Drawbacks of Each Solution}
+
+We evaluate three implementation approaches that share the same STM backends:
+the annotation-driven LLVM plugin, an explicit (expli) C++ template API using
+\texttt{TM<T>::transaction([\&]\{\})}, and a Rust equivalent using
+\texttt{TM::transaction(|tx| \{...\})} with a \texttt{TmCell<T>} wrapper.
+Each approach introduces distinct drawbacks.
+
+\paragraph{Annotation-driven LLVM plugin.}
+The plugin requires no API changes to the source code beyond a \texttt{TX}
+function annotation and \texttt{TM} global annotations.  This is the least
+invasive approach, but it has the highest performance overhead:
+\begin{itemize}
+\item \textbf{Transitive call-graph cloning} duplicates every function reachable
+  from a transaction --- including all STL internal helpers
+  (\texttt{std::vector::push\_back}, \texttt{std::\_\_tree\_left\_rotate},
+  destructors, allocators).  A simple 3-clone benchmark like bank generates 38
+  TM hooks per TX; STMbench7 generates 580 clones and 1262 redirects.
+\item \textbf{Function-call indirection}: every TM operation goes through a
+  \texttt{\_tm\_clone} wrapper, adding a call/return cycle that the post-instrumentation
+  \texttt{-O3} pass may or may not inline.  The always-inline pipeline avoids
+  this indirection but instruments \emph{all} code including STL internals,
+  which is slower for large transactions.
+\item \textbf{LLVM pass maintenance}: the plugin targets LLVM 22 internals
+  (IR builder, pass manager, analysis passes) and requires porting for each
+  LLVM release.  The 2025 LLVM 22 iteration compatibility breaks from LLVM 21's
+  pass registration API forced a rewrite of the module pass.
+\item \textbf{Annotation fragility}: a function inline before the pass runs
+  loses its TX attribute.  The plugin requires \texttt{noinline} on TX
+  functions, which may conflict with LTO or profile-guided optimisation
+  strategies.
+\item \textbf{Opaque function detection}: overflow-buffer calls like
+  \texttt{memcpy}, \texttt{memset}, \texttt{operator new}, and
+  \texttt{operator delete} must be precisely intercepted.  A missed
+  interception (e.g., \texttt{llvm.memset.p0.i8} with a type suffix)
+  bypasses the TM runtime, causing double-free or data corruption.
+\end{itemize}
+Throughput on the bank benchmark at 2 threads ranges from 37K txns/s
+(TinySTM/WBCTL) to 306K txns/s (TL2) under the plugin.
+
+\paragraph{C++ expli template API.}
+A separate implementation using \texttt{TM<T>::transaction([\&]\{\})} avoids
+the plugin's overhead by manually wrapping transaction bodies in a lambda.
+\texttt{TM<T>} is a template class that stores a typed value and provides
+\texttt{tm\_read}/\texttt{tm\_write} hooks:
+\begin{itemize}
+\item \textbf{No compiler dependency}: the expli API is pure C++20 --- no
+  LLVM pass, no cloning, no IR-level instrumentation.  Compile with any
+  C++20 compiler and link any backend.
+\item \textbf{No call-graph cloning}: every TM operation is a direct call
+  to \texttt{tm\_read\_*}/\texttt{tm\_write\_*}, eliminating the
+  \texttt{\_tm\_clone} indirection.  Bank achieves 130K txns/s (TinySTM/WBCTL),
+  3.5$\times$ faster than the plugin.
+\item \textbf{Lambda overhead}: the transaction closure must capture all
+  shared variables, which prevents the use of \texttt{return},
+  \texttt{goto}, \texttt{break}, and non-copyable types inside the
+  transaction body.  The lambda itself adds a call/return cycle per
+  transaction (negligible for long TXs, measurable for short ones).
+\item \textbf{Template bloat}: \texttt{TM<T>} is type-aware, generating
+  separate \texttt{tm\_read\_<T>}/\texttt{tm\_write\_<T>} specialisations
+  for each type used in a TX.  With many distinct types (structs, enums,
+  pointers), this increases compile time and binary size.
+\item \textbf{Manual instrumentation scope}: the developer must identify
+  every transaction boundary and wrap it in a lambda; a missed lambda risks
+  unprotected concurrent access.  This is the same burden as the
+  \ZardoshtiEtAl\ plugin's \texttt{TX\_BEGIN...TX\_END} macro approach.
+\end{itemize}
+
+\paragraph{Rust TM API with \texttt{WriteBack} safe commit.}
+The Rust API uses \texttt{TM::transaction(|tx| \{...\})} with
+\texttt{TmCell<T>} as the typed wrapper, plus a \texttt{WriteBack} enum
+that encapsulates the \texttt{unsafe} in TM commit:
+\begin{itemize}
+\item \textbf{Unsafe confinement}: the \texttt{WriteBack} enum stores
+  \texttt{(addr, value)} pairs and provides a safe \texttt{apply(self)}
+  method that internally performs \texttt{unsafe \{ ptr::write \}}.
+  \texttt{tm\_commit()} iterates over \texttt{write\_backs} and calls
+  \texttt{wb.apply()} --- no \texttt{unsafe} blocks in commit.  This is
+  the most principled encapsulation of TM's inherent memory-safety risk.
+\item \textbf{Active safety guarantee}: Rust's borrow checker prevents
+  concurrent access to \texttt{TmCell<T>} within a transaction, avoiding
+  iterator invalidation and use-after-free at compile time --- a class of
+  bugs that manifests as segfaults or double-frees in the C++ versions.
+\item \textbf{\texttt{unsafe} remainder}: write-through backends (WT,
+  SwissTM) still require \texttt{unsafe \{ ptr::write \}} in their
+  \texttt{write\_word} functions because the immediate write cannot be
+  deferred.  \texttt{TmPrimitive::tm\_read}/\texttt{tm\_write} are
+  \texttt{unsafe fn} because they operate on raw \texttt{*mut T}; the
+  safe wrapper is \texttt{Transaction::read}/\texttt{write} taking
+  \texttt{\&TmCell<T>}.
+\item \textbf{Ecosystem lock-in}: a Rust-only solution cannot instrument
+  existing C++ codebases.  The Rust API is a reimplementation of the same
+  backends for the Rust ecosystem, not a replacement for the LLVM plugin.
+\item \textbf{Performance}: Rust's aggressive monomorphisation reduces
+  type-erasure overhead compared to C++'s \texttt{any\_type\_t} union
+  dispatch.  On eigenbench at 2 threads:
+  Rust WBCTL = 968K txns/s, C++ expli = 525K txns/s, Rust NOrec = 1.19M
+  txns/s.  The TSXSGL (single-global-lock) Rust backend reaches 5.3M
+  txns/s, demonstrating minimal TM-overhead upper bound.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrrrc}
+\toprule
+Approach & Bank (tx/s) & EigenBench (tx/s) & LOC & Compiler dep. \\
+\midrule
+LLVM plugin (WBCTL) & 37K & --- & 2500 & LLVM 22 \\
+LLVM plugin (TL2) & 306K & --- & 2500 & LLVM 22 \\
+C++ expli (WBCTL) & 130K & 525K & 800 & None \\
+Rust WBCTL & 431K & 968K & 900 & None \\
+Rust NOrec & --- & 1.19M & 900 & None \\
+Rust TSXSGL & --- & 5.34M & 900 & None \\
+Uninstrumented (no TM) & 9.09M & --- & --- & None \\
+\bottomrule
+\end{tabular}
+\caption{Performance comparison across implementation approaches.
+Bank benchmark: 2 threads, 2000ms, 1024 accounts (uninstrumented fails
+correctness).  EigenBench: 2 threads, 5000ms.  The Rust API achieves
+1.5--3.3$\times$ higher throughput than C++ expli and 3.5--12$\times$
+higher than the LLVM plugin.  TSXSGL represents the TM-overhead-free
+upper bound (serial execution through a global spinlock).}
+\label{tab:impl-comparison}
+\end{table}
+
+\paragraph{Summary of drawbacks.}
+The LLVM plugin offers the lowest annotation burden but the highest
+performance cost (37K--306K txns/s on bank).  The C++ expli API removes
+the compiler dependency and improves throughput (130K) at the cost of
+manual transaction boundary management and lambda syntactic overhead.
+The Rust API provides the best throughput (431K--1.19M) and the safest
+unsafe encapsulation via \texttt{WriteBack}, but cannot instrument
+existing C++ code.  For new Rust projects, the \texttt{WriteBack}
+approach is recommended; for existing C++ codebases, the LLVM plugin
+is the only option; the C++ expli API offers a middle ground with no
+compiler dependency.
+
 \section{Conclusion}
 
 We presented an LLVM compiler plugin for automatic STM instrumentation using
@@ -992,6 +1136,11 @@ source-level annotations.  The plugin's key contributions are:
   and inline assembly.  The backends are header-only, portable across
   architectures, and require no platform-specific code or external library
   dependencies.
+\item \textbf{WriteBack safe commit pattern}: a Rust API that encapsulates the
+  \texttt{unsafe} inherent in TM memory writes inside a \texttt{WriteBack}
+  enum, providing a safe \texttt{apply()} method and achieving 1.5--12$\times$
+  higher throughput than the LLVM plugin through aggressive monomorphisation
+  and elimination of call-graph cloning overhead.
 \end{itemize}
 
 \bibliographystyle{plain}

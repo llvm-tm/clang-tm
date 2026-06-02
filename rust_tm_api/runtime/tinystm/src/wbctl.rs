@@ -26,7 +26,10 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     if tx_aborted() { return; }
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
     let tv = val.to_typed();
-    with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
+    with_tx(|tx| {
+        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv.clone() });
+        tx.write_backs.push(tv.into_write_back(addr));
+    });
 }
 
 fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
@@ -38,7 +41,10 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     if tx_aborted() { return; }
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
-    with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv }); });
+    with_tx(|tx| {
+        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv.clone() });
+        tx.write_backs.push(tv.into_write_back(addr));
+    });
 }
 
 pub fn tm_commit() -> bool {
@@ -46,12 +52,11 @@ pub fn tm_commit() -> bool {
     fence(Ordering::SeqCst);
     if tx.aborted { TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
     if tx.write_set.is_empty() { return true; }
-    let (raw, raw_bytes) = flatten_write_set(&tx.write_set);
+    let addrs: Vec<usize> = tx.write_set.keys().copied().collect();
     gc_acquire(); fence(Ordering::SeqCst);
-    let idxs = lock_write_addrs_both(&raw, &raw_bytes);
+    let idxs = lock_write_addrs(&addrs);
     if !validate_read_set(&tx.read_set) { unlock_indices(&idxs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
-    unsafe { for &(a, v, sz) in &raw { write_mem(a, v, sz); } }
-    unsafe { for &(a, ref buf) in &raw_bytes { write_mem_bytes(a, buf); } }
+    for wb in tx.write_backs { wb.apply(); }
     fence(Ordering::SeqCst);
     unlock_indices(&idxs);
     gc_release_and_inc();

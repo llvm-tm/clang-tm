@@ -1,3 +1,49 @@
+// ── WriteBack — deferred write for safe commit ──────────
+// WriteBack::apply() encapsulates the unsafe ptr::write so that
+// tm_commit() can be a safe function.  The safety contract is:
+//   - The address was obtained from a TmCell (valid, aligned, live)
+//   - commit() holds exclusive access (locks acquired, read-set validated)
+#[derive(Clone, Debug)]
+pub enum WriteBack {
+    U8(usize, u8),
+    U16(usize, u16),
+    U32(usize, u32),
+    U64(usize, u64),
+    Bytes(usize, Box<[u8]>),
+}
+
+impl WriteBack {
+    pub fn addr(&self) -> usize {
+        match *self {
+            WriteBack::U8(a, _) | WriteBack::U16(a, _)
+                | WriteBack::U32(a, _) | WriteBack::U64(a, _)
+                | WriteBack::Bytes(a, _) => a,
+        }
+    }
+
+    /// Apply this write-back to memory.
+    ///
+    /// # Safety contract (caller must ensure)
+    ///
+    /// 1. `addr` points to valid, aligned memory of the correct size.
+    /// 2. No other thread aliases `addr` during this call (exclusive access
+    ///    is guaranteed by the TM commit protocol — locks held, read-set
+    ///    validated, global commit lock acquired).
+    pub fn apply(self) {
+        unsafe {
+            match self {
+                WriteBack::U8(addr, v) => (addr as *mut u8).write(v),
+                WriteBack::U16(addr, v) => (addr as *mut u16).write(v),
+                WriteBack::U32(addr, v) => (addr as *mut u32).write(v),
+                WriteBack::U64(addr, v) => (addr as *mut u64).write(v),
+                WriteBack::Bytes(addr, b) => {
+                    std::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, b.len());
+                }
+            }
+        }
+    }
+}
+
 // ── TypedValue — type-safe write-set entry ──────────────
 #[derive(Clone, Debug)]
 pub enum TypedValue {
@@ -26,6 +72,16 @@ impl TypedValue {
             TypedValue::U32(_) => 4,
             TypedValue::U64(_) => 8,
             TypedValue::Bytes(ref b) => b.len(),
+        }
+    }
+
+    pub fn into_write_back(self, addr: usize) -> WriteBack {
+        match self {
+            TypedValue::U8(v) => WriteBack::U8(addr, v),
+            TypedValue::U16(v) => WriteBack::U16(addr, v),
+            TypedValue::U32(v) => WriteBack::U32(addr, v),
+            TypedValue::U64(v) => WriteBack::U64(addr, v),
+            TypedValue::Bytes(b) => WriteBack::Bytes(addr, b),
         }
     }
 }

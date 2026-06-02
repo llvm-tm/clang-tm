@@ -7,7 +7,7 @@ use core::sync::atomic::{fence, AtomicU64, Ordering};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-pub use runtime_core::{Primitive, TypedValue};
+pub use runtime_core::{Primitive, TypedValue, WriteBack};
 
 // ── Constants ───────────────────────────────────────────
 const LOCK_MASK: u64 = 0xFF;
@@ -87,6 +87,8 @@ pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
 struct TxState {
     read_set: Vec<(usize, u64)>,  // (addr, version_at_read)
     write_set: HashMap<usize, TypedValue>,
+    /// Deferred write-back closures (safe to apply at commit).
+    write_backs: Vec<WriteBack>,
     start_version: u64,
     aborted: bool,
 }
@@ -96,6 +98,7 @@ impl TxState {
         TxState {
             read_set: Vec::with_capacity(64),
             write_set: HashMap::with_capacity(8),
+            write_backs: Vec::new(),
             start_version,
             aborted: false,
         }
@@ -173,7 +176,8 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
 
     let tv = val.to_typed();
     with_tx(|tx| {
-        tx.write_set.insert(addr, tv);
+        tx.write_set.insert(addr, tv.clone());
+        tx.write_backs.push(tv.into_write_back(addr));
     });
 }
 
@@ -187,7 +191,10 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     if tx_aborted() { return; }
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
-    with_tx(|tx| { tx.write_set.insert(addr, tv); });
+    with_tx(|tx| {
+        tx.write_set.insert(addr, tv.clone());
+        tx.write_backs.push(tv.into_write_back(addr));
+    });
 }
 
 // ── Validate read-set (lock-based) ─────────────────────
@@ -239,20 +246,9 @@ pub fn tm_commit() -> bool {
     }
     fence(Ordering::SeqCst);
 
-    // 5. Write-back all values
-    for (addr, tv) in &tx.write_set {
-        unsafe {
-            match tv {
-                TypedValue::U8(v) => (*addr as *mut u8).write(*v),
-                TypedValue::U16(v) => (*addr as *mut u16).write(*v),
-                TypedValue::U32(v) => (*addr as *mut u32).write(*v),
-                TypedValue::U64(v) => (*addr as *mut u64).write(*v),
-                TypedValue::Bytes(b) => {
-                    let dst = *addr as *mut u8;
-                    for (i, &byte) in b.iter().enumerate() { dst.add(i).write(byte); }
-                }
-            }
-        }
+    // 5. Write-back all values (safe — WriteBack::apply() encapsulates the unsafe)
+    for wb in tx.write_backs {
+        wb.apply();
     }
 
     // 6. Unlock write-set addresses (reverse order to match locking)
