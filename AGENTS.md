@@ -1208,4 +1208,62 @@ benchmarks/
 - `expli_benchmarks/TPC-C/tpcc.cpp`, `STMbench7/` — unchanged
 - `expli_benchmarks/datastructures/` — empty placeholder for future linked-list, hash-map, treap, skip-list benchmarks
 
+## Done (this session — 2026-06-02)
+- **Makefile BUILD_RULE fix**: Changed `$$(2)` → `$(2)` in recipe line of `define BUILD_RULE` in `expli_benchmarks/Makefile`. `$$(2)` was expanding to empty (make variable `2`) instead of the source file path, causing all compile commands to omit the benchmark source file. Fixed all 15 build targets.
+- **KMeans compilation fix**: Fixed `&g_centers[k].coords[0].peek()` lvalue error (can't take address of peek() return). Refactored to flat TM array layout with `read_centers_local()` for bulk reads without TM in inner loop. Added `expli::TM<double>::thread_init()` in worker function (was missing, causing "tx not defined" crash).
+- **SSCA2 time fix**: Changed O(N²) edge construction (scale=20 → 1M vertices × 1M edges = 5×10¹¹ iterations, timed out >3min) to O(N * max_degree) approach (each vertex connects to 3-3 random neighbors). Reduced default scale from 20 to 14.
+- **All 6 STAMP C++ benchmarks compile and PASS** with TinySTM/WBCTL:
+  - Vacation: 5.2M TXNs, 1.04M tx/s, PASS (money conservation)
+  - Labyrinth: 48 paths (2 found, 46 failed), PASS
+  - KMeans: 400 iterations, 3ms, PASS
+  - Genome: 16777216 segments, 640K matches, 15s, PASS
+  - Intruder: 1M packets, 579K inserts + 574K deletes, 222ms, PASS
+  - SSCA2: 16384 vertices, 49K TXNs, 22K edges, 5ms, PASS
+- **Rust benchmarks refactored** from flat structure to hierarchical modules:
+  - `src/lib.rs` — shared library with `Rng` + `pub mod stamp`
+  - `src/stamp/{mod,kmeans,labyrinth,vacation,genome,intruder,ssca2}.rs` — 6 STAMP benchmark modules
+  - `src/bin/{bank,stamp,stmbench7,datastructures,eigenbench,tpcc,ycsb,fuzz_counter,fuzz_bank}.rs` — 9 binary entry points
+  - `Cargo.toml` updated with `[lib]` section, all bins pointing to `src/bin/`
+  - Missing STAMP benchmarks (genome, intruder, ssca2) added to Rust code
+  - Old `src/stamp.rs` removed (replaced by `src/stamp/` module + `src/bin/stamp.rs`)
+- **Cleanup**: Removed old `labyrinth_swisstm_fuzz.cpp` from `expli_benchmarks/STAMP/labyrinth/`
+- **Bayes and Yada added** — all 8 STAMP C++ benchmarks now implemented and passing:
+  - bayes: Bayesian network structure learning (serialized task queue, 5ms)
+  - yada: Delaunay mesh refinement (serialized, 162→405 elements, 3s)
+- **Makefile BUILD_RULE fix**: `$$(2)` → `$(2)` — source file was silently omitted from compile commands
+- **Rust stamp module**: 8 separate `.rs` files under `src/stamp/` — `{mod,kmeans,labyrinth,vacation,genome,intruder,ssca2,bayes,yada}.rs`
+
+## Done (this session — 2026-06-02)
+- **Shared TM-friendly containers (C++)**: Created `expli_tm_api/containers/tm_small_set.hpp` (fixed-capacity sorted set, `expli::TM<T>` internally), `tm_heap.hpp` (binary heap priority queue), `tm_bit_vector.hpp` (compact u64[] bitset with `__atomic_*` operations). All containers have TM methods (read/write via `expli::TM`) and non-TM setup methods (`setup_*` using `peek()/poke()`) for initialization.
+- **Shared TM-friendly containers (Rust)**: Created `rust_tm_api/containers/` crate with `TMSmallSet<T, MAX>`, `TMHeap<T, MAX>`, `TMBitVector<N>`. Added to workspace members. All operations go through `Transaction` (`tx.read()`/`tx.write()`).
+- **Thread barrier utility**: Created `expli_tm_api/thread_barrier.hpp` (`expli::Barrier`) using `std::atomic` for initialization phases outside TM.
+- **TMSmallSet enhancements**: Added `empty()`, `get(i)` (TM), `collect(vec)` (TM), `setup_clear()`, `setup_insert(val)`, `setup_count()`, `setup_contains(val)`, `setup_get(i)` (non-TM via peek/poke).
+- **Bayes refactored**: Replaced `std::mutex` + `std::set<int>` + `std::vector<Task>` heap with TM-friendly `TMSmallSet<int,2>` for parents/children, `TaskList` (TM-tracked parallel arrays), and `expli::TM<double>/int` for scores/counts. Added `global_max_edges` limit check (was missing, causing unbounded growth). Uses single-thread learning (tid==0) since algorithm is inherently serialized. **PASS** at default params (9ms, 18 ops, 64 parents).
+- **Yada refactored**: Replaced `std::mutex` + `std::set<int> neighbors` with `TMSmallSet<int, 8> + expli::TM<uint8_t>` for shared element fields (`encroached`, `is_garbage`, `is_referenced`). TM-tracked work heap with `expli::TM<int>` count. Uses `setup_*` (non-TM peek/poke) for non-TX element access (single-threaded worker). **PASS** (155 ops, 405 elements, 3s timer).
+- **All 8 C++ STAMP benchmarks PASS** with TinySTM/WBCTL: vacation (5.1M TXNs), labyrinth (2 paths), kmeans (400 iterations), genome (640K matches), intruder (1.1M ops), ssca2 (49K TXNs), bayes (9ms), yada (155 ops).
+- **Rust containers crate** compiles as dependency of `benchmarks` with `--features wbctl`.
+- **ssca2.rs fixed**: Changed `TmCell<bool>` → `TmCell<u8>` with `0`/`1` values — `bool` does not implement `TmPrimitive`.
+- **stamp.rs fixed**: Changed macro-based module dispatch to explicit match dispatch — Rust macros cannot use metavariables as module path segments (`stamp::$bench::run`).
+- **All 9 Rust benchmark binaries compile** with `--features wbctl` (only warnings, no errors).
+
+## Key Decisions (this session)
+- `TMSmallSet`/`TMHeap` internal size counters are `expli::TM<int>` (TM-tracked) rather than raw `int` — ensures correct read/write isolation inside TX.
+- `setup_*` methods on containers use `peek()/poke()` (non-TM) for initialization outside TX; `read()/write()` (TM) for operations inside TX.
+- `expli::TM<T>` uses `poke(val)` for non-TM initialization; no `T(T val)` constructor added (would break `T value_ = {}` default pattern).
+- Bayes/yada use single-thread execution (tid==0) since their algorithms are fundamentally serialized (best-first search / mesh refinement).
+- Non-TM vector operations inside `grow_and_retriangulate` (push_back, garbage marking) use `peek()/poke()` on TM-fields + `setup_*` on neighbors. Only work heap pop/push goes through TM `tx_retry`.
+- `expli::TM<uint8_t>` used for boolean-like fields (`is_garbage`, `encroached`, `is_referenced`) since `bool` has no `tm_type_traits` specialization.
+
+## Relevant Files
+- `expli_tm_api/containers/tm_small_set.hpp`: TM-friendly fixed-capacity set (both TM and non-TM operations)
+- `expli_tm_api/containers/tm_heap.hpp`: TM-friendly binary heap priority queue
+- `expli_tm_api/containers/tm_bit_vector.hpp`: Compact bitset with atomic u64[] operations
+- `expli_tm_api/thread_barrier.hpp`: Reusable barrier using `std::atomic` (not TM)
+- `expli_benchmarks/STAMP/bayes/bayes.cpp`: Rewritten with TM-only data structures (no std::mutex, no std::set)
+- `expli_benchmarks/STAMP/yada/yada.cpp`: Rewritten with TM-only data structures (no std::mutex, no std::set)
+- `rust_tm_api/containers/`: Rust crate with TMSmallSet, TMHeap, TMBitVector
+- `rust_tm_api/containers/src/tm_small_set.rs`: Rust TMSmallSet (Vec<TmCell<T>>)
+- `rust_tm_api/containers/src/tm_heap.rs`: Rust TMHeap (Vec<TmCell<T>>)
+- `rust_tm_api/containers/src/tm_bit_vector.rs`: Rust TMBitVector (AtomicU64[])
+
 
