@@ -94,131 +94,112 @@ static inline int grid_idx(const LabyrinthData* data, int x, int y, int z) {
     return (z * data->height + y) * data->width + x;
 }
 
-static bool do_expansion(long* grid_copy, const LabyrinthData* data,
-                          const Point3D& src, const Point3D& dst,
-                          int* queue, int& qh, int& qt) {
-    int w = data->width, h = data->height, d = data->depth;
-    int idx = grid_idx(data, src.x, src.y, src.z);
-    grid_copy[idx] = 0;
+// ── BFS expansion: computes distance field from src (non-TX, raw memory) ───
+static int do_expansion(long* dist, const long* cell_states,
+                         int w, int h, int d,
+                         const Point3D& src, const Point3D& dst,
+                         int* queue) {
+    int gridsize = w * h * d;
+    for (int i = 0; i < gridsize; i++) dist[i] = -1L;
+
+    int qh = 0, qt = 0;
+    int idx = (src.z * h + src.y) * w + src.x;
+    dist[idx] = 0;
     queue[qt++] = idx;
 
     int dirs[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-
     while (qh < qt) {
         int cur = queue[qh++];
-        int cx = cur % w;
-        int cy = (cur / w) % h;
-        int cz = cur / (w * h);
-        
-        if (cx == dst.x && cy == dst.y && cz == dst.z) {
-            return true;
-        }
+        int cx = cur % w, cy = (cur / w) % h, cz = cur / (w * h);
+        if (cx == dst.x && cy == dst.y && cz == dst.z) return 1;
 
-        for (int dir = 0; dir < 6; dir++) {
-            int nx = cx + dirs[dir][0];
-            int ny = cy + dirs[dir][1];
-            int nz = cz + dirs[dir][2];
-
-            if (nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d)
-                continue;
-
+        for (int d2 = 0; d2 < 6; d2++) {
+            int nx = cx + dirs[d2][0], ny = cy + dirs[d2][1], nz = cz + dirs[d2][2];
+            if (nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d) continue;
             int nidx = (nz * h + ny) * w + nx;
-            long val = grid_copy[nidx];
-            if (val == -2L) continue;
-            if (val == -1L) {
-                grid_copy[nidx] = 1;
+            if (cell_states[nidx] == -2L) continue; // wall
+            if (dist[nidx] == -1L) { // unvisited
+                dist[nidx] = dist[cur] + 1;
                 queue[qt++] = nidx;
             }
         }
     }
-    return false;
+    return 0;
 }
 
-TX static bool labyrinth_route(LabyrinthData* data, int req_idx,
-                                std::vector<long>& local_grid) {
-    std::memcpy(local_grid.data(), data->grid.data(), data->grid.size() * sizeof(long));
-    auto& req = data->requests[req_idx];
-    
-    int w = data->width, h = data->height, d = data->depth;
-    int gridsize = w * h * d;
-    
-    // Allocate raw arrays (avoids std::queue/deque which break under TM)
-    long* grid_copy = new long[gridsize];
-    int* queue = new int[gridsize];
-    for (int i = 0; i < gridsize; i++) grid_copy[i] = local_grid[i];
-    
-    int qh = 0, qt = 0;
-    if (!do_expansion(grid_copy, data, req.src, req.dst, queue, qh, qt)) {
-        delete[] grid_copy;
-        delete[] queue;
-        return false;
-    }
-
-    // Traceback using grid_copy's distance values
-    // Simple greedy: at each step, move to the neighbor with lowest value
-    std::vector<Point3D> path;
-    int cur_x = req.dst.x, cur_y = req.dst.y, cur_z = req.dst.z;
+// ── Greedy traceback: reconstruct path from distance field ────────────────
+static bool do_traceback(std::vector<Point3D>& path, const long* dist,
+                          int w, int h, int d,
+                          const Point3D& src, const Point3D& dst) {
+    path.clear();
+    int cx = dst.x, cy = dst.y, cz = dst.z;
     int dirs[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-    
     while (true) {
-        path.push_back({cur_x, cur_y, cur_z});
-        int idx = (cur_z * h + cur_y) * w + cur_x;
-        if (grid_copy[idx] == 0) break;
-        
-        int best_d = -1;
-        long best_val = grid_copy[idx];
-        
-        for (int dir = 0; dir < 6; dir++) {
-            int nx = cur_x + dirs[dir][0];
-            int ny = cur_y + dirs[dir][1];
-            int nz = cur_z + dirs[dir][2];
-            if (nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d)
-                continue;
-            int nidx = (nz * h + ny) * w + nx;
-            long nv = grid_copy[nidx];
-            if (nv >= 0 && nv < best_val) {
-                best_val = nv;
-                best_d = dir;
-            }
-        }
-        
-        if (best_d < 0) {
-            delete[] grid_copy;
-            delete[] queue;
-            path.clear();
-            return false;
-        }
-        
-        cur_x += dirs[best_d][0];
-        cur_y += dirs[best_d][1];
-        cur_z += dirs[best_d][2];
-    }
-    
-    std::reverse(path.begin(), path.end());
-    delete[] grid_copy;
-    delete[] queue;
+        path.push_back({cx, cy, cz});
+        int idx = (cz * h + cy) * w + cx;
+        if (idx == (src.z * h + src.y) * w + src.x) break;
 
-    // Mark path cells in the real grid
-    for (size_t i = 1; i < path.size() - 1; i++) {
+        int best_d = -1;
+        long best_val = dist[idx];
+        for (int d2 = 0; d2 < 6; d2++) {
+            int nx = cx + dirs[d2][0], ny = cy + dirs[d2][1], nz = cz + dirs[d2][2];
+            if (nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d) continue;
+            long nv = dist[(nz * h + ny) * w + nx];
+            if (nv >= 0 && nv < best_val) { best_val = nv; best_d = d2; }
+        }
+        if (best_d < 0) { path.clear(); return false; }
+        cx += dirs[best_d][0]; cy += dirs[best_d][1]; cz += dirs[best_d][2];
+    }
+    std::reverse(path.begin(), path.end());
+    return !path.empty();
+}
+
+// ── TX wrapper: atomically verify and mark path cells ─────────────────────
+TX static bool labyrinth_mark(LabyrinthData* data,
+                               const std::vector<Point3D>& path) {
+    for (size_t i = 1; i + 1 < path.size(); i++) {
         int idx = grid_idx(data, path[i].x, path[i].y, path[i].z);
         if (data->grid[idx] != -1L) return false;
+    }
+    for (size_t i = 1; i + 1 < path.size(); i++) {
+        int idx = grid_idx(data, path[i].x, path[i].y, path[i].z);
         data->grid[idx] = -2L;
     }
-
     return true;
 }
 
 THREAD void worker_labyrinth(ThreadData* td) {
     auto data = g_labyrinth;
+    int gridsize = data->width * data->height * data->depth;
     std::vector<long> local_grid(data->grid.size());
+    long* dist = new long[gridsize];
+    int* queue = new int[gridsize];
+    std::vector<Point3D> path;
 
     for (int i = td->thread_id; i < data->num_requests; i += g_num_threads) {
         if (data->request_handled[i]) continue;
 
-        bool ok = labyrinth_route(data, i, local_grid);
-        if (ok) {
-            data->request_handled[i] = 1;
-            total_ops.fetch_add(1, std::memory_order_relaxed);
+        auto& req = data->requests[i];
+        int w = data->width, h = data->height, d = data->depth;
+
+        while (true) {
+            // Load grid state (non-TX raw memcpy — may be stale, that's OK)
+            std::memcpy(local_grid.data(), data->grid.data(),
+                        data->grid.size() * sizeof(long));
+
+            int ok = do_expansion(dist, local_grid.data(), w, h, d,
+                                   req.src, req.dst, queue);
+            bool traced = ok && do_traceback(path, dist, w, h, d, req.src, req.dst);
+            if (!ok || !traced || path.empty()) break;
+
+            if (labyrinth_mark(data, path)) break;
+            // TX returned false — path cells were taken between memcpy and TX.
+            // Loop back to reload grid state.
         }
+
+        data->request_handled[i] = 1;
+        total_ops.fetch_add(1, std::memory_order_relaxed);
     }
+    delete[] dist;
+    delete[] queue;
 }

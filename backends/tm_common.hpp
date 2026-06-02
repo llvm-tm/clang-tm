@@ -164,6 +164,19 @@ write_value_to_addr( //
 	}
 }
 
+// ── Bitmask of N bytes (e.g. N=2 → 0xFFFF) ────────────────────
+#define BYTE_MASK(n) ((n) >= 8 ? ~0ULL : ((1ULL << ((n) * 8)) - 1))
+
+// ── Extract raw u64 from any_type_t (union-based, always u8) ──
+inline uint64_t any_to_u64(const any_type_t &val, ValueType /*sz*/) {
+    return val.u8;
+}
+
+// ── Store raw u64 into any_type_t (union-based, always u8) ────
+inline void u64_to_any(any_type_t &out, uint64_t val, ValueType /*sz*/) {
+    out.u8 = val;
+}
+
 // ===========================================================================
 // Stack-address detection: check if a pointer is on the current thread's
 // stack.  Stack data is thread-private and must NEVER go through TM reads/

@@ -26,7 +26,12 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - `alloc_stress_test` status: **FULL PASS** (vec + map insert/erase + raw new/delete + mixed workers), **PASS at 1t/2t/3t** concurrent.
 - Bank benchmark: **PASS at 1t/2t/4t** with correct total money preserved.
 
-## Done (this session)
+## Done (this session — 2026-06-02)
+- **WBETL bitmap valid-byte bug fixed (2-part root cause)**: 
+  1. `BYTE_MASK(nbytes)` produces VALUE-width mask (e.g. `0xFFFFFFFF` for 4 bytes) but the valid bitmap needs a BYTE-COUNT mask (`0x0F`). Cast to `uint8_t` truncated `0xFFFFFFFF` → `0xFF`, marking ALL 8 bytes valid and zeroing adjacent bytes in the same 8-byte word on write-back.
+  2. 32-bit `int` shift UB: valid-bitmap mask reused `byte_offset << 3` (bits, up to 56) from value-field shift. `(int)((1<<4)-1) << 32 = undefined behavior` → masked to lower bits → `0`. Fixed by using `byte_offset(raw_addr)` directly (0–7 bytes) for the valid-bitmap shift, and `1u` for unsigned semantics.
+  - **WBETL fuzz_bank**: All seeds/threads PASS money conservation (previously failed ~50% loss at 1t).
+  - **Tested**: Bank (1t/4t), fuzz_bank (1t/2t/4t), debug_wbetl2 (same-word/diff-word patterns) — all PASS.
 - **TMTreapMap / TMTreapMultiMap**: Created `benchmarks/datastructures/tm_treap_map.hpp` — treap-based (randomized BST, Aragon & Seidel 1989) map/multimap replacement for `std::map`/`std::multimap`. Uses `std::hash<K>` + Murmur3 finalizer mixing for priorities (avoids degenerate tree from identity hash). Parent pointers for O(log n) Iterator++. Stress tests (10 tests, insert/find/erase/iterate/lower_bound) all PASS.
 - **Hand-rolled RB tree (tm_rbtree.hpp)**: Buggy `erase()` (split-by-key logic wrong for separating == k from > k). Replaced by treap.
 - **STMbench7 integrated with treap**: Uses `TMTreapMap` (5 by-ID indexes) + `TMTreapMultiMap` (2 by-date indexes). Uninstrumented build works (100 ops in 1s).

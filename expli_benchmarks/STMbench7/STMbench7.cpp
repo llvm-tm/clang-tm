@@ -17,8 +17,8 @@
 // ── Spec constants ──────────────────────────────────────────
 constexpr int FANOUT      = 3;
 constexpr int TREE_LEVELS = 6;
-constexpr int MAX_CP      = 500;
-constexpr int AP_PER_CP   = 200;
+constexpr int MAX_CP      = 200;    // Rust: 200
+constexpr int AP_PER_CP   = 4;     // 200*4 = 800 (Rust: 800)
 constexpr int CONN_PER_AP = 3;
 constexpr int MAX_BA      = 729;  // 3^6
 constexpr int MAX_CA      = 364;  // Σ3^0..5
@@ -441,10 +441,28 @@ static OpCat pick_category(std::mt19937 &r) {
 }
 
 static int count_by_cat[4] = {0,0,0,0};
+static std::atomic<bool> g_stop{false};
+static std::atomic<uint64_t> g_tx_count{0};
+
+// ── TX retry wrapper (sigsetjmp frame lives here) ──────────
+template<typename F>
+static auto run_tx(F&& body) -> decltype(body()) {
+    volatile bool done = false;
+    decltype(body()) result{};
+    while (!done) {
+        sigsetjmp(tm_jmpbuf, 0);
+        tm_nested_call_counter = 1;
+        tm_begin();
+        result = body();
+        tm_end();
+        done = true;
+        g_tx_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    tm_nested_call_counter = 0;
+    return result;
+}
 
 // ── Worker ──────────────────────────────────────────────────
-static std::atomic<bool> g_stop{false};
-
 static void worker(int seed) {
     expli::TM<int>::thread_init();
     auto rng = std::mt19937(seed);
@@ -461,7 +479,7 @@ static void worker(int seed) {
         }
         if (first < 0) continue;
         int idx = first + (rng() % (last - first + 1));
-        g_ops[idx].fn(rng);
+        run_tx([&]() -> OpResult { return g_ops[idx].fn(rng); });
         count_by_cat[cat]++;
     }
     expli::TM<int>::thread_exit();
@@ -495,13 +513,16 @@ int main(int argc, char *argv[]) {
     uint64_t total = 0;
     for (int c=0; c<4; c++) total += count_by_cat[c];
 
+    uint64_t tx_total = g_tx_count.load();
+
     printf("\nResults (%d ms):\n", (int)ms);
     printf("  Long trav:   %d\n", count_by_cat[0]);
     printf("  Short trav:  %d\n", count_by_cat[1]);
     printf("  Short ops:   %d\n", count_by_cat[2]);
     printf("  Struct mods: %d\n", count_by_cat[3]);
-    printf("  Total:       %llu\n", (unsigned long long)total);
-    printf("  Ops/sec:     %.0f\n", total * 1000.0 / ms);
+    printf("  Business ops: %llu  (%.0f ops/sec)\n", (unsigned long long)total, total * 1000.0 / ms);
+    printf("  TM TXs:       %llu  (%.0f txns/sec)\n",
+           (unsigned long long)tx_total, tx_total * 1000.0 / ms);
 
     delete[] threads;
     expli::TM<int>::exit();
