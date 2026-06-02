@@ -2,6 +2,10 @@ use crate::common::*;
 use crate::common::TX;
 use core::sync::atomic::{fence, Ordering};
 
+fn tx_aborted() -> bool {
+    TX.with(|tx| match *tx.borrow() { Some(ref t) => t.aborted, None => false })
+}
+
 fn read_word<T: Primitive>(addr: usize) -> T {
     fence(Ordering::SeqCst);
     if !tx_active() { return unsafe { (addr as *const T).read() }; }
@@ -157,6 +161,15 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
         tx.undo_backs.push(old_tv.into_write_back(addr));
         tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv });
     });
+}
+
+pub fn tm_abort() {
+    if let Some(tx) = flush_tx() {
+        for u in tx.undo_backs { u.apply(); }
+        if !tx.locked_addrs.is_empty() {
+            unlock_indices(&tx.locked_addrs);
+        }
+    }
 }
 
 pub fn tm_commit() -> bool {

@@ -14,16 +14,15 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         let value: T = unsafe { (addr as *const T).read() };
         if read_version(addr) != version { continue; }
         if with_tx(|tx| {
-            if version > tx.start_version { tx.aborted = true; true }
+            if version > tx.start_version { true }
             else { tx.read_set.push((addr, version)); false }
-        }) { return value; }
+        }) { std::panic::panic_any(TmxAbort); }
         return value;
     }
 }
 
 fn write_word<T: Primitive>(addr: usize, val: T) {
     fence(Ordering::SeqCst);
-    if tx_aborted() { return; }
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
     let tv = val.to_typed();
     with_tx(|tx| {
@@ -38,7 +37,6 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
     fence(Ordering::SeqCst);
-    if tx_aborted() { return; }
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| {
@@ -47,10 +45,13 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     });
 }
 
+pub fn tm_abort() {
+    flush_tx();
+}
+
 pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
     fence(Ordering::SeqCst);
-    if tx.aborted { TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
     if tx.write_set.is_empty() { return true; }
     let addrs: Vec<usize> = tx.write_set.keys().copied().collect();
     gc_acquire(); fence(Ordering::SeqCst);

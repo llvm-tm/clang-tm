@@ -13,7 +13,7 @@ use core::sync::atomic::{fence, AtomicU64, Ordering};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-pub use runtime_core::{Primitive, TypedValue, WriteBack};
+pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
 
 // ── Constants ───────────────────────────────────────────
 const LOCK_MASK: u64 = 0xFF;
@@ -134,11 +134,7 @@ fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
 }
 
 fn tx_active() -> bool {
-    TX.with(|tx| match *tx.borrow() { Some(ref t) => !t.aborted, None => false })
-}
-
-fn tx_aborted() -> bool {
-    TX.with(|tx| match *tx.borrow() { Some(ref t) => t.aborted, None => false })
+    TX.with(|tx| tx.borrow().is_some())
 }
 
 fn flush_tx() -> Option<Box<TxState>> {
@@ -162,17 +158,15 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         let val: T = unsafe { (addr as *const T).read() };
         if read_version(addr) != ver { continue; }
 
-        let aborted = with_tx(|tx| {
+        if with_tx(|tx| {
             if ver > tx.start_version {
-                tx.aborted = true;
                 true
             } else {
-                if tx.read_set.len() > 1_000_000 { tx.aborted = true; return true; }
+                if tx.read_set.len() > 1_000_000 { return true; }
                 tx.read_set.push((addr, ver));
                 false
             }
-        });
-        if aborted { return val; }
+        }) { std::panic::panic_any(TmxAbort); }
         return val;
     }
 }
@@ -180,7 +174,6 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 // ── Write word ──────────────────────────────────────────
 fn write_word<T: Primitive>(addr: usize, val: T) {
     fence(Ordering::SeqCst);
-    if tx_aborted() { return; }
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
 
     let tv = val.to_typed();
@@ -208,7 +201,6 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
     fence(Ordering::SeqCst);
-    if tx_aborted() { return; }
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
 
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
@@ -237,15 +229,6 @@ fn validate_read_set(rs: &[(usize, u64)]) -> bool {
 pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
     fence(Ordering::SeqCst);
-
-    if tx.aborted {
-        // Discard redo entries for this aborted TX
-        REDO_LOG.with(|log| {
-            log.borrow_mut().truncate(0);
-        });
-        TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
-        return false;
-    }
 
     if tx.write_set.is_empty() { return true; }
 
@@ -327,6 +310,7 @@ pub fn tm_commit() -> bool {
 
 // ── Init ────────────────────────────────────────────────
 pub fn tm_init() {
+    tm_install_tmx_hook();
     locks();
     G_CLOCK.store(0, Ordering::Release);
 }
@@ -348,6 +332,11 @@ pub fn tm_exit_thread() {}
 pub fn tm_begin() {
     let sv = G_CLOCK.load(Ordering::Acquire);
     TX.with(|tx| { *tx.borrow_mut() = Some(Box::new(TxState::new(sv))); });
+}
+
+pub fn tm_abort() {
+    REDO_LOG.with(|log| { log.borrow_mut().truncate(0); });
+    flush_tx();
 }
 
 pub fn tm_abort_count() -> u64 { TM_ABORT_COUNT.load(Ordering::Relaxed) }

@@ -60,6 +60,12 @@ pub fn tm_commit() -> bool {
     true
 }
 
+pub fn tm_abort() {
+    fence(Ordering::SeqCst);
+    ACTIVE.with(|a| *a.borrow_mut() = false);
+    unlock_global();
+}
+
 pub fn tm_abort_count() -> u64 { 0 }
 
 // ── Read/write — direct memory access (SGL provides isolation) ──

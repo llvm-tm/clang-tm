@@ -536,7 +536,25 @@ public:
     static void commit(TxDescriptor* tx) {
         if (!tx || !tx->active) return;
 
+        // DEBUG: dump tx pointer and key fields on every commit call
+        fprintf(stderr, "COMMIT: tx=%p active=%d aborted=%d wl_sz=%zu rs_sz=%zu write_cnt=%d owned_orecs=%zu\n",
+                (void*)tx, (int)tx->active, (int)tx->aborted,
+                tx->write_log.size(), tx->read_set.size(),
+                tx->write_count, tx->owned_orecs.size());
+
         if (tx->aborted) {
+            // DEBUG: check write_log integrity before iterating
+            if (tx->write_log.size() > 0) {
+                fprintf(stderr, "DEBUG commit(aborted): tx=%p active=%d aborted=%d wl_sz=%zu rs_sz=%zu write_cnt=%d orecs_sz=%zu\n",
+                        (void*)tx, (int)tx->active, (int)tx->aborted,
+                        tx->write_log.size(), tx->read_set.size(),
+                        tx->write_count, tx->owned_orecs.size());
+                // Check first element
+                auto& front = tx->write_log.front();
+                fprintf(stderr, "  front: byte_addr=%p word_addr=%p orec=%p owner=%p\n",
+                        (void*)front.byte_addr, (void*)front.word_addr,
+                        (void*)front.orec, (void*)front.owner);
+            }
             for (auto& we : tx->write_log) {
                 we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
             }
@@ -549,6 +567,18 @@ public:
             tx->active = false;
             stm::tm_token_release_if_held(tx->id);
             return;
+        }
+
+        // DEBUG: integrity check on entry to normal commit
+        if (tx->write_log.size() > 0) {
+            auto& front = tx->write_log.front();
+            auto& back = tx->write_log.back();
+            fprintf(stderr, "DEBUG commit(normal): tx=%p wl_sz=%zu rs_sz=%zu write_cnt=%d\n"
+                            "  front: byte_addr=%p orec=%p\n"
+                            "  back:  byte_addr=%p orec=%p\n",
+                    (void*)tx, tx->write_log.size(), tx->read_set.size(), tx->write_count,
+                    (void*)front.byte_addr, (void*)front.orec,
+                    (void*)back.byte_addr, (void*)back.orec);
         }
 
         // Phase 1: acquire read-locks via atomic exchange, capturing the

@@ -3,17 +3,17 @@
 // Reads record orec version; writes acquire orec exclusive and
 // write through to memory, saving old value in undo log.
 
-use core::sync::atomic::{fence, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 pub use runtime_core::{Primitive, TypedValue, WriteBack};
 
 // ── Constants ───────────────────────────────────────────
-const OWNED_BIT: u64 = 0;
 const VERSION_SHIFT: u64 = 8;
 const TABLE_BITS: u64 = 20;
 const TABLE_SIZE: usize = 1 << TABLE_BITS;
+const WN_THRESHOLD: u64 = 10;     // writes before we get a cm_ts priority
 
 fn lock_index(addr: usize) -> usize {
     let h = (addr as u64).wrapping_mul(0x9E3779B97F4A7C15);
@@ -21,41 +21,67 @@ fn lock_index(addr: usize) -> usize {
 }
 
 // ── Orec ────────────────────────────────────────────────
+// Two-field design (like C++ SwissTM):
+//   version_lock: bit 0 = READ_LOCKED (only during commit Phase 1, microseconds),
+//                 bits 8+ = version (stable across TX body, bumped at commit)
+//   w_lock: writer-exclusive (invisible to readers — readers never wait on w_lock)
+//   owner_cm_ts: contention-management ts of owning TX (set when w_lock held)
 struct Orec {
-    state: AtomicU64, // bit 0 = owned, bits 8+ = version
+    version_lock: AtomicU64,
+    w_lock: AtomicBool,
+    owner_cm_ts: AtomicU64,
 }
 
 impl Orec {
     const fn new() -> Self {
-        Orec { state: AtomicU64::new(0) }
+        Orec {
+            version_lock: AtomicU64::new(0),
+            w_lock: AtomicBool::new(false),
+            owner_cm_ts: AtomicU64::new(0),
+        }
     }
-    fn is_owned(&self) -> bool {
-        self.state.load(Ordering::Relaxed) & 1 != 0
-    }
+    // Reader-visible version (bits 8+ of version_lock).  Never blocked by w_lock.
     fn version(&self) -> u64 {
-        self.state.load(Ordering::Acquire) >> VERSION_SHIFT
+        self.version_lock.load(Ordering::Acquire) >> VERSION_SHIFT
     }
-    fn read_version_preserving(&self) -> u64 {
-        // Load the state and extract version, preserving read-lock bits
-        let s = self.state.load(Ordering::Acquire);
-        s >> VERSION_SHIFT
+    // Acquire the writer lock.  Does NOT affect version_lock — readers can still
+    // read the version and will accept dirty values (validated at commit).
+    fn try_lock_exclusive_with_cm(&self, cm_ts: u64) -> bool {
+        if self.w_lock.load(Ordering::Relaxed) { return false; }
+        if self.w_lock.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            self.owner_cm_ts.store(cm_ts, Ordering::Release);
+            true
+        } else {
+            false
+        }
     }
-    fn try_lock_exclusive(&self, tx_id: u64) -> bool {
-        let cur = self.state.load(Ordering::Relaxed);
-        if cur & 1 != 0 { return false; }
-        // Set owned bit, preserve version and incarnation bits
-        let desired = cur | 1;
-        self.state.compare_exchange_weak(cur, desired, Ordering::Acquire, Ordering::Relaxed).is_ok()
+    fn read_owner_cm_ts(&self) -> u64 {
+        self.owner_cm_ts.load(Ordering::Acquire)
     }
-    fn unlock_exclusive_and_inc_version(&self) {
-        let cur = self.state.load(Ordering::Relaxed);
-        let ver = (cur >> VERSION_SHIFT) + 1;
-        self.state.store(ver << VERSION_SHIFT, Ordering::Release);
+    // Release w_lock only — no version bump (no read_set tracking for
+    // dirty reads, so bumping would only cause cascading aborts).
+    fn unlock_wlock(&self) {
+        self.w_lock.store(false, Ordering::Release);
     }
-    fn unlock_exclusive_with_version(&self, ver: u64) {
-        self.state.store(ver << VERSION_SHIFT, Ordering::Release);
+    // Commit Phase 1: signal readers that we're about to validate+commit.
+    fn set_read_locked(&self) {
+        self.version_lock.fetch_or(1, Ordering::Release);
+    }
+    // Commit Phase 5: store new version, clear READ_LOCKED bit, release w_lock.
+    fn commit_release(&self, ver: u64) {
+        self.version_lock.store(ver << VERSION_SHIFT, Ordering::Release);
+        self.w_lock.store(false, Ordering::Release);
+    }
+    // Abort after Phase 1: clear READ_LOCKED + release w_lock (no version bump).
+    fn abort_release(&self) {
+        let cur = self.version_lock.load(Ordering::Relaxed);
+        self.version_lock.store(cur & !1, Ordering::Release);
+        self.w_lock.store(false, Ordering::Release);
     }
 }
+
+// ── Global contention-management clock ──────────────────
+static GREEDY_TS: AtomicU64 = AtomicU64::new(0);
 
 fn orec_for(addr: usize) -> &'static Orec {
     &orecs()[lock_index(addr)]
@@ -81,28 +107,87 @@ struct TxState {
     /// Deferred undo closures (safe to apply on rollback).
     undo_backs: Vec<WriteBack>,
     locked_orecs: Vec<usize>,           // orec indices locked for writing
-    start_version: u64,
+    valid_ts: u64,                      // highest commit_ts for which read_set is validated
+    cm_ts: u64,                         // contention-management timestamp (u64::MAX = none)
+    write_count: u64,                   // writes performed in this TX (for cm timestamp)
+    succ_abort_count: u64,              // consecutive aborts (for backoff)
     aborted: bool,
     tx_id: u64,
 }
 
 impl TxState {
-    fn new(start_version: u64, tx_id: u64) -> Self {
+    fn new(global_clock: u64, tx_id: u64, prev_abort_count: u64) -> Self {
         TxState {
             read_set: Vec::with_capacity(64),
             write_set: HashMap::with_capacity(8),
             undo_backs: Vec::new(),
             locked_orecs: Vec::new(),
-            start_version,
+            valid_ts: global_clock,
+            cm_ts: u64::MAX,
+            write_count: 0,
+            succ_abort_count: prev_abort_count,
             aborted: false,
             tx_id,
         }
     }
 }
 
+// ── Contention manager ──────────────────────────────────
+// Priority = lower cm_ts wins (older TX).  A TX gets a cm_ts
+// from GREEDY_TS after WN_THRESHOLD writes.
+fn cm_on_write(tx: &mut TxState) {
+    if tx.cm_ts == u64::MAX && tx.write_count >= WN_THRESHOLD {
+        tx.cm_ts = GREEDY_TS.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+// Return true if we should abort (owner has higher priority).
+// Pre-WN_THRESHOLD (both cm_ts = u64::MAX): bounded spin, no
+// deterministic tiebreaker — parity creates permanent priority
+// (one thread always "wins") which causes livelock.
+// Post-WN_THRESHOLD: lower cm_ts = older = higher priority.
+fn cm_should_abort(tx: &TxState, orec: &Orec, spin_count: &mut u32) -> bool {
+    if tx.cm_ts == u64::MAX {
+        let owner_cm = orec.read_owner_cm_ts();
+        if owner_cm == u64::MAX {
+            // Both pre-WN_THRESHOLD: bounded spin, abort after 100K
+            *spin_count += 1;
+            return *spin_count >= 100000;
+        }
+        return true;  // Owner earned priority, we should abort
+    }
+    let owner_cm = orec.read_owner_cm_ts();
+    // Owner has lower cm_ts = older/higher-priority → we abort
+    if owner_cm < tx.cm_ts {
+        return true;
+    }
+    false  // We have higher priority, keep waiting
+}
+
+// Exponential backoff after abort.  Range: ~50µs to ~5ms.
+// Uses spin for short backoffs, thread::sleep for long backoffs.
+// The exponential growth prevents the ABORT→RETRY→ABORT cascade:
+// each retry waits exponentially longer, giving competitors a
+// window to commit their TX without contention.
+fn cm_backoff(abort_count: u64) {
+    let ac = abort_count & 0x3F;
+    // Compute delay in microseconds (50µs * 2^(ac & 7))
+    let delay_us = 50u64 * (1u64 << (ac.min(7) as u64));
+    if delay_us <= 200 {
+        // Short backoff: spin-loop (sub-millisecond)
+        for _ in 0..delay_us * 2000 {
+            std::hint::spin_loop();
+        }
+    } else {
+        // Long backoff: yield CPU (millisecond+)
+        std::thread::sleep(std::time::Duration::from_micros(delay_us));
+    }
+}
+
 // ── Thread-local state ──────────────────────────────────
 thread_local! {
     static TX: RefCell<Option<Box<TxState>>> = const { RefCell::new(None) };
+    static SUCC_ABORT_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
@@ -110,6 +195,18 @@ fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
         let mut b = tx.borrow_mut();
         f(b.as_mut().expect("no active transaction"))
     })
+}
+
+fn tx_abort_count() -> u64 {
+    SUCC_ABORT_COUNT.with(|c| c.get())
+}
+
+fn inc_tx_abort_count() {
+    SUCC_ABORT_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+fn reset_tx_abort_count() {
+    SUCC_ABORT_COUNT.with(|c| c.set(0));
 }
 
 fn tx_active() -> bool {
@@ -169,10 +266,13 @@ fn byte_size_of_tv(tv: &TypedValue) -> u8 {
 fn read_word<T: Primitive>(addr: usize) -> T {
     fence(Ordering::SeqCst);
     if !tx_active() {
+        // Aborted (zombie window) or no TX at all.  In the zombie
+        // window, addr may be corrupted from pointer-chasing through
+        // aborted reads (e.g. read_ptr returns null → next read would
+        // dereference 0).  Return zeroed to avoid SIGSEGV.
+        if tx_aborted() { return unsafe { core::mem::zeroed() }; }
         return unsafe { (addr as *const T).read() };
     }
-
-    let sz = core::mem::size_of::<T>() as u8;
 
     // Check write-set
     if let Some(tv) = TX.with(|tx| {
@@ -183,26 +283,53 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         if tx_aborted() {
             return unsafe { (addr as *const T).read() };
         }
-        let idx = lock_index(addr);
         let orec = orec_for(addr);
 
-        // If another TX owns this orec, abort (don't spin — eager-locking
-        // protocol means the holder may be delayed for the entire TX)
-        if orec.is_owned() {
-            with_tx(|tx| { tx.aborted = true; });
+        // If a concurrent writer holds w_lock, decide: spin briefly for
+        // light TXs (no cm_ts, short duration), accept dirty value for
+        // heavy TXs (has cm_ts, long duration — labyrinth monotonic 0→1).
+        // This hybrid prevents both bank dirty-reads and labyrinth livelock.
+        if orec.w_lock.load(Ordering::Relaxed) {
+            // Heavy TXs (owner_cm_ts != u64::MAX, ≥10 writes,
+            // e.g. labyrinth) skip spin entirely to avoid livelock.
+            // Accept dirty value immediately, NO read_set entry
+            // (labyrinth reads are advisory for BFS, not financial).
+            let owner_cm = orec.read_owner_cm_ts();
+            if owner_cm == u64::MAX {
+                // Light TX (<10 writes, e.g. bank): spin up to
+                // 2M cycles (~1ms) to let the writer complete.
+                for _ in 0..2000000 {
+                    if tx_aborted() { return unsafe { core::mem::zeroed() }; }
+                    if !orec.w_lock.load(Ordering::Relaxed) { break; }
+                    std::hint::spin_loop();
+                }
+                if !orec.w_lock.load(Ordering::Relaxed) {
+                    // Writer completed during spin — read clean value.
+                    let ver = orec.version();
+                    let val: T = unsafe { (addr as *const T).read() };
+                    with_tx(|tx| { tx.read_set.push((addr, ver)); });
+                    return val;
+                }
+            }
+            // Timeout or heavy TX: accept dirty value, do NOT track
+            // in read_set (avoids validate cascade from writer abort).
             return unsafe { (addr as *const T).read() };
+        }
+
+        // Spin while commit Phase 1 has version_lock READ_LOCKED (us window).
+        while orec.version_lock.load(Ordering::Relaxed) & 1 != 0 {
+            if tx_aborted() { return unsafe { core::mem::zeroed() }; }
+            std::hint::spin_loop();
         }
 
         let ver = orec.version();
         let val: T = unsafe { (addr as *const T).read() };
 
-        // Re-check orec
-        if orec.is_owned() || orec.version() != ver { continue; }
+        // Re-check: if READ_LOCKED now set, or version changed, retry.
+        if orec.version_lock.load(Ordering::Acquire) != (ver << VERSION_SHIFT) { continue; }
 
         let aborted = with_tx(|tx| {
-            // Check that the orec wasn't write-locked by someone since we read
-            // (we already checked: not owned before, not owned after, version same)
-            if ver > tx.start_version {
+            if ver > tx.valid_ts && !extend(tx) {
                 tx.aborted = true;
                 true
             } else {
@@ -228,18 +355,27 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         // Check if we already own this address's orec
         let idx = lock_index(addr);
         if !tx.locked_orecs.contains(&idx) {
-            // Acquire the orec exclusively (bounded spin, then abort)
             let orec = orec_for(addr);
-            let mut locked = false;
-            for _ in 0..5000 {
-                if orec.try_lock_exclusive(tx.tx_id) {
+            let mut spin_count = 0u32;
+            loop {
+                if orec.try_lock_exclusive_with_cm(tx.cm_ts) {
                     tx.locked_orecs.push(idx);
-                    locked = true;
                     break;
+                }
+                // Lock held by another TX.  Use contention manager
+                // to decide: if we have lower priority, abort now.
+                if cm_should_abort(tx, orec, &mut spin_count) {
+                    tx.aborted = true;
+                    return;
                 }
                 std::hint::spin_loop();
             }
-            if !locked { tx.aborted = true; return; }
+
+            // Check if orec version advanced since TX started
+            if orec.version() > tx.valid_ts && !extend(tx) {
+                tx.aborted = true;
+                return;
+            }
         }
 
         // Save old value in undo log (first write only)
@@ -257,6 +393,8 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         // Write through to memory
         write_mem_typed(addr, &tv);
         tx.write_set.insert(addr, tv);
+        tx.write_count += 1;
+        cm_on_write(tx);
     });
 }
 
@@ -274,14 +412,19 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
         let idx = lock_index(addr);
         if !tx.locked_orecs.contains(&idx) {
             let orec = orec_for(addr);
-            let mut spins = 0;
-            while !orec.try_lock_exclusive(tx.tx_id) {
-                spins += 1;
-                if spins > 10000 { tx.aborted = true; return; }
+            let mut spin_count = 0u32;
+            loop {
+                if orec.try_lock_exclusive_with_cm(tx.cm_ts) {
+                    tx.locked_orecs.push(idx);
+                    break;
+                }
+                if cm_should_abort(tx, orec, &mut spin_count) {
+                    tx.aborted = true;
+                    return;
+                }
                 std::hint::spin_loop();
             }
-            tx.locked_orecs.push(idx);
-        }
+            }  // close lock-acquire if
 
         // Save old values byte-by-byte
         for (i, _) in src.iter().enumerate() {
@@ -298,6 +441,8 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
             for (i, &byte) in src.iter().enumerate() { dst.add(i).write(byte); }
         }
         tx.write_set.insert(addr, tv);
+        tx.write_count += 1;
+        cm_on_write(tx);
     });
 }
 
@@ -312,6 +457,28 @@ fn validate(tx: &TxState) -> bool {
     true
 }
 
+// ── Extend (validate + advance valid_ts) ────────────────
+fn extend(tx: &mut TxState) -> bool {
+    let ts = G_CLOCK.load(Ordering::Acquire);
+    if ts > tx.valid_ts {
+        if validate(tx) {
+            tx.valid_ts = ts;
+            return true;
+        }
+    }
+    false
+}
+
+// ── Abort cleanup ───────────────────────────────────────
+pub fn tm_abort() {
+    if let Some(tx) = flush_tx() {
+        for u in tx.undo_backs { u.apply(); }
+        for &idx in &tx.locked_orecs {
+            orecs()[idx].unlock_wlock();
+        }
+    }
+}
+
 // ── Commit ──────────────────────────────────────────────
 pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
@@ -320,37 +487,46 @@ pub fn tm_commit() -> bool {
     if tx.aborted {
         for u in tx.undo_backs { u.apply(); }
         for &idx in &tx.locked_orecs {
-            orecs()[idx].unlock_exclusive_and_inc_version();
+            orecs()[idx].unlock_wlock();
         }
         TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
-        // Exponential backoff to avoid eager-locking livelock
-        let ac = TM_ABORT_COUNT.load(Ordering::Relaxed) & 0x3F;
-        for _ in 0..(ac + 1) * 100 { std::hint::spin_loop(); }
+        inc_tx_abort_count();
+        let ac = TM_ABORT_COUNT.load(Ordering::Relaxed);
+        cm_backoff(ac);
         return false;
     }
 
     if tx.write_set.is_empty() {
+        reset_tx_abort_count();
         return true;
     }
 
-    // Validate read-set
+    // Phase 1: set READ_LOCKED to block new readers during validation
+    for &idx in &tx.locked_orecs {
+        orecs()[idx].set_read_locked();
+    }
+    fence(Ordering::SeqCst);
+
+    // Phase 4: validate read-set (versions still correct with READ_LOCKED bit set)
     if !validate(&tx) {
         for u in tx.undo_backs { u.apply(); }
         for &idx in &tx.locked_orecs {
-            orecs()[idx].unlock_exclusive_and_inc_version();
+            orecs()[idx].abort_release();
         }
         TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
-        let ac = TM_ABORT_COUNT.load(Ordering::Relaxed) & 0x3F;
-        for _ in 0..(ac + 1) * 100 { std::hint::spin_loop(); }
+        inc_tx_abort_count();
+        let ac = TM_ABORT_COUNT.load(Ordering::Relaxed);
+        cm_backoff(ac);
         return false;
     }
 
-    // Release locks with incremented version
+    // Phase 5: release with new version
     let commit_ver = G_CLOCK.fetch_add(1, Ordering::Release) + 1;
     for &idx in &tx.locked_orecs {
-        orecs()[idx].unlock_exclusive_with_version(commit_ver);
+        orecs()[idx].commit_release(commit_ver);
     }
 
+    reset_tx_abort_count();
     true
 }
 
@@ -358,15 +534,17 @@ pub fn tm_commit() -> bool {
 pub fn tm_init() {
     orecs();
     G_CLOCK.store(0, Ordering::Release);
+    GREEDY_TS.store(0, Ordering::Release);
 }
 
 pub fn tm_exit() {}
 
 pub fn tm_init_thread() {
-    // Assign TX ID for locking ownership check
     let tid = THR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let sv = G_CLOCK.load(Ordering::Acquire);
+    let ac = tx_abort_count();
     TX.with(|tx| {
-        *tx.borrow_mut() = Some(Box::new(TxState::new(0, tid)));
+        *tx.borrow_mut() = Some(Box::new(TxState::new(sv, tid, ac)));
     });
 }
 
@@ -376,9 +554,10 @@ pub fn tm_exit_thread() {
 
 pub fn tm_begin() {
     let sv = G_CLOCK.load(Ordering::Acquire);
-    let tid = THR_COUNTER.load(Ordering::Relaxed);
+    let tid = THR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let ac = tx_abort_count();
     TX.with(|tx| {
-        *tx.borrow_mut() = Some(Box::new(TxState::new(sv, tid)));
+        *tx.borrow_mut() = Some(Box::new(TxState::new(sv, tid, ac)));
     });
 }
 
