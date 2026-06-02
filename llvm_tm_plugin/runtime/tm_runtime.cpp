@@ -172,6 +172,8 @@ void tm_serialize_unlock()
 	g_serialize_mutex.unlock();
 }
 
+sigjmp_buf* tm_get_env() { return (sigjmp_buf*)&tm_jmpbuf; }
+
 void tm_begin()
 {
 	printf("tm_nested_call_counter=%d  --  ", tm_nested_call_counter);

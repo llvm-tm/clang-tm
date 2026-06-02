@@ -3,41 +3,45 @@ name = "benchmarks"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "benchmarks"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bank"
-path = "src/bank.rs"
+path = "src/bin/bank.rs"
 
 [[bin]]
 name = "stmbench7"
-path = "src/stmbench7.rs"
+path = "src/bin/stmbench7.rs"
 
 [[bin]]
 name = "datastructures"
-path = "src/datastructures.rs"
+path = "src/bin/datastructures.rs"
 
 [[bin]]
 name = "eigenbench"
-path = "src/eigenbench.rs"
+path = "src/bin/eigenbench.rs"
 
 [[bin]]
 name = "stamp"
-path = "src/stamp.rs"
+path = "src/bin/stamp.rs"
 
 [[bin]]
 name = "tpcc"
-path = "src/tpcc.rs"
+path = "src/bin/tpcc.rs"
 
 [[bin]]
 name = "ycsb"
-path = "src/ycsb.rs"
+path = "src/bin/ycsb.rs"
 
 [[bin]]
 name = "fuzz_counter"
-path = "src/fuzz_counter.rs"
+path = "src/bin/fuzz_counter.rs"
 
 [[bin]]
 name = "fuzz_bank"
-path = "src/fuzz_bank.rs"
+path = "src/bin/fuzz_bank.rs"
 
 [features]
 default = ["wbctl"]
@@ -54,4 +58,5 @@ spht    = ["tm/spht"]
 
 [dependencies]
 tm = { path = "../tm", default-features = false }
+containers = { path = "../containers" }
 fastrand = "2"

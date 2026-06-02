@@ -7,62 +7,66 @@ LDFLAGS   = -pthread
 
 # --- Choose backend (default: TinySTM/WBCTL) --------------------
 BACKEND ?= TINYSTM
-# BACKEND ?= NOrec
-# BACKEND ?= SWISSTM
-# BACKEND ?= TL2
-# BACKEND ?= SGL
 
 CXXFLAGS += -I..
 EXTRA_INC =
+RUNTIME =
 
 ifeq ($(BACKEND),TINYSTM)
   RUNTIME  = ../backends/runtimes/TinySTM_runtime.cpp
   DEFS     = -DTM_BACKEND_TINYSTM -DDESIGN_WBCTL
   EXTRA_INC = -I../backends -I../backends/TinySTM
-  BUILTINS = ../backends/TinySTM/tinystm_globals.hpp \
-             ../backends/TinySTM/tinystm_common.hpp \
-             ../backends/TinySTM/tinystm_wbctl.hpp
+endif
+ifeq ($(BACKEND),WBETL)
+  RUNTIME  = ../backends/runtimes/TinySTM_runtime.cpp
+  DEFS     = -DTM_BACKEND_TINYSTM -DDESIGN_WBETL
+  EXTRA_INC = -I../backends -I../backends/TinySTM
+endif
+ifeq ($(BACKEND),WT)
+  RUNTIME  = ../backends/runtimes/TinySTM_runtime.cpp
+  DEFS     = -DTM_BACKEND_TINYSTM -DDESIGN_WT
+  EXTRA_INC = -I../backends -I../backends/TinySTM
 endif
 ifeq ($(BACKEND),NOREC)
   RUNTIME  = ../backends/runtimes/NOrec_runtime.cpp
   DEFS     = -DTM_BACKEND_NOREC
   EXTRA_INC = -I../backends -I../backends/NOrec
-  BUILTINS = ../backends/NOrec/NOrec.hpp
 endif
 ifeq ($(BACKEND),SWISSTM)
   RUNTIME  = ../backends/runtimes/SwissTM_runtime.cpp
   DEFS     = -DTM_BACKEND_SWISSTM
   EXTRA_INC = -I../backends -I../backends/SwissTM
-  BUILTINS = ../backends/SwissTM/SwissTM.hpp
 endif
 ifeq ($(BACKEND),TL2)
   RUNTIME  = ../backends/runtimes/tl2_runtime.cpp
   DEFS     = -DTM_BACKEND_TL2
   EXTRA_INC = -I../backends -I../backends/TL2
-  BUILTINS = ../backends/TL2/tl2.hpp
 endif
 ifeq ($(BACKEND),SGL)
   RUNTIME  = ../backends/runtimes/single_global_lock_runtime.cpp
   DEFS     = -DTM_BACKEND_SGL
-  BUILTINS =
+  EXTRA_INC =
 endif
+
+BUILTINS = $(addprefix ../backends/,tm_alloc_overrides.hpp tm_common.hpp \
+           tm_platform.hpp tm_spin_token.hpp tm_event_logger.hpp tm_debug.hpp)
 
 # --- Source directories (logical structure) -----------------------
 # NOTE: on case-insensitive filesystems (macOS), directory names
 # differing only by case refer to the same directory.  We use the
 # actual lower-case names where case-collision would occur.
-# Logical name → actual directory:
-#   EigenBench  → eigenbench/
-#   YCSB        → ycsb/
-#   TPC-C       → TPC-C/   (hyphenated, no collision)
-#   STMbench7   → STMbench7/
-#   STAMP       → STAMP/
-#   datastructures → datastructures/
-#   tests       → tests/   (bank/, fuzz/)
+# Logical name      → actual directory:
+#   EigenBench       → eigenbench/
+#   YCSB             → ycsb/
+#   TPC-C            → TPC-C/
+#   STMbench7        → STMbench7/
+#   STAMP            → STAMP/ (vacation/, labyrinth/, kmeans/, genome/, intruder/, ssca2/)
+#   datastructures   → datastructures/
+#   tests            → tests/ (bank/, fuzz/)
 
 # --- tests --------------------------------------------------------
-BANK_SRC    = tests/bank/bank.cpp
-BANK_BIN    = bin/bank
+BANK_SRC     = tests/bank/bank.cpp
+BANK_BIN     = bin/bank
 FUZZ_CTR_SRC = tests/fuzz/fuzz_counter.cpp
 FUZZ_CTR_BIN = bin/fuzz_counter
 FUZZ_BANK_SRC = tests/fuzz/fuzz_bank.cpp
@@ -77,10 +81,22 @@ BENCH7_SRC  = STMbench7/STMbench7.cpp
 BENCH7_BIN  = bin/stmbench7
 
 # --- STAMP --------------------------------------------------------
-VACATION_SRC = STAMP/vacation/vacation.cpp
-VACATION_BIN = bin/vacation
-LABYRINTH_SRC = STAMP/labyrinth/labyrinth_swisstm_fuzz.cpp
-LABYRINTH_BIN = bin/labyrinth
+VACATION_SRC   = STAMP/vacation/vacation.cpp
+VACATION_BIN   = bin/vacation
+LABYRINTH_SRC  = STAMP/labyrinth/labyrinth.cpp
+LABYRINTH_BIN  = bin/labyrinth
+KMEANS_SRC     = STAMP/kmeans/kmeans.cpp
+KMEANS_BIN     = bin/kmeans
+GENOME_SRC     = STAMP/genome/genome.cpp
+GENOME_BIN     = bin/genome
+INTRUDER_SRC   = STAMP/intruder/intruder.cpp
+INTRUDER_BIN   = bin/intruder
+SSCA2_SRC      = STAMP/ssca2/ssca2.cpp
+SSCA2_BIN      = bin/ssca2
+BAYES_SRC      = STAMP/bayes/bayes.cpp
+BAYES_BIN      = bin/bayes
+YADA_SRC       = STAMP/yada/yada.cpp
+YADA_BIN       = bin/yada
 
 # --- TPC-C --------------------------------------------------------
 TPCC_SRC    = TPC-C/tpcc.cpp
@@ -99,54 +115,43 @@ TEST_DS_BIN = bin/test_ds
 TEST_TX_SRC = ../expli_tm_api/tests/test_tx.cpp
 TEST_TX_BIN = bin/test_tx
 
-BUILTINS += ../backends/tm_alloc_overrides.hpp \
-            ../backends/tm_common.hpp \
-            ../backends/tm_platform.hpp \
-            ../backends/tm_spin_token.hpp \
-            ../backends/tm_event_logger.hpp \
-            ../backends/tm_debug.hpp
+# --- Build rules --------------------------------------------------
+STAMP_BINS = $(VACATION_BIN) $(LABYRINTH_BIN) $(KMEANS_BIN) $(GENOME_BIN) $(INTRUDER_BIN) $(SSCA2_BIN) $(BAYES_BIN) $(YADA_BIN)
 
-# Rules
-.PHONY: all clean run-bank run-eigenbench run-bench7 run-vacation run-labyrinth run-fuzz-counter run-fuzz-bank run-fuzz run-tpcc run-ycsb run-test-ds run-test-tx run-tests run
+.PHONY: all clean run-bank run-eigenbench run-bench7 run-vacation run-labyrinth run-kmeans
+.PHONY: run-genome run-intruder run-ssca2 run-bayes run-yada run-fuzz-counter run-fuzz-bank run-fuzz
+.PHONY: run-tpcc run-ycsb run-test-ds run-test-tx run-tests run run-stamp
 
-all: bin $(BANK_BIN) $(EIGEN_BIN) $(BENCH7_BIN) $(VACATION_BIN) $(LABYRINTH_BIN) $(FUZZ_CTR_BIN) $(FUZZ_BANK_BIN) $(TPCC_BIN) $(YCSB_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN)
+all: bin $(BANK_BIN) $(EIGEN_BIN) $(BENCH7_BIN) $(STAMP_BINS) \
+     $(FUZZ_CTR_BIN) $(FUZZ_BANK_BIN) $(TPCC_BIN) $(YCSB_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN)
 
 bin:
-	mkdir -p bin
+	mkdir -p bin STAMP/kmeans STAMP/genome STAMP/intruder STAMP/ssca2
 
-$(BANK_BIN): bin $(BANK_SRC) $(RUNTIME) $(BUILTINS) Makefile
-	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(BANK_SRC) $(RUNTIME) $(LDFLAGS)
+define BUILD_RULE
+$(1): bin $(2) $(RUNTIME) $(BUILTINS) Makefile
+	$$(CXX) $$(CXXFLAGS) $$(EXTRA_INC) $$(DEFS) -o $$@ $(2) $$(RUNTIME) $$(LDFLAGS)
+endef
 
-$(EIGEN_BIN): bin $(EIGEN_SRC) $(RUNTIME) $(BUILTINS) Makefile
-	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(EIGEN_SRC) $(RUNTIME) $(LDFLAGS)
+$(eval $(call BUILD_RULE,$(BANK_BIN),$(BANK_SRC)))
+$(eval $(call BUILD_RULE,$(EIGEN_BIN),$(EIGEN_SRC)))
+$(eval $(call BUILD_RULE,$(BENCH7_BIN),$(BENCH7_SRC)))
+$(eval $(call BUILD_RULE,$(FUZZ_CTR_BIN),$(FUZZ_CTR_SRC)))
+$(eval $(call BUILD_RULE,$(FUZZ_BANK_BIN),$(FUZZ_BANK_SRC)))
+$(eval $(call BUILD_RULE,$(VACATION_BIN),$(VACATION_SRC)))
+$(eval $(call BUILD_RULE,$(LABYRINTH_BIN),$(LABYRINTH_SRC)))
+$(eval $(call BUILD_RULE,$(KMEANS_BIN),$(KMEANS_SRC)))
+$(eval $(call BUILD_RULE,$(GENOME_BIN),$(GENOME_SRC)))
+$(eval $(call BUILD_RULE,$(INTRUDER_BIN),$(INTRUDER_SRC)))
+$(eval $(call BUILD_RULE,$(SSCA2_BIN),$(SSCA2_SRC)))
+$(eval $(call BUILD_RULE,$(BAYES_BIN),$(BAYES_SRC)))
+$(eval $(call BUILD_RULE,$(YADA_BIN),$(YADA_SRC)))
+$(eval $(call BUILD_RULE,$(TPCC_BIN),$(TPCC_SRC)))
+$(eval $(call BUILD_RULE,$(YCSB_BIN),$(YCSB_SRC)))
+$(eval $(call BUILD_RULE,$(TEST_DS_BIN),$(TEST_DS_SRC)))
+$(eval $(call BUILD_RULE,$(TEST_TX_BIN),$(TEST_TX_SRC)))
 
-$(BENCH7_BIN): bin $(BENCH7_SRC) $(RUNTIME) $(BUILTINS) Makefile
-	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(BENCH7_SRC) $(RUNTIME) $(LDFLAGS)
-
-$(FUZZ_CTR_BIN): bin $(FUZZ_CTR_SRC) $(RUNTIME) $(BUILTINS) Makefile
-	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(FUZZ_CTR_SRC) $(RUNTIME) $(LDFLAGS)
-
-$(FUZZ_BANK_BIN): bin $(FUZZ_BANK_SRC) $(RUNTIME) $(BUILTINS) Makefile
-	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(FUZZ_BANK_SRC) $(RUNTIME) $(LDFLAGS)
-
-$(VACATION_BIN): bin $(VACATION_SRC) $(RUNTIME) $(BUILTINS) Makefile
-	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(VACATION_SRC) $(RUNTIME) $(LDFLAGS)
-
-$(TPCC_BIN): bin $(TPCC_SRC) $(RUNTIME) $(BUILTINS) Makefile
-	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(TPCC_SRC) $(RUNTIME) $(LDFLAGS)
-
-$(YCSB_BIN): bin $(YCSB_SRC) $(RUNTIME) $(BUILTINS) Makefile
-	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(YCSB_SRC) $(RUNTIME) $(LDFLAGS)
-
-$(LABYRINTH_BIN): bin $(LABYRINTH_SRC) $(RUNTIME) $(BUILTINS) Makefile
-	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(LABYRINTH_SRC) $(RUNTIME) $(LDFLAGS)
-
-$(TEST_DS_BIN): bin $(TEST_DS_SRC) $(RUNTIME) $(BUILTINS) Makefile
-	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(TEST_DS_SRC) $(RUNTIME) $(LDFLAGS)
-
-$(TEST_TX_BIN): bin $(TEST_TX_SRC) $(RUNTIME) $(BUILTINS) Makefile
-	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(TEST_TX_SRC) $(RUNTIME) $(LDFLAGS)
-
+# --- Run targets --------------------------------------------------
 run-bank: $(BANK_BIN)
 	./$(BANK_BIN) -d 3000 -a 512 -t 4
 
@@ -167,6 +172,26 @@ run-vacation: $(VACATION_BIN)
 run-labyrinth: $(LABYRINTH_BIN)
 	./$(LABYRINTH_BIN)
 
+run-kmeans: $(KMEANS_BIN)
+	./$(KMEANS_BIN) -t 4 -k 16 -d 2 -n 2048 -i 100
+
+run-genome: $(GENOME_BIN)
+	./$(GENOME_BIN) -t 4 -g 16384 -s 64 -n 16777216
+
+run-intruder: $(INTRUDER_BIN)
+	./$(INTRUDER_BIN) -t 4 -a 10 -l 128 -n 1048576 -s 1
+
+run-ssca2: $(SSCA2_BIN)
+	./$(SSCA2_BIN) -t 4 -s 14 -i 1.0 -u 1.0 -l 3 -m 3
+
+run-bayes: $(BAYES_BIN)
+	./$(BAYES_BIN) -t 4 -v 32 -r 1024 -n 2 -p 2 -e 2
+
+run-yada: $(YADA_BIN)
+	./$(YADA_BIN) -t 4 -a 20 -j 0.5
+
+run-stamp: run-vacation run-labyrinth run-kmeans run-genome run-intruder run-ssca2 run-bayes run-yada
+
 run-test-ds: $(TEST_DS_BIN)
 	./$(TEST_DS_BIN)
 
@@ -183,7 +208,7 @@ run-ycsb: $(YCSB_BIN)
 	./$(YCSB_BIN) -t 4 -d 3000
 
 run-tests: run-test-ds run-test-tx
-run: run-bank run-eigenbench run-bench7 run-vacation run-labyrinth run-fuzz run-tpcc run-ycsb run-tests
+run: run-bank run-eigenbench run-bench7 run-stamp run-fuzz run-tpcc run-ycsb run-tests
 
 clean:
 	rm -rf bin
