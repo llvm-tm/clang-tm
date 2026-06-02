@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::sync::atomic::AtomicU32;
 use std::sync::OnceLock;
 
-pub use runtime_core::{Primitive, TypedValue, WriteBack};
+pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
 
 // ── Constants ───────────────────────────────────────────
 const LOCK_MASK: u64 = 0xFF;
@@ -150,11 +150,7 @@ pub fn tm_abort_count() -> u64 {
 }
 
 pub fn tx_active() -> bool {
-    TX.with(|tx| match *tx.borrow() { Some(ref t) => !t.aborted, None => false })
-}
-
-pub fn tx_aborted() -> bool {
-    TX.with(|tx| match *tx.borrow() { Some(ref t) => t.aborted, None => false })
+    TX.with(|tx| tx.borrow().is_some())
 }
 
 pub fn flush_tx() -> Option<Box<TxState>> { TX.with(|tx| tx.borrow_mut().take()) }
@@ -199,7 +195,7 @@ fn do_init() {
 fn do_exit() { INIT_COUNT.store(0, Ordering::Relaxed); }
 
 // ── Public API (shared by all variants) ─────────────────
-pub fn tm_init() { do_init(); }
+pub fn tm_init() { tm_install_tmx_hook(); do_init(); }
 pub fn tm_exit() { do_exit(); }
 pub fn tm_init_thread() {}
 pub fn tm_exit_thread() {}

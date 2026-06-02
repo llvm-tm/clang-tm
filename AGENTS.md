@@ -1073,10 +1073,118 @@ Ran all 7 non-TSX backends × 3 benchmarks at 1t and 4t:
 - `swap_remove` is correct for `HashMap` removal (no order dependence in TM write sets)
 - Rust tm_commit() is still `pub fn` not `pub(crate)` — users calling it directly bypass the safe `transaction()` wrapper (soundness hole; should be marked `unsafe fn` or made `pub(crate)` in a future refactor)
 
-## Next Steps
-1. Run LLVM plugin automated instrumentation benchmarks (eigenbench not available for LLVM plugin — only bank, STAMP, STMbench7)
-2. Update docs/paper.tex with performance comparison table and WriteBack architecture
-3. Commit all changes
+## Done (this session — 2026-06-02)
+
+### C++ expli_benchmarks folder reorganization
+- **Before**: flat structure — `bank/`, `fuzz/`, `eigenbench/`, `labyrinth/`, `vacation/`, `STMbench7/`, `tpcc/`, `ycsb/` all as siblings.
+- **After**: hierarchical — `tests/bank/`, `tests/fuzz/`, `EigenBench/`, `STMbench7/`, `STAMP/vacation/`, `STAMP/labyrinth/`, `TPC-C/`, `YCSB/`, `datastructures/` (placeholder).
+- **Makefile updated**: source paths, run targets, labyrinth build rule added. All 11 binaries compile and pass smoke tests.
+- **Include paths**: fixed `../../../` for depth-2 sources.
+
+### C++ vs Rust benchmark comparison (-O3, WBCTL, 4t)
+| Benchmark | C++ (txns/sec) | Rust (txns/sec) | Ratio |
+|-----------|:--------------:|:----------------:|:-----:|
+| Bank | 245K | 126K | 1.94× |
+| eigenbench | 1.28M | 572K | 2.24× |
+| Vacation | 2.65M | (not comparable) | — |
+| STMbench7 | HANGS | 1.94M | — |
+
+### All 10 Rust backends pass bank + fuzz_bank + fuzz_counter + labyrinth
+- **stmbench7 4t**: TSXSGL 7.6M, DUDETM 2.1M, TL2 2.09M, WBCTL 1.94M, WBETL 1.91M, NOrec 1.64M, SwissTM 842K txns/sec.
+- **eigenbench 4t**: TSXSGL 8.6M, TL2 607K, NOrec 583K, WBCTL 572K, DUDETM 530K, SwissTM 468K, WBETL 419K tx/s.
+- **Labyrinth 2t**: WBCTL, NOrec, TL2 all pass.
+
+### Dead code cleanup
+- Removed `tx_aborted()` and `tx_active()`'s `!t.aborted` read from `common.rs` (WBCTL/WBETL no longer use it after panic-based abort).
+- Added `tx_aborted()` to `wt.rs` (write-through still needs flag-based abort).
+- Added `tm_abort()` to NVHTM and SPHT (was missing from TSX backends).
+- All 10 backends compile cleanly.
+
+## Key Decisions
+- **Folder structure uses lower-case eigenbench/ and ycsb/ on disk** due to macOS case-insensitive filesystem. Logical names (EigenBench, YCSB) documented in Makefile comments.
+- **All source includes use `../../../expli_tm_api/`** from depth-2 directories (`tests/bank/`, `STAMP/vacation/`, etc.) — no Makefile `-I` magic needed beyond the existing `-I..` pointing at repo root.
+- **Java/Swift-style folder structure** (`tests/bank/`, `tests/fuzz/`, `STAMP/vacation/`) groups benchmarks by family, not by function.
+
+## Planned Work
+
+### Remaining C++ STAMP benchmarks
+
+Implement the following STAMP benchmarks under `expli_benchmarks/STAMP/`:
+
+| Benchmark | Description | File | Priority |
+|-----------|-------------|------|----------|
+| kmeans | K-means clustering — data-mining workload with read-heavy TXs | `STAMP/kmeans/kmeans.cpp` | Medium |
+| genome | Gene sequencing — large read-sets, moderate write-sets | `STAMP/genome/genome.cpp` | Low |
+| intruder | Network intrusion detection — high contention on shared hash table | `STAMP/intruder/intruder.cpp` | Low |
+| ssca2 | Graph analysis — kernel 2 (large graph construction) | `STAMP/ssca2/ssca2.cpp` | Low |
+
+**Implementation approach**: Each benchmark follows the `vacation.cpp` pattern — a single `.cpp` file that instantiates `TM<>` for the chosen backend, spawns worker threads, runs TXs via `TM<>::transaction()`, and reports throughput/correctness. No plugin, no clone infrastructure — just the expli TM API.
+
+**kmeans details** (highest priority):
+- Input: `-k <clusters> -d <dimensions> -n <points> -i <iterations> -t <threads>`
+- Each TX: read all points assigned to a cluster, write centroid updates
+- Shuffle across workers: partition points by cluster assignment, update centroids in TX
+- Uses `TM::transaction()` for atomic centroid read+write
+- Verify: centroids converge to same result as serial run
+- Typical parameters: `./bin/kmeans -k 16 -d 2 -n 2048 -i 100 -t 4`
+
+**genome details**: Read-heavy, large read-sets. Uses gene-sequence fragments stored in a TM-protected hash map.
+
+**intruder details**: High contention. Shared hash table of packet signatures. Each TX inserts or removes entries with short duration but frequent conflicts.
+
+**ssca2 details**: Large graph construction. Kernel 2 builds edges between vertices. Many small TXs.
+
+### Rust benchmarks folder refactoring
+
+Current flat structure in `rust_tm_api/benchmarks/src/`:
+```
+bank.rs, datastructures.rs, eigenbench.rs,
+fuzz_bank.rs, fuzz_counter.rs, stamp.rs,
+stmbench7.rs, tpcc.rs, ycsb.rs
+```
+
+**Target structure** (mirrors `expli_benchmarks/`):
+```
+benchmarks/
+  Cargo.toml
+  src/
+    STMbench7/stmbench7.rs
+    TPCC/tpcc.rs
+    STAMP/
+      stamp.rs              ← existing, contains labyrinth+vacation+kmeans (module)
+      vacation.rs           ← extract from stamp.rs
+      labyrinth.rs          ← extract from stamp.rs
+      kmeans.rs             ← future
+      genome.rs             ← future
+      intruder.rs            ← future
+      ssca2.rs              ← future
+    YCSB/ycsb.rs            ← rename src/ycsb.rs → src/YCSB/ycsb.rs
+    EigenBench/eigenbench.rs ← rename src/eigenbench.rs → src/EigenBench/eigenbench.rs
+    datastructures/
+      mod.rs                ← split existing datastructures.rs
+      linked_list.rs
+      hash_map.rs
+      treap.rs
+      skip_list.rs
+    tests/
+      mod.rs
+      bank.rs               ← rename src/bank.rs → src/tests/bank.rs
+      fuzz_counter.rs       ← rename src/fuzz_counter.rs → src/tests/fuzz_counter.rs
+      fuzz_bank.rs          ← rename src/fuzz_bank.rs → src/tests/fuzz_bank.rs
+```
+
+**Caveats**:
+1. **Case-insensitive filesystem**: On macOS, `EigenBench`/`eigenbench` and `YCSB`/`ycsb` collide as directory names. Solution: use `eigenbench`/`ycsb` as the actual directory names (lowercase) in all paths, keeping the logical name in comments/docs.
+2. **Cargo.toml `[[bin]]` paths**: Each `path = "src/..."` entry must be updated to match the new location.
+3. **`use` / module paths**: If using `mod.rs`-style modules, adjust `use crate::...` paths. Currently all files are top-level bins; splitting into modules requires `pub mod` declarations and `use super::...` paths.
+
+**Implementation order**:
+1. Create the directory hierarchy under `src/`
+2. Move files to new locations
+3. Update `[[bin]]` entries in `Cargo.toml` to point to new paths
+4. Update `use` declarations if any cross-file dependencies exist
+5. Run `cargo build --features wbctl` to verify
+6. Run bank + stmbench7 + stamp to verify correctness
 
 ## Relevant Files
 - `rust_tm_api/runtime/core/src/lib.rs`: `WriteBack` enum with safe `apply()` + `TypedValue::into_write_back(addr)` added
@@ -1086,7 +1194,18 @@ Ran all 7 non-TSX backends × 3 benchmarks at 1t and 4t:
 - `rust_tm_api/runtime/nvhtm/src/lib.rs`, `runtime/spht/src/lib.rs`: `WriteBack`-based commit
 - `rust_tm_api/runtime/swisstm/src/lib.rs`: `undo_backs` for rollback
 - `rust_tm_api/tm/src/lib.rs`: `TmCell`, `Transaction`, `transaction()` API
+- `rust_tm_api/runtime/tinystm/src/wt.rs`: `tx_aborted()` re-added (flag-based), `tm_abort()` applies undo + unlocks.
+- `rust_tm_api/runtime/norec/src/lib.rs`: `validate_impl()` returns `Option<u64>` (never panics).
+- `rust_tm_api/runtime/tl2/src/lib.rs`: TmxAbort panic on stale read/cap.
+- `rust_tm_api/runtime/dudetm/src/lib.rs`: TmxAbort panic, `tm_abort()` truncates REDO_LOG + flush_tx.
+- `rust_tm_api/runtime/tsxsgl/src/lib.rs`: `tm_abort()` releases global lock + resets ACTIVE.
+- `rust_tm_api/runtime/nvhtm/src/lib.rs`, `runtime/spht/src/lib.rs`: `tm_abort()` flushes TX.
 - `expli_benchmarks/Makefile`: C++ benchmark build system
-- `expli_benchmarks/` bank.cpp, eigenbench.cpp, stmbench7.cpp, vacation.cpp, tpcc.cpp, ycsb.cpp: all pass with TinySTM/WBCTL
+- `expli_benchmarks/tests/bank/bank.cpp`, `expli_benchmarks/tests/fuzz/` — moved to `tests/`
+- `expli_benchmarks/STAMP/vacation/vacation.cpp`, `STAMP/labyrinth/` — moved under `STAMP/`
+- `expli_benchmarks/EigenBench/eigenbench.cpp` → `eigenbench/eigenbench.cpp` (case-insensitive fs)
+- `expli_benchmarks/YCSB/ycsb.cpp` → `ycsb/ycsb.cpp` (case-insensitive fs)
+- `expli_benchmarks/TPC-C/tpcc.cpp`, `STMbench7/` — unchanged
+- `expli_benchmarks/datastructures/` — empty placeholder for future linked-list, hash-map, treap, skip-list benchmarks
 
 

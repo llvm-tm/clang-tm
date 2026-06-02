@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{fence, AtomicU64, Ordering};
 use std::cell::RefCell;
-pub use runtime_core::{Primitive, TypedValue, WriteBack};
+pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
 
 // ── Global lock ─────────────────────────────────────────
 // Even = unlocked (version), Odd = locked.
@@ -66,17 +66,7 @@ fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
 }
 
 fn tx_active() -> bool {
-    TX.with(|tx| match *tx.borrow() {
-        Some(ref t) => !t.aborted,
-        None => false,
-    })
-}
-
-fn tx_aborted() -> bool {
-    TX.with(|tx| match *tx.borrow() {
-        Some(ref t) => t.aborted,
-        None => false,
-    })
+    TX.with(|tx| tx.borrow().is_some())
 }
 
 fn flush_tx() -> Option<Box<TxState>> {
@@ -109,25 +99,22 @@ fn byte_size_of_tv(tv: &TypedValue) -> u8 {
 // Re-reads every address in the read-set from memory and
 // compares to the observed value.  Returns the current clock
 // value if all match.
-fn validate(tx: &mut TxState) -> u64 {
+fn validate_impl(tx: &mut TxState) -> Option<u64> {
     loop {
         let time = GLOBAL_LOCK.load(Ordering::Acquire);
         if time & 1 != 0 {
-            // lock held by a concurrent writer — spin
             std::hint::spin_loop();
             continue;
         }
         for r in &tx.read_set {
             let cur = read_mem_val(r.addr, r.sz);
             if cur != r.observed_val {
-                tx.aborted = true;
-                return 0;
+                return None;
             }
         }
         if time == GLOBAL_LOCK.load(Ordering::Acquire) {
-            return time;
+            return Some(time);
         }
-        // clock changed during validation, retry from the top
     }
 }
 
@@ -180,15 +167,12 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         }
 
         // Clock changed — validate all reads
-        let aborted = with_tx(|tx| {
-            let new_snap = validate(tx);
-            tx.snapshot = new_snap;
-            tx.aborted
+        with_tx(|tx| {
+            match validate_impl(tx) {
+                Some(s) => tx.snapshot = s,
+                None => std::panic::panic_any(TmxAbort),
+            }
         });
-        if aborted {
-            // Return whatever we got (tm_commit will check aborted)
-            return val;
-        }
         // Loop back to re-read this address with the new snapshot
     }
 }
@@ -196,9 +180,6 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 // ── Write word ──────────────────────────────────────────
 fn write_word<T: Primitive>(addr: usize, val: T) {
     fence(Ordering::SeqCst);
-    if tx_aborted() {
-        return;
-    }
     if !tx_active() {
         unsafe { (addr as *mut T).write(val); }
         return;
@@ -242,9 +223,6 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
     fence(Ordering::SeqCst);
-    if tx_aborted() {
-        return;
-    }
     if !tx_active() {
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len());
@@ -264,6 +242,7 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
 
 // ── Public API ──────────────────────────────────────────
 pub fn tm_init() {
+    tm_install_tmx_hook();
     GLOBAL_LOCK.store(0, Ordering::Release);
     THR_COUNTER.store(1, Ordering::Release);
 }
@@ -299,11 +278,6 @@ pub fn tm_commit() -> bool {
     };
     fence(Ordering::SeqCst);
 
-    if tx.aborted {
-        TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
-        return false;
-    }
-
     // Read-only fast path
     if tx.read_only || tx.write_set.is_empty() {
         return true;
@@ -321,12 +295,8 @@ pub fn tm_commit() -> bool {
         {
             break;
         }
-        // CAS failed — validate and retry using the local tx
-        snapshot = validate(&mut tx);
-        if tx.aborted {
-            TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
+        // CAS failed — validate and retry
+        snapshot = match validate_impl(&mut tx) { Some(s) => s, None => { TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; } };
     }
 
     // We hold the global lock. Write-back all entries.
@@ -338,6 +308,10 @@ pub fn tm_commit() -> bool {
     GLOBAL_LOCK.store(snapshot + 2, Ordering::Release);
 
     true
+}
+
+pub fn tm_abort() {
+    flush_tx();
 }
 
 pub fn tm_abort_count() -> u64 {

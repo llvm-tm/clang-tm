@@ -47,35 +47,51 @@ ifeq ($(BACKEND),SGL)
   BUILTINS =
 endif
 
-# --- Benchmarks ---------------------------------------------------
-BANK_SRC = bank/bank.cpp
-BANK_BIN = bin/bank
+# --- Source directories (logical structure) -----------------------
+# NOTE: on case-insensitive filesystems (macOS), directory names
+# differing only by case refer to the same directory.  We use the
+# actual lower-case names where case-collision would occur.
+# Logical name → actual directory:
+#   EigenBench  → eigenbench/
+#   YCSB        → ycsb/
+#   TPC-C       → TPC-C/   (hyphenated, no collision)
+#   STMbench7   → STMbench7/
+#   STAMP       → STAMP/
+#   datastructures → datastructures/
+#   tests       → tests/   (bank/, fuzz/)
 
-# --- EigenBench --------------------------------------------------
-EIGEN_SRC = eigenbench/eigenbench.cpp
-EIGEN_BIN = bin/eigenbench
-
-# --- STMbench7 ----------------------------------------------------
-BENCH7_SRC = STMbench7/STMbench7.cpp
-BENCH7_BIN = bin/stmbench7
-
-# --- Fuzz benchmarks (explicit TM API) ---------------------------
-FUZZ_CTR_SRC = fuzz/fuzz_counter.cpp
+# --- tests --------------------------------------------------------
+BANK_SRC    = tests/bank/bank.cpp
+BANK_BIN    = bin/bank
+FUZZ_CTR_SRC = tests/fuzz/fuzz_counter.cpp
 FUZZ_CTR_BIN = bin/fuzz_counter
-FUZZ_BANK_SRC = fuzz/fuzz_bank.cpp
+FUZZ_BANK_SRC = tests/fuzz/fuzz_bank.cpp
 FUZZ_BANK_BIN = bin/fuzz_bank
 
-# --- Vacation (simplified STAMP) ---------------------------------
-VACATION_SRC = vacation/vacation.cpp
-VACATION_BIN = bin/vacation
+# --- EigenBench --------------------------------------------------
+EIGEN_SRC   = eigenbench/eigenbench.cpp
+EIGEN_BIN   = bin/eigenbench
 
-# --- TPCC --------------------------------------------------------
-TPCC_SRC = tpcc/tpcc.cpp
-TPCC_BIN = bin/tpcc
+# --- STMbench7 ----------------------------------------------------
+BENCH7_SRC  = STMbench7/STMbench7.cpp
+BENCH7_BIN  = bin/stmbench7
+
+# --- STAMP --------------------------------------------------------
+VACATION_SRC = STAMP/vacation/vacation.cpp
+VACATION_BIN = bin/vacation
+LABYRINTH_SRC = STAMP/labyrinth/labyrinth_swisstm_fuzz.cpp
+LABYRINTH_BIN = bin/labyrinth
+
+# --- TPC-C --------------------------------------------------------
+TPCC_SRC    = TPC-C/tpcc.cpp
+TPCC_BIN    = bin/tpcc
 
 # --- YCSB --------------------------------------------------------
-YCSB_SRC = ycsb/ycsb.cpp
-YCSB_BIN = bin/ycsb
+YCSB_SRC    = ycsb/ycsb.cpp
+YCSB_BIN    = bin/ycsb
+
+# --- datastructures (placeholder) ---------------------------------
+# TODO: implement linked-list, hash-map, treap, skip-list, queue, stack
 
 # --- expli_tm_api tests ------------------------------------------
 TEST_DS_SRC = ../expli_tm_api/tests/test_ds.cpp
@@ -91,9 +107,9 @@ BUILTINS += ../backends/tm_alloc_overrides.hpp \
             ../backends/tm_debug.hpp
 
 # Rules
-.PHONY: all clean run-bank run-bench7 run-vacation run-fuzz-counter run-fuzz-bank run-fuzz run-test-ds run-test-tx run-tests run
+.PHONY: all clean run-bank run-eigenbench run-bench7 run-vacation run-labyrinth run-fuzz-counter run-fuzz-bank run-fuzz run-tpcc run-ycsb run-test-ds run-test-tx run-tests run
 
-all: bin $(BANK_BIN) $(EIGEN_BIN) $(BENCH7_BIN) $(VACATION_BIN) $(FUZZ_CTR_BIN) $(FUZZ_BANK_BIN) $(TPCC_BIN) $(YCSB_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN)
+all: bin $(BANK_BIN) $(EIGEN_BIN) $(BENCH7_BIN) $(VACATION_BIN) $(LABYRINTH_BIN) $(FUZZ_CTR_BIN) $(FUZZ_BANK_BIN) $(TPCC_BIN) $(YCSB_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN)
 
 bin:
 	mkdir -p bin
@@ -122,6 +138,9 @@ $(TPCC_BIN): bin $(TPCC_SRC) $(RUNTIME) $(BUILTINS) Makefile
 $(YCSB_BIN): bin $(YCSB_SRC) $(RUNTIME) $(BUILTINS) Makefile
 	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(YCSB_SRC) $(RUNTIME) $(LDFLAGS)
 
+$(LABYRINTH_BIN): bin $(LABYRINTH_SRC) $(RUNTIME) $(BUILTINS) Makefile
+	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(LABYRINTH_SRC) $(RUNTIME) $(LDFLAGS)
+
 $(TEST_DS_BIN): bin $(TEST_DS_SRC) $(RUNTIME) $(BUILTINS) Makefile
 	$(CXX) $(CXXFLAGS) $(EXTRA_INC) $(DEFS) -o $@ $(TEST_DS_SRC) $(RUNTIME) $(LDFLAGS)
 
@@ -145,6 +164,9 @@ run-fuzz: run-fuzz-counter run-fuzz-bank
 run-vacation: $(VACATION_BIN)
 	./$(VACATION_BIN) 4 5000 1000 100 42
 
+run-labyrinth: $(LABYRINTH_BIN)
+	./$(LABYRINTH_BIN)
+
 run-test-ds: $(TEST_DS_BIN)
 	./$(TEST_DS_BIN)
 
@@ -161,7 +183,7 @@ run-ycsb: $(YCSB_BIN)
 	./$(YCSB_BIN) -t 4 -d 3000
 
 run-tests: run-test-ds run-test-tx
-run: run-bank run-eigenbench run-bench7 run-vacation run-fuzz run-tpcc run-ycsb run-tests
+run: run-bank run-eigenbench run-bench7 run-vacation run-labyrinth run-fuzz run-tpcc run-ycsb run-tests
 
 clean:
 	rm -rf bin

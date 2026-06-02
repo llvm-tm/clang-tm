@@ -304,6 +304,12 @@ pub fn tm_commit() -> bool {
     true
 }
 
+pub fn tm_abort() {
+    drop(flush_tx());
+    TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+
 pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub fn tm_abort_count() -> u64 {

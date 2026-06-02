@@ -1,3 +1,30 @@
+// ── TmxAbort — panic payload for TM contention aborts ───
+// Used by write-back backends (WBCTL, WBETL, NOrec, TL2, DUDETM)
+// to unwind past the transaction body on contention, avoiding the
+// "zombie window" where subsequent TM ops would run with aborted state.
+// Caught by transaction()'s catch_unwind — only TM aborts are caught;
+// real panics (user code) are re-panicked.
+// The custom panic hook in tm_install_tmx_hook() filters out the
+// "Box<dyn Any>" spam that Rust would otherwise print for every
+// caught TmxAbort panic.
+#[derive(Debug)]
+pub struct TmxAbort;
+
+/// Install a panic hook that suppresses TmxAbort panic messages.
+/// TmxAbort panics are caught by transaction()'s catch_unwind and
+/// are normal TM retries — the "Box<dyn Any>" output would be noise.
+/// Call this once at tm_init() in any backend that uses TmxAbort.
+pub fn tm_install_tmx_hook() {
+    static HOOK_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    HOOK_INSTALLED.get_or_init(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if info.payload().downcast_ref::<TmxAbort>().is_some() { return; }
+            prev(info);
+        }));
+    });
+}
+
 // ── WriteBack — deferred write for safe commit ──────────
 // WriteBack::apply() encapsulates the unsafe ptr::write so that
 // tm_commit() can be a safe function.  The safety contract is:

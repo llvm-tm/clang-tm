@@ -14,10 +14,7 @@ fn read_word<T: Primitive>(addr: usize) -> T {
             while is_locked(addr) {
                 if with_tx(|tx| tx.locked_addrs.contains(&lock_index(addr))) { break; }
                 rspins += 1;
-                if rspins > 5000 {
-                    with_tx(|tx| tx.aborted = true);
-                    return unsafe { (addr as *const T).read() };
-                }
+                if rspins > 5000 { std::panic::panic_any(TmxAbort); }
                 std::hint::spin_loop();
             }
         }
@@ -25,16 +22,15 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         let value: T = unsafe { (addr as *const T).read() };
         if read_version(addr) != version { continue; }
         if with_tx(|tx| {
-            if version > tx.start_version { tx.aborted = true; true }
+            if version > tx.start_version { true }
             else { tx.read_set.push((addr, version)); false }
-        }) { return value; }
+        }) { std::panic::panic_any(TmxAbort); }
         return value;
     }
 }
 
 fn write_word<T: Primitive>(addr: usize, val: T) {
     fence(Ordering::SeqCst);
-    if tx_aborted() { return; }
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
     let tv = val.to_typed();
     // Existing write-set entry → update in-place, no lock needed
@@ -50,12 +46,12 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         let mut spins = 0u64;
         while is_locked(addr) {
             spins += 1;
-            if spins > 5000 { with_tx(|tx| tx.aborted = true); return; }
+            if spins > 5000 { std::panic::panic_any(TmxAbort); }
             std::hint::spin_loop();
         }
     }
     let version = read_version(addr);
-    if version > with_tx(|tx| tx.start_version) { with_tx(|tx| tx.aborted = true); return; }
+    if version > with_tx(|tx| tx.start_version) { std::panic::panic_any(TmxAbort); }
     let lock_idx = lock_index(addr);
     // Self-ownership check: different addresses may hash to the same lock
     if with_tx(|tx| tx.locked_addrs.contains(&lock_idx)) {
@@ -71,7 +67,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         if lock_spins > 10000
             || (is_locked(addr) && read_version(addr) > with_tx(|tx| tx.start_version))
         {
-            with_tx(|tx| tx.aborted = true); return;
+            std::panic::panic_any(TmxAbort);
         }
         std::hint::spin_loop();
     }
@@ -87,7 +83,6 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
     fence(Ordering::SeqCst);
-    if tx_aborted() { return; }
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     // Existing write-set entry → update in-place, no lock needed
     if with_tx(|tx| tx.write_set.contains_key(&addr)) {
@@ -102,12 +97,12 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
         let mut spins = 0u64;
         while is_locked(addr) {
             spins += 1;
-            if spins > 5000 { with_tx(|tx| tx.aborted = true); return; }
+            if spins > 5000 { std::panic::panic_any(TmxAbort); }
             std::hint::spin_loop();
         }
     }
     let version = read_version(addr);
-    if version > with_tx(|tx| tx.start_version) { with_tx(|tx| tx.aborted = true); return; }
+    if version > with_tx(|tx| tx.start_version) { std::panic::panic_any(TmxAbort); }
     let lock_idx = lock_index(addr);
     // Self-ownership check: different addresses may hash to the same lock
     if with_tx(|tx| tx.locked_addrs.contains(&lock_idx)) {
@@ -124,7 +119,7 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
         if lock_spins > 10000
             || (is_locked(addr) && read_version(addr) > with_tx(|tx| tx.start_version))
         {
-            with_tx(|tx| tx.aborted = true); return;
+            std::panic::panic_any(TmxAbort);
         }
         std::hint::spin_loop();
     }
@@ -135,10 +130,21 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     });
 }
 
+pub fn tm_abort() {
+    // Unlock any encounter-time locked addresses before discarding state
+    TX.with(|tx| {
+        if let Some(ref t) = *tx.borrow() {
+            if !t.locked_addrs.is_empty() {
+                unlock_indices(&t.locked_addrs);
+            }
+        }
+    });
+    flush_tx();
+}
+
 pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
     fence(Ordering::SeqCst);
-    if tx.aborted { unlock_indices(&tx.locked_addrs); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
     if tx.write_set.is_empty() { return true; }
     gc_acquire(); fence(Ordering::SeqCst);
     if !validate_read_set(&tx.read_set) { unlock_indices(&tx.locked_addrs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
