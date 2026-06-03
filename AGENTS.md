@@ -1425,4 +1425,37 @@ benchmarks/
 - `rust_tm_api/containers/src/tm_heap.rs`: Rust TMHeap (Vec<TmCell<T>>)
 - `rust_tm_api/containers/src/tm_bit_vector.rs`: Rust TMBitVector (AtomicU64[])
 
+## Planned Work — Rust TM address space + region allocator
+
+### Motivation
+The C++ region allocator (`backends/tm_region_allocator.hpp`) provides per-thread bump, bitmaps for small blocks, free lists for medium blocks, and thread-local free-list caching.  The Rust TM backends currently use `Box::new()` (std heap), which has no TM-address-space awareness, no `is_tm_address()` check, and no allocator metadata within the TM region.  Porting the allocator to Rust enables:
+- `is_tm_address()` for safe runtime pointer classification
+- Self-contained TM region for future persistence
+- Deterministic perf (no dependency on system allocator)
+- Integration with `tm-executor` for queue-mode spec-alloc
+
+### Design (mirrors C++)
+- Single 64 GB `mmap` region, aligned to `CHUNK_SIZE` (64 KB)
+- 32 size classes (16 B … 4 KB), bitmap for ≤256 B, free list otherwise
+- 64 KB chunks with `ChunkHeader` (magic, size_class, block_count, free_count, alloc_hint, bitmap ptr or free-list offset)
+- Per-thread: bump slab, free-list cache (LIFO, intrusive), hot-chunk pointer
+- Large allocations (>4 KB): bump from slab with `LargeHdr` prefix
+- `free` pushes to per-thread free list (no atomics); watermark draining planned
+- `is_tm_address(ptr)`: `region_start <= ptr < region_end`
+
+### Implementation steps
+1. Create `rust_tm_api/addrspace/` crate in workspace
+2. `RegionAllocator` struct with static methods wrapping global state
+3. Size-class table (compile-time `const` array matching C++ `kSizeTable`)
+4. `ChunkHeader` packed `#[repr(C)]` struct, `chunk_start()`, `chunk_hdr()` helpers
+5. Bitmap helpers (`bitmap_find_free`, `bitmap_set`, `bitmap_clear` — all bitwise)
+6. Intrusive free-list helpers (offset-based, 4-byte next-offset)
+7. Thread-local cache (`TLFreeList { head, count }`, `tl_fl_push`, `tl_fl_pop`)
+8. `tm_region_malloc` (fast: TL pop → hot chunk → bitmap/freelist → slow: slab bump)
+9. `tm_region_free` (TL push, no atomics)
+10. `tm_region_calloc`, `tm_region_realloc`
+11. Unit tests (mirror the 12 C++ tests from `test_region_alloc.cpp`)
+12. Linked-list stress benchmark (mirror `test_region_stress.cpp`)
+13. Integration with `tm-executor`: `TxExecutor` implementors use region allocator for spec-alloc
+
 
