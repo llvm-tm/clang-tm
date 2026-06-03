@@ -87,6 +87,7 @@ extern "C" {
 }
 
 extern size_t g_slab_size;
+extern int    g_slab_size_shift;   // log2(g_slab_size), for bitwise slab-rounding
 extern size_t g_chunks_per_slab;
 
 // Precomputed size-class tables (set by tm_region_init)
@@ -167,14 +168,14 @@ inline uint64_t* chunk_bitmap(ChunkHeader *hdr) noexcept {
 
 // Find first zero bit in bitmap starting from hint. Returns -1 if full.
 inline int bitmap_find_free(const uint64_t *bm, int block_count, int hint) noexcept {
-    int words = (block_count + 63) / 64;
-    int start_w = hint / 64;
+    int words = (block_count + 63) >> 6;
+    int start_w = hint >> 6;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = start_w; i < words; i++) {
             uint64_t w = __atomic_load_n(&bm[i], __ATOMIC_RELAXED);
             if (w != ~0ULL) {
                 int bit = __builtin_ctzll(~w);
-                int idx = i * 64 + bit;
+                int idx = (i << 6) | bit;
                 if (idx < block_count) return idx;
             }
         }
@@ -184,11 +185,11 @@ inline int bitmap_find_free(const uint64_t *bm, int block_count, int hint) noexc
 }
 
 inline void bitmap_set(uint64_t *bm, int idx) noexcept {
-    __atomic_fetch_or(&bm[idx / 64], 1ULL << (idx % 64), __ATOMIC_RELAXED);
+    __atomic_fetch_or(&bm[idx >> 6], 1ULL << (idx & 63), __ATOMIC_RELAXED);
 }
 
 inline void bitmap_clear(uint64_t *bm, int idx) noexcept {
-    __atomic_fetch_and(&bm[idx / 64], ~(1ULL << (idx % 64)), __ATOMIC_RELAXED);
+    __atomic_fetch_and(&bm[idx >> 6], ~(1ULL << (idx & 63)), __ATOMIC_RELAXED);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -264,7 +265,7 @@ inline void *tm_region_malloc(size_t sz) noexcept {
         char *p = g_tl_slab.bump;
         char *next = p + alloc_sz;
         if (next > g_tl_slab.end) [[unlikely]] {
-            size_t needed = (alloc_sz + g_slab_size - 1) / g_slab_size;
+            size_t needed = (alloc_sz + g_slab_size - 1) >> g_slab_size_shift;
             size_t idx = g_next_slab_idx.fetch_add(needed, std::memory_order_relaxed);
             char *slab = g_tm_region_start + idx * g_slab_size;
             if (slab + needed * g_slab_size > g_tm_region_end) [[unlikely]] {
@@ -482,7 +483,7 @@ inline void *tm_region_slow_alloc(size_t sz) noexcept {
     size_t slab_sz = g_slab_size;
     size_t needed = 1;
     if (sz > slab_sz)
-        needed = (sz + slab_sz - 1) / slab_sz;
+        needed = (sz + slab_sz - 1) >> g_slab_size_shift;
 
     size_t idx = g_next_slab_idx.fetch_add(needed, std::memory_order_relaxed);
     char *slab = g_tm_region_start + idx * slab_sz;

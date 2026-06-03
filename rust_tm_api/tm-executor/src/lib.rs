@@ -13,11 +13,47 @@
 //! let exec = QueueExecutor::new(4, 4);
 //! tx_execute(&exec, |tx| { balance.write(tx, new_val); });
 //! ```
+//!
+//! When using `QueueExecutor`, speculative allocations inside a TX can use
+//! [`spec_alloc`] / [`spec_free`] which allocate from the TM address-space
+//! region (a fast per-thread bump allocator).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
+
+// ── Region init guard ──────────────────────────────────────────────
+
+/// Ensure the TM address-space region is initialised exactly once.
+fn ensure_region_init() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        let rc = addrspace::tm_region_init();
+        assert_eq!(rc, 0, "tm_region_init() failed: {}", rc);
+    });
+}
+
+// ── Spec-alloc helpers ────────────────────────────────────────────
+
+/// Allocate `size` bytes from the TM address-space region.
+///
+/// Returns a 16-byte-aligned pointer.  The region is initialised on first
+/// call (idempotent).  Use inside `tx_execute` bodies for fast per-thread
+/// speculative allocation.
+#[inline]
+pub fn spec_alloc(size: usize) -> *mut u8 {
+    ensure_region_init();
+    addrspace::tm_region_malloc(size)
+}
+
+/// Free a pointer obtained from [`spec_alloc`].
+///
+/// Pushes to the calling thread's local free list (no atomic RMW).
+#[inline]
+pub fn spec_free(ptr: *mut u8) {
+    addrspace::tm_region_free(ptr);
+}
 
 // ── TxExecutor trait ───────────────────────────────────────────────
 
@@ -67,6 +103,7 @@ struct QueueInner {
 
 impl QueueExecutor {
     pub fn new(num_workers: usize, num_queues: usize) -> Self {
+        ensure_region_init();
         let nq = num_queues.max(1);
         let nw = num_workers.max(1);
         let inner = Arc::new(QueueInner {
@@ -81,7 +118,10 @@ impl QueueExecutor {
         let mut workers = Vec::with_capacity(nw);
         for _ in 0..nw {
             let s = Arc::clone(&inner);
-            workers.push(thread::spawn(move || Self::worker_loop(&s)));
+            workers.push(thread::spawn(move || {
+                ensure_region_init();
+                Self::worker_loop(&s);
+            }));
         }
 
         QueueExecutor { inner, workers }
@@ -260,5 +300,33 @@ mod tests {
             let v = tx.read(&cell);
             tx.write(&cell, v + 1);
         });
+    }
+
+    #[test]
+    fn queue_spec_alloc_inside_tx() {
+        // Verify that the addrspace allocator is usable inside a TX
+        // executed through QueueExecutor.
+        let exec = QueueExecutor::new(2, 2);
+        let val = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let val_c = Arc::clone(&val);
+        exec.execute(Box::new(move || {
+            let p = spec_alloc(64);
+            assert!(!p.is_null());
+            assert!(addrspace::is_tm_address(p));
+            unsafe { std::ptr::write(p as *mut u64, 42u64); }
+            val_c.store(unsafe { std::ptr::read(p as *mut u64) }, Ordering::Release);
+            spec_free(p);
+        }));
+        assert_eq!(val.load(Ordering::Acquire), 42);
+    }
+
+    #[test]
+    fn inline_spec_alloc_works() {
+        let p = spec_alloc(128);
+        assert!(!p.is_null());
+        assert!(addrspace::is_tm_address(p));
+        unsafe { std::ptr::write(p as *mut u64, 1234u64); }
+        assert_eq!(unsafe { std::ptr::read(p as *mut u64) }, 1234);
+        spec_free(p);
     }
 }
