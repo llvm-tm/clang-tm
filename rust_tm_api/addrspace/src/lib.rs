@@ -486,11 +486,6 @@ fn chunk_start(ptr: *mut u8) -> *mut u8 {
 }
 
 #[inline]
-fn chunk_hdr<'a>(ptr: *mut u8) -> &'a ChunkHeader {
-    unsafe { &*(chunk_start(ptr) as *const ChunkHeader) }
-}
-
-#[inline]
 fn chunk_block_ptr(chunk: *mut u8, block_idx: i32, sc: usize) -> *mut u8 {
     let off = (sc_data_off(sc) as usize) + (block_idx as usize) * (sc_block_size(sc) as usize);
     unsafe { chunk.add(off) }
