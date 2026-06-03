@@ -22,6 +22,7 @@ char *g_tm_region_start = nullptr;
 char *g_tm_region_end   = nullptr;
 
 size_t g_slab_size         = 0;
+int    g_slab_size_shift   = 0;
 size_t g_chunks_per_slab   = 0;
 
 uint16_t g_sc_block_size[MAX_CLASSES];
@@ -68,7 +69,11 @@ int tm_region_init() noexcept {
     // Slab size = TM_SLAB_PAGES × page_size, always a page multiple.
     g_slab_size = static_cast<size_t>(TM_SLAB_PAGES) *
                   static_cast<size_t>(page_size);
-    g_chunks_per_slab = g_slab_size / CHUNK_SIZE;
+    g_slab_size_shift = __builtin_ctzll(g_slab_size);
+    static_assert((CHUNK_SIZE & (CHUNK_SIZE - 1)) == 0,
+                  "CHUNK_SIZE must be power of 2");
+    int chunk_shift = __builtin_ctzll((size_t)CHUNK_SIZE);
+    g_chunks_per_slab = g_slab_size >> chunk_shift;
 
     // ── Precompute size class tables ──────────────────────
     for (int sc = 0; sc < (int)MAX_CLASSES; sc++) {
@@ -89,7 +94,7 @@ int tm_region_init() noexcept {
             uint32_t max_try = (CHUNK_SIZE - CHUNK_HEADER_SZ) / bs;
             uint32_t bc;
             for (bc = max_try; bc > 0; bc--) {
-                uint32_t bm_bytes = (bc + 7) / 8;
+                uint32_t bm_bytes = (bc + 7) >> 3;
                 uint32_t hdr_total = CHUNK_HEADER_SZ + bm_bytes;
                 uint32_t data_off = (hdr_total + 15) & ~15u;
                 uint32_t total = data_off + bc * bs;
@@ -132,14 +137,14 @@ int tm_region_init() noexcept {
     g_tm_region_start = aligned_start;
     g_tm_region_end   = aligned_start + aligned_size;
 
-    g_num_slabs = aligned_size / g_slab_size;
+    g_num_slabs = aligned_size >> g_slab_size_shift;
     g_next_slab_idx.store(0, std::memory_order_relaxed);
 
     fprintf(stderr,
             "[TM-REGION] mmap %p .. %p  (%zu MB, %zu slabs, "
             "%zu B/slab, %zu chunks/slab, %zu classes)\n",
             (void*)g_tm_region_start, (void*)g_tm_region_end,
-            aligned_size / (1024 * 1024), g_num_slabs,
+            aligned_size >> 20, g_num_slabs,  // MB = bytes >> 20
             g_slab_size, g_chunks_per_slab, MAX_CLASSES);
 
     return 0;
