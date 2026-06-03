@@ -169,6 +169,7 @@ void tm_serialize_unlock()
 // int tm_setjmp() { return sigsetjmp(*(sigjmp_buf *)tm_jmpbuf, 0); }
 
 void tm_set_jmpbuf(void *buf) { }
+sigjmp_buf *tm_get_env() { return (sigjmp_buf *)tm_jmpbuf; }
 
 void tm_begin()
 {

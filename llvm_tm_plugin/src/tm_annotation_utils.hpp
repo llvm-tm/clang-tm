@@ -35,7 +35,9 @@ constexpr char MAIN_ANNOT[] = "main";
 constexpr char TM_LOCAL_ANNOT[] = "tm_local";
 constexpr char ALLOW_OPAQUE_ANNOT[] = "tm_allow_opaque";
 constexpr char PSTATIC_REBUILD_ANNOT[] = "pstatic_rebuild";
+constexpr char ASYNC_TX_ANNOT[] = "async_transaction";
 constexpr char TM_CLONE_SUFFIX[] = "_tm_clone";
+constexpr char TM_DISPATCH_SUFFIX[] = "_tm_clone_dispatch";
 
 // Symbol table name constants (persistent runtimes)
 constexpr char TM_SYMBOL_COUNT[] = "tm_symbol_count";

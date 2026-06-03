@@ -94,6 +94,7 @@ void tm_serialize_unlock()
 }
 
 void tm_set_jmpbuf(void *buf) { tinystm::jmpbuf = (sigjmp_buf *)buf; }
+sigjmp_buf *tm_get_env() { return &tm_jmpbuf; }
 
 int tm_setjmp() { return 0; }
 

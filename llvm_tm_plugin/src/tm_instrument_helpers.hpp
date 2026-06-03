@@ -54,7 +54,7 @@ static ModulePassContext setupModulePass(Module &M)
 	createTMSymbolTables(M, TMSymbols);
 
 	for (auto &F : M) {
-		if (!F.isDeclaration() && hasAnnotation(F, "transaction"))
+		if (!F.isDeclaration() && (hasAnnotation(F, TX_ANNOT) || hasAnnotation(F, ASYNC_TX_ANNOT)))
 			collectTransactionCallGraph(F, M, CtxOut.TxReachableFuncs);
 	}
 	return CtxOut;
@@ -94,7 +94,7 @@ static void instrumentThreadEntries(Module &M,
 	for (auto &F : M) {
 		if (F.isDeclaration() || F.getName() == "main")
 			continue;
-		if (hasAnnotation(F, TX_ANNOT))
+		if (hasAnnotation(F, TX_ANNOT) || hasAnnotation(F, ASYNC_TX_ANNOT))
 			continue;
 		if (!hasAnnotation(F, THREAD_ANNOT) && !ExplicitThreadEntries.count(&F))
 			continue;
