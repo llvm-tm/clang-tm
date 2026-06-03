@@ -49,7 +49,7 @@
 - `rust_tm_api/tm-executor/Cargo.toml`: Backend feature passthrough, `addrspace` dependency.
 - `backends/tm_region_allocator.hpp`: C++ allocator — bitmap ops, free-list ops, `tm_region_malloc` fast/slow path, `tm_region_free` (TL list push), `tm_region_realloc`/`calloc`, `chunk_alloc`.
 - `backends/runtimes/tm_region_allocator.cpp`: Init-time mmap alignment, size-class table precomputation.
-- `backends/tests/test_region_stress.cpp`: C++ 8-phase stress benchmark.
+- `tests/backends/test_region_stress.cpp`: C++ 8-phase stress benchmark.
 
 ## Next Steps
 1. Run full Rust workspace tests (`cargo test --workspace`) to confirm no regressions.

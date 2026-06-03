@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "tm_common.hpp"
-#include "../tm_spin_token.hpp"
+#include "tm_spin_token.hpp"
 #include "tm_event_logger.hpp"
 #include <random>
 #include <thread>

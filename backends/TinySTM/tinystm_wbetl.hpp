@@ -12,9 +12,9 @@
 #include <thread>
 
 #include "tinystm_common.hpp"
-#include "../tm_event_logger.hpp"
-#include "../tm_log_entries.hpp"
-#include "../tm_log_merge.hpp"
+#include "tm_event_logger.hpp"
+#include "tm_log_entries.hpp"
+#include "tm_log_merge.hpp"
 
 extern "C" {
 extern __thread int32_t tm_nested_call_counter;
@@ -416,6 +416,6 @@ write_word_etl(                                                //
 #define TM_STUB_HAVE_TYPES
 #define TM_STUB_RL ReadLogEntry_wbetl
 #define TM_STUB_WL WriteLogEntry_wbetl
-#include "../tm_stubs.hpp"
+#include "tm_stubs.hpp"
 
 } // namespace tinystm

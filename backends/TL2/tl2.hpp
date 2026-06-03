@@ -19,8 +19,8 @@
 #include <vector>
 #include <string.h>
 #include <csetjmp>
-#include "../tm_common.hpp"
-#include "../tm_event_logger.hpp"
+#include "tm_common.hpp"
+#include "tm_event_logger.hpp"
 #include <type_traits>
 
 namespace tl2 {

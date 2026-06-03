@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 // Constants
 // ════════════════════════════════════════════════════════════════
 
-const TM_REGION_SIZE: usize = 64 * 1024 * 1024 * 1024; // 64 GB
+const TM_REGION_SIZE: usize = 16 * 1024 * 1024 * 1024; // 16 GB
 const TM_SLAB_PAGES: usize = 256;
 const CHUNK_SIZE: usize = 65536; // 64 KB
 const CHUNK_MASK: usize = CHUNK_SIZE - 1;

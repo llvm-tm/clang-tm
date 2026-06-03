@@ -11,8 +11,8 @@
 #include <vector>
 
 #include "tinystm_globals.hpp"
-#include "../tm_alloc_overrides.hpp"
-#include "../DUDETM/dudetm_base.hpp"
+#include "tm_alloc_overrides.hpp"
+#include "DUDETM/dudetm_base.hpp"
 
 thread_local bool g_in_tx = false;
 thread_local FreeNode* g_deferred_frees = nullptr;

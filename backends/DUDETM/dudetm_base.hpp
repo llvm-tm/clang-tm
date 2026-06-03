@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#include "../tm_common.hpp"
+#include "tm_common.hpp"
 
 namespace dudetm
 {

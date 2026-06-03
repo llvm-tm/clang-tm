@@ -36,14 +36,14 @@
 #include <csetjmp>
 #include <cstdio>
 #include <cstdlib>
-#include "../tm_alloc_overrides.hpp"
+#include "tm_alloc_overrides.hpp"
 thread_local bool g_in_tx = false;
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 
-#include "../rel_ptr.hpp"
+#include "rel_ptr.hpp"
 
 // ── Shared state in mmap ────────────────────────────────────────
 

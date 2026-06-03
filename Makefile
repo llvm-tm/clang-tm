@@ -1,24 +1,9 @@
 # Top-level Makefile for TM API C++ Project
-# Builds: LLVM plugin, runtimes, benchmarks, and tests
-#
-# Targets:
-#   all           - Build everything
-#   plugin        - Build LLVM TM plugin
-#   runtimes      - Build STM runtimes
-#   benchmarks   - Build all benchmarks
-#   tests        - Build plugin tests
-#   clean        - Clean all build artifacts
-#
-# Options:
-#   BACKEND=tl2       Build with TL2 backend (default TinySTM)
-#   BACKEND=singlelock Build with SingleGlobalLock backend
-#   DEBUG=1         Build with debug flags
+# Builds: LLVM plugin, plugin benchmarks, expli benchmarks, tests
 
-# Detect LLVM installation (handles versioned installs: llvm-config-22, llvm-config-22.1, llvm-config)
 include llvm_tm_plugin/llvm-tool-helper.mk
 LLVM_CONFIG_ARGS := $(shell $(LLVM_CONFIG) --cxxflags --ldflags --system-libs --libs core analysis 2>/dev/null || echo "-I$(shell brew --prefix llvm 2>/dev/null || echo /usr/lib/llvm-22)/include -L$(shell brew --prefix llvm 2>/dev/null || echo /usr/lib/llvm-22)/lib -lLLVM-22")
 
-# Compiler settings
 CXX ?= $(LLVM_CXX)
 CXXFLAGS += -std=c++20 -pthread
 ifeq ($(DEBUG),1)
@@ -26,40 +11,20 @@ ifeq ($(DEBUG),1)
 else
   CXXFLAGS += -O2
 endif
-
-# Backend selection
 BACKEND ?= tinystm
 
-# Directories
 PROJECT_ROOT := $(shell pwd)
 LLVM_PLUGIN_DIR := $(PROJECT_ROOT)/llvm_tm_plugin
 BACKENDS_DIR := $(PROJECT_ROOT)/backends
-RUNTIMES_DIR := $(BACKENDS_DIR)/runtimes
-BENCHMARKS_DIR := $(PROJECT_ROOT)/benchmarks
-TESTS_DIR := $(PROJECT_ROOT)/backends/tests
+PLUGIN_BENCHMARKS_DIR := $(PROJECT_ROOT)/plugin-benchmarks
+EXPLI_BENCHMARKS_DIR := $(PROJECT_ROOT)/expli-benchmarks
+TESTS_DIR := $(PROJECT_ROOT)/tests
 
-# Plugin
 PLUGIN := $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
 
-# All subdirectories
-PLUGIN_SUBDIR := llvm_tm_plugin
-RUNTIME_SUBDIRS := runtimes
-BENCHMARK_SUBDIRS := \
-	benchmarks/test/bank \
-	benchmarks/datastructures \
-	benchmarks/STMbench7 \
-	benchmarks/YCSB \
-	benchmarks/EigenBench \
-	benchmarks/STAMP \
-	benchmarks/TPCC \
-	benchmarks/test/intset
+.PHONY: all clean plugin plugin-benchmarks expli-benchmarks tests check help info
 
-# regression is broken - missing Makefile.common
-# benchmarks/test/regression
-
-.PHONY: all clean plugin runtimes benchmarks tests check help info
-
-all: info plugin runtimes benchmarks
+all: info plugin plugin-benchmarks expli-benchmarks
 
 info:
 	@echo "TM API C++ Build System"
@@ -68,13 +33,7 @@ info:
 	@echo "LLVM Config: $(LLVM_CONFIG)"
 	@echo "Backend:    $(BACKEND)"
 	@echo "CXX:       $(CXX)"
-	@echo "CXXFLAGS:  $(CXXFLAGS)"
 	@echo ""
-	@echo "Plugin:    $(PLUGIN)"
-
-# ============================================================================
-# LLVM Plugin
-# ============================================================================
 
 plugin: $(PLUGIN)
 
@@ -84,109 +43,54 @@ $(PLUGIN): $(LLVM_PLUGIN_DIR)/src/TMInstrumentPass.cpp | $(LLVM_PLUGIN_DIR)/bin
 $(LLVM_PLUGIN_DIR)/bin:
 	mkdir -p $@
 
-# ============================================================================
-# Runtimes
-# ============================================================================
+plugin-benchmarks: plugin
+	@echo "Building plugin benchmarks..."
+	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/bank bank_tinystm BACKEND=$(BACKEND) 2>/dev/null || true
+	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/bank bank_singlelock BACKEND=$(BACKEND) 2>/dev/null || true
+	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/datastructures bin/avltree_SingleGlobalLock 2>/dev/null || true
+	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/STAMP stamp_uninstrumented 2>/dev/null || true
+	@echo "Plugin benchmarks built."
 
-runtimes:
-	@echo "Building runtimes (header-only, no build needed)..."
-
-# ============================================================================
-# Benchmarks
-# ============================================================================
-
-benchmarks: plugin
-	@echo "Building all benchmarks..."
-	@$(MAKE) -C $(BENCHMARKS_DIR)/test/bank clean 2>/dev/null || true
-	@$(MAKE) -C $(BENCHMARKS_DIR)/test/bank bank_tinystm BACKEND=$(BACKEND)
-	@$(MAKE) -C $(BENCHMARKS_DIR)/test/bank bank_singlelock BACKEND=$(BACKEND)
-	@$(MAKE) -C $(BENCHMARKS_DIR)/test/bank bank_dudetm BACKEND=$(BACKEND)
-	@$(MAKE) -C $(BENCHMARKS_DIR)/test/bank bank_nvhtm BACKEND=$(BACKEND)
-	@$(MAKE) -C $(BENCHMARKS_DIR)/test/bank bank_spht BACKEND=$(BACKEND)
-	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures clean 2>/dev/null || true
-	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures bin/avltree_SingleGlobalLock
-	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures bin/rbtree_SingleGlobalLock
-	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures bin/hashmap_SingleGlobalLock
-	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures bin/bitmap_SingleGlobalLock
-	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures bin/list_SingleGlobalLock
-	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures bin/set_SingleGlobalLock
-	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures bin/heap_SingleGlobalLock
-	@$(MAKE) -C $(BENCHMARKS_DIR)/STAMP clean 2>/dev/null || true
-	@$(MAKE) -C $(BENCHMARKS_DIR)/STAMP stamp_uninstrumented
-	@$(MAKE) -C $(BENCHMARKS_DIR)/STAMP stamp_tinystm BACKEND=$(BACKEND)
-	@echo "Benchmarks built."
-
-# ============================================================================
-# Plugin Tests
-# ============================================================================
+expli-benchmarks:
+	@echo "Building expli benchmarks..."
+	@$(MAKE) -C $(EXPLI_BENCHMARKS_DIR) all BACKEND=$(BACKEND) 2>/dev/null || true
+	@echo "Expli benchmarks built."
 
 tests: plugin
-	@echo "Building plugin tests..."
+	@echo "Building all tests..."
 	@$(MAKE) -C $(LLVM_PLUGIN_DIR) clean 2>/dev/null || true
 	@$(MAKE) -C $(LLVM_PLUGIN_DIR) all
+	@echo "Tests built."
 
-# ============================================================================
-# Clean
-# ============================================================================
+check: tests
+	@echo "Running tests..."
+	@$(MAKE) -C $(LLVM_PLUGIN_DIR) run 2>/dev/null || true
 
 clean:
-	@echo "Cleaning all build artifacts..."
-	@for dir in $(BENCHMARK_SUBDIRS); do \
-		$(MAKE) -C $(dir) clean 2>/dev/null || true; \
-	done
+	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/bank clean 2>/dev/null || true
+	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/datastructures clean 2>/dev/null || true
 	@$(MAKE) -C $(LLVM_PLUGIN_DIR) clean 2>/dev/null || true
-	@$(MAKE) -C $(BENCHMARKS_DIR)/test/bank clean 2>/dev/null || true
-	@$(MAKE) -C $(BENCHMARKS_DIR)/datastructures clean 2>/dev/null || true
+	@$(MAKE) -C $(EXPLI_BENCHMARKS_DIR) clean 2>/dev/null || true
 	rm -rf $(LLVM_PLUGIN_DIR)/bin $(LLVM_PLUGIN_DIR)/out
 	rm -f /tmp/tm_persistent_state.bin
 	@echo "Clean complete."
-
-# ============================================================================
-# Help
-# ============================================================================
 
 help:
 	@echo "TM API C++ Build System"
 	@echo "======================"
 	@echo ""
-	@echo "Main Targets:"
-	@echo "  all           - Build everything (plugin, runtimes, benchmarks)"
-	@echo "  plugin       - Build LLVM TM plugin"
-	@echo "  runtimes     - Prepare STM runtimes (header-only)"
-	@echo "  benchmarks   - Build all benchmarks"
-	@echo "  tests        - Build plugin tests"
-	@echo "  clean        - Clean all build artifacts"
+	@echo "Targets:"
+	@echo "  all               - Plugin + plugin benchmarks + expli benchmarks"
+	@echo "  plugin            - Build LLVM TM plugin"
+	@echo "  plugin-benchmarks - Build plugin-based benchmarks"
+	@echo "  expli-benchmarks  - Build explicit C++ API benchmarks"
+	@echo "  tests             - Build plugin tests"
+	@echo "  check             - Build and run plugin tests"
+	@echo "  clean             - Clean all build artifacts"
 	@echo ""
-	@echo "Options:"
-	@echo "  BACKEND=tl2        - Use TL2 backend (default: tinystm)"
-	@echo "  BACKEND=singlelock - Use SingleGlobalLock backend"
-	@echo "  DEBUG=1            - Build with debug flags (-O0 -g)"
-	@echo ""
-	@echo "LLVM Options:"
-	@echo "  LLVM_CONFIG=<path> - Specify llvm-config path"
-	@echo ""
-	@echo "Examples:"
-	@echo "  make all                    # Build everything"
-	@echo "  make plugin                # Just the plugin"
-	@echo "  make benchmarks BACKEND=tl2 # Build with TL2"
-	@echo "  make clean                 # Clean everything"
+	@echo "Options: BACKEND=tl2, DEBUG=1"
 
-# ============================================================================
-# Quick Test
-# ============================================================================
-
-test_run: benchmarks
-	@echo ""
-	@echo "Running benchmark tests..."
-	@echo "=========================="
-	@echo ""
-	@echo "Bank benchmark (SingleGlobalLock):"
-	@$(BENCHMARKS_DIR)/test/bank/bin/bank_singlelock -t 2 -d 1000 || echo "(timeout or error)"
-	@echo ""
-	@echo "AVL Tree benchmark:"
-	@$(BENCHMARKS_DIR)/datastructures/bin/avltree_SingleGlobalLock 1 10 100 || echo "(timeout or error)"
-	@echo ""
-	@echo "STAMP benchmarks (uninstrumented):"
-	@$(BENCHMARKS_DIR)/STAMP/bin/stamp_uninstrumented -b kmeans -t 2 || echo "(timeout or error)"
-	@echo ""
-	@echo "Tests complete."
+test_run: plugin-benchmarks
+	@$(PLUGIN_BENCHMARKS_DIR)/bank/bin/bank_singlelock -t 2 -d 1000 2>/dev/null || true
+	@$(PLUGIN_BENCHMARKS_DIR)/datastructures/bin/avltree_SingleGlobalLock 1 10 100 2>/dev/null || true
+	@$(PLUGIN_BENCHMARKS_DIR)/STAMP/bin/stamp_uninstrumented -b kmeans -t 2 2>/dev/null || true

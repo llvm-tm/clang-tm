@@ -17,9 +17,9 @@
 #include <unistd.h>
 #include <pthread.h>
 
-#include "../tm_common.hpp"
-#include "../tm_spin_token.hpp"
-#include "../tm_event_logger.hpp"
+#include "tm_common.hpp"
+#include "tm_spin_token.hpp"
+#include "tm_event_logger.hpp"
 
 namespace swisstm
 {

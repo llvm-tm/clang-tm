@@ -8,8 +8,8 @@
  * with a small header for free-path recycling.
  */
 
-#include "../tm_region_allocator.hpp"
-#include "../tm_platform.hpp"
+#include "tm_region_allocator.hpp"
+#include "tm_platform.hpp"
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>

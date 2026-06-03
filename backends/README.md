@@ -94,7 +94,7 @@ The `tests/` subdirectory contains standalone correctness tests that
 compile directly against each backend (no LLVM plugin needed).
 
 ```
-cd backends/tests
+cd tests/backends
 make run
 ```
 
@@ -161,7 +161,7 @@ with timestamps, thread IDs, and event payloads.
 
 ```bash
 # Add -DTM_EVENT_LOG to CXXFLAGS when compiling the runtime:
-cd backends/tests
+cd tests/backends
 make CXXFLAGS="-std=c++20 -O0 -pthread -g -DTM_EVENT_LOG" run
 ```
 
@@ -197,7 +197,7 @@ reports any invariant violations before generating the timeline.
 
 ```bash
 # 1. Generate a raw event log from a benchmark with TM_EVENT_LOG:
-cd benchmarks/STMbench7
+cd plugin-benchmarks/stmbench7
 rm -f bin/stmbench_tl2 && make stmbench_tl2 TM_DEFINES_tl2="-DTM_EVENT_LOG"
 ./bin/stmbench_tl2 -t 4 -d 5000 -w 1 2>/tmp/event_log.txt
 

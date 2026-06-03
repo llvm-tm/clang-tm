@@ -41,7 +41,7 @@ namespace stm {
 // ═══════════════════════════════════════════════════════════════════
 
 #ifndef TM_REGION_SIZE
-#define TM_REGION_SIZE (64ULL * 1024 * 1024 * 1024)
+#define TM_REGION_SIZE (16ULL * 1024 * 1024 * 1024)
 #endif
 
 #ifndef TM_SLAB_PAGES
