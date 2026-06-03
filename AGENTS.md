@@ -56,3 +56,11 @@
 2. Verify C++ build + test suite still passes with the division→shift optimizations.
 3. (Future) Add TL-list watermark draining to the C++ allocator (currently marked "not implemented yet").
 4. (Future) Profile real workloads (STMbench7, STAMP) with the Rust region allocator vs Box::new().
+
+## Issues Found
+1. **Plugin Build Failures**: The LLVM plugin builds are failing due to TMRuntimeHooks type issues in tm_method_instrumentation.hpp. The error shows:
+   - Unknown type name 'TMRuntimeHooks'
+   - No matching function for call to 'instrumentLoadsStoresInFunction'
+   - No matching function for call to 'instrumentAllClones'
+   This is a compilation issue in the plugin source code that needs to be fixed.
+2. **test_treap_tx Crash**: The treap benchmark crashes with `rip=0x0` during PLT resolution, with a corrupted return address pointing to a heap address (0x555555615290). This requires further investigation.

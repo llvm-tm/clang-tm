@@ -101,7 +101,7 @@ static bool tracesToTMGlobal(Value *Ptr, Module &M)
 
 // Replace llvm.memcpy/memmove/memset on TM globals with per-byte instrumented loops.
 #ifndef DISABLE_TM_READ_WRITE
-static void instrumentMemoryIntrinsic(CallBase *Call, Module &M, const TMRuntimeHooks &H)
+static void instrumentMemoryIntrinsic(CallBase *Call, Module &M, TMRuntimeHooks &H)
 {
 	LLVMContext &Ctx = M.getContext();
 	auto *i8Ty = Type::getInt8Ty(Ctx);
@@ -272,7 +272,7 @@ static bool isTMTracedPtr(const Value *Ptr)
 
 static void instrumentLoadsStoresInFunction(Function *F,
                                             Module *M,
-                                            const TMRuntimeHooks &H)
+                                            TMRuntimeHooks &H)
 {
 	if (TMAudit) {
 		SmallPtrSet<const Value *, 32> LocalVars;
@@ -431,7 +431,7 @@ static void instrumentLoadsStoresInFunction(Function *, Module *,
 static Function *cloneMethod(Function *Original, const Twine &Suffix,
                               Module *M, LLVMContext &Ctx,
                               SmallPtrSetImpl<const GlobalVariable *> &TMG,
-                              const TMRuntimeHooks &H,
+                              TMRuntimeHooks &H,
                               CloneMode Mode = CloneMode::Instrument)
 {
     FunctionType *FTy = Original->getFunctionType();
@@ -669,7 +669,7 @@ static void redirectCallsToClones(Function &F, Module &M,
 static SmallVector<std::pair<Function *, Function *>, 32> &
 cloneTxReachableGraph(Module &M,
                       SmallPtrSetImpl<Function *> &TxReachableFuncs,
-                      const TMRuntimeHooks &H,
+                      TMRuntimeHooks &H,
                       CloneMode Mode = CloneMode::Instrument)
 {
     SmallPtrSet<const GlobalVariable *, 16> TMG;
@@ -720,7 +720,7 @@ cloneTxReachableGraph(Module &M,
 // but the stored value is a TM-traced argument.
 static void instrumentAllClones(
     SmallVectorImpl<std::pair<Function *, Function *>> &ClonedMap,
-    Module &M, const TMRuntimeHooks &H)
+    Module &M, TMRuntimeHooks &H)
 {
     for (auto &pair : ClonedMap) {
         Function *Clone = pair.second;
