@@ -120,6 +120,8 @@ inline void *tm_region_slow_alloc(size_t sz) noexcept;
 
 inline void *tm_region_malloc(size_t sz) noexcept {
     // Align to 16 bytes (sufficient for all standard types).
+    // Minimum 16 bytes so malloc(0) returns a unique pointer per C standard.
+    if (sz < 16) sz = 16;
     sz = (sz + 15) & ~15ULL;
 
     // Fast path: non-atomic bump within the current slab.

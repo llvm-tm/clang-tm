@@ -1,7 +1,29 @@
 # Session Summary
 
 ## Latest Session (this session — 2026-06-03)
-- **Per-thread slab bump allocator**: `tm_region_allocator.hpp` rewritten — removed global `g_tm_region_bump` atomic pointer. Added `g_tl_slab` (thread_local) with non-atomic bump on fast path. Slow path `fetch_add` on `g_next_slab_idx` claims slabs. All slabs at fixed offsets within 64 GB region — `isTMAddress()` stays a simple bounds check. Slab size = `TM_SLAB_PAGES` (256) × `tm_page_size()`. References: Hoard, TCMalloc, Gidenstam.
+
+### TM region allocator design analysis
+- **Multiple granularity**: The allocator supports ANY size (1 B … 64 GB) from the same bump. There is NO size-class segregation — a 1 MB allocation and a 16 B allocation both come from the same slab. This means small allocations waste space (16 B minimum after alignment) and large sequential allocations may fragment the slab. No small-object pools, no segregated free lists.
+- **Free efficiency**: `tm_region_free()` is a **no-op** (ZERO cycles). No coalescing, no page return, no free-list insertion. The 64 GB region is freed atomically at process exit via `munmap`. The downside: memory is NEVER reused within a thread's lifetime. Long-lived workloads with steady-state alloc/free cycles will exhaust the region.
+- **Scalability**: Per-thread slab bump avoids all atomic RMW on the fast path. 4-thread linked list stress shows **3.9× speedup** vs `std::malloc` (4 threads, 500K nodes/thread, 90M allocs/sec).
+- **Zero-size fix**: `malloc(0)` now enforces a 16 B minimum so two consecutive calls return distinct non-null pointers per C standard.
+
+### TM allocator unit tests (12 PASS)
+Created `backends/tests/test_region_alloc.cpp` with standalone tests:
+`init`, `malloc_small` (1…256 B), `malloc_large` (1 KB…1 MB), `alignment` (16 B for all sizes), `isTMAddress` (inside/outside/null/stack/heap), `calloc` (zeroing), `realloc` (null/grow/shrink), `multi_thread` (8 threads, 1000 allocs each), `oversized` (2× and 3× slab size), `bump_order` (256 sequential allocs, sorted, non-overlapping), `zero_size` (distinct ptrs for malloc(0)), `slab_exhaustion` (single thread claims 3+ slabs).
+
+### Linked-list stress test + allocator benchmark
+Created `backends/tests/test_region_stress.cpp`:
+- Single-threaded linked list: 2.1× TM region vs `std::malloc` (31M vs 15M allocs/sec)
+- Multi-threaded (4t) linked list: 3.9× TM region vs `std::malloc` (91M vs 23M allocs/sec)
+- Scalability: 1t→25M, 2t→45M, 4t→100M allocs/sec (near-linear)
+- Correctness verified: list sum matches expectation
+- Both tests added to `backends/tests/Makefile` as `region_alloc` and `region_stress` under `make run-allocs` or `make run`
+
+### Fixes
+- **`tm_region_malloc` zero-size**: Added `if (sz < 16) sz = 16` before alignment to guarantee unique pointers for `malloc(0)`.
+- **Makefile header deps**: `tm_region_allocator.hpp` and `tm_platform.hpp` added as prerequisites for allocator test build rules.
+- **Makefile dedup**: Removed stale duplicate `bin/region_stress` rule that referenced `test_harness.hpp`.
 - **Atomic-counter pending TX tracking**: `queue_runtime.cpp` — replaced `TmFutureState` (mutex+CV+done) and `g_tm_pending` TLS with thread-local `std::atomic<int> g_tm_pending_count`. Each enqueued task captures a pointer to the caller's counter, decrements after TX completion. Caller spin-waits with `tm_cpu_relax()`. No per-TX allocation, no `new`/`delete`. Plugin (`TMInstrumentPass.cpp`) no longer declares `g_tm_pending`.
 - **`tm_page_size()`**: Added to `backends/tm_platform.hpp` section 7 — wraps `sysconf(_SC_PAGESIZE)` on POSIX, `GetSystemInfo` on Windows, fallback 4096.
 - **`tm_perf_counters.hpp`** (new): Thread-local `TmPerfCounters` struct + `TM_PERF_SCOPE`/`TM_PERF_INC` macros. All compile to no-ops when `-DTM_PERF_COUNTERS` undefined. Instrumented in `queue_runtime.cpp`.
