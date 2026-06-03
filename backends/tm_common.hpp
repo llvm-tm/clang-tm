@@ -9,6 +9,8 @@
 #include <pthread.h>
 #include <vector>
 
+#include "tm_region_allocator.hpp"
+
 
 
 #ifndef NDEBUG
@@ -178,69 +180,22 @@ inline void u64_to_any(any_type_t &out, uint64_t val, ValueType /*sz*/) {
 }
 
 // ===========================================================================
-// Stack-address detection: check if a pointer is on the current thread's
-// stack.  Stack data is thread-private and must NEVER go through TM reads/
-// writes — doing so creates write-set entries for addresses that will be
-// popped on function return, causing post-commit stack corruption.  Also,
-// using TM reads on stack addresses causes spurious lock conflicts in
-// lock-based backends because stack addresses hash to random locks.
+// TM region bypass check: an address bypasses TM instrumentation iff it
+// is NOT in the TM region.  Any address not in the dedicated TM region
+// bypasses TM (raw load/store).  Stack, heap, and globals are all outside
+// the TM region and thus bypass TM.
 //
-// The plugin performs static analysis to skip stack-loaded/store from non-
-// escaping allocas (alloca + GEP chains + recursive argIsAllocaDest for
-// forwarded function parameters).  However, pointers LOADED from allocas
-// (e.g., lambda capture result_ptr) have runtime values that the static
-// analysis cannot determine.  This runtime check catches those remaining
-// cases as a safety net.
+// NOTE: As of June 2026, backends no longer check isTMAddress() at runtime
+// — the LLVM plugin ensures TM ops are only emitted for TM-tracked addresses.
+// isTMAddress() is available for debug assertions and the tm_free() path
+// (which decides between deferred and direct free based on region membership).
+//   - TM-region addresses (always go through TM read/write)
 //
-// Returns true if the address is on the calling thread's stack.
-// Uses pthread_getattr_np on Linux, pthread_get_stackaddr_np on macOS.
-// Caches the stack bounds in a thread_local variable (first call only).
+// The TM region MUST be initialized by tm_region_init() (called from each
+// runtime's tm_init()) before any TX runs.  If the region is not initialized,
+// isTMAddress() returns false for everything — safe (no TM) but wrong
+// (no transactional safety).  The runtime asserts with a fatal error.
 // ===========================================================================
-inline bool isStackAddress(void *addr)
-{
-    // Method 1: pthread-based stack bounds (cached thread-local).
-    thread_local bool init = false;
-    thread_local void *stack_base = nullptr;
-    thread_local size_t stack_size = 0;
-    if (!init) {
-#if defined(__APPLE__)
-        stack_base = pthread_get_stackaddr_np(pthread_self());
-        stack_size = pthread_get_stacksize_np(pthread_self());
-#else
-        pthread_attr_t attr;
-        if (pthread_getattr_np(pthread_self(), &attr) == 0) {
-            pthread_attr_getstack(&attr, &stack_base, &stack_size);
-            pthread_attr_destroy(&attr);
-        } else {
-            fprintf(stderr, "[WARN] pthread_getattr_np failed for tid=%lu\n",
-                    (unsigned long)pthread_self());
-        }
-#endif
-        init = true;
-    }
-    if (stack_base) {
-        uintptr_t a = (uintptr_t)addr;
-        uintptr_t base = (uintptr_t)stack_base;
-        if (a >= base && a < base + stack_size)
-            return true;
-    }
-
-    // Method 2 (fallback): compare with current stack pointer.
-    // A thread's stack grows downward; any address between the current
-    // stack pointer and the top of the stack (highest address) is on
-    // this thread's stack.  We use __builtin_frame_address to get a
-    // conservative lower bound.
-    void *frame = __builtin_frame_address(0);
-    uintptr_t a = (uintptr_t)addr;
-    uintptr_t fp = (uintptr_t)frame;
-    // Stack grows downward: addresses >= fp (toward the top) are on
-    // the stack.  Pad by 4MB to account for deep call chains (TM clone
-    // functions add frame overhead; STAMP benchmarks can have deep
-    // hash/btree traversal chains reaching >256KB from read_word_ctl).
-    uintptr_t top = fp + 4UL * 1024 * 1024;
-    return a >= fp && a <= top;
-}
-
 constexpr int OFFSET_BITS = 3; // for 64bit
 constexpr int OFFSET_MASK = 7;
 

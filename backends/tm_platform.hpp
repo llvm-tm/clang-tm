@@ -10,7 +10,7 @@
 // Sections:
 //   1. Platform-detection macros
 //   2. System includes (selected per platform)
-//   3. Stack-address detection          (isStackAddress)
+//   3. (removed — address-space detection now in tm_region_allocator.hpp)
 //   4. Backtrace / crash diagnostics    (tm_backtrace_print)
 //   5. CPU relax / spin-loop hint       (tm_cpu_relax)
 //   6. Cycle-accurate timestamp         (tm_timestamp)
@@ -59,7 +59,7 @@
 
 // ── 2. System includes (selected per platform) ───────────────────
 
-// POSIX threads (for isStackAddress)
+// POSIX threads
 #if TM_PLATFORM_POSIX
   #include <pthread.h>
 #endif
@@ -79,85 +79,11 @@
   #include <execinfo.h>
 #endif
 
-// ── 3. Stack-address detection ───────────────────────────────────
-//
-// Stack-allocated data is thread-private and must never go through TM
-// read/write — write-back to a popped stack frame would corrupt active
-// stack data, causing jump-to-garbage crashes.
-//
-// Used as the FIRST check in every backend's read_word_XX / write_word_XX.
-// When the address is on the calling thread's stack, the function
-// bypasses all TM protocol (no lock, no write-set/read-set entry).
-//
-// Adding a new platform:
-//   1. Add a new #elif block below.
-//   2. Use the platform's thread API to get stack base + size.
-//   3. Return true if addr is within [base, base+size).
-//   4. Do NOT call malloc/new / do I/O inside (signal-unsafe callers).
 
 namespace stm
 {
 
-inline bool isStackAddress(void const *addr)
-{
-#if defined(__APPLE__)
-	// macOS / iOS: pthread_get_stackaddr_np returns the HIGH address
-	// of the stack (stack grows downward).
-	pthread_t self = pthread_self();
-	void *stack_addr = pthread_get_stackaddr_np(self);
-	size_t stack_size = pthread_get_stacksize_np(self);
-	void *stack_bottom = (char *)stack_addr - stack_size;
-	return (addr >= stack_bottom && addr < stack_addr);
-
-#elif defined(__linux__) || defined(__linux)
-	// Linux: pthread_getattr_np + pthread_attr_getstack.
-	pthread_attr_t attr;
-	void *stack_addr;
-	size_t stack_size;
-	pthread_getattr_np(pthread_self(), &attr);
-	pthread_attr_getstack(&attr, &stack_addr, &stack_size);
-	pthread_attr_destroy(&attr);
-	void *stack_end = (char *)stack_addr + stack_size;
-	return (addr >= stack_addr && addr < stack_end);
-
-#elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
-	// BSD: pthread_attr_get_np (different name from Linux).
-	pthread_attr_t attr;
-	pthread_attr_init(&attr);
-	pthread_attr_get_np(pthread_self(), &attr);
-	void *stack_addr;
-	size_t stack_size;
-	pthread_attr_getstack(&attr, &stack_addr, &stack_size);
-	pthread_attr_destroy(&attr);
-	void *stack_end = (char *)stack_addr + stack_size;
-	return (addr >= stack_addr && addr < stack_end);
-
-#elif defined(_WIN32) || defined(_WIN64)
-	// Windows: GetCurrentThreadStackLimits (Vista+).
-	ULONG_PTR low, high;
-	GetCurrentThreadStackLimits(&low, &high);
-	uintptr_t a = (uintptr_t)addr;
-	return (a >= (uintptr_t)low && a < (uintptr_t)high);
-
-#elif defined(__sun)
-	// Solaris / illumos: thr_stksegment.
-	stack_t stk;
-	thr_stksegment(&stk);
-	uintptr_t a = (uintptr_t)addr;
-	uintptr_t base = (uintptr_t)stk.ss_sp;
-	uintptr_t end = base + stk.ss_size;
-	return (a >= base && a < end);
-
-#else
-	// Unsupported platform: return false (stack writes go through TM).
-	// If you see "jump to garbage" crashes, add a detection block above.
-	(void)addr;
-	return false;
-#endif
-}
-
-
-// ── 4. Portable backtrace (crash diagnostics) ────────────────────
+// ── 3. Portable backtrace (crash diagnostics) ────────────────────
 //
 // tm_backtrace(buf, size)    — fill buffer with return-addresses
 // tm_backtrace_print(fd)     — print one-line backtrace to file desc.

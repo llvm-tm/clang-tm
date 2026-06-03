@@ -30,7 +30,7 @@ using word_t = uint64_t;
 using stm::any_type_mapping;
 using stm::any_type_t;
 using stm::fill_any_type;
-using stm::isStackAddress;
+
 using stm::read_value_from_addr;
 using stm::return_any_type;
 using stm::ValueType;
@@ -304,8 +304,6 @@ read_word_norec(     //
 	// tm_read would either return stale values (if write-back and no write-
 	// set entry) or create spurious read-set entries that cause validation
 	// failures (lock-based backends hash stack addresses to random locks).
-	if (isStackAddress(addr))
-		return read_value_from_addr(addr, sz);
 
 	// Scan from the END (most recent write) so that addresses written
 	// multiple times (e.g., vector _M_finish on each push_back) return
@@ -438,14 +436,6 @@ write_word_norec(    //
 {
 	TM_ASSERT(tx, "tx not defined");
 	TM_ASSERT(tx->active, "tx not active");
-
-	// Stack-address detection: writing to the stack creates write-set entries
-	// for addresses that will be popped on function return.  At commit time,
-	// the write-back would corrupt the active stack frame.
-	if (isStackAddress(addr)) {
-		write_value_to_addr(addr, val, sz);
-		return;
-	}
 
 	tx->read_only = false; // TODO: shouldn't the TX abort?
 

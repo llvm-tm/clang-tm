@@ -61,6 +61,7 @@
 #include <unordered_set>
 
 #include "tm_event_logger.hpp"
+#include "tm_region_allocator.hpp"
 
 // ── Thread-local state ───────────────────────────────────
 // Each runtime file MUST define these (with `thread_local` not `extern`):
@@ -138,7 +139,7 @@ inline void tm_clear_spec_allocs()
 		auto *next = node->next;
 		if (node->ptr) {
 			TM_EVENT(CLEAR_SPEC_ALLOC, (uintptr_t)node->ptr, 0);
-			::operator delete(node->ptr); // free the speculatively-allocated memory
+			stm::tm_region_free(node->ptr);
 		}
 		std::free(node);                  // free the bookkeeping node (std::malloc'd)
 		node = next;
@@ -194,7 +195,7 @@ inline void tm_flush_deferred_frees()
 	while (node) {
 		auto *next = node->next;
 		TM_EVENT(FLUSH_DEFERRED, (uintptr_t)node->ptr, 0);
-		::operator delete(node->ptr); // user data (tm_malloc'd)
+		stm::tm_region_free(node->ptr);
 		std::free(node);              // FreeNode bookkeeping (::malloc'd)
 		node = next;
 	}
@@ -231,7 +232,7 @@ inline void tm_clear_deferred_frees()
 //       return tm_track_alloc_result(::operator new(s), s);
 //   }
 //   extern "C" void  tm_free(void* ptr) {
-//       if (!ptr || stm::isStackAddress(ptr)) return;
+//       if (!ptr) return;
 //       TM_EVENT(FREE, ptr, 0);
 //       if (g_in_tx) {
 //           BACKEND::tm_write_i1((uint8_t*)ptr, 0);   // backend-specific

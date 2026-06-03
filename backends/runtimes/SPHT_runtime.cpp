@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <new>
 
+#include "../tm_common.hpp"
 #include "../SPHT/spht_globals.hpp"
 #include "../tm_alloc_overrides.hpp"
 
@@ -40,12 +41,17 @@ static std::atomic<int64_t> g_tm_end_count{0};
 
 void tm_init()
 {
+    if (stm::tm_region_init() != 0) {
+        fprintf(stderr, "FATAL: tm_region_init() failed — TM address space unavailable\n");
+        std::abort();
+    }
 	spht::init();
 }
 
 void tm_exit()
 {
 	spht::exit();
+    stm::tm_region_destroy();
 }
 
 void tm_init_thread()
@@ -189,14 +195,14 @@ void consume_ptr(volatile void *ptr) { (void)ptr; }
 
 void *tm_malloc(size_t size)
 {
-	void *p = ::operator new(size);
+	void *p = stm::tm_region_malloc(size);
 	tm_track_spec_alloc(p);
 	return p;
 }
 
 void *tm_calloc(size_t nmemb, size_t size)
 {
-	void *p = ::operator new(nmemb * size);
+	void *p = stm::tm_region_malloc(nmemb * size);
 	memset(p, 0, nmemb * size);
 	tm_track_spec_alloc(p);
 	return p;
@@ -204,10 +210,10 @@ void *tm_calloc(size_t nmemb, size_t size)
 
 void *tm_realloc(void *ptr, size_t size)
 {
-	void *p = ::operator new(size);
+	void *p = stm::tm_region_malloc(size);
 	if (ptr) {
 		memcpy(p, ptr, size);
-		::operator delete(ptr);
+		stm::tm_region_free(ptr);
 	}
 	tm_track_spec_alloc(p);
 	return p;
@@ -216,10 +222,8 @@ void *tm_realloc(void *ptr, size_t size)
 void tm_free(void *ptr)
 {
 	if (!ptr) return;
-	if (stm::isStackAddress(ptr)) return;
+	if (!stm::isTMAddress(ptr)) return;
 	if (g_in_tx) {
-		// Dummy write: add freed address to write_set so commit acquires
-		// its lock, causing concurrent readers to abort on validation.
 		spht::tm_write_i1(reinterpret_cast<uint8_t *>(ptr), 0);
 		if (g_deferred_frees_set.count(ptr)) {
 			TM_EVENT(DOUBLE_FREE, ptr, 0);
@@ -232,12 +236,12 @@ void tm_free(void *ptr)
 		}
 		tm_untrack_spec_alloc(ptr);
 		g_deferred_frees_set.insert(ptr);
-		auto *node = static_cast<FreeNode *>(::operator new(sizeof(FreeNode)));
+		auto *node = static_cast<FreeNode *>(std::malloc(sizeof(FreeNode)));
 		node->ptr = ptr;
 		node->next = g_deferred_frees;
 		g_deferred_frees = node;
 	} else {
-		::operator delete(ptr);
+		stm::tm_region_free(ptr);
 	}
 }
 

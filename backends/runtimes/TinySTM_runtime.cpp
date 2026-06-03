@@ -207,22 +207,19 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len) {
 
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count) { (void)symbol_table; (void)symbol_count; }
 void consume_ptr(volatile void *ptr) { (void)ptr; }
-void* tm_malloc(size_t size) { void* p = ::operator new(size); memset(p, 0, size); tm_track_spec_alloc(p); return p; }
-void* tm_calloc(size_t nmemb, size_t size) { void* p = ::operator new(nmemb * size); memset(p, 0, nmemb * size); tm_track_spec_alloc(p); return p; }
+void* tm_malloc(size_t size) { void* p = stm::tm_region_malloc(size); memset(p, 0, size); tm_track_spec_alloc(p); return p; }
+void* tm_calloc(size_t nmemb, size_t size) { void* p = stm::tm_region_malloc(nmemb * size); memset(p, 0, nmemb * size); tm_track_spec_alloc(p); return p; }
 void* tm_realloc(void* ptr, size_t size) {
-	void* p = ::operator new(size);
+	void* p = stm::tm_region_malloc(size);
 	memset(p, 0, size);
 	if (ptr) {
-		// Copy min of old/new size (caller knows actual old size)
-		// but we must avoid reading past the old allocation
-		::operator delete(ptr);
+		stm::tm_region_free(ptr);
 	}
 	tm_track_spec_alloc(p);
 	return p;
 }
 void  tm_free(void* ptr) {
 	if (g_in_tx) {
-		// Detect double-free: same pointer freed twice in the same TX
 		if (g_deferred_frees_set.count(ptr)) {
 			fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
 			void* buf[64];
@@ -233,12 +230,12 @@ void  tm_free(void* ptr) {
 		}
 		tm_untrack_spec_alloc(ptr);
 		g_deferred_frees_set.insert(ptr);
-		auto* node = static_cast<FreeNode*>(::operator new(sizeof(FreeNode)));
+		auto* node = static_cast<FreeNode*>(std::malloc(sizeof(FreeNode)));
 		node->ptr = ptr;
 		node->next = g_deferred_frees;
 		g_deferred_frees = node;
 	} else {
-		::operator delete(ptr);
+		stm::tm_region_free(ptr);
 	}
 }
 

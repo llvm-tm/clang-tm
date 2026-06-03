@@ -10,6 +10,12 @@
 - **Plan written**: `docs/address_space_allocator_plan.md` — compiler errors for stack-pointer args to TX functions + dedicated TM address space via mmap (replaces `isStackAddress` with `isTMAddress`).
 - **LeftRight/Romulus/XTM backends** (C++ and Rust) added to repo.
 - **test_queue binary** compiles, links, and runs with exit code 0 (TinySTM/WBCTL backend + queue runtime).
+- **Rust Yada build bug fixes** (Rust 1.96):
+  - `*mut YadaData` not `Send` → wrapped in `AtomicUsize` + `Arc`
+  - `transaction(|tx| ...)` takes `Fn` (not `FnOnce`) → use raw pointer dereference inside `unsafe` block
+  - "implicit autoref" error → use `&*ptr` (explicit reborrow) instead of `(*ptr).field`
+- **Merged remote 232a28f** (fast-forward) — includes queue pipeline, address space plan, debug patches, docs, test_queue.
+- **Commit `d77ba49`**: Implement all 8 STAMP benchmarks in C++ expli and Rust, refactored to hierarchical modules, added TM-friendly C++ and Rust containers.
 
 ## Goal
 Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures for LLVM 22.

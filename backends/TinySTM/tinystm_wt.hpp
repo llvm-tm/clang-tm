@@ -312,11 +312,6 @@ read_word_wt(                                           //
 	TM_ASSERT(tx, "read_word_wt: tx is null");
 	TM_ASSERT(tx->active, "read_word_wt: tx not active");
 
-	// Stack addresses: bypass TM entirely (thread-private, never shared)
-	if (stm::isStackAddress(addr)) {
-		return read_value_from_addr(addr, ValueType::UINT64);
-	}
-
 	// Write-set lookup — return the buffered new value if we wrote here
 	{
 		auto w = tx->write_set.find(addr);
@@ -428,12 +423,6 @@ write_word_wt(                                           //
 
 	TM_ASSERT(tx, "write_word_wt: tx is null");
 	TM_ASSERT(tx->active, "write_word_wt: tx not active");
-
-	// Stack addresses: bypass TM entirely (thread-private, never shared)
-	if (stm::isStackAddress(addr)) {
-		write_value_to_addr(addr, val, ValueType::UINT64);
-		return;
-	}
 
 	tx->read_only = false;
 
