@@ -1,4 +1,5 @@
-#include "../../../expli_tm_api/tm_api.hpp"
+#include "expli_tm_api/tm_api.hpp"
+#include "expli_tm_api/tx_executor.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -38,9 +39,22 @@ struct Bank {
 
 Bank *g_bank;   // set once in main, never modified
 
+// ── Executor (optional, set by --queue) ─────────────────────
+static expli::TxExecutor *g_executor = nullptr;
+
+// Dispatch to either the inline TM::transaction or the executor
+template<typename F>
+void run_tx(F&& body) {
+    if (g_executor) {
+        tx_transaction(*g_executor, std::forward<F>(body));
+    } else {
+        expli::TM<int>::transaction(std::forward<F>(body));
+    }
+}
+
 // ── TX functions ────────────────────────────────────────────
 void transfer(int src, int dst, int amount) {
-    expli::TM<int>::transaction([&]() {
+    run_tx([&]() {
         Account *a_src = &g_bank->accounts[src];
         Account *a_dst = &g_bank->accounts[dst];
 
@@ -56,7 +70,7 @@ void transfer(int src, int dst, int amount) {
 
 int total_transactional() {
     int total = 0;
-    expli::TM<int>::transaction([&]() {
+    run_tx([&]() {
         total = 0;
         for (int i = 0; i < g_bank->size(); ++i)
             total += g_bank->accounts[i].balance.read();
@@ -65,7 +79,7 @@ int total_transactional() {
 }
 
 void reset() {
-    expli::TM<int>::transaction([&]() {
+    run_tx([&]() {
         for (int i = 0; i < g_bank->size(); ++i)
             g_bank->accounts[i].balance.write(DEFAULT_INITIAL_BALANCE);
     });
@@ -158,6 +172,7 @@ int main(int argc, char *argv[]) {
     int read_all_pct  = DEFAULT_READ_ALL;
     int write_all_pct = DEFAULT_WRITE_ALL;
     bool disjoint = false;
+    bool queue_mode = false;
 
     for (int i = 1; i < argc; ++i) {
         if      (!strcmp(argv[i], "-d") && i+1 < argc) duration_ms  = atoi(argv[++i]);
@@ -166,8 +181,9 @@ int main(int argc, char *argv[]) {
         else if (!strcmp(argv[i], "-r") && i+1 < argc) read_all_pct = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-w") && i+1 < argc) write_all_pct = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--disjoint")) disjoint = true;
+        else if (!strcmp(argv[i], "--queue")) queue_mode = true;
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-            printf("Usage: bank [-d ms] [-a n] [-t n] [-r pct] [-w pct] [--disjoint]\n");
+            printf("Usage: bank [-d ms] [-a n] [-t n] [-r pct] [-w pct] [--disjoint] [--queue]\n");
             return 0;
         }
     }
@@ -178,6 +194,16 @@ int main(int argc, char *argv[]) {
     if (nb_accounts < nb_threads && disjoint) {
         fprintf(stderr, "Error: accounts < threads for disjoint mode\n");
         return 1;
+    }
+
+    // Queue executor (if --queue)
+    expli::QueueExecutor *qexec = nullptr;
+    if (queue_mode) {
+        qexec = new expli::QueueExecutor(nb_threads, nb_threads);
+        g_executor = qexec;
+        printf("Mode: queue (%d workers, %d queues)\n", nb_threads, nb_threads);
+    } else {
+        printf("Mode: inline\n");
     }
 
     expli::TM<int>::init();
@@ -233,6 +259,10 @@ int main(int argc, char *argv[]) {
            (unsigned long long)total_txns, total_txns*1000.0/elapsed);
 
     delete g_bank;
+    if (qexec) {
+        g_executor = nullptr;
+        delete qexec;
+    }
     expli::TM<int>::exit();
 
     if (final_total == expected_total) {

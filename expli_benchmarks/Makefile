@@ -11,6 +11,7 @@ BACKEND ?= TINYSTM
 CXXFLAGS += -I..
 EXTRA_INC =
 RUNTIME =
+REGION_ALLOC = ../backends/runtimes/tm_region_allocator.cpp
 
 ifeq ($(BACKEND),TINYSTM)
   RUNTIME  = ../backends/runtimes/TinySTM_runtime.cpp
@@ -129,8 +130,8 @@ bin:
 	mkdir -p bin STAMP/kmeans STAMP/genome STAMP/intruder STAMP/ssca2
 
 define BUILD_RULE
-$(1): bin $(2) $(RUNTIME) $(BUILTINS) Makefile
-	$$(CXX) $$(CXXFLAGS) $$(EXTRA_INC) $$(DEFS) -o $$@ $(2) $$(RUNTIME) $$(LDFLAGS)
+$(1): bin $(2) $(RUNTIME) $(REGION_ALLOC) $(BUILTINS) Makefile
+	$$(CXX) $$(CXXFLAGS) $$(EXTRA_INC) $$(DEFS) -o $$@ $(2) $$(RUNTIME) $$(REGION_ALLOC) $$(LDFLAGS)
 endef
 
 $(eval $(call BUILD_RULE,$(BANK_BIN),$(BANK_SRC)))

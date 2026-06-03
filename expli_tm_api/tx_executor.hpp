@@ -192,9 +192,12 @@ private:
 // ── Retry-loop helper for use with any executor ──────────────────
 // Wraps a user body in the sigsetjmp/tm_begin/body/tm_end retry loop
 // and executes it via the given executor.
+//
+// body is captured by value (moved) so the executor can run it later
+// (inline executors run immediately; queue executors enqueue it).
 template<typename F>
-void tx_transaction(TxExecutor& exec, F&& body) {
-    exec.execute([&body]() {
+void tx_transaction(TxExecutor& exec, F body) {
+    exec.execute([body = std::move(body)]() mutable {
         volatile bool done = false;
         while (!done) {
             sigsetjmp(tm_jmpbuf, 0);
