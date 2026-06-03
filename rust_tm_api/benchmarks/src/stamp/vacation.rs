@@ -27,7 +27,7 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
         for tid in 0..config.threads {
             let r = rm.clone();
             let sc = stop;
-            let so = ops.clone();
+            let so = ops;
             let ro = &g_reserve_ok;
             let rf = &g_reserve_fail;
             let co = &g_cancel_ok;

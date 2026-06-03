@@ -22,7 +22,6 @@ using namespace llvm;
 
 struct ModulePassContext {
 	TMRuntimeHooks H;
-	GlobalVariable *ThreadReadyGV;
 	SmallPtrSet<Function *, 32> TxReachableFuncs;
 	SmallVector<std::pair<Function *, Function *>, 32> *ClonedMap = nullptr;
 	bool modified = false;
@@ -34,19 +33,6 @@ static ModulePassContext setupModulePass(Module &M)
 	const char *SetjmpFunc = tm_platform::sigsetjmpName(M);
 	ModulePassContext CtxOut;
 	CtxOut.H = TMRuntimeHooks::declareAll(M, Ctx, SetjmpFunc);
-	Type *i8Ty = Type::getInt8Ty(Ctx);
-
-	GlobalVariable *ThreadReadyGV = M.getGlobalVariable("tm_thread_ready");
-	if (!ThreadReadyGV) {
-		ThreadReadyGV = new GlobalVariable(M,
-		                                   i8Ty,
-		                                   false,
-		                                   GlobalValue::ExternalLinkage,
-		                                   ConstantInt::get(i8Ty, 0),
-		                                   "tm_thread_ready");
-		ThreadReadyGV->setThreadLocal(true);
-	}
-	CtxOut.ThreadReadyGV = ThreadReadyGV;
 
 	SmallVector<std::pair<GlobalVariable *, StringRef>, 16> TMSymbols;
 	collectTMSymbols(M, TMSymbols);
@@ -67,7 +53,7 @@ static void instrumentMainInitExit(Function *MainFn, ModulePassContext &Ctx)
 	BasicBlock &Entry = MainFn->getEntryBlock();
 	IRBuilder<> Builder(&Entry, Entry.begin());
 	Builder.CreateCall(Ctx.H.init, {});
-	insertThreadInitWithGuard(Builder, Ctx.H.init_thread, Ctx.ThreadReadyGV);
+	insertThreadInitWithGuard(Builder, Ctx.H.init_thread);
 
 	for (auto &F : *MainFn->getParent()) {
 		if (F.isDeclaration())
@@ -81,7 +67,7 @@ static void instrumentMainInitExit(Function *MainFn, ModulePassContext &Ctx)
 	auto MainReturns = collectReturns(*MainFn);
 	for (auto *Ret : MainReturns) {
 		IRBuilder<> RetBuilder(Ret);
-		insertThreadExitWithGuard(RetBuilder, Ctx.H.exit_thread, Ctx.ThreadReadyGV);
+		insertThreadExitWithGuard(RetBuilder, Ctx.H.exit_thread);
 		RetBuilder.CreateCall(Ctx.H.exit_fn, {});
 	}
 	Ctx.modified = true;
@@ -102,13 +88,13 @@ static void instrumentThreadEntries(Module &M,
 		TM_DEBUG("Instrumenting thread entry point: %s", F.getName().str().c_str());
 		BasicBlock &Entry = F.getEntryBlock();
 		IRBuilder<> Builder(&Entry, Entry.begin());
-		insertThreadInitWithGuard(Builder, Ctx.H.init_thread, Ctx.ThreadReadyGV);
+		insertThreadInitWithGuard(Builder, Ctx.H.init_thread);
 
 		for (auto *Ret : collectReturns(F)) {
 			if (!Ret)
 				continue;
 			IRBuilder<> RetBuilder(Ret);
-			insertThreadExitWithGuard(RetBuilder, Ctx.H.exit_thread, Ctx.ThreadReadyGV);
+			insertThreadExitWithGuard(RetBuilder, Ctx.H.exit_thread);
 		}
 		Ctx.modified = true;
 	}

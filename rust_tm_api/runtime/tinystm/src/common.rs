@@ -109,10 +109,13 @@ pub struct TxState {
     pub write_backs: Vec<WriteBack>,
     /// Deferred undo closures (safe to apply on abort/rollback).
     /// Used by write-through backends (WT).
+    #[allow(dead_code)]
     pub undo_backs: Vec<WriteBack>,
     pub start_version: u64,
+    #[allow(dead_code)]
     pub aborted: bool,
     /// Lock indices held by encounter-time locking variants (WBETL, WT).
+    #[allow(dead_code)]
     pub locked_addrs: Vec<usize>,
 }
 

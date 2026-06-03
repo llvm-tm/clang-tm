@@ -37,8 +37,10 @@ thread_local! {
     static ACTIVE: RefCell<bool> = const { RefCell::new(false) };
 }
 
+#[allow(dead_code)]
 fn tx_active() -> bool { ACTIVE.with(|a| *a.borrow()) }
 
+#[allow(dead_code)]
 fn tx_aborted() -> bool { false }
 
 // ── Public API ──────────────────────────────────────────

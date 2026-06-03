@@ -268,7 +268,7 @@ $(BIN_DIR)/test_persist: $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(RUNTIME_DIR)/persis
 # Persistent SGL runtime (write-through, uses mmap) — different .opt.bc than target name
 $(BIN_DIR)/test_persist_sgl: $(OUT_DIR)/test_persist.opt.bc $(BACKENDS_DIR)/runtimes/PersistentSGL_runtime.cpp | $(BIN_DIR)
 	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/runtimes/PersistentSGL_runtime.cpp \
-	  $(DEFAULT_LINK_FLAGS) $< -o $@
+	  $(DEFAULT_LINK_FLAGS) -I $(BACKENDS_DIR) $< -o $@
 
 ll: all $(TEST_LLS) $(OPT_LLS)
 

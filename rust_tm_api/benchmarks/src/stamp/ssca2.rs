@@ -20,7 +20,7 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
         for tid in 0..config.threads {
             let a = adj.clone();
             let sc = stop;
-            let so = ops.clone();
+            let so = ops;
             let ge = &g_edges;
             s.spawn(move || {
                 let rng = RefCell::new(Rng::new(tid as u64 * 12345 + 42));

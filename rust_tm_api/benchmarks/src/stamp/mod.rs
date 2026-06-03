@@ -7,7 +7,6 @@ pub mod ssca2;
 pub mod bayes;
 pub mod yada;
 
-use crate::Rng;
 
 #[derive(Clone)]
 pub struct Config {

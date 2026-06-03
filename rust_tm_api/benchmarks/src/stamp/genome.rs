@@ -26,7 +26,7 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
             let ht = table.clone();
             let g = gene.clone();
             let sc = stop;
-            let so = ops.clone();
+            let so = ops;
             let gm = &g_matches;
             let gr = &g_reads;
             s.spawn(move || {

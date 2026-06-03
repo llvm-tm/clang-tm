@@ -25,23 +25,43 @@ TX void tx_check(int key, int expected) {
 }
 
 MAIN int main() {
+    printf("A\n");
+    fflush(stdout);
     for (int i = 0; i < 10; i++) {
+        printf("B i=%d\n", i);
+        fflush(stdout);
         g_map[i] = i * 10;
+        printf("C i=%d\n", i);
+        fflush(stdout);
     }
+    printf("D\n");
+    fflush(stdout);
     for (int i = 0; i < 10; i++) {
+        printf("E i=%d\n", i);
+        fflush(stdout);
         int v = g_map[i];
+        printf("F i=%d v=%d\n", i, v);
+        fflush(stdout);
         if (v != i * 10) {
             printf("FAIL: pre-populated g_map[%d] = %d (expected %d)\n", i, v, i * 10);
             return 1;
         }
     }
+    printf("G\n");
+    fflush(stdout);
     tx_insert_many();
+    printf("H\n");
+    fflush(stdout);
     for (int i = 0; i < 10; i++) {
         tx_check(100 + i, i);
     }
+    printf("I\n");
+    fflush(stdout);
     for (int i = 0; i < 10; i++) {
         tx_check(i, i * 10);
     }
+    printf("J\n");
+    fflush(stdout);
     printf("Result: PASS\n");
     return 0;
 }

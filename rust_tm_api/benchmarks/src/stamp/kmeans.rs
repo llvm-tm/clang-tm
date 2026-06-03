@@ -35,7 +35,7 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
         for tid in 0..config.threads {
             let sref = state.clone();
             let sc = stop;
-            let so = ops.clone();
+            let so = ops;
             let gi = &g_iters;
             let start = tid * chunk;
             let end = if tid == config.threads - 1 { config.points } else { start + chunk };

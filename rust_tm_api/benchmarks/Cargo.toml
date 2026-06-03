@@ -23,6 +23,10 @@ dudetm  = ["tm/dudetm"]
 tsxsgl  = ["tm/tsxsgl"]
 nvhtm   = ["tm/nvhtm"]
 spht    = ["tm/spht"]
+leftright = ["tm/leftright"]
+leftright-single = ["tm/leftright-single"]
+romulus   = ["tm/romulus"]
+xtm       = ["tm/xtm"]
 
 [dependencies]
 tm = { path = "../tm", default-features = false }

@@ -168,7 +168,7 @@ fn grow_and_retriangulate(data: &mut YadaData, el_id: usize,
 }
 
 // ── Run ───────────────────────────────────────────────────
-pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
+pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     println!("\n=== Yada ===");
     let grid_size: usize = config.points.max(10).min(30);
     let angle_constraint = config.dims as f64;
