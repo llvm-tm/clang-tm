@@ -884,20 +884,34 @@ public:
 		getOrCreateTLS(TM_QUEUE_ACTIVE_TLS, i32Ty);
 		getOrCreateTLS(TM_PENDING_TLS, PointerType::getUnqual(CtxRef));
 
-		// 7. Inject tm_queue_init / tm_queue_shutdown in main
+		// 7. Inject tm_init/tm_exit + tm_queue_init/tm_queue_shutdown in main.
+		//    Also inject tm_init_thread/tm_exit_thread into THREAD functions.
+		{
+			SmallPtrSet<Function *, 32> EmptyEntries;
+			instrumentThreadEntries(M, EmptyEntries, Ctx);
+		}
+
 		if (Function *MainFn = M.getFunction(MAIN_ANNOT)) {
-			IRBuilder<> Builder(&MainFn->getEntryBlock(),
-			                    MainFn->getEntryBlock().begin());
-			// tm_queue_init(4, 4) — can be overridden by THREADS env
+			// Insert tm_queue_init at beginning of entry block.
+			// instrumentMainInitExit will insert tm_init/tm_init_thread
+			// after this (both use Entry.begin(), pushing ours down).
 			auto *i32Ty2 = Type::getInt32Ty(CtxRef);
 			FunctionCallee QueueInit =
 			    M.getOrInsertFunction("tm_queue_init",
 			        FunctionType::get(Type::getVoidTy(CtxRef),
 			                          {i32Ty2, i32Ty2}, false));
-			Builder.CreateCall(QueueInit,
-			                   {ConstantInt::get(i32Ty2, 4),
-			                    ConstantInt::get(i32Ty2, 4)});
+			{
+				IRBuilder<> Builder(&MainFn->getEntryBlock(),
+				                    MainFn->getEntryBlock().begin());
+				Builder.CreateCall(QueueInit,
+				                   {ConstantInt::get(i32Ty2, 4),
+				                    ConstantInt::get(i32Ty2, 4)});
+			}
 
+			// Insert tm_queue_shutdown before returns.
+			// instrumentMainInitExit will insert tm_exit_thread/tm_exit
+			// before the return too, but after our tm_queue_shutdown
+			// (both use IRBuilder<>(Ret), inserting before Ret).
 			auto MainReturns = collectReturns(*MainFn);
 			FunctionCallee QueueShutdown =
 			    M.getOrInsertFunction("tm_queue_shutdown",
@@ -906,6 +920,11 @@ public:
 				IRBuilder<> RetBuilder(Ret);
 				RetBuilder.CreateCall(QueueShutdown, {});
 			}
+
+			// Inject tm_init/tm_exit + tm_init_thread/tm_exit_thread in
+			// main.  This inserts AFTER tm_queue_init at entry and AFTER
+			// tm_queue_shutdown before returns (see comments above).
+			instrumentMainInitExit(MainFn, Ctx);
 		}
 
 		TM_DEBUG("TMQueueGlobalInitPass: %s", modified ? "modified module" : "no changes");

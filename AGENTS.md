@@ -21,6 +21,10 @@
   - "implicit autoref" error → use `&*ptr` (explicit reborrow) instead of `(*ptr).field`
 - **Merged remote 232a28f** (fast-forward) — includes queue pipeline, address space plan, debug patches, docs, test_queue.
 - **Commit `d77ba49`**: Implement all 8 STAMP benchmarks in C++ expli and Rust, refactored to hierarchical modules, added TM-friendly C++ and Rust containers.
+- **Queue pipeline injects tm_init/tm_exit**: `TMQueueGlobalInitPass` now calls `instrumentMainInitExit(MainFn, Ctx)` before the existing `tm_queue_init`/`tm_queue_shutdown` injection. Entry order: `tm_init` → `tm_init_thread` → `tm_queue_init`. Exit order: `tm_queue_shutdown` → `tm_exit_thread` → `tm_exit`. Also calls `instrumentThreadEntries(M, EmptyEntries, Ctx)` for THREAD-annotated functions.
+- **Four queue tests created and passing**: `test_queue` (silent→PASS fix with shared global and verification), `test_queue_sync` (sync TXes, counter=4), `test_queue_async` (async TXes + `tm_wait_prev_tx`, counter=2), `test_queue_multi` (4 threads × 100 iterations via THREAD+TX, counter=400). All use the `tm-instrument-queue` pipeline + TinySTM/WBCTL + `queue_runtime`.
+- **Makefile pattern rule for queue tests**: `QUEUE_TESTS` list + static pattern rules (`.bc` → `.instr.bc` via `tm-instrument-queue`, `.instr.bc` → `.opt.bc`, `.opt.bc` → binary via `tinystm_runtime.o` + `queue_runtime.o` + `tm_region_allocator.o`). Explicit per-test rules replaced by shared pattern.
+- **Full test suite: 31/31 PASS** — all existing 27 plugin tests + 4 new queue tests.
 
 ## Goal
 Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures for LLVM 22.

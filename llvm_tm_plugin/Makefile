@@ -83,7 +83,8 @@ TEST_NAMES := test_types test_memtest test_threads test_persist test_retry test_
               test_init_no_tx \
               test_simple_vector test_vec_push \
                test_alloc_stress_manual test_manual_tx \
-               test_treap_tx test_realloc_crash test_std_queue test_queue
+               test_treap_tx test_realloc_crash test_std_queue test_queue \
+               test_queue_sync test_queue_async test_queue_multi
 
 RACE_TEST_NAMES := test_task_queue_race test_parent_set_race test_counter_race
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))
@@ -190,33 +191,32 @@ $(RACE_TEST_BINS): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(BACKENDS_DIR)/runtimes/Si
 	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/runtimes/SingleGlobalLock_runtime.cpp \
 	  $(DEFAULT_LINK_FLAGS) -I $(BACKENDS_DIR) $< -o $@
 
-# Queue runtime test: uses tm-instrument-queue pipeline + TinySTM backend + queue_runtime
-$(OUT_DIR)/test_queue.instr.bc: $(OUT_DIR)/test_queue.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
+# Queue runtime test(s): use tm-instrument-queue pipeline + TinySTM backend + queue_runtime
+QUEUE_TESTS := test_queue test_queue_sync test_queue_async test_queue_multi
+
+# Queue pipeline instrumentation
+$(foreach t,$(QUEUE_TESTS),$(OUT_DIR)/$(t).instr.bc): $(OUT_DIR)/%.instr.bc: $(OUT_DIR)/%.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
 	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so \
 	  -passes="tm-instrument-queue" $< -o $@
 
-$(OUT_DIR)/test_queue.opt.bc: $(OUT_DIR)/test_queue.instr.bc | $(OUT_DIR)
-	$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $(OUT_DIR)/test_queue.instr.bc -o $@
+$(foreach t,$(QUEUE_TESTS),$(OUT_DIR)/$(t).opt.bc): $(OUT_DIR)/%.opt.bc: $(OUT_DIR)/%.instr.bc | $(OUT_DIR)
+	$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $(OUT_DIR)/$*.instr.bc -o $@
 
-$(BIN_DIR)/test_queue: $(OUT_DIR)/test_queue.opt.bc $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp $(BACKENDS_DIR)/runtimes/queue_runtime.cpp $(BACKENDS_DIR)/runtimes/tm_region_allocator.cpp | $(OUT_DIR) $(BIN_DIR)
+# Compile runtime objects once
+QUEUE_RT_OBJS := $(OUT_DIR)/tinystm_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o
+$(QUEUE_RT_OBJS): | $(OUT_DIR)
+$(OUT_DIR)/tinystm_runtime.o: $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp
 	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
-	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) \
-	  $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \
-	  -o $(OUT_DIR)/tinystm_runtime.o
+	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
+$(OUT_DIR)/queue_runtime.o: $(BACKENDS_DIR)/runtimes/queue_runtime.cpp
 	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
-	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) \
-	  $(BACKENDS_DIR)/runtimes/queue_runtime.cpp \
-	  -o $(OUT_DIR)/queue_runtime.o
+	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
+$(OUT_DIR)/tm_region_allocator.o: $(BACKENDS_DIR)/runtimes/tm_region_allocator.cpp
 	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
-	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) \
-	  $(BACKENDS_DIR)/runtimes/tm_region_allocator.cpp \
-	  -o $(OUT_DIR)/tm_region_allocator.o
-	$(CXX) $(DEFAULT_LINK_FLAGS) \
-	  $(OUT_DIR)/test_queue.opt.bc \
-	  $(OUT_DIR)/tinystm_runtime.o \
-	  $(OUT_DIR)/queue_runtime.o \
-	  $(OUT_DIR)/tm_region_allocator.o \
-	  -o $@
+	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
+
+$(foreach t,$(QUEUE_TESTS),$(BIN_DIR)/$(t)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(QUEUE_RT_OBJS) | $(BIN_DIR)
+	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/$*.opt.bc $(QUEUE_RT_OBJS) -o $@
 
 # Persistent runtime (snapshot-based, saves on tm_exit)
 $(BIN_DIR)/test_persist: $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(RUNTIME_DIR)/persistent.cpp | $(BIN_DIR)
