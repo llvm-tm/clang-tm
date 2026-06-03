@@ -1,6 +1,11 @@
 # Session Summary
 
 ## Latest Session (this session — 2026-06-03)
+- **TM region allocator implemented**: `tm_region_allocator.hpp` + `.cpp` — mmap bump allocator (64 GB), `isTMAddress()` positive membership check. `tm_region_init/destroy` wired into all 7 runtimes + queue_runtime. `tm_malloc/free` redirected from `::operator new/delete` to `stm::tm_region_malloc/free`.
+- **`isStackAddress` removed entirely**: deleted the 80-line platform-abstraction function from `tm_platform.hpp` (macOS/Linux/BSD/Windows/Solaris). All backends now execute TM ops unconditionally — the LLVM plugin handles bypass at the IR level.
+- **`!isTMAddress()` gates removed** from WBCTL, WT, NOrec, TL2 read/write paths. `shouldBypassTM()` removed from `tm_common.hpp`. `using stm::isTMAddress` declarations cleaned up from all backends.
+- **All 6 backend tests PASS** at 6 backends × 6 tests = 36/36 (tl2, tinystm, wt, wbetl, norec, swisstm). NVHTM/SPHT have pre-existing RTM intrinsic compilation errors (unrelated).
+- **Commit `ed643a1`**: TM address-space region allocator + remove isStackAddress gates.
 - **Queue pipeline implemented and tested**: `TMQueueGlobalInitPass` clones TX functions, instruments clones, creates dispatch wrappers, replaces call sites with `tm_enqueue` + optional `tm_wait_prev_tx()`. Pipeline `tm-instrument-queue` → `TMQueueGlobalInitPass` → `TMInstrumentInlinePass` → `TMStripLifetimePass`.
 - **Key fixes**: TX functions manually cloned before `cloneTxReachableGraph` (which skips them). `TMInstrumentInlinePass` uses `ends_with(TM_CLONE_SUFFIX)` instead of `contains()` to avoid double-instrumenting dispatch wrappers. Originals with `_tm_clone` versions are skipped.
 - **Queue runtime**: `queue_runtime.h` + `queue_runtime.cpp` — thread pool with round-robin queue distribution + work stealing, `tm_future_state_t` (mutex+CV+done), `tm_enqueue`/`tm_wait_prev_tx`/`tm_queue_init`/`tm_queue_shutdown`.
@@ -1347,7 +1352,32 @@ benchmarks/
 - `expli::TM<uint8_t>` used for boolean-like fields (`is_garbage`, `encroached`, `is_referenced`) since `bool` has no `tm_type_traits` specialization.
 - **Execution model separated from TM backend**: The backend (WBCTL, NOrec, TL2) provides only `tm_begin`/`tm_commit`/`tm_read`/`tm_write`. The executor controls *when and where* those functions are called. `InlineExecutor` wraps the current inline behavior; `QueueExecutor` provides thread-pool-based async execution. `submit<Backend>(body)` template is shared across all executors, avoiding duplication.
 
+## Key Decisions (this session — 2026-06-03)
+- **isStackAddress deleted outright**: the 80-line platform-abstraction (macOS/Linux/BSD/Windows/Solaris) is gone. Stack safety moves to the plugin (alloca analysis, `argIsAllocaDest`, `escapedAlloca`). Backends never check stack bounds.
+- **isTMAddress removed as bypass gate**: `!isTMAddress()` previously caused backends to skip TM ops for non-region addresses. Now TM ops execute unconditionally — the plugin is responsible for not generating `tm_read`/`tm_write` for non-TM pointers. This fixes `counter_mt` (shared global in BSS was bypassed).
+- **isTMAddress kept for tm_free path**: `tm_free` still uses `!isTMAddress(ptr)` to decide between deferred-free (region address) and direct `::operator delete` (non-region fallback). This is not a bypass — it's a bookkeeping decision.
+- **Region allocator is an optimization, not a correctness gate**: The mmap bump allocator pre-commits 64 GB for TM-tracked data. `tm_malloc` inside TXes goes here (no page faults). Standard `new`/`malloc` outside TXes uses the regular heap.
+- **PersistentSGL insight applied**: Like PersistentSGL's `addr_to_file_off()` which runs TM ops first and persists conditionally, backends now run TM ops unconditionally and use `isTMAddress()` only for auxiliary checks (bookkeeping, debug assertions).
+
 ## Relevant Files
+- `backends/tm_region_allocator.hpp`: isTMAddress() + tm_region_malloc/calloc/realloc/free (bump allocator, namespace stm)
+- `backends/runtimes/tm_region_allocator.cpp`: mmap init/destroy, g_tm_region_* globals (namespace stm)
+- `backends/tm_common.hpp`: removed shouldBypassTM(), updated comments
+- `backends/tm_platform.hpp`: removed isStackAddress() (80-line function + 4 platform variants)
+- `backends/tm_alloc_overrides.hpp`: updated tm_free pattern comment
+- `backends/TinySTM/tinystm_common.hpp`: removed using stm::isTMAddress
+- `backends/TinySTM/tinystm_wbctl.hpp`: removed !isTMAddress() gates from read_word_ctl + write_word_ctl
+- `backends/TinySTM/tinystm_wt.hpp`: removed !isTMAddress() gates from read_word_wt + write_word_wt
+- `backends/NOrec/NOrec.hpp`: removed using + !isTMAddress() gates from read_word_norec + write_word_norec
+- `backends/TL2/tl2.hpp`: removed !isTMAddress() gates from read_impl + write_impl
+- `backends/SwissTM/SwissTM.hpp`: removed using stm::isTMAddress (was unused)
+- `backends/runtimes/TinySTM_runtime.cpp`: tm_malloc/tm_free → region allocator + tm_region_init in init
+- `backends/runtimes/NOrec_runtime.cpp`: tm_free → region allocator + tm_region_init in init
+- `backends/runtimes/SwissTM_runtime.cpp`: same + tm_region_init
+- `backends/runtimes/tl2_runtime.cpp`: same + tm_region_init
+- `backends/runtimes/DUDETM_runtime.cpp`: same + tm_region_destroy
+- `backends/runtimes/NVHTM_runtime.cpp`: same + tm_region_init
+- `backends/runtimes/SPHT_runtime.cpp`: same + tm_region_init
 - `docs/address_space_allocator_plan.md`: Plan for stack-pointer arg validation + dedicated TM address space via mmap  
 - `docs/queue_execution_model.md`: Queue-based TM execution model design doc
 - `backends/runtimes/queue_runtime.h`: Queue runtime C API (tm_enqueue, tm_wait_prev_tx, tm_queue_init, tm_queue_shutdown)

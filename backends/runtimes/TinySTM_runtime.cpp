@@ -239,4 +239,4 @@ void  tm_free(void* ptr) {
 	}
 }
 
-}
+} // extern "C"

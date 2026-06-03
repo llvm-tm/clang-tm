@@ -13,10 +13,13 @@
  * ║  by tm_clear_spec_allocs() while the unordered_map still held						║
  * ║  pointers to them.  See commit <FIX>.												║
  * ║																					║
- * ║  User code (TX functions) IS instrumented by the LLVM plugin -						║
- * ║  the plugin replaces malloc/free/operator new/operator delete						║
- * ║  with tm_malloc/tm_free.  This is independent of the runtime						║
- * ║  and does NOT go through any header overrides.										║
+ * ║  CORRECT: The LLVM TM plugin replaces operator new/delete in							║
+ * ║  instrumented user code at the IR level, not via header overrides.				║
+ * ║  Runtime code (compiled separately, no plugin) uses standard allocator.			║
+ * ║																					║
+ * ║  operator delete overrides ARE provided to handle bump-region addresses				║
+ * ║  from tm_malloc that survive TX commit and are later deleted outside TX.			║
+ * ║  These overrides are safe for runtime internals because they use heap.			║
  * ╚══════════════════════════════════════════════════════════════════════╝
  *
  * This header provides:
@@ -57,6 +60,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <cstdlib>
 #include <new>
 #include <unordered_set>
 
@@ -296,3 +300,5 @@ inline void tm_free_append_deferred(void* ptr) {
 //
 // TL;DR: Runtime internals → standard allocator.
 //        User TM code      → tm_malloc/tm_free (via plugin).
+
+

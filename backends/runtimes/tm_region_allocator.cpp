@@ -12,6 +12,7 @@
 
 #include "../tm_region_allocator.hpp"
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -70,14 +71,16 @@ int tm_region_init() noexcept {
 }
 
 void tm_region_destroy() noexcept {
-    if (!g_tm_region_start)
-        return;
-
-    munmap(g_tm_region_start, g_tm_region_end - g_tm_region_start);
-    g_tm_region_start = nullptr;
-    g_tm_region_end   = nullptr;
-    g_tm_region_bump  = nullptr;
-    g_region_inited.store(0, std::memory_order_release);
+    // Region addresses remain valid for isTMAddress() checks even after
+    // destroy — the pointers are not cleared.  The OS reclaims the
+    // virtual memory on process exit, so explicit munmap is unnecessary.
+    //
+    // We DO NOT clear g_tm_region_start/end/bump because global
+    // destructors (treap clear_subtree, etc.) may still read from the
+    // region to traverse Node pointers.  Those reads are technically
+    // UB after munmap, but at process exit the virtual pages are still
+    // resident (no new physical pages are allocated to anything else).
+    // Leaving the pointers valid avoids the crash entirely.
 }
 
 } // namespace stm

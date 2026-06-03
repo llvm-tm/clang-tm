@@ -134,6 +134,8 @@ run_test test_retry "retry" "longjmp" "Test PASSED" "final counter = 3"
 
 run_test test_std_queue "PASS: std::queue<Cell> and raw array both work"
 
+run_test test_queue "PASS"
+
 # ---- Opaque symbol resolution test ----
 echo "===== Testing tm-resolve-opaque ====="
 if [ ! -x ./bin/test_math_opaque ]; then
