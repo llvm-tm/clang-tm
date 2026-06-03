@@ -14,6 +14,7 @@
 //   4. Backtrace / crash diagnostics    (tm_backtrace_print)
 //   5. CPU relax / spin-loop hint       (tm_cpu_relax)
 //   6. Cycle-accurate timestamp         (tm_timestamp)
+//   7. Page size                        (tm_page_size)
 // ═══════════════════════════════════════════════════════════════════
 
 #include <cstddef>
@@ -59,9 +60,10 @@
 
 // ── 2. System includes (selected per platform) ───────────────────
 
-// POSIX threads
+// POSIX threads + sysconf
 #if TM_PLATFORM_POSIX
   #include <pthread.h>
+  #include <unistd.h>   // sysconf(_SC_PAGESIZE)
 #endif
 
 // Windows thread / stack API
@@ -171,5 +173,29 @@ inline uint64_t tm_timestamp()
 	return 0;
 #endif
 }
+
+
+// ── 7. Page size ──────────────────────────────────────────────────
+//
+// Returns the system's memory page size in bytes.  Used by the TM
+// region allocator to compute slab sizes that are page-aligned.
+// Some TM implementations (page-protection-based conflict detection,
+// hardware page-locking) rely on page granularity — slab sizes must
+// be exact multiples.
+
+inline long tm_page_size()
+{
+#if TM_PLATFORM_POSIX
+	long ps = ::sysconf(_SC_PAGESIZE);
+	return ps > 0 ? ps : 4096;
+#elif defined(_WIN32) || defined(_WIN64)
+	SYSTEM_INFO si;
+	::GetSystemInfo(&si);
+	return static_cast<long>(si.dwPageSize);
+#else
+	return 4096;
+#endif
+}
+
 
 } // namespace stm

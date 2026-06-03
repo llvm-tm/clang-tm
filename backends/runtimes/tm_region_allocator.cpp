@@ -1,28 +1,27 @@
 /**
  * tm_region_allocator.cpp — TM Address-Space Region Allocator
  *
- * Manages a single mmap'd virtual region used for all TM-tracked
- * allocations.  Provides tm_region_init / tm_region_destroy and
- * the global bump-pointer variables referenced by the inline
- * functions in tm_region_allocator.hpp.
+ * Manages a single mmap'd virtual region for all TM-tracked
+ * allocations.  The region is divided into fixed-size slabs
+ * (g_slab_size = TM_SLAB_PAGES × page_size).  Each thread bumps
+ * from its own thread-local slab; the slow path atomically claims
+ * the next slab index.
  *
- * The region is initialized once (lazily on first tm_malloc or
- * at tm_init/tm_queue_init time).  Thread-safe via atomic bump.
+ * Single-init guarded by g_region_inited (atomic CAS).
  */
 
 #include "../tm_region_allocator.hpp"
+#include "../tm_platform.hpp"
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <sys/mman.h>
-#include <unistd.h>
 
 namespace stm {
 
 // ── Global state ──────────────────────────────────────────────
 char *g_tm_region_start = nullptr;
 char *g_tm_region_end   = nullptr;
-char *g_tm_region_bump  = nullptr;
 
 // Guard to ensure single-init across all translation units.
 static std::atomic<int> g_region_inited{0};
@@ -31,23 +30,27 @@ int tm_region_init() noexcept {
     if (g_region_inited.load(std::memory_order_acquire))
         return 0;
 
-    // Try to init; only one thread succeeds.
     int expected = 0;
     if (!g_region_inited.compare_exchange_strong(expected, 1,
                                                   std::memory_order_acq_rel))
         return 0; // another thread beat us
 
-    // Determine page size for aligment
-    long page_size = sysconf(_SC_PAGESIZE);
-    if (page_size <= 0) page_size = 4096;
+    // ── Platform page size ───────────────────────────────────
+    long page_size = stm::tm_page_size();
 
     size_t region_size = TM_REGION_SIZE;
 
-    // On 32-bit, reduce region size to avoid virtual address space exhaustion
+    // On 32-bit, reduce region size to avoid virtual address exhaustion
     if (sizeof(void *) == 4) {
         region_size = 512ULL * 1024 * 1024; // 512 MB
     }
 
+    // ── Compute slab size ────────────────────────────────────
+    // Slab size = TM_SLAB_PAGES × page_size, always a page multiple.
+    g_slab_size = static_cast<size_t>(TM_SLAB_PAGES) *
+                  static_cast<size_t>(page_size);
+
+    // ── mmap the region ──────────────────────────────────────
     void *addr = mmap(nullptr, region_size,
                       PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS,
@@ -61,26 +64,28 @@ int tm_region_init() noexcept {
 
     g_tm_region_start = static_cast<char *>(addr);
     g_tm_region_end   = g_tm_region_start + region_size;
-    g_tm_region_bump  = g_tm_region_start;
 
-    fprintf(stderr, "[TM-REGION] mmap %p .. %p  (%zu MB)\n",
+    // ── Compute number of slabs ──────────────────────────────
+    g_num_slabs = region_size / g_slab_size;
+    g_next_slab_idx.store(0, std::memory_order_relaxed);
+
+    fprintf(stderr, "[TM-REGION] mmap %p .. %p  (%zu MB, %zu slabs of %zu B)\n",
             (void*)g_tm_region_start, (void*)g_tm_region_end,
-            region_size / (1024 * 1024));
+            region_size / (1024 * 1024), g_num_slabs, g_slab_size);
 
     return 0;
 }
 
 void tm_region_destroy() noexcept {
-    // Region addresses remain valid for isTMAddress() checks even after
-    // destroy — the pointers are not cleared.  The OS reclaims the
-    // virtual memory on process exit, so explicit munmap is unnecessary.
+    // Region addresses remain valid for isTMAddress() checks even
+    // after destroy — the OS reclaims virtual memory on process exit.
+    // We DO NOT clear g_tm_region_start/end because global destructors
+    // (treap clear_subtree, etc.) may still read from the region.
+    // At process exit the virtual pages are still resident (no new
+    // physical pages are allocated to anything else).
     //
-    // We DO NOT clear g_tm_region_start/end/bump because global
-    // destructors (treap clear_subtree, etc.) may still read from the
-    // region to traverse Node pointers.  Those reads are technically
-    // UB after munmap, but at process exit the virtual pages are still
-    // resident (no new physical pages are allocated to anything else).
-    // Leaving the pointers valid avoids the crash entirely.
+    // An explicit munmap is technically correct but causes crashes in
+    // global destructors that traverse TM-allocated data structures.
 }
 
 } // namespace stm
