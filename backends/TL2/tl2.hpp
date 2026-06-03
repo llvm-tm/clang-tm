@@ -38,6 +38,13 @@ thread_local bool tm_jmpbuf_initialized = false;
 extern std::atomic<uint64_t> g_tm_abort_count;
 namespace tl2 {
 
+using stm::isTMAddress;
+// Overload for volatile pointers (TL2 uses volatile throughout)
+template <typename T>
+inline bool isTMAddress(volatile T *addr) noexcept {
+    return stm::isTMAddress(const_cast<const T *>(addr));
+}
+
 // Copy jump buffer - needed for external integration with LLVM plugin
 inline void copy_jmp_env(sigjmp_buf* dest) {
     if (dest) {
@@ -317,10 +324,8 @@ public:
         std::atomic_signal_fence(std::memory_order_seq_cst);
         assert(tx && tx->active);
 
-        // Stack-address detection: writing to the stack would create write-set
-        // entries for addresses that will be popped on function return, causing
-        // post-commit stack corruption.
-        if (stm::isStackAddress((void*)addr)) { *addr = val; return; }
+        // No bypass: the plugin ensures only TM-tracked addresses reach the runtime.
+
 
         // Real byte width of each DataType (NOT dtype_size(), which returns
         // 4 for PTR but PTR write-back writes 8 bytes as word_t).
@@ -384,11 +389,8 @@ public:
     static T read_impl(Transaction* tx, AddrT addr) {
         assert(tx && tx->active);
 
-        // Stack-address detection: reading from the stack would create read-set
-        // entries for stack addresses that hash to random locks, causing spurious
-        // validation failures.
-        if (stm::isStackAddress((void*)addr))
-            return from_word<T>(to_word(*addr));
+        // No bypass: the plugin ensures only TM-tracked addresses reach the runtime.
+
 
         if (bloom_might_contain(tx, (word_t*)addr)) {
             // Exact type match (fast path)

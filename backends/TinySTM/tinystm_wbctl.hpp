@@ -305,11 +305,8 @@ read_word_ctl(                                                //
 	TM_ASSERT(tx, "tx not defined");
 	TM_ASSERT(tx->active, "tx not active");
 
-	// Stack-address detection: reading from the stack would create read-set
-	// entries for stack addresses that hash to random locks, causing spurious
-	// validation failures and aborts.  Use a raw load for thread-private data.
-	if (isStackAddress(addr))
-		return read_value_from_addr(addr, sz);
+	// No bypass: the plugin ensures only TM-tracked addresses reach the runtime.
+	// (Non-region addresses like shared globals in expli tests are also valid.)
 
 #ifdef DEBUG_WBCTL
 	// Debug: detect corrupted addresses
@@ -609,10 +606,8 @@ write_word_ctl(                                               //
 	// Stack-address detection: writing to the stack via tm_write would create
 	// a write-set entry that gets written back at commit time — by then the
 	// stack frame has been popped and the write corrupts active stack data.
-	if (isStackAddress(addr)) {
-		write_value_to_addr(addr, val, sz);
-		return;
-	}
+	// No bypass: the plugin ensures only TM-tracked addresses reach the runtime.
+	(void)sz;
 
 
 

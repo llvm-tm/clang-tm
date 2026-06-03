@@ -28,7 +28,6 @@ using stm::any_type_mapping;
 using stm::any_type_t;
 using stm::ByteOffset;
 using stm::fill_any_type;
-using stm::isStackAddress;
 using stm::read_value_from_addr;
 using stm::return_any_type;
 using stm::type_size;
@@ -332,6 +331,13 @@ random_backoff(  //
 
 inline void init()
 {
+    // Initialize the TM address-space region (mmap bump allocator).
+    // If this fails, isTMAddress() returns false for all addresses,
+    // so all TM reads/writes bypass the lock table (safe but dead).
+    if (stm::tm_region_init() != 0) {
+        fprintf(stderr, "FATAL: tm_region_init() failed — TM address space unavailable\n");
+        std::abort();
+    }
 	g_clock.store(1, std::memory_order_release);
 	thr_counter.store(1, std::memory_order_release);
 	// Events already no-ops unless TM_EVENT_LOG defined.
@@ -339,7 +345,7 @@ inline void init()
 
 inline void exit()
 {
-	// TODO: free shared structures
+	stm::tm_region_destroy();
 }
 
 inline word_t get_clock()

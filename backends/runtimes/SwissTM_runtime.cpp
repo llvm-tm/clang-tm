@@ -36,10 +36,17 @@ static std::atomic<int64_t> g_tm_begin_count{0};
 static std::atomic<int64_t> g_tm_end_count{0};
 void tm_init()
 {
+    if (stm::tm_region_init() != 0) {
+        fprintf(stderr, "FATAL: tm_region_init() failed — TM address space unavailable\n");
+        std::abort();
+    }
 	swisstm::init();
 }
 
-void tm_exit() {}
+void tm_exit()
+{
+    stm::tm_region_destroy();
+}
 
 void tm_init_thread()
 {
@@ -225,17 +232,17 @@ static void print_stats()
 }
 
 static int init = (std::atexit(print_stats), 0);
-void* tm_malloc(size_t size) { return tm_track_alloc_result(::operator new(size), size); }
-void* tm_calloc(size_t nmemb, size_t size) { void* p = ::operator new(nmemb * size); memset(p, 0, nmemb * size); return tm_track_alloc_result(p, nmemb * size); }
-void* tm_realloc(void* ptr, size_t size) { void* p = ::operator new(size); if (ptr) { memcpy(p, ptr, size); ::operator delete(ptr); } return tm_track_alloc_result(p, size); }
+void* tm_malloc(size_t size) { return tm_track_alloc_result(stm::tm_region_malloc(size), size); }
+void* tm_calloc(size_t nmemb, size_t size) { void* p = stm::tm_region_malloc(nmemb * size); memset(p, 0, nmemb * size); return tm_track_alloc_result(p, nmemb * size); }
+void* tm_realloc(void* ptr, size_t size) { void* p = stm::tm_region_malloc(size); if (ptr) { memcpy(p, ptr, size); stm::tm_region_free(ptr); } return tm_track_alloc_result(p, size); }
 void  tm_free(void* ptr) {
-	if (!ptr || stm::isStackAddress(ptr)) return;
+	if (!ptr || !stm::isTMAddress(ptr)) return;
 	TM_EVENT(FREE, ptr, 0);
 	if (g_in_tx) {
 		swisstm::tm_write_i1(reinterpret_cast<uint8_t*>(ptr), 0);
 		tm_free_append_deferred(ptr);
 	} else {
-		::operator delete(ptr);
+		stm::tm_region_free(ptr);
 	}
 }
 }

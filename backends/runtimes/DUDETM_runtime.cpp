@@ -59,6 +59,7 @@ void tm_exit()
 {
     dudetm::shutdown();
     tinystm::exit();
+    stm::tm_region_destroy();
 }
 
 void tm_init_thread()
@@ -239,7 +240,7 @@ push_free_entry(void* ptr)
 
 void* tm_malloc(size_t size)
 {
-    void* p = ::operator new(size);
+    void* p = stm::tm_region_malloc(size);
     tm_track_alloc_result(p, size);
     if (g_in_tx) push_alloc_entry(p, size);
     return p;
@@ -247,7 +248,7 @@ void* tm_malloc(size_t size)
 
 void* tm_calloc(size_t nmemb, size_t size)
 {
-    void* p = ::operator new(nmemb * size);
+    void* p = stm::tm_region_malloc(nmemb * size);
     memset(p, 0, nmemb * size);
     tm_track_alloc_result(p, nmemb * size);
     if (g_in_tx) push_alloc_entry(p, nmemb * size);
@@ -256,11 +257,11 @@ void* tm_calloc(size_t nmemb, size_t size)
 
 void* tm_realloc(void* ptr, size_t size)
 {
-    void* p = ::operator new(size);
+    void* p = stm::tm_region_malloc(size);
     if (ptr) {
         memcpy(p, ptr, size);
         if (g_in_tx) push_free_entry(ptr);
-        ::operator delete(ptr);
+        stm::tm_region_free(ptr);
     }
     tm_track_alloc_result(p, size);
     if (g_in_tx) push_alloc_entry(p, size);
@@ -269,14 +270,14 @@ void* tm_realloc(void* ptr, size_t size)
 
 void tm_free(void* ptr)
 {
-    if (!ptr || stm::isStackAddress(ptr)) return;
+    if (!ptr || !stm::isTMAddress(ptr)) return;
     TM_EVENT(FREE, ptr, 0);
     if (g_in_tx) {
         tinystm::tm_write_i1(reinterpret_cast<uint8_t*>(ptr), 0);
         tm_free_append_deferred(ptr);
         push_free_entry(ptr);
     } else {
-        ::operator delete(ptr);
+        stm::tm_region_free(ptr);
     }
 }
 

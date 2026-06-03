@@ -54,8 +54,8 @@ $(foreach b,$(BACKENDS),$(eval bin/$(b)/: ; mkdir -p $$@))
 # ── Per-backend, per-test build rules ──────────────────────────────
 # Generate: bin/<b>/<t>: test_<t>.cpp <runtime> test_helpers.hpp | bin/<b>/
 define BUILD_RULE
-bin/$(1)/$(2): test_$(2).cpp $(RUNTIME_$(1)) test_helpers.hpp | bin/$(1)/
-	$$(CXX) $$(CXXFLAGS) $$(INC_$(1)) $$(FLAGS_$(1)) -o $$@ $$< $$(RUNTIME_$(1))
+bin/$(1)/$(2): test_$(2).cpp $(RUNTIME_$(1)) $(RUNTIME_DIR)/tm_region_allocator.cpp test_helpers.hpp | bin/$(1)/
+	$$(CXX) $$(CXXFLAGS) $$(INC_$(1)) $$(FLAGS_$(1)) -o $$@ $$< $$(RUNTIME_$(1)) $(RUNTIME_DIR)/tm_region_allocator.cpp
 endef
 
 # Flatten: for each (backend, test) pair, eval a build rule
