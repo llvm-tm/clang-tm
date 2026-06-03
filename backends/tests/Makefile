@@ -46,10 +46,16 @@ FLAGS_spht := -DTM_BACKEND_SPHT -mrtm
 # ── Test source files ──────────────────────────────────────────────
 TESTS := counter_st counter_mt write_set_validation overlap_stress read_lock_interference readall_write_interference
 
-.PHONY: all clean list run% list-backends
+# ── Standalone allocator tests (no backend runtime) ─────────────────
+ALLOC_TESTS := region_alloc region_stress
+
+.PHONY: all clean list run% list-backends run-alloc
 
 # ── Explicit per-backend directory rules ───────────────────────────
 $(foreach b,$(BACKENDS),$(eval bin/$(b)/: ; mkdir -p $$@))
+
+bin/:
+	mkdir -p $@
 
 # ── Per-backend, per-test build rules ──────────────────────────────
 # Generate: bin/<b>/<t>: test_<t>.cpp <runtime> test_helpers.hpp | bin/<b>/
@@ -61,9 +67,22 @@ endef
 # Flatten: for each (backend, test) pair, eval a build rule
 RULES := $(foreach b,$(BACKENDS),$(foreach t,$(TESTS),$(eval $(call BUILD_RULE,$(b),$(t)))))
 
+# ── Standalone allocator test rules ─────────────────────────────────
+# Each allocator test just links against the region allocator .cpp
+# (no TM runtime needed).
+REGION_ALLOC_SRC := $(RUNTIME_DIR)/tm_region_allocator.cpp
+REGION_ALLOC_DEPS := $(REGION_ALLOC_SRC) ../tm_platform.hpp ../tm_region_allocator.hpp
+
+bin/region_alloc: test_region_alloc.cpp $(REGION_ALLOC_DEPS) | bin/
+	$(CXX) $(CXXFLAGS) -I.. -o $@ $< $(REGION_ALLOC_SRC)
+
+bin/region_stress: test_region_stress.cpp $(REGION_ALLOC_DEPS) | bin/
+	$(CXX) $(CXXFLAGS) -I.. -o $@ $< $(REGION_ALLOC_SRC)
+
 # ── All target ─────────────────────────────────────────────────────
 BINS := $(foreach b,$(BACKENDS),$(foreach t,$(TESTS),bin/$(b)/$(t)))
-all: $(BINS)
+ALLOC_BINS := $(addprefix bin/, $(ALLOC_TESTS))
+all: $(BINS) $(ALLOC_BINS)
 
 # ── Run targets ────────────────────────────────────────────────────
 RUN_TARGETS := $(addprefix run-,$(BACKENDS))
@@ -75,14 +94,23 @@ $(RUN_TARGETS): run-%:
 		bin/$*/$(t) 2>&1; \
 		echo;)
 
-run: $(RUN_TARGETS)
-	@echo "=== All backends done ==="
+run-allocs:
+	@echo "=== TM Region Allocator Tests ==="
+	@for t in $(ALLOC_TESTS); do \
+		echo "--- $$t ---"; \
+		bin/$$t 2>&1; \
+		echo; \
+	done
+
+run: run-allocs $(RUN_TARGETS)
+	@echo "=== All tests done ==="
 
 # ── Convenience ────────────────────────────────────────────────────
 list:
-	@echo "Backends:" $(BACKENDS)
-	@echo "Tests:   " $(TESTS)
-	@echo "Targets: " $(BINS)
+	@echo "Backends:"   $(BACKENDS)
+	@echo "Tests: "     $(TESTS)
+	@echo "Alloc tests:" $(ALLOC_TESTS)
+	@echo "Targets: "   $(BINS) $(ALLOC_BINS)
 
 clean:
 	rm -rf bin
