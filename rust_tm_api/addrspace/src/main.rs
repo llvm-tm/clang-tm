@@ -73,6 +73,7 @@ fn list_sum(head: *const Node) -> i64 {
 }
 
 // ── Benchmark helpers ─────────────────────────────────────────
+#[allow(dead_code)]
 struct BenchResult {
     name: &'static str,
     nodes: i64,
