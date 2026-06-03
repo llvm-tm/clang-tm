@@ -598,7 +598,6 @@ public:
 
 // TLS variable names for queue runtime (accessed via M.getGlobalVariable)
 static constexpr char TM_QUEUE_ACTIVE_TLS[] = "g_tm_queue_active";
-static constexpr char TM_PENDING_TLS[]      = "g_tm_pending";
 
 // Check if a function has any TX annotation (transaction or async_transaction)
 static bool hasAnyTXAnnotation(Function &F)
@@ -880,9 +879,7 @@ public:
 			GV->setThreadLocal(true);
 			return GV;
 		};
-		auto *i32Ty = Type::getInt32Ty(CtxRef);
-		getOrCreateTLS(TM_QUEUE_ACTIVE_TLS, i32Ty);
-		getOrCreateTLS(TM_PENDING_TLS, PointerType::getUnqual(CtxRef));
+		getOrCreateTLS(TM_QUEUE_ACTIVE_TLS, Type::getInt32Ty(CtxRef));
 
 		// 7. Inject tm_init/tm_exit + tm_queue_init/tm_queue_shutdown in main.
 		//    Also inject tm_init_thread/tm_exit_thread into THREAD functions.

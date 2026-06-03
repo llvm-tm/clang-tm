@@ -8,20 +8,18 @@
 extern "C" {
 #endif
 
-// TLS variables defined in queue_runtime.cpp, accessed by the LLVM plugin
-// via M.getGlobalVariable().  Not declared here — the plugin finds them by name.
-
-// Enqueue a transaction for execution.
+// Enqueue a TX for execution.
 // fn: dispatch function that calls the instrumented _tm_clone.
 // args: heap-allocated packed arguments struct (freed by dispatch after use).
 //
-// In inline mode: calls fn(args) immediately (no-op future).
-// In queue mode: creates a future, stores in thread_local, pushes to pool.
+// In inline mode: calls fn(args) immediately.
+// In queue mode: increments thread_local pending counter, enqueues work,
+//                worker decrements the CALLER's counter on completion.
 void tm_enqueue(void (*fn)(void*), void* args);
 
-// Block until the previous async TX on this thread completes.
+// Block until all pending TXes enqueued by this thread complete.
 // In inline mode: no-op (TX already completed synchronously).
-// In queue mode: blocks on the thread_local future.
+// In queue mode: spin-waits on thread_local pending counter.
 void tm_wait_prev_tx(void);
 
 // Initialize thread pool.  Called once at program startup.

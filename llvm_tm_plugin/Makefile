@@ -211,12 +211,54 @@ $(OUT_DIR)/tinystm_runtime.o: $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp
 $(OUT_DIR)/queue_runtime.o: $(BACKENDS_DIR)/runtimes/queue_runtime.cpp
 	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
+$(OUT_DIR)/queue_runtime_perf.o: $(BACKENDS_DIR)/runtimes/queue_runtime.cpp
+	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL -DTM_PERF_COUNTERS \
+	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
 $(OUT_DIR)/tm_region_allocator.o: $(BACKENDS_DIR)/runtimes/tm_region_allocator.cpp
 	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
 
 $(foreach t,$(QUEUE_TESTS),$(BIN_DIR)/$(t)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(QUEUE_RT_OBJS) | $(BIN_DIR)
 	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/$*.opt.bc $(QUEUE_RT_OBJS) -o $@
+
+# Inline/queue benchmark: same source, two pipelines, for throughput comparison
+$(OUT_DIR)/bench_queue_compare.inline.instr.bc: $(OUT_DIR)/bench_queue_compare.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
+	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so \
+	  -passes="tm-instrument" $< -o $@
+$(OUT_DIR)/bench_queue_compare.inline.opt.bc: $(OUT_DIR)/bench_queue_compare.inline.instr.bc | $(OUT_DIR)
+	$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $< -o $@
+$(BIN_DIR)/bench_queue_compare_inline: $(OUT_DIR)/bench_queue_compare.inline.opt.bc $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp | $(BIN_DIR)
+	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \
+	  $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
+	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
+
+$(OUT_DIR)/bench_queue_compare.queue.instr.bc: $(OUT_DIR)/bench_queue_compare.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
+	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so \
+	  -passes="tm-instrument-queue" $< -o $@
+$(OUT_DIR)/bench_queue_compare.queue.opt.bc: $(OUT_DIR)/bench_queue_compare.queue.instr.bc | $(OUT_DIR)
+	$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $< -o $@
+$(BIN_DIR)/bench_queue_compare_queue: $(OUT_DIR)/bench_queue_compare.queue.opt.bc $(QUEUE_RT_OBJS) | $(BIN_DIR)
+	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/bench_queue_compare.queue.opt.bc $(QUEUE_RT_OBJS) -o $@
+$(BIN_DIR)/bench_queue_compare_queue_perf: $(OUT_DIR)/bench_queue_compare.queue.opt.bc \
+  $(OUT_DIR)/tinystm_runtime.o $(OUT_DIR)/queue_runtime_perf.o $(OUT_DIR)/tm_region_allocator.o | $(BIN_DIR)
+	$(CXX) $(DEFAULT_LINK_FLAGS) $^ -o $@
+
+# Benchmark v2: sync-light + async-light + heavy-sync in one binary
+$(OUT_DIR)/bench_queue_compare2.inline.instr.bc: $(OUT_DIR)/bench_queue_compare2.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
+	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so \
+	  -passes="tm-instrument" $< -o $@
+$(OUT_DIR)/bench_queue_compare2.inline.opt.bc: $(OUT_DIR)/bench_queue_compare2.inline.instr.bc | $(OUT_DIR)
+	$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $< -o $@
+$(BIN_DIR)/bench_queue_compare2_inline: $(OUT_DIR)/bench_queue_compare2.inline.opt.bc $(QUEUE_RT_OBJS) | $(BIN_DIR)
+	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/bench_queue_compare2.inline.opt.bc $(QUEUE_RT_OBJS) -o $@
+
+$(OUT_DIR)/bench_queue_compare2.queue.instr.bc: $(OUT_DIR)/bench_queue_compare2.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
+	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so \
+	  -passes="tm-instrument-queue" $< -o $@
+$(OUT_DIR)/bench_queue_compare2.queue.opt.bc: $(OUT_DIR)/bench_queue_compare2.queue.instr.bc | $(OUT_DIR)
+	$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $< -o $@
+$(BIN_DIR)/bench_queue_compare2_queue: $(OUT_DIR)/bench_queue_compare2.queue.opt.bc $(QUEUE_RT_OBJS) | $(BIN_DIR)
+	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/bench_queue_compare2.queue.opt.bc $(QUEUE_RT_OBJS) -o $@
 
 # Persistent runtime (snapshot-based, saves on tm_exit)
 $(BIN_DIR)/test_persist: $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(RUNTIME_DIR)/persistent.cpp | $(BIN_DIR)
