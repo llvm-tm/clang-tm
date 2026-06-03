@@ -68,7 +68,7 @@ $(BIN_DIR)/libTMInstrument.so: $(BIN_DIR)/libTMInstrument_$(PLUGIN_VARIANT).so
 # Plugin variants: each gets the matching -D flags
 define TMPluginTarget
 $(BIN_DIR)/libTMInstrument_$(1).so: $(SRC_DIR)/TMInstrumentPass.cpp | $(BIN_DIR)
-	$$(CXX) $$(PLUGIN_CXXFLAGS) $(PLUGIN_FLAGS_$(1)) -shared $$< -o $$@ $$(LLVM_CONFIG_ARGS)
+	$(CXX) -I$(BACKENDS_DIR) -I$(TM_PLUGIN_DIR) -I$(LLVM_CONFIG_INCLUDE_PATH) -I$(SRC_DIR) -I$(TM_PLUGIN_DIR)/src -fPIC  $$(PLUGIN_CXXFLAGS) $(PLUGIN_FLAGS_$(1)) -shared $$< -o $$@ $$(LLVM_CONFIG_ARGS)
 endef
 $(foreach v,$(PLUGIN_VARIANTS),$(eval $(call TMPluginTarget,$(v))))
 
