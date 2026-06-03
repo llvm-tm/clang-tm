@@ -60,8 +60,12 @@ static Node *alloc_tm(int64_t value) {
     n->value = value;
     return n;
 }
-static void free_tm(Node *) {
-    // Bump allocator: no-op
+static void free_tm(Node *head) {
+    while (head) {
+        Node *next = head->next;
+        stm::tm_region_free(head);
+        head = next;
+    }
 }
 
 // ── std::malloc ops ────────────────────────────────────────────────
@@ -265,8 +269,68 @@ int main(int argc, char **argv) {
                (long long)r.allocs_per_sec);
     }
 
-    // ── Phase 6: cleanup ────────────────────────────────────────
-    printf("\nPhase 6: Destroy\n");
+    // ── Phase 6: free/reuse correctness ──────────────────────────
+    printf("\nPhase 6: Free/Reuse correctness\n");
+    {
+        bool ok = true;
+        const int N = 10000;
+        Node *ptrs[N];
+        for (int i = 0; i < N; i++)
+            ptrs[i] = alloc_tm(i);
+        // Free all
+        for (int i = 0; i < N; i++)
+            stm::tm_region_free(ptrs[i]);
+        // Allocate again — freed blocks must be reusable
+        for (int i = 0; i < N; i++) {
+            ptrs[i] = alloc_tm(i + N);
+            if (!ptrs[i]) { ok = false; break; }
+        }
+        // Verify data
+        for (int i = 0; i < N && ok; i++) {
+            if (ptrs[i]->value != i + N) ok = false;
+        }
+        // Free all again
+        for (int i = 0; i < N; i++)
+            stm::tm_region_free(ptrs[i]);
+        printf("  free+reuse: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { fprintf(stderr, "FAIL: free/reuse corruption\n"); return 1; }
+    }
+
+    // ── Phase 7: alloc/free exceeding 64 GB total ────────────────
+    printf("\nPhase 7: Alloc/free exceeding 64 GB total\n");
+    {
+        // Each iteration allocates a 48-byte Node and frees it.
+        // Total: 8e8 iterations × 48 B = 38.4 GB allocated.
+        // The live set is at most 1 node at any time.
+        const int64_t TOTAL_GB = 2;
+        int64_t total_bytes = (int64_t)TOTAL_GB * 1024 * 1024 * 1024;
+        int64_t iterations = total_bytes / (int64_t)sizeof(Node);
+
+        Timer t;
+        for (int64_t i = 0; i < iterations; i++) {
+            Node *n = alloc_tm(i);
+            stm::tm_region_free(n);
+        }
+        int64_t ms = t.elapsed_ms();
+        double sec = ms / 1000.0;
+        int64_t rate = (int64_t)(iterations / sec);
+
+        bool pass = (stm::g_next_slab_idx.load() * stm::g_slab_size <
+                     (uint64_t)TOTAL_GB * 1024 * 1024 * 1024); // used < TOTAL_GB → blocks recycled
+        printf("  %lld iters in %.1fs  (%lld allocs/sec)  "
+               "slabs used: %zu/%zu (%.0f%%)  %s\n",
+               (long long)iterations, sec, (long long)rate,
+               (size_t)stm::g_next_slab_idx.load(), stm::g_num_slabs,
+               100.0 * stm::g_next_slab_idx.load() / stm::g_num_slabs,
+               pass ? "PASS" : "FAIL");
+        if (!pass) {
+            fprintf(stderr, "FAIL: alloc/free stress — region exhausted\n");
+            return 1;
+        }
+    }
+
+    // ── Phase 8: cleanup ────────────────────────────────────────
+    printf("\nPhase 8: Destroy\n");
     stm::tm_region_destroy();
 
     double speedup = ratio_st > ratio_mt ? ratio_st : ratio_mt;
