@@ -1,7 +1,87 @@
 # Session Summary
 
+## Latest Session (this session — 2026-06-03)
+- **Queue pipeline implemented and tested**: `TMQueueGlobalInitPass` clones TX functions, instruments clones, creates dispatch wrappers, replaces call sites with `tm_enqueue` + optional `tm_wait_prev_tx()`. Pipeline `tm-instrument-queue` → `TMQueueGlobalInitPass` → `TMInstrumentInlinePass` → `TMStripLifetimePass`.
+- **Key fixes**: TX functions manually cloned before `cloneTxReachableGraph` (which skips them). `TMInstrumentInlinePass` uses `ends_with(TM_CLONE_SUFFIX)` instead of `contains()` to avoid double-instrumenting dispatch wrappers. Originals with `_tm_clone` versions are skipped.
+- **Queue runtime**: `queue_runtime.h` + `queue_runtime.cpp` — thread pool with round-robin queue distribution + work stealing, `tm_future_state_t` (mutex+CV+done), `tm_enqueue`/`tm_wait_prev_tx`/`tm_queue_init`/`tm_queue_shutdown`.
+- **`tm_get_env` added** to `TinySTM_runtime.cpp` and `persistent.cpp` (was missing, causing linker errors).
+- **LLVM 22 API fixes**: `getOrInsertFunction` uses `FunctionType::get` (not variadic), `PointerType::getUnqual(Ctx)` (no pointee type), `Twine`→`StringRef` via `.str()`.
+- **All plugin tests PASS** (test_persist now links after `tm_get_env` fix).
+- **Plan written**: `docs/address_space_allocator_plan.md` — compiler errors for stack-pointer args to TX functions + dedicated TM address space via mmap (replaces `isStackAddress` with `isTMAddress`).
+- **LeftRight/Romulus/XTM backends** (C++ and Rust) added to repo.
+- **test_queue binary** compiles, links, and runs with exit code 0 (TinySTM/WBCTL backend + queue runtime).
+
 ## Goal
 Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures for LLVM 22.
+
+## Issues: LeftRight/Romulus/XTM backends (paused 2026-06-02)
+
+### True Left-Right (leftright_single in Rust)
+- **Read-committed isolation only** — the two-copy + global write-lock approach gives **read-committed**, not serializable or snapshot isolation. This is inherent to the design: readers always read from the active copy and never validate against a read-set. Lost updates occur when two TXs read the same address before either commits (counter test loses ~20% of increments at 2 threads). Read-all TXs see inconsistent snapshots when the flip happens mid-iteration (bank loses $1-4 at 2 threads).
+- **Two approaches tried**:
+  1. **Single-writer thread** (commit queue): Writer thread receives TXs via channel, processes one at a time. Correct at 1t but same read-committed issue at 2+t. Adds thread-hop latency.
+  2. **Phase-based global lock** (eager writes): Writer holds a spinlock from first `tm_write` through `tm_commit`, writes eagerly to the inactive copy. Avoids thread-hop but same isolation issue. Two reader counters (classic Left-Right) correctly track pre-/post-flip readers for the barrier.
+- **To make it serializable**: Add a version table + read-set validation on commit. The writer would check each TX's read-set against the version table before committing. Reads would record `(addr, version_at_read_time)`. A read-address modified by a concurrent commit → abort.
+- **No progress on Romulus/XTM Rust backends** — the existing version-table-based Rust backends (`leftright`, `romulus`, `xtm`) pass bank/fuzz tests because they use TL2-style commit-time validation (not the true Left-Right protocol), so they inherit serializable isolation from the version-table approach.
+
+## Queue-Based Execution Model (planned 2026-06-02)
+
+### Architecture
+Separate **execution model** from **TM backend**. The backend (WBCTL, NOrec, TL2) provides `tm_begin`/`tm_commit`/`tm_read`/`tm_write` — it knows nothing about executors. The executor controls *when and where* those functions are called.
+
+Three layers: `Application (transaction/async) → TxExecutor (inline|queue) → TM Backend`
+
+### TxExecutor interface
+- `enqueue(task)` — submit a task for execution
+- `wait_all()` — block until all tasks complete
+- `shutdown()` — stop accepting tasks
+
+Two implementations:
+- **InlineExecutor**: calls `task()` immediately on `enqueue()` — this IS the existing behavior
+- **QueueExecutor**: N workers × M queues (parameterizable). Hash/rr routing, work stealing. Returns `std::future<R>` via `submit<Backend>(body)` template
+
+### LLVM plugin path
+New pipeline `tm-instrument-queue`:
+1. Clone TX function → `foo_tm_clone` (same as existing)
+2. Generate dispatch wrapper: `foo_tm_clone_dispatch(raw_args)` containing the retry loop + `tm_begin`/call/`tm_commit`
+3. Replace direct `call @foo_tm_clone(args...)` with `call @tm_enqueue(@dispatch, packed_args)` — no inline `tm_begin`/`tm_commit` in the caller
+4. Link with `QueueExecutor` runtime
+
+### No code duplication
+- Backend code unchanged (shared across all executors)
+- Retry loop template `submit<Backend>(body)` shared via `TxExecutor` base
+- Plugin clone generation reused; only dispatch wrapper generation + `tm_enqueue` insertion is new
+- `InlineExecutor` is a ~5-line wrapper (no behavioral change to existing `TM<T>::transaction()`)
+
+### Design doc
+`docs/queue_execution_model.md` — full architecture, integration plan, Rust equivalent.
+
+## Queue Execution Model (refined 2026-06-02)
+
+### Sync vs Async distinction
+- **`transaction`** (default): always synchronous from app's perspective. Queue mode: enqueue + plugin-inserted `tm_wait_prev_tx()`. Inline mode: execute inline (unchanged).
+- **`async_transaction`** (new): queue mode = enqueue only, no wait. Inline mode = same as `transaction`. App calls `tm_wait_prev_tx()` manually.
+- **`tm_wait_prev_tx()`**: blocks until the previous async TX on this thread completes. Inline mode = no-op.
+
+### Thread-local state in runtime
+- `g_tm_queue_active` — set during init, determines queue vs inline mode
+- `g_tm_pending` — opaque `tm_future_state_t*` with mutex/cv/done flag
+- `tm_enqueue`: creates future, stores in thread_local, pushes to thread pool
+- `tm_wait_prev_tx`: blocks on `g_tm_pending->done`, then frees it
+
+### Plugin changes
+- Recognize `async_transaction` annotation alongside existing `transaction`
+- Queue pipeline: clone → dispatch wrapper → `tm_enqueue` call replacement
+- For `transaction`: also insert `tm_wait_prev_tx()` after enqueue
+- For `async_transaction`: no wait insertion
+- Annotation validation: no function can have both `transaction` and `async_transaction`
+
+## Next Steps (Queue Execution Model)
+1. **Runtime C API**: `queue_runtime.h` + `queue_runtime.cpp` — `tm_future_state_t`, `tm_enqueue`, `tm_wait_prev_tx`, thread pool init, no-op inline fallback
+2. **Plugin annotation**: Add `async_transaction` to recognized annotations, extend `checkAnnotationConsistency`
+3. **Plugin queue pipeline**: `tm-instrument-queue` — clone + dispatch wrapper + call replacement + wait insertion
+4. **Tests**: `test_queue_sync`, `test_queue_async`, `test_queue_multi`, `test_queue_inline_mode`
+5. **Benchmarks**: compare inline vs queue throughput on bank/eigenbench/labyrinth at 1t/2t/4t
 
 ## Done
 - **Makefile from-clean chain fix**: `TM_PLUGIN` in `tm_pipeline.mk` changed from absolute path (`$(LLVM_PLUGIN_DIR)/bin/...`) to relative (`$(BIN_DIR)/...`), matching the build rules. GNU Make 4.4 treats absolute and relative paths as different targets, so the pattern rule prerequisite `$(TM_PLUGIN)` never matched `bin/libTMInstrument.so` from clean state. Fixed — `make clean && make out/foo.instr.bc` now works in one invocation.
@@ -97,6 +177,7 @@ Maintain the LLVM IR-level TM plugin pipeline and fix benchmark/test failures fo
 - Post-instrumentation `-O3` reordering remains a problem for the inline pipelines despite `atomic_signal_fence`. The non-inline pipeline avoids this by keeping clones as separate `NoInline`+`OptimizeNone` functions.
 
 ## Relevant Files
+- `docs/queue_execution_model.md`: Queue-based TM execution model design doc
 - `backends/TinySTM/tinystm_wt.hpp`: WT implementation — refactored to use shared `tinystm_common.hpp` infrastructure.
 - `backends/TinySTM/tinystm_common.hpp`: shared Lock/LockTable/Transaction templates, bit layout definitions, jmpbuf declaration.
 - `backends/TinySTM/tinystm_wbctl.hpp`: reference implementation for correct patterns.
@@ -1258,8 +1339,13 @@ benchmarks/
 - Bayes/yada use single-thread execution (tid==0) since their algorithms are fundamentally serialized (best-first search / mesh refinement).
 - Non-TM vector operations inside `grow_and_retriangulate` (push_back, garbage marking) use `peek()/poke()` on TM-fields + `setup_*` on neighbors. Only work heap pop/push goes through TM `tx_retry`.
 - `expli::TM<uint8_t>` used for boolean-like fields (`is_garbage`, `encroached`, `is_referenced`) since `bool` has no `tm_type_traits` specialization.
+- **Execution model separated from TM backend**: The backend (WBCTL, NOrec, TL2) provides only `tm_begin`/`tm_commit`/`tm_read`/`tm_write`. The executor controls *when and where* those functions are called. `InlineExecutor` wraps the current inline behavior; `QueueExecutor` provides thread-pool-based async execution. `submit<Backend>(body)` template is shared across all executors, avoiding duplication.
 
 ## Relevant Files
+- `docs/address_space_allocator_plan.md`: Plan for stack-pointer arg validation + dedicated TM address space via mmap  
+- `docs/queue_execution_model.md`: Queue-based TM execution model design doc
+- `backends/runtimes/queue_runtime.h`: Queue runtime C API (tm_enqueue, tm_wait_prev_tx, tm_queue_init, tm_queue_shutdown)
+- `backends/runtimes/queue_runtime.cpp`: QueueExecutor thread pool implementation
 - `expli_tm_api/containers/tm_small_set.hpp`: TM-friendly fixed-capacity set (both TM and non-TM operations)
 - `expli_tm_api/containers/tm_heap.hpp`: TM-friendly binary heap priority queue
 - `expli_tm_api/containers/tm_bit_vector.hpp`: Compact bitset with atomic u64[] operations

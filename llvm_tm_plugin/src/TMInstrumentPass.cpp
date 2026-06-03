@@ -207,15 +207,22 @@ static void checkAnnotationConsistency(Module &M)
 		bool isThread = hasAnnotation(F, THREAD_ANNOT);
 		bool isMain = (F.getName() == MAIN_ANNOT) || hasAnnotation(F, MAIN_ANNOT);
 		bool isTx = hasAnnotation(F, TX_ANNOT);
-		if (isThread && isTx) {
+		bool isAsyncTx = hasAnnotation(F, ASYNC_TX_ANNOT);
+		if (isTx && isAsyncTx) {
 			errs() << "error: function '" << F.getName()
-			       << "' has both 'thread' and 'transaction' annotations. "
+			       << "' has both 'transaction' and 'async_transaction' annotations. "
+			       << "A function cannot be both synchronous and asynchronous.\n";
+			exit(1);
+		}
+		if (isThread && (isTx || isAsyncTx)) {
+			errs() << "error: function '" << F.getName()
+			       << "' has both 'thread' and transaction annotations. "
 			       << "A thread entry function cannot be a transaction function.\n";
 			exit(1);
 		}
-		if (isMain && isTx) {
+		if (isMain && (isTx || isAsyncTx)) {
 			errs() << "error: function '" << F.getName()
-			       << "' has both 'main' and 'transaction' annotations. "
+			       << "' has both 'main' and transaction annotations. "
 			       << "The main function cannot be a transaction function.\n";
 			exit(1);
 		}
@@ -232,7 +239,7 @@ static void redirectTXFunctionsToClones(
 	for (auto &F : M) {
 		if (F.isDeclaration())
 			continue;
-		if (!hasAnnotation(F, TX_ANNOT))
+		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT))
 			continue;
 		tm_method_instrumentation::redirectCallsToClones(F,
 		                                                 M,
@@ -292,7 +299,7 @@ public:
 		for (auto &F : M) {
 			if (F.isDeclaration())
 				continue;
-			if (!hasAnnotation(F, TX_ANNOT))
+			if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT))
 				continue;
 			injectTransactionBeginEnd(F, M, Ctx.H);
 			modified = true;
@@ -342,10 +349,21 @@ class TMInstrumentInlinePass : public PassInfoMixin<TMInstrumentInlinePass>
 public:
 	PreservedAnalyses run(Function &F, FunctionAnalysisManager &)
 	{
-		if (!hasAnnotation(F, TX_ANNOT) && !F.getName().contains(TM_CLONE_SUFFIX)) {
+		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT)
+		    && !F.getName().ends_with(TM_CLONE_SUFFIX)) {
 			return PreservedAnalyses::all();
 		}
+		// Skip TX-annotated originals that have a _tm_clone version
+		// (handled by TMQueueGlobalInitPass — already instrumented in clone).
 		Module *M = F.getParent();
+		if (hasAnnotation(F, TX_ANNOT) || hasAnnotation(F, ASYNC_TX_ANNOT)) {
+			std::string CloneName = (F.getName() + TM_CLONE_SUFFIX).str();
+			if (M->getFunction(CloneName)) {
+				TM_DEBUG("%s has queue clone %s, skipping re-instrumentation",
+				         F.getName().str().c_str(), CloneName.c_str());
+				return PreservedAnalyses::all();
+			}
+		}
 		LLVMContext &Ctx = M->getContext();
 		auto H = TMRuntimeHooks::declareAll(*M, Ctx, tm_platform::sigsetjmpName(*M));
 
@@ -514,13 +532,25 @@ class TMInstrumentPass : public PassInfoMixin<TMInstrumentPass>
 public:
 	PreservedAnalyses run(Function &F, FunctionAnalysisManager &)
 	{
-		if (!hasAnnotation(F, TX_ANNOT)) {
+		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT)) {
 			TM_DEBUG("%s is not a transaction function, skipping",
 			         F.getName().str().c_str());
 			return PreservedAnalyses::all();
 		}
-		TM_DEBUG("TMInstrumentPass: processing function %s", F.getName().str().c_str());
+		// Skip functions that have already been handled by the queue pipeline
+		// (detected by the presence of a _tm_clone version of the same function).
+		// The queue pass clones + instruments the clone, and the original should
+		// remain un-instrumented (callers are replaced with tm_enqueue).
 		Module *M = F.getParent();
+		{
+			std::string CloneName = (F.getName() + TM_CLONE_SUFFIX).str();
+			if (M->getFunction(CloneName)) {
+				TM_DEBUG("%s has queue clone %s, skipping re-instrumentation",
+				         F.getName().str().c_str(), CloneName.c_str());
+				return PreservedAnalyses::all();
+			}
+		}
+		TM_DEBUG("TMInstrumentPass: processing function %s", F.getName().str().c_str());
 		LLVMContext &Ctx = M->getContext();
 		auto H = TMRuntimeHooks::declareAll(*M, Ctx, tm_platform::sigsetjmpName(*M));
 
@@ -562,6 +592,324 @@ public:
 		for (Instruction *I : ToErase)
 			I->eraseFromParent();
 		return PreservedAnalyses::none();
+	}
+	static bool isRequired() { return true; }
+};
+
+// TLS variable names for queue runtime (accessed via M.getGlobalVariable)
+static constexpr char TM_QUEUE_ACTIVE_TLS[] = "g_tm_queue_active";
+static constexpr char TM_PENDING_TLS[]      = "g_tm_pending";
+
+// Check if a function has any TX annotation (transaction or async_transaction)
+static bool hasAnyTXAnnotation(Function &F)
+{
+	return hasAnnotation(F, TX_ANNOT) || hasAnnotation(F, ASYNC_TX_ANNOT);
+}
+
+static Function *findClone(Function *Original, Module &M)
+{
+	std::string CloneName = (Original->getName() + TM_CLONE_SUFFIX).str();
+	return M.getFunction(CloneName);
+}
+
+static StructType *createArgsStructType(Function *F, LLVMContext &Ctx)
+{
+	SmallVector<Type *, 8> ArgTypes;
+	for (auto &Arg : F->args())
+		ArgTypes.push_back(Arg.getType());
+	if (ArgTypes.empty())
+		return nullptr;
+	std::string StructName = (F->getName() + "_args_t").str();
+	return StructType::create(Ctx, ArgTypes, StructName);
+}
+
+// Generate a dispatch wrapper for a TX function.
+// The wrapper receives a void* pointing to the packed arguments struct,
+// loads the args, calls the _tm_clone, then frees the struct.
+//
+// Returns the dispatch function or nullptr on failure.
+static Function *createDispatchWrapper(Function *Original, Function *Clone,
+                                       Module &M, IRBuilder<> &B)
+{
+	LLVMContext &Ctx = M.getContext();
+	auto *i8PtrTy = PointerType::getUnqual(Ctx);
+	auto *voidTy  = Type::getVoidTy(Ctx);
+
+	// Create the dispatch function type: void(i8*)
+	auto *DispFT = FunctionType::get(voidTy, {i8PtrTy}, false);
+	auto *DispF = Function::Create(DispFT,
+	                               GlobalValue::InternalLinkage,
+	                               Original->getName() + TM_DISPATCH_SUFFIX,
+	                               &M);
+
+	// Create entry block
+	auto *Entry = BasicBlock::Create(Ctx, "entry", DispF);
+	B.SetInsertPoint(Entry);
+
+	// Build the packed args struct type
+	StructType *ArgsTy = createArgsStructType(Original, Ctx);
+	if (!ArgsTy) {
+		// Function takes no arguments — dispatch just calls clone
+		B.CreateCall(Clone, {});
+		B.CreateRetVoid();
+		return DispF;
+	}
+
+	// Bitcast raw_args to the struct pointer
+	Value *RawArg = DispF->getArg(0); // i8*
+	Value *ArgsPtr = B.CreateBitCast(RawArg, PointerType::getUnqual(Ctx));
+
+	// Load each argument from the struct
+	SmallVector<Value *, 8> LoadedArgs;
+	unsigned Idx = 0;
+	for (auto &Arg : Original->args()) {
+		Value *ElemPtr = B.CreateStructGEP(ArgsTy, ArgsPtr, Idx);
+		Value *Loaded = B.CreateLoad(Arg.getType(), ElemPtr);
+		LoadedArgs.push_back(Loaded);
+		++Idx;
+	}
+
+	// Call the clone with loaded args
+	B.CreateCall(Clone, LoadedArgs);
+
+	// Free the arg struct
+	FunctionCallee FreeFn = M.getOrInsertFunction("free",
+	    FunctionType::get(voidTy, {i8PtrTy}, false));
+	B.CreateCall(FreeFn, {RawArg});
+
+	B.CreateRetVoid();
+	DispF->addFnAttr(llvm::Attribute::NoInline);
+	TM_DEBUG("Created dispatch wrapper: %s", DispF->getName().str().c_str());
+	return DispF;
+}
+
+// Replace a call site to _tm_clone with tm_enqueue(dispatch, packed_args)
+// and, if sync=true, tm_wait_prev_tx().
+static void replaceCallWithEnqueue(CallBase *Call, Function *DispatchFn,
+                                   Module &M, IRBuilder<> &B,
+                                   const TMRuntimeHooks &H, bool sync)
+{
+	LLVMContext &Ctx = M.getContext();
+	auto *i8PtrTy = PointerType::getUnqual(Ctx);
+	auto *i64Ty = Type::getInt64Ty(Ctx);
+	auto *voidTy = Type::getVoidTy(Ctx);
+
+	Function *CalledFn = Call->getCalledFunction();
+	if (!CalledFn)
+		return;
+
+	// Compute argument struct size
+	StructType *ArgsTy = createArgsStructType(CalledFn, Ctx);
+	if (!ArgsTy) {
+		// No args: just enqueue with NULL
+		B.SetInsertPoint(Call);
+		B.CreateCall(H.enqueue_fn, {
+		    B.CreateBitCast(DispatchFn, i8PtrTy),
+		    ConstantPointerNull::get(i8PtrTy)});
+		if (sync)
+			B.CreateCall(H.wait_prev_tx_fn, {});
+		return;
+	}
+
+	const DataLayout &DL = M.getDataLayout();
+	uint64_t StructSize = DL.getTypeAllocSize(ArgsTy);
+
+	// malloc the args struct
+	FunctionCallee MallocFn = M.getOrInsertFunction("malloc",
+	    FunctionType::get(i8PtrTy, {i64Ty}, false));
+	B.SetInsertPoint(Call);
+	Value *RawArgs = B.CreateCall(MallocFn, {ConstantInt::get(i64Ty, StructSize)});
+	Value *ArgsPtr = B.CreateBitCast(RawArgs, PointerType::getUnqual(Ctx));
+
+	// Store each argument into the struct
+	unsigned Idx = 0;
+	for (auto &Arg : Call->args()) {
+		Value *ElemPtr = B.CreateStructGEP(ArgsTy, ArgsPtr, Idx);
+		B.CreateStore(Arg, ElemPtr);
+		++Idx;
+	}
+
+	// tm_enqueue(dispatch, raw_args)
+	B.CreateCall(H.enqueue_fn, {B.CreateBitCast(DispatchFn, i8PtrTy), RawArgs});
+
+	// If sync, tm_wait_prev_tx()
+	if (sync)
+		B.CreateCall(H.wait_prev_tx_fn, {});
+}
+
+// ===========================================================================
+// PASS (queue pipeline): clone + instrument + dispatch wrapper + enqueue
+// ===========================================================================
+
+class TMQueueGlobalInitPass : public PassInfoMixin<TMQueueGlobalInitPass>
+{
+public:
+	PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
+	{
+		TM_DEBUG("TMQueueGlobalInitPass: processing module %s", M.getName().str().c_str());
+		checkAnnotationConsistency(M);
+		auto Ctx = setupModulePass(M);
+		bool &modified = Ctx.modified;
+		using namespace tm_method_instrumentation;
+
+		// 0. Clone TX-annotated functions FIRST, since cloneTxReachableGraph
+		//    skips them (hasAnnotation TX_ANNOT/ASYNC_TX_ANNOT → continue).
+		//    The clones serve as the runnable TX body on worker threads.
+		{
+			auto &AllClones = tm_method_instrumentation::getClonedMethodsMap();
+			SmallPtrSet<const GlobalVariable *, 16> TMG;
+			tm_method_instrumentation::collectTMGlobalsCached(M, TMG);
+			for (auto &F : M) {
+				if (F.isDeclaration())
+					continue;
+				if (!hasAnyTXAnnotation(F))
+					continue;
+				// Check if already cloned
+				bool already = false;
+				for (auto &pair : AllClones)
+					if (pair.first == &F) { already = true; break; }
+				if (already)
+					continue;
+
+				Function *Clone = tm_method_instrumentation::cloneMethod(
+				    &F, TM_CLONE_SUFFIX, &M, M.getContext(), TMG, Ctx.H,
+				    CloneMode::CloneOnly);
+				AllClones.push_back({&F, Clone});
+				TM_DEBUG("Queue: cloned TX function %s -> %s",
+				         F.getName().str().c_str(),
+				         Clone->getName().str().c_str());
+			}
+		}
+
+		if (!Ctx.TxReachableFuncs.empty()) {
+			// 1. Clone the reachable call graph (CloneOnly mode)
+			//    This also appends to the same getClonedMethodsMap() used above,
+			//    but skips already-cloned and TX-annotated functions.
+			Ctx.ClonedMap = &cloneTxReachableGraph(M,
+			                                        Ctx.TxReachableFuncs,
+			                                        Ctx.H,
+			                                        CloneMode::CloneOnly);
+			// 2. Redirect all calls to _tm_clone versions.
+			//    For TX functions this moves external callers (e.g., main)
+			//    to the clone, letting us later replace with tm_enqueue.
+			redirectTXFunctionsToClones(M,
+			                            Ctx.TxReachableFuncs,
+			                            *Ctx.ClonedMap,
+			                            CloneMode::CloneOnly);
+			// 3. Instrument all clones (load/store + malloc instrumentation)
+			instrumentAllClones(*Ctx.ClonedMap, M, Ctx.H);
+			// 4. Inject tm_begin/tm_end + sigsetjmp retry into each clone
+			//    (clones run as self-contained TXs on worker threads)
+			for (auto &pair : *Ctx.ClonedMap) {
+				Function *Clone = pair.second;
+				injectTransactionBeginEnd(*Clone, M, Ctx.H);
+			}
+			modified = true;
+		}
+
+		checkOpaqueOrAbort(M, Ctx.TxReachableFuncs);
+
+		// 4. Create dispatch wrappers for each TX function
+		SmallVector<std::pair<Function *, Function *>, 8> DispatchWrappers;
+		{
+			IRBuilder<> B(M.getContext());
+			for (auto &F : M) {
+				if (F.isDeclaration())
+					continue;
+				if (!hasAnyTXAnnotation(F))
+					continue;
+				Function *Clone = findClone(&F, M);
+				if (!Clone) {
+					TM_DEBUG("No clone found for TX function %s, skipping dispatch",
+					         F.getName().str().c_str());
+					continue;
+				}
+				// Only handle void-returning functions for now
+				if (!F.getReturnType()->isVoidTy()) {
+					TM_DEBUG("TX function %s returns non-void, skipping dispatch",
+					         F.getName().str().c_str());
+					continue;
+				}
+				Function *DispF = createDispatchWrapper(&F, Clone, M, B);
+				if (DispF)
+					DispatchWrappers.push_back({&F, DispF});
+			}
+		}
+
+		// 5. Replace calls to ORIGINAL TX functions with tm_enqueue + optional
+		//    tm_wait_prev_tx.  We use Orig (the original function) because
+		//    external callers (main) still call the original, not the clone.
+		LLVMContext &CtxRef = M.getContext();
+		for (auto &[Orig, DispF] : DispatchWrappers) {
+			bool isSync = hasAnnotation(*Orig, TX_ANNOT);
+
+			// Collect call sites to replace — look for calls to Orig
+			SmallVector<CallBase *, 16> CallSites;
+			for (auto *U : Orig->users()) {
+				auto *Call = dyn_cast<CallBase>(U);
+				if (!Call)
+					continue;
+				Function *Caller = Call->getFunction();
+				if (!Caller)
+					continue;
+				// Skip calls from within _tm_clone functions (internal recursion)
+				if (Caller->getName().contains(TM_CLONE_SUFFIX))
+					continue;
+				CallSites.push_back(Call);
+			}
+
+			for (auto *Call : CallSites) {
+				IRBuilder<> B(Call);
+				replaceCallWithEnqueue(Call, DispF, M, B, Ctx.H, isSync);
+				// Erase original call
+				Call->eraseFromParent();
+				modified = true;
+			}
+		}
+
+		// 6. Declare TLS globals for queue mode
+		auto getOrCreateTLS = [&](StringRef Name, Type *Ty) -> GlobalVariable * {
+			if (auto *GV = M.getGlobalVariable(Name))
+				return GV;
+			auto *GV = new GlobalVariable(M,
+			                              Ty,
+			                              false,
+			                              GlobalValue::ExternalLinkage,
+			                              nullptr,
+			                              Name);
+			GV->setThreadLocal(true);
+			return GV;
+		};
+		auto *i32Ty = Type::getInt32Ty(CtxRef);
+		getOrCreateTLS(TM_QUEUE_ACTIVE_TLS, i32Ty);
+		getOrCreateTLS(TM_PENDING_TLS, PointerType::getUnqual(CtxRef));
+
+		// 7. Inject tm_queue_init / tm_queue_shutdown in main
+		if (Function *MainFn = M.getFunction(MAIN_ANNOT)) {
+			IRBuilder<> Builder(&MainFn->getEntryBlock(),
+			                    MainFn->getEntryBlock().begin());
+			// tm_queue_init(4, 4) — can be overridden by THREADS env
+			auto *i32Ty2 = Type::getInt32Ty(CtxRef);
+			FunctionCallee QueueInit =
+			    M.getOrInsertFunction("tm_queue_init",
+			        FunctionType::get(Type::getVoidTy(CtxRef),
+			                          {i32Ty2, i32Ty2}, false));
+			Builder.CreateCall(QueueInit,
+			                   {ConstantInt::get(i32Ty2, 4),
+			                    ConstantInt::get(i32Ty2, 4)});
+
+			auto MainReturns = collectReturns(*MainFn);
+			FunctionCallee QueueShutdown =
+			    M.getOrInsertFunction("tm_queue_shutdown",
+			        FunctionType::get(Type::getVoidTy(CtxRef), {}, false));
+			for (auto *Ret : MainReturns) {
+				IRBuilder<> RetBuilder(Ret);
+				RetBuilder.CreateCall(QueueShutdown, {});
+			}
+		}
+
+		TM_DEBUG("TMQueueGlobalInitPass: %s", modified ? "modified module" : "no changes");
+		return modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
 	}
 	static bool isRequired() { return true; }
 };
@@ -614,7 +962,8 @@ class TMInstrumentCheckPass : public PassInfoMixin<TMInstrumentCheckPass>
 public:
 	PreservedAnalyses run(Function &F, FunctionAnalysisManager &)
 	{
-		if (!hasAnnotation(F, TX_ANNOT) && !F.getName().contains(TM_CLONE_SUFFIX)) {
+		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT)
+		    && !F.getName().contains(TM_CLONE_SUFFIX)) {
 			return PreservedAnalyses::all();
 		}
 		Module *M = F.getParent();
@@ -717,6 +1066,15 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
 				            MPM.addPass(AlwaysInlinerPass());
 				            MPM.addPass(
 				                createModuleToFunctionPassAdaptor(TMInstrumentPass()));
+				            MPM.addPass(TMStripLifetimePass());
+				            return true;
+			            }
+			            // ---- Queue pipeline (clone + dispatch wrapper + enqueue) ----
+			            if (Name == "tm-instrument-queue") {
+				            TM_DEBUG("Registering tm-instrument-queue pass pipeline");
+				            MPM.addPass(TMQueueGlobalInitPass());
+				            MPM.addPass(createModuleToFunctionPassAdaptor(
+				                TMInstrumentInlinePass()));
 				            MPM.addPass(TMStripLifetimePass());
 				            return true;
 			            }
