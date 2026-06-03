@@ -2,12 +2,10 @@
  * tm_region_allocator.cpp — TM Address-Space Region Allocator
  *
  * Manages a single mmap'd virtual region for all TM-tracked
- * allocations.  The region is divided into fixed-size slabs
- * (g_slab_size = TM_SLAB_PAGES × page_size).  Each thread bumps
- * from its own thread-local slab; the slow path atomically claims
- * the next slab index.
- *
- * Single-init guarded by g_region_inited (atomic CAS).
+ * allocations.  Provides per-thread free-list caching, page-based
+ * chunks with bitmaps for small allocations, and freelists for
+ * medium allocations.  Large allocations (> 4 KB) use slab bump
+ * with a small header for free-path recycling.
  */
 
 #include "../tm_region_allocator.hpp"
@@ -19,12 +17,37 @@
 
 namespace stm {
 
-// ── Global state ──────────────────────────────────────────────
+// ── Global state ──────────────────────────────────────────
 char *g_tm_region_start = nullptr;
 char *g_tm_region_end   = nullptr;
 
-// Guard to ensure single-init across all translation units.
+size_t g_slab_size         = 0;
+size_t g_chunks_per_slab   = 0;
+
+uint16_t g_sc_block_size[MAX_CLASSES];
+uint16_t g_sc_block_count[MAX_CLASSES];
+uint16_t g_sc_bitmap_bytes[MAX_CLASSES];
+uint16_t g_sc_data_off[MAX_CLASSES];
+
+std::atomic<size_t> g_next_slab_idx{0};
+size_t g_num_slabs = 0;
+
+thread_local Slab       g_tl_slab{nullptr, nullptr};
+thread_local TLFreeList g_tl_free_lists[MAX_CLASSES]{};
+thread_local void*      g_tl_hot_chunks[MAX_CLASSES]{};
+thread_local LargeHdr*  g_tl_large_free_list{nullptr};
+
 static std::atomic<int> g_region_inited{0};
+
+// ── Size class table (compile-time) ───────────────────────
+static constexpr uint16_t kSizeTable[MAX_CLASSES] = {
+    16,   24,   32,   40,   48,   56,   64,   80,
+    96,  112,  128,  160,  192,  224,  256,  320,
+   384,  448,  512,  640,  768,  896, 1024, 1280,
+  1536, 1792, 2048, 2560, 3072, 3584, 4096, 0
+};
+
+// ── tm_region_init ────────────────────────────────────────
 
 int tm_region_init() noexcept {
     if (g_region_inited.load(std::memory_order_acquire))
@@ -33,24 +56,60 @@ int tm_region_init() noexcept {
     int expected = 0;
     if (!g_region_inited.compare_exchange_strong(expected, 1,
                                                   std::memory_order_acq_rel))
-        return 0; // another thread beat us
+        return 0;
 
-    // ── Platform page size ───────────────────────────────────
     long page_size = stm::tm_page_size();
 
     size_t region_size = TM_REGION_SIZE;
+    if (sizeof(void *) == 4)
+        region_size = 512ULL * 1024 * 1024;
 
-    // On 32-bit, reduce region size to avoid virtual address exhaustion
-    if (sizeof(void *) == 4) {
-        region_size = 512ULL * 1024 * 1024; // 512 MB
-    }
-
-    // ── Compute slab size ────────────────────────────────────
+    // ── Compute slab size ─────────────────────────────────
     // Slab size = TM_SLAB_PAGES × page_size, always a page multiple.
     g_slab_size = static_cast<size_t>(TM_SLAB_PAGES) *
                   static_cast<size_t>(page_size);
+    g_chunks_per_slab = g_slab_size / CHUNK_SIZE;
 
-    // ── mmap the region ──────────────────────────────────────
+    // ── Precompute size class tables ──────────────────────
+    for (int sc = 0; sc < (int)MAX_CLASSES; sc++) {
+        uint16_t bs = kSizeTable[sc];
+        if (bs == 0) {
+            // Sentinel — no more classes
+            g_sc_block_size[sc] = 0;
+            g_sc_block_count[sc] = 0;
+            g_sc_bitmap_bytes[sc] = 0;
+            g_sc_data_off[sc] = 0;
+            break;
+        }
+
+        g_sc_block_size[sc] = bs;
+
+        if (bs <= BITMAP_THRESHOLD) {
+            // Bitmap mode: compute max blocks that fit with bitmap overhead
+            uint32_t max_try = (CHUNK_SIZE - CHUNK_HEADER_SZ) / bs;
+            uint32_t bc;
+            for (bc = max_try; bc > 0; bc--) {
+                uint32_t bm_bytes = (bc + 7) / 8;
+                uint32_t hdr_total = CHUNK_HEADER_SZ + bm_bytes;
+                uint32_t data_off = (hdr_total + 15) & ~15u;
+                uint32_t total = data_off + bc * bs;
+                if (total <= CHUNK_SIZE) {
+                    g_sc_bitmap_bytes[sc] = (uint16_t)bm_bytes;
+                    g_sc_data_off[sc]     = (uint16_t)data_off;
+                    break;
+                }
+            }
+            g_sc_block_count[sc] = (uint16_t)bc;
+        } else {
+            // Freelist mode: no bitmap overhead
+            uint32_t bc = (uint32_t)(CHUNK_SIZE - CHUNK_HEADER_SZ) / bs;
+            g_sc_block_count[sc]  = (uint16_t)bc;
+            g_sc_bitmap_bytes[sc] = 0;
+            g_sc_data_off[sc]     = CHUNK_HEADER_SZ;
+        }
+    }
+
+    // ── mmap the region ───────────────────────────────────
     void *addr = mmap(nullptr, region_size,
                       PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS,
@@ -62,30 +121,40 @@ int tm_region_init() noexcept {
         return -1;
     }
 
-    g_tm_region_start = static_cast<char *>(addr);
-    g_tm_region_end   = g_tm_region_start + region_size;
+    // Align region start up to CHUNK_SIZE so chunk_start() produces
+    // correct addresses.  Slab size (1 MB) is a multiple of CHUNK_SIZE
+    // (64 KB), so slab boundaries are also CHUNK_SIZE-aligned.
+    char *aligned_start = (char*)(((uintptr_t)addr + CHUNK_MASK) & ~CHUNK_MASK);
+    size_t aligned_size = region_size & ~CHUNK_MASK; // round down
+    if (aligned_start + aligned_size > (char*)addr + region_size)
+        aligned_size -= CHUNK_SIZE; // paranoia: stay within mmap
 
-    // ── Compute number of slabs ──────────────────────────────
-    g_num_slabs = region_size / g_slab_size;
+    g_tm_region_start = aligned_start;
+    g_tm_region_end   = aligned_start + aligned_size;
+
+    g_num_slabs = aligned_size / g_slab_size;
     g_next_slab_idx.store(0, std::memory_order_relaxed);
 
-    fprintf(stderr, "[TM-REGION] mmap %p .. %p  (%zu MB, %zu slabs of %zu B)\n",
+    fprintf(stderr,
+            "[TM-REGION] mmap %p .. %p  (%zu MB, %zu slabs, "
+            "%zu B/slab, %zu chunks/slab, %zu classes)\n",
             (void*)g_tm_region_start, (void*)g_tm_region_end,
-            region_size / (1024 * 1024), g_num_slabs, g_slab_size);
+            aligned_size / (1024 * 1024), g_num_slabs,
+            g_slab_size, g_chunks_per_slab, MAX_CLASSES);
 
     return 0;
 }
 
+// ── tm_region_destroy ─────────────────────────────────────
+
 void tm_region_destroy() noexcept {
-    // Region addresses remain valid for isTMAddress() checks even
-    // after destroy — the OS reclaims virtual memory on process exit.
-    // We DO NOT clear g_tm_region_start/end because global destructors
-    // (treap clear_subtree, etc.) may still read from the region.
-    // At process exit the virtual pages are still resident (no new
-    // physical pages are allocated to anything else).
-    //
-    // An explicit munmap is technically correct but causes crashes in
-    // global destructors that traverse TM-allocated data structures.
+    // The OS reclaims the virtual mapping at process exit.
+    // We deliberately do NOT reset g_next_slab_idx or any thread-local
+    // state, because hot-chunk pointers from earlier allocations may
+    // still reference valid headers.  Resetting the slab index would
+    // cause later allocations to reuse old slabs, corrupting headers.
+    // Tests that need full reset should call tm_region_init again
+    // (which is idempotent and reuses the existing mapping).
 }
 
 } // namespace stm
