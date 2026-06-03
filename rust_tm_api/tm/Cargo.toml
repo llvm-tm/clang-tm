@@ -15,6 +15,10 @@ dudetm  = ["runtime-dudetm"]
 tsxsgl  = ["runtime-tsxsgl"]
 nvhtm   = ["runtime-nvhtm"]
 spht    = ["runtime-spht"]
+leftright = ["runtime-leftright"]
+leftright-single = ["runtime-leftright-single"]
+romulus   = ["runtime-romulus"]
+xtm       = ["runtime-xtm"]
 
 [dependencies]
 runtime-core = { path = "../runtime/core" }
@@ -26,3 +30,7 @@ runtime-dudetm  = { path = "../runtime/dudetm", optional = true }
 runtime-tsxsgl  = { path = "../runtime/tsxsgl", optional = true }
 runtime-nvhtm   = { path = "../runtime/nvhtm", optional = true }
 runtime-spht    = { path = "../runtime/spht", optional = true }
+runtime-leftright = { path = "../runtime/leftright", optional = true }
+runtime-leftright-single = { path = "../runtime/leftright_single", optional = true }
+runtime-romulus   = { path = "../runtime/romulus", optional = true }
+runtime-xtm       = { path = "../runtime/xtm", optional = true }

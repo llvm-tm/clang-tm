@@ -339,7 +339,10 @@ if [ "$MODE" = "link-only" ]; then
         # Also compile tm_region_allocator if it exists (separate compilation unit)
         REGION_O="${OUT_DIR:?}/tm_region_allocator.o"
         if [ -f "$RUNTIMES_DIR/tm_region_allocator.cpp" ]; then
+            # Need -I for backends/ parent dir (tm_region_allocator.hpp lives there)
+            REGION_INCLUDE="-I $(dirname "$RUNTIMES_DIR")"
             $CXX -std=c++20 ${OPT_LEVEL:--O1} -c "$RUNTIMES_DIR/tm_region_allocator.cpp" -o "$REGION_O" \
+                $REGION_INCLUDE \
                 -fno-stack-protector -pthread "${CXXFLAGS[@]+"${CXXFLAGS[@]}"}"
         fi
         $CXX "${LINK_CXXFLAGS[@]}" "$INPUT" "$RUNTIME_O" "$REGION_O" -o "$OUTPUT"

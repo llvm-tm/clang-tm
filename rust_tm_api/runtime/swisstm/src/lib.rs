@@ -110,8 +110,11 @@ struct TxState {
     valid_ts: u64,                      // highest commit_ts for which read_set is validated
     cm_ts: u64,                         // contention-management timestamp (u64::MAX = none)
     write_count: u64,                   // writes performed in this TX (for cm timestamp)
+    #[allow(dead_code)]
     succ_abort_count: u64,              // consecutive aborts (for backoff)
+    #[allow(dead_code)]
     aborted: bool,
+    #[allow(dead_code)]
     tx_id: u64,
 }
 

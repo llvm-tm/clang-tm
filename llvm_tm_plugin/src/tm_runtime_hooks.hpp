@@ -5,7 +5,6 @@
 #define TM_RUNTIME_HOOKS_HPP
 
 #include <llvm/IR/DataLayout.h>
-#include "tm_method_instrumentation.hpp"
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Type.h>

@@ -36,6 +36,7 @@ struct TxState {
     write_backs: Vec<WriteBack>,
     snapshot: u64,
     read_only: bool,
+    #[allow(dead_code)]
     aborted: bool,
 }
 

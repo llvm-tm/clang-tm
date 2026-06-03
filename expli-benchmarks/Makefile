@@ -48,6 +48,21 @@ ifeq ($(BACKEND),SGL)
   DEFS     = -DTM_BACKEND_SGL
   EXTRA_INC =
 endif
+ifeq ($(BACKEND),LEFTRIGHT)
+  RUNTIME  = ../backends/runtimes/leftright_runtime.cpp
+  DEFS     = -DTM_BACKEND_LEFTRIGHT
+  EXTRA_INC = -I../backends -I../backends/LeftRight
+endif
+ifeq ($(BACKEND),ROMULUS)
+  RUNTIME  = ../backends/runtimes/romulus_runtime.cpp
+  DEFS     = -DTM_BACKEND_ROMULUS
+  EXTRA_INC = -I../backends -I../backends/Romulus
+endif
+ifeq ($(BACKEND),XTM)
+  RUNTIME  = ../backends/runtimes/xtm_runtime.cpp
+  DEFS     = -DTM_BACKEND_XTM
+  EXTRA_INC = -I../backends -I../backends/XTM
+endif
 
 BUILTINS = $(addprefix ../backends/,tm_alloc_overrides.hpp tm_common.hpp \
            tm_platform.hpp tm_spin_token.hpp tm_event_logger.hpp tm_debug.hpp)

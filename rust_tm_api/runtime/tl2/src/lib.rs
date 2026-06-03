@@ -52,10 +52,12 @@ fn lock_at_index(idx: usize) -> &'static Lock {
     &locks()[idx]
 }
 
+#[allow(dead_code)]
 fn try_lock(addr: usize) -> bool {
     lock_at_index(lock_index(addr)).try_lock_exclusive()
 }
 
+#[allow(dead_code)]
 fn unlock(addr: usize) {
     lock_at_index(lock_index(addr)).unlock_exclusive();
 }
@@ -90,6 +92,7 @@ struct TxState {
     /// Deferred write-back closures (safe to apply at commit).
     write_backs: Vec<WriteBack>,
     start_version: u64,
+    #[allow(dead_code)]
     aborted: bool,
 }
 
@@ -211,7 +214,7 @@ pub fn tm_commit() -> bool {
     }
 
     // 2. Snapshot the clock
-    let commit_version = G_CLOCK.load(Ordering::Acquire);
+    let _commit_version = G_CLOCK.load(Ordering::Acquire);
 
     // 3. Validate read-set
     if !validate_read_set(&tx.read_set) {

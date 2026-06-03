@@ -49,6 +49,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-leftright"
+version = "0.1.0"
+dependencies = [
+ "runtime-core",
+]
+
+[[package]]
+name = "runtime-leftright-single"
+version = "0.1.0"
+dependencies = [
+ "runtime-core",
+]
+
+[[package]]
 name = "runtime-norec"
 version = "0.1.0"
 dependencies = [
@@ -57,6 +71,13 @@ dependencies = [
 
 [[package]]
 name = "runtime-nvhtm"
+version = "0.1.0"
+dependencies = [
+ "runtime-core",
+]
+
+[[package]]
+name = "runtime-romulus"
 version = "0.1.0"
 dependencies = [
  "runtime-core",
@@ -98,18 +119,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-xtm"
+version = "0.1.0"
+dependencies = [
+ "runtime-core",
+]
+
+[[package]]
 name = "tm"
 version = "0.1.0"
 dependencies = [
  "runtime-core",
  "runtime-dudetm",
+ "runtime-leftright",
+ "runtime-leftright-single",
  "runtime-norec",
  "runtime-nvhtm",
+ "runtime-romulus",
  "runtime-spht",
  "runtime-swisstm",
  "runtime-tinystm",
  "runtime-tl2",
  "runtime-tsxsgl",
+ "runtime-xtm",
 ]
 
 [[package]]

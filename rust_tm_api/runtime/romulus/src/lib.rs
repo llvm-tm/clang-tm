@@ -1,0 +1,233 @@
+use std::cell::RefCell;
+use std::sync::atomic::{fence, AtomicU64, Ordering};
+
+use runtime_core::{Primitive, TypedValue, WriteBack};
+
+// ── Globals ──────────────────────────────────────────────────────
+static G_CLOCK: AtomicU64 = AtomicU64::new(1);
+static THR_COUNTER: AtomicU64 = AtomicU64::new(1);
+static G_TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
+static COMMIT_LOCK: AtomicU64 = AtomicU64::new(0);
+
+const VERSION_TABLE_SIZE: usize = 1 << 20;
+static VERSION_TABLE: [AtomicU64; VERSION_TABLE_SIZE] =
+    [const { AtomicU64::new(0) }; VERSION_TABLE_SIZE];
+
+fn version_index(addr: usize) -> usize {
+    (addr >> 3) & (VERSION_TABLE_SIZE - 1)
+}
+
+// ── Thread-local state ──────────────────────────────────────────
+struct TxState {
+    timestamp: u64,
+    read_only: bool,
+    write_set: std::collections::HashMap<usize, TypedValue>,
+    write_backs: Vec<WriteBack>,
+}
+
+thread_local! {
+    static TX: RefCell<Option<Box<TxState>>> = const { RefCell::new(None) };
+}
+
+fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
+    TX.with(|tx| {
+        let mut b = tx.borrow_mut();
+        f(b.as_mut().expect("TX not active"))
+    })
+}
+
+fn tx_active() -> bool {
+    TX.with(|tx| tx.borrow().is_some())
+}
+
+fn flush_tx() -> Option<Box<TxState>> {
+    TX.with(|tx| tx.borrow_mut().take())
+}
+
+// ── Init ─────────────────────────────────────────────────────────
+pub fn tm_init() {
+    G_CLOCK.store(1, Ordering::Release);
+    THR_COUNTER.store(1, Ordering::Release);
+    for vt in VERSION_TABLE.iter() {
+        vt.store(0, Ordering::Release);
+    }
+}
+
+pub fn tm_exit() {}
+
+pub fn tm_init_thread() {}
+pub fn tm_exit_thread() {}
+
+// ── Clock helpers ────────────────────────────────────────────────
+fn get_clock() -> u64 {
+    G_CLOCK.load(Ordering::Acquire)
+}
+
+fn increment_clock() -> u64 {
+    G_CLOCK.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+// ── Begin ────────────────────────────────────────────────────────
+pub fn tm_begin() {
+    let ts = get_clock();
+    THR_COUNTER.fetch_add(1, Ordering::AcqRel);
+    TX.with(|tx| {
+        let t = Box::new(TxState {
+            timestamp: ts,
+            read_only: true,
+            write_set: std::collections::HashMap::new(),
+            write_backs: Vec::new(),
+        });
+        *tx.borrow_mut() = Some(t);
+    });
+}
+
+// ── Abort ────────────────────────────────────────────────────────
+pub fn tm_abort() {
+    flush_tx();
+}
+
+pub fn tm_abort_count() -> u64 {
+    G_TM_ABORT_COUNT.load(Ordering::Relaxed)
+}
+
+// ── Commit ───────────────────────────────────────────────────────
+pub fn tm_commit() -> bool {
+    let tx = match flush_tx() {
+        Some(t) => t,
+        None => return true,
+    };
+    fence(Ordering::SeqCst);
+
+    if tx.read_only || tx.write_set.is_empty() {
+        return true;
+    }
+
+    // Acquire commit lock (serializes write-back, prevents version/data race)
+    while COMMIT_LOCK
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        std::hint::spin_loop();
+    }
+
+    // Verify no version-table entry has changed since our snapshot
+    for &addr in tx.write_set.keys() {
+        let idx = version_index(addr);
+        let ver = VERSION_TABLE[idx].load(Ordering::Acquire);
+        if ver > tx.timestamp {
+            COMMIT_LOCK.store(0, Ordering::Release);
+            G_TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+    }
+
+    // Increment clock for ordering
+    let commit_ts = increment_clock();
+
+    // Write-back BEFORE updating version table (avoids version/data race)
+    for wb in tx.write_backs {
+        wb.apply();
+    }
+    fence(Ordering::SeqCst);
+
+    // Update version table AFTER write-back
+    for &addr in tx.write_set.keys() {
+        let idx = version_index(addr);
+        VERSION_TABLE[idx].store(commit_ts, Ordering::Release);
+    }
+
+    COMMIT_LOCK.store(0, Ordering::Release);
+    true
+}
+
+// ── Read word ────────────────────────────────────────────────────
+fn read_word<T: Primitive>(addr: usize) -> T {
+    fence(Ordering::SeqCst);
+    if !tx_active() {
+        return unsafe { (addr as *const T).read() };
+    }
+
+    // Check own write-set
+    if let Some(tv) = with_tx(|tx| tx.write_set.get(&addr).cloned()) {
+        return T::from_typed(&tv);
+    }
+
+    let val: T = unsafe { (addr as *const T).read() };
+    val
+}
+
+// ── Write word ───────────────────────────────────────────────────
+fn write_word<T: Primitive>(addr: usize, val: T) {
+    fence(Ordering::SeqCst);
+    if !tx_active() {
+        unsafe { (addr as *mut T).write(val); }
+        return;
+    }
+
+    let tv = val.to_typed();
+    with_tx(|tx| {
+        tx.read_only = false;
+        tx.write_set.insert(addr, tv.clone());
+        tx.write_backs.push(tv.into_write_back(addr));
+    });
+}
+
+// ── Typed read/write wrappers ────────────────────────────────────
+macro_rules! def_read {
+    ($n:ident, $t:ty) => {
+        #[inline]
+        pub fn $n(addr: *mut $t) -> $t {
+            read_word::<$t>(addr as usize)
+        }
+    };
+}
+macro_rules! def_write {
+    ($n:ident, $t:ty) => {
+        #[inline]
+        pub fn $n(addr: *mut $t, val: $t) {
+            write_word::<$t>(addr as usize, val)
+        }
+    };
+}
+
+def_read!(tm_read_u8, u8);
+def_read!(tm_read_u16, u16);
+def_read!(tm_read_u32, u32);
+def_read!(tm_read_u64, u64);
+def_read!(tm_read_i8, i8);
+def_read!(tm_read_i16, i16);
+def_read!(tm_read_i32, i32);
+def_read!(tm_read_i64, i64);
+def_read!(tm_read_f32, f32);
+def_read!(tm_read_f64, f64);
+
+def_write!(tm_write_u8, u8);
+def_write!(tm_write_u16, u16);
+def_write!(tm_write_u32, u32);
+def_write!(tm_write_u64, u64);
+def_write!(tm_write_i8, i8);
+def_write!(tm_write_i16, i16);
+def_write!(tm_write_i32, i32);
+def_write!(tm_write_i64, i64);
+def_write!(tm_write_f32, f32);
+def_write!(tm_write_f64, f64);
+
+pub fn tm_read_ptr<T>(addr: *mut *mut T) -> *mut T {
+    let v = read_word::<u64>(addr as usize);
+    v as *mut T
+}
+pub fn tm_write_ptr<T>(addr: *mut *mut T, val: *mut T) {
+    write_word::<u64>(addr as usize, val as u64);
+}
+
+pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) {
+    for (i, d) in dst.iter_mut().enumerate() {
+        *d = read_word::<u8>(addr as usize + i);
+    }
+}
+pub fn tm_write_raw(addr: *mut u8, src: &[u8]) {
+    for (i, &s) in src.iter().enumerate() {
+        write_word::<u8>(addr as usize + i, s);
+    }
+}

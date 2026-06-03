@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::cell::RefCell;
-use tm::{transaction, TmCell, Transaction};
+use tm::{transaction, TmCell};
 use crate::Rng;
 use super::Config;
 
@@ -17,7 +17,7 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
         for tid in 0..config.threads {
             let g = grid.clone();
             let sc = stop;
-            let so = ops.clone();
+            let so = ops;
             s.spawn(move || {
                 let rng = RefCell::new(Rng::new(tid as u64 * 12345 + 42));
                 while !sc.load(Ordering::Relaxed) {
@@ -29,7 +29,7 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
                     let dz = (rng.borrow_mut().next() % config.grid_z as u64) as usize;
 
                     let _ = transaction(|tx| {
-                        fn idx(xs: usize, ys: usize, zs: usize, x: usize, y: usize, z: usize) -> usize {
+                        fn idx(xs: usize, ys: usize, _zs: usize, x: usize, y: usize, z: usize) -> usize {
                             z * xs * ys + y * xs + x
                         }
                         let grid: &[TmCell<i32>] = &*g;

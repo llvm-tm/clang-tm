@@ -84,6 +84,7 @@ impl TaskList {
         tx.write(&self.to_ids[i], to);
         tx.write(&self.count, (i + 1) as i32);
     }
+    #[allow(dead_code)]
     fn push_setup(&self, op: i32, from: i32, to: i32, score: f64) {
         let i = unsafe { *self.count.ptr() } as usize;
         if i >= MAX_TASKS { return; }
@@ -118,6 +119,7 @@ impl TaskList {
         tx.write(&self.count, last as i32);
         t
     }
+    #[allow(dead_code)]
     fn peek_empty(&self) -> bool { let v = unsafe { *self.count.ptr() }; v == 0 }
 }
 
@@ -255,7 +257,7 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
                 (rng.next() % 2) as i32
             } else {
                 let mut key = rng.next();
-                for &p in &parents_init[v] {
+                for &_p in &parents_init[v] {
                     key = key.wrapping_mul(31).wrapping_add(key);
                 }
                 (key % 2) as i32
@@ -295,7 +297,7 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
         for tid in 0..config.threads.max(1).min(2) { // at most 2 threads for bayes
             let d = data.clone();
             let sc = stop;
-            let so = ops.clone();
+            let so = ops;
             let go = &g_ops;
             let chunk = num_var / config.threads.max(1);
             let start = tid * chunk;

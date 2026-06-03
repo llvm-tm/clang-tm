@@ -58,10 +58,12 @@ fn lock_at_index(idx: usize) -> &'static Lock {
     &locks()[idx]
 }
 
+#[allow(dead_code)]
 fn try_lock(addr: usize) -> bool {
     lock_at_index(lock_index(addr)).try_lock_exclusive()
 }
 
+#[allow(dead_code)]
 fn unlock(addr: usize) {
     lock_at_index(lock_index(addr)).unlock_exclusive();
 }
@@ -90,7 +92,9 @@ pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
 // ── Redo log entry ──────────────────────────────────────
 #[derive(Clone)]
 struct RedoEntry {
+    #[allow(dead_code)]
     addr: usize,
+    #[allow(dead_code)]
     val: TypedValue,
     commit_marker: bool, // true = this is a commit marker, not a data entry
 }
@@ -102,6 +106,7 @@ struct TxState {
     /// Deferred write-back closures (safe to apply at commit).
     write_backs: Vec<WriteBack>,
     start_version: u64,
+    #[allow(dead_code)]
     aborted: bool,
 }
 

@@ -22,13 +22,13 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
         for tid in 0..config.threads {
             let ht = table.clone();
             let sc = stop;
-            let so = ops.clone();
+            let so = ops;
             let ins = &g_inserts;
             let del = &g_deletes;
             s.spawn(move || {
                 let rng = RefCell::new(Rng::new(tid as u64 * 12345 + 42));
                 let atoms: Vec<(u32, u32)> = (0..config.num_atoms)
-                    .map(|i| {
+                    .map(|_i| {
                         let len = (rng.borrow_mut().next() % config.max_length as u64) as u32 + 1;
                         let val = (rng.borrow_mut().next() % 10000) as u32;
                         (val, len)
