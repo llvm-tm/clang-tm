@@ -6,7 +6,7 @@
 #include <csetjmp>
 #include <cstdio>
 #include <cstdlib>
-#include "../tm_alloc_overrides.hpp"
+#include "tm_alloc_overrides.hpp"
 thread_local bool g_in_tx = false;
 #include <algorithm>
 #include <fcntl.h>
@@ -14,7 +14,7 @@ thread_local bool g_in_tx = false;
 #include <sys/mman.h>
 #include <sys/stat.h>
 
-#include "../rel_ptr.hpp"
+#include "rel_ptr.hpp"
 
 static std::mutex global_tx_lock;
 static std::atomic<bool> initialized{false};

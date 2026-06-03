@@ -9,8 +9,8 @@
 #include <unistd.h>
 #include <unordered_set>
 
-#include "../SwissTM/SwissTM.hpp"
-#include "../tm_alloc_overrides.hpp"
+#include "SwissTM/SwissTM.hpp"
+#include "tm_alloc_overrides.hpp"
 
 thread_local bool g_in_tx = false;
 thread_local FreeNode* g_deferred_frees = nullptr;

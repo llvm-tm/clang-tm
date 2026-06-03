@@ -8,40 +8,8 @@ name = "benchmarks"
 path = "src/lib.rs"
 
 [[bin]]
-name = "bank"
-path = "src/bin/bank.rs"
-
-[[bin]]
-name = "stmbench7"
-path = "src/bin/stmbench7.rs"
-
-[[bin]]
 name = "datastructures"
 path = "src/bin/datastructures.rs"
-
-[[bin]]
-name = "eigenbench"
-path = "src/bin/eigenbench.rs"
-
-[[bin]]
-name = "stamp"
-path = "src/bin/stamp.rs"
-
-[[bin]]
-name = "tpcc"
-path = "src/bin/tpcc.rs"
-
-[[bin]]
-name = "ycsb"
-path = "src/bin/ycsb.rs"
-
-[[bin]]
-name = "fuzz_counter"
-path = "src/bin/fuzz_counter.rs"
-
-[[bin]]
-name = "fuzz_bank"
-path = "src/bin/fuzz_bank.rs"
 
 [features]
 default = ["wbctl"]

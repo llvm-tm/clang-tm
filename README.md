@@ -88,21 +88,19 @@ Each benchmark directory has its own Makefile with targets named
 `<name>_<backend>`:
 
 ```bash
-make -C benchmarks/test/bank bank_norec bank_tl2 bank_singlelock bank_tinystm
-make -C benchmarks/datastructures avltree_NOrec avltree_SingleGlobalLock
-make -C benchmarks/STMbench7 stmbench_singlelock stmbench_tl2 stmbench_tinystm
-make -C benchmarks/STAMP stamp_tinystm
-make -C benchmarks/YCSB ycsb_singlelock
-make -C benchmarks/EigenBench eigen_singlelock
+make -C plugin-benchmarks/bank bank_norec bank_tl2 bank_singlelock bank_tinystm
+make -C plugin-benchmarks/datastructures avltree_NOrec avltree_SingleGlobalLock
+make -C plugin-benchmarks/STMbench7 stmbench_singlelock stmbench_tl2 stmbench_tinystm
+make -C plugin-benchmarks/STAMP stamp_tinystm
+make -C plugin-benchmarks/ycsb ycsb_singlelock
+make -C plugin-benchmarks/eigenbench eigen_singlelock
 ```
 
 ### 4. Build backends unit tests
 
 ```bash
-make -C backends/tests all
-make -C backends/tests run                    # Run all tests
-make -C backends/tests test_tl2_simple         # Single test
-make -C backends/tests tinystm_all             # All 3 TinySTM flavors
+make -C tests/backends all
+make -C tests/backends run                    # Run all tests
 ```
 
 ## The Compilation Pipeline
@@ -227,27 +225,27 @@ Results go to `benchmark_results/<mode>_<timestamp>/` with a `SUMMARY.txt`.
 
 ```bash
 # Bank (money conservation test)
-benchmarks/test/bank/bin/bank_singlelock -t 4 -a 256 -d 3000 -r 10 -w 0
+plugin-benchmarks/bank/bin/bank_singlelock -t 4 -a 256 -d 3000 -r 10 -w 0
 #   -t threads  -a accounts  -d duration_ms  -r %read-all  -w %write-all
 
 # Data structures
-benchmarks/datastructures/bin/avltree_SingleGlobalLock 4 10000 3000 80 10 10
+plugin-benchmarks/datastructures/bin/avltree_SingleGlobalLock 4 10000 3000 80 10 10
 #   threads  init_size  duration_ms  %read  %insert  %remove
 
 # STMbench7 (complex CAD/CAM graph)
-benchmarks/STMbench7/bin/stmbench_singlelock -t 4 -d 3000 -w 1
+plugin-benchmarks/stmbench7/bin/stmbench_singlelock -t 4 -d 3000 -w 1
 #   -t threads  -d duration_ms  -w workload(1=90%read/10%write)
 
 # STAMP (Stanford TM benchmarks, TinySTM only)
-benchmarks/STAMP/bin/stamp_tinystm -t 2 -d 5000 -b genome
+plugin-benchmarks/STAMP/bin/stamp_tinystm -t 2 -d 5000 -b genome
 #   -t threads  -d duration_ms  -b benchmark
 
 # YCSB (cloud serving benchmark)
-benchmarks/YCSB/bin/ycsb_singlelock -t 4 -d 3000 -w A -k 10000 -i 1000
+plugin-benchmarks/ycsb/bin/ycsb_singlelock -t 4 -d 3000 -w A -k 10000 -i 1000
 #   -t threads  -d ms  -w workload  -k key_range  -i initial_records
 
 # EigenBench (synthetic TM characterization)
-benchmarks/EigenBench/bin/eigen_singlelock -t 2 -d 2000
+plugin-benchmarks/eigenbench/bin/eigen_singlelock -t 2 -d 2000
 ```
 
 ## Assessing Instrumentation Overhead
@@ -480,8 +478,8 @@ suitable for TM workloads (no pointer-based data structures like red-black trees
 ### Test Suite
 
 ```bash
-make -C expli_benchmarks test         # 207 ds tests + 114 tx tests
-make -C expli_benchmarks run-tests    # same
+make -C expli-benchmarks test         # 207 ds tests + 114 tx tests
+make -C expli-benchmarks run-tests    # same
 ```
 
 ## Backend Reference
@@ -531,7 +529,7 @@ TX PSTATIC_REBUILD void rebuild() {
 }
 ```
 
-The plugin calls `rebuild()` automatically after `tm_init()` restores the arrays. Because it's `TX`, allocations go to the persistent heap. See `benchmarks/persistent_kv_stdmap.cpp`.
+The plugin calls `rebuild()` automatically after `tm_init()` restores the arrays. Because it's `TX`, allocations go to the persistent heap. See `plugin-benchmarks/persistent_kv_stdmap.cpp`.
 
 **Important:** Call `g_map.clear()` before `main` returns to avoid the `std::map` destructor accessing the unmapped mmap after `tm_exit()`.
 
@@ -592,7 +590,7 @@ The `backends/tm_event_logger.hpp` header provides a per-thread ring-buffer
 event logger for debugging TM backend crashes.  Activate with `-DTM_EVENT_LOG`:
 
 ```bash
-make CXXFLAGS="-std=c++20 -O0 -pthread -g -DTM_EVENT_LOG" -C backends/tests run
+make CXXFLAGS="-std=c++20 -O0 -pthread -g -DTM_EVENT_LOG" -C tests/backends run
 ```
 
 The logger records TX begin/abort/commit, lock acquire/release, read/write-set

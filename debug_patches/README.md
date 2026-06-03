@@ -14,7 +14,7 @@ in the source but compiles to zero overhead unless activated:
 
 ```bash
 # Build with event logging
-make CXXFLAGS="-DTM_EVENT_LOG -UNDEBUG" -C backends/tests clean all
+make CXXFLAGS="-DTM_EVENT_LOG -UNDEBUG" -C tests/backends clean all
 
 # Run with SIGSEGV auto-dump
 ./bin/test_foo

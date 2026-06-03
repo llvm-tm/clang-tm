@@ -16,9 +16,9 @@
 #include <csignal>
 #include <random>
 
-#include "../tm_spin_token.hpp"
-#include "../tm_event_logger.hpp"
-#include "../tm_platform.hpp"
+#include "tm_spin_token.hpp"
+#include "tm_event_logger.hpp"
+#include "tm_platform.hpp"
 #include "tinystm_common.hpp"
 
 extern "C" {

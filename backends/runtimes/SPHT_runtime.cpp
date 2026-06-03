@@ -18,9 +18,9 @@
 #include <unistd.h>
 #include <new>
 
-#include "../tm_common.hpp"
-#include "../SPHT/spht_globals.hpp"
-#include "../tm_alloc_overrides.hpp"
+#include "tm_common.hpp"
+#include "SPHT/spht_globals.hpp"
+#include "tm_alloc_overrides.hpp"
 
 thread_local bool g_in_tx = false;
 thread_local FreeNode *g_deferred_frees = nullptr;

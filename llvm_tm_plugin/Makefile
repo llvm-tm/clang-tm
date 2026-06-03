@@ -49,7 +49,7 @@ BACKENDS_DIR := ../backends
 TINYSTM_DIR := $(BACKENDS_DIR)/TinySTM
 
 SRC_DIR := src
-TEST_DIR := test
+TEST_DIR := ../tests/plugin
 
 PLUGIN_VARIANTS  = release no_setjmp no_rw no_malloc minimal debug
 PLUGIN_FLAGS_release       = -DNDEBUG

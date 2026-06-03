@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "../../tm_bit_ops.hpp"  // for bit (read/write/clear) if needed
+// #include "backends/tm_bit_ops.hpp"  // not present in project
 #include <cstdint>
 #include <cstring>
 

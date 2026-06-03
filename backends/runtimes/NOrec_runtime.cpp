@@ -10,7 +10,7 @@
 #include <mutex>
 #include <new>
 #include "NOrec_globals.hpp"
-#include "../tm_alloc_overrides.hpp"
+#include "tm_alloc_overrides.hpp"
 
 // Debug: catch absurd operator new sizes with backtrace
 void* operator new(size_t size) {
