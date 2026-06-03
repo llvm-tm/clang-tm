@@ -336,7 +336,13 @@ if [ "$MODE" = "link-only" ]; then
         RUNTIME_O="${OUT_DIR:?}/tm_runtime.o"
         $CXX -std=c++20 ${OPT_LEVEL:--O1} -c "$RESOLVED_RUNTIME" -o "$RUNTIME_O" \
             -fno-stack-protector -pthread "${CXXFLAGS[@]+"${CXXFLAGS[@]}"}"
-        $CXX "${LINK_CXXFLAGS[@]}" "$INPUT" "$RUNTIME_O" -o "$OUTPUT"
+        # Also compile tm_region_allocator if it exists (separate compilation unit)
+        REGION_O="${OUT_DIR:?}/tm_region_allocator.o"
+        if [ -f "$RUNTIMES_DIR/tm_region_allocator.cpp" ]; then
+            $CXX -std=c++20 ${OPT_LEVEL:--O1} -c "$RUNTIMES_DIR/tm_region_allocator.cpp" -o "$REGION_O" \
+                -fno-stack-protector -pthread "${CXXFLAGS[@]+"${CXXFLAGS[@]}"}"
+        fi
+        $CXX "${LINK_CXXFLAGS[@]}" "$INPUT" "$RUNTIME_O" "$REGION_O" -o "$OUTPUT"
     else
         $CXX "${LINK_CXXFLAGS[@]}" "$INPUT" "$RESOLVED_RUNTIME" -o "$OUTPUT"
     fi
