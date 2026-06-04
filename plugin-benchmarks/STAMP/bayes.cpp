@@ -1,5 +1,5 @@
-// Bayes — C++ port of the original STAMP spec (explicit API path)
-// Uses tm_read_i8/tm_write_i8 + tx_run() for TM access.
+// Bayes — C++ port of the original STAMP spec (LLVM plugin path)
+// Auto-instrumented via __attribute__((annotate("transaction"))).
 //
 // Original spec: https://github.com/ccaominh/stamp/tree/master/bayes
 //
@@ -50,37 +50,16 @@ static inline double l2d(long v) { double r; memcpy(&r, &v, sizeof(r)); return r
 
 // ── TM abstraction ──────────────────────────────────────────────────
   extern "C" {
-      void     tm_begin();
-      void     tm_end();
-      long     tm_read_i8(const long*);
-      void     tm_write_i8(long*, long);
       void     tm_init();
       void     tm_exit();
       void     tm_init_thread();
       void     tm_exit_thread();
       void*    tm_calloc(size_t, size_t);
   }
-  extern __thread int32_t tm_nested_call_counter;
-  extern __thread sigjmp_buf tm_jmpbuf;
-
-  #define TX_FUNC
-  #define TM_GLOBAL
-  #define TM_READ_I8(p)     tm_read_i8((const long*)(p))
-  #define TM_WRITE_I8(p, v) tm_write_i8((long*)(p), (long)(v))
-
-  template<typename F>
-  static void tx_run(F&& body) {
-      volatile bool done = false;
-      while (!done) {
-          sigsetjmp(tm_jmpbuf, 0);
-          tm_nested_call_counter = 1;
-          tm_begin();
-          body();
-          tm_end();
-          done = true;
-      }
-      tm_nested_call_counter = 0;
-  }
+  #define TX_FUNC      __attribute__((annotate("transaction"), noinline))
+  #define TM_GLOBAL    __attribute__((annotate("tm")))
+  #define TM_READ_I8(p)     (*(const long*)(p))
+  #define TM_WRITE_I8(p, v) (*(long*)(p) = (long)(v))
 
 #define TM_READ_DOUBLE(p)    l2d(TM_READ_I8((const long*)(p)))
 #define TM_WRITE_DOUBLE(p,v) TM_WRITE_I8((long*)(p), d2l(v))
@@ -284,11 +263,9 @@ static void worker(int tid) {
         std::lock_guard<std::mutex> lock(g_init_mutex);
         for (int v = start; v < end; v++) {
             double ll = compute_density_ll(v, {});
-            tx_run([&]() {
-                TM_WRITE_DOUBLE(&g_local_ll[v], ll);
-                TM_WRITE_DOUBLE(g_base_log_likelihood,
-                                 TM_READ_DOUBLE(g_base_log_likelihood) + ll);
-            });
+            TM_WRITE_DOUBLE(&g_local_ll[v], ll);
+            TM_WRITE_DOUBLE(g_base_log_likelihood,
+                             TM_READ_DOUBLE(g_base_log_likelihood) + ll);
         }
     }
 
@@ -296,19 +273,16 @@ static void worker(int tid) {
     {
         std::lock_guard<std::mutex> lock(g_init_mutex);
         for (int v = start; v < end; v++) {
-            double base_ll;
-            tx_run([&]() { base_ll = TM_READ_DOUBLE(&g_local_ll[v]); });
+            double base_ll = TM_READ_DOUBLE(&g_local_ll[v]);
             for (int from = 0; from < nvar; from++) {
                 if (from == v) continue;
                 double with_ll = compute_density_ll(v, {from});
                 if (with_ll > base_ll) {
                     double delta = with_ll - base_ll;
                     Task t = {0, from, v, 0.0};
-                    tx_run([&]() {
-                        t.score = g_base_penalty +
-                                  g_num_record * (TM_READ_DOUBLE(g_base_log_likelihood) + delta);
-                    });
-                    tx_run([&]() { insert_task(t); });
+                    t.score = g_base_penalty +
+                              g_num_record * (TM_READ_DOUBLE(g_base_log_likelihood) + delta);
+                    insert_task(t);
                 }
             }
         }
@@ -317,16 +291,16 @@ static void worker(int tid) {
     // ── Phase 3: work loop ──
     for (;;) {
         Task t;
-        tx_run([&]() { t = pop_best_task(); });
+        t = pop_best_task();
         if (t.op < 0) break;
 
         bool ok = false;
-        tx_run([&]() { ok = apply_insert(t); });
+        ok = apply_insert(t);
         if (ok) {
             Task next;
-            tx_run([&]() { next = find_best_insert(t.to_id); });
+            next = find_best_insert(t.to_id);
             if (next.op >= 0) {
-                tx_run([&]() { insert_task(next); });
+                insert_task(next);
             }
             g_total_ops.fetch_add(1, std::memory_order_relaxed);
         }
@@ -356,7 +330,7 @@ int main(int argc, char* argv[]) {
     printf("  Threads:     %ld\n", g_num_threads);
     printf("  Seed:        %u\n", g_seed);
     printf("  Path:        %s\n",
-           "Explicit API"
+           "LLVM plugin"
     );
 
     // ── Allocate TM data ──

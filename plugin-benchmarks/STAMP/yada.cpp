@@ -1,5 +1,5 @@
-// Yada — C++ port of the original STAMP spec (explicit API path)
-// Uses tm_read_i8/tm_write_i8 + tx_run() for TM access.
+// Yada — C++ port of the original STAMP spec (LLVM plugin path)
+// Auto-instrumented via __attribute__((annotate("transaction"))).
 //
 // Original spec: https://github.com/ccaominh/stamp/tree/master/yada
 //
@@ -54,37 +54,16 @@ static inline double l2d(long v) { double r; memcpy(&r, &v, sizeof(r)); return r
 
 // ── TM abstraction ──────────────────────────────────────────────────
   extern "C" {
-      void     tm_begin();
-      void     tm_end();
-      long     tm_read_i8(const long*);
-      void     tm_write_i8(long*, long);
       void     tm_init();
       void     tm_exit();
       void     tm_init_thread();
       void     tm_exit_thread();
       void*    tm_calloc(size_t, size_t);
   }
-  extern __thread int32_t tm_nested_call_counter;
-  extern __thread sigjmp_buf tm_jmpbuf;
-
-  #define TX_FUNC
-  #define TM_GLOBAL
-  #define TM_READ_I8(p)     tm_read_i8((const long*)(p))
-  #define TM_WRITE_I8(p, v) tm_write_i8((long*)(p), (long)(v))
-
-  template<typename F>
-  static void tx_run(F&& body) {
-      volatile bool done = false;
-      while (!done) {
-          sigsetjmp(tm_jmpbuf, 0);
-          tm_nested_call_counter = 1;
-          tm_begin();
-          body();
-          tm_end();
-          done = true;
-      }
-      tm_nested_call_counter = 0;
-  }
+  #define TX_FUNC      __attribute__((annotate("transaction"), noinline))
+  #define TM_GLOBAL    __attribute__((annotate("tm")))
+  #define TM_READ_I8(p)     (*(const long*)(p))
+  #define TM_WRITE_I8(p, v) (*(long*)(p) = (long)(v))
 
 // ── Element data (flat arrays in TM region for TM-accessed fields) ──
 static long* g_elem_encroached   = nullptr; // [MAX_ELEMENTS]
@@ -368,7 +347,7 @@ static void worker(int tid) {
 
     while (!g_stop.load(std::memory_order_relaxed)) {
         int el_id;
-        tx_run([&]() { pop_work_best(&el_id); });
+        pop_work_best(&el_id);
         if (el_id < 0) continue;
 
         // Quick check outside TX
@@ -380,14 +359,12 @@ static void worker(int tid) {
         long old_count = g_elem_count;
 
         // Refine
-        tx_run([&]() {
-            refine_element(el_id, before_ids, border_edges, bad_ids, bfs_queue);
-        });
+        refine_element(el_id, before_ids, border_edges, bad_ids, bfs_queue);
 
         long num_new = g_elem_count - old_count;
         if (num_new > 0) {
             // Push bad new elements
-            tx_run([&]() { push_bad_ids(bad_ids); });
+            push_bad_ids(bad_ids);
             g_total_ops.fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -408,7 +385,7 @@ int main(int argc, char* argv[]) {
     printf("  Jitter:           %.2f\n", g_jitter);
     printf("  Threads:          %ld\n", g_num_threads);
     printf("  Path:             %s\n",
-           "Explicit API"
+           "LLVM plugin"
     );
 
     // ── Allocate TM data ──
