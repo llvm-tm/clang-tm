@@ -22,6 +22,7 @@
 
 extern "C" {
 extern __thread int32_t tm_nested_call_counter;
+extern thread_local bool g_tm_expli_mode;
 }
 
 namespace tinystm
@@ -169,6 +170,28 @@ compareByAddr(     //
 	return (word_t)a < (word_t)b;
 }
 
+// Helper: determine stack bounds for the current thread.
+// Cached per-thread to avoid repeated pthread calls.
+struct StackBounds {
+	void *lo, *hi;
+};
+inline const StackBounds &get_stack_bounds() {
+	thread_local StackBounds cached = {nullptr, nullptr};
+	if (!cached.lo) {
+		pthread_t self = pthread_self();
+		void *hi = pthread_get_stackaddr_np(self);
+		size_t sz = pthread_get_stacksize_np(self);
+		cached.lo = static_cast<char *>(hi) - sz;
+		cached.hi = hi;
+	}
+	return cached;
+}
+
+inline bool is_stack_addr(void *addr) {
+	const auto &b = get_stack_bounds();
+	return addr >= b.lo && addr < b.hi;
+}
+
 inline bool //
 commit()    //
 {
@@ -187,6 +210,14 @@ commit()    //
 			sorted_addrs.push_back(it.first);
 		std::sort(sorted_addrs.begin(), sorted_addrs.end(), compareByAddr);
 		for (void *addr : sorted_addrs) {
+			// Stack addresses are transient local variables — they don't need
+			// inter-thread locking (stack is per-thread), and writing back to
+			// a stack address whose frame has been popped would corrupt the
+			// current function's stack.  Skip lock acquisition for stack.
+			if (is_stack_addr(addr)) continue;
+			// Null/low addresses from linked-list traversal bugs: don't lock
+			// (there's nothing to write back) and assert on the read-side.
+			if (addr == nullptr || (uintptr_t)addr < 0x100000) continue;
 			auto &w = tx->write_set[addr];
 			ByteOffset bo((word_t)addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
@@ -235,6 +266,14 @@ commit()    //
 		for (auto &it : tx->write_set) {
 			auto &addr = it.first;
 			auto &w = it.second;
+			// Skip stack addresses in plugin path — they come from dead
+			// _tm_clone frames and writing back corrupts the current stack.
+			// In expli API path, TM fields on the stack need write-back.
+			if (!g_tm_expli_mode && is_stack_addr(addr)) continue;
+			// Skip null/low addresses — the plugin can generate these during
+			// linked-list traversal (e.g., null _M_next pointer in std::map).
+			// The read path already handles them; the write path must as well.
+			if (addr == nullptr || (uintptr_t)addr < 0x100000) continue;
 			if ((uintptr_t)addr > 0x7FFFFFFFFFFFULL) {
 				fprintf(stderr, "BAD WRITE-BACK ADDR: addr=%p type=%d val.u8=%llu\n",
 				        addr, (int)w.type, (unsigned long long)w.new_val.u8);
@@ -249,6 +288,9 @@ commit()    //
 		for (auto &it : tx->write_set) {
 			auto &addr = it.first;
 			auto &w = it.second;
+			if (is_stack_addr(addr)) continue;
+			// Same null-guard as write-back for consistency
+			if (addr == nullptr || (uintptr_t)addr < 0x100000) continue;
 			ByteOffset bo((word_t)addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 			if (!lock->is_locked_by(tx->id)) {
@@ -261,7 +303,7 @@ commit()    //
 				lock->unlock(tx->id);
 			} else {
 				TM_ASSERT(lock->get_version() <= commit_version,
-				               "Lock version updated while locked");
+				               "Lock version not updated");
 				lock->unlock_with_version(tx->id, commit_version);
 			}
 			TM_EVENT2(LOCK_RELEASE, (uint64_t)lock, (uint64_t)addr, commit_version);

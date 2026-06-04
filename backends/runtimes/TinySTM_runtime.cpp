@@ -10,25 +10,46 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <execinfo.h>
 #include <mutex>
+#include <pthread.h>
 #include <thread>
 #include <unistd.h>
 #include <unordered_set>
 
 #include "tinystm_globals.hpp"
 #include "tm_alloc_overrides.hpp"
+#include "tm_thread_state.hpp"
+__thread int32_t tm_nested_call_counter = 0;
+thread_local bool g_tm_expli_mode = false;
 thread_local bool g_in_tx = false;
 thread_local FreeNode* g_deferred_frees = nullptr;
 thread_local std::unordered_set<void*> g_deferred_frees_set;
 thread_local SpecAlloc* g_spec_allocs = nullptr;
 
+static pthread_once_t g_tm_state_key_once = PTHREAD_ONCE_INIT;
+static pthread_key_t g_tm_state_key;
+
+static void make_tm_state_key() {
+    pthread_key_create(&g_tm_state_key, NULL);
+}
+
 extern "C" {
 
-__thread int32_t tm_nested_call_counter;
-__thread int32_t tm_longjmp_ret;
 __thread sigjmp_buf tm_jmpbuf;
 __thread int tm_init_thread_call_count = 0;
+
+TMThreadState *tm_get_thread_state() {
+    pthread_once(&g_tm_state_key_once, make_tm_state_key);
+    TMThreadState *state = (TMThreadState *)pthread_getspecific(g_tm_state_key);
+    if (!state) {
+        void *mem = stm::tm_region_malloc(sizeof(TMThreadState));
+        state = new (mem) TMThreadState{0, 0};
+        pthread_setspecific(g_tm_state_key, state);
+    }
+    return state;
+}
 
 // Mutex removed — TinySTM's own lock acquisition handles concurrency,
 // and a std::mutex around commit() leaks across siglongjmp from abort_tx()
@@ -102,20 +123,38 @@ void tm_begin()
 {
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
-	if (tm_nested_call_counter == 1) { g_in_tx = true;
+	auto *ts = tm_get_thread_state();
+	// Detect path: expli API sets tm_nested_call_counter,
+	// LLVM plugin sets ts->nested_call_counter via GEP/store.
+	int32_t tc = tm_nested_call_counter;
+	int32_t sc = ts->nested_call_counter;
+	if (tc > 0 && sc == 0)
+		g_tm_expli_mode = true;
+	else if (sc > 0 && tc == 0)
+		g_tm_expli_mode = false;
+	// Read from whichever source set the counter
+	int32_t c = (tc > 0) ? tc : sc;
+	// Sync ts->nested_call_counter for plugin preamble consistency,
+	// but do NOT touch tm_nested_call_counter (expli API manages it).
+	ts->nested_call_counter = c;
+	if (c == 1) { g_in_tx = true;
 		tinystm::jmpbuf = (sigjmp_buf *)&tm_jmpbuf;
 		tm_clear_spec_allocs();
 		tm_clear_deferred_frees();
 		tinystm::begin();
 	}
-	assert(tm_nested_call_counter >= 0);
+	assert(c >= 0);
 }
 
 void tm_end()
 {
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 	tm_end_count++;
-	if (tm_nested_call_counter == 1) { g_in_tx = false;
+	auto *ts = tm_get_thread_state();
+	int32_t tc = tm_nested_call_counter;
+	int32_t sc = ts->nested_call_counter;
+	int32_t c = (tc > 0) ? tc : sc;
+	if (c == 1) { g_in_tx = false;
 		// Record max read-set and write-set sizes for this TX
 #if defined(DESIGN_WBCTL)
 		auto *tx = tinystm::current_tx_wbctl;
@@ -135,7 +174,7 @@ void tm_end()
 		tm_flush_spec_allocs();
 		tm_flush_deferred_frees();
 	}
-	assert(tm_nested_call_counter >= 0);
+	assert(c >= 0);
 	tm_tx_count++;
 }
 

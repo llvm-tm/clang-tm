@@ -432,9 +432,26 @@ static bool handleLoadStore(Instruction *I,
 		return false;
 	};
 
+	// Skip loads/stores that access TM runtime thread state fields via
+	// tm_get_thread_state().  These are injected by injectTransactionBeginEnd
+	// and must use raw loads/stores (routing through tm_read/tm_write would
+	// fail because tx->active is not yet set when we read the counter).
+	auto isThreadStateAccess = [](Value *Ptr) -> bool {
+		Value *Base = Ptr->stripPointerCasts();
+		if (auto *GEP = dyn_cast<GetElementPtrInst>(Base))
+			Base = GEP->getPointerOperand()->stripPointerCasts();
+		if (auto *Call = dyn_cast<CallInst>(Base))
+			if (Call->getCalledFunction() &&
+			    Call->getCalledFunction()->getName() == "tm_get_thread_state")
+				return true;
+		return false;
+	};
+
 	if (auto *Load = dyn_cast<LoadInst>(I)) {
 		Value *Ptr = Load->getPointerOperand();
 		if (isTLSGlobal(Ptr))
+			return false;
+		if (isThreadStateAccess(Ptr))
 			return false;
 		if (auto *AI = dyn_cast<AllocaInst>(getBaseObjectNoLoad(Ptr))) {
 			if (!isEscapedAlloca(AI, &F))
@@ -453,6 +470,8 @@ static bool handleLoadStore(Instruction *I,
 	} else if (auto *Store = dyn_cast<StoreInst>(I)) {
 		Value *Ptr = Store->getPointerOperand();
 		if (isTLSGlobal(Ptr))
+			return false;
+		if (isThreadStateAccess(Ptr))
 			return false;
 		if (isa<AllocaInst>(getBaseObjectNoLoad(Ptr)))
 			return false;
@@ -476,27 +495,24 @@ static bool handleLoadStore(Instruction *I,
 }
 
 // Inject tm_begin/tm_end + sigsetjmp nesting into a TX function.
+// TM runtime state (nested_call_counter, longjmp_ret) lives in the TM
+// address space, accessed via tm_get_thread_state().  No thread_local
+// globals in the IR — this eliminates TLV relocations that conflict
+// with runtimes that define many __thread variables (e.g. TinySTM).
 static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHooks &H)
 {
 	LLVMContext &Ctx = M.getContext();
 	Type *i32Ty = Type::getInt32Ty(Ctx);
+	auto *i8PtrTy = PointerType::getUnqual(Ctx);
+	auto *i64Ty = Type::getInt64Ty(Ctx);
 
-	auto getOrCreateTLS = [&](StringRef Name, Type *Ty) -> GlobalVariable * {
-		if (auto *GV = M.getGlobalVariable(Name))
-			return GV;
-		auto *GV = new GlobalVariable(M,
-		                              Ty,
-		                              false,
-		                              GlobalValue::ExternalLinkage,
-		                              nullptr,
-		                              Name);
-		GV->setThreadLocal(true);
-		return GV;
-	};
-	auto *CounterGV = getOrCreateTLS("tm_nested_call_counter", i32Ty);
-#ifndef DISABLE_SETJMP
-	auto *JmpRetGV = getOrCreateTLS("tm_longjmp_ret", i32Ty);
-#endif
+	// Field offsets within TMThreadState struct (must match tm_thread_state.hpp)
+	//   struct TMThreadState {
+	//       int32_t nested_call_counter;  // offset 0
+	//       int32_t longjmp_ret;          // offset 4
+	//   };
+	constexpr int COUNTER_OFFSET = 0;
+	constexpr int JMPRET_OFFSET = 4;
 
 	TM_DEBUG("Injecting tm_begin/tm_end in transaction function: %s",
 	         F.getName().str().c_str());
@@ -514,13 +530,24 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 	}
 	Entry.getTerminator()->eraseFromParent();
 
+	// Load thread state pointer from TM address space
 	IRBuilder<> Builder(&Entry);
-	Value *CounterVal = Builder.CreateLoad(i32Ty, CounterGV, "counter");
+	Value *StatePtr = Builder.CreateCall(H.get_thread_state, {}, "tm_state");
+
+	// Access nested_call_counter at offset 0
+	Value *CounterPtr = Builder.CreateGEP(i32Ty, Builder.CreateBitCast(StatePtr, i8PtrTy),
+	                                      {Builder.getInt64(0)},
+	                                      "cnt_ptr");
+	Value *CounterVal = Builder.CreateLoad(i32Ty, CounterPtr, "counter");
 	Value *IsOuter = Builder.CreateICmpEQ(CounterVal,
 	                                      ConstantInt::get(i32Ty, 0),
 	                                      "is_outer");
 #ifndef DISABLE_SETJMP
-	Value *JmpRetVal = Builder.CreateLoad(i32Ty, JmpRetGV, "jmpret");
+	// Access longjmp_ret at offset 4
+	Value *JmpRetPtr = Builder.CreateGEP(i32Ty, Builder.CreateBitCast(StatePtr, i8PtrTy),
+	                                     {Builder.getInt64(1)},
+	                                     "jmpret_ptr");
+	Value *JmpRetVal = Builder.CreateLoad(i32Ty, JmpRetPtr, "jmpret");
 	IsOuter = Builder.CreateOr(IsOuter,
 	                           Builder.CreateICmpNE(JmpRetVal,
 	                                                ConstantInt::get(i32Ty, 0),
@@ -536,20 +563,21 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 #ifndef DISABLE_SETJMP
 	Value *JmpBufPtr = OuterBuilder.CreateCall(H.get_env);
 	OuterBuilder.CreateCall(H.set_jmpbuf, {JmpBufPtr});
-	OuterBuilder.CreateStore(OuterBuilder.CreateCall(H.sigsetjmp,
-	                                                 {JmpBufPtr,
-	                                                  ConstantInt::get(i32Ty, 0)}),
-	                         JmpRetGV);
-	OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetGV);
+	Value *SigJmpRet = OuterBuilder.CreateCall(H.sigsetjmp,
+	                                            {JmpBufPtr,
+	                                             ConstantInt::get(i32Ty, 0)});
+	// Store sigsetjmp result to longjmp_ret, then clear
+	OuterBuilder.CreateStore(SigJmpRet, JmpRetPtr);
+	OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetPtr);
 #endif
-	OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 1), CounterGV);
+	OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 1), CounterPtr);
 	OuterBuilder.CreateCall(H.begin, {});
 	OuterBuilder.CreateBr(ContBB);
 
 	IRBuilder<> NestedBuilder(NestedBB);
 	NestedBuilder.CreateStore(NestedBuilder.CreateAdd(CounterVal,
 	                                                  ConstantInt::get(i32Ty, 1)),
-	                          CounterGV);
+	                          CounterPtr);
 	NestedBuilder.CreateBr(ContBB);
 
 	// Transaction exit
@@ -565,7 +593,7 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 	IRBuilder<> OuterEndBuilder(OuterEndBB);
 	OuterEndBuilder.CreateCall(H.end, {});
 #ifndef DISABLE_SETJMP
-	OuterEndBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetGV);
+	OuterEndBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetPtr);
 #endif
 	OuterEndBuilder.CreateBr(CleanupBB);
 
@@ -582,7 +610,7 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 		}
 		Ret->eraseFromParent();
 		IRBuilder<> NewBBuilder(NewBB);
-		Value *CounterAtEnd = NewBBuilder.CreateLoad(i32Ty, CounterGV, "counter_at_end");
+		Value *CounterAtEnd = NewBBuilder.CreateLoad(i32Ty, CounterPtr, "counter_at_end");
 		NewBBuilder.CreateCondBr(NewBBuilder.CreateICmpEQ(CounterAtEnd,
 		                                                  ConstantInt::get(i32Ty, 1),
 		                                                  "is_outer_at_end"),
@@ -592,9 +620,9 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 	}
 
 	IRBuilder<> CleanupBuilder(CleanupBB);
-	Value *Cnt = CleanupBuilder.CreateLoad(i32Ty, CounterGV, "counter_cleanup");
+	Value *Cnt = CleanupBuilder.CreateLoad(i32Ty, CounterPtr, "counter_cleanup");
 	CleanupBuilder.CreateStore(CleanupBuilder.CreateSub(Cnt, ConstantInt::get(i32Ty, 1)),
-	                           CounterGV);
+	                           CounterPtr);
 	if (F.getReturnType()->isVoidTy())
 		CleanupBuilder.CreateRetVoid();
 	else
