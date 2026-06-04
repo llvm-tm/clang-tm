@@ -347,6 +347,78 @@ detecting indirect TM calls would require either link-time
 instrumentation (as in GCC's TMTS~\cite{TMTS}) or runtime dispatch
 tables.
 
+\subsection{STL Container Limitations}
+\label{sec:stl-limitations}
+
+The plugin's \emph{always-instrument} policy (every load/store in every cloned
+function is replaced with TM barriers) creates a fundamental incompatibility with
+standard library containers that perform internal memory reallocation.  This
+section documents the failure mode and the mitigations available.
+
+\paragraph{Vector reallocation inside transactions.}
+When a \texttt{std::vector<T>::push\_back()} call inside a TX function exceeds
+the current capacity, the vector allocates a new buffer via \texttt{operator new}
+(replaced with \texttt{tm\_malloc} by the plugin), copies existing elements to
+the new buffer using \texttt{memcpy} (expanded into \texttt{tm\_read\_i8}/
+\texttt{tm\_write\_i8} loops), then frees the old buffer via \texttt{operator
+delete} (replaced with \texttt{tm\_free}, which defers the free to commit time).
+
+The \texttt{memcpy} expansion reads each 8-byte word of the old buffer through
+\texttt{tm\_read\_i8}, which performs a TM read-barrier: it records the word's
+lock/version in the read-set.  The word at offset~0 of each element overlaps
+with the STM lock table entry for that address.  A concurrent transaction that
+holds the lock on an element in the old buffer triggers a read-validation
+failure, causing an abort and retry.  On retry, the vector reallocation
+re-executes, and the cycle repeats --- the transaction may livelock or crash
+if the reading of the stale buffer accesses freed memory (\texttt{SIGSEGV}
+in \texttt{read\_word\_ctl}).
+
+\paragraph{Other STL containers.}
+A similar issue affects any container whose internal operations copy or move
+elements between buffers inside a TX:
+\begin{itemize}
+\item \texttt{std::deque}: block-level reallocation during \texttt{push\_back}/
+  \texttt{push\_front}.
+\item \texttt{std::unordered\_map} and \texttt{std::unordered\_set}: rehashing
+  triggers per-bucket relocation of all elements into a new bucket array.
+\item \texttt{std::map} and \texttt{std::set} (node-based): tree rotation and
+  rebalancing do not relocate element data, but each node insertion allocates
+  a tree node (via \texttt{tm\_malloc}, which is correct) and writes node
+  pointers through TM barriers (also correct).  These containers are safe in
+  practice provided node allocations do not exceed the TM region's capacity.
+\item \texttt{std::list}: since \texttt{list} does not relocate elements on
+  insertion, it is safe; only the sentinel node and per-element nodes are
+  allocated.
+\end{itemize}
+
+\paragraph{Mitigations.}
+Three approaches are available to avoid the reallocation crash:
+\begin{enumerate}
+\item \textbf{Pre-reservation} (recommended for fixed-size data sets): call
+  \texttt{reserve()} on all vectors at initialisation time with a capacity
+  large enough to accommodate the worst-case number of elements, including
+  any elements added by create operations.  The STMbench7 benchmark
+  (Section~\ref{sec:evaluation}) uses this strategy successfully:
+  \texttt{g\_documents.reserve(MAX\_DOCUMENTS + MAX\_CP)} ensures that
+  all 1000 documents fit without reallocation.  Inner vectors of struct
+  fields (e.g., \texttt{atomicPartIds}) are similarly reserved per-element.
+  Structure-modification operations that create new elements call
+  \texttt{reserve()} on the new element's inner vectors before pushing data.
+
+\item \textbf{TM-friendly containers} (recommended for dynamic workloads):
+  Replace \texttt{std::vector} with custom containers that never reallocate
+  (e.g., \texttt{TMTreapMap} for associative access, \texttt{std::array} for
+  fixed-capacity storage).  The project provides \texttt{TMTreapMap} and
+  \texttt{TMTreapMultiMap} wrappers that are safe inside transactions; they
+  allocate node memory through \texttt{tm\_malloc} and never bulk-relocate
+  existing elements.
+
+\item \textbf{Disable reallocation operations}: skip structure-modification
+  operations that trigger \texttt{push\_back} beyond reserved capacity.
+  This is the least satisfactory option as it changes benchmark semantics,
+  but may be acceptable for read-dominated workloads.
+\end{enumerate}
+
 \subsection{Backend Runtime Interface}
 
 All backends export the following C-linkage functions:
@@ -1012,6 +1084,14 @@ invasive approach, but it has the highest performance overhead:
   \texttt{operator delete} must be precisely intercepted.  A missed
   interception (e.g., \texttt{llvm.memset.p0.i8} with a type suffix)
   bypasses the TM runtime, causing double-free or data corruption.
+\item \textbf{STL incompatibility}: \texttt{std::vector} and other
+  reallocation-based containers \emph{cannot} be used inside transactions
+  without explicit pre-reservation (\S\ref{sec:stl-limitations}).
+  The \texttt{\_tm\_clone} of \texttt{std::vector::\_M\_realloc\_insert}
+  reads old-element bytes through TM barriers from a buffer that is about
+  to be freed, causing a \texttt{SIGSEGV} in \texttt{read\_word\_ctl}.
+  Only TM-friendly containers (\texttt{TMTreapMap}, \texttt{std::array})
+  or pre-reserved vectors are safe.
 \end{itemize}
 Throughput on the bank benchmark at 2 threads ranges from 37K txns/s
 (TinySTM/WBCTL) to 306K txns/s (TL2) under the plugin.
@@ -1080,18 +1160,19 @@ that encapsulates the \texttt{unsafe} in TM commit:
 \begin{table}[h]
 \centering
 \small
-\begin{tabular}{lrrrc}
+\begin{tabular}{lrrrcl}
 \toprule
-Approach & Bank (tx/s) & EigenBench (tx/s) & LOC & Compiler dep. \\
+Approach & Bank (tx/s) & EigenBench (tx/s) & LOC & Compiler dep. & STL safe \\
 \midrule
-LLVM plugin (WBCTL) & 37K & --- & 2500 & LLVM 22 \\
-LLVM plugin (TL2) & 306K & --- & 2500 & LLVM 22 \\
-C++ expli (WBCTL) & 130K & 525K & 800 & None \\
-Rust WBCTL & 431K & 968K & 900 & None \\
-Rust NOrec & --- & 1.19M & 900 & None \\
-Rust TSXSGL & --- & 5.34M & 900 & None \\
-Uninstrumented (no TM) & 9.09M & --- & --- & None \\
+LLVM plugin (WBCTL) & 37K & --- & 2500 & LLVM 22 & No$^*$ \\
+LLVM plugin (TL2) & 306K & --- & 2500 & LLVM 22 & No$^*$ \\
+C++ expli (WBCTL) & 130K & 525K & 800 & None & Yes \\
+Rust WBCTL & 431K & 968K & 900 & None & Yes \\
+Rust NOrec & --- & 1.19M & 900 & None & Yes \\
+Rust TSXSGL & --- & 5.34M & 900 & None & Yes \\
+Uninstrumented (no TM) & 9.09M & --- & --- & None & N/A \\
 \bottomrule
+\multicolumn{6}{l}{\small $^*$Requires pre-reservation or TM-friendly containers (\S\ref{sec:stl-limitations}).}\\
 \end{tabular}
 \caption{Performance comparison across implementation approaches.
 Bank benchmark: 2 threads, 2000ms, 1024 accounts (uninstrumented fails
@@ -1117,7 +1198,9 @@ compiler dependency.
 \section{Conclusion}
 
 We presented an LLVM compiler plugin for automatic STM instrumentation using
-source-level annotations.  The plugin's key contributions are:
+source-level annotations, together with a detailed comparison of three
+implementation approaches (annotation-driven, explicit C++ API, and Rust).
+The plugin's key contributions are:
 
 \begin{itemize}
 \item Annotation-driven TX detection that requires no changes to function types
