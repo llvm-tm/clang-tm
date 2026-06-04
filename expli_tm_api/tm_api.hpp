@@ -83,10 +83,29 @@ template<> struct tm_type_traits<double> {
 };
 
 // ── TM<T> — Transactional Memory wrapper ─────────────────────
+// TM<T> stores its value in the TM address space (allocated via tm_malloc).
+// This ensures isTMAddress() assertions in the backend pass and eliminates
+// the need for stack-address write-back in the commit phase.
 template<typename T>
 class TM {
-    T value_ = {};
+    T *value_ = nullptr;
+
+    T* ptr() {
+        if (!value_) {
+            value_ = (T*)tm_malloc(sizeof(T));
+        }
+        return value_;
+    }
+    const T* ptr() const {
+        if (!value_) {
+            const_cast<TM*>(this)->value_ = (T*)tm_malloc(sizeof(T));
+        }
+        return value_;
+    }
 public:
+    TM() {}
+    ~TM() {}  // tm_region memory: no per-object free
+
     // ── Lifecycle ──
     // Nesting protocol: the plugin normally increments tm_nested_call_counter
     // before calling tm_begin/tm_end.  We replicate that here so the runtime
@@ -144,10 +163,10 @@ public:
 
     // ── Read / Write (TM operations) ──
     T read() const {
-        return tm_type_traits<T>::read(const_cast<T*>(&value_));
+        return tm_type_traits<T>::read(const_cast<T*>(ptr()));
     }
     void write(const T &v) {
-        tm_type_traits<T>::write(&value_, v);
+        tm_type_traits<T>::write(ptr(), v);
     }
 
     // ── Static read/write with explicit address ──
@@ -159,15 +178,29 @@ public:
     }
 
     // ── Peek / Poke (non-TM direct access — use only outside any TX) ──
-    T peek() const { return value_; }
-    void poke(const T &v) { value_ = v; }
+    T peek() const { return value_ ? *value_ : T{}; }
+    void poke(const T &v) { if (ptr()) *value_ = v; }
 };
 
 // ── TM<T*> specialization for pointers ──────────────────────
+// The pointer itself is stored in TM address space; the pointed-to buffer
+// is managed separately via alloc/free_ptr (heap, not TM-tracked).
 template<typename T>
 class TM<T*> {
-    T *value_ = nullptr;
+    T **value_ = nullptr;
+
+    T** ptr() {
+        if (!value_) {
+            value_ = (T**)tm_malloc(sizeof(T*));
+            *value_ = nullptr;
+        }
+        return value_;
+    }
+
 public:
+    TM() {}
+    ~TM() {}
+
     static void begin()        { tm_nested_call_counter = 1; tm_begin(); }
     static void end()          { tm_end(); tm_nested_call_counter = 0; }
 
@@ -201,21 +234,22 @@ public:
     // frees ALL spec-alloc entries — including buffers allocated OUTSIDE
     // the current TX — causing use-after-free on the first TX begin().
     T *alloc(size_t n) {
-        value_ = static_cast<T*>(::operator new(n * sizeof(T)));
-        return value_;
+        *ptr() = static_cast<T*>(::operator new(n * sizeof(T)));
+        return *value_;
     }
     void free_ptr() {
-        if (value_) { ::operator delete(value_); value_ = nullptr; }
+        if (value_ && *value_) { ::operator delete(*value_); *value_ = nullptr; }
     }
 
     T *read() const {
-        return (T*)tm_read_ptr((void**)const_cast<T**>(&value_));
+        if (!value_) return nullptr;
+        return (T*)tm_read_ptr((void**)value_);
     }
     T *read() {
-        return (T*)tm_read_ptr((void**)&value_);
+        return (T*)tm_read_ptr((void**)ptr());
     }
     void write(T *v) {
-        tm_write_ptr((void**)&value_, (void*)v);
+        tm_write_ptr((void**)ptr(), (void*)v);
     }
 
     // Indexed element access inside a TX.
@@ -226,8 +260,11 @@ public:
     const T& operator[](size_t i) const { return const_cast<TM*>(this)->read()[i]; }
 
     // Direct access (use only outside TX)
-    T *peek() const { return value_; }
-    void poke(T *v) { value_ = v; }
+    T *peek() const { return value_ ? *value_ : nullptr; }
+    void poke(T *v) {
+        if (value_) *value_ = v;
+        else { T** p = ptr(); *p = v; }
+    }
 
     // Static element read/write for raw pointers
     static T read_at(const T *addr) {

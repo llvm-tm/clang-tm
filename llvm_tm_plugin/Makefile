@@ -169,7 +169,7 @@ $(OUT_DIR)/test_local_containers.opt.bc: $(OUT_DIR)/test_local_containers.bc $(B
 
 $(addprefix $(BIN_DIR)/,$(TINYSTM_TESTS)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp | $(BIN_DIR)
 	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp \
-	  $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
+	  $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL -DLLVM_TM_PLUGIN \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
 
 # SwissTM-backed test (reproducer for STMbench7 bad_alloc crash)
@@ -206,16 +206,16 @@ $(foreach t,$(QUEUE_TESTS),$(OUT_DIR)/$(t).opt.bc): $(OUT_DIR)/%.opt.bc: $(OUT_D
 QUEUE_RT_OBJS := $(OUT_DIR)/tinystm_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o
 $(QUEUE_RT_OBJS): | $(OUT_DIR)
 $(OUT_DIR)/tinystm_runtime.o: $(BACKENDS_DIR)/runtimes/TinySTM_runtime.cpp
-	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
+	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL -DLLVM_TM_PLUGIN \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
 $(OUT_DIR)/queue_runtime.o: $(BACKENDS_DIR)/runtimes/queue_runtime.cpp
-	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
+	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL -DLLVM_TM_PLUGIN \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
 $(OUT_DIR)/queue_runtime_perf.o: $(BACKENDS_DIR)/runtimes/queue_runtime.cpp
-	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL -DTM_PERF_COUNTERS \
+	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL -DTM_PERF_COUNTERS -DLLVM_TM_PLUGIN \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
 $(OUT_DIR)/tm_region_allocator.o: $(BACKENDS_DIR)/runtimes/tm_region_allocator.cpp
-	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
+	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL -DLLVM_TM_PLUGIN \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR) $< -o $@
 
 $(foreach t,$(QUEUE_TESTS),$(BIN_DIR)/$(t)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(QUEUE_RT_OBJS) | $(BIN_DIR)
