@@ -125,6 +125,9 @@ TM_DEFINES_dudetm        = -DDESIGN_WBCTL
 
 TM_INCLUDES_persistentsgl =
 TM_INCLUDES_distributedsgl =
+TM_INCLUDES_tl2          = -I$(TL2_DIR) -I$(BACKENDS_DIR)
+TM_INCLUDES_singlelock   =
+TM_INCLUDES_norec        = -I$(NOREC_DIR) -I$(BACKENDS_DIR)
 TM_INCLUDES_tinystm     = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)
 TM_INCLUDES_norec       = -I$(NOREC_DIR) -I$(BACKENDS_DIR)
 TM_INCLUDES_tinystm_wbctl = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)

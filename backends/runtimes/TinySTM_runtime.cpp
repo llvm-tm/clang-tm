@@ -22,6 +22,7 @@
 #include "tm_alloc_overrides.hpp"
 #include "tm_thread_state.hpp"
 __thread int32_t tm_nested_call_counter = 0;
+__thread int32_t tm_longjmp_ret = 0;
 thread_local bool g_tm_expli_mode = false;
 thread_local bool g_in_tx = false;
 thread_local FreeNode* g_deferred_frees = nullptr;
@@ -124,18 +125,13 @@ void tm_begin()
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
 	auto *ts = tm_get_thread_state();
-	// Detect path: expli API sets tm_nested_call_counter,
-	// LLVM plugin sets ts->nested_call_counter via GEP/store.
 	int32_t tc = tm_nested_call_counter;
 	int32_t sc = ts->nested_call_counter;
 	if (tc > 0 && sc == 0)
 		g_tm_expli_mode = true;
 	else if (sc > 0 && tc == 0)
 		g_tm_expli_mode = false;
-	// Read from whichever source set the counter
 	int32_t c = (tc > 0) ? tc : sc;
-	// Sync ts->nested_call_counter for plugin preamble consistency,
-	// but do NOT touch tm_nested_call_counter (expli API manages it).
 	ts->nested_call_counter = c;
 	if (c == 1) { g_in_tx = true;
 		tinystm::jmpbuf = (sigjmp_buf *)&tm_jmpbuf;
@@ -274,7 +270,10 @@ void  tm_free(void* ptr) {
 		node->next = g_deferred_frees;
 		g_deferred_frees = node;
 	} else {
-		stm::tm_region_free(ptr);
+		if (stm::isTMAddress(ptr))
+			stm::tm_region_free(ptr);
+		else
+			::operator delete(ptr);
 	}
 }
 
