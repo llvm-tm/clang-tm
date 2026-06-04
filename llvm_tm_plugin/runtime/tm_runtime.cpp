@@ -5,12 +5,35 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <new>
 #include <map>
 #include <mutex>
+#include <pthread.h>
+
+#include "../../backends/tm_thread_state.hpp"
 
 #define TM_BUFFER_SIZE 1024
 
+static pthread_once_t g_tm_state_key_once = PTHREAD_ONCE_INIT;
+static pthread_key_t g_tm_state_key;
+
+static void make_tm_state_key() {
+    pthread_key_create(&g_tm_state_key, NULL);
+}
+
 extern "C" {
+
+TMThreadState *tm_get_thread_state() {
+    pthread_once(&g_tm_state_key_once, make_tm_state_key);
+    TMThreadState *state = (TMThreadState *)pthread_getspecific(g_tm_state_key);
+    if (!state) {
+        void *mem = std::malloc(sizeof(TMThreadState));
+        state = new (mem) TMThreadState{0, 0};
+        pthread_setspecific(g_tm_state_key, state);
+    }
+    return state;
+}
+
 // Helper function to get symbol type string
 static const char *tm_get_type_string(uint8_t type)
 {
@@ -34,13 +57,7 @@ static const char *tm_get_type_string(uint8_t type)
 	}
 }
 
-// __thread vs thread_local: inspecting llvm ir, thread_local is
-// marked as internal, hence we need to use __thread for the
-// injected variables to be globaly accessible
-
 __thread unsigned char tm_jmpbuf[256];
-__thread int32_t tm_nested_call_counter;
-__thread int32_t tm_longjmp_ret;
 __thread uint8_t is_tm_init_thread_ready = 0;
 thread_local uint8_t tm_buffer[TM_BUFFER_SIZE] = {0};
 
@@ -176,27 +193,29 @@ sigjmp_buf* tm_get_env() { return (sigjmp_buf*)&tm_jmpbuf; }
 
 void tm_begin()
 {
-	printf("tm_nested_call_counter=%d  --  ", tm_nested_call_counter);
-	if (tm_nested_call_counter == 1) {
+	auto *ts = tm_get_thread_state();
+	printf("tm_nested_call_counter=%d  --  ", ts->nested_call_counter);
+	if (ts->nested_call_counter == 1) {
 		printf("tm_begin outer\n");
 		g_in_tx = true;
 		tm_clear_spec_allocs();
 		tm_clear_deferred_frees();
 	} else {
-		printf("tm_begin nested %d\n", tm_nested_call_counter);
+		printf("tm_begin nested %d\n", ts->nested_call_counter);
 	}
 }
 
 void tm_end()
 {
-	printf("tm_nested_call_counter=%d  --  ", tm_nested_call_counter);
-	if (tm_nested_call_counter == 1) {
+	auto *ts = tm_get_thread_state();
+	printf("tm_nested_call_counter=%d  --  ", ts->nested_call_counter);
+	if (ts->nested_call_counter == 1) {
 		tm_flush_spec_allocs();
 		tm_flush_deferred_frees();
 		g_in_tx = false;
 		printf("tm_end outer\n");
 	} else {
-		printf("tm_end nested %d\n", tm_nested_call_counter);
+		printf("tm_end nested %d\n", ts->nested_call_counter);
 	}
 }
 

@@ -26,6 +26,7 @@ struct TMRuntimeHooks {
 	FunctionCallee malloc_fn, calloc_fn, realloc_fn, free_fn;
 	FunctionCallee memset_fn;
 	FunctionCallee enqueue_fn, wait_prev_tx_fn;
+	FunctionCallee get_thread_state;
 
 	bool valid() { return read_i4.getCallee() && write_i4.getCallee(); }
 
@@ -83,6 +84,7 @@ struct TMRuntimeHooks {
 
 		h.enqueue_fn = hook("tm_enqueue", voidTy, {i8PtrTy, i8PtrTy});
 		h.wait_prev_tx_fn = hook("tm_wait_prev_tx", voidTy, {});
+		h.get_thread_state = hook("tm_get_thread_state", i8PtrTy, {});
 
 		h.write_i1 = hook("tm_write_i1", voidTy, {i8PtrTy, i8Ty});
 		h.write_i2 = hook("tm_write_i2", voidTy, {i8PtrTy, i16Ty});

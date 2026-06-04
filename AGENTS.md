@@ -1,15 +1,29 @@
 # Session Summary
 
-## Latest Session (this session — 2026-06-03)
+## Latest Session (this session — 2026-06-04)
 
-### TLV crash diagnosis (LLVM plugin pipeline)
-- **`test_treap_tx` and `test_vector_realloc`** crash with `EXC_BAD_ACCESS (address=0x8030000000000036)` at `blr xN` in TLV access. The LLVM plugin's IR declares `tm_nested_call_counter`, `tm_longjmp_ret` as `external thread_local`; LLVM codegen emits `adrp`/`ldr` + `blr` (TLVPPAGE/TLVPPAGEOFF relocations).
-- **`test_types` (stub runtime) works fine** with the same plugin and same `external thread_local` pattern — the TLV descriptors in `__thread_vars` show identical `0x8030...` placeholder thunks in both binaries. The linker/dyld mechanism processes these placeholders correctly in the stub runtime but fails for TinySTM.
-- **Root cause**: Not in the C++/Rust runtimes (both work correctly in expli mode). The problem is specific to the **LLVM plugin pipeline interaction with TinySTM**. TinySTM brings 20+ TLV variables vs ~6 for the stub runtime. The BC's TLV relocations likely get misindexed when the linker merges them with TinySTM's larger TLV descriptor table.
-- **Fix attempted**: Removed `insertThreadInitWithGuard`/`insertThreadExitWithGuard` guard variable (`@tm_thread_ready = external thread_local`) from plugin IR — simplified to direct `tm_init_thread()`/`tm_exit_thread()` calls. This removed one TLV variable but didn't fix the crash (root cause is elsewhere).
-- **Conclusion**: Issue is exclusively in the LLVM plugin pipeline — **expli C++ and Rust implementations are proven correct**:
-  - Expli C++: bank benchmark 9.2M txns/sec PASS, 114 TX tests PASS, 207 DS tests PASS, eigenbench/fuzz_counter PASS
-  - Rust: `cargo test --workspace` — 17/17 tests PASS, zero warnings
+### Fix: TinySTM runtime nesting counter + expli API commit (stack write-back)
+
+#### Root cause: Double-redirection of nesting counter
+`TinySTM_runtime.cpp` used `ts->nested_call_counter` (from `TMThreadState`, allocated in TM address space via `tm_get_thread_state()`) while the expli API (`tx_executor.hpp`, `tm_api.hpp`) used the bare `__thread int32_t tm_nested_call_counter`. The runtime never saw the counter set by the expli API — `tinystm::begin()` was never called, and transactions silently did nothing.
+
+**Fix**: Sync both counters in `tm_begin()`: read whichever was set (expli → `tm_nested_call_counter`, plugin → `ts->nested_call_counter` via GEP), propagate to both. Do NOT modify `tm_nested_call_counter` in `tm_end()` — the expli API manages it.
+
+#### Root cause: Stack-address write-back blocked
+In commit's write-back phase, `is_stack_addr(addr) continue;` skipped all stack addresses. This was correct for the **plugin** (dead `_tm_clone` frames) but wrong for the **expli API** (valid stack-allocated `expli::TM<T>` fields that need write-back).
+
+**Fix**: Added `thread_local bool g_tm_expli_mode` flag. Set to `true` in `tm_begin()` when the expli API path is detected (`tm_nested_call_counter > 0 && ts->nested_call_counter == 0`), `false` for the plugin path (`ts->nested_call_counter > 0 && tm_nested_call_counter == 0`). The write-back loop skips stack addresses only when `!g_tm_expli_mode`.
+
+#### Test results
+- **Expli C++**: 114/114 TX tests PASS, 207/207 DS tests PASS (both `-O0 -g`)
+- **LLVM plugin**: `test_treap_tx` PASS (H, I, J printed, "Result: PASS", read-set=69, write-set=66)
+- **Other TinySTM plugin tests**: `test_ll_alloc` PASS, `test_simple_vector` PASS, `test_construct_tx_pattern` PASS, `test_local_containers` PASS
+- **Pre-existing issues unchanged**: `test_vec_push` and `test_alloc_stress` hang at exit; `test_vector_realloc` has data corruption from `std::vector` reallocation races
+
+#### Key changes
+- `backends/runtimes/TinySTM_runtime.cpp`: Added `tm_nested_call_counter` definition, `g_tm_expli_mode` flag, path-detection logic in `tm_begin()`, fixed counter sync
+- `backends/TinySTM/tinystm_wbctl.hpp`: Added `extern thread_local bool g_tm_expli_mode;` declaration, guarded `is_stack_addr` in write-back phase
+- `backends/TinySTM/tinystm_wbctl.hpp`: Removed is_stack_addr/null-addr guards from lock acquisition and lock release (already safe via `is_locked_by` check — stack addresses were never locked, so `is_locked_by` returns false and skips them)
 
 ### Rust warning cleanup
 - Fixed all Rust compiler warnings across the workspace (runtime backends + benchmarks): unused variables prefixed with `_`, unused imports removed, `#[allow(dead_code)]` on struct fields that are part of TM runtime state, unnecessary `mut` removed.
@@ -21,43 +35,29 @@
 - **XTM**: Page-level versioning in the 64 GB address space is elegant — 64 KB chunk headers (already exist) could store per-chunk version numbers, giving ~1M chunks (manageable). 4 KB pages would be ~16M entries (more metadata overhead). The unsolved problem is write detection: either hardware mprotect (expensive) or software write barriers on every store (same runtime overhead as existing STMs). The addrspace helps with layout but doesn't solve the fundamental instrumentation problem.
 
 ## Goal
-- Implement and integrate the Rust TM address-space region allocator (addrspace crate) with per-thread free lists, small-block bitmaps, medium-block offset-based free lists, then stress-test and integrate with tm-executor for queue-mode TX spec-alloc.
+- Fix the LLVM plugin pipeline crash (PC=0, SIGSEGV) in TinySTM-backed treap tests and unify the runtime path for both expli API and LLVM plugin
 
 ## Key Decisions
-- **`OnceLock` over `static mut`**: Rust `static` puts arrays in read-only memory; writing via `*mut` cast causes SIGSEGV. `static mut` is unsafe to read in Rust 2024 (UB warning `static_mut_refs`). `OnceLock::set()`/`get().unwrap()` is safe, zero-cost after init, and provides correct release/acquire ordering.
-- **Size-class tables stored before `REGION_START.store(Release)`**: Ensures that any reader seeing `REGION_START != 0` (via Acquire load) also sees populated tables.
-- **`tm-executor` feature-forward to `tm`**: Users must activate a backend feature (e.g., `--features wbctl`) — same pattern as `containers` and `benchmarks` crates.
-- **Chunk size = 64 KB, not configurable**: Fits 16 per 1 MB slab; self-describing headers at 64 KB boundaries enable O(1) pointer-to-chunk resolution via `ptr & ~0xFFFF`.
-- **`tm_region_free` recycles memory**: Pushes to per-thread TL list. When TL list exceeds 256 entries, drains half back to chunk (watermark). This prevents memory exhaustion in long-running alloc/free workloads.
-- **Rust `addrspace` uses `thread_local!` + `UnsafeCell<TlState>`**: Single TLS access per alloc/free via `TL.with(|c| &mut *c.get())`. `TlState` bundles slab, free lists, hot chunks, large free list.
-- **Benchmark binary in same crate**: `addrspace` has both `lib.rs` (library) and `main.rs` (binary). The library is used by `tm-executor`; the binary is the stand-alone stress test.
+- **`g_tm_expli_mode` flag in write-back**: The write-back phase in commit() needs to write to stack addresses for the expli API (stack-allocated `expli::TM<T>` fields) but skip them for the plugin (dead `_tm_clone` frames). A `thread_local bool` set by path detection in `tm_begin()` is the cleanest way to distinguish.
+- **`tm_nested_call_counter` defined in runtime**: Must be `__thread int32_t` defined exactly once in `TinySTM_runtime.cpp`. The header-only `extern` declaration in `tinystm_wbctl.hpp` is only for compilation units that can't include the runtime definition.
+- **Do NOT modify `tm_nested_call_counter` in `tm_end()`**: The expli API manages this variable's lifecycle (sets to 0 after `tm_end()` returns). If the runtime overwrites it, the next `begin()` sees the wrong value.
 
 ## Critical Context
-- **`REGION_START` write order**: Must set `OnceLock` tables BEFORE `REGION_START.store(Release)`. Previously tables were set after, creating a window where a reader sees `REGION_START != 0` but tables are `None` → panic on `unwrap()`. Fixed by reordering.
-- **CAS loser must not return early**: Thread that loses `compare_exchange(0, 1)` for `NEXT_SLAB_IDX` previously returned 0 immediately before tables were populated. Now spins until `REGION_START != 0` (Acquire), guaranteeing tables are readable.
-- **`init_once()` called from each test / worker thread**: Idempotent via `OnceLock`. The `tm_region_init()` spin-wait ensures forward progress even under thread contention.
-- **`tm-executor` library cannot compile without a backend feature**: `tm` crate emits `compile_error!` when no backend is selected. Downstream crates/binaries must activate e.g., `--features wbctl`.
-- **`tl_fl_push`** writes the old `fl.head` pointer into the first 8 bytes of the freed block (overwriting user data). **`tl_fl_pop`** reads those 8 bytes back to restore `fl.head`. This is the classic intrusive free list (Mimalloc, Hoard).
-- **`is_tm_address()`**: Simple bounds check — `region_start <= ptr < region_end`. All allocator metadata lives inside the mmap region.
+- **Nesting counter sync**: `TinySTM_runtime.cpp` uses `ts->nested_call_counter` (from `TMThreadState`) while the expli API uses `tm_nested_call_counter` (bare `__thread`). Prior to this fix, `tinystm::begin()` was never called for the expli API path.
+- **Stack write-back required for expli API**: The expli API places `expli::TM<T>` fields on the stack (e.g., `Point p; p.x.write(10)`). Without write-back to stack addresses, committed values are never persisted to memory. The plugin path must skip stack write-back to avoid corrupting dead `_tm_clone` frames.
+- **`is_stack_addr` detection**: Uses `pthread_get_stackaddr_np()` + `pthread_get_stacksize_np()` to compute current thread's stack bounds. Cached per-thread via `thread_local StackBounds` struct to avoid repeated syscalls.
+- **Lock acquisition/release skips stack addresses unconditionally**: Stack is per-thread, so no inter-thread locking is needed. The `is_locked_by()` check in the release loop already skips un-locked stack addresses.
 
 ## Relevant Files
-- `rust_tm_api/addrspace/src/lib.rs`: Rust port — `ChunkHeader`, `LargeHdr`, bitmap ops, `tm_region_malloc`/`free`/`calloc`/`realloc`/`init`, 11 unit tests, `tm_region_stats()` accessor.
-- `rust_tm_api/addrspace/src/main.rs`: Linked-list stress benchmark binary (8 phases, mirrors C++).
-- `rust_tm_api/addrspace/Cargo.toml`: Depends on `libc` 0.2.
-- `rust_tm_api/tm-executor/src/lib.rs`: `spec_alloc`/`spec_free` re-exports, `ensure_region_init()` in `QueueExecutor::new()` and worker threads.
-- `rust_tm_api/tm-executor/Cargo.toml`: Backend feature passthrough, `addrspace` dependency.
-- `backends/tm_region_allocator.hpp`: C++ allocator — bitmap ops, free-list ops, `tm_region_malloc` fast/slow path, `tm_region_free` (TL list push), `tm_region_realloc`/`calloc`, `chunk_alloc`.
-- `backends/runtimes/tm_region_allocator.cpp`: Init-time mmap alignment, size-class table precomputation.
-- `tests/backends/test_region_stress.cpp`: C++ 8-phase stress benchmark.
+- `backends/runtimes/TinySTM_runtime.cpp`: `tm_nested_call_counter` definition, `g_tm_expli_mode`, path detection, nesting counter sync
+- `backends/TinySTM/tinystm_wbctl.hpp`: `g_tm_expli_mode` declaration, guarded `is_stack_addr` in write-back; `is_stack_addr()`, `get_stack_bounds()` helper
 
 ## Next Steps
-1. Run full Rust workspace tests (`cargo test --workspace`) to confirm no regressions.
-2. Verify C++ build + test suite still passes with the division→shift optimizations.
-3. (Future) Add TL-list watermark draining to the C++ allocator (currently marked "not implemented yet").
-4. (Future) Profile real workloads (STMbench7, STAMP) with the Rust region allocator vs Box::new().
-5. (Future) Implement Romulus w/queue executor + addrspace redo logs.
-6. (Future) Fix LLVM plugin TLV interaction with TinySTM (misindexed TLV descriptors when BC relocations merge with runtime's larger TLV table).
+1. Remove vestigial `extern __thread int32_t tm_nested_call_counter` from `tinystm_wbctl.hpp` line 24 (now unused — the variable is defined in `TinySTM_runtime.cpp` and declared by `tm_api.hpp` for the expli API, `tm_thread_state.hpp` for the plugin)
+2. (Future) Fix LLVM plugin TLV interaction: BC's `external thread_local` relocations misindexed when merged with TinySTM's larger TLV descriptor table
+3. (Future) Implement the plugin alias analysis to skip stack-address instrumentation entirely (remove the root cause at the source)
 
 ## Issues Found
-1. **LLVM plugin TLV crash with TinySTM**: `test_treap_tx`, `test_vector_realloc` crash at `blr xN` with `EXC_BAD_ACCESS (0x8030...)`. BC's `external thread_local` relocations (TLVPPAGE/TLVPPAGEOFF) conflict with TinySTM's 20+ TLV variables. Stub runtime works fine (~6 TLV vars). The linker likely misindexes BC TLV entries when merging into a larger descriptor table. Not a C++ runtime or Rust issue — both work correctly in expli mode.
-2. **Plugin Build Failures** (pre-existing): The LLVM plugin builds fail due to TMRuntimeHooks type issues in tm_method_instrumentation.hpp. Unknown type name 'TMRuntimeHooks', no matching function for call to 'instrumentLoadsStoresInFunction' / 'instrumentAllClones'. This is a compilation issue in the plugin source code that needs to be fixed.
+1. **Double-redirection of nesting counter in `TinySTM_runtime.cpp`**: Originally used `__thread int32_t tm_nested_call_counter` directly, but a prior refactor changed to `ts->nested_call_counter` (from `TMThreadState`), breaking the expli API path. Now fixed with bidirectional sync in `tm_begin()`.
+2. **Stack write-back blocked for expli API**: `is_stack_addr(addr) continue;` in commit's write-back phase skipped stack addresses unconditionally, preventing expli API `expli::TM<T>` fields from being persisted. Fixed with `g_tm_expli_mode` flag.
+3. **Pre-existing issues**: `test_vec_push` / `test_alloc_stress` hang at exit (TinySTM plugin); `test_vector_realloc` data corruption from `std::vector` reallocation races (not solved by TM instrumentation)

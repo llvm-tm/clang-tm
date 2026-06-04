@@ -9,6 +9,17 @@
 #include <functional>
 #include <utility>
 
+// Forward declarations for TM-address detection (resolved at link time via
+// tm_region_allocator.cpp).  This allows clear_subtree() to skip operator
+// delete on TM-allocated nodes (allocated via tm_region_malloc inside TX),
+// since the entire TM region is freed as a unit by tm_region_destroy().
+extern char *g_tm_region_start;
+extern char *g_tm_region_end;
+inline bool is_tm_addr(const void *p) noexcept {
+    const char *cp = static_cast<const char *>(p);
+    return cp >= g_tm_region_start && cp < g_tm_region_end;
+}
+
 // ── Map (unique keys) ─────────────────────────────────────────
 
 template<typename K, typename V>
@@ -99,7 +110,8 @@ class TMTreapMap {
                     if (p->left == x) p->left = nullptr;
                     else              p->right = nullptr;
                 }
-                delete x;
+                if (!is_tm_addr(x))
+                    delete x;
                 x = p;
             }
         }
@@ -250,7 +262,8 @@ class TMTreapMultiMap {
                     if (p->left == x) p->left = nullptr;
                     else              p->right = nullptr;
                 }
-                delete x;
+                if (!is_tm_addr(x))
+                    delete x;
                 x = p;
             }
         }
