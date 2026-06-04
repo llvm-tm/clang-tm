@@ -179,10 +179,21 @@ inline const StackBounds &get_stack_bounds() {
 	thread_local StackBounds cached = {nullptr, nullptr};
 	if (!cached.lo) {
 		pthread_t self = pthread_self();
+#ifdef __APPLE__
 		void *hi = pthread_get_stackaddr_np(self);
 		size_t sz = pthread_get_stacksize_np(self);
 		cached.lo = static_cast<char *>(hi) - sz;
 		cached.hi = hi;
+#else
+		pthread_attr_t attr;
+		pthread_getattr_np(self, &attr);
+		void *lo;
+		size_t sz;
+		pthread_attr_getstack(&attr, &lo, &sz);
+		pthread_attr_destroy(&attr);
+		cached.lo = lo;
+		cached.hi = static_cast<char *>(lo) + sz;
+#endif
 	}
 	return cached;
 }
@@ -263,26 +274,22 @@ commit()    //
 
 		// Write-back phase
 		TM_EVENT(COMMIT_WRITEBACK, tx->id, tx->write_set.size());
-		for (auto &it : tx->write_set) {
-			auto &addr = it.first;
-			auto &w = it.second;
-			// Skip stack addresses in plugin path — they come from dead
-			// _tm_clone frames and writing back corrupts the current stack.
-			// In expli API path, TM fields on the stack need write-back.
-			if (!g_tm_expli_mode && is_stack_addr(addr)) continue;
-			// Skip null/low addresses — the plugin can generate these during
-			// linked-list traversal (e.g., null _M_next pointer in std::map).
-			// The read path already handles them; the write path must as well.
-			if (addr == nullptr || (uintptr_t)addr < 0x100000) continue;
-			if ((uintptr_t)addr > 0x7FFFFFFFFFFFULL) {
-				fprintf(stderr, "BAD WRITE-BACK ADDR: addr=%p type=%d val.u8=%llu\n",
-				        addr, (int)w.type, (unsigned long long)w.new_val.u8);
-						stm::tm_backtrace_print(2);
-				continue;
+		{
+			for (auto &it : tx->write_set) {
+				auto &addr = it.first;
+				auto &w = it.second;
+				// Skip stack addresses in plugin path — they come from dead
+				// _tm_clone frames and writing back corrupts the current stack.
+				// In expli API path, TM fields on the stack need write-back.
+				if (!g_tm_expli_mode && is_stack_addr(addr)) continue;
+				// Skip null/low addresses — the plugin can generate these during
+				// linked-list traversal (e.g., null _M_next pointer in std::map).
+				// The read path already handles them; the write path must as well.
+				if (addr == nullptr || (uintptr_t)addr < 0x100000) continue;
+				ByteOffset bo((word_t)addr);
+				Lock *lock = &g_locks_wbctl.get(bo.base_addr);
+				write_value_to_addr(addr, w.new_val, w.type);
 			}
-			ByteOffset bo((word_t)addr);
-			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
-			write_value_to_addr(addr, w.new_val, w.type);
 		}
 
 		for (auto &it : tx->write_set) {

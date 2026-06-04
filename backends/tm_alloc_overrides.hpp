@@ -199,7 +199,10 @@ inline void tm_flush_deferred_frees()
 	while (node) {
 		auto *next = node->next;
 		TM_EVENT(FLUSH_DEFERRED, (uintptr_t)node->ptr, 0);
-		stm::tm_region_free(node->ptr);
+		if (stm::isTMAddress(node->ptr))
+			stm::tm_region_free(node->ptr);
+		else
+			::operator delete(node->ptr);
 		std::free(node);              // FreeNode bookkeeping (::malloc'd)
 		node = next;
 	}

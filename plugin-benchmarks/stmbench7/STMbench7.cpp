@@ -173,6 +173,21 @@ static void init_data() {
     g_cpByDate.clear();
     g_apByDate.clear();
 
+    // Pre-reserve capacity to prevent vector reallocation during TX.
+    // The LLVM TM plugin instruments ALL memory accesses inside a TX,
+    // including std::vector's internal memcpy/memmove for reallocation.
+    // The _tm_clone of __relocate_a_1 reads old-element bytes via TM
+    // barriers (tm_read_i1) while the old buffer is about to be freed —
+    // this crashes in read_word_ctl(). Pre-reserving to max possible
+    // size avoids reallocation entirely. All struct mod SM operations
+    // are bounded to stay within these reserves.
+    g_complexAssemblies.reserve(MAX_CA);                     // 364, fixed tree
+    g_baseAssemblies.reserve(MAX_BA * 2);                    // 1458, SM7 can add
+    g_compositeParts.reserve(MAX_CP * 2);                    // 1000, SM1 can add
+    g_atomicParts.reserve(MAX_AP * 2);                       // 200000, SM3 can add
+    g_connections.reserve(MAX_CONN * 2);                     // 600000, SM5 can add
+    g_documents.reserve(MAX_DOCUMENTS + MAX_CP);             // 1000, SM1 creates 1 doc per CP
+
     // --- Module (§: single module) ---
     Module mod;
     mod.id = 0;
@@ -198,6 +213,8 @@ static void init_data() {
                 ca.level     = l;
                 ca.parentId  = -1;
                 ca.buildDate = 1000 + (l * 100 + j) % 365;
+                ca.childAssemblyIds.reserve(FANOUT);
+                ca.childBaseAssemblyIds.reserve(FANOUT);
                 g_complexAssemblies.push_back(ca);
             }
             off += sz;
@@ -347,6 +364,18 @@ static void init_data() {
 
     g_atomicPartCount = (int)g_atomicParts.size();
     g_connectionCount = (int)g_connections.size();
+
+    // Pre-reserve inner vector capacities — same rationale: prevent
+    // reallocation during TX. SM3 pushes to atomicPartIds, SM5 pushes
+    // to connectionIds. Reserves account for worst-case SM activity.
+    for (auto &cp : g_compositeParts) {
+        cp.atomicPartIds.reserve(AP_PER_CP * 2);       // 400, SM3 can add ~200 more
+        cp.baseAssemblyIds.reserve(MAX_CP_BA_BAG * 2); // 10
+    }
+    for (auto &ba : g_baseAssemblies)
+        ba.compositePartIds.reserve(MAX_CP_BA_BAG * 2);
+    for (auto &ap : g_atomicParts)
+        ap.connectionIds.reserve(CONN_PER_AP * 4);     // 12, SM5 can add a few
 }
 
 // ─── Random helpers ─────────────────────────────────────────────────────
@@ -679,6 +708,8 @@ TX OpResult op_sm1_create_cp(int new_id) {
     cp.buildDate     = 2000;
     cp.documentId    = (int)g_documents.size();
     cp.rootAtomicPartId = (int)g_atomicParts.size();
+    cp.atomicPartIds.reserve(AP_PER_CP + 8);
+    cp.baseAssemblyIds.reserve(MAX_CP_BA_BAG + 2);
     g_compositeParts.push_back(cp);
     g_cpById[new_id] = cp_idx;
     g_cpByDate.insert({2000, cp_idx});
@@ -791,9 +822,10 @@ TX OpResult op_sm7_create_ba(int parent_ca_idx) {
     if (ca.level != TREE_LEVELS - 1) return { 0, true };  // only leaf CAs have BAs
     int ba_idx = (int)g_baseAssemblies.size();
     BaseAssembly ba;
-    ba.id                = ba_idx;
-    ba.parentAssemblyId   = parent_ca_idx;
-    ba.buildDate         = 2000;
+    ba.id                   = ba_idx;
+    ba.parentAssemblyId     = parent_ca_idx;
+    ba.buildDate            = 2000;
+    ba.compositePartIds.reserve(MAX_CP_BA_BAG + 2);
     g_baseAssemblies.push_back(ba);
     ca.childBaseAssemblyIds.push_back(ba_idx);
     g_baById[ba_idx] = ba_idx;

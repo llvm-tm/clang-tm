@@ -508,6 +508,7 @@ done
 # --- Compile runtime to native object (if source, to prevent LTO inlining) ---
 
 RUNTIME_O=""
+REGION_O=""
 if $RUNTIME_IS_SOURCE; then
     runtime_base="$(basename "$RESOLVED_RUNTIME")"
     runtime_base_noext="${runtime_base%.*}"
@@ -521,6 +522,16 @@ if $RUNTIME_IS_SOURCE; then
     # acquisition) — breaking TM correctness.
     $CXX -std=c++20 $RUNTIME_OPT -c "$RESOLVED_RUNTIME" -o "$RUNTIME_O" \
         -fno-stack-protector -pthread "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"
+
+    # Also compile tm_region_allocator if it exists (separate compilation unit)
+    if [ -f "$RUNTIMES_DIR/tm_region_allocator.cpp" ]; then
+        REGION_O="$OUT_DIR/tm_region_allocator.o"
+        REGION_INCLUDE="-I $(dirname "$RUNTIMES_DIR")"
+        log "[rt] $RUNTIMES_DIR/tm_region_allocator.cpp → native object file"
+        $CXX -std=c++20 $RUNTIME_OPT -c "$RUNTIMES_DIR/tm_region_allocator.cpp" -o "$REGION_O" \
+            $REGION_INCLUDE \
+            -fno-stack-protector -pthread "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"
+    fi
 fi
 
 # --- Optimize instrumented bitcode ---
@@ -548,7 +559,11 @@ fi
 # Final link: compile bitcode to native binary and link with runtime
 log "[fin] linking → $OUTPUT"
 if [ -n "$RUNTIME_O" ]; then
-    $CXX "${LINK_FLAGS[@]+"${LINK_FLAGS[@]}"}" "$opt_bc" "$RUNTIME_O" -o "$OUTPUT"
+    if [ -n "$REGION_O" ]; then
+        $CXX "${LINK_FLAGS[@]+"${LINK_FLAGS[@]}"}" "$opt_bc" "$RUNTIME_O" "$REGION_O" -o "$OUTPUT"
+    else
+        $CXX "${LINK_FLAGS[@]+"${LINK_FLAGS[@]}"}" "$opt_bc" "$RUNTIME_O" -o "$OUTPUT"
+    fi
 else
     $CXX "${LINK_FLAGS[@]+"${LINK_FLAGS[@]}"}" "$opt_bc" "$RESOLVED_RUNTIME" -o "$OUTPUT"
 fi

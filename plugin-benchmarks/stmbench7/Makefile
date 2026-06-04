@@ -1,4 +1,7 @@
 TM_PLUGIN := $(abspath ../../llvm_tm_plugin/bin/libTMInstrument.so)
+TM_COMPILE_FLAGS := -O1 -fno-inline -fno-vectorize -fno-slp-vectorize \
+    -fno-unroll-loops -fno-stack-protector -pthread \
+    -I$(realpath ..)
 include ../../llvm_tm_plugin/tm_pipeline.mk
 $(eval $(call tm_define_rules))
 
