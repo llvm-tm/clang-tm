@@ -41,7 +41,11 @@ three implementation approaches --- annotation-driven (LLVM plugin), explicit
 lambda API (C++), and Rust with \texttt{WriteBack} safe commit --- identifying
 the drawbacks of each: the plugin's call-graph cloning overhead (37K--306K
 txns/s), the expli API's manual boundary management (130K), and the Rust API's
-ecosystem lock-in (431K).
+ecosystem lock-in (431K).  A head-to-head comparison of the LLVM plugin and the
+C++ expli API on the same TinySTM backend shows the expli API is 1.4--2.4$\times$
+faster on the bank benchmark and 1.1--1.4$\times$ faster on STAMP vacation,
+with the gap widening at lower contention and narrowing under write-heavy
+loads or larger transactions.
 \end{abstract}
 
 \section{Introduction}
@@ -653,6 +657,37 @@ correctness due to unprotected concurrent transfers.}
 \label{tab:bank}
 \end{table}
 
+Table~\ref{tab:plugin-vs-explicit} compares the annotation-driven LLVM plugin
+against the explicit C++ API on the same TinySTM/WBCTL backend across thread
+counts and read/write mixes.  The explicit API is consistently 1.4--2.4$\times$
+faster.  The gap is largest at 1 thread (2.4$\times$) and under read-only
+workloads (2.1$\times$), where contention is low and per-access instrumentation
+overhead dominates.  Under write-heavy workloads (20\% write-all), contention
+becomes the primary bottleneck and the gap narrows to 1.4$\times$.  Scalability
+is similar: both variants peak at 4--8 threads, then plateau due to TinySTM's
+O(N) read-set validation at commit time.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Scenario & Plugin (tx/s) & Explicit (tx/s) & Ratio \\
+\midrule
+1T, 20\% read (mixed) & 46,539 & 113,409 & 1.00 : 2.44 \\
+2T, 20\% read (mixed) & 75,326 & 169,295 & 1.00 : 2.25 \\
+4T, 20\% read (mixed) & 138,476 & 255,447 & 1.00 : 1.84 \\
+8T, 20\% read (mixed) & 127,053 & 235,254 & 1.00 : 1.85 \\
+4T, 100\% read-only & 29,253 & 61,423 & 1.00 : 2.10 \\
+4T, 20\% write-all & 19,669 & 27,506 & 1.00 : 1.40 \\
+\bottomrule
+\end{tabular}
+\caption{LLVM plugin vs.\ explicit C++ API --- bank benchmark, TinySTM/WBCTL,
+a=1024, d=5000\,ms.  The explicit API is 1.4--2.4$\times$ faster across all
+scenarios.  The gap narrows under contention (write-heavy) and widens when
+per-access overhead dominates (read-only, low-thread-count).}
+\label{tab:plugin-vs-explicit}
+\end{table}
+
 \subsection{Data Structure Benchmarks}
 
 Figure~\ref{fig:ds-throughput} shows data-structure microbenchmark
@@ -720,38 +755,47 @@ EigenBench benefit from shorter transactions.
 
 \begin{table}[h]
 \centering
-\begin{tabular}{lcr}
+\begin{tabular}{lclr}
 \toprule
-Benchmark & Backend & Ops/sec \\
+Benchmark & Approach & Backend & Ops/sec \\
 \midrule
-STMbench7 (4T, w=1) & TinySTM/WBCTL & 400 \\
-STMbench7 (4T, w=1) & SingleGlobalLock & 400 \\
-YCSB Workload A (4T, 10k keys) & SingleGlobalLock & 534,000 \\
-EigenBench (2T, 2s) & SingleGlobalLock & 200 \\
+STMbench7 (4T, w=1) & LLVM plugin & TinySTM/WBCTL & ---$^\dagger$ \\
+STMbench7 (4T, w=1) & C++ expli & TinySTM/WBCTL & 276,186 \\
+STMbench7 (4T, w=1) & SingleGlobalLock & 400 (plugin) \\
+Vacation (4T, 4096 TX) & LLVM plugin & TinySTM/WBCTL & 1,247,117 \\
+Vacation (4T, 4096 TX) & C++ expli & TinySTM/WBCTL & 1,709,040 \\
+YCSB Workload A (4T, 10k keys) & LLVM plugin & SingleGlobalLock & 534,000 \\
+EigenBench (2T, 2s) & LLVM plugin & SingleGlobalLock & 200 \\
 \bottomrule
+\multicolumn{4}{l}{\small $^\dagger$Crash: \texttt{std::bad\_alloc} during \texttt{std::vector} reallocation inside TX (\S\ref{sec:stl-limitations}).}\\
 \end{tabular}
-\caption{Application benchmark results.  STMbench7 instruments every
-element access in traversals (300k connections $\times$ 4 fields),
-generating millions of TM read calls per transaction.  YCSB and
-EigenBench feature shorter transactions with fewer instrumented
-accesses.}
+\caption{Application benchmark results.  The LLVM plugin's STMbench7
+binary crashes due to the STL reallocation incompatibility
+(\S\ref{sec:stl-limitations}); only the C++ explicit API variant
+(which uses \texttt{expli::vector} instead of \texttt{std::vector})
+completes successfully, achieving 276K ops/sec.  Vacation shows the
+same trend as the bank benchmark: the expli API is 1.37$\times$ faster
+than the plugin path on the identical algorithm.  YCSB and EigenBench
+feature shorter transactions with fewer instrumented accesses.}
 \label{tab:application}
 \end{table}
 
 \begin{table}[h]
 \centering
-\begin{tabular}{lrr}
+\begin{tabular}{lrrr}
 \toprule
-Backend & 2T (ops/sec) & Correctness \\
+Approach & Backend & 4T (ops/sec) & Correctness \\
 \midrule
-SingleGlobalLock & 200 & Always \\
-TinySTM/WBCTL & 200 & Always \\
+C++ expli (TM-safe containers) & TinySTM/WBCTL & 276,186 & Always \\
+LLVM plugin ($\dagger$) & TinySTM/WBCTL & crash & --- \\
+LLVM plugin & SingleGlobalLock & 400 & Always \\
 \bottomrule
 \end{tabular}
-\caption{STMbench7 results.  TinySTM/WBCTL matches SingleGlobalLock throughput
-(200 ops/sec at 2T) with identical correctness --- write-back encounter-time
-locking is fast enough for the read-dominated traversal workload.
-Other eager-locking backends are too slow.}
+\caption{STMbench7 results.  The expli version uses \texttt{expli::vector}
+(instead of \texttt{std::vector}) and TM-safe concurrent indexes, avoiding
+the reallocation crash that affects the plugin version.  The plugin version
+with SingleGlobalLock runs but at very low throughput due to the per-element
+TM barrier overhead in the read-dominated traversal workload.}
 \end{table}
 
 \subsection{Instrumentation Overhead}
@@ -1095,6 +1139,20 @@ invasive approach, but it has the highest performance overhead:
 \end{itemize}
 Throughput on the bank benchmark at 2 threads ranges from 37K txns/s
 (TinySTM/WBCTL) to 306K txns/s (TL2) under the plugin.
+At higher thread counts the gap between the plugin and explicit API
+persists: at 4 threads the plugin reaches 138K txns/s vs.\ 255K txns/s
+for the explicit API (1.8$\times$), and at 8 threads 127K vs.\ 235K
+(1.9$\times$).  The gap is largest at 1 thread (2.4$\times$) and
+narrowest under write-heavy workloads (1.4$\times$), confirming that
+per-access instrumentation overhead---not contention---is the primary
+bottleneck separating the two approaches.  The STAMP vacation benchmark
+confirms this trend: on identical spec-compliant implementations
+(parallel arrays, same TinySTM/WBCTL backend, same transaction
+boundaries), the expli path reaches 1.71M ops/sec vs.\ 1.25M ops/sec
+for the plugin path (1.37$\times$) at 4 threads, and 1.20M vs.\ 1.09M
+(1.10$\times$) at 1 thread.  The narrower gap vs.\ the bank benchmark
+reflects vacation's larger transactions (more TM ops per TX), which
+amortize the preamble/postamble overhead.
 
 \paragraph{C++ expli template API.}
 A separate implementation using \texttt{TM<T>::transaction([\&]\{\})} avoids
@@ -1107,8 +1165,10 @@ the plugin's overhead by manually wrapping transaction bodies in a lambda.
   C++20 compiler and link any backend.
 \item \textbf{No call-graph cloning}: every TM operation is a direct call
   to \texttt{tm\_read\_*}/\texttt{tm\_write\_*}, eliminating the
-  \texttt{\_tm\_clone} indirection.  Bank achieves 130K txns/s (TinySTM/WBCTL),
-  3.5$\times$ faster than the plugin.
+  \texttt{\_tm\_clone} indirection.  Bank achieves 130K txns/s (TinySTM/WBCTL)
+  at 2 threads (3.5$\times$ faster than the plugin's 37K), and 255K txns/s
+  at 4 threads (1.8$\times$ faster).  Across all thread counts and read/write
+  mixes the explicit API is 1.4--2.4$\times$ faster.
 \item \textbf{Lambda overhead}: the transaction closure must capture all
   shared variables, which prevents the use of \texttt{return},
   \texttt{goto}, \texttt{break}, and non-copyable types inside the

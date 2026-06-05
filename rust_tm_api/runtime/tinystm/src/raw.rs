@@ -113,6 +113,7 @@ fn try_lock_at_index(idx: usize) -> bool {
 // ── Memory operations (the only unavoidable unsafe) ─────
 #[inline]
 pub unsafe fn write_mem(addr: usize, val: u64, nbytes: u8) {
+    assert!(runtime_core::is_tm_address(addr as *const u8), "Address not in TM address space");
     let ptr = addr as *mut u64;
     match nbytes {
         1 => (ptr as *mut u8).write(val as u8),

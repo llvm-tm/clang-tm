@@ -217,6 +217,15 @@ inline T tm_read(T *addr)
 {
 	if (!current_tx || !current_tx->active)
 		return *addr;
+
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr)) {
+		return *addr;
+	}
+#else
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#endif
+
 	return *addr; // HTM tracks the read-set in hardware
 }
 
@@ -227,6 +236,15 @@ inline void tm_write(T *addr, T val)
 	// top bit set) is either a moved-from null pointer GEP or a bug.
 	// Skip safely — the data is garbage anyway.
 	if (!addr || (uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 47) != 0)
+
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr)) {
+		*addr = val;
+		return;
+	}
+#else
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#endif
 		return;
 
 	if (!current_tx || !current_tx->active) {

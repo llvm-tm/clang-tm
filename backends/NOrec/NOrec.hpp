@@ -106,6 +106,14 @@ inline T tm_read(    //
 	TM_ASSERT(tx != nullptr, "tx is null");
 	TM_ASSERT(tx->active, "tx not active");
 
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr)) {
+		return *addr;
+	}
+#else
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#endif
+
 	any_type_t r = read_word(tx, (void *)addr, SZ);
 	return return_any_type<T>(r);
 }
@@ -125,6 +133,15 @@ tm_write(            //
 {
 	TM_ASSERT(tx != nullptr, "tx is null");
 	TM_ASSERT(tx->active, "tx not active");
+
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr)) {
+		*addr = val;
+		return;
+	}
+#else
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#endif
 
 	any_type_t w;
 	fill_any_type(w, &val, SZ);

@@ -11,7 +11,13 @@
 
 #include "tm_region_allocator.hpp"
 
-
+#ifdef LLVM_TM_PLUGIN
+#define LLVM_TM_ADDR_CHECK(addr) do { if (!stm::isTMAddress(addr)) { return *(addr); } } while(0)
+#define LLVM_TM_ADDR_CHECK_WRITE(addr, val) do { if (!stm::isTMAddress(addr)) { *(addr) = (val); return; } } while(0)
+#else
+#define LLVM_TM_ADDR_CHECK(addr) TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space")
+#define LLVM_TM_ADDR_CHECK_WRITE(addr, val) TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space")
+#endif
 
 #ifndef NDEBUG
 #define TM_ASSERT(cond, msg)                                                             \
@@ -229,6 +235,7 @@ inline bool same_location( //
 		if (!tx || !tx->active) {                                                        \
 			return *addr;                                                                \
 		}                                                                                \
+		LLVM_TM_ADDR_CHECK(addr);                                                        \
 		any_type_t r = tx->read_word((void *)addr, SZ);                                  \
 		return return_any_type<TYPE>(r);                                                 \
 	}
@@ -240,6 +247,7 @@ inline bool same_location( //
 			*addr = val;                                                                 \
 			return;                                                                      \
 		}                                                                                \
+		LLVM_TM_ADDR_CHECK_WRITE(addr, val);                                             \
 		any_type_t w;                                                                    \
 		fill_any_type(w, &val, SZ);                                                      \
 		tx->write_word((void *)addr, w, SZ);                                             \

@@ -268,16 +268,15 @@ inline T tm_read(            //
     T *addr                  //
 )
 {
-#ifdef LLVM_TM_PLUGIN
-	// Plugin: non-TM addresses (stack from _tm_clone frames,
-	// heap from uninstrumented code) bypass TM protocol.
-	if (!stm::isTMAddress(addr))
-		return *addr;
-#else
-	// Expli C++: all TM values must be in TM address space.
-	assert(stm::isTMAddress(addr) && "tm_read: addr not in TM address space");
-#endif
 	TM_ASSERT_VALID_TX(tx, "tinystm tm_read");
+
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr)) {
+		return *addr;
+	}
+#else
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#endif
 
 	any_type_t r = read_word(tx, (void *)addr, SZ);
 	return return_any_type<T>(r);
@@ -298,18 +297,16 @@ tm_write(                    //
     T val                    //
 )
 {
+	TM_ASSERT_VALID_TX(tx, "tinystm tm_write");
+
 #ifdef LLVM_TM_PLUGIN
-	// Plugin: non-TM addresses bypass TM protocol.
-	// These are dead _tm_clone stack frames; no rollback needed.
 	if (!stm::isTMAddress(addr)) {
 		*addr = val;
 		return;
 	}
 #else
-	// Expli C++: all TM values must be in TM address space.
-	assert(stm::isTMAddress(addr) && "tm_write: addr not in TM address space");
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
 #endif
-	TM_ASSERT_VALID_TX(tx, "tinystm tm_write");
 
 	any_type_t w;
 	fill_any_type(w, &val, SZ);

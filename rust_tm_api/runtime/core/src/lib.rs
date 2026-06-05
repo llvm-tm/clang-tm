@@ -200,3 +200,6 @@ impl_raw_for_primitive!(i32);
 impl_raw_for_primitive!(i64);
 impl_raw_for_primitive!(f32);
 impl_raw_for_primitive!(f64);
+
+/// Re-export the TM address-space check from the addrspace crate.
+pub use addrspace::is_tm_address;
