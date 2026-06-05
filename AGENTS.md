@@ -2,24 +2,52 @@
 
 ## Latest Session (this session — 2026-06-05)
 
-### Benchmark compatibility audit across 3 sets
+### All 8 STAMP benchmarks + TPC-C ported to spec-compliant expli C++
 
-#### Findings
-- **3 benchmark sets exist**: plugin (LLVM auto-instrumentation), expli C++ (manual `tm_read_i8`/`tm_write_i8`), Rust (manual `TmCell` API)
-- **Only 4 benchmarks are comparable across plugin vs expli C++**: bank, tpcc, ycsb, bayes, yada. Same algorithm, same CLI, comparable output.
-- **6 STAMP benchmarks (vacation, genome, intruder, kmeans, labyrinth, ssca2) use different algorithms** between plugin and expli/Rust:
-  - Plugin follows original STAMP spec (ported from github.com/ccaominh/stamp) with full data structures and workflow
-  - Expli C++ uses simplified "TM stress test" versions — same name, different computational semantics
-  - Rust uses even simpler versions with different TM scope, no convergence checks, smaller defaults
-  - **None of these 6 are comparable across sets** without reimplementation
-- **Rust benchmarks crash on TinySTM backend**: Every Rust benchmark panics with `"Address not in TM address space"` in `runtime/tinystm/src/wbctl.rs:6`. Root cause: Rust `TmCell` data is heap-allocated (Box/Vec), not allocated from the TM region via `tm_calloc`. The TinySTM backend asserts all TM-accessed addresses are in the mmap'd region. This is a systemic design incompatibility — the Rust TmCell model assumes any address is valid, but the backend enforces TM-region-only addresses.
-- **Plugin EigenBench broken**: Only produces 1-op transactions (avg TX length = 1 despite R1=10/W1=10 configuration). Plugin eigenbench appears to miss instrumentation or has incorrect TX boundaries.
-- **Plugin STMBench7 OOM**: Crashes with `std::bad_alloc` during large data structure construction (500 CPs, 100K APs). Expli version uses smaller scale (200 CPs, 800 APs).
+#### What was done
+- **8 STAMP benchmarks** now match the plugin spec (same algorithm, same RNG seeds, same output):
+  - vacation: best-price query, 3 table types, flat TM arrays on TM region
+  - kmeans: convergence check, cluster-biased points, accumulate/update phases, barrier sync
+  - ssca2: clique-based graph generation + triangle counting on CSR
+  - genome: gene+segments, mutex-dedup, hash-based overlap matching
+  - intruder: flow reassembly with attack detection, mutex-protected queues
+  - labyrinth: off-TM BFS + TM-protected path mark (with sigsetjmp retry loop)
+  - bayes, yada: already ported (from stamp_common split to standalone files)
+- **TPC-C**: full v5.11 spec port — 5 transactions (New-Order, Payment, Order-Status, Delivery, Stock-Level), remote warehouse (1%/15%), unique items per order, History rows, flat TM arrays via `tm_calloc`
+- **STMbench7**: functional with 12/45 ops, reduced scale (200 CP, 800 AP)
 
-#### Next steps needed
-- Port original STAMP spec algorithms from plugin `*_bench.hpp` to expli C++ and Rust for vacation, genome, intruder, kmeans, labyrinth, ssca2
-- Fix Rust address-space issue: either allocate TmCell data from TM region, or relax the is_tm_address check
-- Fix plugin EigenBench instrumentation
+#### Test results (all via `make run-stamp` and `make run-tpcc`)
+| Benchmark | Result | Notable |
+|-----------|--------|---------|
+| vacation  | 1.3M txns/sec | 2 aborts |
+| labyrinth | 64/64 routed | 2 aborts |
+| kmeans    | 52 iters, converged | 108 aborts |
+| genome    | 16320 unique | 0 aborts |
+| intruder  | 1M processed | 0 aborts |
+| ssca2     | 1.7M triangles | R/O, no writes |
+| bayes     | 60 parents | 2369 aborts |
+| yada      | 411 elements | 247 aborts |
+| tpcc      | 399 ops/sec | 555 aborts, 3s run |
+| stmbench7 | 231K ops/sec | 112K aborts, 5s run |
+
+#### Key implementation patterns for expli C++
+- **tx_run template**: `volatile bool done` loop with `sigsetjmp(tm_jmpbuf,0)` + `tm_nested_call_counter = 1` before `tm_begin()`. The nesting counter signals the runtime to actually start a TinySTM transaction.
+- **Flat TM arrays**: `tm_calloc` for all TM-tracked data, `TM_READ_I8`/`TM_WRITE_I8` macros wrapping `tm_read_i8`/`tm_write_i8` from the runtime. Direct stores during initialization (no TM needed).
+- **Off-TM computation**: BFS (labyrinth), Hash table building (genome), Triangle counting (ssca2), Clustering (kmeans) all done outside TM — only the final write-back or check-and-mark uses TM barriers.
+- **Mutex for serial access**: genome dedup, intruder queues — use `std::mutex` matching plugin's `tm_serialize_lock`.
+
+#### Build and run commands
+```sh
+make -C expli-benchmarks run-stamp BACKEND=TINYSTM    # all 8 STAMP
+make -C expli-benchmarks run-tpcc BACKEND=TINYSTM      # TPC-C
+make -C expli-benchmarks run-bench7 BACKEND=TINYSTM    # STMbench7
+```
+
+### Remaining work
+- **Rust address-space crash**: ALL Rust benchmarks panic (`"Address not in TM address space"`). Rust `TmCell` wraps heap-allocated (Box/Vec) data; TinySTM enforces TM-region-only addresses. Either allocate TmCell data from the TM region or relax the TinySTM assertion.
+- **Plugin bugs**: EigenBench produces 1-op TX (instrumentation miss); STMBench7 OOM at medium OO7 scale (500 CP, 100K AP).
+- **STMbench7**: 33 of 45 operations still missing from expli version.
+- **Rust STAMP ports**: Not started (blocked by address-space issue).
 
 ## Previous Session (2026-06-04)
 
