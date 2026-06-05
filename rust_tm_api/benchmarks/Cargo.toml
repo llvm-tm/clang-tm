@@ -35,6 +35,14 @@ path = "src/cli/stamp_labyrinth.rs"
 name = "stamp_ssca2"
 path = "src/cli/stamp_ssca2.rs"
 
+[[bin]]
+name = "stamp_bayes"
+path = "src/cli/stamp_bayes.rs"
+
+[[bin]]
+name = "stamp_yada"
+path = "src/cli/stamp_yada.rs"
+
 [features]
 default = ["wbctl"]
 wbctl = ["tm/wbctl"]
