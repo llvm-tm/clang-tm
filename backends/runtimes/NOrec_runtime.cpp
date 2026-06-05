@@ -11,6 +11,7 @@
 #include <new>
 #include "NOrec_globals.hpp"
 #include "tm_alloc_overrides.hpp"
+#include "tm_thread_state.hpp"
 
 // Debug: catch absurd operator new sizes with backtrace
 void* operator new(size_t size) {
@@ -101,6 +102,11 @@ void tm_init_thread()
 }
 
 void tm_exit_thread() { norec::exit_thread(); }
+
+TMThreadState *tm_get_thread_state() {
+    static thread_local TMThreadState ts;
+    return &ts;
+}
 
 static std::recursive_mutex g_serialize_mutex;
 

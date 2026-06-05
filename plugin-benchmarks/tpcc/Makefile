@@ -7,7 +7,7 @@ $(eval $(call tm_define_rules))
 all: tpcc_singlelock tpcc_tl2 tpcc_tinystm tpcc_persistentsgl tpcc_uninstrumented \
 	tpcc_tsxsgl tpcc_swisstm \
 	tpcc_tinystm_wbctl tpcc_tinystm_wbetl tpcc_tinystm_wt \
-	tpcc_dudetm tpcc_spht
+	tpcc_dudetm tpcc_spht tpcc_norec
 
 tpcc_uninstrumented: TPCC.cpp | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $< -o $(BIN_DIR)/$@
@@ -23,6 +23,7 @@ $(eval $(call tm_target, tpcc_tinystm_wbetl, TPCC.cpp, tinystm_wbetl))
 $(eval $(call tm_target, tpcc_tinystm_wt, TPCC.cpp, tinystm_wt))
 $(eval $(call tm_target, tpcc_dudetm, TPCC.cpp, dudetm))
 $(eval $(call tm_target, tpcc_spht, TPCC.cpp, spht))
+$(eval $(call tm_target, tpcc_norec, TPCC.cpp, norec))
 
 clean:
 	rm -rf $(OUT_DIR) $(BIN_DIR)
