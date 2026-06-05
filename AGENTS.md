@@ -122,6 +122,86 @@ Added bayes and yada Rust ports, completing all 8 STAMP benchmarks across all 3 
 4. **Stack write-back blocked for expli API** (fixed): `is_stack_addr` skip unconditionally blocked expli stack fields.
 5. **Pre-existing**: `test_vec_push`/`test_alloc_stress` hang at exit; `test_vector_realloc` data corruption; SSCA2 SIGSEGV in `tm_begin` from worker thread.
 
+### run_full_compare.sh improvements this session
+
+Created **`run_full_compare.sh`** (515 lines): comprehensive runner for 3 impls × 3 backends (wbctl, wt, norec) × 11 benches (STAMP×8 + TPC-C + YCSB + STMbench7). Fixes applied:
+
+| # | Fix | Issue |
+|---|-----|-------|
+| 1 | Associative arrays → case functions | `declare -A` invalid on macOS bash 3.x |
+| 2 | Added `norec`/`tinystm_wbctl`/`tinystm_wt` targets to YCSB/TPCC Makefiles | Missing targets prevented linking |
+| 3 | `timeout` → `$TIMEOUT_CMD` (auto-detect `gtimeout`) | `timeout` doesn't exist on macOS |
+| 4 | Absolute paths for `RESULTS_DIR` | Python analysis failed with relative paths after `cd` |
+| 5 | Added `tm_get_thread_state()` to `NOrec_runtime.cpp` | Missing symbol for plugin NOREC linker |
+| 6 | Interleaved build+run for Expli C++ (`make clean` per backend) | Make timestamps caused stale binaries |
+| 7 | Interleaved build+run for Rust (`cargo build + run per feature`) | `--features` overwrote previous binaries |
+| 8 | Fixed plugin binary directory lookup (separate dirs per benchmark type) | TPCC/YCSB/STMbench7 binaries not in STAMP/bin |
+| 9 | Added `fastrand = "2"` to Rust `benchmarks/Cargo.toml` | Missing dep for `fuzz_counter`, `bank`, `stmbench7` |
+
+Run stats (threads=1,4; samples=1): completed=96, crash=11, fail=10, skipped=15, total=132.
+
+## Crash Investigation Plan
+
+### Priority 1: Rust WT address-space assertion (8 benches — exit 101)
+**Affected**: vacation, kmeans, labyrinth, bayes, yada, tpcc, ycsb, stmbench7  
+**Works**: genome, intruder, ssca2  
+**Error**: `panicked at runtime/tinystm/src/wt.rs:10:5 — Address not in TM address space`  
+**Root cause**: Rust WT runtime asserts `runtime_core::is_tm_address(addr)` in every `tm_read`/`tm_write`. Benches passing non-`TmCell<T>` addresses (heap/stack data outside TM mmap region) trigger the panic. WBCTL avoids this because it does not validate addresses (it reads through the write-set).
+
+**Investigation steps**:
+1. For each failing bench, identify which address triggers the assertion (data structure + allocation pattern).
+2. Determine whether the address *should* be in TM space (bench bug) or the runtime should accept it (runtime limitation).
+3. Fix options:
+   - **A**: Make benches use `TmCell<T>` for all TM-tracked data (correct but invasive).
+   - **B**: Remove/weaken the address-space assertion in Rust WT (match WBCTL behavior — accept any address). This loses a safety check but matches the existing C++ TinySTM WBCTL semantics.
+4. Apply fix, rebuild `--features wt`, re-run failing benches.
+
+### Priority 1: Expli WBCTL/WT SSCA2 (2 benches — SIGSEGV)
+**Affected**: ssca2 (both wbctl and wt)  
+**Error**: SIGSEGV during graph initialization, before `[TM-REGION]` mmap line. Output truncated at 6 parameter lines.  
+**Not affected**: ssca2-norec (crashes with address-space assertion like all other norec benches).  
+**Root cause**: Pre-existing crash in the edge-generation phase of SSCA2. The `--max-parallel-edges` param (`-m`) might construct an invalid graph scale.
+
+**Investigation steps**:
+1. Run `ssca2 -s 14 -u 1.0 -l 3 -m 3 -i 3` (same params) standalone under a debugger to catch the crash site.
+2. Check if the crash is in TM code (`tm_begin`/`tm_read`/`tm_write`) or non-TM code (plain C++ data structure manipulation).
+3. If non-TM: fix the benchmark logic (off-by-one, buffer overflow).
+4. If TM: check if heap data outside TM region is being accessed within a transaction.
+5. Cross-check with plugin/rust ssca2 — do they work? (Plugin ssca2 passed in run_compare_all.sh runs; Rust ssca2 passed in this session.)
+
+### Priority 2: Expli NOrec (all 11 benches — sig=6 assertion)
+**Affected**: ALL benches across norec backend  
+**Error**: `TM ASSERTION FAILED: Address not in TM address space (NOrec.hpp:114)`  
+**Root cause**: `NOrec_runtime.cpp` defines `tm_read_i8`/`tm_write_i8` etc. that call directly into `norec::tm_read_i8` which asserts `stm::isTMAddress(addr)`. When `LLVM_TM_PLUGIN` is NOT defined (expli mode), the assertion is a hard fault instead of falling through to a direct memory access. The C++ `TinySTM_runtime.cpp` has `g_tm_expli_mode` to detect this and skip assertions; NOrec runtime lacks this.
+
+**Investigation steps**:
+1. Check if `NOrec_runtime.cpp` can detect expli mode (e.g., define a `TM_EXPLI_MODE` or check `g_tm_expli_mode`).
+2. Alternatively, define `LLVM_TM_PLUGIN` for expli NOrec builds to enable the fallback path — but verify no side effects on the codegen.
+3. Fix `NOrec_runtime.cpp` to handle non-TM addresses gracefully in expli mode (either skip assertion or fall through to `std::memcpy`).
+4. Rebuild expli with `BACKEND=NOREC`, re-run all benches.
+
+### Priority 2: Rust WT address-space assertion on non-TM heaps (same as Priority 1, broader fix)
+Some benches (tpcc, stmbench7) use large heap-allocated arrays whose pointers are stored in `TmCell`. The actual data buffers reside on the heap outside the TM region. Reads/Writes through `TmCell`-stored pointers then fail when the WT runtime asserts the dereferenced address is in TM space.
+
+**Investigation steps**:
+1. For tpcc: trace the assertion to a specific `tm_read` call — is it reading a `TmCell` value (should be in TM space) or dereferencing a pointer stored inside a `TmCell` (points to heap)?
+2. If the latter: the issue is that pointer-indirection through TM-tracked pointers is unsafe with WT but safe with WBCTL (WBCTL only tracks the pointer cell, not the pointed-to data). This is a fundamental semantic difference between the backends.
+3. Fix: store data in `TmCell` (inside TM region) instead of on the C heap. Or accept that WT cannot safely follow TM-tracked pointers.
+
+### Priority 3: Plugin path not producing results
+**Issue**: The `run_full_compare.sh` plugin section produced zero output files. The `run_plugin_impl` function correctly checks binary paths but may fail silently.
+
+**Investigation steps**:
+1. Run `run_plugin_impl` standalone with verbose logging to see which binary checks fail.
+2. Check if plugin binaries exist at the expected paths.
+3. Check if `return 0` in the old code (now `if [ -x ... ]`) was causing the entire plugin section to early-exit.
+4. Fix any path or permission issues.
+
+### Known/Deferred
+- **High-concurrency segfaults (vacation, 28–56t)**: Sporadic SIGSEGV during thread cleanup after valid output. Benchmark completes, metrics are trustworthy. Deferred until after Priority 1-2 fixes.
+- **Plugin stmbench7 vector crash**: `std::vector::_M_realloc_insert` inside TM region. All 36 runs skipped. Known incompatibility.
+- **Rust WT Labyrinth 4t → 0 ms**: Reported `Time = 0.000000` (labyrinth_4t_s1 passes but shows 0ms). May indicate empty workload. Verify with larger grid dimensions.
+
 ## Relevant Files
 - `run_compare_all.sh`: Main benchmark runner with skip-list, build, run, and analysis phases
 - `backends/TinySTM/tinystm_wbctl.hpp`: WBCTL runtime with write-back and `is_stack_addr`
