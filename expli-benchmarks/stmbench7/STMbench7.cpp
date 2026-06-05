@@ -441,6 +441,7 @@ static OpCat pick_category(std::mt19937 &r) {
 }
 
 static int count_by_cat[4] = {0,0,0,0};
+static std::mutex g_count_mutex;
 static std::atomic<bool> g_stop{false};
 static std::atomic<uint64_t> g_tx_count{0};
 
@@ -480,7 +481,7 @@ static void worker(int seed) {
         if (first < 0) continue;
         int idx = first + (rng() % (last - first + 1));
         run_tx([&]() -> OpResult { return g_ops[idx].fn(rng); });
-        count_by_cat[cat]++;
+        { std::lock_guard<std::mutex> lock(g_count_mutex); count_by_cat[cat]++; }
     }
     expli::TM<int>::thread_exit();
 }

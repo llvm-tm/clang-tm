@@ -326,7 +326,7 @@ run_plugin_impl() {
     local stm7_dir="$PB/stmbench7/bin" ycsb_dir="$PB/ycsb/bin"
 
     for bench in "${STAMP_BENCHES[@]}"; do
-        local bin="$stm_dir/${stm_app}stamp_${backend}"
+        local bin="$stm_dir/${stm_app}${backend}"
         [ -x "$bin" ] || continue
         local params="$(plugin_params "$bench")"
         for t in $THREAD_LIST; do
@@ -337,29 +337,29 @@ run_plugin_impl() {
         done
     done
 
-    if [ -x "$tpcc_dir/${tpcc_app}tpcc_${backend}" ]; then
+    if [ -x "$tpcc_dir/${tpcc_app}${backend}" ]; then
         for t in $THREAD_LIST; do
             for s in $(seq 1 $SAMPLES); do
                 run_one plugin "$backend" tpcc "$t" "$s" \
-                    "$tpcc_dir/${tpcc_app}tpcc_${backend}" -t "$t" -d 5000
+                    "$tpcc_dir/${tpcc_app}${backend}" -t "$t" -d 5000
             done
         done
     fi
 
-    if [ -x "$ycsb_dir/${ycsb_app}ycsb_${backend}" ]; then
+    if [ -x "$ycsb_dir/${ycsb_app}${backend}" ]; then
         for t in $THREAD_LIST; do
             for s in $(seq 1 $SAMPLES); do
                 run_one plugin "$backend" ycsb "$t" "$s" \
-                    "$ycsb_dir/${ycsb_app}ycsb_${backend}" -t "$t" -d 5000 -w a
+                    "$ycsb_dir/${ycsb_app}${backend}" -t "$t" -d 5000 -w a
             done
         done
     fi
 
-    if [ -x "$stm7_dir/${stm7_app}stmbench_${backend}" ]; then
+    if [ -x "$stm7_dir/${stm7_app}${backend}" ]; then
         for t in $THREAD_LIST; do
             for s in $(seq 1 $SAMPLES); do
                 run_one plugin "$backend" stmbench7 "$t" "$s" \
-                    "$stm7_dir/${stm7_app}stmbench_${backend}" -t "$t" -d 5000 -w 1
+                    "$stm7_dir/${stm7_app}${backend}" -t "$t" -d 5000 -w 1
             done
         done
     fi
