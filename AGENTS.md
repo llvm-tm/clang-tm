@@ -2,6 +2,12 @@
 
 ## Latest Session (this session — 2026-06-05)
 
+### Comprehensive benchmark runner: `run_compare_all.sh`
+- New script `run_compare_all.sh` runs TSXSGL, TinySTM WBCTL, NOrec, and SingleGlobalLock across 3 implementations (plugin/expli/rust) × 8 STAMP benches + TPC-C + STMbench7
+- 12 thread levels (1–56), 3 samples, uninstrumented baseline at 1t
+- Organized output in `benchmark_results/compare_all_<ts>/raw/{plugin,expli,rust}/{backend}/` with `progress.txt`, `results.csv`, and `SUMMARY.txt`
+- Analysis phase computes mean/stddev per (impl × backend × bench × threads)
+
 ### Ported 6 STAMP benchmarks: expli C++ and Rust now match plugin algorithm
 
 All 6 STAMP benchmarks (vacation, kmeans, labyrinth, genome, intruder, ssca2) have been ported with the **same algorithm** across all 3 implementations:
@@ -91,3 +97,20 @@ Replaced `tm_read_double(&data.centroids[...])` / `tm_write_double(&data.centroi
 1. **Double-redirection of nesting counter in `TinySTM_runtime.cpp`**: Originally used `__thread int32_t tm_nested_call_counter` directly, but a prior refactor changed to `ts->nested_call_counter` (from `TMThreadState`), breaking the expli API path. Now fixed with bidirectional sync in `tm_begin()`.
 2. **Stack write-back blocked for expli API**: `is_stack_addr(addr) continue;` in commit's write-back phase skipped stack addresses unconditionally, preventing expli API `expli::TM<T>` fields from being persisted. Fixed with `g_tm_expli_mode` flag.
 3. **Pre-existing issues**: `test_vec_push` / `test_alloc_stress` hang at exit (TinySTM plugin); `test_vector_realloc` data corruption from `std::vector` reallocation races (not solved by TM instrumentation)
+
+### Plugin TinySTM WBCTL crashes (compare_all benchmark run 2026-06-05)
+
+**Crashes observed with plugin TinySTM WBCTL** at high thread counts and with stmbench7:
+
+| Benchmark | Threads | Issue | Details |
+|-----------|---------|-------|---------|
+| vacation  | 35–56   | Segfault | Crashes during `worker_vacation` execution at ≥35 threads. Runs ≤28 threads succeed. Likely write-set or lock-array sizing issue at high concurrency. |
+| genome    | 56      | Heap corruption | `double free or corruption (out)` — race in write-back phase at high thread count. Samples 1 and 3 at 56t succeed, suggesting a Heisenbug. |
+| stmbench7 | 2       | Segfault | Consistent crash on ALL 3 samples at just 2 threads. Crashes during worker execution after init completes. Pre-existing `std::vector::_M_realloc_insert` issue. |
+
+**Build fixes applied:**
+- `tm_pipeline.mk:129` — `TM_INCLUDES_singlelock` was empty; added `-I$(BACKENDS_DIR)` so `SingleGlobalLock_runtime.cpp` can find `tm_alloc_overrides.hpp`
+- `expli-benchmarks/Makefile:47` — Wrong filename `single_global_lock_runtime.cpp` (lowercase); fixed to `SingleGlobalLock_runtime.cpp`
+- `expli-benchmarks/Makefile:49` — `EXTRA_INC` was empty for SGL backend; added `-I../backends`
+- `tinystm_wbctl.hpp:317-325` — Ungated debug `fprintf` on lock-version mismatch; wrapped in `#ifndef NDEBUG`
+- `run_compare_all.sh` — SSCA2 plugin flag `-m` corrected to `-p` (plugin STAMP parser uses `-p` for max parallel edges, not `-m`); workload reduced: intruder 1M→5120 flows, genome 16M→1M segments
