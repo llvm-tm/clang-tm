@@ -1,14 +1,7 @@
-// Labyrinth — C++ port of the original STAMP spec (explicit API path)
-// Original spec: https://github.com/ccaominh/stamp/tree/master/labyrinth
-//
-// BFS router: find paths in 3D grid, reserve cells via TM.
-// Only the final path-marking step is transactional; BFS is off-TM.
-//
-// Parameters:
-//   -x <num>  X-dimension (default: 4)
-//   -y <num>  Y-dimension (default: 4)
-//   -z <num>  Z-dimension (default: 4)
-//   -n <num>  Number of paths (default: 64)
+// STAMP/labyrinth benchmark — explicit TM API port
+// Matches the plugin labyrinth_bench.hpp algorithm.
+
+#include "expli_tm_api/tm_api.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -21,6 +14,7 @@
 #include <cstring>
 #include <queue>
 #include <random>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -40,50 +34,48 @@ extern "C" {
     extern __thread sigjmp_buf tm_jmpbuf;
 }
 
-#define TM_READ_I8(p)     tm_read_i8((const void*)(p))
-#define TM_WRITE_I8(p, v) tm_write_i8((void*)(p), (long)(v))
+using PRNG = std::mt19937_64;
 
-template <typename F>
-static void tx_run(F&& body) {
-    volatile bool done = false;
-    while (!done) {
-        sigsetjmp(tm_jmpbuf, 0);
-        tm_nested_call_counter = 1;
-        tm_begin();
-        body();
-        tm_end();
-        done = true;
-    }
-    tm_nested_call_counter = 0;
+// ── TM helpers ────────────────────────────────────────────
+static inline long tm_read_long(long* addr) {
+    uint64_t raw = tm_read_i8(reinterpret_cast<uint64_t*>(addr));
+    long val;
+    memcpy(&val, &raw, sizeof(val));
+    return val;
 }
 
-// ── Parameters ─────────────────────────────────────────────────────
-static long g_labyrinth_x = 4;
-static long g_labyrinth_y = 4;
-static long g_labyrinth_z = 4;
-static long g_labyrinth_n = 64;
-static long g_num_threads = 4;
+static inline void tm_write_long(long* addr, long val) {
+    uint64_t raw;
+    memcpy(&raw, &val, sizeof(raw));
+    tm_write_i8(reinterpret_cast<uint64_t*>(addr), (int64_t)raw);
+}
 
-struct Point3D { int x, y, z; };
+struct Point3D {
+    int x, y, z;
+    bool operator==(const Point3D& o) const { return x == o.x && y == o.y && z == o.z; }
+    bool operator!=(const Point3D& o) const { return !(*this == o); }
+};
 
 struct PathRequest {
     Point3D src;
     Point3D dst;
 };
 
-// Grid stores: -1 = free, -2 = wall, -3 = routed (set by TM mark)
-static long*       g_grid = nullptr;
-static PathRequest* g_requests = nullptr;
-static int*        g_request_handled = nullptr;
-static long        g_width, g_height, g_depth;
-static long        g_gridsize;
-static std::atomic<long> total_ops{0};
+struct LabyrinthData {
+    long* grid;            // flat array [width * height * depth]
+    PathRequest* requests;
+    int* request_handled;
+    int width, height, depth;
+    int num_requests;
+};
 
-static int grid_idx(int x, int y, int z) {
-    return (int)((z * g_height + y) * g_width + x);
+static LabyrinthData g_data;
+
+static inline int grid_idx(int w, int h, int x, int y, int z) {
+    return (z * h + y) * w + x;
 }
 
-// ── BFS expansion (non-TM, on local copy) ──────────────────────────
+// ── BFS expansion (non-TX, works on local copy) ───────────
 static int do_expansion(long* dist, const long* cell_states,
                          int w, int h, int d,
                          const Point3D& src, const Point3D& dst,
@@ -101,6 +93,7 @@ static int do_expansion(long* dist, const long* cell_states,
         int cur = queue[qh++];
         int cx = cur % w, cy = (cur / w) % h, cz = cur / (w * h);
         if (cx == dst.x && cy == dst.y && cz == dst.z) return 1;
+
         for (int d2 = 0; d2 < 6; d2++) {
             int nx = cx + dirs[d2][0], ny = cy + dirs[d2][1], nz = cz + dirs[d2][2];
             if (nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d) continue;
@@ -115,10 +108,10 @@ static int do_expansion(long* dist, const long* cell_states,
     return 0;
 }
 
-// ── Greedy traceback (non-TM) ──────────────────────────────────────
-static int do_traceback(std::vector<Point3D>& path, const long* dist,
-                         int w, int h, int d,
-                         const Point3D& src, const Point3D& dst) {
+// ── Greedy traceback (non-TX) ─────────────────────────────
+static bool do_traceback(std::vector<Point3D>& path, const long* dist,
+                          int w, int h, int d,
+                          const Point3D& src, const Point3D& dst) {
     path.clear();
     int cx = dst.x, cy = dst.y, cz = dst.z;
     int dirs[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
@@ -126,6 +119,7 @@ static int do_traceback(std::vector<Point3D>& path, const long* dist,
         path.push_back({cx, cy, cz});
         int idx = (cz * h + cy) * w + cx;
         if (idx == (src.z * h + src.y) * w + src.x) break;
+
         int best_d = -1;
         long best_val = dist[idx];
         for (int d2 = 0; d2 < 6; d2++) {
@@ -134,137 +128,153 @@ static int do_traceback(std::vector<Point3D>& path, const long* dist,
             long nv = dist[(nz * h + ny) * w + nx];
             if (nv >= 0 && nv < best_val) { best_val = nv; best_d = d2; }
         }
-        if (best_d < 0) { path.clear(); return 0; }
+        if (best_d < 0) { path.clear(); return false; }
         cx += dirs[best_d][0]; cy += dirs[best_d][1]; cz += dirs[best_d][2];
     }
     std::reverse(path.begin(), path.end());
     return !path.empty();
 }
 
-// ── TM mark: atomically verify and reserve path cells ──────────────
-static bool labyrinth_mark(const std::vector<Point3D>& path) {
-    bool ok = false;
-    tx_run([&]() {
-        for (size_t i = 1; i + 1 < path.size(); i++) {
-            int idx = grid_idx(path[i].x, path[i].y, path[i].z);
-            long val = TM_READ_I8(&g_grid[idx]);
-            if (val != -1L) return;
+// ── TX mark: atomically verify and mark path cells ────────
+static bool labyrinth_mark(LabyrinthData* data, const std::vector<Point3D>& path) {
+    bool result = false;
+    tx_retry([&]() {
+        int w = data->width, h = data->height, d = data->depth;
+        // Verify all intermediate cells are free
+        bool ok = true;
+        for (size_t i = 1; i + 1 < path.size() && ok; i++) {
+            int idx = grid_idx(w, h, path[i].x, path[i].y, path[i].z);
+            if (tm_read_long(&data->grid[idx]) != -1L)
+                ok = false;
         }
+        if (!ok) { result = false; return; }
+        // Mark them as blocked
         for (size_t i = 1; i + 1 < path.size(); i++) {
-            int idx = grid_idx(path[i].x, path[i].y, path[i].z);
-            TM_WRITE_I8(&g_grid[idx], -2L);
+            int idx = grid_idx(w, h, path[i].x, path[i].y, path[i].z);
+            tm_write_long(&data->grid[idx], -2L);
         }
-        ok = true;
+        result = true;
     });
-    return ok;
+    return result;
 }
 
-// ── Worker ─────────────────────────────────────────────────────────
-static void worker(long tid) {
-    tm_init_thread();
+// ── Worker thread ─────────────────────────────────────────
+static std::atomic<uint64_t> g_total_ops{0};
 
-    int gridsize = (int)g_gridsize;
-    std::vector<long> local_grid((size_t)gridsize);
-    std::vector<long> dist((size_t)gridsize);
-    std::vector<int> queue((size_t)gridsize);
+static void worker(int thread_id, int num_threads) {
+    expli::TM<int>::thread_init();
+
+    auto* data = &g_data;
+    int gridsize = data->width * data->height * data->depth;
+    auto* local_grid = new long[gridsize];
+    auto* dist = new long[gridsize];
+    auto* queue = new int[gridsize];
     std::vector<Point3D> path;
 
-    for (long i = tid; i < g_labyrinth_n; i += g_num_threads) {
-        if (g_request_handled[i]) continue;
+    for (int i = thread_id; i < data->num_requests; i += num_threads) {
+        if (data->request_handled[i]) continue;
 
-        auto& req = g_requests[i];
-        int w = (int)g_width, h = (int)g_height, d = (int)g_depth;
+        auto& req = data->requests[i];
+        int w = data->width, h = data->height, d = data->depth;
 
         while (true) {
-            std::memcpy(local_grid.data(), g_grid, (size_t)gridsize * sizeof(long));
+            // Snapshot grid state (non-TX — may be stale)
+            memcpy(local_grid, data->grid, gridsize * sizeof(long));
 
-            int ok = do_expansion(dist.data(), local_grid.data(), w, h, d,
-                                   req.src, req.dst, queue.data());
-            int traced = ok && do_traceback(path, dist.data(), w, h, d,
-                                             req.src, req.dst);
+            int ok = do_expansion(dist, local_grid, w, h, d,
+                                   req.src, req.dst, queue);
+            bool traced = ok && do_traceback(path, dist, w, h, d, req.src, req.dst);
             if (!ok || !traced || path.empty()) break;
 
-            if (labyrinth_mark(path)) break;
+            if (labyrinth_mark(data, path)) break;
+            // TX failed — path cells taken. Retry.
         }
 
-        g_request_handled[i] = 1;
-        total_ops.fetch_add(1, std::memory_order_relaxed);
+        data->request_handled[i] = 1;
+        g_total_ops.fetch_add(1, std::memory_order_relaxed);
     }
 
-    tm_exit_thread();
+    delete[] local_grid;
+    delete[] dist;
+    delete[] queue;
+    expli::TM<int>::thread_exit();
 }
 
-// ── Main ───────────────────────────────────────────────────────────
 int main(int argc, char* argv[]) {
+    int num_threads = 4;
+    int width = 8, height = 8, depth = 8;
+    int num_requests = 64;
+
     for (int i = 1; i < argc; i++) {
-        if      (strcmp(argv[i], "-x") == 0 && i+1 < argc) g_labyrinth_x = atol(argv[++i]);
-        else if (strcmp(argv[i], "-y") == 0 && i+1 < argc) g_labyrinth_y = atol(argv[++i]);
-        else if (strcmp(argv[i], "-z") == 0 && i+1 < argc) g_labyrinth_z = atol(argv[++i]);
-        else if (strcmp(argv[i], "-n") == 0 && i+1 < argc) g_labyrinth_n = atol(argv[++i]);
-        else if (strcmp(argv[i], "-c") == 0 && i+1 < argc) g_num_threads  = atol(argv[++i]);
+        if (!strcmp(argv[i], "-p") && i + 1 < argc) num_threads = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-x") && i + 1 < argc) width = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-y") && i + 1 < argc) height = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-z") && i + 1 < argc) depth = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-n") && i + 1 < argc) num_requests = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-h")) {
+            fprintf(stderr, "Usage: %s -p <threads> -x <width> -y <height> -z <depth> -n <requests>\n", argv[0]);
+            return 0;
+        }
     }
 
-    printf("Labyrinth (STAMP spec)\n");
-    printf("  Grid:  %ldx%ldx%ld\n", g_labyrinth_x, g_labyrinth_y, g_labyrinth_z);
-    printf("  Paths: %ld\n", g_labyrinth_n);
-    printf("  Threads: %ld\n", g_num_threads);
+    expli::TM<int>::init();
 
-    tm_init();
-    g_width  = g_labyrinth_x;
-    g_height = g_labyrinth_y;
-    g_depth  = g_labyrinth_z;
-    g_gridsize = g_width * g_height * g_depth;
+    g_data.width = width;
+    g_data.height = height;
+    g_data.depth = depth;
+    g_data.num_requests = num_requests;
 
-    g_grid = (long*)tm_calloc((size_t)g_gridsize, sizeof(long));
-    for (long i = 0; i < g_gridsize; i++) g_grid[i] = -1L;
+    int gridsize = width * height * depth;
+    g_data.grid = (long*)tm_malloc((size_t)gridsize * sizeof(long));
+    std::fill(g_data.grid, g_data.grid + gridsize, -1L);
 
-    // Add random walls
-    std::mt19937_64 rng(42);
-    long num_walls = g_gridsize / 8;
-    for (long i = 0; i < num_walls; i++) {
-        long idx = (long)(rng() % (uint64_t)g_gridsize);
-        if (g_grid[idx] == -1L) g_grid[idx] = -2L;
+    PRNG rng(42);
+    int num_walls = gridsize / 8;
+    for (int i = 0; i < num_walls; i++) {
+        int idx = (int)(rng() % gridsize);
+        if (g_data.grid[idx] == -1L)
+            g_data.grid[idx] = -2L;
     }
 
-    // Generate requests
-    g_requests = new PathRequest[(size_t)g_labyrinth_n];
-    g_request_handled = new int[(size_t)g_labyrinth_n]{};
+    g_data.requests = new PathRequest[num_requests];
+    g_data.request_handled = new int[num_requests]();
 
-    for (long i = 0; i < g_labyrinth_n; i++) {
+    for (int i = 0; i < num_requests; i++) {
         int sx, sy, sz, dx, dy, dz;
         do {
-            sx = (int)(rng() % (uint64_t)g_width);
-            sy = (int)(rng() % (uint64_t)g_height);
-            sz = (int)(rng() % (uint64_t)g_depth);
-        } while (g_grid[grid_idx(sx, sy, sz)] != -1L);
+            sx = (int)(rng() % width);
+            sy = (int)(rng() % height);
+            sz = (int)(rng() % depth);
+        } while (g_data.grid[grid_idx(width, height, sx, sy, sz)] != -1L);
         do {
-            dx = (int)(rng() % (uint64_t)g_width);
-            dy = (int)(rng() % (uint64_t)g_height);
-            dz = (int)(rng() % (uint64_t)g_depth);
-        } while (g_grid[grid_idx(dx, dy, dz)] != -1L ||
+            dx = (int)(rng() % width);
+            dy = (int)(rng() % height);
+            dz = (int)(rng() % depth);
+        } while (g_data.grid[grid_idx(width, height, dx, dy, dz)] != -1L ||
                  (dx == sx && dy == sy && dz == sz));
-
-        g_requests[i] = {{sx, sy, sz}, {dx, dy, dz}};
+        g_data.requests[i] = {{sx, sy, sz}, {dx, dy, dz}};
     }
 
-    printf("  Maze generated: %ld cells, %ld walls\n", g_gridsize, num_walls);
+    printf("Maze size:    %ix%ix%i\n", width, height, depth);
+    printf("Paths to route: %i\n", num_requests);
+    fflush(stdout);
 
-    auto t1 = std::chrono::steady_clock::now();
-
+    auto start_time = std::chrono::high_resolution_clock::now();
     std::vector<std::thread> threads;
-    for (long t = 0; t < g_num_threads; t++)
-        threads.emplace_back(worker, t);
-    for (auto& th : threads) th.join();
+    for (int i = 0; i < num_threads; i++)
+        threads.emplace_back(worker, i, num_threads);
+    for (auto& t : threads)
+        t.join();
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       end_time - start_time).count();
 
-    auto t2 = std::chrono::steady_clock::now();
-    double elapsed = std::chrono::duration<double>(t2 - t1).count();
+    uint64_t ops = g_total_ops.load();
+    printf("    Time = %lld ms\n", (long long)elapsed);
+    printf("    Routed = %llu / %d\n", (unsigned long long)ops, num_requests);
 
-    printf("\nResults (%ld ms):\n", (long)(elapsed * 1000));
-    printf("  Routed:   %ld\n", total_ops.load());
-    printf("  PASS\n");
-
-    delete[] g_requests;
-    delete[] g_request_handled;
-    tm_exit();
+    delete[] g_data.requests;
+    delete[] g_data.request_handled;
+    expli::TM<int>::exit();
     return 0;
 }
