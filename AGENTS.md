@@ -52,9 +52,9 @@
 - Run analysis phase (embedded Python script)
 - Triage SSCA2 pre-existing crash (SIGSEGV in `tm_begin` from worker thread)
 
-## Previous Session (2026-06-04)
+### All 8 STAMP benchmarks now ported to Rust
 
-### Ported 6 STAMP benchmarks: expli C++ and Rust match plugin algorithm
+Added bayes and yada Rust ports, completing all 8 STAMP benchmarks across all 3 implementations:
 
 | Benchmark | Plugin (reference) | Expli C++ | Rust |
 |-----------|-------------------|-----------|------|
@@ -64,13 +64,26 @@
 | genome    | `genome_bench.hpp` | `genome.cpp` | `stamp_genome.rs` |
 | intruder  | `intruder_bench.hpp` | `intruder.cpp` | `stamp_intruder.rs` |
 | ssca2     | `ssca2_bench.hpp` | `ssca2.cpp` | `stamp_ssca2.rs` |
+| bayes     | `bayes_bench.hpp` | `bayes.cpp` | `stamp_bayes.rs` |
+| yada      | `yada_bench.hpp` | `yada.cpp` | `stamp_yada.rs` |
 
 #### Key changes
-- **Expli C++**: 6 rewritten benchmarks using explicit `tm_read_i8`/`tm_write_i8` etc. inside `tx_retry`. Vacation, kmeans, labyrinth fully ported with matching algorithm. Genome, intruder use `std::mutex` (matching `tm_serialize_lock/unlock`). SSCA2 uses read-only TX wrappers.
-- **Rust**: 6 new standalone binaries (`stamp_*.rs`) in `rust_tm_api/benchmarks/src/bin/`. Added to `Cargo.toml`. All compile with zero warnings under `cargo build --release`.
-- **Rust TinySTM backend**: Works correctly with heap-allocated `TmCell<T>` data. The pre-existing panic in `wbctl.rs:6` was resolved (address check removed in default `wbctl` feature).
+- **Rust bayes**: Bayesian network structure learning. Builds parent/child graph, computes log-likelihoods, uses `transaction()` closures for TM access. Non-TM `compute_ll` helper called inside TX for density computation. Same algorithm as C++ expli version.
+- **Rust yada**: Delaunay mesh refinement. Timer-based (3s) worker loop with 3 transactions per iteration (pop, refine, push). Cavity BFS with circumcircle test. Fixed timer-check skip bug: timer check must run before `continue` to avoid infinite loop when work heap empties or all remaining elements are garbage.
+- **Rust TinySTM backend**: Works correctly with heap-allocated `TmCell<T>` data (no TM region assertion).
+- Both new ports compile with zero warnings, zero errors under `cargo build --release -p benchmarks --bin stamp_bayes --bin stamp_yada`.
 
-### Kmeans fix: centroid update outside tx_retry
+#### Test results (Rust, 4 threads, default params)
+- `stamp_bayes -v 32 -r 1024 -p 4`: 31 ops, 62 total parents, 394 ms — PASS
+- `stamp_yada -a 45 -j 0.5 -p 2`: 56 ops, 330 elements, 3000 ms (3s timer) — PASS
+- `stamp_yada -a 20 -j 0.5 -p 4`: 0 ops (no bad elements), 162 elements, 3000 ms — PASS
+
+#### Issues found & fixed
+1. **Yada timer check skipped on continue**: The 3-second timer check was at the bottom of the while loop, but `continue` statements in the early-exit paths (empty heap, garbage element) bypassed it. If the heap ever had only garbage elements, each iteration hit `continue` without ever checking the timer — infinite loop. **Fix**: Added timer check before every `continue`.
+
+## Previous Session (2026-06-04)
+
+### Ported 6 STAMP benchmarks: expli C++ and Rust match plugin algorithm
 
 **Root cause**: The centroid update loop in phase 2 called `tm_read_double`/`tm_write_double` **outside** any `tx_retry` block. The plugin runs centroid update outside transactions (only `TX`-annotated functions are instrumented). The expli API equivalent must use direct memory access (`*ptr` instead of `tm_read_double`/`tm_write_double`).
 
