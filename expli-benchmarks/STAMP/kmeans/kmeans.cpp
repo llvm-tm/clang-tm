@@ -1,17 +1,11 @@
-// KMeans — C++ port of the original STAMP spec (explicit API path)
-// Original spec: https://github.com/ccaominh/stamp/tree/master/kmeans
-//
-// Parameters:
-//   -m <num>   Max clusters (= dimensions)  (default: 40)
-//   -n <num>   Number of points              (default: 40)
-//   -t <num>   Convergence threshold         (default: 0.00001)
+// STAMP/kmeans benchmark — explicit TM API port
+// Matches the plugin kmeans_bench.hpp algorithm.
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <cmath>
-#include <csetjmp>
-#include <cstdint>
+#include <limits>
+#include <random>
 #include <thread>
 #include <vector>
 #include <chrono>
@@ -62,215 +56,216 @@ static void tx_run(F&& body) {
     tm_nested_call_counter = 0;
 }
 
-template<typename F>
-static void tx_run_sync(F&& body) {
-    sigsetjmp(tm_jmpbuf, 0);
-    tm_nested_call_counter = 1;
-    tm_begin();
-    body();
-    tm_end();
-    tm_nested_call_counter = 0;
+using PRNG = std::mt19937_64;
+
+// ── TM-safe double read/write helpers ─────────────────────
+static inline double tm_read_double(double* addr) {
+    uint64_t raw = tm_read_i8(reinterpret_cast<uint64_t*>(addr));
+    double val;
+    memcpy(&val, &raw, sizeof(val));
+    return val;
 }
 
-// ── RNG ────────────────────────────────────────────────────────────
-#include <random>
-static thread_local std::mt19937 tls_rng;
-
-static void rng_seed(unsigned s) { tls_rng = std::mt19937(s); }
-static double rng_uniform(double min, double max) {
-    return std::uniform_real_distribution<double>(min, max)(tls_rng);
-}
-static long rng_range(long max) {
-    return (long)(tls_rng() % (uint32_t)max);
+static inline void tm_write_double(double* addr, double val) {
+    uint64_t raw;
+    memcpy(&raw, &val, sizeof(raw));
+    tm_write_i8(reinterpret_cast<uint64_t*>(addr), (int64_t)raw);
 }
 
-// ── Data structures (flat arrays) ──────────────────────────────────
-// Points (non-TM, read-only after generation)
-static double* g_points = nullptr; // [npoints * ndims]
-
-// TM-tracked centroids
-static long* g_centroids = nullptr; // [nclusters * ndims] as d2l
-
-// Per-cluster TM-tracked accumulators (reset each iteration)
-static long* g_new_centers_sum = nullptr;   // [nclusters * ndims] as d2l
-static long* g_new_centers_count = nullptr;  // [nclusters]
-
-static long g_ndims = 0;
-static std::atomic<long> g_total_iters{0};
-static std::atomic<bool> g_converged{false};
-static std::mutex g_barrier_mutex;
-static std::condition_variable g_barrier_cv;
-static int g_barrier_count = 0;
-
-static void barrier_wait() {
-    std::unique_lock<std::mutex> lock(g_barrier_mutex);
-    g_barrier_count++;
-    if (g_barrier_count >= (int)g_num_threads) {
-        g_barrier_count = 0;
-        g_barrier_cv.notify_all();
-    } else {
-        g_barrier_cv.wait(lock);
-    }
+static inline int tm_read_int(int* addr) {
+    return (int)tm_read_i4(reinterpret_cast<uint32_t*>(addr));
 }
 
-// ── TM accumulate (find nearest centroid, accumulate sums) ─────────
-TX_FUNC static void tx_accumulate(long start, long end,
-                                   double* local_sum, long* local_count) {
-    for (long i = start; i < end; i++) {
-        double* pt = &g_points[i * g_ndims];
-        int best = 0;
-        double best_dist = 1e308;
-        for (long c = 0; c < g_nclusters; c++) {
-            double dist = 0.0;
-            for (long d = 0; d < g_ndims; d++) {
-                double diff = pt[d] - l2d(TM_READ_I8(&g_centroids[c * g_ndims + d]));
-                dist += diff * diff;
+static inline void tm_write_int(int* addr, int val) {
+    tm_write_i4(reinterpret_cast<uint32_t*>(addr), (uint32_t)val);
+}
+
+// ── KMeans data ───────────────────────────────────────────
+struct KMeansData {
+    double* points;         // [npoints * ndims] row-major
+    double* centroids;      // [nclusters * ndims] row-major
+    int*    assignments;    // [npoints]
+    double* new_centers_sum;
+    int*    new_centers_count;
+    int npoints;
+    int ndims;
+    int nclusters;
+    double threshold;
+};
+
+static KMeansData g_data;
+
+static double tm_sqrt_s(double x) {
+    if (x <= 0) return 0;
+    double s = x;
+    for (int i = 0; i < 25; i++) s = (s + x / s) * 0.5;
+    return s;
+}
+
+static void kmeans_accumulate(KMeansData* data, int start, int end,
+                               double* local_sum, int* local_count) {
+    int ndims = data->ndims;
+    int nclusters = data->nclusters;
+
+    for (int i = start; i < end; i++) {
+        int best = -1;
+        double best_dist = std::numeric_limits<double>::max();
+
+        // One TX per point: read centroids, compute assignment, write assignment
+        double pt_buf[64];
+        double ct_buf[64 * 64];
+        tx_retry([&]() {
+            for (int d = 0; d < ndims; d++)
+                pt_buf[d] = tm_read_double(&data->points[i * ndims + d]);
+            for (int c = 0; c < nclusters; c++)
+                for (int d = 0; d < ndims; d++)
+                    ct_buf[c * ndims + d] = tm_read_double(&data->centroids[c * ndims + d]);
+
+            best = -1;
+            best_dist = std::numeric_limits<double>::max();
+            for (int c = 0; c < nclusters; c++) {
+                double dist = 0.0;
+                for (int d = 0; d < ndims; d++) {
+                    double diff = pt_buf[d] - ct_buf[c * ndims + d];
+                    dist += diff * diff;
+                }
+                if (dist < best_dist) { best_dist = dist; best = c; }
             }
-            if (dist < best_dist) { best_dist = dist; best = (int)c; }
-        }
-        for (long d = 0; d < g_ndims; d++)
-            local_sum[best * g_ndims + d] += pt[d];
+            tm_write_int(&data->assignments[i], best);
+        });
+
         local_count[best]++;
+        for (int d = 0; d < ndims; d++)
+            local_sum[best * ndims + d] += pt_buf[d];
     }
 }
 
-// ── Worker thread ──────────────────────────────────────────────────
-static void worker(long tid) {
-    tm_init_thread();
-    rng_seed(42 + (unsigned)tid);
+static void worker(int thread_id, int num_threads) {
+    expli::TM<int>::thread_init();
 
-    long chunk = (g_npoints + g_num_threads - 1) / g_num_threads;
-    long start = tid * chunk;
-    long end = std::min(start + chunk, g_npoints);
+    auto* data = &g_data;
+    int npoints = data->npoints;
+    int ndims = data->ndims;
+    int nclusters = data->nclusters;
+    double threshold = data->threshold;
 
-    // Per-thread local accumulators
-    std::vector<double> local_sum(g_nclusters * g_ndims);
-    std::vector<long> local_count(g_nclusters);
+    auto* local_sum = new double[nclusters * ndims]();
+    auto* local_count = new int[nclusters]();
 
-    for (int iter = 0; iter < 100 && !g_converged.load(); iter++) {
-        // Reset local accumulators
-        std::fill(local_sum.begin(), local_sum.end(), 0.0);
-        std::fill(local_count.begin(), local_count.end(), 0L);
+    bool converged = false;
+    int max_iters = 100;
 
-        // Accumulate (TM)
-        tx_run([&]() {
-            tx_accumulate(start, end, local_sum.data(), local_count.data());
-        });
+    while (!converged && max_iters-- > 0) {
+        std::fill(local_sum, local_sum + nclusters * ndims, 0.0);
+        std::fill(local_count, local_count + nclusters, 0);
 
-        // Barrier: all threads finish accumulate before centroid update
-        barrier_wait();
+        int chunk = (npoints + num_threads - 1) / num_threads;
+        int start = thread_id * chunk;
+        int end = std::min(start + chunk, npoints);
 
-        // Merge local → global and update centroids (serialized by barrier)
-        tx_run_sync([&]() {
-            // Merge local into global accumulators
-            for (long c = 0; c < g_nclusters; c++) {
-                long cnt = TM_READ_I8(&g_new_centers_count[c]);
-                TM_WRITE_I8(&g_new_centers_count[c], cnt + local_count[c]);
-                for (long d = 0; d < g_ndims; d++) {
-                    double old = TM_READ_DOUBLE(&g_new_centers_sum[c * g_ndims + d]);
-                    TM_WRITE_DOUBLE(&g_new_centers_sum[c * g_ndims + d],
-                                    old + local_sum[c * g_ndims + d]);
-                }
-            }
-        });
+        if (start < end) {
+            kmeans_accumulate(data, start, end, local_sum, local_count);
+        }
 
-        // Thread 0 computes new centroids and checks convergence
-        if (tid == 0) {
-            double max_delta = 0.0;
-            tx_run_sync([&]() {
-                for (long c = 0; c < g_nclusters; c++) {
-                    long cnt = TM_READ_I8(&g_new_centers_count[c]);
-                    if (cnt > 0) {
-                        for (long d = 0; d < g_ndims; d++) {
-                            double new_val = TM_READ_DOUBLE(&g_new_centers_sum[c * g_ndims + d]) / cnt;
-                            double old_val = TM_READ_DOUBLE(&g_centroids[c * g_ndims + d]);
-                            double diff = new_val - old_val;
-                            max_delta = std::max(max_delta, diff * diff);
-
-                            TM_WRITE_DOUBLE(&g_centroids[c * g_ndims + d], new_val);
-                            TM_WRITE_DOUBLE(&g_new_centers_sum[c * g_ndims + d], 0.0);
-                        }
-                        TM_WRITE_I8(&g_new_centers_count[c], 0);
-                    }
-                }
-            });
-            max_delta = std::sqrt(max_delta);
-            if (max_delta < g_threshold) {
-                g_converged.store(true, std::memory_order_relaxed);
+        // Serial accumulate (no TM — matches plugin behavior)
+        for (int c = 0; c < nclusters; c++) {
+            data->new_centers_count[c] += local_count[c];
+            for (int d = 0; d < ndims; d++) {
+                data->new_centers_sum[c * ndims + d] += local_sum[c * ndims + d];
             }
         }
 
-        barrier_wait();
-        g_total_iters.fetch_add(1, std::memory_order_relaxed);
+        double delta = 0.0;
+        for (int c = 0; c < nclusters; c++) {
+            if (data->new_centers_count[c] > 0) {
+                for (int d = 0; d < ndims; d++) {
+                    int idx = c * ndims + d;
+                    double new_val = data->new_centers_sum[idx] / data->new_centers_count[c];
+                    double diff = data->centroids[idx] - new_val;
+                    delta += diff * diff;
+                    data->centroids[idx] = new_val;
+                    data->new_centers_sum[idx] = 0.0;
+                }
+            }
+            data->new_centers_count[c] = 0;
+        }
+
+        delta = tm_sqrt_s(delta / (nclusters * ndims));
+        converged = (delta < threshold);
     }
+
+    delete[] local_sum;
+    delete[] local_count;
+    expli::TM<int>::thread_exit();
 }
 
-// ── Main ───────────────────────────────────────────────────────────
 int main(int argc, char* argv[]) {
+    int num_threads = 4;
+    int nclusters = 16;
+    int ndims = 2;
+    int npoints = 2048;
+    double threshold = 0.0001;
+
     for (int i = 1; i < argc; i++) {
-        if      (strcmp(argv[i], "-m") == 0 && i+1 < argc)
-            g_nclusters = atol(argv[++i]);
-        else if (strcmp(argv[i], "-n") == 0 && i+1 < argc)
-            g_npoints = atol(argv[++i]);
-        else if (strcmp(argv[i], "-t") == 0 && i+1 < argc)
-            g_threshold = atof(argv[++i]);
-        else if (strcmp(argv[i], "-c") == 0 && i+1 < argc)
-            g_num_threads = atol(argv[++i]);
-    }
-    g_ndims = g_nclusters; // ndims = nclusters (matches plugin)
-
-    printf("KMeans (STAMP spec)\n");
-    printf("  Points:    %ld\n", g_npoints);
-    printf("  Clusters:  %ld\n", g_nclusters);
-    printf("  Dims:      %ld\n", g_ndims);
-    printf("  Threshold: %.6f\n", g_threshold);
-    printf("  Threads:   %ld\n", g_num_threads);
-
-    tm_init();
-
-    // Allocate data
-    g_points = new double[g_npoints * g_ndims]();
-    g_centroids = (long*)tm_calloc((size_t)g_nclusters * g_ndims, sizeof(long));
-    g_new_centers_sum = (long*)tm_calloc((size_t)g_nclusters * g_ndims, sizeof(long));
-    g_new_centers_count = (long*)tm_calloc(g_nclusters, sizeof(long));
-
-    // Generate cluster-biased points (matching plugin spec)
-    rng_seed(42);
-    for (long i = 0; i < g_npoints; i++) {
-        long cluster = i % g_nclusters;
-        for (long d = 0; d < g_ndims; d++) {
-            g_points[i * g_ndims + d] =
-                rng_uniform(-10.0, 10.0) + (double)cluster * 5.0;
+        if (!strcmp(argv[i], "-p") && i + 1 < argc) num_threads = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-k") && i + 1 < argc) nclusters = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-d") && i + 1 < argc) ndims = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-n") && i + 1 < argc) npoints = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-t") && i + 1 < argc) threshold = atof(argv[++i]);
+        else if (!strcmp(argv[i], "-h")) {
+            fprintf(stderr, "Usage: %s -p <threads> -k <clusters> -d <dims> -n <points> -t <threshold>\n", argv[0]);
+            return 0;
         }
     }
 
-    // Initialize centroids (random, not TM-tracked for setup)
-    for (long c = 0; c < g_nclusters; c++)
-        for (long d = 0; d < g_ndims; d++)
-            g_centroids[c * g_ndims + d] = d2l(rng_uniform(-10.0, 10.0));
+    printf("Points:    %i\n", npoints);
+    printf("Dims:      %i\n", ndims);
+    printf("Clusters:  %i\n", nclusters);
+    printf("Threshold: %f\n", threshold);
+    fflush(stdout);
 
-    printf("  Initial centroids: %ld\n", g_nclusters);
+    expli::TM<int>::init();
 
-    auto t1 = std::chrono::steady_clock::now();
+    g_data.npoints = npoints;
+    g_data.ndims = ndims;
+    g_data.nclusters = nclusters;
+    g_data.threshold = threshold;
+    g_data.points = (double*)tm_calloc((size_t)npoints * ndims, sizeof(double));
+    g_data.centroids = (double*)tm_calloc((size_t)nclusters * ndims, sizeof(double));
+    g_data.assignments = (int*)tm_calloc(npoints, sizeof(int));
+    g_data.new_centers_sum = (double*)tm_calloc((size_t)nclusters * ndims, sizeof(double));
+    g_data.new_centers_count = (int*)tm_calloc((size_t)nclusters, sizeof(int));
 
+    PRNG rng(42);
+    for (int i = 0; i < npoints; i++) {
+        int cluster = i % nclusters;
+        for (int d = 0; d < ndims; d++) {
+            double u = (double)rng() / (double)rng.max();
+            g_data.points[i * ndims + d] = (-10.0 + u * 20.0) + cluster * 5.0;
+        }
+    }
+
+    for (int c = 0; c < nclusters; c++) {
+        for (int d = 0; d < ndims; d++) {
+            double u = (double)rng() / (double)rng.max();
+            g_data.centroids[c * ndims + d] = -10.0 + u * 20.0;
+        }
+    }
+
+    std::fill(g_data.assignments, g_data.assignments + npoints, -1);
+
+    auto start_time = std::chrono::high_resolution_clock::now();
     std::vector<std::thread> threads;
-    for (long t = 0; t < g_num_threads; t++)
-        threads.emplace_back(worker, t);
-    for (auto& th : threads) th.join();
+    for (int i = 0; i < num_threads; i++)
+        threads.emplace_back(worker, i, num_threads);
+    for (auto& t : threads)
+        t.join();
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       end_time - start_time).count();
 
-    auto t2 = std::chrono::steady_clock::now();
-    double elapsed = std::chrono::duration<double>(t2 - t1).count();
+    printf("    Elapsed = %lld ms\n", (long long)elapsed);
 
-    long iters = g_total_iters.load();
-    printf("\nResults (%ld ms):\n", (long)(elapsed * 1000));
-    printf("  Iterations: %ld\n", iters);
-    if (g_converged.load())
-        printf("  Converged:  yes\n");
-    else
-        printf("  Converged:  no (max iters)\n");
-    printf("  PASS\n");
-
-    delete[] g_points;
-    tm_exit();
+    expli::TM<int>::exit();
     return 0;
 }

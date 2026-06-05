@@ -183,22 +183,22 @@ run-fuzz-bank: $(FUZZ_BANK_BIN)
 run-fuzz: run-fuzz-counter run-fuzz-bank
 
 run-vacation: $(VACATION_BIN)
-	./$(VACATION_BIN) 4 5000 1000 100 42
+	./$(VACATION_BIN) -p 4 -r 16384 -n 2 -u 98 -t 4096
 
 run-labyrinth: $(LABYRINTH_BIN)
-	./$(LABYRINTH_BIN)
+	./$(LABYRINTH_BIN) -p 4 -x 8 -y 8 -z 8 -n 64
 
 run-kmeans: $(KMEANS_BIN)
-	./$(KMEANS_BIN) -t 4 -k 16 -d 2 -n 2048 -i 100
+	./$(KMEANS_BIN) -p 4 -k 16 -d 2 -n 2048
 
 run-genome: $(GENOME_BIN)
-	./$(GENOME_BIN) -t 4 -g 16384 -s 64 -n 16777216
+	./$(GENOME_BIN) -p 4 -g 16384 -s 64 -n 16777216
 
 run-intruder: $(INTRUDER_BIN)
-	./$(INTRUDER_BIN) -t 4 -a 10 -l 128 -n 1048576 -s 1
+	./$(INTRUDER_BIN) -p 4 -a 10 -l 128 -n 1048576 -s 1
 
 run-ssca2: $(SSCA2_BIN)
-	./$(SSCA2_BIN) -t 4 -s 14 -i 1.0 -u 1.0 -l 3 -m 3
+	./$(SSCA2_BIN) -p 4 -s 14 -u 1.0 -l 3 -m 3 -i 3
 
 run-bayes: $(BAYES_BIN)
 	./$(BAYES_BIN) -t 4 -v 32 -r 1024 -n 2 -p 2 -e 2
