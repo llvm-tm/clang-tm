@@ -113,7 +113,7 @@ mark_broken() {
     local label="${1}_${2}_${3}"
     if ! grep -qx "$1 $2 $3" "$SKIP_FILE" 2>/dev/null; then
         echo "$1 $2 $3" >> "$SKIP_FILE"
-        printf "  *** %-60s ALL REMAINING SKIPPED (consistent crash) ***\n" "$label"
+        printf "  *** %-60s ALL REMAINING SKIPPED (consistent crash) ***\n" "$label" >&2
     fi
 }
 
@@ -137,7 +137,8 @@ run_one() {
     # Skip if this (impl, backend, bench) is known to crash consistently
     if is_skipped "$impl" "$backend" "$bench"; then
         RUN_SKIPPED=$((RUN_SKIPPED + 1))
-        log_progress "SKIP $label (known-broken combo: $combo)"
+        printf "  %-60s %s\n" "$label" "SKIP (known-broken: $combo)"
+        log_progress "SKIP $label (known-broken: $combo)"
         return 0
     fi
 
@@ -145,7 +146,8 @@ run_one() {
     if [ -f "$outfile" ] && [ -s "$outfile" ]; then
         if grep -qE 'PASS|Verification passed|done\.|Ops/sec|Results|Time\s*[=:]' "$outfile" 2>/dev/null; then
             RUN_SKIPPED=$((RUN_SKIPPED + 1))
-            log_progress "SKIP $label (exists, looks OK)"
+            printf "  %-60s %s\n" "$label" "SKIP (exists)"
+            log_progress "SKIP $label (exists)"
             return 0
         fi
         rm -f "$outfile"
