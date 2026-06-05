@@ -13,27 +13,27 @@ path = "src/bin/datastructures.rs"
 
 [[bin]]
 name = "stamp_vacation"
-path = "src/bin/stamp_vacation.rs"
+path = "src/cli/stamp_vacation.rs"
 
 [[bin]]
 name = "stamp_kmeans"
-path = "src/bin/stamp_kmeans.rs"
+path = "src/cli/stamp_kmeans.rs"
 
 [[bin]]
 name = "stamp_genome"
-path = "src/bin/stamp_genome.rs"
+path = "src/cli/stamp_genome.rs"
 
 [[bin]]
 name = "stamp_intruder"
-path = "src/bin/stamp_intruder.rs"
+path = "src/cli/stamp_intruder.rs"
 
 [[bin]]
 name = "stamp_labyrinth"
-path = "src/bin/stamp_labyrinth.rs"
+path = "src/cli/stamp_labyrinth.rs"
 
 [[bin]]
 name = "stamp_ssca2"
-path = "src/bin/stamp_ssca2.rs"
+path = "src/cli/stamp_ssca2.rs"
 
 [features]
 default = ["wbctl"]
