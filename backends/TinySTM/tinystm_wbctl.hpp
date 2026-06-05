@@ -314,6 +314,7 @@ commit()    //
 				lock->unlock_with_version(tx->id, commit_version);
 			}
 			TM_EVENT2(LOCK_RELEASE, (uint64_t)lock, (uint64_t)addr, commit_version);
+#ifndef NDEBUG
 			if (lock->get_version() < commit_version) {
 				fprintf(stderr, "ASSERT: lock=%p get_version=%llu commit_version=%llu lock_state=0x%llx tx_id=%llu\n",
 				        (void*)lock,
@@ -323,6 +324,7 @@ commit()    //
 				        (unsigned long long)tx->id);
 				fflush(stderr);
 			}
+#endif
 			TM_ASSERT(lock->get_version() >= commit_version,
 			               "Lock version not updated");
 		}

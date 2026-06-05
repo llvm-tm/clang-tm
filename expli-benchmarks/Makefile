@@ -44,9 +44,9 @@ ifeq ($(BACKEND),TL2)
   EXTRA_INC = -I../backends -I../backends/TL2
 endif
 ifeq ($(BACKEND),SGL)
-  RUNTIME  = ../backends/runtimes/single_global_lock_runtime.cpp
+  RUNTIME  = ../backends/runtimes/SingleGlobalLock_runtime.cpp
   DEFS     = -DTM_BACKEND_SGL
-  EXTRA_INC =
+  EXTRA_INC = -I../backends
 endif
 ifeq ($(BACKEND),LEFTRIGHT)
   RUNTIME  = ../backends/runtimes/leftright_runtime.cpp
