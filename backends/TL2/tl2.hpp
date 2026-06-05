@@ -324,8 +324,14 @@ public:
         std::atomic_signal_fence(std::memory_order_seq_cst);
         assert(tx && tx->active);
 
-        // No bypass: the plugin ensures only TM-tracked addresses reach the runtime.
-
+#ifdef LLVM_TM_PLUGIN
+        if (!stm::isTMAddress((void*)addr)) {
+            *addr = val;
+            return;
+        }
+#else
+        TM_ASSERT(stm::isTMAddress((void*)addr), "Address not in TM address space");
+#endif
 
         // Real byte width of each DataType (NOT dtype_size(), which returns
         // 4 for PTR but PTR write-back writes 8 bytes as word_t).
@@ -389,8 +395,13 @@ public:
     static T read_impl(Transaction* tx, AddrT addr) {
         assert(tx && tx->active);
 
-        // No bypass: the plugin ensures only TM-tracked addresses reach the runtime.
-
+#ifdef LLVM_TM_PLUGIN
+        if (!stm::isTMAddress((void*)addr)) {
+            return *addr;
+        }
+#else
+        TM_ASSERT(stm::isTMAddress((void*)addr), "Address not in TM address space");
+#endif
 
         if (bloom_might_contain(tx, (word_t*)addr)) {
             // Exact type match (fast path)

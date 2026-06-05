@@ -244,26 +244,34 @@ inline bool commit() {
 
 // ── Read word ───────────────────────────────────────────────────
 inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
-    // Check write-set
-    auto w = tx->write_set.find(addr);
-    if (w != tx->write_set.end())
-        return w->second.new_val;
 
-    // Read from memory
-    any_type_t val = read_value_from_addr(addr, sz);
+	TM_ASSERT(tx && tx->active, "xtm read: no active tx");
 
-    // Track version for dependency detection
-    size_t idx = version_index(addr);
-    uint64_t ver = g_version_table[idx].load(std::memory_order_acquire);
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr)) {
+		return read_value_from_addr(addr, sz);
+	}
+#else
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#endif
 
-    // Add to read-set
-    ReadLogEntry entry;
-    entry.type = sz;
-    entry.addr = addr;
-    entry.observed_version = ver;
-    tx->read_set[addr] = entry;
+	return read_value_from_addr(addr, sz);
+}
 
-    return val;
+inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz) {
+
+	TM_ASSERT(tx && tx->active, "xtm write: no active tx");
+
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr)) {
+		write_value_to_addr(addr, val, sz);
+		return;
+	}
+#else
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#endif
+
+	write_value_to_addr(addr, val, sz);
 }
 
 // ── Write word ──────────────────────────────────────────────────

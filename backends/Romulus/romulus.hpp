@@ -181,13 +181,34 @@ inline bool commit() {
 
 // ── Read word ───────────────────────────────────────────────────
 inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
-    // Check write-set first
-    auto w = tx->write_set.find(addr);
-    if (w != tx->write_set.end())
-        return w->second.new_val;
 
-    // Read from memory
-    return read_value_from_addr(addr, sz);
+	TM_ASSERT(tx && tx->active, "romulus read: no active tx");
+
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr)) {
+		return read_value_from_addr(addr, sz);
+	}
+#else
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#endif
+
+	return read_value_from_addr(addr, sz);
+}
+
+inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz) {
+
+	TM_ASSERT(tx && tx->active, "romulus write: no active tx");
+
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr)) {
+		write_value_to_addr(addr, val, sz);
+		return;
+	}
+#else
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#endif
+
+	write_value_to_addr(addr, val, sz);
 }
 
 // ── Write word ──────────────────────────────────────────────────

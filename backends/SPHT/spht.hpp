@@ -260,6 +260,15 @@ inline T tm_read(T *addr)
 {
 	if (!current_tx || !current_tx->active)
 		return *addr;
+
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr)) {
+		return *addr;
+	}
+#else
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#endif
+
 	return *addr;
 }
 
@@ -269,6 +278,15 @@ inline void tm_write(T *addr, T val)
 	// Null-address guard
 	if (!addr || (uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 47) != 0)
 		return;
+
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr)) {
+		*addr = val;
+		return;
+	}
+#else
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#endif
 
 	if (!current_tx || !current_tx->active) {
 		*addr = val;

@@ -262,6 +262,14 @@ public:
     static T read_impl(T* addr, TxDescriptor* tx) {
         if (!tx || !tx->active) return *addr;
 
+#ifdef LLVM_TM_PLUGIN
+        if (!stm::isTMAddress(addr)) {
+            return *addr;
+        }
+#else
+        TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#endif
+
         word_t* waddr = get_word_addr(addr);
         OwnershipRecord* orec = get_orec(waddr);
 
@@ -393,6 +401,15 @@ public:
     static void write_impl(T* addr, T val, TxDescriptor* tx) {
         std::atomic_signal_fence(std::memory_order_seq_cst);
         if (!tx || !tx->active) { *addr = val; return; }
+
+#ifdef LLVM_TM_PLUGIN
+        if (!stm::isTMAddress(addr)) {
+            *addr = val;
+            return;
+        }
+#else
+        TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#endif
         // SwissTM eagerly reads *addr for the undo log.  The plugin never
         // generates null-address TM calls (verified via IR analysis), so
         // any null-address reaching here is a bug elsewhere, not something
