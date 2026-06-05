@@ -11,8 +11,13 @@
 # Samples: 3
 # ============================================================================
 
-set -euo pipefail
-SELF="$(realpath "$0")"
+# pipefail requires bash 4+ (not available on macOS's default bash 3.x)
+if set -o pipefail 2>/dev/null; then
+    set -euo pipefail
+else
+    set -eu
+fi
+SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
 cd "$(dirname "$0")"
 
 # ── Configuration ─────────────────────────────────────────────────────────
@@ -54,11 +59,13 @@ STAMP_RUST_PARAMS[labyrinth]="-x 8 -y 8 -z 8 -n 64"
 STAMP_RUST_PARAMS[genome]="-g 16384 -s 64 -n 1000000"
 STAMP_RUST_PARAMS[intruder]="-a 10 -l 128 -n 5120 -s 1"
 STAMP_RUST_PARAMS[ssca2]="-s 14 -u 1.0 -l 3 -m 3 -i 3"
+STAMP_RUST_PARAMS[bayes]="-v 16 -r 32 -n 2 -e 4 -i 2"
+STAMP_RUST_PARAMS[yada]="-a 20 -j 0.5"
 
-# Which benchmarks exist per path (bayes/yada missing from plugin backends and Rust)
-STAMP_BENCHES_PLUGIN=(vacation kmeans labyrinth genome intruder ssca2)
+# Which benchmarks exist per path
+STAMP_BENCHES_PLUGIN=(vacation kmeans labyrinth genome intruder ssca2 bayes yada)
 STAMP_BENCHES_EXPLI=(vacation kmeans labyrinth genome intruder ssca2 bayes yada)
-STAMP_BENCHES_RUST=(vacation kmeans labyrinth genome intruder ssca2)
+STAMP_BENCHES_RUST=(vacation kmeans labyrinth genome intruder ssca2 bayes yada)
 
 # ── Results directory ─────────────────────────────────────────────────────
 RESULTS_DIR="benchmark_results/compare_all_$(date +%Y%m%d_%H%M%S)"
@@ -186,7 +193,7 @@ run_one() {
     fi
 
     # Auto-detect consistently-broken combos: truncated output + no success indicators
-    local fsize=$(stat -c%s "$outfile" 2>/dev/null || echo 0)
+    local fsize=$(wc -c < "$outfile" 2>/dev/null || echo 0)
     if [ "$rc" != 0 ] && [ "$fsize" -gt 0 ] && [ "$fsize" -lt 600 ]; then
         if ! grep -qE 'PASS|Results|Time\s*[=:]|Ops/sec|Verification passed|done\.' "$outfile" 2>/dev/null; then
             mark_broken "$impl" "$backend" "$bench"
@@ -360,20 +367,20 @@ for impl in plugin expli rust; do
     for backend in tsxsgl tinystm_wbctl norec sgl; do
         case "$impl-$backend" in
             plugin-tsxsgl|plugin-tinystm_wbctl|plugin-sgl)
-                # STAMP (6 benches) + TPCC + STM7 = 8
-                total_est=$((total_est + (6 + 1 + 1) * nthreads * SAMPLES))
+                # STAMP (8 benches) + TPCC + STM7 = 10
+                total_est=$((total_est + (8 + 1 + 1) * nthreads * SAMPLES))
                 ;;
             plugin-norec)
-                # STAMP (6) + STM7 (1) = 7 (TPCC has NOrec)
-                total_est=$((total_est + (6 + 1) * nthreads * SAMPLES))
+                # STAMP (8) + STM7 (1) = 9 (TPCC has NOrec)
+                total_est=$((total_est + (8 + 1) * nthreads * SAMPLES))
                 ;;
             expli-tinystm_wbctl|expli-norec|expli-sgl)
                 # STAMP (8) + TPCC + STM7 = 10
                 total_est=$((total_est + (8 + 1 + 1) * nthreads * SAMPLES))
                 ;;
             rust-tsxsgl|rust-tinystm_wbctl|rust-norec)
-                # STAMP (6) only
-                total_est=$((total_est + 6 * nthreads * SAMPLES))
+                # STAMP (8) only
+                total_est=$((total_est + 8 * nthreads * SAMPLES))
                 ;;
             rust-sgl|expli-tsxsgl)
                 # Not available
@@ -382,7 +389,7 @@ for impl in plugin expli rust; do
     done
 done
 # Uninstrumented: 1 thread only, 1 sample
-total_est=$((total_est + (6 + 1 + 1) * 1 * 1))  # stamp + tpcc + stm7 at 1t
+total_est=$((total_est + (8 + 1 + 1) * 1 * 1))  # stamp + tpcc + stm7 at 1t
 total_est=$((total_est + nthreads * SAMPLES * 1)) # extra slack
 echo "Estimated total runs: ~$total_est"
 echo ""
