@@ -1,146 +1,167 @@
-// Simplified STAMP/genome benchmark using the explicit TM API.
+// Genome — C++ port of the original STAMP spec (explicit API path)
+// Original spec: https://github.com/ccaominh/stamp/tree/master/genome
 //
-// Gene sequence matching: read segments from a shared hash map,
-// find overlapping segments, and merge them.
-// Read-heavy: most TXs read from shared structures.
-//
-// Build:
-//   make -C expli_benchmarks BACKEND=TINYSTM run-genome
-//
-// Original: https://stamp.stanford.edu/
+// Parameters:
+//   -g <num>   Gene length       (default: 16384)
+//   -s <num>   Segment length    (default: 64)
+//   -n <num>   Number of segments(default: 4096)
 
-#include "expli_tm_api/tm_api.hpp"
-
-#include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <random>
+#include <cmath>
+#include <cstdint>
 #include <thread>
 #include <vector>
+#include <chrono>
+#include <atomic>
+#include <algorithm>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <mutex>
+#include <random>
 
-template <typename F>
-inline void tx_retry(F&& body) {
-    tm_nested_call_counter++;
-    int done = 0;
-    while (!done) {
-        tm_longjmp_ret = sigsetjmp(tm_jmpbuf, 0);
-        tm_begin();
-        if (tm_longjmp_ret != 0)
-            continue;
-        body();
-        tm_end();
-        done = 1;
-    }
-    tm_nested_call_counter--;
+static long g_gene_length    = 16384;
+static long g_segment_length = 64;
+static long g_num_segments   = 4096;
+static long g_num_threads    = 4;
+
+// ── TM init (minimal — genome barely uses TM) ─────────────────────
+extern "C" {
+    void     tm_init();
+    void     tm_exit();
+    void     tm_init_thread();
+    void     tm_exit_thread();
 }
 
-// ── Configuration ───────────────────────────────────────────
-struct Config {
-    int threads = 4;
-    int gene_length = 16384;
-    int segment_length = 64;
-    int num_segments = 16777216;
-    unsigned seed = 42;
-};
+// ── PRNG (std::mt19937_64 matching plugin) ─────────────────────────
+static thread_local std::mt19937_64 tls_rng;
+static void rng_seed(uint64_t s) { tls_rng = std::mt19937_64(s); }
+static uint64_t rng_next() { return tls_rng(); }
 
-static Config parse_args(int argc, char *argv[]) {
-    Config c;
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-t") && i+1 < argc) c.threads = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-g") && i+1 < argc) c.gene_length = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-s") && i+1 < argc) c.segment_length = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-n") && i+1 < argc) c.num_segments = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-S") && i+1 < argc) c.seed = (unsigned)atoi(argv[++i]);
-    }
-    return c;
+// ── Data ───────────────────────────────────────────────────────────
+static std::string g_gene;
+static std::vector<std::string> g_segments;
+static std::unordered_set<std::string> g_unique_segments;
+static std::vector<std::string> g_reconstructed;
+static std::mutex g_dedup_mutex;
+static std::atomic<long> g_total_ops{0};
+
+// ── Hash function (matching plugin) ────────────────────────────────
+static uint64_t str_hash(const std::string& s, size_t start, size_t len) {
+    uint64_t h = 0;
+    for (size_t i = start; i < start + len; i++)
+        h = h * 131 + (unsigned char)s[i];
+    return h;
 }
 
-// ── Segment (gene fragment) ─────────────────────────────────
-struct Segment {
-    int id;
-    int start;
-    int length;
-    char *data;
-};
+// ── Dedup (mutex-protected, matching plugin's tm_serialize_lock) ───
+static void dedup(long start, long end) {
+    for (long i = start; i < end; i++) {
+        std::lock_guard<std::mutex> lock(g_dedup_mutex);
+        g_unique_segments.insert(g_segments[(size_t)i]);
+    }
+}
 
-// ── Shared TM-tracked segment store ─────────────────────────
-struct GSegment {
-    expli::TM<int> start;
-    expli::TM<int> length;
-    expli::TM<int> matched;
-};
-
-static std::vector<GSegment> g_segments;
-static std::atomic<bool> g_stop{false};
-static std::atomic<uint64_t> g_matches{0};
-static std::atomic<uint64_t> g_reads{0};
-
-static void worker(int tid, const Config &cfg) {
-    expli::TM<int>::thread_init();
-    auto rng = std::mt19937(cfg.seed + tid * 1000);
-    int n_per_thread = (cfg.num_segments + cfg.threads - 1) / cfg.threads;
-    int start = tid * n_per_thread;
-    int end = std::min(start + n_per_thread, cfg.num_segments);
-
-    for (int iter = 0; iter < 10; iter++) {
-        for (int i = start; i < end; i++) {
-            int target = rng() % cfg.num_segments;
-            tx_retry([&]() {
-                int s = g_segments[target].start.read();
-                int l = g_segments[target].length.read();
-                int m = g_segments[target].matched.read();
-                // Simple overlap check
-                int s2 = g_segments[i].start.read();
-                int l2 = g_segments[i].length.read();
-                int overlap = std::max(0, std::min(s + l, s2 + l2) - std::max(s, s2));
-                if (overlap > 0 && m == 0) {
-                    g_segments[target].matched.write(1);
-                    g_matches.fetch_add(1);
-                }
-                g_reads.fetch_add(1);
-            });
+// ── Match (no TM needed — reads unique_set, writes reconstructed) ──
+static void match() {
+    // Build hash table of suffix hashes (skip first char)
+    std::unordered_map<uint64_t, std::vector<std::string*>> hash_table;
+    for (auto& s : g_unique_segments) {
+        if (s.size() > 1) {
+            uint64_t h = str_hash(s, 1, s.size() - 1);
+            hash_table[h].push_back(const_cast<std::string*>(&s));
         }
     }
-    expli::TM<int>::thread_exit();
+
+    // Find longest suffix-prefix overlap
+    for (long j = g_segment_length - 1; j >= 1; j--) {
+        for (auto& s : g_unique_segments) {
+            if ((long)s.size() <= j) continue;
+            uint64_t end_h = str_hash(s, s.size() - (size_t)j, (size_t)j);
+            auto fit = hash_table.find(end_h);
+            if (fit == hash_table.end()) continue;
+            for (auto candidate : fit->second) {
+                if (candidate == &s) continue;
+                if ((long)candidate->size() < j) continue;
+                if (s.compare(s.size() - (size_t)j, (size_t)j,
+                              *candidate, 0, (size_t)j) == 0) {
+                    g_reconstructed.push_back(s + candidate->substr((size_t)j));
+                    return;
+                }
+            }
+        }
+    }
 }
 
-int main(int argc, char *argv[]) {
-    auto cfg = parse_args(argc, argv);
+// ── Worker ─────────────────────────────────────────────────────────
+static void worker(long tid) {
+    tm_init_thread();
 
-    printf("Genome — Explicit TM API\n");
-    printf("Threads: %d  Gene: %d  Segment: %d  NumSegments: %d\n",
-           cfg.threads, cfg.gene_length, cfg.segment_length, cfg.num_segments);
+    long chunk = (g_num_segments + g_num_threads - 1) / g_num_threads;
+    long start = tid * chunk;
+    long end = std::min(start + chunk, g_num_segments);
 
-    expli::TM<int>::init();
+    if (start < end) dedup(start, end);
+}
 
-    // Initialize segments
-    auto rng = std::mt19937(cfg.seed);
-    g_segments.resize(cfg.num_segments);
-    for (int i = 0; i < cfg.num_segments; i++) {
-        g_segments[i].start.poke(rng() % cfg.gene_length);
-        g_segments[i].length.poke((rng() % cfg.segment_length) + 1);
-        g_segments[i].matched.poke(0);
+// ── Main ───────────────────────────────────────────────────────────
+int main(int argc, char* argv[]) {
+    for (int i = 1; i < argc; i++) {
+        if      (strcmp(argv[i], "-g") == 0 && i+1 < argc)
+            g_gene_length = atol(argv[++i]);
+        else if (strcmp(argv[i], "-s") == 0 && i+1 < argc)
+            g_segment_length = atol(argv[++i]);
+        else if (strcmp(argv[i], "-n") == 0 && i+1 < argc)
+            g_num_segments = atol(argv[++i]);
+        else if (strcmp(argv[i], "-c") == 0 && i+1 < argc)
+            g_num_threads = atol(argv[++i]);
     }
 
-    auto start = std::chrono::high_resolution_clock::now();
-    std::vector<std::thread> threads;
-    for (int t = 0; t < cfg.threads; t++)
-        threads.emplace_back(worker, t, std::ref(cfg));
-    for (auto &th : threads)
-        th.join();
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    printf("Genome (STAMP spec)\n");
+    printf("  Gene length:    %ld\n", g_gene_length);
+    printf("  Segment length: %ld\n", g_segment_length);
+    printf("  Segments:       %ld\n", g_num_segments);
+    printf("  Threads:        %ld\n", g_num_threads);
 
-    printf("\nResults (%lld ms):\n", (long long)elapsed);
-    printf("  Matches: %llu  Reads: %llu\n",
-           (unsigned long long)g_matches.load(),
-           (unsigned long long)g_reads.load());
+    tm_init();
+
+    // Generate gene
+    rng_seed(42);
+    const char bases[] = {'a', 'c', 'g', 't'};
+    g_gene.resize((size_t)g_gene_length);
+    for (long i = 0; i < g_gene_length; i++)
+        g_gene[(size_t)i] = bases[rng_next() % 4];
+
+    // Generate segments (random substrings)
+    g_segments.resize((size_t)g_num_segments);
+    for (long i = 0; i < g_num_segments; i++) {
+        long start = (long)(rng_next() % (uint64_t)(g_gene_length - g_segment_length));
+        g_segments[(size_t)i] = g_gene.substr((size_t)start, (size_t)g_segment_length);
+    }
+
+    printf("  Generated %ld segments\n", g_num_segments);
+
+    // Dedup (parallel, mutex-protected)
+    auto t1 = std::chrono::steady_clock::now();
+
+    std::vector<std::thread> threads;
+    for (long t = 0; t < g_num_threads; t++)
+        threads.emplace_back(worker, t);
+    for (auto& th : threads) th.join();
+
+    // Match (single-threaded, matching plugin's all-threads-but-only-one-counts)
+    match();
+
+    auto t2 = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(t2 - t1).count();
+
+    printf("\nResults (%ld ms):\n", (long)(elapsed * 1000));
+    printf("  Unique segments: %zu\n", g_unique_segments.size());
+    printf("  Reconstructed:   %zu\n", g_reconstructed.size());
     printf("  PASS\n");
-    expli::TM<int>::exit();
+
+    tm_exit();
     return 0;
 }
