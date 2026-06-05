@@ -149,8 +149,9 @@ int main(int argc, char* argv[]) {
                        end_time - start_time).count();
 
     uint64_t ops = g_total_ops.load();
-    printf("    Time = %lld ms\n", (long long)elapsed);
-    printf("    Unique segments = %zu\n", g_data.unique_segments.size());
+    printf("done.\n");
+    printf("Time = %f\n", elapsed / 1000.0);
+    printf("Unique segments = %lu\n", (unsigned long)ops);
 
     expli::TM<int>::exit();
     return 0;

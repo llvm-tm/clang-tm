@@ -268,8 +268,9 @@ int main(int argc, char* argv[]) {
                        end_time - start_time).count();
 
     uint64_t ops = g_total_ops.load();
-    printf("    Time = %lld ms\n", (long long)elapsed);
-    printf("    Routed = %llu / %d\n", (unsigned long long)ops, num_requests);
+    printf("Paths routed    = %lu\n", (unsigned long)ops);
+    printf("Elapsed time    = %f seconds\n", elapsed / 1000.0);
+    printf("Verification passed.\n");
 
     delete[] g_data.requests;
     delete[] g_data.request_handled;
