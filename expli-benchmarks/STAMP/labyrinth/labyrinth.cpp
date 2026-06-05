@@ -18,22 +18,6 @@
 #include <thread>
 #include <vector>
 
-// ── TM runtime declarations ────────────────────────────────────────
-extern "C" {
-    void     tm_init();
-    void     tm_exit();
-    void     tm_init_thread();
-    void     tm_exit_thread();
-    void*    tm_calloc(size_t n, size_t sz);
-    long     tm_read_i8(const void* addr);
-    void     tm_write_i8(void* addr, long val);
-    void     tm_begin();
-    void     tm_end();
-    extern __thread int32_t tm_nested_call_counter;
-    extern __thread int32_t tm_longjmp_ret;
-    extern __thread sigjmp_buf tm_jmpbuf;
-}
-
 using PRNG = std::mt19937_64;
 
 // ── TM helpers ────────────────────────────────────────────
@@ -48,6 +32,20 @@ static inline void tm_write_long(long* addr, long val) {
     uint64_t raw;
     memcpy(&raw, &val, sizeof(raw));
     tm_write_i8(reinterpret_cast<uint64_t*>(addr), (int64_t)raw);
+}
+
+template<typename F>
+inline void tx_retry(F&& body) {
+    volatile bool done = false;
+    while (!done) {
+        sigsetjmp(tm_jmpbuf, 0);
+        tm_nested_call_counter = 1;
+        tm_begin();
+        body();
+        tm_end();
+        done = true;
+    }
+    tm_nested_call_counter = 0;
 }
 
 struct Point3D {
@@ -202,7 +200,7 @@ static void worker(int thread_id, int num_threads) {
 
 int main(int argc, char* argv[]) {
     int num_threads = 4;
-    int width = 8, height = 8, depth = 8;
+    int width = 32, height = 32, depth = 3;
     int num_requests = 64;
 
     for (int i = 1; i < argc; i++) {

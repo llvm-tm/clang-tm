@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tm::*;
+use benchmarks::Rng;
 
 struct Edge {
     src: u64,
@@ -61,7 +62,6 @@ fn build_csr(edges: &mut Vec<Edge>) -> (SparseRow, u64) {
 
 fn ssca2_has_edge(row_ptr: &[u64], col_idx: &[u64], src: u64, dst: u64) -> bool {
     transaction(|_tx| {
-        // Read-only TX — for faithful benchmarking
         let start = row_ptr[src as usize];
         let end = row_ptr[(src + 1) as usize];
         for i in start..end {
@@ -76,8 +76,8 @@ fn ssca2_has_edge(row_ptr: &[u64], col_idx: &[u64], src: u64, dst: u64) -> bool 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut num_threads = 4;
-    let mut scale = 14;
-    let mut prob_unidirectional = 1.0;
+    let mut scale = 13;
+    let mut prob_unidirectional = 0.5;
     let mut _subgr_edge_length = 3;
     let mut max_paral_edges = 3;
     let mut iterations = 3;
@@ -103,12 +103,12 @@ fn main() {
     let perc_int_weights = 0.6;
     let prob_intercl_edges = 0.5;
 
-    let mut rng = fastrand::Rng::with_seed(42);
+    let mut rng = Rng::new(42);
 
     // Random permutation
     let mut perm: Vec<u64> = (0..tot_vertices).collect();
     for i in (1..tot_vertices as usize).rev() {
-        let j = rng.usize(0..=i);
+        let j = (rng.next() as usize) % (i + 1);
         perm.swap(i, j);
     }
 
@@ -116,7 +116,7 @@ fn main() {
     let mut clique_sizes: Vec<usize> = Vec::new();
     let mut assigned = 0u64;
     while assigned < tot_vertices {
-        let sz = (rng.u32(..) as u64 % max_clique_size as u64) + 1;
+        let sz = (rng.next() as u64 % max_clique_size as u64) + 1;
         let sz = std::cmp::min(sz, tot_vertices - assigned);
         clique_sizes.push(sz as usize);
         assigned += sz;
@@ -131,18 +131,19 @@ fn main() {
         for i in 0..csize {
             for j in 0..csize {
                 if i == j { continue; }
-                let u: f64 = rng.u64(..) as f64 / u64::MAX as f64;
-                if u >= prob_unidirectional { continue; }
-                let si = perm[(start_v + i as u64) as usize];
-                let sj = perm[(start_v + j as u64) as usize];
-                if edge_set.insert((si, sj)) {
-                    let wu: f64 = rng.u64(..) as f64 / u64::MAX as f64;
-                    let w = if wu < perc_int_weights {
-                        (rng.u64(..) % (1u64 << scale)) as i64
-                    } else {
-                        -((rng.u64(..) % scale as u64) as i64)
-                    };
-                    temp_edges.push(Edge { src: si, dst: sj, weight: w });
+                let u = rng.uniform();
+                if u >= prob_unidirectional {
+                    let si = perm[(start_v + i as u64) as usize];
+                    let sj = perm[(start_v + j as u64) as usize];
+                    if edge_set.insert((si, sj)) {
+                        let wu = rng.uniform();
+                        let w = if wu < perc_int_weights {
+                            (rng.next() % (1u64 << scale)) as i64
+                        } else {
+                            -(rng.next() as i64 % scale as i64)
+                        };
+                        temp_edges.push(Edge { src: si, dst: sj, weight: w });
+                    }
                 }
             }
         }
@@ -156,19 +157,19 @@ fn main() {
             let v = perm[(start_v + i as u64) as usize];
             let mut d = 1u64;
             while d < tot_vertices {
-                let u: f64 = rng.u64(..) as f64 / u64::MAX as f64;
+                let u = rng.uniform();
                 let prob = prob_intercl_edges / ((d as f64).log2() + 1.0);
                 if u < prob {
                     let neighbor = (v + d) % tot_vertices;
                     for _ in 0..max_paral_edges {
-                        let u2: f64 = rng.u64(..) as f64 / u64::MAX as f64;
+                        let u2 = rng.uniform();
                         if u2 < 0.5 {
                             if edge_set.insert((v, neighbor)) {
-                                let wu: f64 = rng.u64(..) as f64 / u64::MAX as f64;
+                                let wu = rng.uniform();
                                 let w = if wu < perc_int_weights {
-                                    (rng.u64(..) % (1u64 << scale)) as i64
+                                    (rng.next() % (1u64 << scale)) as i64
                                 } else {
-                                    -((rng.u64(..) % scale as u64) as i64)
+                                    -(rng.next() as i64 % scale as i64)
                                 };
                                 temp_edges.push(Edge { src: v, dst: neighbor, weight: w });
                             }

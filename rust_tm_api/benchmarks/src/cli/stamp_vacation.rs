@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tm::*;
+use benchmarks::Rng;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -39,11 +40,11 @@ fn main() {
     // Initialize tables: cars, rooms, flights — each with num_relations entries
     // Each entry: [num_used, num_free, num_total, price, active]
     let mut tables: Vec<Vec<TmCell<i32>>> = (0..3).map(|_| Vec::with_capacity(num_relations * 5)).collect();
-    let mut rng = fastrand::Rng::with_seed(42);
+    let mut rng = Rng::new(42);
     for t in 0..3 {
         for _ in 0..num_relations {
-            let num = ((rng.u64(0..5) + 1) * 100) as i32;
-            let price = (rng.u64(0..5) * 10 + 50) as i32;
+            let num = ((rng.next() % 5 + 1) * 100) as i32;
+            let price = (rng.next() % 5 * 10 + 50) as i32;
             tables[t].push(TmCell::new(0));  // num_used
             tables[t].push(TmCell::new(num));  // num_free
             tables[t].push(TmCell::new(num));  // num_total
@@ -78,7 +79,7 @@ fn main() {
 
             s.spawn(move || {
                 tm_init_thread();
-                let mut rng = fastrand::Rng::with_seed(42u64 + tid as u64);
+                let mut rng = Rng::new(42u64 + tid as u64);
 
                 let tasks_per = ttasks / num_threads as i32;
                 let extra = ttasks % num_threads as i32;
@@ -86,17 +87,17 @@ fn main() {
                 let end_idx = start_idx + tasks_per + if (tid as i32) < extra { 1 } else { 0 };
 
                 for _iter in start_idx..end_idx {
-                    let r = rng.u64(0..100) as i32;
-                    let customer_id = (rng.u64(0..qrange as u64) + 1) as usize;
+                    let r = (rng.next() % 100) as i32;
+                    let customer_id = (rng.next() % qrange as u64 + 1) as usize;
 
                     if r < pct_user {
                         // make_reservation_tx
                         // Generate query params outside closure
-                        let nq = rng.u64(0..queries as u64) as i32 + 1;
+                        let nq = (rng.next() % queries as u64) as i32 + 1;
                         let mut qs = Vec::with_capacity(nq as usize);
                         for _q in 0..nq {
-                            let t = rng.u64(0..3) as usize;
-                            let id = (rng.u64(0..qrange as u64) + 1) as usize;
+                            let t = (rng.next() % 3) as usize;
+                            let id = (rng.next() % qrange as u64 + 1) as usize;
                             qs.push((t, id));
                         }
 
@@ -149,10 +150,10 @@ fn main() {
                         });
                     } else {
                         // update_tables_tx
-                        let t = rng.u64(0..3) as usize;
-                        let id = (rng.u64(0..qrange as u64) + 1) as usize;
-                        let op = rng.u64(0..2);
-                        let price_val = if op == 1 { (rng.u64(0..5) * 10 + 50) as i32 } else { 0 };
+                        let t = (rng.next() % 3) as usize;
+                        let id = (rng.next() % qrange as u64 + 1) as usize;
+                        let op = rng.next() % 2;
+                        let price_val = if op == 1 { (rng.next() % 5 * 10 + 50) as i32 } else { 0 };
 
                         transaction(|tx| {
                             let idx = (id - 1) * 5;

@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tm::*;
+use benchmarks::Rng;
 
 #[derive(Clone)]
 struct Packet {
@@ -87,26 +88,26 @@ fn main() {
         decoded_queue: VecDeque::new(),
     };
 
-    let mut rng = fastrand::Rng::with_seed(seed as u64);
+    let mut rng = Rng::new(seed as u64);
     let mut total_attacks = 0;
 
     for flow in 1..=num_flows as i64 {
-        let is_attack = rng.u32(..) % 100 < percent_attack as u32;
+        let is_attack = (rng.next() as u32) % 100 < percent_attack as u32;
         let payload: String;
 
         if is_attack {
-            let sig_idx = rng.usize(0..DICT.len());
+            let sig_idx = rng.next() as usize % DICT.len();
             payload = DICT[sig_idx].to_string();
             total_attacks += 1;
         } else {
-            let len = (rng.u32(..) as usize % max_data_length as usize) + 1;
-            payload = (0..len).map(|_| (32u8 + (rng.u32(..) as u8 % 95)) as char).collect();
+            let len = (rng.next() as usize % max_data_length as usize) + 1;
+            payload = (0..len).map(|_| (32u8 + (rng.next() as u8 % 95)) as char).collect();
         }
 
         let num_packets = if payload.is_empty() {
             1
         } else {
-            (rng.u32(..) as usize % payload.len()) + 1
+            (rng.next() as usize % payload.len()) + 1
         };
 
         let base_len = payload.len() / num_packets;
@@ -187,7 +188,6 @@ fn main() {
                         let _attack = detect_attack(&df.data);
                         total_ops.fetch_add(1, Ordering::Relaxed);
                     } else if !had_packet {
-                        // No packets left and no decoded flows ready → done
                         break;
                     }
                 }

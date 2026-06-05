@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tm::*;
+use benchmarks::Rng;
 
 fn str_hash_range(s: &[u8], start: usize, len: usize) -> u64 {
     let mut h: u64 = 0;
@@ -42,17 +43,17 @@ fn main() {
     tm_init();
 
     // Generate gene
-    let mut rng = fastrand::Rng::with_seed(42);
+    let mut rng = Rng::new(42);
     let mut gene_bytes = Vec::with_capacity(gene_length);
     for _ in 0..gene_length {
-        gene_bytes.push(bases[rng.usize(0..4)]);
+        gene_bytes.push(bases[rng.next() as usize % 4]);
     }
     let gene = unsafe { String::from_utf8_unchecked(gene_bytes) };
 
     // Generate segments
     let segments: Vec<String> = (0..num_segments)
         .map(|_| {
-            let start = rng.usize(0..gene_length - segment_length);
+            let start = rng.next() as usize % (gene_length - segment_length);
             gene[start..start + segment_length].to_string()
         })
         .collect();
@@ -93,7 +94,7 @@ fn main() {
     let mut ht: HashMap<u64, Vec<usize>> = HashMap::new();
     for (idx, s) in unique.iter().enumerate() {
         if s.len() > 1 {
-            let h = str_hash_range(s.as_bytes(), 1, s.len() - 1);
+            let h = str_hash_range(s.as_bytes(), 0, s.len() - 1);
             ht.entry(h).or_default().push(idx);
         }
     }

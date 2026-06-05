@@ -347,14 +347,15 @@ int main(int argc, char* argv[]) {
     g_data.num_threads = num_threads;
 
     PRNG init_rng(42);
-    for (int i = 0; i < 3; i++) {
+    {
         int n = num_relations;
-        std::vector<Reservation>* tables[] = {&g_data.cars, &g_data.rooms, &g_data.flights};
-        for (auto* t : tables) {
-            t->reserve(n);
-            for (int j = 1; j <= n; j++) {
-                int num = (int)(init_rng() % 5 + 1) * 100;
-                int price_val = (int)(init_rng() % 5) * 10 + 50;
+        g_data.cars.reserve(n);
+        g_data.rooms.reserve(n);
+        g_data.flights.reserve(n);
+        for (int j = 1; j <= n; j++) {
+            int num = (int)(init_rng() % 5 + 1) * 100;
+            int price_val = (int)(init_rng() % 5) * 10 + 50;
+            for (auto* t : {&g_data.cars, &g_data.rooms, &g_data.flights}) {
                 t->push_back({});
                 Reservation& r = t->back();
                 r.active.poke(1);

@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tm::*;
+use benchmarks::Rng;
 
 #[derive(Clone, Copy, PartialEq)]
 struct Point3D {
@@ -25,7 +26,6 @@ fn do_expansion(
     src: Point3D, dst: Point3D,
     queue: &mut [usize],
 ) -> bool {
-    dist.fill(-1);
     dist.fill(-1);
 
     let mut qh = 0;
@@ -102,21 +102,18 @@ fn do_traceback(
     !path.is_empty()
 }
 
-// TM mark: atomically verify and mark path cells
 fn labyrinth_mark(
     grid: &[TmCell<i32>],
     w: i32, h: i32,
     path: &[Point3D],
 ) -> bool {
     transaction(|tx| {
-        // Verify all intermediate cells are free
         for i in 1..path.len().saturating_sub(1) {
             let idx = grid_idx(w, h, path[i].x, path[i].y, path[i].z);
             if tx.read(&grid[idx]) != -1 {
                 return false;
             }
         }
-        // Mark them as blocked
         for i in 1..path.len().saturating_sub(1) {
             let idx = grid_idx(w, h, path[i].x, path[i].y, path[i].z);
             tx.write(&grid[idx], -2);
@@ -128,9 +125,9 @@ fn labyrinth_mark(
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut num_threads = 4;
-    let mut w = 8;
-    let mut h = 8;
-    let mut d = 8;
+    let mut w = 32;
+    let mut h = 32;
+    let mut d = 3;
     let mut num_requests = 64;
 
     let mut i = 1;
@@ -153,15 +150,14 @@ fn main() {
 
     let gridsize = (w * h * d) as usize;
 
-    // Initialize grid
     let grid: Vec<TmCell<i32>> = (0..gridsize).map(|_| TmCell::new(-1)).collect();
 
-    let mut rng = fastrand::Rng::with_seed(42);
+    let mut rng = Rng::new(42);
     let num_walls = gridsize / 8;
 
     // Place walls
     for _ in 0..num_walls {
-        let idx = rng.usize(0..gridsize);
+        let idx = rng.next() as usize % gridsize;
         unsafe { *grid[idx].ptr() = -2; }
     }
 
@@ -169,15 +165,15 @@ fn main() {
     let mut requests: Vec<PathRequest> = Vec::with_capacity(num_requests);
     for _ in 0..num_requests {
         let (sx, sy, sz) = loop {
-            let cx = rng.usize(0..w as usize) as i32;
-            let cy = rng.usize(0..h as usize) as i32;
-            let cz = rng.usize(0..d as usize) as i32;
+            let cx = (rng.next() as usize % w as usize) as i32;
+            let cy = (rng.next() as usize % h as usize) as i32;
+            let cz = (rng.next() as usize % d as usize) as i32;
             if unsafe { *grid[grid_idx(w, h, cx, cy, cz)].ptr() } == -1 { break (cx, cy, cz); }
         };
         let (dx, dy, dz) = loop {
-            let cx = rng.usize(0..w as usize) as i32;
-            let cy = rng.usize(0..h as usize) as i32;
-            let cz = rng.usize(0..d as usize) as i32;
+            let cx = (rng.next() as usize % w as usize) as i32;
+            let cy = (rng.next() as usize % h as usize) as i32;
+            let cz = (rng.next() as usize % d as usize) as i32;
             let idx = grid_idx(w, h, cx, cy, cz);
             if unsafe { *grid[idx].ptr() } == -1 && !(cx == sx && cy == sy && cz == sz) { break (cx, cy, cz); }
         };
@@ -210,7 +206,6 @@ fn main() {
                     let req = &requests[i];
 
                     loop {
-                        // Snapshot grid (non-TX)
                         for g in 0..gridsize {
                             local_grid[g] = unsafe { *grid[g].ptr() };
                         }
@@ -221,7 +216,6 @@ fn main() {
 
                         let success = labyrinth_mark(&grid, w, h, &path);
                         if success { break; }
-                        // TX failed — retry
                     }
 
                     total_ops.fetch_add(1, Ordering::Relaxed);

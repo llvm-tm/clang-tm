@@ -20,14 +20,25 @@ All 6 STAMP benchmarks (vacation, kmeans, labyrinth, genome, intruder, ssca2) ha
 - **Rust**: 6 new standalone binaries (`stamp_*.rs`) in `rust_tm_api/benchmarks/src/bin/`. Added to `Cargo.toml`. All compile with zero warnings, zero errors under `cargo build --release`.
 - **Rust TinySTM backend**: Works correctly with heap-allocated `TmCell<T>` data (no TM region assertion). The pre-existing panic in `wbctl.rs:6` is a non-issue for the pure-Rust TinySTM — the address check was [removed/fixed] in the default `wbctl` feature.
 
-#### Test results (small params)
-All 6 Rust binaries run successfully:
-- `stamp_vacation`: 200 tasks, 2 threads — PASS
-- `stamp_kmeans`: 200 pts, 8 clusters, 2D, 2 threads — PASS (100 iterations)
-- `stamp_genome`: 50K segments, 2 threads — PASS
-- `stamp_intruder`: 5K flows, 10% attack, 2 threads — PASS (all flows completed)
-- `stamp_labyrinth`: 8x8x8, 32 paths, 2 threads — PASS (all routed)
-- `stamp_ssca2`: scale=10, 2 threads — PASS (21K triangles)
+### Kmeans fix: centroid update outside tx_retry (assertion fix)
+
+#### Root cause
+The centroid update loop in phase 2 called `tm_read_double`/`tm_write_double` **outside** any `tx_retry` block. The plugin runs the centroid update outside any transaction (only `TX`-annotated functions are instrumented by the LLVM pass). The expli API equivalent must use direct memory access (`*ptr` instead of `tm_read_double`/`tm_write_double`) for code paths that run outside a transaction.
+
+#### Fix
+Replaced `tm_read_double(&data.centroids[...])` / `tm_write_double(&data.centroids[...], ...)` with `*cptr` read/write in the centroid update loop. The TM assertion (`(tx)->active`) now passes because the code no longer calls TM read/write barriers without an active transaction.
+
+#### Impact
+- **Before**: ASSERT `(tx)->active` failed in DEBUG builds; NDEBUG builds ran but with 647 aborts (likely from assertion-induced corruption propagating).
+- **After**: 23 aborts (normal for concurrent workload), kmeans produces correct output.
+
+#### Test results (expli C++ only — all benchmarks, 2 threads, small params)
+- `vacation`: 200 tasks, 16K relations, 80% user — PASS (49K ops/sec)
+- `labyrinth`: 8x8x8, 32 paths — PASS (32/32 routed)
+- `genome`: 16K gene, 64 seg, 16M segments — PASS (16320 unique)
+- `intruder`: 5K flows, 10% attack — PASS (5120/5120 completed)
+- `kmeans`: 200 pts, 8 clusters, 2D — PASS (23 aborts)
+- `ssca2`: scale=7, 2 threads — CRASH (pre-existing: SIGSEGV in `tm_begin` from worker thread)
 
 ## Previous Session (2026-06-04)
 
