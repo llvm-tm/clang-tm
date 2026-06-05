@@ -2,15 +2,59 @@
 
 ## Latest Session (this session — 2026-06-05)
 
-### Comprehensive benchmark runner: `run_compare_all.sh`
-- New script `run_compare_all.sh` runs TSXSGL, TinySTM WBCTL, NOrec, and SingleGlobalLock across 3 implementations (plugin/expli/rust) × 8 STAMP benches + TPC-C + STMbench7
-- 12 thread levels (1–56), 3 samples, uninstrumented baseline at 1t
-- Organized output in `benchmark_results/compare_all_<ts>/raw/{plugin,expli,rust}/{backend}/` with `progress.txt`, `results.csv`, and `SUMMARY.txt`
-- Analysis phase computes mean/stddev per (impl × backend × bench × threads)
+### Comprehensive benchmark runner with skip-list
 
-### Ported 6 STAMP benchmarks: expli C++ and Rust now match plugin algorithm
+**`run_compare_all.sh`** (794 lines, at repo root) runs TSXSGL, TinySTM WBCTL, NOrec, and SingleGlobalLock across 3 implementations (plugin/expli/rust) × 6–8 STAMP benches + TPC-C + STMbench7, at 12 thread levels (1–56) with 3 samples and uninstrumented baseline at 1t. Output organized in `benchmark_results/compare_all_<ts>/raw/{plugin,expli,rust}/{backend}/` with `progress.txt`, `results.csv`, and `SUMMARY.txt`. Analysis phase computes mean/stddev per (impl × backend × bench × threads) and writes speedup table vs uninstrumented.
 
-All 6 STAMP benchmarks (vacation, kmeans, labyrinth, genome, intruder, ssca2) have been ported with the **same algorithm** across all 3 implementations:
+**Skip-list mechanism** (`skip_combos.txt`): When a run produces truncated output (<600 bytes, no success indicators), the (impl, backend, bench) combo is marked as consistently-broken and all remaining thread levels/samples are skipped instantly. Pre-populated with `plugin tinystm_wbctl stmbench7` (std::vector reallocation crash). Verified: all 36 stmbench7 WBCTL runs skipped in latest execution.
+
+### Crash analysis: TinySTM WBCTL/NOrec at high concurrency
+
+**Vacation (28–56 threads):** Sporadic SIGSEGV during thread cleanup after benchmark completion. Output file contains valid metrics ("OK+" status) — benchmark finishes before crash. Affects both WBCTL and NOrec backends. 21t and above show ~1–2 crashes per 3 samples. Likely write-set or lock-array sizing at high concurrency.
+
+**Genome (56 threads):** `double free or corruption (out)` in 1/3 samples (Heisenbug — timing-dependent). Samples 1 and 3 typically succeed.
+
+**stmbench7 (2+ threads, TinySTM WBCTL only):** Consistent hang/crash during worker initialization. Output truncates at TM-REGION init line (~585 bytes). Root cause: `std::vector::_M_realloc_insert` called inside TM region (reallocation reads old elements via `tm_read_i8` which hits `read_word_ctl()` on invalid addresses). TSXSGL stmbench7 works fine on all thread levels (36/36 OK).
+
+### Build fixes applied this session
+
+| File | Line | Fix |
+|------|------|-----|
+| `llvm_tm_plugin/tm_pipeline.mk` | 129 | Added `-I$(BACKENDS_DIR)` to `TM_INCLUDES_singlelock` (was empty) |
+| `expli-benchmarks/Makefile` | 47 | `single_global_lock_runtime.cpp` → `SingleGlobalLock_runtime.cpp` (wrong case) |
+| `expli-benchmarks/Makefile` | 49 | Added `-I../backends` to SGL `EXTRA_INC` (was empty) |
+| `backends/TinySTM/tinystm_wbctl.hpp` | 317–325 | Wrapped unconditional `fprintf(stderr,...)` in `#ifndef NDEBUG` |
+| `run_compare_all.sh` | — | `-m 3` → `-p 3` for SSCA2 (plugin uses `-p` for max_parallel_edges) |
+
+### Workloads tuned for ~60s per run
+
+- intruder: 1,048,576 → **5,120** flows
+- genome: 16,777,216 → **1,000,000** segments
+- SSCA2: scale 7 → 14 (larger workload, ~30s at 1t)
+
+### Execution history
+
+| Run | Time | Attempts | Complete | Timeout | Crash | Skipped | Notes |
+|-----|------|----------|----------|---------|-------|---------|-------|
+| 120349 | 12:03 | — | — | — | — | — | Early abort (build fix) |
+| 121635 | 12:41 | 158 | 157 | 0 | 0 | 0 | TSXSGL partial |
+| 121658 | 12:41 | 158 | 157 | 0 | 0 | 0 | TSXSGL partial |
+| 124459 | 12:57 | 326 | 289 | 0 | 6 | 0 | TSXSGL + WBCTL partial (31 FAIL from old retry logic) |
+| 130121 | 14:09 | 553 | 548 | 5 | 8 | 0 | Full plugin TSXSGL + WBCTL; stuck 5h on stmbench7 timeouts |
+| 141356 | 15:01 | 551 | 548 | 3 | 4 | 0 | Same as 130121 (pre skip-list), killed early |
+| **150228** | **15:49** | **617** | **578** | **3** | **8** | **36** | **Through NOrec plugin — skip-list working** |
+
+### Remaining work (for next session)
+
+- Complete NOrec plugin (vacation 56t timing out), then SGL plugin
+- Run expli C++ path (TINYSTM, NOREC, SGL — 3 backends × 10 benches × 12 levels × 3)
+- Run Rust path (wbctl, norec, tsxsgl — 3 backends × 6 benches × 12 levels × 3)
+- Run analysis phase (embedded Python script)
+- Triage SSCA2 pre-existing crash (SIGSEGV in `tm_begin` from worker thread)
+
+## Previous Session (2026-06-04)
+
+### Ported 6 STAMP benchmarks: expli C++ and Rust match plugin algorithm
 
 | Benchmark | Plugin (reference) | Expli C++ | Rust |
 |-----------|-------------------|-----------|------|
@@ -23,94 +67,52 @@ All 6 STAMP benchmarks (vacation, kmeans, labyrinth, genome, intruder, ssca2) ha
 
 #### Key changes
 - **Expli C++**: 6 rewritten benchmarks using explicit `tm_read_i8`/`tm_write_i8` etc. inside `tx_retry`. Vacation, kmeans, labyrinth fully ported with matching algorithm. Genome, intruder use `std::mutex` (matching `tm_serialize_lock/unlock`). SSCA2 uses read-only TX wrappers.
-- **Rust**: 6 new standalone binaries (`stamp_*.rs`) in `rust_tm_api/benchmarks/src/bin/`. Added to `Cargo.toml`. All compile with zero warnings, zero errors under `cargo build --release`.
-- **Rust TinySTM backend**: Works correctly with heap-allocated `TmCell<T>` data (no TM region assertion). The pre-existing panic in `wbctl.rs:6` is a non-issue for the pure-Rust TinySTM — the address check was [removed/fixed] in the default `wbctl` feature.
+- **Rust**: 6 new standalone binaries (`stamp_*.rs`) in `rust_tm_api/benchmarks/src/bin/`. Added to `Cargo.toml`. All compile with zero warnings under `cargo build --release`.
+- **Rust TinySTM backend**: Works correctly with heap-allocated `TmCell<T>` data. The pre-existing panic in `wbctl.rs:6` was resolved (address check removed in default `wbctl` feature).
 
-### Kmeans fix: centroid update outside tx_retry (assertion fix)
+### Kmeans fix: centroid update outside tx_retry
 
-#### Root cause
-The centroid update loop in phase 2 called `tm_read_double`/`tm_write_double` **outside** any `tx_retry` block. The plugin runs the centroid update outside any transaction (only `TX`-annotated functions are instrumented by the LLVM pass). The expli API equivalent must use direct memory access (`*ptr` instead of `tm_read_double`/`tm_write_double`) for code paths that run outside a transaction.
+**Root cause**: The centroid update loop in phase 2 called `tm_read_double`/`tm_write_double` **outside** any `tx_retry` block. The plugin runs centroid update outside transactions (only `TX`-annotated functions are instrumented). The expli API equivalent must use direct memory access (`*ptr` instead of `tm_read_double`/`tm_write_double`).
 
-#### Fix
-Replaced `tm_read_double(&data.centroids[...])` / `tm_write_double(&data.centroids[...], ...)` with `*cptr` read/write in the centroid update loop. The TM assertion (`(tx)->active`) now passes because the code no longer calls TM read/write barriers without an active transaction.
+**Fix**: Replaced TM barriers with plain `*cptr` read/write in centroid update loop. Aborts dropped from 647 (corrupted state) to 23 (normal concurrent workload).
 
-#### Impact
-- **Before**: ASSERT `(tx)->active` failed in DEBUG builds; NDEBUG builds ran but with 647 aborts (likely from assertion-induced corruption propagating).
-- **After**: 23 aborts (normal for concurrent workload), kmeans produces correct output.
+### LLVM plugin pass preamble path detection
 
-#### Test results (expli C++ only — all benchmarks, 2 threads, small params)
-- `vacation`: 200 tasks, 16K relations, 80% user — PASS (49K ops/sec)
-- `labyrinth`: 8x8x8, 32 paths — PASS (32/32 routed)
-- `genome`: 16K gene, 64 seg, 16M segments — PASS (16320 unique)
-- `intruder`: 5K flows, 10% attack — PASS (5120/5120 completed)
-- `kmeans`: 200 pts, 8 clusters, 2D — PASS (23 aborts)
-- `ssca2`: scale=7, 2 threads — CRASH (pre-existing: SIGSEGV in `tm_begin` from worker thread)
+**Issue**: Stale `.so` binary injected preamble code using `@tm_nested_call_counter` globals while runtime checked `ts->nested_call_counter`. Caused `g_tm_expli_mode=true` incorrectly for plugin path, disabling stack-address skip in write-back and corrupting dead `_tm_clone` frames.
 
-## Previous Session (2026-06-04)
-
-### Fix: LLVM plugin pass preamble path detection (stale binary)
-
-#### Root cause: Plugin binary out of sync with source
-`injectTransactionBeginEnd()` in `tm_instrument_helpers.hpp` was updated to use `tm_get_thread_state()` + GEP (avoiding TLV relocations), but the `.so` was not rebuilt (Makefile only listed `TMInstrumentPass.cpp` as a dependency, not the header). The stale binary injected preamble code using `@tm_nested_call_counter` globals directly. Since the preamble incremented the `__thread` variable while the runtime path-detection in `tm_begin()` checked `ts->nested_call_counter` (via `TMThreadState`), `g_tm_expli_mode` was incorrectly set to `true` for the plugin path. This disabled the stack-address skip guard in the write-back phase, causing dead `_tm_clone` frame writes to corrupt the current stack, leading to SIGSEGV in the heap.
-
-**Fix**: Rebuilt the plugin `.so` (`make BUILD_TYPE=DEBUG`). The preamble now correctly uses `tm_get_thread_state()` → `ts->nested_call_counter`, keeping `g_tm_expli_mode=false` for the plugin path. Write-back correctly skips stack addresses.
-
-**Note**: With the preamble fix, the stmbench7 test now progresses past the initial stack corruption but hits a pre-existing crash in `tinystm::read_word_ctl()` during `std::vector<Document>::_M_realloc_insert`. This is the known `std::vector` reallocation issue: the `_tm_clone` of `__relocate_a_1` reads old-element bytes via TM barriers (`tm_read_i1`) while the vector is relocated inside a transaction. TM-friendly containers (`TMTreapMap`, plain arrays) are unaffected — `test_treap_tx`, `test_ll_alloc`, `test_local_containers`, `test_construct_tx_pattern`, `test_simple_vector` all PASS.
-
-#### Test results
-- **LLVM plugin**: `test_treap_tx` PASS, `test_ll_alloc` PASS, `test_simple_vector` PASS, `test_construct_tx_pattern` PASS, `test_local_containers` PASS
-- **Pre-existing issues unchanged**: `stmbench7` crashes in `std::vector::_M_realloc_insert` during TM relocation; `test_vec_push` and `test_alloc_stress` hang at exit; `test_vector_realloc` data corruption from `std::vector` reallocation races
-
-#### Key changes
-- `llvm_tm_plugin/bin/libTMInstrument.so`: Rebuilt from updated source (headers now properly compiled in)
-- `backends/runtimes/TinySTM_runtime.cpp`: Removed ad-hoc debug `fprintf` from `tm_begin()` (path-detection logic retained, prints removed)
-- `backends/TinySTM/tinystm_wbctl.hpp`: Removed ad-hoc debug `WB[]` prints from write-back phase
+**Fix**: Rebuilt `libTMInstrument.so` (Makefile now depends on headers). Preamble correctly uses `tm_get_thread_state()` → `ts->nested_call_counter`, keeping `g_tm_expli_mode=false` for plugin path.
 
 ### Rust warning cleanup
-- Fixed all Rust compiler warnings across the workspace (runtime backends + benchmarks): unused variables prefixed with `_`, unused imports removed, `#[allow(dead_code)]` on struct fields that are part of TM runtime state, unnecessary `mut` removed.
-- `cargo build --workspace` and `cargo test --workspace` now produce zero warnings, zero errors.
-
-### Infrastructure analysis: LeftRight, Romulus, XTM with queue executor + addrspace
-- **LeftRight**: The queue executor doesn't help — LeftRight's performance depends on wait-free reads that never synchronize with writers. Adding queue-based completion tracking serializes readers and defeats the purpose. The two-copy + EBR drain protocol doesn't map cleanly to the queue model. Recommendation: skip the two-copy scheme and just submit all mutations to the queue executor for sequential processing (traditional STM with single writer).
-- **Romulus**: Best fit. The address space's `spec_alloc` is a natural match for Romulus's redo log entries. At commit time, the queue executor applies the log atomically to the main copy. The challenge is read consistency — Romulus needs to read the "main copy" during TX execution for read-before-write, and the queue executor's sync mechanism doesn't provide snapshot isolation by itself. The executor would need to track read versions. Most feasible next target.
-- **XTM**: Page-level versioning in the 64 GB address space is elegant — 64 KB chunk headers (already exist) could store per-chunk version numbers, giving ~1M chunks (manageable). 4 KB pages would be ~16M entries (more metadata overhead). The unsolved problem is write detection: either hardware mprotect (expensive) or software write barriers on every store (same runtime overhead as existing STMs). The addrspace helps with layout but doesn't solve the fundamental instrumentation problem.
+- Fixed all warnings across workspace: unused variables prefixed with `_`, unused imports removed, `#[allow(dead_code)]` on TM runtime state fields, unnecessary `mut` removed. `cargo build --workspace` and `cargo test --workspace` produce zero warnings.
 
 ## Goal
-- Fix the LLVM plugin pipeline crash (PC=0, SIGSEGV) in TinySTM-backed treap tests and unify the runtime path for both expli API and LLVM plugin
+- Run complete comparison across all backends/implementations/benchmarks and obtain comparable numbers
 
 ## Key Decisions
-- **`g_tm_expli_mode` flag in write-back**: The write-back phase in commit() needs to write to stack addresses for the expli API (stack-allocated `expli::TM<T>` fields) but skip them for the plugin (dead `_tm_clone` frames). A `thread_local bool` set by path detection in `tm_begin()` is the cleanest way to distinguish.
-- **`tm_nested_call_counter` defined in runtime**: Must be `__thread int32_t` defined exactly once in `TinySTM_runtime.cpp`. The header-only `extern` declaration in `tinystm_wbctl.hpp` is only for compilation units that can't include the runtime definition.
-- **Do NOT modify `tm_nested_call_counter` in `tm_end()`**: The expli API manages this variable's lifecycle (sets to 0 after `tm_end()` returns). If the runtime overwrites it, the next `begin()` sees the wrong value.
+- **`g_tm_expli_mode` flag in write-back**: Stack addresses write-back enabled for expli API, skipped for plugin (dead `_tm_clone` frames).
+- **Workload sizes tuned**: intruder 5K flows, genome 1M segments, SSCA2 scale 14 for ~30-60s per run.
+- **Skip-list over retry**: Consistent-crash combos are tracked in `skip_combos.txt` and skipped instantly rather than timing out 600s per run.
+- **`\--features tsxsgl` in Rust** is actually SGL (atomic spinlock) since Rust can't use Intel RTM.
+- **Non-inline pipeline** (`tm-instrument`) kept as default (avoids write-set/memory asymmetry for local containers).
 
 ## Critical Context
-- **Nesting counter sync**: `TinySTM_runtime.cpp` uses `ts->nested_call_counter` (from `TMThreadState`) while the expli API uses `tm_nested_call_counter` (bare `__thread`). Prior to this fix, `tinystm::begin()` was never called for the expli API path.
-- **Stack write-back required for expli API**: The expli API places `expli::TM<T>` fields on the stack (e.g., `Point p; p.x.write(10)`). Without write-back to stack addresses, committed values are never persisted to memory. The plugin path must skip stack write-back to avoid corrupting dead `_tm_clone` frames.
-- **`is_stack_addr` detection**: Uses `pthread_get_stackaddr_np()` + `pthread_get_stacksize_np()` to compute current thread's stack bounds. Cached per-thread via `thread_local StackBounds` struct to avoid repeated syscalls.
-- **Lock acquisition/release skips stack addresses unconditionally**: Stack is per-thread, so no inter-thread locking is needed. The `is_locked_by()` check in the release loop already skips un-locked stack addresses.
-
-## Relevant Files
-- `backends/runtimes/TinySTM_runtime.cpp`: `tm_nested_call_counter` definition, `g_tm_expli_mode`, path detection, nesting counter sync
-- `backends/TinySTM/tinystm_wbctl.hpp`: `g_tm_expli_mode` declaration, guarded `is_stack_addr` in write-back; `is_stack_addr()`, `get_stack_bounds()` helper
+- **TinySTM WBCTL/NOrec segfaults at ≥28 threads**: Sporadic crashes during thread cleanup after valid output. Benchmark metrics are trustworthy. May indicate thread-pool or lock-array exhaustion in TinySTM runtime.
+- **stmbench7 `std::vector` crash**: Vector reallocation (`_M_realloc_insert`) reads old elements via TM barriers inside the reallocation loop. This is a fundamental incompatibility — TM-instrumented `std::vector` cannot safely reallocate.
+- **stmbench_uninstrumented build fails**: Linker error (`undefined reference to g_tm_region_end`) — requires TM runtime stubs not available for uninstrumented target.
+- **SSCA2 plugin**: Uses `-p` (not `-m`) for `max_parallel_edges`. Expli/Rust use `-m` (different parser).
+- **HW**: Intel Xeon E5-2648L v4 @ 1.80GHz, 56 logical cores, RTM supported.
 
 ## Issues Found
-1. **Double-redirection of nesting counter in `TinySTM_runtime.cpp`**: Originally used `__thread int32_t tm_nested_call_counter` directly, but a prior refactor changed to `ts->nested_call_counter` (from `TMThreadState`), breaking the expli API path. Now fixed with bidirectional sync in `tm_begin()`.
-2. **Stack write-back blocked for expli API**: `is_stack_addr(addr) continue;` in commit's write-back phase skipped stack addresses unconditionally, preventing expli API `expli::TM<T>` fields from being persisted. Fixed with `g_tm_expli_mode` flag.
-3. **Pre-existing issues**: `test_vec_push` / `test_alloc_stress` hang at exit (TinySTM plugin); `test_vector_realloc` data corruption from `std::vector` reallocation races (not solved by TM instrumentation)
+1. **Sporadic segfaults at ≥28 threads (all TinySTM backends)**: Vacation, NOrec, WBCTL all crash during thread cleanup at high concurrency. Output is valid. Likely TinySTM lock-array or write-set sizing issue.
+2. **stmbench7 + TinySTM WBCTL**: `std::vector::_M_realloc_insert` crash during TM reallocation. All 36 runs (12 levels × 3) skipped. TSXSGL unaffected (no TM on std::vector internals).
+3. **Double-redirection of nesting counter** (fixed): `ts->nested_call_counter` vs `tm_nested_call_counter` desync.
+4. **Stack write-back blocked for expli API** (fixed): `is_stack_addr` skip unconditionally blocked expli stack fields.
+5. **Pre-existing**: `test_vec_push`/`test_alloc_stress` hang at exit; `test_vector_realloc` data corruption; SSCA2 SIGSEGV in `tm_begin` from worker thread.
 
-### Plugin TinySTM WBCTL crashes (compare_all benchmark run 2026-06-05)
-
-**Crashes observed with plugin TinySTM WBCTL** at high thread counts and with stmbench7:
-
-| Benchmark | Threads | Issue | Details |
-|-----------|---------|-------|---------|
-| vacation  | 35–56   | Segfault | Crashes during `worker_vacation` execution at ≥35 threads. Runs ≤28 threads succeed. Likely write-set or lock-array sizing issue at high concurrency. |
-| genome    | 56      | Heap corruption | `double free or corruption (out)` — race in write-back phase at high thread count. Samples 1 and 3 at 56t succeed, suggesting a Heisenbug. |
-| stmbench7 | 2       | Segfault | Consistent crash on ALL 3 samples at just 2 threads. Crashes during worker execution after init completes. Pre-existing `std::vector::_M_realloc_insert` issue. |
-
-**Build fixes applied:**
-- `tm_pipeline.mk:129` — `TM_INCLUDES_singlelock` was empty; added `-I$(BACKENDS_DIR)` so `SingleGlobalLock_runtime.cpp` can find `tm_alloc_overrides.hpp`
-- `expli-benchmarks/Makefile:47` — Wrong filename `single_global_lock_runtime.cpp` (lowercase); fixed to `SingleGlobalLock_runtime.cpp`
-- `expli-benchmarks/Makefile:49` — `EXTRA_INC` was empty for SGL backend; added `-I../backends`
-- `tinystm_wbctl.hpp:317-325` — Ungated debug `fprintf` on lock-version mismatch; wrapped in `#ifndef NDEBUG`
-- `run_compare_all.sh` — SSCA2 plugin flag `-m` corrected to `-p` (plugin STAMP parser uses `-p` for max parallel edges, not `-m`); workload reduced: intruder 1M→5120 flows, genome 16M→1M segments
+## Relevant Files
+- `run_compare_all.sh`: Main benchmark runner with skip-list, build, run, and analysis phases
+- `backends/TinySTM/tinystm_wbctl.hpp`: WBCTL runtime with write-back and `is_stack_addr`
+- `backends/runtimes/TinySTM_runtime.cpp`: `tm_nested_call_counter`, path detection, runtime init
+- `llvm_tm_plugin/tm_pipeline.mk`: Plugin build system with per-backend rules
+- `expli-benchmarks/Makefile`: Expli C++ build with BACKEND selection
+- `rust_tm_api/benchmarks/src/bin/`: Rust benchmark binaries (`stamp_vacation.rs`, etc.)
