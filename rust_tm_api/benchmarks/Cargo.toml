@@ -55,4 +55,3 @@ xtm       = ["tm/xtm"]
 [dependencies]
 tm = { path = "../tm", default-features = false }
 containers = { path = "../containers" }
-fastrand = "2"

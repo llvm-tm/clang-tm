@@ -1,6 +1,13 @@
 // STAMP/ssca2 benchmark — explicit TM API port
 // Matches the plugin ssca2_bench.hpp algorithm.
 
+#include "expli_tm_api/tm_api.hpp"
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <csetjmp>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -9,11 +16,6 @@
 #include <set>
 #include <thread>
 #include <vector>
-#include <chrono>
-#include <atomic>
-#include <algorithm>
-#include <set>
-#include <random>
 
 static long g_scale = 13;
 static long g_iterations = 10;
@@ -21,27 +23,8 @@ static double g_prob_unidirectional = 0.5;
 static long g_max_paral_edges = 3;
 static long g_num_threads = 4;
 
-// ── TM abstraction (expli only) ────────────────────────────────────
-extern "C" {
-    void     tm_begin();
-    void     tm_end();
-    long     tm_read_i8(const long*);
-    void     tm_write_i8(long*, long);
-    void     tm_init();
-    void     tm_exit();
-    void     tm_init_thread();
-    void     tm_exit_thread();
-    void*    tm_calloc(size_t, size_t);
-}
-extern __thread int32_t tm_nested_call_counter;
-extern __thread sigjmp_buf tm_jmpbuf;
-
-#define TX_FUNC
-#define TM_READ_I8(p)     tm_read_i8((const long*)(p))
-#define TM_WRITE_I8(p, v) tm_write_i8((long*)(p), (long)(v))
-
 template<typename F>
-static void tx_run(F&& body) {
+static void tx_retry(F&& body) {
     volatile bool done = false;
     while (!done) {
         sigsetjmp(tm_jmpbuf, 0);
@@ -182,11 +165,11 @@ static void worker(int thread_id, int num_threads) {
 
 int main(int argc, char* argv[]) {
     int num_threads = 4;
-    int scale = 14;
-    double prob_unidirectional = 1.0;
+    int scale = 13;
+    double prob_unidirectional = 0.5;
     int max_paral_edges = 3;
     int subgr_edge_length = 3;
-    int iterations = 3;
+    int iterations = 10;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-p") && i + 1 < argc) num_threads = atoi(argv[++i]);
@@ -200,8 +183,6 @@ int main(int argc, char* argv[]) {
             return 0;
         }
     }
-
-    rng_seed(42);
 
     g_data.scale = scale;
     g_data.max_paral_edges = max_paral_edges;

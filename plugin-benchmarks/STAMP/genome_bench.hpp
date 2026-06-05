@@ -83,7 +83,7 @@ __attribute__((annotate("tm_allow_opaque")))
 TX static void genome_match(GenomeData* data, int start, int end,
                              std::unordered_map<uint64_t, std::vector<std::string*>>& hash_table) {
     for (auto it = data->unique_segments.begin(); it != data->unique_segments.end(); ++it) {
-        uint64_t h = str_hash(*it, 1, (int)it->size() - 1);
+        uint64_t h = str_hash(*it, 0, (int)it->size() - 1);
         hash_table[h].push_back(const_cast<std::string*>(&(*it)));
     }
 

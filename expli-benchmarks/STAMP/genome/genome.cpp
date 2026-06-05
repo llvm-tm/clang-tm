@@ -4,6 +4,11 @@
 // Uses std:: containers with mutex for serialization, matching the
 // plugin's tm_serialize_lock/unlock inside TX functions.
 
+#include "expli_tm_api/tm_api.hpp"
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -14,32 +19,21 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <chrono>
-#include <atomic>
-#include <algorithm>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <mutex>
-#include <random>
 
 using PRNG = std::mt19937_64;
 
-// ── Genome data ───────────────────────────────────────────
 struct GenomeData {
     std::string gene;
     std::vector<std::string> segments;
     std::unordered_set<std::string> unique_segments;
-    std::vector<std::string> reconstructed;
     int segment_length;
     int num_segments;
 };
 
 static GenomeData g_data;
-static std::mutex g_mutex;              // matches tm_serialize_lock
+static std::mutex g_mutex;
 static std::atomic<uint64_t> g_total_ops{0};
 
-// ── TM-safe dedup (serialized via mutex) ──────────────────
 static void genome_dedup(int start, int end) {
     for (int i = start; i < end; i++) {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -54,18 +48,15 @@ static inline uint64_t str_hash(const std::string& s, int start, int len) {
     return h;
 }
 
-// ── Genome matching — uses mutex for shared reconstructed ─
-// String operations (compare, substr, +) are not TM-protected,
-// matching the plugin's tm_allow_opaque annotation.
-static void genome_match(int start, int end,
-                          std::unordered_map<uint64_t, std::vector<std::string*>>& hash_table) {
-    // Build hash table from unique_segments
-    for (auto it = g_data.unique_segments.begin(); it != g_data.unique_segments.end(); ++it) {
-        uint64_t h = str_hash(*it, 1, (int)it->size() - 1);
-        hash_table[h].push_back(const_cast<std::string*>(&(*it)));
+static uint64_t genome_match() {
+    std::unordered_map<uint64_t, std::vector<std::string*>> hash_table;
+    for (auto& s : g_data.unique_segments) {
+        if (s.size() > 1) {
+            uint64_t h = str_hash(s, 0, (int)s.size() - 1);
+            hash_table[h].push_back(const_cast<std::string*>(&s));
+        }
     }
 
-    // Find overlapping segments
     for (int j = g_data.segment_length - 1; j >= 1; j--) {
         for (auto it = g_data.unique_segments.begin(); it != g_data.unique_segments.end(); ++it) {
             if ((int)it->size() <= j) continue;
@@ -76,17 +67,15 @@ static void genome_match(int start, int end,
                     if (candidate == &(*it)) continue;
                     if (candidate->size() < (size_t)j) continue;
                     if (it->compare((int)it->size() - j, j, *candidate, 0, j) == 0) {
-                        std::lock_guard<std::mutex> lock(g_mutex);
-                        g_data.reconstructed.push_back(*it + candidate->substr(j));
-                        return;
+                        return 1;
                     }
                 }
             }
         }
     }
+    return 0;
 }
 
-// ── Worker thread ─────────────────────────────────────────
 static void worker(int thread_id, int num_threads) {
     expli::TM<int>::thread_init();
 
@@ -98,10 +87,8 @@ static void worker(int thread_id, int num_threads) {
     if (start < end)
         genome_dedup(start, end);
 
-    std::unordered_map<uint64_t, std::vector<std::string*>> hash_table;
-
     if (start < end) {
-        genome_match(start, end, hash_table);
+        genome_match();
         if (thread_id == 0)
             g_total_ops.fetch_add(g_data.unique_segments.size(), std::memory_order_relaxed);
     }
@@ -113,7 +100,7 @@ int main(int argc, char* argv[]) {
     int num_threads = 4;
     int gene_length = 16384;
     int segment_length = 64;
-    int num_segments = 16777216;
+    int num_segments = 4096;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-p") && i + 1 < argc) num_threads = atoi(argv[++i]);
@@ -133,9 +120,7 @@ int main(int argc, char* argv[]) {
     printf("Sequencing gene...\n");
     fflush(stdout);
 
-    if (start < end) dedup(start, end);
-}
-
+    expli::TM<int>::init();
     g_data.segment_length = segment_length;
     g_data.num_segments = num_segments;
 

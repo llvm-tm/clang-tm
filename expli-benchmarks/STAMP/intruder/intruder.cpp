@@ -143,8 +143,8 @@ static void worker() {
 int main(int argc, char* argv[]) {
     int num_threads = 4;
     int percent_attack = 10;
-    int max_data_length = 128;
-    int num_flows = 1048576;
+    int max_data_length = 16;
+    int num_flows = 1024;
     int seed = 1;
 
     for (int i = 1; i < argc; i++) {
