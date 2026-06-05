@@ -1,428 +1,768 @@
-#include "expli_tm_api/tm_api.hpp"
+// TPC-C — C++ port of the plugin spec-compliant TPC-C (explicit API path)
+// Based on TPC-C Specification v5.11
+//
+// 9 tables, 5 transaction types. Flat TM arrays, tx_run pattern.
+
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <csetjmp>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <random>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
-// ── Constants ──────────────────────────────────────────────────────────
-static const int DEFAULT_WAREHOUSES = 1;
-static const int DEFAULT_DISTRICTS = 10;
-static const int DEFAULT_CUSTOMERS = 3000;
-static const int DEFAULT_ITEMS = 100000;
-static const int MAX_ORDERS_PER_DISTRICT = 10000;
-static const int MAX_OL_PER_ORDER = 15;
+// ── TM runtime declarations ────────────────────────────────────────
+extern "C" {
+    void     tm_init();
+    void     tm_exit();
+    void     tm_init_thread();
+    void     tm_exit_thread();
+    void*    tm_calloc(size_t n, size_t sz);
+    long     tm_read_i8(const void* addr);
+    void     tm_write_i8(void* addr, long val);
+    int32_t  tm_read_i4(const void* addr);
+    void     tm_write_i4(void* addr, int32_t val);
+    float    tm_read_f4(const void* addr);
+    void     tm_write_f4(void* addr, float val);
+    void     tm_begin();
+    void     tm_end();
+    extern __thread int32_t tm_nested_call_counter;
+    extern __thread int32_t tm_longjmp_ret;
+    extern __thread sigjmp_buf tm_jmpbuf;
+}
 
-// ── RNG ────────────────────────────────────────────────────────────────
-struct Rng {
-    uint64_t state;
-    explicit Rng(uint64_t seed) : state(seed) {}
-    uint64_t next() {
-        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-        return state >> 33;
+#define TM_READ_I8(p)     tm_read_i8((const void*)(p))
+#define TM_WRITE_I8(p, v) tm_write_i8((void*)(p), (long)(v))
+
+template <typename F>
+static void tx_run(F&& body) {
+    volatile bool done = false;
+    while (!done) {
+        sigsetjmp(tm_jmpbuf, 0);
+        tm_nested_call_counter = 1;
+        tm_begin();
+        body();
+        tm_end();
+        done = true;
     }
-    uint64_t range(uint64_t lo, uint64_t hi) { return lo + next() % (hi - lo); }
-};
+    tm_nested_call_counter = 0;
+}
 
-// ── Table structs (TM<T> has no value ctor — use poke() after default init) ──
+// ── Configuration ──────────────────────────────────────────────────
+constexpr int DEFAULT_WAREHOUSES = 1;
+constexpr int DEFAULT_DISTRICTS  = 10;
+constexpr int DEFAULT_CUSTOMERS  = 3000;
+constexpr int DEFAULT_ITEMS      = 100000;
+constexpr int PREPOPULATED_ORDERS = 3000;
+constexpr int MAX_ORDERS_PER_DISTRICT = 10000;
+constexpr int MAX_OL_PER_ORDER   = 15;
+constexpr int MAX_HISTORY_ROWS   = 1000000;
+
+// ── Table structs ──────────────────────────────────────────────────
 struct Warehouse {
-    int w_id;
-    expli::TM<double> w_tax;
-    expli::TM<double> w_ytd;
-    Warehouse(int id) : w_id(id) { w_tax.poke(0.19); w_ytd.poke(3000000.0); }
+    int   w_id;
+    char  w_name[11];
+    char  w_street_1[21];
+    char  w_street_2[21];
+    char  w_city[21];
+    char  w_state[3];
+    char  w_zip[10];
+    float w_tax;
+    float w_ytd;
 };
 
 struct District {
-    int d_id, d_w_id;
-    expli::TM<double> d_tax;
-    expli::TM<double> d_ytd;
-    expli::TM<int> d_next_o_id;
-    District(int did, int wid) : d_id(did), d_w_id(wid) {
-        d_tax.poke(0.15); d_ytd.poke(3000000.0); d_next_o_id.poke(2101);
-    }
+    int   d_id;
+    int   d_w_id;
+    char  d_name[11];
+    char  d_street_1[21];
+    char  d_street_2[21];
+    char  d_city[21];
+    char  d_state[3];
+    char  d_zip[10];
+    float d_tax;
+    float d_ytd;
+    int   d_next_o_id;
 };
 
 struct Customer {
-    int c_id, c_d_id, c_w_id;
-    expli::TM<double> c_credit_lim;
-    expli::TM<double> c_discount;
-    expli::TM<double> c_balance;
-    expli::TM<double> c_ytd_payment;
-    expli::TM<int> c_payment_cnt;
-    expli::TM<int> c_delivery_cnt;
-    Customer(int cid, int did, int wid) : c_id(cid), c_d_id(did), c_w_id(wid) {
-        c_credit_lim.poke(50000.0); c_discount.poke(0.3);
-        c_balance.poke(-10.0); c_ytd_payment.poke(10.0);
-        c_payment_cnt.poke(1); c_delivery_cnt.poke(0);
-    }
+    int   c_id;
+    int   c_d_id;
+    int   c_w_id;
+    char  c_first[17];
+    char  c_middle[3];
+    char  c_last[17];
+    char  c_street_1[21];
+    char  c_street_2[21];
+    char  c_city[21];
+    char  c_state[3];
+    char  c_zip[10];
+    char  c_phone[17];
+    int   c_since;
+    char  c_credit[3];
+    float c_credit_lim;
+    float c_discount;
+    float c_balance;
+    float c_ytd_payment;
+    int   c_payment_cnt;
+    int   c_delivery_cnt;
+    char  c_data[501];
 };
 
 struct History {
-    expli::TM<double> h_amount;
-    History() { h_amount.poke(10.0); }
+    int   h_c_id;
+    int   h_c_d_id;
+    int   h_c_w_id;
+    int   h_d_id;
+    int   h_w_id;
+    int   h_date;
+    float h_amount;
+    char  h_data[25];
 };
 
 struct Order {
-    int o_id, o_d_id, o_w_id, o_c_id;
-    expli::TM<int> o_carrier_id;
-    int o_ol_cnt;
-    Order(int oid, int did, int wid, int cid, int olc)
-        : o_id(oid), o_d_id(did), o_w_id(wid), o_c_id(cid), o_ol_cnt(olc) {
-        o_carrier_id.poke(oid <= 2100 ? (oid % 10 + 1) : 0);
-    }
+    int   o_id;
+    int   o_d_id;
+    int   o_w_id;
+    int   o_c_id;
+    int   o_entry_d;
+    int   o_carrier_id;
+    int   o_ol_cnt;
+    float o_all_local;
 };
 
 struct NewOrder {
-    expli::TM<int> no_o_id;
-    expli::TM<int> no_d_id;
-    expli::TM<int> no_w_id;
-    NewOrder() { no_o_id.poke(-1); no_d_id.poke(-1); no_w_id.poke(-1); }
-    NewOrder(int oid, int did, int wid) {
-        no_o_id.poke(oid); no_d_id.poke(did); no_w_id.poke(wid);
-    }
+    int no_o_id;
+    int no_d_id;
+    int no_w_id;
 };
 
 struct OrderLine {
-    int ol_o_id, ol_d_id, ol_w_id, ol_number, ol_i_id;
-    expli::TM<double> ol_amount;
-    expli::TM<int> ol_delivery_d;
-    OrderLine(int oid, int did, int wid, int num, int iid, double amt, int dd)
-        : ol_o_id(oid), ol_d_id(did), ol_w_id(wid), ol_number(num), ol_i_id(iid) {
-        ol_amount.poke(amt); ol_delivery_d.poke(dd);
-    }
+    int   ol_o_id;
+    int   ol_d_id;
+    int   ol_w_id;
+    int   ol_number;
+    int   ol_i_id;
+    int   ol_supply_w_id;
+    int   ol_quantity;
+    int   ol_delivery_d;
+    float ol_amount;
+    char  ol_dist_info[25];
 };
 
 struct Item {
-    int i_id;
-    double i_price;
-    Item(int id, double price) : i_id(id), i_price(price) {}
+    int   i_id;
+    int   i_im_id;
+    char  i_name[25];
+    float i_price;
+    char  i_data[51];
 };
 
 struct Stock {
-    int s_i_id, s_w_id;
-    expli::TM<int> s_quantity;
-    expli::TM<int> s_ytd;
-    expli::TM<int> s_order_cnt;
-    expli::TM<int> s_remote_cnt;
-    Stock(int iid, int wid) : s_i_id(iid), s_w_id(wid) {
-        s_quantity.poke(100); s_ytd.poke(0); s_order_cnt.poke(0); s_remote_cnt.poke(0);
-    }
+    int   s_i_id;
+    int   s_w_id;
+    int   s_quantity;
+    char  s_dist_01[25];
+    char  s_dist_02[25];
+    char  s_dist_03[25];
+    char  s_dist_04[25];
+    char  s_dist_05[25];
+    char  s_dist_06[25];
+    char  s_dist_07[25];
+    char  s_dist_08[25];
+    char  s_dist_09[25];
+    char  s_dist_10[25];
+    int   s_ytd;
+    int   s_order_cnt;
+    int   s_remote_cnt;
+    char  s_data[51];
 };
 
-// ── Database ───────────────────────────────────────────────────────────
-struct TpccDatabase {
-    int num_w, num_d, num_c, num_i;
-    std::vector<Warehouse> warehouse;
-    std::vector<District> district;
-    std::vector<Customer> customer;
-    std::vector<History> history;
-    std::vector<Order> order;
-    std::vector<NewOrder> neworder;
-    std::vector<OrderLine> orderline;
-    std::vector<Item> item;
-    std::vector<Stock> stock;
+// ── Global data (TM-allocated flat arrays) ─────────────────────────
+static Warehouse* g_warehouse  = nullptr;
+static District*  g_district   = nullptr;
+static Customer*  g_customer   = nullptr;
+static History*   g_history    = nullptr;
+static Order*     g_order      = nullptr;
+static NewOrder*  g_neworder   = nullptr;
+static OrderLine* g_orderline  = nullptr;
+static Item*      g_item       = nullptr;
+static Stock*     g_stock      = nullptr;
 
-    TpccDatabase(int w);
-    int idx_w(int w) const { return w - 1; }
-    int idx_d(int w, int d) const { return (w - 1) * num_d + (d - 1); }
-    int idx_c(int w, int d, int c) const {
-        return ((w - 1) * num_d + (d - 1)) * num_c + (c - 1);
+static int g_num_warehouses = DEFAULT_WAREHOUSES;
+static int g_num_districts  = DEFAULT_DISTRICTS;
+static int g_num_customers  = DEFAULT_CUSTOMERS;
+static int g_num_items      = DEFAULT_ITEMS;
+
+// ── Index helpers ──────────────────────────────────────────────────
+static int idx_w(int w)        { return w - 1; }
+static int idx_d(int w, int d) { return (w - 1) * g_num_districts + (d - 1); }
+static int idx_c(int w, int d, int c) {
+    return ((w - 1) * g_num_districts + (d - 1)) * g_num_customers + (c - 1);
+}
+static int idx_ord(int w, int d, int o) {
+    return ((w - 1) * g_num_districts + (d - 1)) * MAX_ORDERS_PER_DISTRICT + (o - 1);
+}
+static int idx_no(int w, int d, int o)   { return idx_ord(w, d, o); }
+static int idx_ol(int w, int d, int o, int l) {
+    return (((w - 1) * g_num_districts + (d - 1)) * MAX_ORDERS_PER_DISTRICT + (o - 1))
+           * MAX_OL_PER_ORDER + (l - 1);
+}
+static int idx_i(int i) { return i - 1; }
+static int idx_s(int w, int i) { return (w - 1) * g_num_items + (i - 1); }
+
+// ── Helper: fill char array with repeating pattern ─────────────────
+static void gen_string(char* dest, int len, const char* src) {
+    int slen = (int)strlen(src);
+    for (int i = 0; i < len - 1; i++) dest[i] = src[i % slen];
+    dest[len - 1] = '\0';
+}
+
+static char* stock_dist_string(Stock* s, int d_id) {
+    switch (d_id) {
+        case 1:  return s->s_dist_01;
+        case 2:  return s->s_dist_02;
+        case 3:  return s->s_dist_03;
+        case 4:  return s->s_dist_04;
+        case 5:  return s->s_dist_05;
+        case 6:  return s->s_dist_06;
+        case 7:  return s->s_dist_07;
+        case 8:  return s->s_dist_08;
+        case 9:  return s->s_dist_09;
+        case 10: return s->s_dist_10;
+        default: return s->s_dist_01;
     }
-    int idx_ord(int w, int d, int o) const {
-        return ((w - 1) * num_d + (d - 1)) * MAX_ORDERS_PER_DISTRICT + (o - 1);
-    }
-    int idx_no(int w, int d, int o) const { return idx_ord(w, d, o); }
-    int idx_ol(int w, int d, int o, int l) const {
-        return (((w - 1) * num_d + (d - 1)) * MAX_ORDERS_PER_DISTRICT + (o - 1))
-               * MAX_OL_PER_ORDER + (l - 1);
-    }
-    int idx_i(int i) const { return i - 1; }
-    int idx_s(int w, int i) const { return (w - 1) * num_i + (i - 1); }
-};
+}
 
-TpccDatabase::TpccDatabase(int w) : num_w(w), num_d(DEFAULT_DISTRICTS),
-    num_c(DEFAULT_CUSTOMERS), num_i(DEFAULT_ITEMS)
-{
-    int total_orders = num_w * num_d * MAX_ORDERS_PER_DISTRICT;
-    warehouse.reserve(num_w);
-    for (int i = 0; i < num_w; ++i)
-        warehouse.emplace_back(i + 1);
+// ── TM read/write helpers for flat arrays (matching plugin) ────────
+// The plugin auto-instruments every field access in TX functions.
+// Here we explicitly TM-read/TM-write the fields that transactions
+// actually read/modify.
 
-    district.reserve(num_w * num_d);
-    for (int i = 0; i < num_w * num_d; ++i)
-        district.emplace_back(i % num_d + 1, i / num_d + 1);
+static float fread(const void* p) { return tm_read_f4(p); }
+static void fwrite(void* p, float v) { tm_write_f4(p, v); }
+static int iread(const void* p) { return tm_read_i4(p); }
+static void iwrite(void* p, int v) { tm_write_i4(p, v); }
 
-    customer.reserve(num_w * num_d * num_c);
-    for (int i = 0; i < num_w * num_d * num_c; ++i) {
-        int cid = i % num_c + 1;
-        int did = (i / num_c) % num_d + 1;
-        int wid = i / (num_c * num_d) + 1;
-        customer.emplace_back(cid, did, wid);
-    }
+// ── Data initialization ────────────────────────────────────────────
+static void init_data() {
+    int nw = g_num_warehouses, nd = g_num_districts;
+    int nc = g_num_customers, ni = g_num_items;
 
-    history.resize(total_orders > 100000 ? total_orders : 100000);
-
-    order.reserve(total_orders);
-    for (int i = 0; i < total_orders; ++i) {
-        int oid = i % MAX_ORDERS_PER_DISTRICT + 1;
-        int did = (i / MAX_ORDERS_PER_DISTRICT) % num_d + 1;
-        int wid = i / (MAX_ORDERS_PER_DISTRICT * num_d) + 1;
-        int cid = oid % 3000 + 1;
-        order.emplace_back(oid, did, wid, cid, oid % 11 + 5);
+    // Warehouse
+    for (int w = 1; w <= nw; w++) {
+        int wi = idx_w(w);
+        g_warehouse[wi].w_id = w;
+        gen_string(g_warehouse[wi].w_name, 11, "Warehouse");
+        gen_string(g_warehouse[wi].w_street_1, 21, "Street");
+        gen_string(g_warehouse[wi].w_street_2, 21, "Ave");
+        gen_string(g_warehouse[wi].w_city, 21, "City");
+        gen_string(g_warehouse[wi].w_state, 3, "ST");
+        gen_string(g_warehouse[wi].w_zip, 10, "123456789");
+        g_warehouse[wi].w_tax = 0.1900f;
+        g_warehouse[wi].w_ytd = 3000000.00f;
     }
 
-    neworder.reserve(total_orders);
-    for (int i = 0; i < total_orders; ++i) {
-        int oid = i % MAX_ORDERS_PER_DISTRICT + 1;
-        if (oid > 2100) {
-            int did = (i / MAX_ORDERS_PER_DISTRICT) % num_d + 1;
-            int wid = i / (MAX_ORDERS_PER_DISTRICT * num_d) + 1;
-            neworder.emplace_back(oid, did, wid);
-        } else {
-            neworder.emplace_back();
+    // District
+    for (int w = 1; w <= nw; w++) {
+        for (int d = 1; d <= nd; d++) {
+            int di = idx_d(w, d);
+            g_district[di].d_id = d;
+            g_district[di].d_w_id = w;
+            gen_string(g_district[di].d_name, 11, "District");
+            gen_string(g_district[di].d_street_1, 21, "Street");
+            gen_string(g_district[di].d_street_2, 21, "Ave");
+            gen_string(g_district[di].d_city, 21, "City");
+            gen_string(g_district[di].d_state, 3, "ST");
+            gen_string(g_district[di].d_zip, 10, "123456789");
+            g_district[di].d_tax = 0.1500f;
+            g_district[di].d_ytd = 3000000.00f;
+            g_district[di].d_next_o_id = PREPOPULATED_ORDERS + 1;
         }
     }
 
-    int total_ol = total_orders * MAX_OL_PER_ORDER;
-    orderline.reserve(total_ol);
-    for (int i = 0; i < total_ol; ++i) {
-        int o_idx = i / MAX_OL_PER_ORDER;
-        int num = i % MAX_OL_PER_ORDER + 1;
-        int oid = o_idx % MAX_ORDERS_PER_DISTRICT + 1;
-        int did = (o_idx / MAX_ORDERS_PER_DISTRICT) % num_d + 1;
-        int wid = o_idx / (MAX_ORDERS_PER_DISTRICT * num_d) + 1;
-        int carrier = oid <= 2100 ? 1000 : 0;
-        double amt = (double)oid * 5.0;
-        orderline.emplace_back(oid, did, wid, num, o_idx % num_i + 1, amt, carrier);
+    // Customer
+    for (int w = 1; w <= nw; w++) {
+        for (int d = 1; d <= nd; d++) {
+            for (int c = 1; c <= nc; c++) {
+                int ci = idx_c(w, d, c);
+                g_customer[ci].c_id = c;
+                g_customer[ci].c_d_id = d;
+                g_customer[ci].c_w_id = w;
+                gen_string(g_customer[ci].c_first, 17, "FIRSTNAME");
+                gen_string(g_customer[ci].c_middle, 3, "OE");
+                gen_string(g_customer[ci].c_last, 17, "LASTNAME");
+                gen_string(g_customer[ci].c_street_1, 21, "Street");
+                gen_string(g_customer[ci].c_street_2, 21, "Ave");
+                gen_string(g_customer[ci].c_city, 21, "City");
+                gen_string(g_customer[ci].c_state, 3, "ST");
+                gen_string(g_customer[ci].c_zip, 10, "123456789");
+                gen_string(g_customer[ci].c_phone, 17, "5555555555");
+                g_customer[ci].c_since = (int)::time(nullptr);
+                gen_string(g_customer[ci].c_credit, 3, "GC");
+                g_customer[ci].c_credit_lim = 50000.00f;
+                g_customer[ci].c_discount = 0.3000f;
+                g_customer[ci].c_balance = -10.00f;
+                g_customer[ci].c_ytd_payment = 10.00f;
+                g_customer[ci].c_payment_cnt = 1;
+                g_customer[ci].c_delivery_cnt = 0;
+                gen_string(g_customer[ci].c_data, 501, "data");
+            }
+        }
     }
 
-    item.reserve(num_i);
-    for (int i = 0; i < num_i; ++i)
-        item.emplace_back(i + 1, (double)(i % 100 + 1));
-
-    stock.reserve(num_w * num_i);
-    for (int i = 0; i < num_w * num_i; ++i)
-        stock.emplace_back(i % num_i + 1, i / num_i + 1);
-}
-
-// ── Transaction types ──────────────────────────────────────────────────
-int txn_new_order(TpccDatabase &db, int w_id, int d_id, Rng &rng) {
-    int d_idx = db.idx_d(w_id, d_id);
-    int next_o_id = db.district[d_idx].d_next_o_id.read();
-    db.district[d_idx].d_next_o_id.write(next_o_id + 1);
-    int o_id = next_o_id;
-    int num_items = (int)rng.range(5, 16);
-    int o_idx = db.idx_ord(w_id, d_id, o_id);
-
-    db.order[o_idx].o_carrier_id.write(0);
-
-    int no_idx = db.idx_no(w_id, d_id, o_id);
-    db.neworder[no_idx].no_o_id.write(o_id);
-    db.neworder[no_idx].no_d_id.write(d_id);
-    db.neworder[no_idx].no_w_id.write(w_id);
-
-    for (int ol_num = 1; ol_num <= num_items; ++ol_num) {
-        int i_id = (int)rng.range(1, db.num_i + 1);
-        int ol_idx = db.idx_ol(w_id, d_id, o_id, ol_num);
-        double amount = db.item[db.idx_i(i_id)].i_price * 5.0;
-
-        int s_idx = db.idx_s(w_id, i_id);
-        int qty = db.stock[s_idx].s_quantity.read();
-        db.stock[s_idx].s_quantity.write(qty >= 5 ? qty - 5 : qty - 5 + 91);
-        db.stock[s_idx].s_ytd.write(db.stock[s_idx].s_ytd.read() + 5);
-        db.stock[s_idx].s_order_cnt.write(db.stock[s_idx].s_order_cnt.read() + 1);
-
-        db.orderline[ol_idx].ol_amount.write(amount);
-        db.orderline[ol_idx].ol_delivery_d.write(0);
+    // Item
+    for (int i = 1; i <= ni; i++) {
+        int ii = idx_i(i);
+        g_item[ii].i_id = i;
+        g_item[ii].i_im_id = (i % 99999) + 1;
+        gen_string(g_item[ii].i_name, 25, "ItemName");
+        g_item[ii].i_price = (float)((i % 100) + 1);
+        gen_string(g_item[ii].i_data, 51, "OriginalData");
     }
-    return next_o_id;
+
+    // Stock
+    for (int w = 1; w <= nw; w++) {
+        for (int i = 1; i <= ni; i++) {
+            int si = idx_s(w, i);
+            g_stock[si].s_i_id = i;
+            g_stock[si].s_w_id = w;
+            g_stock[si].s_quantity = 100;
+            for (int d = 1; d <= 10; d++)
+                gen_string(stock_dist_string(&g_stock[si], d), 25, "DistStr");
+            g_stock[si].s_ytd = 0;
+            g_stock[si].s_order_cnt = 0;
+            g_stock[si].s_remote_cnt = 0;
+            gen_string(g_stock[si].s_data, 51, "OriginalData");
+        }
+    }
+
+    // Pre-populate History
+    int hist_count = 0;
+    for (int w = 1; w <= nw; w++) {
+        for (int d = 1; d <= nd; d++) {
+            for (int c = 1; c <= nc; c++) {
+                int hi = hist_count++;
+                g_history[hi].h_c_id = c;
+                g_history[hi].h_c_d_id = d;
+                g_history[hi].h_c_w_id = w;
+                g_history[hi].h_d_id = d;
+                g_history[hi].h_w_id = w;
+                g_history[hi].h_date = (int)::time(nullptr);
+                g_history[hi].h_amount = 10.00f;
+                gen_string(g_history[hi].h_data, 25, "InitHistory");
+            }
+        }
+    }
+
+    // Pre-populate Orders, Order-Lines, New-Orders
+    for (int w = 1; w <= nw; w++) {
+        for (int d = 1; d <= nd; d++) {
+            std::mt19937 ord_rng((unsigned)(w * 1000 + d));
+
+            for (int o = 1; o <= PREPOPULATED_ORDERS; o++) {
+                int c_id = (int)(ord_rng() % nc) + 1;
+                int ol_cnt = (int)(ord_rng() % 11) + 5;
+
+                int o_idx = idx_ord(w, d, o);
+                g_order[o_idx].o_id = o;
+                g_order[o_idx].o_d_id = d;
+                g_order[o_idx].o_w_id = w;
+                g_order[o_idx].o_c_id = c_id;
+                g_order[o_idx].o_entry_d = (int)::time(nullptr);
+                g_order[o_idx].o_carrier_id = (o <= 2100) ? ((int)(ord_rng() % 10) + 1) : 0;
+                g_order[o_idx].o_ol_cnt = ol_cnt;
+                g_order[o_idx].o_all_local = 1.0f;
+
+                std::unordered_set<int> used_items;
+                for (int l = 1; l <= ol_cnt; l++) {
+                    int ol_idx = idx_ol(w, d, o, l);
+                    int i_id;
+                    do { i_id = (int)(ord_rng() % ni) + 1; } while (used_items.count(i_id));
+                    used_items.insert(i_id);
+
+                    g_orderline[ol_idx].ol_o_id = o;
+                    g_orderline[ol_idx].ol_d_id = d;
+                    g_orderline[ol_idx].ol_w_id = w;
+                    g_orderline[ol_idx].ol_number = l;
+                    g_orderline[ol_idx].ol_i_id = i_id;
+                    g_orderline[ol_idx].ol_supply_w_id = w;
+                    g_orderline[ol_idx].ol_quantity = 5;
+                    g_orderline[ol_idx].ol_delivery_d = (o <= 2100) ? (int)::time(nullptr) : 0;
+                    g_orderline[ol_idx].ol_amount = 5.0f * g_item[idx_i(i_id)].i_price;
+                    gen_string(g_orderline[ol_idx].ol_dist_info, 25,
+                               stock_dist_string(&g_stock[idx_s(w, i_id)], d));
+                }
+
+                if (o > 2100) {
+                    int no_idx = idx_no(w, d, o);
+                    g_neworder[no_idx].no_o_id = o;
+                    g_neworder[no_idx].no_d_id = d;
+                    g_neworder[no_idx].no_w_id = w;
+                }
+            }
+        }
+    }
 }
 
-void txn_payment(TpccDatabase &db, int w_id, int d_id, int c_id, double amount) {
-    int w_idx = db.idx_w(w_id);
-    db.warehouse[w_idx].w_ytd.write(db.warehouse[w_idx].w_ytd.read() + amount);
+// ── Transaction: New-Order (§2.4) ──────────────────────────────────
+// 45% of transaction mix
+static int txn_new_order(int w_id, int d_id, int c_id,
+                         int num_items, int* item_ids,
+                         int* supplier_ws, int* quantities) {
+    int d_idx = idx_d(w_id, d_id);
+    int o_id = iread(&g_district[d_idx].d_next_o_id);
+    iwrite(&g_district[d_idx].d_next_o_id, o_id + 1);
 
-    int d_idx = db.idx_d(w_id, d_id);
-    db.district[d_idx].d_ytd.write(db.district[d_idx].d_ytd.read() + amount);
+    int o_idx = idx_ord(w_id, d_id, o_id);
+    iwrite(&g_order[o_idx].o_id, o_id);
+    iwrite(&g_order[o_idx].o_d_id, d_id);
+    iwrite(&g_order[o_idx].o_w_id, w_id);
+    iwrite(&g_order[o_idx].o_c_id, c_id);
+    iwrite(&g_order[o_idx].o_entry_d, (int)::time(nullptr));
+    iwrite(&g_order[o_idx].o_carrier_id, 0);
+    iwrite(&g_order[o_idx].o_ol_cnt, num_items);
 
-    int c_idx = db.idx_c(w_id, d_id, c_id);
-    db.customer[c_idx].c_balance.write(
-        db.customer[c_idx].c_balance.read() - amount);
-    db.customer[c_idx].c_ytd_payment.write(
-        db.customer[c_idx].c_ytd_payment.read() + amount);
-    db.customer[c_idx].c_payment_cnt.write(
-        db.customer[c_idx].c_payment_cnt.read() + 1);
+    int no_idx = idx_no(w_id, d_id, o_id);
+    iwrite(&g_neworder[no_idx].no_o_id, o_id);
+    iwrite(&g_neworder[no_idx].no_d_id, d_id);
+    iwrite(&g_neworder[no_idx].no_w_id, w_id);
+
+    float total_amount = 0;
+    int all_local = 1;
+
+    for (int i = 0; i < num_items; i++) {
+        int ol_number = i + 1;
+        int ol_idx = idx_ol(w_id, d_id, o_id, ol_number);
+        int ol_i_id = item_ids[i];
+        int ol_sw_id = supplier_ws[i];
+        int ol_qty = quantities[i];
+
+        if (ol_sw_id != w_id) all_local = 0;
+
+        iwrite(&g_orderline[ol_idx].ol_o_id, o_id);
+        iwrite(&g_orderline[ol_idx].ol_d_id, d_id);
+        iwrite(&g_orderline[ol_idx].ol_w_id, w_id);
+        iwrite(&g_orderline[ol_idx].ol_number, ol_number);
+        iwrite(&g_orderline[ol_idx].ol_i_id, ol_i_id);
+        iwrite(&g_orderline[ol_idx].ol_supply_w_id, ol_sw_id);
+        iwrite(&g_orderline[ol_idx].ol_quantity, ol_qty);
+        iwrite(&g_orderline[ol_idx].ol_delivery_d, 0);
+
+        float i_price = iread((int*)&g_item[idx_i(ol_i_id)].i_price);
+        float ol_amount = (float)ol_qty * i_price;
+        fwrite(&g_orderline[ol_idx].ol_amount, ol_amount);
+        total_amount += ol_amount;
+
+        int s_idx = idx_s(ol_sw_id, ol_i_id);
+        int sqty = iread(&g_stock[s_idx].s_quantity);
+        if (sqty - ol_qty >= 10)
+            iwrite(&g_stock[s_idx].s_quantity, sqty - ol_qty);
+        else
+            iwrite(&g_stock[s_idx].s_quantity, sqty - ol_qty + 91);
+
+        iwrite(&g_stock[s_idx].s_ytd, iread(&g_stock[s_idx].s_ytd) + ol_qty);
+        iwrite(&g_stock[s_idx].s_order_cnt, iread(&g_stock[s_idx].s_order_cnt) + 1);
+        if (ol_sw_id != w_id)
+            iwrite(&g_stock[s_idx].s_remote_cnt, iread(&g_stock[s_idx].s_remote_cnt) + 1);
+
+        gen_string(g_orderline[ol_idx].ol_dist_info, 25,
+                   stock_dist_string(&g_stock[s_idx], d_id));
+    }
+
+    // Write o_all_local as float via TM
+    fwrite(&g_order[o_idx].o_all_local, all_local ? 1.0f : 0.0f);
+    return o_id;
 }
 
-double txn_order_status(TpccDatabase &db, int w_id, int d_id, int c_id) {
-    int c_idx = db.idx_c(w_id, d_id, c_id);
-    return db.customer[c_idx].c_balance.read();
+// ── Transaction: Payment (§2.5) ────────────────────────────────────
+// 43% of transaction mix
+static void txn_payment(int w_id, int d_id, int c_id, float amount) {
+    int w_idx = idx_w(w_id);
+    fwrite(&g_warehouse[w_idx].w_ytd, fread(&g_warehouse[w_idx].w_ytd) + amount);
+
+    int d_idx = idx_d(w_id, d_id);
+    fwrite(&g_district[d_idx].d_ytd, fread(&g_district[d_idx].d_ytd) + amount);
+
+    int c_idx = idx_c(w_id, d_id, c_id);
+    fwrite(&g_customer[c_idx].c_balance, fread(&g_customer[c_idx].c_balance) - amount);
+    fwrite(&g_customer[c_idx].c_ytd_payment, fread(&g_customer[c_idx].c_ytd_payment) + amount);
+    iwrite(&g_customer[c_idx].c_payment_cnt, iread(&g_customer[c_idx].c_payment_cnt) + 1);
 }
 
-void txn_delivery(TpccDatabase &db, int w_id, int carrier_id) {
-    for (int d_id = 1; d_id <= db.num_d; ++d_id) {
-        int found_o_id = -1;
-        for (int o_id = 2101; o_id < MAX_ORDERS_PER_DISTRICT; ++o_id) {
-            int no_idx = db.idx_no(w_id, d_id, o_id);
-            if (db.neworder[no_idx].no_o_id.read() == o_id) {
-                found_o_id = o_id;
+// ── Transaction: Order-Status (§2.6) ───────────────────────────────
+// 4% of transaction mix
+static float txn_order_status(int w_id, int d_id, int c_id) {
+    int c_idx = idx_c(w_id, d_id, c_id);
+    float balance = fread(&g_customer[c_idx].c_balance);
+
+    int d_idx = idx_d(w_id, d_id);
+    int max_o = iread(&g_district[d_idx].d_next_o_id) - 1;
+    int latest_o_id = -1;
+
+    for (int oid = max_o; oid >= 1; oid--) {
+        int o_idx = idx_ord(w_id, d_id, oid);
+        if (iread(&g_order[o_idx].o_c_id) == c_id && iread(&g_order[o_idx].o_w_id) != 0) {
+            latest_o_id = oid;
+            break;
+        }
+    }
+
+    if (latest_o_id > 0) {
+        int o_idx = idx_ord(w_id, d_id, latest_o_id);
+        int ol_cnt = iread(&g_order[o_idx].o_ol_cnt);
+        for (int l = 1; l <= ol_cnt; l++) {
+            int ol_idx = idx_ol(w_id, d_id, latest_o_id, l);
+            volatile float amt = fread(&g_orderline[ol_idx].ol_amount);
+            (void)amt;
+        }
+    }
+
+    return balance;
+}
+
+// ── Transaction: Delivery (§2.7) ───────────────────────────────────
+// 4% of transaction mix
+static void txn_delivery(int w_id, int carrier_id) {
+    for (int d_id = 1; d_id <= g_num_districts; d_id++) {
+        int found_no = -1;
+        for (int oid = 1; oid < MAX_ORDERS_PER_DISTRICT; oid++) {
+            int no_idx = idx_no(w_id, d_id, oid);
+            if (iread(&g_neworder[no_idx].no_o_id) == oid) {
+                found_no = oid;
                 break;
             }
         }
-        if (found_o_id < 0) continue;
-        int o_id = found_o_id;
+        if (found_no < 0) continue;
 
-        int o_idx = db.idx_ord(w_id, d_id, o_id);
-        db.order[o_idx].o_carrier_id.write(carrier_id);
-        int ol_cnt = db.order[o_idx].o_ol_cnt;
+        int o_idx = idx_ord(w_id, d_id, found_no);
+        iwrite(&g_order[o_idx].o_carrier_id, carrier_id);
 
-        double ol_total = 0.0;
-        for (int l = 1; l <= ol_cnt; ++l) {
-            int ol_idx = db.idx_ol(w_id, d_id, o_id, l);
-            ol_total += db.orderline[ol_idx].ol_amount.read();
-            db.orderline[ol_idx].ol_delivery_d.write(1000);
+        int ol_cnt = iread(&g_order[o_idx].o_ol_cnt);
+        float ol_total = 0;
+        for (int l = 1; l <= ol_cnt; l++) {
+            int ol_idx = idx_ol(w_id, d_id, found_no, l);
+            ol_total += fread(&g_orderline[ol_idx].ol_amount);
+            iwrite(&g_orderline[ol_idx].ol_delivery_d, (int)::time(nullptr));
         }
 
-        int c_id = db.order[o_idx].o_c_id;
-        int c_idx = db.idx_c(w_id, d_id, c_id);
-        db.customer[c_idx].c_balance.write(
-            db.customer[c_idx].c_balance.read() + ol_total);
-        db.customer[c_idx].c_delivery_cnt.write(
-            db.customer[c_idx].c_delivery_cnt.read() + 1);
+        int c_id = iread(&g_order[o_idx].o_c_id);
+        int c_idx = idx_c(w_id, d_id, c_id);
+        fwrite(&g_customer[c_idx].c_balance, fread(&g_customer[c_idx].c_balance) + ol_total);
+        iwrite(&g_customer[c_idx].c_delivery_cnt, iread(&g_customer[c_idx].c_delivery_cnt) + 1);
 
-        db.neworder[db.idx_no(w_id, d_id, o_id)].no_o_id.write(-1);
+        iwrite(&g_neworder[idx_no(w_id, d_id, found_no)].no_o_id, -1);
     }
 }
 
-int txn_stock_level(TpccDatabase &db, int w_id, int d_id, int threshold) {
-    int d_idx = db.idx_d(w_id, d_id);
-    int next_o_id = db.district[d_idx].d_next_o_id.read();
-    int start = next_o_id > 20 ? next_o_id - 20 : 1;
+// ── Transaction: Stock-Level (§2.8) ────────────────────────────────
+// 4% of transaction mix
+static int txn_stock_level(int w_id, int d_id, int threshold) {
+    int d_idx = idx_d(w_id, d_id);
+    int next_o_id = iread(&g_district[d_idx].d_next_o_id);
 
-    int below = 0;
-    // Track seen item IDs (non-TM set)
-    bool seen[100001] = {false};
-    for (int o_id = start; o_id < next_o_id; ++o_id) {
-        int o_idx = db.idx_ord(w_id, d_id, o_id);
-        int ol_cnt = db.order[o_idx].o_ol_cnt;
-        for (int l = 1; l <= ol_cnt; ++l) {
-            int ol_idx = db.idx_ol(w_id, d_id, o_id, l);
-            int i_id = db.orderline[ol_idx].ol_i_id;
-            if (i_id < 1 || i_id > db.num_i) continue;
-            if (!seen[i_id]) {
-                seen[i_id] = true;
-                int qty = db.stock[db.idx_s(w_id, i_id)].s_quantity.read();
-                if (qty < threshold) ++below;
+    int start_o_id = next_o_id - 20;
+    if (start_o_id < 1) start_o_id = 1;
+
+    std::unordered_set<int> counted;
+
+    for (int oid = start_o_id; oid < next_o_id; oid++) {
+        int o_idx = idx_ord(w_id, d_id, oid);
+        if (iread(&g_order[o_idx].o_w_id) == 0) continue;
+
+        int ol_cnt = iread(&g_order[o_idx].o_ol_cnt);
+        for (int l = 1; l <= ol_cnt; l++) {
+            int ol_idx = idx_ol(w_id, d_id, oid, l);
+            int i_id = iread(&g_orderline[ol_idx].ol_i_id);
+            if (counted.count(i_id)) continue;
+            counted.insert(i_id);
+
+            int s_idx = idx_s(w_id, i_id);
+            if (iread(&g_stock[s_idx].s_quantity) < threshold) {
+                // low-stock — counted in distinct set
             }
         }
     }
-    return below;
+
+    return (int)counted.size();
 }
 
-// ── Globals ────────────────────────────────────────────────────────────
-std::atomic<bool> g_stop{false};
-std::atomic<uint64_t> g_total_ops{0};
-std::atomic<uint64_t> g_tx_counts[5] = {};
-TpccDatabase *g_db = nullptr;
+// ── Worker ─────────────────────────────────────────────────────────
+static std::atomic<bool> g_done{false};
+static std::atomic<uint64_t> g_total_ops{0};
+static std::atomic<int> g_counts[5] = {};
 
-// ── Worker ─────────────────────────────────────────────────────────────
-void run_worker(int tid) {
-    expli::TM<int>::thread_init();
-    Rng rng(tid * 12345ULL + 42);
+static void run_worker(int id, int loops) {
+    tm_init_thread();
+    std::mt19937 rng((unsigned)(id * 12345 + 42));
+    std::uniform_int_distribution<int> wdist(1, g_num_warehouses);
+    std::uniform_int_distribution<int> ddist(1, g_num_districts);
+    std::uniform_int_distribution<int> cdist(1, g_num_customers);
+    std::uniform_int_distribution<int> op_dist(0, 99);
+    std::uniform_int_distribution<int> item_dist(1, g_num_items);
+    std::uniform_int_distribution<int> qty_dist(1, 10);
+    std::uniform_int_distribution<int> olcount_dist(5, 15);
+    std::uniform_int_distribution<int> threshold_dist(10, 20);
 
-    while (!g_stop.load()) {
-        int r = (int)(rng.next() % 100);
-        int w_id = (int)rng.range(1, g_db->num_w + 1);
-        int d_id = (int)rng.range(1, g_db->num_d + 1);
-        int c_id = (int)rng.range(1, g_db->num_c + 1);
+    while (!g_done.load() && loops > 0) {
+        loops--;
+        int r = op_dist(rng);
+        int w_id = wdist(rng);
+        int d_id = ddist(rng);
 
         if (r < 45) {
-            expli::TM<int>::transaction([&]() {
-                txn_new_order(*g_db, w_id, d_id, rng);
+            int c_id = cdist(rng);
+            int num_items = olcount_dist(rng);
+
+            int item_ids[15];
+            int supplier_ws[15];
+            int quantities[15];
+
+            for (int i = 0; i < num_items; i++) {
+                int r2 = (int)(rng() % 100);
+                item_ids[i] = item_dist(rng);
+                for (int j = 0; j < i; j++) {
+                    if (item_ids[j] == item_ids[i]) {
+                        item_ids[i] = item_dist(rng);
+                        j = -1;
+                    }
+                }
+                if (r2 < 1 && g_num_warehouses > 1) {
+                    int other_w = wdist(rng);
+                    while (other_w == w_id) other_w = wdist(rng);
+                    supplier_ws[i] = other_w;
+                } else {
+                    supplier_ws[i] = w_id;
+                }
+                quantities[i] = qty_dist(rng);
+            }
+
+            tx_run([&]() {
+                txn_new_order(w_id, d_id, c_id, num_items, item_ids, supplier_ws, quantities);
             });
-            g_tx_counts[0].fetch_add(1);
+            g_counts[0].fetch_add(1);
+
         } else if (r < 88) {
-            double amount = 100.0 + (double)(rng.next() % 9900);
-            expli::TM<int>::transaction([&]() {
-                txn_payment(*g_db, w_id, d_id, c_id, amount);
+            int pay_w_id = w_id;
+            if ((rng() % 100) < 15 && g_num_warehouses > 1) {
+                do { pay_w_id = wdist(rng); } while (pay_w_id == w_id);
+            }
+            int c_id = cdist(rng);
+            float amount = 100.00f + (float)(rng() % 9900);
+            tx_run([&]() {
+                txn_payment(pay_w_id, d_id, c_id, amount);
             });
-            g_tx_counts[1].fetch_add(1);
+            g_counts[1].fetch_add(1);
+
         } else if (r < 92) {
-            expli::TM<int>::transaction([&]() {
-                txn_order_status(*g_db, w_id, d_id, c_id);
+            int c_id = cdist(rng);
+            tx_run([&]() {
+                txn_order_status(w_id, d_id, c_id);
             });
-            g_tx_counts[2].fetch_add(1);
+            g_counts[2].fetch_add(1);
+
         } else if (r < 96) {
-            int carrier = (int)(rng.next() % 10) + 1;
-            expli::TM<int>::transaction([&]() {
-                txn_delivery(*g_db, w_id, carrier);
+            int carrier_id = (int)(rng() % 10) + 1;
+            tx_run([&]() {
+                txn_delivery(w_id, carrier_id);
             });
-            g_tx_counts[3].fetch_add(1);
+            g_counts[3].fetch_add(1);
+
         } else {
-            int threshold = (int)rng.range(10, 21);
-            expli::TM<int>::transaction([&]() {
-                txn_stock_level(*g_db, w_id, d_id, threshold);
+            int threshold = threshold_dist(rng);
+            tx_run([&]() {
+                txn_stock_level(w_id, d_id, threshold);
             });
-            g_tx_counts[4].fetch_add(1);
+            g_counts[4].fetch_add(1);
         }
+
         g_total_ops.fetch_add(1);
     }
-    expli::TM<int>::thread_exit();
+
+    tm_exit_thread();
 }
 
-// ── Main ───────────────────────────────────────────────────────────────
-int main(int argc, char *argv[]) {
-    int threads = 4, duration = 10000, warehouses = DEFAULT_WAREHOUSES;
+// ── Main ───────────────────────────────────────────────────────────
+int main(int argc, char* argv[]) {
+    int threads = 4;
+    int duration = 10000;
 
-    for (int i = 1; i < argc; ++i) {
-        if      (!strcmp(argv[i], "-t") && i+1 < argc) threads = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-d") && i+1 < argc) duration = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-w") && i+1 < argc) warehouses = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-            printf("Usage: tpcc [-t n] [-d ms] [-w n]\n");
-            return 0;
-        }
+    for (int i = 1; i < argc; i++) {
+        if      (strcmp(argv[i], "-t") == 0 && i+1 < argc) threads   = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-d") == 0 && i+1 < argc) duration  = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-w") == 0 && i+1 < argc) g_num_warehouses = atoi(argv[++i]);
     }
+
+    tm_init();
+
+    // Allocate flat arrays in TM region
+    g_warehouse = (Warehouse*)tm_calloc((size_t)g_num_warehouses, sizeof(Warehouse));
+    g_district  = (District*)tm_calloc((size_t)(g_num_warehouses * g_num_districts), sizeof(District));
+    g_customer  = (Customer*)tm_calloc((size_t)(g_num_warehouses * g_num_districts * g_num_customers), sizeof(Customer));
+    g_history   = (History*)tm_calloc(MAX_HISTORY_ROWS, sizeof(History));
+    int total_order_slots = g_num_warehouses * g_num_districts * MAX_ORDERS_PER_DISTRICT;
+    g_order     = (Order*)tm_calloc((size_t)total_order_slots, sizeof(Order));
+    g_neworder  = (NewOrder*)tm_calloc((size_t)total_order_slots, sizeof(NewOrder));
+    int total_ol_slots = total_order_slots * MAX_OL_PER_ORDER;
+    g_orderline = (OrderLine*)tm_calloc((size_t)total_ol_slots, sizeof(OrderLine));
+    g_item      = (Item*)tm_calloc((size_t)g_num_items, sizeof(Item));
+    g_stock     = (Stock*)tm_calloc((size_t)(g_num_warehouses * g_num_items), sizeof(Stock));
 
     printf("========= TPC-C Benchmark (v5.11) =========\n");
     printf("============================================\n");
-    printf("Warehouses: %d\n", warehouses);
-    printf("Districts:  %d\n", warehouses * DEFAULT_DISTRICTS);
-    printf("Customers:  %d\n", warehouses * DEFAULT_DISTRICTS * DEFAULT_CUSTOMERS);
-    printf("Items:      %d\n", DEFAULT_ITEMS);
-    printf("Threads:    %d\n", threads);
-    printf("Duration:   %dms\n\n", duration);
+    printf("Configuration:\n");
+    printf("  Warehouses: %d\n", g_num_warehouses);
+    printf("  Districts:  %d\n", g_num_warehouses * g_num_districts);
+    printf("  Customers:  %d per district\n", g_num_customers);
+    printf("  Items:      %d\n", g_num_items);
+    printf("  Orders:     %d per district (pre-populated)\n", PREPOPULATED_ORDERS);
+    printf("  Threads:    %d\n", threads);
+    printf("  Duration:   %d ms\n\n", duration);
 
-    expli::TM<int>::init();
-    g_db = new TpccDatabase(warehouses);
+    printf("Initializing data...\n");
+    init_data();
+    printf("  Warehouses: %d\n", g_num_warehouses);
+    printf("  Districts:  %d\n", g_num_warehouses * g_num_districts);
+    printf("  Customers:  %d\n", g_num_warehouses * g_num_districts * g_num_customers);
+    printf("  Items:      %d\n", g_num_items);
+    printf("  Done\n\n");
 
-    std::vector<std::thread> thrds;
-    for (int t = 0; t < threads; ++t)
-        thrds.emplace_back([t]() { run_worker(t); });
+    int loops = duration / 10;
+    auto t1 = std::chrono::steady_clock::now();
+
+    std::vector<std::thread> threads_v;
+    for (int t = 0; t < threads; t++)
+        threads_v.emplace_back(run_worker, t, loops);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(duration));
-    g_stop.store(true);
-    for (auto &th : thrds) th.join();
+    g_done = true;
+
+    for (auto& th : threads_v) th.join();
+    auto t2 = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double>(t2 - t1).count() * 1000;
 
     uint64_t ops = g_total_ops.load();
-    double secs = duration / 1000.0;
 
-    printf("\nResults\n");
+    printf("Results\n");
     printf("=======\n");
-    printf("Elapsed:  %.1fs\n", secs);
-    printf("Total ops: %llu\n", (unsigned long long)ops);
-    printf("Throughput: %.0f txn/s\n", ops / secs);
-    printf("\nTransaction breakdown:\n");
-    printf("  New-Order:    %llu\n", (unsigned long long)g_tx_counts[0].load());
-    printf("  Payment:      %llu\n", (unsigned long long)g_tx_counts[1].load());
-    printf("  Order-Status: %llu\n", (unsigned long long)g_tx_counts[2].load());
-    printf("  Delivery:     %llu\n", (unsigned long long)g_tx_counts[3].load());
-    printf("  Stock-Level:  %llu\n", (unsigned long long)g_tx_counts[4].load());
+    printf("Elapsed:       %.0f ms\n", ms);
+    printf("Total ops:     %llu\n", (unsigned long long)ops);
+    printf("Ops/sec:       %.0f\n\n", ops / (ms / 1000.0));
 
-    delete g_db;
-    expli::TM<int>::exit();
+    printf("Transaction breakdown:\n");
+    printf("  New-Order:     %d\n", g_counts[0].load());
+    printf("  Payment:       %d\n", g_counts[1].load());
+    printf("  Order-Status:  %d\n", g_counts[2].load());
+    printf("  Delivery:      %d\n", g_counts[3].load());
+    printf("  Stock-Level:   %d\n", g_counts[4].load());
+
+    tm_exit();
     return 0;
 }
