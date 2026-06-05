@@ -164,8 +164,6 @@ inline void ssca2_generate_graph() {
     }
 
     for (auto& e : temp_edges) {
-        e.src = perm[e.src % tot_vertices];
-        e.dst = perm[e.dst % tot_vertices];
         data->edges.push_back(e);
     }
 

@@ -105,7 +105,7 @@ static double* g_circ_y = nullptr; // [MAX_ELEMENTS]
 static double* g_circ_r = nullptr; // [MAX_ELEMENTS]
 static double* g_min_angle = nullptr; // [MAX_ELEMENTS]
 
-static long g_elem_count = 0;
+static std::atomic<long> g_elem_count{0};
 static std::atomic<long> g_total_ops{0};
 static std::atomic<bool> g_stop{false};
 
@@ -533,7 +533,7 @@ int main(int argc, char* argv[]) {
     // ── Report results ──
     long ops = g_total_ops.load();
     printf("\nResults (%ld ms):\n", (long)(elapsed * 1000));
-    printf("  Operations: %ld  Total elements: %ld\n", ops, g_elem_count);
+    printf("  Operations: %ld  Total elements: %ld\n", ops, g_elem_count.load());
     printf("  Time: %.6f sec\n", elapsed);
     printf("  Rate: %.0f ops/sec\n", ops / elapsed);
     printf("  PASS\n");

@@ -181,11 +181,13 @@ int main(int argc, char* argv[]) {
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-p") && i + 1 < argc) num_threads = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-k") && i + 1 < argc) nclusters = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-m") && i + 1 < argc) { ndims = atoi(argv[++i]); nclusters = ndims; }
+        else if (!strcmp(argv[i], "-d") && i + 1 < argc) ndims = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-n") && i + 1 < argc) npoints = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-t") && i + 1 < argc) threshold = atof(argv[++i]);
         else if (!strcmp(argv[i], "-h")) {
-            fprintf(stderr, "Usage: %s -p <threads> -m <max_clusters> -n <min_clusters> -t <threshold>\n", argv[0]);
+            fprintf(stderr, "Usage: %s -p <threads> -k <clusters> -d <dims> -n <points> -t <threshold>\n", argv[0]);
             return 0;
         }
     }

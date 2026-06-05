@@ -269,8 +269,6 @@ int main(int argc, char* argv[]) {
     }
 
     for (auto& e : temp_edges) {
-        e.src = (uint64_t)perm[e.src % tot_vertices];
-        e.dst = (uint64_t)perm[e.dst % tot_vertices];
         g_data.edges.push_back(e);
     }
 
