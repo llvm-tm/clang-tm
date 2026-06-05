@@ -1,6 +1,27 @@
 # Session Summary
 
-## Latest Session (this session — 2026-06-04)
+## Latest Session (this session — 2026-06-05)
+
+### Benchmark compatibility audit across 3 sets
+
+#### Findings
+- **3 benchmark sets exist**: plugin (LLVM auto-instrumentation), expli C++ (manual `tm_read_i8`/`tm_write_i8`), Rust (manual `TmCell` API)
+- **Only 4 benchmarks are comparable across plugin vs expli C++**: bank, tpcc, ycsb, bayes, yada. Same algorithm, same CLI, comparable output.
+- **6 STAMP benchmarks (vacation, genome, intruder, kmeans, labyrinth, ssca2) use different algorithms** between plugin and expli/Rust:
+  - Plugin follows original STAMP spec (ported from github.com/ccaominh/stamp) with full data structures and workflow
+  - Expli C++ uses simplified "TM stress test" versions — same name, different computational semantics
+  - Rust uses even simpler versions with different TM scope, no convergence checks, smaller defaults
+  - **None of these 6 are comparable across sets** without reimplementation
+- **Rust benchmarks crash on TinySTM backend**: Every Rust benchmark panics with `"Address not in TM address space"` in `runtime/tinystm/src/wbctl.rs:6`. Root cause: Rust `TmCell` data is heap-allocated (Box/Vec), not allocated from the TM region via `tm_calloc`. The TinySTM backend asserts all TM-accessed addresses are in the mmap'd region. This is a systemic design incompatibility — the Rust TmCell model assumes any address is valid, but the backend enforces TM-region-only addresses.
+- **Plugin EigenBench broken**: Only produces 1-op transactions (avg TX length = 1 despite R1=10/W1=10 configuration). Plugin eigenbench appears to miss instrumentation or has incorrect TX boundaries.
+- **Plugin STMBench7 OOM**: Crashes with `std::bad_alloc` during large data structure construction (500 CPs, 100K APs). Expli version uses smaller scale (200 CPs, 800 APs).
+
+#### Next steps needed
+- Port original STAMP spec algorithms from plugin `*_bench.hpp` to expli C++ and Rust for vacation, genome, intruder, kmeans, labyrinth, ssca2
+- Fix Rust address-space issue: either allocate TmCell data from TM region, or relax the is_tm_address check
+- Fix plugin EigenBench instrumentation
+
+## Previous Session (2026-06-04)
 
 ### Fix: LLVM plugin pass preamble path detection (stale binary)
 
