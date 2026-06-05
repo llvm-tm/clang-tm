@@ -66,7 +66,12 @@ RAW_DIR="$RESULTS_DIR/raw"
 SUMMARY="$RESULTS_DIR/SUMMARY.txt"
 CSV="$RESULTS_DIR/results.csv"
 PROGRESS="$RESULTS_DIR/progress.txt"
+SKIP_FILE="$RESULTS_DIR/skip_combos.txt"
 mkdir -p "$RAW_DIR"/{plugin,expli,rust}/{tsxsgl,tinystm_wbctl,norec,sgl,uninstrumented}
+touch "$SKIP_FILE"
+# Known-broken combos: skip all stmbench7 with plugin TinySTM WBCTL
+# (crashes during worker init at 2+ threads due to std::vector reallocation issue)
+echo "plugin tinystm_wbctl stmbench7" >> "$SKIP_FILE"
 
 # Early validation
 if [ ! -d "llvm_tm_plugin/bin" ]; then
@@ -100,6 +105,18 @@ log_progress() {
     } > "$PROGRESS"
 }
 
+# ── Skip-list: mark consistently-crashing (impl, backend, bench) combos ──
+is_skipped() {
+    grep -qx "$1 $2 $3" "$SKIP_FILE" 2>/dev/null
+}
+mark_broken() {
+    local label="${1}_${2}_${3}"
+    if ! grep -qx "$1 $2 $3" "$SKIP_FILE" 2>/dev/null; then
+        echo "$1 $2 $3" >> "$SKIP_FILE"
+        printf "  *** %-60s ALL REMAINING SKIPPED (consistent crash) ***\n" "$label"
+    fi
+}
+
 # ── Helper: run one benchmark ─────────────────────────────────────────────
 # run_one <impl> <backend> <bench_name> <threads> <sample> -- <binary> [args...]
 run_one() {
@@ -111,10 +128,18 @@ run_one() {
     local sep="$1"; shift  # should be "--"
     local binary="$1"; shift
 
-    local label="${impl}_${backend}_${bench}_${threads}t_s${sample}"
+    local combo="${impl}_${backend}_${bench}"
+    local label="${combo}_${threads}t_s${sample}"
     local outfile="$RAW_DIR/$impl/$backend/${bench}_${threads}t_s${sample}.txt"
 
     RUN_TOTAL=$((RUN_TOTAL + 1))
+
+    # Skip if this (impl, backend, bench) is known to crash consistently
+    if is_skipped "$impl" "$backend" "$bench"; then
+        RUN_SKIPPED=$((RUN_SKIPPED + 1))
+        log_progress "SKIP $label (known-broken combo: $combo)"
+        return 0
+    fi
 
     # Skip if already exists and looks successful (resume support)
     if [ -f "$outfile" ] && [ -s "$outfile" ]; then
@@ -155,6 +180,14 @@ run_one() {
                 RUN_COMPLETED=$((RUN_COMPLETED + 1))
                 RUN_FAIL=$((RUN_FAIL - 1))
             fi
+        fi
+    fi
+
+    # Auto-detect consistently-broken combos: truncated output + no success indicators
+    local fsize=$(stat -c%s "$outfile" 2>/dev/null || echo 0)
+    if [ "$rc" != 0 ] && [ "$fsize" -gt 0 ] && [ "$fsize" -lt 600 ]; then
+        if ! grep -qE 'PASS|Results|Time\s*[=:]|Ops/sec|Verification passed|done\.' "$outfile" 2>/dev/null; then
+            mark_broken "$impl" "$backend" "$bench"
         fi
     fi
 
