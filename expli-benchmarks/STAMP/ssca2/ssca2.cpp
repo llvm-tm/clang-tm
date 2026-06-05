@@ -297,8 +297,7 @@ int main(int argc, char* argv[]) {
                        end_time - start_time).count();
 
     uint64_t ops = g_total_ops.load();
-    printf("    Time = %lld ms\n", (long long)elapsed);
-    printf("    Triangles = %llu\n", (unsigned long long)ops);
+    printf("Time taken for all is %f sec.\n", elapsed / 1000.0);
 
     expli::TM<int>::exit();
     return 0;

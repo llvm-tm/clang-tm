@@ -237,8 +237,8 @@ int main(int argc, char* argv[]) {
                        end_time - start_time).count();
 
     uint64_t ops = g_total_ops.load();
-    printf("    Time = %lld ms\n", (long long)elapsed);
-    printf("    Completed flows = %llu / %d\n", (unsigned long long)ops, num_flows);
+    printf("Elapsed time = %f seconds\n", elapsed / 1000.0);
+    printf("Num found = %lu\n", (unsigned long)ops);
 
     expli::TM<int>::exit();
     return 0;

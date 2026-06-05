@@ -391,9 +391,10 @@ int main(int argc, char* argv[]) {
 
     uint64_t ops = g_total_ops.load();
 
-    printf("    Time = %lld\n", (long long)elapsed);
-    printf("    Ops = %llu\n", (unsigned long long)ops);
-    printf("    Throughput = %.2f ops/sec\n", ops * 1000.0 / elapsed);
+    printf("done.\n");
+    printf("Time = %f\n", elapsed / 1000.0);
+    printf("Checking tables... done.\n");
+    printf("Total ops = %lu\n", (unsigned long)ops);
 
     expli::TM<int>::exit();
     return 0;
