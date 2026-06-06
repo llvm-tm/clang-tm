@@ -12,7 +12,7 @@
 
 // tinystm_wbctl.hpp includes tinystm_common.hpp which has all declarations.
 // globals are defined in TinySTM_runtime.cpp (not included here to avoid ODR).
-#include "../../backends/TinySTM/tinystm_wbctl.hpp"
+#include "tinystm_wbctl.hpp"
 
 // Manual TM wrappers using tinystm namespace
 using tinystm::tm_read_i8;

@@ -1,5 +1,5 @@
 // Minimal self-contained vector to isolate the stack-write-via-tm_write_ptr bug.
-#include "../../backends/tm_safe_map.hpp"
+#include "tm_safe_map.hpp"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>

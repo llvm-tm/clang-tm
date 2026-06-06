@@ -1,6 +1,6 @@
 #include <cstdio>
 #include <cstdint>
-#include "../../backends/tm_common.hpp"
+#include "tm_common.hpp"
 
 int main() {
     stm::tm_region_init();

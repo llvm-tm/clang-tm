@@ -13,7 +13,7 @@
 #include <vector>
 
 // TinySTM function declarations (not globals — those come from TinySTM_runtime.cpp at link)
-#include "../../backends/TinySTM/tinystm_wbctl.hpp"
+#include "tinystm_wbctl.hpp"
 
 // ---- Manual TM wrappers (bypassing plugin) ----
 using namespace tinystm;
