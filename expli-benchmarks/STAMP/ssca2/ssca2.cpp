@@ -17,11 +17,29 @@
 #include <thread>
 #include <vector>
 
+#include "../../tests/benchmark_test.hpp"
+
 static long g_scale = 13;
 static long g_iterations = 10;
 static double g_prob_unidirectional = 0.5;
 static long g_max_paral_edges = 3;
 static long g_num_threads = 4;
+static int g_subgr_edge_length = 3;
+
+static void parse_args(int argc, char* argv[]) {
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-p") && i + 1 < argc) g_num_threads = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-s") && i + 1 < argc) g_scale = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-u") && i + 1 < argc) g_prob_unidirectional = atof(argv[++i]);
+        else if (!strcmp(argv[i], "-l") && i + 1 < argc) g_subgr_edge_length = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-m") && i + 1 < argc) g_max_paral_edges = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-i") && i + 1 < argc) g_iterations = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-h")) {
+            fprintf(stderr, "Usage: %s -p <threads> -s <scale> -u <prob> -l <len> -m <par_edges> -i <iters>\n", argv[0]);
+            exit(0);
+        }
+    }
+}
 
 template<typename F>
 static void tx_retry(F&& body) {
@@ -139,7 +157,7 @@ static void worker(int thread_id, int num_threads) {
     uint64_t end_v = std::min(start_v + chunk, g_data.num_vertices);
     uint64_t local_ops = 0;
 
-    for (int iter = 0; iter < 3; iter++) {
+    for (int iter = 0; iter < g_iterations; iter++) {
         for (uint64_t v = start_v; v < end_v; v++) {
             uint64_t start = row_ptr[v];
             uint64_t end = row_ptr[v + 1];
@@ -163,26 +181,105 @@ static void worker(int thread_id, int num_threads) {
     expli::TM<int>::thread_exit();
 }
 
-int main(int argc, char* argv[]) {
-    int num_threads = 4;
-    int scale = 13;
-    double prob_unidirectional = 0.5;
-    int max_paral_edges = 3;
-    int subgr_edge_length = 3;
-    int iterations = 10;
+static void test_cli_flags() {
+    printf("  Testing CLI flags...\n");
+    long save_scale = g_scale, save_iters = g_iterations;
+    double save_prob = g_prob_unidirectional;
+    long save_par = g_max_paral_edges, save_sub = g_subgr_edge_length, save_t = g_num_threads;
+    TEST_EQ(g_scale, 13L, "default scale");
+    TEST_EQ(g_iterations, 10L, "default iterations");
+    TEST_NEAR(g_prob_unidirectional, 0.5, 1e-9, "default prob");
+    TEST_EQ(g_max_paral_edges, 3L, "default max paral edges");
+    TEST_EQ(g_num_threads, 4L, "default threads");
+    const char* test_args[] = {"prog", "-p", "2", "-s", "8", "-u", "0.3", "-l", "5", "-m", "1", "-i", "3"};
+    parse_args(13, (char**)test_args);
+    TEST_EQ(g_num_threads, 2L, "override threads");
+    TEST_EQ(g_scale, 8L, "override scale");
+    TEST_NEAR(g_prob_unidirectional, 0.3, 1e-9, "override prob");
+    TEST_EQ(g_subgr_edge_length, 5, "override subgr edge len");
+    TEST_EQ(g_max_paral_edges, 1L, "override max paral edges");
+    TEST_EQ(g_iterations, 3L, "override iterations");
+    g_scale = save_scale; g_iterations = save_iters;
+    g_prob_unidirectional = save_prob; g_max_paral_edges = save_par;
+    g_subgr_edge_length = save_sub; g_num_threads = save_t;
+    if (test_result() != 0) exit(1);
+}
 
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-p") && i + 1 < argc) num_threads = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-s") && i + 1 < argc) scale = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-u") && i + 1 < argc) prob_unidirectional = atof(argv[++i]);
-        else if (!strcmp(argv[i], "-l") && i + 1 < argc) subgr_edge_length = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-m") && i + 1 < argc) max_paral_edges = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-i") && i + 1 < argc) iterations = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-h")) {
-            fprintf(stderr, "Usage: %s -p <threads> -s <scale> -u <prob> -l <len> -m <par_edges> -i <iters>\n", argv[0]);
-            return 0;
+static void test_rng() {
+    printf("  Testing RNG determinism...\n");
+    test_rng_determinism<PRNG>();
+    if (test_result() != 0) exit(1);
+}
+
+static void test_logic() {
+    printf("  Testing SSCA2 logic...\n");
+    // Build a simple graph and verify CSR construction (no TM needed)
+    // Create 4 vertices: 0-1, 1-2, 2-0 = triangle (0,1,2)
+    g_data.edges.clear();
+    g_data.edges.push_back({0, 1, 1});
+    g_data.edges.push_back({1, 2, 1});
+    g_data.edges.push_back({2, 0, 1});
+    g_data.edges.push_back({1, 3, 1});
+    build_csr();
+
+    TEST_EQ((int)g_data.num_vertices, 4, "4 vertices");
+    TEST_EQ((int)g_data.edges.size(), 4, "4 unique edges");
+
+    // Check CSR structure directly (no TM calls)
+    auto& row = g_data.graph.row_ptr;
+    auto& col = g_data.graph.col_idx;
+    TEST_EQ((int)row.size(), 5, "row_ptr has 5 entries");
+    TEST_EQ((int)col.size(), 4, "col_idx has 4 entries");
+
+    // Helper to check adjacency
+    auto has_edge_csr = [&](uint64_t src, uint64_t dst) {
+        uint64_t s = row[src], e = row[src + 1];
+        for (uint64_t i = s; i < e; i++)
+            if (col[i] == dst) return true;
+        return false;
+    };
+    TEST_ASSERT(has_edge_csr(0, 1), "CSR edge 0->1");
+    TEST_ASSERT(has_edge_csr(1, 2), "CSR edge 1->2");
+    TEST_ASSERT(has_edge_csr(2, 0), "CSR edge 2->0");
+    TEST_ASSERT(has_edge_csr(1, 3), "CSR edge 1->3");
+    TEST_ASSERT(!has_edge_csr(0, 2), "CSR no edge 0->2");
+
+    // Manual triangle detection without TM
+    bool found_triangle = false;
+    for (uint64_t a = 0; a < g_data.num_vertices && !found_triangle; a++) {
+        for (uint64_t i = row[a]; i < row[a + 1] && !found_triangle; i++) {
+            uint64_t b = col[i];
+            for (uint64_t j = row[b]; j < row[b + 1] && !found_triangle; j++) {
+                uint64_t c = col[j];
+                if (has_edge_csr(c, a)) found_triangle = true;
+            }
         }
     }
+    TEST_ASSERT(found_triangle, "triangle (0,1,2) found via CSR");
+
+    g_data.edges.clear();
+    g_data.graph.row_ptr.clear();
+    g_data.graph.col_idx.clear();
+    g_data.graph.weights.clear();
+    if (test_result() != 0) exit(1);
+}
+
+int main(int argc, char* argv[]) {
+    if (argc > 1 && strcmp(argv[1], "--test") == 0) {
+        printf("Running self-tests for ssca2...\n");
+        test_cli_flags();
+        test_rng();
+        test_logic();
+        printf("All tests passed.\n");
+        return 0;
+    }
+    parse_args(argc, argv);
+
+    int num_threads = (int)g_num_threads;
+    int scale = (int)g_scale;
+    double prob_unidirectional = g_prob_unidirectional;
+    int max_paral_edges = (int)g_max_paral_edges;
+    int subgr_edge_length = g_subgr_edge_length;
 
     g_data.scale = scale;
     g_data.max_paral_edges = max_paral_edges;
@@ -283,6 +380,8 @@ int main(int argc, char* argv[]) {
     printf("Vertices: %lu  Edges: %lu\n",
            (unsigned long)g_data.num_vertices, (unsigned long)g_data.num_edges);
     fflush(stdout);
+
+    expli::TM<int>::init();
 
     auto start_time = std::chrono::high_resolution_clock::now();
     std::vector<std::thread> threads;

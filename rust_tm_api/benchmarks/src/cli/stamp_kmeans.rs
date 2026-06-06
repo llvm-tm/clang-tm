@@ -4,6 +4,10 @@ use std::time::Instant;
 use tm::*;
 use benchmarks::Rng;
 
+fn euclidean_dist_sq(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut npoints = 200;
@@ -144,4 +148,42 @@ fn main() {
     let elapsed = start.elapsed();
     println!("    Time = {} ms", elapsed.as_millis());
     tm_exit();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use benchmarks::Rng;
+
+    #[test]
+    fn test_rng_determinism() {
+        let mut a = Rng::new(42);
+        let mut b = Rng::new(42);
+        for _ in 0..1000 {
+            assert_eq!(a.next(), b.next());
+        }
+    }
+
+    #[test]
+    fn test_euclidean_dist_sq() {
+        let a = [0.0, 0.0, 0.0];
+        let b = [1.0, 2.0, 3.0];
+        let dist = euclidean_dist_sq(&a, &b);
+        assert!((dist - 14.0).abs() < 1e-10, "dist = {}", dist);
+    }
+
+    #[test]
+    fn test_euclidean_dist_sq_same_point() {
+        let a = [3.5, 7.2, 1.0];
+        let dist = euclidean_dist_sq(&a, &a);
+        assert!((dist - 0.0).abs() < 1e-10, "dist = {}", dist);
+    }
+
+    #[test]
+    fn test_euclidean_dist_sq_2d() {
+        let a = [0.0, 0.0];
+        let b = [3.0, 4.0];
+        let dist = euclidean_dist_sq(&a, &b);
+        assert!((dist - 25.0).abs() < 1e-10, "dist = {}", dist);
+    }
 }

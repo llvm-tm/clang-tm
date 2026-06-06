@@ -23,6 +23,8 @@
 #include <mutex>
 #include <random>
 
+#include "../../tests/benchmark_test.hpp"
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -31,6 +33,14 @@
 static long g_angle_constraint = 20;
 static double g_jitter = 0.5;
 static long g_num_threads = 4;
+
+static void parse_args(int argc, char* argv[]) {
+    for (int i = 1; i < argc; i++) {
+        if      (strcmp(argv[i], "-a") == 0 && i+1 < argc) g_angle_constraint = atol(argv[++i]);
+        else if (strcmp(argv[i], "-j") == 0 && i+1 < argc) g_jitter = atof(argv[++i]);
+        else if (strcmp(argv[i], "-t") == 0 && i+1 < argc) g_num_threads = atol(argv[++i]);
+    }
+}
 
 // ── Constants ───────────────────────────────────────────────────────
 static const int MAX_NEIGHBORS = 16;
@@ -105,7 +115,7 @@ static double* g_circ_y = nullptr; // [MAX_ELEMENTS]
 static double* g_circ_r = nullptr; // [MAX_ELEMENTS]
 static double* g_min_angle = nullptr; // [MAX_ELEMENTS]
 
-static std::atomic<long> g_elem_count{0};
+static long* g_elem_count_ptr = nullptr;
 static std::atomic<long> g_total_ops{0};
 static std::atomic<bool> g_stop{false};
 
@@ -281,12 +291,15 @@ TX_FUNC static void refine_element(int el_id,
     // ── Create new elements from border edges ──
     int border_count = 0;
     // Save the slot for the seed element's replacement
-    long saved_new_id = g_elem_count;
+    long saved_new_id = TM_READ_I8(g_elem_count_ptr);
+    long cur_id = saved_new_id;
 
     for (auto& edge : border_edges) {
         if (border_count >= 3) break;
 
-        int tid = g_elem_count++;
+        int tid = (int)cur_id;
+        TM_WRITE_I8(g_elem_count_ptr, cur_id + 1);
+        cur_id++;
         if (tid >= MAX_ELEMENTS) break;
 
         // Geometry
@@ -377,14 +390,14 @@ static void worker(int tid) {
         // Mark seed as not referenced (outside TX)
         g_elem_is_referenced[el_id] = 0;
 
-        long old_count = g_elem_count;
+        long old_count = *g_elem_count_ptr;
 
         // Refine
         tx_run([&]() {
             refine_element(el_id, before_ids, border_edges, bad_ids, bfs_queue);
         });
 
-        long num_new = g_elem_count - old_count;
+        long num_new = *g_elem_count_ptr - old_count;
         if (num_new > 0) {
             // Push bad new elements
             tx_run([&]() { push_bad_ids(bad_ids); });
@@ -395,13 +408,59 @@ static void worker(int tid) {
     tm_exit_thread();
 }
 
+// ── Self-tests ────────────────────────────────────────────────────
+static int test_cli_flags() {
+    TEST_EQ(g_angle_constraint, 20, "default angle constraint");
+    const char* test_argv[] = {"yada", "-a", "30", "-j", "0.3", "-t", "2"};
+    parse_args(7, (char**)test_argv);
+    TEST_EQ(g_angle_constraint, 30, "parsed angle constraint");
+    TEST_NEAR(g_jitter, 0.3, 1e-9, "parsed jitter");
+    TEST_EQ(g_num_threads, 2, "parsed threads");
+    g_angle_constraint = 20; g_jitter = 0.5; g_num_threads = 4;
+    return test_result();
+}
+
+static int test_rng() {
+    std::mt19937 a(42), b(42);
+    for (int i = 0; i < 1000; i++) TEST_EQ(a(), b(), "RNG determinism");
+    return test_result();
+}
+
+static int test_geometry() {
+    double cx, cy, cr;
+    circumcircle(cx, cy, cr, {0,0}, {1,0}, {0,1});
+    TEST_NEAR(cx, 0.5, 1e-9, "circumcenter x");
+    TEST_NEAR(cy, 0.5, 1e-9, "circumcenter y");
+    TEST_NEAR(cr, sqrt(2)/2, 1e-9, "circumradius");
+
+    circumcircle(cx, cy, cr, {0,0}, {1,0}, {0.5, sqrt(3)/2});
+    TEST_NEAR(cx, 0.5, 1e-9, "equilateral cx");
+    TEST_NEAR(cy, sqrt(3)/6, 1e-9, "equilateral cy");
+
+    double angle = tri_min_angle({0,0}, {1,0}, {0.5, sqrt(3)/2});
+    TEST_NEAR(angle, 60.0, 1e-9, "equilateral min angle");
+
+    angle = tri_min_angle({0,0}, {1,0}, {0,1});
+    TEST_NEAR(angle, 45.0, 1e-9, "right triangle min angle");
+
+    return test_result();
+}
+
+static int test_all() {
+    int fails = 0;
+    fails += test_cli_flags();
+    fails += test_rng();
+    fails += test_geometry();
+    return fails;
+}
+
 // ── Main ────────────────────────────────────────────────────────────
 int main(int argc, char* argv[]) {
-    for (int i = 1; i < argc; i++) {
-        if      (strcmp(argv[i], "-a") == 0 && i+1 < argc) g_angle_constraint = atol(argv[++i]);
-        else if (strcmp(argv[i], "-j") == 0 && i+1 < argc) g_jitter = atof(argv[++i]);
-        else if (strcmp(argv[i], "-t") == 0 && i+1 < argc) g_num_threads = atol(argv[++i]);
+    if (argc > 1 && strcmp(argv[1], "--test") == 0) {
+        int fails = test_all();
+        return fails ? 1 : 0;
     }
+    parse_args(argc, argv);
 
     printf("Yada (STAMP spec, shared source)\n");
     printf("  Angle constraint: %ld°\n", g_angle_constraint);
@@ -421,6 +480,7 @@ int main(int argc, char* argv[]) {
     g_elem_neighbors     = (long*)tm_calloc(MAX_ELEMENTS * MAX_NEIGHBORS, sizeof(long));
     g_work_heap_data     = (long*)tm_calloc(MAX_ELEMENTS, sizeof(long));
     g_work_heap_cnt      = (long*)tm_calloc(1, sizeof(long));
+    g_elem_count_ptr     = (long*)tm_calloc(1, sizeof(long));
 
     g_pt_x      = new double[MAX_ELEMENTS * 3]();
     g_pt_y      = new double[MAX_ELEMENTS * 3]();
@@ -448,7 +508,7 @@ int main(int argc, char* argv[]) {
     }
 
     auto add_element = [&](const Point& a, const Point& b, const Point& c) {
-        int id = g_elem_count++;
+        int id = (int)(*g_elem_count_ptr)++;
         g_pt_x[id * 3] = a.x;     g_pt_y[id * 3] = a.y;
         g_pt_x[id * 3 + 1] = b.x; g_pt_y[id * 3 + 1] = b.y;
         g_pt_x[id * 3 + 2] = c.x; g_pt_y[id * 3 + 2] = c.y;
@@ -478,7 +538,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Compute neighbor relationships ──
-    int num_el = (int)g_elem_count;
+    int num_el = (int)*g_elem_count_ptr;
     for (int i = 0; i < num_el; i++) {
         for (int j = i + 1; j < num_el; j++) {
             int shared = 0;
@@ -533,7 +593,7 @@ int main(int argc, char* argv[]) {
     // ── Report results ──
     long ops = g_total_ops.load();
     printf("\nResults (%ld ms):\n", (long)(elapsed * 1000));
-    printf("  Operations: %ld  Total elements: %ld\n", ops, g_elem_count.load());
+    printf("  Operations: %ld  Total elements: %ld\n", ops, (long)*g_elem_count_ptr);
     printf("  Time: %.6f sec\n", elapsed);
     printf("  Rate: %.0f ops/sec\n", ops / elapsed);
     printf("  PASS\n");

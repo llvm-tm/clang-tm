@@ -18,6 +18,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "../tests/benchmark_test.hpp"
+
 // ── TM runtime declarations ────────────────────────────────────────
 extern "C" {
     void     tm_init();
@@ -64,6 +66,21 @@ constexpr int PREPOPULATED_ORDERS = 3000;
 constexpr int MAX_ORDERS_PER_DISTRICT = 10000;
 constexpr int MAX_OL_PER_ORDER   = 15;
 constexpr int MAX_HISTORY_ROWS   = 1000000;
+
+static int g_num_threads = 4;
+static int g_duration = 10000;
+static int g_num_warehouses = DEFAULT_WAREHOUSES;
+static int g_num_districts = DEFAULT_DISTRICTS;
+static int g_num_customers = DEFAULT_CUSTOMERS;
+static int g_num_items = DEFAULT_ITEMS;
+
+static void parse_args(int argc, char* argv[]) {
+    for (int i = 1; i < argc; i++) {
+        if      (strcmp(argv[i], "-t") == 0 && i+1 < argc) g_num_threads   = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-d") == 0 && i+1 < argc) g_duration  = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-w") == 0 && i+1 < argc) g_num_warehouses = atoi(argv[++i]);
+    }
+}
 
 // ── Table structs ──────────────────────────────────────────────────
 struct Warehouse {
@@ -195,11 +212,7 @@ static NewOrder*  g_neworder   = nullptr;
 static OrderLine* g_orderline  = nullptr;
 static Item*      g_item       = nullptr;
 static Stock*     g_stock      = nullptr;
-
-static int g_num_warehouses = DEFAULT_WAREHOUSES;
-static int g_num_districts  = DEFAULT_DISTRICTS;
-static int g_num_customers  = DEFAULT_CUSTOMERS;
-static int g_num_items      = DEFAULT_ITEMS;
+static int*       g_history_count = nullptr;
 
 // ── Index helpers ──────────────────────────────────────────────────
 static int idx_w(int w)        { return w - 1; }
@@ -242,10 +255,6 @@ static char* stock_dist_string(Stock* s, int d_id) {
 }
 
 // ── TM read/write helpers for flat arrays (matching plugin) ────────
-// The plugin auto-instruments every field access in TX functions.
-// Here we explicitly TM-read/TM-write the fields that transactions
-// actually read/modify.
-
 static float fread(const void* p) { return tm_read_f4(p); }
 static void fwrite(void* p, float v) { tm_write_f4(p, v); }
 static int iread(const void* p) { return tm_read_i4(p); }
@@ -361,6 +370,7 @@ static void init_data() {
             }
         }
     }
+    *g_history_count = hist_count;
 
     // Pre-populate Orders, Order-Lines, New-Orders
     for (int w = 1; w <= nw; w++) {
@@ -495,6 +505,17 @@ static void txn_payment(int w_id, int d_id, int c_id, float amount) {
     fwrite(&g_customer[c_idx].c_balance, fread(&g_customer[c_idx].c_balance) - amount);
     fwrite(&g_customer[c_idx].c_ytd_payment, fread(&g_customer[c_idx].c_ytd_payment) + amount);
     iwrite(&g_customer[c_idx].c_payment_cnt, iread(&g_customer[c_idx].c_payment_cnt) + 1);
+
+    int h_idx = iread(g_history_count);
+    iwrite(g_history_count, h_idx + 1);
+    iwrite(&g_history[h_idx].h_c_id, c_id);
+    iwrite(&g_history[h_idx].h_c_d_id, d_id);
+    iwrite(&g_history[h_idx].h_c_w_id, w_id);
+    iwrite(&g_history[h_idx].h_d_id, d_id);
+    iwrite(&g_history[h_idx].h_w_id, w_id);
+    iwrite(&g_history[h_idx].h_date, (int)::time(nullptr));
+    fwrite(&g_history[h_idx].h_amount, amount);
+    gen_string(g_history[h_idx].h_data, 25, "Payment");
 }
 
 // ── Transaction: Order-Status (§2.6) ───────────────────────────────
@@ -689,16 +710,72 @@ static void run_worker(int id, int loops) {
     tm_exit_thread();
 }
 
+static void test_cli_flags() {
+    printf("  Testing CLI flags...\n");
+    int save_t = g_num_threads, save_d = g_duration, save_w = g_num_warehouses;
+    TEST_EQ(g_num_threads, 4, "default threads");
+    TEST_EQ(g_duration, 10000, "default duration");
+    TEST_EQ(g_num_warehouses, 1, "default warehouses");
+    const char* test_args[] = {"prog", "-t", "2", "-d", "500", "-w", "3"};
+    parse_args(7, (char**)test_args);
+    TEST_EQ(g_num_threads, 2, "override threads");
+    TEST_EQ(g_duration, 500, "override duration");
+    TEST_EQ(g_num_warehouses, 3, "override warehouses");
+    g_num_threads = save_t; g_duration = save_d; g_num_warehouses = save_w;
+    if (test_result() != 0) exit(1);
+}
+
+static void test_rng() {
+    printf("  Testing RNG determinism...\n");
+    test_rng_determinism<std::mt19937>();
+    if (test_result() != 0) exit(1);
+}
+
+static void test_logic() {
+    printf("  Testing TPC-C logic...\n");
+    // Test warehouse data generation (no TM needed)
+    int save_w = g_num_warehouses;
+    g_num_warehouses = 1;
+    tm_init();
+
+    g_warehouse = (Warehouse*)tm_calloc((size_t)g_num_warehouses, sizeof(Warehouse));
+    g_district  = (District*)tm_calloc((size_t)(g_num_warehouses * g_num_districts), sizeof(District));
+    g_customer  = (Customer*)tm_calloc((size_t)(g_num_warehouses * g_num_districts * g_num_customers), sizeof(Customer));
+    g_history   = (History*)tm_calloc(MAX_HISTORY_ROWS, sizeof(History));
+    g_history_count = (int*)tm_calloc(1, sizeof(int));
+    int total_order_slots = g_num_warehouses * g_num_districts * MAX_ORDERS_PER_DISTRICT;
+    g_order     = (Order*)tm_calloc((size_t)total_order_slots, sizeof(Order));
+    g_neworder  = (NewOrder*)tm_calloc((size_t)total_order_slots, sizeof(NewOrder));
+    int total_ol_slots = total_order_slots * MAX_OL_PER_ORDER;
+    g_orderline = (OrderLine*)tm_calloc((size_t)total_ol_slots, sizeof(OrderLine));
+    g_item      = (Item*)tm_calloc((size_t)g_num_items, sizeof(Item));
+    g_stock     = (Stock*)tm_calloc((size_t)(g_num_warehouses * g_num_items), sizeof(Stock));
+
+    init_data();
+
+    TEST_EQ(g_warehouse[0].w_id, 1, "warehouse id");
+    TEST_EQ(g_district[0].d_id, 1, "district id");
+    TEST_EQ(g_item[0].i_id, 1, "item id");
+    TEST_ASSERT(g_item[0].i_price > 0, "item price > 0");
+    TEST_EQ(g_stock[0].s_quantity, 100, "stock quantity");
+    TEST_ASSERT(g_customer[0].c_id == 1, "customer id");
+
+    tm_exit();
+    g_num_warehouses = save_w;
+    if (test_result() != 0) exit(1);
+}
+
 // ── Main ───────────────────────────────────────────────────────────
 int main(int argc, char* argv[]) {
-    int threads = 4;
-    int duration = 10000;
-
-    for (int i = 1; i < argc; i++) {
-        if      (strcmp(argv[i], "-t") == 0 && i+1 < argc) threads   = atoi(argv[++i]);
-        else if (strcmp(argv[i], "-d") == 0 && i+1 < argc) duration  = atoi(argv[++i]);
-        else if (strcmp(argv[i], "-w") == 0 && i+1 < argc) g_num_warehouses = atoi(argv[++i]);
+    if (argc > 1 && strcmp(argv[1], "--test") == 0) {
+        printf("Running self-tests for tpcc...\n");
+        test_cli_flags();
+        test_rng();
+        test_logic();
+        printf("All tests passed.\n");
+        return 0;
     }
+    parse_args(argc, argv);
 
     tm_init();
 
@@ -707,6 +784,7 @@ int main(int argc, char* argv[]) {
     g_district  = (District*)tm_calloc((size_t)(g_num_warehouses * g_num_districts), sizeof(District));
     g_customer  = (Customer*)tm_calloc((size_t)(g_num_warehouses * g_num_districts * g_num_customers), sizeof(Customer));
     g_history   = (History*)tm_calloc(MAX_HISTORY_ROWS, sizeof(History));
+    g_history_count = (int*)tm_calloc(1, sizeof(int));
     int total_order_slots = g_num_warehouses * g_num_districts * MAX_ORDERS_PER_DISTRICT;
     g_order     = (Order*)tm_calloc((size_t)total_order_slots, sizeof(Order));
     g_neworder  = (NewOrder*)tm_calloc((size_t)total_order_slots, sizeof(NewOrder));
@@ -723,8 +801,8 @@ int main(int argc, char* argv[]) {
     printf("  Customers:  %d per district\n", g_num_customers);
     printf("  Items:      %d\n", g_num_items);
     printf("  Orders:     %d per district (pre-populated)\n", PREPOPULATED_ORDERS);
-    printf("  Threads:    %d\n", threads);
-    printf("  Duration:   %d ms\n\n", duration);
+    printf("  Threads:    %d\n", g_num_threads);
+    printf("  Duration:   %d ms\n\n", g_duration);
 
     printf("Initializing data...\n");
     init_data();
@@ -734,14 +812,14 @@ int main(int argc, char* argv[]) {
     printf("  Items:      %d\n", g_num_items);
     printf("  Done\n\n");
 
-    int loops = duration / 10;
+    int loops = g_duration / 10;
     auto t1 = std::chrono::steady_clock::now();
 
     std::vector<std::thread> threads_v;
-    for (int t = 0; t < threads; t++)
+    for (int t = 0; t < g_num_threads; t++)
         threads_v.emplace_back(run_worker, t, loops);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(duration));
+    std::this_thread::sleep_for(std::chrono::milliseconds(g_duration));
     g_done = true;
 
     for (auto& th : threads_v) th.join();

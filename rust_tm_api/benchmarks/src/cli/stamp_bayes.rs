@@ -24,6 +24,29 @@ impl Lcg {
     }
 }
 
+fn has_path_dfs(child_count: &[i32], child_data: &[i32], from: i32, to: i32, nvar: usize) -> bool {
+    if from == to {
+        return false;
+    }
+    let mut visited = vec![false; nvar];
+    let mut stack = vec![to];
+    visited[to as usize] = true;
+    while let Some(cur) = stack.pop() {
+        let ccount = child_count[cur as usize];
+        for i in 0..ccount as usize {
+            let c = child_data[cur as usize * nvar + i];
+            if c == from {
+                return false;
+            }
+            if c >= 0 && c < nvar as i32 && !visited[c as usize] {
+                visited[c as usize] = true;
+                stack.push(c);
+            }
+        }
+    }
+    true
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut num_var = 32i32;
@@ -281,13 +304,13 @@ fn main() {
 
                         // has_path
                         let mut visited = vec![false; nvar as usize];
-                        let mut stack = vec![from];
-                        visited[from as usize] = true;
+                        let mut stack = vec![to];
+                        visited[to as usize] = true;
                         while let Some(cur) = stack.pop() {
                             let ccount = tx.read(&child_count[cur as usize]);
                             for i in 0..ccount as usize {
                                 let c = tx.read(&child_data[cur as usize * nvar as usize + i]);
-                                if c == to { return false; }
+                                if c == from { return false; }
                                 if c >= 0 && c < nvar && !visited[c as usize] {
                                     visited[c as usize] = true;
                                     stack.push(c);
@@ -402,4 +425,62 @@ fn main() {
     println!("  PASS");
 
     tm_exit();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rng_determinism() {
+        let mut a = Lcg::new(42);
+        let mut b = Lcg::new(42);
+        for _ in 0..1000 {
+            assert_eq!(a.next(), b.next());
+        }
+    }
+
+    #[test]
+    fn test_has_path_no_cycle() {
+        // Graph: 0 -> 1 -> 2
+        // from=0, to=2: no path from 2 back to 0
+        let mut child_count = vec![0i32; 3];
+        let mut child_data = vec![-1i32; 9];
+        child_count[0] = 1;
+        child_data[0 * 3 + 0] = 1;
+        child_count[1] = 1;
+        child_data[1 * 3 + 0] = 2;
+        assert!(has_path_dfs(&child_count, &child_data, 0, 2, 3));
+    }
+
+    #[test]
+    fn test_has_path_cycle_detected() {
+        // Graph: 0 -> 2, 1 -> 0, 2 -> 1 (cycle 0-2-1-0)
+        // from=0, to=2: path exists (2->1->0)
+        let mut child_count = vec![0i32; 3];
+        let mut child_data = vec![-1i32; 9];
+        child_count[0] = 1;
+        child_data[0 * 3 + 0] = 2;
+        child_count[1] = 1;
+        child_data[1 * 3 + 0] = 0;
+        child_count[2] = 1;
+        child_data[2 * 3 + 0] = 1;
+        assert!(!has_path_dfs(&child_count, &child_data, 0, 2, 3));
+    }
+
+    #[test]
+    fn test_has_path_self_loop() {
+        // Adding from=1 to to=1: immediate cycle detected
+        let child_count = vec![0i32; 3];
+        let child_data = vec![-1i32; 9];
+        assert!(!has_path_dfs(&child_count, &child_data, 1, 1, 3));
+    }
+
+    #[test]
+    fn test_has_path_disconnected() {
+        // No edges: any (from,to) pair has no path
+        let child_count = vec![0i32; 3];
+        let child_data = vec![-1i32; 9];
+        assert!(has_path_dfs(&child_count, &child_data, 0, 1, 3));
+    }
 }

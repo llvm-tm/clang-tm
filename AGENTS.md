@@ -1,6 +1,63 @@
 # Session Summary
 
-## Latest Session (this session — 2026-06-05)
+## Latest Session (this session — 2026-06-06)
+
+### Runner fixes: all 3 implementations × 4 backends now work end-to-end
+
+Created **`run_clean_benchmarks.sh`** (now 433 lines) — comprehensive runner with build-on-demand for expli C++, stubs baseline, and embedded Python analysis:
+
+| Fix | Issue |
+|-----|-------|
+| Plugin `-b` flag: `${bench:0:1}` → `"$bench"` | Was passing single letter (`v`) instead of full name (`vacation`) — root cause of ALL 8 plugin STAMP failures |
+| Expli: build-on-demand per backend | `make clean` at end of build loop wiped all binaries before run phase |
+| Plugin `sgl` → `singlelock` | Binary name mismatch prevented singlelock runs |
+| Speedup table: show all impls | Was hardcoded to only show `plugin` entries |
+
+### Rust WT: all 8 STAMP benchmarks now pass
+
+**Root cause**: `wt.rs:10` and `wt.rs:41` assert `is_tm_address(addr)` — but `TmCell<T>` stores its value inline (stack/heap allocated, never in TM region). C++ TinySTM already handles this at `tinystm_common.hpp:273/298` — non-TM addresses bypass TM logging entirely.
+
+**Fix**: Added `is_tm_address()` check before assertion in `read_word`/`write_word` in `wt.rs`. Non-TM addresses are read/written directly without transactional logic. Both `read_raw_bytes`/`write_raw_bytes` benefit via their calls to `read_word`/`write_word`.
+
+**Results**: All 8 Rust WT benchmarks pass (previously 4/8 crashed with exit=101).
+
+### Plugin WT crash investigation
+
+**Crashes observed**: genome (timeout), intruder (SIGSEGV), bayes (SIGSEGV), yada (timeout)
+
+**Root cause**: LLVM plugin instruments STL container operations inside transactions. WT's write-through with undo logs corrupts heap metadata when `std::vector::push_back` triggers reallocation inside a TM transaction. The old buffer is read via `tm_read_i8` and written to the new buffer via `tm_write_i8`, but the WT `write_word_wt` acquires lock-table locks on non-TM heap addresses and saves undo entries — exposing allocator metadata to corruption on abort or concurrent access.
+
+**Status**: Pre-existing. Only affects LLVM plugin path + WT combo. Expli C++ WT works (no STL instrumentation). Deferred.
+
+### Uninstrumented baseline for expli C++
+
+Created `backends/runtimes/tm_stubs.cpp` — stubs implementation of all `extern "C"` TM API functions:
+- `tm_init`/`tm_exit`/`tm_begin`/`tm_end` — no-ops
+- `tm_malloc`/`tm_calloc`/`tm_realloc`/`tm_free` — pass through to system allocator
+- `tm_read_i*`/`tm_write_i*` — direct memory access
+
+Added `stubs` target to `expli-benchmarks/Makefile` with `BUILD_STUBS_RULE` that links against `tm_stubs.cpp` instead of the TM runtime. Runner builds stubs on demand in `run_uninstrumented()`. All 11 benchmarks (STAMP×8 + tpcc + ycsb + stmbench7) run successfully.
+
+### Full verification results (1 thread, 1 sample)
+
+| Impl | Backend | STAMP(8) | tpcc | ycsb | stmbench7 | Total |
+|------|---------|----------|------|------|-----------|-------|
+| Plugin | tinystm_wbctl | 8/8 OK | OK | OK | OK | **11/11** |
+| Plugin | tinystm_wt | 4/8 OK (pre-existing crashes) | OK | OK | OK | **7/11** |
+| Plugin | norec | 8/8 OK | OK | OK | OK | **11/11** |
+| Plugin | singlelock | 8/8 OK | OK | OK | OK | **11/11** |
+| Plugin | tsxsgl | — (no TSX hw) | — | — | — | **0/11** |
+| Expli | tinystm_wbctl | 8/8 OK | OK | OK | OK | **11/11** |
+| Expli | tinystm_wt | 8/8 OK | OK | OK | OK | **11/11** |
+| Expli | norec | 8/8 OK | OK | OK | OK | **11/11** |
+| Expli | sgl | 8/8 OK | OK | OK | OK | **11/11** |
+| Expli | uninstrumented | 8/8 OK | OK | OK | OK | **11/11** |
+| Rust | wbctl | 8/8 OK | — | — | — | **8/8** |
+| Rust | wt | 8/8 OK | — | — | — | **8/8** |
+| Rust | norec | 8/8 OK | — | — | — | **8/8** |
+| Rust | sgl (tsxsgl) | 8/8 OK | — | — | — | **8/8** |
+
+## Previous Session (2026-06-05)
 
 ### Comprehensive benchmark runner with skip-list
 

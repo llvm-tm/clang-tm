@@ -164,6 +164,13 @@ fn main() {
     let init_circ_y: Vec<f64> = init_pts.iter().map(|&(a,b,c)| circumcircle(a,b,c).1).collect();
     let init_circ_r: Vec<f64> = init_pts.iter().map(|&(a,b,c)| circumcircle(a,b,c).2).collect();
     let init_min_angle: Vec<f64> = init_pts.iter().map(|&(a,b,c)| tri_min_angle(a,b,c)).collect();
+    let init_encroached: Vec<i64> = init_pts.iter().map(|&(a,b,c)| {
+        let mut e = 0;
+        if is_encroached(a, b, c) { e = 1; }
+        if is_encroached(b, c, a) { e = 1; }
+        if is_encroached(c, a, b) { e = 1; }
+        e
+    }).collect();
 
     // ── Allocate TM-tracked arrays ─────────────────────────────
     // All fields use TmCell so they can be read/written inside transaction closures.
@@ -205,7 +212,7 @@ fn main() {
     let init_bad = transaction(|tx| {
         let mut bc = 0i64;
         for i in 0..nelem {
-            if init_min_angle[i] < angle_constraint {
+            if init_min_angle[i] < angle_constraint || init_encroached[i] != 0 {
                 tx.write(&is_referenced[i], 1);
                 tx.write(&work_heap[bc as usize], i as i64);
                 bc += 1;
@@ -499,6 +506,60 @@ struct SharedData {
     circ_y: Arc<Vec<TmCell<f64>>>,
     circ_r: Arc<Vec<TmCell<f64>>>,
     min_angle: Arc<Vec<TmCell<f64>>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rng_determinism() {
+        let mut a = Lcg::new(42);
+        let mut b = Lcg::new(42);
+        for _ in 0..1000 {
+            assert_eq!(a.next(), b.next());
+        }
+    }
+
+    #[test]
+    fn test_circumcircle_right_triangle() {
+        let (cx, cy, cr) = circumcircle(
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 1.0, y: 0.0 },
+            Point { x: 0.0, y: 1.0 },
+        );
+        assert!((cx - 0.5).abs() < 1e-10, "cx = {}", cx);
+        assert!((cy - 0.5).abs() < 1e-10, "cy = {}", cy);
+        let expected_r = (2.0f64).sqrt() / 2.0;
+        assert!((cr - expected_r).abs() < 1e-10, "cr = {}, expected = {}", cr, expected_r);
+    }
+
+    #[test]
+    fn test_tri_min_angle_equilateral() {
+        let a = Point { x: 0.0, y: 0.0 };
+        let b = Point { x: 1.0, y: 0.0 };
+        let c = Point { x: 0.5, y: (3.0f64).sqrt() / 2.0 };
+        let angle = tri_min_angle(a, b, c);
+        assert!((angle - 60.0).abs() < 1e-10, "angle = {}, expected 60", angle);
+    }
+
+    #[test]
+    fn test_tri_min_angle_right() {
+        let a = Point { x: 0.0, y: 0.0 };
+        let b = Point { x: 1.0, y: 0.0 };
+        let c = Point { x: 0.0, y: 1.0 };
+        let angle = tri_min_angle(a, b, c);
+        assert!((angle - 45.0).abs() < 1e-10, "angle = {}, expected 45", angle);
+    }
+
+    #[test]
+    fn test_is_encroached() {
+        let edge_a = Point { x: 0.0, y: 0.0 };
+        let edge_b = Point { x: 2.0, y: 0.0 };
+        assert!(is_encroached(edge_a, edge_b, Point { x: 1.0, y: 0.5 }));
+        assert!(!is_encroached(edge_a, edge_b, Point { x: 1.0, y: 1.5 }));
+        assert!(is_encroached(edge_a, edge_b, Point { x: 1.0, y: 1.0 }));
+    }
 }
 
 impl Clone for SharedData {
