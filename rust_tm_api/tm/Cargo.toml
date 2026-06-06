@@ -19,8 +19,11 @@ leftright = ["runtime-leftright"]
 leftright-single = ["runtime-leftright-single"]
 romulus   = ["runtime-romulus"]
 xtm       = ["runtime-xtm"]
+sgl-persistent  = ["runtime-sgl-persistent"]
+sgl-distributed = ["runtime-sgl-distributed"]
 
 [dependencies]
+addrspace = { path = "../addrspace" }
 runtime-core = { path = "../runtime/core" }
 runtime-tinystm = { path = "../runtime/tinystm" }
 runtime-norec   = { path = "../runtime/norec", optional = true }
@@ -34,3 +37,5 @@ runtime-leftright = { path = "../runtime/leftright", optional = true }
 runtime-leftright-single = { path = "../runtime/leftright_single", optional = true }
 runtime-romulus   = { path = "../runtime/romulus", optional = true }
 runtime-xtm       = { path = "../runtime/xtm", optional = true }
+runtime-sgl-persistent  = { path = "../runtime/sgl-persistent", optional = true }
+runtime-sgl-distributed = { path = "../runtime/sgl-distributed", optional = true }

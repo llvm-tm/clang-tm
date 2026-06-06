@@ -386,6 +386,108 @@ pub fn tm_region_init() -> i32 {
     0
 }
 
+/// Initialise the TM region backed by a file (for persistence or sharing).
+///
+/// `path` — path to the backing file (created if it doesn't exist).
+/// `shared` — if true, use `MAP_SHARED` (visible to other processes);
+///            if false, use `MAP_PRIVATE` (process-local copy-on-write).
+///
+/// Returns 0 on success, -1 on failure.  Idempotent (second call is a no-op).
+pub fn tm_region_init_file(path: &str, shared: bool) -> i32 {
+    if REGION_START.load(Ordering::Acquire) != 0 {
+        return 0;
+    }
+    if NEXT_SLAB_IDX
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        while REGION_START.load(Ordering::Acquire) == 0 {
+            std::hint::spin_loop();
+        }
+        return 0;
+    }
+
+    let page_size = page_size();
+    let slab_size = TM_SLAB_PAGES * page_size;
+    let slab_shift = slab_size.trailing_zeros() as usize;
+
+    let mut bs: [u16; MAX_CLASSES] = [0; MAX_CLASSES];
+    let mut bc: [u16; MAX_CLASSES] = [0; MAX_CLASSES];
+    let mut bm: [u16; MAX_CLASSES] = [0; MAX_CLASSES];
+    let mut doff: [u16; MAX_CLASSES] = [0; MAX_CLASSES];
+
+    for sc in 0..MAX_CLASSES {
+        let bbs = SIZE_TABLE[sc];
+        if bbs == 0 { break; }
+        bs[sc] = bbs;
+        if (bbs as usize) <= BITMAP_THRESHOLD {
+            let max_try = (CHUNK_SIZE - CHUNK_HEADER_SZ) / (bbs as usize);
+            let mut found = 0u32;
+            for cnt in (1..=max_try).rev() {
+                let bytes = (cnt + 7) >> 3;
+                let hdr_total = CHUNK_HEADER_SZ + bytes;
+                let data_off = (hdr_total + 15) & !15;
+                let total = data_off + cnt * (bbs as usize);
+                if total <= CHUNK_SIZE {
+                    bm[sc] = bytes as u16;
+                    doff[sc] = data_off as u16;
+                    found = cnt as u32;
+                    break;
+                }
+            }
+            bc[sc] = found as u16;
+        } else {
+            let cnt = (CHUNK_SIZE - CHUNK_HEADER_SZ) / (bbs as usize);
+            bc[sc] = cnt as u16;
+            bm[sc] = 0;
+            doff[sc] = CHUNK_HEADER_SZ as u16;
+        }
+    }
+
+    let region_size = if std::mem::size_of::<usize>() <= 4 {
+        512 * 1024 * 1024
+    } else {
+        TM_REGION_SIZE
+    };
+
+    let flags = if shared { libc::MAP_SHARED } else { libc::MAP_PRIVATE };
+    let addr = mmap_file(path, region_size, flags);
+    if addr.is_null() {
+        NEXT_SLAB_IDX.store(0, Ordering::Release);
+        return -1;
+    }
+
+    let aligned_start = ((addr as usize) + CHUNK_MASK) & !CHUNK_MASK;
+    let aligned_size = region_size & !CHUNK_MASK;
+
+    let num_slabs = aligned_size >> slab_shift;
+
+    SC_BLOCK_SIZE.set(bs).ok();
+    SC_BLOCK_COUNT.set(bc).ok();
+    SC_BITMAP_BYTES.set(bm).ok();
+    SC_DATA_OFF.set(doff).ok();
+
+    REGION_START.store(aligned_start, Ordering::Release);
+    REGION_END.store(aligned_start + aligned_size, Ordering::Release);
+    SLAB_SIZE.store(slab_size, Ordering::Relaxed);
+    SLAB_SHIFT.store(slab_shift, Ordering::Relaxed);
+    SLAB_COUNT.store(num_slabs, Ordering::Relaxed);
+    NEXT_SLAB_IDX.store(0, Ordering::Relaxed);
+
+    let mmap_type = if shared { "shared" } else { "private" };
+    eprintln!(
+        "[TM-REGION] mmap (file, {mmap_type}) {:p} .. {:p}  ({} MB, {} slabs, {} B/slab, {} classes)",
+        aligned_start as *const u8,
+        (aligned_start + aligned_size) as *const u8,
+        aligned_size / (1024 * 1024),
+        num_slabs,
+        slab_size,
+        MAX_CLASSES,
+    );
+
+    0
+}
+
 /// Cleanup (currently a no-op; the OS reclaims the mapping at exit).
 pub fn tm_region_destroy() {
     // The OS reclaims the virtual mapping at process exit.
@@ -411,6 +513,18 @@ pub fn tm_region_stats() -> Option<RegionStats> {
     })
 }
 
+/// Return the start address of the TM region (0 if not initialised).
+pub fn tm_region_start() -> usize {
+    REGION_START.load(Ordering::Acquire)
+}
+
+/// Return the total size of the TM region (0 if not initialised).
+pub fn tm_region_size() -> usize {
+    let start = REGION_START.load(Ordering::Acquire);
+    let end = REGION_END.load(Ordering::Relaxed);
+    if start == 0 { 0 } else { end - start }
+}
+
 // ════════════════════════════════════════════════════════════════
 // Internal helpers
 // ════════════════════════════════════════════════════════════════
@@ -434,6 +548,48 @@ fn mmap_region(size: usize) -> *mut u8 {
         )
     };
     if addr == libc::MAP_FAILED {
+        std::ptr::null_mut()
+    } else {
+        addr as *mut u8
+    }
+}
+
+fn mkdir_parent(path: &str) {
+    // Create parent directories of `path` (POSIX mkdir -p).
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+}
+
+fn mmap_file(path: &str, size: usize, flags: libc::c_int) -> *mut u8 {
+    use std::ffi::CString;
+    mkdir_parent(path);
+    let cpath = CString::new(path).unwrap();
+    let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o644) };
+    if fd < 0 {
+        eprintln!("addrspace: open({path}) failed");
+        return std::ptr::null_mut();
+    }
+    if unsafe { libc::ftruncate(fd, size as i64) } < 0 {
+        eprintln!("addrspace: ftruncate({path}, {size}) failed");
+        unsafe { libc::close(fd); }
+        return std::ptr::null_mut();
+    }
+    let addr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            flags,
+            fd,
+            0,
+        )
+    };
+    unsafe { libc::close(fd); }
+    if addr == libc::MAP_FAILED {
+        eprintln!("addrspace: mmap file {path} failed");
         std::ptr::null_mut()
     } else {
         addr as *mut u8

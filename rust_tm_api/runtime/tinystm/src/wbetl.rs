@@ -3,7 +3,6 @@ use crate::common::TX;
 use core::sync::atomic::{fence, Ordering};
 
 fn read_word<T: Primitive>(addr: usize) -> T {
-    assert!(runtime_core::is_tm_address(addr as *const u8), "Address not in TM address space");
     fence(Ordering::SeqCst);
     if !tx_active() { return unsafe { (addr as *const T).read() }; }
     if let Some(entry) = TX.with(|tx| {
@@ -31,7 +30,6 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 }
 
 fn write_word<T: Primitive>(addr: usize, val: T) {
-    assert!(runtime_core::is_tm_address(addr as *const u8), "Address not in TM address space");
     fence(Ordering::SeqCst);
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
     let tv = val.to_typed();

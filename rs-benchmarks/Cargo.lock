@@ -10,11 +10,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "benchmarks"
+version = "0.1.0"
+dependencies = [
+ "containers",
+ "fastrand",
+ "libc",
+ "tm",
+]
+
+[[package]]
 name = "containers"
 version = "0.1.0"
 dependencies = [
  "tm",
 ]
+
+[[package]]
+name = "fastrand"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "libc"
@@ -152,12 +168,4 @@ dependencies = [
  "runtime-tl2",
  "runtime-tsxsgl",
  "runtime-xtm",
-]
-
-[[package]]
-name = "tm-executor"
-version = "0.1.0"
-dependencies = [
- "addrspace",
- "tm",
 ]
