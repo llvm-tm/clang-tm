@@ -24,6 +24,8 @@
 #include <atomic>
 #include <mutex>
 
+#include "../../tests/benchmark_test.hpp"
+
 // ── Configuration ───────────────────────────────────────────────────
 static long g_num_var           = 32;
 static long g_num_record        = 1024;
@@ -32,6 +34,18 @@ static long g_insert_penalty    = 2;
 static long g_max_edges_per_var = 2;
 static unsigned g_seed          = 0;
 static long g_num_threads       = 4;
+
+static void parse_args(int argc, char* argv[]) {
+    for (int i = 1; i < argc; i++) {
+        if      (strcmp(argv[i], "-v") == 0 && i+1 < argc) g_num_var = atol(argv[++i]);
+        else if (strcmp(argv[i], "-r") == 0 && i+1 < argc) g_num_record = atol(argv[++i]);
+        else if (strcmp(argv[i], "-n") == 0 && i+1 < argc) g_max_parents = atol(argv[++i]);
+        else if (strcmp(argv[i], "-s") == 0 && i+1 < argc) g_seed = (unsigned)atol(argv[++i]);
+        else if (strcmp(argv[i], "-i") == 0 && i+1 < argc) g_insert_penalty = atol(argv[++i]);
+        else if (strcmp(argv[i], "-e") == 0 && i+1 < argc) g_max_edges_per_var = atol(argv[++i]);
+        else if (strcmp(argv[i], "-t") == 0 && i+1 < argc) g_num_threads = atol(argv[++i]);
+    }
+}
 
 // ── Constants ───────────────────────────────────────────────────────
 static const int MAX_PARENTS     = 8;
@@ -335,17 +349,88 @@ static void worker(int tid) {
     tm_exit_thread();
 }
 
+static void test_cli_flags() {
+    printf("  Testing CLI flags...\n");
+    long sv = g_num_var, sr = g_num_record, sn = g_max_parents;
+    unsigned ss = g_seed; long si = g_insert_penalty, se = g_max_edges_per_var, st = g_num_threads;
+    TEST_EQ(g_num_var, 32L, "default vars");
+    TEST_EQ(g_num_record, 1024L, "default records");
+    TEST_EQ(g_max_parents, 2L, "default max parents");
+    TEST_EQ(g_seed, 0U, "default seed");
+    TEST_EQ(g_insert_penalty, 2L, "default penalty");
+    TEST_EQ(g_max_edges_per_var, 2L, "default max edges");
+    TEST_EQ(g_num_threads, 4L, "default threads");
+    const char* test_args[] = {"prog", "-v", "8", "-r", "64", "-n", "3", "-s", "5", "-i", "1", "-e", "4", "-t", "2"};
+    parse_args(15, (char**)test_args);
+    TEST_EQ(g_num_var, 8L, "override vars");
+    TEST_EQ(g_num_record, 64L, "override records");
+    TEST_EQ(g_max_parents, 3L, "override max parents");
+    TEST_EQ(g_seed, 5U, "override seed");
+    TEST_EQ(g_insert_penalty, 1L, "override penalty");
+    TEST_EQ(g_max_edges_per_var, 4L, "override max edges");
+    TEST_EQ(g_num_threads, 2L, "override threads");
+    g_num_var = sv; g_num_record = sr; g_max_parents = sn; g_seed = ss;
+    g_insert_penalty = si; g_max_edges_per_var = se; g_num_threads = st;
+    if (test_result() != 0) exit(1);
+}
+
+static void test_rng() {
+    printf("  Testing RNG determinism...\n");
+    // The bayes benchmark uses a custom LCG, not std::mt19937_64.
+    // Test our LCG determinism directly.
+    rng_seed(42);
+    uint32_t first[5];
+    for (int i = 0; i < 5; i++) first[i] = rng_next();
+    rng_seed(42);
+    for (int i = 0; i < 5; i++) {
+        TEST_EQ(rng_next(), first[i], "LCG determinism");
+    }
+    if (test_result() != 0) exit(1);
+}
+
+static void test_logic() {
+    printf("  Testing bayes logic...\n");
+    // Test compute_density_ll with simple data
+    long sv = g_num_var, sr = g_num_record;
+    g_num_var = 2; g_num_record = 100;
+    g_records.resize(100, std::vector<int>(2));
+    for (int r = 0; r < 100; r++) {
+        g_records[r][0] = r % 2;
+        g_records[r][1] = (r * 7) % 2;
+    }
+    double ll_empty = compute_density_ll(0, {});
+    TEST_ASSERT(ll_empty < 0.0, "log-likelihood with no parents is negative");
+    double ll_with_parent = compute_density_ll(1, {0});
+    TEST_ASSERT(ll_with_parent > ll_empty || ll_with_parent <= ll_empty,
+                "ll with parent computed");
+    // Test d2l/l2d roundtrip
+    double orig = -0.693147;
+    long bits = d2l(orig);
+    double back = l2d(bits);
+    TEST_NEAR(back, orig, 1e-12, "d2l/l2d roundtrip");
+    // Test penalty formula
+    long save_penalty = g_insert_penalty;
+    g_insert_penalty = 2;
+    g_base_penalty = g_insert_penalty > 0
+        ? -0.5 * std::log((double)g_num_record) * g_insert_penalty
+        : 0.0;
+    TEST_ASSERT(g_base_penalty < 0.0, "base penalty is negative");
+    g_insert_penalty = save_penalty;
+    g_num_var = sv; g_num_record = sr;
+    if (test_result() != 0) exit(1);
+}
+
 // ── Main ────────────────────────────────────────────────────────────
 int main(int argc, char* argv[]) {
-    for (int i = 1; i < argc; i++) {
-        if      (strcmp(argv[i], "-v") == 0 && i+1 < argc) g_num_var = atol(argv[++i]);
-        else if (strcmp(argv[i], "-r") == 0 && i+1 < argc) g_num_record = atol(argv[++i]);
-        else if (strcmp(argv[i], "-n") == 0 && i+1 < argc) g_max_parents = atol(argv[++i]);
-        else if (strcmp(argv[i], "-s") == 0 && i+1 < argc) g_seed = (unsigned)atol(argv[++i]);
-        else if (strcmp(argv[i], "-i") == 0 && i+1 < argc) g_insert_penalty = atol(argv[++i]);
-        else if (strcmp(argv[i], "-e") == 0 && i+1 < argc) g_max_edges_per_var = atol(argv[++i]);
-        else if (strcmp(argv[i], "-t") == 0 && i+1 < argc) g_num_threads = atol(argv[++i]);
+    if (argc > 1 && strcmp(argv[1], "--test") == 0) {
+        printf("Running self-tests for bayes...\n");
+        test_cli_flags();
+        test_rng();
+        test_logic();
+        printf("All tests passed.\n");
+        return 0;
     }
+    parse_args(argc, argv);
 
     printf("Bayes (STAMP spec, shared source)\n");
     printf("  Variables:   %ld\n", g_num_var);

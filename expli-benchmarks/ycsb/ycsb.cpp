@@ -8,6 +8,8 @@
 #include <thread>
 #include <vector>
 
+#include "../tests/benchmark_test.hpp"
+
 // ── Workload / Distribution ────────────────────────────────────────────
 enum Workload { WL_A, WL_B, WL_C, WL_D, WL_E, WL_F };
 enum Distribution { DIST_UNIFORM, DIST_ZIPFIAN, DIST_LATEST };
@@ -256,8 +258,10 @@ void run_worker(int tid, const Config &cfg, const std::vector<double> &cdf) {
                 });
             } else {
                 uint8_t buf[FIELD_SIZE];
-                expli::TM<int64_t>::transaction([&](){ g_db->read_field0(key, buf); });
-                expli::TM<int64_t>::transaction([&](){ g_db->update_record(key); });
+                expli::TM<int64_t>::transaction([&](){
+                    g_db->read_field0(key, buf);
+                    g_db->update_record(key);
+                });
             }
             break;
         }
@@ -266,8 +270,77 @@ void run_worker(int tid, const Config &cfg, const std::vector<double> &cdf) {
     expli::TM<int64_t>::thread_exit();
 }
 
+static void test_cli_flags() {
+    printf("  Testing CLI flags...\n");
+    Config c;
+    // Test defaults
+    TEST_EQ(c.threads, 4, "default threads");
+    TEST_EQ(c.duration, 10000, "default duration");
+    TEST_EQ(c.workload, WL_A, "default workload");
+    TEST_EQ(c.dist, DIST_ZIPFIAN, "default dist");
+    TEST_EQ(c.key_range, 10000, "default key range");
+    TEST_EQ(c.initial_records, 10000, "default initial records");
+
+    // Override
+    const char* test_args[] = {"prog", "-t", "2", "-d", "500", "-k", "100", "-i", "50",
+                                "-w", "c", "-dist", "u"};
+    Config c2 = parse_args(13, (char**)test_args);
+    TEST_EQ(c2.threads, 2, "override threads");
+    TEST_EQ(c2.duration, 500, "override duration");
+    TEST_EQ(c2.key_range, 100, "override key range");
+    TEST_EQ(c2.initial_records, 50, "override initial records");
+    TEST_EQ(c2.workload, WL_C, "override workload");
+    TEST_EQ(c2.dist, DIST_UNIFORM, "override dist");
+
+    // Test another workload/dist
+    const char* test_args2[] = {"prog", "-w", "f", "-dist", "l"};
+    Config c3 = parse_args(5, (char**)test_args2);
+    TEST_EQ(c3.workload, WL_F, "workload F");
+    TEST_EQ(c3.dist, DIST_LATEST, "dist latest");
+
+    if (test_result() != 0) exit(1);
+}
+
+static void test_rng() {
+    printf("  Testing RNG determinism...\n");
+    // Test custom Rng determinism
+    Rng a(42), b(42);
+    for (int i = 0; i < 1000; i++) {
+        TEST_EQ(a.next(), b.next(), "Rng determinism");
+    }
+    if (test_result() != 0) exit(1);
+}
+
+static void test_logic() {
+    printf("  Testing YCSB logic...\n");
+    // Test zipfian CDF generation and sampling
+    auto cdf = build_zipfian_cdf(100, 0.99);
+    TEST_EQ((int)cdf.size(), 100, "zipfian CDF size");
+    TEST_NEAR(cdf[99], 1.0, 1e-9, "zipfian CDF ends at 1.0");
+    TEST_ASSERT(cdf[0] > 0, "zipfian first element > 0");
+    // Test sampling
+    int s = zipfian_sample(cdf, 0.5);
+    TEST_ASSERT(s >= 0 && s < 100, "zipfian sample in range");
+
+    // Test Rng-based operations determinism
+    Rng r1(123), r2(123);
+    for (int i = 0; i < 100; i++) {
+        TEST_EQ(r1.next(), r2.next(), "Rng sequence");
+    }
+
+    if (test_result() != 0) exit(1);
+}
+
 // ── Main ───────────────────────────────────────────────────────────────
 int main(int argc, char *argv[]) {
+    if (argc > 1 && strcmp(argv[1], "--test") == 0) {
+        printf("Running self-tests for ycsb...\n");
+        test_cli_flags();
+        test_rng();
+        test_logic();
+        printf("All tests passed.\n");
+        return 0;
+    }
     Config cfg = parse_args(argc, argv);
 
     printf("========= YCSB Benchmark =========\n");

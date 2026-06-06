@@ -158,7 +158,7 @@ fn main() {
             let mut d = 1u64;
             while d < tot_vertices {
                 let u = rng.uniform();
-                let prob = prob_intercl_edges / ((d as f64).log2() + 1.0);
+                let prob = prob_intercl_edges / ((d as f64 + 1.0).log2() + 1.0);
                 if u < prob {
                     let neighbor = (v + d) % tot_vertices;
                     for _ in 0..max_paral_edges {
@@ -180,12 +180,6 @@ fn main() {
             }
         }
         start_v += csize as u64;
-    }
-
-    // Finalize edges
-    for e in &mut temp_edges {
-        e.src = perm[e.src as usize % perm.len()];
-        e.dst = perm[e.dst as usize % perm.len()];
     }
 
     let (graph, num_vertices) = build_csr(&mut temp_edges);
@@ -252,4 +246,69 @@ fn main() {
     println!("    Triangles = {}", ops);
 
     tm_exit();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use benchmarks::Rng;
+
+    #[test]
+    fn test_rng_determinism() {
+        let mut a = Rng::new(42);
+        let mut b = Rng::new(42);
+        for _ in 0..1000 {
+            assert_eq!(a.next(), b.next());
+        }
+    }
+
+    #[test]
+    fn test_build_csr_simple() {
+        let mut edges = vec![
+            Edge { src: 0, dst: 1, weight: 10 },
+            Edge { src: 0, dst: 2, weight: 20 },
+            Edge { src: 1, dst: 2, weight: 30 },
+        ];
+        let (graph, nv) = build_csr(&mut edges);
+        assert_eq!(nv, 3);
+        assert_eq!(graph.row_ptr, vec![0, 2, 3, 3]);
+        assert_eq!(graph.col_idx, vec![1, 2, 2]);
+        assert_eq!(graph.weights, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn test_build_csr_dedup() {
+        let mut edges = vec![
+            Edge { src: 0, dst: 1, weight: 10 },
+            Edge { src: 0, dst: 1, weight: 99 },
+        ];
+        let (graph, nv) = build_csr(&mut edges);
+        assert_eq!(nv, 2);
+        assert_eq!(graph.row_ptr, vec![0, 1, 1]);
+        assert_eq!(graph.col_idx.len(), 1);
+        assert_eq!(graph.col_idx[0], 1);
+    }
+
+    #[test]
+    fn test_build_csr_empty() {
+        let mut edges: Vec<Edge> = vec![];
+        let (graph, nv) = build_csr(&mut edges);
+        assert_eq!(nv, 0);
+        assert_eq!(graph.row_ptr, vec![0]);
+        assert!(graph.col_idx.is_empty());
+        assert!(graph.weights.is_empty());
+    }
+
+    #[test]
+    fn test_has_edge() {
+        let mut edges = vec![
+            Edge { src: 0, dst: 2, weight: 5 },
+            Edge { src: 1, dst: 3, weight: 7 },
+        ];
+        let (graph, _nv) = build_csr(&mut edges);
+        assert!(ssca2_has_edge(&graph.row_ptr, &graph.col_idx, 0, 2));
+        assert!(!ssca2_has_edge(&graph.row_ptr, &graph.col_idx, 0, 1));
+        assert!(ssca2_has_edge(&graph.row_ptr, &graph.col_idx, 1, 3));
+        assert!(!ssca2_has_edge(&graph.row_ptr, &graph.col_idx, 2, 0));
+    }
 }

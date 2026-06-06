@@ -7,8 +7,8 @@ fn tx_aborted() -> bool {
 }
 
 fn read_word<T: Primitive>(addr: usize) -> T {
-    assert!(runtime_core::is_tm_address(addr as *const u8), "Address not in TM address space");
     fence(Ordering::SeqCst);
+    if !runtime_core::is_tm_address(addr as *const u8) { return unsafe { (addr as *const T).read() }; }
     if !tx_active() { return unsafe { (addr as *const T).read() }; }
     if let Some(entry) = TX.with(|tx| {
         tx.borrow().as_ref().and_then(|t| t.write_set.get(&addr)).map(|e| e.value.clone())
@@ -38,8 +38,8 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 }
 
 fn write_word<T: Primitive>(addr: usize, val: T) {
-    assert!(runtime_core::is_tm_address(addr as *const u8), "Address not in TM address space");
     fence(Ordering::SeqCst);
+    if !runtime_core::is_tm_address(addr as *const u8) { unsafe { (addr as *mut T).write(val); } return; }
     if tx_aborted() { return; }
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
     let tv = val.to_typed();

@@ -18,6 +18,8 @@
 #include <thread>
 #include <vector>
 
+#include "../../tests/benchmark_test.hpp"
+
 using PRNG = std::mt19937_64;
 
 // ── TM helpers ────────────────────────────────────────────
@@ -68,6 +70,24 @@ struct LabyrinthData {
 };
 
 static LabyrinthData g_data;
+
+static int g_num_threads = 4;
+static int g_width = 32, g_height = 32, g_depth = 3;
+static int g_num_requests = 64;
+
+static void parse_args(int argc, char* argv[]) {
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-p") && i + 1 < argc) g_num_threads = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-x") && i + 1 < argc) g_width = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-y") && i + 1 < argc) g_height = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-z") && i + 1 < argc) g_depth = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-n") && i + 1 < argc) g_num_requests = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-h")) {
+            fprintf(stderr, "Usage: %s -p <threads> -x <width> -y <height> -z <depth> -n <requests>\n", argv[0]);
+            exit(0);
+        }
+    }
+}
 
 static inline int grid_idx(int w, int h, int x, int y, int z) {
     return (z * h + y) * w + x;
@@ -198,31 +218,84 @@ static void worker(int thread_id, int num_threads) {
     expli::TM<int>::thread_exit();
 }
 
-int main(int argc, char* argv[]) {
-    int num_threads = 4;
-    int width = 32, height = 32, depth = 3;
-    int num_requests = 64;
+static void test_cli_flags() {
+    printf("  Testing CLI flags...\n");
+    int save_p = g_num_threads, save_x = g_width, save_y = g_height, save_z = g_depth, save_n = g_num_requests;
+    TEST_EQ(g_num_threads, 4, "default threads");
+    TEST_EQ(g_width, 32, "default width");
+    TEST_EQ(g_height, 32, "default height");
+    TEST_EQ(g_depth, 3, "default depth");
+    TEST_EQ(g_num_requests, 64, "default requests");
+    const char* test_args[] = {"prog", "-p", "2", "-x", "8", "-y", "8", "-z", "2", "-n", "4"};
+    parse_args(11, (char**)test_args);
+    TEST_EQ(g_num_threads, 2, "override threads");
+    TEST_EQ(g_width, 8, "override width");
+    TEST_EQ(g_height, 8, "override height");
+    TEST_EQ(g_depth, 2, "override depth");
+    TEST_EQ(g_num_requests, 4, "override requests");
+    g_num_threads = save_p; g_width = save_x; g_height = save_y; g_depth = save_z; g_num_requests = save_n;
+    if (test_result() != 0) exit(1);
+}
 
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-p") && i + 1 < argc) num_threads = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-x") && i + 1 < argc) width = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-y") && i + 1 < argc) height = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-z") && i + 1 < argc) depth = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-n") && i + 1 < argc) num_requests = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-h")) {
-            fprintf(stderr, "Usage: %s -p <threads> -x <width> -y <height> -z <depth> -n <requests>\n", argv[0]);
-            return 0;
-        }
+static void test_rng() {
+    printf("  Testing RNG determinism...\n");
+    test_rng_determinism<PRNG>();
+    if (test_result() != 0) exit(1);
+}
+
+static void test_logic() {
+    printf("  Testing labyrinth logic...\n");
+    // Basic grid and BFS expansion test
+    int w = 8, h = 8, d = 2;
+    int gridsize = w * h * d;
+    long* grid = new long[gridsize];
+    std::fill(grid, grid + gridsize, -1L);
+    long* dist = new long[gridsize];
+    int* queue = new int[gridsize];
+    std::vector<Point3D> path;
+
+    Point3D src = {1, 1, 0}, dst = {6, 6, 0};
+    int ok = do_expansion(dist, grid, w, h, d, src, dst, queue);
+    TEST_ASSERT(ok, "BFS finds path in empty grid");
+    bool traced = ok && do_traceback(path, dist, w, h, d, src, dst);
+    TEST_ASSERT(traced && !path.empty(), "traceback produces path");
+    TEST_ASSERT(path.front() == src, "path starts at src");
+    TEST_ASSERT(path.back() == dst, "path ends at dst");
+
+    // Blocked grid: place wall at (4,4,0)
+    grid[(0 * h + 4) * w + 4] = -2L;
+    // Also block (4,3,0) and (4,5,0) to force detour
+    grid[(0 * h + 3) * w + 4] = -2L;
+    grid[(0 * h + 5) * w + 4] = -2L;
+    // Block (3,4,0) and (5,4,0)
+    grid[(0 * h + 4) * w + 3] = -2L;
+    grid[(0 * h + 4) * w + 5] = -2L;
+    ok = do_expansion(dist, grid, w, h, d, src, dst, queue);
+    TEST_ASSERT(ok, "BFS finds path around walls");
+
+    delete[] grid; delete[] dist; delete[] queue;
+    if (test_result() != 0) exit(1);
+}
+
+int main(int argc, char* argv[]) {
+    if (argc > 1 && strcmp(argv[1], "--test") == 0) {
+        printf("Running self-tests for labyrinth...\n");
+        test_cli_flags();
+        test_rng();
+        test_logic();
+        printf("All tests passed.\n");
+        return 0;
     }
+    parse_args(argc, argv);
 
     expli::TM<int>::init();
 
-    g_data.width = width;
-    g_data.height = height;
-    g_data.depth = depth;
-    g_data.num_requests = num_requests;
+    g_data.width = g_width;
+    g_data.height = g_height;
+    g_data.depth = g_depth;
+    g_data.num_requests = g_num_requests;
 
-    int gridsize = width * height * depth;
+    int gridsize = g_width * g_height * g_depth;
     g_data.grid = (long*)tm_malloc((size_t)gridsize * sizeof(long));
     std::fill(g_data.grid, g_data.grid + gridsize, -1L);
 
@@ -234,33 +307,33 @@ int main(int argc, char* argv[]) {
             g_data.grid[idx] = -2L;
     }
 
-    g_data.requests = new PathRequest[num_requests];
-    g_data.request_handled = new int[num_requests]();
+    g_data.requests = new PathRequest[g_num_requests];
+    g_data.request_handled = new int[g_num_requests]();
 
-    for (int i = 0; i < num_requests; i++) {
+    for (int i = 0; i < g_num_requests; i++) {
         int sx, sy, sz, dx, dy, dz;
         do {
-            sx = (int)(rng() % width);
-            sy = (int)(rng() % height);
-            sz = (int)(rng() % depth);
-        } while (g_data.grid[grid_idx(width, height, sx, sy, sz)] != -1L);
+            sx = (int)(rng() % g_width);
+            sy = (int)(rng() % g_height);
+            sz = (int)(rng() % g_depth);
+        } while (g_data.grid[grid_idx(g_width, g_height, sx, sy, sz)] != -1L);
         do {
-            dx = (int)(rng() % width);
-            dy = (int)(rng() % height);
-            dz = (int)(rng() % depth);
-        } while (g_data.grid[grid_idx(width, height, dx, dy, dz)] != -1L ||
+            dx = (int)(rng() % g_width);
+            dy = (int)(rng() % g_height);
+            dz = (int)(rng() % g_depth);
+        } while (g_data.grid[grid_idx(g_width, g_height, dx, dy, dz)] != -1L ||
                  (dx == sx && dy == sy && dz == sz));
         g_data.requests[i] = {{sx, sy, sz}, {dx, dy, dz}};
     }
 
-    printf("Maze size:    %ix%ix%i\n", width, height, depth);
-    printf("Paths to route: %i\n", num_requests);
+    printf("Maze size:    %ix%ix%i\n", g_width, g_height, g_depth);
+    printf("Paths to route: %i\n", g_num_requests);
     fflush(stdout);
 
     auto start_time = std::chrono::high_resolution_clock::now();
     std::vector<std::thread> threads;
-    for (int i = 0; i < num_threads; i++)
-        threads.emplace_back(worker, i, num_threads);
+    for (int i = 0; i < g_num_threads; i++)
+        threads.emplace_back(worker, i, g_num_threads);
     for (auto& t : threads)
         t.join();
     auto end_time = std::chrono::high_resolution_clock::now();

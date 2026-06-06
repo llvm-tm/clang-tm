@@ -131,15 +131,41 @@ TEST_DS_BIN = bin/test_ds
 TEST_TX_SRC = ../tests/expli-api/test_tx.cpp
 TEST_TX_BIN = bin/test_tx
 
+# --- Stubs runtime (uninstrumented baseline) --------------------
+STUBS = ../backends/runtimes/tm_stubs.cpp
+
+# Stubs binary names (appended with _stubs)
+VACATION_STUBS   = bin/vacation_stubs
+LABYRINTH_STUBS  = bin/labyrinth_stubs
+KMEANS_STUBS     = bin/kmeans_stubs
+GENOME_STUBS     = bin/genome_stubs
+INTRUDER_STUBS   = bin/intruder_stubs
+SSCA2_STUBS      = bin/ssca2_stubs
+BAYES_STUBS      = bin/bayes_stubs
+YADA_STUBS       = bin/yada_stubs
+TPCC_STUBS       = bin/tpcc_stubs
+YCSB_STUBS       = bin/ycsb_stubs
+BENCH7_STUBS     = bin/stmbench7_stubs
+BANK_STUBS       = bin/bank_stubs
+EIGEN_STUBS      = bin/eigenbench_stubs
+FUZZ_CTR_STUBS   = bin/fuzz_counter_stubs
+FUZZ_BANK_STUBS  = bin/fuzz_bank_stubs
+
+STAMP_STUBS = $(VACATION_STUBS) $(LABYRINTH_STUBS) $(KMEANS_STUBS) $(GENOME_STUBS) \
+              $(INTRUDER_STUBS) $(SSCA2_STUBS) $(BAYES_STUBS) $(YADA_STUBS)
+
 # --- Build rules --------------------------------------------------
 STAMP_BINS = $(VACATION_BIN) $(LABYRINTH_BIN) $(KMEANS_BIN) $(GENOME_BIN) $(INTRUDER_BIN) $(SSCA2_BIN) $(BAYES_BIN) $(YADA_BIN)
 
-.PHONY: all clean run-bank run-eigenbench run-bench7 run-vacation run-labyrinth run-kmeans
+.PHONY: all stubs clean run-bank run-eigenbench run-bench7 run-vacation run-labyrinth run-kmeans
 .PHONY: run-genome run-intruder run-ssca2 run-bayes run-yada run-fuzz-counter run-fuzz-bank run-fuzz
 .PHONY: run-tpcc run-ycsb run-test-ds run-test-tx run-tests run run-stamp
 
 all: bin $(BANK_BIN) $(EIGEN_BIN) $(BENCH7_BIN) $(STAMP_BINS) \
      $(FUZZ_CTR_BIN) $(FUZZ_BANK_BIN) $(TPCC_BIN) $(YCSB_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN)
+
+stubs: bin $(BANK_STUBS) $(EIGEN_STUBS) $(BENCH7_STUBS) $(STAMP_STUBS) \
+       $(FUZZ_CTR_STUBS) $(FUZZ_BANK_STUBS) $(TPCC_STUBS) $(YCSB_STUBS)
 
 bin:
 	mkdir -p bin STAMP/kmeans STAMP/genome STAMP/intruder STAMP/ssca2
@@ -147,6 +173,11 @@ bin:
 define BUILD_RULE
 $(1): bin $(2) $(RUNTIME) $(REGION_ALLOC) $(BUILTINS) Makefile
 	$$(CXX) $$(CXXFLAGS) $$(EXTRA_INC) $$(DEFS) -o $$@ $(2) $$(RUNTIME) $$(REGION_ALLOC) $$(LDFLAGS)
+endef
+
+define BUILD_STUBS_RULE
+$(1): bin $(2) $(STUBS) Makefile
+	$$(CXX) $$(CXXFLAGS) -I../backends -o $$@ $(2) $(STUBS) $$(LDFLAGS)
 endef
 
 $(eval $(call BUILD_RULE,$(BANK_BIN),$(BANK_SRC)))
@@ -166,6 +197,23 @@ $(eval $(call BUILD_RULE,$(TPCC_BIN),$(TPCC_SRC)))
 $(eval $(call BUILD_RULE,$(YCSB_BIN),$(YCSB_SRC)))
 $(eval $(call BUILD_RULE,$(TEST_DS_BIN),$(TEST_DS_SRC)))
 $(eval $(call BUILD_RULE,$(TEST_TX_BIN),$(TEST_TX_SRC)))
+
+# --- Stubs build rules (uninstrumented baseline) ------------------
+$(eval $(call BUILD_STUBS_RULE,$(BANK_STUBS),$(BANK_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(EIGEN_STUBS),$(EIGEN_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(BENCH7_STUBS),$(BENCH7_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(FUZZ_CTR_STUBS),$(FUZZ_CTR_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(FUZZ_BANK_STUBS),$(FUZZ_BANK_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(VACATION_STUBS),$(VACATION_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(LABYRINTH_STUBS),$(LABYRINTH_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(KMEANS_STUBS),$(KMEANS_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(GENOME_STUBS),$(GENOME_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(INTRUDER_STUBS),$(INTRUDER_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(SSCA2_STUBS),$(SSCA2_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(BAYES_STUBS),$(BAYES_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(YADA_STUBS),$(YADA_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(TPCC_STUBS),$(TPCC_SRC)))
+$(eval $(call BUILD_STUBS_RULE,$(YCSB_STUBS),$(YCSB_SRC)))
 
 # --- Run targets --------------------------------------------------
 run-bank: $(BANK_BIN)

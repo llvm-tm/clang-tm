@@ -20,14 +20,8 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-#include <queue>
-#include <chrono>
-#include <atomic>
-#include <algorithm>
-#include <string>
-#include <unordered_map>
-#include <mutex>
-#include <random>
+
+#include "../../tests/benchmark_test.hpp"
 
 using PRNG = std::mt19937_64;
 
@@ -59,6 +53,26 @@ struct IntruderData {
 
 static IntruderData g_data;
 static std::mutex g_mutex;          // matches tm_serialize_lock
+
+static int g_num_threads = 4;
+static int g_percent_attack = 10;
+static int g_max_data_length = 16;
+static int g_num_flows = 1024;
+static int g_seed = 1;
+
+static void parse_args(int argc, char* argv[]) {
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-p") && i + 1 < argc) g_num_threads = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-a") && i + 1 < argc) g_percent_attack = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-l") && i + 1 < argc) g_max_data_length = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-n") && i + 1 < argc) g_num_flows = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-s") && i + 1 < argc) g_seed = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-h")) {
+            fprintf(stderr, "Usage: %s -p <threads> -a <pct_attack> -l <max_len> -n <flows> -s <seed>\n", argv[0]);
+            exit(0);
+        }
+    }
+}
 
 // ── Attack detection (non-TX, pure string ops) ────────────
 static bool detect_attack(const std::string& data, const std::vector<std::string>& dict) {
@@ -140,30 +154,70 @@ static void worker() {
     expli::TM<int>::thread_exit();
 }
 
-int main(int argc, char* argv[]) {
-    int num_threads = 4;
-    int percent_attack = 10;
-    int max_data_length = 16;
-    int num_flows = 1024;
-    int seed = 1;
+static void test_cli_flags() {
+    printf("  Testing CLI flags...\n");
+    int save_p = g_num_threads, save_a = g_percent_attack, save_l = g_max_data_length;
+    int save_n = g_num_flows, save_s = g_seed;
+    TEST_EQ(g_num_threads, 4, "default threads");
+    TEST_EQ(g_percent_attack, 10, "default attack pct");
+    TEST_EQ(g_max_data_length, 16, "default max data length");
+    TEST_EQ(g_num_flows, 1024, "default num flows");
+    TEST_EQ(g_seed, 1, "default seed");
+    const char* test_args[] = {"prog", "-p", "2", "-a", "50", "-l", "32", "-n", "8", "-s", "99"};
+    parse_args(11, (char**)test_args);
+    TEST_EQ(g_num_threads, 2, "override threads");
+    TEST_EQ(g_percent_attack, 50, "override attack pct");
+    TEST_EQ(g_max_data_length, 32, "override max data length");
+    TEST_EQ(g_num_flows, 8, "override num flows");
+    TEST_EQ(g_seed, 99, "override seed");
+    g_num_threads = save_p; g_percent_attack = save_a; g_max_data_length = save_l;
+    g_num_flows = save_n; g_seed = save_s;
+    if (test_result() != 0) exit(1);
+}
 
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-p") && i + 1 < argc) num_threads = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-a") && i + 1 < argc) percent_attack = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-l") && i + 1 < argc) max_data_length = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-n") && i + 1 < argc) num_flows = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-s") && i + 1 < argc) seed = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-h")) {
-            fprintf(stderr, "Usage: %s -p <threads> -a <pct_attack> -l <max_len> -n <flows> -s <seed>\n", argv[0]);
-            return 0;
-        }
+static void test_rng() {
+    printf("  Testing RNG determinism...\n");
+    test_rng_determinism<PRNG>();
+    if (test_result() != 0) exit(1);
+}
+
+static void test_logic() {
+    printf("  Testing intruder logic...\n");
+    // Verify attack classification
+    std::vector<std::string> dict = {"attack", "root", "system"};
+    TEST_ASSERT(detect_attack("this is an attack string", dict), "detect attack");
+    TEST_ASSERT(detect_attack("ROOT access granted", dict), "detect case-insensitive");
+    TEST_ASSERT(!detect_attack("benign data here", dict), "no false positive");
+    // Test packet generation determinism
+    PRNG rng(42);
+    int num_packets = 0, attack_count = 0;
+    for (long flow = 1; flow <= 20; flow++) {
+        bool is_attack = (int)(rng() % 100) < 10;
+        if (is_attack) attack_count++;
+        int payload_len = (int)(rng() % 16) + 1;
+        int np = (int)(rng() % payload_len) + 1;
+        num_packets += np;
     }
+    TEST_ASSERT(num_packets > 0, "generated packets");
+    if (test_result() != 0) exit(1);
+}
+
+int main(int argc, char* argv[]) {
+    if (argc > 1 && strcmp(argv[1], "--test") == 0) {
+        printf("Running self-tests for intruder...\n");
+        test_cli_flags();
+        test_rng();
+        test_logic();
+        printf("All tests passed.\n");
+        return 0;
+    }
+    parse_args(argc, argv);
 
     expli::TM<int>::init();
 
-    g_data.num_flows = num_flows;
-    g_data.max_data_length = max_data_length;
-    g_data.percent_attack = percent_attack;
+    g_data.num_flows = g_num_flows;
+    g_data.max_data_length = g_max_data_length;
+    g_data.percent_attack = g_percent_attack;
     g_data.total_attacks = 0;
 
     g_data.dictionary = {"about", "attack", "back", "root", "system", "access",
@@ -178,11 +232,11 @@ int main(int argc, char* argv[]) {
                          "shell", "should", "site", "some", "such", "take",
                          "than", "that", "their", "them", "then", "there"};
 
-    PRNG rng(seed);
+    PRNG rng(g_seed);
     int total_packets = 0;
 
-    for (long flow = 1; flow <= num_flows; flow++) {
-        bool is_attack = (int)(rng() % 100) < percent_attack;
+    for (long flow = 1; flow <= g_num_flows; flow++) {
+        bool is_attack = (int)(rng() % 100) < g_percent_attack;
         std::string payload;
 
         if (is_attack) {
@@ -190,7 +244,7 @@ int main(int argc, char* argv[]) {
             payload = g_data.dictionary[sig_idx];
             g_data.total_attacks++;
         } else {
-            int len = (int)(rng() % max_data_length) + 1;
+            int len = (int)(rng() % g_max_data_length) + 1;
             payload.resize(len);
             for (int i = 0; i < len; i++)
                 payload[i] = (char)(32 + (rng() % 95));
@@ -219,16 +273,16 @@ int main(int argc, char* argv[]) {
 
     (void)total_packets;
 
-    printf("Percent attack  = %i\n", percent_attack);
-    printf("Max data length = %i\n", max_data_length);
-    printf("Num flow        = %i\n", num_flows);
-    printf("Random seed     = %i\n", seed);
+    printf("Percent attack  = %i\n", g_percent_attack);
+    printf("Max data length = %i\n", g_max_data_length);
+    printf("Num flow        = %i\n", g_num_flows);
+    printf("Random seed     = %i\n", g_seed);
     printf("Num attack      = %i\n", g_data.total_attacks);
     fflush(stdout);
 
     auto start_time = std::chrono::high_resolution_clock::now();
     std::vector<std::thread> threads;
-    for (int i = 0; i < num_threads; i++)
+    for (int i = 0; i < g_num_threads; i++)
         threads.emplace_back(worker);
     for (auto& t : threads)
         t.join();

@@ -5,6 +5,7 @@
 // Build: make -C expli-benchmarks BACKEND=TINYSTM run-vacation
 
 #include "expli_tm_api/tm_api.hpp"
+#include "../../tests/benchmark_test.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -302,14 +303,9 @@ static void print_usage(const char* prog) {
                     "[-p <num_threads>]\n", prog);
 }
 
-int main(int argc, char* argv[]) {
-    int num_relations = 16384;
-    int num_queries_per_tx = 2;
-    int percent_user = 98;
-    int total_tasks = 4096;
-    int num_threads = 4;
-
-    // Parse args (matches plugin STAMP.cpp style)
+static void parse_args(int argc, char* argv[], int& num_relations,
+                       int& num_queries_per_tx, int& percent_user,
+                       int& total_tasks, int& num_threads) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-n") == 0 && i + 1 < argc)
             num_queries_per_tx = atoi(argv[++i]);
@@ -323,9 +319,128 @@ int main(int argc, char* argv[]) {
             num_threads = atoi(argv[++i]);
         else if (strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
-            return 0;
+            exit(0);
         }
     }
+}
+
+static int test_cli_flags() {
+    printf("  test_cli_flags...\n");
+    {
+        int nr = 16384, nq = 2, pct = 98, tasks = 4096, thr = 4;
+        const char* fake[] = {"vacation"};
+        parse_args(1, (char**)fake, nr, nq, pct, tasks, thr);
+        TEST_EQ(nr, 16384, "default num_relations");
+        TEST_EQ(nq, 2, "default num_queries_per_tx");
+        TEST_EQ(pct, 98, "default percent_user");
+        TEST_EQ(tasks, 4096, "default total_tasks");
+        TEST_EQ(thr, 4, "default num_threads");
+    }
+    {
+        int nr = 16384, nq = 2, pct = 98, tasks = 4096, thr = 4;
+        const char* fake[] = {"vacation", "-n", "5", "-r", "100",
+                              "-u", "50", "-t", "200", "-p", "8"};
+        parse_args(11, (char**)fake, nr, nq, pct, tasks, thr);
+        TEST_EQ(nr, 100, "override num_relations");
+        TEST_EQ(nq, 5, "override num_queries_per_tx");
+        TEST_EQ(pct, 50, "override percent_user");
+        TEST_EQ(tasks, 200, "override total_tasks");
+        TEST_EQ(thr, 8, "override num_threads");
+    }
+    return test_result();
+}
+
+static int test_rng() {
+    printf("  test_rng...\n");
+    test_rng_determinism<PRNG>();
+    return test_result();
+}
+
+static int test_manager() {
+    printf("  test_manager...\n");
+    expli::TM<int>::init();
+    expli::TM<int>::thread_init();
+
+    VacationData data;
+    int n = 10;
+    data.num_relations = n;
+    data.query_range = n;
+    data.cars.reserve(n);
+    for (int j = 1; j <= n; j++) {
+        data.cars.push_back({});
+        Reservation& r = data.cars.back();
+        r.active.poke(0);
+        r.id.poke(j);
+        r.num_used.poke(0);
+        r.num_free.poke(0);
+        r.num_total.poke(0);
+        r.price.poke(0);
+    }
+
+    int free = -1, price = -1;
+    bool ok = false;
+    tx_retry([&]() {
+        ok = add_reservation(&data.cars, 1, 100, 200);
+    });
+    TEST_EQ(ok, true, "add car reservation");
+
+    tx_retry([&]() {
+        free = query_num_free(&data.cars, 1);
+    });
+    TEST_EQ(free, 100, "car num_free after add");
+
+    tx_retry([&]() {
+        price = query_price(&data.cars, 1);
+    });
+    TEST_EQ(price, 200, "car price after add");
+
+    tx_retry([&]() {
+        ok = delete_reservation(&data.cars, 1, 60);
+    });
+    TEST_EQ(ok, true, "delete partial reservation");
+
+    tx_retry([&]() {
+        free = query_num_free(&data.cars, 1);
+    });
+    TEST_EQ(free, 40, "car num_free after partial delete");
+
+    tx_retry([&]() {
+        ok = delete_reservation(&data.cars, 1, 40);
+    });
+    TEST_EQ(ok, true, "delete remaining reservation");
+
+    TEST_EQ(data.cars[0].num_free.peek(), 0, "car num_free after full delete");
+    TEST_EQ(data.cars[0].active.peek(), 0, "car inactive after all removed");
+
+    expli::TM<int>::thread_exit();
+    expli::TM<int>::exit();
+    return test_result();
+}
+
+static int test_all() {
+    printf("Running self-tests...\n");
+    int fails = 0;
+    fails += test_cli_flags();
+    fails += test_rng();
+    fails += test_manager();
+    printf("Self-tests: %s\n", fails ? "FAILED" : "ALL PASSED");
+    return fails;
+}
+
+int main(int argc, char* argv[]) {
+    int num_relations = 16384;
+    int num_queries_per_tx = 2;
+    int percent_user = 98;
+    int total_tasks = 4096;
+    int num_threads = 4;
+
+    if (argc > 1 && strcmp(argv[1], "--test") == 0) {
+        int fails = test_all();
+        return fails ? 1 : 0;
+    }
+
+    parse_args(argc, argv, num_relations, num_queries_per_tx,
+               percent_user, total_tasks, num_threads);
 
     printf("Initializing manager... done.\n");
     printf("Initializing clients... done.\n");
