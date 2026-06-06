@@ -319,24 +319,27 @@ for backend_name in TINYSTM NOREC SGL; do
     fi
 done
 
-# ── 1e. Rust benchmarks ──────────────────────────────────────────────────
+# ── 1e. Rust benchmarks (skip if cargo not available) ───────────────────
 echo "=== Building Rust STAMP benchmarks ==="
-RUST_DIR="rust_tm_api"
-
-for feature in wbctl norec tsxsgl; do
-    echo "  [build] rust --features $feature ..."
-    set +e
-    cargo build --release --manifest-path "$RUST_DIR/Cargo.toml" \
-        --no-default-features --features "$feature" \
-        > /tmp/build_rust_${feature}.log 2>&1
-    rc=$?; set -e
-    if [ "$rc" != 0 ]; then
-        echo "  [build] rust --features $feature FAILED (see /tmp/build_rust_${feature}.log)"
-        tail -10 /tmp/build_rust_${feature}.log
-    else
-        echo "  [build] rust --features $feature OK"
-    fi
-done
+if command -v cargo &>/dev/null; then
+    RUST_DIR="rust_tm_api"
+    for feature in wbctl norec tsxsgl; do
+        echo "  [build] rust --features $feature ..."
+        set +e
+        cargo build --release --manifest-path "$RUST_DIR/Cargo.toml" \
+            --no-default-features --features "$feature" \
+            > /tmp/build_rust_${feature}.log 2>&1
+        rc=$?; set -e
+        if [ "$rc" != 0 ]; then
+            echo "  [build] rust --features $feature FAILED (see /tmp/build_rust_${feature}.log)"
+            tail -10 /tmp/build_rust_${feature}.log
+        else
+            echo "  [build] rust --features $feature OK"
+        fi
+    done
+else
+    echo "  [SKIP] cargo not found — Rust benchmarks not built"
+fi
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
@@ -547,9 +550,13 @@ run_rust() {
     done
 }
 
-run_rust tinystm_wbctl wbctl
-run_rust norec norec
-run_rust tsxsgl tsxsgl
+if command -v cargo &>/dev/null; then
+    run_rust tinystm_wbctl wbctl
+    run_rust norec norec
+    run_rust tsxsgl tsxsgl
+else
+    echo "  [SKIP] cargo not found — Rust benchmark runs skipped"
+fi
 
 # ── Final progress ────────────────────────────────────────────────────────
 echo ""
