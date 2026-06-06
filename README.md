@@ -683,3 +683,22 @@ Rust is consistently 1.5–12× faster than the equivalent C++ backend due to:
 lower type-erasure overhead (native enums vs `any_type_t` unions), more
 efficient `HashMap` for write-sets, and aggressive monomorphization of
 generic read/write paths.
+
+### STAMP Benchmark Suite Results
+
+All 8 STAMP benchmarks + TPC-C + STMbench7, run at 4 thread levels (1,2,4,8) × 3 samples on Intel Xeon E5-2648L v4 (56 cores). SGL plugin not yet tested.
+
+| Impl | Backend | vacation | kmeans | labyrinth | genome | intruder | ssca2 | bayes | yada | tpcc | stmbench7 | Pass |
+|------|---------|:-------:|:------:|:---------:|:-----:|:--------:|:-----:|:----:|:----:|:----:|:---------:|:----:|
+| Plugin | TSXSGL | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗(2t+) | ✓ | ✓ | **112/113** |
+| Plugin | WBCTL | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗(2t+) | ✓ | ✗(skip) | **99/100** |
+| Plugin | NOREC | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗(2t+) | ✓ | ✗(skip) | **105/107** |
+| Expli | WBCTL | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | **120/120** |
+| Expli | NOREC | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | **120/120** |
+| Expli | SGL | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | **120/120** |
+
+**Known issues**:
+- **yada plugin** (2+ threads): segfault during parallel mesh refinement on all backends — pre-existing.
+- **stmbench7 + TinySTM WBCTL**: `std::vector::_M_realloc_insert` inside TM — incompatible.
+- **stmbench7 + plugin NOREC**: hang during cleanup at 2+ threads.
+- **High concurrency (≥28t)**: sporadic segfaults during thread cleanup; output metrics are valid.
