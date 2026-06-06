@@ -8,31 +8,44 @@ LLVM plugin calls from instrumented bitcode.
 
 ```
 backends/
-├── runtimes/              # Runtime wrappers (one per backend)
-│   ├── SingleGlobalLock_runtime.cpp
-│   ├── tl2_runtime.cpp
-│   ├── NOrec_runtime.cpp
-│   ├── TinySTM_runtime.cpp
-│   ├── SwissTM_runtime.cpp
-│   ├── PersistentSGL_runtime.cpp
-│   └── DistributedSGL_runtime.cpp
-├── TinySTM/               # Write-back commit-time/encounter-time + write-through
-│   ├── tinystm_common.hpp
-│   ├── tinystm_globals.hpp
-│   ├── tinystm_wbctl.hpp     # Write-back commit-time locking
-│   ├── tinystm_wbetl.hpp     # Write-back encounter-time locking
-│   └── tinystm_wt.hpp        # Write-through
-├── TL2/                   # Transactional Locking 2
-│   └── tl2.hpp
-├── NOrec/                 # Lazy value-based validation STM
-│   ├── NOrec.hpp
-│   └── NOrec_globals.hpp
-├── SwissTM/               # Hybrid lazy/pessimistic
-│   └── SwissTM.hpp
-├── tests/                 # Standalone backend correctness tests
-├── rel_ptr.hpp            # Relative-pointer class for ASLR-safe shared memory
-├── tm_alloc_overrides.hpp # operator new/delete overrides for persistent heap
-└── tm_common.hpp          # Shared type definitions
+├── stubs/                      # Stub implementations for testing
+│   ├── tm_stubs.cpp
+│   └── tm_stubs.hpp
+├── tm_impl/                    # TM algorithm implementations
+│   ├── common/                 # Shared headers used by all backends
+│   │   ├── rel_ptr.hpp
+│   │   ├── tm_alloc_overrides.hpp
+│   │   ├── tm_api.hpp
+│   │   ├── tm_common.hpp
+│   │   ├── tm_debug.hpp
+│   │   ├── tm_event_logger.hpp
+│   │   ├── tm_log_entries.hpp
+│   │   ├── tm_log_merge.hpp
+│   │   ├── tm_opaque_safe.hpp
+│   │   ├── tm_perf_counters.hpp
+│   │   ├── tm_platform.hpp
+│   │   ├── tm_rbtree.hpp
+│   │   ├── tm_region_allocator.hpp
+│   │   ├── tm_safe_map.hpp
+│   │   ├── tm_spin_token.hpp
+│   │   └── tm_thread_state.hpp
+│   ├── tiny_stm/               # Write-back commit-time + write-through
+│   ├── tl2/                    # Transactional Locking 2
+│   ├── norec/                  # Lazy value-based validation STM
+│   ├── swisstm/                # Hybrid lazy/pessimistic
+│   ├── single_global_lock/     # Single global lock (serial execution)
+│   ├── tsx_sgl/                # TSX + single global lock hybrid
+│   ├── persistent_sgl/         # Persistent + single global lock
+│   ├── distributed_sgl/        # Distributed + single global lock
+│   ├── queue/                  # Queue-based runtime
+│   ├── nvhtm/                  # NV-HTM
+│   ├── dudetm/                 # DudeTM
+│   ├── romulus/                # Romulus Log
+│   ├── leftright/              # Left-Right
+│   ├── spht/                   # SPHT
+│   ├── xtm/                    # XTM
+│   └── tm_region_allocator/    # TM address-space region allocator
+└── README.md
 ```
 
 ## Backend Selection
@@ -44,12 +57,12 @@ only the final link step differs.
 | Backend            | Runtime file                         | Additional flags          | Include paths               |
 |--------------------|--------------------------------------|---------------------------|-----------------------------|
 | SingleGlobalLock   | `SingleGlobalLock_runtime.cpp`       | *(none)*                  | *(none)*                    |
-| TL2                | `tl2_runtime.cpp`                    | *(none)*                  | `-Ibackends/TL2`           |
-| NOrec              | `NOrec_runtime.cpp`                  | *(none)*                  | `-Ibackends/NOrec`         |
-| TinySTM (WBCTL)    | `TinySTM_runtime.cpp`                | `-DDESIGN_WBCTL`          | `-Ibackends/TinySTM`       |
-| TinySTM (WBETL)    | `TinySTM_runtime.cpp`                | `-DDESIGN_WBETL`          | `-Ibackends/TinySTM`       |
-| TinySTM (WT)       | `TinySTM_runtime.cpp`                | `-DDESIGN_WT`             | `-Ibackends/TinySTM`       |
-| SwissTM            | `SwissTM_runtime.cpp`                | *(none)*                  | `-Ibackends/SwissTM`       |
+| TL2                | `tl2_runtime.cpp`                    | *(none)*                  | `-Ibackends/tm_impl/tl2`           |
+| NOrec              | `NOrec_runtime.cpp`                  | *(none)*                  | `-Ibackends/tm_impl/norec`         |
+| TinySTM (WBCTL)    | `TinySTM_runtime.cpp`                | `-DDESIGN_WBCTL`          | `-Ibackends/tm_impl/tiny_stm`       |
+| TinySTM (WBETL)    | `TinySTM_runtime.cpp`                | `-DDESIGN_WBETL`          | `-Ibackends/tm_impl/tiny_stm`       |
+| TinySTM (WT)       | `TinySTM_runtime.cpp`                | `-DDESIGN_WT`             | `-Ibackends/tm_impl/tiny_stm`       |
+| SwissTM            | `SwissTM_runtime.cpp`                | *(none)*                  | `-Ibackends/tm_impl/swisstm`       |
 | PersistentSGL      | `PersistentSGL_runtime.cpp`          | *(none)*                  | *(none)*                    |
 | DistributedSGL     | `DistributedSGL_runtime.cpp`         | *(none)*                  | *(none)*                    |
 
@@ -94,7 +107,7 @@ The `tests/` subdirectory contains standalone correctness tests that
 compile directly against each backend (no LLVM plugin needed).
 
 ```
-cd tests/backends
+cd tests/backends/tm_impl
 make run
 ```
 
@@ -161,7 +174,7 @@ with timestamps, thread IDs, and event payloads.
 
 ```bash
 # Add -DTM_EVENT_LOG to CXXFLAGS when compiling the runtime:
-cd tests/backends
+cd tests/backends/tm_impl
 make CXXFLAGS="-std=c++20 -O0 -pthread -g -DTM_EVENT_LOG" run
 ```
 
@@ -176,9 +189,9 @@ p ((stm::EventRing*)&stm::get_event_ring())->dump(0, stderr)
 
 | File                              | Role                        |
 |-----------------------------------|-----------------------------|
-| `backends/tm_event_logger.hpp`    | Ring buffer + event macros  |
-| `backends/TinySTM/tinystm_wbctl.hpp` | Instrumented with events  |
-| `backends/TinySTM/tinystm_common.hpp` | SIGSEGV handler install   |
+| `backends/tm_impl/common/tm_event_logger.hpp`    | Ring buffer + event macros  |
+| `backends/tm_impl/tiny_stm/tinystm_wbctl.hpp` | Instrumented with events  |
+| `backends/tm_impl/tiny_stm/tinystm_common.hpp` | SIGSEGV handler install   |
 | `tools/stm_bug_tool/timeline_viz.py` | PDF timeline visualizer   |
 
 ### Timeline PDF Visualization
@@ -197,7 +210,7 @@ reports any invariant violations before generating the timeline.
 
 ```bash
 # 1. Generate a raw event log from a benchmark with TM_EVENT_LOG:
-cd plugin-benchmarks/stmbench7
+cd benchmarks/plugin/stmbench7
 rm -f bin/stmbench_tl2 && make stmbench_tl2 TM_DEFINES_tl2="-DTM_EVENT_LOG"
 ./bin/stmbench_tl2 -t 4 -d 5000 -w 1 2>/tmp/event_log.txt
 

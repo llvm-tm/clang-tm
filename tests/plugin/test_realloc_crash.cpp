@@ -10,7 +10,7 @@
 
 #include "tm_test_common.hpp"
 
-#include "../../plugin-benchmarks/datastructures/tm_treap_map.hpp"
+#include "tm_treap_map.hpp"
 
 struct AtomicPart {
     int32_t id;
