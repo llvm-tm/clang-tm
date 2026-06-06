@@ -1,14 +1,9 @@
 [package]
-name = "runtime-tinystm"
+name = "runtime-sgl-distributed"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 addrspace = { path = "../../addrspace" }
 runtime-core = { path = "../core" }
-
-[features]
-default = ["wbctl"]
-wbctl = []
-wbetl = []
-wt = []
+libc = "0.2"

@@ -102,6 +102,7 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
     fence(Ordering::SeqCst);
+    if !runtime_core::is_tm_address(addr as *const u8) { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     if tx_aborted() { return; }
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     // Existing write-set entry → update in-place, no lock needed

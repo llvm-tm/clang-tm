@@ -1,0 +1,109 @@
+[package]
+name = "benchmarks"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "benchmarks"
+path = "src/lib.rs"
+
+[[bin]]
+name = "datastructures"
+path = "src/bins/datastructures.rs"
+
+[[bin]]
+name = "stamp_vacation"
+path = "src/clis/stamp_vacation.rs"
+
+[[bin]]
+name = "stamp_kmeans"
+path = "src/clis/stamp_kmeans.rs"
+
+[[bin]]
+name = "stamp_genome"
+path = "src/clis/stamp_genome.rs"
+
+[[bin]]
+name = "stamp_intruder"
+path = "src/clis/stamp_intruder.rs"
+
+[[bin]]
+name = "stamp_labyrinth"
+path = "src/clis/stamp_labyrinth.rs"
+
+[[bin]]
+name = "stamp_ssca2"
+path = "src/clis/stamp_ssca2.rs"
+
+[[bin]]
+name = "stamp_bayes"
+path = "src/clis/stamp_bayes.rs"
+
+[[bin]]
+name = "stamp_yada"
+path = "src/clis/stamp_yada.rs"
+
+[[bin]]
+name = "tpcc"
+path = "src/bins/tpcc.rs"
+
+[[bin]]
+name = "bank"
+path = "src/bins/bank.rs"
+
+[[bin]]
+name = "stmbench7"
+path = "src/bins/stmbench7.rs"
+
+[[bin]]
+name = "ycsb"
+path = "src/bins/ycsb.rs"
+
+[[bin]]
+name = "eigenbench"
+path = "src/bins/eigenbench.rs"
+
+[[bin]]
+name = "fuzz_bank"
+path = "src/bins/fuzz_bank.rs"
+
+[[bin]]
+name = "fuzz_counter"
+path = "src/bins/fuzz_counter.rs"
+
+[[bin]]
+name = "stamp"
+path = "src/bins/stamp.rs"
+
+[[bin]]
+name = "test_persist_bank"
+path = "src/bins/test_persist_bank.rs"
+
+[[bin]]
+name = "test_distrib_bank"
+path = "src/bins/test_distrib_bank.rs"
+
+[features]
+default = ["wbctl"]
+wbctl = ["tm/wbctl"]
+wbetl = ["tm/wbetl"]
+wt    = ["tm/wt"]
+norec   = ["tm/norec"]
+tl2     = ["tm/tl2"]
+swisstm = ["tm/swisstm"]
+dudetm  = ["tm/dudetm"]
+tsxsgl  = ["tm/tsxsgl"]
+sgl-persistent  = ["tm/sgl-persistent"]
+sgl-distributed = ["tm/sgl-distributed"]
+nvhtm   = ["tm/nvhtm"]
+spht    = ["tm/spht"]
+leftright = ["tm/leftright"]
+leftright-single = ["tm/leftright-single"]
+romulus   = ["tm/romulus"]
+xtm       = ["tm/xtm"]
+
+[dependencies]
+tm = { path = "../rust_tm_api/tm", default-features = false }
+containers = { path = "../rust_tm_api/containers" }
+fastrand = "2"
+libc = "0.2"

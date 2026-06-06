@@ -190,6 +190,7 @@ static INIT_COUNT: AtomicU32 = AtomicU32::new(0);
 
 fn do_init() {
     if INIT_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
+        addrspace::tm_region_init();
         locks();
         G_CLOCK.store(0, Ordering::Release);
     }
