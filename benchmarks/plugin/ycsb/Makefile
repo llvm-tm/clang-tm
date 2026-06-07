@@ -1,6 +1,6 @@
-TM_PLUGIN := $(abspath ../../plugin/bin/libTMInstrument.so)
+TM_PLUGIN := $(abspath ../../../plugin/bin/libTMInstrument.so)
 TM_INSTRUMENT_FLAGS = -tm-allow-opaque
-include ../../plugin/tm_pipeline.mk
+include ../../../plugin/tm_pipeline.mk
 $(eval $(call tm_define_rules))
 
 SRC := YCSB.cpp

@@ -25,9 +25,6 @@ struct alignas(64) PaddedVar {
     volatile uint64_t val;
 };
 
-static PaddedVar g_a{0};
-static PaddedVar g_b{0};
-
 int main() {
     printf("Read-Lock Interference Test\n");
     printf("===========================\n\n");
@@ -35,6 +32,10 @@ int main() {
     printf("Iterations: %d per thread\n\n", ITERATIONS);
 
     tm_init();
+    auto g_a = (PaddedVar*)tm_malloc(sizeof(PaddedVar));
+    auto g_b = (PaddedVar*)tm_malloc(sizeof(PaddedVar));
+    g_a->val = 0;
+    g_b->val = 0;
 
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -46,10 +47,10 @@ int main() {
             bar.arrive_and_wait();
             tm_transaction([&]() {
                 // Read both — overlap with thread 1's read set
-                uint64_t av = tm_r8((uint64_t*)&g_a.val);
-                uint64_t bv = tm_r8((uint64_t*)&g_b.val);
+                uint64_t av = tm_r8((uint64_t*)&g_a->val);
+                uint64_t bv = tm_r8((uint64_t*)&g_b->val);
                 (void)av; (void)bv;
-                tm_w8((uint64_t*)&g_a.val, g_a.val + 1);
+                tm_w8((uint64_t*)&g_a->val, g_a->val + 1);
             });
             bar.arrive_and_wait();
         }
@@ -64,10 +65,10 @@ int main() {
             bar.arrive_and_wait();
             tm_transaction([&]() {
                 // Read both — overlap with thread 0's read set
-                uint64_t av = tm_r8((uint64_t*)&g_a.val);
-                uint64_t bv = tm_r8((uint64_t*)&g_b.val);
+                uint64_t av = tm_r8((uint64_t*)&g_a->val);
+                uint64_t bv = tm_r8((uint64_t*)&g_b->val);
                 (void)av; (void)bv;
-                tm_w8((uint64_t*)&g_b.val, g_b.val + 1);
+                tm_w8((uint64_t*)&g_b->val, g_b->val + 1);
             });
             bar.arrive_and_wait();
         }
@@ -88,8 +89,8 @@ int main() {
 
     tm_exit();
 
-    uint64_t final_a = g_a.val;
-    uint64_t final_b = g_b.val;
+    uint64_t final_a = g_a->val;
+    uint64_t final_b = g_b->val;
     uint64_t expected_a = ITERATIONS;
     uint64_t expected_b = ITERATIONS;
 

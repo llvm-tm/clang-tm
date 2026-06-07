@@ -1,9 +1,10 @@
-include ../../plugin/llvm-tool-helper.mk
-CLANG_TM   := ../../plugin/clang-tm
-RUNTIMES   := ../../backends/tm_impl
-BACKENDS   := ../../backends
+include ../../../plugin/llvm-tool-helper.mk
+CLANG_TM   := ../../../plugin/clang-tm
+RUNTIMES   := ../../../backends/tm_impl
+BACKENDS   := ../../../backends
 
-CXXFLAGS   := -std=c++20 -O3 -pthread
+CXXFLAGS   := -std=c++20 -O3 -pthread -I$(BACKENDS)/tm_impl/common \
+              -I$(BACKENDS)/stubs
 
 BIN_DIR    := bin
 

@@ -11,6 +11,7 @@
 // for ABI compatibility across all runtimes.
 
 extern "C" {
+void *tm_malloc(size_t size);
 extern __thread int32_t tm_nested_call_counter;
 extern __thread int32_t tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;

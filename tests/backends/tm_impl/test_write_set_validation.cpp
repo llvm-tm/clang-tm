@@ -27,8 +27,6 @@ struct Data {
     volatile uint64_t b;
 };
 
-static Data data{0, 0};
-
 int main() {
     printf("Write-Set Validation Test\n");
     printf("=========================\n\n");
@@ -38,19 +36,22 @@ int main() {
            NUM_THREADS * ITERS_PER_THREAD, (unsigned long long)COEFF);
 
     tm_init();
+    auto data = (Data*)tm_malloc(sizeof(Data));
+    data->a = 0;
+    data->b = 0;
 
     auto start = std::chrono::high_resolution_clock::now();
 
     std::vector<std::thread> threads;
     for (int i = 0; i < NUM_THREADS; ++i) {
-        threads.emplace_back([]() {
+        threads.emplace_back([&data]() {
             tm_init_thread();
             tm_nested_call_counter++;
             for (int j = 0; j < ITERS_PER_THREAD; ++j) {
-                tm_transaction([&]() {
-                    uint64_t a_val = tm_r8((uint64_t*)&data.a);
-                    tm_w8((uint64_t*)&data.a, a_val + 1);
-                    tm_w8((uint64_t*)&data.b, a_val * COEFF);
+                tm_transaction([&data]() {
+                    uint64_t a_val = tm_r8((uint64_t*)&data->a);
+                    tm_w8((uint64_t*)&data->a, a_val + 1);
+                    tm_w8((uint64_t*)&data->b, a_val * COEFF);
                 });
             }
             tm_nested_call_counter--;
@@ -64,8 +65,8 @@ int main() {
 
     tm_exit();
 
-    uint64_t final_a = data.a;
-    uint64_t final_b = data.b;
+    uint64_t final_a = data->a;
+    uint64_t final_b = data->b;
     uint64_t expected_a = (uint64_t)(NUM_THREADS * ITERS_PER_THREAD);
     uint64_t expected_b = (final_a > 0) ? (final_a - 1) * COEFF : 0;
 

@@ -25,8 +25,6 @@ struct alignas(64) PaddedVar {
     volatile uint64_t val;
 };
 
-static PaddedVar g_vars[NUM_VARS] = {};
-
 int main() {
     printf("SwissTM Overlap Stress Test\n");
     printf("===========================\n\n");
@@ -37,13 +35,15 @@ int main() {
     printf("Hang within seconds if fix is missing.\n\n");
 
     tm_init();
+    auto g_vars = (PaddedVar*)tm_malloc(sizeof(PaddedVar) * NUM_VARS);
+    for (int i = 0; i < NUM_VARS; ++i) g_vars[i].val = 0;
 
     auto start = std::chrono::high_resolution_clock::now();
 
     std::barrier bar(NUM_THREADS + 1);
     std::vector<std::thread> threads;
     for (int t = 0; t < NUM_THREADS; ++t) {
-        threads.emplace_back([t, &bar]() {
+        threads.emplace_back([t, &bar, &g_vars]() {
             tm_init_thread();
             tm_nested_call_counter++;
             for (int i = 0; i < ITERATIONS; ++i) {
@@ -51,7 +51,7 @@ int main() {
                 // This maximizes the Phase 1 overlap window.
                 bar.arrive_and_wait();
 
-                tm_transaction([&]() {
+                tm_transaction([t, i, &g_vars]() {
                     for (int v = 0; v < NUM_VARS; ++v) {
                         uint64_t x = tm_r8((uint64_t*)&g_vars[v].val);
                         (void)x;

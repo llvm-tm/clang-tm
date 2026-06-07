@@ -1,4 +1,5 @@
-include ../../plugin/tm_pipeline.mk
+TM_PLUGIN := $(abspath ../../../plugin/bin/libTMInstrument.so)
+include ../../../plugin/tm_pipeline.mk
 $(eval $(call tm_define_rules))
 
 CXXFLAGS := -std=c++20 -O2 -pthread
