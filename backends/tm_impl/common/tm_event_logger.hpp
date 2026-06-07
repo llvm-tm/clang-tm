@@ -56,7 +56,9 @@ enum class EventType : uint8_t {
     FLUSH_DEFERRED,     // addr1 = ptr actually freed at commit
     CLEAR_SPEC_ALLOC,   // addr1 = ptr cleared on abort/retry
     DEFERRED_FREE_ACTUAL, // addr1 = ptr, actual ::operator delete call
-    DOUBLE_FREE          // addr1 = ptr, double-free detected at runtime (before _exit)
+    DOUBLE_FREE,          // addr1 = ptr, double-free detected at runtime (before _exit)
+    MOVE_DEFERRED_TO_RETIRED, // data = commit_version
+    FLUSH_RETIRED         // addr1 = ptr, data = retire_version
 };
 
 static constexpr const char* event_name(EventType t) {
@@ -79,8 +81,10 @@ static constexpr const char* event_name(EventType t) {
         case EventType::FREE:                return "FREE";
         case EventType::FLUSH_DEFERRED:      return "FLUSH_DEFERRED";
         case EventType::CLEAR_SPEC_ALLOC:    return "CLEAR_SPEC_ALLOC";
-        case EventType::DEFERRED_FREE_ACTUAL: return "DEFERRED_FREE_ACTUAL";
-        case EventType::DOUBLE_FREE:          return "DOUBLE_FREE";
+        case EventType::DEFERRED_FREE_ACTUAL:  return "DEFERRED_FREE_ACTUAL";
+        case EventType::DOUBLE_FREE:           return "DOUBLE_FREE";
+        case EventType::MOVE_DEFERRED_TO_RETIRED: return "MOVE_DEFERRED_TO_RETIRED";
+        case EventType::FLUSH_RETIRED:         return "FLUSH_RETIRED";
     }
     return "UNKNOWN";
 }

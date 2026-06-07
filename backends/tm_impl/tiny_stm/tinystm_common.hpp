@@ -201,8 +201,9 @@ class Transaction
 {
 public:
 	volatile word_t id = 0;
-	word_t start_version = 0;
-	volatile word_t end_version = 0;
+    word_t start_version = 0;
+    volatile word_t end_version = 0;
+    word_t commit_version = 0; // set by commit() for EBR
 	bool active = false;
 	bool aborted = false;
 	bool read_only = true;

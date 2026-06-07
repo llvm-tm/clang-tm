@@ -312,12 +312,10 @@ static bool handleMallocFree(CallBase *Call,
 		}
 	};
 
-	// STL container internal allocations (vector realloc, string _M_create, etc.)
-	// must NOT go through tm_malloc — their buffers persist across TX boundaries
-	// and must not be freed on TX abort while the container's in-memory pointer
-	// still references them.  HOWEVER, deallocation (operator delete/free) must
-	// STILL go through tm_free so the deallocation is deferred to commit time,
-	// preventing concurrent readers from accessing freed memory during the TX.
+	// STL container internal allocations use the regular heap (not tm_malloc)
+	// to separate TM region allocation from regular heap allocation for
+	// buffers that persist across TX boundaries.  Deletion still goes through
+	// tm_free for deferred deallocation at commit time.
 	bool isSTL = isSTLContainerAllocSite(Call);
 
 	// For STL container allocation sites: skip new/malloc/calloc/realloc

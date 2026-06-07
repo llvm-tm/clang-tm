@@ -207,7 +207,7 @@ inline bool //
 commit()    //
 {
 	auto *tx = current_tx_wbctl;
-	volatile word_t commit_version = 0;
+	volatile word_t commit_version = get_clock();
 
 	TM_ASSERT(tx, "tx not defined");
 	TM_ASSERT(tx->active, "tx not active");
@@ -332,6 +332,8 @@ commit()    //
 		// clear lock list
 		tx->locks_held.clear();
 	}
+
+	tx->commit_version = commit_version; // for EBR
 
 	stm::tm_token_release();
 	tx->reset();

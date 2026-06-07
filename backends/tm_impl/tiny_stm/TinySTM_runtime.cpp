@@ -29,6 +29,23 @@ thread_local FreeNode* g_deferred_frees = nullptr;
 thread_local std::unordered_set<void*> g_deferred_frees_set;
 thread_local SpecAlloc* g_spec_allocs = nullptr;
 
+// EBR retired list
+thread_local FreeNode* g_retired_frees = nullptr;
+
+// Per-thread index for EBR version tracking.
+thread_local size_t g_tl_tid = 0;
+
+// Global array: g_thread_tx_version[tid] = start_version of current TX, or 0 if no TX.
+// (tid is the thread's TinySTM tx->id, which is 1-based.)
+std::atomic<uint64_t> g_thread_tx_version[tinystm::MAX_THREADS];
+
+// Global set: given pointer currently tracked by exactly one thread's retired list.
+// tm_move_deferred_to_retired inserts here; tm_flush_retired_frees erases after free.
+// Ensures the same shared buffer (e.g. std::vector old buffer) is freed only once
+// when both threads independently defer it.
+std::mutex g_retired_global_mutex;
+std::unordered_set<void *> g_retired_global_set;
+
 static pthread_once_t g_tm_state_key_once = PTHREAD_ONCE_INIT;
 static pthread_key_t g_tm_state_key;
 
@@ -38,17 +55,29 @@ static void make_tm_state_key() {
 
 extern "C" {
 
-__thread sigjmp_buf tm_jmpbuf;
-__thread int tm_init_thread_call_count = 0;
-
-TMThreadState *tm_get_thread_state() {
-    pthread_once(&g_tm_state_key_once, make_tm_state_key);
-    TMThreadState *state = (TMThreadState *)pthread_getspecific(g_tm_state_key);
-    if (!state) {
-        void *mem = stm::tm_region_malloc(sizeof(TMThreadState));
-        state = new (mem) TMThreadState{0, 0};
-        pthread_setspecific(g_tm_state_key, state);
-    }
+void  tm_free(void* ptr) {
+	if (g_in_tx) {
+		if (g_deferred_frees_set.count(ptr)) {
+			fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
+			void* buf[64];
+			int n = backtrace(buf, 64);
+			backtrace_symbols_fd(buf, n, 2);
+			fflush(stderr);
+			_exit(1);
+		}
+		tm_untrack_spec_alloc(ptr);
+		g_deferred_frees_set.insert(ptr);
+		auto* node = static_cast<FreeNode*>(std::malloc(sizeof(FreeNode)));
+		node->ptr = ptr;
+		node->next = g_deferred_frees;
+		g_deferred_frees = node;
+	} else {
+		if (stm::isTMAddress(ptr))
+			stm::tm_region_free(ptr);
+		else
+			::operator delete(ptr);
+	}
+}
     return state;
 }
 
@@ -94,6 +123,15 @@ void tm_init_thread()
 	(void)0;
 #endif
 	tinystm::init_thread();
+	// Capture the thread's TinySTM ID for EBR.
+	// tinystm::init_thread() sets the thread ID (tx->id) via thr_counter.
+#if defined(DESIGN_WBCTL)
+	g_tl_tid = tinystm::current_tx_wbctl->id;
+#elif defined(DESIGN_WBETL)
+	g_tl_tid = tinystm::current_tx_wbetl->id;
+#elif defined(DESIGN_WT)
+	g_tl_tid = tinystm::current_tx_wt->id;
+#endif
 }
 
 void tm_exit_thread()
@@ -138,6 +176,27 @@ void tm_begin()
 		tm_clear_spec_allocs();
 		tm_clear_deferred_frees();
 		tinystm::begin();
+		// EBR: register our start version and flush safe retired entries.
+		// On retry (siglongjmp), the stale version from the aborted TX
+		// is still in the array; we clear it first to avoid inflating
+		// the safe_version minimum.
+		g_thread_tx_version[g_tl_tid] = 0;
+		uint64_t safe_version = UINT64_MAX;
+		for (size_t i = 1; i < tinystm::MAX_THREADS; i++) {
+			uint64_t v = g_thread_tx_version[i].load(std::memory_order_acquire);
+			if (v != 0 && v < safe_version)
+				safe_version = v;
+		}
+		tm_flush_retired_frees(safe_version);
+#if defined(DESIGN_WBCTL)
+		auto *tx = tinystm::current_tx_wbctl;
+#elif defined(DESIGN_WBETL)
+		auto *tx = tinystm::current_tx_wbetl;
+#elif defined(DESIGN_WT)
+		auto *tx = tinystm::current_tx_wt;
+#endif
+		g_thread_tx_version[g_tl_tid].store(tx->start_version,
+		                                    std::memory_order_release);
 	}
 	assert(c >= 0);
 }
@@ -167,8 +226,10 @@ void tm_end()
             (void)0;
 		}
 		tinystm::commit();
+		tm_move_deferred_to_retired(tx->commit_version);
 		tm_flush_spec_allocs();
-		tm_flush_deferred_frees();
+		// Unregister from EBR version tracking
+		g_thread_tx_version[g_tl_tid].store(0, std::memory_order_release);
 	}
 	assert(c >= 0);
 	tm_tx_count++;

@@ -61,6 +61,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdlib>
+#include <mutex>
 #include <new>
 #include <unordered_set>
 
@@ -184,12 +185,25 @@ inline void tm_flush_spec_allocs()
 struct FreeNode {
 	FreeNode *next;
 	void *ptr; // the user pointer to be freed on commit
+	uint64_t retire_version; // EBR: clock version when this was retired
 };
 
 extern thread_local FreeNode *g_deferred_frees;
 
 // Duplicate-detection set for deferred frees.
 extern thread_local std::unordered_set<void *> g_deferred_frees_set;
+
+// EBR retired list — pointers not yet safe to free.
+extern thread_local FreeNode *g_retired_frees;
+
+// Global set to prevent the same pointer from being retired by multiple threads.
+// When tm_move_deferred_to_retired adds a pointer to the retired list, it first
+// checks this set.  If the pointer is already tracked by another thread, the
+// current thread skips it (just frees the FreeNode bookkeeping).  This prevents
+// double-free of shared buffers (e.g., std::vector reallocation where two
+// threads both call ::operator delete on the same old buffer).
+extern std::mutex g_retired_global_mutex;
+extern std::unordered_set<void *> g_retired_global_set;
 
 // Flush (execute) all pending deferred frees — call after successful commit.
 // Frees both the user pointer AND the bookkeeping FreeNode.
@@ -203,7 +217,7 @@ inline void tm_flush_deferred_frees()
 			stm::tm_region_free(node->ptr);
 		else
 			::operator delete(node->ptr);
-		std::free(node);              // FreeNode bookkeeping (::malloc'd)
+		std::free(node);
 		node = next;
 	}
 	g_deferred_frees = nullptr;
@@ -224,6 +238,93 @@ inline void tm_clear_deferred_frees()
 	}
 	g_deferred_frees = nullptr;
 	g_deferred_frees_set.clear();
+}
+
+// ── Epoch-based reclamation (EBR) retired list ───────────
+//
+// Instead of freeing deferred pointers immediately after commit
+// (which allows concurrent in-flight TXs to observe freed memory),
+// pointers are moved to a per-thread "retired" list tagged with
+// the commit clock version.  They are actually freed only after
+// all TXs that started before that version have completed.
+//
+// Thread-locals — each runtime MUST define these:
+//   thread_local FreeNode* g_retired_frees = nullptr;
+//   thread_local size_t g_tl_tid = 0;
+//
+// Global per-thread version array — each runtime MUST define:
+//   std::atomic<uint64_t> g_thread_tx_version[MAX_THREADS];
+
+extern thread_local FreeNode *g_retired_frees;
+
+// Move all entries from g_deferred_frees to g_retired_frees,
+// tagging them with the given commit_version.
+// Call this AFTER tinystm::commit() in tm_end.
+// Uses a global set (g_retired_global_set) to ensure the same pointer
+// is tracked by at most one thread's retired list, preventing double-free
+// when both threads independently defer the same shared buffer.
+inline void tm_move_deferred_to_retired(uint64_t commit_version)
+{
+	auto *node = g_deferred_frees;
+	while (node) {
+		auto *next = node->next;
+		node->retire_version = commit_version;
+		// Check global set — if another thread already retired this pointer,
+		// discard our copy (just free the FreeNode bookkeeping).
+		{
+			std::lock_guard<std::mutex> lock(g_retired_global_mutex);
+			if (g_retired_global_set.count(node->ptr)) {
+				std::free(node);
+				node = next;
+				continue;
+			}
+			g_retired_global_set.insert(node->ptr);
+		}
+		node->next = g_retired_frees;
+		g_retired_frees = node;
+		node = next;
+	}
+	g_deferred_frees = nullptr;
+	g_deferred_frees_set.clear();
+	TM_EVENT(MOVE_DEFERRED_TO_RETIRED, commit_version, 0);
+}
+
+// Free all retired entries whose retire_version < safe_version.
+// safe_version is the minimum start_version across all active TXs.
+// Entries with retire_version >= safe_version are kept in the list.
+inline void tm_flush_retired_frees(uint64_t safe_version)
+{
+	auto *node = g_retired_frees;
+	FreeNode *keep_head = nullptr;
+	FreeNode *keep_tail = nullptr;
+	while (node) {
+		auto *next = node->next;
+		if (node->retire_version < safe_version) {
+			TM_EVENT(FLUSH_RETIRED, (uintptr_t)node->ptr, node->retire_version);
+			if (!stm::isTMAddress(node->ptr)) {
+				{
+					std::lock_guard<std::mutex> lock(g_retired_global_mutex);
+					g_retired_global_set.erase(node->ptr);
+				}
+				::operator delete(node->ptr);
+			} else {
+				stm::tm_region_free(node->ptr);
+			}
+			std::free(node);
+		} else {
+			// Not yet safe — keep in list
+			node->next = nullptr;
+			if (!keep_head) {
+				keep_head = node;
+				keep_tail = node;
+			} else {
+				keep_tail->next = node;
+				keep_tail = node;
+			}
+		}
+		node = next;
+	}
+	g_retired_frees = keep_head;
 }
 
 // ── Shared alloc/free bookkeeping ────────────────────────

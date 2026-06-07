@@ -104,8 +104,7 @@ void tm_init_thread()
 void tm_exit_thread() { norec::exit_thread(); }
 
 TMThreadState *tm_get_thread_state() {
-    static thread_local TMThreadState ts;
-    return &ts;
+    return reinterpret_cast<TMThreadState*>(&tm_nested_call_counter);
 }
 
 static std::recursive_mutex g_serialize_mutex;
