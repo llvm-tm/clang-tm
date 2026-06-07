@@ -28,7 +28,11 @@ static std::atomic<int64_t> g_tm_end_count{0};
 static std::atomic<int64_t> g_tm_tx_count{0};
 
 // Plugin required
+struct TMThreadState;
+extern "C" TMThreadState *tm_get_thread_state();
 __thread std::jmp_buf tm_jmpbuf;
+__thread int32_t tm_nested_call_counter = 0;
+__thread int32_t tm_longjmp_ret = 0;
 static thread_local TMThreadState g_tm_state{0, 0};
 
 extern "C" {

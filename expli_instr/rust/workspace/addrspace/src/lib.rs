@@ -146,6 +146,11 @@ pub fn is_tm_address(ptr: *const u8) -> bool {
 /// Returns a 16-byte-aligned pointer.  `malloc(0)` returns a unique
 /// non-null pointer (minimum 16 bytes).
 pub fn tm_region_malloc(sz: usize) -> *mut u8 {
+    if REGION_START.load(Ordering::Acquire) == 0 {
+        let rc = tm_region_init();
+        assert_eq!(rc, 0, "tm_region_init() failed in tm_region_malloc");
+    }
+
     let mut sz = sz;
     if sz < 16 {
         sz = 16;

@@ -2,69 +2,69 @@
 # Run directly: no LLVM plugin pipeline.
 
 CXX      ?= clang++
-CXXFLAGS  = -std=c++20 -O3 -march=native -pthread -I$(abspath ..)
+CXXFLAGS  = -std=c++20 -O3 -march=native -pthread -I$(abspath ../..) -I$(abspath ../..)/expli_instr/cpp
 LDFLAGS   = -pthread
 
 # --- Choose backend (default: TinySTM/WBCTL) --------------------
 BACKEND ?= TINYSTM
 
-CXXFLAGS += -I..
+CXXFLAGS += -I../.. -I../../expli_instr/cpp
 EXTRA_INC =
 RUNTIME =
-REGION_ALLOC = ../backends/tm_impl/tm_region_allocator/tm_region_allocator.cpp
+REGION_ALLOC = ../../backends/tm_impl/tm_region_allocator/tm_region_allocator.cpp
 
 ifeq ($(BACKEND),TINYSTM)
-  RUNTIME  = ../backends/tm_impl/tiny_stm/TinySTM_runtime.cpp
+  RUNTIME  = ../../backends/tm_impl/tiny_stm/TinySTM_runtime.cpp
   DEFS     = -DTM_BACKEND_TINYSTM -DDESIGN_WBCTL
-  EXTRA_INC = -I../backends/tm_impl/common -I../backends/tm_impl/tiny_stm
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tiny_stm
 endif
 ifeq ($(BACKEND),WBETL)
-  RUNTIME  = ../backends/tm_impl/tiny_stm/TinySTM_runtime.cpp
+  RUNTIME  = ../../backends/tm_impl/tiny_stm/TinySTM_runtime.cpp
   DEFS     = -DTM_BACKEND_TINYSTM -DDESIGN_WBETL
-  EXTRA_INC = -I../backends/tm_impl/common -I../backends/tm_impl/tiny_stm
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tiny_stm
 endif
 ifeq ($(BACKEND),WT)
-  RUNTIME  = ../backends/tm_impl/tiny_stm/TinySTM_runtime.cpp
+  RUNTIME  = ../../backends/tm_impl/tiny_stm/TinySTM_runtime.cpp
   DEFS     = -DTM_BACKEND_TINYSTM -DDESIGN_WT
-  EXTRA_INC = -I../backends/tm_impl/common -I../backends/tm_impl/tiny_stm
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tiny_stm
 endif
 ifeq ($(BACKEND),NOREC)
-  RUNTIME  = ../backends/tm_impl/norec/NOrec_runtime.cpp
+  RUNTIME  = ../../backends/tm_impl/norec/NOrec_runtime.cpp
   DEFS     = -DTM_BACKEND_NOREC
-  EXTRA_INC = -I../backends/tm_impl/common -I../backends/tm_impl/norec
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/norec
 endif
 ifeq ($(BACKEND),SWISSTM)
-  RUNTIME  = ../backends/tm_impl/swisstm/SwissTM_runtime.cpp
+  RUNTIME  = ../../backends/tm_impl/swisstm/SwissTM_runtime.cpp
   DEFS     = -DTM_BACKEND_SWISSTM
-  EXTRA_INC = -I../backends/tm_impl/common -I../backends/tm_impl/swisstm
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/swisstm
 endif
 ifeq ($(BACKEND),TL2)
-  RUNTIME  = ../backends/tm_impl/tl2/tl2_runtime.cpp
+  RUNTIME  = ../../backends/tm_impl/tl2/tl2_runtime.cpp
   DEFS     = -DTM_BACKEND_TL2
-  EXTRA_INC = -I../backends/tm_impl/common -I../backends/tm_impl/tl2
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tl2
 endif
 ifeq ($(BACKEND),SGL)
-  RUNTIME  = ../backends/tm_impl/single_global_lock/SingleGlobalLock_runtime.cpp
+  RUNTIME  = ../../backends/tm_impl/single_global_lock/SingleGlobalLock_runtime.cpp
   DEFS     = -DTM_BACKEND_SGL
-  EXTRA_INC = -I../backends/tm_impl/common
+  EXTRA_INC = -I../../backends/tm_impl/common
 endif
 ifeq ($(BACKEND),LEFTRIGHT)
-  RUNTIME  = ../backends/tm_impl/leftright/leftright_runtime.cpp
+  RUNTIME  = ../../backends/tm_impl/leftright/leftright_runtime.cpp
   DEFS     = -DTM_BACKEND_LEFTRIGHT
-  EXTRA_INC = -I../backends/tm_impl/common -I../backends/tm_impl/leftright
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/leftright
 endif
 ifeq ($(BACKEND),ROMULUS)
-  RUNTIME  = ../backends/tm_impl/romulus/romulus_runtime.cpp
+  RUNTIME  = ../../backends/tm_impl/romulus/romulus_runtime.cpp
   DEFS     = -DTM_BACKEND_ROMULUS
-  EXTRA_INC = -I../backends/tm_impl/common -I../backends/tm_impl/romulus
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/romulus
 endif
 ifeq ($(BACKEND),XTM)
-  RUNTIME  = ../backends/tm_impl/xtm/xtm_runtime.cpp
+  RUNTIME  = ../../backends/tm_impl/xtm/xtm_runtime.cpp
   DEFS     = -DTM_BACKEND_XTM
-  EXTRA_INC = -I../backends/tm_impl/common -I../backends/tm_impl/xtm
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/xtm
 endif
 
-BUILTINS = $(addprefix ../backends/tm_impl/common/,tm_alloc_overrides.hpp tm_common.hpp \
+BUILTINS = $(addprefix ../../backends/tm_impl/common/,tm_alloc_overrides.hpp tm_common.hpp \
            tm_platform.hpp tm_spin_token.hpp tm_event_logger.hpp tm_debug.hpp)
 
 # --- Source directories (logical structure) -----------------------
@@ -126,13 +126,13 @@ YCSB_BIN    = bin/ycsb
 # TODO: implement linked-list, hash-map, treap, skip-list, queue, stack
 
 # --- expli_tm_api tests ------------------------------------------
-TEST_DS_SRC = ../tests/expli-api/test_ds.cpp
+TEST_DS_SRC = ../../tests/expli-api/test_ds.cpp
 TEST_DS_BIN = bin/test_ds
-TEST_TX_SRC = ../tests/expli-api/test_tx.cpp
+TEST_TX_SRC = ../../tests/expli-api/test_tx.cpp
 TEST_TX_BIN = bin/test_tx
 
 # --- Stubs runtime (uninstrumented baseline) --------------------
-STUBS = ../backends/stubs/tm_stubs.cpp
+STUBS = ../../backends/stubs/tm_stubs.cpp
 
 # Stubs binary names (appended with _stubs)
 VACATION_STUBS   = bin/vacation_stubs
@@ -177,7 +177,7 @@ endef
 
 define BUILD_STUBS_RULE
 $(1): bin $(2) $(STUBS) Makefile
-	$$(CXX) $$(CXXFLAGS) -I../backends/tm_impl/common -o $$@ $(2) $(STUBS) $$(LDFLAGS)
+	$$(CXX) $$(CXXFLAGS) -I../../backends/tm_impl/common -o $$@ $(2) $(STUBS) $$(LDFLAGS)
 endef
 
 $(eval $(call BUILD_RULE,$(BANK_BIN),$(BANK_SRC)))

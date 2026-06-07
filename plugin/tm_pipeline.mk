@@ -126,6 +126,7 @@ TM_INCLUDES_persistentsgl =
 TM_INCLUDES_distributedsgl =
 TM_INCLUDES_tl2          = -I$(TL2_DIR) -I$(BACKENDS_DIR)/tm_impl/common
 TM_INCLUDES_singlelock   = -I$(BACKENDS_DIR)/tm_impl/common
+TM_INCLUDES_tsxsgl       = -I$(BACKENDS_DIR)/tm_impl/common
 TM_INCLUDES_tinystm     = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)/tm_impl/common
 TM_INCLUDES_norec       = -I$(NOREC_DIR) -I$(BACKENDS_DIR)/tm_impl/common
 TM_INCLUDES_tinystm_wbctl = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)/tm_impl/common
