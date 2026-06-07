@@ -5,7 +5,6 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
-#include <new>
 #include <map>
 #include <mutex>
 #include <pthread.h>
@@ -14,26 +13,17 @@
 
 #define TM_BUFFER_SIZE 1024
 
-static pthread_once_t g_tm_state_key_once = PTHREAD_ONCE_INIT;
-static pthread_key_t g_tm_state_key;
-
-static void make_tm_state_key() {
-    pthread_key_create(&g_tm_state_key, NULL);
-}
-
 extern "C" {
 
+// tm_nested_call_counter and tm_longjmp_ret are thread-local globals.
+// tm_get_thread_state() returns a pointer aliasing them so that both
+// direct TLS access (test_retry.cpp) and TMThreadState* access (LLVM
+// pass preamble via GEP at offsets 0 and 4) use the same storage.
+__thread int32_t tm_nested_call_counter = 0;
+__thread int32_t tm_longjmp_ret = 0;
+
 TMThreadState *tm_get_thread_state() {
-    pthread_once(&g_tm_state_key_once, make_tm_state_key);
-    TMThreadState *state = (TMThreadState *)pthread_getspecific(g_tm_state_key);
-    if (!state) {
-        void *mem = std::malloc(sizeof(TMThreadState));
-        state = new (mem) TMThreadState();
-        state->nested_call_counter = 0;
-        state->longjmp_ret = 0;
-        pthread_setspecific(g_tm_state_key, state);
-    }
-    return state;
+    return reinterpret_cast<TMThreadState*>(&tm_nested_call_counter);
 }
 
 // Helper function to get symbol type string
@@ -60,8 +50,6 @@ static const char *tm_get_type_string(uint8_t type)
 }
 
 __thread unsigned char tm_jmpbuf[256];
-__thread int32_t tm_longjmp_ret;
-__thread int32_t tm_nested_call_counter;
 __thread uint8_t is_tm_init_thread_ready = 0;
 thread_local uint8_t tm_buffer[TM_BUFFER_SIZE] = {0};
 
