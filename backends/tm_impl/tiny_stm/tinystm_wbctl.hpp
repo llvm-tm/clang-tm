@@ -202,11 +202,6 @@ commit()    //
 			sorted_addrs.push_back(it.first);
 		std::sort(sorted_addrs.begin(), sorted_addrs.end(), compareByAddr);
 		for (void *addr : sorted_addrs) {
-			// Stack addresses are transient local variables — they don't need
-			// inter-thread locking (stack is per-thread), and writing back to
-			// a stack address whose frame has been popped would corrupt the
-			// current function's stack.  Skip lock acquisition for stack.
-			if (is_stack_addr(addr)) continue;
 			// Null/low addresses from linked-list traversal bugs: don't lock
 			// (there's nothing to write back) and assert on the read-side.
 			if (addr == nullptr || (uintptr_t)addr < 0x100000) continue;
@@ -276,7 +271,6 @@ commit()    //
 		for (auto &it : tx->write_set) {
 			auto &addr = it.first;
 			auto &w = it.second;
-			if (is_stack_addr(addr)) continue;
 			// Same null-guard as write-back for consistency
 			if (addr == nullptr || (uintptr_t)addr < 0x100000) continue;
 			ByteOffset bo((word_t)addr);
@@ -642,8 +636,6 @@ write_word_ctl(                                               //
 	// stack frame has been popped and the write corrupts active stack data.
 	// No bypass: the plugin ensures only TM-tracked addresses reach the runtime.
 	(void)sz;
-
-
 
 	tx->read_only = false;
 
