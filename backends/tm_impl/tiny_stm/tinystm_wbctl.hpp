@@ -115,6 +115,7 @@ abort_tx(const char *loc="")  //
 	TM_ASSERT(tx->active, "tx not active");
 
 	TM_EVENT(TX_ABORT, tx->id, tx->abort_count);
+	tm_serialize_unlock_all();
 	tx->unlock_held_locks_and_clear();
 	tx->abort_count++;
 	tx->is_retry = true;

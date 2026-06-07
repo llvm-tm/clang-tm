@@ -1,6 +1,6 @@
 # Session Summary
 
-## Latest Session (2026-06-07) — Post-restructure fixes + Rust addrspace guard
+## Latest Session (2026-06-07) — Serialize lock leak fix + genome/bayes/intruder lock restoration
 
 ### Path fixes after repo restructure (commit 9c13c52)
 
@@ -30,6 +30,23 @@ The plugin instrumentation pass injects calls to `tm_get_thread_state()` and the
 | TSXSGL | `tm_get_thread_state()` | Added `tm_get_thread_state()` + `#include "../common/tm_thread_state.hpp"` + `TM_INCLUDES_tsxsgl` in `tm_pipeline.mk` |
 | SingleGlobalLock | `tm_nested_call_counter`, `tm_longjmp_ret` | Added `__thread int32_t tm_nested_call_counter = 0; __thread int32_t tm_longjmp_ret = 0;` |
 
+### Serialize lock leak fix (across siglongjmp in abort_tx)
+
+**Root cause**: `tm_serialize_lock()` was called in benchmark code (genome, bayes, intruder) to protect STL containers during concurrent TM transactions. When a TX aborted via `siglongjmp`, the recursive mutex was held forever — no thread could acquire it again, causing hangs.
+
+**Fix**: Added thread-local `g_serialize_lock_count` in `TinySTM_runtime.cpp` and `tm_serialize_unlock_all()` that unlocks N times before `siglongjmp`:
+- `tinystm_wbctl.hpp:abort_tx()` — calls `tm_serialize_unlock_all()` before `siglongjmp`
+- `tinystm_wt.hpp:abort_tx()` — same fix
+- (WBETL uses shared code path)
+
+**Result**: serialize_lock can safely be used in benchmarks again without leaking across aborts.
+
+### Serialize lock restored in genome/bayes/intruder
+
+After an earlier fix temporarily removed `tm_serialize_lock/unlock` from genome, bayes, and intruder to work around the leak, they must be restored now that the leak is fixed. These locks are essential for protecting STL `unordered_set`/`unordered_map`/`priority_queue`/`queue` operations inside TM transactions — without them, concurrent inserts cause data structure corruption.
+
+**Status**: All three benchmarks restored with serialize_lock. Genome now runs 7t @ 1M segments successfully (intermittent — some crashes at 4t+ likely from concurrent phase mismatch between genome_dedup and genome_match, a pre-existing benchmark design issue).
+
 ### Rust addrspace: auto-init guard for tm_region_malloc
 
 **Root cause**: `TmCell::new()` calls `addrspace::tm_region_malloc()` directly (not through `spec_alloc()` which calls `ensure_region_init()`). If the first allocation happens before any explicit `tm_region_init()` call, the `OnceLock` accessors (`SC_BLOCK_SIZE.get().unwrap()`) panic on `None`.
@@ -39,42 +56,40 @@ The plugin instrumentation pass injects calls to `tm_get_thread_state()` and the
 **Before**: All 8 Rust STAMP benchmarks crashed with `panic at addrspace/src/lib.rs:603: called Option::unwrap() on a None value`.
 **After**: All 8 pass with all backends (wbctl, norec, tsxsgl).
 
-## Bugs from this session's run
+## Bugs (current status)
 
-Current benchmark run (`benchmark_run.log`, PID via `benchmarks/scripts/run_compare_all.sh`) running plugin/expli/rust × tsxsgl/tinystm_wbctl/norec/sgl × 8 STAMP + TPC-C + STMbench7, 12 threads × 3 samples + uninstrumented 1t.
+### Fixed this session
 
-### Crashes observed (>490 attempts, 451 completed)
+| Bug | Fix |
+|-----|-----|
+| Serialize lock leaked across `siglongjmp` in TinySTM abort | Added thread-local counter + `tm_serialize_unlock_all()` in `abort_tx()` for WBCTL/WT backends |
+| Genome/bayes/intruder crashes at multi-thread (STL corruption) | Restored `tm_serialize_lock/unlock` in all three benchmarks now that leak is fixed |
 
-| Benchmark | Backend | Impl | Severity | Details |
-|-----------|---------|------|----------|---------|
-| yada | tsxsgl | plugin | CRASH (sig 11) at 2t | Consistent segfault — pre-existing |
-| yada | all | plugin | CRASH (all backends, ≥2t) | Pre-existing timing/topology issue |
-| genome | tinystm_wbctl | plugin | SEGFAULT at all thread levels (1t+) | Output recovered (OK+) but signal 139 seen. ≤3t succeeds, ≥4t timeouts |
-| genome | tinystm_wbctl | plugin | TIMEOUT at ≥4t | Benchmark hangs instead of completing within 600s |
-| vacation | tinystm_wbctl | plugin | TIMEOUT at 4t, 10t, 21t, 56t | Also sporadic segfaults at ≥28t during cleanup |
-| stmbench7 | tinystm_wbctl | plugin | CRASH | `std::vector::_M_realloc_insert` inside TM (known, all 36 runs skipped) |
-| stmbench7 | norec | plugin | CRASH | Added to skip list |
-| stmbench7 | — | plugin | BUILD FAIL | `stmbench_uninstrumented` — `#include "datastructures/tm_treap_map.hpp"` not found |
+### Unfixed
 
-### Build failures
-
-| Target | Error |
-|--------|-------|
-| `benchmarks/plugin/STAMP/Makefile stamp_tl2` | `tl2/tl2.hpp: No such file or directory` |
-| `benchmarks/plugin/stmbench7/Makefile stmbench_uninstrumented` | `datastructures/tm_treap_map.hpp: No such file or directory` |
-
-### Pre-existing unfixed issues (from prior sessions)
-
-1. **High-concurrency segfaults (vacation, 28–56t)**: Sporadic SIGSEGV during thread cleanup after valid output. Affects all TinySTM backends (WBCTL, NOrec) plugin path. Metrics are trustworthy.
-2. **Plugin stmbench7 vector crash**: `std::vector::_M_realloc_insert` inside TM region. Fundamental incompatibility.
-3. **SSCA2 plugin SIGSEGV in `tm_begin` from worker thread**: Pre-existing, timing-dependent.
-4. **stmbench7 + NOREC plugin cleanup hang ≥2t**: Added to skip list.
+| Issue | Impl | Status |
+|-------|------|--------|
+| Yada plugin crash at ≥2t (all backends) | plugin | Pre-existing, timing/topology |
+| Genome WBCTL segfault at 4t+ (intermittent) | plugin | Concurrent phase mismatch between `genome_dedup`/`genome_match` (no barrier) |
+| Vacation WBCTL timeout at ≥4t | plugin | Pre-existing, may improve after stale-process cleanup |
+| Vacation segfault at ≥28t during cleanup | plugin | Pre-existing, sporadic |
+| stmbench7 WBCTL vector realloc crash | plugin | Pre-existing, fundamental STL incompatibility |
+| stmbench7 NOREC cleanup hang ≥2t | plugin | Pre-existing |
+| stmbench7 uninstrumented build failure | plugin | Missing `tm_treap_map.hpp` |
+| TL2 build failure | plugin | Missing `tl2/tl2.hpp` |
 
 ## Relevant Files
 - `benchmarks/scripts/run_compare_all.sh` — Main benchmark runner
+- `backends/tm_impl/tiny_stm/TinySTM_runtime.cpp` — `tm_serialize_lock/unlock/unlock_all`, `g_serialize_lock_count`
+- `backends/tm_impl/tiny_stm/tinystm_wbctl.hpp` — `abort_tx` calls `tm_serialize_unlock_all()` before `siglongjmp`
+- `backends/tm_impl/tiny_stm/tinystm_wt.hpp` — same fix
 - `backends/tm_impl/tsx_sgl/TSXSGL_runtime.cpp` — Fixed: added `tm_get_thread_state()`
 - `backends/tm_impl/single_global_lock/SingleGlobalLock_runtime.cpp` — Fixed: added thread-local counters
 - `plugin/tm_pipeline.mk` — Fixed: added `TM_INCLUDES_tsxsgl`
 - `expli_instr/rust/workspace/addrspace/src/lib.rs` — Fixed: auto-init guard in `tm_region_malloc`
 - `benchmarks/rust/Cargo.toml` — Fixed: dependency paths
 - `benchmarks/cpp/Makefile` — Fixed: includes and paths
+- `benchmarks/plugin/STAMP/genome_bench.hpp` — Restored `tm_serialize_lock/unlock`
+- `benchmarks/plugin/STAMP/bayes_bench.hpp` — Restored `tm_serialize_lock/unlock`
+- `benchmarks/plugin/STAMP/intruder_bench.hpp` — Restored `tm_serialize_lock/unlock`
+- `benchmarks/plugin/STAMP/stamp_common.hpp` — Declares `tm_serialize_unlock_all()`
