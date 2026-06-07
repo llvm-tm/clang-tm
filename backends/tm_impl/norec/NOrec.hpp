@@ -106,10 +106,6 @@ inline T tm_read(    //
 	TM_ASSERT(tx != nullptr, "tx is null");
 	TM_ASSERT(tx->active, "tx not active");
 
-	if (!stm::isTMAddress(addr)) {
-		return *addr;
-	}
-
 	any_type_t r = read_word(tx, (void *)addr, SZ);
 	return return_any_type<T>(r);
 }
@@ -129,11 +125,6 @@ tm_write(            //
 {
 	TM_ASSERT(tx != nullptr, "tx is null");
 	TM_ASSERT(tx->active, "tx not active");
-
-	if (!stm::isTMAddress(addr)) {
-		*addr = val;
-		return;
-	}
 
 	any_type_t w;
 	fill_any_type(w, &val, SZ);

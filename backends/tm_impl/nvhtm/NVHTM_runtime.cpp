@@ -18,7 +18,7 @@
 #include <new>
 
 #include "tm_common.hpp"
-#include "NVHTM/nvhtm_globals.hpp"
+#include "nvhtm/nvhtm_globals.hpp"
 #include "tm_alloc_overrides.hpp"
 
 thread_local bool g_in_tx = false;

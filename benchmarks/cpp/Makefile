@@ -64,7 +64,7 @@ ifeq ($(BACKEND),XTM)
   EXTRA_INC = -I../backends/tm_impl/common -I../backends/tm_impl/xtm
 endif
 
-BUILTINS = $(addprefix ../backends/,tm_alloc_overrides.hpp tm_common.hpp \
+BUILTINS = $(addprefix ../backends/tm_impl/common/,tm_alloc_overrides.hpp tm_common.hpp \
            tm_platform.hpp tm_spin_token.hpp tm_event_logger.hpp tm_debug.hpp)
 
 # --- Source directories (logical structure) -----------------------

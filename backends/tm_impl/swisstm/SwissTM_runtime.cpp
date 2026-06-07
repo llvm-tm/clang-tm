@@ -25,6 +25,8 @@ extern "C" {
 // thread-local symbol with the same name, and the linker aliases them.
 // siglongjmp to this buffer jumps back to the plugin's sigsetjmp.
 __thread int8_t tm_is_init_ready = 0;
+__thread int32_t tm_nested_call_counter = 0;
+__thread int32_t tm_longjmp_ret = 0;
 static thread_local TMThreadState g_tm_state{0, 0};
 __thread sigjmp_buf tm_jmpbuf;
 

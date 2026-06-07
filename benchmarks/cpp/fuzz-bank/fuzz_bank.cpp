@@ -10,7 +10,7 @@
 //       expli_benchmarks/fuzz/fuzz_bank.cpp \
 //       backends/runtimes/TinySTM_runtime.cpp
 
-#include "expli_tm_api/tm_api.hpp"
+#include "../../expli_instr/cpp/include/tm_api.hpp"
 
 #include <csetjmp>
 #include <cstdint>

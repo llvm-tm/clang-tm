@@ -6,8 +6,8 @@
 //       tools/stm_bug_tool/benchmarks/fuzz_counter.cpp \
 //       backends/runtimes/tl2_runtime.cpp
 
-#include "backends/tests/test_helpers.hpp"
-#include "backends/tm_event_logger.hpp"
+#include "../../../tests/backends/tm_impl/test_helpers.hpp"
+#include "../../../backends/tm_impl/common/tm_event_logger.hpp"
 
 #include <atomic>
 #include <cstdio>
