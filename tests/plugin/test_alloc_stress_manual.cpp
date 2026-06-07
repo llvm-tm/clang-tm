@@ -38,13 +38,11 @@ static void tx_abort() {
 // ---- Shared globals (same as test_alloc_stress) ----
 
 std::vector<int64_t> g_vec;
-std::atomic<int64_t> g_vec_total{0};
 std::atomic<int64_t> g_vec_pushes{0};
 
 std::vector<std::pair<int64_t, int64_t>> g_map_data;
 std::atomic<int64_t> g_map_ops{0};
 
-int64_t *g_raw_ptr = nullptr;
 std::atomic<int64_t> g_raw_written{0};
 
 // Sync

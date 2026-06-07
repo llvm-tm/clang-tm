@@ -53,33 +53,8 @@ static void make_tm_state_key() {
     pthread_key_create(&g_tm_state_key, NULL);
 }
 
-extern "C" {
-
-void  tm_free(void* ptr) {
-	if (g_in_tx) {
-		if (g_deferred_frees_set.count(ptr)) {
-			fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
-			void* buf[64];
-			int n = backtrace(buf, 64);
-			backtrace_symbols_fd(buf, n, 2);
-			fflush(stderr);
-			_exit(1);
-		}
-		tm_untrack_spec_alloc(ptr);
-		g_deferred_frees_set.insert(ptr);
-		auto* node = static_cast<FreeNode*>(std::malloc(sizeof(FreeNode)));
-		node->ptr = ptr;
-		node->next = g_deferred_frees;
-		g_deferred_frees = node;
-	} else {
-		if (stm::isTMAddress(ptr))
-			stm::tm_region_free(ptr);
-		else
-			::operator delete(ptr);
-	}
-}
-    return state;
-}
+__thread sigjmp_buf tm_jmpbuf;
+__thread int tm_init_thread_call_count = 0;
 
 // Mutex removed — TinySTM's own lock acquisition handles concurrency,
 // and a std::mutex around commit() leaks across siglongjmp from abort_tx()
@@ -98,6 +73,8 @@ thread_local uint64_t g_tm_tx_write_set{0};
 static std::atomic<uint64_t> g_tm_begin_count{0};
 static std::atomic<uint64_t> g_tm_end_count{0};
 static std::atomic<uint64_t> g_tm_tx_count{0};
+extern "C" {
+
 void tm_init() {
 	tinystm::init();
 	tinystm::reset_locks();
@@ -158,6 +135,16 @@ sigjmp_buf *tm_get_env() { return &tm_jmpbuf; }
 
 int tm_setjmp() { return 0; }
 
+// Separate thread-local for plugin-side TM state so that
+// tm_nested_call_counter (expli API) and ts->nested_call_counter
+// (plugin entry sequence) are distinct — the mode detection in
+// tm_begin() compares both to decide explicit vs plugin mode.
+static __thread TMThreadState g_tm_thread_state = {0, 0};
+
+TMThreadState *tm_get_thread_state() {
+    return &g_tm_thread_state;
+}
+
 void tm_begin()
 {
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
@@ -170,7 +157,6 @@ void tm_begin()
 	else if (sc > 0 && tc == 0)
 		g_tm_expli_mode = false;
 	int32_t c = (tc > 0) ? tc : sc;
-	ts->nested_call_counter = c;
 	if (c == 1) { g_in_tx = true;
 		tinystm::jmpbuf = (sigjmp_buf *)&tm_jmpbuf;
 		tm_clear_spec_allocs();

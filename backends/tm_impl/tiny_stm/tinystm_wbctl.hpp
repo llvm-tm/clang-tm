@@ -170,37 +170,18 @@ compareByAddr(     //
 	return (word_t)a < (word_t)b;
 }
 
-// Helper: determine stack bounds for the current thread.
-// Cached per-thread to avoid repeated pthread calls.
-struct StackBounds {
-	void *lo, *hi;
-};
-inline const StackBounds &get_stack_bounds() {
-	thread_local StackBounds cached = {nullptr, nullptr};
-	if (!cached.lo) {
-		pthread_t self = pthread_self();
-#ifdef __APPLE__
-		void *hi = pthread_get_stackaddr_np(self);
-		size_t sz = pthread_get_stacksize_np(self);
-		cached.lo = static_cast<char *>(hi) - sz;
-		cached.hi = hi;
-#else
-		pthread_attr_t attr;
-		pthread_getattr_np(self, &attr);
-		void *lo;
-		size_t sz;
-		pthread_attr_getstack(&attr, &lo, &sz);
-		pthread_attr_destroy(&attr);
-		cached.lo = lo;
-		cached.hi = static_cast<char *>(lo) + sz;
-#endif
-	}
-	return cached;
-}
-
+// Determine if addr is on the current thread's stack by comparing
+// against the address of a local variable (which is always on the
+// stack).  Static globals / heap addresses are far from the stack
+// pointer so the difference exceeds the threshold.
+// This is more reliable than pthread_getattr_np which can return
+// incorrect bounds for the main thread (encompassing BSS/data).
 inline bool is_stack_addr(void *addr) {
-	const auto &b = get_stack_bounds();
-	return addr >= b.lo && addr < b.hi;
+	char marker;
+	uintptr_t a = (uintptr_t)addr;
+	uintptr_t m = (uintptr_t)&marker;
+	uintptr_t d = (a > m) ? (a - m) : (m - a);
+	return d < (uintptr_t)32 * 1024 * 1024; // within 32 MB of SP
 }
 
 inline bool //

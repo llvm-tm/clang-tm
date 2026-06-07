@@ -15,15 +15,16 @@ INC_tl2     := $(INC_BASE) -I../../../backends/tm_impl/tl2
 RUNTIME_tl2 := $(RUNTIME_DIR)/tl2/tl2_runtime.cpp
 FLAGS_tl2   := -DTM_BACKEND_TL2
 
-INC_tinystm := $(INC_BASE) -I../../../backends/tm_impl/tiny_stm
+TINYSTM_STUB := -I../../../backends/stubs
+INC_tinystm := $(INC_BASE) -I../../../backends/tm_impl/tiny_stm $(TINYSTM_STUB)
 RUNTIME_tinystm := $(RUNTIME_DIR)/tiny_stm/TinySTM_runtime.cpp
 FLAGS_tinystm := -DDESIGN_WBCTL -DTM_BACKEND_TINYSTM
 
-INC_wt := $(INC_BASE) -I../../../backends/tm_impl/tiny_stm
+INC_wt := $(INC_BASE) -I../../../backends/tm_impl/tiny_stm $(TINYSTM_STUB)
 RUNTIME_wt := $(RUNTIME_DIR)/tiny_stm/TinySTM_runtime.cpp
 FLAGS_wt := -DDESIGN_WT -DTM_BACKEND_TINYSTM
 
-INC_wbetl := $(INC_BASE) -I../../../backends/tm_impl/tiny_stm
+INC_wbetl := $(INC_BASE) -I../../../backends/tm_impl/tiny_stm $(TINYSTM_STUB)
 RUNTIME_wbetl := $(RUNTIME_DIR)/tiny_stm/TinySTM_runtime.cpp
 FLAGS_wbetl := -DDESIGN_WBETL -DTM_BACKEND_TINYSTM
 
