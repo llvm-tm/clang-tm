@@ -22,7 +22,6 @@
 #include <vector>
 #include <chrono>
 #include <atomic>
-#include <mutex>
 
 #include "../../tests/benchmark_test.hpp"
 
@@ -130,7 +129,6 @@ static std::vector<std::vector<int>> g_records;
 
 static double g_base_penalty = 0.0;
 static std::atomic<long> g_total_ops{0};
-static std::mutex g_init_mutex;
 
 // ── Helper: compute density log-likelihood (non-TM, reads g_records) ─
 static double compute_density_ll(int var, const std::vector<int>& parents_vec) {
@@ -293,9 +291,8 @@ static void worker(int tid) {
     int start = tid * chunk;
     int end = start + chunk > nvar ? nvar : start + chunk;
 
-    // ── Phase 1: initialize local_ll ──
+    // ── Phase 1: initialize local_ll (TM handles conflicts on g_base_log_likelihood) ──
     {
-        std::lock_guard<std::mutex> lock(g_init_mutex);
         for (int v = start; v < end; v++) {
             double ll = compute_density_ll(v, {});
             tx_run([&]() {
@@ -306,9 +303,8 @@ static void worker(int tid) {
         }
     }
 
-    // ── Phase 2: build initial task list ──
+    // ── Phase 2: build initial task list (TM handles conflicts) ──
     {
-        std::lock_guard<std::mutex> lock(g_init_mutex);
         for (int v = start; v < end; v++) {
             double base_ll;
             tx_run([&]() { base_ll = TM_READ_DOUBLE(&g_local_ll[v]); });

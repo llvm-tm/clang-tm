@@ -6,11 +6,11 @@
 #include <vector>
 
 struct TM KMeansData {
-    std::vector<std::vector<double>> points;
-    std::vector<std::vector<double>> centroids;
-    std::vector<double> new_centers_sum;
-    std::vector<int> new_centers_count;
-    std::vector<int> assignments;
+    double* points;
+    double* centroids;
+    double* new_centers_sum;
+    int* new_centers_count;
+    int* assignments;
     int npoints;
     int ndims;
     int nclusters;
@@ -29,23 +29,24 @@ inline void kmeans_generate_points() {
     data->ndims = ndims;
     data->nclusters = nclusters;
     data->threshold = g_kmeans_t;
-    data->points.resize(npoints, std::vector<double>(ndims));
-    data->centroids.resize(nclusters, std::vector<double>(ndims));
-    data->new_centers_sum.resize(nclusters * ndims, 0.0);
-    data->new_centers_count.resize(nclusters, 0);
-    data->assignments.resize(npoints, -1);
+
+    data->points = new double[npoints * ndims]();
+    data->centroids = new double[nclusters * ndims]();
+    data->new_centers_sum = new double[nclusters * ndims]();
+    data->new_centers_count = new int[nclusters]();
+    data->assignments = new int[npoints]();
 
     PRNG rng(42);
     for (int i = 0; i < npoints; i++) {
         int cluster = i % nclusters;
         for (int d = 0; d < ndims; d++) {
-            data->points[i][d] = rng.uniform(-10.0, 10.0) + cluster * 5.0;
+            data->points[i * ndims + d] = rng.uniform(-10.0, 10.0) + cluster * 5.0;
         }
     }
 
     for (int c = 0; c < nclusters; c++) {
         for (int d = 0; d < ndims; d++) {
-            data->centroids[c][d] = rng.uniform(-10.0, 10.0);
+            data->centroids[c * ndims + d] = rng.uniform(-10.0, 10.0);
         }
     }
 
@@ -58,15 +59,14 @@ inline void kmeans_generate_points() {
     fflush(stdout);
 }
 
-static inline int find_nearest_cluster(const std::vector<double>& point,
-                                        const std::vector<std::vector<double>>& centroids,
-                                        int nclusters) {
+static inline int find_nearest_cluster(const double* point, const double* centroids,
+                                        int nclusters, int ndims) {
     int best = -1;
     double best_dist = std::numeric_limits<double>::max();
     for (int c = 0; c < nclusters; c++) {
         double dist = 0.0;
-        for (size_t d = 0; d < point.size(); d++) {
-            double diff = point[d] - centroids[c][d];
+        for (int d = 0; d < ndims; d++) {
+            double diff = point[d] - centroids[c * ndims + d];
             dist += diff * diff;
         }
         if (dist < best_dist) {
@@ -78,23 +78,46 @@ static inline int find_nearest_cluster(const std::vector<double>& point,
 }
 
 TX static void kmeans_accumulate(KMeansData* data, int start, int end,
-                                   std::vector<double>& local_sum,
-                                   std::vector<int>& local_count) {
+                                   double* local_sum, int* local_count) {
     for (int i = start; i < end; i++) {
-        int c = find_nearest_cluster(data->points[i], data->centroids, data->nclusters);
+        int c = find_nearest_cluster(&data->points[i * data->ndims],
+                                      data->centroids, data->nclusters, data->ndims);
         data->assignments[i] = c;
         local_count[c]++;
         for (int d = 0; d < data->ndims; d++) {
-            local_sum[c * data->ndims + d] += data->points[i][d];
+            local_sum[c * data->ndims + d] += data->points[i * data->ndims + d];
         }
     }
 }
 
+TX static double kmeans_aggregate_update(KMeansData* data,
+                                           double* local_sum, int* local_count) {
+    for (int c = 0; c < data->nclusters; c++) {
+        data->new_centers_count[c] += local_count[c];
+        for (int d = 0; d < data->ndims; d++) {
+            data->new_centers_sum[c * data->ndims + d] += local_sum[c * data->ndims + d];
+        }
+    }
+
+    double delta = 0.0;
+    for (int c = 0; c < data->nclusters; c++) {
+        if (data->new_centers_count[c] > 0) {
+            for (int d = 0; d < data->ndims; d++) {
+                double new_val = data->new_centers_sum[c * data->ndims + d] / data->new_centers_count[c];
+                double diff = data->centroids[c * data->ndims + d] - new_val;
+                delta += diff * diff;
+                data->centroids[c * data->ndims + d] = new_val;
+                data->new_centers_sum[c * data->ndims + d] = 0.0;
+            }
+        }
+        data->new_centers_count[c] = 0;
+    }
+
+    return delta;
+}
+
 THREAD void worker_kmeans(ThreadData* td) {
     auto data = g_kmeans;
-    auto& points = data->points;
-    auto& centroids = data->centroids;
-    auto& assignments = data->assignments;
 
     int npoints = data->npoints;
     int ndims = data->ndims;
@@ -118,31 +141,11 @@ THREAD void worker_kmeans(ThreadData* td) {
         int end = std::min(start + chunk, npoints);
 
         if (start < end) {
-            kmeans_accumulate(data, start, end, local_sum, local_count);
+            kmeans_accumulate(data, start, end, local_sum.data(), local_count.data());
         }
 
-        for (int c = 0; c < nclusters; c++) {
-            data->new_centers_count[c] += local_count[c];
-            for (int d = 0; d < ndims; d++) {
-                data->new_centers_sum[c * ndims + d] += local_sum[c * ndims + d];
-            }
-        }
+        double delta = kmeans_aggregate_update(data, local_sum.data(), local_count.data());
 
-        double delta = 0.0;
-        for (int c = 0; c < nclusters; c++) {
-            if (data->new_centers_count[c] > 0) {
-                for (int d = 0; d < ndims; d++) {
-                    double new_val = data->new_centers_sum[c * ndims + d] / data->new_centers_count[c];
-                    double diff = centroids[c][d] - new_val;
-                    delta += diff * diff;
-                    centroids[c][d] = new_val;
-                    data->new_centers_sum[c * ndims + d] = 0.0;
-                }
-            }
-            data->new_centers_count[c] = 0;
-        }
-
-        delta = tm_sqrt(delta / (nclusters * ndims));
         converged = (delta < threshold);
         total_ops.fetch_add(npoints, std::memory_order_relaxed);
     }

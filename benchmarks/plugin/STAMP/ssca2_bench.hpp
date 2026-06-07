@@ -31,6 +31,8 @@ struct TM SSCA2Data {
     double prob_unidirectional;
     double prob_intercl_edges;
     int subgr_edge_length;
+    int64_t global_max_weight;
+    int64_t* tri_count;
 };
 
 static SSCA2Data* g_ssca2 = nullptr;
@@ -203,36 +205,64 @@ TX static int64_t ssca2_get_weight(SSCA2Data* data, uint64_t src, uint64_t dst) 
     return -1;
 }
 
+// ── TX: atomically update global max weight ──────────────────
+TX static void ssca2_update_max_weight(SSCA2Data* data, int64_t local_max) {
+    if (local_max > data->global_max_weight)
+        data->global_max_weight = local_max;
+}
+
+// ── Get weight (read-only, used outside TX for local max) ───
+static int64_t get_weight(const SSCA2Data* data, uint64_t v, int64_t w_i) {
+    return data->graph.weights[w_i];
+}
+
+// ── Check edge (read-only, used outside TX) ──────────────────
+static bool has_edge(const SSCA2Data* data, uint64_t src, uint64_t dst) {
+    auto& row_ptr = data->graph.row_ptr;
+    auto& col_idx = data->graph.col_idx;
+    uint64_t start = row_ptr[src];
+    uint64_t end = row_ptr[src + 1];
+    for (uint64_t i = start; i < end; i++)
+        if (col_idx[i] == dst) return true;
+    return false;
+}
+
 THREAD void worker_ssca2(ThreadData* td) {
     auto data = g_ssca2;
     auto& row_ptr = data->graph.row_ptr;
     auto& col_idx = data->graph.col_idx;
+    auto& weights = data->graph.weights;
 
     uint64_t chunk = (data->num_vertices + g_num_threads - 1) / g_num_threads;
     uint64_t start_v = td->thread_id * chunk;
     uint64_t end_v = std::min(start_v + chunk, data->num_vertices);
     uint64_t local_ops = 0;
+    int64_t local_max = 0;
 
+    // ── Non-TX: iterate vertices, read graph data, count triangles ──
     for (int iter = 0; iter < g_ssca2_i; iter++) {
         for (uint64_t v = start_v; v < end_v; v++) {
             uint64_t start = row_ptr[v];
             uint64_t end = row_ptr[v + 1];
 
             for (uint64_t i = start; i < end; i++) {
+                int64_t w = weights[i];
+                if (w > local_max) local_max = w;
+
                 uint64_t neighbor = col_idx[i];
                 uint64_t nstart = row_ptr[neighbor];
                 uint64_t nend = row_ptr[neighbor + 1];
 
                 for (uint64_t j = nstart; j < nend; j++) {
                     uint64_t n2 = col_idx[j];
-                    bool triangle = ssca2_has_edge(data, n2, v);
-                    if (triangle) {
-                        local_ops++;
-                    }
+                    if (has_edge(data, n2, v)) local_ops++;
                 }
             }
         }
     }
+
+    // ── TX: one write per thread to update global max weight ──
+    ssca2_update_max_weight(data, local_max);
 
     total_ops.fetch_add(local_ops, std::memory_order_relaxed);
 }

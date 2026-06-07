@@ -1,48 +1,35 @@
 #pragma once
 
-// NOTE: Bayes avoids std::string and other complex STL types in TM structs.
-//
-// The TM instrumentation pass cannot see into opaque library functions
-// (e.g. std::string::compare, std::unordered_set::find).  If these are
-// called on TM-managed memory inside a transaction, the loads/stores
-// inside those opaque functions will NOT be instrumented with tm_read/
-// tm_write, leading to non-transactional access and potential corruption.
-//
-// Bayes keeps TM data as plain ints, vectors, and sets of ints — only
-// standard algorithms (which are header-only and therefore visible to
-// the instrumentation pass) are used inside TX blocks.  Any algorithm
-// whose implementation lives in the C++ standard library .so/.dylib is
-// opaque and must be avoided in TM context unless proven safe.
-
 #include "stamp_common.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <mutex>
-#include <set>
-#include <vector>
+
+#define BAYES_MAX_PARENTS 64
 
 struct Task {
     int op;
     int from_id;
     int to_id;
     double score;
-    bool operator<(const Task& o) const { return score > o.score; }
 };
 
 struct TM BayesData {
+    int* records;
     int num_var;
     int num_record;
+    int* parents;
+    int* parents_cnt;
+    int* children_adj;
+    int* children_cnt;
+    double* local_ll;
+    Task* task_list;
+    int task_count;
+    int task_capacity;
     double base_penalty;
     double base_log_likelihood;
-
-    std::vector<std::vector<int>> records;
-    std::vector<std::set<int>> parents;
-    std::vector<std::set<int>> children;
-    std::vector<double> local_ll;
-
-    std::vector<Task> task_list;
     int total_parents;
-
     int global_max_edges;
     double quality_factor;
 };
@@ -50,17 +37,47 @@ struct TM BayesData {
 static BayesData* g_bayes = nullptr;
 static std::mutex g_init_mutex;
 
-static double compute_density_ll(BayesData* data, int var,
-                                  const std::vector<int>& parents_vec) {
-    int np = (int)parents_vec.size();
+static inline bool task_heap_empty(int count) { return count == 0; }
+
+static inline void task_heap_push(Task* heap, int& count, const Task& t) {
+    int i = count++;
+    heap[i] = t;
+    while (i > 0) {
+        int p = (i - 1) / 2;
+        if (heap[p].score >= heap[i].score) break;
+        Task tmp = heap[p]; heap[p] = heap[i]; heap[i] = tmp;
+        i = p;
+    }
+}
+
+static inline Task task_heap_pop(Task* heap, int& count) {
+    Task top = heap[0];
+    heap[0] = heap[--count];
+    int i = 0;
+    while (true) {
+        int largest = i;
+        int l = 2 * i + 1;
+        int r = 2 * i + 2;
+        if (l < count && heap[l].score > heap[largest].score) largest = l;
+        if (r < count && heap[r].score > heap[largest].score) largest = r;
+        if (largest == i) break;
+        Task tmp = heap[i]; heap[i] = heap[largest]; heap[largest] = tmp;
+        i = largest;
+    }
+    return top;
+}
+
+TX static double compute_density_ll(BayesData* data, int var,
+                                  const int* parents_vec, int np) {
     int ncfg = 1 << np;
-    std::vector<int> c0(ncfg, 0), c1(ncfg, 0);
+    int c0[128], c1[128];
+    for (int i = 0; i < ncfg; i++) c0[i] = c1[i] = 0;
 
     for (int r = 0; r < data->num_record; r++) {
         int cfg = 0;
         for (int i = 0; i < np; i++)
-            cfg = (cfg << 1) | data->records[r][parents_vec[i]];
-        if (data->records[r][var] == 0) c0[cfg]++; else c1[cfg]++;
+            cfg = (cfg << 1) | data->records[r * data->num_var + parents_vec[i]];
+        if (data->records[r * data->num_var + var] == 0) c0[cfg]++; else c1[cfg]++;
     }
 
     double ll = 0.0;
@@ -86,45 +103,66 @@ inline void bayes_generate_network() {
     data->global_max_edges = g_bayes_e;
     data->quality_factor = 1.0;
 
-    data->parents.resize(data->num_var);
-    data->children.resize(data->num_var);
-    data->local_ll.resize(data->num_var, 0.0);
+    int nvar = data->num_var;
+    int nrec = data->num_record;
+
+    data->records = new int[nrec * nvar]();
+    data->parents = new int[nvar * BAYES_MAX_PARENTS]();
+    data->parents_cnt = new int[nvar]();
+    data->children_adj = new int[nvar * BAYES_MAX_PARENTS]();
+    data->children_cnt = new int[nvar]();
+    data->local_ll = new double[nvar]();
+
+    int task_cap = nvar * nvar;
+    data->task_list = new Task[task_cap]();
+    data->task_count = 0;
+    data->task_capacity = task_cap;
 
     PRNG rng(g_bayes_s);
-    data->records.resize(data->num_record, std::vector<int>(data->num_var));
 
-    for (int v = 1; v < data->num_var; v++) {
+    for (int v = 1; v < nvar; v++) {
         int max_np = std::min(g_bayes_n, v);
         int np = (max_np > 0) ? (int)(rng.next() % max_np) + 1 : 0;
         for (int p = 0; p < np && p < v; p++) {
             int parent = (int)(rng.next() % v);
-            if (data->parents[v].find(parent) == data->parents[v].end()) {
-                data->parents[v].insert(parent);
-                data->children[parent].insert(v);
+            int pc = data->parents_cnt[v];
+            bool found = false;
+            for (int i = 0; i < pc; i++) {
+                if (data->parents[v * BAYES_MAX_PARENTS + i] == parent) {
+                    found = true; break;
+                }
+            }
+            if (!found && pc < BAYES_MAX_PARENTS) {
+                data->parents[v * BAYES_MAX_PARENTS + pc] = parent;
+                data->parents_cnt[v] = pc + 1;
+                int cc = data->children_cnt[parent];
+                data->children_adj[parent * BAYES_MAX_PARENTS + cc] = v;
+                data->children_cnt[parent] = cc + 1;
                 data->total_parents++;
             }
         }
     }
 
-    for (int r = 0; r < data->num_record; r++) {
-        for (int v = 0; v < data->num_var; v++) {
-            if (data->parents[v].empty()) {
-                data->records[r][v] = (int)(rng.next() % 2);
+    for (int r = 0; r < nrec; r++) {
+        for (int v = 0; v < nvar; v++) {
+            if (data->parents_cnt[v] == 0) {
+                data->records[r * nvar + v] = (int)(rng.next() % 2);
             } else {
                 int val = 0;
-                for (int p : data->parents[v])
-                    val = (val << 1) | data->records[r][p];
+                int* pv = &data->parents[v * BAYES_MAX_PARENTS];
+                for (int i = 0; i < data->parents_cnt[v]; i++)
+                    val = (val << 1) | data->records[r * nvar + pv[i]];
                 int threshold = 30;
-                for (int p : data->parents[v])
-                    threshold += (p * 7 + v * 11) % 40;
+                for (int i = 0; i < data->parents_cnt[v]; i++)
+                    threshold += (pv[i] * 7 + v * 11) % 40;
                 threshold = (threshold + val * 17) % 100;
-                data->records[r][v] = (rng.next() % 100 < threshold) ? 1 : 0;
+                data->records[r * nvar + v] = (rng.next() % 100 < threshold) ? 1 : 0;
             }
         }
     }
 
     data->base_penalty = g_bayes_i > 0
-        ? -0.5 * std::log((double)data->num_record) * g_bayes_i
+        ? -0.5 * std::log((double)nrec) * g_bayes_i
         : 0.0;
     g_bayes = data;
 
@@ -141,98 +179,120 @@ inline void bayes_generate_network() {
     fflush(stdout);
 }
 
-static bool has_path(BayesData* data, int from, int to) {
-    std::vector<bool> visited(data->num_var, false);
-    std::vector<int> stack = {from};
+TX static int parents_has(BayesData* data, int var, int p) {
+    int* pv = &data->parents[var * BAYES_MAX_PARENTS];
+    int pc = data->parents_cnt[var];
+    for (int i = 0; i < pc; i++)
+        if (pv[i] == p) return 1;
+    return 0;
+}
+
+TX static bool has_path(BayesData* data, int from, int to) {
+    int nv = data->num_var;
+    bool* visited = (bool*)__builtin_alloca(nv * sizeof(bool));
+    for (int i = 0; i < nv; i++) visited[i] = false;
+    int* stack = (int*)__builtin_alloca(nv * sizeof(int));
+    int sp = 0;
     visited[from] = true;
-    while (!stack.empty()) {
-        int cur = stack.back();
-        stack.pop_back();
-        for (int c : data->children[cur]) {
+    stack[sp++] = from;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        int* cv = &data->children_adj[cur * BAYES_MAX_PARENTS];
+        int cc = data->children_cnt[cur];
+        for (int i = 0; i < cc; i++) {
+            int c = cv[i];
             if (c == to) return true;
-            if (!visited[c]) { visited[c] = true; stack.push_back(c); }
+            if (!visited[c]) { visited[c] = true; stack[sp++] = c; }
         }
     }
     return false;
 }
 
 TX static Task pop_best_task(BayesData* data) {
-    tm_serialize_lock();
-    if (data->task_list.empty()) { tm_serialize_unlock(); return {-1, -1, -1, -1e100}; }
-    std::pop_heap(data->task_list.begin(), data->task_list.end());
-    Task t = data->task_list.back();
-    data->task_list.pop_back();
-    tm_serialize_unlock();
+    if (task_heap_empty(data->task_count)) {
+        Task t; t.op = -1; t.from_id = -1; t.to_id = -1; t.score = -1e100;
+        return t;
+    }
+    Task t = task_heap_pop(data->task_list, data->task_count);
     return t;
 }
 
 TX static void insert_task(BayesData* data, const Task& t) {
-    tm_serialize_lock();
-    data->task_list.push_back(t);
-    std::push_heap(data->task_list.begin(), data->task_list.end());
-    tm_serialize_unlock();
+    if (data->task_count < data->task_capacity)
+        task_heap_push(data->task_list, data->task_count, t);
 }
 
 TX static bool apply_insert(BayesData* data, int from, int to) {
-    tm_serialize_lock();
-    if (data->parents[to].find(from) != data->parents[to].end()) { tm_serialize_unlock(); return false; }
-    if (has_path(data, to, from)) { tm_serialize_unlock(); return false; }
-    if (data->global_max_edges > 0 && (int)data->parents[to].size() >= data->global_max_edges)
-        { tm_serialize_unlock(); return false; }
+    if (parents_has(data, to, from)) return false;
+    if (has_path(data, to, from)) return false;
+    if (data->global_max_edges > 0 &&
+        data->parents_cnt[to] >= data->global_max_edges) return false;
 
-    data->parents[to].insert(from);
-    data->children[from].insert(to);
+    int pc = data->parents_cnt[to];
+    data->parents[to * BAYES_MAX_PARENTS + pc] = from;
+    data->parents_cnt[to] = pc + 1;
+    int cc = data->children_cnt[from];
+    data->children_adj[from * BAYES_MAX_PARENTS + cc] = to;
+    data->children_cnt[from] = cc + 1;
     data->total_parents++;
 
-    std::vector<int> par(data->parents[to].begin(), data->parents[to].end());
-    double new_ll = compute_density_ll(data, to, par);
+    int par[BAYES_MAX_PARENTS];
+    for (int i = 0; i < pc; i++)
+        par[i] = data->parents[to * BAYES_MAX_PARENTS + i];
+    par[pc] = from;
+    double new_ll = compute_density_ll(data, to, par, pc + 1);
     data->base_log_likelihood += (new_ll - data->local_ll[to]);
     data->local_ll[to] = new_ll;
-    tm_serialize_unlock();
 
     return true;
 }
 
 TX static Task find_best_insert(BayesData* data, int to) {
-    tm_serialize_lock();
-    Task best = {-1, -1, -1, -1e100};
+    Task best;
+    best.op = -1; best.from_id = -1; best.to_id = -1; best.score = -1e100;
     double base_ll = data->local_ll[to];
 
+    int pc = data->parents_cnt[to];
     for (int from = 0; from < data->num_var; from++) {
         if (from == to) continue;
-        if (data->parents[to].find(from) != data->parents[to].end()) continue;
+        if (parents_has(data, to, from)) continue;
         if (has_path(data, to, from)) continue;
-        if (data->global_max_edges > 0 && (int)data->parents[to].size() >= data->global_max_edges)
-            continue;
+        if (data->global_max_edges > 0 && pc >= data->global_max_edges) continue;
 
-        std::vector<int> par(data->parents[to].begin(), data->parents[to].end());
-        par.push_back(from);
-        double new_ll = compute_density_ll(data, to, par);
+        int par[BAYES_MAX_PARENTS];
+        for (int i = 0; i < pc; i++)
+            par[i] = data->parents[to * BAYES_MAX_PARENTS + i];
+        par[pc] = from;
+        double new_ll = compute_density_ll(data, to, par, pc + 1);
         double delta = new_ll - base_ll;
         double score = data->total_parents * data->base_penalty +
                        data->num_record * (data->base_log_likelihood + delta);
 
-        if (score > best.score)
-            best = {0, from, to, score};
+        if (score > best.score) {
+            best.op = 0; best.from_id = from; best.to_id = to; best.score = score;
+        }
     }
-    tm_serialize_unlock();
     return best;
 }
 
 static void init_worker(BayesData* data, int nvar, int start, int end) {
     for (int v = start; v < end; v++) {
-        data->local_ll[v] = compute_density_ll(data, v, {});
+        data->local_ll[v] = compute_density_ll(data, v, nullptr, 0);
         data->base_log_likelihood += data->local_ll[v];
     }
     for (int v = start; v < end; v++) {
         for (int from = 0; from < nvar; from++) {
             if (from == v) continue;
-            double with_ll = compute_density_ll(data, v, {from});
+            int parent_arr[1] = {from};
+            double with_ll = compute_density_ll(data, v, parent_arr, 1);
             if (with_ll > data->local_ll[v]) {
                 double delta = with_ll - data->local_ll[v];
                 double score = data->base_penalty +
                                data->num_record * (data->base_log_likelihood + delta);
-                insert_task(data, {0, from, v, score});
+                Task t;
+                t.op = 0; t.from_id = from; t.to_id = v; t.score = score;
+                if (data->task_count < data->task_capacity)
+                    task_heap_push(data->task_list, data->task_count, t);
             }
         }
     }
@@ -245,7 +305,6 @@ THREAD void worker_bayes(ThreadData* td) {
     int start = td->thread_id * chunk;
     int end = std::min(start + chunk, nvar);
 
-    // Serialize initialization to avoid data races on non-TX code
     {
         std::lock_guard<std::mutex> lock(g_init_mutex);
         init_worker(data, nvar, start, end);

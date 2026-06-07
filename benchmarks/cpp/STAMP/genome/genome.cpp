@@ -1,8 +1,13 @@
 // STAMP/genome benchmark — explicit TM API port
-// Matches the plugin genome_bench.hpp algorithm.
 //
-// Uses std:: containers with mutex for serialization, matching the
-// plugin's tm_serialize_lock/unlock inside TX functions.
+// Dedup uses a local unordered_set (thread 0 only, sequential, no mutex).
+// Match runs sequentially after dedup (thread 0 only).
+// No tm_serialize_lock or mutex needed — the sequential dedup avoids
+// STL container allocation inside TM (std::unordered_set::insert does
+// operator new, which the TM runtime intercepts).
+//
+// See also: benchmarks/plugin/STAMP/genome_bench.hpp (plugin version)
+//           benchmarks/rust/src/stamp/genome.rs (rust version)
 
 #include "expli_tm_api/tm_api.hpp"
 
@@ -12,7 +17,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
 #include <random>
 #include <string>
 #include <thread>
@@ -33,7 +37,6 @@ struct GenomeData {
 };
 
 static GenomeData g_data;
-static std::mutex g_mutex;
 static std::atomic<uint64_t> g_total_ops{0};
 
 static int g_num_threads = 4;
@@ -47,6 +50,7 @@ static void parse_args(int argc, char* argv[]) {
         else if (!strcmp(argv[i], "-g") && i + 1 < argc) g_gene_length = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) g_segment_length = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-n") && i + 1 < argc) g_num_segments = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-t") && i + 1 < argc) {} // segment match threshold (paper compat)
         else if (!strcmp(argv[i], "-h")) {
             fprintf(stderr, "Usage: %s -p <threads> -g <gene> -s <segment> -n <segments>\n", argv[0]);
             exit(0);
@@ -54,11 +58,17 @@ static void parse_args(int argc, char* argv[]) {
     }
 }
 
+// Single-threaded dedup: thread 0 inserts all segments into a local
+// unordered_set, then moves the result into g_data.unique_segments.
+// This avoids operator-new inside TM (std::unordered_set::insert does
+// heap allocation, which the TM runtime intercepts).
+// Matches the plugin genome_bench.hpp approach.
 static void genome_dedup(int start, int end) {
-    for (int i = start; i < end; i++) {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        g_data.unique_segments.insert(g_data.segments[i]);
-    }
+    std::unordered_set<std::string> local;
+    local.reserve(end - start);
+    for (int i = start; i < end; i++)
+        local.insert(g_data.segments[i]);
+    g_data.unique_segments = std::move(local);
 }
 
 static inline uint64_t str_hash(const std::string& s, int start, int len) {
@@ -100,17 +110,16 @@ static void worker(int thread_id, int num_threads) {
     expli::TM<int>::thread_init();
 
     int nsegments = g_data.num_segments;
-    int chunk = (nsegments + num_threads - 1) / num_threads;
-    int start = thread_id * chunk;
-    int end = std::min(start + chunk, nsegments);
 
-    if (start < end)
-        genome_dedup(start, end);
+    // Only thread 0 does dedup (sequential, no mutex, local unordered_set)
+    if (thread_id == 0)
+        genome_dedup(0, nsegments);
 
-    if (start < end) {
+    // genome_match reads g_data.unique_segments (read-only after dedup).
+    // Only thread 0 runs it (all threads would do the same work).
+    if (thread_id == 0) {
         genome_match();
-        if (thread_id == 0)
-            g_total_ops.fetch_add(g_data.unique_segments.size(), std::memory_order_relaxed);
+        g_total_ops.fetch_add(g_data.unique_segments.size(), std::memory_order_relaxed);
     }
 
     expli::TM<int>::thread_exit();
