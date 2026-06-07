@@ -34,14 +34,7 @@ struct alignas(64) PaddedAccount {
     volatile uint64_t balance;
 };
 
-static PaddedAccount g_accounts[NUM_ACCOUNTS] = {};
-
 int main() {
-    // Initialize all accounts to 1000
-    for (int i = 0; i < NUM_ACCOUNTS; ++i)
-        g_accounts[i].balance = 1000;
-    uint64_t initial_total = (uint64_t)NUM_ACCOUNTS * 1000;
-
     printf("SwissTM Read-All + Write Interference\n");
     printf("======================================\n\n");
     printf("Accounts: %d\n", NUM_ACCOUNTS);
@@ -49,6 +42,11 @@ int main() {
     printf("Readers:  %d x %d read-all TXs each\n\n", NUM_READERS, READER_ITERS);
 
     tm_init();
+    auto g_accounts = (PaddedAccount*)tm_malloc(sizeof(PaddedAccount) * NUM_ACCOUNTS);
+    // Initialize all accounts to 1000
+    for (int i = 0; i < NUM_ACCOUNTS; ++i)
+        g_accounts[i].balance = 1000;
+    uint64_t initial_total = (uint64_t)NUM_ACCOUNTS * 1000;
 
     std::barrier bar(NUM_WRITERS + NUM_READERS + 1);
 
@@ -59,7 +57,7 @@ int main() {
 
     // Writer threads: transfer from account[i] to account[i+1]
     for (int w = 0; w < NUM_WRITERS; ++w) {
-        threads.emplace_back([w, &writer_committed, &bar]() {
+        threads.emplace_back([w, &writer_committed, &bar, &g_accounts]() {
             tm_init_thread();
             tm_nested_call_counter++;
             for (int i = 0; i < WRITER_ITERS; ++i) {
@@ -85,7 +83,7 @@ int main() {
 
     // Reader threads: read ALL accounts (read-all TX)
     for (int r = 0; r < NUM_READERS; ++r) {
-        threads.emplace_back([r, &reader_committed, &bar]() {
+        threads.emplace_back([r, &reader_committed, &bar, &g_accounts]() {
             tm_init_thread();
             tm_nested_call_counter++;
             for (int i = 0; i < READER_ITERS; ++i) {

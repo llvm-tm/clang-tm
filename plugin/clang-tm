@@ -529,12 +529,19 @@ if $RUNTIME_IS_SOURCE; then
         -fno-stack-protector -pthread "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"
 
     # Also compile tm_region_allocator if it exists (for TM address space)
-    REGION_O=""
-    if [ -f "$RUNTIMES_DIR/tm_region_allocator.cpp" ]; then
+    # Look in $RUNTIMES_DIR/tm_region_allocator/ first, then $RUNTIMES_DIR/
+    REGION_SRC=""
+    if [ -f "$RUNTIMES_DIR/tm_region_allocator/tm_region_allocator.cpp" ]; then
+        REGION_SRC="$RUNTIMES_DIR/tm_region_allocator/tm_region_allocator.cpp"
         REGION_INCLUDE="-I $(dirname "$RUNTIMES_DIR")"
+    elif [ -f "$RUNTIMES_DIR/tm_region_allocator.cpp" ]; then
+        REGION_SRC="$RUNTIMES_DIR/tm_region_allocator.cpp"
+        REGION_INCLUDE="-I $(dirname "$RUNTIMES_DIR")"
+    fi
+    if [ -n "$REGION_SRC" ]; then
         REGION_O="$OUT_DIR/tm_region_allocator.o"
         log "[rt] tm_region_allocator.cpp → native object file"
-        $CXX -std=c++20 $RUNTIME_OPT -c "$RUNTIMES_DIR/tm_region_allocator.cpp" -o "$REGION_O" \
+        $CXX -std=c++20 $RUNTIME_OPT -c "$REGION_SRC" -o "$REGION_O" \
             $REGION_INCLUDE \
             -fno-stack-protector -pthread "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"
     fi

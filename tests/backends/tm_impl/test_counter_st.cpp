@@ -10,12 +10,13 @@ int main() {
     tm_init_thread();
     tm_nested_call_counter++;
 
-    volatile uint64_t counter = 0;
+    auto counter = (volatile uint64_t*)tm_malloc(sizeof(uint64_t));
+    *counter = 0;
 
     for (int i = 0; i < ITERATIONS; ++i) {
         tm_transaction([&]() {
-            uint64_t v = tm_r8((uint64_t*)&counter);
-            tm_w8((uint64_t*)&counter, v + 1);
+            uint64_t v = tm_r8((uint64_t*)counter);
+            tm_w8((uint64_t*)counter, v + 1);
         });
     }
 
@@ -23,6 +24,6 @@ int main() {
     tm_exit_thread();
     tm_exit();
 
-    return check_result({"counter", counter == ITERATIONS,
-                         (int64_t)counter, ITERATIONS});
+    return check_result({"counter", *counter == ITERATIONS,
+                         (int64_t)*counter, ITERATIONS});
 }

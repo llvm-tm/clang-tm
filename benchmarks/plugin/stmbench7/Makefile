@@ -1,8 +1,6 @@
-TM_PLUGIN := $(abspath ../../plugin/bin/libTMInstrument.so)
-TM_COMPILE_FLAGS := -O1 -fno-inline -fno-vectorize -fno-slp-vectorize \
-    -fno-unroll-loops -fno-stack-protector -pthread \
-    -I$(realpath ..)
-include ../../plugin/tm_pipeline.mk
+TM_PLUGIN := $(abspath ../../../plugin/bin/libTMInstrument.so)
+include ../../../plugin/tm_pipeline.mk
+TM_COMPILE_FLAGS += -I$(realpath ..)
 $(eval $(call tm_define_rules))
 
 .PHONY: all clean
