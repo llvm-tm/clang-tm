@@ -34,6 +34,8 @@
   #include <immintrin.h>
 #endif
 
+#include "../common/tm_thread_state.hpp"
+
 thread_local bool g_in_tx = false;
 thread_local bool in_tsx = false;
 thread_local uint64_t tsx_start_owner = 0;
@@ -45,6 +47,10 @@ static std::atomic<uint64_t> sgl_owner{0};
 __thread std::jmp_buf tm_jmpbuf;
 __thread int32_t tm_nested_call_counter;
 __thread int32_t tm_longjmp_ret;
+
+extern "C" TMThreadState *tm_get_thread_state() {
+    return reinterpret_cast<TMThreadState*>(&tm_nested_call_counter);
+}
 
 enum { LOCK_BUSY = 0xFF, OWNER_CHANGED = 0x01 };
 

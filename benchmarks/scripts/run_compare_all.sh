@@ -17,8 +17,8 @@ if set -o pipefail 2>/dev/null; then
 else
     set -eu
 fi
-SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
-cd "$(dirname "$0")"
+SELF="$(cd "$(dirname "$0")/../.." && pwd -P)/benchmarks/scripts/$(basename "$0")"
+cd "$(dirname "$0")/../.."
 
 # ── Configuration ─────────────────────────────────────────────────────────
 THREAD_LIST="${THREADS:-"1 2 4 7 10 14 21 28 35 42 49 56"}"
@@ -74,8 +74,9 @@ SUMMARY="$RESULTS_DIR/SUMMARY.txt"
 CSV="$RESULTS_DIR/results.csv"
 PROGRESS="$RESULTS_DIR/progress.txt"
 SKIP_FILE="$RESULTS_DIR/skip_combos.txt"
+SAVEPOINT="$RESULTS_DIR/savepoint.txt"
 mkdir -p "$RAW_DIR"/{plugin,expli,rust}/{tsxsgl,tinystm_wbctl,norec,sgl,uninstrumented}
-touch "$SKIP_FILE"
+touch "$SKIP_FILE" "$SAVEPOINT"
 # Known-broken combos: skip all stmbench7 with plugin TinySTM WBCTL
 # (crashes during worker init at 2+ threads due to std::vector reallocation issue)
 echo "plugin tinystm_wbctl stmbench7" >> "$SKIP_FILE"
@@ -148,6 +149,9 @@ run_one() {
         log_progress "SKIP $label (known-broken: $combo)"
         return 0
     fi
+
+    # Record savepoint before launching (enables resume if interrupted)
+    echo "$label" >> "$SAVEPOINT"
 
     # Skip if already exists and looks successful (resume support)
     if [ -f "$outfile" ] && [ -s "$outfile" ]; then
@@ -240,7 +244,7 @@ echo ""
 
 # ── 1a. Plugin STAMP ─────────────────────────────────────────────────────
 echo "=== Building plugin STAMP benchmarks ==="
-PLUGIN_STAMP_DIR="plugin-benchmarks/STAMP"
+PLUGIN_STAMP_DIR="benchmarks/plugin/STAMP"
 PLUGIN_STAMP_BIN="$PLUGIN_STAMP_DIR/bin"
 
 mkdir -p "$PLUGIN_STAMP_BIN"
@@ -262,7 +266,7 @@ fi
 
 # ── 1b. Plugin TPCC ──────────────────────────────────────────────────────
 echo "=== Building plugin TPCC benchmarks ==="
-PLUGIN_TPCC_DIR="plugin-benchmarks/tpcc"
+PLUGIN_TPCC_DIR="benchmarks/plugin/tpcc"
 PLUGIN_TPCC_BIN="$PLUGIN_TPCC_DIR/bin"
 
 mkdir -p "$PLUGIN_TPCC_BIN"
@@ -283,7 +287,7 @@ fi
 
 # ── 1c. Plugin STMbench7 ─────────────────────────────────────────────────
 echo "=== Building plugin STMbench7 benchmarks ==="
-PLUGIN_STM7_DIR="plugin-benchmarks/stmbench7"
+PLUGIN_STM7_DIR="benchmarks/plugin/stmbench7"
 PLUGIN_STM7_BIN="$PLUGIN_STM7_DIR/bin"
 
 mkdir -p "$PLUGIN_STM7_BIN"
@@ -304,7 +308,7 @@ fi
 
 # ── 1d. Expli C++ benchmarks ─────────────────────────────────────────────
 echo "=== Building expli C++ benchmarks ==="
-EXPLI_DIR="expli-benchmarks"
+EXPLI_DIR="benchmarks/cpp"
 
 for backend_name in TINYSTM NOREC SGL; do
     echo "  [build] expli benchmarks with BACKEND=$backend_name ..."
@@ -319,10 +323,10 @@ for backend_name in TINYSTM NOREC SGL; do
     fi
 done
 
-# ── 1e. Rust benchmarks (skip if cargo not available) ───────────────────
+# ── 1e. Rust benchmarks ─────────────────────────────────────────────────
 echo "=== Building Rust STAMP benchmarks ==="
+RUST_DIR="benchmarks/rust"
 if command -v cargo &>/dev/null; then
-    RUST_DIR="rust_tm_api"
     for feature in wbctl norec tsxsgl; do
         echo "  [build] rust --features $feature ..."
         set +e
@@ -550,13 +554,9 @@ run_rust() {
     done
 }
 
-if command -v cargo &>/dev/null; then
-    run_rust tinystm_wbctl wbctl
-    run_rust norec norec
-    run_rust tsxsgl tsxsgl
-else
-    echo "  [SKIP] cargo not found — Rust benchmark runs skipped"
-fi
+run_rust tinystm_wbctl wbctl
+run_rust norec norec
+run_rust tsxsgl tsxsgl
 
 # ── Final progress ────────────────────────────────────────────────────────
 echo ""

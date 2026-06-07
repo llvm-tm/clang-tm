@@ -103,7 +103,7 @@ romulus   = ["tm/romulus"]
 xtm       = ["tm/xtm"]
 
 [dependencies]
-tm = { path = "../rust_tm_api/tm", default-features = false }
-containers = { path = "../rust_tm_api/containers" }
+tm = { path = "../../expli_instr/rust/workspace/tm", default-features = false }
+containers = { path = "../../expli_instr/rust/workspace/containers" }
 fastrand = "2"
 libc = "0.2"
