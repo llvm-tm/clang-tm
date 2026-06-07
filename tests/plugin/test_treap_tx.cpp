@@ -1,4 +1,4 @@
-#include "../../plugin-benchmarks/datastructures/tm_treap_map.hpp"
+#include "tm_treap_map.hpp"
 #include <cstdio>
 #include "tm_test_common.hpp"
 

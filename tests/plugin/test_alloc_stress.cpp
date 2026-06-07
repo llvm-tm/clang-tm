@@ -1,4 +1,4 @@
-#include "../../backends/tm_safe_map.hpp"
+#include "tm_safe_map.hpp"
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -14,7 +14,6 @@
 
 // 1. std::vector + push_back => new[] / delete[] on reallocation
 TM std::vector<int64_t> g_vec;
-TM std::atomic<int64_t> g_vec_total{0};
 TM std::atomic<int64_t> g_vec_pushes{0};
 
 // 2. std::map + insert/erase => new/delete of tree nodes
@@ -22,7 +21,6 @@ TM TMSafeMap<int64_t, int64_t> g_map;
 TM std::atomic<int64_t> g_map_ops{0};
 
 // 3. raw new/delete inside TX
-TM int64_t *g_raw_ptr = nullptr;
 TM std::atomic<int64_t> g_raw_written{0};
 
 // Sync
@@ -44,7 +42,6 @@ TX void vec_push_tx(int64_t base)
 		count++;
 	}
 	g_vec_pushes.fetch_add(count);
-	g_vec_total.fetch_add(count * base + (count * (count - 1)) / 2);
 }
 
 TX void map_insert_tx(int64_t base)
@@ -52,7 +49,6 @@ TX void map_insert_tx(int64_t base)
 	for (int64_t i = 0; i < MAP_INSERTS_PER_TX; i++) {
 		g_map[base + i] = (base + i) * 10;
 	}
-	printf("Passou aqui!\n");
 	g_map_ops.fetch_add(MAP_INSERTS_PER_TX);
 }
 
