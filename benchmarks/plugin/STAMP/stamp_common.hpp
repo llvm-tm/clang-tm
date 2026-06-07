@@ -14,6 +14,7 @@
 extern "C" {
 void tm_serialize_lock();
 void tm_serialize_unlock();
+int tm_serialize_unlock_all();
 }
 
 #define TM __attribute__((annotate("tm")))

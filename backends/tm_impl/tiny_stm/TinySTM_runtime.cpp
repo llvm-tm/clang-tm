@@ -3,6 +3,12 @@
  * Uses TinySTM for transactional memory
  */
 
+extern "C" {
+void tm_serialize_lock();
+void tm_serialize_unlock();
+int tm_serialize_unlock_all();
+}
+
 #include <atomic>
 #include <cassert>
 #include <csetjmp>
@@ -117,17 +123,33 @@ void tm_exit_thread()
 }
 
 // Serialization lock for functions that couldn't be cloned.
-// Using recursive_mutex so the same thread can re-acquire after a longjmp retry.
+// Uses recursive_mutex so the same thread can re-acquire after a longjmp retry.
+// The lock count is tracked thread-locally so abort_tx can clean it up before
+// siglongjmp (preventing permanent recursive-mutex leaks across aborts).
 static std::recursive_mutex g_serialize_mutex;
+static thread_local int g_serialize_lock_count = 0;
 
 void tm_serialize_lock()
 {
 	g_serialize_mutex.lock();
+	g_serialize_lock_count++;
 }
 
 void tm_serialize_unlock()
 {
+	g_serialize_lock_count--;
 	g_serialize_mutex.unlock();
+}
+
+// Called from abort_tx before siglongjmp to release the serialize lock.
+// Returns the number of unlocks performed (for assertion/debug).
+int tm_serialize_unlock_all()
+{
+	int n = g_serialize_lock_count;
+	for (int i = 0; i < n; i++)
+		g_serialize_mutex.unlock();
+	g_serialize_lock_count = 0;
+	return n;
 }
 
 void tm_set_jmpbuf(void *buf) { tinystm::jmpbuf = (sigjmp_buf *)buf; }

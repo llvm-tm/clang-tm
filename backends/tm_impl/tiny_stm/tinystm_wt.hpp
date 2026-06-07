@@ -159,6 +159,7 @@ abort_tx(const char *loc = "") //
 	TM_ASSERT(tx->active, "abort_tx: tx not active");
 
 	TM_EVENT(TX_ABORT, tx->id, tx->abort_count);
+	tm_serialize_unlock_all();
 
 	// Restore old values from write-set
 	for (auto &it : tx->write_set) {
