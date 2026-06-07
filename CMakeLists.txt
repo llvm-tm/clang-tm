@@ -57,9 +57,9 @@ message(STATUS "Using opt:   ${LLVM_OPT}")
 # Directories
 # ============================================================================
 
-set(PLUGIN_DIR ${CMAKE_SOURCE_DIR}/llvm_tm_plugin)
+set(PLUGIN_DIR ${CMAKE_SOURCE_DIR}/plugin)
 set(BACKENDS_DIR ${CMAKE_SOURCE_DIR}/backends)
-set(RUNTIMES_DIR ${BACKENDS_DIR}/runtimes)
+set(RUNTIMES_DIR ${BACKENDS_DIR}/tm_impl)
 set(BENCHMARKS_DIR ${CMAKE_SOURCE_DIR}/benchmarks)
 
 # ============================================================================
@@ -68,7 +68,7 @@ set(BENCHMARKS_DIR ${CMAKE_SOURCE_DIR}/benchmarks)
 
 if(BUILD_PLUGIN)
     add_library(TMInstrument SHARED
-        ${PLUGIN_DIR}/src/TMInstrumentPass.cpp
+        ${PLUGIN_DIR}/passes/TMInstrumentPass.cpp
     )
 
     target_link_libraries(TMInstrument PRIVATE LLVM::Core LLVM::Analysis)
@@ -97,7 +97,7 @@ if(BUILD_TESTS)
     )
 
     foreach(test_name ${TEST_NAMES})
-        set(test_src ${PLUGIN_DIR}/test/${test_name}.cpp)
+        set(test_src ${CMAKE_SOURCE_DIR}/tests/plugin/${test_name}.cpp)
 
         # Step 1: Compile to bitcode (with -fno-inline)
         add_custom_command(OUTPUT ${test_name}.bc
@@ -108,7 +108,7 @@ if(BUILD_TESTS)
 
         # Step 2: Run TM instrumentation plugin
         add_custom_command(OUTPUT ${test_name}.instr.bc
-            COMMAND ${LLVM_OPT} -load-pass-plugin=${CMAKE_SOURCE_DIR}/llvm_tm_plugin/bin/libTMInstrument.so
+            COMMAND ${LLVM_OPT} -load-pass-plugin=${CMAKE_SOURCE_DIR}/plugin/bin/libTMInstrument.so
                 -passes=tm-instrument ${test_name}.bc -o ${test_name}.instr.bc
             DEPENDS ${test_name}.bc TMInstrument
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -140,9 +140,9 @@ endif()
 if(BUILD_BENCHMARKS)
     # Bank benchmark
     add_custom_target(bank_benchmark ALL
-        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/test/bank/Makefile bank_singlelock
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/plugin/bank/Makefile bank_singlelock
         DEPENDS TMInstrument
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/test/bank
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/plugin/bank
     )
 
     # Data structures

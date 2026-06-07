@@ -13,7 +13,7 @@
 #include <vector>
 
 // TinySTM function declarations (not globals — those come from TinySTM_runtime.cpp at link)
-#include "../../backends/TinySTM/tinystm_wbctl.hpp"
+#include "tinystm_wbctl.hpp"
 
 // ---- Manual TM wrappers (bypassing plugin) ----
 using namespace tinystm;
@@ -38,13 +38,11 @@ static void tx_abort() {
 // ---- Shared globals (same as test_alloc_stress) ----
 
 std::vector<int64_t> g_vec;
-std::atomic<int64_t> g_vec_total{0};
 std::atomic<int64_t> g_vec_pushes{0};
 
 std::vector<std::pair<int64_t, int64_t>> g_map_data;
 std::atomic<int64_t> g_map_ops{0};
 
-int64_t *g_raw_ptr = nullptr;
 std::atomic<int64_t> g_raw_written{0};
 
 // Sync

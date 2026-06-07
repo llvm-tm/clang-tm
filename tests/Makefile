@@ -7,13 +7,13 @@
 .PHONY: all run clean
 
 all:
-	$(MAKE) -C backends all
+	$(MAKE) -C backends/tm_impl all
 	$(MAKE) -C expli-api all
 
 run:
-	$(MAKE) -C backends run
-	@echo "Plugin tests: run 'make -C ../llvm_tm_plugin run' from llvm_tm_plugin/"
-	@echo "(Plugin test files live here, but build via llvm_tm_plugin Makefile)"
+	$(MAKE) -C backends/tm_impl run
+	@echo "Plugin tests: run 'make -C ../plugin run' from plugin/"
+	@echo "(Plugin test files live here, but build via plugin/ Makefile)"
 
 clean:
-	$(MAKE) -C backends clean
+	$(MAKE) -C backends/tm_impl clean

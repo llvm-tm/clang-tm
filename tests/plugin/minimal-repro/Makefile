@@ -1,7 +1,7 @@
-CLANG_TM ?= ../../../llvm_tm_plugin/clang-tm
+CLANG_TM ?= ../../../plugin/clang-tm
 CXXFLAGS ?= -std=c++20 -O1 -pthread -fno-inline -fno-vectorize -fno-slp-vectorize -fno-unroll-loops -fno-stack-protector
 BACKENDS ?= ../../../backends
-RUNTIMES ?= $(BACKENDS)/runtimes
+RUNTIMES ?= $(BACKENDS)/tm_impl
 BIN_DIR ?= bin
 
 # Source file: repro2.cpp for STMbench7-like (global vector<CompositePart>),
@@ -18,20 +18,20 @@ TARGETS = \
 $(TARGETS): $(SOURCE) | $(BIN_DIR)
 
 test_repro_norec: $(SOURCE) | $(BIN_DIR)
-	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/NOrec_runtime.cpp \
-	-I$(BACKENDS)/NOrec -I$(BACKENDS) -o $(BIN_DIR)/$@ $<
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/norec/NOrec_runtime.cpp \
+	-I$(BACKENDS)/tm_impl/norec -I$(BACKENDS) -o $(BIN_DIR)/$@ $<
 
 test_repro_tinystm_wbctl: $(SOURCE) | $(BIN_DIR)
-	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/TinySTM_runtime.cpp \
-	-DDESIGN_WBCTL -I$(BACKENDS)/TinySTM -I$(BACKENDS) -o $(BIN_DIR)/$@ $<
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/tiny_stm/TinySTM_runtime.cpp \
+	-DDESIGN_WBCTL -I$(BACKENDS)/tm_impl/tiny_stm -I$(BACKENDS) -o $(BIN_DIR)/$@ $<
 
 test_repro_swisstm: $(SOURCE) | $(BIN_DIR)
-	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/SwissTM_runtime.cpp \
-	-I$(BACKENDS)/SwissTM -I$(BACKENDS) -o $(BIN_DIR)/$@ $<
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/swisstm/SwissTM_runtime.cpp \
+	-I$(BACKENDS)/tm_impl/swisstm -I$(BACKENDS) -o $(BIN_DIR)/$@ $<
 
 test_repro_tl2: $(SOURCE) | $(BIN_DIR)
-	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/tl2_runtime.cpp \
-	-I$(BACKENDS)/TL2 -I$(BACKENDS) -o $(BIN_DIR)/$@ $<
+	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/tl2/tl2_runtime.cpp \
+	-I$(BACKENDS)/tm_impl/tl2 -I$(BACKENDS) -o $(BIN_DIR)/$@ $<
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)

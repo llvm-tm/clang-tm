@@ -1,7 +1,7 @@
 # Top-level Makefile for TM API C++ Project
 # Builds: LLVM plugin, plugin benchmarks, expli benchmarks, tests
 
-include llvm_tm_plugin/llvm-tool-helper.mk
+include plugin/llvm-tool-helper.mk
 LLVM_CONFIG_ARGS := $(shell $(LLVM_CONFIG) --cxxflags --ldflags --system-libs --libs core analysis 2>/dev/null || echo "-I$(shell brew --prefix llvm 2>/dev/null || echo /usr/lib/llvm-22)/include -L$(shell brew --prefix llvm 2>/dev/null || echo /usr/lib/llvm-22)/lib -lLLVM-22")
 
 CXX ?= $(LLVM_CXX)
@@ -14,10 +14,10 @@ endif
 BACKEND ?= tinystm
 
 PROJECT_ROOT := $(shell pwd)
-LLVM_PLUGIN_DIR := $(PROJECT_ROOT)/llvm_tm_plugin
+LLVM_PLUGIN_DIR := $(PROJECT_ROOT)/plugin
 BACKENDS_DIR := $(PROJECT_ROOT)/backends
-PLUGIN_BENCHMARKS_DIR := $(PROJECT_ROOT)/plugin-benchmarks
-EXPLI_BENCHMARKS_DIR := $(PROJECT_ROOT)/expli-benchmarks
+PLUGIN_BENCHMARKS_DIR := $(PROJECT_ROOT)/benchmarks/plugin
+EXPLI_BENCHMARKS_DIR := $(PROJECT_ROOT)/benchmarks/cpp
 TESTS_DIR := $(PROJECT_ROOT)/tests
 
 PLUGIN := $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
@@ -37,8 +37,10 @@ info:
 
 plugin: $(PLUGIN)
 
-$(PLUGIN): $(LLVM_PLUGIN_DIR)/src/TMInstrumentPass.cpp | $(LLVM_PLUGIN_DIR)/bin
-	$(CXX) -fPIC -std=c++20 -shared $< -o $@ $(LLVM_CONFIG_ARGS)
+$(PLUGIN): $(LLVM_PLUGIN_DIR)/passes/TMInstrumentPass.cpp | $(LLVM_PLUGIN_DIR)/bin
+	$(CXX) -fPIC -std=c++20 -shared $< -o $@ \
+	  -I$(LLVM_PLUGIN_DIR)/passes -I$(LLVM_PLUGIN_DIR)/analysis \
+	  -I$(BACKENDS_DIR)/tm_impl/common $(LLVM_CONFIG_ARGS)
 
 $(LLVM_PLUGIN_DIR)/bin:
 	mkdir -p $@
