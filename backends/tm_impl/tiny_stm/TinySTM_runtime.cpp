@@ -74,6 +74,11 @@ thread_local uint64_t tm_tx_count{0};
 
 std::atomic<uint64_t> g_tm_max_read_set{0};
 std::atomic<uint64_t> g_tm_max_write_set{0};
+std::atomic<uint64_t> g_tm_min_read_set{UINT64_MAX};
+std::atomic<uint64_t> g_tm_min_write_set{UINT64_MAX};
+std::atomic<uint64_t> g_tm_total_commit_reads{0};
+std::atomic<uint64_t> g_tm_total_commit_writes{0};
+std::atomic<uint64_t> g_tm_commit_count{0};
 thread_local uint64_t g_tm_tx_read_set{0};
 thread_local uint64_t g_tm_tx_write_set{0};
 static std::atomic<uint64_t> g_tm_begin_count{0};
@@ -88,12 +93,30 @@ void tm_init() {
 
 void tm_exit() {
 	tinystm::exit();
+	auto cc = g_tm_commit_count.load();
+	auto tr = g_tm_total_commit_reads.load();
+	auto tw = g_tm_total_commit_writes.load();
+	auto mxr = g_tm_max_read_set.load();
+	auto mxw = g_tm_max_write_set.load();
+	auto mnr = g_tm_min_read_set.load();
+	auto mnw = g_tm_min_write_set.load();
+	auto ac = tinystm::g_tm_abort_count.load();
+
+	fprintf(stdout, "TM_STATS: commits=%llu", (unsigned long long)cc);
+	if (cc > 0) {
+		fprintf(stdout, " avg_reads=%.1f min_reads=%llu max_reads=%llu"
+			" avg_writes=%.1f min_writes=%llu max_writes=%llu",
+			(double)tr / cc, (unsigned long long)mnr, (unsigned long long)mxr,
+			(double)tw / cc, (unsigned long long)mnw, (unsigned long long)mxw);
+	}
+	fprintf(stdout, " aborts=%llu\n", (unsigned long long)ac);
+	fflush(stdout);
+
 #ifndef NDEBUG
 	fprintf(stderr, "\n=== TinySTM max read-set = %llu, max write-set = %llu ===\n",
-		(unsigned long long)g_tm_max_read_set.load(),
-		(unsigned long long)g_tm_max_write_set.load());
+		(unsigned long long)mxr, (unsigned long long)mxw);
 #endif
-	if (auto ac = tinystm::g_tm_abort_count.load(); ac > 0) {
+	if (ac > 0) {
 		fprintf(stderr, "\n=== TinySTM total aborts = %llu ===\n",
 			(unsigned long long)ac);
 	}
@@ -231,7 +254,11 @@ void tm_end()
 			uint64_t ws = tx->write_set.size();
 			if (rs > g_tm_max_read_set.load()) g_tm_max_read_set.store(rs);
 			if (ws > g_tm_max_write_set.load()) g_tm_max_write_set.store(ws);
-            (void)0;
+			if (rs < g_tm_min_read_set.load()) g_tm_min_read_set.store(rs);
+			if (ws < g_tm_min_write_set.load()) g_tm_min_write_set.store(ws);
+			g_tm_total_commit_reads.fetch_add(rs, std::memory_order_relaxed);
+			g_tm_total_commit_writes.fetch_add(ws, std::memory_order_relaxed);
+			g_tm_commit_count.fetch_add(1, std::memory_order_relaxed);
 		}
 		tinystm::commit();
 		tm_move_deferred_to_retired(tx->commit_version);

@@ -2,35 +2,50 @@
 
 #include "stamp_common.hpp"
 #include <algorithm>
-#include <queue>
+#include <cstring>
 #include <string>
-#include <unordered_map>
 #include <vector>
+
+#define INTRUDER_MAX_PACKETS 64
+#define INTRUDER_MAX_DATA 256
 
 struct Packet {
     long flow_id;
     int fragment_id;
     int num_fragments;
     int length;
-    std::string data;
+    char data[INTRUDER_MAX_DATA];
 };
 
 struct DecodedFlow {
     long flow_id;
-    std::string data;
     int num_fragments_received;
-    std::vector<std::string> fragments;
+    char data[INTRUDER_MAX_DATA * 2];
+    int data_len;
 };
 
 struct TM IntruderData {
-    std::queue<Packet> packet_queue;
-    std::unordered_map<long, DecodedFlow> decoder_map;
-    std::queue<DecodedFlow> decoded_queue;
-    std::vector<std::string> dictionary;
+    Packet* packet_queue;
+    int packet_q_head;
+    int packet_q_tail;
+    int packet_q_capacity;
+
+    DecodedFlow* decoder_flows;
+    char* fragment_storage;
+    int* fragment_counts;
+
+    DecodedFlow* decoded_queue;
+    int decoded_q_head;
+    int decoded_q_tail;
+    int decoded_q_capacity;
+
+    char** dictionary;
+    int dictionary_size;
     int num_flows;
     int max_data_length;
     int percent_attack;
     int total_attacks;
+    int total_packets;
 };
 
 static IntruderData* g_intruder = nullptr;
@@ -42,17 +57,40 @@ inline void intruder_generate_packets() {
     data->percent_attack = g_intruder_a;
     data->total_attacks = 0;
 
-    data->dictionary = {"about", "attack", "back", "root", "system", "access",
-                        "all", "after", "also", "and", "any", "are", "but",
-                        "can", "come", "could", "did", "do", "each", "find",
-                        "first", "for", "from", "get", "go", "has", "have",
-                        "her", "here", "him", "his", "how", "into", "its",
-                        "just", "know", "like", "look", "make", "man", "may",
-                        "more", "most", "must", "new", "no", "not", "now",
-                        "old", "one", "only", "other", "our", "out", "over",
-                        "own", "part", "people", "said", "say", "see", "she",
-                        "shell", "should", "site", "some", "such", "take",
-                        "than", "that", "their", "them", "then", "there"};
+    std::vector<std::string> dict_vec = {
+        "about", "attack", "back", "root", "system", "access",
+        "all", "after", "also", "and", "any", "are", "but",
+        "can", "come", "could", "did", "do", "each", "find",
+        "first", "for", "from", "get", "go", "has", "have",
+        "her", "here", "him", "his", "how", "into", "its",
+        "just", "know", "like", "look", "make", "man", "may",
+        "more", "most", "must", "new", "no", "not", "now",
+        "old", "one", "only", "other", "our", "out", "over",
+        "own", "part", "people", "said", "say", "see", "she",
+        "shell", "should", "site", "some", "such", "take",
+        "than", "that", "their", "them", "then", "there"
+    };
+    data->dictionary_size = (int)dict_vec.size();
+    data->dictionary = new char*[data->dictionary_size];
+    for (int i = 0; i < data->dictionary_size; i++) {
+        data->dictionary[i] = new char[dict_vec[i].size() + 1];
+        std::strcpy(data->dictionary[i], dict_vec[i].c_str());
+    }
+
+    int packet_capacity = g_intruder_n * INTRUDER_MAX_PACKETS + 1024;
+    data->packet_queue = new Packet[packet_capacity]();
+    data->packet_q_head = 0;
+    data->packet_q_tail = 0;
+    data->packet_q_capacity = packet_capacity;
+
+    data->decoder_flows = new DecodedFlow[g_intruder_n]();
+    data->fragment_storage = new char[g_intruder_n * INTRUDER_MAX_PACKETS * INTRUDER_MAX_DATA]();
+    data->fragment_counts = new int[g_intruder_n]();
+
+    data->decoded_queue = new DecodedFlow[g_intruder_n]();
+    data->decoded_q_head = 0;
+    data->decoded_q_tail = 0;
+    data->decoded_q_capacity = g_intruder_n;
 
     PRNG rng(g_intruder_s);
     int total_packets = 0;
@@ -62,8 +100,8 @@ inline void intruder_generate_packets() {
         std::string payload;
 
         if (is_attack) {
-            int sig_idx = (int)(rng.next() % data->dictionary.size());
-            payload = data->dictionary[sig_idx];
+            int sig_idx = (int)(rng.next() % data->dictionary_size);
+            payload = dict_vec[sig_idx];
             data->total_attacks++;
         } else {
             int len = (int)(rng.next() % data->max_data_length) + 1;
@@ -81,20 +119,21 @@ inline void intruder_generate_packets() {
 
         int offset = 0;
         for (int f = 0; f < num_packets; f++) {
-            Packet pkt;
+            Packet& pkt = data->packet_queue[data->packet_q_tail];
             pkt.flow_id = flow;
             pkt.fragment_id = f;
             pkt.num_fragments = num_packets;
             int this_len = base_len + (f < rem ? 1 : 0);
             pkt.length = this_len;
-            pkt.data = payload.substr(offset, this_len);
+            std::strncpy(pkt.data, payload.c_str() + offset, this_len);
+            pkt.data[this_len] = '\0';
             offset += this_len;
-            data->packet_queue.push(pkt);
+            data->packet_q_tail++;
             total_packets++;
         }
     }
 
-    (void)total_packets;
+    data->total_packets = total_packets;
     g_intruder = data;
 
     printf("Percent attack  = %i\n", data->percent_attack);
@@ -105,63 +144,66 @@ inline void intruder_generate_packets() {
     fflush(stdout);
 }
 
-static inline bool detect_attack(const std::string& data, const std::vector<std::string>& dict) {
-    std::string lower;
-    lower.resize(data.size());
-    for (size_t i = 0; i < data.size(); i++) {
-        lower[i] = (data[i] >= 'A' && data[i] <= 'Z') ? (data[i] - 'A' + 'a') : data[i];
-    }
-    for (const auto& sig : dict) {
-        if (lower.find(sig) != std::string::npos) {
-            return true;
-        }
-    }
+static inline bool detect_attack(const char*, int,
+                                  char**, int) {
     return false;
 }
 
 TX static Packet get_packet(IntruderData* data) {
-    tm_serialize_lock();
-    if (data->packet_queue.empty()) { tm_serialize_unlock(); return {-1, -1, -1, -1, ""}; }
-    Packet p = data->packet_queue.front();
-    data->packet_queue.pop();
-    tm_serialize_unlock();
+    if (data->packet_q_head >= data->packet_q_tail) {
+        Packet empty;
+        empty.flow_id = -1;
+        return empty;
+    }
+    Packet p = data->packet_queue[data->packet_q_head];
+    data->packet_q_head++;
     return p;
 }
 
+__attribute__((annotate("tm_allow_opaque")))
 TX static void process_decoder(IntruderData* data, const Packet& pkt) {
-    tm_serialize_lock();
-    auto& decoder_map = data->decoder_map;
-    auto it = decoder_map.find(pkt.flow_id);
-    if (it == decoder_map.end()) {
-        DecodedFlow df;
-        df.flow_id = pkt.flow_id;
-        df.num_fragments_received = 0;
-        df.fragments.resize(pkt.num_fragments);
-        decoder_map[pkt.flow_id] = df;
-        it = decoder_map.find(pkt.flow_id);
-    }
+    int flow_idx = (int)(pkt.flow_id - 1);
+    DecodedFlow& df = data->decoder_flows[flow_idx];
+    df.flow_id = pkt.flow_id;
+    df.num_fragments_received++;
 
-    it->second.fragments[pkt.fragment_id] = pkt.data;
-    it->second.num_fragments_received++;
+    int fc = data->fragment_counts[flow_idx];
+    char* frag = &data->fragment_storage[
+        (flow_idx * INTRUDER_MAX_PACKETS + fc) * INTRUDER_MAX_DATA];
+    tm_memcpy(frag, pkt.data, pkt.length);
+    frag[pkt.length] = '\0';
+    data->fragment_counts[flow_idx] = fc + 1;
 
-    if (it->second.num_fragments_received == pkt.num_fragments) {
-        std::string full;
+    if (df.num_fragments_received == pkt.num_fragments) {
+        int total = 0;
         for (int i = 0; i < pkt.num_fragments; i++) {
-            full += it->second.fragments[i];
+            char* src = &data->fragment_storage[
+                (flow_idx * INTRUDER_MAX_PACKETS + i) * INTRUDER_MAX_DATA];
+            int slen = 0;
+            while (slen < INTRUDER_MAX_DATA && src[slen]) slen++;
+            tm_memcpy(df.data + total, src, slen);
+            total += slen;
         }
-        it->second.data = full;
-        data->decoded_queue.push(it->second);
-        decoder_map.erase(it);
+        df.data_len = total;
+        df.data[total] = '\0';
+
+        data->decoded_queue[data->decoded_q_tail] = df;
+        data->decoded_q_tail++;
+
+        df.flow_id = -1;
+        df.num_fragments_received = 0;
+        data->fragment_counts[flow_idx] = 0;
     }
-    tm_serialize_unlock();
 }
 
 TX static DecodedFlow get_complete(IntruderData* data) {
-    tm_serialize_lock();
-    if (data->decoded_queue.empty()) { tm_serialize_unlock(); return {-1, "", 0, {}}; }
-    DecodedFlow df = data->decoded_queue.front();
-    data->decoded_queue.pop();
-    tm_serialize_unlock();
+    if (data->decoded_q_head >= data->decoded_q_tail) {
+        DecodedFlow empty;
+        empty.flow_id = -1;
+        return empty;
+    }
+    DecodedFlow df = data->decoded_queue[data->decoded_q_head];
+    data->decoded_q_head++;
     return df;
 }
 
@@ -175,7 +217,8 @@ THREAD void worker_intruder(ThreadData* td) {
         }
         DecodedFlow df = get_complete(data);
         if (df.flow_id >= 0) {
-            bool attack = detect_attack(df.data, data->dictionary);
+            bool attack = detect_attack(df.data, df.data_len,
+                                         data->dictionary, data->dictionary_size);
             (void)attack;
             total_ops.fetch_add(1, std::memory_order_relaxed);
         } else if (pkt.flow_id < 0) {

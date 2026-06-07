@@ -15,6 +15,29 @@ extern "C" {
 void tm_serialize_lock();
 void tm_serialize_unlock();
 int tm_serialize_unlock_all();
+void* tm_calloc(size_t, size_t);
+}
+
+// TM-safe memory operations (no opaque libc calls)
+static inline void tm_memcpy(char* dst, const char* src, int n) {
+    for (int i = 0; i < n; i++) dst[i] = src[i];
+}
+
+static inline int tm_strcmp(const char* a, const char* b, int alen, int blen) {
+    int min = alen < blen ? alen : blen;
+    for (int i = 0; i < min; i++) {
+        if (a[i] != b[i]) return (unsigned char)a[i] - (unsigned char)b[i];
+    }
+    if (alen < blen) return -1;
+    if (alen > blen) return 1;
+    return 0;
+}
+
+static inline int tm_strncmp(const char* a, const char* b, int n) {
+    for (int i = 0; i < n; i++) {
+        if (a[i] != b[i]) return (unsigned char)a[i] - (unsigned char)b[i];
+    }
+    return 0;
 }
 
 #define TM __attribute__((annotate("tm")))

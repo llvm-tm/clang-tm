@@ -2,9 +2,6 @@
 
 #include "stamp_common.hpp"
 #include <algorithm>
-#include <map>
-#include <string>
-#include <vector>
 
 struct Reservation {
     int id;
@@ -26,10 +23,10 @@ struct ReservationInfo {
 };
 
 struct TM VacationData {
-    std::map<int, Reservation> cars;
-    std::map<int, Reservation> rooms;
-    std::map<int, Reservation> flights;
-    std::map<int, Customer> customers;
+    Reservation* cars;
+    Reservation* rooms;
+    Reservation* flights;
+    Customer* customers;
     int num_relations;
     int query_range;
     int num_queries_per_tx;
@@ -45,13 +42,23 @@ inline void vacation_generate_prices() {
     data->num_queries_per_tx = g_vacation_n;
     data->percent_user = g_vacation_u;
 
+    int nr = data->num_relations;
+    int cr = data->query_range + 10;
+    data->cars = new Reservation[nr]();
+    data->rooms = new Reservation[nr]();
+    data->flights = new Reservation[nr]();
+    data->customers = new Customer[cr]();
+
+    for (int i = 0; i < cr; i++)
+        data->customers[i].id = -1;
+
     PRNG rng(42);
-    for (int i = 1; i <= data->num_relations; i++) {
+    for (int i = 1; i <= nr; i++) {
         int num = (int)(rng.next() % 5 + 1) * 100;
         int price = (int)(rng.next() % 5) * 10 + 50;
-        data->cars[i] = {i, 0, num, num, price};
-        data->rooms[i] = {i, 0, num, num, price};
-        data->flights[i] = {i, 0, num, num, price};
+        data->cars[i - 1] = {i, 0, num, num, price};
+        data->rooms[i - 1] = {i, 0, num, num, price};
+        data->flights[i - 1] = {i, 0, num, num, price};
     }
 
     g_vacation = data;
@@ -66,75 +73,73 @@ inline void vacation_generate_prices() {
     fflush(stdout);
 }
 
-TX static int query_reservation(std::map<int, Reservation>* table, int id) {
-    auto it = table->find(id);
-    if (it == table->end()) return -1;
-    return it->second.num_free;
+static inline bool reservation_exists(Reservation* table, int id) {
+    return table[id - 1].num_total > 0;
 }
 
-TX static int query_price(std::map<int, Reservation>* table, int id) {
-    auto it = table->find(id);
-    if (it == table->end()) return -1;
-    return it->second.price;
+TX static int query_reservation(Reservation* table, int id) {
+    if (!reservation_exists(table, id)) return -1;
+    return table[id - 1].num_free;
 }
 
-TX static bool add_reservation(std::map<int, Reservation>* table, int id, int num, int price) {
-    auto it = table->find(id);
-    if (it != table->end()) {
-        it->second.num_free += num;
-        it->second.num_total += num;
-        it->second.price = price;
-    } else {
-        (*table)[id] = {id, 0, num, num, price};
-    }
+TX static int query_price(Reservation* table, int id) {
+    if (!reservation_exists(table, id)) return -1;
+    return table[id - 1].price;
+}
+
+TX static bool add_reservation(Reservation* table, int id, int num, int price) {
+    Reservation& r = table[id - 1];
+    r.num_free += num;
+    r.num_total += num;
+    r.price = price;
     return true;
 }
 
-TX static bool delete_reservation(std::map<int, Reservation>* table, int id, int num) {
-    auto it = table->find(id);
-    if (it == table->end()) return false;
-    if (it->second.num_free < num) return false;
-    it->second.num_free -= num;
-    it->second.num_total -= num;
-    if (it->second.num_total == 0) {
-        table->erase(it);
-    }
+TX static bool delete_reservation(Reservation* table, int id, int num) {
+    Reservation& r = table[id - 1];
+    if (r.num_total == 0) return false;
+    if (r.num_free < num) return false;
+    r.num_free -= num;
+    r.num_total -= num;
     return true;
 }
 
-TX static int make_reservation(std::map<int, Reservation>* table, int id) {
-    auto it = table->find(id);
-    if (it == table->end() || it->second.num_free <= 0) return -1;
-    it->second.num_used++;
-    it->second.num_free--;
-    return it->second.price;
+TX static int make_reservation(Reservation* table, int id) {
+    Reservation& r = table[id - 1];
+    if (r.num_total == 0 || r.num_free <= 0) return -1;
+    r.num_used++;
+    r.num_free--;
+    return r.price;
 }
 
-TX static int cancel_reservation(std::map<int, Reservation>* table, int id) {
-    auto it = table->find(id);
-    if (it == table->end() || it->second.num_used <= 0) return -1;
-    it->second.num_used--;
-    it->second.num_free++;
-    return it->second.price;
+TX static int cancel_reservation(Reservation* table, int id) {
+    Reservation& r = table[id - 1];
+    if (r.num_total == 0 || r.num_used <= 0) return -1;
+    r.num_used--;
+    r.num_free++;
+    return r.price;
 }
 
 TX static void add_customer(VacationData* data, int customer_id) {
-    if (data->customers.find(customer_id) == data->customers.end()) {
-        data->customers[customer_id] = {customer_id, 0};
+    Customer& c = data->customers[customer_id - 1];
+    if (c.id == -1) {
+        c.id = customer_id;
+        c.bill = 0;
     }
 }
 
 TX static int query_customer_bill(VacationData* data, int customer_id) {
-    auto it = data->customers.find(customer_id);
-    if (it == data->customers.end()) return -1;
-    return it->second.bill;
+    Customer& c = data->customers[customer_id - 1];
+    if (c.id == -1) return -1;
+    return c.bill;
 }
 
 TX static int delete_customer(VacationData* data, int customer_id) {
-    auto it = data->customers.find(customer_id);
-    if (it == data->customers.end()) return -1;
-    int bill = it->second.bill;
-    data->customers.erase(it);
+    Customer& c = data->customers[customer_id - 1];
+    if (c.id == -1) return -1;
+    int bill = c.bill;
+    c.id = -1;
+    c.bill = 0;
     return bill;
 }
 
@@ -153,10 +158,10 @@ TX static void make_reservation_tx(VacationData* data, int customer_id) {
         int t = (int)(rng.next() % 3);
         int id = (int)(rng.next() % data->query_range) + 1;
 
-        std::map<int, Reservation>* table = nullptr;
-        if (t == 0) table = &data->cars;
-        else if (t == 1) table = &data->flights;
-        else table = &data->rooms;
+        Reservation* table = nullptr;
+        if (t == 0) table = data->cars;
+        else if (t == 1) table = data->flights;
+        else table = data->rooms;
 
         int avail = query_reservation(table, id);
         if (avail > 0) {
@@ -172,14 +177,14 @@ TX static void make_reservation_tx(VacationData* data, int customer_id) {
     if (found) {
         for (int t = 0; t < 3; t++) {
             if (best_ids[t] > 0) {
-                std::map<int, Reservation>* table = nullptr;
-                if (t == 0) table = &data->cars;
-                else if (t == 1) table = &data->flights;
-                else table = &data->rooms;
+                Reservation* table = nullptr;
+                if (t == 0) table = data->cars;
+                else if (t == 1) table = data->flights;
+                else table = data->rooms;
 
                 int p = make_reservation(table, best_ids[t]);
                 if (p >= 0) {
-                    data->customers[customer_id].bill += p;
+                    data->customers[customer_id - 1].bill += p;
                 }
             }
         }
@@ -187,9 +192,10 @@ TX static void make_reservation_tx(VacationData* data, int customer_id) {
 }
 
 TX static void delete_customer_tx(VacationData* data, int customer_id) {
-    auto it = data->customers.find(customer_id);
-    if (it != data->customers.end()) {
-        data->customers.erase(it);
+    Customer& c = data->customers[customer_id - 1];
+    if (c.id != -1) {
+        c.id = -1;
+        c.bill = 0;
     }
 }
 
@@ -199,10 +205,10 @@ TX static void update_tables_tx(VacationData* data) {
     int id = (int)(rng.next() % data->query_range) + 1;
     int op = (int)(rng.next() % 2);
 
-    std::map<int, Reservation>* table = nullptr;
-    if (type == 0) table = &data->cars;
-    else if (type == 1) table = &data->flights;
-    else table = &data->rooms;
+    Reservation* table = nullptr;
+    if (type == 0) table = data->cars;
+    else if (type == 1) table = data->flights;
+    else table = data->rooms;
 
     if (op == 1) {
         int price = (int)(rng.next() % 5) * 10 + 50;

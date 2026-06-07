@@ -92,9 +92,9 @@ const char *g_yada_i = nullptr;
 static void print_usage()
 {
 	std::cout
-	    << "Usage: stamp -b <benchmark> -t <threads> [benchmark-specific options]\n\n"
+	    << "Usage: stamp -b <benchmark> -p <threads> [benchmark-specific options]\n\n"
 	    << "Benchmark-specific options:\n"
-	    << "  bayes:    -v <vars> -r <records> -n <max_parents> -p <pct_parent>\n"
+	    << "  bayes:    -v <vars> -r <records> -n <max_parents> -c <pct_parent>\n"
 	    << "            -s <seed> -i <penalty> -e <max_edges>\n"
 	    << "  genome:   -g <gene_len> -s <seg_len> -n <num_segments>\n"
 	    << "  intruder: -a <pct_attack> -l <max_packets> -n <streams> -s <seed>\n"
@@ -260,7 +260,7 @@ MAIN int main(int argc, char *argv[])
 	g_num_threads = DEFAULT_NB_THREADS;
 
 	for (int i = 1; i < argc; i++) {
-		if (strcmp(argv[i], "-t") == 0) {
+		if (strcmp(argv[i], "-p") == 0) {
 			parse_int(argc, argv, i, g_num_threads);
 		} else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
 			print_usage();
@@ -297,7 +297,7 @@ MAIN int main(int argc, char *argv[])
 					parse_int(argc, argv, i, g_bayes_r);
 				else if (strcmp(argv[i], "-n") == 0)
 					parse_int(argc, argv, i, g_bayes_n);
-				else if (strcmp(argv[i], "-p") == 0)
+				else if (strcmp(argv[i], "-c") == 0)
 					parse_int(argc, argv, i, g_bayes_p);
 				else if (strcmp(argv[i], "-s") == 0)
 					parse_int(argc, argv, i, g_bayes_s);
@@ -317,7 +317,10 @@ MAIN int main(int argc, char *argv[])
 					parse_int(argc, argv, i, g_genome_s);
 				else if (strcmp(argv[i], "-n") == 0)
 					parse_int(argc, argv, i, g_genome_n);
-				else {
+				else if (strcmp(argv[i], "-t") == 0) {
+					int dummy;
+					parse_int(argc, argv, i, dummy);
+				} else {
 					std::cerr << "Unknown flag: " << argv[i] << "\n";
 					return 1;
 				}
