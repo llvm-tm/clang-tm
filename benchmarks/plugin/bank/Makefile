@@ -29,7 +29,7 @@ bank_norec: bank.cpp | $(BIN_DIR)
 	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/norec/NOrec_runtime.cpp -I$(BACKENDS)/tm_impl/norec -o $(BIN_DIR)/$@ $<
 
 bank_tl2: bank.cpp | $(BIN_DIR)
-	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/tl2/tl2_runtime.cpp -o $(BIN_DIR)/$@ $<
+	$(CLANG_TM) $(CXXFLAGS) -I$(BACKENDS)/tm_impl --runtime $(RUNTIMES)/tl2/tl2_runtime.cpp -o $(BIN_DIR)/$@ $<
 
 bank_tinystm: bank.cpp | $(BIN_DIR)
 	$(CLANG_TM) $(CXXFLAGS) --runtime $(RUNTIMES)/tiny_stm/TinySTM_runtime.cpp -I$(BACKENDS)/tm_impl/tiny_stm -DDESIGN_WBCTL -o $(BIN_DIR)/$@ $<

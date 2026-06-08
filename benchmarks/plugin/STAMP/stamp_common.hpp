@@ -18,6 +18,11 @@ int tm_serialize_unlock_all();
 void* tm_calloc(size_t, size_t);
 }
 
+// RAII helpers for TM-region allocation (zero-initialised).
+// Use these in non-TX init code where the plugin cannot redirect new.
+template <typename T> static T* tm_new()     { return (T*)tm_calloc(1, sizeof(T)); }
+template <typename T> static T* tm_new_array(size_t n) { return (T*)tm_calloc(n, sizeof(T)); }
+
 // TM-safe memory operations (no opaque libc calls)
 static inline void tm_memcpy(char* dst, const char* src, int n) {
     for (int i = 0; i < n; i++) dst[i] = src[i];
