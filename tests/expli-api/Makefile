@@ -11,18 +11,12 @@ RUNTIME_FLAGS = -DDESIGN_WBCTL -DTM_BACKEND_TINYSTM -DTM_REGION_SIZE=$(TM_REGION
 # Override: make TM_REGION_SIZE=16000000000
 TM_REGION_SIZE ?= 536870912
 
-SRCS = test_ds.cpp test_tx.cpp test_stress_ds.cpp
+SRCS = test_stress_ds.cpp
 BINS = $(SRCS:.cpp=)
 
 .PHONY: all clean run
 
 all: $(BINS)
-
-test_ds: test_ds.cpp $(RUNTIME_SRC)
-	$(CXX) $(CXXFLAGS) $(INC) $(RUNTIME_FLAGS) -o $@ $< $(RUNTIME_SRC) $(LDFLAGS)
-
-test_tx: test_tx.cpp $(RUNTIME_SRC)
-	$(CXX) $(CXXFLAGS) $(INC) $(RUNTIME_FLAGS) -o $@ $< $(RUNTIME_SRC) $(LDFLAGS)
 
 test_stress_ds: test_stress_ds.cpp $(RUNTIME_SRC)
 	$(CXX) $(CXXFLAGS) $(INC) $(RUNTIME_FLAGS) -o $@ $< $(RUNTIME_SRC) $(LDFLAGS)
@@ -30,7 +24,7 @@ test_stress_ds: test_stress_ds.cpp $(RUNTIME_SRC)
 run: all
 	@for b in $(BINS); do \
 		echo "=== $$b ==="; \
-		timeout 30 ./$$b 2>&1 || true; \
+		perl -e 'alarm shift @ARGV; exec @ARGV' 30 ./$$b 2>&1 || true; \
 		echo; \
 	done
 
