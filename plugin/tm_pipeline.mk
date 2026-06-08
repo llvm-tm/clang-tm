@@ -107,6 +107,7 @@ TM_RUNTIME_dudetm        = $(RUNTIMES_DIR)/dudetm/DUDETM_runtime.cpp
 TM_RUNTIME_spht          = $(RUNTIMES_DIR)/spht/SPHT_runtime.cpp
 
 TM_DEFINES_tinystm      = -DDESIGN_WBCTL -DLLVM_TM_PLUGIN
+TM_DEFINES_swisstm      = -DLLVM_TM_PLUGIN
 TM_DEFINES_tl2          = -DLLVM_TM_PLUGIN
 TM_DEFINES_singlelock   = -DLLVM_TM_PLUGIN
 TM_DEFINES_norec        = -DLLVM_TM_PLUGIN
@@ -120,7 +121,8 @@ TM_DEFINES_dudetm        = -DDESIGN_WBCTL -DLLVM_TM_PLUGIN
 
 TM_INCLUDES_persistentsgl =
 TM_INCLUDES_distributedsgl =
-TM_INCLUDES_tl2          = -I$(TL2_DIR) -I$(BACKENDS_DIR)/tm_impl/common
+TM_INCLUDES_tl2          = -I$(BACKENDS_DIR)/tm_impl -I$(BACKENDS_DIR)/tm_impl/common
+TM_INCLUDES_swisstm      = -I$(SWISSTM_DIR) -I$(BACKENDS_DIR)/tm_impl/common
 TM_INCLUDES_singlelock   = -I$(BACKENDS_DIR)/tm_impl/common
 TM_INCLUDES_tsxsgl       = -I$(BACKENDS_DIR)/tm_impl/common
 TM_INCLUDES_tinystm     = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)/tm_impl/common

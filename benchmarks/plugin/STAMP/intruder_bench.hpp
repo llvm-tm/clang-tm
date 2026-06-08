@@ -51,7 +51,7 @@ struct TM IntruderData {
 static IntruderData* g_intruder = nullptr;
 
 inline void intruder_generate_packets() {
-    auto data = new IntruderData();
+    auto data = tm_new<IntruderData>();
     data->num_flows = g_intruder_n;
     data->max_data_length = g_intruder_l;
     data->percent_attack = g_intruder_a;
@@ -78,16 +78,16 @@ inline void intruder_generate_packets() {
     }
 
     int packet_capacity = g_intruder_n * INTRUDER_MAX_PACKETS + 1024;
-    data->packet_queue = new Packet[packet_capacity]();
+    data->packet_queue = tm_new_array<Packet>(packet_capacity);
     data->packet_q_head = 0;
     data->packet_q_tail = 0;
     data->packet_q_capacity = packet_capacity;
 
-    data->decoder_flows = new DecodedFlow[g_intruder_n]();
-    data->fragment_storage = new char[g_intruder_n * INTRUDER_MAX_PACKETS * INTRUDER_MAX_DATA]();
-    data->fragment_counts = new int[g_intruder_n]();
+    data->decoder_flows = tm_new_array<DecodedFlow>(g_intruder_n);
+    data->fragment_storage = (char*)tm_calloc(g_intruder_n * INTRUDER_MAX_PACKETS * INTRUDER_MAX_DATA, 1);
+    data->fragment_counts = (int*)tm_calloc(g_intruder_n, sizeof(int));
 
-    data->decoded_queue = new DecodedFlow[g_intruder_n]();
+    data->decoded_queue = tm_new_array<DecodedFlow>(g_intruder_n);
     data->decoded_q_head = 0;
     data->decoded_q_tail = 0;
     data->decoded_q_capacity = g_intruder_n;
@@ -144,8 +144,16 @@ inline void intruder_generate_packets() {
     fflush(stdout);
 }
 
-static inline bool detect_attack(const char*, int,
-                                  char**, int) {
+// Check if decoded payload matches any dictionary entry (signature match).
+// In the original benchmark, this is the core detection logic.
+static inline bool detect_attack(const char* data, int data_len,
+                                  char** dictionary, int dict_size) {
+    for (int i = 0; i < dict_size; i++) {
+        int dlen = (int)std::strlen(dictionary[i]);
+        if (data_len >= dlen &&
+            std::strncmp(data + data_len - dlen, dictionary[i], dlen) == 0)
+            return true;
+    }
     return false;
 }
 
