@@ -4,6 +4,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <atomic>
+
+// Global (non-TLS) flag: 1 when queue runtime is active (tm_queue_init called).
+// Unlike the TLS g_tm_queue_active (only set for the enqueuing thread), this is
+// visible to all threads.  Backends (e.g. LeftRight) use it to skip barrier
+// synchronization that would deadlock when only worker threads run TM.
+extern std::atomic<int> g_tm_queue_global;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -16,6 +24,21 @@ extern "C" {
 // In queue mode: increments thread_local pending counter, enqueues work,
 //                worker decrements the CALLER's counter on completion.
 void tm_enqueue(void (*fn)(void*), void* args);
+
+// Extended enqueue with queue routing and transaction ID.
+// queue_id: target queue index (0..num_queues-1), or -1 for default round-robin.
+// Returns: a globally unique transaction ID, or 0 if executed inline.
+// The caller can later pass this ID to tm_wait_tx() to block until that
+// specific transaction completes (not necessarily the last one enqueued).
+uint64_t tm_enqueue_ex(void (*fn)(void*), void* args, int queue_id);
+
+// Block until the transaction identified by tx_id completes.
+// Safe to call from any thread, but only the enqueuing thread's
+// completion tracking is consulted.
+void tm_wait_tx(uint64_t tx_id);
+
+// Return the last transaction ID enqueued by this thread, or 0 if none.
+uint64_t tm_last_tx_id(void);
 
 // Block until all pending TXes enqueued by this thread complete.
 // In inline mode: no-op (TX already completed synchronously).

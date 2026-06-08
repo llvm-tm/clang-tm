@@ -10,12 +10,15 @@
 #include <unordered_map>
 #include <vector>
 
-#include "../tm_common.hpp"
-#include "../tm_spin_token.hpp"
+#include "../common/tm_common.hpp"
+#include "../common/tm_spin_token.hpp"
 
-extern "C" {
 extern __thread int32_t tm_nested_call_counter;
-}
+
+// Global (non-TLS) queue-active flag (defined in queue_runtime.cpp).
+// Visible to all threads — unlike the TLS g_tm_queue_active which is
+// only set for the enqueuing thread.
+extern std::atomic<int> g_tm_queue_global;
 
 namespace leftright {
 
@@ -80,6 +83,12 @@ extern std::atomic<uint64_t> g_clock;
 extern std::atomic<uint64_t> thr_counter;
 extern __thread Transaction *current_tx;
 extern std::atomic<uint64_t> g_tm_abort_count;
+
+// Queue mode active (1 when running under tm-instrument-queue* pipeline).
+// Only worker threads run TM transactions; the main thread never enters
+// tm_begin/tm_end, so barriers that expect ALL threads would deadlock.
+// Uses the global (non-TLS) flag so all worker threads see the same value.
+inline bool isQueueActive() { return g_tm_queue_global.load(std::memory_order_acquire); }
 
 // ── Left-Right barrier counters ─────────────────────────────────
 extern std::atomic<uint64_t> g_left_barrier;
@@ -200,39 +209,47 @@ inline bool commit() {
     if (!tx->active) return true;
 
     if (!tx->read_only) {
-        // Phase 1: Left-Right barrier — ensure all concurrent TXs
-        // have finished their Left phase before proceeding to Right.
-        left_barrier();
+        if (isQueueActive()) {
+            // Queue mode: only worker threads run TM transactions.
+            // The main thread never reaches barriers, so they would
+            // deadlock.  Skip them entirely — the queue executor
+            // provides ordering (each worker runs one TX at a time;
+            // with auto-wait only one TX exists in the system).
+            if (!validate())
+                abort_tx("read_validation");
+            uint64_t commit_version = increment_clock();
+            for (auto &it : tx->write_set) {
+                auto &addr = it.first;
+                auto &w = it.second;
+                write_value_to_addr(addr, w.new_val, w.type);
+            }
+        } else {
+            // Phase 1: Left-Right barrier — ensure all concurrent TXs
+            // have finished their Left phase before proceeding to Right.
+            left_barrier();
 
-        // Phase 2: Sort write-set addresses and acquire locks
-        std::vector<void *> sorted_addrs;
-        sorted_addrs.reserve(tx->write_set.size());
-        for (auto &it : tx->write_set)
-            sorted_addrs.push_back(it.first);
-        std::sort(sorted_addrs.begin(), sorted_addrs.end(), compareByAddr);
+            // Phase 2: Sort write-set addresses
+            std::vector<void *> sorted_addrs;
+            sorted_addrs.reserve(tx->write_set.size());
+            for (auto &it : tx->write_set)
+                sorted_addrs.push_back(it.first);
+            std::sort(sorted_addrs.begin(), sorted_addrs.end(), compareByAddr);
 
-        for (void *addr : sorted_addrs) {
-            auto &w = tx->write_set[addr];
-            // In LeftRight, we use a simple version-based check
-            // rather than per-address locks.  The barrier ensures
-            // that all reads from the Left phase are consistent.
-        }
+            // Phase 3: Right barrier — ensure all threads have
+            // completed their Left phase before any Right phase writes.
+            right_barrier();
 
-        // Phase 3: Right barrier — ensure all threads have
-        // completed their Left phase before any Right phase writes.
-        right_barrier();
+            // Phase 4: Validate read-set
+            if (!validate())
+                abort_tx("read_validation");
 
-        // Phase 4: Validate read-set
-        if (!validate()) {
-            abort_tx("read_validation");
-        }
-
-        // Phase 5: Write-back and commit
-        uint64_t commit_version = increment_clock();
-        for (auto &it : tx->write_set) {
-            auto &addr = it.first;
-            auto &w = it.second;
-            write_value_to_addr(addr, w.new_val, w.type);
+            // Phase 5: Write-back and commit
+            uint64_t commit_version = increment_clock();
+            for (auto &it : tx->write_set) {
+                auto &addr = it.first;
+                auto &w = it.second;
+                write_value_to_addr(addr, w.new_val, w.type);
+            }
         }
     }
 
@@ -243,55 +260,49 @@ inline bool commit() {
 
 // ── Read word ───────────────────────────────────────────────────
 inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
-
-	TM_ASSERT(tx && tx->active, "leftright read: no active tx");
-
-#ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr)) {
-		return read_value_from_addr(addr, sz);
-	}
-#else
-	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
-#endif
-
-	return read_value_from_addr(addr, sz);
-}
-
-inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz) {
-
-	TM_ASSERT(tx && tx->active, "leftright write: no active tx");
+    TM_ASSERT(tx && tx->active, "leftright read: no active tx");
 
 #ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr)) {
-		write_value_to_addr(addr, val, sz);
-		return;
-	}
+    if (!stm::isTMAddress(addr))
+        return read_value_from_addr(addr, sz);
 #else
-	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+    TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
 #endif
 
-	write_value_to_addr(addr, val, sz);
-}
-
-    // Read from memory
     any_type_t val = read_value_from_addr(addr, sz);
 
-    // Add to read-set (only if not already present)
-    auto r = tx->read_set.find(addr);
-    if (r == tx->read_set.end()) {
-        ReadLogEntry entry;
-        entry.type = sz;
-        entry.addr = addr;
-        entry.observed_version = get_clock();
-        tx->read_set[addr] = entry;
+    if (!isQueueActive()) {
+        // Non-queue mode: log reads for barrier-based validation.
+        // In queue mode the read-set is not needed (validation is a no-op
+        // since the queue provides ordering; barriers are skipped).
+        auto r = tx->read_set.find(addr);
+        if (r == tx->read_set.end()) {
+            ReadLogEntry entry;
+            entry.type = sz;
+            entry.addr = addr;
+            entry.observed_version = get_clock();
+            tx->read_set[addr] = entry;
+        }
     }
-
     return val;
 }
 
 // ── Write word ──────────────────────────────────────────────────
-inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz) {
+inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz, bool skip_write_set = false) {
+    TM_ASSERT(tx && tx->active, "leftright write: no active tx");
+
     tx->read_only = false;
+
+#ifdef LLVM_TM_PLUGIN
+    if (!stm::isTMAddress(addr)) {
+        write_value_to_addr(addr, val, sz);
+        return;
+    }
+#endif
+
+    // In queue mode with auto-wait (no concurrent TXes), writes can be
+    // applied directly instead of buffered.  But the backend cannot
+    // distinguish auto from manual, so always buffer for safety.
     WriteLogEntry entry;
     entry.type = sz;
     entry.addr = addr;

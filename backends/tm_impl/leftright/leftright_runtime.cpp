@@ -7,8 +7,9 @@
 #include <thread>
 #include <unordered_set>
 
-#include "../LeftRight/leftright.hpp"
-#include "../tm_alloc_overrides.hpp"
+#include "leftright.hpp"
+#include "../common/tm_alloc_overrides.hpp"
+#include "../common/tm_thread_state.hpp"
 
 thread_local bool g_in_tx = false;
 thread_local FreeNode *g_deferred_frees = nullptr;
@@ -33,8 +34,16 @@ __thread sigjmp_buf *jmpbuf_ptr;
 
 } // namespace leftright
 
-__thread int32_t tm_nested_call_counter;
-__thread int32_t tm_longjmp_ret;
+// Separate thread-local counters:
+//   tm_nested_call_counter  — managed by tm_begin/tm_end (explicit API calls)
+//   g_tm_thread_state       — managed by generated plugin clone code
+// The clone writes to g_tm_thread_state.nested_call_counter via
+// tm_get_thread_state() + GEP, then calls tm_begin().  tm_begin()
+// reads both to determine if this is plugin-mode or explicit-mode entry.
+static __thread TMThreadState g_tm_thread_state = {0, 0};
+__thread int32_t tm_nested_call_counter = 0;
+__thread int32_t tm_longjmp_ret = 0;
+
 __thread sigjmp_buf tm_jmpbuf;
 __thread int tm_init_thread_call_count = 0;
 
@@ -58,24 +67,35 @@ void tm_init_thread() {
 
 void tm_exit_thread() {}
 
+TMThreadState *tm_get_thread_state() {
+    return &g_tm_thread_state;
+}
+
+void tm_set_jmpbuf(void *buf) {
+    leftright::jmpbuf_ptr = (sigjmp_buf *)buf;
+}
+
+sigjmp_buf *tm_get_env() {
+    return &tm_jmpbuf;
+}
+
 void tm_begin() {
-    if (tm_nested_call_counter == 0) {
-        tm_nested_call_counter = 1;
-    } else {
-        tm_nested_call_counter++;
-        return;
-    }
-    leftright::jmpbuf_ptr = (sigjmp_buf *)&tm_jmpbuf;
-    leftright::begin();
+    // Determine effective nesting depth: plugin mode (g_tm_thread_state field)
+    // vs explicit mode (tm_nested_call_counter).  The clone manages the struct
+    // field; tm_begin/tm_end never modify counters themselves.
+    int32_t tc = tm_nested_call_counter;
+    int32_t sc = g_tm_thread_state.nested_call_counter;
+    int32_t c = (tc > 0) ? tc : sc;
+    if (c <= 1)
+        leftright::begin();
 }
 
 void tm_end() {
-    if (tm_nested_call_counter == 1) {
+    int32_t tc = tm_nested_call_counter;
+    int32_t sc = g_tm_thread_state.nested_call_counter;
+    int32_t c = (tc > 0) ? tc : sc;
+    if (c <= 1)
         leftright::commit();
-        tm_nested_call_counter = 0;
-    } else if (tm_nested_call_counter > 1) {
-        tm_nested_call_counter--;
-    }
 }
 
 // ── Malloc/Free ─────────────────────────────────────────────────
