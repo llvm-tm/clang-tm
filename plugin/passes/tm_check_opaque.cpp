@@ -32,6 +32,8 @@ bool checkOpaqueFunctions(Module &M,
 			continue;
 		if (F->getName().starts_with("tm_"))
 			continue;
+		if (hasAnnotation(*F, ALLOW_OPAQUE_ANNOT))
+			continue;
 		for (auto &BB : *F) {
 			for (auto &I : BB) {
 				auto *Call = dyn_cast<CallBase>(&I);

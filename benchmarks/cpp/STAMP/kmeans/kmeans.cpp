@@ -326,6 +326,16 @@ int main(int argc, char* argv[]) {
 
     printf("Time: %lf seconds\n", elapsed / 1000.0);
 
+    printf("  Centroids:\n");
+    for (int c = 0; c < g_nclusters; c++) {
+        printf("    [%d] ", c);
+        for (int d = 0; d < g_ndims; d++) {
+            if (d > 0) printf(", ");
+            printf("%.6f", g_data.centroids[c * g_ndims + d]);
+        }
+        printf("\n");
+    }
+
     expli::TM<int>::exit();
     return 0;
 }

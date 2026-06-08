@@ -206,9 +206,12 @@ fn main() {
                     let req = &requests[i];
 
                     loop {
-                        for g in 0..gridsize {
-                            local_grid[g] = unsafe { *grid[g].ptr() };
-                        }
+                        let lg_ptr = &mut local_grid[0] as *mut i32;
+                        transaction(|tx| {
+                            for g in 0..gridsize {
+                                unsafe { *lg_ptr.add(g) = tx.read(&grid[g]); }
+                            }
+                        });
 
                         let ok = do_expansion(&mut dist, &local_grid, w, h, d, req.src, req.dst, &mut queue);
                         let traced = ok && do_traceback(&mut path, &dist, w, h, d, req.src, req.dst);

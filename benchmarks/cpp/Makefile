@@ -21,7 +21,7 @@ endif
 ifeq ($(BACKEND),WBETL)
   RUNTIME  = ../../backends/tm_impl/tiny_stm/TinySTM_runtime.cpp
   DEFS     = -DTM_BACKEND_TINYSTM -DDESIGN_WBETL
-  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tiny_stm
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tiny_stm -I../../backends/stubs
 endif
 ifeq ($(BACKEND),WT)
   RUNTIME  = ../../backends/tm_impl/tiny_stm/TinySTM_runtime.cpp

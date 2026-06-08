@@ -116,24 +116,9 @@ impl MemAccess for UntrackedAccess {
 }
 
 // ── Helper: dispatch on a const bool ──
-// Usage: `MemoryAccess::<USE_TM>::load(&node.key)`
-pub type MemoryAccess<const TM: bool> = if TM {
-    TmAccess
-} else {
-    UntrackedAccess
-};
-
-// HACK: Rust stable doesn't support `type ... = if ...` for const generics.
-// A workaround is to use a macro:
-macro_rules! select_access {
-    ($use_tm:expr) => {
-        if $use_tm {
-            TmAccess
-        } else {
-            UntrackedAccess
-        }
-    };
-}
+// Use select_access!(USE_TM)::load(&node.key)
+// (Currently unused; kept as a reference pattern.)
+// macro_rules! select_access { ... }
 
 #[cfg(test)]
 mod tests {

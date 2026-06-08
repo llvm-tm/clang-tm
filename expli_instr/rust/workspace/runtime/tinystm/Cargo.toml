@@ -8,7 +8,7 @@ addrspace = { path = "../../addrspace" }
 runtime-core = { path = "../core" }
 
 [features]
-default = ["wbctl"]
+default = []
 wbctl = []
 wbetl = []
 wt = []

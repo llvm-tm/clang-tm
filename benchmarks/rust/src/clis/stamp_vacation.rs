@@ -91,27 +91,30 @@ fn main() {
                     let customer_id = (rng.next() % qrange as u64 + 1) as usize;
 
                     if r < pct_user {
+                        // Pre-generate all random values deterministically
+                        let nq = (rng.next() % queries as u64) as i32 + 1;
+                        let mut r_table = vec![0i32; nq as usize];
+                        let mut r_id = vec![0i32; nq as usize];
+                        for q in 0..nq as usize {
+                            r_table[q] = (rng.next() % 3) as i32;
+                            r_id[q] = (rng.next() % qrange as u64 + 1) as i32;
+                        }
+
                         // make_reservation_tx
                         transaction(|tx| {
-                            let mut rng = Rng::new(
-                                (unsafe { std::arch::x86_64::_rdtsc() })
-                                    .wrapping_add(customer_id as u64),
-                            );
-
                             // add_customer
                             let c_active = tx.read(&customer_active[customer_id - 1]);
                             if c_active == 0 {
                                 tx.write(&customer_active[customer_id - 1], 1);
                             }
 
-                            let nq = (rng.next() % queries as u64) as i32 + 1;
                             let mut best_prices = [-1i32; 3];
                             let mut best_ids = [-1i32; 3];
                             let mut found = false;
 
-                            for _q in 0..nq {
-                                let t = (rng.next() % 3) as usize;
-                                let id = (rng.next() % qrange as u64 + 1) as usize;
+                            for q in 0..nq as usize {
+                                let t = r_table[q] as usize;
+                                let id = r_id[q] as usize;
                                 let idx = (id - 1) * 5;
                                 let avail = tx.read(&tables[t][idx + 1]); // num_free
                                 if avail > 0 {
@@ -148,20 +151,20 @@ fn main() {
                             tx.write(&customers[customer_id - 1], 0);
                         });
                     } else {
+                        // Pre-generate random values deterministically
+                        let t = (rng.next() % 3) as usize;
+                        let id = (rng.next() % qrange as u64 + 1) as usize;
+                        let op = rng.next() % 2;
+                        let price_val =
+                            if op == 1 { (rng.next() % 5 * 10 + 50) as i32 } else { 0 };
+
                         // update_tables_tx
                         transaction(|tx| {
-                            let mut rng = Rng::new(unsafe { std::arch::x86_64::_rdtsc() });
-                            let t = (rng.next() % 3) as usize;
-                            let id = (rng.next() % qrange as u64 + 1) as usize;
-                            let op = rng.next() % 2;
-                            let price_val =
-                                if op == 1 { (rng.next() % 5 * 10 + 50) as i32 } else { 0 };
                             let idx = (id - 1) * 5;
                             if op == 1 {
-                                let price = price_val;
                                 tx.write(&tables[t][idx + 1], tx.read(&tables[t][idx + 1]) + 100);
                                 tx.write(&tables[t][idx + 2], tx.read(&tables[t][idx + 2]) + 100);
-                                tx.write(&tables[t][idx + 3], price);
+                                tx.write(&tables[t][idx + 3], price_val);
                                 tx.write(&tables[t][idx + 4], 1);
                             } else {
                                 let nf = tx.read(&tables[t][idx + 1]);
