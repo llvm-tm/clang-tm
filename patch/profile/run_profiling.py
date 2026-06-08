@@ -11,6 +11,7 @@ Detailed STAMP profiling with TM metrics collection.
 """
 
 import csv
+import os
 import re
 import subprocess
 import sys
