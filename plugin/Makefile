@@ -65,10 +65,15 @@ PLUGIN_FLAGS_debug         =
 $(BIN_DIR)/libTMInstrument.so: $(BIN_DIR)/libTMInstrument_$(PLUGIN_VARIANT).so
 	cp $< $@
 
-# Plugin variants: each gets the matching -D flags
+# Collect all pass source files
+TM_PASS_SRCS := $(wildcard $(SRC_DIR)/TM*.cpp $(SRC_DIR)/tm_check_opaque.cpp)
+TM_PASS_CXXFLAGS := -I$(BACKENDS_DIR)/tm_impl/common -I$(BACKENDS_DIR) -I$(LLVM_PLUGIN_DIR) -I$(SRC_DIR) -I$(LLVM_PLUGIN_DIR)/analysis -fPIC $(PLUGIN_CXXFLAGS)
+
+# Plugin variants: each gets the matching -D flags.
+# Compile all pass sources into a single .so.
 define TMPluginTarget
-$(BIN_DIR)/libTMInstrument_$(1).so: $(SRC_DIR)/TMInstrumentPass.cpp | $(BIN_DIR)
-	$(CXX) -I$(BACKENDS_DIR)/tm_impl/common -I$(BACKENDS_DIR) -I$(LLVM_PLUGIN_DIR) -I$(SRC_DIR) -I$(LLVM_PLUGIN_DIR)/analysis -fPIC  $$(PLUGIN_CXXFLAGS) $(PLUGIN_FLAGS_$(1)) -shared $$< -o $$@ $$(LLVM_CONFIG_ARGS)
+$(BIN_DIR)/libTMInstrument_$(1).so: $(TM_PASS_SRCS) | $(BIN_DIR)
+	$(CXX) $(TM_PASS_CXXFLAGS) $(PLUGIN_FLAGS_$(1)) -shared $(TM_PASS_SRCS) -o $$@ $(LLVM_CONFIG_ARGS)
 endef
 $(foreach v,$(PLUGIN_VARIANTS),$(eval $(call TMPluginTarget,$(v))))
 

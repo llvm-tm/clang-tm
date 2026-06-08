@@ -16,6 +16,7 @@
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Operator.h>
 #include <llvm/IR/Value.h>
 
 #include "tm_annotation_utils.hpp"

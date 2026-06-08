@@ -9,6 +9,7 @@
 #include <llvm/Transforms/Utils/Cloning.h>
 
 #include "tm_annotation_utils.hpp"
+#include "tm_call_graph.hpp"
 #include "tm_debug.hpp"
 #include "tm_local_vars.hpp"
 #include "tm_platform.hpp"
@@ -46,7 +47,35 @@ static ModulePassContext setupModulePass(Module &M)
 	return CtxOut;
 }
 
-// checkOpaqueOrAbort is defined in TMInstrumentPass.cpp alongside checkOpaqueFunctions
+static void checkAnnotationConsistency(Module &M)
+{
+	for (auto &F : M) {
+		if (F.isDeclaration())
+			continue;
+		bool isThread = hasAnnotation(F, THREAD_ANNOT);
+		bool isMain = (F.getName() == MAIN_ANNOT) || hasAnnotation(F, MAIN_ANNOT);
+		bool isTx = hasAnnotation(F, TX_ANNOT);
+		bool isAsyncTx = hasAnnotation(F, ASYNC_TX_ANNOT);
+		if (isTx && isAsyncTx) {
+			errs() << "error: function '" << F.getName()
+			       << "' has both 'transaction' and 'async_transaction' annotations. "
+			       << "A function cannot be both synchronous and asynchronous.\n";
+			exit(1);
+		}
+		if (isThread && (isTx || isAsyncTx)) {
+			errs() << "error: function '" << F.getName()
+			       << "' has both 'thread' and transaction annotations. "
+			       << "A thread entry function cannot be a transaction function.\n";
+			exit(1);
+		}
+		if (isMain && (isTx || isAsyncTx)) {
+			errs() << "error: function '" << F.getName()
+			       << "' has both 'main' and transaction annotations. "
+			       << "The main function cannot be a transaction function.\n";
+			exit(1);
+		}
+	}
+}
 
 static void instrumentMainInitExit(Function *MainFn, ModulePassContext &Ctx)
 {

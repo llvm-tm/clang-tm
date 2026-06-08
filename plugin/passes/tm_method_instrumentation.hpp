@@ -735,6 +735,31 @@ static void instrumentAllClones(
     }
 }
 
+// For each TX-annotated function in the module, redirect all calls to
+// reachable callees to their _tm_clone counterparts.  Retries 3 times
+// over clones to handle transitive call chains.
+static void redirectTXFunctionsToClones(
+    Module &M,
+    SmallPtrSetImpl<Function *> &TxReachableFuncs,
+    SmallVectorImpl<std::pair<Function *, Function *>> &ClonedMap,
+    CloneMode Mode = CloneMode::Instrument)
+{
+	for (auto &F : M) {
+		if (F.isDeclaration())
+			continue;
+		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT))
+			continue;
+		redirectCallsToClones(F, M, TxReachableFuncs, ClonedMap, Mode);
+	}
+	for (int _r = 0; _r < 3; _r++)
+		for (auto &pair : ClonedMap)
+			redirectCallsToClones(*pair.second,
+			                      M,
+			                      TxReachableFuncs,
+			                      ClonedMap,
+			                      Mode);
+}
+
 } // namespace tm_method_instrumentation
 
 #endif // TM_METHOD_INSTRUMENTATION_HPP

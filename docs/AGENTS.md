@@ -1,6 +1,65 @@
 # Session Summary
 
-## Latest Session (2026-06-07) — Detailed TM metrics + bayes 4-thread hang fixed + Table VI comparison
+## Latest Session (2026-06-08) — 5-pass Honorio pipeline decomposition
+
+### What was done
+
+The LLVM plugin pass infrastructure was reorganized from a 2-pass-per-pipeline design into a true **5-pass Honorio-style decomposed pipeline** matching the IPDPS 2020 paper:
+
+| Step | Honorio Pass | New File | Purpose |
+|------|-------------|----------|---------|
+| 1 | DualPathInfoCollector | `TMCollectPass.cpp` | Collects transactional boundaries, call graph, annotation info |
+| 2 | TransactionSafeCreation | `TMClonePass.cpp` | Creates transaction-safe clones of tx-reachable callees |
+| 3 | ReplaceCallInsideTransaction | `TMRedirectPass.cpp` | Redirects calls to clones, instruments clones, injects init/exit |
+| 4 | LoadStoreBarrierInsertion | `TMInstrumentFnPass.cpp` | Injects tx_begin/end, replaces loads/stores with TM barriers |
+| 5 | Cleanup | `TMCleanupPass.cpp` | Strips lifetime intrinsics, optional verification (-tm-strict-check) |
+
+### Key changes
+
+- **New files**: 5 pass `.cpp` files + `tm_pipeline_state.hpp` (shared state), `tm_pipeline_opts.hpp` (extern opts), `tm_check_opaque.{hpp,cpp}` (opaque check moved from monolithic file)
+- **Pipeline names**: `tm-instrument` now chains the 5 steps. Individual passes available: `tm-collect`, `tm-clone`, `tm-redirect`, `tm-instrument-fn`, `tm-cleanup`
+- **`tm_allow_opaque` fix**: Removed the `hasAnnotation(*F, ALLOW_OPAQUE_ANNOT)` skip at what was line 97 of `checkOpaqueFunctions` — this annotation on a function now only allows calls to opaque functions WITHIN it, not skip instrumentation of its body
+- **Verification**: `-tm-strict-check` flag enables post-instrumentation verification (opt-in, matching original TMInstrumentCheckPass behavior). Access to `tm_get_thread_state()` fields and TLS globals are correctly excluded
+- **Helgrind/DRD docs**: Added to `docs/plugin-debug.md`
+
+### Side fixes
+
+- Added `#include <llvm/IR/Operator.h>` to `tm_local_vars.hpp` (GEPOperator missing)
+- Added `#include <llvm/IR/IRBuilder.h>` to `tm_runtime_hooks.hpp` (IRBuilder missing)  
+- Added `#include <llvm/IR/Instructions.h>` to `tm_annotation_utils.hpp` (LoadInst/StoreInst missing)
+- Added `#include "tm_call_graph.hpp"` to `tm_instrument_helpers.hpp`
+- Moved `checkAnnotationConsistency` → `tm_instrument_helpers.hpp`
+- Moved `redirectTXFunctionsToClones` → `tm_method_instrumentation.hpp`
+- Queue pipeline helpers (findClone, createDispatchWrapper, replaceCallWithEnqueue, TM_QUEUE_ACTIVE_TLS) restored in TMInstrumentPass.cpp
+
+### Build verification
+
+- Plugin builds cleanly with LLVM 22
+- All key tests pass: test_tm_simple, test_nested_tx, test_retry, test_threads, test_treap_tx, test_simple_vector
+- Pre-existing failures unchanged: test_vec_push (push count mismatch, same on old pipeline)
+
+### All files modified
+- `plugin/passes/TMInstrumentPass.cpp` — Stripped down to backward-compat passes + pipeline registration
+- `plugin/passes/tm_instrument_helpers.hpp` — Added `checkAnnotationConsistency`
+- `plugin/passes/tm_method_instrumentation.hpp` — Added `redirectTXFunctionsToClones`
+- `plugin/passes/tm_runtime_hooks.hpp` — Added `#include <llvm/IR/IRBuilder.h>`
+- `plugin/analysis/tm_local_vars.hpp` — Added `#include <llvm/IR/Operator.h>`
+- `plugin/analysis/tm_annotation_utils.hpp` — Added `#include <llvm/IR/Instructions.h>`
+- `plugin/Makefile` — Compile all pass `.cpp` files
+- `docs/plugin-debug.md` — Added Helgrind/DRD section
+
+### New files
+- `plugin/passes/TMCollectPass.cpp`
+- `plugin/passes/TMClonePass.cpp`
+- `plugin/passes/TMRedirectPass.cpp`
+- `plugin/passes/TMInstrumentFnPass.cpp`
+- `plugin/passes/TMCleanupPass.cpp`
+- `plugin/passes/tm_pipeline_state.hpp`
+- `plugin/passes/tm_pipeline_opts.hpp`
+- `plugin/passes/tm_check_opaque.hpp`
+- `plugin/passes/tm_check_opaque.cpp`
+
+## Previous Session (2026-06-07) — Detailed TM metrics + bayes 4-thread hang fixed + Table VI comparison
 
 ### Fixes applied to plugin STAMP benchmarks
 
