@@ -176,3 +176,41 @@ make bin/libTMInstrument.so
 ### Missing runtime symbols
 
 Check the `DEFAULT_LINK_FLAGS` in `Makefile` include `-pthread` and the correct backend runtime file (e.g., `TinySTM_runtime.cpp` for TinySTM-backed tests).
+
+## Valgrind Helgrind/DRD for Non-TM Concurrency Debugging
+
+The TM plugin instruments **TM-annotated** accesses (`TX` functions on `struct TM` globals). Code protected by manual synchronization (e.g., `tm_serialize_lock/unlock`, `std::mutex`, atomics) is NOT instrumented — the TM runtime does not track these accesses, so they can race silently.
+
+Use Valgrind's **Helgrind** or **DRD** to detect races in non-TM concurrent code:
+
+```sh
+# Build an uninstrumented binary (no plugin) for maximum performance
+make test_foo_noinst
+
+# Run under Helgrind (slower, more detailed)
+valgrind --tool=helgrind ./bin/test_foo_noinst -t 4 -d 1000
+
+# Run under DRD (faster, less overhead)
+valgrind --tool=drd ./bin/test_foo_noinst -t 4 -d 1000
+```
+
+### What to look for
+
+- **`tm_serialize_lock/unlock`** — Helgrind may report false positives because it doesn't understand the custom mutex semantics. Use DRD's `--exclude-text` or suppression files to filter known-safe patterns.
+- **Atomic operations** (`std::atomic`, `__sync_fetch_and_add`) — Helgrind understands these and reports races if they're used inconsistently (some accesses atomic, others plain).
+- **Thread-local state** — Accesses to `__thread` globals (e.g., `tm_nested_call_counter`) are thread-private and should NOT race. Helgrind tracks TLS correctly.
+- **TM runtime internals** — Skip by adding `--ignore-inner` or using `--tool=drd --ignore-thread-creation`.
+
+### Filtering plugin false positives
+
+The TM runtime uses `sigsetjmp`/`siglongjmp` for transaction aborts, which Helgrind/DRD do not model correctly. Always use the uninstrumented (`_noinst`) binary, not the instrumented one.
+
+### Example: testing a serialize-lock benchmark
+
+```sh
+make test_intruder_noinst
+valgrind --tool=drd --exclude-text=backends/tm_impl --show-stack-usage=no \
+  ./bin/test_intruder_noinst -t 4 -d 2000
+```
+
+This excludes all TM backend internals, focusing the race detector on benchmark code only.
