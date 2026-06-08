@@ -205,11 +205,11 @@ def print_report(results: List[BenchResult], table_vi: Dict[str, dict]):
             tm = r.tm_stats
             vi = table_vi.get(r.benchmark, {})
             if vi:
-                vi_commits = vi.get("Transactions", "?").replace(",", "").replace("~", "")
-                vi_avg_r = vi.get("Read Set", "?")
-                vi_avg_w = vi.get("Write Set", "?")
-                vi_tot_r = vi.get("Read Barriers", "?").replace(",", "").replace("~", "")
-                vi_tot_w = vi.get("Write Barriers", "?").replace(",", "").replace("~", "")
+                vi_commits = vi.get("Transactions (%)", vi.get("Transactions", "?")).replace(",", "").replace("~", "")
+                vi_avg_r = vi.get("Read Set (90 pctile)", vi.get("Read Set", "?"))
+                vi_avg_w = vi.get("Write Set (90 pctile)", vi.get("Write Set", "?"))
+                vi_tot_r = vi.get("Read Barrier (90 pctile)", vi.get("Read Barriers", "?")).replace(",", "").replace("~", "")
+                vi_tot_w = vi.get("Write Barrier (90 pctile)", vi.get("Write Barriers", "?")).replace(",", "").replace("~", "")
                 print(f"{r.benchmark:<20s} {'Measured':>8s} {tm.commits:>7d} {tm.avg_reads:>6.1f} "
                       f"{tm.avg_writes:>6.1f} {tm.total_reads:>8d} {tm.total_writes:>8d} {tm.aborts:>7d}")
                 print(f"{'':20s} {'Table VI':>8s} {vi_commits:>7s} {vi_avg_r:>6s} {vi_avg_w:>6s} "

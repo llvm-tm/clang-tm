@@ -75,11 +75,11 @@ def main():
         print(f"\n{bench_key:<20s} {'':12s} {'':>12s} {'':>12s} {'':>8s}")
 
         pairs = [
-            ("Commits",    parse_int(r.get("commits", "")),    parse_int(row.get("Transactions", ""))),
-            ("AvgReads",   parse_float(r.get("avg_reads", "")), parse_float(row.get("Read Set", ""))),
-            ("AvgWrites",  parse_float(r.get("avg_writes", "")),parse_float(row.get("Write Set", ""))),
-            ("TotReads",   parse_int(r.get("total_reads", "")),parse_int(row.get("Read Barriers", ""))),
-            ("TotWrites",  parse_int(r.get("total_writes", "")),parse_int(row.get("Write Barriers", ""))),
+            ("Commits",    parse_int(r.get("commits", "")),    parse_int(row.get("Transactions (%)", row.get("Transactions", "")))),
+            ("AvgReads",   parse_float(r.get("avg_reads", "")), parse_float(row.get("Read Set (90 pctile)", row.get("Read Set", "")))),
+            ("AvgWrites",  parse_float(r.get("avg_writes", "")),parse_float(row.get("Write Set (90 pctile)", row.get("Write Set", "")))),
+            ("TotReads",   parse_int(r.get("total_reads", "")),parse_int(row.get("Read Barrier (90 pctile)", row.get("Read Barriers", "")))),
+            ("TotWrites",  parse_int(r.get("total_writes", "")),parse_int(row.get("Write Barrier (90 pctile)", row.get("Write Barriers", "")))),
             ("Aborts",     parse_int(r.get("aborts", "")),      None),
         ]
 

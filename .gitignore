@@ -1,5 +1,8 @@
 # Build artifacts
 **/bin/
+# Test binaries (compiled in-tree)
+tests/*/test_*
+tests/*/bench_*
 # Generated yada mesh files
 .yada_meshes/
 benchmark_yada

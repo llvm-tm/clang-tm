@@ -90,10 +90,6 @@ OUT_DIR          ?= out
 BIN_DIR          ?= bin
 TM_PLUGIN        ?= $(BIN_DIR)/libTMInstrument.so
 
-# Include machine-local config (if it exists) for arch-specific flags
-# e.g., TM_DEFINES_tsxsgl = -mrtm
--include $(abspath $(LLVM_PLUGIN_DIR)/../machine_config.mk)
-
 # ---- Backend mappings ----
 
 TM_RUNTIME_tinystm      = $(RUNTIMES_DIR)/tiny_stm/TinySTM_runtime.cpp
@@ -136,6 +132,12 @@ TM_DEFINES_spht          = -DTM_BACKEND_SPHT -mrtm
 TM_INCLUDES_spht         = -I$(SPHT_DIR) -I$(BACKENDS_DIR)/tm_impl/common
 
 TM_INCLUDES_dudetm        = -I$(TINYSTM_DIR) -I$(DUDETM_DIR) -I$(BACKENDS_DIR)/tm_impl/common
+
+# Include machine-local config (if it exists) for arch-specific flags
+# e.g., TM_DEFINES_tsxsgl = -mrtm, TM_DEFINES_tinystm += -DTM_REGION_SIZE=536870912
+# IMPORTANT: must come after all TM_DEFINES_* / TM_INCLUDES_* assignments
+# so that += appends correctly.
+-include $(abspath $(LLVM_PLUGIN_DIR)/../machine_config.mk)
 
 # ---- Opaque symbol resolution (external tools) ----
 

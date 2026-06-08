@@ -75,9 +75,10 @@ template<bool UseTM, typename K, typename V>
 Node<K,V>* insert(Tree<K,V>* tree, Node<K,V>* node) {
     using MA = MemoryAccess<UseTM>;
 
-    MA::store(&node->left,   nullptr);
-    MA::store(&node->right,  nullptr);
-    MA::store(&node->parent, nullptr);
+    Node<K,V>* null_node = nullptr;
+    MA::store(&node->left,   null_node);
+    MA::store(&node->right,  null_node);
+    MA::store(&node->parent, null_node);
     MA::store(&node->color,  Node<K,V>::BLACK);
 
     K key = node->key;
