@@ -8,6 +8,12 @@ THREAD_LIST="${THREADS:-"1 2 4 7 10 14 21 28 35 42 49 56"}"
 SAMPLES=3
 TIMEOUT=300
 
+# Portable timeout: use gtimeout (macOS coreutils) if available
+TIMEOUT_CMD="timeout"
+if ! command -v timeout &>/dev/null && command -v gtimeout &>/dev/null; then
+    TIMEOUT_CMD="gtimeout"
+fi
+
 RESULTS_DIR="benchmark_results/comprehensive_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
 SUMMARY="$RESULTS_DIR/SUMMARY.txt"
@@ -32,7 +38,7 @@ run_one() {
     local out="$RESULTS_DIR/${label//\//_}.txt"
     printf "  %-50s " "$label"
     set +e
-    timeout $TIMEOUT "$binary" "$@" > "$out" 2>/dev/null
+    $TIMEOUT_CMD $TIMEOUT "$binary" "$@" > "$out" 2>/dev/null
     local rc=$?
     set -e
     if [ "$rc" = 124 ]; then

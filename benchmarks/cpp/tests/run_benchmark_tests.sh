@@ -15,6 +15,13 @@ BENCHMARKS=(
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/bin"
+
+# Portable timeout: use gtimeout (macOS coreutils) if available
+TIMEOUT_CMD="timeout"
+if ! command -v timeout &>/dev/null && command -v gtimeout &>/dev/null; then
+    TIMEOUT_CMD="gtimeout"
+fi
+
 FAILED=()
 PASSED=()
 
@@ -36,7 +43,7 @@ for name in "${BENCHMARKS[@]}"; do
     fi
 
     echo "  Running: $name --test"
-    if timeout 30 "$binary" --test > /tmp/btest_${name}.out 2>&1; then
+    if $TIMEOUT_CMD 30 "$binary" --test > /tmp/btest_${name}.out 2>&1; then
         echo "  [PASS] $name"
         PASSED+=("$name")
     else
