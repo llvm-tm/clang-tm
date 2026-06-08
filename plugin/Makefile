@@ -227,6 +227,37 @@ $(OUT_DIR)/tm_region_allocator.o: $(BACKENDS_DIR)/tm_impl/tm_region_allocator/tm
 $(foreach t,$(QUEUE_TESTS),$(BIN_DIR)/$(t)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(QUEUE_RT_OBJS) | $(BIN_DIR)
 	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/$*.opt.bc $(QUEUE_RT_OBJS) -o $@
 
+# LeftRight queue test: use LeftRight backend + queue pipeline
+$(OUT_DIR)/leftright_runtime.o: $(BACKENDS_DIR)/tm_impl/leftright/leftright_runtime.cpp | $(OUT_DIR)
+	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DLLVM_TM_PLUGIN \
+	  -I $(BACKENDS_DIR)/tm_impl/leftright \
+	  -I $(BACKENDS_DIR)/tm_impl/common -I $(BACKENDS_DIR)/tm_impl -I $(BACKENDS_DIR) $< -o $@
+
+$(BIN_DIR)/test_queue_leftright: $(OUT_DIR)/test_queue.opt.bc \
+  $(OUT_DIR)/leftright_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o | $(BIN_DIR)
+	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/test_queue.opt.bc \
+	  $(OUT_DIR)/leftright_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o -o $@
+
+$(OUT_DIR)/test_queue_leftright_manual.bc: $(TEST_DIR)/test_queue_leftright_manual.cpp | $(OUT_DIR)
+	$(CLANG_TM) --compile-only -std=c++20 $(TM_COMPILE_FLAGS) $< -o $@
+$(OUT_DIR)/test_queue_leftright_manual.instr.bc: $(OUT_DIR)/test_queue_leftright_manual.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
+	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so \
+	  -passes="tm-instrument-queue-manual" $< -o $@
+$(OUT_DIR)/test_queue_leftright_manual.opt.bc: $(OUT_DIR)/test_queue_leftright_manual.instr.bc | $(OUT_DIR)
+	$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $< -o $@
+
+$(BIN_DIR)/test_queue_leftright_manual: $(OUT_DIR)/test_queue_leftright_manual.opt.bc \
+  $(OUT_DIR)/leftright_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o | $(BIN_DIR)
+	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/test_queue_leftright_manual.opt.bc \
+	  $(OUT_DIR)/leftright_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o -o $@
+
+# Queue TX wait test (no plugin — manual API calls)
+$(OUT_DIR)/test_queue_tx_wait.o: $(TEST_DIR)/test_queue_tx_wait.cpp | $(OUT_DIR)
+	$(CXX) -c -std=c++20 -I$(BACKENDS_DIR)/tm_impl/queue -I$(BACKENDS_DIR)/tm_impl/common -I$(BACKENDS_DIR) $< -o $@
+
+$(BIN_DIR)/test_queue_tx_wait: $(OUT_DIR)/test_queue_tx_wait.o $(QUEUE_RT_OBJS) | $(BIN_DIR)
+	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/test_queue_tx_wait.o $(QUEUE_RT_OBJS) -o $@
+
 # Inline/queue benchmark: same source, two pipelines, for throughput comparison
 $(OUT_DIR)/bench_queue_compare.inline.instr.bc: $(OUT_DIR)/bench_queue_compare.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
 	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so \
@@ -266,6 +297,27 @@ $(OUT_DIR)/bench_queue_compare2.queue.opt.bc: $(OUT_DIR)/bench_queue_compare2.qu
 $(BIN_DIR)/bench_queue_compare2_queue: $(OUT_DIR)/bench_queue_compare2.queue.opt.bc $(QUEUE_RT_OBJS) | $(BIN_DIR)
 	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/bench_queue_compare2.queue.opt.bc $(QUEUE_RT_OBJS) -o $@
 
+# Wait-strategy comparison: auto-wait vs manual-wait on queue pipeline
+$(OUT_DIR)/bench_queue_wait_compare.auto.instr.bc: $(OUT_DIR)/bench_queue_wait_compare.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
+	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so \
+	  -passes="tm-instrument-queue" $< -o $@
+$(OUT_DIR)/bench_queue_wait_compare.auto.opt.bc: $(OUT_DIR)/bench_queue_wait_compare.auto.instr.bc | $(OUT_DIR)
+	$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $< -o $@
+$(BIN_DIR)/bench_queue_wait_auto: $(OUT_DIR)/bench_queue_wait_compare.auto.opt.bc $(QUEUE_RT_OBJS) | $(BIN_DIR)
+	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/bench_queue_wait_compare.auto.opt.bc $(QUEUE_RT_OBJS) -o $@
+
+# Manual-wait variant: compile with -DMANUAL, instrument with queue-manual pipeline
+$(OUT_DIR)/bench_queue_wait_compare.man.bc: $(TEST_DIR)/bench_queue_wait_compare.cpp | $(OUT_DIR)
+	$(CLANG_TM) --compile-only -std=c++20 $(TM_COMPILE_FLAGS) \
+	  -DMANUAL $< -o $@
+$(OUT_DIR)/bench_queue_wait_compare.man.instr.bc: $(OUT_DIR)/bench_queue_wait_compare.man.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
+	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so \
+	  -passes="tm-instrument-queue-manual" $< -o $@
+$(OUT_DIR)/bench_queue_wait_compare.man.opt.bc: $(OUT_DIR)/bench_queue_wait_compare.man.instr.bc | $(OUT_DIR)
+	$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $< -o $@
+$(BIN_DIR)/bench_queue_wait_manual: $(OUT_DIR)/bench_queue_wait_compare.man.opt.bc $(QUEUE_RT_OBJS) | $(BIN_DIR)
+	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/bench_queue_wait_compare.man.opt.bc $(QUEUE_RT_OBJS) -o $@
+
 # Persistent runtime (snapshot-based, saves on tm_exit)
 $(BIN_DIR)/test_persist: $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(RUNTIME_DIR)/persistent.cpp | $(BIN_DIR)
 	$(CLANG_TM) --link-only --runtime=$(RUNTIME_DIR)/persistent.cpp \
@@ -279,8 +331,12 @@ $(BIN_DIR)/test_persist_sgl: $(OUT_DIR)/test_persist.opt.bc $(BACKENDS_DIR)/tm_i
 ll: all $(TEST_LLS) $(OPT_LLS)
 
 # Convenience targets: make test_foo -> make bin/test_foo
-.PHONY: $(TEST_NAMES) $(RACE_TEST_NAMES) test_persist_sgl test_std_queue_tl2
-$(TEST_NAMES) $(RACE_TEST_NAMES) test_persist_sgl test_std_queue_tl2: %: $(BIN_DIR)/%
+.PHONY: $(TEST_NAMES) $(RACE_TEST_NAMES) test_persist_sgl test_std_queue_tl2 test_queue_tx_wait \
+        bench_queue_wait_auto bench_queue_wait_manual \
+        test_queue_leftright test_queue_leftright_manual bench_queue_compare_queue
+$(TEST_NAMES) $(RACE_TEST_NAMES) test_persist_sgl test_std_queue_tl2 test_queue_tx_wait \
+  bench_queue_wait_auto bench_queue_wait_manual \
+  test_queue_leftright test_queue_leftright_manual bench_queue_compare_queue: %: $(BIN_DIR)/%
 
 test: all $(TEST_PROGS) $(RACE_TEST_BINS) $(BIN_DIR)/test_persist_sgl
 

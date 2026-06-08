@@ -105,6 +105,7 @@ TM_RUNTIME_tinystm_wbetl = $(RUNTIMES_DIR)/tiny_stm/TinySTM_runtime.cpp
 TM_RUNTIME_tinystm_wt    = $(RUNTIMES_DIR)/tiny_stm/TinySTM_runtime.cpp
 TM_RUNTIME_dudetm        = $(RUNTIMES_DIR)/dudetm/DUDETM_runtime.cpp
 TM_RUNTIME_spht          = $(RUNTIMES_DIR)/spht/SPHT_runtime.cpp
+TM_RUNTIME_leftright     = $(RUNTIMES_DIR)/leftright/leftright_runtime.cpp
 
 TM_DEFINES_tinystm      = -DDESIGN_WBCTL -DLLVM_TM_PLUGIN
 TM_DEFINES_swisstm      = -DLLVM_TM_PLUGIN

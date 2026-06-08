@@ -136,7 +136,7 @@ RUNTIME="runtime.cpp"
 PLUGIN=""
 KEEP_TEMPS=0
 VERBOSE=0
-INLINE_PIPELINE=0
+PIPELINE_MODE=""      # inline/queue/queue-manual
 ALLOW_OPAQUE=0
 STRICT_OPAQUE=0
 OUTPUT=""
@@ -169,7 +169,11 @@ while [ $# -gt 0 ]; do
         -k|--keep-temps)
             KEEP_TEMPS=1; shift ;;
         -i|--inline)
-            INLINE_PIPELINE=1; shift ;;
+            PIPELINE_MODE="inline"; shift ;;
+        --queue)
+            PIPELINE_MODE="queue"; shift ;;
+        --queue-manual)
+            PIPELINE_MODE="queue-manual"; shift ;;
         -v|--verbose)
             VERBOSE=1; shift ;;
         --print-tool)
@@ -497,9 +501,14 @@ for src in "${SOURCES[@]}"; do
 
     # Step 2: Instrument
     instr_bc="$OUT_DIR/$base_noext.instr.bc"
-    PIPELINE="tm-instrument-then-inline"
-    if [ "$INLINE_PIPELINE" -eq 1 ]; then
+    if [ "$PIPELINE_MODE" = "inline" ]; then
         PIPELINE="tm-instrument-inline"
+    elif [ "$PIPELINE_MODE" = "queue" ]; then
+        PIPELINE="tm-instrument-queue"
+    elif [ "$PIPELINE_MODE" = "queue-manual" ]; then
+        PIPELINE="tm-instrument-queue-manual"
+    else
+        PIPELINE="tm-instrument-then-inline"
     fi
     log "[2/4] $bc → instrumented IR ($PIPELINE)"
     OPTS=()

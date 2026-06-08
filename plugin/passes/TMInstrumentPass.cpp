@@ -456,6 +456,9 @@ static void replaceCallWithEnqueue(CallBase *Call, Function *DispatchFn,
 class TMQueueGlobalInitPass : public PassInfoMixin<TMQueueGlobalInitPass>
 {
 public:
+	TMQueueGlobalInitPass() : injectWait_(true) {}
+	TMQueueGlobalInitPass(bool injectWait) : injectWait_(injectWait) {}
+
 	PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
 	{
 		TM_DEBUG("TMQueueGlobalInitPass: processing module %s", M.getName().str().c_str());
@@ -552,7 +555,7 @@ public:
 
 			for (auto *Call : CallSites) {
 				IRBuilder<> B(Call);
-				replaceCallWithEnqueue(Call, DispF, M, B, Ctx.H, isSync);
+				replaceCallWithEnqueue(Call, DispF, M, B, Ctx.H, injectWait_ && isSync);
 				Call->eraseFromParent();
 				modified = true;
 			}
@@ -604,6 +607,9 @@ public:
 		return modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
 	}
 	static bool isRequired() { return true; }
+
+private:
+	bool injectWait_ = true;
 };
 
 // ===========================================================================
@@ -665,14 +671,22 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
 				                createModuleToFunctionPassAdaptor(TMInstrumentPass()));
 				            return true;
 			            }
-			            // ---- Queue pipeline ----
-			            if (Name == "tm-instrument-queue") {
-				            TM_DEBUG("Registering tm-instrument-queue pass pipeline");
-				            MPM.addPass(TMQueueGlobalInitPass());
-				            MPM.addPass(createModuleToFunctionPassAdaptor(
-				                TMInstrumentInlinePass()));
-				            return true;
-			            }
+			    // ---- Queue pipeline (auto-wait) ----
+			    if (Name == "tm-instrument-queue") {
+				    TM_DEBUG("Registering tm-instrument-queue pass pipeline");
+				    MPM.addPass(TMQueueGlobalInitPass(true));
+				    MPM.addPass(createModuleToFunctionPassAdaptor(
+				        TMInstrumentInlinePass()));
+				    return true;
+			    }
+			    // ---- Queue pipeline (manual-wait) ----
+			    if (Name == "tm-instrument-queue-manual") {
+				    TM_DEBUG("Registering tm-instrument-queue-manual pass pipeline");
+				    MPM.addPass(TMQueueGlobalInitPass(false));
+				    MPM.addPass(createModuleToFunctionPassAdaptor(
+				        TMInstrumentInlinePass()));
+				    return true;
+			    }
 			            // ---- Individual 5-step passes ----
 			            if (Name == "tm-collect")
 				            return registerTMCollectPass(MPM);
