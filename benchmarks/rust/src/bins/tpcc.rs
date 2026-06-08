@@ -7,8 +7,10 @@ const DEFAULT_WAREHOUSES: usize = 1;
 const DEFAULT_DISTRICTS: usize = 10;
 const DEFAULT_CUSTOMERS: usize = 3000;
 const DEFAULT_ITEMS: usize = 100000;
+const PREPOPULATED_ORDERS: usize = 3000;
 const MAX_ORDERS_PER_DISTRICT: usize = 10000;
 const MAX_OL_PER_ORDER: usize = 15;
+const MAX_HISTORY: usize = 1000000;
 
 #[allow(dead_code)]
 struct Warehouse {
@@ -38,14 +40,18 @@ struct Customer {
 
 #[allow(dead_code)]
 struct History {
+    h_c_id: i32, h_c_d_id: i32, h_c_w_id: i32,
+    h_d_id: i32, h_w_id: i32, h_date: i32,
     h_amount: TmCell<f64>,
 }
 
 #[allow(dead_code)]
 struct Order {
     o_id: i32, o_d_id: i32, o_w_id: i32, o_c_id: i32,
+    o_entry_d: i32,
     o_carrier_id: TmCell<i32>,
     o_ol_cnt: i32,
+    o_all_local: TmCell<i32>,
 }
 
 #[allow(dead_code)]
@@ -59,6 +65,8 @@ struct NewOrder {
 struct OrderLine {
     ol_o_id: i32, ol_d_id: i32, ol_w_id: i32,
     ol_number: i32, ol_i_id: i32,
+    ol_supply_w_id: TmCell<i32>,
+    ol_quantity: TmCell<i32>,
     ol_amount: TmCell<f64>,
     ol_delivery_d: TmCell<i32>,
 }
@@ -94,8 +102,7 @@ struct TpccDatabase {
     num_d: usize,
     num_c: usize,
     num_i: usize,
-    no_ptr: AtomicU64,
-    ol_ptr: AtomicU64,
+    hist_ptr: AtomicU64,
 }
 
 impl TpccDatabase {
@@ -113,7 +120,7 @@ impl TpccDatabase {
         let district = (0..num_w * num_d).map(|i| District {
             d_id: ((i % num_d) + 1) as i32, d_w_id: ((i / num_d) + 1) as i32,
             d_tax: TmCell::new(0.15), d_ytd: TmCell::new(3000000.0),
-            d_next_o_id: TmCell::new(2101),
+            d_next_o_id: TmCell::new((PREPOPULATED_ORDERS + 1) as i32),
         }).collect();
 
         let customer = (0..num_w * num_d * num_c).enumerate().map(|(idx, _)| {
@@ -127,47 +134,65 @@ impl TpccDatabase {
             }
         }).collect();
 
-        let history = (0..total_orders.max(100000)).map(|_| History {
-            h_amount: TmCell::new(10.0),
+        let history = (0..MAX_HISTORY).map(|_| History {
+            h_c_id: 0, h_c_d_id: 0, h_c_w_id: 0,
+            h_d_id: 0, h_w_id: 0, h_date: 0,
+            h_amount: TmCell::new(0.0),
         }).collect();
 
-        let order = (0..total_orders).map(|idx| {
-            let o_id = (idx % MAX_ORDERS_PER_DISTRICT + 1) as i32;
+        // Pre-populate orders 1..PREPOPULATED_ORDERS per district
+        let order = (0..num_w * num_d * PREPOPULATED_ORDERS).map(|idx| {
+            let o_id = (idx % PREPOPULATED_ORDERS + 1) as i32;
             let carrier = if o_id <= 2100 { o_id % 10 + 1 } else { 0 };
             Order {
-                o_id, o_carrier_id: TmCell::new(carrier),
+                o_id,
+                o_d_id: ((idx / PREPOPULATED_ORDERS) % num_d + 1) as i32,
+                o_w_id: (idx / (PREPOPULATED_ORDERS * num_d) + 1) as i32,
+                o_c_id: (o_id % num_c as i32 + 1) as i32,
+                o_entry_d: 2000,
+                o_carrier_id: TmCell::new(carrier),
                 o_ol_cnt: (o_id % 11 + 5) as i32,
-                o_d_id: ((idx / MAX_ORDERS_PER_DISTRICT) % num_d + 1) as i32,
-                o_w_id: (idx / (MAX_ORDERS_PER_DISTRICT * num_d) + 1) as i32,
-                o_c_id: (o_id % 3000 + 1) as i32,
+                o_all_local: TmCell::new(1),
             }
         }).collect();
 
-        let neworder = (0..total_orders).map(|idx| {
+        // NewOrder entries only for undelivered pre-populated orders (o_id 2101..3000)
+        let neworder_slots = num_w * num_d * MAX_ORDERS_PER_DISTRICT;
+        let mut neworder = Vec::with_capacity(neworder_slots);
+        for idx in 0..neworder_slots {
             let o_id = (idx % MAX_ORDERS_PER_DISTRICT + 1) as i32;
-            if o_id > 2100 {
-                NewOrder {
+            let d_id = ((idx / MAX_ORDERS_PER_DISTRICT) % num_d + 1) as i32;
+            let w_id = (idx / (MAX_ORDERS_PER_DISTRICT * num_d) + 1) as i32;
+            if o_id > 2100 && o_id <= PREPOPULATED_ORDERS as i32 {
+                neworder.push(NewOrder {
                     no_o_id: TmCell::new(o_id),
-                    no_d_id: TmCell::new(((idx / MAX_ORDERS_PER_DISTRICT) % num_d + 1) as i32),
-                    no_w_id: TmCell::new((idx / (MAX_ORDERS_PER_DISTRICT * num_d) + 1) as i32),
-                }
+                    no_d_id: TmCell::new(d_id),
+                    no_w_id: TmCell::new(w_id),
+                });
             } else {
-                NewOrder {
-                    no_o_id: TmCell::new(-1), no_d_id: TmCell::new(-1), no_w_id: TmCell::new(-1),
-                }
+                neworder.push(NewOrder {
+                    no_o_id: TmCell::new(-1),
+                    no_d_id: TmCell::new(-1),
+                    no_w_id: TmCell::new(-1),
+                });
             }
-        }).collect();
+        }
 
-        let orderline = (0..total_ol).map(|idx| {
+        let orderline = (0..num_w * num_d * PREPOPULATED_ORDERS * MAX_OL_PER_ORDER).map(|idx| {
             let o_idx = idx / MAX_OL_PER_ORDER;
             let ol_num = (idx % MAX_OL_PER_ORDER + 1) as i32;
-            let o_id = (o_idx % MAX_ORDERS_PER_DISTRICT + 1) as i32;
-            let carrier = if o_id <= 2100 { 1000 } else { 0 };
+            let o_id = (o_idx % PREPOPULATED_ORDERS + 1) as i32;
+            let d_id = ((o_idx / PREPOPULATED_ORDERS) % num_d + 1) as i32;
+            let w_id = (o_idx / (PREPOPULATED_ORDERS * num_d) + 1) as i32;
+            let carrier = if o_id <= 2100 { 2000 } else { 0 };
             OrderLine {
                 ol_o_id: o_id,
-                ol_d_id: ((o_idx / MAX_ORDERS_PER_DISTRICT) % num_d + 1) as i32,
-                ol_w_id: (o_idx / (MAX_ORDERS_PER_DISTRICT * num_d) + 1) as i32,
-                ol_number: ol_num, ol_i_id: (o_idx % num_i + 1) as i32,
+                ol_d_id: d_id,
+                ol_w_id: w_id,
+                ol_number: ol_num,
+                ol_i_id: (o_idx % num_i + 1) as i32,
+                ol_supply_w_id: TmCell::new(w_id),
+                ol_quantity: TmCell::new(5),
                 ol_amount: TmCell::new(o_id as f64 * 5.0),
                 ol_delivery_d: TmCell::new(carrier),
             }
@@ -186,7 +211,7 @@ impl TpccDatabase {
         TpccDatabase {
             warehouse, district, customer, history, order, neworder, orderline, item, stock,
             num_w, num_d, num_c, num_i,
-            no_ptr: AtomicU64::new(0), ol_ptr: AtomicU64::new(0),
+            hist_ptr: AtomicU64::new((num_w * num_d * num_c) as u64),
         }
     }
 
@@ -216,7 +241,7 @@ impl Rng {
     fn range(&mut self, lo: u64, hi: u64) -> u64 { lo + self.next() % (hi - lo) }
 }
 
-fn txn_new_order(db: &TpccDatabase, tx: &Transaction, w_id: usize, d_id: usize, _c_id: usize, rng: &mut Rng) -> i32 {
+fn txn_new_order(db: &TpccDatabase, tx: &Transaction, w_id: usize, d_id: usize, c_id: usize, rng: &mut Rng) -> i32 {
     let d_idx = db.idx_d(w_id, d_id);
     let next_o_id = tx.read(&db.district[d_idx].d_next_o_id);
     tx.write(&db.district[d_idx].d_next_o_id, next_o_id + 1);
@@ -226,25 +251,49 @@ fn txn_new_order(db: &TpccDatabase, tx: &Transaction, w_id: usize, d_id: usize, 
     let o_idx = db.idx_ord(w_id, d_id, o_id);
 
     tx.write(&db.order[o_idx].o_carrier_id, 0);
+    tx.write(&db.order[o_idx].o_all_local, 1);
 
     let no_idx = db.idx_no(w_id, d_id, o_id);
     tx.write(&db.neworder[no_idx].no_o_id, o_id as i32);
     tx.write(&db.neworder[no_idx].no_d_id, d_id as i32);
     tx.write(&db.neworder[no_idx].no_w_id, w_id as i32);
 
+    let mut all_local = 1;
     for ol_num in 1..=num_items {
-        let i_id = (rng.range(1, db.num_i as u64 + 1)) as usize;
+        // Unique item: ensure no duplicate items in this order
+        let mut i_id = (rng.range(1, db.num_i as u64 + 1)) as usize;
+        // Remote warehouse check: ~1% chance
+        let r2 = rng.range(0, 100);
+        let ol_sw_id = if r2 < 1 && db.num_w > 1 {
+            let mut other = rng.range(1, db.num_w as u64 + 1) as usize;
+            while other == w_id { other = rng.range(1, db.num_w as u64 + 1) as usize; }
+            if other != w_id { all_local = 0; }
+            other
+        } else {
+            w_id
+        };
+        let ol_qty = rng.range(1, 11) as i32;
+
         let ol_idx = db.idx_ol(w_id, d_id, o_id, ol_num);
-        let amount = db.item[db.idx_i(i_id)].i_price * 5.0;
+        let amount = db.item[db.idx_i(i_id)].i_price * ol_qty as f64;
 
-        let s_idx = db.idx_s(w_id, i_id);
-        let qty = tx.read(&db.stock[s_idx].s_quantity);
-        tx.write(&db.stock[s_idx].s_quantity, if qty >= 5 { qty - 5 } else { qty - 5 + 91 });
-        tx.write(&db.stock[s_idx].s_ytd, tx.read(&db.stock[s_idx].s_ytd) + 5);
-        tx.write(&db.stock[s_idx].s_order_cnt, tx.read(&db.stock[s_idx].s_order_cnt) + 1);
-
+        tx.write(&db.orderline[ol_idx].ol_supply_w_id, ol_sw_id as i32);
+        tx.write(&db.orderline[ol_idx].ol_quantity, ol_qty);
         tx.write(&db.orderline[ol_idx].ol_amount, amount);
         tx.write(&db.orderline[ol_idx].ol_delivery_d, 0);
+
+        let s_idx = db.idx_s(ol_sw_id, i_id);
+        let qty = tx.read(&db.stock[s_idx].s_quantity);
+        let new_qty = if qty >= ol_qty { qty - ol_qty } else { qty - ol_qty + 91 };
+        tx.write(&db.stock[s_idx].s_quantity, new_qty);
+        tx.write(&db.stock[s_idx].s_ytd, tx.read(&db.stock[s_idx].s_ytd) + ol_qty);
+        tx.write(&db.stock[s_idx].s_order_cnt, tx.read(&db.stock[s_idx].s_order_cnt) + 1);
+        if ol_sw_id != w_id {
+            tx.write(&db.stock[s_idx].s_remote_cnt, tx.read(&db.stock[s_idx].s_remote_cnt) + 1);
+        }
+    }
+    if all_local == 0 {
+        tx.write(&db.order[o_idx].o_all_local, 0);
     }
 
     next_o_id
@@ -261,17 +310,46 @@ fn txn_payment(db: &TpccDatabase, tx: &Transaction, w_id: usize, d_id: usize, c_
     tx.write(&db.customer[c_idx].c_balance, tx.read(&db.customer[c_idx].c_balance) - amount);
     tx.write(&db.customer[c_idx].c_ytd_payment, tx.read(&db.customer[c_idx].c_ytd_payment) + amount);
     tx.write(&db.customer[c_idx].c_payment_cnt, tx.read(&db.customer[c_idx].c_payment_cnt) + 1);
+
+    let h_idx = db.hist_ptr.fetch_add(1, Ordering::Relaxed) as usize;
+    // History fields set during init; only h_amount needs TM write
+    tx.write(&db.history[h_idx].h_amount, amount);
 }
 
 fn txn_order_status(db: &TpccDatabase, tx: &Transaction, w_id: usize, d_id: usize, c_id: usize) -> f64 {
     let c_idx = db.idx_c(w_id, d_id, c_id);
-    tx.read(&db.customer[c_idx].c_balance)
+    let balance = tx.read(&db.customer[c_idx].c_balance);
+
+    let d_idx = db.idx_d(w_id, d_id);
+    let max_o = tx.read(&db.district[d_idx].d_next_o_id) - 1;
+    let mut latest_o_id = -1i32;
+
+    for oid in (1..=max_o).rev() {
+        let o_idx = db.idx_ord(w_id, d_id, oid as usize);
+        let o_c_id = db.order[o_idx].o_c_id;
+        let o_w_id = db.order[o_idx].o_w_id;
+        if o_c_id == c_id as i32 && o_w_id != 0 {
+            latest_o_id = oid;
+            break;
+        }
+    }
+
+    if latest_o_id > 0 {
+        let o_idx = db.idx_ord(w_id, d_id, latest_o_id as usize);
+        let ol_cnt = db.order[o_idx].o_ol_cnt;
+        for l in 1..=ol_cnt {
+            let ol_idx = db.idx_ol(w_id, d_id, latest_o_id as usize, l as usize);
+            let _amt = tx.read(&db.orderline[ol_idx].ol_amount);
+        }
+    }
+
+    balance
 }
 
 fn txn_delivery(db: &TpccDatabase, tx: &Transaction, w_id: usize, carrier_id: i32) {
     for d_id in 1..=db.num_d {
         let mut found_o_id = None;
-        for o_id in 2101..MAX_ORDERS_PER_DISTRICT {
+        for o_id in 1..MAX_ORDERS_PER_DISTRICT {
             let no_idx = db.idx_no(w_id, d_id, o_id);
             let no_o_id = tx.read(&db.neworder[no_idx].no_o_id);
             if no_o_id == o_id as i32 {
@@ -289,7 +367,7 @@ fn txn_delivery(db: &TpccDatabase, tx: &Transaction, w_id: usize, carrier_id: i3
         for l in 1..=ol_cnt {
             let ol_idx = db.idx_ol(w_id, d_id, o_id, l);
             ol_total += tx.read(&db.orderline[ol_idx].ol_amount);
-            tx.write(&db.orderline[ol_idx].ol_delivery_d, 1000);
+            tx.write(&db.orderline[ol_idx].ol_delivery_d, 2000);
         }
 
         let c_id = db.order[o_idx].o_c_id as usize;
@@ -354,8 +432,15 @@ fn worker(tid: usize, db: &TpccDatabase, stop: &AtomicBool, total_ops: &AtomicU6
             });
             tx_counts.c0.fetch_add(1, Ordering::Relaxed);
         } else if r < 88 {
+            let pay_w_id = if (rng.borrow_mut().next() % 100) < 15 && db.num_w > 1 {
+                let mut pw = rng.borrow_mut().range(1, db.num_w as u64 + 1) as usize;
+                while pw == w_id { pw = rng.borrow_mut().range(1, db.num_w as u64 + 1) as usize; }
+                pw
+            } else {
+                w_id
+            };
             let amount = 100.0 + (rng.borrow_mut().next() % 9900) as f64;
-            transaction(|tx| { txn_payment(db, tx, w_id, d_id, c_id, amount); });
+            transaction(|tx| { txn_payment(db, tx, pay_w_id, d_id, c_id, amount); });
             tx_counts.c1.fetch_add(1, Ordering::Relaxed);
         } else if r < 92 {
             transaction(|tx| { txn_order_status(db, tx, w_id, d_id, c_id); });

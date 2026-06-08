@@ -50,11 +50,11 @@ int max(int a, int b) {
 }
 
 int size(int n) {
-    return (n == -1 || n == sentinel) ? 0 : node_size[n];
+    return n == sentinel ? 0 : node_size[n];
 }
 
 bool isRed(int n) {
-    return (n != -1 && n != sentinel) && node_red[n];
+    return n != sentinel && node_red[n];
 }
 
 int newNode(int key, int value) {
@@ -64,13 +64,17 @@ int newNode(int key, int value) {
         free_head = node_free[free_head];
     } else {
         n = node_count++;
+        if (n >= MAX_NODES - 1) {
+            fprintf(stderr, "FATAL: rbtree node pool exhausted (MAX_NODES=%d)\n", MAX_NODES);
+            std::abort();
+        }
     }
     node_keys[n] = key;
     node_values[n] = value;
     node_red[n] = true;
     node_left[n] = sentinel;
     node_right[n] = sentinel;
-    node_parent[n] = -1;
+    node_parent[n] = sentinel;
     node_size[n] = 1;
     return n;
 }
@@ -160,24 +164,26 @@ TM void insertFixup(int z) {
 }
 
 TM void insert(int key, int value) {
-    int z = newNode(key, value);
     int y = sentinel;
     int x = root;
 
     while (x != sentinel) {
         y = x;
-        node_size[x]++;
-        if (z < node_keys[x]) {
+        if (key < node_keys[x]) {
             x = node_left[x];
-        } else {
+        } else if (key > node_keys[x]) {
             x = node_right[x];
+        } else {
+            node_values[x] = value;
+            return;
         }
     }
 
+    int z = newNode(key, value);
     node_parent[z] = y;
     if (y == sentinel) {
         root = z;
-    } else if (z < node_keys[y]) {
+    } else if (key < node_keys[y]) {
         node_left[y] = z;
     } else {
         node_right[y] = z;
@@ -187,6 +193,16 @@ TM void insert(int key, int value) {
     node_right[z] = sentinel;
     node_red[z] = true;
     node_size[z] = 1;
+
+    // Update size on the path
+    x = root;
+    while (x != z) {
+        node_size[x]++;
+        if (key < node_keys[x])
+            x = node_left[x];
+        else
+            x = node_right[x];
+    }
 
     insertFixup(z);
 }
@@ -488,8 +504,14 @@ MAIN int main(int argc, char* argv[]) {
               << "Key range:      " << range_max << "\n"
               << std::endl;
 
-    sentinel = -2;
+    // Sentinel must be a valid array index (zero-initialized arrays are correct for a null node)
+    sentinel = MAX_NODES - 1;
     root = sentinel;
+    node_red[sentinel] = false;
+    node_left[sentinel] = sentinel;
+    node_right[sentinel] = sentinel;
+    node_parent[sentinel] = sentinel;
+    node_size[sentinel] = 0;
 
     std::cout << "Initial tree size: " << treeSize() << std::endl;
 

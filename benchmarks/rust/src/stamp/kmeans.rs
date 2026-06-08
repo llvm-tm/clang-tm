@@ -20,12 +20,11 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
             (rng.next() % 1000) as f64 / 100.0
         }).collect()
     ).collect();
-    let assignment: Vec<TmCell<i32>> = (0..config.points).map(|_| TmCell::new(-1)).collect();
-    let new_count: Vec<TmCell<i32>> = (0..config.clusters).map(|_| TmCell::new(0)).collect();
-    let new_sum: Vec<Vec<TmCell<f64>>> = (0..config.dims)
+    let counts: Vec<TmCell<i64>> = (0..config.clusters).map(|_| TmCell::new(0i64)).collect();
+    let sums: Vec<Vec<TmCell<f64>>> = (0..config.dims)
         .map(|_| (0..config.clusters).map(|_| TmCell::new(0.0f64)).collect()).collect();
 
-    let state = Arc::new((points, clusters, assignment, new_count, new_sum));
+    let state = Arc::new((points, clusters, counts, sums));
     let dur = std::time::Duration::from_millis(config.duration as u64);
     let chunk = config.points / config.threads;
     let g_iters = AtomicU64::new(0);
@@ -41,9 +40,10 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
             let end = if tid == config.threads - 1 { config.points } else { start + chunk };
             s.spawn(move || {
                 while !sc.load(Ordering::Relaxed) {
-                    // Assignment phase (non-TM)
+                    let mut local_counts = vec![0i64; config.clusters];
+                    let mut local_sums = vec![0.0f64; config.clusters * config.dims];
                     for p in start..end {
-                        let mut best_cluster = 0i32;
+                        let mut best = 0i32;
                         let mut best_dist = f64::MAX;
                         for c in 0..config.clusters {
                             let mut dist = 0.0;
@@ -51,25 +51,19 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
                                 let diff = sref.0[d][p] - sref.1[d][c];
                                 dist += diff * diff;
                             }
-                            if dist < best_dist { best_dist = dist; best_cluster = c as i32; }
+                            if dist < best_dist { best_dist = dist; best = c as i32; }
                         }
-                        unsafe { *sref.2[p].ptr() = best_cluster; }
+                        local_counts[best as usize] += 1;
+                        for d in 0..config.dims {
+                            local_sums[best as usize * config.dims + d] += sref.0[d][p];
+                        }
                     }
 
-                    // Reset accumulators (non-TM)
-                    for c in 0..config.clusters {
-                        unsafe { *sref.3[c].ptr() = 0; }
-                        for d in 0..config.dims { unsafe { *sref.4[d][c].ptr() = 0.0; } }
-                    }
-
-                    // Accumulate (TM)
                     transaction(|tx| {
-                        for p in start..end {
-                            let cl = unsafe { *sref.2[p].ptr() };
-                            tx.write(&sref.3[cl as usize], tx.read(&sref.3[cl as usize]) + 1);
+                        for c in 0..config.clusters {
+                            tx.write(&sref.2[c], tx.read(&sref.2[c]) + local_counts[c]);
                             for d in 0..config.dims {
-                                tx.write(&sref.4[d][cl as usize],
-                                         tx.read(&sref.4[d][cl as usize]) + sref.0[d][p]);
+                                tx.write(&sref.3[d][c], tx.read(&sref.3[d][c]) + local_sums[c * config.dims + d]);
                             }
                         }
                     });

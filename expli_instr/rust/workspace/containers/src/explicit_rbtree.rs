@@ -53,7 +53,7 @@ impl<K, V, A: MemAccess> RBTree<K, V, A> {
     pub fn find(&self, key: &K) -> Option<&V>
     where K: Ord + Copy,
     {
-        self.lookup(key).map(|n| unsafe { &(*n).val })
+        self.lookup(key).map(|n| &n.val)
     }
 
     pub fn contains(&self, key: &K) -> bool

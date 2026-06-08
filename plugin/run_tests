@@ -32,7 +32,7 @@ run_test test_types \
 
 run_test test_memtest "tm_init" "tm_init_thread" "tm_exit_thread" "tm_exit"
 run_test test_threads "tm_init" "tm_init_thread" "tm_exit_thread" "tm_exit" "worker_thread 0: finished"
-run_test test_nested_tx "final counter = 111"
+run_test test_nested_tx "final counter = 111" "Test PASSED"
 
 # Persistent test: run twice to verify persistence
 echo "Running persist (first run)..."

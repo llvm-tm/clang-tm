@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::sync::atomic::AtomicU32;
 use std::sync::OnceLock;
 
-pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
+pub use runtime_core::{tm_install_tmx_hook, Primitive, TypedValue, WriteBack};
+#[cfg(any(feature = "wbctl", feature = "wbetl"))]
+pub use runtime_core::TmxAbort;
 
 // ── Constants ───────────────────────────────────────────
 const LOCK_MASK: u64 = 0xFF;
@@ -64,6 +66,7 @@ pub fn unlock_at_index(idx: usize) { locks()[idx].unlock_exclusive(); }
 
 pub fn version_at_index(idx: usize) -> u64 { locks()[idx].version() }
 
+#[cfg(feature = "wbctl")]
 fn lock_at_index(idx: usize) {
     while !try_lock_at_index(idx) {
         std::hint::spin_loop();
@@ -106,10 +109,11 @@ pub struct TxState {
     pub write_set: HashMap<usize, WriteEntry>,
     /// Deferred write-back closures (safe to apply at commit).
     /// Used by write-back backends (WBCTL, WBETL).
+    #[cfg(any(feature = "wbctl", feature = "wbetl"))]
     pub write_backs: Vec<WriteBack>,
     /// Deferred undo closures (safe to apply on abort/rollback).
     /// Used by write-through backends (WT).
-    #[allow(dead_code)]
+    #[cfg(feature = "wt")]
     pub undo_backs: Vec<WriteBack>,
     pub start_version: u64,
     #[allow(dead_code)]
@@ -124,7 +128,9 @@ impl TxState {
         TxState {
             read_set: Vec::with_capacity(64),
             write_set: HashMap::with_capacity(8),
+            #[cfg(any(feature = "wbctl", feature = "wbetl"))]
             write_backs: Vec::new(),
+            #[cfg(feature = "wt")]
             undo_backs: Vec::new(),
             start_version,
             aborted: false,
@@ -152,6 +158,44 @@ pub fn tm_abort_count() -> u64 {
     TM_ABORT_COUNT.load(Ordering::Relaxed)
 }
 
+// ── TM_STATS counters ─────────────────────────────────────
+pub static TM_COMMIT_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static TM_TOTAL_READS: AtomicU64 = AtomicU64::new(0);
+pub static TM_TOTAL_WRITES: AtomicU64 = AtomicU64::new(0);
+pub static TM_MAX_READ_SET: AtomicU64 = AtomicU64::new(0);
+pub static TM_MAX_WRITE_SET: AtomicU64 = AtomicU64::new(0);
+pub static TM_MIN_READ_SET: AtomicU64 = AtomicU64::new(u64::MAX);
+pub static TM_MIN_WRITE_SET: AtomicU64 = AtomicU64::new(u64::MAX);
+
+pub fn update_read_write_stats(read_len: usize, write_len: usize) {
+    let r = read_len as u64;
+    let w = write_len as u64;
+    TM_TOTAL_READS.fetch_add(r, Ordering::Relaxed);
+    TM_TOTAL_WRITES.fetch_add(w, Ordering::Relaxed);
+    TM_COMMIT_COUNT.fetch_add(1, Ordering::Relaxed);
+    // max
+    let mut cur = TM_MAX_READ_SET.load(Ordering::Relaxed);
+    while r > cur { match TM_MAX_READ_SET.compare_exchange_weak(cur, r, Ordering::Relaxed, Ordering::Relaxed) { Ok(_) => break, Err(v) => cur = v, } }
+    cur = TM_MAX_WRITE_SET.load(Ordering::Relaxed);
+    while w > cur { match TM_MAX_WRITE_SET.compare_exchange_weak(cur, w, Ordering::Relaxed, Ordering::Relaxed) { Ok(_) => break, Err(v) => cur = v, } }
+    // min
+    let mut cur_min = TM_MIN_READ_SET.load(Ordering::Relaxed);
+    while r < cur_min { match TM_MIN_READ_SET.compare_exchange_weak(cur_min, r, Ordering::Relaxed, Ordering::Relaxed) { Ok(_) => break, Err(v) => cur_min = v, } }
+    cur_min = TM_MIN_WRITE_SET.load(Ordering::Relaxed);
+    while w < cur_min { match TM_MIN_WRITE_SET.compare_exchange_weak(cur_min, w, Ordering::Relaxed, Ordering::Relaxed) { Ok(_) => break, Err(v) => cur_min = v, } }
+}
+
+pub fn reset_tm_stats() {
+    TM_COMMIT_COUNT.store(0, Ordering::Relaxed);
+    TM_TOTAL_READS.store(0, Ordering::Relaxed);
+    TM_TOTAL_WRITES.store(0, Ordering::Relaxed);
+    TM_MAX_READ_SET.store(0, Ordering::Relaxed);
+    TM_MAX_WRITE_SET.store(0, Ordering::Relaxed);
+    TM_MIN_READ_SET.store(u64::MAX, Ordering::Relaxed);
+    TM_MIN_WRITE_SET.store(u64::MAX, Ordering::Relaxed);
+    TM_ABORT_COUNT.store(0, Ordering::Relaxed);
+}
+
 pub fn tx_active() -> bool {
     TX.with(|tx| tx.borrow().is_some())
 }
@@ -161,6 +205,7 @@ pub fn flush_tx() -> Option<Box<TxState>> { TX.with(|tx| tx.borrow_mut().take())
 // ── Commit helpers ──────────────────────────────────────
 
 /// Lock lock-indices for a set of write-addresses.
+#[cfg(feature = "wbctl")]
 pub fn lock_write_addrs(addrs: &[usize]) -> Vec<usize> {
     let mut idxs: Vec<usize> = addrs.iter().map(|&a| lock_index(a)).collect();
     idxs.sort_unstable();
@@ -196,7 +241,23 @@ fn do_init() {
     }
 }
 
-fn do_exit() { INIT_COUNT.store(0, Ordering::Relaxed); }
+fn do_exit() {
+    let cc = TM_COMMIT_COUNT.load(Ordering::Relaxed);
+    let tr = TM_TOTAL_READS.load(Ordering::Relaxed);
+    let tw = TM_TOTAL_WRITES.load(Ordering::Relaxed);
+    let mxr = TM_MAX_READ_SET.load(Ordering::Relaxed);
+    let mxw = TM_MAX_WRITE_SET.load(Ordering::Relaxed);
+    let mnr = TM_MIN_READ_SET.load(Ordering::Relaxed);
+    let mnw = TM_MIN_WRITE_SET.load(Ordering::Relaxed);
+    let ac = TM_ABORT_COUNT.load(Ordering::Relaxed);
+    print!("TM_STATS: commits={}", cc);
+    if cc > 0 {
+        print!(" avg_reads={:.1} min_reads={} max_reads={} avg_writes={:.1} min_writes={} max_writes={}",
+            tr as f64 / cc as f64, mnr, mxr, tw as f64 / cc as f64, mnw, mxw);
+    }
+    println!(" aborts={}", ac);
+    INIT_COUNT.store(0, Ordering::Relaxed);
+}
 
 // ── Public API (shared by all variants) ─────────────────
 pub fn tm_init() { tm_install_tmx_hook(); do_init(); }

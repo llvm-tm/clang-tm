@@ -25,7 +25,7 @@ sgl-distributed = ["runtime-sgl-distributed"]
 [dependencies]
 addrspace = { path = "../addrspace" }
 runtime-core = { path = "../runtime/core" }
-runtime-tinystm = { path = "../runtime/tinystm" }
+runtime-tinystm = { path = "../runtime/tinystm", default-features = false }
 runtime-norec   = { path = "../runtime/norec", optional = true }
 runtime-tl2     = { path = "../runtime/tl2", optional = true }
 runtime-swisstm = { path = "../runtime/swisstm", optional = true }

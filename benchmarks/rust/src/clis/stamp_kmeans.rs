@@ -41,15 +41,19 @@ fn main() {
 
     tm_init();
 
-    // Generate random points and cluster centers
+    // Generate random points and cluster centers (same algorithm as C++ kmeans.cpp)
     let mut rng = Rng::new(42);
-    let points: Vec<TmCell<f64>> = (0..npoints * ndims).map(|_| {
-        let u = rng.uniform() * 1000.0;
-        TmCell::new(u)
-    }).collect();
+    let mut points = Vec::with_capacity(npoints * ndims);
+    for i in 0..npoints {
+        let cluster = i % nclusters;
+        for _d in 0..ndims {
+            let u = rng.uniform();
+            points.push(TmCell::new((-10.0 + u * 20.0) + cluster as f64 * 5.0));
+        }
+    }
     let clusters: Vec<TmCell<f64>> = (0..nclusters * ndims).map(|_| {
-        let u = rng.uniform() * 1000.0;
-        TmCell::new(u)
+        let u = rng.uniform();
+        TmCell::new(-10.0 + u * 20.0)
     }).collect();
     let assignments: Vec<TmCell<i32>> = (0..npoints).map(|_| TmCell::new(0)).collect();
     let _membership: Vec<TmCell<i32>> = (0..npoints).map(|_| TmCell::new(0)).collect();
@@ -118,22 +122,17 @@ fn main() {
                                     count += 1;
                                 }
                             }
-                            let converged_all = if count > 0 {
+                            let cvd = transaction(|tx| {
                                 let mut delta = 0.0f64;
                                 for d in 0..ndims {
                                     let new_val = sum[d] / count as f64;
-                                    let old_val = unsafe { *clusters[c * ndims + d].ptr() };
+                                    let old_val = tx.read(&clusters[c * ndims + d]);
                                     delta += (new_val - old_val) * (new_val - old_val);
-                                    unsafe { *clusters[c * ndims + d].ptr() = new_val; }
+                                    tx.write(&clusters[c * ndims + d], new_val);
                                 }
-                                let sqrt_s = delta.sqrt();
-                                sqrt_s < 0.001
-                            } else {
-                                true
-                            };
-                            if converged_all {
-                                converged.store(true, Ordering::Release);
-                            }
+                                delta.sqrt() < 0.001
+                            });
+                            if cvd { converged.store(true, Ordering::Release); }
                         }
                     }
 
@@ -147,6 +146,19 @@ fn main() {
 
     let elapsed = start.elapsed();
     println!("    Time = {} ms", elapsed.as_millis());
+
+    // Print final centroids for verification
+    println!("  Centroids:");
+    for c in 0..nclusters {
+        print!("    [{}] ", c);
+        for d in 0..ndims {
+            let v = unsafe { *clusters[c * ndims + d].ptr() };
+            if d > 0 { print!(", "); }
+            print!("{:.6}", v);
+        }
+        println!();
+    }
+
     tm_exit();
 }
 

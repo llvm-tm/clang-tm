@@ -52,7 +52,7 @@ pub fn tm_abort() {
 pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
     fence(Ordering::SeqCst);
-    if tx.write_set.is_empty() { return true; }
+    if tx.write_set.is_empty() { update_read_write_stats(tx.read_set.len(), 0); return true; }
     let addrs: Vec<usize> = tx.write_set.keys().copied().collect();
     gc_acquire(); fence(Ordering::SeqCst);
     let idxs = lock_write_addrs(&addrs);
@@ -61,6 +61,7 @@ pub fn tm_commit() -> bool {
     fence(Ordering::SeqCst);
     unlock_indices(&idxs);
     gc_release_and_inc();
+    update_read_write_stats(tx.read_set.len(), tx.write_set.len());
     true
 }
 
