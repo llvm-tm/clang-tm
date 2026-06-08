@@ -77,12 +77,24 @@ static inline int find_nearest_cluster(const double* point, const double* centro
     return best;
 }
 
-TX static void kmeans_accumulate(KMeansData* data, int start, int end,
-                                   double* local_sum, int* local_count) {
+TX static void kmeans_merge_global(KMeansData* data,
+                                    double* local_sum, int* local_count) {
+    for (int c = 0; c < data->nclusters; c++) {
+        int lc = local_count[c];
+        if (lc > 0) {
+            data->new_centers_count[c] += lc;
+            for (int d = 0; d < data->ndims; d++) {
+                data->new_centers_sum[c * data->ndims + d] += local_sum[c * data->ndims + d];
+            }
+        }
+    }
+}
+
+static void kmeans_accum_local(double* local_sum, int* local_count,
+                                KMeansData* data, int start, int end) {
     for (int i = start; i < end; i++) {
         int c = find_nearest_cluster(&data->points[i * data->ndims],
                                       data->centroids, data->nclusters, data->ndims);
-        data->assignments[i] = c;
         local_count[c]++;
         for (int d = 0; d < data->ndims; d++) {
             local_sum[c * data->ndims + d] += data->points[i * data->ndims + d];
@@ -90,29 +102,18 @@ TX static void kmeans_accumulate(KMeansData* data, int start, int end,
     }
 }
 
-TX static double kmeans_aggregate_update(KMeansData* data,
-                                           double* local_sum, int* local_count) {
-    for (int c = 0; c < data->nclusters; c++) {
-        data->new_centers_count[c] += local_count[c];
-        for (int d = 0; d < data->ndims; d++) {
-            data->new_centers_sum[c * data->ndims + d] += local_sum[c * data->ndims + d];
-        }
-    }
+TX static double kmeans_update_one_cluster(KMeansData* data, int c) {
+    if (data->new_centers_count[c] == 0) return 0.0;
 
     double delta = 0.0;
-    for (int c = 0; c < data->nclusters; c++) {
-        if (data->new_centers_count[c] > 0) {
-            for (int d = 0; d < data->ndims; d++) {
-                double new_val = data->new_centers_sum[c * data->ndims + d] / data->new_centers_count[c];
-                double diff = data->centroids[c * data->ndims + d] - new_val;
-                delta += diff * diff;
-                data->centroids[c * data->ndims + d] = new_val;
-                data->new_centers_sum[c * data->ndims + d] = 0.0;
-            }
-        }
-        data->new_centers_count[c] = 0;
+    for (int d = 0; d < data->ndims; d++) {
+        double new_val = data->new_centers_sum[c * data->ndims + d] / data->new_centers_count[c];
+        double diff = data->centroids[c * data->ndims + d] - new_val;
+        delta += diff * diff;
+        data->centroids[c * data->ndims + d] = new_val;
+        data->new_centers_sum[c * data->ndims + d] = 0.0;
     }
-
+    data->new_centers_count[c] = 0;
     return delta;
 }
 
@@ -126,27 +127,41 @@ THREAD void worker_kmeans(ThreadData* td) {
     int total_threads = g_num_threads;
     int tid = td->thread_id;
 
-    std::vector<double> local_sum(nclusters * ndims, 0.0);
-    std::vector<int> local_count(nclusters, 0);
+    double* local_sum = new double[nclusters * ndims]();
+    int* local_count = new int[nclusters]();
 
     bool converged = false;
     int max_iters = 100;
 
     while (!converged && max_iters-- > 0) {
-        std::fill(local_sum.begin(), local_sum.end(), 0.0);
-        std::fill(local_count.begin(), local_count.end(), 0);
+        for (int i = 0; i < nclusters * ndims; i++) local_sum[i] = 0.0;
+        for (int i = 0; i < nclusters; i++) local_count[i] = 0;
 
+        // Phase 1: Non-TX accumulation into thread-local arrays
         int chunk = (npoints + total_threads - 1) / total_threads;
         int start = tid * chunk;
         int end = std::min(start + chunk, npoints);
 
         if (start < end) {
-            kmeans_accumulate(data, start, end, local_sum.data(), local_count.data());
+            kmeans_accum_local(local_sum, local_count, data, start, end);
         }
 
-        double delta = kmeans_aggregate_update(data, local_sum.data(), local_count.data());
+        // Phase 2: TX merge — each thread atomically adds its local counts/sums
+        // to the global accumulators
+        kmeans_merge_global(data, local_sum, local_count);
 
-        converged = (delta < threshold);
+        // Phase 3: Thread 0 updates centroids from accumulators (one TX per cluster)
+        if (tid == 0) {
+            double delta = 0.0;
+            for (int c = 0; c < nclusters; c++) {
+                delta += kmeans_update_one_cluster(data, c);
+            }
+            converged = (delta < threshold);
+        }
+
         total_ops.fetch_add(npoints, std::memory_order_relaxed);
     }
+
+    delete[] local_sum;
+    delete[] local_count;
 }

@@ -15,13 +15,16 @@ struct Edge {
 };
 
 struct SparseRow {
-    std::vector<uint64_t> row_ptr;
-    std::vector<uint64_t> col_idx;
-    std::vector<int64_t> weights;
+    uint64_t* row_ptr;
+    uint64_t* col_idx;
+    int64_t* weights;
+    uint64_t row_count;
+    uint64_t col_count;
 };
 
 struct TM SSCA2Data {
-    std::vector<Edge> edges;
+    Edge* edges;
+    uint64_t num_edges_alloc;
     SparseRow graph;
     uint64_t num_vertices;
     uint64_t num_edges;
@@ -38,50 +41,56 @@ struct TM SSCA2Data {
 static SSCA2Data* g_ssca2 = nullptr;
 
 static void build_csr(SSCA2Data* data) {
-    auto& edges = data->edges;
-    if (edges.empty()) return;
+    Edge* edges = data->edges;
+    uint64_t ne = data->num_edges;
+    if (ne == 0) return;
 
-    std::sort(edges.begin(), edges.end(),
+    std::sort(edges, edges + ne,
               [](const Edge& a, const Edge& b) {
                   if (a.src != b.src) return a.src < b.src;
                   return a.dst < b.dst;
               });
 
-    auto last = std::unique(edges.begin(), edges.end(),
-                            [](const Edge& a, const Edge& b) {
-                                return a.src == b.src && a.dst == b.dst;
-                            });
-    edges.erase(last, edges.end());
+    // Unique
+    uint64_t write_idx = 0;
+    for (uint64_t i = 0; i < ne; i++) {
+        if (i == 0 || edges[i].src != edges[i-1].src || edges[i].dst != edges[i-1].dst) {
+            edges[write_idx++] = edges[i];
+        }
+    }
+    data->num_edges = write_idx;
+    ne = write_idx;
 
     uint64_t max_v = 0;
-    for (auto& e : edges) {
-        max_v = std::max(max_v, std::max(e.src, e.dst));
+    for (uint64_t i = 0; i < ne; i++) {
+        max_v = std::max(max_v, std::max(edges[i].src, edges[i].dst));
     }
     data->num_vertices = max_v + 1;
 
-    auto& row_ptr = data->graph.row_ptr;
-    auto& col_idx = data->graph.col_idx;
-    auto& weights = data->graph.weights;
+    auto& g = data->graph;
+    g.row_count = data->num_vertices + 1;
+    g.row_ptr = new uint64_t[g.row_count]();
+    g.col_count = ne;
+    g.col_idx = new uint64_t[ne]();
+    g.weights = new int64_t[ne]();
 
-    row_ptr.resize(data->num_vertices + 1, 0);
-
-    for (auto& e : edges) {
-        row_ptr[e.src + 1]++;
+    for (uint64_t i = 0; i < ne; i++) {
+        g.row_ptr[edges[i].src + 1]++;
     }
 
     for (uint64_t i = 1; i <= data->num_vertices; i++) {
-        row_ptr[i] += row_ptr[i - 1];
+        g.row_ptr[i] += g.row_ptr[i - 1];
     }
 
-    col_idx.resize(edges.size());
-    weights.resize(edges.size());
+    uint64_t* temp_pos = new uint64_t[g.row_count];
+    for (uint64_t i = 0; i < g.row_count; i++) temp_pos[i] = g.row_ptr[i];
 
-    std::vector<uint64_t> temp_pos = row_ptr;
-    for (auto& e : edges) {
-        uint64_t pos = temp_pos[e.src]++;
-        col_idx[pos] = e.dst;
-        weights[pos] = e.weight;
+    for (uint64_t i = 0; i < ne; i++) {
+        uint64_t pos = temp_pos[edges[i].src]++;
+        g.col_idx[pos] = edges[i].dst;
+        g.weights[pos] = edges[i].weight;
     }
+    delete[] temp_pos;
 }
 
 inline void ssca2_generate_graph() {
@@ -165,12 +174,14 @@ inline void ssca2_generate_graph() {
         start_v += csize;
     }
 
-    for (auto& e : temp_edges) {
-        data->edges.push_back(e);
+    data->num_edges = (uint64_t)temp_edges.size();
+    data->num_edges_alloc = data->num_edges + 1024;
+    data->edges = new Edge[data->num_edges_alloc]();
+    for (uint64_t i = 0; i < data->num_edges; i++) {
+        data->edges[i] = temp_edges[i];
     }
 
     build_csr(data);
-    data->num_edges = data->edges.size();
     g_ssca2 = data;
 
     printf("Number of processors:       %i\n", g_num_threads);
@@ -183,86 +194,68 @@ inline void ssca2_generate_graph() {
     fflush(stdout);
 }
 
-TX static bool ssca2_has_edge(SSCA2Data* data, uint64_t src, uint64_t dst) {
-    auto& row_ptr = data->graph.row_ptr;
-    auto& col_idx = data->graph.col_idx;
-    uint64_t start = row_ptr[src];
-    uint64_t end = row_ptr[src + 1];
+static bool ssca2_has_edge(const SSCA2Data* data, uint64_t src, uint64_t dst) {
+    uint64_t start = data->graph.row_ptr[src];
+    uint64_t end = data->graph.row_ptr[src + 1];
     for (uint64_t i = start; i < end; i++) {
-        if (col_idx[i] == dst) return true;
+        if (data->graph.col_idx[i] == dst) return true;
     }
     return false;
 }
 
-TX static int64_t ssca2_get_weight(SSCA2Data* data, uint64_t src, uint64_t dst) {
-    auto& row_ptr = data->graph.row_ptr;
-    auto& col_idx = data->graph.col_idx;
-    uint64_t start = row_ptr[src];
-    uint64_t end = row_ptr[src + 1];
+static int64_t ssca2_get_weight(const SSCA2Data* data, uint64_t src, uint64_t dst) {
+    uint64_t start = data->graph.row_ptr[src];
+    uint64_t end = data->graph.row_ptr[src + 1];
     for (uint64_t i = start; i < end; i++) {
-        if (col_idx[i] == dst) return data->graph.weights[i];
+        if (data->graph.col_idx[i] == dst) return data->graph.weights[i];
     }
     return -1;
 }
 
-// ── TX: atomically update global max weight ──────────────────
-TX static void ssca2_update_max_weight(SSCA2Data* data, int64_t local_max) {
+
+
+TX static void ssca2_update_max_weight(SSCA2Data* data, int64_t local_max,
+                                        uint64_t local_ops,
+                                        uint64_t* ops_out) {
     if (local_max > data->global_max_weight)
         data->global_max_weight = local_max;
-}
-
-// ── Get weight (read-only, used outside TX for local max) ───
-static int64_t get_weight(const SSCA2Data* data, uint64_t v, int64_t w_i) {
-    return data->graph.weights[w_i];
-}
-
-// ── Check edge (read-only, used outside TX) ──────────────────
-static bool has_edge(const SSCA2Data* data, uint64_t src, uint64_t dst) {
-    auto& row_ptr = data->graph.row_ptr;
-    auto& col_idx = data->graph.col_idx;
-    uint64_t start = row_ptr[src];
-    uint64_t end = row_ptr[src + 1];
-    for (uint64_t i = start; i < end; i++)
-        if (col_idx[i] == dst) return true;
-    return false;
+    *ops_out = local_ops;
 }
 
 THREAD void worker_ssca2(ThreadData* td) {
     auto data = g_ssca2;
-    auto& row_ptr = data->graph.row_ptr;
-    auto& col_idx = data->graph.col_idx;
-    auto& weights = data->graph.weights;
 
     uint64_t chunk = (data->num_vertices + g_num_threads - 1) / g_num_threads;
     uint64_t start_v = td->thread_id * chunk;
     uint64_t end_v = std::min(start_v + chunk, data->num_vertices);
-    uint64_t local_ops = 0;
+
     int64_t local_max = 0;
+    uint64_t local_ops = 0;
 
     // ── Non-TX: iterate vertices, read graph data, count triangles ──
     for (int iter = 0; iter < g_ssca2_i; iter++) {
         for (uint64_t v = start_v; v < end_v; v++) {
-            uint64_t start = row_ptr[v];
-            uint64_t end = row_ptr[v + 1];
+            uint64_t start = data->graph.row_ptr[v];
+            uint64_t end = data->graph.row_ptr[v + 1];
 
             for (uint64_t i = start; i < end; i++) {
-                int64_t w = weights[i];
+                int64_t w = data->graph.weights[i];
                 if (w > local_max) local_max = w;
 
-                uint64_t neighbor = col_idx[i];
-                uint64_t nstart = row_ptr[neighbor];
-                uint64_t nend = row_ptr[neighbor + 1];
+                uint64_t neighbor = data->graph.col_idx[i];
+                uint64_t nstart = data->graph.row_ptr[neighbor];
+                uint64_t nend = data->graph.row_ptr[neighbor + 1];
 
                 for (uint64_t j = nstart; j < nend; j++) {
-                    uint64_t n2 = col_idx[j];
-                    if (has_edge(data, n2, v)) local_ops++;
+                    uint64_t n2 = data->graph.col_idx[j];
+                    if (ssca2_has_edge(data, n2, v)) local_ops++;
                 }
             }
         }
     }
 
-    // ── TX: one write per thread to update global max weight ──
-    ssca2_update_max_weight(data, local_max);
-
-    total_ops.fetch_add(local_ops, std::memory_order_relaxed);
+    // ── TX: update global max weight ──
+    uint64_t ops = 0;
+    ssca2_update_max_weight(data, local_max, local_ops, &ops);
+    total_ops.fetch_add(ops, std::memory_order_relaxed);
 }
