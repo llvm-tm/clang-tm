@@ -21,10 +21,18 @@ all: $(BINS)
 test_stress_ds: test_stress_ds.cpp $(RUNTIME_SRC)
 	$(CXX) $(CXXFLAGS) $(INC) $(RUNTIME_FLAGS) -o $@ $< $(RUNTIME_SRC) $(LDFLAGS)
 
+# Portable timeout: use gtimeout (macOS coreutils) if available
+TIMEOUT_CMD := timeout
+ifeq ($(shell command -v timeout 2>/dev/null),)
+    ifneq ($(shell command -v gtimeout 2>/dev/null),)
+        TIMEOUT_CMD := gtimeout
+    endif
+endif
+
 run: all
 	@for b in $(BINS); do \
 		echo "=== $$b ==="; \
-		perl -e 'alarm shift @ARGV; exec @ARGV' 30 ./$$b 2>&1 || true; \
+		$(TIMEOUT_CMD) 30 ./$$b 2>&1 || true; \
 		echo; \
 	done
 

@@ -24,6 +24,13 @@ cd "$(dirname "$0")/../.."
 THREAD_LIST="${THREADS:-"1 2 4 7 10 14 21 28 35 42 49 56"}"
 SAMPLES=3
 TIMEOUT=600
+
+# Portable timeout: use gtimeout (macOS coreutils) if available
+TIMEOUT_CMD="timeout"
+if ! command -v timeout &>/dev/null && command -v gtimeout &>/dev/null; then
+    TIMEOUT_CMD="gtimeout"
+fi
+
 STAMP_WORKLOAD="fixed"     # STAMP is time-to-complete (fixed work)
 
 # Plugin STAMP params (STAMP.cpp unified binary, -b dispatch)
@@ -165,7 +172,7 @@ run_one() {
     fi
 
     set +e
-    timeout "$TIMEOUT" "$binary" "$@" > "$outfile" 2>&1
+    $TIMEOUT_CMD "$TIMEOUT" "$binary" "$@" > "$outfile" 2>&1
     local rc=$?
     set -e
 
