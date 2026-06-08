@@ -24,11 +24,12 @@ struct PathRequest {
 };
 
 struct TM LabyrinthData {
-    std::vector<PathRequest> requests;
-    std::vector<int> request_handled;
-    std::vector<long> grid;
+    PathRequest* requests;
+    int* request_handled;
+    long* grid;
     int width, height, depth;
     int num_requests;
+    int gridsize;
     long x_cost, y_cost, z_cost;
     long bend_cost;
 };
@@ -51,20 +52,23 @@ inline void labyrinth_generate_maze() {
     data->bend_cost = 1;
     data->num_requests = g_labyrinth_n;
 
-    int gridsize = data->width * data->height * data->depth;
-    data->grid.resize(gridsize, -1L);
-
+    data->gridsize = data->width * data->height * data->depth;
+    data->grid = new long[data->gridsize]();
     PRNG rng(42);
-    int num_walls = gridsize / 8;
+    for (int i = 0; i < data->gridsize; i++) {
+        data->grid[i] = -1L;
+    }
+
+    int num_walls = data->gridsize / 8;
     for (int i = 0; i < num_walls; i++) {
-        int idx = (int)(rng.next() % gridsize);
+        int idx = (int)(rng.next() % data->gridsize);
         if (data->grid[idx] == -1L) {
             data->grid[idx] = -2L;
         }
     }
 
-    data->requests.resize(data->num_requests);
-    data->request_handled.resize(data->num_requests, 0);
+    data->requests = new PathRequest[data->num_requests]();
+    data->request_handled = new int[data->num_requests]();
 
     for (int i = 0; i < data->num_requests; i++) {
         int sx, sy, sz, dx, dy, dz;
@@ -94,7 +98,20 @@ static inline int grid_idx(const LabyrinthData* data, int x, int y, int z) {
     return (z * data->height + y) * data->width + x;
 }
 
-// ── BFS expansion: computes distance field from src (non-TX, raw memory) ───
+// ── TX wrapper: atomically verify and mark path cells ─────────
+TX static bool labyrinth_mark(LabyrinthData* data, const Point3D* path, int path_len) {
+    for (int i = 1; i + 1 < path_len; i++) {
+        int idx = (path[i].z * data->height + path[i].y) * data->width + path[i].x;
+        if (data->grid[idx] != -1L) return false;
+    }
+    for (int i = 1; i + 1 < path_len; i++) {
+        int idx = (path[i].z * data->height + path[i].y) * data->width + path[i].x;
+        data->grid[idx] = -2L;
+    }
+    return true;
+}
+
+// ── BFS expansion: computes distance field (non-TX, raw memory) ───
 static int do_expansion(long* dist, const long* cell_states,
                          int w, int h, int d,
                          const Point3D& src, const Point3D& dst,
@@ -117,8 +134,8 @@ static int do_expansion(long* dist, const long* cell_states,
             int nx = cx + dirs[d2][0], ny = cy + dirs[d2][1], nz = cz + dirs[d2][2];
             if (nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d) continue;
             int nidx = (nz * h + ny) * w + nx;
-            if (cell_states[nidx] == -2L) continue; // wall
-            if (dist[nidx] == -1L) { // unvisited
+            if (cell_states[nidx] == -2L) continue;
+            if (dist[nidx] == -1L) {
                 dist[nidx] = dist[cur] + 1;
                 queue[qt++] = nidx;
             }
@@ -127,15 +144,15 @@ static int do_expansion(long* dist, const long* cell_states,
     return 0;
 }
 
-// ── Greedy traceback: reconstruct path from distance field ────────────────
-static bool do_traceback(std::vector<Point3D>& path, const long* dist,
-                          int w, int h, int d,
-                          const Point3D& src, const Point3D& dst) {
-    path.clear();
+// ── Greedy traceback: reconstruct path from distance field ────
+static int do_traceback(Point3D* path, const long* dist,
+                         int w, int h, int d,
+                         const Point3D& src, const Point3D& dst) {
+    int pc = 0;
     int cx = dst.x, cy = dst.y, cz = dst.z;
     int dirs[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
     while (true) {
-        path.push_back({cx, cy, cz});
+        path[pc++] = {cx, cy, cz};
         int idx = (cz * h + cy) * w + cx;
         if (idx == (src.z * h + src.y) * w + src.x) break;
 
@@ -147,59 +164,48 @@ static bool do_traceback(std::vector<Point3D>& path, const long* dist,
             long nv = dist[(nz * h + ny) * w + nx];
             if (nv >= 0 && nv < best_val) { best_val = nv; best_d = d2; }
         }
-        if (best_d < 0) { path.clear(); return false; }
+        if (best_d < 0) { pc = 0; break; }
         cx += dirs[best_d][0]; cy += dirs[best_d][1]; cz += dirs[best_d][2];
     }
-    std::reverse(path.begin(), path.end());
-    return !path.empty();
-}
-
-// ── TX wrapper: atomically verify and mark path cells ─────────────────────
-TX static bool labyrinth_mark(LabyrinthData* data,
-                               const std::vector<Point3D>& path) {
-    for (size_t i = 1; i + 1 < path.size(); i++) {
-        int idx = grid_idx(data, path[i].x, path[i].y, path[i].z);
-        if (data->grid[idx] != -1L) return false;
+    // Reverse in place
+    for (int i = 0; i < pc / 2; i++) {
+        Point3D tmp = path[i];
+        path[i] = path[pc - 1 - i];
+        path[pc - 1 - i] = tmp;
     }
-    for (size_t i = 1; i + 1 < path.size(); i++) {
-        int idx = grid_idx(data, path[i].x, path[i].y, path[i].z);
-        data->grid[idx] = -2L;
-    }
-    return true;
+    return pc;
 }
 
 THREAD void worker_labyrinth(ThreadData* td) {
     auto data = g_labyrinth;
-    int gridsize = data->width * data->height * data->depth;
-    std::vector<long> local_grid(data->grid.size());
-    long* dist = new long[gridsize];
-    int* queue = new int[gridsize];
-    std::vector<Point3D> path;
+    int gsize = data->gridsize;
+    long* local_grid = new long[gsize];
+    long* dist = new long[gsize];
+    int* queue = new int[gsize];
+    Point3D* path = new Point3D[gsize];
 
     for (int i = td->thread_id; i < data->num_requests; i += g_num_threads) {
         if (data->request_handled[i]) continue;
 
-        auto& req = data->requests[i];
         int w = data->width, h = data->height, d = data->depth;
+        PathRequest& req = data->requests[i];
 
         while (true) {
-            // Load grid state (non-TX raw memcpy — may be stale, that's OK)
-            std::memcpy(local_grid.data(), data->grid.data(),
-                        data->grid.size() * sizeof(long));
+            // Copy grid locally (non-TX)
+            std::memcpy(local_grid, data->grid, gsize * sizeof(long));
 
-            int ok = do_expansion(dist, local_grid.data(), w, h, d,
-                                   req.src, req.dst, queue);
-            bool traced = ok && do_traceback(path, dist, w, h, d, req.src, req.dst);
-            if (!ok || !traced || path.empty()) break;
+            int ok = do_expansion(dist, local_grid, w, h, d, req.src, req.dst, queue);
+            int plen = ok ? do_traceback(path, dist, w, h, d, req.src, req.dst) : 0;
+            if (plen == 0) break;
 
-            if (labyrinth_mark(data, path)) break;
-            // TX returned false — path cells were taken between memcpy and TX.
-            // Loop back to reload grid state.
+            if (labyrinth_mark(data, path, plen)) {
+                total_ops.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
         }
-
-        data->request_handled[i] = 1;
-        total_ops.fetch_add(1, std::memory_order_relaxed);
     }
+    delete[] local_grid;
     delete[] dist;
     delete[] queue;
+    delete[] path;
 }
