@@ -16,6 +16,7 @@
 
 #include "tl2/tl2.hpp"
 #include "tm_alloc_overrides.hpp"
+#include "tm_thread_state.hpp"
 thread_local bool g_in_tx = false;
 thread_local FreeNode* g_deferred_frees = nullptr;
 thread_local std::unordered_set<void*> g_deferred_frees_set;
@@ -26,6 +27,11 @@ static __thread int8_t tm_is_init_ready = 0;
 __thread int32_t tm_nested_call_counter;
 __thread int32_t tm_longjmp_ret;
 __thread sigjmp_buf tm_jmpbuf;
+static __thread TMThreadState g_tm_thread_state = {0, 0};
+
+TMThreadState *tm_get_thread_state() {
+    return &g_tm_thread_state;
+}
 
 #define TM_BUFFER_SIZE 1024
 static __thread uint8_t tm_buffer[TM_BUFFER_SIZE];

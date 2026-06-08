@@ -258,7 +258,8 @@ commit()    //
 				// Skip stack addresses in plugin path — they come from dead
 				// _tm_clone frames and writing back corrupts the current stack.
 				// In expli API path, TM fields on the stack need write-back.
-				if (!g_tm_expli_mode && is_stack_addr(addr)) continue;
+				// Also skip TM-region addresses are never on the stack.
+				if (!g_tm_expli_mode && !stm::isTMAddress(addr) && is_stack_addr(addr)) continue;
 				// Skip null/low addresses — the plugin can generate these during
 				// linked-list traversal (e.g., null _M_next pointer in std::map).
 				// The read path already handles them; the write path must as well.
@@ -626,6 +627,7 @@ write_word_ctl(                                               //
     ValueType sz                                              //
 )
 {
+
 	ByteOffset bo((word_t)addr);
 
 	TM_ASSERT(tx, "tx not defined");
