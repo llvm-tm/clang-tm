@@ -397,7 +397,11 @@ public:
 
 #ifdef LLVM_TM_PLUGIN
         if (!stm::isTMAddress((void*)addr)) {
-            return *addr;
+            if constexpr (std::is_pointer_v<T>) {
+                return const_cast<T>(*addr);
+            } else {
+                return *addr;
+            }
         }
 #else
         TM_ASSERT(stm::isTMAddress((void*)addr), "Address not in TM address space");

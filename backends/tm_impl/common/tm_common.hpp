@@ -167,8 +167,6 @@ write_value_to_addr( //
 		WRITE_VALUE_TO_ADDR_CASE(FLOAT, float, val, addr);
 		WRITE_VALUE_TO_ADDR_CASE(DOUBLE, double, val, addr);
 		WRITE_VALUE_TO_ADDR_CASE(POINTER, void *, val, addr);
-	default:
-		break;
 	}
 }
 

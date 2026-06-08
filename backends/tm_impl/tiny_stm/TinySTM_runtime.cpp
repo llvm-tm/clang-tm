@@ -190,8 +190,11 @@ TMThreadState *tm_get_thread_state() {
     return &g_tm_thread_state;
 }
 
+static __thread int tm_count = 0;
+
 void tm_begin()
 {
+	int mc = ++tm_count;
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
 	auto *ts = tm_get_thread_state();
@@ -202,6 +205,9 @@ void tm_begin()
 	else if (sc > 0 && tc == 0)
 		g_tm_expli_mode = false;
 	int32_t c = (tc > 0) ? tc : sc;
+	fprintf(stderr, "[tm_begin #%d] sc=%d tc=%d c=%d tx_active=%d\n",
+		mc, sc, tc, c,
+		tinystm::current_tx_wbctl ? tinystm::current_tx_wbctl->active : -1);
 	if (c == 1) { g_in_tx = true;
 		tinystm::jmpbuf = (sigjmp_buf *)&tm_jmpbuf;
 		tm_clear_spec_allocs();
@@ -232,15 +238,22 @@ void tm_begin()
 	assert(c >= 0);
 }
 
+static __thread int tm_end_call_count = 0;
+
 void tm_end()
 {
+	int my_call = ++tm_end_call_count;
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 	tm_end_count++;
 	auto *ts = tm_get_thread_state();
 	int32_t tc = tm_nested_call_counter;
 	int32_t sc = ts->nested_call_counter;
 	int32_t c = (tc > 0) ? tc : sc;
-	if (c == 1) { g_in_tx = false;
+	if (c == 1) { 
+		fprintf(stderr, "[tm_end #%d] sc=%d tc=%d c=%d calling commit (tx->active=%d)\n",
+			my_call, sc, tc, c,
+			tinystm::current_tx_wbctl ? tinystm::current_tx_wbctl->active : -1);
+		g_in_tx = false;
 		// Record max read-set and write-set sizes for this TX
 #if defined(DESIGN_WBCTL)
 		auto *tx = tinystm::current_tx_wbctl;
