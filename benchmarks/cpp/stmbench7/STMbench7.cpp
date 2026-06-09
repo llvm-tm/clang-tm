@@ -945,8 +945,8 @@ static void test_cli_flags() {
     int save_t = g_num_threads, save_d = g_duration_ms;
     TEST_EQ(g_num_threads, 4, "default threads");
     TEST_EQ(g_duration_ms, 10000, "default duration");
-    const char* test_args[] = {"prog", "2", "500"};
-    parse_args(3, (char**)test_args);
+    const char* test_args[] = {"prog", "-t", "2", "-d", "500"};
+    parse_args((int)(sizeof(test_args)/sizeof(test_args[0])), (char**)test_args);
     TEST_EQ(g_num_threads, 2, "override threads");
     TEST_EQ(g_duration_ms, 500, "override duration");
     g_num_threads = save_t; g_duration_ms = save_d;
