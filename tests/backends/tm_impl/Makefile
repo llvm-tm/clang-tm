@@ -9,7 +9,7 @@ RUNTIME_DIR := ../../../backends/tm_impl
 INC_BASE := -I../../../backends/tm_impl/common -I$(RUNTIME_DIR)
 
 # ── Backend definitions ────────────────────────────────────────────
-BACKENDS := tl2 tinystm wt wbetl norec swisstm
+BACKENDS := tl2 tinystm wt wbetl norec swisstm xtm
 
 INC_tl2     := $(INC_BASE) -I../../../backends/tm_impl/tl2
 RUNTIME_tl2 := $(RUNTIME_DIR)/tl2/tl2_runtime.cpp
@@ -36,13 +36,9 @@ INC_swisstm := $(INC_BASE) -I../../../backends/tm_impl/swisstm
 RUNTIME_swisstm := $(RUNTIME_DIR)/swisstm/SwissTM_runtime.cpp
 FLAGS_swisstm := -DTM_BACKEND_SWISSTM
 
-INC_nvhtm := $(INC_BASE) -I../../../backends/tm_impl/nvhtm
-RUNTIME_nvhtm := $(RUNTIME_DIR)/nvhtm/NVHTM_runtime.cpp
-FLAGS_nvhtm := -DTM_BACKEND_NVHTM -mrtm
-
-INC_spht := $(INC_BASE) -I../../../backends/tm_impl/spht
-RUNTIME_spht := $(RUNTIME_DIR)/spht/SPHT_runtime.cpp
-FLAGS_spht := -DTM_BACKEND_SPHT -mrtm
+INC_xtm := $(INC_BASE) -I../../../backends/tm_impl/xtm
+RUNTIME_xtm := $(RUNTIME_DIR)/xtm/xtm_runtime.cpp
+FLAGS_xtm := -DTM_BACKEND_XTM
 
 # ── Test source files ──────────────────────────────────────────────
 TESTS := counter_st counter_mt write_set_validation overlap_stress read_lock_interference readall_write_interference
@@ -88,7 +84,7 @@ all: $(BINS) $(ALLOC_BINS)
 # ── Run targets ────────────────────────────────────────────────────
 RUN_TARGETS := $(addprefix run-,$(BACKENDS))
 
-$(RUN_TARGETS): run-%:
+$(RUN_TARGETS): run-%: $(foreach t,$(TESTS),bin/%/$(t))
 	@echo "=== Backend: $* ==="
 	@$(foreach t,$(TESTS),\
 		echo "--- $(t) ---"; \

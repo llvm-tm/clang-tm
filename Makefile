@@ -22,7 +22,7 @@ TESTS_DIR := $(PROJECT_ROOT)/tests
 
 PLUGIN := $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
 
-.PHONY: all clean plugin plugin-benchmarks expli-benchmarks tests check help info
+.PHONY: all clean plugin plugin-benchmarks expli-benchmarks tests check help info test_run
 
 all: info plugin plugin-benchmarks expli-benchmarks
 

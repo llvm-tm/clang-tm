@@ -52,6 +52,8 @@ public:
         std::lock_guard<std::mutex> lk(mtx_);
         return mmap_.find_first(k);
     }
+    using Iter = typename flat_multimap<K,V>::Iter;
+
     void clear() {
         std::lock_guard<std::mutex> lk(mtx_);
         mmap_.clear();
@@ -59,6 +61,18 @@ public:
     size_t size() const {
         std::lock_guard<std::mutex> lk(mtx_);
         return mmap_.size();
+    }
+    Iter lower_bound(const K &k) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return mmap_.lower_bound(k);
+    }
+    Iter begin() {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return mmap_.begin();
+    }
+    Iter end() {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return mmap_.end();
     }
 };
 

@@ -141,8 +141,8 @@ impl TpccDatabase {
         }).collect();
 
         // Pre-populate orders 1..PREPOPULATED_ORDERS per district
-        let order = (0..num_w * num_d * PREPOPULATED_ORDERS).map(|idx| {
-            let o_id = (idx % PREPOPULATED_ORDERS + 1) as i32;
+        let order = (0..num_w * num_d * MAX_ORDERS_PER_DISTRICT).map(|idx| {
+            let o_id = (idx % MAX_ORDERS_PER_DISTRICT + 1) as i32;
             let carrier = if o_id <= 2100 { o_id % 10 + 1 } else { 0 };
             Order {
                 o_id,
@@ -178,12 +178,12 @@ impl TpccDatabase {
             }
         }
 
-        let orderline = (0..num_w * num_d * PREPOPULATED_ORDERS * MAX_OL_PER_ORDER).map(|idx| {
+        let orderline = (0..num_w * num_d * MAX_ORDERS_PER_DISTRICT * MAX_OL_PER_ORDER).map(|idx| {
             let o_idx = idx / MAX_OL_PER_ORDER;
             let ol_num = (idx % MAX_OL_PER_ORDER + 1) as i32;
-            let o_id = (o_idx % PREPOPULATED_ORDERS + 1) as i32;
-            let d_id = ((o_idx / PREPOPULATED_ORDERS) % num_d + 1) as i32;
-            let w_id = (o_idx / (PREPOPULATED_ORDERS * num_d) + 1) as i32;
+            let o_id = (o_idx % MAX_ORDERS_PER_DISTRICT + 1) as i32;
+            let d_id = ((o_idx / MAX_ORDERS_PER_DISTRICT) % num_d + 1) as i32;
+            let w_id = (o_idx / (MAX_ORDERS_PER_DISTRICT * num_d) + 1) as i32;
             let carrier = if o_id <= 2100 { 2000 } else { 0 };
             OrderLine {
                 ol_o_id: o_id,
@@ -311,7 +311,7 @@ fn txn_payment(db: &TpccDatabase, tx: &Transaction, w_id: usize, d_id: usize, c_
     tx.write(&db.customer[c_idx].c_ytd_payment, tx.read(&db.customer[c_idx].c_ytd_payment) + amount);
     tx.write(&db.customer[c_idx].c_payment_cnt, tx.read(&db.customer[c_idx].c_payment_cnt) + 1);
 
-    let h_idx = db.hist_ptr.fetch_add(1, Ordering::Relaxed) as usize;
+    let h_idx = (db.hist_ptr.fetch_add(1, Ordering::Relaxed) as usize) % MAX_HISTORY;
     // History fields set during init; only h_amount needs TM write
     tx.write(&db.history[h_idx].h_amount, amount);
 }

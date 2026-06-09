@@ -30,7 +30,7 @@ LLVM_CONFIG := $(shell command -v llvm-config-22 2>/dev/null || command -v llvm-
 # Check LLVM version (22+ required)
 LLVM_VER := $(shell $(LLVM_CONFIG) --version 2>/dev/null || echo "0")
 LLVM_MAJOR := $(word 1,$(subst ., ,$(LLVM_VER)))
-OLD_VERSIONS := 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 20
+OLD_VERSIONS := 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20
 ifneq ($(filter $(LLVM_MAJOR),$(OLD_VERSIONS)),)
   $(error LLVM 22+ required, found $(LLVM_VER))
 endif

@@ -343,6 +343,17 @@ public:
         m_size++;
     }
     void pop_back() { if (m_size) { m_size--; m_data[m_size].~T(); } }
+    iterator erase(iterator pos) {
+        if (pos < m_data || pos >= m_data + m_size) return m_data + m_size;
+        size_t idx = pos - m_data;
+        m_data[idx].~T();
+        for (size_t i = idx + 1; i < m_size; i++) {
+            new (&m_data[i-1]) T(static_cast<T&&>(m_data[i]));
+            m_data[i].~T();
+        }
+        m_size--;
+        return m_data + idx;
+    }
 
     T &operator[](size_t i)       { return m_data[i]; }
     const T &operator[](size_t i) const { return m_data[i]; }

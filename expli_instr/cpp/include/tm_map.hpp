@@ -121,15 +121,15 @@ public:
 
     void insert(const K &k, const V &v) {
         if (m_size >= m_cap) grow(m_cap ? m_cap*2 : 64);
-        // linear insert to maintain data order (sorted by date)
+        // maintain sorted order (allow duplicate keys)
         size_t i = 0;
         for (; i < m_size; i++) {
-            if (m_data[i].first < k) /* earlier date */;
-            else break;
+            if (!(m_data[i].first < k)) break;
         }
-        // allow duplicates — just insert at end for now
-        // (sorted order not strictly required for multimap iteration)
-        new (&m_data[m_size]) P(k, v);
+        // shift elements right and insert at i
+        for (size_t j = m_size; j > i; j--)
+            new (&m_data[j]) P(m_data[j-1]);
+        new (&m_data[i]) P(k, v);
         m_size++;
     }
 
@@ -152,6 +152,16 @@ public:
     Iter end()   { return Iter{m_data + m_size}; }
     const Iter begin() const { return Iter{m_data}; }
     const Iter end()   const { return Iter{m_data + m_size}; }
+
+    Iter lower_bound(const K &k) const {
+        size_t lo = 0, hi = m_size;
+        while (lo < hi) {
+            size_t mid = (lo + hi) / 2;
+            if (m_data[mid].first < k) lo = mid + 1;
+            else hi = mid;
+        }
+        return Iter{m_data + lo};
+    }
 
     size_t size() const { return m_size; }
 };
