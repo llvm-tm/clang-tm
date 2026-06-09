@@ -28,6 +28,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <atomic>
+#include <cpuid.h>
+#include <thread>
+#include <immintrin.h>
 #include <new>
 #include <cstdio>
 
