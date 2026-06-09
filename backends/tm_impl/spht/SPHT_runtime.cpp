@@ -193,10 +193,32 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count) { (void)symbol_table; (void)symbol_count; }
 void consume_ptr(volatile void *ptr) { (void)ptr; }
 
+static void
+spht_push_malloc_entry(void *ptr, size_t size)
+{
+	if (g_in_tx && spht::current_tx && spht::current_tx->pcl) {
+		stm::any_type_t w;
+		w.u8 = (uint64_t)size;
+		spht::current_tx->pcl->append(ptr, stm::ValueType::UINT64, w,
+		                              spht::LOG_MALLOC);
+	}
+}
+
+static void
+spht_push_free_entry(void *ptr)
+{
+	if (g_in_tx && spht::current_tx && spht::current_tx->pcl) {
+		stm::any_type_t w = {};
+		spht::current_tx->pcl->append(ptr, stm::ValueType::UINT64, w,
+		                              spht::LOG_FREE);
+	}
+}
+
 void *tm_malloc(size_t size)
 {
 	void *p = stm::tm_region_malloc(size);
 	tm_track_spec_alloc(p);
+	spht_push_malloc_entry(p, size);
 	return p;
 }
 
@@ -205,6 +227,7 @@ void *tm_calloc(size_t nmemb, size_t size)
 	void *p = stm::tm_region_malloc(nmemb * size);
 	memset(p, 0, nmemb * size);
 	tm_track_spec_alloc(p);
+	spht_push_malloc_entry(p, nmemb * size);
 	return p;
 }
 
@@ -213,9 +236,11 @@ void *tm_realloc(void *ptr, size_t size)
 	void *p = stm::tm_region_malloc(size);
 	if (ptr) {
 		memcpy(p, ptr, size);
+		spht_push_free_entry(ptr);
 		stm::tm_region_free(ptr);
 	}
 	tm_track_spec_alloc(p);
+	spht_push_malloc_entry(p, size);
 	return p;
 }
 
@@ -223,6 +248,7 @@ void tm_free(void *ptr)
 {
 	if (!ptr) return;
 	if (!stm::isTMAddress(ptr)) return;
+	spht_push_free_entry(ptr);
 	if (g_in_tx) {
 		spht::tm_write_i1(reinterpret_cast<uint8_t *>(ptr), 0);
 		if (g_deferred_frees_set.count(ptr)) {
