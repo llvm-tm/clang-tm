@@ -53,7 +53,7 @@ for collecting and analyzing STAMP benchmark characterization data.
 
 ```bash
 # Apply the patch
-git am patch/profile/0001-add-tm-metrics.patch
+git am patches/profile/0001-add-tm-metrics.patch
 
 # Build and run profiling
 cd benchmarks/plugin/STAMP && make -j stamp_tinystm
