@@ -7,7 +7,7 @@
 #include <thread>
 #include <unordered_set>
 
-#include "../XTM/xtm.hpp"
+#include "xtm.hpp"
 #include "../tm_alloc_overrides.hpp"
 
 thread_local bool g_in_tx = false;
