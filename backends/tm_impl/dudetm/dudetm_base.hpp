@@ -51,7 +51,6 @@ static_assert(sizeof(PerThreadLog) % 64 == 0, "cache-line aligned");
 struct SharedControl {
     std::atomic<uint64_t> global_commit_seq{0};
     std::atomic<int>      next_log_idx{0};
-    // Single-byte flags (volatile not needed; atomic provides ordering)
     std::atomic<bool>     shutdown{false};
     std::atomic<bool>     replayer_ready{false};
 };
@@ -118,31 +117,51 @@ publish_batch(const DUDERedoEntry* entries, size_t count)
 }
 
 // ── Address → file offset ─────────────────────────────────────
+// Checks both registered symbol ranges and the persistent mmap's heap area
+// (so that writes to heap-allocated data are also persisted).
 static inline size_t
 addr_to_file_off(uintptr_t addr)
 {
-    if (g_sym_count == 0) return (size_t)-1;
-    int lo = 0, hi = (int)g_sym_count - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        if (addr < g_sym_ranges[mid].addr_start)
-            hi = mid - 1;
-        else if (addr >= g_sym_ranges[mid].addr_end)
-            lo = mid + 1;
-        else
-            return g_sym_ranges[mid].file_off + (addr - g_sym_ranges[mid].addr_start);
+    // 1. Check registered symbol ranges (global TM variables)
+    if (g_sym_count > 0) {
+        int lo = 0, hi = (int)g_sym_count - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            if (addr < g_sym_ranges[mid].addr_start)
+                hi = mid - 1;
+            else if (addr >= g_sym_ranges[mid].addr_end)
+                lo = mid + 1;
+            else
+                return g_sym_ranges[mid].file_off + (addr - g_sym_ranges[mid].addr_start);
+        }
+    }
+    // 2. Check heap area within the persistent mmap
+    //    (addresses returned by persistent tm_malloc bump allocator).
+    //    The bump pointer is stored at offset 16 of the persistent file header
+    //    (sizeof(magic)=8 + sizeof(version)=4 + sizeof(sym_count)=4), atomically
+    //    updated by the parent's tm_malloc and readable by the replayer via MAP_SHARED.
+    if (g_persist_base) {
+        uintptr_t base   = (uintptr_t)g_persist_base;
+        uintptr_t hstart = base + g_heap_start_off;
+        uint64_t  bump   = *reinterpret_cast<const uint64_t*>(g_persist_base + 16);
+        if (addr >= hstart && addr < hstart + bump)
+            return addr - base;  // direct file offset
     }
     return (size_t)-1;
 }
+
+// ── Replayer-local bump allocator state ──────────────────────
+// (only accessed by the replayer child process)
+static size_t replayer_heap_bump = 0;
 
 // ── Replay a single op ────────────────────────────────────────
 inline void replay_op(const DUDERedoEntry& e, uint8_t* local_persist)
 {
     switch (e.op_type) {
     case OP_WRITE: {
+        size_t off = addr_to_file_off(e.addr);
         stm::write_value_to_addr(
             reinterpret_cast<void*>(e.addr), e.val, e.type);
-        size_t off = addr_to_file_off(e.addr);
         if (off != (size_t)-1) {
             size_t sz = 8;
             switch (e.type) {
@@ -157,6 +176,18 @@ inline void replay_op(const DUDERedoEntry& e, uint8_t* local_persist)
         }
         break;
     }
+    case OP_MALLOC: {
+        // Track the allocation so addr_to_file_off knows the heap range.
+        // The parent atomically increments the header bump via
+        // __atomic_fetch_add(g_persist_base + 16, ...), and the replayer
+        // reads the value from the MAP_SHARED header for its own tracking.
+        size_t sz = e.val.u8;
+        replayer_heap_bump += sz;
+        break;
+    }
+    case OP_FREE:
+        // Bump allocator: free is a no-op (space is never reclaimed).
+        break;
     default:
         break;
     }
@@ -177,6 +208,10 @@ replayer_loop()
         close(fd); _exit(1);
     }
     close(fd);
+
+    // Initialize the replayer-local bump from the persistent file header.
+    // The parent may have advanced it since the file was first created.
+    replayer_heap_bump = *reinterpret_cast<const uint64_t*>(local_persist + 16);
 
     // Signal parent that replayer is ready (shared memory write visible to parent)
     g_ctrl->replayer_ready.store(true, std::memory_order_release);
@@ -382,6 +417,16 @@ init(uint32_t sym_count, void** sym_addresses, uint64_t* sym_sizes)
         g_sym_ranges[i].addr_end   = start + sz;
         g_sym_ranges[i].file_off   = off;
         off += sz;
+    }
+    // Sort by address (required for binary search in addr_to_file_off)
+    for (uint32_t i = 1; i < sym_count; i++) {
+        DUDESymbolRange key = g_sym_ranges[i];
+        int32_t j = (int32_t)i - 1;
+        while (j >= 0 && g_sym_ranges[j].addr_start > key.addr_start) {
+            g_sym_ranges[j + 1] = g_sym_ranges[j];
+            j--;
+        }
+        g_sym_ranges[j + 1] = key;
     }
 
     // ── Shared memory allocations (BEFORE fork) ──────────────

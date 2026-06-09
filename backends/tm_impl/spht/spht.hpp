@@ -48,11 +48,20 @@ constexpr size_t PCL_CAPACITY         = 65536;
 constexpr size_t GROUP_COMMIT_INTERVAL = 16;
 constexpr int    MAX_RETRIES           = 12;
 
+// ── Log entry types ────────────────────────────────────────────────
+enum LogEntryType : uint8_t {
+	LOG_WRITE  = 0,  // ordinary write (addr, type, new_val)
+	LOG_MALLOC = 1,  // tm_malloc inside TX: addr = pointer, new_val = size
+	LOG_FREE   = 2,  // tm_free inside TX: addr = pointer being freed
+};
+
 // ── Log entry ──────────────────────────────────────────────────────
 struct LogEntry {
-	void *addr;
-	ValueType type;
-	any_type_t new_val;
+	LogEntryType op_type;
+	uint8_t      _pad[7];
+	void        *addr;
+	ValueType    type;
+	any_type_t   new_val;   // for LOG_MALLOC: size; for LOG_WRITE: written value
 };
 
 // ── Per-Thread Commit Log ──────────────────────────────────────────
@@ -62,10 +71,11 @@ struct PCL {
 
 	void reset_epoch() { entries.clear(); epoch_start = 0; }
 
-	void append(void *addr, ValueType type, const any_type_t &val)
+	void append(void *addr, ValueType type, const any_type_t &val,
+	            LogEntryType op_type = LOG_WRITE)
 	{
 		if (entries.size() >= PCL_CAPACITY) return;
-		entries.push_back({addr, type, val});
+		entries.push_back({op_type, {}, addr, type, val});
 	}
 };
 
@@ -184,7 +194,17 @@ static void group_commit(Transaction *tx)
 
 	for (size_t i = pcl->epoch_start; i < pcl->entries.size(); i++) {
 		LogEntry &e = pcl->entries[i];
-		write_value_to_addr(e.addr, e.new_val, e.type);
+		switch (e.op_type) {
+		case LOG_WRITE:
+			write_value_to_addr(e.addr, e.new_val, e.type);
+			break;
+		case LOG_MALLOC:
+		case LOG_FREE:
+			// Alloc/free entries are logged for audit / replay.
+			// In the current SPHT design, recovery re-allocates the
+			// TM region from scratch, so no replay action is needed.
+			break;
+		}
 	}
 
 	pcl->epoch_start = pcl->entries.size();

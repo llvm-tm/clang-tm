@@ -10,6 +10,11 @@
 #include <unordered_set>
 #include <vector>
 
+#include "tm_thread_state.hpp"
+
+// Forward declarations required by tinystm_wbctl.hpp (included via tinystm_globals.hpp)
+extern "C" int tm_serialize_unlock_all();
+
 #include "tinystm_globals.hpp"
 #include "tm_alloc_overrides.hpp"
 #include "dudetm/dudetm_base.hpp"
@@ -70,10 +75,28 @@ void tm_init_thread()
 
 void tm_exit_thread() {}
 
+// ── TMThreadState ──────────────────────────────────────────
+static thread_local TMThreadState g_tm_thread_state{0, 0};
+static thread_local sigjmp_buf   g_tm_jmpbuf;
+
+TMThreadState *tm_get_thread_state() {
+    return &g_tm_thread_state;
+}
+
+sigjmp_buf *tm_get_env() {
+    return &g_tm_jmpbuf;
+}
+
 static std::recursive_mutex g_serialize_mutex;
 
 void tm_serialize_lock() { g_serialize_mutex.lock(); }
 void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
+
+// Required by tinystm_wbctl.hpp for abort cleanup
+int tm_serialize_unlock_all() {
+    while (g_serialize_mutex.try_lock()) {}
+    return 0;
+}
 
 void tm_set_jmpbuf(void *buf) { tinystm::jmpbuf = (sigjmp_buf *)buf; }
 int tm_setjmp() { return 0; }
@@ -280,5 +303,8 @@ void tm_free(void* ptr)
         stm::tm_region_free(ptr);
     }
 }
+
+// Must be in extern "C" linkage to match the declaration in tinystm_wbctl.hpp
+extern "C" thread_local bool g_tm_expli_mode = false;
 
 } // extern "C"

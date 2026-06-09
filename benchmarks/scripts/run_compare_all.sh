@@ -34,9 +34,9 @@ fi
 STAMP_WORKLOAD="fixed"     # STAMP is time-to-complete (fixed work)
 
 # Plugin STAMP params (STAMP.cpp unified binary, -b dispatch)
-# These use benchmark-specific flags; note that -t is consumed globally
-# for thread count, so vacation's -t (tasks) and kmeans's -t (threshold)
-# use defaults (4096 tasks / 0.00001 threshold).
+# Thread count is passed with -p (STAMP.cpp). Benchmark-specific -t flags
+# (vacation tasks, kmeans threshold) are passed via $params and are NOT
+# consumed by the main parser.
 declare -A STAMP_PLUGIN_PARAMS
 STAMP_PLUGIN_PARAMS[vacation]="-n 2 -q 90 -r 16384 -u 98"
 STAMP_PLUGIN_PARAMS[kmeans]=""           # uses defaults: -m 40 -n 40
@@ -416,7 +416,7 @@ for bench in "${STAMP_BENCHES_PLUGIN[@]}"; do
     params="${STAMP_PLUGIN_PARAMS[$bench]}"
     if [ -x "$PLUGIN_STAMP_BIN/stamp_uninstrumented" ]; then
         run_one plugin uninstrumented "$bench" 1 1 -- \
-            "$PLUGIN_STAMP_BIN/stamp_uninstrumented" -b "$bench" -t 1 $params
+            "$PLUGIN_STAMP_BIN/stamp_uninstrumented" -b "$bench" -p 1 $params
     fi
 done
 
@@ -450,7 +450,7 @@ run_plugin_stamp() {
         for t in $THREAD_LIST; do
             for s in $(seq 1 $SAMPLES); do
                 run_one plugin "$backend" "$bench" "$t" "$s" -- \
-                    "$binary" -b "$bench" -t "$t" $params
+                    "$binary" -b "$bench" -p "$t" $params
             done
         done
     done
