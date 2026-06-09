@@ -64,9 +64,12 @@ struct Edge {
 };
 
 struct SparseRow {
-    std::vector<uint64_t> row_ptr;
-    std::vector<uint64_t> col_idx;
-    std::vector<int64_t> weights;
+    // Flat arrays in TM region (allocated via tm_calloc for TM access)
+    uint64_t *row_ptr;
+    uint64_t *col_idx;
+    int64_t  *weights;
+    size_t    row_ptr_size;
+    size_t    col_idx_size;
 };
 
 struct SSCA2Data {
@@ -89,13 +92,14 @@ static std::atomic<uint64_t> g_total_ops{0};
 static bool ssca2_has_edge(uint64_t src, uint64_t dst) {
     bool found = false;
     tx_retry([&]() {
-        auto& row_ptr = g_data.graph.row_ptr;
-        auto& col_idx = g_data.graph.col_idx;
-        uint64_t start = row_ptr[src];
-        uint64_t end = row_ptr[src + 1];
+        uint64_t *row_ptr = g_data.graph.row_ptr;
+        uint64_t *col_idx = g_data.graph.col_idx;
+        uint64_t start = (uint64_t)tm_read_i8((uint64_t*)&row_ptr[src]);
+        uint64_t end   = (uint64_t)tm_read_i8((uint64_t*)&row_ptr[src + 1]);
         found = false;
         for (uint64_t i = start; i < end; i++) {
-            if (col_idx[i] == dst) { found = true; break; }
+            uint64_t n = (uint64_t)tm_read_i8((uint64_t*)&col_idx[i]);
+            if (n == dst) { found = true; break; }
         }
     });
     return found;
@@ -123,34 +127,46 @@ static void build_csr() {
         max_v = std::max(max_v, std::max(e.src, e.dst));
     g_data.num_vertices = max_v + 1;
 
-    auto& row_ptr = g_data.graph.row_ptr;
-    auto& col_idx = g_data.graph.col_idx;
-    auto& weights = g_data.graph.weights;
+    // Allocate flat arrays in TM region
+    size_t rp_size = g_data.num_vertices + 1;
+    size_t ci_size = edges.size();
+    tm_free(g_data.graph.row_ptr);
+    tm_free(g_data.graph.col_idx);
+    tm_free(g_data.graph.weights);
+    g_data.graph.row_ptr     = (uint64_t*)tm_calloc(rp_size, sizeof(uint64_t));
+    g_data.graph.col_idx     = (uint64_t*)tm_calloc(ci_size, sizeof(uint64_t));
+    g_data.graph.weights     = (int64_t*)tm_calloc(ci_size, sizeof(int64_t));
+    g_data.graph.row_ptr_size = rp_size;
+    g_data.graph.col_idx_size = ci_size;
 
-    row_ptr.assign(g_data.num_vertices + 1, 0);
+    uint64_t *row_ptr = g_data.graph.row_ptr;
     for (auto& e : edges)
         row_ptr[e.src + 1]++;
 
     for (uint64_t i = 1; i <= g_data.num_vertices; i++)
         row_ptr[i] += row_ptr[i - 1];
 
-    col_idx.resize(edges.size());
-    weights.resize(edges.size());
+    uint64_t *col_idx = g_data.graph.col_idx;
+    int64_t  *weights = g_data.graph.weights;
 
-    std::vector<uint64_t> temp_pos = row_ptr;
+    // Temporary position pointer (stack-allocated)
+    uint64_t *temp_pos = (uint64_t*)tm_calloc(rp_size, sizeof(uint64_t));
+    memcpy(temp_pos, row_ptr, rp_size * sizeof(uint64_t));
+
     for (auto& e : edges) {
         uint64_t pos = temp_pos[e.src]++;
         col_idx[pos] = e.dst;
         weights[pos] = e.weight;
     }
+    tm_free(temp_pos);
 }
 
 // ── Worker thread ─────────────────────────────────────────
 static void worker(int thread_id, int num_threads) {
     expli::TM<int>::thread_init();
 
-    auto& row_ptr = g_data.graph.row_ptr;
-    auto& col_idx = g_data.graph.col_idx;
+    uint64_t *row_ptr = g_data.graph.row_ptr;
+    uint64_t *col_idx = g_data.graph.col_idx;
 
     uint64_t chunk = (g_data.num_vertices + num_threads - 1) / num_threads;
     uint64_t start_v = thread_id * chunk;
@@ -226,13 +242,13 @@ static void test_logic() {
     TEST_EQ((int)g_data.edges.size(), 4, "4 unique edges");
 
     // Check CSR structure directly (no TM calls)
-    auto& row = g_data.graph.row_ptr;
-    auto& col = g_data.graph.col_idx;
-    TEST_EQ((int)row.size(), 5, "row_ptr has 5 entries");
-    TEST_EQ((int)col.size(), 4, "col_idx has 4 entries");
+    uint64_t *row = g_data.graph.row_ptr;
+    uint64_t *col = g_data.graph.col_idx;
+    TEST_EQ(g_data.graph.row_ptr_size, 5UL, "row_ptr has 5 entries");
+    TEST_EQ(g_data.graph.col_idx_size, 4UL, "col_idx has 4 entries");
 
     // Helper to check adjacency
-    auto has_edge_csr = [&](uint64_t src, uint64_t dst) {
+    auto has_edge_csr = [row, col](uint64_t src, uint64_t dst) {
         uint64_t s = row[src], e = row[src + 1];
         for (uint64_t i = s; i < e; i++)
             if (col[i] == dst) return true;
@@ -258,19 +274,23 @@ static void test_logic() {
     TEST_ASSERT(found_triangle, "triangle (0,1,2) found via CSR");
 
     g_data.edges.clear();
-    g_data.graph.row_ptr.clear();
-    g_data.graph.col_idx.clear();
-    g_data.graph.weights.clear();
+    tm_free(g_data.graph.row_ptr); g_data.graph.row_ptr = nullptr;
+    tm_free(g_data.graph.col_idx); g_data.graph.col_idx = nullptr;
+    tm_free(g_data.graph.weights); g_data.graph.weights = nullptr;
+    g_data.graph.row_ptr_size = 0;
+    g_data.graph.col_idx_size = 0;
     if (test_result() != 0) exit(1);
 }
 
 int main(int argc, char* argv[]) {
     if (argc > 1 && strcmp(argv[1], "--test") == 0) {
         printf("Running self-tests for ssca2...\n");
+        tm_init();
         test_cli_flags();
         test_rng();
         test_logic();
         printf("All tests passed.\n");
+        tm_exit();
         return 0;
     }
     parse_args(argc, argv);
@@ -369,6 +389,8 @@ int main(int argc, char* argv[]) {
         g_data.edges.push_back(e);
     }
 
+    expli::TM<int>::init();
+
     build_csr();
     g_data.num_edges = g_data.edges.size();
 
@@ -380,8 +402,6 @@ int main(int argc, char* argv[]) {
     printf("Vertices: %lu  Edges: %lu\n",
            (unsigned long)g_data.num_vertices, (unsigned long)g_data.num_edges);
     fflush(stdout);
-
-    expli::TM<int>::init();
 
     auto start_time = std::chrono::high_resolution_clock::now();
     std::vector<std::thread> threads;
