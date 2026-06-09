@@ -270,6 +270,7 @@ inline T tm_read(            //
 )
 {
 	TM_ASSERT_VALID_TX(tx, "tinystm tm_read");
+	LLVM_TM_ADDR_CHECK(addr);
 
 	any_type_t r = read_word(tx, (void *)addr, SZ);
 	return return_any_type<T>(r);
@@ -291,6 +292,7 @@ tm_write(                    //
 )
 {
 	TM_ASSERT_VALID_TX(tx, "tinystm tm_write");
+	LLVM_TM_ADDR_CHECK_WRITE(addr, val);
 
 	any_type_t w;
 	fill_any_type(w, &val, SZ);

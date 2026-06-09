@@ -163,7 +163,8 @@ TX static Packet get_packet(IntruderData* data) {
         empty.flow_id = -1;
         return empty;
     }
-    Packet p = data->packet_queue[data->packet_q_head];
+    int idx = data->packet_q_head;
+    Packet p = data->packet_queue[idx];
     data->packet_q_head++;
     return p;
 }
