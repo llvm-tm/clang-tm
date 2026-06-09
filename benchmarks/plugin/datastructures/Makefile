@@ -11,7 +11,7 @@ all: $(OUT_DIR) $(BIN_DIR) \
 	$(foreach b,$(LOCAL_BENCHES),$(b)_uninstrumented $(b)_SingleGlobalLock $(b)_NOrec $(b)_TinySTM)
 
 $(BIN_DIR)/%_uninstrumented: %.cpp | $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $< -o $@ -pthread
+	$(CXX) $(CXXFLAGS) $< -o $@
 
 $(foreach b,$(LOCAL_BENCHES),$(eval $(call tm_target,$(b)_SingleGlobalLock,$(b).cpp,singlelock)))
 $(foreach b,$(LOCAL_BENCHES),$(eval $(call tm_target,$(b)_NOrec,$(b).cpp,norec)))

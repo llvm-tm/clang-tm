@@ -19,4 +19,4 @@ $(eval $(call tm_target, eigen_norec, $(SRC), norec))
 $(eval $(call tm_target, eigen_swisstm, $(SRC), swisstm))
 
 clean:
-	rm -rf out bin
+	rm -rf $(OUT_DIR) $(BIN_DIR)

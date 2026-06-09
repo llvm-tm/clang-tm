@@ -25,4 +25,4 @@ $(eval $(call tm_target, ycsb_tinystm_wt, $(SRC), tinystm_wt))
 $(eval $(call tm_target, ycsb_norec, $(SRC), norec))
 
 clean:
-	rm -rf out bin
+	rm -rf $(OUT_DIR) $(BIN_DIR)

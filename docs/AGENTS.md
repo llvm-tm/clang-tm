@@ -1,6 +1,80 @@
 # Session Summary
 
-## Latest Session (2026-06-08) — 5-pass Honorio pipeline decomposition
+## Latest Session (2026-06-09) — Backend benchmark comparison + crash documentation
+
+### What was done
+
+A comprehensive benchmark comparison was run across 3 TM backends (tinystm_wbctl, norec, singlelock) on **8 STAMP benchmarks + TPC-C + STMbench7** at 12 thread levels × 3 samples. The runner script (`benchmarks/scripts/run_backend_compare.sh`) was also fixed for output parsing.
+
+### Benchmark results summary
+
+| Backend | Overhead (1t, min–max) | STAMP | STMbench7 | TPC-C | Total runs |
+|---------|----------------------|-------|-----------|-------|-----------|
+| singlelock | 0.58x–2.50x | ✓ 288/288 | ✓ 108/108 | ✓ 36/36 | 432/432 |
+| norec | 1.54x–19.71x | ✓ 288/288 | ✗ 2/108 | ✗ 0/36 | 290/432 |
+| tinystm_wbctl | 1.63x–20.04x | ✓ 287/288 | ✗ 0/108 | not run | 287/396 |
+
+### Crash signatures documented
+
+#### 1. norec STMbench7 — segfault in `read_word_norec` at worker startup
+
+**Backtrace**: `read_word_norec` ← `op_st9_traverse_cp` (CompositePart traversal) ← `worker`
+**Mechanism**: The `addr` parameter passed to `read_word_norec` is a code-section address (identical to RIP at crash site). This indicates a corrupted pointer in the STMbench7 data structure — likely a `tm_free()`'d `AtomicPart` or `Connection` whose memory has been recycled but whose address is still in the read-set of a concurrent transaction. When the CAS-based lock-free initialization creates the OO7 data structure (100K AtomicParts, 300K Connections), some cross-object references may not be fully visible to concurrently spawned worker threads.
+**Conditions**: Segfaults at all thread counts ≥2. Exit code 139 (SIGSEGV).
+**Affected file**: `backends/tm_impl/norec/NOrec.hpp:read_word_norec`
+
+#### 2. norec TPC-C — segfault in `read_word_norec` from `std::_Hashtable::_M_find_before_node`
+
+**Backtrace**: `read_word_norec` ← `std::_Hashtable::_M_find_before_node` ← `_M_find_node` ← `find` ← `count`
+**Mechanism**: TPC-C uses `std::unordered_set`/`std::unordered_map` inside TM transactions (e.g., for item index lookups during order processing). The hashtable's internal nodes are allocated via `std::allocator` (not `tm_calloc`), so pointer chasing inside `read_word_norec` dereferences non-TM-tracked heap memory. If the node was freed/removed, the dangling pointer causes SIGSEGV.
+**Conditions**: Segfaults at all thread counts including 1t. Exit code 139.
+**Root cause**: STL hashtable in TX — same class as the tinystm_wbctl STMbench7 crash. The STL's internal pointer chasing through `std::allocator`-managed nodes is invisible to the TM pass.
+
+#### 3. tinystm_wbctl STMbench7 — STL vector realloc crash
+
+**Backtrace**: `read_word_ctl` ← (various STL functions depending on workload phase)
+**Mechanism**: Pre-existing known issue — STMbench7 uses `std::vector` and other STL containers inside `struct TM` objects. When a vector reallocates (growing beyond capacity), its internal buffer pointer changes. The TM pass has instrumented writes to the vector's old buffer, but the reallocation (done by `std::allocator`) allocates new non-TM-tracked memory. Subsequent accesses to the new buffer through non-instrumented pointer loads cause out-of-bounds reads or writes to freed memory.
+**Conditions**: Crashes at all thread counts. Pre-existing, not introduced by this session.
+
+#### 4. tinystm_wbctl TPC-C — STL hashtable crash (same root cause as #2)
+
+Not run in this session (explicitly skipped by runner script), but confirmed via GDB: crashes in `read_word_ctl` called from `std::equal_to<int>::operator()` during `_Hashtable::_M_key_equals`.
+
+#### 5. tinystm_wbctl bayes 28t_s3 — crash during learning phase
+
+**Symptom**: Fails during "Learning structure..." (main TM phase). Only 1 of 3 samples failed, suggesting an intermittent issue (perhaps a race condition in the Bayesian learning algorithm or a TM validation collision at high thread count).
+**Root cause**: Not fully diagnosed. Most likely a timing-sensitive issue in `compute_density_ll` + serialize lock interaction, or a TM validation conflict at 28 threads.
+
+### Analysis script fixes
+
+The embedded `analyze.py` in `run_backend_compare.sh` was fixed:
+
+| Issue | Fix |
+|-------|-----|
+| Vacation/genome not parsed (`Time = X` without "seconds") | Added pattern `r"Time\s*=\s*(\d+\.?\d*)"` |
+| Kmeans not parsed (`Time: X seconds` with colon) | Added pattern `r"Time:\s*(\d+\.?\d*)\s*seconds"` |
+| Bayes not parsed (`Learn time = X`) | Added pattern `r"Learn time\s*=\s*(\d+\.?\d*)"` |
+| Throughput benchmarks (stmbench7, tpcc) reported elapsed time instead of ops/sec | Check `parse_ops()` first, fall back to `parse_time()` |
+| Overhead table compared different metrics (time_sec vs ops_per_sec) | Filter uninstrumented comparison by metric |
+
+### NOREC validation pathology at high thread counts
+
+NOREC's `validate()` re-reads the entire read-set on each clock change. Under high contention (STMbench7 at 21t), the global clock changes frequently, causing repeated O(read_set) re-validations that slow execution to a crawl. A single 21t run took 101 seconds (20× the configured 5s duration) with only 29 ops/sec throughput.
+
+### New files
+- `docs/BACKEND_COMPARISON.md` — Full comparison doc with overhead tables, scaling analysis, reliability matrix
+
+### Modified files
+- `benchmarks/scripts/run_backend_compare.sh` — Fixed embedded `analyze.py` (patterns, throughput detection, metric filtering)
+- `backends/stubs/tm_stubs.cpp` — Added `g_tm_region_start`/`g_tm_region_end` for TM-aware headers
+- `benchmarks/plugin/datastructures/Makefile` — Removed redundant `-pthread` flag
+- `benchmarks/plugin/eigenbench/Makefile` — Fixed `make clean` to use `$(OUT_DIR)`/`$(BIN_DIR)`
+- `benchmarks/plugin/stmbench7/Makefile` — Fixed uninstrumented build (include `tm_stubs.cpp`, proper include paths)
+- `benchmarks/plugin/ycsb/Makefile` — Fixed `make clean` to use `$(OUT_DIR)`/`$(BIN_DIR)`
+- `plugin/tm_pipeline.mk` — Added `leftright` backend, fixed `tm_clean` to remove `.o` files
+- `docs/AGENTS.md` — This session summary
+
+## Previous Session (2026-06-08) — 5-pass Honorio pipeline decomposition
 
 ### What was done
 
