@@ -19,6 +19,7 @@
 #include <new>
 
 #include "tm_common.hpp"
+#include "tm_thread_state.hpp"
 #include "spht/spht_globals.hpp"
 #include "tm_alloc_overrides.hpp"
 
@@ -85,6 +86,25 @@ void tm_set_jmpbuf(void *buf)
 
 int tm_setjmp()
 {
+	return 0;
+}
+
+sigjmp_buf *tm_get_env()
+{
+	return &tm_jmpbuf;
+}
+
+TMThreadState *tm_get_thread_state()
+{
+	static thread_local TMThreadState ts;
+	ts.nested_call_counter = tm_nested_call_counter;
+	ts.longjmp_ret = tm_longjmp_ret;
+	return &ts;
+}
+
+int tm_serialize_unlock_all()
+{
+	// SPHT uses per-thread PCL, no global serialize
 	return 0;
 }
 
