@@ -5,12 +5,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <thread>
+#include <new>
 #include <unordered_map>
 #include <vector>
 
-#include "../tm_common.hpp"
-#include "../tm_spin_token.hpp"
+#include "../common/tm_common.hpp"
+#include "../common/tm_spin_token.hpp"
 
 extern "C" {
 extern __thread int32_t tm_nested_call_counter;
@@ -26,97 +26,127 @@ using stm::return_any_type;
 using stm::type_size;
 using stm::write_value_to_addr;
 
-// ── jmpbuf (defined in runtime) ─────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+//  XTM — eXtended Transactional Memory (ASPLOS 2006)
+//
+//  Key data structures from the paper:
+//    XSW — Transaction Status Word (per-thread state)
+//    XADT — Transaction Address/Data Table (global page table)
+//    XF  — XADT Filter (bloom filter for fast negative lookup)
+//
+//  Algorithm:
+//    Page-granularity lazy versioning with private page copies.
+//    On first write to a page, we take ownership via CAS and
+//    create a private copy.  Reads take a version snapshot for
+//    later validation.  Commit validates all snapshot versions
+//    then writes back private pages and bumps page versions.
+//    Abort discards private copies and releases ownership.
+// ═══════════════════════════════════════════════════════════════
+
+// ── Constants ──────────────────────────────────────────────────
+constexpr size_t PAGE_SHIFT = 12;       // 4 KB pages
+constexpr size_t PAGE_SIZE = 1ULL << PAGE_SHIFT; // 4096
+constexpr uintptr_t PAGE_MASK = ~(PAGE_SIZE - 1);
+constexpr size_t XADT_SIZE = 1ULL << 20; // ~1M entries ≈ 32 MB
+
+// ── jmpbuf (defined in runtime) ────────────────────────────────
 extern __thread sigjmp_buf *jmpbuf_ptr;
 
-// ── Version tracking ────────────────────────────────────────────
-// Each address has a version that increments on every write.
-// XTM uses these versions to build a dependency DAG.
-
-// ── Log entries ──────────────────────────────────────────────────
-struct ReadLogEntry {
-    ValueType type;
-    void *addr;
-    uint64_t observed_version;
+// ── XADT Entry ─────────────────────────────────────────────────
+// Per-page metadata in the global transaction address/data table.
+//   version    – incremented on every commit that touches this page
+//   owner_tx_id – 0 = free, otherwise the tx id that owns the page
+struct XADTEntry {
+    std::atomic<uint64_t> version{0};
+    std::atomic<uint64_t> owner_tx_id{0};
 };
 
-struct WriteLogEntry {
-    ValueType type;
-    void *addr;
-    any_type_t new_val;
-    uint64_t version;
-};
+// ── XADT (global page table) ───────────────────────────────────
+extern XADTEntry *g_xadt;  // dynamically allocated in init()
 
-// ── Version slot (per-address version counter) ──────────────────
-// In a full implementation these would be stored alongside data.
-// Here we use a global array indexed by address hash.
-constexpr size_t VERSION_TABLE_SIZE = 1ULL << 20;
-extern std::atomic<uint64_t> g_version_table[VERSION_TABLE_SIZE];
-
-inline size_t version_index(void *addr) {
-    return ((uintptr_t)addr >> 3) & (VERSION_TABLE_SIZE - 1);
+inline size_t xadt_index(void *addr) {
+    return (((uintptr_t)addr) >> PAGE_SHIFT) & (XADT_SIZE - 1);
 }
 
-// ── Transaction ──────────────────────────────────────────────────
+// ── XF (XADT Filter) — Bloom filter ──────────────────────────
+// A simple bit-vector bloom filter for fast negative lookups.
+// If the bit for an address is 0, the page is definitely not
+// owned by anyone.  If 1, it *may* be owned.
+constexpr size_t XF_BITS = 1ULL << 16; // 8 KB filter
+extern std::atomic<uint8_t> g_xf[XF_BITS];
+
+inline size_t xf_index(void *addr) {
+    // Two hash functions for better distribution
+    uintptr_t p = (uintptr_t)addr >> PAGE_SHIFT;
+    return (p ^ (p >> 10)) & (XF_BITS - 1);
+}
+
+inline void xf_set(void *addr) {
+    g_xf[xf_index(addr)].store(1, std::memory_order_relaxed);
+}
+
+inline bool xf_test(void *addr) {
+    return g_xf[xf_index(addr)].load(std::memory_order_relaxed) != 0;
+}
+
+// ── Transaction control block (XSW + local logs) ─────────────
 struct Transaction {
     uint64_t id = 0;
-    uint64_t left_id = 0;    // Left phase identifier
-    uint64_t right_id = 0;   // Right phase identifier
-    uint64_t start_version = 0;
-    uint64_t end_version = 0;
-    bool active = false;
-    bool read_only = true;
-    int abort_count = 0;
-    bool is_retry = false;
+    bool    active = false;
+    bool    read_only = true;
+    int     abort_count = 0;
+    bool    is_retry = false;
 
-    std::unordered_map<void *, ReadLogEntry> read_set;
-    std::unordered_map<void *, WriteLogEntry> write_set;
-
-    // Dependency tracking: addresses read whose versions changed
-    std::vector<void *> deps;
+    // Write set:  page_addr → private_copy
+    std::unordered_map<void *, void *> write_set;
+    // Read set:   page_addr → snapshot_version
+    std::unordered_map<void *, uint64_t> read_set;
 
     void reset() {
-        start_version = 0;
-        end_version = 0;
-        left_id = 0;
-        right_id = 0;
         active = false;
         read_only = true;
         abort_count = 0;
         is_retry = false;
-        deps.clear();
         clear();
     }
 
     void clear() {
-        read_set.clear();
         write_set.clear();
-        deps.clear();
+        read_set.clear();
     }
 };
 
-// ── Globals ──────────────────────────────────────────────────────
-extern std::atomic<uint64_t> g_clock;
-extern std::atomic<uint64_t> thr_counter;
-extern std::atomic<uint64_t> g_phase;
+// ── Globals ─────────────────────────────────────────────────────
+extern std::atomic<uint64_t> g_tx_counter;
 extern __thread Transaction *current_tx;
-extern std::atomic<uint64_t> g_tm_abort_count;
+extern std::atomic<uint64_t> g_abort_counter;
 
-// ── Init ─────────────────────────────────────────────────────────
+// ── Init / Exit ─────────────────────────────────────────────────
 inline void init() {
-    g_clock.store(1, std::memory_order_release);
-    thr_counter.store(1, std::memory_order_release);
-    g_phase.store(0, std::memory_order_release);
-    for (size_t i = 0; i < VERSION_TABLE_SIZE; i++)
-        g_version_table[i].store(0, std::memory_order_release);
+    g_tx_counter.store(1, std::memory_order_release);
+    g_abort_counter.store(0, std::memory_order_release);
+
+    // Allocate XADT
+    g_xadt = new XADTEntry[XADT_SIZE]();
+    for (size_t i = 0; i < XADT_SIZE; i++) {
+        g_xadt[i].version.store(0, std::memory_order_release);
+        g_xadt[i].owner_tx_id.store(0, std::memory_order_release);
+    }
+
+    // Clear bloom filter
+    for (size_t i = 0; i < XF_BITS; i++)
+        g_xf[i].store(0, std::memory_order_release);
 }
 
-inline void exit() {}
+inline void exit() {
+    delete[] g_xadt;
+    g_xadt = nullptr;
+}
 
 inline void init_thread() {
     if (!current_tx) {
         current_tx = new Transaction();
-        current_tx->id = thr_counter.fetch_add(1, std::memory_order_acq_rel);
+        current_tx->id = g_tx_counter.fetch_add(1, std::memory_order_acq_rel);
     }
     current_tx->reset();
 }
@@ -126,39 +156,26 @@ inline void exit_thread() {
     current_tx = nullptr;
 }
 
-// ── Clock helpers ────────────────────────────────────────────────
-inline uint64_t get_clock() {
-    return g_clock.load(std::memory_order_acquire);
-}
-
-inline uint64_t increment_clock() {
-    return g_clock.fetch_add(1, std::memory_order_acq_rel) + 1;
-}
-
-// ── Left-Right phases ───────────────────────────────────────────
-inline uint64_t enter_left_phase() {
-    uint64_t phase = g_phase.fetch_add(1, std::memory_order_acq_rel);
-    return phase;
-}
-
-inline uint64_t enter_right_phase() {
-    // Spin until all threads have entered left phase
-    while (g_phase.load(std::memory_order_acquire) <
-           thr_counter.load(std::memory_order_acquire)) {
-        std::this_thread::yield();
+// ── Private page allocator ──────────────────────────────────────
+inline void *alloc_private_page() {
+    void *p = nullptr;
+    if (posix_memalign(&p, PAGE_SIZE, PAGE_SIZE) != 0) {
+        fprintf(stderr, "XTM: posix_memalign failed\n");
+        std::abort();
     }
-    return g_phase.fetch_add(1, std::memory_order_acq_rel);
+    return p;
 }
 
-// ── Begin ────────────────────────────────────────────────────────
+inline void free_private_page(void *p) {
+    std::free(p);
+}
+
+// ── Begin ───────────────────────────────────────────────────────
 inline bool begin() {
     auto *tx = current_tx;
-    if (tx->active) return true;
+    if (tx->active) return true;  // nested
 
     tx->clear();
-    tx->start_version = get_clock();
-    tx->end_version = tx->start_version;
-    tx->left_id = enter_left_phase();
     tx->active = true;
     tx->read_only = true;
     if (!tx->is_retry) tx->abort_count = 0;
@@ -166,74 +183,70 @@ inline bool begin() {
     return true;
 }
 
-// ── Abort ────────────────────────────────────────────────────────
-inline void abort_tx(const char *loc = "") {
+// ── Abort ───────────────────────────────────────────────────────
+[[noreturn]] inline void abort_tx() {
     auto *tx = current_tx;
+
+    // Release ownership and free private copies
+    for (auto &kv : tx->write_set) {
+        void *page = kv.first;
+        void *priv = kv.second;
+        size_t idx = xadt_index(page);
+        g_xadt[idx].owner_tx_id.store(0, std::memory_order_release);
+        free_private_page(priv);
+    }
+
     tx->clear();
     tx->abort_count++;
     tx->is_retry = true;
     tx->active = false;
     stm::tm_token_release_if_held(tx->id);
-    g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
+    g_abort_counter.fetch_add(1, std::memory_order_relaxed);
     siglongjmp(*jmpbuf_ptr, 1);
 }
 
-// ── Validate ────────────────────────────────────────────────────
-inline bool validate() {
-    auto *tx = current_tx;
-    for (auto &it : tx->read_set) {
-        auto &r = it.second;
-        size_t idx = version_index(r.addr);
-        uint64_t ver = g_version_table[idx].load(std::memory_order_acquire);
-        if (ver != r.observed_version)
-            return false;
-    }
-    return true;
-}
-
-// ── Extend ──────────────────────────────────────────────────────
-inline bool extend() {
-    auto *tx = current_tx;
-    uint64_t last_version = get_clock();
-    if (!validate()) return false;
-    tx->end_version = last_version;
-    return true;
-}
-
 // ── Commit ──────────────────────────────────────────────────────
-// XTM uses a 3-phase commit:
-//   1. Left phase: reads and version tracking captured during begin()
-//   2. Right phase (enter): ensure all threads crossed the barrier
-//   3. Commit: validate deps, write-back, release
+// Phase 1: validate that no page in our read-set has had its
+//           version change since we first read it.
+// Phase 2: write back private copies, bump versions, release
+//           ownership.
 inline bool commit() {
     auto *tx = current_tx;
     if (!tx->active) return true;
 
     if (!tx->read_only) {
-        // Phase 1: Cross to right phase (barrier)
-        tx->right_id = enter_right_phase();
+        // ── Validate read-set snapshots ────────────────────────
+        for (auto &kv : tx->read_set) {
+            void *page = kv.first;
+            uint64_t snapshot = kv.second;
+            size_t idx = xadt_index(page);
 
-        // Phase 2: Validate read-set versions
-        for (auto &it : tx->read_set) {
-            auto &r = it.second;
-            size_t idx = version_index(r.addr);
-            uint64_t ver = g_version_table[idx].load(std::memory_order_acquire);
-            if (ver != r.observed_version) {
-                // Dependency changed — abort
-                abort_tx("dep_changed");
+            // Skip validation for pages we own (we wrote to them)
+            if (tx->write_set.find(page) != tx->write_set.end())
+                continue;
+
+            uint64_t current_ver =
+                g_xadt[idx].version.load(std::memory_order_acquire);
+            if (current_ver != snapshot) {
+                abort_tx();  // conflict detected
             }
         }
 
-        // Phase 3: Increment clock for ordering
-        uint64_t commit_version = increment_clock();
+        // ── Write back private copies ──────────────────────────
+        for (auto &kv : tx->write_set) {
+            void *page = kv.first;
+            void *priv = kv.second;
 
-        // Phase 4: Write-back with version updates
-        for (auto &it : tx->write_set) {
-            auto &addr = it.first;
-            auto &w = it.second;
-            write_value_to_addr(addr, w.new_val, w.type);
-            size_t idx = version_index(addr);
-            g_version_table[idx].store(commit_version, std::memory_order_release);
+            // Copy the private page back to the original location
+            std::memcpy(page, priv, PAGE_SIZE);
+
+            size_t idx = xadt_index(page);
+            // Bump version to invalidate any concurrent snapshots
+            g_xadt[idx].version.fetch_add(1, std::memory_order_acq_rel);
+            // Release ownership
+            g_xadt[idx].owner_tx_id.store(0, std::memory_order_release);
+
+            free_private_page(priv);
         }
     }
 
@@ -242,53 +255,94 @@ inline bool commit() {
     return true;
 }
 
-// ── Read word ───────────────────────────────────────────────────
+// ── Read word ──────────────────────────────────────────────────
 inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
 
-	TM_ASSERT(tx && tx->active, "xtm read: no active tx");
+    TM_ASSERT(tx && tx->active, "xtm read: no active tx");
 
 #ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr)) {
-		return read_value_from_addr(addr, sz);
-	}
+    if (!stm::isTMAddress(addr)) {
+        return read_value_from_addr(addr, sz);
+    }
 #else
-	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+    TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
 #endif
 
-	return read_value_from_addr(addr, sz);
+    void *page = (void *)((uintptr_t)addr & PAGE_MASK);
+    size_t idx = xadt_index(page);
+
+    // ── Ownership check (via XADT) ────────────────────────────
+    uint64_t owner = g_xadt[idx].owner_tx_id.load(std::memory_order_acquire);
+    if (owner != 0 && owner != tx->id) {
+        // Page is owned by another transaction → conflict
+        abort_tx();
+    }
+
+    // ── If we have a private copy, read from it ──────────────
+    auto wit = tx->write_set.find(page);
+    if (wit != tx->write_set.end()) {
+        size_t offset = (uintptr_t)addr - (uintptr_t)page;
+        return read_value_from_addr(
+            (void *)((uintptr_t)wit->second + offset), sz);
+    }
+
+    // ── First read of this page — record a version snapshot ──
+    //    (only if the page is NOT owned by someone else — we
+    //     already checked that above, so owner == 0 or our id)
+    uint64_t ver = g_xadt[idx].version.load(std::memory_order_acquire);
+    tx->read_set.try_emplace(page, ver);
+
+    return read_value_from_addr(addr, sz);
 }
 
-inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz) {
+// ── Write word ─────────────────────────────────────────────────
+inline void write_word(Transaction *tx, void *addr, any_type_t val,
+                       ValueType sz) {
 
-	TM_ASSERT(tx && tx->active, "xtm write: no active tx");
+    TM_ASSERT(tx && tx->active, "xtm write: no active tx");
 
 #ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr)) {
-		write_value_to_addr(addr, val, sz);
-		return;
-	}
+    if (!stm::isTMAddress(addr)) {
+        write_value_to_addr(addr, val, sz);
+        return;
+    }
 #else
-	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+    TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
 #endif
 
-	write_value_to_addr(addr, val, sz);
-}
-
-// ── Write word ──────────────────────────────────────────────────
-inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz) {
     tx->read_only = false;
-    size_t idx = version_index(addr);
-    uint64_t ver = g_version_table[idx].load(std::memory_order_acquire);
 
-    WriteLogEntry entry;
-    entry.type = sz;
-    entry.addr = addr;
-    entry.new_val = val;
-    entry.version = ver;
-    tx->write_set[addr] = entry;
+    void *page = (void *)((uintptr_t)addr & PAGE_MASK);
+    size_t idx = xadt_index(page);
+    size_t offset = (uintptr_t)addr - (uintptr_t)page;
+
+    // ── Acquire ownership of the page (CAS on XADT entry) ─────
+    uint64_t expected = 0;
+    if (!g_xadt[idx].owner_tx_id.compare_exchange_strong(
+            expected, tx->id, std::memory_order_acq_rel)) {
+        if (expected != tx->id) {
+            // Page is owned by another transaction → conflict
+            abort_tx();
+        }
+    } else {
+        // We just acquired ownership — set the bloom filter bit
+        xf_set(page);
+    }
+
+    // ── Get or create private copy ────────────────────────────
+    auto wit = tx->write_set.find(page);
+    if (wit == tx->write_set.end()) {
+        void *priv = alloc_private_page();
+        std::memcpy(priv, page, PAGE_SIZE);
+        tx->write_set[page] = priv;
+        wit = tx->write_set.find(page);
+    }
+
+    // Write to the private copy at the correct offset
+    write_value_to_addr((void *)((uintptr_t)wit->second + offset), val, sz);
 }
 
-// ── Typed read/write templates ──────────────────────────────────
+// ── Typed read/write templates ─────────────────────────────────
 template <typename T, ValueType SZ>
 inline T tm_read(T *addr) {
     any_type_t v = read_word(current_tx, (void *)addr, SZ);
