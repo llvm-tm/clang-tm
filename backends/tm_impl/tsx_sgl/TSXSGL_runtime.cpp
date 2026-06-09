@@ -35,6 +35,7 @@
 #endif
 
 #include "../common/tm_thread_state.hpp"
+#include "../common/tm_rtm.hpp"
 
 thread_local bool g_in_tx = false;
 thread_local bool in_tsx = false;
@@ -80,29 +81,30 @@ void tm_begin() {
     g_in_tx = true;
 
 #if defined(__x86_64__) || defined(__i386__)
-    for (int attempts = 0; attempts < 5; attempts++) {
-        unsigned status = _xbegin();
-        if (status == _XBEGIN_STARTED) {
-            // Read sgl_owner into the TSX read-set AND check if
-            // the lock is held.
-            uint64_t v = sgl_owner.load(std::memory_order_seq_cst);
-            if (v != 0) {
-                _xabort(LOCK_BUSY);
+    if (tm_rtm::available()) {
+        for (int attempts = 0; attempts < 5; attempts++) {
+            unsigned status = _xbegin();
+            if (status == _XBEGIN_STARTED) {
+                // Read sgl_owner into the TSX read-set AND check if
+                // the lock is held.
+                uint64_t v = sgl_owner.load(std::memory_order_seq_cst);
+                if (v != 0) {
+                    _xabort(LOCK_BUSY);
+                }
+                tsx_start_owner = v;
+                in_tsx = true;
+                return;
             }
-            tsx_start_owner = v;
-            in_tsx = true;
-            return;
-        }
 
-
-        if ((status & _XABORT_EXPLICIT) &&
-            _XABORT_CODE(status) == LOCK_BUSY) {
-            // Lock was busy — wait for it to become free before retrying
-            // to avoid the lemming effect (thundering herd into SGL).
-            while (sgl_owner.load(std::memory_order_relaxed) != 0)
-                _mm_pause();
-        } else if (!(status & _XABORT_RETRY)) {
-            break;
+            if ((status & _XABORT_EXPLICIT) &&
+                _XABORT_CODE(status) == LOCK_BUSY) {
+                // Lock was busy — wait for it to become free before retrying
+                // to avoid the lemming effect (thundering herd into SGL).
+                while (sgl_owner.load(std::memory_order_relaxed) != 0)
+                    _mm_pause();
+            } else if (!(status & _XABORT_RETRY)) {
+                break;
+            }
         }
     }
 #else

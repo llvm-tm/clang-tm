@@ -28,10 +28,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <atomic>
-#include <cpuid.h>
 #include <thread>
 #include <immintrin.h>
 #include <new>
+
+#include "tm_rtm.hpp"
 #include <cstdio>
 
 namespace spht
@@ -90,6 +91,10 @@ struct Transaction {
 	uint64_t tx_seq = 0;
 	PCL *pcl = nullptr;
 
+	// Set to true once RTM is known to always abort — persists across
+	// reset() so subsequent transactions skip RTM entirely.
+	bool rtm_broken = false;
+
 	void reset()
 	{
 		active = false;
@@ -107,23 +112,8 @@ extern std::atomic<uint64_t> *g_durable_seqs;
 
 inline void setjmp(sigjmp_buf *buf) { jmpbuf = buf; }
 
-// ── RTM availability detection ─────────────────────────────────────
-inline bool rtm_available()
-{
-#if defined(__x86_64__) || defined(__i386__)
-	static int cached = -1;
-	if (cached < 0) {
-		unsigned int a = 0, b = 0, c = 0, d = 0;
-		__cpuid_count(7, 0, a, b, c, d);
-		cached = (b & (1 << 11)) ? 1 : 0;
-		if (!cached)
-			fprintf(stderr, "[SPHT] RTM not available — running without HTM\n");
-	}
-	return cached > 0;
-#else
-	return false;
-#endif
-}
+// ── RTM availability (delegates to common probe) ─────────────────
+inline bool rtm_available() { return tm_rtm::available(); }
 
 // =========================================================================
 // Global lifecycle
@@ -222,7 +212,7 @@ inline bool begin()
 	auto *tx = current_tx;
 	tx->read_only = true;
 
-	if (!rtm_available()) {
+	if (tx->rtm_broken || !rtm_available()) {
 		tx->active = false;
 		return false;
 	}
@@ -236,6 +226,7 @@ inline bool begin()
 	tx->retry_count++;
 	if (tx->retry_count > MAX_RETRIES) {
 		tx->active = false;
+		tx->rtm_broken = true;
 		return false;
 	}
 	if (tx->retry_count > 3) {
