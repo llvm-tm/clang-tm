@@ -221,10 +221,6 @@ inline bool commit() {
             uint64_t snapshot = kv.second;
             size_t idx = xadt_index(page);
 
-            // Skip validation for pages we own (we wrote to them)
-            if (tx->write_set.find(page) != tx->write_set.end())
-                continue;
-
             uint64_t current_ver =
                 g_xadt[idx].version.load(std::memory_order_acquire);
             if (current_ver != snapshot) {

@@ -17,3 +17,4 @@ run:
 
 clean:
 	$(MAKE) -C backends/tm_impl clean
+	$(MAKE) -C expli-api clean

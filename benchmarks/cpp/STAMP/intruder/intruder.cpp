@@ -48,12 +48,12 @@ struct DecodedFlow {
     int  data_len;
 };
 
-// ── Global TM-controlled state ───────────────────────────────────────
+// ── Global TM-controlled state (all in TM region) ────────────────────
 // Packet queue (monotonic — head/tail only advance)
-static Packet* g_packet_queue        = nullptr;
-static int    g_packet_q_head        = 0;
-static int    g_packet_q_tail        = 0;
-static int    g_packet_q_capacity    = 0;
+static Packet*  g_packet_queue        = nullptr;
+static int*     g_packet_q_head       = nullptr;
+static int*     g_packet_q_tail       = nullptr;
+static int      g_packet_q_capacity   = 0;
 
 // Per-flow decoder state
 static DecodedFlow* g_decoder_flows  = nullptr;  // [max_flow_id]
@@ -62,9 +62,9 @@ static int*         g_fragment_counts = nullptr;  // [flow]
 
 // Decoded flow queue (monotonic)
 static DecodedFlow* g_decoded_queue  = nullptr;
-static int    g_decoded_q_head       = 0;
-static int    g_decoded_q_tail       = 0;
-static int    g_decoded_q_capacity   = 0;
+static int*    g_decoded_q_head       = nullptr;
+static int*    g_decoded_q_tail       = nullptr;
+static int     g_decoded_q_capacity   = 0;
 
 // Dictionary (read-only after init)
 static char** g_dictionary           = nullptr;
@@ -102,8 +102,8 @@ static Packet get_packet() {
     Packet pkt;
     pkt.flow_id = -1;
     tx_run([&]() {
-        int h = (int)tm_read_i4((uint32_t*)&g_packet_q_head);
-        int t = (int)tm_read_i4((uint32_t*)&g_packet_q_tail);
+        int h = (int)tm_read_i4((uint32_t*)g_packet_q_head);
+        int t = (int)tm_read_i4((uint32_t*)g_packet_q_tail);
         if (h < t) {
             Packet* src = &g_packet_queue[h];
             pkt.flow_id       = (long)tm_read_i8((uint64_t*)&src->flow_id);
@@ -112,7 +112,7 @@ static Packet get_packet() {
             pkt.length        = (int)tm_read_i4((uint32_t*)&src->length);
             for (int i = 0; i < INTRUDER_MAX_DATA; i++)
                 pkt.data[i] = (char)tm_read_i1((uint8_t*)&src->data[i]);
-            tm_write_i4((uint32_t*)&g_packet_q_head, h + 1);
+            tm_write_i4((uint32_t*)g_packet_q_head, h + 1);
         }
     });
     return pkt;
@@ -146,7 +146,7 @@ static void process_decoder(const Packet& pkt) {
             tm_write_i4((uint32_t*)&g_decoder_flows[idx].data_len, total);
             tm_write_i8((uint64_t*)&g_decoder_flows[idx].flow_id, fid);
 
-            int qtail = (int)tm_read_i4((uint32_t*)&g_decoded_q_tail);
+            int qtail = (int)tm_read_i4((uint32_t*)g_decoded_q_tail);
             if (qtail < g_decoded_q_capacity) {
                 DecodedFlow* dst = &g_decoded_queue[qtail];
                 tm_write_i8((uint64_t*)&dst->flow_id, fid);
@@ -154,7 +154,7 @@ static void process_decoder(const Packet& pkt) {
                 for (int i = 0; i < total; i++)
                     tm_write_i1((uint8_t*)&dst->data[i],
                                g_decoder_flows[idx].data[i]);
-                tm_write_i4((uint32_t*)&g_decoded_q_tail, qtail + 1);
+                tm_write_i4((uint32_t*)g_decoded_q_tail, qtail + 1);
             }
             tm_write_i4((uint32_t*)&g_fragment_counts[idx], 0);
         }
@@ -166,15 +166,15 @@ static DecodedFlow get_complete() {
     DecodedFlow df;
     df.flow_id = -1;
     tx_run([&]() {
-        int h = (int)tm_read_i4((uint32_t*)&g_decoded_q_head);
-        int t = (int)tm_read_i4((uint32_t*)&g_decoded_q_tail);
+        int h = (int)tm_read_i4((uint32_t*)g_decoded_q_head);
+        int t = (int)tm_read_i4((uint32_t*)g_decoded_q_tail);
         if (h < t) {
             DecodedFlow* src = &g_decoded_queue[h];
             df.flow_id  = (long)tm_read_i8((uint64_t*)&src->flow_id);
             df.data_len = (int)tm_read_i4((uint32_t*)&src->data_len);
             for (int i = 0; i < df.data_len && i < INTRUDER_MAX_DATA * 2; i++)
                 df.data[i] = (char)tm_read_i1((uint8_t*)&src->data[i]);
-            tm_write_i4((uint32_t*)&g_decoded_q_head, h + 1);
+            tm_write_i4((uint32_t*)g_decoded_q_head, h + 1);
         }
     });
     return df;
@@ -327,16 +327,20 @@ int main(int argc, char* argv[]) {
 
     // Packet queue: worst-case g_num_flows * max_packets_per_flow
     g_packet_q_capacity = max_flows * max_packets_per_flow + 1024;
-    g_packet_queue      = new Packet[g_packet_q_capacity]();
+    g_packet_queue      = (Packet*)tm_calloc(g_packet_q_capacity, sizeof(Packet));
+    g_packet_q_head     = (int*)tm_calloc(1, sizeof(int));
+    g_packet_q_tail     = (int*)tm_calloc(1, sizeof(int));
 
     // Per-flow decoder state
-    g_decoder_flows     = new DecodedFlow[max_flows]();
-    g_fragment_storage  = new char[max_flows * INTRUDER_MAX_PACKETS * INTRUDER_MAX_DATA]();
-    g_fragment_counts   = new int[max_flows]();
+    g_decoder_flows     = (DecodedFlow*)tm_calloc(max_flows, sizeof(DecodedFlow));
+    g_fragment_storage  = (char*)tm_calloc(max_flows * INTRUDER_MAX_PACKETS * INTRUDER_MAX_DATA, 1);
+    g_fragment_counts   = (int*)tm_calloc(max_flows, sizeof(int));
 
     // Decoded queue: at most one per flow
     g_decoded_q_capacity = max_flows;
-    g_decoded_queue      = new DecodedFlow[g_decoded_q_capacity]();
+    g_decoded_queue      = (DecodedFlow*)tm_calloc(g_decoded_q_capacity, sizeof(DecodedFlow));
+    g_decoded_q_head     = (int*)tm_calloc(1, sizeof(int));
+    g_decoded_q_tail     = (int*)tm_calloc(1, sizeof(int));
 
     // ── Generate packets (main thread, no TM) ──
     int total_packets = 0;
@@ -374,7 +378,7 @@ int main(int argc, char* argv[]) {
 
             int offset = 0;
             for (int f = 0; f < num_packets; f++) {
-                Packet& pkt = g_packet_queue[g_packet_q_tail++];
+                Packet& pkt = g_packet_queue[(*g_packet_q_tail)++];
                 pkt.flow_id       = flow;
                 pkt.fragment_id   = f;
                 pkt.num_fragments = num_packets;
@@ -412,11 +416,15 @@ int main(int argc, char* argv[]) {
     printf("Num found = %lu\n", (unsigned long)ops);
 
     // ── Cleanup ──
-    delete[] g_packet_queue;
-    delete[] g_decoder_flows;
-    delete[] g_fragment_storage;
-    delete[] g_fragment_counts;
-    delete[] g_decoded_queue;
+    tm_free(g_packet_queue);
+    tm_free(g_packet_q_head);
+    tm_free(g_packet_q_tail);
+    tm_free(g_decoder_flows);
+    tm_free(g_fragment_storage);
+    tm_free(g_fragment_counts);
+    tm_free(g_decoded_queue);
+    tm_free(g_decoded_q_head);
+    tm_free(g_decoded_q_tail);
     for (int i = 0; i < g_dictionary_size; i++)
         delete[] g_dictionary[i];
     delete[] g_dictionary;

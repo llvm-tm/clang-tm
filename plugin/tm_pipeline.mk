@@ -130,8 +130,8 @@ TM_INCLUDES_tsxsgl       = -I$(BACKENDS_DIR)/tm_impl/common
 TM_INCLUDES_tinystm     = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)/tm_impl/common
 TM_INCLUDES_norec       = -I$(NOREC_DIR) -I$(BACKENDS_DIR)/tm_impl/common
 TM_INCLUDES_tinystm_wbctl = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)/tm_impl/common
-TM_INCLUDES_tinystm_wbetl = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)/tm_impl/common
-TM_INCLUDES_tinystm_wt    = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)/tm_impl/common
+TM_INCLUDES_tinystm_wbetl = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)/tm_impl/common -I$(BACKENDS_DIR)/stubs
+TM_INCLUDES_tinystm_wt    = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)/tm_impl/common -I$(BACKENDS_DIR)/stubs
 TM_DEFINES_spht          = -DTM_BACKEND_SPHT -DLLVM_TM_PLUGIN -mrtm
 TM_INCLUDES_spht         = -I$(SPHT_DIR) -I$(BACKENDS_DIR)/tm_impl/common
 
