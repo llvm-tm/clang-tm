@@ -10,8 +10,8 @@ all: stmbench_singlelock stmbench_tl2 stmbench_tinystm stmbench_uninstrumented \
 	stmbench_tinystm_wbctl stmbench_tinystm_wbetl stmbench_tinystm_wt \
 	stmbench_norec stmbench_dudetm stmbench_spht
 
-stmbench_uninstrumented: STMbench7.cpp | $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(BACKENDS_DIR) $< -o $(BIN_DIR)/$@
+stmbench_uninstrumented: STMbench7.cpp $(BACKENDS_DIR)/stubs/tm_stubs.cpp | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(TM_COMPILE_FLAGS) -I$(BACKENDS_DIR) -I$(BACKENDS_DIR)/tm_impl/common -I$(realpath ..) $+ -o $(BIN_DIR)/$@
 
 $(eval $(call tm_target, stmbench_singlelock, STMbench7.cpp, singlelock))
 $(eval $(call tm_target, stmbench_tl2, STMbench7.cpp, tl2))

@@ -86,6 +86,7 @@ SWISSTM_DIR      ?= $(BACKENDS_DIR)/tm_impl/swisstm
 NOREC_DIR        ?= $(BACKENDS_DIR)/tm_impl/norec
 DUDETM_DIR       ?= $(BACKENDS_DIR)/tm_impl/dudetm
 SPHT_DIR          ?= $(BACKENDS_DIR)/tm_impl/spht
+LEFTRIGHT_DIR     ?= $(BACKENDS_DIR)/tm_impl/leftright
 OUT_DIR          ?= out
 BIN_DIR          ?= bin
 TM_PLUGIN        ?= $(BIN_DIR)/libTMInstrument.so
@@ -135,6 +136,8 @@ TM_DEFINES_spht          = -DTM_BACKEND_SPHT -DLLVM_TM_PLUGIN -mrtm
 TM_INCLUDES_spht         = -I$(SPHT_DIR) -I$(BACKENDS_DIR)/tm_impl/common
 
 TM_INCLUDES_dudetm        = -I$(TINYSTM_DIR) -I$(DUDETM_DIR) -I$(BACKENDS_DIR)/tm_impl/common
+TM_DEFINES_leftright      = -DLLVM_TM_PLUGIN
+TM_INCLUDES_leftright     = -I$(LEFTRIGHT_DIR) -I$(BACKENDS_DIR)/tm_impl/common
 
 # Include machine-local config (if it exists) for arch-specific flags
 # e.g., TM_DEFINES_tsxsgl = -mrtm, TM_DEFINES_tinystm += -DTM_REGION_SIZE=536870912
@@ -235,4 +238,4 @@ $(BIN_DIR):
 
 .PHONY: tm_clean
 tm_clean:
-	rm -f $(OUT_DIR)/*.bc $(OUT_DIR)/*.instr.bc $(OUT_DIR)/*.opt.bc
+	rm -f $(OUT_DIR)/*.bc $(OUT_DIR)/*.instr.bc $(OUT_DIR)/*.opt.bc $(OUT_DIR)/*.o

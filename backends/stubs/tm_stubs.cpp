@@ -4,6 +4,10 @@
 #include <cstdlib>
 #include <cstring>
 
+// ── Globals expected by TM-aware headers (e.g. tm_spin_token.hpp) ─
+char *g_tm_region_start = nullptr;
+char *g_tm_region_end   = nullptr;
+
 // ── Thread-local variables (same linkage as tm_api.hpp expects) ──
 __thread int32_t tm_nested_call_counter = 0;
 __thread int32_t tm_longjmp_ret = 0;
