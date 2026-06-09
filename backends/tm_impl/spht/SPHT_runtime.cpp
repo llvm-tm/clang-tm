@@ -20,7 +20,7 @@
 
 #include "tm_common.hpp"
 #include "tm_thread_state.hpp"
-#include "spht/spht_globals.hpp"
+#include "spht_globals.hpp"
 #include "tm_alloc_overrides.hpp"
 
 thread_local bool g_in_tx = false;
