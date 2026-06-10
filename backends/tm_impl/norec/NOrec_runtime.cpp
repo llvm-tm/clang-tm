@@ -283,10 +283,27 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 	}
 }
 
-// TM allocator stubs (redirect to system allocator)
-void* tm_malloc(size_t size) { return tm_track_alloc_result(std::malloc(size), size); }
-void* tm_calloc(size_t nmemb, size_t size) { return tm_track_alloc_result(std::calloc(nmemb, size), nmemb * size); }
-void* tm_realloc(void* ptr, size_t size) { return tm_track_alloc_result(std::realloc(ptr, size), size); }
+// TM allocator stubs.
+// IMPORTANT: Use ::operator new/delete to match the allocator domain used by
+// STL containers.  The LLVM plugin intercepts both `new`/`delete` and
+// `malloc`/`free` inside TX functions and redirects them to `tm_malloc`/
+// `tm_free`.  If we used `malloc`/`free` here, objects allocated via `new`
+// outside any TX (e.g. vector buffers in init_data) would be freed via
+// `free()` inside a TX on reallocation — a C++ allocator API mismatch.
+void* tm_malloc(size_t size) { return tm_track_alloc_result(::operator new(size), size); }
+void* tm_calloc(size_t nmemb, size_t size) {
+    void* p = ::operator new(nmemb * size);
+    std::memset(p, 0, nmemb * size);
+    return tm_track_alloc_result(p, nmemb * size);
+}
+void* tm_realloc(void* ptr, size_t size) {
+    void* p = ::operator new(size);
+    if (ptr) {
+        std::memcpy(p, ptr, size);
+        ::operator delete(ptr);
+    }
+    return tm_track_alloc_result(p, size);
+}
 void  tm_free(void* ptr) {
     if (!ptr || !stm::isTMAddress(ptr)) return;
     TM_EVENT(FREE, ptr, 0);
@@ -294,7 +311,7 @@ void  tm_free(void* ptr) {
         norec::tm_write_i1(reinterpret_cast<uint8_t*>(ptr), 0);
         tm_free_append_deferred(ptr);
     } else {
-        std::free(ptr);
+        ::operator delete(ptr);
     }
 }
 
