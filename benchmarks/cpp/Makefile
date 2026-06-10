@@ -81,6 +81,10 @@ BUILTINS = $(addprefix ../../backends/tm_impl/common/,tm_alloc_overrides.hpp tm_
 #   datastructures   → datastructures/
 #   tests            → tests/ (bank/, fuzz/)
 
+# --- RBtree -------------------------------------------------------
+RBTREE_SRC   = rbtree/rbtree.cpp
+RBTREE_BIN   = bin/rbtree
+
 # --- tests --------------------------------------------------------
 BANK_SRC     = bank/bank.cpp
 BANK_BIN     = bin/bank
@@ -163,7 +167,7 @@ STAMP_BINS = $(VACATION_BIN) $(LABYRINTH_BIN) $(KMEANS_BIN) $(GENOME_BIN) $(INTR
 .PHONY: run-tpcc run-ycsb run-test-ds run-test-tx run-tests run run-stamp
 
 all: bin $(BANK_BIN) $(EIGEN_BIN) $(BENCH7_BIN) $(STAMP_BINS) \
-     $(FUZZ_CTR_BIN) $(FUZZ_BANK_BIN) $(TPCC_BIN) $(YCSB_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN)
+     $(FUZZ_CTR_BIN) $(FUZZ_BANK_BIN) $(TPCC_BIN) $(YCSB_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN) $(RBTREE_BIN)
 
 stubs: bin $(BANK_STUBS) $(EIGEN_STUBS) $(BENCH7_STUBS) $(STAMP_STUBS) \
        $(FUZZ_CTR_STUBS) $(FUZZ_BANK_STUBS) $(TPCC_STUBS) $(YCSB_STUBS)
@@ -198,6 +202,7 @@ $(eval $(call BUILD_RULE,$(TPCC_BIN),$(TPCC_SRC)))
 $(eval $(call BUILD_RULE,$(YCSB_BIN),$(YCSB_SRC)))
 $(eval $(call BUILD_RULE,$(TEST_DS_BIN),$(TEST_DS_SRC)))
 $(eval $(call BUILD_RULE,$(TEST_TX_BIN),$(TEST_TX_SRC)))
+$(eval $(call BUILD_RULE,$(RBTREE_BIN),$(RBTREE_SRC)))
 
 # --- Stubs build rules (uninstrumented baseline) ------------------
 $(eval $(call BUILD_STUBS_RULE,$(BANK_STUBS),$(BANK_SRC)))

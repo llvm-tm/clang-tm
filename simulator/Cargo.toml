@@ -1,0 +1,27 @@
+[package]
+name = "tm-des"
+version = "0.1.0"
+edition = "2021"
+description = "Transactional Memory Discrete Event Simulator"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+[[bin]]
+name = "tm-des"
+path = "src/bin/tm-des.rs"
+
+[[bin]]
+name = "tm-check"
+path = "src/bin/tm-check.rs"
+
+[[bin]]
+name = "tm-gen"
+path = "src/bin/tm-gen.rs"
+
+[[bin]]
+name = "tm-trace2jsonl"
+path = "src/bin/tm-trace2jsonl.rs"

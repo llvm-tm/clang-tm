@@ -1,0 +1,13 @@
+{"timestamp":1,"thread_id":0,"seq":0,"kind":{"Log":{"msg":"Scenario 3: two threads transfer same account (conflict)"}}}
+{"timestamp":10,"thread_id":0,"seq":1,"kind":"TxBegin"}
+{"timestamp":11,"thread_id":0,"seq":2,"kind":{"Read":{"addr":139637976731648,"width":4}}}
+{"timestamp":12,"thread_id":0,"seq":3,"kind":{"Write":{"addr":139637976731648,"width":4,"val":0}}}
+{"timestamp":13,"thread_id":0,"seq":4,"kind":{"Read":{"addr":139637976731656,"width":4}}}
+{"timestamp":14,"thread_id":0,"seq":5,"kind":{"Write":{"addr":139637976731656,"width":4,"val":0}}}
+{"timestamp":15,"thread_id":0,"seq":6,"kind":"TxEnd"}
+{"timestamp":10,"thread_id":1,"seq":1,"kind":"TxBegin"}
+{"timestamp":11,"thread_id":1,"seq":2,"kind":{"Read":{"addr":139637976731648,"width":4}}}
+{"timestamp":12,"thread_id":1,"seq":3,"kind":{"Write":{"addr":139637976731648,"width":4,"val":0}}}
+{"timestamp":13,"thread_id":1,"seq":4,"kind":{"Read":{"addr":139637976731656,"width":4}}}
+{"timestamp":14,"thread_id":1,"seq":5,"kind":{"Write":{"addr":139637976731656,"width":4,"val":0}}}
+{"timestamp":15,"thread_id":1,"seq":6,"kind":"TxEnd"}

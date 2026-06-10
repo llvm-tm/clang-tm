@@ -67,7 +67,12 @@ cl::opt<std::string> OpaqueSymbolsFile(
 
 cl::opt<bool> TMAudit(
     "tm-audit",
-    cl::desc("Print every load/store in TX functions with instrumentation analysis"),
+    cl::desc("Print detailed instrumentation audit to stderr"),
+    cl::init(false));
+
+cl::opt<bool> EmitTrace(
+    "emit-tm-trace",
+    cl::desc("Emit tm_trace before each instrumented access"),
     cl::init(false));
 
 // ===========================================================================

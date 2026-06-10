@@ -28,6 +28,7 @@ struct TMRuntimeHooks {
 	FunctionCallee memset_fn;
 	FunctionCallee enqueue_fn, wait_prev_tx_fn;
 	FunctionCallee get_thread_state;
+	FunctionCallee trace_fn;
 
 	bool valid() { return read_i4.getCallee() && write_i4.getCallee(); }
 
@@ -98,18 +99,34 @@ struct TMRuntimeHooks {
 		h.write_f8 = hook("tm_write_f8", voidTy, {i8PtrTy, f64Ty});
 		h.write_ptr = hook("tm_write_ptr", voidTy, {i8PtrTy, i8PtrTy});
 
+		// Optional trace hook (only injected if --emit-tm-trace is set)
+		h.trace_fn = hook("tm_trace", voidTy, {i32Ty, i8PtrTy, i64Ty, i64Ty});
+		// Params: (type_code: R=0/W=1, addr, width, value)
+
 		return h;
 	}
 };
+
+// Forward declaration for --emit-tm-trace (defined in TMInstrumentPass.cpp)
+extern llvm::cl::opt<bool> EmitTrace;
 
 // Helpers to emit tm_read/tm_write calls based on LLVM types.
 // These replace the duplicated switch-on-type chains.
 static Value *emitTMRead(IRBuilder<> &B, Value *Ptr, Type *Ty, const TMRuntimeHooks &H)
 {
 	auto &Ctx = B.getContext();
-	auto *i8PtrTy = PointerType::getUnqual(Ctx);
+	auto *i32Ty = Type::getInt32Ty(Ctx);
 	auto *i64Ty = Type::getInt64Ty(Ctx);
+	auto *i8PtrTy = PointerType::getUnqual(Ctx);
 	Value *PC = B.CreateBitCast(Ptr, i8PtrTy);
+
+	// Optional trace emission
+	if (EmitTrace) {
+		Value *TypeCode = ConstantInt::get(i32Ty, 0); // 0 = read
+		Value *WidthVal = ConstantInt::get(i64Ty, Ty->getScalarSizeInBits() / 8);
+		Value *ValPlaceholder = ConstantInt::get(i64Ty, 0);
+		B.CreateCall(H.trace_fn, {TypeCode, PC, WidthVal, ValPlaceholder});
+	}
 
 	if (Ty->isIntegerTy(1)) {
 		Value *V = B.CreateCall(H.read_i1, {PC});
@@ -194,10 +211,19 @@ static Value *emitTMRead(IRBuilder<> &B, Value *Ptr, Type *Ty, const TMRuntimeHo
 static bool emitTMWrite(IRBuilder<> &B, Value *Ptr, Value *Val, const TMRuntimeHooks &H)
 {
 	auto &Ctx = B.getContext();
-	auto *i8PtrTy = PointerType::getUnqual(Ctx);
+	auto *i32Ty = Type::getInt32Ty(Ctx);
 	auto *i64Ty = Type::getInt64Ty(Ctx);
+	auto *i8PtrTy = PointerType::getUnqual(Ctx);
 	Value *PC = B.CreateBitCast(Ptr, i8PtrTy);
 	Type *Ty = Val->getType();
+
+	// Optional trace emission before write
+	if (EmitTrace) {
+		Value *TypeCode = ConstantInt::get(i32Ty, 1); // 1 = write
+		Value *WidthVal = ConstantInt::get(i64Ty, Ty->getScalarSizeInBits() / 8);
+		Value *ValWide = B.CreateZExtOrBitCast(Val, i64Ty);
+		B.CreateCall(H.trace_fn, {TypeCode, PC, WidthVal, ValWide});
+	}
 
 	if (Ty->isIntegerTy(1)) {
 		B.CreateCall(H.write_i1, {PC, B.CreateZExt(Val, Type::getInt8Ty(Ctx))});
