@@ -14,11 +14,6 @@ class TMSafeVector {
     void grow(size_t min_cap) {
         size_t nc = m_cap ? m_cap : 4;
         while (nc < min_cap) nc *= 2;
-        if (nc * sizeof(T) > (1ULL << 40)) {
-            fprintf(stderr, "GROW_CRASH: m_cap=%zu nc=%zu min_cap=%zu this=%p\n",
-                    m_cap, nc, min_cap, (void*)this);
-            fflush(stderr);
-        }
         T* nd = static_cast<T*>(::operator new(nc * sizeof(T)));
         for (size_t i = 0; i < m_size; i++) {
             new (&nd[i]) T(static_cast<T&&>(m_data[i]));

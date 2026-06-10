@@ -284,12 +284,10 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 }
 
 // TM allocator stubs.
-// IMPORTANT: Use ::operator new/delete to match the allocator domain used by
-// STL containers.  The LLVM plugin intercepts both `new`/`delete` and
-// `malloc`/`free` inside TX functions and redirects them to `tm_malloc`/
-// `tm_free`.  If we used `malloc`/`free` here, objects allocated via `new`
-// outside any TX (e.g. vector buffers in init_data) would be freed via
-// `free()` inside a TX on reallocation — a C++ allocator API mismatch.
+// Use ::operator new/delete (not malloc/free) so that objects allocated via
+// ::operator new outside any TX (e.g., via new[] in init_data) are freed via
+// ::operator delete when the plugin intercepts `delete` inside a TX — avoids
+// C++ allocator API mismatch.
 void* tm_malloc(size_t size) { return tm_track_alloc_result(::operator new(size), size); }
 void* tm_calloc(size_t nmemb, size_t size) {
     void* p = ::operator new(nmemb * size);

@@ -271,30 +271,18 @@ static void auditTXFunctionLoadsStores(Function &F, Module &M)
 	       << "\n";
 }
 
-// Check if a function (possibly cloned with _tm_clone suffix) originates from
-// an STL container whose internal new/delete must not go through tm_malloc.
-// STL container functions have mangled names starting with _ZNSt (std::) or
-// _ZNKSt (const std::).  Their internal buffer allocations (vector realloc,
-// string _M_create, etc.) must use the regular heap to avoid spec_alloc being
-// freed on TX abort while the container's in-memory pointer still references it.
-static bool isSTLContainerAllocSite(CallBase *Call)
-{
-	Function *Parent = Call->getFunction();
-	if (!Parent)
-		return false;
-	StringRef Name = Parent->getName();
-	if (Name.ends_with(TM_CLONE_SUFFIX))
-		Name = Name.drop_back(StringRef(TM_CLONE_SUFFIX).size());
-	return tm_platform::isSTLContainerFunction(Name);
-}
-
 // Replace a malloc/free/operator-new call with the TM-aware equivalent.
 // Handles both CallInst and InvokeInst. For InvokeInst, the callee is
 // changed in-place (via setCalledFunction) to preserve the unwind
 // destination — converting to a CallInst + branch would lose exception
 // semantics (e.g., std::bad_alloc from operator new).
-// SKIPS interception for calls inside STL container functions (vector, string,
-// deque, etc.) whose internal buffer allocations must use the regular heap.
+// NOTE: STL container functions are NOT exempt from interception.  All
+// operator new / operator delete calls, including those inside STL container
+// functions, are redirected to tm_malloc / tm_free.  Previously STL
+// functions were exempt (to keep their buffers on the system heap), but
+// this caused system-heap buffer overflow when TM-instrumented code
+// wrote past the buffer — the TM runtime cannot detect system-heap
+// corruption.  Maintaining per-STL exemptions is fragile and costly.
 static bool handleMallocFree(CallBase *Call,
                              IRBuilder<> &B,
                              const TMRuntimeHooks &H,
@@ -341,22 +329,8 @@ static bool handleMallocFree(CallBase *Call,
 		}
 	};
 
-	// STL container internal allocations use the regular heap (not tm_malloc)
-	// to separate TM region allocation from regular heap allocation for
-	// buffers that persist across TX boundaries.  Deletion still goes through
-	// tm_free for deferred deallocation at commit time.
-	bool isSTL = isSTLContainerAllocSite(Call);
-
-	// For STL container allocation sites: skip new/malloc/calloc/realloc
-	// interception (use regular heap allocator), but still intercept
-	// delete/free to defer deallocation to commit time.
 	bool isNew = tm_platform::isOperatorNew(N);
 	bool isFree = tm_platform::isOperatorDelete(N);
-
-	// STL container new/malloc: use regular heap (skip tm_malloc).
-	// STL container delete/free: still redirect to tm_free for deferred free.
-	if ((isNew || N == "calloc" || N == "realloc") && isSTL)
-		return false;
 
 	if (isNew) {
 		// operator new with alignment (e.g. _ZnwmSt11align_val_t) has

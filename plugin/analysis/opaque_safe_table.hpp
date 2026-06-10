@@ -27,11 +27,6 @@ static const OpaqueSafeEntry KnownSafeOpaqueTable[] = {
     {"_Zda", true},
     {"llvm.", true},
     {"__cxa_", true},
-
-    {"_Unwind", true},
-    {"pthread_", true},
-    {"_ZNSaIcE", true},
-    {"_ZNSaIcEC2ERKS_", false},
     {"printf", false},
     {"fprintf", false},
     {"fflush", false},
@@ -40,6 +35,8 @@ static const OpaqueSafeEntry KnownSafeOpaqueTable[] = {
     {"putc", false},
     {"snprintf", false},
     {"sprintf", false},
+    {"_ZSt17__throw_bad_allocv", false},
+    {"_ZSt20__throw_length_errorPKc", false},
     {"exit", false},
     {"abort", false},
     {"strlen", false},
@@ -78,17 +75,24 @@ static constexpr size_t KnownSafeOpaqueTableSize = sizeof(KnownSafeOpaqueTable) 
 // memory — their internal loads go through TM reads if needed, and they have
 // no stores to TM-shared data.  Separated from KnownSafeOpaqueTable because
 // the default check rejects ALL functions with TM-traced args as unsafe.
+// NOTE: STL container functions (std::vector, std::map, std::unordered_set, etc.)
+// are intentionally NOT listed here.  Previously STL entries were added as
+// "exemptions" to let STL containers work inside transactions, but this
+// approach is fragile and costly to maintain:
+//   - Per-function exemptions never cover all STL variants (debug/checked iterators,
+//     different allocators, platform-specific ABI quirks), so gaps remain.
+//   - Opaque STL functions bypass TM conflict detection on their internal reads,
+//     making silent data corruption possible (e.g., std::lower_bound reading
+//     another thread's uncommitted write).
+//   - STL container buffer allocations must go through tm_malloc / tm_free
+//     like any other TM allocation, not the system heap.  Exempting STL
+//     functions from malloc/free interception caused system-heap corruption
+//     from TM-instrumented writes past the buffer.
+// Instead, use TM-safe data structures (TMSafeMap, TMSafeQueue, SimpleVec)
+// inside transactions.
 static const OpaqueSafeEntry KnownSafeWithTMArgsTable[] = {
     {"memcmp", false},
-    {"_ZNKSt8__detail20_Prime_rehash_policy14_M_need_rehashEmmm", false},
     {"strlen", false},
-    {"_ZSt11_Hash_bytesPKvmm", false},
-    {"_ZNSaIcEC2ERKS_", false},
-    {"_ZNSaIcED2Ev", false},
-    // basic_string destructor + append: these call operator delete (intercepted
-    // by handleMallocFree) and do not modify TM-shared memory directly.
-    {"_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEED1Ev", false},
-    {"_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6appendEPKc", false},
 };
 
 // Syscall-related symbols — these are safe inside transactions because

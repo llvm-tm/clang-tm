@@ -1,6 +1,13 @@
 /**
- * STL Container Test for LLVM TM Plugin
- * Tests that the plugin correctly instruments std::vector and std::unordered_map
+ * STL Container Test for LLVM TM Plugin (REFERENCE ONLY — NOT BUILT BY DEFAULT)
+ *
+ * STL containers inside TM transactions are no longer supported.  The plugin
+ * no longer maintains per-STL exemptions or opaque-safe-table entries for
+ * std::unordered_map, std::map, or std::string internals.  These STL types
+ * use internal functions (e.g. _Hash_bytes, _M_need_rehash) that the opaque
+ * checker flags as unsafe.  Use TMSafeMap, TMSafeQueue, or SimpleVec instead.
+ *
+ * This file is kept for reference but removed from the default TEST_NAMES.
  */
 
 #include <iostream>

@@ -79,9 +79,9 @@ $(foreach v,$(PLUGIN_VARIANTS),$(eval $(call TMPluginTarget,$(v))))
 
 PLUGIN_SO_NAMES := $(addprefix $(BIN_DIR)/libTMInstrument_,$(addsuffix .so,$(PLUGIN_VARIANTS)))
 
-TEST_NAMES := test_types test_memtest test_threads test_persist test_retry test_stl_containers \
-              test_stl_primitive test_annotation_detect test_local_containers \
-              test_custom_class test_stl_map_find test_tm_arg_trace \
+TEST_NAMES := test_types test_memtest test_threads test_persist test_retry \
+              test_annotation_detect test_local_containers \
+              test_custom_class test_tm_arg_trace \
               test_math_opaque test_vector_realloc \
               test_alloc_stress test_ll_alloc test_construct_tx_pattern \
               test_nested_tx test_tm_simple test_tm_safe_map \
@@ -91,6 +91,12 @@ TEST_NAMES := test_types test_memtest test_threads test_persist test_retry test_
                test_alloc_stress_manual test_manual_tx \
                test_treap_tx test_realloc_crash test_std_queue test_queue \
                test_queue_sync test_queue_async test_queue_multi
+
+# STL container tests — no longer supported inside TM.  These would require
+# opaque-safe-table entries for std::unordered_map, std::map, and std::string
+# internals, which are intentionally removed (fragile to maintain, and opaque
+# STL functions bypass TM conflict detection).  Kept for reference.
+STL_TEST_NAMES := test_stl_containers test_stl_primitive test_stl_map_find
 
 RACE_TEST_NAMES := test_task_queue_race test_parent_set_race test_counter_race
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))
