@@ -393,7 +393,27 @@ read_word_norec(     //
 		}
 	}
 
-	any_type_t value = read_value_from_addr(addr, sz);
+	// NOREC write-back: a concurrent writer holds the global lock
+	// (clock_is_odd) while writing to memory.  A reader who reads during this
+	// window may get a torn 8-byte value that is neither the pre- nor
+	// post-write value.  The validation loop below does *not* detect this
+	// because when the writer is still writing, validate() re-reads the same
+	// torn memory — the torn value matches itself and validation passes.
+	//
+	// Standard NOREC double-check: record the clock *before* the read and
+	// verify it hasn't changed *after*.  If a writer acquired the lock (clock
+	// becomes odd), released it (→ even+2), or both, the clock value differs
+	// and we retry.  This guarantees the value corresponds to a single
+	// consistent global state.
+	uint64_t clock_before, clock_after;
+	any_type_t value;
+	do {
+		while ((clock_before = get_clock()) & 1) {
+			__builtin_ia32_pause();
+		}
+		value = read_value_from_addr(addr, sz);
+		clock_after = get_clock();
+	} while (clock_after != clock_before);
 
 	if (sz == ValueType::POINTER) {
 		uint64_t ptr_val = reinterpret_cast<uint64_t>(value.ptr);

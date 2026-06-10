@@ -27,9 +27,7 @@ static const OpaqueSafeEntry KnownSafeOpaqueTable[] = {
     {"_Zda", true},
     {"llvm.", true},
     {"__cxa_", true},
-    {"_ZSt", true},
-    {"_ZNSt", true},
-    {"_ZNKSt", true},
+
     {"_Unwind", true},
     {"pthread_", true},
     {"_ZNSaIcE", true},

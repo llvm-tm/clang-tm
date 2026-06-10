@@ -38,6 +38,7 @@
 #include <set>
 #include <thread>
 #include <vector>
+#include "tm_vector.hpp"
 
 #define TM __attribute__((annotate("tm")))
 #define TX __attribute__((annotate("transaction"), noinline))
@@ -100,7 +101,7 @@ struct AtomicPart {                      // §: node in a graph, belongs to one 
     int buildDate;
     int weight;
     int compositePartId;                 // owning CP index
-    std::vector<int> connectionIds;      // incident connection indices
+    TMSafeVector<int> connectionIds;     // incident connection indices
 };
 
 struct CompositePart {                   // §: design library entry
@@ -108,23 +109,23 @@ struct CompositePart {                   // §: design library entry
     int buildDate;
     int documentId;                      // owning Document index
     int rootAtomicPartId;                // entry point into graph
-    std::vector<int> atomicPartIds;      // all APs in this graph
-    std::vector<int> baseAssemblyIds;    // reverse bag: which BAs contain this CP
+    TMSafeVector<int> atomicPartIds;     // all APs in this graph
+    TMSafeVector<int> baseAssemblyIds;   // reverse bag: which BAs contain this CP
 };
 
 struct BaseAssembly {                    // §: tree leaf
     int id;
     int parentAssemblyId;                // parent ComplexAssembly index
     int buildDate;
-    std::vector<int> compositePartIds;   // bag of CPs belonging to this BA
+    TMSafeVector<int> compositePartIds;  // bag of CPs belonging to this BA
 };
 
 struct ComplexAssembly {                 // §: internal tree node
     int id;
     int level;                           // 0 (root) .. TREE_LEVELS-1
     int parentId;                        // -1 for root
-    std::vector<int> childAssemblyIds;   // child CA indices (levels 0..TREE_LEVELS-2)
-    std::vector<int> childBaseAssemblyIds; // child BA indices (level TREE_LEVELS-1 only)
+    TMSafeVector<int> childAssemblyIds;   // child CA indices (levels 0..TREE_LEVELS-2)
+    TMSafeVector<int> childBaseAssemblyIds; // child BA indices (level TREE_LEVELS-1 only)
     int buildDate;
 };
 
@@ -134,13 +135,13 @@ struct Module {                          // §: design root
 };
 
 // ─── TM globals ─────────────────────────────────────────────────────────
-TM std::vector<Module>          g_modules;
-TM std::vector<ComplexAssembly> g_complexAssemblies;
-TM std::vector<BaseAssembly>    g_baseAssemblies;
-TM std::vector<CompositePart>   g_compositeParts;
-TM std::vector<AtomicPart>      g_atomicParts;
-TM std::vector<Connection>      g_connections;
-TM std::vector<Document>        g_documents;
+TM TMSafeVector<Module>          g_modules;
+TM TMSafeVector<ComplexAssembly> g_complexAssemblies;
+TM TMSafeVector<BaseAssembly>    g_baseAssemblies;
+TM TMSafeVector<CompositePart>   g_compositeParts;
+TM TMSafeVector<AtomicPart>      g_atomicParts;
+TM TMSafeVector<Connection>      g_connections;
+TM TMSafeVector<Document>        g_documents;
 TM Manual                       g_manual;
 
 // Indexes (§3, Table 1): 6 ID‑based indexes + 2 date indexes
