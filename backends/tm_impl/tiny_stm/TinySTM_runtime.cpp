@@ -196,11 +196,8 @@ static __thread TMThreadState g_tm_thread_state = {0, 0};
 
 TMThreadState *tm_get_thread_state() { return &g_tm_thread_state; }
 
-static __thread int tm_count = 0;
-
 void tm_begin()
 {
-	int mc = ++tm_count;
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
 	auto *ts = tm_get_thread_state();
@@ -211,20 +208,6 @@ void tm_begin()
 	else if (sc > 0 && tc == 0)
 		g_tm_expli_mode = false;
 	int32_t c = (tc > 0) ? tc : sc;
-#if defined(DESIGN_WBCTL)
-	auto *cur_tx_begin = tinystm::current_tx_wbctl;
-#elif defined(DESIGN_WBETL)
-	auto *cur_tx_begin = tinystm::current_tx_wbetl;
-#elif defined(DESIGN_WT)
-	auto *cur_tx_begin = tinystm::current_tx_wt;
-#endif
-	fprintf(stderr,
-	        "[tm_begin #%d] sc=%d tc=%d c=%d tx_active=%d\n",
-	        mc,
-	        sc,
-	        tc,
-	        c,
-	        cur_tx_begin ? cur_tx_begin->active : -1);
 	if (c == 1) {
 		g_in_tx = true;
 		tinystm::jmpbuf = (sigjmp_buf *)&tm_jmpbuf;
@@ -255,11 +238,8 @@ void tm_begin()
 	assert(c >= 0);
 }
 
-static __thread int tm_end_call_count = 0;
-
 void tm_end()
 {
-	int my_call = ++tm_end_call_count;
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 	tm_end_count++;
 	auto *ts = tm_get_thread_state();
@@ -267,20 +247,6 @@ void tm_end()
 	int32_t sc = ts->nested_call_counter;
 	int32_t c = (tc > 0) ? tc : sc;
 	if (c == 1) {
-#if defined(DESIGN_WBCTL)
-		auto *cur_tx_end = tinystm::current_tx_wbctl;
-#elif defined(DESIGN_WBETL)
-		auto *cur_tx_end = tinystm::current_tx_wbetl;
-#elif defined(DESIGN_WT)
-		auto *cur_tx_end = tinystm::current_tx_wt;
-#endif
-		fprintf(stderr,
-		        "[tm_end #%d] sc=%d tc=%d c=%d calling commit (tx->active=%d)\n",
-		        my_call,
-		        sc,
-		        tc,
-		        c,
-		        cur_tx_end ? cur_tx_end->active : -1);
 		g_in_tx = false;
 		// Record max read-set and write-set sizes for this TX
 #if defined(DESIGN_WBCTL)
@@ -441,3 +407,35 @@ void tm_free(void *ptr)
 }
 
 } // extern "C"
+
+// ═══════════════════════════════════════════════════════════════════
+//  operator delete overrides — handle TM-region pointers at exit
+// ═══════════════════════════════════════════════════════════════════
+//
+// Global object destructors (e.g. ~std::vector<T>) call ::operator delete
+// from libstdc++ without going through the plugin's tm_free replacement.
+// If the buffer is in the TM region (mmap), the default operator delete
+// calls free() on a non-heap address → "free(): invalid pointer".
+//
+// These overrides redirect TM-region pointers to tm_region_free and
+// pass non-TM pointers to the standard deallocation path.
+//
+// These are NOT inline so the linker picks them as strong symbols.
+
+static void tm_delete_impl(void *ptr) noexcept
+{
+	if (!ptr) return;
+	if (stm::isTMAddress(ptr))
+		stm::tm_region_free(ptr);
+	else
+		std::free(ptr);
+}
+
+void operator delete(void *ptr) noexcept { tm_delete_impl(ptr); }
+void operator delete(void *ptr, size_t) noexcept { tm_delete_impl(ptr); }
+void operator delete(void *ptr, std::align_val_t) noexcept { tm_delete_impl(ptr); }
+void operator delete(void *ptr, size_t, std::align_val_t) noexcept { tm_delete_impl(ptr); }
+void operator delete[](void *ptr) noexcept { tm_delete_impl(ptr); }
+void operator delete[](void *ptr, size_t) noexcept { tm_delete_impl(ptr); }
+void operator delete[](void *ptr, std::align_val_t) noexcept { tm_delete_impl(ptr); }
+void operator delete[](void *ptr, size_t, std::align_val_t) noexcept { tm_delete_impl(ptr); }

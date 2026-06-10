@@ -263,10 +263,31 @@ extern thread_local FreeNode *g_retired_frees;
 // Uses a global set (g_retired_global_set) to ensure the same pointer
 // is tracked by at most one thread's retired list, preventing double-free
 // when both threads independently defer the same shared buffer.
+inline bool isValidFreeNode(FreeNode *node)
+{
+	if (!node) return true;
+	if ((reinterpret_cast<uintptr_t>(node) & 7) != 0) return false;
+	if (reinterpret_cast<uintptr_t>(node) < 0x1000) return false;
+	return true;
+}
+
+// Check if a next pointer stored inside a FreeNode is reasonable.
+// (The node pointer itself may be valid but its ->next field may not be.)
+inline bool isValidNextPtr(FreeNode *next)
+{
+	return !next || isValidFreeNode(next);
+}
+
 inline void tm_move_deferred_to_retired(uint64_t commit_version)
 {
 	auto *node = g_deferred_frees;
 	while (node) {
+		if (!isValidFreeNode(node)) {
+			fprintf(stderr, "FATAL: corrupted deferred list node=%p g_deferred_frees=%p\n",
+			        (void*)node, (void*)g_deferred_frees);
+			fflush(stderr);
+			_exit(1);
+		}
 		auto *next = node->next;
 		node->retire_version = commit_version;
 		// Check global set — if another thread already retired this pointer,
@@ -374,6 +395,14 @@ inline void tm_free_append_deferred(void* ptr) {
     }
     tm_untrack_spec_alloc(ptr);
     g_deferred_frees_set.insert(ptr);
+    // Validate g_deferred_frees before linking — catches TLS corruption
+    // or use-after-free of the FreeNode chain.
+    if (!isValidNextPtr(g_deferred_frees)) {
+        fprintf(stderr, "FATAL: corrupt g_deferred_frees=%p before tm_free_append_deferred ptr=%p\n",
+                (void*)g_deferred_frees, ptr);
+        fflush(stderr);
+        _exit(1);
+    }
     auto* node = static_cast<FreeNode*>(std::malloc(sizeof(FreeNode)));
     node->ptr = ptr;
     node->next = g_deferred_frees;

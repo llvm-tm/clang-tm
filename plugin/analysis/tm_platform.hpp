@@ -52,12 +52,6 @@ inline const char *sigsetjmpName(llvm::Module &M)
 #endif
 
 // -------------------------------------------------------------------------
-// Itanium ABI operator new/delete name matching
-//
-// These mangled names are used by clang/GCC on Linux, macOS, and BSD.
-// When porting to Windows/MSVC, the mangling scheme is different and
-// these tables must be updated.
-// -------------------------------------------------------------------------
 
 inline bool isOperatorNew(llvm::StringRef N)
 {

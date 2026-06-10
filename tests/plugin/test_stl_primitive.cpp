@@ -1,6 +1,10 @@
 /**
- * STL Container Test - Focused on primitive types
- * Tests that the plugin correctly instruments std::vector and std::unordered_map with primitive types
+ * STL Container Test - Focused on primitive types (REFERENCE ONLY — NOT BUILT BY DEFAULT)
+ *
+ * STL containers inside TM transactions are no longer supported.  The plugin
+ * no longer maintains per-STL exemptions or opaque-safe-table entries for
+ * std::unordered_map internals.  This file is kept for reference but removed
+ * from the default TEST_NAMES.
  */
 
 #include <iostream>

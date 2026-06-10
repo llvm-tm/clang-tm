@@ -3,6 +3,11 @@
 
 #include "tm_test_common.hpp"
 
+// NOTE: This test is REFERENCE ONLY — NOT BUILT BY DEFAULT.  The plugin no
+// longer supports std::map inside TM transactions.  std::map uses opaque
+// _Rb_tree functions that the opaque checker flags as unsafe with TM-traced
+// pointer args.  Removed from TEST_NAMES.
+
 TM std::map<int, int> g_map;
 
 TX void map_find_tx() {

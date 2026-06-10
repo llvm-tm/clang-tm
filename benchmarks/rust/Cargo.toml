@@ -56,6 +56,10 @@ name = "stmbench7"
 path = "src/bins/stmbench7.rs"
 
 [[bin]]
+name = "stmbench7_async"
+path = "src/bins/stmbench7_async.rs"
+
+[[bin]]
 name = "ycsb"
 path = "src/bins/ycsb.rs"
 
