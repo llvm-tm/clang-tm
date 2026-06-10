@@ -16,8 +16,8 @@
 #include <atomic>
 #include <csetjmp>
 
-#include "tm_alloc_overrides.hpp"
 #include "tm_thread_state.hpp"
+#include "tm_hooks.hpp"
 thread_local bool g_in_tx = false;
 
 static std::mutex global_tx_lock;
@@ -35,6 +35,8 @@ __thread int32_t tm_nested_call_counter = 0;
 __thread int32_t tm_longjmp_ret = 0;
 static thread_local TMThreadState g_tm_state{0, 0};
 
+extern const TMRealHooks g_sgl_hooks;
+
 extern "C" {
 
 TMThreadState *tm_get_thread_state() {
@@ -45,6 +47,7 @@ void tm_init() {
     if (!initialized.load(std::memory_order_relaxed)) {
         initialized.store(true, std::memory_order_seq_cst);
     }
+    tm_register_real_hooks(&g_sgl_hooks);
 }
 
 void tm_init_thread() {
@@ -82,26 +85,6 @@ void tm_set_env(sigjmp_buf* env) {
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
 
-void tm_begin() {
-    g_in_tx = true;
-    g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
-    global_tx_lock.lock();
-    assert(g_tm_state.nested_call_counter >= 0);
-    g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
-}
-
-void tm_end()
-{
-    global_tx_lock.unlock();
-    g_in_tx = false;
-    assert(g_tm_state.nested_call_counter >= 0);
-}
-
-// Read functions with symbol_id parameter (unused in this backend)
-uint8_t tm_read_i1(volatile uint8_t *addr) { return *addr; }
-uint16_t tm_read_i2(volatile uint16_t *addr) { return *addr; }
-uint32_t tm_read_i4(volatile uint32_t *addr) { return *addr; }
-uint64_t tm_read_i8(volatile uint64_t *addr) { return *addr; }
 void tm_read_i16(void *addr, void *out) {
     auto *out_words = static_cast<uint64_t *>(out);
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
@@ -118,9 +101,6 @@ void tm_read_i64(void *addr, void *out) {
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
     for (int i = 0; i < 8; i++) out_words[i] = vaddr[i];
 }
-float tm_read_f4(volatile float *addr) { return *addr; }
-double tm_read_f8(volatile double *addr) { return *addr; }
-void *tm_read_ptr(volatile void **addr) { return (void*)*addr; }
 
 void *tm_read_z(volatile uint8_t *src, uint64_t len) {
     void *buf = malloc(len);
@@ -128,11 +108,6 @@ void *tm_read_z(volatile uint8_t *src, uint64_t len) {
     return buf;
 }
 
-// Write functions with symbol_id parameter (unused in this backend)
-void tm_write_i1(volatile uint8_t *addr, uint8_t val) { *addr = val; }
-void tm_write_i2(volatile uint16_t *addr, uint16_t val) { *addr = val; }
-void tm_write_i4(volatile uint32_t *addr, uint32_t val) { *addr = val; }
-void tm_write_i8(volatile uint64_t *addr, uint64_t val) { *addr = val; }
 void tm_write_i16(void *addr, void *val) {
     auto *val_words = static_cast<const uint64_t *>(val);
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
@@ -148,9 +123,6 @@ void tm_write_i64(void *addr, void *val) {
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
     for (int i = 0; i < 8; i++) vaddr[i] = val_words[i];
 }
-void tm_write_f4(volatile float *addr, float val) { *addr = val; }
-void tm_write_f8(volatile double *addr, double val) { *addr = val; }
-void tm_write_ptr(volatile void **addr, void *val) { *addr = val; }
 
 void tm_write_z(volatile uint8_t *dst, volatile uint8_t *src, uint64_t len) {
     memcpy((void*)dst, (const void*)src, len);
@@ -162,10 +134,63 @@ void tm_memset(volatile uint8_t *addr, uint8_t val, uint64_t len) {
 
 void consume_ptr(volatile void *ptr) { (void)ptr; }
 
-// TM allocator stubs (redirect to system allocator)
-void* tm_malloc(size_t size) { return g_in_tx ? malloc(size) : malloc(size); }
-void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
-void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
-void  tm_free(void* ptr) { free(ptr); }
-
 } // extern "C"
+
+// Hook implementations (static; registered via tm_register_real_hooks)
+static void real_tm_begin() {
+    g_in_tx = true;
+    g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
+    global_tx_lock.lock();
+    assert(g_tm_state.nested_call_counter >= 0);
+    g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+static void real_tm_end() {
+    global_tx_lock.unlock();
+    g_in_tx = false;
+    assert(g_tm_state.nested_call_counter >= 0);
+}
+
+static uint8_t real_tm_read_i1(uint8_t *addr) { return *addr; }
+static uint16_t real_tm_read_i2(uint16_t *addr) { return *addr; }
+static uint32_t real_tm_read_i4(uint32_t *addr) { return *addr; }
+static uint64_t real_tm_read_i8(uint64_t *addr) { return *addr; }
+static float real_tm_read_f4(float *addr) { return *addr; }
+static double real_tm_read_f8(double *addr) { return *addr; }
+static void *real_tm_read_ptr(void **addr) { return *addr; }
+
+static void real_tm_write_i1(uint8_t *addr, uint8_t val) { *addr = val; }
+static void real_tm_write_i2(uint16_t *addr, uint16_t val) { *addr = val; }
+static void real_tm_write_i4(uint32_t *addr, uint32_t val) { *addr = val; }
+static void real_tm_write_i8(uint64_t *addr, int64_t val) { *addr = val; }
+static void real_tm_write_f4(float *addr, float val) { *addr = val; }
+static void real_tm_write_f8(double *addr, double val) { *addr = val; }
+static void real_tm_write_ptr(void **addr, void *val) { *addr = val; }
+
+static void *real_tm_malloc(size_t size) { return malloc(size); }
+static void *real_tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
+static void *real_tm_realloc(void *ptr, size_t size) { return realloc(ptr, size); }
+static void  real_tm_free(void *ptr) { free(ptr); }
+
+const TMRealHooks g_sgl_hooks = {
+    .begin    = real_tm_begin,
+    .end      = real_tm_end,
+    .malloc   = real_tm_malloc,
+    .calloc   = real_tm_calloc,
+    .realloc  = real_tm_realloc,
+    .free     = real_tm_free,
+    .read_i1  = real_tm_read_i1,
+    .read_i2  = real_tm_read_i2,
+    .read_i4  = real_tm_read_i4,
+    .read_i8  = real_tm_read_i8,
+    .read_f4  = real_tm_read_f4,
+    .read_f8  = real_tm_read_f8,
+    .read_ptr = real_tm_read_ptr,
+    .write_i1  = real_tm_write_i1,
+    .write_i2  = real_tm_write_i2,
+    .write_i4  = real_tm_write_i4,
+    .write_i8  = real_tm_write_i8,
+    .write_f4  = real_tm_write_f4,
+    .write_f8  = real_tm_write_f8,
+    .write_ptr = real_tm_write_ptr,
+};

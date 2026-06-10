@@ -27,6 +27,8 @@ int tm_serialize_unlock_all();
 #include "tinystm_globals.hpp"
 #include "tm_alloc_overrides.hpp"
 #include "tm_thread_state.hpp"
+#include "tm_hooks.hpp"
+extern const TMRealHooks g_tiny_hooks;
 __thread int32_t tm_nested_call_counter = 0;
 __thread int32_t tm_longjmp_ret = 0;
 thread_local bool g_tm_expli_mode = false;
@@ -88,6 +90,7 @@ void tm_init()
 {
 	tinystm::init();
 	tinystm::reset_locks();
+	tm_register_real_hooks(&g_tiny_hooks);
 }
 
 void tm_exit()
@@ -196,7 +199,13 @@ static __thread TMThreadState g_tm_thread_state = {0, 0};
 
 TMThreadState *tm_get_thread_state() { return &g_tm_thread_state; }
 
-void tm_begin()
+} // extern "C" — non‑hook functions above, hooks below
+
+// ═══════════════════════════════════════════════════════════════════
+//  Hook implementations (static; registered via tm_register_real_hooks)
+// ═══════════════════════════════════════════════════════════════════
+
+static void real_tm_begin()
 {
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
@@ -214,10 +223,6 @@ void tm_begin()
 		tm_clear_spec_allocs();
 		tm_clear_deferred_frees();
 		tinystm::begin();
-		// EBR: register our start version and flush safe retired entries.
-		// On retry (siglongjmp), the stale version from the aborted TX
-		// is still in the array; we clear it first to avoid inflating
-		// the safe_version minimum.
 		g_thread_tx_version[g_tl_tid] = 0;
 		uint64_t safe_version = UINT64_MAX;
 		for (size_t i = 1; i < tinystm::MAX_THREADS; i++) {
@@ -238,7 +243,7 @@ void tm_begin()
 	assert(c >= 0);
 }
 
-void tm_end()
+static void real_tm_end()
 {
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 	tm_end_count++;
@@ -248,7 +253,6 @@ void tm_end()
 	int32_t c = (tc > 0) ? tc : sc;
 	if (c == 1) {
 		g_in_tx = false;
-		// Record max read-set and write-set sizes for this TX
 #if defined(DESIGN_WBCTL)
 		auto *tx = tinystm::current_tx_wbctl;
 #elif defined(DESIGN_WBETL)
@@ -274,17 +278,83 @@ void tm_end()
 		tinystm::commit();
 		tm_move_deferred_to_retired(tx->commit_version);
 		tm_flush_spec_allocs();
-		// Unregister from EBR version tracking
 		g_thread_tx_version[g_tl_tid].store(0, std::memory_order_release);
 	}
 	assert(c >= 0);
 	tm_tx_count++;
 }
 
-uint8_t tm_read_i1(uint8_t *addr) { return tinystm::tm_read_i1(addr); }
-uint16_t tm_read_i2(uint16_t *addr) { return tinystm::tm_read_i2(addr); }
-uint32_t tm_read_i4(uint32_t *addr) { return tinystm::tm_read_i4(addr); }
-uint64_t tm_read_i8(uint64_t *addr) { return tinystm::tm_read_i8(addr); }
+static uint8_t real_tm_read_i1(uint8_t *addr) { return tinystm::tm_read_i1(addr); }
+static uint16_t real_tm_read_i2(uint16_t *addr) { return tinystm::tm_read_i2(addr); }
+static uint32_t real_tm_read_i4(uint32_t *addr) { return tinystm::tm_read_i4(addr); }
+static uint64_t real_tm_read_i8(uint64_t *addr) { return tinystm::tm_read_i8(addr); }
+static float real_tm_read_f4(float *addr) { return tinystm::tm_read_f4(addr); }
+static double real_tm_read_f8(double *addr) { return tinystm::tm_read_f8(addr); }
+static void *real_tm_read_ptr(void **addr) { return tinystm::tm_read_ptr(addr); }
+
+static void real_tm_write_i1(uint8_t *addr, uint8_t val) { tinystm::tm_write_i1(addr, val); }
+static void real_tm_write_i2(uint16_t *addr, uint16_t val) { tinystm::tm_write_i2(addr, val); }
+static void real_tm_write_i4(uint32_t *addr, uint32_t val) { tinystm::tm_write_i4(addr, val); }
+static void real_tm_write_i8(uint64_t *addr, int64_t val) { tinystm::tm_write_i8(addr, val); }
+static void real_tm_write_f4(float *addr, float val) { tinystm::tm_write_f4(addr, val); }
+static void real_tm_write_f8(double *addr, double val) { tinystm::tm_write_f8(addr, val); }
+static void real_tm_write_ptr(void **addr, void *val) { tinystm::tm_write_ptr(addr, val); }
+
+static void *real_tm_malloc(size_t size)
+{
+	void *p = stm::tm_region_malloc(size);
+	memset(p, 0, size);
+	tm_track_spec_alloc(p);
+	return p;
+}
+static void *real_tm_calloc(size_t nmemb, size_t size)
+{
+	void *p = stm::tm_region_malloc(nmemb * size);
+	memset(p, 0, nmemb * size);
+	tm_track_spec_alloc(p);
+	return p;
+}
+static void *real_tm_realloc(void *ptr, size_t size)
+{
+	void *p = stm::tm_region_malloc(size);
+	memset(p, 0, size);
+	if (ptr) {
+		stm::tm_region_free(ptr);
+	}
+	tm_track_spec_alloc(p);
+	return p;
+}
+static void real_tm_free(void *ptr)
+{
+	if (g_in_tx) {
+		if (g_deferred_frees_set.count(ptr)) {
+			fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
+			void *buf[64];
+			int n = backtrace(buf, 64);
+			backtrace_symbols_fd(buf, n, 2);
+			fflush(stderr);
+			_exit(1);
+		}
+		tm_untrack_spec_alloc(ptr);
+		g_deferred_frees_set.insert(ptr);
+		auto *node = static_cast<FreeNode *>(std::malloc(sizeof(FreeNode)));
+		node->ptr = ptr;
+		node->next = g_deferred_frees;
+		g_deferred_frees = node;
+	} else {
+		if (stm::isTMAddress(ptr))
+			stm::tm_region_free(ptr);
+		else
+			::operator delete(ptr);
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Plugin‑specific extern "C" functions (not hooks)
+// ═══════════════════════════════════════════════════════════════════
+
+extern "C" {
+
 void tm_read_i16(void *addr, void *out)
 {
 	auto *out_words = static_cast<uint64_t *>(out);
@@ -303,14 +373,7 @@ void tm_read_i64(void *addr, void *out)
 	for (int i = 0; i < 8; i++)
 		out_words[i] = tinystm::tm_read_i8(static_cast<uint64_t *>(addr) + i);
 }
-float tm_read_f4(float *addr) { return tinystm::tm_read_f4(addr); }
-double tm_read_f8(double *addr) { return tinystm::tm_read_f8(addr); }
-void *tm_read_ptr(void **addr) { return tinystm::tm_read_ptr(addr); }
 
-void tm_write_i1(uint8_t *addr, uint8_t val) { tinystm::tm_write_i1(addr, val); }
-void tm_write_i2(uint16_t *addr, int16_t val) { tinystm::tm_write_i2(addr, val); }
-void tm_write_i4(uint32_t *addr, int32_t val) { tinystm::tm_write_i4(addr, val); }
-void tm_write_i8(uint64_t *addr, int64_t val) { tinystm::tm_write_i8(addr, val); }
 void tm_write_i16(void *addr, void *val)
 {
 	auto *val_words = static_cast<const uint64_t *>(val);
@@ -329,9 +392,6 @@ void tm_write_i64(void *addr, void *val)
 	for (int i = 0; i < 8; i++)
 		tinystm::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
 }
-void tm_write_f4(float *addr, float val) { tinystm::tm_write_f4(addr, val); }
-void tm_write_f8(double *addr, double val) { tinystm::tm_write_f8(addr, val); }
-void tm_write_ptr(void **addr, void *val) { tinystm::tm_write_ptr(addr, val); }
 
 void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len)
 {
@@ -357,56 +417,35 @@ void tm_load_symbols(void *symbol_table, uint32_t symbol_count)
 	(void)symbol_count;
 }
 void consume_ptr(volatile void *ptr) { (void)ptr; }
-void *tm_malloc(size_t size)
-{
-	void *p = stm::tm_region_malloc(size);
-	memset(p, 0, size);
-	tm_track_spec_alloc(p);
-	return p;
-}
-void *tm_calloc(size_t nmemb, size_t size)
-{
-	void *p = stm::tm_region_malloc(nmemb * size);
-	memset(p, 0, nmemb * size);
-	tm_track_spec_alloc(p);
-	return p;
-}
-void *tm_realloc(void *ptr, size_t size)
-{
-	void *p = stm::tm_region_malloc(size);
-	memset(p, 0, size);
-	if (ptr) {
-		stm::tm_region_free(ptr);
-	}
-	tm_track_spec_alloc(p);
-	return p;
-}
-void tm_free(void *ptr)
-{
-	if (g_in_tx) {
-		if (g_deferred_frees_set.count(ptr)) {
-			fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
-			void *buf[64];
-			int n = backtrace(buf, 64);
-			backtrace_symbols_fd(buf, n, 2);
-			fflush(stderr);
-			_exit(1);
-		}
-		tm_untrack_spec_alloc(ptr);
-		g_deferred_frees_set.insert(ptr);
-		auto *node = static_cast<FreeNode *>(std::malloc(sizeof(FreeNode)));
-		node->ptr = ptr;
-		node->next = g_deferred_frees;
-		g_deferred_frees = node;
-	} else {
-		if (stm::isTMAddress(ptr))
-			stm::tm_region_free(ptr);
-		else
-			::operator delete(ptr);
-	}
-}
 
 } // extern "C"
+
+// ═══════════════════════════════════════════════════════════════════
+//  Hook registration table
+// ═══════════════════════════════════════════════════════════════════
+
+const TMRealHooks g_tiny_hooks = {
+    .begin    = real_tm_begin,
+    .end      = real_tm_end,
+    .malloc   = real_tm_malloc,
+    .calloc   = real_tm_calloc,
+    .realloc  = real_tm_realloc,
+    .free     = real_tm_free,
+    .read_i1  = real_tm_read_i1,
+    .read_i2  = real_tm_read_i2,
+    .read_i4  = real_tm_read_i4,
+    .read_i8  = real_tm_read_i8,
+    .read_f4  = real_tm_read_f4,
+    .read_f8  = real_tm_read_f8,
+    .read_ptr = real_tm_read_ptr,
+    .write_i1  = real_tm_write_i1,
+    .write_i2  = real_tm_write_i2,
+    .write_i4  = real_tm_write_i4,
+    .write_i8  = real_tm_write_i8,
+    .write_f4  = real_tm_write_f4,
+    .write_f8  = real_tm_write_f8,
+    .write_ptr = real_tm_write_ptr,
+};
 
 // ═══════════════════════════════════════════════════════════════════
 //  operator delete overrides — handle TM-region pointers at exit

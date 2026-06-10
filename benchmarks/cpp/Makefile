@@ -2,7 +2,7 @@
 # Run directly: no LLVM plugin pipeline.
 
 CXX      ?= clang++
-CXXFLAGS  = -std=c++20 -O3 -march=native -pthread -I$(abspath ../..) -I$(abspath ../..)/expli_instr/cpp
+CXXFLAGS  = -std=c++20 -O3 -march=native -pthread -DNDEBUG -I$(abspath ../..) -I$(abspath ../..)/expli_instr/cpp
 LDFLAGS   = -pthread
 
 # --- Choose backend (default: TinySTM/WBCTL) --------------------
@@ -64,6 +64,7 @@ ifeq ($(BACKEND),XTM)
   EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/xtm
 endif
 
+HOOKS_SRC = ../../backends/tm_impl/common/tm_hooks.cpp
 BUILTINS = $(addprefix ../../backends/tm_impl/common/,tm_alloc_overrides.hpp tm_common.hpp \
            tm_platform.hpp tm_spin_token.hpp tm_event_logger.hpp tm_debug.hpp)
 
@@ -171,8 +172,8 @@ bin:
 	mkdir -p bin STAMP/kmeans STAMP/genome STAMP/intruder STAMP/ssca2
 
 define BUILD_RULE
-$(1): bin $(2) $(RUNTIME) $(REGION_ALLOC) $(BUILTINS) Makefile
-	$$(CXX) $$(CXXFLAGS) $$(EXTRA_INC) $$(DEFS) -o $$@ $(2) $$(RUNTIME) $$(REGION_ALLOC) $$(LDFLAGS)
+$(1): bin $(2) $(RUNTIME) $(REGION_ALLOC) $(HOOKS_SRC) $(BUILTINS) Makefile
+	$$(CXX) $$(CXXFLAGS) $$(EXTRA_INC) $$(DEFS) -o $$@ $(2) $$(RUNTIME) $$(REGION_ALLOC) $$(HOOKS_SRC) $$(LDFLAGS)
 endef
 
 define BUILD_STUBS_RULE

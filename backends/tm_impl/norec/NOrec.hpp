@@ -10,6 +10,7 @@
 
 #include "tm_common.hpp"
 #include "tm_event_logger.hpp"
+#include "tm_platform.hpp"
 
 // NOrec uses shared TM_ASSERT / TM_ASSERT_VALID_TX from tm_common.hpp.
 #ifndef NDEBUG
@@ -409,7 +410,7 @@ read_word_norec(     //
 	any_type_t value;
 	do {
 		while ((clock_before = get_clock()) & 1) {
-			__builtin_ia32_pause();
+			stm::tm_cpu_relax();
 		}
 		value = read_value_from_addr(addr, sz);
 		clock_after = get_clock();
