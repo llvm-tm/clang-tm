@@ -1,0 +1,9 @@
+{"timestamp":1,"thread_id":0,"seq":0,"kind":{"Log":{"msg":"Scenario 5: lost update (write-after-read conflict)"}}}
+{"timestamp":10,"thread_id":0,"seq":1,"kind":"TxBegin"}
+{"timestamp":11,"thread_id":0,"seq":2,"kind":{"Read":{"addr":139637976731648,"width":4}}}
+{"timestamp":12,"thread_id":1,"seq":1,"kind":"TxBegin"}
+{"timestamp":13,"thread_id":1,"seq":2,"kind":{"Read":{"addr":139637976731648,"width":4}}}
+{"timestamp":14,"thread_id":1,"seq":3,"kind":{"Write":{"addr":139637976731648,"width":4,"val":5}}}
+{"timestamp":15,"thread_id":1,"seq":4,"kind":"TxEnd"}
+{"timestamp":16,"thread_id":0,"seq":3,"kind":{"Write":{"addr":139637976731648,"width":4,"val":10}}}
+{"timestamp":17,"thread_id":0,"seq":4,"kind":"TxEnd"}

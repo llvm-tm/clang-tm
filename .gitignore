@@ -1,5 +1,6 @@
-# Build artifacts
+# Build artifacts (but not Rust src/bin/ which are source files)
 **/bin/
+!**/src/bin/
 # Test binaries (compiled in-tree)
 tests/*/test_*
 tests/*/bench_*
