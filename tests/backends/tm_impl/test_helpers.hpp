@@ -11,7 +11,6 @@
 // for ABI compatibility across all runtimes.
 
 extern "C" {
-void *tm_malloc(size_t size);
 extern __thread int32_t tm_nested_call_counter;
 extern __thread int32_t tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;
@@ -21,37 +20,40 @@ void tm_exit();
 void tm_init_thread();
 void tm_exit_thread();
 
-// TX lifecycle — the caller manages tm_nested_call_counter
-void tm_begin();
-void tm_end();
+// TX lifecycle — function pointers from hook system
+extern void     (*tm_begin)();
+extern void     (*tm_end)();
+extern void    *(*tm_malloc)(size_t);
+extern void    *(*tm_calloc)(size_t, size_t);
+extern void    *(*tm_realloc)(void*, size_t);
+extern void     (*tm_free)(void*);
 
-// Read/write primitives (all widths)
-// The symbol_id parameter is for LLVM plugin compatibility; tests pass 0.
-uint8_t  tm_read_i1(uint8_t *addr, uint32_t symbol_id);
-void     tm_write_i1(uint8_t *addr, uint8_t val, uint32_t symbol_id);
-uint16_t tm_read_i2(uint16_t *addr, uint32_t symbol_id);
-void     tm_write_i2(uint16_t *addr, uint16_t val, uint32_t symbol_id);
-uint32_t tm_read_i4(uint32_t *addr, uint32_t symbol_id);
-void     tm_write_i4(uint32_t *addr, uint32_t val, uint32_t symbol_id);
-uint64_t tm_read_i8(uint64_t *addr, uint32_t symbol_id);
-void     tm_write_i8(uint64_t *addr, uint64_t val, uint32_t symbol_id);
-float    tm_read_f4(float *addr, uint32_t symbol_id);
-void     tm_write_f4(float *addr, float val, uint32_t symbol_id);
-double   tm_read_f8(double *addr, uint32_t symbol_id);
-void     tm_write_f8(double *addr, double val, uint32_t symbol_id);
-void    *tm_read_ptr(void **addr, uint32_t symbol_id);
-void     tm_write_ptr(void **addr, void *val, uint32_t symbol_id);
+// Read/write function pointers (no symbol_id, matching hook system)
+extern uint8_t  (*tm_read_i1)(uint8_t*);
+extern void     (*tm_write_i1)(uint8_t*, uint8_t);
+extern uint16_t (*tm_read_i2)(uint16_t*);
+extern void     (*tm_write_i2)(uint16_t*, uint16_t);
+extern uint32_t (*tm_read_i4)(uint32_t*);
+extern void     (*tm_write_i4)(uint32_t*, uint32_t);
+extern uint64_t (*tm_read_i8)(uint64_t*);
+extern void     (*tm_write_i8)(uint64_t*, int64_t);
+extern float    (*tm_read_f4)(float*);
+extern void     (*tm_write_f4)(float*, float);
+extern double   (*tm_read_f8)(double*);
+extern void     (*tm_write_f8)(double*, double);
+extern void    *(*tm_read_ptr)(void**);
+extern void     (*tm_write_ptr)(void**, void*);
 }
 
 // ── Convenience wrappers (omit symbol_id for test code) ────────────
-inline uint8_t  tm_r1(uint8_t *a)  { return tm_read_i1(a, 0); }
-inline uint16_t tm_r2(uint16_t *a) { return tm_read_i2(a, 0); }
-inline uint32_t tm_r4(uint32_t *a) { return tm_read_i4(a, 0); }
-inline uint64_t tm_r8(uint64_t *a) { return tm_read_i8(a, 0); }
-inline void     tm_w1(uint8_t *a, uint8_t v)  { tm_write_i1(a, v, 0); }
-inline void     tm_w2(uint16_t *a, uint16_t v) { tm_write_i2(a, v, 0); }
-inline void     tm_w4(uint32_t *a, uint32_t v) { tm_write_i4(a, v, 0); }
-inline void     tm_w8(uint64_t *a, uint64_t v) { tm_write_i8(a, v, 0); }
+inline uint8_t  tm_r1(uint8_t *a)  { return tm_read_i1(a); }
+inline uint16_t tm_r2(uint16_t *a) { return tm_read_i2(a); }
+inline uint32_t tm_r4(uint32_t *a) { return tm_read_i4(a); }
+inline uint64_t tm_r8(uint64_t *a) { return tm_read_i8(a); }
+inline void     tm_w1(uint8_t *a, uint8_t v)  { tm_write_i1(a, v); }
+inline void     tm_w2(uint16_t *a, uint16_t v) { tm_write_i2(a, v); }
+inline void     tm_w4(uint32_t *a, uint32_t v) { tm_write_i4(a, v); }
+inline void     tm_w8(uint64_t *a, uint64_t v) { tm_write_i8(a, (int64_t)v); }
 
 // ── Retry loop: works with both longjmp-based and flag-based backends ──
 //

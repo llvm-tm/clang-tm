@@ -6,6 +6,7 @@ include ../../../plugin/llvm-tool-helper.mk
 CXX := $(LLVM_CXX)
 CXXFLAGS := -std=c++20 -O0 -pthread -g
 RUNTIME_DIR := ../../../backends/tm_impl
+HOOKS_SRC := $(RUNTIME_DIR)/common/tm_hooks.cpp
 INC_BASE := -I../../../backends/tm_impl/common -I$(RUNTIME_DIR)
 
 # ── Backend definitions ────────────────────────────────────────────
@@ -57,8 +58,8 @@ bin/:
 # ── Per-backend, per-test build rules ──────────────────────────────
 # Generate: bin/<b>/<t>: test_<t>.cpp <runtime> test_helpers.hpp | bin/<b>/
 define BUILD_RULE
-bin/$(1)/$(2): test_$(2).cpp $(RUNTIME_$(1)) $(RUNTIME_DIR)/tm_region_allocator/tm_region_allocator.cpp test_helpers.hpp | bin/$(1)/
-	$$(CXX) $$(CXXFLAGS) $$(INC_$(1)) $$(FLAGS_$(1)) -o $$@ $$< $$(RUNTIME_$(1)) $(RUNTIME_DIR)/tm_region_allocator/tm_region_allocator.cpp
+bin/$(1)/$(2): test_$(2).cpp $(RUNTIME_$(1)) $(RUNTIME_DIR)/tm_region_allocator/tm_region_allocator.cpp $(HOOKS_SRC) test_helpers.hpp | bin/$(1)/
+	$$(CXX) $$(CXXFLAGS) $$(INC_$(1)) $$(FLAGS_$(1)) -o $$@ $$< $$(RUNTIME_$(1)) $(RUNTIME_DIR)/tm_region_allocator/tm_region_allocator.cpp $(HOOKS_SRC)
 endef
 
 # Flatten: for each (backend, test) pair, eval a build rule

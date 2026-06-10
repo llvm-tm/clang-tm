@@ -12,6 +12,8 @@
 #include "SwissTM.hpp"
 #include "tm_alloc_overrides.hpp"
 #include "tm_thread_state.hpp"
+#include "tm_hooks.hpp"
+extern const TMRealHooks g_swisstm_hooks;
 
 thread_local bool g_in_tx = false;
 thread_local FreeNode* g_deferred_frees = nullptr;
@@ -47,6 +49,7 @@ void tm_init()
         std::abort();
     }
 	swisstm::init();
+	tm_register_real_hooks(&g_swisstm_hooks);
 }
 
 void tm_exit()
@@ -81,9 +84,13 @@ void tm_set_env(sigjmp_buf *env)
 	}
 }
 
-// Wrapper functions matching plugin interface
+} // extern "C" — non‑hook functions above, hooks below
 
-void tm_begin()
+// ═══════════════════════════════════════════════════════════════════
+//  Hook implementations (static; registered via tm_register_real_hooks)
+// ═══════════════════════════════════════════════════════════════════
+
+static void real_tm_begin()
 {
 	swisstm::set_jmpbuf(&tm_jmpbuf);
 	tm_clear_spec_allocs();
@@ -94,7 +101,7 @@ void tm_begin()
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 }
 
-void tm_end()
+static void real_tm_end()
 {
 	swisstm::commit();
 	g_in_tx = false;
@@ -104,25 +111,86 @@ void tm_end()
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 }
 
-uint8_t tm_read_i1(uint8_t *addr)
+static uint8_t real_tm_read_i1(uint8_t *addr)
 {
 	return swisstm::tm_read_i1(addr);
 }
 
-uint16_t tm_read_i2(uint16_t *addr)
+static uint16_t real_tm_read_i2(uint16_t *addr)
 {
 	return swisstm::tm_read_i2(addr);
 }
 
-uint32_t tm_read_i4(uint32_t *addr)
+static uint32_t real_tm_read_i4(uint32_t *addr)
 {
 	return swisstm::tm_read_i4(addr);
 }
 
-uint64_t tm_read_i8(uint64_t *addr)
+static uint64_t real_tm_read_i8(uint64_t *addr)
 {
 	return swisstm::tm_read_i8(addr);
 }
+
+static float real_tm_read_f4(float *addr) { return swisstm::tm_read_f4(addr); }
+
+static double real_tm_read_f8(double *addr) { return swisstm::tm_read_f8(addr); }
+
+static void *real_tm_read_ptr(void **addr) { return swisstm::tm_read_ptr(addr); }
+
+static void real_tm_write_i1(uint8_t *addr, uint8_t val)
+{
+	swisstm::tm_write_i1(addr, val);
+}
+
+static void real_tm_write_i2(uint16_t *addr, uint16_t val)
+{
+	swisstm::tm_write_i2(addr, val);
+}
+
+static void real_tm_write_i4(uint32_t *addr, uint32_t val)
+{
+	swisstm::tm_write_i4(addr, val);
+}
+
+static void real_tm_write_i8(uint64_t *addr, int64_t val)
+{
+	swisstm::tm_write_i8(addr, val);
+}
+
+static void real_tm_write_f4(float *addr, float val)
+{
+	swisstm::tm_write_f4(addr, val);
+}
+
+static void real_tm_write_f8(double *addr, double val)
+{
+	swisstm::tm_write_f8(addr, val);
+}
+
+static void real_tm_write_ptr(void **addr, void *val)
+{
+	swisstm::tm_write_ptr(addr, val);
+}
+
+static void *real_tm_malloc(size_t size) { return tm_track_alloc_result(stm::tm_region_malloc(size), size); }
+static void *real_tm_calloc(size_t nmemb, size_t size) { void* p = stm::tm_region_malloc(nmemb * size); memset(p, 0, nmemb * size); return tm_track_alloc_result(p, nmemb * size); }
+static void *real_tm_realloc(void* ptr, size_t size) { void* p = stm::tm_region_malloc(size); if (ptr) { memcpy(p, ptr, size); stm::tm_region_free(ptr); } return tm_track_alloc_result(p, size); }
+static void  real_tm_free(void* ptr) {
+	if (!ptr || !stm::isTMAddress(ptr)) return;
+	TM_EVENT(FREE, ptr, 0);
+	if (g_in_tx) {
+		swisstm::tm_write_i1(reinterpret_cast<uint8_t*>(ptr), 0);
+		tm_free_append_deferred(ptr);
+	} else {
+		stm::tm_region_free(ptr);
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Plugin‑specific extern "C" functions (not hooks)
+// ═══════════════════════════════════════════════════════════════════
+
+extern "C" {
 
 void tm_read_i16(void *addr, void *out) {
     auto *out_words = static_cast<uint64_t *>(out);
@@ -142,12 +210,6 @@ void tm_read_i64(void *addr, void *out) {
         out_words[i] = swisstm::tm_read_i8(static_cast<uint64_t *>(addr) + i);
 }
 
-float tm_read_f4(float *addr) { return swisstm::tm_read_f4(addr); }
-
-double tm_read_f8(double *addr) { return swisstm::tm_read_f8(addr); }
-
-void *tm_read_ptr(void **addr) { return swisstm::tm_read_ptr(addr); }
-
 void *tm_read_z(uint8_t *addr, uint64_t len)
 {
 	assert(len < TM_BUFFER_SIZE);
@@ -155,26 +217,6 @@ void *tm_read_z(uint8_t *addr, uint64_t len)
 		tm_buffer[i] = swisstm::tm_read_i1(&addr[i]);
 	}
 	return tm_buffer;
-}
-
-void tm_write_i1(uint8_t *addr, uint8_t val)
-{
-	swisstm::tm_write_i1(addr, val);
-}
-
-void tm_write_i2(uint16_t *addr, uint16_t val)
-{
-	swisstm::tm_write_i2(addr, val);
-}
-
-void tm_write_i4(uint32_t *addr, uint32_t val)
-{
-	swisstm::tm_write_i4(addr, val);
-}
-
-void tm_write_i8(uint64_t *addr, uint64_t val)
-{
-	swisstm::tm_write_i8(addr, val);
 }
 
 void tm_write_i16(void *addr, void *val) {
@@ -195,21 +237,6 @@ void tm_write_i64(void *addr, void *val) {
         swisstm::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
 }
 
-void tm_write_f4(float *addr, float val)
-{
-	swisstm::tm_write_f4(addr, val);
-}
-
-void tm_write_f8(double *addr, double val)
-{
-	swisstm::tm_write_f8(addr, val);
-}
-
-void tm_write_ptr(void **addr, void *val)
-{
-	swisstm::tm_write_ptr(addr, val);
-}
-
 void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len)
 {
 	for (uint64_t i = 0; i < len; i++) {
@@ -226,6 +253,8 @@ void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
 
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {}
 
+} // extern "C"
+
 static void print_stats()
 {
 #ifndef NDEBUG
@@ -238,17 +267,30 @@ static void print_stats()
 }
 
 static int init = (std::atexit(print_stats), 0);
-void* tm_malloc(size_t size) { return tm_track_alloc_result(stm::tm_region_malloc(size), size); }
-void* tm_calloc(size_t nmemb, size_t size) { void* p = stm::tm_region_malloc(nmemb * size); memset(p, 0, nmemb * size); return tm_track_alloc_result(p, nmemb * size); }
-void* tm_realloc(void* ptr, size_t size) { void* p = stm::tm_region_malloc(size); if (ptr) { memcpy(p, ptr, size); stm::tm_region_free(ptr); } return tm_track_alloc_result(p, size); }
-void  tm_free(void* ptr) {
-	if (!ptr || !stm::isTMAddress(ptr)) return;
-	TM_EVENT(FREE, ptr, 0);
-	if (g_in_tx) {
-		swisstm::tm_write_i1(reinterpret_cast<uint8_t*>(ptr), 0);
-		tm_free_append_deferred(ptr);
-	} else {
-		stm::tm_region_free(ptr);
-	}
-}
-}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Hook registration table
+// ═══════════════════════════════════════════════════════════════════
+
+const TMRealHooks g_swisstm_hooks = {
+    .begin    = real_tm_begin,
+    .end      = real_tm_end,
+    .malloc   = real_tm_malloc,
+    .calloc   = real_tm_calloc,
+    .realloc  = real_tm_realloc,
+    .free     = real_tm_free,
+    .read_i1  = real_tm_read_i1,
+    .read_i2  = real_tm_read_i2,
+    .read_i4  = real_tm_read_i4,
+    .read_i8  = real_tm_read_i8,
+    .read_f4  = real_tm_read_f4,
+    .read_f8  = real_tm_read_f8,
+    .read_ptr = real_tm_read_ptr,
+    .write_i1  = real_tm_write_i1,
+    .write_i2  = real_tm_write_i2,
+    .write_i4  = real_tm_write_i4,
+    .write_i8  = real_tm_write_i8,
+    .write_f4  = real_tm_write_f4,
+    .write_f8  = real_tm_write_f8,
+    .write_ptr = real_tm_write_ptr,
+};

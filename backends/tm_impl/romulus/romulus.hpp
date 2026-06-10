@@ -9,8 +9,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "../tm_common.hpp"
-#include "../tm_spin_token.hpp"
+#include "tm_common.hpp"
+#include "tm_spin_token.hpp"
 
 extern "C" {
 extern __thread int32_t tm_nested_call_counter;
@@ -195,23 +195,7 @@ inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
 	return read_value_from_addr(addr, sz);
 }
 
-inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz) {
-
-	TM_ASSERT(tx && tx->active, "romulus write: no active tx");
-
-#ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr)) {
-		write_value_to_addr(addr, val, sz);
-		return;
-	}
-#else
-	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
-#endif
-
-	write_value_to_addr(addr, val, sz);
-}
-
-// ── Write word ──────────────────────────────────────────────────
+// ── Write word (with write-set logging) ─────────────────────────
 inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz) {
     tx->read_only = false;
 

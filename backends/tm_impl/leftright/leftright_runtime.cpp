@@ -10,6 +10,7 @@
 #include "leftright.hpp"
 #include "../common/tm_alloc_overrides.hpp"
 #include "../common/tm_thread_state.hpp"
+#include "../common/tm_hooks.hpp"
 
 thread_local bool g_in_tx = false;
 thread_local FreeNode *g_deferred_frees = nullptr;
@@ -47,10 +48,16 @@ __thread int32_t tm_longjmp_ret = 0;
 __thread sigjmp_buf tm_jmpbuf;
 __thread int tm_init_thread_call_count = 0;
 
+// Define the global queue-active flag locally (queue_runtime.cpp is not linked).
+std::atomic<int> g_tm_queue_global{0};
+
+extern const TMRealHooks g_leftright_hooks;
+
 extern "C" {
 
 void tm_init() {
     leftright::init();
+    tm_register_real_hooks(&g_leftright_hooks);
 }
 
 void tm_exit() {
@@ -79,10 +86,16 @@ sigjmp_buf *tm_get_env() {
     return &tm_jmpbuf;
 }
 
-void tm_begin() {
-    // Determine effective nesting depth: plugin mode (g_tm_thread_state field)
-    // vs explicit mode (tm_nested_call_counter).  The clone manages the struct
-    // field; tm_begin/tm_end never modify counters themselves.
+} // extern "C" — non-hook functions above, hooks below
+
+// ═══════════════════════════════════════════════════════════════════
+//  Hook implementations (static; registered via tm_register_real_hooks)
+// ═══════════════════════════════════════════════════════════════════
+
+// Forward declarations for static hook functions
+static void real_tm_free(void *ptr);
+
+static void real_tm_begin() {
     int32_t tc = tm_nested_call_counter;
     int32_t sc = g_tm_thread_state.nested_call_counter;
     int32_t c = (tc > 0) ? tc : sc;
@@ -90,7 +103,7 @@ void tm_begin() {
         leftright::begin();
 }
 
-void tm_end() {
+static void real_tm_end() {
     int32_t tc = tm_nested_call_counter;
     int32_t sc = g_tm_thread_state.nested_call_counter;
     int32_t c = (tc > 0) ? tc : sc;
@@ -98,32 +111,31 @@ void tm_end() {
         leftright::commit();
 }
 
-// ── Malloc/Free ─────────────────────────────────────────────────
-void *tm_malloc(size_t size) {
+static void *real_tm_malloc(size_t size) {
     void *p = ::operator new(size);
     if (p) tm_track_spec_alloc(p);
     return p;
 }
 
-void *tm_calloc(size_t nmemb, size_t size) {
+static void *real_tm_calloc(size_t nmemb, size_t size) {
     size_t total = nmemb * size;
     void *p = ::operator new(total);
     if (p) { std::memset(p, 0, total); tm_track_spec_alloc(p); }
     return p;
 }
 
-void *tm_realloc(void *ptr, size_t size) {
-    if (!ptr) return tm_malloc(size);
+static void *real_tm_realloc(void *ptr, size_t size) {
+    if (!ptr) return real_tm_malloc(size);
     void *p = ::operator new(size);
     if (p) {
         std::memcpy(p, ptr, size);
-        tm_free(ptr);
+        real_tm_free(ptr);
         tm_track_spec_alloc(p);
     }
     return p;
 }
 
-void tm_free(void *ptr) {
+static void real_tm_free(void *ptr) {
     if (!ptr) return;
     tm_untrack_spec_alloc(ptr);
     if (g_in_tx)
@@ -132,21 +144,46 @@ void tm_free(void *ptr) {
         ::operator delete(ptr);
 }
 
-uint8_t tm_read_i1(uint8_t *addr) { return leftright::tm_read<uint8_t, leftright::ValueType::UINT8>(addr); }
-uint16_t tm_read_i2(uint16_t *addr) { return leftright::tm_read<uint16_t, leftright::ValueType::UINT16>(addr); }
-uint32_t tm_read_i4(uint32_t *addr) { return leftright::tm_read<uint32_t, leftright::ValueType::UINT32>(addr); }
-uint64_t tm_read_i8(uint64_t *addr) { return leftright::tm_read<uint64_t, leftright::ValueType::UINT64>(addr); }
-void tm_write_i1(uint8_t *addr, uint8_t val) { leftright::tm_write<uint8_t, leftright::ValueType::UINT8>(addr, val); }
-void tm_write_i2(uint16_t *addr, uint16_t val) { leftright::tm_write<uint16_t, leftright::ValueType::UINT16>(addr, val); }
-void tm_write_i4(uint32_t *addr, uint32_t val) { leftright::tm_write<uint32_t, leftright::ValueType::UINT32>(addr, val); }
-void tm_write_i8(uint64_t *addr, uint64_t val) { leftright::tm_write<uint64_t, leftright::ValueType::UINT64>(addr, val); }
+static uint8_t real_tm_read_i1(uint8_t *addr) { return leftright::tm_read<uint8_t, leftright::ValueType::UINT8>(addr); }
+static uint16_t real_tm_read_i2(uint16_t *addr) { return leftright::tm_read<uint16_t, leftright::ValueType::UINT16>(addr); }
+static uint32_t real_tm_read_i4(uint32_t *addr) { return leftright::tm_read<uint32_t, leftright::ValueType::UINT32>(addr); }
+static uint64_t real_tm_read_i8(uint64_t *addr) { return leftright::tm_read<uint64_t, leftright::ValueType::UINT64>(addr); }
+static void real_tm_write_i1(uint8_t *addr, uint8_t val) { leftright::tm_write<uint8_t, leftright::ValueType::UINT8>(addr, val); }
+static void real_tm_write_i2(uint16_t *addr, uint16_t val) { leftright::tm_write<uint16_t, leftright::ValueType::UINT16>(addr, val); }
+static void real_tm_write_i4(uint32_t *addr, uint32_t val) { leftright::tm_write<uint32_t, leftright::ValueType::UINT32>(addr, val); }
+static void real_tm_write_i8(uint64_t *addr, int64_t val) { leftright::tm_write<uint64_t, leftright::ValueType::UINT64>(addr, static_cast<uint64_t>(val)); }
 
-float tm_read_f4(float *addr) { return leftright::tm_read<float, leftright::ValueType::FLOAT>(addr); }
-double tm_read_f8(double *addr) { return leftright::tm_read<double, leftright::ValueType::DOUBLE>(addr); }
-void tm_write_f4(float *addr, float val) { leftright::tm_write<float, leftright::ValueType::FLOAT>(addr, val); }
-void tm_write_f8(double *addr, double val) { leftright::tm_write<double, leftright::ValueType::DOUBLE>(addr, val); }
+static float real_tm_read_f4(float *addr) { return leftright::tm_read<float, leftright::ValueType::FLOAT>(addr); }
+static double real_tm_read_f8(double *addr) { return leftright::tm_read<double, leftright::ValueType::DOUBLE>(addr); }
+static void real_tm_write_f4(float *addr, float val) { leftright::tm_write<float, leftright::ValueType::FLOAT>(addr, val); }
+static void real_tm_write_f8(double *addr, double val) { leftright::tm_write<double, leftright::ValueType::DOUBLE>(addr, val); }
 
-void *tm_read_ptr(void **addr) { return leftright::tm_read<void *, leftright::ValueType::POINTER>(addr); }
-void tm_write_ptr(void **addr, void *val) { leftright::tm_write<void *, leftright::ValueType::POINTER>(addr, val); }
+static void *real_tm_read_ptr(void **addr) { return leftright::tm_read<void *, leftright::ValueType::POINTER>(addr); }
+static void real_tm_write_ptr(void **addr, void *val) { leftright::tm_write<void *, leftright::ValueType::POINTER>(addr, val); }
 
-} // extern "C"
+// ═══════════════════════════════════════════════════════════════════
+//  Hook registration table
+// ═══════════════════════════════════════════════════════════════════
+
+const TMRealHooks g_leftright_hooks = {
+    .begin    = real_tm_begin,
+    .end      = real_tm_end,
+    .malloc   = real_tm_malloc,
+    .calloc   = real_tm_calloc,
+    .realloc  = real_tm_realloc,
+    .free     = real_tm_free,
+    .read_i1  = real_tm_read_i1,
+    .read_i2  = real_tm_read_i2,
+    .read_i4  = real_tm_read_i4,
+    .read_i8  = real_tm_read_i8,
+    .read_f4  = real_tm_read_f4,
+    .read_f8  = real_tm_read_f8,
+    .read_ptr = real_tm_read_ptr,
+    .write_i1  = real_tm_write_i1,
+    .write_i2  = real_tm_write_i2,
+    .write_i4  = real_tm_write_i4,
+    .write_i8  = real_tm_write_i8,
+    .write_f4  = real_tm_write_f4,
+    .write_f8  = real_tm_write_f8,
+    .write_ptr = real_tm_write_ptr,
+};

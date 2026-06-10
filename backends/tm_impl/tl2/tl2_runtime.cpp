@@ -14,9 +14,10 @@
 #include <unistd.h>
 #include <unordered_set>
 
-#include "tl2/tl2.hpp"
+#include "tl2.hpp"
 #include "tm_alloc_overrides.hpp"
 #include "tm_thread_state.hpp"
+#include "tm_hooks.hpp"
 thread_local bool g_in_tx = false;
 thread_local FreeNode* g_deferred_frees = nullptr;
 thread_local std::unordered_set<void*> g_deferred_frees_set;
@@ -42,12 +43,15 @@ static std::atomic<int64_t> g_tm_end_count{0};
 static std::atomic<int64_t> g_tm_commit_fail_count{0};
 std::atomic<uint64_t> g_tm_abort_count{0};
 
+extern const TMRealHooks g_tl2_hooks;
+
 extern "C" void tm_init() {
     if (stm::tm_region_init() != 0) {
         fprintf(stderr, "FATAL: tm_region_init() failed — TM address space unavailable\n");
         std::abort();
     }
     tl2::init();
+    tm_register_real_hooks(&g_tl2_hooks);
 }
 
 extern "C" void tm_exit() {
@@ -87,7 +91,7 @@ extern "C" void tm_set_env(sigjmp_buf* env) {
 
 // Wrapper functions matching plugin interface (2-arg read/write, no symbol_id)
 
-extern "C" void tm_begin() {
+static void real_tm_begin() {
     tl2::set_jmp_env_external(&tm_jmpbuf);
     tm_clear_spec_allocs();
     tm_clear_deferred_frees();
@@ -97,7 +101,7 @@ extern "C" void tm_begin() {
     g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 }
 
-extern "C" void tm_end() {
+static void real_tm_end() {
     if (!tl2::commit()) {
         g_tm_commit_fail_count.fetch_add(1, std::memory_order_relaxed);
         siglongjmp(tm_jmpbuf, 1);
@@ -111,20 +115,20 @@ extern "C" void tm_end() {
 }
 
 // Read wrappers — 1 arg (addr only, symbol_id removed)
-extern "C" uint8_t tm_read_i1(uint8_t *addr) {
+static uint8_t real_tm_read_i1(uint8_t *addr) {
     return tl2::tm_read_i1(addr);
 }
 
-extern "C" uint16_t tm_read_i2(uint16_t *addr) {
+static uint16_t real_tm_read_i2(uint16_t *addr) {
     return tl2::tm_read_i2(addr);
 }
 
-extern "C" uint32_t tm_read_i4(uint32_t *addr) {
+static uint32_t real_tm_read_i4(uint32_t *addr) {
     uint32_t r = tl2::tm_read_i4(addr);
     return r;
 }
 
-extern "C" uint64_t tm_read_i8(uint64_t *addr) {
+static uint64_t real_tm_read_i8(uint64_t *addr) {
     return tl2::tm_read_i8(addr);
 }
 
@@ -144,15 +148,15 @@ extern "C" void tm_read_i64(void *addr, void *out) {
         out_words[i] = tl2::tm_read_i8(static_cast<uint64_t *>(addr) + i);
 }
 
-extern "C" float tm_read_f4(float *addr) {
+static float real_tm_read_f4(float *addr) {
     return tl2::tm_read_f4(addr);
 }
 
-extern "C" double tm_read_f8(double *addr) {
+static double real_tm_read_f8(double *addr) {
     return tl2::tm_read_f8(addr);
 }
 
-extern "C" void *tm_read_ptr(void **addr) {
+static void *real_tm_read_ptr(void **addr) {
     return tl2::tm_read_ptr((volatile void**)addr);
 }
 
@@ -165,19 +169,19 @@ extern "C" void *tm_read_z(uint8_t *addr, uint64_t len) {
 }
 
 // Write wrappers — 2 args (addr + val, symbol_id removed)
-extern "C" void tm_write_i1(uint8_t *addr, uint8_t val) {
+static void real_tm_write_i1(uint8_t *addr, uint8_t val) {
     tl2::tm_write_i1(addr, val);
 }
 
-extern "C" void tm_write_i2(uint16_t *addr, uint16_t val) {
+static void real_tm_write_i2(uint16_t *addr, uint16_t val) {
     tl2::tm_write_i2(addr, val);
 }
 
-extern "C" void tm_write_i4(uint32_t *addr, uint32_t val) {
+static void real_tm_write_i4(uint32_t *addr, uint32_t val) {
     tl2::tm_write_i4(addr, val);
 }
 
-extern "C" void tm_write_i8(uint64_t *addr, uint64_t val) {
+static void real_tm_write_i8(uint64_t *addr, int64_t val) {
     tl2::tm_write_i8(addr, val);
 }
 
@@ -197,15 +201,15 @@ extern "C" void tm_write_i64(void *addr, void *val) {
         tl2::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
 }
 
-extern "C" void tm_write_f4(float *addr, float val) {
+static void real_tm_write_f4(float *addr, float val) {
     tl2::tm_write_f4(addr, val);
 }
 
-extern "C" void tm_write_f8(double *addr, double val) {
+static void real_tm_write_f8(double *addr, double val) {
     tl2::tm_write_f8(addr, val);
 }
 
-extern "C" void tm_write_ptr(void **addr, void *val) {
+static void real_tm_write_ptr(void **addr, void *val) {
     tl2::tm_write_ptr((volatile void**)addr, val);
 }
 
@@ -224,10 +228,10 @@ extern "C" void tm_memset(uint8_t *addr, uint8_t val, uint64_t len) {
 extern "C" void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
 
-extern "C" void* tm_malloc(size_t size) { return tm_track_alloc_result(stm::tm_region_malloc(size), size); }
-extern "C" void* tm_calloc(size_t nmemb, size_t size) { void* p = stm::tm_region_malloc(nmemb * size); memset(p, 0, nmemb * size); return tm_track_alloc_result(p, nmemb * size); }
-extern "C" void* tm_realloc(void* ptr, size_t size) { void* p = stm::tm_region_malloc(size); if (ptr) { memcpy(p, ptr, size); stm::tm_region_free(ptr); } return tm_track_alloc_result(p, size); }
-extern "C" void  tm_free(void* ptr) {
+static void* real_tm_malloc(size_t size) { return tm_track_alloc_result(stm::tm_region_malloc(size), size); }
+static void* real_tm_calloc(size_t nmemb, size_t size) { void* p = stm::tm_region_malloc(nmemb * size); memset(p, 0, nmemb * size); return tm_track_alloc_result(p, nmemb * size); }
+static void* real_tm_realloc(void* ptr, size_t size) { void* p = stm::tm_region_malloc(size); if (ptr) { memcpy(p, ptr, size); stm::tm_region_free(ptr); } return tm_track_alloc_result(p, size); }
+static void  real_tm_free(void* ptr) {
     if (!ptr || !stm::isTMAddress(ptr)) return;
     TM_EVENT(FREE, ptr, 0);
     if (g_in_tx) {
@@ -237,3 +241,26 @@ extern "C" void  tm_free(void* ptr) {
         stm::tm_region_free(ptr);
     }
 }
+
+const TMRealHooks g_tl2_hooks = {
+    .begin    = real_tm_begin,
+    .end      = real_tm_end,
+    .malloc   = real_tm_malloc,
+    .calloc   = real_tm_calloc,
+    .realloc  = real_tm_realloc,
+    .free     = real_tm_free,
+    .read_i1  = real_tm_read_i1,
+    .read_i2  = real_tm_read_i2,
+    .read_i4  = real_tm_read_i4,
+    .read_i8  = real_tm_read_i8,
+    .read_f4  = real_tm_read_f4,
+    .read_f8  = real_tm_read_f8,
+    .read_ptr = real_tm_read_ptr,
+    .write_i1  = real_tm_write_i1,
+    .write_i2  = real_tm_write_i2,
+    .write_i4  = real_tm_write_i4,
+    .write_i8  = real_tm_write_i8,
+    .write_f4  = real_tm_write_f4,
+    .write_f8  = real_tm_write_f8,
+    .write_ptr = real_tm_write_ptr,
+};

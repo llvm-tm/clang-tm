@@ -76,9 +76,10 @@
 //   thread_local std::unordered_set<void*> g_deferred_frees_set;
 //   thread_local SpecAlloc* g_spec_allocs = nullptr;
 
-// Each runtime must define these two functions:
-extern "C" void *tm_malloc(size_t size);
-extern "C" void tm_free(void *ptr);
+// tm_malloc / tm_free / tm_calloc / tm_realloc are now declared as
+// extern "C" function POINTER variables in tm_hooks.hpp (included by
+// each runtime).  The declarations below are removed to avoid
+// "redefinition as different kind of symbol" errors.
 
 extern thread_local bool g_in_tx;
 
