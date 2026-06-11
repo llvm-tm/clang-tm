@@ -61,4 +61,8 @@ impl Event {
             EventKind::Read { .. } | EventKind::Write { .. }
         )
     }
+
+    pub fn is_tx_boundary(&self) -> bool {
+        matches!(self.kind, EventKind::TxBegin | EventKind::TxEnd)
+    }
 }

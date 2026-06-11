@@ -1,110 +1,200 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <new>
 #include <utility>
 
 // TM-safe replacement for std::map.
-// Uses a sorted dynamic array with explicit inline binary search and
-// inline insert/erase — no opaque STL calls, so the TM pass can
-// instrument every element access.
-// NOTE: All element copies use field-by-field assignment (not struct
-// assignment) to prevent LLVM from lowering to opaque memcpy calls.
+// Uses an open-addressing hashmap with linear probing — no opaque STL
+// calls, so the TM pass can instrument every element access.
+// All allocation uses ::operator new/delete (redirected by TM pass
+// inside TX).  Deletion uses backward-shift (no tombstones).
 template <typename K, typename V> class TMSafeMap
 {
-	std::pair<K, V>* m_data = nullptr;
-	size_t           m_size = 0;
-	size_t           m_cap  = 0;
+	struct Slot {
+		bool occupied = false;
+		std::pair<K, V> kv;
+	};
 
-	void grow(size_t min_cap)
+	Slot*  m_data = nullptr;
+	size_t m_cap  = 0;   // power of 2, 0 = empty
+	size_t m_size = 0;   // occupied count
+
+	static constexpr double MAX_LOAD = 0.75;
+
+	size_t hash_idx(const K &k) const
 	{
-		size_t nc = m_cap ? m_cap : 4;
-		while (nc < min_cap) nc *= 2;
-		auto* nd = static_cast<std::pair<K, V>*>(::operator new(nc * sizeof(std::pair<K, V>)));
-		for (size_t i = 0; i < m_size; i++) {
-			nd[i].first  = m_data[i].first;
-			nd[i].second = m_data[i].second;
+		return std::hash<K>{}(k) & (m_cap - 1);
+	}
+
+	// Find occupied slot for key, or return m_cap if not found.
+	size_t find_occupied(const K &k) const
+	{
+		if (m_cap == 0) return 0;
+		size_t i = hash_idx(k);
+		while (m_data[i].occupied) {
+			if (m_data[i].kv.first == k) return i;
+			i = (i + 1) & (m_cap - 1);
 		}
-		::operator delete(m_data);
+		return m_cap;
+	}
+
+	// Return index of empty slot to use for insertion (grow first if needed).
+	size_t find_empty(const K &k)
+	{
+		if (m_size >= static_cast<size_t>(m_cap * MAX_LOAD))
+			grow();
+		size_t i = hash_idx(k);
+		while (m_data[i].occupied)
+			i = (i + 1) & (m_cap - 1);
+		return i;
+	}
+
+	void grow()
+	{
+		size_t nc = m_cap ? m_cap * 2 : 16;
+		auto* nd = static_cast<Slot*>(::operator new(nc * sizeof(Slot)));
+		for (size_t i = 0; i < nc; i++)
+			nd[i].occupied = false;
+
+		if (m_data) {
+			for (size_t i = 0; i < m_cap; i++) {
+				if (m_data[i].occupied) {
+					size_t j = std::hash<K>{}(m_data[i].kv.first) & (nc - 1);
+					while (nd[j].occupied)
+						j = (j + 1) & (nc - 1);
+					nd[j].occupied = true;
+					nd[j].kv = m_data[i].kv;
+				}
+			}
+			::operator delete(m_data);
+		}
+
 		m_data = nd;
 		m_cap  = nc;
 	}
 
-	size_t find_pos(const K &k) const
+	// Backward-shift deletion (Knuth).  Slides subsequent entries back
+	// to fill the gap without breaking probe chains or needing tombstones.
+	void do_erase(size_t i)
 	{
-		auto first = m_data;
-		auto count = m_size;
-		while (count > 0) {
-			auto step = count / 2;
-			auto it = first + step;
-			if (it->first < k) {
-				first = it + 1;
-				count -= step + 1;
-			} else {
-				count = step;
-			}
+		m_size--;
+		size_t j = i;
+		for (;;) {
+			size_t next = (j + 1) & (m_cap - 1);
+			if (!m_data[next].occupied) break;
+			size_t h = std::hash<K>{}(m_data[next].kv.first) & (m_cap - 1);
+			// Check whether 'i' lies on the probe chain of next.
+			// Probe chain of next is [h, next] in cyclic probe order.
+			// Entry at next can slide back to fill 'j' iff the
+			// closed interval [h, next] (cyclic) does NOT contain 'i'.
+			bool can_slide = [&]() {
+				if (h <= next)
+					return i < h || i > next;
+				else
+					return i >= h || i <= next;
+			}();
+			if (!can_slide) break;
+			m_data[j].occupied = true;
+			m_data[j].kv       = m_data[next].kv;
+			m_data[next].occupied = false;
+			j = next;
 		}
-		return static_cast<size_t>(first - m_data);
 	}
+
+	// Iterator that skips empty slots.  operator* returns a reference
+	// to the std::pair<K, V> stored in the slot (lvalue).
+	template <typename SlotT, typename PairT> struct MapIter {
+		SlotT* slot;
+		SlotT* end_slot;
+
+		MapIter &operator++()
+		{
+			++slot;
+			while (slot != end_slot && !slot->occupied)
+				++slot;
+			return *this;
+		}
+		bool operator!=(const MapIter &o) const { return slot != o.slot; }
+		PairT &operator*()  const { return slot->kv; }
+		PairT *operator->() const { return &slot->kv; }
+	};
 
 public:
 	TMSafeMap() = default;
-	TMSafeMap(const TMSafeMap& o) { reserve(o.m_size); for (size_t i = 0; i < o.m_size; i++) { m_data[i].first = o.m_data[i].first; m_data[i].second = o.m_data[i].second; } m_size = o.m_size; }
-	TMSafeMap& operator=(const TMSafeMap& o) { if (this != &o) { clear(); reserve(o.m_size); for (size_t i = 0; i < o.m_size; i++) { m_data[i].first = o.m_data[i].first; m_data[i].second = o.m_data[i].second; } m_size = o.m_size; } return *this; }
-	~TMSafeMap() { clear(); ::operator delete(m_data); }
+	TMSafeMap(const TMSafeMap &o) { for (size_t i = 0; i < o.m_cap; i++) { if (o.m_data[i].occupied) (*this)[o.m_data[i].kv.first] = o.m_data[i].kv.second; } }
+	TMSafeMap &operator=(const TMSafeMap &o) { if (this != &o) { clear(); for (size_t i = 0; i < o.m_cap; i++) { if (o.m_data[i].occupied) (*this)[o.m_data[i].kv.first] = o.m_data[i].kv.second; } } return *this; }
+	~TMSafeMap() { ::operator delete(m_data); }
 
-	using const_iterator = const std::pair<K, V>*;
+	using iterator       = MapIter<      Slot,       std::pair<K,       V>>;
+	using const_iterator = MapIter<const Slot, const std::pair<K, V>>;
 
-	void reserve(size_t n) { if (n > m_cap) grow(n); }
+	const_iterator begin() const
+	{
+		if (!m_data) return {nullptr, nullptr};
+		for (size_t i = 0; i < m_cap; i++)
+			if (m_data[i].occupied) return {m_data + i, m_data + m_cap};
+		return {m_data + m_cap, m_data + m_cap};
+	}
+	const_iterator end() const
+	{
+		if (!m_data) return {nullptr, nullptr};
+		return {m_data + m_cap, m_data + m_cap};
+	}
+
+	iterator begin()
+	{
+		if (!m_data) return {nullptr, nullptr};
+		for (size_t i = 0; i < m_cap; i++)
+			if (m_data[i].occupied) return {m_data + i, m_data + m_cap};
+		return {m_data + m_cap, m_data + m_cap};
+	}
+	iterator end()
+	{
+		if (!m_data) return {nullptr, nullptr};
+		return {m_data + m_cap, m_data + m_cap};
+	}
 
 	const_iterator find(const K &k) const
 	{
-		auto pos = find_pos(k);
-		if (pos < m_size && m_data[pos].first == k)
-			return m_data + pos;
-		return m_data + m_size;
+		size_t i = find_occupied(k);
+		if (i < m_cap)
+			return {m_data + i, m_data + m_cap};
+		return end();
 	}
 
 	V &operator[](const K &k)
 	{
-		auto pos = find_pos(k);
-		if (pos < m_size && m_data[pos].first == k)
-			return m_data[pos].second;
-		if (m_size >= m_cap) grow(m_size + 1);
-		for (size_t i = m_size; i > pos; i--) {
-			m_data[i].first  = m_data[i - 1].first;
-			m_data[i].second = m_data[i - 1].second;
-		}
-		m_data[pos].first  = k;
-		m_data[pos].second = V{};
+		size_t i = find_occupied(k);
+		if (i < m_cap)
+			return m_data[i].kv.second;
+		i = find_empty(k);
+		m_data[i].occupied = true;
+		m_data[i].kv.first  = k;
+		m_data[i].kv.second = V{};
 		m_size++;
-		return m_data[pos].second;
+		return m_data[i].kv.second;
 	}
 
 	size_t erase(const K &k)
 	{
-		auto pos = find_pos(k);
-		if (pos >= m_size || m_data[pos].first != k)
-			return 0;
-		for (size_t i = pos + 1; i < m_size; i++) {
-			m_data[i - 1].first  = m_data[i].first;
-			m_data[i - 1].second = m_data[i].second;
-		}
-		m_size--;
+		size_t i = find_occupied(k);
+		if (i >= m_cap) return 0;
+		do_erase(i);
 		return 1;
 	}
 
 	void clear()
 	{
+		for (size_t i = 0; i < m_cap; i++)
+			m_data[i].occupied = false;
 		m_size = 0;
 	}
 
 	size_t size() const { return m_size; }
 	bool empty() const { return m_size == 0; }
-
-	using iterator = const std::pair<K, V>*;
-	iterator begin() const { return m_data; }
-	iterator end()   const { return m_data + m_size; }
 };
 
 // TM-safe replacement for std::multimap.

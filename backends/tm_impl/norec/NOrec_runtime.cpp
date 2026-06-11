@@ -13,6 +13,7 @@
 #include "tm_alloc_overrides.hpp"
 #include "tm_thread_state.hpp"
 #include "tm_hooks.hpp"
+#include "../common/tm_hooks.cpp"
 
 // Debug: catch absurd operator new sizes with backtrace
 void* operator new(size_t size) {

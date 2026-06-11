@@ -81,6 +81,8 @@ fn infer_events(entries: &[RawEntry]) -> Vec<Event> {
                 1 => EventKind::Write { addr: entry.addr, width: entry.width as u8, val: entry.value },
                 2 => EventKind::TxBegin,
                 3 => EventKind::TxEnd,
+                4 => EventKind::Alloc { addr: entry.addr, size: entry.width },
+                5 => EventKind::Free { addr: entry.addr },
                 _ => continue,
             };
             events.push(Event::new(entry.timestamp, tid, next_seq, kind));

@@ -333,8 +333,10 @@ THREAD void worker(ThreadData* data) {
             (void)found;
             data->nb_contains.fetch_add(1, std::memory_order_relaxed);
         } else if (op < data->write_pct + data->read_pct + 5) {
-            int minKey = key_dist(rng) % (data->range_max / 10);
-            int maxKey = minKey + (data->range_max / 10);
+            int step = data->range_max / 10;
+            if (step < 1) step = 1;
+            int minKey = key_dist(rng) % step;
+            int maxKey = minKey + step;
             int count = txn_rangeCount(minKey, maxKey);
             (void)count;
             data->nb_range.fetch_add(1, std::memory_order_relaxed);

@@ -1,4 +1,5 @@
 #include "tm_safe_map.hpp"
+#include "tm_vector.hpp"
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -12,8 +13,8 @@
 
 // Multiple TM globals to stress spec alloc + deferred free
 
-// 1. std::vector + push_back => new[] / delete[] on reallocation
-TM std::vector<int64_t> g_vec;
+// 1. TMVector + push_back => ::operator new/delete on reallocation
+TM TMVector<int64_t> g_vec;
 TM std::atomic<int64_t> g_vec_pushes{0};
 
 // 2. std::map + insert/erase => new/delete of tree nodes

@@ -5,6 +5,8 @@
 #include <new>
 #include <utility>
 
+extern "C" void tm_debug_grow(void* this_ptr, size_t m_cap, size_t m_size, size_t nc, size_t min_cap, size_t sz);
+
 template <typename T>
 class TMSafeVector {
     T*      m_data;
@@ -14,6 +16,12 @@ class TMSafeVector {
     void grow(size_t min_cap) {
         size_t nc = m_cap ? m_cap : 4;
         while (nc < min_cap) nc *= 2;
+        {
+            char buf[256];
+            int n = snprintf(buf, sizeof(buf), "DBG grow this=%p m_cap=%zu m_size=%zu nc=%zu min_cap=%zu sz=%zu\n",
+                             (void*)this, m_cap, m_size, nc, min_cap, sizeof(T));
+            write(2, buf, n < 256 ? n : 256);
+        }
         T* nd = static_cast<T*>(::operator new(nc * sizeof(T)));
         for (size_t i = 0; i < m_size; i++) {
             new (&nd[i]) T(static_cast<T&&>(m_data[i]));

@@ -386,11 +386,6 @@ static void instrumentLoadsStoresInFunction(Function *F,
                     if (!isEscapedAlloca(AI, F))
                         continue;
                 }
-                // Skip loads through reference parameters that always receive
-                // alloca addresses (same rationale as the store check below).
-                if (auto *Arg = dyn_cast<Argument>(getBaseObjectNoLoad(Ptr)))
-                    if (argIsAllocaDest(Arg))
-                        continue;
                 if (isTMLocalVar(Ptr, *M)) continue;
                 IRBuilder<> Builder(Load);
                 if (auto *Call = emitTMRead(Builder, Ptr, Load->getType(), H)) {

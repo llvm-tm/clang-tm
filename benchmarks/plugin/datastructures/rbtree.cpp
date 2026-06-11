@@ -466,8 +466,10 @@ THREAD void worker(ThreadData* data) {
             (void)found;
             data->nb_contains.fetch_add(1, std::memory_order_relaxed);
         } else if (op < data->write_pct + data->read_pct + 5) {
-            int minKey = key_dist(rng) % (data->range_max / 10);
-            int maxKey = minKey + (data->range_max / 10);
+            int step = data->range_max / 10;
+            if (step < 1) step = 1;
+            int minKey = key_dist(rng) % step;
+            int maxKey = minKey + step;
             int count = txn_rangeCount(minKey, maxKey);
             (void)count;
             data->nb_range.fetch_add(1, std::memory_order_relaxed);
@@ -493,6 +495,12 @@ MAIN int main(int argc, char* argv[]) {
     if (argc > 4) read_pct = std::atoi(argv[4]);
     if (argc > 5) write_pct = std::atoi(argv[5]);
     if (argc > 6) range_max = std::atoi(argv[6]);
+
+    // Validate arguments
+    if (nb_threads < 1) { std::cerr << "ERROR: nb_threads must be >= 1\n"; return 1; }
+    if (range_max < 10) { std::cerr << "ERROR: range_max must be >= 10\n"; return 1; }
+    if (read_pct + write_pct > 95) { std::cerr << "ERROR: read_pct + write_pct must be <= 95\n"; return 1; }
+    if (initial_size >= MAX_NODES) { std::cerr << "ERROR: initial_size too large for MAX_NODES=" << MAX_NODES << "\n"; return 1; }
 
     std::cout << "Red-Black Tree Benchmark\n"
               << "=====================\n"
