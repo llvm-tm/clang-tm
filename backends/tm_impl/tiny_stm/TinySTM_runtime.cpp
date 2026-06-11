@@ -326,6 +326,7 @@ static void *real_tm_realloc(void *ptr, size_t size)
 }
 static void real_tm_free(void *ptr)
 {
+	if (!ptr) return;
 	if (g_in_tx) {
 		if (g_deferred_frees_set.count(ptr)) {
 			fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
@@ -417,6 +418,8 @@ void tm_load_symbols(void *symbol_table, uint32_t symbol_count)
 	(void)symbol_count;
 }
 void consume_ptr(volatile void *ptr) { (void)ptr; }
+
+
 
 } // extern "C"
 
