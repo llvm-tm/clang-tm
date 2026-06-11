@@ -49,4 +49,8 @@ impl ShadowMemory {
     pub fn is_valid_ptr(&self, addr: u64) -> bool {
         self.allocations.get(&addr).map_or(false, |a| !a.is_freed)
     }
+
+    pub fn was_freed(&self, addr: u64) -> bool {
+        self.allocations.get(&addr).map_or(false, |a| a.is_freed)
+    }
 }

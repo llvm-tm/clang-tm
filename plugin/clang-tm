@@ -354,6 +354,7 @@ if [ "$MODE" = "link-only" ]; then
                 -fno-stack-protector -pthread "${CXXFLAGS[@]+"${CXXFLAGS[@]}"}"
             LINK_OBJS+=("$REGION_O")
         fi
+        
         $CXX "${LINK_CXXFLAGS[@]}" "$INPUT" "${LINK_OBJS[@]}" -o "$OUTPUT"
     else
         $CXX "${LINK_CXXFLAGS[@]}" "$INPUT" "$RESOLVED_RUNTIME" -o "$OUTPUT"
@@ -554,6 +555,7 @@ if $RUNTIME_IS_SOURCE; then
             $REGION_INCLUDE \
             -fno-stack-protector -pthread "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"
     fi
+
 fi
 
 # --- Optimize instrumented bitcode ---

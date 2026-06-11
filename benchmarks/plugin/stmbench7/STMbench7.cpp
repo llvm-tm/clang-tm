@@ -45,6 +45,8 @@
 #define THREAD __attribute__((annotate("thread"), noinline))
 #define MAIN __attribute__((annotate("main"), noinline))
 
+extern void tm_set_num_threads(int n);
+
 // ─── Spec constants (§2: medium OO7 size) ────────────────────────────────
 constexpr int FANOUT           = 3;
 constexpr int TREE_LEVELS      = 6;      // 0..5 internal (CA), level 5 has BA children
@@ -1131,7 +1133,7 @@ MAIN int main(int argc, char *argv[]) {
               << "Locking:    " << (locking_mode == 0 ? "TM (plugin)" : "Medium-grained") << "\n"
               << std::endl;
 
-    stm::tm_token_set_num_threads(nb_threads);
+    tm_set_num_threads(nb_threads);
     init_data();
 
     std::cout << "Data structure (§2: medium OO7 size):\n"
