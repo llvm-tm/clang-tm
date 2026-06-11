@@ -75,35 +75,15 @@ fn infer_events(entries: &[RawEntry]) -> Vec<Event> {
         let mut sorted = thread_entries.clone();
         sorted.sort_by_key(|e| e.timestamp);
 
-        let mut in_tx = false;
-        let mut prev_ts = 0u64;
-
         for entry in sorted {
-            let gap = entry.timestamp.saturating_sub(prev_ts);
-
-            if !in_tx {
-                events.push(Event::new(entry.timestamp, tid, next_seq, EventKind::TxBegin));
-                next_seq += 1;
-                in_tx = true;
-            } else if gap > 100 {
-                events.push(Event::new(prev_ts + 1, tid, next_seq, EventKind::TxEnd));
-                next_seq += 1;
-                events.push(Event::new(entry.timestamp, tid, next_seq, EventKind::TxBegin));
-                next_seq += 1;
-            }
-
             let kind = match entry.type_code {
                 0 => EventKind::Read { addr: entry.addr, width: entry.width as u8 },
                 1 => EventKind::Write { addr: entry.addr, width: entry.width as u8, val: entry.value },
+                2 => EventKind::TxBegin,
+                3 => EventKind::TxEnd,
                 _ => continue,
             };
             events.push(Event::new(entry.timestamp, tid, next_seq, kind));
-            next_seq += 1;
-            prev_ts = entry.timestamp;
-        }
-
-        if in_tx {
-            events.push(Event::new(prev_ts + 1, tid, next_seq, EventKind::TxEnd));
             next_seq += 1;
         }
     }
