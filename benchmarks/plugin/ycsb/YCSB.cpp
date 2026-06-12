@@ -59,7 +59,7 @@ TM Record g_records[MAX_RECORDS];
 TM int g_record_count = 0;
 TM int g_record_counter = 0;
 
-TMSafeMap<int, int> g_key_to_index;
+TM TMSafeMap<int, int> g_key_to_index;
 
 enum class Distribution { UNIFORM, ZIPFIAN, LATEST };
 enum class WorkloadType { A, B, C, D, E, F };
