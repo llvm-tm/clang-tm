@@ -3,9 +3,8 @@
 #include "stamp_common.hpp"
 #include <algorithm>
 #include <cstring>
-#include <string>
-#include <unordered_map>
-#include <vector>
+#include "tm_safe_map.hpp"
+#include "tm_vector.hpp"
 
 struct TM GenomeData {
     char* gene;
@@ -119,7 +118,7 @@ static void genome_dedup_seq(GenomeData* data) {
 }
 
 static void build_hash_table(GenomeData* data,
-    std::unordered_map<uint64_t, std::vector<char**>>& hash_table) {
+    TMSafeMap<uint64_t, TMSafeVector<char**>>& hash_table) {
     for (int i = 0; i < data->unique_count; i++) {
         char* seg = data->unique_segments[i];
         int slen = data->unique_segment_lens[i];
@@ -130,7 +129,7 @@ static void build_hash_table(GenomeData* data,
 
 __attribute__((annotate("tm_allow_opaque")))
 TX static void genome_match(GenomeData* data, int start, int end,
-                             std::unordered_map<uint64_t, std::vector<char**>>& hash_table) {
+                             TMSafeMap<uint64_t, TMSafeVector<char**>>& hash_table) {
     for (int j = data->segment_length - 1; j >= 1; j--) {
         for (int i = 0; i < data->unique_count; i++) {
             char* a = data->unique_segments[i];
@@ -173,7 +172,7 @@ THREAD void worker_genome(ThreadData* td) {
     while (g_genome_barrier.load(std::memory_order_acquire) < g_num_threads) {}
 
     // Build per-thread hash table from unique segments
-    std::unordered_map<uint64_t, std::vector<char**>> hash_table;
+    TMSafeMap<uint64_t, TMSafeVector<char**>> hash_table;
     build_hash_table(data, hash_table);
 
     // Parallel matching: each thread processes a portion of unique segments
