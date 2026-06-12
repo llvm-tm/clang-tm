@@ -16,7 +16,7 @@
 #define MAIN __attribute__((annotate("main"), noinline))
 
 #include <cstdio>
-#include <map>
+#include "tm_safe_map.hpp"
 
 constexpr int MAX_ENTRIES = 1024;
 
@@ -25,8 +25,8 @@ TM int      g_pkeys[MAX_ENTRIES];
 TM int      g_pvals[MAX_ENTRIES];
 TM int      g_pcount = 0;
 
-// In-memory std::map (NOT TM-annotated — rebuilt on each restart)
-static std::map<int, int> g_map;
+// TM-safe map (allocations use ::operator new, redirected by LLVM pass)
+static TMSafeMap<int, int> g_map;
 
 // Called automatically after tm_init() restores persistent data.
 // TX ensures it runs inside a transaction (allocations → persistent heap).

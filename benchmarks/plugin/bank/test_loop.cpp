@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <thread>
 #include <random>
-#include <vector>
+#include "tm_vector.hpp"
 
 extern "C" {
 extern void tm_init();
@@ -13,7 +13,7 @@ extern void tm_end();
 }
 
 struct Account { uint64_t balance; };
-std::vector<Account> accounts(1024, Account{1000});
+TMSafeVector<Account> accounts(1024, Account{1000});
 
 #define TX __attribute__((annotate("transaction"), noinline))
 

@@ -119,6 +119,11 @@ template <typename K, typename V> class TMSafeMap
 			return *this;
 		}
 		bool operator!=(const MapIter &o) const { return slot != o.slot; }
+		bool operator==(const MapIter &o) const { return slot == o.slot; }
+		template <typename SlotT2, typename PairT2>
+		bool operator!=(const MapIter<SlotT2, PairT2> &o) const { return slot != o.slot; }
+		template <typename SlotT2, typename PairT2>
+		bool operator==(const MapIter<SlotT2, PairT2> &o) const { return slot == o.slot; }
 		PairT &operator*()  const { return slot->kv; }
 		PairT *operator->() const { return &slot->kv; }
 	};

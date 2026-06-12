@@ -18,6 +18,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "tm_vector.hpp"
 
 #include "NOrec.hpp"
 
@@ -34,7 +35,7 @@ struct Account {
 };
 
 struct Bank {
-	std::vector<Account> accounts;
+	TMSafeVector<Account> accounts;
 
 	Bank(int size)
 	{
@@ -45,7 +46,7 @@ struct Bank {
 		}
 	}
 
-	int size() const { return accounts.size(); }
+	int size() const { return (int)accounts.size(); }
 };
 
 Bank *bank;
