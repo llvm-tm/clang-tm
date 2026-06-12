@@ -154,7 +154,7 @@ inline bool //
 validate()  //
 {
 	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop");
+		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 	auto *tx = current_tx_wbetl;
 	for (auto &it : tx->read_set) {
@@ -189,7 +189,7 @@ inline bool //
 commit()    //
 {
 	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop");
+		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 	auto *tx = current_tx_wbetl;
 
@@ -252,7 +252,7 @@ read_word_etl(                                                //
 )
 {
 	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop");
+		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 	void *aligned = stm::merge::align_down_8(addr);
@@ -335,7 +335,7 @@ write_word_etl(                                                //
 )
 {
 	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop");
+		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 	void *aligned = stm::merge::align_down_8(addr);

@@ -196,7 +196,7 @@ inline void
 validate_read_set_wt(word_t commit_version)
 {
 	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop");
+		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 	auto *tx = current_tx_wt;
 	if (commit_version <= tx->start_version + 1)
@@ -247,7 +247,7 @@ inline bool //
 commit()    //
 {
 	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop");
+		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 	auto *tx = current_tx_wt;
 
@@ -318,7 +318,7 @@ read_word_wt(                                           //
 )
 {
 	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop");
+		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 
@@ -433,7 +433,7 @@ write_word_wt(                                           //
 )
 {
 	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop");
+		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 

@@ -28,7 +28,6 @@ int tm_serialize_unlock_all();
 #include "tm_alloc_overrides.hpp"
 #include "tm_thread_state.hpp"
 #include "tm_hooks.hpp"
-#include "../common/tm_hooks.cpp"
 extern const TMRealHooks g_tiny_hooks;
 __thread int32_t tm_nested_call_counter = 0;
 __thread int32_t tm_longjmp_ret = 0;

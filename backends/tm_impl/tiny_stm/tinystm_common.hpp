@@ -304,6 +304,12 @@ extern std::atomic<word_t> g_clock;
 extern std::atomic<tinystm::word_t> thr_counter;
 extern std::atomic<tinystm::word_t> reset_locks_thr;
 extern std::atomic<uint64_t> g_tm_abort_count;
+// When set, forces all in-flight transactions to abort immediately at the
+// next read/write/validate/commit operation (see `proactive_stop` in
+// tinystm_{wbctl,wbetl,wt}.hpp).  Introduced in commit 0496686 as a
+// workaround for a worker-thread hang at >=2 threads, but masks the
+// underlying deadlock/contention bug.  TODO: remove the proactive_stop
+// aborts and fix the root cause.
 extern std::atomic<bool> g_tm_stop_requested;
 extern thread_local bool rng_initialized;
 extern thread_local std::mt19937 rng;
