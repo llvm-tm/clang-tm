@@ -34,6 +34,7 @@
 #include <random>
 #include <thread>
 #include <vector>
+#include "tm_vector.hpp"
 
 #define TM __attribute__((annotate("tm")))
 #define TX __attribute__((annotate("transaction"), noinline))
@@ -73,11 +74,11 @@ TM long g_shared_counter = 0;
 Config g_config;
 
 struct ThreadLocalData {
-	std::vector<int> indices_R1;
-	std::vector<int> indices_W1;
-	std::vector<int> indices_R2;
-	std::vector<int> indices_W2;
-	std::vector<int> indices_A3;
+	TMSafeVector<int> indices_R1;
+	TMSafeVector<int> indices_W1;
+	TMSafeVector<int> indices_R2;
+	TMSafeVector<int> indices_W2;
+	TMSafeVector<int> indices_A3;
 	std::mt19937 *rng;
 };
 
