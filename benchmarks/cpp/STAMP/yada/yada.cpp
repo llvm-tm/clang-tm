@@ -18,12 +18,10 @@
 #include <vector>
 #include <chrono>
 #include <atomic>
-#include <set>
-#include <algorithm>
-#include <mutex>
 #include <random>
 
 #include "../../tests/benchmark_test.hpp"
+#include "../../include/scratch_set.hpp"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -228,10 +226,10 @@ TX_FUNC static long read_neighbor(int id, int idx) {
 
 // ── Grow region + retriangulate (single TX for consistency) ─────────
 TX_FUNC static void refine_element(int el_id,
-                                    std::vector<int>& before_ids,
-                                    std::set<Edge>& border_edges,
-                                    std::vector<int>& bad_ids,
-                                    std::vector<int>& bfs_queue) {
+                                    ScratchVector<int>& before_ids,
+                                    ScratchSet<Edge>& border_edges,
+                                    ScratchVector<int>& bad_ids,
+                                    ScratchVector<int>& bfs_queue) {
     // ── Read seed element geometry ──
     double seed_cx = g_circ_x[el_id];
     double seed_cy = g_circ_y[el_id];
@@ -248,7 +246,7 @@ TX_FUNC static void refine_element(int el_id,
 
     before_ids.push_back(el_id);
     bfs_queue.push_back(el_id);
-    std::set<int> visited;
+    ScratchSet<int> visited;
     visited.insert(el_id);
     size_t qidx = 0;
 
@@ -270,7 +268,7 @@ TX_FUNC static void refine_element(int el_id,
         long nc = read_neighbor_count(cur_id);
         for (long ni = 0; ni < nc; ni++) {
             int nid = (int)read_neighbor(cur_id, (int)ni);
-            if (visited.find(nid) == visited.end()) {
+            if (!visited.contains(nid)) {
                 visited.insert(nid);
                 bfs_queue.push_back(nid);
             }
@@ -358,7 +356,7 @@ TX_FUNC static void refine_element(int el_id,
     }
 }
 
-TX_FUNC static void push_bad_ids(const std::vector<int>& bad_ids) {
+TX_FUNC static void push_bad_ids(const ScratchVector<int>& bad_ids) {
     for (int bid : bad_ids) {
         if (read_is_referenced(bid) != 0) {
             long n = TM_READ_I8(g_work_heap_cnt);
@@ -374,10 +372,10 @@ TX_FUNC static void push_bad_ids(const std::vector<int>& bad_ids) {
 static void worker(int tid) {
     tm_init_thread();
 
-    std::vector<int> before_ids;
-    std::vector<int> bad_ids;
-    std::vector<int> bfs_queue;
-    std::set<Edge> border_edges;
+    ScratchVector<int> before_ids;
+    ScratchVector<int> bad_ids;
+    ScratchVector<int> bfs_queue;
+    ScratchSet<Edge> border_edges;
 
     while (!g_stop.load(std::memory_order_relaxed)) {
         int el_id;

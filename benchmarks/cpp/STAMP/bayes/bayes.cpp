@@ -24,6 +24,7 @@
 #include <atomic>
 
 #include "../../tests/benchmark_test.hpp"
+#include "../../include/scratch_set.hpp"
 
 // ── Configuration ───────────────────────────────────────────────────
 static long g_num_var           = 32;
@@ -131,10 +132,10 @@ static double g_base_penalty = 0.0;
 static std::atomic<long> g_total_ops{0};
 
 // ── Helper: compute density log-likelihood (non-TM, reads g_records) ─
-static double compute_density_ll(int var, const std::vector<int>& parents_vec) {
+static double compute_density_ll(int var, const ScratchVector<int>& parents_vec) {
     int np = (int)parents_vec.size();
     int ncfg = 1 << np;
-    std::vector<int> c0(ncfg, 0), c1(ncfg, 0);
+    ScratchVector<int> c0(ncfg, 0), c1(ncfg, 0);
     for (int r = 0; r < g_num_record; r++) {
         int cfg = 0;
         for (int i = 0; i < np; i++)
@@ -165,16 +166,15 @@ TX_FUNC static void set_insert(long* data, long count, long val) {
     TM_WRITE_I8(&data[count], val);
 }
 
-TX_FUNC static void set_collect(const long* data, long count, std::vector<int>& out) {
+TX_FUNC static void set_collect(const long* data, long count, ScratchVector<int>& out) {
     for (long i = 0; i < count; i++)
         out.push_back((int)TM_READ_I8(&data[i]));
 }
 
 // ── TM path detection (reads children sets through TM barriers) ─────
 TX_FUNC static bool has_path(int from, int to) {
-    std::vector<bool> visited(g_num_var, false);
-    std::vector<int> stack;
-    stack.clear();
+    ScratchVector<char> visited(g_num_var, 0);
+    ScratchVector<int> stack;
     stack.push_back(from);
     visited[from] = true;
     while (!stack.empty()) {
@@ -207,7 +207,7 @@ TX_FUNC static Task find_best_insert(int to) {
         np = TM_READ_I8(&g_parent_count[to]);
         if (g_max_edges_per_var > 0 && np >= g_max_edges_per_var)
             continue;
-        std::vector<int> par;
+        ScratchVector<int> par;
         set_collect(g_parent_data + to * MAX_PARENTS, np, par);
         par.push_back(from);
         double new_ll = compute_density_ll(to, par);
@@ -272,7 +272,7 @@ TX_FUNC static bool apply_insert(const Task& t) {
     set_insert(g_child_data + from * g_num_var, nc, to);
     TM_WRITE_I8(&g_child_count[from], nc + 1);
     TM_WRITE_I8(g_total_parents, TM_READ_I8(g_total_parents) + 1);
-    std::vector<int> par;
+    ScratchVector<int> par;
     set_collect(g_parent_data + to * MAX_PARENTS, (long)(np + 1), par);
     double new_ll = compute_density_ll(to, par);
     double old_ll = TM_READ_DOUBLE(&g_local_ll[to]);

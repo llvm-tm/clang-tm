@@ -9,19 +9,19 @@
 //   -t <num>    Number of threads            (default: 4)
 
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <csetjmp>
-#include <cstdint>
 #include <thread>
-#include <vector>
-#include <chrono>
-#include <atomic>
-#include <set>
 #include <algorithm>
-#include <mutex>
+#include <atomic>
+#include <chrono>
 #include <random>
+#include <vector>
+#include "tm_vector.hpp"
+#include "tm_hash_set.hpp"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -46,7 +46,24 @@ struct Edge {
         if (b.x != o.b.x) return b.x < o.b.x;
         return b.y < o.b.y;
     }
+    bool operator==(const Edge& o) const {
+        return a.x == o.a.x && a.y == o.a.y && b.x == o.b.x && b.y == o.b.y;
+    }
 };
+
+namespace std {
+template<> struct hash<Edge> {
+    size_t operator()(const Edge& e) const noexcept {
+        size_t h = 0;
+        auto mix = [&](double v) {
+            size_t k = *reinterpret_cast<const uint64_t*>(&v);
+            h ^= k + 0x9e3779b9 + (h << 6) + (h >> 2);
+        };
+        mix(e.a.x); mix(e.a.y); mix(e.b.x); mix(e.b.y);
+        return h;
+    }
+};
+}
 
 // ── Double ↔ long reinterpretation ──────────────────────────────────
 static inline long d2l(double v) { long r; memcpy(&r, &v, sizeof(r)); return r; }
@@ -197,10 +214,10 @@ TX_FUNC static long read_neighbor(int id, int idx) {
 
 // ── Grow region + retriangulate (single TX for consistency) ─────────
 TX_FUNC static void refine_element(int el_id,
-                                    std::vector<int>& before_ids,
-                                    std::set<Edge>& border_edges,
-                                    std::vector<int>& bad_ids,
-                                    std::vector<int>& bfs_queue) {
+                                    TMSafeVector<int>& before_ids,
+                                    TMSafeHashSet<Edge>& border_edges,
+                                    TMSafeVector<int>& bad_ids,
+                                    TMSafeVector<int>& bfs_queue) {
     // ── Read seed element geometry ──
     double seed_cx = g_circ_x[el_id];
     double seed_cy = g_circ_y[el_id];
@@ -217,7 +234,7 @@ TX_FUNC static void refine_element(int el_id,
 
     before_ids.push_back(el_id);
     bfs_queue.push_back(el_id);
-    std::set<int> visited;
+    TMSafeHashSet<int> visited;
     visited.insert(el_id);
     size_t qidx = 0;
 
@@ -239,7 +256,7 @@ TX_FUNC static void refine_element(int el_id,
         long nc = read_neighbor_count(cur_id);
         for (long ni = 0; ni < nc; ni++) {
             int nid = (int)read_neighbor(cur_id, (int)ni);
-            if (visited.find(nid) == visited.end()) {
+            if (!visited.contains(nid)) {
                 visited.insert(nid);
                 bfs_queue.push_back(nid);
             }
@@ -324,7 +341,7 @@ TX_FUNC static void refine_element(int el_id,
     }
 }
 
-TX_FUNC static void push_bad_ids(const std::vector<int>& bad_ids) {
+TX_FUNC static void push_bad_ids(const TMSafeVector<int>& bad_ids) {
     for (int bid : bad_ids) {
         if (read_is_referenced(bid) != 0) {
             long n = TM_READ_I8(g_work_heap_cnt);
@@ -340,10 +357,10 @@ TX_FUNC static void push_bad_ids(const std::vector<int>& bad_ids) {
 static void worker(int tid) {
     tm_init_thread();
 
-    std::vector<int> before_ids;
-    std::vector<int> bad_ids;
-    std::vector<int> bfs_queue;
-    std::set<Edge> border_edges;
+    TMSafeVector<int> before_ids;
+    TMSafeVector<int> bad_ids;
+    TMSafeVector<int> bfs_queue;
+    TMSafeHashSet<Edge> border_edges;
 
     while (!g_stop.load(std::memory_order_relaxed)) {
         int el_id;

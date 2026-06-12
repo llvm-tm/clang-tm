@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <initializer_list>
 #include <new>
 #include <utility>
 
@@ -34,7 +35,15 @@ public:
     using const_iterator  = const T*;
 
     TMSafeVector() : m_data(nullptr), m_size(0), m_cap(0) {}
+    TMSafeVector(std::initializer_list<T> il) : m_data(nullptr), m_size(0), m_cap(0) {
+        reserve(il.size());
+        for (auto& v : il) {
+            new (&m_data[m_size]) T(v);
+            m_size++;
+        }
+    }
     explicit TMSafeVector(size_t n) : m_data(nullptr), m_size(0), m_cap(0) { resize(n); }
+    TMSafeVector(size_t n, const T& val) : m_data(nullptr), m_size(0), m_cap(0) { resize(n, val); }
     TMSafeVector(const TMSafeVector& o) : m_data(nullptr), m_size(0), m_cap(0) {
         reserve(o.m_size);
         for (size_t i = 0; i < o.m_size; i++)
@@ -81,6 +90,17 @@ public:
             reserve(n);
             for (size_t i = m_size; i < n; i++)
                 new (&m_data[i]) T();
+        }
+        m_size = n;
+    }
+    void resize(size_t n, const T& val) {
+        if (n < m_size) {
+            for (size_t i = n; i < m_size; i++)
+                m_data[i].~T();
+        } else if (n > m_size) {
+            reserve(n);
+            for (size_t i = m_size; i < n; i++)
+                new (&m_data[i]) T(val);
         }
         m_size = n;
     }

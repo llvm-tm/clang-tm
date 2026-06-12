@@ -25,8 +25,8 @@
 #include <iostream>
 #include <random>
 #include <thread>
-#include <unordered_set>
 #include <vector>
+#include "tm_hash_set.hpp"
 
 #define TM __attribute__((annotate("tm")))
 #define TX __attribute__((annotate("transaction"), noinline))
@@ -713,7 +713,7 @@ TX int txn_stock_level(int w_id, int d_id, int threshold)
 		start_o_id = 1;
 
 	// Use local set to avoid counting duplicate items within the scan
-	std::unordered_set<int> counted;
+	TMSafeHashSet<int> counted;
 
 	for (int o_id = start_o_id; o_id < next_o_id; o_id++) {
 		int o_idx = idx_ord(w_id, d_id, o_id);
@@ -724,7 +724,7 @@ TX int txn_stock_level(int w_id, int d_id, int threshold)
 		for (int l = 1; l <= ol_cnt; l++) {
 			int ol_idx = idx_ol(w_id, d_id, o_id, l);
 			int i_id = g_orderline[ol_idx].ol_i_id;
-			if (counted.count(i_id))
+			if (counted.contains(i_id))
 				continue;
 			counted.insert(i_id);
 

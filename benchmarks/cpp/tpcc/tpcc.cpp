@@ -15,10 +15,10 @@
 #include <ctime>
 #include <random>
 #include <thread>
-#include <unordered_set>
 #include <vector>
 
 #include "../tests/benchmark_test.hpp"
+#include "../include/scratch_set.hpp"
 
 // ── TM runtime declarations ────────────────────────────────────────
 extern "C" {
@@ -391,11 +391,11 @@ static void init_data() {
                 g_order[o_idx].o_ol_cnt = ol_cnt;
                 g_order[o_idx].o_all_local = 1.0f;
 
-                std::unordered_set<int> used_items;
+                ScratchSet<int> used_items;
                 for (int l = 1; l <= ol_cnt; l++) {
                     int ol_idx = idx_ol(w, d, o, l);
                     int i_id;
-                    do { i_id = (int)(ord_rng() % ni) + 1; } while (used_items.count(i_id));
+                    do { i_id = (int)(ord_rng() % ni) + 1; } while (used_items.contains(i_id));
                     used_items.insert(i_id);
 
                     g_orderline[ol_idx].ol_o_id = o;
@@ -592,7 +592,7 @@ static int txn_stock_level(int w_id, int d_id, int threshold) {
     int start_o_id = next_o_id - 20;
     if (start_o_id < 1) start_o_id = 1;
 
-    std::unordered_set<int> counted;
+    ScratchSet<int> counted;
 
     for (int oid = start_o_id; oid < next_o_id; oid++) {
         int o_idx = idx_ord(w_id, d_id, oid);
@@ -602,7 +602,8 @@ static int txn_stock_level(int w_id, int d_id, int threshold) {
         for (int l = 1; l <= ol_cnt; l++) {
             int ol_idx = idx_ol(w_id, d_id, oid, l);
             int i_id = iread(&g_orderline[ol_idx].ol_i_id);
-            if (counted.count(i_id)) continue;
+            if (counted.contains(i_id))
+                continue;
             counted.insert(i_id);
 
             int s_idx = idx_s(w_id, i_id);
