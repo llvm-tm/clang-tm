@@ -18,6 +18,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "tm_vector.hpp"
 
 // #include "tinystm_common.hpp" // -I tm_api_cpp/backends/TinySTM/
 #include "tinystm_wbctl.hpp" // -I tm_api_cpp/backends/TinySTM/
@@ -35,7 +36,7 @@ struct Account {
 };
 
 struct Bank {
-	std::vector<Account> accounts;
+	TMSafeVector<Account> accounts;
 
 	Bank(int size)
 	{
@@ -46,7 +47,7 @@ struct Bank {
 		}
 	}
 
-	int size() const { return accounts.size(); }
+	int size() const { return (int)accounts.size(); }
 };
 
 Bank *bank;
