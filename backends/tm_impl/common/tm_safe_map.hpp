@@ -81,26 +81,27 @@ template <typename K, typename V> class TMSafeMap
 	void do_erase(size_t i)
 	{
 		m_size--;
-		size_t j = i;
+		m_data[i].occupied = false;
+		size_t hole = i;
 		for (;;) {
-			size_t next = (j + 1) & (m_cap - 1);
+			size_t next = (hole + 1) & (m_cap - 1);
 			if (!m_data[next].occupied) break;
 			size_t h = std::hash<K>{}(m_data[next].kv.first) & (m_cap - 1);
-			// Check whether 'i' lies on the probe chain of next.
-			// Probe chain of next is [h, next] in cyclic probe order.
-			// Entry at next can slide back to fill 'j' iff the
-			// closed interval [h, next] (cyclic) does NOT contain 'i'.
-			bool can_slide = [&]() {
+			// Entry at next slides into the current hole iff the
+			// CURRENT hole position is on the probe chain of next
+			// (closed interval [h, next] cyclic).  If not on the
+			// chain, sliding would strand 'next' because a future
+			// find starting at h would stop at the new empty slot.
+			bool must_slide = [&]() {
 				if (h <= next)
-					return i < h || i > next;
+					return hole >= h && hole <= next;
 				else
-					return i >= h || i <= next;
+					return hole >= h || hole <= next;
 			}();
-			if (!can_slide) break;
-			m_data[j].occupied = true;
-			m_data[j].kv       = m_data[next].kv;
+			if (!must_slide) break;
+			m_data[hole] = m_data[next];
 			m_data[next].occupied = false;
-			j = next;
+			hole = next;
 		}
 	}
 

@@ -211,8 +211,23 @@ public:
         m_size++;
     }
 
+    void erase(const K &k) {
+        size_t i = lower_bound(k);
+        if (i >= m_size || m_data[i] < k || k < m_data[i]) return;
+        m_data[i].~K();
+        for (size_t j = i; j + 1 < m_size; j++)
+            new (&m_data[j]) K(m_data[j + 1]);
+        m_size--;
+    }
+
+    K* begin() { return m_data; }
+    const K* begin() const { return m_data; }
+    K* end() { return m_data + m_size; }
+    const K* end() const { return m_data + m_size; }
+
     void clear() { for (size_t i=0; i<m_size; i++) m_data[i].~K(); m_size=0; }
     size_t size() const { return m_size; }
+    bool empty() const { return m_size == 0; }
 };
 
 } // namespace expli
