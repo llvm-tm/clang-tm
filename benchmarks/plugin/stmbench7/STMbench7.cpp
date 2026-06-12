@@ -36,9 +36,9 @@
 #include "tm_spin_token.hpp"
 #include <mutex>
 #include <random>
-#include <set>
 #include <thread>
 #include <vector>
+#include "tm_hash_set.hpp"
 #include "tm_vector.hpp"
 
 #define TM __attribute__((annotate("tm")))
@@ -292,7 +292,7 @@ static void init_data() {
         std::mt19937 rng(42);
         for (int cp_idx = 0; cp_idx < MAX_CP; cp_idx++) {
             int num_ba = 1 + (rng() % (MAX_CP_BA_BAG - 1));
-            std::set<int> chosen;
+            TMSafeHashSet<int> chosen;
             while ((int)chosen.size() < num_ba)
                 chosen.insert(rng() % MAX_BA);
             for (int ba_idx : chosen) {

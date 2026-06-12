@@ -29,8 +29,8 @@
 #include <mutex>
 #include <random>
 #include <thread>
-#include <unordered_map>
-#include <vector>
+#include "tm_safe_map.hpp"
+#include "tm_vector.hpp"
 
 #define TM __attribute__((annotate("tm")))
 #define TX __attribute__((annotate("transaction"), noinline))
@@ -59,7 +59,7 @@ TM Record g_records[MAX_RECORDS];
 TM int g_record_count = 0;
 TM int g_record_counter = 0;
 
-TM std::unordered_map<int, int> g_key_to_index;
+TMSafeMap<int, int> g_key_to_index;
 
 enum class Distribution { UNIFORM, ZIPFIAN, LATEST };
 enum class WorkloadType { A, B, C, D, E, F };
@@ -150,7 +150,7 @@ TM void read_all_fields(int key, char output[NUM_FIELDS][FIELD_SIZE])
 	}
 }
 
-TM int scan(int start_key, int count, std::vector<int> &results)
+TM int scan(int start_key, int count, TMSafeVector<int> &results)
 {
 	int found = 0;
 	for (int i = 0; i < count && found < 10; i++) {
@@ -198,7 +198,7 @@ TX void txn_read_all(int key, char output[NUM_FIELDS][FIELD_SIZE])
 	read_all_fields(key, output);
 }
 
-TX int txn_scan(int start_key, int count, std::vector<int> &results)
+TX int txn_scan(int start_key, int count, TMSafeVector<int> &results)
 {
 	return scan(start_key, count, results);
 }
@@ -327,7 +327,8 @@ THREAD void worker(ThreadData *data)
 				txn_read(key, buf, FIELD_SIZE);
 				data->reads.fetch_add(1, std::memory_order_relaxed);
 			} else {
-				std::vector<int> results;
+				TMSafeVector<int> results(10);
+				results.clear();
 				txn_scan(key, 10, results);
 				data->scans.fetch_add(1, std::memory_order_relaxed);
 				data->scan_results.fetch_add(results.size(), std::memory_order_relaxed);
@@ -335,7 +336,8 @@ THREAD void worker(ThreadData *data)
 			break;
 		case WorkloadType::F:
 			if (op_r < 50) {
-				std::vector<int> results;
+				TMSafeVector<int> results(10);
+				results.clear();
 				txn_scan(key, 10, results);
 				data->scans.fetch_add(1, std::memory_order_relaxed);
 				data->scan_results.fetch_add(results.size(), std::memory_order_relaxed);
