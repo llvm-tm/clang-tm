@@ -15,8 +15,10 @@ thread_local std::mt19937 rng;
 std::atomic<tinystm::word_t> reset_locks_thr{0};
 std::atomic<tinystm::word_t> g_clock{1};
 std::atomic<tinystm::word_t> thr_counter{1};
-std::atomic<uint64_t> g_tm_abort_count{0};
-__thread sigjmp_buf *jmpbuf;
+	std::atomic<uint64_t> g_tm_abort_count{0};
+	__thread sigjmp_buf *jmpbuf;
+	thread_local sigjmp_buf *g_tx_exit_jmpbuf = nullptr;
+	std::atomic<bool> g_tm_stop_requested{false};
 } // namespace tinystm
 #elif defined(DESIGN_WBCTL)
 #include "tinystm_wbctl.hpp"
@@ -29,8 +31,10 @@ thread_local std::mt19937 rng;
 std::atomic<tinystm::word_t> reset_locks_thr{0};
 std::atomic<tinystm::word_t> g_clock{1};
 std::atomic<tinystm::word_t> thr_counter{1};
-std::atomic<uint64_t> g_tm_abort_count{0};
-__thread sigjmp_buf *jmpbuf;
+	std::atomic<uint64_t> g_tm_abort_count{0};
+	__thread sigjmp_buf *jmpbuf;
+	thread_local sigjmp_buf *g_tx_exit_jmpbuf = nullptr;
+	std::atomic<bool> g_tm_stop_requested{false};
 } // namespace tinystm
 #elif defined(DESIGN_WT)
 #include "tinystm_wt.hpp"
@@ -43,8 +47,10 @@ thread_local std::mt19937 rng;
 std::atomic<tinystm::word_t> reset_locks_thr{0};
 std::atomic<tinystm::word_t> g_clock{1};
 std::atomic<tinystm::word_t> thr_counter{1};
-std::atomic<uint64_t> g_tm_abort_count{0};
-__thread sigjmp_buf *jmpbuf;
+	std::atomic<uint64_t> g_tm_abort_count{0};
+	__thread sigjmp_buf *jmpbuf;
+	thread_local sigjmp_buf *g_tx_exit_jmpbuf = nullptr;
+	std::atomic<bool> g_tm_stop_requested{false};
 }
 #else
 #error "Define one of the following: DESIGN_WBETL, DESIGN_WBCTL, DESIGN_WT"

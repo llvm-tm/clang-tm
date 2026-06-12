@@ -35,6 +35,7 @@ using stm::ValueType;
 using stm::write_value_to_addr;
 
 extern __thread sigjmp_buf *jmpbuf;
+extern thread_local sigjmp_buf *g_tx_exit_jmpbuf;
 
 constexpr word_t OWNED_BITS = 2L;       // read mask is not used, but kept
 constexpr word_t INCARNATION_BITS = 3L; // wt only
@@ -303,6 +304,7 @@ extern std::atomic<word_t> g_clock;
 extern std::atomic<tinystm::word_t> thr_counter;
 extern std::atomic<tinystm::word_t> reset_locks_thr;
 extern std::atomic<uint64_t> g_tm_abort_count;
+extern std::atomic<bool> g_tm_stop_requested;
 extern thread_local bool rng_initialized;
 extern thread_local std::mt19937 rng;
 
