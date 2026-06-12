@@ -57,9 +57,12 @@ bin/:
 
 # ── Per-backend, per-test build rules ──────────────────────────────
 # Generate: bin/<b>/<t>: test_<t>.cpp <runtime> test_helpers.hpp | bin/<b>/
+# tm_hooks.cpp is included directly by TinySTM_runtime.cpp and
+# NOrec_runtime.cpp — skip standalone HOOKS_SRC for those backends.
+HOOKS_EXCLUDE := tinystm wt wbetl norec
 define BUILD_RULE
-bin/$(1)/$(2): test_$(2).cpp $(RUNTIME_$(1)) $(RUNTIME_DIR)/tm_region_allocator/tm_region_allocator.cpp $(HOOKS_SRC) test_helpers.hpp | bin/$(1)/
-	$$(CXX) $$(CXXFLAGS) $$(INC_$(1)) $$(FLAGS_$(1)) -o $$@ $$< $$(RUNTIME_$(1)) $(RUNTIME_DIR)/tm_region_allocator/tm_region_allocator.cpp $(HOOKS_SRC)
+bin/$(1)/$(2): test_$(2).cpp $(RUNTIME_$(1)) $(RUNTIME_DIR)/tm_region_allocator/tm_region_allocator.cpp test_helpers.hpp | bin/$(1)/
+	$$(CXX) $$(CXXFLAGS) $$(INC_$(1)) $$(FLAGS_$(1)) -o $$@ $$< $$(RUNTIME_$(1)) $(RUNTIME_DIR)/tm_region_allocator/tm_region_allocator.cpp $(if $(filter $(1),$(HOOKS_EXCLUDE)),,$(HOOKS_SRC))
 endef
 
 # Flatten: for each (backend, test) pair, eval a build rule

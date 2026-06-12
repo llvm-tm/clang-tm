@@ -183,6 +183,9 @@ abort_tx(const char *loc = "") //
 		random_backoff();
 	}
 
+	if (g_tx_exit_jmpbuf && g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		siglongjmp(*g_tx_exit_jmpbuf, 1);
+	}
 	siglongjmp(*jmpbuf, 1);
 	TM_ASSERT(false, "Did not jump");
 }
@@ -192,6 +195,9 @@ abort_tx(const char *loc = "") //
 inline void
 validate_read_set_wt(word_t commit_version)
 {
+	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		abort_tx("proactive_stop");
+	}
 	auto *tx = current_tx_wt;
 	if (commit_version <= tx->start_version + 1)
 		return;
@@ -240,6 +246,9 @@ release_write_locks_wt(word_t commit_version)
 inline bool //
 commit()    //
 {
+	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		abort_tx("proactive_stop");
+	}
 	auto *tx = current_tx_wt;
 
 	TM_ASSERT(tx, "commit: tx is null");
@@ -308,6 +317,9 @@ read_word_wt(                                           //
     ValueType /*sz*/                                    //
 )
 {
+	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		abort_tx("proactive_stop");
+	}
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 
 	TM_ASSERT(tx, "read_word_wt: tx is null");
@@ -420,6 +432,9 @@ write_word_wt(                                           //
     ValueType /*sz*/                                    //
 )
 {
+	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		abort_tx("proactive_stop");
+	}
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 
 	TM_ASSERT(tx, "write_word_wt: tx is null");

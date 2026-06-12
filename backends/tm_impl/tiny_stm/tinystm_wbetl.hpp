@@ -143,6 +143,9 @@ abort_tx(const char *loc = "")       //
 	if (tx->abort_count > 5) {
 		random_backoff();
 	}
+	if (g_tx_exit_jmpbuf && g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		siglongjmp(*g_tx_exit_jmpbuf, 1);
+	}
 	siglongjmp(*jmpbuf, 1);
 	TM_ASSERT(false, "Did not jump");
 }
@@ -150,6 +153,9 @@ abort_tx(const char *loc = "")       //
 inline bool //
 validate()  //
 {
+	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		abort_tx("proactive_stop");
+	}
 	auto *tx = current_tx_wbetl;
 	for (auto &it : tx->read_set) {
 		auto &addr = it.first;
@@ -182,6 +188,9 @@ extend()    //
 inline bool //
 commit()    //
 {
+	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		abort_tx("proactive_stop");
+	}
 	auto *tx = current_tx_wbetl;
 
 	TM_ASSERT(tx, "tx not defined");
@@ -242,6 +251,9 @@ read_word_etl(                                                //
     ValueType sz                                              //
 )
 {
+	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		abort_tx("proactive_stop");
+	}
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 	void *aligned = stm::merge::align_down_8(addr);
 	ByteOffset bo((word_t)aligned);
@@ -322,6 +334,9 @@ write_word_etl(                                                //
     ValueType sz                                              //
 )
 {
+	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		abort_tx("proactive_stop");
+	}
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 	void *aligned = stm::merge::align_down_8(addr);
 	ByteOffset bo((word_t)aligned);

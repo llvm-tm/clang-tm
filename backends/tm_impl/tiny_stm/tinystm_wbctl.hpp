@@ -125,6 +125,9 @@ abort_tx(const char *loc="")  //
 		// random backoff when aborts are really bad
 		random_backoff(tx->abort_count);
 	}
+	if (g_tx_exit_jmpbuf && g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		siglongjmp(*g_tx_exit_jmpbuf, 1);
+	}
 	siglongjmp(*jmpbuf, 1);
 	TM_ASSERT(false, "Did not jump");
 }
@@ -132,6 +135,9 @@ abort_tx(const char *loc="")  //
 inline bool //
 validate()  //
 {
+	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		abort_tx("proactive_stop");
+	}
 	auto *tx = current_tx_wbctl;
 	for (auto &it : tx->read_set) {
 		auto &addr = it.first;
@@ -188,6 +194,9 @@ inline bool is_stack_addr(void *addr) {
 inline bool //
 commit()    //
 {
+	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		abort_tx("proactive_stop");
+	}
 	auto *tx = current_tx_wbctl;
 	volatile word_t commit_version = get_clock();
 
@@ -329,6 +338,9 @@ read_word_ctl(                                                //
     ValueType sz                                              //
 )
 {
+	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		abort_tx("proactive_stop");
+	}
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 	ByteOffset bo((word_t)addr);
 
@@ -627,6 +639,9 @@ write_word_ctl(                                               //
     ValueType sz                                              //
 )
 {
+	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
+		abort_tx("proactive_stop");
+	}
 
 	ByteOffset bo((word_t)addr);
 

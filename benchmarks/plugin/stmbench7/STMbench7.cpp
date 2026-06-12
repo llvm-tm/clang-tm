@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <csetjmp>
 #include <cstring>
 #include <iostream>
 #include "datastructures/tm_treap_map.hpp"
@@ -46,6 +47,12 @@
 #define MAIN __attribute__((annotate("main"), noinline))
 
 extern void tm_set_num_threads(int n);
+
+// TinySTM exit-on-stop mechanism
+namespace tinystm {
+extern thread_local sigjmp_buf *g_tx_exit_jmpbuf;
+extern std::atomic<bool> g_tm_stop_requested;
+}
 
 // ─── Spec constants (§2: medium OO7 size) ────────────────────────────────
 constexpr int FANOUT           = 3;
@@ -1079,10 +1086,16 @@ THREAD void worker(ThreadData *data) {
     int ops = 0;
     int lt = 0, st = 0, sop = 0, sm = 0, ro = 0, up = 0;
 
+    sigjmp_buf tx_exit_buf;
+
     while (!g_stop_workers.load(std::memory_order_relaxed) && ops < data->loops) {
         OpDesc desc = pick_operation(rng, data->writePercent);
-        OpResult res = desc.func(rng);
-        (void)res;
+        tinystm::g_tx_exit_jmpbuf = &tx_exit_buf;
+        if (sigsetjmp(tx_exit_buf, 1) == 0) {
+            OpResult res = desc.func(rng);
+            (void)res;
+        }
+        tinystm::g_tx_exit_jmpbuf = nullptr;
         ops++;
         switch (desc.cat) {
             case OpClass::LONG_TRAV:   lt++;  break;
@@ -1124,6 +1137,8 @@ MAIN int main(int argc, char *argv[]) {
         case 3: writePercent = 90; break;   // write-dominated (§3: 10% RO, 90% UP)
         default: writePercent = 10;
     }
+
+    setbuf(stderr, NULL);
 
     std::cout << "STMbench7 (EuroSys 2007 Spec)\n"
               << "==============================\n"
@@ -1167,6 +1182,7 @@ MAIN int main(int argc, char *argv[]) {
     std::this_thread::sleep_for(std::chrono::milliseconds(duration_ms));
 
     g_stop_workers.store(true, std::memory_order_release);
+    tinystm::g_tm_stop_requested.store(true, std::memory_order_release);
     for (auto &t : threads) t.join();
 
     auto end_time = std::chrono::high_resolution_clock::now();
