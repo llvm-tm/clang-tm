@@ -91,8 +91,8 @@ static long* g_task_to    = nullptr;
 static long* g_task_score = nullptr;
 static long* g_task_count = nullptr;
 
-// Records (non-TM, read-only after init)
-static std::vector<std::vector<int>> g_records;
+// Records (read-only after init)
+static TMSafeVector<TMSafeVector<int>> g_records;
 
 static double g_base_penalty = 0.0;
 static std::atomic<long> g_total_ops{0};
@@ -382,7 +382,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    g_records.resize(g_num_record, std::vector<int>(g_num_var));
+    g_records.resize(g_num_record, TMSafeVector<int>(g_num_var));
     for (int r = 0; r < (int)g_num_record; r++) {
         for (int v = 0; v < num_var_i; v++) {
             if (g_parent_count[v] == 0) {

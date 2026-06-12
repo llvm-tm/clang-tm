@@ -439,13 +439,13 @@ TM void init_data()
 				g_order_count++;
 
 				// Create order lines
-				std::unordered_set<int> used_items;
+				TMSafeHashSet<int> used_items;
 				for (int l = 1; l <= ol_cnt; l++) {
 					int ol_idx = idx_ol(w, d, o, l);
 					int i_id;
 					do {
 						i_id = (int)(ord_rng() % ni) + 1;
-					} while (used_items.count(i_id));
+					} while (used_items.contains(i_id));
 					used_items.insert(i_id);
 
 					int supply_w = w; // all local in init data
