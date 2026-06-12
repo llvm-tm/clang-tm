@@ -47,32 +47,32 @@ $(LLVM_PLUGIN_DIR)/bin:
 
 plugin-benchmarks: plugin
 	@echo "Building plugin benchmarks..."
-	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/bank bank_tinystm BACKEND=$(BACKEND) 2>/dev/null || true
-	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/bank bank_singlelock BACKEND=$(BACKEND) 2>/dev/null || true
-	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/datastructures bin/avltree_SingleGlobalLock 2>/dev/null || true
-	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/STAMP stamp_uninstrumented 2>/dev/null || true
+	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/bank bank_tinystm BACKEND=$(BACKEND) 2>&1
+	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/bank bank_singlelock BACKEND=$(BACKEND) 2>&1
+	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/datastructures bin/avltree_SingleGlobalLock 2>&1
+	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/STAMP stamp_uninstrumented 2>&1
 	@echo "Plugin benchmarks built."
 
 expli-benchmarks:
 	@echo "Building expli benchmarks..."
-	@$(MAKE) -C $(EXPLI_BENCHMARKS_DIR) all BACKEND=$(BACKEND) 2>/dev/null || true
+	@$(MAKE) -C $(EXPLI_BENCHMARKS_DIR) all BACKEND=$(BACKEND) 2>&1
 	@echo "Expli benchmarks built."
 
 tests: plugin
 	@echo "Building all tests..."
-	@$(MAKE) -C $(LLVM_PLUGIN_DIR) clean 2>/dev/null || true
+	@$(MAKE) -C $(LLVM_PLUGIN_DIR) clean 2>&1
 	@$(MAKE) -C $(LLVM_PLUGIN_DIR) all
 	@echo "Tests built."
 
 check: tests
 	@echo "Running tests..."
-	@$(MAKE) -C $(LLVM_PLUGIN_DIR) run 2>/dev/null || true
+	@$(MAKE) -C $(LLVM_PLUGIN_DIR) run 2>&1
 
 clean:
-	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/bank clean 2>/dev/null || true
-	@$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/datastructures clean 2>/dev/null || true
-	@$(MAKE) -C $(LLVM_PLUGIN_DIR) clean 2>/dev/null || true
-	@$(MAKE) -C $(EXPLI_BENCHMARKS_DIR) clean 2>/dev/null || true
+	-$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/bank clean 2>&1
+	-$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/datastructures clean 2>&1
+	-$(MAKE) -C $(LLVM_PLUGIN_DIR) clean 2>&1
+	-$(MAKE) -C $(EXPLI_BENCHMARKS_DIR) clean 2>&1
 	rm -rf $(LLVM_PLUGIN_DIR)/bin $(LLVM_PLUGIN_DIR)/out
 	rm -f /tmp/tm_persistent_state.bin
 	@echo "Clean complete."
@@ -93,6 +93,6 @@ help:
 	@echo "Options: BACKEND=tl2, DEBUG=1"
 
 test_run: plugin-benchmarks
-	@$(PLUGIN_BENCHMARKS_DIR)/bank/bin/bank_singlelock -t 2 -d 1000 2>/dev/null || true
-	@$(PLUGIN_BENCHMARKS_DIR)/datastructures/bin/avltree_SingleGlobalLock 1 10 100 2>/dev/null || true
-	@$(PLUGIN_BENCHMARKS_DIR)/STAMP/bin/stamp_uninstrumented -b kmeans -t 2 2>/dev/null || true
+	@$(PLUGIN_BENCHMARKS_DIR)/bank/bin/bank_singlelock -t 2 -d 1000 2>&1
+	@$(PLUGIN_BENCHMARKS_DIR)/datastructures/bin/avltree_SingleGlobalLock 1 10 100 2>&1
+	@$(PLUGIN_BENCHMARKS_DIR)/STAMP/bin/stamp_uninstrumented -b kmeans -t 2 2>&1

@@ -136,7 +136,7 @@ inline bool //
 validate()  //
 {
 	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop");
+		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 	auto *tx = current_tx_wbctl;
 	for (auto &it : tx->read_set) {
@@ -195,7 +195,7 @@ inline bool //
 commit()    //
 {
 	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop");
+		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 	auto *tx = current_tx_wbctl;
 	volatile word_t commit_version = get_clock();
@@ -339,7 +339,7 @@ read_word_ctl(                                                //
 )
 {
 	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop");
+		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 	ByteOffset bo((word_t)addr);
@@ -632,7 +632,7 @@ read_from_memory:
 }
 
 inline void                                                   //
-write_word_ctl(                                               //
+write_word_ctl(                                                //
     Transaction<ReadLogEntry_wbctl, WriteLogEntry_wbctl> *tx, //
     void *addr,                                               //
     any_type_t val,                                           //
@@ -640,7 +640,7 @@ write_word_ctl(                                               //
 )
 {
 	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop");
+		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 
 	ByteOffset bo((word_t)addr);
