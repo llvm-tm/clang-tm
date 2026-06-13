@@ -3,41 +3,46 @@
 #include <cstddef>
 #include <cstdint>
 
-// ── Hook forwarding functions ──────────────────────────────
-// These are the actual extern "C" symbols seen by all callers
-// (both plugin-generated code and explicit API).
-// Each forwards to an internal dispatch pointer that defaults to
-// a stub implementation (direct access, no TM overhead).
-// Backends register real implementations via tm_register_real_hooks().
-// tm_set_num_threads(1) keeps/restores stubs; >1 activates real hooks.
+// ── Public hook variables ─────────────────────────────────────────
+// These are the actual extern "C" symbols seen by all callers (both
+// plugin-generated code and explicit API).
+//
+// Each is a function-pointer variable (not a forwarding function) so
+// that the runtime can swap the hook at runtime for:
+//   - single-thread stubs (direct access, no TM overhead)
+//   - multi-thread real TM implementations
+//   - phase-based TM (different backends based on abort rate)
+//
+// The LLVM plugin emits indirect calls (load + call through) so that
+// hook swaps take effect immediately for instrumented code too.
 
 extern "C" {
 
 // Lifecycle
-void     tm_begin();
-void     tm_end();
-void    *tm_malloc(size_t);
-void    *tm_calloc(size_t, size_t);
-void    *tm_realloc(void*, size_t);
-void     tm_free(void*);
+extern void     (*tm_begin)();
+extern void     (*tm_end)();
+extern void    *(*tm_malloc)(size_t);
+extern void    *(*tm_calloc)(size_t, size_t);
+extern void    *(*tm_realloc)(void*, size_t);
+extern void     (*tm_free)(void*);
 
 // Reads
-uint8_t  tm_read_i1(uint8_t*);
-uint16_t tm_read_i2(uint16_t*);
-uint32_t tm_read_i4(uint32_t*);
-uint64_t tm_read_i8(uint64_t*);
-float    tm_read_f4(float*);
-double   tm_read_f8(double*);
-void    *tm_read_ptr(void**);
+extern uint8_t  (*tm_read_i1)(uint8_t*);
+extern uint16_t (*tm_read_i2)(uint16_t*);
+extern uint32_t (*tm_read_i4)(uint32_t*);
+extern uint64_t (*tm_read_i8)(uint64_t*);
+extern float    (*tm_read_f4)(float*);
+extern double   (*tm_read_f8)(double*);
+extern void    *(*tm_read_ptr)(void**);
 
 // Writes
-void tm_write_i1(uint8_t*, uint8_t);
-void tm_write_i2(uint16_t*, uint16_t);
-void tm_write_i4(uint32_t*, uint32_t);
-void tm_write_i8(uint64_t*, int64_t);
-void tm_write_f4(float*, float);
-void tm_write_f8(double*, double);
-void tm_write_ptr(void**, void*);
+extern void (*tm_write_i1)(uint8_t*, uint8_t);
+extern void (*tm_write_i2)(uint16_t*, uint16_t);
+extern void (*tm_write_i4)(uint32_t*, uint32_t);
+extern void (*tm_write_i8)(uint64_t*, int64_t);
+extern void (*tm_write_f4)(float*, float);
+extern void (*tm_write_f8)(double*, double);
+extern void (*tm_write_ptr)(void**, void*);
 
 } // extern "C"
 
@@ -71,3 +76,8 @@ struct TMRealHooks {
 
 void tm_register_real_hooks(const TMRealHooks *hooks);
 void tm_set_num_threads(int n);
+void tm_hook_init_thread();
+void tm_hook_exit_thread();
+
+// Phase-based TM: atomically swap ALL hooks under a global lock.
+void tm_swap_runtime(const TMRealHooks *hooks);

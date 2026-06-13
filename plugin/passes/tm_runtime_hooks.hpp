@@ -1,6 +1,9 @@
 // tm_runtime_hooks.hpp
-// Shared type for all TM runtime hook function declarations.
-// Eliminates the 14-parameter explosion through every instrumentation function.
+// Shared type for all TM runtime hook function-pointer variables.
+// Each hook is an extern "C" function-pointer variable (e.g. void (*tm_begin)())
+// that the runtime can swap at runtime for phase-based TM, thread-count gating, etc.
+// The plugin emits indirect calls (load pointer + call through it) so that hook
+// swaps take effect immediately for both instrumented and explicit API code.
 #ifndef TM_RUNTIME_HOOKS_HPP
 #define TM_RUNTIME_HOOKS_HPP
 
@@ -12,25 +15,105 @@
 
 using namespace llvm;
 
-struct TMRuntimeHooks {
-	FunctionCallee read_i1, read_i2, read_i4, read_i8;
-	FunctionCallee read_i16, read_i32, read_i64;
-	FunctionCallee read_f4, read_f8, read_ptr;
-	FunctionCallee write_i1, write_i2, write_i4, write_i8;
-	FunctionCallee write_i16, write_i32, write_i64;
-	FunctionCallee write_f4, write_f8, write_ptr;
-	FunctionCallee begin, end;
-	FunctionCallee set_jmpbuf, get_env, sigsetjmp;
-	FunctionCallee init, exit_fn;
-	FunctionCallee init_thread, exit_thread;
-	FunctionCallee serialize_lock, serialize_unlock;
-	FunctionCallee malloc_fn, calloc_fn, realloc_fn, free_fn;
-	FunctionCallee memset_fn;
-	FunctionCallee enqueue_fn, wait_prev_tx_fn;
-	FunctionCallee get_thread_state;
-	FunctionCallee trace_fn;
+// ── TMRuntimeHook ─────────────────────────────────────────────────
+// A single TM runtime function-pointer variable.
+// Stores the GlobalVariable* (the extern hook symbol) and the
+// FunctionType* (for constructing indirect call IR).
+struct TMRuntimeHook {
+	GlobalVariable *gv = nullptr;
+	FunctionType  *fnTy = nullptr;
 
-	bool valid() { return read_i4.getCallee() && write_i4.getCallee(); }
+	explicit operator bool() const { return gv && fnTy; }
+
+	// Convenience accessors (mimic FunctionCallee interface)
+	FunctionType *getFunctionType() const { return fnTy; }
+	GlobalVariable *getGlobalVariable() const { return gv; }
+};
+
+// ── Helpers ───────────────────────────────────────────────────────
+// Get or create a GlobalVariable for the given hook name.
+// If the user's bitcode already declares `extern void (*tm_begin)()`,
+// we find that existing GlobalVariable. Otherwise we create one.
+static GlobalVariable *getOrCreateHookGV(Module &M, StringRef Name) {
+	if (auto *GV = M.getGlobalVariable(Name))
+		return GV;
+	return new GlobalVariable(M, PointerType::getUnqual(M.getContext()), false,
+	                          GlobalValue::ExternalLinkage, nullptr, Name);
+}
+
+// Declare a single hook variable and return the TMRuntimeHook wrapper.
+static TMRuntimeHook declareHook(Module &M, StringRef Name,
+                                 Type *RetTy, ArrayRef<Type *> ParamTys) {
+	TMRuntimeHook H;
+	H.fnTy = FunctionType::get(RetTy, ParamTys, false);
+	H.gv   = getOrCreateHookGV(M, Name);
+	return H;
+}
+
+// Emit an indirect call through a TMRuntimeHook.
+// Generates: %ptr = load ptr, ptr @hook_name
+//            call <fnTy> %ptr(args...)
+static CallInst *emitHookCall(IRBuilder<> &B, const TMRuntimeHook &Hook,
+                              ArrayRef<Value *> Args, const Twine &Name = "") {
+	Value *FnPtr = B.CreateLoad(PointerType::getUnqual(B.getContext()),
+	                            Hook.gv, "hook." + Hook.gv->getName());
+	return B.CreateCall(Hook.fnTy, FnPtr, Args, Name);
+}
+
+// Emit an indirect invoke through a TMRuntimeHook.
+static InvokeInst *emitHookInvoke(IRBuilder<> &B, const TMRuntimeHook &Hook,
+                                  ArrayRef<Value *> Args,
+                                  BasicBlock *Normal, BasicBlock *Unwind,
+                                  const Twine &Name = "") {
+	Value *FnPtr = B.CreateLoad(PointerType::getUnqual(B.getContext()),
+	                            Hook.gv, "hook." + Hook.gv->getName());
+	return B.CreateInvoke(Hook.fnTy, FnPtr, Normal, Unwind, Args, Name);
+}
+
+// Create an InvokeInst directly (when no IRBuilder is available, e.g. in
+// helper lambdas that create new instructions).
+static InvokeInst *createHookInvoke(LLVMContext &Ctx, const TMRuntimeHook &Hook,
+                                    ArrayRef<Value *> Args,
+                                    BasicBlock *Normal, BasicBlock *Unwind,
+                                    const Twine &Name = "") {
+	auto *FnPtrTy = PointerType::getUnqual(Ctx);
+	auto *FnPtr   = new LoadInst(FnPtrTy, Hook.gv, "hook." + Hook.gv->getName(),
+	                             false, Unwind->getFirstInst());
+	return InvokeInst::Create(Hook.fnTy, FnPtr, Normal, Unwind, Args, {}, Name);
+}
+
+// Create a CallInst directly (when no IRBuilder is available).
+static CallInst *createHookCall(LLVMContext &Ctx, const TMRuntimeHook &Hook,
+                                ArrayRef<Value *> Args,
+                                Instruction *InsertBefore,
+                                const Twine &Name = "") {
+	auto *FnPtrTy = PointerType::getUnqual(Ctx);
+	auto *FnPtr   = new LoadInst(FnPtrTy, Hook.gv, "hook." + Hook.gv->getName(),
+	                             false, InsertBefore);
+	return CallInst::Create(Hook.fnTy, FnPtr, Args, {}, Name, InsertBefore);
+}
+
+// ── TMRuntimeHooks ────────────────────────────────────────────────
+// Collection of all TM runtime hook variables.
+struct TMRuntimeHooks {
+	TMRuntimeHook read_i1, read_i2, read_i4, read_i8;
+	TMRuntimeHook read_i16, read_i32, read_i64;
+	TMRuntimeHook read_f4, read_f8, read_ptr;
+	TMRuntimeHook write_i1, write_i2, write_i4, write_i8;
+	TMRuntimeHook write_i16, write_i32, write_i64;
+	TMRuntimeHook write_f4, write_f8, write_ptr;
+	TMRuntimeHook begin, end;
+	TMRuntimeHook set_jmpbuf, get_env, sigsetjmp;
+	TMRuntimeHook init, exit_fn;
+	TMRuntimeHook init_thread, exit_thread;
+	TMRuntimeHook serialize_lock, serialize_unlock;
+	TMRuntimeHook malloc_fn, calloc_fn, realloc_fn, free_fn;
+	TMRuntimeHook memset_fn;
+	TMRuntimeHook enqueue_fn, wait_prev_tx_fn;
+	TMRuntimeHook get_thread_state;
+	TMRuntimeHook trace_fn;
+
+	bool valid() { return read_i4 && write_i4; }
 
 	static TMRuntimeHooks declareAll(Module &M,
 	                                 LLVMContext &Ctx,
@@ -47,7 +130,7 @@ struct TMRuntimeHooks {
 		auto *i8PtrTy = PointerType::getUnqual(Ctx);
 
 		auto hook = [&](StringRef N, Type *R, ArrayRef<Type *> A) {
-			return M.getOrInsertFunction(N, FunctionType::get(R, A, false));
+			return declareHook(M, N, R, A);
 		};
 
 		h.init = hook("tm_init", voidTy, {});
@@ -59,12 +142,9 @@ struct TMRuntimeHooks {
 		h.set_jmpbuf = hook("tm_set_jmpbuf", voidTy, {i8PtrTy});
 		h.get_env = hook("tm_get_env", i8PtrTy, {});
 
-		{ // declare sigsetjmp/setjmp with returns_twice attribute
-			auto *SJF = cast<Function>(
-			    hook(SetjmpFunc, i32Ty, {i8PtrTy, i32Ty}).getCallee());
-			SJF->addFnAttr(Attribute::ReturnsTwice);
-			h.sigsetjmp = FunctionCallee(SJF);
-		}
+		// sigsetjmp needs ReturnsTwice attribute set on the CallInst
+		h.sigsetjmp = hook(SetjmpFunc, i32Ty, {i8PtrTy, i32Ty});
+
 		h.serialize_lock = hook("tm_serialize_lock", voidTy, {});
 		h.serialize_unlock = hook("tm_serialize_unlock", voidTy, {});
 		h.malloc_fn = hook("tm_malloc", i8PtrTy, {i64Ty});
@@ -110,7 +190,7 @@ struct TMRuntimeHooks {
 // Forward declaration for --emit-tm-trace (defined in TMInstrumentPass.cpp)
 extern llvm::cl::opt<bool> EmitTrace;
 
-// Helpers to emit tm_read/tm_write calls based on LLVM types.
+// Helpers to emit tm_read/tm_write calls through hook variables.
 // These replace the duplicated switch-on-type chains.
 static Value *emitTMRead(IRBuilder<> &B, Value *Ptr, Type *Ty, const TMRuntimeHooks &H)
 {
@@ -125,27 +205,27 @@ static Value *emitTMRead(IRBuilder<> &B, Value *Ptr, Type *Ty, const TMRuntimeHo
 		Value *TypeCode = ConstantInt::get(i32Ty, 0); // 0 = read
 		Value *WidthVal = ConstantInt::get(i64Ty, Ty->getScalarSizeInBits() / 8);
 		Value *ValPlaceholder = ConstantInt::get(i64Ty, 0);
-		B.CreateCall(H.trace_fn, {TypeCode, PC, WidthVal, ValPlaceholder});
+		emitHookCall(B, H.trace_fn, {TypeCode, PC, WidthVal, ValPlaceholder});
 	}
 
 	if (Ty->isIntegerTy(1)) {
-		Value *V = B.CreateCall(H.read_i1, {PC});
+		Value *V = emitHookCall(B, H.read_i1, {PC});
 		return B.CreateTrunc(V, Ty);
 	}
 	if (Ty->isIntegerTy(8))
-		return B.CreateCall(H.read_i1, {PC});
+		return emitHookCall(B, H.read_i1, {PC});
 	if (Ty->isIntegerTy(16))
-		return B.CreateCall(H.read_i2, {PC});
+		return emitHookCall(B, H.read_i2, {PC});
 	if (Ty->isIntegerTy(32))
-		return B.CreateCall(H.read_i4, {PC});
+		return emitHookCall(B, H.read_i4, {PC});
 	if (Ty->isIntegerTy(64))
-		return B.CreateCall(H.read_i8, {PC});
+		return emitHookCall(B, H.read_i8, {PC});
 
 	// Integer types wider than 64 bits (i128, i256, i512): delegate to
 	// wide runtime hooks that handle multiple tm_read_i8 calls internally.
 	if (Ty->isIntegerTy()) {
 		unsigned BitWidth = Ty->getIntegerBitWidth();
-		FunctionCallee Hook;
+		TMRuntimeHook Hook;
 		if (BitWidth <= 128)
 			Hook = H.read_i16;
 		else if (BitWidth <= 256)
@@ -154,16 +234,16 @@ static Value *emitTMRead(IRBuilder<> &B, Value *Ptr, Type *Ty, const TMRuntimeHo
 			Hook = H.read_i64;
 		AllocaInst *Alloca = B.CreateAlloca(Ty);
 		Value *OutBuf = B.CreateBitCast(Alloca, i8PtrTy);
-		B.CreateCall(Hook, {PC, OutBuf});
+		emitHookCall(B, Hook, {PC, OutBuf});
 		return B.CreateLoad(Ty, Alloca);
 	}
 
 	if (Ty->isFloatTy())
-		return B.CreateCall(H.read_f4, {PC});
+		return emitHookCall(B, H.read_f4, {PC});
 	if (Ty->isDoubleTy())
-		return B.CreateCall(H.read_f8, {PC});
+		return emitHookCall(B, H.read_f8, {PC});
 	if (Ty->isPointerTy()) {
-		Value *V = B.CreateCall(H.read_ptr, {PC});
+		Value *V = emitHookCall(B, H.read_ptr, {PC});
 		return B.CreateBitCast(V, Ty);
 	}
 
@@ -199,7 +279,7 @@ static Value *emitTMRead(IRBuilder<> &B, Value *Ptr, Type *Ty, const TMRuntimeHo
 		Value *BytePtr = B.CreateGEP(Type::getInt8Ty(Ctx),
 		                             PC,
 		                             ConstantInt::get(i64Ty, i));
-		Value *ByteVal = B.CreateCall(H.read_i1, {BytePtr});
+		Value *ByteVal = emitHookCall(B, H.read_i1, {BytePtr});
 		Value *ExtByte = B.CreateZExt(ByteVal, IntTy);
 		if (i > 0)
 			ExtByte = B.CreateShl(ExtByte, ConstantInt::get(IntTy, i * 8));
@@ -222,27 +302,27 @@ static bool emitTMWrite(IRBuilder<> &B, Value *Ptr, Value *Val, const TMRuntimeH
 		Value *TypeCode = ConstantInt::get(i32Ty, 1); // 1 = write
 		Value *WidthVal = ConstantInt::get(i64Ty, Ty->getScalarSizeInBits() / 8);
 		Value *ValWide = B.CreateZExtOrBitCast(Val, i64Ty);
-		B.CreateCall(H.trace_fn, {TypeCode, PC, WidthVal, ValWide});
+		emitHookCall(B, H.trace_fn, {TypeCode, PC, WidthVal, ValWide});
 	}
 
 	if (Ty->isIntegerTy(1)) {
-		B.CreateCall(H.write_i1, {PC, B.CreateZExt(Val, Type::getInt8Ty(Ctx))});
+		emitHookCall(B, H.write_i1, {PC, B.CreateZExt(Val, Type::getInt8Ty(Ctx))});
 		return true;
 	}
 	if (Ty->isIntegerTy(8)) {
-		B.CreateCall(H.write_i1, {PC, Val});
+		emitHookCall(B, H.write_i1, {PC, Val});
 		return true;
 	}
 	if (Ty->isIntegerTy(16)) {
-		B.CreateCall(H.write_i2, {PC, Val});
+		emitHookCall(B, H.write_i2, {PC, Val});
 		return true;
 	}
 	if (Ty->isIntegerTy(32)) {
-		B.CreateCall(H.write_i4, {PC, Val});
+		emitHookCall(B, H.write_i4, {PC, Val});
 		return true;
 	}
 	if (Ty->isIntegerTy(64)) {
-		B.CreateCall(H.write_i8, {PC, Val});
+		emitHookCall(B, H.write_i8, {PC, Val});
 		return true;
 	}
 
@@ -250,7 +330,7 @@ static bool emitTMWrite(IRBuilder<> &B, Value *Ptr, Value *Val, const TMRuntimeH
 	// wide runtime hooks that handle multiple tm_write_i8 calls internally.
 	if (Ty->isIntegerTy()) {
 		unsigned BitWidth = Ty->getIntegerBitWidth();
-		FunctionCallee Hook;
+		TMRuntimeHook Hook;
 		if (BitWidth <= 128)
 			Hook = H.write_i16;
 		else if (BitWidth <= 256)
@@ -260,22 +340,22 @@ static bool emitTMWrite(IRBuilder<> &B, Value *Ptr, Value *Val, const TMRuntimeH
 		AllocaInst *Alloca = B.CreateAlloca(Ty);
 		B.CreateStore(Val, Alloca);
 		Value *ValBuf = B.CreateBitCast(Alloca, i8PtrTy);
-		B.CreateCall(Hook, {PC, ValBuf});
+		emitHookCall(B, Hook, {PC, ValBuf});
 		return true;
 	}
 
 	if (Ty->isFloatTy()) {
-		B.CreateCall(H.write_f4, {PC, Val});
+		emitHookCall(B, H.write_f4, {PC, Val});
 		return true;
 	}
 	if (Ty->isDoubleTy()) {
-		B.CreateCall(H.write_f8, {PC, Val});
+		emitHookCall(B, H.write_f8, {PC, Val});
 		return true;
 	}
 	if (Ty->isPointerTy()) {
 		auto *i8PtrTy2 = PointerType::getUnqual(Ctx);
 		Value *VC = B.CreateBitCast(Val, i8PtrTy2);
-		B.CreateCall(H.write_ptr, {PC, VC});
+		emitHookCall(B, H.write_ptr, {PC, VC});
 		return true;
 	}
 
@@ -312,7 +392,7 @@ static bool emitTMWrite(IRBuilder<> &B, Value *Ptr, Value *Val, const TMRuntimeH
 		Value *BytePtr = B.CreateGEP(Type::getInt8Ty(Ctx),
 		                             PC,
 		                             ConstantInt::get(i64Ty, i));
-		B.CreateCall(H.write_i1, {BytePtr, ByteVal});
+		emitHookCall(B, H.write_i1, {BytePtr, ByteVal});
 	}
 	return true;
 }

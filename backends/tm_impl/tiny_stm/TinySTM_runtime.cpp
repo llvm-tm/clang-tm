@@ -135,6 +135,7 @@ void tm_exit()
 
 void tm_init_thread()
 {
+	tm_hook_init_thread();
 	tm_init_thread_call_count++;
 #ifndef NDEBUG
 	(void)0;
@@ -153,6 +154,7 @@ void tm_init_thread()
 
 void tm_exit_thread()
 {
+	tm_hook_exit_thread();
 	// no-op — Transaction object persists for the thread's lifetime
 }
 

@@ -424,11 +424,11 @@ static void replaceCallWithEnqueue(CallBase *Call, Function *DispatchFn,
 	StructType *ArgsTy = createArgsStructType(CalledFn, Ctx);
 	if (!ArgsTy) {
 		B.SetInsertPoint(Call);
-		B.CreateCall(H.enqueue_fn, {
+		emitHookCall(B, H.enqueue_fn, {
 		    B.CreateBitCast(DispatchFn, i8PtrTy),
 		    ConstantPointerNull::get(i8PtrTy)});
 		if (sync)
-			B.CreateCall(H.wait_prev_tx_fn, {});
+			emitHookCall(B, H.wait_prev_tx_fn, {});
 		return;
 	}
 
@@ -448,10 +448,10 @@ static void replaceCallWithEnqueue(CallBase *Call, Function *DispatchFn,
 		++Idx;
 	}
 
-	B.CreateCall(H.enqueue_fn, {B.CreateBitCast(DispatchFn, i8PtrTy), RawArgs});
+	emitHookCall(B, H.enqueue_fn, {B.CreateBitCast(DispatchFn, i8PtrTy), RawArgs});
 
 	if (sync)
-		B.CreateCall(H.wait_prev_tx_fn, {});
+		emitHookCall(B, H.wait_prev_tx_fn, {});
 }
 
 // ===========================================================================
