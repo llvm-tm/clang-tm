@@ -80,15 +80,21 @@ static void real_tm_end() {
 }
 
 static void *real_tm_malloc(size_t size) {
-    void *p = ::operator new(size);
-    if (p) tm_track_spec_alloc(p);
+    void *p = stm::tm_region_malloc(size);
+    if (p) {
+        std::memset(p, 0, size);
+        tm_track_spec_alloc(p);
+    }
     return p;
 }
 
 static void *real_tm_calloc(size_t nmemb, size_t size) {
     size_t total = nmemb * size;
-    void *p = ::operator new(total);
-    if (p) { std::memset(p, 0, total); tm_track_spec_alloc(p); }
+    void *p = stm::tm_region_malloc(total);
+    if (p) {
+        std::memset(p, 0, total);
+        tm_track_spec_alloc(p);
+    }
     return p;
 }
 
@@ -98,15 +104,16 @@ static void real_tm_free(void *ptr) {
     if (g_in_tx)
         tm_free_append_deferred(ptr);
     else
-        ::operator delete(ptr);
+        stm::tm_region_free(ptr);
 }
 
 static void *real_tm_realloc(void *ptr, size_t size) {
     if (!ptr) return real_tm_malloc(size);
-    void *p = ::operator new(size);
+    void *p = stm::tm_region_malloc(size);
     if (p) {
         std::memcpy(p, ptr, size);
-        real_tm_free(ptr);
+        if (stm::isTMAddress(ptr))
+            stm::tm_region_free(ptr);
         tm_track_spec_alloc(p);
     }
     return p;

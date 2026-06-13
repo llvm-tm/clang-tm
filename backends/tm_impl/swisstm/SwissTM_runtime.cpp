@@ -13,6 +13,14 @@
 #include "tm_alloc_overrides.hpp"
 #include "tm_thread_state.hpp"
 #include "tm_hooks.hpp"
+
+// Shared TLS variables (defined in tm_hooks.cpp, used by all backends)
+extern "C" {
+extern __thread int32_t    tm_nested_call_counter;
+extern __thread int32_t    tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
+}
+
 extern const TMRealHooks g_swisstm_hooks;
 
 thread_local bool g_in_tx = false;
@@ -27,10 +35,7 @@ extern "C" {
 // thread-local symbol with the same name, and the linker aliases them.
 // siglongjmp to this buffer jumps back to the plugin's sigsetjmp.
 __thread int8_t tm_is_init_ready = 0;
-__thread int32_t tm_nested_call_counter = 0;
-__thread int32_t tm_longjmp_ret = 0;
 static thread_local TMThreadState g_tm_state{0, 0};
-__thread sigjmp_buf tm_jmpbuf;
 
 TMThreadState *tm_get_thread_state() {
     return &g_tm_state;

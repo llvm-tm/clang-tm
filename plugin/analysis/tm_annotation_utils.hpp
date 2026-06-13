@@ -143,39 +143,7 @@ static void collectTMGlobals(Module &M, SmallPtrSetImpl<const Value *> &TMValues
 	});
 }
 
-// Check if a function uses any TM-annotated globals
-// PURPOSE: Determine if a function uses TM globals (needs thread init/exit)
-//          Used to identify thread entry points
-// NOTE: This checks if the function accesses any global that has "tm" annotation
-static bool hasTMGlobals(Function &F)
-{
-	Module *M = F.getParent();
 
-	// First, collect all TM-annotated globals
-	SmallPtrSet<const Value *, 8> TMGlobals;
-	collectTMGlobals(*M, TMGlobals);
-
-	// Check if the function accesses any of these globals
-	for (auto &BB : F) {
-		for (auto &I : BB) {
-			if (auto *Load = dyn_cast<LoadInst>(&I)) {
-				if (TMGlobals.count(Load->getPointerOperand())) {
-					TM_DEBUG("Function %s uses TM global",
-					         F.getName().str().c_str());
-					return true;
-				}
-			}
-			if (auto *Store = dyn_cast<StoreInst>(&I)) {
-				if (TMGlobals.count(Store->getPointerOperand())) {
-					TM_DEBUG("Function %s uses TM global",
-					         F.getName().str().c_str());
-					return true;
-				}
-			}
-		}
-	}
-	return false;
-}
 
 // Check if a specific GlobalVariable has the "tm" annotation.
 // Uses a cached set for O(1) lookups.

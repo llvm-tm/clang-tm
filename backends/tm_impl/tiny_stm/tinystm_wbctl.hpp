@@ -348,7 +348,6 @@ read_word_ctl(                                                //
 	TM_ASSERT(tx->active, "tx not active");
 
 	// No bypass: the plugin ensures only TM-tracked addresses reach the runtime.
-	// (Non-region addresses like shared globals in expli tests are also valid.)
 
 #ifdef DEBUG_WBCTL
 	// Debug: detect corrupted addresses

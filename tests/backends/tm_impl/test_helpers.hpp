@@ -45,6 +45,9 @@ extern void    *(*tm_read_ptr)(void**);
 extern void     (*tm_write_ptr)(void**, void*);
 }
 
+// tm_set_num_threads is a C++ function (defined in tm_hooks.cpp, not extern "C")
+void tm_set_num_threads(int n);
+
 // ── Convenience wrappers (omit symbol_id for test code) ────────────
 inline uint8_t  tm_r1(uint8_t *a)  { return tm_read_i1(a); }
 inline uint16_t tm_r2(uint16_t *a) { return tm_read_i2(a); }

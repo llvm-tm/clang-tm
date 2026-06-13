@@ -18,6 +18,8 @@
 
 #include "tm_thread_state.hpp"
 #include "tm_hooks.hpp"
+#include "tm_region_allocator.hpp"
+#include "tm_alloc_overrides.hpp"
 thread_local bool g_in_tx = false;
 
 static std::mutex global_tx_lock;
@@ -169,10 +171,31 @@ static void real_tm_write_f4(float *addr, float val) { *addr = val; }
 static void real_tm_write_f8(double *addr, double val) { *addr = val; }
 static void real_tm_write_ptr(void **addr, void *val) { *addr = val; }
 
-static void *real_tm_malloc(size_t size) { return malloc(size); }
-static void *real_tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
-static void *real_tm_realloc(void *ptr, size_t size) { return realloc(ptr, size); }
-static void  real_tm_free(void *ptr) { free(ptr); }
+static void *real_tm_malloc(size_t size) {
+    void *p = stm::tm_region_malloc(size);
+    if (p) { std::memset(p, 0, size); tm_track_spec_alloc(p); }
+    return p;
+}
+static void *real_tm_calloc(size_t nmemb, size_t size) {
+    size_t total = nmemb * size;
+    void *p = stm::tm_region_malloc(total);
+    if (p) { std::memset(p, 0, total); tm_track_spec_alloc(p); }
+    return p;
+}
+static void *real_tm_realloc(void *ptr, size_t size) {
+    if (!ptr) return real_tm_malloc(size);
+    void *p = stm::tm_region_malloc(size);
+    if (p) { std::memcpy(p, ptr, size); stm::tm_region_free(ptr); tm_track_spec_alloc(p); }
+    return p;
+}
+static void  real_tm_free(void *ptr) {
+    if (!ptr) return;
+    tm_untrack_spec_alloc(ptr);
+    if (g_in_tx)
+        tm_free_append_deferred(ptr);
+    else
+        stm::tm_region_free(ptr);
+}
 
 const TMRealHooks g_sgl_hooks = {
     .begin    = real_tm_begin,

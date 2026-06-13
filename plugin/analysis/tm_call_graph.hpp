@@ -21,65 +21,7 @@ using namespace llvm;
 // Inline capacity hint for call graph SmallPtrSet containers
 constexpr size_t CALLGRAPH_INLINE_CAPACITY = 32;
 
-// Collect functions called directly from a function
-// PURPOSE: Build a set of functions that are called directly from F.
-//          Used as a helper for call graph traversal.
-static void collectDirectCalls(Function &F, SmallPtrSet<Function *, CALLGRAPH_INLINE_CAPACITY> &CalledFuncs)
-{
-	for (auto &BB : F) {
-		for (auto &I : BB) {
-			if (auto *Call = dyn_cast<CallBase>(&I)) {
-				if (Function *Callee = Call->getCalledFunction()) {
-					if (!Callee->isDeclaration()) {
-						CalledFuncs.insert(Callee);
-					}
-				}
-			}
-		}
-	}
-}
 
-// Check if a function calls any transaction-annotated functions
-// PURPOSE: Used to identify thread entry points. If a function calls
-//          transaction functions but is not one itself, it's a thread entry.
-static bool callsTransactionFunctions(Function &F, Module &M)
-{
-	for (auto &BB : F) {
-		for (auto &I : BB) {
-			if (auto *Call = dyn_cast<CallBase>(&I)) {
-				if (Function *Callee = Call->getCalledFunction()) {
-					if (hasAnnotation(*Callee, TX_ANNOT)) {
-						TM_DEBUG("Function %s calls transaction function %s",
-						         F.getName().str().c_str(),
-						         Callee->getName().str().c_str());
-						return true;
-					}
-				}
-			}
-		}
-	}
-	return false;
-}
-
-// Check if any function directly called by F, itself directly calls a transaction function
-// PURPOSE: Distinguish "thread entry points" from "transaction callers".
-//          A thread entry (e.g., worker_thread) does NOT directly call a transaction
-//          but calls helpers that do. A direct caller of a transaction should NOT
-//          get tm_init_thread/tm_exit_thread instrumentation.
-static bool transitivelyCallsTransactionFunctions(Function &F, Module &M)
-{
-	SmallPtrSet<Function *, CALLGRAPH_INLINE_CAPACITY> CalledFuncs;
-	collectDirectCalls(F, CalledFuncs);
-	for (Function *Callee : CalledFuncs) {
-		if (callsTransactionFunctions(*Callee, M)) {
-			TM_DEBUG("Function %s transitively calls a transaction function through %s",
-			         F.getName().str().c_str(),
-			         Callee->getName().str().c_str());
-			return true;
-		}
-	}
-	return false;
-}
 
 // Recursively collect all functions reachable from a transaction-annotated function
 // PURPOSE: Build the transitive closure of functions called from transactions.
