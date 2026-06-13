@@ -148,6 +148,10 @@ void tm_hook_exit_thread() {
     s_thread_count.fetch_sub(1);
 }
 
+const TMRealHooks *tm_get_real_hooks() {
+    return &s_real_hooks;
+}
+
 // Phase-based TM: atomically swap ALL hooks under the global lock.
 // This allows the runtime to switch backends at runtime based on
 // abort rate, workload characteristics, etc.

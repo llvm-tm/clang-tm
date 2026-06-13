@@ -79,5 +79,8 @@ void tm_set_num_threads(int n);
 void tm_hook_init_thread();
 void tm_hook_exit_thread();
 
+// Returns the currently registered real hooks (for use with tm_swap_runtime).
+const TMRealHooks *tm_get_real_hooks();
+
 // Phase-based TM: atomically swap ALL hooks under a global lock.
 void tm_swap_runtime(const TMRealHooks *hooks);
