@@ -14,6 +14,7 @@ int main() {
     printf("Expected:   %d\n\n", NUM_THREADS * ITERATIONS);
 
     tm_init();
+    tm_set_num_threads(NUM_THREADS);
     auto shared_counter = (volatile uint64_t*)tm_malloc(sizeof(uint64_t));
     *shared_counter = 0;
 

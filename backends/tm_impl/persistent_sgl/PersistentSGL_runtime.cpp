@@ -16,6 +16,9 @@ thread_local bool g_in_tx = false;
 #include <sys/stat.h>
 
 #include "rel_ptr.hpp"
+#include "tm_hooks.hpp"
+
+extern const TMRealHooks g_psgl_hooks;
 
 static std::mutex global_tx_lock;
 static std::atomic<bool> initialized{false};
@@ -25,6 +28,7 @@ static std::atomic<int64_t> g_tm_tx_count{0};
 
 __thread std::jmp_buf tm_jmpbuf;
 static thread_local TMThreadState g_tm_persist_state{0, 0};
+static std::recursive_mutex g_serialize_mutex;
 
 static constexpr size_t PERSIST_HEAP_SIZE = 64UL * 1024 * 1024; // 64 MB
 
@@ -42,6 +46,171 @@ struct SymbolRange {
 static SymbolRange* g_sym_ranges = nullptr;
 static uint32_t g_sym_count = 0;
 
+static size_t addr_to_file_off(uintptr_t addr) {
+    if (g_sym_count == 0) return (size_t)-1;
+    int lo = 0, hi = (int)g_sym_count - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (addr < g_sym_ranges[mid].addr_start)
+            hi = mid - 1;
+        else if (addr >= g_sym_ranges[mid].addr_end)
+            lo = mid + 1;
+        else
+            return g_sym_ranges[mid].file_off + (addr - g_sym_ranges[mid].addr_start);
+    }
+    return (size_t)-1;
+}
+
+static void persist_write(size_t file_off, const void* val, size_t sz) {
+    if (g_mmap_base && file_off != (size_t)-1)
+        memcpy(g_mmap_base + file_off, val, sz);
+}
+
+// ── Real hook implementations ─────────────────────────────────
+
+static void real_tm_begin() {
+    g_in_tx = true;
+    g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
+    global_tx_lock.lock();
+}
+
+static void real_tm_end() {
+    g_in_tx = false;
+    g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
+    g_tm_tx_count.fetch_add(1, std::memory_order_relaxed);
+    global_tx_lock.unlock();
+}
+
+static uint8_t real_tm_read_i1(uint8_t* addr) { return *addr; }
+static uint16_t real_tm_read_i2(uint16_t* addr) { return *addr; }
+static uint32_t real_tm_read_i4(uint32_t* addr) { return *addr; }
+static uint64_t real_tm_read_i8(uint64_t* addr) { return *addr; }
+static float real_tm_read_f4(float* addr) { return *addr; }
+static double real_tm_read_f8(double* addr) { return *addr; }
+static void* real_tm_read_ptr(void** addr) { return (void*)*addr; }
+
+static void real_tm_write_i1(uint8_t* addr, uint8_t val) {
+    size_t off = addr_to_file_off((uintptr_t)addr);
+    *addr = val;
+    if (off != (size_t)-1) persist_write(off, &val, 1);
+}
+
+static void real_tm_write_i2(uint16_t* addr, uint16_t val) {
+    size_t off = addr_to_file_off((uintptr_t)addr);
+    *addr = val;
+    if (off != (size_t)-1) persist_write(off, &val, 2);
+}
+
+static void real_tm_write_i4(uint32_t* addr, uint32_t val) {
+    size_t off = addr_to_file_off((uintptr_t)addr);
+    *addr = val;
+    if (off != (size_t)-1) persist_write(off, &val, 4);
+}
+
+static void real_tm_write_i8(uint64_t* addr, int64_t val) {
+    size_t off = addr_to_file_off((uintptr_t)addr);
+    *addr = val;
+    if (off != (size_t)-1) persist_write(off, &val, 8);
+}
+
+static void real_tm_write_f4(float* addr, float val) {
+    size_t off = addr_to_file_off((uintptr_t)addr);
+    *addr = val;
+    if (off != (size_t)-1) persist_write(off, &val, 4);
+}
+
+static void real_tm_write_f8(double* addr, double val) {
+    size_t off = addr_to_file_off((uintptr_t)addr);
+    *addr = val;
+    if (off != (size_t)-1) persist_write(off, &val, 8);
+}
+
+static void real_tm_write_ptr(void** addr, void* val) {
+    size_t off = addr_to_file_off((uintptr_t)addr);
+    *addr = val;
+    if (off != (size_t)-1) persist_write(off, &val, sizeof(void*));
+}
+
+// TM allocator stubs (redirect to system allocator)
+// ── Persistent allocator ────────────────────────────────────
+// Bump-allocates from the persistent mmap region so allocations
+// survive process restarts.  tm_free is a no-op (bump allocator).
+
+static void* real_tm_malloc(size_t size) {
+    if (!g_mmap_base || size == 0) return malloc(size);
+    if (g_in_tx) {
+        // Bump-allocate from the persistent heap
+        uint64_t old_bump = __atomic_fetch_add(
+            reinterpret_cast<uint64_t*>(g_mmap_base + 16), size, __ATOMIC_RELAXED);
+        if (old_bump + size > PERSIST_HEAP_SIZE) {
+            fprintf(stderr, "PersistentSGL: OOM (%zu > %zu)\n",
+                    old_bump + size, PERSIST_HEAP_SIZE);
+            return malloc(size);
+        }
+        return g_mmap_base + heap_start_off_global + old_bump;
+    }
+    return malloc(size);
+}
+
+static void* real_tm_calloc(size_t nmemb, size_t size) {
+    size_t total = nmemb * size;
+    void* p = real_tm_malloc(total);
+    if (p) memset(p, 0, total);
+    return p;
+}
+
+static void* real_tm_realloc(void* ptr, size_t size) {
+    if (!ptr) return real_tm_malloc(size);
+    if (!g_mmap_base) return realloc(ptr, size);
+    // Check if ptr is in the persistent heap
+    uint8_t* heap_start = g_mmap_base + heap_start_off_global;
+    if (ptr >= (void*)heap_start && ptr < (void*)(heap_start + PERSIST_HEAP_SIZE)) {
+        // In persistent heap: allocate new, copy (bump allocator can't shrink/grow in place)
+        void* newp = real_tm_malloc(size);
+        if (newp && size > 0) {
+            // Copy old data (up to min(old_size, new_size))
+            // We don't know old_size, copy up to new_size
+            memcpy(newp, ptr, size);
+        }
+        return newp;
+    }
+    return realloc(ptr, size);
+}
+
+static void real_tm_free(void* ptr) {
+    if (!g_mmap_base || !ptr) return;
+    uint8_t* heap_start = g_mmap_base + heap_start_off_global;
+    if (ptr >= (void*)heap_start && ptr < (void*)(heap_start + PERSIST_HEAP_SIZE)) {
+        return; // persistent heap: no-op (bump allocator)
+    }
+    free(ptr); // system heap
+}
+
+const TMRealHooks g_psgl_hooks = {
+    real_tm_begin,
+    real_tm_end,
+    real_tm_malloc,
+    real_tm_calloc,
+    real_tm_realloc,
+    real_tm_free,
+    real_tm_read_i1,
+    real_tm_read_i2,
+    real_tm_read_i4,
+    real_tm_read_i8,
+    real_tm_read_f4,
+    real_tm_read_f8,
+    real_tm_read_ptr,
+    real_tm_write_i1,
+    real_tm_write_i2,
+    real_tm_write_i4,
+    real_tm_write_i8,
+    real_tm_write_f4,
+    real_tm_write_f8,
+    real_tm_write_ptr,
+};
+
+// ── Extern "C" API ────────────────────────────────────────────
+
 extern "C" {
 
 TMThreadState *tm_get_thread_state() {
@@ -54,6 +223,7 @@ extern void* tm_symbol_addresses[];
 extern uint64_t tm_symbol_sizes[];
 
 void tm_init() {
+    tm_register_real_hooks(&g_psgl_hooks);
 
     uint32_t n = tm_symbol_count;
     if (n == 0) {
@@ -186,6 +356,7 @@ static constexpr uintptr_t PERSIST_MMAP_FIXED_ADDR = 0x600000000000ULL;
 }
 
 void tm_init_thread() {
+    tm_hook_init_thread();
 }
 
 void tm_exit() {
@@ -208,9 +379,9 @@ void tm_exit() {
     initialized.store(false, std::memory_order_seq_cst);
 }
 
-void tm_exit_thread() {}
-
-static std::recursive_mutex g_serialize_mutex;
+void tm_exit_thread() {
+    tm_hook_exit_thread();
+}
 
 void tm_serialize_lock() { g_serialize_mutex.lock(); }
 
@@ -231,43 +402,6 @@ void tm_set_env(sigjmp_buf* env) {
 
 void tm_load_symbols(void* symbol_table, uint32_t symbol_count) {}
 
-static size_t addr_to_file_off(uintptr_t addr) {
-    if (g_sym_count == 0) return (size_t)-1;
-    int lo = 0, hi = (int)g_sym_count - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        if (addr < g_sym_ranges[mid].addr_start)
-            hi = mid - 1;
-        else if (addr >= g_sym_ranges[mid].addr_end)
-            lo = mid + 1;
-        else
-            return g_sym_ranges[mid].file_off + (addr - g_sym_ranges[mid].addr_start);
-    }
-    return (size_t)-1;
-}
-
-static void persist_write(size_t file_off, const void* val, size_t sz) {
-    if (g_mmap_base && file_off != (size_t)-1)
-        memcpy(g_mmap_base + file_off, val, sz);
-}
-
-void tm_begin() {
-    g_in_tx = true;
-    g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
-    global_tx_lock.lock();
-}
-
-void tm_end() {
-    g_in_tx = false;
-    g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
-    g_tm_tx_count.fetch_add(1, std::memory_order_relaxed);
-    global_tx_lock.unlock();
-}
-
-uint8_t tm_read_i1(volatile uint8_t* addr) { return *addr; }
-uint16_t tm_read_i2(volatile uint16_t* addr) { return *addr; }
-uint32_t tm_read_i4(volatile uint32_t* addr) { return *addr; }
-uint64_t tm_read_i8(volatile uint64_t* addr) { return *addr; }
 void tm_read_i16(void *addr, void *out) {
     auto *out_words = static_cast<uint64_t *>(out);
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
@@ -284,38 +418,11 @@ void tm_read_i64(void *addr, void *out) {
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
     for (int i = 0; i < 8; i++) out_words[i] = vaddr[i];
 }
-float tm_read_f4(volatile float* addr) { return *addr; }
-double tm_read_f8(volatile double* addr) { return *addr; }
-void* tm_read_ptr(volatile void** addr) { return (void*)*addr; }
 
 void* tm_read_z(volatile uint8_t* src, uint64_t len) {
     void* buf = malloc(len);
     memcpy(buf, (const void*)src, len);
     return buf;
-}
-
-void tm_write_i1(volatile uint8_t* addr, uint8_t val) {
-    size_t off = addr_to_file_off((uintptr_t)addr);
-    *addr = val;
-    if (off != (size_t)-1) persist_write(off, &val, 1);
-}
-
-void tm_write_i2(volatile uint16_t* addr, uint16_t val) {
-    size_t off = addr_to_file_off((uintptr_t)addr);
-    *addr = val;
-    if (off != (size_t)-1) persist_write(off, &val, 2);
-}
-
-void tm_write_i4(volatile uint32_t* addr, uint32_t val) {
-    size_t off = addr_to_file_off((uintptr_t)addr);
-    *addr = val;
-    if (off != (size_t)-1) persist_write(off, &val, 4);
-}
-
-void tm_write_i8(volatile uint64_t* addr, uint64_t val) {
-    size_t off = addr_to_file_off((uintptr_t)addr);
-    *addr = val;
-    if (off != (size_t)-1) persist_write(off, &val, 8);
 }
 
 void tm_write_i16(void *addr, void *val) {
@@ -346,24 +453,6 @@ void tm_write_i64(void *addr, void *val) {
     }
 }
 
-void tm_write_f4(volatile float* addr, float val) {
-    size_t off = addr_to_file_off((uintptr_t)addr);
-    *addr = val;
-    if (off != (size_t)-1) persist_write(off, &val, 4);
-}
-
-void tm_write_f8(volatile double* addr, double val) {
-    size_t off = addr_to_file_off((uintptr_t)addr);
-    *addr = val;
-    if (off != (size_t)-1) persist_write(off, &val, 8);
-}
-
-void tm_write_ptr(volatile void** addr, void* val) {
-    size_t off = addr_to_file_off((uintptr_t)addr);
-    *addr = val;
-    if (off != (size_t)-1) persist_write(off, &val, sizeof(void*));
-}
-
 void tm_write_z(volatile uint8_t* dst, volatile uint8_t* src, uint64_t len) {
     size_t off = addr_to_file_off((uintptr_t)dst);
     memcpy((void*)dst, (const void*)src, len);
@@ -382,60 +471,5 @@ void tm_memset(volatile uint8_t* addr, uint8_t val, uint64_t len) {
 }
 
 void consume_ptr(volatile void* ptr) { (void)ptr; }
-
-// TM allocator stubs (redirect to system allocator)
-// ── Persistent allocator ────────────────────────────────────
-// Bump-allocates from the persistent mmap region so allocations
-// survive process restarts.  tm_free is a no-op (bump allocator).
-
-void* tm_malloc(size_t size) {
-    if (!g_mmap_base || size == 0) return malloc(size);
-    if (g_in_tx) {
-        // Bump-allocate from the persistent heap
-        uint64_t old_bump = __atomic_fetch_add(
-            reinterpret_cast<uint64_t*>(g_mmap_base + 16), size, __ATOMIC_RELAXED);
-        if (old_bump + size > PERSIST_HEAP_SIZE) {
-            fprintf(stderr, "PersistentSGL: OOM (%zu > %zu)\n",
-                    old_bump + size, PERSIST_HEAP_SIZE);
-            return malloc(size);
-        }
-        return g_mmap_base + heap_start_off_global + old_bump;
-    }
-    return malloc(size);
-}
-
-void* tm_calloc(size_t nmemb, size_t size) {
-    size_t total = nmemb * size;
-    void* p = tm_malloc(total);
-    if (p) memset(p, 0, total);
-    return p;
-}
-
-void* tm_realloc(void* ptr, size_t size) {
-    if (!ptr) return tm_malloc(size);
-    if (!g_mmap_base) return realloc(ptr, size);
-    // Check if ptr is in the persistent heap
-    uint8_t* heap_start = g_mmap_base + heap_start_off_global;
-    if (ptr >= (void*)heap_start && ptr < (void*)(heap_start + PERSIST_HEAP_SIZE)) {
-        // In persistent heap: allocate new, copy (bump allocator can't shrink/grow in place)
-        void* newp = tm_malloc(size);
-        if (newp && size > 0) {
-            // Copy old data (up to min(old_size, new_size))
-            // We don't know old_size, copy up to new_size
-            memcpy(newp, ptr, size);
-        }
-        return newp;
-    }
-    return realloc(ptr, size);
-}
-
-void tm_free(void* ptr) {
-    if (!g_mmap_base || !ptr) return;
-    uint8_t* heap_start = g_mmap_base + heap_start_off_global;
-    if (ptr >= (void*)heap_start && ptr < (void*)(heap_start + PERSIST_HEAP_SIZE)) {
-        return; // persistent heap: no-op (bump allocator)
-    }
-    free(ptr); // system heap
-}
 
 } // extern "C"

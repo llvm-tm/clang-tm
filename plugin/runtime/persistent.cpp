@@ -171,8 +171,6 @@ void tm_serialize_unlock()
 	g_serialize_mutex.unlock();
 }
 
-// int tm_setjmp() { return sigsetjmp(*(sigjmp_buf *)tm_jmpbuf, 0); }
-
 void tm_set_jmpbuf(void *buf) { }
 sigjmp_buf *tm_get_env() { return (sigjmp_buf *)tm_jmpbuf; }
 
@@ -241,12 +239,6 @@ void *tm_read_ptr(void *addr)
 	printf("tm_read_ptr\n");
 	return val;
 }
-void *tm_read_z(void *src, size_t sz)
-{
-	memcpy(tm_buffer, src, sz);
-	return tm_buffer;
-}
-
 // Write functions
 void tm_write_i1(void *addr, int8_t val)
 {
@@ -283,10 +275,6 @@ void tm_write_ptr(void *addr, void *val)
 	printf("tm_write_ptr\n");
 	*(void **)addr = val;
 }
-void tm_write_z(void *dst, void *src, size_t sz) { memcpy(dst, src, sz); }
-
 void tm_memset(void *dst, uint8_t val, size_t sz) { memset(dst, val, sz); }
-
-void consume_ptr(volatile void *ptr) { (void)ptr; }
 
 } // extern "C"

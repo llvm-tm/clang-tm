@@ -1,6 +1,7 @@
 #include "tm_hooks.hpp"
 
 #include <atomic>
+#include <csetjmp>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -8,6 +9,13 @@
 #include <mutex>
 #include <pthread.h>
 #include <thread>
+
+// ── Shared per-thread TM state (used by all backends) ──────────
+// Defined once here so that multiple backends can coexist without
+// duplicate-symbol errors.
+__thread int32_t    tm_nested_call_counter = 0;
+__thread int32_t    tm_longjmp_ret = 0;
+__thread sigjmp_buf tm_jmpbuf;
 
 // ═══════════════════════════════════════════════════════════════
 // Stub implementations — direct access, no TM overhead
@@ -177,6 +185,27 @@ void tm_swap_runtime(const TMRealHooks *hooks) {
     if (hooks->write_f4) tm_write_f4 = hooks->write_f4;
     if (hooks->write_f8) tm_write_f8 = hooks->write_f8;
     if (hooks->write_ptr) tm_write_ptr = hooks->write_ptr;
+    // Also update s_real_hooks so tm_hook_init_thread() doesn't revert
+    if (hooks->begin)   s_real_hooks.begin   = hooks->begin;
+    if (hooks->end)     s_real_hooks.end     = hooks->end;
+    if (hooks->malloc)  s_real_hooks.malloc  = hooks->malloc;
+    if (hooks->calloc)  s_real_hooks.calloc  = hooks->calloc;
+    if (hooks->realloc) s_real_hooks.realloc = hooks->realloc;
+    if (hooks->free)    s_real_hooks.free    = hooks->free;
+    if (hooks->read_i1) s_real_hooks.read_i1 = hooks->read_i1;
+    if (hooks->read_i2) s_real_hooks.read_i2 = hooks->read_i2;
+    if (hooks->read_i4) s_real_hooks.read_i4 = hooks->read_i4;
+    if (hooks->read_i8) s_real_hooks.read_i8 = hooks->read_i8;
+    if (hooks->read_f4) s_real_hooks.read_f4 = hooks->read_f4;
+    if (hooks->read_f8) s_real_hooks.read_f8 = hooks->read_f8;
+    if (hooks->read_ptr) s_real_hooks.read_ptr = hooks->read_ptr;
+    if (hooks->write_i1) s_real_hooks.write_i1 = hooks->write_i1;
+    if (hooks->write_i2) s_real_hooks.write_i2 = hooks->write_i2;
+    if (hooks->write_i4) s_real_hooks.write_i4 = hooks->write_i4;
+    if (hooks->write_i8) s_real_hooks.write_i8 = hooks->write_i8;
+    if (hooks->write_f4) s_real_hooks.write_f4 = hooks->write_f4;
+    if (hooks->write_f8) s_real_hooks.write_f8 = hooks->write_f8;
+    if (hooks->write_ptr) s_real_hooks.write_ptr = hooks->write_ptr;
 }
 
 // ═══════════════════════════════════════════════════════════════

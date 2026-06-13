@@ -29,12 +29,16 @@ constexpr const char* VERSION = "2.0.0-full";
 
 using word_t = uintptr_t;
 
-// Jump buffer for transaction retry (setjmp/longjmp)
-thread_local sigjmp_buf tm_jmpbuf;
-thread_local bool tm_jmpbuf_initialized = false;
-
 // Global abort counter — defined in tl2_runtime.cpp
 } // namespace tl2
+
+// Shared TLS variables (defined in tm_hooks.cpp, used by all backends)
+extern "C" {
+extern __thread int32_t    tm_nested_call_counter;
+extern __thread int32_t    tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
+}
+extern thread_local bool tm_jmpbuf_initialized;
 extern std::atomic<uint64_t> g_tm_abort_count;
 namespace tl2 {
 

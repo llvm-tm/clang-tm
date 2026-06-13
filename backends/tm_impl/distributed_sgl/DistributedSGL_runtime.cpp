@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "tm_alloc_overrides.hpp"
+#include "tm_hooks.hpp"
 thread_local bool g_in_tx = false;
 #include <fcntl.h>
 #include <unistd.h>
@@ -44,6 +45,8 @@ thread_local bool g_in_tx = false;
 #include <sys/stat.h>
 
 #include "rel_ptr.hpp"
+
+extern const TMRealHooks g_dsgl_hooks;
 
 // ── Shared state in mmap ────────────────────────────────────────
 
@@ -58,7 +61,7 @@ static_assert(sizeof(SharedState) == 24, "SharedState unexpected size");
 
 static constexpr const char* SHM_FILE = "benchmark_results/tm_2pc_state.bin";
 static SharedState* g_state = nullptr;
-static uint8_t*     g_data_base = nullptr;   // TM data in mmap
+static uint8_t*     g_data_base = nullptr;
 static size_t       g_mmap_size = 0;
 static size_t       g_data_off = 0;
 
@@ -106,6 +109,7 @@ static void sync_shared_to_local() {
 // ── tm_init ─────────────────────────────────────────────────────
 
 void tm_init() {
+    tm_register_real_hooks(&g_dsgl_hooks);
     uint64_t data_size = 0;
     for (uint32_t i = 0; i < tm_symbol_count; i++)
         data_size += tm_symbol_sizes[i];
@@ -181,37 +185,10 @@ void tm_set_env(sigjmp_buf* env) {
 // Per-thread: true until the first tm_begin publishes local state to mmap
 static thread_local bool g_first_begin = true;
 
-void tm_begin() {
-    g_in_tx = true;
-    // First transaction in this thread: publish local init state
-    // (benchmarks initialize TM globals AFTER tm_init, so the mmap
-    //  has stale data until we publish here).
-    if (g_first_begin) {
-        sync_local_to_shared();
-        g_first_begin = false;
-    }
-
-    // PREPARE phase: acquire global lock, then read latest state
-    spin_lock(&g_state->lock_flag);
-    sync_shared_to_local();
-}
-
-void tm_end() {
-    g_in_tx = false;
-    // COMMIT phase: publish state, advance epoch, release lock
-    sync_local_to_shared();
-    g_state->epoch.fetch_add(1, std::memory_order_release);
-    spin_unlock(&g_state->lock_flag);
-}
-
-// ── Read/write hooks (direct memory, no instrumentation beyond serialization) ──
+// ── Read/write hooks (plugin-specific) ──
 
 void tm_load_symbols(void*, uint32_t) {}
 
-uint8_t  tm_read_i1(volatile uint8_t*  a) { return *a; }
-uint16_t tm_read_i2(volatile uint16_t* a) { return *a; }
-uint32_t tm_read_i4(volatile uint32_t* a) { return *a; }
-uint64_t tm_read_i8(volatile uint64_t* a) { return *a; }
 void tm_read_i16(void *addr, void *out) {
     auto *out_words = static_cast<uint64_t *>(out);
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
@@ -228,9 +205,6 @@ void tm_read_i64(void *addr, void *out) {
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
     for (int i = 0; i < 8; i++) out_words[i] = vaddr[i];
 }
-float    tm_read_f4(volatile float*    a) { return *a; }
-double   tm_read_f8(volatile double*   a) { return *a; }
-void*    tm_read_ptr(volatile void**   a) { return (void*)*a; }
 
 void* tm_read_z(volatile uint8_t* src, uint64_t len) {
     void* buf = malloc(len);
@@ -238,10 +212,6 @@ void* tm_read_z(volatile uint8_t* src, uint64_t len) {
     return buf;
 }
 
-void tm_write_i1(volatile uint8_t*  a, uint8_t  v) { *a = v; }
-void tm_write_i2(volatile uint16_t* a, uint16_t v) { *a = v; }
-void tm_write_i4(volatile uint32_t* a, uint32_t v) { *a = v; }
-void tm_write_i8(volatile uint64_t* a, uint64_t v) { *a = v; }
 void tm_write_i16(void *addr, void *val) {
     auto *val_words = static_cast<const uint64_t *>(val);
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
@@ -257,9 +227,6 @@ void tm_write_i64(void *addr, void *val) {
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
     for (int i = 0; i < 8; i++) vaddr[i] = val_words[i];
 }
-void tm_write_f4(volatile float*    a, float    v) { *a = v; }
-void tm_write_f8(volatile double*   a, double   v) { *a = v; }
-void tm_write_ptr(volatile void**   a, void*    v) { *a = v; }
 
 void tm_write_z(volatile uint8_t* d, volatile uint8_t* s, uint64_t l) {
     memcpy((void*)d, (const void*)s, l);
@@ -270,8 +237,8 @@ void tm_memset(volatile uint8_t* a, uint8_t v, uint64_t l) {
 
 // ── Stubs ───────────────────────────────────────────────────────
 
-void tm_init_thread() {}
-void tm_exit_thread() {}
+void tm_init_thread() { tm_hook_init_thread(); }
+void tm_exit_thread() { tm_hook_exit_thread(); }
 
 static std::recursive_mutex g_serialize_mutex;
 void tm_serialize_lock()   { g_serialize_mutex.lock(); }
@@ -279,10 +246,95 @@ void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
 
 void consume_ptr(volatile void*) {}
 
-// TM allocator stubs (redirect to system allocator)
-void* tm_malloc(size_t size) { return g_in_tx ? malloc(size) : malloc(size); }
-void* tm_calloc(size_t nmemb, size_t size) { return calloc(nmemb, size); }
-void* tm_realloc(void* ptr, size_t size) { return realloc(ptr, size); }
-void  tm_free(void* ptr) { free(ptr); }
-
 } // extern "C"
+
+// ── Real hooks (registered via tm_register_real_hooks) ──────────
+
+static void real_tm_begin() {
+    g_in_tx = true;
+    // First transaction in this thread: publish local init state
+    // (benchmarks initialize TM globals AFTER tm_init, so the mmap
+    //  has stale data until we publish here).
+    if (g_first_begin) {
+        sync_local_to_shared();
+        g_first_begin = false;
+    }
+
+    // PREPARE phase: acquire global lock, then read latest state
+    spin_lock(&g_state->lock_flag);
+    sync_shared_to_local();
+}
+
+static void real_tm_end() {
+    g_in_tx = false;
+    // COMMIT phase: publish state, advance epoch, release lock
+    sync_local_to_shared();
+    g_state->epoch.fetch_add(1, std::memory_order_release);
+    spin_unlock(&g_state->lock_flag);
+}
+
+static uint8_t  real_tm_read_i1(uint8_t*  a) { return *a; }
+static uint16_t real_tm_read_i2(uint16_t* a) { return *a; }
+static uint32_t real_tm_read_i4(uint32_t* a) { return *a; }
+static uint64_t real_tm_read_i8(uint64_t* a) { return *a; }
+static float    real_tm_read_f4(float*    a) { return *a; }
+static double   real_tm_read_f8(double*   a) { return *a; }
+static void*    real_tm_read_ptr(void**   a) { return (void*)*a; }
+
+static void real_tm_write_i1(uint8_t*  a, uint8_t  v) { *a = v; }
+static void real_tm_write_i2(uint16_t* a, uint16_t v) { *a = v; }
+static void real_tm_write_i4(uint32_t* a, uint32_t v) { *a = v; }
+static void real_tm_write_i8(uint64_t* a, int64_t v) { *a = v; }
+static void real_tm_write_f4(float*    a, float    v) { *a = v; }
+static void real_tm_write_f8(double*   a, double   v) { *a = v; }
+static void real_tm_write_ptr(void**   a, void*    v) { *a = v; }
+
+// TM allocator stubs (redirect to TM region allocator)
+static void* real_tm_malloc(size_t size) {
+    void* p = stm::tm_region_malloc(size);
+    if (p) { std::memset(p, 0, size); tm_track_spec_alloc(p); }
+    return p;
+}
+static void* real_tm_calloc(size_t nmemb, size_t size) {
+    size_t total = nmemb * size;
+    void* p = stm::tm_region_malloc(total);
+    if (p) { std::memset(p, 0, total); tm_track_spec_alloc(p); }
+    return p;
+}
+static void* real_tm_realloc(void* ptr, size_t size) {
+    if (!ptr) return real_tm_malloc(size);
+    void* p = stm::tm_region_malloc(size);
+    if (p) { std::memcpy(p, ptr, size); stm::tm_region_free(ptr); tm_track_spec_alloc(p); }
+    return p;
+}
+static void  real_tm_free(void* ptr) {
+    if (!ptr) return;
+    tm_untrack_spec_alloc(ptr);
+    if (g_in_tx)
+        tm_free_append_deferred(ptr);
+    else
+        stm::tm_region_free(ptr);
+}
+
+const TMRealHooks g_dsgl_hooks = {
+    .begin    = real_tm_begin,
+    .end      = real_tm_end,
+    .malloc   = real_tm_malloc,
+    .calloc   = real_tm_calloc,
+    .realloc  = real_tm_realloc,
+    .free     = real_tm_free,
+    .read_i1  = real_tm_read_i1,
+    .read_i2  = real_tm_read_i2,
+    .read_i4  = real_tm_read_i4,
+    .read_i8  = real_tm_read_i8,
+    .read_f4  = real_tm_read_f4,
+    .read_f8  = real_tm_read_f8,
+    .read_ptr = real_tm_read_ptr,
+    .write_i1  = real_tm_write_i1,
+    .write_i2  = real_tm_write_i2,
+    .write_i4  = real_tm_write_i4,
+    .write_i8  = real_tm_write_i8,
+    .write_f4  = real_tm_write_f4,
+    .write_f8  = real_tm_write_f8,
+    .write_ptr = real_tm_write_ptr,
+};

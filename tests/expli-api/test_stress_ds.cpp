@@ -122,28 +122,33 @@ static void test_rbtree_standalone() {
 // ─── RBTree: inside TX (UseTM=true) ───────────────────────────────
 
 static void test_rbtree_tx() {
-    explicit_rbtree::Tree<int, int> tree;
+    auto* tree = (explicit_rbtree::Tree<int, int>*)expli::TM<int>::malloc(
+        sizeof(explicit_rbtree::Tree<int, int>));
+    tree->root = nullptr;
+
+    fprintf(stderr, "DEBUG rbtree_tx: tree=%p &tree->root=%p\n",
+            (void*)tree, (void*)&tree->root);
 
     expli::TM<int>::transaction([&]() {
         auto* n1 = alloc_rb_node_tm(10, 100);
         auto* n2 = alloc_rb_node_tm(20, 200);
         auto* n3 = alloc_rb_node_tm(5, 50);
 
-        CHECK(explicit_rbtree::insert<true>(&tree, n1) == nullptr,
+        CHECK(explicit_rbtree::insert<true>(tree, n1) == nullptr,
               "rbtree tx insert n1");
-        CHECK(explicit_rbtree::insert<true>(&tree, n2) == nullptr,
+        CHECK(explicit_rbtree::insert<true>(tree, n2) == nullptr,
               "rbtree tx insert n2");
-        CHECK(explicit_rbtree::insert<true>(&tree, n3) == nullptr,
+        CHECK(explicit_rbtree::insert<true>(tree, n3) == nullptr,
               "rbtree tx insert n3");
 
-        CHECK(explicit_rbtree::contains<true>(&tree, 10), "rbtree tx contains 10");
-        CHECK(explicit_rbtree::contains<true>(&tree, 20), "rbtree tx contains 20");
-        CHECK(explicit_rbtree::contains<true>(&tree, 5), "rbtree tx contains 5");
-        CHECK(!explicit_rbtree::contains<true>(&tree, 99), "rbtree tx not contains 99");
+        CHECK(explicit_rbtree::contains<true>(tree, 10), "rbtree tx contains 10");
+        CHECK(explicit_rbtree::contains<true>(tree, 20), "rbtree tx contains 20");
+        CHECK(explicit_rbtree::contains<true>(tree, 5), "rbtree tx contains 5");
+        CHECK(!explicit_rbtree::contains<true>(tree, 99), "rbtree tx not contains 99");
     });
 
-    CHECK(explicit_rbtree::contains<false>(&tree, 10), "rbtree post-tx contains 10");
-    CHECK(explicit_rbtree::contains<false>(&tree, 5), "rbtree post-tx contains 5");
+    CHECK(explicit_rbtree::contains<false>(tree, 10), "rbtree post-tx contains 10");
+    CHECK(explicit_rbtree::contains<false>(tree, 5), "rbtree post-tx contains 5");
 
     printf("  RBTree inside TX:    %s\n", failures ? "FAIL" : "PASS");
 }
@@ -244,42 +249,41 @@ static void test_hashmap_standalone() {
 // ─── HashMap: inside TX (UseTM=true) ──────────────────────────────
 
 static void test_hashmap_tx() {
-    explicit_hashmap::Map<int, int> map;
+    auto* map = (explicit_hashmap::Map<int, int>*)expli::TM<int>::malloc(
+        sizeof(explicit_hashmap::Map<int, int>));
     size_t cap = 4096;
-    map.slots = (explicit_hashmap::Slot<int,int>*)expli::TM<int>::calloc(cap, sizeof(explicit_hashmap::Slot<int,int>));
-    map.capacity = cap;
-    map.size = 0;
+    map->slots = (explicit_hashmap::Slot<int,int>*)expli::TM<int>::calloc(cap, sizeof(explicit_hashmap::Slot<int,int>));
+    map->capacity = cap;
+    map->size = 0;
 
     expli::TM<int>::transaction([&]() {
         for (int i = 0; i < 2000; i++) {
-            CHECK(explicit_hashmap::insert<true>(&map, i, i * 3),
+            CHECK(explicit_hashmap::insert<true>(map, i, i * 3),
                   "hashmap tx insert");
         }
 
         // Inside TX: read through TM (write-back hasn't committed to memory yet)
         for (int i = 0; i < 2000; i++) {
-            int* v = explicit_hashmap::find<true>(&map, i);
+            int* v = explicit_hashmap::find<true>(map, i);
             CHECK(v != nullptr, "hashmap tx find");
             int val = MemoryAccess<true>::load(v);
             CHECK(val == i * 3, "hashmap tx find value");
         }
 
-        CHECK(explicit_hashmap::erase<true>(&map, 500), "hashmap tx erase");
-        CHECK(explicit_hashmap::find<true>(&map, 500) == nullptr,
+        CHECK(explicit_hashmap::erase<true>(map, 500), "hashmap tx erase");
+        CHECK(explicit_hashmap::find<true>(map, 500) == nullptr,
               "hashmap tx erased not found");
     });
 
     // After TX: values committed to memory, plain load works
     for (int i = 0; i < 2000; i++) {
         if (i == 500) continue; // erased
-        int* v = explicit_hashmap::find<false>(&map, i);
+        int* v = explicit_hashmap::find<false>(map, i);
         CHECK(v != nullptr, "hashmap post-tx find");
         CHECK(*v == i * 3, "hashmap post-tx value");
     }
-    CHECK(explicit_hashmap::find<false>(&map, 500) == nullptr,
+    CHECK(explicit_hashmap::find<false>(map, 500) == nullptr,
           "hashmap post-tx erased not found");
-
-    expli::TM<int>::free(map.slots);
     printf("  HashMap inside TX:    %s\n", failures ? "FAIL" : "PASS");
 }
 
@@ -310,8 +314,9 @@ static void test_rbtree_multithread() {
     const int NTH = 4;
     const int OPS = 2000;
 
-    explicit_rbtree::Tree<int, int> tree;
-    tree.root = nullptr;
+    auto* tree = (explicit_rbtree::Tree<int, int>*)expli::TM<int>::malloc(
+        sizeof(explicit_rbtree::Tree<int, int>));
+    tree->root = nullptr;
 
     std::vector<std::thread> threads;
     std::vector<std::vector<int>> thread_keys(NTH);
@@ -324,18 +329,18 @@ static void test_rbtree_multithread() {
     }
 
     for (int t = 0; t < NTH; t++)
-        threads.emplace_back(stress_rbtree_thread, &tree, thread_keys[t]);
+        threads.emplace_back(stress_rbtree_thread, tree, thread_keys[t]);
     for (auto& th : threads) th.join();
 
     for (int t = 0; t < NTH; t++)
         for (int k : thread_keys[t])
-            CHECK(explicit_rbtree::contains<false>(&tree, k),
+            CHECK(explicit_rbtree::contains<false>(tree, k),
                   "rbtree multi-threaded contains all");
 
     int prev = -1;
     int count = 0;
     for (int k = 0; k < NTH * OPS; k++) {
-        auto* n = explicit_rbtree::lookup<false>(&tree, k);
+        auto* n = explicit_rbtree::lookup<false>(tree, k);
         CHECK(n != nullptr, "rbtree multi-threaded sequential lookup");
         CHECK(n->key > prev, "rbtree multi-threaded order");
         prev = n->key;
@@ -371,11 +376,12 @@ static void test_hashmap_multithread() {
     const int NTH = 4;
     const int OPS = 2000;
 
-    explicit_hashmap::Map<int, int> map;
+    auto* map = (explicit_hashmap::Map<int, int>*)expli::TM<int>::malloc(
+        sizeof(explicit_hashmap::Map<int, int>));
     size_t cap = 16384;
-    map.slots = (explicit_hashmap::Slot<int,int>*)std::calloc(cap, sizeof(explicit_hashmap::Slot<int,int>));
-    map.capacity = cap;
-    map.size = 0;
+    map->slots = (explicit_hashmap::Slot<int,int>*)expli::TM<int>::calloc(cap, sizeof(explicit_hashmap::Slot<int,int>));
+    map->capacity = cap;
+    map->size = 0;
 
     std::vector<std::thread> threads;
     std::vector<std::vector<int>> thread_keys(NTH);
@@ -388,17 +394,15 @@ static void test_hashmap_multithread() {
     }
 
     for (int t = 0; t < NTH; t++)
-        threads.emplace_back(stress_hashmap_thread, &map, thread_keys[t]);
+        threads.emplace_back(stress_hashmap_thread, map, thread_keys[t]);
     for (auto& th : threads) th.join();
 
     for (int t = 0; t < NTH; t++)
         for (int k : thread_keys[t]) {
-            int* v = explicit_hashmap::find<false>(&map, k);
+            int* v = explicit_hashmap::find<false>(map, k);
             CHECK(v != nullptr && *v == k * 2,
                   "hashmap multi-threaded verify");
         }
-
-    std::free(map.slots);
     printf("  HashMap multi-threaded: %s\n", failures ? "FAIL" : "PASS");
 }
 

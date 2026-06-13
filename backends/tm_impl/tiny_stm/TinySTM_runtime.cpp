@@ -28,9 +28,15 @@ int tm_serialize_unlock_all();
 #include "tm_alloc_overrides.hpp"
 #include "tm_thread_state.hpp"
 #include "tm_hooks.hpp"
+
+// Shared TLS variables (defined in tm_hooks.cpp, used by all backends)
+extern "C" {
+extern __thread int32_t    tm_nested_call_counter;
+extern __thread int32_t    tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
+}
+
 extern const TMRealHooks g_tiny_hooks;
-__thread int32_t tm_nested_call_counter = 0;
-__thread int32_t tm_longjmp_ret = 0;
 thread_local bool g_tm_expli_mode = false;
 thread_local bool g_in_tx = false;
 thread_local FreeNode *g_deferred_frees = nullptr;
@@ -59,7 +65,6 @@ static pthread_key_t g_tm_state_key;
 
 static void make_tm_state_key() { pthread_key_create(&g_tm_state_key, NULL); }
 
-__thread sigjmp_buf tm_jmpbuf;
 __thread int tm_init_thread_call_count = 0;
 
 // Mutex removed — TinySTM's own lock acquisition handles concurrency,

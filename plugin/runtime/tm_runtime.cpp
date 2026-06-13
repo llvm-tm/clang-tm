@@ -26,29 +26,6 @@ TMThreadState *tm_get_thread_state() {
     return reinterpret_cast<TMThreadState*>(&tm_nested_call_counter);
 }
 
-// Helper function to get symbol type string
-static const char *tm_get_type_string(uint8_t type)
-{
-	switch (type) {
-	case 1:
-		return "i8";
-	case 2:
-		return "i16";
-	case 3:
-		return "i32";
-	case 4:
-		return "i64";
-	case 5:
-		return "f32";
-	case 6:
-		return "f64";
-	case 7:
-		return "ptr";
-	default:
-		return "unknown";
-	}
-}
-
 __thread unsigned char tm_jmpbuf[256];
 __thread uint8_t is_tm_init_thread_ready = 0;
 thread_local uint8_t tm_buffer[TM_BUFFER_SIZE] = {0};
@@ -218,8 +195,6 @@ void tm_set_jmpbuf(void *buf) { }
 
 void tm_longjmp(int val) { longjmp(*(sigjmp_buf *)tm_jmpbuf, val); }
 
-// int tm_setjmp() { return sigsetjmp(*(sigjmp_buf *)tm_jmpbuf, 0); }
-
 int8_t tm_read_i1(void *addr)
 {
 	int8_t val = *(int8_t *)addr;
@@ -269,14 +244,6 @@ void *tm_read_ptr(void *addr)
 	return val;
 }
 
-void *tm_read_z(void *src, size_t sz)
-{
-	assert(sz < TM_BUFFER_SIZE);
-	memcpy(tm_buffer, src, sz);
-	printf("tm_read_z\n");
-	return tm_buffer;
-}
-
 void tm_write_i1(void *addr, uint8_t val)
 {
 	fflush(stdout);
@@ -323,21 +290,12 @@ void tm_write_ptr(void *addr, void *val)
 	*(void **)addr = val;
 }
 
-void tm_write_z(void *dst, void *src, size_t sz)
-{
-	assert(sz < TM_BUFFER_SIZE);
-	memcpy(dst, src, sz);
-	printf("tm_write_z\n");
-}
-
 void tm_memset(void *dst, uint8_t value, size_t sz)
 {
 	assert(sz < TM_BUFFER_SIZE);
 	memset(dst, value, sz);
 	printf("tm_memset\n");
 }
-
-void consume_ptr(volatile void *ptr) { (void)ptr; }
 
 // TM-aware allocators
 void *tm_malloc(size_t size) { void* p = malloc(size); tm_track_spec_alloc(p); return p; }

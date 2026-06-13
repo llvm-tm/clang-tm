@@ -82,17 +82,6 @@ static InvokeInst *createHookInvoke(LLVMContext &Ctx, const TMRuntimeHook &Hook,
 	return InvokeInst::Create(Hook.fnTy, FnPtr, Normal, Unwind, Args, {}, Name);
 }
 
-// Create a CallInst directly (when no IRBuilder is available).
-static CallInst *createHookCall(LLVMContext &Ctx, const TMRuntimeHook &Hook,
-                                ArrayRef<Value *> Args,
-                                Instruction *InsertBefore,
-                                const Twine &Name = "") {
-	auto *FnPtrTy = PointerType::getUnqual(Ctx);
-	auto *FnPtr   = new LoadInst(FnPtrTy, Hook.gv, "hook." + Hook.gv->getName(),
-	                             false, InsertBefore);
-	return CallInst::Create(Hook.fnTy, FnPtr, Args, {}, Name, InsertBefore);
-}
-
 // ── TMRuntimeHooks ────────────────────────────────────────────────
 // Collection of all TM runtime hook variables.
 struct TMRuntimeHooks {

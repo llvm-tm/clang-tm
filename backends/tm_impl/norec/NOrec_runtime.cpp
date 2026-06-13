@@ -14,7 +14,15 @@
 #include "tm_thread_state.hpp"
 #include "tm_hooks.hpp"
 
+// Shared TLS variables (defined in tm_hooks.cpp, used by all backends)
+extern "C" {
+extern __thread int32_t    tm_nested_call_counter;
+extern __thread int32_t    tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
+}
+
 // Debug: catch absurd operator new sizes with backtrace
+#ifndef NOREC_AS_WRAPPER
 void* operator new(size_t size) {
     if (size > (1ULL << 42)) { // > 4TB
         fprintf(stderr, "\nFATAL: operator new(%zu) called with absurd size!\n", size);
@@ -41,6 +49,7 @@ void operator delete(void* p) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, size_t) noexcept { std::free(p); }
 void operator delete[](void* p, size_t) noexcept { std::free(p); }
+#endif // !NOREC_AS_WRAPPER
 
 thread_local bool g_in_tx = false;
 thread_local FreeNode* g_deferred_frees = nullptr;
@@ -52,10 +61,6 @@ extern const TMRealHooks g_norec_hooks;
 extern "C" {
 // Thread-local state
 static __thread int8_t tm_is_init_ready = 0;
-__thread int32_t tm_nested_call_counter;
-__thread int32_t tm_longjmp_ret;
-// sigjmp_buf is typically ~200 bytes, use 256 to be safe
-__thread sigjmp_buf tm_jmpbuf;
 
 // Retry loop support: returns true if retry via longjmp, false if new transaction
 static inline bool check_retry_or_init()
@@ -235,21 +240,22 @@ static void real_tm_write_ptr(void **addr, void *val)
 }
 
 // TM allocator stubs.
-// Use ::operator new/delete (not malloc/free) so that objects allocated via
-// ::operator new outside any TX (e.g., via new[] in init_data) are freed via
-// ::operator delete when the plugin intercepts `delete` inside a TX — avoids
-// C++ allocator API mismatch.
-static void* real_tm_malloc(size_t size) { return tm_track_alloc_result(::operator new(size), size); }
+static void* real_tm_malloc(size_t size) {
+    void* p = stm::tm_region_malloc(size);
+    std::memset(p, 0, size);
+    return tm_track_alloc_result(p, size);
+}
 static void* real_tm_calloc(size_t nmemb, size_t size) {
-    void* p = ::operator new(nmemb * size);
+    void* p = stm::tm_region_malloc(nmemb * size);
     std::memset(p, 0, nmemb * size);
     return tm_track_alloc_result(p, nmemb * size);
 }
 static void* real_tm_realloc(void* ptr, size_t size) {
-    void* p = ::operator new(size);
-    if (ptr) {
+    if (!ptr) return real_tm_malloc(size);
+    void* p = stm::tm_region_malloc(size);
+    if (p) {
         std::memcpy(p, ptr, size);
-        ::operator delete(ptr);
+        stm::tm_region_free(ptr);
     }
     return tm_track_alloc_result(p, size);
 }
@@ -260,7 +266,7 @@ static void  real_tm_free(void* ptr) {
         norec::tm_write_i1(reinterpret_cast<uint8_t*>(ptr), 0);
         tm_free_append_deferred(ptr);
     } else {
-        ::operator delete(ptr);
+        stm::tm_region_free(ptr);
     }
 }
 

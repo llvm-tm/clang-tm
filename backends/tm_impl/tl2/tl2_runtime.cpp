@@ -23,11 +23,11 @@ thread_local FreeNode* g_deferred_frees = nullptr;
 thread_local std::unordered_set<void*> g_deferred_frees_set;
 thread_local SpecAlloc* g_spec_allocs = nullptr;
 
+// TL2-specific jmpbuf tracking (defined here, declared extern in tl2.hpp)
+thread_local bool tm_jmpbuf_initialized = false;
+
 // Thread-local state
 static __thread int8_t tm_is_init_ready = 0;
-__thread int32_t tm_nested_call_counter;
-__thread int32_t tm_longjmp_ret;
-__thread sigjmp_buf tm_jmpbuf;
 static __thread TMThreadState g_tm_thread_state = {0, 0};
 
 TMThreadState *tm_get_thread_state() {

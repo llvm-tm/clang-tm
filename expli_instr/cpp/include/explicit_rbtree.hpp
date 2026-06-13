@@ -108,7 +108,7 @@ Node<K,V>* insert(Tree<K,V>* tree, Node<K,V>* node) {
     }
 
     MA::store(&node->color, Node<K,V>::RED);
-    while (MA::load(&node) != MA::load(&tree->root) &&
+    while (node != MA::load(&tree->root) &&
            MA::load(&MA::load(&node->parent)->color) == Node<K,V>::RED)
     {
         Node<K,V>* parent   = MA::load(&node->parent);
@@ -118,7 +118,7 @@ Node<K,V>* insert(Tree<K,V>* tree, Node<K,V>* node) {
         Node<K,V>* left_gp  = MA::load(&gp->left);
         Node<K,V>* right_gp = MA::load(&gp->right);
 
-        if (MA::load(&parent) == left_gp) {
+        if (parent == left_gp) {
             Node<K,V>* uncle = right_gp;
             if (uncle && MA::load(&uncle->color) == Node<K,V>::RED) {
                 MA::store(&parent->color, Node<K,V>::BLACK);
@@ -126,7 +126,7 @@ Node<K,V>* insert(Tree<K,V>* tree, Node<K,V>* node) {
                 MA::store(&gp->color,     Node<K,V>::RED);
                 node = gp;
             } else {
-                if (MA::load(&node) == MA::load(&parent->right)) {
+                if (node == MA::load(&parent->right)) {
                     node = parent;
                     Node<K,V>* r = MA::load(&node->right);
                     Node<K,V>* rl = MA::load(&r->left);
@@ -169,7 +169,7 @@ Node<K,V>* insert(Tree<K,V>* tree, Node<K,V>* node) {
                 MA::store(&gp->color,     Node<K,V>::RED);
                 node = gp;
             } else {
-                if (MA::load(&node) == MA::load(&parent->left)) {
+                if (node == MA::load(&parent->left)) {
                     node = parent;
                     Node<K,V>* l  = MA::load(&node->left);
                     Node<K,V>* lr = MA::load(&l->right);

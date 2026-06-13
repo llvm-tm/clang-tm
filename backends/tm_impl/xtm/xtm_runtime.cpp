@@ -28,9 +28,9 @@ __thread sigjmp_buf *jmpbuf_ptr = nullptr;
 } // namespace xtm
 
 __thread sigjmp_buf *jmpbuf = nullptr;
-__thread int32_t tm_nested_call_counter = 0;
-__thread int32_t tm_longjmp_ret = 0;
-__thread sigjmp_buf tm_jmpbuf;
+extern __thread int32_t tm_nested_call_counter;
+extern __thread int32_t tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
 __thread int tm_init_thread_call_count = 0;
 
 extern const TMRealHooks g_xtm_hooks;

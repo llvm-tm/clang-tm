@@ -190,18 +190,6 @@ static bool needsMemIntrinsicInstrumentation(CallBase *Call, Module &M)
 	return false;
 }
 
-// Legacy detection — kept for ABI compatibility, new code should use
-// needsMemIntrinsicInstrumentation().
-static bool handleMemoryIntrinsic(CallBase *Call,
-                                  Module &M,
-                                  const TMRuntimeHooks &H,
-                                  SmallVectorImpl<Instruction *> *ToErase = nullptr)
-{
-	(void)H;
-	(void)ToErase;
-	return needsMemIntrinsicInstrumentation(Call, M);
-}
-
 // ===========================================================================
 // Load/store audit (enabled with -tm-audit)
 // ===========================================================================

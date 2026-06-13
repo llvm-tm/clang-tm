@@ -36,6 +36,11 @@
 
 #include "../common/tm_thread_state.hpp"
 #include "../common/tm_rtm.hpp"
+#include "../common/tm_hooks.hpp"
+#include "../common/tm_region_allocator.hpp"
+#include "../common/tm_alloc_overrides.hpp"
+
+extern const TMRealHooks g_tsxsgl_hooks;
 
 thread_local bool g_in_tx = false;
 thread_local bool in_tsx = false;
@@ -57,10 +62,10 @@ enum { LOCK_BUSY = 0xFF, OWNER_CHANGED = 0x01 };
 
 extern "C" {
 
-void tm_init() {}
+void tm_init() { tm_register_real_hooks(&g_tsxsgl_hooks); }
 void tm_exit() {}
-void tm_init_thread() { tm_nested_call_counter = 0; in_tsx = false; }
-void tm_exit_thread() {}
+void tm_init_thread() { tm_hook_init_thread(); tm_nested_call_counter = 0; in_tsx = false; }
+void tm_exit_thread() { tm_hook_exit_thread(); }
 
 static std::recursive_mutex g_serialize_mutex;
 
@@ -76,68 +81,6 @@ void tm_set_env(sigjmp_buf* env) {
 
 void tm_load_symbols(void *, uint32_t) {}
 
-void tm_begin() {
-    if (tm_nested_call_counter > 1) return;
-    g_in_tx = true;
-
-#if defined(__x86_64__) || defined(__i386__)
-    if (tm_rtm::available()) {
-        for (int attempts = 0; attempts < 5; attempts++) {
-            unsigned status = _xbegin();
-            if (status == _XBEGIN_STARTED) {
-                // Read sgl_owner into the TSX read-set AND check if
-                // the lock is held.
-                uint64_t v = sgl_owner.load(std::memory_order_seq_cst);
-                if (v != 0) {
-                    _xabort(LOCK_BUSY);
-                }
-                tsx_start_owner = v;
-                in_tsx = true;
-                return;
-            }
-
-            if ((status & _XABORT_EXPLICIT) &&
-                _XABORT_CODE(status) == LOCK_BUSY) {
-                // Lock was busy — wait for it to become free before retrying
-                // to avoid the lemming effect (thundering herd into SGL).
-                while (sgl_owner.load(std::memory_order_relaxed) != 0)
-                    _mm_pause();
-            } else if (!(status & _XABORT_RETRY)) {
-                break;
-            }
-        }
-    }
-#else
-    (void)in_tsx;
-#endif
-    // Fallback: enter SGL (write to sgl_owner so TSX threads abort).
-    global_tx_lock.lock();
-    sgl_owner.store(1, std::memory_order_seq_cst);
-    in_tsx = false;
-}
-
-void tm_end() {
-    if (tm_nested_call_counter > 1) return;
-    g_in_tx = false;
-
-    if (in_tsx) {
-#if defined(__x86_64__) || defined(__i386__)
-        if (sgl_owner.load(std::memory_order_seq_cst) != tsx_start_owner) {
-            _xabort(OWNER_CHANGED);
-        }
-        _xend();
-#endif
-        return;
-    }
-    sgl_owner.store(0, std::memory_order_seq_cst);
-    global_tx_lock.unlock();
-}
-
-// Read: plain load — TSX or SGL provides isolation
-uint8_t  tm_read_i1(volatile uint8_t *addr)  { return *addr; }
-uint16_t tm_read_i2(volatile uint16_t *addr) { return *addr; }
-uint32_t tm_read_i4(volatile uint32_t *addr) { return *addr; }
-uint64_t tm_read_i8(volatile uint64_t *addr) { return *addr; }
 void tm_read_i16(void *addr, void *out) {
     auto *out_words = static_cast<uint64_t *>(out);
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
@@ -154,9 +97,6 @@ void tm_read_i64(void *addr, void *out) {
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
     for (int i = 0; i < 8; i++) out_words[i] = vaddr[i];
 }
-float    tm_read_f4(volatile float *addr)    { return *addr; }
-double   tm_read_f8(volatile double *addr)   { return *addr; }
-void *   tm_read_ptr(volatile void **addr)   { return (void*)*addr; }
 
 void *tm_read_z(volatile uint8_t *src, uint64_t len) {
     void *buf = malloc(len);
@@ -164,11 +104,6 @@ void *tm_read_z(volatile uint8_t *src, uint64_t len) {
     return buf;
 }
 
-// Write: plain store — TSX or SGL provides isolation
-void tm_write_i1(volatile uint8_t *addr, uint8_t val)     { *addr = val; }
-void tm_write_i2(volatile uint16_t *addr, uint16_t val)   { *addr = val; }
-void tm_write_i4(volatile uint32_t *addr, uint32_t val)   { *addr = val; }
-void tm_write_i8(volatile uint64_t *addr, uint64_t val)   { *addr = val; }
 void tm_write_i16(void *addr, void *val) {
     auto *val_words = static_cast<const uint64_t *>(val);
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
@@ -184,9 +119,6 @@ void tm_write_i64(void *addr, void *val) {
     auto *vaddr = static_cast<volatile uint64_t *>(addr);
     for (int i = 0; i < 8; i++) vaddr[i] = val_words[i];
 }
-void tm_write_f4(volatile float *addr, float val)         { *addr = val; }
-void tm_write_f8(volatile double *addr, double val)       { *addr = val; }
-void tm_write_ptr(volatile void **addr, void *val)        { *addr = val; }
 
 void tm_write_z(volatile uint8_t *dst, volatile uint8_t *src, uint64_t len) {
     memcpy((void*)dst, (const void*)src, len);
@@ -198,10 +130,123 @@ void tm_memset(volatile uint8_t *addr, uint8_t val, uint64_t len) {
 
 void consume_ptr(volatile void *) {}
 
-// TM allocator stubs — TSX and SGL both work with system malloc
-void* tm_malloc(size_t size)   { return malloc(size); }
-void* tm_calloc(size_t n, size_t s) { return calloc(n, s); }
-void* tm_realloc(void *p, size_t s) { return realloc(p, s); }
-void  tm_free(void *p)              { free(p); }
-
 } // extern "C"
+
+// ── Real implementations (registered via hooks) ─────────────────────
+
+static void real_tm_begin() {
+    if (tm_nested_call_counter > 1) return;
+    g_in_tx = true;
+
+#if defined(__x86_64__) || defined(__i386__)
+    if (tm_rtm::available()) {
+        for (int attempts = 0; attempts < 5; attempts++) {
+            unsigned status = _xbegin();
+            if (status == _XBEGIN_STARTED) {
+                uint64_t v = sgl_owner.load(std::memory_order_seq_cst);
+                if (v != 0) {
+                    _xabort(LOCK_BUSY);
+                }
+                tsx_start_owner = v;
+                in_tsx = true;
+                return;
+            }
+
+            if ((status & _XABORT_EXPLICIT) &&
+                _XABORT_CODE(status) == LOCK_BUSY) {
+                while (sgl_owner.load(std::memory_order_relaxed) != 0)
+                    _mm_pause();
+            } else if (!(status & _XABORT_RETRY)) {
+                break;
+            }
+        }
+    }
+#else
+    (void)in_tsx;
+#endif
+    global_tx_lock.lock();
+    sgl_owner.store(1, std::memory_order_seq_cst);
+    in_tsx = false;
+}
+
+static void real_tm_end() {
+    if (tm_nested_call_counter > 1) return;
+    g_in_tx = false;
+
+    if (in_tsx) {
+#if defined(__x86_64__) || defined(__i386__)
+        if (sgl_owner.load(std::memory_order_seq_cst) != tsx_start_owner) {
+            _xabort(OWNER_CHANGED);
+        }
+        _xend();
+#endif
+        return;
+    }
+    sgl_owner.store(0, std::memory_order_seq_cst);
+    global_tx_lock.unlock();
+}
+
+static uint8_t  real_tm_read_i1(uint8_t *addr)  { return *addr; }
+static uint16_t real_tm_read_i2(uint16_t *addr) { return *addr; }
+static uint32_t real_tm_read_i4(uint32_t *addr) { return *addr; }
+static uint64_t real_tm_read_i8(uint64_t *addr) { return *addr; }
+static float    real_tm_read_f4(float *addr)    { return *addr; }
+static double   real_tm_read_f8(double *addr)   { return *addr; }
+static void *   real_tm_read_ptr(void **addr)   { return (void*)*addr; }
+
+static void real_tm_write_i1(uint8_t *addr, uint8_t val)     { *addr = val; }
+static void real_tm_write_i2(uint16_t *addr, uint16_t val)   { *addr = val; }
+static void real_tm_write_i4(uint32_t *addr, uint32_t val)   { *addr = val; }
+static void real_tm_write_i8(uint64_t *addr, int64_t val)    { *(volatile uint64_t*)addr = (uint64_t)val; }
+static void real_tm_write_f4(float *addr, float val)         { *addr = val; }
+static void real_tm_write_f8(double *addr, double val)       { *addr = val; }
+static void real_tm_write_ptr(void **addr, void *val)        { *addr = val; }
+
+static void* real_tm_malloc(size_t size) {
+    void* p = stm::tm_region_malloc(size);
+    if (p) { std::memset(p, 0, size); tm_track_spec_alloc(p); }
+    return p;
+}
+static void* real_tm_calloc(size_t n, size_t s) {
+    size_t total = n * s;
+    void* p = stm::tm_region_malloc(total);
+    if (p) { std::memset(p, 0, total); tm_track_spec_alloc(p); }
+    return p;
+}
+static void* real_tm_realloc(void *p, size_t s) {
+    if (!p) return real_tm_malloc(s);
+    void* np = stm::tm_region_malloc(s);
+    if (np) { std::memcpy(np, p, s); stm::tm_region_free(p); tm_track_spec_alloc(np); }
+    return np;
+}
+static void  real_tm_free(void *p) {
+    if (!p) return;
+    tm_untrack_spec_alloc(p);
+    if (g_in_tx)
+        tm_free_append_deferred(p);
+    else
+        stm::tm_region_free(p);
+}
+
+const TMRealHooks g_tsxsgl_hooks = {
+    .begin    = real_tm_begin,
+    .end      = real_tm_end,
+    .malloc   = real_tm_malloc,
+    .calloc   = real_tm_calloc,
+    .realloc  = real_tm_realloc,
+    .free     = real_tm_free,
+    .read_i1  = real_tm_read_i1,
+    .read_i2  = real_tm_read_i2,
+    .read_i4  = real_tm_read_i4,
+    .read_i8  = real_tm_read_i8,
+    .read_f4  = real_tm_read_f4,
+    .read_f8  = real_tm_read_f8,
+    .read_ptr = real_tm_read_ptr,
+    .write_i1  = real_tm_write_i1,
+    .write_i2  = real_tm_write_i2,
+    .write_i4  = real_tm_write_i4,
+    .write_i8  = real_tm_write_i8,
+    .write_f4  = real_tm_write_f4,
+    .write_f8  = real_tm_write_f8,
+    .write_ptr = real_tm_write_ptr,
+};

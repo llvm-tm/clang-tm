@@ -38,12 +38,6 @@ namespace tm_method_instrumentation
 // Clone mode: Instrument clones immediately, or mark for later inlining
 enum class CloneMode { Instrument, AlwaysInline, CloneOnly };
 
-struct TMMethodInfo {
-	Function *Original;
-	Function *Cloned;
-	Value *TMGlobal;
-};
-
 static SmallPtrSet<const GlobalVariable *, 16> *TMGlobalsCache = nullptr;
 
 static void collectTMGlobalsCached(Module &M,

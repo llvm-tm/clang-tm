@@ -22,11 +22,14 @@
 #include "tm_thread_state.hpp"
 #include "spht_globals.hpp"
 #include "tm_alloc_overrides.hpp"
+#include "tm_hooks.hpp"
 
 thread_local bool g_in_tx = false;
 thread_local FreeNode *g_deferred_frees = nullptr;
 thread_local std::unordered_set<void *> g_deferred_frees_set;
 thread_local SpecAlloc *g_spec_allocs = nullptr;
+
+extern const TMRealHooks g_spht_hooks;
 
 extern "C" {
 
@@ -42,6 +45,7 @@ static std::atomic<int64_t> g_tm_end_count{0};
 
 void tm_init()
 {
+	tm_register_real_hooks(&g_spht_hooks);
     if (stm::tm_region_init() != 0) {
         fprintf(stderr, "FATAL: tm_region_init() failed — TM address space unavailable\n");
         std::abort();
@@ -57,6 +61,7 @@ void tm_exit()
 
 void tm_init_thread()
 {
+	tm_hook_init_thread();
 	spht::init_thread();
 	spht::jmpbuf = &tm_jmpbuf;
 	sigsetjmp(tm_jmpbuf, 0);
@@ -64,6 +69,7 @@ void tm_init_thread()
 
 void tm_exit_thread()
 {
+	tm_hook_exit_thread();
 	spht::exit_thread();
 }
 
@@ -108,110 +114,11 @@ int tm_serialize_unlock_all()
 	return 0;
 }
 
-void tm_begin()
-{
-	tm_clear_spec_allocs();
-	tm_clear_deferred_frees();
-	g_in_tx = true;
-	spht::begin();
-	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
-}
+} // extern "C" — infrastructure
 
-void tm_end()
-{
-	spht::commit();
-	g_in_tx = false;
-	tm_flush_spec_allocs();
-	tm_flush_deferred_frees();
-	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
-}
-
-// ---- Read hooks ----
-
-uint8_t tm_read_i1(uint8_t *addr)  { return spht::tm_read_i1(addr); }
-uint16_t tm_read_i2(uint16_t *addr){ return spht::tm_read_i2(addr); }
-uint32_t tm_read_i4(uint32_t *addr){ return spht::tm_read_i4(addr); }
-uint64_t tm_read_i8(uint64_t *addr){ return spht::tm_read_i8(addr); }
-
-void tm_read_i16(void *addr, void *out)
-{
-	auto *out_words = static_cast<uint64_t *>(out);
-	out_words[0] = spht::tm_read_i8(static_cast<uint64_t *>(addr) + 0);
-	out_words[1] = spht::tm_read_i8(static_cast<uint64_t *>(addr) + 1);
-}
-
-void tm_read_i32(void *addr, void *out)
-{
-	auto *out_words = static_cast<uint64_t *>(out);
-	for (int i = 0; i < 4; i++)
-		out_words[i] = spht::tm_read_i8(static_cast<uint64_t *>(addr) + i);
-}
-
-void tm_read_i64(void *addr, void *out)
-{
-	auto *out_words = static_cast<uint64_t *>(out);
-	for (int i = 0; i < 8; i++)
-		out_words[i] = spht::tm_read_i8(static_cast<uint64_t *>(addr) + i);
-}
-
-float tm_read_f4(float *addr)    { return spht::tm_read_f4(addr); }
-double tm_read_f8(double *addr)  { return spht::tm_read_f8(addr); }
-void * tm_read_ptr(void **addr)  { return spht::tm_read_ptr(addr); }
-
-void *tm_read_z(uint8_t *addr, uint64_t len)
-{
-	assert(len < TM_BUFFER_SIZE);
-	for (uint64_t i = 0; i < len; i++)
-		tm_buffer[i] = spht::tm_read_i1(&addr[i]);
-	return tm_buffer;
-}
-
-// ---- Write hooks ----
-
-void tm_write_i1(uint8_t *addr, uint8_t val)        { spht::tm_write_i1(addr, val); }
-void tm_write_i2(uint16_t *addr, uint16_t val)      { spht::tm_write_i2(addr, val); }
-void tm_write_i4(uint32_t *addr, uint32_t val)      { spht::tm_write_i4(addr, val); }
-void tm_write_i8(uint64_t *addr, int64_t val)       { spht::tm_write_i8(addr, (uint64_t)val); }
-
-void tm_write_i16(void *addr, void *val)
-{
-	auto *val_words = static_cast<const uint64_t *>(val);
-	for (int i = 0; i < 2; i++)
-		spht::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
-}
-
-void tm_write_i32(void *addr, void *val)
-{
-	auto *val_words = static_cast<const uint64_t *>(val);
-	for (int i = 0; i < 4; i++)
-		spht::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
-}
-
-void tm_write_i64(void *addr, void *val)
-{
-	auto *val_words = static_cast<const uint64_t *>(val);
-	for (int i = 0; i < 8; i++)
-		spht::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
-}
-
-void tm_write_f4(float *addr, float val)             { spht::tm_write_f4(addr, val); }
-void tm_write_f8(double *addr, double val)           { spht::tm_write_f8(addr, val); }
-void tm_write_ptr(void **addr, void *val)            { spht::tm_write_ptr(addr, val); }
-
-void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len)
-{
-	for (uint64_t i = 0; i < len; i++)
-		spht::tm_write_i1(&dst[i], src[i]);
-}
-
-void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
-{
-	for (uint64_t i = 0; i < len; i++)
-		spht::tm_write_i1(&addr[i], val);
-}
-
-void tm_load_symbols(void *symbol_table, uint32_t symbol_count) { (void)symbol_table; (void)symbol_count; }
-void consume_ptr(volatile void *ptr) { (void)ptr; }
+// ═══════════════════════════════════════════════════════════════════
+//  Hook implementations (static; registered via tm_register_real_hooks)
+// ═══════════════════════════════════════════════════════════════════
 
 static void
 spht_push_malloc_entry(void *ptr, size_t size)
@@ -234,7 +141,47 @@ spht_push_free_entry(void *ptr)
 	}
 }
 
-void *tm_malloc(size_t size)
+static void real_tm_begin()
+{
+	tm_clear_spec_allocs();
+	tm_clear_deferred_frees();
+	g_in_tx = true;
+	spht::begin();
+	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+static void real_tm_end()
+{
+	spht::commit();
+	g_in_tx = false;
+	tm_flush_spec_allocs();
+	tm_flush_deferred_frees();
+	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+// ---- Read hooks ----
+
+static uint8_t real_tm_read_i1(uint8_t *addr)  { return spht::tm_read_i1(addr); }
+static uint16_t real_tm_read_i2(uint16_t *addr){ return spht::tm_read_i2(addr); }
+static uint32_t real_tm_read_i4(uint32_t *addr){ return spht::tm_read_i4(addr); }
+static uint64_t real_tm_read_i8(uint64_t *addr){ return spht::tm_read_i8(addr); }
+
+static float real_tm_read_f4(float *addr)    { return spht::tm_read_f4(addr); }
+static double real_tm_read_f8(double *addr)  { return spht::tm_read_f8(addr); }
+static void * real_tm_read_ptr(void **addr)  { return spht::tm_read_ptr(addr); }
+
+// ---- Write hooks ----
+
+static void real_tm_write_i1(uint8_t *addr, uint8_t val)        { spht::tm_write_i1(addr, val); }
+static void real_tm_write_i2(uint16_t *addr, uint16_t val)      { spht::tm_write_i2(addr, val); }
+static void real_tm_write_i4(uint32_t *addr, uint32_t val)      { spht::tm_write_i4(addr, val); }
+static void real_tm_write_i8(uint64_t *addr, int64_t val)       { spht::tm_write_i8(addr, (uint64_t)val); }
+
+static void real_tm_write_f4(float *addr, float val)             { spht::tm_write_f4(addr, val); }
+static void real_tm_write_f8(double *addr, double val)           { spht::tm_write_f8(addr, val); }
+static void real_tm_write_ptr(void **addr, void *val)            { spht::tm_write_ptr(addr, val); }
+
+static void *real_tm_malloc(size_t size)
 {
 	void *p = stm::tm_region_malloc(size);
 	tm_track_spec_alloc(p);
@@ -242,7 +189,7 @@ void *tm_malloc(size_t size)
 	return p;
 }
 
-void *tm_calloc(size_t nmemb, size_t size)
+static void *real_tm_calloc(size_t nmemb, size_t size)
 {
 	void *p = stm::tm_region_malloc(nmemb * size);
 	memset(p, 0, nmemb * size);
@@ -251,7 +198,7 @@ void *tm_calloc(size_t nmemb, size_t size)
 	return p;
 }
 
-void *tm_realloc(void *ptr, size_t size)
+static void *real_tm_realloc(void *ptr, size_t size)
 {
 	void *p = stm::tm_region_malloc(size);
 	if (ptr) {
@@ -264,7 +211,7 @@ void *tm_realloc(void *ptr, size_t size)
 	return p;
 }
 
-void tm_free(void *ptr)
+static void real_tm_free(void *ptr)
 {
 	if (!ptr) return;
 	if (!stm::isTMAddress(ptr)) return;
@@ -291,4 +238,102 @@ void tm_free(void *ptr)
 	}
 }
 
-} // extern "C"
+// ═══════════════════════════════════════════════════════════════════
+//  Hook registration table
+// ═══════════════════════════════════════════════════════════════════
+
+const TMRealHooks g_spht_hooks = {
+    .begin    = real_tm_begin,
+    .end      = real_tm_end,
+    .malloc   = real_tm_malloc,
+    .calloc   = real_tm_calloc,
+    .realloc  = real_tm_realloc,
+    .free     = real_tm_free,
+    .read_i1  = real_tm_read_i1,
+    .read_i2  = real_tm_read_i2,
+    .read_i4  = real_tm_read_i4,
+    .read_i8  = real_tm_read_i8,
+    .read_f4  = real_tm_read_f4,
+    .read_f8  = real_tm_read_f8,
+    .read_ptr = real_tm_read_ptr,
+    .write_i1  = real_tm_write_i1,
+    .write_i2  = real_tm_write_i2,
+    .write_i4  = real_tm_write_i4,
+    .write_i8  = real_tm_write_i8,
+    .write_f4  = real_tm_write_f4,
+    .write_f8  = real_tm_write_f8,
+    .write_ptr = real_tm_write_ptr,
+};
+
+// ═══════════════════════════════════════════════════════════════════
+//  Plugin-specific extern "C" functions (not hook candidates)
+// ═══════════════════════════════════════════════════════════════════
+
+extern "C" {
+
+void tm_read_i16(void *addr, void *out)
+{
+	auto *out_words = static_cast<uint64_t *>(out);
+	out_words[0] = spht::tm_read_i8(static_cast<uint64_t *>(addr) + 0);
+	out_words[1] = spht::tm_read_i8(static_cast<uint64_t *>(addr) + 1);
+}
+
+void tm_read_i32(void *addr, void *out)
+{
+	auto *out_words = static_cast<uint64_t *>(out);
+	for (int i = 0; i < 4; i++)
+		out_words[i] = spht::tm_read_i8(static_cast<uint64_t *>(addr) + i);
+}
+
+void tm_read_i64(void *addr, void *out)
+{
+	auto *out_words = static_cast<uint64_t *>(out);
+	for (int i = 0; i < 8; i++)
+		out_words[i] = spht::tm_read_i8(static_cast<uint64_t *>(addr) + i);
+}
+
+void *tm_read_z(uint8_t *addr, uint64_t len)
+{
+	assert(len < TM_BUFFER_SIZE);
+	for (uint64_t i = 0; i < len; i++)
+		tm_buffer[i] = spht::tm_read_i1(&addr[i]);
+	return tm_buffer;
+}
+
+void tm_write_i16(void *addr, void *val)
+{
+	auto *val_words = static_cast<const uint64_t *>(val);
+	for (int i = 0; i < 2; i++)
+		spht::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
+}
+
+void tm_write_i32(void *addr, void *val)
+{
+	auto *val_words = static_cast<const uint64_t *>(val);
+	for (int i = 0; i < 4; i++)
+		spht::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
+}
+
+void tm_write_i64(void *addr, void *val)
+{
+	auto *val_words = static_cast<const uint64_t *>(val);
+	for (int i = 0; i < 8; i++)
+		spht::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
+}
+
+void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len)
+{
+	for (uint64_t i = 0; i < len; i++)
+		spht::tm_write_i1(&dst[i], src[i]);
+}
+
+void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
+{
+	for (uint64_t i = 0; i < len; i++)
+		spht::tm_write_i1(&addr[i], val);
+}
+
+void tm_load_symbols(void *symbol_table, uint32_t symbol_count) { (void)symbol_table; (void)symbol_count; }
+void consume_ptr(volatile void *ptr) { (void)ptr; }
+
+} // extern "C" — plugin-specific

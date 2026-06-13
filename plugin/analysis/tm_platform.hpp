@@ -82,12 +82,6 @@ inline bool isOperatorDelete(llvm::StringRef N)
 //   _ZNKSt = std:: (const method)
 //   _ZN9__gnu_cxx = __gnu_cxx:: (libstdc++ extensions)
 // -------------------------------------------------------------------------
-inline bool isSTLContainerFunction(llvm::StringRef Name)
-{
-	return Name.starts_with("_ZNSt") || Name.starts_with("_ZNKSt") ||
-	       Name.starts_with("_ZN9__gnu_cxx");
-}
-
 // -------------------------------------------------------------------------
 // Heap allocation/deallocation call detection
 //
