@@ -69,10 +69,11 @@ void tm_exit() {
 }
 
 void tm_init_thread() {
+    tm_hook_init_thread();
     leftright::init_thread();
 }
 
-void tm_exit_thread() {}
+void tm_exit_thread() { tm_hook_exit_thread(); }
 
 TMThreadState *tm_get_thread_state() {
     return &g_tm_thread_state;
