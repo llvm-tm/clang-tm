@@ -50,10 +50,11 @@ extern "C" void tm_exit() {
 }
 
 extern "C" void tm_init_thread() {
+    tm_hook_init_thread();
     xtm::init_thread();
 }
 
-extern "C" void tm_exit_thread() {}
+extern "C" void tm_exit_thread() { tm_hook_exit_thread(); }
 
 static void real_tm_begin() {
     if (tm_nested_call_counter == 1) {

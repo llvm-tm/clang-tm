@@ -59,10 +59,12 @@ extern "C" void tm_exit() {
 }
 
 extern "C" void tm_init_thread() {
+    tm_hook_init_thread();
     tl2::init_thread();
 }
 
 extern "C" void tm_exit_thread() {
+    tm_hook_exit_thread();
     tl2::exit_thread();
 }
 

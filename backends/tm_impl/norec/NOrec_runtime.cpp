@@ -98,6 +98,7 @@ void tm_exit() {
 
 void tm_init_thread()
 {
+	tm_hook_init_thread();
 	norec::init_thread();
 	// Set NOrec's jmpbuf pointer to our thread-local buffer
 	norec::jmpbuf = &tm_jmpbuf;
@@ -105,7 +106,7 @@ void tm_init_thread()
 	sigsetjmp(tm_jmpbuf, 0);
 }
 
-void tm_exit_thread() { norec::exit_thread(); }
+void tm_exit_thread() { tm_hook_exit_thread(); norec::exit_thread(); }
 
 TMThreadState *tm_get_thread_state() {
     return reinterpret_cast<TMThreadState*>(&tm_nested_call_counter);

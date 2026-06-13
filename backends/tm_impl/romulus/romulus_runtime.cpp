@@ -49,9 +49,9 @@ void tm_exit() {
     }
 }
 
-void tm_init_thread() { romulus::init_thread(); }
+void tm_init_thread() { tm_hook_init_thread(); romulus::init_thread(); }
 
-void tm_exit_thread() {}
+void tm_exit_thread() { tm_hook_exit_thread(); }
 
 } // extern "C" — non-hook functions above, hooks below
 

@@ -51,6 +51,7 @@ void tm_init() {
 }
 
 void tm_init_thread() {
+    tm_hook_init_thread();
 }
 
 void tm_exit() {
@@ -58,6 +59,7 @@ void tm_exit() {
 }
 
 void tm_exit_thread() {
+    tm_hook_exit_thread();
 }
 
 static std::recursive_mutex g_serialize_mutex;
