@@ -16,7 +16,7 @@
 #include <random>
 #include <set>
 #include <thread>
-#include <vector>
+#include "../../include/scratch_set.hpp"
 
 #include "../../tests/benchmark_test.hpp"
 
@@ -127,7 +127,7 @@ static int do_expansion(long* dist, const long* cell_states,
 }
 
 // ── Greedy traceback (non-TX) ─────────────────────────────
-static bool do_traceback(std::vector<Point3D>& path, const long* dist,
+static bool do_traceback(ScratchVector<Point3D>& path, const long* dist,
                           int w, int h, int d,
                           const Point3D& src, const Point3D& dst) {
     path.clear();
@@ -154,7 +154,7 @@ static bool do_traceback(std::vector<Point3D>& path, const long* dist,
 }
 
 // ── TX mark: atomically verify and mark path cells ────────
-static bool labyrinth_mark(LabyrinthData* data, const std::vector<Point3D>& path) {
+static bool labyrinth_mark(LabyrinthData* data, const ScratchVector<Point3D>& path) {
     bool result = false;
     tx_retry([&]() {
         int w = data->width, h = data->height, d = data->depth;
@@ -187,7 +187,7 @@ static void worker(int thread_id, int num_threads) {
     auto* local_grid = new long[gridsize];
     auto* dist = new long[gridsize];
     auto* queue = new int[gridsize];
-    std::vector<Point3D> path;
+    ScratchVector<Point3D> path;
 
     for (int i = thread_id; i < data->num_requests; i += num_threads) {
         if (data->request_handled[i]) continue;
@@ -252,7 +252,7 @@ static void test_logic() {
     std::fill(grid, grid + gridsize, -1L);
     long* dist = new long[gridsize];
     int* queue = new int[gridsize];
-    std::vector<Point3D> path;
+    ScratchVector<Point3D> path;
 
     Point3D src = {1, 1, 0}, dst = {6, 6, 0};
     int ok = do_expansion(dist, grid, w, h, d, src, dst, queue);

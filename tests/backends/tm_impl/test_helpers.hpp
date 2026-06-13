@@ -20,29 +20,29 @@ void tm_exit();
 void tm_init_thread();
 void tm_exit_thread();
 
-// TX lifecycle — function pointers from hook system
-extern void     (*tm_begin)();
-extern void     (*tm_end)();
-extern void    *(*tm_malloc)(size_t);
-extern void    *(*tm_calloc)(size_t, size_t);
-extern void    *(*tm_realloc)(void*, size_t);
-extern void     (*tm_free)(void*);
+// TX lifecycle — forwarding functions provided by tm_hooks.cpp
+void     tm_begin();
+void     tm_end();
+void    *tm_malloc(size_t);
+void    *tm_calloc(size_t, size_t);
+void    *tm_realloc(void*, size_t);
+void     tm_free(void*);
 
-// Read/write function pointers (no symbol_id, matching hook system)
-extern uint8_t  (*tm_read_i1)(uint8_t*);
-extern void     (*tm_write_i1)(uint8_t*, uint8_t);
-extern uint16_t (*tm_read_i2)(uint16_t*);
-extern void     (*tm_write_i2)(uint16_t*, uint16_t);
-extern uint32_t (*tm_read_i4)(uint32_t*);
-extern void     (*tm_write_i4)(uint32_t*, uint32_t);
-extern uint64_t (*tm_read_i8)(uint64_t*);
-extern void     (*tm_write_i8)(uint64_t*, int64_t);
-extern float    (*tm_read_f4)(float*);
-extern void     (*tm_write_f4)(float*, float);
-extern double   (*tm_read_f8)(double*);
-extern void     (*tm_write_f8)(double*, double);
-extern void    *(*tm_read_ptr)(void**);
-extern void     (*tm_write_ptr)(void**, void*);
+// Read/write forwarding functions
+uint8_t  tm_read_i1(uint8_t*);
+void     tm_write_i1(uint8_t*, uint8_t);
+uint16_t tm_read_i2(uint16_t*);
+void     tm_write_i2(uint16_t*, uint16_t);
+uint32_t tm_read_i4(uint32_t*);
+void     tm_write_i4(uint32_t*, uint32_t);
+uint64_t tm_read_i8(uint64_t*);
+void     tm_write_i8(uint64_t*, int64_t);
+float    tm_read_f4(float*);
+void     tm_write_f4(float*, float);
+double   tm_read_f8(double*);
+void     tm_write_f8(double*, double);
+void    *tm_read_ptr(void**);
+void     tm_write_ptr(void**, void*);
 }
 
 // ── Convenience wrappers (omit symbol_id for test code) ────────────
