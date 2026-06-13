@@ -19,31 +19,28 @@ void     tm_exit();
 void     tm_init_thread();
 void     tm_exit_thread();
 
-// Hook function pointers — default to stubs; backends register real impls.
-// NOTE: each must be declared 'extern' to avoid duplicate definitions
-// in every translation unit that includes this header.
-extern void     (*tm_begin)();
-extern void     (*tm_end)();
-extern void    *(*tm_malloc)(size_t size);
-extern void    *(*tm_calloc)(size_t nmemb, size_t size);
-extern void    *(*tm_realloc)(void *ptr, size_t size);
-extern void     (*tm_free)(void *ptr);
+void     tm_begin();
+void     tm_end();
+void    *tm_malloc(size_t size);
+void    *tm_calloc(size_t nmemb, size_t size);
+void    *tm_realloc(void *ptr, size_t size);
+void     tm_free(void *ptr);
 
-extern uint8_t  (*tm_read_i1)(uint8_t *addr);
-extern uint16_t (*tm_read_i2)(uint16_t *addr);
-extern uint32_t (*tm_read_i4)(uint32_t *addr);
-extern uint64_t (*tm_read_i8)(uint64_t *addr);
-extern float    (*tm_read_f4)(float *addr);
-extern double   (*tm_read_f8)(double *addr);
-extern void    *(*tm_read_ptr)(void **addr);
+uint8_t  tm_read_i1(uint8_t *addr);
+uint16_t tm_read_i2(uint16_t *addr);
+uint32_t tm_read_i4(uint32_t *addr);
+uint64_t tm_read_i8(uint64_t *addr);
+float    tm_read_f4(float *addr);
+double   tm_read_f8(double *addr);
+void    *tm_read_ptr(void **addr);
 
-extern void (*tm_write_i1)(uint8_t *addr, uint8_t val);
-extern void (*tm_write_i2)(uint16_t *addr, uint16_t val);
-extern void (*tm_write_i4)(uint32_t *addr, uint32_t val);
-extern void (*tm_write_i8)(uint64_t *addr, int64_t val);
-extern void (*tm_write_f4)(float *addr, float val);
-extern void (*tm_write_f8)(double *addr, double val);
-extern void (*tm_write_ptr)(void **addr, void *val);
+void tm_write_i1(uint8_t *addr, uint8_t val);
+void tm_write_i2(uint16_t *addr, uint16_t val);
+void tm_write_i4(uint32_t *addr, uint32_t val);
+void tm_write_i8(uint64_t *addr, int64_t val);
+void tm_write_f4(float *addr, float val);
+void tm_write_f8(double *addr, double val);
+void tm_write_ptr(void **addr, void *val);
 }
 
 namespace expli {

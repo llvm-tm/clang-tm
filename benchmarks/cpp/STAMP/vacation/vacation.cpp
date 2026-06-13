@@ -17,6 +17,7 @@
 #include <random>
 #include <thread>
 #include <vector>
+#include "../../include/scratch_set.hpp"
 #include <chrono>
 #include <atomic>
 
@@ -56,10 +57,10 @@ struct Customer {
 };
 
 struct VacationData {
-    std::vector<Reservation> cars;
-    std::vector<Reservation> rooms;
-    std::vector<Reservation> flights;
-    std::vector<Customer> customers;
+    ScratchVector<Reservation> cars;
+    ScratchVector<Reservation> rooms;
+    ScratchVector<Reservation> flights;
+    ScratchVector<Customer> customers;
     int num_relations;
     int query_range;
     int num_queries_per_tx;
@@ -71,7 +72,7 @@ struct VacationData {
 static VacationData g_data;
 
 // ── Table operations (inside TX) ──────────────────────────
-static int query_num_free(std::vector<Reservation>* table, int id) {
+static int query_num_free(ScratchVector<Reservation>* table, int id) {
     int idx = id - 1;
     if (idx < 0 || idx >= (int)table->size())
         return -1;
@@ -81,7 +82,7 @@ static int query_num_free(std::vector<Reservation>* table, int id) {
     return r.num_free.read();
 }
 
-static int query_price(std::vector<Reservation>* table, int id) {
+static int query_price(ScratchVector<Reservation>* table, int id) {
     int idx = id - 1;
     if (idx < 0 || idx >= (int)table->size())
         return -1;
@@ -91,7 +92,7 @@ static int query_price(std::vector<Reservation>* table, int id) {
     return r.price.read();
 }
 
-static bool add_reservation(std::vector<Reservation>* table, int id, int num, int price) {
+static bool add_reservation(ScratchVector<Reservation>* table, int id, int num, int price) {
     int idx = id - 1;
     if (idx < 0 || idx >= (int)table->size())
         return false;
@@ -112,7 +113,7 @@ static bool add_reservation(std::vector<Reservation>* table, int id, int num, in
     return true;
 }
 
-static bool delete_reservation(std::vector<Reservation>* table, int id, int num) {
+static bool delete_reservation(ScratchVector<Reservation>* table, int id, int num) {
     int idx = id - 1;
     if (idx < 0 || idx >= (int)table->size())
         return false;
@@ -128,7 +129,7 @@ static bool delete_reservation(std::vector<Reservation>* table, int id, int num)
     return true;
 }
 
-static int make_reservation(std::vector<Reservation>* table, int id) {
+static int make_reservation(ScratchVector<Reservation>* table, int id) {
     int idx = id - 1;
     if (idx < 0 || idx >= (int)table->size())
         return -1;
@@ -140,7 +141,7 @@ static int make_reservation(std::vector<Reservation>* table, int id) {
     return r.price.read();
 }
 
-static int cancel_reservation(std::vector<Reservation>* table, int id) {
+static int cancel_reservation(ScratchVector<Reservation>* table, int id) {
     int idx = id - 1;
     if (idx < 0 || idx >= (int)table->size())
         return -1;
@@ -200,7 +201,7 @@ static void make_reservation_tx(VacationData* data, int customer_id) {
             int t = (int)(rng() % 3);
             int id = (int)(rng() % data->query_range) + 1;
 
-            std::vector<Reservation>* table = nullptr;
+            ScratchVector<Reservation>* table = nullptr;
             if (t == 0) table = &data->cars;
             else if (t == 1) table = &data->flights;
             else table = &data->rooms;
@@ -219,7 +220,7 @@ static void make_reservation_tx(VacationData* data, int customer_id) {
         if (found) {
             for (int t = 0; t < 3; t++) {
                 if (best_ids[t] > 0) {
-                    std::vector<Reservation>* table = nullptr;
+                    ScratchVector<Reservation>* table = nullptr;
                     if (t == 0) table = &data->cars;
                     else if (t == 1) table = &data->flights;
                     else table = &data->rooms;
@@ -251,7 +252,7 @@ static void update_tables_tx(VacationData* data) {
         int id = (int)(rng() % data->query_range) + 1;
         int op = (int)(rng() % 2);
 
-        std::vector<Reservation>* table = nullptr;
+        ScratchVector<Reservation>* table = nullptr;
         if (type == 0) table = &data->cars;
         else if (type == 1) table = &data->flights;
         else table = &data->rooms;
