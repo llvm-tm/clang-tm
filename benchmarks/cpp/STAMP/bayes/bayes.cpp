@@ -64,15 +64,15 @@ static inline double l2d(long v) { double r; memcpy(&r, &v, sizeof(r)); return r
 
 // ── TM abstraction ──────────────────────────────────────────────────
   extern "C" {
-      void     tm_begin();
-      void     tm_end();
-      long     tm_read_i8(const long*);
-      void     tm_write_i8(long*, long);
+      extern void     (*tm_begin)();
+      extern void     (*tm_end)();
+      extern long     (*tm_read_i8)(const long*);
+      extern void     (*tm_write_i8)(long*, long);
       void     tm_init();
       void     tm_exit();
       void     tm_init_thread();
       void     tm_exit_thread();
-      void*    tm_calloc(size_t, size_t);
+      extern void*    (*tm_calloc)(size_t, size_t);
   }
   extern __thread int32_t tm_nested_call_counter;
   extern __thread sigjmp_buf tm_jmpbuf;

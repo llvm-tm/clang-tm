@@ -16,6 +16,7 @@
 #include <llvm/IR/IRBuilder.h>
 
 #include "tm_debug.hpp"
+#include "tm_runtime_hooks.hpp"
 
 using namespace llvm;
 
@@ -23,20 +24,20 @@ using namespace llvm;
 // PURPOSE: Call tm_init_thread() at thread entry point.
 //          The runtime must be idempotent (check its own flag internally).
 static void insertThreadInitWithGuard(IRBuilder<> &Builder,
-                                      FunctionCallee tm_init_thread)
+                                      const TMRuntimeHook &tm_init_thread)
 {
 	TM_DEBUG("Inserting thread init");
-	Builder.CreateCall(tm_init_thread, {});
+	emitHookCall(Builder, tm_init_thread, {});
 }
 
 // Insert thread exit
 // PURPOSE: Call tm_exit_thread() at thread exit point.
 //          The runtime must be idempotent (check its own flag internally).
 static void insertThreadExitWithGuard(IRBuilder<> &Builder,
-                                      FunctionCallee tm_exit_thread)
+                                      const TMRuntimeHook &tm_exit_thread)
 {
 	TM_DEBUG("Inserting thread exit");
-	Builder.CreateCall(tm_exit_thread, {});
+	emitHookCall(Builder, tm_exit_thread, {});
 }
 
 #endif // TM_THREAD_GUARD_HPP

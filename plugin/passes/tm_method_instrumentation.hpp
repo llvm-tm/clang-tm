@@ -151,7 +151,7 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M, TMRuntimeHooks 
 		Value *WideVal = ABB.CreateZExt(SrcOrVal, i64Ty, "wide_val");
 		Constant *BCMagic = ConstantInt::get(i64Ty, 0x0101010101010101ULL);
 		Value *Broadcast = ABB.CreateMul(WideVal, BCMagic, "broadcast");
-		ABB.CreateCall(H.write_i8, {ADst, Broadcast});
+		emitHookCall(ABB, H.write_i8, {ADst, Broadcast});
 		Value *ANext = ABB.CreateAdd(AIdx, Eight);
 		AIdx->addIncoming(ANext, AlignedLB);
 		ABB.CreateBr(AlignedLE);
@@ -164,7 +164,7 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M, TMRuntimeHooks 
 
 		IRBuilder<> RBB(RemLB);
 		Value *RDst = RBB.CreateGEP(i8Ty, Dst, RIdx);
-		RBB.CreateCall(H.write_i1, {RDst, SrcOrVal});
+		emitHookCall(RBB, H.write_i1, {RDst, SrcOrVal});
 		Value *RNext = RBB.CreateAdd(RIdx, ConstantInt::get(LenTy, 1));
 		RIdx->addIncoming(RNext, RemLB);
 		RBB.CreateBr(RemLE);
@@ -194,8 +194,8 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M, TMRuntimeHooks 
 		IRBuilder<> BB(LoopBody);
 		Value *DG = BB.CreateGEP(i8Ty, Dst, AIdx);
 		Value *SG = BB.CreateGEP(i8Ty, SrcOrVal, AIdx);
-		Value *ReadVal = BB.CreateCall(H.read_i8, {SG});
-		BB.CreateCall(H.write_i8, {DG, ReadVal});
+		Value *ReadVal = emitHookCall(BB, H.read_i8, {SG});
+		emitHookCall(BB, H.write_i8, {DG, ReadVal});
 		Value *ANext = BB.CreateAdd(AIdx, Eight);
 		AIdx->addIncoming(ANext, LoopBody);
 		BB.CreateBr(LoopEntry);
@@ -209,7 +209,7 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M, TMRuntimeHooks 
 		IRBuilder<> RBB(RemBody);
 		Value *RDG = RBB.CreateGEP(i8Ty, Dst, RIdx);
 		Value *RSG = RBB.CreateGEP(i8Ty, SrcOrVal, RIdx);
-		RBB.CreateCall(H.write_i1, {RDG, RBB.CreateCall(H.read_i1, {RSG})});
+		emitHookCall(RBB, H.write_i1, {RDG, emitHookCall(RBB, H.read_i1, {RSG})});
 		Value *RNext = RBB.CreateAdd(RIdx, ConstantInt::get(LenTy, 1));
 		RIdx->addIncoming(RNext, RemBody);
 		RBB.CreateBr(RemEntry);

@@ -81,7 +81,7 @@ static void instrumentMainInitExit(Function *MainFn, ModulePassContext &Ctx)
 {
 	BasicBlock &Entry = MainFn->getEntryBlock();
 	IRBuilder<> Builder(&Entry, Entry.begin());
-	Builder.CreateCall(Ctx.H.init, {});
+	emitHookCall(Builder, Ctx.H.init, {});
 	insertThreadInitWithGuard(Builder, Ctx.H.init_thread);
 
 	for (auto &F : *MainFn->getParent()) {
@@ -97,7 +97,7 @@ static void instrumentMainInitExit(Function *MainFn, ModulePassContext &Ctx)
 	for (auto *Ret : MainReturns) {
 		IRBuilder<> RetBuilder(Ret);
 		insertThreadExitWithGuard(RetBuilder, Ctx.H.exit_thread);
-		RetBuilder.CreateCall(Ctx.H.exit_fn, {});
+		emitHookCall(RetBuilder, Ctx.H.exit_fn, {});
 	}
 	Ctx.modified = true;
 }
@@ -302,27 +302,22 @@ static bool handleMallocFree(CallBase *Call,
 	// If NumArgs is specified, only forward the first NumArgs arguments
 	// (needed for operator new with alignment which passes 2 args to
 	//  tm_malloc which only expects 1).
-	auto redirectTo = [&](FunctionCallee Target, unsigned NumArgs = ~0u) {
+	auto redirectTo = [&](const TMRuntimeHook &Target, unsigned NumArgs = ~0u) {
 		SmallVector<Value *, 4> Args;
 		unsigned N = std::min((unsigned)Call->arg_size(), NumArgs);
 		for (unsigned i = 0; i < N; i++)
 			Args.push_back(Call->getArgOperand(i));
 		if (isInvoke) {
 			auto *II = cast<InvokeInst>(Call);
-			auto *FTy = Target.getFunctionType();
-			auto *NewInvoke = InvokeInst::Create(FTy,
-			                                     Target.getCallee(),
-			                                     II->getNormalDest(),
-			                                     II->getUnwindDest(),
-			                                     Args,
-			                                     {},
-			                                     Call->getName(),
-			                                     Call->getParent());
+			auto *NewInvoke = createHookInvoke(II->getContext(), Target, Args,
+			                                   II->getNormalDest(),
+			                                   II->getUnwindDest(),
+			                                   Call->getName());
 			NewInvoke->setAttributes(AttributeList{});
 			Call->replaceAllUsesWith(NewInvoke);
 			ToErase.push_back(Call);
 		} else {
-			auto *NewCall = B.CreateCall(Target, Args);
+			auto *NewCall = emitHookCall(B, Target, Args, Call->getName());
 			NewCall->setAttributes(AttributeList{});
 			Call->replaceAllUsesWith(NewCall);
 			ToErase.push_back(Call);
@@ -347,16 +342,23 @@ static bool handleMallocFree(CallBase *Call,
 		return true;
 	}
 	if (isFree) {
-		// For InvokeInst, change the callee to tm_free in-place.
-		// For CallInst, create a new tm_free call with a bitcast pointer,
-		// matching the existing CallInst pattern.
+		// For InvokeInst, replace with a new invoke that loads the hook.
+		// For CallInst, create a new indirect call through the free hook
+		// with a bitcast pointer, matching the existing CallInst pattern.
 		if (isInvoke) {
-			Call->setCalledFunction(H.free_fn);
-			Call->setAttributes(AttributeList{});
+			auto *II = cast<InvokeInst>(Call);
+			auto *NewInvoke = createHookInvoke(B.getContext(), H.free_fn,
+			                                   {B.CreateBitCast(Call->getArgOperand(0), B.getPtrTy())},
+			                                   II->getNormalDest(),
+			                                   II->getUnwindDest(),
+			                                   Call->getName());
+			NewInvoke->setAttributes(AttributeList{});
+			Call->replaceAllUsesWith(NewInvoke);
+			ToErase.push_back(Call);
 		} else {
 			Value *PtrArg = Call->getArgOperand(0);
 			auto *BC = B.CreateBitCast(PtrArg, B.getPtrTy());
-			B.CreateCall(H.free_fn, {BC});
+			emitHookCall(B, H.free_fn, {BC});
 			ToErase.push_back(Call);
 		}
 		return true;
@@ -533,7 +535,7 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 
 	// Load thread state pointer from TM address space
 	IRBuilder<> Builder(&Entry);
-	Value *StatePtr = Builder.CreateCall(H.get_thread_state, {}, "tm_state");
+	Value *StatePtr = emitHookCall(Builder, H.get_thread_state, {}, "tm_state");
 
 	// Access nested_call_counter at offset 0
 	Value *CounterPtr = Builder.CreateGEP(i32Ty, Builder.CreateBitCast(StatePtr, i8PtrTy),
@@ -562,17 +564,18 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 
 	IRBuilder<> OuterBuilder(OuterBB);
 #ifndef DISABLE_SETJMP
-	Value *JmpBufPtr = OuterBuilder.CreateCall(H.get_env);
-	OuterBuilder.CreateCall(H.set_jmpbuf, {JmpBufPtr});
-	Value *SigJmpRet = OuterBuilder.CreateCall(H.sigsetjmp,
-	                                            {JmpBufPtr,
-	                                             ConstantInt::get(i32Ty, 0)});
+	Value *JmpBufPtr = emitHookCall(OuterBuilder, H.get_env);
+	emitHookCall(OuterBuilder, H.set_jmpbuf, {JmpBufPtr});
+	auto *SigJmpRetCall = emitHookCall(OuterBuilder, H.sigsetjmp,
+	                                   {JmpBufPtr,
+	                                    ConstantInt::get(i32Ty, 0)});
+	SigJmpRetCall->addFnAttr(Attribute::ReturnsTwice);
 	// Store sigsetjmp result to longjmp_ret, then clear
-	OuterBuilder.CreateStore(SigJmpRet, JmpRetPtr);
+	OuterBuilder.CreateStore(SigJmpRetCall, JmpRetPtr);
 	OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetPtr);
 #endif
 	OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 1), CounterPtr);
-	OuterBuilder.CreateCall(H.begin, {});
+	emitHookCall(OuterBuilder, H.begin, {});
 	OuterBuilder.CreateBr(ContBB);
 
 	IRBuilder<> NestedBuilder(NestedBB);
@@ -592,7 +595,7 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 	BasicBlock *CleanupBB = BasicBlock::Create(Ctx, "tx_cleanup", &F);
 
 	IRBuilder<> OuterEndBuilder(OuterEndBB);
-	OuterEndBuilder.CreateCall(H.end, {});
+	emitHookCall(OuterEndBuilder, H.end, {});
 #ifndef DISABLE_SETJMP
 	OuterEndBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetPtr);
 #endif
