@@ -296,6 +296,10 @@ pub fn tm_init() {
     tm_install_tmx_hook();
     locks();
     G_CLOCK.store(0, Ordering::Release);
+    #[cfg(feature = "simulation")]
+    for lock in locks().iter() {
+        lock.data.store(0, Ordering::Release);
+    }
 }
 
 pub fn tm_exit() {}
