@@ -5,3 +5,6 @@ edition = "2021"
 
 [dependencies]
 addrspace = { path = "../../addrspace" }
+
+[features]
+simulation = []

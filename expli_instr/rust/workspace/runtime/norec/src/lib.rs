@@ -5,8 +5,30 @@
 // serializes via CAS on the global lock.
 
 use core::sync::atomic::{fence, AtomicU64, Ordering};
+#[cfg(not(feature = "simulation"))]
 use std::cell::RefCell;
 pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
+
+// ── Thread-local / simulation state ──────────────────────
+// Normal mode: thread_local! for production multi-threaded use.
+// Simulation mode: HashMap<u64, State> so the simulator can
+// multiplex simulated threads on real OS threads.
+#[cfg(not(feature = "simulation"))]
+thread_local! {
+    static TX: RefCell<Option<Box<TxState>>> = const { RefCell::new(None) };
+}
+
+#[cfg(feature = "simulation")]
+use std::collections::HashMap;
+#[cfg(feature = "simulation")]
+use std::sync::Mutex;
+
+#[cfg(feature = "simulation")]
+fn sim_tx_store() -> &'static Mutex<HashMap<u64, Option<Box<TxState>>>> {
+    use std::sync::OnceLock;
+    static STORE: OnceLock<Mutex<HashMap<u64, Option<Box<TxState>>>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 // ── Global lock ─────────────────────────────────────────
 // Even = unlocked (version), Odd = locked.
@@ -16,28 +38,31 @@ static THR_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // ── Read entry ─────────────────────────────────────────
-struct ReadEntry {
-    addr: usize,
-    sz: u8,           // byte size of the read
-    observed_val: u64, // value at read time, zero-extended to u64
+#[derive(Clone)]
+pub struct ReadEntry {
+    pub addr: usize,
+    pub sz: u8,           // byte size of the read
+    pub observed_val: u64, // value at read time, zero-extended to u64
 }
 
 // ── Write entry ─────────────────────────────────────────
-struct WriteEntry {
-    addr: usize,
-    value: TypedValue,
+#[derive(Clone)]
+pub struct WriteEntry {
+    pub addr: usize,
+    pub value: TypedValue,
 }
 
 // ── Transaction state ───────────────────────────────────
-struct TxState {
-    read_set: Vec<ReadEntry>,
-    write_set: Vec<WriteEntry>,
+#[derive(Clone)]
+pub struct TxState {
+    pub read_set: Vec<ReadEntry>,
+    pub write_set: Vec<WriteEntry>,
     /// Deferred write-back closures (safe to apply at commit).
-    write_backs: Vec<WriteBack>,
-    snapshot: u64,
-    read_only: bool,
+    pub write_backs: Vec<WriteBack>,
+    pub snapshot: u64,
+    pub read_only: bool,
     #[allow(dead_code)]
-    aborted: bool,
+    pub aborted: bool,
 }
 
 impl TxState {
@@ -53,12 +78,8 @@ impl TxState {
     }
 }
 
-// ── Thread-local state ──────────────────────────────────
-thread_local! {
-    static TX: RefCell<Option<Box<TxState>>> = const { RefCell::new(None) };
-}
-
 // ── Helpers ─────────────────────────────────────────────
+#[cfg(not(feature = "simulation"))]
 fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     TX.with(|tx| {
         let mut b = tx.borrow_mut();
@@ -66,12 +87,40 @@ fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     })
 }
 
+#[cfg(feature = "simulation")]
+fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_tx_store();
+    let mut map = store.lock().unwrap();
+    let state = map.get_mut(&tid).expect("no sim state for thread");
+    f(state.as_mut().expect("no active transaction"))
+}
+
+#[cfg(not(feature = "simulation"))]
 fn tx_active() -> bool {
     TX.with(|tx| tx.borrow().is_some())
 }
 
+#[cfg(feature = "simulation")]
+fn tx_active() -> bool {
+    use runtime_core::current_sim_thread_id;
+    let tid = current_sim_thread_id();
+    let store = sim_tx_store();
+    let map = store.lock().unwrap();
+    map.get(&tid).map_or(false, |s| s.is_some())
+}
+
+#[cfg(not(feature = "simulation"))]
 fn flush_tx() -> Option<Box<TxState>> {
     TX.with(|tx| tx.borrow_mut().take())
+}
+
+#[cfg(feature = "simulation")]
+fn flush_tx() -> Option<Box<TxState>> {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_tx_store();
+    let mut map = store.lock().unwrap();
+    map.get_mut(&tid).and_then(|s| s.take())
 }
 
 fn read_mem_val(addr: usize, sz: u8) -> u64 {
@@ -129,10 +178,8 @@ fn read_word<T: Primitive>(addr: usize) -> T {
     let sz = core::mem::size_of::<T>() as u8;
 
     // Phase 1: check our own write-set first (reverse scan)
-    let ws_val = TX.with(|tx| {
-        let b = tx.borrow();
-        let t = b.as_ref().unwrap();
-        for e in t.write_set.iter().rev() {
+    let ws_val = with_tx(|tx| {
+        for e in tx.write_set.iter().rev() {
             if e.addr == addr {
                 let esz = byte_size_of_tv(&e.value);
                 if esz == sz {
@@ -251,9 +298,17 @@ pub fn tm_init() {
 pub fn tm_exit() {}
 
 pub fn tm_init_thread() {
+    #[cfg(not(feature = "simulation"))]
     TX.with(|tx| {
         *tx.borrow_mut() = None;
     });
+    #[cfg(feature = "simulation")]
+    {
+        let tid = runtime_core::current_sim_thread_id();
+        let store = sim_tx_store();
+        let mut map = store.lock().unwrap();
+        map.entry(tid).or_insert(None);
+    }
 }
 
 pub fn tm_exit_thread() {}
@@ -267,9 +322,17 @@ pub fn tm_begin() {
         }
         std::hint::spin_loop();
     };
+    #[cfg(not(feature = "simulation"))]
     TX.with(|tx| {
         *tx.borrow_mut() = Some(Box::new(TxState::new(snap)));
     });
+    #[cfg(feature = "simulation")]
+    {
+        let tid = runtime_core::current_sim_thread_id();
+        let store = sim_tx_store();
+        let mut map = store.lock().unwrap();
+        *map.get_mut(&tid).expect("no sim state for thread") = Some(Box::new(TxState::new(snap)));
+    }
 }
 
 pub fn tm_commit() -> bool {
@@ -378,4 +441,42 @@ pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) {
 #[inline]
 pub fn tm_write_raw(addr: *mut u8, src: &[u8]) {
     write_raw_bytes(addr as usize, src);
+}
+
+// ── Simulation-only API (used by the TM simulator) ──────
+#[cfg(feature = "simulation")]
+pub mod sim {
+    use super::*;
+
+    /// Set the simulated thread ID for the current OS thread.
+    /// Call before each backend operation in simulation mode.
+    pub fn set_thread_id(id: u64) {
+        runtime_core::set_sim_thread_id(id);
+    }
+
+    /// Clear the simulated thread ID.
+    pub fn clear_thread_id() {
+        runtime_core::clear_sim_thread_id();
+    }
+
+    /// Snapshot all per-thread TxState for checkpointing.
+    pub fn snapshot_states() -> HashMap<u64, Option<Box<TxState>>> {
+        let store = sim_tx_store();
+        let map = store.lock().unwrap();
+        map.clone()
+    }
+
+    /// Restore per-thread TxState from a checkpoint.
+    pub fn restore_states(states: HashMap<u64, Option<Box<TxState>>>) {
+        let store = sim_tx_store();
+        let mut map = store.lock().unwrap();
+        *map = states;
+    }
+
+    /// Clear all state (for reset between scenarios).
+    pub fn reset() {
+        let store = sim_tx_store();
+        let mut map = store.lock().unwrap();
+        map.clear();
+    }
 }
