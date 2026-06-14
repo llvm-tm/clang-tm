@@ -46,6 +46,12 @@ void tm_init() {
         abort();
     }
     romulus::init();
+    // Mark as multi-thread so real hooks (region allocator) are installed
+    // immediately, even before any worker thread calls tm_init_thread().
+    // Without this, s_thread_count=1 causes stubs (std::malloc) to be used,
+    // and TM-object pointers allocated during Bank construction land on the
+    // regular heap — making isTMAddress() return false during read_word.
+    tm_set_num_threads(2);
     tm_register_real_hooks(&g_romulus_hooks);
 }
 
