@@ -234,8 +234,15 @@ public:
     // the buffer to g_spec_allocs, and tm_begin()'s tm_clear_spec_allocs()
     // frees ALL spec-alloc entries — including buffers allocated OUTSIDE
     // the current TX — causing use-after-free on the first TX begin().
+    //
+    // Placement‑new constructs each element so that TM‑wrapped members
+    // (e.g. TM<int>::value_) are properly zero‑initialised even when the
+    // underlying heap memory is reused across alloc/free cycles.
     T *alloc(size_t n) {
-        *ptr() = static_cast<T*>(::operator new(n * sizeof(T)));
+        T* buf = static_cast<T*>(::operator new(n * sizeof(T)));
+        for (size_t i = 0; i < n; i++)
+            new (&buf[i]) T();
+        *ptr() = buf;
         return *value_;
     }
     void free_ptr() {

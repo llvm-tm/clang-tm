@@ -29,6 +29,16 @@ namespace stm {
 //   touching chunk metadata on the fast path.  Per-thread bump
 //   from the thread's slab allocates fresh chunks when needed.
 //
+// Memory debugging:
+//   Define TM_DEBUG_ALLOC to enable per-thread tracking of all live
+//   allocations.  When enabled, tm_region_check_leaks() (call at exit)
+//   reports any unfreed TM allocations with their sizes.  This can
+//   be combined with Valgrind:
+//     valgrind --tool=memcheck --track-origins=yes ./your_program
+//   Note: Valgrind will report TM-allocated memory (from mmap) as
+//   "still reachable" — that is expected.  The TM_DEBUG_ALLOC output
+//   tells you which specific pointers were never freed.
+//
 // Benchmark results (single-threaded linked list, 500K nodes):
 //   TM region:   39 ns/alloc  (25.6M allocs/sec)
 //   std::malloc: 87 ns/alloc  (11.5M allocs/sec)
@@ -114,6 +124,40 @@ extern thread_local Slab       g_tl_slab;
 extern thread_local TLFreeList g_tl_free_lists[MAX_CLASSES];
 extern thread_local void*      g_tl_hot_chunks[MAX_CLASSES];
 extern thread_local LargeHdr*  g_tl_large_free_list;
+
+// Optional debug tracking of live allocations (defined only when
+// TM_DEBUG_ALLOC is active).  tm_region_malloc inserts the allocated
+// pointer and size; tm_region_free removes it.  tm_region_check_leaks()
+// prints any remaining entries at exit.
+//
+// Compile with -DTM_DEBUG_ALLOC to enable.  Without the flag the
+// tracking compiles to nothing (zero overhead).
+
+#ifdef TM_DEBUG_ALLOC
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <unordered_map>
+// Per-thread set of (ptr, size) of live TM allocations
+extern thread_local std::unordered_map<void*, size_t> *g_tl_debug_allocs;
+#endif
+
+// Check for memory leaks in the TM region allocator.
+// Only produces output when compiled with -DTM_DEBUG_ALLOC.
+// Call this at program exit (after all threads have joined and
+// freed their TM allocations).
+inline void tm_region_check_leaks() noexcept {
+#ifdef TM_DEBUG_ALLOC
+    if (!g_tl_debug_allocs || g_tl_debug_allocs->empty())
+        return;
+    fprintf(stderr,
+            "[TM-LEAK] %zu unfreed TM allocation(s) in this thread:\n",
+            g_tl_debug_allocs->size());
+    for (auto &kv : *g_tl_debug_allocs) {
+        fprintf(stderr, "  ptr=%p  size=%zu\n", kv.first, kv.second);
+    }
+#endif
+}
 
 // ═══════════════════════════════════════════════════════════
 // isTMAddress()

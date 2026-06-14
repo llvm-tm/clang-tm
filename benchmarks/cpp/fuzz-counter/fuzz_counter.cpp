@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -20,7 +21,24 @@ struct Counter {
 static Counter *g_counters;
 static int g_num_counters;
 
+static const char VERSION[] = "1.0.0";
+
 int main(int argc, char *argv[]) {
+    if (argc == 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)) {
+        printf(
+            "\n"
+            "┏━━━┓┏━━━┓┏━━━┓┏━━━┓\n"
+            "┃┏━┓┃┃┏━┓┃┃┏━┓┃┃┏━━┛\n"
+            "┃┗━┛┃┃┃━┃┃┃┃━┗┛┃┗━━┓\n"
+            "┃┏┓┏┛┃┗━┛┃┃┃━┏┓┃┏━━┛\n"
+            "┃┃┃┗┓┃┏━┓┃┃┗━┛┃┃┗━━┓\n"
+            "┗┛┗━┛┗┛━┗┛┗━━━┛┗━━━┛\n"
+            "\n"
+            "          fuzz-counter v%s\n"
+            "\n",
+            VERSION);
+        return 0;
+    }
     int num_threads = argc > 1 ? atoi(argv[1]) : 4;
     int iters       = argc > 2 ? atoi(argv[2]) : 1000;
     g_num_counters  = argc > 3 ? atoi(argv[3]) : 8;
