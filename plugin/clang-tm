@@ -355,6 +355,17 @@ if [ "$MODE" = "link-only" ]; then
             LINK_OBJS+=("$REGION_O")
         fi
         
+        # Also compile tm_hooks.cpp if it exists (shared hook variables, required by all backends)
+        HOOKS_SRC="$RUNTIMES_DIR/common/tm_hooks.cpp"
+        if [ -f "$HOOKS_SRC" ]; then
+            HOOKS_O="${OUT_DIR:?}/tm_hooks.o"
+            HOOKS_INCLUDE="-I $(dirname "$RUNTIMES_DIR") -I $RUNTIMES_DIR/common"
+            $CXX -std=c++20 ${OPT_LEVEL:--O1} -c "$HOOKS_SRC" -o "$HOOKS_O" \
+                $HOOKS_INCLUDE \
+                -fno-stack-protector -pthread "${CXXFLAGS[@]+"${CXXFLAGS[@]}"}"
+            LINK_OBJS+=("$HOOKS_O")
+        fi
+        
         $CXX "${LINK_CXXFLAGS[@]}" "$INPUT" "${LINK_OBJS[@]}" -o "$OUTPUT"
     else
         $CXX "${LINK_CXXFLAGS[@]}" "$INPUT" "$RESOLVED_RUNTIME" -o "$OUTPUT"
@@ -556,6 +567,17 @@ if $RUNTIME_IS_SOURCE; then
             -fno-stack-protector -pthread "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"
     fi
 
+    # Also compile tm_hooks.cpp if it exists (shared hook variables, required by all backends)
+    HOOKS_SRC="$RUNTIMES_DIR/common/tm_hooks.cpp"
+    HOOKS_O=""
+    if [ -f "$HOOKS_SRC" ]; then
+        HOOKS_O="$OUT_DIR/tm_hooks.o"
+        log "[rt] tm_hooks.cpp → native object file"
+        $CXX -std=c++20 $RUNTIME_OPT -c "$HOOKS_SRC" -o "$HOOKS_O" \
+            -I $(dirname "$RUNTIMES_DIR") -I $RUNTIMES_DIR/common \
+            -fno-stack-protector -pthread "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"
+    fi
+
 fi
 
 # --- Optimize instrumented bitcode ---
@@ -588,6 +610,9 @@ if [ -n "$RUNTIME_O" ]; then
 fi
 if [ -n "$REGION_O" ]; then
     LINK_OBJECTS+=("$REGION_O")
+fi
+if [ -n "$HOOKS_O" ]; then
+    LINK_OBJECTS+=("$HOOKS_O")
 fi
 if [ ${#LINK_OBJECTS[@]} -gt 0 ]; then
     $CXX "${LINK_FLAGS[@]+"${LINK_FLAGS[@]}"}" "$opt_bc" "${LINK_OBJECTS[@]}" -o "$OUTPUT"

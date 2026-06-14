@@ -29,14 +29,20 @@ __thread sigjmp_buf *jmpbuf_ptr;
 
 __thread sigjmp_buf *jmpbuf;
 
-__thread int32_t tm_nested_call_counter;
-__thread int32_t tm_longjmp_ret;
-__thread sigjmp_buf tm_jmpbuf;
+extern "C" {
+extern __thread int32_t    tm_nested_call_counter;
+extern __thread int32_t    tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
+}
 __thread int tm_init_thread_call_count = 0;
 
 extern "C" {
 
 void tm_init() {
+    if (stm::tm_region_init() != 0) {
+        fprintf(stderr, "FATAL: tm_region_init() failed\n");
+        abort();
+    }
     romulus::init();
     tm_register_real_hooks(&g_romulus_hooks);
 }

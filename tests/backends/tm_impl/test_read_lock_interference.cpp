@@ -16,7 +16,7 @@
 #include "test_helpers.hpp"
 #include <thread>
 #include <chrono>
-#include <barrier>
+#include <pthread.h>
 
 static constexpr int NUM_THREADS = 2;
 static constexpr int ITERATIONS = 5000;
@@ -39,12 +39,13 @@ int main() {
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    std::barrier bar(NUM_THREADS + 1);
+    pthread_barrier_t bar;
+    pthread_barrier_init(&bar, NULL, NUM_THREADS + 1);
     std::thread t0([&]() {
         tm_init_thread();
         tm_nested_call_counter++;
         for (int i = 0; i < ITERATIONS; ++i) {
-            bar.arrive_and_wait();
+            pthread_barrier_wait(&bar);
             tm_transaction([&]() {
                 // Read both — overlap with thread 1's read set
                 uint64_t av = tm_r8((uint64_t*)&g_a->val);
@@ -52,7 +53,7 @@ int main() {
                 (void)av; (void)bv;
                 tm_w8((uint64_t*)&g_a->val, g_a->val + 1);
             });
-            bar.arrive_and_wait();
+            pthread_barrier_wait(&bar);
         }
         tm_nested_call_counter--;
         tm_exit_thread();
@@ -62,7 +63,7 @@ int main() {
         tm_init_thread();
         tm_nested_call_counter++;
         for (int i = 0; i < ITERATIONS; ++i) {
-            bar.arrive_and_wait();
+            pthread_barrier_wait(&bar);
             tm_transaction([&]() {
                 // Read both — overlap with thread 0's read set
                 uint64_t av = tm_r8((uint64_t*)&g_a->val);
@@ -70,19 +71,20 @@ int main() {
                 (void)av; (void)bv;
                 tm_w8((uint64_t*)&g_b->val, g_b->val + 1);
             });
-            bar.arrive_and_wait();
+            pthread_barrier_wait(&bar);
         }
         tm_exit_thread();
     });
 
     // Drive the main barrier
     for (int i = 0; i < ITERATIONS; ++i) {
-        bar.arrive_and_wait();
-        bar.arrive_and_wait();
+        pthread_barrier_wait(&bar);
+        pthread_barrier_wait(&bar);
     }
 
     t0.join();
     t1.join();
+    pthread_barrier_destroy(&bar);
 
     auto end = std::chrono::high_resolution_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);

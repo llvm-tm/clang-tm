@@ -15,7 +15,7 @@
 #include <thread>
 #include <vector>
 #include <chrono>
-#include <barrier>
+#include <pthread.h>
 
 static constexpr int NUM_THREADS = 4;
 static constexpr int ITERATIONS = 2000;
@@ -40,7 +40,8 @@ int main() {
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    std::barrier bar(NUM_THREADS + 1);
+    pthread_barrier_t bar;
+    pthread_barrier_init(&bar, NULL, NUM_THREADS + 1);
     std::vector<std::thread> threads;
     for (int t = 0; t < NUM_THREADS; ++t) {
         threads.emplace_back([t, &bar, &g_vars]() {
@@ -49,7 +50,7 @@ int main() {
             for (int i = 0; i < ITERATIONS; ++i) {
                 // Barrier: all threads synchronize at the start of each TX.
                 // This maximizes the Phase 1 overlap window.
-                bar.arrive_and_wait();
+                pthread_barrier_wait(&bar);
 
                 tm_transaction([t, i, &g_vars]() {
                     for (int v = 0; v < NUM_VARS; ++v) {
@@ -61,7 +62,7 @@ int main() {
                     tm_w8((uint64_t*)&g_vars[idx].val, cur + 1);
                 });
 
-                bar.arrive_and_wait();
+                pthread_barrier_wait(&bar);
             }
             tm_nested_call_counter--;
             tm_exit_thread();
@@ -70,10 +71,11 @@ int main() {
 
     // Wait for all threads to finish
     for (int i = 0; i < ITERATIONS; ++i) {
-        bar.arrive_and_wait(); // let threads start TX i
-        bar.arrive_and_wait(); // let threads finish TX i
+        pthread_barrier_wait(&bar); // let threads start TX i
+        pthread_barrier_wait(&bar); // let threads finish TX i
     }
     for (auto& th : threads) th.join();
+    pthread_barrier_destroy(&bar);
 
     auto end = std::chrono::high_resolution_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);

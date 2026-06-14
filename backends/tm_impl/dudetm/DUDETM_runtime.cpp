@@ -37,9 +37,11 @@ extern uint32_t tm_symbol_count;
 extern void*    tm_symbol_addresses[];
 extern uint64_t tm_symbol_sizes[];
 
-__thread int32_t tm_nested_call_counter;
-__thread int32_t tm_longjmp_ret;
-__thread unsigned char tm_jmpbuf[256];
+extern "C" {
+extern __thread int32_t    tm_nested_call_counter;
+extern __thread int32_t    tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
+}
 __thread int tm_init_thread_call_count = 0;
 
 thread_local uint64_t tm_begin_count{0};
@@ -60,6 +62,10 @@ void tm_init()
     dudetm::init(tm_symbol_count,
                  tm_symbol_addresses,
                  tm_symbol_sizes);
+    if (stm::tm_region_init() != 0) {
+        fprintf(stderr, "FATAL: tm_region_init() failed\n");
+        abort();
+    }
     tm_register_real_hooks(&g_dudetm_hooks);
 }
 
@@ -159,8 +165,7 @@ void tm_load_symbols(void *symbol_table, uint32_t symbol_count) { (void)symbol_t
 
 void consume_ptr(volatile void *ptr) { (void)ptr; }
 
-// Must be in extern "C" linkage to match the declaration in tinystm_wbctl.hpp
-extern "C" thread_local bool g_tm_expli_mode = false;
+thread_local bool g_tm_expli_mode = false;
 
 } // extern "C"
 
@@ -272,8 +277,8 @@ static double    real_tm_read_f8(double *addr)    { return tinystm::tm_read_f8(a
 static void*     real_tm_read_ptr(void **addr)    { return tinystm::tm_read_ptr(addr); }
 
 static void real_tm_write_i1(uint8_t *addr, uint8_t val)     { tinystm::tm_write_i1(addr, val); }
-static void real_tm_write_i2(uint16_t *addr, int16_t val)    { tinystm::tm_write_i2(addr, val); }
-static void real_tm_write_i4(uint32_t *addr, int32_t val)    { tinystm::tm_write_i4(addr, val); }
+static void real_tm_write_i2(uint16_t *addr, uint16_t val)   { tinystm::tm_write_i2(addr, val); }
+static void real_tm_write_i4(uint32_t *addr, uint32_t val)   { tinystm::tm_write_i4(addr, val); }
 static void real_tm_write_i8(uint64_t *addr, int64_t val)    { tinystm::tm_write_i8(addr, val); }
 static void real_tm_write_f4(float *addr, float val)         { tinystm::tm_write_f4(addr, val); }
 static void real_tm_write_f8(double *addr, double val)       { tinystm::tm_write_f8(addr, val); }

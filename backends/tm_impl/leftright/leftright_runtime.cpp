@@ -42,10 +42,9 @@ __thread sigjmp_buf *jmpbuf_ptr;
 // tm_get_thread_state() + GEP, then calls tm_begin().  tm_begin()
 // reads both to determine if this is plugin-mode or explicit-mode entry.
 static __thread TMThreadState g_tm_thread_state = {0, 0};
-__thread int32_t tm_nested_call_counter = 0;
-__thread int32_t tm_longjmp_ret = 0;
-
-__thread sigjmp_buf tm_jmpbuf;
+extern __thread int32_t    tm_nested_call_counter;
+extern __thread int32_t    tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
 __thread int tm_init_thread_call_count = 0;
 
 // Define the global queue-active flag locally (queue_runtime.cpp is not linked).
@@ -56,6 +55,10 @@ extern const TMRealHooks g_leftright_hooks;
 extern "C" {
 
 void tm_init() {
+    if (stm::tm_region_init() != 0) {
+        fprintf(stderr, "FATAL: tm_region_init() failed\n");
+        abort();
+    }
     leftright::init();
     tm_register_real_hooks(&g_leftright_hooks);
 }

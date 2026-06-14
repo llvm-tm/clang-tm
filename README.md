@@ -1,111 +1,104 @@
 # TM API — C++ Transactional Memory Framework
 
 Multi-paradigm transactional memory framework for C++ (LLVM plugin, explicit C++ API, Rust bindings).
+Supports 12+ STM/HTM backends.
 
 ## Structure
 
 ```
-backends/          — TM runtime implementations
-├── stubs/         — TM-lite compatible pass-through stubs
-└── tm_impl/       — 15+ STM/HTM backends (TinySTM, NOrec, TL2, SGL, etc.)
+backends/          — TM runtime implementations (TinySTM, NOrec, TL2, SGL, SwissTM, etc.)
 plugin/            — LLVM instrumentation plugin (5-pass Honorio pipeline)
-benchmarks/        — Benchmarks (plugin-instrumented, C++ expli, Rust)
+benchmarks/        — Benchmarks (plugin-instrumented, C++ explicit, Rust)
 tests/             — Tests for all components
+expli_instr/       — Explicit C++ API headers + Rust workspace
 tools/             — Build/install scripts
-docs/              — Documentation
+simulator/         — Rust discrete event simulator for TM trace replay
 ```
 
-## Quick Start
+## Quick Start — Explicit C++ API (no LLVM plugin needed)
 
 ```bash
-# 1. Build the LLVM instrumentation plugin
+# Build and run with TinySTM (default)
+make -C benchmarks/cpp -j4 run-test-tx
+
+# Select a different backend
+make -C benchmarks/cpp -j4 BACKEND=NOREC bin/test_tx
+./benchmarks/cpp/bin/test_tx
+
+# Run a benchmark
+make -C benchmarks/cpp -j4 BACKEND=TINYSTM bin/bank
+./benchmarks/cpp/bin/bank -t 2 -d 1000 --test
+```
+
+Available backends: `TINYSTM`, `WBETL`, `WT`, `NOREC`, `SWISSTM`, `TL2`, `SGL`, `LEFTRIGHT`, `ROMULUS`, `XTM`, `SPHT`, `TSXSGL`.
+
+## Quick Start — LLVM Plugin
+
+```bash
+# 1. Build the plugin
 make plugin
 
-# 2. Build a benchmark and run it
+# 2. Build a plugin-instrumented benchmark
 cd benchmarks/plugin/bank
-
-# Single global lock (simplest backend, no TM needed)
 make bank_singlelock
 ./bin/bank_singlelock -t 4 -d 5000
-
-# With a TM backend (e.g. TinySTM write-back commit-lock)
-make bank_tinystm
-./bin/bank_tinystm -t 4 -d 5000
 ```
 
-Select a different backend: `export BACKEND=tl2` (default: `tinystm`).
-
-## Building Benchmarks
-
-All build commands assume `cd benchmarks/plugin/<name>` first.
-
-### Bank (transfer between accounts)
+## Quick Start — Rust API
 
 ```bash
-cd benchmarks/plugin/bank
-make bank_singlelock              # single global lock
-make bank_tinystm                 # TinySTM wbctl
-make bank_tinystm_wbetl           # TinySTM encounter-time lock
-make bank_tinystm_wt              # TinySTM write-through
-make bank_norec                   # NOrec
-make bank_tl2                     # TL2
-make bank_swiss                   # SwissTM
+cd benchmarks/rust
 
-# Run: flags: -t N (threads, default 4), -d N (duration ms, default 10000)
-./bin/bank_tinystm -t 4 -d 5000
+# Build and run bank with NOrec
+cargo run --release --no-default-features --features tm/norec --bin bank -- -d 100 -t 2 --test
+
+# With default TinySTM backend
+cargo run --release --bin bank -- -d 100 -t 2 --test
 ```
 
-### STMbench7 (OO7-style benchmark, EuroSys 2007)
+## Build and Run All Tests
 
 ```bash
-cd benchmarks/plugin/stmbench7
-make stmbench_singlelock          # single global lock (recommended)
-make stmbench_norec               # NOrec
-make stmbench_tl2                 # TL2
-# Run:
-./bin/stmbench_singlelock
+# Explicit C++ API across all 12 backends
+make check-all
+
+# Or use the smoke test
+./smoke_test.sh
 ```
 
-### STAMP (Stanford TM benchmark suite)
+## All Backend-Specific Plugin Benchmarks
 
-```bash
-cd benchmarks/plugin/STAMP
-make stamp_singlelock
-./bin/stamp_singlelock -b kmeans -t 4
+| Backend       | Define                | Notes                        |
+|---------------|-----------------------|------------------------------|
+| TinySTM/WBCTL | `DESIGN_WBCTL`        | Write-back commit-time lock  |
+| TinySTM/WBETL | `DESIGN_WBETL`        | Write-back encounter-time    |
+| TinySTM/WT    | `DESIGN_WT`           | Write-through + undo log     |
+| NOrec         | —                     | Lazy value-based validation  |
+| TL2           | —                     | Commit-time locking          |
+| SwissTM       | —                     | Hybrid lazy/pessimistic      |
+| SingleLock    | —                     | Serial execution             |
+| LeftRight     | —                     | Concurrent read, serialized  |
+| Romulus       | —                     | Redo logging                 |
+| XTM           | —                     | Experimental                 |
+| SPHT          | `-mrtm`               | RTM + epoch commit log       |
+| TSXSGL        | `-mrtm`               | TSX + single global lock     |
+| DUDETM        | `DESIGN_WBCTL`        | Commit + redo log (plugin)   |
+| NVHTM         | `-mrtm`               | RTM + NVM (plugin)           |
+
+## Plugin Race Checker
+
+```sh
+opt-22 -load-pass-plugin=plugin/bin/libTMRaceChecker.so \
+       -passes="tm-race-checker" myapp.bc -o /dev/null
 ```
 
-### Data Structures (AVL tree, hashmap, etc.)
+## Known Issues
 
-```bash
-cd benchmarks/plugin/datastructures
-make avltree_SingleGlobalLock
-./bin/avltree_SingleGlobalLock 1 1000 1000
-```
-
-## Backend Unit Tests
-
-Build and run the 36 backend tests (6 tests × 6 backends):
-
-```bash
-make -C tests/backends/tm_impl all
-make -C tests/backends/tm_impl run
-```
-
-## Key Features
-
-- **5-pass decomposed pipeline** (Honorio-style): DualPathInfoCollector → TransactionSafeCreation → ReplaceCallInsideTransaction → LoadStoreBarrierInsertion → Cleanup
-- **TM-lite pre-processing pass**: lowers `atomic do` blocks to the same pipeline
-- **Multi-backend**: pluggable STM backends via extern "C" ABI
-- **Multi-paradigm**: LLVM plugin, explicit C++ API, Rust bindings
-- **Annotation-driven barrier elision**: `tm_local` qualifier reduces instrumentation overhead
-
-## Bank Benchmark Options
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-t N` | Number of threads | 4 |
-| `-d N` | Duration (milliseconds) | 10000 |
-| `-a N` | Number of accounts | 1024 |
-| `-r N` | Read-all percentage | 20 |
-| `-w N` | Write-all percentage | 0 |
-| `-j`  | Disjoint access mode | off |
+| Issue | Details |
+|-------|---------|
+| **LeftRight test_tx fails** | 29/114 tests fail (pre-existing algorithm bug, not related to build fixes) |
+| **Romulus test_tx fails** | 54/114 tests fail (pre-existing algorithm bug, not related to build fixes) |
+| **DUDETM, NVHTM, DistributedSGL, PersistentSGL** | Build but depend on plugin-provided symbols (`tm_symbol_count`, `tm_symbol_addresses`, `tm_symbol_sizes`) not available in explicit C++ API |
+| **rbtree benchmark timing** | Reports 0ms duration (pre-existing) |
+| **stmbench7 times out** | Data race in `ts_multimap::lower_bound()` (pre-existing) |
+| **Plugin pipeline tests** | Need `clang-tm` wrapper testing (auto-link of `tm_hooks.cpp` fix not fully verified) |

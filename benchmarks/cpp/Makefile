@@ -63,6 +63,16 @@ ifeq ($(BACKEND),XTM)
   DEFS     = -DTM_BACKEND_XTM
   EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/xtm
 endif
+ifeq ($(BACKEND),SPHT)
+  RUNTIME  = ../../backends/tm_impl/spht/SPHT_runtime.cpp
+  DEFS     = -DTM_BACKEND_SPHT -mrtm
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/spht
+endif
+ifeq ($(BACKEND),TSXSGL)
+  RUNTIME  = ../../backends/tm_impl/tsx_sgl/TSXSGL_runtime.cpp
+  DEFS     = -DTM_BACKEND_TSXSGL -mrtm
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tsx_sgl
+endif
 
 HOOKS_SRC = ../../backends/tm_impl/common/tm_hooks.cpp
 BUILTINS = $(addprefix ../../backends/tm_impl/common/,tm_alloc_overrides.hpp tm_common.hpp \

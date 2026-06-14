@@ -15,6 +15,7 @@
 #include <mutex>
 #include <atomic>
 #include <csetjmp>
+#include <unordered_set>
 
 #include "tm_thread_state.hpp"
 #include "tm_hooks.hpp"
@@ -32,9 +33,14 @@ static std::atomic<int64_t> g_tm_tx_count{0};
 // Plugin required
 struct TMThreadState;
 extern "C" TMThreadState *tm_get_thread_state();
-__thread std::jmp_buf tm_jmpbuf;
-__thread int32_t tm_nested_call_counter = 0;
-__thread int32_t tm_longjmp_ret = 0;
+extern "C" {
+extern __thread int32_t    tm_nested_call_counter;
+extern __thread int32_t    tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
+}
+thread_local FreeNode *g_deferred_frees = nullptr;
+thread_local std::unordered_set<void *> g_deferred_frees_set;
+thread_local SpecAlloc *g_spec_allocs = nullptr;
 static thread_local TMThreadState g_tm_state{0, 0};
 
 extern const TMRealHooks g_sgl_hooks;
@@ -48,6 +54,10 @@ TMThreadState *tm_get_thread_state() {
 void tm_init() {
     if (!initialized.load(std::memory_order_relaxed)) {
         initialized.store(true, std::memory_order_seq_cst);
+    }
+    if (stm::tm_region_init() != 0) {
+        fprintf(stderr, "FATAL: tm_region_init() failed\n");
+        abort();
     }
     tm_register_real_hooks(&g_sgl_hooks);
 }
@@ -77,7 +87,7 @@ int tm_setjmp() {
 void tm_set_jmpbuf(void *buf) { }
 
 sigjmp_buf* tm_get_env() {
-    return (sigjmp_buf*)&tm_jmpbuf;
+    return &tm_jmpbuf;
 }
 
 void tm_set_env(sigjmp_buf* env) {

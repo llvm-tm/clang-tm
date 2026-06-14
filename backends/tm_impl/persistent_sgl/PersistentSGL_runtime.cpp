@@ -26,7 +26,11 @@ static std::atomic<int64_t> g_tm_begin_count{0};
 static std::atomic<int64_t> g_tm_end_count{0};
 static std::atomic<int64_t> g_tm_tx_count{0};
 
-__thread std::jmp_buf tm_jmpbuf;
+extern "C" {
+extern __thread int32_t    tm_nested_call_counter;
+extern __thread int32_t    tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
+}
 static thread_local TMThreadState g_tm_persist_state{0, 0};
 static std::recursive_mutex g_serialize_mutex;
 
@@ -223,6 +227,10 @@ extern void* tm_symbol_addresses[];
 extern uint64_t tm_symbol_sizes[];
 
 void tm_init() {
+    if (stm::tm_region_init() != 0) {
+        fprintf(stderr, "FATAL: tm_region_init() failed\n");
+        abort();
+    }
     tm_register_real_hooks(&g_psgl_hooks);
 
     uint32_t n = tm_symbol_count;
@@ -392,12 +400,12 @@ int tm_setjmp() { return 0; }
 void tm_set_jmpbuf(void *buf) { }
 
 sigjmp_buf* tm_get_env() {
-    return (sigjmp_buf*)&tm_jmpbuf;
+    return &tm_jmpbuf;
 }
 
 void tm_set_env(sigjmp_buf* env) {
     if (env)
-        memcpy(&tm_jmpbuf, env, sizeof(tm_jmpbuf));
+        memcpy(&tm_jmpbuf, env, sizeof(sigjmp_buf));
 }
 
 void tm_load_symbols(void* symbol_table, uint32_t symbol_count) {}
