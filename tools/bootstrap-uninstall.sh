@@ -3,8 +3,8 @@
 # clang-tm: one-line uninstaller
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/llvm-tm/clang-tm/main/llvm_tm_plugin/bootstrap-uninstall.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/llvm-tm/clang-tm/main/llvm_tm_plugin/bootstrap-uninstall.sh | bash -s -- --prefix ~/.local
+#   curl -fsSL https://raw.githubusercontent.com/llvm-tm/clang-tm/main/tools/bootstrap-uninstall.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/llvm-tm/clang-tm/main/tools/bootstrap-uninstall.sh | bash -s -- --prefix ~/.local
 #
 # All arguments are forwarded to uninstall.sh.
 # =============================================================================
@@ -27,4 +27,4 @@ echo "==> Downloading clang-tm uninstall script..."
 git clone --depth 1 "$REPO" "$TMPDIR"
 
 echo "==> Running uninstall.sh..."
-exec "$TMPDIR/llvm_tm_plugin/uninstall.sh" -y "$@"
+exec "$TMPDIR/tools/uninstall-plugin.sh" -y "$@"

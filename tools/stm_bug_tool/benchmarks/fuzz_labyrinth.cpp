@@ -7,7 +7,7 @@
 //       -DTM_EVENT_LOG -DTM_BACKEND_TINYSTM -DDESIGN_WT \
 //       -Ibackends/TinySTM -Ibackends \
 //       tools/stm_bug_tool/benchmarks/fuzz_labyrinth.cpp \
-//       backends/runtimes/TinySTM_runtime.cpp \
+//       backends/tm_impl/tiny_stm/TinySTM_runtime.cpp \
 //       -o tools/stm_bug_tool/bin/fuzz_labyrinth_wt
 
 #include <atomic>

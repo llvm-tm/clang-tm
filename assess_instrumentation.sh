@@ -20,9 +20,9 @@
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
-source "$SCRIPT_DIR/llvm_tm_plugin/llvm-tool-helper.sh"
+source "$SCRIPT_DIR/plugin/llvm-tool-helper.sh"
 
-PLUGIN="llvm_tm_plugin/bin/libTMInstrument.so"
+PLUGIN="plugin/bin/libTMInstrument.so"
 CXX="$LLVM_CXX"
 CXXFLAGS="-std=c++20 -O3 -fno-inline -fno-stack-protector"
 OPT="$LLVM_OPT"
@@ -31,12 +31,12 @@ OPT="$LLVM_OPT"
 # Configuration: benchmark name → source file (relative to repo root)
 # ------------------------------------------------------------------
 ALL_BENCHES=(
-    "bank:benchmarks/test/bank/bank.cpp"
-    "avltree:benchmarks/datastructures/avltree.cpp"
-    "avltree_recursive:benchmarks/datastructures/avltree_recursive.cpp"
-    "stmbench7:benchmarks/STMbench7/STMbench7.cpp"
-    "ycsb:benchmarks/YCSB/YCSB.cpp"
-    "eigen:benchmarks/EigenBench/EigenBench.cpp"
+    "bank:benchmarks/cpp/bank/bank.cpp"
+    "avltree:benchmarks/plugin/datastructures/avltree.cpp"
+    "avltree_recursive:benchmarks/plugin/datastructures/avltree_recursive.cpp"
+    "stmbench7:benchmarks/plugin/stmbench7/STMbench7.cpp"
+    "ycsb:benchmarks/plugin/ycsb/YCSB.cpp"
+    "eigen:benchmarks/plugin/eigenbench/EigenBench.cpp"
 )
 
 # ------------------------------------------------------------------

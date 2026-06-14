@@ -220,7 +220,7 @@ In inline mode, `async_transaction` behaves exactly like `transaction`. `tm_wait
 The runtime maintains per-thread state to bridge the enqueuing thread and the worker thread:
 
 ```c
-// backends/runtimes/queue_runtime.h
+// backends/tm_impl/queue/queue_runtime.h
 typedef struct tm_future_state {
     pthread_mutex_t  mutex;
     pthread_cond_t   cond;
@@ -409,8 +409,8 @@ The key principle: **the backend never changes**. It provides `tm_begin`/`tm_com
 | Thread pool | `QueueExecutor` class | No, new code |
 | Plugin clone generation | `TMInstrumentPass` | Yes, same cloning code |
 | Plugin dispatch wrapper | New pass in `tm-instrument-queue` pipeline | No, new code |
-| `tm_enqueue` / `tm_wait_prev_tx` | `backends/runtimes/queue_runtime.cpp` | No, new code |
-| Thread-local future state | `backends/runtimes/queue_runtime.h` | No, new code |
+| `tm_enqueue` / `tm_wait_prev_tx` | `backends/tm_impl/queue/queue_runtime.cpp` | No, new code |
+| Thread-local future state | `backends/tm_impl/queue/queue_runtime.h` | No, new code |
 | `async_transaction` annotation support | Plugin annotation checker | new |
 | `tm_wait_prev_tx()` call insertion | Plugin (for `transaction` in queue mode) | new |
 
@@ -422,8 +422,8 @@ The key principle: **the backend never changes**. It provides `tm_begin`/`tm_com
 - `tm_alloc_overrides.hpp`, `tm_debug.hpp`, `tm_platform.hpp`
 
 **What is new:**
-- `backends/runtimes/queue_runtime.h` — `tm_future_state_t`, `tm_enqueue`, `tm_wait_prev_tx` declarations
-- `backends/runtimes/queue_runtime.cpp` — thread pool + `tm_enqueue`/`tm_wait_prev_tx` impl
+- `backends/tm_impl/queue/queue_runtime.h` — `tm_future_state_t`, `tm_enqueue`, `tm_wait_prev_tx` declarations
+- `backends/tm_impl/queue/queue_runtime.cpp` — thread pool + `tm_enqueue`/`tm_wait_prev_tx` impl
 - Plugin pipeline: `tm-instrument-queue`
 - Plugin: `async_transaction` annotation recognition + `tm_wait_prev_tx` call insertion
 - Dispatch wrapper generation in plugin
@@ -431,8 +431,8 @@ The key principle: **the backend never changes**. It provides `tm_begin`/`tm_com
 ## Implementation Plan
 
 ### Step 1: Runtime thread-local state + C API
-- `backends/runtimes/queue_runtime.h` — `tm_future_state_t`, `g_tm_queue_active`, `g_tm_pending`
-- `backends/runtimes/queue_runtime.cpp` — `tm_enqueue`, `tm_wait_prev_tx`, thread pool `QueueExecutor`
+- `backends/tm_impl/queue/queue_runtime.h` — `tm_future_state_t`, `g_tm_queue_active`, `g_tm_pending`
+- `backends/tm_impl/queue/queue_runtime.cpp` — `tm_enqueue`, `tm_wait_prev_tx`, thread pool `QueueExecutor`
 - No-op path when `g_tm_queue_active == false`
 
 ### Step 2: Plugin annotation support

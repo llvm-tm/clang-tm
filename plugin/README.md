@@ -101,13 +101,12 @@ to `clang++` unchanged.
 ## Install
 
 ```sh
-cd plugin
-make variants
-./install.sh                  # installs to /usr/local/
-PREFIX=~/.local ./install.sh  # installs to user-local prefix
+make -C plugin variants
+./tools/install-plugin.sh                  # installs to /usr/local/
+PREFIX=~/.local ./tools/install-plugin.sh  # installs to user-local prefix
 ```
 
-Installs to `PREFIX/bin/clang-tm` and `PREFIX/lib/clang-tm/{plugin,runtimes,backends}/`.
+Installs to `PREFIX/bin/clang-tm` and `PREFIX/lib/clang-tm/{plugin,backends}/`.
 The `clang-tm` script auto-detects the installed layout, so after
 installation `clang-tm` works from any directory:
 
@@ -118,7 +117,7 @@ clang-tm --runtime SingleGlobalLock_runtime.cpp -o myapp app.cpp
 Uninstall:
 
 ```sh
-./plugin/uninstall.sh
+./tools/uninstall-plugin.sh
 ```
 
 Additional flags:

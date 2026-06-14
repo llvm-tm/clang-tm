@@ -38,29 +38,25 @@ Ensure the LLVM `bin/` directory is on `PATH` (usually
 
 ### Verify Installation
 
-Run `./check-requirements.sh` in the project root to verify all tools are
+Run `./tools/check-requirements.sh` in the project root to verify all tools are
 available at compatible versions.
 
 ## Project Structure After Copying to Remote Machine
 
 ```
 /path/to/project/
-├── llvm_tm_plugin/
+├── plugin/
 │   ├── clang-tm              # Main compilation script
 │   ├── tm-resolve-opaque.py  # Opaque symbol resolution tool
 │   ├── bin/libTMInstrument.so  # Plugin binary (must be built first)
-│   ├── src/                  # Plugin source (plugin + opaque_safe_table.hpp)
+│   ├── passes/               # Plugin source (LLVM passes)
 │   ├── runtime/              # Generic TM runtime
 │   └── tm_pipeline.mk        # Build system include
 ├── backends/
-│   ├── runtimes/             # STM runtime implementations
-│   ├── include/              # Backend headers
-│   ├── SwissTM/              # SwissTM backend
-│   ├── TinySTM/              # TinySTM backend
-│   ├── TL2/                  # TL2 backend
-│   └── NOrec/                # NOrec backend
+│   └── tm_impl/              # STM runtime implementations (one subdir per backend)
 └── benchmarks/
-    └── test/bank/            # Example benchmark
+    ├── cpp/bank/             # Example benchmark (explicit C++ API)
+    └── plugin/bank/          # Example benchmark (plugin-instrumented)
 ```
 
 ## Quick Setup on New Machine
@@ -68,22 +64,23 @@ available at compatible versions.
 ### One-liner install (requires LLVM/Clang 22+)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/llvm-tm/clang-tm/main/llvm_tm_plugin/bootstrap-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/llvm-tm/clang-tm/main/tools/bootstrap-install.sh | bash
 ```
 
 ### Or from a local clone
 
 ```sh
 git clone https://github.com/llvm-tm/clang-tm.git
-cd clang-tm/llvm_tm_plugin
-make variants
-./install.sh
+cd clang-tm
+make plugin
+./tools/install-plugin.sh
 ```
 
 ### Build and run a benchmark
 
 ```sh
-clang-tm -std=c++20 -O3 -pthread --runtime SingleGlobalLock_runtime.cpp \
-    -o bank bank.cpp
-./bank -d 3000 -t 4
+# Build a plugin-instrumented benchmark
+cd benchmarks/plugin/bank
+make bank_singlelock
+./bin/bank_singlelock -t 4 -d 5000
 ```

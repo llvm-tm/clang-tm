@@ -185,24 +185,24 @@ fi
 info "plugin → $INSTALL_PLUGIN/ ($(ls -1 "$INSTALL_PLUGIN" | wc -l | tr -d ' ') variants)"
 
 # ---- 3. Install runtime sources ----
-cp "$BACKENDS_DIR/runtimes/"*.cpp "$INSTALL_RUNTIMES/"
+find "$BACKENDS_DIR/tm_impl" -name '*_runtime.cpp' -exec cp {} "$INSTALL_RUNTIMES/" \;
 info "runtimes → $INSTALL_RUNTIMES/ ($(ls -1 "$INSTALL_RUNTIMES" | wc -l | tr -d ' ') files)"
 
 # ---- 4. Install backend headers (preserving ../-relative layout) ----
 #
 # Runtime .cpp files use includes like:
 #   #include "../tm_alloc_overrides.hpp"   → lib/clang-tm/tm_alloc_overrides.hpp
-#   #include "../TL2/tl2.hpp"              → lib/clang-tm/TL2/tl2.hpp
+#   #include "../tiny_stm/tinystm_wbctl.hpp" → lib/clang-tm/tiny_stm/tinystm_wbctl.hpp
 #
 # We place all headers at the lib/clang-tm/ level so ../ resolves correctly.
-cp "$BACKENDS_DIR/tm_api.hpp" "$INSTALL_LIB/"
-cp "$BACKENDS_DIR/tm_common.hpp" "$INSTALL_LIB/"
-cp "$BACKENDS_DIR/rel_ptr.hpp" "$INSTALL_LIB/" 2>/dev/null || true
-cp "$BACKENDS_DIR/tm_alloc_overrides.hpp" "$INSTALL_LIB/" 2>/dev/null || true
+cp "$BACKENDS_DIR/tm_impl/common/tm_api.hpp" "$INSTALL_LIB/"
+cp "$BACKENDS_DIR/tm_impl/common/tm_common.hpp" "$INSTALL_LIB/"
+cp "$BACKENDS_DIR/tm_impl/common/rel_ptr.hpp" "$INSTALL_LIB/" 2>/dev/null || true
+cp "$BACKENDS_DIR/tm_impl/common/tm_alloc_overrides.hpp" "$INSTALL_LIB/" 2>/dev/null || true
 
-# Backend subdirectories (TL2/, NOrec/, SwissTM/, TinySTM/)
-for subdir in TL2 NOrec SwissTM TinySTM; do
-    sub="$BACKENDS_DIR/$subdir"
+# Backend subdirectories (mapped from tm_impl/ subdirs)
+for subdir in tiny_stm norec swisstm tl2; do
+    sub="$BACKENDS_DIR/tm_impl/$subdir"
     if [ -d "$sub" ]; then
         mkdir -p "$INSTALL_LIB/$subdir"
         cp "$sub/"*.hpp "$INSTALL_LIB/$subdir/" 2>/dev/null || true
@@ -211,8 +211,8 @@ done
 
 # Also copy the API header to include/ for convenience
 mkdir -p "$INSTALL_INCLUDE"
-cp "$BACKENDS_DIR/tm_api.hpp" "$INSTALL_INCLUDE/"
-cp "$BACKENDS_DIR/tm_common.hpp" "$INSTALL_INCLUDE/"
+cp "$BACKENDS_DIR/tm_impl/common/tm_api.hpp" "$INSTALL_INCLUDE/"
+cp "$BACKENDS_DIR/tm_impl/common/tm_common.hpp" "$INSTALL_INCLUDE/"
 info "headers → $INSTALL_LIB/ (backends + tm_api.hpp)"
 
 # ---- 5. Summary ----

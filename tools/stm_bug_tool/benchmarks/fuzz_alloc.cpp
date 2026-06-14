@@ -6,7 +6,7 @@
 //   clang++ -std=c++20 -O0 -pthread -g -I$(PWD) \
 //       -DTM_EVENT_LOG -DTM_BACKEND_TL2 -Ibackends/TL2 \
 //       tools/stm_bug_tool/benchmarks/fuzz_alloc.cpp \
-//       backends/runtimes/tl2_runtime.cpp
+//       backends/tm_impl/tl2/tl2_runtime.cpp
 
 #include <atomic>
 #include <csetjmp>

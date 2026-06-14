@@ -219,7 +219,7 @@ Platform-specific implementation in the `.cpp` companion:
 
 ### 4.1 Files to Create
 - `backends/tm_region_allocator.hpp` — header with `tm_region_init()`, `isTMAddress()`, `tm_region_malloc()`/free/realloc declarations (inline or macro).
-- `backends/runtimes/tm_region_allocator.cpp` — implementation (mmap + bump allocator).
+- `backends/tm_impl/tm_region_allocator/tm_region_allocator.cpp` — implementation (mmap + bump allocator).
 
 ### 4.2 Files to Modify
 | File | Change |
@@ -227,9 +227,9 @@ Platform-specific implementation in the `.cpp` companion:
 | `backends/tm_platform.hpp` | Add `TM_REGION_SIZE` constant, `tm_platform_region_init()` declaration |
 | `backends/tm_common.hpp` | Add `#include "tm_region_allocator.hpp"`, replace `isStackAddress` calls with `!isTMAddress` |
 | All 8 backend `.hpp` files | Replace `isStackAddress(addr)` with `!g_tm_region_start \|\| !isTMAddress(addr)` (fallback: if region not initialized, skip check) |
-| `backends/runtimes/TinySTM_runtime.cpp` (and all runtimes) | Call `tm_region_init()` in `init()`, replace `tm_malloc`/`tm_calloc`/`tm_realloc`/`tm_free` with region variants |
-| `backends/runtimes/queue_runtime.cpp` | Call `tm_region_init()` in `tm_queue_init` |
-| `llvm_tm_plugin/src/tm_instrument_helpers.hpp` | Add `argTracesToStack()` helper for the queue pass |
+| `backends/tm_impl/tiny_stm/TinySTM_runtime.cpp` (and all runtimes) | Call `tm_region_init()` in `init()`, replace `tm_malloc`/`tm_calloc`/`tm_realloc`/`tm_free` with region variants |
+| `backends/tm_impl/queue/queue_runtime.cpp` | Call `tm_region_init()` in `tm_queue_init` |
+| `plugin/passes/tm_instrument_helpers.hpp` | Add `argTracesToStack()` helper for the queue pass |
 
 ### 4.3 Inline vs Queue Mode
 - In **inline mode** (existing behavior): malloc/free still goes through the region allocator if initialized; `isTMAddress` check works identically.

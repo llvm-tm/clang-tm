@@ -29,8 +29,8 @@ set(STM_BACKEND "tinystm" CACHE STRING "STM backend: tinystm, tl2, singlelock, s
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find LLVM
-find_package(LLVM 16 REQUIRED CONFIG)
+# Find LLVM (LLVM 22+ required, matching the Makefile-based build)
+find_package(LLVM 22 REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake at: ${LLVM_DIR}")
 
