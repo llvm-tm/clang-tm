@@ -96,7 +96,11 @@ int tm_region_init() noexcept {
             for (bc = max_try; bc > 0; bc--) {
                 uint32_t bm_bytes = (bc + 7) >> 3;
                 uint32_t hdr_total = CHUNK_HEADER_SZ + bm_bytes;
-                uint32_t data_off = (hdr_total + 15) & ~15u;
+                // Round data offset up to page boundary (4096) so allocator
+                // metadata (ChunkHeader, bitmap) never shares a 4 KB page
+                // with data blocks.  This prevents backends that do full-page
+                // write-back (e.g. XTM) from corrupting allocator metadata.
+                uint32_t data_off = (hdr_total + 4095) & ~4095u;
                 uint32_t total = data_off + bc * bs;
                 if (total <= CHUNK_SIZE) {
                     g_sc_bitmap_bytes[sc] = (uint16_t)bm_bytes;
@@ -106,11 +110,12 @@ int tm_region_init() noexcept {
             }
             g_sc_block_count[sc] = (uint16_t)bc;
         } else {
-            // Freelist mode: no bitmap overhead
-            uint32_t bc = (uint32_t)(CHUNK_SIZE - CHUNK_HEADER_SZ) / bs;
+            // Freelist mode: no bitmap overhead.
+            // Start data at page boundary after header.
+            uint32_t bc = (uint32_t)(CHUNK_SIZE - 4096u) / bs;
             g_sc_block_count[sc]  = (uint16_t)bc;
             g_sc_bitmap_bytes[sc] = 0;
-            g_sc_data_off[sc]     = CHUNK_HEADER_SZ;
+            g_sc_data_off[sc]     = 4096u;
         }
     }
 
