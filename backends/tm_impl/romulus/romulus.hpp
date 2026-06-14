@@ -39,7 +39,26 @@ inline size_t version_index(void *addr) {
     return (reinterpret_cast<uintptr_t>(addr) >> 3) & (VERSION_TABLE_SIZE - 1);
 }
 
-// ── Log entry ───────────────────────────────────────────────────
+// ── Version-table entry: bit 0 = lock, bits 1+ = version ────────
+constexpr uint64_t VERSION_LOCK_BIT = 1ULL;
+
+inline uint64_t make_version_entry(uint64_t ver) {
+    return ver << 1;
+}
+inline uint64_t read_version(uint64_t entry) {
+    return entry >> 1;
+}
+inline bool is_locked(uint64_t entry) {
+    return (entry & VERSION_LOCK_BIT) != 0;
+}
+
+// ── Read-set entry ──────────────────────────────────────────────
+struct ReadEntry {
+    void *addr;
+    uint64_t version;
+};
+
+// ── Write-set entry ─────────────────────────────────────────────
 struct WriteEntry {
     ValueType type;
     void *addr;
@@ -56,6 +75,7 @@ struct Transaction {
     bool is_retry = false;
 
     std::unordered_map<void *, WriteEntry> write_set;
+    std::vector<ReadEntry> read_set;
 
     void reset() {
         timestamp = 0;
@@ -66,7 +86,10 @@ struct Transaction {
         clear();
     }
 
-    void clear() { write_set.clear(); }
+    void clear() {
+        write_set.clear();
+        read_set.clear();
+    }
 };
 
 // ── Globals ──────────────────────────────────────────────────────
@@ -84,7 +107,7 @@ inline void init() {
     if (!g_version_table) {
         g_version_table = new std::atomic<uint64_t>[VERSION_TABLE_SIZE];
         for (size_t i = 0; i < VERSION_TABLE_SIZE; i++)
-            g_version_table[i].store(0, std::memory_order_release);
+            g_version_table[i].store(make_version_entry(0), std::memory_order_release);
     }
 }
 
@@ -143,54 +166,80 @@ inline bool commit() {
     auto *tx = current_tx;
     if (!tx->active) return true;
 
-    if (!tx->read_only && !tx->write_set.empty()) {
-        // Collect sorted write addresses for deadlock-free version check
-        std::vector<void *> addrs;
-        addrs.reserve(tx->write_set.size());
-        for (auto &it : tx->write_set)
-            addrs.push_back(it.first);
-        std::sort(addrs.begin(), addrs.end(),
-                  [](void *a, void *b) { return (uintptr_t)a < (uintptr_t)b; });
+        if (!tx->read_only && !tx->write_set.empty()) {
+            // Collect sorted write addresses for deadlock-free version check
+            std::vector<void *> addrs;
+            addrs.reserve(tx->write_set.size());
+            for (auto &it : tx->write_set)
+                addrs.push_back(it.first);
+            std::sort(addrs.begin(), addrs.end(),
+                      [](void *a, void *b) { return (uintptr_t)a < (uintptr_t)b; });
 
-        // Phase 1: Acquire commit lock
-        while (g_commit_lock.load(std::memory_order_acquire) != 0 ||
-               g_commit_lock.exchange(1, std::memory_order_acquire) != 0) {
-            std::this_thread::yield();
-        }
+            // Phase 1: Acquire commit lock
+            while (g_commit_lock.load(std::memory_order_acquire) != 0 ||
+                   g_commit_lock.exchange(1, std::memory_order_acquire) != 0) {
+                std::this_thread::yield();
+            }
 
-        // Phase 2: Validate
-        bool valid = true;
+            // Phase 2: Validate write set + read set
+            bool valid = true;
+            for (void *addr : addrs) {
+                size_t idx = version_index(addr);
+                uint64_t entry = g_version_table[idx].load(std::memory_order_acquire);
+                if (is_locked(entry)) {
+                    valid = false;
+                    break;
+                }
+                if (read_version(entry) > tx->timestamp) {
+                    valid = false;
+                    break;
+                }
+            }
+            // Validate read set — only needed for addresses not in the write set
+            if (valid) {
+                for (auto &re : tx->read_set) {
+                    size_t idx = version_index(re.addr);
+                    uint64_t entry = g_version_table[idx].load(std::memory_order_acquire);
+                    if (is_locked(entry)) {
+                        valid = false;
+                        break;
+                    }
+                    uint64_t ver = read_version(entry);
+                    if (ver != re.version) {
+                        valid = false;
+                        break;
+                    }
+                }
+            }
+
+            if (!valid) {
+                g_commit_lock.store(0, std::memory_order_release);
+                abort_tx("version_changed");
+                return false;
+            }
+
+        // Phase 3: Set lock bits on all written addresses
         for (void *addr : addrs) {
             size_t idx = version_index(addr);
-            uint64_t ver = g_version_table[idx].load(std::memory_order_acquire);
-            if (ver > tx->timestamp) {
-                valid = false;
-                fprintf(stderr, "ROMULUS_VALFAIL: ts=%lu ver=%lu idx=%zu addr=%p\n",
-                        (unsigned long)tx->timestamp, (unsigned long)ver, idx, addr);
-                break;
-            }
+            g_version_table[idx].fetch_or(VERSION_LOCK_BIT, std::memory_order_acq_rel);
         }
+        std::atomic_thread_fence(std::memory_order_seq_cst);
 
-        if (!valid) {
-            g_commit_lock.store(0, std::memory_order_release);
-            abort_tx("version_changed");
-            return false;
-        }
-
-        // Phase 3: Increment global clock
+        // Phase 4: Increment global clock
         uint64_t commit_ts = increment_clock();
 
-        // Phase 4: Write-back
+        // Phase 5: Write-back
         for (void *addr : addrs) {
             auto &w = tx->write_set[addr];
             write_value_to_addr(addr, w.new_val, w.type);
         }
         std::atomic_thread_fence(std::memory_order_seq_cst);
 
-        // Phase 5: Update version table
+        // Phase 6: Update version table (clear lock bit, set new version)
         for (void *addr : addrs) {
             size_t idx = version_index(addr);
-            g_version_table[idx].store(commit_ts, std::memory_order_release);
+            g_version_table[idx].store(make_version_entry(commit_ts),
+                                       std::memory_order_release);
         }
 
         // Release commit lock
@@ -216,6 +265,17 @@ inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
 	if (!stm::isTMAddress(addr)) {
 		return read_value_from_addr(addr, sz);
 	}
+
+	// Record read for read-set validation at commit time
+	size_t idx = version_index(addr);
+	uint64_t entry = g_version_table[idx].load(std::memory_order_acquire);
+
+	// If a write-back is in progress, abort now
+	if (is_locked(entry)) {
+		abort_tx("write_back_in_progress");
+	}
+
+	tx->read_set.push_back({addr, read_version(entry)});
 
 	return read_value_from_addr(addr, sz);
 }
