@@ -203,3 +203,109 @@ impl_raw_for_primitive!(f64);
 
 /// Re-export the TM address-space check from the addrspace crate.
 pub use addrspace::is_tm_address;
+
+// ── Simulation mode (deterministic replay) ────────────────
+//
+// When the "simulation" feature is enabled, backends replace their
+// thread_local! TxState storage with a HashMap<SimThreadId, TxState>
+// so the simulator can multiplex simulated threads on real OS threads.
+//
+// The simulator sets SIM_THREAD_ID before each backend call and uses
+// SimStateStore::snapshot()/restore() for checkpointing.
+
+/// Opaque identifier for a simulated thread.
+#[cfg(feature = "simulation")]
+pub type SimThreadId = u64;
+
+#[cfg(feature = "simulation")]
+thread_local! {
+    static SIM_THREAD_ID: std::cell::Cell<Option<SimThreadId>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Set the simulated thread ID for the current OS thread.
+/// Must be called before any backend function when in simulation mode.
+#[cfg(feature = "simulation")]
+pub fn set_sim_thread_id(id: SimThreadId) {
+    SIM_THREAD_ID.with(|c| c.set(Some(id)));
+}
+
+/// Clear the simulated thread ID.
+#[cfg(feature = "simulation")]
+pub fn clear_sim_thread_id() {
+    SIM_THREAD_ID.with(|c| c.set(None));
+}
+
+/// Get the current simulated thread ID (panics if not set).
+#[cfg(feature = "simulation")]
+pub fn current_sim_thread_id() -> SimThreadId {
+    SIM_THREAD_ID.with(|c| c.get().expect("sim_thread_id not set"))
+}
+
+/// Generic per-thread state storage for simulation mode.
+///
+/// Replaces `thread_local! { static TX: RefCell<Option<T>> }` in backends.
+/// The simulator maps each simulated thread to a real OS thread via
+/// `set_sim_thread_id()`. This store retrieves the correct state by ID.
+#[cfg(feature = "simulation")]
+pub struct SimStateStore<T> {
+    inner: std::sync::Mutex<std::collections::HashMap<SimThreadId, T>>,
+}
+
+#[cfg(feature = "simulation")]
+impl<T> SimStateStore<T> {
+    /// Create a new empty store.
+    pub fn new() -> Self {
+        SimStateStore {
+            inner: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Access the state of the currently active simulated thread.
+    pub fn with<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut T) -> R,
+    {
+        let tid = current_sim_thread_id();
+        let mut map = self.inner.lock().unwrap();
+        let state = map.get_mut(&tid).expect("no state for sim thread");
+        f(state)
+    }
+
+    /// Access the state of a specific simulated thread.
+    pub fn with_tid<F, R>(&self, tid: SimThreadId, f: F) -> R
+    where
+        F: FnOnce(&mut T) -> R,
+    {
+        let mut map = self.inner.lock().unwrap();
+        let state = map.get_mut(&tid).expect("no state for sim thread");
+        f(state)
+    }
+
+    /// Insert state for a simulated thread (called on thread init).
+    pub fn insert(&self, tid: SimThreadId, state: T) {
+        let mut map = self.inner.lock().unwrap();
+        map.insert(tid, state);
+    }
+
+    /// Remove and return state for a simulated thread (called on thread exit).
+    pub fn remove(&self, tid: SimThreadId) -> Option<T> {
+        let mut map = self.inner.lock().unwrap();
+        map.remove(&tid)
+    }
+
+    /// Snapshot all thread states (for checkpointing).
+    pub fn snapshot(&self) -> std::collections::HashMap<SimThreadId, T>
+    where
+        T: Clone,
+    {
+        let map = self.inner.lock().unwrap();
+        map.clone()
+    }
+
+    /// Restore thread states from a snapshot.
+    pub fn restore(&self, map: std::collections::HashMap<SimThreadId, T>) {
+        let mut inner = self.inner.lock().unwrap();
+        *inner = map;
+    }
+}
