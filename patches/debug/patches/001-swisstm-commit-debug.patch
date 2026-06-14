@@ -1,11 +1,11 @@
-diff --git a/backends/SwissTM/SwissTM.hpp b/backends/SwissTM/SwissTM.hpp
-index 0eb0904..f5e9af1 100644
---- a/backends/SwissTM/SwissTM.hpp
-+++ b/backends/SwissTM/SwissTM.hpp
-@@ -536,7 +536,25 @@ public:
+diff --git a/backends/tm_impl/swisstm/SwissTM.hpp b/backends/tm_impl/swisstm/SwissTM.hpp
+index e60e985..f5e9af1 100644
+--- a/backends/tm_impl/swisstm/SwissTM.hpp
++++ b/backends/tm_impl/swisstm/SwissTM.hpp
+@@ -551,7 +551,25 @@ public:
      static void commit(TxDescriptor* tx) {
          if (!tx || !tx->active) return;
- 
+
 +        // DEBUG: dump tx pointer and key fields on every commit call
 +        fprintf(stderr, "COMMIT: tx=%p active=%d aborted=%d wl_sz=%zu rs_sz=%zu write_cnt=%d owned_orecs=%zu\n",
 +                (void*)tx, (int)tx->active, (int)tx->aborted,
@@ -28,10 +28,10 @@ index 0eb0904..f5e9af1 100644
              for (auto& we : tx->write_log) {
                  we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
              }
-@@ -551,6 +569,18 @@ public:
+@@ -567,6 +585,18 @@ public:
              return;
          }
- 
+
 +        // DEBUG: integrity check on entry to normal commit
 +        if (tx->write_log.size() > 0) {
 +            auto& front = tx->write_log.front();
