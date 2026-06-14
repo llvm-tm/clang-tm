@@ -270,9 +270,28 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
             }
         }
 
-        tx.write_set.push(WriteEntry { addr, value: tv.clone() });
-        tx.write_backs.push(tv.into_write_back(addr));
+        tx.write_set.push(WriteEntry { addr, value: tv });
     });
+}
+
+fn apply_write_set(write_set: &[WriteEntry]) {
+    for e in write_set {
+        apply_typed_value(e.addr, &e.value);
+    }
+}
+
+fn apply_typed_value(addr: usize, tv: &TypedValue) {
+    unsafe {
+        match tv {
+            TypedValue::U8(v) => (addr as *mut u8).write(*v),
+            TypedValue::U16(v) => (addr as *mut u16).write(*v),
+            TypedValue::U32(v) => (addr as *mut u32).write(*v),
+            TypedValue::U64(v) => (addr as *mut u64).write(*v),
+            TypedValue::Bytes(b) => {
+                std::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, b.len());
+            }
+        }
+    }
 }
 
 // ── Raw byte operations ─────────────────────────────────
@@ -294,8 +313,6 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| {
         tx.read_only = false;
-        tx.write_backs.push(tv.clone().into_write_back(addr));
-        // Remove/existing entry at this addr for raw bytes
         tx.write_set.retain(|e| e.addr != addr);
         tx.write_set.push(WriteEntry { addr, value: tv });
     });
@@ -376,10 +393,8 @@ pub fn tm_commit() -> bool {
         snapshot = match validate_impl(&mut tx) { Some(s) => s, None => { TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; } };
     }
 
-    // We hold the global lock. Write-back all entries.
-    for wb in tx.write_backs {
-        wb.apply();
-    }
+    // We hold the global lock. Write-back from write-set.
+    apply_write_set(&tx.write_set);
 
     // Release lock and advance version (even → next even)
     GLOBAL_LOCK.store(snapshot + 2, Ordering::Release);
