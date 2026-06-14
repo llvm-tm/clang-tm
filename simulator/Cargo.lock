@@ -183,6 +183,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-tinystm"
+version = "0.1.0"
+dependencies = [
+ "addrspace",
+ "runtime-core",
+]
+
+[[package]]
 name = "runtime-tl2"
 version = "0.1.0"
 dependencies = [
@@ -258,6 +266,7 @@ dependencies = [
  "libc",
  "runtime-core",
  "runtime-norec",
+ "runtime-tinystm",
  "runtime-tl2",
  "serde",
  "serde_json",

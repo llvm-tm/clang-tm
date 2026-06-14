@@ -1,13 +1,12 @@
 use crate::common::*;
-use crate::common::TX;
 use core::sync::atomic::{fence, Ordering};
 
 fn read_word<T: Primitive>(addr: usize) -> T {
     fence(Ordering::SeqCst);
     if !tx_active() { return unsafe { (addr as *const T).read() }; }
-    if let Some(entry) = TX.with(|tx| {
-        tx.borrow().as_ref().and_then(|t| t.write_set.get(&addr)).map(|e| e.value.clone())
-    }) { return T::from_typed(&entry); }
+    if let Some(entry) = with_tx(|tx| tx.write_set.get(&addr).map(|e| e.value.clone())) {
+        return T::from_typed(&entry);
+    }
     loop {
         while is_locked(addr) { std::hint::spin_loop(); }
         let version = read_version(addr);

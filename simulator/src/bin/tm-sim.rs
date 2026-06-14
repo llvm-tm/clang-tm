@@ -19,7 +19,7 @@ struct Cli {
     #[arg(short, long, default_value = "-")]
     trace: String,
 
-    /// Backend to use: norec, tl2.
+    /// Backend to use: norec, tl2, tinystm.
     #[arg(short, long, default_value = "norec")]
     backend: String,
 
