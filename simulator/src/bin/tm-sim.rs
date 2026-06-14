@@ -6,6 +6,7 @@
 //   tm-sim [--backend norec] [--trace trace.jsonl]
 
 use clap::Parser;
+use tm_des::backend::Backend;
 use tm_des::event::{Event, EventKind};
 use tm_des::sim_engine::SimEngine;
 use tm_des::trace::Trace;
@@ -18,7 +19,7 @@ struct Cli {
     #[arg(short, long, default_value = "-")]
     trace: String,
 
-    /// Backend to use (currently only "norec").
+    /// Backend to use: norec, tl2.
     #[arg(short, long, default_value = "norec")]
     backend: String,
 
@@ -29,8 +30,12 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
+    let Some(backend) = Backend::from_name(&cli.backend) else {
+        eprintln!("Unknown backend '{}'. Available: norec, tl2", cli.backend);
+        std::process::exit(1);
+    };
 
-    eprintln!("TM Simulator — backend={}", cli.backend);
+    eprintln!("TM Simulator — backend={}", backend.name());
 
     // Load trace
     let events: Vec<Event> = if cli.trace == "-" {
@@ -47,7 +52,7 @@ fn main() {
     eprintln!("Loaded {} events", events.len());
 
     // Build engine and run
-    let mut engine = SimEngine::new();
+    let mut engine = SimEngine::new(backend);
     engine.init();
 
     let limit = if cli.max_events > 0 {
@@ -64,7 +69,6 @@ fn main() {
             break;
         }
 
-        // Track scenario boundaries (Checkpoint events separate scenarios)
         if matches!(event.kind, EventKind::Checkpoint) {
             eprintln!("  Scenario {}: {} events processed", scenario, i - scenario_start);
             engine.reset();

@@ -1,13 +1,15 @@
 // ── Simulation engine ────────────────────────────────────
-// Drives the actual NOrec (and eventually other) Rust backend
-// via the `simulation` feature.  All simulated threads run on
-// the same OS thread; the sim_thread_id tells the backend which
-// simulated thread's state to access.
+// Drives a real TM backend through a trace file using the
+// `simulation` feature flag for deterministic replay.
+// All simulated threads run on the same OS thread; the
+// sim_thread_id tells the backend which simulated thread's
+// state to access.
 //
 // The engine also runs a Verifier alongside the backend to catch
 // memory violations (double-free, use-after-free, out-of-TX
 // accesses) and check money conservation.
 
+use crate::backend::Backend;
 use crate::event::{Event, EventKind};
 use crate::verifier::Verifier;
 
@@ -25,11 +27,7 @@ pub struct ReplayStats {
 impl ReplayStats {
     pub fn abort_rate(&self) -> f64 {
         let total = self.commits + self.aborts;
-        if total == 0 {
-            0.0
-        } else {
-            100.0 * self.aborts as f64 / total as f64
-        }
+        if total == 0 { 0.0 } else { 100.0 * self.aborts as f64 / total as f64 }
     }
 }
 
@@ -37,15 +35,17 @@ impl ReplayStats {
 pub struct SimEngine {
     pub stats: ReplayStats,
     pub verifier: Verifier,
+    pub backend: Backend,
     in_tx: std::collections::HashMap<u64, bool>,
     seen_threads: std::collections::HashSet<u64>,
 }
 
 impl SimEngine {
-    pub fn new() -> Self {
+    pub fn new(backend: Backend) -> Self {
         SimEngine {
             stats: ReplayStats::default(),
             verifier: Verifier::new(),
+            backend,
             in_tx: std::collections::HashMap::new(),
             seen_threads: std::collections::HashSet::new(),
         }
@@ -69,19 +69,21 @@ impl SimEngine {
             }
         }
 
-        runtime_norec::tm_init();
-        runtime_norec::sim::set_thread_id(0);
-        runtime_norec::tm_init_thread();
-        runtime_norec::sim::clear_thread_id();
+        let b = self.backend;
+        b.init();
+        b.sim_set_thread_id(0);
+        b.init_thread();
+        b.sim_clear_thread_id();
         self.seen_threads.insert(0);
     }
 
     /// Ensure a simulated thread has been initialized in the backend.
     fn ensure_thread(&mut self, tid: u64) {
         if self.seen_threads.insert(tid) {
-            runtime_norec::sim::set_thread_id(tid);
-            runtime_norec::tm_init_thread();
-            runtime_norec::sim::clear_thread_id();
+            let b = self.backend;
+            b.sim_set_thread_id(tid);
+            b.init_thread();
+            b.sim_clear_thread_id();
         }
     }
 
@@ -91,9 +93,10 @@ impl SimEngine {
         let tid = event.thread_id as u64;
 
         self.ensure_thread(tid);
-        runtime_norec::sim::set_thread_id(tid);
+        let b = self.backend;
+        b.sim_set_thread_id(tid);
         let result = self.dispatch_event(event);
-        runtime_norec::sim::clear_thread_id();
+        b.sim_clear_thread_id();
 
         if let Err(why) = result {
             eprintln!(
@@ -105,16 +108,17 @@ impl SimEngine {
 
     fn dispatch_event(&mut self, event: &Event) -> Result<(), String> {
         let tid = event.thread_id as u64;
+        let b = self.backend;
 
         match &event.kind {
             EventKind::TxBegin => {
                 self.verifier.tx_begin(tid);
-                runtime_norec::tm_begin();
+                b.begin();
                 self.in_tx.insert(tid, true);
                 Ok(())
             }
             EventKind::TxEnd => {
-                let ok = runtime_norec::tm_commit();
+                let ok = b.commit();
                 self.in_tx.insert(tid, false);
                 if ok {
                     self.stats.commits += 1;
@@ -123,7 +127,7 @@ impl SimEngine {
                 } else {
                     self.stats.aborts += 1;
                     self.verifier.tx_abort(tid);
-                    runtime_norec::tm_abort();
+                    b.abort();
                     Err("commit failed".into())
                 }
             }
@@ -131,20 +135,18 @@ impl SimEngine {
                 let in_tx = self.in_tx.get(&tid).copied().unwrap_or(false);
                 let _verified = self.verifier.check_read(tid, *addr);
 
-                // Record stats for out-of-TX reads regardless of verification result
                 if !in_tx {
                     self.stats.reads_outside_tx += 1;
                 }
 
                 let val: u64 = match width {
-                    1 => runtime_norec::tm_read_u8(*addr as *mut u8) as u64,
-                    2 => runtime_norec::tm_read_u16(*addr as *mut u16) as u64,
-                    4 => runtime_norec::tm_read_u32(*addr as *mut u32) as u64,
-                    8 => runtime_norec::tm_read_u64(*addr as *mut u64),
+                    1 => b.read_u8(*addr as *mut u8) as u64,
+                    2 => b.read_u16(*addr as *mut u16) as u64,
+                    4 => b.read_u32(*addr as *mut u32) as u64,
+                    8 => b.read_u64(*addr as *mut u64),
                     w => return Err(format!("unsupported read width {}", w)),
                 };
 
-                // If the backend returned OK but was not in a transaction, still record the value
                 if in_tx {
                     self.verifier.record_value(*addr, val);
                 }
@@ -160,10 +162,10 @@ impl SimEngine {
                 }
 
                 match width {
-                    1 => runtime_norec::tm_write_u8(*addr as *mut u8, *val as u8),
-                    2 => runtime_norec::tm_write_u16(*addr as *mut u16, *val as u16),
-                    4 => runtime_norec::tm_write_u32(*addr as *mut u32, *val as u32),
-                    8 => runtime_norec::tm_write_u64(*addr as *mut u64, *val),
+                    1 => b.write_u8(*addr as *mut u8, *val as u8),
+                    2 => b.write_u16(*addr as *mut u16, *val as u16),
+                    4 => b.write_u32(*addr as *mut u32, *val as u32),
+                    8 => b.write_u64(*addr as *mut u64, *val),
                     w => return Err(format!("unsupported write width {}", w)),
                 }
 
@@ -206,7 +208,7 @@ impl SimEngine {
 
     /// Reset state between scenarios.
     pub fn reset(&mut self) {
-        runtime_norec::sim::reset();
+        self.backend.sim_reset();
         self.in_tx.clear();
         self.seen_threads.clear();
         self.verifier.reset();
