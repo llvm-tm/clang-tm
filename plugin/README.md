@@ -254,6 +254,92 @@ pipeline on some tests — root cause under investigation.
 - Module-level work (symbol tables, global init) is done once.
 - Function passes run per-function, modifying IR of individual transaction functions independently.
 
+## Race Condition Checker
+
+The project includes a **standalone LLVM pass** (`libTMRaceChecker.so`) that
+detects accesses to TM-annotated globals from functions that are **not**
+annotated with `transaction`.  This catches common bugs where the developer
+forgot to add `[[tx::transaction]]` to a function that reads or writes
+shared TM state.
+
+The checker reuses the same pointer-tracing analysis (`tracesFromTMGlobal`)
+that the instrumentation pipeline uses, guaranteeing no false positives
+or false negatives that differ from actual instrumentation behavior.
+
+### Build
+
+```sh
+cd plugin
+make bin/libTMRaceChecker.so        # standalone .so
+```
+
+### Usage
+
+```sh
+# 1. Compile your source to LLVM bitcode
+clang++-22 -std=c++20 -O0 -fno-inline -emit-llvm -c myapp.cpp -o myapp.bc
+
+# 2. Run the race checker
+opt-22 -load-pass-plugin=bin/libTMRaceChecker.so \
+       -passes="tm-race-checker" myapp.bc -o /dev/null 2>&1
+```
+
+Output example:
+```
+TM-RACE-CHECKER: app.cpp:42:7: read to TM-annotated global 'g_counter'
+  in function 'worker' without transaction annotation
+  note: add [[tx::transaction]] to function 'worker' or use
+        peek()/poke() for intentional non-transactional access
+```
+
+### Integration with the instrumentation pipeline
+
+The race analysis is **also** run automatically inside the instrumentation
+pipeline (`libTMInstrument.so`).  Whenever the pipeline encounters a
+non-transaction function that accesses TM-annotated globals, it emits a
+warning of the form:
+
+```
+warning: access to TM-annotated global 'g_counter' in function
+  'bad_access' without transaction annotation.
+  Add [[tx::transaction]] to 'bad_access', or use peek()/poke() for
+  intentional non-transactional access.
+```
+
+This means you do **not** need to run the race checker separately if you
+are already using the instrumentation pipeline.  The standalone checker
+exists for:
+- **CI / pre-commit hooks** — run it on every commit to catch regressions.
+- **Third-party code audit** — scan code that you cannot compile with the
+  full TM pipeline.
+- **Education / debugging** — understand exactly which functions access
+  TM state without instrumentation.
+
+### Detecting memory leaks in TM allocations
+
+The TM region allocator supports optional per-thread leak detection.
+Compile with `-DTM_DEBUG_ALLOC` to enable tracking of every
+`tm_region_malloc` / `tm_region_free` call.
+
+```sh
+# Build with debug allocation tracking
+g++ -DTM_DEBUG_ALLOC ... -o myapp myapp.cpp
+```
+
+Call `stm::tm_region_check_leaks()` at program exit (after all threads
+have joined) to print any unfreed TM allocations with their addresses
+and sizes.
+
+Alternative — use Valgrind:
+
+```sh
+valgrind --tool=memcheck --track-origins=yes ./myapp
+```
+
+Note: Valgrind reports the TM mmap'd region as "still reachable" —
+this is expected.  Only non-TM allocations (std::malloc from bookkeeping
+code) will be flagged as actual leaks.
+
 ## Annotation Reference
 
 ```cpp

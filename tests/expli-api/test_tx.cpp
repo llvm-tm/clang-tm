@@ -77,6 +77,9 @@ static void test_nesting() {
 
     bv = b.read();
     CHECK(bv == 20, "after inner end, outer sees inner write");
+    // Note: b.peek() after inner end but before outer end would return the
+    // backing-memory value (which may be stale in write‑buffering backends
+    // such as NOREC).  Use b.read() for transactional reads.
     expli::TM<int>::end();        // outer end (commits both)
 
     CHECK(a.peek() == 10, "nesting commit a");

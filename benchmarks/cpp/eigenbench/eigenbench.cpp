@@ -147,8 +147,8 @@ void run_worker(int tid, SharedArrays &arrays, const Config &cfg) {
                 arrays.a3[tid][idx].poke(v + 1);
         }
     }
+    }
     expli::TM<int64_t>::thread_exit();
-}
 }
 
 // ── Main ───────────────────────────────────────────────────────────────

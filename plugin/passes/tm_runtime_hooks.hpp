@@ -54,7 +54,7 @@ static TMRuntimeHook declareHook(Module &M, StringRef Name,
 // Generates: %ptr = load ptr, ptr @hook_name
 //            call <fnTy> %ptr(args...)
 static CallInst *emitHookCall(IRBuilder<> &B, const TMRuntimeHook &Hook,
-                              ArrayRef<Value *> Args, const Twine &Name = "") {
+                              ArrayRef<Value *> Args = {}, const Twine &Name = "") {
 	Value *FnPtr = B.CreateLoad(PointerType::getUnqual(B.getContext()),
 	                            Hook.gv, "hook." + Hook.gv->getName());
 	return B.CreateCall(Hook.fnTy, FnPtr, Args, Name);
@@ -78,7 +78,7 @@ static InvokeInst *createHookInvoke(LLVMContext &Ctx, const TMRuntimeHook &Hook,
                                     const Twine &Name = "") {
 	auto *FnPtrTy = PointerType::getUnqual(Ctx);
 	auto *FnPtr   = new LoadInst(FnPtrTy, Hook.gv, "hook." + Hook.gv->getName(),
-	                             false, Unwind->getFirstInst());
+	                             false, Unwind->getFirstNonPHI());
 	return InvokeInst::Create(Hook.fnTy, FnPtr, Normal, Unwind, Args, {}, Name);
 }
 

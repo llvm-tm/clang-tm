@@ -2,6 +2,8 @@
 #define TM_INSTRUMENT_HELPERS_HPP
 
 #include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/IR/DebugInfoMetadata.h>
+#include <llvm/IR/DebugLoc.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
@@ -28,6 +30,77 @@ struct ModulePassContext {
 	bool modified = false;
 };
 
+// Scan non-transaction functions for accesses to TM-annotated globals and
+// emit a warning.  This catches cases where the developer omitted the
+// [[tx::transaction]] annotation on a function that reads/writes shared TM
+// state, which is a common source of data races.
+//
+// This analysis reuses tracesFromTMGlobal from tm_local_vars.hpp — the same
+// logic used by the instrumentation pipeline to decide which loads/stores
+// to replace with tm_read/tm_write.  If tracesFromTMGlobal returns true for
+// a non-TX function, the developer likely intended to annotate it.
+//
+// The warning text suggests adding the missing annotation.
+static void checkMissingTransactionAnnotations(Module &M)
+{
+	SmallPtrSet<const Value *, 16> TMGlobals;
+	collectTMGlobals(M, TMGlobals);
+	if (TMGlobals.empty())
+		return;
+
+	for (auto &F : M) {
+		if (F.isDeclaration())
+			continue;
+		if (hasAnnotation(F, TX_ANNOT) || hasAnnotation(F, ASYNC_TX_ANNOT))
+			continue;
+		if (hasAnnotation(F, THREAD_ANNOT))
+			continue;
+		if (F.getName() == MAIN_ANNOT || F.getName() == "main")
+			continue;
+
+		for (auto &BB : F) {
+			for (auto &I : BB) {
+				Value *Ptr = nullptr;
+				if (auto *Load = dyn_cast<LoadInst>(&I))
+					Ptr = Load->getPointerOperand();
+				else if (auto *Store = dyn_cast<StoreInst>(&I))
+					Ptr = Store->getPointerOperand();
+				else
+					continue;
+				if (!Ptr)
+					continue;
+
+				if (tracesFromTMGlobal(Ptr, M)) {
+					StringRef GlobalName = "<TM global>";
+					if (auto *GV = dyn_cast<GlobalVariable>(
+						    Ptr->stripPointerCasts()))
+						GlobalName = GV->getName();
+					else if (auto *Base = getBaseObject(Ptr))
+						if (auto *GV = dyn_cast<GlobalVariable>(Base))
+							GlobalName = GV->getName();
+
+					DebugLoc DL = I.getDebugLoc();
+					errs() << "warning: ";
+					if (DL) {
+						auto *Scope = dyn_cast<DIScope>(DL.getScope());
+						if (Scope)
+							errs() << Scope->getFilename() << ":"
+							       << DL.getLine() << ":" << DL.getCol() << ": ";
+					}
+					errs() << "access to TM-annotated global '"
+					       << GlobalName << "' in function '"
+					       << F.getName()
+					       << "' without transaction annotation. "
+					       << "Add [[tx::transaction]] to '"
+					       << F.getName()
+					       << "', or use peek()/poke() for "
+					       << "intentional non-transactional access.\n";
+				}
+			}
+		}
+	}
+}
+
 static ModulePassContext setupModulePass(Module &M)
 {
 	LLVMContext &Ctx = M.getContext();
@@ -44,6 +117,9 @@ static ModulePassContext setupModulePass(Module &M)
 		if (!F.isDeclaration() && (hasAnnotation(F, TX_ANNOT) || hasAnnotation(F, ASYNC_TX_ANNOT)))
 			collectTransactionCallGraph(F, M, CtxOut.TxReachableFuncs);
 	}
+
+	checkMissingTransactionAnnotations(M);
+
 	return CtxOut;
 }
 

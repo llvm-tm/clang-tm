@@ -240,9 +240,7 @@ static void worker(ThreadData &d) {
         if (op < 6) {          // 60% insert
             BSTNode *z = alloc_node(key);
             expli::TM<int>::transaction([&]() {
-                if (!tm_insert(&g_root, z)) {
-                    tm_free(z);
-                }
+                tm_insert(&g_root, z);
             });
         } else if (op < 8) {   // 20% lookup
             expli::TM<int>::transaction([&]() {
