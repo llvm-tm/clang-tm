@@ -256,13 +256,9 @@ inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
 
     TM_ASSERT(tx && tx->active, "xtm read: no active tx");
 
-#ifdef LLVM_TM_PLUGIN
     if (!stm::isTMAddress(addr)) {
         return read_value_from_addr(addr, sz);
     }
-#else
-    TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
-#endif
 
     void *page = (void *)((uintptr_t)addr & PAGE_MASK);
     size_t idx = xadt_index(page);
@@ -297,14 +293,10 @@ inline void write_word(Transaction *tx, void *addr, any_type_t val,
 
     TM_ASSERT(tx && tx->active, "xtm write: no active tx");
 
-#ifdef LLVM_TM_PLUGIN
     if (!stm::isTMAddress(addr)) {
         write_value_to_addr(addr, val, sz);
         return;
     }
-#else
-    TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
-#endif
 
     tx->read_only = false;
 

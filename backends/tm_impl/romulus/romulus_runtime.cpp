@@ -23,6 +23,8 @@ std::atomic<uint64_t> g_global_clock{1};
 std::atomic<uint64_t> thr_counter{1};
 __thread Transaction *current_tx = nullptr;
 std::atomic<uint64_t> g_tm_abort_count{0};
+std::atomic<uint64_t> *g_version_table = nullptr;
+std::atomic<uint64_t> g_commit_lock{0};
 __thread sigjmp_buf *jmpbuf_ptr;
 
 } // namespace romulus
@@ -66,14 +68,10 @@ void tm_exit_thread() { tm_hook_exit_thread(); }
 // ═══════════════════════════════════════════════════════════════════
 
 static void real_tm_begin() {
-    if (tm_nested_call_counter == 0) {
-        tm_nested_call_counter = 1;
-    } else {
-        tm_nested_call_counter++;
-        return;
+    if (tm_nested_call_counter == 1) {
+        romulus::jmpbuf_ptr = (sigjmp_buf *)&tm_jmpbuf;
+        romulus::begin();
     }
-    romulus::jmpbuf_ptr = (sigjmp_buf *)&tm_jmpbuf;
-    romulus::begin();
 }
 
 static void real_tm_end() {

@@ -44,16 +44,51 @@ opt-22 -load-pass-plugin=plugin/bin/libTMRaceChecker.so \
 
 `tm_region_check_leaks()` added to `tm_region_allocator.hpp`, gated by `-DTM_DEBUG_ALLOC`. When enabled, a per‑thread `unordered_map<void*,size_t>` tracks live allocations; `tm_region_check_leaks()` at exit prints any unfreed pointers.
 
-## Verified passing (NOREC backend)
+## Bug fixes (usability round)
 
-| Benchmark   | Status |
-|-------------|--------|
-| `test_tx`   | 114/114 PASS |
-| `test_ds`   | 207/207 PASS |
-| `eigenbench`| PASS |
-| `rbtree`    | PASS |
-| `ycsb`      | PASS |
-| `intruder`  | PASS |
+- Fixed all stale paths in scripts and docs (llvm_tm_plugin → plugin, backends/runtimes → backends/tm_impl).
+- Unified LLVM requirement to 22 in CMakeLists.txt.
+- Added `.github/workflows/ci.yml`.
+- Removed stale `backends/runtimes/` comments from 9 source/doc files.
+- Removed `plugin/bin/tm-race-checker` from git tracking (.gitignore covers `**/bin/`).
+- Fixed `docs/REQUIREMENTS.md` directory tree and install instructions.
+- Fixed `plugin/README.md` install instructions (./install.sh → ./tools/install-plugin.sh).
+- Fixed `plugin/clang-tm` install.sh references.
+- Upgraded Python 3.8+ check to hard failure in check-requirements.sh.
+
+## Backend bug fixes
+
+- **XTM read_word/write_word**: Removed `#ifdef LLVM_TM_PLUGIN` guard on `isTMAddress()` check so non-TM addresses (e.g. regular heap from `::operator new` in `TM<int*>::alloc()`) fall through to direct read/write instead of crashing on page-aligned `memcpy` overflow. Fixes test_tx crash ("corrupted double-linked list") and test_ds crash with XTM.
+- **LEFTRIGHT read_word**: Added write-set lookup before reading from memory, so own writes within a transaction are visible to subsequent reads. Also added missing `#include <algorithm>` for `std::sort` in commit path.
+- **ROMULUS read_word**: Same write-set lookup fix as LEFTRIGHT.
+- **LEFTRIGHT/ROMULUS**: Added missing `#include <algorithm>`.
+
+## ROMULUS rewrite: proper version-table OCC commit
+
+Replaced the broken commit-time CAS (which reinterpreted every data address as an `atomic<uint64_t>` version slot, corrupting data on write-back) with a proper version-table-based OCC protocol:
+
+1. **Separate version table**: `g_version_table[]` — 2^20 entries of `atomic<uint64_t>`, indexed by `(addr>>3) & mask`. Independent of data addresses.
+2. **Commit lock**: `g_commit_lock` spinlock serializes the commit path.
+3. **Protocol**: Validate (check `version ≤ tx->timestamp`) → acquire lock → re-validate → increment global clock → write-back → fence → update version entries (`store(commit_ts)`) → release lock.
+4. **write-set lookup in read_word**: own writes visible to subsequent reads within the same transaction.
+5. **Removed old_val capture**: write-set no longer captures old values (undo logging not needed for OCC).
+
+## Verified passing (all backends)
+
+Comprehensive smoke test: `test_tx` + `test_ds` on 10 backends (TINYSTM, WBETL, WT, NOREC, SWISSTM, TL2, SGL, XTM, LEFTRIGHT, ROMULUS).
+
+| Backend   | `test_tx` | `test_ds` |
+|-----------|-----------|-----------|
+| TINYSTM   | 114/114   | 207/207   |
+| WBETL     | 114/114   | 207/207   |
+| WT        | 114/114   | 207/207   |
+| NOREC     | 114/114   | 207/207   |
+| SWISSTM   | 114/114   | 207/207   |
+| TL2       | 114/114   | 207/207   |
+| SGL       | 114/114   | 207/207   |
+| XTM       | 114/114   | 207/207   |
+| LEFTRIGHT | 114/114   | 207/207   |
+| ROMULUS   | 114/114   | 207/207   |
 
 ## Known issues
 
@@ -61,3 +96,6 @@ opt-22 -load-pass-plugin=plugin/bin/libTMRaceChecker.so \
 - TinySTM `counter_mt` has the same pre-existing assertion failure
 - **rbtree double‑free in TM region allocator** (`FATAL: double-free detected in TM`) — pre‑existing. Root cause: region allocator reuses addresses across transactions; `g_deferred_frees_set` (thread‑local) fires false‑positive when same address freed again in a different thread.
 - **stmbench7 times out with >1 thread** — root cause: data race in `ts_multimap::lower_bound()` — `op_st5` drops `std::mutex` before iterating, leaving raw iterator into `tm_malloc`‑backed memory. Affects NOrec, TL2, SwissTM; TinySTM survives by chance (per‑object locking serializes the path).
+- **LEFTRIGHT bank/ycsb multi-thread deadlock** — pre‑existing. Left-right barrier implementation deadlocks with >1 thread.
+- **XTM rbtree segfault** — pre‑existing. Page-level private copy scheme conflicts with double-free detection or region boundary.
+- **ROMULUS bank multi-thread correctness**: `bank -d 500 -a 128 -t 2` fails ("Money created/destroyed") consistently with ≥2 threads. Passes with 1 thread. Root cause: OCC write-back (Phase 4) vs. concurrent read from another thread's `read_word`. The reader sees a partially-written state (some addresses updated, others not yet) at old version numbers, which the subsequent validation cannot distinguish from a consistent snapshot. Fix requires either (a) a lock-bit per version entry (readers abort when write-back is in progress), or (b) a read-set that validates all read addresses (not just written ones). Pre-existing issue (original Romulus didn't compile).
