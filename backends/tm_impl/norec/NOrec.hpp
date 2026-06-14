@@ -273,12 +273,15 @@ commit()    //
 	TM_EVENT2(COMMIT_LOCK_ACQUIRE, expect, desire, 0);
 
 	for (auto &w : tx->write_set) {
-		// Safety guard: skip non-TM addresses that reached the
-		// write-set before the address guard was in place.
+#ifdef LLVM_TM_PLUGIN
+		// Plugin mode: non-TM addresses are handled by the read/write
+		// bypass in read_word_norec/write_word_norec and never reach
+		// the write-set.  The guard below is a safety net.
 		if (!stm::isTMAddress(w.addr) ||
 		    w.addr == nullptr || (uintptr_t)w.addr < 0x100000) {
 			continue;
 		}
+#endif
 		TM_EVENT2(COMMIT_WRITEBACK, (word_t)w.addr, (word_t)w.type, 0);
 		write_value_to_addr(w.addr, w.new_val, w.type);
 	}
@@ -401,21 +404,17 @@ read_word_norec(     //
 	}
 
 	// ── TM-address bypass ──────────────────────────────────────
-	// Non-TM addresses (regular heap, stack, near-null) bypass the
-	// TM protocol entirely.  Without this guard, the LLVM plugin can
-	// instrument null-pointer-derived GEP addresses (e.g. &node->right
-	// where node became null due to concurrent mutation), which would
-	// cause SIGSEGV in read_value_from_addr's memcpy.
-#ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr)) {
-		if (addr == nullptr || (uintptr_t)addr < 0x100000) {
-			any_type_t zero = {};
-			return zero;
-		}
-		return read_value_from_addr(addr, sz);
+	// The LLVM plugin can instrument null-pointer-derived GEP addresses
+	// (e.g. &node->right where node became null due to concurrent
+	// mutation).  Guard unconditionally (even in expli API mode) to
+	// prevent SIGSEGV in read_value_from_addr's memcpy.
+	if (addr == nullptr || (uintptr_t)addr < 0x100000) {
+		any_type_t zero = {};
+		return zero;
 	}
-#else
-	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr))
+		return read_value_from_addr(addr, sz);
 #endif
 
 	// NOREC write-back: a concurrent writer holds the global lock
@@ -483,20 +482,18 @@ write_word_norec(    //
 	TM_ASSERT(tx->active, "tx not active");
 
 	// ── TM-address bypass ──────────────────────────────────────
-	// Non-TM addresses (regular heap, stack, near-null) bypass the
-	// TM write protocol.  Direct store for valid addresses; silently
-	// skip invalid ones (e.g. null-derived GEP from concurrent mutation).
+	// The LLVM plugin can instrument null-derived GEP addresses.
+	// Guard unconditionally (even in expli API mode) to prevent
+	// SIGSEGV from writes to invalid addresses.
+	if (addr == nullptr || (uintptr_t)addr < 0x100000 ||
+	    ((uintptr_t)addr >> 47) != 0) {
+		return; // invalid address — skip
+	}
 #ifdef LLVM_TM_PLUGIN
 	if (!stm::isTMAddress(addr)) {
-		if (addr == nullptr || (uintptr_t)addr < 0x100000 ||
-		    ((uintptr_t)addr >> 47) != 0) {
-			return; // invalid address — skip
-		}
 		write_value_to_addr(addr, val, sz);
 		return;
 	}
-#else
-	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
 #endif
 
 	tx->read_only = false; // TODO: shouldn't the TX abort?
