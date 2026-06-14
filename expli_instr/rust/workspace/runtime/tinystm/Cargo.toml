@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 addrspace = { path = "../../addrspace" }
 runtime-core = { path = "../core" }
+serde = { version = "1", features = ["derive", "alloc"], optional = true }
 
 [features]
 default = []
@@ -13,3 +14,4 @@ wbctl = []
 wbetl = []
 wt = []
 simulation = ["runtime-core/simulation"]
+serde = ["dep:serde", "runtime-core/serde"]

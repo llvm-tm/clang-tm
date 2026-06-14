@@ -101,12 +101,14 @@ pub fn gc_acquire() {
 pub fn gc_release_and_inc() { G_CLOCK.fetch_add(1, Ordering::Release); }
 
 // ── Write entry ─────────────────────────────────────────
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
 pub struct WriteEntry {
     pub value: TypedValue,
 }
 
 // ── Transaction state ───────────────────────────────────
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
 pub struct TxState {
     pub read_set: Vec<(usize, u64)>,
@@ -165,7 +167,7 @@ pub fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
 pub fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     let tid = runtime_core::current_sim_thread_id();
     let store = sim_tx_store();
-    let mut map = store.lock().unwrap();
+    let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
     let state = map.get_mut(&tid).expect("no sim state for thread");
     f(state.as_mut().expect("no active transaction"))
 }
@@ -179,7 +181,7 @@ pub fn tx_active() -> bool {
 pub fn tx_active() -> bool {
     let tid = runtime_core::current_sim_thread_id();
     let store = sim_tx_store();
-    let map = store.lock().unwrap();
+    let map = store.lock().unwrap_or_else(|e| e.into_inner());
     map.get(&tid).map_or(false, |s| s.is_some())
 }
 
@@ -190,7 +192,7 @@ pub fn flush_tx() -> Option<Box<TxState>> { TX.with(|tx| tx.borrow_mut().take())
 pub fn flush_tx() -> Option<Box<TxState>> {
     let tid = runtime_core::current_sim_thread_id();
     let store = sim_tx_store();
-    let mut map = store.lock().unwrap();
+    let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
     map.get_mut(&tid).and_then(|s| s.take())
 }
 
@@ -306,7 +308,7 @@ pub fn tm_init_thread() {
     {
         let tid = runtime_core::current_sim_thread_id();
         let store = sim_tx_store();
-        let mut map = store.lock().unwrap();
+        let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(tid).or_insert(None);
     }
 }
@@ -324,7 +326,7 @@ pub fn tm_begin() {
     let start_ver = gc_snapshot();
     let tid = runtime_core::current_sim_thread_id();
     let store = sim_tx_store();
-    let mut map = store.lock().unwrap();
+    let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
     *map.get_mut(&tid).expect("no sim state for thread") = Some(Box::new(TxState::new(start_ver)));
 }
 
@@ -349,19 +351,20 @@ pub mod sim {
 
     pub fn snapshot_states() -> HashMap<u64, Option<Box<TxState>>> {
         let store = sim_tx_store();
-        let map = store.lock().unwrap();
+        let map = store.lock().unwrap_or_else(|e| e.into_inner());
         map.clone()
     }
 
     pub fn restore_states(states: HashMap<u64, Option<Box<TxState>>>) {
         let store = sim_tx_store();
-        let mut map = store.lock().unwrap();
+        let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
         *map = states;
     }
 
     pub fn reset() {
+        let Some(tid) = runtime_core::try_current_sim_thread_id() else { return; };
         let store = sim_tx_store();
-        let mut map = store.lock().unwrap();
-        map.clear();
+        let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
+        map.remove(&tid);
     }
 }

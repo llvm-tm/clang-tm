@@ -12,6 +12,8 @@ pub mod bank_sim;
 pub mod sim_engine;
 pub mod verifier;
 pub mod backend;
+pub mod deadlock;
+pub mod checkpoint;
 
 use clap::Parser;
 
