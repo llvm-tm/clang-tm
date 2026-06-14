@@ -109,6 +109,10 @@ static void sync_shared_to_local() {
 // ── tm_init ─────────────────────────────────────────────────────
 
 void tm_init() {
+    if (stm::tm_region_init() != 0) {
+        fprintf(stderr, "FATAL: tm_region_init() failed\n");
+        abort();
+    }
     tm_register_real_hooks(&g_dsgl_hooks);
     uint64_t data_size = 0;
     for (uint32_t i = 0; i < tm_symbol_count; i++)
@@ -171,9 +175,11 @@ void tm_exit() {
 
 // ── Transaction boundaries (2PC with shared-memory sync) ────────
 
-__thread int32_t tm_nested_call_counter;
-__thread int32_t tm_longjmp_ret;
-__thread sigjmp_buf tm_jmpbuf;
+extern "C" {
+extern __thread int32_t    tm_nested_call_counter;
+extern __thread int32_t    tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
+}
 
 int tm_setjmp() { return 0; }
 void tm_set_jmpbuf(void*) {}

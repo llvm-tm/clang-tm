@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::sync::atomic::AtomicU32;
 use std::sync::OnceLock;
 
+#[allow(unused_imports)]
 pub use runtime_core::{tm_install_tmx_hook, Primitive, TypedValue, WriteBack};
 #[cfg(any(feature = "wbctl", feature = "wbetl"))]
 pub use runtime_core::TmxAbort;

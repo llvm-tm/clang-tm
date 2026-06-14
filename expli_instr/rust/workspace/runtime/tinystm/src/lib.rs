@@ -1,3 +1,7 @@
+// Allow dead code and unused imports when this crate is compiled but no TinySTM
+// variant is active (e.g., when building with --features tm/norec).
+#![allow(dead_code, unused_imports)]
+
 mod common;
 
 // Only compile the selected variant's module.

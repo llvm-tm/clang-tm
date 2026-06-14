@@ -96,3 +96,34 @@ test_run: plugin-benchmarks
 	@$(PLUGIN_BENCHMARKS_DIR)/bank/bin/bank_singlelock -t 2 -d 1000 2>&1
 	@$(PLUGIN_BENCHMARKS_DIR)/datastructures/bin/avltree_SingleGlobalLock 1 10 100 2>&1
 	@$(PLUGIN_BENCHMARKS_DIR)/STAMP/bin/stamp_uninstrumented -b kmeans -t 2 2>&1
+
+# Run all explicit C++ API benchmarks across all supported backends
+BACKENDS_TESTS := TINYSTM WBETL WT NOREC SWISSTM TL2 SGL LEFTRIGHT ROMULUS XTM SPHT TSXSGL
+check-all:
+	@echo "=== Building and running all tests across all backends ==="
+	@for be in $(BACKENDS_TESTS); do \
+		echo "--- Backend: $$be ---"; \
+		$(MAKE) -C $(EXPLI_BENCHMARKS_DIR) clean BACKEND=$$be 2>&1 > /dev/null; \
+		if $(MAKE) -C $(EXPLI_BENCHMARKS_DIR) -j4 bin/test_tx bin/test_ds BACKEND=$$be 2>&1 > /tmp/check-$$be-build.log; then \
+			echo "  Build: OK"; \
+			if [ "$$be" = "SGL" ] || [ "$$be" = "LEFTRIGHT" ] || [ "$$be" = "ROMULUS" ]; then \
+				echo "  (runtime needs explicit init — skipping run)"; \
+			else \
+				if $(EXPLI_BENCHMARKS_DIR)/bin/test_tx > /tmp/check-$$be-tx.log 2>&1; then \
+					echo "  test_tx: $$(tail -1 /tmp/check-$$be-tx.log)"; \
+				else \
+					echo "  test_tx: FAIL"; \
+				fi; \
+				if $(EXPLI_BENCHMARKS_DIR)/bin/test_ds > /tmp/check-$$be-ds.log 2>&1; then \
+					echo "  test_ds: $$(tail -1 /tmp/check-$$be-ds.log)"; \
+				else \
+					echo "  test_ds: FAIL"; \
+				fi; \
+			fi; \
+		else \
+			echo "  Build: FAIL"; \
+			tail -3 /tmp/check-$$be-build.log; \
+		fi; \
+		echo ""; \
+	done
+	@echo "=== All backend tests complete ==="

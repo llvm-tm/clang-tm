@@ -33,9 +33,11 @@ extern const TMRealHooks g_spht_hooks;
 
 extern "C" {
 
-__thread int32_t tm_nested_call_counter;
-__thread int32_t tm_longjmp_ret;
-__thread sigjmp_buf tm_jmpbuf;
+extern "C" {
+extern __thread int32_t    tm_nested_call_counter;
+extern __thread int32_t    tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
+}
 
 #define TM_BUFFER_SIZE 1024
 static __thread uint8_t tm_buffer[TM_BUFFER_SIZE];

@@ -244,6 +244,8 @@ void *tm_read_ptr(void *addr)
 	return val;
 }
 
+void consume_ptr(volatile void *ptr) { (void)ptr; }
+
 void tm_write_i1(void *addr, uint8_t val)
 {
 	fflush(stdout);
