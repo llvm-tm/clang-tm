@@ -12,8 +12,8 @@ set -euo pipefail
 #   4. To re-apply later:  ./debug_patches/apply.sh
 # ──────────────────────────────────────────────────────────────────────────
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PATCHES="$ROOT/debug_patches/patches"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PATCHES="$(cd "$(dirname "$0")" && pwd)/patches"
 
 NAME="${1:-$(date -u +%Y%m%dT%H%M%S)-unnamed.patch}"
 OUT="$PATCHES/$NAME"

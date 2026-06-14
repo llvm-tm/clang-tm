@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PATCHES="$ROOT/debug_patches/patches"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PATCHES="$(cd "$(dirname "$0")" && pwd)/patches"
 
 # Must be in a git repo
 cd "$ROOT"

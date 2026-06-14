@@ -28,30 +28,30 @@ The event logger is APPROPRIATE for **production debugging** — zero
 overhead when off, always available.  See `backends/tm_event_logger.hpp`
 for event types.
 
-### Approach 2: `debug_patches/` (external patches, source stays clean)
+### Approach 2: `patches/debug/patches/` (external patches, source stays clean)
 
 For **one-off or invasive debugging** (per-call `fprintf`, type-specific
 breakpoint traps, custom assertions), use git-formatted patches:
 
 ```bash
 # 1. HACK the source files (add your debug code):
-   vim backends/SwissTM/SwissTM.hpp
+   vim backends/tm_impl/swisstm/SwissTM.hpp
 
 # 2. Create a patch:
    cd $PROJ_ROOT
-   git diff > debug_patches/patches/001-my-debug.patch
+   git diff > patches/debug/patches/001-my-debug.patch
 
 # 3. Revert the working tree back to clean:
-   git checkout -- backends/SwissTM/SwissTM.hpp
+   git checkout -- backends/tm_impl/swisstm/SwissTM.hpp
    # or:  git checkout -- .
 
 # 4. Apply the patch for debugging:
-   ./debug_patches/apply.sh
+   ./patches/debug/apply.sh
 
 # 5. Build & debug...
 
 # 6. Remove when done:
-   ./debug_patches/remove.sh
+   ./patches/debug/remove.sh
 ```
 
 ## Creating a good debug patch
