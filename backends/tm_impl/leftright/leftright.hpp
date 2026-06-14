@@ -91,20 +91,13 @@ extern std::atomic<uint64_t> g_tm_abort_count;
 // Uses the global (non-TLS) flag so all worker threads see the same value.
 inline bool isQueueActive() { return g_tm_queue_global.load(std::memory_order_acquire); }
 
-// ── Left-Right barrier counters ─────────────────────────────────
-extern std::atomic<uint64_t> g_left_barrier;
-extern std::atomic<uint64_t> g_right_barrier;
-extern std::atomic<uint64_t> g_left_phase;
-extern std::atomic<uint64_t> g_right_phase;
+// ── Global commit lock (serializes writers) ─────────────────────
+extern std::atomic<uint32_t> g_commit_lock;
 
 // ── Init ─────────────────────────────────────────────────────────
 inline void init() {
     g_clock.store(1, std::memory_order_release);
     thr_counter.store(1, std::memory_order_release);
-    g_left_barrier.store(0, std::memory_order_release);
-    g_right_barrier.store(0, std::memory_order_release);
-    g_left_phase.store(0, std::memory_order_release);
-    g_right_phase.store(0, std::memory_order_release);
 }
 
 inline void exit() {}
@@ -129,32 +122,6 @@ inline uint64_t get_clock() {
 
 inline uint64_t increment_clock() {
     return g_clock.fetch_add(1, std::memory_order_acq_rel) + 1;
-}
-
-// ── Left-Right barrier ───────────────────────────────────────────
-// All threads must cross the left barrier before any thread can
-// proceed to the right phase.  This ensures a clean Left→Right
-// ordering across all concurrent transactions.
-
-inline void left_barrier() {
-    uint64_t phase = g_left_phase.load(std::memory_order_acquire);
-    g_left_barrier.fetch_add(1, std::memory_order_acq_rel);
-
-    // Spin until all threads have reached the left barrier
-    while (g_left_barrier.load(std::memory_order_acquire) <
-           g_right_barrier.load(std::memory_order_acquire) + thr_counter.load() - 1) {
-        std::this_thread::yield();
-    }
-}
-
-inline void right_barrier() {
-    g_right_barrier.fetch_add(1, std::memory_order_acq_rel);
-
-    // Spin until all threads have crossed to the right phase
-    while (g_right_barrier.load(std::memory_order_acquire) <
-           g_left_barrier.load(std::memory_order_acquire)) {
-        std::this_thread::yield();
-    }
 }
 
 // ── Begin/Abort/Commit ──────────────────────────────────────────
@@ -205,17 +172,25 @@ static bool compareByAddr(const void *a, const void *b) {
     return (uintptr_t)a < (uintptr_t)b;
 }
 
+inline bool acquire_commit_lock() {
+    uint32_t expected = 0;
+    return g_commit_lock.compare_exchange_strong(expected, 1,
+        std::memory_order_acquire,
+        std::memory_order_relaxed);
+}
+
+inline void release_commit_lock() {
+    g_commit_lock.store(0, std::memory_order_release);
+}
+
 inline bool commit() {
     auto *tx = current_tx;
     if (!tx->active) return true;
 
     if (!tx->read_only) {
         if (isQueueActive()) {
-            // Queue mode: only worker threads run TM transactions.
-            // The main thread never reaches barriers, so they would
-            // deadlock.  Skip them entirely — the queue executor
-            // provides ordering (each worker runs one TX at a time;
-            // with auto-wait only one TX exists in the system).
+            // Queue mode: the executor provides ordering (each worker
+            // runs one TX at a time).  Validate and write-back directly.
             if (!validate())
                 abort_tx("read_validation");
             uint64_t commit_version = increment_clock();
@@ -225,31 +200,47 @@ inline bool commit() {
                 write_value_to_addr(addr, w.new_val, w.type);
             }
         } else {
-            // Phase 1: Left-Right barrier — ensure all concurrent TXs
-            // have finished their Left phase before proceeding to Right.
-            left_barrier();
-
-            // Phase 2: Sort write-set addresses
+            // Sort write-set addresses (deterministic ordering for
+            // potential future per-address locking).
             std::vector<void *> sorted_addrs;
             sorted_addrs.reserve(tx->write_set.size());
             for (auto &it : tx->write_set)
                 sorted_addrs.push_back(it.first);
             std::sort(sorted_addrs.begin(), sorted_addrs.end(), compareByAddr);
 
-            // Phase 3: Right barrier — ensure all threads have
-            // completed their Left phase before any Right phase writes.
-            right_barrier();
-
-            // Phase 4: Validate read-set
-            if (!validate())
+            // Phase 1: Optimistic validation (outside lock).
+            // Cheap abort for already-stale transactions.
+            if (!validate()) {
+                stm::tm_token_release_if_held(tx->id);
                 abort_tx("read_validation");
+            }
 
-            // Phase 5: Write-back and commit
-            uint64_t commit_version = increment_clock();
-            for (auto &it : tx->write_set) {
-                auto &addr = it.first;
-                auto &w = it.second;
-                write_value_to_addr(addr, w.new_val, w.type);
+            // Phase 2: Acquire global commit lock (serializes writers).
+            while (!acquire_commit_lock())
+                std::this_thread::yield();
+
+            // Phase 3: Re-validate under lock.
+            // Catches changes since Phase 1 (concurrent commit could have
+            // modified a read-set address between the validate and here).
+            bool valid = validate();
+
+            if (valid) {
+                // Phase 4: Increment clock and write-back.
+                uint64_t commit_version = increment_clock();
+                for (auto &it : tx->write_set) {
+                    auto &addr = it.first;
+                    auto &w = it.second;
+                    write_value_to_addr(addr, w.new_val, w.type);
+                }
+            }
+
+            // Phase 5: Release lock.  MUST happen before abort_tx()
+            // (which does siglongjmp), otherwise the lock is held forever.
+            release_commit_lock();
+
+            if (!valid) {
+                stm::tm_token_release_if_held(tx->id);
+                abort_tx("read_validation");
             }
         }
     }
@@ -275,9 +266,9 @@ inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
     any_type_t val = read_value_from_addr(addr, sz);
 
     if (!isQueueActive()) {
-        // Non-queue mode: log reads for barrier-based validation.
+        // Non-queue mode: log reads for OCC read-set validation.
         // In queue mode the read-set is not needed (validation is a no-op
-        // since the queue provides ordering; barriers are skipped).
+        // since the queue provides ordering; the lock is skipped too).
         auto r = tx->read_set.find(addr);
         if (r == tx->read_set.end()) {
             ReadLogEntry entry;

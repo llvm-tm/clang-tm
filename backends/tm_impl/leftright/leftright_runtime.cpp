@@ -26,10 +26,7 @@ std::atomic<uint64_t> thr_counter{1};
 __thread Transaction *current_tx = nullptr;
 std::atomic<uint64_t> g_tm_abort_count{0};
 
-std::atomic<uint64_t> g_left_barrier{0};
-std::atomic<uint64_t> g_right_barrier{0};
-std::atomic<uint64_t> g_left_phase{0};
-std::atomic<uint64_t> g_right_phase{0};
+std::atomic<uint32_t> g_commit_lock{0};
 
 __thread sigjmp_buf *jmpbuf_ptr;
 
