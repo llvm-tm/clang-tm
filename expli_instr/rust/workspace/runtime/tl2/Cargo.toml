@@ -5,3 +5,6 @@ edition = "2021"
 
 [dependencies]
 runtime-core = { path = "../core" }
+
+[features]
+simulation = ["runtime-core/simulation"]

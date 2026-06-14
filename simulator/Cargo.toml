@@ -13,6 +13,7 @@ bincode = "1"
 # Real TM backend crates (simulation mode)
 runtime-core = { path = "../expli_instr/rust/workspace/runtime/core", features = ["simulation"] }
 runtime-norec = { path = "../expli_instr/rust/workspace/runtime/norec", features = ["simulation"] }
+runtime-tl2 = { path = "../expli_instr/rust/workspace/runtime/tl2", features = ["simulation"] }
 libc = "0.2"
 
 [[bin]]

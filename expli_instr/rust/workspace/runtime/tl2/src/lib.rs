@@ -4,6 +4,7 @@
 // a global monotonically increasing clock.
 
 use core::sync::atomic::{fence, AtomicU64, Ordering};
+#[cfg(not(feature = "simulation"))]
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -79,17 +80,26 @@ fn locks() -> &'static [Lock] {
 }
 
 // ── Global commit lock + clock ──────────────────────────
-// Commit lock: 0 = unlocked, >0 = locked by thread.
 static COMMIT_LOCK: AtomicU64 = AtomicU64::new(0);
 static G_CLOCK: AtomicU64 = AtomicU64::new(0);
 
 pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
 
+// ── Thread-local / simulation state ──────────────────────
+#[cfg(feature = "simulation")]
+use std::sync::Mutex;
+
+#[cfg(feature = "simulation")]
+fn sim_tx_store() -> &'static Mutex<HashMap<u64, Option<Box<TxState>>>> {
+    static STORE: OnceLock<Mutex<HashMap<u64, Option<Box<TxState>>>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 // ── Transaction state ───────────────────────────────────
-struct TxState {
+#[derive(Clone)]
+pub struct TxState {
     read_set: Vec<(usize, u64)>,  // (addr, version_at_read)
     write_set: HashMap<usize, TypedValue>,
-    /// Deferred write-back closures (safe to apply at commit).
     write_backs: Vec<WriteBack>,
     start_version: u64,
     #[allow(dead_code)]
@@ -108,11 +118,13 @@ impl TxState {
     }
 }
 
-// ── Thread-local state ──────────────────────────────────
+// ── Thread-local storage ──────────────────────────────
+#[cfg(not(feature = "simulation"))]
 thread_local! {
     static TX: RefCell<Option<Box<TxState>>> = const { RefCell::new(None) };
 }
 
+#[cfg(not(feature = "simulation"))]
 fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     TX.with(|tx| {
         let mut b = tx.borrow_mut();
@@ -120,12 +132,39 @@ fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     })
 }
 
+#[cfg(feature = "simulation")]
+fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_tx_store();
+    let mut map = store.lock().unwrap();
+    let state = map.get_mut(&tid).expect("no sim state for thread");
+    f(state.as_mut().expect("no active transaction"))
+}
+
+#[cfg(not(feature = "simulation"))]
 fn tx_active() -> bool {
     TX.with(|tx| tx.borrow().is_some())
 }
 
+#[cfg(feature = "simulation")]
+fn tx_active() -> bool {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_tx_store();
+    let map = store.lock().unwrap();
+    map.get(&tid).map_or(false, |s| s.is_some())
+}
+
+#[cfg(not(feature = "simulation"))]
 fn flush_tx() -> Option<Box<TxState>> {
     TX.with(|tx| tx.borrow_mut().take())
+}
+
+#[cfg(feature = "simulation")]
+fn flush_tx() -> Option<Box<TxState>> {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_tx_store();
+    let mut map = store.lock().unwrap();
+    map.get_mut(&tid).and_then(|s| s.take())
 }
 
 // ── Read word ───────────────────────────────────────────
@@ -136,23 +175,20 @@ fn read_word<T: Primitive>(addr: usize) -> T {
     }
 
     // Check write-set
-    if let Some(tv) = TX.with(|tx| {
-        tx.borrow().as_ref().and_then(|t| t.write_set.get(&addr).cloned())
-    }) { return T::from_typed(&tv); }
+    if let Some(tv) = with_tx(|tx| tx.write_set.get(&addr).cloned()) {
+        return T::from_typed(&tv);
+    }
 
     loop {
-        // Spin while lock held
         while is_locked(addr) { std::hint::spin_loop(); }
         let ver = read_version(addr);
         let val: T = unsafe { (addr as *const T).read() };
-        // Double-check the lock version after reading
         if read_version(addr) != ver { continue; }
 
         if with_tx(|tx| {
             if ver > tx.start_version {
                 true
             } else {
-                // Check read_set size cap
                 if tx.read_set.len() > 1_000_000 {
                     return true;
                 }
@@ -204,7 +240,7 @@ pub fn tm_commit() -> bool {
     if tx.write_set.is_empty() { return true; }
 
     // 1. Acquire global commit lock
-    let my_id = 1; // single-bit thread ID for the global lock
+    let my_id = 1;
     loop {
         let cur = COMMIT_LOCK.load(Ordering::Relaxed);
         if cur == 0 && COMMIT_LOCK.compare_exchange_weak(0, my_id, Ordering::Acquire, Ordering::Relaxed).is_ok() {
@@ -213,23 +249,19 @@ pub fn tm_commit() -> bool {
         std::hint::spin_loop();
     }
 
-    // 2. Snapshot the clock
-    let _commit_version = G_CLOCK.load(Ordering::Acquire);
-
-    // 3. Validate read-set
+    // 2. Validate read-set
     if !validate_read_set(&tx.read_set) {
         COMMIT_LOCK.store(0, Ordering::Release);
         TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
         return false;
     }
 
-    // 4. Lock all write-set addresses (sorted for deadlock freedom)
+    // 3. Lock write-set addresses (sorted for deadlock freedom)
     let mut addrs: Vec<usize> = tx.write_set.keys().copied().collect();
     addrs.sort_unstable();
     let mut locked_idxs: Vec<usize> = Vec::with_capacity(addrs.len());
     for &a in &addrs {
         let idx = lock_index(a);
-        // Dedup lock indices (two addresses may map to same lock)
         if locked_idxs.last().copied() != Some(idx) {
             while !lock_at_index(idx).try_lock_exclusive() {
                 std::hint::spin_loop();
@@ -239,21 +271,21 @@ pub fn tm_commit() -> bool {
     }
     fence(Ordering::SeqCst);
 
-    // 5. Write-back all values (safe — WriteBack::apply() encapsulates the unsafe)
+    // 4. Write-back
     for wb in tx.write_backs {
         wb.apply();
     }
 
-    // 6. Unlock write-set addresses (reverse order to match locking)
+    // 5. Unlock (reverse order)
     for &idx in locked_idxs.iter().rev() {
         lock_at_index(idx).unlock_exclusive();
     }
     fence(Ordering::SeqCst);
 
-    // 7. Advance global clock
+    // 6. Advance global clock
     G_CLOCK.fetch_add(1, Ordering::Release);
 
-    // 8. Release global commit lock
+    // 7. Release global commit lock
     COMMIT_LOCK.store(0, Ordering::Release);
 
     true
@@ -268,13 +300,33 @@ pub fn tm_init() {
 
 pub fn tm_exit() {}
 
-pub fn tm_init_thread() {}
+pub fn tm_init_thread() {
+    #[cfg(not(feature = "simulation"))]
+    TX.with(|tx| { *tx.borrow_mut() = None; });
+    #[cfg(feature = "simulation")]
+    {
+        let tid = runtime_core::current_sim_thread_id();
+        let store = sim_tx_store();
+        let mut map = store.lock().unwrap();
+        map.entry(tid).or_insert(None);
+    }
+}
 
 pub fn tm_exit_thread() {}
 
+#[cfg(not(feature = "simulation"))]
 pub fn tm_begin() {
     let sv = G_CLOCK.load(Ordering::Acquire);
     TX.with(|tx| { *tx.borrow_mut() = Some(Box::new(TxState::new(sv))); });
+}
+
+#[cfg(feature = "simulation")]
+pub fn tm_begin() {
+    let sv = G_CLOCK.load(Ordering::Acquire);
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_tx_store();
+    let mut map = store.lock().unwrap();
+    *map.get_mut(&tid).expect("no sim state for thread") = Some(Box::new(TxState::new(sv)));
 }
 
 pub fn tm_abort() { flush_tx(); }
@@ -315,3 +367,35 @@ def_write!(tm_write_f64, f64);
 #[inline] pub fn tm_write_ptr<T>(addr: *mut *mut T, val: *mut T) { write_word::<u64>(addr as usize, val as u64); }
 #[inline] pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) { read_raw_bytes(addr as usize, dst); }
 #[inline] pub fn tm_write_raw(addr: *mut u8, src: &[u8]) { write_raw_bytes(addr as usize, src); }
+
+// ── Simulation-only API ──────────────────────────────────
+#[cfg(feature = "simulation")]
+pub mod sim {
+    use super::*;
+
+    pub fn set_thread_id(id: u64) {
+        runtime_core::set_sim_thread_id(id);
+    }
+
+    pub fn clear_thread_id() {
+        runtime_core::clear_sim_thread_id();
+    }
+
+    pub fn snapshot_states() -> HashMap<u64, Option<Box<TxState>>> {
+        let store = sim_tx_store();
+        let map = store.lock().unwrap();
+        map.clone()
+    }
+
+    pub fn restore_states(states: HashMap<u64, Option<Box<TxState>>>) {
+        let store = sim_tx_store();
+        let mut map = store.lock().unwrap();
+        *map = states;
+    }
+
+    pub fn reset() {
+        let store = sim_tx_store();
+        let mut map = store.lock().unwrap();
+        map.clear();
+    }
+}
