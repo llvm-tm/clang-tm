@@ -23,3 +23,5 @@ pub use wbetl::*;
 pub use wt::*;
 
 pub use common::{tm_init, tm_exit, tm_begin, tm_init_thread, tm_exit_thread, tm_abort_count};
+#[cfg(feature = "simulation")]
+pub use common::sim;

@@ -7,6 +7,7 @@
 pub enum Backend {
     Norec,
     Tl2,
+    Tinystm,
 }
 
 impl Backend {
@@ -14,6 +15,7 @@ impl Backend {
         match name {
             "norec" | "no-rec" => Some(Backend::Norec),
             "tl2" | "TL2" => Some(Backend::Tl2),
+            "tinystm" | "tiny-stm" => Some(Backend::Tinystm),
             _ => None,
         }
     }
@@ -22,122 +24,129 @@ impl Backend {
         match self {
             Backend::Norec => "norec",
             Backend::Tl2 => "tl2",
+            Backend::Tinystm => "tinystm",
         }
     }
 
-    /// Initialize the TM runtime.
     pub fn init(&self) {
         match self {
             Backend::Norec => runtime_norec::tm_init(),
             Backend::Tl2 => runtime_tl2::tm_init(),
+            Backend::Tinystm => runtime_tinystm::tm_init(),
         }
     }
 
-    /// Initialize a (simulated) thread.
     pub fn init_thread(&self) {
         match self {
             Backend::Norec => runtime_norec::tm_init_thread(),
             Backend::Tl2 => runtime_tl2::tm_init_thread(),
+            Backend::Tinystm => runtime_tinystm::tm_init_thread(),
         }
     }
 
-    /// Begin a transaction.
     pub fn begin(&self) {
         match self {
             Backend::Norec => runtime_norec::tm_begin(),
             Backend::Tl2 => runtime_tl2::tm_begin(),
+            Backend::Tinystm => runtime_tinystm::tm_begin(),
         }
     }
 
-    /// Commit a transaction. Returns true on success.
     pub fn commit(&self) -> bool {
         match self {
             Backend::Norec => runtime_norec::tm_commit(),
             Backend::Tl2 => runtime_tl2::tm_commit(),
+            Backend::Tinystm => runtime_tinystm::tm_commit(),
         }
     }
 
-    /// Abort the current transaction.
     pub fn abort(&self) {
         match self {
             Backend::Norec => runtime_norec::tm_abort(),
             Backend::Tl2 => runtime_tl2::tm_abort(),
+            Backend::Tinystm => runtime_tinystm::tm_abort(),
         }
     }
 
-    /// Set the simulated thread ID.
     pub fn sim_set_thread_id(&self, id: u64) {
         match self {
             Backend::Norec => runtime_norec::sim::set_thread_id(id),
             Backend::Tl2 => runtime_tl2::sim::set_thread_id(id),
+            Backend::Tinystm => runtime_tinystm::sim::set_thread_id(id),
         }
     }
 
-    /// Clear the simulated thread ID.
     pub fn sim_clear_thread_id(&self) {
         match self {
             Backend::Norec => runtime_norec::sim::clear_thread_id(),
             Backend::Tl2 => runtime_tl2::sim::clear_thread_id(),
+            Backend::Tinystm => runtime_tinystm::sim::clear_thread_id(),
         }
     }
 
-    /// Reset all simulated thread state.
     pub fn sim_reset(&self) {
         match self {
             Backend::Norec => runtime_norec::sim::reset(),
             Backend::Tl2 => runtime_tl2::sim::reset(),
+            Backend::Tinystm => runtime_tinystm::sim::reset(),
         }
     }
 
-    /// Typed transactional reads.
     pub fn read_u8(&self, addr: *mut u8) -> u8 {
         match self {
             Backend::Norec => runtime_norec::tm_read_u8(addr),
             Backend::Tl2 => runtime_tl2::tm_read_u8(addr),
+            Backend::Tinystm => runtime_tinystm::tm_read_u8(addr),
         }
     }
     pub fn read_u16(&self, addr: *mut u16) -> u16 {
         match self {
             Backend::Norec => runtime_norec::tm_read_u16(addr),
             Backend::Tl2 => runtime_tl2::tm_read_u16(addr),
+            Backend::Tinystm => runtime_tinystm::tm_read_u16(addr),
         }
     }
     pub fn read_u32(&self, addr: *mut u32) -> u32 {
         match self {
             Backend::Norec => runtime_norec::tm_read_u32(addr),
             Backend::Tl2 => runtime_tl2::tm_read_u32(addr),
+            Backend::Tinystm => runtime_tinystm::tm_read_u32(addr),
         }
     }
     pub fn read_u64(&self, addr: *mut u64) -> u64 {
         match self {
             Backend::Norec => runtime_norec::tm_read_u64(addr),
             Backend::Tl2 => runtime_tl2::tm_read_u64(addr),
+            Backend::Tinystm => runtime_tinystm::tm_read_u64(addr),
         }
     }
 
-    /// Typed transactional writes.
     pub fn write_u8(&self, addr: *mut u8, val: u8) {
         match self {
             Backend::Norec => runtime_norec::tm_write_u8(addr, val),
             Backend::Tl2 => runtime_tl2::tm_write_u8(addr, val),
+            Backend::Tinystm => runtime_tinystm::tm_write_u8(addr, val),
         }
     }
     pub fn write_u16(&self, addr: *mut u16, val: u16) {
         match self {
             Backend::Norec => runtime_norec::tm_write_u16(addr, val),
             Backend::Tl2 => runtime_tl2::tm_write_u16(addr, val),
+            Backend::Tinystm => runtime_tinystm::tm_write_u16(addr, val),
         }
     }
     pub fn write_u32(&self, addr: *mut u32, val: u32) {
         match self {
             Backend::Norec => runtime_norec::tm_write_u32(addr, val),
             Backend::Tl2 => runtime_tl2::tm_write_u32(addr, val),
+            Backend::Tinystm => runtime_tinystm::tm_write_u32(addr, val),
         }
     }
     pub fn write_u64(&self, addr: *mut u64, val: u64) {
         match self {
             Backend::Norec => runtime_norec::tm_write_u64(addr, val),
             Backend::Tl2 => runtime_tl2::tm_write_u64(addr, val),
+            Backend::Tinystm => runtime_tinystm::tm_write_u64(addr, val),
         }
     }
 }
@@ -210,8 +219,9 @@ mod tests {
 
     #[test]
     fn test_backend_from_name_invalid() {
-        assert_eq!(Backend::from_name("tinystm"), None);
+        assert_eq!(Backend::from_name("tinystm"), Some(Backend::Tinystm));
         assert_eq!(Backend::from_name(""), None);
+        assert_eq!(Backend::from_name("swisstm"), None);
     }
 
     #[test]
@@ -308,12 +318,39 @@ mod tests {
         b.sim_clear_thread_id();
     }
 
+    // ── TinySTM backend simulation ────────────────────────
+
+    #[test]
+    fn test_tinystm_simple_tx() {
+        mmap_tm_region();
+        let b = Backend::Tinystm;
+        b.init();
+        b.sim_set_thread_id(0);
+        b.init_thread();
+        let addr = 0x7f00_0000_D000 as *mut u64;
+        unsafe { addr.write(0); }
+        b.begin();
+        let v = b.read_u64(addr);
+        assert_eq!(v, 0);
+        b.write_u64(addr, 77);
+        assert!(b.commit(), "tinystm commit should succeed");
+        b.sim_clear_thread_id();
+
+        // Read back
+        b.sim_set_thread_id(0);
+        b.begin();
+        let v = b.read_u64(addr);
+        assert_eq!(v, 77, "value should persist after commit");
+        b.commit();
+        b.sim_clear_thread_id();
+    }
+
     // ── Cross-backend consistency ─────────────────────────
 
     #[test]
     fn test_norec_and_tl2_produce_identical_commits() {
         mmap_tm_region();
-        for b in [Backend::Norec, Backend::Tl2] {
+        for b in [Backend::Norec, Backend::Tl2, Backend::Tinystm] {
             b.init();
             b.sim_set_thread_id(0);
             b.init_thread();
@@ -331,7 +368,7 @@ mod tests {
     #[test]
     fn test_thread_isolation() {
         mmap_tm_region();
-        for b in [Backend::Norec, Backend::Tl2] {
+        for b in [Backend::Norec, Backend::Tl2, Backend::Tinystm] {
             b.init();
             let addr = 0x7f00_0000_C000 as *mut u64;
             unsafe { addr.write(0); }
@@ -359,7 +396,7 @@ mod tests {
     #[test]
     fn test_sim_reset_clears_state() {
         mmap_tm_region();
-        for b in [Backend::Norec, Backend::Tl2] {
+        for b in [Backend::Norec, Backend::Tl2, Backend::Tinystm] {
             b.init();
             b.sim_set_thread_id(0);
             b.init_thread();

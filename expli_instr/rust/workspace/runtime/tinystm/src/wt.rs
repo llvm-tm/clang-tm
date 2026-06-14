@@ -1,18 +1,17 @@
 use crate::common::*;
-use crate::common::TX;
 use core::sync::atomic::{fence, Ordering};
 
 fn tx_aborted() -> bool {
-    TX.with(|tx| match *tx.borrow() { Some(ref t) => t.aborted, None => false })
+    tx_active() && with_tx(|tx| tx.aborted)
 }
 
 fn read_word<T: Primitive>(addr: usize) -> T {
     fence(Ordering::SeqCst);
     if !runtime_core::is_tm_address(addr as *const u8) { return unsafe { (addr as *const T).read() }; }
     if !tx_active() { return unsafe { (addr as *const T).read() }; }
-    if let Some(entry) = TX.with(|tx| {
-        tx.borrow().as_ref().and_then(|t| t.write_set.get(&addr)).map(|e| e.value.clone())
-    }) { return T::from_typed(&entry); }
+    if let Some(entry) = with_tx(|tx| tx.write_set.get(&addr).map(|e| e.value.clone())) {
+        return T::from_typed(&entry);
+    }
     loop {
         {
             let mut rspins = 0u64;

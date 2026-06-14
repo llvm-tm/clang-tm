@@ -14,6 +14,7 @@ bincode = "1"
 runtime-core = { path = "../expli_instr/rust/workspace/runtime/core", features = ["simulation"] }
 runtime-norec = { path = "../expli_instr/rust/workspace/runtime/norec", features = ["simulation"] }
 runtime-tl2 = { path = "../expli_instr/rust/workspace/runtime/tl2", features = ["simulation"] }
+runtime-tinystm = { path = "../expli_instr/rust/workspace/runtime/tinystm", features = ["simulation", "wbctl"] }
 libc = "0.2"
 
 [[bin]]

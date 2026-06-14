@@ -1,5 +1,6 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(not(feature = "simulation"))]
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::sync::atomic::AtomicU32;
 use std::sync::OnceLock;
@@ -100,26 +101,23 @@ pub fn gc_acquire() {
 pub fn gc_release_and_inc() { G_CLOCK.fetch_add(1, Ordering::Release); }
 
 // ── Write entry ─────────────────────────────────────────
+#[derive(Clone)]
 pub struct WriteEntry {
     pub value: TypedValue,
 }
 
 // ── Transaction state ───────────────────────────────────
+#[derive(Clone)]
 pub struct TxState {
     pub read_set: Vec<(usize, u64)>,
     pub write_set: HashMap<usize, WriteEntry>,
-    /// Deferred write-back closures (safe to apply at commit).
-    /// Used by write-back backends (WBCTL, WBETL).
     #[cfg(any(feature = "wbctl", feature = "wbetl"))]
     pub write_backs: Vec<WriteBack>,
-    /// Deferred undo closures (safe to apply on abort/rollback).
-    /// Used by write-through backends (WT).
     #[cfg(feature = "wt")]
     pub undo_backs: Vec<WriteBack>,
     pub start_version: u64,
     #[allow(dead_code)]
     pub aborted: bool,
-    /// Lock indices held by encounter-time locking variants (WBETL, WT).
     #[allow(dead_code)]
     pub locked_addrs: Vec<usize>,
 }
@@ -140,16 +138,60 @@ impl TxState {
     }
 }
 
-// ── Thread-local state ──────────────────────────────────
+// ── Thread-local / simulation state ──────────────────────
+#[cfg(feature = "simulation")]
+use std::sync::Mutex;
+
+#[cfg(feature = "simulation")]
+fn sim_tx_store() -> &'static Mutex<HashMap<u64, Option<Box<TxState>>>> {
+    static STORE: OnceLock<Mutex<HashMap<u64, Option<Box<TxState>>>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(not(feature = "simulation"))]
 thread_local! {
     pub(crate) static TX: RefCell<Option<Box<TxState>>> = const { RefCell::new(None) };
 }
 
+#[cfg(not(feature = "simulation"))]
 pub fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     TX.with(|tx| {
         let mut b = tx.borrow_mut();
         f(b.as_mut().expect("no active transaction"))
     })
+}
+
+#[cfg(feature = "simulation")]
+pub fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_tx_store();
+    let mut map = store.lock().unwrap();
+    let state = map.get_mut(&tid).expect("no sim state for thread");
+    f(state.as_mut().expect("no active transaction"))
+}
+
+#[cfg(not(feature = "simulation"))]
+pub fn tx_active() -> bool {
+    TX.with(|tx| tx.borrow().is_some())
+}
+
+#[cfg(feature = "simulation")]
+pub fn tx_active() -> bool {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_tx_store();
+    let map = store.lock().unwrap();
+    map.get(&tid).map_or(false, |s| s.is_some())
+}
+
+#[cfg(not(feature = "simulation"))]
+pub fn flush_tx() -> Option<Box<TxState>> { TX.with(|tx| tx.borrow_mut().take()) }
+
+#[cfg(feature = "simulation")]
+pub fn flush_tx() -> Option<Box<TxState>> {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_tx_store();
+    let mut map = store.lock().unwrap();
+    map.get_mut(&tid).and_then(|s| s.take())
 }
 
 /// Global abort counter, incremented on every TM abort across all backends.
@@ -174,12 +216,10 @@ pub fn update_read_write_stats(read_len: usize, write_len: usize) {
     TM_TOTAL_READS.fetch_add(r, Ordering::Relaxed);
     TM_TOTAL_WRITES.fetch_add(w, Ordering::Relaxed);
     TM_COMMIT_COUNT.fetch_add(1, Ordering::Relaxed);
-    // max
     let mut cur = TM_MAX_READ_SET.load(Ordering::Relaxed);
     while r > cur { match TM_MAX_READ_SET.compare_exchange_weak(cur, r, Ordering::Relaxed, Ordering::Relaxed) { Ok(_) => break, Err(v) => cur = v, } }
     cur = TM_MAX_WRITE_SET.load(Ordering::Relaxed);
     while w > cur { match TM_MAX_WRITE_SET.compare_exchange_weak(cur, w, Ordering::Relaxed, Ordering::Relaxed) { Ok(_) => break, Err(v) => cur = v, } }
-    // min
     let mut cur_min = TM_MIN_READ_SET.load(Ordering::Relaxed);
     while r < cur_min { match TM_MIN_READ_SET.compare_exchange_weak(cur_min, r, Ordering::Relaxed, Ordering::Relaxed) { Ok(_) => break, Err(v) => cur_min = v, } }
     cur_min = TM_MIN_WRITE_SET.load(Ordering::Relaxed);
@@ -196,12 +236,6 @@ pub fn reset_tm_stats() {
     TM_MIN_WRITE_SET.store(u64::MAX, Ordering::Relaxed);
     TM_ABORT_COUNT.store(0, Ordering::Relaxed);
 }
-
-pub fn tx_active() -> bool {
-    TX.with(|tx| tx.borrow().is_some())
-}
-
-pub fn flush_tx() -> Option<Box<TxState>> { TX.with(|tx| tx.borrow_mut().take()) }
 
 // ── Commit helpers ──────────────────────────────────────
 
@@ -221,9 +255,6 @@ pub fn validate_read_set(read_set: &[(usize, u64)]) -> bool {
 }
 
 pub fn unlock_indices(idxs: &[usize]) {
-    // Dedup: lock aliasing (two addresses → same lock index) causes
-    // duplicates in WT/WBETL locked_addrs.  Each lock must be released
-    // exactly once or the version counter is inflated.
     let mut deduped: Vec<usize> = idxs.to_vec();
     deduped.sort_unstable();
     deduped.dedup();
@@ -238,7 +269,11 @@ fn do_init() {
     if INIT_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
         addrspace::tm_region_init();
         locks();
-        G_CLOCK.store(0, Ordering::Release);
+    }
+    G_CLOCK.store(0, Ordering::Release);
+    #[cfg(feature = "simulation")]
+    for lock in locks().iter() {
+        lock.data.store(0, Ordering::Release);
     }
 }
 
@@ -263,12 +298,34 @@ fn do_exit() {
 // ── Public API (shared by all variants) ─────────────────
 pub fn tm_init() { tm_install_tmx_hook(); do_init(); }
 pub fn tm_exit() { do_exit(); }
-pub fn tm_init_thread() {}
+
+pub fn tm_init_thread() {
+    #[cfg(not(feature = "simulation"))]
+    TX.with(|tx| { *tx.borrow_mut() = None; });
+    #[cfg(feature = "simulation")]
+    {
+        let tid = runtime_core::current_sim_thread_id();
+        let store = sim_tx_store();
+        let mut map = store.lock().unwrap();
+        map.entry(tid).or_insert(None);
+    }
+}
+
 pub fn tm_exit_thread() {}
 
+#[cfg(not(feature = "simulation"))]
 pub fn tm_begin() {
     let start_ver = gc_snapshot();
     TX.with(|tx| { *tx.borrow_mut() = Some(Box::new(TxState::new(start_ver))); });
+}
+
+#[cfg(feature = "simulation")]
+pub fn tm_begin() {
+    let start_ver = gc_snapshot();
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_tx_store();
+    let mut map = store.lock().unwrap();
+    *map.get_mut(&tid).expect("no sim state for thread") = Some(Box::new(TxState::new(start_ver)));
 }
 
 // ── Macros for public API wrappers ──────────────────────
@@ -276,3 +333,35 @@ pub fn tm_begin() {
 macro_rules! def_read  { ($n:ident, $t:ty) => { #[inline] pub fn $n(addr: *mut $t) -> $t { read_word::<$t>(addr as usize) } }; }
 #[macro_export]
 macro_rules! def_write { ($n:ident, $t:ty) => { #[inline] pub fn $n(addr: *mut $t, val: $t) { write_word::<$t>(addr as usize, val); } }; }
+
+// ── Simulation-only API ──────────────────────────────────
+#[cfg(feature = "simulation")]
+pub mod sim {
+    use super::*;
+
+    pub fn set_thread_id(id: u64) {
+        runtime_core::set_sim_thread_id(id);
+    }
+
+    pub fn clear_thread_id() {
+        runtime_core::clear_sim_thread_id();
+    }
+
+    pub fn snapshot_states() -> HashMap<u64, Option<Box<TxState>>> {
+        let store = sim_tx_store();
+        let map = store.lock().unwrap();
+        map.clone()
+    }
+
+    pub fn restore_states(states: HashMap<u64, Option<Box<TxState>>>) {
+        let store = sim_tx_store();
+        let mut map = store.lock().unwrap();
+        *map = states;
+    }
+
+    pub fn reset() {
+        let store = sim_tx_store();
+        let mut map = store.lock().unwrap();
+        map.clear();
+    }
+}
