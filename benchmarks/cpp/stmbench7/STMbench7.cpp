@@ -5,12 +5,12 @@
 
 #include "expli_tm_api/tm_api.hpp"
 #include "expli_tm_api/tm_concurrent_map.hpp"
+#include "expli_tm_api/tm_treap_multimap.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
 #include <random>
 #include <set>
 #include <thread>
@@ -118,8 +118,8 @@ static expli::ts_map<int,int> g_baById;
 static expli::ts_map<int,int> g_cpById;
 static expli::ts_map<int,int> g_apById;
 static expli::ts_map<int,int> g_docById;
-static expli::ts_multimap<int,int> g_cpByDate;
-static expli::ts_multimap<int,int> g_apByDate;
+static expli::tm_treap_multimap<int,int> g_cpByDate;
+static expli::tm_treap_multimap<int,int> g_apByDate;
 
 // ── Init ─────────────────────────────────────────────────────────
 static void init_data() {
