@@ -208,8 +208,11 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
 
     let tv = val.to_typed();
     with_tx(|tx| {
-        tx.write_set.insert(addr, tv.clone());
-        tx.write_backs.push(tv.into_write_back(addr));
+        use std::collections::hash_map::Entry;
+        if let Entry::Vacant(e) = tx.write_set.entry(addr) {
+            e.insert(tv.clone());
+            tx.write_backs.push(tv.into_write_back(addr));
+        }
     });
 }
 

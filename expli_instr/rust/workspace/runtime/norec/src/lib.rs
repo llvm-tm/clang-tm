@@ -175,7 +175,6 @@ fn validate_impl(tx: &mut TxState) -> Option<u64> {
 fn read_word<T: Primitive>(addr: usize) -> T {
     fence(Ordering::SeqCst);
     if !tx_active() {
-        // Outside any TX — raw read
         return unsafe { (addr as *const T).read() };
     }
     let sz = core::mem::size_of::<T>() as u8;
@@ -188,7 +187,6 @@ fn read_word<T: Primitive>(addr: usize) -> T {
                 if esz == sz {
                     return Some(T::from_typed(&e.value));
                 }
-                // Type interchange fallback
             }
         }
         None
@@ -197,16 +195,33 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         return v;
     }
 
-    // Phase 2: memory read with validation loop
+    // Phase 2: memory read with double-check torn-read protection.
+    // Matches the C++ NOrec pattern: read clock, read value, re-read clock.
+    // If the clock changed, a writer was active and the value may be torn.
     loop {
-        let val_u64 = read_mem_val(addr, sz);
-        let val = unsafe { (addr as *const T).read() };
+        let (clock_before, val_u64) = loop {
+            let cb = GLOBAL_LOCK.load(Ordering::Acquire);
+            if cb & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let v = read_mem_val(addr, sz);
+            let ca = GLOBAL_LOCK.load(Ordering::Acquire);
+            if ca == cb {
+                break (cb, v);
+            }
+        };
+        let val: T = match sz {
+            1 => T::from_typed(&TypedValue::U8(val_u64 as u8)),
+            2 => T::from_typed(&TypedValue::U16(val_u64 as u16)),
+            4 => T::from_typed(&TypedValue::U32(val_u64 as u32)),
+            8 => T::from_typed(&TypedValue::U64(val_u64)),
+            _ => unreachable!(),
+        };
 
         let snapshot = with_tx(|tx| tx.snapshot);
-        let gl = GLOBAL_LOCK.load(Ordering::Acquire);
 
-        if gl == snapshot {
-            // Clock stable — install read-set entry
+        if clock_before == snapshot {
             with_tx(|tx| {
                 tx.read_set.push(ReadEntry {
                     addr,
@@ -217,14 +232,12 @@ fn read_word<T: Primitive>(addr: usize) -> T {
             return val;
         }
 
-        // Clock changed — validate all reads
         with_tx(|tx| {
             match validate_impl(tx) {
                 Some(s) => tx.snapshot = s,
                 None => std::panic::panic_any(TmxAbort),
             }
         });
-        // Loop back to re-read this address with the new snapshot
     }
 }
 
@@ -241,27 +254,24 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
 
     with_tx(|tx| {
         tx.read_only = false;
-        tx.write_backs.push(tv.clone().into_write_back(addr));
 
         // Scan from end for existing entry at this address
         for i in (0..tx.write_set.len()).rev() {
             if tx.write_set[i].addr == addr {
                 let esz = byte_size_of_tv(&tx.write_set[i].value);
                 if esz == sz {
-                    // Same size: update in-place
                     tx.write_set[i].value = tv;
                     return;
                 }
                 if esz >= sz {
-                    // Wider entry already covers this — skip
                     return;
                 }
-                // Narrower entry — fall through to add new entry
                 break;
             }
         }
 
-        tx.write_set.push(WriteEntry { addr, value: tv });
+        tx.write_set.push(WriteEntry { addr, value: tv.clone() });
+        tx.write_backs.push(tv.into_write_back(addr));
     });
 }
 
