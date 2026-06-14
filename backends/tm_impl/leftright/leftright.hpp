@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <csetjmp>
 #include <cstdint>
@@ -262,12 +263,14 @@ inline bool commit() {
 inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
     TM_ASSERT(tx && tx->active, "leftright read: no active tx");
 
-#ifdef LLVM_TM_PLUGIN
+    // Check write set first — own writes must be visible
+    auto wit = tx->write_set.find(addr);
+    if (wit != tx->write_set.end()) {
+        return wit->second.new_val;
+    }
+
     if (!stm::isTMAddress(addr))
         return read_value_from_addr(addr, sz);
-#else
-    TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
-#endif
 
     any_type_t val = read_value_from_addr(addr, sz);
 
@@ -293,12 +296,10 @@ inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz
 
     tx->read_only = false;
 
-#ifdef LLVM_TM_PLUGIN
     if (!stm::isTMAddress(addr)) {
         write_value_to_addr(addr, val, sz);
         return;
     }
-#endif
 
     // In queue mode with auto-wait (no concurrent TXes), writes can be
     // applied directly instead of buffered.  But the backend cannot

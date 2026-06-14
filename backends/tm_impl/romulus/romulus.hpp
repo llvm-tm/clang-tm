@@ -1,10 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -30,16 +32,21 @@ using stm::write_value_to_addr;
 // ── jmpbuf (defined in runtime) ─────────────────────────────────
 extern __thread sigjmp_buf *jmpbuf_ptr;
 
-// ── Log entries ──────────────────────────────────────────────────
+// ── Version table (separate from data, maps address→version) ───
+constexpr size_t VERSION_TABLE_SIZE = 1 << 20;
+
+inline size_t version_index(void *addr) {
+    return (reinterpret_cast<uintptr_t>(addr) >> 3) & (VERSION_TABLE_SIZE - 1);
+}
+
+// ── Log entry ───────────────────────────────────────────────────
 struct WriteEntry {
     ValueType type;
     void *addr;
-    any_type_t old_val;
     any_type_t new_val;
 };
 
-// ── Transaction ──────────────────────────────────────────────────
-// Romulus uses a commit-time CAS approach with redo logging.
+// ── Transaction ─────────────────────────────────────────────────
 struct Transaction {
     uint64_t id = 0;
     uint64_t timestamp = 0;
@@ -48,7 +55,6 @@ struct Transaction {
     int abort_count = 0;
     bool is_retry = false;
 
-    // Write-set doubles as redo log
     std::unordered_map<void *, WriteEntry> write_set;
 
     void reset() {
@@ -68,11 +74,18 @@ extern std::atomic<uint64_t> g_global_clock;
 extern std::atomic<uint64_t> thr_counter;
 extern __thread Transaction *current_tx;
 extern std::atomic<uint64_t> g_tm_abort_count;
+extern std::atomic<uint64_t> *g_version_table;
+extern std::atomic<uint64_t> g_commit_lock;
 
 // ── Init ─────────────────────────────────────────────────────────
 inline void init() {
     g_global_clock.store(1, std::memory_order_release);
     thr_counter.store(1, std::memory_order_release);
+    if (!g_version_table) {
+        g_version_table = new std::atomic<uint64_t>[VERSION_TABLE_SIZE];
+        for (size_t i = 0; i < VERSION_TABLE_SIZE; i++)
+            g_version_table[i].store(0, std::memory_order_release);
+    }
 }
 
 inline void exit() {}
@@ -125,13 +138,13 @@ inline void abort_tx(const char *loc = "") {
     siglongjmp(*jmpbuf_ptr, 1);
 }
 
-// ── Commit: lock-free CAS redo ──────────────────────────────────
+// ── Commit: lock-based redo with version-table validation ──────
 inline bool commit() {
     auto *tx = current_tx;
     if (!tx->active) return true;
 
-    if (!tx->read_only) {
-        // Collect sorted write addresses for deadlock-free CAS
+    if (!tx->read_only && !tx->write_set.empty()) {
+        // Collect sorted write addresses for deadlock-free version check
         std::vector<void *> addrs;
         addrs.reserve(tx->write_set.size());
         for (auto &it : tx->write_set)
@@ -139,39 +152,49 @@ inline bool commit() {
         std::sort(addrs.begin(), addrs.end(),
                   [](void *a, void *b) { return (uintptr_t)a < (uintptr_t)b; });
 
-        // Phase 1: Acquire ownership via CAS on per-address version slots.
-        // We use atomic<uint64_t> at each address's version slot.
-        // If the version changed since our snapshot, abort.
+        // Phase 1: Acquire commit lock
+        while (g_commit_lock.load(std::memory_order_acquire) != 0 ||
+               g_commit_lock.exchange(1, std::memory_order_acquire) != 0) {
+            std::this_thread::yield();
+        }
+
+        // Phase 2: Validate
+        bool valid = true;
         for (void *addr : addrs) {
-            auto &w = tx->write_set[addr];
-            uint64_t expected = tx->timestamp;
-            uint64_t desired = tx->id | (1ULL << 63); // owned by tx
-            // In a full implementation, we'd CAS on a version counter
-            // stored alongside each address.  For this implementation
-            // we use a simplified approach: atomic CAS on the address
-            // itself to signal ownership.
-            std::atomic<uint64_t> *slot =
-                reinterpret_cast<std::atomic<uint64_t> *>(addr);
-            uint64_t cur = slot->load(std::memory_order_acquire);
-            if (cur != expected && (cur & (1ULL << 63)) == 0) {
-                // Version changed — conflict
-                abort_tx("version_changed");
+            size_t idx = version_index(addr);
+            uint64_t ver = g_version_table[idx].load(std::memory_order_acquire);
+            if (ver > tx->timestamp) {
+                valid = false;
+                fprintf(stderr, "ROMULUS_VALFAIL: ts=%lu ver=%lu idx=%zu addr=%p\n",
+                        (unsigned long)tx->timestamp, (unsigned long)ver, idx, addr);
+                break;
             }
         }
 
-        // Phase 2: Increment global clock for ordering
+        if (!valid) {
+            g_commit_lock.store(0, std::memory_order_release);
+            abort_tx("version_changed");
+            return false;
+        }
+
+        // Phase 3: Increment global clock
         uint64_t commit_ts = increment_clock();
 
-        // Phase 3: CAS-based write-back for each address
+        // Phase 4: Write-back
         for (void *addr : addrs) {
             auto &w = tx->write_set[addr];
-            std::atomic<uint64_t> *slot =
-                reinterpret_cast<std::atomic<uint64_t> *>(addr);
-            // Write the new value
             write_value_to_addr(addr, w.new_val, w.type);
-            // Release ownership with new version
-            slot->store(commit_ts, std::memory_order_release);
         }
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+
+        // Phase 5: Update version table
+        for (void *addr : addrs) {
+            size_t idx = version_index(addr);
+            g_version_table[idx].store(commit_ts, std::memory_order_release);
+        }
+
+        // Release commit lock
+        g_commit_lock.store(0, std::memory_order_release);
     }
 
     stm::tm_token_release();
@@ -184,13 +207,15 @@ inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
 
 	TM_ASSERT(tx && tx->active, "romulus read: no active tx");
 
-#ifdef LLVM_TM_PLUGIN
+	// Check write set first — own writes must be visible
+	auto wit = tx->write_set.find(addr);
+	if (wit != tx->write_set.end()) {
+		return wit->second.new_val;
+	}
+
 	if (!stm::isTMAddress(addr)) {
 		return read_value_from_addr(addr, sz);
 	}
-#else
-	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
-#endif
 
 	return read_value_from_addr(addr, sz);
 }
@@ -199,13 +224,9 @@ inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
 inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz) {
     tx->read_only = false;
 
-    // Capture old value for potential rollback
-    any_type_t old_val = read_value_from_addr(addr, sz);
-
     WriteEntry entry;
     entry.type = sz;
     entry.addr = addr;
-    entry.old_val = old_val;
     entry.new_val = val;
     tx->write_set[addr] = entry;
 }
