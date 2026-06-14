@@ -2,6 +2,8 @@
 // Runtime dispatching between TM backends in simulation mode.
 // Each registered backend exports the same simulation API.
 
+use std::collections::HashMap;
+
 /// Available TM backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
@@ -149,12 +151,67 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_write_u64(addr, val),
         }
     }
+
+    /// Serialize the backend's per-thread state to a byte blob.
+    pub fn sim_snapshot_bytes(&self) -> Vec<u8> {
+        match self {
+            Backend::Norec => {
+                let states = runtime_norec::sim::snapshot_states();
+                bincode::serialize(&states).unwrap_or_default()
+            }
+            Backend::Tl2 => {
+                let states = runtime_tl2::sim::snapshot_states();
+                bincode::serialize(&states).unwrap_or_default()
+            }
+            Backend::Tinystm => {
+                let states = runtime_tinystm::sim::snapshot_states();
+                bincode::serialize(&states).unwrap_or_default()
+            }
+        }
+    }
+
+    /// Deserialize and restore the backend's per-thread state from a byte blob.
+    pub fn sim_restore_bytes(&self, data: &[u8]) -> Result<(), String> {
+        match self {
+            Backend::Norec => {
+                let states: HashMap<u64, Option<Box<runtime_norec::TxState>>> =
+                    bincode::deserialize(data)
+                        .map_err(|e| format!("deserialize norec state: {}", e))?;
+                runtime_norec::sim::restore_states(states);
+                Ok(())
+            }
+            Backend::Tl2 => {
+                let states: HashMap<u64, Option<Box<runtime_tl2::TxState>>> =
+                    bincode::deserialize(data)
+                        .map_err(|e| format!("deserialize tl2 state: {}", e))?;
+                runtime_tl2::sim::restore_states(states);
+                Ok(())
+            }
+            Backend::Tinystm => {
+                let states: HashMap<u64, Option<Box<runtime_tinystm::TxState>>> =
+                    bincode::deserialize(data)
+                        .map_err(|e| format!("deserialize tinystm state: {}", e))?;
+                runtime_tinystm::sim::restore_states(states);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn is_norec(&self) -> bool { matches!(self, Backend::Norec) }
+    pub fn is_tl2(&self) -> bool { matches!(self, Backend::Tl2) }
+    pub fn is_tinystm(&self) -> bool { matches!(self, Backend::Tinystm) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::OnceLock;
+    use std::sync::atomic::AtomicU64;
+
+    fn alloc_tid() -> u64 {
+        static NEXT: AtomicU64 = AtomicU64::new(1000);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
 
     fn mmap_tm_region() {
         static MMAP: OnceLock<()> = OnceLock::new();
@@ -177,9 +234,10 @@ mod tests {
     }
 
     fn run_simple_tx(b: Backend) {
+        let tid = alloc_tid();
         mmap_tm_region();
         b.init();
-        b.sim_set_thread_id(0);
+        b.sim_set_thread_id(tid);
         b.init_thread();
 
         let addr = 0x7f00_0000_8000 as *mut u64;
@@ -195,7 +253,7 @@ mod tests {
         b.sim_clear_thread_id();
 
         // Verify value persisted
-        b.sim_set_thread_id(0);
+        b.sim_set_thread_id(tid);
         b.begin();
         let v = b.read_u64(addr);
         assert_eq!(v, 42, "value should persist after commit");
@@ -239,9 +297,10 @@ mod tests {
 
     #[test]
     fn test_norec_commit_without_tx() {
+        let tid = alloc_tid();
         mmap_tm_region();
         Backend::Norec.init();
-        Backend::Norec.sim_set_thread_id(0);
+        Backend::Norec.sim_set_thread_id(tid);
         Backend::Norec.init_thread();
         assert!(Backend::Norec.commit());
         Backend::Norec.sim_clear_thread_id();
@@ -249,9 +308,10 @@ mod tests {
 
     #[test]
     fn test_norec_abort_without_tx() {
+        let tid = alloc_tid();
         mmap_tm_region();
         Backend::Norec.init();
-        Backend::Norec.sim_set_thread_id(0);
+        Backend::Norec.sim_set_thread_id(tid);
         Backend::Norec.init_thread();
         Backend::Norec.abort();
         Backend::Norec.sim_clear_thread_id();
@@ -259,10 +319,11 @@ mod tests {
 
     #[test]
     fn test_norec_read_write_u8() {
+        let tid = alloc_tid();
         mmap_tm_region();
         let b = Backend::Norec;
         b.init();
-        b.sim_set_thread_id(0);
+        b.sim_set_thread_id(tid);
         b.init_thread();
         let addr = 0x7f00_0000_9000 as *mut u8;
         unsafe { addr.write(0); }
@@ -283,9 +344,10 @@ mod tests {
 
     #[test]
     fn test_tl2_commit_without_tx() {
+        let tid = alloc_tid();
         mmap_tm_region();
         Backend::Tl2.init();
-        Backend::Tl2.sim_set_thread_id(0);
+        Backend::Tl2.sim_set_thread_id(tid);
         Backend::Tl2.init_thread();
         assert!(Backend::Tl2.commit());
         Backend::Tl2.sim_clear_thread_id();
@@ -293,9 +355,10 @@ mod tests {
 
     #[test]
     fn test_tl2_abort_without_tx() {
+        let tid = alloc_tid();
         mmap_tm_region();
         Backend::Tl2.init();
-        Backend::Tl2.sim_set_thread_id(0);
+        Backend::Tl2.sim_set_thread_id(tid);
         Backend::Tl2.init_thread();
         Backend::Tl2.abort();
         Backend::Tl2.sim_clear_thread_id();
@@ -303,10 +366,11 @@ mod tests {
 
     #[test]
     fn test_tl2_read_write_u16() {
+        let tid = alloc_tid();
         mmap_tm_region();
         let b = Backend::Tl2;
         b.init();
-        b.sim_set_thread_id(0);
+        b.sim_set_thread_id(tid);
         b.init_thread();
         let addr = 0x7f00_0000_A000 as *mut u16;
         unsafe { addr.write(0); }
@@ -322,10 +386,11 @@ mod tests {
 
     #[test]
     fn test_tinystm_simple_tx() {
+        let tid = alloc_tid();
         mmap_tm_region();
         let b = Backend::Tinystm;
         b.init();
-        b.sim_set_thread_id(0);
+        b.sim_set_thread_id(tid);
         b.init_thread();
         let addr = 0x7f00_0000_D000 as *mut u64;
         unsafe { addr.write(0); }
@@ -337,7 +402,7 @@ mod tests {
         b.sim_clear_thread_id();
 
         // Read back
-        b.sim_set_thread_id(0);
+        b.sim_set_thread_id(tid);
         b.begin();
         let v = b.read_u64(addr);
         assert_eq!(v, 77, "value should persist after commit");
@@ -351,8 +416,9 @@ mod tests {
     fn test_norec_and_tl2_produce_identical_commits() {
         mmap_tm_region();
         for b in [Backend::Norec, Backend::Tl2, Backend::Tinystm] {
+            let tid = alloc_tid();
             b.init();
-            b.sim_set_thread_id(0);
+            b.sim_set_thread_id(tid);
             b.init_thread();
             let addr = 0x7f00_0000_B000 as *mut u64;
             unsafe { addr.write(0); }
@@ -369,12 +435,14 @@ mod tests {
     fn test_thread_isolation() {
         mmap_tm_region();
         for b in [Backend::Norec, Backend::Tl2, Backend::Tinystm] {
+            let tid0 = alloc_tid();
+            let tid1 = alloc_tid();
             b.init();
             let addr = 0x7f00_0000_C000 as *mut u64;
             unsafe { addr.write(0); }
 
             // Thread 0
-            b.sim_set_thread_id(0);
+            b.sim_set_thread_id(tid0);
             b.init_thread();
             b.begin();
             b.write_u64(addr, 10);
@@ -382,7 +450,7 @@ mod tests {
             b.sim_clear_thread_id();
 
             // Thread 1 (starts after T0 committed, so sees 10)
-            b.sim_set_thread_id(1);
+            b.sim_set_thread_id(tid1);
             b.init_thread();
             b.begin();
             let v = b.read_u64(addr);
@@ -397,15 +465,16 @@ mod tests {
     fn test_sim_reset_clears_state() {
         mmap_tm_region();
         for b in [Backend::Norec, Backend::Tl2, Backend::Tinystm] {
+            let tid = alloc_tid();
             b.init();
-            b.sim_set_thread_id(0);
+            b.sim_set_thread_id(tid);
             b.init_thread();
             b.begin();
             assert!(b.commit(), "{}: first commit", b.name());
-            b.sim_clear_thread_id();
             // After sim_reset, thread 0's state should be gone
             b.sim_reset();
-            b.sim_set_thread_id(0);
+            b.sim_clear_thread_id();
+            b.sim_set_thread_id(tid);
             // After reset, need to re-init
             b.init_thread();
             b.begin();

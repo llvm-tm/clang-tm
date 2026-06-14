@@ -22,6 +22,6 @@ pub use wbetl::*;
 #[cfg(feature = "wt")]
 pub use wt::*;
 
-pub use common::{tm_init, tm_exit, tm_begin, tm_init_thread, tm_exit_thread, tm_abort_count};
+pub use common::{tm_init, tm_exit, tm_begin, tm_init_thread, tm_exit_thread, tm_abort_count, TxState, WriteEntry};
 #[cfg(feature = "simulation")]
 pub use common::sim;

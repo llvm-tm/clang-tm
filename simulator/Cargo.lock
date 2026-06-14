@@ -173,6 +173,7 @@ name = "runtime-core"
 version = "0.1.0"
 dependencies = [
  "addrspace",
+ "serde",
 ]
 
 [[package]]
@@ -180,6 +181,7 @@ name = "runtime-norec"
 version = "0.1.0"
 dependencies = [
  "runtime-core",
+ "serde",
 ]
 
 [[package]]
@@ -188,6 +190,7 @@ version = "0.1.0"
 dependencies = [
  "addrspace",
  "runtime-core",
+ "serde",
 ]
 
 [[package]]
@@ -195,6 +198,7 @@ name = "runtime-tl2"
 version = "0.1.0"
 dependencies = [
  "runtime-core",
+ "serde",
 ]
 
 [[package]]

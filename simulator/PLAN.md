@@ -251,8 +251,8 @@ Environment variable `TM_TRACE_PATH=/tmp/mytrace.raw`. When set, the C++ hook la
 | **P3** | Simulator scaffold: thread pool, per-thread queues, one-at-a-time scheduler | `simulator/src/scheduler.rs`, `simulator/src/thread_pool.rs` |
 | **P4** | Trace replay: feed events through scheduler → actual backend calls | `simulator/src/replay.rs` |
 | **P5** | Verifier: shadow memory, double-free, out-of-TX, opacity | `simulator/src/verifier.rs` |
-| **P6** | Deadlock detector: wait-for graph, cycle detection | `simulator/src/deadlock.rs` |
-| **P7** | Checkpoint/restore with backend state serialization | `simulator/src/checkpoint.rs` |
+| **P6** | **DONE** Deadlock detector: wait-for graph, cycle detection (per-thread retry tracking, conflict-graph DFS, report) | `simulator/src/deadlock.rs` |
+| **P7** | **DONE** Checkpoint/restore with backend state serialization via bincode (opaque blob per backend, save/load file, snapshot_engine/restore_engine) | `simulator/src/checkpoint.rs` |
 | **P8** | Add simulation feature to remaining backends (tl2, tinystm, swisstm, ...) | all `runtime-*/src/lib.rs` |
 | **P9** | Trace sources: LLVM --emit-tm-trace + C++ TM_TRACE_PATH hook | `plugin/passes/*`, `backends/tm_impl/common/tm_hooks.cpp` |
 

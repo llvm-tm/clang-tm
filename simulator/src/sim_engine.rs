@@ -7,14 +7,24 @@
 //
 // The engine also runs a Verifier alongside the backend to catch
 // memory violations (double-free, use-after-free, out-of-TX
-// accesses) and check money conservation.
+// accesses), check money conservation, detect livelock cycles,
+// and checkpoint/restore simulation state.
 
 use crate::backend::Backend;
+use crate::checkpoint::{self, Checkpoint};
+use crate::deadlock::DeadlockDetector;
 use crate::event::{Event, EventKind};
 use crate::verifier::Verifier;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicU64;
+
+fn alloc_tid_base() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1_000_000);
+    NEXT.fetch_add(10_000, std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Statistics collected during replay.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ReplayStats {
     pub total_events: u64,
     pub commits: u64,
@@ -36,8 +46,12 @@ pub struct SimEngine {
     pub stats: ReplayStats,
     pub verifier: Verifier,
     pub backend: Backend,
-    in_tx: std::collections::HashMap<u64, bool>,
-    seen_threads: std::collections::HashSet<u64>,
+    pub deadlock: DeadlockDetector,
+    base_tid: u64,
+    in_tx: HashMap<u64, bool>,
+    seen_threads: HashSet<u64>,
+    current_write_set: HashMap<u64, Vec<u64>>,
+    events_processed: u64,
 }
 
 impl SimEngine {
@@ -46,9 +60,17 @@ impl SimEngine {
             stats: ReplayStats::default(),
             verifier: Verifier::new(),
             backend,
-            in_tx: std::collections::HashMap::new(),
-            seen_threads: std::collections::HashSet::new(),
+            deadlock: DeadlockDetector::new(10),
+            base_tid: alloc_tid_base(),
+            in_tx: HashMap::new(),
+            seen_threads: HashSet::new(),
+            current_write_set: HashMap::new(),
+            events_processed: 0,
         }
+    }
+
+    fn btid(&self, event_tid: u64) -> u64 {
+        self.base_tid + event_tid
     }
 
     /// Initialize the backend and back the TM address space.
@@ -70,11 +92,12 @@ impl SimEngine {
         }
 
         let b = self.backend;
+        let tid0 = self.btid(0);
         b.init();
-        b.sim_set_thread_id(0);
+        b.sim_set_thread_id(tid0);
         b.init_thread();
         b.sim_clear_thread_id();
-        self.seen_threads.insert(0);
+        self.seen_threads.insert(tid0);
     }
 
     /// Ensure a simulated thread has been initialized in the backend.
@@ -90,7 +113,7 @@ impl SimEngine {
     /// Process a single event.
     pub fn process_event(&mut self, event: &Event) {
         self.stats.total_events += 1;
-        let tid = event.thread_id as u64;
+        let tid = self.btid(event.thread_id as u64);
 
         self.ensure_thread(tid);
         let b = self.backend;
@@ -104,10 +127,25 @@ impl SimEngine {
                 event.timestamp, event.thread_id, why
             );
         }
+
+        // Run deadlock check periodically
+        self.events_processed += 1;
+        if self.events_processed % 100 == 0 {
+            let reports = self.deadlock.check();
+            for r in &reports {
+                eprintln!(
+                    "  ⚠ LIVELOCK CYCLE: threads [{}] at addrs [{}] — {} retries",
+                    r.cycle.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "),
+                    r.conflicting_addrs.iter().map(|a| format!("0x{:x}", a)).collect::<Vec<_>>().join(", "),
+                    r.retries,
+                );
+            }
+        }
     }
 
     fn dispatch_event(&mut self, event: &Event) -> Result<(), String> {
         let tid = event.thread_id as u64;
+        let btid = self.btid(tid);
         let b = self.backend;
 
         match &event.kind {
@@ -115,18 +153,22 @@ impl SimEngine {
                 self.verifier.tx_begin(tid);
                 b.begin();
                 self.in_tx.insert(tid, true);
+                self.current_write_set.insert(tid, Vec::new());
                 Ok(())
             }
             EventKind::TxEnd => {
-                let ok = b.commit();
                 self.in_tx.insert(tid, false);
+                let ws = self.current_write_set.remove(&tid).unwrap_or_default();
+                let ok = b.commit();
                 if ok {
                     self.stats.commits += 1;
                     self.verifier.tx_commit(tid);
+                    self.deadlock.record_commit(btid, &ws);
                     Ok(())
                 } else {
                     self.stats.aborts += 1;
                     self.verifier.tx_abort(tid);
+                    self.deadlock.record_abort(btid, &ws);
                     b.abort();
                     Err("commit failed".into())
                 }
@@ -171,6 +213,7 @@ impl SimEngine {
 
                 if in_tx {
                     self.verifier.record_value(*addr, *val);
+                    self.current_write_set.entry(tid).or_default().push(*addr);
                 }
 
                 Ok(())
@@ -206,11 +249,44 @@ impl SimEngine {
         }
     }
 
+    /// Create a snapshot of the full engine state for checkpointing.
+    pub fn snapshot(&self, events_remaining: &[Event]) -> Checkpoint {
+        checkpoint::snapshot_engine(
+            &self.backend,
+            events_remaining,
+            self.events_processed,
+            &self.stats,
+            &self.verifier,
+            &self.in_tx,
+            &self.seen_threads,
+            self.base_tid,
+        )
+    }
+
+    /// Restore engine state from a checkpoint.
+    pub fn restore(&mut self, cp: &Checkpoint) -> Result<(), String> {
+        let (_remaining, stats, verifier, in_tx, seen_threads, base_tid) =
+            checkpoint::restore_engine(cp, &self.backend)?;
+        self.stats = stats;
+        self.verifier = verifier;
+        self.in_tx = in_tx;
+        self.seen_threads = seen_threads;
+        self.base_tid = base_tid;
+        self.deadlock.reset();
+        Ok(())
+    }
+
     /// Reset state between scenarios.
     pub fn reset(&mut self) {
-        self.backend.sim_reset();
+        for &tid in self.seen_threads.iter() {
+            self.backend.sim_set_thread_id(tid);
+            self.backend.sim_reset();
+            self.backend.sim_clear_thread_id();
+        }
         self.in_tx.clear();
         self.seen_threads.clear();
         self.verifier.reset();
+        self.deadlock.reset();
+        self.current_write_set.clear();
     }
 }

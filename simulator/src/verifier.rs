@@ -10,14 +10,14 @@
 use std::collections::HashMap;
 
 /// An allocation in the shadow memory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Allocation {
     pub size: u64,
     pub is_freed: bool,
 }
 
 /// Simulation verifier.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Verifier {
     pub shadow: HashMap<u64, Allocation>,
     pub values: HashMap<u64, u64>,

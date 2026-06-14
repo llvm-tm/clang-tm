@@ -30,6 +30,7 @@ pub fn tm_install_tmx_hook() {
 // tm_commit() can be a safe function.  The safety contract is:
 //   - The address was obtained from a TmCell (valid, aligned, live)
 //   - commit() holds exclusive access (locks acquired, read-set validated)
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug)]
 pub enum WriteBack {
     U8(usize, u8),
@@ -72,6 +73,7 @@ impl WriteBack {
 }
 
 // ── TypedValue — type-safe write-set entry ──────────────
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug)]
 pub enum TypedValue {
     U8(u8),
@@ -240,6 +242,12 @@ pub fn clear_sim_thread_id() {
 #[cfg(feature = "simulation")]
 pub fn current_sim_thread_id() -> SimThreadId {
     SIM_THREAD_ID.with(|c| c.get().expect("sim_thread_id not set"))
+}
+
+/// Get the current simulated thread ID, or `None` if not set.
+#[cfg(feature = "simulation")]
+pub fn try_current_sim_thread_id() -> Option<SimThreadId> {
+    SIM_THREAD_ID.with(|c| c.get())
 }
 
 /// Generic per-thread state storage for simulation mode.
