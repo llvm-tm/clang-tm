@@ -416,3 +416,38 @@ fn test_unsupported_write_width_errors() {
     ];
     run_events(Backend::Norec, &events);
 }
+
+// ── TinySTM WBCTL: write-only address conflict ───────────
+// Regression test: C++ TinySTM WBCTL adds read-set entries for written
+// addresses so validate() catches version changes from concurrent writers.
+// Rust TinySTM WBCTL omitted this, allowing lost updates when a write-only
+// address was modified by another transaction.
+#[test]
+fn test_tinystm_write_only_conflict() {
+    // T0: read A, write B=100. T1: write B=200.
+    // T1 commits FIRST (advancing B's lock version).
+    // With the fix, T0 also adds B to read_set during write, so validation
+    // catches B's version change and aborts T0.
+    // Without the fix, T0 would commit (lost update).
+    let events = vec![
+        make_event(0, 0, 1, EventKind::ThreadSpawn(0)),
+        make_event(0, 1, 2, EventKind::ThreadSpawn(1)),
+        // Both begin at roughly the same "time"
+        make_event(1, 0, 3, EventKind::TxBegin),
+        make_event(1, 1, 4, EventKind::TxBegin),
+        // T0 reads A (adds A to read_set)
+        make_event(2, 0, 5, EventKind::Read { addr: 0x7f00_0000_8000, width: 8 }),
+        // T1 writes B=200 (adds B to read_set via write fix)
+        make_event(2, 1, 6, EventKind::Write { addr: 0x7f00_0000_9000, width: 8, val: 200 }),
+        // T0 writes B=100 (adds B to read_set via write fix)
+        make_event(3, 0, 7, EventKind::Write { addr: 0x7f00_0000_9000, width: 8, val: 100 }),
+        // T1 commits FIRST → writes B=200 to memory, advances B's lock version
+        make_event(3, 1, 8, EventKind::TxEnd),
+        // T0 commits → validates read_set: B's version changed → ABORT
+        make_event(4, 0, 9, EventKind::TxEnd),
+    ];
+    let engine = run_events(Backend::Tinystm, &events);
+    assert_eq!(engine.stats.commits, 1, "TinySTM: write-only address conflict → 1 commit");
+    assert_eq!(engine.stats.aborts, 1, "TinySTM: T0 aborts due to B's version change");
+    assert!(engine.verifier.violations.is_empty(), "no memory violations");
+}

@@ -25,8 +25,23 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
     let tv = val.to_typed();
     with_tx(|tx| {
-        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv.clone() });
-        tx.write_backs.push(tv.into_write_back(addr));
+        use std::collections::hash_map::Entry;
+        // Read current version so we can add a read-set entry.
+        // Matches C++ TinySTM WBCTL: write also creates a read-set entry
+        // so that validate() catches version changes from concurrent writers.
+        while is_locked(addr) { std::hint::spin_loop(); }
+        let version = read_version(addr);
+        if version > tx.start_version { std::panic::panic_any(TmxAbort); }
+        match tx.write_set.entry(addr) {
+            Entry::Vacant(e) => {
+                tx.write_backs.push(tv.clone().into_write_back(addr));
+                e.insert(WriteEntry { value: tv });
+            }
+            Entry::Occupied(mut e) => {
+                e.get_mut().value = tv;
+            }
+        }
+        tx.read_set.push((addr, version));
     });
 }
 
