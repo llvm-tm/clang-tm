@@ -16,34 +16,15 @@ pub struct Allocation {
     pub is_freed: bool,
 }
 
-/// A committed value record (for money conservation checks).
-#[derive(Debug, Clone)]
-pub struct CommittedValue {
-    pub initial: u64,
-    pub final_val: u64,
-}
-
 /// Simulation verifier.
 #[derive(Debug, Clone)]
 pub struct Verifier {
-    /// Shadow memory: addr → Allocation
     pub shadow: HashMap<u64, Allocation>,
-
-    /// Committed values at tracked addresses.
-    /// Set from initial_values in trace or from Write events.
     pub values: HashMap<u64, u64>,
-
-    /// Per-thread transaction depth (for nesting checks).
     pub tx_depth: HashMap<u64, u32>,
-
-    /// Violations detected.
     pub violations: Vec<String>,
-
-    /// Per-thread out-of-TX counters.
     pub reads_outside: u64,
     pub writes_outside: u64,
-
-    /// Abort counter.
     pub aborts: u64,
     pub commits: u64,
 }
@@ -62,20 +43,16 @@ impl Verifier {
         }
     }
 
-    /// Record the initial value of an address (from trace initial-values).
     pub fn set_initial_value(&mut self, addr: u64, val: u64) {
         self.values.entry(addr).or_insert(val);
     }
 
-    /// Check a read operation. Returns true if in-transaction, false otherwise.
     pub fn check_read(&mut self, tid: u64, addr: u64) -> bool {
         let depth = self.tx_depth.get(&tid).copied().unwrap_or(0);
         if depth == 0 {
             self.reads_outside += 1;
             return false;
         }
-
-        // Use-after-free check
         if let Some(alloc) = self.shadow.get(&addr) {
             if alloc.is_freed {
                 self.violations.push(format!(
@@ -87,15 +64,12 @@ impl Verifier {
         true
     }
 
-    /// Check a write operation. Returns true if in-transaction.
     pub fn check_write(&mut self, tid: u64, addr: u64, _val: u64) -> bool {
         let depth = self.tx_depth.get(&tid).copied().unwrap_or(0);
         if depth == 0 {
             self.writes_outside += 1;
             return false;
         }
-
-        // Use-after-free check
         if let Some(alloc) = self.shadow.get(&addr) {
             if alloc.is_freed {
                 self.violations.push(format!(
@@ -107,18 +81,20 @@ impl Verifier {
         true
     }
 
-    /// Track an allocation.
     pub fn alloc(&mut self, addr: u64, size: u64) {
-        if self.shadow.contains_key(&addr) {
-            self.violations.push(format!(
-                "RE-ALLOC of address 0x{:x} (already allocated)",
-                addr
-            ));
+        match self.shadow.get(&addr) {
+            Some(a) if !a.is_freed => {
+                self.violations.push(format!(
+                    "RE-ALLOC of address 0x{:x} (still live, size={})",
+                    addr, a.size
+                ));
+                return;
+            }
+            _ => {}
         }
         self.shadow.insert(addr, Allocation { size, is_freed: false });
     }
 
-    /// Track a free, checking for double-free or free-of-unallocated.
     pub fn free(&mut self, addr: u64) {
         match self.shadow.get_mut(&addr) {
             None => {
@@ -139,36 +115,30 @@ impl Verifier {
         }
     }
 
-    /// Called on TxBegin.
     pub fn tx_begin(&mut self, tid: u64) {
         *self.tx_depth.entry(tid).or_insert(0) += 1;
     }
 
-    /// Called on successful commit (returns true).
     pub fn tx_commit(&mut self, tid: u64) {
         let d = self.tx_depth.get_mut(&tid).expect("commit without begin");
         *d = d.saturating_sub(1);
         self.commits += 1;
     }
 
-    /// Called on abort.
     pub fn tx_abort(&mut self, tid: u64) {
         let d = self.tx_depth.get_mut(&tid).expect("abort without begin");
         *d = d.saturating_sub(1);
         self.aborts += 1;
     }
 
-    /// Record a committed value.
     pub fn record_value(&mut self, addr: u64, val: u64) {
         self.values.insert(addr, val);
     }
 
-    /// Compute money conservation: sum of all tracked values.
     pub fn total_value(&self) -> u64 {
         self.values.values().sum()
     }
 
-    /// Reset per-scenario state (counters survive across scenarios).
     pub fn reset(&mut self) {
         self.shadow.clear();
         self.values.clear();
@@ -178,7 +148,6 @@ impl Verifier {
         self.writes_outside = 0;
     }
 
-    /// Generate a final report.
     pub fn report(&self, initial_total: u64) -> Vec<String> {
         let mut lines = Vec::new();
 
@@ -218,7 +187,6 @@ impl Verifier {
             }
         }
 
-        // Per-thread nesting warnings
         for (&tid, &d) in &self.tx_depth {
             if d > 0 {
                 lines.push(format!("⚠ Thread {} still in transaction (depth={}) at end", tid, d));
@@ -228,3 +196,280 @@ impl Verifier {
         lines
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Transaction depth ──────────────────────────────────
+
+    #[test]
+    fn test_begin_commit_tracks_depth() {
+        let mut v = Verifier::new();
+        v.tx_begin(0);
+        assert_eq!(v.tx_depth.get(&0), Some(&1));
+        v.tx_commit(0);
+        assert_eq!(v.tx_depth.get(&0), Some(&0));
+        assert_eq!(v.commits, 1);
+    }
+
+    #[test]
+    fn test_begin_abort_tracks_depth() {
+        let mut v = Verifier::new();
+        v.tx_begin(0);
+        assert_eq!(v.tx_depth.get(&0), Some(&1));
+        v.tx_abort(0);
+        assert_eq!(v.tx_depth.get(&0), Some(&0));
+        assert_eq!(v.aborts, 1);
+    }
+
+    #[test]
+    fn test_multiple_threads_independent_depth() {
+        let mut v = Verifier::new();
+        v.tx_begin(0);
+        v.tx_begin(1);
+        v.tx_begin(1);
+        assert_eq!(v.tx_depth.get(&0), Some(&1));
+        assert_eq!(v.tx_depth.get(&1), Some(&2));
+        v.tx_commit(0);
+        v.tx_commit(1);
+        assert_eq!(v.tx_depth.get(&0), Some(&0));
+        assert_eq!(v.tx_depth.get(&1), Some(&1));
+        v.tx_commit(1);
+        assert_eq!(v.tx_depth.get(&1), Some(&0));
+    }
+
+    // ── Out-of-transaction detection ───────────────────────
+
+    #[test]
+    fn test_read_outside_tx_counted() {
+        let mut v = Verifier::new();
+        let in_tx = v.check_read(0, 0x1000);
+        assert!(!in_tx);
+        assert_eq!(v.reads_outside, 1);
+    }
+
+    #[test]
+    fn test_read_inside_tx_not_counted() {
+        let mut v = Verifier::new();
+        v.tx_begin(0);
+        let in_tx = v.check_read(0, 0x1000);
+        assert!(in_tx);
+        assert_eq!(v.reads_outside, 0);
+    }
+
+    #[test]
+    fn test_write_outside_tx_counted() {
+        let mut v = Verifier::new();
+        let in_tx = v.check_write(0, 0x1000, 42);
+        assert!(!in_tx);
+        assert_eq!(v.writes_outside, 1);
+    }
+
+    #[test]
+    fn test_write_inside_tx_not_counted() {
+        let mut v = Verifier::new();
+        v.tx_begin(0);
+        let in_tx = v.check_write(0, 0x1000, 42);
+        assert!(in_tx);
+        assert_eq!(v.writes_outside, 0);
+    }
+
+    // ── Memory violation detection ─────────────────────────
+
+    #[test]
+    fn test_double_free_detected() {
+        let mut v = Verifier::new();
+        v.alloc(0x1000, 64);
+        v.free(0x1000);
+        assert!(v.violations.is_empty(), "first free should succeed");
+        v.free(0x1000); // second free — double free
+        assert_eq!(v.violations.len(), 1);
+        assert!(v.violations[0].contains("DOUBLE-FREE"));
+    }
+
+    #[test]
+    fn test_free_unallocated_detected() {
+        let mut v = Verifier::new();
+        v.free(0xDEAD);
+        assert_eq!(v.violations.len(), 1);
+        assert!(v.violations[0].contains("FREE of unallocated"));
+    }
+
+    #[test]
+    fn test_use_after_free_detected_on_read() {
+        let mut v = Verifier::new();
+        v.alloc(0x2000, 32);
+        v.free(0x2000);
+        v.tx_begin(0);
+        v.check_read(0, 0x2000);
+        assert_eq!(v.violations.len(), 1);
+        assert!(v.violations[0].contains("USE-AFTER-FREE"));
+    }
+
+    #[test]
+    fn test_use_after_free_detected_on_write() {
+        let mut v = Verifier::new();
+        v.alloc(0x2000, 32);
+        v.free(0x2000);
+        v.tx_begin(0);
+        v.check_write(0, 0x2000, 99);
+        assert_eq!(v.violations.len(), 1);
+        assert!(v.violations[0].contains("USE-AFTER-FREE"));
+    }
+
+    #[test]
+    fn test_re_alloc_detected() {
+        let mut v = Verifier::new();
+        v.alloc(0x3000, 64);
+        v.alloc(0x3000, 128); // same address, still live
+        assert_eq!(v.violations.len(), 1);
+        assert!(v.violations[0].contains("RE-ALLOC"));
+    }
+
+    #[test]
+    fn test_alloc_free_alloc_works() {
+        let mut v = Verifier::new();
+        v.alloc(0x4000, 64);
+        v.free(0x4000);
+        assert!(v.violations.is_empty());
+        v.alloc(0x4000, 128); // re-alloc after free — allowed
+        assert!(v.violations.is_empty(), "re-alloc after free is OK");
+    }
+
+    // ── Value / money conservation ─────────────────────────
+
+    #[test]
+    fn test_record_value_tracks_values() {
+        let mut v = Verifier::new();
+        v.record_value(0x1000, 100);
+        v.record_value(0x2000, 200);
+        assert_eq!(v.total_value(), 300);
+    }
+
+    #[test]
+    fn test_record_value_overwrites_same_addr() {
+        let mut v = Verifier::new();
+        v.record_value(0x1000, 100);
+        v.record_value(0x1000, 150);
+        assert_eq!(v.total_value(), 150);
+    }
+
+    #[test]
+    fn test_empty_verifier_total_zero() {
+        let v = Verifier::new();
+        assert_eq!(v.total_value(), 0);
+    }
+
+    #[test]
+    fn test_set_initial_value_only_first() {
+        let mut v = Verifier::new();
+        v.set_initial_value(0x1000, 50);
+        v.set_initial_value(0x1000, 99); // ignored — or_insert
+        assert_eq!(v.total_value(), 50);
+    }
+
+    // ── Reset ──────────────────────────────────────────────
+
+    #[test]
+    fn test_reset_clears_scenario_state() {
+        let mut v = Verifier::new();
+        v.tx_begin(0);
+        v.check_read(0, 0x1000);
+        v.record_value(0x1000, 42);
+        v.alloc(0x2000, 64);
+        v.free(0xDEAD); // violation
+        v.tx_commit(0);
+
+        assert_eq!(v.commits, 1);
+        assert_eq!(v.reads_outside, 0);
+        assert!(!v.violations.is_empty());
+        assert!(!v.values.is_empty());
+
+        v.reset();
+
+        // Counters survive reset
+        assert_eq!(v.commits, 1);
+        // Scenario state cleared
+        assert!(v.shadow.is_empty());
+        assert!(v.values.is_empty());
+        assert!(v.tx_depth.is_empty());
+        assert!(v.violations.is_empty());
+        assert_eq!(v.reads_outside, 0);
+    }
+
+    // ── Report ─────────────────────────────────────────────
+
+    #[test]
+    fn test_report_empty() {
+        let v = Verifier::new();
+        let lines = v.report(0);
+        assert!(lines.iter().any(|l| l.contains("Commits: 0")));
+        assert!(lines.iter().any(|l| l.contains("NO MEMORY VIOLATIONS")));
+    }
+
+    #[test]
+    fn test_report_with_aborts() {
+        let mut v = Verifier::new();
+        v.commits = 9;
+        v.aborts = 1;
+        let lines = v.report(0);
+        assert!(lines.iter().any(|l| l.contains("10.0%")));
+    }
+
+    #[test]
+    fn test_report_with_money_conservation() {
+        let mut v = Verifier::new();
+        v.record_value(0x1000, 100);
+        v.record_value(0x2000, 200);
+        let lines = v.report(300);
+        assert!(lines.iter().any(|l| l.contains("MONEY CONSERVED")));
+        assert!(lines.iter().any(|l| l.contains("Δ=0")));
+    }
+
+    #[test]
+    fn test_report_money_not_conserved() {
+        let mut v = Verifier::new();
+        v.record_value(0x1000, 100);
+        let lines = v.report(200);
+        assert!(lines.iter().any(|l| l.contains("MONEY NOT CONSERVED")));
+        assert!(lines.iter().any(|l| l.contains("Δ=-100")));
+    }
+
+    #[test]
+    fn test_report_violations() {
+        let mut v = Verifier::new();
+        v.free(0xBEEF); // unallocated
+        let lines = v.report(0);
+        assert!(lines.iter().any(|l| l.contains("1 MEMORY VIOLATION")));
+    }
+
+    #[test]
+    fn test_report_outside_accesses() {
+        let mut v = Verifier::new();
+        v.reads_outside = 3;
+        v.writes_outside = 1;
+        let lines = v.report(0);
+        assert!(lines.iter().any(|l| l.contains("3 read(s) outside")));
+        assert!(lines.iter().any(|l| l.contains("1 write(s) outside")));
+    }
+
+    #[test]
+    fn test_commit_without_begin_panics() {
+        let mut v = Verifier::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            v.tx_commit(0);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_abort_without_begin_panics() {
+        let mut v = Verifier::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            v.tx_abort(0);
+        }));
+        assert!(result.is_err());
+    }
+}
+

@@ -141,3 +141,239 @@ impl Backend {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::OnceLock;
+
+    fn mmap_tm_region() {
+        static MMAP: OnceLock<()> = OnceLock::new();
+        MMAP.get_or_init(|| {
+            unsafe {
+                let addr = 0x7f00_0000_0000 as *mut libc::c_void;
+                let result = libc::mmap(
+                    addr,
+                    256 * 1024 * 1024,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+                    -1,
+                    0,
+                );
+                if result == libc::MAP_FAILED {
+                    panic!("mmap failed: {}", std::io::Error::last_os_error());
+                }
+            }
+        });
+    }
+
+    fn run_simple_tx(b: Backend) {
+        mmap_tm_region();
+        b.init();
+        b.sim_set_thread_id(0);
+        b.init_thread();
+
+        let addr = 0x7f00_0000_8000 as *mut u64;
+
+        // Write outside TX (raw write)
+        unsafe { addr.write(0); }
+
+        b.begin();
+        let v = b.read_u64(addr);
+        assert_eq!(v, 0);
+        b.write_u64(addr, 42);
+        assert!(b.commit(), "commit should succeed");
+        b.sim_clear_thread_id();
+
+        // Verify value persisted
+        b.sim_set_thread_id(0);
+        b.begin();
+        let v = b.read_u64(addr);
+        assert_eq!(v, 42, "value should persist after commit");
+        b.commit();
+        b.sim_clear_thread_id();
+    }
+
+    // ── Backend parsing ────────────────────────────────────
+
+    #[test]
+    fn test_backend_from_name_norec() {
+        assert_eq!(Backend::from_name("norec"), Some(Backend::Norec));
+        assert_eq!(Backend::from_name("no-rec"), Some(Backend::Norec));
+    }
+
+    #[test]
+    fn test_backend_from_name_tl2() {
+        assert_eq!(Backend::from_name("tl2"), Some(Backend::Tl2));
+        assert_eq!(Backend::from_name("TL2"), Some(Backend::Tl2));
+    }
+
+    #[test]
+    fn test_backend_from_name_invalid() {
+        assert_eq!(Backend::from_name("tinystm"), None);
+        assert_eq!(Backend::from_name(""), None);
+    }
+
+    #[test]
+    fn test_backend_name() {
+        assert_eq!(Backend::Norec.name(), "norec");
+        assert_eq!(Backend::Tl2.name(), "tl2");
+    }
+
+    // ── NOrec backend simulation ──────────────────────────
+
+    #[test]
+    fn test_norec_simple_tx() {
+        run_simple_tx(Backend::Norec);
+    }
+
+    #[test]
+    fn test_norec_commit_without_tx() {
+        mmap_tm_region();
+        Backend::Norec.init();
+        Backend::Norec.sim_set_thread_id(0);
+        Backend::Norec.init_thread();
+        assert!(Backend::Norec.commit());
+        Backend::Norec.sim_clear_thread_id();
+    }
+
+    #[test]
+    fn test_norec_abort_without_tx() {
+        mmap_tm_region();
+        Backend::Norec.init();
+        Backend::Norec.sim_set_thread_id(0);
+        Backend::Norec.init_thread();
+        Backend::Norec.abort();
+        Backend::Norec.sim_clear_thread_id();
+    }
+
+    #[test]
+    fn test_norec_read_write_u8() {
+        mmap_tm_region();
+        let b = Backend::Norec;
+        b.init();
+        b.sim_set_thread_id(0);
+        b.init_thread();
+        let addr = 0x7f00_0000_9000 as *mut u8;
+        unsafe { addr.write(0); }
+        b.begin();
+        b.write_u8(addr, 255);
+        let v = b.read_u8(addr);
+        assert_eq!(v, 255, "write-then-read within same tx should see value");
+        assert!(b.commit());
+        b.sim_clear_thread_id();
+    }
+
+    // ── TL2 backend simulation ─────────────────────────────
+
+    #[test]
+    fn test_tl2_simple_tx() {
+        run_simple_tx(Backend::Tl2);
+    }
+
+    #[test]
+    fn test_tl2_commit_without_tx() {
+        mmap_tm_region();
+        Backend::Tl2.init();
+        Backend::Tl2.sim_set_thread_id(0);
+        Backend::Tl2.init_thread();
+        assert!(Backend::Tl2.commit());
+        Backend::Tl2.sim_clear_thread_id();
+    }
+
+    #[test]
+    fn test_tl2_abort_without_tx() {
+        mmap_tm_region();
+        Backend::Tl2.init();
+        Backend::Tl2.sim_set_thread_id(0);
+        Backend::Tl2.init_thread();
+        Backend::Tl2.abort();
+        Backend::Tl2.sim_clear_thread_id();
+    }
+
+    #[test]
+    fn test_tl2_read_write_u16() {
+        mmap_tm_region();
+        let b = Backend::Tl2;
+        b.init();
+        b.sim_set_thread_id(0);
+        b.init_thread();
+        let addr = 0x7f00_0000_A000 as *mut u16;
+        unsafe { addr.write(0); }
+        b.begin();
+        b.write_u16(addr, 0xCAFE);
+        let v = b.read_u16(addr);
+        assert_eq!(v, 0xCAFE);
+        assert!(b.commit());
+        b.sim_clear_thread_id();
+    }
+
+    // ── Cross-backend consistency ─────────────────────────
+
+    #[test]
+    fn test_norec_and_tl2_produce_identical_commits() {
+        mmap_tm_region();
+        for b in [Backend::Norec, Backend::Tl2] {
+            b.init();
+            b.sim_set_thread_id(0);
+            b.init_thread();
+            let addr = 0x7f00_0000_B000 as *mut u64;
+            unsafe { addr.write(0); }
+            b.begin();
+            b.write_u64(addr, 100);
+            assert!(b.commit(), "{} commit should succeed", b.name());
+            b.sim_clear_thread_id();
+        }
+    }
+
+    // ── Simulation thread isolation ───────────────────────
+
+    #[test]
+    fn test_thread_isolation() {
+        mmap_tm_region();
+        for b in [Backend::Norec, Backend::Tl2] {
+            b.init();
+            let addr = 0x7f00_0000_C000 as *mut u64;
+            unsafe { addr.write(0); }
+
+            // Thread 0
+            b.sim_set_thread_id(0);
+            b.init_thread();
+            b.begin();
+            b.write_u64(addr, 10);
+            assert!(b.commit());
+            b.sim_clear_thread_id();
+
+            // Thread 1 (starts after T0 committed, so sees 10)
+            b.sim_set_thread_id(1);
+            b.init_thread();
+            b.begin();
+            let v = b.read_u64(addr);
+            assert_eq!(v, 10, "{}: thread 1 should see thread 0's committed value", b.name());
+            b.sim_clear_thread_id();
+        }
+    }
+
+    // ── Sim reset ─────────────────────────────────────────
+
+    #[test]
+    fn test_sim_reset_clears_state() {
+        mmap_tm_region();
+        for b in [Backend::Norec, Backend::Tl2] {
+            b.init();
+            b.sim_set_thread_id(0);
+            b.init_thread();
+            b.begin();
+            assert!(b.commit(), "{}: first commit", b.name());
+            b.sim_clear_thread_id();
+            // After sim_reset, thread 0's state should be gone
+            b.sim_reset();
+            b.sim_set_thread_id(0);
+            // After reset, need to re-init
+            b.init_thread();
+            b.begin();
+            assert!(b.commit(), "{}: commit after reset", b.name());
+            b.sim_clear_thread_id();
+        }
+    }
+}

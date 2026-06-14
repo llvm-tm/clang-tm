@@ -309,3 +309,141 @@ impl<T> SimStateStore<T> {
         *inner = map;
     }
 }
+
+#[cfg(all(test, feature = "simulation"))]
+mod tests {
+    use super::*;
+
+    // ── SimThreadId ─────────────────────────────────────
+
+    #[test]
+    fn test_set_clear_sim_thread_id() {
+        set_sim_thread_id(42);
+        assert_eq!(current_sim_thread_id(), 42);
+        clear_sim_thread_id();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            current_sim_thread_id();
+        }));
+        assert!(result.is_err(), "current_sim_thread_id should panic after clear");
+    }
+
+    #[test]
+    fn test_multiple_threads_via_cell() {
+        set_sim_thread_id(0);
+        assert_eq!(current_sim_thread_id(), 0);
+        set_sim_thread_id(1);
+        assert_eq!(current_sim_thread_id(), 1, "overwrites previous ID");
+        clear_sim_thread_id();
+    }
+
+    // ── SimStateStore ───────────────────────────────────
+
+    #[test]
+    fn test_sim_state_store_insert_and_with() {
+        let store = SimStateStore::new();
+        store.insert(0, "hello".to_string());
+
+        set_sim_thread_id(0);
+        store.with(|s| {
+            assert_eq!(s.as_str(), "hello");
+            *s = "world".to_string();
+        });
+        clear_sim_thread_id();
+
+        set_sim_thread_id(0);
+        store.with(|s| {
+            assert_eq!(s.as_str(), "world");
+        });
+        clear_sim_thread_id();
+    }
+
+    #[test]
+    fn test_sim_state_store_with_tid() {
+        let store = SimStateStore::new();
+        store.insert(0, "alpha".to_string());
+        store.insert(1, "beta".to_string());
+
+        store.with_tid(1, |s| {
+            assert_eq!(s.as_str(), "beta");
+            *s = "gamma".to_string();
+        });
+
+        store.with_tid(0, |s| {
+            assert_eq!(s.as_str(), "alpha");
+        });
+        store.with_tid(1, |s| {
+            assert_eq!(s.as_str(), "gamma");
+        });
+    }
+
+    #[test]
+    fn test_sim_state_store_insert_and_remove() {
+        let store = SimStateStore::new();
+        store.insert(0, 100u64);
+        store.insert(1, 200u64);
+
+        assert_eq!(store.remove(0), Some(100));
+        assert_eq!(store.remove(0), None, "already removed");
+        assert_eq!(store.remove(1), Some(200));
+    }
+
+    #[test]
+    fn test_sim_state_store_with_panics_for_missing_tid() {
+        let store: SimStateStore<String> = SimStateStore::new();
+        set_sim_thread_id(99);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.with(|_| {});
+        }));
+        assert!(result.is_err(), "with() should panic for missing thread");
+        clear_sim_thread_id();
+    }
+
+    #[test]
+    fn test_sim_state_store_snapshot_restore() {
+        let store = SimStateStore::new();
+        store.insert(0, "a".to_string());
+        store.insert(1, "b".to_string());
+
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap.get(&0).map(String::as_str), Some("a"));
+        assert_eq!(snap.get(&1).map(String::as_str), Some("b"));
+
+        // Modify after snapshot
+        store.insert(0, "modified".to_string());
+        store.with_tid(0, |s| {
+            assert_eq!(s.as_str(), "modified");
+        });
+
+        // Restore
+        store.restore(snap);
+        store.with_tid(0, |s| {
+            assert_eq!(s.as_str(), "a", "should be restored to snapshot value");
+        });
+    }
+
+    #[test]
+    fn test_sim_state_store_multiple_insert_same_tid() {
+        let store = SimStateStore::new();
+        store.insert(0, "first".to_string());
+        store.insert(0, "second".to_string()); // overwrites
+
+        set_sim_thread_id(0);
+        store.with(|s| {
+            assert_eq!(s.as_str(), "second");
+        });
+        clear_sim_thread_id();
+    }
+
+    #[test]
+    fn test_sim_state_store_with_tid_after_remove() {
+        let store = SimStateStore::new();
+        store.insert(0, 42u64);
+        store.remove(0);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.with_tid(0, |_| {});
+        }));
+        assert!(result.is_err(), "with_tid should panic for removed state");
+    }
+}
