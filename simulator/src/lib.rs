@@ -9,6 +9,7 @@ pub mod rng;
 pub mod ser;
 pub mod tm_model;
 pub mod bank_sim;
+pub mod sim_engine;
 
 use clap::Parser;
 
