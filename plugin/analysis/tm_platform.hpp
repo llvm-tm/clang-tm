@@ -9,7 +9,7 @@
 //
 // To add a new platform:
 //   1. Add a `#elif defined(__NEW_PLATFORM__)` block to the helpers below.
-//   2. Verify with `make -C llvm_tm_plugin run`.
+//   2. Verify with `make -C plugin run`.
 // =========================================================================
 
 #include "llvm/ADT/StringRef.h"

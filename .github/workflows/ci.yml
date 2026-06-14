@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 22
+        run: |
+          wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 lld make
+
+      - name: Build plugin
+        run: make plugin
+
+      - name: Build race checker
+        run: make -C plugin race-checker
+
+      - name: Build expli C++ benchmarks (NOREC)
+        run: make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=NOREC
+
+      - name: Run expli C++ tests (NOREC)
+        run: |
+          ./benchmarks/cpp/bin/test_tx
+          ./benchmarks/cpp/bin/test_ds
+
+      - name: Build plugin tests
+        run: make -C plugin test
+
+      - name: Run plugin tests
+        run: make -C plugin run
+
+      - name: Verify annotations
+        run: make -C plugin check

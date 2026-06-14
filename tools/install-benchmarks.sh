@@ -164,30 +164,30 @@ copy_files "benchmarks/YCSB" YCSB.cpp Makefile
 # ---- Copy infrastructure ----
 info "Copying build infrastructure..."
 
-mkdir -p "$BENCHDIR/llvm_tm_plugin"
-copy_file "llvm_tm_plugin/clang-tm" "$BENCHDIR/llvm_tm_plugin/clang-tm"
-copy_file "llvm_tm_plugin/tm_pipeline.mk" "$BENCHDIR/llvm_tm_plugin/tm_pipeline.mk"
-copy_file "llvm_tm_plugin/llvm-tool-helper.mk" "$BENCHDIR/llvm_tm_plugin/llvm-tool-helper.mk"
-chmod 755 "$BENCHDIR/llvm_tm_plugin/clang-tm"
+mkdir -p "$BENCHDIR/plugin"
+copy_file "plugin/clang-tm" "$BENCHDIR/plugin/clang-tm"
+copy_file "plugin/tm_pipeline.mk" "$BENCHDIR/plugin/tm_pipeline.mk"
+copy_file "plugin/llvm-tool-helper.mk" "$BENCHDIR/plugin/llvm-tool-helper.mk"
+chmod 755 "$BENCHDIR/plugin/clang-tm"
 
 # ---- Copy backend runtimes and headers ----
 info "Copying backend runtimes and headers..."
 
-mkdir -p "$BENCHDIR/backends/runtimes"
+mkdir -p "$BENCHDIR/backends/tm_impl"
 for f in "$TM_RUNTIMES"/*.cpp; do
-    cp "$f" "$BENCHDIR/backends/runtimes/"
+    cp "$f" "$BENCHDIR/backends/tm_impl/"
 done
 
-for dir in TinySTM NOrec SwissTM TL2; do
-    if [ -d "$PROJECT_ROOT/backends/$dir" ]; then
-        mkdir -p "$BENCHDIR/backends/$dir"
-        cp "$PROJECT_ROOT/backends/$dir"/*.hpp "$BENCHDIR/backends/$dir/" 2>/dev/null || true
+for dir in tiny_stm norec swisstm tl2; do
+    if [ -d "$PROJECT_ROOT/backends/tm_impl/$dir" ]; then
+        mkdir -p "$BENCHDIR/backends/tm_impl/$dir"
+        cp "$PROJECT_ROOT/backends/tm_impl/$dir"/*.hpp "$BENCHDIR/backends/tm_impl/$dir/" 2>/dev/null || true
     fi
 done
 
 for f in tm_api.hpp tm_common.hpp tm_alloc_overrides.hpp rel_ptr.hpp; do
-    if [ -f "$PROJECT_ROOT/backends/$f" ]; then
-        cp "$PROJECT_ROOT/backends/$f" "$BENCHDIR/backends/"
+    if [ -f "$PROJECT_ROOT/backends/tm_impl/common/$f" ]; then
+        cp "$PROJECT_ROOT/backends/tm_impl/common/$f" "$BENCHDIR/backends/tm_impl/common/"
     fi
 done
 

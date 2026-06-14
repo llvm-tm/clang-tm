@@ -8,7 +8,7 @@
 //   clang++ -std=c++20 -O0 -pthread -g -I.. \
 //       -DTM_BACKEND_TINYSTM -DDESIGN_WBCTL -I../backends -I../backends/TinySTM \
 //       expli_benchmarks/fuzz/fuzz_bank.cpp \
-//       backends/runtimes/TinySTM_runtime.cpp
+//       backends/tm_impl/tiny_stm/TinySTM_runtime.cpp
 
 #include "../../expli_instr/cpp/include/tm_api.hpp"
 

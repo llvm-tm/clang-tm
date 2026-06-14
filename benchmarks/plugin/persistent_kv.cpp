@@ -8,11 +8,11 @@
  * Build:
  *   cd benchmarks && mkdir -p out bin
  *   clang++ -O3 -fno-inline -emit-llvm -S persistent_kv.cpp -o out/persistent_kv.ll
- *   opt -load-pass-plugin=../llvm_tm_plugin/bin/libTMInstrument.so \
+ *   opt -load-pass-plugin=../plugin/bin/libTMInstrument.so \
  *       -passes="tm-instrument" out/persistent_kv.ll -o out/persistent_kv.instr.ll
  *   opt -O3 out/persistent_kv.instr.ll -o out/persistent_kv.opt.bc
  *   clang++ -O3 out/persistent_kv.opt.bc \
- *       ../backends/runtimes/PersistentSGL_runtime.cpp -o bin/persistent_kv
+ *       ../backends/tm_impl/persistent_sgl/PersistentSGL_runtime.cpp -o bin/persistent_kv
  *
  * Run:
  *   ./bin/persistent_kv    # first run: counter=0

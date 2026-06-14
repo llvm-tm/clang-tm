@@ -17,9 +17,9 @@
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
-source "$SCRIPT_DIR/llvm_tm_plugin/llvm-tool-helper.sh"
+source "$SCRIPT_DIR/plugin/llvm-tool-helper.sh"
 
-PLUGIN="llvm_tm_plugin/bin/libTMInstrument.so"
+PLUGIN="plugin/bin/libTMInstrument.so"
 CXX="$LLVM_CXX"
 OPT="$LLVM_OPT"
 
@@ -30,19 +30,19 @@ CXXFLAGS="-std=c++20 -O1 -fno-inline -fno-vectorize -fno-slp-vectorize -fno-unro
 PIPELINE="tm-instrument"
 
 ALL_BENCHES=(
-    "bank:benchmarks/test/bank/bank.cpp"
-    "avltree:benchmarks/datastructures/avltree.cpp"
-    "avltree_recursive:benchmarks/datastructures/avltree_recursive.cpp"
-    "stmbench7:benchmarks/STMbench7/STMbench7.cpp"
-    "ycsb:benchmarks/YCSB/YCSB.cpp"
-    "eigen:benchmarks/EigenBench/EigenBench.cpp"
-    "stamp:benchmarks/STAMP/STAMP.cpp"
-    "bitmap:benchmarks/datastructures/bitmap.cpp"
-    "hashmap:benchmarks/datastructures/hashmap.cpp"
-    "list:benchmarks/datastructures/list.cpp"
-    "set:benchmarks/datastructures/set.cpp"
-    "heap:benchmarks/datastructures/heap.cpp"
-    "rbtree:benchmarks/datastructures/rbtree.cpp"
+    "bank:benchmarks/cpp/bank/bank.cpp"
+    "avltree:benchmarks/plugin/datastructures/avltree.cpp"
+    "avltree_recursive:benchmarks/plugin/datastructures/avltree_recursive.cpp"
+    "stmbench7:benchmarks/plugin/stmbench7/STMbench7.cpp"
+    "ycsb:benchmarks/plugin/ycsb/YCSB.cpp"
+    "eigen:benchmarks/plugin/eigenbench/EigenBench.cpp"
+    "stamp:benchmarks/plugin/STAMP/STAMP.cpp"
+    "bitmap:benchmarks/plugin/datastructures/bitmap.cpp"
+    "hashmap:benchmarks/plugin/datastructures/hashmap.cpp"
+    "list:benchmarks/plugin/datastructures/list.cpp"
+    "set:benchmarks/plugin/datastructures/set.cpp"
+    "heap:benchmarks/plugin/datastructures/heap.cpp"
+    "rbtree:benchmarks/plugin/datastructures/rbtree.cpp"
 )
 
 out_dir=$(mktemp -d /tmp/tm_assess_full_XXXXXX)
@@ -201,7 +201,7 @@ for entry in "${ALL_BENCHES[@]}"; do
     extra_opt=""
     case "$label" in
         stmbench7)
-            extra_cxx="-Ibenchmarks/datastructures -Ibackends"
+            extra_cxx="-Ibenchmarks/plugin/datastructures -Ibackends"
             ;;
         ycsb)
             extra_opt="-tm-allow-opaque"

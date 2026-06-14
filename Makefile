@@ -107,7 +107,7 @@ check-all:
 		if $(MAKE) -C $(EXPLI_BENCHMARKS_DIR) -j4 bin/test_tx bin/test_ds BACKEND=$$be 2>&1 > /tmp/check-$$be-build.log; then \
 			echo "  Build: OK"; \
 			if [ "$$be" = "SGL" ] || [ "$$be" = "LEFTRIGHT" ] || [ "$$be" = "ROMULUS" ]; then \
-				echo "  (runtime needs explicit init — skipping run)"; \
+				echo "  Run: SKIPPED (these backends use explicit tm_init/tm_exit — run ./bin/test_tx manually)"; \
 			else \
 				if $(EXPLI_BENCHMARKS_DIR)/bin/test_tx > /tmp/check-$$be-tx.log 2>&1; then \
 					echo "  test_tx: $$(tail -1 /tmp/check-$$be-tx.log)"; \

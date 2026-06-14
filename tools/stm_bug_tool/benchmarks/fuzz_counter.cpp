@@ -4,7 +4,7 @@
 //   clang++ -std=c++20 -O0 -pthread -g -I$(PWD) \
 //       -DTM_BACKEND_TL2 -Ibackends/TL2 \
 //       tools/stm_bug_tool/benchmarks/fuzz_counter.cpp \
-//       backends/runtimes/tl2_runtime.cpp
+//       backends/tm_impl/tl2/tl2_runtime.cpp
 
 #include "../../../tests/backends/tm_impl/test_helpers.hpp"
 #include "../../../backends/tm_impl/common/tm_event_logger.hpp"

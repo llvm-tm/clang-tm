@@ -16,7 +16,7 @@ echo "=== Checking software requirements ==="
 echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/llvm_tm_plugin/llvm-tool-helper.sh"
+source "$SCRIPT_DIR/../plugin/llvm-tool-helper.sh"
 
 if command -v "$LLVM_OPT" &>/dev/null; then
     ver=$("$LLVM_OPT" --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
@@ -56,9 +56,9 @@ fi
 if command -v python3 &>/dev/null; then
     python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" 2>/dev/null && \
         pass "python3 3.8+ found" || \
-        echo "  WARN: python3 found but < 3.8 (tm-resolve-opaque.py may fail)"
+        fail "python3 found but < 3.8 (tm-resolve-opaque.py requires 3.8+)"
 else
-    echo "  WARN: python3 not found (needed by tm-resolve-opaque.py)"
+    fail "python3 not found (needed by tm-resolve-opaque.py)"
 fi
 
 # gtimeout / timeout
@@ -71,17 +71,16 @@ else
 fi
 
 # LLVM plugin .so
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PLUGIN="$SCRIPT_DIR/llvm_tm_plugin/bin/libTMInstrument.so"
+PLUGIN="$SCRIPT_DIR/../plugin/bin/libTMInstrument.so"
 if [ -f "$PLUGIN" ]; then
     pass "TM plugin found at $PLUGIN"
 else
-    echo "  WARN: TM plugin not built yet (run 'make' in llvm_tm_plugin/)"
+    echo "  WARN: TM plugin not built yet (run 'make' in plugin/)"
 fi
 
 # backends
-BACKENDS="$SCRIPT_DIR/backends"
-if [ -d "$BACKENDS/runtimes" ]; then
+BACKENDS="$SCRIPT_DIR/../backends/tm_impl"
+if [ -d "$BACKENDS" ]; then
     pass "Backend runtimes directory found"
 else
     fail "Backend runtimes directory not found"

@@ -18,7 +18,7 @@
 # Examples:
 #   clang-tm -std=c++20 -O3 -pthread -o myapp app.cpp
 #   clang-tm --runtime SingleGlobalLock_runtime.cpp -o myapp app.cpp
-#   clang-tm --runtime ../backends/runtimes/TinySTM_runtime.cpp \\
+#   clang-tm --runtime ../backends/tm_impl/tiny_stm/TinySTM_runtime.cpp \\
 #            -DDESIGN_WBCTL -I ../backends/TinySTM -I ../backends \\
 #            -std=c++20 -pthread -o myapp test_alloc_stress.cpp
 #
@@ -35,7 +35,7 @@
 #         - .cpp/.cc/.cxx source  → compiled to bitcode, merged
 #           with instrumented IR so the optimizer can inline
 #         - .o/.a/.so/.dylib/.bc → linked as-is in the final step
-#       Default: runtime.cpp (looked up in CWD and backends/runtimes/)
+#       Default: runtime.cpp (looked up in CWD and backends/tm_impl/)
 #   --plugin FILE, -p FILE
 #       Path to libTMInstrument.so (default: auto-located).
 #   --keep-temps, -k
@@ -378,7 +378,7 @@ fi
 # ---- Locate plugin ----
 
 if [ -z "$PLUGIN" ]; then
-    # Try bare name first (install.sh creates this), fall back to _release
+    # Try bare name first (tools/install-plugin.sh creates this), fall back to _release
     PLUGIN="$TM_PLUGIN_DIR/libTMInstrument.so"
     if [ ! -f "$PLUGIN" ]; then
         PLUGIN="$TM_PLUGIN_DIR/libTMInstrument_release.so"
@@ -386,7 +386,7 @@ if [ -z "$PLUGIN" ]; then
 fi
 if [ ! -f "$PLUGIN" ]; then
     echo "clang-tm: plugin not found at $TM_PLUGIN_DIR/libTMInstrument.so" >&2
-    echo "  Set --plugin or run install.sh." >&2
+    echo "  Set --plugin or run tools/install-plugin.sh." >&2
     exit 1
 fi
 

@@ -89,12 +89,12 @@ touch "$SKIP_FILE" "$SAVEPOINT"
 echo "plugin tinystm_wbctl stmbench7" >> "$SKIP_FILE"
 
 # Early validation
-if [ ! -d "llvm_tm_plugin/bin" ]; then
-    echo "ERROR: llvm_tm_plugin/bin/ not found. Build the plugin first."
+if [ ! -d "plugin/bin" ]; then
+    echo "ERROR: plugin/bin/ not found. Build the plugin first."
     exit 1
 fi
-if [ ! -f "llvm_tm_plugin/bin/libTMInstrument.so" ]; then
-    echo "ERROR: libTMInstrument.so not found. Run 'make -C llvm_tm_plugin' first."
+if [ ! -f "plugin/bin/libTMInstrument.so" ]; then
+    echo "ERROR: libTMInstrument.so not found. Run 'make -C plugin' first."
     exit 1
 fi
 

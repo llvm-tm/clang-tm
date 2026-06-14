@@ -32,9 +32,9 @@ $RSYNC --exclude='.git' --exclude='*.o' --exclude='bin/' \
 
 echo ""
 echo "=== Building plugin variants on $HOST ==="
-$SSH "$HOST" "cd $REMOTE_DIR && make -C llvm_tm_plugin variants" || {
+$SSH "$HOST" "cd $REMOTE_DIR && make -C plugin variants" || {
     echo "WARNING: Plugin build failed. Trying without variants..."
-    $SSH "$HOST" "cd $REMOTE_DIR && make -C llvm_tm_plugin"
+    $SSH "$HOST" "cd $REMOTE_DIR && make -C plugin"
 }
 
 echo ""
