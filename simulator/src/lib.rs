@@ -10,6 +10,7 @@ pub mod ser;
 pub mod tm_model;
 pub mod bank_sim;
 pub mod sim_engine;
+pub mod verifier;
 
 use clap::Parser;
 

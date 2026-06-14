@@ -11,7 +11,8 @@ use tm_des::sim_engine::SimEngine;
 use tm_des::trace::Trace;
 
 #[derive(Parser, Debug)]
-#[command(name = "tm-sim", about = "Replay TM trace through the real backend")]
+#[command(name = "tm-sim", about = "Replay TM trace through the real backend",
+          version = "0.1.0")]
 struct Cli {
     /// Trace file (JSONL) to replay.
     #[arg(short, long, default_value = "-")]
@@ -75,22 +76,10 @@ fn main() {
         engine.process_event(event);
     }
 
-    // Report
-    let s = &engine.stats;
+    // Report via Verifier
     eprintln!();
     eprintln!("═══ tm-sim report ═══");
-    eprintln!("Events: {}  Commits: {}  Aborts: {}  Abort rate: {:.1}%",
-              s.total_events, s.commits, s.aborts, s.abort_rate());
-    if s.reads_outside_tx > 0 {
-        eprintln!("⚠ {} reads outside transaction", s.reads_outside_tx);
+    for line in engine.verifier.report(0) {
+        eprintln!("{}", line);
     }
-    if s.writes_outside_tx > 0 {
-        eprintln!("⚠ {} writes outside transaction", s.writes_outside_tx);
-    }
-
-    // Value-based verification: sum all committed values
-    // (NOrec writes back to real memory — we can't inspect from here directly.
-    //  Full verification needs shadow memory, coming in Phase 4.)
-    eprintln!();
-    eprintln!("NOTE: Value verification requires shadow memory (Phase 4)");
 }
