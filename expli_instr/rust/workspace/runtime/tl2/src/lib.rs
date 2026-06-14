@@ -101,6 +101,7 @@ fn sim_tx_store() -> &'static Mutex<HashMap<u64, Option<Box<TxState>>>> {
 pub struct TxState {
     read_set: Vec<(usize, u64)>,  // (addr, version_at_read)
     write_set: HashMap<usize, TypedValue>,
+    #[allow(dead_code)]
     write_backs: Vec<WriteBack>,
     start_version: u64,
     #[allow(dead_code)]
@@ -208,11 +209,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
 
     let tv = val.to_typed();
     with_tx(|tx| {
-        use std::collections::hash_map::Entry;
-        if let Entry::Vacant(e) = tx.write_set.entry(addr) {
-            e.insert(tv.clone());
-            tx.write_backs.push(tv.into_write_back(addr));
-        }
+        tx.write_set.insert(addr, tv);
     });
 }
 
@@ -226,9 +223,22 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| {
-        tx.write_set.insert(addr, tv.clone());
-        tx.write_backs.push(tv.into_write_back(addr));
+        tx.write_set.insert(addr, tv);
     });
+}
+
+fn apply_typed_value(addr: usize, tv: &TypedValue) {
+    unsafe {
+        match tv {
+            TypedValue::U8(v) => (addr as *mut u8).write(*v),
+            TypedValue::U16(v) => (addr as *mut u16).write(*v),
+            TypedValue::U32(v) => (addr as *mut u32).write(*v),
+            TypedValue::U64(v) => (addr as *mut u64).write(*v),
+            TypedValue::Bytes(b) => {
+                std::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, b.len());
+            }
+        }
+    }
 }
 
 // ── Validate read-set (lock-based) ─────────────────────
@@ -275,9 +285,9 @@ pub fn tm_commit() -> bool {
     }
     fence(Ordering::SeqCst);
 
-    // 4. Write-back
-    for wb in tx.write_backs {
-        wb.apply();
+    // 4. Write-back from write-set
+    for (addr, tv) in &tx.write_set {
+        apply_typed_value(*addr, tv);
     }
 
     // 5. Unlock (reverse order)

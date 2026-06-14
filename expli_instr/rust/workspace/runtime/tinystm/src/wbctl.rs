@@ -26,21 +26,11 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     let tv = val.to_typed();
     with_tx(|tx| {
         use std::collections::hash_map::Entry;
-        // Read current version so we can add a read-set entry.
-        // Matches C++ TinySTM WBCTL: write also creates a read-set entry
-        // so that validate() catches version changes from concurrent writers.
         while is_locked(addr) { std::hint::spin_loop(); }
         let version = read_version(addr);
         if version > tx.start_version { std::panic::panic_any(TmxAbort); }
-        match tx.write_set.entry(addr) {
-            Entry::Vacant(e) => {
-                tx.write_backs.push(tv.clone().into_write_back(addr));
-                e.insert(WriteEntry { value: tv });
-            }
-            Entry::Occupied(mut e) => {
-                e.get_mut().value = tv;
-            }
-        }
+        let entry = tx.write_set.entry(addr);
+        entry.or_insert(WriteEntry { value: tv });
         tx.read_set.push((addr, version));
     });
 }
@@ -54,9 +44,22 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| {
-        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv.clone() });
-        tx.write_backs.push(tv.into_write_back(addr));
+        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv });
     });
+}
+
+fn apply_typed_value(addr: usize, tv: &TypedValue) {
+    unsafe {
+        match tv {
+            TypedValue::U8(v) => (addr as *mut u8).write(*v),
+            TypedValue::U16(v) => (addr as *mut u16).write(*v),
+            TypedValue::U32(v) => (addr as *mut u32).write(*v),
+            TypedValue::U64(v) => (addr as *mut u64).write(*v),
+            TypedValue::Bytes(b) => {
+                std::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, b.len());
+            }
+        }
+    }
 }
 
 pub fn tm_abort() {
@@ -71,7 +74,7 @@ pub fn tm_commit() -> bool {
     gc_acquire(); fence(Ordering::SeqCst);
     let idxs = lock_write_addrs(&addrs);
     if !validate_read_set(&tx.read_set) { unlock_indices(&idxs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
-    for wb in tx.write_backs { wb.apply(); }
+    for (addr, entry) in &tx.write_set { apply_typed_value(*addr, &entry.value); }
     fence(Ordering::SeqCst);
     unlock_indices(&idxs);
     gc_release_and_inc();
