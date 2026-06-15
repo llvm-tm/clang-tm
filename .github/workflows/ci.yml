@@ -26,30 +26,7 @@ jobs:
         run: make -C plugin race-checker
 
       - name: Build expli C++ benchmarks (NOREC)
-        run: |
-          echo "=== Compilers available ==="
-          echo "clang++-22: $(which clang++-22 2>/dev/null || echo NOT FOUND)"
-          echo "clang++-14: $(which clang++-14 2>/dev/null || echo NOT FOUND)"
-          echo "clang++: $(which clang++ 2>/dev/null || echo NOT FOUND)"
-          echo "g++: $(which g++ 2>/dev/null || echo NOT FOUND)"
-          echo "c++: $(which c++ 2>/dev/null || echo NOT FOUND)"
-          echo "=== Trying direct compile ==="
-          cd benchmarks/cpp
-          clang++-22 --version 2>&1 | head -1
-          clang++-22 -std=c++20 -O3 -DNDEBUG \
-            -I../.. -I../../expli_instr/cpp \
-            -I../../backends/tm_impl/common \
-            -I../../backends/tm_impl/norec \
-            -DTM_BACKEND_NOREC \
-            -o bin/test_tx \
-            ../../tests/expli-api/test_tx.cpp \
-            ../../backends/tm_impl/norec/NOrec_runtime.cpp \
-            ../../backends/tm_impl/tm_region_allocator/tm_region_allocator.cpp \
-            ../../backends/tm_impl/common/tm_hooks.cpp \
-            -pthread 2>&1
-          rc=$?
-          echo "=== Direct compile exit code: $rc ==="
-          exit $rc
+        run: make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=NOREC
 
       - name: Run expli C++ tests (NOREC)
         run: |
