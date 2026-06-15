@@ -87,14 +87,13 @@ PLUGIN_SO_NAMES := $(addprefix $(BIN_DIR)/libTMInstrument_,$(addsuffix .so,$(PLU
 TEST_NAMES := test_types test_memtest test_threads test_persist test_retry \
               test_annotation_detect \
               test_custom_class test_tm_arg_trace \
-              test_math_opaque test_vector_realloc \
+              test_math_opaque \
               test_alloc_stress test_ll_alloc test_construct_tx_pattern \
               test_nested_tx test_tm_simple test_tm_safe_map \
               test_init_no_tx \
-              test_simple_vector test_vec_push \
-              test_stl_vector_race \
+              test_simple_vector \
                test_alloc_stress_manual test_manual_tx \
-               test_treap_tx test_realloc_crash test_std_queue test_queue \
+               test_treap_tx test_queue \
                test_queue_sync test_queue_async test_queue_multi
 
 # STL container tests — no longer supported inside TM.  These would require
@@ -170,15 +169,13 @@ $(BIN_DIR)/%_noinst: $(OUT_DIR)/%.bc $(RUNTIME_DIR)/tm_runtime.cpp | $(BIN_DIR)
 # ---- Specialized backends ----
 
 # TinySTM-backed tests (WBCTL write-back commit-time locking)
-TINYSTM_TESTS := test_opaque_race test_local_containers test_vector_realloc test_alloc_stress test_ll_alloc test_construct_tx_pattern \
-                 test_simple_vector test_vec_push test_treap_tx test_stl_vector_race
+TINYSTM_TESTS := test_opaque_race test_local_containers test_alloc_stress test_ll_alloc test_construct_tx_pattern \
+                 test_simple_vector test_treap_tx
 
-# test_local_containers uses local containers inside TX functions,
-# which requires the inline pipeline (AlwaysInline clones all reachable
-# functions and inlines them into the TX body, ensuring all internal
-# loads/stores are visible for TM instrumentation).  The non-inline
-# pipeline can't handle this because local container `this` pointers
-# don't trace to TM globals.
+# test_local_containers uses local containers inside TX functions
+# (inline pipeline). Not in TEST_NAMES — pre-existing broken-module bug
+# in injectTransactionBeginEnd with 77 inlined ret void instructions.
+# Can be built manually: make bin/test_local_containers
 $(OUT_DIR)/test_local_containers.opt.bc: $(OUT_DIR)/test_local_containers.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
 	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so \
 	  -passes="tm-instrument-inline" $< -o $(OUT_DIR)/test_local_containers.instr.bc
@@ -189,18 +186,7 @@ $(addprefix $(BIN_DIR)/,$(TINYSTM_TESTS)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(B
 	  $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL -DLLVM_TM_PLUGIN \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR)/tm_impl/common -I $(BACKENDS_DIR) $< -o $@
 
-# SwissTM-backed test (reproducer for STMbench7 bad_alloc crash)
-SWISSTM_TESTS := test_realloc_crash
 
-$(addprefix $(BIN_DIR)/,$(SWISSTM_TESTS)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(BACKENDS_DIR)/tm_impl/swisstm/SwissTM_runtime.cpp | $(BIN_DIR)
-	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/tm_impl/swisstm/SwissTM_runtime.cpp \
-	  $(DEFAULT_LINK_FLAGS) \
-	  -I $(BACKENDS_DIR)/tm_impl/swisstm -I $(BACKENDS_DIR)/tm_impl/common -I $(BACKENDS_DIR) $< -o $@
-
-# TL2-backed test (std::queue reproducer — separate target from WBCTL default)
-$(BIN_DIR)/test_std_queue_tl2: $(OUT_DIR)/test_std_queue.opt.bc $(BACKENDS_DIR)/tm_impl/tl2/tl2_runtime.cpp | $(BIN_DIR)
-	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/tm_impl/tl2/tl2_runtime.cpp \
-	  $(DEFAULT_LINK_FLAGS) -I $(BACKENDS_DIR)/tm_impl/tl2 -I $(BACKENDS_DIR) $< -o $@
 
 # Race tests (SingleGlobalLock runtime)
 RACE_TEST_BINS := $(addprefix $(BIN_DIR)/,$(RACE_TEST_NAMES))
@@ -342,10 +328,10 @@ $(BIN_DIR)/test_persist_sgl: $(OUT_DIR)/test_persist.opt.bc $(BACKENDS_DIR)/tm_i
 ll: all $(TEST_LLS) $(OPT_LLS)
 
 # Convenience targets: make test_foo -> make bin/test_foo
-.PHONY: $(TEST_NAMES) $(RACE_TEST_NAMES) test_persist_sgl test_std_queue_tl2 test_queue_tx_wait \
+.PHONY: $(TEST_NAMES) $(RACE_TEST_NAMES) test_persist_sgl test_queue_tx_wait \
         bench_queue_wait_auto bench_queue_wait_manual \
         test_queue_leftright test_queue_leftright_manual bench_queue_compare_queue
-$(TEST_NAMES) $(RACE_TEST_NAMES) test_persist_sgl test_std_queue_tl2 test_queue_tx_wait \
+$(TEST_NAMES) $(RACE_TEST_NAMES) test_persist_sgl test_queue_tx_wait \
   bench_queue_wait_auto bench_queue_wait_manual \
   test_queue_leftright test_queue_leftright_manual bench_queue_compare_queue: %: $(BIN_DIR)/%
 

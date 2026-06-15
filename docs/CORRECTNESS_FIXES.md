@@ -8,8 +8,9 @@
 | 3b | NOREC commit write-back skipping non-TM addresses in expli mode | **Fixed** | `84400be` |
 | 4 | LEFTRIGHT multi-thread deadlock | **Fixed** | `1de1b90` |
 | 5 | XTM rbtree segfault | **Fixed** | `62d3878` |
-| 6 | SIGBUS in test_treap_tx (tm_get_env/tm_set_jmpbuf as DATA) | **Fixed** | *(not yet committed)* |
-| 7 | test_local_containers opaque errors (stdlib exception symbols) | **Fixed** | *(not yet committed)* |
+| 6 | SIGBUS in test_treap_tx (tm_get_env/tm_set_jmpbuf as DATA) | **Fixed** | `1f4e309` |
+| 7 | test_local_containers opaque errors (stdlib exception symbols) | **Fixed** | `1f4e309` |
+| — | STL-in-TM tests removed from build (known broken) | **Removed** | *(this commit)* |
 
 ---
 
@@ -130,7 +131,7 @@ These functions never access TM-annotated memory — they either terminate the p
 
 **Revealed pre-existing issue:** After the opaque check passes, `injectTransactionBeginEnd` in `tm_instrument_helpers.hpp` creates a broken module: "Basic Block in function '_Z9vector_txii' does not have terminator!". This occurs because the function has 77 inlined `ret void` instructions from `std::vector` template code, and the return-splitting logic in `injectTransactionBeginEnd` doesn't handle the case where multiple returns share a parent block. The opaque check was previously masking this bug by aborting before the verify pass ran.
 
-**Removed from TEST_NAMES** in the Makefile — `test_local_containers` was never part of `run_tests.sh` and couldn't build due to the opaque check. Now that the opaque check passes, it still fails due to the pre-existing broken-module bug. Kept in `TINYSTM_TESTS` for manual builds.
+**Removed from TEST_NAMES** in the Makefile — `test_local_containers` was never part of `run_tests.sh` and couldn't build due to the opaque check. Now that the opaque check passes, it still fails due to the pre-existing broken-module bug. Kept in `TINYSTM_TESTS` for manual builds. Also removed `test_vec_push`, `test_vector_realloc`, `test_stl_vector_race`, `test_realloc_crash`, and `test_std_queue` from `TEST_NAMES` (and `TINYSTM_TESTS`/`SWISSTM_TESTS`) — these tested STL containers inside TX, which has been an accepted limitation since the Honorio 5-pass decomposition. Source files kept for reference.
 
 ---
 
