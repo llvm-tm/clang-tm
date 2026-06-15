@@ -189,10 +189,6 @@ static void stub_set_jmpbuf(void*) {}
 
 static void *stub_get_env() { return (sigjmp_buf*)&tm_jmpbuf; }
 
-int stub_tm_sigsetjmp(void *env, int savemask) {
-    return sigsetjmp(*(sigjmp_buf*)env, savemask);
-}
-
 static TMThreadState *stub_get_thread_state() {
     return (TMThreadState*)&tm_nested_call_counter;
 }
@@ -292,4 +288,4 @@ void consume_ptr(volatile void *ptr) { (void)ptr; }
 __asm__(".globl _tm_sigsetjmp\n"
         ".data\n"
         ".align 3\n"
-        "_tm_sigsetjmp: .quad _stub_tm_sigsetjmp\n");
+        "_tm_sigsetjmp: .quad _sigsetjmp\n");

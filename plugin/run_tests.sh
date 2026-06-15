@@ -61,7 +61,7 @@ run_test test_retry "retry" "longjmp" "Test PASSED" "final counter = 3"
 run_test test_tm_arg_trace "argument trace test" "PASS: argument trace test passed"
 
 # Custom class test
-run_test test_custom_class "custom" "PASS"
+run_test test_custom_class "Custom" "PASS"
 
 # Simple vector test
 run_test test_simple_vector "PASS" || echo "  Skipped (may hang)"

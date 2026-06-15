@@ -47,10 +47,6 @@ static void stub_write_f4(float    *a, float    v) { *a = v; }
 static void stub_write_f8(double   *a, double   v) { *a = v; }
 static void stub_write_ptr(void   **a, void    *v) { *a = v; }
 
-static int stub_tm_sigsetjmp(void *env, int savemask) {
-    return sigsetjmp(*(sigjmp_buf*)env, savemask);
-}
-
 static void *stub_tm_get_env() {
     return (void*)&tm_jmpbuf;
 }
@@ -91,7 +87,7 @@ void     (*tm_write_i8)(uint64_t*, int64_t)  = stub_write_i8;
 void     (*tm_write_f4)(float*, float)        = stub_write_f4;
 void     (*tm_write_f8)(double*, double)      = stub_write_f8;
 void     (*tm_write_ptr)(void**, void*)        = stub_write_ptr;
-int      (*tm_sigsetjmp)(void*, int)            = stub_tm_sigsetjmp;
+int      (*tm_sigsetjmp)(void*, int)            = (int(*)(void*, int))sigsetjmp;
 void    *(*tm_get_env)()                        = stub_tm_get_env;
 void     (*tm_set_jmpbuf)(void*)               = stub_tm_set_jmpbuf;
 void *(*tm_get_thread_state)()          = stub_tm_get_thread_state;
