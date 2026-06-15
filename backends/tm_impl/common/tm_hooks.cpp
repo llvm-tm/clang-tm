@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <setjmp.h>
 
 // ── Shared per-thread TM state (used by all backends) ──────────
 __thread int32_t    tm_nested_call_counter = 0;

@@ -1,7 +1,7 @@
 # Makefile for expli_benchmarks (explicit TM API, no plugin needed)
 # Run directly: no LLVM plugin pipeline.
 
-CXX      ?= clang++
+CXX       = clang++
 CXXFLAGS  = -std=c++20 -O3 -march=native -pthread -DNDEBUG -I$(abspath ../..) -I$(abspath ../..)/expli_instr/cpp
 LDFLAGS   = -pthread
 
