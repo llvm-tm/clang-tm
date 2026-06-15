@@ -146,7 +146,7 @@ inline void tm_cpu_relax()
 #if TM_PLATFORM_X86
 	__builtin_ia32_pause();
 #elif TM_PLATFORM_ARM64
-	__builtin_arm_yield();
+	__asm__ __volatile__("yield" ::: "memory");
 #else
 	// No hint available on this architecture.
 #endif
