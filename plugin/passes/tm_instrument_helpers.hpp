@@ -32,7 +32,7 @@ struct ModulePassContext {
 
 // Scan non-transaction functions for accesses to TM-annotated globals and
 // emit a warning.  This catches cases where the developer omitted the
-// [[tx::transaction]] annotation on a function that reads/writes shared TM
+// [[tm::shared]] annotation on a function that reads/writes shared TM
 // state, which is a common source of data races.
 //
 // This analysis reuses tracesFromTMGlobal from tm_local_vars.hpp — the same
@@ -90,8 +90,8 @@ static void checkMissingTransactionAnnotations(Module &M)
 					errs() << "access to TM-annotated global '"
 					       << GlobalName << "' in function '"
 					       << F.getName()
-					       << "' without transaction annotation. "
-					       << "Add [[tx::transaction]] to '"
+					       << "' without shared annotation. "
+					       << "Add [[tm::shared]] to '"
 					       << F.getName()
 					       << "', or use peek()/poke() for "
 					       << "intentional non-transactional access.\n";
@@ -134,20 +134,20 @@ static void checkAnnotationConsistency(Module &M)
 		bool isAsyncTx = hasAnnotation(F, ASYNC_TX_ANNOT);
 		if (isTx && isAsyncTx) {
 			errs() << "error: function '" << F.getName()
-			       << "' has both 'transaction' and 'async_transaction' annotations. "
-			       << "A function cannot be both synchronous and asynchronous.\n";
+			       << "' has both 'shared' and 'async_shared' annotations. "
+			       << "A function cannot be both shared and async_shared.\n";
 			exit(1);
 		}
 		if (isThread && (isTx || isAsyncTx)) {
 			errs() << "error: function '" << F.getName()
-			       << "' has both 'thread' and transaction annotations. "
-			       << "A thread entry function cannot be a transaction function.\n";
+			       << "' has both 'thread' and shared annotations. "
+			       << "A thread entry function cannot be a shared function.\n";
 			exit(1);
 		}
 		if (isMain && (isTx || isAsyncTx)) {
 			errs() << "error: function '" << F.getName()
-			       << "' has both 'main' and transaction annotations. "
-			       << "The main function cannot be a transaction function.\n";
+			       << "' has both 'main' and shared annotations. "
+			       << "The main function cannot be a shared function.\n";
 			exit(1);
 		}
 	}

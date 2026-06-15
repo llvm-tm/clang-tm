@@ -1,5 +1,5 @@
 /// Test: queue-based asynchronous transaction execution
-/// Async TXes (async_transaction annotation) are enqueued without
+/// Async TXes (async_shared annotation) are enqueued without
 /// automatic wait.  The caller must call tm_wait_prev_tx() explicitly
 /// before reading values.
 
@@ -11,7 +11,7 @@ extern "C" void tm_wait_prev_tx(void);
 
 static int counter = 0;
 
-__attribute__((noinline, annotate("async_transaction")))
+__attribute__((noinline, annotate("async_shared")))
 void async_add_one() {
     counter++;
 }

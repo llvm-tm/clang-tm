@@ -1,7 +1,7 @@
 // tm_annotation_utils.hpp
 // Helper functions for reading TM annotations from LLVM metadata
 //
-// PURPOSE: The plugin uses LLVM annotations ("tm" and "transaction") to mark
+// PURPOSE: The plugin uses LLVM annotations ("tm" and "shared") to mark
 //          variables and functions that should be managed transactionally.
 //          These annotations are added by the user via __attribute__((annotate("tm")))
 //          or similar mechanisms.
@@ -30,13 +30,13 @@ using namespace llvm;
 constexpr char ANNOTATION_GLOBAL[] = "llvm.global.annotations";
 constexpr unsigned ANNOTATION_MIN_OPERANDS = 2;
 constexpr char TM_ANNOT[] = "tm";
-constexpr char TX_ANNOT[] = "transaction";
+constexpr char TX_ANNOT[] = "shared";
 constexpr char THREAD_ANNOT[] = "thread";
 constexpr char MAIN_ANNOT[] = "main";
 constexpr char TM_LOCAL_ANNOT[] = "tm_local";
 constexpr char ALLOW_OPAQUE_ANNOT[] = "tm_allow_opaque";
 constexpr char PSTATIC_REBUILD_ANNOT[] = "pstatic_rebuild";
-constexpr char ASYNC_TX_ANNOT[] = "async_transaction";
+constexpr char ASYNC_TX_ANNOT[] = "async_shared";
 constexpr char TM_CLONE_SUFFIX[] = "_tm_clone";
 constexpr char TM_DISPATCH_SUFFIX[] = "_tm_clone_dispatch";
 
@@ -81,7 +81,7 @@ static void forEachAnnotation(Module &M, Fn Callback)
 }
 
 // Check if a function has a specific annotation
-// PURPOSE: Used to identify transaction functions (annotated with "transaction")
+// PURPOSE: Used to identify shared functions (annotated with "shared")
 //          and functions using TM (annotated with "tm")
 // NOTE: Annotations are stored in @llvm.global.annotations, not on the function directly
 static bool hasAnnotation(Function &F, StringRef annot)

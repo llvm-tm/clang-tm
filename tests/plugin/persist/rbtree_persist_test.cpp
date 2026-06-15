@@ -23,7 +23,7 @@ struct TreeNode {
 };
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction"), noinline))
+#define TX __attribute__((annotate("shared"), noinline))
 
 TM TreeNode g_nodes[MAX_NODES];
 TM int32_t  g_root   = -1;

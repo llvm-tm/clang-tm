@@ -37,7 +37,9 @@ jobs:
         run: make -C plugin test
 
       - name: Run plugin tests
-        run: make -C plugin run
+        run: |
+          make -C plugin run 2>&1
+          echo "=== exit: $? ==="
 
       - name: Verify annotations
         run: make -C plugin check

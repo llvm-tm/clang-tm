@@ -22,7 +22,7 @@ struct CompositePart {
 std::vector<CompositePart> g_composite_parts;
 std::vector<AtomicPart> g_atomic_parts;
 
-__attribute__((annotate("transaction"), noinline))
+__attribute__((annotate("shared"), noinline))
 void create_composite(int id, int n_atomic,
     std::vector<CompositePart>& composite_parts,
     std::vector<AtomicPart>& atomic_parts) {

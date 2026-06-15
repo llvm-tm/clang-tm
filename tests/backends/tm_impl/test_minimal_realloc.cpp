@@ -17,7 +17,7 @@ struct Elem {
 
 static std::vector<Elem> g_vec;
 
-__attribute__((annotate("transaction"), noinline))
+__attribute__((annotate("shared"), noinline))
 void push_tx() {
     g_vec.push_back(Elem(999999, 1));
 }

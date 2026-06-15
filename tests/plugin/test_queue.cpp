@@ -9,12 +9,12 @@ extern "C" void tm_wait_prev_tx(void);
 
 static int shared = 0;
 
-__attribute__((noinline, annotate("transaction")))
+__attribute__((noinline, annotate("shared")))
 void increment(int delta) {
     shared += delta;
 }
 
-__attribute__((noinline, annotate("async_transaction")))
+__attribute__((noinline, annotate("async_shared")))
 void async_increment(int delta) {
     shared += delta;
 }
