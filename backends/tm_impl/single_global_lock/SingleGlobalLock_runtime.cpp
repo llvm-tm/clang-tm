@@ -32,7 +32,6 @@ static std::atomic<int64_t> g_tm_tx_count{0};
 
 // Plugin required
 struct TMThreadState;
-extern "C" TMThreadState *tm_get_thread_state();
 extern "C" {
 extern __thread int32_t    tm_nested_call_counter;
 extern __thread int32_t    tm_longjmp_ret;
@@ -47,8 +46,8 @@ extern const TMRealHooks g_sgl_hooks;
 
 extern "C" {
 
-TMThreadState *tm_get_thread_state() {
-    return &g_tm_state;
+static void *real_tm_get_thread_state() {
+    return (void*)&g_tm_state;
 }
 
 void tm_init() {
@@ -224,4 +223,5 @@ const TMRealHooks g_sgl_hooks = {
     .write_f4  = real_tm_write_f4,
     .write_f8  = real_tm_write_f8,
     .write_ptr = real_tm_write_ptr,
+    .get_thread_state = real_tm_get_thread_state,
 };
