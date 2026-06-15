@@ -26,16 +26,7 @@ jobs:
         run: make -C plugin race-checker
 
       - name: Build expli C++ benchmarks (NOREC)
-        run: |
-          set +e
-          make -C benchmarks/cpp -p 2>/dev/null | grep '^CXX '
-          echo "=== Dry run ==="
-          make -C benchmarks/cpp -n bin/test_tx BACKEND=NOREC 2>&1
-          echo "=== Full build ==="
-          make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=NOREC 2>&1
-          rc=$?
-          echo "=== Exit: $rc ==="
-          exit $rc
+        run: make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=NOREC
 
       - name: Run expli C++ tests (NOREC)
         run: |
