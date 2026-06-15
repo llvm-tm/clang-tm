@@ -30,8 +30,8 @@ thread_local bool tm_jmpbuf_initialized = false;
 static __thread int8_t tm_is_init_ready = 0;
 static __thread TMThreadState g_tm_thread_state = {0, 0};
 
-TMThreadState *tm_get_thread_state() {
-    return &g_tm_thread_state;
+static void *real_tm_get_thread_state() {
+    return (void*)&g_tm_thread_state;
 }
 
 #define TM_BUFFER_SIZE 1024
@@ -261,4 +261,5 @@ const TMRealHooks g_tl2_hooks = {
     .write_f4  = real_tm_write_f4,
     .write_f8  = real_tm_write_f8,
     .write_ptr = real_tm_write_ptr,
+    .get_thread_state = real_tm_get_thread_state,
 };

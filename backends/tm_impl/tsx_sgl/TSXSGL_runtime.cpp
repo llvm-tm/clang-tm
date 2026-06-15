@@ -60,8 +60,8 @@ extern __thread int32_t    tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;
 }
 
-extern "C" TMThreadState *tm_get_thread_state() {
-    return reinterpret_cast<TMThreadState*>(&tm_nested_call_counter);
+static void *real_tm_get_thread_state() {
+    return (void*)&tm_nested_call_counter;
 }
 
 enum { LOCK_BUSY = 0xFF, OWNER_CHANGED = 0x01 };
@@ -260,4 +260,5 @@ const TMRealHooks g_tsxsgl_hooks = {
     .write_f4  = real_tm_write_f4,
     .write_f8  = real_tm_write_f8,
     .write_ptr = real_tm_write_ptr,
+    .get_thread_state = real_tm_get_thread_state,
 };

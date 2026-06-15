@@ -92,8 +92,8 @@ void tm_exit_thread()
 static thread_local TMThreadState g_tm_thread_state{0, 0};
 static thread_local sigjmp_buf   g_tm_jmpbuf;
 
-TMThreadState *tm_get_thread_state() {
-    return &g_tm_thread_state;
+static void *real_tm_get_thread_state() {
+    return (void*)&g_tm_thread_state;
 }
 
 
@@ -355,4 +355,5 @@ const TMRealHooks g_dudetm_hooks = {
     .write_ptr = real_tm_write_ptr,
     .get_env    = real_tm_get_env,
     .set_jmpbuf = real_tm_set_jmpbuf,
+    .get_thread_state = real_tm_get_thread_state,
 };
