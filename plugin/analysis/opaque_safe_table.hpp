@@ -41,6 +41,7 @@ static const OpaqueSafeEntry KnownSafeOpaqueTable[] = {
     {"abort", false},
     {"_ZSt9terminatev", false},
     {"__throw_", true},
+    {"_ZSt28__throw_bad_array_new_length", true},
     {"_ZNSt20bad_array_new_length", true},
     {"_ZNSt11logic_error", true},
     {"_ZNSt12length_error", true},
