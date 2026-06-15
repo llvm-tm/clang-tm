@@ -26,7 +26,26 @@ jobs:
         run: make -C plugin race-checker
 
       - name: Build expli C++ benchmarks (NOREC)
-        run: make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=NOREC
+        run: |
+          echo "=== Finding compiler ==="
+          CXX=$(command -v clang++-22 || command -v clang++-18 || command -v clang++-17 || command -v clang++-16 || command -v clang++-15 || command -v clang++-14 || command -v clang++ || echo g++)
+          echo "CXX=$CXX"
+          $CXX --version 2>&1 | head -1
+          echo "=== Test compile trivial program ==="
+          cat > /tmp/test_trivial.cpp << 'EOF'
+          #include <csetjmp>
+          #include <setjmp.h>
+          int main() {
+            sigjmp_buf buf;
+            sigsetjmp(buf, 0);
+            return 0;
+          }
+          EOF
+          $CXX -std=c++20 -c /tmp/test_trivial.cpp -o /tmp/test_trivial.o 2>&1
+          echo "trivial compile: $?"
+          echo "=== make build ==="
+          make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=NOREC 2>&1
+          echo "make exit: $?"
 
       - name: Run expli C++ tests (NOREC)
         run: |
