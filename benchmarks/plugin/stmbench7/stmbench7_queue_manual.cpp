@@ -26,7 +26,7 @@
 #define ASYNC_TX __attribute__((noinline, annotate("async_shared")))
 #define MAIN    __attribute__((annotate("main"), noinline))
 
-extern "C" void tm_wait_prev_tx(void);
+extern "C" void (*tm_wait_prev_tx)(void);
 
 // ─── Spec constants ────────────────────────────────────────────
 constexpr int NUM_NODES       = 10000;

@@ -92,7 +92,8 @@ TEST_NAMES := test_types test_memtest test_threads test_persist test_retry \
               test_nested_tx test_tm_simple test_tm_safe_map \
               test_init_no_tx \
               test_simple_vector \
-               test_treap_tx
+              test_treap_tx \
+              test_local_containers
 
 # STL container tests — no longer supported inside TM.  These would require
 # opaque-safe-table entries for std::unordered_map, std::map, and std::string
@@ -152,14 +153,10 @@ $(BIN_DIR)/%_noinst: $(OUT_DIR)/%.bc $(RUNTIME_DIR)/tm_runtime.cpp | $(BIN_DIR)
 TINYSTM_TESTS := test_opaque_race test_local_containers test_alloc_stress test_ll_alloc test_construct_tx_pattern \
                  test_simple_vector test_treap_tx
 
-# test_local_containers uses local containers inside TX functions
-# (inline pipeline). Not in TEST_NAMES — pre-existing broken-module bug
-# in injectTransactionBeginEnd with 77 inlined ret void instructions.
-# Can be built manually: make bin/test_local_containers
-$(OUT_DIR)/test_local_containers.opt.bc: $(OUT_DIR)/test_local_containers.bc $(BIN_DIR)/libTMInstrument.so | $(OUT_DIR)
-	$(CLANG_TM) --instrument-only --plugin=$(BIN_DIR)/libTMInstrument.so \
-	  -passes="tm-instrument-inline" $< -o $(OUT_DIR)/test_local_containers.instr.bc
-	$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $(OUT_DIR)/test_local_containers.instr.bc -o $@
+# test_local_containers uses local containers inside TX functions.
+# Uses the default 5-step Honorio pipeline (each _tm_clone has exactly
+# one return, avoiding the broken-module bug in the inline pipeline).
+# See CORRECTNESS_FIXES.md for details.
 
 $(addprefix $(BIN_DIR)/,$(TINYSTM_TESTS)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(BACKENDS_DIR)/tm_impl/tiny_stm/TinySTM_runtime.cpp | $(BIN_DIR)
 	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/tm_impl/tiny_stm/TinySTM_runtime.cpp \

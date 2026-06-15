@@ -7,7 +7,7 @@
 
 #include "tm_test_common.hpp"
 
-extern "C" void tm_wait_prev_tx(void);
+extern "C" void (*tm_wait_prev_tx)(void);
 
 static int counter = 0;
 

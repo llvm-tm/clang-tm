@@ -5,7 +5,7 @@
 
 #include <cstdio>
 
-extern "C" void tm_wait_prev_tx(void);
+extern "C" void (*tm_wait_prev_tx)(void);
 
 static int shared = 0;
 
