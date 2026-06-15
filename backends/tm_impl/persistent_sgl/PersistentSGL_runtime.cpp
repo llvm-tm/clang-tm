@@ -397,11 +397,7 @@ void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
 
 int tm_setjmp() { return 0; }
 
-void tm_set_jmpbuf(void *buf) { }
 
-sigjmp_buf* tm_get_env() {
-    return &tm_jmpbuf;
-}
 
 void tm_set_env(sigjmp_buf* env) {
     if (env)

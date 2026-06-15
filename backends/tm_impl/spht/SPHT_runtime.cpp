@@ -87,19 +87,9 @@ void tm_serialize_unlock()
 	g_serialize_mutex.unlock();
 }
 
-void tm_set_jmpbuf(void *buf)
-{
-	spht::jmpbuf = (sigjmp_buf *)buf;
-}
-
 int tm_setjmp()
 {
 	return 0;
-}
-
-sigjmp_buf *tm_get_env()
-{
-	return &tm_jmpbuf;
 }
 
 TMThreadState *tm_get_thread_state()
@@ -121,6 +111,10 @@ int tm_serialize_unlock_all()
 // ═══════════════════════════════════════════════════════════════════
 //  Hook implementations (static; registered via tm_register_real_hooks)
 // ═══════════════════════════════════════════════════════════════════
+
+static void *real_tm_get_env() { return (void*)&tm_jmpbuf; }
+
+static void real_tm_set_jmpbuf(void *buf) { spht::jmpbuf = (sigjmp_buf *)buf; }
 
 static void
 spht_push_malloc_entry(void *ptr, size_t size)
@@ -265,6 +259,8 @@ const TMRealHooks g_spht_hooks = {
     .write_f4  = real_tm_write_f4,
     .write_f8  = real_tm_write_f8,
     .write_ptr = real_tm_write_ptr,
+    .get_env    = real_tm_get_env,
+    .set_jmpbuf = real_tm_set_jmpbuf,
 };
 
 // ═══════════════════════════════════════════════════════════════════

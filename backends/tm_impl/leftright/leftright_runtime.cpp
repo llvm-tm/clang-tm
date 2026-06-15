@@ -79,19 +79,17 @@ TMThreadState *tm_get_thread_state() {
     return &g_tm_thread_state;
 }
 
-void tm_set_jmpbuf(void *buf) {
-    leftright::jmpbuf_ptr = (sigjmp_buf *)buf;
-}
 
-sigjmp_buf *tm_get_env() {
-    return &tm_jmpbuf;
-}
 
 } // extern "C" — non-hook functions above, hooks below
 
 // ═══════════════════════════════════════════════════════════════════
 //  Hook implementations (static; registered via tm_register_real_hooks)
 // ═══════════════════════════════════════════════════════════════════
+
+static void *real_tm_get_env() { return (void*)&tm_jmpbuf; }
+
+static void real_tm_set_jmpbuf(void *buf) { leftright::jmpbuf_ptr = (sigjmp_buf *)buf; }
 
 // Forward declarations for static hook functions
 static void real_tm_free(void *ptr);
@@ -194,4 +192,6 @@ const TMRealHooks g_leftright_hooks = {
     .write_f4  = real_tm_write_f4,
     .write_f8  = real_tm_write_f8,
     .write_ptr = real_tm_write_ptr,
+    .get_env    = real_tm_get_env,
+    .set_jmpbuf = real_tm_set_jmpbuf,
 };

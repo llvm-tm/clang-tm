@@ -85,11 +85,6 @@ void tm_serialize_unlock()
 	g_serialize_mutex.unlock();
 }
 
-void tm_set_jmpbuf(void *buf)
-{
-	nvhtm::jmpbuf = (sigjmp_buf *)buf;
-}
-
 int tm_setjmp()
 {
 	return 0;
@@ -100,6 +95,8 @@ int tm_setjmp()
 // ═══════════════════════════════════════════════════════════════════
 //  Hook implementations (static; registered via tm_register_real_hooks)
 // ═══════════════════════════════════════════════════════════════════
+
+static void real_tm_set_jmpbuf(void *buf) { nvhtm::jmpbuf = (sigjmp_buf *)buf; }
 
 static void real_tm_begin()
 {
@@ -218,6 +215,7 @@ const TMRealHooks g_nvhtm_hooks = {
     .write_f4  = real_tm_write_f4,
     .write_f8  = real_tm_write_f8,
     .write_ptr = real_tm_write_ptr,
+    .set_jmpbuf = real_tm_set_jmpbuf,
 };
 
 // ═══════════════════════════════════════════════════════════════════

@@ -78,11 +78,7 @@ extern "C" int tm_setjmp() {
     return 0;
 }
 
-extern "C" void tm_set_jmpbuf(void *buf) { }
 
-extern "C" sigjmp_buf* tm_get_env() {
-    return &tm_jmpbuf;
-}
 
 extern "C" void tm_set_env(sigjmp_buf* env) {
     if (env) {

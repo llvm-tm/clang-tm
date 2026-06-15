@@ -90,6 +90,83 @@ static std::atomic<uint64_t> g_tm_begin_count{0};
 static std::atomic<uint64_t> g_tm_end_count{0};
 static std::atomic<uint64_t> g_tm_tx_count{0};
 extern "C" {
+#ifdef LLVM_TM_PLUGIN
+
+static void do_tm_init()
+{
+	tinystm::init();
+	tinystm::reset_locks();
+	tm_register_real_hooks(&g_tiny_hooks);
+}
+
+static void do_tm_exit()
+{
+	tinystm::exit();
+	auto cc = g_tm_commit_count.load();
+	auto tr = g_tm_total_commit_reads.load();
+	auto tw = g_tm_total_commit_writes.load();
+	auto mxr = g_tm_max_read_set.load();
+	auto mxw = g_tm_max_write_set.load();
+	auto mnr = g_tm_min_read_set.load();
+	auto mnw = g_tm_min_write_set.load();
+	auto ac = tinystm::g_tm_abort_count.load();
+
+	fprintf(stdout, "TM_STATS: commits=%llu", (unsigned long long)cc);
+	if (cc > 0) {
+		fprintf(stdout,
+		        " avg_reads=%.1f min_reads=%llu max_reads=%llu"
+		        " avg_writes=%.1f min_writes=%llu max_writes=%llu",
+		        (double)tr / cc,
+		        (unsigned long long)mnr,
+		        (unsigned long long)mxr,
+		        (double)tw / cc,
+		        (unsigned long long)mnw,
+		        (unsigned long long)mxw);
+	}
+	fprintf(stdout, " aborts=%llu\n", (unsigned long long)ac);
+	fflush(stdout);
+
+#ifndef NDEBUG
+	fprintf(stderr,
+	        "\n=== TinySTM max read-set = %llu, max write-set = %llu ===\n",
+	        (unsigned long long)mxr,
+	        (unsigned long long)mxw);
+#endif
+	if (ac > 0) {
+		fprintf(stderr,
+		        "\n=== TinySTM total aborts = %llu ===\n",
+		        (unsigned long long)ac);
+	}
+}
+
+static void do_tm_init_thread()
+{
+	tm_hook_init_thread();
+	tm_init_thread_call_count++;
+#ifndef NDEBUG
+	(void)0;
+#endif
+	tinystm::init_thread();
+#if defined(DESIGN_WBCTL)
+	g_tl_tid = tinystm::current_tx_wbctl->id;
+#elif defined(DESIGN_WBETL)
+	g_tl_tid = tinystm::current_tx_wbetl->id;
+#elif defined(DESIGN_WT)
+	g_tl_tid = tinystm::current_tx_wt->id;
+#endif
+}
+
+static void do_tm_exit_thread()
+{
+	tm_hook_exit_thread();
+}
+
+void (*tm_init)()        = do_tm_init;
+void (*tm_exit)()        = do_tm_exit;
+void (*tm_init_thread)() = do_tm_init_thread;
+void (*tm_exit_thread)() = do_tm_exit_thread;
+
+#else
 
 void tm_init()
 {
@@ -146,8 +223,6 @@ void tm_init_thread()
 	(void)0;
 #endif
 	tinystm::init_thread();
-	// Capture the thread's TinySTM ID for EBR.
-	// tinystm::init_thread() sets the thread ID (tx->id) via thr_counter.
 #if defined(DESIGN_WBCTL)
 	g_tl_tid = tinystm::current_tx_wbctl->id;
 #elif defined(DESIGN_WBETL)
@@ -162,6 +237,8 @@ void tm_exit_thread()
 	tm_hook_exit_thread();
 	// no-op — Transaction object persists for the thread's lifetime
 }
+
+#endif
 
 // Serialization lock for functions that couldn't be cloned.
 // Uses recursive_mutex so the same thread can re-acquire after a longjmp retry.
@@ -193,9 +270,6 @@ int tm_serialize_unlock_all()
 	return n;
 }
 
-void tm_set_jmpbuf(void *buf) { tinystm::jmpbuf = (sigjmp_buf *)buf; }
-sigjmp_buf *tm_get_env() { return &tm_jmpbuf; }
-
 int tm_setjmp() { return 0; }
 
 // Separate thread-local for plugin-side TM state so that
@@ -204,21 +278,31 @@ int tm_setjmp() { return 0; }
 // tm_begin() compares both to decide explicit vs plugin mode.
 static __thread TMThreadState g_tm_thread_state = {0, 0};
 
-TMThreadState *tm_get_thread_state() { return &g_tm_thread_state; }
-
 } // extern "C" — non‑hook functions above, hooks below
 
 // ═══════════════════════════════════════════════════════════════════
 //  Hook implementations (static; registered via tm_register_real_hooks)
 // ═══════════════════════════════════════════════════════════════════
 
+static void *real_tm_get_env() {
+    return (void*)&tm_jmpbuf;
+}
+
+static void real_tm_set_jmpbuf(void *buf) {
+    tinystm::jmpbuf = (sigjmp_buf *)buf;
+}
+
+static void *real_tm_get_thread_state() {
+    return &g_tm_thread_state;
+}
+
 static void real_tm_begin()
 {
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
-	auto *ts = tm_get_thread_state();
+	auto *ts = real_tm_get_thread_state();
 	int32_t tc = tm_nested_call_counter;
-	int32_t sc = ts->nested_call_counter;
+	int32_t sc = ((TMThreadState*)ts)->nested_call_counter;
 	if (tc > 0 && sc == 0)
 		g_tm_expli_mode = true;
 	else if (sc > 0 && tc == 0)
@@ -254,9 +338,9 @@ static void real_tm_end()
 {
 	g_tm_end_count.fetch_add(1, std::memory_order_relaxed);
 	tm_end_count++;
-	auto *ts = tm_get_thread_state();
+	auto *ts = real_tm_get_thread_state();
 	int32_t tc = tm_nested_call_counter;
-	int32_t sc = ts->nested_call_counter;
+	int32_t sc = ((TMThreadState*)ts)->nested_call_counter;
 	int32_t c = (tc > 0) ? tc : sc;
 	if (c == 1) {
 		g_in_tx = false;
@@ -455,6 +539,9 @@ const TMRealHooks g_tiny_hooks = {
     .write_f4  = real_tm_write_f4,
     .write_f8  = real_tm_write_f8,
     .write_ptr = real_tm_write_ptr,
+    .get_env = real_tm_get_env,
+    .set_jmpbuf = real_tm_set_jmpbuf,
+    .get_thread_state = real_tm_get_thread_state,
 };
 
 // ═══════════════════════════════════════════════════════════════════

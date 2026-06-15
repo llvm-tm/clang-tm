@@ -44,6 +44,12 @@ extern void (*tm_write_f4)(float*, float);
 extern void (*tm_write_f8)(double*, double);
 extern void (*tm_write_ptr)(void**, void*);
 
+// Sigsetjmp hook (system sigsetjmp wrapper — always the same regardless of backend)
+extern int (*tm_sigsetjmp)(void*, int);
+
+// Thread-state hook (each backend provides its own implementation)
+extern void *(*tm_get_thread_state)();
+
 } // extern "C"
 
 // ── Registration API ────────────────────────────────────────
@@ -72,6 +78,9 @@ struct TMRealHooks {
     void     (*write_f4)(float*, float)        = nullptr;
     void     (*write_f8)(double*, double)      = nullptr;
     void     (*write_ptr)(void**, void*)        = nullptr;
+    void    *(*get_env)()                        = nullptr;
+    void     (*set_jmpbuf)(void*)                = nullptr;
+    void    *(*get_thread_state)()               = nullptr;
 };
 
 void tm_register_real_hooks(const TMRealHooks *hooks);

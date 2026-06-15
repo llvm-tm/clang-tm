@@ -15,6 +15,4 @@ struct TMThreadState {
     int32_t longjmp_ret;
 };
 
-extern "C" TMThreadState *tm_get_thread_state();
-
 #endif // TM_THREAD_STATE_HPP
