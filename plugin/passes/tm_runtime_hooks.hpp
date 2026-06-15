@@ -78,8 +78,9 @@ static InvokeInst *createHookInvoke(LLVMContext &Ctx, const TMRuntimeHook &Hook,
                                     BasicBlock *Normal, BasicBlock *Unwind,
                                     const Twine &Name = "") {
 	auto *FnPtrTy = PointerType::getUnqual(Ctx);
+	auto It = Unwind->getFirstNonPHIIt();
 	auto *FnPtr   = new LoadInst(FnPtrTy, Hook.gv, "hook." + Hook.gv->getName(),
-	                             false, &*Unwind->getFirstNonPHIIt());
+	                             false, It);
 	return InvokeInst::Create(Hook.fnTy, FnPtr, Normal, Unwind, Args, {}, Name);
 }
 
