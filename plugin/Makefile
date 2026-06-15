@@ -77,7 +77,7 @@ TM_PASS_CXXFLAGS := -I$(BACKENDS_DIR)/tm_impl/common -I$(BACKENDS_DIR) -I$(LLVM_
 # Plugin variants: each gets the matching -D flags.
 # Compile all pass sources into a single .so.
 define TMPluginTarget
-$(BIN_DIR)/libTMInstrument_$(1).so: $(TM_PASS_SRCS) | $(BIN_DIR)
+$(BIN_DIR)/libTMInstrument_$(1).so: $(TM_PASS_SRCS) $(wildcard analysis/*.hpp) | $(BIN_DIR)
 	$(CXX) $(TM_PASS_CXXFLAGS) $(PLUGIN_FLAGS_$(1)) -shared $(TM_PASS_SRCS) -o $$@ $(LLVM_CONFIG_ARGS)
 endef
 $(foreach v,$(PLUGIN_VARIANTS),$(eval $(call TMPluginTarget,$(v))))

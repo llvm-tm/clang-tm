@@ -37,7 +37,7 @@ info:
 
 plugin: $(PLUGIN)
 
-$(PLUGIN): $(LLVM_PLUGIN_DIR)/passes/TMInstrumentPass.cpp | $(LLVM_PLUGIN_DIR)/bin
+$(PLUGIN): $(LLVM_PLUGIN_DIR)/passes/TMInstrumentPass.cpp $(LLVM_PLUGIN_DIR)/analysis/opaque_safe_table.hpp | $(LLVM_PLUGIN_DIR)/bin
 	$(CXX) -fPIC -std=c++20 -shared $< -o $@ \
 	  -I$(LLVM_PLUGIN_DIR)/passes -I$(LLVM_PLUGIN_DIR)/analysis \
 	  -I$(BACKENDS_DIR)/tm_impl/common $(LLVM_CONFIG_ARGS)
