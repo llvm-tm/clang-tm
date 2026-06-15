@@ -26,7 +26,21 @@ jobs:
         run: make -C plugin race-checker
 
       - name: Build expli C++ benchmarks (NOREC)
-        run: make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=NOREC
+        run: |
+          echo "=== Compiler ==="
+          which clang++ && clang++ --version | head -2
+          which g++ && g++ --version | head -1
+          echo "=== Sequential build ==="
+          set +e
+          make -C benchmarks/cpp bin/test_tx bin/test_ds BACKEND=NOREC 2>&1
+          ec1=$?
+          echo "=== Sequential exit code: $ec1 ==="
+          make -C benchmarks/cpp clean 2>&1 > /dev/null
+          echo "=== Parallel build (-j4) ==="
+          make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=NOREC 2>&1
+          ec2=$?
+          echo "=== Parallel exit code: $ec2 ==="
+          exit $((ec1 > ec2 ? ec1 : ec2))
 
       - name: Run expli C++ tests (NOREC)
         run: |
