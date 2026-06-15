@@ -282,12 +282,12 @@ void consume_ptr(volatile void *ptr) { (void)ptr; }
 } // extern "C"
 
 // sigsetjmp hook: the LLVM pass declares @tm_sigsetjmp as a DATA ptr.
-// On Linux the hook is `__sigsetjmp` (a glibc internal name, no conflict).
-// On macOS/BSD we use `tm_sigsetjmp` to avoid clashing with the POSIX
-// function `sigsetjmp` from <setjmp.h>.
-#ifdef __APPLE__
-__asm__(".globl _tm_sigsetjmp\n"
-        ".data\n"
-        ".align 3\n"
-        "_tm_sigsetjmp: .quad _sigsetjmp\n");
+// We must provide a DATA symbol (function pointer) containing the address
+// of the real sigsetjmp implementation — NOT the implementation itself.
+// On glibc, sigsetjmp is a macro expanding to __sigsetjmp(env, savemask);
+// taking its address requires the underlying function name.
+#if defined(__APPLE__)
+int (*tm_sigsetjmp)(void*, int) = (int(*)(void*, int))sigsetjmp;
+#else
+int (*tm_sigsetjmp)(void*, int) = (int(*)(void*, int))__sigsetjmp;
 #endif

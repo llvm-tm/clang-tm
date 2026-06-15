@@ -90,10 +90,23 @@ Comprehensive smoke test: `test_tx` + `test_ds` on 10 backends (TINYSTM, WBETL, 
 | LEFTRIGHT | 114/114   | 207/207   |
 | ROMULUS   | 114/114   | 207/207   |
 
+## sigsetjmp DATA/TEXT symbol fix (CI Linux crash)
+
+**Root cause**: The LLVM pass (`sigsetjmpName()` in `tm_platform.hpp`) returned `"__sigsetjmp"` on Linux, but `__sigsetjmp` is a real function (TEXT symbol) in glibc — the pass declares it as `external global ptr` (DATA symbol). Generated code: `load ptr, ptr @__sigsetjmp` reads 8 bytes of the function's machine code → garbage address → SIGSEGV. On macOS `sigsetjmpName()` returned `"tm_sigsetjmp"`, which the runtime defines as a proper `.quad` DATA symbol, so it worked.
+
+**Fix**: `sigsetjmpName()` now returns `"tm_sigsetjmp"` on all platforms. Added `tm_sigsetjmp` DATA variable definition (as C-level `int (*tm_sigsetjmp)(void*, int) = ...`) to `plugin/runtime/tm_runtime.cpp` and `plugin/runtime/persistent.cpp` for all platforms (previously only on Apple via Mach-O asm).
+
+**Result**: `make -C plugin run` passes on Linux x86_64 (Docker QEMU). All 18 plugin tests pass on both macOS arm64 and Linux x86_64.
+
+## Plugin runtime TLS/stub cleanup
+
+- `tm_runtime.cpp` and `persistent.cpp` now define all TLS variables (`tm_nested_call_counter`, `tm_longjmp_ret`, `tm_jmpbuf`, etc.) and all hook DATA variables directly, eliminating the need to link `backends/tm_impl/common/tm_hooks.cpp` for plugin runtimes.
+
 ## Known issues
 
 - `test_stress_ds` has a pre-existing assertion failure on non-TM addresses (region-size bug unrelated to hooks refactoring)
 - TinySTM `counter_mt` has the same pre-existing assertion failure
+- `make plugin-benchmarks` / STAMP benchmarks fail with `tm_safe_map.hpp` header path issue (pre-existing, unrelated to plugin)
 - **rbtree double‑free in TM region allocator** (`FATAL: double-free detected in TM`) — pre‑existing. Root cause: region allocator reuses addresses across transactions; `g_deferred_frees_set` (thread‑local) fires false‑positive when same address freed again in a different thread.
 - **stmbench7 times out with >1 thread** — root cause: data race in `ts_multimap::lower_bound()` — `op_st5` drops `std::mutex` before iterating, leaving raw iterator into `tm_malloc`‑backed memory. Affects NOrec, TL2, SwissTM; TinySTM survives by chance (per‑object locking serializes the path).
 - **LEFTRIGHT bank/ycsb multi-thread deadlock** — pre‑existing. Left-right barrier implementation deadlocks with >1 thread.
