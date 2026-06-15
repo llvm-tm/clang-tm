@@ -23,7 +23,10 @@ extern "C" {
 // In inline mode: calls fn(args) immediately.
 // In queue mode: increments thread_local pending counter, enqueues work,
 //                worker decrements the CALLER's counter on completion.
-void tm_enqueue(void (*fn)(void*), void* args);
+//
+// DATA variable (function pointer) — the LLVM pass declares this as
+// external global ptr and emits indirect calls through it.
+extern void (*tm_enqueue)(void (*fn)(void*), void* args);
 
 // Extended enqueue with queue routing and transaction ID.
 // queue_id: target queue index (0..num_queues-1), or -1 for default round-robin.
@@ -43,7 +46,10 @@ uint64_t tm_last_tx_id(void);
 // Block until all pending TXes enqueued by this thread complete.
 // In inline mode: no-op (TX already completed synchronously).
 // In queue mode: spin-waits on thread_local pending counter.
-void tm_wait_prev_tx(void);
+//
+// DATA variable (function pointer) — the LLVM pass declares this as
+// external global ptr and emits indirect calls through it.
+extern void (*tm_wait_prev_tx)(void);
 
 // Initialize thread pool.  Called once at program startup.
 // Workers read from THREADS env var, fallback to default_workers.

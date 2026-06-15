@@ -116,22 +116,38 @@ for 24-byte size class).
 
 ---
 
-## 7. test_local_containers opaque errors — missing stdlib exception symbols ✅
+## 7. test_local_containers — opaque errors + broken-module bug ✅ (fully fixed)
 
-**Root cause:** `test_local_containers.cpp` uses `std::vector` inside `[[tx::transaction]]` functions. At `-O1`, the LLVM frontend generates `@__clang_call_terminate` → `@_ZSt9terminatev` for exception cleanup paths, and `@__cxa_throw` with `@_ZNSt20bad_array_new_lengthC1Ev`, `@_ZNSt11logic_errorC2EPKc`, `@_ZNSt12length_errorD1Ev` for allocation failure paths. None of these symbols were in the `KnownSafeOpaqueTable`, so the opaque check aborted.
+**Root cause (opaque errors):** See original entry below — missing stdlib exception symbols in `KnownSafeOpaqueTable`.
 
-**Fix:** Added to `opaque_safe_table.hpp`:
-- `_ZSt9terminatev` — `std::terminate()` called from `__clang_call_terminate`
-- `__throw_*` prefix — all `std::__throw_*` functions (e.g. `__throw_length_error`, `__throw_bad_array_new_length`)
-- `_ZNSt20bad_array_new_lengthC1Ev` / `C2Ev` — `bad_array_new_length` constructors
-- `_ZNSt11logic_errorC2EPKc` — `std::logic_error` constructor
-- `_ZNSt12length_errorD1Ev` — `std::length_error` destructor
+**Root cause (broken-module bug):** The inline pipeline (`tm-instrument-inline`) ran `injectTransactionBeginEnd` on the function `vector_tx` after all its callees had been inlined. The function body contained 77 `ret void` instructions from `std::vector` template expansions, and the return-splitting logic in `injectTransactionBeginEnd` produced a basic block without a terminator: "Basic Block in function '_Z9vector_txii' does not have terminator!".
 
-These functions never access TM-annotated memory — they either terminate the program or construct exception objects on the heap. They are safe to call within a transaction.
+**Fix:** Switched from `tm-instrument-inline` (inline pipeline) to `tm-instrument` (default 5-step Honorio pipeline). The Honorio pipeline clones functions before instrumentation (`tm-clone` pass), so each `_tm_clone` has exactly one return — the return-splitting logic works correctly. Removed the custom Makefile rule; added `test_local_containers` to `TEST_NAMES`.
 
-**Revealed pre-existing issue:** After the opaque check passes, `injectTransactionBeginEnd` in `tm_instrument_helpers.hpp` creates a broken module: "Basic Block in function '_Z9vector_txii' does not have terminator!". This occurs because the function has 77 inlined `ret void` instructions from `std::vector` template code, and the return-splitting logic in `injectTransactionBeginEnd` doesn't handle the case where multiple returns share a parent block. The opaque check was previously masking this bug by aborting before the verify pass ran.
+**Verification:** `bin/test_local_containers`: `g_tx_count = 419 (expected >= 400)` PASS.
 
-**Removed from TEST_NAMES** in the Makefile — `test_local_containers` was never part of `run_tests.sh` and couldn't build due to the opaque check. Now that the opaque check passes, it still fails due to the pre-existing broken-module bug. Kept in `TINYSTM_TESTS` for manual builds. Also removed `test_vec_push`, `test_vector_realloc`, `test_stl_vector_race`, `test_realloc_crash`, and `test_std_queue` from `TEST_NAMES` (and `TINYSTM_TESTS`/`SWISSTM_TESTS`) — these tested STL containers inside TX, which has been an accepted limitation since the Honorio 5-pass decomposition. Source files kept for reference.
+## 8. Queue runtime DATA/TEXT symbol conflicts — tm_enqueue, tm_wait_prev_tx, tm_init_thread, tm_exit_thread ✅
+
+**Root cause:** Four hook symbols in the queue runtime were declared/defined as TEXT functions (standalone `__TEXT,__text`), but the LLVM pass declares all hooks as DATA variables (`external global ptr`). On macOS, ld64 silently accepts the mismatch (treats the TEXT address as a pointer value). On Linux, LLD strictly enforces type checking — the generated code loads 8 bytes of function machine code as a function pointer → jumps to garbage → `udf #0xe08` trap.
+
+**Symbols affected:**
+- `tm_enqueue` — was `void tm_enqueue(...) { ... }` (TEXT) → now `void (*tm_enqueue)(...) = &real_tm_enqueue;` (DATA)
+- `tm_wait_prev_tx` — was `void tm_wait_prev_tx(void) { ... }` (TEXT) → now `void (*tm_wait_prev_tx)(void) = &real_tm_wait_prev_tx;` (DATA)
+- `tm_init_thread` — was `extern "C" void tm_init_thread(void)` (TEXT declaration) → now `extern "C" void (*tm_init_thread)(void)` (DATA declaration)
+- `tm_exit_thread` — same pattern as `tm_init_thread`
+
+**Pattern used** (same as `tm_sigsetjmp` fix in `plugin/runtime/tm_runtime.cpp`):
+```cpp
+// 1. Real implementation as static function
+static void real_tm_enqueue(void (*fn)(void*), void* args) { ... }
+
+// 2. DATA variable pointing to it
+void (*tm_enqueue)(void (*)(void*), void*) = &real_tm_enqueue;
+```
+
+**All test/bench files using these hooks updated:** `test_queue.cpp`, `test_queue_async.cpp`, `bench_queue_compare.cpp`, `bench_queue_compare2.cpp`, `stmbench7_queue_manual.cpp` — changed `extern "C" void tm_wait_prev_tx(void)` → `extern "C" void (*tm_wait_prev_tx)(void)`.
+
+**Verification:** `bin/test_queue`: PASS, `bin/test_queue_sync`: PASS, `bin/test_queue_async`: PASS. `make -C plugin run`: all 18+ plugin tests pass on macOS arm64.
 
 ---
 
@@ -142,3 +158,5 @@ These functions never access TM-annotated memory — they either terminate the p
 | TinySTM STMbench7 crash (STL vector realloc) | High | STL-in-TM incompatibility, pre-existing |
 | LEFTRIGHT write-set `observed_version` | Low | Uses global clock at read time instead of per-address version; correct with global lock but more conservative than needed |
 | stmbench7 times out with >1 thread | Low | Data race in `ts_multimap::lower_bound()` — pre-existing |
+| **`test_queue_multi` counter mismatch (351 vs 400)** | Low | `counter` is a plain `static int` (not TM-tracked). The `TX` annotation creates a TM transaction wrapper, but the LLVM pass instruments only TM-annotated globals. 4 threads × 100 increments of a non-TM variable without atomic/lock protection → classic lost-update race. Expected 400, consistently observed ~351. Fix: either declare counter as `TM int counter` or use `std::atomic<int>`. Also affects `bench_queue_compare.cpp` and `bench_queue_compare2.cpp` (same plain-`static int counter` pattern). |
+| **`test_queue_multi` no caller-side completion wait** | Low | The test joins pthreads (caller threads) but never waits for pool workers to finish all enqueued tasks. If `counter` were TM-tracked, workers might still be executing after `pthread_join` returns. Fix: caller threads should call `tm_wait_prev_tx()` after their enqueue loops. |
