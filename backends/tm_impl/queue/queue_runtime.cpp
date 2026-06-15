@@ -13,8 +13,10 @@
 #include <unordered_map>
 #include <vector>
 
-extern "C" void tm_init_thread(void);
-extern "C" void tm_exit_thread(void);
+// DATA variables: backends compiled with -DLLVM_TM_PLUGIN define these as
+// function-pointer variables, not as TEXT functions.
+extern "C" void (*tm_init_thread)(void);
+extern "C" void (*tm_exit_thread)(void);
 
 // =========================================================================
 // Perf counters (gated by -DTM_PERF_COUNTERS, macros in header)
@@ -206,7 +208,7 @@ extern "C" {
 
 thread_local int g_tm_queue_active = 0;
 
-void tm_enqueue(void (*fn)(void*), void* args)
+static void real_tm_enqueue(void (*fn)(void*), void* args)
 {
     TM_PERF_INC(g_caller_perf, enqueue_calls);
 
@@ -233,6 +235,11 @@ void tm_enqueue(void (*fn)(void*), void* args)
         caller_pending->fetch_sub(1, std::memory_order_release);
     });
 }
+
+// DATA variable: LLVM plugin declares @tm_enqueue as external global ptr
+// (function-pointer variable).  The actual implementation lives in
+// real_tm_enqueue above.
+void (*tm_enqueue)(void (*)(void*), void*) = &real_tm_enqueue;
 
 uint64_t tm_enqueue_ex(void (*fn)(void*), void* args, int queue_id)
 {
@@ -303,7 +310,7 @@ uint64_t tm_last_tx_id(void)
     return g_last_tx_id;
 }
 
-void tm_wait_prev_tx(void)
+static void real_tm_wait_prev_tx(void)
 {
     TM_PERF_INC(g_caller_perf, wait_calls);
 
@@ -320,6 +327,9 @@ void tm_wait_prev_tx(void)
 
     TM_PERF_END(g_caller_perf);
 }
+
+// DATA variable: LLVM plugin declares @tm_wait_prev_tx as external global ptr.
+void (*tm_wait_prev_tx)(void) = &real_tm_wait_prev_tx;
 
 void tm_queue_init(int default_workers, int default_queues)
 {
