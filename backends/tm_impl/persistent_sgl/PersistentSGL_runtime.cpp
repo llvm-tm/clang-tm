@@ -211,14 +211,17 @@ const TMRealHooks g_psgl_hooks = {
     real_tm_write_f4,
     real_tm_write_f8,
     real_tm_write_ptr,
+    nullptr,                    // get_env (stub suffices)
+    nullptr,                    // set_jmpbuf (stub suffices)
+    real_tm_get_thread_state,
 };
 
 // ── Extern "C" API ────────────────────────────────────────────
 
 extern "C" {
 
-TMThreadState *tm_get_thread_state() {
-    return &g_tm_persist_state;
+static void *real_tm_get_thread_state() {
+    return (void*)&g_tm_persist_state;
 }
 
 extern uint32_t tm_symbol_count;

@@ -113,8 +113,8 @@ void tm_init_thread()
 
 void tm_exit_thread() { tm_hook_exit_thread(); norec::exit_thread(); }
 
-TMThreadState *tm_get_thread_state() {
-    return reinterpret_cast<TMThreadState*>(&tm_nested_call_counter);
+static void *real_tm_get_thread_state() {
+    return (void*)&tm_nested_call_counter;
 }
 
 static std::recursive_mutex g_serialize_mutex;
@@ -376,4 +376,5 @@ const TMRealHooks g_norec_hooks = {
     .write_f4  = real_tm_write_f4,
     .write_f8  = real_tm_write_f8,
     .write_ptr = real_tm_write_ptr,
+    .get_thread_state = real_tm_get_thread_state,
 };

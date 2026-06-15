@@ -75,8 +75,8 @@ void tm_init_thread() {
 
 void tm_exit_thread() { tm_hook_exit_thread(); }
 
-TMThreadState *tm_get_thread_state() {
-    return &g_tm_thread_state;
+static void *real_tm_get_thread_state() {
+    return (void*)&g_tm_thread_state;
 }
 
 
@@ -194,4 +194,5 @@ const TMRealHooks g_leftright_hooks = {
     .write_ptr = real_tm_write_ptr,
     .get_env    = real_tm_get_env,
     .set_jmpbuf = real_tm_set_jmpbuf,
+    .get_thread_state = real_tm_get_thread_state,
 };

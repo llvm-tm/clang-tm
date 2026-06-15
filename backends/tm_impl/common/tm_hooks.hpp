@@ -3,19 +3,73 @@
 #include <cstddef>
 #include <cstdint>
 
-// ── Public hook variables ─────────────────────────────────────────
-// These are the actual extern "C" symbols seen by all callers (both
-// plugin-generated code and explicit API).
+// ═══════════════════════════════════════════════════════════════════════
+//  Stable Hook Interface — how to create a new TM backend runtime
+// ═══════════════════════════════════════════════════════════════════════
 //
-// Each is a function-pointer variable (not a forwarding function) so
-// that the runtime can swap the hook at runtime for:
-//   - single-thread stubs (direct access, no TM overhead)
-//   - multi-thread real TM implementations
-//   - phase-based TM (different backends based on abort rate)
+// The TM system uses function-pointer variables (not forwarding functions)
+// for ALL hook operations.  This enables:
+//   1. Stub/real swapping: single‑thread → multi‑thread transparently
+//   2. Phase‑based TM: swap backends at runtime via tm_swap_runtime()
+//   3. Immediate effect: LLVM plugin emits indirect calls through these
+//      pointers, so swaps take effect for instrumented code too.
 //
-// The LLVM plugin emits indirect calls (load + call through) so that
-// hook swaps take effect immediately for instrumented code too.
+// ── RULE: EVERY HOOK IS A DATA VARIABLE ──────────────────────────────
+//
+// All hooks declared below with "extern void (*NAME)()" are DATA variables
+// — function pointers, NOT function declarations.  Backend runtime files
+// MUST NOT define a function with the same name (e.g. "void tm_begin() { }"
+// would collide with "void (*tm_begin)()").
+//
+// ── HOW TO CREATE A NEW BACKEND RUNTIME ──────────────────────────────
+//
+// In your backend_runtime.cpp:
+//
+//   #include "tm_hooks.hpp"
+//
+//   // 1. Implement each hook as a STATIC function
+//   static void real_tm_begin() { ... }
+//   static void real_tm_end()   { ... }
+//   static uint8_t real_tm_read_i1(uint8_t *a) { ... }
+//   // ... all 21 hooks (7 reads + 7 writes + 5 lifecycle + 2 misc)
+//
+//   // 2. Use RETURN TYPE "void*" for get_thread_state / get_env
+//   static void *real_tm_get_thread_state() { return (void*)&my_state; }
+//   static void *real_tm_get_env() { return (void*)&tm_jmpbuf; }
+//   static void  real_tm_set_jmpbuf(void *buf) { }
+//
+//   // 3. Build the registration table with designated initializers
+//   const TMRealHooks g_my_backend_hooks = {
+//       .begin    = real_tm_begin,
+//       .end      = real_tm_end,
+//       .malloc   = real_tm_malloc,
+//       .calloc   = real_tm_calloc,
+//       .free     = real_tm_free,
+//       .read_i1  = real_tm_read_i1,
+//       // ... remaining read/write hooks ...
+//       .write_ptr = real_tm_write_ptr,
+//       .get_env   = real_tm_get_env,
+//       .set_jmpbuf = real_tm_set_jmpbuf,
+//       .get_thread_state = real_tm_get_thread_state,
+//   };
+//
+//   // 4. Register in tm_init()
+//   void tm_init() {
+//       tm_register_real_hooks(&g_my_backend_hooks);
+//   }
+//
+// ── WHAT NOT TO DO ───────────────────────────────────────────────────
+//
+//   ❌ extern "C" TMThreadState *tm_get_thread_state() { ... }
+//      → Collides with "extern void *(*tm_get_thread_state)()" below.
+//        Use "static void *real_tm_get_thread_state()" instead.
+//
+//   ❌ void tm_begin() { ... }
+//      → Same collision.  Use "static void real_tm_begin() { }".
+//
+// ═══════════════════════════════════════════════════════════════════════
 
+// ── Public hook variables ─────────────────────────────────────────
 extern "C" {
 
 // Lifecycle

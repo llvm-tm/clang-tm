@@ -37,8 +37,8 @@ extern "C" {
 __thread int8_t tm_is_init_ready = 0;
 static thread_local TMThreadState g_tm_state{0, 0};
 
-TMThreadState *tm_get_thread_state() {
-    return &g_tm_state;
+static void *real_tm_get_thread_state() {
+    return (void*)&g_tm_state;
 }
 
 #define TM_BUFFER_SIZE 1024
@@ -303,4 +303,5 @@ const TMRealHooks g_swisstm_hooks = {
     .write_ptr = real_tm_write_ptr,
     .get_env    = real_tm_get_env,
     .set_jmpbuf = real_tm_set_jmpbuf,
+    .get_thread_state = real_tm_get_thread_state,
 };

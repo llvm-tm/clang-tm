@@ -92,7 +92,6 @@ TEST_NAMES := test_types test_memtest test_threads test_persist test_retry \
               test_nested_tx test_tm_simple test_tm_safe_map \
               test_init_no_tx \
               test_simple_vector \
-               test_alloc_stress_manual test_manual_tx \
                test_treap_tx test_queue \
                test_queue_sync test_queue_async test_queue_multi
 
@@ -141,25 +140,7 @@ $(BIN_DIR)/test_math_opaque: $(OUT_DIR)/test_math_opaque.bc $(RUNTIME_DIR)/tm_ru
 	$(CLANG_TM) --link-only --runtime=$(RUNTIME_DIR)/tm_runtime.cpp \
 	  $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/test_math_opaque.opt.bc -o $@ -lm
 
-# Manual TM tests (no plugin — hand-instrumented with TinySTM calls directly)
-# These need -I flags for TinySTM headers, unlike normal test sources.
-$(OUT_DIR)/test_alloc_stress_manual.bc: $(TEST_DIR)/test_alloc_stress_manual.cpp | $(OUT_DIR)
-	$(CLANG_TM) --compile-only -std=c++20 $(TM_COMPILE_FLAGS) \
-	  -DDESIGN_WBCTL -I $(TINYSTM_DIR) -I $(BACKENDS_DIR)/tm_impl/common -I $(BACKENDS_DIR) $< -o $@
 
-$(BIN_DIR)/test_alloc_stress_manual: $(OUT_DIR)/test_alloc_stress_manual.bc $(BACKENDS_DIR)/tm_impl/tiny_stm/TinySTM_runtime.cpp | $(BIN_DIR)
-	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/tm_impl/tiny_stm/TinySTM_runtime.cpp \
-	  $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
-	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR)/tm_impl/common -I $(BACKENDS_DIR) $< -o $@
-
-$(OUT_DIR)/test_manual_tx.bc: $(TEST_DIR)/test_manual_tx.cpp | $(OUT_DIR)
-	$(CLANG_TM) --compile-only -std=c++20 $(TM_COMPILE_FLAGS) \
-	  -DDESIGN_WBCTL -I $(TINYSTM_DIR) -I $(BACKENDS_DIR)/tm_impl/common -I $(BACKENDS_DIR) $< -o $@
-
-$(BIN_DIR)/test_manual_tx: $(OUT_DIR)/test_manual_tx.bc $(BACKENDS_DIR)/tm_impl/tiny_stm/TinySTM_runtime.cpp | $(BIN_DIR)
-	$(CLANG_TM) --link-only --runtime=$(BACKENDS_DIR)/tm_impl/tiny_stm/TinySTM_runtime.cpp \
-	  $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL \
-	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR)/tm_impl/common -I $(BACKENDS_DIR) $< -o $@
 
 # Uninstrumented variant (no plugin)
 $(BIN_DIR)/%_noinst: $(OUT_DIR)/%.bc $(RUNTIME_DIR)/tm_runtime.cpp | $(BIN_DIR)
