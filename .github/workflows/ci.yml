@@ -30,10 +30,8 @@ jobs:
 
       - name: Run expli C++ tests (NOREC)
         run: |
-          echo "=== test_tx ==="
-          ./benchmarks/cpp/bin/test_tx 2>&1 || echo "test_tx exit: $?"
-          echo "=== test_ds ==="
-          ./benchmarks/cpp/bin/test_ds 2>&1 || echo "test_ds exit: $?"
+          ./benchmarks/cpp/bin/test_tx
+          ./benchmarks/cpp/bin/test_ds
 
       - name: Build plugin tests
         run: make -C plugin test
