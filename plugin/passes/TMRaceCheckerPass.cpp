@@ -48,7 +48,7 @@ namespace {
 // transitively reachable from TX functions, so the race checker should not
 // flag code that will be instrumented.
 //
-// Only "transaction"-annotated functions are used as seeds.  THREAD, MAIN,
+// Only "shared"-annotated functions are used as seeds.  THREAD, MAIN,
 // pstatic_rebuild, and tm_allow_opaque functions are NOT used as seeds — they
 // are checked individually (they call TX functions, but the TX function calls
 // are what provide safety, not the annotation on the caller).
@@ -56,7 +56,7 @@ static void collectReachableFromTX(Module &M,
                                    SmallPtrSetImpl<Function *> &SafeSet) {
     SmallVector<Function *, 32> Worklist;
 
-    // Seed: only functions annotated with "transaction" or "async_transaction"
+    // Seed: only functions annotated with "shared" or "async_shared"
     for (auto &F : M) {
         if (F.isDeclaration())
             continue;
@@ -107,7 +107,7 @@ static void emitWarning(Function &F, Instruction &I, StringRef GlobalName) {
            << " to TM-annotated global '" << GlobalName
            << "' in function '" << F.getName()
            << "' without transaction annotation\n";
-    errs() << "  note: add [[tx::transaction]] to function '"
+    errs() << "  note: add [[tm::shared]] to function '"
            << F.getName()
            << "' or use peek()/poke() for intentional non-transactional access\n";
 }

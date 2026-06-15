@@ -9,7 +9,7 @@ extern "C" void tm_wait_prev_tx(void);
 
 static int counter = 0;
 
-__attribute__((noinline, annotate("transaction")))
+__attribute__((noinline, annotate("shared")))
 void increment() {
     counter++;
 }

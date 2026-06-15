@@ -9,19 +9,19 @@ extern "C" void tm_wait_prev_tx(void);
 static int counter = 0;
 
 // --- Sync TX (light) ---
-__attribute__((noinline, annotate("transaction")))
+__attribute__((noinline, annotate("shared")))
 void inc_sync() {
     counter++;
 }
 
 // --- Async TX (light) ---
-__attribute__((noinline, annotate("async_transaction")))
+__attribute__((noinline, annotate("async_shared")))
 void inc_async() {
     counter++;
 }
 
 // --- Heavy TX (100 increments batched) ---
-__attribute__((noinline, annotate("transaction")))
+__attribute__((noinline, annotate("shared")))
 void inc_heavy() {
     for (int j = 0; j < 100; j++)
         counter++;

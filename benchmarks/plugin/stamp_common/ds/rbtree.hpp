@@ -5,7 +5,7 @@
 #endif
 
 #ifndef TX
-#define TX __attribute__((annotate("transaction"), noinline))
+#define TX __attribute__((annotate("shared"), noinline))
 #endif
 
 template<typename K, typename V>

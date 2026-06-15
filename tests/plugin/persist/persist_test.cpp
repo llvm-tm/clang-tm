@@ -7,7 +7,7 @@
 #include <vector>
 
 #define TM __attribute__((annotate("tm")))
-#define TX __attribute__((annotate("transaction"), noinline))
+#define TX __attribute__((annotate("shared"), noinline))
 
 TM int64_t g_counter = 0;
 TM int64_t g_array[4] = {0};

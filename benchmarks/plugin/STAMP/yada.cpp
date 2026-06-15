@@ -1,5 +1,5 @@
 // Yada — C++ port of the original STAMP spec (LLVM plugin path)
-// Auto-instrumented via __attribute__((annotate("transaction"))).
+// Auto-instrumented via __attribute__((annotate("shared"))).
 //
 // Original spec: https://github.com/ccaominh/stamp/tree/master/yada
 //
@@ -77,7 +77,7 @@ static inline double l2d(long v) { double r; memcpy(&r, &v, sizeof(r)); return r
       void     tm_exit_thread();
       void*    tm_calloc(size_t, size_t);
   }
-  #define TX_FUNC      __attribute__((annotate("transaction"), noinline))
+  #define TX_FUNC      __attribute__((annotate("shared"), noinline))
   #define TM_GLOBAL    __attribute__((annotate("tm")))
   #define TM_READ_I8(p)     (*(const long*)(p))
   #define TM_WRITE_I8(p, v) (*(long*)(p) = (long)(v))

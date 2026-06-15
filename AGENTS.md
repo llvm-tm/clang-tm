@@ -23,7 +23,7 @@ Removed unused functions (`createHookCall`, `handleMemoryIntrinsic`, `hasTMGloba
 
 ## LLVM race checker plugin
 
-`plugin/passes/TMRaceCheckerPass.cpp` — a standalone `opt` pass (`-passes="tm-race-checker"`) that scans all non‑transaction functions for loads/stores to TM‑annotated globals. Reuses `tracesFromTMGlobal()` from `tm_local_vars.hpp` (same analysis as the instrumentation pipeline). Emits source‑location warnings suggesting `[[tx::transaction]]` annotation.
+`plugin/passes/TMRaceCheckerPass.cpp` — a standalone `opt` pass (`-passes="tm-race-checker"`) that scans all non‑transaction functions for loads/stores to TM‑annotated globals. Reuses `tracesFromTMGlobal()` from `tm_local_vars.hpp` (same analysis as the instrumentation pipeline). Emits source‑location warnings suggesting `[[tm::shared]]` annotation.
 
 The instrumentation plugin (`libTMInstrument.so`) now also warns about missing transaction annotations at build time via `checkMissingTransactionAnnotations()` in `tm_instrument_helpers.hpp`, called from `setupModulePass()`.
 
