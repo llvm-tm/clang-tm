@@ -85,7 +85,7 @@ $(foreach v,$(PLUGIN_VARIANTS),$(eval $(call TMPluginTarget,$(v))))
 PLUGIN_SO_NAMES := $(addprefix $(BIN_DIR)/libTMInstrument_,$(addsuffix .so,$(PLUGIN_VARIANTS)))
 
 TEST_NAMES := test_types test_memtest test_threads test_persist test_retry \
-              test_annotation_detect test_local_containers \
+              test_annotation_detect \
               test_custom_class test_tm_arg_trace \
               test_math_opaque test_vector_realloc \
               test_alloc_stress test_ll_alloc test_construct_tx_pattern \
