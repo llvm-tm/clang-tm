@@ -63,6 +63,51 @@ make run            # build + run all tests
 make check          # run tests and verify
 ```
 
+## Practical Examples
+
+### Counter (minimal)
+
+`tests/plugin/test_types.cpp` shows the full pattern. The key steps:
+
+1. Mark shared globals with `__attribute__((annotate("tm")))` (or `#define TM __attribute__((annotate("tm")))`)
+2. Annotate transaction functions with `__attribute__((annotate("shared")))`
+3. Compile through `clang-tm` which runs the LLVM pass pipeline
+
+```cpp
+#define TM __attribute__((annotate("tm")))
+
+TM int32_t counter = 0;
+
+__attribute__((annotate("shared")))
+void inc(int n) {
+    for (int i = 0; i < n; i++)
+        counter = counter + 1;   // → tm_read_i4 + tm_write_i4
+}
+```
+
+### Shared struct with methods
+
+See `tests/plugin/test_custom_class.cpp` — a `TM struct Pair` with TM-tracked fields
+and `[[tm::shared]]` methods.
+
+### Money conservation (Bank)
+
+`benchmarks/plugin/bank/bank.cpp` — multi-threaded transfers verifying total money
+is conserved. The classic TM correctness litmus test.
+
+### Data structures
+
+`benchmarks/plugin/datastructures/*.cpp` — AVL tree, RB tree, hash map from
+multiple threads using `TMSafeMap`/`TMSafeVector`/`TMSafeHashSet` (see
+`DATASTRUCTURES.md` for complexity comparisons).
+
+### STAMP workloads
+
+`benchmarks/plugin/STAMP/STAMP.cpp` — 8 real-world TM benchmarks (vacation,
+labyrinth, genome, kmeans, intruder, yada, ssca2, bayes).
+
+---
+
 ## Quick Start with `clang-tm`
 
 The **`clang-tm`** script wraps the full pipeline into a single
