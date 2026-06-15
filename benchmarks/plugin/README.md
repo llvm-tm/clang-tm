@@ -79,13 +79,13 @@ make -C benchmarks/plugin/eigenbench eigen_norec
 
 | Benchmark     | Directory          | Description                                                    | README                                |
 |---------------|--------------------|----------------------------------------------------------------|---------------------------------------|
-| **Bank**      | `test/bank/`       | Money-transfer correctness test (ACID conservation)            | [README](test/bank/README.md)         |
+| **Bank**      | `bank/`            | Money-transfer correctness test (ACID conservation)            | [README](bank/README.md)              |
 | **Data Structures** | `datastructures/` | Microbenchmarks for AVL tree, RB tree, hash map, bitmap, etc. | [README](datastructures/README.md)    |
 | **STAMP**     | `STAMP/`           | 8 real-world TM workloads (vacation, bayes, genome, etc.)      | [README](STAMP/README.md)             |
-| **STMbench7** | `STMbench7/`       | CAD/CAM graph-based STM benchmark                              | [README](STMbench7/README.md)         |
-| **TPC-C**     | `TPCC/`            | Order-entry OLTP benchmark                                     | [README](TPCC/README.md)              |
-| **YCSB**      | `YCSB/`            | Cloud-serving key-value workloads                              | [README](YCSB/README.md)              |
-| **EigenBench**| `EigenBench/`      | Synthetic TM microbenchmark for orthogonal characteristics     | [README](EigenBench/README.md)        |
+| **STMbench7** | `stmbench7/`       | CAD/CAM graph-based STM benchmark                              | [README](stmbench7/README.md)         |
+| **TPC-C**     | `tpcc/`            | Order-entry OLTP benchmark                                     | [README](tpcc/README.md)              |
+| **YCSB**      | `ycsb/`            | Cloud-serving key-value workloads                              | [README](ycsb/README.md)              |
+| **EigenBench**| `eigenbench/`      | Synthetic TM microbenchmark for orthogonal characteristics     | [README](eigenbench/README.md)        |
 
 ## Quick Start
 

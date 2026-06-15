@@ -4,7 +4,21 @@
 
 ## Family 1: Plugin-path containers (`backends/tm_impl/common/`)
 
-Used inside `TX`/`TX_FUNC` functions compiled with the LLVM TM pass. Allocation uses `::operator new` (redirected by the pass to `tm_malloc` inside transactions).
+Used inside `[[tm::shared]]` functions (`__attribute__((annotate("shared")))`) compiled with the LLVM TM pass. Allocation uses `::operator new` (redirected by the pass to `tm_malloc` inside transactions). See `tests/plugin/test_types.cpp` for a minimal example.
+
+```
+#include  ──────┐
+tests/plugin/   │  benchmarks/plugin/
+  test_types.cpp │   bank/bank.cpp
+  test_treap_tx  │   datastructures/*.cpp
+                 │   STAMP/*.cpp
+                 └─── all use these
+```
+
+**Source files:**
+- `backends/tm_impl/common/tm_vector.hpp` — `TMSafeVector<T>`
+- `backends/tm_impl/common/tm_hash_set.hpp` — `TMSafeHashSet<T>`
+- `backends/tm_impl/common/tm_safe_map.hpp` — `TMSafeMap<K,V>`, `TMSafeMultiMap<K,V>`
 
 ### 1.1 TMSafeVector<T> (`tm_vector.hpp`)
 
@@ -78,6 +92,11 @@ Used inside `TX`/`TX_FUNC` functions compiled with the LLVM TM pass. Allocation 
 
 Allocation uses `tm_malloc`/`tm_free` directly. Built for the explicit instrumentation API.
 
+**Source files:**
+- `expli_instr/cpp/include/tm_api.hpp` — `expli::vector<T>`
+- `expli_instr/cpp/include/tm_map.hpp` — `expli::flat_set<K>`, `expli::flat_map<K,V>`, `expli::flat_multimap<K,V>`
+- `tests/expli-api/test_tx.cpp` — unit tests using these containers
+
 ### 2.1 expli::vector<T> (`tm_api.hpp`, namespace `expli`)
 
 **Replaces:** `std::vector<T>`
@@ -148,7 +167,10 @@ Has `Iter` struct with `->`, `*`, `++`, `!=`. Supports range-for. `lower_bound` 
 
 ## Family 3: Scratch containers (`benchmarks/cpp/include/`)
 
-Used inside expli benchmarks for local scratch data. NOT TM-tracked — regular `::operator new`/`::operator delete`. TM safety comes from explicit `TM_READ_I8`/`TM_WRITE_I8` calls on shared data.
+Used inside expli benchmarks for local scratch data. NOT TM-tracked — regular `::operator new`/`::operator delete`. TM safety comes from explicit `tm_read_i8`/`tm_write_i8` calls on shared data.
+
+**Source files:**
+- `benchmarks/cpp/include/scratch_set.hpp` — `ScratchVector<T>`, `ScratchSet<T>`
 
 ### 3.1 ScratchVector<T> (`scratch_set.hpp`)
 

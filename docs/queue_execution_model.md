@@ -11,8 +11,8 @@ A queue-based model decouples these concerns. The caller enqueues a TX to a thre
 - **Flexible work distribution**: multiple queues with hash-based or priority routing
 
 The model provides two transaction types:
-- **`transaction`** (default): synchronous from the app's perspective — the plugin enqueues the TX and then **waits** for it to complete before returning to the app. The queue provides elastic worker resources under the hood, but the calling thread still blocks until the TX finishes.
-- **`async_transaction`** (optional): the plugin enqueues the TX and returns immediately. The app can continue working and later call `tm_wait_prev_tx()` to block until the TX completes. In inline mode, `async_transaction` behaves identically to `transaction` and `tm_wait_prev_tx()` is a no-op.
+- **`"shared"`** (default): synchronous from the app's perspective — the plugin enqueues the TX and then **waits** for it to complete before returning to the app. The queue provides elastic worker resources under the hood, but the calling thread still blocks until the TX finishes.
+- **`"async_shared"`** (optional): the plugin enqueues the TX and returns immediately. The app can continue working and later call `tm_wait_prev_tx()` to block until the TX completes. In inline mode, `"async_shared"` behaves identically to `"shared"` and `tm_wait_prev_tx()` is a no-op.
 
 ## Architecture Layers
 
@@ -122,14 +122,14 @@ For STM, **M = N** (per-worker) is the natural default: each worker has its own 
 
 ## Sync vs Async Transaction Semantics
 
-The key design rule: **`transaction` is always synchronous from the app's perspective**, regardless of execution model.
+The key design rule: **`"shared"` is always synchronous from the app's perspective**, regardless of execution model.
 
-| Execution mode | `transaction` | `async_transaction` | `tm_wait_prev_tx()` |
-|----------------|---------------|---------------------|---------------------|
+| Execution mode | `"shared"` | `"async_shared"` | `tm_wait_prev_tx()` |
+|----------------|------------|------------------|---------------------|
 | **Inline** | execute inline, blocking | execute inline, blocking _(same as transaction)_ | no-op (TX already done) |
 | **Queue** | enqueue → **wait** (plugin-inserted) | enqueue → return immediately | blocks until prev async TX done |
 
-The app always sees the same semantics for `transaction`: the TX completes before the next line of code runs. Only `async_transaction` gives asynchronous behavior, and only in queue mode.
+The app always sees the same semantics for `"shared"`: the TX completes before the next line of code runs. Only `"async_shared"` gives asynchronous behavior, and only in queue mode.
 
 ## Integration with Explicit C++ API
 
@@ -168,14 +168,14 @@ static void transaction(F&& body) {
 
 // Async (queue mode only; inline mode = synchronous):
 // The plugin inserts tm_wait_prev_tx() for regular transaction.
-// For async_transaction, the app calls tm_wait_prev_tx() manually.
+// For "async_shared", the app calls tm_wait_prev_tx() manually.
 ```
 
 For the explicit API, the `transaction()` method uses `InlineExecutor` (unchanged behavior). Users who want queue mode with the explicit API create a `QueueExecutor` directly and call `exec.submit<Backend>(body)` which returns a future, then call `tm_wait_prev_tx()` or `future.get()` to synchronize.
 
 ## Sync vs Async Transaction Semantics (Detail)
 
-### Default `transaction` annotation (queue mode)
+### Default `"shared"` annotation (queue mode)
 
 ```
 App Thread:                          Worker Thread:
@@ -189,7 +189,7 @@ App Thread:                          Worker Thread:
 
 The plugin inserts `tm_wait_prev_tx()` after every `tm_enqueue` call for `transaction`-annotated functions. The app thread blocks until the worker finishes.
 
-### `async_transaction` annotation (queue mode)
+### `"async_shared"` annotation (queue mode)
 
 ```
 App Thread:                          Worker Thread:
@@ -213,7 +213,7 @@ App Thread:
   continue ...
 ```
 
-In inline mode, `async_transaction` behaves exactly like `transaction`. `tm_wait_prev_tx()` is a no-op because the inline `tm_enqueue` already completed the TX synchronously.
+In inline mode, `"async_shared"` behaves exactly like `"shared"`. `tm_wait_prev_tx()` is a no-op because the inline `tm_enqueue` already completed the TX synchronously.
 
 ## Runtime Thread-Local State
 
@@ -300,10 +300,10 @@ A new pipeline `tm-instrument-queue` would:
 ### 1. Annotations
 
 The plugin recognizes two TX annotations:
-- `__attribute__((annotate("transaction")))` — synchronous in all modes
-- `__attribute__((annotate("async_transaction")))` — async in queue mode, sync in inline mode
+- `__attribute__((annotate("shared")))` — synchronous in all modes
+- `__attribute__((annotate("async_shared")))` — async in queue mode, sync in inline mode
 
-Both annotations are processed identically for cloning and instrumentation. The difference is only in the generated call site code.
+In `plugin/analysis/tm_annotation_utils.hpp`, `TX_ANNOT` is defined as `"shared"` and `ASYNC_TX_ANNOT` as `"async_shared"`. The pass in `TMInstrumentFnPass.cpp` inserts `tm_begin()`/`tm_end()` for `"shared"`-annotated functions, and for `"async_shared"`, it generates the queue-enqueue + optional wait pattern instead.
 
 ### 2. Clone + dispatch wrapper (same for both annotations)
 
@@ -326,7 +326,7 @@ void foo_tm_clone_dispatch(void* raw_args) {
 
 ### 3. Call site replacement
 
-**For `transaction` annotation:**
+**For `"shared"` annotation (synchronous):**
 
 ```llvm
 ; Original: call void @foo(args...)
@@ -340,7 +340,7 @@ call void @tm_wait_prev_tx()    ; ← plugin inserts this wait
 
 The plugin inserts `tm_wait_prev_tx()` right after `tm_enqueue`. This makes the TX synchronous from the app's perspective even though it runs on a worker thread.
 
-**For `async_transaction` annotation:**
+**For `"async_shared"` annotation (asynchronous):**
 
 ```llvm
 ; Original: call void @foo(args...)
@@ -359,7 +359,7 @@ The plugin does NOT insert `tm_wait_prev_tx()` after the enqueue. The app is res
 User code may call `tm_wait_prev_tx()` explicitly:
 
 ```c
-__attribute__((annotate("async_transaction")))
+__attribute__((annotate("async_shared")))
 void do_work(int* data) {
     *data += 1;
 }
@@ -375,7 +375,7 @@ The plugin leaves `tm_wait_prev_tx()` calls unchanged (they resolve to the runti
 
 ### 5. Inline pipeline behavior (unchanged)
 
-For inline pipelines, both `transaction` and `async_transaction` produce the same code:
+For inline pipelines, both `"shared"` and `"async_shared"` produce the same code:
 ```llvm
 call void @tm_begin()
 call void @foo_tm_clone(args...)
@@ -386,9 +386,9 @@ The runtime's `g_tm_queue_active` is `false` in inline mode, so `tm_enqueue` (if
 
 ### Annotation validation
 
-The plugin's `checkAnnotationConsistency` must recognize both `"transaction"` and `"async_transaction"`. A function cannot have both annotations.
+The plugin's `checkAnnotationConsistency` (in `tm_instrument_helpers.hpp`) recognizes both `"shared"` and `"async_shared"`. A function cannot have both annotations.
 
-For queue pipelines, any `async_transaction` without a corresponding `tm_wait_prev_tx()` before the function returns is a potential leak of the thread-local future state — this could be a warning.
+For queue pipelines, any `"async_shared"` without a corresponding `tm_wait_prev_tx()` before the function returns is a potential leak of the thread-local future state — this could be a warning.
 
 ### Plugin flag selection
 
@@ -411,7 +411,7 @@ The key principle: **the backend never changes**. It provides `tm_begin`/`tm_com
 | Plugin dispatch wrapper | New pass in `tm-instrument-queue` pipeline | No, new code |
 | `tm_enqueue` / `tm_wait_prev_tx` | `backends/tm_impl/queue/queue_runtime.cpp` | No, new code |
 | Thread-local future state | `backends/tm_impl/queue/queue_runtime.h` | No, new code |
-| `async_transaction` annotation support | Plugin annotation checker | new |
+| `"async_shared"` annotation support | Plugin annotation checker | new |
 | `tm_wait_prev_tx()` call insertion | Plugin (for `transaction` in queue mode) | new |
 
 **What is reused:**
@@ -425,7 +425,7 @@ The key principle: **the backend never changes**. It provides `tm_begin`/`tm_com
 - `backends/tm_impl/queue/queue_runtime.h` — `tm_future_state_t`, `tm_enqueue`, `tm_wait_prev_tx` declarations
 - `backends/tm_impl/queue/queue_runtime.cpp` — thread pool + `tm_enqueue`/`tm_wait_prev_tx` impl
 - Plugin pipeline: `tm-instrument-queue`
-- Plugin: `async_transaction` annotation recognition + `tm_wait_prev_tx` call insertion
+- Plugin: `"async_shared"` annotation recognition + `tm_wait_prev_tx` call insertion
 - Dispatch wrapper generation in plugin
 
 ## Implementation Plan
@@ -436,8 +436,8 @@ The key principle: **the backend never changes**. It provides `tm_begin`/`tm_com
 - No-op path when `g_tm_queue_active == false`
 
 ### Step 2: Plugin annotation support
-- Add `"async_transaction"` to recognized annotations in `checkAnnotationConsistency`
-- Extend the annotation-to-pipeline mapping to handle both `transaction` and `async_transaction`
+- Add `"async_shared"` to recognized annotations in `checkAnnotationConsistency`
+- Extend the annotation-to-pipeline mapping to handle both `"shared"` and `"async_shared"`
 
 ### Step 3: Plugin queue pipeline
 - New pipeline `tm-instrument-queue` in `TMInstrumentPass.cpp`
@@ -451,9 +451,9 @@ The key principle: **the backend never changes**. It provides `tm_begin`/`tm_com
 
 ### Step 5: Tests
 - `test_queue_sync`: single `transaction` in queue mode — verify it blocks until completion
-- `test_queue_async`: single `async_transaction` + `tm_wait_prev_tx` — verify ordering
+- `test_queue_async`: single `"async_shared"` + `tm_wait_prev_tx` — verify ordering
 - `test_queue_multi`: multiple TXs on queue, all complete correctly
-- `test_queue_inline_mode`: `async_transaction` in inline mode behaves like `transaction`
+- `test_queue_inline_mode`: `"async_shared"` in inline mode behaves like `"shared"`
 
 ### Step 6: Benchmarks
 - Compare inline vs queue throughput on bank/eigenbench/labyrinth at 1t/2t/4t
@@ -493,5 +493,5 @@ fn foo_tm_clone_dispatch(args: FooArgs) {
 let exec = Arc::new(QueueExecutor::new(4, 4));
 tm_enqueue(&exec, foo_tm_clone_dispatch, args);
 // For transaction: tm_wait_prev_tx() follows
-// For async_transaction: user calls tm_wait_prev_tx() later
+// For "async_shared": user calls tm_wait_prev_tx() later
 ```

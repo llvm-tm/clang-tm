@@ -21,7 +21,7 @@ on a new machine (including remote machines accessed via SSH).
 ### Ubuntu / Debian
 
 ```sh
-wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc https://apt.llvm.org/llvm-snapshot.gpg.key
 sudo add-apt-repository "deb https://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-22 main"
 sudo apt update
 sudo apt install -y llvm-22-dev clang-22 lld make

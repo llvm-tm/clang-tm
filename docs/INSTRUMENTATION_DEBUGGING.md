@@ -119,12 +119,12 @@ all transactions and is trivially correct).
 
 ```sh
 # Build with SingleGlobalLock runtime
-make -C benchmarks/test/bank bank_singlelock
+make -C benchmarks/plugin/bank bank_singlelock
 
 # Run under helgrind
 valgrind --tool=helgrind \
   --log-file=/tmp/helgrind_sgl.log \
-  ./benchmarks/test/bank/bin/bank_singlelock -t 4 -d 1000
+  ./benchmarks/plugin/bank/bin/bank_singlelock -t 4 -d 1000
 ```
 
 The SingleGlobalLock backend serializes all TX execution within a global mutex.
@@ -134,12 +134,12 @@ Any race reported here is a bug in the application, not TM instrumentation.
 
 ```sh
 # Build with a real TM backend
-make -C benchmarks/test/bank bank_tinystm
+make -C benchmarks/plugin/bank bank_tinystm
 
 # Run under helgrind
 valgrind --tool=helgrind \
   --log-file=/tmp/helgrind_tm.log \
-  ./benchmarks/test/bank/bin/bank_tinystm -t 4 -d 1000
+  ./benchmarks/plugin/bank/bin/bank_tinystm -t 4 -d 1000
 ```
 
 Compare the two log files. NEW races in the TM backend (not present in
@@ -297,7 +297,7 @@ diff <(grep 'tm_read_\|tm_write_' /tmp/a.instr.ll | sort) \
 
 ## Test Harness for Instrumentation Correctness
 
-### Money-conservation benchmark (`benchmarks/test/bank/bank.cpp`)
+### Money-conservation benchmark (`benchmarks/plugin/bank/bank.cpp`)
 
 The bank benchmark is the primary correctness litmus test. It verifies that
 the sum of all account balances remains constant across concurrent transfers.
@@ -305,8 +305,8 @@ the sum of all account balances remains constant across concurrent transfers.
 correctness bug.**
 
 ```sh
-make -C benchmarks/test/bank bank_tinystm
-./benchmarks/test/bank/bin/bank_tinystm -t 4 -d 5000
+make -C benchmarks/plugin/bank bank_tinystm
+./benchmarks/plugin/bank/bin/bank_tinystm -t 4 -d 5000
 # Expected: ✓ PASS: Bank total is correct (money was conserved)
 ```
 
