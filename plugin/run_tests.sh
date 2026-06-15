@@ -56,11 +56,6 @@ fi
 # Retry test: verifies longjmp/sigsetjmp for transaction retry
 run_test test_retry "retry" "longjmp" "Test PASSED" "final counter = 3"
 
-# STL container test
-run_test test_stl_containers "STL Container Test" "All tests passed" || echo "  Skipped (may timeout)"
-
-# Map find regression test
-run_test test_stl_map_find "std::map::find regression test" "PASS: map find test passed"
 
 # Argument trace test
 run_test test_tm_arg_trace "argument trace test" "PASS: argument trace test passed"

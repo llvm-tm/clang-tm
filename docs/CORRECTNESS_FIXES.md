@@ -10,7 +10,7 @@
 | 5 | XTM rbtree segfault | **Fixed** | `62d3878` |
 | 6 | SIGBUS in test_treap_tx (tm_get_env/tm_set_jmpbuf as DATA) | **Fixed** | `1f4e309` |
 | 7 | test_local_containers opaque errors (stdlib exception symbols) | **Fixed** | `1f4e309` |
-| — | STL-in-TM tests removed from build (known broken) | **Removed** | *(this commit)* |
+| — | STL-in-TM tests removed from build + test runner (known broken) | **Removed** | `87ceb96`, `d2def60` |
 
 ---
 
