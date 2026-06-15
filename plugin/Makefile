@@ -92,8 +92,7 @@ TEST_NAMES := test_types test_memtest test_threads test_persist test_retry \
               test_nested_tx test_tm_simple test_tm_safe_map \
               test_init_no_tx \
               test_simple_vector \
-               test_treap_tx test_queue \
-               test_queue_sync test_queue_async test_queue_multi
+               test_treap_tx
 
 # STL container tests — no longer supported inside TM.  These would require
 # opaque-safe-table entries for std::unordered_map, std::map, and std::string
@@ -187,7 +186,7 @@ $(foreach t,$(QUEUE_TESTS),$(OUT_DIR)/$(t).opt.bc): $(OUT_DIR)/%.opt.bc: $(OUT_D
 	$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $(OUT_DIR)/$*.instr.bc -o $@
 
 # Compile runtime objects once
-QUEUE_RT_OBJS := $(OUT_DIR)/tinystm_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o
+QUEUE_RT_OBJS := $(OUT_DIR)/tinystm_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o $(OUT_DIR)/tm_hooks.o
 $(QUEUE_RT_OBJS): | $(OUT_DIR)
 $(OUT_DIR)/tinystm_runtime.o: $(BACKENDS_DIR)/tm_impl/tiny_stm/TinySTM_runtime.cpp
 	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL -DLLVM_TM_PLUGIN \
@@ -201,6 +200,9 @@ $(OUT_DIR)/queue_runtime_perf.o: $(BACKENDS_DIR)/tm_impl/queue/queue_runtime.cpp
 $(OUT_DIR)/tm_region_allocator.o: $(BACKENDS_DIR)/tm_impl/tm_region_allocator/tm_region_allocator.cpp
 	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DDESIGN_WBCTL -DLLVM_TM_PLUGIN \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR)/tm_impl/common -I $(BACKENDS_DIR) $< -o $@
+$(OUT_DIR)/tm_hooks.o: $(BACKENDS_DIR)/tm_impl/common/tm_hooks.cpp
+	$(CXX) -c $(DEFAULT_LINK_FLAGS) -DLLVM_TM_PLUGIN \
+	  -I $(BACKENDS_DIR)/tm_impl/common -I $(BACKENDS_DIR) $< -o $@
 
 $(foreach t,$(QUEUE_TESTS),$(BIN_DIR)/$(t)): $(BIN_DIR)/%: $(OUT_DIR)/%.opt.bc $(QUEUE_RT_OBJS) | $(BIN_DIR)
 	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/$*.opt.bc $(QUEUE_RT_OBJS) -o $@

@@ -190,6 +190,8 @@ static void real_tm_free(void* ptr) {
     free(ptr); // system heap
 }
 
+static void *real_tm_get_thread_state();
+
 const TMRealHooks g_psgl_hooks = {
     real_tm_begin,
     real_tm_end,

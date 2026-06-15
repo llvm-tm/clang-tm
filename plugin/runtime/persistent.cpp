@@ -176,10 +176,6 @@ static void impl_serialize_unlock() { g_serialize_mutex.unlock(); }
 static void impl_set_jmpbuf(void *buf) { }
 static sigjmp_buf *impl_get_env() { return (sigjmp_buf *)tm_jmpbuf; }
 
-extern "C" int impl_tm_sigsetjmp(void *env, int savemask) {
-    return sigsetjmp(*(sigjmp_buf*)env, savemask);
-}
-
 static void impl_begin()
 {
 	printf("tm_nested_call_counter=%d  --  ", g_tm_state.nested_call_counter);
@@ -284,4 +280,4 @@ void consume_ptr(volatile void *ptr) { (void)ptr; }
 __asm__(".globl _tm_sigsetjmp\n"
         ".data\n"
         ".align 3\n"
-        "_tm_sigsetjmp: .quad _impl_tm_sigsetjmp\n");
+        "_tm_sigsetjmp: .quad _sigsetjmp\n");
