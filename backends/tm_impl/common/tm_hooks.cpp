@@ -88,7 +88,13 @@ void     (*tm_write_i8)(uint64_t*, int64_t)  = stub_write_i8;
 void     (*tm_write_f4)(float*, float)        = stub_write_f4;
 void     (*tm_write_f8)(double*, double)      = stub_write_f8;
 void     (*tm_write_ptr)(void**, void*)        = stub_write_ptr;
+#if defined(__APPLE__)
 int      (*tm_sigsetjmp)(void*, int)            = (int(*)(void*, int))sigsetjmp;
+#else
+// glibc: sigsetjmp is a macro expanding to __sigsetjmp(env, savemask);
+// taking its address requires the underlying function name.
+int      (*tm_sigsetjmp)(void*, int)            = (int(*)(void*, int))__sigsetjmp;
+#endif
 void    *(*tm_get_env)()                        = stub_tm_get_env;
 void     (*tm_set_jmpbuf)(void*)               = stub_tm_set_jmpbuf;
 void *(*tm_get_thread_state)()          = stub_tm_get_thread_state;
