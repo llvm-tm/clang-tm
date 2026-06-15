@@ -93,13 +93,15 @@ void     (*tm_set_jmpbuf)(void*)               = stub_tm_set_jmpbuf;
 void *(*tm_get_thread_state)()          = stub_tm_get_thread_state;
 
 // Init/exit hooks — defined as DATA variables so the LLVM pass can load
-// through them.  Backends that need custom init set these in a constructor.
-// Weak default definitions so backends that provide their own strong
-// DATA variables (e.g. under -DLLVM_TM_PLUGIN) don't cause duplicate symbols.
+// through them.  Only compiled under -DLLVM_TM_PLUGIN; without the plugin
+// the backend provides strong TEXT (function) definitions directly.
+// Weak linkage so plugin builds can override with strong DATA variables.
+#ifdef LLVM_TM_PLUGIN
 __attribute__((weak)) void (*tm_init)()        = stub_begin;
 __attribute__((weak)) void (*tm_exit)()        = stub_end;
 __attribute__((weak)) void (*tm_init_thread)() = stub_begin;
 __attribute__((weak)) void (*tm_exit_thread)() = stub_end;
+#endif
 
 } // extern "C"
 

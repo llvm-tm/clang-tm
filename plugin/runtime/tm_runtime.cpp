@@ -285,7 +285,9 @@ void consume_ptr(volatile void *ptr) { (void)ptr; }
 // On Linux the hook is `__sigsetjmp` (a glibc internal name, no conflict).
 // On macOS/BSD we use `tm_sigsetjmp` to avoid clashing with the POSIX
 // function `sigsetjmp` from <setjmp.h>.
+#ifdef __APPLE__
 __asm__(".globl _tm_sigsetjmp\n"
         ".data\n"
         ".align 3\n"
         "_tm_sigsetjmp: .quad _sigsetjmp\n");
+#endif
