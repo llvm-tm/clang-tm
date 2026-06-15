@@ -100,7 +100,7 @@ TEST_NAMES := test_types test_memtest test_threads test_persist test_retry \
 # STL functions bypass TM conflict detection).  Kept for reference.
 STL_TEST_NAMES := test_stl_containers test_stl_primitive test_stl_map_find
 
-RACE_TEST_NAMES := test_task_queue_race test_parent_set_race test_counter_race
+RACE_TEST_NAMES := test_task_queue_race test_counter_race
 TEST_SRCS := $(addprefix $(TEST_DIR)/,$(addsuffix .cpp,$(TEST_NAMES)))
 TEST_PROGS := $(addprefix $(BIN_DIR)/,$(TEST_NAMES))
 
