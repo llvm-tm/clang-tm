@@ -2,23 +2,19 @@
 
 #include <atomic>
 #include <csetjmp>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
-#include <pthread.h>
-#include <thread>
 
 // ── Shared per-thread TM state (used by all backends) ──────────
-// Defined once here so that multiple backends can coexist without
-// duplicate-symbol errors.
 __thread int32_t    tm_nested_call_counter = 0;
 __thread int32_t    tm_longjmp_ret = 0;
 __thread sigjmp_buf tm_jmpbuf;
 
 // ═══════════════════════════════════════════════════════════════
-// Stub implementations — direct access, no TM overhead
+// Stub implementations — direct access, no TM overhead.
+// Always compiled (static = internal linkage, no linker conflict).
 // ═══════════════════════════════════════════════════════════════
 
 extern "C" {
@@ -51,6 +47,22 @@ static void stub_write_f4(float    *a, float    v) { *a = v; }
 static void stub_write_f8(double   *a, double   v) { *a = v; }
 static void stub_write_ptr(void   **a, void    *v) { *a = v; }
 
+static int stub_tm_sigsetjmp(void *env, int savemask) {
+    return sigsetjmp(*(sigjmp_buf*)env, savemask);
+}
+
+static void *stub_tm_get_env() {
+    return (void*)&tm_jmpbuf;
+}
+
+static void stub_tm_set_jmpbuf(void *buf) {
+    (void)buf;
+}
+
+static void *stub_tm_get_thread_state() {
+    return (void*)&tm_nested_call_counter;
+}
+
 } // extern "C"
 
 // ═══════════════════════════════════════════════════════════════
@@ -79,6 +91,19 @@ void     (*tm_write_i8)(uint64_t*, int64_t)  = stub_write_i8;
 void     (*tm_write_f4)(float*, float)        = stub_write_f4;
 void     (*tm_write_f8)(double*, double)      = stub_write_f8;
 void     (*tm_write_ptr)(void**, void*)        = stub_write_ptr;
+int      (*tm_sigsetjmp)(void*, int)            = stub_tm_sigsetjmp;
+void    *(*tm_get_env)()                        = stub_tm_get_env;
+void     (*tm_set_jmpbuf)(void*)               = stub_tm_set_jmpbuf;
+void *(*tm_get_thread_state)()          = stub_tm_get_thread_state;
+
+// Init/exit hooks — defined as DATA variables so the LLVM pass can load
+// through them.  Backends that need custom init set these in a constructor.
+// Weak default definitions so backends that provide their own strong
+// DATA variables (e.g. under -DLLVM_TM_PLUGIN) don't cause duplicate symbols.
+__attribute__((weak)) void (*tm_init)()        = stub_begin;
+__attribute__((weak)) void (*tm_exit)()        = stub_end;
+__attribute__((weak)) void (*tm_init_thread)() = stub_begin;
+__attribute__((weak)) void (*tm_exit_thread)() = stub_end;
 
 } // extern "C"
 
@@ -95,8 +120,17 @@ static bool s_registered = false;
 // Single-thread: stubs (direct access, no TM overhead).
 // Multi-thread: real hooks registered by the backend.
 // Must be called with s_hook_mutex held.
+//
+// Under LLVM_TM_PLUGIN the instrumentation always emits TM operations
+// through function pointers (tm_read_i4, tm_begin, etc.), so stubs
+// would silently no-op transactions.  Force real hooks always.
 static void apply_hooks_unlocked() {
-    bool single = s_thread_count.load() <= 1;
+    bool single =
+#ifdef LLVM_TM_PLUGIN
+        false;
+#else
+        s_thread_count.load() <= 1;
+#endif
     const TMRealHooks *r = &s_real_hooks;
     auto pick = [&](auto stub, auto real) {
         return single ? stub : (real ? real : stub);
@@ -122,6 +156,9 @@ static void apply_hooks_unlocked() {
     tm_write_f4 = pick(stub_write_f4, r->write_f4);
     tm_write_f8 = pick(stub_write_f8, r->write_f8);
     tm_write_ptr= pick(stub_write_ptr, r->write_ptr);
+    tm_get_env = pick(stub_tm_get_env, r->get_env);
+    tm_set_jmpbuf = pick(stub_tm_set_jmpbuf, r->set_jmpbuf);
+    tm_get_thread_state = pick(stub_tm_get_thread_state, r->get_thread_state);
 }
 
 void tm_register_real_hooks(const TMRealHooks *hooks) {
@@ -161,8 +198,6 @@ const TMRealHooks *tm_get_real_hooks() {
 }
 
 // Phase-based TM: atomically swap ALL hooks under the global lock.
-// This allows the runtime to switch backends at runtime based on
-// abort rate, workload characteristics, etc.
 void tm_swap_runtime(const TMRealHooks *hooks) {
     std::lock_guard<std::mutex> lock(s_hook_mutex);
     if (hooks->begin)   tm_begin    = hooks->begin;
@@ -185,6 +220,9 @@ void tm_swap_runtime(const TMRealHooks *hooks) {
     if (hooks->write_f4) tm_write_f4 = hooks->write_f4;
     if (hooks->write_f8) tm_write_f8 = hooks->write_f8;
     if (hooks->write_ptr) tm_write_ptr = hooks->write_ptr;
+    if (hooks->get_env) tm_get_env = hooks->get_env;
+    if (hooks->set_jmpbuf) tm_set_jmpbuf = hooks->set_jmpbuf;
+    if (hooks->get_thread_state) tm_get_thread_state = hooks->get_thread_state;
     // Also update s_real_hooks so tm_hook_init_thread() doesn't revert
     if (hooks->begin)   s_real_hooks.begin   = hooks->begin;
     if (hooks->end)     s_real_hooks.end     = hooks->end;
@@ -200,16 +238,19 @@ void tm_swap_runtime(const TMRealHooks *hooks) {
     if (hooks->read_f8) s_real_hooks.read_f8 = hooks->read_f8;
     if (hooks->read_ptr) s_real_hooks.read_ptr = hooks->read_ptr;
     if (hooks->write_i1) s_real_hooks.write_i1 = hooks->write_i1;
+    if (hooks->get_env) s_real_hooks.get_env = hooks->get_env;
+    if (hooks->set_jmpbuf) s_real_hooks.set_jmpbuf = hooks->set_jmpbuf;
     if (hooks->write_i2) s_real_hooks.write_i2 = hooks->write_i2;
     if (hooks->write_i4) s_real_hooks.write_i4 = hooks->write_i4;
     if (hooks->write_i8) s_real_hooks.write_i8 = hooks->write_i8;
     if (hooks->write_f4) s_real_hooks.write_f4 = hooks->write_f4;
     if (hooks->write_f8) s_real_hooks.write_f8 = hooks->write_f8;
     if (hooks->write_ptr) s_real_hooks.write_ptr = hooks->write_ptr;
+    if (hooks->get_thread_state) s_real_hooks.get_thread_state = hooks->get_thread_state;
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Trace infrastructure (used by both explicit API and plugin pipeline)
+// Trace infrastructure
 // ═══════════════════════════════════════════════════════════════
 
 // Weak default for tm_trace — overridden by tm_trace_runtime.cpp when linked
@@ -457,6 +498,9 @@ __attribute__((constructor)) static void tm_trace_hook_init() {
     s_real_hooks.write_f4 = tm_write_f4;
     s_real_hooks.write_f8 = tm_write_f8;
     s_real_hooks.write_ptr = tm_write_ptr;
+    s_real_hooks.get_env = tm_get_env;
+    s_real_hooks.set_jmpbuf = tm_set_jmpbuf;
+    s_real_hooks.get_thread_state = tm_get_thread_state;
 
     // Replace hooks with trace wrappers
     tm_begin    = trace_begin;

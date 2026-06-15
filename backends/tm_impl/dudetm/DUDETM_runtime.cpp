@@ -96,9 +96,7 @@ TMThreadState *tm_get_thread_state() {
     return &g_tm_thread_state;
 }
 
-sigjmp_buf *tm_get_env() {
-    return &g_tm_jmpbuf;
-}
+
 
 static std::recursive_mutex g_serialize_mutex;
 
@@ -111,7 +109,6 @@ int tm_serialize_unlock_all() {
     return 0;
 }
 
-void tm_set_jmpbuf(void *buf) { tinystm::jmpbuf = (sigjmp_buf *)buf; }
 int tm_setjmp() { return 0; }
 
 void tm_read_i16(void *addr, void *out) {
@@ -327,6 +324,10 @@ static void real_tm_free(void* ptr)
     }
 }
 
+static void *real_tm_get_env() { return (void*)&g_tm_jmpbuf; }
+
+static void real_tm_set_jmpbuf(void *buf) { tinystm::jmpbuf = (sigjmp_buf *)buf; }
+
 // ═══════════════════════════════════════════════════════════════════
 //  Hook registration table
 // ═══════════════════════════════════════════════════════════════════
@@ -352,4 +353,6 @@ const TMRealHooks g_dudetm_hooks = {
     .write_f4  = real_tm_write_f4,
     .write_f8  = real_tm_write_f8,
     .write_ptr = real_tm_write_ptr,
+    .get_env    = real_tm_get_env,
+    .set_jmpbuf = real_tm_set_jmpbuf,
 };

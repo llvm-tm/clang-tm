@@ -507,10 +507,30 @@ static bool handleLoadStore(Instruction *I,
 		Value *Base = Ptr->stripPointerCasts();
 		if (auto *GEP = dyn_cast<GetElementPtrInst>(Base))
 			Base = GEP->getPointerOperand()->stripPointerCasts();
-		if (auto *Call = dyn_cast<CallInst>(Base))
+		if (auto *Call = dyn_cast<CallInst>(Base)) {
+			// Direct call: call ptr @tm_get_thread_state()
 			if (Call->getCalledFunction() &&
 			    Call->getCalledFunction()->getName() == "tm_get_thread_state")
 				return true;
+			// Indirect call: %fn = load ptr, ptr @tm_get_thread_state
+			//               call ptr %fn()
+			if (auto *Load = dyn_cast<LoadInst>(Call->getCalledOperand()))
+				if (auto *GV = dyn_cast<GlobalVariable>(Load->getPointerOperand()))
+					if (GV->getName() == "tm_get_thread_state")
+						return true;
+		}
+		return false;
+	};
+
+	// Skip loads/stores from TM runtime hook globals (e.g. @tm_begin,
+	// @tm_read_ptr).  These are function-pointer DATA variables declared
+	// by the pass itself — they live in the regular data section, NOT in
+	// the TM region.  Instrumenting them with tm_read/tm_write would
+	// route accesses through a backend that expects tx->active, which
+	// fails before tm_begin() is called (or outside any transaction).
+	auto isHookGlobal = [&H](Value *Ptr) -> bool {
+		if (auto *GV = dyn_cast<GlobalVariable>(getBaseObjectNoLoad(Ptr)))
+			return H.isHookGV(GV);
 		return false;
 	};
 
@@ -519,6 +539,8 @@ static bool handleLoadStore(Instruction *I,
 		if (isTLSGlobal(Ptr))
 			return false;
 		if (isThreadStateAccess(Ptr))
+			return false;
+		if (isHookGlobal(Ptr))
 			return false;
 		if (auto *AI = dyn_cast<AllocaInst>(getBaseObjectNoLoad(Ptr))) {
 			if (!isEscapedAlloca(AI, &F))
@@ -539,6 +561,8 @@ static bool handleLoadStore(Instruction *I,
 		if (isTLSGlobal(Ptr))
 			return false;
 		if (isThreadStateAccess(Ptr))
+			return false;
+		if (isHookGlobal(Ptr))
 			return false;
 		if (isa<AllocaInst>(getBaseObjectNoLoad(Ptr)))
 			return false;

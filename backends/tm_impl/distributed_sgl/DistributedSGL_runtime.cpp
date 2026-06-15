@@ -182,8 +182,7 @@ extern __thread sigjmp_buf tm_jmpbuf;
 }
 
 int tm_setjmp() { return 0; }
-void tm_set_jmpbuf(void*) {}
-sigjmp_buf* tm_get_env() { return &tm_jmpbuf; }
+
 void tm_set_env(sigjmp_buf* env) {
     if (env) memcpy(&tm_jmpbuf, env, sizeof(sigjmp_buf));
 }

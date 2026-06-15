@@ -27,7 +27,11 @@ namespace tm_platform
 //
 // On Linux/glibc, LLVM/clang emits calls to `__sigsetjmp` (the glibc
 // internal name).  On other POSIX systems (macOS, BSD), the standard
-// `sigsetjmp` is used.  We detect via the LLVM target triple string.
+// `sigsetjmp` conflicts with the POSIX function of the same name, so
+// we use `tm_sigsetjmp` instead.
+//
+// The runtime must provide `tm_sigsetjmp` as a DATA symbol (global
+// function pointer) holding the address of the actual implementation.
 // -------------------------------------------------------------------------
 inline const char *sigsetjmpName(llvm::Module &M)
 {
@@ -35,7 +39,7 @@ inline const char *sigsetjmpName(llvm::Module &M)
 	if (triple.find("linux") != std::string::npos ||
 	    triple.find("-gnu") != std::string::npos)
 		return "__sigsetjmp";
-	return "sigsetjmp";
+	return "tm_sigsetjmp";
 }
 
 // -------------------------------------------------------------------------

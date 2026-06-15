@@ -3,6 +3,9 @@
  *
  * This runtime persists TM global variables to disk between runs.
  * Uses the symbol table to know which variables to save/load.
+ *
+ * Provides function-pointer (DATA) symbols for all hooks the LLVM
+ * pass loads from (load ptr, ptr @hook_name → indirect call).
  */
 
 #include <csetjmp>
@@ -14,9 +17,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "../../backends/tm_impl/common/tm_thread_state.hpp"
-
 #define TM_BUFFER_SIZE 1024
+
+// Per-thread TM state struct — must match the LLVM pass's offset constants:
+//   COUNTER_OFFSET = 0  (nested_call_counter)
+//   JMPRET_OFFSET  = 4  (longjmp_ret)
+struct TMThreadState {
+    int32_t nested_call_counter;
+    int32_t longjmp_ret;
+};
 
 // Thread-local state
 static thread_local TMThreadState g_tm_state{0, 0};
@@ -31,13 +40,15 @@ extern const char *tm_symbol_names[];
 extern const void *tm_symbol_addresses[];
 extern const uint32_t tm_symbol_count;
 
-extern "C" {
+// ═══════════════════════════════════════════════════════════════
+// Hook implementations (static — internal linkage)
+// ═══════════════════════════════════════════════════════════════
 
-TMThreadState *tm_get_thread_state() {
+static TMThreadState *impl_get_thread_state() {
     return &g_tm_state;
 }
 
-void tm_init()
+static void impl_init()
 {
 	printf("tm_init\n");
 	fflush(stdout);
@@ -63,10 +74,6 @@ void tm_init()
 				ifs.read(name, name_len);
 			}
 
-			// Read saved value
-			uint64_t val = 0;
-			ifs.read(reinterpret_cast<char *>(&val), sizeof(val));
-
 			// Find the current address of this symbol by name
 			const void *current_addr = nullptr;
 			for (uint32_t j = 0; j < tm_symbol_count; j++) {
@@ -78,6 +85,8 @@ void tm_init()
 
 			if (current_addr != nullptr) {
 				// Copy value to the current address
+				uint64_t val = 0;
+				ifs.read(reinterpret_cast<char *>(&val), sizeof(val));
 				memcpy(const_cast<void *>(current_addr), &val, sizeof(val));
 				printf("Persistent runtime: restored %s at %p = 0x%llx\n",
 				       name,
@@ -97,7 +106,7 @@ void tm_init()
 	fflush(stdout);
 }
 
-void tm_exit()
+static void impl_exit()
 {
 	printf("tm_exit\n");
 	fflush(stdout);
@@ -141,7 +150,7 @@ void tm_exit()
 	fflush(stdout);
 }
 
-void tm_init_thread()
+static void impl_init_thread()
 {
 	if (is_tm_init_thread_ready == 0) {
 		printf("tm_init_thread\n");
@@ -150,7 +159,7 @@ void tm_init_thread()
 	}
 }
 
-void tm_exit_thread()
+static void impl_exit_thread()
 {
 	if (is_tm_init_thread_ready == 1) {
 		printf("tm_exit_thread\n");
@@ -161,20 +170,17 @@ void tm_exit_thread()
 
 static std::recursive_mutex g_serialize_mutex;
 
-void tm_serialize_lock()
-{
-	g_serialize_mutex.lock();
+static void impl_serialize_lock() { g_serialize_mutex.lock(); }
+static void impl_serialize_unlock() { g_serialize_mutex.unlock(); }
+
+static void impl_set_jmpbuf(void *buf) { }
+static sigjmp_buf *impl_get_env() { return (sigjmp_buf *)tm_jmpbuf; }
+
+extern "C" int impl_tm_sigsetjmp(void *env, int savemask) {
+    return sigsetjmp(*(sigjmp_buf*)env, savemask);
 }
 
-void tm_serialize_unlock()
-{
-	g_serialize_mutex.unlock();
-}
-
-void tm_set_jmpbuf(void *buf) { }
-sigjmp_buf *tm_get_env() { return (sigjmp_buf *)tm_jmpbuf; }
-
-void tm_begin()
+static void impl_begin()
 {
 	printf("tm_nested_call_counter=%d  --  ", g_tm_state.nested_call_counter);
 	if (g_tm_state.nested_call_counter == 1) {
@@ -185,7 +191,7 @@ void tm_begin()
 	fflush(stdout);
 }
 
-void tm_end()
+static void impl_end()
 {
 	printf("tm_nested_call_counter=%d  --  ", g_tm_state.nested_call_counter);
 	if (g_tm_state.nested_call_counter == 1) {
@@ -197,84 +203,85 @@ void tm_end()
 }
 
 // Read functions
-int8_t tm_read_i1(void *addr)
-{
-	int8_t val = *(int8_t *)addr;
-	printf("tm_read_i1\n");
-	return val;
-}
-int16_t tm_read_i2(void *addr)
-{
-	int16_t val = *(int16_t *)addr;
-	printf("tm_read_i2\n");
-	return val;
-}
-int32_t tm_read_i4(void *addr)
-{
-	int32_t val = *(int32_t *)addr;
-	printf("tm_read_i4\n");
-	return val;
-}
-int64_t tm_read_i8(void *addr)
-{
-	int64_t val = *(int64_t *)addr;
-	printf("tm_read_i8\n");
-	return val;
-}
-float tm_read_f4(void *addr)
-{
-	float val = *(float *)addr;
-	printf("tm_read_f4\n");
-	return val;
-}
-double tm_read_f8(void *addr)
-{
-	double val = *(double *)addr;
-	printf("tm_read_f8\n");
-	return val;
-}
-void *tm_read_ptr(void *addr)
-{
-	void *val = *(void **)addr;
-	printf("tm_read_ptr\n");
-	return val;
-}
+static int8_t  impl_read_i1(void  *a) { int8_t  v = *(int8_t*)a;  printf("tm_read_i1\n"); return v; }
+static int16_t impl_read_i2(void  *a) { int16_t v = *(int16_t*)a; printf("tm_read_i2\n"); return v; }
+static int32_t impl_read_i4(void  *a) { int32_t v = *(int32_t*)a; printf("tm_read_i4\n"); return v; }
+static int64_t impl_read_i8(void  *a) { int64_t v = *(int64_t*)a; printf("tm_read_i8\n"); return v; }
+static float   impl_read_f4(void  *a) { float   v = *(float*)a;   printf("tm_read_f4\n"); return v; }
+static double  impl_read_f8(void  *a) { double  v = *(double*)a;  printf("tm_read_f8\n"); return v; }
+static void   *impl_read_ptr(void **a) { void   *v = *a;           printf("tm_read_ptr\n"); return v; }
+
 // Write functions
-void tm_write_i1(void *addr, int8_t val)
-{
-	printf("tm_write_i1\n");
-	*(int8_t *)addr = val;
-}
-void tm_write_i2(void *addr, int16_t val)
-{
-	printf("tm_write_i2\n");
-	*(int16_t *)addr = val;
-}
-void tm_write_i4(void *addr, int32_t val)
-{
-	printf("tm_write_i4\n");
-	*(int32_t *)addr = val;
-}
-void tm_write_i8(void *addr, int64_t val)
-{
-	printf("tm_write_i8\n");
-	*(int64_t *)addr = val;
-}
-void tm_write_f4(void *addr, float val)
-{
-	printf("tm_write_f4\n");
-	*(float *)addr = val;
-}
-void tm_write_f8(void *addr, double val)
-{
-	printf("tm_write_f8\n");
-	*(double *)addr = val;
-}
-void tm_write_ptr(void *addr, void *val)
-{
-	printf("tm_write_ptr\n");
-	*(void **)addr = val;
-}
-void tm_memset(void *dst, uint8_t val, size_t sz) { memset(dst, val, sz); }
+static void impl_write_i1(void  *a, int8_t  v) { printf("tm_write_i1\n");  *(int8_t*)a  = v; }
+static void impl_write_i2(void  *a, int16_t v) { printf("tm_write_i2\n");  *(int16_t*)a = v; }
+static void impl_write_i4(void  *a, int32_t v) { printf("tm_write_i4\n");  *(int32_t*)a = v; }
+static void impl_write_i8(void  *a, int64_t v) { printf("tm_write_i8\n");  *(int64_t*)a = v; }
+static void impl_write_f4(void  *a, float   v) { printf("tm_write_f4\n");  *(float*)a   = v; }
+static void impl_write_f8(void  *a, double  v) { printf("tm_write_f8\n");  *(double*)a  = v; }
+static void impl_write_ptr(void **a, void   *v) { printf("tm_write_ptr\n"); *a = v; }
+
+static void impl_memset(void *dst, uint8_t val, size_t sz) { memset(dst, val, sz); }
+
+// ═══════════════════════════════════════════════════════════════
+// Hook function-pointer globals — the LLVM pass loads from these
+// DATA symbols to get function pointers for indirect calls.
+// ═══════════════════════════════════════════════════════════════
+
+extern "C" {
+
+void     (*tm_init)()                          = impl_init;
+void     (*tm_exit)()                          = impl_exit;
+void     (*tm_init_thread)()                   = impl_init_thread;
+void     (*tm_exit_thread)()                   = impl_exit_thread;
+void     (*tm_begin)()                         = (void(*)())impl_begin;
+void     (*tm_end)()                           = (void(*)())impl_end;
+void     (*tm_set_jmpbuf)(void*)               = impl_set_jmpbuf;
+void    *(*tm_get_env)()                       = (void*(*)())impl_get_env;
+void     (*tm_serialize_lock)()                = impl_serialize_lock;
+void     (*tm_serialize_unlock)()              = impl_serialize_unlock;
+void     (*tm_memset)(void*, uint8_t, size_t)  = impl_memset;
+
+void    *(*tm_malloc)(size_t)               = (void*(*)(size_t))nullptr;
+void    *(*tm_calloc)(size_t, size_t)       = (void*(*)(size_t,size_t))nullptr;
+void    *(*tm_realloc)(void*, size_t)       = (void*(*)(void*,size_t))nullptr;
+void     (*tm_free)(void*)                  = (void(*)(void*))nullptr;
+uint8_t  (*tm_read_i1)(uint8_t*)            = (uint8_t(*)(uint8_t*))impl_read_i1;
+uint16_t (*tm_read_i2)(uint16_t*)           = (uint16_t(*)(uint16_t*))impl_read_i2;
+uint32_t (*tm_read_i4)(uint32_t*)           = (uint32_t(*)(uint32_t*))impl_read_i4;
+uint64_t (*tm_read_i8)(uint64_t*)           = (uint64_t(*)(uint64_t*))impl_read_i8;
+float    (*tm_read_f4)(float*)              = (float(*)(float*))impl_read_f4;
+double   (*tm_read_f8)(double*)             = (double(*)(double*))impl_read_f8;
+void    *(*tm_read_ptr)(void**)             = (void*(*)(void**))impl_read_ptr;
+void     (*tm_write_i1)(uint8_t*, uint8_t)  = (void(*)(uint8_t*,uint8_t))impl_write_i1;
+void     (*tm_write_i2)(uint16_t*, uint16_t)= (void(*)(uint16_t*,uint16_t))impl_write_i2;
+void     (*tm_write_i4)(uint32_t*, uint32_t)= (void(*)(uint32_t*,uint32_t))impl_write_i4;
+void     (*tm_write_i8)(uint64_t*, int64_t) = (void(*)(uint64_t*,int64_t))impl_write_i8;
+void     (*tm_write_f4)(float*, float)      = (void(*)(float*,float))impl_write_f4;
+void     (*tm_write_f8)(double*, double)    = (void(*)(double*,double))impl_write_f8;
+void     (*tm_write_ptr)(void**, void*)      = (void(*)(void**,void*))impl_write_ptr;
+void     (*tm_get_thread_state)() = (void(*)())impl_get_thread_state;
+
+// ── Functions called directly (not through hook pointers) ───
+// These are called directly by the LLVM pass preamble, so they
+// must be actual function symbols (TEXT), not function-pointer
+// globals.
+
+void tm_flush_deferred_frees() {}
+void tm_clear_deferred_frees() {}
+
+int tm_setjmp() { return sigsetjmp(*(sigjmp_buf *)tm_jmpbuf, 0); }
+
+void tm_longjmp(int val) { longjmp(*(sigjmp_buf *)tm_jmpbuf, val); }
+
+void consume_ptr(volatile void *ptr) { (void)ptr; }
 
 } // extern "C"
+
+// tm_sigsetjmp hook: the LLVM pass declares @tm_sigsetjmp as a DATA ptr.
+// On Linux the hook is `__sigsetjmp` (a glibc internal name, no conflict).
+// On macOS/BSD we use `tm_sigsetjmp` to avoid clashing with the POSIX
+// function `sigsetjmp` from <setjmp.h>.
+__asm__(".globl _tm_sigsetjmp\n"
+        ".data\n"
+        ".align 3\n"
+        "_tm_sigsetjmp: .quad _impl_tm_sigsetjmp\n");

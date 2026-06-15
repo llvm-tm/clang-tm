@@ -58,7 +58,7 @@ bin/:
 # ── Per-backend, per-test build rules ──────────────────────────────
 # Generate: bin/<b>/<t>: test_<t>.cpp <runtime> test_helpers.hpp | bin/<b>/
 # tm_hooks.cpp is required by all backends (defines shared function-pointer
-# variables and the thread-counting / swap logic).
+# variables, TLS state, and the thread-counting / swap logic).
 define BUILD_RULE
 bin/$(1)/$(2): test_$(2).cpp $(RUNTIME_$(1)) $(RUNTIME_DIR)/tm_region_allocator/tm_region_allocator.cpp test_helpers.hpp | bin/$(1)/
 	$$(CXX) $$(CXXFLAGS) $$(INC_$(1)) $$(FLAGS_$(1)) -o $$@ $$< $$(RUNTIME_$(1)) $(RUNTIME_DIR)/tm_region_allocator/tm_region_allocator.cpp $(if $(filter $(1),$(HOOKS_EXCLUDE)),,$(HOOKS_SRC))

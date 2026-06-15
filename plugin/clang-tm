@@ -355,9 +355,11 @@ if [ "$MODE" = "link-only" ]; then
             LINK_OBJS+=("$REGION_O")
         fi
         
-        # Also compile tm_hooks.cpp if it exists (shared hook variables, required by all backends)
+        # Also compile tm_hooks.cpp if the runtime does NOT already provide
+        # the hook function-pointer variables (plugin/runtime/ files now define
+        # them directly to avoid linker conflicts).
         HOOKS_SRC="$RUNTIMES_DIR/common/tm_hooks.cpp"
-        if [ -f "$HOOKS_SRC" ]; then
+        if [ -f "$HOOKS_SRC" ] && [[ "$RESOLVED_RUNTIME" != */plugin/runtime/* ]]; then
             HOOKS_O="${OUT_DIR:?}/tm_hooks.o"
             HOOKS_INCLUDE="-I $(dirname "$RUNTIMES_DIR") -I $RUNTIMES_DIR/common"
             $CXX -std=c++20 ${OPT_LEVEL:--O1} -c "$HOOKS_SRC" -o "$HOOKS_O" \
@@ -567,10 +569,11 @@ if $RUNTIME_IS_SOURCE; then
             -fno-stack-protector -pthread "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"
     fi
 
-    # Also compile tm_hooks.cpp if it exists (shared hook variables, required by all backends)
+    # Also compile tm_hooks.cpp if the runtime does NOT already provide
+    # the hook function-pointer variables (plugin/runtime/ defines them directly).
     HOOKS_SRC="$RUNTIMES_DIR/common/tm_hooks.cpp"
     HOOKS_O=""
-    if [ -f "$HOOKS_SRC" ]; then
+    if [ -f "$HOOKS_SRC" ] && [[ "$RESOLVED_RUNTIME" != */plugin/runtime/* ]]; then
         HOOKS_O="$OUT_DIR/tm_hooks.o"
         log "[rt] tm_hooks.cpp → native object file"
         $CXX -std=c++20 $RUNTIME_OPT -c "$HOOKS_SRC" -o "$HOOKS_O" \

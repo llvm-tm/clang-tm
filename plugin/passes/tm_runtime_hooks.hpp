@@ -7,6 +7,7 @@
 #ifndef TM_RUNTIME_HOOKS_HPP
 #define TM_RUNTIME_HOOKS_HPP
 
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
@@ -85,6 +86,10 @@ static InvokeInst *createHookInvoke(LLVMContext &Ctx, const TMRuntimeHook &Hook,
 // ── TMRuntimeHooks ────────────────────────────────────────────────
 // Collection of all TM runtime hook variables.
 struct TMRuntimeHooks {
+	SmallPtrSet<const GlobalVariable *, 32> hookGVs;
+
+	bool isHookGV(const GlobalVariable *GV) const { return hookGVs.count(GV); }
+
 	TMRuntimeHook read_i1, read_i2, read_i4, read_i8;
 	TMRuntimeHook read_i16, read_i32, read_i64;
 	TMRuntimeHook read_f4, read_f8, read_ptr;
@@ -171,6 +176,30 @@ struct TMRuntimeHooks {
 		// Optional trace hook (only injected if --emit-tm-trace is set)
 		h.trace_fn = hook("tm_trace", voidTy, {i32Ty, i8PtrTy, i64Ty, i64Ty});
 		// Params: (type_code: R=0/W=1, addr, width, value)
+
+		// Register all hook GVs for fast skip checks in handleLoadStore.
+		// Any GlobalVariable declared via declareHook above is a runtime
+		// function-pointer variable, NOT a TM-annotated user global, and
+		// must NOT be instrumented with tm_read/tm_write.
+		auto reg = [&](auto &hook) {
+			if (hook.gv) h.hookGVs.insert(hook.gv);
+		};
+		reg(h.read_i1); reg(h.read_i2); reg(h.read_i4); reg(h.read_i8);
+		reg(h.read_i16); reg(h.read_i32); reg(h.read_i64);
+		reg(h.read_f4); reg(h.read_f8); reg(h.read_ptr);
+		reg(h.write_i1); reg(h.write_i2); reg(h.write_i4); reg(h.write_i8);
+		reg(h.write_i16); reg(h.write_i32); reg(h.write_i64);
+		reg(h.write_f4); reg(h.write_f8); reg(h.write_ptr);
+		reg(h.begin); reg(h.end);
+		reg(h.set_jmpbuf); reg(h.get_env); reg(h.sigsetjmp);
+		reg(h.init); reg(h.exit_fn);
+		reg(h.init_thread); reg(h.exit_thread);
+		reg(h.serialize_lock); reg(h.serialize_unlock);
+		reg(h.malloc_fn); reg(h.calloc_fn); reg(h.realloc_fn); reg(h.free_fn);
+		reg(h.memset_fn);
+		reg(h.enqueue_fn); reg(h.wait_prev_tx_fn);
+		reg(h.get_thread_state);
+		reg(h.trace_fn);
 
 		return h;
 	}

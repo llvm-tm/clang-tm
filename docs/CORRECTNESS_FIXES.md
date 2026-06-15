@@ -5,8 +5,11 @@
 | 1 | SwissTM debug fprintfs (performance) | **Fixed** | `ed1c75e` |
 | 2 | Debug patch scripts path fix | **Fixed** | `27936d4` |
 | 3 | NOrec STMbench7/TPC-C crash (SIGSEGV) | **Fixed** | `e885078` |
+| 3b | NOREC commit write-back skipping non-TM addresses in expli mode | **Fixed** | `84400be` |
 | 4 | LEFTRIGHT multi-thread deadlock | **Fixed** | `1de1b90` |
 | 5 | XTM rbtree segfault | **Fixed** | `62d3878` |
+| 6 | SIGBUS in test_treap_tx (tm_get_env/tm_set_jmpbuf as DATA) | **Fixed** | *(not yet committed)* |
+| 7 | test_local_containers opaque errors (stdlib exception symbols) | **Fixed** | *(not yet committed)* |
 
 ---
 
@@ -89,6 +92,43 @@ data pages) can no longer corrupt allocator metadata.
 
 Capacity impact: ~5-6% reduction per chunk (e.g. 2560 blocks instead of 2714
 for 24-byte size class).
+
+---
+
+---
+
+## 6. SIGBUS in test_treap_tx — tm_get_env/tm_set_jmpbuf as DATA ✅
+
+**Root cause:** `tm_get_env` and `tm_set_jmpbuf` were standalone `__TEXT,__text` functions in every backend. The LLVM pass's `emitHookCall` treats them as function-pointer DATA variables — it generates `ldr x8, [x8]` which loads 8 bytes of function prologue (not a pointer), then `blr x8` jumps to garbage → SIGBUS (signal 10).
+
+**Fix:** Converted both symbols to proper DATA variables registered through the hooks system:
+
+- `tm_hooks.hpp` — Added `.get_env` and `.set_jmpbuf` fields to `TMRealHooks`
+- `tm_hooks.cpp` — Added `tm_get_env` / `tm_set_jmpbuf` as `__thread DATA` variables with stub defaults:
+  - `stub_tm_get_env` returns `&tm_jmpbuf` (the default thread-local jmpbuf)
+  - `stub_tm_set_jmpbuf` is a no-op
+- Registered in `apply_hooks_unlocked()`, `tm_swap_runtime()`, `s_real_hooks` save, and trace-hook init.
+- 11 backends updated: TinySTM, DUDETM, NVHTM, SPHT, LeftRight, SwissTM, TSXSGL, DistributedSGL, SingleGlobalLock, TL2, NOrec, PersistentSGL — all removed standalone function definitions and registered via `.get_env`/`.set_jmpbuf` in their hooks struct.
+- No‑op backends (TSXSGL, DistributedSGL, SGL, TL2, NOrec, P‑SGL) rely on the stubs from `tm_hooks.cpp`.
+
+**Verification:** `nm` confirms `_tm_get_env` and `_tm_set_jmpbuf` now reside in `__DATA,__data`, not `__TEXT,__text`. `test_treap_tx` exits 0 (was SIGBUS 138).
+
+---
+
+## 7. test_local_containers opaque errors — missing stdlib exception symbols ✅
+
+**Root cause:** `test_local_containers.cpp` uses `std::vector` inside `[[tx::transaction]]` functions. At `-O1`, the LLVM frontend generates `@__clang_call_terminate` → `@_ZSt9terminatev` for exception cleanup paths, and `@__cxa_throw` with `@_ZNSt20bad_array_new_lengthC1Ev`, `@_ZNSt11logic_errorC2EPKc`, `@_ZNSt12length_errorD1Ev` for allocation failure paths. None of these symbols were in the `KnownSafeOpaqueTable`, so the opaque check aborted.
+
+**Fix:** Added to `opaque_safe_table.hpp`:
+- `_ZSt9terminatev` — `std::terminate()` called from `__clang_call_terminate`
+- `__throw_*` prefix — all `std::__throw_*` functions (e.g. `__throw_length_error`, `__throw_bad_array_new_length`)
+- `_ZNSt20bad_array_new_lengthC1Ev` / `C2Ev` — `bad_array_new_length` constructors
+- `_ZNSt11logic_errorC2EPKc` — `std::logic_error` constructor
+- `_ZNSt12length_errorD1Ev` — `std::length_error` destructor
+
+These functions never access TM-annotated memory — they either terminate the program or construct exception objects on the heap. They are safe to call within a transaction.
+
+**Revealed pre-existing issue:** After the opaque check passes, `injectTransactionBeginEnd` in `tm_instrument_helpers.hpp` creates a broken module: "Basic Block in function '_Z9vector_txii' does not have terminator!". This occurs because the function has 77 inlined `ret void` instructions from `std::vector` template code, and the return-splitting logic in `injectTransactionBeginEnd` doesn't handle the case where multiple returns share a parent block. The opaque check was previously masking this bug by aborting before the verify pass ran.
 
 ---
 
