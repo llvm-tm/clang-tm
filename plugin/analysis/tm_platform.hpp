@@ -33,12 +33,12 @@ namespace tm_platform
 // The runtime must provide `tm_sigsetjmp` as a DATA symbol (global
 // function pointer) holding the address of the actual implementation.
 // -------------------------------------------------------------------------
-inline const char *sigsetjmpName(llvm::Module &M)
+inline const char *sigsetjmpName(llvm::Module &)
 {
-	std::string triple = M.getTargetTriple().str();
-	if (triple.find("linux") != std::string::npos ||
-	    triple.find("-gnu") != std::string::npos)
-		return "__sigsetjmp";
+	// Use a single name on all platforms.  The name must NOT collide with
+	// a real TEXT (function) symbol — `__sigsetjmp` (glibc) is a real
+	// function; declaring it as `external global ptr` in LLVM IR makes
+	// the generated code read 8 bytes of the function body as a pointer.
 	return "tm_sigsetjmp";
 }
 
