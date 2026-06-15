@@ -1,4 +1,4 @@
-# TM API — C++ Transactional Memory Framework
+# TM API — Transactional Memory Framework
 
 Multi-paradigm transactional memory framework for C++ (LLVM plugin, explicit C++ API, Rust bindings).
 Supports 12+ STM/HTM backends.
