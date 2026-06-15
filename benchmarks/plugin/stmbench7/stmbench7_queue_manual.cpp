@@ -4,7 +4,7 @@
  * Queue-manual pipeline showcase with STMbench7-like operations:
  *   - Graph data structure (nodes + connections, like STMbench7's AP graph)
  *   - Multiple operation categories: short reads, short updates, traversals, struct mods
- *   - All operations use async_transaction annotation (return void)
+ *   - All operations use async_shared annotation (return void)
  *   - Main thread enqueues batches and calls tm_wait_prev_tx() periodically
  *
  * Build with: tm-instrument-queue-manual pipeline + queue_runtime.o
@@ -23,7 +23,7 @@
 #include <random>
 #include "tm_vector.hpp"
 
-#define ASYNC_TX __attribute__((noinline, annotate("async_transaction")))
+#define ASYNC_TX __attribute__((noinline, annotate("async_shared")))
 #define MAIN    __attribute__((annotate("main"), noinline))
 
 extern "C" void tm_wait_prev_tx(void);
@@ -88,7 +88,7 @@ static void init_data() {
     }
 }
 
-// ─── Operations (all async_transaction, return void) ──────────
+// ─── Operations (all async_shared, return void) ──────────
 
 ASYNC_TX void op_read_node(int idx) {
     if (idx >= 0 && idx < (int)g_nodes.size()) {

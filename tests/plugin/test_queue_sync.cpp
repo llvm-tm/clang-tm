@@ -1,5 +1,5 @@
 /// Test: queue-based synchronous transaction execution
-/// Sync TXes (transaction annotation) are enqueued and the caller
+/// Sync TXes (shared annotation) are enqueued and the caller
 /// automatically waits via plugin-inserted tm_wait_prev_tx().
 
 #include <cstdio>

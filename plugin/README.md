@@ -26,7 +26,7 @@ plugin/
 
 ## Features
 
-- Instruments functions annotated with `__attribute__((annotate("transaction")))`
+- Instruments functions annotated with `__attribute__((annotate("shared")))`
   (convenience macro: `TX`).
 - Instruments reads/writes to globals annotated with `__attribute__((annotate("tm")))`
   (convenience macro: `TM`).
@@ -257,8 +257,8 @@ pipeline on some tests — root cause under investigation.
 
 The project includes a **standalone LLVM pass** (`libTMRaceChecker.so`) that
 detects accesses to TM-annotated globals from functions that are **not**
-annotated with `transaction`.  This catches common bugs where the developer
-forgot to add `[[tx::transaction]]` to a function that reads or writes
+annotated with `shared`.  This catches common bugs where the developer
+forgot to add `[[tm::shared]]` to a function that reads or writes
 shared TM state.
 
 The checker reuses the same pointer-tracing analysis (`tracesFromTMGlobal`)
@@ -286,8 +286,8 @@ opt-22 -load-pass-plugin=bin/libTMRaceChecker.so \
 Output example:
 ```
 TM-RACE-CHECKER: app.cpp:42:7: read to TM-annotated global 'g_counter'
-  in function 'worker' without transaction annotation
-  note: add [[tx::transaction]] to function 'worker' or use
+  in function 'worker' without shared annotation
+  note: add [[tm::shared]] to function 'worker' or use
         peek()/poke() for intentional non-transactional access
 ```
 
@@ -300,8 +300,8 @@ warning of the form:
 
 ```
 warning: access to TM-annotated global 'g_counter' in function
-  'bad_access' without transaction annotation.
-  Add [[tx::transaction]] to 'bad_access', or use peek()/poke() for
+  'bad_access' without shared annotation.
+  Add [[tm::shared]] to 'bad_access', or use peek()/poke() for
   intentional non-transactional access.
 ```
 
@@ -343,7 +343,7 @@ code) will be flagged as actual leaks.
 
 ```cpp
 #define TM  __attribute__((annotate("tm")))           // shared global
-#define TX  __attribute__((annotate("transaction"), noinline))  // transaction
+#define TX  __attribute__((annotate("shared"), noinline))  // shared
 #define THREAD __attribute__((annotate("thread"), noinline))    // thread entry
 #define MAIN __attribute__((annotate("main"), noinline))        // main alternative
 #define PSTATIC_REBUILD __attribute__((annotate("pstatic_rebuild")))  // restore fn

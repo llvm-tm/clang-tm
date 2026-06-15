@@ -1,4 +1,4 @@
-/// Benchmark: inline pipeline — functions with `transaction` annotation,
+/// Benchmark: inline pipeline — functions with `shared` annotation,
 /// wrapped in manual tm_begin/tm_end retry loop in main().
 
 #include <cstdio>
@@ -15,12 +15,12 @@ void tm_exit(void);
 
 static int counter = 0;
 
-__attribute__((noinline, annotate("transaction")))
+__attribute__((noinline, annotate("shared")))
 void inc() {
     counter++;
 }
 
-__attribute__((noinline, annotate("transaction")))
+__attribute__((noinline, annotate("shared")))
 void inc_heavy() {
     for (int j = 0; j < 100; j++)
         counter++;

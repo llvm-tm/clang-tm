@@ -17,7 +17,7 @@ struct OuterStruct {
     InnerVec inner;
 };
 
-__attribute__((annotate("transaction"), noinline))
+__attribute__((annotate("shared"), noinline))
 void tx_work(std::vector<OuterStruct>& vec, int n, int thread_id) {
     for (int i = 0; i < n; i++) {
         // push_back triggers realloc (like g_compositeParts)

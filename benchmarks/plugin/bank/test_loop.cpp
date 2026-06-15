@@ -15,7 +15,7 @@ extern void tm_end();
 struct Account { uint64_t balance; };
 TMSafeVector<Account> accounts(1024, Account{1000});
 
-#define TX __attribute__((annotate("transaction"), noinline))
+#define TX __attribute__((annotate("shared"), noinline))
 
 TX void do_tx(int src, int dst, uint64_t amt) {
     tm_begin();
