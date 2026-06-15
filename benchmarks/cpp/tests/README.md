@@ -5,7 +5,7 @@
 Run all benchmark self-tests:
 
 ```bash
-cd expli-benchmarks
+cd benchmarks/cpp
 make          # build all benchmarks
 ./tests/run_benchmark_tests.sh
 ```
@@ -164,7 +164,7 @@ To verify that CLI parameters actually affect the workload:
 
 ## Adding Tests to a New Benchmark
 
-1. Include the test header:
+1. Include the test header from `benchmarks/cpp/tests/`:
    ```cpp
    #include "../tests/benchmark_test.hpp"
    ```
@@ -198,8 +198,8 @@ To verify that CLI parameters actually affect the workload:
 
 ## Adding a New Fuzz Benchmark
 
-1. Create `expli-benchmarks/<name>/<name>.cpp`
+1. Create `benchmarks/cpp/<name>/<name>.cpp`
 2. Include TM wrappers and declare a deterministic RNG
 3. Define an invariant that must hold after concurrent TM operations
-4. Add to `expli-benchmarks/Makefile`
+4. Add to `benchmarks/cpp/Makefile`
 5. Add `--test` support

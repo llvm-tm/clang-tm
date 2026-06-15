@@ -3,8 +3,9 @@
 ## Overview
 
 This document describes how the TM plugin instruments the Bank benchmark.
-The uninstrumented IR is at `benchmarks/test/bank/out/bank.ll` (7,297 lines).
-The instrumented IR is at `benchmarks/test/bank/out/bank.instr.ll` (7,517 lines).
+The uninstrumented IR can be generated from `benchmarks/plugin/bank/bank.cpp`.
+The instrumented IR is produced by `opt -passes="tm-instrument"` via the
+`clang-tm` wrapper. See `benchmarks/plugin/bank/Makefile` for the pipeline.
 
 ## What Is Annotated
 
@@ -13,9 +14,9 @@ From `llvm.global.annotations` we identify:
 | Entity | Annotation | Kind |
 |--------|-----------|------|
 | `bank` (global variable) | `"tm"` | TM global |
-| `transfer(int, int, int)` | `"transaction"` | TX function |
-| `total_transactional()` | `"transaction"` | TX function |
-| `reset()` | `"transaction"` | TX function |
+| `transfer(int, int, int)` | `"shared"` | TX function |
+| `total_transactional()` | `"shared"` | TX function |
+| `reset()` | `"shared"` | TX function |
 | `worker_thread(ThreadData&)` | `"thread"` | Thread entry |
 | `main` | `"main"` | Main entry |
 

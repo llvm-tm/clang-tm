@@ -17,7 +17,7 @@ plugin**. Compile with any C++20 compiler and link against any backend at build 
 ## Quick Start
 
 ```bash
-cd expli_benchmarks
+cd benchmarks/cpp
 
 # Build all benchmarks with the default backend (TinySTM/WBCTL):
 make all
@@ -128,7 +128,7 @@ All benchmarks accept `-t <threads>` and `-d <duration_ms>`:
 ## Running All Benchmarks
 
 ```bash
-cd expli_benchmarks
+cd benchmarks/cpp
 
 # Build everything:
 make all
@@ -168,26 +168,29 @@ recommended backend for correctness-sensitive applications.
 ## Project Structure
 
 ```
-expli_benchmarks/
-├── Makefile                          # Build all benchmarks for any backend
+benchmarks/cpp/
+├── Makefile                         # Build all benchmarks for any backend
 ├── bank/
-│   └── bank.cpp                      # Bank money-conservation benchmark
+│   └── bank.cpp                     # Bank money-conservation benchmark
 ├── eigenbench/
-│   └── eigenbench.cpp                # EigenBench TM microbenchmark
+│   └── eigenbench.cpp               # EigenBench TM microbenchmark
 ├── STMbench7/
-│   └── STMbench7.cpp                 # CAD/CAM graph benchmark
+│   └── STMbench7.cpp                # CAD/CAM graph benchmark
 ├── vacation/
-│   └── vacation.cpp                  # Simplified STAMP vacation
+│   └── vacation.cpp                 # Simplified STAMP vacation
 ├── tpcc/
-│   └── tpcc.cpp                      # TPC-C benchmark
+│   └── tpcc.cpp                     # TPC-C benchmark
 ├── ycsb/
-│   └── ycsb.cpp                      # YCSB benchmark
+│   └── ycsb.cpp                     # YCSB benchmark
 ├── fuzz/
-│   ├── fuzz_counter.cpp              # Deterministic counter stress test
-│   └── fuzz_bank.cpp                 # Deterministic bank stress test
-└── bin/                              # Compiled binaries
+│   ├── fuzz_counter.cpp             # Deterministic counter stress test
+│   └── fuzz_bank.cpp                # Deterministic bank stress test
+├── tests/
+│   └── README.md                    # Test methodology docs
+└── bin/                             # Compiled binaries
 ```
 
-The TM API itself lives in `expli_tm_api/tm_api.hpp` and the backends are in
-`backends/`. No LLVM plugin, no bitcode pipeline, no cloning — just a C++20
-compiler and pthreads.
+The TM API itself lives in `expli_instr/cpp/include/tm_api.hpp` and the backends
+live in `backends/tm_impl/`. No LLVM plugin, no bitcode pipeline, no cloning —
+just a C++20 compiler and pthreads. See `backends/README.md` for backend
+selection and architecture details.

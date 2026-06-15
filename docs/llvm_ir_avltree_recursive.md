@@ -2,9 +2,7 @@
 
 ## Structure
 
-File: `benchmarks/datastructures/avltree_recursive.cpp`
-Uninstrumented IR: `benchmarks/datastructures/out/avltree_recursive.ll` (5,609 lines)
-Instrumented IR:   `benchmarks/datastructures/out/avltree_recursive.instr.ll` (6,467 lines)
+File: `benchmarks/plugin/datastructures/avltree_recursive.cpp`
 
 Annotated entities from `llvm.global.annotations`:
 
@@ -12,7 +10,7 @@ Annotated entities from `llvm.global.annotations`:
 |--------|-----------|------|
 | `node_keys`, `node_values`, `node_left`, `node_right` ... | `"tm"` | 10 TM globals |
 | `node_count`, `root`, `free_head` | `"tm"` | 3 TM scalars |
-| `txn_insert`, `txn_erase`, `txn_contains`, `txn_get`, `txn_rangeCount` | `"transaction"` | 5 TX functions |
+| `txn_insert`, `txn_erase`, `txn_contains`, `txn_get`, `txn_rangeCount` | `"shared"` | 5 TX functions |
 | `worker` | `"thread"` | Thread entry |
 
 ## Cloning
