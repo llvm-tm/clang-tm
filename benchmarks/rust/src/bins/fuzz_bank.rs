@@ -15,9 +15,21 @@ fn verify(bank: &[TmCell<i32>], expected: i32) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && (args[1] == "--version" || args[1] == "-V") {
+        println!("\n\
+━┏━━━┓┏┓━┏┓┏━━━━┓┏━━━━┓\n\
+━┃┏━━┛┃┃━┃┃┗━━┓━┃┗━━┓━┃\n\
+━┃┗━━┓┃┃━┃┃━━┏┛┏┛━━┏┛┏┛\n\
+━┃┏━━┛┃┃━┃┃━┏┛┏┛━━┏┛┏┛━\n\
+┏┛┗┓━━┃┗━┛┃┏┛━┗━┓┏┛━┗━┓\n\
+┗━━┛━━┗━━━┛┗━━━━┛┗━━━━┛\n\
+    fuzz-bank v1.0.0\n");
+        return;
+    }
+
     let mut threads = 4usize;
     let mut iters = 1000usize;
-    let mut accounts = 16usize;
+    let mut accounts = 64usize;
     let mut seed = 42u64;
 
     let mut i = 1;
@@ -25,7 +37,7 @@ fn main() {
         match args[i].as_str() {
             "-t" if i+1 < args.len() => { threads = args[i+1].parse().unwrap_or(4); i+=2; }
             "-n" if i+1 < args.len() => { iters = args[i+1].parse().unwrap_or(1000); i+=2; }
-            "-a" if i+1 < args.len() => { accounts = args[i+1].parse().unwrap_or(16); i+=2; }
+            "-a" if i+1 < args.len() => { accounts = args[i+1].parse().unwrap_or(64); i+=2; }
             "-s" if i+1 < args.len() => { seed = args[i+1].parse().unwrap_or(42); i+=2; }
             "-h" | "--help" => {
                 eprintln!("Usage: fuzz_bank [-t threads] [-n iters] [-a accounts] [-s seed]");

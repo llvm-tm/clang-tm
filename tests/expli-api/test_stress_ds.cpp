@@ -126,9 +126,6 @@ static void test_rbtree_tx() {
         sizeof(explicit_rbtree::Tree<int, int>));
     tree->root = nullptr;
 
-    fprintf(stderr, "DEBUG rbtree_tx: tree=%p &tree->root=%p\n",
-            (void*)tree, (void*)&tree->root);
-
     expli::TM<int>::transaction([&]() {
         auto* n1 = alloc_rb_node_tm(10, 100);
         auto* n2 = alloc_rb_node_tm(20, 200);

@@ -203,7 +203,7 @@ See `expli_instr/rust/workspace/README.md` for backend selection and benchmark d
 | Issue | Details |
 |-------|---------|
 | **LeftRight test_tx fails** | 29/114 tests fail (pre-existing algorithm bug, not related to build fixes) |
-| **Romulus test_tx fails** | 54/114 tests fail (pre-existing algorithm bug, not related to build fixes) |
+| **Romulus test_tx passes** | All 114 tests pass after OCC read-validate fix (version-table re-check on read_word) |
 | **DUDETM, NVHTM, DistributedSGL, PersistentSGL** | Build but depend on plugin-provided symbols (`tm_symbol_count`, `tm_symbol_addresses`, `tm_symbol_sizes`) not available in explicit C++ API |
 | **rbtree benchmark timing** | Reports 0ms duration (pre-existing) |
 | **stmbench7 times out** | Data race in `ts_multimap::lower_bound()` (pre-existing) |

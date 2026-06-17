@@ -126,12 +126,6 @@ static void do_tm_exit()
 	fprintf(stdout, " aborts=%llu\n", (unsigned long long)ac);
 	fflush(stdout);
 
-#ifndef NDEBUG
-	fprintf(stderr,
-	        "\n=== TinySTM max read-set = %llu, max write-set = %llu ===\n",
-	        (unsigned long long)mxr,
-	        (unsigned long long)mxw);
-#endif
 	if (ac > 0) {
 		fprintf(stderr,
 		        "\n=== TinySTM total aborts = %llu ===\n",
@@ -202,12 +196,6 @@ void tm_exit()
 	fprintf(stdout, " aborts=%llu\n", (unsigned long long)ac);
 	fflush(stdout);
 
-#ifndef NDEBUG
-	fprintf(stderr,
-	        "\n=== TinySTM max read-set = %llu, max write-set = %llu ===\n",
-	        (unsigned long long)mxr,
-	        (unsigned long long)mxw);
-#endif
 	if (ac > 0) {
 		fprintf(stderr,
 		        "\n=== TinySTM total aborts = %llu ===\n",

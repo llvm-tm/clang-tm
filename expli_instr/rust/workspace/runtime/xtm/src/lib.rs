@@ -1,3 +1,22 @@
+// ═══════════════════════════════════════════════════════════════════
+//  XTM — eXtended Transactional Memory (ASPLOS 2006)
+//
+//  IMPORTANT: This Rust implementation uses a version-table OCC
+//  protocol (same as the Rust Romulus backend) because Rust's
+//  ownership model cannot express the C++ XTM's page-granularity
+//  private-copy scheme (XADT/XSW/XF). The C++ XTM uses virtual
+//  memory primitives (mprotect, page-fault handlers) that have no
+//  Rust equivalent.
+//
+//  C++ reference: backends/tm_impl/xtm/xtm.hpp
+//
+//  Algorithm (this file):
+//    Version-table OCC with commit-lock serialized write-back.
+//    On commit: validate read-set → acquire lock → re-validate →
+//    increment clock → write-back → fence → update version entries →
+//    release lock.
+// ═══════════════════════════════════════════════════════════════════
+
 use std::cell::RefCell;
 use std::sync::atomic::{fence, AtomicU64, Ordering};
 
@@ -183,10 +202,19 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         return v;
     }
 
-    // Read from memory
-    let val: T = unsafe { (addr as *const T).read() };
+    // Read-validate: capture version, read data, re-check version.
+    // Without the re-check, a concurrent commit's write-back can
+    // race with the data read, producing an inconsistent snapshot.
     let idx = version_index(addr);
+
     let observed_version = VERSION_TABLE[idx].load(Ordering::Acquire);
+    let val: T = unsafe { (addr as *const T).read() };
+    let version_after = VERSION_TABLE[idx].load(Ordering::Acquire);
+
+    if observed_version != version_after {
+        // Version changed during read — abort and retry
+        panic!("version_changed_during_read");
+    }
 
     with_tx(|tx| {
         tx.read_set.push(ReadEntry {
