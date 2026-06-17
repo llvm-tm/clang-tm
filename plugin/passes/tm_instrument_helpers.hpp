@@ -55,6 +55,8 @@ static void checkMissingTransactionAnnotations(Module &M)
 			continue;
 		if (hasAnnotation(F, THREAD_ANNOT))
 			continue;
+		if (hasAnnotation(F, NONTX_ANNOT))
+			continue;
 		if (F.getName() == MAIN_ANNOT || F.getName() == "main")
 			continue;
 
@@ -71,13 +73,35 @@ static void checkMissingTransactionAnnotations(Module &M)
 					continue;
 
 				if (tracesFromTMGlobal(Ptr, M)) {
+					// Trace following same path as tracesFromTMGlobal
 					StringRef GlobalName = "<TM global>";
-					if (auto *GV = dyn_cast<GlobalVariable>(
-						    Ptr->stripPointerCasts()))
-						GlobalName = GV->getName();
-					else if (auto *Base = getBaseObject(Ptr))
-						if (auto *GV = dyn_cast<GlobalVariable>(Base))
-							GlobalName = GV->getName();
+					Value *Trace = Ptr;
+					for (int i = 0; i < 10 && Trace; i++) {
+						Trace = Trace->stripPointerCasts();
+						if (auto *GV = dyn_cast<GlobalVariable>(Trace)) {
+							if (isTMAnnotatedGlobal(GV, M)) {
+								GlobalName = GV->getName();
+								break;
+							}
+						}
+						if (auto *GEP = dyn_cast<GetElementPtrInst>(Trace))
+							Trace = const_cast<Value *>(GEP->getPointerOperand());
+						else if (auto *GEPOp = dyn_cast<GEPOperator>(Trace))
+							Trace = const_cast<Value *>(GEPOp->getPointerOperand());
+						else if (auto *Load = dyn_cast<LoadInst>(Trace))
+							Trace = const_cast<Value *>(Load->getPointerOperand());
+						else if (auto *Call = dyn_cast<CallBase>(Trace)) {
+							// Try arguments in reverse (last arg is often 'this')
+							for (unsigned a = Call->arg_size(); a > 0; a--) {
+								Value *A = Call->getArgOperand(a - 1);
+								if (tracesFromTMGlobal(A, M))
+									{ Trace = A; break; }
+								if (a == 1) Trace = nullptr;
+							}
+						} else {
+							break;
+						}
+					}
 
 					DebugLoc DL = I.getDebugLoc();
 					errs() << "warning: ";
@@ -93,8 +117,8 @@ static void checkMissingTransactionAnnotations(Module &M)
 					       << "' without shared annotation. "
 					       << "Add [[tm::shared]] to '"
 					       << F.getName()
-					       << "', or use peek()/poke() for "
-					       << "intentional non-transactional access.\n";
+					       << "', or suppress with [[tm::nontx]] "
+					       << "if intentional.\n";
 				}
 			}
 		}

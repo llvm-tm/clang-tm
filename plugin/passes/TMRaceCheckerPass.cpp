@@ -197,11 +197,16 @@ static void emitWarning(Function &F, Instruction &I, StringRef GlobalName) {
            << "' without transaction annotation\n";
     errs() << "  note: add [[tm::shared]] to function '"
            << F.getName()
-           << "' or use peek()/poke() for intentional non-transactional access\n";
+           << "', or suppress with [[tm::nontx]] if intentional\n";
 }
 
 class TMRaceCheckerPass : public PassInfoMixin<TMRaceCheckerPass> {
+    bool Verbose = false;
 public:
+    TMRaceCheckerPass() {
+        Verbose = (getenv("TM_RACE_CHECKER_VERBOSE") != nullptr);
+    }
+
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
         TM_DEBUG("TMRaceCheckerPass: scanning module %s",
                  M.getName().str().c_str());
@@ -211,7 +216,7 @@ public:
         collectTMGlobals(M, TMGlobals);
 
         if (TMGlobals.empty()) {
-            TM_DEBUG("No TM-annotated globals found, skipping");
+            if (Verbose) TM_DEBUG("No TM-annotated globals found, skipping");
             return PreservedAnalyses::all();
         }
 
@@ -231,7 +236,8 @@ public:
                 hasAnnotation(F, ASYNC_TX_ANNOT) ||
                 hasAnnotation(F, THREAD_ANNOT) ||
                 hasAnnotation(F, PSTATIC_REBUILD_ANNOT) ||
-                hasAnnotation(F, ALLOW_OPAQUE_ANNOT))
+                hasAnnotation(F, ALLOW_OPAQUE_ANNOT) ||
+                hasAnnotation(F, NONTX_ANNOT))
                 continue;
             // Skip main (entry point, may do setup/teardown outside TX)
             if (F.getName() == "main")
@@ -241,7 +247,8 @@ public:
             if (SafeSet.count(&F))
                 continue;
 
-            TM_DEBUG("Checking function: %s", F.getName().str().c_str());
+            if (Verbose)
+                TM_DEBUG("Checking function: %s", F.getName().str().c_str());
             for (auto &BB : F) {
                 for (auto &I : BB) {
                     Value *Ptr = nullptr;
@@ -271,7 +278,7 @@ public:
             }
         }
 
-        if (!Found)
+        if (!Found && Verbose)
             TM_DEBUG("No TM-race candidates found");
 
         return PreservedAnalyses::all();
