@@ -9,12 +9,12 @@ Invariants" (TRANSACT'06).
 
 1. **Fuzz**: Run a parameterized benchmark (counter array, bank transfers)
    with random thread counts, iteration counts, and data seeds.
-2. **Trace**: The event logger (`#define TM_EVENT_LOG`) records every TM
-   operation (TX begin/end/abort, lock acquire/release, read/write-set
-   ops, commit phases) to a per-thread ring buffer.
+2. **Trace**: Trace events (TX begin/end, reads, writes, aborts) are logged
+   via the instrument pass (`--emit-tm-trace`) or runtime wrappers
+   (`TM_TRACE_PATH` / `TM_TRACE_FILE`).
 3. **Check**: Post-hoc analysis validates static invariants against the
-   event trace.  If an invariant is violated, the event log pinpoints
-   which operation sequence caused the failure.
+   trace.  If an invariant is violated, the trace pinpoints which operation
+   sequence caused the failure.
 4. **Report**: FAIL per (backend, fuzz_params) with the violating event
    sequence.
 
@@ -32,17 +32,28 @@ Invariants" (TRANSACT'06).
 
 ## Usage
 
+### New fuzz driver (LLVM plugin pipeline)
+
+```bash
+# Basic: fuzz a benchmark with TINYSTM
+python3 tools/tm-fuzz/tm-fuzz.py --app benchmarks/plugin/bank/bank.cpp --backend TINYSTM
+
+# With strategy pass and multiple thread counts
+python3 tools/tm-fuzz/tm-fuzz.py --app benchmarks/plugin/bank/bank.cpp \
+    --strategy auto --threads 1,2,4 --duration 10
+
+# With trace and invariant checking
+python3 tools/tm-fuzz/tm-fuzz.py --app benchmarks/plugin/bank/bank.cpp \
+    --trace --baseline baseline.txt --duration 30
+
+# All backends
+python3 tools/tm-fuzz/tm-fuzz.py --app benchmarks/plugin/bank/bank.cpp --backend all
+```
+
+### Manual event log checking
+
 ```bash
 cd tools/stm_bug_tool
-
-# Run fuzzing for all backends
-python3 fuzz_runner.py --backends all --runs 10
-
-# Run fuzzing for specific backend with 100 runs
-python3 fuzz_runner.py --backends tl2,tinystm --runs 100
-
-# Run single benchmark with event log visible
-make -C benchmarks run BACKEND=tl2 THREADS=4
 
 # Check event log from a previous run
 python3 invariant_checker.py --log /tmp/event_log.txt
@@ -52,9 +63,12 @@ python3 invariant_checker.py --log /tmp/event_log.txt
 
 | File | Role |
 |------|------|
-| `fuzz_runner.py` | Orchestrates builds and runs across backends and parameters |
 | `invariant_checker.py` | Invariant definitions and post-hoc checking on event traces |
 | `event_parser.py` | Parses event log stderr output into structured data |
-| `benchmarks/fuzz_counter.cpp` | Counter array fuzz target (generic TM correctness) |
-| `benchmarks/fuzz_bank.cpp` | Bank transfer fuzz target (money conservation) |
-| `benchmarks/Makefile` | Build rules for fuzz targets |
+| `tools/tm-fuzz/tm-fuzz.py` | Generic TM fuzz driver (LLVM plugin pipeline) |
+
+## See Also
+
+- `docs/fuzz-tool-plan.md` — Design plan and implementation status for the fuzz tool
+- `plugin/passes/TMFuzzStrategyPass.cpp` — Strategic point detection pass
+- `backends/tm_impl/common/tm_trace_runtime.cpp` — Runtime trace collector

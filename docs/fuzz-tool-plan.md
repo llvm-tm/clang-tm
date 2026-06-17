@@ -74,3 +74,43 @@ Pipeline: `opt` passes → run → `tm-trace2jsonl` → `tm-check` → report.
 5. `tm-fuzz` driver script (~2d)
 
 Total: ~3 weeks for prototype.
+
+## Implementation Status (2026-06-17)
+
+### ✅ Phase 1: Strategic Point Detection (`tm-fuzz-strategy`)
+- New LLVM pass at `plugin/passes/TMFuzzStrategyPass.cpp`
+- Registers as `tm-fuzz-strategy` pipeline pass
+- Detects: transaction boundaries (call-graph from main/threads), shared data (≥2 threads accessing globals), sync points (mutex/atomic calls), hot loops (back edges)
+- Output: `!tm.strategic` metadata; `-tm-strategy-dump` for diagnostics
+- Built as standalone `bin/libTMFuzzStrategy.so` and included in main plugin
+- CMake/Makefile: `make fuzz-strategy` target
+
+### ✅ Phase 2: Sampling
+- Three modes in `backends/tm_impl/common/tm_hooks.cpp`:
+  - **Rate-limited**: every Nth access per thread via `TM_SAMPLE_RATE` env
+  - **Phase**: full instrumentation for first K TXes, then sparse via `TM_SAMPLE_PHASE_FULL`
+  - **Adaptive**: rate doubles at >100 aborts, quadruples at >1000
+- Controlled via `TM_SAMPLE_MODE` env var ("none", "rate", "phase", "adaptive")
+- API: `tm_set_sample_rate()`, `tm_get_sample_rate()`, `tm_set_sampling_mode()`
+- Constructor-initiated; coexists with trace wrappers (separate `s_trace_real_hooks`)
+
+### ✅ Phase 3: Extended Trace Fields
+- Extended format: `ts tid type txid addr width val cont_flag [extra]`
+- Per-thread `t_current_tx_id` counter tracked across transactions
+- `t_tx_reads`/`t_tx_writes` counters recorded in commit events (encoded as `val = (reads << 32) | writes`)
+- New event type 6 (abort) with reason: `tm_trace_abort(reason)`
+- Contention flag in read/write events: `tm_trace_contention(addr, width, val)`
+- Python parser: `parse_trace_log()` in `tools/stm_bug_tool/event_parser.py`
+
+### ✅ Phase 4: Invariant Assessment
+- **User oracle**: C callback API — `tm_register_invariant_callback(cb, data)` wraps `tm_end` to call oracle after each commit
+- **Sequential baseline**: `check_sequential_baseline()` compares final state against single-threaded baseline
+- **User oracle checker**: `check_user_oracle()` parses `TM-INVARIANT: FAIL` lines from output
+- Baseline loader: `load_baseline(path)` in `tools/stm_bug_tool/invariant_checker.py`
+
+### ✅ Phase 5: `tm-fuzz` Driver CLI
+- Script at `tools/tm-fuzz/tm-fuzz.py` (executable)
+- Full pipeline: strategy pass → instrument → link → run → trace → check → report
+- Options: `--app`, `--backend`, `--threads`, `--duration`, `--strategy`, `--sample-rate`, `--trace`, `--baseline`
+- Supports all TM backends (TINYSTM, NOREC, TL2, SWISSTM, SGL, XTM) via `--backend all`
+- Invariant checking via existing `event_parser.py` + `invariant_checker.py`

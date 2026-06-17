@@ -110,6 +110,10 @@ __attribute__((weak)) void (*tm_init_thread)() = stub_begin;
 __attribute__((weak)) void (*tm_exit_thread)() = stub_end;
 #endif
 
+// Weak default for tm_trace — the real implementation is in tm_trace_runtime.cpp
+__attribute__((weak)) void tm_trace_stub(uint32_t, void*, uint64_t, uint64_t) {}
+__attribute__((weak)) void (*tm_trace)(uint32_t, void*, uint64_t, uint64_t) = tm_trace_stub;
+
 } // extern "C"
 
 // ═══════════════════════════════════════════════════════════════
@@ -258,22 +262,43 @@ void tm_swap_runtime(const TMRealHooks *hooks) {
 // Trace infrastructure
 // ═══════════════════════════════════════════════════════════════
 
-// Weak default for tm_trace — overridden by tm_trace_runtime.cpp when linked
-extern "C" __attribute__((weak)) void tm_trace(uint32_t, void*, uint64_t, uint64_t) {}
+
 
 // Thread-local sequence counter for ordering
 static thread_local uint64_t t_trace_seq = 0;
+
+// Thread-local TX ID counter for richer trace events
+static thread_local uint64_t t_current_tx_id = 0;
+static thread_local uint64_t t_tx_reads = 0;
+static thread_local uint64_t t_tx_writes = 0;
 
 // Helper: write a text-format trace line to a FILE*
 static FILE *g_trace_file = nullptr;
 static std::atomic<uint64_t> g_trace_ts{0};
 
-// ── Trace helper: write a formatted line ───────────────────────────────
+// Trace wrappers save the hooks beneath them here (separate from s_real_hooks
+// so trace and sampling can coexist without recursion).
+static TMRealHooks s_trace_real_hooks;
+
+// ── Trace helper: write a formatted line (extended format) ────────────
+// Format: ts tid type txid addr width val cont_flag [extra...]
+// Types: 0=read, 1=write, 2=tx_begin, 3=tx_end, 4=malloc, 5=free, 6=abort
+static void trace_write_line_ext(FILE *f, uint64_t ts, uint64_t tid, int type,
+                                 uint64_t txid, uint64_t addr, int width,
+                                 uint64_t val, uint8_t cont_flag,
+                                 const char *extra) {
+    fprintf(f, "%llu %llu %d %llu 0x%llx %d 0x%llx %u%s%s\n",
+            (unsigned long long)ts, (unsigned long long)tid, type,
+            (unsigned long long)txid,
+            (unsigned long long)addr, width, (unsigned long long)val,
+            (unsigned)cont_flag,
+            extra ? " " : "", extra ? extra : "");
+}
+
+// Legacy format writer (backward compat)
 static void trace_write_line(FILE *f, uint64_t ts, uint64_t tid, int type,
                              uint64_t addr, int width, uint64_t val) {
-    fprintf(f, "%llu %llu %d 0x%llx %d 0x%llx\n",
-            (unsigned long long)ts, (unsigned long long)tid, type,
-            (unsigned long long)addr, width, (unsigned long long)val);
+    trace_write_line_ext(f, ts, tid, type, 0, addr, width, val, 0, nullptr);
 }
 
 // Individual trace wrapper functions (no templates to avoid type mismatch)
@@ -283,51 +308,60 @@ static void trace_begin() {
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 2, 0, 0, 0);
+        t_current_tx_id++;
+        t_tx_reads = 0;
+        t_tx_writes = 0;
+        trace_write_line_ext(g_trace_file, ts, tid, 2, t_current_tx_id,
+                             0, 0, 0, 0, nullptr);
     }
-    if (s_real_hooks.begin) s_real_hooks.begin();
+    if (s_trace_real_hooks.begin) s_trace_real_hooks.begin();
 }
 
 static void trace_end() {
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 3, 0, 0, 0);
+        trace_write_line_ext(g_trace_file, ts, tid, 3, t_current_tx_id,
+                             0, 0, (t_tx_reads << 32) | t_tx_writes, 0, nullptr);
     }
-    if (s_real_hooks.end) s_real_hooks.end();
+    if (s_trace_real_hooks.end) s_trace_real_hooks.end();
 }
 
 static void *trace_malloc(size_t s) {
-    void *p = s_real_hooks.malloc ? s_real_hooks.malloc(s) : std::malloc(s);
+    void *p = s_trace_real_hooks.malloc ? s_trace_real_hooks.malloc(s) : std::malloc(s);
     if (g_trace_file && p) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 4, (uint64_t)(uintptr_t)p, (int)s, 0);
+        trace_write_line_ext(g_trace_file, ts, tid, 4, t_current_tx_id,
+                             (uint64_t)(uintptr_t)p, (int)s, 0, 0, nullptr);
     }
     return p;
 }
 
 static void *trace_calloc(size_t n, size_t s) {
-    void *p = s_real_hooks.calloc ? s_real_hooks.calloc(n, s) : std::calloc(n, s);
+    void *p = s_trace_real_hooks.calloc ? s_trace_real_hooks.calloc(n, s) : std::calloc(n, s);
     if (g_trace_file && p) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 4, (uint64_t)(uintptr_t)p, (int)(n * s), 0);
+        trace_write_line_ext(g_trace_file, ts, tid, 4, t_current_tx_id,
+                             (uint64_t)(uintptr_t)p, (int)(n * s), 0, 0, nullptr);
     }
     return p;
 }
 
 static void *trace_realloc(void *old, size_t s) {
-    void *p = s_real_hooks.realloc ? s_real_hooks.realloc(old, s) : std::realloc(old, s);
+    void *p = s_trace_real_hooks.realloc ? s_trace_real_hooks.realloc(old, s) : std::realloc(old, s);
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
         if (old && p != old) {
-            trace_write_line(g_trace_file, ts, tid, 5, (uint64_t)(uintptr_t)old, 0, 0);
+            trace_write_line_ext(g_trace_file, ts, tid, 5, t_current_tx_id,
+                                 (uint64_t)(uintptr_t)old, 0, 0, 0, nullptr);
         }
         if (p) {
             ts = g_trace_ts.fetch_add(1);
-            trace_write_line(g_trace_file, ts, tid, 4, (uint64_t)(uintptr_t)p, (int)s, 0);
+            trace_write_line_ext(g_trace_file, ts, tid, 4, t_current_tx_id,
+                                 (uint64_t)(uintptr_t)p, (int)s, 0, 0, nullptr);
         }
     }
     return p;
@@ -337,74 +371,89 @@ static void trace_free(void *p) {
     if (g_trace_file && p) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 5, (uint64_t)(uintptr_t)p, 0, 0);
+        trace_write_line_ext(g_trace_file, ts, tid, 5, t_current_tx_id,
+                             (uint64_t)(uintptr_t)p, 0, 0, 0, nullptr);
     }
-    if (s_real_hooks.free) s_real_hooks.free(p);
+    if (s_trace_real_hooks.free) s_trace_real_hooks.free(p);
     else if (p) std::free(p);
 }
 
 static uint8_t trace_read_i1(uint8_t *a) {
-    uint8_t r = s_real_hooks.read_i1 ? s_real_hooks.read_i1(a) : *a;
+    uint8_t r = s_trace_real_hooks.read_i1 ? s_trace_real_hooks.read_i1(a) : *a;
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 0, (uint64_t)(uintptr_t)a, 1, r);
+        t_tx_reads++;
+        trace_write_line_ext(g_trace_file, ts, tid, 0, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 1, r, 0, nullptr);
     }
     return r;
 }
 static uint16_t trace_read_i2(uint16_t *a) {
-    uint16_t r = s_real_hooks.read_i2 ? s_real_hooks.read_i2(a) : *a;
+    uint16_t r = s_trace_real_hooks.read_i2 ? s_trace_real_hooks.read_i2(a) : *a;
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 0, (uint64_t)(uintptr_t)a, 2, r);
+        t_tx_reads++;
+        trace_write_line_ext(g_trace_file, ts, tid, 0, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 2, r, 0, nullptr);
     }
     return r;
 }
 static uint32_t trace_read_i4(uint32_t *a) {
-    uint32_t r = s_real_hooks.read_i4 ? s_real_hooks.read_i4(a) : *a;
+    uint32_t r = s_trace_real_hooks.read_i4 ? s_trace_real_hooks.read_i4(a) : *a;
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 0, (uint64_t)(uintptr_t)a, 4, r);
+        t_tx_reads++;
+        trace_write_line_ext(g_trace_file, ts, tid, 0, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 4, r, 0, nullptr);
     }
     return r;
 }
 static uint64_t trace_read_i8(uint64_t *a) {
-    uint64_t r = s_real_hooks.read_i8 ? s_real_hooks.read_i8(a) : *a;
+    uint64_t r = s_trace_real_hooks.read_i8 ? s_trace_real_hooks.read_i8(a) : *a;
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 0, (uint64_t)(uintptr_t)a, 8, r);
+        t_tx_reads++;
+        trace_write_line_ext(g_trace_file, ts, tid, 0, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 8, r, 0, nullptr);
     }
     return r;
 }
 static float trace_read_f4(float *a) {
-    float r = s_real_hooks.read_f4 ? s_real_hooks.read_f4(a) : *a;
+    float r = s_trace_real_hooks.read_f4 ? s_trace_real_hooks.read_f4(a) : *a;
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
+        t_tx_reads++;
         uint32_t tmp; memcpy(&tmp, &r, 4);
-        trace_write_line(g_trace_file, ts, tid, 0, (uint64_t)(uintptr_t)a, 4, tmp);
+        trace_write_line_ext(g_trace_file, ts, tid, 0, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 4, tmp, 0, nullptr);
     }
     return r;
 }
 static double trace_read_f8(double *a) {
-    double r = s_real_hooks.read_f8 ? s_real_hooks.read_f8(a) : *a;
+    double r = s_trace_real_hooks.read_f8 ? s_trace_real_hooks.read_f8(a) : *a;
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
+        t_tx_reads++;
         uint64_t tmp; memcpy(&tmp, &r, 8);
-        trace_write_line(g_trace_file, ts, tid, 0, (uint64_t)(uintptr_t)a, 8, tmp);
+        trace_write_line_ext(g_trace_file, ts, tid, 0, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 8, tmp, 0, nullptr);
     }
     return r;
 }
 static void *trace_read_ptr(void **a) {
-    void *r = s_real_hooks.read_ptr ? s_real_hooks.read_ptr(a) : *a;
+    void *r = s_trace_real_hooks.read_ptr ? s_trace_real_hooks.read_ptr(a) : *a;
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 0, (uint64_t)(uintptr_t)a, 8, (uint64_t)(uintptr_t)r);
+        t_tx_reads++;
+        trace_write_line_ext(g_trace_file, ts, tid, 0, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 8, (uint64_t)(uintptr_t)r, 0, nullptr);
     }
     return r;
 }
@@ -413,64 +462,137 @@ static void trace_write_i1(uint8_t *a, uint8_t v) {
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 1, (uint64_t)(uintptr_t)a, 1, v);
+        t_tx_writes++;
+        trace_write_line_ext(g_trace_file, ts, tid, 1, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 1, v, 0, nullptr);
     }
-    if (s_real_hooks.write_i1) s_real_hooks.write_i1(a, v);
+    if (s_trace_real_hooks.write_i1) s_trace_real_hooks.write_i1(a, v);
 }
 static void trace_write_i2(uint16_t *a, uint16_t v) {
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 1, (uint64_t)(uintptr_t)a, 2, v);
+        t_tx_writes++;
+        trace_write_line_ext(g_trace_file, ts, tid, 1, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 2, v, 0, nullptr);
     }
-    if (s_real_hooks.write_i2) s_real_hooks.write_i2(a, v);
+    if (s_trace_real_hooks.write_i2) s_trace_real_hooks.write_i2(a, v);
 }
 static void trace_write_i4(uint32_t *a, uint32_t v) {
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 1, (uint64_t)(uintptr_t)a, 4, v);
+        t_tx_writes++;
+        trace_write_line_ext(g_trace_file, ts, tid, 1, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 4, v, 0, nullptr);
     }
-    if (s_real_hooks.write_i4) s_real_hooks.write_i4(a, v);
+    if (s_trace_real_hooks.write_i4) s_trace_real_hooks.write_i4(a, v);
 }
 static void trace_write_i8(uint64_t *a, int64_t v) {
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 1, (uint64_t)(uintptr_t)a, 8, (uint64_t)v);
+        t_tx_writes++;
+        trace_write_line_ext(g_trace_file, ts, tid, 1, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 8, (uint64_t)v, 0, nullptr);
     }
-    if (s_real_hooks.write_i8) s_real_hooks.write_i8(a, v);
+    if (s_trace_real_hooks.write_i8) s_trace_real_hooks.write_i8(a, v);
 }
 static void trace_write_f4(float *a, float v) {
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
+        t_tx_writes++;
         uint32_t tmp; memcpy(&tmp, &v, 4);
-        trace_write_line(g_trace_file, ts, tid, 1, (uint64_t)(uintptr_t)a, 4, tmp);
+        trace_write_line_ext(g_trace_file, ts, tid, 1, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 4, tmp, 0, nullptr);
     }
-    if (s_real_hooks.write_f4) s_real_hooks.write_f4(a, v);
+    if (s_trace_real_hooks.write_f4) s_trace_real_hooks.write_f4(a, v);
 }
 static void trace_write_f8(double *a, double v) {
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
+        t_tx_writes++;
         uint64_t tmp; memcpy(&tmp, &v, 8);
-        trace_write_line(g_trace_file, ts, tid, 1, (uint64_t)(uintptr_t)a, 8, tmp);
+        trace_write_line_ext(g_trace_file, ts, tid, 1, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 8, tmp, 0, nullptr);
     }
-    if (s_real_hooks.write_f8) s_real_hooks.write_f8(a, v);
+    if (s_trace_real_hooks.write_f8) s_trace_real_hooks.write_f8(a, v);
 }
 static void trace_write_ptr(void **a, void *v) {
     if (g_trace_file) {
         uint64_t ts = g_trace_ts.fetch_add(1);
         uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
-        trace_write_line(g_trace_file, ts, tid, 1, (uint64_t)(uintptr_t)a, 8, (uint64_t)(uintptr_t)v);
+        t_tx_writes++;
+        trace_write_line_ext(g_trace_file, ts, tid, 1, t_current_tx_id,
+                             (uint64_t)(uintptr_t)a, 8, (uint64_t)(uintptr_t)v, 0, nullptr);
     }
-    if (s_real_hooks.write_ptr) s_real_hooks.write_ptr(a, v);
+    if (s_trace_real_hooks.write_ptr) s_trace_real_hooks.write_ptr(a, v);
 }
 
 } // extern "C"
 
-// Install trace wrappers when TM_TRACE_FILE env var is set.
+// Trace abort event (called by backend on TX abort)
+extern "C" void tm_trace_abort(uint64_t reason) {
+    if (g_trace_file) {
+        uint64_t ts = g_trace_ts.fetch_add(1);
+        uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
+        trace_write_line_ext(g_trace_file, ts, tid, 6, t_current_tx_id,
+                             0, 0, reason, 0, nullptr);
+    }
+}
+
+// Record a contention event on a read/write
+extern "C" void tm_trace_contention(uint64_t addr, int width, uint64_t val) {
+    if (g_trace_file) {
+        uint64_t ts = g_trace_ts.fetch_add(1);
+        uint64_t tid = (uint64_t)(uintptr_t)pthread_self() & 0xffff;
+        trace_write_line_ext(g_trace_file, ts, tid, 0, t_current_tx_id,
+                             addr, width, val, 1, nullptr);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Invariant oracle (Phase 4 of fuzz tool plan)
+// ═══════════════════════════════════════════════════════════════
+
+static tm_invariant_callback_t g_invariant_cb = nullptr;
+static void *g_invariant_data = nullptr;
+
+// Saved original tm_end before we wrapped it
+static void (*g_original_tm_end)() = nullptr;
+
+extern "C" {
+
+static void end_with_invariant() {
+    if (g_original_tm_end) g_original_tm_end();
+    if (g_invariant_cb) {
+        int result = g_invariant_cb(g_invariant_data);
+        if (result != 0) {
+            fprintf(stderr, "TM-INVARIANT: FAIL (callback returned %d "
+                            "after tx %llu on thread 0x%llx)\n",
+                    result,
+                    (unsigned long long)t_current_tx_id,
+                    (unsigned long long)(uintptr_t)pthread_self());
+        }
+    }
+}
+
+} // extern "C"
+
+extern "C" void tm_register_invariant_callback(tm_invariant_callback_t cb, void *data) {
+    g_invariant_cb = cb;
+    g_invariant_data = data;
+
+    // Wrap tm_end to call the oracle after commit
+    if (!g_original_tm_end) {
+        g_original_tm_end = tm_end;
+        tm_end = end_with_invariant;
+    }
+}
+
+// Install trace wrappers when TM_TRACE_PATH env var is set.
 // Called automatically at startup via constructor attribute.
 __attribute__((constructor)) static void tm_trace_hook_init() {
     const char *path = getenv("TM_TRACE_PATH");
@@ -482,7 +604,225 @@ __attribute__((constructor)) static void tm_trace_hook_init() {
         return;
     }
 
-    // Save current hooks as real hooks (they were set by backend init)
+    // Save current hooks as trace real hooks (separate from s_real_hooks
+    // so trace and sampling can coexist without recursion).
+    s_trace_real_hooks.begin   = tm_begin;
+    s_trace_real_hooks.end     = tm_end;
+    s_trace_real_hooks.malloc  = tm_malloc;
+    s_trace_real_hooks.calloc  = tm_calloc;
+    s_trace_real_hooks.realloc = tm_realloc;
+    s_trace_real_hooks.free    = tm_free;
+    s_trace_real_hooks.read_i1 = tm_read_i1;
+    s_trace_real_hooks.read_i2 = tm_read_i2;
+    s_trace_real_hooks.read_i4 = tm_read_i4;
+    s_trace_real_hooks.read_i8 = tm_read_i8;
+    s_trace_real_hooks.read_f4 = tm_read_f4;
+    s_trace_real_hooks.read_f8 = tm_read_f8;
+    s_trace_real_hooks.read_ptr = tm_read_ptr;
+    s_trace_real_hooks.write_i1 = tm_write_i1;
+    s_trace_real_hooks.write_i2 = tm_write_i2;
+    s_trace_real_hooks.write_i4 = tm_write_i4;
+    s_trace_real_hooks.write_i8 = tm_write_i8;
+    s_trace_real_hooks.write_f4 = tm_write_f4;
+    s_trace_real_hooks.write_f8 = tm_write_f8;
+    s_trace_real_hooks.write_ptr = tm_write_ptr;
+    s_trace_real_hooks.get_env = tm_get_env;
+    s_trace_real_hooks.set_jmpbuf = tm_set_jmpbuf;
+    s_trace_real_hooks.get_thread_state = tm_get_thread_state;
+
+    // Replace hooks with trace wrappers
+    tm_begin    = trace_begin;
+    tm_end      = trace_end;
+    tm_malloc   = trace_malloc;
+    tm_calloc   = trace_calloc;
+    tm_realloc  = trace_realloc;
+    tm_free     = trace_free;
+    tm_read_i1  = trace_read_i1;
+    tm_read_i2  = trace_read_i2;
+    tm_read_i4  = trace_read_i4;
+    tm_read_i8  = trace_read_i8;
+    tm_read_f4  = trace_read_f4;
+    tm_read_f8  = trace_read_f8;
+    tm_read_ptr = trace_read_ptr;
+    tm_write_i1 = trace_write_i1;
+    tm_write_i2 = trace_write_i2;
+    tm_write_i4 = trace_write_i4;
+    tm_write_i8 = trace_write_i8;
+    tm_write_f4 = trace_write_f4;
+    tm_write_f8 = trace_write_f8;
+    tm_write_ptr= trace_write_ptr;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Sampling infrastructure (Phase 2 of fuzz tool plan)
+// ═══════════════════════════════════════════════════════════════
+
+// Sampling mode
+enum class TMSamplingMode : uint8_t {
+    None = 0,
+    RateLimited,
+    Phase,
+    Adaptive
+};
+
+// Sampling config
+static TMSamplingMode g_sampling_mode = TMSamplingMode::None;
+static thread_local uint64_t t_sample_count = 0;
+static thread_local uint64_t t_tx_count = 0;
+static thread_local uint64_t t_abort_count = 0;
+static uint64_t g_sample_rate = 1;        // 1 = every access, 10 = every 10th
+static uint64_t g_phase_full = 10;        // first N transactions get full instrumentation
+static thread_local bool t_phase_full_active = true;
+
+// Sample rate getter/setter
+extern "C" void tm_set_sample_rate(uint64_t rate) {
+    g_sample_rate = rate > 0 ? rate : 1;
+}
+
+extern "C" uint64_t tm_get_sample_rate() {
+    return g_sample_rate;
+}
+
+extern "C" void tm_set_sampling_mode(const char *mode) {
+    if (std::strcmp(mode, "rate") == 0)
+        g_sampling_mode = TMSamplingMode::RateLimited;
+    else if (std::strcmp(mode, "phase") == 0)
+        g_sampling_mode = TMSamplingMode::Phase;
+    else if (std::strcmp(mode, "adaptive") == 0)
+        g_sampling_mode = TMSamplingMode::Adaptive;
+    else if (std::strcmp(mode, "none") == 0)
+        g_sampling_mode = TMSamplingMode::None;
+}
+
+static bool should_sample() {
+    switch (g_sampling_mode) {
+    case TMSamplingMode::None:
+        return true;
+    case TMSamplingMode::RateLimited:
+        return (++t_sample_count % g_sample_rate == 0);
+    case TMSamplingMode::Phase:
+        if (t_phase_full_active)
+            return true;
+        return (++t_sample_count % g_sample_rate == 0);
+    case TMSamplingMode::Adaptive: {
+        uint64_t rate = g_sample_rate;
+        if (t_abort_count > 100)
+            rate = g_sample_rate * 2;
+        if (t_abort_count > 1000)
+            rate = g_sample_rate * 4;
+        return (++t_sample_count % rate == 0);
+    }
+    }
+    return false;
+}
+
+extern "C" {
+
+// Sampling wrappers — forward to real hooks based on sampling decision
+static void sample_begin() {
+    if (g_sampling_mode == TMSamplingMode::Phase) {
+        if (t_tx_count >= g_phase_full)
+            t_phase_full_active = false;
+        t_tx_count++;
+    }
+    if (should_sample() && s_real_hooks.begin)
+        s_real_hooks.begin();
+}
+
+static void sample_end() {
+    if (should_sample() && s_real_hooks.end)
+        s_real_hooks.end();
+}
+
+static void *sample_malloc(size_t s) {
+    if (should_sample() && s_real_hooks.malloc)
+        return s_real_hooks.malloc(s);
+    return s_real_hooks.malloc ? s_real_hooks.malloc(s) : std::malloc(s);
+}
+
+static void *sample_calloc(size_t n, size_t s) {
+    if (should_sample() && s_real_hooks.calloc)
+        return s_real_hooks.calloc(n, s);
+    return s_real_hooks.calloc ? s_real_hooks.calloc(n, s) : std::calloc(n, s);
+}
+
+static void *sample_realloc(void *old, size_t s) {
+    if (should_sample() && s_real_hooks.realloc)
+        return s_real_hooks.realloc(old, s);
+    return s_real_hooks.realloc ? s_real_hooks.realloc(old, s) : std::realloc(old, s);
+}
+
+static void sample_free(void *p) {
+    if (s_real_hooks.free) s_real_hooks.free(p);
+    else if (p) std::free(p);
+}
+
+static uint8_t sample_read_i1(uint8_t *a) {
+    return should_sample() && s_real_hooks.read_i1 ? s_real_hooks.read_i1(a) : *a;
+}
+static uint16_t sample_read_i2(uint16_t *a) {
+    return should_sample() && s_real_hooks.read_i2 ? s_real_hooks.read_i2(a) : *a;
+}
+static uint32_t sample_read_i4(uint32_t *a) {
+    return should_sample() && s_real_hooks.read_i4 ? s_real_hooks.read_i4(a) : *a;
+}
+static uint64_t sample_read_i8(uint64_t *a) {
+    return should_sample() && s_real_hooks.read_i8 ? s_real_hooks.read_i8(a) : *a;
+}
+static float sample_read_f4(float *a) {
+    return should_sample() && s_real_hooks.read_f4 ? s_real_hooks.read_f4(a) : *a;
+}
+static double sample_read_f8(double *a) {
+    return should_sample() && s_real_hooks.read_f8 ? s_real_hooks.read_f8(a) : *a;
+}
+static void *sample_read_ptr(void **a) {
+    return should_sample() && s_real_hooks.read_ptr ? s_real_hooks.read_ptr(a) : *a;
+}
+
+static void sample_write_i1(uint8_t *a, uint8_t v) {
+    if (should_sample() && s_real_hooks.write_i1) s_real_hooks.write_i1(a, v);
+    else *a = v;
+}
+static void sample_write_i2(uint16_t *a, uint16_t v) {
+    if (should_sample() && s_real_hooks.write_i2) s_real_hooks.write_i2(a, v);
+    else *a = v;
+}
+static void sample_write_i4(uint32_t *a, uint32_t v) {
+    if (should_sample() && s_real_hooks.write_i4) s_real_hooks.write_i4(a, v);
+    else *a = v;
+}
+static void sample_write_i8(uint64_t *a, int64_t v) {
+    if (should_sample() && s_real_hooks.write_i8) s_real_hooks.write_i8(a, v);
+    else *a = (uint64_t)v;
+}
+static void sample_write_f4(float *a, float v) {
+    if (should_sample() && s_real_hooks.write_f4) s_real_hooks.write_f4(a, v);
+    else *a = v;
+}
+static void sample_write_f8(double *a, double v) {
+    if (should_sample() && s_real_hooks.write_f8) s_real_hooks.write_f8(a, v);
+    else *a = v;
+}
+static void sample_write_ptr(void **a, void *v) {
+    if (should_sample() && s_real_hooks.write_ptr) s_real_hooks.write_ptr(a, v);
+    else *a = v;
+}
+
+// Abort notification for adaptive sampling
+static void sample_notify_abort() {
+    t_abort_count++;
+}
+
+} // extern "C"
+
+// Install sampling wrappers when TM_SAMPLE_MODE env var is set.
+// Called automatically at startup via constructor attribute.
+__attribute__((constructor)) static void tm_sample_hook_init() {
+    const char *mode = getenv("TM_SAMPLE_MODE");
+    if (!mode || !mode[0])
+        return;
+
+    // Save current hooks as real hooks
     s_real_hooks.begin   = tm_begin;
     s_real_hooks.end     = tm_end;
     s_real_hooks.malloc  = tm_malloc;
@@ -507,27 +847,39 @@ __attribute__((constructor)) static void tm_trace_hook_init() {
     s_real_hooks.set_jmpbuf = tm_set_jmpbuf;
     s_real_hooks.get_thread_state = tm_get_thread_state;
 
-    // Replace hooks with trace wrappers
-    tm_begin    = trace_begin;
-    tm_end      = trace_end;
-    tm_malloc   = trace_malloc;
-    tm_calloc   = trace_calloc;
-    tm_realloc  = trace_realloc;
-    tm_free     = trace_free;
-    tm_read_i1  = trace_read_i1;
-    tm_read_i2  = trace_read_i2;
-    tm_read_i4  = trace_read_i4;
-    tm_read_i8  = trace_read_i8;
-    tm_read_f4  = trace_read_f4;
-    tm_read_f8  = trace_read_f8;
-    tm_read_ptr = trace_read_ptr;
-    tm_write_i1 = trace_write_i1;
-    tm_write_i2 = trace_write_i2;
-    tm_write_i4 = trace_write_i4;
-    tm_write_i8 = trace_write_i8;
-    tm_write_f4 = trace_write_f4;
-    tm_write_f8 = trace_write_f8;
-    tm_write_ptr= trace_write_ptr;
+    // Set sampling mode
+    tm_set_sampling_mode(mode);
+
+    // Read sample rate from env
+    const char *rate_str = getenv("TM_SAMPLE_RATE");
+    if (rate_str && rate_str[0])
+        tm_set_sample_rate(std::atoll(rate_str));
+
+    const char *phase_full_str = getenv("TM_SAMPLE_PHASE_FULL");
+    if (phase_full_str && phase_full_str[0])
+        g_phase_full = std::atoll(phase_full_str);
+
+    // Replace hooks with sampling wrappers
+    tm_begin    = sample_begin;
+    tm_end      = sample_end;
+    tm_malloc   = sample_malloc;
+    tm_calloc   = sample_calloc;
+    tm_realloc  = sample_realloc;
+    tm_free     = sample_free;
+    tm_read_i1  = sample_read_i1;
+    tm_read_i2  = sample_read_i2;
+    tm_read_i4  = sample_read_i4;
+    tm_read_i8  = sample_read_i8;
+    tm_read_f4  = sample_read_f4;
+    tm_read_f8  = sample_read_f8;
+    tm_read_ptr = sample_read_ptr;
+    tm_write_i1 = sample_write_i1;
+    tm_write_i2 = sample_write_i2;
+    tm_write_i4 = sample_write_i4;
+    tm_write_i8 = sample_write_i8;
+    tm_write_f4 = sample_write_f4;
+    tm_write_f8 = sample_write_f8;
+    tm_write_ptr= sample_write_ptr;
 }
 
 __attribute__((destructor)) static void tm_trace_hook_fini() {
