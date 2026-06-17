@@ -66,12 +66,18 @@ $(BIN_DIR)/libTMInstrument.so: $(BIN_DIR)/libTMInstrument_$(PLUGIN_VARIANT).so
 	cp $< $@
 
 # Collect all pass source files
-TM_PASS_SRCS := $(wildcard $(SRC_DIR)/TM*.cpp $(SRC_DIR)/tm_check_opaque.cpp)
+TM_PASS_SRCS := $(filter-out $(SRC_DIR)/TMFuzzStrategyPass.cpp, $(wildcard $(SRC_DIR)/TM*.cpp $(SRC_DIR)/tm_check_opaque.cpp))
 
 # Race checker plugin (standalone .so built from the detection pass only)
 RACE_CHECKER_SRC := $(SRC_DIR)/TMRaceCheckerPass.cpp
 $(BIN_DIR)/libTMRaceChecker.so: $(RACE_CHECKER_SRC) | $(BIN_DIR)
 	$(CXX) -I$(LLVM_PLUGIN_DIR)/analysis -I$(SRC_DIR) -I$(BACKENDS_DIR) $(PLUGIN_CXXFLAGS) -shared $< -o $@ $(LLVM_CONFIG_ARGS)
+
+# Fuzz strategy plugin (Phase 1 of fuzz tool plan)
+FUZZ_STRATEGY_SRC := $(SRC_DIR)/TMFuzzStrategyPass.cpp
+$(BIN_DIR)/libTMFuzzStrategy.so: $(FUZZ_STRATEGY_SRC) | $(BIN_DIR)
+	$(CXX) -I$(LLVM_PLUGIN_DIR)/analysis -I$(SRC_DIR) -I$(BACKENDS_DIR) $(PLUGIN_CXXFLAGS) -shared $< -o $@ $(LLVM_CONFIG_ARGS)
+
 TM_PASS_CXXFLAGS := -I$(BACKENDS_DIR)/tm_impl/common -I$(BACKENDS_DIR) -I$(LLVM_PLUGIN_DIR) -I$(SRC_DIR) -I$(LLVM_PLUGIN_DIR)/analysis -fPIC $(PLUGIN_CXXFLAGS)
 
 # Plugin variants: each gets the matching -D flags.
@@ -107,9 +113,9 @@ TEST_PROGS := $(addprefix $(BIN_DIR)/,$(TEST_NAMES))
 
 .PHONY: all variants test test_noinst ll run run_noinst check check_noinst clean
 
-all: $(BIN_DIR)/libTMInstrument.so $(BIN_DIR)/libTMRaceChecker.so
+all: $(BIN_DIR)/libTMInstrument.so $(BIN_DIR)/libTMRaceChecker.so $(BIN_DIR)/libTMFuzzStrategy.so
 
-variants: $(PLUGIN_SO_NAMES) $(BIN_DIR)/libTMRaceChecker.so
+variants: $(PLUGIN_SO_NAMES) $(BIN_DIR)/libTMRaceChecker.so $(BIN_DIR)/libTMFuzzStrategy.so
 
 # ---- Pattern rules (test/ sources) ----
 $(eval $(call tm_define_rules, $(TEST_DIR)/))
@@ -342,3 +348,6 @@ clean:
 
 .PHONY: race-checker
 race-checker: $(BIN_DIR)/libTMRaceChecker.so
+
+.PHONY: fuzz-strategy
+fuzz-strategy: $(BIN_DIR)/libTMFuzzStrategy.so

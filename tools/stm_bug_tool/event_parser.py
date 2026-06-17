@@ -26,6 +26,15 @@ EVENT_RE = re.compile(
     r'data=(\d+)'
 )
 
+# Extended trace format (tm_hooks.cpp trace_write_line_ext):
+# ts tid type txid addr width val cont_flag [extra...]
+TRACE_EXT_RE = re.compile(
+    r'(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+'
+    r'0x([0-9a-fA-F]+)\s+(\d+)\s+'
+    r'0x([0-9a-fA-F]+)\s+(\d+)'
+    r'(?:\s+(.*))?'
+)
+
 # Pattern for SIGSEGV header
 SIGSEGV_RE = re.compile(r'^=== SIGSEGV at address (0x[0-9a-fA-F]+) ===$')
 
@@ -176,6 +185,71 @@ def window_around_failure(parsed: dict, window: int = 200) -> dict:
         "total_entries": len(parsed.get("events", [])),
         "dump_start": parsed["dump_start"],
     }
+
+
+def parse_trace_log(text: str) -> dict:
+    """Parse extended trace log (from tm_hooks.cpp trace_write_line_ext).
+
+    Format per line:
+        ts tid type txid addr width val cont_flag [extra]
+
+    Types: 0=read, 1=write, 2=tx_begin, 3=tx_end, 4=malloc, 5=free, 6=abort
+
+    Returns same structure as parse_event_log().
+    """
+    result = {
+        "events": [],
+        "sigsegv_addr": None,
+        "total_entries": 0,
+        "dump_start": 0,
+        "invariant_fail": False,
+        "invariant_result": None,
+    }
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        m = TRACE_EXT_RE.match(line)
+        if not m:
+            continue
+
+        ts = int(m.group(1))
+        tid = m.group(2)
+        etype = int(m.group(3))
+        txid = int(m.group(4))
+        addr = int(m.group(5), 16)
+        width = int(m.group(6))
+        val = int(m.group(7), 16)
+        cont_flag = int(m.group(8))
+        extra = m.group(9)
+
+        # Map types to event names (matching event_parser convention)
+        type_map = {
+            0: "READ",
+            1: "WRITE",
+            2: "TX_BEGIN",
+            3: "TX_END",
+            4: "MALLOC",
+            5: "FREE",
+            6: "ABORT",
+        }
+
+        event = {
+            "timestamp": ts,
+            "thread_id": tid,
+            "type": type_map.get(etype, f"TYPE_{etype}"),
+            "txid": txid,
+            "addr1": addr,
+            "addr2": width,
+            "data": val,
+            "contention": bool(cont_flag),
+            "extra": extra or "",
+        }
+        result["events"].append(event)
+
+    return result
 
 
 def split_by_tx(events: list) -> list:

@@ -74,6 +74,10 @@ static void tm_trace_push(uint32_t type_code, void *addr, uint64_t width, uint64
     };
 }
 
-extern "C" void tm_trace(uint32_t type_code, void *addr, uint64_t width, uint64_t value) {
+// Internal implementation called through the DATA pointer below
+extern "C" void tm_trace_impl(uint32_t type_code, void *addr, uint64_t width, uint64_t value) {
     tm_trace_push(type_code, addr, width, value);
 }
+
+// Hook pointer variable that the LLVM pass loads through
+extern "C" void (*tm_trace)(uint32_t, void*, uint64_t, uint64_t) = tm_trace_impl;
