@@ -321,7 +321,7 @@ make bin/libTMRaceChecker.so        # standalone .so
 
 ```sh
 # 1. Compile your source to LLVM bitcode
-clang++-22 -std=c++20 -O0 -fno-inline -emit-llvm -c myapp.cpp -o myapp.bc
+clang++-22 -std=c++20 -O0 -fno-inline -g -emit-llvm -c myapp.cpp -o myapp.bc
 
 # 2. Run the race checker
 opt-22 -load-pass-plugin=bin/libTMRaceChecker.so \
