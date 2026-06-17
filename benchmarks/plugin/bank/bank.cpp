@@ -240,11 +240,6 @@ void do_transaction_work(WorkerContext &ctx)
 			dst = ((src + 1) % ctx.rand_max) + ctx.rand_min;
 		}
 		transfer(src, dst, 1);
-		{
-			static int dbg = 0;
-			if (++dbg <= 5) fprintf(stderr, "BANK=%p &bank=%p accounts.data=%p\n",
-					(void*)bank, (void*)&bank, (void*)(bank ? bank->accounts.data() : nullptr));
-		}
 		ctx.nb_transfer->fetch_add(1);
 	}
 }

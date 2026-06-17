@@ -263,18 +263,7 @@ void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {}
 
 } // extern "C"
 
-static void print_stats()
-{
-#ifndef NDEBUG
-	fprintf(stderr, "=== SwissTM_new Runtime Stats ===\n");
-	fprintf(stderr,
-	        "tm_begin: %lld, tm_end: %lld\n",
-	        (long long)g_tm_begin_count.load(std::memory_order_relaxed),
-	        (long long)g_tm_end_count.load(std::memory_order_relaxed));
-#endif
-}
 
-static int init = (std::atexit(print_stats), 0);
 
 // ═══════════════════════════════════════════════════════════════════
 //  Hook registration table

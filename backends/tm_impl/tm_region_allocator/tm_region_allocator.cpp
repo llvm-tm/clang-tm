@@ -145,15 +145,6 @@ int tm_region_init() noexcept {
     g_num_slabs = aligned_size >> g_slab_size_shift;
     g_next_slab_idx.store(0, std::memory_order_relaxed);
 
-#ifndef NDEBUG
-    fprintf(stderr,
-            "[TM-REGION] mmap %p .. %p  (%zu MB, %zu slabs, "
-            "%zu B/slab, %zu chunks/slab, %zu classes)\n",
-            (void*)g_tm_region_start, (void*)g_tm_region_end,
-            aligned_size >> 20, g_num_slabs,  // MB = bytes >> 20
-            g_slab_size, g_chunks_per_slab, MAX_CLASSES);
-#endif
-
     return 0;
 }
 

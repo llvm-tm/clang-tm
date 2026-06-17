@@ -1,0 +1,13 @@
+diff --git a/tests/expli-api/test_stress_ds.cpp b/tests/expli-api/test_stress_ds.cpp
+--- a/tests/expli-api/test_stress_ds.cpp
++++ b/tests/expli-api/test_stress_ds.cpp
+@@ -125,6 +125,9 @@ static void test_rbtree_tx() {
+     auto* tree = (explicit_rbtree::Tree<int, int>*)expli::TM<int>::malloc(
+         sizeof(explicit_rbtree::Tree<int, int>));
+     tree->root = nullptr;
++
++    fprintf(stderr, "DEBUG rbtree_tx: tree=%p &tree->root=%p\n",
++            (void*)tree, (void*)&tree->root);
+ 
+     expli::TM<int>::transaction([&]() {
+         auto* n1 = alloc_rb_node_tm(10, 100);

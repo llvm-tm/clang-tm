@@ -300,17 +300,6 @@ commit()    //
 				lock->unlock_with_version(tx->id, commit_version);
 			}
 			TM_EVENT2(LOCK_RELEASE, (uint64_t)lock, (uint64_t)addr, commit_version);
-#ifndef NDEBUG
-			if (lock->get_version() < commit_version) {
-				fprintf(stderr, "ASSERT: lock=%p get_version=%llu commit_version=%llu lock_state=0x%llx tx_id=%llu\n",
-				        (void*)lock,
-				        (unsigned long long)lock->get_version(),
-				        (unsigned long long)commit_version,
-				        (unsigned long long)lock->state.load(std::memory_order_acquire),
-				        (unsigned long long)tx->id);
-				fflush(stderr);
-			}
-#endif
 			TM_ASSERT(lock->get_version() >= commit_version,
 			               "Lock version not updated");
 		}
@@ -348,25 +337,6 @@ read_word_ctl(                                                //
 	TM_ASSERT(tx->active, "tx not active");
 
 	// No bypass: the plugin ensures only TM-tracked addresses reach the runtime.
-
-#ifdef DEBUG_WBCTL
-	// Debug: detect corrupted addresses
-	static std::atomic<uint64_t> read_count{0};
-	uint64_t rc = read_count++;
-	uint64_t addr_bits = (uint64_t)addr;
-
-	if (addr_bits < 0x100000 || (addr_bits >> 48) != 0) {
-		fprintf(stderr,
-		        "[R%llu] addr=%p sz=%d tx=%llu ws=%zu rs=%zu\n",
-		        rc,
-		        (void *)addr_bits,
-		        (int)sz,
-		        (unsigned long long)tx->id,
-		        tx->write_set.size(),
-		        tx->read_set.size());
-		fflush(stderr);
-	}
-#endif
 
 	// Corrupted address detection removed (was shadowing root cause).
 

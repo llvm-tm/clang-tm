@@ -266,18 +266,28 @@ inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
 		return read_value_from_addr(addr, sz);
 	}
 
-	// Record read for read-set validation at commit time
+	// Read-validate: capture version, read data, re-check version.
+	// Without the re-check, a concurrent commit's write-back can
+	// race with the data read, producing an inconsistent snapshot.
 	size_t idx = version_index(addr);
-	uint64_t entry = g_version_table[idx].load(std::memory_order_acquire);
 
-	// If a write-back is in progress, abort now
-	if (is_locked(entry)) {
+retry_read:
+	uint64_t entry_before = g_version_table[idx].load(std::memory_order_acquire);
+	if (is_locked(entry_before)) {
 		abort_tx("write_back_in_progress");
 	}
 
-	tx->read_set.push_back({addr, read_version(entry)});
+	any_type_t val = read_value_from_addr(addr, sz);
 
-	return read_value_from_addr(addr, sz);
+	uint64_t entry_after = g_version_table[idx].load(std::memory_order_acquire);
+	if (entry_before != entry_after) {
+		// Version changed or lock was acquired during read — abort
+		abort_tx("version_changed_during_read");
+	}
+
+	tx->read_set.push_back({addr, read_version(entry_before)});
+
+	return val;
 }
 
 // ── Write word (with write-set logging) ─────────────────────────

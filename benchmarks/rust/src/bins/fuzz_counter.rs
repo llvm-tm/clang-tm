@@ -4,6 +4,18 @@ use tm::{TmCell, transaction, tm_init, tm_exit, tm_abort_count};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && (args[1] == "--version" || args[1] == "-V") {
+        println!("\n\
+━┏━━━┓┏┓━┏┓┏━━━━┓┏━━━━┓\n\
+━┃┏━━┛┃┃━┃┃┗━━┓━┃┗━━┓━┃\n\
+━┃┗━━┓┃┃━┃┃━━┏┛┏┛━━┏┛┏┛\n\
+━┃┏━━┛┃┃━┃┃━┏┛┏┛━━┏┛┏┛━\n\
+┏┛┗┓━━┃┗━┛┃┏┛━┗━┓┏┛━┗━┓\n\
+┗━━┛━━┗━━━┛┗━━━━┛┗━━━━┛\n\
+    fuzz-counter v1.0.0\n");
+        return;
+    }
+
     let mut threads = 4usize;
     let mut iters = 1000usize;
     let mut counters = 8usize;

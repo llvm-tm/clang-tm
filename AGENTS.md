@@ -111,4 +111,86 @@ Comprehensive smoke test: `test_tx` + `test_ds` on 10 backends (TINYSTM, WBETL, 
 - **stmbench7 times out with >1 thread** — root cause: data race in `ts_multimap::lower_bound()` — `op_st5` drops `std::mutex` before iterating, leaving raw iterator into `tm_malloc`‑backed memory. Affects NOrec, TL2, SwissTM; TinySTM survives by chance (per‑object locking serializes the path).
 - **LEFTRIGHT bank/ycsb multi-thread deadlock** — pre‑existing. Left-right barrier implementation deadlocks with >1 thread.
 - **XTM rbtree segfault** — pre‑existing. Page-level private copy scheme conflicts with double-free detection or region boundary.
-- **ROMULUS bank multi-thread correctness**: `bank -d 500 -a 128 -t 2` fails ("Money created/destroyed") consistently with ≥2 threads. Passes with 1 thread. Root cause: OCC write-back (Phase 4) vs. concurrent read from another thread's `read_word`. The reader sees a partially-written state (some addresses updated, others not yet) at old version numbers, which the subsequent validation cannot distinguish from a consistent snapshot. Fix requires either (a) a lock-bit per version entry (readers abort when write-back is in progress), or (b) a read-set that validates all read addresses (not just written ones). Pre-existing issue (original Romulus didn't compile).
+- **ROMULUS bank multi-thread correctness**: `bank -d 500 -a 128 -t 2` fails ("Money created/destroyed") consistently with ≥2 threads. Passes with 1 thread. Root cause: OCC write-back (Phase 4) vs. concurrent read from another thread's `read_word`. The reader sees a partially-written state (some addresses updated, others not yet) at old version numbers, which the subsequent validation cannot distinguish from a consistent snapshot. Fix: read-validate pattern — capture version entry BEFORE reading, read data, re-check version entry after reading. If version changed or lock bit set, abort. Verified: all 114 test_tx + 207 test_ds pass, bank multi-thread money conserved. ✅ FIXED (2026-06-15)
+
+## Session 2026-06-15 — Read-validate fix + race checker + Rust/C++ alignment
+
+### ROMULUS OCC read-validate fix
+
+**Root cause**: `read_word()` in romulus.hpp captured the version-table entry BEFORE reading from memory, but never re-checked it afterwards. A concurrent commit could write-back between the version check and the data read, producing an inconsistent snapshot that validation could not detect.
+
+**Fix**: Re-read the version entry AFTER reading from memory. If the entry changed (version bumped or lock bit set), abort. Pattern matches standard OCC read-validate protocol.
+
+**Files changed**: `backends/tm_impl/romulus/romulus.hpp` — read_word now reads-validates (capture → read → re-check → record).
+
+**Verification**: `test_tx` 114/114, `test_ds` 207/207, `bank -t 4 -d 500 -a 128` passes money conservation.
+
+### test_queue_multi counter race
+
+**Root cause**: `counter` was a plain `static int` (not TM-annotated) in a TX function accessed from 4 threads. The LLVM pass only instruments TM-tracked globals, so `counter += delta` was a plain (non-atomic) load/add/store — classic lost-update.
+
+**Fix**: Changed to `static TM int counter` so the LLVM pass instruments the access.
+
+**Files changed**: `tests/plugin/test_queue_multi.cpp`
+
+### Race checker findings
+
+Running `libTMRaceChecker.so` on all benchmarks revealed only false positives:
+- **bank**: `total_non_transactional()` accesses TM globals by design (called after all threads join)
+- **avltree**: Helper functions are reachable from TX, cloned+instrumented by pipeline; originals are dead code
+- **STAMP**: `intruder_generate_packets()`, `yada_generate_mesh()` are called before threads start (single-thread init)
+- **fix**: Removed debug `fprintf(stderr, ...)` in `benchmarks/plugin/bank/bank.cpp` that directly accessed the `bank` TM global from `do_transaction_work()`
+
+### Rust XTM implementation note
+
+**Issue**: Rust XTM used version-table OCC (same as Romulus) but claimed to implement the XTM page-granularity private-copy algorithm from ASPLOS 2006. The algorithms are completely different.
+
+**Fix**: Updated the implementation note in `expli_instr/rust/workspace/runtime/xtm/src/lib.rs` to accurately describe the Rust version as version-table OCC and document the difference from C++ XTM.
+
+### Rust XTM read-validate fix
+
+Same OCC read-validate race as C++ Romulus: capture version AFTER reading from memory. Fixed by re-ordering to read version → read data → re-check version (same protocol as C++ Romulus fix).
+
+### Rust benchmark alignment
+
+- Added `--version`/`-V` ASCII art to `fuzz_counter` and `fuzz_bank` (matching C++)
+- Fixed `fuzz_bank` default accounts from 16 to 64 (matching C++)
+
+### All files modified
+
+- `backends/tm_impl/romulus/romulus.hpp` — ROMULUS read-validate fix
+- `tests/plugin/test_queue_multi.cpp` — TM annotation on counter
+- `benchmarks/plugin/bank/bank.cpp` — removed debug fprintf with TM global access
+- `README.md` — updated ROMULUS test status (114/114 pass)
+- `AGENTS.md` — this session summary
+- `expli_instr/rust/workspace/runtime/xtm/src/lib.rs` — XTM implementation note + read-validate fix
+- `benchmarks/rust/src/bins/fuzz_counter.rs` — added --version ASCII art
+- `benchmarks/rust/src/bins/fuzz_bank.rs` — added --version ASCII art, fixed default accounts (16→64)
+
+## Session 2026-06-17 — Debug printf cleanup into patches/debug system
+
+### Problem
+
+Source files contained stray `fprintf(stderr, ...)` debug printfs that clutter output and are only useful during active debugging. These should live in `patches/debug/` patches, not in source.
+
+### Files cleaned
+
+| File | Printfs removed |
+|------|----------------|
+| `backends/tm_impl/tiny_stm/TinySTM_runtime.cpp` | Two `#ifndef NDEBUG` blocks printing max read-set/write-set on exit (plugin + non-plugin paths) |
+| `backends/tm_impl/tiny_stm/tinystm_wbctl.hpp` | `#ifndef NDEBUG` ASSERT debug dump on lock version mismatch; `#ifdef DEBUG_WBCTL` corrupted-address detector |
+| `backends/tm_impl/swisstm/SwissTM_runtime.cpp` | `print_stats()` function + `atexit` registration (SwissTM begin/end counts) |
+| `backends/tm_impl/tm_region_allocator/tm_region_allocator.cpp` | `#ifndef NDEBUG` mmap region info printf |
+| `tests/expli-api/test_stress_ds.cpp` | `"DEBUG rbtree_tx: tree=%p..."` printf |
+
+### Debug patches created
+
+Five new patches in `patches/debug/patches/` (each adds back the removed printfs):
+
+- `002-tinystm-rs-ws-debug.patch` — TinySTM max read-set/write-set stats
+- `003-tinystm-wbctl-debug.patch` — tinystm_wbctl ASSERT + DEBUG_WBCTL blocks
+- `004-tm-region-alloc-debug.patch` — TM region allocator mmap info
+- `005-test-stress-ds-debug.patch` — test_stress_ds DEBUG printf
+- `006-swisstm-stats.patch` — SwissTM print_stats + atexit
+
+All 6 patches (001–006) apply cleanly via `patches/debug/apply.sh`.
