@@ -101,6 +101,9 @@ extern void (*tm_write_ptr)(void**, void*);
 // Sigsetjmp hook (system sigsetjmp wrapper — always the same regardless of backend)
 extern int (*tm_sigsetjmp)(void*, int);
 
+// Trace hook (emitted when --emit-tm-trace is passed to the instrument pass)
+extern void (*tm_trace)(uint32_t, void*, uint64_t, uint64_t);
+
 // Thread-state hook (each backend provides its own implementation)
 extern void *(*tm_get_thread_state)();
 
@@ -147,3 +150,22 @@ const TMRealHooks *tm_get_real_hooks();
 
 // Phase-based TM: atomically swap ALL hooks under a global lock.
 void tm_swap_runtime(const TMRealHooks *hooks);
+
+// Sampling API (Phase 2 of fuzz tool plan)
+extern "C" {
+void tm_set_sample_rate(uint64_t rate);
+uint64_t tm_get_sample_rate();
+void tm_set_sampling_mode(const char *mode); // "none", "rate", "phase", "adaptive"
+}
+
+// Trace API (Phase 3 of fuzz tool plan)
+extern "C" {
+void tm_trace_abort(uint64_t reason);
+void tm_trace_contention(uint64_t addr, int width, uint64_t val);
+}
+
+// Invariant oracle API (Phase 4 of fuzz tool plan)
+typedef int (*tm_invariant_callback_t)(void *data);
+extern "C" {
+void tm_register_invariant_callback(tm_invariant_callback_t cb, void *data);
+}
