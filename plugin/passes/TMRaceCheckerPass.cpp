@@ -88,6 +88,94 @@ static void collectReachableFromTX(Module &M,
              (unsigned)SafeSet.size());
 }
 
+// Trace a pointer back through the same path as tracesFromTMGlobal and return
+// the first TM-annotated GlobalVariable name found. Falls back to "<TM global>"
+// when no GlobalVariable is reachable (e.g. call results from tm_read_ptr).
+static StringRef findTMGlobalName(Value *V, Module &M,
+                                  SmallPtrSetImpl<const PHINode *> *VisitedPHIs,
+                                  int Depth = 0) {
+    if (Depth > 15 || !V)
+        return "<TM global>";
+    V = V->stripPointerCasts();
+
+    if (auto *GV = dyn_cast<GlobalVariable>(V)) {
+        if (isTMAnnotatedGlobal(GV, M))
+            return GV->getName();
+        return "<TM global>";
+    }
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(V))
+        return findTMGlobalName(const_cast<Value *>(GEP->getPointerOperand()),
+                                M, VisitedPHIs, Depth + 1);
+    if (auto *GEPOp = dyn_cast<GEPOperator>(V))
+        return findTMGlobalName(const_cast<Value *>(GEPOp->getPointerOperand()),
+                                M, VisitedPHIs, Depth + 1);
+    if (auto *Load = dyn_cast<LoadInst>(V))
+        return findTMGlobalName(const_cast<Value *>(Load->getPointerOperand()),
+                                M, VisitedPHIs, Depth + 1);
+    // Call result: check if any argument traces to a named global
+    if (auto *Call = dyn_cast<CallBase>(V)) {
+        for (unsigned i = 0; i < Call->arg_size(); i++) {
+            StringRef N = findTMGlobalName(Call->getArgOperand(i), M,
+                                           VisitedPHIs, Depth + 1);
+            if (N != "<TM global>") return N;
+        }
+        return "<TM global>";
+    }
+    // PHI: search incoming values (cycle-safe via VisitedPHIs)
+    if (auto *Phi = dyn_cast<PHINode>(V)) {
+        if (VisitedPHIs && VisitedPHIs->count(Phi))
+            return "<TM global>";
+        SmallPtrSet<const PHINode *, 4> LocalVisitedPHIs;
+        if (!VisitedPHIs)
+            VisitedPHIs = &LocalVisitedPHIs;
+        VisitedPHIs->insert(Phi);
+        for (Value *Inc : Phi->incoming_values()) {
+            StringRef N = findTMGlobalName(Inc, M, VisitedPHIs, Depth + 1);
+            if (N != "<TM global>") return N;
+        }
+        return "<TM global>";
+    }
+    if (auto *Sel = dyn_cast<SelectInst>(V)) {
+        StringRef N = findTMGlobalName(Sel->getTrueValue(), M,
+                                       VisitedPHIs, Depth + 1);
+        if (N != "<TM global>") return N;
+        return findTMGlobalName(Sel->getFalseValue(), M,
+                                VisitedPHIs, Depth + 1);
+    }
+    if (auto *PTI = dyn_cast<PtrToIntInst>(V))
+        return findTMGlobalName(PTI->getPointerOperand(), M,
+                                VisitedPHIs, Depth + 1);
+    if (auto *ITP = dyn_cast<IntToPtrInst>(V))
+        return findTMGlobalName(ITP->getOperand(0), M,
+                                VisitedPHIs, Depth + 1);
+    // Function argument: follow through call sites like tracesFromTMGlobal does
+    if (auto *Arg = dyn_cast<Argument>(V)) {
+        Function *Parent = Arg->getParent();
+        if (!Parent) return "<TM global>";
+        for (User *U : Parent->users()) {
+            auto *Call = dyn_cast<CallBase>(U);
+            if (!Call || Call->getCalledFunction() != Parent)
+                continue;
+            StringRef N = findTMGlobalName(Call->getArgOperand(Arg->getArgNo()),
+                                           M, VisitedPHIs, Depth + 1);
+            if (N != "<TM global>") return N;
+        }
+        return "<TM global>";
+    }
+    // Alloca: check stores to it (same logic as tracesFromTMGlobal)
+    if (auto *AI = dyn_cast<AllocaInst>(V)) {
+        for (User *U : AI->users()) {
+            if (auto *Store = dyn_cast<StoreInst>(U)) {
+                StringRef N = findTMGlobalName(
+                    Store->getValueOperand(), M, VisitedPHIs, Depth + 1);
+                if (N != "<TM global>") return N;
+            }
+        }
+        return "<TM global>";
+    }
+    return "<TM global>";
+}
+
 // Emit a structured warning with source location
 static void emitWarning(Function &F, Instruction &I, StringRef GlobalName) {
     DebugLoc DL = I.getDebugLoc();
@@ -171,14 +259,10 @@ public:
                     // Reuse the same tracesFromTMGlobal analysis
                     // that the instrumentation pipeline uses
                     if (tracesFromTMGlobal(Ptr, M)) {
-                        // Extract the global variable name for the diagnostic
-                        StringRef GlobalName = "<TM global>";
-                        if (auto *GV = dyn_cast<GlobalVariable>(
-                                Ptr->stripPointerCasts()))
-                            GlobalName = GV->getName();
-                        else if (auto *Base = getBaseObject(Ptr))
-                            if (auto *GV = dyn_cast<GlobalVariable>(Base))
-                                GlobalName = GV->getName();
+                        // Trace through the same path as tracesFromTMGlobal to
+                        // find the actual TM-annotated global variable name
+                        SmallPtrSet<const PHINode *, 4> DummyVisited;
+                        StringRef GlobalName = findTMGlobalName(Ptr, M, &DummyVisited);
 
                         emitWarning(F, I, GlobalName);
                         Found = true;
