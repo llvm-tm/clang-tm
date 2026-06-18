@@ -25,6 +25,7 @@ A multi-paradigm C++ transactional memory framework (LLVM plugin, explicit C++ A
 ### In Progress
 - Paper writing and results collection
 - Performance analysis across pipeline variants
+- Improvement plan execution (see IMPROVEMENT_PLAN.md)
 
 ### Blocked
 - None
@@ -41,6 +42,7 @@ A multi-paradigm C++ transactional memory framework (LLVM plugin, explicit C++ A
 1. Produce paper plots from bank and rbtree benchmark results across all 3 pipelines
 2. Benchmark on larger thread counts and other datastructures (AVL tree, hashmap)
 3. Consider which pipeline analysis to include in the paper — queue advantages on bank are significant (27–37% faster, 62% fewer aborts), rbtree is neutral
+4. Execute improvement plan (IMPROVEMENT_PLAN.md): fix remaining simulation spin loops, expand CI/CD, add more simulator backends, fix C++↔simulator address mismatch
 
 ## Critical Context
 - Bank benefits substantially from queue pipeline (abort reduction via serialized commit order); rbtree is neutral because reads dominate and all pipelines inline the non-void `txn_contains()` call
