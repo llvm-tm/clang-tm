@@ -181,6 +181,16 @@ impl SimEngine {
                     Err("commit failed".into())
                 }
             }
+            EventKind::Abort { reason } => {
+                self.in_tx.insert(tid, false);
+                self.aborted.insert(tid, true);
+                let ws = self.current_write_set.remove(&tid).unwrap_or_default();
+                self.stats.aborts += 1;
+                self.verifier.tx_abort(tid);
+                self.deadlock.record_abort(btid, &ws);
+                b.abort();
+                Err(format!("abort (reason={})", reason))
+            }
             EventKind::Read { addr, width } => {
                 let in_tx = self.in_tx.get(&tid).copied().unwrap_or(false);
                 let _verified = self.verifier.check_read(tid, *addr);

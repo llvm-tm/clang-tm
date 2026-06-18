@@ -62,6 +62,18 @@ impl Checker {
                     self.committed_tx += 1;
                 }
             }
+            crate::event::EventKind::Abort { .. } => {
+                let d = self.tx_depth.get_mut(&event.thread_id).ok_or_else(|| {
+                    format!("Abort without TxBegin on thread {}", event.thread_id)
+                })?;
+                if *d == 0 {
+                    return Err("Abort without TxBegin".into());
+                }
+                *d -= 1;
+                if *d == 0 {
+                    self.aborted_tx += 1;
+                }
+            }
             crate::event::EventKind::Read { .. } => {
                 if depth == 0 {
                     self.out_of_tx_reads += 1;
