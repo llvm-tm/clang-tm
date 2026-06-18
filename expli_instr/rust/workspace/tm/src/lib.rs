@@ -188,16 +188,44 @@ pub use runtime_tinystm::{
     tm_read_raw, tm_write_raw,
 };
 
+// ── Feature exclusivity ─────────────────────────────────
+// Ensure exactly one backend is selected (at most one, at least one).
+macro_rules! exclusive_backend {
+    ($me:expr, $($others:expr),+) => {
+        #[cfg(all(feature = $me, any($(feature = $others),+)))]
+        compile_error!(concat!(
+            "Multiple backends enabled: '", $me,
+            "' conflicts with another backend. Enable exactly one."
+        ));
+    };
+}
+
+exclusive_backend!("norec",             "tl2", "swisstm", "dudetm", "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "wbctl", "wbetl", "wt");
+exclusive_backend!("tl2",               "swisstm", "dudetm", "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "wbctl", "wbetl", "wt");
+exclusive_backend!("swisstm",           "dudetm", "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "wbctl", "wbetl", "wt");
+exclusive_backend!("dudetm",            "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "wbctl", "wbetl", "wt");
+exclusive_backend!("tsxsgl",            "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "wbctl", "wbetl", "wt");
+exclusive_backend!("nvhtm",             "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "wbctl", "wbetl", "wt");
+exclusive_backend!("spht",              "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "wbctl", "wbetl", "wt");
+exclusive_backend!("leftright",         "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "wbctl", "wbetl", "wt");
+exclusive_backend!("leftright-single",  "romulus", "xtm", "sgl-persistent", "sgl-distributed", "wbctl", "wbetl", "wt");
+exclusive_backend!("romulus",           "xtm", "sgl-persistent", "sgl-distributed", "wbctl", "wbetl", "wt");
+exclusive_backend!("xtm",               "sgl-persistent", "sgl-distributed", "wbctl", "wbetl", "wt");
+exclusive_backend!("sgl-persistent",    "sgl-distributed", "wbctl", "wbetl", "wt");
+exclusive_backend!("sgl-distributed",   "wbctl", "wbetl", "wt");
+exclusive_backend!("wbctl",             "wbetl", "wt");
+exclusive_backend!("wbetl",             "wt");
+
 #[cfg(not(any(
     feature = "wbctl", feature = "wbetl", feature = "wt",
     feature = "norec", feature = "tl2", feature = "swisstm", feature = "dudetm",
     feature = "tsxsgl", feature = "nvhtm", feature = "spht",
-    feature = "leftright", feature = "leftright-single",
+    feature = "leftright", feature = "leftright_single",
     feature = "romulus", feature = "xtm",
-    feature = "sgl-persistent", feature = "sgl-distributed",
+    feature = "sgl_persistent", feature = "sgl_distributed",
 )))]
 compile_error!(
-    "At least one backend feature must be enabled: wbctl, wbetl, wt, norec, tl2, swisstm, dudetm, tsxsgl, nvhtm, spht, leftright, leftright-single, romulus, xtm, sgl-persistent, sgl-distributed"
+    "At least one backend feature must be enabled: wbctl, wbetl, wt, norec, tl2, swisstm, dudetm, tsxsgl, nvhtm, spht, leftright, leftright_single, romulus, xtm, sgl_persistent, sgl_distributed"
 );
 
 // ── TmPrimitive trait ──────────────────────────────────
