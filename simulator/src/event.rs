@@ -15,6 +15,9 @@ pub enum EventKind {
     ThreadJoin(u32),               // (child_id)
     TxBegin,
     TxEnd,
+    Abort {
+        reason: u64,
+    },
     Read {
         addr: u64,
         width: u8,
@@ -52,7 +55,7 @@ impl Event {
     }
 
     pub fn is_tx_lifecycle(&self) -> bool {
-        matches!(self.kind, EventKind::TxBegin | EventKind::TxEnd)
+        matches!(self.kind, EventKind::TxBegin | EventKind::TxEnd | EventKind::Abort { .. })
     }
 
     pub fn is_memory_op(&self) -> bool {
@@ -63,6 +66,6 @@ impl Event {
     }
 
     pub fn is_tx_boundary(&self) -> bool {
-        matches!(self.kind, EventKind::TxBegin | EventKind::TxEnd)
+        matches!(self.kind, EventKind::TxBegin | EventKind::TxEnd | EventKind::Abort { .. })
     }
 }

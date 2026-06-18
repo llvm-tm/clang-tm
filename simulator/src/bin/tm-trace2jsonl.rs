@@ -83,6 +83,7 @@ fn infer_events(entries: &[RawEntry]) -> Vec<Event> {
                 3 => EventKind::TxEnd,
                 4 => EventKind::Alloc { addr: entry.addr, size: entry.width },
                 5 => EventKind::Free { addr: entry.addr },
+                6 => EventKind::Abort { reason: entry.value },
                 code => {
                     eprintln!("warning: unsupported type_code {} at line (ts={}, tid={}) — skipped",
                               code, entry.timestamp, entry.thread_id);
