@@ -317,6 +317,7 @@ fn flush_tx() -> Option<Box<TxState>> {
 }
 
 // ── TX ID generator ─────────────────────────────────────
+#[cfg(not(feature = "simulation"))]
 static THR_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // ── Memory helpers ─────────────────────────────────────
