@@ -13,11 +13,11 @@ fn main() {
             }
             Err(e) => {
                 eprintln!("Failed to load checkpoint: {}; starting fresh", e);
-                SimState::new(cli.seed, 1, 0x7f00_0000_0000, 0x0000_0000_1000_0000)
+                SimState::new(1, 0x7f00_0000_0000, 0x0000_0000_1000_0000)
             }
         }
     } else {
-        SimState::new(cli.seed, 1, 0x7f00_0000_0000, 0x0000_0000_1000_0000)
+        SimState::new(1, 0x7f00_0000_0000, 0x0000_0000_1000_0000)
     };
     state.checker.livelock_threshold = cli.livelock_threshold;
 
@@ -70,10 +70,12 @@ fn main() {
         }
     }
 
-    // Optionally write events back out
-    if cli.trace != "-" && !processed.is_empty() {
-        let out_path = "tm-des.output.jsonl";
-        if let Err(e) = (tm_des::trace::Trace { events: processed }).to_jsonl(&mut std::fs::File::create(out_path).unwrap()) {
+    // Write processed events to output file
+    if !processed.is_empty() {
+        let out_path = cli.output.as_deref().unwrap_or("tm-des.output.jsonl");
+        if let Err(e) = (tm_des::trace::Trace { events: processed }).to_jsonl(
+            &mut std::fs::File::create(out_path).unwrap()
+        ) {
             eprintln!("Output error: {}", e);
         } else {
             eprintln!("Output written to '{}'", out_path);

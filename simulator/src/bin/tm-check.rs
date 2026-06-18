@@ -8,7 +8,8 @@ use tm_des::tm_model::TmModel;
 #[derive(Parser, Debug)]
 #[command(name = "tm-check", about = "Replay TM trace through model and verify correctness")]
 struct Cli {
-    /// Trace file (JSONL) to check.
+    /// Trace file (JSONL) to check. Use '-' for stdin.
+    #[arg(short, long, default_value = "-")]
     trace: String,
 
     /// TM region base address (hex or decimal).
@@ -133,9 +134,6 @@ fn check_trace(events: &[Event], cli: &Cli) {
             }
             if model.get_or_create_tx(tid).active {
                 model.tm_abort_reason(tid, &err);
-            }
-            if matches!(event.kind, EventKind::TxEnd) {
-                model.tm_begin(tid);
             }
         }
     }

@@ -281,19 +281,24 @@ fn do_init() {
 
 fn do_exit() {
     let cc = TM_COMMIT_COUNT.load(Ordering::Relaxed);
-    let tr = TM_TOTAL_READS.load(Ordering::Relaxed);
-    let tw = TM_TOTAL_WRITES.load(Ordering::Relaxed);
-    let mxr = TM_MAX_READ_SET.load(Ordering::Relaxed);
-    let mxw = TM_MAX_WRITE_SET.load(Ordering::Relaxed);
-    let mnr = TM_MIN_READ_SET.load(Ordering::Relaxed);
-    let mnw = TM_MIN_WRITE_SET.load(Ordering::Relaxed);
-    let ac = TM_ABORT_COUNT.load(Ordering::Relaxed);
-    print!("TM_STATS: commits={}", cc);
-    if cc > 0 {
-        print!(" avg_reads={:.1} min_reads={} max_reads={} avg_writes={:.1} min_writes={} max_writes={}",
-            tr as f64 / cc as f64, mnr, mxr, tw as f64 / cc as f64, mnw, mxw);
+    #[cfg(not(feature = "simulation"))]
+    {
+        let tr = TM_TOTAL_READS.load(Ordering::Relaxed);
+        let tw = TM_TOTAL_WRITES.load(Ordering::Relaxed);
+        let mxr = TM_MAX_READ_SET.load(Ordering::Relaxed);
+        let mxw = TM_MAX_WRITE_SET.load(Ordering::Relaxed);
+        let mnr = TM_MIN_READ_SET.load(Ordering::Relaxed);
+        let mnw = TM_MIN_WRITE_SET.load(Ordering::Relaxed);
+        let ac = TM_ABORT_COUNT.load(Ordering::Relaxed);
+        print!("TM_STATS: commits={}", cc);
+        if cc > 0 {
+            print!(" avg_reads={:.1} min_reads={} max_reads={} avg_writes={:.1} min_writes={} max_writes={}",
+                tr as f64 / cc as f64, mnr, mxr, tw as f64 / cc as f64, mnw, mxw);
+        }
+        println!(" aborts={}", ac);
     }
-    println!(" aborts={}", ac);
+    #[cfg(feature = "simulation")]
+    let _ = cc;
     INIT_COUNT.store(0, Ordering::Relaxed);
 }
 

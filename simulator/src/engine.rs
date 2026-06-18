@@ -19,10 +19,10 @@ pub struct SimState {
 }
 
 impl SimState {
-    pub fn new(seed: u64, threads: u32, tm_base: u64, tm_size: u64) -> Self {
+    pub fn new(threads: u32, tm_base: u64, tm_size: u64) -> Self {
         let mut lps = HashMap::new();
         for tid in 0..threads {
-            lps.insert(tid, LpState::new(tid, seed));
+            lps.insert(tid, LpState::new(tid, 0));
         }
         SimState {
             clock: 0,
@@ -92,7 +92,7 @@ impl SimState {
                 }
             }
             EventKind::Log { msg } => {
-                println!("[LOG ts={} tid={}] {}", event.timestamp, event.thread_id, msg);
+                eprintln!("[LOG ts={} tid={}] {}", event.timestamp, event.thread_id, msg);
             }
             EventKind::ThreadJoin(_) => {}
         }

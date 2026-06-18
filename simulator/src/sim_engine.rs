@@ -49,6 +49,7 @@ pub struct SimEngine {
     pub deadlock: DeadlockDetector,
     base_tid: u64,
     in_tx: HashMap<u64, bool>,
+    aborted: HashMap<u64, bool>,
     seen_threads: HashSet<u64>,
     current_write_set: HashMap<u64, Vec<u64>>,
     events_processed: u64,
@@ -63,6 +64,7 @@ impl SimEngine {
             deadlock: DeadlockDetector::new(10),
             base_tid: alloc_tid_base(),
             in_tx: HashMap::new(),
+            aborted: HashMap::new(),
             seen_threads: HashSet::new(),
             current_write_set: HashMap::new(),
             events_processed: 0,
@@ -153,12 +155,17 @@ impl SimEngine {
                 self.verifier.tx_begin(tid);
                 b.begin();
                 self.in_tx.insert(tid, true);
+                self.aborted.insert(tid, false);
                 self.current_write_set.insert(tid, Vec::new());
                 Ok(())
             }
             EventKind::TxEnd => {
                 self.in_tx.insert(tid, false);
                 let ws = self.current_write_set.remove(&tid).unwrap_or_default();
+                if *self.aborted.get(&tid).unwrap_or(&false) {
+                    self.aborted.insert(tid, false);
+                    return Err("TxEnd after abort — skipped".into());
+                }
                 let ok = b.commit();
                 if ok {
                     self.stats.commits += 1;
@@ -167,6 +174,7 @@ impl SimEngine {
                     Ok(())
                 } else {
                     self.stats.aborts += 1;
+                    self.aborted.insert(tid, true);
                     self.verifier.tx_abort(tid);
                     self.deadlock.record_abort(btid, &ws);
                     b.abort();
@@ -284,6 +292,7 @@ impl SimEngine {
             self.backend.sim_clear_thread_id();
         }
         self.in_tx.clear();
+        self.aborted.clear();
         self.seen_threads.clear();
         self.verifier.reset();
         self.deadlock.reset();
