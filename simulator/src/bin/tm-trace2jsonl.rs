@@ -47,16 +47,43 @@ fn parse_trace(input: &str) -> Result<Vec<RawEntry>, String> {
             .map_err(|e| format!("line {} thread_id: {}", line_no + 1, e))?;
         let type_code: u32 = parts[2].parse()
             .map_err(|e| format!("line {} type_code: {}", line_no + 1, e))?;
-        let addr_str = parts[3].trim_start_matches("0x");
-        let addr = u64::from_str_radix(addr_str, 16)
-            .map_err(|e| format!("line {} addr: {}", line_no + 1, e))?;
-        let width = if parts.len() > 4 {
-            parts[4].parse().unwrap_or(8)
-        } else { 8 };
-        let value_str = if parts.len() > 5 {
-            parts[5].trim_start_matches("0x")
-        } else { "0" };
-        let value = u64::from_str_radix(value_str, 16).unwrap_or(0);
+
+        // Two trace formats are in use:
+        //
+        //   Old (6-field):  ts tid type 0x<addr> <width> 0x<value>
+        //   Extended (8+):  ts tid type <txid> 0x<addr> <width> 0x<value> <cont> [extra...]
+        //
+        // Distinguish by checking whether parts[3] starts with "0x".
+        // In the old format parts[3] is the address (always 0x-prefixed).
+        // In the extended format parts[3] is the TX id (decimal integer).
+        let (addr, width, value) = if parts[3].starts_with("0x") {
+            // Old legacy format (6 fields)
+            let addr_str = parts[3].trim_start_matches("0x");
+            let addr = u64::from_str_radix(addr_str, 16)
+                .map_err(|e| format!("line {} addr: {}", line_no + 1, e))?;
+            let width = if parts.len() > 4 {
+                parts[4].parse().unwrap_or(8)
+            } else { 8 };
+            let value_str = if parts.len() > 5 {
+                parts[5].trim_start_matches("0x")
+            } else { "0" };
+            let value = u64::from_str_radix(value_str, 16).unwrap_or(0);
+            (addr, width, value)
+        } else {
+            // Extended format (8+ fields): ts tid type txid 0x<addr> width 0x<value> cont
+            if parts.len() < 7 {
+                return Err(format!("line {}: extended format needs at least 7 columns", line_no + 1));
+            }
+            let addr_str = parts[4].trim_start_matches("0x");
+            let addr = u64::from_str_radix(addr_str, 16)
+                .map_err(|e| format!("line {} addr: {}", line_no + 1, e))?;
+            let width: u64 = parts[5].parse()
+                .map_err(|e| format!("line {} width: {}", line_no + 1, e))?;
+            let value_str = parts[6].trim_start_matches("0x");
+            let value = u64::from_str_radix(value_str, 16).unwrap_or(0);
+            (addr, width, value)
+        };
+
         entries.push(RawEntry { timestamp, thread_id, type_code, addr, width, value });
     }
     Ok(entries)

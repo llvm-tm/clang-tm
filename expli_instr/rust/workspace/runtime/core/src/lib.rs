@@ -318,6 +318,98 @@ impl<T> SimStateStore<T> {
     }
 }
 
+// ── SyncCounters — contention-aware stat collection ──────
+// Gated behind `feature = "stats"`.  Used by the simulator to
+// collect per-backend internal synchronization metrics that
+// are invisible at the event-log level:
+//   - Validation attempts and failures (read-set staleness checks)
+//   - Lock contention events (CAS failures on lock/orec acquisition)
+//   - Read-set and write-set sizes at commit time
+//
+// These counters are atomics so backends can increment them from
+// any simulated thread context without coordination.
+
+/// Aggregated internal-synchronization counters for a TM backend.
+#[cfg(feature = "stats")]
+pub struct SyncCounters {
+    /// Number of read-set validation passes attempted.
+    pub validations: std::sync::atomic::AtomicU64,
+    /// Number of validation passes that failed (→ abort).
+    pub validation_failures: std::sync::atomic::AtomicU64,
+    /// Number of times a lock/orec/commit-lock CAS failed (contention).
+    pub lock_contentions: std::sync::atomic::AtomicU64,
+    /// Number of times lock acquisition timed out or failed definitively.
+    pub lock_acquire_failures: std::sync::atomic::AtomicU64,
+    /// Total read-set entries added across all committed transactions.
+    pub total_read_set_entries: std::sync::atomic::AtomicU64,
+    /// Total write-set entries added across all committed transactions.
+    pub total_write_set_entries: std::sync::atomic::AtomicU64,
+    /// Total committed transactions.
+    pub commits: std::sync::atomic::AtomicU64,
+    /// Total aborted transactions.
+    pub aborts: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(feature = "stats")]
+impl SyncCounters {
+    pub const fn new() -> Self {
+        SyncCounters {
+            validations: std::sync::atomic::AtomicU64::new(0),
+            validation_failures: std::sync::atomic::AtomicU64::new(0),
+            lock_contentions: std::sync::atomic::AtomicU64::new(0),
+            lock_acquire_failures: std::sync::atomic::AtomicU64::new(0),
+            total_read_set_entries: std::sync::atomic::AtomicU64::new(0),
+            total_write_set_entries: std::sync::atomic::AtomicU64::new(0),
+            commits: std::sync::atomic::AtomicU64::new(0),
+            aborts: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    pub fn reset(&self) {
+        use std::sync::atomic::Ordering;
+        self.validations.store(0, Ordering::Relaxed);
+        self.validation_failures.store(0, Ordering::Relaxed);
+        self.lock_contentions.store(0, Ordering::Relaxed);
+        self.lock_acquire_failures.store(0, Ordering::Relaxed);
+        self.total_read_set_entries.store(0, Ordering::Relaxed);
+        self.total_write_set_entries.store(0, Ordering::Relaxed);
+        self.commits.store(0, Ordering::Relaxed);
+        self.aborts.store(0, Ordering::Relaxed);
+    }
+}
+
+#[cfg(all(test, feature = "stats"))]
+mod stats_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn test_sync_counters_new() {
+        let c = SyncCounters::new();
+        assert_eq!(c.validations.load(Ordering::Relaxed), 0);
+        assert_eq!(c.commits.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_sync_counters_reset() {
+        let c = SyncCounters::new();
+        c.validations.fetch_add(100, Ordering::Relaxed);
+        c.commits.fetch_add(10, Ordering::Relaxed);
+        c.reset();
+        assert_eq!(c.validations.load(Ordering::Relaxed), 0);
+        assert_eq!(c.commits.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_sync_counters_fetch_add() {
+        let c = SyncCounters::new();
+        c.validations.fetch_add(5, Ordering::Relaxed);
+        c.validation_failures.fetch_add(2, Ordering::Relaxed);
+        assert_eq!(c.validations.load(Ordering::Relaxed), 5);
+        assert_eq!(c.validation_failures.load(Ordering::Relaxed), 2);
+    }
+}
+
 #[cfg(all(test, feature = "simulation"))]
 mod tests {
     use super::*;

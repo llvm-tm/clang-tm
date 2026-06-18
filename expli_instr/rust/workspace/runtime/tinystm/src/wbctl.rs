@@ -73,7 +73,7 @@ pub fn tm_commit() -> bool {
     let addrs: Vec<usize> = tx.write_set.keys().copied().collect();
     gc_acquire(); fence(Ordering::SeqCst);
     let idxs = lock_write_addrs(&addrs);
-    if !validate_read_set(&tx.read_set) { unlock_indices(&idxs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
+    if !validate_read_set(&tx.read_set) { unlock_indices(&idxs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
     for (addr, entry) in &tx.write_set { apply_typed_value(*addr, &entry.value); }
     fence(Ordering::SeqCst);
     unlock_indices(&idxs);

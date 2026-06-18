@@ -71,6 +71,8 @@ pub fn version_at_index(idx: usize) -> u64 { locks()[idx].version() }
 #[cfg(feature = "wbctl")]
 fn lock_at_index(idx: usize) {
     while !try_lock_at_index(idx) {
+        #[cfg(feature = "stats")]
+        TM_STATS.lock_contentions.fetch_add(1, Ordering::Relaxed);
         std::hint::spin_loop();
     }
 }
@@ -204,6 +206,9 @@ pub fn tm_abort_count() -> u64 {
 }
 
 // ── TM_STATS counters ─────────────────────────────────────
+#[cfg(feature = "stats")]
+pub static TM_STATS: runtime_core::SyncCounters = runtime_core::SyncCounters::new();
+
 pub static TM_COMMIT_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static TM_TOTAL_READS: AtomicU64 = AtomicU64::new(0);
 pub static TM_TOTAL_WRITES: AtomicU64 = AtomicU64::new(0);
@@ -218,6 +223,12 @@ pub fn update_read_write_stats(read_len: usize, write_len: usize) {
     TM_TOTAL_READS.fetch_add(r, Ordering::Relaxed);
     TM_TOTAL_WRITES.fetch_add(w, Ordering::Relaxed);
     TM_COMMIT_COUNT.fetch_add(1, Ordering::Relaxed);
+    #[cfg(feature = "stats")]
+    {
+        TM_STATS.total_read_set_entries.fetch_add(r, Ordering::Relaxed);
+        TM_STATS.total_write_set_entries.fetch_add(w, Ordering::Relaxed);
+        TM_STATS.commits.fetch_add(1, Ordering::Relaxed);
+    }
     let mut cur = TM_MAX_READ_SET.load(Ordering::Relaxed);
     while r > cur { match TM_MAX_READ_SET.compare_exchange_weak(cur, r, Ordering::Relaxed, Ordering::Relaxed) { Ok(_) => break, Err(v) => cur = v, } }
     cur = TM_MAX_WRITE_SET.load(Ordering::Relaxed);
@@ -253,7 +264,12 @@ pub fn lock_write_addrs(addrs: &[usize]) -> Vec<usize> {
 }
 
 pub fn validate_read_set(read_set: &[(usize, u64)]) -> bool {
-    read_set.iter().all(|(a, v)| version_at_index(lock_index(*a)) == *v)
+    #[cfg(feature = "stats")]
+    TM_STATS.validations.fetch_add(1, Ordering::Relaxed);
+    let ok = read_set.iter().all(|(a, v)| version_at_index(lock_index(*a)) == *v);
+    #[cfg(feature = "stats")]
+    if !ok { TM_STATS.validation_failures.fetch_add(1, Ordering::Relaxed); }
+    ok
 }
 
 pub fn unlock_indices(idxs: &[usize]) {
@@ -303,7 +319,7 @@ fn do_exit() {
 }
 
 // ── Public API (shared by all variants) ─────────────────
-pub fn tm_init() { tm_install_tmx_hook(); do_init(); }
+pub fn tm_init() { tm_install_tmx_hook(); do_init(); #[cfg(feature = "stats")] TM_STATS.reset(); }
 pub fn tm_exit() { do_exit(); }
 
 pub fn tm_init_thread() {
@@ -371,5 +387,36 @@ pub mod sim {
         let store = sim_tx_store();
         let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
         map.remove(&tid);
+    }
+
+    #[cfg(feature = "stats")]
+    pub fn take_stats() -> runtime_core::SyncCounters {
+        let s = runtime_core::SyncCounters::new();
+        s.validations.store(TM_STATS.validations.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.validation_failures.store(TM_STATS.validation_failures.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.lock_contentions.store(TM_STATS.lock_contentions.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.lock_acquire_failures.store(TM_STATS.lock_acquire_failures.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.total_read_set_entries.store(TM_STATS.total_read_set_entries.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.total_write_set_entries.store(TM_STATS.total_write_set_entries.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.commits.store(TM_STATS.commits.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.aborts.store(TM_STATS.aborts.load(Ordering::Relaxed), Ordering::Relaxed);
+        TM_STATS.reset();
+        s
+    }
+
+    #[cfg(feature = "stats")]
+    pub fn print_stats(s: &runtime_core::SyncCounters) {
+        use std::sync::atomic::Ordering;
+        let val = s.validations.load(Ordering::Relaxed);
+        let vfail = s.validation_failures.load(Ordering::Relaxed);
+        let lcon = s.lock_contentions.load(Ordering::Relaxed);
+        let laf  = s.lock_acquire_failures.load(Ordering::Relaxed);
+        let trs  = s.total_read_set_entries.load(Ordering::Relaxed);
+        let tws  = s.total_write_set_entries.load(Ordering::Relaxed);
+        let com  = s.commits.load(Ordering::Relaxed);
+        let abt  = s.aborts.load(Ordering::Relaxed);
+        eprintln!("  STATS (TinySTM):");
+        eprintln!("    Commits={}  Aborts={}  Val={}  VFail={}  Locks={}  LAqFail={}  RS={}  WS={}",
+                  com, abt, val, vfail, lcon, laf, trs, tws);
     }
 }

@@ -9,4 +9,5 @@ serde = { version = "1", features = ["derive", "alloc"], optional = true }
 
 [features]
 simulation = ["runtime-core/simulation"]
+stats = ["runtime-core/stats"]
 serde = ["dep:serde", "runtime-core/serde"]
