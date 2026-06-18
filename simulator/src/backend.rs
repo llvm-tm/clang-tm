@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_from_name_invalid() {
+    fn test_backend_from_name_tinystm() {
         assert_eq!(Backend::from_name("tinystm"), Some(Backend::Tinystm));
         assert_eq!(Backend::from_name(""), None);
         assert_eq!(Backend::from_name("swisstm"), None);
