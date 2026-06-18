@@ -200,6 +200,24 @@ impl Backend {
     pub fn is_norec(&self) -> bool { matches!(self, Backend::Norec) }
     pub fn is_tl2(&self) -> bool { matches!(self, Backend::Tl2) }
     pub fn is_tinystm(&self) -> bool { matches!(self, Backend::Tinystm) }
+
+    /// Take snapshot of internal sync counters and reset them.
+    pub fn take_stats(&self) -> runtime_core::SyncCounters {
+        match self {
+            Backend::Norec => runtime_norec::sim::take_stats(),
+            Backend::Tl2 => runtime_tl2::sim::take_stats(),
+            Backend::Tinystm => runtime_tinystm::sim::take_stats(),
+        }
+    }
+
+    /// Print internal sync counters to stderr.
+    pub fn print_stats(&self, s: &runtime_core::SyncCounters) {
+        match self {
+            Backend::Norec => runtime_norec::sim::print_stats(s),
+            Backend::Tl2 => runtime_tl2::sim::print_stats(s),
+            Backend::Tinystm => runtime_tinystm::sim::print_stats(s),
+        }
+    }
 }
 
 #[cfg(test)]

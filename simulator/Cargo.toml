@@ -11,10 +11,10 @@ serde_json = "1"
 bincode = "1"
 
 # Real TM backend crates (simulation mode)
-runtime-core = { path = "../expli_instr/rust/workspace/runtime/core", features = ["simulation", "serde"] }
-runtime-norec = { path = "../expli_instr/rust/workspace/runtime/norec", features = ["simulation", "serde"] }
-runtime-tl2 = { path = "../expli_instr/rust/workspace/runtime/tl2", features = ["simulation", "serde"] }
-runtime-tinystm = { path = "../expli_instr/rust/workspace/runtime/tinystm", features = ["simulation", "serde", "wbctl"] }
+runtime-core = { path = "../expli_instr/rust/workspace/runtime/core", features = ["simulation", "serde", "stats"] }
+runtime-norec = { path = "../expli_instr/rust/workspace/runtime/norec", features = ["simulation", "serde", "stats"] }
+runtime-tl2 = { path = "../expli_instr/rust/workspace/runtime/tl2", features = ["simulation", "serde", "stats"] }
+runtime-tinystm = { path = "../expli_instr/rust/workspace/runtime/tinystm", features = ["simulation", "serde", "stats", "wbctl"] }
 libc = "0.2"
 
 [[bin]]

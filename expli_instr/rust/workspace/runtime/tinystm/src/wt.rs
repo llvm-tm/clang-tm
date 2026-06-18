@@ -177,10 +177,10 @@ pub fn tm_abort() {
 pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
     fence(Ordering::SeqCst);
-    if tx.aborted { for u in tx.undo_backs { u.apply(); } unlock_indices(&tx.locked_addrs); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
+    if tx.aborted { for u in tx.undo_backs { u.apply(); } unlock_indices(&tx.locked_addrs); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
     if tx.write_set.is_empty() { return true; }
     gc_acquire(); fence(Ordering::SeqCst);
-    if !validate_read_set(&tx.read_set) { for u in tx.undo_backs { u.apply(); } unlock_indices(&tx.locked_addrs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
+    if !validate_read_set(&tx.read_set) { for u in tx.undo_backs { u.apply(); } unlock_indices(&tx.locked_addrs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
     unlock_indices(&tx.locked_addrs);
     gc_release_and_inc();
     true
