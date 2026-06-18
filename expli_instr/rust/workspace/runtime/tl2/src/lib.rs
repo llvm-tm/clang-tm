@@ -185,7 +185,12 @@ fn read_word<T: Primitive>(addr: usize) -> T {
     }
 
     loop {
-        while is_locked(addr) { std::hint::spin_loop(); }
+        while is_locked(addr) {
+            #[cfg(feature = "simulation")]
+            std::panic::panic_any(runtime_core::TmxAbort);
+            #[cfg(not(feature = "simulation"))]
+            std::hint::spin_loop();
+        }
         let ver = read_version(addr);
         let val: T = unsafe { (addr as *const T).read() };
         if read_version(addr) != ver { continue; }
@@ -272,6 +277,15 @@ pub fn tm_commit() -> bool {
         if cur == 0 && COMMIT_LOCK.compare_exchange_weak(0, my_id, Ordering::Acquire, Ordering::Relaxed).is_ok() {
             break;
         }
+        // In simulation mode, if another thread holds the commit lock,
+        // it will never be released — abort.
+        #[cfg(feature = "simulation")]
+        if COMMIT_LOCK.load(Ordering::Relaxed) != 0 {
+            TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "stats")]
+            TM_STATS.aborts.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
         #[cfg(feature = "stats")]
         TM_STATS.lock_contentions.fetch_add(1, Ordering::Relaxed);
         std::hint::spin_loop();
@@ -294,9 +308,23 @@ pub fn tm_commit() -> bool {
         let idx = lock_index(a);
         if locked_idxs.last().copied() != Some(idx) {
             while !lock_at_index(idx).try_lock_exclusive() {
-                #[cfg(feature = "stats")]
-                TM_STATS.lock_acquire_failures.fetch_add(1, Ordering::Relaxed);
-                std::hint::spin_loop();
+                // In simulation mode, if the lock is held by another
+                // thread, it will never be released — abort.
+                #[cfg(feature = "simulation")]
+                {
+                    // Release the commit lock first, then abort
+                    COMMIT_LOCK.store(0, Ordering::Release);
+                    TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(feature = "stats")]
+                    TM_STATS.aborts.fetch_add(1, Ordering::Relaxed);
+                    return false;
+                }
+                #[cfg(not(feature = "simulation"))]
+                {
+                    #[cfg(feature = "stats")]
+                    TM_STATS.lock_acquire_failures.fetch_add(1, Ordering::Relaxed);
+                    std::hint::spin_loop();
+                }
             }
             locked_idxs.push(idx);
         }

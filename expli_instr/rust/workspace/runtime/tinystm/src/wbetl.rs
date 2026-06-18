@@ -12,6 +12,9 @@ fn read_word<T: Primitive>(addr: usize) -> T {
             let mut rspins = 0u64;
             while is_locked(addr) {
                 if with_tx(|tx| tx.locked_addrs.contains(&lock_index(addr))) { break; }
+                // In simulation mode, the lock-holder will never release.
+                #[cfg(feature = "simulation")]
+                std::panic::panic_any(TmxAbort);
                 rspins += 1;
                 if rspins > 5000 { std::panic::panic_any(TmxAbort); }
                 std::hint::spin_loop();
@@ -44,6 +47,9 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     {
         let mut spins = 0u64;
         while is_locked(addr) {
+            // In simulation mode, the lock-holder will never release.
+            #[cfg(feature = "simulation")]
+            std::panic::panic_any(TmxAbort);
             spins += 1;
             if spins > 5000 { std::panic::panic_any(TmxAbort); }
             std::hint::spin_loop();
@@ -62,6 +68,9 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     }
     let mut lock_spins = 0u64;
     while !try_lock_at_index(lock_idx) {
+        // In simulation mode, the lock-holder will never release.
+        #[cfg(feature = "simulation")]
+        std::panic::panic_any(TmxAbort);
         lock_spins += 1;
         if lock_spins > 10000
             || (is_locked(addr) && read_version(addr) > with_tx(|tx| tx.start_version))
@@ -95,6 +104,9 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     {
         let mut spins = 0u64;
         while is_locked(addr) {
+            // In simulation mode, the lock-holder will never release.
+            #[cfg(feature = "simulation")]
+            std::panic::panic_any(TmxAbort);
             spins += 1;
             if spins > 5000 { std::panic::panic_any(TmxAbort); }
             std::hint::spin_loop();
@@ -114,6 +126,9 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     }
     let mut lock_spins = 0u64;
     while !try_lock_at_index(lock_idx) {
+        // In simulation mode, the lock-holder will never release.
+        #[cfg(feature = "simulation")]
+        std::panic::panic_any(TmxAbort);
         lock_spins += 1;
         if lock_spins > 10000
             || (is_locked(addr) && read_version(addr) > with_tx(|tx| tx.start_version))
@@ -142,7 +157,8 @@ pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
     fence(Ordering::SeqCst);
     if tx.write_set.is_empty() { return true; }
-    gc_acquire(); fence(Ordering::SeqCst);
+    if !gc_acquire() { TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
+    fence(Ordering::SeqCst);
     if !validate_read_set(&tx.read_set) { unlock_indices(&tx.locked_addrs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
     for wb in tx.write_backs { wb.apply(); }
     fence(Ordering::SeqCst);

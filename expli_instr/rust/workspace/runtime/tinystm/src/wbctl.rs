@@ -8,7 +8,12 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         return T::from_typed(&entry);
     }
     loop {
-        while is_locked(addr) { std::hint::spin_loop(); }
+        while is_locked(addr) {
+            #[cfg(feature = "simulation")]
+            std::panic::panic_any(TmxAbort);
+            #[cfg(not(feature = "simulation"))]
+            std::hint::spin_loop();
+        }
         let version = read_version(addr);
         let value: T = unsafe { (addr as *const T).read() };
         if read_version(addr) != version { continue; }
@@ -26,7 +31,12 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     let tv = val.to_typed();
     with_tx(|tx| {
         use std::collections::hash_map::Entry;
-        while is_locked(addr) { std::hint::spin_loop(); }
+        while is_locked(addr) {
+            #[cfg(feature = "simulation")]
+            std::panic::panic_any(TmxAbort);
+            #[cfg(not(feature = "simulation"))]
+            std::hint::spin_loop();
+        }
         let version = read_version(addr);
         if version > tx.start_version { std::panic::panic_any(TmxAbort); }
         let entry = tx.write_set.entry(addr);
@@ -71,7 +81,8 @@ pub fn tm_commit() -> bool {
     fence(Ordering::SeqCst);
     if tx.write_set.is_empty() { update_read_write_stats(tx.read_set.len(), 0); return true; }
     let addrs: Vec<usize> = tx.write_set.keys().copied().collect();
-    gc_acquire(); fence(Ordering::SeqCst);
+    if !gc_acquire() { TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
+    fence(Ordering::SeqCst);
     let idxs = lock_write_addrs(&addrs);
     if !validate_read_set(&tx.read_set) { unlock_indices(&idxs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
     for (addr, entry) in &tx.write_set { apply_typed_value(*addr, &entry.value); }
