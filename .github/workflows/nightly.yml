@@ -1,0 +1,72 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Fidelity regression: compare real C++ vs simulator ──
+  fidelity-regression:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 lld make
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build simulator (release)
+        run: cargo build --release --manifest-path simulator/Cargo.toml
+      - name: Build C++ benchmarks for 3 sim backends
+        run: |
+          for backend in NOREC TL2 TINYSTM; do
+            make -C benchmarks/cpp -j4 BACKEND=$backend
+          done
+      - name: Run comparison
+        run: |
+          python3 simulator/compare_real_sim.py \
+            --backends NOREC,TL2,TINYSTM \
+            --benchmarks bank,vacation,kmeans \
+            --csv nightly_results.csv 2>&1
+      - name: Upload fidelity results
+        uses: actions/upload-artifact@v4
+        with:
+          name: fidelity-results
+          path: nightly_results.csv
+
+  # ── Cross-backend full sweep ────────────────────────────
+  cross-backend-full:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 lld make
+      - name: Build and test all 10 backends
+        run: |
+          echo "backend,test_tx,test_ds" > cross_backend_results.csv
+          for backend in TINYSTM WBETL WT NOREC SWISSTM TL2 SGL XTM LEFTRIGHT ROMULUS; do
+            make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=$backend 2>/dev/null
+            ./benchmarks/cpp/bin/test_tx > /dev/null 2>&1 && tx="PASS" || tx="FAIL"
+            ./benchmarks/cpp/bin/test_ds > /dev/null 2>&1 && ds="PASS" || ds="FAIL"
+            echo "$backend,$tx,$ds" >> cross_backend_results.csv
+          done
+          cat cross_backend_results.csv
+      - name: Upload cross-backend results
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-backend-results
+          path: cross_backend_results.csv
