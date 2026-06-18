@@ -276,9 +276,11 @@ def main():
     parser.add_argument('--bench', '-b', help='Benchmark binary to run')
     parser.add_argument('--bench-args', '-a', default='',
                         help='Arguments for benchmark binary')
-    parser.add_argument('--backend', default='norec',
-                        choices=['norec', 'tl2', 'tinystm'],
+    parser.add_argument('--backend', default=None,
+                        choices=['norec', 'tl2', 'tinystm', 'romulus', 'swisstm'],
                         help='Rust backend for tm-sim (default: norec)')
+    parser.add_argument('--backends', default=None,
+                        help='Comma-separated list of backends to test')
     parser.add_argument('--model-only', action='store_true',
                         help='Compare against tm-check only, skip tm-sim')
     parser.add_argument('--sim-only', action='store_true',
@@ -297,6 +299,15 @@ def main():
     if not args.trace and not args.bench:
         print("Error: provide --trace or --bench", file=sys.stderr)
         sys.exit(1)
+
+    # Resolve backend list: --backends (plural) overrides --backend (singular).
+    # If neither is given, default to norec.
+    if args.backends:
+        backend_list = [b.strip() for b in args.backends.split(',') if b.strip()]
+    elif args.backend:
+        backend_list = [args.backend]
+    else:
+        backend_list = ['norec']
 
     log = lambda msg: None if args.quiet else print(msg, file=sys.stderr)
 
@@ -378,13 +389,14 @@ def main():
             comparisons.append(('Model (WBCTL)', model))
 
     if not args.model_only:
-        log(f"\n--- tm-sim (backend={args.backend}) ---")
-        rc, sim_out = run_command(
-            [tm_sim_bin, '--backend', args.backend, '--trace', jsonl_path],
-            'tm-sim')
-        sim = parse_tm_sim_output(sim_out)
-        if 'total' in sim:
-            comparisons.append((f'Sim ({args.backend})', sim))
+        for bk in backend_list:
+            log(f"\n--- tm-sim (backend={bk}) ---")
+            rc, sim_out = run_command(
+                [tm_sim_bin, '--backend', bk, '--trace', jsonl_path],
+                f'tm-sim-{bk}')
+            sim = parse_tm_sim_output(sim_out)
+            if 'total' in sim:
+                comparisons.append((f'Sim ({bk})', sim))
 
     # ── Step 5: Metrics ─────────────────────────────────────────
     print("\n" + "=" * 58)
@@ -414,7 +426,9 @@ def main():
                       'real_aborts,sim_aborts,'
                       'fidelity,commit_mae,abort_delta,'
                       'total_events,clean,conflicts')
-            row = (f'{trace_name},{label},{args.backend},'
+            # Extract backend name from label "Sim (norec)" or use raw label
+            backend_name = label.split('(')[-1].rstrip(')') if '(' in label else label
+            row = (f'{trace_name},{label},{backend_name},'
                    f'{m["total_tx"]},{m["real_commits"]},{m["sim_commits"]},'
                    f'{m["real_aborts"]},{m["sim_aborts"]},'
                    f'{m["fidelity"]:.2f},{m["commit_mae"]},{m["abort_delta"]},'

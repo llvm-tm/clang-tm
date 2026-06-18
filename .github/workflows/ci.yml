@@ -46,7 +46,7 @@ jobs:
       - name: Run simulator unit tests
         run: cargo test --manifest-path simulator/Cargo.toml -- --test-threads=1
       - name: Synthetic trace fidelity check
-        run: python3 simulator/compare_sim.py --sim-only --backends norec,tl2,tinystm 2>&1
+        run: python3 simulator/compare_sim.py --sim-only --backends norec,tl2,tinystm,romulus,swisstm 2>&1
 
   # ── Job 3: Rust workspace build ────────────────────────
   rust-build:
