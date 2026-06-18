@@ -121,17 +121,13 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: Check for stale legacy directories
+      - name: Verify stale directories have been removed
         run: |
-          stale=false
+          all_clean=true
           for dir in llvm_tm_plugin expli-benchmarks plugin-benchmarks rust_tm_api; do
             if [ -d "$dir" ]; then
-              echo "STALE: $dir still exists"
-              stale=true
+              echo "STALE: $dir still exists — should have been deleted"
+              all_clean=false
             fi
           done
-          if [ "$stale" = true ]; then
-            echo "Run IMPROVEMENT_PLAN.md item 2.1 to clean up"
-          else
-            echo "No stale directories found"
-          fi
+          $all_clean && echo "All stale directories removed ✓"
