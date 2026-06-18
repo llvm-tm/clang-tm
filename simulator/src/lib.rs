@@ -24,17 +24,17 @@ pub struct Cli {
     #[arg(short, long, default_value = "-")]
     pub trace: String,
 
+    /// Output file for processed events (default: tm-des.output.jsonl).
+    #[arg(short, long)]
+    pub output: Option<String>,
+
     /// Restore from checkpoint file instead of starting fresh.
     #[arg(long)]
     pub checkpoint: Option<String>,
 
-    /// Save checkpoint every N events.
+    /// Save checkpoint every N events (0 = disabled).
     #[arg(long, default_value = "10000")]
     pub checkpoint_every: u64,
-
-    /// Global PRNG seed.
-    #[arg(short, long, default_value = "42")]
-    pub seed: u64,
 
     /// Stop after processing M events (0 = unlimited).
     #[arg(long, default_value = "0")]

@@ -6,6 +6,7 @@
 //   tm-sim [--backend norec] [--trace trace.jsonl]
 
 use clap::Parser;
+use std::collections::HashMap;
 use tm_des::backend::Backend;
 use tm_des::event::{Event, EventKind};
 use tm_des::sim_engine::SimEngine;
@@ -26,12 +27,16 @@ struct Cli {
     /// Stop after N events (0 = unlimited).
     #[arg(long, default_value = "0")]
     max_events: u64,
+
+    /// Initial committed values file (JSON: {"addr_hex": value, ...}).
+    #[arg(long)]
+    initial_values: Option<String>,
 }
 
 fn main() {
     let cli = Cli::parse();
     let Some(backend) = Backend::from_name(&cli.backend) else {
-        eprintln!("Unknown backend '{}'. Available: norec, tl2", cli.backend);
+        eprintln!("Unknown backend '{}'. Available: norec, tl2, tinystm", cli.backend);
         std::process::exit(1);
     };
 
@@ -54,6 +59,21 @@ fn main() {
     // Build engine and run
     let mut engine = SimEngine::new(backend);
     engine.init();
+
+    // Load initial committed values for money conservation check
+    if let Some(path) = &cli.initial_values {
+        let data: String = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| { eprintln!("Cannot read {}: {}", path, e); std::process::exit(1); });
+        let initial: HashMap<String, u64> = serde_json::from_str(&data)
+            .unwrap_or_else(|e| { eprintln!("JSON parse error in {}: {}", path, e); std::process::exit(1); });
+        for (k, v) in &initial {
+            let addr = u64::from_str_radix(k.trim_start_matches("0x"), 16)
+                .unwrap_or_else(|_| { eprintln!("Bad addr '{}'", k); std::process::exit(1); });
+            engine.verifier.set_initial_value(addr, *v);
+        }
+        engine.verifier.initial_value_sum = engine.verifier.total_value();
+        eprintln!("Loaded {} initial committed values", initial.len());
+    }
 
     let limit = if cli.max_events > 0 {
         cli.max_events as usize
@@ -83,7 +103,7 @@ fn main() {
     // Report via Verifier
     eprintln!();
     eprintln!("═══ tm-sim report ═══");
-    for line in engine.verifier.report(0) {
+    for line in engine.verifier.report() {
         eprintln!("{}", line);
     }
 }

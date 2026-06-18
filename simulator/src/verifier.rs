@@ -27,6 +27,7 @@ pub struct Verifier {
     pub writes_outside: u64,
     pub aborts: u64,
     pub commits: u64,
+    pub initial_value_sum: u64,
 }
 
 impl Verifier {
@@ -40,6 +41,7 @@ impl Verifier {
             writes_outside: 0,
             aborts: 0,
             commits: 0,
+            initial_value_sum: 0,
         }
     }
 
@@ -116,17 +118,42 @@ impl Verifier {
     }
 
     pub fn tx_begin(&mut self, tid: u64) {
-        *self.tx_depth.entry(tid).or_insert(0) += 1;
+        let depth = self.tx_depth.entry(tid).or_insert(0);
+        if *depth > 0 {
+            self.violations.push(format!(
+                "DOUBLE-TX-BEGIN tid={} (already in transaction, depth={})",
+                tid, *depth
+            ));
+        }
+        *depth += 1;
     }
 
     pub fn tx_commit(&mut self, tid: u64) {
-        let d = self.tx_depth.get_mut(&tid).expect("commit without begin");
+        let d = match self.tx_depth.get_mut(&tid) {
+            Some(d) if *d > 0 => d,
+            _ => {
+                self.violations.push(format!(
+                    "COMMIT-WITHOUT-BEGIN tid={}",
+                    tid
+                ));
+                return;
+            }
+        };
         *d = d.saturating_sub(1);
         self.commits += 1;
     }
 
     pub fn tx_abort(&mut self, tid: u64) {
-        let d = self.tx_depth.get_mut(&tid).expect("abort without begin");
+        let d = match self.tx_depth.get_mut(&tid) {
+            Some(d) if *d > 0 => d,
+            _ => {
+                self.violations.push(format!(
+                    "ABORT-WITHOUT-BEGIN tid={}",
+                    tid
+                ));
+                return;
+            }
+        };
         *d = d.saturating_sub(1);
         self.aborts += 1;
     }
@@ -148,7 +175,7 @@ impl Verifier {
         self.writes_outside = 0;
     }
 
-    pub fn report(&self, initial_total: u64) -> Vec<String> {
+    pub fn report(&self) -> Vec<String> {
         let mut lines = Vec::new();
 
         lines.push(format!("Commits: {}  Aborts: {}  Abort rate: {:.1}%",
@@ -176,11 +203,11 @@ impl Verifier {
         }
 
         let final_total = self.total_value();
-        if initial_total > 0 {
+        if self.initial_value_sum > 0 {
             lines.push(format!("Total value: {}  (initial: {})  Δ={}",
-                final_total, initial_total,
-                final_total as i64 - initial_total as i64));
-            if final_total == initial_total {
+                final_total, self.initial_value_sum,
+                final_total as i64 - self.initial_value_sum as i64));
+            if final_total == self.initial_value_sum {
                 lines.push("MONEY CONSERVED ✓".into());
             } else {
                 lines.push("⚠ MONEY NOT CONSERVED".into());
@@ -403,7 +430,7 @@ mod tests {
     #[test]
     fn test_report_empty() {
         let v = Verifier::new();
-        let lines = v.report(0);
+        let lines = v.report();
         assert!(lines.iter().any(|l| l.contains("Commits: 0")));
         assert!(lines.iter().any(|l| l.contains("NO MEMORY VIOLATIONS")));
     }
@@ -413,7 +440,7 @@ mod tests {
         let mut v = Verifier::new();
         v.commits = 9;
         v.aborts = 1;
-        let lines = v.report(0);
+        let lines = v.report();
         assert!(lines.iter().any(|l| l.contains("10.0%")));
     }
 
@@ -422,7 +449,8 @@ mod tests {
         let mut v = Verifier::new();
         v.record_value(0x1000, 100);
         v.record_value(0x2000, 200);
-        let lines = v.report(300);
+        v.initial_value_sum = 300;
+        let lines = v.report();
         assert!(lines.iter().any(|l| l.contains("MONEY CONSERVED")));
         assert!(lines.iter().any(|l| l.contains("Δ=0")));
     }
@@ -431,7 +459,8 @@ mod tests {
     fn test_report_money_not_conserved() {
         let mut v = Verifier::new();
         v.record_value(0x1000, 100);
-        let lines = v.report(200);
+        v.initial_value_sum = 200;
+        let lines = v.report();
         assert!(lines.iter().any(|l| l.contains("MONEY NOT CONSERVED")));
         assert!(lines.iter().any(|l| l.contains("Δ=-100")));
     }
@@ -440,7 +469,7 @@ mod tests {
     fn test_report_violations() {
         let mut v = Verifier::new();
         v.free(0xBEEF); // unallocated
-        let lines = v.report(0);
+        let lines = v.report();
         assert!(lines.iter().any(|l| l.contains("1 MEMORY VIOLATION")));
     }
 
@@ -449,27 +478,23 @@ mod tests {
         let mut v = Verifier::new();
         v.reads_outside = 3;
         v.writes_outside = 1;
-        let lines = v.report(0);
+        let lines = v.report();
         assert!(lines.iter().any(|l| l.contains("3 read(s) outside")));
         assert!(lines.iter().any(|l| l.contains("1 write(s) outside")));
     }
 
     #[test]
-    fn test_commit_without_begin_panics() {
+    fn test_commit_without_begin_recorded() {
         let mut v = Verifier::new();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            v.tx_commit(0);
-        }));
-        assert!(result.is_err());
+        v.tx_commit(0);
+        assert!(v.violations.iter().any(|l| l.contains("COMMIT-WITHOUT-BEGIN")));
     }
 
     #[test]
-    fn test_abort_without_begin_panics() {
+    fn test_abort_without_begin_recorded() {
         let mut v = Verifier::new();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            v.tx_abort(0);
-        }));
-        assert!(result.is_err());
+        v.tx_abort(0);
+        assert!(v.violations.iter().any(|l| l.contains("ABORT-WITHOUT-BEGIN")));
     }
 }
 
