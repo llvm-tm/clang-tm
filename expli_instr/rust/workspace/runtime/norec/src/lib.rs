@@ -217,8 +217,15 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         let (clock_before, val_u64) = loop {
             let cb = GLOBAL_LOCK.load(Ordering::Acquire);
             if cb & 1 != 0 {
-                std::hint::spin_loop();
-                continue;
+                // In simulation mode there is no concurrent writer, so the
+                // value is safe to read directly despite the locked clock.
+                #[cfg(feature = "simulation")]
+                break (cb, read_mem_val(addr, sz));
+                #[cfg(not(feature = "simulation"))]
+                {
+                    std::hint::spin_loop();
+                    continue;
+                }
             }
             let v = read_mem_val(addr, sz);
             let ca = GLOBAL_LOCK.load(Ordering::Acquire);
@@ -371,6 +378,11 @@ pub fn tm_begin() {
         if v & 1 == 0 {
             break v;
         }
+        // In simulation mode, the lock-holder will never run;
+        // fall back to snapshot 0 (safe: no concurrent writer).
+        #[cfg(feature = "simulation")]
+        break 0;
+        #[cfg(not(feature = "simulation"))]
         std::hint::spin_loop();
     };
     #[cfg(not(feature = "simulation"))]

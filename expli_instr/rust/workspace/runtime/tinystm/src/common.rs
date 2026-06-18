@@ -71,9 +71,16 @@ pub fn version_at_index(idx: usize) -> u64 { locks()[idx].version() }
 #[cfg(feature = "wbctl")]
 fn lock_at_index(idx: usize) {
     while !try_lock_at_index(idx) {
-        #[cfg(feature = "stats")]
-        TM_STATS.lock_contentions.fetch_add(1, Ordering::Relaxed);
-        std::hint::spin_loop();
+        // In simulation mode, if the lock is held by another thread,
+        // it will never be released — abort the transaction.
+        #[cfg(feature = "simulation")]
+        std::panic::panic_any(TmxAbort);
+        #[cfg(not(feature = "simulation"))]
+        {
+            #[cfg(feature = "stats")]
+            TM_STATS.lock_contentions.fetch_add(1, Ordering::Relaxed);
+            std::hint::spin_loop();
+        }
     }
 }
 
@@ -90,12 +97,17 @@ static G_CLOCK: AtomicU64 = AtomicU64::new(0);
 
 pub fn gc_snapshot() -> u64 { G_CLOCK.load(Ordering::Acquire) }
 
-pub fn gc_acquire() {
+pub fn gc_acquire() -> bool {
     loop {
         let cur = G_CLOCK.load(Ordering::Relaxed);
         if cur & 1 == 0
             && G_CLOCK.compare_exchange_weak(cur, cur | 1, Ordering::Acquire, Ordering::Relaxed).is_ok()
-        { return; }
+        { return true; }
+        // In simulation mode, if the global clock is locked, the
+        // holding thread will never release it — abort commit.
+        #[cfg(feature = "simulation")]
+        return false;
+        #[cfg(not(feature = "simulation"))]
         std::hint::spin_loop();
     }
 }
