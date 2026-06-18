@@ -89,6 +89,7 @@ name = "runtime-romulus"
 version = "0.1.0"
 dependencies = [
  "runtime-core",
+ "serde",
 ]
 
 [[package]]
@@ -121,6 +122,7 @@ name = "runtime-swisstm"
 version = "0.1.0"
 dependencies = [
  "runtime-core",
+ "serde",
 ]
 
 [[package]]

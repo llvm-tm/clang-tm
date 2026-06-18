@@ -185,6 +185,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-romulus"
+version = "0.1.0"
+dependencies = [
+ "runtime-core",
+ "serde",
+]
+
+[[package]]
+name = "runtime-swisstm"
+version = "0.1.0"
+dependencies = [
+ "runtime-core",
+ "serde",
+]
+
+[[package]]
 name = "runtime-tinystm"
 version = "0.1.0"
 dependencies = [
@@ -270,6 +286,8 @@ dependencies = [
  "libc",
  "runtime-core",
  "runtime-norec",
+ "runtime-romulus",
+ "runtime-swisstm",
  "runtime-tinystm",
  "runtime-tl2",
  "serde",
