@@ -1,12 +1,32 @@
+// ── ROMULUS TM backend for Rust ──────────────────────────
+// Version-table OCC with commit-lock serialisation.
+// Read-validate protocol: capture version → read data → re-check.
+
+#[cfg(not(feature = "simulation"))]
 use std::cell::RefCell;
 use std::sync::atomic::{fence, AtomicU64, Ordering};
+use std::collections::HashMap;
+#[cfg(feature = "simulation")]
+use std::cell::UnsafeCell;
 
-use runtime_core::{Primitive, TypedValue, WriteBack};
+pub use runtime_core::{Primitive, TypedValue, WriteBack};
+
+// ── SyncUnsafeCell: UnsafeCell that implements Sync ────
+// Safe because simulation mode is single-threaded.
+#[cfg(feature = "simulation")]
+struct SyncUnsafeCell<T>(UnsafeCell<T>);
+#[cfg(feature = "simulation")]
+unsafe impl<T: Send> Sync for SyncUnsafeCell<T> {}
+#[cfg(feature = "simulation")]
+impl<T> SyncUnsafeCell<T> {
+    fn new(val: T) -> Self { Self(UnsafeCell::new(val)) }
+    fn get(&self) -> *mut T { self.0.get() }
+}
 
 // ── Globals ──────────────────────────────────────────────────────
 static G_CLOCK: AtomicU64 = AtomicU64::new(1);
 static THR_COUNTER: AtomicU64 = AtomicU64::new(1);
-static G_TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
 static COMMIT_LOCK: AtomicU64 = AtomicU64::new(0);
 
 const VERSION_TABLE_SIZE: usize = 1 << 20;
@@ -17,18 +37,30 @@ fn version_index(addr: usize) -> usize {
     (addr >> 3) & (VERSION_TABLE_SIZE - 1)
 }
 
-// ── Thread-local state ──────────────────────────────────────────
-struct TxState {
-    timestamp: u64,
-    read_only: bool,
-    write_set: std::collections::HashMap<usize, TypedValue>,
-    write_backs: Vec<WriteBack>,
+// ── TxState ─────────────────────────────────────────────────────
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone)]
+pub struct TxState {
+    pub timestamp: u64,
+    pub read_only: bool,
+    pub write_set: HashMap<usize, TypedValue>,
+    pub write_backs: Vec<WriteBack>,
 }
 
+// ── Thread-local / simulation state ────────────────────────────
+#[cfg(not(feature = "simulation"))]
 thread_local! {
     static TX: RefCell<Option<Box<TxState>>> = const { RefCell::new(None) };
 }
 
+#[cfg(feature = "simulation")]
+fn sim_tx_store() -> &'static SyncUnsafeCell<HashMap<u64, Option<Box<TxState>>>> {
+    use std::sync::OnceLock;
+    static STORE: OnceLock<SyncUnsafeCell<HashMap<u64, Option<Box<TxState>>>>> = OnceLock::new();
+    STORE.get_or_init(|| SyncUnsafeCell::new(HashMap::new()))
+}
+
+#[cfg(not(feature = "simulation"))]
 fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     TX.with(|tx| {
         let mut b = tx.borrow_mut();
@@ -36,12 +68,39 @@ fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     })
 }
 
+#[cfg(feature = "simulation")]
+fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_tx_store();
+    let map = unsafe { &mut *store.get() };
+    let state = map.get_mut(&tid).expect("no sim state for thread");
+    f(state.as_mut().expect("no active transaction"))
+}
+
+#[cfg(not(feature = "simulation"))]
 fn tx_active() -> bool {
     TX.with(|tx| tx.borrow().is_some())
 }
 
+#[cfg(feature = "simulation")]
+fn tx_active() -> bool {
+    let Some(tid) = runtime_core::try_current_sim_thread_id() else { return false; };
+    let store = sim_tx_store();
+    let map = unsafe { &*store.get() };
+    map.get(&tid).map_or(false, |s| s.is_some())
+}
+
+#[cfg(not(feature = "simulation"))]
 fn flush_tx() -> Option<Box<TxState>> {
     TX.with(|tx| tx.borrow_mut().take())
+}
+
+#[cfg(feature = "simulation")]
+fn flush_tx() -> Option<Box<TxState>> {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_tx_store();
+    let map = unsafe { &mut *store.get() };
+    map.get_mut(&tid).and_then(|s| s.take())
 }
 
 // ── Init ─────────────────────────────────────────────────────────
@@ -71,15 +130,21 @@ fn increment_clock() -> u64 {
 pub fn tm_begin() {
     let ts = get_clock();
     THR_COUNTER.fetch_add(1, Ordering::AcqRel);
-    TX.with(|tx| {
-        let t = Box::new(TxState {
-            timestamp: ts,
-            read_only: true,
-            write_set: std::collections::HashMap::new(),
-            write_backs: Vec::new(),
-        });
-        *tx.borrow_mut() = Some(t);
+    let t = Box::new(TxState {
+        timestamp: ts,
+        read_only: true,
+        write_set: HashMap::new(),
+        write_backs: Vec::new(),
     });
+    #[cfg(not(feature = "simulation"))]
+    TX.with(|tx| { *tx.borrow_mut() = Some(t); });
+    #[cfg(feature = "simulation")]
+    {
+        let tid = runtime_core::current_sim_thread_id();
+        let store = sim_tx_store();
+        let map = unsafe { &mut *store.get() };
+        map.insert(tid, Some(t));
+    }
 }
 
 // ── Abort ────────────────────────────────────────────────────────
@@ -88,7 +153,7 @@ pub fn tm_abort() {
 }
 
 pub fn tm_abort_count() -> u64 {
-    G_TM_ABORT_COUNT.load(Ordering::Relaxed)
+    TM_ABORT_COUNT.load(Ordering::Relaxed)
 }
 
 // ── Commit ───────────────────────────────────────────────────────
@@ -112,12 +177,12 @@ pub fn tm_commit() -> bool {
     }
 
     // Verify no version-table entry has changed since our snapshot
-    for &addr in tx.write_set.keys() {
-        let idx = version_index(addr);
+    for addr in tx.write_set.keys() {
+        let idx = version_index(*addr);
         let ver = VERSION_TABLE[idx].load(Ordering::Acquire);
         if ver > tx.timestamp {
             COMMIT_LOCK.store(0, Ordering::Release);
-            G_TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
+            TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
             return false;
         }
     }
@@ -132,8 +197,8 @@ pub fn tm_commit() -> bool {
     fence(Ordering::SeqCst);
 
     // Update version table AFTER write-back
-    for &addr in tx.write_set.keys() {
-        let idx = version_index(addr);
+    for addr in tx.write_set.keys() {
+        let idx = version_index(*addr);
         VERSION_TABLE[idx].store(commit_ts, Ordering::Release);
     }
 
@@ -229,5 +294,54 @@ pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) {
 pub fn tm_write_raw(addr: *mut u8, src: &[u8]) {
     for (i, &s) in src.iter().enumerate() {
         write_word::<u8>(addr as usize + i, s);
+    }
+}
+
+// ── Simulation-only API ─────────────────────────────────────────
+#[cfg(feature = "simulation")]
+pub mod sim {
+    use super::*;
+
+    pub fn set_thread_id(id: u64) {
+        runtime_core::set_sim_thread_id(id);
+    }
+
+    pub fn clear_thread_id() {
+        runtime_core::clear_sim_thread_id();
+    }
+
+    pub fn snapshot_states() -> HashMap<u64, Option<Box<TxState>>> {
+        let store = sim_tx_store();
+        let map = unsafe { &*store.get() };
+        map.clone()
+    }
+
+    pub fn restore_states(states: HashMap<u64, Option<Box<TxState>>>) {
+        let store = sim_tx_store();
+        let map = unsafe { &mut *store.get() };
+        *map = states;
+    }
+
+    pub fn reset() {
+        let Some(tid) = runtime_core::try_current_sim_thread_id() else { return; };
+        let store = sim_tx_store();
+        let map = unsafe { &mut *store.get() };
+        map.remove(&tid);
+    }
+
+    #[cfg(feature = "stats")]
+    pub fn take_stats() -> runtime_core::SyncCounters {
+        let s = runtime_core::SyncCounters::new();
+        s.aborts.store(TM_ABORT_COUNT.load(Ordering::Relaxed), Ordering::Relaxed);
+        TM_ABORT_COUNT.store(0, Ordering::Relaxed);
+        s
+    }
+
+    #[cfg(feature = "stats")]
+    pub fn print_stats(s: &runtime_core::SyncCounters) {
+        use std::sync::atomic::Ordering;
+        let abt = s.aborts.load(Ordering::Relaxed);
+        eprintln!("  STATS (ROMULUS):");
+        eprintln!("    Aborts={}", abt);
     }
 }

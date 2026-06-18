@@ -4,10 +4,25 @@
 // write through to memory, saving old value in undo log.
 
 use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
-use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(not(feature = "simulation"))]
+use std::cell::RefCell;
+#[cfg(feature = "simulation")]
+use std::cell::UnsafeCell;
 use std::sync::OnceLock;
 pub use runtime_core::{Primitive, TypedValue, WriteBack};
+
+// ── SyncUnsafeCell: UnsafeCell that implements Sync ────
+// Safe because simulation mode is single-threaded.
+#[cfg(feature = "simulation")]
+struct SyncUnsafeCell<T>(UnsafeCell<T>);
+#[cfg(feature = "simulation")]
+unsafe impl<T: Send> Sync for SyncUnsafeCell<T> {}
+#[cfg(feature = "simulation")]
+impl<T> SyncUnsafeCell<T> {
+    fn new(val: T) -> Self { Self(UnsafeCell::new(val)) }
+    fn get(&self) -> *mut T { self.0.get() }
+}
 
 // ── Constants ───────────────────────────────────────────
 const VERSION_SHIFT: u64 = 8;
@@ -101,21 +116,23 @@ static G_CLOCK: AtomicU64 = AtomicU64::new(0);
 pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // ── Transaction state ───────────────────────────────────
-struct TxState {
-    read_set: Vec<(usize, u64)>,        // (addr, observed_version)
-    write_set: HashMap<usize, TypedValue>,
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone)]
+pub struct TxState {
+    pub read_set: Vec<(usize, u64)>,        // (addr, observed_version)
+    pub write_set: HashMap<usize, TypedValue>,
     /// Deferred undo closures (safe to apply on rollback).
-    undo_backs: Vec<WriteBack>,
-    locked_orecs: Vec<usize>,           // orec indices locked for writing
-    valid_ts: u64,                      // highest commit_ts for which read_set is validated
-    cm_ts: u64,                         // contention-management timestamp (u64::MAX = none)
-    write_count: u64,                   // writes performed in this TX (for cm timestamp)
+    pub undo_backs: Vec<WriteBack>,
+    pub locked_orecs: Vec<usize>,           // orec indices locked for writing
+    pub valid_ts: u64,                      // highest commit_ts for which read_set is validated
+    pub cm_ts: u64,                         // contention-management timestamp (u64::MAX = none)
+    pub write_count: u64,                   // writes performed in this TX (for cm timestamp)
     #[allow(dead_code)]
-    succ_abort_count: u64,              // consecutive aborts (for backoff)
+    pub succ_abort_count: u64,              // consecutive aborts (for backoff)
     #[allow(dead_code)]
-    aborted: bool,
+    pub aborted: bool,
     #[allow(dead_code)]
-    tx_id: u64,
+    pub tx_id: u64,
 }
 
 impl TxState {
@@ -145,54 +162,58 @@ fn cm_on_write(tx: &mut TxState) {
 }
 
 // Return true if we should abort (owner has higher priority).
-// Pre-WN_THRESHOLD (both cm_ts = u64::MAX): bounded spin, no
-// deterministic tiebreaker — parity creates permanent priority
-// (one thread always "wins") which causes livelock.
-// Post-WN_THRESHOLD: lower cm_ts = older = higher priority.
 fn cm_should_abort(tx: &TxState, orec: &Orec, spin_count: &mut u32) -> bool {
     if tx.cm_ts == u64::MAX {
         let owner_cm = orec.read_owner_cm_ts();
         if owner_cm == u64::MAX {
-            // Both pre-WN_THRESHOLD: bounded spin, abort after 100K
+            // Both pre-WN_THRESHOLD: bounded spin
             *spin_count += 1;
             return *spin_count >= 100000;
         }
         return true;  // Owner earned priority, we should abort
     }
     let owner_cm = orec.read_owner_cm_ts();
-    // Owner has lower cm_ts = older/higher-priority → we abort
     if owner_cm < tx.cm_ts {
         return true;
     }
     false  // We have higher priority, keep waiting
 }
 
-// Exponential backoff after abort.  Range: ~50µs to ~5ms.
-// Uses spin for short backoffs, thread::sleep for long backoffs.
-// The exponential growth prevents the ABORT→RETRY→ABORT cascade:
-// each retry waits exponentially longer, giving competitors a
-// window to commit their TX without contention.
 fn cm_backoff(abort_count: u64) {
     let ac = abort_count & 0x3F;
-    // Compute delay in microseconds (50µs * 2^(ac & 7))
     let delay_us = 50u64 * (1u64 << (ac.min(7) as u64));
     if delay_us <= 200 {
-        // Short backoff: spin-loop (sub-millisecond)
+        #[cfg(not(feature = "simulation"))]
         for _ in 0..delay_us * 2000 {
             std::hint::spin_loop();
         }
+        #[cfg(feature = "simulation")]
+        std::thread::sleep(std::time::Duration::from_micros(delay_us));
     } else {
-        // Long backoff: yield CPU (millisecond+)
         std::thread::sleep(std::time::Duration::from_micros(delay_us));
     }
 }
 
-// ── Thread-local state ──────────────────────────────────
+// ── Thread-local / simulation state ────────────────────
+#[cfg(feature = "simulation")]
+struct SimThreadState {
+    tx: Option<Box<TxState>>,
+    succ_abort_count: u64,
+}
+
+#[cfg(not(feature = "simulation"))]
 thread_local! {
     static TX: RefCell<Option<Box<TxState>>> = const { RefCell::new(None) };
     static SUCC_ABORT_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(feature = "simulation")]
+fn sim_state_store() -> &'static SyncUnsafeCell<HashMap<u64, SimThreadState>> {
+    static STORE: OnceLock<SyncUnsafeCell<HashMap<u64, SimThreadState>>> = OnceLock::new();
+    STORE.get_or_init(|| SyncUnsafeCell::new(HashMap::new()))
+}
+
+#[cfg(not(feature = "simulation"))]
 fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     TX.with(|tx| {
         let mut b = tx.borrow_mut();
@@ -200,28 +221,99 @@ fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     })
 }
 
+#[cfg(feature = "simulation")]
+fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_state_store();
+    let map = unsafe { &mut *store.get() };
+    let st = map.get_mut(&tid).expect("no sim state for thread");
+    f(st.tx.as_mut().expect("no active transaction"))
+}
+
+#[cfg(not(feature = "simulation"))]
 fn tx_abort_count() -> u64 {
     SUCC_ABORT_COUNT.with(|c| c.get())
 }
 
+#[cfg(feature = "simulation")]
+fn tx_abort_count() -> u64 {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_state_store();
+    let map = unsafe { &*store.get() };
+    map.get(&tid).map_or(0, |st| st.succ_abort_count)
+}
+
+#[cfg(not(feature = "simulation"))]
 fn inc_tx_abort_count() {
     SUCC_ABORT_COUNT.with(|c| c.set(c.get() + 1));
 }
 
+#[cfg(feature = "simulation")]
+fn inc_tx_abort_count() {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_state_store();
+    let map = unsafe { &mut *store.get() };
+    if let Some(st) = map.get_mut(&tid) {
+        st.succ_abort_count += 1;
+    }
+}
+
+#[cfg(not(feature = "simulation"))]
 fn reset_tx_abort_count() {
     SUCC_ABORT_COUNT.with(|c| c.set(0));
 }
 
+#[cfg(feature = "simulation")]
+fn reset_tx_abort_count() {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_state_store();
+    let map = unsafe { &mut *store.get() };
+    if let Some(st) = map.get_mut(&tid) {
+        st.succ_abort_count = 0;
+    }
+}
+
+#[cfg(not(feature = "simulation"))]
 fn tx_active() -> bool {
     TX.with(|tx| match *tx.borrow() { Some(ref t) => !t.aborted, None => false })
 }
 
+#[cfg(feature = "simulation")]
+fn tx_active() -> bool {
+    let Some(tid) = runtime_core::try_current_sim_thread_id() else { return false; };
+    let store = sim_state_store();
+    let map = unsafe { &*store.get() };
+    map.get(&tid).map_or(false, |st| {
+        st.tx.as_ref().map_or(false, |t| !t.aborted)
+    })
+}
+
+#[cfg(not(feature = "simulation"))]
 fn tx_aborted() -> bool {
     TX.with(|tx| match *tx.borrow() { Some(ref t) => t.aborted, None => false })
 }
 
+#[cfg(feature = "simulation")]
+fn tx_aborted() -> bool {
+    let Some(tid) = runtime_core::try_current_sim_thread_id() else { return false; };
+    let store = sim_state_store();
+    let map = unsafe { &*store.get() };
+    map.get(&tid).map_or(false, |st| {
+        st.tx.as_ref().map_or(false, |t| t.aborted)
+    })
+}
+
+#[cfg(not(feature = "simulation"))]
 fn flush_tx() -> Option<Box<TxState>> {
     TX.with(|tx| tx.borrow_mut().take())
+}
+
+#[cfg(feature = "simulation")]
+fn flush_tx() -> Option<Box<TxState>> {
+    let tid = runtime_core::current_sim_thread_id();
+    let store = sim_state_store();
+    let map = unsafe { &mut *store.get() };
+    map.get_mut(&tid).and_then(|st| st.tx.take())
 }
 
 // ── TX ID generator ─────────────────────────────────────
@@ -269,18 +361,14 @@ fn byte_size_of_tv(tv: &TypedValue) -> u8 {
 fn read_word<T: Primitive>(addr: usize) -> T {
     fence(Ordering::SeqCst);
     if !tx_active() {
-        // Aborted (zombie window) or no TX at all.  In the zombie
-        // window, addr may be corrupted from pointer-chasing through
-        // aborted reads (e.g. read_ptr returns null → next read would
-        // dereference 0).  Return zeroed to avoid SIGSEGV.
         if tx_aborted() { return unsafe { core::mem::zeroed() }; }
         return unsafe { (addr as *const T).read() };
     }
 
     // Check write-set
-    if let Some(tv) = TX.with(|tx| {
-        tx.borrow().as_ref().and_then(|t| t.write_set.get(&addr).cloned())
-    }) { return T::from_typed(&tv); }
+    if let Some(tv) = with_tx(|tx| tx.write_set.get(&addr).cloned()) {
+        return T::from_typed(&tv);
+    }
 
     loop {
         if tx_aborted() {
@@ -288,41 +376,44 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         }
         let orec = orec_for(addr);
 
-        // If a concurrent writer holds w_lock, decide: spin briefly for
-        // light TXs (no cm_ts, short duration), accept dirty value for
-        // heavy TXs (has cm_ts, long duration — labyrinth monotonic 0→1).
-        // This hybrid prevents both bank dirty-reads and labyrinth livelock.
         if orec.w_lock.load(Ordering::Relaxed) {
-            // Heavy TXs (owner_cm_ts != u64::MAX, ≥10 writes,
-            // e.g. labyrinth) skip spin entirely to avoid livelock.
-            // Accept dirty value immediately, NO read_set entry
-            // (labyrinth reads are advisory for BFS, not financial).
             let owner_cm = orec.read_owner_cm_ts();
             if owner_cm == u64::MAX {
-                // Light TX (<10 writes, e.g. bank): spin up to
-                // 2M cycles (~1ms) to let the writer complete.
-                for _ in 0..2000000 {
-                    if tx_aborted() { return unsafe { core::mem::zeroed() }; }
-                    if !orec.w_lock.load(Ordering::Relaxed) { break; }
-                    std::hint::spin_loop();
+                #[cfg(not(feature = "simulation"))]
+                {
+                    // Light TX (<10 writes): spin briefly
+                    for _ in 0..2000000 {
+                        if tx_aborted() { return unsafe { core::mem::zeroed() }; }
+                        if !orec.w_lock.load(Ordering::Relaxed) { break; }
+                        std::hint::spin_loop();
+                    }
+                    if !orec.w_lock.load(Ordering::Relaxed) {
+                        let ver = orec.version();
+                        let val: T = unsafe { (addr as *const T).read() };
+                        with_tx(|tx| { tx.read_set.push((addr, ver)); });
+                        return val;
+                    }
                 }
-                if !orec.w_lock.load(Ordering::Relaxed) {
-                    // Writer completed during spin — read clean value.
-                    let ver = orec.version();
-                    let val: T = unsafe { (addr as *const T).read() };
-                    with_tx(|tx| { tx.read_set.push((addr, ver)); });
-                    return val;
+                #[cfg(feature = "simulation")]
+                {
+                    // Can't spin in simulation — abort
+                    with_tx(|tx| tx.aborted = true);
+                    return unsafe { core::mem::zeroed() };
                 }
             }
-            // Timeout or heavy TX: accept dirty value, do NOT track
-            // in read_set (avoids validate cascade from writer abort).
             return unsafe { (addr as *const T).read() };
         }
 
-        // Spin while commit Phase 1 has version_lock READ_LOCKED (us window).
+        // Spin while commit Phase 1 has version_lock READ_LOCKED
+        #[cfg(not(feature = "simulation"))]
         while orec.version_lock.load(Ordering::Relaxed) & 1 != 0 {
             if tx_aborted() { return unsafe { core::mem::zeroed() }; }
             std::hint::spin_loop();
+        }
+        #[cfg(feature = "simulation")]
+        if orec.version_lock.load(Ordering::Relaxed) & 1 != 0 {
+            with_tx(|tx| tx.aborted = true);
+            return unsafe { core::mem::zeroed() };
         }
 
         let ver = orec.version();
@@ -355,7 +446,6 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     let sz = byte_size_of_tv(&tv);
 
     with_tx(|tx| {
-        // Check if we already own this address's orec
         let idx = lock_index(addr);
         if !tx.locked_orecs.contains(&idx) {
             let orec = orec_for(addr);
@@ -365,16 +455,19 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
                     tx.locked_orecs.push(idx);
                     break;
                 }
-                // Lock held by another TX.  Use contention manager
-                // to decide: if we have lower priority, abort now.
                 if cm_should_abort(tx, orec, &mut spin_count) {
                     tx.aborted = true;
                     return;
                 }
+                #[cfg(not(feature = "simulation"))]
                 std::hint::spin_loop();
+                #[cfg(feature = "simulation")]
+                {
+                    tx.aborted = true;
+                    return;
+                }
             }
 
-            // Check if orec version advanced since TX started
             if orec.version() > tx.valid_ts && !extend(tx) {
                 tx.aborted = true;
                 return;
@@ -393,7 +486,6 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
             tx.undo_backs.push(wb);
         }
 
-        // Write through to memory
         write_mem_typed(addr, &tv);
         tx.write_set.insert(addr, tv);
         tx.write_count += 1;
@@ -425,11 +517,16 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
                     tx.aborted = true;
                     return;
                 }
+                #[cfg(not(feature = "simulation"))]
                 std::hint::spin_loop();
+                #[cfg(feature = "simulation")]
+                {
+                    tx.aborted = true;
+                    return;
+                }
             }
-            }  // close lock-acquire if
+        }
 
-        // Save old values byte-by-byte
         for (i, _) in src.iter().enumerate() {
             let byte_addr = addr + i;
             if !tx.write_set.contains_key(&byte_addr) {
@@ -510,7 +607,7 @@ pub fn tm_commit() -> bool {
     }
     fence(Ordering::SeqCst);
 
-    // Phase 4: validate read-set (versions still correct with READ_LOCKED bit set)
+    // Phase 4: validate read-set
     if !validate(&tx) {
         for u in tx.undo_backs { u.apply(); }
         for &idx in &tx.locked_orecs {
@@ -543,25 +640,64 @@ pub fn tm_init() {
 pub fn tm_exit() {}
 
 pub fn tm_init_thread() {
-    let tid = THR_COUNTER.fetch_add(1, Ordering::Relaxed);
     let sv = G_CLOCK.load(Ordering::Acquire);
     let ac = tx_abort_count();
-    TX.with(|tx| {
-        *tx.borrow_mut() = Some(Box::new(TxState::new(sv, tid, ac)));
-    });
+    #[cfg(not(feature = "simulation"))]
+    {
+        let tid = THR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        TX.with(|tx| {
+            *tx.borrow_mut() = Some(Box::new(TxState::new(sv, tid, ac)));
+        });
+    }
+    #[cfg(feature = "simulation")]
+    {
+        let tid = runtime_core::current_sim_thread_id();
+        let store = sim_state_store();
+        let map = unsafe { &mut *store.get() };
+        map.entry(tid).or_insert_with(|| SimThreadState {
+            tx: Some(Box::new(TxState::new(sv, tid, ac))),
+            succ_abort_count: ac,
+        });
+    }
 }
 
 pub fn tm_exit_thread() {
+    #[cfg(not(feature = "simulation"))]
     TX.with(|tx| { *tx.borrow_mut() = None; });
+    #[cfg(feature = "simulation")]
+    {
+        let tid = runtime_core::current_sim_thread_id();
+        let store = sim_state_store();
+        let map = unsafe { &mut *store.get() };
+        if let Some(st) = map.get_mut(&tid) {
+            st.tx = None;
+        }
+    }
 }
 
 pub fn tm_begin() {
     let sv = G_CLOCK.load(Ordering::Acquire);
-    let tid = THR_COUNTER.fetch_add(1, Ordering::Relaxed);
     let ac = tx_abort_count();
-    TX.with(|tx| {
-        *tx.borrow_mut() = Some(Box::new(TxState::new(sv, tid, ac)));
-    });
+    #[cfg(not(feature = "simulation"))]
+    {
+        let tid = THR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        TX.with(|tx| {
+            *tx.borrow_mut() = Some(Box::new(TxState::new(sv, tid, ac)));
+        });
+    }
+    #[cfg(feature = "simulation")]
+    {
+        let tid = runtime_core::current_sim_thread_id();
+        let store = sim_state_store();
+        let map = unsafe { &mut *store.get() };
+        map.entry(tid).or_insert_with(|| SimThreadState {
+            tx: None,
+            succ_abort_count: 0,
+        });
+        if let Some(st) = map.get_mut(&tid) {
+            st.tx = Some(Box::new(TxState::new(sv, tid, ac)));
+        }
+    }
 }
 
 pub fn tm_abort_count() -> u64 { TM_ABORT_COUNT.load(Ordering::Relaxed) }
@@ -600,3 +736,56 @@ def_write!(tm_write_f64, f64);
 #[inline] pub fn tm_write_ptr<T>(addr: *mut *mut T, val: *mut T) { write_word::<u64>(addr as usize, val as u64); }
 #[inline] pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) { read_raw_bytes(addr as usize, dst); }
 #[inline] pub fn tm_write_raw(addr: *mut u8, src: &[u8]) { write_raw_bytes(addr as usize, src); }
+
+// ── Simulation-only API ─────────────────────────────────
+#[cfg(feature = "simulation")]
+pub mod sim {
+    use super::*;
+
+    pub fn set_thread_id(id: u64) {
+        runtime_core::set_sim_thread_id(id);
+    }
+
+    pub fn clear_thread_id() {
+        runtime_core::clear_sim_thread_id();
+    }
+
+    pub fn snapshot_states() -> HashMap<u64, Option<Box<TxState>>> {
+        let store = sim_state_store();
+        let map = unsafe { &*store.get() };
+        map.iter().map(|(k, st)| (*k, st.tx.clone())).collect()
+    }
+
+    pub fn restore_states(states: HashMap<u64, Option<Box<TxState>>>) {
+        let store = sim_state_store();
+        let map = unsafe { &mut *store.get() };
+        map.clear();
+        for (k, tx) in states {
+            let ac = tx.as_ref().map_or(0, |t| t.succ_abort_count);
+            map.insert(k, SimThreadState { tx, succ_abort_count: ac });
+        }
+    }
+
+    pub fn reset() {
+        let Some(tid) = runtime_core::try_current_sim_thread_id() else { return; };
+        let store = sim_state_store();
+        let map = unsafe { &mut *store.get() };
+        map.remove(&tid);
+    }
+
+    #[cfg(feature = "stats")]
+    pub fn take_stats() -> runtime_core::SyncCounters {
+        let s = runtime_core::SyncCounters::new();
+        s.aborts.store(TM_ABORT_COUNT.load(Ordering::Relaxed), Ordering::Relaxed);
+        TM_ABORT_COUNT.store(0, Ordering::Relaxed);
+        s
+    }
+
+    #[cfg(feature = "stats")]
+    pub fn print_stats(s: &runtime_core::SyncCounters) {
+        use std::sync::atomic::Ordering;
+        let abt = s.aborts.load(Ordering::Relaxed);
+        eprintln!("  STATS (SwissTM):");
+        eprintln!("    Aborts={}", abt);
+    }
+}
