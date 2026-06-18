@@ -75,13 +75,13 @@ jobs:
             llvm-toolchain-jammy-22 main"
           sudo apt-get update
           sudo apt-get install -y llvm-22-dev clang-22 lld make
-      - name: Build race checker
-        run: make -C plugin race-checker
+      - name: Build plugin (produces .bc files) + race checker
+        run: make plugin && make -C plugin race-checker
       - name: Check for race warnings on plugin benchmarks
         run: |
           echo "=== Race checker analysis ==="
           cd plugin
-          for bc in bin/*.bc; do
+          for bc in out/*.bc; do
             [ -f "$bc" ] || continue
             name=$(basename "$bc" .bc)
             warnings=$(opt-22 -load-pass-plugin=bin/libTMRaceChecker.so \
@@ -106,14 +106,11 @@ jobs:
           sudo apt-get install -y llvm-22-dev clang-22 lld make
       - name: Build and test all backends
         run: |
-          results=""
           for backend in TINYSTM WBETL WT NOREC SWISSTM TL2 SGL XTM LEFTRIGHT ROMULUS; do
             make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=$backend 2>/dev/null
-            tx_out=$(./benchmarks/cpp/bin/test_tx 2>&1)
-            tx_pass=$(echo "$tx_out" | grep -c "PASS" || true)
-            ds_out=$(./benchmarks/cpp/bin/test_ds 2>&1)
-            ds_pass=$(echo "$ds_out" | grep -c "PASS" || true)
-            echo "=== $backend: test_tx=${tx_pass:-FAIL} test_ds=${ds_pass:-FAIL} ==="
+            tx_pass=$(./benchmarks/cpp/bin/test_tx 2>&1 | grep -c "ALL.*PASSED" || true)
+            ds_pass=$(./benchmarks/cpp/bin/test_ds 2>&1 | grep -c "ALL.*PASSED" || true)
+            echo "=== $backend: test_tx=$([ "$tx_pass" -ge 1 ] && echo PASS || echo FAIL) test_ds=$([ "$ds_pass" -ge 1 ] && echo PASS || echo FAIL) ==="
           done
 
   # ── Job 6: Stale directory check ────────────────────────

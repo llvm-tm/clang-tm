@@ -231,9 +231,10 @@ impl SimEngine {
                                 if e.downcast_ref::<TmxAbort>().is_some() {
                                     self.in_tx.insert(tid, false);
                                     self.aborted.insert(tid, true);
-                                    self.current_write_set.remove(&tid);
+                                    let ws = self.current_write_set.remove(&tid).unwrap_or_default();
                                     self.stats.aborts += 1;
                                     self.verifier.tx_abort(tid);
+                                    self.deadlock.record_abort(btid, &ws);
                                     return Err("aborted during read".into());
                                 }
                                 panic::resume_unwind(e);
@@ -272,9 +273,10 @@ impl SimEngine {
                             if e.downcast_ref::<TmxAbort>().is_some() {
                                 self.in_tx.insert(tid, false);
                                 self.aborted.insert(tid, true);
-                                self.current_write_set.remove(&tid);
+                                let ws = self.current_write_set.remove(&tid).unwrap_or_default();
                                 self.stats.aborts += 1;
                                 self.verifier.tx_abort(tid);
+                                self.deadlock.record_abort(btid, &ws);
                                 return Err("aborted during write".into());
                             }
                             panic::resume_unwind(e);
