@@ -6,40 +6,132 @@ on:
   pull_request:
     branches: [main, master]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  smoke-test:
+  # ── Job 1: Plugin smoke test ────────────────────────────
+  plugin-test:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
       - name: Install LLVM 22
         run: |
-          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc https://apt.llvm.org/llvm-snapshot.gpg.key
-          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ llvm-toolchain-jammy-22 main"
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
           sudo apt-get update
           sudo apt-get install -y llvm-22-dev clang-22 lld make
-
       - name: Build plugin
         run: make plugin
-
       - name: Build race checker
         run: make -C plugin race-checker
-
-      - name: Build expli C++ benchmarks (NOREC)
-        run: make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=NOREC
-
-      - name: Run expli C++ tests (NOREC)
-        run: |
-          ./benchmarks/cpp/bin/test_tx
-          ./benchmarks/cpp/bin/test_ds
-
       - name: Build plugin tests
         run: make -C plugin test
-
       - name: Run plugin tests
-        run: |
-          make -C plugin run 2>&1
-          echo "=== exit: $? ==="
-
+        run: make -C plugin run 2>&1
       - name: Verify annotations
         run: make -C plugin check
+
+  # ── Job 2: Simulator tests ─────────────────────────────
+  simulator-test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build simulator
+        run: cargo build --manifest-path simulator/Cargo.toml
+      - name: Run simulator unit tests
+        run: cargo test --manifest-path simulator/Cargo.toml -- --test-threads=1
+      - name: Synthetic trace fidelity check
+        run: python3 simulator/compare_sim.py --sim-only --backends norec,tl2,tinystm 2>&1
+
+  # ── Job 3: Rust workspace build ────────────────────────
+  rust-build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build all Rust workspace members
+        run: cargo build --manifest-path expli_instr/rust/workspace/Cargo.toml
+      - name: Build all Rust benchmarks
+        run: cargo build --manifest-path benchmarks/rust/Cargo.toml
+      - name: Run Rust workspace tests
+        run: cargo test --manifest-path expli_instr/rust/workspace/Cargo.toml
+
+  # ── Job 4: Race checker warnings ────────────────────────
+  race-checker:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 lld make
+      - name: Build race checker
+        run: make -C plugin race-checker
+      - name: Check for race warnings on plugin benchmarks
+        run: |
+          echo "=== Race checker analysis ==="
+          cd plugin
+          for bc in bin/*.bc; do
+            [ -f "$bc" ] || continue
+            name=$(basename "$bc" .bc)
+            warnings=$(opt-22 -load-pass-plugin=bin/libTMRaceChecker.so \
+              -passes="tm-race-checker" "$bc" -o /dev/null 2>&1 | \
+              grep -c "suggest" || true)
+            echo "  $name: $warnings warning(s)"
+          done
+
+  # ── Job 5: Cross-backend correctness (push to main only) ─
+  cross-backend:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 lld make
+      - name: Build and test all backends
+        run: |
+          results=""
+          for backend in TINYSTM WBETL WT NOREC SWISSTM TL2 SGL XTM LEFTRIGHT ROMULUS; do
+            make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=$backend 2>/dev/null
+            tx_out=$(./benchmarks/cpp/bin/test_tx 2>&1)
+            tx_pass=$(echo "$tx_out" | grep -c "PASS" || true)
+            ds_out=$(./benchmarks/cpp/bin/test_ds 2>&1)
+            ds_pass=$(echo "$ds_out" | grep -c "PASS" || true)
+            echo "=== $backend: test_tx=${tx_pass:-FAIL} test_ds=${ds_pass:-FAIL} ==="
+          done
+
+  # ── Job 6: Stale directory check ────────────────────────
+  stale-check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for stale legacy directories
+        run: |
+          stale=false
+          for dir in llvm_tm_plugin expli-benchmarks plugin-benchmarks rust_tm_api; do
+            if [ -d "$dir" ]; then
+              echo "STALE: $dir still exists"
+              stale=true
+            fi
+          done
+          if [ "$stale" = true ]; then
+            echo "Run IMPROVEMENT_PLAN.md item 2.1 to clean up"
+          else
+            echo "No stale directories found"
+          fi
