@@ -124,6 +124,8 @@ static std::mutex s_hook_mutex;
 static std::atomic<int> s_thread_count{1}; // main thread counts as 1
 static TMRealHooks s_real_hooks;
 static bool s_registered = false;
+static bool g_trace_active = false;
+static TMRealHooks s_trace_real_hooks;
 
 // Install hooks based on current thread count.
 // Single-thread: stubs (direct access, no TM overhead).
@@ -140,34 +142,66 @@ static void apply_hooks_unlocked() {
 #else
         s_thread_count.load() <= 1;
 #endif
-    const TMRealHooks *r = &s_real_hooks;
-    auto pick = [&](auto stub, auto real) {
-        return single ? stub : (real ? real : stub);
-    };
+    if (g_trace_active) {
+        // Trace wrappers are active: update the trace's saved real hooks
+        // and keep the trace wrappers in place.  The delegation chain is:
+        //   benchmark → trace_begin → s_trace_real_hooks.begin (= real backend)
+        s_trace_real_hooks.begin   = s_real_hooks.begin;
+        s_trace_real_hooks.end     = s_real_hooks.end;
+        s_trace_real_hooks.malloc  = s_real_hooks.malloc;
+        s_trace_real_hooks.calloc  = s_real_hooks.calloc;
+        s_trace_real_hooks.realloc = s_real_hooks.realloc;
+        s_trace_real_hooks.free    = s_real_hooks.free;
+        s_trace_real_hooks.read_i1 = s_real_hooks.read_i1;
+        s_trace_real_hooks.read_i2 = s_real_hooks.read_i2;
+        s_trace_real_hooks.read_i4 = s_real_hooks.read_i4;
+        s_trace_real_hooks.read_i8 = s_real_hooks.read_i8;
+        s_trace_real_hooks.read_f4 = s_real_hooks.read_f4;
+        s_trace_real_hooks.read_f8 = s_real_hooks.read_f8;
+        s_trace_real_hooks.read_ptr = s_real_hooks.read_ptr;
+        s_trace_real_hooks.write_i1 = s_real_hooks.write_i1;
+        s_trace_real_hooks.write_i2 = s_real_hooks.write_i2;
+        s_trace_real_hooks.write_i4 = s_real_hooks.write_i4;
+        s_trace_real_hooks.write_i8 = s_real_hooks.write_i8;
+        s_trace_real_hooks.write_f4 = s_real_hooks.write_f4;
+        s_trace_real_hooks.write_f8 = s_real_hooks.write_f8;
+        s_trace_real_hooks.write_ptr = s_real_hooks.write_ptr;
+        s_trace_real_hooks.get_env = s_real_hooks.get_env;
+        s_trace_real_hooks.set_jmpbuf = s_real_hooks.set_jmpbuf;
+        s_trace_real_hooks.get_thread_state = s_real_hooks.get_thread_state;
+        // Keep tm_begin/end etc. set to trace wrappers (already installed by
+        // tm_trace_hook_init constructor).  s_trace_real_hooks now points
+        // to the real backend, so trace wrappers will delegate correctly.
+    } else {
+        const TMRealHooks *r = &s_real_hooks;
+        auto pick = [&](auto stub, auto real) {
+            return single ? stub : (real ? real : stub);
+        };
 
-    tm_begin    = pick(stub_begin,    r->begin);
-    tm_end      = pick(stub_end,      r->end);
-    tm_malloc   = pick(stub_malloc,   r->malloc);
-    tm_calloc   = pick(stub_calloc,   r->calloc);
-    tm_realloc  = pick(stub_realloc,  r->realloc);
-    tm_free     = pick(stub_free,     r->free);
-    tm_read_i1  = pick(stub_read_i1,  r->read_i1);
-    tm_read_i2  = pick(stub_read_i2,  r->read_i2);
-    tm_read_i4  = pick(stub_read_i4,  r->read_i4);
-    tm_read_i8  = pick(stub_read_i8,  r->read_i8);
-    tm_read_f4  = pick(stub_read_f4,  r->read_f4);
-    tm_read_f8  = pick(stub_read_f8,  r->read_f8);
-    tm_read_ptr = pick(stub_read_ptr, r->read_ptr);
-    tm_write_i1 = pick(stub_write_i1, r->write_i1);
-    tm_write_i2 = pick(stub_write_i2, r->write_i2);
-    tm_write_i4 = pick(stub_write_i4, r->write_i4);
-    tm_write_i8 = pick(stub_write_i8, r->write_i8);
-    tm_write_f4 = pick(stub_write_f4, r->write_f4);
-    tm_write_f8 = pick(stub_write_f8, r->write_f8);
-    tm_write_ptr= pick(stub_write_ptr, r->write_ptr);
-    tm_get_env = pick(stub_tm_get_env, r->get_env);
-    tm_set_jmpbuf = pick(stub_tm_set_jmpbuf, r->set_jmpbuf);
-    tm_get_thread_state = pick(stub_tm_get_thread_state, r->get_thread_state);
+        tm_begin    = pick(stub_begin,    r->begin);
+        tm_end      = pick(stub_end,      r->end);
+        tm_malloc   = pick(stub_malloc,   r->malloc);
+        tm_calloc   = pick(stub_calloc,   r->calloc);
+        tm_realloc  = pick(stub_realloc,  r->realloc);
+        tm_free     = pick(stub_free,     r->free);
+        tm_read_i1  = pick(stub_read_i1,  r->read_i1);
+        tm_read_i2  = pick(stub_read_i2,  r->read_i2);
+        tm_read_i4  = pick(stub_read_i4,  r->read_i4);
+        tm_read_i8  = pick(stub_read_i8,  r->read_i8);
+        tm_read_f4  = pick(stub_read_f4,  r->read_f4);
+        tm_read_f8  = pick(stub_read_f8,  r->read_f8);
+        tm_read_ptr = pick(stub_read_ptr, r->read_ptr);
+        tm_write_i1 = pick(stub_write_i1, r->write_i1);
+        tm_write_i2 = pick(stub_write_i2, r->write_i2);
+        tm_write_i4 = pick(stub_write_i4, r->write_i4);
+        tm_write_i8 = pick(stub_write_i8, r->write_i8);
+        tm_write_f4 = pick(stub_write_f4, r->write_f4);
+        tm_write_f8 = pick(stub_write_f8, r->write_f8);
+        tm_write_ptr= pick(stub_write_ptr, r->write_ptr);
+        tm_get_env = pick(stub_tm_get_env, r->get_env);
+        tm_set_jmpbuf = pick(stub_tm_set_jmpbuf, r->set_jmpbuf);
+        tm_get_thread_state = pick(stub_tm_get_thread_state, r->get_thread_state);
+    }
 }
 
 void tm_register_real_hooks(const TMRealHooks *hooks) {
@@ -275,10 +309,6 @@ static thread_local uint64_t t_tx_writes = 0;
 // Helper: write a text-format trace line to a FILE*
 static FILE *g_trace_file = nullptr;
 static std::atomic<uint64_t> g_trace_ts{0};
-
-// Trace wrappers save the hooks beneath them here (separate from s_real_hooks
-// so trace and sampling can coexist without recursion).
-static TMRealHooks s_trace_real_hooks;
 
 // ── Trace helper: write a formatted line (extended format) ────────────
 // Format: ts tid type txid addr width val cont_flag [extra...]
@@ -603,6 +633,8 @@ __attribute__((constructor)) static void tm_trace_hook_init() {
         fprintf(stderr, "tm_hooks: cannot open trace '%s'\n", path);
         return;
     }
+
+    g_trace_active = true;
 
     // Save current hooks as trace real hooks (separate from s_real_hooks
     // so trace and sampling can coexist without recursion).

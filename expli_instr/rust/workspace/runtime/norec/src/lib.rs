@@ -37,6 +37,10 @@ static GLOBAL_LOCK: AtomicU64 = AtomicU64::new(0);
 static THR_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
 
+// ── Internal sync counters (gated behind "stats" feature) ─
+#[cfg(feature = "stats")]
+pub static TM_STATS: runtime_core::SyncCounters = runtime_core::SyncCounters::new();
+
 // ── Read entry ─────────────────────────────────────────
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
@@ -153,15 +157,26 @@ fn byte_size_of_tv(tv: &TypedValue) -> u8 {
 // compares to the observed value.  Returns the current clock
 // value if all match.
 fn validate_impl(tx: &mut TxState) -> Option<u64> {
+    #[cfg(feature = "stats")]
+    TM_STATS.validations.fetch_add(1, Ordering::Relaxed);
     loop {
         let time = GLOBAL_LOCK.load(Ordering::Acquire);
         if time & 1 != 0 {
-            std::hint::spin_loop();
-            continue;
+            // In simulation mode the lock-holder will never run,
+            // so spinning is futile — abort immediately.
+            #[cfg(not(feature = "simulation"))]
+            {
+                std::hint::spin_loop();
+                continue;
+            }
+            #[cfg(feature = "simulation")]
+            return None;
         }
         for r in &tx.read_set {
             let cur = read_mem_val(r.addr, r.sz);
             if cur != r.observed_val {
+                #[cfg(feature = "stats")]
+                TM_STATS.validation_failures.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
         }
@@ -228,6 +243,8 @@ fn read_word<T: Primitive>(addr: usize) -> T {
                     sz,
                     observed_val: val_u64,
                 });
+                #[cfg(feature = "stats")]
+                TM_STATS.total_read_set_entries.fetch_add(1, Ordering::Relaxed);
             });
             return val;
         }
@@ -271,6 +288,8 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         }
 
         tx.write_set.push(WriteEntry { addr, value: tv });
+        #[cfg(feature = "stats")]
+        TM_STATS.total_write_set_entries.fetch_add(1, Ordering::Relaxed);
     });
 }
 
@@ -323,6 +342,8 @@ pub fn tm_init() {
     tm_install_tmx_hook();
     GLOBAL_LOCK.store(0, Ordering::Release);
     THR_COUNTER.store(1, Ordering::Release);
+    #[cfg(feature = "stats")]
+    TM_STATS.reset();
 }
 
 pub fn tm_exit() {}
@@ -387,10 +408,14 @@ pub fn tm_commit() -> bool {
             .compare_exchange_weak(expect, desire, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
+            #[cfg(feature = "stats")]
+            TM_STATS.commits.fetch_add(1, Ordering::Relaxed);
             break;
         }
         // CAS failed — validate and retry
-        snapshot = match validate_impl(&mut tx) { Some(s) => s, None => { TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; } };
+        #[cfg(feature = "stats")]
+        TM_STATS.lock_contentions.fetch_add(1, Ordering::Relaxed);
+        snapshot = match validate_impl(&mut tx) { Some(s) => s, None => { TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; } };
     }
 
     // We hold the global lock. Write-back from write-set.
@@ -507,5 +532,38 @@ pub mod sim {
         let store = sim_tx_store();
         let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
         map.remove(&tid);
+    }
+
+    /// Read the current stats snapshot and reset counters.
+    #[cfg(feature = "stats")]
+    pub fn take_stats() -> runtime_core::SyncCounters {
+        let s = runtime_core::SyncCounters::new();
+        s.validations.store(TM_STATS.validations.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.validation_failures.store(TM_STATS.validation_failures.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.lock_contentions.store(TM_STATS.lock_contentions.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.lock_acquire_failures.store(TM_STATS.lock_acquire_failures.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.total_read_set_entries.store(TM_STATS.total_read_set_entries.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.total_write_set_entries.store(TM_STATS.total_write_set_entries.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.commits.store(TM_STATS.commits.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.aborts.store(TM_STATS.aborts.load(Ordering::Relaxed), Ordering::Relaxed);
+        TM_STATS.reset();
+        s
+    }
+
+    /// Print stats to stderr.
+    #[cfg(feature = "stats")]
+    pub fn print_stats(s: &runtime_core::SyncCounters) {
+        use std::sync::atomic::Ordering;
+        let val = s.validations.load(Ordering::Relaxed);
+        let vfail = s.validation_failures.load(Ordering::Relaxed);
+        let lcon = s.lock_contentions.load(Ordering::Relaxed);
+        let laf  = s.lock_acquire_failures.load(Ordering::Relaxed);
+        let trs  = s.total_read_set_entries.load(Ordering::Relaxed);
+        let tws  = s.total_write_set_entries.load(Ordering::Relaxed);
+        let com  = s.commits.load(Ordering::Relaxed);
+        let abt  = s.aborts.load(Ordering::Relaxed);
+        eprintln!("  STATS (NOrec):");
+        eprintln!("    Commits={}  Aborts={}  Val={}  VFail={}  Locks={}  LAqFail={}  RS={}  WS={}",
+                  com, abt, val, vfail, lcon, laf, trs, tws);
     }
 }

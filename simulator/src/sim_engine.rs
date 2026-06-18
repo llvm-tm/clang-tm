@@ -15,7 +15,10 @@ use crate::checkpoint::{self, Checkpoint};
 use crate::deadlock::DeadlockDetector;
 use crate::event::{Event, EventKind};
 use crate::verifier::Verifier;
+use runtime_core::TmxAbort;
+use std::cmp;
 use std::collections::{HashMap, HashSet};
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::AtomicU64;
 
 fn alloc_tid_base() -> u64 {
@@ -76,10 +79,21 @@ impl SimEngine {
     }
 
     /// Initialize the backend and back the TM address space.
+    /// Uses the default fixed address (0x7f00_0000_0000).
     pub fn init(&mut self) {
+        self.init_at(0x7f00_0000_0000 as *mut libc::c_void, 256 * 1024 * 1024);
+    }
+
+    /// Initialize with a specific base address and size.
+    /// Scans a slice of events to determine the address range if base is null.
+    pub fn init_from_events(&mut self, events: &[Event]) {
+        let (base, size) = compute_address_range(events);
+        self.init_at(base, size);
+    }
+
+    /// Low-level initialization at a given address range.
+    pub fn init_at(&mut self, addr: *mut libc::c_void, size: usize) {
         unsafe {
-            let addr = 0x7f00_0000_0000 as *mut libc::c_void;
-            let size: usize = 256 * 1024 * 1024;
             let result = libc::mmap(
                 addr,
                 size,
@@ -89,7 +103,8 @@ impl SimEngine {
                 0,
             );
             if result == libc::MAP_FAILED {
-                panic!("mmap of TM address space at 0x7f0000000000 failed: {}", std::io::Error::last_os_error());
+                panic!("mmap of TM address space at {:p} ({} bytes) failed: {}",
+                       addr, size, std::io::Error::last_os_error());
             }
         }
 
@@ -199,11 +214,32 @@ impl SimEngine {
                     self.stats.reads_outside_tx += 1;
                 }
 
-                let val: u64 = match width {
-                    1 => b.read_u8(*addr as *mut u8) as u64,
-                    2 => b.read_u16(*addr as *mut u16) as u64,
-                    4 => b.read_u32(*addr as *mut u32) as u64,
-                    8 => b.read_u64(*addr as *mut u64),
+                let val: u64 = match *width {
+                    1 | 2 | 4 | 8 => {
+                        let read_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                            match width {
+                                1 => b.read_u8(*addr as *mut u8) as u64,
+                                2 => b.read_u16(*addr as *mut u16) as u64,
+                                4 => b.read_u32(*addr as *mut u32) as u64,
+                                8 => b.read_u64(*addr as *mut u64),
+                                _ => unreachable!(),
+                            }
+                        }));
+                        match read_result {
+                            Ok(v) => v,
+                            Err(e) => {
+                                if e.downcast_ref::<TmxAbort>().is_some() {
+                                    self.in_tx.insert(tid, false);
+                                    self.aborted.insert(tid, true);
+                                    self.current_write_set.remove(&tid);
+                                    self.stats.aborts += 1;
+                                    self.verifier.tx_abort(tid);
+                                    return Err("aborted during read".into());
+                                }
+                                panic::resume_unwind(e);
+                            }
+                        }
+                    }
                     w => return Err(format!("unsupported read width {}", w)),
                 };
 
@@ -221,11 +257,29 @@ impl SimEngine {
                     self.stats.writes_outside_tx += 1;
                 }
 
-                match width {
-                    1 => b.write_u8(*addr as *mut u8, *val as u8),
-                    2 => b.write_u16(*addr as *mut u16, *val as u16),
-                    4 => b.write_u32(*addr as *mut u32, *val as u32),
-                    8 => b.write_u64(*addr as *mut u64, *val),
+                match *width {
+                    1 | 2 | 4 | 8 => {
+                        let write_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                            match width {
+                                1 => b.write_u8(*addr as *mut u8, *val as u8),
+                                2 => b.write_u16(*addr as *mut u16, *val as u16),
+                                4 => b.write_u32(*addr as *mut u32, *val as u32),
+                                8 => b.write_u64(*addr as *mut u64, *val),
+                                _ => unreachable!(),
+                            }
+                        }));
+                        if let Err(e) = write_result {
+                            if e.downcast_ref::<TmxAbort>().is_some() {
+                                self.in_tx.insert(tid, false);
+                                self.aborted.insert(tid, true);
+                                self.current_write_set.remove(&tid);
+                                self.stats.aborts += 1;
+                                self.verifier.tx_abort(tid);
+                                return Err("aborted during write".into());
+                            }
+                            panic::resume_unwind(e);
+                        }
+                    }
                     w => return Err(format!("unsupported write width {}", w)),
                 }
 
@@ -308,4 +362,42 @@ impl SimEngine {
         self.deadlock.reset();
         self.current_write_set.clear();
     }
+}
+
+/// Compute the address range that covers all memory-access events in a trace.
+/// Returns (base_address, region_size).  Falls back to the default 0x7f00 range
+/// if the trace is empty or has no address events.
+pub fn compute_address_range(events: &[Event]) -> (*mut libc::c_void, usize) {
+    const DEFAULT_BASE: u64 = 0x7f00_0000_0000;
+    const DEFAULT_SIZE: usize = 256 * 1024 * 1024;
+    const TM_REGION_SIZE: usize = 256 * 1024 * 1024;
+
+    let mut min_addr = u64::MAX;
+    let mut max_addr = 0u64;
+
+    for event in events {
+        match &event.kind {
+            EventKind::Read { addr, .. } | EventKind::Write { addr, .. } | EventKind::Alloc { addr, .. } | EventKind::Free { addr } => {
+                if *addr < min_addr { min_addr = *addr; }
+                if *addr > max_addr { max_addr = *addr; }
+            }
+            _ => {}
+        }
+    }
+
+    if min_addr == u64::MAX || max_addr == 0 {
+        return (DEFAULT_BASE as *mut libc::c_void, DEFAULT_SIZE);
+    }
+
+    // Round down to page boundary
+    let page_size = 4096u64;
+    let base = (min_addr / page_size) * page_size;
+
+    // Compute how much we need: from base to max_addr, padded to the TM region size
+    let range = (max_addr - base) as usize;
+    let size = cmp::max(range + TM_REGION_SIZE / 4, TM_REGION_SIZE);
+    // Round up to page boundary
+    let size = ((size + page_size as usize - 1) / page_size as usize) * page_size as usize;
+
+    (base as *mut libc::c_void, size)
 }

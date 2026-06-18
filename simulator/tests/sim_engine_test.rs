@@ -451,3 +451,64 @@ fn test_tinystm_write_only_conflict() {
     assert_eq!(engine.stats.aborts, 1, "TinySTM: T0 aborts due to B's version change");
     assert!(engine.verifier.violations.is_empty(), "no memory violations");
 }
+
+// ── Checkpoint roundtrip ───────────────────────────────────
+// Verify that checkpoint/restore produces identical results.
+#[test]
+fn test_checkpoint_roundtrip() {
+    use tm_des::checkpoint;
+    for b in [Backend::Norec, Backend::Tl2, Backend::Tinystm] {
+        mmap_tm_region();
+
+        // Generate a multi-scenario trace
+        let events = vec![
+            make_event(0, 0, 1, EventKind::ThreadSpawn(0)),
+            make_event(1, 0, 2, EventKind::TxBegin),
+            make_event(2, 0, 3, EventKind::Write { addr: 0x7f00_0000_8000, width: 8, val: 10 }),
+            make_event(3, 0, 4, EventKind::TxEnd),
+            make_event(4, 0, 5, EventKind::Checkpoint),
+            make_event(5, 0, 6, EventKind::TxBegin),
+            make_event(6, 0, 7, EventKind::Write { addr: 0x7f00_0000_8000, width: 8, val: 20 }),
+            make_event(7, 0, 8, EventKind::TxEnd),
+        ];
+
+        // Run all events in one shot (baseline)
+        let mut engine_baseline = SimEngine::new(b);
+        engine_baseline.init();
+        for e in &events {
+            engine_baseline.process_event(e);
+        }
+
+        // Run with checkpoint/restore after the Checkpoint event
+        let mut engine_cp = SimEngine::new(b);
+        engine_cp.init();
+        let mut remaining: Vec<Event> = events.to_vec();
+
+        // Process events up to and including the first Checkpoint
+        while let Some(pos) = remaining.iter().position(|e| matches!(e.kind, EventKind::Checkpoint)) {
+            let before: Vec<Event> = remaining.drain(..=pos).collect();
+            for e in &before {
+                engine_cp.process_event(e);
+            }
+            // Snapshot and restore
+            let cp = engine_cp.snapshot(&remaining);
+            let bytes = bincode::serialize(&cp).expect("serialize checkpoint");
+            let cp_restored: checkpoint::Checkpoint =
+                bincode::deserialize(&bytes).expect("deserialize checkpoint");
+            engine_cp.restore(&cp_restored).expect("restore checkpoint");
+        }
+
+        // Process remaining events
+        for e in &remaining {
+            engine_cp.process_event(e);
+        }
+
+        // Compare
+        assert_eq!(engine_baseline.stats.commits, engine_cp.stats.commits,
+                   "{}: commits match after checkpoint roundtrip", b.name());
+        assert_eq!(engine_baseline.stats.aborts, engine_cp.stats.aborts,
+                   "{}: aborts match after checkpoint roundtrip", b.name());
+        assert_eq!(engine_baseline.verifier.violations.len(), engine_cp.verifier.violations.len(),
+                   "{}: violation count matches after checkpoint roundtrip", b.name());
+    }
+}

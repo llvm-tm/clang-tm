@@ -56,9 +56,9 @@ fn main() {
 
     eprintln!("Loaded {} events", events.len());
 
-    // Build engine and run
+    // Build engine and initialize with addresses from the trace
     let mut engine = SimEngine::new(backend);
-    engine.init();
+    engine.init_from_events(&events);
 
     // Load initial committed values for money conservation check
     if let Some(path) = &cli.initial_values {
@@ -106,4 +106,8 @@ fn main() {
     for line in engine.verifier.report() {
         eprintln!("{}", line);
     }
+
+    // Report internal sync counters
+    let stats = engine.backend.take_stats();
+    engine.backend.print_stats(&stats);
 }

@@ -143,7 +143,7 @@ pub fn tm_commit() -> bool {
     fence(Ordering::SeqCst);
     if tx.write_set.is_empty() { return true; }
     gc_acquire(); fence(Ordering::SeqCst);
-    if !validate_read_set(&tx.read_set) { unlock_indices(&tx.locked_addrs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); return false; }
+    if !validate_read_set(&tx.read_set) { unlock_indices(&tx.locked_addrs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
     for wb in tx.write_backs { wb.apply(); }
     fence(Ordering::SeqCst);
     unlock_indices(&tx.locked_addrs);
