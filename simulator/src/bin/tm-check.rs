@@ -117,6 +117,16 @@ fn check_trace(events: &[Event], cli: &Cli) {
             EventKind::Write { addr, val, .. } => {
                 model.tm_write(tid, *addr, *val, 4)
             }
+            EventKind::Abort { reason } => {
+                if model.get_or_create_tx(tid).active {
+                    model.tm_abort_reason(tid, &format!("abort_from_trace reason={}", reason));
+                    conflicts.push(format!(
+                        "conflict at event {} (ts={}, tid={}): explicit abort (reason={})",
+                        n_events, event.timestamp, event.thread_id, reason
+                    ));
+                }
+                Ok(())
+            }
             EventKind::Log { msg } => {
                 eprintln!("[LOG ts={}] {}", event.timestamp, msg);
                 Ok(())

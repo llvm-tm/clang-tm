@@ -65,6 +65,11 @@ impl SimState {
                 lp.read_set.clear();
                 lp.write_set.clear();
             }
+            EventKind::Abort { .. } => {
+                lp.in_tx = false;
+                lp.read_set.clear();
+                lp.write_set.clear();
+            }
             EventKind::Read { addr, .. } => {
                 if lp.in_tx {
                     lp.read_set.push(crate::lp::ReadEntry { addr: *addr, version: 0 });
