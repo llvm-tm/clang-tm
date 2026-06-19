@@ -12,7 +12,7 @@ jobs:
   fidelity-regression:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install LLVM 22
         run: |
           sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
@@ -46,7 +46,7 @@ jobs:
   cross-backend-full:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install LLVM 22
         run: |
           sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
