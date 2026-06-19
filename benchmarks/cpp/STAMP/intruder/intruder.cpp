@@ -141,7 +141,7 @@ static void process_decoder(const Packet& pkt) {
                 int flen = pkt.length;
                 for (int i = 0; i < flen && total < INTRUDER_MAX_DATA * 2; i++)
                     tm_write_i1((uint8_t*)&g_decoder_flows[idx].data[total++],
-                               g_fragment_storage[off + i]);
+                               tm_read_i1((uint8_t*)&g_fragment_storage[off + i]));
             }
             tm_write_i4((uint32_t*)&g_decoder_flows[idx].data_len, total);
             tm_write_i8((uint64_t*)&g_decoder_flows[idx].flow_id, fid);
