@@ -14,7 +14,7 @@ jobs:
   plugin-test:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install LLVM 22
         run: |
           sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
@@ -38,7 +38,7 @@ jobs:
   simulator-test:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Build simulator
@@ -54,7 +54,7 @@ jobs:
   rust-build:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Build all Rust workspace members
@@ -68,7 +68,7 @@ jobs:
   race-checker:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install LLVM 22
         run: |
           sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
@@ -97,7 +97,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install LLVM 22
         run: |
           sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
@@ -119,7 +119,7 @@ jobs:
   stale-check:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Verify stale directories have been removed
         run: |
           all_clean=true
