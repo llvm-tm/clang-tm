@@ -1,82 +1,175 @@
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tm::{transaction, TmCell};
 use crate::Rng;
 use super::Config;
 
-pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
+fn sqrt_approx(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0; }
+    let mut s = x;
+    for _ in 0..25 {
+        let ns = (s + x / s) * 0.5;
+        if (ns - s).abs() < 1e-15 { break; }
+        s = ns;
+    }
+    s
+}
+
+struct KMeansData {
+    npoints: usize,
+    ndims: usize,
+    nclusters: usize,
+    threshold: f64,
+    points: Vec<TmCell<f64>>,
+    centroids: Vec<TmCell<f64>>,
+    assignments: Vec<TmCell<i32>>,
+    new_centers_sum: Vec<TmCell<f64>>,
+    new_centers_count: Vec<TmCell<i32>>,
+}
+
+fn accumulate(tid: usize, num_threads: usize, d: &KMeansData,
+              local_sum: &RefCell<Vec<f64>>, local_count: &RefCell<Vec<i32>>) {
+    let chunk = (d.npoints + num_threads - 1) / num_threads;
+    let start = tid * chunk;
+    let end = (start + chunk).min(d.npoints);
+
+    transaction(|tx| {
+        let mut ls = local_sum.borrow_mut();
+        let mut lc = local_count.borrow_mut();
+        for i in start..end {
+            let mut best = -1i32;
+            let mut best_dist = f64::MAX;
+            for c in 0..d.nclusters {
+                let mut dist = 0.0;
+                for dim in 0..d.ndims {
+                    let diff = tx.read(&d.points[i * d.ndims + dim])
+                            - tx.read(&d.centroids[c * d.ndims + dim]);
+                    dist += diff * diff;
+                }
+                if dist < best_dist { best_dist = dist; best = c as i32; }
+            }
+            tx.write(&d.assignments[i], best);
+            lc[best as usize] += 1;
+            for dim in 0..d.ndims {
+                ls[best as usize * d.ndims + dim] += tx.read(&d.points[i * d.ndims + dim]);
+            }
+        }
+    });
+}
+
+pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
     println!("\n=== KMeans ===");
-    println!("  Points: {}  Clusters: {}  Dims: {}",
-             config.points, config.clusters, config.dims);
-    let points: Vec<Vec<f64>> = (0..config.dims).map(|d|
-        (0..config.points).map(|p| {
-            let mut rng = Rng::new((d * config.points + p + 42) as u64);
-            (rng.next() % 1000) as f64 / 100.0
-        }).collect()
-    ).collect();
-    let clusters: Vec<Vec<f64>> = (0..config.dims).map(|d|
-        (0..config.clusters).map(|c| {
-            let mut rng = Rng::new((d * config.clusters + c + 12345) as u64);
-            (rng.next() % 1000) as f64 / 100.0
-        }).collect()
-    ).collect();
-    let counts: Vec<TmCell<i64>> = (0..config.clusters).map(|_| TmCell::new(0i64)).collect();
-    let sums: Vec<Vec<TmCell<f64>>> = (0..config.dims)
-        .map(|_| (0..config.clusters).map(|_| TmCell::new(0.0f64)).collect()).collect();
+    let npoints = config.points.max(1);
+    let nclusters = config.clusters.max(1);
+    let ndims = config.dims.max(1);
+    let threshold = 0.00001;
+    println!("  Points: {}  Dims: {}  Clusters: {}  Threshold: {}",
+             npoints, ndims, nclusters, threshold);
 
-    let state = Arc::new((points, clusters, counts, sums));
-    let dur = std::time::Duration::from_millis(config.duration as u64);
-    let chunk = config.points / config.threads;
-    let g_iters = AtomicU64::new(0);
+    let mut d = KMeansData {
+        npoints, ndims, nclusters, threshold,
+        points: (0..npoints * ndims).map(|_| TmCell::new(0.0)).collect(),
+        centroids: (0..nclusters * ndims).map(|_| TmCell::new(0.0)).collect(),
+        assignments: (0..npoints).map(|_| TmCell::new(-1)).collect(),
+        new_centers_sum: (0..nclusters * ndims).map(|_| TmCell::new(0.0)).collect(),
+        new_centers_count: (0..nclusters).map(|_| TmCell::new(0)).collect(),
+    };
 
+    let mut rng = Rng::new(42);
+    for i in 0..npoints {
+        let cluster = (i % nclusters) as f64;
+        for dim in 0..ndims {
+            let u = rng.uniform();
+            let val = (-10.0 + u * 20.0) + cluster * 5.0;
+            unsafe { *d.points[i * ndims + dim].ptr() = val; }
+        }
+    }
+    for c in 0..nclusters {
+        for dim in 0..ndims {
+            let u = rng.uniform();
+            let val = -10.0 + u * 20.0;
+            unsafe { *d.centroids[c * ndims + dim].ptr() = val; }
+        }
+    }
+
+    let data = Arc::new(d);
+    let converged = AtomicBool::new(false);
+    let g_ops = AtomicU64::new(0);
     let t0 = std::time::Instant::now();
+
     std::thread::scope(|s| {
         for tid in 0..config.threads {
-            let sref = state.clone();
-            let sc = stop;
-            let so = ops;
-            let gi = &g_iters;
-            let start = tid * chunk;
-            let end = if tid == config.threads - 1 { config.points } else { start + chunk };
+            let d = data.clone();
+            let cv = &converged;
+            let go = &g_ops;
             s.spawn(move || {
-                while !sc.load(Ordering::Relaxed) {
-                    let mut local_counts = vec![0i64; config.clusters];
-                    let mut local_sums = vec![0.0f64; config.clusters * config.dims];
-                    for p in start..end {
-                        let mut best = 0i32;
-                        let mut best_dist = f64::MAX;
-                        for c in 0..config.clusters {
-                            let mut dist = 0.0;
-                            for d in 0..config.dims {
-                                let diff = sref.0[d][p] - sref.1[d][c];
-                                dist += diff * diff;
+                let local_sum = RefCell::new(vec![0.0f64; nclusters * ndims]);
+                let local_count = RefCell::new(vec![0i32; nclusters]);
+                let mut max_iters = 100i32;
+
+                while !cv.load(Ordering::Relaxed) && max_iters > 0 {
+                    max_iters -= 1;
+                    local_sum.borrow_mut().fill(0.0);
+                    local_count.borrow_mut().fill(0);
+
+                    accumulate(tid, config.threads, &d, &local_sum, &local_count);
+
+                    // Merge into globals (non-TX, matches C++ explicit API)
+                    {
+                        let ls = local_sum.borrow();
+                        let lc = local_count.borrow();
+                        for c in 0..nclusters {
+                            unsafe {
+                                *d.new_centers_count[c].ptr() += lc[c];
+                                for dim in 0..ndims {
+                                    *d.new_centers_sum[c * ndims + dim].ptr() += ls[c * ndims + dim];
+                                }
                             }
-                            if dist < best_dist { best_dist = dist; best = c as i32; }
-                        }
-                        local_counts[best as usize] += 1;
-                        for d in 0..config.dims {
-                            local_sums[best as usize * config.dims + d] += sref.0[d][p];
                         }
                     }
 
-                    transaction(|tx| {
-                        for c in 0..config.clusters {
-                            tx.write(&sref.2[c], tx.read(&sref.2[c]) + local_counts[c]);
-                            for d in 0..config.dims {
-                                tx.write(&sref.3[d][c], tx.read(&sref.3[d][c]) + local_sums[c * config.dims + d]);
+                    // Update centroids (all threads, matches C++ semantics)
+                    let mut delta = 0.0;
+                    for c in 0..nclusters {
+                        let cnt = unsafe { *d.new_centers_count[c].ptr() };
+                        if cnt > 0 {
+                            for dim in 0..ndims {
+                                let sum = unsafe { *d.new_centers_sum[c * ndims + dim].ptr() };
+                                let new_val = sum / cnt as f64;
+                                let old_val = unsafe { *d.centroids[c * ndims + dim].ptr() };
+                                let diff = old_val - new_val;
+                                delta += diff * diff;
+                                unsafe { *d.centroids[c * ndims + dim].ptr() = new_val; }
+                                unsafe { *d.new_centers_sum[c * ndims + dim].ptr() = 0.0; }
                             }
                         }
-                    });
-
-                    gi.fetch_add(1, Ordering::Relaxed);
-                    so.fetch_add(1, Ordering::Relaxed);
+                        unsafe { *d.new_centers_count[c].ptr() = 0; }
+                    }
+                    delta = sqrt_approx(delta / (nclusters * ndims) as f64);
+                    if delta < threshold {
+                        cv.store(true, Ordering::Relaxed);
+                    }
+                    go.fetch_add(npoints as u64, Ordering::Relaxed);
                 }
             });
         }
-        std::thread::sleep(dur);
-        stop.store(true, Ordering::Relaxed);
     });
+
     let elapsed = t0.elapsed().as_millis() as u64;
-    let iters = g_iters.load(Ordering::Relaxed);
-    println!("  Iterations: {}  Elapsed: {} ms", iters, elapsed);
+    let iter_ops = g_ops.load(Ordering::Relaxed);
+    println!("  Operations: {}  Elapsed: {} ms  Rate: {} ops/s",
+             iter_ops, elapsed, if elapsed > 0 { iter_ops * 1000 / elapsed } else { 0 });
+
+    println!("  Centroids:");
+    let d = &*data;
+    for c in 0..nclusters.min(10) {
+        print!("    [{c}] ");
+        for dim in 0..ndims.min(5) {
+            if dim > 0 { print!(", "); }
+            print!("{:.6}", unsafe { *d.centroids[c * ndims + dim].ptr() });
+        }
+        if ndims > 5 { print!(", ..."); }
+        println!();
+    }
 }
