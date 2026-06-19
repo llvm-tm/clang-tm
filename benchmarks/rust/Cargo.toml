@@ -109,5 +109,6 @@ xtm       = ["tm/xtm"]
 [dependencies]
 tm = { path = "../../expli_instr/rust/workspace/tm", default-features = false }
 containers = { path = "../../expli_instr/rust/workspace/containers" }
+addrspace = { path = "../../expli_instr/rust/workspace/addrspace" }
 fastrand = "2"
 libc = "0.2"
