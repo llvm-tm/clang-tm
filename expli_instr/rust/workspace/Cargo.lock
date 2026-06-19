@@ -10,6 +10,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench-tinystm"
+version = "0.1.0"
+dependencies = [
+ "addrspace",
+ "tm",
+]
+
+[[package]]
 name = "containers"
 version = "0.1.0"
 dependencies = [
