@@ -17,7 +17,6 @@ fn read_word<T: Primitive>(addr: usize) -> T {
             let mut rspins = 0u64;
             while is_locked(addr) {
                 if with_tx(|tx| tx.locked_addrs.contains(&lock_index(addr))) { break; }
-                // In simulation mode, the lock-holder will never release.
                 #[cfg(feature = "simulation")]
                 { with_tx(|tx| tx.aborted = true); return unsafe { (addr as *const T).read() }; }
                 rspins += 1;
@@ -31,10 +30,16 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         let version = read_version(addr);
         let value: T = unsafe { (addr as *const T).read() };
         if read_version(addr) != version { continue; }
-        if with_tx(|tx| {
-            if version > tx.start_version { tx.aborted = true; true }
-            else { tx.read_set.push((addr, version)); false }
-        }) { return value; }
+        let retry = with_tx(|tx| {
+            if version > tx.end_version {
+                if tx.snapshot_extend() { return true; }
+                tx.aborted = true;
+            } else {
+                tx.read_set.push((addr, version));
+            }
+            false
+        });
+        if retry { continue; }
         return value;
     }
 }
@@ -192,11 +197,10 @@ pub fn tm_commit() -> bool {
     fence(Ordering::SeqCst);
     if tx.aborted { for u in tx.undo_backs { u.apply(); } unlock_indices(&tx.locked_addrs); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
     if tx.write_set.is_empty() { return true; }
-    if !gc_acquire() { for u in tx.undo_backs { u.apply(); } unlock_indices(&tx.locked_addrs); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
+    gc_tick();
     fence(Ordering::SeqCst);
-    if !validate_read_set(&tx.read_set) { for u in tx.undo_backs { u.apply(); } unlock_indices(&tx.locked_addrs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
+    if !validate_read_set(&tx.read_set) { for u in tx.undo_backs { u.apply(); } unlock_indices(&tx.locked_addrs); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
     unlock_indices(&tx.locked_addrs);
-    gc_release_and_inc();
     true
 }
 

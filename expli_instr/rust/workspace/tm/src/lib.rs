@@ -1,5 +1,4 @@
 /// Safe public TM API.
-use runtime_core::TmxAbort;
 
 // ── Backend selection via feature flags ─────────────────
 // The `wbctl` (default), `wbetl`, `wt`, `norec`, `tl2`,
@@ -178,7 +177,7 @@ pub use runtime_sgl_distributed::{
 #[cfg(any(feature = "wbctl", feature = "wbetl", feature = "wt"))]
 pub use runtime_tinystm::{
     tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
+    tm_begin, tm_commit, tm_abort_count, tm_commit_count, tm_reset_stats, tm_abort,
     tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
     tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
     tm_read_f32, tm_read_f64, tm_read_ptr,
@@ -356,6 +355,25 @@ impl Transaction {
 }
 
 // ── transaction() ───────────────────────────────────────
+// Retry loop shared by ALL Rust TM backends.
+//
+// Abort-retry dispatch depends on which backend is active:
+//
+//   TinySTM family (wbctl/wbetl/wt) — lazy-abort flag:
+//     The closure runs to completion. tm_commit() checks the
+//     tx.aborted flag and returns false if set → retry.
+//     catch_unwind only catches real panics (user code), which
+//     it re-panics. This is the common case: hot retries do not
+//     allocate or unwind.
+//
+//   tl2, dudetm, norec — panic_any(TmxAbort):
+//     On conflict the backend panics with TmxAbort. catch_unwind
+//     intercepts it, tm_abort() drops the aborted tx state, and
+//     the loop retries. Real panics (other payloads) are re-panicked.
+//
+// In both cases the http://TmxAbort hook (tm_install_tmx_hook)
+// suppresses the default panic handler for TmxAbort panics so
+// they don't pollute stderr.
 pub fn transaction<T, F>(f: F) -> T
 where
     F: Fn(&Transaction) -> T,
@@ -364,20 +382,14 @@ where
         tm_begin();
         let tx = Transaction { _private: () };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&tx)));
-        let committed = match result {
-            Ok(_) => tm_commit(),
-            Err(payload) => {
-                // Only TM aborts (TmxAbort) are caught — retry automatically.
-                // Real user panics are re-panicked after cleanup.
-                tm_abort();
-                if payload.downcast_ref::<TmxAbort>().is_some() {
-                    continue; // TM contention — retry
-                }
-                std::panic::resume_unwind(payload); // real panic — propagate
+        match result {
+            Ok(val) => {
+                if tm_commit() { return val; }
             }
-        };
-        if let Ok(val) = result {
-            if committed { return val; }
+            Err(payload) => {
+                tm_abort();
+                std::panic::resume_unwind(payload);
+            }
         }
     }
 }
