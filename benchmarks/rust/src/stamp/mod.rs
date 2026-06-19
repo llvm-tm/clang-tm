@@ -7,7 +7,6 @@ pub mod ssca2;
 pub mod bayes;
 pub mod yada;
 
-
 #[derive(Clone)]
 pub struct Config {
     pub threads: usize,
@@ -35,6 +34,13 @@ pub struct Config {
     pub update_prob: f64,
     pub min_degree: usize,
     pub max_degree: usize,
+    pub threshold: f64,
+    pub jitter: f64,
+    pub angle: f64,
+    pub prob_unidirectional: f64,
+    pub max_paral_edges: usize,
+    pub subgr_edge_length: usize,
+    pub iterations: usize,
 }
 
 impl Default for Config {
@@ -49,9 +55,33 @@ impl Default for Config {
             percent_attack: 10, seed: 1,
             scale: 20, initiator_prob: 1.0, update_prob: 1.0,
             min_degree: 3, max_degree: 3,
+            threshold: 0.00001, jitter: 0.5, angle: 20.0,
+            prob_unidirectional: 0.5, max_paral_edges: 3,
+            subgr_edge_length: 3, iterations: 10,
         }
     }
 }
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Bench { All, KMeans, Labyrinth, Vacation, Genome, Intruder, SSCA2, Bayes, Yada }
+
+pub fn run_test(bench: Bench) -> i32 {
+    match bench {
+        Bench::KMeans => kmeans::test(),
+        Bench::Labyrinth => labyrinth::test(),
+        Bench::Vacation => vacation::test(),
+        Bench::Genome => genome::test(),
+        Bench::Intruder => intruder::test(),
+        Bench::SSCA2 => ssca2::test(),
+        Bench::Bayes => bayes::test(),
+        Bench::Yada => yada::test(),
+        Bench::All => {
+            let mut f = 0;
+            f += kmeans::test(); f += labyrinth::test();
+            f += vacation::test(); f += genome::test();
+            f += intruder::test(); f += ssca2::test();
+            f += bayes::test(); f += yada::test();
+            f
+        }
+    }
+}

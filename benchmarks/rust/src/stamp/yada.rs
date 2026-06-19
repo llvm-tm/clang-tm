@@ -61,6 +61,27 @@ struct YadaState {
     angle: f64,
 }
 
+pub fn test() -> i32 {
+    let mut fails = 0;
+    // Test circumcircle of right triangle
+    let (cx, cy, cr) = circumcircle(0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
+    if (cx - 0.5).abs() > 1e-10 { eprintln!("FAIL: circumcircle cx {}", cx); fails += 1; }
+    if (cy - 0.5).abs() > 1e-10 { eprintln!("FAIL: circumcircle cy {}", cy); fails += 1; }
+    let expected_r = (2.0f64).sqrt() / 2.0;
+    if (cr - expected_r).abs() > 1e-10 { eprintln!("FAIL: circumcircle cr {}", cr); fails += 1; }
+    // Test tri_min_angle of equilateral
+    let ang = tri_min_angle(0.0, 0.0, 1.0, 0.0, 0.5, (3.0f64).sqrt() / 2.0);
+    if (ang - 60.0).abs() > 1e-10 { eprintln!("FAIL: equilateral angle {}", ang); fails += 1; }
+    // Test tri_min_angle of right
+    let ang = tri_min_angle(0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
+    if (ang - 45.0).abs() > 1e-10 { eprintln!("FAIL: right angle {}", ang); fails += 1; }
+    // Test is_encroached
+    if !is_encroached(0.0, 0.0, 2.0, 0.0, 1.0, 0.5) { eprintln!("FAIL: point inside edge circle"); fails += 1; }
+    if is_encroached(0.0, 0.0, 2.0, 0.0, 1.0, 1.5) { eprintln!("FAIL: point outside edge circle"); fails += 1; }
+    if fails > 0 { eprintln!("yada: {} test(s) failed", fails); }
+    fails
+}
+
 pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     println!("\n=== Yada ===");
     let grid_size: usize = config.points.max(10).min(30);
@@ -151,7 +172,7 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     }
 
     let wh_count = work_heap_init.len();
-    let mut work_heap: Vec<TmCell<i64>> = (0..max_elems)
+    let work_heap: Vec<TmCell<i64>> = (0..max_elems)
         .map(|i| TmCell::new(if i < wh_count { work_heap_init[i] } else { -1 }))
         .collect();
 

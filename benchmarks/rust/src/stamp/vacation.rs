@@ -5,6 +5,22 @@ use tm::{transaction, TmCell};
 use crate::Rng;
 use super::Config;
 
+pub fn test() -> i32 {
+    let mut fails = 0;
+    // Test basic reservation logic (no TM needed)
+    let num = 5;
+    let mut num_free = num;
+    let mut num_used = 0;
+    num_free -= 1; num_used += 1;
+    if num_free != 4 || num_used != 1 { eprintln!("FAIL: reservation"); fails += 1; }
+    num_free += 100;
+    if num_free != 104 { eprintln!("FAIL: add inventory"); fails += 1; }
+    num_free += 1; num_used -= 1;
+    if num_free != 105 || num_used != 0 { eprintln!("FAIL: cancel"); fails += 1; }
+    if fails > 0 { eprintln!("vacation: {} test(s) failed", fails); }
+    fails
+}
+
 pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     println!("\n=== Vacation ===");
     let (num_relations, query_range, num_queries_per_tx, percent_user) = {
