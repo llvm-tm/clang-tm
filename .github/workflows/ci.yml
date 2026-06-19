@@ -62,7 +62,7 @@ jobs:
       - name: Build all Rust benchmarks
         run: cargo build --manifest-path benchmarks/rust/Cargo.toml
       - name: Run Rust workspace tests
-        run: cargo test --manifest-path expli_instr/rust/workspace/Cargo.toml
+        run: cargo test --manifest-path expli_instr/rust/workspace/Cargo.toml -- --test-threads=1
 
   # ── Job 4: Race checker warnings ────────────────────────
   race-checker:
