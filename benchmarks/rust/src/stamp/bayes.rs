@@ -1,15 +1,13 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::thread_local;
 use std::cell::RefCell;
 use tm::{transaction, TmCell};
 use crate::Rng;
 use super::Config;
 
 const MAX_TASKS: usize = 131072;
-const MAX_PARENTS: usize = 2;
+const MAX_PARENTS: usize = 8;
 
-// ── Small fixed-size parent set (TM-tracked) ──────────────
 struct ParentSet {
     count: TmCell<i32>,
     data: [TmCell<i32>; MAX_PARENTS],
@@ -17,7 +15,7 @@ struct ParentSet {
 
 impl ParentSet {
     fn new() -> Self {
-        ParentSet { count: TmCell::new(0), data: [TmCell::new(-1), TmCell::new(-1)] }
+        ParentSet { count: TmCell::new(0), data: [TmCell::new(-1), TmCell::new(-1), TmCell::new(-1), TmCell::new(-1), TmCell::new(-1), TmCell::new(-1), TmCell::new(-1), TmCell::new(-1)] }
     }
     fn contains(&self, tx: &tm::Transaction, val: i32) -> bool {
         let n = tx.read(&self.count);
@@ -48,7 +46,6 @@ impl ParentSet {
     }
 }
 
-// ── Task list (TM priority queue) ─────────────────────────
 struct TaskList {
     scores: Vec<TmCell<f64>>,
     ops: Vec<TmCell<i32>>,
@@ -84,16 +81,6 @@ impl TaskList {
         tx.write(&self.to_ids[i], to);
         tx.write(&self.count, (i + 1) as i32);
     }
-    #[allow(dead_code)]
-    fn push_setup(&self, op: i32, from: i32, to: i32, score: f64) {
-        let i = unsafe { *self.count.ptr() } as usize;
-        if i >= MAX_TASKS { return; }
-        unsafe { *self.scores[i].ptr() = score; }
-        unsafe { *self.ops[i].ptr() = op; }
-        unsafe { *self.from_ids[i].ptr() = from; }
-        unsafe { *self.to_ids[i].ptr() = to; }
-        unsafe { *self.count.ptr() = (i + 1) as i32; }
-    }
     fn pop_best(&self, tx: &tm::Transaction) -> Task {
         let n = tx.read(&self.count) as usize;
         if n == 0 { return Task { op: -1, from: -1, to: -1, score: -1e100 }; }
@@ -119,11 +106,8 @@ impl TaskList {
         tx.write(&self.count, last as i32);
         t
     }
-    #[allow(dead_code)]
-    fn peek_empty(&self) -> bool { let v = unsafe { *self.count.ptr() }; v == 0 }
 }
 
-// ── Bayes data ────────────────────────────────────────────
 struct BayesData {
     num_var: usize,
     num_records: usize,
@@ -138,36 +122,31 @@ struct BayesData {
     task_list: TaskList,
 }
 
-// ── Compute density log-likelihood for a variable with given parents ─
 fn compute_density_ll(data: &BayesData, var: usize, parents: &[i32]) -> f64 {
     let num_configs = 1usize << parents.len();
-    let mut cfg = vec![(0i32, 0i32); num_configs];
+    let mut c0 = vec![0i32; num_configs];
+    let mut c1 = vec![0i32; num_configs];
     for r in 0..data.num_records {
         let mut config = 0usize;
         for (i, &p) in parents.iter().enumerate() {
             if data.records[r][p as usize] != 0 { config |= 1 << i; }
         }
-        if data.records[r][var] != 0 {
-            cfg[config].1 += 1;
-        } else {
-            cfg[config].0 += 1;
-        }
+        if data.records[r][var] != 0 { c1[config] += 1; } else { c0[config] += 1; }
     }
     let mut ll = 0.0f64;
     let nf = data.num_records as f64;
     for c in 0..num_configs {
-        let total = cfg[c].0 + cfg[c].1;
+        let total = c0[c] + c1[c];
         if total == 0 { continue; }
         let frac = total as f64 / nf;
-        let p0 = cfg[c].0 as f64 / total as f64;
-        let p1 = cfg[c].1 as f64 / total as f64;
+        let p0 = c0[c] as f64 / total as f64;
+        let p1 = c1[c] as f64 / total as f64;
         if p0 > 0.0 { ll += frac * p0 * p0.ln(); }
         if p1 > 0.0 { ll += frac * p1 * p1.ln(); }
     }
     ll
 }
 
-// ── Cycle detection (DFS, reads committed child sets) ─────
 fn has_path(data: &BayesData, from: i32, to: i32) -> bool {
     thread_local! {
         static VISITED: RefCell<Vec<bool>> = RefCell::new(Vec::new());
@@ -189,9 +168,7 @@ fn has_path(data: &BayesData, from: i32, to: i32) -> bool {
                 let n = data.children[cur as usize].peek_count();
                 for i in 0..n as usize {
                     let child = data.children[cur as usize].peek_get(i);
-                    if child >= 0 && !visited[child as usize] {
-                        stack.push(child);
-                    }
+                    if child >= 0 && !visited[child as usize] { stack.push(child); }
                 }
             }
             false
@@ -199,12 +176,12 @@ fn has_path(data: &BayesData, from: i32, to: i32) -> bool {
     })
 }
 
-// ── Find best insertion for a variable ────────────────────
 fn find_best_insert(data: &BayesData, to: i32, tx: &tm::Transaction) -> Task {
     if tx.read(&data.total_parents) >= data.global_max_edges * data.num_var as i32 {
         return Task { op: -1, from: -1, to: -1, score: -1e100 };
     }
     let mut best = Task { op: 0, from: -1, to: -1, score: -1e100 };
+    let base_ll = tx.read(&data.local_ll[to as usize]);
     for from in 0..data.num_var as i32 {
         if from == to { continue; }
         if data.parents[to as usize].contains(tx, from) { continue; }
@@ -212,31 +189,26 @@ fn find_best_insert(data: &BayesData, to: i32, tx: &tm::Transaction) -> Task {
         let mut par = data.parents[to as usize].collect(tx);
         par.push(from);
         let new_ll = compute_density_ll(data, to as usize, &par);
-        let delta = new_ll - tx.read(&data.local_ll[to as usize]);
+        let delta = new_ll - base_ll;
         let score = tx.read(&data.total_parents) as f64 * data.base_penalty
                   + data.num_records as f64 * (tx.read(&data.base_log_likelihood) + delta);
-        if score > best.score {
-            best = Task { op: 0, from, to, score };
-        }
+        if score > best.score { best = Task { op: 0, from, to, score }; }
     }
     best
 }
 
-// ── Worker function ───────────────────────────────────────
 pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
     println!("\n=== Bayes ===");
     let num_var = config.points.max(8).min(64);
     let num_records = config.num_customers.max(64).min(2048);
-    let max_parents = 2usize;
+    let max_parents = 8usize;
     let insert_penalty = 2.0;
     let base_penalty = -0.5 * (num_records as f64).ln() * insert_penalty;
     let global_max_edges = 2i32;
     println!("  Vars: {}  Records: {}  Max parents: {}  Penalty: {:.0}",
              num_var, num_records, max_parents, insert_penalty);
 
-    // ── Data generation ──────────────────────────────────
     let mut rng = Rng::new(42);
-    // Generate random parent graph
     let mut parents_init: Vec<Vec<i32>> = (0..num_var).map(|_| Vec::new()).collect();
     for v in 1..num_var {
         let n = (rng.next() as usize % max_parents.min(v)) + 1;
@@ -250,22 +222,27 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
             }
         }
     }
-    // Generate random records
-    let records: Vec<Vec<i32>> = (0..num_records).map(|_| {
-        (0..num_var).map(|v| {
+    let mut records: Vec<Vec<i32>> = Vec::with_capacity(num_records);
+    for r in 0..num_records {
+        let mut rec = vec![0i32; num_var];
+        for v in 0..num_var {
             if parents_init[v].is_empty() {
-                (rng.next() % 2) as i32
+                rec[v] = (rng.next() % 2) as i32;
             } else {
-                let mut key = rng.next();
-                for &_p in &parents_init[v] {
-                    key = key.wrapping_mul(31).wrapping_add(key);
+                let mut val = 0i32;
+                let mut threshold = 30i32;
+                for &p in &parents_init[v] {
+                    let prev = if r > 0 { records[r - 1][p as usize] } else { 0 };
+                    val = (val << 1) | prev;
+                    threshold += (p * 7 + v as i32 * 11) % 40;
                 }
-                (key % 2) as i32
+                threshold = (threshold + val * 17) % 100;
+                rec[v] = (rng.next() % 100 < threshold as u64) as i32;
             }
-        }).collect()
-    }).collect();
+        }
+        records.push(rec);
+    }
 
-    // ── Allocate TM data structures ──────────────────────
     let parents: Vec<ParentSet> = (0..num_var).map(|_| ParentSet::new()).collect();
     let children: Vec<ParentSet> = (0..num_var).map(|_| ParentSet::new()).collect();
     let local_ll: Vec<TmCell<f64>> = (0..num_var).map(|_| TmCell::new(0.0)).collect();
@@ -280,7 +257,6 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
         global_max_edges, task_list,
     });
 
-    // Initialize parent sets from generated graph (non-TM)
     for v in 0..num_var {
         for &p in &parents_init[v] {
             data.parents[v].peek_insert(p);
@@ -294,94 +270,79 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
 
     std::thread::scope(|s| {
         let mut threads = Vec::new();
-        for tid in 0..config.threads.max(1).min(2) { // at most 2 threads for bayes
+        for tid in 0..config.threads {
             let d = data.clone();
             let sc = stop;
-            let so = ops;
             let go = &g_ops;
-            let chunk = num_var / config.threads.max(1);
+            let chunk = (num_var + config.threads - 1) / config.threads;
             let start = tid * chunk;
-            let end = if tid == config.threads - 1 { num_var } else { (start + chunk).min(num_var) };
+            let end = (start + chunk).min(num_var);
             threads.push(s.spawn(move || {
-                if tid == 0 {
-                    // Phase 1: Initial per-variable LL (just thread 0)
-                    // Already initialized in setup, nothing to do here.
+                // Phase 1: Init per-variable LL
+                for v in start..end {
+                    let ll = compute_density_ll(&d, v, &[]);
+                    transaction(|tx| {
+                        tx.write(&d.local_ll[v], ll);
+                        tx.write(&d.base_log_likelihood, tx.read(&d.base_log_likelihood) + ll);
+                    });
                 }
 
-                // Phase 2: Enqueue single-edge tasks (parallel)
-                if tid == 0 && end > start {
-                    // Phase 2 + Phase 3 happen in thread 0
-                    thread2(&d, start, end, go, sc, so);
+                // Phase 2: Enqueue single-edge tasks
+                for v in start..end {
+                    let base_ll = transaction(|tx| tx.read(&d.local_ll[v]));
+                    for from in 0..d.num_var as i32 {
+                        if from == v as i32 { continue; }
+                        let with_ll = compute_density_ll(&d, v, &[from]);
+                        if with_ll > base_ll {
+                            let delta = with_ll - base_ll;
+                            let score = transaction(|tx| {
+                                d.base_penalty + d.num_records as f64 * (tx.read(&d.base_log_likelihood) + delta)
+                            });
+                            transaction(|tx| {
+                                d.task_list.push(tx, 0, from, v as i32, score);
+                            });
+                        }
+                    }
+                }
+
+                // Phase 3: Greedy search loop (all threads participate)
+                loop {
+                    if sc.load(Ordering::Relaxed) { break; }
+                    let task = transaction(|tx| d.task_list.pop_best(tx));
+                    if task.op < 0 { break; }
+                    let ok = transaction(|tx| {
+                        if d.parents[task.to as usize].contains(tx, task.from) { return false; }
+                        if has_path(&d, task.to, task.from) { return false; }
+                        if tx.read(&d.total_parents) >= d.global_max_edges * d.num_var as i32 { return false; }
+
+                        d.parents[task.to as usize].insert(tx, task.from);
+                        d.children[task.from as usize].insert(tx, task.to);
+                        tx.write(&d.total_parents, tx.read(&d.total_parents) + 1);
+
+                        let par = d.parents[task.to as usize].collect(tx);
+                        let new_ll = compute_density_ll(&d, task.to as usize, &par);
+                        let delta = new_ll - tx.read(&d.local_ll[task.to as usize]);
+                        tx.write(&d.local_ll[task.to as usize], new_ll);
+                        tx.write(&d.base_log_likelihood, tx.read(&d.base_log_likelihood) + delta);
+
+                        let next = find_best_insert(&d, task.to, tx);
+                        if next.from >= 0 {
+                            d.task_list.push(tx, next.op, next.from, next.to, next.score);
+                        }
+                        true
+                    });
+                    if ok {
+                        go.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }));
         }
         std::thread::sleep(dur);
         stop.store(true, Ordering::Relaxed);
     });
+
     let elapsed = t0.elapsed().as_millis() as u64;
     let ops_count = g_ops.load(Ordering::Relaxed);
     let total_par = unsafe { *data.total_parents.ptr() };
-    println!("  Operations: {}  Total parents: {}  Elapsed: {} ms",
-             ops_count, total_par, elapsed);
-}
-
-fn thread2(data: &BayesData, _start: usize, _end: usize,
-           g_ops: &AtomicU64, stop: &AtomicBool, _ops: &AtomicU64) {
-    // Initialize per-variable LL
-    let mut init_rng = Rng::new(42);
-    let _ = &mut init_rng;
-    let mut base_ll = 0.0f64;
-    for v in 0..data.num_var {
-        let ll = compute_density_ll(data, v, &[]);
-        transaction(|tx| {
-            tx.write(&data.local_ll[v], ll);
-            tx.write(&data.base_log_likelihood, tx.read(&data.base_log_likelihood) + ll);
-        });
-        base_ll += ll;
-    }
-    // Enqueue single-edge tasks (Phase 2)
-    for v in 0..data.num_var {
-        for from in 0..data.num_var as i32 {
-            if from == v as i32 { continue; }
-            let with_ll = compute_density_ll(data, v, &[from]);
-            if with_ll > base_ll / data.num_var as f64 {
-                let delta = with_ll - base_ll / data.num_var as f64;
-                let score = data.base_penalty + data.num_records as f64 * (base_ll + delta);
-                transaction(|tx| {
-                    data.task_list.push(tx, 0, from, v as i32, score);
-                });
-            }
-        }
-    }
-    // Phase 3: Greedy search loop
-    while !stop.load(Ordering::Relaxed) {
-        // Pop best task
-        let task = transaction(|tx| data.task_list.pop_best(tx));
-        if task.op < 0 { break; }
-
-        // Validate and apply
-        transaction(|tx| {
-            if data.parents[task.to as usize].contains(tx, task.from) { return; }
-            if has_path(data, task.to, task.from) { return; }
-            if tx.read(&data.total_parents) >= data.global_max_edges * data.num_var as i32 { return; }
-
-            data.parents[task.to as usize].insert(tx, task.from);
-            data.children[task.from as usize].insert(tx, task.to);
-            tx.write(&data.total_parents, tx.read(&data.total_parents) + 1);
-
-            // Recompute LL with new parent set
-            let par = data.parents[task.to as usize].collect(tx);
-            let new_ll = compute_density_ll(data, task.to as usize, &par);
-            let delta = new_ll - tx.read(&data.local_ll[task.to as usize]);
-            tx.write(&data.local_ll[task.to as usize], new_ll);
-            tx.write(&data.base_log_likelihood, tx.read(&data.base_log_likelihood) + delta);
-
-            // Find next best for same variable
-            let next = find_best_insert(data, task.to, tx);
-            if next.from >= 0 {
-                data.task_list.push(tx, next.op, next.from, next.to, next.score);
-            }
-        });
-        g_ops.fetch_add(1, Ordering::Relaxed);
-    }
+    println!("  Operations: {}  Total parents: {}  Elapsed: {} ms", ops_count, total_par, elapsed);
 }
