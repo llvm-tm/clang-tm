@@ -167,6 +167,30 @@ Same OCC read-validate race as C++ Romulus: capture version AFTER reading from m
 - `benchmarks/rust/src/bins/fuzz_counter.rs` — added --version ASCII art
 - `benchmarks/rust/src/bins/fuzz_bank.rs` — added --version ASCII art, fixed default accounts (16→64)
 
+## Rust benchmark audit (2026-06-19) — Simplifications vs C++
+
+All 10 benchmarks audited. 7 have significant simplifications. Full audit and fix plan:
+
+### Fidelity by benchmark
+- **Fuzz counter/bank**: Faithful (only CLI style differs: positional vs named)
+- **Intruder**: Missing `--test` mode; C++ has non-TM read bug (line 143)
+- **Bank**: Missing `--disjoint`, `--queue`, `-w` features
+- **Vacation**: Simplified — no best-price selection, single-query, time-based
+- **Labyrinth**: Simplified — BFS inside TX (C++ does local BFS, then TX-mark)
+- **Bayes**: Only thread 0 works; max 2 threads hardcoded; MAX_PARENTS=2 (C++=8)
+- **Yada**: Only thread 0 works; TM only for work-heap pop
+- **Kmeans**: No convergence loop; data outside TM region
+- **Genome**: COMPLETELY DIFFERENT — Rust is hash-table insertion, C++ is string dedup+matching
+- **SSCA2**: COMPLETELY DIFFERENT — Rust is edge insertion, C++ is graph gen+CSR+triangle counting
+
+### Priority order for fixes
+1. P0: Fix C++ intruder non-TM read (intruder.cpp:143)
+2. P1: Vacation (best-price), Labyrinth (local BFS+TX-mark), Bank (disjoint/w), Bayes (all threads)
+3. P2: Kmeans (convergence loop), Yada (distribute work, TM scope), Genome (full rewrite), SSCA2 (full rewrite)
+4. P3: `--test` mode + CLI args alignment for all
+
+Estimated total: ~4000–6000 new lines.
+
 ## Session 2026-06-17 — Debug printf cleanup into patches/debug system
 
 ### Problem
