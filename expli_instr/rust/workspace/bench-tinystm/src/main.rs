@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use tm::{TmCell, Transaction};
+use tm::TmCell;
 
 const NUM_CELLS: usize = 100;
 const ITERS: u64 = 1000;

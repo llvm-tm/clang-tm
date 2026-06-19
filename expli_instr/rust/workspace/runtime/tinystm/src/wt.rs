@@ -1,15 +1,15 @@
 use crate::common::*;
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{compiler_fence, fence, Ordering};
 
 fn tx_aborted() -> bool {
     tx_active() && with_tx(|tx| tx.aborted)
 }
 
 fn read_word<T: Primitive>(addr: usize) -> T {
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
     if !runtime_core::is_tm_address(addr as *const u8) { return unsafe { (addr as *const T).read() }; }
     if !tx_active() { return unsafe { (addr as *const T).read() }; }
-    if let Some(entry) = with_tx(|tx| tx.write_set.get(&addr).map(|e| e.value.clone())) {
+    if let Some(entry) = with_tx(|tx| ws_get(&tx.write_set, addr).map(|e| e.value.clone())) {
         return T::from_typed(&entry);
     }
     loop {
@@ -45,18 +45,17 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 }
 
 fn write_word<T: Primitive>(addr: usize, val: T) {
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
     if !runtime_core::is_tm_address(addr as *const u8) { unsafe { (addr as *mut T).write(val); } return; }
     if tx_aborted() { return; }
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
     let tv = val.to_typed();
     // Existing write-set entry → update in-place, no lock needed
-    if with_tx(|tx| tx.write_set.contains_key(&addr)) {
-        // Capture old value for undo (write-through modifies memory)
+    if with_tx(|tx| ws_contains(&tx.write_set, addr)) {
         let old_val: T = unsafe { (addr as *const T).read() };
         unsafe { (addr as *mut T).write(val); }
         with_tx(|tx| {
-            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone());
+            ws_write(&mut tx.write_set, addr, tv.clone());
             tx.undo_backs.push(old_val.to_typed().into_write_back(addr));
         });
         return;
@@ -83,7 +82,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         let old_tv = old_val.to_typed();
         with_tx(|tx| {
             tx.undo_backs.push(old_tv.into_write_back(addr));
-            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv });
+            ws_write(&mut tx.write_set, addr, tv);
         });
         return;
     }
@@ -105,7 +104,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     let old_tv = old_val.to_typed();
     with_tx(|tx| { tx.locked_addrs.push(lock_idx);
         tx.undo_backs.push(old_tv.into_write_back(addr));
-        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv });
+        ws_write(&mut tx.write_set, addr, tv);
     });
 }
 
@@ -114,20 +113,19 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 }
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
     if !runtime_core::is_tm_address(addr as *const u8) { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     if tx_aborted() { return; }
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     // Existing write-set entry → update in-place, no lock needed
-    if with_tx(|tx| tx.write_set.contains_key(&addr)) {
-        // Save old bytes for undo (write-through modifies memory)
+    if with_tx(|tx| ws_contains(&tx.write_set, addr)) {
         let mut old_buf = vec![0u8; src.len()];
         unsafe { std::ptr::copy_nonoverlapping(addr as *const u8, old_buf.as_mut_ptr(), src.len()); }
         unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); }
         let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
         let old_tv = TypedValue::Bytes(old_buf.into_boxed_slice());
         with_tx(|tx| {
-            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone());
+            ws_write(&mut tx.write_set, addr, tv);
             tx.undo_backs.push(old_tv.into_write_back(addr));
         });
         return;
@@ -154,7 +152,7 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
         let old_tv = TypedValue::Bytes(old_buf.into_boxed_slice());
         with_tx(|tx| {
             tx.undo_backs.push(old_tv.into_write_back(addr));
-            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv });
+            ws_write(&mut tx.write_set, addr, tv);
         });
         return;
     }
@@ -170,16 +168,14 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
         }
         std::hint::spin_loop();
     }
-    // Save old bytes for undo
     let mut old_buf = vec![0u8; src.len()];
     unsafe { std::ptr::copy_nonoverlapping(addr as *const u8, old_buf.as_mut_ptr(), src.len()); }
-    // Write through
     unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     let old_tv = TypedValue::Bytes(old_buf.into_boxed_slice());
     with_tx(|tx| { tx.locked_addrs.push(lock_idx);
         tx.undo_backs.push(old_tv.into_write_back(addr));
-        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv });
+        ws_write(&mut tx.write_set, addr, tv);
     });
 }
 

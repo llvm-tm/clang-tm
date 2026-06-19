@@ -1,10 +1,10 @@
 use crate::common::*;
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{compiler_fence, fence, Ordering};
 
 fn read_word<T: Primitive>(addr: usize) -> T {
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
     if !tx_active() { return unsafe { (addr as *const T).read() }; }
-    if let Some(entry) = with_tx(|tx| tx.write_set.get(&addr).map(|e| e.value.clone())) {
+    if let Some(entry) = with_tx(|tx| ws_get(&tx.write_set, addr).map(|e| e.value.clone())) {
         return T::from_typed(&entry);
     }
     loop {
@@ -32,13 +32,13 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 }
 
 fn write_word<T: Primitive>(addr: usize, val: T) {
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
     if with_tx(|tx| tx.aborted) { return; }
     let tv = val.to_typed();
     // Quick check: already in write_set → just update value in-place
-    if with_tx(|tx| tx.write_set.contains_key(&addr)) {
-        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()); });
+    if with_tx(|tx| ws_contains(&tx.write_set, addr)) {
+        with_tx(|tx| { if let Some((_, e)) = tx.write_set.iter_mut().find(|(a, _)| *a == addr) { e.value = tv.clone(); } });
         return;
     }
     with_tx(|tx| {
@@ -49,7 +49,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         }
         let version = read_version(addr);
         if version > tx.start_version { tx.aborted = true; return; }
-        tx.write_set.entry(addr).or_insert(WriteEntry { value: tv });
+        tx.write_set.push((addr, WriteEntry { value: tv }));
     });
 }
 
@@ -58,25 +58,11 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 }
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     if with_tx(|tx| tx.aborted) { return; }
-    if with_tx(|tx| tx.write_set.contains_key(&addr)) {
-        let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
-        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()); });
-        return;
-    }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
-    with_tx(|tx| {
-        while is_locked(addr) {
-            #[cfg(feature = "simulation")]
-            { tx.aborted = true; return; }
-            std::hint::spin_loop();
-        }
-        let version = read_version(addr);
-        if version > tx.start_version { tx.aborted = true; return; }
-        tx.write_set.entry(addr).or_insert(WriteEntry { value: tv });
-    });
+    with_tx(|tx| ws_write(&mut tx.write_set, addr, tv.clone()));
 }
 
 fn apply_typed_value(addr: usize, tv: &TypedValue) {
@@ -107,7 +93,7 @@ pub fn tm_commit() -> bool {
         return false;
     }
     if tx.write_set.is_empty() { update_read_write_stats(tx.read_set.len(), 0); return true; }
-    let addrs: Vec<usize> = tx.write_set.keys().copied().collect();
+    let addrs = ws_keys(&tx.write_set);
     let idxs = lock_write_addrs(&addrs);
     gc_tick();
     fence(Ordering::SeqCst);
