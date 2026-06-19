@@ -208,6 +208,33 @@ fn worker(data: &IntruderData) {
 }
 
 // ── Public entry point ─────────────────────────────────────────────
+pub fn test() -> i32 {
+    let mut fails = 0;
+    // Test detect_attack with dictionary
+    let dict: Vec<String> = vec![
+        "attack".to_string(), "virus".to_string(), "malware".to_string(),
+    ];
+    let mut data = [0i8; 256];
+    let msg = b"this is an attack message";
+    for (i, &c) in msg.iter().enumerate() { data[i] = c as i8; }
+    if !detect_attack(&data, msg.len(), &dict) {
+        eprintln!("FAIL: 'attack' not detected"); fails += 1;
+    }
+    let safe = b"hello world this is fine";
+    for (i, &c) in safe.iter().enumerate() { data[i] = c as i8; }
+    if detect_attack(&data, safe.len(), &dict) {
+        eprintln!("FAIL: false positive for safe message"); fails += 1;
+    }
+    // Test case-insensitive matching
+    let mixed = b"Virus found here";
+    for (i, &c) in mixed.iter().enumerate() { data[i] = c as i8; }
+    if !detect_attack(&data, mixed.len(), &dict) {
+        eprintln!("FAIL: case-insensitive 'Virus' not detected"); fails += 1;
+    }
+    if fails > 0 { eprintln!("intruder: {} test(s) failed", fails); }
+    fails
+}
+
 pub fn run(config: &Config, _stop: &AtomicBool, ops: &AtomicU64) {
     let max_flows = config.num_packets;
     let max_packets_per_flow = config.max_length.min(INTRUDER_MAX_PACKETS);

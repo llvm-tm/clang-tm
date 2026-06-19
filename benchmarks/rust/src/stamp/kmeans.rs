@@ -16,6 +16,7 @@ fn sqrt_approx(x: f64) -> f64 {
     s
 }
 
+#[allow(dead_code)]
 struct KMeansData {
     npoints: usize,
     ndims: usize,
@@ -58,6 +59,43 @@ fn accumulate(tid: usize, num_threads: usize, d: &KMeansData,
     });
 }
 
+pub fn test() -> i32 {
+    let mut fails = 0;
+    // Test sqrt_approx
+    let r = sqrt_approx(4.0);
+    if (r - 2.0).abs() > 1e-10 { eprintln!("FAIL: sqrt(4) = {}", r); fails += 1; }
+    let r = sqrt_approx(0.0);
+    if r != 0.0 { eprintln!("FAIL: sqrt(0) = {}", r); fails += 1; }
+
+    // Test euclidean distance logic
+    let p1 = [1.0, 2.0, 3.0];
+    let p2 = [4.0, 5.0, 6.0];
+    let mut dist_sq = 0.0;
+    for i in 0..3 { let d = p1[i] - p2[i]; dist_sq += d * d; }
+    let expected = 27.0f64;
+    if (dist_sq - expected).abs() > 1e-10 { eprintln!("FAIL: dist_sq = {}", dist_sq); fails += 1; }
+
+    // Test cluster assignment
+    let pts = [0.0, 0.0, 6.0, 0.0, 10.0, 0.0];
+    let cents = [0.0, 0.0, 9.0, 0.0];
+    for pi in 0..3 {
+        let mut best = -1i32;
+        let mut best_d = f64::MAX;
+        for ci in 0..2 {
+            let mut d = 0.0;
+            for j in 0..2 {
+                let diff = pts[pi * 2 + j] - cents[ci * 2 + j];
+                d += diff * diff;
+            }
+            if d < best_d { best_d = d; best = ci as i32; }
+        }
+        let expected = [0, 1, 1];
+        if best != expected[pi] { eprintln!("FAIL: point {} assigned to cluster {}", pi, best); fails += 1; }
+    }
+    if fails > 0 { eprintln!("kmeans: {} test(s) failed", fails); }
+    fails
+}
+
 pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
     println!("\n=== KMeans ===");
     let npoints = config.points.max(1);
@@ -67,7 +105,7 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
     println!("  Points: {}  Dims: {}  Clusters: {}  Threshold: {}",
              npoints, ndims, nclusters, threshold);
 
-    let mut d = KMeansData {
+    let d = KMeansData {
         npoints, ndims, nclusters, threshold,
         points: (0..npoints * ndims).map(|_| TmCell::new(0.0)).collect(),
         centroids: (0..nclusters * ndims).map(|_| TmCell::new(0.0)).collect(),

@@ -197,7 +197,33 @@ fn find_best_insert(data: &BayesData, to: i32, tx: &tm::Transaction) -> Task {
     best
 }
 
-pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
+pub fn test() -> i32 {
+    let mut fails = 0;
+    // Test density LL computation
+    // 2 records, 2 vars: var 0 depends on nothing, var 1 depends on var 0
+    let records = vec![
+        vec![0i32, 0],
+        vec![1i32, 1],
+    ];
+    let data = BayesData {
+        num_var: 2, num_records: 2, base_penalty: 1.0,
+        records, parents: vec![ParentSet::new(), ParentSet::new()],
+        children: vec![ParentSet::new(), ParentSet::new()],
+        local_ll: vec![TmCell::new(0.0), TmCell::new(0.0)],
+        base_log_likelihood: TmCell::new(0.0),
+        total_parents: TmCell::new(0),
+        global_max_edges: 2,
+        task_list: TaskList::new(),
+    };
+    let ll_none = compute_density_ll(&data, 0, &[]);
+    if ll_none.is_nan() || ll_none.is_infinite() { eprintln!("FAIL: LL is {}", ll_none); fails += 1; }
+    let ll_w_parent = compute_density_ll(&data, 1, &[0]);
+    if ll_w_parent.is_nan() || ll_w_parent.is_infinite() { eprintln!("FAIL: LL with parent is {}", ll_w_parent); fails += 1; }
+    if fails > 0 { eprintln!("bayes: {} test(s) failed", fails); }
+    fails
+}
+
+pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     println!("\n=== Bayes ===");
     let num_var = config.points.max(8).min(64);
     let num_records = config.num_customers.max(64).min(2048);
