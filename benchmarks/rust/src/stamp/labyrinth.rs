@@ -5,6 +5,73 @@ use tm::{transaction, TmCell};
 use crate::Rng;
 use super::Config;
 
+pub fn test() -> i32 {
+    let mut fails = 0;
+    // BFS always finds path in empty grid
+    let w = 3; let h = 3; let d = 1;
+    let size = w * h * d;
+    let g: Vec<TmCell<i32>> = (0..size).map(|_| TmCell::new(0)).collect();
+    let src = 0usize; let dst = size - 1;
+    let path = {
+        let local: Vec<i32> = (0..size).map(|i| unsafe { *g[i].ptr() }).collect();
+        let mut visited = vec![false; size];
+        let mut queue = std::collections::VecDeque::new();
+        let mut parent = vec![usize::MAX; size];
+        visited[src] = true; queue.push_back(src);
+        while let Some(cur) = queue.pop_front() {
+            if cur == dst { break; }
+            let (cx, cy, cz) = (cur % w, (cur / w) % h, cur / (w * h));
+            for (dx, dy, dz) in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
+                let nx = cx.wrapping_add_signed(dx);
+                let ny = cy.wrapping_add_signed(dy);
+                let nz = cz.wrapping_add_signed(dz);
+                if nx < w && ny < h && nz < d {
+                    let ni = nx + ny * w + nz * w * h;
+                    if !visited[ni] && local[ni] == 0 {
+                        visited[ni] = true; parent[ni] = cur; queue.push_back(ni);
+                    }
+                }
+            }
+        }
+        if !visited[dst] { Vec::new() } else {
+            let mut p = Vec::new(); let mut cur = dst;
+            while cur != usize::MAX { p.push(cur as i32); cur = parent[cur]; }
+            p.reverse(); p
+        }
+    };
+    if path.is_empty() { eprintln!("FAIL: empty grid BFS found no path"); fails += 1; }
+    if path.len() < 5 { eprintln!("FAIL: path too short: {}", path.len()); fails += 1; }
+
+    // Wall blocking middle row
+    for col in 0..w { unsafe { *g[1 * w + col].ptr() = 1; } }
+    let blocked = {
+        let local: Vec<i32> = (0..size).map(|i| unsafe { *g[i].ptr() }).collect();
+        let mut visited = vec![false; size];
+        let mut queue = std::collections::VecDeque::new();
+        visited[src] = true; queue.push_back(src);
+        while let Some(cur) = queue.pop_front() {
+            if cur == dst { break; }
+            let (cx, cy, cz) = (cur % w, (cur / w) % h, cur / (w * h));
+            for (dx, dy, dz) in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
+                let nx = cx.wrapping_add_signed(dx);
+                let ny = cy.wrapping_add_signed(dy);
+                let nz = cz.wrapping_add_signed(dz);
+                if nx < w && ny < h && nz < d {
+                    let ni = nx + ny * w + nz * w * h;
+                    if !visited[ni] && local[ni] == 0 {
+                        visited[ni] = true; queue.push_back(ni);
+                    }
+                }
+            }
+        }
+        !visited[dst]
+    };
+    if !blocked { eprintln!("FAIL: obstacle should block path"); fails += 1; }
+
+    if fails > 0 { eprintln!("labyrinth: {} test(s) failed", fails); }
+    fails
+}
+
 pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
     println!("\n=== Labyrinth ===");
     println!("  Grid: {}x{}x{}", config.grid_x, config.grid_y, config.grid_z);

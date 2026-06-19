@@ -5,8 +5,10 @@ use tm::{transaction, TmCell};
 use crate::Rng;
 use super::Config;
 
+#[allow(dead_code)]
 struct Edge { src: u64, dst: u64, weight: i64 }
 
+#[allow(dead_code)]
 struct CSR {
     row_ptr: Vec<TmCell<u64>>,
     col_idx: Vec<TmCell<u64>>,
@@ -22,6 +24,51 @@ fn has_edge(csr: &CSR, src: u64, dst: u64) -> bool {
         }
         false
     })
+}
+
+pub fn test() -> i32 {
+    let mut fails = 0;
+    // Build simple graph CSR manually (no TM)
+    let edges = [(0u64, 1u64), (1u64, 2u64), (2u64, 0u64), (1u64, 3u64)];
+    let num_vertices = 4u64;
+    let mut row_ptr = vec![0u64; num_vertices as usize + 1];
+    for &(s, _) in &edges { row_ptr[s as usize + 1] += 1; }
+    for i in 1..=num_vertices as usize { row_ptr[i] += row_ptr[i - 1]; }
+    let mut col_idx = vec![0u64; edges.len()];
+    let mut temp_pos = row_ptr.clone();
+    for &(s, d) in &edges {
+        let pos = temp_pos[s as usize] as usize;
+        temp_pos[s as usize] += 1;
+        col_idx[pos] = d;
+    }
+    // Check CSR structure
+    if row_ptr.len() != 5 { eprintln!("FAIL: row_ptr len"); fails += 1; }
+    if col_idx.len() != 4 { eprintln!("FAIL: col_idx len"); fails += 1; }
+    // Check edges
+    let has_edge = |s: u64, d: u64| -> bool {
+        let start = row_ptr[s as usize];
+        let end = row_ptr[s as usize + 1];
+        (start..end).any(|i| col_idx[i as usize] == d)
+    };
+    if !has_edge(0, 1) { eprintln!("FAIL: missing edge 0->1"); fails += 1; }
+    if !has_edge(1, 2) { eprintln!("FAIL: missing edge 1->2"); fails += 1; }
+    if !has_edge(2, 0) { eprintln!("FAIL: missing edge 2->0"); fails += 1; }
+    if !has_edge(1, 3) { eprintln!("FAIL: missing edge 1->3"); fails += 1; }
+    if has_edge(0, 2) { eprintln!("FAIL: unexpected edge 0->2"); fails += 1; }
+    // Check triangle (0,1,2)
+    let mut found_triangle = false;
+    for a in 0..num_vertices {
+        for i in row_ptr[a as usize]..row_ptr[a as usize + 1] {
+            let b = col_idx[i as usize];
+            for j in row_ptr[b as usize]..row_ptr[b as usize + 1] {
+                let c = col_idx[j as usize];
+                if has_edge(c, a) { found_triangle = true; }
+            }
+        }
+    }
+    if !found_triangle { eprintln!("FAIL: triangle (0,1,2) not found"); fails += 1; }
+    if fails > 0 { eprintln!("ssca2: {} test(s) failed", fails); }
+    fails
 }
 
 pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
