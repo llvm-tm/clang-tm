@@ -13,11 +13,14 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
     let grid = Arc::new(grid);
     let dur = std::time::Duration::from_millis(config.duration as u64);
 
+    let g_done = AtomicU64::new(0);
+
     std::thread::scope(|s| {
         for tid in 0..config.threads {
             let g = grid.clone();
             let sc = stop;
             let so = ops;
+            let gd = &g_done;
             s.spawn(move || {
                 let rng = RefCell::new(Rng::new(tid as u64 * 12345 + 42));
                 while !sc.load(Ordering::Relaxed) {
@@ -28,39 +31,80 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
                     let dy = (rng.borrow_mut().next() % config.grid_y as u64) as usize;
                     let dz = (rng.borrow_mut().next() % config.grid_z as u64) as usize;
 
-                    let _ = transaction(|tx| {
-                        fn idx(xs: usize, ys: usize, _zs: usize, x: usize, y: usize, z: usize) -> usize {
-                            z * xs * ys + y * xs + x
-                        }
-                        let grid: &[TmCell<i32>] = &*g;
-                        if tx.read(&grid[idx(config.grid_x, config.grid_y, config.grid_z, sx, sy, sz)]) != 0 { return false; }
-                        if tx.read(&grid[idx(config.grid_x, config.grid_y, config.grid_z, dx, dy, dz)]) != 0 { return false; }
+                    fn idx(xs: usize, ys: usize, _zs: usize, x: usize, y: usize, z: usize) -> usize {
+                        z * xs * ys + y * xs + x
+                    }
 
-                        let capacity = config.grid_x * config.grid_y * config.grid_z;
-                        let mut q = Vec::with_capacity(capacity);
-                        q.push((sx, sy, sz, 0i32));
-                        tx.write(&grid[idx(config.grid_x, config.grid_y, config.grid_z, sx, sy, sz)], 1);
-                        let mut found = false;
-                        let mut front = 0;
-                        while front < q.len() && !found {
-                            let (cx, cy, cz, dist) = q[front];
-                            front += 1;
-                            if dist > 10 { break; }
-                            for (ddx, ddy, ddz) in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
-                                let nx = cx.wrapping_add(ddx as usize);
-                                let ny = cy.wrapping_add(ddy as usize);
-                                let nz = cz.wrapping_add(ddz as usize);
-                                if nx >= config.grid_x || ny >= config.grid_y || nz >= config.grid_z { continue; }
-                                if nx == dx && ny == dy && nz == dz { found = true; break; }
-                                let idx = idx(config.grid_x, config.grid_y, config.grid_z, nx, ny, nz);
-                                if tx.read(&grid[idx]) == 0 {
-                                    tx.write(&grid[idx], 1);
-                                    q.push((nx, ny, nz, dist + 1));
-                                }
+                    // Read grid snapshot (non-TM may be stale)
+                    let local: Vec<i32> = (0..size).map(|i| unsafe { *g[i].ptr() }).collect();
+                    let w = config.grid_x;
+                    let h = config.grid_y;
+                    let d = config.grid_z;
+
+                    // BFS on local copy
+                    let mut q: Vec<(usize, usize, usize)> = Vec::with_capacity(size);
+                    let mut dist: Vec<i32> = vec![-1i32; size];
+                    let start_i = idx(w, h, d, sx, sy, sz);
+                    let dst_i = idx(w, h, d, dx, dy, dz);
+                    if local[start_i] != 0 || local[dst_i] != 0 { continue; }
+
+                    dist[start_i] = 0;
+                    q.push((sx, sy, sz));
+                    let mut front = 0;
+                    while front < q.len() {
+                        let (cx, cy, cz) = q[front];
+                        front += 1;
+                        if cx == dx && cy == dy && cz == dz { break; }
+                        for &(ddx, ddy, ddz) in &[(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
+                            let nx = cx.wrapping_add(ddx as usize);
+                            let ny = cy.wrapping_add(ddy as usize);
+                            let nz = cz.wrapping_add(ddz as usize);
+                            if nx >= w || ny >= h || nz >= d { continue; }
+                            let ni = idx(w, h, d, nx, ny, nz);
+                            if local[ni] == 0 && dist[ni] < 0 {
+                                dist[ni] = dist[idx(w, h, d, cx, cy, cz)] + 1;
+                                q.push((nx, ny, nz));
                             }
                         }
-                        found
+                    }
+                    if dist[dst_i] < 0 { continue; }
+
+                    // Traceback (non-TM)
+                    let mut path: Vec<(usize, usize, usize)> = Vec::new();
+                    let (mut cx, mut cy, mut cz) = (dx, dy, dz);
+                    loop {
+                        path.push((cx, cy, cz));
+                        if cx == sx && cy == sy && cz == sz { break; }
+                        let mut best = (0i32, 0usize, 0usize, 0usize);
+                        for &(ddx, ddy, ddz) in &[(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
+                            let nx = cx.wrapping_add(ddx as usize);
+                            let ny = cy.wrapping_add(ddy as usize);
+                            let nz = cz.wrapping_add(ddz as usize);
+                            if nx >= w || ny >= h || nz >= d { continue; }
+                            let nd = dist[idx(w, h, d, nx, ny, nz)];
+                            if nd >= 0 && (best.0 < 0 || nd < best.0) {
+                                best = (nd, nx, ny, nz);
+                            }
+                        }
+                        if best.0 < 0 { path.clear(); break; }
+                        cx = best.1; cy = best.2; cz = best.3;
+                    }
+                    if path.is_empty() { continue; }
+                    path.reverse();
+
+                    // TX-mark: atomically verify and mark path cells
+                    let ok = transaction(|tx| {
+                        for i in 1..path.len().saturating_sub(1) {
+                            let pi = idx(w, h, d, path[i].0, path[i].1, path[i].2);
+                            if tx.read(&g[pi]) != 0 { return false; }
+                        }
+                        for i in 1..path.len().saturating_sub(1) {
+                            let pi = idx(w, h, d, path[i].0, path[i].1, path[i].2);
+                            tx.write(&g[pi], 1);
+                        }
+                        true
                     });
+                    if ok { gd.fetch_add(1, Ordering::Relaxed); }
                     so.fetch_add(1, Ordering::Relaxed);
                 }
             });
@@ -68,5 +112,6 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
         std::thread::sleep(dur);
         stop.store(true, Ordering::Relaxed);
     });
-    println!("  Labyrinth complete");
+    let elapsed = g_done.load(Ordering::Relaxed);
+    println!("  Paths routed: {}  Operations: {}", elapsed, ops.load(Ordering::Relaxed));
 }
