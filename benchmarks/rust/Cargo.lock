@@ -13,6 +13,7 @@ dependencies = [
 name = "benchmarks"
 version = "0.1.0"
 dependencies = [
+ "addrspace",
  "containers",
  "fastrand",
  "libc",
