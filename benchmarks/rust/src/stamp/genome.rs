@@ -1,71 +1,69 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::cell::RefCell;
-use tm::{transaction, TmCell};
 use crate::Rng;
 use super::Config;
 
-pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
+fn str_hash(s: &[u8], start: usize, len: usize) -> u64 {
+    let mut h = 0u64;
+    for i in start..start + len {
+        h = h.wrapping_mul(131).wrapping_add(s[i] as u64);
+    }
+    h
+}
+
+pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
     println!("\n=== Genome ===");
-    println!("  Gene length: {}  Segments: {}  Segment length: {}",
-             config.gene_length, config.num_segments, config.segment_length);
+    let gene_len = config.gene_length.max(1).min(1 << 20);
+    let seg_len = config.segment_length.max(1).min(gene_len - 1);
+    let num_seg = config.num_segments.max(1).min(1 << 20);
+    println!("  Gene length: {}  Segment length: {}  Segments: {}",
+             gene_len, seg_len, num_seg);
 
-    let hash_size: usize = 1 << 18;
-    let hash_table: Vec<TmCell<u32>> = (0..hash_size).map(|_| TmCell::new(u32::MAX)).collect();
-    let gene_len = config.gene_length.min(1 << 20);
-    let gene: Vec<u8> = (0..gene_len).map(|i| (i.wrapping_mul(6364136223846793005) >> 40 & 0x3) as u8).collect();
-    let table = Arc::new(hash_table);
-    let dur = std::time::Duration::from_millis(config.duration as u64);
-    let num_seg = config.num_segments.min(1 << 20);
-    let g_matches = AtomicU64::new(0);
-    let g_reads = AtomicU64::new(0);
+    let mut rng = Rng::new(42);
+    let bases = [b'a', b'c', b'g', b't'];
 
-    let t0 = std::time::Instant::now();
-    std::thread::scope(|s| {
-        for tid in 0..config.threads {
-            let ht = table.clone();
-            let g = gene.clone();
-            let sc = stop;
-            let so = ops;
-            let gm = &g_matches;
-            let gr = &g_reads;
-            s.spawn(move || {
-                let rng = RefCell::new(Rng::new(tid as u64 * 12345 + 42));
-                let chunk = num_seg / config.threads;
-                let start = tid * chunk;
-                let end = if tid == config.threads - 1 { num_seg } else { start + chunk };
+    // Generate gene
+    let gene: Vec<u8> = (0..gene_len).map(|_| bases[(rng.next() % 4) as usize]).collect();
 
-                while !sc.load(Ordering::Relaxed) {
-                    for _ in start..end {
-                        let pos = (rng.borrow_mut().next() as usize) % (gene_len.saturating_sub(config.segment_length));
-                        let mut hash_val = 0u32;
-                        for j in 0..config.segment_length {
-                            hash_val = hash_val.wrapping_mul(31).wrapping_add(g.get(pos + j).copied().unwrap_or(0) as u32);
-                        }
-                        let bucket = (hash_val as usize) % hash_size;
+    // Generate segments
+    let segments: Vec<Vec<u8>> = (0..num_seg)
+        .map(|_| {
+            let start = (rng.next() as usize) % (gene_len - seg_len);
+            gene[start..start + seg_len].to_vec()
+        })
+        .collect();
 
-                        let new_match = transaction(|tx| {
-                            let cur = tx.read(&ht[bucket]);
-                            if cur == u32::MAX || cur == hash_val {
-                                tx.write(&ht[bucket], hash_val);
-                                cur == u32::MAX
-                            } else {
-                                false
-                            }
-                        });
+    // Dedup (sequential, no TM — matches C++ single-threaded approach)
+    let unique: HashSet<Vec<u8>> = segments.into_iter().collect();
+    let unique_segs: Vec<Vec<u8>> = unique.into_iter().collect();
+    println!("  Unique segments: {}", unique_segs.len());
 
-                        if new_match { gm.fetch_add(1, Ordering::Relaxed); }
-                        gr.fetch_add(1, Ordering::Relaxed);
-                    }
-                    so.fetch_add(1, Ordering::Relaxed);
-                }
-            });
+    // Match: find overlapping suffix/prefix matches
+    let mut hash_table: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (idx, s) in unique_segs.iter().enumerate() {
+        if s.len() > 1 {
+            let h = str_hash(s, 0, s.len() - 1);
+            hash_table.entry(h).or_default().push(idx);
         }
-        std::thread::sleep(dur);
-        stop.store(true, Ordering::Relaxed);
-    });
-    let elapsed = t0.elapsed().as_millis() as u64;
-    let matches = g_matches.load(Ordering::Relaxed);
-    let reads = g_reads.load(Ordering::Relaxed);
-    println!("  Matches: {}  Reads: {}  Elapsed: {} ms", matches, reads, elapsed);
+    }
+
+    let mut matches = 0u64;
+    for j in (1..seg_len).rev() {
+        for (idx, s) in unique_segs.iter().enumerate() {
+            if s.len() <= j { continue; }
+            let end_h = str_hash(s, s.len() - j, j);
+            if let Some(candidates) = hash_table.get(&end_h) {
+                for &cidx in candidates {
+                    if cidx == idx { continue; }
+                    let cs = &unique_segs[cidx];
+                    if cs.len() < j { continue; }
+                    if s[s.len() - j..s.len()] == cs[0..j] {
+                        matches += 1;
+                    }
+                }
+            }
+        }
+    }
+    println!("  Overlapping matches: {}", matches);
 }
