@@ -18,6 +18,7 @@
 #include <vector>
 #include <chrono>
 #include <atomic>
+#include <algorithm>
 #include <random>
 
 #include "../../tests/benchmark_test.hpp"
