@@ -1,10 +1,10 @@
 use crate::common::*;
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{compiler_fence, fence, Ordering};
 
 fn read_word<T: Primitive>(addr: usize) -> T {
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
     if !tx_active() { return unsafe { (addr as *const T).read() }; }
-    if let Some(entry) = with_tx(|tx| tx.write_set.get(&addr).map(|e| e.value.clone())) {
+    if let Some(entry) = with_tx(|tx| ws_get(&tx.write_set, addr).map(|e| e.value.clone())) {
         return T::from_typed(&entry);
     }
     loop {
@@ -37,14 +37,14 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 }
 
 fn write_word<T: Primitive>(addr: usize, val: T) {
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
     if with_tx(|tx| tx.aborted) { return; }
     let tv = val.to_typed();
     // Existing write-set entry → update in-place, no lock needed
-    if with_tx(|tx| tx.write_set.contains_key(&addr)) {
+    if with_tx(|tx| ws_contains(&tx.write_set, addr)) {
         with_tx(|tx| {
-            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone());
+            ws_write(&mut tx.write_set, addr, tv.clone());
             tx.write_backs.push(tv.clone().into_write_back(addr));
         });
         return;
@@ -67,7 +67,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     // Self-ownership check: different addresses may hash to the same lock
     if with_tx(|tx| tx.locked_addrs.contains(&lock_idx)) {
         with_tx(|tx| {
-            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv.clone() });
+            ws_write(&mut tx.write_set, addr, tv.clone());
             tx.write_backs.push(tv.into_write_back(addr));
         });
         return;
@@ -85,7 +85,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         std::hint::spin_loop();
     }
     with_tx(|tx| { tx.locked_addrs.push(lock_idx);
-        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv.clone() });
+        ws_write(&mut tx.write_set, addr, tv.clone());
         tx.write_backs.push(tv.into_write_back(addr));
     });
 }
@@ -95,18 +95,10 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 }
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     if with_tx(|tx| tx.aborted) { return; }
-    // Existing write-set entry → update in-place, no lock needed
-    if with_tx(|tx| tx.write_set.contains_key(&addr)) {
-        let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
-        with_tx(|tx| {
-            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone());
-            tx.write_backs.push(tv.clone().into_write_back(addr));
-        });
-        return;
-    }
+    let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     {
         let mut spins = 0u64;
         while is_locked(addr) {
@@ -121,12 +113,10 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     let version = read_version(addr);
     if version > with_tx(|tx| tx.start_version) { with_tx(|tx| tx.aborted = true); return; }
     let lock_idx = lock_index(addr);
-    // Self-ownership check: different addresses may hash to the same lock
     if with_tx(|tx| tx.locked_addrs.contains(&lock_idx)) {
-        let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
         with_tx(|tx| {
-            tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv.clone() });
-            tx.write_backs.push(tv.into_write_back(addr));
+            ws_write(&mut tx.write_set, addr, tv.clone());
+            tx.write_backs.push(tv.clone().into_write_back(addr));
         });
         return;
     }
@@ -142,9 +132,8 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
         }
         std::hint::spin_loop();
     }
-    let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| { tx.locked_addrs.push(lock_idx);
-        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv.clone() });
+        ws_write(&mut tx.write_set, addr, tv.clone());
         tx.write_backs.push(tv.into_write_back(addr));
     });
 }

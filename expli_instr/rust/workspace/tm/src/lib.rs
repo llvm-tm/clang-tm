@@ -355,25 +355,30 @@ impl Transaction {
 }
 
 // ── transaction() ───────────────────────────────────────
-// Retry loop shared by ALL Rust TM backends.
+// Retry loop — two implementations selected at compile time.
 //
-// Abort-retry dispatch depends on which backend is active:
+// TinySTM family (wbctl/wbetl/wt) — lazy-abort flag:
+//   The closure runs to completion. tm_commit() checks the
+//   tx.aborted flag and returns false if set → retry.
+//   No catch_unwind needed: hot retries avoid unwind overhead.
 //
-//   TinySTM family (wbctl/wbetl/wt) — lazy-abort flag:
-//     The closure runs to completion. tm_commit() checks the
-//     tx.aborted flag and returns false if set → retry.
-//     catch_unwind only catches real panics (user code), which
-//     it re-panics. This is the common case: hot retries do not
-//     allocate or unwind.
+// All other backends (norec, tl2, swisstm, dudetm, ...):
+//   On conflict the backend panics with TmxAbort. catch_unwind
+//   intercepts it, tm_abort() drops the aborted tx state, and
+//   the loop retries. Real panics (other payloads) are re-panicked.
 //
-//   tl2, dudetm, norec — panic_any(TmxAbort):
-//     On conflict the backend panics with TmxAbort. catch_unwind
-//     intercepts it, tm_abort() drops the aborted tx state, and
-//     the loop retries. Real panics (other payloads) are re-panicked.
-//
-// In both cases the http://TmxAbort hook (tm_install_tmx_hook)
+// In both cases the TmxAbort hook (tm_install_tmx_hook)
 // suppresses the default panic handler for TmxAbort panics so
 // they don't pollute stderr.
+
+/// Panic-based backends: must catch TmxAbort panics.
+#[cfg(any(
+    feature = "norec", feature = "tl2", feature = "swisstm",
+    feature = "dudetm", feature = "tsxsgl", feature = "nvhtm",
+    feature = "spht", feature = "leftright", feature = "leftright-single",
+    feature = "romulus", feature = "xtm",
+    feature = "sgl-persistent", feature = "sgl-distributed",
+))]
 pub fn transaction<T, F>(f: F) -> T
 where
     F: Fn(&Transaction) -> T,
@@ -391,5 +396,25 @@ where
                 std::panic::resume_unwind(payload);
             }
         }
+    }
+}
+
+/// Lazy-abort backends (TinySTM family): retry without catch_unwind.
+#[cfg(not(any(
+    feature = "norec", feature = "tl2", feature = "swisstm",
+    feature = "dudetm", feature = "tsxsgl", feature = "nvhtm",
+    feature = "spht", feature = "leftright", feature = "leftright-single",
+    feature = "romulus", feature = "xtm",
+    feature = "sgl-persistent", feature = "sgl-distributed",
+)))]
+pub fn transaction<T, F>(f: F) -> T
+where
+    F: Fn(&Transaction) -> T,
+{
+    loop {
+        tm_begin();
+        let tx = Transaction { _private: () };
+        let val = f(&tx);
+        if tm_commit() { return val; }
     }
 }

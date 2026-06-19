@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 #[cfg(not(feature = "simulation"))]
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering, fence};
@@ -99,12 +98,39 @@ pub struct WriteEntry {
     pub value: TypedValue,
 }
 
+// ── Write-set helpers (Vec linear scan for tiny write sets) ──
+#[inline]
+pub fn ws_contains(ws: &[(usize, WriteEntry)], addr: usize) -> bool {
+    ws.iter().any(|(a, _)| *a == addr)
+}
+
+#[inline]
+pub fn ws_get(ws: &[(usize, WriteEntry)], addr: usize) -> Option<&WriteEntry> {
+    ws.iter().find(|(a, _)| *a == addr).map(|(_, e)| e)
+}
+
+/// Upsert: update existing entry's value or insert new entry.
+#[inline]
+pub fn ws_write(ws: &mut Vec<(usize, WriteEntry)>, addr: usize, value: TypedValue) {
+    if let Some((_, entry)) = ws.iter_mut().find(|(a, _)| *a == addr) {
+        entry.value = value;
+    } else {
+        ws.push((addr, WriteEntry { value }));
+    }
+}
+
+/// Collect unique addresses from write-set into a Vec.
+#[inline]
+pub fn ws_keys(ws: &[(usize, WriteEntry)]) -> Vec<usize> {
+    ws.iter().map(|(a, _)| *a).collect()
+}
+
 // ── Transaction state ───────────────────────────────────
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
 pub struct TxState {
     pub read_set: Vec<(usize, u64)>,
-    pub write_set: HashMap<usize, WriteEntry>,
+    pub write_set: Vec<(usize, WriteEntry)>,
     #[cfg(any(feature = "wbctl", feature = "wbetl"))]
     pub write_backs: Vec<WriteBack>,
     #[cfg(feature = "wt")]
@@ -121,7 +147,7 @@ impl TxState {
     pub fn new(start_version: u64) -> Self {
         TxState {
             read_set: Vec::with_capacity(64),
-            write_set: HashMap::with_capacity(8),
+            write_set: Vec::with_capacity(8),
             #[cfg(any(feature = "wbctl", feature = "wbetl"))]
             write_backs: Vec::new(),
             #[cfg(feature = "wt")]
@@ -144,6 +170,8 @@ impl TxState {
 }
 
 // ── Thread-local / simulation state ──────────────────────
+#[cfg(feature = "simulation")]
+use std::collections::HashMap;
 #[cfg(feature = "simulation")]
 use std::sync::Mutex;
 
