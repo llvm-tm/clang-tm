@@ -9,18 +9,24 @@ fn read_word<T: Primitive>(addr: usize) -> T {
     }
     loop {
         while is_locked(addr) {
+            if with_tx(|tx| tx.locked_addrs.contains(&lock_index(addr))) { break; }
             #[cfg(feature = "simulation")]
-            std::panic::panic_any(TmxAbort);
-            #[cfg(not(feature = "simulation"))]
+            { with_tx(|tx| tx.aborted = true); return unsafe { (addr as *const T).read() }; }
             std::hint::spin_loop();
         }
         let version = read_version(addr);
         let value: T = unsafe { (addr as *const T).read() };
         if read_version(addr) != version { continue; }
-        if with_tx(|tx| {
-            if version > tx.start_version { true }
-            else { tx.read_set.push((addr, version)); false }
-        }) { std::panic::panic_any(TmxAbort); }
+        let retry = with_tx(|tx| {
+            if version > tx.end_version {
+                if tx.snapshot_extend() { return true; }
+                tx.aborted = true;
+            } else {
+                tx.read_set.push((addr, version));
+            }
+            false
+        });
+        if retry { continue; }
         return value;
     }
 }
@@ -28,20 +34,22 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 fn write_word<T: Primitive>(addr: usize, val: T) {
     fence(Ordering::SeqCst);
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
+    if with_tx(|tx| tx.aborted) { return; }
     let tv = val.to_typed();
+    // Quick check: already in write_set → just update value in-place
+    if with_tx(|tx| tx.write_set.contains_key(&addr)) {
+        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()); });
+        return;
+    }
     with_tx(|tx| {
-        use std::collections::hash_map::Entry;
         while is_locked(addr) {
             #[cfg(feature = "simulation")]
-            std::panic::panic_any(TmxAbort);
-            #[cfg(not(feature = "simulation"))]
+            { tx.aborted = true; return; }
             std::hint::spin_loop();
         }
         let version = read_version(addr);
-        if version > tx.start_version { std::panic::panic_any(TmxAbort); }
-        let entry = tx.write_set.entry(addr);
-        entry.or_insert(WriteEntry { value: tv });
-        tx.read_set.push((addr, version));
+        if version > tx.start_version { tx.aborted = true; return; }
+        tx.write_set.entry(addr).or_insert(WriteEntry { value: tv });
     });
 }
 
@@ -52,9 +60,22 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 fn write_raw_bytes(addr: usize, src: &[u8]) {
     fence(Ordering::SeqCst);
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
+    if with_tx(|tx| tx.aborted) { return; }
+    if with_tx(|tx| tx.write_set.contains_key(&addr)) {
+        let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
+        with_tx(|tx| { tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()); });
+        return;
+    }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| {
-        tx.write_set.entry(addr).and_modify(|e| e.value = tv.clone()).or_insert(WriteEntry { value: tv });
+        while is_locked(addr) {
+            #[cfg(feature = "simulation")]
+            { tx.aborted = true; return; }
+            std::hint::spin_loop();
+        }
+        let version = read_version(addr);
+        if version > tx.start_version { tx.aborted = true; return; }
+        tx.write_set.entry(addr).or_insert(WriteEntry { value: tv });
     });
 }
 
@@ -79,16 +100,21 @@ pub fn tm_abort() {
 pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
     fence(Ordering::SeqCst);
+    if tx.aborted {
+        if !tx.locked_addrs.is_empty() { unlock_indices(&tx.locked_addrs); }
+        TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
     if tx.write_set.is_empty() { update_read_write_stats(tx.read_set.len(), 0); return true; }
     let addrs: Vec<usize> = tx.write_set.keys().copied().collect();
-    if !gc_acquire() { TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
-    fence(Ordering::SeqCst);
     let idxs = lock_write_addrs(&addrs);
-    if !validate_read_set(&tx.read_set) { unlock_indices(&idxs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
+    gc_tick();
+    fence(Ordering::SeqCst);
+    if !validate_read_set(&tx.read_set) { unlock_indices(&idxs); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
     for (addr, entry) in &tx.write_set { apply_typed_value(*addr, &entry.value); }
     fence(Ordering::SeqCst);
     unlock_indices(&idxs);
-    gc_release_and_inc();
     update_read_write_stats(tx.read_set.len(), tx.write_set.len());
     true
 }

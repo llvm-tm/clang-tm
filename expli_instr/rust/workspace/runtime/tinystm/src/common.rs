@@ -7,8 +7,6 @@ use std::sync::OnceLock;
 
 #[allow(unused_imports)]
 pub use runtime_core::{tm_install_tmx_hook, Primitive, TypedValue, WriteBack};
-#[cfg(any(feature = "wbctl", feature = "wbetl"))]
-pub use runtime_core::TmxAbort;
 
 // ── Constants ───────────────────────────────────────────
 const LOCK_MASK: u64 = 0xFF;
@@ -71,16 +69,9 @@ pub fn version_at_index(idx: usize) -> u64 { locks()[idx].version() }
 #[cfg(feature = "wbctl")]
 fn lock_at_index(idx: usize) {
     while !try_lock_at_index(idx) {
-        // In simulation mode, if the lock is held by another thread,
-        // it will never be released — abort the transaction.
-        #[cfg(feature = "simulation")]
-        std::panic::panic_any(TmxAbort);
-        #[cfg(not(feature = "simulation"))]
-        {
-            #[cfg(feature = "stats")]
-            TM_STATS.lock_contentions.fetch_add(1, Ordering::Relaxed);
-            std::hint::spin_loop();
-        }
+        #[cfg(feature = "stats")]
+        TM_STATS.lock_contentions.fetch_add(1, Ordering::Relaxed);
+        std::hint::spin_loop();
     }
 }
 
@@ -97,22 +88,9 @@ static G_CLOCK: AtomicU64 = AtomicU64::new(0);
 
 pub fn gc_snapshot() -> u64 { G_CLOCK.load(Ordering::Acquire) }
 
-pub fn gc_acquire() -> bool {
-    loop {
-        let cur = G_CLOCK.load(Ordering::Relaxed);
-        if cur & 1 == 0
-            && G_CLOCK.compare_exchange_weak(cur, cur | 1, Ordering::Acquire, Ordering::Relaxed).is_ok()
-        { return true; }
-        // In simulation mode, if the global clock is locked, the
-        // holding thread will never release it — abort commit.
-        #[cfg(feature = "simulation")]
-        return false;
-        #[cfg(not(feature = "simulation"))]
-        std::hint::spin_loop();
-    }
-}
-
-pub fn gc_release_and_inc() { G_CLOCK.fetch_add(1, Ordering::Release); }
+/// Atomically increment the global clock and return the **new** value.
+/// No CAS lock-bit — concurrent commits proceed in parallel.
+pub fn gc_tick() -> u64 { G_CLOCK.fetch_add(1, Ordering::AcqRel).wrapping_add(1) }
 
 // ── Write entry ─────────────────────────────────────────
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -132,6 +110,7 @@ pub struct TxState {
     #[cfg(feature = "wt")]
     pub undo_backs: Vec<WriteBack>,
     pub start_version: u64,
+    pub end_version: u64,
     #[allow(dead_code)]
     pub aborted: bool,
     #[allow(dead_code)]
@@ -148,9 +127,19 @@ impl TxState {
             #[cfg(feature = "wt")]
             undo_backs: Vec::new(),
             start_version,
+            end_version: start_version,
             aborted: false,
             locked_addrs: Vec::new(),
         }
+    }
+
+    pub fn snapshot_extend(&mut self) -> bool {
+        let last_version = gc_snapshot();
+        if !validate_read_set(&self.read_set) {
+            return false;
+        }
+        self.end_version = last_version;
+        true
     }
 }
 
@@ -215,6 +204,14 @@ pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub fn tm_abort_count() -> u64 {
     TM_ABORT_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn tm_commit_count() -> u64 {
+    TM_COMMIT_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn tm_reset_stats() {
+    reset_tm_stats();
 }
 
 // ── TM_STATS counters ─────────────────────────────────────

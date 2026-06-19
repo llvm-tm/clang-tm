@@ -12,21 +12,26 @@ fn read_word<T: Primitive>(addr: usize) -> T {
             let mut rspins = 0u64;
             while is_locked(addr) {
                 if with_tx(|tx| tx.locked_addrs.contains(&lock_index(addr))) { break; }
-                // In simulation mode, the lock-holder will never release.
                 #[cfg(feature = "simulation")]
-                std::panic::panic_any(TmxAbort);
+                { with_tx(|tx| tx.aborted = true); return unsafe { (addr as *const T).read() }; }
                 rspins += 1;
-                if rspins > 5000 { std::panic::panic_any(TmxAbort); }
+                if rspins > 5000 { with_tx(|tx| tx.aborted = true); return unsafe { (addr as *const T).read() }; }
                 std::hint::spin_loop();
             }
         }
         let version = read_version(addr);
         let value: T = unsafe { (addr as *const T).read() };
         if read_version(addr) != version { continue; }
-        if with_tx(|tx| {
-            if version > tx.start_version { true }
-            else { tx.read_set.push((addr, version)); false }
-        }) { std::panic::panic_any(TmxAbort); }
+        let retry = with_tx(|tx| {
+            if version > tx.end_version {
+                if tx.snapshot_extend() { return true; }
+                tx.aborted = true;
+            } else {
+                tx.read_set.push((addr, version));
+            }
+            false
+        });
+        if retry { continue; }
         return value;
     }
 }
@@ -34,6 +39,7 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 fn write_word<T: Primitive>(addr: usize, val: T) {
     fence(Ordering::SeqCst);
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
+    if with_tx(|tx| tx.aborted) { return; }
     let tv = val.to_typed();
     // Existing write-set entry → update in-place, no lock needed
     if with_tx(|tx| tx.write_set.contains_key(&addr)) {
@@ -47,16 +53,16 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     {
         let mut spins = 0u64;
         while is_locked(addr) {
-            // In simulation mode, the lock-holder will never release.
+            if with_tx(|tx| tx.locked_addrs.contains(&lock_index(addr))) { break; }
             #[cfg(feature = "simulation")]
-            std::panic::panic_any(TmxAbort);
+            { with_tx(|tx| tx.aborted = true); return; }
             spins += 1;
-            if spins > 5000 { std::panic::panic_any(TmxAbort); }
+            if spins > 5000 { with_tx(|tx| tx.aborted = true); return; }
             std::hint::spin_loop();
         }
     }
     let version = read_version(addr);
-    if version > with_tx(|tx| tx.start_version) { std::panic::panic_any(TmxAbort); }
+    if version > with_tx(|tx| tx.start_version) { with_tx(|tx| tx.aborted = true); return; }
     let lock_idx = lock_index(addr);
     // Self-ownership check: different addresses may hash to the same lock
     if with_tx(|tx| tx.locked_addrs.contains(&lock_idx)) {
@@ -68,14 +74,13 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     }
     let mut lock_spins = 0u64;
     while !try_lock_at_index(lock_idx) {
-        // In simulation mode, the lock-holder will never release.
         #[cfg(feature = "simulation")]
-        std::panic::panic_any(TmxAbort);
+        { with_tx(|tx| tx.aborted = true); return; }
         lock_spins += 1;
         if lock_spins > 10000
             || (is_locked(addr) && read_version(addr) > with_tx(|tx| tx.start_version))
         {
-            std::panic::panic_any(TmxAbort);
+            with_tx(|tx| tx.aborted = true); return;
         }
         std::hint::spin_loop();
     }
@@ -92,6 +97,7 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 fn write_raw_bytes(addr: usize, src: &[u8]) {
     fence(Ordering::SeqCst);
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
+    if with_tx(|tx| tx.aborted) { return; }
     // Existing write-set entry → update in-place, no lock needed
     if with_tx(|tx| tx.write_set.contains_key(&addr)) {
         let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
@@ -104,16 +110,16 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     {
         let mut spins = 0u64;
         while is_locked(addr) {
-            // In simulation mode, the lock-holder will never release.
+            if with_tx(|tx| tx.locked_addrs.contains(&lock_index(addr))) { break; }
             #[cfg(feature = "simulation")]
-            std::panic::panic_any(TmxAbort);
+            { with_tx(|tx| tx.aborted = true); return; }
             spins += 1;
-            if spins > 5000 { std::panic::panic_any(TmxAbort); }
+            if spins > 5000 { with_tx(|tx| tx.aborted = true); return; }
             std::hint::spin_loop();
         }
     }
     let version = read_version(addr);
-    if version > with_tx(|tx| tx.start_version) { std::panic::panic_any(TmxAbort); }
+    if version > with_tx(|tx| tx.start_version) { with_tx(|tx| tx.aborted = true); return; }
     let lock_idx = lock_index(addr);
     // Self-ownership check: different addresses may hash to the same lock
     if with_tx(|tx| tx.locked_addrs.contains(&lock_idx)) {
@@ -126,14 +132,13 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     }
     let mut lock_spins = 0u64;
     while !try_lock_at_index(lock_idx) {
-        // In simulation mode, the lock-holder will never release.
         #[cfg(feature = "simulation")]
-        std::panic::panic_any(TmxAbort);
+        { with_tx(|tx| tx.aborted = true); return; }
         lock_spins += 1;
         if lock_spins > 10000
             || (is_locked(addr) && read_version(addr) > with_tx(|tx| tx.start_version))
         {
-            std::panic::panic_any(TmxAbort);
+            with_tx(|tx| tx.aborted = true); return;
         }
         std::hint::spin_loop();
     }
@@ -156,14 +161,19 @@ pub fn tm_abort() {
 pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
     fence(Ordering::SeqCst);
+    if tx.aborted {
+        if !tx.locked_addrs.is_empty() { unlock_indices(&tx.locked_addrs); }
+        TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
     if tx.write_set.is_empty() { return true; }
-    if !gc_acquire() { TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
+    gc_tick();
     fence(Ordering::SeqCst);
-    if !validate_read_set(&tx.read_set) { unlock_indices(&tx.locked_addrs); gc_release_and_inc(); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
+    if !validate_read_set(&tx.read_set) { unlock_indices(&tx.locked_addrs); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
     for wb in tx.write_backs { wb.apply(); }
     fence(Ordering::SeqCst);
     unlock_indices(&tx.locked_addrs);
-    gc_release_and_inc();
     true
 }
 
