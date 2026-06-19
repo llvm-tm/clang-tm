@@ -28,6 +28,8 @@ pub struct Config {
     pub num_atoms: usize,
     pub max_length: usize,
     pub num_packets: usize,
+    pub percent_attack: usize,
+    pub seed: u64,
     pub scale: usize,
     pub initiator_prob: f64,
     pub update_prob: f64,
@@ -44,6 +46,7 @@ impl Default for Config {
             num_rooms: 10, num_customers: 100, num_items: 10,
             gene_length: 16384, segment_length: 64, num_segments: 16777216,
             num_atoms: 10, max_length: 128, num_packets: 1048576,
+            percent_attack: 10, seed: 1,
             scale: 20, initiator_prob: 1.0, update_prob: 1.0,
             min_degree: 3, max_degree: 3,
         }
