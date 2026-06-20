@@ -1,0 +1,10 @@
+[package]
+name = "runtime-tikv"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tikv-client = "0.4"
+tokio = { version = "1", features = ["rt", "time"] }
+runtime-core = { path = "../core" }
+addrspace = { path = "../../addrspace" }

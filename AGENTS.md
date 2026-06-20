@@ -428,3 +428,47 @@ The LEFTRIGHT bank benchmark (`bank -t 2`) showed money loss ("Money created/des
 
 Throughput with value-based validation: ~630K txns/sec (2 threads, 128 accounts).
 
+## Session 2026-06-20 — TiKV distributed TM backend + transaction() retry fix
+
+### TiKV backend implementation
+
+Created a distributed TM backend wrapping TiKV (Percolator-style 2PC) as a Rust crate `runtime/tikv` and C++ FFI shim `tikv_backend.cpp`.
+
+Key decisions:
+- `tikv_tm_` prefix for C FFI exports to avoid DATA/TEXT symbol conflicts with the hooks system.
+- Lazy-abort retry → promoted to panic-based (TmxAbort) to handle TiKV gRPC errors during reads.
+- TM addresses mapped to TiKV keys via `tm:{region_offset:016x}` (offset from region base for cross-process agreement).
+- Reads: local write-set → local read-set → TiKV `get()` (lazy-fetch with caching).
+- Writes: buffer in local write-set, flushed atomically at commit via TiKV 2PC.
+
+### Bug fixes discovered during implementation
+
+1. **`transaction()` retry on TmxAbort** (`tm/src/lib.rs`): The panic-based `transaction()` function had `resume_unwind(payload)` for ALL panics, including `TmxAbort`. This meant any backend using `TmxAbort` (NOREC, TL2, DUDETM, etc.) would crash on the first abort instead of retrying. Fixed by checking `payload.downcast_ref::<TmxAbort>().is_some()` and retrying with `continue`.
+
+2. **TiKV read macro panic** (`runtime/tikv/src/lib.rs`): `bytes[..n]` panicked when TiKV returned a value shorter than `size_of::<$ty>()` (e.g., previous bank run left 4-byte `i32` values, fuzz_counter read them as 8-byte `u64`). Fixed by using `bytes.len().min(n)` to handle variable-length values.
+
+3. **C FFI wrappers** (`runtime/tikv/src/lib.rs`): Wrappers called nonexistent `tikv_read_*`/`tikv_write_*` functions instead of macro-generated `tm_read_*`/`tm_write_*`. Fixed all 22 wrapper function calls.
+
+4. **TiKV error handling in reads** (`runtime/tikv/src/lib.rs`): Multi-threaded TiKV access returns `TxnNotFound` when reading a key locked by another transaction's commit. Changed from `expect()` panic to rollback + `TmxAbort` signal, triggering the TM retry loop.
+
+### Files created
+
+- `expli_instr/rust/workspace/runtime/tikv/src/lib.rs` — Full TiKV TM backend (396 lines)
+- `expli_instr/rust/workspace/runtime/tikv/Cargo.toml` — Crate manifest
+- `backends/tm_impl/tikv/tikv_backend.cpp` — C++ → Rust FFI shim + LLVM_TM_PLUGIN guards
+- `backends/tm_impl/tikv/README.md` — Architecture docs and build instructions
+
+### Files modified
+
+- `expli_instr/rust/workspace/tm/src/lib.rs` — Added `use runtime_core::TmxAbort`; `tikv` feature re-export block; `tikv` to exclusivity checks, at-least-one check, and `transaction()` cfg lists; fixed `transaction()` retry on TmxAbort
+- `expli_instr/rust/workspace/tm/Cargo.toml` — Added `tikv` feature → `runtime-tikv`
+- `expli_instr/rust/workspace/Cargo.toml` — Added `runtime/tikv` workspace member
+- `benchmarks/rust/Cargo.toml` — Added `tikv` feature passthrough
+
+### Verification
+
+**Single-threaded bank** (1 thread, 64 accounts, 5s): PASS — money conserved (795 txns, 0 aborts)
+**Multi-threaded bank** (4 threads, 64 accounts, 10s): PASS — money conserved (4702 txns, 0 TM-level aborts, TiKV handles conflicts via Percolator 2PC retry)
+
+Note: Multi-threaded TiKV sees contention errors (TxnNotFound) during concurrent reads/writes. The backend handles these by rolling back the TiKV transaction and signaling TmxAbort. The `transaction()` retry loop re-executes. This is slower than shared-memory backends but correct.
+
