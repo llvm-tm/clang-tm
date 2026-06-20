@@ -139,9 +139,8 @@ validate()  //
 		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 	auto *tx = current_tx_wbctl;
-	for (auto &it : tx->read_set) {
-		auto &addr = it.first;
-		auto &r = it.second;
+	for (auto &r : tx->read_set) {
+		void *addr = r.addr;
 		ByteOffset bo((word_t)addr);
 		Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 		word_t l = lock->get();
@@ -215,18 +214,27 @@ commit()    //
 			// Null/low addresses from linked-list traversal bugs: don't lock
 			// (there's nothing to write back) and assert on the read-side.
 			if (addr == nullptr || (uintptr_t)addr < 0x100000) continue;
-			auto &w = tx->write_set[addr];
+			auto &w = *tx->ws_find(addr);
 			ByteOffset bo((word_t)addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 			volatile word_t l = lock->get();
 			word_t owner = (l & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS;
 			if (owner != tx->id) {                // skip self-locks
+				// Retry limit on lock acquisition to break circular-wait deadlock:
+				// when two threads hold a lock each and need each other's, extend()
+				// keeps validating successfully (neither has committed) so no abort
+				// is ever called and the token threshold is never reached.
+				// After LOCK_RETRY_LIMIT attempts we abort and retry from the top.
+				int lock_retries = 0;
 				while (!lock->try_lock(tx->id)) { // if lock is busy...
 					if (!extend()) {              // ... try to validate the read-set...
 						if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 5)) {
 							continue;
 						}
 						abort_tx("commit_lock");
+					}
+					if (++lock_retries >= 1000) {
+						abort_tx("commit_lock_timeout");
 					}
 				}
 				tx->locks_held.push_back(lock); // keep track of locks
@@ -341,18 +349,18 @@ read_word_ctl(                                                //
 	// Corrupted address detection removed (was shadowing root cause).
 
 	// Check write-set for this exact address
-	auto w = tx->write_set.find(addr);
-	if (w != tx->write_set.end()) {
-		if (w->second.type == sz) {
-			return w->second.new_val;
+	auto *w = tx->ws_find(addr);
+	if (w) {
+		if (w->type == sz) {
+			return w->new_val;
 		}
 		// POINTER and UINT64 are both 8 bytes and share storage in any_type_t
 		// (MAP_ANY maps ptr and u8 to the same member).  LLVM type mapping can
 		// write a value as UINT64 (ptrtoint in deque internals) and read it back
 		// as POINTER, or vice versa.  Treat them as interchangeable.
-		if ((sz == ValueType::POINTER && w->second.type == ValueType::UINT64) ||
-		    (sz == ValueType::UINT64 && w->second.type == ValueType::POINTER)) {
-			return w->second.new_val;
+		if ((sz == ValueType::POINTER && w->type == ValueType::UINT64) ||
+		    (sz == ValueType::UINT64 && w->type == ValueType::POINTER)) {
+			return w->new_val;
 		}
 		// REVERSE-type check: existing is narrower (UINT8/16/32), reading wider
 		// (UINT64, POINTER).  Try to reconstruct the wider value from sub-word
@@ -367,15 +375,15 @@ read_word_ctl(                                                //
 		//       to memory, get stale data (0), and pointer+offset produces
 		//       tiny invalid addresses.
 		if ((sz == ValueType::UINT64 || sz == ValueType::POINTER) &&
-		    (w->second.type == ValueType::UINT8 || w->second.type == ValueType::UINT16 ||
-		     w->second.type == ValueType::UINT32)) {
+		    (w->type == ValueType::UINT8 || w->type == ValueType::UINT16 ||
+		     w->type == ValueType::UINT32)) {
 			uint64_t merged = 0;
 			bool all_found = true;
 			for (unsigned i = 0; i < 8; i++) {
 				void *byte_addr = reinterpret_cast<void *>((uintptr_t)addr + i);
-				auto it = tx->write_set.find(byte_addr);
-				if (it != tx->write_set.end() && it->second.type == ValueType::UINT8) {
-					merged |= (static_cast<uint64_t>(it->second.new_val.u1)) << (i * 8);
+				auto *it = tx->ws_find(byte_addr);
+				if (it && it->type == ValueType::UINT8) {
+					merged |= (static_cast<uint64_t>(it->new_val.u1)) << (i * 8);
 				} else {
 					all_found = false;
 					break;
@@ -393,27 +401,27 @@ read_word_ctl(                                                //
 		// via memmove byte loop in deque internal operations).
 		if (sz == ValueType::UINT8) {
 			any_type_t result;
-			if (w->second.type == ValueType::UINT64) {
-				result.u1 = static_cast<uint8_t>(w->second.new_val.u8 & 0xFF);
+			if (w->type == ValueType::UINT64) {
+				result.u1 = static_cast<uint8_t>(w->new_val.u8 & 0xFF);
 				return result;
 			}
-			if (w->second.type == ValueType::UINT32) {
-				result.u1 = static_cast<uint8_t>(w->second.new_val.u4 & 0xFF);
+			if (w->type == ValueType::UINT32) {
+				result.u1 = static_cast<uint8_t>(w->new_val.u4 & 0xFF);
 				return result;
 			}
-			if (w->second.type == ValueType::UINT16) {
-				result.u1 = static_cast<uint8_t>(w->second.new_val.u2 & 0xFF);
+			if (w->type == ValueType::UINT16) {
+				result.u1 = static_cast<uint8_t>(w->new_val.u2 & 0xFF);
 				return result;
 			}
 		}
-		if (sz == ValueType::UINT16 && w->second.type == ValueType::UINT64) {
+		if (sz == ValueType::UINT16 && w->type == ValueType::UINT64) {
 			any_type_t result;
-			result.u2 = static_cast<uint16_t>(w->second.new_val.u8 & 0xFFFF);
+			result.u2 = static_cast<uint16_t>(w->new_val.u8 & 0xFFFF);
 			return result;
 		}
-		if (sz == ValueType::UINT32 && w->second.type == ValueType::UINT64) {
+		if (sz == ValueType::UINT32 && w->type == ValueType::UINT64) {
 			any_type_t result;
-			result.u4 = static_cast<uint32_t>(w->second.new_val.u8 & 0xFFFFFFFF);
+			result.u4 = static_cast<uint32_t>(w->new_val.u8 & 0xFFFFFFFF);
 			return result;
 		}
 	}
@@ -441,9 +449,9 @@ read_word_ctl(                                                //
 			bool all_byte = true;
 			for (unsigned i = 0; i < read_size; i++) {
 				void *byte_addr = reinterpret_cast<void *>((uintptr_t)addr + i);
-				auto it = tx->write_set.find(byte_addr);
-				if (it != tx->write_set.end() && it->second.type == ValueType::UINT8) {
-					merged |= (static_cast<uint64_t>(it->second.new_val.u1)) << (i * 8);
+				auto *it = tx->ws_find(byte_addr);
+				if (it && it->type == ValueType::UINT8) {
+					merged |= (static_cast<uint64_t>(it->new_val.u1)) << (i * 8);
 				} else {
 					all_byte = false;
 					break;
@@ -469,22 +477,22 @@ read_word_ctl(                                                //
 		unsigned shift = static_cast<unsigned>(bo.offset) * 8;
 
 		// Check UINT64 at 8-byte aligned (existing logic)
-		auto w2 = tx->write_set.find(base_addr);
-		if (w2 != tx->write_set.end() && w2->second.type == ValueType::UINT64) {
+		auto *w2 = tx->ws_find(base_addr);
+		if (w2 && w2->type == ValueType::UINT64) {
 			switch (sz) {
 			case ValueType::UINT8: {
 				any_type_t result;
-				result.u1 = static_cast<uint8_t>(w2->second.new_val.u8 >> shift);
+				result.u1 = static_cast<uint8_t>(w2->new_val.u8 >> shift);
 				return result;
 			}
 			case ValueType::UINT16: {
 				any_type_t result;
-				result.u2 = static_cast<uint16_t>(w2->second.new_val.u8 >> shift);
+				result.u2 = static_cast<uint16_t>(w2->new_val.u8 >> shift);
 				return result;
 			}
 			case ValueType::UINT32: {
 				any_type_t result;
-				result.u4 = static_cast<uint32_t>(w2->second.new_val.u8 >> shift);
+				result.u4 = static_cast<uint32_t>(w2->new_val.u8 >> shift);
 				return result;
 			}
 			default:
@@ -495,20 +503,20 @@ read_word_ctl(                                                //
 		// Check UINT32 at 4-byte aligned address (may equal base_addr for
 		// offsets 0-3 — check independently of UINT64 above)
 		void *u32_addr = reinterpret_cast<void *>((uintptr_t)addr & ~3ULL);
-		auto w32 = tx->write_set.find(u32_addr);
-		if (w32 != tx->write_set.end() && w32->second.type == ValueType::UINT32) {
+		auto *w32 = tx->ws_find(u32_addr);
+		if (w32 && w32->type == ValueType::UINT32) {
 			unsigned byte_off = static_cast<unsigned>((uintptr_t)addr - (uintptr_t)u32_addr);
 			unsigned u32_shift = byte_off * 8;
 			switch (sz) {
 			case ValueType::UINT8: {
 				any_type_t result;
-				result.u1 = static_cast<uint8_t>(w32->second.new_val.u4 >> u32_shift);
+				result.u1 = static_cast<uint8_t>(w32->new_val.u4 >> u32_shift);
 				return result;
 			}
 			case ValueType::UINT16: {
 				if (byte_off <= 2) {
 					any_type_t result;
-					result.u2 = static_cast<uint16_t>(w32->second.new_val.u4 >> u32_shift);
+					result.u2 = static_cast<uint16_t>(w32->new_val.u4 >> u32_shift);
 					return result;
 				}
 				break;
@@ -521,12 +529,12 @@ read_word_ctl(                                                //
 		// Check UINT16 at 2-byte aligned address (may equal base_addr or
 		// u32_addr — check independently)
 		void *u16_addr = reinterpret_cast<void *>((uintptr_t)addr & ~1ULL);
-		auto w16 = tx->write_set.find(u16_addr);
-		if (w16 != tx->write_set.end() && w16->second.type == ValueType::UINT16) {
+		auto *w16 = tx->ws_find(u16_addr);
+		if (w16 && w16->type == ValueType::UINT16) {
 			unsigned byte_off = static_cast<unsigned>((uintptr_t)addr - (uintptr_t)u16_addr);
 			if (byte_off < 2 && sz == ValueType::UINT8) {
 				any_type_t result;
-				result.u1 = static_cast<uint8_t>(w16->second.new_val.u2 >> (byte_off * 8));
+				result.u1 = static_cast<uint8_t>(w16->new_val.u2 >> (byte_off * 8));
 				return result;
 			}
 		}
@@ -593,7 +601,7 @@ read_from_memory:
 		r.observed_version = version;
 		r.observed_val = val;
 		r.type = sz;
-		tx->read_set.insert(std::pair(addr, r));
+		tx->read_set.push_back(r);
 
 		return val;
 	}
@@ -628,18 +636,18 @@ write_word_ctl(                                                //
 
 	// Found write-set entry at exact addr with matching type → update in place.
 	{
-		auto w = tx->write_set.find(addr);
-		if (w != tx->write_set.end()) {
-			if (w->second.type == sz) {
-				w->second.new_val = val;
+		auto *w = tx->ws_find(addr);
+		if (w) {
+			if (w->type == sz) {
+				w->new_val = val;
 				return;
 			}
 			// Type mismatch at same addr.  If existing entry is UINT64 and this
 			// write is a sub-word type, merge the byte(s) into the wider entry.
-			if (w->second.type == ValueType::UINT64 && sz == ValueType::UINT8) {
-				uint64_t merged = (w->second.new_val.u8 & ~(uint64_t)0xFF);
+			if (w->type == ValueType::UINT64 && sz == ValueType::UINT8) {
+				uint64_t merged = (w->new_val.u8 & ~(uint64_t)0xFF);
 				merged |= (uint64_t)(val.u1);
-				w->second.new_val.u8 = merged;
+				w->new_val.u8 = merged;
 				return;
 			}
 		}
@@ -650,8 +658,8 @@ write_word_ctl(                                                //
 	// rather than creating a separate entry that could mask the wider value.
 	if (bo.offset != 0) {
 		void *base_addr = reinterpret_cast<void *>(bo.base_addr);
-		auto w2 = tx->write_set.find(base_addr);
-		if (w2 != tx->write_set.end() && w2->second.type == ValueType::UINT64) {
+		auto *w2 = tx->ws_find(base_addr);
+		if (w2 && w2->type == ValueType::UINT64) {
 			unsigned shift = static_cast<unsigned>(bo.offset) * 8;
 			uint64_t mask;
 			uint64_t write_val;
@@ -674,9 +682,9 @@ write_word_ctl(                                                //
 				break;
 			}
 			if (mask) {
-				uint64_t merged = (w2->second.new_val.u8 & ~mask);
+				uint64_t merged = (w2->new_val.u8 & ~mask);
 				merged |= (write_val << shift);
-				w2->second.new_val.u8 = merged;
+				w2->new_val.u8 = merged;
 				return;
 			}
 		}
@@ -704,9 +712,9 @@ write_word_ctl(                                                //
 	// narrower UINT32 entry later overwriting only the lower 4 bytes of a
 	// POINTER entry at commit, corrupting the pointer).
 	{
-		auto existing = tx->write_set.find(addr);
-		if (existing != tx->write_set.end() && existing->second.type != sz) {
-			if (typeSize(existing->second.type) > sz_bytes) {
+		auto *existing = tx->ws_find(addr);
+		if (existing && existing->type != sz) {
+			if (typeSize(existing->type) > sz_bytes) {
 				return;
 			}
 		}
@@ -717,9 +725,9 @@ write_word_ctl(                                                //
 	// (e.g., UINT16 at base+2 when a POINTER entry exists at base).
 	if (bo.offset != 0) {
 		void *base_addr = reinterpret_cast<void *>(bo.base_addr);
-		auto base_entry = tx->write_set.find(base_addr);
-		if (base_entry != tx->write_set.end() && base_entry->second.type != sz) {
-			if (typeSize(base_entry->second.type) >= sz_bytes + bo.offset) {
+		auto *base_entry = tx->ws_find(base_addr);
+		if (base_entry && base_entry->type != sz) {
+			if (typeSize(base_entry->type) >= sz_bytes + bo.offset) {
 				return;
 			}
 		}
@@ -735,11 +743,16 @@ write_word_ctl(                                                //
 		if (nbytes > 1) {
 			for (unsigned i = 0; i < nbytes; i++) {
 				void *sub_addr = reinterpret_cast<void *>((uintptr_t)addr + i);
-				auto it = tx->write_set.find(sub_addr);
-				if (it != tx->write_set.end() && it->second.type != sz) {
-					if (typeSize(it->second.type) < nbytes) {
+				auto *it = tx->ws_find(sub_addr);
+				if (it && it->type != sz) {
+					if (typeSize(it->type) < nbytes) {
 						// Existing entry is narrower — erase (wider write replaces it)
-						tx->write_set.erase(it);
+						for (size_t ei = 0; ei < tx->write_set.size(); ei++) {
+							if (tx->write_set[ei].first == sub_addr) {
+								tx->ws_erase_idx(ei);
+								break;
+							}
+						}
 					}
 				}
 			}
@@ -792,7 +805,7 @@ write_word_ctl(                                                //
 		w.type = sz;
 		w.addr = addr;
 		w.version = version;
-		tx->write_set[addr] = w;
+		tx->ws_get_or_insert(addr) = w;
 		TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)sz);
 
 		// Also add to read-set so that validate() catches version changes
@@ -803,7 +816,7 @@ write_word_ctl(                                                //
 		r.observed_version = version;
 		r.observed_val = val;
 		r.type = sz;
-		tx->read_set.insert(std::pair(addr, r));
+		tx->read_set.push_back(r);
 
 		return;
 	}

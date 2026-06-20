@@ -157,9 +157,8 @@ validate()  //
 		abort_tx("proactive_stop"); // TODO: remove proactive_stop and fix the underlying hang
 	}
 	auto *tx = current_tx_wbetl;
-	for (auto &it : tx->read_set) {
-		auto &addr = it.first;
-		auto &r = it.second;
+	for (auto &r : tx->read_set) {
+		void *addr = r.addr;
 		ByteOffset bo((word_t)addr);
 		Lock *lock = &g_locks_wbetl.get(bo.base_addr);
 		word_t l = lock->get();
@@ -263,10 +262,10 @@ read_word_etl(                                                //
 
 	// Check write-set by aligned address → bitmap extract
 	{
-		auto w = tx->write_set.find(aligned);
-		if (w != tx->write_set.end()) {
+		auto *w = tx->ws_find(aligned);
+		if (w) {
 			any_type_t result;
-			if (stm::merge::bitmap_read(result, w->second.value, w->second.valid,
+			if (stm::merge::bitmap_read(result, w->value, w->valid,
 			                           sz, addr)) {
 				return result;
 			}
@@ -315,11 +314,18 @@ read_word_etl(                                                //
 
 		TM_EVENT2(READ_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, version);
 
-		auto r_it = tx->read_set.find(aligned);
-		if (r_it != tx->read_set.end()) {
-			stm::merge::merge_read(r_it->second, version, val, sz, addr);
-		} else {
-			tx->read_set.insert(std::pair(aligned, stm::merge::make_read_entry<ReadLogEntry_wbetl>(aligned, version, val, sz, addr)));
+		{
+			bool found = false;
+			for (auto &r : tx->read_set) {
+				if (r.addr == aligned) {
+					stm::merge::merge_read(r, version, val, sz, addr);
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				tx->read_set.push_back(stm::merge::make_read_entry<ReadLogEntry_wbetl>(aligned, version, val, sz, addr));
+			}
 		}
 
 		return val;
@@ -349,9 +355,9 @@ write_word_etl(                                                //
 	tx->read_only = false;
 
 	{
-		auto w = tx->write_set.find(aligned);
-		if (w != tx->write_set.end()) {
-			stm::merge::bitmap_write(w->second.value, w->second.valid, val, sz, addr);
+		auto *w = tx->ws_find(aligned);
+		if (w) {
+			stm::merge::bitmap_write(w->value, w->valid, val, sz, addr);
 			return;
 		}
 	}
@@ -421,7 +427,7 @@ write_word_etl(                                                //
 		}
 	}
 
-	tx->write_set[aligned] = stm::merge::make_write_entry<WriteLogEntry_wbetl>(aligned, val, sz, addr, lock->get_version());
+	*tx->ws_get_or_insert(aligned) = stm::merge::make_write_entry<WriteLogEntry_wbetl>(aligned, val, sz, addr, lock->get_version());
 	TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)sz);
 }
 
