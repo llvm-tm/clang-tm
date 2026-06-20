@@ -300,10 +300,131 @@ Comprehensive sweep across 3 backends × 8 benchmarks × 2 thread counts:
 | **NOrec** 1t | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | **NOrec** 4t | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-### Remaining known issues — 12 backends missing `LLVM_TM_PLUGIN` guards
+## Session 2026-06-20 — LLVM_TM_PLUGIN guards for all remaining 12 backends
 
-The following backends define `tm_init`, `tm_exit`, `tm_init_thread`, `tm_exit_thread` as TEXT functions without `#ifdef LLVM_TM_PLUGIN` guards, causing the same DATA/TEXT crash with plugin-instrumented binaries:
+### Problem
 
-- `SingleGlobalLock_runtime.cpp`, `TSXSGL_runtime.cpp`, `tl2_runtime.cpp`, `SwissTM_runtime.cpp`, `DUDETM_runtime.cpp`, `SPHT_runtime.cpp`, `xtm_runtime.cpp`, `romulus_runtime.cpp`, `NVHTM_runtime.cpp`, `PersistentSGL_runtime.cpp`, `DistributedSGL_runtime.cpp`, `leftright_runtime.cpp`
+The same DATA/TEXT symbol conflict that crashed plugin-instrumented STAMP binaries (fixed in previous session for NOrec + TinySTM) affected 12 remaining backends: SGL, TSX-SGL, TL2, SwissTM, DUDETM, SPHT, XTM, Romulus, NV-HTM, PersistentSGL, DistributedSGL, and LeftRight. Each defined `tm_init`/`tm_exit`/`tm_init_thread`/`tm_exit_thread` as bare TEXT functions, but the plugin runtime expects them as DATA variables (function pointers).
 
-Fix pattern: apply `#ifdef LLVM_TM_PLUGIN` / `#else` / `#endif` around each function definition (see `NOrec_runtime.cpp` or `TinySTM_runtime.cpp` for the canonical pattern).
+### Fix
+
+Applied the same `#ifdef LLVM_TM_PLUGIN` pattern to all 12 backend runtime files (NOrec pattern: forward declarations + DATA variables, then per-function `#ifdef`/`#else`/`#endif` wrappers).
+
+### Files changed
+
+- `backends/tm_impl/single_global_lock/SingleGlobalLock_runtime.cpp`
+- `backends/tm_impl/tsx_sgl/TSXSGL_runtime.cpp`
+- `backends/tm_impl/tl2/tl2_runtime.cpp`
+- `backends/tm_impl/swisstm/SwissTM_runtime.cpp`
+- `backends/tm_impl/dudetm/DUDETM_runtime.cpp`
+- `backends/tm_impl/spht/SPHT_runtime.cpp`
+- `backends/tm_impl/xtm/xtm_runtime.cpp`
+- `backends/tm_impl/romulus/romulus_runtime.cpp`
+- `backends/tm_impl/nvhtm/NVHTM_runtime.cpp`
+- `backends/tm_impl/persistent_sgl/PersistentSGL_runtime.cpp`
+- `backends/tm_impl/distributed_sgl/DistributedSGL_runtime.cpp`
+- `backends/tm_impl/leftright/leftright_runtime.cpp`
+
+### Verification
+
+All testable backends pass:
+
+| Backend   | `test_tx` | `test_ds` |
+|-----------|-----------|-----------|
+| SGL       | 114/114   | 207/207   |
+| TL2       | 114/114   | 207/207   |
+| LEFTRIGHT | 114/114   | —         |
+| ROMULUS   | 114/114   | 207/207   |
+| XTM       | 114/114   | 207/207   |
+| SWISSTM   | 114/114   | —         |
+| WBETL     | 114/114   | —         |
+| WT        | 114/114   | —         |
+
+Note: SPHT and TSXSGL are x86-only (`-mrtm`). DUDETM, NVHTM, PersistentSGL, DistributedSGL lack explicit-API Makefile entries — only used via plugin pipeline.
+
+## Session 2026-06-20 — TiKV distributed TM backend (TM abstraction expressiveness)
+
+### New backend: `runtime/tikv` (Rust)
+
+A new distributed TM backend that wraps TiKV (`tikv-client` 0.4 from crates.io, not vendored) with TM semantics, demonstrating that **any distributed storage system** can be wrapped by the TM abstraction:
+
+- **`tm_begin()`** → TiKV `begin_optimistic()` (snapshot isolation)
+- **`tm_read()`** → local write-set → TiKV `get()` (lazy-fetch, cached in read-set)
+- **`tm_write()`** → buffer in local write-set
+- **`tm_commit()`** → flush writes → TiKV `commit()` (Percolator-style 2PC)
+- **`tm_abort()`** → TiKV `rollback()`
+
+Key design:
+- TM addresses mapped to TiKV keys via `tm:{region_offset:016x}` (offset from TM region base, so different processes agree on keys).
+- Global Tokio runtime + `TransactionClient` created once in `tm_init()`.
+- Per-thread `Transaction` + write-set/read-set in thread-local `RefCell`.
+- All async ops driven via `runtime.block_on()`.
+- Uses the lazy-abort retry pattern (no `catch_unwind`).
+
+### C++ FFI shim: `backends/tm_impl/tikv/tikv_backend.cpp`
+
+Bridges the C++ hook system to the Rust FFI library. Declares `extern "C"` functions from the Rust static lib and wraps them as `TMRealHooks`. Includes `LLVM_TM_PLUGIN` guards for plugin-instrumented binaries.
+
+### Files created
+
+- `expli_instr/rust/workspace/runtime/tikv/Cargo.toml` — depends on `tikv-client = "0.4"` (crates.io)
+- `expli_instr/rust/workspace/runtime/tikv/src/lib.rs` — TiKV-backed TM implementation
+- `backends/tm_impl/tikv/tikv_backend.cpp` — C++ -> Rust FFI shim
+- `backends/tm_impl/tikv/README.md` — architecture docs + build instructions
+
+### Files modified
+
+- `expli_instr/rust/workspace/Cargo.toml` — added `runtime/tikv` to workspace members
+- `expli_instr/rust/workspace/tm/Cargo.toml` — added `tikv` feature + `runtime-tikv` dependency
+- `expli_instr/rust/workspace/tm/src/lib.rs` — added `#[cfg(feature = "tikv")]` re-export block, exclusivity checks
+- `benchmarks/rust/Cargo.toml` — added `tikv` feature passthrough
+
+### Usage
+
+```sh
+# Prerequisite: running TiKV cluster with PD at 127.0.0.1:2379
+TM_TIKV_PD=127.0.0.1:2379 cargo run --release --features tikv --bin fuzz_counter
+```
+
+### Generalising the pattern
+
+The README documents how the same approach applies to other storage systems:
+- **Apache Kafka**: map addresses to compacted topics
+- **Redis**: WATCH/MULTI/EXEC for optimistic concurrency
+- **PostgreSQL**: `SELECT ... FOR UPDATE` rows
+
+The TM API never changes. Only the backend implementation differs.
+
+## Session 2026-06-20 — LEFTRIGHT global-clock OCC correctness fix
+
+### Root cause chain
+
+The LEFTRIGHT bank benchmark (`bank -t 2`) showed money loss ("Money created/destroyed") with 2+ threads. Three independent bugs conspired:
+
+1. **Stub allocator during init** (`tm_hooks.cpp`): `apply_hooks_unlocked()` used stubs when `s_thread_count ≤ 1`. Since `s_thread_count` starts at 1 (main thread), all `tm_malloc` calls during single-threaded init used `std::malloc` instead of the TM region allocator. Result: `TM<int>::value_` pointers were on the regular heap, `isTMAddress()` returned false, and `read_word`/`write_word` bypassed read-set/write-set tracking entirely — the OCC was doing nothing.
+
+2. **Null jmpbuf pointer** (`tm_api.hpp`): `TM<T>::transaction()` called `sigsetjmp(tm_jmpbuf, 0)` but never called `tm_set_jmpbuf(&tm_jmpbuf)`. The backend's `leftright::jmpbuf_ptr` stayed null. When `abort_tx()` called `siglongjmp(*nullptr, 1)`, the null dereference silently did nothing (compiler UB), control returned as if the transaction committed, and the retry loop set `done = true` — the abort appeared to succeed.
+
+3. **Missing value-based validation** (`leftright.hpp`): The existing OCC only checked `observed_version > end_version`, which catches concurrent commits BETWEEN reads but not commits AFTER the last read (the "commit after all reads" case: both reads at clock=5, concurrent commit at clock=6, validate passes → stale write-back clobbers the concurrent change).
+
+### Fixes applied
+
+1. **`tm_hooks.cpp` — `apply_hooks_unlocked()`**: Changed the single-thread guard from `s_thread_count.load() <= 1` to `s_thread_count.load() <= 1 && !s_registered`. Once `tm_register_real_hooks()` is called, real hooks are always used regardless of thread count. This ensures `tm_malloc` and `tm_read_i4`/`tm_write_i4` go through the backend from the start, so `TM<int>::value_` is in the TM region and read-set/write-set tracking is active.
+
+2. **`tm_api.hpp` — `transaction()`**: Added `tm_set_jmpbuf(&tm_jmpbuf)` calls in both `TM<T>::transaction()` and `TM<T*>::transaction()` before `tm_begin()`, so the backend's retry-jump pointer is properly set. Added `extern void (*tm_set_jmpbuf)(void*)` declaration to the header.
+
+3. **`leftright.hpp` — Value-based validation**: Each `ReadLogEntry` now stores `captured_value` (the data read). Phase 3 (under the commit lock) re-reads every read-set address and compares with the captured value using `std::memcmp`. This detects actual data conflicts without the false-abort problem of the global-clock check (`get_clock() > end_version` fires on every concurrent commit, even non-conflicting ones). The Phase 1 optimistic validate (before acquiring the lock) still uses the original `observed_version > end_version` check for a fast-path abort.
+
+4. **`leftright_runtime.cpp` — Lifecycle**: Added `g_in_tx = true`, `tm_clear_spec_allocs()`, `tm_clear_deferred_frees()` in `real_tm_begin()`, and `tm_flush_deferred_frees()`, `tm_flush_spec_allocs()`, `g_in_tx = false` in `real_tm_end()`. Removed dead duplicate `jmpbuf` variable.
+
+### Verification
+
+| Test | Result |
+|------|--------|
+| `test_tx` LEFTRIGHT | 114/114 PASS |
+| `test_ds` LEFTRIGHT | 207/207 PASS |
+| `bank -d 500 -a 128 -t 2` | PASS (money conserved) |
+| `bank -d 500 -a 128 -t 4` | PASS (money conserved) |
+
+Throughput with value-based validation: ~630K txns/sec (2 threads, 128 accounts).
+

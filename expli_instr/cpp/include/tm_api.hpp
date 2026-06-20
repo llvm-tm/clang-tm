@@ -34,6 +34,8 @@ extern float    (*tm_read_f4)(float *addr);
 extern double   (*tm_read_f8)(double *addr);
 extern void    *(*tm_read_ptr)(void **addr);
 
+extern void     (*tm_set_jmpbuf)(void*);
+
 extern void (*tm_write_i1)(uint8_t *addr, uint8_t val);
 extern void (*tm_write_i2)(uint16_t *addr, uint16_t val);
 extern void (*tm_write_i4)(uint32_t *addr, uint32_t val);
@@ -144,6 +146,7 @@ public:
         while (!done) {
             sigsetjmp(tm_jmpbuf, 0);
             tm_nested_call_counter = 1;
+            tm_set_jmpbuf(&tm_jmpbuf);
             tm_begin();
             body();
             tm_end();
@@ -211,6 +214,7 @@ public:
         while (!done) {
             sigsetjmp(tm_jmpbuf, 0);
             tm_nested_call_counter = 1;
+            tm_set_jmpbuf(&tm_jmpbuf);
             tm_begin();
             body();
             tm_end();

@@ -3,6 +3,7 @@
 #include "tm_api.hpp"
 #include "tm_map.hpp"
 #include <mutex>
+#include <optional>
 
 namespace expli {
 
@@ -12,9 +13,10 @@ class ts_map {
     flat_map<K,V> map_;
     mutable std::mutex mtx_;
 public:
-    V *find(const K &k) {
+    std::optional<V> find(const K &k) {
         std::lock_guard<std::mutex> lk(mtx_);
-        return map_.find(k);
+        V *p = map_.find(k);
+        return p ? std::optional<V>(*p) : std::nullopt;
     }
     void insert(const K &k, const V &v) {
         std::lock_guard<std::mutex> lk(mtx_);

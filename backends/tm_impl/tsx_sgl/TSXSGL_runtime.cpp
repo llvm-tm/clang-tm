@@ -68,16 +68,46 @@ enum { LOCK_BUSY = 0xFF, OWNER_CHANGED = 0x01 };
 
 extern "C" {
 
-void tm_init() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init();
+static void do_tm_exit();
+static void do_tm_init_thread();
+static void do_tm_exit_thread();
+
+void (*tm_init)()        = do_tm_init;
+void (*tm_exit)()        = do_tm_exit;
+void (*tm_init_thread)() = do_tm_init_thread;
+void (*tm_exit_thread)() = do_tm_exit_thread;
+
+static void do_tm_init()
+#else
+void tm_init()
+#endif
+{
     if (stm::tm_region_init() != 0) {
         fprintf(stderr, "FATAL: tm_region_init() failed\n");
         abort();
     }
     tm_register_real_hooks(&g_tsxsgl_hooks);
 }
-void tm_exit() {}
-void tm_init_thread() { tm_hook_init_thread(); tm_nested_call_counter = 0; in_tsx = false; }
-void tm_exit_thread() { tm_hook_exit_thread(); }
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit()
+#else
+void tm_exit()
+#endif
+{}
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init_thread()
+#else
+void tm_init_thread()
+#endif
+{ tm_hook_init_thread(); tm_nested_call_counter = 0; in_tsx = false; }
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit_thread()
+#else
+void tm_exit_thread()
+#endif
+{ tm_hook_exit_thread(); }
 
 static std::recursive_mutex g_serialize_mutex;
 
