@@ -472,3 +472,58 @@ Key decisions:
 
 Note: Multi-threaded TiKV sees contention errors (TxnNotFound) during concurrent reads/writes. The backend handles these by rolling back the TiKV transaction and signaling TmxAbort. The `transaction()` retry loop re-executes. This is slower than shared-memory backends but correct.
 
+## Session 2026-06-20 — SPHT SGL fallback fix (RTM deadlock + data race)
+
+### Problem
+
+SPHT had no mutual exclusion fallback when RTM was broken or unavailable.
+When RTM aborted after MAX_RETRIES (12), `spht::begin()` returned `false`
+and all subsequent TM operations entered pass-through mode (direct memory
+access) **without any lock** — concurrent writes raced, corrupting data.
+
+- **fuzz_counter 4t**: `INVARIANT FAIL` (counter sum mismatch)
+- **bank 4t**: `FAIL: Money destroyed by 32`
+
+### Root-cause chain
+
+1. **No SGL fallback**: SPHT's `begin()` set `current_tx->active = false`
+   on RTM failure, causing all read/write hooks to bypass TM tracking and
+   access memory directly.  With no mutex, concurrent threads raced.
+
+2. **Retry-loop deadlock**: The fuzz_counter's explicit retry loop calls
+   `tm_begin()`, then checks `tm_longjmp_ret`.  When an RTM abort triggered
+   `siglongjmp` from within `begin()`, `tm_longjmp_ret` was set to 1.
+   On the next iteration, `tm_begin()` called `begin()` which returned
+   `false` (rtm_broken) and — with the naive fallback — **acquired the SGL
+   mutex**.  The `if (tm_longjmp_ret != 0) continue;` immediately skipped
+   `tm_end()`, leaking the mutex.  The following iteration deadlocked on
+   `std::mutex::lock()`.
+
+### Fix
+
+Added a proper SGL fallback (matching TSXSGL's pattern):
+
+- **`g_spht_fallback_mutex`** (`std::mutex`): acquired on `begin()` failure,
+  released in `tm_end()`.
+- **`g_spht_rtm_mode`** (thread-local `bool`): tracks whether we're in RTM
+  (`spht::commit()` path) or SGL (mutex unlock path).
+- **`tm_longjmp_ret != 0` guard**: skips mutex acquisition when the retry
+  loop just handled a `siglongjmp` (the `continue` will skip body+tm_end,
+  so the mutex would leak).  The next iteration (where `sigsetjmp` returns
+  0) acquires it properly.
+
+### Files changed
+
+- `backends/tm_impl/spht/SPHT_runtime.cpp` — `real_tm_begin`/`real_tm_end`
+  SGL fallback logic + `tm_longjmp_ret` guard.
+
+### Verification
+
+| Benchmark | SPHT (before) | SPHT (after) |
+|-----------|--------------|--------------|
+| fuzz_counter 4t | FAIL (data race) | PASS (12231 == 12231) |
+| bank 4t | FAIL (money destroyed) | PASS (1.1M txns/sec, conserved) |
+| intruder 4t | FAIL (10970 found) | PASS (5120 found) |
+| test_ds | 207/207 PASS | 207/207 PASS |
+| test_tx | pre-existing crash | pre-existing crash (unrelated) |
+
