@@ -1,4 +1,4 @@
-CXXFLAGS := -std=c++20 -O1 -pthread
+CXXFLAGS := -std=c++20 -O1 -pthread -I$(abspath ../../../backends/tm_impl/common)
 TM_PLUGIN := $(abspath ../../../plugin/bin/libTMInstrument.so)
 include ../../../plugin/tm_pipeline.mk
 $(eval $(call tm_define_rules))

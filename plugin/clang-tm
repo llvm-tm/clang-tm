@@ -556,10 +556,10 @@ if $RUNTIME_IS_SOURCE; then
     REGION_SRC=""
     if [ -f "$RUNTIMES_DIR/tm_region_allocator/tm_region_allocator.cpp" ]; then
         REGION_SRC="$RUNTIMES_DIR/tm_region_allocator/tm_region_allocator.cpp"
-        REGION_INCLUDE="-I $(dirname "$RUNTIMES_DIR")"
+        REGION_INCLUDE="-I $(dirname "$RUNTIMES_DIR") -I $RUNTIMES_DIR/common"
     elif [ -f "$RUNTIMES_DIR/tm_region_allocator.cpp" ]; then
         REGION_SRC="$RUNTIMES_DIR/tm_region_allocator.cpp"
-        REGION_INCLUDE="-I $(dirname "$RUNTIMES_DIR")"
+        REGION_INCLUDE="-I $(dirname "$RUNTIMES_DIR") -I $RUNTIMES_DIR/common"
     fi
     if [ -n "$REGION_SRC" ]; then
         REGION_O="$OUT_DIR/tm_region_allocator.o"
