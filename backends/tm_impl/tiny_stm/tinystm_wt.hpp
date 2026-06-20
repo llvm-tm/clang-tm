@@ -479,7 +479,7 @@ write_word_wt(                                           //
 				any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
 
 				WriteLogEntry_wt w = make_write_entry(old_val, val, version, incarnation);
-				*tx->ws_get_or_insert(addr) = w;
+				tx->ws_get_or_insert(addr) = w;
 				tx->locks_held.push_back(lock);
 
 				TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, l);
@@ -493,7 +493,7 @@ write_word_wt(                                           //
 				any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
 
 				WriteLogEntry_wt w = make_write_entry(old_val, val, version, incarnation);
-				*tx->ws_get_or_insert(addr) = w;
+				tx->ws_get_or_insert(addr) = w;
 
 				TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)8);
 
@@ -510,7 +510,7 @@ write_word_wt(                                           //
 			word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
 			any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
 
-			*tx->ws_get_or_insert(addr) = make_write_entry(old_val, val, version, incarnation);
+			tx->ws_get_or_insert(addr) = make_write_entry(old_val, val, version, incarnation);
 			write_value_to_addr(addr, val, ValueType::UINT64);
 			TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)8);
 			return;

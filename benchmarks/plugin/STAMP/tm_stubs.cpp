@@ -4,5 +4,5 @@
 extern "C" {
 void tm_serialize_lock() {}
 void tm_serialize_unlock() {}
-void* tm_calloc(size_t nmemb, size_t size) { return std::calloc(nmemb, size); }
+void* (*tm_calloc)(size_t, size_t) = [](size_t nmemb, size_t size) { return std::calloc(nmemb, size); };
 }

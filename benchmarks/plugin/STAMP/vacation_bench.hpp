@@ -177,7 +177,7 @@ TX static long delete_customer(VacationData* data, long customer_id) {
 TX static void make_reservation_tx(VacationData* data, long customer_id) {
     add_customer(data, customer_id);
 
-    PRNG rng(rdtsc() + customer_id);
+    PRNG rng(wall_clock_now() + customer_id);
     long best_prices[3] = {-1, -1, -1};
     long best_ids[3] = {-1, -1, -1};
     bool found = false;
@@ -228,7 +228,7 @@ TX static void delete_customer_tx(VacationData* data, long customer_id) {
 }
 
 TX static void update_tables_tx(VacationData* data) {
-    PRNG rng(rdtsc());
+    PRNG rng(wall_clock_now());
     long type = (long)(rng.next() % 3);
     long id = (long)(rng.next() % data->query_range) + 1;
     long op = (long)(rng.next() % 2);
