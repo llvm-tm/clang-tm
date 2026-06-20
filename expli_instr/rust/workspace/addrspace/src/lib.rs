@@ -224,6 +224,67 @@ pub fn tm_region_calloc(nmemb: usize, sz: usize) -> *mut u8 {
     p
 }
 
+// ════════════════════════════════════════════════════════════════
+// System-heap fallback allocators
+// ════════════════════════════════════════════════════════════════
+// These use the system allocator (std::alloc) rather than the TM
+// address-space region.  They are intended for large flat arrays
+// that must be allocated during single-threaded initialisation,
+// before TM worker threads start, and where the total exceeds the
+// TM region size (16 GB).
+//
+// This mirrors the C++ convention where tm_calloc starts as
+// stub_calloc (= std::calloc, system heap) and only switches to
+// the TM region allocator when multi-thread execution begins
+// (s_thread_count > 1 in tm_hooks.cpp).
+//
+// All three Rust TinySTM backends (wbctl, wbetl, wt) handle
+// non-TM addresses correctly in their read/write/commit paths
+// (direct ptr::read/ptr::write, no is_tm_address assertion), so
+// data allocated via these functions works safely inside
+// transactions.
+
+/// Allocate zeroed memory from the system heap (not the TM region).
+/// Alignment: 16 bytes.  Frees via `tm_system_free(sz)`.
+pub fn tm_system_calloc(nmemb: usize, sz: usize) -> *mut u8 {
+    let total = nmemb * sz;
+    if total == 0 { return std::ptr::null_mut(); }
+    let layout = std::alloc::Layout::from_size_align(total, 16)
+        .expect("tm_system_calloc: invalid layout");
+    unsafe { std::alloc::alloc_zeroed(layout) }
+}
+
+/// Allocate uninitialized memory from the system heap (not the TM region).
+pub fn tm_system_malloc(sz: usize) -> *mut u8 {
+    if sz == 0 { return std::ptr::null_mut(); }
+    let sz = (sz + 15) & !15;
+    let layout = std::alloc::Layout::from_size_align(sz, 16)
+        .expect("tm_system_malloc: invalid layout");
+    unsafe { std::alloc::alloc(layout) }
+}
+
+/// Free memory allocated with `tm_system_malloc` or `tm_system_calloc`.
+/// `sz` must be the original allocation size (or the total from calloc).
+pub fn tm_system_free(ptr: *mut u8, sz: usize) {
+    if ptr.is_null() || sz == 0 { return; }
+    let layout = std::alloc::Layout::from_size_align(sz, 16)
+        .expect("tm_system_free: invalid layout");
+    unsafe { std::alloc::dealloc(ptr, layout) }
+}
+
+/// Reallocate a pointer obtained from `tm_system_malloc`/`tm_system_calloc`.
+pub fn tm_system_realloc(ptr: *mut u8, old_sz: usize, new_sz: usize) -> *mut u8 {
+    if ptr.is_null() { return tm_system_malloc(new_sz); }
+    if new_sz == 0 { tm_system_free(ptr, old_sz); return std::ptr::null_mut(); }
+    let np = tm_system_malloc(new_sz);
+    if !np.is_null() && !ptr.is_null() {
+        let copy = if old_sz < new_sz { old_sz } else { new_sz };
+        unsafe { std::ptr::copy_nonoverlapping(ptr, np, copy) };
+    }
+    tm_system_free(ptr, old_sz);
+    np
+}
+
 /// Reallocate a pointer obtained from `tm_region_malloc`.
 pub fn tm_region_realloc(ptr: *mut u8, new_sz: usize) -> *mut u8 {
     if ptr.is_null() {
