@@ -1,5 +1,6 @@
 #include "queue_runtime.h"
 #include "tm_perf_counters.hpp"
+#include "tm_region_allocator.hpp"
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -92,6 +93,7 @@ private:
     void workerLoop(int)
     {
         tm_init_thread();
+        stm::tm_record_stack_bounds();
 
 #ifdef TM_PERF_COUNTERS
         // Register this worker's counter set (side effect: creates thread_local)
@@ -210,6 +212,7 @@ thread_local int g_tm_queue_active = 0;
 
 static void real_tm_enqueue(void (*fn)(void*), void* args)
 {
+    stm::tm_record_stack_bounds();
     TM_PERF_INC(g_caller_perf, enqueue_calls);
 
     if (!g_tm_queue_active) {
@@ -243,6 +246,7 @@ void (*tm_enqueue)(void (*)(void*), void*) = &real_tm_enqueue;
 
 uint64_t tm_enqueue_ex(void (*fn)(void*), void* args, int queue_id)
 {
+    stm::tm_record_stack_bounds();
     TM_PERF_INC(g_caller_perf, enqueue_calls);
 
     if (!g_tm_queue_active) {

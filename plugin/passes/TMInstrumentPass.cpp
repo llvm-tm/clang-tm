@@ -584,14 +584,17 @@ public:
 
 		if (Function *MainFn = M.getFunction(MAIN_ANNOT)) {
 			auto *i32Ty2 = Type::getInt32Ty(CtxRef);
+			auto *i64Ty = Type::getInt64Ty(CtxRef);
+			auto *ptrTy = PointerType::getUnqual(CtxRef);
 			FunctionCallee QueueInit =
 			    M.getOrInsertFunction("tm_queue_init",
 			        FunctionType::get(Type::getVoidTy(CtxRef),
 			                          {i32Ty2, i32Ty2}, false));
+			CallInst *QueueInitCall = nullptr;
 			{
 				IRBuilder<> Builder(&MainFn->getEntryBlock(),
 				                    MainFn->getEntryBlock().begin());
-				Builder.CreateCall(QueueInit,
+				QueueInitCall = Builder.CreateCall(QueueInit,
 				                   {ConstantInt::get(i32Ty2, 4),
 				                    ConstantInt::get(i32Ty2, 4)});
 			}
@@ -606,6 +609,33 @@ public:
 			}
 
 			instrumentMainInitExit(MainFn, Ctx);
+
+			// Emit tm_register_global calls for each TM-annotated global.
+			// Insert BEFORE tm_queue_init (which is now AFTER tm_init/tm_init_thread,
+			// inserted by instrumentMainInitExit above), so the order in main() is:
+			//   tm_init → tm_init_thread → tm_register_global → tm_queue_init → user code
+			{
+				SmallVector<std::pair<GlobalVariable *, StringRef>, 8> TMSymbols;
+				collectTMSymbols(M, TMSymbols);
+				if (!TMSymbols.empty()) {
+					FunctionCallee RegFn =
+					    M.getOrInsertFunction("tm_register_global",
+					        FunctionType::get(Type::getVoidTy(CtxRef),
+					                          {ptrTy, i64Ty}, false));
+					IRBuilder<> RegBuilder(QueueInitCall);
+					const DataLayout &DL = M.getDataLayout();
+					for (auto &Sym : TMSymbols) {
+						GlobalVariable *GV = Sym.first;
+						Constant *GVCast = ConstantExpr::getBitCast(GV, ptrTy);
+						uint64_t Size = DL.getTypeAllocSize(GV->getValueType());
+						RegBuilder.CreateCall(RegFn,
+						    {GVCast, ConstantInt::get(i64Ty, Size)});
+						TM_DEBUG("Emitting tm_register_global(%s)",
+						         Sym.second.str().c_str());
+					}
+					modified = true;
+				}
+			}
 		}
 
 		TM_DEBUG("TMQueueGlobalInitPass: %s", modified ? "modified module" : "no changes");

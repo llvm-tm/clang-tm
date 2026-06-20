@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <new>
+#include <pthread.h>
+#include <vector>
 
 namespace stm {
 
@@ -157,6 +159,70 @@ inline void tm_region_check_leaks() noexcept {
         fprintf(stderr, "  ptr=%p  size=%zu\n", kv.first, kv.second);
     }
 #endif
+}
+
+// ═══════════════════════════════════════════════════════════
+// Registered TM globals (static/globals annotated with "tm",
+// registered via tm_register_global at startup)
+// ═══════════════════════════════════════════════════════════
+
+struct TMGlobalRange {
+    const char *start;
+    const char *end;
+};
+
+extern std::vector<TMGlobalRange> g_tm_globals;
+
+extern "C" void tm_register_global(void *addr, size_t size);
+
+inline bool isTMGlobal(const void *addr) noexcept {
+    const char *a = static_cast<const char *>(addr);
+    for (auto &r : g_tm_globals) {
+        if (a >= r.start && a < r.end)
+            return true;
+    }
+    return false;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Stack-pointer check: prevents async worker threads from
+// treating their own stack as TM-tracked memory.
+// ═══════════════════════════════════════════════════════════
+
+extern thread_local const char *g_tm_stack_low;
+extern thread_local const char *g_tm_stack_high;
+
+// Record current thread's approximate stack bounds using pthread API.
+// Must be called at the start of each worker thread (and can be called
+// from the main thread for symmetry).
+inline void tm_record_stack_bounds() {
+#ifdef __APPLE__
+    g_tm_stack_high = static_cast<const char *>(
+        pthread_get_stackaddr_np(pthread_self()));
+    size_t stack_size = pthread_get_stacksize_np(pthread_self());
+    g_tm_stack_low = g_tm_stack_high - stack_size;
+#elif defined(__linux__)
+    pthread_attr_t attr;
+    void *stack_addr;
+    size_t stack_size;
+    pthread_getattr_np(pthread_self(), &attr);
+    pthread_attr_getstack(&attr, &stack_addr, &stack_size);
+    pthread_attr_destroy(&attr);
+    g_tm_stack_low = static_cast<const char *>(stack_addr);
+    g_tm_stack_high = g_tm_stack_low + stack_size;
+#else
+    (void)pthread_self();
+    g_tm_stack_low = nullptr;
+    g_tm_stack_high = nullptr;
+#endif
+}
+
+// Returns true if addr falls within the calling thread's stack.
+inline bool isOnCurrentThreadStack(const void *addr) noexcept {
+    if (!g_tm_stack_low || !g_tm_stack_high)
+        return false;
+    const char *a = static_cast<const char *>(addr);
+    return a >= g_tm_stack_low && a < g_tm_stack_high;
 }
 
 // ═══════════════════════════════════════════════════════════

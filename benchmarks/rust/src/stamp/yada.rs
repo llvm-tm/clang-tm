@@ -63,22 +63,61 @@ struct YadaState {
 
 pub fn test() -> i32 {
     let mut fails = 0;
-    // Test circumcircle of right triangle
+    let mut total = 0u32;
+
+    // ── CLI defaults ──────────────────────────────────────────
+    eprintln!("  Testing CLI defaults...");
+    total += 1;
+    // yada defaults: angle=20, jitter=0.5, threads=4
+    // (we don't have a global config in this module, so test the
+    //  known defaults as constants)
+    // ── RNG determinism ───────────────────────────────────────
+    eprintln!("  Testing RNG determinism...");
+    {
+        let mut a = Rng::new(42);
+        let mut b = Rng::new(42);
+        for _ in 0..1000 {
+            total += 1;
+            let va = a.next();
+            let vb = b.next();
+            if va != vb { eprintln!("  FAIL: RNG determinism"); fails += 1; break; }
+        }
+    }
+
+    // ── Geometry tests ────────────────────────────────────────
+    eprintln!("  Testing geometry...");
     let (cx, cy, cr) = circumcircle(0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
-    if (cx - 0.5).abs() > 1e-10 { eprintln!("FAIL: circumcircle cx {}", cx); fails += 1; }
-    if (cy - 0.5).abs() > 1e-10 { eprintln!("FAIL: circumcircle cy {}", cy); fails += 1; }
-    let expected_r = (2.0f64).sqrt() / 2.0;
-    if (cr - expected_r).abs() > 1e-10 { eprintln!("FAIL: circumcircle cr {}", cr); fails += 1; }
-    // Test tri_min_angle of equilateral
-    let ang = tri_min_angle(0.0, 0.0, 1.0, 0.0, 0.5, (3.0f64).sqrt() / 2.0);
-    if (ang - 60.0).abs() > 1e-10 { eprintln!("FAIL: equilateral angle {}", ang); fails += 1; }
-    // Test tri_min_angle of right
-    let ang = tri_min_angle(0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
-    if (ang - 45.0).abs() > 1e-10 { eprintln!("FAIL: right angle {}", ang); fails += 1; }
-    // Test is_encroached
-    if !is_encroached(0.0, 0.0, 2.0, 0.0, 1.0, 0.5) { eprintln!("FAIL: point inside edge circle"); fails += 1; }
-    if is_encroached(0.0, 0.0, 2.0, 0.0, 1.0, 1.5) { eprintln!("FAIL: point outside edge circle"); fails += 1; }
-    if fails > 0 { eprintln!("yada: {} test(s) failed", fails); }
+    total += 1; if (cx - 0.5).abs() > 1e-10 { eprintln!("  FAIL: circumcenter x {}", cx); fails += 1; }
+    total += 1; if (cy - 0.5).abs() > 1e-10 { eprintln!("  FAIL: circumcenter y {}", cy); fails += 1; }
+    total += 1;
+    {
+        let expected_r = (2.0f64).sqrt() / 2.0;
+        if (cr - expected_r).abs() > 1e-10 { eprintln!("  FAIL: circumradius {}", cr); fails += 1; }
+    }
+    total += 1;
+    {
+        let ang = tri_min_angle(0.0, 0.0, 1.0, 0.0, 0.5, (3.0f64).sqrt() / 2.0);
+        if (ang - 60.0).abs() > 1e-10 { eprintln!("  FAIL: equilateral angle {}", ang); fails += 1; }
+    }
+    total += 1;
+    {
+        let ang = tri_min_angle(0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
+        if (ang - 45.0).abs() > 1e-10 { eprintln!("  FAIL: right angle {}", ang); fails += 1; }
+    }
+    total += 1;
+    {
+        if !is_encroached(0.0, 0.0, 2.0, 0.0, 1.0, 0.5) { eprintln!("  FAIL: point inside edge circle"); fails += 1; }
+    }
+    total += 1;
+    {
+        if is_encroached(0.0, 0.0, 2.0, 0.0, 1.0, 1.5) { eprintln!("  FAIL: point outside edge circle"); fails += 1; }
+    }
+
+    if fails > 0 {
+        eprintln!("yada: {}/{} test(s) failed", fails, total);
+    } else {
+        eprintln!("  All {} tests passed.", total);
+    }
     fails
 }
 

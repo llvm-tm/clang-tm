@@ -152,6 +152,7 @@ dependencies = [
  "fastrand",
  "libc",
  "tm",
+ "tm-executor",
 ]
 
 [[package]]
@@ -1906,6 +1907,14 @@ dependencies = [
  "runtime-tl2",
  "runtime-tsxsgl",
  "runtime-xtm",
+]
+
+[[package]]
+name = "tm-executor"
+version = "0.1.0"
+dependencies = [
+ "addrspace",
+ "tm",
 ]
 
 [[package]]

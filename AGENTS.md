@@ -666,4 +666,72 @@ Extended `tm-sim` (real-backend replay binary) with:
 4. **SPHT profiling patch**: RDTSC instrumentation for SPHT (branch overflow + mutex fallback)
 5. **Run `run_workflow.sh` on RTM hardware** → real machine profile → validate against real TSXSGL
 
+## Session 2026-06-20 — `.tm_shared` section: TM-annotated global registration system
+
+### Problem
+
+In plugin-instrumented binaries, static TM-annotated globals (e.g. `static TM int counter`) live in the BSS/data segment, not the TM region. The `LLVM_TM_ADDR_CHECK` macro bypassed TM operations for non-TM-region addresses, causing silent lost-updates on static TM globals in async/queue execution.
+
+### Root cause chain
+
+1. **`LLVM_TM_ADDR_CHECK` bypass**: When `!stm::isTMAddress(addr)` was true (static global not in mmap'd TM region), the macro returned immediately with a plain load/store, bypassing read-set/write-set tracking entirely.
+2. **Queue worker threads**: Worker threads ran cloned+instrumented TX functions that generated `tm_read_i4`/`tm_write_i4` calls for `counter`, but these calls hit the bypass macro and did plain load/store — no TM tracking, no OCC validation, lost updates.
+
+### Fix — `.tm_shared` registration system
+
+**Runtime** (`tm_region_allocator.hpp` + `tm_region_allocator.cpp`):
+- Added `TMGlobalRange` struct and `extern std::vector<TMGlobalRange> g_tm_globals` tracking all registered TM globals.
+- Added `tm_register_global(void *addr, size_t size)` — `extern "C"` function that records the address range.
+- Added `stm::isTMGlobal(const void *addr)` — inline O(n) scan for fast-path bypass check.
+
+**LLVM pass** (`TMInstrumentPass.cpp` — `TMQueueGlobalInitPass`):
+- After `instrumentMainInitExit()` inserts `tm_init()`/`tm_init_thread()` at the start of `main()`, the pass now iterates all TM-annotated globals (via `collectTMSymbols`) and emits `tm_register_global(&symbol, sizeof(symbol))` calls for each.
+- Calls are inserted BEFORE `tm_queue_init()`, AFTER `tm_init()`/`tm_init_thread()`, so the order in `main()` is: `tm_init → tm_init_thread → tm_register_global → tm_queue_init → user code`.
+
+**Macro update** (`tm_common.hpp`):
+- `LLVM_TM_ADDR_CHECK` and `LLVM_TM_ADDR_CHECK_WRITE` now check `stm::isTMGlobal(addr)` before bypassing. If the address falls within a registered TM global range, the TM operation proceeds normally with full read-set/write-set tracking.
+
+### Verification
+
+- `test_queue_multi`: PASS — 431 commits, avg 2 reads + 1 write per TX, 32 aborts (expected with 4 threads). Previously would have shown 400 plain increments with zero TM stat counters (bypassed).
+- All 26 simulator tests: 26/26 PASS
+
+### Files modified
+
+- `backends/tm_impl/common/tm_region_allocator.hpp` — Added `TMGlobalRange`, `extern g_tm_globals`, `extern "C" void tm_register_global()`, `inline isTMGlobal()`; added `#include <vector>`
+- `backends/tm_impl/tm_region_allocator/tm_region_allocator.cpp` — Added `g_tm_globals` definition, `tm_register_global()` implementation; added `#include <vector>`
+- `backends/tm_impl/common/tm_common.hpp` — `LLVM_TM_ADDR_CHECK`/`LLVM_TM_ADDR_CHECK_WRITE` now check `stm::isTMGlobal(addr)` before bypassing
+- `plugin/passes/TMInstrumentPass.cpp` — `TMQueueGlobalInitPass::run()` emits `tm_register_global` calls for each TM-annotated global after init, before queue init
+
+## Session 2026-06-20 — Stack-pointer checks in async paths (defense-in-depth)
+
+### Problem
+
+Queue executor worker threads (and caller threads calling `tm_enqueue`) had no mechanism to detect if a TM operation targeted the thread's own stack — a potential correctness gap if the instrumentation pass ever generated `tm_read_*/tm_write_*` for stack-local addresses.
+
+### Fix — Thread-local stack-bound tracking + bypass
+
+**Runtime** (`tm_region_allocator.hpp` + `tm_region_allocator.cpp`):
+- Added `extern thread_local g_tm_stack_low` / `g_tm_stack_high` for approximate thread stack bounds.
+- Added `stm::tm_record_stack_bounds()` — uses `pthread_get_stackaddr_np` (macOS) or `pthread_getattr_np` + `pthread_attr_getstack` (Linux) to record stack boundaries.
+- Added `stm::isOnCurrentThreadStack(const void*)` — returns true if address falls within the calling thread's stack.
+
+**Macro update** (`tm_common.hpp`):
+- `LLVM_TM_ADDR_CHECK` / `LLVM_TM_ADDR_CHECK_WRITE` now additionally check `stm::isOnCurrentThreadStack(addr)`. If the address is on the current thread's stack, the macro bypasses with a plain load/store instead of a TM operation.
+
+**Queue runtime** (`queue_runtime.cpp`):
+- `real_tm_enqueue()` and `tm_enqueue_ex()` call `stm::tm_record_stack_bounds()` on first invocation (caller thread).
+- `QueueExecutor::workerLoop()` calls `stm::tm_record_stack_bounds()` after `tm_init_thread()` (worker threads).
+- Added `#include "tm_region_allocator.hpp"` to `queue_runtime.cpp`.
+
+**Rust side** (`addrspace/src/lib.rs` + `tm-executor/src/lib.rs`):
+- Added `record_stack_bounds()` and `is_on_stack()` to the `addrspace` crate (Rust equivalent of the C++ stack check, using `libc::pthread_get_stackaddr_np` / `pthread_getattr_np`).
+- `QueueExecutor::worker_loop()` in `tm-executor` calls `addrspace::record_stack_bounds()` at startup.
+
+### Verification
+
+- All 4 queue tests pass (test_queue, test_queue_sync, test_queue_async, test_queue_multi).
+- Simulator tests: 26/26 PASS.
+- Plugin tests: 18/18 PASS.
+- Rust workspace compiles cleanly.
 
