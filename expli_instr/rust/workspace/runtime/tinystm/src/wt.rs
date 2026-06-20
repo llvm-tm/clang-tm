@@ -83,6 +83,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         with_tx(|tx| {
             tx.undo_backs.push(old_tv.into_write_back(addr));
             ws_write(&mut tx.write_set, addr, tv);
+            tx.read_set.push((addr, version));
         });
         return;
     }
@@ -105,6 +106,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     with_tx(|tx| { tx.locked_addrs.push(lock_idx);
         tx.undo_backs.push(old_tv.into_write_back(addr));
         ws_write(&mut tx.write_set, addr, tv);
+        tx.read_set.push((addr, version));
     });
 }
 

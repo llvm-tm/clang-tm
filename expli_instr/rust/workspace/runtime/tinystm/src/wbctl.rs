@@ -50,6 +50,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         let version = read_version(addr);
         if version > tx.start_version { tx.aborted = true; return; }
         tx.write_set.push((addr, WriteEntry { value: tv }));
+        tx.read_set.push((addr, version));
     });
 }
 
