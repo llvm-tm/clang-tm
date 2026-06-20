@@ -21,8 +21,8 @@ Based on the 2026-06-19 Rust benchmark audit, updated 2026-06-20.
 
 ## P3: Minor alignment
 
-- [ ] **--test mode for standalone CLI bins**: `stamp_bayes.rs`, `stamp_yada.rs` standalone binaries lack `--test` flag. The unified `stamp.rs` has `--test -b <bench>` which is the canonical path.
-- [ ] **CLI args alignment**: Named vs positional argument consistency across all benchmarks. Minor.
+- [x] **--test mode for standalone CLI bins**: `stamp_bayes.rs`, `stamp_yada.rs` standalone binaries now support `--test` flag, calling `benchmarks::stamp::bayes::test()` / `benchmarks::stamp::yada::test()`.
+- [x] **CLI args alignment**: All Rust benchmarks already use named flags. Fuzz counter/bank use `-t`, `-n`, `-c`, `-a`, `-s` matching C++. No positional args.
 
 ## Verification
 

@@ -94,6 +94,11 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--test" => {
+                let fails = benchmarks::stamp::yada::test();
+                println!("yada test: {} failures", fails);
+                std::process::exit(if fails == 0 { 0 } else { 1 });
+            }
             "-a" => { i += 1; angle_constraint = args[i].parse().unwrap(); }
             "-j" => { i += 1; jitter = args[i].parse().unwrap(); }
             "-p" | "-t" => { i += 1; num_threads = args[i].parse().unwrap(); }

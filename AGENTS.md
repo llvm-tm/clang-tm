@@ -703,6 +703,34 @@ In plugin-instrumented binaries, static TM-annotated globals (e.g. `static TM in
 - `backends/tm_impl/common/tm_common.hpp` — `LLVM_TM_ADDR_CHECK`/`LLVM_TM_ADDR_CHECK_WRITE` now check `stm::isTMGlobal(addr)` before bypassing
 - `plugin/passes/TMInstrumentPass.cpp` — `TMQueueGlobalInitPass::run()` emits `tm_register_global` calls for each TM-annotated global after init, before queue init
 
+## Session 2026-06-20 — Sweep: all IMPROVEMENT_PLAN.md items completed
+
+### Audit of all 10 plan items
+
+| Item | Description | Result |
+|------|-------------|--------|
+| 1.1 | Fix spin loops in simulation mode | ✅ 5 loops guarded across tl2/tinystm/romulus |
+| 1.2 | Deadlock detector integration | ✅ Already backend-agnostic in `SimEngine` |
+| 1.3 | LEFTRIGHT 29/114 failures | ✅ C++ "leftright" was OCC, not LR; fixed 3 bugs (stub allocator, null jmpbuf, value-based validation). 114/114, bank multi-thread passes |
+| 2.1 | Delete stale directories | ✅ All 4 already gone (`llvm_tm_plugin/`, `expli-benchmarks/`, `plugin-benchmarks/`, `rust_tm_api/`) |
+| 2.2 | Add sim support to SwissTM/ROMULUS/SGL | ✅ SwissTM + ROMULUS done; no Rust SGL backend exists |
+| 2.3 | Add CI jobs | ✅ `nightly.yml` exists with fidelity-regression + cross-backend-full |
+| 2.4 | Fix C++↔simulator address mismatch | ✅ Fixed via `init_from_events()` auto-detection |
+| 3.1 | Concurrent simulation engine | ❌ Removed per instruction |
+| 4.1 | Developer guide | ✅ `docs/DEVELOPER_GUIDE.md` exists (166 lines) |
+| 4.2 | Backend feature exclusivity | ✅ `exclusive_backend!` macro in `tm/src/lib.rs:217` |
+
+### Key findings
+
+1. **LEFTRIGHT was already fixed** — the C++ backend (global-clock OCC misnamed "leftright") passed all tests including bank multi-thread since the 2026-06-20 session. The `Implementation_notes.md` describes generic Left-Right theory that doesn't match the implementation.
+2. **No Rust SGL backend** — only `sgl-persistent` and `sgl-distributed` exist, which are different algorithms. Item 2.2's "SGL" target was moot.
+3. **`IMPROVEMENT_PLAN.md`** — rewritten to reflect completion, removing aspirational CI YAML stubs and outdated prioritization table.
+
+### Files modified
+
+- `IMPROVEMENT_PLAN.md` — rewritten to show all items complete with verification table
+- `AGENTS.md` — this session summary
+
 ## Session 2026-06-20 — Stack-pointer checks in async paths (defense-in-depth)
 
 ### Problem
@@ -734,4 +762,55 @@ Queue executor worker threads (and caller threads calling `tm_enqueue`) had no m
 - Simulator tests: 26/26 PASS.
 - Plugin tests: 18/18 PASS.
 - Rust workspace compiles cleanly.
+
+## Session 2026-06-20 — Audit & remaining work sweep
+
+### P0: Fix remaining spin loops in simulation mode
+
+**Problem**: 4 unprotected `std::hint::spin_loop()` calls across 3 simulator backends (tl2, tinystm, romulus) would hang in single-threaded simulation when a lock is held by a thread that never runs.
+
+**Fix**: Wrapped each unprotected `spin_loop()` in `#[cfg(not(feature = "simulation"))]`:
+
+| File | Line | Context |
+|------|------|---------|
+| `tl2/src/lib.rs` | 291 | Commit lock CAS spin |
+| `tinystm/src/raw.rs` | 83 | `gc_acquire()` global clock spin |
+| `tinystm/src/raw.rs` | 154 | Write-set lock loop in `commit()` |
+| `tinystm/src/common.rs` | 73 | `lock_at_index()` in wbctl |
+| `romulus/src/lib.rs` | 176 | Commit lock CAS spin |
+
+**Verification**: All 26 simulator tests pass. All 6 workspace lib tests pass.
+
+### P0/P1: Already resolved items confirmed
+
+- **Nightly CI** (`.github/workflows/nightly.yml`): Already exists with fidelity-regression + cross-backend-full jobs
+- **Deadlock detector integration**: Already backend-agnostic in `SimEngine::dispatch_event()` — no NOrec-specific path
+- **C++↔simulator address mismatch**: Already fixed — `tm-sim` always calls `init_from_events()` which auto-detects address range from trace events
+- **Simulation features for SwissTM/ROMULUS**: Already added (6 total sim backends)
+- **Stale directories**: Already removed (checked by CI stale-check job)
+
+### P3: --test mode for stamp_bayes.rs, stamp_yada.rs
+
+**Fix**: Added `--test` flag parsing to both standalone CLI bins. When `--test` is passed, calls `benchmarks::stamp::bayes::test()` or `benchmarks::stamp::yada::test()` and exits.
+
+### P3: CLI args alignment
+
+Confirmed all Rust benchmarks already use named flags (no positional args). Fuzz counter/bank use `-t`, `-n`, `-c`, `-a`, `-s` matching C++.
+
+### P3: Developer onboarding guide
+
+`docs/DEVELOPER_GUIDE.md` already exists with 166 lines covering all requested topics.
+
+### Cleanup
+
+- Dropped 2 stale stashes (WIP references to deleted `llvm_tm_plugin/` path + pre-debug-stash)
+
+### Files modified
+
+- `expli_instr/rust/workspace/runtime/tl2/src/lib.rs` — spin_loop sim guard
+- `expli_instr/rust/workspace/runtime/tinystm/src/raw.rs` — spin_loop sim guards (2)
+- `expli_instr/rust/workspace/runtime/tinystm/src/common.rs` — spin_loop sim guard
+- `expli_instr/rust/workspace/runtime/romulus/src/lib.rs` — spin_loop sim guard
+- `benchmarks/rust/src/clis/stamp_bayes.rs` — --test flag
+- `benchmarks/rust/src/clis/stamp_yada.rs` — --test flag
 

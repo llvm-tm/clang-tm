@@ -80,6 +80,7 @@ pub fn gc_acquire() {
         {
             return;
         }
+        #[cfg(not(feature = "simulation"))]
         std::hint::spin_loop();
     }
 }
@@ -151,6 +152,7 @@ pub fn commit(
 
     for &idx in &lock_idxs {
         while !try_lock_at_index(idx) {
+            #[cfg(not(feature = "simulation"))]
             std::hint::spin_loop();
         }
     }

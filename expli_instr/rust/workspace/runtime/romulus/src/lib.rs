@@ -173,6 +173,7 @@ pub fn tm_commit() -> bool {
         .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
+        #[cfg(not(feature = "simulation"))]
         std::hint::spin_loop();
     }
 
