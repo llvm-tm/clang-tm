@@ -29,6 +29,10 @@ thread_local FreeNode *g_deferred_frees = nullptr;
 thread_local std::unordered_set<void *> g_deferred_frees_set;
 thread_local SpecAlloc *g_spec_allocs = nullptr;
 
+// SGL fallback for when RTM is broken / unavailable
+static std::mutex g_spht_fallback_mutex;
+thread_local bool g_spht_rtm_mode = false;
+
 extern const TMRealHooks g_spht_hooks;
 
 extern "C" {
@@ -168,13 +172,30 @@ static void real_tm_begin()
 	tm_clear_spec_allocs();
 	tm_clear_deferred_frees();
 	g_in_tx = true;
-	spht::begin();
+
+	if (spht::begin()) {
+		g_spht_rtm_mode = true;
+	} else if (tm_longjmp_ret != 0) {
+		// Just came from siglongjmp — the retry loop's
+		// "if (tm_longjmp_ret != 0) continue" will skip body+tm_end.
+		// Don't acquire SGL now; the next iteration (where
+		// sigsetjmp returns 0) will acquire it properly.
+		g_spht_rtm_mode = false;
+	} else {
+		g_spht_rtm_mode = false;
+		g_spht_fallback_mutex.lock();
+	}
+
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 static void real_tm_end()
 {
-	spht::commit();
+	if (g_spht_rtm_mode) {
+		spht::commit();
+	} else {
+		g_spht_fallback_mutex.unlock();
+	}
 	g_in_tx = false;
 	tm_flush_spec_allocs();
 	tm_flush_deferred_frees();
