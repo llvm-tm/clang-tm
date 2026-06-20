@@ -11,6 +11,8 @@
 
 #include "tm_test_common.hpp"
 
+extern "C" void (*tm_wait_prev_tx)(void);
+
 static TM int counter = 0;
 static const int num_threads = 4;
 static const int iters_per_thread = 100;
@@ -23,6 +25,7 @@ THREAD void worker(int tid) {
     for (int i = 0; i < iters_per_thread; i++) {
         tx_increment(1);
     }
+    tm_wait_prev_tx();
 }
 
 static void* thread_entry(void* arg) {
