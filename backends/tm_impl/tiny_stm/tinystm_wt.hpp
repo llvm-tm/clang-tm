@@ -45,6 +45,7 @@ constexpr const char *VERSION = "0.3.0-wt";
   * ---------------------------------------------------- */
 
 struct ReadLogEntry_wt {
+	void *addr;
 	volatile word_t observed_version;
 	word_t observed_incarnation;
 	any_type_t observed_val;
@@ -58,9 +59,9 @@ struct WriteLogEntry_wt {
 };
 
 // ── Factory functions ──────────────────────────────────────────
-inline ReadLogEntry_wt make_read_entry(word_t version, word_t incarnation,
+inline ReadLogEntry_wt make_read_entry(void *addr, word_t version, word_t incarnation,
                                        const any_type_t &val) {
-	return {version, incarnation, val};
+	return {addr, version, incarnation, val};
 }
 
 inline WriteLogEntry_wt make_write_entry(const any_type_t &old_val,
@@ -201,9 +202,9 @@ validate_read_set_wt(word_t commit_version)
 	auto *tx = current_tx_wt;
 	if (commit_version <= tx->start_version + 1)
 		return;
-	for (auto &it : tx->read_set) {
-		auto &r = it.second;
-		ByteOffset bo((word_t)it.first);
+	for (auto &r : tx->read_set) {
+		void *addr = r.addr;
+		ByteOffset bo((word_t)addr);
 		Lock_wt *lock = &g_locks_wt.get(bo.base_addr);
 
 		word_t l = lock->get();
@@ -218,9 +219,8 @@ validate_read_set_wt(word_t commit_version)
 		                   current_incarnation != r.observed_incarnation))
 			abort_tx("version_mismatch");
 		if (is_locked && owner == tx->id) {
-			auto w = tx->write_set.find(it.first);
-			if (w != tx->write_set.end() &&
-			    r.observed_version != w->second.version)
+			auto *w = tx->ws_find(addr);
+			if (w && r.observed_version != w->version)
 				abort_tx("stale_read_own_lock");
 		}
 	}
@@ -327,9 +327,9 @@ read_word_wt(                                           //
 
 	// Write-set lookup — return the buffered new value if we wrote here
 	{
-		auto w = tx->write_set.find(addr);
-		if (w != tx->write_set.end()) {
-			return w->second.new_val;
+		auto *w = tx->ws_find(addr);
+		if (w) {
+			return w->new_val;
 		}
 	}
 
@@ -373,9 +373,8 @@ read_word_wt(                                           //
 			}
 
 			bool extended = false;
-			for (auto &it : tx->read_set) {
-				auto &r = it.second;
-				Lock_wt *rl = &g_locks_wt.get(ByteOffset((word_t)it.first).base_addr);
+			for (auto &r : tx->read_set) {
+				Lock_wt *rl = &g_locks_wt.get(ByteOffset((word_t)r.addr).base_addr);
 				word_t rv = (rl->get() & (VERSION_MASK << META_BITS)) >> META_BITS;
 				if (rv > tx->start_version) {
 					extended = true;
@@ -387,9 +386,8 @@ read_word_wt(                                           //
 				// Try full extend or abort
 				word_t last_version = get_clock();
 				bool valid = true;
-				for (auto &it : tx->read_set) {
-					auto &r = it.second;
-					Lock_wt *rl = &g_locks_wt.get(ByteOffset((word_t)it.first).base_addr);
+				for (auto &r : tx->read_set) {
+					Lock_wt *rl = &g_locks_wt.get(ByteOffset((word_t)r.addr).base_addr);
 					word_t lv = rl->get();
 					word_t rv = (lv & (VERSION_MASK << META_BITS)) >> META_BITS;
 					if (rv > r.observed_version) {
@@ -417,7 +415,7 @@ read_word_wt(                                           //
 
 		TM_EVENT2(READ_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, version);
 
-		tx->read_set.insert(std::pair(addr, make_read_entry(version, incarnation, result)));
+		tx->read_set.push_back(make_read_entry(addr, version, incarnation, result));
 
 		return result;
 	}
@@ -444,9 +442,9 @@ write_word_wt(                                           //
 
 	// Existing write-set entry at the same aligned address → update in place
 	{
-		auto w = tx->write_set.find(addr);
-		if (w != tx->write_set.end()) {
-			w->second.new_val = val;
+		auto *w = tx->ws_find(addr);
+		if (w) {
+			w->new_val = val;
 			write_value_to_addr(addr, val, ValueType::UINT64);
 			return;
 		}
@@ -481,7 +479,7 @@ write_word_wt(                                           //
 				any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
 
 				WriteLogEntry_wt w = make_write_entry(old_val, val, version, incarnation);
-				tx->write_set[addr] = w;
+				*tx->ws_get_or_insert(addr) = w;
 				tx->locks_held.push_back(lock);
 
 				TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, l);
@@ -495,7 +493,7 @@ write_word_wt(                                           //
 				any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
 
 				WriteLogEntry_wt w = make_write_entry(old_val, val, version, incarnation);
-				tx->write_set[addr] = w;
+				*tx->ws_get_or_insert(addr) = w;
 
 				TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)8);
 
@@ -512,7 +510,7 @@ write_word_wt(                                           //
 			word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
 			any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
 
-			tx->write_set[addr] = make_write_entry(old_val, val, version, incarnation);
+			*tx->ws_get_or_insert(addr) = make_write_entry(old_val, val, version, incarnation);
 			write_value_to_addr(addr, val, ValueType::UINT64);
 			TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)8);
 			return;

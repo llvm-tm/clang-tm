@@ -256,19 +256,30 @@ pub fn run(config: &Config, _stop: &AtomicBool, ops: &AtomicU64) {
     let dictionary: Vec<String> = wordlist.iter().map(|s| s.to_string()).collect();
 
     // ── Allocate TM-safe flat arrays ──
+    // Large init arrays use the system heap (not the TM region) because
+    // their total size (~70 GB with -l 128) exceeds TM_REGION_SIZE (16 GB).
+    // This mirrors C++'s stub_calloc (= std::calloc) during single-thread
+    // init before workers start.  TM read/write ops work on any address.
     let packet_q_capacity = (max_flows * max_packets_per_flow + 1024) as i32;
-    let packet_queue = addrspace::tm_region_calloc(packet_q_capacity as usize * size_of::<Packet>(), 1);
-    let packet_q_head = addrspace::tm_region_calloc(size_of::<i32>(), 1) as *mut i32;
-    let packet_q_tail = addrspace::tm_region_calloc(size_of::<i32>(), 1) as *mut i32;
+    let packet_q_bytes = packet_q_capacity as usize * size_of::<Packet>();
+    let packet_queue = addrspace::tm_system_calloc(packet_q_bytes, 1);
+    let packet_q_sz = size_of::<i32>();
+    let packet_q_head = addrspace::tm_system_calloc(packet_q_sz, 1) as *mut i32;
+    let packet_q_tail = addrspace::tm_system_calloc(packet_q_sz, 1) as *mut i32;
 
-    let decoder_flows = addrspace::tm_region_calloc(max_flows * size_of::<DecodedFlow>(), 1);
-    let fragment_storage = addrspace::tm_region_calloc(max_flows * INTRUDER_MAX_PACKETS * INTRUDER_MAX_DATA, 1) as *mut i8;
-    let fragment_counts = addrspace::tm_region_calloc(max_flows * size_of::<i32>(), 1) as *mut i32;
+    let df_bytes = max_flows * size_of::<DecodedFlow>();
+    let decoder_flows = addrspace::tm_system_calloc(df_bytes, 1);
+    let fs_bytes = max_flows * INTRUDER_MAX_PACKETS * INTRUDER_MAX_DATA;
+    let fragment_storage = addrspace::tm_system_calloc(fs_bytes, 1) as *mut i8;
+    let fc_bytes = max_flows * size_of::<i32>();
+    let fragment_counts = addrspace::tm_system_calloc(fc_bytes, 1) as *mut i32;
 
     let decoded_q_capacity = max_flows as i32;
-    let decoded_queue = addrspace::tm_region_calloc(decoded_q_capacity as usize * size_of::<DecodedFlow>(), 1);
-    let decoded_q_head = addrspace::tm_region_calloc(size_of::<i32>(), 1) as *mut i32;
-    let decoded_q_tail = addrspace::tm_region_calloc(size_of::<i32>(), 1) as *mut i32;
+    let dq_bytes = decoded_q_capacity as usize * size_of::<DecodedFlow>();
+    let decoded_queue = addrspace::tm_system_calloc(dq_bytes, 1);
+    let decoded_q_sz = size_of::<i32>();
+    let decoded_q_head = addrspace::tm_system_calloc(decoded_q_sz, 1) as *mut i32;
+    let decoded_q_tail = addrspace::tm_system_calloc(decoded_q_sz, 1) as *mut i32;
 
     // ── Generate packets (single-threaded, no TM) ──
     let queue_ptr = packet_queue as *mut Packet;
@@ -357,13 +368,13 @@ pub fn run(config: &Config, _stop: &AtomicBool, ops: &AtomicU64) {
     println!("Num found = {}", total_ops);
 
     // ── Cleanup ──
-    addrspace::tm_region_free(packet_queue);
-    addrspace::tm_region_free(packet_q_head as *mut u8);
-    addrspace::tm_region_free(packet_q_tail as *mut u8);
-    addrspace::tm_region_free(decoder_flows);
-    addrspace::tm_region_free(fragment_storage as *mut u8);
-    addrspace::tm_region_free(fragment_counts as *mut u8);
-    addrspace::tm_region_free(decoded_queue);
-    addrspace::tm_region_free(decoded_q_head as *mut u8);
-    addrspace::tm_region_free(decoded_q_tail as *mut u8);
+    addrspace::tm_system_free(packet_queue, packet_q_bytes);
+    addrspace::tm_system_free(packet_q_head as *mut u8, packet_q_sz);
+    addrspace::tm_system_free(packet_q_tail as *mut u8, packet_q_sz);
+    addrspace::tm_system_free(decoder_flows, df_bytes);
+    addrspace::tm_system_free(fragment_storage as *mut u8, fs_bytes);
+    addrspace::tm_system_free(fragment_counts as *mut u8, fc_bytes);
+    addrspace::tm_system_free(decoded_queue, dq_bytes);
+    addrspace::tm_system_free(decoded_q_head as *mut u8, decoded_q_sz);
+    addrspace::tm_system_free(decoded_q_tail as *mut u8, decoded_q_sz);
 }

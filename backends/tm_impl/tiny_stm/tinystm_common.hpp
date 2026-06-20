@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <unordered_map>
 #include <vector>
 
 #include "tm_common.hpp"
@@ -222,9 +221,53 @@ public:
 	// holds a pointer to them → use-after-free on the next begin().
 	//
 	// See tm_alloc_overrides.hpp for the full discussion.
-	std::unordered_map<void *, ReadLogEntry> read_set;
-	std::unordered_map<void *, WriteLogEntry> write_set;
+	//
+	// Note: read_set and write_set use std::vector (not unordered_map)
+	// to avoid per-operation heap allocations.  The TM read/write paths
+	// allocate/free 165M+ entries for the intruder benchmark; the
+	// unordered_map's node-allocator overhead alone was ~28% of runtime.
+	// Linear scans over small sets (avg ~2.5 writes, ~91 reads) are
+	// faster than hash-table lookup + malloc.
+	std::vector<ReadLogEntry> read_set;
+	std::vector<std::pair<void *, WriteLogEntry>> write_set;
 	std::vector<Lock *> locks_held;
+
+	// ── write_set helpers ───────────────────────────────────────
+
+	/// Find entry by address; returns pointer or nullptr.
+	WriteLogEntry *ws_find(void *addr)
+	{
+		for (auto &kv : write_set)
+			if (kv.first == addr) return &kv.second;
+		return nullptr;
+	}
+
+	const WriteLogEntry *ws_find(void *addr) const
+	{
+		for (auto &kv : write_set)
+			if (kv.first == addr) return &kv.second;
+		return nullptr;
+	}
+
+	/// Get or create entry for address (like unordered_map::operator[]).
+	WriteLogEntry &ws_get_or_insert(void *addr)
+	{
+		for (auto &kv : write_set)
+			if (kv.first == addr) return kv.second;
+		write_set.emplace_back(addr, WriteLogEntry{});
+		return write_set.back().second;
+	}
+
+	/// Erase entry at position `i` (swap-with-last, O(1) order-destroying).
+	void ws_erase_idx(size_t i)
+	{
+		if (i < write_set.size()) {
+			write_set[i] = write_set.back();
+			write_set.pop_back();
+		}
+	}
+
+	// ── Transaction lifecycle ───────────────────────────────────
 
 	void reset()
 	{
