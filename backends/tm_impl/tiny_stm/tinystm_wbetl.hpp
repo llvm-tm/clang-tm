@@ -427,7 +427,7 @@ write_word_etl(                                                //
 		}
 	}
 
-	*tx->ws_get_or_insert(aligned) = stm::merge::make_write_entry<WriteLogEntry_wbetl>(aligned, val, sz, addr, lock->get_version());
+	tx->ws_get_or_insert(aligned) = stm::merge::make_write_entry<WriteLogEntry_wbetl>(aligned, val, sz, addr, lock->get_version());
 	TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)sz);
 }
 

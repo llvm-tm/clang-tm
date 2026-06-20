@@ -75,7 +75,7 @@ static inline double l2d(long v) { double r; memcpy(&r, &v, sizeof(r)); return r
       void     tm_exit();
       void     tm_init_thread();
       void     tm_exit_thread();
-      void*    tm_calloc(size_t, size_t);
+      extern void* (*tm_calloc)(size_t, size_t);
   }
   #define TX_FUNC      __attribute__((annotate("shared"), noinline))
   #define TM_GLOBAL    __attribute__((annotate("tm")))

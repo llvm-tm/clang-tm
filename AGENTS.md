@@ -263,3 +263,47 @@ All workspace tests pass. `tm-executor` `queue_spec_alloc_inside_tx` only hangs 
 - `expli_instr/rust/workspace/runtime/tinystm/src/wt.rs` — same
 - `expli_instr/rust/workspace/runtime/tinystm/src/common.rs` — `HashMap`→`Vec` write-set, helper functions
 - `.github/workflows/ci.yml` — `--test-threads=1` for Rust workspace tests
+
+## Session 2026-06-20 — STAMP plugin-instrumented binary crash fix (DATA/TEXT symbol conflict)
+
+### Root cause
+
+All plugin-instrumented STAMP binaries crashed with SIGSEGV before doing any work (`stamp_tinystm_wbctl`, `stamp_tinystm_wt`, `stamp_norec`, `bank_tinystm`, etc.). The crash was a **DATA/TEXT symbol conflict**: the STAMP source code declared `tm_calloc` as a **function prototype** (`void* tm_calloc(size_t, size_t)` at `stamp_common.hpp:18`), causing the C++ frontend to generate `call @tm_calloc(...)` — a direct function call. But the plugin runtime defines `tm_calloc` as a **DATA variable** (`void* (*tm_calloc)(size_t, size_t) = ...`). The linker resolved the direct call to the DATA variable's address, jumping to the function-pointer *header address* instead of *through it*, treating 8 bytes of pointer data as machine code.
+
+### Fix — `tm_calloc` declaration (all STAMP sources)
+
+Changed from function prototype to function-pointer variable declaration:
+
+- **`stamp_common.hpp:18`**: `void* tm_calloc(...)` → `extern void* (*tm_calloc)(size_t, size_t)`
+- **`tm_stubs.cpp:7`**: `void* tm_calloc(...) { ... }` → `void* (*tm_calloc)(size_t, size_t) = [](...) { ... };`
+- **`bayes.cpp:58`**: same function → function-pointer declaration
+- **`yada.cpp:78`**: same function → function-pointer declaration
+
+This generates `load ptr, ptr @tm_calloc; call ptr %val(...)` (indirect through DATA) instead of `call @tm_calloc(...)` (direct to DATA address).
+
+### Fix — NOrec runtime (`LLVM_TM_PLUGIN` guards)
+
+`NOrec_runtime.cpp` defined `tm_init()`, `tm_exit()`, `tm_init_thread()`, `tm_exit_thread()` as TEXT functions regardless of `-DLLVM_TM_PLUGIN`. Added `#ifdef LLVM_TM_PLUGIN` wrappers (matching `TinySTM_runtime.cpp`'s pattern):
+- Rename functions to `static void do_tm_init()` etc.
+- Define DATA variables: `void (*tm_init)() = do_tm_init;`
+
+### Verification — 48/48 STAMP tests pass
+
+Comprehensive sweep across 3 backends × 8 benchmarks × 2 thread counts:
+
+| Backend   | bayes | genome | intruder | kmeans | labyrinth | ssca2 | vacation | yada |
+|-----------|-------|--------|----------|--------|-----------|-------|----------|------|
+| **WBCTL** 1t | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **WBCTL** 4t | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **WT** 1t | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **WT** 4t | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **NOrec** 1t | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **NOrec** 4t | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+### Remaining known issues — 12 backends missing `LLVM_TM_PLUGIN` guards
+
+The following backends define `tm_init`, `tm_exit`, `tm_init_thread`, `tm_exit_thread` as TEXT functions without `#ifdef LLVM_TM_PLUGIN` guards, causing the same DATA/TEXT crash with plugin-instrumented binaries:
+
+- `SingleGlobalLock_runtime.cpp`, `TSXSGL_runtime.cpp`, `tl2_runtime.cpp`, `SwissTM_runtime.cpp`, `DUDETM_runtime.cpp`, `SPHT_runtime.cpp`, `xtm_runtime.cpp`, `romulus_runtime.cpp`, `NVHTM_runtime.cpp`, `PersistentSGL_runtime.cpp`, `DistributedSGL_runtime.cpp`, `leftright_runtime.cpp`
+
+Fix pattern: apply `#ifdef LLVM_TM_PLUGIN` / `#else` / `#endif` around each function definition (see `NOrec_runtime.cpp` or `TinySTM_runtime.cpp` for the canonical pattern).

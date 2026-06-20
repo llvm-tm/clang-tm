@@ -15,7 +15,7 @@ extern "C" {
 void tm_serialize_lock();
 void tm_serialize_unlock();
 int tm_serialize_unlock_all();
-void* tm_calloc(size_t, size_t);
+extern void* (*tm_calloc)(size_t, size_t);
 }
 
 // RAII helpers for TM-region allocation (zero-initialised).
@@ -164,7 +164,8 @@ extern const char* g_yada_i;  // -i: input file prefix (.mesh file)
 
 void run_benchmark(BenchmarkType bench, int threads);
 
-inline uint64_t rdtsc() {
+__attribute__((annotate("tm_allow_opaque")))
+inline uint64_t wall_clock_now() {
     return std::chrono::steady_clock::now().time_since_epoch().count();
 }
 

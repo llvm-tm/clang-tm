@@ -87,7 +87,22 @@ static std::atomic<int64_t> g_tm_begin_count{0};
 static std::atomic<int64_t> g_tm_end_count{0};
 static std::atomic<int64_t> g_tm_tx_count{0};
 
-void tm_init() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init();
+static void do_tm_exit();
+static void do_tm_init_thread();
+static void do_tm_exit_thread();
+
+void (*tm_init)()        = do_tm_init;
+void (*tm_exit)()        = do_tm_exit;
+void (*tm_init_thread)() = do_tm_init_thread;
+void (*tm_exit_thread)() = do_tm_exit_thread;
+
+static void do_tm_init()
+#else
+void tm_init()
+#endif
+{
     if (stm::tm_region_init() != 0) {
         fprintf(stderr, "FATAL: tm_region_init() failed — TM address space unavailable\n");
         std::abort();
@@ -96,12 +111,21 @@ void tm_init() {
     tm_register_real_hooks(&g_norec_hooks);
 }
 
-void tm_exit() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit()
+#else
+void tm_exit()
+#endif
+{
     norec::exit();
     stm::tm_region_destroy();
 }
 
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init_thread()
+#else
 void tm_init_thread()
+#endif
 {
 	tm_hook_init_thread();
 	norec::init_thread();
@@ -111,7 +135,12 @@ void tm_init_thread()
 	sigsetjmp(tm_jmpbuf, 0);
 }
 
-void tm_exit_thread() { tm_hook_exit_thread(); norec::exit_thread(); }
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit_thread()
+#else
+void tm_exit_thread()
+#endif
+{ tm_hook_exit_thread(); norec::exit_thread(); }
 
 static void *real_tm_get_thread_state() {
     return (void*)&tm_nested_call_counter;
