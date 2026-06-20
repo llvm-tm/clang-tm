@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 #include <sys/mman.h>
 
 namespace stm {
@@ -37,6 +38,11 @@ thread_local Slab       g_tl_slab{nullptr, nullptr};
 thread_local TLFreeList g_tl_free_lists[MAX_CLASSES]{};
 thread_local void*      g_tl_hot_chunks[MAX_CLASSES]{};
 thread_local LargeHdr*  g_tl_large_free_list{nullptr};
+
+std::vector<TMGlobalRange> g_tm_globals;
+
+thread_local const char *g_tm_stack_low = nullptr;
+thread_local const char *g_tm_stack_high = nullptr;
 
 static std::atomic<int> g_region_inited{0};
 
@@ -158,6 +164,15 @@ void tm_region_destroy() noexcept {
     // cause later allocations to reuse old slabs, corrupting headers.
     // Tests that need full reset should call tm_region_init again
     // (which is idempotent and reuses the existing mapping).
+}
+
+// ── tm_register_global ──────────────────────────────────
+// Called from instrumented main() for each TM-annotated global
+// so that isTMGlobal() can check membership.
+
+extern "C" void tm_register_global(void *addr, size_t size) {
+    g_tm_globals.push_back({static_cast<const char *>(addr),
+                            static_cast<const char *>(addr) + size});
 }
 
 } // namespace stm

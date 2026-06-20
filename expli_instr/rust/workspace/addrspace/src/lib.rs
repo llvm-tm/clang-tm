@@ -141,6 +141,51 @@ pub fn is_tm_address(ptr: *const u8) -> bool {
     addr >= start && addr < end
 }
 
+// ════════════════════════════════════════════════════════════════
+// Stack-pointer check (defense-in-depth for async worker threads)
+// ════════════════════════════════════════════════════════════════
+
+thread_local! {
+    static STACK_LOW: UnsafeCell<usize> = const { UnsafeCell::new(0) };
+    static STACK_HIGH: UnsafeCell<usize> = const { UnsafeCell::new(0) };
+}
+
+/// Record the calling thread's approximate stack bounds.
+/// Must be called at the start of each worker thread.
+pub fn record_stack_bounds() {
+    #[cfg(target_os = "macos")]
+    {
+        let stack_addr = unsafe { libc::pthread_get_stackaddr_np(libc::pthread_self()) } as usize;
+        let stack_size = unsafe { libc::pthread_get_stacksize_np(libc::pthread_self()) };
+        STACK_LOW.with(|c| unsafe { *c.get() = stack_addr - stack_size });
+        STACK_HIGH.with(|c| unsafe { *c.get() = stack_addr });
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut attr: libc::pthread_attr_t = unsafe { std::mem::zeroed() };
+        unsafe { libc::pthread_getattr_np(libc::pthread_self(), &mut attr) };
+        let mut stack_addr: *mut libc::c_void = std::ptr::null_mut();
+        let mut stack_size: libc::size_t = 0;
+        unsafe { libc::pthread_attr_getstack(&attr, &mut stack_addr, &mut stack_size) };
+        unsafe { libc::pthread_attr_destroy(&mut attr) };
+        STACK_LOW.with(|c| unsafe { *c.get() = stack_addr as usize });
+        STACK_HIGH.with(|c| unsafe { *c.get() = stack_addr as usize + stack_size });
+    }
+
+}
+
+/// Returns `true` if `ptr` falls within the calling thread's stack bounds.
+#[inline]
+pub fn is_on_stack(ptr: *const u8) -> bool {
+    let addr = ptr as usize;
+    let lo = STACK_LOW.with(|c| unsafe { *c.get() });
+    let hi = STACK_HIGH.with(|c| unsafe { *c.get() });
+    if lo == 0 || hi == 0 {
+        return false;
+    }
+    addr >= lo && addr < hi
+}
+
 /// Allocate from the TM region.
 ///
 /// Returns a 16-byte-aligned pointer.  `malloc(0)` returns a unique

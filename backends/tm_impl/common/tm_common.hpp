@@ -13,10 +13,20 @@
 
 #ifdef LLVM_TM_PLUGIN
 // The LLVM pass only generates tm_read_*/tm_write_* for TM-tracked addresses
-// (annotated globals, tm_calloc results, struct TM members).  Trust the pass:
-// do not bypass — let the backend handle the operation with proper TM tracking.
-#define LLVM_TM_ADDR_CHECK(addr) ((void)0)
-#define LLVM_TM_ADDR_CHECK_WRITE(addr, val) ((void)0)
+// (annotated globals, tm_calloc results, struct TM members).  Do NOT bypass
+// if the address falls in a registered TM global range (registered via
+// tm_register_global at startup).  Bypass for addresses on this thread's stack
+// (defense-in-depth — async worker threads should not TM-track stack memory).
+#define LLVM_TM_ADDR_CHECK(addr) do { \
+    if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) { \
+        if (stm::isOnCurrentThreadStack(addr)) { return *(addr); } \
+    } \
+} while(0)
+#define LLVM_TM_ADDR_CHECK_WRITE(addr, val) do { \
+    if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) { \
+        if (stm::isOnCurrentThreadStack(addr)) { *(addr) = (val); return; } \
+    } \
+} while(0)
 #else
 #define LLVM_TM_ADDR_CHECK(addr) TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space")
 #define LLVM_TM_ADDR_CHECK_WRITE(addr, val) TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space")
