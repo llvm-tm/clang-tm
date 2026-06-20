@@ -231,7 +231,22 @@ extern const char* tm_symbol_names[];
 extern void* tm_symbol_addresses[];
 extern uint64_t tm_symbol_sizes[];
 
-void tm_init() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init();
+static void do_tm_exit();
+static void do_tm_init_thread();
+static void do_tm_exit_thread();
+
+void (*tm_init)()        = do_tm_init;
+void (*tm_exit)()        = do_tm_exit;
+void (*tm_init_thread)() = do_tm_init_thread;
+void (*tm_exit_thread)() = do_tm_exit_thread;
+
+static void do_tm_init()
+#else
+void tm_init()
+#endif
+{
     if (stm::tm_region_init() != 0) {
         fprintf(stderr, "FATAL: tm_region_init() failed\n");
         abort();
@@ -368,11 +383,21 @@ static constexpr uintptr_t PERSIST_MMAP_FIXED_ADDR = 0x600000000000ULL;
     initialized.store(true, std::memory_order_seq_cst);
 }
 
-void tm_init_thread() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init_thread()
+#else
+void tm_init_thread()
+#endif
+{
     tm_hook_init_thread();
 }
 
-void tm_exit() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit()
+#else
+void tm_exit()
+#endif
+{
     if (g_mmap_base) {
         // Save final TM symbol state to the mmap file before unmapping.
         // This captures changes made both inside TX functions (via tm_write_*)
@@ -392,7 +417,12 @@ void tm_exit() {
     initialized.store(false, std::memory_order_seq_cst);
 }
 
-void tm_exit_thread() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit_thread()
+#else
+void tm_exit_thread()
+#endif
+{
     tm_hook_exit_thread();
 }
 

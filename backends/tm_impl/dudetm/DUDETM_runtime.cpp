@@ -56,7 +56,21 @@ static std::atomic<uint64_t> g_tm_begin_count{0};
 static std::atomic<uint64_t> g_tm_end_count{0};
 static std::atomic<uint64_t> g_tm_tx_count{0};
 
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init();
+static void do_tm_exit();
+static void do_tm_init_thread();
+static void do_tm_exit_thread();
+
+void (*tm_init)()        = do_tm_init;
+void (*tm_exit)()        = do_tm_exit;
+void (*tm_init_thread)() = do_tm_init_thread;
+void (*tm_exit_thread)() = do_tm_exit_thread;
+
+static void do_tm_init()
+#else
 void tm_init()
+#endif
 {
     tinystm::init();
     dudetm::init(tm_symbol_count,
@@ -69,21 +83,33 @@ void tm_init()
     tm_register_real_hooks(&g_dudetm_hooks);
 }
 
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit()
+#else
 void tm_exit()
+#endif
 {
     dudetm::shutdown();
     tinystm::exit();
     stm::tm_region_destroy();
 }
 
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init_thread()
+#else
 void tm_init_thread()
+#endif
 {
     tm_hook_init_thread();
     tm_init_thread_call_count++;
     tinystm::init_thread();
 }
 
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit_thread()
+#else
 void tm_exit_thread()
+#endif
 {
     tm_hook_exit_thread();
 }
