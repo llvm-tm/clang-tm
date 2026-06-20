@@ -60,6 +60,11 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--test" => {
+                let fails = benchmarks::stamp::bayes::test();
+                println!("bayes test: {} failures", fails);
+                std::process::exit(if fails == 0 { 0 } else { 1 });
+            }
             "-v" => { i += 1; num_var = args[i].parse().unwrap(); }
             "-r" => { i += 1; num_record = args[i].parse().unwrap(); }
             "-n" => { i += 1; max_parents = args[i].parse().unwrap(); }
