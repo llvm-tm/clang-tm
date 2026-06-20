@@ -2,11 +2,10 @@
 // Tests the full pipeline: construct events, feed through
 // SimEngine, verify stats for both NOrec and TL2.
 //
-// NOTE: Some NOrec tests (test_idempotent_write_conflict_norec,
-// test_disjoint_access_no_conflict, test_scenario_boundary_reset)
-// require `--test-threads=1` because NOrec's global versioned lock
-// causes false conflicts when multiple SimEngine instances run in
-// parallel. All tests pass serially.
+// NOTE: All backends use shared global state (GLOBAL_LOCK for NOrec,
+// LOCK_TABLE/COMMIT_LOCK/G_CLOCK for TL2, lock table for TinySTM),
+// so multiple SimEngine instances running in parallel produce false
+// conflicts. Requires `--test-threads=1`. All tests pass serially.
 
 use tm_des::backend::Backend;
 use tm_des::event::{Event, EventKind};
