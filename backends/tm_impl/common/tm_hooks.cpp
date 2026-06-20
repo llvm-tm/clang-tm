@@ -140,7 +140,12 @@ static void apply_hooks_unlocked() {
 #ifdef LLVM_TM_PLUGIN
         false;
 #else
-        s_thread_count.load() <= 1;
+        // Use stubs only when no backend has registered real hooks yet.
+        // Once tm_register_real_hooks() is called, ALL TM operations
+        // must go through the real hooks (stubs allocate via std::malloc
+        // which is not in the TM region, causing isTMAddress() to fail
+        // and read-set/write-set logging to be bypassed).
+        s_thread_count.load() <= 1 && !s_registered;
 #endif
     if (g_trace_active) {
         // Trace wrappers are active: update the trace's saved real hooks

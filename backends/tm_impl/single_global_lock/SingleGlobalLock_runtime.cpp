@@ -50,7 +50,22 @@ static void *real_tm_get_thread_state() {
     return (void*)&g_tm_state;
 }
 
-void tm_init() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init();
+static void do_tm_exit();
+static void do_tm_init_thread();
+static void do_tm_exit_thread();
+
+void (*tm_init)()        = do_tm_init;
+void (*tm_exit)()        = do_tm_exit;
+void (*tm_init_thread)() = do_tm_init_thread;
+void (*tm_exit_thread)() = do_tm_exit_thread;
+
+static void do_tm_init()
+#else
+void tm_init()
+#endif
+{
     if (!initialized.load(std::memory_order_relaxed)) {
         initialized.store(true, std::memory_order_seq_cst);
     }
@@ -61,15 +76,30 @@ void tm_init() {
     tm_register_real_hooks(&g_sgl_hooks);
 }
 
-void tm_init_thread() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init_thread()
+#else
+void tm_init_thread()
+#endif
+{
     tm_hook_init_thread();
 }
 
-void tm_exit() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit()
+#else
+void tm_exit()
+#endif
+{
     initialized.store(false, std::memory_order_seq_cst);
 }
 
-void tm_exit_thread() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit_thread()
+#else
+void tm_exit_thread()
+#endif
+{
     tm_hook_exit_thread();
 }
 

@@ -40,7 +40,22 @@ __thread int tm_init_thread_call_count = 0;
 
 extern "C" {
 
-void tm_init() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init();
+static void do_tm_exit();
+static void do_tm_init_thread();
+static void do_tm_exit_thread();
+
+void (*tm_init)()        = do_tm_init;
+void (*tm_exit)()        = do_tm_exit;
+void (*tm_init_thread)() = do_tm_init_thread;
+void (*tm_exit_thread)() = do_tm_exit_thread;
+
+static void do_tm_init()
+#else
+void tm_init()
+#endif
+{
     if (stm::tm_region_init() != 0) {
         fprintf(stderr, "FATAL: tm_region_init() failed\n");
         abort();
@@ -55,7 +70,12 @@ void tm_init() {
     tm_register_real_hooks(&g_romulus_hooks);
 }
 
-void tm_exit() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit()
+#else
+void tm_exit()
+#endif
+{
     romulus::exit();
     if (auto ac = romulus::g_tm_abort_count.load(); ac > 0) {
         fprintf(stderr, "\n=== Romulus total aborts = %llu ===\n",
@@ -63,9 +83,19 @@ void tm_exit() {
     }
 }
 
-void tm_init_thread() { tm_hook_init_thread(); romulus::init_thread(); }
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init_thread()
+#else
+void tm_init_thread()
+#endif
+{ tm_hook_init_thread(); romulus::init_thread(); }
 
-void tm_exit_thread() { tm_hook_exit_thread(); }
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit_thread()
+#else
+void tm_exit_thread()
+#endif
+{ tm_hook_exit_thread(); }
 
 } // extern "C" — non-hook functions above, hooks below
 

@@ -35,13 +35,33 @@ __thread int tm_init_thread_call_count = 0;
 
 extern const TMRealHooks g_xtm_hooks;
 
-extern "C" void tm_init() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init();
+static void do_tm_exit();
+static void do_tm_init_thread();
+static void do_tm_exit_thread();
+
+void (*tm_init)()        = do_tm_init;
+void (*tm_exit)()        = do_tm_exit;
+void (*tm_init_thread)() = do_tm_init_thread;
+void (*tm_exit_thread)() = do_tm_exit_thread;
+
+static void do_tm_init()
+#else
+extern "C" void tm_init()
+#endif
+{
     stm::tm_region_init();
     xtm::init();
     tm_register_real_hooks(&g_xtm_hooks);
 }
 
-extern "C" void tm_exit() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit()
+#else
+extern "C" void tm_exit()
+#endif
+{
     xtm::exit();
     if (auto ac = xtm::g_abort_counter.load(); ac > 0) {
         fprintf(stderr, "\n=== XTM total aborts = %llu ===\n",
@@ -49,15 +69,28 @@ extern "C" void tm_exit() {
     }
 }
 
-extern "C" void tm_init_thread() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init_thread()
+#else
+extern "C" void tm_init_thread()
+#endif
+{
     tm_hook_init_thread();
     xtm::init_thread();
 }
 
-extern "C" void tm_exit_thread() { tm_hook_exit_thread(); }
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit_thread()
+#else
+extern "C" void tm_exit_thread()
+#endif
+{ tm_hook_exit_thread(); }
 
 static void real_tm_begin() {
     if (tm_nested_call_counter == 1) {
+        g_in_tx = true;
+        tm_clear_spec_allocs();
+        tm_clear_deferred_frees();
         xtm::jmpbuf_ptr = (sigjmp_buf *)&tm_jmpbuf;
         xtm::begin();
     }
@@ -66,6 +99,9 @@ static void real_tm_begin() {
 static void real_tm_end() {
     if (tm_nested_call_counter == 1) {
         xtm::commit();
+        tm_flush_deferred_frees();
+        tm_flush_spec_allocs();
+        g_in_tx = false;
     }
 }
 
@@ -87,8 +123,15 @@ static void *real_tm_realloc(void *ptr, size_t size) {
 
 static void real_tm_free(void *ptr) {
     if (!ptr) return;
-    tm_untrack_spec_alloc(ptr);
-    stm::tm_region_free(ptr);
+    if (g_in_tx) {
+        tm_free_append_deferred(ptr);
+    } else {
+        tm_untrack_spec_alloc(ptr);
+        if (stm::isTMAddress(ptr))
+            stm::tm_region_free(ptr);
+        else
+            ::operator delete(ptr);
+    }
 }
 
 static uint8_t  real_tm_read_i1(uint8_t  *addr) { return xtm::tm_read<uint8_t,  xtm::ValueType::UINT8>(addr); }

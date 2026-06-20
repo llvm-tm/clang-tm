@@ -17,8 +17,6 @@ thread_local FreeNode *g_deferred_frees = nullptr;
 thread_local std::unordered_set<void *> g_deferred_frees_set;
 thread_local SpecAlloc *g_spec_allocs = nullptr;
 
-__thread sigjmp_buf *jmpbuf;
-
 namespace leftright {
 
 std::atomic<uint64_t> g_clock{1};
@@ -51,7 +49,22 @@ extern const TMRealHooks g_leftright_hooks;
 
 extern "C" {
 
-void tm_init() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init();
+static void do_tm_exit();
+static void do_tm_init_thread();
+static void do_tm_exit_thread();
+
+void (*tm_init)()        = do_tm_init;
+void (*tm_exit)()        = do_tm_exit;
+void (*tm_init_thread)() = do_tm_init_thread;
+void (*tm_exit_thread)() = do_tm_exit_thread;
+
+static void do_tm_init()
+#else
+void tm_init()
+#endif
+{
     if (stm::tm_region_init() != 0) {
         fprintf(stderr, "FATAL: tm_region_init() failed\n");
         abort();
@@ -60,7 +73,12 @@ void tm_init() {
     tm_register_real_hooks(&g_leftright_hooks);
 }
 
-void tm_exit() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit()
+#else
+void tm_exit()
+#endif
+{
     leftright::exit();
     if (auto ac = leftright::g_tm_abort_count.load(); ac > 0) {
         fprintf(stderr, "\n=== LeftRight total aborts = %llu ===\n",
@@ -68,12 +86,22 @@ void tm_exit() {
     }
 }
 
-void tm_init_thread() {
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init_thread()
+#else
+void tm_init_thread()
+#endif
+{
     tm_hook_init_thread();
     leftright::init_thread();
 }
 
-void tm_exit_thread() { tm_hook_exit_thread(); }
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit_thread()
+#else
+void tm_exit_thread()
+#endif
+{ tm_hook_exit_thread(); }
 
 static void *real_tm_get_thread_state() {
     return (void*)&g_tm_thread_state;
@@ -98,16 +126,24 @@ static void real_tm_begin() {
     int32_t tc = tm_nested_call_counter;
     int32_t sc = g_tm_thread_state.nested_call_counter;
     int32_t c = (tc > 0) ? tc : sc;
-    if (c <= 1)
+    if (c <= 1) {
+        g_in_tx = true;
+        tm_clear_spec_allocs();
+        tm_clear_deferred_frees();
         leftright::begin();
+    }
 }
 
 static void real_tm_end() {
     int32_t tc = tm_nested_call_counter;
     int32_t sc = g_tm_thread_state.nested_call_counter;
     int32_t c = (tc > 0) ? tc : sc;
-    if (c <= 1)
+    if (c <= 1) {
         leftright::commit();
+        tm_flush_deferred_frees();
+        tm_flush_spec_allocs();
+        g_in_tx = false;
+    }
 }
 
 static void *real_tm_malloc(size_t size) {

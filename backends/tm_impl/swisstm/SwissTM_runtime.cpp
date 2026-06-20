@@ -47,7 +47,21 @@ static __thread uint8_t tm_buffer[TM_BUFFER_SIZE];
 // Global transaction counters
 static std::atomic<int64_t> g_tm_begin_count{0};
 static std::atomic<int64_t> g_tm_end_count{0};
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init();
+static void do_tm_exit();
+static void do_tm_init_thread();
+static void do_tm_exit_thread();
+
+void (*tm_init)()        = do_tm_init;
+void (*tm_exit)()        = do_tm_exit;
+void (*tm_init_thread)() = do_tm_init_thread;
+void (*tm_exit_thread)() = do_tm_exit_thread;
+
+static void do_tm_init()
+#else
 void tm_init()
+#endif
 {
     if (stm::tm_region_init() != 0) {
         fprintf(stderr, "FATAL: tm_region_init() failed — TM address space unavailable\n");
@@ -57,18 +71,31 @@ void tm_init()
 	tm_register_real_hooks(&g_swisstm_hooks);
 }
 
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit()
+#else
 void tm_exit()
+#endif
 {
     stm::tm_region_destroy();
 }
 
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_init_thread()
+#else
 void tm_init_thread()
+#endif
 {
 	tm_hook_init_thread();
 	swisstm::init_thread();
 }
 
-void tm_exit_thread() { tm_hook_exit_thread(); swisstm::exit_thread(); }
+#ifdef LLVM_TM_PLUGIN
+static void do_tm_exit_thread()
+#else
+void tm_exit_thread()
+#endif
+{ tm_hook_exit_thread(); swisstm::exit_thread(); }
 
 static std::recursive_mutex g_serialize_mutex;
 

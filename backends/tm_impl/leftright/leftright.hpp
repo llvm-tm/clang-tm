@@ -38,6 +38,7 @@ struct ReadLogEntry {
     ValueType type;
     void *addr;
     uint64_t observed_version;
+    any_type_t captured_value;
 };
 
 struct WriteLogEntry {
@@ -224,6 +225,24 @@ inline bool commit() {
             // modified a read-set address between the validate and here).
             bool valid = validate();
 
+            // Value-based validation: re-read all read-set addresses and
+            // compare with captured values.  This detects actual conflicts
+            // even when the clock didn't advance between reads (the "commit
+            // after all reads" case), without the false aborts caused by
+            // a simple get_clock() > end_version check (which fires on
+            // every concurrent commit, even non-conflicting ones).
+            if (valid) {
+                for (auto &it : tx->read_set) {
+                    auto &r = it.second;
+                    any_type_t cur = read_value_from_addr(r.addr, r.type);
+                    if (std::memcmp(&cur, &r.captured_value,
+                                    type_size(r.type)) != 0) {
+                        valid = false;
+                        break;
+                    }
+                }
+            }
+
             if (valid) {
                 // Phase 4: Increment clock and write-back.
                 uint64_t commit_version = increment_clock();
@@ -275,6 +294,7 @@ inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
             entry.type = sz;
             entry.addr = addr;
             entry.observed_version = get_clock();
+            entry.captured_value = val;
             tx->read_set[addr] = entry;
         }
     }
