@@ -12,8 +12,11 @@
 #include "tm_region_allocator.hpp"
 
 #ifdef LLVM_TM_PLUGIN
-#define LLVM_TM_ADDR_CHECK(addr) do { if (!stm::isTMAddress(addr)) { return *(addr); } } while(0)
-#define LLVM_TM_ADDR_CHECK_WRITE(addr, val) do { if (!stm::isTMAddress(addr)) { *(addr) = (val); return; } } while(0)
+// The LLVM pass only generates tm_read_*/tm_write_* for TM-tracked addresses
+// (annotated globals, tm_calloc results, struct TM members).  Trust the pass:
+// do not bypass — let the backend handle the operation with proper TM tracking.
+#define LLVM_TM_ADDR_CHECK(addr) ((void)0)
+#define LLVM_TM_ADDR_CHECK_WRITE(addr, val) ((void)0)
 #else
 #define LLVM_TM_ADDR_CHECK(addr) TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space")
 #define LLVM_TM_ADDR_CHECK_WRITE(addr, val) TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space")
