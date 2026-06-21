@@ -110,9 +110,7 @@ extern __thread sigjmp_buf *jmpbuf;
 extern std::atomic<uint64_t> g_num_threads;
 extern std::atomic<uint64_t> *g_durable_seqs;
 
-// Cascade-abort flag: SGL fallback writes this, TSX read-set includes it.
-// When another thread acquires SGL, all TSX transactions abort immediately.
-extern std::atomic<int> g_spht_sgl_owner;
+// (reserved for cascade-abort flag)
 
 inline void setjmp(sigjmp_buf *buf) { jmpbuf = buf; }
 
@@ -221,30 +219,25 @@ inline bool begin()
 		return false;
 	}
 
-	unsigned status = _xbegin();
-	if (status == _XBEGIN_STARTED) {
+	// Single TSX attempt.  If the TSX aborts (even during body(), which
+	// causes the CPU to restore to this _xbegin()), we always fall back
+	// to SGL.  We do NOT read the abort reason from a local variable
+	// because after a TSX abort during body() the stack may have been
+	// reused — only CPU registers (which RTM restores) are reliable.
+	//
+	// The compiler typically keeps the _xbegin() return value in a
+	// register (RAX/EAX).  By inlining the check here without an
+	// intervening variable, we avoid spilling to the stack.
+	if (_xbegin() == _XBEGIN_STARTED) [[likely]] {
 		tx->active = true;
-		// Read sgl_owner to add it to TSX read-set.
-		// If SGL fallback is active (or becomes active later), the write to
-		// sgl_owner immediately aborts this TSX transaction (cache-line
-		// invalidation on the read-set), preventing cascade aborts.
-		if (g_spht_sgl_owner.load(std::memory_order_relaxed) != 0) {
-			_xabort(1);
-		}
 		return true;
 	}
 
-	tx->retry_count++;
-	if (tx->retry_count > MAX_RETRIES) {
-		tx->active = false;
-		tx->rtm_broken = true;
-		return false;
-	}
-	if (tx->retry_count > 3) {
-		std::this_thread::sleep_for(
-		    std::chrono::microseconds(10 * (1 << (tx->retry_count - 3))));
-	}
-	siglongjmp(*jmpbuf, 1);
+	// TSX aborted (either from this _xbegin() or from a concurrent
+	// abort during body() of the previous TSX attempt).  Fall back
+	// to SGL for correctness.
+	tx->active = false;
+	tx->rtm_broken = true;
 	return false;
 }
 
