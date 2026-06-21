@@ -16,7 +16,7 @@ use crate::queue::EventQueue;
 use crate::lp::LpState;
 use crate::memory::ShadowMemory;
 use crate::checker::Checker;
-use crate::cost_model::{self, BackendProfile};
+use crate::cost_model::{BackendProfile, CalibratedCostModel};
 use crate::machine_profile::MachineProfile;
 use std::collections::HashMap;
 
@@ -43,6 +43,15 @@ pub struct SimState {
     pub total_estimated_cycles: u64,
     pub total_tx_commits: u64,
     pub total_tx_aborts: u64,
+    /// Machine hardware profile (defaults to Skylake estimates if not loaded).
+    #[serde(default = "MachineProfile::skylake_default")]
+    pub machine_profile: MachineProfile,
+    /// Backend profile for cost model.
+    #[serde(default)]
+    pub backend_profile: BackendProfile,
+    /// Pre-computed cost model for fast dispatch (rebuilt when profile changes).
+    #[serde(skip)]
+    pub calibrated: CalibratedCostModel,
 }
 
 impl SimState {
@@ -51,6 +60,8 @@ impl SimState {
         for tid in 0..threads {
             lps.insert(tid, LpState::new(tid, 0));
         }
+        let machine = MachineProfile::skylake_default();
+        let backend = BackendProfile::Default;
         SimState {
             clock: 0,
             queue: EventQueue::new(),
@@ -63,11 +74,24 @@ impl SimState {
             total_estimated_cycles: 0,
             total_tx_commits: 0,
             total_tx_aborts: 0,
+            machine_profile: machine.clone(),
+            backend_profile: backend,
+            calibrated: CalibratedCostModel::from_profile(&machine, backend),
         }
     }
 
     pub fn set_clock_mode(&mut self, mode: ClockMode) {
         self.clock_mode = mode;
+    }
+
+    pub fn set_machine_profile(&mut self, profile: MachineProfile) {
+        self.machine_profile = profile.clone();
+        self.calibrated = CalibratedCostModel::from_profile(&profile, self.backend_profile);
+    }
+
+    pub fn set_backend_profile(&mut self, backend: BackendProfile) {
+        self.backend_profile = backend;
+        self.calibrated = CalibratedCostModel::from_profile(&self.machine_profile, backend);
     }
 
     pub fn load_events(&mut self, events: Vec<Event>) {
@@ -77,8 +101,11 @@ impl SimState {
     }
 
     fn get_event_cost(&self, kind: &EventKind) -> u64 {
-        let machine = MachineProfile::skylake_default();
-        cost_model::event_cost(kind, &machine, BackendProfile::Default)
+        if self.clock_mode == ClockMode::Cost {
+            self.calibrated.event_cost(kind)
+        } else {
+            0
+        }
     }
 
     /// Advance the clock based on the event.  In Timestamp mode,
@@ -191,6 +218,12 @@ impl SimState {
         }
         if self.clock_mode == ClockMode::Cost {
             eprintln!("  Estimated cycles: {}", self.total_estimated_cycles);
+            eprintln!("  Machine: {} @ {:.1} GHz", self.machine_profile.cpu, self.machine_profile.freq_ghz);
+            eprintln!("  Backend profile: {:?}", self.backend_profile);
+            if self.total_estimated_cycles > 0 && self.machine_profile.freq_ghz > 0.0 {
+                let estimated_us = self.total_estimated_cycles as f64 / (self.machine_profile.freq_ghz * 1000.0);
+                eprintln!("  Estimated time: {:.2} us ({:.3} ms)", estimated_us, estimated_us / 1000.0);
+            }
         }
     }
 }
