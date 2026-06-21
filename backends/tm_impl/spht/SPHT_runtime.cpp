@@ -176,14 +176,14 @@ static void real_tm_begin()
 	if (spht::begin()) {
 		g_spht_rtm_mode = true;
 	} else if (tm_longjmp_ret != 0) {
-		// Just came from siglongjmp — the retry loop's
-		// "if (tm_longjmp_ret != 0) continue" will skip body+tm_end.
-		// Don't acquire SGL now; the next iteration (where
-		// sigsetjmp returns 0) will acquire it properly.
 		g_spht_rtm_mode = false;
 	} else {
 		g_spht_rtm_mode = false;
 		g_spht_fallback_mutex.lock();
+		// Signal all concurrent TSX transactions to abort immediately.
+		// They have g_spht_sgl_owner in their read-set, so this write
+		// triggers an instant cache-line invalidation abort.
+		spht::g_spht_sgl_owner.store(1, std::memory_order_release);
 	}
 
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
@@ -194,6 +194,7 @@ static void real_tm_end()
 	if (g_spht_rtm_mode) {
 		spht::commit();
 	} else {
+		spht::g_spht_sgl_owner.store(0, std::memory_order_release);
 		g_spht_fallback_mutex.unlock();
 	}
 	g_in_tx = false;
