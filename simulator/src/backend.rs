@@ -12,6 +12,7 @@ pub enum Backend {
     Tinystm,
     Romulus,
     Swisstm,
+    TsxSim,
 }
 
 impl Backend {
@@ -22,6 +23,7 @@ impl Backend {
             "tinystm" | "tiny-stm" => Some(Backend::Tinystm),
             "romulus" => Some(Backend::Romulus),
             "swisstm" => Some(Backend::Swisstm),
+            "tsx-sim" | "tsx_sim" => Some(Backend::TsxSim),
             _ => None,
         }
     }
@@ -33,6 +35,7 @@ impl Backend {
             Backend::Tinystm => "tinystm",
             Backend::Romulus => "romulus",
             Backend::Swisstm => "swisstm",
+            Backend::TsxSim => "tsx-sim",
         }
     }
 
@@ -43,6 +46,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_init(),
             Backend::Romulus => runtime_romulus::tm_init(),
             Backend::Swisstm => runtime_swisstm::tm_init(),
+            Backend::TsxSim => runtime_tsx_sim::tm_init(),
         }
     }
 
@@ -53,6 +57,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_init_thread(),
             Backend::Romulus => runtime_romulus::tm_init_thread(),
             Backend::Swisstm => runtime_swisstm::tm_init_thread(),
+            Backend::TsxSim => runtime_tsx_sim::tm_init_thread(),
         }
     }
 
@@ -63,6 +68,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_begin(),
             Backend::Romulus => runtime_romulus::tm_begin(),
             Backend::Swisstm => runtime_swisstm::tm_begin(),
+            Backend::TsxSim => runtime_tsx_sim::tm_begin(),
         }
     }
 
@@ -73,6 +79,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_commit(),
             Backend::Romulus => runtime_romulus::tm_commit(),
             Backend::Swisstm => runtime_swisstm::tm_commit(),
+            Backend::TsxSim => runtime_tsx_sim::tm_commit(),
         }
     }
 
@@ -83,6 +90,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_abort(),
             Backend::Romulus => runtime_romulus::tm_abort(),
             Backend::Swisstm => runtime_swisstm::tm_abort(),
+            Backend::TsxSim => runtime_tsx_sim::tm_abort(),
         }
     }
 
@@ -93,6 +101,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::sim::set_thread_id(id),
             Backend::Romulus => runtime_romulus::sim::set_thread_id(id),
             Backend::Swisstm => runtime_swisstm::sim::set_thread_id(id),
+            Backend::TsxSim => runtime_tsx_sim::sim::set_thread_id(id),
         }
     }
 
@@ -103,6 +112,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::sim::clear_thread_id(),
             Backend::Romulus => runtime_romulus::sim::clear_thread_id(),
             Backend::Swisstm => runtime_swisstm::sim::clear_thread_id(),
+            Backend::TsxSim => runtime_tsx_sim::sim::clear_thread_id(),
         }
     }
 
@@ -113,6 +123,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::sim::reset(),
             Backend::Romulus => runtime_romulus::sim::reset(),
             Backend::Swisstm => runtime_swisstm::sim::reset(),
+            Backend::TsxSim => runtime_tsx_sim::sim::reset(),
         }
     }
 
@@ -123,6 +134,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_read_u8(addr),
             Backend::Romulus => runtime_romulus::tm_read_u8(addr),
             Backend::Swisstm => runtime_swisstm::tm_read_u8(addr),
+            Backend::TsxSim => runtime_tsx_sim::tm_read_u8(addr),
         }
     }
     pub fn read_u16(&self, addr: *mut u16) -> u16 {
@@ -132,6 +144,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_read_u16(addr),
             Backend::Romulus => runtime_romulus::tm_read_u16(addr),
             Backend::Swisstm => runtime_swisstm::tm_read_u16(addr),
+            Backend::TsxSim => runtime_tsx_sim::tm_read_u16(addr),
         }
     }
     pub fn read_u32(&self, addr: *mut u32) -> u32 {
@@ -141,6 +154,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_read_u32(addr),
             Backend::Romulus => runtime_romulus::tm_read_u32(addr),
             Backend::Swisstm => runtime_swisstm::tm_read_u32(addr),
+            Backend::TsxSim => runtime_tsx_sim::tm_read_u32(addr),
         }
     }
     pub fn read_u64(&self, addr: *mut u64) -> u64 {
@@ -150,6 +164,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_read_u64(addr),
             Backend::Romulus => runtime_romulus::tm_read_u64(addr),
             Backend::Swisstm => runtime_swisstm::tm_read_u64(addr),
+            Backend::TsxSim => runtime_tsx_sim::tm_read_u64(addr),
         }
     }
 
@@ -160,6 +175,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_write_u8(addr, val),
             Backend::Romulus => runtime_romulus::tm_write_u8(addr, val),
             Backend::Swisstm => runtime_swisstm::tm_write_u8(addr, val),
+            Backend::TsxSim => runtime_tsx_sim::tm_write_u8(addr, val),
         }
     }
     pub fn write_u16(&self, addr: *mut u16, val: u16) {
@@ -169,6 +185,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_write_u16(addr, val),
             Backend::Romulus => runtime_romulus::tm_write_u16(addr, val),
             Backend::Swisstm => runtime_swisstm::tm_write_u16(addr, val),
+            Backend::TsxSim => runtime_tsx_sim::tm_write_u16(addr, val),
         }
     }
     pub fn write_u32(&self, addr: *mut u32, val: u32) {
@@ -178,6 +195,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_write_u32(addr, val),
             Backend::Romulus => runtime_romulus::tm_write_u32(addr, val),
             Backend::Swisstm => runtime_swisstm::tm_write_u32(addr, val),
+            Backend::TsxSim => runtime_tsx_sim::tm_write_u32(addr, val),
         }
     }
     pub fn write_u64(&self, addr: *mut u64, val: u64) {
@@ -187,6 +205,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::tm_write_u64(addr, val),
             Backend::Romulus => runtime_romulus::tm_write_u64(addr, val),
             Backend::Swisstm => runtime_swisstm::tm_write_u64(addr, val),
+            Backend::TsxSim => runtime_tsx_sim::tm_write_u64(addr, val),
         }
     }
 
@@ -211,6 +230,10 @@ impl Backend {
             }
             Backend::Swisstm => {
                 let states = runtime_swisstm::sim::snapshot_states();
+                bincode::serialize(&states).unwrap_or_default()
+            }
+            Backend::TsxSim => {
+                let states = runtime_tsx_sim::sim::snapshot_states();
                 bincode::serialize(&states).unwrap_or_default()
             }
         }
@@ -254,6 +277,13 @@ impl Backend {
                 runtime_swisstm::sim::restore_states(states);
                 Ok(())
             }
+            Backend::TsxSim => {
+                let states: HashMap<u64, Option<Box<runtime_tsx_sim::TsxThreadState>>> =
+                    bincode::deserialize(data)
+                        .map_err(|e| format!("deserialize tsx_sim state: {}", e))?;
+                runtime_tsx_sim::sim::restore_states(states);
+                Ok(())
+            }
         }
     }
 
@@ -269,6 +299,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::sim::take_stats(),
             Backend::Romulus => runtime_romulus::sim::take_stats(),
             Backend::Swisstm => runtime_swisstm::sim::take_stats(),
+            Backend::TsxSim => runtime_tsx_sim::sim::take_stats(),
         }
     }
 
@@ -280,6 +311,7 @@ impl Backend {
             Backend::Tinystm => runtime_tinystm::sim::print_stats(s),
             Backend::Romulus => runtime_romulus::sim::print_stats(s),
             Backend::Swisstm => runtime_swisstm::sim::print_stats(s),
+            Backend::TsxSim => runtime_tsx_sim::sim::print_stats(s),
         }
     }
 }

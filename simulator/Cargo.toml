@@ -17,6 +17,7 @@ runtime-tl2 = { path = "../expli_instr/rust/workspace/runtime/tl2", features = [
 runtime-tinystm = { path = "../expli_instr/rust/workspace/runtime/tinystm", features = ["simulation", "serde", "stats", "wbctl"] }
 runtime-romulus = { path = "../expli_instr/rust/workspace/runtime/romulus", features = ["simulation", "serde", "stats"] }
 runtime-swisstm = { path = "../expli_instr/rust/workspace/runtime/swisstm", features = ["simulation", "serde", "stats"] }
+runtime-tsx-sim = { path = "../expli_instr/rust/workspace/runtime/tsx_sim", features = ["simulation", "serde", "stats"] }
 libc = "0.2"
 
 [[bin]]
