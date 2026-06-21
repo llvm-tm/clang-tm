@@ -611,4 +611,59 @@ The architecture was reviewed and refactored for maximum modularity:
 4. **SPHT profiling patch**: similar RDTSC instrumentation for SPHT (branch overflow + mutex fallback)
 5. **NV-HTM profiling**: Intel TSX extortion detection + 2-phase abort semantics  
 
+## Session 2026-06-21 — Simulator cost mode: SimEngine + machine profile calibration
+
+### P1: SimEngine cost mode (`sim_engine.rs`)
+
+Added cost mode to `SimEngine` (the real-backend trace driver), so `--clock-mode cost --backend X` now runs the actual backend (detecting true conflicts/aborts) while accumulating estimated cycle costs from the calibrated model.
+
+**New types:**
+- `SimClockMode` enum: `Timestamp` (original) or `Cost` (accumulate cycles)
+- `cost_model: Option<CalibratedCostModel>` – pre-computed per-event cycle costs
+- `estimated_cycles: u64` – accumulator updated on every `process_event()`
+- `freq_ghz: f64` – wall-clock conversion factor
+- `set_cost_mode(model, freq_ghz)` – one-shot setup from CLI
+
+**Per-event behavior in cost mode:**
+1. Look up event cost from `CalibratedCostModel::event_cost(kind)`
+2. Advance `estimated_cycles` by event cost
+3. Run the real backend (existing logic detects conflicts → aborts)
+4. On abort: charge `Abort { reason: 0 }` cost (avoids double-charging begin/body from the aborted transaction)
+5. Every 10k events: print progress with estimated wall time
+
+### P0: Machine profile calibration
+
+Updated both `broadwell_ep_v4.json` and `skylake.json` with real TSX_STATS measurements:
+
+| Parameter | Old (idealized) | New (calibrated) | Notes |
+|-----------|-----------------|-------------------|-------|
+| `xbegin_cycles` | 20 | 60 | Measured on Broadwell-EP |
+| `xend_cycles` | 80 | 178 | Measured |
+| `read_l1_cycles` | 4 | 5 | Slight overhead |
+| `write_l1_cycles` | 5 | 6 | Slight overhead |
+| `mutex_lock/unlock` | 50 | 75 | Real SGL fallback cost |
+| `conflict_abort_penalty` | 2000 | 2500 | Real TSX conflict cost |
+
+Added 4 backend entries to both profiles (`default`, `tsxsgl`, `tinystm`, `norec`, `tl2`) with estimated per-backend overheads based on algorithm complexity.
+
+### P4: tm-sim CLI upgrade
+
+Extended `tm-sim` (real-backend replay binary) with:
+
+- `--clock-mode {timestamp|cost}` — switches between original replay and cost-mode replay
+- `--machine-profile <path>` — loads JSON machine profile and builds `CalibratedCostModel`
+- `--freq-ghz <float>` — overrides CPU frequency for wall-time estimation
+- **Cost mode summary**: auto-prints `═══ cost mode: N cycles ≈ T.s @ F GHz ═══` at end
+
+### Pre-existing test race condition documented
+
+26 integration tests pass with `--test-threads=1`. Parallel execution triggers MMAP address conflicts (all backends share `0x7f00_0000_0000` fixed address) causing spurious TL2 failures. This is pre-existing and unrelated to the cost mode changes.
+
+### Updated next steps
+1. **Validate** cost mode: run `tm-sim --backend norec --clock-mode cost --machine-profile machine_profiles/broadwell_ep_v4.json` on a real trace, verify throughput varies with thread count
+2. **P6**: Wire `--workload-profile` in `tm-des` (currently declared but unused CLI arg)
+3. **P4 full**: Compute SGL fallback costing conditionally — use `sgl_begin_cost`/`sgl_end_cost` only when the backend signals fallback mode
+4. **SPHT profiling patch**: RDTSC instrumentation for SPHT (branch overflow + mutex fallback)
+5. **Run `run_workflow.sh` on RTM hardware** → real machine profile → validate against real TSXSGL
+
 
