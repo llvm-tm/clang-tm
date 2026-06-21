@@ -17,8 +17,9 @@ use crate::workload_profile::WorkloadProfile;
 
 // ── Backend selection ──────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum BackendProfile {
+    #[default]
     Default,
     Tinystm,
     Norec,
@@ -182,6 +183,20 @@ pub struct CalibratedCostModel {
     pub write_cost: u64,
     pub sgl_begin_cost: u64,
     pub sgl_end_cost: u64,
+}
+
+impl Default for CalibratedCostModel {
+    fn default() -> Self {
+        CalibratedCostModel {
+            tx_begin_cost: 50,
+            tx_end_cost: 40,
+            abort_cost: 100,
+            read_cost: 10,
+            write_cost: 12,
+            sgl_begin_cost: 100,
+            sgl_end_cost: 100,
+        }
+    }
 }
 
 impl CalibratedCostModel {

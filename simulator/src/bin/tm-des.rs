@@ -1,5 +1,13 @@
 use clap::Parser;
-use tm_des::{Cli, engine::SimState, trace::Trace, ser};
+use std::path::Path;
+use tm_des::{
+    Cli,
+    cost_model::BackendProfile,
+    engine::{ClockMode, SimState},
+    machine_profile::MachineProfile,
+    trace::Trace,
+    ser,
+};
 
 fn main() {
     let cli = Cli::parse();
@@ -20,6 +28,40 @@ fn main() {
         SimState::new(1, 0x7f00_0000_0000, 0x0000_0000_1000_0000)
     };
     state.checker.livelock_threshold = cli.livelock_threshold;
+
+    // Apply machine profile from CLI
+    if let Some(ref mp_path) = cli.machine_profile {
+        match MachineProfile::load(Path::new(mp_path)) {
+            Ok(profile) => {
+                eprintln!("Loaded machine profile from '{}': {} @ {:.1} GHz",
+                          mp_path, profile.cpu, profile.freq_ghz);
+                state.set_machine_profile(profile);
+            }
+            Err(e) => {
+                eprintln!("Warning: failed to load machine profile '{}': {}; using defaults", mp_path, e);
+            }
+        }
+    }
+
+    // Apply backend profile from CLI
+    if cli.backend != "default" {
+        let backend = BackendProfile::from_name(&cli.backend);
+        eprintln!("Using backend profile: {:?} (from '{}')", backend, cli.backend);
+        state.set_backend_profile(backend);
+    }
+
+    // Apply clock mode from CLI
+    let clock_mode = match cli.clock_mode.to_lowercase().as_str() {
+        "cost" | "costs" => {
+            eprintln!("Clock mode: cost (accumulating estimated cycle costs)");
+            ClockMode::Cost
+        }
+        _ => {
+            eprintln!("Clock mode: timestamp (matching trace timestamps)");
+            ClockMode::Timestamp
+        }
+    };
+    state.set_clock_mode(clock_mode);
 
     // Load trace
     let events = if cli.trace == "-" {
@@ -57,8 +99,8 @@ fn main() {
     }
 
     // Final report
-    eprintln!("Processed {} events ({} new)", state.events_processed, processed.len());
-    eprintln!("Clock: {}", state.clock);
+    eprintln!();
+    state.print_summary();
 
     let warnings = state.checker.finalize();
     if warnings.is_empty() {
