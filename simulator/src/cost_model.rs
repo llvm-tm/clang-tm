@@ -1,0 +1,217 @@
+// ── Cost Model: event-duration heuristics ──────────────────
+// Maps each EventKind to a cycle cost using a MachineProfile,
+// enabling the DES engine to estimate execution time.
+//
+// The cost model is backend-aware: different TM backends have
+// different cost formulas for the same event kind.
+//
+// Two usage modes:
+//   1. Generic: `event_cost(kind, &machine, backend)` — compute
+//      per-event cost on the fly.
+//   2. Calibrated: `CalibratedCostModel` — pre-computes costs
+//      from a machine profile for fast lookup.
+
+use crate::event::EventKind;
+use crate::machine_profile::MachineProfile;
+use crate::workload_profile::WorkloadProfile;
+
+// ── Backend selection ──────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendProfile {
+    Default,
+    Tinystm,
+    Norec,
+    Tl2,
+    Swisstm,
+    Romulus,
+    Tsxsgl,
+    TsxSim,
+}
+
+impl BackendProfile {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "tinystm" => BackendProfile::Tinystm,
+            "norec" => BackendProfile::Norec,
+            "tl2" => BackendProfile::Tl2,
+            "swisstm" => BackendProfile::Swisstm,
+            "romulus" => BackendProfile::Romulus,
+            "tsxsgl" => BackendProfile::Tsxsgl,
+            "tsx-sim" | "tsx_sim" => BackendProfile::TsxSim,
+            _ => BackendProfile::Default,
+        }
+    }
+}
+
+// ── Cycle costs ────────────────────────────────────────────
+
+/// Generic (non-hardware-specific) overhead costs.
+const ALLOC_COST: u64 = 50;
+const FREE_COST: u64 = 30;
+const THREAD_SPAWN_COST: u64 = 1000;
+const THREAD_JOIN_COST: u64 = 500;
+const CHECKPOINT_COST: u64 = 100;
+const ASSERT_COST: u64 = 10;
+const LOG_COST: u64 = 20;
+
+/// Compute cycle cost for an event given a machine profile and backend.
+pub fn event_cost(
+    kind: &EventKind,
+    machine: &MachineProfile,
+    backend: BackendProfile,
+) -> u64 {
+    match backend {
+        BackendProfile::Tsxsgl | BackendProfile::TsxSim => tsx_event_cost(kind, machine),
+        _ => generic_event_cost(kind, machine),
+    }
+}
+
+fn generic_event_cost(kind: &EventKind, machine: &MachineProfile) -> u64 {
+    let bk = machine.backend("default");
+    match kind {
+        EventKind::TxBegin => bk.begin_overhead as u64,
+        EventKind::TxEnd => bk.commit_overhead as u64,
+        EventKind::Abort { .. } => bk.abort_overhead as u64,
+        EventKind::Read { .. } => (machine.tsx.read_l1_cycles + bk.read_overhead) as u64,
+        EventKind::Write { .. } => (machine.tsx.write_l1_cycles + bk.write_overhead) as u64,
+        EventKind::Alloc { .. } => ALLOC_COST,
+        EventKind::Free { .. } => FREE_COST,
+        EventKind::ThreadSpawn(_) => THREAD_SPAWN_COST,
+        EventKind::ThreadJoin(_) => THREAD_JOIN_COST,
+        EventKind::Checkpoint => CHECKPOINT_COST,
+        EventKind::Assert { .. } => ASSERT_COST,
+        EventKind::Log { .. } => LOG_COST,
+    }
+}
+
+fn tsx_event_cost(kind: &EventKind, machine: &MachineProfile) -> u64 {
+    let bk = machine.backend("tsxsgl");
+    match kind {
+        EventKind::TxBegin => machine.tsx.xbegin_cycles as u64,
+        EventKind::TxEnd => machine.tsx.xend_cycles as u64,
+        EventKind::Abort { reason } => {
+            let base = machine.tsx.xabort_cycles as u64;
+            if *reason == 0xFF || *reason == 0x01 {
+                // Explicit abort with spin (LOCK_BUSY, OWNER_CHANGED)
+                base + 200
+            } else {
+                base
+            }
+        }
+        EventKind::Read { .. } => {
+            (machine.tsx.read_l1_cycles + machine.tsx.bloom_check_cycles + bk.read_overhead) as u64
+        }
+        EventKind::Write { .. } => {
+            (machine.tsx.write_l1_cycles + machine.tsx.bloom_check_cycles + bk.write_overhead) as u64
+        }
+        EventKind::Alloc { .. } => ALLOC_COST,
+        EventKind::Free { .. } => FREE_COST,
+        EventKind::ThreadSpawn(_) => THREAD_SPAWN_COST,
+        EventKind::ThreadJoin(_) => THREAD_JOIN_COST,
+        EventKind::Checkpoint => CHECKPOINT_COST,
+        EventKind::Assert { .. } => ASSERT_COST,
+        EventKind::Log { .. } => LOG_COST,
+    }
+}
+
+/// Estimate total execution time for a workload on a given machine+backend.
+/// Returns estimated cycles.
+pub fn estimate_workload(
+    workload: &WorkloadProfile,
+    machine: &MachineProfile,
+    backend: BackendProfile,
+) -> f64 {
+    let bk = machine.backend(match backend {
+        BackendProfile::Tsxsgl | BackendProfile::TsxSim => "tsxsgl",
+        _ => "default",
+    });
+
+    let n = workload.total_transactions as f64;
+    let reads = workload.read_set.mean;
+    let writes = workload.write_set.mean;
+    let abort_rate = workload.contention.abort_rate;
+    let conflict_ratio = workload.contention.conflict_abort_ratio;
+
+    let (read_cost_per, write_cost_per): (f64, f64) = match backend {
+        BackendProfile::Tsxsgl | BackendProfile::TsxSim => {
+            (machine.tsx.read_l1_cycles + machine.tsx.bloom_check_cycles + bk.read_overhead,
+             machine.tsx.write_l1_cycles + machine.tsx.bloom_check_cycles + bk.write_overhead)
+        }
+        _ => {
+            (bk.read_overhead + machine.tsx.read_l1_cycles,
+             bk.write_overhead + machine.tsx.write_l1_cycles)
+        }
+    };
+
+    let begin_cost = match backend {
+        BackendProfile::Tsxsgl | BackendProfile::TsxSim => machine.tsx.xbegin_cycles,
+        _ => bk.begin_overhead,
+    };
+    let commit_cost = match backend {
+        BackendProfile::Tsxsgl | BackendProfile::TsxSim => machine.tsx.xend_cycles,
+        _ => bk.commit_overhead,
+    };
+    let abort_cost = match backend {
+        BackendProfile::Tsxsgl | BackendProfile::TsxSim => machine.tsx.xabort_cycles,
+        _ => bk.abort_overhead,
+    };
+
+    // Transaction body cost
+    let body_cost = reads * read_cost_per + writes * write_cost_per;
+    // Successful tx cost
+    let commit_tx_cost = begin_cost + body_cost + commit_cost;
+    // Aborted tx cost (abort happens after partial body)
+    let abort_tx_cost = begin_cost + body_cost * 0.5 + abort_cost;
+    // Average cost per attempted transaction
+    let avg_cost = (1.0 - abort_rate) * commit_tx_cost + abort_rate * abort_tx_cost
+        + abort_rate * conflict_ratio * machine.tsx.conflict_abort_penalty;
+
+    avg_cost * n
+}
+
+// ── Calibrated cost model (pre-computed per-event costs) ───
+// For fast dispatch during simulation.
+
+#[derive(Debug, Clone)]
+pub struct CalibratedCostModel {
+    pub tx_begin_cost: u64,
+    pub tx_end_cost: u64,
+    pub abort_cost: u64,
+    pub read_cost: u64,
+    pub write_cost: u64,
+    pub sgl_begin_cost: u64,
+    pub sgl_end_cost: u64,
+}
+
+impl CalibratedCostModel {
+    /// Build from a machine profile and backend.
+    pub fn from_profile(machine: &MachineProfile, backend: BackendProfile) -> Self {
+        CalibratedCostModel {
+            tx_begin_cost: event_cost(&EventKind::TxBegin, machine, backend),
+            tx_end_cost: event_cost(&EventKind::TxEnd, machine, backend),
+            abort_cost: event_cost(&EventKind::Abort { reason: 0 }, machine, backend),
+            read_cost: event_cost(&EventKind::Read { addr: 0, width: 8 }, machine, backend),
+            write_cost: event_cost(&EventKind::Write { addr: 0, width: 8, val: 0 }, machine, backend),
+            sgl_begin_cost: (machine.backend("tsxsgl").begin_overhead + machine.tsx.mutex_lock_cycles) as u64,
+            sgl_end_cost: (machine.backend("tsxsgl").commit_overhead + machine.tsx.mutex_unlock_cycles) as u64,
+        }
+    }
+
+    pub fn event_cost(&self, kind: &EventKind) -> u64 {
+        match kind {
+            EventKind::TxBegin => self.tx_begin_cost,
+            EventKind::TxEnd => self.tx_end_cost,
+            EventKind::Abort { .. } => self.abort_cost,
+            EventKind::Read { .. } => self.read_cost,
+            EventKind::Write { .. } => self.write_cost,
+            EventKind::ThreadSpawn(_) => THREAD_SPAWN_COST,
+            EventKind::ThreadJoin(_) => THREAD_JOIN_COST,
+            EventKind::Alloc { .. } => ALLOC_COST,
+            EventKind::Free { .. } => FREE_COST,
+            EventKind::Checkpoint => CHECKPOINT_COST,
+            EventKind::Assert { .. } => ASSERT_COST,
+            EventKind::Log { .. } => LOG_COST,
+        }
+    }
+}

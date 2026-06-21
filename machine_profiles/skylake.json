@@ -1,0 +1,58 @@
+{
+  "cpu": "Intel Skylake (estimated)",
+  "freq_ghz": 3.0,
+  "tsx": {
+    "xbegin_cycles": 20.0,
+    "xend_cycles": 80.0,
+    "xabort_cycles": 1500.0,
+    "read_l1_cycles": 4.0,
+    "write_l1_cycles": 5.0,
+    "bloom_check_cycles": 2.0,
+    "mutex_lock_cycles": 100.0,
+    "mutex_unlock_cycles": 100.0,
+    "conflict_abort_penalty": 2000.0,
+    "cache_line_size": 64,
+    "max_read_lines": 512,
+    "max_write_lines": 128
+  },
+  "memory": {
+    "l1_hit_cycles": 4.0,
+    "l2_hit_cycles": 12.0,
+    "l3_hit_cycles": 40.0,
+    "ram_cycles": 200.0
+  },
+  "backends": [
+    {
+      "backend": "default",
+      "begin_overhead": 50.0,
+      "commit_overhead": 40.0,
+      "abort_overhead": 100.0,
+      "read_overhead": 5.0,
+      "write_overhead": 6.0,
+      "validation_entry_cost": 3.0,
+      "lock_acquire_cost": 30.0
+    },
+    {
+      "backend": "tsxsgl",
+      "begin_overhead": 20.0,
+      "commit_overhead": 80.0,
+      "abort_overhead": 1500.0,
+      "read_overhead": 6.0,
+      "write_overhead": 7.0,
+      "validation_entry_cost": 0.0,
+      "lock_acquire_cost": 100.0
+    },
+    {
+      "backend": "norec",
+      "begin_overhead": 40.0,
+      "commit_overhead": 60.0,
+      "abort_overhead": 80.0,
+      "read_overhead": 8.0,
+      "write_overhead": 10.0,
+      "validation_entry_cost": 2.0,
+      "lock_acquire_cost": 0.0
+    }
+  ],
+  "collected": "built-in",
+  "description": "Default Skylake cycle costs (uncalibrated). Replace with machine_profiles/<cpu>.json from profiling data."
+}

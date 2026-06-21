@@ -218,6 +218,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-tsx-sim"
+version = "0.1.0"
+dependencies = [
+ "runtime-core",
+ "serde",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -290,6 +298,7 @@ dependencies = [
  "runtime-swisstm",
  "runtime-tinystm",
  "runtime-tl2",
+ "runtime-tsx-sim",
  "serde",
  "serde_json",
 ]

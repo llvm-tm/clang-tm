@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["tm", "runtime/core", "runtime/tinystm", "runtime/norec", "runtime/tl2", "runtime/swisstm", "runtime/dudetm", "runtime/tsxsgl", "runtime/nvhtm", "runtime/spht", "runtime/leftright", "runtime/leftright_single", "runtime/romulus", "runtime/xtm", "runtime/sgl-persistent", "runtime/sgl-distributed", "runtime/tikv", "containers", "tm-executor", "addrspace", "bench-tinystm"]
+members = ["tm", "runtime/core", "runtime/tinystm", "runtime/norec", "runtime/tl2", "runtime/swisstm", "runtime/dudetm", "runtime/tsxsgl", "runtime/nvhtm", "runtime/spht", "runtime/leftright", "runtime/leftright_single", "runtime/romulus", "runtime/xtm", "runtime/sgl-persistent", "runtime/sgl-distributed", "runtime/tikv", "runtime/tsx_sim", "containers", "tm-executor", "addrspace", "bench-tinystm"]

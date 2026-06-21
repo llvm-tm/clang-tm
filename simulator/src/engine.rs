@@ -1,12 +1,35 @@
+// ── Simulation engine: core DES loop with cost model ──────
+// Processes events from the queue, advances the clock by
+// accumulating estimated cycle costs per event, and checks
+// TM correctness invariants.
+//
+// The clock can be driven in two modes:
+//   MODE_TIMESTAMP: match the trace timestamp (original behavior)
+//   MODE_COST: accumulate event costs from the machine profile
+//
+// The cost mode enables "what-if" analysis: how fast would this
+// workload run on different hardware or with a different backend?
+
 use serde::{Deserialize, Serialize};
 use crate::event::{Event, EventKind};
 use crate::queue::EventQueue;
 use crate::lp::LpState;
 use crate::memory::ShadowMemory;
 use crate::checker::Checker;
+use crate::cost_model::{self, BackendProfile};
+use crate::machine_profile::MachineProfile;
 use std::collections::HashMap;
 
-/// Simulation engine: core DES loop.
+/// Clock advancement mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClockMode {
+    /// Use trace timestamps directly (original behavior).
+    Timestamp,
+    /// Accumulate estimated cycle costs per event.
+    Cost,
+}
+
+/// Simulation engine state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimState {
     pub clock: u64,
@@ -16,6 +39,10 @@ pub struct SimState {
     pub checker: Checker,
     pub events_processed: u64,
     pub retire_watermark: u64,
+    pub clock_mode: ClockMode,
+    pub total_estimated_cycles: u64,
+    pub total_tx_commits: u64,
+    pub total_tx_aborts: u64,
 }
 
 impl SimState {
@@ -32,7 +59,15 @@ impl SimState {
             checker: Checker::new(1000),
             events_processed: 0,
             retire_watermark: 0,
+            clock_mode: ClockMode::Timestamp,
+            total_estimated_cycles: 0,
+            total_tx_commits: 0,
+            total_tx_aborts: 0,
         }
+    }
+
+    pub fn set_clock_mode(&mut self, mode: ClockMode) {
+        self.clock_mode = mode;
     }
 
     pub fn load_events(&mut self, events: Vec<Event>) {
@@ -41,8 +76,29 @@ impl SimState {
         }
     }
 
+    fn get_event_cost(&self, kind: &EventKind) -> u64 {
+        let machine = MachineProfile::skylake_default();
+        cost_model::event_cost(kind, &machine, BackendProfile::Default)
+    }
+
+    /// Advance the clock based on the event.  In Timestamp mode,
+    /// the clock is set to the event's timestamp.  In Cost mode,
+    /// the clock is incremented by the event's estimated cycle cost.
+    fn advance_clock(&mut self, event: &Event) {
+        match self.clock_mode {
+            ClockMode::Timestamp => {
+                self.clock = event.timestamp.max(self.clock);
+            }
+            ClockMode::Cost => {
+                let cost = self.get_event_cost(&event.kind);
+                self.clock = self.clock.saturating_add(cost);
+                self.total_estimated_cycles = self.clock;
+            }
+        }
+    }
+
     fn dispatch(&mut self, event: &Event) {
-        self.clock = event.timestamp.max(self.clock);
+        self.advance_clock(event);
         let lp = self.lps.entry(event.thread_id)
             .or_insert_with(|| LpState::new(event.thread_id, 0));
 
@@ -64,11 +120,13 @@ impl SimState {
                 lp.in_tx = false;
                 lp.read_set.clear();
                 lp.write_set.clear();
+                self.total_tx_commits += 1;
             }
             EventKind::Abort { .. } => {
                 lp.in_tx = false;
                 lp.read_set.clear();
                 lp.write_set.clear();
+                self.total_tx_aborts += 1;
             }
             EventKind::Read { addr, .. } => {
                 if lp.in_tx {
@@ -116,5 +174,23 @@ impl SimState {
             self.events_processed += 1;
         }
         processed
+    }
+
+    /// Print execution summary.
+    pub fn print_summary(&self) {
+        eprintln!("── SIMULATION SUMMARY ──");
+        eprintln!("  Events processed: {}", self.events_processed);
+        eprintln!("  Final clock: {}", self.clock);
+        eprintln!("  Clock mode: {:?}", self.clock_mode);
+        eprintln!("  TX commits: {}", self.total_tx_commits);
+        eprintln!("  TX aborts: {}", self.total_tx_aborts);
+        if self.total_tx_commits + self.total_tx_aborts > 0 {
+            let rate = 100.0 * self.total_tx_aborts as f64
+                / (self.total_tx_commits + self.total_tx_aborts) as f64;
+            eprintln!("  Abort rate: {:.1}%", rate);
+        }
+        if self.clock_mode == ClockMode::Cost {
+            eprintln!("  Estimated cycles: {}", self.total_estimated_cycles);
+        }
     }
 }
