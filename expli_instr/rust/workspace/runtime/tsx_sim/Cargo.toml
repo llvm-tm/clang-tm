@@ -1,0 +1,15 @@
+[package]
+name = "runtime-tsx-sim"
+version = "0.1.0"
+edition = "2021"
+description = "TSX simulation backend — models Intel RTM semantics for DES"
+
+[dependencies]
+runtime-core = { path = "../core" }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+default = []
+simulation = ["runtime-core/simulation"]
+serde = ["dep:serde", "runtime-core/serde"]
+stats = ["runtime-core/stats"]

@@ -1462,6 +1462,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-tsx-sim"
+version = "0.1.0"
+dependencies = [
+ "runtime-core",
+ "serde",
+]
+
+[[package]]
 name = "runtime-tsxsgl"
 version = "0.1.0"
 dependencies = [

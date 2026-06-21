@@ -527,3 +527,88 @@ Added a proper SGL fallback (matching TSXSGL's pattern):
 | test_ds | 207/207 PASS | 207/207 PASS |
 | test_tx | pre-existing crash | pre-existing crash (unrelated) |
 
+## Session 2026-06-21 — Simulator improvement: cost model + TSX simulation backend + profiling
+
+### Three new infrastructure pieces created
+
+#### 1. TSX timing profiling patch (`patches/profile/tsx/0001-tsxsgl-tsx-timing-instrumentation.patch`)
+
+Adds RDTSC instrumentation to TSXSGL backend measuring:
+- `xbegin_ok`: cycles for successful `_xbegin()` → TSX region
+- `xbegin_abort`: cycles for failed `_xbegin()` (abort)
+- `xend`: cycles for `_xend()` commit
+- `xabort`: cycles for `_xabort()` explicit abort
+- `sgl_begin/end/spin`: SGL fallback lock/unlock/spin-wait cycles
+- `read/write`: per-operation cycles (L1 + bloom)
+- `depth`: total cycles from `_xbegin()` to `_xend()` (TSX transaction duration)
+- Abort reason breakdown: conflict, capacity, explicit, other
+- Write-set and read-set size estimation per commit (unique cache-line tracking)
+
+Apply via `patches/profile/tsx/run_workflow.sh` which applies patch → builds → runs experiments → reverts.
+
+#### 2. Profiling experiment runner (`patches/profile/tsx/run_tsx_profiling.py`)
+
+Runs fuzz_counter + bank across 1/2/4/8 threads (high/low contention variants), parses TSX_STATS output, writes CSV results and calibration JSON for the simulator cost model.
+
+#### 3. TSX simulation backend (`runtime/tsx_sim/`)
+
+New Rust crate implementing the TM hook API with a TSX simulation model:
+- **Cache-line granularity write-set** (`HashMap<u64, Vec<CacheLineWrite>>`): tracks all writes by cache-line address
+- **Bloom filter read-set** (double-hashing, 4096-bit array): approximates Intel's undocumented L1 cache tracking
+- **Capacity abort simulation**: configurable limits (default: 512 read lines, 128 write lines via `TSX_SIM_MAX_READ_LINES` / `TSX_SIM_MAX_WRITE_LINES` env vars)
+- **Conflict detection**: on commit, checks all other threads' bloom filters for write-set line read-MAYBE-match; also checks write-set overlap
+- **Virtual cycle counter**: accumulates Skylake cycle costs per operation (xbegin=20, xend=80, xabort=1500, read=4, write=5, bloom=2, mutex=100, conflict=2000)
+- **SGL fallback**: when capacity exceeded or too many aborts (configurable)
+- **Simulation module**: `set_thread_id`, `snapshot_states`, `restore_states`, `reset`, `take_stats`, `print_stats` (matches existing backend pattern)
+
+#### 4. Cost model module (`simulator/src/cost_model.rs`)
+
+Maps each `EventKind` to a cycle cost, enabling the DES engine to estimate execution time:
+- `BackendProfile` enum: Default, Tinystm, Norec, Tl2, Swisstm, Romulus, Tsxsgl, TsxSim
+- `event_cost(kind, profile) → u64`: per-backend cost lookup
+- `CalibratedCostModel`: loads costs from TSX_STATS output via `parse(line)`, can be used to calibrate simulation against real profiling data
+- TSX-specific costs: xbegin, xend, xabort, L1 read/write, bloom check
+
+#### 5. Calibration loader (`simulator/src/calibration.rs`)
+
+Loads profiling output JSON into Rust data structures:
+- `load_calibration(path) -> HashMap<String, CalibrationRecord>`
+- `cost_model_from_calibration(records, benchmark) -> CalibratedCostModel`
+- Falls back to cross-benchmark average when per-benchmark record not found
+
+### Integration
+- `Backend::TsxSim` variant added to `simulator/src/backend.rs` — full dispatch for all tm_* and sim::* functions
+- `simulator/Cargo.toml` updated with `runtime-tsx-sim` dependency (features: simulation, serde, stats)
+- Workspace `Cargo.toml` updated with `runtime/tsx_sim` member
+- All build steps verified: `cargo build` passes for both `runtime-tsx-sim` and `tm-des` (simulator)
+
+### Modularity redesign (2026-06-21 review)
+
+The architecture was reviewed and refactored for maximum modularity:
+
+**Three independent input files:**
+- **Machine Profile** (`machine_profile.json`): hardware characteristics (CPU, TSX cycle costs, cache latency). Collected once per machine by `run_tsx_profiling.py`. Portable across machines — profile on one, simulate on another.
+- **Workload Profile** (`workload_profile.json`): workload characteristics (read/write-set sizes, abort rates, contention, access patterns). From compiler plugin (LLVM pass instrumentation) or trace analysis.
+- **Trace Events**: actual instrumented execution trace from the compiler plugin.
+
+**New/refactored modules:**
+- `machine_profile.rs` — `MachineProfile` struct with serde JSON I/O. Contains `TsxCharacteristics`, `MemoryCharacteristics`, `BackendCharacteristics`. Default Skylake profile when no profiling data available.
+- `workload_profile.rs` — `WorkloadProfile` struct with serde JSON I/O. Contains read/write-set distributions, contention breakdown, per-backend workload stats. `estimated_cycles_per_tx()` predicts execution time from workload + machine.
+- `cost_model.rs` — refactored to use `MachineProfile` instead of hardcoded constants. `event_cost(kind, &machine, backend)` → cycles. `estimate_workload()` for aggregate predictions. `CalibratedCostModel` for fast dispatch.
+- `calibration.rs` — refactored to convert profiling data → `MachineProfile` (via `calibration_to_machine_profile()` or `machine_profile_from_tsx_stats()`).
+- `engine.rs` — added `ClockMode::Timestamp` / `ClockMode::Cost`. Cost mode advances clock by accumulating estimated cycle costs per event. New `print_summary()` for diagnostics.
+- `lib.rs` — CLI extended with `--machine-profile`, `--workload-profile`, `--backend`, `--clock-mode` options.
+
+**Key invariant:** The profiling experiment runner (`run_tsx_profiling.py`) now generates three outputs:
+1. `tsx_profile_{timestamp}.csv` — raw benchmark results
+2. `calibration_{timestamp}.json` — per-benchmark calibration records
+3. `machine_profile_{timestamp}.json` — portable hardware profile (consumed by simulator on any machine)
+
+### Updated next steps
+1. **Run `run_workflow.sh` on RTM hardware** → collects TSX_STATS → generates `machine_profile.json` → ship JSON to any simulation machine
+2. **Validate**: replay same traces through real TSXSGL and TSX-SIM backend, compare commit/abort decisions + timing
+3. **Tune TSX simulation parameters**: bloom filter false positive rate, capacity thresholds, conflict detection granularity
+4. **SPHT profiling patch**: similar RDTSC instrumentation for SPHT (branch overflow + mutex fallback)
+5. **NV-HTM profiling**: Intel TSX extortion detection + 2-phase abort semantics  
+
+
