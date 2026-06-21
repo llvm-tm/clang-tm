@@ -110,6 +110,10 @@ extern __thread sigjmp_buf *jmpbuf;
 extern std::atomic<uint64_t> g_num_threads;
 extern std::atomic<uint64_t> *g_durable_seqs;
 
+// Cascade-abort flag: SGL fallback writes this, TSX read-set includes it.
+// When another thread acquires SGL, all TSX transactions abort immediately.
+extern std::atomic<int> g_spht_sgl_owner;
+
 inline void setjmp(sigjmp_buf *buf) { jmpbuf = buf; }
 
 // ── RTM availability (delegates to common probe) ─────────────────
@@ -220,6 +224,13 @@ inline bool begin()
 	unsigned status = _xbegin();
 	if (status == _XBEGIN_STARTED) {
 		tx->active = true;
+		// Read sgl_owner to add it to TSX read-set.
+		// If SGL fallback is active (or becomes active later), the write to
+		// sgl_owner immediately aborts this TSX transaction (cache-line
+		// invalidation on the read-set), preventing cascade aborts.
+		if (g_spht_sgl_owner.load(std::memory_order_relaxed) != 0) {
+			_xabort(1);
+		}
 		return true;
 	}
 
