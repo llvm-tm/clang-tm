@@ -1,88 +1,47 @@
-From aed9f1b0e2c3d4f5a6b7c8d9e0f1a2b3c4d5e6f7 Mon Sep 17 00:00:00 2001
-From: TM Profiling <tm-dev@example.com>
-Date: Mon, 1 Jan 2024 00:00:00 +0000
-Subject: [PATCH 1/1] tsxsgl: add detailed TSX timing instrumentation
-
-Adds RDTSC-based timing measurements for all TSX operations and the
-SGL fallback path in the TSXSGL backend. Measurements are printed
-as a TSX_STATS line at exit.
-
-Collected metrics:
-- xbegin_success: _xbegin() that entered TSX (cycles)
-- xbegin_abort: _xbegin() that returned abort (cycles)
-- xend: _xend() commit (cycles)
-- xabort: _xabort() explicit abort (cycles)
-- sgl_begin: SGL fallback lock acquisition (cycles from lock() to store())
-- sgl_end: SGL release (cycles from store(0) to unlock())
-- sgl_spin: spin-wait on LOCK_BUSY (cycles)
-- read: tm_read_i4/8 (cycles)
-- write: tm_write_i4/8 (cycles)
-- read_set_size: per-commit estimated read-set size
-- write_set_size: per-commit estimated write-set size
-- abort_reason: cumulative abort reason codes
-- tsx_depth: duration of _xbegin().._xend() (cycles)
-
 diff --git a/backends/tm_impl/tsx_sgl/TSXSGL_runtime.cpp b/backends/tm_impl/tsx_sgl/TSXSGL_runtime.cpp
-index abcdef1..1234567 100644
+index 0403444..0cd7b0b 100644
 --- a/backends/tm_impl/tsx_sgl/TSXSGL_runtime.cpp
 +++ b/backends/tm_impl/tsx_sgl/TSXSGL_runtime.cpp
-@@ -1,4 +1,12 @@
- /**
-+ * TSXSGL with TSX Timing Instrumentation
-+ *
-+ * Define TSX_PROFILE to activate detailed cycle-level timing.
-+ * Prints TSX_STATS at exit.
-+ *
-+ * Metrics use RDTSC.  Cycle counts are affected by turbo boost,
-+ * frequency scaling, and out-of-order execution — treat as
-+ * approximate distributions, not exact cycle counts.
-+ *
-  * TSXSGL: TSX Lock Elision with Single Global Lock fallback.
-  *
-  * Uses Intel TSX (RTM) for optimistic concurrency. On RTM failure
-@@ -10,14 +18,6 @@
-  * - sgl_owner: 1 = SGL held, 0 = free
-  *
-  * The sgl_owner cache-line is added to the TSX read-set on begin().
-- * Any concurrent SGL entry (which writes to sgl_owner) aborts the TSX.
-- * The write forces a cache-line invalidation to the read-set, causing
-- * an immediate TSX abort (wasted-work prevention).
-- *
-- * Abort handling distinguishes:
-- *   LOCK_BUSY (0xFF) — explicit _xabort from sgl_owner check
-- *   OWNER_CHANGED (0x01) — explicit _xabort from end() re-check
-- *   Other — hardware conflict or capacity abort
-  */
-
- #include <algorithm>
-@@ -39,6 +39,21 @@
- #include <new>
- #include <sstream>
-
-+// ── Profiling instrumentation ───────────────────────────────
-+// #define TSX_PROFILE  // uncomment to enable
+@@ -41,6 +41,23 @@
+ #include "../common/tm_region_allocator.hpp"
+ #include "../common/tm_alloc_overrides.hpp"
+ 
++// ── TSX profiling instrumentation ───────────────────────
++// Define TSX_PROFILE to enable detailed cycle-level timing
++// via RDTSC.  Prints a TSX_STATS: line at exit.
++//
++// Apply via:   git apply patches/profile/tsx/0001-tsxsgl-timing.patch
++// Remove via:  git checkout -- backends/tm_impl/tsx_sgl/TSXSGL_runtime.cpp
 +#ifdef TSX_PROFILE
 +  #include <cstdio>
 +  #include <atomic>
-+  #define TSX_RDTSC() uint64_t __tsx_tsc; \
-+      do { uint32_t lo, hi; asm volatile("rdtsc" : "=a"(lo), "=d"(hi)); \
-+      __tsx_tsc = ((uint64_t)hi << 32) | lo; } while(0)
-+  // thread-local accumulators
-+  #define TSX_ACC(name, start, end) do { \
-+      tsx_acc_##name.fetch_add((end) - (start), std::memory_order_relaxed); \
-+      tsx_cnt_##name.fetch_add(1, std::memory_order_relaxed); } while(0)
++  static inline uint64_t tsx_rdtsc() {
++      uint32_t lo, hi;
++      asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
++      return ((uint64_t)hi << 32) | lo;
++  }
 +#else
-+  #define TSX_RDTSC() ((void)0)
 +#endif
 +
- #ifdef __x86_64__
-
- // ---- TM allocator integration ----
-@@ -60,6 +75,34 @@ static std::mutex global_tx_lock;
+ extern const TMRealHooks g_tsxsgl_hooks;
+ 
+ thread_local bool g_in_tx = false;
+@@ -50,9 +67,45 @@ thread_local SpecAlloc *g_spec_allocs = nullptr;
+ thread_local bool in_tsx = false;
+ thread_local uint64_t tsx_start_owner = 0;
+ 
++#ifdef TSX_PROFILE
++thread_local uint64_t tsx_depth_start = 0;
++thread_local uint64_t tsx_read_set_count = 0;
++thread_local uint64_t tsx_write_set_count = 0;
++thread_local std::unordered_set<uintptr_t> tsx_write_set_lines;
++thread_local std::unordered_set<uintptr_t> tsx_read_set_lines;
++#endif
++
+ static std::mutex global_tx_lock;
  static std::atomic<uint64_t> sgl_owner{0};
- static std::atomic<uint64_t> g_spin_count{0};
-
-+// ── TSX profile counters (atomically aggregated) ────────────
+ 
++// ── TSX profile counters (atomically aggregated) ────────
 +#ifdef TSX_PROFILE
 +static std::atomic<uint64_t> tsx_acc_xbegin_ok{0};
 +static std::atomic<uint64_t> tsx_cnt_xbegin_ok{0};
@@ -110,51 +69,18 @@ index abcdef1..1234567 100644
 +static std::atomic<uint64_t> tsx_abort_other{0};
 +#endif
 +
- // ---- Thread-local state ----
- thread_local bool g_in_tx = false;
- thread_local bool in_tsx = false;
-@@ -71,6 +114,9 @@ thread_local bool in_tsx = false;
- static thread_local uint64_t tm_rdtsc_begin = 0;
- static thread_local uint64_t tm_rdtsc_reads = 0;
- static thread_local uint64_t tm_rdtsc_writes = 0;
-+static thread_local uint64_t tsx_depth_start = 0;
-+static thread_local uint64_t tsx_read_set_count = 0;
-+static thread_local uint64_t tsx_write_set_count = 0;
- static thread_local uint64_t tm_begin_count = 0;
- static thread_local uint64_t tm_commit_count = 0;
-
-@@ -81,6 +127,9 @@ static void print_stats() {
-         fprintf(stderr, "[TSXSGL] tm_avg_duration = %.0f cycles\n",
-                 (double)tm_rdtsc_begin / cnt);
+ // Plugin-required thread-local state
+ extern "C" {
+ extern __thread int32_t    tm_nested_call_counter;
+@@ -88,6 +141,46 @@ void tm_init()
+         fprintf(stderr, "FATAL: tm_region_init() failed\n");
+         abort();
      }
-+    if (cnt > 0) {
-+        fprintf(stderr, "[TSXSGL] tm_avg_reads = %.1f, tm_avg_writes = %.1f\n",
-+                (double)tm_rdtsc_reads / cnt, (double)tm_rdtsc_writes / cnt);
-+    }
- }
- #endif
-
-@@ -96,6 +145,39 @@ void tm_init() {
-         tm_event_log_init();
-     }
-
 +#ifdef TSX_PROFILE
-+    // Register an atexit handler to print profile data
-+    // (using atexit rather than destructors for portability)
 +    static bool registered = false;
 +    if (!registered) {
 +        registered = true;
-+        auto dump = []() {
-+            auto ok = tsx_cnt_xbegin_ok.load();
-+            auto ab = tsx_cnt_xbegin_abort.load();
-+            auto xd = tsx_cnt_xend.load();
-+            auto xa = tsx_cnt_xabort.load();
-+            auto sb = tsx_cnt_sgl_begin.load();
-+            auto se = tsx_cnt_sgl_end.load();
-+            auto ss = tsx_cnt_sgl_spin.load();
-+            auto rd = tsx_cnt_read.load();
-+            auto wr = tsx_cnt_write.load();
-+            auto dp = tsx_cnt_depth.load();
++        std::atexit([]() {
 +            fprintf(stdout,
 +                "TSX_STATS:"
 +                " xbegin_ok=%llu(%llu) xbegin_abort=%llu(%llu)"
@@ -163,85 +89,67 @@ index abcdef1..1234567 100644
 +                " read=%llu(%llu) write=%llu(%llu)"
 +                " depth=%llu(%llu)"
 +                " conflict=%llu capacity=%llu explicit=%llu other=%llu\n",
-+                (unsigned long long)ok, (unsigned long long)tsx_acc_xbegin_ok.load(),
-+                (unsigned long long)ab, (unsigned long long)tsx_acc_xbegin_abort.load(),
-+                (unsigned long long)xd, (unsigned long long)tsx_acc_xend.load(),
-+                (unsigned long long)xa, (unsigned long long)tsx_acc_xabort.load(),
-+                (unsigned long long)sb, (unsigned long long)tsx_acc_sgl_begin.load(),
-+                (unsigned long long)se, (unsigned long long)tsx_acc_sgl_end.load(),
-+                (unsigned long long)ss, (unsigned long long)tsx_acc_sgl_spin.load(),
-+                (unsigned long long)rd, (unsigned long long)tsx_acc_read.load(),
-+                (unsigned long long)wr, (unsigned long long)tsx_acc_write.load(),
-+                (unsigned long long)dp, (unsigned long long)tsx_acc_depth.load(),
++                (unsigned long long)tsx_cnt_xbegin_ok.load(),
++                (unsigned long long)tsx_acc_xbegin_ok.load(),
++                (unsigned long long)tsx_cnt_xbegin_abort.load(),
++                (unsigned long long)tsx_acc_xbegin_abort.load(),
++                (unsigned long long)tsx_cnt_xend.load(),
++                (unsigned long long)tsx_acc_xend.load(),
++                (unsigned long long)tsx_cnt_xabort.load(),
++                (unsigned long long)tsx_acc_xabort.load(),
++                (unsigned long long)tsx_cnt_sgl_begin.load(),
++                (unsigned long long)tsx_acc_sgl_begin.load(),
++                (unsigned long long)tsx_cnt_sgl_end.load(),
++                (unsigned long long)tsx_acc_sgl_end.load(),
++                (unsigned long long)tsx_cnt_sgl_spin.load(),
++                (unsigned long long)tsx_acc_sgl_spin.load(),
++                (unsigned long long)tsx_cnt_read.load(),
++                (unsigned long long)tsx_acc_read.load(),
++                (unsigned long long)tsx_cnt_write.load(),
++                (unsigned long long)tsx_acc_write.load(),
++                (unsigned long long)tsx_cnt_depth.load(),
++                (unsigned long long)tsx_acc_depth.load(),
 +                (unsigned long long)tsx_abort_conflict.load(),
 +                (unsigned long long)tsx_abort_capacity.load(),
 +                (unsigned long long)tsx_abort_explicit.load(),
 +                (unsigned long long)tsx_abort_other.load());
-+        };
-+        std::atexit(dump);
++        });
 +    }
 +#endif
-+
      tm_register_real_hooks(&g_tsxsgl_hooks);
-     stm::tm_region_init();
  }
-@@ -113,6 +195,19 @@ void tm_init_thread() {
-     tm_event_log_init_thread();
- }
-
-+// ── Write-set size estimation ───────────────────────────────
-+// We approximate write-set size by tracking unique cache-line-aligned
-+// addresses written within the current TSX region.  This is a
-+// coarse proxy — the actual write-set is in the L1 cache.
-+static thread_local std::unordered_set<uintptr_t> tsx_write_set_lines;
-+static void tsx_track_write(void *addr) {
-+    uintptr_t line = reinterpret_cast<uintptr_t>(addr) >> 6;  // 64-byte lines
-+    tsx_write_set_lines.insert(line);
-+}
-
-+// ── Read-set size estimation ────────────────────────────────
-+// Track unique cache-line-aligned addresses read.
-+static thread_local std::unordered_set<uintptr_t> tsx_read_set_lines;
-+static void tsx_track_read(void *addr) {
-+    uintptr_t line = reinterpret_cast<uintptr_t>(addr) >> 6;
-+    tsx_read_set_lines.insert(line);
-+}
+ #ifdef LLVM_TM_PLUGIN
+@@ -179,11 +272,23 @@ static void real_tm_begin() {
+     if (tm_nested_call_counter > 1) return;
+     g_in_tx = true;
+ 
++#ifdef TSX_PROFILE
++    tsx_depth_start = 0;
++    tsx_read_set_count = 0;
++    tsx_write_set_count = 0;
++    tsx_write_set_lines.clear();
++    tsx_read_set_lines.clear();
++#endif
 +
- // ── Real implementations (registered via hooks) ─────────────────────
-
- static void real_tm_begin() {
-@@ -121,10 +216,18 @@ static void real_tm_begin() {
-
  #if defined(__x86_64__) || defined(__i386__)
      if (tm_rtm::available()) {
-+        tsx_depth_start = 0;
-+        tsx_read_set_count = 0;
-+        tsx_write_set_count = 0;
-+        tsx_write_set_lines.clear();
-+        tsx_read_set_lines.clear();
          for (int attempts = 0; attempts < 5; attempts++) {
-+            TSX_RDTSC();
-+            uint64_t tsx_try_tsc = __tsx_tsc;
++            uint64_t xb_s = tsx_rdtsc();
              unsigned status = _xbegin();
-+            uint64_t xb_end;
-+            TSX_RDTSC();
-+            xb_end = __tsx_tsc;
              if (status == _XBEGIN_STARTED) {
-+                TSX_ACC(xbegin_ok, tsx_try_tsc, xb_end);
-+                tsx_depth_start = xb_end;
++                tsx_acc_xbegin_ok.fetch_add(tsx_rdtsc() - xb_s, std::memory_order_relaxed);
++                tsx_cnt_xbegin_ok.fetch_add(1, std::memory_order_relaxed);
++                tsx_depth_start = tsx_rdtsc();
                  uint64_t v = sgl_owner.load(std::memory_order_seq_cst);
                  if (v != 0) {
-+                    TSX_RDTSC();
-+                    uint64_t xa_start = __tsx_tsc;
                      _xabort(LOCK_BUSY);
-+                    // _xabort restores to _xbegin — never reached
-                 }
-                 tsx_start_owner = v;
+@@ -192,11 +297,27 @@ static void real_tm_begin() {
                  in_tsx = true;
                  return;
              }
-+            TSX_ACC(xbegin_abort, tsx_try_tsc, xb_end);
-+            // Categorize abort reason
++            tsx_acc_xbegin_abort.fetch_add(tsx_rdtsc() - xb_s, std::memory_order_relaxed);
++            tsx_cnt_xbegin_abort.fetch_add(1, std::memory_order_relaxed);
++#ifdef TSX_PROFILE
 +            if (status & _XABORT_EXPLICIT) {
 +                tsx_abort_explicit.fetch_add(1, std::memory_order_relaxed);
 +            } else if (status & _XABORT_CAPACITY) {
@@ -251,67 +159,63 @@ index abcdef1..1234567 100644
 +            } else {
 +                tsx_abort_other.fetch_add(1, std::memory_order_relaxed);
 +            }
-
--            if ((status & _XABORT_EXPLICIT) &&
--                _XABORT_CODE(status) == LOCK_BUSY) {
-+            if ((status & _XABORT_EXPLICIT) && _XABORT_CODE(status) == LOCK_BUSY) {
-+                TSX_RDTSC();
-+                uint64_t spin_start = __tsx_tsc;
++#endif
+ 
+             if ((status & _XABORT_EXPLICIT) &&
+                 _XABORT_CODE(status) == LOCK_BUSY) {
++                uint64_t sp_s = tsx_rdtsc();
                  while (sgl_owner.load(std::memory_order_relaxed) != 0)
                      _mm_pause();
-+                TSX_RDTSC();
-+                TSX_ACC(sgl_spin, spin_start, __tsx_tsc);
++                tsx_acc_sgl_spin.fetch_add(tsx_rdtsc() - sp_s, std::memory_order_relaxed);
++                tsx_cnt_sgl_spin.fetch_add(1, std::memory_order_relaxed);
              } else if (!(status & _XABORT_RETRY)) {
                  break;
              }
-         }
-     }
+@@ -205,8 +326,11 @@ static void real_tm_begin() {
+ #else
+     (void)in_tsx;
  #endif
-+    TSX_RDTSC();
-+    uint64_t sgl_begin_tsc = __tsx_tsc;
++    uint64_t sgl_s = tsx_rdtsc();
      global_tx_lock.lock();
      sgl_owner.store(1, std::memory_order_seq_cst);
-+    TSX_RDTSC();
-+    TSX_ACC(sgl_begin, sgl_begin_tsc, __tsx_tsc);
++    tsx_acc_sgl_begin.fetch_add(tsx_rdtsc() - sgl_s, std::memory_order_relaxed);
++    tsx_cnt_sgl_begin.fetch_add(1, std::memory_order_relaxed);
      in_tsx = false;
  }
-
- static void real_tm_end() {
+ 
+@@ -214,34 +338,83 @@ static void real_tm_end() {
      if (tm_nested_call_counter > 1) return;
      g_in_tx = false;
-
-+    TSX_RDTSC();
-+    uint64_t end_start = __tsx_tsc;
+ 
++#ifdef TSX_PROFILE
++    tsx_read_set_count = tsx_read_set_lines.size();
++    tsx_write_set_count = tsx_write_set_lines.size();
++#endif
 +
      if (in_tsx) {
  #if defined(__x86_64__) || defined(__i386__)
++        uint64_t xe_s = tsx_rdtsc();
          if (sgl_owner.load(std::memory_order_seq_cst) != tsx_start_owner) {
-+            TSX_RDTSC();
-+            uint64_t xa_tsc = __tsx_tsc;
              _xabort(OWNER_CHANGED);
-+            // never reached
          }
-+        tsx_read_set_count = tsx_read_set_lines.size();
-+        tsx_write_set_count = tsx_write_set_lines.size();
          _xend();
-+        TSX_RDTSC();
-+        TSX_ACC(xend, end_start, __tsx_tsc);
++        uint64_t xe_e = tsx_rdtsc();
++        tsx_acc_xend.fetch_add(xe_e - xe_s, std::memory_order_relaxed);
++        tsx_cnt_xend.fetch_add(1, std::memory_order_relaxed);
 +        if (tsx_depth_start != 0) {
-+            TSX_ACC(depth, tsx_depth_start, __tsx_tsc);
++            tsx_acc_depth.fetch_add(xe_e - tsx_depth_start, std::memory_order_relaxed);
++            tsx_cnt_depth.fetch_add(1, std::memory_order_relaxed);
 +        }
  #endif
-+        tm_rdtsc_reads += tsx_read_set_count;
-+        tm_rdtsc_writes += tsx_write_set_count;
          return;
      }
-+    TSX_RDTSC();
-+    uint64_t sgl_rel_tsc = __tsx_tsc;
++    uint64_t sgle_s = tsx_rdtsc();
      sgl_owner.store(0, std::memory_order_seq_cst);
      global_tx_lock.unlock();
-+    TSX_RDTSC();
-+    TSX_ACC(sgl_end, sgl_rel_tsc, __tsx_tsc);
++    tsx_acc_sgl_end.fetch_add(tsx_rdtsc() - sgle_s, std::memory_order_relaxed);
++    tsx_cnt_sgl_end.fetch_add(1, std::memory_order_relaxed);
  }
-
+ 
 -static uint8_t  real_tm_read_i1(uint8_t *addr)  { return *addr; }
 -static uint16_t real_tm_read_i2(uint16_t *addr) { return *addr; }
 -static uint32_t real_tm_read_i4(uint32_t *addr) { return *addr; }
@@ -319,24 +223,7 @@ index abcdef1..1234567 100644
 -static float    real_tm_read_f4(float *addr)    { return *addr; }
 -static double   real_tm_read_f8(double *addr)   { return *addr; }
 -static void *   real_tm_read_ptr(void **addr)   { return (void*)*addr; }
-+// ---- Read hooks with timing ----
-+#define TSX_READ_HOOK(name, type, ret_type) \
-+static ret_type real_tm_##name(type *addr) { \
-+    TSX_RDTSC(); uint64_t r_tsc = __tsx_tsc; \
-+    ret_type v = *addr; \
-+    TSX_RDTSC(); TSX_ACC(read, r_tsc, __tsx_tsc); \
-+    if (in_tsx) tsx_track_read(addr); \
-+    return v; \
-+}
-
-+TSX_READ_HOOK(read_i1, uint8_t, uint8_t)
-+TSX_READ_HOOK(read_i2, uint16_t, uint16_t)
-+TSX_READ_HOOK(read_i4, uint32_t, uint32_t)
-+TSX_READ_HOOK(read_i8, uint64_t, uint64_t)
-+TSX_READ_HOOK(read_f4, float, float)
-+TSX_READ_HOOK(read_f8, double, double)
-+TSX_READ_HOOK(read_ptr, void*, void*)
-
+-
 -static void real_tm_write_i1(uint8_t *addr, uint8_t val)     { *addr = val; }
 -static void real_tm_write_i2(uint16_t *addr, uint16_t val)   { *addr = val; }
 -static void real_tm_write_i4(uint32_t *addr, uint32_t val)   { *addr = val; }
@@ -344,24 +231,54 @@ index abcdef1..1234567 100644
 -static void real_tm_write_f4(float *addr, float val)         { *addr = val; }
 -static void real_tm_write_f8(double *addr, double val)       { *addr = val; }
 -static void real_tm_write_ptr(void **addr, void *val)        { *addr = val; }
-+#define TSX_WRITE_HOOK(name, type, val_type) \
-+static void real_tm_##name(type *addr, val_type val) { \
-+    TSX_RDTSC(); uint64_t w_tsc = __tsx_tsc; \
-+    *addr = val; \
-+    TSX_RDTSC(); TSX_ACC(write, w_tsc, __tsx_tsc); \
-+    if (in_tsx) tsx_track_write(addr); \
++#ifdef TSX_PROFILE
++  #define TIMED_READ(typ, name, ret_type) \
++    static ret_type real_tm_read_##name(typ *addr) { \
++        uint64_t r_s = tsx_rdtsc(); ret_type v = *addr; \
++        tsx_acc_read.fetch_add(tsx_rdtsc() - r_s, std::memory_order_relaxed); \
++        tsx_cnt_read.fetch_add(1, std::memory_order_relaxed); \
++        tsx_read_set_lines.insert((uintptr_t)addr & ~63ULL); return v; }
++  #define TIMED_WRITE(typ, name) \
++    static void real_tm_write_##name(typ *addr, typ val) { \
++        uint64_t w_s = tsx_rdtsc(); *addr = val; \
++        tsx_acc_write.fetch_add(tsx_rdtsc() - w_s, std::memory_order_relaxed); \
++        tsx_cnt_write.fetch_add(1, std::memory_order_relaxed); \
++        tsx_write_set_lines.insert((uintptr_t)addr & ~63ULL); }
++#else
++  #define TIMED_READ(typ, name, ret_type) \
++    static ret_type real_tm_read_##name(typ *addr) { return *addr; }
++  #define TIMED_WRITE(typ, name) \
++    static void real_tm_write_##name(typ *addr, typ val) { *addr = val; }
++#endif
++
++TIMED_READ(uint8_t,  i1, uint8_t)
++TIMED_READ(uint16_t, i2, uint16_t)
++TIMED_READ(uint32_t, i4, uint32_t)
++TIMED_READ(uint64_t, i8, uint64_t)
++TIMED_READ(float,    f4, float)
++TIMED_READ(double,   f8, double)
++TIMED_READ(void*,    ptr, void*)
++
++TIMED_WRITE(uint8_t,  i1)
++TIMED_WRITE(uint16_t, i2)
++TIMED_WRITE(uint32_t, i4)
++TIMED_WRITE(float,    f4)
++TIMED_WRITE(double,   f8)
++TIMED_WRITE(void*,    ptr)
++
++#ifdef TSX_PROFILE
++static void real_tm_write_i8(uint64_t *addr, int64_t val) {
++    uint64_t w_s = tsx_rdtsc();
++    *(volatile uint64_t*)addr = (uint64_t)val;
++    tsx_acc_write.fetch_add(tsx_rdtsc() - w_s, std::memory_order_relaxed);
++    tsx_cnt_write.fetch_add(1, std::memory_order_relaxed);
++    tsx_write_set_lines.insert((uintptr_t)addr & ~63ULL);
 +}
-
-+TSX_WRITE_HOOK(write_i1, uint8_t, uint8_t)
-+TSX_WRITE_HOOK(write_i2, uint16_t, uint16_t)
-+TSX_WRITE_HOOK(write_i4, uint32_t, uint32_t)
-+TSX_WRITE_HOOK(write_i8, uint64_t, int64_t)
-+TSX_WRITE_HOOK(write_f4, float, float)
-+TSX_WRITE_HOOK(write_f8, double, double)
-+TSX_WRITE_HOOK(write_ptr, void*, void*)
-
++#else
++static void real_tm_write_i8(uint64_t *addr, int64_t val) {
++    *(volatile uint64_t*)addr = (uint64_t)val;
++}
++#endif
+ 
  static void* real_tm_malloc(size_t size) {
      void* p = stm::tm_region_malloc(size);
-
-- -- 
-2.34.1
