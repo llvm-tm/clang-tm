@@ -5,13 +5,19 @@
 // sim_thread_id tells the backend which simulated thread's
 // state to access.
 //
-// The engine also runs a Verifier alongside the backend to catch
-// memory violations (double-free, use-after-free, out-of-TX
-// accesses), check money conservation, detect livelock cycles,
-// and checkpoint/restore simulation state.
+// Two clock modes:
+//   Timestamp — events advance clock to their trace timestamp
+//   Cost      — events advance clock by estimated cycle costs
+//              from the calibrated cost model, while the real
+//              backend detects conflicts/aborts naturally
+//
+// The cost mode enables "what-if" analysis: given a trace and a
+// machine profile, estimate how fast the workload would run on
+// different hardware or with a different TM backend.
 
 use crate::backend::Backend;
 use crate::checkpoint::{self, Checkpoint};
+use crate::cost_model::CalibratedCostModel;
 use crate::deadlock::DeadlockDetector;
 use crate::event::{Event, EventKind};
 use crate::verifier::Verifier;
@@ -20,6 +26,15 @@ use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::AtomicU64;
+
+/// Clock advancement mode for the simulation engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimClockMode {
+    /// Use event timestamps directly (original behavior).
+    Timestamp,
+    /// Accumulate estimated cycle costs per event.
+    Cost,
+}
 
 fn alloc_tid_base() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1_000_000);
@@ -56,6 +71,14 @@ pub struct SimEngine {
     seen_threads: HashSet<u64>,
     current_write_set: HashMap<u64, Vec<u64>>,
     events_processed: u64,
+    /// Clock advancement mode.
+    pub sim_clock_mode: SimClockMode,
+    /// Calibrated cost model (used in Cost mode).
+    pub cost_model: Option<CalibratedCostModel>,
+    /// Accumulated estimated cycles (Cost mode).
+    pub estimated_cycles: u64,
+    /// Frequency in GHz for time estimation.
+    pub freq_ghz: f64,
 }
 
 impl SimEngine {
@@ -71,6 +94,32 @@ impl SimEngine {
             seen_threads: HashSet::new(),
             current_write_set: HashMap::new(),
             events_processed: 0,
+            sim_clock_mode: SimClockMode::Timestamp,
+            cost_model: None,
+            estimated_cycles: 0,
+            freq_ghz: 3.0,
+        }
+    }
+
+    /// Set cost mode with a calibrated model and frequency.
+    pub fn set_cost_mode(&mut self, model: CalibratedCostModel, freq_ghz: f64) {
+        self.sim_clock_mode = SimClockMode::Cost;
+        self.cost_model = Some(model);
+        self.freq_ghz = freq_ghz;
+        self.estimated_cycles = 0;
+    }
+
+    /// Get the cycle cost for an event kind.
+    fn event_cost(&self, kind: &EventKind) -> u64 {
+        match &self.sim_clock_mode {
+            SimClockMode::Cost => {
+                if let Some(ref model) = self.cost_model {
+                    model.event_cost(kind)
+                } else {
+                    0
+                }
+            }
+            SimClockMode::Timestamp => 0,
         }
     }
 
@@ -135,8 +184,32 @@ impl SimEngine {
         self.ensure_thread(tid);
         let b = self.backend;
         b.sim_set_thread_id(tid);
+
+        // Accumulate cycle cost before dispatching
+        let event_cost = self.event_cost(&event.kind);
+        self.estimated_cycles += event_cost;
+
         let result = self.dispatch_event(event);
+
+        // Charge abort overhead if the abort came from the backend
+        if result.is_err() {
+            let abort_cost = self.event_cost(&EventKind::Abort { reason: 0 });
+            self.estimated_cycles += abort_cost;
+        }
+
         b.sim_clear_thread_id();
+
+        // In cost mode, print a summary line every 10k events
+        if self.sim_clock_mode == SimClockMode::Cost
+            && self.events_processed > 0
+            && self.events_processed % 10000 == 0
+        {
+            let secs = self.estimated_cycles as f64 / (self.freq_ghz * 1e9);
+            eprintln!(
+                "  [cost] events={} cycles={} est_time={:.3}s",
+                self.events_processed, self.estimated_cycles, secs
+            );
+        }
 
         if let Err(why) = result {
             eprintln!(
@@ -363,6 +436,7 @@ impl SimEngine {
         self.verifier.reset();
         self.deadlock.reset();
         self.current_write_set.clear();
+        self.estimated_cycles = 0;
     }
 }
 

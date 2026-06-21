@@ -2,15 +2,15 @@
   "cpu": "Intel Xeon E5-2648L v4 @ 1.80GHz (Broadwell-EP)",
   "freq_ghz": 1.8,
   "tsx": {
-    "xbegin_cycles": 20.0,
-    "xend_cycles": 80.0,
+    "xbegin_cycles": 60.0,
+    "xend_cycles": 178.0,
     "xabort_cycles": 1500.0,
-    "read_l1_cycles": 4.0,
-    "write_l1_cycles": 5.0,
+    "read_l1_cycles": 5.0,
+    "write_l1_cycles": 6.0,
     "bloom_check_cycles": 2.0,
-    "mutex_lock_cycles": 50.0,
-    "mutex_unlock_cycles": 50.0,
-    "conflict_abort_penalty": 2000.0,
+    "mutex_lock_cycles": 75.0,
+    "mutex_unlock_cycles": 75.0,
+    "conflict_abort_penalty": 2500.0,
     "cache_line_size": 64,
     "max_read_lines": 512,
     "max_write_lines": 128
@@ -23,16 +23,56 @@
   },
   "backends": [
     {
-      "backend": "tsxsgl",
+      "backend": "default",
       "begin_overhead": 50.0,
-      "commit_overhead": 80.0,
-      "abort_overhead": 100.0,
+      "commit_overhead": 100.0,
+      "abort_overhead": 120.0,
       "read_overhead": 5.0,
       "write_overhead": 6.0,
       "validation_entry_cost": 3.0,
       "lock_acquire_cost": 50.0
+    },
+    {
+      "backend": "tsxsgl",
+      "begin_overhead": 60.0,
+      "commit_overhead": 178.0,
+      "abort_overhead": 1500.0,
+      "read_overhead": 5.0,
+      "write_overhead": 6.0,
+      "validation_entry_cost": 3.0,
+      "lock_acquire_cost": 75.0
+    },
+    {
+      "backend": "tinystm",
+      "begin_overhead": 30.0,
+      "commit_overhead": 80.0,
+      "abort_overhead": 50.0,
+      "read_overhead": 8.0,
+      "write_overhead": 10.0,
+      "validation_entry_cost": 5.0,
+      "lock_acquire_cost": 40.0
+    },
+    {
+      "backend": "norec",
+      "begin_overhead": 25.0,
+      "commit_overhead": 60.0,
+      "abort_overhead": 30.0,
+      "read_overhead": 6.0,
+      "write_overhead": 7.0,
+      "validation_entry_cost": 3.0,
+      "lock_acquire_cost": 35.0
+    },
+    {
+      "backend": "tl2",
+      "begin_overhead": 35.0,
+      "commit_overhead": 90.0,
+      "abort_overhead": 60.0,
+      "read_overhead": 9.0,
+      "write_overhead": 11.0,
+      "validation_entry_cost": 6.0,
+      "lock_acquire_cost": 45.0
     }
   ],
   "collected": "2026-06-21",
-  "description": "Broadwell-EP v4 TSXSGL calibration from TSX_STATS profiling. fuzz_counter/bank/STAMP at 1/2/4/8 threads. Microcode 0xb000040. RTM/HLE available. Conflict aborts dominate (85-95%), capacity ~0.5-1.5% at 4t+, LOCK_BUSY explicit ~5-15%"
+  "description": "Broadwell-EP v4 calibration from TSX_STATS profiling + estimated software-TM overheads. TSXSGL xbegin=60, xend=178 measured. SW backends: calibrated approximations based on algorithm complexity. fuzz_counter/bank/STAMP at 1/2/4/8 threads. Microcode 0xb000040. RTM/HLE available."
 }
