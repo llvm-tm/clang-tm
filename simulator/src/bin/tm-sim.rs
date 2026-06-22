@@ -15,6 +15,7 @@
 use clap::Parser;
 use std::collections::HashMap;
 use tm_des::backend::Backend;
+use tm_des::computation_profile::ComputationProfile;
 use tm_des::cost_model::{BackendProfile, CalibratedCostModel};
 use tm_des::event::{Event, EventKind};
 use tm_des::machine_profile::MachineProfile;
@@ -44,6 +45,11 @@ struct Cli {
     /// CPU frequency in GHz (for wall-time estimation).
     #[arg(long)]
     freq_ghz: Option<f64>,
+
+    /// Baseline computation profile (from tm_stub_runtime with TM_BASELINE_PATH).
+    /// Adds pure computation time to TM-overhead cycle estimate.
+    #[arg(long)]
+    baseline_profile: Option<String>,
 
     /// Stop after N events (0 = unlimited).
     #[arg(long, default_value = "0")]
@@ -108,6 +114,21 @@ fn main() {
         }
     }
 
+    // Load baseline computation profile
+    if let Some(path) = &cli.baseline_profile {
+        match ComputationProfile::load(path) {
+            Ok(profile) => {
+                eprintln!("Baseline profile: {} seqs, {:.6}s computation",
+                    profile.count, profile.seconds());
+                engine.set_computation_profile(profile);
+            }
+            Err(e) => {
+                eprintln!("Cannot load baseline profile '{}': {}", path, e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Load initial committed values for money conservation check
     if let Some(path) = &cli.initial_values {
         let data: String = std::fs::read_to_string(path)
@@ -157,10 +178,12 @@ fn main() {
 
     // Report estimated time in cost mode
     if engine.sim_clock_mode == SimClockMode::Cost {
-        let secs = engine.estimated_cycles as f64 / (engine.freq_ghz * 1e9);
+        let tm_secs = engine.estimated_cycles as f64 / (engine.freq_ghz * 1e9);
+        let baseline_secs = engine.computation_profile.as_ref().map(|p| p.seconds()).unwrap_or(0.0);
+        let total_secs = tm_secs + baseline_secs;
         eprintln!(
-            "═══ cost mode: {} cycles ≈ {:.4}s @ {} GHz ═══",
-            engine.estimated_cycles, secs, engine.freq_ghz
+            "═══ cost mode: {} cycles ≈ {:.4}s TM + {:.4}s computation = {:.4}s total @ {} GHz ═══",
+            engine.estimated_cycles, tm_secs, baseline_secs, total_secs, engine.freq_ghz
         );
     }
 

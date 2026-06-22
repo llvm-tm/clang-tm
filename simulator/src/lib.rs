@@ -18,6 +18,7 @@ pub mod deadlock;
 pub mod checkpoint;
 pub mod machine_profile;
 pub mod workload_profile;
+pub mod computation_profile;
 
 use clap::Parser;
 

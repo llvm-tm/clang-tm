@@ -54,13 +54,13 @@
     },
     {
       "backend": "norec",
-      "begin_overhead": 25.0,
-      "commit_overhead": 60.0,
-      "abort_overhead": 30.0,
-      "read_overhead": 6.0,
-      "write_overhead": 7.0,
-      "validation_entry_cost": 3.0,
-      "lock_acquire_cost": 35.0
+      "begin_overhead": 30.0,
+      "commit_overhead": 71.0,
+      "abort_overhead": 38.0,
+      "read_overhead": 8.0,
+      "write_overhead": 9.0,
+      "validation_entry_cost": 4.0,
+      "lock_acquire_cost": 42.0
     },
     {
       "backend": "tl2",

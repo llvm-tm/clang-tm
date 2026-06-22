@@ -17,6 +17,7 @@
 
 use crate::backend::Backend;
 use crate::checkpoint::{self, Checkpoint};
+use crate::computation_profile::ComputationProfile;
 use crate::cost_model::CalibratedCostModel;
 use crate::deadlock::DeadlockDetector;
 use crate::event::{Event, EventKind};
@@ -40,6 +41,10 @@ fn alloc_tid_base() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1_000_000);
     NEXT.fetch_add(10_000, std::sync::atomic::Ordering::Relaxed)
 }
+
+/// Default TM region base address used when the trace address range is unavailable.
+pub const DEFAULT_TM_BASE: u64 = 0x7f00_0000_0000;
+pub const DEFAULT_TM_SIZE: usize = 256 * 1024 * 1024;
 
 /// Statistics collected during replay.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -79,6 +84,11 @@ pub struct SimEngine {
     pub estimated_cycles: u64,
     /// Frequency in GHz for time estimation.
     pub freq_ghz: f64,
+    /// Baseline computation profile (optional).
+    pub computation_profile: Option<ComputationProfile>,
+    /// Address translation addend: trace_addr + addr_addend → backend mmap addr.
+    /// Zero when no translation is needed.
+    pub addr_addend: i64,
     /// Pending TxBegin events buffered for Phase 4 batch processing.
     /// Stores raw event thread_ids (not btid'd).
     /// Flushed before the first non-TxBegin event in each iteration.
@@ -108,6 +118,8 @@ impl SimEngine {
             cost_model: None,
             estimated_cycles: 0,
             freq_ghz: 3.0,
+            computation_profile: None,
+            addr_addend: 0,
             pending_begins: VecDeque::new(),
             persistent_retries: HashMap::new(),
         }
@@ -119,6 +131,11 @@ impl SimEngine {
         self.cost_model = Some(model);
         self.freq_ghz = freq_ghz;
         self.estimated_cycles = 0;
+    }
+
+    /// Set a computation baseline profile for total wall-time estimation.
+    pub fn set_computation_profile(&mut self, profile: ComputationProfile) {
+        self.computation_profile = Some(profile);
     }
 
     /// Get the cycle cost for an event kind.
@@ -139,6 +156,11 @@ impl SimEngine {
         self.base_tid + event_tid
     }
 
+    /// Translate a trace address to the mapped backend address.
+    fn translate_addr(&self, trace_addr: u64) -> u64 {
+        (trace_addr as i64 + self.addr_addend) as u64
+    }
+
     /// Initialize the backend and back the TM address space.
     /// Uses the default fixed address (0x7f00_0000_0000).
     pub fn init(&mut self) {
@@ -153,21 +175,44 @@ impl SimEngine {
     }
 
     /// Low-level initialization at a given address range.
-    pub fn init_at(&mut self, addr: *mut libc::c_void, size: usize) {
-        unsafe {
-            let result = libc::mmap(
-                addr,
-                size,
+    /// Maps memory at the trace's expected address if possible, otherwise
+    /// maps at the default TM region and sets an address translation addend.
+    pub fn init_at(&mut self, trace_addr: *mut libc::c_void, size: usize) {
+        // Map at the default TM region (safe — never overlaps process segments).
+        // The trace_addr computed from events may overlap the process stack
+        // or heap, so we always map at the safe default and translate.
+        let (mapped_base, addend) = unsafe {
+            let r = libc::mmap(
+                DEFAULT_TM_BASE as *mut libc::c_void, size,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
-                -1,
-                0,
+                -1, 0,
             );
-            if result == libc::MAP_FAILED {
-                panic!("mmap of TM address space at {:p} ({} bytes) failed: {}",
-                       addr, size, std::io::Error::last_os_error());
+            if r != libc::MAP_FAILED {
+                let addend = DEFAULT_TM_BASE as i64 - trace_addr as i64;
+                (DEFAULT_TM_BASE, addend)
+            } else {
+                // Fall back to kernel-chosen address.
+                let r = libc::mmap(
+                    std::ptr::null_mut(), size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1, 0,
+                );
+                if r == libc::MAP_FAILED {
+                    panic!("mmap failed: {}", std::io::Error::last_os_error());
+                }
+                let addend = r as i64 - trace_addr as i64;
+                eprintln!("  [sim] kernel-chosen mmap at {:p}, addend={:#x}", r, addend);
+                (r as u64, addend)
             }
-        }
+        };
+
+        self.addr_addend = addend;
+
+        // Zero the mapped region so uninitialized reads return 0.
+        unsafe { std::ptr::write_bytes(mapped_base as *mut u8, 0, size); }
+        eprintln!("  [sim] addr_addend={:#x} mapped={:#x} size={}", addend, mapped_base, size);
 
         let b = self.backend;
         let tid0 = self.btid(0);
@@ -408,6 +453,7 @@ impl SimEngine {
                 Err(format!("abort (reason={})", reason))
             }
             EventKind::Read { addr, width } => {
+                let mem_addr = self.translate_addr(*addr);
                 let in_tx = self.in_tx.get(&tid).copied().unwrap_or(false);
                 let _verified = self.verifier.check_read(tid, *addr);
 
@@ -419,10 +465,10 @@ impl SimEngine {
                     1 | 2 | 4 | 8 => {
                         let read_result = panic::catch_unwind(AssertUnwindSafe(|| {
                             match width {
-                                1 => b.read_u8(*addr as *mut u8) as u64,
-                                2 => b.read_u16(*addr as *mut u16) as u64,
-                                4 => b.read_u32(*addr as *mut u32) as u64,
-                                8 => b.read_u64(*addr as *mut u64),
+                                1 => b.read_u8(mem_addr as *mut u8) as u64,
+                                2 => b.read_u16(mem_addr as *mut u16) as u64,
+                                4 => b.read_u32(mem_addr as *mut u32) as u64,
+                                8 => b.read_u64(mem_addr as *mut u64),
                                 _ => unreachable!(),
                             }
                         }));
@@ -452,6 +498,7 @@ impl SimEngine {
                 Ok(())
             }
             EventKind::Write { addr, width, val } => {
+                let mem_addr = self.translate_addr(*addr);
                 let in_tx = self.in_tx.get(&tid).copied().unwrap_or(false);
                 let _verified = self.verifier.check_write(tid, *addr, *val);
 
@@ -463,10 +510,10 @@ impl SimEngine {
                     1 | 2 | 4 | 8 => {
                         let write_result = panic::catch_unwind(AssertUnwindSafe(|| {
                             match width {
-                                1 => b.write_u8(*addr as *mut u8, *val as u8),
-                                2 => b.write_u16(*addr as *mut u16, *val as u16),
-                                4 => b.write_u32(*addr as *mut u32, *val as u32),
-                                8 => b.write_u64(*addr as *mut u64, *val),
+                                1 => b.write_u8(mem_addr as *mut u8, *val as u8),
+                                2 => b.write_u16(mem_addr as *mut u16, *val as u16),
+                                4 => b.write_u32(mem_addr as *mut u32, *val as u32),
+                                8 => b.write_u64(mem_addr as *mut u64, *val),
                                 _ => unreachable!(),
                             }
                         }));

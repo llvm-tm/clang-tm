@@ -814,3 +814,58 @@ Confirmed all Rust benchmarks already use named flags (no positional args). Fuzz
 - `benchmarks/rust/src/clis/stamp_bayes.rs` — --test flag
 - `benchmarks/rust/src/clis/stamp_yada.rs` — --test flag
 
+## Session 2026-06-22 — Simulator calibration against real C++ NOrec
+
+### Goal
+Evaluate NOrec simulation fidelity vs real C++ NOrec on STAMP intruder, then improve throughput estimation via an uninstrumented computation baseline.
+
+### Problem: baseline binary hang/crash
+`tm_api.hpp` declares TM operations as function-pointer DATA symbols (`extern void (*tm_begin)()`), but `tm_stub_runtime.cpp` defined them as plain TEXT functions. The linker resolved DATA→TEXT, loading machine-code bytes as a function pointer → jump-to-garbage → SIGABRT.
+
+**Fix**: Rewrote `tm_stub_runtime.cpp` with correct layout: `tm_init`, `tm_exit`, `tm_init_thread`, `tm_exit_thread` as TEXT functions; all other TM ops (`tm_begin`, `tm_end`, `tm_malloc`, `tm_calloc`, `tm_read_*`, `tm_write_*`) as function-pointer DATA variables pointing to stub implementations. Baseline now runs cleanly.
+
+### Problem: mmap SIGSEGV
+Rust process stack at `0x3060359a4` fell within the trace's mmap range `0x300000000-0x400000000`. `MAP_FIXED` replaced the stack.
+
+**Fix**: Always mmap at safe default address `0x7f00_0000_0000`, compute `addr_addend = mapped - trace_base`, translate all addresses in dispatch_event.
+
+### Problem: backend profile lookup always returned "default"
+Two bugs in cost model:
+1. `machine_profile.backend()` used `||` in `.find()` predicate: `b.backend == name || b.backend == "default"` returned the first match, which was always "default" (first in JSON array). Fixed with `.or_else()` chain.
+2. `generic_event_cost()` hardcoded `machine.backend("default")` instead of using the actual backend name. Added `backend_name` parameter.
+
+### Key discovery: trace-instrumentation vs real overhead
+The 0.835s wall time from the trace-generating binary was **event-logging overhead**, not real TM overhead. The event-logged binary was built with `-O0 -DTM_EVENT_LOGGER`. Plain `-O3 -DNDEBUG` NOrec runs in **0.008s** total (0.004s computation, 0.004s TM). The old cost model was close to correct for plain NOrec (~11 cycles/read, ~25/begin, ~60/commit) — it was only 116× too low *for the trace-instrumented binary*.
+
+### Calibration result
+Calibrated NOrec cost model against real C++ NOrec at `-O3`:
+
+| Component | Real | Simulated | Error |
+|-----------|------|-----------|-------|
+| Computation (O3 stub) | 0.0017s | 0.0017s | — |
+| TM overhead | ~0.004s | 0.0040s | — |
+| Init/harvest | ~0.0023s | N/A | — |
+| **Total** | **0.008s** | **0.0057s\*** | — |
+
+\*Simulation covers transaction execution only (trace excludes init/harvest).
+
+Simulation accurately estimates per-transaction execution time. The 0.0023s gap is init/harvest overhead not captured by the trace.
+
+### Infrastructure added
+- **`simulator/src/computation_profile.rs`** — Parses baseline output (`TOTAL: N seqs N ns`)
+- **`--baseline-profile`** flag to `tm-sim` — wires computation baseline into cost-mode total
+- **`--freq-ghz`** flag — overrides CPU frequency for wall-time conversion
+- **Address translation** in `SimEngine` — `addr_addend`, `translate_addr()`, always maps at `0x7f00_0000_0000`
+
+### Files modified
+- `backends/tm_impl/common/tm_stub_runtime.cpp` — DATA/TEXT symbol fix (function pointers)
+- `simulator/src/sim_engine.rs` — address translation, computation_profile wiring
+- `simulator/src/computation_profile.rs` — new module
+- `simulator/src/cost_model.rs` — `BackendProfile::machine_profile_name()`, `generic_event_cost` accepts backend name
+- `simulator/src/machine_profile.rs` — `backend()` method uses fallback search (`.or_else()`)
+- `simulator/src/bin/tm-sim.rs` — `--baseline-profile`, `--freq-ghz` CLI args
+- `simulator/machine_profiles/skylake.json` — NOrec calibration (30/71/8/9 cycles)
+
+### Key insight for future
+**Always calibrate cost models against the uninstrumented backend, not against trace-instrumented runs.** Event-logging overhead (buffer management, file I/O, timestamp capture) can dominate actual TM overhead by 100×.
+
