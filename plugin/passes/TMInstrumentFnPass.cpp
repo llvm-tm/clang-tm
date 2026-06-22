@@ -4,6 +4,7 @@
 // to TM runtime read/write barriers.  Also instruments malloc/free and
 // memory intrinsics (memcpy/memmove/memset) on TM-tracked memory.
 
+#include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
@@ -24,7 +25,7 @@ using namespace llvm;
 class TMInstrumentFnPass : public PassInfoMixin<TMInstrumentFnPass>
 {
 public:
-	PreservedAnalyses run(Function &F, FunctionAnalysisManager &)
+	PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM)
 	{
 		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT)) {
 			return PreservedAnalyses::all();
@@ -82,6 +83,10 @@ public:
 		}
 		for (Instruction *I : ToErase)
 			I->eraseFromParent();
+
+		// Emit computation events for non-TM instruction cost estimation
+		auto &TTI = AM.getResult<TargetIRAnalysis>(F);
+		emitComputationEvents(F, TTI, H, *M);
 
 		return PreservedAnalyses::none();
 	}

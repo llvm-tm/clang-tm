@@ -168,7 +168,7 @@ public:
 class TMInstrumentInlinePass : public PassInfoMixin<TMInstrumentInlinePass>
 {
 public:
-	PreservedAnalyses run(Function &F, FunctionAnalysisManager &)
+	PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM)
 	{
 		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT)
 		    && !F.getName().ends_with(TM_CLONE_SUFFIX)) {
@@ -219,6 +219,11 @@ public:
 		}
 		for (Instruction *I : ToErase)
 			I->eraseFromParent();
+
+		// Emit computation events for non-TM instruction cost estimation
+		auto &TTI = AM.getResult<TargetIRAnalysis>(F);
+		emitComputationEvents(F, TTI, H, *M);
+
 		return PreservedAnalyses::none();
 	}
 	static bool isRequired() { return true; }
@@ -231,7 +236,7 @@ public:
 class TMInstrumentPass : public PassInfoMixin<TMInstrumentPass>
 {
 public:
-	PreservedAnalyses run(Function &F, FunctionAnalysisManager &)
+	PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM)
 	{
 		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT)) {
 			return PreservedAnalyses::all();
@@ -284,6 +289,11 @@ public:
 		}
 		for (Instruction *I : ToErase)
 			I->eraseFromParent();
+
+		// Emit computation events for non-TM instruction cost estimation
+		auto &TTI = AM.getResult<TargetIRAnalysis>(F);
+		emitComputationEvents(F, TTI, H, *M);
+
 		return PreservedAnalyses::none();
 	}
 	static bool isRequired() { return true; }

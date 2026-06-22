@@ -317,7 +317,7 @@ static std::atomic<uint64_t> g_trace_ts{0};
 
 // ── Trace helper: write a formatted line (extended format) ────────────
 // Format: ts tid type txid addr width val cont_flag [extra...]
-// Types: 0=read, 1=write, 2=tx_begin, 3=tx_end, 4=malloc, 5=free, 6=abort
+// Types: 0=read, 1=write, 2=tx_begin, 3=tx_end, 4=malloc, 5=free, 6=abort, 7=computation
 static void trace_write_line_ext(FILE *f, uint64_t ts, uint64_t tid, int type,
                                  uint64_t txid, uint64_t addr, int width,
                                  uint64_t val, uint8_t cont_flag,

@@ -95,6 +95,7 @@ fn generic_event_cost(kind: &EventKind, machine: &MachineProfile, backend_name: 
         EventKind::Checkpoint => CHECKPOINT_COST,
         EventKind::Assert { .. } => ASSERT_COST,
         EventKind::Log { .. } => LOG_COST,
+        EventKind::Computation { cycles } => *cycles,
     }
 }
 
@@ -125,6 +126,7 @@ fn tsx_event_cost(kind: &EventKind, machine: &MachineProfile) -> u64 {
         EventKind::Checkpoint => CHECKPOINT_COST,
         EventKind::Assert { .. } => ASSERT_COST,
         EventKind::Log { .. } => LOG_COST,
+        EventKind::Computation { cycles } => *cycles,
     }
 }
 
@@ -184,6 +186,7 @@ impl CalibratedCostModel {
             EventKind::Checkpoint => CHECKPOINT_COST,
             EventKind::Assert { .. } => ASSERT_COST,
             EventKind::Log { .. } => LOG_COST,
+            EventKind::Computation { cycles } => *cycles,
         }
     }
 }

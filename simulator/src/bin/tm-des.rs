@@ -2,6 +2,7 @@ use clap::Parser;
 use std::path::Path;
 use tm_des::{
     Cli,
+    calibration::{self, calibration_to_machine_profile},
     cost_model::BackendProfile,
     engine::{ClockMode, SimState},
     machine_profile::MachineProfile,
@@ -28,9 +29,37 @@ fn main() {
         SimState::new(1, 0x7f00_0000_0000, 0x0000_0000_1000_0000)
     };
     state.checker.livelock_threshold = cli.livelock_threshold;
+    state.retry_cost_multiplier = cli.retry_cost_multiplier;
+    if let Some(freq) = cli.effective_freq {
+        state.effective_freq_ghz = freq;
+        eprintln!("Effective frequency: {:.2} GHz (manual override)", freq);
+    }
 
-    // Apply machine profile from CLI
-    if let Some(ref mp_path) = cli.machine_profile {
+    // Apply calibration or machine profile from CLI (calibration takes precedence)
+    if let Some(ref cal_path) = cli.calibration {
+        match calibration::load_calibration(Path::new(cal_path)) {
+            Ok(records) => {
+                let profile = calibration_to_machine_profile(&records, "calibrated", 0.0,
+                    &format!("Auto-generated from {}", cal_path));
+                // Compute effective frequency if records contain depth_cycles info
+                if let Some(avg) = calibration::average_records(&records) {
+                    if avg.depth_cycles > 0.0 && avg.samples > 0 {
+                        // depth_cycles = total tx cycles from profiling
+                        // freq = cycles / time — but we don't have wall time here.
+                        // Store the nominal freq from the profile, effective freq
+                        // can be provided via --effective-freq.
+                        state.effective_freq_ghz = profile.freq_ghz;
+                    }
+                }
+                eprintln!("Loaded calibration from '{}': {} records, {} backends",
+                          cal_path, records.len(), profile.backends.len());
+                state.set_machine_profile(profile);
+            }
+            Err(e) => {
+                eprintln!("Warning: failed to load calibration '{}': {}; using defaults", cal_path, e);
+            }
+        }
+    } else if let Some(ref mp_path) = cli.machine_profile {
         match MachineProfile::load(Path::new(mp_path)) {
             Ok(profile) => {
                 eprintln!("Loaded machine profile from '{}': {} @ {:.1} GHz",

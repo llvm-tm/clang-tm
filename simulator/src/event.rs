@@ -34,6 +34,12 @@ pub enum EventKind {
     Free {
         addr: u64,
     },
+    /// Estimated cycles of non-TM computation (emitted by LLVM pass via --emit-tm-trace).
+    /// The cycles value represents the sum of TargetTransformInfo::TCK_RecipThroughput
+    /// costs for all non-TM instructions between TM events in the original function.
+    Computation {
+        cycles: u64,
+    },
     Checkpoint,
     Assert {
         cond: bool,

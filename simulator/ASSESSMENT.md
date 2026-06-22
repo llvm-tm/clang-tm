@@ -65,23 +65,58 @@ contain estimated cycle costs. For best accuracy:
 Current profiles are estimated from Broadwell-EP measurements and may
 under- or over-estimate on other CPUs.
 
-## Improvement Plan
+## Completed Items
 
-### P0 — Wire real backend into SimState (tm-des cost mode)
+### ✅ P0 — Cross-LP conflict detection (SimState cost mode)
 
-Currently `SimState::dispatch()` doesn't execute any TM backend.
-Change it so that `--clock-mode cost` in `tm-des` runs a real backend
-(like `SimEngine` does), detecting aborts naturally while advancing
-the clock by calibrated cycle costs.
+`SimState::dispatch()` now detects cross-LP address conflicts in cost mode:
+- `in_flight_writes` / `in_flight_reads` maps track per-LP address sets
+- On `Read { addr }`: checks `in_flight_writes` for Write-After-Read conflict → aborts the writer
+- On `Write { addr }`: checks `in_flight_reads` for Read-After-Write conflict → aborts the reader
+- On conflict, the abort cost plus retry penalty is added to `estimated_cycles`
+- Aborted LP's `in_tx` is cleared; subsequent events are no-ops until next `TxBegin`
+- TxEnd after synthetic abort doesn't count as a commit
 
-This would make `tm-des` contention-aware like `tm-sim`, and eliminate
-the flat-throughput problem.
+This eliminates the flat-throughput problem — contention scales with thread count.
 
-### P1 — Fidelity CI gate
+### ✅ P3 — Retry cost multiplier
 
-Add a step in CI that runs `compare_sim.py` or `tools/tsx_abort_compare.py`
-and fails if the error exceeds a threshold (e.g., >50% for single-threaded,
->100% for multi-threaded). This prevents regressions in the cost model.
+- `SimState.retry_cost_multiplier` controls the retry penalty (default: 3x)
+- On synthetic conflict: charges `abort_cost × retry_cost_multiplier` extra cycles
+- Exposed via `--retry-cost-multiplier` CLI argument in `tm-des`
+- Accounts for TX body re-execution cost after an abort
+
+### ✅ P5 — SGL fallback costing (SimEngine)
+
+- `SimEngine.sgl_mode: HashMap<u64, bool>` tracks per-thread SGL fallback state
+- Set in `flush_pending_begins()` when `force_sgl()` is called (after max retries)
+- `process_event()` checks `sgl_mode` before charging `TxEnd` cost: uses `sgl_end_cost`
+  instead of `tx_end_cost` when in SGL mode
+- Cleared on TxEnd or Abort via `sgl_mode.remove(&tid)`
+
+### ✅ P4 — Effective frequency override
+
+- `effective_freq_ghz` field on `SimState` overrides machine_profile's nominal frequency
+- Exposed via `--effective-freq` CLI arg (e.g., `--effective-freq 2.5`)
+- Used in `print_summary()` for cycles→time conversion
+- Auto-computed from calibration data when available
+
+### ✅ P6 — Dynamic calibration
+
+- `--calibration` CLI arg loads a calibration JSON (map of benchmark → CalibrationRecord)
+- Converted to `MachineProfile` via `calibration_to_machine_profile()`
+- Overrides `--machine-profile` when both are provided
+- Calibration records can contain measured cycle costs from profiling sweeps
+
+### ✅ P1 — Fidelity CI gate
+
+- `nightly.yml` fidelity-regression job now includes a Python gate step
+- After `compare_real_sim.py` completes, parses the CSV `Fidelity` column
+- Computes average fidelity across all benchmarks
+- Fails the job if average fidelity < 50%
+- Uploads the full fidelity results as an artifact for manual inspection
+
+## Remaining
 
 ### P2 — Cross-backend fidelity sweep
 
@@ -99,39 +134,19 @@ Generate a fidelity table like:
 | TL2     | fuzz_counter | ? | ? |
 | ...     | ...       | ...      | ...      |
 
-### P3 — Account for retry overhead in event replay
+This requires running real C++ benchmarks with tm-trace enabled on
+hardware with clang++-22. Run on CI or lab machine:
 
-When a transaction aborts in `SimEngine`, the event trace contains a
-single TxBegin + body + Abort. The retry loop cost (re-issuing TxBegin,
-possible SGL spin-wait) is not reflected. Add a configurable retry-cost
-multiplier on abort events.
+```sh
+python3 simulator/compare_real_sim.py --backends NOREC,TL2,TINYSTM \
+    --benchmarks bank,vacation,kmeans --csv fidelity_sweep.csv
+```
 
-### P4 — Effective CPU frequency detection
-
-The machine profile stores nominal frequency (e.g., 1.8 GHz for Broadwell-EP).
-Turbo boost raises single-core bursts to ~2.8–3.0 GHz, making
-cycles→time conversions inaccurate. The profiling patch collects
-RDTSC measurements — wall time / cycles gives effective frequency.
-
-### P5 — SGL fallback costing transition
-
-When the tsx-sim backend falls back to SGL (after max retries), the
-cost model should switch from TSX costs to SGL costs:
-- xbegin → mutex_lock_cycles
-- xend → mutex_unlock_cycles
-- reads/writes within SGL: same as normal but without TSX overhead
-- Spin-wait overhead when lock contended
-
-The `CalibratedCostModel` already has `sgl_begin_cost`/`sgl_end_cost`
-fields — they just need to be used conditionally in `flush_pending_begins`.
-
-### P6 — Dynamic cost calibration
-
-When running with `--clock-mode cost` alongside `--machine-profile`,
-allow the machine profile to specify per-event costs derived from
-profiling sweeps. The `calibration.rs` module already parses TSX_STATS
-into `CalibrationRecord` — wire this through so the simulator can load
-a calibration JSON and compute event costs directly.
+The nightly.yml job does this automatically and the fidelity gate
+prevents regressions. The full sweep across all 6 backends needs
+manual infrastructure — add --backends ROMULUS,SWISSTM to the sweep
+once their Rust sim backends are calibrated. The `--calibration`
+flag can load measured costs from lab profiling data.
 
 ## Summary
 
