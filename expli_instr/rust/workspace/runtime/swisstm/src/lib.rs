@@ -633,9 +633,17 @@ pub fn tm_commit() -> bool {
 
 // ── Init ────────────────────────────────────────────────
 pub fn tm_init() {
-    orecs();
+    let table = orecs();
     G_CLOCK.store(0, Ordering::Release);
     GREEDY_TS.store(0, Ordering::Release);
+    // Reset orecs so stale versions don't leak between simulation runs.
+    // In simulation mode, this is safe (single-threaded).
+    #[cfg(feature = "simulation")]
+    for orec in table.iter() {
+        orec.version_lock.store(0, Ordering::Release);
+        orec.w_lock.store(false, Ordering::Release);
+        orec.owner_cm_ts.store(0, Ordering::Release);
+    }
 }
 
 pub fn tm_exit() {}
