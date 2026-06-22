@@ -1,0 +1,2 @@
+Time: 0.001000 seconds
+TSX_STATS: xbegin_ok=0(0) xbegin_abort=4(20562) xend=0(0) xabort=0(0) sgl_begin=2(396) sgl_end=2(774) sgl_spin=1(524514) read=6480(350550) write=2(72) depth=0(0) conflict=1 capacity=0 explicit=1 other=2

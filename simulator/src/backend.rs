@@ -72,6 +72,30 @@ impl Backend {
         }
     }
 
+    /// Attempt to begin a transaction.  Returns `true` if TSX was entered
+    /// successfully, `false` if the xbegin failed (LOCK_BUSY, conflict,
+    /// capacity, etc.).  Default (non-TSX backends) always returns true.
+    ///
+    /// The SimEngine uses this to drive the retry loop externally, allowing
+    /// other threads' events to interleave between retry attempts.  Only
+    /// the `tsx-sim` backend has a meaningful implementation.
+    pub fn try_begin(&self) -> bool {
+        match self {
+            Backend::TsxSim => runtime_tsx_sim::sim::try_begin(),
+            _ => true,
+        }
+    }
+
+    /// Force SGL fallback for the current thread's transaction.  Called by
+    /// the SimEngine after `max_retries` consecutive `try_begin()` failures.
+    /// No-op for non-TSX backends.
+    pub fn force_sgl(&self) {
+        match self {
+            Backend::TsxSim => runtime_tsx_sim::sim::force_sgl(),
+            _ => {}
+        }
+    }
+
     pub fn commit(&self) -> bool {
         match self {
             Backend::Norec => runtime_norec::tm_commit(),
@@ -290,6 +314,7 @@ impl Backend {
     pub fn is_norec(&self) -> bool { matches!(self, Backend::Norec) }
     pub fn is_tl2(&self) -> bool { matches!(self, Backend::Tl2) }
     pub fn is_tinystm(&self) -> bool { matches!(self, Backend::Tinystm) }
+    pub fn is_tsx_sim(&self) -> bool { matches!(self, Backend::TsxSim) }
 
     /// Take snapshot of internal sync counters and reset them.
     pub fn take_stats(&self) -> runtime_core::SyncCounters {

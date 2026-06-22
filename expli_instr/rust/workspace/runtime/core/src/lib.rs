@@ -348,6 +348,16 @@ pub struct SyncCounters {
     pub commits: std::sync::atomic::AtomicU64,
     /// Total aborted transactions.
     pub aborts: std::sync::atomic::AtomicU64,
+    /// TSX SIM: conflict aborts.
+    pub sim_conflict: std::sync::atomic::AtomicU64,
+    /// TSX SIM: capacity aborts.
+    pub sim_capacity: std::sync::atomic::AtomicU64,
+    /// TSX SIM: explicit aborts (retry exhaustion → SGL fallback).
+    pub sim_explicit: std::sync::atomic::AtomicU64,
+    /// TSX SIM: self/abort aborts.
+    pub sim_self: std::sync::atomic::AtomicU64,
+    /// TSX SIM: SGL fallback count.
+    pub sim_fallback: std::sync::atomic::AtomicU64,
 }
 
 #[cfg(feature = "stats")]
@@ -362,6 +372,11 @@ impl SyncCounters {
             total_write_set_entries: std::sync::atomic::AtomicU64::new(0),
             commits: std::sync::atomic::AtomicU64::new(0),
             aborts: std::sync::atomic::AtomicU64::new(0),
+            sim_conflict: std::sync::atomic::AtomicU64::new(0),
+            sim_capacity: std::sync::atomic::AtomicU64::new(0),
+            sim_explicit: std::sync::atomic::AtomicU64::new(0),
+            sim_self: std::sync::atomic::AtomicU64::new(0),
+            sim_fallback: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -375,6 +390,11 @@ impl SyncCounters {
         self.total_write_set_entries.store(0, Ordering::Relaxed);
         self.commits.store(0, Ordering::Relaxed);
         self.aborts.store(0, Ordering::Relaxed);
+        self.sim_conflict.store(0, Ordering::Relaxed);
+        self.sim_capacity.store(0, Ordering::Relaxed);
+        self.sim_explicit.store(0, Ordering::Relaxed);
+        self.sim_self.store(0, Ordering::Relaxed);
+        self.sim_fallback.store(0, Ordering::Relaxed);
     }
 }
 

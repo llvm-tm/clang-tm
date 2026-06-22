@@ -23,7 +23,7 @@ use crate::event::{Event, EventKind};
 use crate::verifier::Verifier;
 use runtime_core::TmxAbort;
 use std::cmp;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::AtomicU64;
 
@@ -79,6 +79,16 @@ pub struct SimEngine {
     pub estimated_cycles: u64,
     /// Frequency in GHz for time estimation.
     pub freq_ghz: f64,
+    /// Pending TxBegin events buffered for Phase 4 batch processing.
+    /// Stores raw event thread_ids (not btid'd).
+    /// Flushed before the first non-TxBegin event in each iteration.
+    pending_begins: VecDeque<u64>,
+    /// Cross-transaction abort accumulator (per raw thread_id).
+    /// When a thread reaches max_retries consecutive aborts across
+    /// iterations, its next begin is forced to SGL fallback.
+    /// This compensates for the sequential event model's inability
+    /// to interleave retries within a single tm_begin() call.
+    persistent_retries: HashMap<u64, u64>,
 }
 
 impl SimEngine {
@@ -98,6 +108,8 @@ impl SimEngine {
             cost_model: None,
             estimated_cycles: 0,
             freq_ghz: 3.0,
+            pending_begins: VecDeque::new(),
+            persistent_retries: HashMap::new(),
         }
     }
 
@@ -182,6 +194,28 @@ impl SimEngine {
         let tid = self.btid(event.thread_id as u64);
 
         self.ensure_thread(tid);
+
+        // TxBegin: buffer for Phase 4 batch processing (tsx-sim backend)
+        // or immediate dispatch (other backends).
+        if matches!(event.kind, EventKind::TxBegin) {
+            if self.backend.is_tsx_sim() {
+                // Phase 4: buffer begin for batch retry processing.
+                // Costs are accumulated inside flush_pending_begins().
+                // Store raw event thread_id (not btid'd).
+                self.pending_begins.push_back(event.thread_id as u64);
+                self.events_processed += 1;
+                return;
+            }
+            // Non-TSX backend: dispatch immediately (no retry needed)
+        } else {
+            // Non-TxBegin: flush any pending begins first so that all
+            // threads' begin events are processed before the first
+            // read/write/end event of the iteration.
+            if !self.pending_begins.is_empty() {
+                self.flush_pending_begins();
+            }
+        }
+
         let b = self.backend;
         b.sim_set_thread_id(tid);
 
@@ -230,6 +264,100 @@ impl SimEngine {
                     r.retries,
                 );
             }
+        }
+    }
+
+    /// Flush any buffered TxBegin events.  For the tsx-sim backend, this
+    /// runs the retry loop round-robin (Phase 4): each thread gets one
+    /// try_begin() attempt per round, and other threads' attempts
+    /// interleave naturally.  After max_retries rounds without success,
+    /// remaining threads are forced to SGL fallback.  For all other
+    /// backends, simply calls begin() for each buffered thread.
+    ///
+    /// `pending_begins` stores raw event thread_ids; `self.btid(raw)`
+    /// converts to the backend's thread id.
+    fn flush_pending_begins(&mut self) {
+        let mut pending: Vec<u64> = self.pending_begins.drain(..).collect();
+        let max_r = 5; // matches TSXSGL and tsx-sim default
+
+        if !self.backend.is_tsx_sim() {
+            // Non-TSX backends: no retry needed
+            for &raw_tid in &pending {
+                let btid = self.btid(raw_tid);
+                self.backend.sim_set_thread_id(btid);
+                self.backend.begin();
+                self.backend.sim_clear_thread_id();
+                self.verifier.tx_begin(raw_tid);
+                self.in_tx.insert(raw_tid, true);
+                self.aborted.insert(raw_tid, false);
+                self.current_write_set.insert(raw_tid, Vec::new());
+            }
+            return;
+        }
+
+        // TSX-sim backend: Phase 4 batch retry loop.
+        // Round-robin through pending threads.  Each thread that fails
+        // try_begin() (LOCK_BUSY due to SGL_OWNER held) charges cost and
+        // retries in the next round.  After max_r rounds, remaining
+        // threads enter SGL fallback.
+        let mut attempts: HashMap<u64, u64> = HashMap::new();
+        let mut in_tx: HashSet<u64> = HashSet::new();
+
+        for _round in 0..max_r {
+            if pending.is_empty() { break; }
+            let still_pending: Vec<u64> = pending.clone();
+            for &raw_tid in &still_pending {
+                if in_tx.contains(&raw_tid) { continue; }
+                let a = attempts.entry(raw_tid).or_insert(0);
+                let btid = self.btid(raw_tid);
+
+                self.backend.sim_set_thread_id(btid);
+                let ok = self.backend.try_begin();
+                self.backend.sim_clear_thread_id();
+                *a += 1;
+
+                // Charge cost for each retry attempt
+                self.estimated_cycles += 60; // COST_XBEGIN
+                if !ok {
+                    self.estimated_cycles += 1500; // COST_XABORT
+                }
+
+                if ok {
+                    in_tx.insert(raw_tid);
+                    self.verifier.tx_begin(raw_tid);
+                    self.in_tx.insert(raw_tid, true);
+                    self.aborted.insert(raw_tid, false);
+                    self.current_write_set.insert(raw_tid, Vec::new());
+                } else if *a >= max_r {
+                    // Force SGL fallback after max_r consecutive failures
+                    self.backend.sim_set_thread_id(btid);
+                    self.backend.force_sgl();
+                    self.backend.sim_clear_thread_id();
+                    self.estimated_cycles += 75; // COST_MUTEX_LOCK
+                    in_tx.insert(raw_tid);
+                    self.verifier.tx_begin(raw_tid);
+                    self.in_tx.insert(raw_tid, true);
+                    self.aborted.insert(raw_tid, false);
+                    self.current_write_set.insert(raw_tid, Vec::new());
+                }
+            }
+            // Remove threads that entered TX from pending list
+            pending.retain(|&raw_tid| !in_tx.contains(&raw_tid));
+        }
+
+        // Any stragglers that didn't enter (shouldn't happen since we force
+        // SGL after max_r rounds, but be safe): force SGL
+        for &raw_tid in &pending {
+            if in_tx.contains(&raw_tid) { continue; }
+            let btid = self.btid(raw_tid);
+            self.backend.sim_set_thread_id(btid);
+            self.backend.force_sgl();
+            self.backend.sim_clear_thread_id();
+            self.estimated_cycles += 75;
+            self.verifier.tx_begin(raw_tid);
+            self.in_tx.insert(raw_tid, true);
+            self.aborted.insert(raw_tid, false);
+            self.current_write_set.insert(raw_tid, Vec::new());
         }
     }
 
@@ -437,6 +565,7 @@ impl SimEngine {
         self.deadlock.reset();
         self.current_write_set.clear();
         self.estimated_cycles = 0;
+        self.pending_begins.clear();
     }
 }
 
