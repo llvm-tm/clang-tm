@@ -176,15 +176,34 @@ fn main() {
         eprintln!("{}", line);
     }
 
-    // Report estimated time in cost mode
+    // Report estimated time in cost mode.
+    // Priority rule: baseline profile > computed cycles > TM-only estimate.
     if engine.sim_clock_mode == SimClockMode::Cost {
         let tm_secs = engine.estimated_cycles as f64 / (engine.freq_ghz * 1e9);
-        let baseline_secs = engine.computation_profile.as_ref().map(|p| p.seconds()).unwrap_or(0.0);
-        let total_secs = tm_secs + baseline_secs;
-        eprintln!(
-            "═══ cost mode: {} cycles ≈ {:.4}s TM + {:.4}s computation = {:.4}s total @ {} GHz ═══",
-            engine.estimated_cycles, tm_secs, baseline_secs, total_secs, engine.freq_ghz
-        );
+        let comp_secs = engine.computed_cycles as f64 / (engine.freq_ghz * 1e9);
+        if let Some(ref profile) = engine.computation_profile {
+            let baseline_secs = profile.seconds();
+            let total_secs = tm_secs + baseline_secs;
+            eprintln!(
+                "═══ cost mode: {} TM cycles ≈ {:.4}s TM + {:.4}s baseline = {:.4}s total @ {} GHz ═══",
+                engine.estimated_cycles, tm_secs, baseline_secs, total_secs, engine.freq_ghz
+            );
+            eprintln!("  (using baseline profile: {} seqs, {:.6}s computation)",
+                profile.count, baseline_secs);
+        } else if engine.computed_cycles > 0 {
+            let total_secs = tm_secs + comp_secs;
+            eprintln!(
+                "═══ cost mode: {} cycles ({}+{}) ≈ {:.4}s total @ {} GHz ═══",
+                engine.estimated_cycles + engine.computed_cycles,
+                engine.estimated_cycles, engine.computed_cycles,
+                total_secs, engine.freq_ghz
+            );
+        } else {
+            eprintln!(
+                "═══ cost mode: {} TM-only cycles ≈ {:.4}s @ {} GHz (no computation baseline) ═══",
+                engine.estimated_cycles, tm_secs, engine.freq_ghz
+            );
+        }
     }
 
     // Report internal sync counters

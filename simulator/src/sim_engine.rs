@@ -84,8 +84,11 @@ pub struct SimEngine {
     pub estimated_cycles: u64,
     /// Frequency in GHz for time estimation.
     pub freq_ghz: f64,
-    /// Baseline computation profile (optional).
+    /// Baseline computation profile (optional).  Priority over computed_cycles.
     pub computation_profile: Option<ComputationProfile>,
+    /// Accumulated computation cycles from trace EventKind::Computation events.
+    /// Only used when no baseline profile is available.
+    pub computed_cycles: u64,
     /// Address translation addend: trace_addr + addr_addend → backend mmap addr.
     /// Zero when no translation is needed.
     pub addr_addend: i64,
@@ -93,6 +96,10 @@ pub struct SimEngine {
     /// Stores raw event thread_ids (not btid'd).
     /// Flushed before the first non-TxBegin event in each iteration.
     pending_begins: VecDeque<u64>,
+    /// Per-thread SGL fallback mode (P5). True when a thread was forced
+    /// to SGL after TSX retry exhaustion. Affects cost accounting:
+    /// TxEnd uses sgl_end_cost instead of tx_end_cost.
+    sgl_mode: HashMap<u64, bool>,
 }
 
 impl SimEngine {
@@ -113,8 +120,10 @@ impl SimEngine {
             estimated_cycles: 0,
             freq_ghz: 3.0,
             computation_profile: None,
+            computed_cycles: 0,
             addr_addend: 0,
             pending_begins: VecDeque::new(),
+            sgl_mode: HashMap::new(),
         }
     }
 
@@ -257,8 +266,24 @@ impl SimEngine {
         let b = self.backend;
         b.sim_set_thread_id(tid);
 
-        // Accumulate cycle cost before dispatching
-        let event_cost = self.event_cost(&event.kind);
+        // Handle Computation events directly (no backend dispatch needed).
+        if let EventKind::Computation { cycles } = &event.kind {
+            self.computed_cycles += cycles;
+            self.estimated_cycles += cycles;
+            self.events_processed += 1;
+            b.sim_clear_thread_id();
+            return;
+        }
+
+        // Accumulate cycle cost before dispatching.
+        // For SGL-mode threads, TxEnd uses sgl_end_cost instead of tx_end_cost (P5).
+        let event_cost = if *self.sgl_mode.get(&tid).unwrap_or(&false)
+            && matches!(event.kind, EventKind::TxEnd)
+        {
+            self.cost_model.as_ref().map(|m| m.sgl_end_cost).unwrap_or(self.event_cost(&event.kind))
+        } else {
+            self.event_cost(&event.kind)
+        };
         self.estimated_cycles += event_cost;
 
         let result = self.dispatch_event(event);
@@ -376,6 +401,7 @@ impl SimEngine {
                     self.backend.force_sgl();
                     self.backend.sim_clear_thread_id();
                     self.estimated_cycles += sgl_lock_cost;
+                    self.sgl_mode.insert(raw_tid, true);
                     in_tx.insert(raw_tid);
                     self.verifier.tx_begin(raw_tid);
                     self.in_tx.insert(raw_tid, true);
@@ -396,6 +422,7 @@ impl SimEngine {
             self.backend.force_sgl();
             self.backend.sim_clear_thread_id();
             self.estimated_cycles += sgl_lock_cost;
+            self.sgl_mode.insert(raw_tid, true);
             self.verifier.tx_begin(raw_tid);
             self.in_tx.insert(raw_tid, true);
             self.aborted.insert(raw_tid, false);
@@ -419,6 +446,7 @@ impl SimEngine {
             }
             EventKind::TxEnd => {
                 self.in_tx.insert(tid, false);
+                self.sgl_mode.remove(&tid);
                 let ws = self.current_write_set.remove(&tid).unwrap_or_default();
                 if *self.aborted.get(&tid).unwrap_or(&false) {
                     self.aborted.insert(tid, false);
@@ -441,6 +469,7 @@ impl SimEngine {
             }
             EventKind::Abort { reason } => {
                 self.in_tx.insert(tid, false);
+                self.sgl_mode.remove(&tid);
                 self.aborted.insert(tid, true);
                 let ws = self.current_write_set.remove(&tid).unwrap_or_default();
                 self.stats.aborts += 1;
@@ -565,6 +594,10 @@ impl SimEngine {
             EventKind::ThreadJoin(_) => {
                 Ok(())
             }
+            EventKind::Computation { .. } => {
+                // Handled in process_event() before dispatch. Unreachable here.
+                Ok(())
+            }
         }
     }
 
@@ -610,6 +643,7 @@ impl SimEngine {
         self.current_write_set.clear();
         self.estimated_cycles = 0;
         self.pending_begins.clear();
+        self.sgl_mode.clear();
     }
 }
 

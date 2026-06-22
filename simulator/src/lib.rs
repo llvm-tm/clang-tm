@@ -33,6 +33,12 @@ pub struct Cli {
     #[arg(long)]
     pub machine_profile: Option<String>,
 
+    /// Path to calibration JSON (raw profiling data).
+    /// Converted to a machine profile via calibration_to_machine_profile().
+    /// Overrides --machine-profile if both are provided.
+    #[arg(long)]
+    pub calibration: Option<String>,
+
     /// Backend to simulate (affects cost formulas).
     #[arg(long, default_value = "default")]
     pub backend: String,
@@ -60,4 +66,14 @@ pub struct Cli {
     /// Retries before livelock warning.
     #[arg(long, default_value = "1000")]
     pub livelock_threshold: u32,
+
+    /// Retry cost multiplier (P3). Applied to abort cost for synthetic conflicts.
+    /// 0 = disabled (no retry penalty). Default 3x accounts for TX body re-execution.
+    #[arg(long, default_value = "3")]
+    pub retry_cost_multiplier: u64,
+
+    /// Effective CPU frequency in GHz (P4). Overrides machine_profile.freq_ghz
+    /// for cycles→time conversion. Useful when turbo boost is active.
+    #[arg(long)]
+    pub effective_freq: Option<f64>,
 }
