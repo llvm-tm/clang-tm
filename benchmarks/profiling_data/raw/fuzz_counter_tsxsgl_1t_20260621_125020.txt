@@ -1,2 +1,0 @@
-INVARIANT: counter sum: PASS (91421 == 91421)
-TSX_STATS: xbegin_ok=4998(298380) xbegin_abort=2(13944) xend=4998(889710) xabort=0(0) sgl_begin=2(408) sgl_end=2(612) sgl_spin=0(0) read=5000(320586) write=5000(254856) depth=4998(3244170) conflict=0 capacity=0 explicit=0 other=2
