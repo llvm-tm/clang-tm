@@ -3,23 +3,40 @@
 This document prioritizes and schedules TLA+ specifications and TLAPS proofs
 for all TM backends and simulator components that currently lack them.
 
+## Completed (5 new specs + README update)
+
+All P0 and P1 items completed in a single session (2026-06-22):
+
+| Spec | Lines | Invariants | Config |
+|------|-------|------------|--------|
+| `Romulus.tla` | 250+ | LockExclusion, VersionEntryValid, AtMostOneCommitting | `Romulus.cfg` |
+| `SPHT.tla` | 375+ | TSXSafety, DurableSeqMonotonic, PCLBounds, TSXBufferInUse | `SPHT.cfg` |
+| `SimEngine.tla` | 280+ | NoConcurrentWrites, SGLMutex, SGLIsolation, NoSelfConflict | `SimEngine.cfg` |
+| `NVHTM.tla` | 310+ | TSXSafety, CheckpointConsistent, CommitPhaseOrdering | `NVHTM.cfg` |
+| `XTM.tla` | 270+ | PageOwnershipExclusion, OwnershipTracked, NoDirtyRead | `XTM.cfg` |
+
+Total: ~1500 new lines of TLA+ across 10 files (5 specs + 5 configs).
+Backend TLA+ coverage: 8 original + 5 new = **13 of 18 backends** covered.
+
 ## Current Coverage
 
 8 backends have TLA+ specs (see `README.md`). The following are **missing**:
 
 | Backend | Algorithm | Priority | Rationale |
 |---------|-----------|----------|-----------|
-| Romulus | Version-table OCC w/ read-validate | P0 | Unique algorithm; no existing spec covers OCC write-back + version-table |
-| SPHT | Persistent HTM + group-commit (RTM + epoch flush) | P0 | Novel persistent TM protocol; 165-line implementation note |
-| SimEngine | Cross-LP conflict resolution + retry costing | P0 | Novel distributed DES protocol; correctness-critical for all simulation results |
-| NV-HTM | Persistent HTM w/ redo log (RTM + durable commit) | P1 | TSX variant, but persistence adds unique invariants |
-| XTM | Page-granularity OCC w/ private copies + XADT | P1 | Unique page-level ownership protocol |
-| DUDETM | Deferred-persistence TM w/ background flusher | P2 | Partial skeleton; spec can be skeletal too |
-| LEFTRIGHT | Global-clock OCC w/ value-based validation | P2 | Similar to NOrec OCC; code is misnamed, not actual Left-Right |
-| TiKV | Percolator 2PC distributed TM | P2 | Entirely different paradigm (distributed vs shared-memory) |
-| TSX-Sim | Bloom-filter read-set + capacity-triggered SGL fallback | P3 | Behavioral model of existing TSXSGL spec; lower novelty |
-| DistributedSGL | SGL over network messages | P3 | Trivial extension of SGL.tla |
-| PersistentSGL | SGL with NVM durability barriers | P3 | Trivial extension of SGL.tla |
+| Backend | Algorithm | Priority | Status |
+|---------|-----------|----------|--------|
+| Romulus | Version-table OCC w/ read-validate | P0 | ✅ `Romulus.tla` — TLC invariants |
+| SPHT | Persistent HTM + group-commit (RTM + epoch flush) | P0 | ✅ `SPHT.tla` — TLC invariants |
+| SimEngine | Cross-LP conflict resolution + retry costing | P0 | ✅ `SimEngine.tla` — TLC invariants |
+| NV-HTM | Persistent HTM w/ redo log (RTM + durable commit) | P1 | ✅ `NVHTM.tla` — TLC invariants |
+| XTM | Page-granularity OCC w/ private copies + XADT | P1 | ✅ `XTM.tla` — TLC invariants |
+| DUDETM | Deferred-persistence TM w/ background flusher | P2 | ❌ Deferred (skeleton impl; low value) |
+| LEFTRIGHT | Global-clock OCC w/ value-based validation | P2 | ❌ Deferred (covered by NOrec.tla) |
+| TiKV | Percolator 2PC distributed TM | P2 | ❌ Deferred (400–600 lines, distributed modeling heavy) |
+| TSX-Sim | Bloom-filter read-set + capacity-triggered SGL fallback | P3 | ❌ Deferred (covered by TSXSGL.tla) |
+| DistributedSGL | SGL over network messages | P3 | ❌ Deferred (trivial SGL.tla extension) |
+| PersistentSGL | SGL with NVM durability barriers | P3 | ❌ Deferred (trivial SGL.tla extension) |
 
 ## P0 — High Priority (unique algorithms, correctness-critical)
 
@@ -297,28 +314,27 @@ relationship in `README.md` is sufficient.
 
 ## Summary
 
-| Priority | Spec | Lines (est.) | Difficulty | Dependencies |
-|----------|------|-------------|------------|-------------|
-| P0a | `Romulus.tla` | 250–350 | Medium | None |
-| P0b | `SPHT.tla` | 200–300 | Medium | `TSXSGL.tla` |
-| P0c | `SimEngine.tla` | 300–400 | Medium-Hard | None |
-| P1a | `NVHTM.tla` | 150–200 | Medium | `TSXSGL.tla` |
-| P1b | `XTM.tla` | 200–250 | Medium | None |
-| P2a | `DUDETM.tla` | 150–200 | Low | `NOrec.tla` |
-| P2b | LEFTRIGHT | 0 (doc) | — | `NOrec.tla` |
-| P2c | `TiKV.tla` | 400–600 | High | None (standalone) |
-| P2d | TSX-Sim | 0 (covered) | — | `TSXSGL.tla` |
-| P3 | Distributed/Persistent SGL | 0 (doc) | — | `SGL.tla` |
+| Priority | Spec | Lines | Status |
+|----------|------|-------|--------|
+| P0a | `Romulus.tla` | 250+ | ✅ Done |
+| P0b | `SPHT.tla` | 375+ | ✅ Done |
+| P0c | `SimEngine.tla` | 280+ | ✅ Done |
+| P1a | `NVHTM.tla` | 310+ | ✅ Done |
+| P1b | `XTM.tla` | 270+ | ✅ Done |
+| P2a | `DUDETM.tla` | — | ❌ Deferred (skeleton impl) |
+| P2b | LEFTRIGHT | — | ❌ Deferred (covered by NOrec.tla) |
+| P2c | `TiKV.tla` | — | ❌ Deferred (heavy distributed modeling) |
+| P2d | TSX-Sim | — | ❌ Deferred (covered by TSXSGL.tla) |
+| P3 | Distributed/Persistent SGL | — | ❌ Deferred (trivial SGL.tla ext) |
 
-### Execution order
+### Execution order (completed)
 
-1. **P0a + P0b in parallel** (Romulus + SPHT) — independent, both high-value.
-2. **P0c (SimEngine)** — after P0a/P0b, allows cross-spec insight.
-3. **P1a (NVHTM)** — reuses SPHT modeling work.
-4. **P1b (XTM)** — can be done any time after P0a.
-5. **P2a–P2c** — as time permits.
-6. **Documentation** — update `README.md` to note the coverage gaps and
-   relationships after each spec is added.
+1. ✅ **P0a + P0b** (Romulus + SPHT) — written in parallel.
+2. ✅ **P0c (SimEngine)** — written immediately after.
+3. ✅ **P1a (NVHTM)** — simplified from SPHT modeling work.
+4. ✅ **P1b (XTM)** — standalone page-granularity OCC spec.
+5. ⏳ **P2a–P2b** — deferred (DUDETM too skeletal; TiKV too heavy).
+6. ✅ **Documentation** — README.md updated with full coverage table.
 
 ### CI integration
 
