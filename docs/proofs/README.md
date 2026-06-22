@@ -8,13 +8,18 @@ backends in this repository.
 | File | Backend | Status |
 |------|---------|--------|
 | `SGL.tla` | Single Global Lock | **Fully verified** — TLAPS (42/42 obligations proved) |
-| `TSXSGL.tla` | TSX+SGL Hybrid | Lock-free + lock-owner invariants — TLAPS proof sketches (not mechanically checked) |
-| `TL2.tla` | TL2 | Specified for TLC — proof sketches, not mechanically checked |
-| `TinySTM_WBCTL.tla` | TinySTM Write-Back CTL | Specified for TLC — proof sketches, not mechanically checked |
-| `TinySTM_WBETL.tla` | TinySTM Write-Back ETL | Specified for TLC — proof sketches, not mechanically checked |
-| `TinySTM_WT.tla` | TinySTM Write-Through | Specified for TLC — proof sketches, not mechanically checked |
-| `SwissTM.tla` | SwissTM | Specified for TLC — proof sketches, not mechanically checked |
-| `NOrec.tla` | NOrec | Specified for TLC — proof sketches, not mechanically checked |
+| `TSXSGL.tla` | TSX+SGL Hybrid | Lock-free + lock-owner invariants — TLAPS proof sketches |
+| `TL2.tla` | TL2 | Specified for TLC — proof sketches |
+| `TinySTM_WBCTL.tla` | TinySTM Write-Back CTL | Specified for TLC — proof sketches |
+| `TinySTM_WBETL.tla` | TinySTM Write-Back ETL | Specified for TLC — proof sketches |
+| `TinySTM_WT.tla` | TinySTM Write-Through | Specified for TLC — proof sketches |
+| `SwissTM.tla` | SwissTM | Specified for TLC — proof sketches |
+| `NOrec.tla` | NOrec | Specified for TLC — proof sketches |
+| `Romulus.tla` | Romulus (version-table OCC w/ read-validate) | Specified for TLC — LockExclusion, VersionEntryValid, AtMostOneCommitting |
+| `SPHT.tla` | SPHT (group-commit persistent HTM) | Specified for TLC — TSXSafety, DurableSeqMonotonic, PCLBounds, TSXBufferInUse |
+| `SimEngine.tla` | SimEngine (cross-LP conflict resolution) | Specified for TLC — NoConcurrentWrites, SGLMutex, SGLIsolation, NoSelfConflict |
+| `NVHTM.tla` | NV-HTM (persistent HTM w/ redo log) | Specified for TLC — TSXSafety, CheckpointConsistent, CommitPhaseOrdering |
+| `XTM.tla` | XTM (page-granularity OCC) | Specified for TLC — PageOwnershipExclusion, OwnershipTracked, NoDirtyRead |
 
 ## Prerequisites
 
@@ -86,6 +91,11 @@ Concrete parameters for model checking:
 | `TinySTM_WT.tla` | `Thread <- {1,2}`, `Addr <- {1,2}`, `MAX_VAL <- 3` |
 | `SwissTM.tla` | `Thread <- {1,2}`, `Addr <- {1,2}`, `MAX_VAL <- 3` |
 | `NOrec.tla` | `Thread <- {1,2}`, `Addr <- {1,2}`, `MaxRetries <- 3` |
+| `Romulus.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1,2}`, `VSIZE <- 2` |
+| `SPHT.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1}`, `MaxRetries <- 2`, `GroupInterval <- 2` |
+| `SimEngine.tla` | `LP <- {0,1}`, `Addr <- {0,1}` |
+| `NVHTM.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1}`, `MaxRetries <- 2` |
+| `XTM.tla` | `Thread <- {1,2}`, `Page <- {0,1}`, `Data <- {0,1}`, `MaxRetries <- 2` |
 
 From the command line (requires TLA+ tools on `$PATH`):
 
@@ -132,6 +142,41 @@ hardware's cache-coherence conflict detection provides the safety guarantee
 (the first SGL write to `sgl_owner` aborts any concurrent TSX); the
 `tm_end()` double-check of `sgl_owner == tsx_start_owner` is a safety net.
 
+**Romulus (Romulus.tla)** — The spec models the full commit lock audit (lock
+bit set on write-set pages before clock increment, cleared on version update).
+The real implementation in `romulus.hpp` follows the same protocol.  The spec
+does not model the `tm_deferred_free` mechanism (allocated TM memory may be
+freed after commit; the spec assumes all memory persists).
+
+**SPHT (SPHT.tla)** — The spec models group commit as an atomic update of
+`durable_seq` and `pcl_epoch_start`.  The real implementation uses `clwb` +
+`sfence` which guarantees linearizability at the cache-line level.  The spec
+models the TSX write buffer as a per-thread function (`tsx_buffer`); the real
+implementation writes directly to memory inside the RTM region (RTM hardware
+provides atomicity and rollback).  Both achieve the same effect.
+
+**SimEngine (SimEngine.tla)** — The spec models conflict detection as an
+atomic action within ReadAddr/WriteAddr.  The real implementation in
+`engine.rs` checks `in_flight_writes`/`in_flight_reads` eagerly and aborts
+the conflicting LP immediately.  `ConflictAbort` is a non-deterministic action
+modeling external abort triggers (not directly emitted by the trace).  The SGL
+isolation invariant (`SGLIsolation`) guarantees that SGL mode blocks all other
+LPs — the real engine relies on the backend runtime for this.
+
+**NVHTM (NVHTM.tla)** — The spec models the durable commit as four sequential
+steps (flush → checkpoint → apply → clear).  The real implementation in the
+NV-HTM runtime uses `clwb` + `sfence` emitted between each phase.  The spec's
+`checkpoint` variable models the durable checkpoint marker; the real
+implementation uses a well-known NVM address.  Recovery is modeled as a single
+action; the real implementation scans for checkpoints across all threads.
+
+**XTM (XTM.tla)** — The spec models pages as individual memory locations
+(not 4 KB regions).  The real `xtm.hpp` uses 4 KB pages with `memcpy` for
+private copies.  The spec's `xadt_owner` and `xadt_version` model the XADT
+hash table entries.  The Bloom filter (XF) from the paper is not modeled
+(performance optimization only).  Eager conflict detection on reads is modeled
+by `ReadConflict` (abort if page owned by another TX).
+
 **TL2 (TL2.tla)** — The spec models per-address guards, while the real
 implementation uses a hash-based guard table (2^13 entries).  Guard-table
 aliasing (two addresses mapping to the same guard) can cause false conflicts in
@@ -157,10 +202,14 @@ protocol.
 
 ### Coverage
 
-- The proofs cover **mutual exclusion** for SGL (fully verified).
-- The remaining specs define **safety invariants** (no dirty reads, lock
-  consistency, no concurrent committing) intended for TLC model checking with
-  finite instances.
+- Fully verified (TLAPS): **SGL** (42/42 obligations).
+- TSX+SGL dual-path protocols: **TSXSGL**, **SPHT**, **NVHTM**.
+- OCC protocols: **NOrec**, **Romulus** (version-table), **XTM** (page-granularity).
+- Lock-based STM: **TL2**, **TinySTM** (WBCTL/WBETL/WT), **SwissTM**.
+- DES conflict resolution: **SimEngine** (cross-LP with SGL fallback).
+- The proofs define **safety invariants** (no dirty reads, lock consistency,
+  no concurrent committing) intended for TLC model checking with finite
+  instances.
 - The proofs do **not** cover: progress/liveness, contention manager behavior,
   infinite-state verification beyond SGL, or the interaction of TSX hardware
   aborts with the system memory model.
