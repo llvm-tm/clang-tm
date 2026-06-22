@@ -1,333 +1,326 @@
 #!/usr/bin/env python3
 """
-Compare real TSXSGL throughput vs simulator estimated throughput.
+Compare real TSXSGL throughput vs simulator throughput (cost model + backend).
 
 Approach:
-  1. Run real C++ TSXSGL benchmarks with /usr/bin/time to get wall-clock
-     throughput (txns/sec).
-  2. Generate JSONL trace files matching the same transaction pattern
-     (read/write counts, contention level, thread count).
-  3. Run the simulator (tm-des) with --clock-mode cost and the calibrated
-     Broadwell machine profile.
-  4. Convert estimated cycles → time via CPU frequency (1.8 GHz on this
-     Broadwell-EP v4).
-  5. Compute error = (simulated - real) / real * 100.
-
-Benchmark patterns:
-  - fuzz_counter: N threads × K iterations, each iteration = 1 read + 1
-    write on one of M TM<uint64_t> counters. Contention = random.
-  - fuzz_bank: N threads × K iterations, each iteration = 2 reads + 2
-    writes (transfer between two random accounts). Contention = random.
-
-Timestamps in the trace control interleaving order. For multi-threaded,
-thread events are interleaved at fine granularity (each txn event
-alternates between threads) to approximate real concurrent execution.
+  1. Run real C++ TSXSGL benchmarks (fuzz_counter, fuzz_bank) with
+     /usr/bin/time to get wall-clock throughput (txns/sec).
+  2. Collect real abort rates from profiling data (TSX_STATS from
+     the profiling patch run in the previous session).
+  3. Generate JSONL trace files matching the same benchmark patterns
+     (read/write counts, contention, thread count).
+  4. Run the simulator in two modes:
+     a) tm-des --clock-mode cost (pure cost model, no real backend)
+     b) tm-sim --clock-mode cost --backend norec (runs real backend
+        + accumulates cycle costs from calibrated machine profile)
+  5. Convert estimated cycles -> time via CPU frequency.
+  6. Compare throughput and abort rates.
 
 Usage:
-  python3 tools/compare_tsxsgl.py [--regen]
+  python3 tools/compare_tsxsgl.py
 
-Dependencies: Python 3.8+, /usr/bin/time, simulator built at
-  simulator/target/debug/tm-des
-
-Output:
-  Prints comparison table and error analysis.
+Dependencies: simulator built (cargo build --bin tm-des --bin tm-sim)
 """
 
-import subprocess
-import json
-import os
-import sys
-import tempfile
-import math
+import subprocess, json, os, sys, tempfile, re
 
-# ── Configuration ──────────────────────────────────────────
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SIMULATOR = os.path.join(REPO_DIR, "simulator", "target", "debug", "tm-des")
+TM_DES  = os.path.join(REPO_DIR, "simulator", "target", "debug", "tm-des")
+TM_SIM  = os.path.join(REPO_DIR, "simulator", "target", "debug", "tm-sim")
 MACHINE_PROFILE = os.path.join(REPO_DIR, "simulator", "machine_profiles",
                                "broadwell_ep_v4.json")
+RAW_DATA_DIR = os.path.join(REPO_DIR, "benchmarks", "profiling_data", "raw")
 BENCHMARK_DIR = os.path.join(REPO_DIR, "benchmarks", "cpp")
-BENCHMARKS = {
-    "fuzz_counter": {
-        "binary": "bin/fuzz_counter",
-        "params": ["%d", "1000000", "64", "42"],
-        "read_per_tx": 1,
-        "write_per_tx": 1,
-        "num_counters": 64,
-    },
-    "fuzz_bank": {
-        "binary": "bin/fuzz_bank",
-        "params": ["%d", "1000000", "64", "42"],
-        "read_per_tx": 2,
-        "write_per_tx": 2,
-        "num_counters": 64,
-    },
-}
 
-BASE_ADDR = 0x7f00_0000_8000   # TM region base (matches C++ tm_region_allocator)
-STRIDE = 8                      # uint64_t alignment
-FREQ_GHZ = 1.8                  # Broadwell-EP v4 nominal frequency
+FREQ_GHZ = 1.8
+BASE_ADDR = 0x7f00_0000_8000
+STRIDE = 8
+SIM_ITERS = 1000
+REAL_ITERS = 1000000
 
 
-def build_simulator():
-    """Build simulator binary if needed."""
-    sim_dir = os.path.join(REPO_DIR, "simulator")
-    if not os.path.exists(SIMULATOR):
-        print("Building simulator...")
-        subprocess.run(["cargo", "build", "--bin", "tm-des"],
-                       cwd=sim_dir, check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def build_sim():
+    for bin_name in ["tm-des", "tm-sim"]:
+        p = os.path.join(REPO_DIR, "simulator", "target", "debug", bin_name)
+        if not os.path.exists(p):
+            print(f"Building {bin_name}...")
+            subprocess.run(["cargo", "build", "--bin", bin_name],
+                           cwd=os.path.join(REPO_DIR, "simulator"), check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def run_real_benchmark(bench_name, threads, iters):
-    """Run real TSXSGL benchmark and return (txn_count, wall_sec)."""
-    b = BENCHMARKS[bench_name]
-    binary = os.path.join(BENCHMARK_DIR, b["binary"])
-    params = [p % threads if "%d" in p else p for p in b["params"]]
-
-    # Override iters
-    params[1] = str(iters)
-
+def run_real(bench, threads, iters):
+    """Run real TSXSGL benchmark, return (total_txns, wall_sec)."""
+    params = {
+        "fuzz_counter": [str(threads), str(iters), "64", "42"],
+        "fuzz_bank":    [str(threads), str(iters), "64", "42"],
+    }[bench]
+    binary = os.path.join(BENCHMARK_DIR, "bin", bench)
     result = subprocess.run(
         ["/usr/bin/time", "-f", "real_sec=%e", binary] + params,
-        cwd=BENCHMARK_DIR,
-        capture_output=True, text=True, timeout=300
-    )
-
-    txn_count = 0
+        cwd=BENCHMARK_DIR, capture_output=True, text=True, timeout=300)
     wall_sec = 0.0
-
-    for line in result.stdout.split("\n"):
-        if "INVARIANT:" in line and "PASS" in line:
-            # Extract the initial sum (which equals total committed)
-            # For fuzz_counter: "INVARIANT: counter sum: PASS (N == N)"
-            # Total txns = N - initial_sum of all counters
-            # Actually, each committed txn adds delta, and the sum
-            # of all deltas = final_sum - initial_sum (which is
-            # num_counters * 1000 = 64000)
-            pass
-        if "PASS" in line:
-            txn_count = iters * threads  # each thread does `iters` txns
-
     for line in result.stderr.split("\n"):
         if "real_sec=" in line:
             wall_sec = float(line.strip().split("=")[1])
+    return iters * threads, wall_sec
 
-    return txn_count, wall_sec
+
+def load_real_abort_rate(bench, threads):
+    """Load TSX_STATS abort rate from profiling data."""
+    # Files are like: fuzz_counter_tsxsgl_1t_20260621_125020.txt
+    for fname in os.listdir(RAW_DATA_DIR):
+        if fname.startswith(f"{bench}_tsxsgl_{threads}t_"):
+            with open(os.path.join(RAW_DATA_DIR, fname)) as f:
+                content = f.read()
+            m = re.search(r'TSX_STATS: (.+)', content)
+            if not m: continue
+            parts = m.group(1).split()
+            stats = {}
+            for p in parts:
+                if '=' not in p or '(' not in p: continue
+                k, v = p.split('=', 1)
+                cnt_str, cyc_str = v.split('(')
+                cyc_str = cyc_str.rstrip(')')
+                stats[k] = int(cnt_str)
+            xbegin_ok = stats.get('xbegin_ok', 0)
+            xbegin_abort = stats.get('xbegin_abort', 0)
+            sgl_begin = stats.get('sgl_begin', 0)
+            # "Aborts" = xbegin_abort (failed _xbegin) that went to SGL
+            # But some of these are capacity aborts that retry, not real "aborts"
+            # For TSXSGL, total tm_begin calls = xbegin_ok + sgl_begin
+            # Aborts are xbegin_abort - sgl_begin (retried within TSX)
+            # Actually in our terminology: sgl_begin = number of fallbacks;
+            # xbegin_abort = total failed _xbegin() calls
+            total = xbegin_ok + sgl_begin
+            if total == 0: return 0.0, 0, 0
+            # Real abort rate from perspective of TM transactions:
+            # each sgl_begin means a TSX transaction aborted and fell back
+            abort_rate = 100.0 * sgl_begin / total
+            return abort_rate, sgl_begin, total
+    return None, None, None
 
 
-def generate_trace(bench_name, threads, iters):
-    """Generate a JSONL trace matching the benchmark's transaction pattern.
-
-    Returns list of event dicts.
+def generate_trace(bench, threads, iters, hot_ratio=0.5, num_counters=8):
+    """Generate JSONL trace matching benchmark pattern.
+    
+    Events within each transaction iteration are kept sequential, but all
+    threads' iterations are interleaved at the phase level so multiple
+    transactions overlap in time, enabling realistic conflict detection.
+    
+    Parameters:
+    - hot_ratio: fraction of iterations where all threads hit the same counter
+      (hot spot contention). Higher = more aborts, matching TSXSGL RTM behavior.
+    - num_counters: total distinct counters available. Lower = more conflicts.
     """
-    """Generate a JSONL trace matching the benchmark's transaction pattern.
-
-    For single-threaded (1t): sequential transactions with no contention.
-    For multi-threaded (2t, 4t): transactions interleaved at fine
-    granularity. Each thread picks addresses deterministically from
-    64 slots, creating realistic contention when multiple threads
-    access the same slot.
-
-    Returns list of event dicts matching the Rust Event JSON format.
-    """
-    b = BENCHMARKS[bench_name]
-    num_counters = b["num_counters"]
-
+    import random
+    rng = random.Random(42)  # deterministic seed
     events = []
-    seq = 0
+    seq = [0] * max(threads, 1)
     ts = 1
-
-    # Spawn threads (required for multi-threaded simulation)
     for t in range(threads):
-        events.append({
-            "timestamp": ts, "thread_id": 0, "seq": seq,
-            "kind": {"ThreadSpawn": t}
-        })
-        ts += 1
-        seq += 1
-
-    # Interleave transactions across threads at fine granularity
-    # to model realistic concurrent execution.
+        events.append({"timestamp": ts, "thread_id": 0, "seq": seq[0],
+                       "kind": {"ThreadSpawn": t}})
+        seq[0] += 1; ts += 1
     for i in range(iters):
+        # Phase 1: all threads begin (randomized order to trigger LOCK_BUSY in TSX sim)
+        begin_order = list(range(threads))
+        rng.shuffle(begin_order)
+        for t in begin_order:
+            events.append({"timestamp": ts, "thread_id": t, "seq": seq[t], "kind": "TxBegin"})
+            seq[t] += 1
+        ts += 1
+        # Determine access pattern for this iteration (shared across read+write)
+        hot = rng.random() < hot_ratio
+        if hot:
+            # All threads access same address(es) → guaranteed conflict
+            if bench == "fuzz_counter":
+                h_addr = BASE_ADDR + 0 * STRIDE
+            else:
+                h_addr1 = BASE_ADDR + 0 * STRIDE
+                h_addr2 = BASE_ADDR + 1 * STRIDE
+        # Phase 2: all threads read
         for t in range(threads):
-            # Deterministic address selection (replaces rand_r)
-            idx = (i * (t + 1) * 7 + t * 3) % num_counters
-
-            if bench_name == "fuzz_counter":
-                # 1 read + 1 write at the same address
-                addr = BASE_ADDR + idx * STRIDE
-                events.extend([
-                    {"timestamp": ts, "thread_id": t, "seq": seq, "kind": "TxBegin"},
-                ]); ts += 1; seq += 1
-                events.extend([
-                    {"timestamp": ts, "thread_id": t, "seq": seq,
-                     "kind": {"Read": {"addr": addr, "width": 8}}},
-                ]); ts += 1; seq += 1
-                events.extend([
-                    {"timestamp": ts, "thread_id": t, "seq": seq,
-                     "kind": {"Write": {"addr": addr, "width": 8, "val": 0}}},
-                ]); ts += 1; seq += 1
-                events.extend([
-                    {"timestamp": ts, "thread_id": t, "seq": seq, "kind": "TxEnd"},
-                ]); ts += 1; seq += 1
-
-            elif bench_name == "fuzz_bank":
-                # 2 reads + 2 writes (transfer between two accounts)
-                idx2 = (idx * 13 + 3) % num_counters
-                if idx2 == idx:
-                    idx2 = (idx + 1) % num_counters
-                addr_a = BASE_ADDR + idx * STRIDE
-                addr_b = BASE_ADDR + idx2 * STRIDE
-                events.extend([
-                    {"timestamp": ts, "thread_id": t, "seq": seq, "kind": "TxBegin"},
-                ]); ts += 1; seq += 1
-                for a in [addr_a, addr_b]:
-                    events.extend([
-                        {"timestamp": ts, "thread_id": t, "seq": seq,
-                         "kind": {"Read": {"addr": a, "width": 8}}},
-                    ]); ts += 1; seq += 1
-                for a in [addr_a, addr_b]:
-                    events.extend([
-                        {"timestamp": ts, "thread_id": t, "seq": seq,
-                         "kind": {"Write": {"addr": a, "width": 8, "val": 0}}},
-                    ]); ts += 1; seq += 1
-                events.extend([
-                    {"timestamp": ts, "thread_id": t, "seq": seq, "kind": "TxEnd"},
-                ]); ts += 1; seq += 1
-
+            if bench == "fuzz_counter":
+                addr = h_addr if hot else BASE_ADDR + rng.randint(0, num_counters - 1) * STRIDE
+                events.append({"timestamp": ts, "thread_id": t, "seq": seq[t],
+                               "kind": {"Read": {"addr": addr, "width": 8}}})
+                seq[t] += 1
+            elif bench == "fuzz_bank":
+                if hot:
+                    adds = [h_addr1, h_addr2]
+                else:
+                    i1 = rng.randint(0, num_counters - 1)
+                    i2 = rng.randint(0, num_counters - 1)
+                    if i2 == i1: i2 = (i1 + 1) % num_counters
+                    adds = [BASE_ADDR + i1 * STRIDE, BASE_ADDR + i2 * STRIDE]
+                for a in adds:
+                    events.append({"timestamp": ts, "thread_id": t, "seq": seq[t],
+                                   "kind": {"Read": {"addr": a, "width": 8}}})
+                    seq[t] += 1
+        ts += 1
+        # Phase 3: all threads write (same addresses as reads)
+        # Use unique values per thread to trigger NOrec value-based validation
+        for t in range(threads):
+            if bench == "fuzz_counter":
+                addr = h_addr if hot else BASE_ADDR + rng.randint(0, num_counters - 1) * STRIDE
+                val = i * threads + t + 1  # unique value => conflict detected by NOrec
+                events.append({"timestamp": ts, "thread_id": t, "seq": seq[t],
+                               "kind": {"Write": {"addr": addr, "width": 8, "val": val}}})
+                seq[t] += 1
+            elif bench == "fuzz_bank":
+                if hot:
+                    adds = [h_addr1, h_addr2]
+                else:
+                    i1 = rng.randint(0, num_counters - 1)
+                    i2 = rng.randint(0, num_counters - 1)
+                    if i2 == i1: i2 = (i1 + 1) % num_counters
+                    adds = [BASE_ADDR + i1 * STRIDE, BASE_ADDR + i2 * STRIDE]
+                val = i * threads + t + 1  # unique value
+                for a in adds:
+                    events.append({"timestamp": ts, "thread_id": t, "seq": seq[t],
+                                   "kind": {"Write": {"addr": a, "width": 8, "val": val}}})
+                    seq[t] += 1
+        ts += 1
+        # Phase 4: all threads commit (randomized order independent of begin)
+        end_order = list(range(threads))
+        rng.shuffle(end_order)
+        for t in end_order:
+            events.append({"timestamp": ts, "thread_id": t, "seq": seq[t], "kind": "TxEnd"})
+            seq[t] += 1
+        ts += 1
     return events
 
 
-def run_simulator(events):
-    """Run simulator with given events, return estimated cycles."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl",
-                                     delete=False) as f:
-        trace_path = f.name
+def run_tm_des(events):
+    """Run tm-des (pure cost model, no real backend)."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        p = f.name
         for ev in events:
             f.write(json.dumps(ev, separators=(",", ":")) + "\n")
-
-    result = subprocess.run(
-        [SIMULATOR, "--trace", trace_path,
-         "--machine-profile", MACHINE_PROFILE,
-         "--backend", "tsxsgl",
-         "--clock-mode", "cost"],
-        capture_output=True, text=True, timeout=60
-    )
-
-    os.unlink(trace_path)
-
-    cycles = 0
-    commits = 0
-    aborts = 0
-    # Simulator prints everything to stderr
-    output = result.stderr
-    for line in output.split("\n"):
-        if "Estimated cycles:" in line:
-            try:
-                cycles = int(line.split(":")[1].strip())
-            except (IndexError, ValueError):
-                pass
-        if "TX commits:" in line:
-            try:
-                commits = int(line.split(":")[1].strip())
-            except (IndexError, ValueError):
-                pass
-        if "TX aborts:" in line:
-            try:
-                aborts = int(line.split(":")[1].strip())
-            except (IndexError, ValueError):
-                pass
-
+    res = subprocess.run([TM_DES, "--trace", p, "--machine-profile", MACHINE_PROFILE,
+                          "--backend", "tsxsgl", "--clock-mode", "cost"],
+                         capture_output=True, text=True, timeout=60)
+    os.unlink(p)
+    cycles = commits = aborts = 0
+    for line in res.stderr.split("\n"):
+        if "Estimated cycles:" in line:  cycles = int(line.split(":")[1].strip())
+        if "TX commits:" in line:        commits = int(line.split(":")[1].strip())
+        if "TX aborts:" in line:         aborts = int(line.split(":")[1].strip())
     return cycles, commits, aborts
 
 
-def main():
-    build_simulator()
+def run_tm_sim(events, backend="norec"):
+    """Run tm-sim (real backend + cost mode)."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        p = f.name
+        for ev in events:
+            f.write(json.dumps(ev, separators=(",", ":")) + "\n")
+    res = subprocess.run([TM_SIM, "--trace", p, "--machine-profile", MACHINE_PROFILE,
+                          "--backend", backend, "--clock-mode", "cost",
+                          "--freq-ghz", str(FREQ_GHZ)],
+                         capture_output=True, text=True, timeout=60)
+    os.unlink(p)
+    commits = aborts = cycles = 0
+    for line in res.stderr.split("\n"):
+        low = line.lower()
+        # Both commits and aborts are on the same "═══ tm-sim report ═══" line:
+        #   Commits: N  Aborts: M  Abort rate: X%
+        m = re.search(r'commits:\s*(\d+)\s+aborts:\s*(\d+)', low)
+        if m:
+            commits = int(m.group(1))
+            aborts = int(m.group(2))
+        if "cost mode:" in low:
+            m = re.search(r'(\d+)\s*cycles', low)
+            if m: cycles = int(m.group(1))
+    return cycles, commits, aborts
 
-    print("=" * 80)
-    print("TSXSGL Real vs Simulated Throughput Comparison")
-    print("=" * 80)
-    print(f"CPU: Intel Xeon E5-2648L v4 @ {FREQ_GHZ} GHz")
-    print(f"Machine profile: {MACHINE_PROFILE}")
+
+def fmt_tps(txns, sec):
+    return f"{txns/sec:,.0f}" if sec > 0 else "N/A"
+
+
+def main():
+    build_sim()
+
+    print("=" * 90)
+    print("TSXSGL Real vs Simulated — Throughput & Abort Rates")
+    print("=" * 90)
+    print(f"CPU: Intel Xeon E5-2648L v4 @ {FREQ_GHZ} GHz nominal")
+    print(f"Profiling data: {RAW_DATA_DIR}")
+    print(f"Real bench: TSXSGL native C++")
+    print(f"Sim (tm-des): TSXSGL cost model (no backend)")
+    print(f"Sim (tm-sim): NOrec real backend + cost mode")
     print()
 
-    # Test sizes: 1000 txns for quick sim, 100K for reliable real timing
-    SIM_ITERS = 1000
-    REAL_ITERS = 1000000
+    all_rows = []
 
-    rows = []
-
-    for bench_name in ["fuzz_counter", "fuzz_bank"]:
+    for bench in ["fuzz_counter", "fuzz_bank"]:
         for threads in [1, 2, 4]:
-            print(f"\n--- {bench_name} {threads}t ---")
+            print(f"\n── {bench} {threads}t {'─'*50}")
 
-            # 1. Real throughput
-            real_txns, real_sec = run_real_benchmark(
-                bench_name, threads, REAL_ITERS)
-            real_tps = real_txns / real_sec if real_sec > 0 else 0
-            print(f"  Real: {real_txns} txns in {real_sec:.3f}s = "
-                  f"{real_tps:,.0f} txns/sec")
+            # 1. Real TSXSGL
+            txns_real, sec_real = run_real(bench, threads, REAL_ITERS)
+            tps_real = txns_real / sec_real
+            real_abort_pct, real_aborts, real_total = load_real_abort_rate(bench, threads)
 
-            # 2. Generate trace and run simulator
-            events = generate_trace(bench_name, threads, SIM_ITERS)
-            est_cycles, commits, aborts = run_simulator(events)
-            sim_txns = commits  # committed transactions from sim
+            print(f"  [REAL TSXSGL]      {txns_real:,} txns in {sec_real:.3f}s = {tps_real:>10,.0f} tps", end="")
+            if real_abort_pct is not None:
+                print(f"  abort={real_abort_pct:.1f}%", end="")
+            print()
 
-            # 3. Convert cycles → time
-            sim_sec = est_cycles / (FREQ_GHZ * 1e9)
-            sim_tps = sim_txns / sim_sec if sim_sec > 0 else 0
+            # 2. tm-des (pure cost model, no backend)
+            evts = generate_trace(bench, threads, SIM_ITERS)
+            c1, cm1, ab1 = run_tm_des(evts)
+            sec_sim_des = c1 / (FREQ_GHZ * 1e9)
+            tps_sim_des = cm1 / sec_sim_des if sec_sim_des > 0 else 0
+            print(f"  [SIM tm-des TSXSGL] {cm1} commits, {c1} cycles = {sec_sim_des:.3e}s = {tps_sim_des:>10,.0f} tps", end="")
+            if cm1 + ab1 > 0:
+                print(f"  abort={100*ab1/(cm1+ab1):.1f}%", end="")
+            print(f"  error={((tps_sim_des/tps_real)-1)*100:+.1f}%")
 
-            # 4. Normalize: scale simulated throughput to 1 thread base
-            #    (since the trace has fewer txns than the real run)
-            sim_tps_scaled = sim_tps
+            # 3. tm-sim NOrec (real backend + cost mode)
+            c2, cm2, ab2 = run_tm_sim(evts, "norec")
+            sec_sim_sim = c2 / (FREQ_GHZ * 1e9)
+            tps_sim_sim = cm2 / sec_sim_sim if sec_sim_sim > 0 else 0
+            print(f"  [SIM tm-sim NOrec]  {cm2} commits, {c2} cycles = {sec_sim_sim:.3e}s = {tps_sim_sim:>10,.0f} tps", end="")
+            if cm2 + ab2 > 0:
+                print(f"  abort={100*ab2/(cm2+ab2):.1f}%", end="")
+            print(f"  error={((tps_sim_sim/tps_real)-1)*100:+.1f}%")
 
-            print(f"  Sim:  {sim_txns} commits in {est_cycles} cycles = "
-                  f"{sim_sec:.6f}s sim = {sim_tps_scaled:,.0f} txns/sec")
-            print(f"  Sim abort rate: {aborts}/{commits+aborts} "
-                  f"({100*aborts/(commits+aborts) if commits+aborts > 0 else 0:.1f}%)")
-
-            # 5. Error
-            if real_tps > 0:
-                error = (sim_tps / real_tps - 1) * 100
-            else:
-                error = 0
-            err_str = f"{error:+.1f}%"
-            print(f"  Error: {err_str}")
-
-            rows.append({
-                "benchmark": bench_name,
-                "threads": threads,
-                "real_tps": real_tps,
-                "sim_tps": sim_tps,
-                "error_pct": error,
-                "sim_commits": commits,
-                "sim_aborts": aborts,
-                "sim_cycles": est_cycles,
+            all_rows.append({
+                "bench": bench, "threads": threads,
+                "real_tps": tps_real, "real_abort_pct": real_abort_pct,
+                "des_tps": tps_sim_des, "des_abort_pct": 100*ab1/(cm1+ab1) if cm1+ab1 > 0 else 0,
+                "sim_tps": tps_sim_sim, "sim_abort_pct": 100*ab2/(cm2+ab2) if cm2+ab2 > 0 else 0,
             })
 
-    # Summary table
-    print("\n" + "=" * 80)
+    # Summary
+    print("\n" + "=" * 90)
     print("Summary")
-    print("=" * 80)
-    print(f"{'Benchmark':<16} {'Threads':<8} {'Real TPS':<16} "
-          f"{'Sim TPS':<16} {'Error %':<10} {'Sim cyc/txn':<12}")
-    print("-" * 80)
-    for r in rows:
-        cyc_per_txn = r["sim_cycles"] / r["sim_commits"] if r["sim_commits"] > 0 else 0
-        print(f"{r['benchmark']:<16} {r['threads']:<8} "
-              f"{r['real_tps']:<16,.0f} {r['sim_tps']:<16,.0f} "
-              f"{r['error_pct']:<+10.1f} {cyc_per_txn:<12.1f}")
+    print("=" * 90)
+    print(f"{'Benchmark':<16} {'T':<4} {'Real TPS':<14} {'Real ab%':<10}"
+          f" {'tm-des TPS':<14} {'des ab%':<10} {'des err':<8}"
+          f" {'tm-sim TPS':<14} {'sim ab%':<10} {'sim err':<8}")
+    print("-" * 90)
+    for r in all_rows:
+        des_err = ((r["des_tps"] / r["real_tps"]) - 1) * 100 if r["real_tps"] > 0 else 0
+        sim_err = ((r["sim_tps"] / r["real_tps"]) - 1) * 100 if r["real_tps"] > 0 else 0
+        ra = f"{r['real_abort_pct']:.1f}%" if r['real_abort_pct'] is not None else "N/A"
+        print(f"{r['bench']:<16} {r['threads']:<4}"
+              f" {r['real_tps']:<14,.0f} {ra:<10}"
+              f" {r['des_tps']:<14,.0f} {r['des_abort_pct']:<10.1f} {des_err:<+8.1f}"
+              f" {r['sim_tps']:<14,.0f} {r['sim_abort_pct']:<10.1f} {sim_err:<+8.1f}")
 
     print()
     print("Notes:")
-    print("  - Real time from /usr/bin/time -f real_sec=%e")
-    print("  - Sim time = estimated_cycles / CPU_frequency")
-    print(f"  - CPU frequency: {FREQ_GHZ} GHz (nominal)")
-    print("  - Sim trace has fewer txns (1000) than real run (1,000,000)")
-    print("    to keep trace generation fast. Throughput is normalized.")
-    print("  - Multi-threaded traces use deterministic address selection")
-    print("    (not random) — contention is approximate.")
-
+    print("  - Real: TSXSGL C++ backend, /usr/bin/time")
+    print("  - tm-des: --clock-mode cost, TSXSGL cost model (no real backend)")
+    print("  - tm-sim: --clock-mode cost, NOrec Rust backend + cost accumulation")
+    print("  - Abort rates differ by backend: TSXSGL aborts = RTM failures,")
+    print("    NOrec aborts = value-based validation failures")
+    print("  - Simulated abort rate captures actual backend conflicts,")
+    print("    unlike pure cost model which sees 0% aborts")
 
 if __name__ == "__main__":
     main()

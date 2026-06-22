@@ -1,0 +1,2 @@
+INVARIANT: money conservation: PASS (640000 == 640000)
+TSX_STATS: xbegin_ok=6379(210809) xbegin_abort=71839(40364324) xend=6379(884039) xabort=0(0) sgl_begin=13293(131484233) sgl_end=13293(40017113) sgl_spin=8622(9772506) read=39344(4405570) write=39344(4254958) depth=6379(5696852) conflict=63117 capacity=73 explicit=8622 other=27
