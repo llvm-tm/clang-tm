@@ -793,7 +793,7 @@ static void emitComputationEvents(Function &F, TargetTransformInfo &TTI,
 			InstructionCost cost = TTI.getInstructionCost(
 			    &I, TargetTransformInfo::TCK_RecipThroughput);
 			if (cost.isValid()) {
-				uint64_t c = *cost.getValue();
+				uint64_t c = cost.getValue();
 				if (c > 0) {
 					bb_cost += c;
 					has_computation = true;
