@@ -66,7 +66,7 @@ VARIABLES
 vars == <<mem, sgl, tsx_mode, pc, retry_cnt, tx_seq, pcl,
           pcl_epoch_start, tsx_buffer, durable_seq, crash, recovered>>
 
-NoWrite == -1
+NoWrite == 0 - 1
 
 (* True if thread t has written to addr a in the current TSX transaction *)
 HasWrittenInTSX(t, a) == tsx_buffer[t][a] # NoWrite
@@ -95,9 +95,8 @@ Init ==
 
 (*── TSX Begin: attempt _xbegin() ────────────────────────────────────*)
 TSXBegin(t) ==
-    /\ pc[t] = "idle"
-    \/ pc[t] = "active_sgl"     (* also attempted after SGL failure *)
-    /\ sgl = 0                   (* TSX requires no concurrent SGL *)
+    /\ (pc[t] = "idle" \/ pc[t] = "active_sgl")     (* also attempted after SGL failure *)
+    /\ sgl = 0                                        (* TSX requires no concurrent SGL *)
     /\ pc' = [pc EXCEPT ![t] = "active_tsx"]
     /\ tsx_mode' = [tsx_mode EXCEPT ![t] = TRUE]
     /\ retry_cnt' = [retry_cnt EXCEPT ![t] = 0]
@@ -190,7 +189,7 @@ TSXRetryOrFallback(t) ==
     /\ LET KeepLen == pcl_epoch_start[t] - 1 IN
        pcl' = [pcl EXCEPT ![t] = [i \in 1..KeepLen |-> pcl[t][i]]]
     /\ UNCHANGED <<mem, sgl, retry_cnt, tx_seq, tsx_buffer,
-                   durable_seq, crash, recovered>>
+                   pcl_epoch_start, durable_seq, crash, recovered>>
 
 (*--------------------------------------------------------------------*)
 (* SGL Path Actions                                                    *)
@@ -232,7 +231,7 @@ SGLCommit(t) ==
     /\ sgl = t
     /\ sgl' = 0
     /\ tx_seq' = [tx_seq EXCEPT ![t] = tx_seq[t] + 1]
-    (\* Group commit after SGL transactions too *\)
+    (* Group commit after SGL transactions too *)
     /\ IF (tx_seq[t] + 1) % GroupInterval = 0
        THEN
            /\ pc' = [pc EXCEPT ![t] = "group_commit"]
@@ -269,12 +268,14 @@ Recovery(t) ==
                THEN pcl[t][i]
                ELSE <<0, 0>>]  (* padding, won't be applied *)
        IN
-       (* Apply all durable PCL entries to memory *)
-       /\ mem' = [a \in Addr |->
-                    IF \E i \in 1..durable_seq[t] :
-                         i <= Len(pcl[t]) /\ pcl[t][i][1] = a
-                    THEN pcl[t][i][2]  (* last durable write *)
-                    ELSE mem[a]]
+        (* Apply all durable PCL entries to memory *)
+        /\ mem' = [a \in Addr |->
+                     LET candidates == {i \in 1..durable_seq[t] :
+                                         i <= Len(pcl[t]) /\ pcl[t][i][1] = a}
+                     IN IF candidates = {}
+                        THEN mem[a]
+                        ELSE LET last == CHOOSE i \in candidates : TRUE IN
+                             pcl[t][last][2]]
     /\ recovered' = [recovered EXCEPT ![t] = TRUE]
     (* After recovery, clean up *)
     /\ pcl' = [pcl EXCEPT ![t] = << >>]
@@ -287,7 +288,7 @@ Recovery(t) ==
 (*--------------------------------------------------------------------*)
 
 Next ==
-    \E t \in Thread :
+    \/ \E t \in Thread :
         \/ TSXBegin(t)
         \/ \E a \in Addr : TSXRead(t, a)
         \/ \E a \in Addr : \E v \in Data : TSXWrite(t, a, v)
@@ -300,7 +301,7 @@ Next ==
         \/ SGLCommit(t)
         \/ GroupCommit(t)
     \/ Crash
-    \/ \E t \in Thread : Recovery(t)
+    \/ \E t2 \in Thread : Recovery(t2)
 
 Spec == Init /\ [][Next]_vars
 
@@ -378,3 +379,5 @@ RecoveryConsistency ==
 
 (* Default: Thread = {1, 2}; Addr = {0, 1}; Data = {0, 1};
    MaxRetries = 2; GroupInterval = 2 *)
+
+====

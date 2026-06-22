@@ -30,15 +30,15 @@ ASSUME Thread \subseteq Nat \ {0}
 
 VARIABLES
     sgl,                                  (* lock: 0=free, tid=locked *)
-    mem[_],                               (* shared memory, indexed by address *)
-    pc[_],                                (* per-thread PC *)
-    mode[_],                              (* "idle", "tsx", "sgl" *)
-    readSet[_],                           (* per-thread read set *)
-    writeSet[_],                          (* per-thread write set *)
-    txSnapshot[_],                        (* sgl snapshot at TX start, per thread *)
-    tsxRetries[_],                        (* TSX retry count per thread *)
-    txCount[_],                           (* committed TX count per thread *)
-    aborted[_]                            (* aborted TX count per thread *)
+    mem,                               (* shared memory, indexed by address *)
+    pc,                                (* per-thread PC *)
+    mode,                              (* "idle", "tsx", "sgl" *)
+    readSet,                           (* per-thread read set *)
+    writeSet,                          (* per-thread write set *)
+    txSnapshot,                        (* sgl snapshot at TX start, per thread *)
+    tsxRetries,                        (* TSX retry count per thread *)
+    txCount,                           (* committed TX count per thread *)
+    aborted                            (* aborted TX count per thread *)
 
 vars == <<sgl, mem, pc, mode, readSet, writeSet, txSnapshot, tsxRetries, txCount, aborted>>
 
