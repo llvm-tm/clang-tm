@@ -43,6 +43,19 @@ impl BackendProfile {
             _ => BackendProfile::Default,
         }
     }
+
+    pub fn machine_profile_name(&self) -> &'static str {
+        match self {
+            BackendProfile::Default => "default",
+            BackendProfile::Tinystm => "tinystm",
+            BackendProfile::Norec => "norec",
+            BackendProfile::Tl2 => "tl2",
+            BackendProfile::Swisstm => "swisstm",
+            BackendProfile::Romulus => "romulus",
+            BackendProfile::Tsxsgl => "tsxsgl",
+            BackendProfile::TsxSim => "tsxsgl",
+        }
+    }
 }
 
 // ── Cycle costs ────────────────────────────────────────────
@@ -64,12 +77,12 @@ pub fn event_cost(
 ) -> u64 {
     match backend {
         BackendProfile::Tsxsgl | BackendProfile::TsxSim => tsx_event_cost(kind, machine),
-        _ => generic_event_cost(kind, machine),
+        _ => generic_event_cost(kind, machine, backend.machine_profile_name()),
     }
 }
 
-fn generic_event_cost(kind: &EventKind, machine: &MachineProfile) -> u64 {
-    let bk = machine.backend("default");
+fn generic_event_cost(kind: &EventKind, machine: &MachineProfile, backend_name: &str) -> u64 {
+    let bk = machine.backend(backend_name);
     match kind {
         EventKind::TxBegin => bk.begin_overhead as u64,
         EventKind::TxEnd => bk.commit_overhead as u64,
