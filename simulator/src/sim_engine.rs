@@ -93,12 +93,6 @@ pub struct SimEngine {
     /// Stores raw event thread_ids (not btid'd).
     /// Flushed before the first non-TxBegin event in each iteration.
     pending_begins: VecDeque<u64>,
-    /// Cross-transaction abort accumulator (per raw thread_id).
-    /// When a thread reaches max_retries consecutive aborts across
-    /// iterations, its next begin is forced to SGL fallback.
-    /// This compensates for the sequential event model's inability
-    /// to interleave retries within a single tm_begin() call.
-    persistent_retries: HashMap<u64, u64>,
 }
 
 impl SimEngine {
@@ -121,7 +115,6 @@ impl SimEngine {
             computation_profile: None,
             addr_addend: 0,
             pending_begins: VecDeque::new(),
-            persistent_retries: HashMap::new(),
         }
     }
 
@@ -345,6 +338,10 @@ impl SimEngine {
         // try_begin() (LOCK_BUSY due to SGL_OWNER held) charges cost and
         // retries in the next round.  After max_r rounds, remaining
         // threads enter SGL fallback.
+        let (xbegin_cost, xabort_cost, sgl_lock_cost) = match &self.cost_model {
+            Some(m) => (m.tx_begin_cost, m.abort_cost, m.sgl_begin_cost),
+            None => (60, 1500, 75),
+        };
         let mut attempts: HashMap<u64, u64> = HashMap::new();
         let mut in_tx: HashSet<u64> = HashSet::new();
 
@@ -361,10 +358,10 @@ impl SimEngine {
                 self.backend.sim_clear_thread_id();
                 *a += 1;
 
-                // Charge cost for each retry attempt
-                self.estimated_cycles += 60; // COST_XBEGIN
+                // Charge cost for each retry attempt (from calibrated model)
+                self.estimated_cycles += xbegin_cost;
                 if !ok {
-                    self.estimated_cycles += 1500; // COST_XABORT
+                    self.estimated_cycles += xabort_cost;
                 }
 
                 if ok {
@@ -378,7 +375,7 @@ impl SimEngine {
                     self.backend.sim_set_thread_id(btid);
                     self.backend.force_sgl();
                     self.backend.sim_clear_thread_id();
-                    self.estimated_cycles += 75; // COST_MUTEX_LOCK
+                    self.estimated_cycles += sgl_lock_cost;
                     in_tx.insert(raw_tid);
                     self.verifier.tx_begin(raw_tid);
                     self.in_tx.insert(raw_tid, true);
@@ -398,7 +395,7 @@ impl SimEngine {
             self.backend.sim_set_thread_id(btid);
             self.backend.force_sgl();
             self.backend.sim_clear_thread_id();
-            self.estimated_cycles += 75;
+            self.estimated_cycles += sgl_lock_cost;
             self.verifier.tx_begin(raw_tid);
             self.in_tx.insert(raw_tid, true);
             self.aborted.insert(raw_tid, false);

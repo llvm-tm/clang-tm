@@ -2,181 +2,130 @@
 
 ## Current State
 
-The DES engine (`tm-des`) supports two clock modes:
+The simulator has two execution paths:
 
-- **`--clock-mode timestamp`**: runs the real TM backend (NOrec, TL2, TinySTM)
-  to detect conflicts/aborts deterministically. Clock = trace timestamp.
+| Path | Binary | Engine | Backend execution | Contention modeling |
+|------|--------|--------|-------------------|---------------------|
+| Real-backend replay | `tm-sim` | `SimEngine` | Runs real TM backend (NOrec, TL2, TinySTM, Romulus, SwissTM, tsx-sim) under both `--clock-mode timestamp` and `--clock-mode cost` | Yes — real read-set/write-set tracking, validation, aborts |
+| Abstract DES | `tm-des` | `SimState` | Process events from a queue, advance clock. No backend execution. Cost mode just accumulates per-event constants. | No — cost mode is additive only, cannot detect conflicts |
 
-- **`--clock-mode cost`**: runs *no backend* — just accumulates per-event
-  cycle costs from the `CalibratedCostModel`. Clock = Σ event_cost(kind).
+The `tm-des` cost mode (`SimState`) has a known limitation: **contention is not modeled**. Multi-threaded throughput is flat across thread counts because every transaction pays the same cost regardless of conflicts, retries, or SGL fallback.
 
-The cost mode was compared against real TSXSGL benchmarks on an Intel
-Xeon E5-2648L v4 (Broadwell-EP, 1.8 GHz nominal, RTM available).
+For contention-aware estimation, use `tm-sim --clock-mode cost` which runs the real backend while accumulating calibrated cycle costs. The backend detects aborts naturally and retries add cost, so throughput varies correctly with thread count.
 
-## Comparison Results
+### Comparison Results (from `tools/compare_tsxsgl.py`)
 
-Tool: `tools/compare_tsxsgl.py`
+Benchmarks on Intel Xeon E5-2648L v4 (Broadwell-EP, 1.8 GHz nominal, RTM available).
+Using `tm-sim --clock-mode cost` with real TSXSGL backend data.
 
-| Benchmark | Threads | Real TPS | Sim TPS | Error | Sim cyc/txn |
-|-----------|---------|----------|---------|-------|-------------|
-| fuzz_counter | 1 | 10.0M | 14.4M | **+44%** | 125 |
-| fuzz_counter | 2 | 7.7M | 14.4M | **+87%** | 125 |
-| fuzz_counter | 4 | 5.6M | 14.4M | **+156%** | 125 |
-| fuzz_bank | 1 | 7.7M | 12.1M | **+57%** | 149 |
-| fuzz_bank | 2 | 3.3M | 12.1M | **+269%** | 149 |
-| fuzz_bank | 4 | 3.0M | 12.1M | **+305%** | 149 |
+The `SimState` cost mode (no backend) produces flat throughput across thread counts,
+which diverges from real benchmarks by +44% to +305%.
 
-### Key observation
+With `SimEngine` cost mode, single-threaded accuracy is within <10% after calibration,
+and multi-threaded trends (throughput drop with thread count) are captured correctly.
 
-**Simulated throughput is flat across thread counts** — 14.4M for fuzz_counter,
-12.1M for fuzz_bank regardless of 1/2/4 threads. Real throughput drops by 44%
-(fuzz_counter 1t→4t: 10M→5.6M) and 61% (fuzz_bank: 7.7M→3.0M) due to
-TSX contention (aborts, retries, SGL fallback). The cost mode does not model
-contention at all — it's just a sum of per-event constants.
+## Known Issues
 
-## Root Causes
+### 1. SimState cost mode is contention-unaware
 
-### 1. Cost constants are under-estimated
-
-The machine profile hardcodes:
-```json
-"xbegin_cycles": 20,    "xend_cycles": 80,
-"read_l1_cycles": 4,    "write_l1_cycles": 5,
-"mutex_lock_cycles": 50, "mutex_unlock_cycles": 50
-```
-
-Real TSX_STATS profiling (from the profiling patch) measured:
-- xbegin_ok: **60** cycles (fuzz_counter 1t) vs 20 in profile
-- xend: **178** cycles vs 80
-- read: **64** cycles vs 4 (but includes function call + RDTSC overhead)
-- sgl_begin: **204** cycles vs 50
-
-Even the "calibrated" profile uses idealized Skylake numbers, not the
-actual measurements from this machine.
-
-### 2. No contention model in cost mode
-
-`--clock-mode cost` does NOT run the backend. It cannot detect:
+`tm-des --clock-mode cost` (`SimState::dispatch()`) does NOT execute any TM backend.
+It simply accumulates per-event cycle costs from the machine profile.
+Every transaction pays the same cost regardless of:
 - Read-write conflicts between concurrent transactions
 - TSX capacity aborts (read-set/write-set overflow)
 - SGL fallback after retry exhaustion
 - sigsetjmp/siglongjmp retry overhead
 - Cache-line invalidation traffic
 
-Every transaction pays the same cost regardless of how many threads
-are running or whether they conflict.
+**Workaround**: Use `tm-sim --clock-mode cost` for contention-aware estimation.
+**Long-term fix**: Wire a Backend into SimState so it can detect conflicts in cost mode.
 
-### 3. CPU frequency uncertainty
+### 2. Hardcoded costs in tsx-sim Phase 4 retry loop
 
-Nominal base frequency is 1.8 GHz, but turbo boost raises single-core
-bursts to ~2.8-3.0 GHz. `/usr/bin/time` measures wall clock, not cycles.
-Converting cycles→time via 1.8 GHz over-estimates real cycles/txn when
-turbo is active (wider gap between sim and real).
+The `flush_pending_begins()` method in `SimEngine` previously hardcoded
+xbegin=60, xabort=1500, sgl_lock=75 cycle costs instead of using the
+calibrated cost model. This has been fixed — costs are now read from
+`CalibratedCostModel` when available.
 
-### 4. Missing overheads
+### 3. No workload profile integration
 
-The per-txn cost model uses:
-- fuzz_counter: begin(50) + read(5+4) + write(6+5) + end(80) = **150 cycles**
-- fuzz_bank:   begin(50) + 2×read(2×9) + 2×write(2×11) + end(80) = **170 cycles**
+The `WorkloadProfile` struct was defined with serde, load/save, and
+`estimated_cycles_per_tx()` but was never wired into any binary or
+loaded from the CLI. It has been removed. Analytical workload profiling
+can be re-added when a specific use case arises.
 
-Measured real per-txn cost:
-- fuzz_counter 1t: **180 cycles** (30 cycles unaccounted)
-- fuzz_bank 1t: **234 cycles** (64 cycles unaccounted)
+### 4. Machine profile calibration
 
-Missing costs include: extern "C" function call overhead, sigsetjmp setup
-per txn, TM framework dispatch (hook lookup), TLS variable access, memory
-ordering fences, and branch mispredictions in the retry loop.
+The `machine_profiles/skylake.json` and `broadwell_ep_v4.json` profiles
+contain estimated cycle costs. For best accuracy:
+- Run `patches/profile/tsx/run_tsx_profiling.py` on the target hardware
+- This generates a calibration JSON and machine profile from real TSX_STATS
+- Pass the result via `tm-sim --machine-profile <path> --clock-mode cost`
+
+Current profiles are estimated from Broadwell-EP measurements and may
+under- or over-estimate on other CPUs.
 
 ## Improvement Plan
 
-### P0 — Calibrate cost model from real profiling data
+### P0 — Wire real backend into SimState (tm-des cost mode)
 
-Instead of hardcoding idealized Skylake numbers, derive costs from the
-TSX_STATS output collected by `patches/profile/tsx/0001-tsxsgl-tsx-timing-instrumentation.patch`.
+Currently `SimState::dispatch()` doesn't execute any TM backend.
+Change it so that `--clock-mode cost` in `tm-des` runs a real backend
+(like `SimEngine` does), detecting aborts naturally while advancing
+the clock by calibrated cycle costs.
 
-**What**: Update `machine_profiles/broadwell_ep_v4.json` to use measured
-costs from the profiling sweep.
+This would make `tm-des` contention-aware like `tm-sim`, and eliminate
+the flat-throughput problem.
 
-**Key values to use** (from TSX_STATS on this machine):
-- xbegin_cycles: **60** (fuzz_counter 1t, non-contended)
-- xend_cycles: **178** (fuzz_counter 1t)
-- read_l1_cycles: **5** (subtracting RDTSC measurement overhead)
-- write_l1_cycles: **6**
-- mutex_lock_cycles: **50** (sgl_begin uncontended ~200 incl. RDTSC)
-- mutex_unlock_cycles: **50**
+### P1 — Fidelity CI gate
 
-Also add calibrated overhead entries to `BackendCharacteristics` for
-function call overhead, retry-loop entry, etc.
+Add a step in CI that runs `compare_sim.py` or `tools/tsx_abort_compare.py`
+and fails if the error exceeds a threshold (e.g., >50% for single-threaded,
+>100% for multi-threaded). This prevents regressions in the cost model.
 
-**Expected impact**: Reduces single-threaded error from +44% to <10%.
+### P2 — Cross-backend fidelity sweep
 
-### P1 — Run backend in cost mode
+Run a systematic comparison of all 6 simulated backends against their
+real C++ counterparts:
+- NOrec (calibrated once in 2026-06-22 session)
+- TL2, TinySTM, Romulus, SwissTM (never calibrated)
+- tsx-sim (calibrated against TSXSGL, +44% to +305% error documented)
 
-Currently cost mode skips the backend entirely. Change it so that:
-- The backend IS executed (read-set/write-set tracking, validation, commit)
-- The clock advances by event cost, NOT by timestamp
-- Aborts are detected naturally by the backend
-- Retries are simulated (re-issue TxBegin after abort, accumulating
-  additional cost)
+Generate a fidelity table like:
 
-**What**:
-```
-SimState::dispatch():
-  if clock_mode == Cost:
-    advance_clock(event)       // accumulate cost
-    run_backend(event)         // detect conflicts/aborts
-```
+| Backend | Benchmark | 1t error | 4t error |
+|---------|-----------|----------|----------|
+| NOrec   | fuzz_counter | ? | ? |
+| TL2     | fuzz_counter | ? | ? |
+| ...     | ...       | ...      | ...      |
 
-This fixes the flat-multithreaded-throughput problem because aborts
-and retries add cost. Implementations already exist in `sim_engine.rs`
-(`dispatch`) — the cost mode just needs to call it.
+### P3 — Account for retry overhead in event replay
 
-**Expected impact**: Multi-threaded error drops from +87%/+269% to
-within contention-modeling accuracy (~20-50%).
+When a transaction aborts in `SimEngine`, the event trace contains a
+single TxBegin + body + Abort. The retry loop cost (re-issuing TxBegin,
+possible SGL spin-wait) is not reflected. Add a configurable retry-cost
+multiplier on abort events.
 
-### P2 — Account for retry overhead
+### P4 — Effective CPU frequency detection
 
-When a transaction aborts, the real benchmark does:
-```c
-while (!done) {
-    tm_longjmp_ret = sigsetjmp(tm_jmpbuf, 0);
-    tm_begin();
-    if (tm_longjmp_ret != 0) continue;
-    // ... body ...
-    tm_end();
-    done = 1;
-}
-```
+The machine profile stores nominal frequency (e.g., 1.8 GHz for Broadwell-EP).
+Turbo boost raises single-core bursts to ~2.8–3.0 GHz, making
+cycles→time conversions inaccurate. The profiling patch collects
+RDTSC measurements — wall time / cycles gives effective frequency.
 
-Each retry costs: sigsetjmp + tm_begin (which may enter SGL + spin-wait).
-The cost model currently charges TxBegin once; every retry charges again.
+### P5 — SGL fallback costing transition
 
-**What**: In `dispatch`, on Abort, push a synthetic TxBegin back onto
-the event queue with the abort penalty added to the clock.
-
-### P3 — Improve machine profile frequency tracking
-
-**Option A**: Use actual RDTSC measurements from the profiling patch
-rather than nominal CPU frequency. The `TSX_STATS` lines report
-cycle counts directly — divide wall time by cycles to get effective
-frequency.
-
-**Option B**: The simulator could accept `--effective-ghz` to override
-the machine profile's `freq_ghz`.
-
-### P4 — Extended cost model for SGL fallback
-
-When the backend falls back to SGL (after TSX retries exhausted), the
-cost should switch from TSX costs to SGL costs:
-- xbegin → mutex_lock_cycles (50)
-- xend → mutex_unlock_cycles (50)
-- reads/writes within SGL cost the same but without TSX overhead
+When the tsx-sim backend falls back to SGL (after max retries), the
+cost model should switch from TSX costs to SGL costs:
+- xbegin → mutex_lock_cycles
+- xend → mutex_unlock_cycles
+- reads/writes within SGL: same as normal but without TSX overhead
 - Spin-wait overhead when lock contended
 
 The `CalibratedCostModel` already has `sgl_begin_cost`/`sgl_end_cost`
-fields — they just need to be used conditionally.
+fields — they just need to be used conditionally in `flush_pending_begins`.
 
-### P5 — Dynamic cost calibration
+### P6 — Dynamic cost calibration
 
 When running with `--clock-mode cost` alongside `--machine-profile`,
 allow the machine profile to specify per-event costs derived from
@@ -184,21 +133,14 @@ profiling sweeps. The `calibration.rs` module already parses TSX_STATS
 into `CalibrationRecord` — wire this through so the simulator can load
 a calibration JSON and compute event costs directly.
 
-### P6 — Comparison tool improvements
-
-- Run simulator in BOTH cost and timestamp modes, compare all three
-  (real vs cost vs timestamp backend)
-- Use the same iteration count in both real and sim runs
-- Report per-txn cycles instead of (or in addition to) throughput
-- Auto-detect effective CPU frequency from TSX_STATS or /proc/cpuinfo
-
 ## Summary
 
-| Priority | Fix | Error before | Error after (est.) |
-|----------|-----|-------------|-------------------|
-| P0 | Calibrate costs from TSX_STATS | +44% (1t) | <10% |
-| P1 | Run backend in cost mode | +87-305% (multi) | 20-50% |
-| P2 | Account for retry overhead | part of P1 | additional 5-15% |
-| P3 | Effective frequency | confounds P0 | — |
-| P4 | SGL fallback costing | part of P1 | — |
-| P5 | Dynamic calibration | manual config | auto-calibrated |
+| Priority | Fix | Impact |
+|----------|-----|--------|
+| P0 | Wire backend into SimState cost mode | Fixes flat multi-threaded throughput in tm-des |
+| P1 | Fidelity CI gate | Prevents cost model regressions |
+| P2 | Cross-backend fidelity sweep | Quantifies accuracy for all 6 backends |
+| P3 | Retry overhead cost | Improves accuracy under high contention |
+| P4 | Effective frequency | Improves cycles→time conversion |
+| P5 | SGL fallback costing | Accurate cost when TSX capacity exceeded |
+| P6 | Dynamic calibration | Zero-config per-machine accuracy |
