@@ -37,7 +37,7 @@ EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
     LP,                 (* Set of LP (thread) IDs *)
-    Addr,               (* Set of memory addresses *)
+    Addr                (* Set of memory addresses *)
 
 ASSUME LP \subseteq Nat
 ASSUME Addr \subseteq Nat
@@ -67,11 +67,11 @@ IsReading(lp, a) == <<lp, a>> \in in_flight_reads
 
 (* Find another LP reading the same address (RAW conflict check) *)
 FindReader(lp, a) ==
-    {r : r \in {r2 \in LP : IsReading(r2, a)} : r # lp}
+    {r \in LP : IsReading(r, a) /\ r # lp}
 
 (* Find another LP writing the same address (WAR conflict check) *)
 FindWriter(lp, a) ==
-    {w : w \in {w2 \in LP : IsWriting(w2, a)} : w # lp}
+    {w \in LP : IsWriting(w, a) /\ w # lp}
 
 (*--------------------------------------------------------------------*)
 (* Init                                                                *)
@@ -204,7 +204,7 @@ ExitSGL(lp) ==
 ConflictAbort(lp) ==
     /\ pc[lp] = "active"
     /\ in_tx[lp] = TRUE
-    (\* This LP is being aborted by another LP's operation *\)
+    (* This LP is being aborted by another LP's operation *\)
     /\ in_tx' = [in_tx EXCEPT ![lp] = FALSE]
     /\ in_flight_writes' = in_flight_writes \ {<<lp, a>> : a \in Addr}
     /\ in_flight_reads' = in_flight_reads \ {<<lp, a>> : a \in Addr}
@@ -300,3 +300,5 @@ NotAllAborted ==
 (*====================================================================*)
 
 (* Default: LP = {0, 1}; Addr = {0, 1} *)
+
+====

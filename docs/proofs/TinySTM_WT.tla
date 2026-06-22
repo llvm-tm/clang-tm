@@ -29,14 +29,14 @@ ASSUME Addr \subseteq Nat
 VARIABLES
     clock,
     lock[_, _],                           (* [addr -> {locked, owner, version, inc}] *)
-    mem[_],
-    pc[_],                                (* idle | active | abort *)
-    readSet[_],                           (* set of <<addr, version, incarnation>> *)
-    writeSet[_],                          (* set of addr *)
+    mem,
+    pc,                                (* idle | active | abort *)
+    readSet,                           (* set of <<addr, version, incarnation>> *)
+    writeSet,                          (* set of addr *)
     undoLog[_, _],                        (* old value before write-through *)
-    readOnly[_],
-    committed[_],
-    aborted[_]
+    readOnly,
+    committed,
+    aborted
 
 vars == <<clock, lock, mem, pc, readSet, writeSet, undoLog, readOnly, committed, aborted>>
 

@@ -92,7 +92,7 @@ vars == <<mem, version, clock, lock, pc, timestamp, read_set, write_set,
 (* Helpers                                                             *)
 (*--------------------------------------------------------------------*)
 
-NoWrite == -1           (* sentinel meaning no write for this address *)
+NoWrite == 0 - 1          (* sentinel meaning no write for this address *)
 
 (* Version entry encoding: bit 0 = lock, bits 1+ = version number *)
 LockBit(entry) == entry % 2
@@ -157,8 +157,8 @@ ReadValidate(t, a) ==
        THEN
            (* abort *)
            /\ pc' = [pc EXCEPT ![t] = "aborting"]
-           /\ UNCHANGED <<mem, version, clock, lock, timestamp, read_set,
-                          write_set, read_only, commit_ts>>
+            /\ UNCHANGED <<mem, version, clock, lock, timestamp, read_set,
+                           write_set, read_only, commit_ts, committed, aborted>>
        ELSE
            (* Step 3: read data from memory *)
            /\ LET val == mem[a] IN
@@ -179,10 +179,10 @@ ReadValidateAbort(t, a) ==
     /\ ~HasWritten(t, a)
     /\ a \in Addr
     /\ LET idx == VIndex(a)
-           entry_before == version[idx] IN
-       LockBit(entry_before) = 0                  (* not locked before read *)
-    /\ LET entry_after == version[idx] IN
-       entry_before # entry_after                  (* changed during read *)
+           entry_before == version[idx]
+           entry_after == version[idx] IN
+       /\ LockBit(entry_before) = 0                (* not locked before read *)
+       /\ entry_before # entry_after                (* changed during read *)
     /\ pc' = [pc EXCEPT ![t] = "aborting"]
     /\ UNCHANGED <<mem, version, clock, lock, timestamp, read_set,
                    write_set, read_only, commit_ts, committed, aborted>>
@@ -334,7 +334,7 @@ Abort(t) ==
     /\ write_set' = [write_set EXCEPT ![t] = [a \in Addr |-> NoWrite]]
     /\ read_only' = [read_only EXCEPT ![t] = TRUE]
     /\ commit_ts' = [commit_ts EXCEPT ![t] = 0]
-    /\ UNCHANGED <<mem, version, clock, lock>>
+    /\ UNCHANGED <<mem, version, clock, lock, committed>>
 
 (*--------------------------------------------------------------------*)
 (* Next-state relation                                                *)
@@ -424,3 +424,5 @@ Completion ==
 
 (* Default model parameters — override in TLC model config *)
 (* Thread = {1, 2}; Addr = {0, 1}; Data = {0, 1, 2}; VSIZE = 2 *)
+
+====

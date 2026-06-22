@@ -67,7 +67,7 @@ vars == <<mem, sgl, tsx_mode, pc, retry_cnt, redo_log,
 (* Helpers                                                             *)
 (*--------------------------------------------------------------------*)
 
-NoWrite == -1
+NoWrite == 0 - 1
 
 (*--------------------------------------------------------------------*)
 (* Init                                                                *)
@@ -116,7 +116,7 @@ TSXWrite(t, a, v) ==
     /\ a \in Addr
     /\ v \in Data
     /\ redo_log' = [redo_log EXCEPT ![t] = Append(redo_log[t], <<a, v>>)]
-    (\* mem is NOT changed — RTM will discard on abort *\)
+    (* mem is NOT changed — RTM will discard on abort *\)
     /\ UNCHANGED <<mem, sgl, tsx_mode, pc, retry_cnt,
                    cp_valid, cp_addr, checkpoint,
                    committed, aborted>>
@@ -127,7 +127,7 @@ TSXCommit(t) ==
     /\ pc[t] = "active_tsx"
     /\ tsx_mode' = [tsx_mode EXCEPT ![t] = FALSE]
     /\ pc' = [pc EXCEPT ![t] = "flush_log"]
-    (\* After _xend(), the redo log is atomically visible to
+    (* After _xend(), the redo log is atomically visible to
        other threads.  We proceed to the durable phase. *\)
     /\ UNCHANGED <<mem, sgl, retry_cnt, redo_log, cp_valid,
                    cp_addr, checkpoint, committed, aborted>>
@@ -135,7 +135,7 @@ TSXCommit(t) ==
 (* Step 2: Flush redo log to NVM ────────────────────────────────────*)
 FlushLog(t) ==
     /\ pc[t] = "flush_log"
-    (\* clwb all redo-log cachelines + sfence *\)
+    (* clwb all redo-log cachelines + sfence *\)
     /\ pc' = [pc EXCEPT ![t] = "write_cp"]
     /\ UNCHANGED <<mem, sgl, tsx_mode, retry_cnt, redo_log,
                    cp_valid, cp_addr, checkpoint, committed, aborted>>
@@ -143,9 +143,9 @@ FlushLog(t) ==
 (* Step 3: Write checkpoint ─────────────────────────────────────────*)
 WriteCheckpoint(t) ==
     /\ pc[t] = "write_cp"
-    (\* Mark checkpoint: indicates redo log is durable *\)
+    (* Mark checkpoint: indicates redo log is durable *\)
     /\ cp_valid' = [cp_valid EXCEPT ![t] = TRUE]
-    (\* cp_addr stores the logical address of the redo log.
+    (* cp_addr stores the logical address of the redo log.
        For modeling, we use the thread ID as the key. *\)
     /\ cp_addr' = [cp_addr EXCEPT ![t] = t]
     /\ checkpoint' = [checkpoint EXCEPT ![t] = TRUE]
@@ -156,19 +156,19 @@ WriteCheckpoint(t) ==
 (* Step 4: Apply redo log to primary memory ─────────────────────────*)
 ApplyLog(t) ==
     /\ pc[t] = "apply_log"
-    (\* Write each redo-log entry to its final address *\)
+    (* Write each redo-log entry to its final address *\)
     /\ LET ApplyOne(m, i) ==
            [a \in Addr |->
                IF i <= Len(redo_log[t]) /\ redo_log[t][i][1] = a
                THEN redo_log[t][i][2]
                ELSE m[a]]
        IN
-       (\* Apply all entries sequentially (fold) *\)
+       (* Apply all entries sequentially (fold) *\)
        /\ mem' = [a \in Addr |->
                     IF \E i \in 1..Len(redo_log[t]) :
                          redo_log[t][i][1] = a
                     THEN
-                        (\* Find the last write to this address in the log *\)
+                        (* Find the last write to this address in the log *\)
                         LET LastIdx ==
                             CHOOSE i \in 1..Len(redo_log[t]) :
                                 redo_log[t][i][1] = a /\
@@ -193,7 +193,7 @@ ClearCheckpoint(t) ==
 (*── TSX Abort (_xabort): discard redo log ──────────────────────────*)
 TSXAbort(t) ==
     /\ pc[t] = "active_tsx"
-    (\* HTM hardware discards all writes (including log entries).
+    (* HTM hardware discards all writes (including log entries).
        The redo log from this aborted TX is stale — discard it. *\)
     /\ redo_log' = [redo_log EXCEPT ![t] = << >>]
     /\ tsx_mode' = [tsx_mode EXCEPT ![t] = FALSE]
@@ -244,7 +244,7 @@ SGLWrite(t, a, v) ==
     /\ sgl = t
     /\ a \in Addr
     /\ v \in Data
-    (\* In SGL mode, the mutex guarantees isolation, so we can
+    (* In SGL mode, the mutex guarantees isolation, so we can
        write directly to memory.  We also log for recovery. *\)
     /\ redo_log' = [redo_log EXCEPT ![t] = Append(redo_log[t], <<a, v>>)]
     /\ mem' = [mem EXCEPT ![a] = v]
@@ -256,10 +256,10 @@ SGLWrite(t, a, v) ==
 SGLCommit(t) ==
     /\ pc[t] = "active_sgl"
     /\ sgl = t
-    (\* Same durable path as TSX: flush → checkpoint → apply *\)
+    (* Same durable path as TSX: flush → checkpoint → apply *\)
     /\ sgl' = 0
     /\ pc' = [pc EXCEPT ![t] = "flush_log"]
-    (\* In SGL mode we skip _xend() and go directly to flush *\)
+    (* In SGL mode we skip _xend() and go directly to flush *\)
     /\ UNCHANGED <<mem, tsx_mode, retry_cnt, redo_log, cp_valid,
                    cp_addr, checkpoint, committed, aborted>>
 
@@ -269,17 +269,17 @@ SGLCommit(t) ==
 
 (*── Recovery: replay checkpointed redo log ─────────────────────────*)
 Recovery(t) ==
-    (\* A checkpoint exists for thread t *\)
+    (* A checkpoint exists for thread t *\)
     /\ checkpoint[t] = TRUE
     /\ cp_valid[t] = TRUE
-    (\* Replay the redo log *\)
+    (* Replay the redo log *\)
     /\ LET LogLen == Len(redo_log[t]) IN
        LogLen > 0 =>
          /\ mem' = [a \in Addr |->
                       IF \E i \in 1..LogLen : redo_log[t][i][1] = a
                       THEN redo_log[t][i][2]
                       ELSE mem[a]]
-    (\* Clear the checkpoint after replay *\)
+    (* Clear the checkpoint after replay *\)
     /\ checkpoint' = [checkpoint EXCEPT ![t] = FALSE]
     /\ cp_valid' = [cp_valid EXCEPT ![t] = FALSE]
     /\ UNCHANGED <<sgl, tsx_mode, pc, retry_cnt, redo_log,
@@ -378,3 +378,5 @@ RecoveryCompletes ==
 
 (* Default: Thread = {1, 2}; Addr = {0, 1}; Data = {0, 1};
    MaxRetries = 2 *)
+
+====

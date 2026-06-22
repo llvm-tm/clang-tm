@@ -20,6 +20,8 @@ backends in this repository.
 | `SimEngine.tla` | SimEngine (cross-LP conflict resolution) | Specified for TLC — NoConcurrentWrites, SGLMutex, SGLIsolation, NoSelfConflict |
 | `NVHTM.tla` | NV-HTM (persistent HTM w/ redo log) | Specified for TLC — TSXSafety, CheckpointConsistent, CommitPhaseOrdering |
 | `XTM.tla` | XTM (page-granularity OCC) | Specified for TLC — PageOwnershipExclusion, OwnershipTracked, NoDirtyRead |
+| `TiKV.tla` | TiKV (Percolator 2PC distributed TM) | Specified with .cfg — LockExclusion, NoStaleLocks, SnapshotIsolation |
+| `TSXSim.tla` | TSX-Sim (bloom-filter TSX simulation) | Specified with .cfg — LockFreeInv, NoTSXCommitConflict, CapacityBounds |
 
 ## Prerequisites
 
@@ -96,6 +98,8 @@ Concrete parameters for model checking:
 | `SimEngine.tla` | `LP <- {0,1}`, `Addr <- {0,1}` |
 | `NVHTM.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1}`, `MaxRetries <- 2` |
 | `XTM.tla` | `Thread <- {1,2}`, `Page <- {0,1}`, `Data <- {0,1}`, `MaxRetries <- 2` |
+| `TiKV.tla` | `Thread <- {1,2}`, `Key <- {0,1}`, `Data <- {0,1,2}`, `MaxRetries <- 2` |
+| `TSXSim.tla` | `Thread <- {1,2}`, `Addr <- 1..8`, `CacheLine <- {1..4}`, `HashPosition <- {1..6}`, `MAX_RETRIES <- 2`, `MAX_READ_LINES <- 3`, `MAX_WRITE_LINES <- 2` |
 
 From the command line (requires TLA+ tools on `$PATH`):
 
@@ -200,13 +204,35 @@ spin-loop (`validate()`).  The spec's clock parity invariant (`clk % 2 = 1`
 iff a thread is committing) correctly models the real CAS-based commit
 protocol.
 
+**TSXSim (TSXSim.tla)** — The spec models a 6-bit bloom filter (2 hash
+functions); the real implementation uses a 4096-bit bloom filter (double-hash).
+Both share the same no-false-negatives property.  The spec's `ConflictFree`
+predicate checks both bloom filter AND write-set overlap; the real
+implementation does the same.  Capacity limits (`MAX_READ_LINES=3`,
+`MAX_WRITE_LINES=2`) are model-checking constants; the real implementation
+defaults to `TSX_SIM_MAX_READ_LINES=512`, `TSX_SIM_MAX_WRITE_LINES=128`.
+Virtual cycle costs are modeled as per-action token updates (not verified as
+invariants — they are simulation artifacts, not correctness properties).
+
+**TiKV (TiKV.tla)** — The spec models Percolator 2PC as three phases: Prewrite
+(acquire locks), CommitPrimary (single-key commit point), CommitSecondary
+(bulk write-back).  The real TiKV client (`tikv-client` 0.4) handles these
+phases internally via `begin_optimistic()` / `commit()`.  The spec's
+`snapshot` variable is a placeholder (TLC constant); the real TiKV uses a
+hybrid logical clock (HLC) for snapshot timestamps.  The `TxnConflict` action
+models TiKV's `TxnNotFound` error during reads (concurrent commit in
+progress), which the real backend handles by rolling back and signalling
+`TmxAbort`.
+
 ### Coverage
 
 - Fully verified (TLAPS): **SGL** (42/42 obligations).
-- TSX+SGL dual-path protocols: **TSXSGL**, **SPHT**, **NVHTM**.
-- OCC protocols: **NOrec**, **Romulus** (version-table), **XTM** (page-granularity).
-- Lock-based STM: **TL2**, **TinySTM** (WBCTL/WBETL/WT), **SwissTM**.
+- TSX+SGL dual-path protocols: **TSXSGL**, **SPHT**, **NVHTM**, **TSXSim** (bloom-filter simulation).
+- OCC protocols: **NOrec**, **Romulus** (version-table), **XTM** (page-granularity), **LEFTRIGHT** (global-clock OCC).
+- Lock-based STM: **TL2**, **TinySTM** (WBCTL/WBETL/WT), **SwissTM**, **DUDETM** (volatile phase).
 - DES conflict resolution: **SimEngine** (cross-LP with SGL fallback).
+- Distributed: **TiKV** (Percolator 2PC), **DistributedSGL** (lock-server messaging).
+- Persistent: **PersistentSGL** (NVM durability), **SPHT** (group-commit), **NVHTM** (redo-log checkpoint).
 - The proofs define **safety invariants** (no dirty reads, lock consistency,
   no concurrent committing) intended for TLC model checking with finite
   instances.

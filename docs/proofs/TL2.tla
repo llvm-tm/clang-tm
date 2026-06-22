@@ -29,15 +29,15 @@ ASSUME MAX_COMMIT \in Nat
 
 VARIABLES
     clock,                                (* global version clock *)
-    guard[_],                             (* per-address guard: bit0=locked, bits1+=version *)
-    mem[_],                               (* shared memory *)
-    pc[_],                                (* idle | active | committing *)
-    readSet[_],                           (* per-thread: set of (addr, observed_version) *)
-    writeSet[_],                          (* per-thread: set of addr *)
+    guard,                             (* per-address guard: bit0=locked, bits1+=version *)
+    mem,                               (* shared memory *)
+    pc,                                (* idle | active | committing *)
+    readSet,                           (* per-thread: set of (addr, observed_version) *)
+    writeSet,                          (* per-thread: set of addr *)
     writeBuf[_, _],                       (* buffered write value per thread per addr *)
-    snapshot[_],                          (* clock snapshot at begin *)
-    readOnly[_],                          (* TRUE if no writes in this TX *)
-    committed[_]                          (* commit count *)
+    snapshot,                          (* clock snapshot at begin *)
+    readOnly,                          (* TRUE if no writes in this TX *)
+    committed                          (* commit count *)
 
 vars == <<clock, guard, mem, pc, readSet, writeSet, writeBuf, snapshot, readOnly, committed>>
 

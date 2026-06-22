@@ -33,16 +33,16 @@ ASSUME MaxRetries \in Nat
 
 VARIABLES
     clk,                                  (* global clock (even = unlocked) *)
-    mem[_],                               (* shared memory *)
-    pc[_],                                (* "idle", "active", "committing" *)
-    readSet[_],                           (* per-thread read set *)
-    writeSet[_],                          (* per-thread write set *)
-    wbBuffer[_],                          (* write-back buffer [addr -> value] *)
-    snapshot[_],                          (* observed clock at begin *)
-    readOnly[_],                          (* true if no writes in this TX *)
-    committed[_],                         (* commit count *)
-    aborted[_],                           (* abort count *)
-    rsSnapshot[_]                         (* clock version at last validation *)
+    mem,                               (* shared memory *)
+    pc,                                (* "idle", "active", "committing" *)
+    readSet,                           (* per-thread read set *)
+    writeSet,                          (* per-thread write set *)
+    wbBuffer,                          (* write-back buffer [addr -> value] *)
+    snapshot,                          (* observed clock at begin *)
+    readOnly,                          (* true if no writes in this TX *)
+    committed,                         (* commit count *)
+    aborted,                           (* abort count *)
+    rsSnapshot                         (* clock version at last validation *)
 
 vars == <<clk, mem, pc, readSet, writeSet, wbBuffer, snapshot, readOnly, committed, aborted>>
 

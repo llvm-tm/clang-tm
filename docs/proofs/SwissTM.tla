@@ -31,14 +31,14 @@ ASSUME Addr \subseteq Nat
 VARIABLES
     g_ts,                                 (* global commit timestamp *)
     orec[_, _, _],                        (* [addr -> {r_lock, w_lock, r_ver, w_owner}] *)
-    mem[_],
-    pc[_],                                (* idle | active | commit_rlock | commit_wb *)
-    readSet[_],                           (* set of <<addr, observed_r_ver>> *)
-    writeLog[_],                          (* set of addr *)
+    mem,
+    pc,                                (* idle | active | commit_rlock | commit_wb *)
+    readSet,                           (* set of <<addr, observed_r_ver>> *)
+    writeLog,                          (* set of addr *)
     writeBuf[_, _],                       (* buffered new value per addr *)
     oldVal[_, _],                         (* old value for undo *)
-    readOnly[_],
-    committed[_]
+    readOnly,
+    committed
 
 vars == <<g_ts, orec, mem, pc, readSet, writeLog, writeBuf, oldVal, readOnly, committed>>
 

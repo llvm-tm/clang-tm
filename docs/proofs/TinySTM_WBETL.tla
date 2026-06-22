@@ -29,13 +29,13 @@ ASSUME Addr \subseteq Nat
 VARIABLES
     clock,
     lock[_, _],                           (* [addr -> {locked, owner, version}] *)
-    mem[_],
-    pc[_],                                (* idle | active | wb *)
-    readSet[_],
-    writeSet[_],
+    mem,
+    pc,                                (* idle | active | wb *)
+    readSet,
+    writeSet,
     writeBuf[_, _],
-    readOnly[_],
-    committed[_]
+    readOnly,
+    committed
 
 vars == <<clock, lock, mem, pc, readSet, writeSet, writeBuf, readOnly, committed>>
 
