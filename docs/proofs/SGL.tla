@@ -141,6 +141,34 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 \* END TRANSLATION 
 
+(* Bounds for model checking: version is unbounded in the spec,
+   but for finite-state TLC we bound it.  The invariants checked
+   (MutexInv, AtMostOneActive, NoDirtyReads) do not reference version. *)
+VersionBound == version < 3
+
+(*====================================================================*)
+(* Action aliases for the TLAPS proof (match PlusCal-generated ops)   *)
+(*====================================================================*)
+Begin(t) == L_idle(t)
+
+Read(t, a) == /\ pc[t] = "L_active"
+              /\ readSet' = [readSet EXCEPT ![t] = readSet[t] \union {a}]
+              /\ pc' = [pc EXCEPT ![t] = "L_active"]
+              /\ UNCHANGED <<lock, version, mem, writeSet, committed>>
+
+Write(t, a, v) == /\ pc[t] = "L_active"
+                  /\ mem' = [mem EXCEPT ![a] = v]
+                  /\ writeSet' = [writeSet EXCEPT ![t] = writeSet[t] \union {a}]
+                  /\ pc' = [pc EXCEPT ![t] = "L_active"]
+                  /\ UNCHANGED <<lock, version, readSet, committed>>
+
+Commit(t) == /\ pc[t] = "L_active"
+             /\ lock' = 0
+             /\ version' = version + 1
+             /\ committed' = [committed EXCEPT ![t] = committed[t] + 1]
+             /\ pc' = [pc EXCEPT ![t] = "L_idle"]
+             /\ UNCHANGED <<mem, readSet, writeSet>>
+
 (*====================================================================*)
 (* MutexInductive — Inductive invariant for mutual exclusion           *)
 (*====================================================================*)

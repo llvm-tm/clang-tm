@@ -17,7 +17,7 @@ TLA2TOOLS_JAR ?= /tmp/tla2tools.jar
 TLAPM         ?= tlapm
 TLC_OPTS      ?=
 
-JAVA := /tmp/jdk-11.0.10+9-jre/bin/java
+JAVA ?= java
 
 # All backends with .tla and .cfg files
 BACKENDS := $(patsubst %.cfg,%,$(wildcard *.cfg))
