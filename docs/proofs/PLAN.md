@@ -28,15 +28,15 @@ Configurable via `TLA2TOOLS_JAR` (default: `/tmp/tla2tools.jar`).
 | **TinySTM_WT** | 12.9M gen, 1.2M distinct | MutexLocks | Largest state space (4-tuple locks, undo log); `aborted` unbounded → `AbortBound` needed; `L_abort` separate label for failed-commit abort |
 | **PersistentSGL** | 949 gen, 288 distinct | LockExclusion, LockHolderActive, RecoveryConsistency, NVMContainsCommitted | `pc` is PlusCal reserved — rename to `state`; crash-guarded begin requires nested `if` pattern; system process for crash/recovery |
 
-## Phase 2: Medium-complexity backends → PlusCal
+## Phase 2: Medium-complexity backends → PlusCal ✅ COMPLETED
 
-| Backend | Labels | Strategy |
-|---------|--------|----------|
-| **TL2** | ✅ DONE | Reference implementation |
-| **Romulus** | 6 | Version-table OCC: start → read/write → validate → inc clock → write-back → release |
-| **XTM** | 6 | Page-granularity OCC: start read/write → page copy → validate → write-back |
-| **LEFTRIGHT** | 5 | Global-clock OCC: start → read/write → validate (value) → inc clock → release |
-| **SwissTM** | 6 | Time-based + encounter locking: start (snapshot) → read (validate if stale) → write (lock) → commit |
+| Backend | TLC states | Invariants | Issues found |
+|---------|-----------|------------|-------------|
+| **TL2** | (pre-existing) | LockConsistent, NoDirtyRead, SnapshotInv | Reference implementation for the PlusCal pattern. |
+| **Romulus** | 462K gen, 141K distinct | LockExclusion, LockHeldImpliesCommitting, ClockMonotonic, AtMostOneCommitting | `aborted` unbounded → `ModelBound`; `forall` not supported in PlusCal (use function overrides); set filter syntax uses `\|` not `:` in TLA+; `-1` unary minus not valid at module level. 11-state action spec reduced to 10 PlusCal labels. |
+| **XTM** | 134K gen, 28K distinct | PageOwnershipExclusion, OwnershipTracked, WriteTrackedOwnership, WritebackConsistent, VersionMonotonic, NoDirtyRead | `write_set`/`read_set` not reset after commit caused invariant violation. Eager conflict detection: PlusCal's `either/or` cannot express mutually-exclusive guarded choices → model allows silent conflict-skip (acceptable for safety). |
+| **LEFTRIGHT** | 778K gen, 224K distinct | LockExclusion, LockHolderCommitting, AtMostOneCommitting | Value-based validation needs `Data={0,1}` for captured-value comparison. No `write_set` cleanup needed (invariants only reference `commit_lock` and `pc`). |
+| **SwissTM** | 1.6M gen, 424K distinct | MutexWriteLock, WriteOwnerInv, NoPostCommitLocks | ORec 4-tuple encoding (`<<rl,wl,rv,wo>>`); sequential function overrides in same label overwrite each other (not compose) — must combine both release patterns into one function override. Most complex PlusCal spec so far (212 lines). |
 
 ## Phase 3: TLA+-only backends (retain existing)
 
@@ -83,8 +83,8 @@ For each backend:
 |-------|--------|--------|--------|
 | 0 | Makefile | 1 session | ✅ |
 | 1 | 6 simple backends → PlusCal | 6 sessions | ✅ COMPLETED 2026-06-23 |
-| 2 | 4 medium backends → PlusCal | 8 sessions | ⏳ TL2 done, 4 pending |
+| 2 | 4 medium backends → PlusCal | 8 sessions | ✅ COMPLETED 2026-06-23 |
 | 3 | 6 TLA+-only retentions (no-op) | 1 session | ⏳ Not started |
 | 4 | Fairness + invariants (all) | 2 sessions | ⏳ Not started |
 | 5 | Verification (all) | 3 sessions | ⏳ Not started |
-| **Total** | **11 new PlusCal specs** | **~21 sessions** | **5/11 backends** |
+| **Total** | **11 new PlusCal specs** | **~21 sessions** | **10/11 backends** (all 11 PlusCal backends done) |
