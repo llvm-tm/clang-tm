@@ -39,21 +39,21 @@ jobs:
       - name: Fidelity gate (fail if avg fidelity < 50%)
         run: |
           python3 -c "
-import csv, sys
-with open('nightly_results.csv') as f:
-    reader = csv.DictReader(f)
-    fidelities = [float(r['Fidelity'].rstrip('%')) for r in reader
-                  if r['Fidelity'] not in ('N/A', '')]
-    if not fidelities:
-        print('No fidelity data found')
-        sys.exit(0)
-    avg = sum(fidelities) / len(fidelities)
-    print(f'Average fidelity: {avg:.1f}%')
-    if avg < 50.0:
-        print(f'FAIL: fidelity {avg:.1f}% < 50% threshold')
-        sys.exit(1)
-    print('PASS')
-"
+          import csv, sys
+          with open('nightly_results.csv') as f:
+              reader = csv.DictReader(f)
+              fidelities = [float(r['Fidelity'].rstrip('%')) for r in reader
+                            if r['Fidelity'] not in ('N/A', '')]
+              if not fidelities:
+                  print('No fidelity data found')
+                  sys.exit(0)
+              avg = sum(fidelities) / len(fidelities)
+              print(f'Average fidelity: {avg:.1f}%')
+              if avg < 50.0:
+                  print(f'FAIL: fidelity {avg:.1f}% < 50% threshold')
+                  sys.exit(1)
+              print('PASS')
+          "
       - name: Upload fidelity results
         uses: actions/upload-artifact@v4
         with:
