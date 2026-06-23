@@ -869,3 +869,66 @@ Simulation accurately estimates per-transaction execution time. The 0.0023s gap 
 ### Key insight for future
 **Always calibrate cost models against the uninstrumented backend, not against trace-instrumented runs.** Event-logging overhead (buffer management, file I/O, timestamp capture) can dominate actual TM overhead by 100×.
 
+## Session 2026-06-23 — DeathStarBench TM benchmark + NOrec correctness issue found
+
+### DeathStarBench TM benchmark
+
+New benchmark `benchmarks/plugin/deathstarbench/social_tm.cpp` — models DeathStarBench social network workload patterns (compose post, read timeline, follow/unfollow, transfer post) as transactional memory operations in shared memory.
+
+**Workload composition:**
+- 50% compose post: atomic post counter increment + next-id increment
+- 30% read timeline: scan all users' post counts (read-only)
+- 10% follow: increment both follower and following counters (dual-write)
+- 5% unfollow: decrement both follower and following counters (dual-write)
+- 5% transfer post: decrement source, increment destination
+
+**Invariant:** `total_followers == total_following` — any violation indicates lost atomicity (a follow/unfollow that committed only one of the two counter updates).
+
+**Build targets:** `social_tm_uninstrumented`, `social_tm_norec`, `social_tm_tinystm_wbctl`, `social_tm_tinystm_wt`.
+
+To build and run:
+```
+make -C benchmarks/plugin/deathstarbench
+./benchmarks/plugin/deathstarbench/bin/social_tm_tinystm_wbctl -d 10000 -u 256 -t 4
+```
+
+### Test results (256 users, 4 threads, 3s)
+
+| Backend       | Ops/sec  | Aborts      | Invariant |
+|---------------|----------|-------------|-----------|
+| TinySTM WBCTL | 556,398  | 129,901     | PASS      |
+| TinySTM WT    | 240,859  | 489,073     | PASS      |
+| NOrec         | ~4M*     | N/A         | FAIL      |
+
+\*NOrec's high throughput is misleading — it has a correctness bug (see below).
+
+### NOrec correctness bug: read/write bypass in plugin mode
+
+**Root cause:** `NOrec.hpp` has an `#ifdef LLVM_TM_PLUGIN` guard in both `read_word_norec()` and `write_word_norec()` that bypasses ALL TM tracking for addresses not in the TM mmap region:
+
+- `NOrec.hpp:415-418` — `read_word_norec()`: returns a direct memory read with zero read-set tracking
+- `NOrec.hpp:492-497` — `write_word_norec()`: writes directly to memory with zero write-set tracking
+- `NOrec.hpp:276-284` — `commit()`: skips write-back for non-TM write-set entries
+
+**Why it triggers:** Benchmarks allocate TM data on the regular heap via `new`/`malloc` (e.g. `TMSafeVector::grow` calls `::operator new`, `social_tm.cpp` does `new SocialNode[n]()`). These addresses are not in the TM region (`isTMAddress()` returns false), so the bypass fires for EVERY TM operation.
+
+**Effect:** Zero TM protection. All reads/writes become plain memory accesses. Lost-update races (read-modify-write on shared counters with no atomicity) produce incorrect results. With 2 threads and 64 accounts, ~2.3% of bank transfer transactions collide on the same account, explaining the observed 1490/64000 money creation.
+
+**Contrast with TinySTM:** TinySTM does NOT have this blanket bypass. It uses `LLVM_TM_ADDR_CHECK` which only bypasses stack-local addresses. Heap addresses always go through TM tracking even in plugin mode.
+
+**History:** The `#ifdef LLVM_TM_PLUGIN` guard was added to prevent SIGSEGV from null-pointer-derived GEP addresses that the LLVM plugin can generate (e.g. `&node->right` when `node` is null due to concurrent mutation). The fix was too broad — it catches all non-TM-region addresses, not just invalid ones. The commit `5a6e670` ("NOREC: fix commit write-back skipping non-TM addresses in expli mode") correctly identified this issue for the commit path but did not fix the read/write paths.
+
+**To fix:** Replace the `#ifdef LLVM_TM_PLUGIN` + `isTMAddress()` bypass with the same `LLVM_TM_ADDR_CHECK` pattern used by TinySTM, so only stack addresses are bypassed while heap-allocated TM data retains full tracking.
+
+### clang-tm fix: LLVM_TM_PLUGIN define
+
+The `plugin/clang-tm` script never defined `-DLLVM_TM_PLUGIN` when compiling the runtime. The NOrec and TinySTM runtimes have `#ifdef LLVM_TM_PLUGIN` guards that define `tm_init`/`tm_exit`/`tm_init_thread`/`tm_exit_thread` as DATA variables (function pointers) instead of TEXT functions. Without the define, the runtime compiled `tm_init` as a TEXT function, but the LLVM pass generates `call *(%rax)` (indirect call through a DATA pointer), causing a DATA/TEXT symbol conflict (reading function machine-code bytes as a pointer → SIGSEGV).
+
+**Fix:** Added `-DLLVM_TM_PLUGIN` to the default `CXXFLAGS` array in `plugin/clang-tm:144`. All plugin-instrumented binaries now get the define automatically.
+
+### Files created/modified
+
+- `benchmarks/plugin/deathstarbench/social_tm.cpp` — DeathStarBench social TM benchmark (new)
+- `benchmarks/plugin/deathstarbench/Makefile` — build targets for 3 backends (new)
+- `plugin/clang-tm` — added `-DLLVM_TM_PLUGIN` to default CXXFLAGS
+

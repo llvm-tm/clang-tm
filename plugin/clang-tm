@@ -141,7 +141,7 @@ ALLOW_OPAQUE=0
 STRICT_OPAQUE=0
 OUTPUT=""
 SOURCES=()
-CXXFLAGS=()
+CXXFLAGS=(-DLLVM_TM_PLUGIN)
 OPT_LEVEL=""       # auto-detected from CXXFLAGS: O0, O1, O2, O3, Og, Os, Oz
 
 # ---- Parse arguments ----
