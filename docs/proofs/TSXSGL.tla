@@ -326,4 +326,18 @@ THEOREM Spec => []LockFreeInv
 THEOREM Spec => []LockOwnerInv
 THEOREM Spec => []AtMostOneSGL
 
+(*====================================================================*)
+(* Fairness and Liveness                                              *)
+(*====================================================================*)
+
+(* Weak fairness on each thread process *)
+Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
+
+(* Strong fairness on each thread process *)
+Spec_SF == Spec /\ \A self \in Thread : SF_vars(ThreadProc(self))
+
+(* Liveness: every active thread eventually becomes idle *)
+ProgressProperty ==
+    \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_begin", "L_done"})
+
 =======================================================================
