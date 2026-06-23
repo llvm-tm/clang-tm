@@ -1,248 +1,369 @@
 ------------------------- MODULE SwissTM -------------------------
 (*
- * SwissTM — TLA+ Specification (TLC-checkable).
+ * SwissTM — ORec-based Eager Writes + Lazy Read Validation (PlusCal)
  *
- * Features (Dragojevic, Guerraoui, Kapalka, 2009):
- *   - Ownership Record (ORec) per address: {r_lock (version), w_lock (pointer)}
- *   - Eager write-write conflict detection:
- *       CAS on w_lock at write time; if fails, abort or wait via CM.
- *   - Lazy read-write conflict detection:
- *       Read-set validated at commit via read-lock acquisition.
- *   - Commit protocol:
- *       1. Acquire read-locks on read-set.
- *       2. Increment global commit timestamp.
- *       3. Validate read-set (re-check versions).
- *       4. Write-back.
- *       5. Release all locks with new version.
- *   - Contention manager: backoff on abort (not modelled for checkability).
+ * ORec (Ownership Record) per address: <<r_lock, w_lock, r_ver, w_owner>>
+ *   - r_lock: 0=free, 1=read-locked (during commit)
+ *   - w_lock: 0=free, 1=write-locked (eager, at write time)
+ *   - r_ver: version number for read-set validation
+ *   - w_owner: thread holding the write lock
  *
- * TLC-checkable invariants:
- *   - ORec r_lock and w_lock are not simultaneously held by different threads.
- *   - Write-back happens under lock.
- *   - No two threads hold w_lock for the same address.
+ * Labels:
+ *   L_idle          — begin or terminate
+ *   L_begin         — clear state, start new transaction
+ *   L_active        — non-deterministic: read, write (eager w_lock),
+ *                     write conflict, or commit
+ *   L_commit_rlock  — acquire read-locks on read-set
+ *   L_commit        — increment ts + validate
+ *   L_commit_wb     — write-back + release locks with new version
+ *   L_abort         — clean up (write conflict, no locks held)
+ *   L_done          — termination
  *)
 
 EXTENDS Naturals, FiniteSets, TLC
 
-CONSTANTS Thread, Addr, MAX_VAL
+CONSTANTS
+    Thread,                (* Set of thread IDs *)
+    Addr,                  (* Set of addresses *)
+    Data,                  (* Set of possible data values *)
+    MaxCommits             (* Max commits per thread *)
+
 ASSUME Thread \subseteq Nat \ {0}
 ASSUME Addr \subseteq Nat
+ASSUME Data \subseteq Nat
+ASSUME MaxCommits \in Nat \ {0}
 
-VARIABLES
-    g_ts,                                 (* global commit timestamp *)
-    orec,                               (* [addr -> {r_lock, w_lock, r_ver, w_owner}] *)
-    mem,
-    pc,                                (* idle | active | commit_rlock | commit_wb *)
-    readSet,                           (* set of <<addr, observed_r_ver>> *)
-    writeLog,                          (* set of addr *)
-    writeBuf,                           (* buffered new value per addr *)
-    oldVal,                              (* old value for undo *)
-    readOnly,
-    committed
-
-vars == <<g_ts, orec, mem, pc, readSet, writeLog, writeBuf, oldVal, readOnly, committed>>
-
-(* ORec encoding: <<r_lock, w_lock, r_ver, w_owner>> *)
-OREC_RLOCK(o) == o[1]           (* 0 = unlocked, 1 = read-locked *)
-OREC_WLOCK(o) == o[2]           (* 0 = unlocked, 1 = write-locked *)
-OREC_RVER(o) == o[3]            (* read version *)
-OREC_WOWNER(o) == o[4]          (* thread ID holding write lock *)
+(* ORec helpers *)
+OREC_RLOCK(o) == o[1]
+OREC_WLOCK(o) == o[2]
+OREC_RVER(o) == o[3]
+OREC_WOWNER(o) == o[4]
 MAKE_OREC(rl, wl, rv, wo) == <<rl, wl, rv, wo>>
 
-Init ==
-    /\ g_ts = 0
-    /\ orec = [a \in Addr |-> MAKE_OREC(0, 0, 0, 0)]
-    /\ mem = [a \in Addr |-> 0]
-    /\ pc = [t \in Thread |-> "idle"]
-    /\ readSet = [t \in Thread |-> {}]
-    /\ writeLog = [t \in Thread |-> {}]
-    /\ writeBuf = [t \in Thread, a \in Addr |-> 0]
-    /\ oldVal = [t \in Thread, a \in Addr |-> 0]
-    /\ readOnly = [t \in Thread |-> TRUE]
-    /\ committed = [t \in Thread |-> 0]
+(*--algorithm SwissTM
 
-Begin(t) ==
-    /\ pc[t] = "idle"
-    /\ pc' = [pc EXCEPT ![t] = "active"]
-    /\ readOnly' = [readOnly EXCEPT ![t] = TRUE]
-    /\ readSet' = [readSet EXCEPT ![t] = {}]
-    /\ writeLog' = [writeLog EXCEPT ![t] = {}]
-    /\ UNCHANGED <<g_ts, orec, mem, writeBuf, oldVal, committed>>
+variables
+    g_ts = 0,
+    orec = [a \in Addr |-> MAKE_OREC(0, 0, 0, 0)],
+    mem = [a \in Addr |-> 0],
+    committed = [t \in Thread |-> 0],
+    aborted = [t \in Thread |-> 0];
 
-(* ---- Read: check write log first, then ORec ---- *)
-ReadOwn(t, a) ==
-    /\ pc[t] = "active"
-    /\ a \in writeLog[t]
-    /\ UNCHANGED vars
+process ThreadProc \in Thread
+variables
+    readSet = {},
+    writeLog = {},
+    writeBuf = [a \in Addr |-> 0],
+    oldVal = [a \in Addr |-> 0],
+    readOnly = TRUE;
+begin
 
-ReadFromMem(t, a) ==
-    /\ pc[t] = "active"
-    /\ a \notin writeLog[t]
-    (* ORec not write-locked by another *)
-    /\ ~ (OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) # t)
-    (* Record r_lock version *)
-    /\ readSet' = [readSet EXCEPT ![t] = readSet[t]
-        \cup {<<a, OREC_RVER(orec[a])>>}]
-    /\ UNCHANGED <<g_ts, orec, mem, pc, writeLog, writeBuf, oldVal, readOnly, committed>>
+L_idle:
+    if committed[self] >= MaxCommits then
+        goto L_done;
+    else
+        goto L_begin;
+    end if;
 
-(* ---- Write: acquire w_lock eagerly ---- *)
-WriteAcquire(t, a, n) ==
-    /\ pc[t] = "active"
-    /\ a \notin writeLog[t]
-    (* w_lock is free *)
-    /\ OREC_WLOCK(orec[a]) = 0
-    (* Acquire write lock *)
-    /\ orec' = [aa \in Addr |->
-        IF aa = a
-        THEN MAKE_OREC(OREC_RLOCK(orec[a]), 1, OREC_RVER(orec[a]), t)
-        ELSE orec[aa]]
-    /\ writeLog' = [writeLog EXCEPT ![t] = writeLog[t] \cup {a}]
-    /\ writeBuf' = [writeBuf EXCEPT ![t][a] = n]
-    /\ oldVal' = [oldVal EXCEPT ![t][a] = mem[a]]
-    /\ readOnly' = [readOnly EXCEPT ![t] = FALSE]
-    /\ UNCHANGED <<g_ts, mem, pc, readSet, committed>>
+L_begin:
+    readSet := {};
+    writeLog := {};
+    readOnly := TRUE;
+    goto L_active;
 
-WriteConflict(t, a) ==
-    (* Write conflict: w_lock held by another -> abort *)
-    /\ pc[t] = "active"
-    /\ a \notin writeLog[t]
-    /\ OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) # t
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    /\ readSet' = [readSet EXCEPT ![t] = {}]
-    /\ UNCHANGED <<g_ts, orec, mem, writeLog, writeBuf, oldVal, readOnly, committed>>
+L_active:
+    either \* Read own write (from writeBuf)
+        with a \in Addr do
+            if a \in writeLog then skip; end if;
+        end with;
+        goto L_active;
+    or \* Read from memory (record r_ver)
+        with a \in Addr do
+            if a \notin writeLog /\ ~(OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) # self) then
+                readSet := readSet \union {<<a, OREC_RVER(orec[a])>>};
+            end if;
+        end with;
+        goto L_active;
+    or \* Write (acquire w_lock)
+        with a \in Addr, n \in Data do
+            if a \notin writeLog /\ OREC_WLOCK(orec[a]) = 0 then
+                orec[a] := MAKE_OREC(OREC_RLOCK(orec[a]), 1, OREC_RVER(orec[a]), self);
+                writeLog := writeLog \union {a};
+                writeBuf[a] := n;
+                oldVal[a] := mem[a];
+                readOnly := FALSE;
+            end if;
+        end with;
+        goto L_active;
+    or \* Write (already in writeLog — update)
+        with a \in Addr, n \in Data do
+            if a \in writeLog then
+                writeBuf[a] := n;
+            end if;
+        end with;
+        goto L_active;
+    or \* Write (conflict — w_lock held by another)
+        if \E a \in Addr : a \notin writeLog /\ OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) # self then
+            goto L_abort;
+        else
+            goto L_active;
+        end if;
+    or \* Commit read-only
+        if readOnly then
+            committed[self] := committed[self] + 1;
+            goto L_idle;
+        else
+            goto L_active;
+        end if;
+    or \* Commit (acquire read-locks first)
+        if ~readOnly /\ writeLog # {}
+           /\ \A <<a, v>> \in readSet : OREC_RLOCK(orec[a]) = 0
+        then
+            orec := [a \in Addr |->
+                IF \E entry \in readSet : entry[1] = a
+                THEN MAKE_OREC(1, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
+                ELSE orec[a]];
+            goto L_commit;
+        else
+            goto L_active;
+        end if;
+    end either;
 
-WriteUpdate(t, a, n) ==
-    /\ pc[t] = "active"
-    /\ a \in writeLog[t]
-    /\ writeBuf' = [writeBuf EXCEPT ![t][a] = n]
-    /\ readOnly' = [readOnly EXCEPT ![t] = FALSE]
-    /\ UNCHANGED <<g_ts, orec, mem, pc, readSet, writeLog, oldVal, committed>>
+L_commit:
+    g_ts := g_ts + 1;
+    if \A <<addr, ver>> \in readSet :
+        OREC_WOWNER(orec[addr]) = self \/ OREC_RVER(orec[addr]) = ver
+    then
+        goto L_commit_wb;
+    else
+        (* Release all locks (read + write) without bumping versions *)
+        orec := [a \in Addr |->
+            IF a \in writeLog
+            THEN MAKE_OREC(0, 0, OREC_RVER(orec[a]), 0)
+            ELSE IF \E entry \in readSet : entry[1] = a
+                THEN MAKE_OREC(0, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
+                ELSE orec[a]];
+        readSet := {};
+        writeLog := {};
+        goto L_abort;
+    end if;
 
-(* ---- Commit: Phase 1 — acquire read-locks on read-set ---- *)
-CommitRLock(t) ==
-    /\ pc[t] = "active"
-    /\ readOnly[t] = FALSE
-    /\ writeLog[t] # {}
-    (* All read-set addresses must not be read-locked by another *)
-    /\ \A entry \in readSet[t] :
-        LET addr == entry[1] IN
-        OREC_RLOCK(orec[addr]) = 0              (* not read-locked *)
-    (* Acquire read-locks: set r_lock = 1 for all read-set entries *)
-    /\ orec' = [a \in Addr |->
-        IF \E entry \in readSet[t] : entry[1] = a
-        THEN MAKE_OREC(1, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
-        ELSE orec[a]]
-    /\ pc' = [pc EXCEPT ![t] = "commit_rlock"]
-    /\ UNCHANGED <<g_ts, mem, readSet, writeLog, writeBuf, oldVal, readOnly, committed>>
-
-(* Phase 2: increment commit timestamp *)
-CommitIncTS(t) ==
-    /\ pc[t] = "commit_rlock"
-    /\ g_ts' = g_ts + 1
-    /\ UNCHANGED <<orec, mem, pc, readSet, writeLog, writeBuf, oldVal, readOnly, committed>>
-
-(* Phase 3: validate read-set (re-check versions) *)
-CommitValidate(t) ==
-    /\ pc[t] = "commit_rlock"
-    /\ \A entry \in readSet[t] :
-        LET addr == entry[1]
-            obs_ver == entry[2] IN
-        \/ OREC_WOWNER(orec[addr]) = t          (* we hold w_lock *)
-        \/ OREC_RVER(orec[addr]) = obs_ver       (* version unchanged *)
-    /\ pc' = [pc EXCEPT ![t] = "commit_wb"]
-    /\ UNCHANGED <<g_ts, orec, mem, readSet, writeLog, writeBuf, oldVal, readOnly, committed>>
-
-CommitValidateFail(t) ==
-    /\ pc[t] = "commit_rlock"
-    /\ \E entry \in readSet[t] :
-        LET addr == entry[1]
-            obs_ver == entry[2] IN
-        ~ (OREC_WOWNER(orec[addr]) = t \/ OREC_RVER(orec[addr]) = obs_ver)
-    (* Release all read-locks *)
-    /\ orec' = [a \in Addr |->
-        IF \E entry \in readSet[t] : entry[1] = a
-        THEN MAKE_OREC(0, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
-        ELSE orec[a]]
-    (* Release all write-locks *)
-    /\ orec' = [a \in Addr |->
-        IF a \in writeLog[t]
-        THEN MAKE_OREC(OREC_RLOCK(orec'[a]), 0, OREC_RVER(orec'[a]), 0)
-        ELSE orec'[a]]
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    /\ readSet' = [readSet EXCEPT ![t] = {}]
-    /\ writeLog' = [writeLog EXCEPT ![t] = {}]
-    /\ UNCHANGED <<g_ts, mem, writeBuf, oldVal, readOnly, committed>>
-
-(* Phase 4+5: write-back + release locks *)
-CommitWriteBack(t) ==
-    /\ pc[t] = "commit_wb"
-    (* Write-back *)
-    /\ mem' = [a \in Addr |->
-        IF a \in writeLog[t] THEN writeBuf[t][a] ELSE mem[a]]
-    (* Release all locks: r_lock -> 0 (with new version),
-       w_lock -> 0, r_ver -> g_ts *)
-    /\ orec' = [a \in Addr |->
-        IF a \in writeLog[t]    (* written addresses: release both *)
+L_commit_wb:
+    (* Write-back and release with new version *)
+    mem := [a \in Addr |->
+        IF a \in writeLog THEN writeBuf[a] ELSE mem[a]];
+    orec := [a \in Addr |->
+        IF a \in writeLog
         THEN MAKE_OREC(0, 0, g_ts, 0)
-        ELSE IF \E entry \in readSet[t] : entry[1] = a  (* read-only, release r_lock *)
+        ELSE IF \E entry \in readSet : entry[1] = a
             THEN MAKE_OREC(0, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
-            ELSE orec[a]]
-    /\ committed' = [committed EXCEPT ![t] = committed[t] + 1]
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    /\ readSet' = [readSet EXCEPT ![t] = {}]
-    /\ writeLog' = [writeLog EXCEPT ![t] = {}]
-    /\ UNCHANGED <<g_ts, writeBuf, oldVal, readOnly>>
+            ELSE orec[a]];
+    committed[self] := committed[self] + 1;
+    goto L_idle;
 
-CommitReadOnly(t) ==
-    /\ pc[t] = "active"
-    /\ readOnly[t] = TRUE
-    /\ committed' = [committed EXCEPT ![t] = committed[t] + 1]
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    /\ readSet' = [readSet EXCEPT ![t] = {}]
-    /\ UNCHANGED <<g_ts, orec, mem, writeLog, writeBuf, oldVal, readOnly>>
+L_abort:
+    readSet := {};
+    writeLog := {};
+    readOnly := TRUE;
+    aborted[self] := aborted[self] + 1;
+    goto L_idle;
 
-Next ==
-    \E t \in Thread :
-        \/ Begin(t)
-        \/ (\E a \in Addr : ReadOwn(t, a))
-        \/ (\E a \in Addr : ReadFromMem(t, a))
-        \/ (\E a \in Addr : \E n \in 0..MAX_VAL : WriteAcquire(t, a, n))
-        \/ (\E a \in Addr : WriteConflict(t, a))
-        \/ (\E a \in Addr : \E n \in 0..MAX_VAL : WriteUpdate(t, a, n))
-        \/ CommitRLock(t)
-        \/ CommitIncTS(t)
-        \/ CommitValidate(t)
-        \/ CommitValidateFail(t)
-        \/ CommitWriteBack(t)
-        \/ CommitReadOnly(t)
+L_done:
+    skip;
+
+end process;
+
+end algorithm; *)
+
+\* BEGIN TRANSLATION
+VARIABLES pc, g_ts, orec, mem, committed, aborted, readSet, writeLog, 
+          writeBuf, oldVal, readOnly
+
+vars == << pc, g_ts, orec, mem, committed, aborted, readSet, writeLog, 
+           writeBuf, oldVal, readOnly >>
+
+ProcSet == (Thread)
+
+Init == (* Global variables *)
+        /\ g_ts = 0
+        /\ orec = [a \in Addr |-> MAKE_OREC(0, 0, 0, 0)]
+        /\ mem = [a \in Addr |-> 0]
+        /\ committed = [t \in Thread |-> 0]
+        /\ aborted = [t \in Thread |-> 0]
+        (* Process ThreadProc *)
+        /\ readSet = [self \in Thread |-> {}]
+        /\ writeLog = [self \in Thread |-> {}]
+        /\ writeBuf = [self \in Thread |-> [a \in Addr |-> 0]]
+        /\ oldVal = [self \in Thread |-> [a \in Addr |-> 0]]
+        /\ readOnly = [self \in Thread |-> TRUE]
+        /\ pc = [self \in ProcSet |-> "L_idle"]
+
+L_idle(self) == /\ pc[self] = "L_idle"
+                /\ IF committed[self] >= MaxCommits
+                      THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
+                      ELSE /\ pc' = [pc EXCEPT ![self] = "L_begin"]
+                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, readSet, 
+                                writeLog, writeBuf, oldVal, readOnly >>
+
+L_begin(self) == /\ pc[self] = "L_begin"
+                 /\ readSet' = [readSet EXCEPT ![self] = {}]
+                 /\ writeLog' = [writeLog EXCEPT ![self] = {}]
+                 /\ readOnly' = [readOnly EXCEPT ![self] = TRUE]
+                 /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                 /\ UNCHANGED << g_ts, orec, mem, committed, aborted, writeBuf, 
+                                 oldVal >>
+
+L_active(self) == /\ pc[self] = "L_active"
+                  /\ \/ /\ \E a \in Addr:
+                             IF a \in writeLog[self]
+                                THEN /\ TRUE
+                                ELSE /\ TRUE
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<orec, committed, readSet, writeLog, writeBuf, oldVal, readOnly>>
+                     \/ /\ \E a \in Addr:
+                             IF a \notin writeLog[self] /\ ~(OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) # self)
+                                THEN /\ readSet' = [readSet EXCEPT ![self] = readSet[self] \union {<<a, OREC_RVER(orec[a])>>}]
+                                ELSE /\ TRUE
+                                     /\ UNCHANGED readSet
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<orec, committed, writeLog, writeBuf, oldVal, readOnly>>
+                     \/ /\ \E a \in Addr:
+                             \E n \in Data:
+                               IF a \notin writeLog[self] /\ OREC_WLOCK(orec[a]) = 0
+                                  THEN /\ orec' = [orec EXCEPT ![a] = MAKE_OREC(OREC_RLOCK(orec[a]), 1, OREC_RVER(orec[a]), self)]
+                                       /\ writeLog' = [writeLog EXCEPT ![self] = writeLog[self] \union {a}]
+                                       /\ writeBuf' = [writeBuf EXCEPT ![self][a] = n]
+                                       /\ oldVal' = [oldVal EXCEPT ![self][a] = mem[a]]
+                                       /\ readOnly' = [readOnly EXCEPT ![self] = FALSE]
+                                  ELSE /\ TRUE
+                                       /\ UNCHANGED << orec, writeLog, 
+                                                       writeBuf, oldVal, 
+                                                       readOnly >>
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<committed, readSet>>
+                     \/ /\ \E a \in Addr:
+                             \E n \in Data:
+                               IF a \in writeLog[self]
+                                  THEN /\ writeBuf' = [writeBuf EXCEPT ![self][a] = n]
+                                  ELSE /\ TRUE
+                                       /\ UNCHANGED writeBuf
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<orec, committed, readSet, writeLog, oldVal, readOnly>>
+                     \/ /\ IF \E a \in Addr : a \notin writeLog[self] /\ OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) # self
+                              THEN /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<orec, committed, readSet, writeLog, writeBuf, oldVal, readOnly>>
+                     \/ /\ IF readOnly[self]
+                              THEN /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
+                                   /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                   /\ UNCHANGED committed
+                        /\ UNCHANGED <<orec, readSet, writeLog, writeBuf, oldVal, readOnly>>
+                     \/ /\ IF ~readOnly[self] /\ writeLog[self] # {}
+                              /\ \A <<a, v>> \in readSet[self] : OREC_RLOCK(orec[a]) = 0
+                              THEN /\ orec' =     [a \in Addr |->
+                                              IF \E entry \in readSet[self] : entry[1] = a
+                                              THEN MAKE_OREC(1, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
+                                              ELSE orec[a]]
+                                   /\ pc' = [pc EXCEPT ![self] = "L_commit"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                   /\ orec' = orec
+                        /\ UNCHANGED <<committed, readSet, writeLog, writeBuf, oldVal, readOnly>>
+                  /\ UNCHANGED << g_ts, mem, aborted >>
+
+L_commit(self) == /\ pc[self] = "L_commit"
+                  /\ g_ts' = g_ts + 1
+                  /\ IF \A <<addr, ver>> \in readSet[self] :
+                         OREC_WOWNER(orec[addr]) = self \/ OREC_RVER(orec[addr]) = ver
+                        THEN /\ pc' = [pc EXCEPT ![self] = "L_commit_wb"]
+                             /\ UNCHANGED << orec, readSet, writeLog >>
+                        ELSE /\ orec' =     [a \in Addr |->
+                                        IF a \in writeLog[self]
+                                        THEN MAKE_OREC(0, 0, OREC_RVER(orec[a]), 0)
+                                        ELSE IF \E entry \in readSet[self] : entry[1] = a
+                                            THEN MAKE_OREC(0, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
+                                            ELSE orec[a]]
+                             /\ readSet' = [readSet EXCEPT ![self] = {}]
+                             /\ writeLog' = [writeLog EXCEPT ![self] = {}]
+                             /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                  /\ UNCHANGED << mem, committed, aborted, writeBuf, oldVal, 
+                                  readOnly >>
+
+L_commit_wb(self) == /\ pc[self] = "L_commit_wb"
+                     /\ mem' =    [a \in Addr |->
+                               IF a \in writeLog[self] THEN writeBuf[self][a] ELSE mem[a]]
+                     /\ orec' =     [a \in Addr |->
+                                IF a \in writeLog[self]
+                                THEN MAKE_OREC(0, 0, g_ts, 0)
+                                ELSE IF \E entry \in readSet[self] : entry[1] = a
+                                    THEN MAKE_OREC(0, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
+                                    ELSE orec[a]]
+                     /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
+                     /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                     /\ UNCHANGED << g_ts, aborted, readSet, writeLog, 
+                                     writeBuf, oldVal, readOnly >>
+
+L_abort(self) == /\ pc[self] = "L_abort"
+                 /\ readSet' = [readSet EXCEPT ![self] = {}]
+                 /\ writeLog' = [writeLog EXCEPT ![self] = {}]
+                 /\ readOnly' = [readOnly EXCEPT ![self] = TRUE]
+                 /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
+                 /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                 /\ UNCHANGED << g_ts, orec, mem, committed, writeBuf, oldVal >>
+
+L_done(self) == /\ pc[self] = "L_done"
+                /\ TRUE
+                /\ pc' = [pc EXCEPT ![self] = "Done"]
+                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, readSet, 
+                                writeLog, writeBuf, oldVal, readOnly >>
+
+ThreadProc(self) == L_idle(self) \/ L_begin(self) \/ L_active(self)
+                       \/ L_commit(self) \/ L_commit_wb(self)
+                       \/ L_abort(self) \/ L_done(self)
+
+(* Allow infinite stuttering to prevent deadlock on termination. *)
+Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
+               /\ UNCHANGED vars
+
+Next == (\E self \in Thread: ThreadProc(self))
+           \/ Terminating
 
 Spec == Init /\ [][Next]_vars
 
-(* ---- INVARIANTS ---- *)
+Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
-(* No two threads hold w_lock for the same address *)
+\* END TRANSLATION
+
+(*====================================================================*)
+(* Invariants                                                          *)
+(*====================================================================*)
+
+(* I1: No two threads hold w_lock for the same address *)
 MutexWriteLock ==
     \A a \in Addr :
-        OREC_WLOCK(orec[a]) = 1
-        => \E t \in Thread : OREC_WOWNER(orec[a]) = t
+        OREC_WLOCK(orec[a]) = 1 =>
+            \E t \in Thread : OREC_WOWNER(orec[a]) = t
 
-(* w_lock owner is in writeLog *)
+(* I2: w_lock owner is in writeLog *)
 WriteOwnerInv ==
     \A a \in Addr :
-        (OREC_WLOCK(orec[a]) = 1)
-        => \E t \in Thread :
-            OREC_WOWNER(orec[a]) = t /\ a \in writeLog[t]
+        OREC_WLOCK(orec[a]) = 1 =>
+            \E t \in Thread :
+                OREC_WOWNER(orec[a]) = t /\ a \in writeLog[t]
 
-(* No thread holds a write-lock after commit *)
+(* I3: No thread holds a write-lock when idle *)
 NoPostCommitLocks ==
-    \A t \in Thread : (pc[t] = "idle")
-        => \A a \in Addr : ~(OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) = t)
+    \A t \in Thread :
+        pc[t] \in {"L_idle", "L_begin", "L_done"} =>
+            \A a \in Addr : ~(OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) = t)
 
+(* Combined invariant *)
 Inv ==
     /\ MutexWriteLock
     /\ WriteOwnerInv
     /\ NoPostCommitLocks
 
-THEOREM Spec => []Inv
+(* Constraint for bounded model checking *)
+ModelBound == g_ts <= 5 /\ \A t \in Thread : aborted[t] <= MaxCommits * 2
 
-========================================================================
+=====
