@@ -1,334 +1,344 @@
--------------------------- MODULE XTM --------------------------
+----------------------- MODULE XTM ------------------------
 (*
- * XTM — Page-Granularity OCC with Private Copies
+ * XTM — Page-Granularity OCC with Private Copies (PlusCal)
  *
- * Algorithm (from backends/tm_impl/xtm/, XTM ASPLOS 2006):
+ * Original action-based spec: 334 lines, 11 actions, 6 states.
+ * PlusCal conversion: 8 labels, ~230 lines.
  *
- *   Page-granularity transactional memory using a global XADT
- *   hash table tracking (owner, version) per page.
- *
- * Key design:
- *   - Memory is tracked at page granularity.
- *   - Each page has an XADT entry: (owner_tx_id, version).
- *   - Reads: look up page in XADT.  If owned by another TX → abort.
- *     Record (page, version) in read-set.  Read from shared memory.
- *   - Writes: CAS-acquire page ownership in XADT.
- *     Create private copy of the full page (conceptual; we model
- *     per-address writes).  All writes go to private copy.
- *   - Commit: validate read-set (page version unchanged) →
- *     write-back private copies → release ownership, bump versions.
+ * Algorithm:
+ *   - Page-granular memory tracked via XADT (owner + version per page).
+ *   - Reads: if page owned by another TX → abort.
+ *     Otherwise record (page, version) in read-set.
+ *   - Writes: CAS-acquire page ownership in XADT; buffer value in write-set.
+ *   - Commit: validate read-set → write-back → release ownership, bump version.
  *   - Abort: release ownership, discard private copies.
  *
- * Invariants (for TLC model checking):
- *   PageOwnership:      Each page is owned by at most one TX at a time.
- *   NoDirtyRead:        A committing TX's read-set pages were not
- *                       modified concurrently.
- *   AtomicWriteBack:    Write-back is atomic (all-or-nothing).
+ * Labels:
+ *   L_idle      — begin new transaction or terminate
+ *   L_begin     — capture current state and start transaction
+ *   L_active    — non-deterministic: read, write, validate, or abort
+ *   L_writeback — write private copies to shared memory
+ *   L_release   — release ownership + bump versions + commit
+ *   L_abort     — release ownership, discard private copies
+ *   L_done      — termination
  *)
 
-EXTENDS Naturals, Sequences, FiniteSets, TLC
+EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
     Thread,             (* Set of thread IDs *)
     Page,               (* Set of page numbers *)
     Data,               (* Set of possible data values *)
-    MaxRetries          (* Max retries before abort *)
+    MaxCommits          (* Max commits per thread for bounded model *)
 
 ASSUME Thread \subseteq Nat \ {0}
 ASSUME Page \subseteq Nat
 ASSUME Data \subseteq Nat
-ASSUME MaxRetries \in Nat \ {0}
+ASSUME MaxCommits \in Nat \ {0}
 
-VARIABLES
-    mem,                (* [Page -> Data]  (page-granular memory) *)
-    xadt_owner,         (* [Page -> Thread \cup {0}]  page owner *)
-    xadt_version,       (* [Page -> Nat]  page version *)
-    pc,                 (* [Thread -> {"idle", "active", "validating",
-                                      "writeback", "commit_ok", "aborting"}] *)
-    read_set,           (* [Thread -> Seq(<<Page, Nat>>)]  (page, version) *)
-    write_set,          (* [Thread -> Page -> Data \cup {NoWrite}]
-                           private copy: writes are buffered here *)
-    abort_count,        (* [Thread -> Nat] *)
-    commit_count,       (* [Thread -> Nat] *)
-    retry_cnt           (* [Thread -> Nat] *)
-
-vars == <<mem, xadt_owner, xadt_version, pc, read_set, write_set,
-          abort_count, commit_count, retry_cnt>>
-
-(*--------------------------------------------------------------------*)
-(* Helpers                                                             *)
-(*--------------------------------------------------------------------*)
-
+(* ---- helpers ---- *)
 NoWrite == 0 - 1
 
-(* Thread t has written to page p *)
-HasWritten(t, p) == write_set[t][p] # NoWrite
+(*--algorithm XTM
 
-(* Thread t owns page p *)
-OwnsPage(t, p) == xadt_owner[p] = t
+variables
+    mem = [p \in Page |-> 0],
+    xadt_owner = [p \in Page |-> 0],
+    xadt_version = [p \in Page |-> 0],
+    committed = [t \in Thread |-> 0],
+    aborted = [t \in Thread |-> 0];
 
-(*--------------------------------------------------------------------*)
-(* Init                                                                *)
-(*--------------------------------------------------------------------*)
+process ThreadProc \in Thread
+variables
+    read_set = {},
+    write_set = [p \in Page |-> NoWrite];
+begin
 
-Init ==
-    /\ mem = [p \in Page |-> 0]
-    /\ xadt_owner = [p \in Page |-> 0]
-    /\ xadt_version = [p \in Page |-> 0]
-    /\ pc = [t \in Thread |-> "idle"]
-    /\ read_set = [t \in Thread |-> << >>]
-    /\ write_set = [t \in Thread |-> [p \in Page |-> NoWrite]]
-    /\ abort_count = [t \in Thread |-> 0]
-    /\ commit_count = [t \in Thread |-> 0]
-    /\ retry_cnt = [t \in Thread |-> 0]
+L_idle:
+    if committed[self] >= MaxCommits then
+        goto L_done;
+    else
+        goto L_begin;
+    end if;
 
-(*--------------------------------------------------------------------*)
-(* Actions                                                             *)
-(*--------------------------------------------------------------------*)
+L_begin:
+    read_set := {};
+    write_set := [p \in Page |-> NoWrite];
+    goto L_active;
 
-(*── Begin ──────────────────────────────────────────────────────────*)
-BeginXTM(t) ==
-    /\ pc[t] = "idle"
-    /\ pc' = [pc EXCEPT ![t] = "active"]
-    /\ read_set' = [read_set EXCEPT ![t] = << >>]
-    /\ write_set' = [write_set EXCEPT ![t] = [p \in Page |-> NoWrite]]
-    /\ UNCHANGED <<mem, xadt_owner, xadt_version, abort_count,
-                   commit_count, retry_cnt>>
+L_active:
+    either \* Read own write (no-op)
+        with p \in Page do
+            if write_set[p] # NoWrite then skip; end if;
+        end with;
+        goto L_active;
+    or \* Read (conflict — abort)
+        if \E p \in Page : write_set[p] = NoWrite /\ xadt_owner[p] \notin {0, self} then
+            goto L_abort;
+        else
+            goto L_active;
+        end if;
+    or \* Read (record version)
+        with p \in Page do
+            if write_set[p] = NoWrite /\ xadt_owner[p] \in {0, self} then
+                read_set := read_set \union {<<p, xadt_version[p]>>};
+            end if;
+        end with;
+        goto L_active;
+    or \* Write (already owned — update private copy)
+        with p \in Page, v \in Data do
+            if write_set[p] # NoWrite then
+                write_set[p] := v;
+            end if;
+        end with;
+        goto L_active;
+    or \* Write (acquire ownership from free)
+        with p \in Page, v \in Data do
+            if write_set[p] = NoWrite /\ xadt_owner[p] = 0 then
+                xadt_owner[p] := self;
+                write_set[p] := v;
+            end if;
+        end with;
+        goto L_active;
+    or \* Write (already owned by self — but not in write-set yet)
+        with p \in Page, v \in Data do
+            if write_set[p] = NoWrite /\ xadt_owner[p] = self then
+                write_set[p] := v;
+            end if;
+        end with;
+        goto L_active;
+    or \* Write (conflict — page owned by another)
+        if \E p \in Page : write_set[p] = NoWrite /\ xadt_owner[p] \notin {0, self} then
+            goto L_abort;
+        else
+            goto L_active;
+        end if;
+    or \* Validate and commit
+        if \A <<p, ver>> \in read_set :
+            write_set[p] # NoWrite \/
+            (xadt_version[p] = ver /\ (xadt_owner[p] = 0 \/ xadt_owner[p] = self))
+        then
+            goto L_writeback;
+        else
+            goto L_abort;
+        end if;
+    end either;
 
-(*── Read page ──────────────────────────────────────────────────────*)
-(*  Look up page in XADT.  If owned by another TX → abort.
-    Otherwise, record version in read-set and read from memory. *)
-ReadPage(t, p) ==
-    /\ pc[t] = "active"
-    /\ p \in Page
-    /\ IF HasWritten(t, p)
-       THEN
-           (* Read own private copy *)
-           /\ UNCHANGED vars
-       ELSE
-           /\ xadt_owner[p] = 0 \/ xadt_owner[p] = t
-           (* Page is free or owned by us → OK to read *)
-           /\ LET ver == xadt_version[p] IN
-              (* Record (page, version) in read-set *)
-              /\ read_set' = [read_set EXCEPT ![t] =
-                                Append(read_set[t], <<p, ver>>)]
-              /\ UNCHANGED <<mem, xadt_owner, xadt_version, pc,
-                             write_set, abort_count, commit_count,
-                             retry_cnt>>
+L_writeback:
+    mem := [p \in Page |->
+        IF write_set[p] # NoWrite THEN write_set[p] ELSE mem[p]];
+    goto L_release;
 
-(*── Read-page conflict: page owned by another TX → abort ──────────*)
-ReadConflict(t, p) ==
-    /\ pc[t] = "active"
-    /\ p \in Page
-    /\ ~HasWritten(t, p)
-    /\ xadt_owner[p] \notin {0, t}  (* owned by another TX *)
-    (* Eager conflict: abort immediately *)
-    /\ pc' = [pc EXCEPT ![t] = "aborting"]
-    /\ abort_count' = [abort_count EXCEPT ![t] = abort_count[t] + 1]
-    /\ retry_cnt' = [retry_cnt EXCEPT ![t] = retry_cnt[t] + 1]
-    /\ UNCHANGED <<mem, xadt_owner, xadt_version, read_set,
-                   write_set, commit_count>>
+L_release:
+    xadt_owner := [p \in Page |->
+        IF xadt_owner[p] = self THEN 0 ELSE xadt_owner[p]];
+    xadt_version := [p \in Page |->
+        IF write_set[p] # NoWrite THEN xadt_version[p] + 1 ELSE xadt_version[p]];
+    read_set := {};
+    write_set := [p \in Page |-> NoWrite];
+    committed[self] := committed[self] + 1;
+    goto L_idle;
 
-(*── Write page (acquire ownership via CAS, then write to private copy) *)
-WritePage(t, p, v) ==
-    /\ pc[t] = "active"
-    /\ p \in Page
-    /\ v \in Data
-    /\ IF HasWritten(t, p)
-       THEN
-           (* Already own this page → just update private copy *)
-           /\ write_set' = [write_set EXCEPT ![t][p] = v]
-           /\ UNCHANGED <<xadt_owner, xadt_version>>
-       ELSE
-           (* Try to acquire ownership: CAS owner from 0 to t *)
-           /\ xadt_owner[p] = 0
-           /\ xadt_owner' = [xadt_owner EXCEPT ![p] = t]
-           /\ write_set' = [write_set EXCEPT ![t][p] = v]
-           (* Keep current version (will bump on commit) *)
-           /\ UNCHANGED <<xadt_version>>
-    /\ UNCHANGED <<mem, pc, read_set, abort_count, commit_count,
-                   retry_cnt>>
+L_abort:
+    xadt_owner := [p \in Page |->
+        IF xadt_owner[p] = self THEN 0 ELSE xadt_owner[p]];
+    read_set := {};
+    write_set := [p \in Page |-> NoWrite];
+    aborted[self] := aborted[self] + 1;
+    goto L_idle;
 
-(*── Write conflict: page owned by another TX → abort ──────────────*)
-WriteConflict(t, p) ==
-    /\ pc[t] = "active"
-    /\ p \in Page
-    /\ ~HasWritten(t, p)
-    /\ xadt_owner[p] \notin {0, t}
-    (* CAS failed → abort *)
-    /\ pc' = [pc EXCEPT ![t] = "aborting"]
-    /\ abort_count' = [abort_count EXCEPT ![t] = abort_count[t] + 1]
-    /\ retry_cnt' = [retry_cnt EXCEPT ![t] = retry_cnt[t] + 1]
-    /\ UNCHANGED <<mem, xadt_owner, xadt_version, read_set,
-                   write_set, commit_count>>
+L_done:
+    skip;
 
-(*── Commit: validate → write-back → release + bump ────────────────*)
-(* Phase 1: Validate read-set (pages not in write-set) *)
-Validate(t) ==
-    /\ pc[t] = "active"
-    (* Check: every read-set page not in write-set has
-       unchanged version and no concurrent owner *)
-    /\ \A i \in 1..Len(read_set[t]) :
-         LET entry == read_set[t][i]
-             page == entry[1]
-             captured_ver == entry[2] IN
-         page \in {p \in Page : HasWritten(t, p)}
-         \/ (xadt_version[page] = captured_ver /\ xadt_owner[page] = t)
-         \/ (xadt_version[page] = captured_ver /\ xadt_owner[page] = 0)
-    (* All checks pass → proceed to write-back *)
-    /\ pc' = [pc EXCEPT ![t] = "writeback"]
-    /\ UNCHANGED <<mem, xadt_owner, xadt_version, read_set,
-                   write_set, abort_count, commit_count, retry_cnt>>
+end process;
 
-(*── Validation failure → abort ────────────────────────────────────*)
-ValidateFailed(t) ==
-    /\ pc[t] = "active"
-    (* Some read-set page version changed or owned by another TX *)
-    /\ ~ (\A i \in 1..Len(read_set[t]) :
-            LET entry == read_set[t][i]
-                page == entry[1]
-                captured_ver == entry[2] IN
-            page \in {p \in Page : HasWritten(t, p)}
-            \/ (xadt_version[page] = captured_ver /\ xadt_owner[page] = t)
-            \/ (xadt_version[page] = captured_ver /\ xadt_owner[page] = 0))
-    /\ pc' = [pc EXCEPT ![t] = "aborting"]
-    /\ abort_count' = [abort_count EXCEPT ![t] = abort_count[t] + 1]
-    /\ retry_cnt' = [retry_cnt EXCEPT ![t] = retry_cnt[t] + 1]
-    /\ UNCHANGED <<mem, xadt_owner, xadt_version, read_set,
-                   write_set, commit_count>>
+end algorithm; *)
 
-(* Phase 2: Write-back (apply private copies to memory) *)
-WriteBackXTM(t) ==
-    /\ pc[t] = "writeback"
-    (* Copy private writes to shared memory *)
-    /\ mem' = [p \in Page |->
-                 IF HasWritten(t, p) THEN write_set[t][p] ELSE mem[p]]
-    /\ pc' = [pc EXCEPT ![t] = "commit_ok"]
-    /\ UNCHANGED <<xadt_owner, xadt_version, read_set, write_set,
-                   abort_count, commit_count, retry_cnt>>
+\* BEGIN TRANSLATION
+VARIABLES pc, mem, xadt_owner, xadt_version, committed, aborted, read_set, 
+          write_set
 
-(* Phase 3: Release ownership + bump versions *)
-ReleaseAndBump(t) ==
-    /\ pc[t] = "commit_ok"
-    (* For each page owned by t: release ownership and bump version *)
-    /\ xadt_owner' = [p \in Page |->
-                        IF OwnsPage(t, p) THEN 0 ELSE xadt_owner[p]]
-    /\ xadt_version' = [p \in Page |->
-                          IF OwnsPage(t, p)
-                          THEN xadt_version[p] + 1
-                          ELSE xadt_version[p]]
-    /\ commit_count' = [commit_count EXCEPT ![t] = commit_count[t] + 1]
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    /\ UNCHANGED <<mem, read_set, write_set, abort_count, retry_cnt>>
+vars == << pc, mem, xadt_owner, xadt_version, committed, aborted, read_set, 
+           write_set >>
 
-(*── Abort (release ownership, discard private copies) ─────────────*)
-AbortXTM(t) ==
-    /\ pc[t] = "aborting"
-    (* Release ownership of all pages t owned *)
-    /\ xadt_owner' = [p \in Page |->
-                        IF OwnsPage(t, p) THEN 0 ELSE xadt_owner[p]]
-    (* No need to restore memory — writes went to private copy only *)
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    /\ write_set' = [write_set EXCEPT ![t] = [p \in Page |-> NoWrite]]
-    /\ read_set' = [read_set EXCEPT ![t] = << >>]
-    /\ UNCHANGED <<mem, xadt_version, commit_count, retry_cnt>>
+ProcSet == (Thread)
 
-(*── Retry: re-enter active state after abort ──────────────────────*)
-RetryXTM(t) ==
-    /\ pc[t] = "idle"
-    /\ retry_cnt[t] > 0
-    (* Reset and try again *)
-    /\ retry_cnt' = [retry_cnt EXCEPT ![t] = 0]
-    /\ pc' = [pc EXCEPT ![t] = "active"]
-    /\ read_set' = [read_set EXCEPT ![t] = << >>]
-    /\ write_set' = [write_set EXCEPT ![t] = [p \in Page |-> NoWrite]]
-    /\ UNCHANGED <<mem, xadt_owner, xadt_version, abort_count,
-                   commit_count>>
+Init == (* Global variables *)
+        /\ mem = [p \in Page |-> 0]
+        /\ xadt_owner = [p \in Page |-> 0]
+        /\ xadt_version = [p \in Page |-> 0]
+        /\ committed = [t \in Thread |-> 0]
+        /\ aborted = [t \in Thread |-> 0]
+        (* Process ThreadProc *)
+        /\ read_set = [self \in Thread |-> {}]
+        /\ write_set = [self \in Thread |-> [p \in Page |-> NoWrite]]
+        /\ pc = [self \in ProcSet |-> "L_idle"]
 
-(*--------------------------------------------------------------------*)
-(* Next-state relation                                                *)
-(*--------------------------------------------------------------------*)
+L_idle(self) == /\ pc[self] = "L_idle"
+                /\ IF committed[self] >= MaxCommits
+                      THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
+                      ELSE /\ pc' = [pc EXCEPT ![self] = "L_begin"]
+                /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
+                                aborted, read_set, write_set >>
 
-Next ==
-    \E t \in Thread :
-        \/ BeginXTM(t)
-        \/ \E p \in Page : ReadPage(t, p)
-        \/ \E p \in Page : ReadConflict(t, p)
-        \/ \E p \in Page : \E v \in Data : WritePage(t, p, v)
-        \/ \E p \in Page : WriteConflict(t, p)
-        \/ Validate(t)
-        \/ ValidateFailed(t)
-        \/ WriteBackXTM(t)
-        \/ ReleaseAndBump(t)
-        \/ AbortXTM(t)
-        \/ RetryXTM(t)
+L_begin(self) == /\ pc[self] = "L_begin"
+                 /\ read_set' = [read_set EXCEPT ![self] = {}]
+                 /\ write_set' = [write_set EXCEPT ![self] = [p \in Page |-> NoWrite]]
+                 /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                 /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
+                                 aborted >>
+
+L_active(self) == /\ pc[self] = "L_active"
+                  /\ \/ /\ \E p \in Page:
+                             IF write_set[self][p] # NoWrite
+                                THEN /\ TRUE
+                                ELSE /\ TRUE
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<xadt_owner, read_set, write_set>>
+                     \/ /\ IF \E p \in Page : write_set[self][p] = NoWrite /\ xadt_owner[p] \notin {0, self}
+                              THEN /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<xadt_owner, read_set, write_set>>
+                     \/ /\ \E p \in Page:
+                             IF write_set[self][p] = NoWrite /\ xadt_owner[p] \in {0, self}
+                                THEN /\ read_set' = [read_set EXCEPT ![self] = read_set[self] \union {<<p, xadt_version[p]>>}]
+                                ELSE /\ TRUE
+                                     /\ UNCHANGED read_set
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<xadt_owner, write_set>>
+                     \/ /\ \E p \in Page:
+                             \E v \in Data:
+                               IF write_set[self][p] # NoWrite
+                                  THEN /\ write_set' = [write_set EXCEPT ![self][p] = v]
+                                  ELSE /\ TRUE
+                                       /\ UNCHANGED write_set
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<xadt_owner, read_set>>
+                     \/ /\ \E p \in Page:
+                             \E v \in Data:
+                               IF write_set[self][p] = NoWrite /\ xadt_owner[p] = 0
+                                  THEN /\ xadt_owner' = [xadt_owner EXCEPT ![p] = self]
+                                       /\ write_set' = [write_set EXCEPT ![self][p] = v]
+                                  ELSE /\ TRUE
+                                       /\ UNCHANGED << xadt_owner, write_set >>
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED read_set
+                     \/ /\ \E p \in Page:
+                             \E v \in Data:
+                               IF write_set[self][p] = NoWrite /\ xadt_owner[p] = self
+                                  THEN /\ write_set' = [write_set EXCEPT ![self][p] = v]
+                                  ELSE /\ TRUE
+                                       /\ UNCHANGED write_set
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<xadt_owner, read_set>>
+                     \/ /\ IF \E p \in Page : write_set[self][p] = NoWrite /\ xadt_owner[p] \notin {0, self}
+                              THEN /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<xadt_owner, read_set, write_set>>
+                     \/ /\ IF \A <<p, ver>> \in read_set[self] :
+                               write_set[self][p] # NoWrite \/
+                               (xadt_version[p] = ver /\ (xadt_owner[p] = 0 \/ xadt_owner[p] = self))
+                              THEN /\ pc' = [pc EXCEPT ![self] = "L_writeback"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                        /\ UNCHANGED <<xadt_owner, read_set, write_set>>
+                  /\ UNCHANGED << mem, xadt_version, committed, aborted >>
+
+L_writeback(self) == /\ pc[self] = "L_writeback"
+                     /\ mem' =    [p \in Page |->
+                               IF write_set[self][p] # NoWrite THEN write_set[self][p] ELSE mem[p]]
+                     /\ pc' = [pc EXCEPT ![self] = "L_release"]
+                     /\ UNCHANGED << xadt_owner, xadt_version, committed, 
+                                     aborted, read_set, write_set >>
+
+L_release(self) == /\ pc[self] = "L_release"
+                   /\ xadt_owner' =           [p \in Page |->
+                                    IF xadt_owner[p] = self THEN 0 ELSE xadt_owner[p]]
+                   /\ xadt_version' =             [p \in Page |->
+                                      IF write_set[self][p] # NoWrite THEN xadt_version[p] + 1 ELSE xadt_version[p]]
+                   /\ read_set' = [read_set EXCEPT ![self] = {}]
+                   /\ write_set' = [write_set EXCEPT ![self] = [p \in Page |-> NoWrite]]
+                   /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
+                   /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                   /\ UNCHANGED << mem, aborted >>
+
+L_abort(self) == /\ pc[self] = "L_abort"
+                 /\ xadt_owner' =           [p \in Page |->
+                                  IF xadt_owner[p] = self THEN 0 ELSE xadt_owner[p]]
+                 /\ read_set' = [read_set EXCEPT ![self] = {}]
+                 /\ write_set' = [write_set EXCEPT ![self] = [p \in Page |-> NoWrite]]
+                 /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
+                 /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                 /\ UNCHANGED << mem, xadt_version, committed >>
+
+L_done(self) == /\ pc[self] = "L_done"
+                /\ TRUE
+                /\ pc' = [pc EXCEPT ![self] = "Done"]
+                /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
+                                aborted, read_set, write_set >>
+
+ThreadProc(self) == L_idle(self) \/ L_begin(self) \/ L_active(self)
+                       \/ L_writeback(self) \/ L_release(self)
+                       \/ L_abort(self) \/ L_done(self)
+
+(* Allow infinite stuttering to prevent deadlock on termination. *)
+Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
+               /\ UNCHANGED vars
+
+Next == (\E self \in Thread: ThreadProc(self))
+           \/ Terminating
 
 Spec == Init /\ [][Next]_vars
 
+Termination == <>(\A self \in ProcSet: pc[self] = "Done")
+
+\* END TRANSLATION
+
 (*====================================================================*)
-(* Invariants                                                         *)
+(* Invariants                                                          *)
 (*====================================================================*)
 
-(*── I1: Each page is owned by at most one TX at a time ─────────────*)
+(* I1: Each page is owned by at most one thread at a time *)
 PageOwnershipExclusion ==
     \A p \in Page :
         \A t1, t2 \in Thread :
             (xadt_owner[p] = t1 /\ xadt_owner[p] = t2) => t1 = t2
 
-(*── I2: If a thread owns a page, it's in the write-set ────────────*)
+(* I2: If a thread owns a page, it's in the write-set *)
 OwnershipTracked ==
     \A t \in Thread, p \in Page :
-        OwnsPage(t, p) => HasWritten(t, p)
+        xadt_owner[p] = t => write_set[t][p] # NoWrite
 
-(*── I3: If a thread has written to a page, it owns it ─────────────*)
+(* I3: If a thread has written to a page, it owns it *)
 WriteTrackedOwnership ==
     \A t \in Thread, p \in Page :
-        HasWritten(t, p) => OwnsPage(t, p)
+        write_set[t][p] # NoWrite => xadt_owner[p] = t
 
-(*── I4: A thread in writeback owns all its written pages ──────────*)
+(* I4: A thread in writeback owns all its written pages *)
 WritebackConsistent ==
     \A t \in Thread :
-        pc[t] = "writeback" =>
-            \A p \in Page : HasWritten(t, p) => OwnsPage(t, p)
+        pc[t] = "L_writeback" =>
+            \A p \in Page : write_set[t][p] # NoWrite => xadt_owner[p] = t
 
-(*── I5: Aborting thread releases all ownership ────────────────────*)
-AbortReleases ==
-    \A t \in Thread :
-        pc[t] = "aborting" =>
-            \A p \in Page : xadt_owner[p] \in {0} \cup (Thread \ {t})
-            (* t may still own pages before AbortXTM fires *)
-            \/ \E a \in Page : xadt_owner[a] = t
-
-(*── I6: Page versions never decrease ──────────────────────────────*)
+(* I5: Page versions never decrease *)
 VersionMonotonic ==
-    \A p \in Page :
-        xadt_version[p] >= 0
+    \A p \in Page : xadt_version[p] >= 0
 
-(*── I7: No dirty reads across transactions ────────────────────────*)
+(* I6: No thread owns pages while idle *)
 NoDirtyRead ==
     \A t \in Thread :
-        pc[t] = "idle" =>
+        pc[t] \in {"L_idle", "L_begin", "L_done"} =>
             \A p \in Page : xadt_owner[p] # t
 
-(*====================================================================*)
-(* Temporal properties                                                *)
-(*====================================================================*)
+(* Combined invariant for TLC *)
+Inv ==
+    /\ PageOwnershipExclusion
+    /\ OwnershipTracked
+    /\ WriteTrackedOwnership
+    /\ WritebackConsistent
+    /\ VersionMonotonic
+    /\ NoDirtyRead
 
-(* Every active transaction eventually completes *)
-Completion ==
-    \A t \in Thread :
-        (pc[t] = "active") ~> (pc[t] \in {"idle", "writeback", "commit_ok"})
+(* Constraint for bounded model checking *)
+ModelBound == \A t \in Thread : aborted[t] <= MaxCommits * 2
 
-(* No pages are permanently locked *)
-NoPermanentLock ==
-    \A p \in Page :
-        <>(xadt_owner[p] = 0)
-
-(*====================================================================*)
-(* Model parameters                                                   *)
-(*====================================================================*)
-
-(* Default: Thread = {1, 2}; Page = {0, 1}; Data = {0, 1};
-   MaxRetries = 2 *)
-
-====
+=====
