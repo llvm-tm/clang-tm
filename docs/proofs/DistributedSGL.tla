@@ -20,10 +20,12 @@ EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
     Client,             (* Set of client node IDs *)
-    Addr                (* Set of memory addresses *)
+    Addr,               (* Set of memory addresses *)
+    Data                (* Set of possible data values *)
 
 ASSUME Client \subseteq Nat \ {0}
 ASSUME Addr \subseteq Nat
+ASSUME Data \subseteq Nat
 
 VARIABLES
     lock_holder,        (* Client \cup {0}: who holds the lock *)
@@ -70,13 +72,15 @@ SendLockReq(c) ==
 
 (* Server processes lock request: grant if available *)
 ProcessLockReq ==
-    /\ \E <<c, MSG_LOCK_REQ>> \in msg_queue :
+    /\ \E msg \in msg_queue :
+        /\ msg[1] \in Client
+        /\ msg[2] = MSG_LOCK_REQ
         /\ lock_holder = 0
         /\ pending_req = 0
-        /\ lock_holder' = c
-        /\ pending_req' = c
-        /\ msg_queue' = msg_queue \ {<<c, MSG_LOCK_REQ>>}
-        /\ msg_queue' = msg_queue' \cup {<<c, MSG_LOCK_GRANT>>}
+        /\ lock_holder' = msg[1]
+        /\ pending_req' = msg[1]
+        /\ msg_queue' = msg_queue \ {msg}
+        /\ msg_queue' = msg_queue' \cup {<<msg[1], MSG_LOCK_GRANT>>}
     /\ UNCHANGED <<mem, pc, granted, version, committed>>
 
 (* Client receives lock grant *)
@@ -101,7 +105,7 @@ ClientWrite(c, a, v) ==
     /\ pc[c] = "active"
     /\ granted[c] = TRUE
     /\ a \in Addr
-    /\ v \in Nat
+    /\ v \in Data
     /\ mem' = [mem EXCEPT ![a] = v]
     /\ UNCHANGED <<lock_holder, pending_req, pc, granted, version,
                    committed, msg_queue>>
@@ -117,14 +121,16 @@ SendUnlock(c) ==
 
 (* Server processes unlock *)
 ProcessUnlock ==
-    /\ \E <<c, MSG_UNLOCK>> \in msg_queue :
-        /\ lock_holder = c
+    /\ \E msg \in msg_queue :
+        /\ msg[1] \in Client
+        /\ msg[2] = MSG_UNLOCK
+        /\ lock_holder = msg[1]
         /\ lock_holder' = 0
-        /\ granted' = [granted EXCEPT ![c] = FALSE]
+        /\ granted' = [granted EXCEPT ![msg[1]] = FALSE]
         /\ version' = version + 1
-        /\ committed' = [committed EXCEPT ![c] = committed[c] + 1]
-        /\ pc' = [pc EXCEPT ![c] = "idle"]
-        /\ msg_queue' = msg_queue \ {<<c, MSG_UNLOCK>>}
+        /\ committed' = [committed EXCEPT ![msg[1]] = committed[msg[1]] + 1]
+        /\ pc' = [pc EXCEPT ![msg[1]] = "idle"]
+        /\ msg_queue' = msg_queue \ {msg}
     /\ UNCHANGED <<pending_req, mem>>
 
 (*--------------------------------------------------------------------*)
@@ -136,7 +142,7 @@ Next ==
     \/ ProcessLockReq
     \/ \E c \in Client : RecvLockGrant(c)
     \/ \E c \in Client : \E a \in Addr : ClientRead(c, a)
-    \/ \E c \in Client : \E a \in Addr : \E v \in Nat : ClientWrite(c, a, v)
+    \/ \E c \in Client : \E a \in Addr : \E v \in Data : ClientWrite(c, a, v)
     \/ \E c \in Client : SendUnlock(c)
     \/ ProcessUnlock
 
@@ -163,11 +169,11 @@ NoSpuriousGrant ==
 
 (*── I4: At most one pending request at a time ─────────────────────*)
 AtMostOnePending ==
-    /\ Cardinality({<<c, MSG_LOCK_REQ>> \in msg_queue}) <= 1
+    /\ Cardinality({x \in msg_queue : x[2] = MSG_LOCK_REQ}) <= 1
     /\ pending_req = 0 \/ \E c \in Client : <<c, MSG_LOCK_GRANT>> \notin msg_queue
 
 (*── I5: Server consistency — only one grant in flight ─────────────*)
 ServerConsistency ==
-    Cardinality({<<c, MSG_LOCK_GRANT>> \in msg_queue}) <= 1
+    Cardinality({x \in msg_queue : x[2] = MSG_LOCK_GRANT}) <= 1
 
 ====

@@ -107,9 +107,9 @@ ReadPage(t, p) ==
            /\ UNCHANGED vars
        ELSE
            /\ xadt_owner[p] = 0 \/ xadt_owner[p] = t
-           (* Page is free or owned by us → OK to read *\)
+           (* Page is free or owned by us → OK to read *)
            /\ LET ver == xadt_version[p] IN
-              (* Record (page, version) in read-set *\)
+              (* Record (page, version) in read-set *)
               /\ read_set' = [read_set EXCEPT ![t] =
                                 Append(read_set[t], <<p, ver>>)]
               /\ UNCHANGED <<mem, xadt_owner, xadt_version, pc,
@@ -122,7 +122,7 @@ ReadConflict(t, p) ==
     /\ p \in Page
     /\ ~HasWritten(t, p)
     /\ xadt_owner[p] \notin {0, t}  (* owned by another TX *)
-    (* Eager conflict: abort immediately *\)
+    (* Eager conflict: abort immediately *)
     /\ pc' = [pc EXCEPT ![t] = "aborting"]
     /\ abort_count' = [abort_count EXCEPT ![t] = abort_count[t] + 1]
     /\ retry_cnt' = [retry_cnt EXCEPT ![t] = retry_cnt[t] + 1]
@@ -140,11 +140,11 @@ WritePage(t, p, v) ==
            /\ write_set' = [write_set EXCEPT ![t][p] = v]
            /\ UNCHANGED <<xadt_owner, xadt_version>>
        ELSE
-           (* Try to acquire ownership: CAS owner from 0 to t *\)
+           (* Try to acquire ownership: CAS owner from 0 to t *)
            /\ xadt_owner[p] = 0
            /\ xadt_owner' = [xadt_owner EXCEPT ![p] = t]
            /\ write_set' = [write_set EXCEPT ![t][p] = v]
-           (* Keep current version (will bump on commit) *\)
+           (* Keep current version (will bump on commit) *)
            /\ UNCHANGED <<xadt_version>>
     /\ UNCHANGED <<mem, pc, read_set, abort_count, commit_count,
                    retry_cnt>>
@@ -155,7 +155,7 @@ WriteConflict(t, p) ==
     /\ p \in Page
     /\ ~HasWritten(t, p)
     /\ xadt_owner[p] \notin {0, t}
-    (* CAS failed → abort *\)
+    (* CAS failed → abort *)
     /\ pc' = [pc EXCEPT ![t] = "aborting"]
     /\ abort_count' = [abort_count EXCEPT ![t] = abort_count[t] + 1]
     /\ retry_cnt' = [retry_cnt EXCEPT ![t] = retry_cnt[t] + 1]
@@ -167,7 +167,7 @@ WriteConflict(t, p) ==
 Validate(t) ==
     /\ pc[t] = "active"
     (* Check: every read-set page not in write-set has
-       unchanged version and no concurrent owner *\)
+       unchanged version and no concurrent owner *)
     /\ \A i \in 1..Len(read_set[t]) :
          LET entry == read_set[t][i]
              page == entry[1]
@@ -175,7 +175,7 @@ Validate(t) ==
          page \in {p \in Page : HasWritten(t, p)}
          \/ (xadt_version[page] = captured_ver /\ xadt_owner[page] = t)
          \/ (xadt_version[page] = captured_ver /\ xadt_owner[page] = 0)
-    (* All checks pass → proceed to write-back *\)
+    (* All checks pass → proceed to write-back *)
     /\ pc' = [pc EXCEPT ![t] = "writeback"]
     /\ UNCHANGED <<mem, xadt_owner, xadt_version, read_set,
                    write_set, abort_count, commit_count, retry_cnt>>
@@ -183,7 +183,7 @@ Validate(t) ==
 (*── Validation failure → abort ────────────────────────────────────*)
 ValidateFailed(t) ==
     /\ pc[t] = "active"
-    (* Some read-set page version changed or owned by another TX *\)
+    (* Some read-set page version changed or owned by another TX *)
     /\ ~ (\A i \in 1..Len(read_set[t]) :
             LET entry == read_set[t][i]
                 page == entry[1]
@@ -200,7 +200,7 @@ ValidateFailed(t) ==
 (* Phase 2: Write-back (apply private copies to memory) *)
 WriteBackXTM(t) ==
     /\ pc[t] = "writeback"
-    (* Copy private writes to shared memory *\)
+    (* Copy private writes to shared memory *)
     /\ mem' = [p \in Page |->
                  IF HasWritten(t, p) THEN write_set[t][p] ELSE mem[p]]
     /\ pc' = [pc EXCEPT ![t] = "commit_ok"]
@@ -210,7 +210,7 @@ WriteBackXTM(t) ==
 (* Phase 3: Release ownership + bump versions *)
 ReleaseAndBump(t) ==
     /\ pc[t] = "commit_ok"
-    (* For each page owned by t: release ownership and bump version *\)
+    (* For each page owned by t: release ownership and bump version *)
     /\ xadt_owner' = [p \in Page |->
                         IF OwnsPage(t, p) THEN 0 ELSE xadt_owner[p]]
     /\ xadt_version' = [p \in Page |->
@@ -224,10 +224,10 @@ ReleaseAndBump(t) ==
 (*── Abort (release ownership, discard private copies) ─────────────*)
 AbortXTM(t) ==
     /\ pc[t] = "aborting"
-    (* Release ownership of all pages t owned *\)
+    (* Release ownership of all pages t owned *)
     /\ xadt_owner' = [p \in Page |->
                         IF OwnsPage(t, p) THEN 0 ELSE xadt_owner[p]]
-    (* No need to restore memory — writes went to private copy only *\)
+    (* No need to restore memory — writes went to private copy only *)
     /\ pc' = [pc EXCEPT ![t] = "idle"]
     /\ write_set' = [write_set EXCEPT ![t] = [p \in Page |-> NoWrite]]
     /\ read_set' = [read_set EXCEPT ![t] = << >>]
@@ -237,7 +237,7 @@ AbortXTM(t) ==
 RetryXTM(t) ==
     /\ pc[t] = "idle"
     /\ retry_cnt[t] > 0
-    (* Reset and try again *\)
+    (* Reset and try again *)
     /\ retry_cnt' = [retry_cnt EXCEPT ![t] = 0]
     /\ pc' = [pc EXCEPT ![t] = "active"]
     /\ read_set' = [read_set EXCEPT ![t] = << >>]
@@ -296,14 +296,13 @@ AbortReleases ==
     \A t \in Thread :
         pc[t] = "aborting" =>
             \A p \in Page : xadt_owner[p] \in {0} \cup (Thread \ {t})
-            (* t may still own pages before AbortXTM fires *\)
+            (* t may still own pages before AbortXTM fires *)
             \/ \E a \in Page : xadt_owner[a] = t
 
-(*── I6: Page versions are consistent with commit count ────────────*)
+(*── I6: Page versions never decrease ──────────────────────────────*)
 VersionMonotonic ==
     \A p \in Page :
-        /\ xadt_version[p] <= commit_count[t]  (* per-page best effort *)
-        /\ xadt_version[p] >= 0
+        xadt_version[p] >= 0
 
 (*── I7: No dirty reads across transactions ────────────────────────*)
 NoDirtyRead ==

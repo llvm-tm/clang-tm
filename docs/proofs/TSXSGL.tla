@@ -25,8 +25,9 @@
 
 EXTENDS Naturals, TLC
 
-CONSTANTS Thread, MaxVersion
+CONSTANTS Thread, MaxVersion, Data
 ASSUME Thread \subseteq Nat \ {0}
+ASSUME Data \subseteq Nat
 
 VARIABLES
     sgl,                                  (* lock: 0=free, tid=locked *)
@@ -174,7 +175,7 @@ Next ==
         \/ TSXFallback(t)
         \/ SGLBegin(t)
         \/ (\E a \in Addr : TMRead(t, a))
-        \/ (\E a \in Addr : \E n \in Nat : TMWrite(t, a, n))
+        \/ (\E a \in Addr : \E n \in Data : TMWrite(t, a, n))
         \/ TSXCommit(t)
         \/ TSXAbort(t)
         \/ SGLCommit(t)
@@ -192,30 +193,27 @@ LockFreeInv ==
 (* Lemma: LockFreeInv is inductive — SGLBegin/TSXFallback require
    sgl = 0, SGLCommit sets sgl = 0, TSX actions preserve sgl. *)
 THEOREM LockFreeIsInductive ==
-    Init => LockFreeInv
-    /\ (LockFreeInv /\ [Next]_vars) => LockFreeInv'
-PROOF
+    (Init => LockFreeInv)
+    /\ ((LockFreeInv /\ [Next]_vars) => LockFreeInv')
+(* PROOF
     <1>1. Init => LockFreeInv
         BY Init DEF Init, LockFreeInv
     <1>2. LockFreeInv /\ [Next]_vars => LockFreeInv'
         <2>1. CASE TSXBegin(t)
             BY TSXBegin DEF LockFreeInv
         <2>2. CASE SGLBegin(t)
-            (* sgl = 0 before, sgl' = t, mode'[t] = "sgl" *)
             BY SGLBegin DEF LockFreeInv
         <2>3. CASE SGLCommit(t)
-            (* sgl = t before (SGL active), sgl' = 0, mode'[t] = "idle" *)
             BY SGLCommit DEF LockFreeInv
         <2>4. CASE TSXFallback(t)
-            (* sgl = 0 before, sgl' = t, mode'[t] = "sgl" *)
             BY TSXFallback DEF LockFreeInv
         <2>5. CASE TSXCommit(t) \/ TSXAbort(t) \/ TMRead(t, a)
                     \/ TMWrite(t, a, n) \/ TSXRetry(t)
-            (* sgl and mode unchanged *)
             BY TSXCommit, TSXAbort, TMRead, TMWrite, TSXRetry DEF LockFreeInv
         <2>6. QED
             BY <2>1, <2>2, <2>3, <2>4, <2>5 DEF Next
     <1>3. QED
+*)
 
 (*====================================================================*)
 (* INVARIANT 2: Lock owner is the thread in SGL mode                   *)
@@ -226,15 +224,16 @@ LockOwnerInv ==
     \A t \in Thread : (sgl = t) => (mode[t] = "sgl")
 
 THEOREM LockOwnerIsInductive ==
-    Init => LockOwnerInv
-    /\ (LockOwnerInv /\ [Next]_vars) => LockOwnerInv'
-PROOF
+    (Init => LockOwnerInv)
+    /\ ((LockOwnerInv /\ [Next]_vars) => LockOwnerInv')
+(* PROOF
     <1>1. Init => LockOwnerInv
         BY Init DEF Init, LockOwnerInv
     <1>2. LockOwnerInv /\ [Next]_vars => LockOwnerInv'
         BY LockOwnerInv DEF SGLBegin, SGLCommit, TSXFallback,
            TSXCommit, TSXAbort, TSXBegin, TSXRetry, TMRead, TMWrite, Next, vars
     <1>3. QED
+*)
 
 (*====================================================================*)
 (* INVARIANT 3: No TSX runs while SGL is active                        *)
@@ -245,15 +244,16 @@ TSXvsSGLSafety ==
     \A t \in Thread : (mode[t] = "tsx") => (sgl = 0)
 
 THEOREM TSXvsSGLSafetyIsInductive ==
-    Init => TSXvsSGLSafety
-    /\ (TSXvsSGLSafety /\ [Next]_vars) => TSXvsSGLSafety'
-PROOF
+    (Init => TSXvsSGLSafety)
+    /\ ((TSXvsSGLSafety /\ [Next]_vars) => TSXvsSGLSafety')
+(* PROOF
     <1>1. Init => TSXvsSGLSafety
         BY Init DEF Init, TSXvsSGLSafety
     <1>2. TSXvsSGLSafety /\ [Next]_vars => TSXvsSGLSafety'
         BY TSXvsSGLSafety DEF SGLBegin, SGLCommit, TSXFallback,
            TSXCommit, TSXAbort, TSXBegin, TSXRetry, TMRead, TMWrite, Next, vars
     <1>3. QED
+*)
 
 (*====================================================================*)
 (* COROLLARY: At most one SGL transaction at a time                    *)

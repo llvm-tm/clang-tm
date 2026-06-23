@@ -28,12 +28,12 @@ ASSUME Addr \subseteq Nat
 
 VARIABLES
     clock,
-    lock[_, _],                           (* [addr -> {locked, owner, version}] *)
+    lock,                                (* [addr -> {locked, owner, version}] *)
     mem,
     pc,                                (* idle | active | wb *)
     readSet,
     writeSet,
-    writeBuf[_, _],
+    writeBuf,
     readOnly,
     committed
 
@@ -80,8 +80,8 @@ WriteNew(t, a, n) ==
     /\ pc[t] = "active"
     /\ a \notin writeSet[t]
     /\ LOCK_FREE(a)                              (* no one holds it *)
-    /\ lock' = [a \in Addr |->
-        IF a = a THEN MAKE_LOCK(1, t, LOCK_VER(a)) ELSE lock[a]]
+    /\ lock' = [aa \in Addr |->
+        IF aa = a THEN MAKE_LOCK(1, t, LOCK_VER(aa)) ELSE lock[aa]]
     /\ writeSet' = [writeSet EXCEPT ![t] = writeSet[t] \cup {a}]
     /\ writeBuf' = [writeBuf EXCEPT ![t][a] = n]
     /\ readOnly' = [readOnly EXCEPT ![t] = FALSE]

@@ -23,10 +23,12 @@ EXTENDS Naturals, FiniteSets, Sequences, TLC
 
 CONSTANTS
     Thread,             (* Set of thread IDs *)
-    Addr                (* Set of memory addresses *)
+    Addr,               (* Set of memory addresses *)
+    Data                (* Set of possible data values *)
 
 ASSUME Thread \subseteq Nat \ {0}
 ASSUME Addr \subseteq Nat
+ASSUME Data \subseteq Nat
 
 VARIABLES
     lock,               (* Thread \cup {0}: lock holder *)
@@ -83,7 +85,7 @@ Write(t, a, v) ==
     /\ pc[t] = "active"
     /\ lock = t
     /\ a \in Addr
-    /\ v \in Nat
+    /\ v \in Data
     /\ mem' = [mem EXCEPT ![a] = v]
     /\ durable_log' = [durable_log EXCEPT ![t] = durable_log[t] \cup {<<a, v>>}]
     /\ UNCHANGED <<lock, nvm, pc, version, committed, crashed, recovered>>
@@ -99,7 +101,7 @@ Flush(t) ==
                  THEN
                      (* Last value written to a in this TX *)
                      LET WrittenValues ==
-                         {v : <<a2, v>> \in durable_log[t] : a2 = a}
+                         {entry[2] : entry \in {x \in durable_log[t] : x[1] = a}}
                      IN CHOOSE v \in WrittenValues : TRUE
                  ELSE nvm[a]]
     /\ pc' = [pc EXCEPT ![t] = "flushing"]
@@ -142,7 +144,7 @@ Recover ==
 Next ==
     \/ \E t \in Thread : Begin(t)
     \/ \E t \in Thread : \E a \in Addr : Read(t, a)
-    \/ \E t \in Thread : \E a \in Addr : \E v \in Nat : Write(t, a, v)
+    \/ \E t \in Thread : \E a \in Addr : \E v \in Data : Write(t, a, v)
     \/ \E t \in Thread : Flush(t)
     \/ \E t \in Thread : Complete(t)
     \/ Crash

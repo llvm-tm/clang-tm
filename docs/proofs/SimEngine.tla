@@ -107,8 +107,8 @@ ReadAddr(lp, a) ==
     /\ pc[lp] = "active"
     /\ in_tx[lp] = TRUE
     /\ a \in Addr
-    LET conflicting_writers == FindWriter(lp, a) IN
-    /\ IF conflicting_writers # {}
+    /\ LET conflicting_writers == FindWriter(lp, a) IN
+       IF conflicting_writers # {}
         THEN
             (* Abort the older writer(s) *)
             /\ \A w \in conflicting_writers :
@@ -135,8 +135,8 @@ WriteAddr(lp, a) ==
     /\ pc[lp] = "active"
     /\ in_tx[lp] = TRUE
     /\ a \in Addr
-    LET conflicting_readers == FindReader(lp, a) IN
-    /\ IF conflicting_readers # {}
+    /\ LET conflicting_readers == FindReader(lp, a) IN
+       IF conflicting_readers # {}
         THEN
             (* Abort the older reader(s) *)
             /\ \A r \in conflicting_readers :
@@ -204,7 +204,7 @@ ExitSGL(lp) ==
 ConflictAbort(lp) ==
     /\ pc[lp] = "active"
     /\ in_tx[lp] = TRUE
-    (* This LP is being aborted by another LP's operation *\)
+    (* This LP is being aborted by another LP's operation *)
     /\ in_tx' = [in_tx EXCEPT ![lp] = FALSE]
     /\ in_flight_writes' = in_flight_writes \ {<<lp, a>> : a \in Addr}
     /\ in_flight_reads' = in_flight_reads \ {<<lp, a>> : a \in Addr}

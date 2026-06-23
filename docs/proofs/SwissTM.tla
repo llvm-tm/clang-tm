@@ -30,13 +30,13 @@ ASSUME Addr \subseteq Nat
 
 VARIABLES
     g_ts,                                 (* global commit timestamp *)
-    orec[_, _, _],                        (* [addr -> {r_lock, w_lock, r_ver, w_owner}] *)
+    orec,                               (* [addr -> {r_lock, w_lock, r_ver, w_owner}] *)
     mem,
     pc,                                (* idle | active | commit_rlock | commit_wb *)
     readSet,                           (* set of <<addr, observed_r_ver>> *)
     writeLog,                          (* set of addr *)
-    writeBuf[_, _],                       (* buffered new value per addr *)
-    oldVal[_, _],                         (* old value for undo *)
+    writeBuf,                           (* buffered new value per addr *)
+    oldVal,                              (* old value for undo *)
     readOnly,
     committed
 
@@ -78,9 +78,9 @@ ReadOwn(t, a) ==
 ReadFromMem(t, a) ==
     /\ pc[t] = "active"
     /\ a \notin writeLog[t]
-    (\* ORec not write-locked by another *\)
+    (* ORec not write-locked by another *)
     /\ ~ (OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) # t)
-    (\* Record r_lock version *\)
+    (* Record r_lock version *)
     /\ readSet' = [readSet EXCEPT ![t] = readSet[t]
         \cup {<<a, OREC_RVER(orec[a])>>}]
     /\ UNCHANGED <<g_ts, orec, mem, pc, writeLog, writeBuf, oldVal, readOnly, committed>>
@@ -89,9 +89,9 @@ ReadFromMem(t, a) ==
 WriteAcquire(t, a, n) ==
     /\ pc[t] = "active"
     /\ a \notin writeLog[t]
-    (\* w_lock is free *\)
+    (* w_lock is free *)
     /\ OREC_WLOCK(orec[a]) = 0
-    (\* Acquire write lock *\)
+    (* Acquire write lock *)
     /\ orec' = [aa \in Addr |->
         IF aa = a
         THEN MAKE_OREC(OREC_RLOCK(orec[a]), 1, OREC_RVER(orec[a]), t)
@@ -103,7 +103,7 @@ WriteAcquire(t, a, n) ==
     /\ UNCHANGED <<g_ts, mem, pc, readSet, committed>>
 
 WriteConflict(t, a) ==
-    (\* Write conflict: w_lock held by another -> abort *\)
+    (* Write conflict: w_lock held by another -> abort *)
     /\ pc[t] = "active"
     /\ a \notin writeLog[t]
     /\ OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) # t
@@ -123,11 +123,11 @@ CommitRLock(t) ==
     /\ pc[t] = "active"
     /\ readOnly[t] = FALSE
     /\ writeLog[t] # {}
-    (\* All read-set addresses must not be read-locked by another *\)
+    (* All read-set addresses must not be read-locked by another *)
     /\ \A entry \in readSet[t] :
         LET addr == entry[1] IN
         OREC_RLOCK(orec[addr]) = 0              (* not read-locked *)
-    (\* Acquire read-locks: set r_lock = 1 for all read-set entries *\)
+    (* Acquire read-locks: set r_lock = 1 for all read-set entries *)
     /\ orec' = [a \in Addr |->
         IF \E entry \in readSet[t] : entry[1] = a
         THEN MAKE_OREC(1, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
@@ -158,12 +158,12 @@ CommitValidateFail(t) ==
         LET addr == entry[1]
             obs_ver == entry[2] IN
         ~ (OREC_WOWNER(orec[addr]) = t \/ OREC_RVER(orec[addr]) = obs_ver)
-    (\* Release all read-locks *\)
+    (* Release all read-locks *)
     /\ orec' = [a \in Addr |->
         IF \E entry \in readSet[t] : entry[1] = a
         THEN MAKE_OREC(0, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
         ELSE orec[a]]
-    (\* Release all write-locks *\)
+    (* Release all write-locks *)
     /\ orec' = [a \in Addr |->
         IF a \in writeLog[t]
         THEN MAKE_OREC(OREC_RLOCK(orec'[a]), 0, OREC_RVER(orec'[a]), 0)
@@ -176,10 +176,10 @@ CommitValidateFail(t) ==
 (* Phase 4+5: write-back + release locks *)
 CommitWriteBack(t) ==
     /\ pc[t] = "commit_wb"
-    (\* Write-back *\)
+    (* Write-back *)
     /\ mem' = [a \in Addr |->
         IF a \in writeLog[t] THEN writeBuf[t][a] ELSE mem[a]]
-    (\* Release all locks: r_lock -> 0 (with new version),
+    (* Release all locks: r_lock -> 0 (with new version),
        w_lock -> 0, r_ver -> g_ts *)
     /\ orec' = [a \in Addr |->
         IF a \in writeLog[t]    (* written addresses: release both *)

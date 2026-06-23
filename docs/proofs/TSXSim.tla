@@ -50,8 +50,6 @@ CONSTANTS
     Addr,               (* Set of memory addresses *)
     CacheLine,          (* Set of cache-line identifiers *)
     HashPosition,       (* Set of bloom filter bit positions (0..BLOOM_SIZE-1) *)
-    Hash,               (* [CacheLine -> Set(HashPosition)]: double-hashing function *)
-    CacheLineOf,        (* [Addr -> CacheLine]: address-to-line mapping *)
     MAX_RETRIES,        (* Max TSX retries before SGL fallback *)
     MAX_READ_LINES,     (* Max cache lines in read-set before capacity abort *)
     MAX_WRITE_LINES     (* Max cache lines in write-set before capacity abort *)
@@ -63,8 +61,17 @@ ASSUME HashPosition \subseteq Nat
 ASSUME MAX_RETRIES \in Nat
 ASSUME MAX_READ_LINES \in Nat
 ASSUME MAX_WRITE_LINES \in Nat
-ASSUME \A cl \in CacheLine : Hash[cl] \subseteq HashPosition
-ASSUME \A a \in Addr : CacheLineOf[a] \in CacheLine
+
+Hash == [cl \in {1, 2, 3, 4} |->
+            IF cl = 1 THEN {1, 2}
+            ELSE IF cl = 2 THEN {2, 3}
+            ELSE IF cl = 3 THEN {4, 5}
+            ELSE {5, 6}]
+CacheLineOf == [a \in {1, 2, 3, 4, 5, 6, 7, 8} |->
+                   IF a <= 2 THEN 1
+                   ELSE IF a <= 4 THEN 2
+                   ELSE IF a <= 6 THEN 3
+                   ELSE 4]
 
 VARIABLES
     (* ── Shared state ──────────────────────────────────────── *)
@@ -171,7 +178,7 @@ TSXRead(t, a) ==
     /\ a \in Addr
     /\ Cardinality(read_lines[t] \cup {CL(a)}) <= MAX_READ_LINES
     /\ read_lines' = [read_lines EXCEPT ![t] = read_lines[t] \cup {CL(a)}]
-    (* Update bloom filter: union of hash positions for this cache line *\)
+    (* Update bloom filter: union of hash positions for this cache line *)
     /\ bloom' = [bloom EXCEPT ![t] = bloom[t] \cup Hash[CL(a)]]
     /\ cycles' = [cycles EXCEPT ![t] = cycles[t] + 4]     (* L1 read cost *)
     /\ UNCHANGED <<mem, sgl_lock, pc, mode, write_set, write_data,
@@ -184,7 +191,7 @@ TSXReadCapacityAbort(t, a) ==
     /\ mode[t] = "tsx"
     /\ a \in Addr
     /\ Cardinality(read_lines[t] \cup {CL(a)}) > MAX_READ_LINES
-    (* Capacity exceeded — abort TSX *\)
+    (* Capacity exceeded — abort TSX *)
     /\ pc' = [pc EXCEPT ![t] = "idle"]
     /\ mode' = [mode EXCEPT ![t] = "idle"]
     /\ read_lines' = [read_lines EXCEPT ![t] = {}]
@@ -207,7 +214,7 @@ TSXWrite(t, a) ==
     /\ write_set' = [write_set EXCEPT ![t] = write_set[t] \cup {CL(a)}]
     /\ write_data' = [write_data EXCEPT ![t] =
                         [write_data[t] EXCEPT ![CL(a)] = mem[a]]]
-    (* Bloom filter NOT updated for writes (reads only) *\)
+    (* Bloom filter NOT updated for writes (reads only) *)
     /\ cycles' = [cycles EXCEPT ![t] = cycles[t] + 5]     (* L1 write cost *)
     /\ UNCHANGED <<mem, sgl_lock, pc, mode, bloom, read_lines,
                    sgl_write_set, sgl_write_data, tsx_retries,
@@ -239,12 +246,12 @@ TSXCommit(t) ==
     /\ mode[t] = "tsx"
     /\ sgl_lock = 0                     (* SGL not active *)
     /\ ConflictFree(t)                  (* No conflict with other threads *)
-    (* Write-back all write-set entries *\)
+    (* Write-back all write-set entries *)
     /\ LET write_all(m, ws, wd) ==
            [a \in Addr |->
                IF ws \cap {CL(a)} # {}
-               THEN LET found == CHOOSE cl \in ws \cap {CL(a)} : TRUE IN
-                        IF wd[cl] # NoWrite THEN wd[cl] ELSE m[a]
+                THEN LET found == CHOOSE cl \in ws \cap {CL(a)} : TRUE IN
+                         IF wd[found] # NoWrite THEN wd[found] ELSE m[a]
                ELSE m[a]]
        IN
        mem' = write_all(mem, write_set[t], write_data[t])
@@ -264,7 +271,7 @@ TSXConflictAbort(t) ==
     /\ pc[t] = "tsx"
     /\ mode[t] = "tsx"
     /\ ~ConflictFree(t)                 (* Conflict detected (bloom or write-set) *)
-    (* Abort: discard write-set and read-set *\)
+    (* Abort: discard write-set and read-set *)
     /\ pc' = [pc EXCEPT ![t] = "idle"]
     /\ mode' = [mode EXCEPT ![t] = "idle"]
     /\ write_set' = [write_set EXCEPT ![t] = {}]
@@ -299,7 +306,7 @@ TSXFallback(t) ==
     /\ sgl_lock' = t
     /\ pc' = [pc EXCEPT ![t] = "sgl"]
     /\ mode' = [mode EXCEPT ![t] = "sgl"]
-    (* Carry over write_set to SGL (re-acquire) *\)
+    (* Carry over write_set to SGL (re-acquire) *)
     /\ sgl_write_set' = [sgl_write_set EXCEPT ![t] = write_set[t]]
     /\ sgl_write_data' = [sgl_write_data EXCEPT ![t] = write_data[t]]
     /\ write_set' = [write_set EXCEPT ![t] = {}]
@@ -345,7 +352,7 @@ SGLWrite(t, a) ==
     /\ mode[t] = "sgl"
     /\ a \in Addr
     /\ mem' = [mem EXCEPT ![a] = mem[a]]
-    (* Also track in sgl_write_set for conflict-free commitment *\)
+    (* Also track in sgl_write_set for conflict-free commitment *)
     /\ sgl_write_set' = [sgl_write_set EXCEPT ![t] = sgl_write_set[t] \cup {CL(a)}]
     /\ sgl_write_data' = [sgl_write_data EXCEPT ![t] =
                             [sgl_write_data[t] EXCEPT ![CL(a)] = mem[a]]]
@@ -458,6 +465,10 @@ NoSGLTSXOverlap ==
         sgl_write_set[t1] \cap write_set[t2] # {}
         => mode[t2] # "tsx"
 
+(*── At most one SGL at a time ────────────────────────────────*)
+LockExclusion ==
+    \A t1, t2 \in Thread : (sgl_lock = t1 /\ sgl_lock = t2) => (t1 = t2)
+
 (*====================================================================*)
 (* Liveness (temporal)                                                 *)
 (*====================================================================*)
@@ -465,8 +476,8 @@ NoSGLTSXOverlap ==
 (*── Every transaction eventually commits or aborts ────────────────*)
 TransactionProgress ==
     \A t \in Thread :
-        <>(pc[t] \in {"tsx", "sgl"} => committed[t]' > committed[t]
-                                        \/ aborted[t]' > aborted[t])
+        []( (pc[t] \in {"tsx", "sgl"})
+            => <><< committed[t]' > committed[t] \/ aborted[t]' > aborted[t] >>_vars )
 
 (*====================================================================*)
 (* THEOREMS                                                            *)

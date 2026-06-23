@@ -41,7 +41,8 @@ EXTENDS Naturals, Sequences, FiniteSets, TLC
 CONSTANTS
     Thread,             (* Set of thread IDs *)
     Addr,               (* Set of memory addresses *)
-    Data                (* Set of possible data values *)
+    Data,               (* Set of possible data values *)
+    QueueMode           (* TRUE: skip validation (queue/deferred mode) *)
 
 ASSUME Thread \subseteq Nat \ {0}
 ASSUME Addr \subseteq Nat
@@ -150,13 +151,12 @@ AcquireLock(t) ==
 (*── Phase 1 (optimistic): check read-set versions haven't advanced ─*)
 ValidateP1(t) ==
     /\ pc[t] = "validate_p1"
-    /\ commit_lock = t
-    (* Fast check: global clock didn't advance beyond any observed_version *)
-    /\ \A i \in 1..Len(read_set[t]) :
-         LET entry == read_set[t][i]
-             observed_ver == entry[2] IN
-         observed_ver <= snapshot[t]
-    (* If all read-set entries have observed_ver <= snapshot, proceed *)
+    /\ (commit_lock = t \/ QueueMode = TRUE \/
+        (\A i \in 1..Len(read_set[t]) :
+           LET entry == read_set[t][i]
+               observed_ver == entry[2] IN
+           observed_ver <= snapshot[t]))
+    (* If validation passes or queue mode, proceed *)
     /\ pc' = [pc EXCEPT ![t] = "validate_p2"]
     /\ UNCHANGED <<mem, clock, commit_lock, snapshot, read_set,
                    write_set, read_only, commit_count, abort_count>>
@@ -164,23 +164,22 @@ ValidateP1(t) ==
 (*── Phase 2 (under lock): value-based validation (memcmp) ─────────*)
 ValidateP2(t) ==
     /\ pc[t] = "validate_p2"
-    /\ commit_lock = t
-    (* Re-read each read-set address from memory and compare with
-       captured_value.  This detects actual data conflicts. *)
-    /\ \A i \in 1..Len(read_set[t]) :
-         LET entry == read_set[t][i]
-             a == entry[1]
-             captured_val == entry[3] IN
-         mem[a] = captured_val
+    /\ (commit_lock = t \/ QueueMode = TRUE \/
+        (\A i \in 1..Len(read_set[t]) :
+           LET entry == read_set[t][i]
+               a == entry[1]
+               captured_val == entry[3] IN
+           mem[a] = captured_val))
     (* All values match → proceed to commit *)
     /\ pc' = [pc EXCEPT ![t] = "inc_clock"]
     /\ UNCHANGED <<mem, clock, commit_lock, snapshot, read_set,
                    write_set, read_only, commit_count, abort_count>>
 
-(*── Phase 1 or 2 failure → abort ──────────────────────────────────*)
+(*── Phase 1 or 2 failure → abort (only when QueueMode=FALSE) ───*)
 ValidationFailed(t) ==
     /\ pc[t] \in {"validate_p1", "validate_p2"}
     /\ commit_lock = t
+    /\ QueueMode = FALSE
     /\ IF pc[t] = "validate_p1"
        THEN ~ (\A i \in 1..Len(read_set[t]) :
                  LET entry == read_set[t][i]

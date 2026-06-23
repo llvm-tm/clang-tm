@@ -42,11 +42,13 @@ EXTENDS Naturals, Sequences, FiniteSets, TLC
 CONSTANTS
     Thread,             (* Set of client thread IDs *)
     Key,                (* Set of TM key identifiers (encoded addr) *)
-    Data                (* Set of possible data values *)
+    Data,               (* Set of possible data values *)
+    MaxRetries          (* Max retries before permanent abort *)
 
 ASSUME Thread \subseteq Nat \ {0}
 ASSUME Key \subseteq Nat
 ASSUME Data \subseteq Nat
+ASSUME MaxRetries \in Nat
 
 VARIABLES
     (* ── TiKV cluster state ──────────────────────────────────── *)
@@ -68,10 +70,11 @@ VARIABLES
 
     (* ── Bookkeeping ─────────────────────────────────────────── *)
     committed,          (* [Thread -> Nat] *)
-    aborted             (* [Thread -> Nat] *)
+    aborted,            (* [Thread -> Nat] *)
+    retry_count         (* [Thread -> Nat]: retries within current tx *)
 
 vars == <<kv_store, kv_locks, pc, write_set, read_set, snapshot,
-          primary_key, prewrite_ok, commit_ts, committed, aborted>>
+          primary_key, prewrite_ok, commit_ts, committed, aborted, retry_count>>
 
 NoWrite == 0 - 1
 HasWritten(t, k) == write_set[t][k] # NoWrite
@@ -92,6 +95,7 @@ Init ==
     /\ commit_ts = [t \in Thread |-> 0]
     /\ committed = [t \in Thread |-> 0]
     /\ aborted = [t \in Thread |-> 0]
+    /\ retry_count = [t \in Thread |-> 0]
 
 (*--------------------------------------------------------------------*)
 (* TM Actions                                                         *)
@@ -103,10 +107,11 @@ Begin(t) ==
     /\ pc' = [pc EXCEPT ![t] = "active"]
     /\ write_set' = [write_set EXCEPT ![t] = [k \in Key |-> NoWrite]]
     /\ read_set' = [read_set EXCEPT ![t] = {}]
-    (* Snapshot timestamp: current kv_store version *\)
+    (* Snapshot timestamp: current kv_store version *)
     (* In TiKV, this is a hybrid logical clock (HLC); for TLA+
-       we model it as the current data version. *\)
+       we model it as the current data version. *)
     /\ snapshot' = [snapshot EXCEPT ![t] = 1]
+    /\ retry_count' = [retry_count EXCEPT ![t] = 0]
     /\ UNCHANGED <<kv_store, kv_locks, primary_key, prewrite_ok,
                    commit_ts, committed, aborted>>
 
@@ -116,28 +121,49 @@ Read(t, k) ==
     /\ k \in Key
     /\ IF HasWritten(t, k)
        THEN
-           (* Write exists in local buffer — return buffered value *\)
+           (* Write exists in local buffer — return buffered value *)
            /\ UNCHANGED vars
        ELSE
-           (* Check local read-set cache, then TiKV snapshot *\)
+           (* Check local read-set cache, then TiKV snapshot *)
            /\ read_set' = [read_set EXCEPT ![t] = read_set[t] \cup {k}]
            (* In case of TiKV error (TxnNotFound from concurrent
               commit), the real implementation panics with TmxAbort,
               rolls back the TiKV transaction, and the TM retry loop
-              re-executes.  We model this via the TxnConflict action. *\)
-           /\ UNCHANGED <<kv_store, kv_locks, pc, write_set, snapshot,
-                          primary_key, prewrite_ok, commit_ts,
-                          committed, aborted>>
+              re-executes.  We model this via the TxnConflict action. *)
+            /\ UNCHANGED <<kv_store, kv_locks, pc, write_set, snapshot,
+                           primary_key, prewrite_ok, commit_ts,
+                           committed, aborted, retry_count>>
 
-(*── Read conflict: TiKV returns TxnNotFound → abort ──────────────*)
-TxnConflict(t) ==
+(*── Read conflict: TiKV returns TxnNotFound → retry or abort ──*)
+TxnConflictRetry(t) ==
     /\ pc[t] = "active"
-    (* TiKV detected a concurrent transaction's lock on a key
-       in our read-set.  Rollback and retry. *\)
-    /\ pc' = [pc EXCEPT ![t] = "aborting"]
+    (* TiKV detected a concurrent transaction's lock. Rollback
+       and retry if retry_count[t] < MaxRetries. *)
+    /\ retry_count[t] < MaxRetries
+    /\ retry_count' = [retry_count EXCEPT ![t] = retry_count[t] + 1]
     /\ aborted' = [aborted EXCEPT ![t] = aborted[t] + 1]
-    /\ UNCHANGED <<kv_store, kv_locks, write_set, read_set, snapshot,
-                   primary_key, prewrite_ok, commit_ts, committed>>
+    (* Rollback: release locks, clear write-set, go idle for retry *)
+    /\ kv_locks' = [k \in Key |->
+                      IF kv_locks[k] = t THEN 0 ELSE kv_locks[k]]
+    /\ write_set' = [write_set EXCEPT ![t] = [k \in Key |-> NoWrite]]
+    /\ read_set' = [read_set EXCEPT ![t] = {}]
+    /\ prewrite_ok' = [prewrite_ok EXCEPT ![t] = FALSE]
+    /\ pc' = [pc EXCEPT ![t] = "idle"]
+    /\ UNCHANGED <<kv_store, snapshot, primary_key, commit_ts, committed>>
+
+TxnConflictAbort(t) ==
+    /\ pc[t] = "active"
+    (* Conflict beyond MaxRetries — permanent abort. *)
+    /\ retry_count[t] >= MaxRetries
+    /\ aborted' = [aborted EXCEPT ![t] = aborted[t] + 1]
+    /\ kv_locks' = [k \in Key |->
+                      IF kv_locks[k] = t THEN 0 ELSE kv_locks[k]]
+    /\ write_set' = [write_set EXCEPT ![t] = [k \in Key |-> NoWrite]]
+    /\ read_set' = [read_set EXCEPT ![t] = {}]
+    /\ prewrite_ok' = [prewrite_ok EXCEPT ![t] = FALSE]
+    /\ pc' = [pc EXCEPT ![t] = "idle"]
+    /\ UNCHANGED <<kv_store, snapshot, primary_key, commit_ts, committed,
+                   retry_count>>
 
 (*── Write: buffer in local write-set ──────────────────────────────*)
 Write(t, k, v) ==
@@ -145,14 +171,14 @@ Write(t, k, v) ==
     /\ k \in Key
     /\ v \in Data
     /\ write_set' = [write_set EXCEPT ![t][k] = v]
-    (* Set primary key if this is the first write *\)
+    (* Set primary key if this is the first write *)
     /\ IF \A k2 \in Key : ~HasWritten(t, k2)
        THEN
            /\ primary_key' = [primary_key EXCEPT ![t] = k]
        ELSE
            /\ UNCHANGED <<primary_key>>
     /\ UNCHANGED <<kv_store, kv_locks, pc, read_set, snapshot,
-                   prewrite_ok, commit_ts, committed, aborted>>
+                   prewrite_ok, commit_ts, committed, aborted, retry_count>>
 
 (*── Commit (read-only): no 2PC needed ─────────────────────────────*)
 ReadOnlyCommit(t) ==
@@ -162,73 +188,74 @@ ReadOnlyCommit(t) ==
     /\ pc' = [pc EXCEPT ![t] = "idle"]
     /\ read_set' = [read_set EXCEPT ![t] = {}]
     /\ UNCHANGED <<kv_store, kv_locks, write_set, snapshot,
-                   primary_key, prewrite_ok, commit_ts, aborted>>
+                   primary_key, prewrite_ok, commit_ts, aborted, retry_count>>
 
 (*── Commit (read-write) — Phase 1: Prewrite ──────────────────────*)
 (*  Percolator prewrite: acquire locks on all written keys. *)
 Prewrite(t) ==
     /\ pc[t] = "active"
     /\ \E k \in Key : HasWritten(t, k)
-    (* Prewrite all written keys: check locks are free, acquire them *\)
+    (* Prewrite all written keys: check locks are free, acquire them *)
     /\ \A k \in Key :
          HasWritten(t, k) =>
              kv_locks[k] = 0 \/ kv_locks[k] = t
-    (* Acquire locks *\)
+    (* Acquire locks *)
     /\ kv_locks' = [k \in Key |->
                       IF HasWritten(t, k) THEN t ELSE kv_locks[k]]
     (* Also write the lock + data to TiKV (modeled as updating
        kv_store to a "prewritten" state — data not yet committed,
        but locked).  For TLC, we keep the old data visible since
-       the lock prevents other readers/writers from seeing it. *\)
+       the lock prevents other readers/writers from seeing it. *)
     /\ prewrite_ok' = [prewrite_ok EXCEPT ![t] = TRUE]
     /\ pc' = [pc EXCEPT ![t] = "prewriting"]
-    /\ UNCHANGED <<write_set, read_set, snapshot, primary_key,
-                   commit_ts, committed, aborted>>
+    /\ UNCHANGED <<kv_store, write_set, read_set, snapshot, primary_key,
+                   commit_ts, committed, aborted, retry_count>>
 
 (*── Prewrite conflict: another thread holds a lock → abort ───────*)
 PrewriteConflict(t) ==
     /\ pc[t] = "active"
     /\ \E k \in Key :
          HasWritten(t, k) /\ kv_locks[k] \notin {0, t}
-    (* Another thread holds the lock — abort *\)
+    (* Another thread holds the lock — abort *)
     /\ pc' = [pc EXCEPT ![t] = "aborting"]
     (* Release any locks we did acquire (none if this is the
        first conflicting key — the real implementation aborts
-       on first conflict) *\)
+       on first conflict) *)
     /\ kv_locks' = [k \in Key |->
                       IF HasWritten(t, k) /\ kv_locks[k] = t
                       THEN 0 ELSE kv_locks[k]]
     /\ prewrite_ok' = [prewrite_ok EXCEPT ![t] = FALSE]
     /\ aborted' = [aborted EXCEPT ![t] = aborted[t] + 1]
-    /\ UNCHANGED <<write_set, read_set, snapshot, primary_key,
-                   commit_ts, committed>>
+    /\ UNCHANGED <<kv_store, write_set, read_set, snapshot, primary_key,
+                   commit_ts, committed, retry_count>>
 
 (*── Commit — Phase 2: Commit primary key ─────────────────────────*)
 (*  Percolator commits the primary key first (single-point commit). *)
 CommitPrimary(t) ==
     /\ pc[t] = "prewriting"
     /\ prewrite_ok[t] = TRUE
-    (* Get commit timestamp *\)
+    (* Get commit timestamp *)
     /\ commit_ts' = [commit_ts EXCEPT ![t] = 2]
-    (* Write the primary key's value definitively *\)
+    (* Write the primary key's value definitively *)
     /\ LET pk == primary_key[t] IN
-       HasWritten(t, pk) =>
-           /\ kv_store' = [kv_store EXCEPT ![pk] = write_set[t][pk]]
-           /\ kv_locks' = [kv_locks EXCEPT ![pk] = 0]
+       IF HasWritten(t, pk)
+       THEN /\ kv_store' = [kv_store EXCEPT ![pk] = write_set[t][pk]]
+            /\ kv_locks' = [kv_locks EXCEPT ![pk] = 0]
+       ELSE /\ UNCHANGED <<kv_store, kv_locks>>
     /\ pc' = [pc EXCEPT ![t] = "committing"]
-    /\ UNCHANGED <<write_set, read_set, snapshot, prewrite_ok,
-                   committed, aborted>>
+    /\ UNCHANGED <<primary_key, write_set, read_set, snapshot, prewrite_ok,
+                   committed, aborted, retry_count>>
 
 (*── Commit — Phase 2b: Commit secondary keys ─────────────────────*)
 (*  After primary is committed, commit all remaining keys. *)
 CommitSecondary(t) ==
     /\ pc[t] = "committing"
-    (* Write all remaining written keys *\)
+    (* Write all remaining written keys *)
     /\ kv_store' = [k \in Key |->
                       IF HasWritten(t, k) /\ k # primary_key[t]
                       THEN write_set[t][k]
                       ELSE kv_store[k]]
-    (* Release all remaining locks *\)
+    (* Release all remaining locks *)
     /\ kv_locks' = [k \in Key |->
                       IF HasWritten(t, k) /\ k # primary_key[t]
                       THEN 0 ELSE kv_locks[k]]
@@ -236,13 +263,13 @@ CommitSecondary(t) ==
     /\ pc' = [pc EXCEPT ![t] = "idle"]
     /\ read_set' = [read_set EXCEPT ![t] = {}]
     /\ UNCHANGED <<write_set, snapshot, primary_key, prewrite_ok,
-                   commit_ts, aborted>>
+                   commit_ts, aborted, retry_count>>
 
 (*── Rollback/Abort ──────────────────────────────────────────────*)
 (*  TiKV rollback: release all locks held by this transaction. *)
 Abort(t) ==
     /\ pc[t] \in {"active", "aborting"}
-    (* Release any locks we hold *\)
+    (* Release any locks we hold *)
     /\ kv_locks' = [k \in Key |->
                       IF kv_locks[k] = t THEN 0 ELSE kv_locks[k]]
     /\ aborted' = [aborted EXCEPT ![t] = aborted[t] + 1]
@@ -250,7 +277,7 @@ Abort(t) ==
     /\ write_set' = [write_set EXCEPT ![t] = [k \in Key |-> NoWrite]]
     /\ read_set' = [read_set EXCEPT ![t] = {}]
     /\ prewrite_ok' = [prewrite_ok EXCEPT ![t] = FALSE]
-    /\ UNCHANGED <<kv_store, snapshot, primary_key, commit_ts, committed>>
+    /\ UNCHANGED <<kv_store, snapshot, primary_key, commit_ts, committed, retry_count>>
 
 (*--------------------------------------------------------------------*)
 (* Next-state relation                                                *)
@@ -260,8 +287,9 @@ Next ==
     \E t \in Thread :
         \/ Begin(t)
         \/ \E k \in Key : Read(t, k)
-        \/ \E k \in Key : TxnConflict(t)
         \/ \E k \in Key : \E v \in Data : Write(t, k, v)
+        \/ TxnConflictRetry(t)
+        \/ TxnConflictAbort(t)
         \/ ReadOnlyCommit(t)
         \/ Prewrite(t)
         \/ PrewriteConflict(t)
@@ -312,6 +340,6 @@ NoDoubleCommit ==
     \A k \in Key :
         kv_locks[k] = 0 \/
         \A t \in Thread :
-            -- (HasWritten(t, k) /\ committed[t] > 0 /\ kv_locks[k] = t)
+            ~(HasWritten(t, k) /\ committed[t] > 0 /\ kv_locks[k] = t)
 
 ====

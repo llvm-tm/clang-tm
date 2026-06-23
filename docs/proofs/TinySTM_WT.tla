@@ -28,12 +28,12 @@ ASSUME Addr \subseteq Nat
 
 VARIABLES
     clock,
-    lock[_, _],                           (* [addr -> {locked, owner, version, inc}] *)
+    lock,                                (* [addr -> {locked, owner, version, inc}] *)
     mem,
     pc,                                (* idle | active | abort *)
     readSet,                           (* set of <<addr, version, incarnation>> *)
     writeSet,                          (* set of addr *)
-    undoLog[_, _],                        (* old value before write-through *)
+    undoLog,                             (* old value before write-through *)
     readOnly,
     committed,
     aborted
@@ -84,15 +84,15 @@ WriteThrough(t, a, n) ==
     /\ pc[t] = "active"
     /\ a \notin writeSet[t]
     /\ LOCK_FREE(lock[a])
-    (\* Acquire lock on a *\)
+    (* Acquire lock on a *)
     /\ lock' = [aa \in Addr |->
         IF aa = a
         THEN MAKE_LOCK(1, t, LOCK_VER(lock[a]), LOCK_INC(lock[a]))
         ELSE lock[aa]]
-    (\* Write-through to memory *\)
+    (* Write-through to memory *)
     /\ mem' = [aa \in Addr |->
         IF aa = a THEN n ELSE mem[aa]]
-    (\* Log old value for undo *\)
+    (* Log old value for undo *)
     /\ undoLog' = [undoLog EXCEPT ![t][a] = mem[a]]
     /\ writeSet' = [writeSet EXCEPT ![t] = writeSet[t] \cup {a}]
     /\ readOnly' = [readOnly EXCEPT ![t] = FALSE]
@@ -112,7 +112,7 @@ Commit(t) ==
     /\ pc[t] = "active"
     /\ readOnly[t] = FALSE
     /\ writeSet[t] # {}
-    (\* Validate read-set *\)
+    (* Validate read-set *)
     /\ \A entry \in readSet[t] :
         LET addr == entry[1]
             ver == entry[2]
@@ -120,9 +120,9 @@ Commit(t) ==
         \/ LOCK_OWNER(lock[addr]) = t            (* self-locked *)
         \/ (LOCK_VER(lock[addr]) = ver /\ LOCK_INC(lock[addr]) = inc)
             (* version and incarnation unchanged *)
-    (\* Increment clock *\)
+    (* Increment clock *)
     /\ clock' = clock + 1
-    (\* Release locks with new version *\)
+    (* Release locks with new version *)
     /\ lock' = [a \in Addr |->
         IF a \in writeSet[t]
         THEN MAKE_LOCK(0, 0, clock + 1, 0)
@@ -137,10 +137,10 @@ Commit(t) ==
 Abort(t) ==
     /\ pc[t] = "active"
     /\ pc' = [pc EXCEPT ![t] = "idle"]
-    (\* Restore memory from undo log *\)
+    (* Restore memory from undo log *)
     /\ mem' = [a \in Addr |->
         IF a \in writeSet[t] THEN undoLog[t][a] ELSE mem[a]]
-    (\* Release locks, bump incarnation *\)
+    (* Release locks, bump incarnation *)
     /\ lock' = [a \in Addr |->
         IF a \in writeSet[t]
         THEN MAKE_LOCK(0, 0, LOCK_VER(lock[a]),
@@ -181,8 +181,9 @@ MutexLocks ==
 
 (* Undo log matches pre-write value for write-set addresses *)
 UndoLogInv ==
-    \A t \in Thread, a \in writeSet[t] :
-        undoLog[t][a] # 0 \/ mem[a] = 0         (* trivial, real check is at abort *)
+    \A t \in Thread :
+        \A a \in writeSet[t] :
+            undoLog[t][a] # 0 \/ mem[a] = 0         (* trivial, real check is at abort *)
 
 (* After an abort, old values are restored: checked by *)
 (* StateRestored invariant in a TLC trace exploration *)

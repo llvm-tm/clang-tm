@@ -10,13 +10,21 @@
  * when Thread is abstract.  Steps Q1-Q6 below are therefore
  * given PROOF OMITTED with explicit justification (they are
  * trivial from the enclosing context).
+ *
+ * MODELING NOTE: This spec models read-set and write-set tracking
+ * and a version clock for proof convenience.  The C++ implementation
+ * (SingleGlobalLock_runtime.cpp) does none of these — the global
+ * mutex provides serial isolation, making tracking unnecessary.
+ * The spec's read-set/write-set/version variables are proof
+ * scaffolding and do not correspond to runtime state.
  *)
 
 EXTENDS Naturals, TLAPS
 
-CONSTANTS Thread, Addr
+CONSTANTS Thread, Addr, Data
 ASSUME Thread \subseteq Nat \ {0}
 ASSUME Addr \subseteq Nat
+ASSUME Data \subseteq Nat
 
 VARIABLES
     lock, version, mem, pc,
@@ -71,7 +79,7 @@ Commit(t) ==
 Next ==
     \/ \E t \in Thread : Begin(t)
     \/ \E t \in Thread : \E a \in Addr : Read(t, a)
-    \/ \E t \in Thread : \E a \in Addr : \E n \in Nat : Write(t, a, n)
+    \/ \E t \in Thread : \E a \in Addr : \E n \in Data : Write(t, a, n)
     \/ \E t \in Thread : Commit(t)
 
 Spec == Init /\ [][Next]_vars

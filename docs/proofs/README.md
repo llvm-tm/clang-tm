@@ -22,6 +22,10 @@ backends in this repository.
 | `XTM.tla` | XTM (page-granularity OCC) | Specified for TLC — PageOwnershipExclusion, OwnershipTracked, NoDirtyRead |
 | `TiKV.tla` | TiKV (Percolator 2PC distributed TM) | Specified with .cfg — LockExclusion, NoStaleLocks, SnapshotIsolation |
 | `TSXSim.tla` | TSX-Sim (bloom-filter TSX simulation) | Specified with .cfg — LockFreeInv, NoTSXCommitConflict, CapacityBounds |
+| `LEFTRIGHT.tla` | LEFTRIGHT (global-clock OCC w/ value validation) | Specified with .cfg — LockExclusion, NoDirtyRead, AtMostOneCommitting |
+| `DUDETM.tla` | DUDETM (deferred-persistence TM, 3-phase) | Specified with .cfg — NoLostBatch, LogOrdering, RecoveryCorrect |
+| `DistributedSGL.tla` | DistributedSGL (lock-server messaging) | Specified with .cfg — LockServerConsistency |
+| `PersistentSGL.tla` | PersistentSGL (NVM durability) | Specified with .cfg — DurableWrite, RecoveryCorrect |
 
 ## Prerequisites
 
@@ -92,7 +96,7 @@ Concrete parameters for model checking:
 | `TinySTM_WBETL.tla` | `Thread <- {1,2}`, `Addr <- {1,2}`, `MAX_VAL <- 3` |
 | `TinySTM_WT.tla` | `Thread <- {1,2}`, `Addr <- {1,2}`, `MAX_VAL <- 3` |
 | `SwissTM.tla` | `Thread <- {1,2}`, `Addr <- {1,2}`, `MAX_VAL <- 3` |
-| `NOrec.tla` | `Thread <- {1,2}`, `Addr <- {1,2}`, `MaxRetries <- 3` |
+| `NOrec.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1}`, `MaxRetries <- 3` |
 | `Romulus.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1,2}`, `VSIZE <- 2` |
 | `SPHT.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1}`, `MaxRetries <- 2`, `GroupInterval <- 2` |
 | `SimEngine.tla` | `LP <- {0,1}`, `Addr <- {0,1}` |
@@ -100,6 +104,10 @@ Concrete parameters for model checking:
 | `XTM.tla` | `Thread <- {1,2}`, `Page <- {0,1}`, `Data <- {0,1}`, `MaxRetries <- 2` |
 | `TiKV.tla` | `Thread <- {1,2}`, `Key <- {0,1}`, `Data <- {0,1,2}`, `MaxRetries <- 2` |
 | `TSXSim.tla` | `Thread <- {1,2}`, `Addr <- 1..8`, `CacheLine <- {1..4}`, `HashPosition <- {1..6}`, `MAX_RETRIES <- 2`, `MAX_READ_LINES <- 3`, `MAX_WRITE_LINES <- 2` |
+| `LEFTRIGHT.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1,2}`, `QueueMode <- FALSE` |
+| `DUDETM.tla` | `Thread <- {1,2}`, `BUF_SIZE <- 4`, `DATA_MAX <- 3` |
+| `DistributedSGL.tla` | `Client <- {1,2,3}`, `Addr <- {0,1}` |
+| `PersistentSGL.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1,2}` |
 
 From the command line (requires TLA+ tools on `$PATH`):
 
@@ -135,6 +143,13 @@ are proved mechanically by Zenon, Z3, and Isabelle.
 
 The following modeling abstractions and discrepancies exist between the TLA+
 specifications and the actual C++ implementations:
+
+**SGL (SGL.tla)** — The spec models read-set, write-set, and a version clock
+as proof scaffolding.  The C++ implementation (`SingleGlobalLock_runtime.cpp`)
+does none of these — the global mutex provides serial isolation, making
+tracking unnecessary.  The spec's `readSet`, `writeSet`, `readVersion`, and
+`version` variables exist only for the TLAPS proof and do not correspond to
+runtime state.
 
 **TSXSGL (TSXSGL.tla)** — Rewritten to use a thread-ID lock variable (`sgl`)
 instead of an epoch counter.  `SGLBegin` and `TSXFallback` now require
@@ -202,7 +217,19 @@ no memory restoration is needed because writes have not been applied yet.
 atomic step (`ReadWithValidation`), while the real implementation uses a
 spin-loop (`validate()`).  The spec's clock parity invariant (`clk % 2 = 1`
 iff a thread is committing) correctly models the real CAS-based commit
-protocol.
+protocol.  The spec now models the torn-read double-clock-check (capturing
+`clock_before`, reading data, capturing `clock_after`, and rejecting on
+mismatch), matching the C++ `read_word()` loop — earlier versions of the spec
+abstracted memory reads as atomic.
+
+**LEFTRIGHT (LEFTRIGHT.tla)** — Despite the file name, both the spec and C++
+implementation (`leftright.hpp`) implement global-clock OCC with value-based
+validation, not Left-Right synchronization.  The C++ implementation has a
+`isQueueActive()` branch that skips validation entirely when the queue
+executor is active.  The spec models this via the `QueueMode` CONSTANT: when
+`QueueMode=TRUE`, the `ValidateP1` and `ValidateP2` actions succeed
+unconditionally (matching the C++ skip-validation behavior).  The default TLC
+instance sets `QueueMode=FALSE` for standard model checking.
 
 **TSXSim (TSXSim.tla)** — The spec models a 6-bit bloom filter (2 hash
 functions); the real implementation uses a 4096-bit bloom filter (double-hash).
@@ -219,10 +246,52 @@ invariants — they are simulation artifacts, not correctness properties).
 (bulk write-back).  The real TiKV client (`tikv-client` 0.4) handles these
 phases internally via `begin_optimistic()` / `commit()`.  The spec's
 `snapshot` variable is a placeholder (TLC constant); the real TiKV uses a
-hybrid logical clock (HLC) for snapshot timestamps.  The `TxnConflict` action
-models TiKV's `TxnNotFound` error during reads (concurrent commit in
-progress), which the real backend handles by rolling back and signalling
-`TmxAbort`.
+hybrid logical clock (HLC) for snapshot timestamps.  The `TxnConflictRetry`
+action models TiKV's `TxnNotFound` error during reads (concurrent commit in
+progress) with retry up to `MaxRetries` times — matching the real backend's
+rollback-and-TmxAbort retry loop.  The `TxnConflictAbort` action fires when
+`MaxRetries` is exceeded, modeling permanent failure.
+
+**SPHT (SPHT.tla)** — The spec models group commit as an atomic update of
+`durable_seq` and `pcl_epoch_start`.  The real implementation uses `clwb` +
+`sfence` which guarantees linearizability at the cache-line level.  The spec
+models the TSX write buffer as a per-thread function (`tsx_buffer`); the real
+implementation writes directly to memory inside the RTM region (RTM hardware
+provides atomicity and rollback).  Both achieve the same effect.  The spec
+models the C++ runtime's `g_spht_fallback_mutex` via the `SGLBegin` action
+(acquiring `sgl = t`).  One known discrepancy: the TLA+ spec clears PCL
+entries on TSX abort, but the C++ implementation does not — stale PCL entries
+from aborted transactions remain in the log, though they are covered by
+subsequent same-address writes.  This could affect recovery correctness if
+a stale entry is replayed.
+
+**DUDETM (DUDETM.tla)** — The spec models a background replayer thread that
+consumes log entries from per-thread circular buffers.  The real implementation
+(`dudetm.hpp`) uses a single background thread that flushes all thread logs.
+The spec's circular buffer abstraction (head/tail pointers per thread) matches
+the C++ `log_head`/`log_tail` indices.  The spec does not model the STM
+commit phase (the volatile TM execution preceding each durable-log publish);
+it models only the durability pipeline.  This is an intentional abstraction —
+the volatile phase is verified by the TinySTM TLA+ specs.
+
+**DistributedSGL (DistributedSGL.tla)** — The spec models a network message
+passing protocol between clients and a lock server.  The real implementation
+(`DistributedSGL_runtime.cpp`) uses TCP sockets with a similar request/grant
+protocol.  The spec models messages as set elements (`Msg(src, type)`); the
+real implementation serializes messages as byte streams over TCP.  The spec's
+`lock_holder` variable models the server's grant state; the real server stores
+the current lock owner in a `std::atomic<pid_t>`.  The spec abstracts away
+message ordering and delivery guarantees (TCP provides in-order reliable
+delivery).
+
+**PersistentSGL (PersistentSGL.tla)** — The spec models post-commit NVM
+flushing as an atomic `Flush(t)` action that copies all written addresses
+from `mem` to `nvm`.  The real implementation (`PersistentSGL_runtime.cpp`)
+uses `clwb` + `sfence` for each cache line.  The spec's `Crash` and `Recovery`
+actions model the persistent state surviving a power failure; the real
+implementation reloads from a well-known NVM address range on restart.
+The spec abstracts variable-size write-sets (all addresses are members of the
+constant `Addr` set).
 
 ### Coverage
 
