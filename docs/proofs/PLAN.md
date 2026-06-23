@@ -1,53 +1,90 @@
-# TLA+ Proofs: Implementation Plan — COMPLETE
+# TLA+ Proofs: PlusCal Migration Plan
 
-All 18 TM backends now have TLA+ specifications. This plan is complete.
+## Status
 
-## Final status
+All 18 backends have TLA+ specs (pure TLA+, action-based). TL2 has been converted to PlusCal as a proof of concept.
 
-| Backend | Algorithm | Spec | Status |
-|---------|-----------|------|--------|
-| **SGL** | Single Global Lock | `SGL.tla` | ✅ TLAPS 42/42 |
-| **TSXSGL** | TSX+SGL Hybrid | `TSXSGL.tla` | ✅ TLAPS proof sketches |
-| **TL2** | TL2 | `TL2.tla` | ✅ TLC invariants |
-| **TinySTM_WBCTL** | Write-Back CTL | `TinySTM_WBCTL.tla` | ✅ TLC invariants |
-| **TinySTM_WBETL** | Write-Back ETL | `TinySTM_WBETL.tla` | ✅ TLC invariants |
-| **TinySTM_WT** | Write-Through | `TinySTM_WT.tla` | ✅ TLC invariants |
-| **SwissTM** | SwissTM | `SwissTM.tla` | ✅ TLC invariants |
-| **NOrec** | NOrec | `NOrec.tla` | ✅ TLC invariants |
-| **Romulus** | Version-table OCC + read-validate | `Romulus.tla` | ✅ TLC invariants |
-| **SPHT** | Group-commit persistent HTM | `SPHT.tla` | ✅ TLC invariants |
-| **SimEngine** | Cross-LP conflict resolution | `SimEngine.tla` | ✅ TLC invariants |
-| **NVHTM** | Persistent HTM w/ redo log | `NVHTM.tla` | ✅ TLC invariants |
-| **XTM** | Page-granularity OCC | `XTM.tla` | ✅ TLC invariants |
-| **DUDETM** | Deferred-persistence TM (3-phase) | `DUDETM.tla` | ✅ TLC invariants |
-| **LEFTRIGHT** | Global-clock OCC + value validation | `LEFTRIGHT.tla` | ✅ TLC invariants |
-| **TiKV** | Percolator 2PC distributed | `TiKV.tla` | ✅ TLC invariants |
-| **TSXSim** | Bloom-filter TSX simulation | `TSXSim.tla` | ✅ TLC invariants |
-| **DistributedSGL** | SGL over network messages | `DistributedSGL.tla` | ✅ TLC invariants |
-| **PersistentSGL** | SGL w/ NVM durability | `PersistentSGL.tla` | ✅ TLC invariants |
+Goal: convert structurally-suitable backends to PlusCal for readability, while keeping the TLA+ generated code committed (since `pcal.trans` writes in-place).
 
-## What was done
+## Phase 0: Build infrastructure
 
-| Item | Effort |
-|------|--------|
-| P0a — Romulus.tla | 250+ lines, 5 invariants, `.cfg` |
-| P0b — SPHT.tla | 375+ lines, 5 invariants, `.cfg` |
-| P0c — SimEngine.tla | 280+ lines, 5 invariants, `.cfg` |
-| P1a — NVHTM.tla | 310+ lines, 5 invariants, `.cfg` |
-| P1b — XTM.tla | 270+ lines, 5 invariants, `.cfg` |
-| P2a — DUDETM.tla | ~260 lines, 3 invariants |
-| P2b — LEFTRIGHT.tla | ~280 lines, 5 invariants |
-| P2c — TiKV.tla | ~290 lines, 6 invariants, `.cfg` |
-| P2d — TSXSim.tla | ~330 lines, 8 invariants, `.cfg` |
-| P3 — DistributedSGL.tla | ~230 lines, 5 invariants |
-| P3 — PersistentSGL.tla | ~210 lines, 5 invariants |
-| README.md | Updated coverage table, parameters, discrepancies |
-| PLAN.md | This file |
+Add a `Makefile` to `docs/proofs/` that provides:
+- `make check-<backend>` — run TLC on a single spec
+- `make check` — run TLC on all specs
+- `make tla` — run `pcal.trans` on all PlusCal specs (regenerates TLA+ in-place)
+- `make clean` — remove `*.old`, `*_TTrace_*`, `*.bin`, `states/`
+- `make check-all` — extended TLC with `-coverage 1`
 
-Total: ~3200 new lines of TLA+ across 19 files (11 specs + 8 updated).
+Configurable via `TLA2TOOLS_JAR` (default: `/tmp/tla2tools.jar`).
 
-## Next steps (if desired)
+## Phase 1: Simple backends → PlusCal
 
-1. **TLC model checking**: Run `tlc2` on all specs with their `.cfg` files to verify invariants pass for 2-thread, 2-address finite instances.
-2. **TLAPS proofs**: Add mechanical TLAPS proofs for key invariants (LockExclusion on all SGL variants, PageOwnershipExclusion on XTM, TSXSafety on SPHT/NVHTM/TSXSim).
-3. **CI integration**: Add TLC model checking step to `nightly.yml` for each spec.
+| Backend | Labels | PlusCal complexity | Effort |
+|---------|--------|--------------------|--------|
+| **SGL** | 3 (begin, active, end) | Trivial — `with` for read/write | 1 session |
+| **TSXSGL** | 5 (begin, tsx_ok, tsx_abort, sgl, end) | TSX fallback in `either/or` | 1 session |
+| **TinySTM_WBCTL** | 4 (begin, read, write, commit) | Write-back CTL | 1 session |
+| **TinySTM_WBETL** | 4 (begin, read, write, commit) | Write-back ETL | 1 session |
+| **TinySTM_WT** | 4 (begin, read, write, commit) | Write-through | 1 session |
+| **PersistentSGL** | 4 (begin, read/write, persist, end) | SGL + durability label | 1 session |
+
+## Phase 2: Medium-complexity backends → PlusCal
+
+| Backend | Labels | Strategy |
+|---------|--------|----------|
+| **TL2** | DONE | Reference implementation |
+| **Romulus** | 6 | Version-table OCC: start → read/write → validate → inc clock → write-back → release |
+| **XTM** | 6 | Page-granularity OCC: start read/write → page copy → validate → write-back |
+| **LEFTRIGHT** | 5 | Global-clock OCC: start → read/write → validate (value) → inc clock → release |
+| **SwissTM** | 6 | Time-based + encounter locking: start (snapshot) → read (validate if stale) → write (lock) → commit |
+
+## Phase 3: TLA+-only backends (retain existing)
+
+These have complex concurrent structure that PlusCal's sequential-process model cannot express naturally:
+
+| Backend | Reason |
+|---------|--------|
+| **NOrec** | CAS-based commit + value validation + retry counter. Already has TLAPS proof sketch. |
+| **DUDETM** | 3-phase commit with concurrent flush. Phases interleave non-sequentially. |
+| **NVHTM** | RTM conflicts + redo log + 2-phase abort. RTM semantics are non-deterministic. |
+| **SPHT** | Group-commit + RTM + SGL fallback. Three interacting modes. |
+| **DistributedSGL** | Lock-server messaging. Message arrival is non-deterministic. |
+| **TiKV** | Percolator 2PC with per-key locks across network. |
+| **TSXSim** | Simulation engine (bloom filter + capacity tracking). Not a TM algorithm. |
+| **SimEngine** | Trace-driven simulation. Not a TM algorithm. |
+
+## Phase 4: Cross-cutting additions (all specs)
+
+After PlusCal conversion, append after `\* END TRANSLATION`:
+
+1. **Fairness alternatives** (TLA+-only, beyond PlusCal's `-wf` flag):
+   - `Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))`
+   - `Spec_SF == Spec /\ \A self \in Thread : SF_vars(ThreadProc(self))`
+   - `ProgressProperty == \A self \in Thread : (pc[self] = "L_active" ~> pc[self] = "L_idle")`
+
+2. **Structural state restrictions** (limit state space for realistic checking):
+   - `NoConcurrentCommit` — at most one thread in any committing state
+   - `FairSchedule` — threads must attempt commit within N active steps
+
+## Phase 5: Verification
+
+For each backend:
+
+| Check | Config | Expected |
+|-------|--------|----------|
+| Safety | Thread={1,2}, Addr={0,1}, MaxCommits=2 | All invariants pass |
+| Sequential | Thread={1} only | All invariants pass (trivial) |
+| Deadlock-free | `-deadlock` | No deadlock |
+| Liveness | OPT-IN: `Spec_WF` + `ProgressProperty` | Property holds |
+
+## Summary
+
+| Phase | Scope | Effort |
+|-------|-------|--------|
+| 0 | Makefile | 1 session |
+| 1 | 6 simple backends → PlusCal | 6 sessions |
+| 2 | 4 medium backends → PlusCal | 8 sessions |
+| 3 | 6 TLA+-only retentions (no-op) | 1 session |
+| 4 | Fairness + invariants (all) | 2 sessions |
+| 5 | Verification (all) | 3 sessions |
+| **Total** | **11 new PlusCal specs** | **~21 sessions** |

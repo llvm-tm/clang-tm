@@ -81,3 +81,8 @@ benchmarks/profiling_data/calibration/
 
 # perf
 perf.data
+
+# TLC-generated artifacts
+*.old
+*_TTrace_*
+*.bin
