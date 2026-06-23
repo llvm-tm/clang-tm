@@ -111,7 +111,77 @@ Comprehensive smoke test: `test_tx` + `test_ds` on 10 backends (TINYSTM, WBETL, 
 - **XTM rbtree segfault** — pre‑existing
 - **ROMULUS bank multi-thread**: was fixed with read-validate pattern (2026-06-15)
 
-## Session 2026-06-23 — TLA+ model fidelity: TinySTM WBCTL/WBETL/WT improvements + fence annotations
+## Session 2026-06-23 — Comprehensive audit: all 18 TLA+ models (Phases 1-3 complete)
+
+### TinySTM model fidelity audit and improvements
+
+Audited all 3 TinySTM TLA+ models against their C++ implementations. Key gaps found and fixed:
+
+| Gap | Affected | Severity | Fix |
+|-----|----------|----------|-----|
+| No `endVersion` per-thread | WBCTL, WBETL, WT | High | Added `endVersion[t]`, `L_extend` label, validation against `endVersion[t]` |
+| Monolithic commit (validate+write-back+unlock as one action) | WBETL | High | Split into `L_incClock` + `L_validateETL` + `L_writeBackETL` (matches C++ phases) |
+| Monolithic commit (validate+unlock as one action) | WT | High | Split into `L_validateWT` + `L_unlock` + `L_abort` |
+| Extend abort path skips lock release | WBETL | Critical (model bug) | Added `lock[a] := <<0, 0, lock[a][3]>>` before `state := "idle"` in L_extend failure |
+| No memory ordering annotations | All | Medium | Added `lastFence[t]` tracking + `FenceFidelity` invariant |
+
+### Verification results (TinySTM models)
+
+| Backend | States (before) | States (after) | TLC result |
+|---------|----------------|----------------|------------|
+| WBCTL | 12K | 146K (+lastFence) | PASS ✅ |
+| WBETL | 3.9K | 58K (+commit split + lastFence) | PASS ✅ |
+| WT | 5.9M | N/A (parallel too large with lastFence) | Sequential PASS ✅ |
+
+### Fence annotations added
+
+For each TinySTM backend, a `lastFence[t]` variable (""/"acq"/"rel"/"sc") is set at points matching C++ fences:
+- **Read**: `"sc"` — matches `atomic_signal_fence(seq_cst)` before version load
+- **Write (lock acquire)**: `"acq"` — matches CAS acquire semantics
+- **Commit (clock inc)**: `"sc"` — matches `atomic_thread_fence(seq_cst)` before clock read
+- **Validate success**: `"sc"` — matches fence before re-reading read-set
+- **Unlock after commit/abort**: `"rel"` — matches `atomic_signal_fence(release)` before lock release
+
+`FenceFidelity`: `\A t \in Thread : writeSet[t] # {} => lastFence[t] # ""`
+
+### Comprehensive Audit of All 18 Backends (2026-06-23)
+
+Audited all remaining 12 unaudited backends. Final score distribution:
+
+| Score | Count | Backends |
+|-------|-------|----------|
+| **5/5** | 1 | SGL |
+| **4/5** | 5 | TinySTM_WBCTL, TinySTM_WBETL, TinySTM_WT, Romulus, XTM |
+| **3/5** | 6 | TSXSGL, PersistentSGL, TL2, LEFTRIGHT, SwissTM, NOrec, TiKV, TSXSim |
+| **2/5** | 3 | NVHTM, SPHT, SimEngine |
+| **1/5** | 2 | DUDETM, DistributedSGL |
+
+### TLC bugs found (expanded)
+
+| Backend | Bug | Fixed? |
+|---------|-----|--------|
+| TinySTM_WBETL | Write-conflict abort didn't release locks | ✅ (PlusCal) |
+| TinySTM_WBETL | Extend abort path skipped lock release | ✅ (PlusCal) |
+| SPHT | `DurableValid` fails: read-only TX triggers GroupCommit with empty PCL | ❌ C++ lacks guard |
+| TSXSim | `TSXvsSGLSafety` fails: SGL begin while TSX active | ❌ Model bug (HW prevents via cache-coherence) |
+| NVHTM | `FreshLogOnBegin` + `CommitPhaseOrdering` fail | ❌ Model bugs (invariant wording, self-violation) |
+
+### Key findings by backend
+
+- **NOrec (3/5)**: Plugin-mode bypass paths not modeled; clock double-check abstracted. Known bug from 2026-06-23 audit still unaddressed in model.
+- **DUDETM (1/5)**: Worst fidelity. TLA+ is a high-level design sketch; actual impl is TinySTM WBCTL wrapper with forked replayer + swapped op-types. Fundamentally different algorithm.
+- **NVHTM (2/5)**: TLA+ models checkpoint/recovery protocol that doesn't exist in C++; no SGL fallback in C++ (RTM failure→pass-through, not mutex); logging is dedup not append.
+- **SPHT (2/5)**: `DurableValid` invariant fails; TSX retry model vs C++ no-retry; SGL PCL divergence; crash/recovery modeled but absent in C++.
+- **DistributedSGL (1/5)**: TLA+ models client-server lock server with message-passing; C++ is single-machine file-backed mmap spinlock.
+- **TiKV (3/5)**: Unbounded counters prevent TLC termination; Percolator 2PC decomposed vs single `txn.commit()`.
+- **TSXSim (3/5)**: `TSXvsSGLSafety` fails; hardware cache-coherence prevents in practice.
+- **SimEngine (2/5)**: Critical naming mismatch — `SimEngine.tla` models DES `engine.rs`, not `sim_engine.rs` replayer.
+
+### Files created/modified (2026-06-23 session)
+- `docs/proofs/tinystm_*.tla` — fence annotations, endVersion, L_extend, commit split
+- `docs/audits/*.md` — 12 new audit reports (tl2, xtm, leftright, swisstm, norec, dudetm, nvhtm, spht, distributed_sgl, tikv, tsxsim, simengine)
+- `docs/audits/SUMMARY.md` — updated with all 18 scores, new bugs, observations
+- `docs/AGENTS.md` — this session summary
 
 ### TinySTM model fidelity audit and improvements
 

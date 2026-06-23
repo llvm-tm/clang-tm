@@ -437,10 +437,10 @@ WriteSetConsistent ==
 (*── I7: Conflict freedom — conflicting TSX can't both commit ─────*)
 NoTSXCommitConflict ==
     \A t1, t2 \in Thread :
-        t1 # t2 /\
-        \E cl \in write_set[t1] :
-            (\E cl2 \in read_lines[t2] : cl = cl2)
-            \/ (\E cl2 \in write_set[t2] : cl = cl2)
+        (t1 # t2 /\
+         \E cl \in write_set[t1] :
+             ((\E cl2 \in read_lines[t2] : cl = cl2) \/
+              (\E cl2 \in write_set[t2] : cl = cl2)))
         => ~(ConflictFree(t1) /\ ConflictFree(t2))
     (*
      * Both threads are in TSX mode and their access patterns
