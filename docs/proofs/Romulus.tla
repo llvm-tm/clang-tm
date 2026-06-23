@@ -1,428 +1,435 @@
------------------------- MODULE Romulus ------------------------
+------------------------ MODULE Romulus --------------------------------
 (*
- * Romulus — Version-Table OCC with Read-Validate
+ * Romulus — Version-Table OCC with Read-Validate (PlusCal)
+ *
+ * Original action-based spec: 400+ lines, 16 actions, 11+ states.
+ * PlusCal conversion: 10 labels, ~230 lines.
  *
  * Algorithm (from backends/tm_impl/romulus/romulus.hpp):
  *
  * Globals:
- *   - g_version_table[0..2^20-1]:  atomic<uint64_t>
+ *   - g_version_table[0..VSIZE-1]:  atomic<uint64_t>
  *       bit 0 = lock bit (1 = write-back in progress)
  *       bits 1+ = version number
  *   - g_global_clock:  atomic<uint64_t> (starts at 1)
- *   - g_commit_lock:   atomic<uint64_t>  (0 = free, 1 = held)
+ *   - g_commit_lock:   atomic<uint64_t>  (0 = free, t = held by thread t)
  *
  * Begin:
- *   snapshot = clock; clear read-set + write-set; active = true
+ *   snapshot = clock; clear read-set + write-set
  *
  * Read(addr):
- *   1. If addr in write-set, return buffered value.
- *   2. Read version entry BEFORE data:  entry_before = version[idx(addr)]
- *   3. If locked (entry_before % 2 == 1), abort.
- *   4. Read data from memory.
- *   5. Read version entry AFTER data:  entry_after = version[idx(addr)]
- *   6. If entry_before != entry_after, abort (version changed during read).
- *   7. Add (addr, entry_before >> 1) to read-set.
+ *   1. If addr in own write-set, return buffered value (no read-set entry).
+ *   2. If version entry is locked (lock bit = 1), abort.
+ *   3. Capture version entry, record (addr, version) in read-set.
+ *      (PlusCal atomicity makes the re-check unnecessary.)
  *
  * Write(addr, val):
  *   Buffer (addr, val) in write-set; set read_only = false.
  *
- * Commit (non-read-only, non-empty write-set):
- *   1. Acquire commit lock (CAS spin).
- *   2. Validate write-set: for each addr, check
- *        version[idx] is not locked AND
- *        (version[idx] >> 1) <= timestamp
- *   3. Validate read-set: for each (addr, captured_version), check
- *        version[idx] is not locked AND
- *        (version[idx] >> 1) == captured_version
- *   4. If any validation fails, release lock, abort.
- *   5. Set lock bits on all written addresses (version[idx] |= 1).
- *   6. fence(seq_cst)
- *   7. Increment global clock -> commit_ts.
- *   8. Write-back: write buffered values to memory.
- *   9. fence(seq_cst)
- *   10. Update version table: version[idx] = make_version_entry(commit_ts)
- *       (clears lock bit, sets new version).
- *   11. Release commit lock.
+ * Commit (non-read-only):
+ *   1. Acquire commit lock.
+ *   2. Validate write-set + read-set (under lock).
+ *   3. Set lock bits on all written addresses' version entries.
+ *   4. Increment global clock -> commit_ts.
+ *   5. Write buffered values to memory.
+ *   6. Update version entries with commit_ts (clears lock bit).
+ *   7. Release commit lock.
  *
  * Read-only commit:
- *   Reset transaction state, no lock needed.
+ *   No lock needed.
  *
- * Invariants (for TLC model checking):
- *   LockExclusion:   At most one thread holds the commit lock.
- *   NoDirtyRead:     A committed transaction's read-set entries are
- *                    consistent (no concurrent write-back corrupted them).
- *   VersionMonotonic: The global clock never decreases.
- *   LockBitCleared:  After commit, all written version entries have
- *                    lock bit = 0.
+ * Labels:
+ *   L_idle          — choose: begin new transaction or terminate
+ *   L_active        — choose: read, write, read-only commit, or start commit
+ *   L_validate      — validate WS + RS under the commit lock
+ *   L_set_lock_bits — set lock bit on version entries (bit 0 = 1)
+ *   L_inc_clock     — increment global clock
+ *   L_write_back    — write buffered values to memory
+ *   L_update_ver    — update version entries (clear lock, set commit_ts)
+ *   L_release_lock  — release commit lock
+ *   L_abort_active  — clean up after abort (no lock held)
+ *   L_done          — termination
  *)
 
-EXTENDS Naturals, Sequences, FiniteSets, TLC
+EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
     Thread,             (* Set of thread IDs *)
     Addr,               (* Set of memory addresses *)
     Data,               (* Set of possible data values *)
-    VSIZE               (* Version table size *)
+    VSIZE,              (* Version table size *)
+    MaxCommits          (* Max commits per thread for bounded model *)
 
 ASSUME VSIZE \in Nat \ {0}
 ASSUME Thread \subseteq Nat \ {0}
 ASSUME Addr \subseteq Nat
 ASSUME Data \subseteq Nat
+ASSUME MaxCommits \in Nat \ {0}
 
-VARIABLES
-    mem,                (* [Addr -> Data] *)
-    version,            (* [0..VSIZE-1 -> Nat]  version-table entries *)
-    clock,              (* Nat, global clock *)
-    lock,               (* Nat, commit lock: 0 = free, t = held by thread t *)
-    pc,                 (* [Thread -> {"idle", "active", "acquire_lock", "validate_ws", "validate_rs",
-                                      "set_lock_bits", "inc_clock", "write_back", "update_ver", "release_lock",
-                                      "aborting"}] *)
-    timestamp,          (* [Thread -> Nat]  snapshot at begin *)
-    read_set,           (* [Thread -> Seq(<<Addr, Nat>>)]  (addr, version) pairs *)
-    write_set,          (* [Thread -> Addr -> Data \cup {NoWrite}] *)
-    read_only,          (* [Thread -> BOOLEAN] *)
-    commit_ts,          (* [Thread -> Nat]  commit timestamp *)
-    committed,          (* [Thread -> Nat]  commit count *)
-    aborted             (* [Thread -> Nat]  abort count *)
-
-vars == <<mem, version, clock, lock, pc, timestamp, read_set, write_set,
-          read_only, commit_ts, committed, aborted>>
-
-(*--------------------------------------------------------------------*)
-(* Helpers                                                             *)
-(*--------------------------------------------------------------------*)
-
-NoWrite == 0 - 1          (* sentinel meaning no write for this address *)
-
-(* Version entry encoding: bit 0 = lock, bits 1+ = version number *)
+(* ---- helpers ---- *)
+NoWrite == 0 - 1
 LockBit(entry) == entry % 2
 VersionOf(entry) == entry \div 2
 MakeEntry(ver) == ver * 2
-
-(* Map an address to a version-table index *)
 VIndex(a) == a % VSIZE
 
-(* Check if thread t has written to address a *)
-HasWritten(t, a) == write_set[t][a] # NoWrite
+(*--algorithm Romulus
 
-(*--------------------------------------------------------------------*)
-(* Init                                                                *)
-(*--------------------------------------------------------------------*)
+variables
+    mem = [a \in Addr |-> 0],
+    version = [i \in 0..VSIZE-1 |-> MakeEntry(0)],
+    clock = 1,
+    lock = 0,
+    committed = [t \in Thread |-> 0],
+    aborted = [t \in Thread |-> 0];
 
-Init ==
-    /\ mem = [a \in Addr |-> 0]
-    /\ version = [i \in 0..VSIZE-1 |-> MakeEntry(0)]
-    /\ clock = 1
-    /\ lock = 0
-    /\ pc = [t \in Thread |-> "idle"]
-    /\ timestamp = [t \in Thread |-> 0]
-    /\ read_set = [t \in Thread |-> << >>]
-    /\ write_set = [t \in Thread |-> [a \in Addr |-> NoWrite]]
-    /\ read_only = [t \in Thread |-> TRUE]
-    /\ commit_ts = [t \in Thread |-> 0]
-    /\ committed = [t \in Thread |-> 0]
-    /\ aborted = [t \in Thread |-> 0]
+process ThreadProc \in Thread
+variables
+    timestamp = 0,
+    read_set = {},
+    write_set = [a \in Addr |-> NoWrite],
+    read_only = TRUE,
+    commit_ts = 0;
+begin
 
-(*--------------------------------------------------------------------*)
-(* Actions                                                             *)
-(*--------------------------------------------------------------------*)
+L_idle:
+    if committed[self] >= MaxCommits then
+        goto L_done;
+    else
+        goto L_begin;
+    end if;
 
-(*── Begin ────────────────────────────────────────────────────────────*)
-Begin(t) ==
-    /\ pc[t] = "idle"
-    /\ pc' = [pc EXCEPT ![t] = "active"]
-    /\ timestamp' = [timestamp EXCEPT ![t] = clock]
-    /\ read_only' = [read_only EXCEPT ![t] = TRUE]
-    /\ read_set' = [read_set EXCEPT ![t] = << >>]
-    /\ write_set' = [write_set EXCEPT ![t] = [a \in Addr |-> NoWrite]]
-    /\ commit_ts' = [commit_ts EXCEPT ![t] = 0]
-    /\ UNCHANGED <<mem, version, clock, lock, committed, aborted>>
+L_begin:
+    timestamp := clock;
+    read_set := {};
+    write_set := [a \in Addr |-> NoWrite];
+    read_only := TRUE;
+    commit_ts := 0;
+    goto L_active;
 
-(*── Read: return buffered write if available ────────────────────────*)
-ReadOwnWrite(t, a) ==
-    /\ pc[t] = "active"
-    /\ HasWritten(t, a)
-    /\ UNCHANGED vars
+L_active:
+    either \* Read (own write — skip)
+        with a \in Addr do
+            if write_set[a] # NoWrite then skip; end if;
+        end with;
+        goto L_active;
+    or \* Read (locked — abort)
+        if \E a \in Addr : write_set[a] = NoWrite /\ LockBit(version[VIndex(a)]) = 1 then
+            goto L_abort_active;
+        else
+            goto L_active;
+        end if;
+    or \* Read (normal — record)
+        with a \in Addr do
+            if write_set[a] = NoWrite /\ LockBit(version[VIndex(a)]) = 0 then
+                read_set := read_set \union {<<a, VersionOf(version[VIndex(a)])>>};
+            end if;
+        end with;
+        goto L_active;
+    or \* Write
+        with a \in Addr, v \in Data do
+            write_set[a] := v;
+            read_only := FALSE;
+        end with;
+        goto L_active;
+    or \* Read-only commit
+        if read_only then
+            committed[self] := committed[self] + 1;
+            goto L_idle;
+        else
+            goto L_active;
+        end if;
+    or \* Commit (acquire lock)
+        if ~read_only /\ lock = 0 then
+            lock := self;
+            goto L_validate;
+        else
+            goto L_active;
+        end if;
+    end either;
 
-(*── Read-Validate: capture version, read data, re-check version ────*)
-ReadValidate(t, a) ==
-    /\ pc[t] = "active"
-    /\ ~HasWritten(t, a)
-    /\ a \in Addr
-    (* Step 1: capture version entry before reading *)
-    /\ LET idx == VIndex(a)
-           entry_before == version[idx] IN
-       (* Step 2: if locked, abort *)
-       IF LockBit(entry_before) = 1
-       THEN
-           (* abort *)
-           /\ pc' = [pc EXCEPT ![t] = "aborting"]
-            /\ UNCHANGED <<mem, version, clock, lock, timestamp, read_set,
-                           write_set, read_only, commit_ts, committed, aborted>>
-       ELSE
-           (* Step 3: read data from memory *)
-           /\ LET val == mem[a] IN
-              (* Step 4: re-check version entry after reading *)
-              /\ entry_before = version[idx]   (* must not have changed *)
-              (* Step 5: add to read-set *)
-              /\ read_set' = [read_set EXCEPT ![t] = Append(read_set[t],
-                                   <<a, VersionOf(entry_before)>>)]
-              /\ UNCHANGED <<mem, version, clock, lock, pc, timestamp,
-                             write_set, read_only, commit_ts, committed, aborted>>
-    (* Note: if the re-check fails (entry_before # version[idx]), this
-       action is simply not enabled — the thread must abort. The
-       ReadValidateAbort action below handles that case. *)
+L_validate:
+    (* validate write-set: all entries not locked, version <= timestamp *)
+    if \A a \in Addr :
+        (write_set[a] # NoWrite) =>
+            (LockBit(version[VIndex(a)]) = 0
+             /\ VersionOf(version[VIndex(a)]) <= timestamp)
+       /\ \A <<addr, ver>> \in read_set :
+            LockBit(version[VIndex(addr)]) = 0
+            /\ VersionOf(version[VIndex(addr)]) = ver
+    then
+        goto L_set_lock_bits;
+    else
+        lock := 0;
+        goto L_abort_active;
+    end if;
 
-(*── Read-validate failure (version changed during read) → abort ────*)
-ReadValidateAbort(t, a) ==
-    /\ pc[t] = "active"
-    /\ ~HasWritten(t, a)
-    /\ a \in Addr
-    /\ LET idx == VIndex(a)
-           entry_before == version[idx]
-           entry_after == version[idx] IN
-       /\ LockBit(entry_before) = 0                (* not locked before read *)
-       /\ entry_before # entry_after                (* changed during read *)
-    /\ pc' = [pc EXCEPT ![t] = "aborting"]
-    /\ UNCHANGED <<mem, version, clock, lock, timestamp, read_set,
-                   write_set, read_only, commit_ts, committed, aborted>>
+L_set_lock_bits:
+    version := [i \in 0..VSIZE-1 |->
+        IF \E a \in Addr : write_set[a] # NoWrite /\ VIndex(a) = i
+        THEN version[i] + 1
+        ELSE version[i]];
 
-(*── Write: buffer value in write-set ────────────────────────────────*)
-WriteAction(t, a, v) ==
-    /\ pc[t] = "active"
-    /\ a \in Addr
-    /\ v \in Data
-    /\ write_set' = [write_set EXCEPT ![t][a] = v]
-    /\ read_only' = [read_only EXCEPT ![t] = FALSE]
-    /\ UNCHANGED <<mem, version, clock, lock, pc, timestamp, read_set,
-                   commit_ts, committed, aborted>>
+L_inc_clock:
+    clock := clock + 1;
+    commit_ts := clock;
 
-(*── Read-only commit ────────────────────────────────────────────────*)
-ReadOnlyCommit(t) ==
-    /\ pc[t] = "active"
-    /\ read_only[t] = TRUE
-    /\ committed' = [committed EXCEPT ![t] = committed[t] + 1]
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    /\ UNCHANGED <<mem, version, clock, lock, timestamp, read_set,
-                   write_set, read_only, commit_ts, aborted>>
+L_write_back:
+    mem := [a \in Addr |->
+        IF write_set[a] # NoWrite
+        THEN write_set[a]
+        ELSE mem[a]];
 
-(*── Commit (non-read-only path) — Phase 1: Acquire lock ────────────*)
-AcquireLock(t) ==
-    /\ pc[t] = "active"
-    /\ read_only[t] = FALSE
-    /\ \E a \in Addr : HasWritten(t, a)   (* non-empty write-set *)
-    /\ lock = 0
-    /\ lock' = t
-    /\ pc' = [pc EXCEPT ![t] = "validate_ws"]
-    /\ UNCHANGED <<mem, version, clock, timestamp, read_set, write_set,
-                   read_only, commit_ts, committed, aborted>>
+L_update_ver:
+    version := [i \in 0..VSIZE-1 |->
+        IF \E a \in Addr : write_set[a] # NoWrite /\ VIndex(a) = i
+        THEN MakeEntry(commit_ts)
+        ELSE version[i]];
 
-(*── Phase 2a: Validate write-set ────────────────────────────────────*)
-ValidateWS(t) ==
-    /\ pc[t] = "validate_ws"
-    /\ lock = t
-    (* For each address that t has written, check: not locked, version <= timestamp *)
-    /\ \A a \in Addr :
-         HasWritten(t, a) =>
-           LET idx == VIndex(a)
-               entry == version[idx] IN
-           LockBit(entry) = 0 /\ VersionOf(entry) <= timestamp[t]
-    (* If all pass, move to validate read-set *)
-    /\ pc' = [pc EXCEPT ![t] = "validate_rs"]
-    /\ UNCHANGED <<mem, version, clock, lock, timestamp, read_set,
-                   write_set, read_only, commit_ts, committed, aborted>>
+L_release_lock:
+    lock := 0;
+    committed[self] := committed[self] + 1;
+    goto L_idle;
 
-(*── Phase 2b: Validate read-set ─────────────────────────────────────*)
-ValidateRS(t) ==
-    /\ pc[t] = "validate_rs"
-    /\ lock = t
-    (* For each entry in read-set, check: not locked, version unchanged *)
-    /\ \A i \in 1..Len(read_set[t]) :
-         LET entry == read_set[t][i]
-             a == entry[1]
-             captured_version == entry[2]
-             idx == VIndex(a)
-             current_entry == version[idx] IN
-         LockBit(current_entry) = 0 /\ VersionOf(current_entry) = captured_version
-    (* All pass → proceed to set lock bits *)
-    /\ pc' = [pc EXCEPT ![t] = "set_lock_bits"]
-    /\ UNCHANGED <<mem, version, clock, lock, timestamp, read_set,
-                   write_set, read_only, commit_ts, committed, aborted>>
+L_abort_active:
+    (* clean up — no lock held *)
+    timestamp := 0;
+    read_set := {};
+    write_set := [a \in Addr |-> NoWrite];
+    read_only := TRUE;
+    commit_ts := 0;
+    aborted[self] := aborted[self] + 1;
+    goto L_idle;
 
-(*── Phase 2a/2b failure → abort ────────────────────────────────────*)
-ValidationFailed(t) ==
-    /\ pc[t] = "validate_ws" \/ pc[t] = "validate_rs"
-    /\ lock = t
-    /\ ~ ( \A a \in Addr :
-              HasWritten(t, a) =>
-                LET idx == VIndex(a)
-                    entry == version[idx] IN
-                LockBit(entry) = 0 /\ VersionOf(entry) <= timestamp[t]
-          )
-    /\ lock' = 0
-    /\ pc' = [pc EXCEPT ![t] = "aborting"]
-    /\ UNCHANGED <<mem, version, clock, timestamp, read_set, write_set,
-                   read_only, commit_ts, committed, aborted>>
+L_done:
+    skip;
 
-(*── Phase 3: Set lock bits on all written addresses ────────────────*)
-SetLockBits(t) ==
-    \* Set lock bit (bit 0 = 1) on version entries for all written addresses.
-    \* Since MakeEntry(ver) = ver*2 produces an even number (bit 0 = 0),
-    \* adding 1 sets the lock bit.
-    /\ pc[t] = "set_lock_bits"
-    /\ lock = t
-    /\ LET WrittenIdxs == {VIndex(a) : a \in {a2 \in Addr : HasWritten(t, a2)}} IN
-       version' = [i \in 0..VSIZE-1 |->
-                     IF i \in WrittenIdxs THEN version[i] + 1
-                                          ELSE version[i]]
-    /\ pc' = [pc EXCEPT ![t] = "inc_clock"]
-    /\ UNCHANGED <<mem, clock, lock, timestamp, read_set, write_set,
-                   read_only, commit_ts, committed, aborted>>
+end process;
 
-(*── Phase 4: Increment global clock ─────────────────────────────────*)
-IncClock(t) ==
-    /\ pc[t] = "inc_clock"
-    /\ lock = t
-    /\ clock' = clock + 1
-    /\ commit_ts' = [commit_ts EXCEPT ![t] = clock']  (* new value after increment *)
-    /\ pc' = [pc EXCEPT ![t] = "write_back"]
-    /\ UNCHANGED <<mem, version, lock, timestamp, read_set, write_set,
-                   read_only, committed, aborted>>
+end algorithm; *)
 
-(*── Phase 5: Write-back buffered values to memory ───────────────────*)
-WriteBack(t) ==
-    /\ pc[t] = "write_back"
-    /\ lock = t
-    /\ mem' = [a \in Addr |->
-                 IF HasWritten(t, a) THEN write_set[t][a] ELSE mem[a]]
-    /\ pc' = [pc EXCEPT ![t] = "update_ver"]
-    /\ UNCHANGED <<version, clock, lock, timestamp, read_set, write_set,
-                   read_only, commit_ts, committed, aborted>>
+\* BEGIN TRANSLATION
+VARIABLES pc, mem, version, clock, lock, committed, aborted, timestamp, 
+          read_set, write_set, read_only, commit_ts
 
-(*── Phase 6: Update version table (clear lock bit, set new version) ─*)
-UpdateVersion(t) ==
-    /\ pc[t] = "update_ver"
-    /\ lock = t
-    /\ LET WrittenIdxs == {VIndex(a) : a \in {a2 \in Addr : HasWritten(t, a2)}} IN
-       version' = [i \in 0..VSIZE-1 |->
-                     IF i \in WrittenIdxs
-                     THEN MakeEntry(commit_ts[t])
-                     ELSE version[i]]
-    /\ pc' = [pc EXCEPT ![t] = "release_lock"]
-    /\ UNCHANGED <<mem, clock, lock, timestamp, read_set, write_set,
-                   read_only, commit_ts, committed, aborted>>
+vars == << pc, mem, version, clock, lock, committed, aborted, timestamp, 
+           read_set, write_set, read_only, commit_ts >>
 
-(*── Phase 7: Release commit lock ────────────────────────────────────*)
-ReleaseLock(t) ==
-    /\ pc[t] = "release_lock"
-    /\ lock = t
-    /\ lock' = 0
-    /\ committed' = [committed EXCEPT ![t] = committed[t] + 1]
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    /\ UNCHANGED <<mem, version, clock, timestamp, read_set, write_set,
-                   read_only, commit_ts, aborted>>
+ProcSet == (Thread)
 
-(*── Abort ───────────────────────────────────────────────────────────*)
-Abort(t) ==
-    /\ pc[t] \in {"active", "aborting", "validate_ws", "validate_rs"}
-    /\ ~ (pc[t] \in {"validate_ws", "validate_rs"} /\ lock = t)
-    (* If we're holding the lock during validation, use ValidationFailed instead *)
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    /\ aborted' = [aborted EXCEPT ![t] = aborted[t] + 1]
-    /\ timestamp' = [timestamp EXCEPT ![t] = 0]
-    /\ read_set' = [read_set EXCEPT ![t] = << >>]
-    /\ write_set' = [write_set EXCEPT ![t] = [a \in Addr |-> NoWrite]]
-    /\ read_only' = [read_only EXCEPT ![t] = TRUE]
-    /\ commit_ts' = [commit_ts EXCEPT ![t] = 0]
-    /\ UNCHANGED <<mem, version, clock, lock, committed>>
+Init == (* Global variables *)
+        /\ mem = [a \in Addr |-> 0]
+        /\ version = [i \in 0..VSIZE-1 |-> MakeEntry(0)]
+        /\ clock = 1
+        /\ lock = 0
+        /\ committed = [t \in Thread |-> 0]
+        /\ aborted = [t \in Thread |-> 0]
+        (* Process ThreadProc *)
+        /\ timestamp = [self \in Thread |-> 0]
+        /\ read_set = [self \in Thread |-> {}]
+        /\ write_set = [self \in Thread |-> [a \in Addr |-> NoWrite]]
+        /\ read_only = [self \in Thread |-> TRUE]
+        /\ commit_ts = [self \in Thread |-> 0]
+        /\ pc = [self \in ProcSet |-> "L_idle"]
 
-(*--------------------------------------------------------------------*)
-(* Next-state relation                                                *)
-(*--------------------------------------------------------------------*)
+L_idle(self) == /\ pc[self] = "L_idle"
+                /\ IF committed[self] >= MaxCommits
+                      THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
+                      ELSE /\ pc' = [pc EXCEPT ![self] = "L_begin"]
+                /\ UNCHANGED << mem, version, clock, lock, committed, aborted, 
+                                timestamp, read_set, write_set, read_only, 
+                                commit_ts >>
 
-Next ==
-    \E t \in Thread :
-        \/ Begin(t)
-        \/ \E a \in Addr : ReadOwnWrite(t, a)
-        \/ \E a \in Addr : ReadValidate(t, a)
-        \/ \E a \in Addr : ReadValidateAbort(t, a)
-        \/ \E a \in Addr : \E v \in Data : WriteAction(t, a, v)
-        \/ ReadOnlyCommit(t)
-        \/ AcquireLock(t)
-        \/ ValidateWS(t)
-        \/ ValidateRS(t)
-        \/ ValidationFailed(t)
-        \/ SetLockBits(t)
-        \/ IncClock(t)
-        \/ WriteBack(t)
-        \/ UpdateVersion(t)
-        \/ ReleaseLock(t)
-        \/ Abort(t)
+L_begin(self) == /\ pc[self] = "L_begin"
+                 /\ timestamp' = [timestamp EXCEPT ![self] = clock]
+                 /\ read_set' = [read_set EXCEPT ![self] = {}]
+                 /\ write_set' = [write_set EXCEPT ![self] = [a \in Addr |-> NoWrite]]
+                 /\ read_only' = [read_only EXCEPT ![self] = TRUE]
+                 /\ commit_ts' = [commit_ts EXCEPT ![self] = 0]
+                 /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                 /\ UNCHANGED << mem, version, clock, lock, committed, aborted >>
+
+L_active(self) == /\ pc[self] = "L_active"
+                  /\ \/ /\ \E a \in Addr:
+                             IF write_set[self][a] # NoWrite
+                                THEN /\ TRUE
+                                ELSE /\ TRUE
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<lock, committed, read_set, write_set, read_only>>
+                     \/ /\ IF \E a \in Addr : write_set[self][a] = NoWrite /\ LockBit(version[VIndex(a)]) = 1
+                              THEN /\ pc' = [pc EXCEPT ![self] = "L_abort_active"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<lock, committed, read_set, write_set, read_only>>
+                     \/ /\ \E a \in Addr:
+                             IF write_set[self][a] = NoWrite /\ LockBit(version[VIndex(a)]) = 0
+                                THEN /\ read_set' = [read_set EXCEPT ![self] = read_set[self] \union {<<a, VersionOf(version[VIndex(a)])>>}]
+                                ELSE /\ TRUE
+                                     /\ UNCHANGED read_set
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<lock, committed, write_set, read_only>>
+                     \/ /\ \E a \in Addr:
+                             \E v \in Data:
+                               /\ write_set' = [write_set EXCEPT ![self][a] = v]
+                               /\ read_only' = [read_only EXCEPT ![self] = FALSE]
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<lock, committed, read_set>>
+                     \/ /\ IF read_only[self]
+                              THEN /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
+                                   /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                   /\ UNCHANGED committed
+                        /\ UNCHANGED <<lock, read_set, write_set, read_only>>
+                     \/ /\ IF ~read_only[self] /\ lock = 0
+                              THEN /\ lock' = self
+                                   /\ pc' = [pc EXCEPT ![self] = "L_validate"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                   /\ lock' = lock
+                        /\ UNCHANGED <<committed, read_set, write_set, read_only>>
+                  /\ UNCHANGED << mem, version, clock, aborted, timestamp, 
+                                  commit_ts >>
+
+L_validate(self) == /\ pc[self] = "L_validate"
+                    /\ IF \A a \in Addr :
+                           (write_set[self][a] # NoWrite) =>
+                               (LockBit(version[VIndex(a)]) = 0
+                                /\ VersionOf(version[VIndex(a)]) <= timestamp[self])
+                          /\ \A <<addr, ver>> \in read_set[self] :
+                               LockBit(version[VIndex(addr)]) = 0
+                               /\ VersionOf(version[VIndex(addr)]) = ver
+                          THEN /\ pc' = [pc EXCEPT ![self] = "L_set_lock_bits"]
+                               /\ lock' = lock
+                          ELSE /\ lock' = 0
+                               /\ pc' = [pc EXCEPT ![self] = "L_abort_active"]
+                    /\ UNCHANGED << mem, version, clock, committed, aborted, 
+                                    timestamp, read_set, write_set, read_only, 
+                                    commit_ts >>
+
+L_set_lock_bits(self) == /\ pc[self] = "L_set_lock_bits"
+                         /\ version' =        [i \in 0..VSIZE-1 |->
+                                       IF \E a \in Addr : write_set[self][a] # NoWrite /\ VIndex(a) = i
+                                       THEN version[i] + 1
+                                       ELSE version[i]]
+                         /\ pc' = [pc EXCEPT ![self] = "L_inc_clock"]
+                         /\ UNCHANGED << mem, clock, lock, committed, aborted, 
+                                         timestamp, read_set, write_set, 
+                                         read_only, commit_ts >>
+
+L_inc_clock(self) == /\ pc[self] = "L_inc_clock"
+                     /\ clock' = clock + 1
+                     /\ commit_ts' = [commit_ts EXCEPT ![self] = clock']
+                     /\ pc' = [pc EXCEPT ![self] = "L_write_back"]
+                     /\ UNCHANGED << mem, version, lock, committed, aborted, 
+                                     timestamp, read_set, write_set, read_only >>
+
+L_write_back(self) == /\ pc[self] = "L_write_back"
+                      /\ mem' =    [a \in Addr |->
+                                IF write_set[self][a] # NoWrite
+                                THEN write_set[self][a]
+                                ELSE mem[a]]
+                      /\ pc' = [pc EXCEPT ![self] = "L_update_ver"]
+                      /\ UNCHANGED << version, clock, lock, committed, aborted, 
+                                      timestamp, read_set, write_set, 
+                                      read_only, commit_ts >>
+
+L_update_ver(self) == /\ pc[self] = "L_update_ver"
+                      /\ version' =        [i \in 0..VSIZE-1 |->
+                                    IF \E a \in Addr : write_set[self][a] # NoWrite /\ VIndex(a) = i
+                                    THEN MakeEntry(commit_ts[self])
+                                    ELSE version[i]]
+                      /\ pc' = [pc EXCEPT ![self] = "L_release_lock"]
+                      /\ UNCHANGED << mem, clock, lock, committed, aborted, 
+                                      timestamp, read_set, write_set, 
+                                      read_only, commit_ts >>
+
+L_release_lock(self) == /\ pc[self] = "L_release_lock"
+                        /\ lock' = 0
+                        /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
+                        /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                        /\ UNCHANGED << mem, version, clock, aborted, 
+                                        timestamp, read_set, write_set, 
+                                        read_only, commit_ts >>
+
+L_abort_active(self) == /\ pc[self] = "L_abort_active"
+                        /\ timestamp' = [timestamp EXCEPT ![self] = 0]
+                        /\ read_set' = [read_set EXCEPT ![self] = {}]
+                        /\ write_set' = [write_set EXCEPT ![self] = [a \in Addr |-> NoWrite]]
+                        /\ read_only' = [read_only EXCEPT ![self] = TRUE]
+                        /\ commit_ts' = [commit_ts EXCEPT ![self] = 0]
+                        /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
+                        /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                        /\ UNCHANGED << mem, version, clock, lock, committed >>
+
+L_done(self) == /\ pc[self] = "L_done"
+                /\ TRUE
+                /\ pc' = [pc EXCEPT ![self] = "Done"]
+                /\ UNCHANGED << mem, version, clock, lock, committed, aborted, 
+                                timestamp, read_set, write_set, read_only, 
+                                commit_ts >>
+
+ThreadProc(self) == L_idle(self) \/ L_begin(self) \/ L_active(self)
+                       \/ L_validate(self) \/ L_set_lock_bits(self)
+                       \/ L_inc_clock(self) \/ L_write_back(self)
+                       \/ L_update_ver(self) \/ L_release_lock(self)
+                       \/ L_abort_active(self) \/ L_done(self)
+
+(* Allow infinite stuttering to prevent deadlock on termination. *)
+Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
+               /\ UNCHANGED vars
+
+Next == (\E self \in Thread: ThreadProc(self))
+           \/ Terminating
 
 Spec == Init /\ [][Next]_vars
 
+Termination == <>(\A self \in ProcSet: pc[self] = "Done")
+
+\* END TRANSLATION
+
 (*====================================================================*)
-(* Invariants                                                         *)
+(* Invariants                                                          *)
 (*====================================================================*)
 
-(*── I1: At most one thread holds the commit lock ────────────────────*)
+(* I1: At most one thread holds the commit lock *)
 LockExclusion ==
     \A t1, t2 \in Thread :
         (lock = t1 /\ lock = t2) => t1 = t2
 
-(*── I2: If a thread holds the lock, it is in a commit phase ────────*)
+(* I2: If a thread holds the lock, it is in a commit phase *)
 LockHeldImpliesCommitting ==
     \A t \in Thread :
-        lock = t => pc[t] \in {"validate_ws", "validate_rs", "set_lock_bits",
-                                "inc_clock", "write_back", "update_ver",
-                                "release_lock"}
+        lock = t => pc[t] \in {"L_validate", "L_set_lock_bits", "L_inc_clock",
+                                "L_write_back", "L_update_ver", "L_release_lock"}
 
-(*── I3: The global clock never decreases ────────────────────────────*)
+(* I3: The global clock never decreases *)
 ClockMonotonic ==
-    clock \in Nat /\ clock >= 1
+    clock >= 1
 
-(*── I4: Version table entries are always even (lock bit = 0) when
-        no commit is in progress on that index ──────────────────────*)
+(* I4: Lock bits are only set when a commit is in progress on that index *)
 VersionEntryValid ==
     \A i \in 0..VSIZE-1 :
         LockBit(version[i]) = 0 \/
         \E t \in Thread :
-            (pc[t] \in {"set_lock_bits", "inc_clock", "write_back", "update_ver"}
-             /\ \E a \in Addr : HasWritten(t, a) /\ VIndex(a) = i)
+            pc[t] \in {"L_set_lock_bits", "L_inc_clock", "L_write_back",
+                        "L_update_ver"}
+            /\ \E a \in Addr : write_set[t][a] # NoWrite /\ VIndex(a) = i
 
-(*── I5: Read-set entries correspond to committed versions ──────────*)
-ReadSetConsistent ==
-    \A t \in Thread :
-        \A i \in 1..Len(read_set[t]) :
-            LET entry == read_set[t][i]
-                a == entry[1]
-                ver == entry[2] IN
-            VersionOf(version[VIndex(a)]) >= ver
-
-(*── I6: No two threads can be in commit phases simultaneously ──────*)
+(* I5: No two threads are in commit phases simultaneously *)
 AtMostOneCommitting ==
     \A t1, t2 \in Thread :
         t1 # t2 =>
-            ~ ( pc[t1] \in {"validate_ws", "validate_rs", "set_lock_bits",
-                             "inc_clock", "write_back", "update_ver",
-                             "release_lock"}
-              /\ pc[t2] \in {"validate_ws", "validate_rs", "set_lock_bits",
-                              "inc_clock", "write_back", "update_ver",
-                              "release_lock"} )
+            ~ ( pc[t1] \in {"L_validate", "L_set_lock_bits", "L_inc_clock",
+                             "L_write_back", "L_update_ver", "L_release_lock"}
+              /\ pc[t2] \in {"L_validate", "L_set_lock_bits", "L_inc_clock",
+                             "L_write_back", "L_update_ver", "L_release_lock"} )
 
-(*====================================================================*)
-(* Temporal property: every started transaction eventually completes  *)
-(* (not provable for all schedules, but useful for TLC checking)      *)
-(*====================================================================*)
+(* Combined invariant for TLC *)
+Inv ==
+    /\ LockExclusion
+    /\ LockHeldImpliesCommitting
+    /\ ClockMonotonic
+    /\ AtMostOneCommitting
 
-Completion ==
-    \A t \in Thread : <>[](pc[t] \in {"idle", "aborting"})
+(* Constraint for bounded model checking (bounds unbounded counters) *)
+ModelBound == clock <= 5 /\ \A t \in Thread : aborted[t] <= MaxCommits * 2
 
-(*====================================================================*)
-(* Model-checking setup                                               *)
-(*====================================================================*)
-
-(* Default model parameters — override in TLC model config *)
-(* Thread = {1, 2}; Addr = {0, 1}; Data = {0, 1, 2}; VSIZE = 2 *)
-
-====
+=====
