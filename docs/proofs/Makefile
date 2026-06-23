@@ -48,6 +48,36 @@ proof-one:
 	@echo "=== TLAPS: $(BACKEND) ==="
 	$(TLAPM) $(BACKEND).tla 2>&1
 
+# Verify all 11 PlusCal backends with sequential model (Thread={1})
+verify-sequential:
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) SGL.tla -config SGL-sequential.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) TSXSGL.tla -config TSXSGL-sequential.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) TinySTM_WBCTL.tla -config TinySTM_WBCTL-sequential.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) TinySTM_WBETL.tla -config TinySTM_WBETL-sequential.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) TinySTM_WT.tla -config TinySTM_WT-sequential.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) PersistentSGL.tla -config PersistentSGL-sequential.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) TL2.tla -config TL2-sequential.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) Romulus.tla -config Romulus-sequential.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) XTM.tla -config XTM-sequential.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) LEFTRIGHT.tla -config LEFTRIGHT-sequential.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) SwissTM.tla -config SwissTM-sequential.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+
+# Verify with larger model (Addr={0,1}) for small backends
+LARGE_BACKENDS := SGL TinySTM_WBCTL TinySTM_WBETL XTM LEFTRIGHT PersistentSGL Romulus
+
+verify-large:
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) SGL.tla -config SGL-large.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) TinySTM_WBCTL.tla -config TinySTM_WBCTL-large.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) TinySTM_WBETL.tla -config TinySTM_WBETL-large.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) XTM.tla -config XTM-large.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) LEFTRIGHT.tla -config LEFTRIGHT-large.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) PersistentSGL.tla -config PersistentSGL-large.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+	$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) Romulus.tla -config Romulus-large.cfg 2>&1 | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'
+
+# Full verification sweep
+verify: verify-sequential verify-large
+	@echo "=== Phase 5: Complete ==="
+
 # Translate PlusCal to TLA+ for all PlusCal backends
 tla:
 	@for b in $(PLUSCAL_BACKENDS); do \
