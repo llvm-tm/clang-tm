@@ -26,63 +26,120 @@ ASSUME Thread \subseteq Nat \ {0}
 ASSUME Addr \subseteq Nat
 ASSUME Data \subseteq Nat
 
-VARIABLES
-    lock, version, mem, pc,
-    readSet, writeSet, readVersion,
-    committed, aborted
+(* --algorithm SGL
 
-vars == <<lock, version, mem, pc, readSet, writeSet, readVersion, committed, aborted>>
+variables
+    lock = 0,
+    version = 0,
+    mem = [a \in Addr |-> 0],
+    readSet = [t \in Thread |-> {}],
+    writeSet = [t \in Thread |-> {}],
+    readVersion = [t \in Thread |-> 0],
+    committed = [t \in Thread |-> 0],
+    aborted = [t \in Thread |-> 0];
 
-Init ==
-    /\ lock = 0
-    /\ version = 0
-    /\ mem = [a \in Addr |-> 0]
-    /\ pc = [t \in Thread |-> "idle"]
-    /\ readSet = [t \in Thread |-> {}]
-    /\ writeSet = [t \in Thread |-> {}]
-    /\ readVersion = [t \in Thread |-> 0]
-    /\ committed = [t \in Thread |-> 0]
-    /\ aborted = [t \in Thread |-> 0]
+process ThreadProc \in Thread
+begin
 
-Begin(t) ==
-    /\ pc[t] = "idle"
-    /\ lock = 0
-    /\ lock' = t
-    /\ pc' = [pc EXCEPT ![t] = "active"]
-    /\ readSet' = [readSet EXCEPT ![t] = {}]
-    /\ writeSet' = [writeSet EXCEPT ![t] = {}]
-    /\ readVersion' = [readVersion EXCEPT ![t] = version]
-    /\ UNCHANGED <<version, mem, committed, aborted>>
+L_idle:
+    await lock = 0;
+    lock := self;
+    readSet[self] := {};
+    writeSet[self] := {};
+    readVersion[self] := version;
 
-Read(t, a) ==
-    /\ pc[t] = "active"
-    /\ a \in Addr
-    /\ readSet' = [readSet EXCEPT ![t] = readSet[t] \cup {a}]
-    /\ UNCHANGED <<lock, version, mem, pc, writeSet, readVersion, committed, aborted>>
+L_active:
+    either \* Read
+        with a \in Addr do
+            readSet[self] := readSet[self] \union {a};
+        end with;
+        goto L_active;
+    or \* Write
+        with a \in Addr, n \in Data do
+            mem[a] := n;
+            writeSet[self] := writeSet[self] \union {a};
+        end with;
+        goto L_active;
+    or \* Commit
+        lock := 0;
+        version := version + 1;
+        committed[self] := committed[self] + 1;
+        goto L_idle;
+    end either;
 
-Write(t, a, n) ==
-    /\ pc[t] = "active"
-    /\ a \in Addr
-    /\ mem' = [mem EXCEPT ![a] = n]
-    /\ writeSet' = [writeSet EXCEPT ![t] = writeSet[t] \cup {a}]
-    /\ UNCHANGED <<lock, version, pc, readSet, readVersion, committed, aborted>>
+L_done:
+    skip;
 
-Commit(t) ==
-    /\ pc[t] = "active"
-    /\ lock = t
-    /\ lock' = 0
-    /\ version' = version + 1
-    /\ committed' = [committed EXCEPT ![t] = committed[t] + 1]
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    /\ UNCHANGED <<mem, readSet, writeSet, readVersion, aborted>>
+end process;
 
-Next ==
-    \/ \E t \in Thread : Begin(t)
-    \/ \E t \in Thread : \E a \in Addr : Read(t, a)
-    \/ \E t \in Thread : \E a \in Addr : \E n \in Data : Write(t, a, n)
-    \/ \E t \in Thread : Commit(t)
+end algorithm; *)
+\* BEGIN TRANSLATION (chksum(pcal) = "c92c2eb6" /\ chksum(tla) = "5823be12")
+VARIABLES pc, lock, version, mem, readSet, writeSet, readVersion, committed, 
+          aborted
+
+vars == << pc, lock, version, mem, readSet, writeSet, readVersion, committed, 
+           aborted >>
+
+ProcSet == (Thread)
+
+Init == (* Global variables *)
+        /\ lock = 0
+        /\ version = 0
+        /\ mem = [a \in Addr |-> 0]
+        /\ readSet = [t \in Thread |-> {}]
+        /\ writeSet = [t \in Thread |-> {}]
+        /\ readVersion = [t \in Thread |-> 0]
+        /\ committed = [t \in Thread |-> 0]
+        /\ aborted = [t \in Thread |-> 0]
+        /\ pc = [self \in ProcSet |-> "L_idle"]
+
+L_idle(self) == /\ pc[self] = "L_idle"
+                /\ lock = 0
+                /\ lock' = self
+                /\ readSet' = [readSet EXCEPT ![self] = {}]
+                /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                /\ readVersion' = [readVersion EXCEPT ![self] = version]
+                /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                /\ UNCHANGED << version, mem, committed, aborted >>
+
+L_active(self) == /\ pc[self] = "L_active"
+                  /\ \/ /\ \E a \in Addr:
+                             readSet' = [readSet EXCEPT ![self] = readSet[self] \union {a}]
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<lock, version, mem, writeSet, committed>>
+                     \/ /\ \E a \in Addr:
+                             \E n \in Data:
+                               /\ mem' = [mem EXCEPT ![a] = n]
+                               /\ writeSet' = [writeSet EXCEPT ![self] = writeSet[self] \union {a}]
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<lock, version, readSet, committed>>
+                     \/ /\ lock' = 0
+                        /\ version' = version + 1
+                        /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
+                        /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                        /\ UNCHANGED <<mem, readSet, writeSet>>
+                  /\ UNCHANGED << readVersion, aborted >>
+
+L_done(self) == /\ pc[self] = "L_done"
+                /\ TRUE
+                /\ pc' = [pc EXCEPT ![self] = "Done"]
+                /\ UNCHANGED << lock, version, mem, readSet, writeSet, 
+                                readVersion, committed, aborted >>
+
+ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_done(self)
+
+(* Allow infinite stuttering to prevent deadlock on termination. *)
+Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
+               /\ UNCHANGED vars
+
+Next == (\E self \in Thread: ThreadProc(self))
+           \/ Terminating
 
 Spec == Init /\ [][Next]_vars
+
+Termination == <>(\A self \in ProcSet: pc[self] = "Done")
+
+\* END TRANSLATION 
 
 (*====================================================================*)
 (* MutexInductive — Inductive invariant for mutual exclusion           *)
