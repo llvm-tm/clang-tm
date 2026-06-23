@@ -1,6 +1,6 @@
 ----------------------- MODULE TinySTM_WT ------------------------
 (*
- * TinySTM WT (Write-Through) — TLA+ Specification
+ * TinySTM WT (Write-Through) — TLA+ Specification (PlusCal)
  *
  * Features:
  *   - Global clock C.
@@ -8,189 +8,309 @@
  *   - Write-through: writes go directly to memory (with undo log).
  *   - Encounter-time locking (lock acquired at first write).
  *   - Undo log on abort: restore old values, bump incarnation.
- *   - begin(): snapshot C_start.
+ *   - begin(): empty read/write sets.
  *   - read(V): double-check, add to read-set.
  *   - write(V,N): lock(V), *V = N, log old value.
  *   - commit(): increment C, validate read-set, unlock(V, C).
  *   - abort(): restore old values, bump incarnation, unlock.
- *
- * TLC-checkable invariants:
- *   - No two threads hold the same lock.
- *   - After abort, memory is restored to pre-write state.
- *   - Write-through only happens while lock is held.
  *)
 
 EXTENDS Naturals, FiniteSets, TLC
 
-CONSTANTS Thread, Addr, MAX_VAL
+CONSTANTS Thread, Addr, MAX_VAL, MaxCommits
 ASSUME Thread \subseteq Nat \ {0}
 ASSUME Addr \subseteq Nat
+ASSUME MAX_VAL \in Nat
 
-VARIABLES
-    clock,
-    lock,                                (* [addr -> {locked, owner, version, inc}] *)
-    mem,
-    pc,                                (* idle | active | abort *)
-    readSet,                           (* set of <<addr, version, incarnation>> *)
-    writeSet,                          (* set of addr *)
-    undoLog,                             (* old value before write-through *)
-    readOnly,
-    committed,
-    aborted
+(* --algorithm TinySTM_WT
 
-vars == <<clock, lock, mem, pc, readSet, writeSet, undoLog, readOnly, committed, aborted>>
+variables
+    clock = 0,
+    lock = [a \in Addr |-> <<0, 0, 0, 0>>],
+    mem = [a \in Addr |-> 0],
+    state = [t \in Thread |-> "idle"],
+    readSet = [t \in Thread |-> {}],
+    writeSet = [t \in Thread |-> {}],
+    undoLog = [t \in Thread, a \in Addr |-> 0],
+    readOnly = [t \in Thread |-> TRUE],
+    committed = [t \in Thread |-> 0],
+    aborted = [t \in Thread |-> 0];
 
-LOCK_FREE(l) == l[1] = 0
-LOCK_OWNER(l) == l[2]
-LOCK_VER(l) == l[3]
-LOCK_INC(l) == l[4]
-MAKE_LOCK(locked, owner, ver, inc) == <<locked, owner, ver, inc>>
+process ThreadProc \in Thread
+begin
 
-Init ==
-    /\ clock = 0
-    /\ lock = [a \in Addr |-> MAKE_LOCK(0, 0, 0, 0)]
-    /\ mem = [a \in Addr |-> 0]
-    /\ pc = [t \in Thread |-> "idle"]
-    /\ readSet = [t \in Thread |-> {}]
-    /\ writeSet = [t \in Thread |-> {}]
-    /\ undoLog = [t \in Thread, a \in Addr |-> 0]
-    /\ readOnly = [t \in Thread |-> TRUE]
-    /\ committed = [t \in Thread |-> 0]
-    /\ aborted = [t \in Thread |-> 0]
+L_idle:
+    if committed[self] < MaxCommits then
+        state[self] := "active";
+        readSet[self] := {};
+        writeSet[self] := {};
+        readOnly[self] := TRUE;
+    else
+        goto L_done;
+    end if;
 
-Begin(t) ==
-    /\ pc[t] = "idle"
-    /\ pc' = [pc EXCEPT ![t] = "active"]
-    /\ readOnly' = [readOnly EXCEPT ![t] = TRUE]
-    /\ readSet' = [readSet EXCEPT ![t] = {}]
-    /\ writeSet' = [writeSet EXCEPT ![t] = {}]
-    /\ UNCHANGED <<clock, lock, mem, undoLog, committed, aborted>>
+L_active:
+    either \* Read (record observed version + incarnation)
+        with a \in Addr do
+            if a \notin writeSet[self] /\ lock[a][1] = 0 then
+                readSet[self] := readSet[self] \union {<<a, lock[a][3], lock[a][4]>>};
+            end if;
+        end with;
+        goto L_active;
+    or \* First write: acquire lock, write through, log old value
+        with a \in Addr, n \in 0..MAX_VAL do
+            if a \notin writeSet[self] /\ lock[a][1] = 0 then
+                lock[a] := <<1, self, lock[a][3], lock[a][4]>>;
+                undoLog[self, a] := mem[a];
+                mem[a] := n;
+                writeSet[self] := writeSet[self] \union {a};
+                readOnly[self] := FALSE;
+            end if;
+        end with;
+        goto L_active;
+    or \* Update write: write through, log old value
+        with a \in Addr, n \in 0..MAX_VAL do
+            if a \in writeSet[self] then
+                undoLog[self, a] := mem[a];
+                mem[a] := n;
+                readOnly[self] := FALSE;
+            end if;
+        end with;
+        goto L_active;
+    or \* Commit read-only
+        if readOnly[self] then
+            committed[self] := committed[self] + 1;
+            state[self] := "idle";
+            readSet[self] := {};
+            goto L_idle;
+        else
+            goto L_active;
+        end if;
+    or \* Commit: validate + release locks
+        if ~readOnly[self] /\ writeSet[self] # {}
+           /\ \A a \in writeSet[self] : lock[a][2] = self
+        then
+            if \A <<a, v, i>> \in readSet[self] :
+                lock[a][2] = self \/ (lock[a][3] = v /\ lock[a][4] = i)
+            then
+                clock := clock + 1;
+                lock := [a \in Addr |->
+                    IF a \in writeSet[self] THEN <<0, 0, clock, 0>> ELSE lock[a]];
+                committed[self] := committed[self] + 1;
+                state[self] := "idle";
+                readSet[self] := {};
+                writeSet[self] := {};
+                goto L_idle;
+            else
+                \* Validation failed: abort
+                goto L_abort;
+            end if;
+        else
+            goto L_active;
+        end if;
+    or \* Abort: restore from undo log, release locks
+        if writeSet[self] # {} then
+            mem := [a \in Addr |->
+                IF a \in writeSet[self] THEN undoLog[self, a] ELSE mem[a]];
+            lock := [a \in Addr |->
+                IF a \in writeSet[self]
+                THEN <<0, 0, lock[a][3], (lock[a][4] + 1) % 8>>
+                ELSE lock[a]];
+            aborted[self] := aborted[self] + 1;
+            readSet[self] := {};
+            writeSet[self] := {};
+            state[self] := "idle";
+            goto L_idle;
+        else
+            goto L_active;
+        end if;
+    end either;
 
-ReadOwn(t, a) ==
-    /\ pc[t] = "active"
-    /\ a \in writeSet[t]
-    /\ UNCHANGED vars
+L_abort:
+    mem := [a \in Addr |->
+        IF a \in writeSet[self] THEN undoLog[self, a] ELSE mem[a]];
+    lock := [a \in Addr |->
+        IF a \in writeSet[self]
+        THEN <<0, 0, lock[a][3], (lock[a][4] + 1) % 8>>
+        ELSE lock[a]];
+    aborted[self] := aborted[self] + 1;
+    readSet[self] := {};
+    writeSet[self] := {};
+    state[self] := "idle";
+    goto L_idle;
 
-ReadMiss(t, a) ==
-    /\ pc[t] = "active"
-    /\ a \notin writeSet[t]
-    /\ LOCK_FREE(lock[a])
-    /\ readSet' = [readSet EXCEPT ![t] = readSet[t]
-        \cup {<<a, LOCK_VER(lock[a]), LOCK_INC(lock[a])>>}]
-    /\ UNCHANGED <<clock, lock, mem, pc, writeSet, undoLog, readOnly, committed, aborted>>
+L_done:
+    skip;
 
-WriteThrough(t, a, n) ==
-    (* First write: acquire lock, write through, log old value *)
-    /\ pc[t] = "active"
-    /\ a \notin writeSet[t]
-    /\ LOCK_FREE(lock[a])
-    (* Acquire lock on a *)
-    /\ lock' = [aa \in Addr |->
-        IF aa = a
-        THEN MAKE_LOCK(1, t, LOCK_VER(lock[a]), LOCK_INC(lock[a]))
-        ELSE lock[aa]]
-    (* Write-through to memory *)
-    /\ mem' = [aa \in Addr |->
-        IF aa = a THEN n ELSE mem[aa]]
-    (* Log old value for undo *)
-    /\ undoLog' = [undoLog EXCEPT ![t][a] = mem[a]]
-    /\ writeSet' = [writeSet EXCEPT ![t] = writeSet[t] \cup {a}]
-    /\ readOnly' = [readOnly EXCEPT ![t] = FALSE]
-    /\ UNCHANGED <<clock, pc, readSet, committed, aborted>>
+end process;
 
-WriteUpdate(t, a, n) ==
-    (* Subsequent write to same address: write through, update log *)
-    /\ pc[t] = "active"
-    /\ a \in writeSet[t]
-    /\ mem' = [aa \in Addr |-> IF aa = a THEN n ELSE mem[aa]]
-    /\ undoLog' = [undoLog EXCEPT ![t][a] = mem[a]]
-    /\ readOnly' = [readOnly EXCEPT ![t] = FALSE]
-    /\ UNCHANGED <<clock, lock, pc, readSet, writeSet, committed, aborted>>
+end algorithm; *)
+\* BEGIN TRANSLATION (chksum(pcal) = "221f6d30" /\ chksum(tla) = "b2b978b8")
+VARIABLES pc, clock, lock, mem, state, readSet, writeSet, undoLog, readOnly, 
+          committed, aborted
 
-(* Commit: validate read-set, release locks with clock *)
-Commit(t) ==
-    /\ pc[t] = "active"
-    /\ readOnly[t] = FALSE
-    /\ writeSet[t] # {}
-    (* Validate read-set *)
-    /\ \A entry \in readSet[t] :
-        LET addr == entry[1]
-            ver == entry[2]
-            inc == entry[3] IN
-        \/ LOCK_OWNER(lock[addr]) = t            (* self-locked *)
-        \/ (LOCK_VER(lock[addr]) = ver /\ LOCK_INC(lock[addr]) = inc)
-            (* version and incarnation unchanged *)
-    (* Increment clock *)
-    /\ clock' = clock + 1
-    (* Release locks with new version *)
-    /\ lock' = [a \in Addr |->
-        IF a \in writeSet[t]
-        THEN MAKE_LOCK(0, 0, clock + 1, 0)
-        ELSE lock[a]]
-    /\ committed' = [committed EXCEPT ![t] = committed[t] + 1]
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    /\ readSet' = [readSet EXCEPT ![t] = {}]
-    /\ writeSet' = [writeSet EXCEPT ![t] = {}]
-    /\ UNCHANGED <<mem, undoLog, readOnly, aborted>>
+vars == << pc, clock, lock, mem, state, readSet, writeSet, undoLog, readOnly, 
+           committed, aborted >>
 
-(* Abort: restore old values from undo log, release locks *)
-Abort(t) ==
-    /\ pc[t] = "active"
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    (* Restore memory from undo log *)
-    /\ mem' = [a \in Addr |->
-        IF a \in writeSet[t] THEN undoLog[t][a] ELSE mem[a]]
-    (* Release locks, bump incarnation *)
-    /\ lock' = [a \in Addr |->
-        IF a \in writeSet[t]
-        THEN MAKE_LOCK(0, 0, LOCK_VER(lock[a]),
-            (LOCK_INC(lock[a]) + 1) % 8)           (* bump incarnation *)
-        ELSE lock[a]]
-    /\ aborted' = [aborted EXCEPT ![t] = aborted[t] + 1]
-    /\ readSet' = [readSet EXCEPT ![t] = {}]
-    /\ writeSet' = [writeSet EXCEPT ![t] = {}]
-    /\ UNCHANGED <<clock, undoLog, readOnly, committed>>
+ProcSet == (Thread)
 
-CommitReadOnly(t) ==
-    /\ pc[t] = "active"
-    /\ readOnly[t] = TRUE
-    /\ committed' = [committed EXCEPT ![t] = committed[t] + 1]
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    /\ readSet' = [readSet EXCEPT ![t] = {}]
-    /\ UNCHANGED <<clock, lock, mem, writeSet, undoLog, readOnly, aborted>>
+Init == (* Global variables *)
+        /\ clock = 0
+        /\ lock = [a \in Addr |-> <<0, 0, 0, 0>>]
+        /\ mem = [a \in Addr |-> 0]
+        /\ state = [t \in Thread |-> "idle"]
+        /\ readSet = [t \in Thread |-> {}]
+        /\ writeSet = [t \in Thread |-> {}]
+        /\ undoLog = [t \in Thread, a \in Addr |-> 0]
+        /\ readOnly = [t \in Thread |-> TRUE]
+        /\ committed = [t \in Thread |-> 0]
+        /\ aborted = [t \in Thread |-> 0]
+        /\ pc = [self \in ProcSet |-> "L_idle"]
 
-Next ==
-    \E t \in Thread :
-        \/ Begin(t)
-        \/ (\E a \in Addr : ReadOwn(t, a))
-        \/ (\E a \in Addr : ReadMiss(t, a))
-        \/ (\E a \in Addr : \E n \in 0..MAX_VAL : WriteThrough(t, a, n))
-        \/ (\E a \in Addr : \E n \in 0..MAX_VAL : WriteUpdate(t, a, n))
-        \/ Commit(t)
-        \/ Abort(t)
-        \/ CommitReadOnly(t)
+L_idle(self) == /\ pc[self] = "L_idle"
+                /\ IF committed[self] < MaxCommits
+                      THEN /\ state' = [state EXCEPT ![self] = "active"]
+                           /\ readSet' = [readSet EXCEPT ![self] = {}]
+                           /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                           /\ readOnly' = [readOnly EXCEPT ![self] = TRUE]
+                           /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                      ELSE /\ pc' = [pc EXCEPT ![self] = "L_done"]
+                           /\ UNCHANGED << state, readSet, writeSet, readOnly >>
+                /\ UNCHANGED << clock, lock, mem, undoLog, committed, aborted >>
+
+L_active(self) == /\ pc[self] = "L_active"
+                  /\ \/ /\ \E a \in Addr:
+                             IF a \notin writeSet[self] /\ lock[a][1] = 0
+                                THEN /\ readSet' = [readSet EXCEPT ![self] = readSet[self] \union {<<a, lock[a][3], lock[a][4]>>}]
+                                ELSE /\ TRUE
+                                     /\ UNCHANGED readSet
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<clock, lock, mem, state, writeSet, undoLog, readOnly, committed, aborted>>
+                     \/ /\ \E a \in Addr:
+                             \E n \in 0..MAX_VAL:
+                               IF a \notin writeSet[self] /\ lock[a][1] = 0
+                                  THEN /\ lock' = [lock EXCEPT ![a] = <<1, self, lock[a][3], lock[a][4]>>]
+                                       /\ undoLog' = [undoLog EXCEPT ![self, a] = mem[a]]
+                                       /\ mem' = [mem EXCEPT ![a] = n]
+                                       /\ writeSet' = [writeSet EXCEPT ![self] = writeSet[self] \union {a}]
+                                       /\ readOnly' = [readOnly EXCEPT ![self] = FALSE]
+                                  ELSE /\ TRUE
+                                       /\ UNCHANGED << lock, mem, writeSet, 
+                                                       undoLog, readOnly >>
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<clock, state, readSet, committed, aborted>>
+                     \/ /\ \E a \in Addr:
+                             \E n \in 0..MAX_VAL:
+                               IF a \in writeSet[self]
+                                  THEN /\ undoLog' = [undoLog EXCEPT ![self, a] = mem[a]]
+                                       /\ mem' = [mem EXCEPT ![a] = n]
+                                       /\ readOnly' = [readOnly EXCEPT ![self] = FALSE]
+                                  ELSE /\ TRUE
+                                       /\ UNCHANGED << mem, undoLog, readOnly >>
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<clock, lock, state, readSet, writeSet, committed, aborted>>
+                     \/ /\ IF readOnly[self]
+                              THEN /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
+                                   /\ state' = [state EXCEPT ![self] = "idle"]
+                                   /\ readSet' = [readSet EXCEPT ![self] = {}]
+                                   /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                   /\ UNCHANGED << state, readSet, committed >>
+                        /\ UNCHANGED <<clock, lock, mem, writeSet, undoLog, readOnly, aborted>>
+                     \/ /\ IF ~readOnly[self] /\ writeSet[self] # {}
+                              /\ \A a \in writeSet[self] : lock[a][2] = self
+                              THEN /\ IF \A <<a, v, i>> \in readSet[self] :
+                                          lock[a][2] = self \/ (lock[a][3] = v /\ lock[a][4] = i)
+                                         THEN /\ clock' = clock + 1
+                                              /\ lock' =     [a \in Addr |->
+                                                         IF a \in writeSet[self] THEN <<0, 0, clock', 0>> ELSE lock[a]]
+                                              /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
+                                              /\ state' = [state EXCEPT ![self] = "idle"]
+                                              /\ readSet' = [readSet EXCEPT ![self] = {}]
+                                              /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                                              /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                                         ELSE /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                                              /\ UNCHANGED << clock, lock, 
+                                                              state, readSet, 
+                                                              writeSet, 
+                                                              committed >>
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                   /\ UNCHANGED << clock, lock, state, readSet, 
+                                                   writeSet, committed >>
+                        /\ UNCHANGED <<mem, undoLog, readOnly, aborted>>
+                     \/ /\ IF writeSet[self] # {}
+                              THEN /\ mem' =    [a \in Addr |->
+                                             IF a \in writeSet[self] THEN undoLog[self, a] ELSE mem[a]]
+                                   /\ lock' =     [a \in Addr |->
+                                              IF a \in writeSet[self]
+                                              THEN <<0, 0, lock[a][3], (lock[a][4] + 1) % 8>>
+                                              ELSE lock[a]]
+                                   /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
+                                   /\ readSet' = [readSet EXCEPT ![self] = {}]
+                                   /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                                   /\ state' = [state EXCEPT ![self] = "idle"]
+                                   /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                   /\ UNCHANGED << lock, mem, state, readSet, 
+                                                   writeSet, aborted >>
+                        /\ UNCHANGED <<clock, undoLog, readOnly, committed>>
+
+L_abort(self) == /\ pc[self] = "L_abort"
+                 /\ mem' =    [a \in Addr |->
+                           IF a \in writeSet[self] THEN undoLog[self, a] ELSE mem[a]]
+                 /\ lock' =     [a \in Addr |->
+                            IF a \in writeSet[self]
+                            THEN <<0, 0, lock[a][3], (lock[a][4] + 1) % 8>>
+                            ELSE lock[a]]
+                 /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
+                 /\ readSet' = [readSet EXCEPT ![self] = {}]
+                 /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                 /\ state' = [state EXCEPT ![self] = "idle"]
+                 /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                 /\ UNCHANGED << clock, undoLog, readOnly, committed >>
+
+L_done(self) == /\ pc[self] = "L_done"
+                /\ TRUE
+                /\ pc' = [pc EXCEPT ![self] = "Done"]
+                /\ UNCHANGED << clock, lock, mem, state, readSet, writeSet, 
+                                undoLog, readOnly, committed, aborted >>
+
+ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_abort(self)
+                       \/ L_done(self)
+
+(* Allow infinite stuttering to prevent deadlock on termination. *)
+Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
+               /\ UNCHANGED vars
+
+Next == (\E self \in Thread: ThreadProc(self))
+           \/ Terminating
 
 Spec == Init /\ [][Next]_vars
 
-(* ---- INVARIANTS ---- *)
+Termination == <>(\A self \in ProcSet: pc[self] = "Done")
+
+\* END TRANSLATION
+
+(*====================================================================*)
+(* Bounds for model checking                                          *)
+(*====================================================================*)
+ModelBound ==
+    /\ clock < 4
+    /\ \A t \in Thread : committed[t] <= MaxCommits
+    /\ \A t \in Thread : aborted[t] < 4
+
+(*====================================================================*)
+(* INVARIANTS                                                         *)
+(*====================================================================*)
 
 (* Mutual exclusion on locks *)
 MutexLocks ==
-    \A a \in Addr : LOCK_FREE(lock[a])
-        \/ \E t \in Thread : LOCK_OWNER(lock[a]) = t
-
-(* Undo log matches pre-write value for write-set addresses *)
-UndoLogInv ==
-    \A t \in Thread :
-        \A a \in writeSet[t] :
-            undoLog[t][a] # 0 \/ mem[a] = 0         (* trivial, real check is at abort *)
-
-(* After an abort, old values are restored: checked by *)
-(* StateRestored invariant in a TLC trace exploration *)
+    \A a \in Addr : lock[a][1] = 0
+        \/ \E t \in Thread : lock[a][2] = t
 
 Inv ==
     /\ MutexLocks
 
 THEOREM Spec => []Inv
 
-========================================================================
+=======================================================================
