@@ -17,22 +17,22 @@ Add a `Makefile` to `docs/proofs/` that provides:
 
 Configurable via `TLA2TOOLS_JAR` (default: `/tmp/tla2tools.jar`).
 
-## Phase 1: Simple backends → PlusCal
+## Phase 1: Simple backends → PlusCal ✅ COMPLETED
 
-| Backend | Labels | PlusCal complexity | Effort |
-|---------|--------|--------------------|--------|
-| **SGL** | 3 (begin, active, end) | Trivial — `with` for read/write | 1 session |
-| **TSXSGL** | 5 (begin, tsx_ok, tsx_abort, sgl, end) | TSX fallback in `either/or` | 1 session |
-| **TinySTM_WBCTL** | 4 (begin, read, write, commit) | Write-back CTL | 1 session |
-| **TinySTM_WBETL** | 4 (begin, read, write, commit) | Write-back ETL | 1 session |
-| **TinySTM_WT** | 4 (begin, read, write, commit) | Write-through | 1 session |
-| **PersistentSGL** | 4 (begin, read/write, persist, end) | SGL + durability label | 1 session |
+| Backend | TLC states | Invariants | Issues found |
+|---------|-----------|------------|-------------|
+| **SGL** | 555 gen, 201 distinct | MutexInv, AtMostOneActive, NoDirtyReads | Version unbounded → `VersionBound`; proof operators missing after PlusCal conversion; cfg needed Addr/Data reduction for bounded checking |
+| **TSXSGL** | 491K gen, 66K distinct | LockFreeInv, LockOwnerInv, AtMostOneSGL | `TSXvsSGLSafety` is NOT an invariant (violated in intermediate state between SGL entry and TSX abort — original action-based spec had same issue); PlusCal `if`+`goto` patterns require `else` branches |
+| **TinySTM_WBCTL** | 53K gen, 11K distinct | NoConcurrentLocking, LockOwnerInv, WriteBackSafe | Macros referencing `lock` variable before PlusCal declaration cause TLC parse error — must inline expressions in PlusCal code; clock unbounded → `ClockBound` |
+| **TinySTM_WBETL** | 32K gen, 3.8K distinct | MutexLocks, LockOwnerTx, NoLocksAfterCommit | Same macro issue as WBCTL; `with`+`if` nested control flow requires explicit else branches in PlusCal |
+| **TinySTM_WT** | 12.9M gen, 1.2M distinct | MutexLocks | Largest state space (4-tuple locks, undo log); `aborted` unbounded → `AbortBound` needed; `L_abort` separate label for failed-commit abort |
+| **PersistentSGL** | 949 gen, 288 distinct | LockExclusion, LockHolderActive, RecoveryConsistency, NVMContainsCommitted | `pc` is PlusCal reserved — rename to `state`; crash-guarded begin requires nested `if` pattern; system process for crash/recovery |
 
 ## Phase 2: Medium-complexity backends → PlusCal
 
 | Backend | Labels | Strategy |
 |---------|--------|----------|
-| **TL2** | DONE | Reference implementation |
+| **TL2** | ✅ DONE | Reference implementation |
 | **Romulus** | 6 | Version-table OCC: start → read/write → validate → inc clock → write-back → release |
 | **XTM** | 6 | Page-granularity OCC: start read/write → page copy → validate → write-back |
 | **LEFTRIGHT** | 5 | Global-clock OCC: start → read/write → validate (value) → inc clock → release |
@@ -79,12 +79,12 @@ For each backend:
 
 ## Summary
 
-| Phase | Scope | Effort |
-|-------|-------|--------|
-| 0 | Makefile | 1 session |
-| 1 | 6 simple backends → PlusCal | 6 sessions |
-| 2 | 4 medium backends → PlusCal | 8 sessions |
-| 3 | 6 TLA+-only retentions (no-op) | 1 session |
-| 4 | Fairness + invariants (all) | 2 sessions |
-| 5 | Verification (all) | 3 sessions |
-| **Total** | **11 new PlusCal specs** | **~21 sessions** |
+| Phase | Scope | Effort | Status |
+|-------|--------|--------|--------|
+| 0 | Makefile | 1 session | ✅ |
+| 1 | 6 simple backends → PlusCal | 6 sessions | ✅ COMPLETED 2026-06-23 |
+| 2 | 4 medium backends → PlusCal | 8 sessions | ⏳ TL2 done, 4 pending |
+| 3 | 6 TLA+-only retentions (no-op) | 1 session | ⏳ Not started |
+| 4 | Fairness + invariants (all) | 2 sessions | ⏳ Not started |
+| 5 | Verification (all) | 3 sessions | ⏳ Not started |
+| **Total** | **11 new PlusCal specs** | **~21 sessions** | **5/11 backends** |
