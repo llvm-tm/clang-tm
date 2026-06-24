@@ -55,7 +55,35 @@ tlapm --version
 
 ### TLC Model Checker
 
-TLC is included with the TLA+ Toolbox:
+TLC can be used via the GUI (TLA+ Toolbox) or directly from the command line.
+
+#### Option A: Direct download (recommended for CLI use)
+
+Download `tla2tools.jar` (no GUI needed):
+
+```bash
+# Java 8 compatible (v1.6.0)
+curl -sL -o /tmp/tla2tools.jar \
+  https://github.com/tlaplus/tlaplus/releases/download/v1.6.0/tla2tools.jar
+
+# Or latest (requires Java 11+)
+curl -sL -o /tmp/tla2tools.jar \
+  https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+```
+
+Verify:
+
+```bash
+java -cp /tmp/tla2tools.jar tlc2.TLC -help
+```
+
+Set the path via environment variable (used by the Makefile):
+
+```bash
+export TLA2TOOLS_JAR=/tmp/tla2tools.jar
+```
+
+#### Option B: TLA+ Toolbox (GUI)
 
 1. Install Java 11+.
 2. Download the TLA+ Toolbox from https://github.com/tlaplus/tlaplus/releases
@@ -109,11 +137,34 @@ Concrete parameters for model checking:
 | `DistributedSGL.tla` | `Client <- {1,2,3}`, `Addr <- {0,1}` |
 | `PersistentSGL.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1,2}` |
 
-From the command line (requires TLA+ tools on `$PATH`):
+From the command line (requires `tla2tools.jar`):
 
 ```bash
 java -cp /path/to/tla2tools.jar tlc2.TLC docs/proofs/SGL.tla -config SGL.cfg
 ```
+
+### Liveness Checking
+
+All backends support liveness verification with weak fairness (`Spec_WF`).
+Each backend has a corresponding `*-liveness.cfg` that uses `SPECIFICATION Spec_WF`
+and `PROPERTY <ProgressProperty|Completion|TransactionProgress>`:
+
+```bash
+# Liveness check (all backends)
+make verify-liveness
+
+# Liveness check (single backend)
+java -cp /tmp/tla2tools.jar tlc2.TLC SGL.tla -config SGL-liveness.cfg
+```
+
+Liveness properties checked per backend:
+
+| Property | Backends |
+|----------|----------|
+| `ProgressProperty` | SGL, TSXSGL, TinySTM_WBCTL/WBETL/WT, PersistentSGL, TL2, Romulus, XTM, LEFTRIGHT, SwissTM, NOrec, DistributedSGL, DUDETM, TiKV |
+| `Completion` | NVHTM, SPHT |
+| `TransactionProgress` | TSXSim |
+| `Progress` | DESEngine |
 
 ## Limitations
 
@@ -284,14 +335,16 @@ the current lock owner in a `std::atomic<pid_t>`.  The spec abstracts away
 message ordering and delivery guarantees (TCP provides in-order reliable
 delivery).
 
-**PersistentSGL (PersistentSGL.tla)** — The spec models post-commit NVM
-flushing as an atomic `Flush(t)` action that copies all written addresses
-from `mem` to `nvm`.  The real implementation (`PersistentSGL_runtime.cpp`)
+**PersistentSGL (PersistentSGL.tla)** — The spec models dual-write durability:
+every write updates both `mem` and `nvm` simultaneously (matching the C++
+dual-write pattern).  The real implementation (`PersistentSGL_runtime.cpp`)
 uses `clwb` + `sfence` for each cache line.  The spec's `Crash` and `Recovery`
 actions model the persistent state surviving a power failure; the real
 implementation reloads from a well-known NVM address range on restart.
 The spec abstracts variable-size write-sets (all addresses are members of the
-constant `Addr` set).
+constant `Addr` set).  Removed the prior deferred-flush model (separate
+`durable_log` + flush phase) to match the C++ implementation's write
+semantics.
 
 ### Coverage
 

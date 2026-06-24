@@ -1,15 +1,14 @@
 ---------------------- MODULE PersistentSGL -----------------------
 (*
- * PersistentSGL — SGL with NVM Durability Barriers (PlusCal)
+ * PersistentSGL — SGL with NVM Dual-Write (PlusCal)
  *
- * Algorithm: Single global lock with durable commit.
- * After releasing the lock, the thread flushes written cache
- * lines to NVM (clwb + sfence).  On recovery, the durable
- * state is loaded from NVM.
+ * Algorithm: Single global lock with persistent dual-write.
+ * Every write updates both mem and nvm simultaneously (clwb + sfence
+ * per write).  On recovery, the durable state is loaded from nvm.
  *
  * Invariants:
  *   LockExclusion: At most one thread holds the lock.
- *   LockHolderActive: Lock holder is in active or flushing state.
+ *   LockHolderActive: Lock holder is in active state.
  *   RecoveryConsistency: After recovery, mem = nvm.
  *)
 
@@ -28,7 +27,6 @@ variables
     mem = [a \in Addr |-> 0],
     nvm = [a \in Addr |-> 0],
     state = [t \in Thread |-> "idle"],
-    durable_log = [t \in Thread |-> {}],
     version = 0,
     committed = [t \in Thread |-> 0],
     crashed = FALSE,
@@ -41,7 +39,6 @@ L_idle:
     if committed[self] < MaxCommits /\ ~crashed /\ lock = 0 then
         lock := self;
         state[self] := "active";
-        durable_log[self] := {};
         goto L_active;
     elsif committed[self] >= MaxCommits then
         goto L_done;
@@ -55,31 +52,19 @@ L_active:
             skip;
         end with;
         goto L_active;
-    or \* Write (buffer in durable log)
+    or \* Write (dual-write: mem + nvm simultaneously)
         with a \in Addr, v \in Data do
             mem[a] := v;
-            durable_log[self] := durable_log[self] \union {<<a, v>>};
+            nvm[a] := v;
         end with;
         goto L_active;
-    or \* Flush to NVM
-        nvm := [a \in Addr |->
-            IF \E <<a2, v2>> \in durable_log[self] : a2 = a
-            THEN
-                LET WrittenValues ==
-                    {entry[2] : entry \in {x \in durable_log[self] : x[1] = a}}
-                IN CHOOSE v \in WrittenValues : TRUE
-            ELSE nvm[a]];
-        goto L_complete;
+    or \* Commit (release lock)
+        lock := 0;
+        version := version + 1;
+        committed[self] := committed[self] + 1;
+        state[self] := "idle";
+        goto L_idle;
     end either;
-
-L_complete:
-    \* Release lock and commit
-    lock := 0;
-    version := version + 1;
-    committed[self] := committed[self] + 1;
-    durable_log[self] := {};
-    state[self] := "idle";
-    goto L_idle;
 
 L_done:
     skip;
@@ -94,12 +79,11 @@ L_sys:
         await ~crashed;
         crashed := TRUE;
         goto L_sys;
-    or \* Recover
+    or \* Recover (nvm is always consistent)
         await crashed /\ ~recovered;
         mem := nvm;
         lock := 0;
         state := [t \in Thread |-> "idle"];
-        durable_log := [t \in Thread |-> {}];
         recovered := TRUE;
         goto L_sys;
     end either;
@@ -107,12 +91,11 @@ L_sys:
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "e03b7ccd" /\ chksum(tla) = "dec22ba9")
-VARIABLES pc, lock, mem, nvm, state, durable_log, version, committed, crashed, 
-          recovered
+\* BEGIN TRANSLATION (chksum(pcal) = "a4102c63" /\ chksum(tla) = "07755a91")
+VARIABLES lock, mem, nvm, state, version, committed, crashed, recovered, pc
 
-vars == << pc, lock, mem, nvm, state, durable_log, version, committed, 
-           crashed, recovered >>
+vars == << lock, mem, nvm, state, version, committed, crashed, recovered, pc
+        >>
 
 ProcSet == (Thread) \cup {0}
 
@@ -121,7 +104,6 @@ Init == (* Global variables *)
         /\ mem = [a \in Addr |-> 0]
         /\ nvm = [a \in Addr |-> 0]
         /\ state = [t \in Thread |-> "idle"]
-        /\ durable_log = [t \in Thread |-> {}]
         /\ version = 0
         /\ committed = [t \in Thread |-> 0]
         /\ crashed = FALSE
@@ -133,12 +115,11 @@ L_idle(self) == /\ pc[self] = "L_idle"
                 /\ IF committed[self] < MaxCommits /\ ~crashed /\ lock = 0
                       THEN /\ lock' = self
                            /\ state' = [state EXCEPT ![self] = "active"]
-                           /\ durable_log' = [durable_log EXCEPT ![self] = {}]
                            /\ pc' = [pc EXCEPT ![self] = "L_active"]
                       ELSE /\ IF committed[self] >= MaxCommits
                                  THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
                                  ELSE /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                           /\ UNCHANGED << lock, state, durable_log >>
+                           /\ UNCHANGED << lock, state >>
                 /\ UNCHANGED << mem, nvm, version, committed, crashed, 
                                 recovered >>
 
@@ -146,53 +127,38 @@ L_active(self) == /\ pc[self] = "L_active"
                   /\ \/ /\ \E a \in Addr:
                              TRUE
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<mem, nvm, durable_log>>
+                        /\ UNCHANGED <<lock, mem, nvm, state, version, committed>>
                      \/ /\ \E a \in Addr:
                              \E v \in Data:
                                /\ mem' = [mem EXCEPT ![a] = v]
-                               /\ durable_log' = [durable_log EXCEPT ![self] = durable_log[self] \union {<<a, v>>}]
+                               /\ nvm' = [nvm EXCEPT ![a] = v]
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ nvm' = nvm
-                     \/ /\ nvm' =    [a \in Addr |->
-                                  IF \E <<a2, v2>> \in durable_log[self] : a2 = a
-                                  THEN
-                                      LET WrittenValues ==
-                                          {entry[2] : entry \in {x \in durable_log[self] : x[1] = a}}
-                                      IN CHOOSE v \in WrittenValues : TRUE
-                                  ELSE nvm[a]]
-                        /\ pc' = [pc EXCEPT ![self] = "L_complete"]
-                        /\ UNCHANGED <<mem, durable_log>>
-                  /\ UNCHANGED << lock, state, version, committed, crashed, 
-                                  recovered >>
-
-L_complete(self) == /\ pc[self] = "L_complete"
-                    /\ lock' = 0
-                    /\ version' = version + 1
-                    /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
-                    /\ durable_log' = [durable_log EXCEPT ![self] = {}]
-                    /\ state' = [state EXCEPT ![self] = "idle"]
-                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                    /\ UNCHANGED << mem, nvm, crashed, recovered >>
+                        /\ UNCHANGED <<lock, state, version, committed>>
+                     \/ /\ lock' = 0
+                        /\ version' = version + 1
+                        /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
+                        /\ state' = [state EXCEPT ![self] = "idle"]
+                        /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                        /\ UNCHANGED <<mem, nvm>>
+                  /\ UNCHANGED << crashed, recovered >>
 
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << lock, mem, nvm, state, durable_log, version, 
-                                committed, crashed, recovered >>
+                /\ UNCHANGED << lock, mem, nvm, state, version, committed, 
+                                crashed, recovered >>
 
-ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_complete(self)
-                       \/ L_done(self)
+ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_done(self)
 
 L_sys == /\ pc[0] = "L_sys"
          /\ \/ /\ ~crashed
                /\ crashed' = TRUE
                /\ pc' = [pc EXCEPT ![0] = "L_sys"]
-               /\ UNCHANGED <<lock, mem, state, durable_log, recovered>>
+               /\ UNCHANGED <<lock, mem, state, recovered>>
             \/ /\ crashed /\ ~recovered
                /\ mem' = nvm
                /\ lock' = 0
                /\ state' = [t \in Thread |-> "idle"]
-               /\ durable_log' = [t \in Thread |-> {}]
                /\ recovered' = TRUE
                /\ pc' = [pc EXCEPT ![0] = "L_sys"]
                /\ UNCHANGED crashed
@@ -230,21 +196,19 @@ LockExclusion ==
     \A t1, t2 \in Thread :
         (lock = t1 /\ lock = t2) => t1 = t2
 
-(*── I2: Lock holder is in active or flushing state ────────────────*)
+(*── I2: Lock holder is in active state ────────────────────────────*)
 LockHolderActive ==
     \A t \in Thread :
-        lock = t => state[t] \in {"active", "flushing"}
+        lock = t => state[t] = "active"
 
 (*── I3: After crash and recovery, mem = nvm ──────────────────────*)
 RecoveryConsistency ==
     recovered = TRUE => mem = nvm
 
-(*── I4: All durable writes in nvm are a superset of committed writes ─*)
-NVMContainsCommitted ==
+(*── I4: NVM always equals mem for committed writes (dual-write) ──*)
+NVMAgreesWithMem ==
     \A a \in Addr :
-        \/ nvm[a] = mem[a]
-        \/ \E t \in Thread :
-            \E <<a2, v>> \in durable_log[t] : a2 = a /\ nvm[a] = v
+        mem[a] = nvm[a]
 
 (*====================================================================*)
 (* Fairness and Liveness                                              *)
@@ -258,6 +222,6 @@ Spec_SF == Spec /\ \A self \in Thread : SF_vars(ThreadProc(self))
 
 (* Liveness: every active thread eventually becomes idle *)
 ProgressProperty ==
-    \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_begin", "L_done"})
+    \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_done", "Done"})
 
 =======================================================================

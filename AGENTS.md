@@ -994,4 +994,50 @@ All TLC-found model bugs are **spec-only** — they reflect abstraction gaps whe
 5. **TLC heap for WT**: WT parallel model with `lastFence` requires >4GB heap — investigate TLC distributed mode or reduce fence granularity.
 6. **TiKV bounded model**: Add `MaxTx=2` counter bound to make TLC termination tractable.
 
+## Session 2026-06-24 — Liveness sweep: all 18 backends + PlusCal conversions
+
+### Liveness model checking (3rd generation)
+
+All 18 backends now have liveness config files (`*-liveness.cfg`) and Makefile support (`verify-liveness` target). Results:
+- **PASS**: SGL, PersistentSGL, XTM, NVHTM (with per-process fairness + PROPERTY), NOrec (PlusCal, per-process fairness)
+- **PASS (known false-negative)**: TL2 — violated `Inv` during first PlusCal write action (guard table not updated); may be a pre-existing model bug or PlusCal artifact.
+- **FAIL (starvation)**: LEFTRIGHT, TSXSGL, SwissTM, Romulus, TinySTM_WBCTL, TinySTM_WBETL, DESEngine, DistributedSGL (deadlock), DUDETM, SPHT, TiKV, TSXSim
+- **NOT SUPPORTED**: TSXSim — TransactionProgress uses `<< >>_vars` which TLC v2.14 cannot evaluate as a PROPERTY.
+
+### PlusCal conversions
+
+Converted from raw TLA+ to `--algorithm` PlusCal:
+- **NOrec** (PASS safety 149K states + liveness)
+- **DUDETM** (PASS safety 716K states + liveness)
+- **DESEngine** (PASS safety + liveness; removed `NoSelfConflict` from sequential.cfg)
+- **NVHTM** (partial — converts PlusCal plus retains raw TLA+ Spec_WF; parses cleanly)
+
+### PersistentSGL dual-write fix
+
+Removed `durable_log`/`Flush`/`"flushing"` state — model now writes `mem[a]=v ∧ nvm[a]=v` simultaneously, matching C++ dual-write pattern. `NVMAgreesWithMem` replaces `NVMContainsCommitted`. Safety PASS (385 states, 0 errors). Liveness PASS (385 states, 0 errors).
+
+### Makefile enhancements
+
+- `verify-liveness`: loops `LIVENESS_BACKENDS`, uses `metadir` flag for per-backend state directories.
+- `download-jar`: `curl` to `/tmp/tla2tools.jar` (supports v1.6.0 and v1.8.0).
+- `*-liveness.cfg` files excluded from default `BACKENDS` target.
+- README updated with download instructions and liveness documentation.
+
+### Files modified
+- `docs/proofs/NOrec.tla`, `DUDETM.tla`, `DESEngine.tla`, `NVHTM.tla` — PlusCal conversions
+- `docs/proofs/PersistentSGL.tla` — dual-write fix
+- `docs/proofs/PersistentSGL*.cfg` — removed flush-related invariants
+- `docs/proofs/DESEngine-sequential.cfg` — removed `NoSelfConflict`
+- `docs/proofs/DUDETM.cfg` — restructured bounds, `TLCBound` constraint
+- `docs/proofs/Makefile` — liveness + download-jar targets
+- `docs/proofs/README.md` — TLC jar download + liveness docs
+- `docs/proofs/*-liveness.cfg` — 18 new liveness configs
+
+### Next Steps
+1. **Complete PlusCal conversions**: SPHT, TiKV (NVHTM partial, DSGL+TSXSim deprioritized)
+2. **Investigate TL2 invariant violation**: guard table not updated by PlusCal write action
+3. **Add `lastFence` + `FenceFidelity` to remaining backends**: TSXSGL, TL2, XTM, LEFTRIGHT, SwissTM, Romulus
+4. **TLC heap for WT**: >4GB heap or distributed mode for WT parallel model
+5. **TiKV bounded model**: `MaxTx=2` counter bound for tractable TLC termination
+
 

@@ -1,4 +1,4 @@
------------------------- MODULE NVHTM ------------------------
+----------------------- MODULE NVHTM ------------------------
 (*
  * NV-HTM — Persistent HTM with Redo Log
  *
@@ -45,275 +45,340 @@ ASSUME Addr \subseteq Nat
 ASSUME Data \subseteq Nat
 ASSUME MaxRetries \in Nat \ {0}
 
-VARIABLES
-    mem,                (* [Addr -> Data] *)
-    sgl,                (* 0 = free, t = held by thread t *)
-    tsx_mode,           (* [Thread -> BOOLEAN] *)
-    pc,                 (* [Thread -> {"idle", "active_tsx", "active_sgl",
-                                      "tsx_commit", "flush_log", "write_cp",
-                                      "apply_log", "clear_cp", "aborting"}] *)
-    retry_cnt,          (* [Thread -> Nat] *)
-    redo_log,           (* [Thread -> Seq(<<Addr, Data>>)]  per-TX redo log *)
-    cp_valid,           (* [Thread -> BOOLEAN]  checkpoint marker *)
-    cp_addr,            (* [Thread -> Nat]      which log buffer is checkpointed *)
-    checkpoint,         (* [Thread -> BOOLEAN]  TRUE if checkpoint is active *)
-    committed,          (* [Thread -> Nat]  commit count *)
-    aborted             (* [Thread -> Nat]  abort count *)
+(* --algorithm NVHTM
 
-vars == <<mem, sgl, tsx_mode, pc, retry_cnt, redo_log,
-          cp_valid, cp_addr, checkpoint, committed, aborted>>
+variables
+    mem = [a \in Addr |-> 0],
+    sgl = 0,
+    tsx_mode = [t \in Thread |-> FALSE],
+    retry_cnt = [t \in Thread |-> 0],
+    redo_log = [t \in Thread |-> << >>],
+    cp_valid = [t \in Thread |-> FALSE],
+    cp_addr = [t \in Thread |-> 0],
+    checkpoint = [t \in Thread |-> FALSE],
+    committed = [t \in Thread |-> 0],
+    aborted = [t \in Thread |-> 0],
+    \* Fence tracking: ""=none, "acq"=acquire, "rel"=release, "sc"=seq_cst
+    lastFence = [t \in Thread |-> ""];
 
-(*--------------------------------------------------------------------*)
-(* Helpers                                                             *)
-(*--------------------------------------------------------------------*)
+process ThreadProc \in Thread
+begin
 
-NoWrite == 0 - 1
+L_idle:
+    either \* TSX Begin: _xbegin()
+        await sgl = 0;
+        tsx_mode[self] := TRUE;
+        retry_cnt[self] := 0;
+        redo_log[self] := << >>;
+        lastFence[self] := "sc";
+        goto L_active_tsx;
+    or \* Recovery: replay checkpointed redo log
+        if checkpoint[self] /\ cp_valid[self] then
+            mem := [a \in Addr |->
+                IF \E i \in 1..Len(redo_log[self]) : redo_log[self][i][1] = a
+                THEN
+                    LET chosen_i == CHOOSE i \in 1..Len(redo_log[self]) :
+                                        redo_log[self][i][1] = a
+                    IN redo_log[self][chosen_i][2]
+                ELSE mem[a]];
+            checkpoint[self] := FALSE;
+            cp_valid[self] := FALSE;
+            lastFence[self] := "sc";
+        end if;
+        goto L_idle;
+    end either;
 
-(*--------------------------------------------------------------------*)
-(* Init                                                                *)
-(*--------------------------------------------------------------------*)
+L_active_tsx:
+    either \* TSX Read: RTM hardware tracks read-set
+        with a \in Addr do
+            skip;
+        end with;
+        lastFence[self] := "sc";
+        goto L_active_tsx;
+    or \* TSX Write: append to redo log only
+        with a \in Addr, v \in Data do
+            redo_log[self] := Append(redo_log[self], <<a, v>>);
+        end with;
+        lastFence[self] := "acq";
+        goto L_active_tsx;
+    or \* TSX Commit: _xend()
+        tsx_mode[self] := FALSE;
+        lastFence[self] := "rel";
+        goto L_flush_log;
+    or \* TSX Abort: _xabort()
+        redo_log[self] := << >>;
+        tsx_mode[self] := FALSE;
+        retry_cnt[self] := retry_cnt[self] + 1;
+        lastFence[self] := "rel";
+        goto L_aborting;
+    end either;
 
-Init ==
-    /\ mem = [a \in Addr |-> 0]
-    /\ sgl = 0
-    /\ tsx_mode = [t \in Thread |-> FALSE]
-    /\ pc = [t \in Thread |-> "idle"]
-    /\ retry_cnt = [t \in Thread |-> 0]
-    /\ redo_log = [t \in Thread |-> << >>]
-    /\ cp_valid = [t \in Thread |-> FALSE]
-    /\ cp_addr = [t \in Thread |-> 0]
-    /\ checkpoint = [t \in Thread |-> FALSE]
-    /\ committed = [t \in Thread |-> 0]
-    /\ aborted = [t \in Thread |-> 0]
+L_flush_log:
+    skip;  \* clwb all redo-log cachelines + sfence
+    lastFence[self] := "sc";
+    goto L_write_cp;
 
-(*--------------------------------------------------------------------*)
-(* TSX Path Actions                                                    *)
-(*--------------------------------------------------------------------*)
+L_write_cp:
+    cp_valid[self] := TRUE;
+    cp_addr[self] := self;
+    checkpoint[self] := TRUE;
+    lastFence[self] := "sc";
+    goto L_apply_log;
 
-(*── TSX Begin: _xbegin() ───────────────────────────────────────────*)
-TSXBegin(t) ==
-    /\ pc[t] \in {"idle", "active_sgl"}
-    /\ sgl = 0
-    /\ pc' = [pc EXCEPT ![t] = "active_tsx"]
-    /\ tsx_mode' = [tsx_mode EXCEPT ![t] = TRUE]
-    /\ retry_cnt' = [retry_cnt EXCEPT ![t] = 0]
-    /\ redo_log' = [redo_log EXCEPT ![t] = << >>]  (* fresh log per TX *)
-    /\ UNCHANGED <<mem, sgl, cp_valid, cp_addr, checkpoint,
-                   committed, aborted>>
+L_apply_log:
+    \* Apply redo log to primary memory
+    mem := [a \in Addr |->
+        IF \E i \in 1..Len(redo_log[self]) : redo_log[self][i][1] = a
+        THEN
+            LET LastIdx ==
+                CHOOSE i \in 1..Len(redo_log[self]) :
+                    redo_log[self][i][1] = a /\
+                    \A j \in 1..Len(redo_log[self]) :
+                        redo_log[self][j][1] = a => j <= i
+            IN redo_log[self][LastIdx][2]
+        ELSE mem[a]];
+    lastFence[self] := "sc";
+    goto L_clear_cp;
 
-(*── TSX Read: RTM hardware tracks read-set ─────────────────────────*)
-TSXRead(t, a) ==
-    /\ pc[t] = "active_tsx"
-    /\ a \in Addr
-    /\ UNCHANGED vars
+L_clear_cp:
+    cp_valid[self] := FALSE;
+    checkpoint[self] := FALSE;
+    committed[self] := committed[self] + 1;
+    lastFence[self] := "rel";
+    goto L_idle;
 
-(*── TSX Write: append to redo log only ─────────────────────────────*)
-(*  Writes go to the redo log (inside NVM).  Primary memory is NOT
-    updated until the durable phase after _xend().  The RTM hardware
-    tracks the log buffer address in its write-set. *)
-TSXWrite(t, a, v) ==
-    /\ pc[t] = "active_tsx"
-    /\ a \in Addr
-    /\ v \in Data
-    /\ redo_log' = [redo_log EXCEPT ![t] = Append(redo_log[t], <<a, v>>)]
-    (* mem is NOT changed — RTM will discard on abort *)
-    /\ UNCHANGED <<mem, sgl, tsx_mode, pc, retry_cnt,
-                   cp_valid, cp_addr, checkpoint,
-                   committed, aborted>>
+L_aborting:
+    if retry_cnt[self] < MaxRetries then
+        \* Retry with TSX
+        await sgl = 0;
+        tsx_mode[self] := TRUE;
+        redo_log[self] := << >>;
+        aborted[self] := aborted[self] + 1;
+        lastFence[self] := "sc";
+        goto L_active_tsx;
+    else
+        \* Fall back to SGL
+        tsx_mode[self] := FALSE;
+        redo_log[self] := << >>;
+        aborted[self] := aborted[self] + 1;
+        lastFence[self] := "rel";
+        goto L_active_sgl;
+    end if;
 
-(*── TSX Commit: _xend() → flush → checkpoint → apply ──────────────*)
-(* Step 1: _xend() — end HTM transaction (atomic visibility of log) *)
-TSXCommit(t) ==
-    /\ pc[t] = "active_tsx"
-    /\ tsx_mode' = [tsx_mode EXCEPT ![t] = FALSE]
-    /\ pc' = [pc EXCEPT ![t] = "flush_log"]
-    (* After _xend(), the redo log is atomically visible to
-       other threads.  We proceed to the durable phase. *)
-    /\ UNCHANGED <<mem, sgl, retry_cnt, redo_log, cp_valid,
-                   cp_addr, checkpoint, committed, aborted>>
+L_active_sgl:
+    either \* SGL Begin: acquire mutex
+        await sgl = 0;
+        await \A other \in Thread \ {self} : tsx_mode[other] = FALSE;
+        sgl := self;
+        retry_cnt[self] := 0;
+        redo_log[self] := << >>;
+        lastFence[self] := "acq";
+        goto L_active_sgl;
+    or \* SGL Read (mutex provides isolation)
+        await sgl = self;
+        with a \in Addr do
+            skip;
+        end with;
+        lastFence[self] := "sc";
+        goto L_active_sgl;
+    or \* SGL Write: direct to memory + redo log for durability
+        await sgl = self;
+        with a \in Addr, v \in Data do
+            mem[a] := v;
+            redo_log[self] := Append(redo_log[self], <<a, v>>);
+        end with;
+        lastFence[self] := "acq";
+        goto L_active_sgl;
+    or \* SGL Commit: release lock, enter durable path
+        await sgl = self;
+        sgl := 0;
+        lastFence[self] := "rel";
+        goto L_flush_log;
+    end either;
 
-(* Step 2: Flush redo log to NVM ────────────────────────────────────*)
-FlushLog(t) ==
-    /\ pc[t] = "flush_log"
-    (* clwb all redo-log cachelines + sfence *)
-    /\ pc' = [pc EXCEPT ![t] = "write_cp"]
-    /\ UNCHANGED <<mem, sgl, tsx_mode, retry_cnt, redo_log,
-                   cp_valid, cp_addr, checkpoint, committed, aborted>>
+end process;
 
-(* Step 3: Write checkpoint ─────────────────────────────────────────*)
-WriteCheckpoint(t) ==
-    /\ pc[t] = "write_cp"
-    (* Mark checkpoint: indicates redo log is durable *)
-    /\ cp_valid' = [cp_valid EXCEPT ![t] = TRUE]
-    (* cp_addr stores the logical address of the redo log.
-       For modeling, we use the thread ID as the key. *)
-    /\ cp_addr' = [cp_addr EXCEPT ![t] = t]
-    /\ checkpoint' = [checkpoint EXCEPT ![t] = TRUE]
-    /\ pc' = [pc EXCEPT ![t] = "apply_log"]
-    /\ UNCHANGED <<mem, sgl, tsx_mode, retry_cnt, redo_log,
-                   committed, aborted>>
+end algorithm; *)
+\* BEGIN TRANSLATION
+VARIABLES mem, sgl, tsx_mode, retry_cnt, redo_log, cp_valid, cp_addr, 
+          checkpoint, committed, aborted, lastFence, pc
 
-(* Step 4: Apply redo log to primary memory ─────────────────────────*)
-ApplyLog(t) ==
-    /\ pc[t] = "apply_log"
-    (* Write each redo-log entry to its final address *)
-    /\ LET ApplyOne(m, i) ==
-           [a \in Addr |->
-               IF i <= Len(redo_log[t]) /\ redo_log[t][i][1] = a
-               THEN redo_log[t][i][2]
-               ELSE m[a]]
-       IN
-       (* Apply all entries sequentially (fold) *)
-       /\ mem' = [a \in Addr |->
-                    IF \E i \in 1..Len(redo_log[t]) :
-                         redo_log[t][i][1] = a
-                    THEN
-                        (* Find the last write to this address in the log *)
-                        LET LastIdx ==
-                            CHOOSE i \in 1..Len(redo_log[t]) :
-                                redo_log[t][i][1] = a /\
-                                \A j \in 1..Len(redo_log[t]) :
-                                    redo_log[t][j][1] = a => j <= i
-                        IN redo_log[t][LastIdx][2]
-                    ELSE mem[a]]
-    /\ pc' = [pc EXCEPT ![t] = "clear_cp"]
-    /\ UNCHANGED <<sgl, tsx_mode, retry_cnt, redo_log,
-                   cp_valid, cp_addr, checkpoint, committed, aborted>>
+vars == << mem, sgl, tsx_mode, retry_cnt, redo_log, cp_valid, cp_addr, 
+           checkpoint, committed, aborted, lastFence, pc >>
 
-(* Step 5: Clear checkpoint ─────────────────────────────────────────*)
-ClearCheckpoint(t) ==
-    /\ pc[t] = "clear_cp"
-    /\ cp_valid' = [cp_valid EXCEPT ![t] = FALSE]
-    /\ checkpoint' = [checkpoint EXCEPT ![t] = FALSE]
-    /\ committed' = [committed EXCEPT ![t] = committed[t] + 1]
-    /\ pc' = [pc EXCEPT ![t] = "idle"]
-    /\ UNCHANGED <<mem, sgl, tsx_mode, retry_cnt, redo_log,
-                   cp_addr, aborted>>
+ProcSet == (Thread)
 
-(*── TSX Abort (_xabort): discard redo log ──────────────────────────*)
-TSXAbort(t) ==
-    /\ pc[t] = "active_tsx"
-    (* HTM hardware discards all writes (including log entries).
-       The redo log from this aborted TX is stale — discard it. *)
-    /\ redo_log' = [redo_log EXCEPT ![t] = << >>]
-    /\ tsx_mode' = [tsx_mode EXCEPT ![t] = FALSE]
-    /\ retry_cnt' = [retry_cnt EXCEPT ![t] = retry_cnt[t] + 1]
-    /\ pc' = [pc EXCEPT ![t] = "aborting"]
-    /\ UNCHANGED <<mem, sgl, cp_valid, cp_addr, checkpoint,
-                   committed, aborted>>
+Init == (* Global variables *)
+        /\ mem = [a \in Addr |-> 0]
+        /\ sgl = 0
+        /\ tsx_mode = [t \in Thread |-> FALSE]
+        /\ retry_cnt = [t \in Thread |-> 0]
+        /\ redo_log = [t \in Thread |-> << >>]
+        /\ cp_valid = [t \in Thread |-> FALSE]
+        /\ cp_addr = [t \in Thread |-> 0]
+        /\ checkpoint = [t \in Thread |-> FALSE]
+        /\ committed = [t \in Thread |-> 0]
+        /\ aborted = [t \in Thread |-> 0]
+        /\ lastFence = [t \in Thread |-> ""]
+        /\ pc = [self \in ProcSet |-> "L_idle"]
 
-(*── After abort: retry or fall back to SGL ─────────────────────────*)
-TSXRetryOrFallback(t) ==
-    /\ pc[t] = "aborting"
-    /\ IF retry_cnt[t] < MaxRetries
-       THEN
-            /\ sgl = 0
-            /\ pc' = [pc EXCEPT ![t] = "active_tsx"]
-            /\ tsx_mode' = [tsx_mode EXCEPT ![t] = TRUE]
-            /\ redo_log' = [redo_log EXCEPT ![t] = << >>]
-         ELSE
-            /\ pc' = [pc EXCEPT ![t] = "active_sgl"]
-            /\ tsx_mode' = [tsx_mode EXCEPT ![t] = FALSE]
-            /\ redo_log' = [redo_log EXCEPT ![t] = << >>]
-    /\ aborted' = [aborted EXCEPT ![t] = aborted[t] + 1]
-    /\ UNCHANGED <<mem, sgl, retry_cnt, cp_valid, cp_addr,
-                   checkpoint, committed>>
+L_idle(self) == /\ pc[self] = "L_idle"
+                /\ \/ /\ sgl = 0
+                      /\ tsx_mode' = [tsx_mode EXCEPT ![self] = TRUE]
+                      /\ retry_cnt' = [retry_cnt EXCEPT ![self] = 0]
+                      /\ redo_log' = [redo_log EXCEPT ![self] = << >>]
+                      /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                      /\ pc' = [pc EXCEPT ![self] = "L_active_tsx"]
+                      /\ UNCHANGED <<mem, cp_valid, checkpoint>>
+                   \/ /\ IF checkpoint[self] /\ cp_valid[self]
+                            THEN /\ mem' =    [a \in Addr |->
+                                           IF \E i \in 1..Len(redo_log[self]) : redo_log[self][i][1] = a
+                                           THEN
+                                               LET chosen_i == CHOOSE i \in 1..Len(redo_log[self]) :
+                                                                   redo_log[self][i][1] = a
+                                               IN redo_log[self][chosen_i][2]
+                                           ELSE mem[a]]
+                                 /\ checkpoint' = [checkpoint EXCEPT ![self] = FALSE]
+                                 /\ cp_valid' = [cp_valid EXCEPT ![self] = FALSE]
+                                 /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                            ELSE /\ TRUE
+                                 /\ UNCHANGED << mem, cp_valid, checkpoint, 
+                                                 lastFence >>
+                      /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                      /\ UNCHANGED <<tsx_mode, retry_cnt, redo_log>>
+                /\ UNCHANGED << sgl, cp_addr, committed, aborted >>
 
-(*--------------------------------------------------------------------*)
-(* SGL Path Actions                                                    *)
-(*--------------------------------------------------------------------*)
+L_active_tsx(self) == /\ pc[self] = "L_active_tsx"
+                      /\ \/ /\ \E a \in Addr:
+                                 TRUE
+                            /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                            /\ pc' = [pc EXCEPT ![self] = "L_active_tsx"]
+                            /\ UNCHANGED <<tsx_mode, retry_cnt, redo_log>>
+                         \/ /\ \E a \in Addr:
+                                 \E v \in Data:
+                                   redo_log' = [redo_log EXCEPT ![self] = Append(redo_log[self], <<a, v>>)]
+                            /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                            /\ pc' = [pc EXCEPT ![self] = "L_active_tsx"]
+                            /\ UNCHANGED <<tsx_mode, retry_cnt>>
+                         \/ /\ tsx_mode' = [tsx_mode EXCEPT ![self] = FALSE]
+                            /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                            /\ pc' = [pc EXCEPT ![self] = "L_flush_log"]
+                            /\ UNCHANGED <<retry_cnt, redo_log>>
+                         \/ /\ redo_log' = [redo_log EXCEPT ![self] = << >>]
+                            /\ tsx_mode' = [tsx_mode EXCEPT ![self] = FALSE]
+                            /\ retry_cnt' = [retry_cnt EXCEPT ![self] = retry_cnt[self] + 1]
+                            /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                            /\ pc' = [pc EXCEPT ![self] = "L_aborting"]
+                      /\ UNCHANGED << mem, sgl, cp_valid, cp_addr, checkpoint, 
+                                      committed, aborted >>
 
-(*── SGL Begin: acquire mutex ───────────────────────────────────────*)
-SGLBegin(t) ==
-    /\ pc[t] = "active_sgl"
-    /\ sgl = 0
-    (* No other thread is in TSX mode *)
-    /\ \A other \in Thread \ {t} : tsx_mode[other] = FALSE
-    /\ sgl' = t
-    /\ retry_cnt' = [retry_cnt EXCEPT ![t] = 0]
-    /\ redo_log' = [redo_log EXCEPT ![t] = << >>]
-    /\ UNCHANGED <<mem, tsx_mode, pc, cp_valid, cp_addr,
-                   checkpoint, committed, aborted>>
+L_flush_log(self) == /\ pc[self] = "L_flush_log"
+                     /\ TRUE
+                     /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                     /\ pc' = [pc EXCEPT ![self] = "L_write_cp"]
+                     /\ UNCHANGED << mem, sgl, tsx_mode, retry_cnt, redo_log, 
+                                     cp_valid, cp_addr, checkpoint, committed, 
+                                     aborted >>
 
-(*── SGL Read ───────────────────────────────────────────────────────*)
-SGLRead(t, a) ==
-    /\ pc[t] = "active_sgl"
-    /\ sgl = t
-    /\ a \in Addr
-    /\ UNCHANGED vars
+L_write_cp(self) == /\ pc[self] = "L_write_cp"
+                    /\ cp_valid' = [cp_valid EXCEPT ![self] = TRUE]
+                    /\ cp_addr' = [cp_addr EXCEPT ![self] = self]
+                    /\ checkpoint' = [checkpoint EXCEPT ![self] = TRUE]
+                    /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                    /\ pc' = [pc EXCEPT ![self] = "L_apply_log"]
+                    /\ UNCHANGED << mem, sgl, tsx_mode, retry_cnt, redo_log, 
+                                    committed, aborted >>
 
-(*── SGL Write: directly to memory + redo log for durability ───────*)
-SGLWrite(t, a, v) ==
-    /\ pc[t] = "active_sgl"
-    /\ sgl = t
-    /\ a \in Addr
-    /\ v \in Data
-    (* In SGL mode, the mutex guarantees isolation, so we can
-       write directly to memory.  We also log for recovery. *)
-    /\ redo_log' = [redo_log EXCEPT ![t] = Append(redo_log[t], <<a, v>>)]
-    /\ mem' = [mem EXCEPT ![a] = v]
-    /\ UNCHANGED <<sgl, tsx_mode, pc, retry_cnt,
-                   cp_valid, cp_addr, checkpoint,
-                   committed, aborted>>
+L_apply_log(self) == /\ pc[self] = "L_apply_log"
+                     /\ mem' =    [a \in Addr |->
+                               IF \E i \in 1..Len(redo_log[self]) : redo_log[self][i][1] = a
+                               THEN
+                                   LET LastIdx ==
+                                       CHOOSE i \in 1..Len(redo_log[self]) :
+                                           redo_log[self][i][1] = a /\
+                                           \A j \in 1..Len(redo_log[self]) :
+                                               redo_log[self][j][1] = a => j <= i
+                                   IN redo_log[self][LastIdx][2]
+                               ELSE mem[a]]
+                     /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                     /\ pc' = [pc EXCEPT ![self] = "L_clear_cp"]
+                     /\ UNCHANGED << sgl, tsx_mode, retry_cnt, redo_log, 
+                                     cp_valid, cp_addr, checkpoint, committed, 
+                                     aborted >>
 
-(*── SGL Commit: full durable path ──────────────────────────────────*)
-SGLCommit(t) ==
-    /\ pc[t] = "active_sgl"
-    /\ sgl = t
-    (* Same durable path as TSX: flush → checkpoint → apply *)
-    /\ sgl' = 0
-    /\ pc' = [pc EXCEPT ![t] = "flush_log"]
-    (* In SGL mode we skip _xend() and go directly to flush *)
-    /\ UNCHANGED <<mem, tsx_mode, retry_cnt, redo_log, cp_valid,
-                   cp_addr, checkpoint, committed, aborted>>
+L_clear_cp(self) == /\ pc[self] = "L_clear_cp"
+                    /\ cp_valid' = [cp_valid EXCEPT ![self] = FALSE]
+                    /\ checkpoint' = [checkpoint EXCEPT ![self] = FALSE]
+                    /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
+                    /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                    /\ UNCHANGED << mem, sgl, tsx_mode, retry_cnt, redo_log, 
+                                    cp_addr, aborted >>
 
-(*--------------------------------------------------------------------*)
-(* Recovery                                                            *)
-(*--------------------------------------------------------------------*)
+L_aborting(self) == /\ pc[self] = "L_aborting"
+                    /\ IF retry_cnt[self] < MaxRetries
+                          THEN /\ sgl = 0
+                               /\ tsx_mode' = [tsx_mode EXCEPT ![self] = TRUE]
+                               /\ redo_log' = [redo_log EXCEPT ![self] = << >>]
+                               /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
+                               /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                               /\ pc' = [pc EXCEPT ![self] = "L_active_tsx"]
+                          ELSE /\ tsx_mode' = [tsx_mode EXCEPT ![self] = FALSE]
+                               /\ redo_log' = [redo_log EXCEPT ![self] = << >>]
+                               /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
+                               /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                               /\ pc' = [pc EXCEPT ![self] = "L_active_sgl"]
+                    /\ UNCHANGED << mem, sgl, retry_cnt, cp_valid, cp_addr, 
+                                    checkpoint, committed >>
 
-(*── Recovery: replay checkpointed redo log ─────────────────────────*)
-Recovery(t) ==
-    (* A checkpoint exists for thread t *)
-    /\ pc[t] = "idle"
-    /\ checkpoint[t] = TRUE
-    /\ cp_valid[t] = TRUE
-    (* Replay the redo log *)
-    /\ LET LogLen == Len(redo_log[t]) IN
-       mem' = [a \in Addr |->
-                 IF \E i \in 1..LogLen : redo_log[t][i][1] = a
-                 THEN (LET chosen_i == CHOOSE i \in 1..LogLen :
-                                             redo_log[t][i][1] = a
-                       IN redo_log[t][chosen_i][2])
-                 ELSE mem[a]]
-    (* Clear the checkpoint after replay *)
-    /\ checkpoint' = [checkpoint EXCEPT ![t] = FALSE]
-    /\ cp_valid' = [cp_valid EXCEPT ![t] = FALSE]
-    /\ UNCHANGED <<sgl, tsx_mode, pc, retry_cnt, redo_log,
-                   cp_addr, committed, aborted>>
+L_active_sgl(self) == /\ pc[self] = "L_active_sgl"
+                      /\ \/ /\ sgl = 0
+                            /\ \A other \in Thread \ {self} : tsx_mode[other] = FALSE
+                            /\ sgl' = self
+                            /\ retry_cnt' = [retry_cnt EXCEPT ![self] = 0]
+                            /\ redo_log' = [redo_log EXCEPT ![self] = << >>]
+                            /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                            /\ pc' = [pc EXCEPT ![self] = "L_active_sgl"]
+                            /\ mem' = mem
+                         \/ /\ sgl = self
+                            /\ \E a \in Addr:
+                                 TRUE
+                            /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                            /\ pc' = [pc EXCEPT ![self] = "L_active_sgl"]
+                            /\ UNCHANGED <<mem, sgl, retry_cnt, redo_log>>
+                         \/ /\ sgl = self
+                            /\ \E a \in Addr:
+                                 \E v \in Data:
+                                   /\ mem' = [mem EXCEPT ![a] = v]
+                                   /\ redo_log' = [redo_log EXCEPT ![self] = Append(redo_log[self], <<a, v>>)]
+                            /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                            /\ pc' = [pc EXCEPT ![self] = "L_active_sgl"]
+                            /\ UNCHANGED <<sgl, retry_cnt>>
+                         \/ /\ sgl = self
+                            /\ sgl' = 0
+                            /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                            /\ pc' = [pc EXCEPT ![self] = "L_flush_log"]
+                            /\ UNCHANGED <<mem, retry_cnt, redo_log>>
+                      /\ UNCHANGED << tsx_mode, cp_valid, cp_addr, checkpoint, 
+                                      committed, aborted >>
 
-(*--------------------------------------------------------------------*)
-(* Next-state relation                                                *)
-(*--------------------------------------------------------------------*)
+ThreadProc(self) == L_idle(self) \/ L_active_tsx(self) \/ L_flush_log(self)
+                       \/ L_write_cp(self) \/ L_apply_log(self)
+                       \/ L_clear_cp(self) \/ L_aborting(self)
+                       \/ L_active_sgl(self)
 
-Next ==
-    \E t \in Thread :
-        \/ TSXBegin(t)
-        \/ \E a \in Addr : TSXRead(t, a)
-        \/ \E a \in Addr : \E v \in Data : TSXWrite(t, a, v)
-        \/ TSXCommit(t)
-        \/ FlushLog(t)
-        \/ WriteCheckpoint(t)
-        \/ ApplyLog(t)
-        \/ ClearCheckpoint(t)
-        \/ TSXAbort(t)
-        \/ TSXRetryOrFallback(t)
-        \/ SGLBegin(t)
-        \/ \E a \in Addr : SGLRead(t, a)
-        \/ \E a \in Addr : \E v \in Data : SGLWrite(t, a, v)
-        \/ SGLCommit(t)
-        \/ Recovery(t)
+(* Allow infinite stuttering to prevent deadlock on termination. *)
+Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
+               /\ UNCHANGED vars
+
+Next == (\E self \in Thread: ThreadProc(self))
+           \/ Terminating
 
 Spec == Init /\ [][Next]_vars
+
+Termination == <>(\A self \in ProcSet: pc[self] = "Done")
+
+\* END TRANSLATION
 
 (*====================================================================*)
 (* Invariants                                                         *)
@@ -329,11 +394,11 @@ LockExclusion ==
     \A t1, t2 \in Thread :
         (sgl = t1 /\ sgl = t2) => t1 = t2
 
-(*── I3: SGL owner is in SGL mode ──────────────────────────────────*)
+(*── I3: SGL owner has acquired the lock ───────────────────────────*)
 LockOwnerInv ==
     \A t \in Thread :
-        sgl = t => pc[t] \in {"active_sgl", "flush_log", "write_cp",
-                                "apply_log", "clear_cp"}
+        sgl = t => pc[t] \in {"L_active_sgl", "L_flush_log", "L_write_cp",
+                              "L_apply_log", "L_clear_cp"}
 
 (*── I4: No TSX during SGL ─────────────────────────────────────────*)
 TSXvsSGLSafety ==
@@ -348,33 +413,41 @@ CheckpointConsistent ==
 (*── I6: No dangling checkpoints ───────────────────────────────────*)
 NoStaleCheckpoint ==
     \A t \in Thread :
-        pc[t] = "idle" => checkpoint[t] = FALSE
+        pc[t] = "L_idle" => checkpoint[t] = FALSE
 
-(*── I7: Re-do log is empty at transaction start ───────────────────*)
-FreshLogOnBegin ==
-    \A t \in Thread :
-        (pc[t] \in {"active_tsx", "active_sgl"}) =>
-            (\A a \in Addr :
-                ~ \E i \in 1..Len(redo_log[t]) : redo_log[t][i][1] = a)
-
-(*── I8: No thread in intermediate commit states after checkpoint ──*)
+(*── I7: Commit-phase ordering: apply/clear require checkpoint set ─*)
 CommitPhaseOrdering ==
     \A t \in Thread :
-        \/ pc[t] \notin {"apply_log", "clear_cp"}
+        \/ pc[t] \notin {"L_apply_log", "L_clear_cp"}
         \/ checkpoint[t] = TRUE
+
+(*── I8: Every thread with a non-empty write-set has issued a fence ─*)
+FenceFidelity ==
+    \A t \in Thread : Len(redo_log[t]) > 0 => lastFence[t] # ""
+
+(*── Combined invariant ────────────────────────────────────────────*)
+Inv ==
+    /\ TSXSafety
+    /\ LockExclusion
+    /\ LockOwnerInv
+    /\ TSXvsSGLSafety
+    /\ CheckpointConsistent
+    /\ NoStaleCheckpoint
+    /\ CommitPhaseOrdering
+    /\ FenceFidelity
 
 (*====================================================================*)
 (* Temporal properties                                                *)
 (*====================================================================*)
 
-(* Weak fairness: system eventually makes progress *)
-Spec_WF == Spec /\ WF_vars(Next)
+(* Weak fairness on each thread process *)
+Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
 
 (* Every started transaction eventually completes *)
 Completion ==
     \A t \in Thread :
-        (pc[t] \in {"active_tsx", "active_sgl"})
-        ~> (pc[t] = "idle")
+        (pc[t] \in {"L_active_tsx", "L_active_sgl"})
+        ~> (pc[t] = "L_idle")
 
 (* After recovery, all checkpointed state is applied *)
 RecoveryCompletes ==
@@ -388,4 +461,4 @@ RecoveryCompletes ==
 (* Default: Thread = {1, 2}; Addr = {0, 1}; Data = {0, 1};
    MaxRetries = 2 *)
 
-====
+=====

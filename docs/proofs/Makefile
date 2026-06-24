@@ -1,12 +1,17 @@
 # TLA+ Proofs Makefile
 #
 # Targets:
-#   make check              — TLC on all backends
-#   make check-<BACKEND>    — TLC on a single backend (e.g., make check-TL2)
-#   make check-all          — TLC + coverage on all backends
-#   make tla                — run pcal.trans on all PlusCal sources
-#   make clean              — remove *.old, *TTrace*, *.bin, states/
-#   make proof-<BACKEND>    — TLAPS proof check (SGL only)
+#   make                    — TLC safety check on all backends
+#   make check-<BACKEND>   — TLC on a single backend (e.g., make check-TL2)
+#   make check-all         — TLC + coverage on all backends
+#   make verify-sequential — 11 PlusCal backends with Thread={1}
+#   make verify-large      — Addr={0,1} for small backends
+#   make verify            — verify-sequential + verify-large
+#   make verify-liveness   — Spec_WF + PROPERTY on all backends
+#   make tla               — run pcal.trans on all PlusCal sources
+#   make download-jar      — download tla2tools.jar to /tmp/
+#   make clean             — remove *.old, *TTrace*, *.bin, states/
+#   make proof-<BACKEND>   — TLAPS proof check (SGL only)
 #
 # Configuration:
 #   TLA2TOOLS_JAR — path to tla2tools.jar (default: /tmp/tla2tools.jar)
@@ -19,14 +24,16 @@ TLC_OPTS      ?=
 
 JAVA ?= java
 
-# All backends with .tla and .cfg files
-BACKENDS := $(patsubst %.cfg,%,$(wildcard *.cfg))
+# All backends with .tla and .cfg files (exclude liveness configs)
+ALL_CFGS := $(wildcard *.cfg)
+BACKENDS := $(patsubst %.cfg,%,$(filter-out %-liveness.cfg,$(ALL_CFGS)))
+LIVENESS_BACKENDS := $(patsubst %-liveness.cfg,%,$(filter %-liveness.cfg,$(ALL_CFGS)))
 # Backends that use PlusCal (have $${$}--algorithm comment)
 PLUSCAL_BACKENDS := $(shell grep -l '\-\-algorithm' *.tla 2>/dev/null | sed 's/\.tla//')
 
 .PHONY: check-all tla clean
 
-# Default: TLC on all backends
+# Default: TLC on all backends (safety only)
 check:
 	@for b in $(BACKENDS); do \
 	    echo "=== TLC: $$b ==="; \
@@ -47,6 +54,18 @@ check-one:
 proof-one:
 	@echo "=== TLAPS: $(BACKEND) ==="
 	$(TLAPM) $(BACKEND).tla 2>&1
+
+# Liveness check: Spec_WF + ProgressProperty on all backends
+verify-liveness:
+	@echo "============================================"; \
+	echo " Liveness check (Spec_WF + PROPERTY)"; \
+	echo "============================================"; \
+	echo; \
+	for b in $(LIVENESS_BACKENDS); do \
+	    echo "=== Liveness: $$b ==="; \
+	    $(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC $(TLC_OPTS) $$b.tla -config $$b-liveness.cfg 2>&1 | tail -30; \
+	    echo; \
+	done
 
 # Verify all 11 PlusCal backends with sequential model (Thread={1})
 verify-sequential:
@@ -84,6 +103,14 @@ tla:
 	    echo "=== pcal.trans: $$b ==="; \
 	    $(JAVA) -cp $(TLA2TOOLS_JAR) pcal.trans -nocfg $$b 2>&1; \
 	done
+
+# Download tla2tools.jar (Java 8 compatible v1.6.0)
+download-jar:
+	@echo "Downloading tla2tools.jar v1.6.0 (Java 8 compatible)..."
+	curl -sL -o /tmp/tla2tools.jar \
+	  https://github.com/tlaplus/tlaplus/releases/download/v1.6.0/tla2tools.jar && \
+	  echo "Downloaded to /tmp/tla2tools.jar" || \
+	  echo "Download failed"
 
 # Clean generated artifacts
 clean:
