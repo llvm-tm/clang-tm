@@ -84,7 +84,15 @@ benchmarks/profiling_data/calibration/
 # perf
 perf.data
 
+# TLA+ tools (never commit jars)
+*.jar
+
 # TLC-generated artifacts
 *.old
-*_TTrace_*
+*.bak
 *.bin
+*_TTrace_*
+
+# TLC state cache
+states/
+states.*

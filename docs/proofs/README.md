@@ -92,6 +92,61 @@ export TLA2TOOLS_JAR=/tmp/tla2tools.jar
 4. Create a new TLC model (Run → New Model), set the model-checking parameters
    (e.g., `Thread <- {1,2,3}`, `Addr <- {1,2}`), and run.
 
+### pcal.trans (PlusCal → TLA+ Compiler)
+
+`pcal.trans` is bundled in the same `tla2tools.jar`. It translates PlusCal
+algorithm source into raw TLA+ for model checking:
+
+```bash
+# Translate a single PlusCal spec
+java -cp /tmp/tla2tools.jar pcal.trans -nocfg TSXSim
+
+# pcal.trans rewrites the .tla file in-place, with a backup in .old
+```
+
+The source `.tla` file must contain a `(* --algorithm ... *)` block.
+The Makefile provides a batch target:
+
+```bash
+make tla   # runs pcal.trans on all PlusCal backends
+```
+
+**Note:** pcal.trans requires Java 11+. Use `tla2tools.jar` v1.8.0 or later
+(recommended) or v1.6.0 with Java 8 (which bundles an older pcal.trans).
+
+## Convenience Script
+
+The `tla.sh` script automates common TLA+ tasks.  It auto-detects backends,
+runs TLC/pcal.trans, and handles liveness configs:
+
+```bash
+# Safety check on all backends
+./tla.sh check-all
+
+# Safety check on a single backend
+./tla.sh check TL2
+
+# PlusCal → TLA+ translation
+./tla.sh tla TSXSim
+
+# Liveness check
+./tla.sh liveness SGL
+
+# Sequential model (Thread={1}) on all PlusCal backends
+./tla.sh sequential
+
+# Large model (Addr={0,1}) on a single backend
+./tla.sh large TinySTM_WBCTL
+
+# List available backends
+./tla.sh list
+
+# Download tla2tools.jar to /tmp/
+./tla.sh download-jar
+```
+
+Run `./tla.sh help` for full usage.
+
 ## Verifying the Proofs
 
 ### SGL.tla — TLAPS Mechanical Proof
