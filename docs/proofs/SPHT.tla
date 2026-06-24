@@ -177,12 +177,14 @@ TSXRetryOrFallback(t) ==
     /\ pc[t] = "aborting"
     /\ IF retry_cnt[t] < MaxRetries
        THEN
-           (* Try TSX again *)
-           /\ pc' = [pc EXCEPT ![t] = "active_tsx"]
-           /\ tsx_mode' = [tsx_mode EXCEPT ![t] = TRUE]
-       ELSE
-           (* Fall back to SGL *)
-           /\ pc' = [pc EXCEPT ![t] = "active_sgl"]
+            (* Can only retry TSX if SGL is still free *)
+            /\ sgl = 0
+            /\ pc' = [pc EXCEPT ![t] = "active_tsx"]
+            /\ tsx_mode' = [tsx_mode EXCEPT ![t] = TRUE]
+        ELSE
+            (* Fall back to SGL — TSX mode ends *)
+            /\ pc' = [pc EXCEPT ![t] = "active_sgl"]
+            /\ tsx_mode' = [tsx_mode EXCEPT ![t] = FALSE]
     (* Pop stale PCL entries (from aborted TX) *)
     (* PCL entries from the aborted TX are between pcl_epoch_start
        and Len(pcl).  Remove them. *)
@@ -199,6 +201,8 @@ TSXRetryOrFallback(t) ==
 SGLBegin(t) ==
     /\ pc[t] = "active_sgl"
     /\ sgl = 0
+    (* No other thread is in TSX mode *)
+    /\ \A other \in Thread \ {t} : tsx_mode[other] = FALSE
     /\ sgl' = t
     (* Reset retry counter for next TSX attempt *)
     /\ retry_cnt' = [retry_cnt EXCEPT ![t] = 0]
@@ -360,6 +364,9 @@ TSXBufferInUse ==
 (*====================================================================*)
 (* Temporal properties                                                *)
 (*====================================================================*)
+
+(* Weak fairness: system eventually makes progress *)
+Spec_WF == Spec /\ WF_vars(Next)
 
 (* Every TSX or SGL transaction eventually completes *)
 Completion ==

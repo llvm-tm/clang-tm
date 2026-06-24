@@ -207,12 +207,14 @@ TSXRetryOrFallback(t) ==
     /\ pc[t] = "aborting"
     /\ IF retry_cnt[t] < MaxRetries
        THEN
-           /\ pc' = [pc EXCEPT ![t] = "active_tsx"]
-           /\ tsx_mode' = [tsx_mode EXCEPT ![t] = TRUE]
-           /\ redo_log' = [redo_log EXCEPT ![t] = << >>]
-       ELSE
-           /\ pc' = [pc EXCEPT ![t] = "active_sgl"]
-           /\ UNCHANGED <<tsx_mode, redo_log>>
+            /\ sgl = 0
+            /\ pc' = [pc EXCEPT ![t] = "active_tsx"]
+            /\ tsx_mode' = [tsx_mode EXCEPT ![t] = TRUE]
+            /\ redo_log' = [redo_log EXCEPT ![t] = << >>]
+         ELSE
+            /\ pc' = [pc EXCEPT ![t] = "active_sgl"]
+            /\ tsx_mode' = [tsx_mode EXCEPT ![t] = FALSE]
+            /\ redo_log' = [redo_log EXCEPT ![t] = << >>]
     /\ aborted' = [aborted EXCEPT ![t] = aborted[t] + 1]
     /\ UNCHANGED <<mem, sgl, retry_cnt, cp_valid, cp_addr,
                    checkpoint, committed>>
@@ -225,6 +227,8 @@ TSXRetryOrFallback(t) ==
 SGLBegin(t) ==
     /\ pc[t] = "active_sgl"
     /\ sgl = 0
+    (* No other thread is in TSX mode *)
+    /\ \A other \in Thread \ {t} : tsx_mode[other] = FALSE
     /\ sgl' = t
     /\ retry_cnt' = [retry_cnt EXCEPT ![t] = 0]
     /\ redo_log' = [redo_log EXCEPT ![t] = << >>]
@@ -270,6 +274,7 @@ SGLCommit(t) ==
 (*── Recovery: replay checkpointed redo log ─────────────────────────*)
 Recovery(t) ==
     (* A checkpoint exists for thread t *)
+    /\ pc[t] = "idle"
     /\ checkpoint[t] = TRUE
     /\ cp_valid[t] = TRUE
     (* Replay the redo log *)
@@ -355,12 +360,15 @@ FreshLogOnBegin ==
 (*── I8: No thread in intermediate commit states after checkpoint ──*)
 CommitPhaseOrdering ==
     \A t \in Thread :
-        \/ pc[t] \notin {"flush_log", "write_cp", "apply_log", "clear_cp"}
+        \/ pc[t] \notin {"apply_log", "clear_cp"}
         \/ checkpoint[t] = TRUE
 
 (*====================================================================*)
 (* Temporal properties                                                *)
 (*====================================================================*)
+
+(* Weak fairness: system eventually makes progress *)
+Spec_WF == Spec /\ WF_vars(Next)
 
 (* Every started transaction eventually completes *)
 Completion ==

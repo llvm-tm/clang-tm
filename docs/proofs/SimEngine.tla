@@ -95,6 +95,8 @@ Init ==
 BeginTx(lp) ==
     /\ pc[lp] = "idle"
     /\ ~in_tx[lp]
+    (* Cannot start a new transaction while another LP is in SGL mode *)
+    /\ \A other \in LP : sgl_mode[other] = FALSE
     /\ in_tx' = [in_tx EXCEPT ![lp] = TRUE]
     /\ pc' = [pc EXCEPT ![lp] = "active"]
     /\ UNCHANGED <<in_flight_writes, in_flight_reads, sgl_mode,
@@ -120,7 +122,7 @@ ReadAddr(lp, a) ==
         ELSE
             (* No conflict: add to read-set *)
             /\ in_flight_reads' = in_flight_reads \cup {<<lp, a>>}
-            /\ UNCHANGED <<in_tx, abort_count, conflict_aborts>>
+            /\ UNCHANGED <<in_tx, abort_count, conflict_aborts, in_flight_writes>>
     /\ UNCHANGED <<pc, sgl_mode, tx_count>>
     (* Note: the \A w quantifier in the THEN branch non-deterministically
        chooses an ordering for aborting multiple conflicting writers.
@@ -129,26 +131,32 @@ ReadAddr(lp, a) ==
        same regardless of order. *)
 
 (*── Write address (inside transaction) ──────────────────────────────*)
-(*  Check RAW conflict: if another LP is reading the same address,
-    abort that older reader. *)
+(*  Check RAW: if another LP is reading the same address, abort reader.
+    Also check WAW: if another LP is already writing, abort that writer. *)
 WriteAddr(lp, a) ==
     /\ pc[lp] = "active"
     /\ in_tx[lp] = TRUE
     /\ a \in Addr
     /\ LET conflicting_readers == FindReader(lp, a) IN
-       IF conflicting_readers # {}
+       LET conflicting_writers == {w \in LP \ {lp} : IsWriting(w, a)} IN
+       IF conflicting_readers # {} \/ conflicting_writers # {}
         THEN
-            (* Abort the older reader(s) *)
             /\ \A r \in conflicting_readers :
                 in_tx' = [in_tx EXCEPT ![r] = FALSE]
                 /\ abort_count' = [abort_count EXCEPT ![r] = abort_count[r] + 1]
                 /\ in_flight_reads' = in_flight_reads \ {<<r, a2>> : a2 \in Addr}
                 /\ in_flight_writes' = in_flight_writes \ {<<r, a2>> : a2 \in Addr}
                 /\ conflict_aborts' = conflict_aborts + Cardinality(conflicting_readers)
+            /\ \A w \in conflicting_writers :
+                in_tx' = [in_tx EXCEPT ![w] = FALSE]
+                /\ abort_count' = [abort_count EXCEPT ![w] = abort_count[w] + 1]
+                /\ in_flight_writes' = in_flight_writes \ {<<w, a2>> : a2 \in Addr}
+                /\ in_flight_reads' = in_flight_reads \ {<<w, a2>> : a2 \in Addr}
+                /\ conflict_aborts' = conflict_aborts + Cardinality(conflicting_writers)
         ELSE
             (* No conflict: add to write-set *)
             /\ in_flight_writes' = in_flight_writes \cup {<<lp, a>>}
-            /\ UNCHANGED <<in_tx, abort_count, conflict_aborts>>
+            /\ UNCHANGED <<in_tx, abort_count, conflict_aborts, in_flight_reads>>
     /\ UNCHANGED <<pc, sgl_mode, tx_count>>
 
 (*── Commit transaction ─────────────────────────────────────────────*)
@@ -179,6 +187,8 @@ AbortTx(lp) ==
 EnterSGL(lp) ==
     (* Can only enter SGL when no other LP is in SGL mode *)
     /\ \A other \in LP : other = lp \/ sgl_mode[other] = FALSE
+    (* No other LP is in a transaction *)
+    /\ \A other \in LP \ {lp} : in_tx[other] = FALSE
     (* No other LP has conflicting in-flight writes/reads *)
     /\ \A other \in LP \ {lp} :
         /\ \A a \in Addr : ~IsWriting(other, a)
@@ -193,9 +203,11 @@ ExitSGL(lp) ==
     /\ pc[lp] = "sgl"
     /\ sgl_mode[lp] = TRUE
     /\ sgl_mode' = [sgl_mode EXCEPT ![lp] = FALSE]
+    /\ in_flight_writes' = in_flight_writes \ {<<lp, a>> : a \in Addr}
+    /\ in_flight_reads' = in_flight_reads \ {<<lp, a>> : a \in Addr}
+    /\ in_tx' = [in_tx EXCEPT ![lp] = FALSE]
     /\ pc' = [pc EXCEPT ![lp] = "idle"]
-    /\ UNCHANGED <<in_flight_writes, in_flight_reads, in_tx,
-                   tx_count, abort_count, conflict_aborts>>
+    /\ UNCHANGED <<tx_count, abort_count, conflict_aborts>>
 
 (*── Conflict abort (external: triggered by a different LP's action) ─*)
 (* This is a non-deterministic action modeling that any LP can be
@@ -283,6 +295,9 @@ NoSelfConflict ==
 (*====================================================================*)
 (* Temporal properties                                                *)
 (*====================================================================*)
+
+(* Weak fairness: system eventually makes progress *)
+Spec_WF == Spec /\ WF_vars(Next)
 
 (* Every started transaction eventually completes *)
 Progress ==

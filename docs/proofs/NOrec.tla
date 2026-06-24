@@ -326,5 +326,15 @@ THEOREM NOrecSerializability ==
 (*      - If T_i and T_j both write to the same address, the later      *)
 (*        committer's value persists.                                   *)
 (*====================================================================*)
+(* Fairness alternatives                                               *)
+(*====================================================================*)
+
+(* Weak fairness: system eventually makes progress *)
+Spec_WF == Spec /\ WF_vars(Next)
+
+(* Liveness: every transaction eventually commits or aborts *)
+ProgressProperty ==
+    \A t \in Thread :
+        (pc[t] \in {"active", "committing"}) ~> (pc[t] = "idle")
 
 ========================================================================

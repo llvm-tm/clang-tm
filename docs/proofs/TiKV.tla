@@ -342,4 +342,16 @@ NoDoubleCommit ==
         \A t \in Thread :
             ~(HasWritten(t, k) /\ committed[t] > 0 /\ kv_locks[k] = t)
 
+(*====================================================================*)
+(* Fairness alternatives                                               *)
+(*====================================================================*)
+
+(* Weak fairness: system eventually makes progress *)
+Spec_WF == Spec /\ WF_vars(Next)
+
+(* Liveness: every transaction eventually commits or aborts *)
+ProgressProperty ==
+    \A t \in Thread :
+        (pc[t] \in {"active", "prewriting", "committing"}) ~> (pc[t] = "idle")
+
 ====

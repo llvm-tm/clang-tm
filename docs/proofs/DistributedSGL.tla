@@ -176,4 +176,16 @@ AtMostOnePending ==
 ServerConsistency ==
     Cardinality({x \in msg_queue : x[2] = MSG_LOCK_GRANT}) <= 1
 
+(*====================================================================*)
+(* Fairness alternatives                                               *)
+(*====================================================================*)
+
+(* Weak fairness: system eventually makes progress *)
+Spec_WF == Spec /\ WF_vars(Next)
+
+(* Liveness: every request eventually gets a grant or release *)
+ProgressProperty ==
+    \A c \in Client :
+        (pc[c] = "request") ~> (pc[c] \in {"active", "waiting", "idle"})
+
 ====

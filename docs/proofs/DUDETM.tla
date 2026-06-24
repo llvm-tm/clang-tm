@@ -339,4 +339,16 @@ LogWriteMatch ==
                     persist_file[prev_idx][1] = OP_COMMIT_BEGIN /\
                     persist_file[prev_idx][2] = t
 
+(*====================================================================*)
+(* Fairness alternatives                                               *)
+(*====================================================================*)
+
+(* Weak fairness: system eventually makes progress *)
+Spec_WF == Spec /\ WF_vars(Next)
+
+(* Liveness: every transaction eventually commits or aborts *)
+ProgressProperty ==
+    \A t \in Thread :
+        (pc[t] = "active") ~> (pc[t] \in {"idle", "logging"})
+
 ====

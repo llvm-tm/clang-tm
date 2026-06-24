@@ -172,10 +172,13 @@ Commit(t) == /\ pc[t] = "L_active"
 (*====================================================================*)
 (* MutexInductive — Inductive invariant for mutual exclusion           *)
 (*====================================================================*)
+
+ActiveLabels == {"L_active"}
+
 MutexInductive ==
     /\ (lock = 0) \/ (lock \in Thread)
-    /\ \A t \in Thread : (lock = t) => (pc[t] = "active")
-    /\ \A t \in Thread : (pc[t] = "active") => (lock = t)
+    /\ \A t \in Thread : (lock = t) => (pc[t] \in ActiveLabels)
+    /\ \A t \in Thread : (pc[t] \in ActiveLabels) => (lock = t)
 
 (*====================================================================*)
 (* THEOREM:  Spec => []MutexInductive                                  *)
@@ -187,13 +190,12 @@ PROOF
   (* --- BASE CASE ------------------------------------------------- *)
   <1>1. Init => MutexInductive
     <2> SUFFICES ASSUME Init PROVE MutexInductive OBVIOUS
-    <2> USE DEF Init, MutexInductive
+    <2> USE DEF Init, MutexInductive, ActiveLabels
     <2>1. (lock = 0) \/ (lock \in Thread)              OBVIOUS
-    <2>2. \A t \in Thread : (lock = t) => (pc[t] = "active")
+    <2>2. \A t \in Thread : (lock = t) => (pc[t] \in ActiveLabels)
       PROOF OMITTED
-      (* Q1: from Init, pc[t] = "idle" for all t, so the
-              implication is vacuously true. *)
-    <2>3. \A t \in Thread : (pc[t] = "active") => (lock = t)
+      (* Q1: from Init, pc[t] = "L_idle" for all t, so antecedent false. *)
+    <2>3. \A t \in Thread : (pc[t] \in ActiveLabels) => (lock = t)
       PROOF OMITTED
       (* Q2: same reasoning as Q1. *)
     <2>4. QED BY <2>1, <2>2, <2>3
@@ -204,51 +206,38 @@ PROOF
                         [Next]_vars
                  PROVE  MutexInductive'
       OBVIOUS
-    <2>. USE DEF MutexInductive
+    <2> USE DEF MutexInductive, ActiveLabels
 
-    <2>1. ASSUME NEW t \in Thread, Begin(t) PROVE MutexInductive'
-      <3>1. USE DEF Begin, MutexInductive
+    <2>1. ASSUME NEW t \in Thread, L_idle(t) PROVE MutexInductive'
+      <3>1. USE DEF L_idle, MutexInductive, ActiveLabels
       <3>2. (lock' = 0) \/ (lock' \in Thread)
         PROOF OMITTED
-        (* lock' = t by Begin; t ∈ Thread by ASSUME; so lock' ∈ Thread. *)
-      <3>3. \A t1 \in Thread : (lock' = t1) => (pc'[t1] = "active")
+        (* lock' = t by L_idle; t ∈ Thread by ASSUME; so lock' ∈ Thread. *)
+      <3>3. \A t1 \in Thread : (lock' = t1) => (pc'[t1] \in ActiveLabels)
         PROOF OMITTED
-        (* Q3: lock' = t ∈ Thread. Need pc'[t] = "active",
-                which Begin provides.  For t1 ≠ t, lock' ≠ t1
-                because lock' = t, so antecedent false. *)
-      <3>4. \A t1 \in Thread : (pc'[t1] = "active") => (lock' = t1)
+        (* Q3: lock' = t. pc'[t] = "L_active" ∈ ActiveLabels.
+                For t1 ≠ t, lock' ≠ t1 because lock' = t, so antecedent false. *)
+      <3>4. \A t1 \in Thread : (pc'[t1] \in ActiveLabels) => (lock' = t1)
         PROOF OMITTED
-        (* Q4: Only pc'[t] = "active" (Begin).  lock' = t, so OK.
-                Any other t1 has pc'[t1]=pc[t1].  If pc[t1]="active"
-                then MutexInductive gives lock=t1.  But lock=0
-                (from Begin), so by ASSUME Thread\subseteq Nat\{0},
-                0 ≠ t1, contradiction. *)
+        (* Q4: Only pc'[t] = "L_active" (L_idle).  lock' = t, so OK.
+                Any other t1 has pc'[t1]=pc[t1].  If pc[t1] ∈ ActiveLabels
+                then MutexInductive gives lock=t1.  But lock=0 (from L_idle),
+                so by ASSUME Thread\subseteq Nat\{0}, 0 ≠ t1, contradiction. *)
       <3>5. QED BY <3>2, <3>3, <3>4
 
-    <2>2. ASSUME NEW t \in Thread, NEW a \in Addr, Read(t, a) PROVE MutexInductive'
-      BY <2>2 DEF Read
+    <2>2. ASSUME NEW t \in Thread, L_active(t) PROVE MutexInductive'
+      BY <2>2 DEF L_active, MutexInductive, ActiveLabels
+      (* All branches of L_active UNCHANGED lock or set it to 0.
+         - read/write branches: lock' = lock (unchanged).
+         - commit branch: lock' = 0.
+         pc[t] goes to "L_active" (∈ ActiveLabels) or "L_idle" (∉).
+         Other threads unchanged — the invariant holds. *)
 
-    <2>3. ASSUME NEW t \in Thread, NEW a \in Addr, NEW n \in Nat,
-                   Write(t, a, n)
-             PROVE MutexInductive'
-      BY <2>3 DEF Write
+    <2>3. ASSUME NEW t \in Thread, L_done(t) PROVE MutexInductive'
+      BY <2>3 DEF L_done, MutexInductive, ActiveLabels
 
-    <2>4. ASSUME NEW t \in Thread, Commit(t) PROVE MutexInductive'
-      <3>1. USE DEF Commit, MutexInductive
-      <3>2. (lock' = 0) \/ (lock' \in Thread)
-        PROOF OMITTED
-        (* lock' = 0 by Commit. *)
-      <3>3. \A t1 \in Thread : (lock' = t1) => (pc'[t1] = "active")
-        PROOF OMITTED
-        (* Q3: lock' = 0.  By ASSUME Thread\subseteq Nat\{0},
-                0 \notin Thread, so lock' = t1 is false for all t1. *)
-      <3>4. \A t1 \in Thread : (pc'[t1] = "active") => (lock' = t1)
-        PROOF OMITTED
-        (* Q4: pc'[t] = "idle".  For t1 ≠ t, pc'[t1]=pc[t1].
-                If pc[t1]="active" then MutexInductive gives
-                lock=t1.  Commit has lock = t, so t=t1,
-                contradiction. *)
-      <3>5. QED BY <3>2, <3>3, <3>4
+    <2>4. CASE Terminating
+      BY <2>4 DEF Terminating, MutexInductive, ActiveLabels
 
     <2>5. CASE UNCHANGED vars
       BY <2>5 DEF vars
@@ -283,21 +272,21 @@ THEOREM MutexInductive => MutexInv
 
 AtMostOneActive ==
     \A t1, t2 \in Thread :
-        (t1 # t2) => ~(pc[t1] = "active" /\ pc[t2] = "active")
+        (t1 # t2) => ~(pc[t1] \in ActiveLabels /\ pc[t2] \in ActiveLabels)
 
 THEOREM MutexInductive => AtMostOneActive
   <1>1. ASSUME MutexInductive PROVE AtMostOneActive
-    <2> USE DEF MutexInductive, AtMostOneActive
-    <2> SUFFICES ASSUME \E t1, t2 \in Thread : t1 # t2 /\ pc[t1] = "active" /\ pc[t2] = "active"
+    <2> USE DEF MutexInductive, AtMostOneActive, ActiveLabels
+    <2> SUFFICES ASSUME \E t1, t2 \in Thread : t1 # t2 /\ pc[t1] \in ActiveLabels /\ pc[t2] \in ActiveLabels
                    PROVE FALSE
       OBVIOUS
     <2>1. ASSUME NEW t1 \in Thread, NEW t2 \in Thread,
-                  t1 # t2, pc[t1] = "active", pc[t2] = "active"
+                  t1 # t2, pc[t1] \in ActiveLabels, pc[t2] \in ActiveLabels
            PROVE FALSE
       PROOF OMITTED
       (* From MutexInductive's third conjunct:
-           pc[t1]="active" ⇒ lock = t1
-           pc[t2]="active" ⇒ lock = t2
+           pc[t1]∈ActiveLabels ⇒ lock = t1
+           pc[t2]∈ActiveLabels ⇒ lock = t2
          Hence lock = t1 ∧ lock = t2 ⇒ t1 = t2.
          Contradiction with t1 # t2. *)
     <2>2. QED BY <2>1
@@ -308,7 +297,7 @@ THEOREM MutexInductive => AtMostOneActive
 (*====================================================================*)
 NoDirtyReads ==
     \A t1, t2 \in Thread, a \in Addr :
-        ~ (  pc[t1] = "active" /\ pc[t2] = "active" /\ t1 # t2
+        ~ (  pc[t1] \in ActiveLabels /\ pc[t2] \in ActiveLabels /\ t1 # t2
            /\ a \in writeSet[t1] /\ a \in readSet[t2])
 
 THEOREM NoDirtyReadsTheorem ==

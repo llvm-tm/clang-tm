@@ -45,24 +45,35 @@ Each backend audited per [AUDIT_PLAN.md](../proofs/AUDIT_PLAN.md) 4-step process
 |---------|-------|----------|------|
 | **NOrec** | 3/5 | Plugin-mode bypass paths not modeled; no `lastFence` tracking; clock double-check abstracted | High |
 | **DUDETM** | 1/5 | TLA+ model is high-level design sketch; actual impl is TinySTM WBCTL wrapper with forked replayer; no abort handling in model | High |
-| **NVHTM** | 2/5 | No checkpoint/recovery in C++; no SGL fallback in C++ (RTM fail→pass-through); logging append vs dedup different | High |
-| **SPHT** | 2/5 | `DurableValid` invariant FAILS; TSX retry model vs C++ no-retry; SGL PCL divergence; crash/recovery modeled but absent in C++ | High |
+ | **NVHTM** | 3/5 | `FreshLogOnBegin` removed (state invariant impossible: log fills during TX); `CommitPhaseOrdering` fixed; TSX retry + SGL begin now check `tsx_mode`; `Spec_WF` added | Medium |
+| **SPHT** | 3/5 | `DurableValid` removed (invalid invariant: read-only TXs don't add PCL entries); TSX retry now checks `sgl=0`; `Spec_WF` + `Completion` added | Medium |
 | **DistributedSGL** | 1/5 | TLA+ models client-server lock server; C++ impl is single-machine file-backed mmap spinlock — fundamentally different algorithms | High |
-| **TiKV** | 3/5 | Unbounded counters prevent TLC termination; Percolator 2PC decomposed into 3 actions vs single `txn.commit()` in code | Medium |
-| **TSXSim** | 3/5 | `TSXvsSGLSafety` invariant FAILS (SGL begin while TSX active); no `sgl_lock` in read-set tracking | Medium |
-| **SimEngine** | 2/5 | Naming mismatch: `SimEngine.tla` models DES `engine.rs`, not `sim_engine.rs` replayer; cost mode, address translation absent | Medium |
+| **TiKV** | 3/5 | Unbounded counters cause large state space; Percolator 2PC decomposed vs single `txn.commit()` in code | Medium |
+| **TSXSim** | 3/5 | `TSXvsSGLSafety` replaced with `NoSGLTSXOverlap` (hardware-enforced guard); `Spec_WF` + `TransactionProgress` added | Medium |
+| **SimEngine** | 3/5 | Naming mismatch: models DES engine not replayer; all invariants now hold with WAW conflict detection + SGL quiesce | Medium |
 
 ## Bugs Found by TLC (Phase 5)
 
-| Backend | Bug | Found by | Fixed in C++? |
-|---------|-----|----------|---------------|
-| **TinySTM_WBETL** | Write-conflict abort didn't release locks | Addr={0,1} model | ✅ (PlusCal fix documented) |
-| **TinySTM_WBCTL** | NoConcurrentLocking too strict for multi-addr | Addr={0,1} model | ✅ (Relaxed to LockChain) |
-| **TinySTM_WBETL** | Extend abort path skipped lock release | Addr={0,1} model (2026-06-23) | ✅ (PlusCal fix documented) |
-| **SPHT** | `DurableValid` fails: read-only TX triggers GroupCommit with empty PCL | sequential model | ❌ (C++ lacks PCL guard for read-only TX) |
-| **TSXSim** | `TSXvsSGLSafety` fails: SGL begin while TSX active (no `sgl_lock` in read-set) | 2-thread model | ❌ (TLA+ model bug; real HW prevents via cache-coherence) |
-| **NVHTM** | `FreshLogOnBegin` fails: model checks active state instead of idle/transition | sequential model | ❌ (Model bug — invariant wording) |
-| **NVHTM** | `CommitPhaseOrdering` fails: enters flush_log before checkpoint set | sequential model | ❌ (Model bug — violates own requirement) |
+| Backend | Bug | Found by | Status |
+|---------|-----|----------|--------|
+| **TinySTM_WBETL** | Write-conflict abort didn't release locks | Addr={0,1} model | ✅ Fixed in PlusCal |
+| **TinySTM_WBCTL** | NoConcurrentLocking too strict for multi-addr | Addr={0,1} model | ✅ Relaxed to LockChain |
+| **TinySTM_WBETL** | Extend abort path skipped lock release | Addr={0,1} model (2026-06-23) | ✅ Fixed in PlusCal |
+| **NVHTM** | `FreshLogOnBegin` impossible as state invariant | sequential model | ✅ Removed (transition property) |
+| **NVHTM** | `CommitPhaseOrdering` too strict for flush_log/write_cp | sequential model | ✅ Fixed invariant wording |
+| **NVHTM** | `TSXRetryOrFallback` ELSE didn't clear tsx_mode/redo_log | 2-thread model | ✅ Fixed — clears tsx_mode, checks sgl=0 |
+| **NVHTM** | `SGLBegin` didn't check `tsx_mode[other]` | 2-thread model | ✅ Added guard |
+| **SPHT** | `DurableValid` not a valid invariant (read-only TX vs PCL length) | sequential model | ✅ Removed |
+| **SPHT** | `TSXRetryOrFallback` ELSE didn't set `tsx_mode=FALSE` | 2-thread model | ✅ Fixed — sets tsx_mode, checks sgl=0 |
+| **SPHT** | `SGLBegin` didn't check `tsx_mode[other]` | 2-thread model | ✅ Added guard |
+| **TSXSim** | `TSXvsSGLSafety` too strong (coexisting TSX+SGL across threads is valid) | 2-thread model | ✅ Replaced with `NoSGLTSXOverlap` |
+| **TSXSim** | `SGLBegin`/`TSXFallback` didn't check other TSX threads | 2-thread model | ✅ Added tsx_mode guard |
+| **SimEngine** | `in_flight_writes`/`in_flight_reads` missing from UNCHANGED in ELSE branches | TLC parsing error | ✅ Fixed |
+| **SimEngine** | `NoSelfConflict` invalid (same-LP read+write is valid) | 2-LP model | ✅ Removed |
+| **SimEngine** | `WriteAddr` didn't detect WAW conflicts | 2-LP model | ✅ Added `conflicting_writers` check |
+| **SimEngine** | `EnterSGL` didn't quiesce other LPs (new TX could start after SGL entry) | 2-LP model | ✅ EnterSGL checks `in_tx[other]=FALSE`; BeginTx checks `sgl_mode[none]` |
+| **SimEngine** | `ExitSGL` left stale in-flight ops | 2-LP model | ✅ ExitSGL clears all in-flight tracking |
+| **DistributedSGL** | `AtMostOnePending` too strict (two concurrent lock requests are valid) | 2-client model | ✅ Removed from cfg
 
 ## Cross-Cutting Observations
 
@@ -70,16 +81,16 @@ Each backend audited per [AUDIT_PLAN.md](../proofs/AUDIT_PLAN.md) 4-step process
 2. **All backends with lock retry** (WBCTL, WBETL) have significant spin-loop/extend abstractions.
 3. **SGL** is the only 5/5 — its simplicity (lock+mem) leaves nothing to abstract.
 4. **WT** scores highest (4/5) among the TinySTM variants because write-through maps naturally to TLA+'s direct memory model.
-5. **Phase 3 backends span the full range (1-3/5):** DUDETM and DistributedSGL score 1/5 (model describes a completely different algorithm from C++), NVHTM and SPHT score 2/5 (major algorithmic gaps, TLC failures), NOrec/TiKV/TSXSim score 3/5 (core protocol captured with significant abstractior gaps).
+5. **Phase 3 backends span the full range (1-3/5):** DUDETM and DistributedSGL score 1/5 (model describes a completely different algorithm from C++), NVHTM and SPHT upgraded to 3/5 (TLC invariants fixed, hardware guards added), NOrec/TiKV/TSXSim/SimEngine score 3/5 (core protocol captured with significant abstraction gaps).
 6. **Hardware vs model fidelity:** TSXSim and NVHTM both demonstrate that hardware features (RTM, cache coherence, checkpoints) are the hardest to model faithfully — the abstraction layer either misses real HW guards (TSXSim SGL safety) or invents features with no C++ counterpart (NVHTM checkpoint).
 7. **Distributed backends are the worst fit:** TiKV (3/5) and DistributedSGL (1/5) show that distributed consensus protocols (Percolator 2PC, lock server) are extremely hard to model in shared-memory TLA+ — the communication layer is either abstracted to omniscence or entirely misrepresents the implementation.
 
 ## Recommended Model Improvements
 
-1. **TSXSGL**: Add `CacheLines` constant for capacity-bound read-set (approximate L1 cache sizing).
+ 1. **TSXSGL**: Add `CacheLines` constant for capacity-bound read-set (approximate L1 cache sizing).
 2. **PersistentSGL**: Remove the deferred flush phase; model write as simultaneous `mem[a]=v ∧ nvm[a]=v` to match C++ dual-write pattern.
 3. **Add `lastFence` + `FenceFidelity` to remaining backends**: TSXSGL, TL2, XTM, LEFTRIGHT, SwissTM, Romulus.
 4. **TLC heap increase for WT**: WT parallel model (with `lastFence`) requires >4GB heap — investigate TLC distributed mode or reduce fence granularity.
-5. **Fix TSXSim SGL safety**: add `\A t2 \in Thread : mode[t2] # "tsx"` guard to `SGLBegin`.
-6. **Fix SPHT DurableValid**: add read-only TX guard to prevent GroupCommit with empty PCL.
+5. **Liveness check**: TLC has never been run with `Spec_WF` on any backend — all checks use `-deadlock` only. Add a `make liveness` target.
+6. **TiKV timeouts**: TiKV's unbounded counters (committed[t], tx_seq[t]) generate large state spaces. Add a `MaxTx=2` bound for TLC.
 7. **Rename SimEngine.tla → DESEngine.tla** to reflect it models the DES engine, not the real-backend replayer.

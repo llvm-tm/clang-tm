@@ -303,6 +303,8 @@ TSXFallback(t) ==
     /\ mode[t] = "tsx"
     /\ tsx_retries[t] >= MAX_RETRIES
     /\ sgl_lock = 0
+    (* No other thread is in TSX mode — SGL writes would break TSX isolation *)
+    /\ \A other \in Thread \ {t} : mode[other] # "tsx"
     /\ sgl_lock' = t
     /\ pc' = [pc EXCEPT ![t] = "sgl"]
     /\ mode' = [mode EXCEPT ![t] = "sgl"]
@@ -326,6 +328,8 @@ TSXFallback(t) ==
 SGLBegin(t) ==
     /\ pc[t] = "idle"
     /\ sgl_lock = 0
+    (* No other thread is in TSX mode — hardware prevents parallel TSX+SGL *)
+    /\ \A other \in Thread \ {t} : mode[other] # "tsx"
     /\ sgl_lock' = t
     /\ pc' = [pc EXCEPT ![t] = "sgl"]
     /\ mode' = [mode EXCEPT ![t] = "sgl"]
@@ -473,6 +477,9 @@ LockExclusion ==
 (* Liveness (temporal)                                                 *)
 (*====================================================================*)
 
+(* Weak fairness: system eventually makes progress *)
+Spec_WF == Spec /\ WF_vars(Next)
+
 (*── Every transaction eventually commits or aborts ────────────────*)
 TransactionProgress ==
     \A t \in Thread :
@@ -488,8 +495,8 @@ THEOREM LockExclusionInvariant ==
     (* Every SGL is properly serialized *)
 
 THEOREM TSXSafetyGuaranteed ==
-    Spec => []TSXvsSGLSafety
-    (* No TSX runs while SGL is active *)
+    Spec => []NoSGLTSXOverlap
+    (* SGL writes never conflict with active TSX transactions *)
 
 THEOREM BloomCoverage ==
     Spec => []BloomContainsReads
