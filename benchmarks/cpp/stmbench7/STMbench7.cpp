@@ -471,7 +471,7 @@ static OpResult op_st10(int cp_idx) {
 // ==================================================================
 static OpResult op_op1(int id) {
     expli::TM<int>::begin();
-    int *idx = g_apById.find(id);
+    auto idx = g_apById.find(id);
     uint64_t r = 0;
     if (idx && *idx >= 0 && (size_t)*idx < g_atomicParts.size())
         r = (uint64_t)(g_atomicParts[*idx].x.read() + g_atomicParts[*idx].y.read() + g_atomicParts[*idx].z.read());
@@ -481,7 +481,7 @@ static OpResult op_op1(int id) {
 
 static OpResult op_op2(int id) {
     expli::TM<int>::begin();
-    int *idx = g_cpById.find(id);
+    auto idx = g_cpById.find(id);
     uint64_t r = 0;
     if (idx && *idx >= 0 && (size_t)*idx < g_compositeParts.size())
         r = (uint64_t)g_compositeParts[*idx].buildDate.read();
@@ -491,7 +491,7 @@ static OpResult op_op2(int id) {
 
 static OpResult op_op3(int id) {
     expli::TM<int>::begin();
-    int *idx = g_docById.find(id);
+    auto idx = g_docById.find(id);
     uint64_t r = 0;
     if (idx && *idx >= 0 && (size_t)*idx < g_documents.size())
         r = (uint64_t)(g_documents[*idx].buildDate.read() + g_documents[*idx].type.read());
@@ -501,7 +501,7 @@ static OpResult op_op3(int id) {
 
 static OpResult op_op4(int id) {
     expli::TM<int>::begin();
-    int *idx = g_baById.find(id);
+    auto idx = g_baById.find(id);
     uint64_t r = 0;
     if (idx && *idx >= 0 && (size_t)*idx < g_baseAssemblies.size())
         r = (uint64_t)g_baseAssemblies[*idx].buildDate.read();
@@ -511,7 +511,7 @@ static OpResult op_op4(int id) {
 
 static OpResult op_op5(int id) {
     expli::TM<int>::begin();
-    int *idx = g_caById.find(id);
+    auto idx = g_caById.find(id);
     uint64_t r = 0;
     if (idx && *idx >= 0 && (size_t)*idx < g_complexAssemblies.size())
         r = (uint64_t)g_complexAssemblies[*idx].buildDate.read();

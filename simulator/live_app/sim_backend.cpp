@@ -48,18 +48,12 @@ static void sim_init_thread() {
     g_thread_id = next_id.fetch_add(1, std::memory_order_relaxed);
 }
 static void sim_exit_thread() {}
-// Per-thread setjmp buffer pointer (set by sim_sigsetjmp, used by sim_end).
-static __thread void *g_saved_jmpbuf = nullptr;
-
 static void sim_begin() { sim_tm_begin(g_thread_id); }
 static void sim_end() {
     uint8_t ok = sim_tm_end(g_thread_id);
     if (!ok) {
-        // Commit failed — longjmp back to the app's sigsetjmp point.
-        // This unwinds past the app's `done = true;` so the loop retries.
-        if (g_saved_jmpbuf) {
-            siglongjmp(*(sigjmp_buf*)g_saved_jmpbuf, 1);
-        }
+        // Commit failed — signal retry to the app.
+        tm_longjmp_ret = 1;
     }
 }
 static void sim_abort() { sim_tm_abort(g_thread_id); }

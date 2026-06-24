@@ -76,9 +76,7 @@ pub fn run_app(sim_backend_path: &str, app_path: &str, app_args: &[String]) -> R
     let argc = app_args.len() as i32;
     let argv = c_args.as_mut_ptr();
 
-    eprintln!("[tm-live] calling app entry point...");
     let ret = unsafe { main_fn(argc, argv) };
-    eprintln!("[tm-live] app returned: {}", ret);
 
     // Free the CStrings we created.
     for (i, _) in app_args.iter().enumerate() {

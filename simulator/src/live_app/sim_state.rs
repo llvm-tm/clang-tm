@@ -88,7 +88,6 @@ impl LiveSimState {
         t.in_tx = true;
         t.aborted = false;
         self.clock += 60;
-        eprintln!("[SIM] Rust tm_begin tid={} clock={}", tid, self.clock);
     }
 
     pub fn tm_read(&mut self, addr: u64, width: u8, tid: u32) -> u64 {

@@ -55,7 +55,7 @@ jobs:
               print('PASS')
           "
       - name: Upload fidelity results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: fidelity-results
           path: nightly_results.csv
@@ -84,7 +84,7 @@ jobs:
           done
           cat cross_backend_results.csv
       - name: Upload cross-backend results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: cross-backend-results
           path: cross_backend_results.csv
