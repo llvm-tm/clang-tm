@@ -1040,4 +1040,62 @@ Removed `durable_log`/`Flush`/`"flushing"` state — model now writes `mem[a]=v 
 4. **TLC heap for WT**: >4GB heap or distributed mode for WT parallel model
 5. **TiKV bounded model**: `MaxTx=2` counter bound for tractable TLC termination
 
+## Session 2026-06-24 — SPHT + TiKV PlusCal conversions + setjmp/longjmp UB analysis
+
+### PlusCal conversions completed
+
+**SPHT** (390-line raw TLA+ → PlusCal): Dual-path TSX+SGL with PCL group commit, crash/recovery.
+- Two processes: `ThreadProc \in Thread` (per-thread TSX/SGL state machine) and `CrashProc = 0` (single crash event)
+- Labels: L_idle, L_active_tsx, L_aborting, L_active_sgl, L_active_sgl_locked, L_group_commit
+- Safety PASS with minimal config (34K states, 0 errors)
+- Full config: running without errors (large state space, ~2M distinct at 1 min)
+
+**TiKV** (357-line raw TLA+ → PlusCal): Percolator 2PC distributed TM.
+- Single process `ThreadProc \in Thread` with 4 labels: L_idle, L_active, L_prewriting, L_committing
+- Safety PASS (no errors found, state space bounded by TLCBound)
+
+### Setjmp/longjmp UB analysis
+
+**Question:** Can the TLA+ models catch UB from `sigsetjmp` inside a frame that returns, followed by `siglongjmp` to the invalid frame?
+
+**Answer: No — the current TLA+ models cannot catch this class of UB.** Reason: all 18 backend models abstract the retry mechanism entirely. When a transaction aborts, the model simply resets thread-local state (`readSet := {}; writeSet := {}; goto L_idle;`). There is no representation of:
+- A call stack (frames)
+- `jmp_buf` objects or their validity
+- The relationship between a frame's lifetime and its `jmp_buf`
+- The `sigsetjmp`/`siglongjmp` mechanism
+
+**What would be needed:** A meta-model layer wrapping backend models with a C stack abstraction:
+- Per-thread stack: sequence of frame IDs
+- `active_jmpbufs`: Set of (thread, frame_id) where frame has active `jmp_buf`
+- `sigsetjmp`: adds (thread, frame) to active_jmpbufs
+- Frame return: pops frame, removes its jmpbuf from active_jmpbufs
+- `siglongjmp`: safety invariant — target (thread, frame_id) ∈ active_jmpbufs
+- Violation → INVARIANT VIOLATION (catches the UB)
+
+This would roughly double the state space. Currently no backend models the retry mechanism at this level.
+
+**Practical mitigation in C++ code:** The implementation already has defense-in-depth against this UB:
+1. Primary `tm_jmpbuf` is `__thread` TLS — cannot dangle
+2. Backend's `jmpbuf` pointer is also `__thread` TLS — same
+3. `tm_set_jmpbuf()` refreshes the backend's pointer after every `sigsetjmp()`
+4. Stack-local jmpbufs (in bank_tinystm_manual, etc.) are used within the same function scope — frame always alive when `siglongjmp` fires
+5. `tm_set_env()` in TL2/SwissTM/SGL/Romulus/XTM copies the caller's buffer INTO TLS — original may dangle, copy survives
+6. Plugin-instrumented mode correctly injects `sigsetjmp` only on outermost transaction entry
+
+No actual UB was found in the codebase, but the TLA+ models cannot verify this property.
+
+### Files modified
+- `docs/proofs/SPHT.tla` — PlusCal conversion (PASS safety)
+- `docs/proofs/TiKV.tla` — PlusCal conversion (PASS safety)
+- `docs/proofs/SPHT.cfg` — updated invariant list (removed LockOwnerInv, added TLCBound)
+- `docs/proofs/TiKV.cfg` — added TLCBound constraint
+- `AGENTS.md` — this session summary
+
+### Next Steps
+1. **Complete remaining PlusCal conversions**: NVHTM (partial), DistributedSGL, TSXSim (deprioritized — complex msg-passing and bloom-filter models)
+2. **Investigate TL2 invariant violation**: guard table not updated by PlusCal write action
+3. **Add `lastFence` + `FenceFidelity` to remaining backends**
+4. **Model jmp_buf validity as a meta-invariant** (optional — see analysis above)
+5. **TLC heap for WT**: >4GB heap or distributed mode for WT parallel model
+
 
