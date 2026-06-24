@@ -80,10 +80,11 @@ Each backend audited per [AUDIT_PLAN.md](../proofs/AUDIT_PLAN.md) 4-step process
 1. **All backends** abstract away `isTMAddress()` checks — the TLA+ address space is always TM-tracked.
 2. **All backends with lock retry** (WBCTL, WBETL) have significant spin-loop/extend abstractions.
 3. **SGL** remains the only 5/5 (lock+mem is trivially captured). **TSXSGL**, **Romulus**, **XTM**, **TL2**, **LEFTRIGHT**, **SwissTM** all upgraded to 4/5 after adding fence annotations.
-4. **Fence annotations (`lastFence`+`FenceFidelity`) now added to 9 backends**: TinySTM_WBCTL, WBETL, WT, TSXSGL, TL2, XTM, LEFTRIGHT, SwissTM, Romulus. This closes the largest cross-cutting gap.
+4. **Fence annotations (`lastFence`+`FenceFidelity`) now added to 9 backends**: TinySTM_WBCTL, WBETL, WT, TSXSGL, TL2, XTM, LEFTRIGHT, SwissTM, Romulus.
 5. **Phase 3 backends span the full range (1-3/5):** DUDETM and DistributedSGL score 1/5 (model describes a completely different algorithm from C++), NVHTM and SPHT upgraded to 3/5 (TLC invariants fixed, hardware guards added), NOrec/TiKV/TSXSim/SimEngine score 3/5 (core protocol captured with significant abstraction gaps).
 6. **Hardware vs model fidelity:** TSXSim and NVHTM both demonstrate that hardware features (RTM, cache coherence, checkpoints) are the hardest to model faithfully.
 7. **Distributed backends are the worst fit:** TiKV (3/5) and DistributedSGL (1/5) show that distributed consensus protocols are extremely hard to model in shared-memory TLA+.
+8. **Fence annotations are coarse:** `lastFence[t]` records a single tag (`"sc"`/`"acq"`/`"rel"`) per label but cannot distinguish `atomic_signal_fence` (compiler barrier) from `atomic_thread_fence` (CPU fence) or bundled RMW+ordering (`fetch_add(acq_rel)`). `FenceFidelity` only checks `writeSet ≠ {} ⇒ a fence happened somewhere` — no guarantee of sufficient strength or correct placement. A proper memory-model proof would require something like `CAT`/`herd7`. Present annotations are a documentation/consistency cross-check, not a formal memory-model verification.
 
 ## Recommended Model Improvements
 

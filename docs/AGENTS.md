@@ -200,6 +200,8 @@ Fence points per backend (matching TinySTM pattern):
 
 Fence annotations now cover **9 backends** (all PlusCal specs).
 
+**Known limitation:** `lastFence[t]` is a coarse approximation. It cannot distinguish `atomic_signal_fence` (compiler barrier) from `atomic_thread_fence` (CPU `dmb`/`mfence`), nor bundled RMW+ordering (`fetch_add(acq_rel)`). `FenceFidelity` only checks `writeSet ≠ {} ⇒ fence happened` — no guarantee of *sufficient* strength or *correct* placement. A proper memory-model proof would need `CAT`/`herd7`. These tags are documentation/consistency aids, not formal verification.
+
 Score updates: TSXSGL 3→**4/5**, TL2 3→**4/5**, LEFTRIGHT 3→**4/5**, SwissTM 3→**4/5**. Romulus and XTM remain at 4/5.
 
 ### Files created/modified (2026-06-23 to 2026-06-24)
