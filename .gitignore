@@ -18,6 +18,8 @@ benchmark_results/
 results_*.csv
 results_*.png
 **/benchmark_results.csv
+# Generated trace files
+*.jsonl
 **/*.png
 
 # TLA+ Proof System cache (auto-generated)
