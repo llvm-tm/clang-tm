@@ -1,6 +1,10 @@
------------------------ MODULE SimEngine -----------------------
+----------------------- MODULE DESEngine -----------------------
 (*
- * SimEngine — Cross-LP Conflict Resolution Protocol
+ * DESEngine — Cross-LP Conflict Resolution Protocol
+ *
+ * NOTE: This spec models the pure DES engine (SimState in engine.rs),
+ * NOT the real-backend replay engine (SimEngine in sim_engine.rs).
+ * See docs/audits/simengine.md for the naming mismatch.
  *
  * Algorithm (from simulator/src/engine.rs, AGENTS.md 2026-06-22):
  *

@@ -175,7 +175,7 @@ Audited all remaining 12 unaudited backends. Final score distribution:
 - **DistributedSGL (1/5)**: TLA+ models client-server lock server with message-passing; C++ is single-machine file-backed mmap spinlock.
 - **TiKV (3/5)**: Unbounded counters prevent TLC termination; Percolator 2PC decomposed vs single `txn.commit()`.
 - **TSXSim (3/5)**: `TSXvsSGLSafety` fails; hardware cache-coherence prevents in practice.
-- **SimEngine (2/5)**: Critical naming mismatch — `SimEngine.tla` models DES `engine.rs`, not `sim_engine.rs` replayer.
+- **SimEngine (2/5)**: Critical naming mismatch — `SimEngine.tla` (now `DESEngine.tla`) models DES `engine.rs`, not `sim_engine.rs` replayer.
 
 ### Fence annotation sweep (2026-06-24)
 

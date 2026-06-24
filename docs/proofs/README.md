@@ -17,7 +17,7 @@ backends in this repository.
 | `NOrec.tla` | NOrec | Specified for TLC — proof sketches |
 | `Romulus.tla` | Romulus (version-table OCC w/ read-validate) | Specified for TLC — LockExclusion, VersionEntryValid, AtMostOneCommitting |
 | `SPHT.tla` | SPHT (group-commit persistent HTM) | Specified for TLC — TSXSafety, DurableSeqMonotonic, PCLBounds, TSXBufferInUse |
-| `SimEngine.tla` | SimEngine (cross-LP conflict resolution) | Specified for TLC — NoConcurrentWrites, SGLMutex, SGLIsolation, NoSelfConflict |
+| `DESEngine.tla` | SimEngine — DES engine (cross-LP conflict resolution) | Specified for TLC — NoConcurrentWrites, SGLMutex, SGLIsolation, NoSelfConflict |
 | `NVHTM.tla` | NV-HTM (persistent HTM w/ redo log) | Specified for TLC — TSXSafety, CheckpointConsistent, CommitPhaseOrdering |
 | `XTM.tla` | XTM (page-granularity OCC) | Specified for TLC — PageOwnershipExclusion, OwnershipTracked, NoDirtyRead |
 | `TiKV.tla` | TiKV (Percolator 2PC distributed TM) | Specified with .cfg — LockExclusion, NoStaleLocks, SnapshotIsolation |
@@ -99,7 +99,7 @@ Concrete parameters for model checking:
 | `NOrec.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1}`, `MaxRetries <- 3` |
 | `Romulus.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1,2}`, `VSIZE <- 2` |
 | `SPHT.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1}`, `MaxRetries <- 2`, `GroupInterval <- 2` |
-| `SimEngine.tla` | `LP <- {0,1}`, `Addr <- {0,1}` |
+| `DESEngine.tla` | `LP <- {0,1}`, `Addr <- {0,1}` |
 | `NVHTM.tla` | `Thread <- {1,2}`, `Addr <- {0,1}`, `Data <- {0,1}`, `MaxRetries <- 2` |
 | `XTM.tla` | `Thread <- {1,2}`, `Page <- {0,1}`, `Data <- {0,1}`, `MaxRetries <- 2` |
 | `TiKV.tla` | `Thread <- {1,2}`, `Key <- {0,1}`, `Data <- {0,1,2}`, `MaxRetries <- 2` |
@@ -174,7 +174,7 @@ models the TSX write buffer as a per-thread function (`tsx_buffer`); the real
 implementation writes directly to memory inside the RTM region (RTM hardware
 provides atomicity and rollback).  Both achieve the same effect.
 
-**SimEngine (SimEngine.tla)** — The spec models conflict detection as an
+**SimEngine (DESEngine.tla)** — The spec models conflict detection as an
 atomic action within ReadAddr/WriteAddr.  The real implementation in
 `engine.rs` checks `in_flight_writes`/`in_flight_reads` eagerly and aborts
 the conflicting LP immediately.  `ConflictAbort` is a non-deterministic action

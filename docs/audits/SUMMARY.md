@@ -92,4 +92,4 @@ Each backend audited per [AUDIT_PLAN.md](../proofs/AUDIT_PLAN.md) 4-step process
 2. **TLC heap increase for WT**: WT parallel model (with `lastFence`) requires >4GB heap — investigate TLC distributed mode or reduce fence granularity.
 3. **Liveness check**: TLC has never been run with `Spec_WF` on any backend — all checks use `-deadlock` only. Add a `make liveness` target.
 4. **TiKV timeouts**: TiKV's unbounded counters (committed[t], tx_seq[t]) generate large state spaces. Add a `MaxTx=2` bound for TLC.
-5. **Rename SimEngine.tla → DESEngine.tla** to reflect it models the DES engine, not the real-backend replayer.
+5. ~~Rename SimEngine.tla → DESEngine.tla~~ ✅ Done (2026-06-24).

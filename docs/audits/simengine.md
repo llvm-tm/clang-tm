@@ -1,14 +1,14 @@
 # Audit: SimEngine (Discrete-Event Simulation Engine)
 
-**Score: 2/5** — The TLA+ spec is named "SimEngine" but actually models the DES `SimState` (`engine.rs`) conflict-resolution protocol, not the real-backend replay engine (`SimEngine` in `sim_engine.rs`). The naming mismatch obscures a fundamental gap: the spec covers only the abstract conflict-resolution layer, while the implementation has two entirely separate engines with different architectures, clock modes, address translation, backend dispatch, and correctness verification. The spec captures WAR/RAW resolution well but misses cost mode, address translation, checkpoint/restore, deadlock detection, and the full event-type dispatch.
+**Score: 2/5** — The TLA+ spec was originally named "SimEngine" (renamed to `DESEngine` on 2026-06-24) but actually models the DES `SimState` (`engine.rs`) conflict-resolution protocol, not the real-backend replay engine (`SimEngine` in `sim_engine.rs`). The naming mismatch obscures a fundamental gap: the spec covers only the abstract conflict-resolution layer, while the implementation has two entirely separate engines with different architectures, clock modes, address translation, backend dispatch, and correctness verification. The spec captures WAR/RAW resolution well but misses cost mode, address translation, checkpoint/restore, deadlock detection, and the full event-type dispatch.
 
 ## Files
 
 | Artifact | Path | Lines | Role |
 |----------|------|-------|------|
-| TLA+ spec | `docs/proofs/SimEngine.tla` | 304 | Cross-LP conflict resolution protocol (models `engine.rs`) |
-| TLC config (parallel) | `docs/proofs/SimEngine.cfg` | 15 | LP={0,1}, Addr={0,1}, 8 invariants |
-| TLC config (sequential) | `docs/proofs/SimEngine-sequential.cfg` | 15 | LP={0}, Addr={0} |
+| TLA+ spec | `docs/proofs/DESEngine.tla` | 304 | Cross-LP conflict resolution protocol (models `engine.rs`) |
+| TLC config (parallel) | `docs/proofs/DESEngine.cfg` | 15 | LP={0,1}, Addr={0,1}, 8 invariants |
+| TLC config (sequential) | `docs/proofs/DESEngine-sequential.cfg` | 15 | LP={0}, Addr={0} |
 | Trace replay engine | `simulator/src/sim_engine.rs` | 686 | Real-backend trace replayer (cost mode + timestamp mode) |
 | DES engine | `simulator/src/engine.rs` | 357 | Pure DES engine: SimState, conflict detection, cost model |
 | Backend dispatch | `simulator/src/backend.rs` | 775 | Backend 6-way dispatch (Norec/Tl2/Tinystm/Romulus/Swisstm/TsxSim) |
@@ -19,7 +19,7 @@
 
 ## Algorithm Summary
 
-The TLA+ spec (`SimEngine.tla`) models a cross-LP conflict-resolution protocol for transactional memory: in-flight writes and reads are tracked per-LP; on a Write(addr), any older LP reading that address is aborted (RAW); on a Read(addr), any older LP writing that address is aborted (WAR). The "newest operation wins" rule resolves all conflicts. SGL fallback provides mutual exclusion when enabled. The Rust implementation has **two separate engines**: `SimState` (`engine.rs`) — a pure DES engine that implements exactly this conflict protocol with cost/timestamp clock modes and shadow memory; and `SimEngine` (`sim_engine.rs`) — a real-backend trace replayer that runs actual TM backends (NOrec, TL2, TinySTM, etc.) through event traces, detecting true aborts from the backend rather than synthetic conflict detection.
+The TLA+ spec (originally `SimEngine.tla`, renamed to `DESEngine.tla` in 2026-06-24) models a cross-LP conflict-resolution protocol for transactional memory: in-flight writes and reads are tracked per-LP; on a Write(addr), any older LP reading that address is aborted (RAW); on a Read(addr), any older LP writing that address is aborted (WAR). The "newest operation wins" rule resolves all conflicts. SGL fallback provides mutual exclusion when enabled. The Rust implementation has **two separate engines**: `SimState` (`engine.rs`) — a pure DES engine that implements exactly this conflict protocol with cost/timestamp clock modes and shadow memory; and `SimEngine` (`sim_engine.rs`) — a real-backend trace replayer that runs actual TM backends (NOrec, TL2, TinySTM, etc.) through event traces, detecting true aborts from the backend rather than synthetic conflict detection.
 
 ## Cross-Reference Checklist
 
@@ -106,11 +106,11 @@ The TLA+ spec (`SimEngine.tla`) models a cross-LP conflict-resolution protocol f
 
 ### 1. Naming mismatch: spec models `engine.rs`, not `sim_engine.rs` (Critical)
 
-**Issue**: The file is named `SimEngine.tla` and the module is `SimEngine`, which strongly implies it models the `SimEngine` struct in `sim_engine.rs`. But the spec's variables (`in_flight_writes`, `in_flight_reads`, `in_tx`, etc.) directly match the `SimState` struct in `engine.rs`. The real `SimEngine` in `sim_engine.rs` has no `in_flight_writes` or conflict detection — it delegates all TM operations to real backends and only tracks `in_tx` per thread for the verifier.
+**Issue**: The file was originally named `SimEngine.tla` (renamed to `DESEngine.tla` on 2026-06-24) and the module was `SimEngine`, which strongly implied it modeled the `SimEngine` struct in `sim_engine.rs`. But the spec's variables (`in_flight_writes`, `in_flight_reads`, `in_tx`, etc.) directly match the `SimState` struct in `engine.rs`. The real `SimEngine` in `sim_engine.rs` has no `in_flight_writes` or conflict detection — it delegates all TM operations to real backends and only tracks `in_tx` per thread for the verifier.
 
 **Impact**: Any reader expecting the TLA+ spec to describe the real-backend replay engine will be confused. The spec describes a pure DES protocol that does not exist in the codebase under the name "SimEngine" — it exists as `SimState` in `engine.rs`.
 
-**Recommendation**: Rename the TLA+ module to `DESEngine` or `SimStateConflictProtocol`. Update the module header comment to clearly state: "This spec models the pure DES engine (SimState in engine.rs), NOT the real-backend replay engine (SimEngine in sim_engine.rs)."
+**Resolution**: ✅ Renamed to `DESEngine` (2026-06-24). Module header now states: "This spec models the pure DES engine (SimState in engine.rs), NOT the real-backend replay engine (SimEngine in sim_engine.rs)."
 
 ### 2. Cost mode and cycle accounting entirely unmodeled (High)
 
