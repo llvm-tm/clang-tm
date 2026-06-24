@@ -12,6 +12,7 @@ fn read_word<T: Primitive>(addr: usize) -> T {
             if with_tx(|tx| tx.locked_addrs.contains(&lock_index(addr))) { break; }
             #[cfg(feature = "simulation")]
             { with_tx(|tx| tx.aborted = true); return unsafe { (addr as *const T).read() }; }
+            #[cfg(not(feature = "simulation"))]
             std::hint::spin_loop();
         }
         let version = read_version(addr);
@@ -45,6 +46,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         while is_locked(addr) {
             #[cfg(feature = "simulation")]
             { tx.aborted = true; return; }
+            #[cfg(not(feature = "simulation"))]
             std::hint::spin_loop();
         }
         let version = read_version(addr);

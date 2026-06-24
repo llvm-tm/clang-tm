@@ -437,6 +437,18 @@ impl SimEngine {
 
         match &event.kind {
             EventKind::TxBegin => {
+                // C++ siglongjmp-based backends may log TxBegin without a
+                // preceding TxEnd/Abort when a transaction retries.  If the
+                // thread was still in a transaction, auto-close it as an abort.
+                if self.in_tx.get(&tid).copied().unwrap_or(false) {
+                    self.in_tx.insert(tid, false);
+                    self.sgl_mode.remove(&tid);
+                    let ws = self.current_write_set.remove(&tid).unwrap_or_default();
+                    self.stats.aborts += 1;
+                    self.verifier.tx_abort(tid);
+                    self.deadlock.record_abort(btid, &ws);
+                    self.estimated_cycles += 60; // implicit abort cost
+                }
                 self.verifier.tx_begin(tid);
                 b.begin();
                 self.in_tx.insert(tid, true);

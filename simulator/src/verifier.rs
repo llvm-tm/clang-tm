@@ -119,20 +119,11 @@ impl Verifier {
 
     /// Handle a TxBegin event.
     ///
-    /// When a thread is already in a transaction (depth > 0), this indicates a
-    /// C++-style siglongjmp retry: the previous transaction was aborted without
-    /// writing a matching TxEnd/Abort event to the trace.  We auto-close the
-    /// previous transaction (counting it as an abort) and begin the new one.
-    /// This avoids false DOUBLE-TX-BEGIN violations on traces from backends
-    /// that use siglongjmp-based abort (e.g. C++ TinySTM).
+    /// Simply increments the nesting depth.  If the caller knows that the
+    /// previous transaction was implicitly aborted (e.g. by C++ siglongjmp
+    /// retry), it must call `tx_abort` before `tx_begin`.
     pub fn tx_begin(&mut self, tid: u64) {
-        let depth = self.tx_depth.entry(tid).or_insert(0);
-        if *depth > 0 {
-            // Implicit abort from siglongjmp retry — close previous tx, start new one.
-            self.aborts += 1;
-            *depth = 0;
-        }
-        *depth += 1;
+        *self.tx_depth.entry(tid).or_insert(0) += 1;
     }
 
     pub fn tx_commit(&mut self, tid: u64) {
@@ -151,11 +142,16 @@ impl Verifier {
     }
 
     pub fn tx_abort(&mut self, tid: u64) {
-        let d = match self.tx_depth.get_mut(&tid) {
+        match self.tx_depth.get_mut(&tid) {
             Some(d) if *d > 0 => {
                 *d = d.saturating_sub(1);
                 self.aborts += 1;
             }
+            // Thread never began a transaction — this is a real abort-without-begin.
+            None => self.violations.push(format!(
+                "ABORT-WITHOUT-BEGIN tid={}",
+                tid
+            )),
             // Depth already 0 — this can happen when a panic-based backend
             // (e.g. NOrec, TL2) throws TmxAbort on a read that follows the
             // abort point in a C++ siglongjmp trace.  The previous abort event
