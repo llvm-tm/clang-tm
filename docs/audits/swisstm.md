@@ -1,6 +1,6 @@
 # Audit: SwissTM (ORec-based Eager Writes + Lazy Read Validation)
 
-**Score: 3/5** — Core commit protocol well-modeled with ORec separation; contention manager, double-check read protocol, and lock-exchange semantics omitted; no fence annotations.
+**Score: 4/5** — Core commit protocol well-modeled with ORec separation; contention manager and double-check read protocol omitted; fence annotations (`lastFence`+`FenceFidelity`) added.
 
 ## Files
 

@@ -1,6 +1,6 @@
 # Audit: TSXSGL (TSX + Single Global Lock)
 
-**Score: 3/5** — Core dual-mode protocol well-captured; TSX hardware details (capacity, abort reasons, L1 read-set) significantly abstracted.
+**Score: 4/5** — Core dual-mode protocol well-captured; TSX hardware details (capacity, abort reasons) abstracted; fence annotations (`lastFence`+`FenceFidelity`) added.
 
 ## Files
 

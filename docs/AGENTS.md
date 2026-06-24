@@ -177,10 +177,36 @@ Audited all remaining 12 unaudited backends. Final score distribution:
 - **TSXSim (3/5)**: `TSXvsSGLSafety` fails; hardware cache-coherence prevents in practice.
 - **SimEngine (2/5)**: Critical naming mismatch — `SimEngine.tla` models DES `engine.rs`, not `sim_engine.rs` replayer.
 
-### Files created/modified (2026-06-23 session)
+### Fence annotation sweep (2026-06-24)
+
+Added `lastFence[t]` + `FenceFidelity` to all 6 remaining PlusCal backends:
+
+| Backend | States (config) | Result |
+|---------|----------------|--------|
+| **TSXSGL** | 840K / 99K (parallel) | PASS ✅ |
+| **TL2** | 4 (sequential) | PASS ✅ |
+| **XTM** | 225K / 37K (parallel) | PASS ✅ |
+| **LEFTRIGHT** | 73 / 42 (sequential) | PASS ✅ |
+| **SwissTM** | 3.5M / 699K (parallel) | PASS ✅ |
+| **Romulus** | 1.79M / 440K (parallel) | PASS ✅ |
+
+Fence points per backend (matching TinySTM pattern):
+- **Read**: `"sc"` — signal fence before version capture
+- **Lock acquire / first write**: `"acq"` — CAS acquire semantics
+- **Clock increment**: `"sc"` — thread fence before clock
+- **Validate success**: `"sc"` — fence before re-read
+- **Unlock / commit**: `"rel"` — release fence before unlock
+- **Abort**: `"rel"` — release before clean-up
+
+Fence annotations now cover **9 backends** (all PlusCal specs).
+
+Score updates: TSXSGL 3→**4/5**, TL2 3→**4/5**, LEFTRIGHT 3→**4/5**, SwissTM 3→**4/5**. Romulus and XTM remain at 4/5.
+
+### Files created/modified (2026-06-23 to 2026-06-24)
 - `docs/proofs/tinystm_*.tla` — fence annotations, endVersion, L_extend, commit split
-- `docs/audits/*.md` — 12 new audit reports (tl2, xtm, leftright, swisstm, norec, dudetm, nvhtm, spht, distributed_sgl, tikv, tsxsim, simengine)
-- `docs/audits/SUMMARY.md` — updated with all 18 scores, new bugs, observations
+- `docs/proofs/{TSXSGL,TL2,XTM,LEFTRIGHT,SwissTM,Romulus}.tla` — fence annotations
+- `docs/audits/*.md` — 18 audit reports (all backends)
+- `docs/audits/SUMMARY.md` — all scores, bugs, observations, fence updates
 - `docs/AGENTS.md` — this session summary
 
 ### TinySTM model fidelity audit and improvements

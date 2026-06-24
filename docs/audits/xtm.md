@@ -1,6 +1,6 @@
 # Audit: XTM — Page-Granularity OCC with Private Copies
 
-**Score: 4/5** — Core protocol well-modeled; one medium-risk gap (missing owner_tx_id check in commit validation); fence annotations not yet added.
+**Score: 4/5** — Core protocol well-modeled; one medium-risk gap (missing owner_tx_id check in commit validation); fence annotations (`lastFence`+`FenceFidelity`) added.
 
 ## Files
 

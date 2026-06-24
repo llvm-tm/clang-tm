@@ -1,6 +1,6 @@
 # Audit: Romulus
 
-**Score: 4/5** — Minimal abstraction gap; well-suited as calibration backend.
+**Score: 4/5** — Minimal abstraction gap (spin-loop, read-validate re-check abstracted); fence annotations (`lastFence`+`FenceFidelity`) added.
 
 ## Files
 

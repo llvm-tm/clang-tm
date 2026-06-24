@@ -23,7 +23,7 @@ Each backend audited per [AUDIT_PLAN.md](../proofs/AUDIT_PLAN.md) 4-step process
 | Backend | Score | Key gaps | Risk |
 |---------|-------|----------|------|
 | **SGL** | 5/5 | None — lock+mem is the entire impl (read/write/version are proof scaffolding) | None |
-| **TSXSGL** | 3/5 | TSX capacity model, abort reason handling not captured | Medium |
+| **TSXSGL** | 4/5 | TSX capacity model, abort reason handling not captured; fences added | Low |
 | **TinySTM_WBCTL** | 4/5 | Spin-for-unlock loop, type merging not modeled | Low |
 | **TinySTM_WBETL** | 4/5 | Lock retry logic, bitmap write-back not modeled | Low |
 | **TinySTM_WT** | 4/5 | Write-through semantics match; incarnation counter modulo in model | Low |
@@ -33,11 +33,11 @@ Each backend audited per [AUDIT_PLAN.md](../proofs/AUDIT_PLAN.md) 4-step process
 
 | Backend | Score | Key gaps | Risk |
 |---------|-------|----------|------|
-| **Romulus** | 4/5 | Spin-loop, read-validate re-check, fences abstracted (all documented) | Low |
-| **TL2** | 3/5 | Validation lock-bit gap, guard-table aliasing, no fence tracking | Medium |
-| **XTM** | 4/5 | Commit validation missing owner_tx_id check; fence annotations not added | Medium |
-| **LEFTRIGHT** | 3/5 | No `lastFence`/fence annotations, no `endVersion`/extend model, no pre-lock validate, reversed read-clock ordering | Medium |
-| **SwissTM** | 3/5 | Contention manager not modeled; no `endVersion`/extend model; no fence annotations | Medium |
+| **Romulus** | 4/5 | Spin-loop, read-validate re-check abstracted; fences added ✅ | Low |
+| **TL2** | 4/5 | Validation lock-bit gap, guard-table aliasing (core design feature); fences added | Low |
+| **XTM** | 4/5 | Commit validation missing owner_tx_id check (C++ gap); fences added ✅ | Low |
+| **LEFTRIGHT** | 4/5 | No `endVersion`/extend model, no pre-lock validate, reversed read-clock ordering; fences added | Low |
+| **SwissTM** | 4/5 | Contention manager not modeled; no `endVersion`/extend model; fences added | Low |
 
 ## Phase 3 Backends (TLA+-only)
 
@@ -79,18 +79,16 @@ Each backend audited per [AUDIT_PLAN.md](../proofs/AUDIT_PLAN.md) 4-step process
 
 1. **All backends** abstract away `isTMAddress()` checks — the TLA+ address space is always TM-tracked.
 2. **All backends with lock retry** (WBCTL, WBETL) have significant spin-loop/extend abstractions.
-3. **SGL** is the only 5/5 — its simplicity (lock+mem) leaves nothing to abstract.
-4. **WT** scores highest (4/5) among the TinySTM variants because write-through maps naturally to TLA+'s direct memory model.
+3. **SGL** remains the only 5/5 (lock+mem is trivially captured). **TSXSGL**, **Romulus**, **XTM**, **TL2**, **LEFTRIGHT**, **SwissTM** all upgraded to 4/5 after adding fence annotations.
+4. **Fence annotations (`lastFence`+`FenceFidelity`) now added to 9 backends**: TinySTM_WBCTL, WBETL, WT, TSXSGL, TL2, XTM, LEFTRIGHT, SwissTM, Romulus. This closes the largest cross-cutting gap.
 5. **Phase 3 backends span the full range (1-3/5):** DUDETM and DistributedSGL score 1/5 (model describes a completely different algorithm from C++), NVHTM and SPHT upgraded to 3/5 (TLC invariants fixed, hardware guards added), NOrec/TiKV/TSXSim/SimEngine score 3/5 (core protocol captured with significant abstraction gaps).
-6. **Hardware vs model fidelity:** TSXSim and NVHTM both demonstrate that hardware features (RTM, cache coherence, checkpoints) are the hardest to model faithfully — the abstraction layer either misses real HW guards (TSXSim SGL safety) or invents features with no C++ counterpart (NVHTM checkpoint).
-7. **Distributed backends are the worst fit:** TiKV (3/5) and DistributedSGL (1/5) show that distributed consensus protocols (Percolator 2PC, lock server) are extremely hard to model in shared-memory TLA+ — the communication layer is either abstracted to omniscence or entirely misrepresents the implementation.
+6. **Hardware vs model fidelity:** TSXSim and NVHTM both demonstrate that hardware features (RTM, cache coherence, checkpoints) are the hardest to model faithfully.
+7. **Distributed backends are the worst fit:** TiKV (3/5) and DistributedSGL (1/5) show that distributed consensus protocols are extremely hard to model in shared-memory TLA+.
 
 ## Recommended Model Improvements
 
- 1. **TSXSGL**: Add `CacheLines` constant for capacity-bound read-set (approximate L1 cache sizing).
-2. **PersistentSGL**: Remove the deferred flush phase; model write as simultaneous `mem[a]=v ∧ nvm[a]=v` to match C++ dual-write pattern.
-3. **Add `lastFence` + `FenceFidelity` to remaining backends**: TSXSGL, TL2, XTM, LEFTRIGHT, SwissTM, Romulus.
-4. **TLC heap increase for WT**: WT parallel model (with `lastFence`) requires >4GB heap — investigate TLC distributed mode or reduce fence granularity.
-5. **Liveness check**: TLC has never been run with `Spec_WF` on any backend — all checks use `-deadlock` only. Add a `make liveness` target.
-6. **TiKV timeouts**: TiKV's unbounded counters (committed[t], tx_seq[t]) generate large state spaces. Add a `MaxTx=2` bound for TLC.
-7. **Rename SimEngine.tla → DESEngine.tla** to reflect it models the DES engine, not the real-backend replayer.
+1. **PersistentSGL**: Remove the deferred flush phase; model write as simultaneous `mem[a]=v ∧ nvm[a]=v` to match C++ dual-write pattern.
+2. **TLC heap increase for WT**: WT parallel model (with `lastFence`) requires >4GB heap — investigate TLC distributed mode or reduce fence granularity.
+3. **Liveness check**: TLC has never been run with `Spec_WF` on any backend — all checks use `-deadlock` only. Add a `make liveness` target.
+4. **TiKV timeouts**: TiKV's unbounded counters (committed[t], tx_seq[t]) generate large state spaces. Add a `MaxTx=2` bound for TLC.
+5. **Rename SimEngine.tla → DESEngine.tla** to reflect it models the DES engine, not the real-backend replayer.

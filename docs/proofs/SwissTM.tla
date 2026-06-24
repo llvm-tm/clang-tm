@@ -176,10 +176,10 @@ end process;
 end algorithm; *)
 
 \* BEGIN TRANSLATION
-VARIABLES pc, g_ts, orec, mem, committed, aborted, readSet, writeLog, 
+VARIABLES pc, g_ts, orec, mem, committed, aborted, lastFence, readSet, writeLog, 
           writeBuf, oldVal, readOnly
 
-vars == << pc, g_ts, orec, mem, committed, aborted, readSet, writeLog, 
+vars == << pc, g_ts, orec, mem, committed, aborted, lastFence, readSet, writeLog, 
            writeBuf, oldVal, readOnly >>
 
 ProcSet == (Thread)
@@ -190,6 +190,7 @@ Init == (* Global variables *)
         /\ mem = [a \in Addr |-> 0]
         /\ committed = [t \in Thread |-> 0]
         /\ aborted = [t \in Thread |-> 0]
+        /\ lastFence = [t \in Thread |-> ""]
         (* Process ThreadProc *)
         /\ readSet = [self \in Thread |-> {}]
         /\ writeLog = [self \in Thread |-> {}]
@@ -202,13 +203,14 @@ L_idle(self) == /\ pc[self] = "L_idle"
                 /\ IF committed[self] >= MaxCommits
                       THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "L_begin"]
-                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, readSet, 
+                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, lastFence, readSet, 
                                 writeLog, writeBuf, oldVal, readOnly >>
 
 L_begin(self) == /\ pc[self] = "L_begin"
                  /\ readSet' = [readSet EXCEPT ![self] = {}]
                  /\ writeLog' = [writeLog EXCEPT ![self] = {}]
                  /\ readOnly' = [readOnly EXCEPT ![self] = TRUE]
+                 /\ lastFence' = [lastFence EXCEPT ![self] = ""]
                  /\ pc' = [pc EXCEPT ![self] = "L_active"]
                  /\ UNCHANGED << g_ts, orec, mem, committed, aborted, writeBuf, 
                                  oldVal >>
@@ -219,12 +221,13 @@ L_active(self) == /\ pc[self] = "L_active"
                                 THEN /\ TRUE
                                 ELSE /\ TRUE
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<orec, committed, readSet, writeLog, writeBuf, oldVal, readOnly>>
+                        /\ UNCHANGED <<lastFence, orec, committed, readSet, writeLog, writeBuf, oldVal, readOnly>>
                      \/ /\ \E a \in Addr:
                              IF a \notin writeLog[self] /\ ~(OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) # self)
                                 THEN /\ readSet' = [readSet EXCEPT ![self] = readSet[self] \union {<<a, OREC_RVER(orec[a])>>}]
                                 ELSE /\ TRUE
                                      /\ UNCHANGED readSet
+                        /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ UNCHANGED <<orec, committed, writeLog, writeBuf, oldVal, readOnly>>
                      \/ /\ \E a \in Addr:
@@ -239,6 +242,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                        /\ UNCHANGED << orec, writeLog, 
                                                        writeBuf, oldVal, 
                                                        readOnly >>
+                        /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ UNCHANGED <<committed, readSet>>
                      \/ /\ \E a \in Addr:
@@ -248,25 +252,29 @@ L_active(self) == /\ pc[self] = "L_active"
                                   ELSE /\ TRUE
                                        /\ UNCHANGED writeBuf
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<orec, committed, readSet, writeLog, oldVal, readOnly>>
+                        /\ UNCHANGED <<lastFence, orec, committed, readSet, writeLog, oldVal, readOnly>>
                      \/ /\ IF \E a \in Addr : a \notin writeLog[self] /\ OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) # self
-                              THEN /\ pc' = [pc EXCEPT ![self] = "L_abort"]
-                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                              THEN /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                                   /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                              ELSE /\ UNCHANGED lastFence
+                                   /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ UNCHANGED <<orec, committed, readSet, writeLog, writeBuf, oldVal, readOnly>>
                      \/ /\ IF readOnly[self]
                               THEN /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ UNCHANGED committed
-                        /\ UNCHANGED <<orec, readSet, writeLog, writeBuf, oldVal, readOnly>>
+                        /\ UNCHANGED <<lastFence, orec, readSet, writeLog, writeBuf, oldVal, readOnly>>
                      \/ /\ IF ~readOnly[self] /\ writeLog[self] # {}
                               /\ \A <<a, v>> \in readSet[self] : OREC_RLOCK(orec[a]) = 0
                               THEN /\ orec' =     [a \in Addr |->
                                               IF \E entry \in readSet[self] : entry[1] = a
                                               THEN MAKE_OREC(1, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
                                               ELSE orec[a]]
+                                   /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
                                    /\ pc' = [pc EXCEPT ![self] = "L_commit"]
-                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                              ELSE /\ UNCHANGED lastFence
+                                   /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ orec' = orec
                         /\ UNCHANGED <<committed, readSet, writeLog, writeBuf, oldVal, readOnly>>
                   /\ UNCHANGED << g_ts, mem, aborted >>
@@ -275,9 +283,11 @@ L_commit(self) == /\ pc[self] = "L_commit"
                   /\ g_ts' = g_ts + 1
                   /\ IF \A <<addr, ver>> \in readSet[self] :
                          OREC_WOWNER(orec[addr]) = self \/ OREC_RVER(orec[addr]) = ver
-                        THEN /\ pc' = [pc EXCEPT ![self] = "L_commit_wb"]
+                        THEN /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                             /\ pc' = [pc EXCEPT ![self] = "L_commit_wb"]
                              /\ UNCHANGED << orec, readSet, writeLog >>
-                        ELSE /\ orec' =     [a \in Addr |->
+                        ELSE /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                             /\ orec' =     [a \in Addr |->
                                         IF a \in writeLog[self]
                                         THEN MAKE_OREC(0, 0, OREC_RVER(orec[a]), 0)
                                         ELSE IF \E entry \in readSet[self] : entry[1] = a
@@ -299,22 +309,24 @@ L_commit_wb(self) == /\ pc[self] = "L_commit_wb"
                                     THEN MAKE_OREC(0, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
                                     ELSE orec[a]]
                      /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
+                     /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
                      /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                      /\ UNCHANGED << g_ts, aborted, readSet, writeLog, 
                                      writeBuf, oldVal, readOnly >>
 
 L_abort(self) == /\ pc[self] = "L_abort"
-                 /\ readSet' = [readSet EXCEPT ![self] = {}]
-                 /\ writeLog' = [writeLog EXCEPT ![self] = {}]
-                 /\ readOnly' = [readOnly EXCEPT ![self] = TRUE]
-                 /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
-                 /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                 /\ UNCHANGED << g_ts, orec, mem, committed, writeBuf, oldVal >>
+                  /\ readSet' = [readSet EXCEPT ![self] = {}]
+                  /\ writeLog' = [writeLog EXCEPT ![self] = {}]
+                  /\ readOnly' = [readOnly EXCEPT ![self] = TRUE]
+                  /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
+                  /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                  /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                  /\ UNCHANGED << g_ts, orec, mem, committed, writeBuf, oldVal >>
 
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, readSet, 
+                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, lastFence, readSet, 
                                 writeLog, writeBuf, oldVal, readOnly >>
 
 ThreadProc(self) == L_idle(self) \/ L_begin(self) \/ L_active(self)
@@ -357,11 +369,16 @@ NoPostCommitLocks ==
         pc[t] \in {"L_idle", "L_begin", "L_done"} =>
             \A a \in Addr : ~(OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) = t)
 
+(* I4: Every thread with a non-empty write-set has issued a fence *)
+FenceFidelity ==
+    \A t \in Thread : writeLog[t] # {} => lastFence[t] # ""
+
 (* Combined invariant *)
 Inv ==
     /\ MutexWriteLock
     /\ WriteOwnerInv
     /\ NoPostCommitLocks
+    /\ FenceFidelity
 
 (* Constraint for bounded model checking *)
 ModelBound == g_ts <= 5 /\ \A t \in Thread : aborted[t] <= MaxCommits * 2

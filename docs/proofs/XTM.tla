@@ -155,10 +155,10 @@ end process;
 end algorithm; *)
 
 \* BEGIN TRANSLATION
-VARIABLES pc, mem, xadt_owner, xadt_version, committed, aborted, read_set, 
+VARIABLES pc, mem, xadt_owner, xadt_version, committed, aborted, lastFence, read_set, 
           write_set
 
-vars == << pc, mem, xadt_owner, xadt_version, committed, aborted, read_set, 
+vars == << pc, mem, xadt_owner, xadt_version, committed, aborted, lastFence, read_set, 
            write_set >>
 
 ProcSet == (Thread)
@@ -169,6 +169,7 @@ Init == (* Global variables *)
         /\ xadt_version = [p \in Page |-> 0]
         /\ committed = [t \in Thread |-> 0]
         /\ aborted = [t \in Thread |-> 0]
+        /\ lastFence = [t \in Thread |-> ""]
         (* Process ThreadProc *)
         /\ read_set = [self \in Thread |-> {}]
         /\ write_set = [self \in Thread |-> [p \in Page |-> NoWrite]]
@@ -179,11 +180,12 @@ L_idle(self) == /\ pc[self] = "L_idle"
                       THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "L_begin"]
                 /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
-                                aborted, read_set, write_set >>
+                                aborted, lastFence, read_set, write_set >>
 
 L_begin(self) == /\ pc[self] = "L_begin"
                  /\ read_set' = [read_set EXCEPT ![self] = {}]
                  /\ write_set' = [write_set EXCEPT ![self] = [p \in Page |-> NoWrite]]
+                 /\ lastFence' = [lastFence EXCEPT ![self] = ""]
                  /\ pc' = [pc EXCEPT ![self] = "L_active"]
                  /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
                                  aborted >>
@@ -194,16 +196,19 @@ L_active(self) == /\ pc[self] = "L_active"
                                 THEN /\ TRUE
                                 ELSE /\ TRUE
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<xadt_owner, read_set, write_set>>
+                        /\ UNCHANGED << xadt_owner, lastFence, read_set, write_set >>
                      \/ /\ IF \E p \in Page : write_set[self][p] = NoWrite /\ xadt_owner[p] \notin {0, self}
                               THEN /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                                   /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                   /\ UNCHANGED lastFence
                         /\ UNCHANGED <<xadt_owner, read_set, write_set>>
                      \/ /\ \E p \in Page:
                              IF write_set[self][p] = NoWrite /\ xadt_owner[p] \in {0, self}
                                 THEN /\ read_set' = [read_set EXCEPT ![self] = read_set[self] \union {<<p, xadt_version[p]>>}]
                                 ELSE /\ TRUE
                                      /\ UNCHANGED read_set
+                        /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ UNCHANGED <<xadt_owner, write_set>>
                      \/ /\ \E p \in Page:
@@ -213,14 +218,15 @@ L_active(self) == /\ pc[self] = "L_active"
                                   ELSE /\ TRUE
                                        /\ UNCHANGED write_set
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<xadt_owner, read_set>>
+                        /\ UNCHANGED << xadt_owner, lastFence, read_set >>
                      \/ /\ \E p \in Page:
                              \E v \in Data:
                                IF write_set[self][p] = NoWrite /\ xadt_owner[p] = 0
                                   THEN /\ xadt_owner' = [xadt_owner EXCEPT ![p] = self]
                                        /\ write_set' = [write_set EXCEPT ![self][p] = v]
+                                       /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
                                   ELSE /\ TRUE
-                                       /\ UNCHANGED << xadt_owner, write_set >>
+                                       /\ UNCHANGED << xadt_owner, write_set, lastFence >>
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ UNCHANGED read_set
                      \/ /\ \E p \in Page:
@@ -230,16 +236,20 @@ L_active(self) == /\ pc[self] = "L_active"
                                   ELSE /\ TRUE
                                        /\ UNCHANGED write_set
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<xadt_owner, read_set>>
+                        /\ UNCHANGED << xadt_owner, lastFence, read_set >>
                      \/ /\ IF \E p \in Page : write_set[self][p] = NoWrite /\ xadt_owner[p] \notin {0, self}
                               THEN /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                                   /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                   /\ UNCHANGED lastFence
                         /\ UNCHANGED <<xadt_owner, read_set, write_set>>
                      \/ /\ IF \A <<p, ver>> \in read_set[self] :
                                write_set[self][p] # NoWrite \/
                                (xadt_version[p] = ver /\ (xadt_owner[p] = 0 \/ xadt_owner[p] = self))
                               THEN /\ pc' = [pc EXCEPT ![self] = "L_writeback"]
+                                   /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                                   /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
                         /\ UNCHANGED <<xadt_owner, read_set, write_set>>
                   /\ UNCHANGED << mem, xadt_version, committed, aborted >>
 
@@ -248,9 +258,10 @@ L_writeback(self) == /\ pc[self] = "L_writeback"
                                IF write_set[self][p] # NoWrite THEN write_set[self][p] ELSE mem[p]]
                      /\ pc' = [pc EXCEPT ![self] = "L_release"]
                      /\ UNCHANGED << xadt_owner, xadt_version, committed, 
-                                     aborted, read_set, write_set >>
+                                     aborted, lastFence, read_set, write_set >>
 
 L_release(self) == /\ pc[self] = "L_release"
+                   /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
                    /\ xadt_owner' =           [p \in Page |->
                                     IF xadt_owner[p] = self THEN 0 ELSE xadt_owner[p]]
                    /\ xadt_version' =             [p \in Page |->
@@ -262,6 +273,7 @@ L_release(self) == /\ pc[self] = "L_release"
                    /\ UNCHANGED << mem, aborted >>
 
 L_abort(self) == /\ pc[self] = "L_abort"
+                 /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
                  /\ xadt_owner' =           [p \in Page |->
                                   IF xadt_owner[p] = self THEN 0 ELSE xadt_owner[p]]
                  /\ read_set' = [read_set EXCEPT ![self] = {}]
@@ -274,7 +286,7 @@ L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
                 /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
-                                aborted, read_set, write_set >>
+                                aborted, lastFence, read_set, write_set >>
 
 ThreadProc(self) == L_idle(self) \/ L_begin(self) \/ L_active(self)
                        \/ L_writeback(self) \/ L_release(self)
@@ -329,6 +341,10 @@ NoDirtyRead ==
         pc[t] \in {"L_idle", "L_begin", "L_done"} =>
             \A p \in Page : xadt_owner[p] # t
 
+(* I7: Every thread with a non-empty write-set has issued a fence *)
+FenceFidelity ==
+    \A t \in Thread : \E p \in Page : write_set[t][p] # NoWrite => lastFence[t] # ""
+
 (* Combined invariant for TLC *)
 Inv ==
     /\ PageOwnershipExclusion
@@ -337,6 +353,7 @@ Inv ==
     /\ WritebackConsistent
     /\ VersionMonotonic
     /\ NoDirtyRead
+    /\ FenceFidelity
 
 (* Constraint for bounded model checking *)
 ModelBound == \A t \in Thread : aborted[t] <= MaxCommits * 2

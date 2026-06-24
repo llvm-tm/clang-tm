@@ -1,6 +1,6 @@
 # Audit: TL2 (Transactional Locking II)
 
-**Score: 3/5** — Core commit protocol captured; guard-table aliasing and lock-bit validation gap are significant abstractions; no fence tracking.
+**Score: 4/5** — Core commit protocol captured; guard-table aliasing and lock-bit validation gap remain; fence annotations (`lastFence`+`FenceFidelity`) added.
 
 ## Files
 

@@ -145,10 +145,10 @@ end process;
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "8e926f83" /\ chksum(tla) = "db4e9901")
 VARIABLES pc, clock, guard, mem, state, readSet, writeSet, writeBuf, snapshot, 
-          readOnly, committed
+          readOnly, committed, lastFence
 
 vars == << pc, clock, guard, mem, state, readSet, writeSet, writeBuf, 
-           snapshot, readOnly, committed >>
+           snapshot, readOnly, committed, lastFence >>
 
 ProcSet == (Thread)
 
@@ -163,6 +163,7 @@ Init == (* Global variables *)
         /\ snapshot = [t \in Thread |-> 0]
         /\ readOnly = [t \in Thread |-> TRUE]
         /\ committed = [t \in Thread |-> 0]
+        /\ lastFence = [t \in Thread |-> ""]
         /\ pc = [self \in ProcSet |-> "L_idle"]
 
 L_idle(self) == /\ pc[self] = "L_idle"
@@ -172,10 +173,11 @@ L_idle(self) == /\ pc[self] = "L_idle"
                            /\ readSet' = [readSet EXCEPT ![self] = {}]
                            /\ writeSet' = [writeSet EXCEPT ![self] = {}]
                            /\ readOnly' = [readOnly EXCEPT ![self] = TRUE]
+                           /\ lastFence' = [lastFence EXCEPT ![self] = ""]
                            /\ pc' = [pc EXCEPT ![self] = "L_active"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "L_done"]
                            /\ UNCHANGED << state, readSet, writeSet, snapshot, 
-                                           readOnly >>
+                                           readOnly, lastFence >>
                 /\ UNCHANGED << clock, guard, mem, writeBuf, committed >>
 
 L_active(self) == /\ pc[self] = "L_active"
@@ -185,6 +187,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                 ELSE /\ TRUE
                                      /\ UNCHANGED readSet
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
                         /\ UNCHANGED <<guard, state, writeSet, writeBuf, readOnly, committed>>
                      \/ /\ \E a \in Addr:
                              \E n \in 0..MAX_COMMIT:
@@ -192,7 +195,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                /\ writeBuf' = [writeBuf EXCEPT ![self, a] = n]
                                /\ readOnly' = [readOnly EXCEPT ![self] = FALSE]
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<guard, state, readSet, committed>>
+                        /\ UNCHANGED <<guard, state, readSet, committed, lastFence>>
                      \/ /\ IF readOnly[self]
                               THEN /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                                    /\ state' = [state EXCEPT ![self] = "idle"]
@@ -200,7 +203,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ UNCHANGED << state, readSet, committed >>
-                        /\ UNCHANGED <<guard, writeSet, writeBuf, readOnly>>
+                        /\ UNCHANGED <<guard, writeSet, writeBuf, readOnly, lastFence>>
                      \/ /\ IF ~readOnly[self] /\ writeSet[self] # {}
                               /\ \A a \in writeSet[self] : GuardLocked(guard[a]) = 0
                               THEN /\ guard' =      [a \in Addr |->
@@ -208,13 +211,15 @@ L_active(self) == /\ pc[self] = "L_active"
                                                THEN MakeGuard(1, GuardVersion(guard[a]))
                                                ELSE guard[a]]
                                    /\ state' = [state EXCEPT ![self] = "committing"]
+                                   /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
                                    /\ pc' = [pc EXCEPT ![self] = "L_incClock"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                   /\ UNCHANGED << guard, state >>
+                                   /\ UNCHANGED << guard, state, lastFence >>
                         /\ UNCHANGED <<readSet, writeSet, writeBuf, readOnly, committed>>
                   /\ UNCHANGED << clock, mem, snapshot >>
 
 L_incClock(self) == /\ pc[self] = "L_incClock"
+                    /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
                     /\ clock' = clock + 1
                     /\ pc' = [pc EXCEPT ![self] = "L_validate"]
                     /\ UNCHANGED << guard, mem, state, readSet, writeSet, 
@@ -223,6 +228,7 @@ L_incClock(self) == /\ pc[self] = "L_incClock"
 L_validate(self) == /\ pc[self] = "L_validate"
                     /\ IF \A <<a, v>> \in readSet[self] : GuardVersion(guard[a]) = v
                           THEN /\ state' = [state EXCEPT ![self] = "committing_v"]
+                               /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
                                /\ pc' = [pc EXCEPT ![self] = "L_writeBack"]
                                /\ UNCHANGED << guard, readSet, writeSet >>
                           ELSE /\ guard' =      [a \in Addr |->
@@ -232,6 +238,7 @@ L_validate(self) == /\ pc[self] = "L_validate"
                                /\ readSet' = [readSet EXCEPT ![self] = {}]
                                /\ writeSet' = [writeSet EXCEPT ![self] = {}]
                                /\ state' = [state EXCEPT ![self] = "idle"]
+                               /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
                                /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                     /\ UNCHANGED << clock, mem, writeBuf, snapshot, readOnly, 
                                     committed >>
@@ -244,7 +251,7 @@ L_writeBack(self) == /\ pc[self] = "L_writeBack"
                      /\ state' = [state EXCEPT ![self] = "committing_wb"]
                      /\ pc' = [pc EXCEPT ![self] = "L_release"]
                      /\ UNCHANGED << clock, guard, readSet, writeSet, writeBuf, 
-                                     snapshot, readOnly, committed >>
+                                     snapshot, readOnly, committed, lastFence >>
 
 L_release(self) == /\ pc[self] = "L_release"
                    /\ guard' =      [a \in Addr |->
@@ -255,6 +262,7 @@ L_release(self) == /\ pc[self] = "L_release"
                    /\ state' = [state EXCEPT ![self] = "idle"]
                    /\ readSet' = [readSet EXCEPT ![self] = {}]
                    /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                   /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                    /\ UNCHANGED << clock, mem, writeBuf, snapshot, readOnly >>
 
@@ -262,7 +270,8 @@ L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
                 /\ UNCHANGED << clock, guard, mem, state, readSet, writeSet, 
-                                writeBuf, snapshot, readOnly, committed >>
+                                writeBuf, snapshot, readOnly, committed, 
+                                lastFence >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_incClock(self)
                        \/ L_validate(self) \/ L_writeBack(self)
@@ -304,10 +313,15 @@ NoDirtyRead ==
 SnapshotInv ==
     \A t \in Thread : snapshot[t] <= clock
 
+(* Invariant 4: Every thread with a non-empty write-set has issued a fence *)
+FenceFidelity ==
+    \A t \in Thread : writeSet[t] # {} => lastFence[t] # ""
+
 (* Combined invariant for TLC *)
 Inv ==
     /\ LockConsistent
     /\ SnapshotInv
+    /\ FenceFidelity
 
 (* Verify the algorithm *)
 THEOREM Spec => []Inv

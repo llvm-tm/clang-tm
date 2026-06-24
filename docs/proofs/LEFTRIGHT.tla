@@ -145,10 +145,10 @@ end process;
 end algorithm; *)
 
 \* BEGIN TRANSLATION
-VARIABLES pc, mem, clock, commit_lock, committed, aborted, snapshot, read_set, 
+VARIABLES pc, mem, clock, commit_lock, committed, aborted, lastFence, snapshot, read_set, 
           write_set, read_only
 
-vars == << pc, mem, clock, commit_lock, committed, aborted, snapshot, 
+vars == << pc, mem, clock, commit_lock, committed, aborted, lastFence, snapshot, 
            read_set, write_set, read_only >>
 
 ProcSet == (Thread)
@@ -159,6 +159,7 @@ Init == (* Global variables *)
         /\ commit_lock = 0
         /\ committed = [t \in Thread |-> 0]
         /\ aborted = [t \in Thread |-> 0]
+        /\ lastFence = [self \in Thread |-> ""]
         (* Process ThreadProc *)
         /\ snapshot = [self \in Thread |-> 0]
         /\ read_set = [self \in Thread |-> {}]
@@ -170,7 +171,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
                 /\ IF committed[self] >= MaxCommits
                       THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "L_begin"]
-                /\ UNCHANGED << mem, clock, commit_lock, committed, aborted, 
+                /\ UNCHANGED << mem, clock, commit_lock, committed, aborted, lastFence,
                                 snapshot, read_set, write_set, read_only >>
 
 L_begin(self) == /\ pc[self] = "L_begin"
@@ -178,41 +179,45 @@ L_begin(self) == /\ pc[self] = "L_begin"
                  /\ read_set' = [read_set EXCEPT ![self] = {}]
                  /\ write_set' = [write_set EXCEPT ![self] = [a \in Addr |-> NoWrite]]
                  /\ read_only' = [read_only EXCEPT ![self] = TRUE]
+                 /\ lastFence' = [lastFence EXCEPT ![self] = ""]
                  /\ pc' = [pc EXCEPT ![self] = "L_active"]
                  /\ UNCHANGED << mem, clock, commit_lock, committed, aborted >>
 
 L_active(self) == /\ pc[self] = "L_active"
-                  /\ \/ /\ \E a \in Addr:
-                             IF write_set[self][a] # NoWrite
-                                THEN /\ TRUE
-                                ELSE /\ TRUE
-                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<commit_lock, committed, read_set, write_set, read_only>>
-                     \/ /\ \E a \in Addr:
-                             IF write_set[self][a] = NoWrite
-                                THEN /\ read_set' = [read_set EXCEPT ![self] = read_set[self] \union {<<a, clock, mem[a]>>}]
-                                ELSE /\ TRUE
-                                     /\ UNCHANGED read_set
-                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<commit_lock, committed, write_set, read_only>>
-                     \/ /\ \E a \in Addr:
-                             \E v \in Data:
-                               /\ write_set' = [write_set EXCEPT ![self][a] = v]
-                               /\ read_only' = [read_only EXCEPT ![self] = FALSE]
-                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<commit_lock, committed, read_set>>
-                     \/ /\ IF read_only[self]
+                  /\ (\/ /\ \E a \in Addr:
+                              IF write_set[self][a] # NoWrite
+                                 THEN /\ TRUE
+                                 ELSE /\ TRUE
+                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                         /\ UNCHANGED <<commit_lock, committed, read_set, write_set, read_only, lastFence>>
+                      \/ /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                         /\ \E a \in Addr:
+                              IF write_set[self][a] = NoWrite
+                                 THEN /\ read_set' = [read_set EXCEPT ![self] = read_set[self] \union {<<a, clock, mem[a]>>}]
+                                 ELSE /\ TRUE
+                                      /\ UNCHANGED read_set
+                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                         /\ UNCHANGED <<commit_lock, committed, write_set, read_only>>
+                      \/ /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                         /\ \E a \in Addr:
+                              \E v \in Data:
+                                /\ write_set' = [write_set EXCEPT ![self][a] = v]
+                                /\ read_only' = [read_only EXCEPT ![self] = FALSE]
+                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                         /\ UNCHANGED <<commit_lock, committed, read_set>>
+                      \/ /\ IF read_only[self]
                               THEN /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ UNCHANGED committed
-                        /\ UNCHANGED <<commit_lock, read_set, write_set, read_only>>
-                     \/ /\ IF ~read_only[self] /\ commit_lock = 0
+                         /\ UNCHANGED <<commit_lock, read_set, write_set, read_only, lastFence>>
+                      \/ /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                         /\ IF ~read_only[self] /\ commit_lock = 0
                               THEN /\ commit_lock' = self
                                    /\ pc' = [pc EXCEPT ![self] = "L_validate"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ UNCHANGED commit_lock
-                        /\ UNCHANGED <<committed, read_set, write_set, read_only>>
+                         /\ UNCHANGED <<committed, read_set, write_set, read_only>>)
                   /\ UNCHANGED << mem, clock, aborted, snapshot >>
 
 L_validate(self) == /\ pc[self] = "L_validate"
@@ -220,12 +225,15 @@ L_validate(self) == /\ pc[self] = "L_validate"
                            ver <= snapshot[self] /\ mem[a] = val
                           THEN /\ pc' = [pc EXCEPT ![self] = "L_inc_clock"]
                                /\ UNCHANGED commit_lock
+                               /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
                           ELSE /\ commit_lock' = 0
                                /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                               /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
                     /\ UNCHANGED << mem, clock, committed, aborted, snapshot, 
                                     read_set, write_set, read_only >>
 
 L_inc_clock(self) == /\ pc[self] = "L_inc_clock"
+                     /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
                      /\ clock' = clock + 1
                      /\ pc' = [pc EXCEPT ![self] = "L_write_back"]
                      /\ UNCHANGED << mem, commit_lock, committed, aborted, 
@@ -236,9 +244,10 @@ L_write_back(self) == /\ pc[self] = "L_write_back"
                                 IF write_set[self][a] # NoWrite THEN write_set[self][a] ELSE mem[a]]
                       /\ pc' = [pc EXCEPT ![self] = "L_release_lock"]
                       /\ UNCHANGED << clock, commit_lock, committed, aborted, 
-                                      snapshot, read_set, write_set, read_only >>
+                                      snapshot, read_set, write_set, read_only, lastFence >>
 
 L_release_lock(self) == /\ pc[self] = "L_release_lock"
+                        /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
                         /\ commit_lock' = 0
                         /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                         /\ pc' = [pc EXCEPT ![self] = "L_idle"]
@@ -246,6 +255,7 @@ L_release_lock(self) == /\ pc[self] = "L_release_lock"
                                         read_set, write_set, read_only >>
 
 L_abort(self) == /\ pc[self] = "L_abort"
+                 /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
                  /\ read_set' = [read_set EXCEPT ![self] = {}]
                  /\ write_set' = [write_set EXCEPT ![self] = [a \in Addr |-> NoWrite]]
                  /\ read_only' = [read_only EXCEPT ![self] = TRUE]
@@ -258,7 +268,7 @@ L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
                 /\ UNCHANGED << mem, clock, commit_lock, committed, aborted, 
-                                snapshot, read_set, write_set, read_only >>
+                                snapshot, read_set, write_set, read_only, lastFence >>
 
 ThreadProc(self) == L_idle(self) \/ L_begin(self) \/ L_active(self)
                        \/ L_validate(self) \/ L_inc_clock(self)
@@ -303,11 +313,16 @@ AtMostOneCommitting ==
               /\ pc[t2] \in {"L_validate", "L_inc_clock", "L_write_back",
                              "L_release_lock"} )
 
+(* I4: Threads with non-empty write-set have issued a fence *)
+FenceFidelity ==
+    \A t \in Thread : \E a \in Addr : write_set[t][a] # NoWrite => lastFence[t] # ""
+
 (* Combined invariant for TLC *)
 Inv ==
     /\ LockExclusion
     /\ LockHolderCommitting
     /\ AtMostOneCommitting
+    /\ FenceFidelity
 
 (* Constraint for bounded model checking *)
 ModelBound == clock <= 5 /\ \A t \in Thread : aborted[t] <= MaxCommits * 2

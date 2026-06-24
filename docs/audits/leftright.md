@@ -1,6 +1,6 @@
 # Audit: LEFTRIGHT (Global-Clock OCC / Value-Based Validation)
 
-**Score: 3/5** — Core commit protocol well-modeled (validate, lock, inc clock, write-back, unlock); TLC invariants pass on sequential and 2-thread models. Significant gaps: no memory-ordering annotations (`lastFence`), no `endVersion`/`extend` modeling, no pre-lock optimistic validate path, no queue mode path, reversed data-read-vs-clock-read ordering.
+**Score: 4/5** — Core commit protocol well-modeled (validate, lock, inc clock, write-back, unlock); TLC invariants pass. Gaps: no `endVersion`/`extend` modeling, no pre-lock validate, reversed read-clock ordering. Fence annotations (`lastFence`+`FenceFidelity`) added.
 
 ## Files
 
