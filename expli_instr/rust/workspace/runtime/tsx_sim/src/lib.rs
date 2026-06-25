@@ -82,6 +82,7 @@ const COST_CONFLICT_ABORT: u64 = 2000;
 /// Bloom filter check per address (cycles).
 const COST_BLOOM_CHECK: u64 = 2;
 
+#[allow(dead_code)]
 /// SGL owner spin-wait cycle cost — _mm_pause() busy-loop while
 /// another thread holds the SGL.  Measured from real TSXSGL profiling:
 /// fuzz_counter 2t shows ~161k spin cycles across 2091 spins = ~77/ea.

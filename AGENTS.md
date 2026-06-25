@@ -666,4 +666,89 @@ Extended `tm-sim` (real-backend replay binary) with:
 4. **SPHT profiling patch**: RDTSC instrumentation for SPHT (branch overflow + mutex fallback)
 5. **Run `run_workflow.sh` on RTM hardware** → real machine profile → validate against real TSXSGL
 
+## Session 2026-06-25 — Documentation audit + warning fixes + plugin variant fix
+
+### Documentation audit: all examples tested
+
+All documented examples across README, plugin/README.md, simulator/README.md, Rust README, backends/README.md, and docs/REQUIREMENTS.md were executed and verified.
+
+#### Explicit C++ API (all pass)
+| Example | Result |
+|---------|--------|
+| `make -C benchmarks/cpp -j4 run-test-tx` | ✅ 114/114 |
+| `make -C benchmarks/cpp BACKEND=NOREC bin/test_tx` + run | ✅ 114/114 |
+| `make -C benchmarks/cpp BACKEND=TINYSTM bin/bank` + `./bin/bank -t 2 -d 1000 --test` | ✅ Money conserved |
+| `make -C benchmarks/cpp BACKEND=TINYSTM bin/test_ds` + run | ✅ 207/207 |
+| `make check-all` (via smoke_test) | ✅ 36/36 across 12 backends |
+
+#### LLVM Plugin
+| Example | Result |
+|---------|--------|
+| `make plugin` | ✅ |
+| `make -C plugin variants` | ❌ `no_rw`/`minimal` broken → **FIXED** |
+| `make -C plugin run` | ✅ 11+ tests pass |
+| `cd benchmarks/plugin/bank && make bank_singlelock && ./bin/bank_singlelock ...` | ❌ SIGSEGV → **FIXED** |
+| `cd benchmarks/plugin/bank && make bank_tinystm && ./bin/bank_tinystm ...` | ❌ SIGSEGV → **FIXED** |
+| Race checker: `opt -load-pass-plugin=...TMRaceChecker.so -passes="tm-race-checker"` | ✅ |
+
+#### Rust API
+| Example | Result |
+|---------|--------|
+| `cargo run --release --bin bank -- -d 100 -t 2 --test` | ✅ Money conserved |
+| `cargo run ... --no-default-features --features tm/norec --bin bank ...` | ✅ Money conserved |
+| `cargo run ... --bin fuzz_counter -- -t 2 -n 10000 -c 8` | ✅ Counter invariant holds |
+| `fuzz_counter ... --no-default-features --features norec ...` | ✅ |
+| `fuzz_counter ... --no-default-features --features wbctl ... -s 42` | ✅ |
+
+#### Simulator
+| Example | Result |
+|---------|--------|
+| `tm-gen --scenario all -o /tmp/trace.jsonl` + `tm-sim --backend norec` | ✅ 9 commits / 1 abort |
+| `tm-gen --scenario lost-update + tm-sim --backend tl2` | ✅ |
+| `tm-des --trace /tmp/trace.jsonl --checkpoint-every 10` | ✅ |
+| `tm-check --trace /tmp/trace.jsonl` | ✅ |
+| `cargo test -- --test-threads=1` | ✅ 26/26 |
+
+#### Infrastructure
+| Example | Result |
+|---------|--------|
+| `./smoke_test.sh` | ✅ 36/36 |
+| `./tools/check-requirements.sh` | ⚠️ Not executable → **FIXED** (chmod +x) |
+| `clang-tm --runtime=.../tm_runtime.cpp -o myapp app.cpp` | ✅ |
+
+### Documentation bugs found
+
+| Location | Issue | Fix |
+|----------|-------|-----|
+| `README.md:145` | Explicit C++ example uses `#include "tm_api.hpp"` but actual include is `#include "expli_tm_api/tm_api.hpp"` | 📝 Doc should read `#include "expli_tm_api/tm_api.hpp"` |
+| `README.md:107` | LLVM plugin example missing `#include <cstdint>` for `int32_t` | 📝 Add `#include <cstdint>` |
+| `README.md:30-31` | Plugin bank example (`make bank_singlelock; ./bin/bank_singlelock`) crashed with SIGSEGV | 🔧 Fixed in clang-tm (auto-add `-DLLVM_TM_PLUGIN`) |
+| `plugin/README.md:206` | `make -C plugin variants` listed 6 working variants but `no_rw`/`minimal` had pre-existing build errors | 🔧 Fixed (TMTracedArgs guard + CallBase* signature) |
+
+### Warnings fixed
+
+| File | Warning | Fix |
+|------|---------|-----|
+| `tm/src/lib.rs:3` | unused import `TmxAbort` | Gated import with `#[cfg(panic_backends)]` |
+| `tm/src/lib.rs:238-244` | unexpected cfg `leftright_single` (underscore vs hyphen) | Changed to `leftright-single` |
+| `tm/src/lib.rs:240` | unexpected cfg `sgl_persistent` / `sgl_distributed` | Changed to `sgl-persistent` / `sgl-distributed` |
+| `bank.rs:1` | unused import `AtomicU64` | Removed |
+| `wbctl.rs:15,48` | unreachable statement after `return` | Added `#[cfg(not(feature = "simulation"))]` guard on `spin_loop()` |
+| `tsx_sim/src/lib.rs:88` | `COST_SGL_SPIN_WAIT` never used | Added `#[allow(dead_code)]` |
+| `sim_engine.rs:91` | `persistent_retries` never read | Added `#[allow(dead_code)]` |
+| `clang-tm` script | Unused `-I` flags in link step | Filtered out compile-only flags from final link |
+| `tm_method_instrumentation.hpp` | `TMTracedArgs` behind `DISABLE_TM_READ_WRITE` guard but used unguarded | Moved outside guard |
+| `tm_method_instrumentation.hpp` | Stub `CallInst*` type mismatch with `CallBase*` | Fixed parameter type |
+| `tools/check-requirements.sh` | Not executable | `chmod +x` |
+
+### Critical fixes
+
+1. **`clang-tm` auto-adds `-DLLVM_TM_PLUGIN`**: The `clang-tm` script now automatically adds `-DLLVM_TM_PLUGIN` when compiling a runtime source to `.o`. This fixes the DATA/TEXT symbol conflict crash for all plugin benchmarks (bank, datastructures, STAMP, etc.) without requiring individual Makefile updates. Previously, only `tm_pipeline.mk`-based builds (plugin tests) had this define.
+
+2. **`TMTracedArgs` guard fix**: Moved `DenseMap<TMTracedArgs>` outside `#ifndef DISABLE_TM_READ_WRITE` in `tm_method_instrumentation.hpp` because it's referenced by clone/redirect passes that run unconditionally. Fixed stub `instrumentMemoryIntrinsic` signature from `CallInst*` to `CallBase*` to match non-stub. Now all 6 plugin variants (`release`, `no_setjmp`, `no_rw`, `no_malloc`, `minimal`, `debug`) build correctly.
+
+### Tooling
+- LLVM 22.1.6, Rust (cargo), g++ 13, Python 3 — all verified
+- All recommended tool versions match those documented in `docs/REQUIREMENTS.md`
+
 

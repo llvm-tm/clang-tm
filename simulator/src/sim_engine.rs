@@ -88,6 +88,7 @@ pub struct SimEngine {
     /// iterations, its next begin is forced to SGL fallback.
     /// This compensates for the sequential event model's inability
     /// to interleave retries within a single tm_begin() call.
+    #[allow(dead_code)]
     persistent_retries: HashMap<u64, u64>,
 }
 

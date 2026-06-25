@@ -1,6 +1,6 @@
 /// Safe public TM API.
 
-use runtime_core::TmxAbort;
+// TmxAbort is imported within the panic-backend transaction() fn body below.
 
 // ── Backend selection via feature flags ─────────────────
 // The `wbctl` (default), `wbetl`, `wt`, `norec`, `tl2`,
@@ -235,13 +235,13 @@ exclusive_backend!("wbetl",             "wt");
     feature = "wbctl", feature = "wbetl", feature = "wt",
     feature = "norec", feature = "tl2", feature = "swisstm", feature = "dudetm",
     feature = "tsxsgl", feature = "nvhtm", feature = "spht",
-    feature = "leftright", feature = "leftright_single",
+    feature = "leftright", feature = "leftright-single",
     feature = "romulus", feature = "xtm",
-    feature = "sgl_persistent", feature = "sgl_distributed",
+    feature = "sgl-persistent", feature = "sgl-distributed",
     feature = "tikv",
 )))]
 compile_error!(
-    "At least one backend feature must be enabled: wbctl, wbetl, wt, norec, tl2, swisstm, dudetm, tsxsgl, nvhtm, spht, leftright, leftright_single, romulus, xtm, sgl_persistent, sgl_distributed, tikv"
+    "At least one backend feature must be enabled: wbctl, wbetl, wt, norec, tl2, swisstm, dudetm, tsxsgl, nvhtm, spht, leftright, leftright-single, romulus, xtm, sgl-persistent, sgl-distributed, tikv"
 );
 
 // ── TmPrimitive trait ──────────────────────────────────
@@ -411,7 +411,7 @@ where
             }
             Err(payload) => {
                 tm_abort();
-                if payload.downcast_ref::<TmxAbort>().is_some() {
+                if payload.downcast_ref::<runtime_core::TmxAbort>().is_some() {
                     continue;
                 }
                 std::panic::resume_unwind(payload);

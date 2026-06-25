@@ -214,7 +214,7 @@ static void instrumentMemoryIntrinsic(CallBase *Call, Module &M, TMRuntimeHooks 
 	//  double-erase when the caller also tracks it in ToErase.
 }
 #else
-static void instrumentMemoryIntrinsic(CallInst *, Module &, const TMRuntimeHooks &) {}
+static void instrumentMemoryIntrinsic(CallBase *, Module &, const TMRuntimeHooks &) {}
 #endif
 
 static bool isCallOnTMObject(CallBase *Call, Module &M)
@@ -243,12 +243,14 @@ static bool isCallOnTMObject(CallBase *Call, Module &M)
 	return traced;
 }
 
-#ifndef DISABLE_TM_READ_WRITE
 // Per-function map of which pointer arguments trace to TM globals.
 // Used by isTMTracedPtr to decide whether an Argument-based pointer
 // should be instrumented in a cloned function.
+// NOTE: declared outside DISABLE_TM_READ_WRITE guard because it's
+// used in clone/redirect passes that run even without read-write inst.
 static DenseMap<const Function *, SmallSet<unsigned, 4>> TMTracedArgs;
 
+#ifndef DISABLE_TM_READ_WRITE
 // Check if a pointer's base argument is TM-traced.
 // In cloned functions, an Argument base that is NOT TM-traced
 // indicates a local/stack pointer (e.g. `this` of a local container)
