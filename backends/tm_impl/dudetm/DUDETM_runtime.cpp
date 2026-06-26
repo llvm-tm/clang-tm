@@ -18,13 +18,11 @@ extern "C" int tm_serialize_unlock_all();
 
 #include "tinystm_globals.hpp"
 #include "tm_alloc_overrides.hpp"
+#include "tm_backend_macros.hpp"
 #include "dudetm/dudetm_base.hpp"
 extern const TMRealHooks g_dudetm_hooks;
 
-thread_local bool g_in_tx = false;
-thread_local FreeNode* g_deferred_frees = nullptr;
-thread_local std::unordered_set<void*> g_deferred_frees_set;
-thread_local SpecAlloc* g_spec_allocs = nullptr;
+
 
 // Thread-local redo-log batch: accumulates MALLOC/FREE entries
 // during a transaction.  Writes come from the TM write-set at
@@ -124,65 +122,11 @@ static void *real_tm_get_thread_state() {
 
 
 
-static std::recursive_mutex g_serialize_mutex;
 
-void tm_serialize_lock() { g_serialize_mutex.lock(); }
-void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
 
-// Required by tinystm_wbctl.hpp for abort cleanup
-int tm_serialize_unlock_all() {
-    while (g_serialize_mutex.try_lock()) {}
-    return 0;
-}
-
-int tm_setjmp() { return 0; }
-
-void tm_read_i16(void *addr, void *out) {
-    auto *out_words = static_cast<uint64_t *>(out);
-    out_words[0] = tinystm::tm_read_i8(static_cast<uint64_t *>(addr) + 0);
-    out_words[1] = tinystm::tm_read_i8(static_cast<uint64_t *>(addr) + 1);
-}
-void tm_read_i32(void *addr, void *out) {
-    auto *out_words = static_cast<uint64_t *>(out);
-    for (int i = 0; i < 4; i++)
-        out_words[i] = tinystm::tm_read_i8(static_cast<uint64_t *>(addr) + i);
-}
-void tm_read_i64(void *addr, void *out) {
-    auto *out_words = static_cast<uint64_t *>(out);
-    for (int i = 0; i < 8; i++)
-        out_words[i] = tinystm::tm_read_i8(static_cast<uint64_t *>(addr) + i);
-}
-
-void tm_write_i16(void *addr, void *val) {
-    auto *val_words = static_cast<const uint64_t *>(val);
-    for (int i = 0; i < 2; i++)
-        tinystm::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
-}
-void tm_write_i32(void *addr, void *val) {
-    auto *val_words = static_cast<const uint64_t *>(val);
-    for (int i = 0; i < 4; i++)
-        tinystm::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
-}
-void tm_write_i64(void *addr, void *val) {
-    auto *val_words = static_cast<const uint64_t *>(val);
-    for (int i = 0; i < 8; i++)
-        tinystm::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
-}
-
-void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len)
-{
-    for (uint64_t i = 0; i < len / 8; i++)
-        tinystm::tm_write_i8(((uint64_t *)dst) + i, *(((uint64_t *)src) + i));
-    uint64_t rem = len % 8;
-    for (uint64_t i = 0; i < rem; i++)
-        tinystm::tm_write_i1(dst + (len - rem - 1) + i, src[(len - rem - 1) + i]);
-}
-
-void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
-{
-    for (uint64_t i = 0; i < len; i++)
-        tinystm::tm_write_i1(&addr[i], val);
-}
+#define TM_BUFFER_SIZE 1024
+static __thread uint8_t tm_buffer[TM_BUFFER_SIZE];
+TM_DEFINE_PLUGIN_RW(tinystm)
 
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count) { (void)symbol_table; (void)symbol_count; }
 
@@ -291,21 +235,7 @@ static void real_tm_end()
     tm_tx_count++;
 }
 
-static uint8_t   real_tm_read_i1(uint8_t *addr)   { return tinystm::tm_read_i1(addr); }
-static uint16_t  real_tm_read_i2(uint16_t *addr)  { return tinystm::tm_read_i2(addr); }
-static uint32_t  real_tm_read_i4(uint32_t *addr)  { return tinystm::tm_read_i4(addr); }
-static uint64_t  real_tm_read_i8(uint64_t *addr)  { return tinystm::tm_read_i8(addr); }
-static float     real_tm_read_f4(float *addr)     { return tinystm::tm_read_f4(addr); }
-static double    real_tm_read_f8(double *addr)    { return tinystm::tm_read_f8(addr); }
-static void*     real_tm_read_ptr(void **addr)    { return tinystm::tm_read_ptr(addr); }
-
-static void real_tm_write_i1(uint8_t *addr, uint8_t val)     { tinystm::tm_write_i1(addr, val); }
-static void real_tm_write_i2(uint16_t *addr, uint16_t val)   { tinystm::tm_write_i2(addr, val); }
-static void real_tm_write_i4(uint32_t *addr, uint32_t val)   { tinystm::tm_write_i4(addr, val); }
-static void real_tm_write_i8(uint64_t *addr, int64_t val)    { tinystm::tm_write_i8(addr, val); }
-static void real_tm_write_f4(float *addr, float val)         { tinystm::tm_write_f4(addr, val); }
-static void real_tm_write_f8(double *addr, double val)       { tinystm::tm_write_f8(addr, val); }
-static void real_tm_write_ptr(void **addr, void *val)        { tinystm::tm_write_ptr(addr, val); }
+TM_DEFINE_READ_WRITE_HOOKS(tinystm)
 
 static void* real_tm_malloc(size_t size)
 {
@@ -358,28 +288,4 @@ static void real_tm_set_jmpbuf(void *buf) { tinystm::jmpbuf = (sigjmp_buf *)buf;
 //  Hook registration table
 // ═══════════════════════════════════════════════════════════════════
 
-const TMRealHooks g_dudetm_hooks = {
-    .begin    = real_tm_begin,
-    .end      = real_tm_end,
-    .malloc   = real_tm_malloc,
-    .calloc   = real_tm_calloc,
-    .realloc  = real_tm_realloc,
-    .free     = real_tm_free,
-    .read_i1  = real_tm_read_i1,
-    .read_i2  = real_tm_read_i2,
-    .read_i4  = real_tm_read_i4,
-    .read_i8  = real_tm_read_i8,
-    .read_f4  = real_tm_read_f4,
-    .read_f8  = real_tm_read_f8,
-    .read_ptr = real_tm_read_ptr,
-    .write_i1  = real_tm_write_i1,
-    .write_i2  = real_tm_write_i2,
-    .write_i4  = real_tm_write_i4,
-    .write_i8  = real_tm_write_i8,
-    .write_f4  = real_tm_write_f4,
-    .write_f8  = real_tm_write_f8,
-    .write_ptr = real_tm_write_ptr,
-    .get_env    = real_tm_get_env,
-    .set_jmpbuf = real_tm_set_jmpbuf,
-    .get_thread_state = real_tm_get_thread_state,
-};
+TM_REAL_HOOKS_TABLE_EXT(dudetm)

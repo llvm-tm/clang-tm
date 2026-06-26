@@ -21,8 +21,7 @@
 #include "tm_hooks.hpp"
 #include "tm_region_allocator.hpp"
 #include "tm_alloc_overrides.hpp"
-thread_local bool g_in_tx = false;
-
+#include "tm_backend_macros.hpp"
 static std::mutex global_tx_lock;
 static std::atomic<bool> initialized{false};
 
@@ -37,9 +36,6 @@ extern __thread int32_t    tm_nested_call_counter;
 extern __thread int32_t    tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;
 }
-thread_local FreeNode *g_deferred_frees = nullptr;
-thread_local std::unordered_set<void *> g_deferred_frees_set;
-thread_local SpecAlloc *g_spec_allocs = nullptr;
 static thread_local TMThreadState g_tm_state{0, 0};
 
 extern const TMRealHooks g_sgl_hooks;
@@ -103,23 +99,9 @@ void tm_exit_thread()
     tm_hook_exit_thread();
 }
 
-static std::recursive_mutex g_serialize_mutex;
-
-void tm_serialize_lock() { g_serialize_mutex.lock(); }
-
-void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
-
-int tm_setjmp() {
-    return 0;
-}
 
 
 
-void tm_set_env(sigjmp_buf* env) {
-    if (env) {
-        memcpy(&tm_jmpbuf, env, sizeof(tm_jmpbuf));
-    }
-}
 
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
@@ -232,26 +214,4 @@ static void  real_tm_free(void *ptr) {
         stm::tm_region_free(ptr);
 }
 
-const TMRealHooks g_sgl_hooks = {
-    .begin    = real_tm_begin,
-    .end      = real_tm_end,
-    .malloc   = real_tm_malloc,
-    .calloc   = real_tm_calloc,
-    .realloc  = real_tm_realloc,
-    .free     = real_tm_free,
-    .read_i1  = real_tm_read_i1,
-    .read_i2  = real_tm_read_i2,
-    .read_i4  = real_tm_read_i4,
-    .read_i8  = real_tm_read_i8,
-    .read_f4  = real_tm_read_f4,
-    .read_f8  = real_tm_read_f8,
-    .read_ptr = real_tm_read_ptr,
-    .write_i1  = real_tm_write_i1,
-    .write_i2  = real_tm_write_i2,
-    .write_i4  = real_tm_write_i4,
-    .write_i8  = real_tm_write_i8,
-    .write_f4  = real_tm_write_f4,
-    .write_f8  = real_tm_write_f8,
-    .write_ptr = real_tm_write_ptr,
-    .get_thread_state = real_tm_get_thread_state,
-};
+TM_REAL_HOOKS_TABLE(sgl)

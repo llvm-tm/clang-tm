@@ -16,13 +16,9 @@
 
 #include "tl2.hpp"
 #include "tm_alloc_overrides.hpp"
+#include "tm_backend_macros.hpp"
 #include "tm_thread_state.hpp"
 #include "tm_hooks.hpp"
-thread_local bool g_in_tx = false;
-thread_local FreeNode* g_deferred_frees = nullptr;
-thread_local std::unordered_set<void*> g_deferred_frees_set;
-thread_local SpecAlloc* g_spec_allocs = nullptr;
-
 // TL2-specific jmpbuf tracking (defined here, declared extern in tl2.hpp)
 thread_local bool tm_jmpbuf_initialized = false;
 
@@ -98,24 +94,9 @@ extern "C" void tm_exit_thread()
     tl2::exit_thread();
 }
 
-static std::recursive_mutex g_serialize_mutex;
-
-extern "C" void tm_serialize_lock() { g_serialize_mutex.lock(); }
-
-extern "C" void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
-
-extern "C" int tm_setjmp() {
-    return 0;
-}
 
 
 
-extern "C" void tm_set_env(sigjmp_buf* env) {
-    if (env) {
-        memcpy(&tm_jmpbuf, env, sizeof(sigjmp_buf));
-        tm_is_init_ready = 1;
-    }
-}
 
 // Wrapper functions matching plugin interface (2-arg read/write, no symbol_id)
 
@@ -160,22 +141,6 @@ static uint64_t real_tm_read_i8(uint64_t *addr) {
     return tl2::tm_read_i8(addr);
 }
 
-extern "C" void tm_read_i16(void *addr, void *out) {
-    auto *out_words = static_cast<uint64_t *>(out);
-    out_words[0] = tl2::tm_read_i8(static_cast<uint64_t *>(addr) + 0);
-    out_words[1] = tl2::tm_read_i8(static_cast<uint64_t *>(addr) + 1);
-}
-extern "C" void tm_read_i32(void *addr, void *out) {
-    auto *out_words = static_cast<uint64_t *>(out);
-    for (int i = 0; i < 4; i++)
-        out_words[i] = tl2::tm_read_i8(static_cast<uint64_t *>(addr) + i);
-}
-extern "C" void tm_read_i64(void *addr, void *out) {
-    auto *out_words = static_cast<uint64_t *>(out);
-    for (int i = 0; i < 8; i++)
-        out_words[i] = tl2::tm_read_i8(static_cast<uint64_t *>(addr) + i);
-}
-
 static float real_tm_read_f4(float *addr) {
     return tl2::tm_read_f4(addr);
 }
@@ -186,14 +151,6 @@ static double real_tm_read_f8(double *addr) {
 
 static void *real_tm_read_ptr(void **addr) {
     return tl2::tm_read_ptr((volatile void**)addr);
-}
-
-extern "C" void *tm_read_z(uint8_t *addr, uint64_t len) {
-    assert(len < TM_BUFFER_SIZE);
-    for (uint64_t i = 0; i < len; i++) {
-        tm_buffer[i] = tl2::tm_read_i1(&addr[i]);
-    }
-    return tm_buffer;
 }
 
 // Write wrappers — 2 args (addr + val, symbol_id removed)
@@ -213,22 +170,6 @@ static void real_tm_write_i8(uint64_t *addr, int64_t val) {
     tl2::tm_write_i8(addr, val);
 }
 
-extern "C" void tm_write_i16(void *addr, void *val) {
-    auto *val_words = static_cast<const uint64_t *>(val);
-    for (int i = 0; i < 2; i++)
-        tl2::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
-}
-extern "C" void tm_write_i32(void *addr, void *val) {
-    auto *val_words = static_cast<const uint64_t *>(val);
-    for (int i = 0; i < 4; i++)
-        tl2::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
-}
-extern "C" void tm_write_i64(void *addr, void *val) {
-    auto *val_words = static_cast<const uint64_t *>(val);
-    for (int i = 0; i < 8; i++)
-        tl2::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
-}
-
 static void real_tm_write_f4(float *addr, float val) {
     tl2::tm_write_f4(addr, val);
 }
@@ -241,17 +182,7 @@ static void real_tm_write_ptr(void **addr, void *val) {
     tl2::tm_write_ptr((volatile void**)addr, val);
 }
 
-extern "C" void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len) {
-    for (uint64_t i = 0; i < len; i++) {
-        tl2::tm_write_i1(&dst[i], src[i]);
-    }
-}
-
-extern "C" void tm_memset(uint8_t *addr, uint8_t val, uint64_t len) {
-    for (uint64_t i = 0; i < len; i++) {
-        tl2::tm_write_i1(&addr[i], val);
-    }
-}
+TM_DEFINE_PLUGIN_RW(tl2)
 
 extern "C" void tm_load_symbols(void *symbol_table, uint32_t symbol_count) {
 }
@@ -270,26 +201,4 @@ static void  real_tm_free(void* ptr) {
     }
 }
 
-const TMRealHooks g_tl2_hooks = {
-    .begin    = real_tm_begin,
-    .end      = real_tm_end,
-    .malloc   = real_tm_malloc,
-    .calloc   = real_tm_calloc,
-    .realloc  = real_tm_realloc,
-    .free     = real_tm_free,
-    .read_i1  = real_tm_read_i1,
-    .read_i2  = real_tm_read_i2,
-    .read_i4  = real_tm_read_i4,
-    .read_i8  = real_tm_read_i8,
-    .read_f4  = real_tm_read_f4,
-    .read_f8  = real_tm_read_f8,
-    .read_ptr = real_tm_read_ptr,
-    .write_i1  = real_tm_write_i1,
-    .write_i2  = real_tm_write_i2,
-    .write_i4  = real_tm_write_i4,
-    .write_i8  = real_tm_write_i8,
-    .write_f4  = real_tm_write_f4,
-    .write_f8  = real_tm_write_f8,
-    .write_ptr = real_tm_write_ptr,
-    .get_thread_state = real_tm_get_thread_state,
-};
+TM_REAL_HOOKS_TABLE(tl2)

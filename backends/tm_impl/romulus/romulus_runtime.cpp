@@ -9,13 +9,10 @@
 
 #include "romulus.hpp"
 #include "tm_alloc_overrides.hpp"
+#include "tm_backend_macros.hpp"
 #include "tm_hooks.hpp"
 extern const TMRealHooks g_romulus_hooks;
 
-thread_local bool g_in_tx = false;
-thread_local FreeNode *g_deferred_frees = nullptr;
-thread_local std::unordered_set<void *> g_deferred_frees_set;
-thread_local SpecAlloc *g_spec_allocs = nullptr;
 
 namespace romulus {
 
@@ -159,46 +156,14 @@ static void *real_tm_realloc(void *ptr, size_t size) {
     return p;
 }
 
-static uint8_t  real_tm_read_i1(uint8_t *addr)  { return romulus::tm_read<uint8_t, romulus::ValueType::UINT8>(addr); }
-static uint16_t real_tm_read_i2(uint16_t *addr) { return romulus::tm_read<uint16_t, romulus::ValueType::UINT16>(addr); }
-static uint32_t real_tm_read_i4(uint32_t *addr) { return romulus::tm_read<uint32_t, romulus::ValueType::UINT32>(addr); }
-static uint64_t real_tm_read_i8(uint64_t *addr) { return romulus::tm_read<uint64_t, romulus::ValueType::UINT64>(addr); }
-static void    real_tm_write_i1(uint8_t *addr, uint8_t val)   { romulus::tm_write<uint8_t, romulus::ValueType::UINT8>(addr, val); }
-static void    real_tm_write_i2(uint16_t *addr, uint16_t val) { romulus::tm_write<uint16_t, romulus::ValueType::UINT16>(addr, val); }
-static void    real_tm_write_i4(uint32_t *addr, uint32_t val) { romulus::tm_write<uint32_t, romulus::ValueType::UINT32>(addr, val); }
-static void    real_tm_write_i8(uint64_t *addr, int64_t val) { romulus::tm_write<uint64_t, romulus::ValueType::UINT64>(addr, (uint64_t)val); }
+TM_DEFINE_READ_WRITE_HOOKS_WITH_I8_CAST(romulus, (uint64_t)v)
 
-static float  real_tm_read_f4(float *addr)  { return romulus::tm_read<float, romulus::ValueType::FLOAT>(addr); }
-static double real_tm_read_f8(double *addr) { return romulus::tm_read<double, romulus::ValueType::DOUBLE>(addr); }
-static void   real_tm_write_f4(float *addr, float val)     { romulus::tm_write<float, romulus::ValueType::FLOAT>(addr, val); }
-static void   real_tm_write_f8(double *addr, double val)   { romulus::tm_write<double, romulus::ValueType::DOUBLE>(addr, val); }
-
-static void *real_tm_read_ptr(void **addr)  { return romulus::tm_read<void *, romulus::ValueType::POINTER>(addr); }
-static void  real_tm_write_ptr(void **addr, void *val) { romulus::tm_write<void *, romulus::ValueType::POINTER>(addr, val); }
+static void *real_tm_get_thread_state() {
+    return (void*)&tm_nested_call_counter;
+}
 
 // ═══════════════════════════════════════════════════════════════════
 //  Hook registration table
 // ═══════════════════════════════════════════════════════════════════
 
-const TMRealHooks g_romulus_hooks = {
-    .begin    = real_tm_begin,
-    .end      = real_tm_end,
-    .malloc   = real_tm_malloc,
-    .calloc   = real_tm_calloc,
-    .realloc  = real_tm_realloc,
-    .free     = real_tm_free,
-    .read_i1  = real_tm_read_i1,
-    .read_i2  = real_tm_read_i2,
-    .read_i4  = real_tm_read_i4,
-    .read_i8  = real_tm_read_i8,
-    .read_f4  = real_tm_read_f4,
-    .read_f8  = real_tm_read_f8,
-    .read_ptr = real_tm_read_ptr,
-    .write_i1  = real_tm_write_i1,
-    .write_i2  = real_tm_write_i2,
-    .write_i4  = real_tm_write_i4,
-    .write_i8  = real_tm_write_i8,
-    .write_f4  = real_tm_write_f4,
-    .write_f8  = real_tm_write_f8,
-    .write_ptr = real_tm_write_ptr,
-};
+TM_REAL_HOOKS_TABLE(romulus);

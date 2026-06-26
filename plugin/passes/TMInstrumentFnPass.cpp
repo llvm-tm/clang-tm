@@ -31,13 +31,10 @@ public:
 		}
 
 		Module *M = F.getParent();
-		{
-			std::string CloneName = (F.getName() + TM_CLONE_SUFFIX).str();
-			if (M->getFunction(CloneName)) {
-				TM_DEBUG("%s has queue clone %s, skipping re-instrumentation",
-				         F.getName().str().c_str(), CloneName.c_str());
-				return PreservedAnalyses::all();
-			}
+		if (Function *Clone = findClone(&F, *M)) {
+			TM_DEBUG("%s has queue clone %s, skipping re-instrumentation",
+			         F.getName().str().c_str(), Clone->getName().str().c_str());
+			return PreservedAnalyses::all();
 		}
 
 		TM_DEBUG("TMInstrumentFnPass: instrumenting function %s",
@@ -51,37 +48,7 @@ public:
 		if (TMAudit)
 			auditTXFunctionLoadsStores(F, *M);
 
-		SmallVector<Instruction *, 16> ToErase;
-		SmallVector<CallBase *, 8> MemIntrinsics;
-
-		for (auto &BB : F) {
-			for (auto InstIt = BB.begin(); InstIt != BB.end();) {
-				Instruction *I = &*InstIt++;
-				IRBuilder<> B(I->getParent(), I->getIterator());
-#ifndef DISABLE_TM_READ_WRITE
-				if (auto *Call = dyn_cast<CallBase>(I))
-					if (needsMemIntrinsicInstrumentation(Call, *M)) {
-						MemIntrinsics.push_back(Call);
-						continue;
-					}
-#endif
-#ifndef DISABLE_MALLOC_FREE
-				if (auto *Call = dyn_cast<CallBase>(I))
-					if (handleMallocFree(Call, B, H, ToErase))
-						continue;
-#endif
-#ifndef DISABLE_TM_READ_WRITE
-				handleLoadStore(I, F, *M, H, ToErase);
-#endif
-			}
-		}
-
-		for (auto *Call : MemIntrinsics) {
-			tm_method_instrumentation::instrumentMemoryIntrinsic(Call, *M, H);
-			ToErase.push_back(Call);
-		}
-		for (Instruction *I : ToErase)
-			I->eraseFromParent();
+		instrumentFunctionBody(F, *M, H);
 
 		return PreservedAnalyses::none();
 	}

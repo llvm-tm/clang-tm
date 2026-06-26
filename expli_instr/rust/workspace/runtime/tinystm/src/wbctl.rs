@@ -68,20 +68,6 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     with_tx(|tx| ws_write(&mut tx.write_set, addr, tv.clone()));
 }
 
-fn apply_typed_value(addr: usize, tv: &TypedValue) {
-    unsafe {
-        match tv {
-            TypedValue::U8(v) => (addr as *mut u8).write(*v),
-            TypedValue::U16(v) => (addr as *mut u16).write(*v),
-            TypedValue::U32(v) => (addr as *mut u32).write(*v),
-            TypedValue::U64(v) => (addr as *mut u64).write(*v),
-            TypedValue::Bytes(b) => {
-                std::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, b.len());
-            }
-        }
-    }
-}
-
 pub fn tm_abort() {
     flush_tx();
 }
@@ -101,7 +87,7 @@ pub fn tm_commit() -> bool {
     gc_tick();
     fence(Ordering::SeqCst);
     if !validate_read_set(&tx.read_set) { unlock_indices(&idxs); TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] crate::common::TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; }
-    for (addr, entry) in &tx.write_set { apply_typed_value(*addr, &entry.value); }
+    for (addr, entry) in &tx.write_set { unsafe { runtime_core::apply_typed_value(*addr, &entry.value); } }
     fence(Ordering::SeqCst);
     unlock_indices(&idxs);
     update_read_write_stats(tx.read_set.len(), tx.write_set.len());

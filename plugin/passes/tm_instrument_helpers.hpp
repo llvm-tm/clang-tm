@@ -72,36 +72,9 @@ static void checkMissingTransactionAnnotations(Module &M)
 				if (!Ptr)
 					continue;
 
-				if (tracesFromTMGlobal(Ptr, M)) {
-					// Trace following same path as tracesFromTMGlobal
-					StringRef GlobalName = "<TM global>";
-					Value *Trace = Ptr;
-					for (int i = 0; i < 10 && Trace; i++) {
-						Trace = Trace->stripPointerCasts();
-						if (auto *GV = dyn_cast<GlobalVariable>(Trace)) {
-							if (isTMAnnotatedGlobal(GV, M)) {
-								GlobalName = GV->getName();
-								break;
-							}
-						}
-						if (auto *GEP = dyn_cast<GetElementPtrInst>(Trace))
-							Trace = const_cast<Value *>(GEP->getPointerOperand());
-						else if (auto *GEPOp = dyn_cast<GEPOperator>(Trace))
-							Trace = const_cast<Value *>(GEPOp->getPointerOperand());
-						else if (auto *Load = dyn_cast<LoadInst>(Trace))
-							Trace = const_cast<Value *>(Load->getPointerOperand());
-						else if (auto *Call = dyn_cast<CallBase>(Trace)) {
-							// Try arguments in reverse (last arg is often 'this')
-							for (unsigned a = Call->arg_size(); a > 0; a--) {
-								Value *A = Call->getArgOperand(a - 1);
-								if (tracesFromTMGlobal(A, M))
-									{ Trace = A; break; }
-								if (a == 1) Trace = nullptr;
-							}
-						} else {
-							break;
-						}
-					}
+				GlobalVariable *FoundGV = nullptr;
+				if (tracesFromTMGlobal(Ptr, M, nullptr, nullptr, 0, &FoundGV)) {
+					StringRef GlobalName = FoundGV ? FoundGV->getName() : "<TM global>";
 
 					DebugLoc DL = I.getDebugLoc();
 					errs() << "warning: ";
@@ -491,6 +464,46 @@ static bool isEscapedAlloca(const AllocaInst *AI, const Function *F)
 	return false;
 }
 
+// ── Shared: isTLSGlobal (thread-local globals skip) ────
+// TLS globals are thread-private runtime state (e.g.,
+// tm_nested_call_counter, tm_longjmp_ret) that must use raw loads/stores.
+// Routing them through tm_read/tm_write would fail in backends that
+// validate tx->active (NOrec), since reads/writes to these globals
+// happen before tm_begin() and after tm_end().
+static bool isTLSGlobal(Value *Ptr) {
+	if (auto *GV = dyn_cast<GlobalVariable>(getBaseObjectNoLoad(Ptr)))
+		return GV->isThreadLocal();
+	return false;
+}
+
+// ── Shared: isThreadStateAccess (tm_get_thread_state skip) ──
+// Loads/stores that access TM runtime thread state fields via
+// tm_get_thread_state().  These are injected by injectTransactionBeginEnd
+// and must use raw loads/stores (routing through tm_read/tm_write would
+// fail because tx->active is not yet set when we read the counter).
+static bool isThreadStateAccess(Value *Ptr) {
+	Value *Base = Ptr->stripPointerCasts();
+	if (auto *GEP = dyn_cast<GetElementPtrInst>(Base))
+		Base = GEP->getPointerOperand()->stripPointerCasts();
+	if (auto *Call = dyn_cast<CallInst>(Base)) {
+		if (Call->getCalledFunction() &&
+		    Call->getCalledFunction()->getName() == "tm_get_thread_state")
+			return true;
+		if (auto *Load = dyn_cast<LoadInst>(Call->getCalledOperand()))
+			if (auto *GV = dyn_cast<GlobalVariable>(Load->getPointerOperand()))
+				if (GV->getName() == "tm_get_thread_state")
+					return true;
+	}
+	return false;
+}
+
+// ── Shared: findClone — return _tm_clone of a function if it exists ──
+static Function *findClone(Function *Original, Module &M)
+{
+	std::string CloneName = (Original->getName() + TM_CLONE_SUFFIX).str();
+	return M.getFunction(CloneName);
+}
+
 // Default: instrument ALL loads/stores in TM transaction functions.
 // Skip stack-allocated variables (allocas) — they are thread-private and
 // their addresses change after setjmp restart.  Also skip tm_local.
@@ -517,34 +530,11 @@ static bool handleLoadStore(Instruction *I,
 	// Routing them through tm_read/tm_write would fail in backends that
 	// validate tx->active (NOrec), since reads/writes to these globals
 	// happen before tm_begin() and after tm_end().
-	auto isTLSGlobal = [](Value *Ptr) -> bool {
-		if (auto *GV = dyn_cast<GlobalVariable>(getBaseObjectNoLoad(Ptr)))
-			return GV->isThreadLocal();
-		return false;
-	};
 
 	// Skip loads/stores that access TM runtime thread state fields via
 	// tm_get_thread_state().  These are injected by injectTransactionBeginEnd
 	// and must use raw loads/stores (routing through tm_read/tm_write would
 	// fail because tx->active is not yet set when we read the counter).
-	auto isThreadStateAccess = [](Value *Ptr) -> bool {
-		Value *Base = Ptr->stripPointerCasts();
-		if (auto *GEP = dyn_cast<GetElementPtrInst>(Base))
-			Base = GEP->getPointerOperand()->stripPointerCasts();
-		if (auto *Call = dyn_cast<CallInst>(Base)) {
-			// Direct call: call ptr @tm_get_thread_state()
-			if (Call->getCalledFunction() &&
-			    Call->getCalledFunction()->getName() == "tm_get_thread_state")
-				return true;
-			// Indirect call: %fn = load ptr, ptr @tm_get_thread_state
-			//               call ptr %fn()
-			if (auto *Load = dyn_cast<LoadInst>(Call->getCalledOperand()))
-				if (auto *GV = dyn_cast<GlobalVariable>(Load->getPointerOperand()))
-					if (GV->getName() == "tm_get_thread_state")
-						return true;
-		}
-		return false;
-	};
 
 	// Skip loads/stores from TM runtime hook globals (e.g. @tm_begin,
 	// @tm_read_ptr).  These are function-pointer DATA variables declared
@@ -745,5 +735,10 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 		CleanupBuilder.CreateRet(
 		    CleanupBuilder.CreateLoad(F.getReturnType(), RetValAlloca));
 }
+
+// ── Shared: instrumentFunctionBody — 3-pass loop over instructions ──
+// Defined in TMInstrumentHelpers.cpp to break circular include dependency
+// (needs tm_method_instrumentation.hpp for instrumentMemoryIntrinsic).
+void instrumentFunctionBody(Function &F, Module &M, TMRuntimeHooks &H);
 
 #endif // TM_INSTRUMENT_HELPERS_HPP

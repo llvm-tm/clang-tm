@@ -10,7 +10,7 @@ use std::cell::RefCell;
 #[cfg(feature = "simulation")]
 use std::cell::UnsafeCell;
 use std::sync::OnceLock;
-pub use runtime_core::{Primitive, TypedValue, WriteBack};
+pub use runtime_core::{Primitive, read_mem_val, TypedValue, WriteBack};
 
 // ── SyncUnsafeCell: UnsafeCell that implements Sync ────
 // Safe because simulation mode is single-threaded.
@@ -321,17 +321,6 @@ fn flush_tx() -> Option<Box<TxState>> {
 static THR_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // ── Memory helpers ─────────────────────────────────────
-fn read_mem_val(addr: usize, sz: u8) -> u64 {
-    unsafe {
-        match sz {
-            1 => (addr as *const u8).read() as u64,
-            2 => (addr as *const u16).read() as u64,
-            4 => (addr as *const u32).read() as u64,
-            8 => (addr as *const u64).read(),
-            _ => 0,
-        }
-    }
-}
 
 fn write_mem_typed(addr: usize, tv: &TypedValue) {
     unsafe {
@@ -345,16 +334,6 @@ fn write_mem_typed(addr: usize, tv: &TypedValue) {
                 for (i, &byte) in b.iter().enumerate() { dst.add(i).write(byte); }
             }
         }
-    }
-}
-
-fn byte_size_of_tv(tv: &TypedValue) -> u8 {
-    match tv {
-        TypedValue::U8(_) => 1,
-        TypedValue::U16(_) => 2,
-        TypedValue::U32(_) => 4,
-        TypedValue::U64(_) => 8,
-        TypedValue::Bytes(b) => b.len() as u8,
     }
 }
 
@@ -444,7 +423,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
 
     let tv = val.to_typed();
-    let sz = byte_size_of_tv(&tv);
+    let sz = tv.byte_size() as u8;
 
     with_tx(|tx| {
         let idx = lock_index(addr);

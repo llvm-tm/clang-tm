@@ -7,7 +7,7 @@
 use core::sync::atomic::{fence, AtomicU64, Ordering};
 #[cfg(not(feature = "simulation"))]
 use std::cell::RefCell;
-pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
+pub use runtime_core::{apply_typed_value, read_mem_val, tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
 
 // ── Thread-local / simulation state ──────────────────────
 // Normal mode: thread_local! for production multi-threaded use.
@@ -130,28 +130,6 @@ fn flush_tx() -> Option<Box<TxState>> {
     map.get_mut(&tid).and_then(|s| s.take())
 }
 
-fn read_mem_val(addr: usize, sz: u8) -> u64 {
-    unsafe {
-        match sz {
-            1 => (addr as *const u8).read() as u64,
-            2 => (addr as *const u16).read() as u64,
-            4 => (addr as *const u32).read() as u64,
-            8 => (addr as *const u64).read(),
-            _ => 0,
-        }
-    }
-}
-
-fn byte_size_of_tv(tv: &TypedValue) -> u8 {
-    match tv {
-        TypedValue::U8(_) => 1,
-        TypedValue::U16(_) => 2,
-        TypedValue::U32(_) => 4,
-        TypedValue::U64(_) => 8,
-        TypedValue::Bytes(b) => b.len() as u8,
-    }
-}
-
 // ── Value-based validation ──────────────────────────────
 // Re-reads every address in the read-set from memory and
 // compares to the observed value.  Returns the current clock
@@ -198,7 +176,7 @@ fn read_word<T: Primitive>(addr: usize) -> T {
     let ws_val = with_tx(|tx| {
         for e in tx.write_set.iter().rev() {
             if e.addr == addr {
-                let esz = byte_size_of_tv(&e.value);
+                let esz = e.value.byte_size() as u8;
                 if esz == sz {
                     return Some(T::from_typed(&e.value));
                 }
@@ -274,7 +252,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     }
 
     let tv = val.to_typed();
-    let sz = byte_size_of_tv(&tv);
+    let sz = tv.byte_size() as u8;
 
     with_tx(|tx| {
         tx.read_only = false;
@@ -282,7 +260,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         // Scan from end for existing entry at this address
         for i in (0..tx.write_set.len()).rev() {
             if tx.write_set[i].addr == addr {
-                let esz = byte_size_of_tv(&tx.write_set[i].value);
+                let esz = tx.write_set[i].value.byte_size() as u8;
                 if esz == sz {
                     tx.write_set[i].value = tv;
                     return;
@@ -303,20 +281,6 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
 fn apply_write_set(write_set: &[WriteEntry]) {
     for e in write_set {
         apply_typed_value(e.addr, &e.value);
-    }
-}
-
-fn apply_typed_value(addr: usize, tv: &TypedValue) {
-    unsafe {
-        match tv {
-            TypedValue::U8(v) => (addr as *mut u8).write(*v),
-            TypedValue::U16(v) => (addr as *mut u16).write(*v),
-            TypedValue::U32(v) => (addr as *mut u32).write(*v),
-            TypedValue::U64(v) => (addr as *mut u64).write(*v),
-            TypedValue::Bytes(b) => {
-                std::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, b.len());
-            }
-        }
     }
 }
 
