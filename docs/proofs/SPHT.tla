@@ -62,6 +62,7 @@ L_idle:
             IN IF candidates = {}
                THEN mem[a]
                ELSE pcl[self][CHOOSE i \in candidates : TRUE][2]];
+        tsx_buffer[self] := [a \in Addr |-> NoWrite];
         pcl[self] := << >>;
         pcl_epoch_start[self] := 1;
         recovered[self] := TRUE;

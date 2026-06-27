@@ -77,9 +77,12 @@ L_idle:
             mem := [a \in Addr |->
                 IF \E i \in 1..Len(redo_log[self]) : redo_log[self][i][1] = a
                 THEN
-                    LET chosen_i == CHOOSE i \in 1..Len(redo_log[self]) :
-                                        redo_log[self][i][1] = a
-                    IN redo_log[self][chosen_i][2]
+                    LET LastIdx ==
+                        CHOOSE i \in 1..Len(redo_log[self]) :
+                            redo_log[self][i][1] = a /\
+                            \A j \in 1..Len(redo_log[self]) :
+                                redo_log[self][j][1] = a => j <= i
+                    IN redo_log[self][LastIdx][2]
                 ELSE mem[a]];
             checkpoint[self] := FALSE;
             cp_valid[self] := FALSE;
@@ -234,9 +237,12 @@ L_idle(self) == /\ pc[self] = "L_idle"
                             THEN /\ mem' =    [a \in Addr |->
                                            IF \E i \in 1..Len(redo_log[self]) : redo_log[self][i][1] = a
                                            THEN
-                                               LET chosen_i == CHOOSE i \in 1..Len(redo_log[self]) :
-                                                                   redo_log[self][i][1] = a
-                                               IN redo_log[self][chosen_i][2]
+                                                LET LastIdx ==
+                                                    CHOOSE i \in 1..Len(redo_log[self]) :
+                                                        redo_log[self][i][1] = a /\
+                                                        \A j \in 1..Len(redo_log[self]) :
+                                                            redo_log[self][j][1] = a => j <= i
+                                                IN redo_log[self][LastIdx][2]
                                            ELSE mem[a]]
                                  /\ checkpoint' = [checkpoint EXCEPT ![self] = FALSE]
                                  /\ cp_valid' = [cp_valid EXCEPT ![self] = FALSE]
