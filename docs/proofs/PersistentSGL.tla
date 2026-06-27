@@ -27,7 +27,7 @@ variables
     mem = [a \in Addr |-> 0],
     nvm = [a \in Addr |-> 0],
     state = [t \in Thread |-> "idle"],
-    version = 0,
+    version = 0,   (* NOTE: Written but never read by any guard or invariant. Kept for model completeness -- tracks commit count for ModelBound. *)
     committed = [t \in Thread |-> 0],
     crashed = FALSE,
     recovered = FALSE;

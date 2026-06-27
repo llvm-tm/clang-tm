@@ -79,7 +79,7 @@ variables
     log_tail = [t \in Thread |-> 0],
     replayer_state = "idle",
     persist_file = << >>,
-    batch_marker = [t \in Thread |-> 0],
+    batch_marker = [t \in Thread |-> 0],   (* NOTE: Declared but never written or read. *)
     recovered = FALSE;
 
 process ThreadProc \in Thread
@@ -390,13 +390,16 @@ RecoveredFlag ==
     recovered = TRUE => \A t \in Thread : IsEmpty(t)
 
 (*── I4: Logged writes match the STM commit that produced them ─────*)
+(* NOTE: Fixed universal/existential confusion. OP_WRITE entries have format *)
+(* <<OP_WRITE, a, v>> (no thread field). The old version used \A t to match *)
+(* a thread field that doesn't exist. Replaced with \E t: there exists some *)
+(* thread that committed before each OP_WRITE.                              *)
 LogWriteMatch ==
-    \A t \in Thread :
-        \A i \in 1..Len(persist_file) :
-            persist_file[i][1] = OP_WRITE =>
-                \E prev_idx \in 1..i-1 :
-                    persist_file[prev_idx][1] = OP_COMMIT_BEGIN /\
-                    persist_file[prev_idx][2] = t
+    \A i \in 1..Len(persist_file) :
+        persist_file[i][1] = OP_WRITE =>
+            \E prev_idx \in 1..i-1, t \in Thread :
+                persist_file[prev_idx][1] = OP_COMMIT_BEGIN /\
+                persist_file[prev_idx][2] = t
 
 (*====================================================================*)
 (* Fairness and Liveness                                              *)

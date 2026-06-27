@@ -48,7 +48,7 @@ variables
     readOnly = [t \in Thread |-> TRUE],
     committed = [t \in Thread |-> 0],
     aborted = [t \in Thread |-> 0],
-    rsSnapshot = [t \in Thread |-> 0],
+    rsSnapshot = [t \in Thread |-> 0],   (* NOTE: Set on begin, never read by any guard or invariant. Kept for documentation. *)
     lastWriter = [a \in Addr |-> 0],
     lastWriteClock = [a \in Addr |-> 0];
 

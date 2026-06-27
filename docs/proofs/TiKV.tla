@@ -36,10 +36,10 @@ variables
     kv_locks = [k \in Key |-> 0],
     write_set = [t \in Thread |-> [k \in Key |-> NoWrite]],
     read_set = [t \in Thread |-> {}],
-    snapshot = [t \in Thread |-> 0],
+    snapshot = [t \in Thread |-> 0],       (* NOTE: Set on begin, never read by guard/invariant. *)
     primary_key = [t \in Thread |-> 0],
-    prewrite_ok = [t \in Thread |-> FALSE],
-    commit_ts = [t \in Thread |-> 0],
+    prewrite_ok = [t \in Thread |-> FALSE], (* NOTE: Written in prewrite/commit/rollback, never read. *)
+    commit_ts = [t \in Thread |-> 0],       (* NOTE: Set on commit, never read. *)
     committed = [t \in Thread |-> 0],
     aborted = [t \in Thread |-> 0],
     retry_count = [t \in Thread |-> 0];
