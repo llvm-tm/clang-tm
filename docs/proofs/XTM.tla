@@ -333,8 +333,8 @@ WritebackConsistent ==
         pc[t] = "L_writeback" =>
             \A p \in Page : write_set[t][p] # NoWrite => xadt_owner[p] = t
 
-(* I5: Page versions never decrease *)
-VersionMonotonic ==
+(* I5: Page versions are non-negative (not monotonicity — just a basic sanity check) *)
+VersionNonNegative ==
     \A p \in Page : xadt_version[p] >= 0
 
 (* I6: No thread owns pages while idle *)
@@ -353,7 +353,7 @@ Inv ==
     /\ OwnershipTracked
     /\ WriteTrackedOwnership
     /\ WritebackConsistent
-    /\ VersionMonotonic
+    /\ VersionNonNegative
     /\ NoDirtyRead
     /\ FenceFidelity
 

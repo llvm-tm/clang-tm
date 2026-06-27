@@ -208,6 +208,10 @@ RecoveryConsistency ==
     recovered = TRUE => mem = nvm
 
 (*── I4: NVM always equals mem for committed writes (dual-write) ──*)
+(* NOTE: Model simplification — the dual-write is atomic (mem and nvm updated  *)
+(* together). In the real C++ backend, NVM writes are deferred to a flush      *)
+(* phase; splitting them would require a non-atomic write action with crash    *)
+(* between mem and nvm update to verify durability semantics.                  *)
 NVMAgreesWithMem ==
     \A a \in Addr :
         mem[a] = nvm[a]

@@ -366,6 +366,6 @@ Spec_SF == Spec /\ \A self \in Thread : SF_vars(ThreadProc(self))
 
 (* Liveness: every active thread eventually becomes idle *)
 ProgressProperty ==
-    \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_begin", "L_done"})
+    \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_done"})
 
 =======================================================================

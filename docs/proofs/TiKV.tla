@@ -373,6 +373,9 @@ NoStaleLocks ==
         pc[t] = "L_idle" =>
             \A k \in Key : kv_locks[k] # t
 
+(* NOTE: Vacuous invariant — HasWritten(t, k) is always false when *)
+(* pc[t]="L_idle" because the write-set is cleared on every path   *)
+(* back to L_idle. Kept for documentation; excluded from Inv.      *)
 CommittedVisible ==
     \A t \in Thread, k \in Key :
         pc[t] = "L_idle" /\ HasWritten(t, k) =>
