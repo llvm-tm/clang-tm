@@ -59,6 +59,23 @@ static bool verifyInstrumentation(Module &M)
 		return true;
 	}
 
+	auto isTLSGlobal = [](Value *Ptr) -> bool {
+		if (auto *GV = dyn_cast<GlobalVariable>(getBaseObjectNoLoad(Ptr)))
+			return GV->isThreadLocal();
+		return false;
+	};
+
+	auto isThreadStateAccess = [](Value *Ptr) -> bool {
+		Value *Base = Ptr->stripPointerCasts();
+		if (auto *GEP = dyn_cast<GetElementPtrInst>(Base))
+			Base = GEP->getPointerOperand()->stripPointerCasts();
+		if (auto *Call = dyn_cast<CallInst>(Base))
+			if (Call->getCalledFunction() &&
+			    Call->getCalledFunction()->getName() == "tm_get_thread_state")
+				return true;
+		return false;
+	};
+
 	bool allOk = true;
 	for (auto &F : M) {
 		if (F.isDeclaration())

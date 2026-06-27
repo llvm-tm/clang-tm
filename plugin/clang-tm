@@ -141,7 +141,7 @@ ALLOW_OPAQUE=0
 STRICT_OPAQUE=0
 OUTPUT=""
 SOURCES=()
-CXXFLAGS=()
+CXXFLAGS=(-DLLVM_TM_PLUGIN)
 OPT_LEVEL=""       # auto-detected from CXXFLAGS: O0, O1, O2, O3, Og, Os, Oz
 
 # ---- Parse arguments ----
@@ -329,14 +329,6 @@ if [ "$MODE" = "link-only" ]; then
     # Compile runtime to native .o and link to prevent LTO inlining.
     LINK_CXXFLAGS=("${CXXFLAGS[@]+"${CXXFLAGS[@]}"}")
     [ -n "${OPT_LEVEL:-}" ] && LINK_CXXFLAGS+=("$OPT_LEVEL")
-    # Filter out compile-only flags (-I, -D, -std, -stdlib) for the final link step
-    FINAL_LINK_FLAGS=()
-    for f in "${LINK_CXXFLAGS[@]+"${LINK_CXXFLAGS[@]}"}"; do
-        case "$f" in
-            -I*|-D*|-std=*|-stdlib=*) ;;
-            *) FINAL_LINK_FLAGS+=("$f") ;;
-        esac
-    done
     if [ -z "$RUNTIME" ] || [ "$RUNTIME" = "runtime.cpp" ]; then
         echo "clang-tm: --runtime required for link-only mode" >&2
         exit 1
@@ -349,7 +341,6 @@ if [ "$MODE" = "link-only" ]; then
     if runtime_is_source "$RESOLVED_RUNTIME"; then
         RUNTIME_O="${OUT_DIR:?}/tm_runtime.o"
         $CXX -std=c++20 ${OPT_LEVEL:--O1} -c "$RESOLVED_RUNTIME" -o "$RUNTIME_O" \
-            -DLLVM_TM_PLUGIN \
             -fno-stack-protector -pthread "${CXXFLAGS[@]+"${CXXFLAGS[@]}"}"
         LINK_OBJS=("$RUNTIME_O")
         # Also compile tm_region_allocator if it exists (separate compilation unit)
@@ -377,9 +368,9 @@ if [ "$MODE" = "link-only" ]; then
             LINK_OBJS+=("$HOOKS_O")
         fi
         
-        $CXX "${FINAL_LINK_FLAGS[@]}" "$INPUT" "${LINK_OBJS[@]}" -o "$OUTPUT"
+        $CXX "${LINK_CXXFLAGS[@]}" "$INPUT" "${LINK_OBJS[@]}" -o "$OUTPUT"
     else
-        $CXX "${FINAL_LINK_FLAGS[@]}" "$INPUT" "$RESOLVED_RUNTIME" -o "$OUTPUT"
+        $CXX "${LINK_CXXFLAGS[@]}" "$INPUT" "$RESOLVED_RUNTIME" -o "$OUTPUT"
     fi
     exit $?
 fi
@@ -558,7 +549,6 @@ if $RUNTIME_IS_SOURCE; then
     # eliminate the TM protocol entirely (write-set insertion, lock
     # acquisition) — breaking TM correctness.
     $CXX -std=c++20 $RUNTIME_OPT -c "$RESOLVED_RUNTIME" -o "$RUNTIME_O" \
-        -DLLVM_TM_PLUGIN \
         -fno-stack-protector -pthread "${COMPILE_FLAGS[@]+"${COMPILE_FLAGS[@]}"}"
 
     # Also compile tm_region_allocator if it exists (for TM address space)

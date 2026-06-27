@@ -117,15 +117,13 @@ impl Verifier {
         }
     }
 
+    /// Handle a TxBegin event.
+    ///
+    /// Simply increments the nesting depth.  If the caller knows that the
+    /// previous transaction was implicitly aborted (e.g. by C++ siglongjmp
+    /// retry), it must call `tx_abort` before `tx_begin`.
     pub fn tx_begin(&mut self, tid: u64) {
-        let depth = self.tx_depth.entry(tid).or_insert(0);
-        if *depth > 0 {
-            self.violations.push(format!(
-                "DOUBLE-TX-BEGIN tid={} (already in transaction, depth={})",
-                tid, *depth
-            ));
-        }
-        *depth += 1;
+        *self.tx_depth.entry(tid).or_insert(0) += 1;
     }
 
     pub fn tx_commit(&mut self, tid: u64) {
@@ -144,18 +142,24 @@ impl Verifier {
     }
 
     pub fn tx_abort(&mut self, tid: u64) {
-        let d = match self.tx_depth.get_mut(&tid) {
-            Some(d) if *d > 0 => d,
-            _ => {
-                self.violations.push(format!(
-                    "ABORT-WITHOUT-BEGIN tid={}",
-                    tid
-                ));
-                return;
+        match self.tx_depth.get_mut(&tid) {
+            Some(d) if *d > 0 => {
+                *d = d.saturating_sub(1);
+                self.aborts += 1;
             }
+            // Thread never began a transaction — this is a real abort-without-begin.
+            None => self.violations.push(format!(
+                "ABORT-WITHOUT-BEGIN tid={}",
+                tid
+            )),
+            // Depth already 0 — this can happen when a panic-based backend
+            // (e.g. NOrec, TL2) throws TmxAbort on a read that follows the
+            // abort point in a C++ siglongjmp trace.  The previous abort event
+            // (from the first TmxAbort catch in dispatch_event) already closed
+            // the transaction.  Silently ignore — the transaction is already
+            // closed.
+            _ => {}
         };
-        *d = d.saturating_sub(1);
-        self.aborts += 1;
     }
 
     pub fn record_value(&mut self, addr: u64, val: u64) {

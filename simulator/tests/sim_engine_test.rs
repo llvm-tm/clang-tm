@@ -451,12 +451,90 @@ fn test_tinystm_write_only_conflict() {
     assert!(engine.verifier.violations.is_empty(), "no memory violations");
 }
 
+// ── Romulus backend integration ──────────────────────────
+
+#[test]
+fn test_romulus_simple_tx() {
+    let events = vec![
+        make_event(0, 0, 1, EventKind::ThreadSpawn(0)),
+        make_event(1, 0, 2, EventKind::TxBegin),
+        make_event(2, 0, 3, EventKind::Read { addr: 0x7f00_0000_C000, width: 8 }),
+        make_event(3, 0, 4, EventKind::Write { addr: 0x7f00_0000_C000, width: 8, val: 77 }),
+        make_event(4, 0, 5, EventKind::TxEnd),
+    ];
+    let engine = run_events(Backend::Romulus, &events);
+    assert_eq!(engine.stats.commits, 1, "Romulus: simple tx commits");
+    assert_eq!(engine.stats.aborts, 0);
+}
+
+#[test]
+fn test_romulus_conflict_detection() {
+    let events = conflict_events_different_values();
+    let engine = run_events(Backend::Romulus, &events);
+    // Romulus OCC: T1 validates and sees T0's version bump → abort
+    assert_eq!(engine.stats.commits, 1, "Romulus: conflict → abort");
+    assert_eq!(engine.stats.aborts, 1);
+}
+
+#[test]
+fn test_romulus_disjoint_no_conflict() {
+    let events = disjoint_access_events();
+    let engine = run_events(Backend::Romulus, &events);
+    assert_eq!(engine.stats.commits, 2, "Romulus: disjoint → 2 commits");
+    assert_eq!(engine.stats.aborts, 0);
+}
+
+// ── SwissTM backend integration ─────────────────────────
+
+#[test]
+fn test_swisstm_simple_tx() {
+    let events = vec![
+        make_event(0, 0, 1, EventKind::ThreadSpawn(0)),
+        make_event(1, 0, 2, EventKind::TxBegin),
+        make_event(2, 0, 3, EventKind::Read { addr: 0x7f00_0000_D000, width: 8 }),
+        make_event(3, 0, 4, EventKind::Write { addr: 0x7f00_0000_D000, width: 8, val: 99 }),
+        make_event(4, 0, 5, EventKind::TxEnd),
+    ];
+    let engine = run_events(Backend::Swisstm, &events);
+    assert_eq!(engine.stats.commits, 1, "SwissTM: simple tx commits");
+    assert_eq!(engine.stats.aborts, 0);
+}
+
+#[test]
+fn test_swisstm_conflict_detection() {
+    let events = conflict_events_different_values();
+    let engine = run_events(Backend::Swisstm, &events);
+    assert_eq!(engine.stats.commits, 1, "SwissTM: conflict → abort");
+    assert_eq!(engine.stats.aborts, 1);
+}
+
+#[test]
+fn test_swisstm_disjoint_no_conflict() {
+    let events = disjoint_access_events();
+    let engine = run_events(Backend::Swisstm, &events);
+    assert_eq!(engine.stats.commits, 2, "SwissTM: disjoint → 2 commits");
+    assert_eq!(engine.stats.aborts, 0);
+}
+
+#[test]
+fn test_swisstm_thread_spawn() {
+    let events = vec![
+        make_event(0, 0, 1, EventKind::ThreadSpawn(0)),
+        make_event(0, 1, 2, EventKind::ThreadSpawn(1)),
+        make_event(1, 1, 3, EventKind::TxBegin),
+        make_event(2, 1, 4, EventKind::Read { addr: 0x7f00_0000_E000, width: 8 }),
+        make_event(3, 1, 5, EventKind::TxEnd),
+    ];
+    let engine = run_events(Backend::Swisstm, &events);
+    assert_eq!(engine.stats.commits, 1, "SwissTM: spawned thread commits");
+}
+
 // ── Checkpoint roundtrip ───────────────────────────────────
 // Verify that checkpoint/restore produces identical results.
 #[test]
 fn test_checkpoint_roundtrip() {
     use tm_des::checkpoint;
-    for b in [Backend::Norec, Backend::Tl2, Backend::Tinystm] {
+    for b in [Backend::Norec, Backend::Tl2, Backend::Tinystm, Backend::Romulus, Backend::Swisstm] {
         mmap_tm_region();
 
         // Generate a multi-scenario trace

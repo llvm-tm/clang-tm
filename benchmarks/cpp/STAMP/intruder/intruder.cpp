@@ -153,7 +153,7 @@ static void process_decoder(const Packet& pkt) {
                 tm_write_i4((uint32_t*)&dst->data_len, total);
                 for (int i = 0; i < total; i++)
                     tm_write_i1((uint8_t*)&dst->data[i],
-                               g_decoder_flows[idx].data[i]);
+                               (uint8_t)tm_read_i1((uint8_t*)&g_decoder_flows[idx].data[i]));
                 tm_write_i4((uint32_t*)g_decoded_q_tail, qtail + 1);
             }
             tm_write_i4((uint32_t*)&g_fragment_counts[idx], 0);

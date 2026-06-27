@@ -37,8 +37,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include "tm_alloc_overrides.hpp"
-#include "tm_backend_macros.hpp"
 #include "tm_hooks.hpp"
+thread_local bool g_in_tx = false;
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -201,6 +201,12 @@ extern __thread int32_t    tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;
 }
 
+int tm_setjmp() { return 0; }
+
+void tm_set_env(sigjmp_buf* env) {
+    if (env) memcpy(&tm_jmpbuf, env, sizeof(sigjmp_buf));
+}
+
 
 
 // Per-thread: true until the first tm_begin publishes local state to mmap
@@ -270,7 +276,6 @@ static void do_tm_exit_thread()
 void tm_exit_thread()
 #endif
 { tm_hook_exit_thread(); }
-
 
 
 void consume_ptr(volatile void*) {}
@@ -345,6 +350,25 @@ static void  real_tm_free(void* ptr) {
         stm::tm_region_free(ptr);
 }
 
-static void* real_tm_get_thread_state() { return nullptr; }
-
-TM_REAL_HOOKS_TABLE(dsgl)
+const TMRealHooks g_dsgl_hooks = {
+    .begin    = real_tm_begin,
+    .end      = real_tm_end,
+    .malloc   = real_tm_malloc,
+    .calloc   = real_tm_calloc,
+    .realloc  = real_tm_realloc,
+    .free     = real_tm_free,
+    .read_i1  = real_tm_read_i1,
+    .read_i2  = real_tm_read_i2,
+    .read_i4  = real_tm_read_i4,
+    .read_i8  = real_tm_read_i8,
+    .read_f4  = real_tm_read_f4,
+    .read_f8  = real_tm_read_f8,
+    .read_ptr = real_tm_read_ptr,
+    .write_i1  = real_tm_write_i1,
+    .write_i2  = real_tm_write_i2,
+    .write_i4  = real_tm_write_i4,
+    .write_i8  = real_tm_write_i8,
+    .write_f4  = real_tm_write_f4,
+    .write_f8  = real_tm_write_f8,
+    .write_ptr = real_tm_write_ptr,
+};

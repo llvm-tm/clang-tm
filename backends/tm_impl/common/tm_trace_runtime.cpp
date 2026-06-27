@@ -14,7 +14,7 @@ static constexpr size_t TRACE_BUF_SIZE = 1 << 20;
 struct TraceEntry {
     uint64_t timestamp;
     uint32_t thread_id;
-    uint32_t type_code; // 0=read, 1=write, 2=begin, 3=end
+    uint32_t type_code; // 0=read, 1=write, 2=begin, 3=end, 4=malloc, 5=free, 6=abort, 7=computation
     uint64_t addr;
     uint64_t width;
     uint64_t value;

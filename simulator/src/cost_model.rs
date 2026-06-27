@@ -13,7 +13,6 @@
 
 use crate::event::EventKind;
 use crate::machine_profile::MachineProfile;
-use crate::workload_profile::WorkloadProfile;
 
 // ── Backend selection ──────────────────────────────────────
 
@@ -43,6 +42,19 @@ impl BackendProfile {
             _ => BackendProfile::Default,
         }
     }
+
+    pub fn machine_profile_name(&self) -> &'static str {
+        match self {
+            BackendProfile::Default => "default",
+            BackendProfile::Tinystm => "tinystm",
+            BackendProfile::Norec => "norec",
+            BackendProfile::Tl2 => "tl2",
+            BackendProfile::Swisstm => "swisstm",
+            BackendProfile::Romulus => "romulus",
+            BackendProfile::Tsxsgl => "tsxsgl",
+            BackendProfile::TsxSim => "tsxsgl",
+        }
+    }
 }
 
 // ── Cycle costs ────────────────────────────────────────────
@@ -64,12 +76,12 @@ pub fn event_cost(
 ) -> u64 {
     match backend {
         BackendProfile::Tsxsgl | BackendProfile::TsxSim => tsx_event_cost(kind, machine),
-        _ => generic_event_cost(kind, machine),
+        _ => generic_event_cost(kind, machine, backend.machine_profile_name()),
     }
 }
 
-fn generic_event_cost(kind: &EventKind, machine: &MachineProfile) -> u64 {
-    let bk = machine.backend("default");
+fn generic_event_cost(kind: &EventKind, machine: &MachineProfile, backend_name: &str) -> u64 {
+    let bk = machine.backend(backend_name);
     match kind {
         EventKind::TxBegin => bk.begin_overhead as u64,
         EventKind::TxEnd => bk.commit_overhead as u64,
@@ -83,6 +95,7 @@ fn generic_event_cost(kind: &EventKind, machine: &MachineProfile) -> u64 {
         EventKind::Checkpoint => CHECKPOINT_COST,
         EventKind::Assert { .. } => ASSERT_COST,
         EventKind::Log { .. } => LOG_COST,
+        EventKind::Computation { cycles } => *cycles,
     }
 }
 
@@ -113,62 +126,8 @@ fn tsx_event_cost(kind: &EventKind, machine: &MachineProfile) -> u64 {
         EventKind::Checkpoint => CHECKPOINT_COST,
         EventKind::Assert { .. } => ASSERT_COST,
         EventKind::Log { .. } => LOG_COST,
+        EventKind::Computation { cycles } => *cycles,
     }
-}
-
-/// Estimate total execution time for a workload on a given machine+backend.
-/// Returns estimated cycles.
-pub fn estimate_workload(
-    workload: &WorkloadProfile,
-    machine: &MachineProfile,
-    backend: BackendProfile,
-) -> f64 {
-    let bk = machine.backend(match backend {
-        BackendProfile::Tsxsgl | BackendProfile::TsxSim => "tsxsgl",
-        _ => "default",
-    });
-
-    let n = workload.total_transactions as f64;
-    let reads = workload.read_set.mean;
-    let writes = workload.write_set.mean;
-    let abort_rate = workload.contention.abort_rate;
-    let conflict_ratio = workload.contention.conflict_abort_ratio;
-
-    let (read_cost_per, write_cost_per): (f64, f64) = match backend {
-        BackendProfile::Tsxsgl | BackendProfile::TsxSim => {
-            (machine.tsx.read_l1_cycles + machine.tsx.bloom_check_cycles + bk.read_overhead,
-             machine.tsx.write_l1_cycles + machine.tsx.bloom_check_cycles + bk.write_overhead)
-        }
-        _ => {
-            (bk.read_overhead + machine.tsx.read_l1_cycles,
-             bk.write_overhead + machine.tsx.write_l1_cycles)
-        }
-    };
-
-    let begin_cost = match backend {
-        BackendProfile::Tsxsgl | BackendProfile::TsxSim => machine.tsx.xbegin_cycles,
-        _ => bk.begin_overhead,
-    };
-    let commit_cost = match backend {
-        BackendProfile::Tsxsgl | BackendProfile::TsxSim => machine.tsx.xend_cycles,
-        _ => bk.commit_overhead,
-    };
-    let abort_cost = match backend {
-        BackendProfile::Tsxsgl | BackendProfile::TsxSim => machine.tsx.xabort_cycles,
-        _ => bk.abort_overhead,
-    };
-
-    // Transaction body cost
-    let body_cost = reads * read_cost_per + writes * write_cost_per;
-    // Successful tx cost
-    let commit_tx_cost = begin_cost + body_cost + commit_cost;
-    // Aborted tx cost (abort happens after partial body)
-    let abort_tx_cost = begin_cost + body_cost * 0.5 + abort_cost;
-    // Average cost per attempted transaction
-    let avg_cost = (1.0 - abort_rate) * commit_tx_cost + abort_rate * abort_tx_cost
-        + abort_rate * conflict_ratio * machine.tsx.conflict_abort_penalty;
-
-    avg_cost * n
 }
 
 // ── Calibrated cost model (pre-computed per-event costs) ───
@@ -227,6 +186,7 @@ impl CalibratedCostModel {
             EventKind::Checkpoint => CHECKPOINT_COST,
             EventKind::Assert { .. } => ASSERT_COST,
             EventKind::Log { .. } => LOG_COST,
+            EventKind::Computation { cycles } => *cycles,
         }
     }
 }

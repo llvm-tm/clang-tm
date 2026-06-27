@@ -137,40 +137,6 @@ impl Primitive for u64 {
     fn to_typed(self) -> TypedValue { TypedValue::U64(self) }
     fn from_typed(v: &TypedValue) -> Self { match *v { TypedValue::U64(x) => x, _ => unreachable!() } }
 }
-
-// ── Free functions: typed memory access (shared by backends) ──
-
-/// Apply a TypedValue to raw memory at addr.
-/// # Safety
-/// Caller must guarantee addr is valid, aligned, writable, and not aliased.
-pub fn apply_typed_value(addr: usize, tv: &TypedValue) {
-    unsafe {
-        match tv {
-            TypedValue::U8(v) => (addr as *mut u8).write(*v),
-            TypedValue::U16(v) => (addr as *mut u16).write(*v),
-            TypedValue::U32(v) => (addr as *mut u32).write(*v),
-            TypedValue::U64(v) => (addr as *mut u64).write(*v),
-            TypedValue::Bytes(b) => {
-                std::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, b.len());
-            }
-        }
-    }
-}
-
-/// Read a value from memory with a given byte size, zero-extended to u64.
-/// # Safety
-/// Caller must guarantee addr is valid, aligned, and readable.
-pub fn read_mem_val(addr: usize, sz: u8) -> u64 {
-    unsafe {
-        match sz {
-            1 => (addr as *const u8).read() as u64,
-            2 => (addr as *const u16).read() as u64,
-            4 => (addr as *const u32).read() as u64,
-            8 => (addr as *const u64).read(),
-            _ => 0,
-        }
-    }
-}
 impl Primitive for i32 {
     fn to_typed(self) -> TypedValue { TypedValue::U32(self as u32) }
     fn from_typed(v: &TypedValue) -> Self { match *v { TypedValue::U32(x) => x as i32, _ => unreachable!() } }

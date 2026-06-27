@@ -8,7 +8,7 @@ use core::sync::atomic::{fence, AtomicU64, Ordering};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-pub use runtime_core::{apply_typed_value, tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
+pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
 
 // ── Constants ───────────────────────────────────────────
 const LOCK_MASK: u64 = 0xFF;
@@ -239,6 +239,20 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     });
 }
 
+fn apply_typed_value(addr: usize, tv: &TypedValue) {
+    unsafe {
+        match tv {
+            TypedValue::U8(v) => (addr as *mut u8).write(*v),
+            TypedValue::U16(v) => (addr as *mut u16).write(*v),
+            TypedValue::U32(v) => (addr as *mut u32).write(*v),
+            TypedValue::U64(v) => (addr as *mut u64).write(*v),
+            TypedValue::Bytes(b) => {
+                std::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, b.len());
+            }
+        }
+    }
+}
+
 // ── Validate read-set (lock-based) ─────────────────────
 fn validate_read_set(rs: &[(usize, u64)]) -> bool {
     #[cfg(feature = "stats")]
@@ -274,6 +288,7 @@ pub fn tm_commit() -> bool {
         }
         #[cfg(feature = "stats")]
         TM_STATS.lock_contentions.fetch_add(1, Ordering::Relaxed);
+        #[cfg(not(feature = "simulation"))]
         std::hint::spin_loop();
     }
 

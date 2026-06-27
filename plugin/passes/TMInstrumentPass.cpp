@@ -168,7 +168,7 @@ public:
 class TMInstrumentInlinePass : public PassInfoMixin<TMInstrumentInlinePass>
 {
 public:
-	PreservedAnalyses run(Function &F, FunctionAnalysisManager &)
+	PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM)
 	{
 		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT)
 		    && !F.getName().ends_with(TM_CLONE_SUFFIX)) {
@@ -176,9 +176,10 @@ public:
 		}
 		Module *M = F.getParent();
 		if (hasAnnotation(F, TX_ANNOT) || hasAnnotation(F, ASYNC_TX_ANNOT)) {
-			if (Function *Clone = findClone(&F, *M)) {
+			std::string CloneName = (F.getName() + TM_CLONE_SUFFIX).str();
+			if (M->getFunction(CloneName)) {
 				TM_DEBUG("%s has queue clone %s, skipping re-instrumentation",
-				         F.getName().str().c_str(), Clone->getName().str().c_str());
+				         F.getName().str().c_str(), CloneName.c_str());
 				return PreservedAnalyses::all();
 			}
 		}
@@ -188,7 +189,40 @@ public:
 		if (TMAudit)
 			auditTXFunctionLoadsStores(F, *M);
 
-		instrumentFunctionBody(F, *M, H);
+		SmallVector<Instruction *, 16> ToErase;
+		SmallVector<CallBase *, 8> MemIntrinsics;
+		for (auto &BB : F) {
+			for (auto InstIt = BB.begin(); InstIt != BB.end();) {
+				Instruction *I = &*InstIt++;
+				IRBuilder<> B(I->getParent(), I->getIterator());
+#ifndef DISABLE_TM_READ_WRITE
+				if (auto *Call = dyn_cast<CallBase>(I)) {
+					if (needsMemIntrinsicInstrumentation(Call, *M)) {
+						MemIntrinsics.push_back(Call);
+						continue;
+					}
+				}
+#endif
+#ifndef DISABLE_MALLOC_FREE
+				if (auto *Call = dyn_cast<CallBase>(I))
+					if (handleMallocFree(Call, B, H, ToErase))
+						continue;
+#endif
+#ifndef DISABLE_TM_READ_WRITE
+				handleLoadStore(I, F, *M, H, ToErase);
+#endif
+			}
+		}
+		for (auto *Call : MemIntrinsics) {
+			tm_method_instrumentation::instrumentMemoryIntrinsic(Call, *M, H);
+			ToErase.push_back(Call);
+		}
+		for (Instruction *I : ToErase)
+			I->eraseFromParent();
+
+		// Emit computation events for non-TM instruction cost estimation
+		auto &TTI = AM.getResult<TargetIRAnalysis>(F);
+		emitComputationEvents(F, TTI, H, *M);
 
 		return PreservedAnalyses::none();
 	}
@@ -202,16 +236,19 @@ public:
 class TMInstrumentPass : public PassInfoMixin<TMInstrumentPass>
 {
 public:
-	PreservedAnalyses run(Function &F, FunctionAnalysisManager &)
+	PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM)
 	{
 		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT)) {
 			return PreservedAnalyses::all();
 		}
 		Module *M = F.getParent();
-		if (Function *Clone = findClone(&F, *M)) {
-			TM_DEBUG("%s has queue clone %s, skipping re-instrumentation",
-			         F.getName().str().c_str(), Clone->getName().str().c_str());
-			return PreservedAnalyses::all();
+		{
+			std::string CloneName = (F.getName() + TM_CLONE_SUFFIX).str();
+			if (M->getFunction(CloneName)) {
+				TM_DEBUG("%s has queue clone %s, skipping re-instrumentation",
+				         F.getName().str().c_str(), CloneName.c_str());
+				return PreservedAnalyses::all();
+			}
 		}
 		TM_DEBUG("TMInstrumentPass: processing function %s", F.getName().str().c_str());
 		LLVMContext &Ctx = M->getContext();
@@ -222,7 +259,41 @@ public:
 		if (TMAudit)
 			auditTXFunctionLoadsStores(F, *M);
 
-		instrumentFunctionBody(F, *M, H);
+		SmallVector<Instruction *, 16> ToErase;
+		SmallVector<CallBase *, 8> MemIntrinsics;
+
+		for (auto &BB : F) {
+			for (auto InstIt = BB.begin(); InstIt != BB.end();) {
+				Instruction *I = &*InstIt++;
+				IRBuilder<> B(I->getParent(), I->getIterator());
+#ifndef DISABLE_TM_READ_WRITE
+				if (auto *Call = dyn_cast<CallBase>(I))
+					if (needsMemIntrinsicInstrumentation(Call, *M)) {
+						MemIntrinsics.push_back(Call);
+						continue;
+					}
+#endif
+#ifndef DISABLE_MALLOC_FREE
+				if (auto *Call = dyn_cast<CallBase>(I))
+					if (handleMallocFree(Call, B, H, ToErase))
+						continue;
+#endif
+#ifndef DISABLE_TM_READ_WRITE
+				handleLoadStore(I, F, *M, H, ToErase);
+#endif
+			}
+		}
+		for (auto *Call : MemIntrinsics) {
+			tm_method_instrumentation::instrumentMemoryIntrinsic(Call, *M, H);
+			ToErase.push_back(Call);
+		}
+		for (Instruction *I : ToErase)
+			I->eraseFromParent();
+
+		// Emit computation events for non-TM instruction cost estimation
+		auto &TTI = AM.getResult<TargetIRAnalysis>(F);
+		emitComputationEvents(F, TTI, H, *M);
+
 		return PreservedAnalyses::none();
 	}
 	static bool isRequired() { return true; }
@@ -282,6 +353,12 @@ public:
 // ===========================================================================
 
 static constexpr char TM_QUEUE_ACTIVE_TLS[] = "g_tm_queue_active";
+
+static Function *findClone(Function *Original, Module &M)
+{
+	std::string CloneName = (Original->getName() + TM_CLONE_SUFFIX).str();
+	return M.getFunction(CloneName);
+}
 
 static StructType *createArgsStructType(Function *F, LLVMContext &Ctx)
 {
@@ -517,14 +594,17 @@ public:
 
 		if (Function *MainFn = M.getFunction(MAIN_ANNOT)) {
 			auto *i32Ty2 = Type::getInt32Ty(CtxRef);
+			auto *i64Ty = Type::getInt64Ty(CtxRef);
+			auto *ptrTy = PointerType::getUnqual(CtxRef);
 			FunctionCallee QueueInit =
 			    M.getOrInsertFunction("tm_queue_init",
 			        FunctionType::get(Type::getVoidTy(CtxRef),
 			                          {i32Ty2, i32Ty2}, false));
+			CallInst *QueueInitCall = nullptr;
 			{
 				IRBuilder<> Builder(&MainFn->getEntryBlock(),
 				                    MainFn->getEntryBlock().begin());
-				Builder.CreateCall(QueueInit,
+				QueueInitCall = Builder.CreateCall(QueueInit,
 				                   {ConstantInt::get(i32Ty2, 4),
 				                    ConstantInt::get(i32Ty2, 4)});
 			}
@@ -539,6 +619,33 @@ public:
 			}
 
 			instrumentMainInitExit(MainFn, Ctx);
+
+			// Emit tm_register_global calls for each TM-annotated global.
+			// Insert BEFORE tm_queue_init (which is now AFTER tm_init/tm_init_thread,
+			// inserted by instrumentMainInitExit above), so the order in main() is:
+			//   tm_init → tm_init_thread → tm_register_global → tm_queue_init → user code
+			{
+				SmallVector<std::pair<GlobalVariable *, StringRef>, 8> TMSymbols;
+				collectTMSymbols(M, TMSymbols);
+				if (!TMSymbols.empty()) {
+					FunctionCallee RegFn =
+					    M.getOrInsertFunction("tm_register_global",
+					        FunctionType::get(Type::getVoidTy(CtxRef),
+					                          {ptrTy, i64Ty}, false));
+					IRBuilder<> RegBuilder(QueueInitCall);
+					const DataLayout &DL = M.getDataLayout();
+					for (auto &Sym : TMSymbols) {
+						GlobalVariable *GV = Sym.first;
+						Constant *GVCast = ConstantExpr::getBitCast(GV, ptrTy);
+						uint64_t Size = DL.getTypeAllocSize(GV->getValueType());
+						RegBuilder.CreateCall(RegFn,
+						    {GVCast, ConstantInt::get(i64Ty, Size)});
+						TM_DEBUG("Emitting tm_register_global(%s)",
+						         Sym.second.str().c_str());
+					}
+					modified = true;
+				}
+			}
 		}
 
 		TM_DEBUG("TMQueueGlobalInitPass: %s", modified ? "modified module" : "no changes");

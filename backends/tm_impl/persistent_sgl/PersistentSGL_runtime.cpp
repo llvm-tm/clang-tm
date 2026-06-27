@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include "tm_alloc_overrides.hpp"
 #include "tm_thread_state.hpp"
+thread_local bool g_in_tx = false;
 #include <algorithm>
 #include <fcntl.h>
 #include <unistd.h>
@@ -31,6 +32,8 @@ extern __thread int32_t    tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;
 }
 static thread_local TMThreadState g_tm_persist_state{0, 0};
+static std::recursive_mutex g_serialize_mutex;
+
 static constexpr size_t PERSIST_HEAP_SIZE = 64UL * 1024 * 1024; // 64 MB
 
 static const char* PERSIST_FILE = "benchmark_results/tm_persist.bin";
@@ -421,6 +424,19 @@ void tm_exit_thread()
 #endif
 {
     tm_hook_exit_thread();
+}
+
+void tm_serialize_lock() { g_serialize_mutex.lock(); }
+
+void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
+
+int tm_setjmp() { return 0; }
+
+
+
+void tm_set_env(sigjmp_buf* env) {
+    if (env)
+        memcpy(&tm_jmpbuf, env, sizeof(sigjmp_buf));
 }
 
 void tm_load_symbols(void* symbol_table, uint32_t symbol_count) {}

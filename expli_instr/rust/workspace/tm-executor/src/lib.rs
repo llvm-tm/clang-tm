@@ -128,6 +128,7 @@ impl QueueExecutor {
     }
 
     fn worker_loop(inner: &QueueInner) {
+        addrspace::record_stack_bounds();
         loop {
             let start_q =
                 inner.next_wq.fetch_add(1, Ordering::Relaxed) % inner.num_q;

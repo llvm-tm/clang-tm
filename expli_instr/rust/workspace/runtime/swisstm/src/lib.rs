@@ -10,7 +10,7 @@ use std::cell::RefCell;
 #[cfg(feature = "simulation")]
 use std::cell::UnsafeCell;
 use std::sync::OnceLock;
-pub use runtime_core::{Primitive, read_mem_val, TypedValue, WriteBack};
+pub use runtime_core::{Primitive, TypedValue, WriteBack};
 
 // ── SyncUnsafeCell: UnsafeCell that implements Sync ────
 // Safe because simulation mode is single-threaded.
@@ -321,6 +321,17 @@ fn flush_tx() -> Option<Box<TxState>> {
 static THR_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // ── Memory helpers ─────────────────────────────────────
+fn read_mem_val(addr: usize, sz: u8) -> u64 {
+    unsafe {
+        match sz {
+            1 => (addr as *const u8).read() as u64,
+            2 => (addr as *const u16).read() as u64,
+            4 => (addr as *const u32).read() as u64,
+            8 => (addr as *const u64).read(),
+            _ => 0,
+        }
+    }
+}
 
 fn write_mem_typed(addr: usize, tv: &TypedValue) {
     unsafe {
@@ -334,6 +345,16 @@ fn write_mem_typed(addr: usize, tv: &TypedValue) {
                 for (i, &byte) in b.iter().enumerate() { dst.add(i).write(byte); }
             }
         }
+    }
+}
+
+fn byte_size_of_tv(tv: &TypedValue) -> u8 {
+    match tv {
+        TypedValue::U8(_) => 1,
+        TypedValue::U16(_) => 2,
+        TypedValue::U32(_) => 4,
+        TypedValue::U64(_) => 8,
+        TypedValue::Bytes(b) => b.len() as u8,
     }
 }
 
@@ -423,7 +444,7 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
 
     let tv = val.to_typed();
-    let sz = tv.byte_size() as u8;
+    let sz = byte_size_of_tv(&tv);
 
     with_tx(|tx| {
         let idx = lock_index(addr);
@@ -612,9 +633,17 @@ pub fn tm_commit() -> bool {
 
 // ── Init ────────────────────────────────────────────────
 pub fn tm_init() {
-    orecs();
+    let table = orecs();
     G_CLOCK.store(0, Ordering::Release);
     GREEDY_TS.store(0, Ordering::Release);
+    // Reset orecs so stale versions don't leak between simulation runs.
+    // In simulation mode, this is safe (single-threaded).
+    #[cfg(feature = "simulation")]
+    for orec in table.iter() {
+        orec.version_lock.store(0, Ordering::Release);
+        orec.w_lock.store(false, Ordering::Release);
+        orec.owner_cm_ts.store(0, Ordering::Release);
+    }
 }
 
 pub fn tm_exit() {}

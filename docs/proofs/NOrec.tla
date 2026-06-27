@@ -26,25 +26,29 @@
 
 EXTENDS Naturals, TLC
 
-CONSTANTS Thread, Addr, MaxRetries
+CONSTANTS Thread, Addr, Data, MaxRetries, MaxCommits
 ASSUME Thread \subseteq Nat \ {0}
 ASSUME Addr \subseteq Nat
+ASSUME Data \subseteq Nat /\ 0 \in Data
 ASSUME MaxRetries \in Nat
+ASSUME MaxCommits \in Nat
 
 VARIABLES
     clk,                                  (* global clock (even = unlocked) *)
-    mem[_],                               (* shared memory *)
-    pc[_],                                (* "idle", "active", "committing" *)
-    readSet[_],                           (* per-thread read set *)
-    writeSet[_],                          (* per-thread write set *)
-    wbBuffer[_],                          (* write-back buffer [addr -> value] *)
-    snapshot[_],                          (* observed clock at begin *)
-    readOnly[_],                          (* true if no writes in this TX *)
-    committed[_],                         (* commit count *)
-    aborted[_],                           (* abort count *)
-    rsSnapshot[_]                         (* clock version at last validation *)
+    mem,                               (* shared memory *)
+    pc,                                (* "idle", "active", "committing" *)
+    readSet,                           (* per-thread read set *)
+    writeSet,                          (* per-thread write set *)
+    wbBuffer,                          (* write-back buffer [addr -> value] *)
+    snapshot,                          (* observed clock at begin *)
+    readOnly,                          (* true if no writes in this TX *)
+    committed,                         (* commit count *)
+    aborted,                           (* abort count *)
+    rsSnapshot,                         (* clock version at last validation *)
+    lastWriter,                         (* thread that last committed a write to each addr *)
+    lastWriteClock                      (* clock value when lastWriter's write became visible *)
 
-vars == <<clk, mem, pc, readSet, writeSet, wbBuffer, snapshot, readOnly, committed, aborted>>
+vars == <<clk, mem, pc, readSet, writeSet, wbBuffer, snapshot, readOnly, committed, aborted, rsSnapshot, lastWriter, lastWriteClock>>
 
 (* A read-set entry: (addr, value, clock_version) *)
 CONSTANT NO_RS_ENTRY
@@ -65,6 +69,8 @@ Init ==
     /\ committed = [t \in Thread |-> 0]
     /\ aborted = [t \in Thread |-> 0]
     /\ rsSnapshot = [t \in Thread |-> 0]
+    /\ lastWriter = [a \in Addr |-> 0]        (* 0 = no thread wrote yet *)
+    /\ lastWriteClock = [a \in Addr |-> 0]    (* clock 0 = initial value *)
 
 (*====================================================================*)
 (* Transaction Begin                                                   *)
@@ -78,7 +84,7 @@ Begin(t) ==
     /\ readSet' = [readSet EXCEPT ![t] = {}]
     /\ writeSet' = [writeSet EXCEPT ![t] = {}]
     /\ rsSnapshot' = [rsSnapshot EXCEPT ![t] = clk]
-    /\ UNCHANGED <<clk, mem, wbBuffer, committed, aborted>>
+    /\ UNCHANGED <<clk, mem, wbBuffer, committed, aborted, lastWriter, lastWriteClock>>
 
 (*====================================================================*)
 (* Read V_i                                                             *)
@@ -95,7 +101,7 @@ ReadFromMemory(t, a) ==
     /\ a \in Addr
     /\ (readSet[t] = {} \/ clk = snapshot[t])  (* fast path: clock unchanged *)
     /\ readSet' = [readSet EXCEPT ![t] = readSet[t] \cup {RS_ENTRY(a, mem[a], snapshot[t])}]
-    /\ UNCHANGED <<clk, mem, pc, writeSet, wbBuffer, snapshot, readOnly, committed, aborted, rsSnapshot>>
+    /\ UNCHANGED <<clk, mem, pc, writeSet, wbBuffer, snapshot, readOnly, committed, aborted, rsSnapshot, lastWriter, lastWriteClock>>
 
 ReadWithValidation(t, a) ==
     (* Clock changed since snapshot; must validate before reading *)
@@ -103,12 +109,11 @@ ReadWithValidation(t, a) ==
     /\ a \notin writeSet[t]
     /\ a \in Addr
     /\ clk # snapshot[t]
-    /\ \* Validate step (simplified: check all read-set entries still match memory)
     /\ (readSet[t] = {} \/ \A e \in readSet[t] : mem[RS_ADDR(e)] = RS_VAL(e))
-        \* If validation passes, snapshot advances to current valid clock
+        (* If validation passes, snapshot advances to current valid clock *)
     /\ snapshot' = [snapshot EXCEPT ![t] = clk - (clk % 2)]  (* round to nearest even *)
     /\ readSet' = [readSet EXCEPT ![t] = readSet[t] \cup {RS_ENTRY(a, mem[a], snapshot[t])}]
-    /\ UNCHANGED <<clk, mem, pc, writeSet, wbBuffer, readOnly, committed, aborted, rsSnapshot>>
+    /\ UNCHANGED <<clk, mem, pc, writeSet, wbBuffer, readOnly, committed, aborted, rsSnapshot, lastWriter, lastWriteClock>>
 
 ReadAbort(t, a) ==
     (* Validation failed: memory doesn't match read-set => abort *)
@@ -119,7 +124,7 @@ ReadAbort(t, a) ==
     /\ readSet' = [readSet EXCEPT ![t] = {}]
     /\ writeSet' = [writeSet EXCEPT ![t] = {}]
     /\ aborted' = [aborted EXCEPT ![t] = aborted[t] + 1]
-    /\ UNCHANGED <<clk, mem, wbBuffer, snapshot, readOnly, committed, rsSnapshot>>
+    /\ UNCHANGED <<clk, mem, wbBuffer, snapshot, readOnly, committed, rsSnapshot, lastWriter, lastWriteClock>>
 
 TMRead(t, a) ==
     ReadOwnWrite(t, a) \/ ReadFromMemory(t, a) \/ ReadWithValidation(t, a) \/ ReadAbort(t, a)
@@ -130,10 +135,11 @@ TMRead(t, a) ==
 Write(t, a, n) ==
     /\ pc[t] = "active"
     /\ a \in Addr
+    /\ n \in Data
     /\ writeSet' = [writeSet EXCEPT ![t] = writeSet[t] \cup {a}]
     /\ wbBuffer' = [wbBuffer EXCEPT ![t][a] = n]
     /\ readOnly' = [readOnly EXCEPT ![t] = FALSE]
-    /\ UNCHANGED <<clk, mem, pc, readSet, snapshot, committed, aborted, rsSnapshot>>
+    /\ UNCHANGED <<clk, mem, pc, readSet, snapshot, committed, aborted, rsSnapshot, lastWriter, lastWriteClock>>
 
 (*====================================================================*)
 (* Commit                                                               *)
@@ -142,11 +148,12 @@ CommitReadOnly(t) ==
     (* Read-only transactions commit without modifying clock *)
     /\ pc[t] = "active"
     /\ readOnly[t] = TRUE
+    /\ committed[t] < MaxCommits
     /\ pc' = [pc EXCEPT ![t] = "idle"]
     /\ readSet' = [readSet EXCEPT ![t] = {}]
     /\ writeSet' = [writeSet EXCEPT ![t] = {}]
     /\ committed' = [committed EXCEPT ![t] = committed[t] + 1]
-    /\ UNCHANGED <<clk, mem, wbBuffer, snapshot, readOnly, aborted, rsSnapshot>>
+    /\ UNCHANGED <<clk, mem, wbBuffer, snapshot, readOnly, aborted, rsSnapshot, lastWriter, lastWriteClock>>
 
 CommitCAS(t) ==
     (* Acquire clock via CAS: snapshot -> snapshot+1 (makes clock odd) *)
@@ -154,23 +161,25 @@ CommitCAS(t) ==
     /\ readOnly[t] = FALSE
     /\ clk = snapshot[t]                     (* CAS succeeds: clock matches snapshot *)
     /\ clk' = snapshot[t] + 1                (* clock becomes odd (locked) *)
+    /\ readSet' = [readSet EXCEPT ![t] = {}] (* clear read-set for commit phase *)
     /\ pc' = [pc EXCEPT ![t] = "committing"]
-    /\ UNCHANGED <<mem, readSet, writeSet, wbBuffer, snapshot, readOnly, committed, aborted, rsSnapshot>>
+    /\ UNCHANGED <<mem, writeSet, wbBuffer, snapshot, readOnly, committed, aborted, rsSnapshot, lastWriter, lastWriteClock>>
 
 CommitCASFail(t) ==
     (* CAS failed: clock changed, validate and retry *)
     /\ pc[t] = "active"
     /\ readOnly[t] = FALSE
     /\ clk # snapshot[t]
-    /\ \* Validate: all read-set entries still match
+    (* Validate: all read-set entries still match *)
     /\ (readSet[t] = {} \/ \A e \in readSet[t] : mem[RS_ADDR(e)] = RS_VAL(e))
     /\ snapshot' = [snapshot EXCEPT ![t] = clk - (clk % 2)]
     /\ readSet' = [readSet EXCEPT ![t] = {}]  (* reset read-set after validation passes *)
-    /\ UNCHANGED <<clk, mem, pc, writeSet, wbBuffer, readOnly, committed, aborted, rsSnapshot>>
+    /\ UNCHANGED <<clk, mem, pc, writeSet, wbBuffer, readOnly, committed, aborted, rsSnapshot, lastWriter, lastWriteClock>>
 
 CommitWriteBack(t) ==
     (* After CAS success: write buffered values to memory *)
     /\ pc[t] = "committing"
+    /\ committed[t] < MaxCommits
     /\ pc' = [pc EXCEPT ![t] = "idle"]
     /\ mem' = [a \in Addr |->
         IF a \in writeSet[t] THEN wbBuffer[t][a] ELSE mem[a]]
@@ -178,6 +187,10 @@ CommitWriteBack(t) ==
     /\ readSet' = [readSet EXCEPT ![t] = {}]
     /\ writeSet' = [writeSet EXCEPT ![t] = {}]
     /\ committed' = [committed EXCEPT ![t] = committed[t] + 1]
+    /\ lastWriter' = [a \in Addr |->
+        IF a \in writeSet[t] THEN t ELSE lastWriter[a]]
+    /\ lastWriteClock' = [a \in Addr |->
+        IF a \in writeSet[t] THEN clk + 1 ELSE lastWriteClock[a]]
     /\ UNCHANGED <<wbBuffer, snapshot, readOnly, aborted, rsSnapshot>>
 
 (*====================================================================*)
@@ -187,7 +200,7 @@ Next ==
     \E t \in Thread :
         \/ Begin(t)
         \/ (\E a \in Addr : TMRead(t, a))
-        \/ (\E a \in Addr : \E n \in Nat : Write(t, a, n))
+        \/ (\E a \in Addr : \E n \in Data : Write(t, a, n))
         \/ CommitReadOnly(t)
         \/ CommitCAS(t)
         \/ CommitCASFail(t)
@@ -203,8 +216,8 @@ ClockParityInv ==
     (clk % 2 = 1) <=> (\E t \in Thread : pc[t] = "committing")
 
 THEOREM ClockParityInductive ==
-    Init => ClockParityInv
-    /\ (ClockParityInv /\ [Next]_vars) => ClockParityInv'
+    (Init => ClockParityInv)
+    /\ ((ClockParityInv /\ [Next]_vars) => ClockParityInv')
 PROOF
     <1>1. Init => ClockParityInv
         BY Init DEF Init, ClockParityInv
@@ -227,7 +240,7 @@ CommitInvariant ==
 (*====================================================================*)
 WriteBufferInv ==
     \A t \in Thread, a \in Addr :
-        (a \in writeSet[t]) => (wbBuffer[t][a] # 0 \/ \E n \in Nat : wbBuffer[t][a] = n)
+        (a \in writeSet[t]) => (wbBuffer[t][a] # 0 \/ wbBuffer[t][a] \in Data)
         \* (trivial: buffer always contains some value for written addresses)
 
 (*====================================================================*)
@@ -247,12 +260,14 @@ WriteBufferInv ==
 (*      ReadAbort).                                                     *)
 (*====================================================================*)
 NoDirtyReads ==
+    (* A read always returns committed data.
+       If thread t2's snapshot is BEFORE the last committed write to address 'a',
+       then t2 may be reading stale data.  In NOrec, t2 must still be active
+       (will validate on commit) or have already committed after the write. *)
     \A t1, t2 \in Thread, a \in Addr :
-        (committed[t1] > 0 /\ a \in writeSet[t1])
+        (t1 # t2 /\ lastWriter[a] = t1 /\ lastWriteClock[a] > snapshot[t2])
         => (readSet[t2] \cap {e \in readSet[t2] : RS_ADDR(e) = a} # {}
-            => \/ committed[t1] < committed[t2]   \* t2 read after t1 committed
-               \/ aborted[t1] > 0                  \* t1's write never committed
-               \/ committed[t2] = 0)               \* t2 hasn't committed yet
+            => pc[t2] = "active")
 
 (*====================================================================*)
 (* PROPERTY: Serializable committed transactions                        *)
@@ -264,7 +279,7 @@ Serializable ==
     \A t1, t2 \in Thread :
         (committed[t1] > 0 /\ committed[t2] > 0 /\ snapshot[t1] < snapshot[t2])
         => \A a \in Addr :
-            (a \in writeSet[t1] /\ readSet[t2] \cap {e : RS_ADDR(e) = a} # {})
+            (a \in writeSet[t1] /\ readSet[t2] \cap {e \in readSet[t2] : RS_ADDR(e) = a} # {})
             => RS_VAL(CHOOSE e \in readSet[t2] : RS_ADDR(e) = a) = wbBuffer[t1][a]
 
 (*====================================================================*)
@@ -311,5 +326,15 @@ THEOREM NOrecSerializability ==
 (*      - If T_i and T_j both write to the same address, the later      *)
 (*        committer's value persists.                                   *)
 (*====================================================================*)
+(* Fairness alternatives                                               *)
+(*====================================================================*)
+
+(* Weak fairness: system eventually makes progress *)
+Spec_WF == Spec /\ WF_vars(Next)
+
+(* Liveness: every transaction eventually commits or aborts *)
+ProgressProperty ==
+    \A t \in Thread :
+        (pc[t] \in {"active", "committing"}) ~> (pc[t] = "idle")
 
 ========================================================================

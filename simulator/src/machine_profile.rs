@@ -174,11 +174,12 @@ impl MachineProfile {
         Ok(())
     }
 
-    /// Get characteristics for a specific backend, or return defaults.
+    /// Get characteristics for a specific backend, or fall back to "default".
     pub fn backend(&self, name: &str) -> BackendCharacteristics {
         self.backends
             .iter()
-            .find(|b| b.backend == name || b.backend == "default")
+            .find(|b| b.backend == name)
+            .or_else(|| self.backends.iter().find(|b| b.backend == "default"))
             .cloned()
             .unwrap_or_default()
     }

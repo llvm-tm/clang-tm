@@ -7,21 +7,11 @@
 #include <cstring>
 #include <mutex>
 #include <setjmp.h>
-#include <unordered_set>
-
-#include "tm_alloc_overrides.hpp"
 
 // ── Shared per-thread TM state (used by all backends) ──────────
 __thread int32_t    tm_nested_call_counter = 0;
 __thread int32_t    tm_longjmp_ret = 0;
 __thread sigjmp_buf tm_jmpbuf;
-
-// Per-backend thread-local state — defined here so backends don't need
-// to repeat these 4 lines.  Declared as extern in tm_alloc_overrides.hpp.
-thread_local bool g_in_tx = false;
-thread_local FreeNode *g_deferred_frees = nullptr;
-thread_local std::unordered_set<void *> g_deferred_frees_set;
-thread_local SpecAlloc *g_spec_allocs = nullptr;
 
 // ═══════════════════════════════════════════════════════════════
 // Stub implementations — direct access, no TM overhead.
@@ -125,34 +115,6 @@ __attribute__((weak)) void tm_trace_stub(uint32_t, void*, uint64_t, uint64_t) {}
 __attribute__((weak)) void (*tm_trace)(uint32_t, void*, uint64_t, uint64_t) = tm_trace_stub;
 
 } // extern "C"
-
-// ═══════════════════════════════════════════════════════════════
-// Shared serialize mutex + default implementations (weak).
-// Backends that need special handling (e.g. TinySTM with
-// lock-count tracking) provide their own strong definitions
-// which override these weak ones.
-// ═══════════════════════════════════════════════════════════════
-
-static std::recursive_mutex g_serialize_mutex;
-
-extern "C" {
-
-__attribute__((weak)) void tm_serialize_lock() { g_serialize_mutex.lock(); }
-__attribute__((weak)) void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
-__attribute__((weak)) int tm_serialize_unlock_all()
-{
-    if (g_serialize_mutex.try_lock()) {
-        g_serialize_mutex.unlock();
-        return 1;
-    }
-    return 0;
-}
-
-__attribute__((weak)) int tm_setjmp() { return 0; }
-__attribute__((weak)) void tm_set_env(sigjmp_buf *env) {
-    if (env) memcpy(&tm_jmpbuf, env, sizeof(sigjmp_buf));
-}
-}
 
 // ═══════════════════════════════════════════════════════════════
 // Thread counting + hook swap
@@ -355,7 +317,7 @@ static std::atomic<uint64_t> g_trace_ts{0};
 
 // ── Trace helper: write a formatted line (extended format) ────────────
 // Format: ts tid type txid addr width val cont_flag [extra...]
-// Types: 0=read, 1=write, 2=tx_begin, 3=tx_end, 4=malloc, 5=free, 6=abort
+// Types: 0=read, 1=write, 2=tx_begin, 3=tx_end, 4=malloc, 5=free, 6=abort, 7=computation
 static void trace_write_line_ext(FILE *f, uint64_t ts, uint64_t tid, int type,
                                  uint64_t txid, uint64_t addr, int width,
                                  uint64_t val, uint8_t cont_flag,

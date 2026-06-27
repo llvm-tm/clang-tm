@@ -70,6 +70,7 @@ fn lock_at_index(idx: usize) {
     while !try_lock_at_index(idx) {
         #[cfg(feature = "stats")]
         TM_STATS.lock_contentions.fetch_add(1, Ordering::Relaxed);
+        #[cfg(not(feature = "simulation"))]
         std::hint::spin_loop();
     }
 }

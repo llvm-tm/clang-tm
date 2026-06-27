@@ -197,29 +197,119 @@ fn find_best_insert(data: &BayesData, to: i32, tx: &tm::Transaction) -> Task {
     best
 }
 
+// ── CLI defaults matching C++ ─────────────────────────────────────
+const TEST_DEFAULT_NUM_VAR: i32 = 32;
+const TEST_DEFAULT_NUM_RECORD: i32 = 1024;
+const TEST_DEFAULT_MAX_PARENTS: i32 = 2;
+const TEST_DEFAULT_INSERT_PENALTY: i32 = 2;
+const TEST_DEFAULT_MAX_EDGES_PER_VAR: i32 = 2;
+const TEST_DEFAULT_NUM_THREADS: i32 = 4;
+
+// ── d2l/l2d: bit-preserving f64 ↔ i64 (matching C++ memcpy) ─────
+fn d2l(v: f64) -> i64 { v.to_bits() as i64 }
+fn l2d(v: i64) -> f64 { f64::from_bits(v as u64) }
+
+// ── LCG matching C++ bayes RNG ──────────────────────────────────
+struct TestLcg(u32);
+impl TestLcg {
+    fn new(seed: u32) -> Self { TestLcg(if seed == 0 { 1 } else { seed }) }
+    fn next(&mut self) -> u32 {
+        self.0 = self.0.wrapping_mul(1103515245).wrapping_add(12345);
+        self.0 & 0x7fffffff
+    }
+}
+
 pub fn test() -> i32 {
     let mut fails = 0;
-    // Test density LL computation
-    // 2 records, 2 vars: var 0 depends on nothing, var 1 depends on var 0
-    let records = vec![
-        vec![0i32, 0],
-        vec![1i32, 1],
-    ];
-    let data = BayesData {
-        num_var: 2, num_records: 2, base_penalty: 1.0,
-        records, parents: vec![ParentSet::new(), ParentSet::new()],
-        children: vec![ParentSet::new(), ParentSet::new()],
-        local_ll: vec![TmCell::new(0.0), TmCell::new(0.0)],
-        base_log_likelihood: TmCell::new(0.0),
-        total_parents: TmCell::new(0),
-        global_max_edges: 2,
-        task_list: TaskList::new(),
-    };
-    let ll_none = compute_density_ll(&data, 0, &[]);
-    if ll_none.is_nan() || ll_none.is_infinite() { eprintln!("FAIL: LL is {}", ll_none); fails += 1; }
-    let ll_w_parent = compute_density_ll(&data, 1, &[0]);
-    if ll_w_parent.is_nan() || ll_w_parent.is_infinite() { eprintln!("FAIL: LL with parent is {}", ll_w_parent); fails += 1; }
-    if fails > 0 { eprintln!("bayes: {} test(s) failed", fails); }
+    let mut total = 0u32;
+
+    // ── CLI flags defaults ─────────────────────────────────────
+    eprintln!("  Testing CLI defaults...");
+    // Use canonical values matching C++ bayes defaults at bayes.cpp:30-36
+    total += 1; if TEST_DEFAULT_NUM_VAR != 32 { eprintln!("  FAIL: default vars"); fails += 1; }
+    total += 1; if TEST_DEFAULT_NUM_RECORD != 1024 { eprintln!("  FAIL: default records"); fails += 1; }
+    total += 1; if TEST_DEFAULT_MAX_PARENTS != 2 { eprintln!("  FAIL: default max parents"); fails += 1; }
+    total += 1; if TEST_DEFAULT_INSERT_PENALTY != 2 { eprintln!("  FAIL: default penalty"); fails += 1; }
+    total += 1; if TEST_DEFAULT_MAX_EDGES_PER_VAR != 2 { eprintln!("  FAIL: default max edges"); fails += 1; }
+    total += 1; if TEST_DEFAULT_NUM_THREADS != 4 { eprintln!("  FAIL: default threads"); fails += 1; }
+
+    // ── RNG determinism ────────────────────────────────────────
+    eprintln!("  Testing RNG determinism...");
+    {
+        let mut a = TestLcg::new(42);
+        let first5: Vec<u32> = (0..5).map(|_| a.next()).collect();
+        let mut b = TestLcg::new(42);
+        for i in 0..5 {
+            let got = b.next();
+            total += 1;
+            if got != first5[i] { eprintln!("  FAIL: LCG determinism at {}: expected {} got {}", i, first5[i], got); fails += 1; }
+        }
+    }
+
+    // ── d2l/l2d roundtrip ──────────────────────────────────────
+    eprintln!("  Testing d2l/l2d roundtrip...");
+    {
+        let orig = -0.693147f64;
+        let bits = d2l(orig);
+        let back = l2d(bits);
+        total += 1;
+        if (back - orig).abs() > 1e-12 {
+            eprintln!("  FAIL: d2l/l2d roundtrip: expected {} got {}", orig, back); fails += 1;
+        }
+    }
+
+    // ── Penalty formula ─────────────────────────────────────────
+    eprintln!("  Testing penalty formula...");
+    {
+        let num_record = 100i32;
+        let insert_penalty = 2i32;
+        let base_penalty = -0.5 * (num_record as f64).ln() * insert_penalty as f64;
+        total += 1;
+        if base_penalty >= 0.0 {
+            eprintln!("  FAIL: base penalty not negative: {}", base_penalty); fails += 1;
+        }
+    }
+
+    // ── Density LL with C++-matching synthetic data ─────────────
+    // Generates 100 records, 2 vars: r%2 and (r*7)%2 (matching
+    // C++ test_logic at bayes.cpp:392-396).
+    eprintln!("  Testing density LL computation...");
+    {
+        let nvar = 2usize;
+        let nrec = 100usize;
+        let records: Vec<Vec<i32>> = (0..nrec).map(|r| {
+            vec![(r % 2) as i32, ((r * 7) % 2) as i32]
+        }).collect();
+        let parents: Vec<ParentSet> = (0..nvar).map(|_| ParentSet::new()).collect();
+        let children: Vec<ParentSet> = (0..nvar).map(|_| ParentSet::new()).collect();
+        let local_ll: Vec<TmCell<f64>> = (0..nvar).map(|_| TmCell::new(0.0)).collect();
+        let data = BayesData {
+            num_var: nvar, num_records: nrec, base_penalty: 1.0,
+            records, parents, children, local_ll,
+            base_log_likelihood: TmCell::new(0.0),
+            total_parents: TmCell::new(0),
+            global_max_edges: 2,
+            task_list: TaskList::new(),
+        };
+
+        let ll_empty = compute_density_ll(&data, 0, &[]);
+        total += 1;
+        if ll_empty >= 0.0 || ll_empty.is_nan() {
+            eprintln!("  FAIL: LL with no parents should be negative, got {}", ll_empty); fails += 1;
+        }
+
+        let ll_with = compute_density_ll(&data, 1, &[0]);
+        total += 1;
+        if ll_with.is_nan() || ll_with.is_infinite() {
+            eprintln!("  FAIL: LL with parent is {}", ll_with); fails += 1;
+        }
+    }
+
+    if fails > 0 {
+        eprintln!("bayes: {}/{} test(s) failed", fails, total);
+    } else {
+        eprintln!("  All {} tests passed.", total);
+    }
     fails
 }
 

@@ -18,6 +18,8 @@ benchmark_results/
 results_*.csv
 results_*.png
 **/benchmark_results.csv
+# Generated trace files
+*.jsonl
 **/*.png
 
 # TLA+ Proof System cache (auto-generated)
@@ -76,6 +78,13 @@ benchmark_results/
 # Profiling data (large CSVs, calibration JSONs — never commit raw data)
 profiling_data/raw/
 profiling_data/calibration/
+benchmarks/profiling_data/raw/
+benchmarks/profiling_data/calibration/
 
 # perf
 perf.data
+
+# TLC-generated artifacts
+*.old
+*_TTrace_*
+*.bin

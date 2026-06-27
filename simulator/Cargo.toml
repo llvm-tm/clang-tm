@@ -19,6 +19,7 @@ runtime-romulus = { path = "../expli_instr/rust/workspace/runtime/romulus", feat
 runtime-swisstm = { path = "../expli_instr/rust/workspace/runtime/swisstm", features = ["simulation", "serde", "stats"] }
 runtime-tsx-sim = { path = "../expli_instr/rust/workspace/runtime/tsx_sim", features = ["simulation", "serde", "stats"] }
 libc = "0.2"
+libloading = "0.8"
 
 [[bin]]
 name = "tm-des"
@@ -39,3 +40,11 @@ path = "src/bin/tm-trace2jsonl.rs"
 [[bin]]
 name = "tm-sim"
 path = "src/bin/tm-sim.rs"
+
+[[bin]]
+name = "tm-live"
+path = "src/bin/tm-live.rs"
+
+[[bin]]
+name = "tm-fix-trace"
+path = "src/bin/tm-fix-trace.rs"

@@ -17,6 +17,7 @@
 
 use crate::backend::Backend;
 use crate::checkpoint::{self, Checkpoint};
+use crate::computation_profile::ComputationProfile;
 use crate::cost_model::CalibratedCostModel;
 use crate::deadlock::DeadlockDetector;
 use crate::event::{Event, EventKind};
@@ -40,6 +41,10 @@ fn alloc_tid_base() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1_000_000);
     NEXT.fetch_add(10_000, std::sync::atomic::Ordering::Relaxed)
 }
+
+/// Default TM region base address used when the trace address range is unavailable.
+pub const DEFAULT_TM_BASE: u64 = 0x7f00_0000_0000;
+pub const DEFAULT_TM_SIZE: usize = 256 * 1024 * 1024;
 
 /// Statistics collected during replay.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -79,17 +84,22 @@ pub struct SimEngine {
     pub estimated_cycles: u64,
     /// Frequency in GHz for time estimation.
     pub freq_ghz: f64,
+    /// Baseline computation profile (optional).  Priority over computed_cycles.
+    pub computation_profile: Option<ComputationProfile>,
+    /// Accumulated computation cycles from trace EventKind::Computation events.
+    /// Only used when no baseline profile is available.
+    pub computed_cycles: u64,
+    /// Address translation addend: trace_addr + addr_addend → backend mmap addr.
+    /// Zero when no translation is needed.
+    pub addr_addend: i64,
     /// Pending TxBegin events buffered for Phase 4 batch processing.
     /// Stores raw event thread_ids (not btid'd).
     /// Flushed before the first non-TxBegin event in each iteration.
     pending_begins: VecDeque<u64>,
-    /// Cross-transaction abort accumulator (per raw thread_id).
-    /// When a thread reaches max_retries consecutive aborts across
-    /// iterations, its next begin is forced to SGL fallback.
-    /// This compensates for the sequential event model's inability
-    /// to interleave retries within a single tm_begin() call.
-    #[allow(dead_code)]
-    persistent_retries: HashMap<u64, u64>,
+    /// Per-thread SGL fallback mode (P5). True when a thread was forced
+    /// to SGL after TSX retry exhaustion. Affects cost accounting:
+    /// TxEnd uses sgl_end_cost instead of tx_end_cost.
+    sgl_mode: HashMap<u64, bool>,
 }
 
 impl SimEngine {
@@ -109,8 +119,11 @@ impl SimEngine {
             cost_model: None,
             estimated_cycles: 0,
             freq_ghz: 3.0,
+            computation_profile: None,
+            computed_cycles: 0,
+            addr_addend: 0,
             pending_begins: VecDeque::new(),
-            persistent_retries: HashMap::new(),
+            sgl_mode: HashMap::new(),
         }
     }
 
@@ -120,6 +133,11 @@ impl SimEngine {
         self.cost_model = Some(model);
         self.freq_ghz = freq_ghz;
         self.estimated_cycles = 0;
+    }
+
+    /// Set a computation baseline profile for total wall-time estimation.
+    pub fn set_computation_profile(&mut self, profile: ComputationProfile) {
+        self.computation_profile = Some(profile);
     }
 
     /// Get the cycle cost for an event kind.
@@ -140,6 +158,11 @@ impl SimEngine {
         self.base_tid + event_tid
     }
 
+    /// Translate a trace address to the mapped backend address.
+    fn translate_addr(&self, trace_addr: u64) -> u64 {
+        (trace_addr as i64 + self.addr_addend) as u64
+    }
+
     /// Initialize the backend and back the TM address space.
     /// Uses the default fixed address (0x7f00_0000_0000).
     pub fn init(&mut self) {
@@ -154,21 +177,44 @@ impl SimEngine {
     }
 
     /// Low-level initialization at a given address range.
-    pub fn init_at(&mut self, addr: *mut libc::c_void, size: usize) {
-        unsafe {
-            let result = libc::mmap(
-                addr,
-                size,
+    /// Maps memory at the trace's expected address if possible, otherwise
+    /// maps at the default TM region and sets an address translation addend.
+    pub fn init_at(&mut self, trace_addr: *mut libc::c_void, size: usize) {
+        // Map at the default TM region (safe — never overlaps process segments).
+        // The trace_addr computed from events may overlap the process stack
+        // or heap, so we always map at the safe default and translate.
+        let (mapped_base, addend) = unsafe {
+            let r = libc::mmap(
+                DEFAULT_TM_BASE as *mut libc::c_void, size,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
-                -1,
-                0,
+                -1, 0,
             );
-            if result == libc::MAP_FAILED {
-                panic!("mmap of TM address space at {:p} ({} bytes) failed: {}",
-                       addr, size, std::io::Error::last_os_error());
+            if r != libc::MAP_FAILED {
+                let addend = DEFAULT_TM_BASE as i64 - trace_addr as i64;
+                (DEFAULT_TM_BASE, addend)
+            } else {
+                // Fall back to kernel-chosen address.
+                let r = libc::mmap(
+                    std::ptr::null_mut(), size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1, 0,
+                );
+                if r == libc::MAP_FAILED {
+                    panic!("mmap failed: {}", std::io::Error::last_os_error());
+                }
+                let addend = r as i64 - trace_addr as i64;
+                eprintln!("  [sim] kernel-chosen mmap at {:p}, addend={:#x}", r, addend);
+                (r as u64, addend)
             }
-        }
+        };
+
+        self.addr_addend = addend;
+
+        // Zero the mapped region so uninitialized reads return 0.
+        unsafe { std::ptr::write_bytes(mapped_base as *mut u8, 0, size); }
+        eprintln!("  [sim] addr_addend={:#x} mapped={:#x} size={}", addend, mapped_base, size);
 
         let b = self.backend;
         let tid0 = self.btid(0);
@@ -220,8 +266,24 @@ impl SimEngine {
         let b = self.backend;
         b.sim_set_thread_id(tid);
 
-        // Accumulate cycle cost before dispatching
-        let event_cost = self.event_cost(&event.kind);
+        // Handle Computation events directly (no backend dispatch needed).
+        if let EventKind::Computation { cycles } = &event.kind {
+            self.computed_cycles += cycles;
+            self.estimated_cycles += cycles;
+            self.events_processed += 1;
+            b.sim_clear_thread_id();
+            return;
+        }
+
+        // Accumulate cycle cost before dispatching.
+        // For SGL-mode threads, TxEnd uses sgl_end_cost instead of tx_end_cost (P5).
+        let event_cost = if *self.sgl_mode.get(&tid).unwrap_or(&false)
+            && matches!(event.kind, EventKind::TxEnd)
+        {
+            self.cost_model.as_ref().map(|m| m.sgl_end_cost).unwrap_or(self.event_cost(&event.kind))
+        } else {
+            self.event_cost(&event.kind)
+        };
         self.estimated_cycles += event_cost;
 
         let result = self.dispatch_event(event);
@@ -301,6 +363,10 @@ impl SimEngine {
         // try_begin() (LOCK_BUSY due to SGL_OWNER held) charges cost and
         // retries in the next round.  After max_r rounds, remaining
         // threads enter SGL fallback.
+        let (xbegin_cost, xabort_cost, sgl_lock_cost) = match &self.cost_model {
+            Some(m) => (m.tx_begin_cost, m.abort_cost, m.sgl_begin_cost),
+            None => (60, 1500, 75),
+        };
         let mut attempts: HashMap<u64, u64> = HashMap::new();
         let mut in_tx: HashSet<u64> = HashSet::new();
 
@@ -317,10 +383,10 @@ impl SimEngine {
                 self.backend.sim_clear_thread_id();
                 *a += 1;
 
-                // Charge cost for each retry attempt
-                self.estimated_cycles += 60; // COST_XBEGIN
+                // Charge cost for each retry attempt (from calibrated model)
+                self.estimated_cycles += xbegin_cost;
                 if !ok {
-                    self.estimated_cycles += 1500; // COST_XABORT
+                    self.estimated_cycles += xabort_cost;
                 }
 
                 if ok {
@@ -334,7 +400,8 @@ impl SimEngine {
                     self.backend.sim_set_thread_id(btid);
                     self.backend.force_sgl();
                     self.backend.sim_clear_thread_id();
-                    self.estimated_cycles += 75; // COST_MUTEX_LOCK
+                    self.estimated_cycles += sgl_lock_cost;
+                    self.sgl_mode.insert(raw_tid, true);
                     in_tx.insert(raw_tid);
                     self.verifier.tx_begin(raw_tid);
                     self.in_tx.insert(raw_tid, true);
@@ -354,7 +421,8 @@ impl SimEngine {
             self.backend.sim_set_thread_id(btid);
             self.backend.force_sgl();
             self.backend.sim_clear_thread_id();
-            self.estimated_cycles += 75;
+            self.estimated_cycles += sgl_lock_cost;
+            self.sgl_mode.insert(raw_tid, true);
             self.verifier.tx_begin(raw_tid);
             self.in_tx.insert(raw_tid, true);
             self.aborted.insert(raw_tid, false);
@@ -369,6 +437,18 @@ impl SimEngine {
 
         match &event.kind {
             EventKind::TxBegin => {
+                // C++ siglongjmp-based backends may log TxBegin without a
+                // preceding TxEnd/Abort when a transaction retries.  If the
+                // thread was still in a transaction, auto-close it as an abort.
+                if self.in_tx.get(&tid).copied().unwrap_or(false) {
+                    self.in_tx.insert(tid, false);
+                    self.sgl_mode.remove(&tid);
+                    let ws = self.current_write_set.remove(&tid).unwrap_or_default();
+                    self.stats.aborts += 1;
+                    self.verifier.tx_abort(tid);
+                    self.deadlock.record_abort(btid, &ws);
+                    self.estimated_cycles += 60; // implicit abort cost
+                }
                 self.verifier.tx_begin(tid);
                 b.begin();
                 self.in_tx.insert(tid, true);
@@ -378,6 +458,7 @@ impl SimEngine {
             }
             EventKind::TxEnd => {
                 self.in_tx.insert(tid, false);
+                self.sgl_mode.remove(&tid);
                 let ws = self.current_write_set.remove(&tid).unwrap_or_default();
                 if *self.aborted.get(&tid).unwrap_or(&false) {
                     self.aborted.insert(tid, false);
@@ -400,6 +481,7 @@ impl SimEngine {
             }
             EventKind::Abort { reason } => {
                 self.in_tx.insert(tid, false);
+                self.sgl_mode.remove(&tid);
                 self.aborted.insert(tid, true);
                 let ws = self.current_write_set.remove(&tid).unwrap_or_default();
                 self.stats.aborts += 1;
@@ -409,6 +491,7 @@ impl SimEngine {
                 Err(format!("abort (reason={})", reason))
             }
             EventKind::Read { addr, width } => {
+                let mem_addr = self.translate_addr(*addr);
                 let in_tx = self.in_tx.get(&tid).copied().unwrap_or(false);
                 let _verified = self.verifier.check_read(tid, *addr);
 
@@ -420,10 +503,10 @@ impl SimEngine {
                     1 | 2 | 4 | 8 => {
                         let read_result = panic::catch_unwind(AssertUnwindSafe(|| {
                             match width {
-                                1 => b.read_u8(*addr as *mut u8) as u64,
-                                2 => b.read_u16(*addr as *mut u16) as u64,
-                                4 => b.read_u32(*addr as *mut u32) as u64,
-                                8 => b.read_u64(*addr as *mut u64),
+                                1 => b.read_u8(mem_addr as *mut u8) as u64,
+                                2 => b.read_u16(mem_addr as *mut u16) as u64,
+                                4 => b.read_u32(mem_addr as *mut u32) as u64,
+                                8 => b.read_u64(mem_addr as *mut u64),
                                 _ => unreachable!(),
                             }
                         }));
@@ -453,6 +536,7 @@ impl SimEngine {
                 Ok(())
             }
             EventKind::Write { addr, width, val } => {
+                let mem_addr = self.translate_addr(*addr);
                 let in_tx = self.in_tx.get(&tid).copied().unwrap_or(false);
                 let _verified = self.verifier.check_write(tid, *addr, *val);
 
@@ -464,10 +548,10 @@ impl SimEngine {
                     1 | 2 | 4 | 8 => {
                         let write_result = panic::catch_unwind(AssertUnwindSafe(|| {
                             match width {
-                                1 => b.write_u8(*addr as *mut u8, *val as u8),
-                                2 => b.write_u16(*addr as *mut u16, *val as u16),
-                                4 => b.write_u32(*addr as *mut u32, *val as u32),
-                                8 => b.write_u64(*addr as *mut u64, *val),
+                                1 => b.write_u8(mem_addr as *mut u8, *val as u8),
+                                2 => b.write_u16(mem_addr as *mut u16, *val as u16),
+                                4 => b.write_u32(mem_addr as *mut u32, *val as u32),
+                                8 => b.write_u64(mem_addr as *mut u64, *val),
                                 _ => unreachable!(),
                             }
                         }));
@@ -522,6 +606,10 @@ impl SimEngine {
             EventKind::ThreadJoin(_) => {
                 Ok(())
             }
+            EventKind::Computation { .. } => {
+                // Handled in process_event() before dispatch. Unreachable here.
+                Ok(())
+            }
         }
     }
 
@@ -567,6 +655,7 @@ impl SimEngine {
         self.current_write_set.clear();
         self.estimated_cycles = 0;
         self.pending_begins.clear();
+        self.sgl_mode.clear();
     }
 }
 

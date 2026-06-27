@@ -1,431 +1,269 @@
-# Session Summary
+# TM API C++ — Project Summary
 
-## Latest Session (2026-06-15) — Queue DATA/TEXT fixes + test_local_containers re-enable + race documentation
+## Phase-switching backend swap
 
-### What was done
+`tm_swap_runtime()` now supports runtime backend switching. Added `tm_get_real_hooks()` to retrieve registered hooks. The phase-switch test (`test_phase_switch.cpp`) demonstrates: swap from stubs to real TinySTM hooks mid-run, verify money conservation across phases.
 
-Fixed all CI-breaking DATA/TEXT symbol conflicts in the queue runtime (`tm_enqueue`, `tm_wait_prev_tx`, `tm_init_thread`, `tm_exit_thread`), re-enabled `test_local_containers` (switched from broken inline pipeline to 5-step Honorio pipeline), and documented pre-existing race conditions.
+## Dual-backend swap test (TinySTM ↔ NOrec)
 
-### Fix: queue runtime DATA/TEXT symbol conflicts
+`test_swap_backends.cpp` links both TinySTM and NOrec in a single binary, swapping between them at runtime. NOrec's symbols are renamed via `norec_wrapper.cpp` (`#define`-based) to avoid linker conflicts with TinySTM. The 3 retry-loop TLS variables (`tm_jmpbuf`, `tm_nested_call_counter`, `tm_longjmp_ret`) were moved to `tm_hooks.cpp` so both backends share them. `tm_swap_runtime()` now also updates `s_real_hooks` to prevent `tm_hook_init_thread()` from reverting the swap.
 
-**Root cause**: Four hook symbols in the queue runtime were TEXT functions, but the LLVM pass declares all hooks as DATA variables (`external global ptr`). On Linux, LLD strictly enforces this — the generated code loads 8 bytes of function machine code as a pointer → jumps to garbage → `udf` trap.
+## Direct backend refactoring (hooks system)
 
-**Fix pattern** (same as `tm_sigsetjmp` in `plugin/runtime/tm_runtime.cpp`):
-- `tm_enqueue`: renamed TEXT function → `static real_tm_enqueue`, DATA variable `void (*tm_enqueue)(...) = &real_tm_enqueue`
-- `tm_wait_prev_tx`: same pattern → `void (*tm_wait_prev_tx)(void) = &real_tm_wait_prev_tx`
-- `tm_init_thread`/`tm_exit_thread`: queue_runtime.cpp extern declarations changed from `extern "C" void tm_init_thread(void)` (TEXT) → `extern "C" void (*tm_init_thread)(void)` (DATA), matching TinySTM_runtime.cpp's `-DLLVM_TM_PLUGIN` DATA definitions
+All 6 direct backends (DUDETM, NVHTM, SPHT, DistributedSGL, PersistentSGL, TSXSGL) now use the hook system: removed their `extern "C"` definitions of hook functions, made them `static`, and register via `TMRealHooks` + `tm_register_real_hooks()`.
 
-**Files updated**: `backends/tm_impl/queue/queue_runtime.cpp`, `backends/tm_impl/queue/queue_runtime.h`, 5 test/bench files (`test_queue.cpp`, `test_queue_async.cpp`, `bench_queue_compare.cpp`, `bench_queue_compare2.cpp`, `stmbench7_queue_manual.cpp`).
+## Plugin dead code cleanup
 
-**Verification**:
-- `bin/test_queue`: PASS (was: linker error, then `udf #0xe08` trap)
-- `bin/test_queue_sync`: PASS
-- `bin/test_queue_async`: PASS
-- `bin/test_queue_multi`: FAIL (counter=351 expected=400) — pre-existing race, see below
-- `make -C plugin run`: all 18+ plugin tests pass on macOS arm64
+Removed unused functions (`createHookCall`, `handleMemoryIntrinsic`, `hasTMGlobals`, `isSTLContainerFunction`, `collectDirectCalls`, `callsTransactionFunctions`, `transitivelyCallsTransactionFunctions`, `TMMethodInfo`), unused file `AtomicDoLower.cpp`, and unused runtime functions (`tm_get_type_string`, `tm_read_z`, `tm_write_z`, `consume_ptr`, commented-out `tm_setjmp`).
 
-### Fix: test_local_containers re-enabled
+## Benchmark bug fixes
 
-**Root cause**: `test_local_containers` was using `tm-instrument-inline` (inline pipeline). The inline pipeline ran `injectTransactionBeginEnd` after all callees were inlined, producing 77 `ret void` instructions from `std::vector` template expansions. The return-splitting logic couldn't handle multiple returns sharing a parent block, producing a broken module ("Basic Block does not have terminator!").
+- **eigenbench crash**: `thread_exit()` was inside the `while (!g_stop.load())` loop; after the first iteration `current_tx` was cleared and the next `transaction()` call crashed in `norec::begin()`. Fixed by moving `thread_exit()` outside the loop.
+- **rbtree double‑free**: `tm_insert()` frees `z` on duplicate key at line 132, but caller `worker()` at line 244 freed `z` again. Removed the duplicate free from the caller.
 
-**Fix**: Changed from inline pipeline to the default 5-step Honorio pipeline (`tm-instrument`). The Honorio pipeline clones functions before instrumentation (`tm-clone`), so each `_tm_clone` has exactly one return — return-splitting works correctly. Removed the custom Makefile rule; added `test_local_containers` to `TEST_NAMES`.
+## LLVM race checker plugin
 
-**Verification**: `bin/test_local_containers`: `g_tx_count = 419 (expected >= 400)` PASS.
+`plugin/passes/TMRaceCheckerPass.cpp` — a standalone `opt` pass (`-passes="tm-race-checker"`) that scans all non‑transaction functions for loads/stores to TM‑annotated globals. Reuses `tracesFromTMGlobal()` from `tm_local_vars.hpp` (same analysis as the instrumentation pipeline). Emits source‑location warnings suggesting `[[tm::shared]]` annotation.
 
-### Pre-existing race conditions documented
+The instrumentation plugin (`libTMInstrument.so`) now also warns about missing transaction annotations at build time via `checkMissingTransactionAnnotations()` in `tm_instrument_helpers.hpp`, called from `setupModulePass()`.
 
-#### test_queue_multi — `counter` not TM-tracked
+Usage:
+```sh
+opt-22 -load-pass-plugin=plugin/bin/libTMRaceChecker.so \
+       -passes="tm-race-checker" myapp.bc -o /dev/null
+```
 
-`test_queue_multi.cpp` has 4 threads each calling `tx_increment(1)` 100 times (expected total 400). The `TX` annotation wraps the function body in `tm_begin`/`tm_end`, but the LLVM pass only instruments loads/stores to TM-annotated globals. `counter` is a plain `static int` — no TM annotation, no atomic, no lock. Four threads doing `counter += 1` concurrently experience classic lost-update races. Expected 400, consistently observed ~351.
+## --version / ASCII art
 
-Same pattern in `bench_queue_compare.cpp` and `bench_queue_compare2.cpp` (plain `static int counter`).
+`plugin/bin/tm-race-checker` (shell wrapper) and `fuzz-counter`/`fuzz-bank` (C++ benchmarks) support `--version` / `-V`. Each prints box‑drawing letter art:
 
-#### test_queue_multi — no caller-side completion wait
+- **tm-race-checker** — "RACE" (leading ━) + "CHECKER" (7‑block)  
+- **fuzz-counter**, **fuzz-bank** — "FUZZ" (4‑block)
 
-The test joins pthreads (caller threads) but never waits for pool workers to finish enqueued tasks. Even if `counter` were TM-tracked, workers might still execute after `pthread_join` returns. Caller threads should call `tm_wait_prev_tx()` after enqueue loops for deterministic results.
+## TM memory debug allocation
 
-### All files modified
-- `backends/tm_impl/queue/queue_runtime.cpp` — DATA/TEXT fix for tm_enqueue, tm_wait_prev_tx, tm_init_thread, tm_exit_thread
-- `backends/tm_impl/queue/queue_runtime.h` — Updated enqueue/wait_prev_tx declarations to DATA variable form
-- `tests/plugin/test_queue.cpp` — `extern "C" void tm_wait_prev_tx(void)` → `extern "C" void (*tm_wait_prev_tx)(void)`
-- `tests/plugin/test_queue_async.cpp` — Same
-- `tests/plugin/bench_queue_compare.cpp` — Same
-- `tests/plugin/bench_queue_compare2.cpp` — Same
-- `benchmarks/plugin/stmbench7/stmbench7_queue_manual.cpp` — Same
-- `plugin/Makefile` — Added test_local_containers to TEST_NAMES; removed broken custom inline-pipeline rule
-- `tests/plugin/test_queue_multi.cpp` — Added race condition comment
-- `docs/CORRECTNESS_FIXES.md` — Updated section 7 (test_local_containers fully fixed), added section 8 (queue DATA/TEXT), added race docs to known issues
+`tm_region_check_leaks()` added to `tm_region_allocator.hpp`, gated by `-DTM_DEBUG_ALLOC`. When enabled, a per‑thread `unordered_map<void*,size_t>` tracks live allocations; `tm_region_check_leaks()` at exit prints any unfreed pointers.
 
----
+## Bug fixes (usability round)
 
-## Previous Session (2026-06-09) — Backend benchmark comparison + crash documentation
+- Fixed all stale paths in scripts and docs (llvm_tm_plugin → plugin, backends/runtimes → backends/tm_impl).
+- Unified LLVM requirement to 22 in CMakeLists.txt.
+- Added `.github/workflows/ci.yml`.
+- Removed stale `backends/runtimes/` comments from 9 source/doc files.
+- Removed `plugin/bin/tm-race-checker` from git tracking (.gitignore covers `**/bin/`).
+- Fixed `docs/REQUIREMENTS.md` directory tree and install instructions.
+- Fixed `plugin/README.md` install instructions (./install.sh → ./tools/install-plugin.sh).
+- Fixed `plugin/clang-tm` install.sh references.
+- Upgraded Python 3.8+ check to hard failure in check-requirements.sh.
 
-### What was done
+## Backend bug fixes
 
-A comprehensive benchmark comparison was run across 3 TM backends (tinystm_wbctl, norec, singlelock) on **8 STAMP benchmarks + TPC-C + STMbench7** at 12 thread levels × 3 samples. The runner script (`benchmarks/scripts/run_backend_compare.sh`) was also fixed for output parsing.
+- **XTM read_word/write_word**: Removed `#ifdef LLVM_TM_PLUGIN` guard on `isTMAddress()` check so non-TM addresses (e.g. regular heap from `::operator new` in `TM<int*>::alloc()`) fall through to direct read/write instead of crashing on page-aligned `memcpy` overflow. Fixes test_tx crash ("corrupted double-linked list") and test_ds crash with XTM.
+- **LEFTRIGHT read_word**: Added write-set lookup before reading from memory, so own writes within a transaction are visible to subsequent reads. Also added missing `#include <algorithm>` for `std::sort` in commit path.
+- **ROMULUS read_word**: Same write-set lookup fix as LEFTRIGHT.
+- **LEFTRIGHT/ROMULUS**: Added missing `#include <algorithm>`.
 
-### Benchmark results summary
+## ROMULUS rewrite: proper version-table OCC commit
 
-| Backend | Overhead (1t, min–max) | STAMP | STMbench7 | TPC-C | Total runs |
-|---------|----------------------|-------|-----------|-------|-----------|
-| singlelock | 0.58x–2.50x | ✓ 288/288 | ✓ 108/108 | ✓ 36/36 | 432/432 |
-| norec | 1.54x–19.71x | ✓ 288/288 | ✗ 2/108 | ✗ 0/36 | 290/432 |
-| tinystm_wbctl | 1.63x–20.04x | ✓ 287/288 | ✗ 0/108 | not run | 287/396 |
+Replaced the broken commit-time CAS (which reinterpreted every data address as an `atomic<uint64_t>` version slot, corrupting data on write-back) with a proper version-table-based OCC protocol:
 
-### Crash signatures documented
+1. **Separate version table**: `g_version_table[]` — 2^20 entries of `atomic<uint64_t>`, indexed by `(addr>>3) & mask`. Independent of data addresses.
+2. **Commit lock**: `g_commit_lock` spinlock serializes the commit path.
+3. **Protocol**: Validate (check `version ≤ tx->timestamp`) → acquire lock → re-validate → increment global clock → write-back → fence → update version entries (`store(commit_ts)`) → release lock.
+4. **write-set lookup in read_word**: own writes visible to subsequent reads within the same transaction.
+5. **Removed old_val capture**: write-set no longer captures old values (undo logging not needed for OCC).
 
-#### 1. norec STMbench7 — segfault in `read_word_norec` at worker startup
+## Verified passing (all backends)
 
-**Backtrace**: `read_word_norec` ← `op_st9_traverse_cp` (CompositePart traversal) ← `worker`
-**Mechanism**: The `addr` parameter passed to `read_word_norec` is a code-section address (identical to RIP at crash site). This indicates a corrupted pointer in the STMbench7 data structure — likely a `tm_free()`'d `AtomicPart` or `Connection` whose memory has been recycled but whose address is still in the read-set of a concurrent transaction. When the CAS-based lock-free initialization creates the OO7 data structure (100K AtomicParts, 300K Connections), some cross-object references may not be fully visible to concurrently spawned worker threads.
-**Conditions**: Segfaults at all thread counts ≥2. Exit code 139 (SIGSEGV).
-**Affected file**: `backends/tm_impl/norec/NOrec.hpp:read_word_norec`
+Comprehensive smoke test: `test_tx` + `test_ds` on 10 backends (TINYSTM, WBETL, WT, NOREC, SWISSTM, TL2, SGL, XTM, LEFTRIGHT, ROMULUS).
 
-#### 2. norec TPC-C — segfault in `read_word_norec` from `std::_Hashtable::_M_find_before_node`
+| Backend   | `test_tx` | `test_ds` |
+|-----------|-----------|-----------|
+| TINYSTM   | 114/114   | 207/207   |
+| WBETL     | 114/114   | 207/207   |
+| WT        | 114/114   | 207/207   |
+| NOREC     | 114/114   | 207/207   |
+| SWISSTM   | 114/114   | 207/207   |
+| TL2       | 114/114   | 207/207   |
+| SGL       | 114/114   | 207/207   |
+| XTM       | 114/114   | 207/207   |
+| LEFTRIGHT | 114/114   | 207/207   |
+| ROMULUS   | 114/114   | 207/207   |
 
-**Backtrace**: `read_word_norec` ← `std::_Hashtable::_M_find_before_node` ← `_M_find_node` ← `find` ← `count`
-**Mechanism**: TPC-C uses `std::unordered_set`/`std::unordered_map` inside TM transactions (e.g., for item index lookups during order processing). The hashtable's internal nodes are allocated via `std::allocator` (not `tm_calloc`), so pointer chasing inside `read_word_norec` dereferences non-TM-tracked heap memory. If the node was freed/removed, the dangling pointer causes SIGSEGV.
-**Conditions**: Segfaults at all thread counts including 1t. Exit code 139.
-**Root cause**: STL hashtable in TX — same class as the tinystm_wbctl STMbench7 crash. The STL's internal pointer chasing through `std::allocator`-managed nodes is invisible to the TM pass.
+## sigsetjmp DATA/TEXT symbol fix (CI Linux crash)
 
-#### 3. tinystm_wbctl STMbench7 — STL vector realloc crash
+**Root cause**: The LLVM pass (`sigsetjmpName()` in `tm_platform.hpp`) returned `"__sigsetjmp"` on Linux, but `__sigsetjmp` is a real function (TEXT symbol) in glibc — the pass declares it as `external global ptr` (DATA symbol). Generated code: `load ptr, ptr @__sigsetjmp` reads 8 bytes of function's machine code → garbage address → SIGSEGV. On macOS `sigsetjmpName()` returned `"tm_sigsetjmp"`, which the runtime defines as a proper `.quad` DATA symbol, so it worked.
 
-**Backtrace**: `read_word_ctl` ← (various STL functions depending on workload phase)
-**Mechanism**: Pre-existing known issue — STMbench7 uses `std::vector` and other STL containers inside `struct TM` objects. When a vector reallocates (growing beyond capacity), its internal buffer pointer changes. The TM pass has instrumented writes to the vector's old buffer, but the reallocation (done by `std::allocator`) allocates new non-TM-tracked memory. Subsequent accesses to the new buffer through non-instrumented pointer loads cause out-of-bounds reads or writes to freed memory.
-**Conditions**: Crashes at all thread counts. Pre-existing, not introduced by this session.
+**Fix**: `sigsetjmpName()` now returns `"tm_sigsetjmp"` on all platforms. Added `tm_sigsetjmp` DATA variable definition (as C-level `int (*tm_sigsetjmp)(void*, int) = ...`) to `plugin/runtime/tm_runtime.cpp` and `plugin/runtime/persistent.cpp` for all platforms (previously only on Apple via Mach-O asm).
 
-#### 4. tinystm_wbctl TPC-C — STL hashtable crash (same root cause as #2)
+## Plugin runtime TLS/stub cleanup
 
-Not run in this session (explicitly skipped by runner script), but confirmed via GDB: crashes in `read_word_ctl` called from `std::equal_to<int>::operator()` during `_Hashtable::_M_key_equals`.
+- `tm_runtime.cpp` and `persistent.cpp` now define all TLS variables and all hook DATA variables directly, eliminating the need to link `backends/tm_impl/common/tm_hooks.cpp` for plugin runtimes.
 
-#### 5. tinystm_wbctl bayes 28t_s3 — crash during learning phase
+## Known issues
 
-**Symptom**: Fails during "Learning structure..." (main TM phase). Only 1 of 3 samples failed, suggesting an intermittent issue (perhaps a race condition in the Bayesian learning algorithm or a TM validation collision at high thread count).
-**Root cause**: Not fully diagnosed. Most likely a timing-sensitive issue in `compute_density_ll` + serialize lock interaction, or a TM validation conflict at 28 threads.
+- `test_stress_ds` has a pre-existing assertion failure on non-TM addresses (region-size bug unrelated to hooks refactoring)
+- TinySTM `counter_mt` has the same pre-existing assertion failure
+- `make plugin-benchmarks` / STAMP benchmarks fail with `tm_safe_map.hpp` header path issue (pre-existing, unrelated to plugin)
+- **rbtree double‑free in TM region allocator** (`FATAL: double-free detected in TM`) — pre‑existing
+- **stmbench7 times out with >1 thread** — data race in `ts_multimap::lower_bound()`
+- **LEFTRIGHT bank/ycsb multi-thread deadlock** — pre‑existing
+- **XTM rbtree segfault** — pre‑existing
+- **ROMULUS bank multi-thread**: was fixed with read-validate pattern (2026-06-15)
 
-### Analysis script fixes
+## Session 2026-06-23 — Comprehensive audit: all 18 TLA+ models (Phases 1-3 complete)
 
-The embedded `analyze.py` in `run_backend_compare.sh` was fixed:
+### TinySTM model fidelity audit and improvements
 
-| Issue | Fix |
-|-------|-----|
-| Vacation/genome not parsed (`Time = X` without "seconds") | Added pattern `r"Time\s*=\s*(\d+\.?\d*)"` |
-| Kmeans not parsed (`Time: X seconds` with colon) | Added pattern `r"Time:\s*(\d+\.?\d*)\s*seconds"` |
-| Bayes not parsed (`Learn time = X`) | Added pattern `r"Learn time\s*=\s*(\d+\.?\d*)"` |
-| Throughput benchmarks (stmbench7, tpcc) reported elapsed time instead of ops/sec | Check `parse_ops()` first, fall back to `parse_time()` |
-| Overhead table compared different metrics (time_sec vs ops_per_sec) | Filter uninstrumented comparison by metric |
+Audited all 3 TinySTM TLA+ models against their C++ implementations. Key gaps found and fixed:
 
-### NOREC validation pathology at high thread counts
+| Gap | Affected | Severity | Fix |
+|-----|----------|----------|-----|
+| No `endVersion` per-thread | WBCTL, WBETL, WT | High | Added `endVersion[t]`, `L_extend` label, validation against `endVersion[t]` |
+| Monolithic commit (validate+write-back+unlock as one action) | WBETL | High | Split into `L_incClock` + `L_validateETL` + `L_writeBackETL` (matches C++ phases) |
+| Monolithic commit (validate+unlock as one action) | WT | High | Split into `L_validateWT` + `L_unlock` + `L_abort` |
+| Extend abort path skips lock release | WBETL | Critical (model bug) | Added `lock[a] := <<0, 0, lock[a][3]>>` before `state := "idle"` in L_extend failure |
+| No memory ordering annotations | All | Medium | Added `lastFence[t]` tracking + `FenceFidelity` invariant |
 
-NOREC's `validate()` re-reads the entire read-set on each clock change. Under high contention (STMbench7 at 21t), the global clock changes frequently, causing repeated O(read_set) re-validations that slow execution to a crawl. A single 21t run took 101 seconds (20× the configured 5s duration) with only 29 ops/sec throughput.
+### Verification results (TinySTM models)
 
-### New files
-- `docs/BACKEND_COMPARISON.md` — Full comparison doc with overhead tables, scaling analysis, reliability matrix
+| Backend | States (before) | States (after) | TLC result |
+|---------|----------------|----------------|------------|
+| WBCTL | 12K | 146K (+lastFence) | PASS ✅ |
+| WBETL | 3.9K | 58K (+commit split + lastFence) | PASS ✅ |
+| WT | 5.9M | N/A (parallel too large with lastFence) | Sequential PASS ✅ |
 
-### Modified files
-- `benchmarks/scripts/run_backend_compare.sh` — Fixed embedded `analyze.py` (patterns, throughput detection, metric filtering)
-- `backends/stubs/tm_stubs.cpp` — Added `g_tm_region_start`/`g_tm_region_end` for TM-aware headers
-- `benchmarks/plugin/datastructures/Makefile` — Removed redundant `-pthread` flag
-- `benchmarks/plugin/eigenbench/Makefile` — Fixed `make clean` to use `$(OUT_DIR)`/`$(BIN_DIR)`
-- `benchmarks/plugin/stmbench7/Makefile` — Fixed uninstrumented build (include `tm_stubs.cpp`, proper include paths)
-- `benchmarks/plugin/ycsb/Makefile` — Fixed `make clean` to use `$(OUT_DIR)`/`$(BIN_DIR)`
-- `plugin/tm_pipeline.mk` — Added `leftright` backend, fixed `tm_clean` to remove `.o` files
+### Fence annotations added
+
+For each TinySTM backend, a `lastFence[t]` variable (""/"acq"/"rel"/"sc") is set at points matching C++ fences:
+- **Read**: `"sc"` — matches `atomic_signal_fence(seq_cst)` before version load
+- **Write (lock acquire)**: `"acq"` — matches CAS acquire semantics
+- **Commit (clock inc)**: `"sc"` — matches `atomic_thread_fence(seq_cst)` before clock read
+- **Validate success**: `"sc"` — matches fence before re-reading read-set
+- **Unlock after commit/abort**: `"rel"` — matches `atomic_signal_fence(release)` before lock release
+
+`FenceFidelity`: `\A t \in Thread : writeSet[t] # {} => lastFence[t] # ""`
+
+### Comprehensive Audit of All 18 Backends (2026-06-23)
+
+Audited all remaining 12 unaudited backends. Final score distribution:
+
+| Score | Count | Backends |
+|-------|-------|----------|
+| **5/5** | 1 | SGL |
+| **4/5** | 5 | TinySTM_WBCTL, TinySTM_WBETL, TinySTM_WT, Romulus, XTM |
+| **3/5** | 6 | TSXSGL, PersistentSGL, TL2, LEFTRIGHT, SwissTM, NOrec, TiKV, TSXSim |
+| **2/5** | 3 | NVHTM, SPHT, SimEngine |
+| **1/5** | 2 | DUDETM, DistributedSGL |
+
+### TLC bugs found (expanded)
+
+| Backend | Bug | Fixed? |
+|---------|-----|--------|
+| TinySTM_WBETL | Write-conflict abort didn't release locks | ✅ (PlusCal) |
+| TinySTM_WBETL | Extend abort path skipped lock release | ✅ (PlusCal) |
+| SPHT | `DurableValid` fails: read-only TX triggers GroupCommit with empty PCL | ❌ C++ lacks guard |
+| TSXSim | `TSXvsSGLSafety` fails: SGL begin while TSX active | ❌ Model bug (HW prevents via cache-coherence) |
+| NVHTM | `FreshLogOnBegin` + `CommitPhaseOrdering` fail | ❌ Model bugs (invariant wording, self-violation) |
+
+### Key findings by backend
+
+- **NOrec (3/5)**: Plugin-mode bypass paths not modeled; clock double-check abstracted. Known bug from 2026-06-23 audit still unaddressed in model.
+- **DUDETM (1/5)**: Worst fidelity. TLA+ is a high-level design sketch; actual impl is TinySTM WBCTL wrapper with forked replayer + swapped op-types. Fundamentally different algorithm.
+- **NVHTM (2/5)**: TLA+ models checkpoint/recovery protocol that doesn't exist in C++; no SGL fallback in C++ (RTM failure→pass-through, not mutex); logging is dedup not append.
+- **SPHT (2/5)**: `DurableValid` invariant fails; TSX retry model vs C++ no-retry; SGL PCL divergence; crash/recovery modeled but absent in C++.
+- **DistributedSGL (1/5)**: TLA+ models client-server lock server with message-passing; C++ is single-machine file-backed mmap spinlock.
+- **TiKV (3/5)**: Unbounded counters prevent TLC termination; Percolator 2PC decomposed vs single `txn.commit()`.
+- **TSXSim (3/5)**: `TSXvsSGLSafety` fails; hardware cache-coherence prevents in practice.
+- **SimEngine (2/5)**: Critical naming mismatch — `SimEngine.tla` (now `DESEngine.tla`) models DES `engine.rs`, not `sim_engine.rs` replayer.
+
+### Fence annotation sweep (2026-06-24)
+
+Added `lastFence[t]` + `FenceFidelity` to all 6 remaining PlusCal backends:
+
+| Backend | States (config) | Result |
+|---------|----------------|--------|
+| **TSXSGL** | 840K / 99K (parallel) | PASS ✅ |
+| **TL2** | 4 (sequential) | PASS ✅ |
+| **XTM** | 225K / 37K (parallel) | PASS ✅ |
+| **LEFTRIGHT** | 73 / 42 (sequential) | PASS ✅ |
+| **SwissTM** | 3.5M / 699K (parallel) | PASS ✅ |
+| **Romulus** | 1.79M / 440K (parallel) | PASS ✅ |
+
+Fence points per backend (matching TinySTM pattern):
+- **Read**: `"sc"` — signal fence before version capture
+- **Lock acquire / first write**: `"acq"` — CAS acquire semantics
+- **Clock increment**: `"sc"` — thread fence before clock
+- **Validate success**: `"sc"` — fence before re-read
+- **Unlock / commit**: `"rel"` — release fence before unlock
+- **Abort**: `"rel"` — release before clean-up
+
+Fence annotations now cover **9 backends** (all PlusCal specs).
+
+**Known limitation:** `lastFence[t]` is a coarse approximation. It cannot distinguish `atomic_signal_fence` (compiler barrier) from `atomic_thread_fence` (CPU `dmb`/`mfence`), nor bundled RMW+ordering (`fetch_add(acq_rel)`). `FenceFidelity` only checks `writeSet ≠ {} ⇒ fence happened` — no guarantee of *sufficient* strength or *correct* placement. A proper memory-model proof would need `CAT`/`herd7`. These tags are documentation/consistency aids, not formal verification.
+
+Score updates: TSXSGL 3→**4/5**, TL2 3→**4/5**, LEFTRIGHT 3→**4/5**, SwissTM 3→**4/5**. Romulus and XTM remain at 4/5.
+
+### Files created/modified (2026-06-23 to 2026-06-24)
+- `docs/proofs/tinystm_*.tla` — fence annotations, endVersion, L_extend, commit split
+- `docs/proofs/{TSXSGL,TL2,XTM,LEFTRIGHT,SwissTM,Romulus}.tla` — fence annotations
+- `docs/audits/*.md` — 18 audit reports (all backends)
+- `docs/audits/SUMMARY.md` — all scores, bugs, observations, fence updates
+- `docs/AGENTS.md` — this session summary
+
+### TinySTM model fidelity audit and improvements
+
+Audited all 3 TinySTM TLA+ models against their C++ implementations. Key gaps found:
+
+| Gap | Affected | Severity | Fix |
+|-----|----------|----------|-----|
+| No `endVersion` per-thread | WBCTL, WBETL, WT | High | Added `endVersion[t]`, `L_extend` label, validation against `endVersion[t]` |
+| Monolithic commit (validate+write-back+unlock as one action) | WBETL | High | Split into `L_incClock` + `L_validateETL` + `L_writeBackETL` (matches C++ phases) |
+| Monolithic commit (validate+unlock as one action) | WT | High | Split into `L_validateWT` + `L_unlock` + `L_abort` |
+| Extend abort path skips lock release | WBETL | Critical (model bug) | Added `lock := ... <<0, 0, lock[a][3]>>` before `state := "idle"` in L_extend failure |
+| No memory ordering annotations | All | Medium | Added `lastFence[t]` tracking + `FenceFidelity` invariant |
+
+### Verification results
+
+| Backend | States (before) | States (after) | TLC result |
+|---------|----------------|----------------|------------|
+| WBCTL | 12K | 146K (+lastFence) | PASS ✅ |
+| WBETL | 3.9K | 58K (+commit split + lastFence) | PASS ✅ |
+| WT | 5.9M | N/A (parallel too large with lastFence) | Sequential PASS ✅ |
+
+### Fence annotations added
+
+For each backend, a `lastFence[t]` variable (""/"acq"/"rel"/"sc") is set at points matching C++ `atomic_signal_fence`/`atomic_thread_fence`/CAS:
+- **Read**: `"sc"` — matches `atomic_signal_fence(seq_cst)` before version load
+- **Write (lock acquire)**: `"acq"` — matches CAS acquire semantics
+- **Commit (clock inc)**: `"sc"` — matches `atomic_thread_fence(seq_cst)` before clock read
+- **Validate success**: `"sc"` — matches `atomic_thread_fence(seq_cst)` before re-reading read-set
+- **Unlock after commit/abort**: `"rel"` — matches `atomic_signal_fence(release)` before lock release
+- **Extend failure / abort**: `"rel"` — matches release fence before unlock in abort_tx
+
+`FenceFidelity` invariant: `\A t \in Thread : writeSet[t] # {} => lastFence[t] # ""` — checks every lock-holding thread has done at least one fence.
+
+### Files modified
+- `docs/proofs/tinystm_wbctl.tla` — PlusCal + TLA+: added `endVersion`, `L_extend`, `lastFence`, `FenceFidelity`
+- `docs/proofs/tinystm_wbetl.tla` — PlusCal + TLA+: added `endVersion`, `L_extend`, `lastFence`, split commit into 3 labels, fixed extend abort lock leak
+- `docs/proofs/tinystm_wt.tla` — PlusCal + TLA+: added `endVersion`, `L_extend`, `lastFence`, split commit into `L_validateWT` + `L_unlock` + `L_abort`
+- `docs/audits/tinystm_wbctl.md` — Updated with new gaps, scores, and fence analysis
+- `docs/audits/tinystm_wbetl.md` — Updated with new gaps, scores, and fence analysis
+- `docs/audits/tinystm_wt.md` — Updated with new gaps, scores, and fence analysis
+- `docs/audits/SUMMARY.md` — Updated scores: WBCTL 3/5→4/5, WBETL 3/5→4/5, WT 4/5 (confirmed)
 - `docs/AGENTS.md` — This session summary
 
-## Previous Session (2026-06-08) — 5-pass Honorio pipeline decomposition
-
-### What was done
-
-The LLVM plugin pass infrastructure was reorganized from a 2-pass-per-pipeline design into a true **5-pass Honorio-style decomposed pipeline** matching the IPDPS 2020 paper:
-
-| Step | Honorio Pass | New File | Purpose |
-|------|-------------|----------|---------|
-| 1 | DualPathInfoCollector | `TMCollectPass.cpp` | Collects transactional boundaries, call graph, annotation info |
-| 2 | TransactionSafeCreation | `TMClonePass.cpp` | Creates transaction-safe clones of tx-reachable callees |
-| 3 | ReplaceCallInsideTransaction | `TMRedirectPass.cpp` | Redirects calls to clones, instruments clones, injects init/exit |
-| 4 | LoadStoreBarrierInsertion | `TMInstrumentFnPass.cpp` | Injects tx_begin/end, replaces loads/stores with TM barriers |
-| 5 | Cleanup | `TMCleanupPass.cpp` | Strips lifetime intrinsics, optional verification (-tm-strict-check) |
-
-### Key changes
-
-- **New files**: 5 pass `.cpp` files + `tm_pipeline_state.hpp` (shared state), `tm_pipeline_opts.hpp` (extern opts), `tm_check_opaque.{hpp,cpp}` (opaque check moved from monolithic file)
-- **Pipeline names**: `tm-instrument` now chains the 5 steps. Individual passes available: `tm-collect`, `tm-clone`, `tm-redirect`, `tm-instrument-fn`, `tm-cleanup`
-- **`tm_allow_opaque` fix**: Removed the `hasAnnotation(*F, ALLOW_OPAQUE_ANNOT)` skip at what was line 97 of `checkOpaqueFunctions` — this annotation on a function now only allows calls to opaque functions WITHIN it, not skip instrumentation of its body
-- **Verification**: `-tm-strict-check` flag enables post-instrumentation verification (opt-in, matching original TMInstrumentCheckPass behavior). Access to `tm_get_thread_state()` fields and TLS globals are correctly excluded
-- **Helgrind/DRD docs**: Added to `docs/plugin-debug.md`
-
-### Side fixes
-
-- Added `#include <llvm/IR/Operator.h>` to `tm_local_vars.hpp` (GEPOperator missing)
-- Added `#include <llvm/IR/IRBuilder.h>` to `tm_runtime_hooks.hpp` (IRBuilder missing)  
-- Added `#include <llvm/IR/Instructions.h>` to `tm_annotation_utils.hpp` (LoadInst/StoreInst missing)
-- Added `#include "tm_call_graph.hpp"` to `tm_instrument_helpers.hpp`
-- Moved `checkAnnotationConsistency` → `tm_instrument_helpers.hpp`
-- Moved `redirectTXFunctionsToClones` → `tm_method_instrumentation.hpp`
-- Queue pipeline helpers (findClone, createDispatchWrapper, replaceCallWithEnqueue, TM_QUEUE_ACTIVE_TLS) restored in TMInstrumentPass.cpp
-
-### Build verification
-
-- Plugin builds cleanly with LLVM 22
-- All key tests pass: test_tm_simple, test_nested_tx, test_retry, test_threads, test_treap_tx, test_simple_vector
-- Pre-existing failures unchanged: test_vec_push (push count mismatch, same on old pipeline)
-
-### All files modified
-- `plugin/passes/TMInstrumentPass.cpp` — Stripped down to backward-compat passes + pipeline registration
-- `plugin/passes/tm_instrument_helpers.hpp` — Added `checkAnnotationConsistency`
-- `plugin/passes/tm_method_instrumentation.hpp` — Added `redirectTXFunctionsToClones`
-- `plugin/passes/tm_runtime_hooks.hpp` — Added `#include <llvm/IR/IRBuilder.h>`
-- `plugin/analysis/tm_local_vars.hpp` — Added `#include <llvm/IR/Operator.h>`
-- `plugin/analysis/tm_annotation_utils.hpp` — Added `#include <llvm/IR/Instructions.h>`
-- `plugin/Makefile` — Compile all pass `.cpp` files
-- `docs/plugin-debug.md` — Added Helgrind/DRD section
-
-### New files
-- `plugin/passes/TMCollectPass.cpp`
-- `plugin/passes/TMClonePass.cpp`
-- `plugin/passes/TMRedirectPass.cpp`
-- `plugin/passes/TMInstrumentFnPass.cpp`
-- `plugin/passes/TMCleanupPass.cpp`
-- `plugin/passes/tm_pipeline_state.hpp`
-- `plugin/passes/tm_pipeline_opts.hpp`
-- `plugin/passes/tm_check_opaque.hpp`
-- `plugin/passes/tm_check_opaque.cpp`
-
-## Previous Session (2026-06-07) — Detailed TM metrics + bayes 4-thread hang fixed + Table VI comparison
-
-### Fixes applied to plugin STAMP benchmarks
-
-All benchmarks now use flat arrays instead of STL containers inside `struct TM`/`TX` functions, since the LLVM TM pass misbehaves with opaque libstdc++ calls and TinySTM intercepts `operator new` inside transactions.
-
-| Benchmark | Bug | Fix |
-|-----------|-----|-----|
-| **kmeans** | Nested `std::vector<std::vector<double>>` caused 0ms/0 aborts | Flat `double*` arrays; TM-wrapped aggregate-update |
-| **vacation** | 4 `std::map<int,T>` caused 1000× aborts | Flat `T*` arrays indexed by id-1 |
-| **genome** | `std::string`/`std::unordered_set` caused bad_alloc/timeout | `char*`/`char**` arrays; sorted-array dedup; hash-table built outside TX |
-| **intruder** | `std::queue`/`std::unordered_map`/`std::string` caused mmap crash | Ring buffer; inline char buffers; flat decoder-flow array |
-| **bayes** | `std::vector<std::vector<int>>`/`std::set` caused `std::length_error` | Flat `int*` arrays; alloca BFS; stack density counters |
-| **yada** | `std::set`/`std::vector` in TX + missing `stop_workers` + wrong border-edge dedup → timeout | BFS moved to THREAD; sort/dedup by cancel-pairs; `empty_count>=3` break |
-| **SSH** | Input file format; plugin generates synthetic data via `-j` flag | Uses synthetic mesh when no `-i` given |
-
-### Fixes applied in this session
-
-| Fix | Details |
-|-----|---------|
-| **Bayes 4-thread hang** | `compute_density_ll` not marked `TX`+`tm_allow_opaque` — LLVM pass instrumented its loads/stores incompatibly with serialize lock held by callers. Added `TX`, `tm_allow_opaque`, and `tm_serialize_lock/unlock`. **Result**: 236ms at 4t, 0 aborts |
-| **Missing serialize unlock** | `compute_density_ll` returned without `tm_serialize_unlock()` — lock leaked on every call from `find_best_insert`/`apply_insert`. Added unlock before return |
-| **Detailed TM metrics** | New globals (`g_tm_min_read_set`, `g_tm_min_write_set`, `g_tm_total_commit_reads`, `g_tm_total_commit_writes`, `g_tm_commit_count`) tracked per-commit in `tm_end()`, printed as `TM_STATS:` at `tm_exit()` |
-| **Table VI comparison** | `run_profiling.py` now compares measured avg/min/max read/write against OCR'd Table VI (90th pctile columns). CSV results saved to `patch/profile/results_tinystm_4t_detailed.csv` |
-
-### Detailed TM metrics (tinystm, 4 threads, paper params)
-
-| Benchmark | Time | Commits | AvgR | MinR | MaxR | AvgW | MinW | MaxW | Aborts |
-|-----------|------|---------|------|------|------|------|------|------|--------|
-| **bayes**       | 236ms |  1028 |  2016.0 |   1 |  2056 |   3.9 |   0 |    4 |     0 |
-| **genome**      | 151ms |    10 | 46080.2 |  38 | 78055 |  97.0 |   0 |  481 |     8 |
-| **intruder***   |   2ms |   —   |   —     |  —  |   —   |   —   |   — |   —  |    —  |
-| **kmeans-high** |1442ms |   623 |  6266.7 | 741 |  9237 | 674.7 | 464 |  784 |   569 |
-| **kmeans-low**  |1542ms |   603 |  6129.2 | 741 |  9237 | 672.7 | 464 |  784 |   514 |
-| **labyrinth**   |   1ms |    73 |    90.7 |  11 |   355 |  17.3 |   0 |   88 |     3 |
-| **ssca2**       |  32ms | 10002 |     4.8 |   3 |     9 |   0.0 |   0 |    0 |     0 |
-| **vacation-high**| 13ms |  4096 |    14.7 |   2 |    23 |   5.0 |   0 |    8 |     3 |
-| **vacation-low** | 12ms |  4099 |    12.0 |   2 |    15 |   4.5 |   0 |    6 |     3 |
-| **yada**        |   8ms |  1366 |    66.3 |   3 |   286 |   8.5 |   0 |  204 |   682 |
-
-*intruder uses serialize locks (not TM), so no TM stats.
-
-Key observations:
-- **ssca2**: 100% read-only (0 writes) — graph traversal is inherently read-only
-- **genome**: Only 10 large TXes, 46080 avg reads each — very read-heavy (hashing/pattern matching)
-- **bayes**: 2016 avg reads, only 3.9 writes — very read-heavy Bayesian network learning
-- **kmeans**: ~6200 reads + ~670 writes per TX — balanced, moderate contention (500+ aborts)
-- **yada**: 66 avg reads, 8.5 avg writes, 682 aborts — moderate write contention (triangulation conflicts)
-- All benchmarks have 0 user-level aborts except kmeans (reports via internal counter)
-
-### Key decisions
-- TX functions using `tm_serialize_lock/unlock` must NOT have `TX` attribute — the LLVM pass's instrumentation conflicts with the manual serialize lock. Use plain functions instead.
-- TX functions using `tm_serialize_lock/unlock` on large writes also need `tm_allow_opaque` (for genome's dedup step that writes ~500K words per TX).
-- Heap allocations inside a TX — even inside an opaque body — are intercepted by TinySTM's `operator new` hook → `bad_alloc`/`length_error`. Move all allocs before TX boundary.
-- Replace `std::set<YadaEdge>` border_edges with `std::vector<YadaEdge>` + sort/dedup (cancel pairs). Set keeps duplicates, canceling requires count==1.
-- `stop_workers` must be explicitly set or workers spin forever on empty heap. Use `empty_count >= 3` heuristic.
-
-### All files modified
-- `benchmarks/plugin/STAMP/kmeans_bench.hpp`
-- `benchmarks/plugin/STAMP/vacation_bench.hpp`
-- `benchmarks/plugin/STAMP/genome_bench.hpp`
-- `benchmarks/plugin/STAMP/intruder_bench.hpp`
-- `benchmarks/plugin/STAMP/bayes_bench.hpp`
-- `benchmarks/plugin/STAMP/yada_bench.hpp`
-- `benchmarks/plugin/STAMP/stamp_common.hpp`
-- `benchmarks/plugin/STAMP/STAMP.cpp`
-- `benchmarks/scripts/profile_stamp.py`
-
-### Input file compatibility with original STAMP (ccaominh/stamp)
-
-The paper's Table IV specifies input file flags (`-i`), but our implementations generate data inline:
-
-| Benchmark | Paper param | Original input | Our approach | Compatible? |
-|-----------|-------------|----------------|--------------|-------------|
-| **yada** | `-a20 -i 633.2` | Triangle `.node`/`.ele` files (1264 elems) | Synthetic 10×10 grid + jitter (162 elems) | ✅ Code already reads `.node`/`.ele`; but input files not downloaded; synthetic is **8× smaller** |
-| **yada+** | `-a10 -i ttimeu10000.2` | 19998 elements | Same 162-element synthetic | Same code path; synthetic is **123× smaller** |
-| **labyrinth** | `-i random-x32-y32-z3-n64` | Text maze file | Inline generation via `-x -y -z -n` | ✅ Same maze dimensions; generation matches original algorithm |
-| **kmeans** | `-i random-n2048-d16-c16` | Gzipped point data | Inline PRNG generation via `-m -n` | ✅ Same sizes; different PRNG (seed 42); distribution similar |
-
-**Key insight**: Our synthetic yada mesh (162 elements) is far smaller than the paper's reference inputs (1264-19998 elements). The paper uses `-i` for input files; our synthetic generation uses `-j` for jitter and generates a 10×10 grid. To match paper workload sizes, we'd need to download the original input files from `https://github.com/ccaominh/stamp` or increase the synthetic grid size.
-
-### Plugin known issues confirmed by profiling
-
-- **genome**: TIMEOUT at 4t — known segfault at multi-thread (concurrent phase mismatch in genome_dedup/genome_match)
-- **yada**: TIMEOUT at 4t — hangs after mesh generation with synthetic data (pre-existing, may be related to work heap size with 162 elements vs YADA_MAX_ELEMENTS)
-- **intruder**: Crash with `[TM-REGION] mmap` — tiny STM tries to allocate 16384 MB region, likely failing on this system
-- **kmeans**: Shows 0ms elapsed — converges instantly with threshold 0.05 and 2048 points (delta drops below threshold in 1 iteration)
-
-## Previous Session (2026-06-07) — Serialize lock leak fix + genome/bayes/intruder lock restoration
-
-### Path fixes after repo restructure (commit 9c13c52)
-
-The repo was restructured to follow Honorio's 5-pass decomposition, moving files around:
-- `backends/runtimes/*` → `backends/tm_impl/*/`
-- `llvm_tm_plugin/` → `plugin/`
-- `plugin-benchmarks/` → `benchmarks/plugin/`
-- `expli-benchmarks/` → `benchmarks/cpp/`
-- `rust_tm_api/` → `expli_instr/rust/workspace/`
-- `run_compare_all.sh` → `benchmarks/scripts/run_compare_all.sh`
-
-All relative paths in Makefiles, Cargo.toml, and the runner script were stale after the move. Fixed:
-
-| File | Fix |
-|------|-----|
-| `benchmarks/scripts/run_compare_all.sh` | `cd $(dirname $0)/../..` (run from repo root); `PLUGIN_STAMP_DIR`, `PLUGIN_TPCC_DIR`, `PLUGIN_STM7_DIR`, `EXPLI_DIR`, `RUST_DIR` paths |
-| `benchmarks/rust/Cargo.toml` | `../rust_tm_api/tm` → `../../expli_instr/rust/workspace/tm` |
-| `benchmarks/cpp/Makefile` | `../backends/` → `../../backends/` everywhere; added `-I$(abspath ../..)/expli_instr/cpp` for moved `tm_api.hpp` |
-| `expli_instr/cpp/expli_tm_api` | Symlink `expli_instr/cpp/expli_tm_api → include` created (old include path `expli_tm_api/tm_api.hpp` still used by source files) |
-
-### Runtime fixes for link-time symbol resolution
-
-The plugin instrumentation pass injects calls to `tm_get_thread_state()` and the expli API references `tm_nested_call_counter`/`tm_longjmp_ret`. Some runtimes were missing these:
-
-| Backend | Missing symbol | Fix |
-|---------|---------------|-----|
-| TSXSGL | `tm_get_thread_state()` | Added `tm_get_thread_state()` + `#include "../common/tm_thread_state.hpp"` + `TM_INCLUDES_tsxsgl` in `tm_pipeline.mk` |
-| SingleGlobalLock | `tm_nested_call_counter`, `tm_longjmp_ret` | Added `__thread int32_t tm_nested_call_counter = 0; __thread int32_t tm_longjmp_ret = 0;` |
-
-### Serialize lock leak fix (across siglongjmp in abort_tx)
-
-**Root cause**: `tm_serialize_lock()` was called in benchmark code (genome, bayes, intruder) to protect STL containers during concurrent TM transactions. When a TX aborted via `siglongjmp`, the recursive mutex was held forever — no thread could acquire it again, causing hangs.
-
-**Fix**: Added thread-local `g_serialize_lock_count` in `TinySTM_runtime.cpp` and `tm_serialize_unlock_all()` that unlocks N times before `siglongjmp`:
-- `tinystm_wbctl.hpp:abort_tx()` — calls `tm_serialize_unlock_all()` before `siglongjmp`
-- `tinystm_wt.hpp:abort_tx()` — same fix
-- (WBETL uses shared code path)
-
-**Result**: serialize_lock can safely be used in benchmarks again without leaking across aborts.
-
-### Serialize lock restored in genome/bayes/intruder
-
-After an earlier fix temporarily removed `tm_serialize_lock/unlock` from genome, bayes, and intruder to work around the leak, they must be restored now that the leak is fixed. These locks are essential for protecting STL `unordered_set`/`unordered_map`/`priority_queue`/`queue` operations inside TM transactions — without them, concurrent inserts cause data structure corruption.
-
-**Status**: All three benchmarks restored with serialize_lock. Genome now runs 7t @ 1M segments successfully (intermittent — some crashes at 4t+ likely from concurrent phase mismatch between genome_dedup and genome_match, a pre-existing benchmark design issue).
-
-### Rust addrspace: auto-init guard for tm_region_malloc
-
-**Root cause**: `TmCell::new()` calls `addrspace::tm_region_malloc()` directly (not through `spec_alloc()` which calls `ensure_region_init()`). If the first allocation happens before any explicit `tm_region_init()` call, the `OnceLock` accessors (`SC_BLOCK_SIZE.get().unwrap()`) panic on `None`.
-
-**Fix**: Added a `REGION_START` guard at the top of `tm_region_malloc()` that calls `tm_region_init()` if the region hasn't been initialized yet.
-
-**Before**: All 8 Rust STAMP benchmarks crashed with `panic at addrspace/src/lib.rs:603: called Option::unwrap() on a None value`.
-**After**: All 8 pass with all backends (wbctl, norec, tsxsgl).
-
-## Why the LLVM TM pass cannot instrument STL containers
-
-The plugin's LLVM pass instruments memory accesses (loads/stores) by:
-1. Identifying which allocations are "TM-tracked" (from `tm_calloc`/`tm_malloc`, or inside `struct TM` globals)
-2. Tracing pointer provenance back to those tracked allocations
-3. Replacing tracked loads/stores with `tm_read_*`/`tm_write_*` runtime calls
-
-**`std::vector` inside a `struct TM` fails because:**
-
-The vector stores its elements in a heap-allocated buffer pointed to by internal fields (`_M_start`/`_M_finish` in libc++). The LLVM pass CAN instrument writes to those pointer fields (they're direct struct fields of the `TM`-annotated object). But when code writes through them — e.g., `*end_ = val` inside `push_back()` — the pass tries to trace the base pointer (`end_`) back to a TM-tracked allocation:
-
-1. `end_` was loaded from the vector's internal field (a non-instrumented load of a thread-local or stack address)
-2. The loaded value is a heap pointer from `::operator new()` (inside the STL allocator)
-3. The pass cannot see that `::operator new()` returned TM-tracked memory — it only knows about `tm_calloc`
-4. So the store through `*end_` is NOT instrumented
-
-**Consequence**: Multiple threads inside `TX` functions can concurrently modify the same vector element without the TM runtime detecting the conflict. This causes silent data corruption — exactly the yada work-heap crash.
-
-**`std::set`/`std::map` inside a `struct TM` fails because:**
-
-These containers use internal red-black trees with opaque C library functions (libstdc++ `_Rb_tree_insert_and_rebalance`). The LLVM pass never sees the IR for these functions, so all pointer manipulations inside them are invisible. Writes to the tree structure are never instrumented.
-
-**Workarounds (both demonstrated in the codebase):**
-
-| Approach | When to use | Example |
-|----------|-------------|---------|
-| Flat `tm_calloc` arrays + read/write macros | Fixed-size or max-size buffers | `yada_bench.hpp` — `YADA_READ`/`YADA_WRITE` macros on `tm_calloc`'d arrays |
-| Custom `SimpleVec` with raw pointer fields | Dynamic resizing needed | `tests/plugin/test_simple_vector.cpp` — `SimpleVec<T>` with `T* begin_, end_, cap_` |
-
-Both work because the pointer provenance IS traceable: `tm_calloc` returns a known-TM base, and the custom struct's pointer fields are directly inside a `struct TM`, so the pass instruments both the field writes AND the data writes through them.
-
-**Existing reproducer tests:**
-- `tests/plugin/test_vector_realloc.cpp` — Shared `TM std::vector<int64_t>` with concurrent read/write (data corruption)
-- `tests/plugin/test_realloc_crash.cpp` — `TM std::vector<AtomicPart>` with inner vectors (bad_alloc from STMbench7)
-- `tests/plugin/test_stl_containers.cpp` — `TM std::vector<int>` and `TM std::unordered_map` (hangs/crashes at multi-thread)
-- `tests/plugin/test_stl_vector_race.cpp` — Yada-style work-heap pattern: shared vector + concurrent push/pop (this session)
-- `tests/plugin/test_simple_vector.cpp` — Workaround with custom `SimpleVec` (raw TM-tracked pointer fields)
-
-## Bugs (current status)
-
-### Fixed this session
-
-| Bug | Fix |
-|-----|-----|
-| Serialize lock leaked across `siglongjmp` in TinySTM abort | Added thread-local counter + `tm_serialize_unlock_all()` in `abort_tx()` for WBCTL/WT backends |
-| Genome/bayes/intruder crashes at multi-thread (STL corruption) | Restored `tm_serialize_lock/unlock` in all three benchmarks now that leak is fixed |
-| Yada plugin crash at ≥2t (all backends) | Merged two TX functions into one TOCTOU-safe refine; replaced heap with flat TM-safe arrays |
-| **Bayes 4-thread hang** | `compute_density_ll` not marked `TX`+`tm_allow_opaque` — pass instrumentation conflicted with serialize lock. **New**: added unlock before return. **Result**: 236ms at 4t |
-| **Intruder crash with TinySTM** | `TX` attribute on `get_packet`/`process_decoder`/`get_complete` conflicted with manual `tm_serialize_lock/unlock`. Removed `TX` from all three (plain functions using serialize lock only) |
-| **Yada timeout (all backends)** | 3 bugs: missing `stop_workers` (added empty_count≥3); wrong border-edge dedup (`std::set` kept interior edges → moved to THREAD + sort/dedup by cancel-pairs); `border_count≥3` limit removed. **Result**: 8ms at 4t |
-| Kmeans/C++/Rust CLI flag incompatibility | Per-impl CLI_ARGS dict in profile_stamp.py handles -m/-n (plugin), -k/-d/-n (C++), -c/-d/-n (Rust) |
-| Thread flag variation (-p vs -t) per benchmark | Per-benchmark THREAD_FLAGS dict in profile_stamp.py |
-| C++ Makefile backend case mismatch | BACKEND_EXPLI map (tinystm→TINYSTM) in profile_stamp.py |
-
-### Unfixed
-| Genome WBCTL TIMEOUT at ≥4t | plugin | Concurrent phase mismatch between `genome_dedup`/`genome_match` (no barrier) — **confirmed by profiling** |
-| Vacation WBCTL (plugin) 11-14x slower than C++ | plugin | 1000× more aborts (10816 vs 13) — investigate contention source |
-| Vacation segfault at ≥28t during cleanup | plugin | Pre-existing, sporadic |
-| stmbench7 WBCTL vector realloc crash | plugin | Pre-existing, fundamental STL incompatibility |
-| stmbench7 NOREC cleanup hang ≥2t | plugin | Pre-existing |
-| stmbench7 uninstrumented build failure | plugin | Missing `tm_treap_map.hpp` |
-| TL2 build failure | plugin | Missing `tl2/tl2.hpp` |
-| **Plugin genome 87x slower than C++** | plugin | Each large TX (46080 avg reads) has high TM overhead — investigate if `tm_allow_opaque` can reduce TX size |
-| **Plugin kmeans-high 1442ms** | plugin | Moderate contention (569 aborts) — investigate convergence vs paper params |
-
-## Relevant Files
-- `benchmarks/scripts/run_compare_all.sh` — Main benchmark runner
-- `backends/tm_impl/tiny_stm/TinySTM_runtime.cpp` — `tm_serialize_lock/unlock/unlock_all`, `g_serialize_lock_count`
-- `backends/tm_impl/tiny_stm/tinystm_wbctl.hpp` — `abort_tx` calls `tm_serialize_unlock_all()` before `siglongjmp`
-- `backends/tm_impl/tiny_stm/tinystm_wt.hpp` — same fix
-- `backends/tm_impl/tsx_sgl/TSXSGL_runtime.cpp` — Fixed: added `tm_get_thread_state()`
-- `backends/tm_impl/single_global_lock/SingleGlobalLock_runtime.cpp` — Fixed: added thread-local counters
-- `plugin/tm_pipeline.mk` — Fixed: added `TM_INCLUDES_tsxsgl`
-- `expli_instr/rust/workspace/addrspace/src/lib.rs` — Fixed: auto-init guard in `tm_region_malloc`
-- `benchmarks/rust/Cargo.toml` — Fixed: dependency paths
-- `benchmarks/cpp/Makefile` — Fixed: includes and paths
-- `benchmarks/plugin/STAMP/genome_bench.hpp` — Restored `tm_serialize_lock/unlock`
-- `benchmarks/plugin/STAMP/bayes_bench.hpp` — Restored `tm_serialize_lock/unlock`
-- `benchmarks/plugin/STAMP/intruder_bench.hpp` — Restored `tm_serialize_lock/unlock`
-- `benchmarks/plugin/STAMP/stamp_common.hpp` — Declares `tm_serialize_unlock_all()`
-- `benchmarks/scripts/profile_stamp.py` — STAMP profiling harness (paper params, per-impl CLI)
-- `benchmarks/stamp_characterization.csv` — OCR'd Table VI (20 rows, 13 cols)
-- `benchmarks/plugin/STAMP/yada_bench.hpp` — Fixed: single-TX refine + flat TM arrays
-- `benchmarks/plugin/STAMP/bayes_bench.hpp` — Fixed: compute_density_ll TX+tm_allow_opaque+serialize_lock (fixed 4t hang)
-- `benchmarks/plugin/STAMP/intruder_bench.hpp` — Fixed: removed TX from serialize-lock functions (fixed crash)
-- `backends/tm_impl/tiny_stm/TinySTM_runtime.cpp` — Added: g_tm_min_read_set, g_tm_min_write_set, g_tm_total_commit_reads, g_tm_total_commit_writes, g_tm_commit_count for detailed TM_STATS
-- `patch/profile/0001-add-tm-metrics.patch` — Cumulative patch: TinySTM metrics + bayes flag + compute_density_ll fix
-- `patch/profile/run_profiling.py` — Detailed profiling with TM_STATS parsing + Table VI comparison
-- `patch/profile/compare_table_vi.py` — Standalone CSV-to-Table-VI comparison
-- `patch/profile/README.md` — Patch documentation and usage
-- `tests/plugin/test_stl_vector_race.cpp` — STL vector race reproducer (shared work-heap pattern)
-- `tests/plugin/test_simple_vector.cpp` — Workaround: custom SimpleVec with TM-tracked pointer fields
-- `tests/plugin/test_vector_realloc.cpp` — Shared std::vector concurrent read/write reproducer
-- `docs/AGENTS.md` — Session notes with profiling results and input compatibility analysis
+### Next steps
+1. Add `lastFence` + `FenceFidelity` to remaining backends (SGL, TSXSGL, TL2, XTM, LEFTRIGHT, SwissTM)
+2. Phase 3 audit: TLA+-only backends (NOrec, DUDETM, NVHTM, SPHT, DistributedSGL, TiKV)
+3. Consider increasing TLC heap for WT parallel model with fence tracking
+
+## Previous sessions
+
+See AGENTS.md for full session history including:
+- Session 2026-06-22: Simulator calibration against real C++ NOrec
+- Session 2026-06-21: Simulator cost mode + machine profile calibration + TSX simulation backend
+- Session 2026-06-20: `.tm_shared` section, TiKV backend, SPHT SGL fallback, LEFTRIGHT OCC correctness fix
+- Session 2026-06-17: Debug printf cleanup into patches/debug system
+- Session 2026-06-15: Read-validate fix + race checker + Rust/C++ alignment
+- Previous sessions: STAMP benchmarks, Honorio pipeline, plugin fixes, etc.

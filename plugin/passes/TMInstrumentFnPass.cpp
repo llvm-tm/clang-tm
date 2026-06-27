@@ -4,6 +4,7 @@
 // to TM runtime read/write barriers.  Also instruments malloc/free and
 // memory intrinsics (memcpy/memmove/memset) on TM-tracked memory.
 
+#include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
@@ -24,17 +25,20 @@ using namespace llvm;
 class TMInstrumentFnPass : public PassInfoMixin<TMInstrumentFnPass>
 {
 public:
-	PreservedAnalyses run(Function &F, FunctionAnalysisManager &)
+	PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM)
 	{
 		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT)) {
 			return PreservedAnalyses::all();
 		}
 
 		Module *M = F.getParent();
-		if (Function *Clone = findClone(&F, *M)) {
-			TM_DEBUG("%s has queue clone %s, skipping re-instrumentation",
-			         F.getName().str().c_str(), Clone->getName().str().c_str());
-			return PreservedAnalyses::all();
+		{
+			std::string CloneName = (F.getName() + TM_CLONE_SUFFIX).str();
+			if (M->getFunction(CloneName)) {
+				TM_DEBUG("%s has queue clone %s, skipping re-instrumentation",
+				         F.getName().str().c_str(), CloneName.c_str());
+				return PreservedAnalyses::all();
+			}
 		}
 
 		TM_DEBUG("TMInstrumentFnPass: instrumenting function %s",
@@ -48,7 +52,41 @@ public:
 		if (TMAudit)
 			auditTXFunctionLoadsStores(F, *M);
 
-		instrumentFunctionBody(F, *M, H);
+		SmallVector<Instruction *, 16> ToErase;
+		SmallVector<CallBase *, 8> MemIntrinsics;
+
+		for (auto &BB : F) {
+			for (auto InstIt = BB.begin(); InstIt != BB.end();) {
+				Instruction *I = &*InstIt++;
+				IRBuilder<> B(I->getParent(), I->getIterator());
+#ifndef DISABLE_TM_READ_WRITE
+				if (auto *Call = dyn_cast<CallBase>(I))
+					if (needsMemIntrinsicInstrumentation(Call, *M)) {
+						MemIntrinsics.push_back(Call);
+						continue;
+					}
+#endif
+#ifndef DISABLE_MALLOC_FREE
+				if (auto *Call = dyn_cast<CallBase>(I))
+					if (handleMallocFree(Call, B, H, ToErase))
+						continue;
+#endif
+#ifndef DISABLE_TM_READ_WRITE
+				handleLoadStore(I, F, *M, H, ToErase);
+#endif
+			}
+		}
+
+		for (auto *Call : MemIntrinsics) {
+			tm_method_instrumentation::instrumentMemoryIntrinsic(Call, *M, H);
+			ToErase.push_back(Call);
+		}
+		for (Instruction *I : ToErase)
+			I->eraseFromParent();
+
+		// Emit computation events for non-TM instruction cost estimation
+		auto &TTI = AM.getResult<TargetIRAnalysis>(F);
+		emitComputationEvents(F, TTI, H, *M);
 
 		return PreservedAnalyses::none();
 	}
