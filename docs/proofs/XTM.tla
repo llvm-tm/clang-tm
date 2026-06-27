@@ -39,6 +39,9 @@ ASSUME MaxCommits \in Nat \ {0}
 (* ---- helpers ---- *)
 NoWrite == 0 - 1
 
+(* NOTE: lastFence[t] fence tracking exists only in the TLA+ translation below.
+   Running pcal.trans will regenerate TLA+ and LOSE all fence tracking.
+   Re-add lastFence variable + EXCEPT updates manually after translation. *)
 (*--algorithm XTM
 
 variables

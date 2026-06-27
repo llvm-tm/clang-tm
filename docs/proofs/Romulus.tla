@@ -73,6 +73,9 @@ VersionOf(entry) == entry \div 2
 MakeEntry(ver) == ver * 2
 VIndex(a) == a % VSIZE
 
+(* NOTE: lastFence[t] fence tracking exists only in the TLA+ translation below.
+   Running pcal.trans will regenerate TLA+ and LOSE all fence tracking.
+   Re-add lastFence variable + EXCEPT updates manually after translation. *)
 (*--algorithm Romulus
 
 variables

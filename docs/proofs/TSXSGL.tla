@@ -32,6 +32,9 @@ ASSUME Data \subseteq Nat
 ASSUME MaxRetries \in Nat
 ASSUME MaxCommits \in Nat
 
+(* NOTE: lastFence[t] fence tracking exists only in the TLA+ translation below.
+   Running pcal.trans will regenerate TLA+ and LOSE all fence tracking.
+   Re-add lastFence variable + EXCEPT updates manually after translation. *)
 (* --algorithm TSXSGL
 
 variables

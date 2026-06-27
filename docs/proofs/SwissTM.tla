@@ -40,6 +40,9 @@ OREC_RVER(o) == o[3]
 OREC_WOWNER(o) == o[4]
 MAKE_OREC(rl, wl, rv, wo) == <<rl, wl, rv, wo>>
 
+(* NOTE: lastFence[t] fence tracking exists only in the TLA+ translation below.
+   Running pcal.trans will regenerate TLA+ and LOSE all fence tracking.
+   Re-add lastFence variable + EXCEPT updates manually after translation. *)
 (*--algorithm SwissTM
 
 variables

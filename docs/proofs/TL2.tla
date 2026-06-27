@@ -35,6 +35,11 @@ GuardVersion(g) == g \div 2
 GuardLocked(g) == g % 2
 MakeGuard(locked, ver) == ver * 2 + locked
 
+(* NOTE: lastFence[t] fence tracking exists only in the TLA+ translation below.
+   The PlusCal source has a partial lastFence update (write action) but lacks
+   the variable declaration and remaining fence points. Running pcal.trans will
+   fail with an undeclared-variable error — a deliberate guardrail. Re-add
+   the full lastFence variable + all EXCEPT updates after translation. *)
 (* --algorithm TL2
 
 variables
