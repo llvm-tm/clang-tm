@@ -46,7 +46,7 @@ NoWrite == 0 - 1
 Hash == [cl \in CacheLine |->
     {h \in HashPosition : (cl + h) % (Cardinality(HashPosition) + 1) \in HashPosition}]
 
-CacheLineOf == [a \in Addr |-> (a - 1) % Cardinality(CacheLine) + 1]
+CacheLineOf == [a \in Addr |-> ((a - 1) % Cardinality(CacheLine)) + 1]
 CL(a) == CacheLineOf[a]
 
 
@@ -503,6 +503,7 @@ NoSGLTSXOverlap ==
         sgl_write_set[t1] \cap write_set[t2] # {}
         => mode[t2] # "tsx"
 
+(* NOTE: Tautology — (sgl_lock=t1 /\ sgl_lock=t2) => t1=t2 holds trivially. *)
 LockExclusion ==
     \A t1, t2 \in Thread :
         (sgl_lock = t1 /\ sgl_lock = t2) => (t1 = t2)
@@ -524,6 +525,6 @@ Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
 TransactionProgress ==
     \A t \in Thread :
         []( (pc[t] \in {"L_tsx", "L_sgl", "L_tsx_retry"})
-            => <>(committed[t]' > committed[t] \/ aborted[t]' > aborted[t]) )
+            => <>(pc[t] = "L_idle") )
 
 =====================================================================

@@ -361,6 +361,8 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 (* Invariants                                                         *)
 (*====================================================================*)
 
+(* NOTE: Tautology — (kv_locks[k]=t1 /\ kv_locks[k]=t2) => t1=t2 *)
+(* holds trivially. Kept for documentation clarity.              *)
 LockExclusion ==
     \A k \in Key :
         \A t1, t2 \in Thread :

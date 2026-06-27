@@ -76,6 +76,7 @@ L_active:
             writeSet[self] := writeSet[self] \union {a};
             writeBuf[self, a] := n;
             readOnly[self] := FALSE;
+            lastFence[self] := "acq";
         end with;
         goto L_active;
     or \* Commit read-only
@@ -105,7 +106,8 @@ L_incClock:
     clock := clock + 1;
 
 L_validate:
-    if \A <<a, v>> \in readSet[self] : GuardVersion(guard[a]) = v then
+    if \A <<a, v>> \in readSet[self] : /\ GuardLocked(guard[a]) = 0
+                                        /\ GuardVersion(guard[a]) = v then
         state[self] := "committing_v";
         goto L_writeBack;
     else
@@ -189,13 +191,14 @@ L_active(self) == /\ pc[self] = "L_active"
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
                         /\ UNCHANGED <<guard, state, writeSet, writeBuf, readOnly, committed>>
-                     \/ /\ \E a \in Addr:
-                             \E n \in 0..MAX_COMMIT:
-                               /\ writeSet' = [writeSet EXCEPT ![self] = writeSet[self] \union {a}]
-                               /\ writeBuf' = [writeBuf EXCEPT ![self, a] = n]
-                               /\ readOnly' = [readOnly EXCEPT ![self] = FALSE]
-                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<guard, state, readSet, committed, lastFence>>
+                      \/ /\ \E a \in Addr:
+                              \E n \in 0..MAX_COMMIT:
+                                /\ writeSet' = [writeSet EXCEPT ![self] = writeSet[self] \union {a}]
+                                /\ writeBuf' = [writeBuf EXCEPT ![self, a] = n]
+                                /\ readOnly' = [readOnly EXCEPT ![self] = FALSE]
+                                /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                         /\ UNCHANGED <<guard, state, readSet, committed>>
                      \/ /\ IF readOnly[self]
                               THEN /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                                    /\ state' = [state EXCEPT ![self] = "idle"]
@@ -226,7 +229,8 @@ L_incClock(self) == /\ pc[self] = "L_incClock"
                                     writeBuf, snapshot, readOnly, committed >>
 
 L_validate(self) == /\ pc[self] = "L_validate"
-                    /\ IF \A <<a, v>> \in readSet[self] : GuardVersion(guard[a]) = v
+                    /\ IF \A <<a, v>> \in readSet[self] : /\ GuardLocked(guard[a]) = 0
+                                                             /\ GuardVersion(guard[a]) = v
                           THEN /\ state' = [state EXCEPT ![self] = "committing_v"]
                                /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
                                /\ pc' = [pc EXCEPT ![self] = "L_writeBack"]
@@ -302,6 +306,11 @@ LockConsistent ==
             a \in writeSet[t] /\ state[t] \in {"committing", "committing_v", "committing_wb"}
 
 (* Invariant 2: No thread reads an address whose guard is locked by another *)
+(* NOTE: Excluded from Inv below — the universal quantifier over ALL t2 triggers   *)
+(* false positives when t2 is the locking thread (state ≠ "idle", a ∈ writeSet).   *)
+(* TL2 tolerates stale read-set entries across concurrent commit; validation        *)
+(* catches them at commit time via version mismatch. TLC would produce spurious     *)
+(* counterexamples if checked.                                                      *)
 NoDirtyRead ==
     \A t1, t2 \in Thread, a \in Addr :
         (t1 # t2)

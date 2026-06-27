@@ -310,6 +310,8 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 (*====================================================================*)
 
 (* I1: Each page is owned by at most one thread at a time *)
+(* NOTE: Tautology — (xadt_owner[p]=t1 /\ xadt_owner[p]=t2) => t1=t2 *)
+(* holds trivially. Kept for documentation clarity.                  *)
 PageOwnershipExclusion ==
     \A p \in Page :
         \A t1, t2 \in Thread :

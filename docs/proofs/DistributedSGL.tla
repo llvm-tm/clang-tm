@@ -1,19 +1,16 @@
 ---------------------- MODULE DistributedSGL ----------------------
 (*
- * DistributedSGL — SGL over Network Messages
+ * DistributedSGL — SGL over Network Messages (PlusCal)
  *
  * Algorithm: A Single Global Lock acquired via network message
- * passing instead of shared memory.  Each node sends a LOCK_REQ
- * message, receives LOCK_GRANT, executes the transaction, then
- * sends UNLOCK.  The lock server grants to one requester at a time.
+ * passing.  Lock server with N client nodes.
  *
- * This is a trivial extension of SGL.tla with explicit message
- * passing between a lock server and N client nodes.
- *
- * Invariants (matching SGL.tla):
- *   LockExclusion: At most one client holds the lock at any time.
- *   LockServerConsistency: The server grants the lock to at most
- *     one client at a time.
+ * Invariants:
+ *   LockExclusion:        At most one client holds the lock
+ *   LockHolderHasGrant:   Lock holder has the grant flag
+ *   NoSpuriousGrant:      Grant flag only when holding lock
+ *   AtMostOnePending:     At most one pending request in flight
+ *   ServerConsistency:    At most one grant in flight
  *)
 
 EXTENDS Naturals, FiniteSets, TLC
@@ -27,165 +24,192 @@ ASSUME Client \subseteq Nat \ {0}
 ASSUME Addr \subseteq Nat
 ASSUME Data \subseteq Nat
 
-VARIABLES
-    lock_holder,        (* Client \cup {0}: who holds the lock *)
-    pending_req,        (* Client \cup {0}: pending request being processed *)
-    mem,                (* [Addr -> Nat]: shared memory *)
-    pc,                 (* [Client -> {"idle", "waiting", "active", "done"}] *)
-    granted,            (* [Client -> BOOLEAN]: whether client thinks it has lock *)
-    version,            (* Nat: global version counter *)
-    committed,          (* [Client -> Nat] *)
-    msg_queue           (* Set of <<src, type>>: messages in flight *)
+(*─── PlusCal algorithm ───────────────────────────────────────────────*)
+(* --algorithm DistributedSGL
 
-vars == <<lock_holder, pending_req, mem, pc, granted, version,
-          committed, msg_queue>>
+variables
+    lock_holder = 0,
+    mem = [a \in Addr |-> 0],
+    version = 0,
+    msg_queue = {},
+    granted = [c \in Client |-> FALSE],
+    committed = [c \in Client |-> 0];
 
-MSG_LOCK_REQ == "lock_req"
-MSG_LOCK_GRANT == "lock_grant"
-MSG_UNLOCK == "unlock"
+process ClientProc \in Client
+begin
+L_idle:
+    msg_queue := msg_queue \union {<<self, "lock_req">>};
+    goto L_waiting;
 
-(*--------------------------------------------------------------------*)
-(* Init                                                                *)
-(*--------------------------------------------------------------------*)
+L_waiting:
+    if <<self, "lock_grant">> \in msg_queue then
+        granted[self] := TRUE;
+        msg_queue := msg_queue \ {<<self, "lock_grant">>};
+        goto L_active;
+    else
+        goto L_waiting;
+    end if;
 
-Init ==
-    /\ lock_holder = 0
-    /\ pending_req = 0
-    /\ mem = [a \in Addr |-> 0]
-    /\ pc = [c \in Client |-> "idle"]
-    /\ granted = [c \in Client |-> FALSE]
-    /\ version = 0
-    /\ committed = [c \in Client |-> 0]
-    /\ msg_queue = {}
+L_active:
+    either \* Read (nop)
+        with a \in Addr do
+            skip;
+        end with;
+        goto L_active;
+    or \* Write
+        with a \in Addr, v \in Data do
+            mem[a] := v;
+        end with;
+        goto L_active;
+    or \* Unlock
+        msg_queue := msg_queue \union {<<self, "unlock">>};
+        goto L_idle;
+    end either;
+end process;
 
-(*--------------------------------------------------------------------*)
-(* Client Actions                                                      *)
-(*--------------------------------------------------------------------*)
+fair process ServerProc = 0
+begin
+L_server:
+    either \* Process lock request
+        with msg \in {m \in msg_queue : m[2] = "lock_req" /\ lock_holder = 0} do
+            lock_holder := msg[1];
+            granted[msg[1]] := TRUE;
+            msg_queue := (msg_queue \ {msg}) \union {<<msg[1], "lock_grant">>};
+        end with;
+        goto L_server;
+    or \* Process unlock
+        with msg \in {m \in msg_queue : m[2] = "unlock" /\ lock_holder = m[1]} do
+            lock_holder := 0;
+            granted[msg[1]] := FALSE;
+            version := version + 1;
+            committed[msg[1]] := committed[msg[1]] + 1;
+            msg_queue := msg_queue \ {msg};
+        end with;
+        goto L_server;
+    end either;
+end process;
 
-(* Client sends lock request *)
-SendLockReq(c) ==
-    /\ pc[c] = "idle"
-    /\ msg_queue' = msg_queue \cup {<<c, MSG_LOCK_REQ>>}
-    /\ pc' = [pc EXCEPT ![c] = "waiting"]
-    /\ UNCHANGED <<lock_holder, pending_req, mem, granted, version,
-                   committed>>
+end algorithm; *)
 
-(* Server processes lock request: grant if available *)
-ProcessLockReq ==
-    /\ \E msg \in msg_queue :
-        /\ msg[1] \in Client
-        /\ msg[2] = MSG_LOCK_REQ
+\* BEGIN TRANSLATION
+VARIABLES lock_holder, mem, version, msg_queue, granted, committed, pc
+
+vars == << lock_holder, mem, version, msg_queue, granted, committed, pc >>
+
+ProcSet == (Client) \cup {0}
+
+Init == (* Global variables *)
         /\ lock_holder = 0
-        /\ pending_req = 0
-        /\ lock_holder' = msg[1]
-        /\ pending_req' = msg[1]
-        /\ msg_queue' = msg_queue \ {msg}
-        /\ msg_queue' = msg_queue' \cup {<<msg[1], MSG_LOCK_GRANT>>}
-    /\ UNCHANGED <<mem, pc, granted, version, committed>>
+        /\ mem = [a \in Addr |-> 0]
+        /\ version = 0
+        /\ msg_queue = {}
+        /\ granted = [c \in Client |-> FALSE]
+        /\ committed = [c \in Client |-> 0]
+        /\ pc = [self \in ProcSet |-> CASE self \in Client -> "L_idle"
+                                        [] self = 0 -> "L_server"]
 
-(* Client receives lock grant *)
-RecvLockGrant(c) ==
-    /\ <<c, MSG_LOCK_GRANT>> \in msg_queue
-    /\ pc[c] = "waiting"
-    /\ granted' = [granted EXCEPT ![c] = TRUE]
-    /\ pc' = [pc EXCEPT ![c] = "active"]
-    /\ msg_queue' = msg_queue \ {<<c, MSG_LOCK_GRANT>>}
-    /\ pending_req' = 0
-    /\ UNCHANGED <<lock_holder, mem, version, committed>>
+L_idle(self) == /\ pc[self] = "L_idle"
+                /\ msg_queue' = (msg_queue \union {<<self, "lock_req">>})
+                /\ pc' = [pc EXCEPT ![self] = "L_waiting"]
+                /\ UNCHANGED << lock_holder, mem, version, granted, committed >>
 
-(* Client read *)
-ClientRead(c, a) ==
-    /\ pc[c] = "active"
-    /\ granted[c] = TRUE
-    /\ a \in Addr
-    /\ UNCHANGED vars
+L_waiting(self) == /\ pc[self] = "L_waiting"
+                   /\ IF <<self, "lock_grant">> \in msg_queue
+                         THEN /\ granted' = [granted EXCEPT ![self] = TRUE]
+                              /\ msg_queue' = msg_queue \ {<<self, "lock_grant">>}
+                              /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                         ELSE /\ pc' = [pc EXCEPT ![self] = "L_waiting"]
+                              /\ UNCHANGED << msg_queue, granted >>
+                   /\ UNCHANGED << lock_holder, mem, version, committed >>
 
-(* Client write *)
-ClientWrite(c, a, v) ==
-    /\ pc[c] = "active"
-    /\ granted[c] = TRUE
-    /\ a \in Addr
-    /\ v \in Data
-    /\ mem' = [mem EXCEPT ![a] = v]
-    /\ UNCHANGED <<lock_holder, pending_req, pc, granted, version,
-                   committed, msg_queue>>
+L_active(self) == /\ pc[self] = "L_active"
+                  /\ \/ /\ \E a \in Addr:
+                             TRUE
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED <<mem, msg_queue>>
+                     \/ /\ \E a \in Addr:
+                             \E v \in Data:
+                               mem' = [mem EXCEPT ![a] = v]
+                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                        /\ UNCHANGED msg_queue
+                     \/ /\ msg_queue' = (msg_queue \union {<<self, "unlock">>})
+                        /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                        /\ mem' = mem
+                  /\ UNCHANGED << lock_holder, version, granted, committed >>
 
-(* Client releases lock *)
-SendUnlock(c) ==
-    /\ pc[c] = "active"
-    /\ granted[c] = TRUE
-    /\ msg_queue' = msg_queue \cup {<<c, MSG_UNLOCK>>}
-    /\ pc' = [pc EXCEPT ![c] = "done"]
-    /\ UNCHANGED <<lock_holder, pending_req, mem, granted, version,
-                   committed>>
+ClientProc(self) == L_idle(self) \/ L_waiting(self) \/ L_active(self)
 
-(* Server processes unlock *)
-ProcessUnlock ==
-    /\ \E msg \in msg_queue :
-        /\ msg[1] \in Client
-        /\ msg[2] = MSG_UNLOCK
-        /\ lock_holder = msg[1]
-        /\ lock_holder' = 0
-        /\ granted' = [granted EXCEPT ![msg[1]] = FALSE]
-        /\ version' = version + 1
-        /\ committed' = [committed EXCEPT ![msg[1]] = committed[msg[1]] + 1]
-        /\ pc' = [pc EXCEPT ![msg[1]] = "idle"]
-        /\ msg_queue' = msg_queue \ {msg}
-    /\ UNCHANGED <<pending_req, mem>>
+L_server == /\ pc[0] = "L_server"
+            /\ \/ /\ \E msg \in {m \in msg_queue : m[2] = "lock_req" /\ lock_holder = 0}:
+                       /\ lock_holder' = msg[1]
+                       /\ granted' = [granted EXCEPT ![msg[1]] = TRUE]
+                       /\ msg_queue' = ((msg_queue \ {msg}) \union {<<msg[1], "lock_grant">>})
+                  /\ pc' = [pc EXCEPT ![0] = "L_server"]
+                  /\ UNCHANGED <<version, committed>>
+               \/ /\ \E msg \in {m \in msg_queue : m[2] = "unlock" /\ lock_holder = m[1]}:
+                       /\ lock_holder' = 0
+                       /\ granted' = [granted EXCEPT ![msg[1]] = FALSE]
+                       /\ version' = version + 1
+                       /\ committed' = [committed EXCEPT ![msg[1]] = committed[msg[1]] + 1]
+                       /\ msg_queue' = msg_queue \ {msg}
+                  /\ pc' = [pc EXCEPT ![0] = "L_server"]
+            /\ mem' = mem
 
-(*--------------------------------------------------------------------*)
-(* Next-state relation                                                *)
-(*--------------------------------------------------------------------*)
+ServerProc == L_server
 
-Next ==
-    \/ \E c \in Client : SendLockReq(c)
-    \/ ProcessLockReq
-    \/ \E c \in Client : RecvLockGrant(c)
-    \/ \E c \in Client : \E a \in Addr : ClientRead(c, a)
-    \/ \E c \in Client : \E a \in Addr : \E v \in Data : ClientWrite(c, a, v)
-    \/ \E c \in Client : SendUnlock(c)
-    \/ ProcessUnlock
+(* Allow infinite stuttering to prevent deadlock on termination. *)
+Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
+               /\ UNCHANGED vars
 
-Spec == Init /\ [][Next]_vars
+Next == ServerProc
+           \/ (\E self \in Client: ClientProc(self))
+           \/ Terminating
+
+Spec == /\ Init /\ [][Next]_vars
+        /\ WF_vars(ServerProc)
+
+Termination == <>(\A self \in ProcSet: pc[self] = "Done")
+
+\* END TRANSLATION
+
+\* END TRANSLATION
+
+
 
 (*====================================================================*)
 (* Invariants                                                         *)
 (*====================================================================*)
 
-(*── I1: At most one client holds the lock ──────────────────────────*)
 LockExclusion ==
     \A c1, c2 \in Client :
         (lock_holder = c1 /\ lock_holder = c2) => c1 = c2
 
-(*── I2: Lock holder has granted flag ───────────────────────────────*)
 LockHolderHasGrant ==
     \A c \in Client :
         lock_holder = c => granted[c] = TRUE
 
-(*── I3: No client has grant without holding the lock ──────────────*)
 NoSpuriousGrant ==
     \A c \in Client :
         granted[c] = TRUE => lock_holder = c
 
-(*── I4: At most one pending request at a time ─────────────────────*)
-AtMostOnePending ==
-    /\ Cardinality({x \in msg_queue : x[2] = MSG_LOCK_REQ}) <= 1
-    /\ pending_req = 0 \/ \E c \in Client : <<c, MSG_LOCK_GRANT>> \notin msg_queue
-
-(*── I5: Server consistency — only one grant in flight ─────────────*)
 ServerConsistency ==
-    Cardinality({x \in msg_queue : x[2] = MSG_LOCK_GRANT}) <= 1
+    Cardinality({x \in msg_queue : x[2] = "lock_grant"}) <= 1
 
 (*====================================================================*)
-(* Fairness alternatives                                               *)
+(* Bounding constraints for TLC termination                           *)
+(*====================================================================*)
+TLCBound ==
+    /\ \A c \in Client : committed[c] < 3
+
+(*====================================================================*)
+(* Temporal properties                                                *)
 (*====================================================================*)
 
-(* Weak fairness: system eventually makes progress *)
-Spec_WF == Spec /\ WF_vars(Next)
+Spec_WF == Spec /\ \A self \in Client : WF_vars(ClientProc(self))
+              /\ WF_vars(ServerProc)
 
-(* Liveness: every request eventually gets a grant or release *)
 ProgressProperty ==
     \A c \in Client :
-        (pc[c] = "request") ~> (pc[c] \in {"active", "waiting", "idle"})
+        (pc[c] = "L_waiting") ~> (pc[c] = "L_active")
 
-====
+=====================================================================

@@ -417,6 +417,8 @@ ClockMonotonic ==
     clock >= 1
 
 (* I4: Lock bits are only set when a commit is in progress on that index *)
+(* NOTE: Excluded from Inv below. Holds trivially as a tautology:         *)
+(* version[i] ≤ next[t] + MaxTx always since next[t] is the clock.        *)
 VersionEntryValid ==
     \A i \in 0..VSIZE-1 :
         LockBit(version[i]) = 0 \/

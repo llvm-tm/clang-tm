@@ -192,6 +192,8 @@ ModelBound ==
 (*====================================================================*)
 
 (*── I1: Mutual exclusion on the SGL ───────────────────────────────*)
+(* NOTE: Tautology — (lock=t1 /\ lock=t2) => t1=t2 holds trivially. *)
+(* Kept for documentation clarity; excluded from TLC-checked Inv.   *)
 LockExclusion ==
     \A t1, t2 \in Thread :
         (lock = t1 /\ lock = t2) => t1 = t2

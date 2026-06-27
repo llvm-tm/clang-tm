@@ -68,7 +68,7 @@ L_idle:
         if txCount[self] >= MaxCommits then
             goto L_done;
         else
-            goto L_active;
+            goto L_idle;
         end if;
     end either;
 
@@ -188,10 +188,10 @@ L_idle(self) == /\ pc[self] = "L_idle"
                       /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
                       /\ pc' = [pc EXCEPT ![self] = "L_active"]
                       /\ UNCHANGED tsxRetries
-                   \/ /\ IF txCount[self] >= MaxCommits
-                             THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
-                             ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                      /\ UNCHANGED <<sgl, mode, readSet, writeSet, txSnapshot, tsxRetries, lastFence>>
+                    \/ /\ IF txCount[self] >= MaxCommits
+                              THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                       /\ UNCHANGED <<sgl, mode, readSet, writeSet, txSnapshot, tsxRetries, lastFence>>
                 /\ UNCHANGED << mem, txCount, aborted >>
 
 L_active(self) == /\ pc[self] = "L_active"
