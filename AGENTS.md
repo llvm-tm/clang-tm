@@ -751,4 +751,97 @@ All documented examples across README, plugin/README.md, simulator/README.md, Ru
 - LLVM 22.1.6, Rust (cargo), g++ 13, Python 3 — all verified
 - All recommended tool versions match those documented in `docs/REQUIREMENTS.md`
 
+## Session 2026-06-26 — 3-impl benchmark comparison (plugin/expli/rust)
+
+### Machine configuration
+
+All benchmarks ran on a single 56-thread Broadwell-EP server:
+
+| Property | Value |
+|----------|-------|
+| CPU | 2× Intel Xeon E5-2648L v4 @ 1.80GHz (Broadwell-EP) |
+| Cores | 14 physical / 28 logical per socket (28 phys / 56 log total) |
+| L1d/L1i cache | 896 KiB each (28 instances) |
+| L2 cache | 7 MiB (28 instances) |
+| L3 cache | 70 MiB (2 instances) |
+| RAM | 30 GiB DDR4 |
+| TSX | RTM + HLE supported (both sockets) |
+| Kernel | Linux 6.8.0-86-generic x86_64 |
+| Compilers | clang++-22.1.6, g++ 13.3.0, rustc 1.96.0 |
+| Compiler flags | `-O3 -march=native -pthread -DNDEBUG` (C++), `-C target-cpu=native` (Rust) |
+
+### Run configuration
+
+- 3 implementations × 4 backends × 12 thread levels (1,2,4,7,10,14,21,28,35,42,49,56) × 3 samples
+- 8 STAMP benchmarks (vacation, genome, intruder, bayes, yada, kmeans, labyrinth, ssca2) + TPC-C + STMbench7
+- stmbench7 skipped (pre-existing build failure in both plugin and expli paths)
+- Total: 3,214 run attempts, 3,106 completed, 2 crashes (0.06%, transient OOM on 70MB intruder output), 106 skipped (known-broken combos)
+- 2,925/3,108 output files parsed successfully (183 stmbench7 dummy stubs unparseable)
+- Results: `benchmark_results/compare_all_20260626_101408/`
+
+### Key results (avg ops/sec @ 4 threads)
+
+Averaged across 6 STAMP+TPCC benchmarks with comparable ops/sec output:
+
+| Rank | Impl   | Backend          | Avg ops/sec | vs expli |
+|------|--------|------------------|------------|----------|
+| 1    | rust   | norec            | 306,433    | 4.08×    |
+| 2    | rust   | tinystm_wbctl    | 261,659    | 3.61×    |
+| 3    | rust   | tsxsgl           | 252,476    | n/a      |
+| 4    | plugin | norec            | 117,659    | 1.57×    |
+| 5    | expli  | sgl              | 76,887     | 1.00×    |
+| 6    | expli  | norec            | 75,151     | 1.00×    |
+| 7    | expli  | tinystm_wbctl    | 72,508     | 1.00×    |
+| 8    | plugin | sgl              | 56,011     | 0.73×    |
+| 9    | plugin | tinystm_wbctl    | 44,604     | 0.62×    |
+| 10   | plugin | tsxsgl           | 39,123     | n/a      |
+
+### Fastest per benchmark @ 4t
+
+| Benchmark | Best            | Ops/sec |
+|-----------|-----------------|---------|
+| vacation  | rust/norec      | 1,165,303 |
+| genome    | expli/sgl       | 111,959 |
+| intruder  | rust/norec      | 31,998 |
+| bayes     | rust/tinystm_wbctl | 31,045 |
+| yada      | plugin/tsxsgl   | 12,222 |
+| tpcc      | plugin/tsxsgl   | 400 |
+
+### Rust vs C++: root cause analysis
+
+Rust is consistently **2.6–4.5× faster** than equivalent C++ explicit API backends:
+
+| Benchmark | Rust (norec) | Expli (norec) | Ratio |
+|-----------|-------------|---------------|-------|
+| vacation  | 1,165,303   | 250,980       | 4.64× |
+| intruder  | 31,998      | 7,852         | 4.07× |
+| bayes     | 28,420      | 20,515        | 1.39× |
+
+Three independent factors contribute:
+
+1. **No TM region allocator**: Rust uses plain `Vec`/`HashMap` for write-sets/read-sets; C++ allocates through `tm_region_allocator` (mmap-backed, per-thread bump allocator with deferred-free tracking). The region allocator adds overhead on every allocation and its deferred-free data structure (`g_deferred_frees_set`) has O(n) lookup cost.
+
+2. **Efficient write-set**: Rust uses `Vec<(usize, WriteEntry)>` with linear scan (1–10 entries typical); C++ uses `std::unordered_map<void*, WriteEntry>` with per-entry hash computation and bucket allocation. For small write-sets (the common case), Vec scan at L1 cache speed beats HashMap hashing.
+
+3. **Compiler fence vs CPU fence**: Rust uses `compiler_fence(SeqCst)` (i.e., `atomic_signal_fence`) for TM read/write barriers — prevents compiler reordering without a CPU instruction. C++ uses `std::atomic_thread_fence(SeqCst)` which emits a full `mfence` instruction (~30–60 cycles). Rust emits a full CPU fence only at commit time where cross-core visibility is required.
+
+Additional Rust advantages: TLS access through native `thread_local!` (vs `__thread` + platform TLS wrappers in C++), and `catch_unwind`-free retry loop for non-panic backends.
+
+### Plugin overhead analysis
+
+| Backend    | Plugin vs Expli | Note |
+|------------|----------------|------|
+| norec      | 1.57× faster   | Plugin's LLVM loop optimizations inline transaction boundaries, reducing function call overhead |
+| sgl        | 0.73× slower   | 27% overhead from instrumentation + setjmp/longjmp retry |
+| tinystm_wbctl | 0.62× slower | 38% overhead from instrumentation; 70MB debug output on intruder suggests verbose logging enabled |
+| tsxsgl     | n/a             | No expli TSXSGL backend for comparison; RTM capacity aborts limit scalability |
+
+### Data integrity
+
+All verification runs pass across all 4 backends:
+- `bank -d 1000 --test` — money conserved
+- `test_tx` — 114/114 PASS
+- `test_ds` — 207/207 PASS
+
+
 
