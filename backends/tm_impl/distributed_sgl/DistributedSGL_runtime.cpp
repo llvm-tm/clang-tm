@@ -207,6 +207,8 @@ void tm_set_env(sigjmp_buf* env) {
     if (env) memcpy(&tm_jmpbuf, env, sizeof(sigjmp_buf));
 }
 
+
+
 // Per-thread: true until the first tm_begin publishes local state to mmap
 static thread_local bool g_first_begin = true;
 
@@ -275,9 +277,6 @@ void tm_exit_thread()
 #endif
 { tm_hook_exit_thread(); }
 
-static std::recursive_mutex g_serialize_mutex;
-void tm_serialize_lock()   { g_serialize_mutex.lock(); }
-void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
 
 void consume_ptr(volatile void*) {}
 
