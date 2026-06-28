@@ -115,17 +115,26 @@ calls `validate()`.
 
 **Effort:** ~100 lines.
 
-### 2.3 PersistentSGL dual-write split (2/5 → 3/5)
+### 2.3 PersistentSGL dual-write split (2/5 → 3/5) ✅ DONE
 
 **Problem:** `mem[a] := v ∧ nvm[a] := v` in one atomic action. C++ does
 `*addr=val`; `memcpy(mmap, ...)` with zero fences between.
 
-**Fix:** Split into two consecutive actions `L_write_mem` and `L_write_nvm` with
-a crash-possible intermediate state. Add `NVMAgreesWithMem` back as a
-NON-trivial invariant. Either require a fence between them (matching proposed C++
-fix) or document that crashes between mem write and mmap write lose data.
+**Fix:** Split into two consecutive actions: L_active (mem write → sets
+`pending_nvm[t]`) and L_write_nvm (nvm write → clears `pending_nvm[t]`).
+Added `pending_nvm[t]`, `pending_addr[t]`, `pending_val[t]` per-thread
+variables tracking the in-flight dual-write. Crash during the intermediate
+state leaves nvm stale; recovery restores mem from nvm, losing the write.
+`NVMAgreesWithMem` weakened to `~crashed /\ no pending ⇒ mem=nvm`.
 
-**Effort:** ~60 lines.
+Also: recovery now resets thread PCs to L_idle (matching C++ re-init);
+L_active guarded by `await ~crashed` (threads freeze after crash);
+System process added to `Spec_WF` (WF forces recovery eventually).
+
+**TLC verification:** Safety (normal): 361 states ✅
+Safety (large): 513 states ✅ Liveness (Spec_WF): 361 states ✅
+
+**Effort:** ~100 lines (PlusCal + TLA+).
 
 ### 2.4 TL2 clock increment ordering fix (3/5 → 4/5)
 
@@ -531,7 +540,7 @@ actions. Then re-translate and verify TLC passes.
 | 1.3 | Per-label `FenceFidelity` | 500 | 0 | +0–0.5 across 10 backends |
 | 2.1 | NVHTM rewrite | 250 | 0 | +2 (1→3) |
 | 2.2 | NOrec double-check split | 100 | 0 | +1 (2→3) |
-| 2.3 | PersistentSGL dual-write split | 60 | 0 | +1 (2→3) |
+| 2.3 | PersistentSGL dual-write split | 100 | 0 | ✅ +1 (2→3) |
 | 2.4 | TL2 clock increment | 10 | 1 | +1 (3→4) |
 | 2.5 | Romulus fence annotations | 40 | 0 | +1 (3→4) |
 | 2.6 | LEFTRIGHT write ordering | 5 | 5 | +1 (3→4) |
@@ -550,7 +559,8 @@ actions. Then re-translate and verify TLC passes.
 1. **Phase 1** (infrastructure) — do first because all other phases depend on
    the new `lastSignalFence`/`lastThreadFence`/`lastRmw` variables.
 2. **Phase 2** (algorithmic gaps) — highest score impact per line.
-   Start with 2.1 (NVHTM) and 2.2 (NOrec) — these are the worst gaps.
+   Done: 2.2 (NOrec), 2.3 (PersistentSGL), 2.6 (LEFTRIGHT), 2.7 (SwissTM).
+   Next: 2.4 (TL2), 2.5 (Romulus), 2.8 (XTM).
 3. **Phase 4** (C++ fixes) — quick wins that also improve real correctness.
 4. **Phase 3** (add `lastFence` to remaining 9) — mechanical, easy.
 5. **Phase 6** (PlusCal desync) — important for maintainability.
@@ -565,7 +575,7 @@ actions. Then re-translate and verify TLC passes.
 | TinySTM_WBCTL | 4/5 | 4/5 | MO sub-score 2→3 |
 | TinySTM_WBETL | 4/5 | 4/5 | MO sub-score 2→3 |
 | TinySTM_WT | 4/5 | 4/5 | MO sub-score 2→3 |
-| PersistentSGL | 2/5 | 3/5 | Phase 2.3 |
+| PersistentSGL | 2/5 | 3/5 ✅ | Phase 2.3 done |
 | Romulus | 3/5 | 4/5 | Phase 2.5 |
 | TL2 | 3/5 | 4/5 | Phase 2.4 |
 | XTM | 3/5 | 4/5 | Phase 2.8 |

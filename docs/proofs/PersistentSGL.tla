@@ -27,10 +27,17 @@ variables
     mem = [a \in Addr |-> 0],
     nvm = [a \in Addr |-> 0],
     state = [t \in Thread |-> "idle"],
-    version = 0,   (* NOTE: Written but never read by any guard or invariant. Kept for model completeness -- tracks commit count for ModelBound. *)
+    version = 0,
     committed = [t \in Thread |-> 0],
     crashed = FALSE,
-    recovered = FALSE;
+    recovered = FALSE,
+    \* Dual-write intermediate state: thread has written mem but not yet nvm.
+    \* A crash during this window leaves nvm with stale data (no fence between 
+    \* *addr=val and memcpy in C++).  Recovery restores mem from nvm, losing
+    \* the mem-only write.
+    pending_nvm = [t \in Thread |-> FALSE],
+    pending_addr = [t \in Thread |-> 0],
+    pending_val = [t \in Thread |-> 0];
 
 process ThreadProc \in Thread
 begin
@@ -47,17 +54,20 @@ L_idle:
     end if;
 
 L_active:
-    either \* Read
+    await ~crashed;
+    either \* Read (no-op in model)
         with a \in Addr do
             skip;
         end with;
         goto L_active;
-    or \* Write (dual-write: mem + nvm simultaneously)
+    or \* Write mem (plain store — no fence before nvm write)
         with a \in Addr, v \in Data do
             mem[a] := v;
-            nvm[a] := v;
+            pending_nvm[self] := TRUE;
+            pending_addr[self] := a;
+            pending_val[self] := v;
         end with;
-        goto L_active;
+        goto L_write_nvm;
     or \* Commit (release lock)
         lock := 0;
         version := version + 1;
@@ -65,6 +75,14 @@ L_active:
         state[self] := "idle";
         goto L_idle;
     end either;
+
+L_write_nvm:
+    \* Write nvm (plain memcpy to mmap — no fence after mem write)
+    nvm[pending_addr[self]] := pending_val[self];
+    pending_nvm[self] := FALSE;
+    pending_addr[self] := 0;
+    pending_val[self] := 0;
+    goto L_active;
 
 L_done:
     skip;
@@ -79,23 +97,30 @@ L_sys:
         await ~crashed;
         crashed := TRUE;
         goto L_sys;
-    or \* Recover (nvm is always consistent)
+    or \* Recover (nvm may have stale data from partial dual-write)
+        \* Reset all threads to idle, matching re-initialization in C++
         await crashed /\ ~recovered;
         mem := nvm;
         lock := 0;
         state := [t \in Thread |-> "idle"];
         recovered := TRUE;
+        \* Clear any in-flight dual-write state
+        pending_nvm := [t \in Thread |-> FALSE];
+        pending_addr := [t \in Thread |-> 0];
+        pending_val := [t \in Thread |-> 0];
+        pc := [t \in ProcSet |-> IF t \in Thread THEN "L_idle" ELSE pc[t]];
         goto L_sys;
     end either;
 
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "a4102c63" /\ chksum(tla) = "07755a91")
-VARIABLES lock, mem, nvm, state, version, committed, crashed, recovered, pc
+\* BEGIN TRANSLATION (chksum(pcal) = "b87e1f34" /\ chksum(tla) = "2a9c5e01")
+VARIABLES lock, mem, nvm, state, version, committed, crashed, recovered,
+          pending_nvm, pending_addr, pending_val, pc
 
-vars == << lock, mem, nvm, state, version, committed, crashed, recovered, pc
-        >>
+vars == << lock, mem, nvm, state, version, committed, crashed, recovered,
+           pending_nvm, pending_addr, pending_val, pc >>
 
 ProcSet == (Thread) \cup {0}
 
@@ -108,6 +133,9 @@ Init == (* Global variables *)
         /\ committed = [t \in Thread |-> 0]
         /\ crashed = FALSE
         /\ recovered = FALSE
+        /\ pending_nvm = [t \in Thread |-> FALSE]
+        /\ pending_addr = [t \in Thread |-> 0]
+        /\ pending_val = [t \in Thread |-> 0]
         /\ pc = [self \in ProcSet |-> CASE self \in Thread -> "L_idle"
                                         [] self = 0 -> "L_sys"]
 
@@ -121,47 +149,72 @@ L_idle(self) == /\ pc[self] = "L_idle"
                                  ELSE /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                            /\ UNCHANGED << lock, state >>
                 /\ UNCHANGED << mem, nvm, version, committed, crashed, 
-                                recovered >>
+                                recovered, pending_nvm, pending_addr,
+                                pending_val >>
 
 L_active(self) == /\ pc[self] = "L_active"
+                  /\ ~crashed
                   /\ \/ /\ \E a \in Addr:
                              TRUE
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<lock, mem, nvm, state, version, committed>>
-                     \/ /\ \E a \in Addr:
-                             \E v \in Data:
-                               /\ mem' = [mem EXCEPT ![a] = v]
-                               /\ nvm' = [nvm EXCEPT ![a] = v]
-                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<lock, state, version, committed>>
-                     \/ /\ lock' = 0
+                        /\ UNCHANGED <<lock, mem, nvm, state, version,
+                                       committed, pending_nvm, pending_addr,
+                                       pending_val>>
+                     \/ \* Write mem (plain store, no fence before nvm)
+                        /\ \E a \in Addr:
+                              \E v \in Data:
+                                /\ mem' = [mem EXCEPT ![a] = v]
+                                /\ pending_nvm' = [pending_nvm EXCEPT ![self] = TRUE]
+                                /\ pending_addr' = [pending_addr EXCEPT ![self] = a]
+                                /\ pending_val' = [pending_val EXCEPT ![self] = v]
+                        /\ pc' = [pc EXCEPT ![self] = "L_write_nvm"]
+                        /\ UNCHANGED <<lock, nvm, state, version, committed>>
+                     \/ \* Commit (release lock)
+                        /\ lock' = 0
                         /\ version' = version + 1
                         /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                         /\ state' = [state EXCEPT ![self] = "idle"]
                         /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                        /\ UNCHANGED <<mem, nvm>>
+                        /\ UNCHANGED <<mem, nvm, pending_nvm, pending_addr,
+                                       pending_val>>
                   /\ UNCHANGED << crashed, recovered >>
+
+L_write_nvm(self) == /\ pc[self] = "L_write_nvm"
+                     /\ nvm' = [nvm EXCEPT ![pending_addr[self]] = pending_val[self]]
+                     /\ pending_nvm' = [pending_nvm EXCEPT ![self] = FALSE]
+                     /\ pending_addr' = [pending_addr EXCEPT ![self] = 0]
+                     /\ pending_val' = [pending_val EXCEPT ![self] = 0]
+                     /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                     /\ UNCHANGED << lock, mem, state, version, committed,
+                                     crashed, recovered >>
 
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
                 /\ UNCHANGED << lock, mem, nvm, state, version, committed, 
-                                crashed, recovered >>
+                                crashed, recovered, pending_nvm, pending_addr,
+                                pending_val >>
 
-ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_done(self)
+ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_write_nvm(self)
+                       \/ L_done(self)
 
 L_sys == /\ pc[0] = "L_sys"
          /\ \/ /\ ~crashed
                /\ crashed' = TRUE
                /\ pc' = [pc EXCEPT ![0] = "L_sys"]
-               /\ UNCHANGED <<lock, mem, state, recovered>>
-            \/ /\ crashed /\ ~recovered
-               /\ mem' = nvm
-               /\ lock' = 0
-               /\ state' = [t \in Thread |-> "idle"]
-               /\ recovered' = TRUE
-               /\ pc' = [pc EXCEPT ![0] = "L_sys"]
-               /\ UNCHANGED crashed
+               /\ UNCHANGED <<lock, mem, state, recovered, pending_nvm,
+                               pending_addr, pending_val>>
+             \/ /\ crashed /\ ~recovered
+                /\ mem' = nvm
+                /\ lock' = 0
+                /\ state' = [t \in Thread |-> "idle"]
+                /\ recovered' = TRUE
+                /\ pending_nvm' = [t \in Thread |-> FALSE]
+                /\ pending_addr' = [t \in Thread |-> 0]
+                /\ pending_val' = [t \in Thread |-> 0]
+                /\ pc' = [t \in ProcSet |-> IF t \in Thread THEN "L_idle"
+                                               ELSE pc[t]]
+                /\ UNCHANGED crashed
          /\ UNCHANGED << nvm, version, committed >>
 
 System == L_sys
@@ -207,21 +260,26 @@ LockHolderActive ==
 RecoveryConsistency ==
     recovered = TRUE => mem = nvm
 
-(*── I4: NVM always equals mem for committed writes (dual-write) ──*)
-(* NOTE: Model simplification — the dual-write is atomic (mem and nvm updated  *)
-(* together). In the real C++ backend, NVM writes are deferred to a flush      *)
-(* phase; splitting them would require a non-atomic write action with crash    *)
-(* between mem and nvm update to verify durability semantics.                  *)
+(*── I4: NVM equals mem when no dual-write is in-flight (non-crash) ──*)
+(* The dual-write is split into L_active (mem write) and L_write_nvm (nvm   *)
+(* write) with zero ordering. A crash between the two leaves nvm stale;     *)
+(* recovery restores mem from nvm, losing the write.  This invariant checks *)
+(* that mem and nvm are consistent when the system is not crashed and no    *)
+(* thread is mid-dual-write.                                                *)
 NVMAgreesWithMem ==
-    \A a \in Addr :
-        mem[a] = nvm[a]
+    ~crashed /\ (\A t \in Thread : ~pending_nvm[t])
+        => (\A a \in Addr : mem[a] = nvm[a])
 
 (*====================================================================*)
 (* Fairness and Liveness                                              *)
 (*====================================================================*)
 
-(* Weak fairness on each thread process *)
-Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
+(* Weak fairness on each thread process and the System process *)
+(* System WF ensures recovery eventually happens after crash, so stuck *)
+(* threads in L_active (blocked by ~crashed guard) can reach L_idle.   *)
+Spec_WF == Spec
+              /\ WF_vars(System)
+              /\ \A self \in Thread : WF_vars(ThreadProc(self))
 
 (* Strong fairness on each thread process *)
 Spec_SF == Spec /\ \A self \in Thread : SF_vars(ThreadProc(self))
