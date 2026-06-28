@@ -58,8 +58,10 @@ variables
     checkpoint = [t \in Thread |-> FALSE],
     committed = [t \in Thread |-> 0],
     aborted = [t \in Thread |-> 0],
-    \* Fence tracking: ""=none, "acq"=acquire, "rel"=release, "sc"=seq_cst
-    lastFence = [t \in Thread |-> ""];
+    \* Fence tracking (signal_fence, thread_fence, RMW)
+    lastSignalFence = [t \in Thread |-> ""],
+    lastThreadFence = [t \in Thread |-> ""],
+    lastRmw = [t \in Thread |-> ""];
 
 process ThreadProc \in Thread
 begin
@@ -70,7 +72,7 @@ L_idle:
         tsx_mode[self] := TRUE;
         retry_cnt[self] := 0;
         redo_log[self] := << >>;
-        lastFence[self] := "sc";
+        lastRmw[self] := "seq_cst";  \* _xbegin() (RTM acquire)
         goto L_active_tsx;
     or \* Recovery: replay checkpointed redo log
         if checkpoint[self] /\ cp_valid[self] then
@@ -86,7 +88,7 @@ L_idle:
                 ELSE mem[a]];
             checkpoint[self] := FALSE;
             cp_valid[self] := FALSE;
-            lastFence[self] := "sc";
+            lastThreadFence[self] := "seq_cst";  \* sfence(seq_cst) for persistent checkpoint
         end if;
         goto L_idle;
     end either;
@@ -96,36 +98,36 @@ L_active_tsx:
         with a \in Addr do
             skip;
         end with;
-        lastFence[self] := "sc";
+        lastRmw[self] := "seq_cst";  \* RTM read
         goto L_active_tsx;
     or \* TSX Write: append to redo log only
         with a \in Addr, v \in Data do
             redo_log[self] := Append(redo_log[self], <<a, v>>);
         end with;
-        lastFence[self] := "acq";
+        lastRmw[self] := "acquire";  \* TSX write
         goto L_active_tsx;
     or \* TSX Commit: _xend()
         tsx_mode[self] := FALSE;
-        lastFence[self] := "rel";
+        lastRmw[self] := "release";  \* _xend()
         goto L_flush_log;
     or \* TSX Abort: _xabort()
         redo_log[self] := << >>;
         tsx_mode[self] := FALSE;
         retry_cnt[self] := retry_cnt[self] + 1;
-        lastFence[self] := "rel";
+        lastRmw[self] := "release";  \* _xabort()
         goto L_aborting;
     end either;
 
 L_flush_log:
     skip;  \* clwb all redo-log cachelines + sfence
-    lastFence[self] := "sc";
+    lastThreadFence[self] := "seq_cst";  \* sfence(seq_cst)
     goto L_write_cp;
 
 L_write_cp:
     cp_valid[self] := TRUE;
     cp_addr[self] := self;
     checkpoint[self] := TRUE;
-    lastFence[self] := "sc";
+    lastThreadFence[self] := "seq_cst";  \* persistent checkpoint fence
     goto L_apply_log;
 
 L_apply_log:
@@ -140,14 +142,14 @@ L_apply_log:
                         redo_log[self][j][1] = a => j <= i
             IN redo_log[self][LastIdx][2]
         ELSE mem[a]];
-    lastFence[self] := "sc";
+    lastThreadFence[self] := "seq_cst";  \* redo-apply (sfence)
     goto L_clear_cp;
 
 L_clear_cp:
     cp_valid[self] := FALSE;
     checkpoint[self] := FALSE;
     committed[self] := committed[self] + 1;
-    lastFence[self] := "rel";
+    lastRmw[self] := "release";  \* checkpoint release
     goto L_idle;
 
 L_aborting:
@@ -157,14 +159,14 @@ L_aborting:
         tsx_mode[self] := TRUE;
         redo_log[self] := << >>;
         aborted[self] := aborted[self] + 1;
-        lastFence[self] := "sc";
+        lastRmw[self] := "seq_cst";  \* _xbegin() retry
         goto L_active_tsx;
     else
         \* Fall back to SGL
         tsx_mode[self] := FALSE;
         redo_log[self] := << >>;
         aborted[self] := aborted[self] + 1;
-        lastFence[self] := "rel";
+        lastRmw[self] := "release";  \* SGL fallback
         goto L_active_sgl;
     end if;
 
@@ -175,14 +177,14 @@ L_active_sgl:
         sgl := self;
         retry_cnt[self] := 0;
         redo_log[self] := << >>;
-        lastFence[self] := "acq";
+        lastRmw[self] := "acquire";  \* mutex.lock()
         goto L_active_sgl;
     or \* SGL Read (mutex provides isolation)
         await sgl = self;
         with a \in Addr do
             skip;
         end with;
-        lastFence[self] := "sc";
+        lastRmw[self] := "seq_cst";  \* SGL read
         goto L_active_sgl;
     or \* SGL Write: direct to memory + redo log for durability
         await sgl = self;
@@ -190,12 +192,12 @@ L_active_sgl:
             mem[a] := v;
             redo_log[self] := Append(redo_log[self], <<a, v>>);
         end with;
-        lastFence[self] := "acq";
+        lastRmw[self] := "acquire";  \* SGL write
         goto L_active_sgl;
     or \* SGL Commit: release lock, enter durable path
         await sgl = self;
         sgl := 0;
-        lastFence[self] := "rel";
+        lastRmw[self] := "release";  \* mutex.unlock()
         goto L_flush_log;
     end either;
 
@@ -204,10 +206,12 @@ end process;
 end algorithm; *)
 \* BEGIN TRANSLATION
 VARIABLES mem, sgl, tsx_mode, retry_cnt, redo_log, cp_valid, cp_addr, 
-          checkpoint, committed, aborted, lastFence, pc
+          checkpoint, committed, aborted, lastSignalFence, lastThreadFence, 
+          lastRmw, pc
 
 vars == << mem, sgl, tsx_mode, retry_cnt, redo_log, cp_valid, cp_addr, 
-           checkpoint, committed, aborted, lastFence, pc >>
+           checkpoint, committed, aborted, lastSignalFence, lastThreadFence, 
+           lastRmw, pc >>
 
 ProcSet == (Thread)
 
@@ -222,7 +226,9 @@ Init == (* Global variables *)
         /\ checkpoint = [t \in Thread |-> FALSE]
         /\ committed = [t \in Thread |-> 0]
         /\ aborted = [t \in Thread |-> 0]
-        /\ lastFence = [t \in Thread |-> ""]
+        /\ lastSignalFence = [t \in Thread |-> ""]
+        /\ lastThreadFence = [t \in Thread |-> ""]
+        /\ lastRmw = [t \in Thread |-> ""]
         /\ pc = [self \in ProcSet |-> "L_idle"]
 
 L_idle(self) == /\ pc[self] = "L_idle"
@@ -230,70 +236,73 @@ L_idle(self) == /\ pc[self] = "L_idle"
                       /\ tsx_mode' = [tsx_mode EXCEPT ![self] = TRUE]
                       /\ retry_cnt' = [retry_cnt EXCEPT ![self] = 0]
                       /\ redo_log' = [redo_log EXCEPT ![self] = << >>]
-                      /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                      /\ lastRmw' = [lastRmw EXCEPT ![self] = "seq_cst"]
                       /\ pc' = [pc EXCEPT ![self] = "L_active_tsx"]
-                      /\ UNCHANGED <<mem, cp_valid, checkpoint>>
+                      /\ UNCHANGED <<mem, cp_valid, checkpoint, lastThreadFence>>
                    \/ /\ IF checkpoint[self] /\ cp_valid[self]
                             THEN /\ mem' =    [a \in Addr |->
                                            IF \E i \in 1..Len(redo_log[self]) : redo_log[self][i][1] = a
                                            THEN
-                                                LET LastIdx ==
-                                                    CHOOSE i \in 1..Len(redo_log[self]) :
-                                                        redo_log[self][i][1] = a /\
-                                                        \A j \in 1..Len(redo_log[self]) :
-                                                            redo_log[self][j][1] = a => j <= i
-                                                IN redo_log[self][LastIdx][2]
+                                               LET LastIdx ==
+                                                   CHOOSE i \in 1..Len(redo_log[self]) :
+                                                       redo_log[self][i][1] = a /\
+                                                       \A j \in 1..Len(redo_log[self]) :
+                                                           redo_log[self][j][1] = a => j <= i
+                                               IN redo_log[self][LastIdx][2]
                                            ELSE mem[a]]
                                  /\ checkpoint' = [checkpoint EXCEPT ![self] = FALSE]
                                  /\ cp_valid' = [cp_valid EXCEPT ![self] = FALSE]
-                                 /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                                 /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = "seq_cst"]
                             ELSE /\ TRUE
                                  /\ UNCHANGED << mem, cp_valid, checkpoint, 
-                                                 lastFence >>
+                                                 lastThreadFence >>
                       /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                      /\ UNCHANGED <<tsx_mode, retry_cnt, redo_log>>
-                /\ UNCHANGED << sgl, cp_addr, committed, aborted >>
+                      /\ UNCHANGED <<tsx_mode, retry_cnt, redo_log, lastRmw>>
+                /\ UNCHANGED << sgl, cp_addr, committed, aborted, 
+                                lastSignalFence >>
 
 L_active_tsx(self) == /\ pc[self] = "L_active_tsx"
                       /\ \/ /\ \E a \in Addr:
                                  TRUE
-                            /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                            /\ lastRmw' = [lastRmw EXCEPT ![self] = "seq_cst"]
                             /\ pc' = [pc EXCEPT ![self] = "L_active_tsx"]
                             /\ UNCHANGED <<tsx_mode, retry_cnt, redo_log>>
                          \/ /\ \E a \in Addr:
                                  \E v \in Data:
                                    redo_log' = [redo_log EXCEPT ![self] = Append(redo_log[self], <<a, v>>)]
-                            /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                            /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
                             /\ pc' = [pc EXCEPT ![self] = "L_active_tsx"]
                             /\ UNCHANGED <<tsx_mode, retry_cnt>>
                          \/ /\ tsx_mode' = [tsx_mode EXCEPT ![self] = FALSE]
-                            /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                            /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                             /\ pc' = [pc EXCEPT ![self] = "L_flush_log"]
                             /\ UNCHANGED <<retry_cnt, redo_log>>
                          \/ /\ redo_log' = [redo_log EXCEPT ![self] = << >>]
                             /\ tsx_mode' = [tsx_mode EXCEPT ![self] = FALSE]
                             /\ retry_cnt' = [retry_cnt EXCEPT ![self] = retry_cnt[self] + 1]
-                            /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                            /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                             /\ pc' = [pc EXCEPT ![self] = "L_aborting"]
                       /\ UNCHANGED << mem, sgl, cp_valid, cp_addr, checkpoint, 
-                                      committed, aborted >>
+                                      committed, aborted, lastSignalFence, 
+                                      lastThreadFence >>
 
 L_flush_log(self) == /\ pc[self] = "L_flush_log"
                      /\ TRUE
-                     /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                     /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = "seq_cst"]
                      /\ pc' = [pc EXCEPT ![self] = "L_write_cp"]
                      /\ UNCHANGED << mem, sgl, tsx_mode, retry_cnt, redo_log, 
                                      cp_valid, cp_addr, checkpoint, committed, 
-                                     aborted >>
+                                     aborted, lastSignalFence, lastRmw >>
 
 L_write_cp(self) == /\ pc[self] = "L_write_cp"
                     /\ cp_valid' = [cp_valid EXCEPT ![self] = TRUE]
                     /\ cp_addr' = [cp_addr EXCEPT ![self] = self]
                     /\ checkpoint' = [checkpoint EXCEPT ![self] = TRUE]
-                    /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                    /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = "seq_cst"]
                     /\ pc' = [pc EXCEPT ![self] = "L_apply_log"]
                     /\ UNCHANGED << mem, sgl, tsx_mode, retry_cnt, redo_log, 
-                                    committed, aborted >>
+                                    committed, aborted, lastSignalFence, 
+                                    lastRmw >>
 
 L_apply_log(self) == /\ pc[self] = "L_apply_log"
                      /\ mem' =    [a \in Addr |->
@@ -306,20 +315,21 @@ L_apply_log(self) == /\ pc[self] = "L_apply_log"
                                                redo_log[self][j][1] = a => j <= i
                                    IN redo_log[self][LastIdx][2]
                                ELSE mem[a]]
-                     /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                     /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = "seq_cst"]
                      /\ pc' = [pc EXCEPT ![self] = "L_clear_cp"]
                      /\ UNCHANGED << sgl, tsx_mode, retry_cnt, redo_log, 
                                      cp_valid, cp_addr, checkpoint, committed, 
-                                     aborted >>
+                                     aborted, lastSignalFence, lastRmw >>
 
 L_clear_cp(self) == /\ pc[self] = "L_clear_cp"
                     /\ cp_valid' = [cp_valid EXCEPT ![self] = FALSE]
                     /\ checkpoint' = [checkpoint EXCEPT ![self] = FALSE]
                     /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
-                    /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                    /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                     /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                     /\ UNCHANGED << mem, sgl, tsx_mode, retry_cnt, redo_log, 
-                                    cp_addr, aborted >>
+                                    cp_addr, aborted, lastSignalFence, 
+                                    lastThreadFence >>
 
 L_aborting(self) == /\ pc[self] = "L_aborting"
                     /\ IF retry_cnt[self] < MaxRetries
@@ -327,15 +337,16 @@ L_aborting(self) == /\ pc[self] = "L_aborting"
                                /\ tsx_mode' = [tsx_mode EXCEPT ![self] = TRUE]
                                /\ redo_log' = [redo_log EXCEPT ![self] = << >>]
                                /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
-                               /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                               /\ lastRmw' = [lastRmw EXCEPT ![self] = "seq_cst"]
                                /\ pc' = [pc EXCEPT ![self] = "L_active_tsx"]
                           ELSE /\ tsx_mode' = [tsx_mode EXCEPT ![self] = FALSE]
                                /\ redo_log' = [redo_log EXCEPT ![self] = << >>]
                                /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
-                               /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                               /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                /\ pc' = [pc EXCEPT ![self] = "L_active_sgl"]
                     /\ UNCHANGED << mem, sgl, retry_cnt, cp_valid, cp_addr, 
-                                    checkpoint, committed >>
+                                    checkpoint, committed, lastSignalFence, 
+                                    lastThreadFence >>
 
 L_active_sgl(self) == /\ pc[self] = "L_active_sgl"
                       /\ \/ /\ sgl = 0
@@ -343,13 +354,13 @@ L_active_sgl(self) == /\ pc[self] = "L_active_sgl"
                             /\ sgl' = self
                             /\ retry_cnt' = [retry_cnt EXCEPT ![self] = 0]
                             /\ redo_log' = [redo_log EXCEPT ![self] = << >>]
-                            /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                            /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
                             /\ pc' = [pc EXCEPT ![self] = "L_active_sgl"]
                             /\ mem' = mem
                          \/ /\ sgl = self
                             /\ \E a \in Addr:
                                  TRUE
-                            /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                            /\ lastRmw' = [lastRmw EXCEPT ![self] = "seq_cst"]
                             /\ pc' = [pc EXCEPT ![self] = "L_active_sgl"]
                             /\ UNCHANGED <<mem, sgl, retry_cnt, redo_log>>
                          \/ /\ sgl = self
@@ -357,16 +368,17 @@ L_active_sgl(self) == /\ pc[self] = "L_active_sgl"
                                  \E v \in Data:
                                    /\ mem' = [mem EXCEPT ![a] = v]
                                    /\ redo_log' = [redo_log EXCEPT ![self] = Append(redo_log[self], <<a, v>>)]
-                            /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                            /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
                             /\ pc' = [pc EXCEPT ![self] = "L_active_sgl"]
                             /\ UNCHANGED <<sgl, retry_cnt>>
                          \/ /\ sgl = self
                             /\ sgl' = 0
-                            /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                            /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                             /\ pc' = [pc EXCEPT ![self] = "L_flush_log"]
                             /\ UNCHANGED <<mem, retry_cnt, redo_log>>
                       /\ UNCHANGED << tsx_mode, cp_valid, cp_addr, checkpoint, 
-                                      committed, aborted >>
+                                      committed, aborted, lastSignalFence, 
+                                      lastThreadFence >>
 
 ThreadProc(self) == L_idle(self) \/ L_active_tsx(self) \/ L_flush_log(self)
                        \/ L_write_cp(self) \/ L_apply_log(self)
@@ -429,7 +441,8 @@ CommitPhaseOrdering ==
 
 (*── I8: Every thread with a non-empty write-set has issued a fence ─*)
 FenceFidelity ==
-    \A t \in Thread : Len(redo_log[t]) > 0 => lastFence[t] # ""
+    \A t \in Thread : Len(redo_log[t]) > 0 =>
+        (lastSignalFence[t] # "" \/ lastThreadFence[t] # "" \/ lastRmw[t] # "")
 
 (*── Combined invariant ────────────────────────────────────────────*)
 Inv ==

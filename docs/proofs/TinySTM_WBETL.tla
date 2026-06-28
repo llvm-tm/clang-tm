@@ -35,8 +35,10 @@ variables
     readOnly = [t \in Thread |-> TRUE],
     endVersion = [t \in Thread |-> 0],
     committed = [t \in Thread |-> 0],
-    \* Fence tracking: ""=none, "acq"=acquire, "rel"=release, "sc"=seq_cst
-    lastFence = [t \in Thread |-> ""];
+    \* Fence tracking (signal_fence, thread_fence, RMW)
+    lastSignalFence = [t \in Thread |-> ""],
+    lastThreadFence = [t \in Thread |-> ""],
+    lastRmw = [t \in Thread |-> ""];
 
 process ThreadProc \in Thread
 begin
@@ -58,7 +60,7 @@ L_active:
             endVersion[self] := clock;
             goto L_active;
         else
-            lastFence[self] := "rel";  \* release fence before unlock
+            lastRmw[self] := "release";  \* lock.release
             lock := [a \in Addr |->
                 IF a \in writeSet[self] THEN <<0, 0, lock[a][3]>> ELSE lock[a]];
             readSet[self] := {};
@@ -67,7 +69,7 @@ L_active:
             goto L_idle;
         end if;
     or \* Read (record observed version)
-        lastFence[self] := "sc";  \* atomic_signal_fence(seq_cst) before version read
+        lastSignalFence[self] := "sc";  \* atomic_signal_fence(seq_cst) before version read
         with a \in Addr do
             if a \notin writeSet[self] /\ lock[a][1] = 0 then
                 readSet[self] := readSet[self] \union {<<a, lock[a][3]>>};
@@ -75,7 +77,7 @@ L_active:
         end with;
         goto L_active;
     or \* New write: acquire lock and buffer
-        lastFence[self] := "acq";  \* CAS acquire semantics
+        lastRmw[self] := "acquire";  \* CAS acquire
         with a \in Addr, n \in 0..MAX_VAL do
             if a \notin writeSet[self] /\ lock[a][1] = 0 then
                 lock[a] := <<1, self, lock[a][3]>>;
@@ -86,7 +88,7 @@ L_active:
         end with;
         goto L_active;
     or \* Update write: buffer updated value (lock already held)
-        lastFence[self] := "sc";  \* seq_cst fence before data write
+        lastSignalFence[self] := "sc";  \* atomic_signal_fence(seq_cst) before data write
         with a \in Addr, n \in 0..MAX_VAL do
             if a \in writeSet[self] then
                 writeBuf[self, a] := n;
@@ -96,7 +98,7 @@ L_active:
         goto L_active;
     or \* Write conflict abort (release locks + reset state)
         if \E a \in Addr \ writeSet[self] : lock[a][1] = 1 /\ lock[a][2] # self then
-            lastFence[self] := "rel";  \* release fence before unlock
+            lastRmw[self] := "release";  \* lock.unlock(release)
             lock := [a \in Addr |->
                 IF a \in writeSet[self] THEN <<0, 0, lock[a][3]>> ELSE lock[a]];
             writeSet[self] := {};
@@ -116,7 +118,7 @@ L_active:
             goto L_active;
         end if;
     or \* Commit (inc clock then validate)
-        lastFence[self] := "sc";  \* atomic_thread_fence(seq_cst) before clock read
+        lastRmw[self] := "acq_rel";  \* g_clock.fetch_add(1, acq_rel)
         if ~readOnly[self] /\ writeSet[self] # {}
            /\ \A a \in writeSet[self] : lock[a][2] = self
         then
@@ -131,10 +133,9 @@ L_validateETL:
     if \A <<a, v>> \in readSet[self] :
         lock[a][2] = self \/ lock[a][3] <= endVersion[self]
     then
-        lastFence[self] := "sc";  \* atomic_thread_fence(seq_cst) before write-back
         goto L_writeBackETL;
     else
-        lastFence[self] := "rel";  \* release fence before unlock
+        lastRmw[self] := "release";  \* lock.unlock(release)
         lock := [a \in Addr |->
             IF a \in writeSet[self] THEN <<0, 0, lock[a][3]>> ELSE lock[a]];
         readSet[self] := {};
@@ -146,7 +147,7 @@ L_validateETL:
 L_writeBackETL:
     mem := [a \in Addr |->
         IF a \in writeSet[self] THEN writeBuf[self, a] ELSE mem[a]];
-    lastFence[self] := "rel";  \* release fence before unlock
+    lastRmw[self] := "release";  \* lock.unlock_with_version(release)
     lock := [a \in Addr |->
         IF a \in writeSet[self] THEN <<0, 0, clock>> ELSE lock[a]];
     committed[self] := committed[self] + 1;
@@ -163,10 +164,10 @@ end process;
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "72101da6" /\ chksum(tla) = "b2461e89")
 VARIABLES pc, clock, lock, mem, state, readSet, writeSet, writeBuf, readOnly, 
-          endVersion, committed, lastFence
+          endVersion, committed, lastSignalFence, lastThreadFence, lastRmw
 
 vars == << pc, clock, lock, mem, state, readSet, writeSet, writeBuf, readOnly, 
-           endVersion, committed, lastFence >>
+           endVersion, committed, lastSignalFence, lastThreadFence, lastRmw >>
 
 ProcSet == (Thread)
 
@@ -181,7 +182,9 @@ Init == (* Global variables *)
         /\ readOnly = [t \in Thread |-> TRUE]
         /\ endVersion = [t \in Thread |-> 0]
         /\ committed = [t \in Thread |-> 0]
-        /\ lastFence = [t \in Thread |-> ""]
+        /\ lastSignalFence = [t \in Thread |-> ""]
+        /\ lastThreadFence = [t \in Thread |-> ""]
+        /\ lastRmw = [t \in Thread |-> ""]
         /\ pc = [self \in ProcSet |-> "L_idle"]
 
 L_idle(self) == /\ pc[self] = "L_idle"
@@ -196,32 +199,32 @@ L_idle(self) == /\ pc[self] = "L_idle"
                            /\ UNCHANGED << state, readSet, writeSet, readOnly, 
                                            endVersion >>
                 /\ UNCHANGED << clock, lock, mem, writeBuf, committed, 
-                                lastFence >>
+                                lastSignalFence, lastThreadFence, lastRmw >>
 
 L_active(self) == /\ pc[self] = "L_active"
                   /\ \/ /\ IF \A <<a, v>> \in readSet[self] : lock[a][3] <= endVersion[self]
                               THEN /\ endVersion' = [endVersion EXCEPT ![self] = clock]
                                    /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ UNCHANGED << lock, state, readSet, 
-                                                   writeSet, lastFence >>
-                              ELSE /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
-                                   /\ lock' =     [a \in Addr |->
-                                              IF a \in writeSet[self] THEN <<0, 0, lock[a][3]>> ELSE lock[a]]
-                                   /\ readSet' = [readSet EXCEPT ![self] = {}]
-                                   /\ writeSet' = [writeSet EXCEPT ![self] = {}]
-                                   /\ state' = [state EXCEPT ![self] = "idle"]
-                                   /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                                   /\ UNCHANGED endVersion
-                        /\ UNCHANGED <<clock, writeBuf, readOnly, committed>>
-                     \/ /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                                                   writeSet, lastSignalFence, lastThreadFence, lastRmw >>
+                               ELSE /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
+                                    /\ lock' =     [a \in Addr |->
+                                               IF a \in writeSet[self] THEN <<0, 0, lock[a][3]>> ELSE lock[a]]
+                                    /\ readSet' = [readSet EXCEPT ![self] = {}]
+                                    /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                                    /\ state' = [state EXCEPT ![self] = "idle"]
+                                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                                    /\ UNCHANGED << endVersion, lastSignalFence, lastThreadFence >>
+                        /\ UNCHANGED <<clock, writeBuf, readOnly, committed, lastSignalFence, lastThreadFence>>
+                     \/ /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
                         /\ \E a \in Addr:
                              IF a \notin writeSet[self] /\ lock[a][1] = 0
                                 THEN /\ readSet' = [readSet EXCEPT ![self] = readSet[self] \union {<<a, lock[a][3]>>}]
                                 ELSE /\ TRUE
                                      /\ UNCHANGED readSet
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<clock, lock, state, writeSet, writeBuf, readOnly, endVersion, committed>>
-                     \/ /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                        /\ UNCHANGED <<clock, lock, state, writeSet, writeBuf, readOnly, endVersion, committed, lastThreadFence, lastRmw>>
+                     \/ /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
                         /\ \E a \in Addr:
                              \E n \in 0..MAX_VAL:
                                IF a \notin writeSet[self] /\ lock[a][1] = 0
@@ -233,8 +236,8 @@ L_active(self) == /\ pc[self] = "L_active"
                                        /\ UNCHANGED << lock, writeSet, 
                                                        writeBuf, readOnly >>
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<clock, state, readSet, endVersion, committed>>
-                     \/ /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                        /\ UNCHANGED <<clock, state, readSet, endVersion, committed, lastSignalFence, lastThreadFence>>
+                     \/ /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
                         /\ \E a \in Addr:
                              \E n \in 0..MAX_VAL:
                                IF a \in writeSet[self]
@@ -243,18 +246,19 @@ L_active(self) == /\ pc[self] = "L_active"
                                   ELSE /\ TRUE
                                        /\ UNCHANGED << writeBuf, readOnly >>
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<clock, lock, state, readSet, writeSet, endVersion, committed>>
+                        /\ UNCHANGED <<clock, lock, state, readSet, writeSet, endVersion, committed, lastThreadFence, lastRmw>>
                      \/ /\ IF \E a \in Addr \ writeSet[self] : lock[a][1] = 1 /\ lock[a][2] # self
-                              THEN /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
-                                   /\ lock' =     [a \in Addr |->
-                                              IF a \in writeSet[self] THEN <<0, 0, lock[a][3]>> ELSE lock[a]]
-                                   /\ writeSet' = [writeSet EXCEPT ![self] = {}]
-                                   /\ state' = [state EXCEPT ![self] = "idle"]
-                                   /\ readSet' = [readSet EXCEPT ![self] = {}]
-                                   /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                               THEN /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
+                                    /\ lock' =     [a \in Addr |->
+                                               IF a \in writeSet[self] THEN <<0, 0, lock[a][3]>> ELSE lock[a]]
+                                    /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                                    /\ state' = [state EXCEPT ![self] = "idle"]
+                                    /\ readSet' = [readSet EXCEPT ![self] = {}]
+                                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                                    /\ UNCHANGED << lastSignalFence, lastThreadFence >>
+                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ UNCHANGED << lock, state, readSet, 
-                                                   writeSet, lastFence >>
+                                                   writeSet, lastSignalFence, lastThreadFence, lastRmw >>
                         /\ UNCHANGED <<clock, writeBuf, readOnly, endVersion, committed>>
                      \/ /\ IF readOnly[self]
                               THEN /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
@@ -263,25 +267,24 @@ L_active(self) == /\ pc[self] = "L_active"
                                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ UNCHANGED << state, readSet, committed >>
-                        /\ UNCHANGED <<clock, lock, writeSet, writeBuf, readOnly, endVersion, lastFence>>
-                     \/ /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                        /\ UNCHANGED <<clock, lock, writeSet, writeBuf, readOnly, endVersion, lastSignalFence, lastThreadFence, lastRmw>>
+                     \/ /\ lastRmw' = [lastRmw EXCEPT ![self] = "acq_rel"]
                         /\ IF ~readOnly[self] /\ writeSet[self] # {}
                               /\ \A a \in writeSet[self] : lock[a][2] = self
                               THEN /\ clock' = clock + 1
                                    /\ pc' = [pc EXCEPT ![self] = "L_validateETL"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ clock' = clock
-                        /\ UNCHANGED <<lock, state, readSet, writeSet, writeBuf, readOnly, endVersion, committed>>
+                        /\ UNCHANGED <<lock, state, readSet, writeSet, writeBuf, readOnly, endVersion, committed, lastSignalFence, lastThreadFence>>
                   /\ mem' = mem
 
 L_validateETL(self) == /\ pc[self] = "L_validateETL"
                        /\ IF \A <<a, v>> \in readSet[self] :
                               lock[a][2] = self \/ lock[a][3] <= endVersion[self]
-                             THEN /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
-                                  /\ pc' = [pc EXCEPT ![self] = "L_writeBackETL"]
+                             THEN /\ pc' = [pc EXCEPT ![self] = "L_writeBackETL"]
                                   /\ UNCHANGED << lock, state, readSet, 
-                                                  writeSet >>
-                             ELSE /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                                                  writeSet, lastSignalFence, lastThreadFence, lastRmw >>
+                             ELSE /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                   /\ lock' =     [a \in Addr |->
                                              IF a \in writeSet[self] THEN <<0, 0, lock[a][3]>> ELSE lock[a]]
                                   /\ readSet' = [readSet EXCEPT ![self] = {}]
@@ -289,12 +292,12 @@ L_validateETL(self) == /\ pc[self] = "L_validateETL"
                                   /\ state' = [state EXCEPT ![self] = "idle"]
                                   /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                        /\ UNCHANGED << clock, mem, writeBuf, readOnly, 
-                                       endVersion, committed >>
+                                       endVersion, committed, lastSignalFence, lastThreadFence >>
 
 L_writeBackETL(self) == /\ pc[self] = "L_writeBackETL"
                         /\ mem' =    [a \in Addr |->
                                   IF a \in writeSet[self] THEN writeBuf[self, a] ELSE mem[a]]
-                        /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                        /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                         /\ lock' =     [a \in Addr |->
                                    IF a \in writeSet[self] THEN <<0, 0, clock>> ELSE lock[a]]
                         /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
@@ -302,14 +305,14 @@ L_writeBackETL(self) == /\ pc[self] = "L_writeBackETL"
                         /\ readSet' = [readSet EXCEPT ![self] = {}]
                         /\ writeSet' = [writeSet EXCEPT ![self] = {}]
                         /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                        /\ UNCHANGED << clock, writeBuf, readOnly, endVersion >>
+                        /\ UNCHANGED << clock, writeBuf, readOnly, endVersion, lastSignalFence, lastThreadFence >>
 
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
                 /\ UNCHANGED << clock, lock, mem, state, readSet, writeSet, 
                                 writeBuf, readOnly, endVersion, committed, 
-                                lastFence >>
+                                lastSignalFence, lastThreadFence, lastRmw >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_validateETL(self)
                        \/ L_writeBackETL(self) \/ L_done(self)
@@ -354,7 +357,9 @@ LockOwnerTx ==
 NoLocksAfterCommit ==
     \A t \in Thread : (state[t] = "idle") => \A a \in Addr : ~(lock[a][2] = t)
 
-FenceFidelity == \A t \in Thread : writeSet[t] # {} => lastFence[t] # ""
+FenceFidelity == \A t \in Thread :
+    writeSet[t] # {} =>
+        (lastSignalFence[t] # "" \/ lastThreadFence[t] # "" \/ lastRmw[t] # "")
 
 Inv ==
     /\ MutexLocks
