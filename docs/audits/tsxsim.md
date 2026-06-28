@@ -1,6 +1,6 @@
 # Audit: TSXSim (Bloom-filter-based TSX Simulation Backend)
 
-**Score: 3/5** — Core algorithm (bloom-filter read-set, cache-line write-set, capacity limits, conflict detection, SGL fallback) faithfully modelled. Significant gap: TSX and SGL can coexist in the TLA+ model because SGLBegin does not check that other threads are idle. Real hardware would abort via cache-coherence on the mutex variable, which the model does not capture. Conflict-detection invariant `NoTSXCommitConflict` had a TLC-parsing bug (parentheses needed) that was fixed during audit.
+**Score: 2/5** — Virtual cycle counting replaces real memory ordering; bloom filter false-positive rate configurable but not modeled; capacity thresholds abstracted. No `lastFence` tracking. Model captures dual-path TSX/SGL at high level. **Downgraded from memory ordering audit (2026-06-28).**
 
 ## Files
 

@@ -1,6 +1,6 @@
 # Audit: TSXSGL (TSX + Single Global Lock)
 
-**Score: 4/5** — Core dual-mode protocol well-captured; TSX hardware details (capacity, abort reasons) abstracted; fence annotations (`lastFence`+`FenceFidelity`) added.
+**Score: 4/5** — Core dual-mode protocol well-captured. Memory ordering sub-score: **3/5** — `sgl_owner` uses `seq_cst` loads/stores but model single `"sc"` tag cannot distinguish `signal_fence` from `seq_cst` load/store. Spin-wait loop abstracted. RTM availability assumed.
 
 ## Files
 

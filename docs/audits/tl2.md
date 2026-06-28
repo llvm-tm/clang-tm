@@ -1,6 +1,6 @@
 # Audit: TL2 (Transactional Locking II)
 
-**Score: 4/5** — Core commit protocol captured; guard-table aliasing and lock-bit validation gap remain; fence annotations (`lastFence`+`FenceFidelity`) added.
+**Score: 3/5** — Core commit protocol captured, but clock increment ordering is fundamentally wrong: C++ uses `fetch_add(relaxed)`, model annotates `"sc"`. Rust backend has architecturally different global commit lock + `fence(SeqCst)` at 6 points not present in C++ or model. Guard-table aliasing gap remains. **Downgraded from memory ordering audit (2026-06-28).**
 
 ## Files
 

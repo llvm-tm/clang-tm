@@ -1,6 +1,6 @@
 # Audit: PersistentSGL
 
-**Score: 3/5** — Lock protocol well-captured; flush/recovery semantics differ from C++ implementation.
+**Score: 2/5** — Simultaneous dual-write in model (`mem[a]:=v ∧ nvm[a]:=v` in one action) hides real durability gap: C++ does `*addr=val` then `memcpy` to mmap with NO fence between; `msync` only at exit. No `lastFence` tracking. Bump allocator `__atomic_fetch_add(relaxed)` not modeled. **Downgraded from memory ordering audit (2026-06-28).**
 
 ## Files
 

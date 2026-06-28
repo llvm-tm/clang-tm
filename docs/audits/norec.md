@@ -1,6 +1,6 @@
 # NOrec (NO-Read-Check) STM — Implementation vs. TLA+ Model Audit
 
-**Score: 3/5** — Core algorithm is correctly captured and model-checked, but several meaningful abstraction gaps exist (no torn-read model, no fence tracking, no plugin-bypass modeling, `Serializable` property declared but not in default config). Model fidelity is moderate.
+**Score: 2/5** — Core algorithm captured at high level, but memory ordering analysis reveals critical gaps: no `lastFence` tracking (only 4/5+ backend without it), torn-read double-check loop (central correctness mechanism) completely abstracted to single atomic step, acquire/release ordering of `global_lock` not captured (plain `clk` integer assignment). **Downgraded from memory ordering audit (2026-06-28).**
 
 ---
 

@@ -1,6 +1,6 @@
 # TiKV Distributed TM Backend — Audit
 
-**Score: 3/5**
+**Score: 2/5** — Async runtime (`tokio`, `block_on`), gRPC error handling, at-most-once delivery semantics not captured. No `lastFence` tracking. Unbounded counters prevent TLC termination. Model captures Percolator 2PC at high level but misses all distributed-systems detail. **Downgraded from memory ordering audit (2026-06-28).**
 
 The TLA+ model captures the high-level TM semantics (begin, read, write, commit with Percolator 2PC phases) but has significant simplifications: unbounded `committed`/`aborted` counters prevent TLC termination, asynchronous network behavior is abstracted to synchronous state transitions, TiKV internal Percolator protocol details are modelled at the wrong abstraction level (Prewrite/CommitPrimary/CommitSecondary are separate model actions but a single `txn.commit()` call in the code), and the panic-based TmxAbort retry mechanism is modelled as direct state transitions.
 

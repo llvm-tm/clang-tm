@@ -1,6 +1,6 @@
 # Audit: TinySTM WBCTL (Write-Back Commit-Time Locking)
 
-**Score: 4/5** — Core commit protocol well-modeled; `endVersion` + `L_extend` added; fence annotations track memory ordering.
+**Score: 4/5** — Core commit protocol well-modeled; `endVersion` + `L_extend` added; fence annotations present. Memory ordering sub-score: **2/5** — double-check protocol window abstracted, signal vs thread fence not distinguished, `is_locked()` acquire semantics not captured, spin-loop ordering effects unmodeled. See docs/audits/SUMMARY.md for full MO analysis.
 
 ## Files
 

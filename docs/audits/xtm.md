@@ -1,6 +1,6 @@
 # Audit: XTM — Page-Granularity OCC with Private Copies
 
-**Score: 4/5** — Core protocol well-modeled; one medium-risk gap (missing owner_tx_id check in commit validation); fence annotations (`lastFence`+`FenceFidelity`) added.
+**Score: 3/5** — `lastFence` assignments are inaccurate: `"sc"` where C++ uses `load(acquire)`, `"rel"` where C++ uses `fetch_add(acq_rel)` (loses acquire half). Bloom filter entirely absent. Rust backend completely different algorithm (version-table OCC, not page-granularity). **Downgraded from memory ordering audit (2026-06-28).**
 
 ## Files
 

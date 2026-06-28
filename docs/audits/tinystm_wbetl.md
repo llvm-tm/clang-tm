@@ -1,6 +1,6 @@
 # Audit: TinySTM WBETL (Write-Back Encounter-Time Locking)
 
-**Score: 4/5** — Core protocol well-captured; commit split into 3 labels; `endVersion` + `L_extend` added; extend abort lock leak fixed; fence annotations track memory ordering.
+**Score: 4/5** — Core protocol well-captured; commit split into 3 labels; `endVersion` + `L_extend` added; extend abort lock leak fixed. Memory ordering sub-score: **2/5** — encounter-time lock spin loop abstracted (5000 iterations), `set_version()` CAS ordering missing, token soft-spin ordering not modeled. See docs/audits/SUMMARY.md for full MO analysis.
 
 ## Files
 

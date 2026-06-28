@@ -1,5 +1,77 @@
 # TLA+ Spec Soundness Review — Recommendations
 
+## Priority 0: Memory ordering semantics (affects all 19 backends)
+
+### 0.1 `lastFence[t]` cannot distinguish signal_fence from thread_fence (all 10 backends with fence tracking)
+
+All 10 backends with `lastFence` use a single tag (`"sc"`) for both `atomic_signal_fence(seq_cst)` (compiler barrier, emits zero CPU instructions) and `atomic_thread_fence(seq_cst)` (CPU `mfence`/`dmb`). On x86 this doesn't matter (`signal_fence` and `thread_fence` are both compiler barriers because x86 TSO provides strong ordering), but on ARM/PowerPC the difference is critical — `signal_fence` provides no hardware ordering. The model cannot catch bugs where a `signal_fence` is insufficient.
+
+**Proposed fix:** Split `lastFence` into `lastSignalFence[t]` and `lastThreadFence[t]`. `FenceFidelity` should check BOTH where appropriate. Alternatively, add a new `lastFence` value `"thread_sc"` distinct from `"sc"`.
+
+### 0.2 `lastFence[t]` cannot distinguish load-acquire from store-release from bundled acq_rel RMW (all 10 with fence tracking)
+
+All three ordering patterns are collapsed:
+- `guard.load(acquire)` → `lastFence := "sc"` (wrong — acquire is weaker than seq_cst)
+- `lock.store(release)` → `lastFence := "rel"` (correct classification)
+- `fetch_add(acq_rel)` → `lastFence := "sc"` (wrong — bundled ordering is neither pure acquire nor pure release)
+- `r_lock.exchange(acq_rel)` → `lastFence := "acq"` (wrong — misses the release half)
+
+**Proposed fix:** Add a separate `lastRmw[t]` variable with values `"acq"`, `"rel"`, `"acq_rel"`, `"relaxed"` to capture bundled RMW ordering independently from `lastFence`.
+
+### 0.3 `FenceFidelity` checks presence, not correctness (all 10 with fence tracking)
+
+The current invariant `\A t \in Thread : writeSet[t] # {} => lastFence[t] # ""` only checks that SOME fence happened somewhere. It does NOT check:
+- The fence is at the correct label (a fence at begin is counted for a commit)
+- The fence has the correct strength (acq vs rel vs seq_cst)
+- The fence is correctly placed relative to the operations it must order
+- The fence pairs correctly with another thread's fence (acquire-release pairing)
+
+**Proposed fix:** Strengthen `FenceFidelity` to check per-label requirements, e.g.:
+```tla
+FenceFidelity == \A t \in Thread :
+    (write_action[t] => lastFence[t] = "acq") /\
+    (commit_action[t] => lastFence[t] \in {"sc", "acq_rel"}) /\
+    (unlock_action[t] => lastFence[t] = "rel")
+```
+This requires adding boolean flags per label recording which action was taken.
+
+### 0.4 NVHTM model describes algorithm that does not exist in C++
+
+**Severity: Critical.** The model has checkpoint/recovery protocol (`L_write_cp`, `L_apply_log`, `L_clear_cp`) and SGL fallback (`L_active_sgl`) — neither exists in C++. The C++ uses pass-through mode on RTM failure (no TM at all). 12 `lastFence` annotations mostly correspond to nothing in the implementation.
+
+**Fix:** Rewrite the model to match the actual C++ (no checkpoint protocol, pass-through on RTM failure, no SGL fallback), or rename the file and mark it as "aspirational."
+
+### 0.5 NOrec torn-read double-check not modeled
+
+The C++ NOrec central correctness mechanism is the double-check loop:
+```
+clock1 = acquire_load(global_lock);  // version capture
+read_data(addr);                      // plain memcpy
+clock2 = acquire_load(global_lock);  // re-check
+if (clock1 != clock2) retry;         // torn read detected
+```
+The model does this as a single atomic action: `readSet := readSet \union {<<a, mem[a], clk>>}`. The model cannot detect torn reads.
+
+**Fix:** Split the read into three atomic steps (clock capture, data read, re-check) with an abort/retry on mismatch. This would roughly double the state space but is necessary to verify NOrec's central correctness property.
+
+### 0.6 PersistentSGL dual-write is atomic in model, non-atomic in C++
+
+The model writes `mem[a] := v ∧ nvm[a] := v` in a single action. The C++ does `*addr = val` then `memcpy` to mmap with NO fence between. `NVMAgreesWithMem` holds in the model but NO crash-consistency guarantee exists in C++.
+
+**Fix:** Remove simultaneous dual-write. Add a crash-possible intermediate state where `mem[a] ≠ nvm[a]`. Then `NVMAgreesWithMem` becomes non-trivial and catches the C++ durability gap.
+
+### 0.7 LEFTRIGHT write path has zero ordering in C++, but model annotates "acq"
+
+The C++ LEFTRIGHT `write_word()` (leftright.hpp:264-275) has zero atomic operations, zero fences. The model sets `lastFence := "acq"` on write, creating a false sense of ordering. This is the only backend where the model OVER-estimates fence coverage on the write path.
+
+**Fix:** Change `lastFence` on write to `""` (no fence), and document that LEFTRIGHT's write path relies on the commit lock and clock increment for ordering.
+
+### 0.8 TL2 C++ clock increment is `relaxed`, model annotates `"sc"`
+
+`tl2.hpp:232`: `g_clock.fetch_add(1, memory_order_relaxed)`. The model tags `L_incClock` with `lastFence := "sc"`. The relaxed clock increment provides zero memory ordering — the model would pass FenceFidelity even if the C++ were weakened below correctness.
+
+**Fix:** Change `lastFence` on clock increment to `""` (matching C++ relaxed), or strengthen the C++ to use `acq_rel` (as per Rust TL2). Either way, model and implementation must agree.
+
 ## Priority 1: Critical (blocks TLC execution or allows incorrect behavior)
 
 ### 1.1 TSXSim.cfg — Undefined invariant `WriteSetConsistent`
@@ -194,9 +266,10 @@ Affects SGL, Romulus, TL2, LEFTRIGHT `ProgressProperty` — references
 
 | Priority | Total | Fixed | Remaining |
 |----------|-------|-------|-----------|
+| P0 (memory ordering) | 8 | 0 | 8 (all — see individual backends in SUMMARY.md) |
 | P1 (blocks TLC) | 3 | 3 ✅ | 0 |
 | P2 (wrong inv) | 6 | 5 | 1 (DUDETM `LogWriteMatch`) |
 | P3 (suspicious) | 5 | 2 | 3 (lastFence desync, NVHTM recovery, SPHT recovery) |
 | P4 (docs) | 4 | 0 | 4 (dead vars, XTM rename, ProgressProperty, NVMAgrees) |
 
-Fixes applied in commit `71b98ae` (recommendations document) and `<PENDING>` (this session's implementation).
+Fixes applied in commit `71b98ae` (recommendations document) and `<PENDING>` (this session's memory ordering audit).

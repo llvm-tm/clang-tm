@@ -1,6 +1,6 @@
 # Audit: LEFTRIGHT (Global-Clock OCC / Value-Based Validation)
 
-**Score: 4/5** — Core commit protocol well-modeled (validate, lock, inc clock, write-back, unlock); TLC invariants pass. Gaps: no `endVersion`/`extend` modeling, no pre-lock validate, reversed read-clock ordering. Fence annotations (`lastFence`+`FenceFidelity`) added.
+**Score: 3/5** — Write path has ZERO ordering operations in C++ but model annotates `"acq"` (wrong direction). Read-path data-race vulnerability on ARM (plain `read_value_from_addr` before `get_clock()` acquire-load — CPU can reorder). Queue-mode bypass not modeled. **Downgraded from memory ordering audit (2026-06-28).**
 
 ## Files
 

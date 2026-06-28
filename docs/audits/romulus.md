@@ -1,6 +1,6 @@
 # Audit: Romulus
 
-**Score: 4/5** — Minimal abstraction gap (spin-loop, read-validate re-check abstracted); fence annotations (`lastFence`+`FenceFidelity`) added.
+**Score: 3/5** — TWO critical `atomic_thread_fence(seq_cst)` calls have NO annotation in model (line 226 after lock-bit set, line 236 after write-back). Lock-bit `fetch_or(acq_rel)` and version `store(release)` also missing. Rust backend is architecturally different (no read-set, no lock-bit phase). **Downgraded from memory ordering audit (2026-06-28).**
 
 ## Files
 

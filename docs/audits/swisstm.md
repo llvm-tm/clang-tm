@@ -1,6 +1,6 @@
 # Audit: SwissTM (ORec-based Eager Writes + Lazy Read Validation)
 
-**Score: 4/5** — Core commit protocol well-modeled with ORec separation; contention manager and double-check read protocol omitted; fence annotations (`lastFence`+`FenceFidelity`) added.
+**Score: 3/5** — `r_lock.exchange(acq_rel)` in commit Phase 1 modeled as `"acq"` only — missing the release side that makes write-back visible to readers. Contention manager ordering (`greedy_ts`, `cm_ts`) not modeled. Undo-log restore ordering on abort not captured. `write_impl` `signal_fence(seq_cst)` missing. **Downgraded from memory ordering audit (2026-06-28).**
 
 ## Files
 

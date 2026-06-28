@@ -1,6 +1,6 @@
 # Audit: TinySTM WT (Write-Through)
 
-**Score: 4/5** — Close match. Write-through semantics naturally align with TLA+ model's direct-memory-update pattern. Incarnation counter is a notable abstraction gap.
+**Score: 4/5** — Close match. Write-through semantics naturally align with TLA+ model's direct-memory-update pattern. Memory ordering sub-score: **2/5** — additionally misses post-CAS version re-read window (C++ re-reads `lock->get()` with acquire after `try_lock()` to get true version). See docs/audits/SUMMARY.md for full MO analysis.
 
 ## Files
 

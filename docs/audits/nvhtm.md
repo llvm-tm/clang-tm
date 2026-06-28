@@ -1,6 +1,6 @@
 # NV-HTM Backend Audit
 
-## **Score: 2/5** — Low model fidelity; checkpoint protocol in TLA+ not implemented in C++
+## **Score: 1/5** — Model describes checkpoint/recovery + SGL fallback that DO NOT EXIST in C++ implementation. C++ uses pass-through on RTM failure, no checkpoint markers, no SGL. 12 `lastFence` annotations correspond to nothing in C++. **Critical downgrade from memory ordering audit (2026-06-28).**
 
 ## Files
 
