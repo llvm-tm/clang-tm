@@ -57,7 +57,7 @@ This revision adds a **memory ordering (MO) sub-score** reflecting how faithfull
 
 | Backend | Overall | MO | Key gaps | Risk |
 |---------|---------|----|----------|------|
-| **NOrec** | **2/5** | 1/5 | **Downgraded**. NO `lastFence` tracking at all (only 4/5+ PlusCal backend without it). Torn-read double-check loop (central correctness mechanism: acquire-load → read data → acquire-load, retry on mismatch) is completely abstracted to single atomic step. Acquire/release ordering of `global_lock` not captured (plain `clk` integer assignment). CAS modeled as deterministic single step. | High |
+| **NOrec** | **4/5** | 4/5 | **Updated 2026-06-28: lastFence[t] tracking added** — all 5 ordering operations annotated (acq: get_clock, sc: CAS commit, rel: set_clock). FenceFidelity checks pc=L_commit_wb => lastFence ∈ {"sc","rel"}. Torn-read double-check split (L_active→L_read_val). Remaining minor gaps: acquire/release as annotation only, plugin-mode bypass not modeled. | Low |
 | **DUDETM** | 1/5 | 1/5 | Unchanged. Zero memory ordering captured from 30+ C++ atomic operations or 8+ Rust fences. Model is high-level design sketch. | High |
 | **NVHTM** | **1/5** | 1/5 | **Downgraded (critical)**. Model describes an algorithm that DOES NOT EXIST in C++: checkpoint/recovery protocol (`L_write_cp`, `L_apply_log`, `L_clear_cp`) with SGL fallback (`L_active_sgl`). C++ NVHTM has NO checkpoint protocol, NO SGL fallback, and uses pass-through mode on RTM failure. 12 `lastFence` annotations mostly correspond to nothing in C++. Redo log is fixed-size array in C++, unbounded sequence in model. | Critical |
 | **SPHT** | 2/5 | 1/5 | Unchanged. `_mm_sfence()` and `_mm_clflush()` for NVM durability not modeled. RTM retry logic differs (single attempt → SGL in C++; multiple retries → SGL in model). `g_durable_seqs` release store absent. Crash/recovery modeled but absent in C++. No `lastFence` tracking. | High |
@@ -68,7 +68,7 @@ This revision adds a **memory ordering (MO) sub-score** reflecting how faithfull
 
 ## Cross-Cutting Observations
 
-1. **`lastFence[t]` coverage (10 of 19)**: TSXSGL, TinySTM_WBCTL/WBETL/WT, TL2, SwissTM, LEFTRIGHT, XTM, Romulus, NVHTM have it. SGL, PersistentSGL, DistributedSGL, NOrec, SPHT, TiKV, TSXSim, DESEngine, DUDETM do not.
+1. **`lastFence[t]` coverage (11 of 19)**: TSXSGL, TinySTM_WBCTL/WBETL/WT, TL2, SwissTM, LEFTRIGHT, XTM, Romulus, NVHTM, NOrec have it. SGL, PersistentSGL, DistributedSGL, SPHT, TiKV, TSXSim, DESEngine, DUDETM do not.
 
 2. **`lastFence` limitation**: As previously documented, it cannot distinguish `atomic_signal_fence` (compiler barrier, zero CPU instructions) from `atomic_thread_fence` (CPU `dmb`/`mfence`), nor bundled RMW ordering (`fetch_add(acq_rel)`, `exchange(acq_rel)`). `FenceFidelity` only checks `writeSet ≠ {} ⇒ fence happened` — no guarantee of sufficient strength or correct placement. This analysis confirms the gap is broader than previously assessed: ALL backends with `lastFence` have at least 2-3 ordering points where the annotation is wrong (wrong tag or missing entirely).
 
@@ -89,7 +89,7 @@ This revision adds a **memory ordering (MO) sub-score** reflecting how faithfull
 
 ## Recommended Model Improvements
 
-1. **Add `lastFence` to remaining 9 backends**: SGL, PersistentSGL, DistributedSGL, NOrec, SPHT, TiKV, TSXSim, DESEngine, DUDETM. Even the coarse annotation is better than none.
+1. **Add `lastFence` to remaining 8 backends**: SGL, PersistentSGL, DistributedSGL, SPHT, TiKV, TSXSim, DESEngine, DUDETM. NOrec completed 2026-06-28.
 
 2. **Split `lastFence` into two variables**: `lastSignalFence[t]` for compiler-only barriers and `lastThreadFence[t]` for CPU barriers. This would let `FenceFidelity` check that the right TYPE of fence was emitted at each label.
 

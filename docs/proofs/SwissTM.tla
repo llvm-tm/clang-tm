@@ -274,8 +274,8 @@ L_active(self) == /\ pc[self] = "L_active"
                                               IF \E entry \in readSet[self] : entry[1] = a
                                               THEN MAKE_OREC(1, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
                                               ELSE orec[a]]
-                                   /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
-                                   /\ pc' = [pc EXCEPT ![self] = "L_commit"]
+                                    /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                                    /\ pc' = [pc EXCEPT ![self] = "L_commit"]
                               ELSE /\ UNCHANGED lastFence
                                    /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ orec' = orec

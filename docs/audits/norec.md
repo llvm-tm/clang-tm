@@ -1,6 +1,6 @@
 # NOrec (NO-Read-Check) STM — Implementation vs. TLA+ Model Audit
 
-**Score: 2/5** — Core algorithm captured at high level, but memory ordering analysis reveals critical gaps: no `lastFence` tracking (only 4/5+ backend without it), torn-read double-check loop (central correctness mechanism) completely abstracted to single atomic step, acquire/release ordering of `global_lock` not captured (plain `clk` integer assignment). **Downgraded from memory ordering audit (2026-06-28).**
+**Score: 4/5** — Core algorithm captured with full lastFence tracking and torn-read double-check. **Updated 2026-06-28: added lastFence[t] annotations (acq: get_clock acquire-load, sc: compare_exchange_strong, rel: set_clock release-store), FenceFidelity invariant, and torn-read double-check split.** Remaining gaps: acquire/release on global_lock modeled as plain clk + annotation (standard TLA+ abstraction), plugin-mode bypass paths not modeled.
 
 ---
 
@@ -32,9 +32,9 @@ Mapping C++ functions/patterns to TLA+ actions/labels.
 | 2 | `norec::begin()` — spin until `get_clock() & 1 == 0`, capture snapshot | `Begin(t)` | 78–87 | ✅ | Spin (`clk % 2 = 0`), snapshot = clk, clear read/write sets |
 | 3 | `read_word_norec()` — write-set lookup (most-recent-first scan) | `ReadOwnWrite(t, a)` | 92–96 | ✅ | Both check `a \in writeSet[t]`; C++ iterates from end for latest value |
 | 4 | `read_word_norec()` — type-interchange fallback (POINTER↔UINT64, wider→narrower, byte-merge) | — | — | ❌ | **Not modeled.** TLA+ has no type system; every address holds a single `Data` value |
-| 5 | `read_word_norec()` — clock double-check (`clock_before` → read → `clock_after`) | — | — | ⚠️ | **Not modeled.** TLA+ assumes atomic memory reads; C++ must protect against torn 8-byte reads across concurrent write-back |
+| 5 | `read_word_norec()` — clock double-check (`clock_before` → read → `clock_after`) | `L_active(read capture)` → `L_read_val` | 213–284 | ✅ | **Modeled.** Clock captured in `L_active` (`clock1[self] := clk`), data read in `L_read_val` (`mem[raddr[self]]`), re-check `clk # clock1[self]`. Retry with validate on mismatch matches C++ `validate()`. Window between capture and data read now explicit — concurrent commit can change clk between steps |
 | 6 | `read_word_norec()` — validate path (snapshot changed → `validate()` → re-read) | `ReadWithValidation(t, a)` | 106–116 | ✅ | Both validate all read-set entries (`mem[RS_ADDR(e)] = RS_VAL(e)`) then advance snapshot |
-| 7 | `read_word_norec()` — fast path (clock unchanged after double-check) | `ReadFromMemory(t, a)` | 98–104 | ⚠️ | TLA+ guard `clk = snapshot[t]`; C++ uses `tx->snapshot != get_clock()` **negated** (proceeds directly on match after double-check). Order differs: TLA+ checks clock FIRST, C++ double-check FIRST then snapshot check |
+| 7 | `read_word_norec()` — fast path (clock unchanged after double-check) | `L_read_val(no-concurrent-commit)` | 279–284 | ✅ | **Updated.** `L_read_val` fast path: `clk = clock1[self]` → add `(a, val, clock1)` to read-set. This matches C++: clock captured, data read, clock re-checked, unchanged means data consistent. No snapshot check needed — clock double-check directly detects concurrent commits |
 | 8 | `abort_tx()` — `siglongjmp(*jmpbuf, 1)` | `ReadAbort(t, a)` | 118–127 | ✅ | Both clear read/write sets, increment abort counter, return to idle |
 | 9 | `write_word_norec()` — buffer in write-set, set `read_only = false` | `Write(t, a, n)` | 135–142 | ✅ | Both add to write-set, record value, clear read-only flag |
 | 10 | `write_word_norec()` — same-address update (find existing entry, overwrite) | — | — | ⚠️ | TLA+ uses `writeSet' = writeSet[t] ∪ {a}` (adds unconditionally). C++ updates existing entry or creates new one. Semantically equivalent (write-set tracks which addrs were written) |

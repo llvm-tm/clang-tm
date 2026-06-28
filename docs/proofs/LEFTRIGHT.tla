@@ -201,11 +201,11 @@ L_active(self) == /\ pc[self] = "L_active"
                                       /\ UNCHANGED read_set
                          /\ pc' = [pc EXCEPT ![self] = "L_active"]
                          /\ UNCHANGED <<commit_lock, committed, write_set, read_only>>
-                      \/ /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
-                         /\ \E a \in Addr:
-                              \E v \in Data:
-                                /\ write_set' = [write_set EXCEPT ![self][a] = v]
-                                /\ read_only' = [read_only EXCEPT ![self] = FALSE]
+                       \/ /\ lastFence' = [lastFence EXCEPT ![self] = ""]
+                          /\ \E a \in Addr:
+                               \E v \in Data:
+                                 /\ write_set' = [write_set EXCEPT ![self][a] = v]
+                                 /\ read_only' = [read_only EXCEPT ![self] = FALSE]
                          /\ pc' = [pc EXCEPT ![self] = "L_active"]
                          /\ UNCHANGED <<commit_lock, committed, read_set>>
                       \/ /\ IF read_only[self]
