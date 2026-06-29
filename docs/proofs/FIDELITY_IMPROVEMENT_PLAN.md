@@ -156,16 +156,21 @@ would pass even if the C++ clock ordering were weakened below correctness.
 **Effort:** 1 line C++ (`tl2.hpp:232`), ~10 lines model (`TL2.tla:236-241`). TLC
 passes (8 states, 3 distinct, 0 errors).
 
-### 2.5 Romulus missing fence annotations (3/5 → 4/5)
+### 2.5 Romulus missing fence annotations (3/5 → 4/5) ✅ DONE
 
 **Problem:** Two `atomic_thread_fence(seq_cst)` calls (lines 226, 236 of
-romulus.hpp) have no model annotation. Lock-bit `fetch_or(acq_rel)` and version
-`store(release)` also missing.
+romulus.hpp) had no model annotation. Lock-bit `fetch_or(acq_rel)` and version
+`store(release)` also missing. Clock increment `fetch_add(acq_rel)` was
+mis-annotated as `lastSignalFence := "sc"`.
 
-**Fix:** Add `lastThreadFence[t] := "sc"` at `L_set_lock_bits` (matching line
-226) and at `L_write_back` → `L_update_ver` transition (matching line 236).
-Add `lastRmw[t] := "acq_rel"` for the `fetch_or`. Add `lastThreadFence[t] :=
-"rel"` for the version `store(release)` (or use `lastRmw[t] := "release"`).
+**Fix:** Four annotations added:
+1. `L_set_lock_bits`: `lastRmw[t] := "acq_rel"` for `fetch_or(acq_rel)`
+2. `L_inc_clock`: `lastRmw[t] := "acq_rel"` for `fetch_add(acq_rel)`+ `lastThreadFence[t] := "sc"` for `thread_fence(seq_cst)` before clock
+3. `L_write_back`: `lastThreadFence[t] := "sc"` for `thread_fence(seq_cst)` after write-back
+4. `L_update_ver`: `lastRmw[t] := "release"` for `store(release)`
+
+Also fixed wrong annotation: `L_inc_clock` `lastSignalFence:="sc"` → `lastRmw:="acq_rel"`.
+TLC passes (2.16M states, 549K distinct, 0 errors).
 
 **Effort:** ~40 lines.
 
@@ -573,7 +578,7 @@ actions. Then re-translate and verify TLC passes.
 | TinySTM_WBETL | 4/5 | 4/5 | MO sub-score 2→3 |
 | TinySTM_WT | 4/5 | 4/5 | MO sub-score 2→3 |
 | PersistentSGL | 2/5 | 3/5 ✅ | Phase 2.3 done |
-| Romulus | 3/5 | 4/5 | Phase 2.5 |
+| Romulus | 3/5 | 4/5 ✅ | Phase 2.5 done |
 | TL2 | 3/5 | 4/5 ✅ | Phase 2.4 done |
 | XTM | 3/5 | 4/5 | Phase 2.8 |
 | LEFTRIGHT | 3/5 | 4/5 ✅ | Phase 2.6 pre-completed |

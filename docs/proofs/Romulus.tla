@@ -322,42 +322,46 @@ L_validate(self) == /\ pc[self] = "L_validate"
                                     commit_ts >>
 
 L_set_lock_bits(self) == /\ pc[self] = "L_set_lock_bits"
-                         /\ version' =        [i \in 0..VSIZE-1 |->
-                                       IF \E a \in Addr : write_set[self][a] # NoWrite /\ VIndex(a) = i
-                                       THEN version[i] + 1
-                                       ELSE version[i]]
-                         /\ pc' = [pc EXCEPT ![self] = "L_inc_clock"]
-                         /\ UNCHANGED << mem, clock, lock, committed, aborted, 
-                                         lastSignalFence, lastThreadFence, lastRmw, timestamp, read_set, 
-                                         write_set, read_only, commit_ts >>
-
-L_inc_clock(self) == /\ pc[self] = "L_inc_clock"
-                     /\ clock' = clock + 1
-                     /\ commit_ts' = [commit_ts EXCEPT ![self] = clock']
-                     /\ pc' = [pc EXCEPT ![self] = "L_write_back"]
-                     /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
-                     /\ UNCHANGED << mem, version, lock, committed, aborted, 
-                                     timestamp, read_set, write_set, read_only, lastThreadFence, lastRmw >>
-
-L_write_back(self) == /\ pc[self] = "L_write_back"
-                      /\ mem' =    [a \in Addr |->
-                                IF write_set[self][a] # NoWrite
-                                THEN write_set[self][a]
-                                ELSE mem[a]]
-                      /\ pc' = [pc EXCEPT ![self] = "L_update_ver"]
-                      /\ UNCHANGED << version, clock, lock, committed, aborted, 
-                                      lastSignalFence, lastThreadFence, lastRmw, timestamp, read_set, 
-                                      write_set, read_only, commit_ts >>
-
-L_update_ver(self) == /\ pc[self] = "L_update_ver"
-                      /\ version' =        [i \in 0..VSIZE-1 |->
-                                    IF \E a \in Addr : write_set[self][a] # NoWrite /\ VIndex(a) = i
-                                    THEN MakeEntry(commit_ts[self])
-                                    ELSE version[i]]
-                      /\ pc' = [pc EXCEPT ![self] = "L_release_lock"]
-                      /\ UNCHANGED << mem, clock, lock, committed, aborted, 
-                                      lastSignalFence, lastThreadFence, lastRmw, timestamp, read_set, 
-                                      write_set, read_only, commit_ts >>
+                          /\ version' =        [i \in 0..VSIZE-1 |->
+                                        IF \E a \in Addr : write_set[self][a] # NoWrite /\ VIndex(a) = i
+                                        THEN version[i] + 1
+                                        ELSE version[i]]
+                          /\ lastRmw' = [lastRmw EXCEPT ![self] = "acq_rel"]
+                          /\ pc' = [pc EXCEPT ![self] = "L_inc_clock"]
+                          /\ UNCHANGED << mem, clock, lock, committed, aborted, 
+                                          lastSignalFence, lastThreadFence, timestamp, read_set, 
+                                          write_set, read_only, commit_ts >>
+ 
+ L_inc_clock(self) == /\ pc[self] = "L_inc_clock"
+                      /\ clock' = clock + 1
+                      /\ commit_ts' = [commit_ts EXCEPT ![self] = clock']
+                      /\ pc' = [pc EXCEPT ![self] = "L_write_back"]
+                      /\ lastRmw' = [lastRmw EXCEPT ![self] = "acq_rel"]
+                      /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = "sc"]
+                      /\ UNCHANGED << mem, version, lock, committed, aborted, 
+                                      timestamp, read_set, write_set, read_only, lastSignalFence >>
+ 
+ L_write_back(self) == /\ pc[self] = "L_write_back"
+                       /\ mem' =    [a \in Addr |->
+                                 IF write_set[self][a] # NoWrite
+                                 THEN write_set[self][a]
+                                 ELSE mem[a]]
+                       /\ pc' = [pc EXCEPT ![self] = "L_update_ver"]
+                       /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = "sc"]
+                       /\ UNCHANGED << version, clock, lock, committed, aborted, 
+                                       lastSignalFence, lastRmw, timestamp, read_set, 
+                                       write_set, read_only, commit_ts >>
+ 
+ L_update_ver(self) == /\ pc[self] = "L_update_ver"
+                       /\ version' =        [i \in 0..VSIZE-1 |->
+                                     IF \E a \in Addr : write_set[self][a] # NoWrite /\ VIndex(a) = i
+                                     THEN MakeEntry(commit_ts[self])
+                                     ELSE version[i]]
+                       /\ pc' = [pc EXCEPT ![self] = "L_release_lock"]
+                       /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
+                       /\ UNCHANGED << mem, clock, lock, committed, aborted, 
+                                       lastSignalFence, lastThreadFence, timestamp, read_set, 
+                                       write_set, read_only, commit_ts >>
 
 L_release_lock(self) == /\ pc[self] = "L_release_lock"
                         /\ lock' = 0
