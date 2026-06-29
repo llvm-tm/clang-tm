@@ -51,7 +51,7 @@
  *   L_done          — termination
  *)
 
-EXTENDS Naturals, FiniteSets, TLC
+EXTENDS Naturals, FiniteSets, TLC, TMTypes
 
 CONSTANTS
     Thread,             (* Set of thread IDs *)
@@ -67,7 +67,6 @@ ASSUME Data \subseteq Nat
 ASSUME MaxCommits \in Nat \ {0}
 
 (* ---- helpers ---- *)
-NoWrite == 0 - 1
 LockBit(entry) == entry % 2
 VersionOf(entry) == entry \div 2
 MakeEntry(ver) == ver * 2
@@ -447,7 +446,8 @@ AtMostOneCommitting ==
 
 (* I6: Every thread with a non-empty write-set has issued a fence (any kind) *)
 FenceFidelity ==
-    \A t \in Thread : (\E a \in Addr : write_set[t][a] # NoWrite) => (lastSignalFence[t] # "" \/ lastThreadFence[t] # "" \/ lastRmw[t] # "")
+    \A t \in Thread : (\E a \in Addr : write_set[t][a] # NoWrite) =>
+        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant for TLC *)
 Inv ==

@@ -23,7 +23,7 @@
  *   L_done         — termination
  *)
 
-EXTENDS Naturals, FiniteSets, TLC
+EXTENDS Naturals, FiniteSets, TLC, TMTypes
 
 CONSTANTS
     Thread,                (* Set of thread IDs *)
@@ -37,11 +37,6 @@ ASSUME Data \subseteq Nat
 ASSUME MaxCommits \in Nat \ {0}
 
 (* ---- helpers ---- *)
-NoWrite == 0 - 1
-
-(* NOTE: lastSignalFence/lastThreadFence/lastRmw fence tracking exists only in the TLA+ translation below.
-   Running pcal.trans will regenerate TLA+ and LOSE all fence tracking.
-   Re-add lastSignalFence/lastThreadFence/lastRmw variable + EXCEPT updates manually after translation. *)
 (*--algorithm LEFTRIGHT
 
 variables
@@ -324,8 +319,8 @@ AtMostOneCommitting ==
 
 (* I4: Threads with non-empty write-set have issued a fence *)
 FenceFidelity ==
-    \A t \in Thread : \E a \in Addr : write_set[t][a] # NoWrite => 
-        (lastSignalFence[t] # "" \/ lastThreadFence[t] # "" \/ lastRmw[t] # "")
+    \A t \in Thread : \E a \in Addr : write_set[t][a] # NoWrite =>
+        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant for TLC *)
 Inv ==

@@ -20,7 +20,7 @@
  *   L_done          — termination
  *)
 
-EXTENDS Naturals, FiniteSets, TLC
+EXTENDS Naturals, FiniteSets, TLC, TMTypes
 
 CONSTANTS
     Thread,                (* Set of thread IDs *)
@@ -381,8 +381,8 @@ NoPostCommitLocks ==
 
 (* I4: Every thread with a non-empty write-set has issued a fence *)
 FenceFidelity ==
-    \A t \in Thread : writeLog[t] # {} => 
-        (lastSignalFence[t] # "" \/ lastThreadFence[t] # "" \/ lastRmw[t] # "")
+    \A t \in Thread : writeLog[t] # {} =>
+        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant *)
 Inv ==

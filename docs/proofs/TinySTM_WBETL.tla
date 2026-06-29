@@ -15,7 +15,7 @@
  * detection.
  *)
 
-EXTENDS Naturals, FiniteSets, TLC
+EXTENDS Naturals, FiniteSets, TLC, TMTypes
 
 CONSTANTS Thread, Addr, MAX_VAL, MaxCommits
 ASSUME Thread \subseteq Nat \ {0}
@@ -359,7 +359,7 @@ NoLocksAfterCommit ==
 
 FenceFidelity == \A t \in Thread :
     writeSet[t] # {} =>
-        (lastSignalFence[t] # "" \/ lastThreadFence[t] # "" \/ lastRmw[t] # "")
+        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
 
 Inv ==
     /\ MutexLocks

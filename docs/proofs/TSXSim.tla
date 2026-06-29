@@ -21,7 +21,7 @@
  *   LockExclusion:       At most one SGL at a time
  *)
 
-EXTENDS Naturals, FiniteSets, Sequences, TLC
+EXTENDS Naturals, FiniteSets, Sequences, TLC, TMTypes
 
 CONSTANTS
     Thread,             (* Set of client thread IDs *)
@@ -39,8 +39,6 @@ ASSUME HashPosition \subseteq Nat
 ASSUME MAX_RETRIES \in Nat
 ASSUME MAX_READ_LINES \in Nat
 ASSUME MAX_WRITE_LINES \in Nat
-
-NoWrite == 0 - 1
 
 (*─── Hash function + cache-line mapping (default constants) ───────*)
 Hash == [cl \in CacheLine |->

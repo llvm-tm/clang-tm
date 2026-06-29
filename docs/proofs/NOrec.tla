@@ -20,7 +20,7 @@
  *       5. G := snapshot+2 (release clock, advance version).
  *)
 
-EXTENDS Naturals, TLC
+EXTENDS Naturals, TLC, TMTypes
 
 CONSTANTS Thread, Addr, Data, MaxRetries, MaxCommits
 ASSUME Thread \subseteq Nat \ {0}
@@ -414,7 +414,7 @@ WriteBufferInv ==
 (*====================================================================*)
 FenceFidelity ==
     \A t \in Thread : (pc[t] = "L_commit_wb") =>
-        (lastRmw[t] \in {"seq_cst", "release"})
+        lastRmw[t] \in {"seq_cst", "release"}
 
 (*====================================================================*)
 (* PROPERTY: No dirty reads                                             *)

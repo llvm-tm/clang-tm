@@ -17,7 +17,7 @@
  *   TSXBufferInUse:    tsx_buffer non-empty => tsx_mode[t]
  *)
 
-EXTENDS Naturals, Sequences, FiniteSets, TLC
+EXTENDS Naturals, Sequences, FiniteSets, TLC, TMTypes
 
 CONSTANTS
     Thread,             (* Set of thread IDs *)
@@ -31,8 +31,6 @@ ASSUME Addr \subseteq Nat
 ASSUME Data \subseteq Nat
 ASSUME MaxRetries \in Nat \ {0}
 ASSUME GroupInterval \in Nat \ {0}
-
-NoWrite == 0 - 1
 
 (*─── PlusCal algorithm ───────────────────────────────────────────────*)
 (* --algorithm SPHT

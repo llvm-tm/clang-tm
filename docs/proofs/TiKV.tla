@@ -13,7 +13,7 @@
  *   CommitOrdering:    Primary precedes secondary in commit
  *)
 
-EXTENDS Naturals, Sequences, FiniteSets, TLC
+EXTENDS Naturals, Sequences, FiniteSets, TLC, TMTypes
 
 CONSTANTS
     Thread,             (* Set of client thread IDs *)
@@ -26,9 +26,7 @@ ASSUME Key \subseteq Nat
 ASSUME Data \subseteq Nat
 ASSUME MaxRetries \in Nat
 
-NoWrite == 0 - 1
-
-(*─── PlusCal algorithm ───────────────────────────────────────────────*)
+(*─── PlusCal algorithm ──────────────────────────────────────────*)
 (* --algorithm TiKV
 
 variables

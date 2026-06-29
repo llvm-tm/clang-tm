@@ -16,7 +16,7 @@
  *       5. Release locks with C_commit.
  *)
 
-EXTENDS Naturals, FiniteSets, TLC
+EXTENDS Naturals, FiniteSets, TLC, TMTypes
 
 CONSTANTS Thread, Addr, MAX_VAL, MaxCommits
 ASSUME Thread \subseteq Nat \ {0}
@@ -329,7 +329,7 @@ WriteBackSafe ==
 
 FenceFidelity == \A t \in Thread :
     state[t] \in {"locking", "wb"} =>
-        (lastSignalFence[t] # "" \/ lastThreadFence[t] # "" \/ lastRmw[t] # "")
+        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
 
 Inv ==
     /\ LockChain

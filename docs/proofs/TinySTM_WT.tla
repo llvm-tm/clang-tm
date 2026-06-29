@@ -15,7 +15,7 @@
  *   - abort(): restore old values, bump incarnation, unlock.
  *)
 
-EXTENDS Naturals, FiniteSets, TLC
+EXTENDS Naturals, FiniteSets, TLC, TMTypes
 
 CONSTANTS Thread, Addr, MAX_VAL, MaxCommits
 ASSUME Thread \subseteq Nat \ {0}
@@ -382,7 +382,7 @@ MutexLocks ==
         \/ \E t \in Thread : lock[a][2] = t
 
 FenceFidelity == \A t \in Thread : writeSet[t] # {} =>
-    (lastSignalFence[t] # "" \/ lastThreadFence[t] # "" \/ lastRmw[t] # "")
+    Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
 
 Inv ==
     /\ MutexLocks

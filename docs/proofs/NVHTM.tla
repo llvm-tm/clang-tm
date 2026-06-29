@@ -32,7 +32,7 @@
  *                        complete and recoverable.
  *)
 
-EXTENDS Naturals, Sequences, FiniteSets, TLC
+EXTENDS Naturals, Sequences, FiniteSets, TLC, TMTypes
 
 CONSTANTS
     Thread,             (* Set of thread IDs *)
@@ -442,7 +442,7 @@ CommitPhaseOrdering ==
 (*── I8: Every thread with a non-empty write-set has issued a fence ─*)
 FenceFidelity ==
     \A t \in Thread : Len(redo_log[t]) > 0 =>
-        (lastSignalFence[t] # "" \/ lastThreadFence[t] # "" \/ lastRmw[t] # "")
+        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
 
 (*── Combined invariant ────────────────────────────────────────────*)
 Inv ==

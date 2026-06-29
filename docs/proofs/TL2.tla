@@ -21,7 +21,7 @@
  *       7. Increment committed count.
  *)
 
-EXTENDS Naturals, FiniteSets, TLC
+EXTENDS Naturals, FiniteSets, TLC, TMTypes
 
 CONSTANTS Thread, Addr, MAX_COMMIT, MaxCommits
 ASSUME Thread \subseteq Nat \ {0}
@@ -336,7 +336,8 @@ SnapshotInv ==
 
 (* Invariant 4: Every thread with a non-empty write-set has issued a fence *)
 FenceFidelity ==
-    \A t \in Thread : writeSet[t] # {} => (lastSignalFence[t] # "" \/ lastThreadFence[t] # "" \/ lastRmw[t] # "")
+    \A t \in Thread : writeSet[t] # {} =>
+        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant for TLC *)
 Inv ==
