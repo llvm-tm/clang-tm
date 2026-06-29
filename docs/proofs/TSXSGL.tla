@@ -32,9 +32,9 @@ ASSUME Data \subseteq Nat
 ASSUME MaxRetries \in Nat
 ASSUME MaxCommits \in Nat
 
-(* NOTE: lastFence[t] fence tracking exists only in the TLA+ translation below.
+(* NOTE: lastSignalFence/lastThreadFence/lastRmw fence tracking exists only in the TLA+ translation below.
    Running pcal.trans will regenerate TLA+ and LOSE all fence tracking.
-   Re-add lastFence variable + EXCEPT updates manually after translation. *)
+   Re-add lastSignalFence/lastThreadFence/lastRmw variable + EXCEPT updates manually after translation. *)
 (* --algorithm TSXSGL
 
 variables
@@ -153,10 +153,10 @@ end process;
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "2f212a71" /\ chksum(tla) = "bef00627")
 VARIABLES pc, sgl, mem, mode, readSet, writeSet, txSnapshot, tsxRetries, 
-          txCount, lastFence, aborted
+          txCount, lastSignalFence, lastThreadFence, lastRmw, aborted
 
 vars == << pc, sgl, mem, mode, readSet, writeSet, txSnapshot, tsxRetries, 
-            txCount, lastFence, aborted >>
+            txCount, lastSignalFence, lastThreadFence, lastRmw, aborted >>
 
 ProcSet == (Thread)
 
@@ -169,7 +169,9 @@ Init == (* Global variables *)
         /\ txSnapshot = [t \in Thread |-> 0]
         /\ tsxRetries = [t \in Thread |-> 0]
         /\ txCount = [t \in Thread |-> 0]
-        /\ lastFence = [t \in Thread |-> ""]
+        /\ lastSignalFence = [t \in Thread |-> ""]
+        /\ lastThreadFence = [t \in Thread |-> ""]
+        /\ lastRmw = [t \in Thread |-> ""]
         /\ aborted = [t \in Thread |-> 0]
         /\ pc = [self \in ProcSet |-> "L_idle"]
 
@@ -179,102 +181,103 @@ L_idle(self) == /\ pc[self] = "L_idle"
                       /\ readSet' = [readSet EXCEPT ![self] = Addr]
                       /\ txSnapshot' = [txSnapshot EXCEPT ![self] = sgl]
                       /\ tsxRetries' = [tsxRetries EXCEPT ![self] = 0]
-                      /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                      /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
                       /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                      /\ UNCHANGED <<sgl, writeSet>>
+                      /\ UNCHANGED <<sgl, writeSet, lastThreadFence, lastRmw>>
                    \/ /\ sgl = 0
                       /\ sgl' = self
                       /\ mode' = [mode EXCEPT ![self] = "sgl"]
                       /\ readSet' = [readSet EXCEPT ![self] = {}]
                       /\ writeSet' = [writeSet EXCEPT ![self] = {}]
                       /\ txSnapshot' = [txSnapshot EXCEPT ![self] = 1]
-                      /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                      /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
                       /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                      /\ UNCHANGED tsxRetries
+                      /\ UNCHANGED <<tsxRetries, lastSignalFence, lastThreadFence>>
                     \/ /\ IF txCount[self] >= MaxCommits
                               THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                       /\ UNCHANGED <<sgl, mode, readSet, writeSet, txSnapshot, tsxRetries, lastFence>>
+                       /\ UNCHANGED <<sgl, mode, readSet, writeSet, txSnapshot, tsxRetries, lastSignalFence, lastThreadFence, lastRmw>>
                 /\ UNCHANGED << mem, txCount, aborted >>
 
 L_active(self) == /\ pc[self] = "L_active"
                   /\ \/ /\ \E a \in Addr:
                              /\ readSet' = [readSet EXCEPT ![self] = readSet[self] \union {a}]
-                             /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                             /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<sgl, mem, mode, writeSet, tsxRetries, txCount, aborted>>
+                        /\ UNCHANGED <<sgl, mem, mode, writeSet, tsxRetries, txCount, aborted, lastThreadFence, lastRmw>>
                      \/ /\ \E a \in Addr:
                              \E n \in Data:
                                /\ mem' = [mem EXCEPT ![a] = n]
                                /\ writeSet' = [writeSet EXCEPT ![self] = writeSet[self] \union {a}]
-                               /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                               /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<sgl, mode, readSet, tsxRetries, txCount, aborted>>
+                        /\ UNCHANGED <<sgl, mode, readSet, tsxRetries, txCount, aborted, lastSignalFence, lastThreadFence>>
                       \/ /\ (IF mode[self] = "tsx"
                                THEN /\ IF sgl = txSnapshot[self]
                                           THEN /\ mode' = [mode EXCEPT ![self] = "idle"]
                                                /\ txCount' = [txCount EXCEPT ![self] = txCount[self] + 1]
-                                               /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                                               /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                                /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                                               /\ UNCHANGED << readSet, 
-                                                               writeSet, 
-                                                               aborted >>
+                                               /\ UNCHANGED << readSet,
+                                                               writeSet,
+                                                               aborted,
+                                                               lastSignalFence, lastThreadFence >>
                                           ELSE /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
                                                /\ mode' = [mode EXCEPT ![self] = "idle"]
                                                /\ readSet' = [readSet EXCEPT ![self] = {}]
                                                /\ writeSet' = [writeSet EXCEPT ![self] = {}]
-                                               /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                                               /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                                /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                                               /\ UNCHANGED txCount
+                                               /\ UNCHANGED <<txCount, lastSignalFence, lastThreadFence>>
                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                     /\ UNCHANGED << mode, readSet, writeSet, 
-                                                    txCount, aborted, lastFence >>)
-                         /\ UNCHANGED <<sgl, mem, tsxRetries>>
+                                                    txCount, aborted, lastSignalFence, lastThreadFence, lastRmw >>)
+                         /\ UNCHANGED <<sgl, mem, tsxRetries, lastSignalFence, lastThreadFence>>
                       \/ /\ (IF mode[self] = "sgl"
                                THEN /\ sgl = self
                                     /\ sgl' = 0
                                     /\ mode' = [mode EXCEPT ![self] = "idle"]
                                     /\ txCount' = [txCount EXCEPT ![self] = txCount[self] + 1]
-                                    /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                                    /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                     /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                    /\ UNCHANGED << sgl, mode, txCount, lastFence >>)
-                         /\ UNCHANGED <<mem, readSet, writeSet, tsxRetries, aborted>>
+                                    /\ UNCHANGED << sgl, mode, txCount, lastSignalFence, lastThreadFence, lastRmw >>)
+                         /\ UNCHANGED <<mem, readSet, writeSet, tsxRetries, aborted, lastSignalFence, lastThreadFence>>
                       \/ /\ (IF mode[self] = "tsx" /\ tsxRetries[self] < MaxRetries
                                THEN /\ tsxRetries' = [tsxRetries EXCEPT ![self] = tsxRetries[self] + 1]
                                     /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
                                     /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                     /\ UNCHANGED << tsxRetries, aborted >>)
-                         /\ UNCHANGED <<sgl, mem, mode, readSet, writeSet, txCount, lastFence>>
+                         /\ UNCHANGED <<sgl, mem, mode, readSet, writeSet, txCount, lastSignalFence, lastThreadFence, lastRmw>>
                       \/ /\ (IF mode[self] = "tsx" /\ tsxRetries[self] >= MaxRetries
                                THEN /\ sgl = 0
                                     /\ sgl' = self
                                     /\ mode' = [mode EXCEPT ![self] = "sgl"]
                                     /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
-                                    /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                                    /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
                                     /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                    /\ UNCHANGED << sgl, mode, aborted, lastFence >>)
-                         /\ UNCHANGED <<mem, readSet, writeSet, tsxRetries, txCount>>
+                                    /\ UNCHANGED << sgl, mode, aborted, lastSignalFence, lastThreadFence, lastRmw >>)
+                         /\ UNCHANGED <<mem, readSet, writeSet, tsxRetries, txCount, lastSignalFence, lastThreadFence>>
                       \/ /\ (IF mode[self] = "tsx" /\ sgl # txSnapshot[self]
                                THEN /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
                                     /\ mode' = [mode EXCEPT ![self] = "idle"]
                                     /\ readSet' = [readSet EXCEPT ![self] = {}]
                                     /\ writeSet' = [writeSet EXCEPT ![self] = {}]
-                                    /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                                    /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                     /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                     /\ UNCHANGED << mode, readSet, writeSet, 
-                                                    aborted, lastFence >>)
-                         /\ UNCHANGED <<sgl, mem, tsxRetries, txCount>>
+                                                    aborted, lastSignalFence, lastThreadFence, lastRmw >>)
+                         /\ UNCHANGED <<sgl, mem, tsxRetries, txCount, lastSignalFence, lastThreadFence>>
                   /\ UNCHANGED txSnapshot
 
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
                 /\ UNCHANGED << sgl, mem, mode, readSet, writeSet, txSnapshot, 
-                                tsxRetries, txCount, lastFence, aborted >>
+                                tsxRetries, txCount, lastSignalFence, lastThreadFence, lastRmw, aborted >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_done(self)
 
@@ -337,7 +340,8 @@ AtMostOneSGL ==
 (*              fence (acq, rel, or sc).                                *)
 (*====================================================================*)
 FenceFidelity ==
-    \A t \in Thread : writeSet[t] # {} => lastFence[t] # ""
+    \A t \in Thread : writeSet[t] # {} => 
+        (lastSignalFence[t] # "" \/ lastThreadFence[t] # "" \/ lastRmw[t] # "")
 
 (*====================================================================*)
 (* Combined invariant                                                  *)

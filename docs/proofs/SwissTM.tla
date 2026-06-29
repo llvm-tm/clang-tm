@@ -40,9 +40,10 @@ OREC_RVER(o) == o[3]
 OREC_WOWNER(o) == o[4]
 MAKE_OREC(rl, wl, rv, wo) == <<rl, wl, rv, wo>>
 
-(* NOTE: lastFence[t] fence tracking exists only in the TLA+ translation below.
-   Running pcal.trans will regenerate TLA+ and LOSE all fence tracking.
-   Re-add lastFence variable + EXCEPT updates manually after translation. *)
+(* NOTE: lastSignalFence, lastThreadFence, lastRmw tracking exists only in the
+   TLA+ translation below.  Running pcal.trans will regenerate TLA+ and LOSE
+   all fence tracking.  Re-add these variables + EXCEPT updates manually after
+   translation. *)
 (*--algorithm SwissTM
 
 variables
@@ -179,10 +180,10 @@ end process;
 end algorithm; *)
 
 \* BEGIN TRANSLATION
-VARIABLES pc, g_ts, orec, mem, committed, aborted, lastFence, readSet, writeLog, 
+VARIABLES pc, g_ts, orec, mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, readSet, writeLog, 
           writeBuf, oldVal, readOnly
 
-vars == << pc, g_ts, orec, mem, committed, aborted, lastFence, readSet, writeLog, 
+vars == << pc, g_ts, orec, mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, readSet, writeLog, 
            writeBuf, oldVal, readOnly >>
 
 ProcSet == (Thread)
@@ -193,7 +194,9 @@ Init == (* Global variables *)
         /\ mem = [a \in Addr |-> 0]
         /\ committed = [t \in Thread |-> 0]
         /\ aborted = [t \in Thread |-> 0]
-        /\ lastFence = [t \in Thread |-> ""]
+        /\ lastSignalFence = [t \in Thread |-> ""]
+        /\ lastThreadFence = [t \in Thread |-> ""]
+        /\ lastRmw = [t \in Thread |-> ""]
         (* Process ThreadProc *)
         /\ readSet = [self \in Thread |-> {}]
         /\ writeLog = [self \in Thread |-> {}]
@@ -206,14 +209,16 @@ L_idle(self) == /\ pc[self] = "L_idle"
                 /\ IF committed[self] >= MaxCommits
                       THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "L_begin"]
-                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, lastFence, readSet, 
+                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, readSet, 
                                 writeLog, writeBuf, oldVal, readOnly >>
 
 L_begin(self) == /\ pc[self] = "L_begin"
                  /\ readSet' = [readSet EXCEPT ![self] = {}]
                  /\ writeLog' = [writeLog EXCEPT ![self] = {}]
                  /\ readOnly' = [readOnly EXCEPT ![self] = TRUE]
-                 /\ lastFence' = [lastFence EXCEPT ![self] = ""]
+                 /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = ""]
+                 /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
+                 /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
                  /\ pc' = [pc EXCEPT ![self] = "L_active"]
                  /\ UNCHANGED << g_ts, orec, mem, committed, aborted, writeBuf, 
                                  oldVal >>
@@ -224,15 +229,15 @@ L_active(self) == /\ pc[self] = "L_active"
                                 THEN /\ TRUE
                                 ELSE /\ TRUE
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<lastFence, orec, committed, readSet, writeLog, writeBuf, oldVal, readOnly>>
+                        /\ UNCHANGED <<lastSignalFence, lastThreadFence, lastRmw, orec, committed, readSet, writeLog, writeBuf, oldVal, readOnly>>
                      \/ /\ \E a \in Addr:
                              IF a \notin writeLog[self] /\ ~(OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) # self)
                                 THEN /\ readSet' = [readSet EXCEPT ![self] = readSet[self] \union {<<a, OREC_RVER(orec[a])>>}]
                                 ELSE /\ TRUE
                                      /\ UNCHANGED readSet
-                        /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                        /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<orec, committed, writeLog, writeBuf, oldVal, readOnly>>
+                        /\ UNCHANGED <<lastThreadFence, lastRmw, orec, committed, writeLog, writeBuf, oldVal, readOnly>>
                      \/ /\ \E a \in Addr:
                              \E n \in Data:
                                IF a \notin writeLog[self] /\ OREC_WLOCK(orec[a]) = 0
@@ -245,9 +250,9 @@ L_active(self) == /\ pc[self] = "L_active"
                                        /\ UNCHANGED << orec, writeLog, 
                                                        writeBuf, oldVal, 
                                                        readOnly >>
-                        /\ lastFence' = [lastFence EXCEPT ![self] = "acq"]
+                        /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<committed, readSet>>
+                        /\ UNCHANGED <<lastSignalFence, lastThreadFence, committed, readSet>>
                      \/ /\ \E a \in Addr:
                              \E n \in Data:
                                IF a \in writeLog[self]
@@ -255,41 +260,41 @@ L_active(self) == /\ pc[self] = "L_active"
                                   ELSE /\ TRUE
                                        /\ UNCHANGED writeBuf
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<lastFence, orec, committed, readSet, writeLog, oldVal, readOnly>>
+                        /\ UNCHANGED <<lastSignalFence, lastThreadFence, lastRmw, orec, committed, readSet, writeLog, oldVal, readOnly>>
                      \/ /\ IF \E a \in Addr : a \notin writeLog[self] /\ OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) # self
-                              THEN /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                              THEN /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                    /\ pc' = [pc EXCEPT ![self] = "L_abort"]
-                              ELSE /\ UNCHANGED lastFence
+                              ELSE /\ UNCHANGED lastRmw
                                    /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<orec, committed, readSet, writeLog, writeBuf, oldVal, readOnly>>
+                        /\ UNCHANGED <<lastSignalFence, lastThreadFence, orec, committed, readSet, writeLog, writeBuf, oldVal, readOnly>>
                      \/ /\ IF readOnly[self]
                               THEN /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ UNCHANGED committed
-                        /\ UNCHANGED <<lastFence, orec, readSet, writeLog, writeBuf, oldVal, readOnly>>
+                        /\ UNCHANGED <<lastSignalFence, lastThreadFence, lastRmw, orec, readSet, writeLog, writeBuf, oldVal, readOnly>>
                      \/ /\ IF ~readOnly[self] /\ writeLog[self] # {}
                               /\ \A <<a, v>> \in readSet[self] : OREC_RLOCK(orec[a]) = 0
                               THEN /\ orec' =     [a \in Addr |->
                                               IF \E entry \in readSet[self] : entry[1] = a
                                               THEN MAKE_OREC(1, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
                                               ELSE orec[a]]
-                                    /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                                    /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
                                     /\ pc' = [pc EXCEPT ![self] = "L_commit"]
-                              ELSE /\ UNCHANGED lastFence
+                              ELSE /\ UNCHANGED lastSignalFence
                                    /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ orec' = orec
-                        /\ UNCHANGED <<committed, readSet, writeLog, writeBuf, oldVal, readOnly>>
+                        /\ UNCHANGED <<lastThreadFence, lastRmw, committed, readSet, writeLog, writeBuf, oldVal, readOnly>>
                   /\ UNCHANGED << g_ts, mem, aborted >>
 
 L_commit(self) == /\ pc[self] = "L_commit"
                   /\ g_ts' = g_ts + 1
                   /\ IF \A <<addr, ver>> \in readSet[self] :
                          OREC_WOWNER(orec[addr]) = self \/ OREC_RVER(orec[addr]) = ver
-                        THEN /\ lastFence' = [lastFence EXCEPT ![self] = "sc"]
+                        THEN /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
                              /\ pc' = [pc EXCEPT ![self] = "L_commit_wb"]
-                             /\ UNCHANGED << orec, readSet, writeLog >>
-                        ELSE /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                             /\ UNCHANGED << orec, readSet, writeLog, lastThreadFence, lastRmw >>
+                        ELSE /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                              /\ orec' =     [a \in Addr |->
                                         IF a \in writeLog[self]
                                         THEN MAKE_OREC(0, 0, OREC_RVER(orec[a]), 0)
@@ -299,6 +304,7 @@ L_commit(self) == /\ pc[self] = "L_commit"
                              /\ readSet' = [readSet EXCEPT ![self] = {}]
                              /\ writeLog' = [writeLog EXCEPT ![self] = {}]
                              /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                             /\ UNCHANGED << lastSignalFence, lastThreadFence >>
                   /\ UNCHANGED << mem, committed, aborted, writeBuf, oldVal, 
                                   readOnly >>
 
@@ -312,24 +318,25 @@ L_commit_wb(self) == /\ pc[self] = "L_commit_wb"
                                     THEN MAKE_OREC(0, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
                                     ELSE orec[a]]
                      /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
-                     /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                     /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                      /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                      /\ UNCHANGED << g_ts, aborted, readSet, writeLog, 
-                                     writeBuf, oldVal, readOnly >>
+                                     writeBuf, oldVal, readOnly, lastSignalFence, lastThreadFence >>
 
 L_abort(self) == /\ pc[self] = "L_abort"
                   /\ readSet' = [readSet EXCEPT ![self] = {}]
                   /\ writeLog' = [writeLog EXCEPT ![self] = {}]
                   /\ readOnly' = [readOnly EXCEPT ![self] = TRUE]
                   /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
-                  /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
+                  /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                   /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                  /\ UNCHANGED << g_ts, orec, mem, committed, writeBuf, oldVal >>
+                  /\ UNCHANGED << g_ts, orec, mem, committed, writeBuf, oldVal, 
+                                  lastSignalFence, lastThreadFence >>
 
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, lastFence, readSet, 
+                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, readSet, 
                                 writeLog, writeBuf, oldVal, readOnly >>
 
 ThreadProc(self) == L_idle(self) \/ L_begin(self) \/ L_active(self)
@@ -374,7 +381,8 @@ NoPostCommitLocks ==
 
 (* I4: Every thread with a non-empty write-set has issued a fence *)
 FenceFidelity ==
-    \A t \in Thread : writeLog[t] # {} => lastFence[t] # ""
+    \A t \in Thread : writeLog[t] # {} => 
+        (lastSignalFence[t] # "" \/ lastThreadFence[t] # "" \/ lastRmw[t] # "")
 
 (* Combined invariant *)
 Inv ==
