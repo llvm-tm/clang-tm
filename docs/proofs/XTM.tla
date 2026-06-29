@@ -211,13 +211,13 @@ L_active(self) == /\ pc[self] = "L_active"
                                    /\ UNCHANGED <<lastSignalFence, lastThreadFence, lastRmw>>
                         /\ UNCHANGED <<xadt_owner, lastSignalFence, lastThreadFence, read_set, write_set>>
                      \/ /\ \E p \in Page:
-                             IF write_set[self][p] = NoWrite /\ xadt_owner[p] \in {0, self}
-                                THEN /\ read_set' = [read_set EXCEPT ![self] = read_set[self] \union {<<p, xadt_version[p]>>}]
-                                 ELSE /\ TRUE
-                                      /\ UNCHANGED read_set
-                        /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
-                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<xadt_owner, write_set, lastThreadFence, lastRmw>>
+                              IF write_set[self][p] = NoWrite /\ xadt_owner[p] \in {0, self}
+                                 THEN /\ read_set' = [read_set EXCEPT ![self] = read_set[self] \union {<<p, xadt_version[p]>>}]
+                                  ELSE /\ TRUE
+                                       /\ UNCHANGED read_set
+                         /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                         /\ UNCHANGED <<xadt_owner, write_set, lastSignalFence, lastThreadFence>>
                      \/ /\ \E p \in Page:
                              \E v \in Data:
                                IF write_set[self][p] # NoWrite
@@ -231,8 +231,8 @@ L_active(self) == /\ pc[self] = "L_active"
                                IF write_set[self][p] = NoWrite /\ xadt_owner[p] = 0
                                   THEN /\ xadt_owner' = [xadt_owner EXCEPT ![p] = self]
                                        /\ write_set' = [write_set EXCEPT ![self][p] = v]
-                                       /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
-                                  ELSE /\ TRUE
+                                        /\ lastRmw' = [lastRmw EXCEPT ![self] = "acq_rel"]
+                                   ELSE /\ TRUE
                                        /\ UNCHANGED << xadt_owner, write_set, lastSignalFence, lastThreadFence, lastRmw >>
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ UNCHANGED <<read_set, lastSignalFence, lastThreadFence>>
@@ -253,9 +253,9 @@ L_active(self) == /\ pc[self] = "L_active"
                      \/ /\ IF \A <<p, ver>> \in read_set[self] :
                                write_set[self][p] # NoWrite \/
                                (xadt_version[p] = ver /\ (xadt_owner[p] = 0 \/ xadt_owner[p] = self))
-                              THEN /\ pc' = [pc EXCEPT ![self] = "L_writeback"]
-                                    /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
-                                    /\ UNCHANGED <<lastThreadFence, lastRmw>>
+                               THEN /\ pc' = [pc EXCEPT ![self] = "L_writeback"]
+                                     /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                                     /\ UNCHANGED <<lastSignalFence, lastThreadFence>>
                                 ELSE /\ pc' = [pc EXCEPT ![self] = "L_abort"]
                                       /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                       /\ UNCHANGED <<lastSignalFence, lastThreadFence>>
@@ -270,7 +270,7 @@ L_writeback(self) == /\ pc[self] = "L_writeback"
                                      aborted, lastSignalFence, lastThreadFence, lastRmw, read_set, write_set >>
 
 L_release(self) == /\ pc[self] = "L_release"
-                   /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
+                    /\ lastRmw' = [lastRmw EXCEPT ![self] = "acq_rel"]
                    /\ xadt_owner' =           [p \in Page |->
                                     IF xadt_owner[p] = self THEN 0 ELSE xadt_owner[p]]
                    /\ xadt_version' =             [p \in Page |->

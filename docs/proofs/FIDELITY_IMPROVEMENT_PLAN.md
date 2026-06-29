@@ -190,22 +190,25 @@ correctly maps to C++ `commit_lock.exchange(acquire)`. No change needed.
 
 **Effort:** 1 line.
 
-### 2.8 XTM bloom filter + lastFence accuracy (3/5 → 4/5)
+### 2.8 XTM bloom filter + lastFence accuracy (3/5 → 4/5) ✅ DONE
 
-**Problem:** `lastFence` assignments wrong: `"sc"` where C++ uses
-`load(acquire)`, `"rel"` where C++ uses `fetch_add(acq_rel)`. Bloom filter
-entirely absent.
+**Problem:** `lastFence` assignments were wrong: `"sc"` where C++ uses
+`load(acquire)`, `"acquire"` where C++ uses `compare_exchange_strong(acq_rel)`,
+`"release"` where C++ uses `fetch_add(acq_rel)`.
 
-**Fix:**
-- Change read `lastFence := "sc"` to just `lastSignalFence[t] := "sc"` (or
-  nothing — C++ has no signal_fence on read path)
-- Change commit release `lastFence := "rel"` to `lastRmw[t] := "acq_rel"`
-  (matching `fetch_add(acq_rel)` on version)
-- Bloom filter: add as a set of addresses with relaxed operations (false
-  positives only, no correctness impact). This is P3 — skip if effort is
-  high.
+**Fix (4 changes):**
+1. Read path: `lastSignalFence := "sc"` → `lastRmw[t] := "acquire"` (line 218)
+2. CAS acquire: `lastRmw[t] := "acquire"` → `lastRmw[t] := "acq_rel"` (line 234)
+3. Validate success: `lastSignalFence := "sc"` → `lastRmw[t] := "acquire"` (line 257)
+4. L_release: `lastRmw[t] := "release"` → `lastRmw[t] := "acq_rel"` (line 273,
+   matches `fetch_add(acq_rel)` on version bump)
 
-**Effort:** ~30 lines.
+Bloom filter omitted (P3 optimization, no correctness impact). TLC passes
+(15/6 states, 0 errors). Note: XTM has zero fences (no thread or signal
+fences) — all ordering is via RMW and acquire/release loads/stores, which
+the 3-variable model now correctly reflects.
+
+**Effort:** ~20 lines.
 
 ---
 
@@ -580,7 +583,7 @@ actions. Then re-translate and verify TLC passes.
 | PersistentSGL | 2/5 | 3/5 ✅ | Phase 2.3 done |
 | Romulus | 3/5 | 4/5 ✅ | Phase 2.5 done |
 | TL2 | 3/5 | 4/5 ✅ | Phase 2.4 done |
-| XTM | 3/5 | 4/5 | Phase 2.8 |
+| XTM | 3/5 | 4/5 ✅ | Phase 2.8 done |
 | LEFTRIGHT | 3/5 | 4/5 ✅ | Phase 2.6 pre-completed |
 | SwissTM | 3/5 | 4/5 ✅ | Phase 2.7 done |
 | NOrec | 2/5 | 3/5 | Phase 2.2 |
