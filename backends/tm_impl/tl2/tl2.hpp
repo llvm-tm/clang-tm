@@ -229,7 +229,7 @@ public:
     }
     
     static word_t increment_clock() {
-        return g_clock.fetch_add(1, std::memory_order_relaxed) + 1;
+        return g_clock.fetch_add(1, std::memory_order_release) + 1;
     }
     
     static word_t get_guard_version(word_t* addr) {

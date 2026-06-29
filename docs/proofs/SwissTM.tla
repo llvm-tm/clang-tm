@@ -250,7 +250,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                        /\ UNCHANGED << orec, writeLog, 
                                                        writeBuf, oldVal, 
                                                        readOnly >>
-                        /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                        /\ lastRmw' = [lastRmw EXCEPT ![self] = "acq_rel"]
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ UNCHANGED <<lastSignalFence, lastThreadFence, committed, readSet>>
                      \/ /\ \E a \in Addr:

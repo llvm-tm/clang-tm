@@ -234,11 +234,12 @@ L_active(self) == /\ pc[self] = "L_active"
                   /\ UNCHANGED << clock, mem, snapshot >>
 
 L_incClock(self) == /\ pc[self] = "L_incClock"
-                    /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
-                    /\ clock' = clock + 1
-                    /\ pc' = [pc EXCEPT ![self] = "L_validate"]
-                    /\ UNCHANGED << guard, mem, state, readSet, writeSet, 
-                                    writeBuf, snapshot, readOnly, committed >>
+                     /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
+                     /\ clock' = clock + 1
+                     /\ pc' = [pc EXCEPT ![self] = "L_validate"]
+                     /\ UNCHANGED << guard, mem, state, readSet, writeSet, 
+                                     writeBuf, snapshot, readOnly, committed, 
+                                     lastSignalFence, lastThreadFence >>
 
 L_validate(self) == /\ pc[self] = "L_validate"
                     /\ IF \A <<a, v>> \in readSet[self] : /\ GuardLocked(guard[a]) = 0

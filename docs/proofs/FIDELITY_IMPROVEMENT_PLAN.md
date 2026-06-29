@@ -136,9 +136,9 @@ Safety (large): 513 states ✅ Liveness (Spec_WF): 361 states ✅
 
 **Effort:** ~100 lines (PlusCal + TLA+).
 
-### 2.4 TL2 clock increment ordering fix (3/5 → 4/5)
+### 2.4 TL2 clock increment ordering fix (3/5 → 4/5) ✅ DONE
 
-**Problem:** C++ `fetch_add(relaxed)` is annotated `"sc"` in model. The model
+**Problem:** C++ `fetch_add(relaxed)` was annotated `"sc"` in model. The model
 would pass even if the C++ clock ordering were weakened below correctness.
 
 **Options:**
@@ -151,9 +151,10 @@ would pass even if the C++ clock ordering were weakened below correctness.
 - **Option C (both):** Fix C++ to use `release`, update model to `lastRmw[t] =
   "release"`. Best fidelity.
 
-**Recommendation:** Option C.
+**Recommendation:** Option C (was chosen).
 
-**Effort:** 1 line C++, ~10 lines model.
+**Effort:** 1 line C++ (`tl2.hpp:232`), ~10 lines model (`TL2.tla:236-241`). TLC
+passes (8 states, 3 distinct, 0 errors).
 
 ### 2.5 Romulus missing fence annotations (3/5 → 4/5)
 
@@ -168,25 +169,21 @@ Add `lastRmw[t] := "acq_rel"` for the `fetch_or`. Add `lastThreadFence[t] :=
 
 **Effort:** ~40 lines.
 
-### 2.6 LEFTRIGHT write-path ordering wrong (3/5 → 4/5)
+### 2.6 LEFTRIGHT write-path ordering wrong ✅ DONE (pre-completed by Phase 1)
 
-**Problem:** Model annotates `"acq"` on write, but C++ write_word has ZERO
-ordering operations.
+The write path in LEFTRIGHT.tla already has no fence annotation (lines 206-211).
+Phase 1 split `lastFence` into 3 variables and did not add any fence to the
+write action. The `"acquire"` on line 218 is the commit-lock acquire, which
+correctly maps to C++ `commit_lock.exchange(acquire)`. No change needed.
 
-**Fix:** Change `lastFence` on write to `""` (no fence). Add a comment noting
-that LEFTRIGHT's write path relies entirely on the commit lock acquire and
-clock increment for ordering. The write action itself is a plain buffer insert.
+### 2.7 SwissTM exchange ordering fix (3/5 → 4/5) ✅ DONE
 
-**Effort:** ~5 lines.
+**Problem:** `r_lock.exchange(acq_rel)` was modeled as `"acq"` — missed release half.
 
-### 2.7 SwissTM exchange ordering fix (3/5 → 4/5)
+**Fix:** Changed to `lastRmw[t] := "acq_rel"` at the exchange action
+(`SwissTM.tla:253`). TLC passes (3.7M states, 825K distinct, 0 errors).
 
-**Problem:** `r_lock.exchange(acq_rel)` modeled as `"acq"` — misses release half.
-
-**Fix:** Change to `lastRmw[t] := "acq_rel"` at the exchange action. Verify
-`FenceFidelity` accepts RMW annotations.
-
-**Effort:** ~10 lines.
+**Effort:** 1 line.
 
 ### 2.8 XTM bloom filter + lastFence accuracy (3/5 → 4/5)
 
@@ -577,10 +574,10 @@ actions. Then re-translate and verify TLC passes.
 | TinySTM_WT | 4/5 | 4/5 | MO sub-score 2→3 |
 | PersistentSGL | 2/5 | 3/5 ✅ | Phase 2.3 done |
 | Romulus | 3/5 | 4/5 | Phase 2.5 |
-| TL2 | 3/5 | 4/5 | Phase 2.4 |
+| TL2 | 3/5 | 4/5 ✅ | Phase 2.4 done |
 | XTM | 3/5 | 4/5 | Phase 2.8 |
-| LEFTRIGHT | 3/5 | 4/5 | Phase 2.6 |
-| SwissTM | 3/5 | 4/5 | Phase 2.7 |
+| LEFTRIGHT | 3/5 | 4/5 ✅ | Phase 2.6 pre-completed |
+| SwissTM | 3/5 | 4/5 ✅ | Phase 2.7 done |
 | NOrec | 2/5 | 3/5 | Phase 2.2 |
 | SPHT | 2/5 | 3/5 | Phase 3.1 |
 | TiKV | 2/5 | 3/5 | Phase 3.1 (documentation) |

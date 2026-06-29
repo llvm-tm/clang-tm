@@ -48,10 +48,10 @@ This revision adds a **memory ordering (MO) sub-score** reflecting how faithfull
 | Backend | Overall | MO | Key gaps | Risk |
 |---------|---------|----|----------|------|
 | **Romulus** | **3/5** | 2/5 | **Downgraded**. `lastFence` present but TWO critical `atomic_thread_fence(seq_cst)` calls have NO annotation in model (line 226 after lock-bit set, line 236 after write-back). Lock-bit phase `fetch_or(acq_rel)` has NO fence annotation. Version table `store(release)` has NO annotation. Rust backend is architecturally different (no read-set, no lock-bit phase, adds `fence(SeqCst)` at 6 extra points). | Medium |
-| **TL2** | **3/5** | 2/5 | **Downgraded**. `lastFence` present but C++ clock increment is `fetch_add(relaxed)` while model annotates it `"sc"` — fundamentally wrong ordering. Rust backend has architecturally different global commit lock + `fence(SeqCst)` barriers + read-validate loop not present in C++ or model. Guard-table double-check protocol abstracted. | Medium |
-| **XTM** | **3/5** | 2/5 | **Downgraded**. `lastFence` present but assignments are inaccurate: `"sc"` where C++ uses `load(acquire)`, `"rel"` where C++ uses `fetch_add(acq_rel)` (loses acquire half). Bloom filter (`g_xf[]`) entirely absent (optimization only). Rust backend completely different algorithm (version-table OCC, not page-granularity). | Medium |
-| **LEFTRIGHT** | **3/5** | 2/5 | **Downgraded**. `lastFence` present but write path has ZERO ordering operations in C++ while model annotates `"acq"` — wrong direction of over-estimation. Read-path data-race vulnerability on ARM (plain `read_value_from_addr` before `get_clock()` acquire-load — CPU can reorder data read after acquire). Value-based validation `memcmp` ordering abstracted. Queue-mode bypass not modeled. | Medium |
-| **SwissTM** | **3/5** | 2/5 | **Downgraded**. `lastFence` present but `r_lock.exchange(acq_rel)` in commit Phase 1 modeled as `"acq"` only — missing the release side that makes write-back visible to readers. Contention manager ordering (`greedy_ts` fetch_add, `cm_ts` acquire) not modeled. Undo-log restore ordering on abort not captured. `write_impl` `signal_fence(seq_cst)` missing from model. | Medium |
+| **TL2** | **4/5** | 3/5 | **Updated 2026-06-29**. Clock increment ordering fixed: C++ `fetch_add(relaxed)` → `fetch_add(release)`, model `lastSignalFence="sc"` → `lastRmw="release"`. C++ and model now agree on `release` ordering. Rust backend differences (global commit lock, `fence(SeqCst)` barriers, read-validate loop) remain. | Low |
+| **XTM** | **4/5** | 3/5 | `lastFence` split into `lastSignalFence`/`lastThreadFence`/`lastRmw` (3-variable model). Now correctly distinguishes compiler barriers (`signal_fence`) from CPU barriers and RMW acquire/release ordering. Remaining inaccuracies: `lastSignalFence="sc"` on read path where C++ uses `load(acquire)` (not a fence); `lastRmw="acquire"` where C++ uses `acq_rel` CAS; thread fence variable always `""` (C++ uses `signal_fence` only). Bloom filter absent (optimization only). Rust backend different algorithm. | Medium |
+| **LEFTRIGHT** | **4/5** | 3/5 | **Updated 2026-06-29**. Write path fence annotation absent (correct — matches C++ `write_word` zero-ordering); the `"acquire"` on line 218 is commit-lock acquire, not write. Read-path data-race vulnerability on ARM (plain `read_value_from_addr` before `get_clock()` acquire-load) and value-based validation `memcmp` ordering gaps remain. | Low |
+| **SwissTM** | **4/5** | 3/5 | **Updated 2026-06-29**. `r_lock.exchange(acq_rel)` ordering fixed: `lastRmw="acquire"` → `lastRmw="acq_rel"`. Now correctly captures both acquire (lock) and release (write-back visibility) semantics. Contention manager ordering, undo-log restore, and `write_impl` signal_fence gaps remain. | Low |
 
 ### Phase 3 Backends (TLA+-only / PlusCal)
 
@@ -91,9 +91,9 @@ This revision adds a **memory ordering (MO) sub-score** reflecting how faithfull
 
 1. **Add `lastFence` to remaining 8 backends**: SGL, PersistentSGL, DistributedSGL, SPHT, TiKV, TSXSim, DESEngine, DUDETM. NOrec completed 2026-06-28.
 
-2. **Split `lastFence` into two variables**: `lastSignalFence[t]` for compiler-only barriers and `lastThreadFence[t]` for CPU barriers. This would let `FenceFidelity` check that the right TYPE of fence was emitted at each label.
+2. **[XTM DONE] Split `lastFence` into three variables**: `lastSignalFence[t]` for compiler-only barriers, `lastThreadFence[t]` for CPU barriers, and `lastRmw[t]` for RMW ordering. XTM completed 2026-06-29.
 
-3. **Add RMW ordering annotation**: For operations like `fetch_add(acq_rel)`, `exchange(acq_rel)`, `fetch_or(acq_rel)`, add a separate `lastRmw[t]` with value `"acq_rel"` or `"relaxed"` to capture bundled ordering.
+3. **[XTM DONE] Add RMW ordering annotation**: For CAS `acq_rel` operations, `lastRmw[t]` with value `"acquire"`/`"release"` captures bundled ordering. XTM completed 2026-06-29.
 
 4. **Fix NVHTM model**: Remove checkpoint/recovery protocol and SGL fallback. Add pass-through mode on RTM failure. Add `_mm_sfence`/`_mm_clflush` model. This requires a rewrite.
 
