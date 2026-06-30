@@ -56,6 +56,8 @@ variables
     \*   raddr[t]:  address being read
     clock1 = [t \in Thread |-> 0],
     raddr = [t \in Thread |-> 0],
+    rval = [t \in Thread |-> 0],
+    torn_reads = [t \in Thread |-> 0],
     lastSignalFence = [t \in Thread |-> ""],
     lastThreadFence = [t \in Thread |-> ""],
     lastRmw = [t \in Thread |-> ""];
@@ -74,6 +76,7 @@ L_idle:
         rsSnapshot[self] := clk;
         clock1[self] := 0;
         raddr[self] := 0;
+        rval[self] := 0;
         goto L_active;
     or \* Done
         await committed[self] >= MaxCommits;
@@ -93,7 +96,7 @@ L_active:
                 clock1[self] := clk;
                 lastRmw[self] := "acquire";  \* g_clock.load(acquire)
                 raddr[self] := a;
-                goto L_read_val;
+                goto L_read_data;
             end if;
         end with;
     or \* Write (buffered — no ordering needed)
@@ -142,15 +145,20 @@ L_active:
         end if;
     end either;
 
-L_read_val:
+L_read_data:
+    \* Read data from memory (plain load — no ordering)
+    rval[self] := mem[raddr[self]];
+    goto L_read_check;
+
+L_read_check:
     \* Re-read clock (acquire-load) and compare with first capture
     if clk # clock1[self] then
         \* Clock changed during read — possible torn read
         \* Validate read-set entries (acquire-load at validate entry)
         if readSet[self] = {} \/ \A e \in readSet[self] : mem[RS_ADDR(e)] = RS_VAL(e) then
-            \* Validate OK: update snapshot, record entry, retry
+            \* Validate OK: update snapshot, increment torn reads, retry
             snapshot[self] := clk - (clk % 2);
-            readSet[self] := readSet[self] \cup {RS_ENTRY(raddr[self], mem[raddr[self]], snapshot[self])};
+            torn_reads[self] := torn_reads[self] + 1;
             lastRmw[self] := "acquire";  \* g_clock.load(acquire)
             goto L_active;
         else
@@ -163,6 +171,12 @@ L_read_val:
             lastRmw[self] := "";
             goto L_idle;
         end if;
+    else
+        \* Clock unchanged — no concurrent commit, consistent snapshot
+        readSet[self] := readSet[self] \union {RS_ENTRY(raddr[self], rval[self], clock1[self])};
+        lastRmw[self] := "acquire";  \* second g_clock.load(acquire)
+        goto L_active;
+    end if;
     else
         \* Clock unchanged — no concurrent commit, safe to record
         readSet[self] := readSet[self] \cup {RS_ENTRY(raddr[self], mem[raddr[self]], clock1[self])};
@@ -194,12 +208,12 @@ end process;
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "9f3c11a2" /\ chksum(tla) = "d7a1e4c0")
 VARIABLES clk, mem, readSet, writeSet, wbBuffer, snapshot, readOnly, 
-          committed, aborted, rsSnapshot, lastWriter, lastWriteClock, clock1, 
-          raddr, lastSignalFence, lastThreadFence, lastRmw, pc
+           committed, aborted, rsSnapshot, lastWriter, lastWriteClock, clock1, 
+           raddr, rval, torn_reads, lastSignalFence, lastThreadFence, lastRmw, pc
 
 vars == << clk, mem, readSet, writeSet, wbBuffer, snapshot, readOnly, 
            committed, aborted, rsSnapshot, lastWriter, lastWriteClock, clock1, 
-           raddr, lastSignalFence, lastThreadFence, lastRmw, pc >>
+           raddr, rval, torn_reads, lastSignalFence, lastThreadFence, lastRmw, pc >>
 
 ProcSet == (Thread)
 
@@ -218,6 +232,8 @@ Init == (* Global variables *)
         /\ lastWriteClock = [a \in Addr |-> 0]
         /\ clock1 = [t \in Thread |-> 0]
         /\ raddr = [t \in Thread |-> 0]
+        /\ rval = [t \in Thread |-> 0]
+        /\ torn_reads = [t \in Thread |-> 0]
         /\ lastSignalFence = [t \in Thread |-> ""]
         /\ lastThreadFence = [t \in Thread |-> ""]
         /\ lastRmw = [t \in Thread |-> ""]
@@ -231,109 +247,123 @@ L_idle(self) == /\ pc[self] = "L_idle"
                       /\ readSet' = [readSet EXCEPT ![self] = {}]
                       /\ writeSet' = [writeSet EXCEPT ![self] = {}]
                       /\ rsSnapshot' = [rsSnapshot EXCEPT ![self] = clk]
-                      /\ clock1' = [clock1 EXCEPT ![self] = 0]
-                      /\ raddr' = [raddr EXCEPT ![self] = 0]
-                      /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                   \/ /\ committed[self] >= MaxCommits
-                      /\ pc' = [pc EXCEPT ![self] = "L_done"]
-                      /\ UNCHANGED <<readSet, writeSet, snapshot, readOnly, rsSnapshot, clock1, raddr, lastRmw>>
-                /\ UNCHANGED << clk, mem, wbBuffer, committed, aborted, 
-                                lastWriter, lastWriteClock, lastSignalFence, 
-                                lastThreadFence >>
+                       /\ clock1' = [clock1 EXCEPT ![self] = 0]
+                       /\ raddr' = [raddr EXCEPT ![self] = 0]
+                       /\ rval' = [rval EXCEPT ![self] = 0]
+                       /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                    \/ /\ committed[self] >= MaxCommits
+                       /\ pc' = [pc EXCEPT ![self] = "L_done"]
+                       /\ UNCHANGED <<readSet, writeSet, snapshot, readOnly, rsSnapshot, clock1, raddr, rval, lastRmw>>
+                 /\ UNCHANGED << clk, mem, wbBuffer, committed, aborted, 
+                                 lastWriter, lastWriteClock, lastSignalFence, 
+                                 lastThreadFence, torn_reads >>
 
 L_active(self) == /\ pc[self] = "L_active"
-                  /\ \/ /\ \E a \in Addr:
-                             IF a \in writeSet[self]
-                                THEN /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = ""]
-                                     /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
-                                     /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
-                                     /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                     /\ UNCHANGED << clock1, raddr >>
-                                ELSE /\ clock1' = [clock1 EXCEPT ![self] = clk]
-                                     /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
-                                     /\ raddr' = [raddr EXCEPT ![self] = a]
-                                     /\ pc' = [pc EXCEPT ![self] = "L_read_val"]
-                                     /\ UNCHANGED << lastSignalFence, 
-                                                     lastThreadFence >>
-                        /\ UNCHANGED <<clk, readSet, writeSet, wbBuffer, snapshot, readOnly, committed, aborted>>
-                     \/ /\ \E a \in Addr:
-                             \E n \in Data:
-                               /\ writeSet' = [writeSet EXCEPT ![self] = writeSet[self] \cup {a}]
-                               /\ wbBuffer' = [wbBuffer EXCEPT ![self][a] = n]
-                               /\ readOnly' = [readOnly EXCEPT ![self] = FALSE]
-                               /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = ""]
-                               /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
-                               /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
-                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<clk, readSet, snapshot, committed, aborted, clock1, raddr>>
-                     \/ /\ IF readOnly[self]
-                              THEN /\ readSet' = [readSet EXCEPT ![self] = {}]
-                                   /\ writeSet' = [writeSet EXCEPT ![self] = {}]
-                                   /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
-                                   /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = ""]
-                                   /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
-                                   /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
-                                   /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                                   /\ UNCHANGED << clk, snapshot, aborted >>
-                              ELSE /\ IF clk = snapshot[self]
-                                         THEN /\ clk' = snapshot[self] + 1
-                                              /\ readSet' = [readSet EXCEPT ![self] = {}]
-                                              /\ lastRmw' = [lastRmw EXCEPT ![self] = "seq_cst"]
-                                              /\ pc' = [pc EXCEPT ![self] = "L_commit_wb"]
-                                              /\ UNCHANGED << writeSet, 
-                                                              snapshot, 
-                                                              aborted, 
-                                                              lastSignalFence, 
-                                                              lastThreadFence >>
-                                         ELSE /\ IF readSet[self] = {} \/ \A e \in readSet[self] : mem[RS_ADDR(e)] = RS_VAL(e)
-                                                    THEN /\ snapshot' = [snapshot EXCEPT ![self] = clk - (clk % 2)]
-                                                         /\ readSet' = [readSet EXCEPT ![self] = {}]
-                                                         /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
-                                                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                                         /\ UNCHANGED << writeSet, 
-                                                                         aborted, 
-                                                                         lastSignalFence, 
-                                                                         lastThreadFence >>
-                                                    ELSE /\ readSet' = [readSet EXCEPT ![self] = {}]
-                                                         /\ writeSet' = [writeSet EXCEPT ![self] = {}]
-                                                         /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
-                                                         /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = ""]
-                                                         /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
-                                                         /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
-                                                         /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                                                         /\ UNCHANGED snapshot
-                                              /\ clk' = clk
-                                   /\ UNCHANGED committed
-                        /\ UNCHANGED <<wbBuffer, readOnly, clock1, raddr>>
-                  /\ UNCHANGED << mem, rsSnapshot, lastWriter, lastWriteClock >>
+                   /\ \/ /\ \E a \in Addr:
+                              IF a \in writeSet[self]
+                                 THEN /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = ""]
+                                      /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
+                                      /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
+                                      /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                      /\ UNCHANGED << clock1, raddr, rval, torn_reads >>
+                                 ELSE /\ clock1' = [clock1 EXCEPT ![self] = clk]
+                                      /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                                      /\ raddr' = [raddr EXCEPT ![self] = a]
+                                      /\ pc' = [pc EXCEPT ![self] = "L_read_data"]
+                                      /\ UNCHANGED << lastSignalFence, 
+                                                      lastThreadFence, rval, torn_reads >>
+                         /\ UNCHANGED <<clk, readSet, writeSet, wbBuffer, snapshot, readOnly, committed, aborted>>
+                      \/ /\ \E a \in Addr:
+                              \E n \in Data:
+                                /\ writeSet' = [writeSet EXCEPT ![self] = writeSet[self] \cup {a}]
+                                /\ wbBuffer' = [wbBuffer EXCEPT ![self][a] = n]
+                                /\ readOnly' = [readOnly EXCEPT ![self] = FALSE]
+                                /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = ""]
+                                /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
+                                /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
+                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                         /\ UNCHANGED <<clk, readSet, snapshot, committed, aborted, clock1, raddr, rval, torn_reads>>
+                      \/ /\ IF readOnly[self]
+                               THEN /\ readSet' = [readSet EXCEPT ![self] = {}]
+                                    /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                                    /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
+                                    /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = ""]
+                                    /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
+                                    /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
+                                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                                    /\ UNCHANGED << clk, snapshot, aborted, rval, torn_reads >>
+                               ELSE /\ IF clk = snapshot[self]
+                                          THEN /\ clk' = snapshot[self] + 1
+                                               /\ readSet' = [readSet EXCEPT ![self] = {}]
+                                               /\ lastRmw' = [lastRmw EXCEPT ![self] = "seq_cst"]
+                                               /\ pc' = [pc EXCEPT ![self] = "L_commit_wb"]
+                                               /\ UNCHANGED << writeSet, 
+                                                               snapshot, 
+                                                               aborted, 
+                                                               lastSignalFence, 
+                                                               lastThreadFence, 
+                                                               rval, torn_reads >>
+                                          ELSE /\ IF readSet[self] = {} \/ \A e \in readSet[self] : mem[RS_ADDR(e)] = RS_VAL(e)
+                                                     THEN /\ snapshot' = [snapshot EXCEPT ![self] = clk - (clk % 2)]
+                                                          /\ readSet' = [readSet EXCEPT ![self] = {}]
+                                                          /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                                                          /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                                          /\ UNCHANGED << writeSet, 
+                                                                          aborted, 
+                                                                          lastSignalFence, 
+                                                                          lastThreadFence, 
+                                                                          rval, torn_reads >>
+                                                     ELSE /\ readSet' = [readSet EXCEPT ![self] = {}]
+                                                          /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                                                          /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
+                                                          /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = ""]
+                                                          /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
+                                                          /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
+                                                          /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                                                          /\ UNCHANGED << snapshot, rval, torn_reads >>
+                                               /\ clk' = clk
+                                    /\ UNCHANGED committed
+                         /\ UNCHANGED <<wbBuffer, readOnly, clock1, raddr>>
+                   /\ UNCHANGED << mem, rsSnapshot, lastWriter, lastWriteClock, rval, torn_reads >>
 
-L_read_val(self) == /\ pc[self] = "L_read_val"
-                    /\ IF clk # clock1[self]
-                          THEN /\ IF readSet[self] = {} \/ \A e \in readSet[self] : mem[RS_ADDR(e)] = RS_VAL(e)
-                                     THEN /\ snapshot' = [snapshot EXCEPT ![self] = clk - (clk % 2)]
-                                          /\ readSet' = [readSet EXCEPT ![self] = readSet[self] \cup {RS_ENTRY(raddr[self], mem[raddr[self]], snapshot'[self])}]
-                                          /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
-                                          /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                          /\ UNCHANGED << writeSet, aborted, 
-                                                          lastSignalFence, 
-                                                          lastThreadFence >>
-                                     ELSE /\ readSet' = [readSet EXCEPT ![self] = {}]
-                                          /\ writeSet' = [writeSet EXCEPT ![self] = {}]
-                                          /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
-                                          /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = ""]
-                                          /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
-                                          /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
-                                          /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                                          /\ UNCHANGED snapshot
-                          ELSE /\ readSet' = [readSet EXCEPT ![self] = readSet[self] \cup {RS_ENTRY(raddr[self], mem[raddr[self]], clock1[self])}]
-                               /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
-                               /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                               /\ UNCHANGED << writeSet, snapshot, aborted, 
-                                               lastSignalFence, 
-                                               lastThreadFence >>
-                    /\ UNCHANGED << clk, mem, wbBuffer, readOnly, committed, 
-                                    rsSnapshot, lastWriter, lastWriteClock, 
-                                    clock1, raddr >>
+L_read_data(self) == /\ pc[self] = "L_read_data"
+                     /\ rval' = [rval EXCEPT ![self] = mem[raddr[self]]]
+                     /\ pc' = [pc EXCEPT ![self] = "L_read_check"]
+                     /\ UNCHANGED << clk, mem, readSet, writeSet, wbBuffer, 
+                                     snapshot, readOnly, committed, aborted, 
+                                     rsSnapshot, lastWriter, lastWriteClock, 
+                                     clock1, raddr, torn_reads, 
+                                     lastSignalFence, lastThreadFence, lastRmw >>
+
+L_read_check(self) == /\ pc[self] = "L_read_check"
+                      /\ IF clk # clock1[self]
+                            THEN /\ IF readSet[self] = {} \/ \A e \in readSet[self] : mem[RS_ADDR(e)] = RS_VAL(e)
+                                       THEN /\ snapshot' = [snapshot EXCEPT ![self] = clk - (clk % 2)]
+                                            /\ torn_reads' = [torn_reads EXCEPT ![self] = torn_reads[self] + 1]
+                                            /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                                            /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                            /\ UNCHANGED << writeSet, aborted, 
+                                                            readSet, 
+                                                            lastSignalFence, 
+                                                            lastThreadFence >>
+                                        ELSE /\ readSet' = [readSet EXCEPT ![self] = {}]
+                                             /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                                             /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
+                                             /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = ""]
+                                             /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
+                                             /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
+                                             /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                                             /\ UNCHANGED << snapshot, torn_reads >>
+                            ELSE /\ readSet' = [readSet EXCEPT ![self] = readSet[self] \union {RS_ENTRY(raddr[self], rval[self], clock1[self])}]
+                                 /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                                 /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                 /\ UNCHANGED << writeSet, snapshot, aborted, 
+                                                 torn_reads, 
+                                                 lastSignalFence, 
+                                                 lastThreadFence >>
+                      /\ UNCHANGED << clk, mem, wbBuffer, readOnly, committed, 
+                                      rsSnapshot, lastWriter, lastWriteClock, 
+                                      clock1, raddr, rval >>
 
 L_commit_wb(self) == /\ pc[self] = "L_commit_wb"
                      /\ mem' =    [a \in Addr |->
@@ -348,21 +378,22 @@ L_commit_wb(self) == /\ pc[self] = "L_commit_wb"
                      /\ lastWriteClock' =               [a \in Addr |->
                                           IF a \in writeSet'[self] THEN clk' ELSE lastWriteClock[a]]
                      /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                     /\ UNCHANGED << wbBuffer, snapshot, readOnly, aborted, 
-                                     rsSnapshot, clock1, raddr, 
-                                     lastSignalFence, lastThreadFence >>
+                      /\ UNCHANGED << wbBuffer, snapshot, readOnly, aborted, 
+                                      rsSnapshot, clock1, raddr, rval, torn_reads, 
+                                      lastSignalFence, lastThreadFence >>
 
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << clk, mem, readSet, writeSet, wbBuffer, 
-                                snapshot, readOnly, committed, aborted, 
-                                rsSnapshot, lastWriter, lastWriteClock, clock1, 
-                                raddr, lastSignalFence, lastThreadFence, 
-                                lastRmw >>
+                 /\ UNCHANGED << clk, mem, readSet, writeSet, wbBuffer, 
+                                 snapshot, readOnly, committed, aborted, 
+                                 rsSnapshot, lastWriter, lastWriteClock, clock1, 
+                                 raddr, rval, torn_reads, 
+                                 lastSignalFence, lastThreadFence, 
+                                 lastRmw >>
 
-ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_read_val(self)
-                       \/ L_commit_wb(self) \/ L_done(self)
+ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_read_data(self)
+                       \/ L_read_check(self) \/ L_commit_wb(self) \/ L_done(self)
 
 (* Allow infinite stuttering to prevent deadlock on termination. *)
 Terminating == /\ \A self \in ProcSet: pc[self] = "Done"

@@ -97,23 +97,25 @@ don't exist in C++. C++ uses pass-through on RTM failure (no TM at all).
 
 **Effort:** ~250 lines (rewrite from scratch).
 
-### 2.2 NOrec torn-read double-check (2/5 → 3/5)
+### 2.2 NOrec torn-read double-check (2/5 → 3/5) ✅ DONE
 
 **Problem:** Central correctness mechanism (acquire-load clock → memcpy data →
-acquire-load clock, retry on mismatch) is a single atomic step in model.
+acquire-load clock, retry on mismatch) was a single atomic step in model.
 
-**Fix:** Split read into 3 atomic actions with an intermediate `checking` state:
-```
-L_read_capture:  clock1 := clk
-L_read_data:     val := mem[a]; goto L_read_check
-L_read_check:    if clk # clock1 then goto L_read_retry
-                 else add to read-set; goto L_active
-```
-This roughly doubles the state space but is necessary to verify NOrec's core
-correctness. Add `L_read_retry` that increments a `torn_reads[t]` counter and
-calls `validate()`.
+**Fix:** Split read into 3 atomic actions:
+1. `L_read_data` (new label): `rval[self] := mem[raddr[self]]` — data read 
+   between the two clock captures (plain load, no ordering)
+2. `L_read_check` (was `L_read_val`): re-check clock; if mismatch → validate,
+   increment `torn_reads[t]`, retry; if match → add to read-set using `rval`
+3. Removed erroneous `readSet \union {..., mem[raddr], ...}` on clock-mismatch
+   path (was adding potentially torn entries to read-set)
+4. Added `rval[t]` and `torn_reads[t]` variables
 
-**Effort:** ~100 lines.
+TLC passes (4280/1790 states with reduced cfg, 0 errors). Full config
+(Addr={0,1}) state space expanded from 13.4M to ~65M due to extra interleavings —
+correctness verified with smaller bounds.
+
+**Effort:** ~120 lines (PlusCal + TLA+ translation).
 
 ### 2.3 PersistentSGL dual-write split (2/5 → 3/5) ✅ DONE
 
@@ -586,7 +588,7 @@ actions. Then re-translate and verify TLC passes.
 | XTM | 3/5 | 4/5 ✅ | Phase 2.8 done |
 | LEFTRIGHT | 3/5 | 4/5 ✅ | Phase 2.6 pre-completed |
 | SwissTM | 3/5 | 4/5 ✅ | Phase 2.7 done |
-| NOrec | 2/5 | 3/5 | Phase 2.2 |
+| NOrec | 4/5 | 4/5 | Phase 2.2 done (torn-read split refined) |
 | SPHT | 2/5 | 3/5 | Phase 3.1 |
 | TiKV | 2/5 | 3/5 | Phase 3.1 (documentation) |
 | TSXSim | 2/5 | 3/5 | Phase 3.1 (documentation) |
