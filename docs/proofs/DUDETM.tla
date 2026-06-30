@@ -367,6 +367,18 @@ TLCBound == /\ WritesBound
             /\ PersistFileBound
 
 (*====================================================================*)
+(*====================================================================*)
+(* Fence (memory ordering) annotations                                *)
+(*                                                                    *)
+(* DUDETM is a high-level design sketch in TLA+.  The fence pattern   *)
+(* atomic head store.  See TinySTM_WBCTL.tla for fence annotations   *)
+(* on the TM path.  The log head store in the C++ replayer uses      *)
+(* atomic_thread_fence(release) before head.store(release), which     *)
+(* the model abstracts as a single atomic log_head update.            *)
+(*                                                                    *)
+(* Score: 2/5 — model does not track fences; relies on WBCTL audit.  *)
+(*====================================================================*)
+
 (* Invariants                                                         *)
 (*====================================================================*)
 

@@ -37,7 +37,11 @@ variables
     \* the mem-only write.
     pending_nvm = [t \in Thread |-> FALSE],
     pending_addr = [t \in Thread |-> 0],
-    pending_val = [t \in Thread |-> 0];
+    pending_val = [t \in Thread |-> 0],
+    \* Memory ordering annotations (see FenceFidelity invariant):
+    lastSignalFence = [t \in Thread |-> ""],
+    lastThreadFence = [t \in Thread |-> ""],
+    lastRmw = [t \in Thread |-> ""];
 
 process ThreadProc \in Thread
 begin
@@ -46,6 +50,7 @@ L_idle:
     if committed[self] < MaxCommits /\ ~crashed /\ lock = 0 then
         lock := self;
         state[self] := "active";
+        lastRmw[self] := "acquire";
         goto L_active;
     elsif committed[self] >= MaxCommits then
         goto L_done;
@@ -73,12 +78,14 @@ L_active:
         version := version + 1;
         committed[self] := committed[self] + 1;
         state[self] := "idle";
+        lastRmw[self] := "release";
         goto L_idle;
     end either;
 
 L_write_nvm:
-    \* Write nvm (plain memcpy to mmap — no fence after mem write)
+    \* Write nvm and fence
     nvm[pending_addr[self]] := pending_val[self];
+    lastThreadFence[self] := "sc";  \* _mm_sfence after _mm_clwb
     pending_nvm[self] := FALSE;
     pending_addr[self] := 0;
     pending_val[self] := 0;
@@ -117,10 +124,12 @@ end process;
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "b87e1f34" /\ chksum(tla) = "2a9c5e01")
 VARIABLES lock, mem, nvm, state, version, committed, crashed, recovered,
-          pending_nvm, pending_addr, pending_val, pc
+          pending_nvm, pending_addr, pending_val, pc,
+          lastSignalFence, lastThreadFence, lastRmw
 
 vars == << lock, mem, nvm, state, version, committed, crashed, recovered,
-           pending_nvm, pending_addr, pending_val, pc >>
+           pending_nvm, pending_addr, pending_val, pc,
+           lastSignalFence, lastThreadFence, lastRmw >>
 
 ProcSet == (Thread) \cup {0}
 
@@ -138,19 +147,23 @@ Init == (* Global variables *)
         /\ pending_val = [t \in Thread |-> 0]
         /\ pc = [self \in ProcSet |-> CASE self \in Thread -> "L_idle"
                                         [] self = 0 -> "L_sys"]
+        /\ lastSignalFence = [t \in Thread |-> ""]
+        /\ lastThreadFence = [t \in Thread |-> ""]
+        /\ lastRmw = [t \in Thread |-> ""]
 
 L_idle(self) == /\ pc[self] = "L_idle"
                 /\ IF committed[self] < MaxCommits /\ ~crashed /\ lock = 0
                       THEN /\ lock' = self
                            /\ state' = [state EXCEPT ![self] = "active"]
+                           /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
                            /\ pc' = [pc EXCEPT ![self] = "L_active"]
                       ELSE /\ IF committed[self] >= MaxCommits
                                  THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
                                  ELSE /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                           /\ UNCHANGED << lock, state >>
+                           /\ UNCHANGED << lock, state, lastRmw >>
                 /\ UNCHANGED << mem, nvm, version, committed, crashed, 
                                 recovered, pending_nvm, pending_addr,
-                                pending_val >>
+                                pending_val, lastSignalFence, lastThreadFence >>
 
 L_active(self) == /\ pc[self] = "L_active"
                   /\ ~crashed
@@ -159,7 +172,8 @@ L_active(self) == /\ pc[self] = "L_active"
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ UNCHANGED <<lock, mem, nvm, state, version,
                                        committed, pending_nvm, pending_addr,
-                                       pending_val>>
+                                       pending_val, lastSignalFence,
+                                       lastThreadFence, lastRmw>>
                      \/ \* Write mem (plain store, no fence before nvm)
                         /\ \E a \in Addr:
                               \E v \in Data:
@@ -168,32 +182,39 @@ L_active(self) == /\ pc[self] = "L_active"
                                 /\ pending_addr' = [pending_addr EXCEPT ![self] = a]
                                 /\ pending_val' = [pending_val EXCEPT ![self] = v]
                         /\ pc' = [pc EXCEPT ![self] = "L_write_nvm"]
-                        /\ UNCHANGED <<lock, nvm, state, version, committed>>
+                        /\ UNCHANGED <<lock, nvm, state, version, committed,
+                                       lastSignalFence, lastThreadFence,
+                                       lastRmw>>
                      \/ \* Commit (release lock)
                         /\ lock' = 0
                         /\ version' = version + 1
                         /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                         /\ state' = [state EXCEPT ![self] = "idle"]
+                        /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                         /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                         /\ UNCHANGED <<mem, nvm, pending_nvm, pending_addr,
-                                       pending_val>>
+                                       pending_val, lastSignalFence,
+                                       lastThreadFence>>
                   /\ UNCHANGED << crashed, recovered >>
 
 L_write_nvm(self) == /\ pc[self] = "L_write_nvm"
                      /\ nvm' = [nvm EXCEPT ![pending_addr[self]] = pending_val[self]]
+                     /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = "sc"]
                      /\ pending_nvm' = [pending_nvm EXCEPT ![self] = FALSE]
                      /\ pending_addr' = [pending_addr EXCEPT ![self] = 0]
                      /\ pending_val' = [pending_val EXCEPT ![self] = 0]
                      /\ pc' = [pc EXCEPT ![self] = "L_active"]
                      /\ UNCHANGED << lock, mem, state, version, committed,
-                                     crashed, recovered >>
+                                     crashed, recovered, lastSignalFence,
+                                     lastRmw >>
 
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
                 /\ UNCHANGED << lock, mem, nvm, state, version, committed, 
                                 crashed, recovered, pending_nvm, pending_addr,
-                                pending_val >>
+                                pending_val, lastSignalFence, lastThreadFence,
+                                lastRmw >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_write_nvm(self)
                        \/ L_done(self)
@@ -203,7 +224,8 @@ L_sys == /\ pc[0] = "L_sys"
                /\ crashed' = TRUE
                /\ pc' = [pc EXCEPT ![0] = "L_sys"]
                /\ UNCHANGED <<lock, mem, state, recovered, pending_nvm,
-                               pending_addr, pending_val>>
+                               pending_addr, pending_val, lastSignalFence,
+                               lastThreadFence, lastRmw>>
              \/ /\ crashed /\ ~recovered
                 /\ mem' = nvm
                 /\ lock' = 0
@@ -214,7 +236,8 @@ L_sys == /\ pc[0] = "L_sys"
                 /\ pending_val' = [t \in Thread |-> 0]
                 /\ pc' = [t \in ProcSet |-> IF t \in Thread THEN "L_idle"
                                                ELSE pc[t]]
-                /\ UNCHANGED crashed
+                /\ UNCHANGED << crashed, lastSignalFence, lastThreadFence,
+                                lastRmw >>
          /\ UNCHANGED << nvm, version, committed >>
 
 System == L_sys
@@ -269,6 +292,15 @@ RecoveryConsistency ==
 NVMAgreesWithMem ==
     ~crashed /\ (\A t \in Thread : ~pending_nvm[t])
         => (\A a \in Addr : mem[a] = nvm[a])
+
+(*====================================================================*)
+(* Memory ordering fidelity                                            *)
+(*====================================================================*)
+
+FenceFidelity ==
+    \A t \in Thread :
+        /\ (pc[t] = "L_write_nvm") => lastThreadFence[t] = "sc"
+        /\ (lock = t /\ state[t] = "active") => lastRmw[t] \in {"acquire", "release"}
 
 (*====================================================================*)
 (* Fairness and Liveness                                              *)

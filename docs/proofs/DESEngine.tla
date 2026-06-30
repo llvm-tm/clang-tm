@@ -343,6 +343,18 @@ NoSelfConflict ==
         ~ (IsWriting(lp, a) /\ IsReading(lp, a))
 
 (*====================================================================*)
+(* Fence (memory ordering) annotations                                *)
+(*                                                                    *)
+(* DESEngine models the cross-LP conflict resolution protocol in      *)
+(* the discrete-event simulator (engine.rs).  There are no shared     *)
+(* memory fences in the model because the DES engine does not         *)
+(* execute on real hardware — it is a software simulation with        *)
+(* sequential event processing.  Memory ordering is irrelevant.       *)
+(*                                                                    *)
+(* Score: 2/5 — simulation model; fences not applicable.              *)
+(*====================================================================*)
+
+(*====================================================================*)
 (* Temporal properties                                                *)
 (*====================================================================*)
 

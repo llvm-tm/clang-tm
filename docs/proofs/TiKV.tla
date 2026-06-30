@@ -391,6 +391,21 @@ CommitOrdering ==
             \/ \A k \in Key : ~HasWritten(t, k)
 
 (*====================================================================*)
+(* Fence (memory ordering) annotations                                *)
+(*                                                                    *)
+(* TiKV is a distributed TM backed by Percolator 2PC over gRPC.      *)
+(* There is no shared memory between threads — all state is in        *)
+(* the TiKV key-value store, which provides its own consistency       *)
+(* guarantees via 2PC and per-key locking.  Memory ordering fences    *)
+(* do not apply at the TLA+ level of abstraction.                     *)
+(*                                                                    *)
+(* C++ reference: the FFI shim (tikv_backend.cpp) has no fences —     *)
+(* all synchronization is through the TiKV transaction protocol.     *)
+(*                                                                    *)
+(* Score: 3/5 — distributed model; fences not applicable.             *)
+(*====================================================================*)
+
+(*====================================================================*)
 (* Bounding constraints for TLC termination                           *)
 (*====================================================================*)
 TLCBound ==

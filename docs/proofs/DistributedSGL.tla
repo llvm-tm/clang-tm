@@ -196,6 +196,22 @@ ServerConsistency ==
     Cardinality({x \in msg_queue : x[2] = "lock_grant"}) <= 1
 
 (*====================================================================*)
+(* Fence (memory ordering) annotations                                *)
+(*                                                                    *)
+(* DistributedSGL uses network message-passing, not shared memory.    *)
+(* There are no load/store fences because there is no shared memory    *)
+(* to protect — all state synchronization is through the message      *)
+(* queue, which provides happens-before via the network transport.    *)
+(*                                                                    *)
+(* C++ reference: DistributedSGL uses a file-backed spinlock on the   *)
+(* lock server node (local machine).  The TLA+ model abstracts this   *)
+(* as an atomic `lock_holder` variable.  Fences don't apply at the    *)
+(* TLA+ level of abstraction.                                         *)
+(*                                                                    *)
+(* Score: 1/5 — message-passing model; fences not applicable.         *)
+(*====================================================================*)
+
+(*====================================================================*)
 (* Bounding constraints for TLC termination                           *)
 (*====================================================================*)
 TLCBound ==

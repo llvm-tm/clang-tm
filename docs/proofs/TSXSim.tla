@@ -507,6 +507,18 @@ LockExclusion ==
         (sgl_lock = t1 /\ sgl_lock = t2) => (t1 = t2)
 
 (*====================================================================*)
+(* Fence (memory ordering) annotations                                *)
+(*                                                                    *)
+(* TSXSim is a simulation-only backend.  It models Intel TSX          *)
+(* execution using bloom filters and cache-line write-sets, but       *)
+(* does not correspond to a C++ backend with real fences.  Fence      *)
+(* annotations are therefore omitted — the model tracks TSX           *)
+(* conflict detection and SGL fallback, not memory ordering.          *)
+(*                                                                    *)
+(* Score: 3/5 — simulation model; fences not applicable.              *)
+(*====================================================================*)
+
+(*====================================================================*)
 (* Bounding constraints for TLC termination                           *)
 (*====================================================================*)
 TLCBound ==
