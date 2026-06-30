@@ -1,17 +1,22 @@
 /**
- * NV-HTM — Non-Volatile Hardware Transactional Memory
+ * NV-HTM — HTM-backed transactional memory using Intel RTM
  *
  * Uses Intel RTM (Restricted Transactional Memory) for hardware-accelerated
  * conflict detection and atomic commit, with a redo log for NVM durability.
+ *
+ * ⚠ TM region is mmap(MAP_ANONYMOUS) DRAM, not true NVM.  The redo log
+ * and _mm_clflush calls are an NVM-readiness scaffold — they have no
+ * functional effect on DRAM but structure the code correctly for future
+ * NVM support (DAX + MAP_SYNC on a real NVM filesystem).
  *
  * Protocol (per transaction):
  *   1. _xbegin() starts an RTM transaction — all reads/writes inside are
  *      tracked by hardware; on abort, all memory writes are rolled back.
  *   2. tm_write_* appends (addr, type, value) to the redo log AND writes
- *      through to memory (HTM rolls back both on abort).
+ *      through to memory (HTM rolls back both on abort on DRAM).
  *   3. _xend() commits the HTM — atomic visibility to other threads.
- *   4. Durable phase (after _xend): flush log entries via _mm_clflush,
- *      _mm_sfence, then apply writes to their final NVM addresses.
+ *   4. Durable phase (after _xend): apply writes to final addresses
+ *      and _mm_clflush each address + _mm_sfence for NVM ordering.
  *
  * CPU without RTM: runs in pass-through mode (no TM, direct memory
  * access).  Reads and writes bypass all tracking.
@@ -33,6 +38,9 @@
 #include <atomic>
 #include <new>
 #include <cstdio>
+#include <thread>
+#include <immintrin.h>
+#include <cpuid.h>
 
 namespace nvhtm
 {
@@ -181,15 +189,14 @@ static void durable_commit(Transaction *tx)
 		return;
 
 #if defined(__x86_64__) || defined(__i386__)
-	// Step A: flush each cache line of the redo log to NVM.
-	for (size_t i = 0; i < tx->log_count; i++)
-		_mm_clflush(&tx->log[i]);
-	// Step B: ensure all clflushes have completed.
-	_mm_sfence();
-
-	// Step C: apply writes to final NVM addresses (idempotent).
-	for (size_t i = 0; i < tx->log_count; i++)
+	// Step A: apply writes to final addresses, flushing each to NVM.
+	// Order: write, then clflush the written address, then sfence.
+	for (size_t i = 0; i < tx->log_count; i++) {
 		write_value_to_addr(tx->log[i].addr, tx->log[i].new_val, tx->log[i].type);
+		_mm_clflush(tx->log[i].addr);
+	}
+	// Step B: ensure all clflushes have completed before returning.
+	_mm_sfence();
 #else
 	for (size_t i = 0; i < tx->log_count; i++)
 		write_value_to_addr(tx->log[i].addr, tx->log[i].new_val, tx->log[i].type);
@@ -235,17 +242,17 @@ inline void tm_write(T *addr, T val)
 	// Null-address guard: writing to < 0x100000 or kernel-space (> 47-bit
 	// top bit set) is either a moved-from null pointer GEP or a bug.
 	// Skip safely — the data is garbage anyway.
-	if (!addr || (uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 47) != 0)
-
+	if (!addr || (uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 47) != 0) {
 #ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr)) {
-		*addr = val;
-		return;
-	}
+		if (!stm::isTMAddress(addr)) {
+			*addr = val;
+			return;
+		}
 #else
-	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
+		TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space");
 #endif
 		return;
+	}
 
 	if (!current_tx || !current_tx->active) {
 		*addr = val;

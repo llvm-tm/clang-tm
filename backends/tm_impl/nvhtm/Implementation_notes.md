@@ -2,6 +2,27 @@
 
 **Paper**: "NV-HTM: A Persistent Transactional Memory for Non-Volatile Memory with Hardware Transactional Memory" (IPDPS 2018, extended in JPDC 2019)
 
+## ⚠ Important constraint: DRAM-backed TM region
+
+The TM region is allocated via `mmap(MAP_ANONYMOUS)` — plain volatile DRAM, not
+NVM.  There is no DAX, `MAP_SYNC`, or persistent-memory file system.  This means:
+
+- **No crash recovery** — DRAM contents vanish on power loss.  The checkpoint and
+  replay infrastructure described in the original paper is not implemented and
+  cannot work on DRAM.
+- **`_mm_clflush` has no durability effect** — flushing a cache line to DRAM is
+  meaningless for persistence.  The instructions are harmless but serve only as
+  an NVM-readiness scaffold.
+- **HTM atomicity still works** — `_xbegin`/`_xend` provides hardware-accelerated
+  conflict detection and atomic commit on DRAM, which is the practical benefit
+  of this backend today.
+
+To enable true NVM support in the future:
+1. Replace `MAP_ANONYMOUS` with `MAP_SYNC` on a DAX-mounted filesystem.
+2. Implement checkpoint marker + recovery in `tm_region_init()`.
+3. Move the redo-log buffer from DRAM heap (`new Transaction`) into the NVM
+   region so it survives crashes.
+
 ## Overview
 
 NV-HTM is a **persistent HTM** that extends Intel RTM (Restricted Transactional Memory) with redo logging for NVM durability. The core insight: HTM provides fast, hardware-accelerated conflict detection and atomic commit, but HTM transactions are not durable (cache flushes before the TsxAbort boundary are discarded). NV-HTM adds a redo log in NVM and a two-phase durable commit protocol that works within the constraints of Intel RTM.
@@ -88,31 +109,38 @@ static inline bool nvhtm_commit(NvHtmTx *tx) {
     _xend(); // Step: HTM commit (atomic visibility of log buffer)
 
     // Durable phase (out of HTM):
-    // Step A: flush log buffer to NVM
-    for (size_t off = 0; off < tx->log_offset; off += 64)
-        _mm_clwb(tx->log_buf + off);
-    _mm_sfence();
-
-    // Step B: write checkpoint
-    *tx->checkpoint_ptr = (char*)(uintptr_t)tx->log_buf;
-    _mm_clwb(tx->checkpoint_ptr);
-    _mm_sfence();
-
-    // Step C: apply writes
+    // Step A (write + flush final addresses): for each log entry,
+    // write value to the final addr then clflush that addr.
     for (size_t off = 0; off < tx->log_offset; ) {
         NvHtmLogEntry *e = (NvHtmLogEntry*)(tx->log_buf + off);
         memcpy(e->addr, e->data, e->size);
+        _mm_clflush(e->addr);
         off += sizeof(NvHtmLogEntry) + e->size;
     }
-
-    // Step D: clear checkpoint
-    *tx->checkpoint_ptr = (char*)nullptr;
-    _mm_clwb(tx->checkpoint_ptr);
     _mm_sfence();
 
     return true;
 }
 ```
+
+## C++ implementation divergence
+
+The C++ implementation in `nvhtm.hpp` differs from the paper in several
+ways, all documented here for maintainers:
+
+| Aspect | Paper / pseudocode | C++ (`nvhtm.hpp`) |
+|--------|-------------------|-------------------|
+| **TM region backing** | NVM (DAX + MAP_SYNC) | DRAM (`MAP_ANONYMOUS`) |
+| **Write inside HTM** | Log-only (no write-through) | Log + write-through to `*addr` |
+| **Checkpoint + recovery** | 4-step protocol in NVM | Not implemented |
+| **Log buffer** | In NVM region | DRAM heap (`new Transaction`) |
+| **`_mm_clflush` target** | Final addresses after writing | Fixed: now flushes `log[i].addr` after write |
+
+The write-through pattern (HTM-tracked) is **correct for DRAM** — HTM
+does track the write-set in L1 cache, and on abort the L1 is invalidated
+with no side effects on DRAM.  For future NVM support, the write-through
+must be replaced with log-only writes to prevent cache eviction during
+HTM from permanently writing to NVM media.
 
 ## Limitations
 
@@ -135,7 +163,7 @@ The implementation follows the standard backend pattern (header + globals + runt
 
 - **Redo log**: Fixed-size (`LOG_CAPACITY=4096`) array of `(addr, type, new_val)` entries in the `Transaction` struct. All writes inside the RTM transaction append to this log AND write-through to memory. The HTM hardware rolls back both on `_xabort()`.
 
-- **Durable phase**: After `_xend()`, `durable_commit()` flushes each log entry cache line via `_mm_clflush`, `_mm_sfence`, then applies all writes to their final addresses. Idempotent — safe to replay on recovery.
+- **Durable phase**: After `_xend()`, `durable_commit()` applies writes to final addresses and flushes each via `_mm_clflush`, then `_mm_sfence`. On DRAM this is a no-op; on NVM it provides correct persist ordering.
 
 - **Pass-through mode**: On CPUs without Intel RTM, `rtm_available()` returns false, `begin()` returns with `active=false`, and all `tm_read_*`/`tm_write_*` operations perform direct memory access with no TM tracking. Multi-threaded correctness is not guaranteed in this mode.
 

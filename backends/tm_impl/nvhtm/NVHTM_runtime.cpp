@@ -18,7 +18,7 @@
 #include <new>
 
 #include "tm_common.hpp"
-#include "nvhtm/nvhtm_globals.hpp"
+#include "nvhtm_globals.hpp"
 #include "tm_alloc_overrides.hpp"
 #include "tm_hooks.hpp"
 
