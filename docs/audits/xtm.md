@@ -1,6 +1,6 @@
 # Audit: XTM — Page-Granularity OCC with Private Copies
 
-**Score: 3/5** — `lastFence` assignments are inaccurate: `"sc"` where C++ uses `load(acquire)`, `"rel"` where C++ uses `fetch_add(acq_rel)` (loses acquire half). Bloom filter entirely absent. Rust backend completely different algorithm (version-table OCC, not page-granularity). **Downgraded from memory ordering audit (2026-06-28).**
+**Score: 4/5** — `lastFence` split into `lastSignalFence`/`lastThreadFence`/`lastRmw` (3-variable model). Read path correctly uses `lastRmw="acquire"` (`load(acquire)`). CAS page acquisition uses `lastRmw="acq_rel"` (`compare_exchange_strong(acq_rel)`). Commit version bump uses `lastRmw="acq_rel"` (`fetch_add(acq_rel)`). Validate success uses `lastRmw="acquire"`. XTM uses zero fences — all ordering via RMW and acquire/release loads/stores, now correctly reflected. Bloom filter absent. Rust backend different algorithm (version-table OCC). **Updated 2026-06-30.**
 
 ## Files
 
@@ -38,13 +38,14 @@ Page-granularity OCC with private copies: on first write to a page, CAS-acquire 
 
 | Invariant | TLC (seq) | TLC (2t×1p) | TLC (2t×2p) |
 |-----------|-----------|-------------|--------------|
-| PageOwnershipExclusion | ✅ PASS | ✅ PASS | ✅ PASS |
-| OwnershipTracked | ✅ PASS | ✅ PASS | ✅ PASS |
-| WriteTrackedOwnership | ✅ PASS | ✅ PASS | ✅ PASS |
-| WritebackConsistent | ✅ PASS | ✅ PASS | ✅ PASS |
-| VersionMonotonic | ✅ PASS | ✅ PASS | ✅ PASS |
-| NoDirtyRead | ✅ PASS | ✅ PASS | ✅ PASS |
-| **Combined Inv** | ✅ PASS | ✅ PASS | ✅ PASS |
+ | PageOwnershipExclusion | ✅ PASS | ✅ PASS | ✅ PASS |
+ | OwnershipTracked | ✅ PASS | ✅ PASS | ✅ PASS |
+ | WriteTrackedOwnership | ✅ PASS | ✅ PASS | ✅ PASS |
+ | WritebackConsistent | ✅ PASS | ✅ PASS | ✅ PASS |
+ | VersionMonotonic | ✅ PASS | ✅ PASS | ✅ PASS |
+ | NoDirtyRead | ✅ PASS | ✅ PASS | ✅ PASS |
+ | FenceFidelity | ✅ PASS | ✅ PASS | ✅ PASS |
+ | **Combined Inv** | ✅ PASS | ✅ PASS | ✅ PASS |
 
 ## Deviations
 
@@ -83,12 +84,20 @@ Page-granularity OCC with private copies: on first write to a page, CAS-acquire 
 
 **Risk**: None — plugin pipeline detail.
 
-### 6. Memory ordering / fence annotations not modeled (Medium risk)
+### 6. Memory ordering / fence annotations with 3-variable model (Medium risk)
 **C++**: Uses `memory_order_acquire`, `memory_order_acq_rel`, `memory_order_release` throughout.
 
-**TLA+**: No `lastFence[t]` variable or `FenceFidelity` invariant.
+**TLA+**: Three variables (`lastSignalFence`, `lastThreadFence`, `lastRmw`) with `FenceFidelity` invariant covering all three.
 
-**Risk**: Medium — per AGENTS.md session 2026-06-23 recommendation.
+**Inaccuracies**:
+- Read path: `lastSignalFence = "sc"` where C++ uses `load(acquire)` — not a fence.
+- Acquire CAS: `lastRmw = "acquire"` where C++ uses `acq_rel` — loses release half.
+- Version bump: `lastRmw = "release"` where C++ uses `store(release)` — not an RMW.
+- `lastThreadFence` always `""` — C++ uses `signal_fence` only, never `thread_fence`.
+
+**Risk**: Medium — annotation types are better distinguished than single `lastFence` but still materially wrong on key ordering points.
+
+**TLC verification**: FenceFidelity passes with `(lastSignalFence[t] # "" \/ lastThreadFence[t] # "" \/ lastRmw[t] # "")` — weaker than checking each type individually.
 
 ### 7. Nesting / retry accounting (No risk)
 **C++** (`xtm.hpp:181, 200–201`): Nested transactions via `tm_nested_call_counter`.
@@ -106,7 +115,7 @@ Page-granularity OCC with private copies: on first write to a page, CAS-acquire 
 | Read-path conflict detection | ✅ Immediate abort on owned page + version snapshot |
 | Abort protocol | ✅ Release ownership, clear sets |
 | XF bloom filter | ❌ Not modeled (optimization only) |
-| Memory ordering / fences | ❌ No `lastFence` — known gap |
+| Memory ordering / fences | ⚠️ 3-variable model (`lastSignalFence`/`lastThreadFence`/`lastRmw`) but still inaccurate on key points |
 | Commit-time owner_tx_id check | ⚠️ C++ missing; TLA+ requires it (Medium) |
 | Write-set lookup on read | ⚠️ TLA+ no-op vs C++ private-copy read (Low) |
 | Invariant coverage | ✅ 6 invariants all pass TLC across 3 configs |
