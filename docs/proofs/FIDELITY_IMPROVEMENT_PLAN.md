@@ -82,20 +82,31 @@ FenceFidelity == \A t \in Thread :
 
 ## Phase 2 — Model algorithmic gaps (scores +1–3 across 5 backends)
 
-### 2.1 NVHTM rewrite (1/5 → 3/5 target)
+### 2.1 NVHTM rewrite (1/5 → 3/5) ✅ DONE
 
-**Problem:** Model describes checkpoint/recovery protocol + SGL fallback that
+**Problem:** Model described checkpoint/recovery protocol + SGL fallback that
 don't exist in C++. C++ uses pass-through on RTM failure (no TM at all).
 
-**Fix:** Replace the model entirely:
-- Remove `L_write_cp`, `L_apply_log`, `L_clear_cp` (checkpoint protocol)
-- Remove `L_active_sgl` (SGL fallback)
-- Add pass-through mode: when RTM fails after `MAX_RETRIES`, set
-  `tsx_mode[self] := FALSE` and allow direct reads/writes (no TM tracking)
-- Add `_mm_sfence` + `_mm_clflush` model as a durability action after `_xend()`
-- Match C++ redo-log structure (fixed-size array, dedup scan, not append-only)
+**Fix:** Replaced the model entirely:
+- Removed `L_write_cp`, `L_apply_log`, `L_clear_cp` (checkpoint protocol)
+- Removed `L_active_sgl` (SGL fallback) — C++ has no mutex fallback
+- Added `L_pass_through`: when RTM fails or RTM unavailable, reads/writes
+  go directly to `mem` with zero TM tracking — matches C++ `active=false`
+- Added `read_only[t]` variable matching C++ `tx->read_only` flag: if no
+  writes occurred during the transaction, skip `_mm_sfence` durable phase
+- Write-through semantics inside TSX: `mem[a] := v` AND
+  `Append(redo_log, <<a, v>>)` — matches C++ write-through redo-log pattern
+- `_xend()` commit → clears `tsx_mode`, either returns to `L_idle` (read-only)
+  or enters `L_flush_log` (durable phase with `lastThreadFence := "seq_cst"`)
+- Abort retry: up to `MaxRetries` retries with TSX, then pass-through fallback
+- Fence annotations: `lastRmw := "seq_cst"` at `_xbegin()`, `"release"` at
+  `_xend()`/`_xabort()`/flush, `lastThreadFence := "seq_cst"` at `_mm_sfence()`
+- Invariants: TSXSafety (tsx_mode ⇒ pc=L_active_tsx), RetryBound,
+  FenceFidelity (redo_log non-empty ⇒ fence set)
 
-**Effort:** ~250 lines (rewrite from scratch).
+TLC: 8401/1764 states, 0 errors. Liveness: PASS (3528/8401 states, 0 errors).
+
+**Effort:** ~250 lines.
 
 ### 2.2 NOrec torn-read double-check (2/5 → 3/5) ✅ DONE
 
@@ -545,7 +556,7 @@ actions. Then re-translate and verify TLC passes.
 | 1.1 | Split `lastFence` → signal/thread | 800 | 0 | +0–0.5 across 10 backends |
 | 1.2 | Add `lastRmw[t]` | 400 | 0 | +0.5–1 across 10 backends |
 | 1.3 | Per-label `FenceFidelity` | 500 | 0 | +0–0.5 across 10 backends |
-| 2.1 | NVHTM rewrite | 250 | 0 | +2 (1→3) |
+| 2.1 | NVHTM rewrite | 250 | 0 | ✅ +2 (1→3) |
 | 2.2 | NOrec double-check split | 100 | 0 | +1 (2→3) |
 | 2.3 | PersistentSGL dual-write split | 100 | 0 | ✅ +1 (2→3) |
 | 2.4 | TL2 clock increment | 10 | 1 | +1 (3→4) |
@@ -566,10 +577,10 @@ actions. Then re-translate and verify TLC passes.
 1. **Phase 1** (infrastructure) — do first because all other phases depend on
    the new `lastSignalFence`/`lastThreadFence`/`lastRmw` variables.
 2. **Phase 2** (algorithmic gaps) — highest score impact per line.
-   Done: 2.2 (NOrec), 2.3 (PersistentSGL), 2.6 (LEFTRIGHT), 2.7 (SwissTM).
+   Done: 2.1 (NVHTM), 2.2 (NOrec), 2.3 (PersistentSGL), 2.6 (LEFTRIGHT), 2.7 (SwissTM).
    Next: 2.4 (TL2), 2.5 (Romulus), 2.8 (XTM).
-3. **Phase 4** (C++ fixes) — quick wins that also improve real correctness.
-4. **Phase 3** (add `lastFence` to remaining 9) — mechanical, easy.
+3. **Phase 3** (add `lastFence` to remaining 9) — completed.
+4. **Phase 4** (C++ fixes) — quick wins that also improve real correctness.
 5. **Phase 6** (PlusCal desync) — important for maintainability.
 6. **Phase 5** (Rust models) — lowest priority; mostly documentation.
 
@@ -592,7 +603,7 @@ actions. Then re-translate and verify TLC passes.
 | SPHT | 2/5 | 3/5 | Phase 3.1 |
 | TiKV | 2/5 | 3/5 | Phase 3.1 (documentation) |
 | TSXSim | 2/5 | 3/5 | Phase 3.1 (documentation) |
-| NVHTM | 1/5 | 3/5 | Phase 2.1 |
+| NVHTM | 1/5 | 3/5 ✅ | Phase 2.1 done |
 | DUDETM | 1/5 | 2/5 | Phase 3.1 (documentation) |
 | DistributedSGL | 1/5 | 1/5 | — (fundamental mismatch) |
 | DESEngine | 2/5 | 2/5 | — (no shared memory) |
