@@ -67,9 +67,6 @@ ASSUME Data \subseteq Nat
 ASSUME MaxCommits \in Nat \ {0}
 
 (* ---- helpers ---- *)
-LockBit(entry) == entry % 2
-VersionOf(entry) == entry \div 2
-MakeEntry(ver) == ver * 2
 VIndex(a) == a % VSIZE
 
 (*--algorithm Romulus
@@ -465,9 +462,7 @@ AtMostOneCommitting ==
                              "L_write_back", "L_update_ver", "L_release_lock"} )
 
 (* I6: Every thread with a non-empty write-set has issued a fence (any kind) *)
-FenceFidelity ==
-    \A t \in Thread : (\E a \in Addr : write_set[t][a] # NoWrite) =>
-        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelity == TMTypes!FenceFidelityPA(Thread, write_set, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant for TLC *)
 Inv ==

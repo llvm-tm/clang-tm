@@ -58,7 +58,7 @@ L_idle:
 L_active:
     either \* Extend (validate read-set and bump snapshot window)
         if \A <<a, v, i>> \in readSet[self] :
-            lock[a][2] = self \/ (lock[a][3] = v /\ lock[a][4] = i)
+            lock[a][2] = self \/ (lock[a][1] = 0 /\ lock[a][3] = v /\ lock[a][4] = i)
         then
             endVersion[self] := clock;
             goto L_active;
@@ -140,7 +140,7 @@ L_active:
 L_validateWT:
     lastSignalFence[self] := "sc";  \* atomic_signal_fence(seq_cst) before validation
     if \A <<a, v, i>> \in readSet[self] :
-        lock[a][2] = self \/ (lock[a][3] = v /\ lock[a][4] = i)
+        lock[a][2] = self \/ (lock[a][1] = 0 /\ lock[a][3] = v /\ lock[a][4] = i)
     then
         goto L_unlock;
     else
@@ -221,7 +221,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
 
 L_active(self) == /\ pc[self] = "L_active"
                   /\ \/ /\ IF \A <<a, v, i>> \in readSet[self] :
-                               lock[a][2] = self \/ (lock[a][3] = v /\ lock[a][4] = i)
+                               lock[a][2] = self \/ (lock[a][1] = 0 /\ lock[a][3] = v /\ lock[a][4] = i)
                               THEN /\ endVersion' = [endVersion EXCEPT ![self] = clock]
                                    /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ UNCHANGED << state, readSet, writeSet, 
@@ -304,7 +304,7 @@ L_active(self) == /\ pc[self] = "L_active"
 L_validateWT(self) == /\ pc[self] = "L_validateWT"
                       /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
                       /\ IF \A <<a, v, i>> \in readSet[self] :
-                             lock[a][2] = self \/ (lock[a][3] = v /\ lock[a][4] = i)
+                             lock[a][2] = self \/ (lock[a][1] = 0 /\ lock[a][3] = v /\ lock[a][4] = i)
                             THEN /\ pc' = [pc EXCEPT ![self] = "L_unlock"]
                             ELSE /\ pc' = [pc EXCEPT ![self] = "L_abort"]
                       /\ UNCHANGED << clock, lock, mem, state, readSet, 
@@ -381,8 +381,7 @@ MutexLocks ==
     \A a \in Addr : lock[a][1] = 0
         \/ \E t \in Thread : lock[a][2] = t
 
-FenceFidelity == \A t \in Thread : writeSet[t] # {} =>
-    Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelity == TMTypes!FenceFidelity(Thread, writeSet, lastSignalFence, lastThreadFence, lastRmw)
 
 Inv ==
     /\ MutexLocks

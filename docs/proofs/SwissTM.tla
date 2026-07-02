@@ -390,9 +390,7 @@ NoPostCommitLocks ==
             \A a \in Addr : ~(OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) = t)
 
 (* I4: Every thread with a non-empty write-set has issued a fence *)
-FenceFidelity ==
-    \A t \in Thread : writeLog[t] # {} =>
-        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelity == TMTypes!FenceFidelity(Thread, writeLog, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant *)
 Inv ==

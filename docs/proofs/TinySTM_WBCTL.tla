@@ -57,7 +57,7 @@ L_idle:
 
 L_active:
     either \* Extend (validate read-set and bump snapshot window)
-        if \A <<a, v>> \in readSet[self] : lock[a][3] <= endVersion[self] then
+        if \A <<a, v>> \in readSet[self] : (lock[a][1] = 0 \/ lock[a][2] = self) /\ lock[a][3] <= endVersion[self] then
             endVersion[self] := clock;
             goto L_active;
         else
@@ -110,7 +110,8 @@ L_incClock:
     clock := clock + 1;
 
 L_validate:
-    if \A <<a, v>> \in readSet[self] : lock[a][3] <= endVersion[self] then
+    if \A <<a, v>> \in readSet[self] :
+           (lock[a][1] = 0 \/ lock[a][2] = self) /\ lock[a][3] <= endVersion[self] then
         state[self] := "wb";
         goto L_writeBack;
     else
@@ -241,8 +242,9 @@ L_incClock(self) == /\ pc[self] = "L_incClock"
                                     writeBuf, readOnly, endVersion, committed, lastSignalFence, lastThreadFence >>
 
 L_validate(self) == /\ pc[self] = "L_validate"
-                    /\ IF \A <<a, v>> \in readSet[self] : lock[a][3] <= endVersion[self]
-                          THEN /\ state' = [state EXCEPT ![self] = "wb"]
+                    /\ IF \A <<a, v>> \in readSet[self] :
+                           (lock[a][1] = 0 \/ lock[a][2] = self) /\ lock[a][3] <= endVersion[self]
+                           THEN /\ state' = [state EXCEPT ![self] = "wb"]
                                /\ pc' = [pc EXCEPT ![self] = "L_writeBack"]
                                /\ UNCHANGED << lock, readSet, writeSet, 
                                                lastSignalFence, lastThreadFence, lastRmw >>

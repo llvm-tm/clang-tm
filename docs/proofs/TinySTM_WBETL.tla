@@ -56,7 +56,7 @@ L_idle:
 
 L_active:
     either \* Extend (validate read-set and bump snapshot window)
-        if \A <<a, v>> \in readSet[self] : lock[a][3] <= endVersion[self] then
+        if \A <<a, v>> \in readSet[self] : (lock[a][1] = 0 \/ lock[a][2] = self) /\ lock[a][3] <= endVersion[self] then
             endVersion[self] := clock;
             goto L_active;
         else
@@ -131,7 +131,7 @@ L_active:
 
 L_validateETL:
     if \A <<a, v>> \in readSet[self] :
-        lock[a][2] = self \/ lock[a][3] <= endVersion[self]
+        (lock[a][1] = 0 \/ lock[a][2] = self) /\ lock[a][3] <= endVersion[self]
     then
         goto L_writeBackETL;
     else
@@ -202,8 +202,9 @@ L_idle(self) == /\ pc[self] = "L_idle"
                                 lastSignalFence, lastThreadFence, lastRmw >>
 
 L_active(self) == /\ pc[self] = "L_active"
-                  /\ \/ /\ IF \A <<a, v>> \in readSet[self] : lock[a][3] <= endVersion[self]
-                              THEN /\ endVersion' = [endVersion EXCEPT ![self] = clock]
+                  /\ \/ /\ IF \A <<a, v>> \in readSet[self] :
+                                (lock[a][1] = 0 \/ lock[a][2] = self) /\ lock[a][3] <= endVersion[self]
+                          THEN /\ endVersion' = [endVersion EXCEPT ![self] = clock]
                                    /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ UNCHANGED << lock, state, readSet, 
                                                    writeSet, lastSignalFence, lastThreadFence, lastRmw >>
@@ -279,8 +280,8 @@ L_active(self) == /\ pc[self] = "L_active"
                   /\ mem' = mem
 
 L_validateETL(self) == /\ pc[self] = "L_validateETL"
-                       /\ IF \A <<a, v>> \in readSet[self] :
-                              lock[a][2] = self \/ lock[a][3] <= endVersion[self]
+                         /\ IF \A <<a, v>> \in readSet[self] :
+                               (lock[a][1] = 0 \/ lock[a][2] = self) /\ lock[a][3] <= endVersion[self]
                              THEN /\ pc' = [pc EXCEPT ![self] = "L_writeBackETL"]
                                   /\ UNCHANGED << lock, state, readSet, 
                                                   writeSet, lastSignalFence, lastThreadFence, lastRmw >>
@@ -357,9 +358,7 @@ LockOwnerTx ==
 NoLocksAfterCommit ==
     \A t \in Thread : (state[t] = "idle") => \A a \in Addr : ~(lock[a][2] = t)
 
-FenceFidelity == \A t \in Thread :
-    writeSet[t] # {} =>
-        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelity == TMTypes!FenceFidelity(Thread, writeSet, lastSignalFence, lastThreadFence, lastRmw)
 
 Inv ==
     /\ MutexLocks

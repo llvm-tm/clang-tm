@@ -350,9 +350,7 @@ AtMostOneSGL ==
 (* INVARIANT 4: Every thread with a non-empty write-set has issued a   *)
 (*              fence (acq, rel, or sc).                                *)
 (*====================================================================*)
-FenceFidelity ==
-    \A t \in Thread : writeSet[t] # {} =>
-        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelity == TMTypes!FenceFidelity(Thread, writeSet, lastSignalFence, lastThreadFence, lastRmw)
 
 (*====================================================================*)
 (* Combined invariant                                                  *)

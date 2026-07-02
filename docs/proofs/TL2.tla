@@ -29,17 +29,11 @@ ASSUME Addr \subseteq Nat
 ASSUME MAX_COMMIT \in Nat
 ASSUME MaxCommits \in Nat
 
-(* ---- helper: guard encoding ---- *)
-LOCK_BIT == 1
-GuardVersion(g) == g \div 2
-GuardLocked(g) == g % 2
-MakeGuard(locked, ver) == ver * 2 + locked
-
 (* --algorithm TL2
 
 variables
     clock = 0,
-    guard = [a \in Addr |-> MakeGuard(0, 0)],
+    guard = [a \in Addr |-> MakeEntry(0)],
     mem = [a \in Addr |-> 0],
     state = [t \in Thread |-> "idle"],
     readSet = [t \in Thread |-> {}],
@@ -73,7 +67,7 @@ L_active:
     either \* ReadMiss
         with a \in Addr do
             if a \notin writeSet[self] then
-                readSet[self] := readSet[self] \union {<<a, GuardVersion(guard[a])>>};
+                readSet[self] := readSet[self] \union {<<a, VersionOf(guard[a])>>};
             end if;
         end with;
         lastRmw[self] := "seq_cst";
@@ -97,10 +91,10 @@ L_active:
         end if;
     or \* Commit Phase 1: acquire locks
         if ~readOnly[self] /\ writeSet[self] # {}
-           /\ \A a \in writeSet[self] : GuardLocked(guard[a]) = 0 then
+           /\ \A a \in writeSet[self] : LockBit(guard[a]) = 0 then
             guard := [a \in Addr |->
                 IF a \in writeSet[self]
-                THEN MakeGuard(1, GuardVersion(guard[a]))
+                THEN MakeEntry(VersionOf(guard[a])) + 1
                 ELSE guard[a]];
             state[self] := "committing";
             lastRmw[self] := "acquire";
@@ -115,15 +109,15 @@ L_incClock:
     clock := clock + 1;
 
 L_validate:
-    if \A <<a, v>> \in readSet[self] : /\ GuardLocked(guard[a]) = 0
-                                        /\ GuardVersion(guard[a]) = v then
+    if \A <<a, v>> \in readSet[self] : /\ LockBit(guard[a]) = 0
+                                        /\ VersionOf(guard[a]) = v then
         lastSignalFence[self] := "sc";
         state[self] := "committing_v";
         goto L_writeBack;
     else
         guard := [a \in Addr |->
             IF a \in writeSet[self]
-            THEN MakeGuard(0, GuardVersion(guard[a]))
+            THEN MakeEntry(VersionOf(guard[a]))
             ELSE guard[a]];
         readSet[self] := {};
         writeSet[self] := {};
@@ -143,7 +137,7 @@ L_release:
     lastRmw[self] := "release";
     guard := [a \in Addr |->
         IF a \in writeSet[self]
-        THEN MakeGuard(0, clock)
+        THEN MakeEntry(clock)
         ELSE guard[a]];
     committed[self] := committed[self] + 1;
     state[self] := "idle";
@@ -168,7 +162,7 @@ ProcSet == (Thread)
 
 Init == (* Global variables *)
         /\ clock = 0
-        /\ guard = [a \in Addr |-> MakeGuard(0, 0)]
+        /\ guard = [a \in Addr |-> MakeEntry(0)]
         /\ mem = [a \in Addr |-> 0]
         /\ state = [t \in Thread |-> "idle"]
         /\ readSet = [t \in Thread |-> {}]
@@ -202,7 +196,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
 L_active(self) == /\ pc[self] = "L_active"
                   /\ \/ /\ \E a \in Addr:
                              IF a \notin writeSet[self]
-                                THEN /\ readSet' = [readSet EXCEPT ![self] = readSet[self] \union {<<a, GuardVersion(guard[a])>>}]
+                                THEN /\ readSet' = [readSet EXCEPT ![self] = readSet[self] \union {<<a, VersionOf(guard[a])>>}]
                                 ELSE /\ TRUE
                                      /\ UNCHANGED readSet
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
@@ -226,10 +220,10 @@ L_active(self) == /\ pc[self] = "L_active"
                         /\ UNCHANGED <<guard, writeSet, writeBuf, readOnly, 
                                          lastSignalFence, lastThreadFence, lastRmw>>
                      \/ /\ IF ~readOnly[self] /\ writeSet[self] # {}
-                              /\ \A a \in writeSet[self] : GuardLocked(guard[a]) = 0
+                              /\ \A a \in writeSet[self] : LockBit(guard[a]) = 0
                               THEN /\ guard' =      [a \in Addr |->
                                                IF a \in writeSet[self]
-                                               THEN MakeGuard(1, GuardVersion(guard[a]))
+                                               THEN MakeEntry(VersionOf(guard[a])) + 1
                                                ELSE guard[a]]
                                    /\ state' = [state EXCEPT ![self] = "committing"]
                                    /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
@@ -249,15 +243,15 @@ L_incClock(self) == /\ pc[self] = "L_incClock"
                                      lastSignalFence, lastThreadFence >>
 
 L_validate(self) == /\ pc[self] = "L_validate"
-                    /\ IF \A <<a, v>> \in readSet[self] : /\ GuardLocked(guard[a]) = 0
-                                                             /\ GuardVersion(guard[a]) = v
+                    /\ IF \A <<a, v>> \in readSet[self] : /\ LockBit(guard[a]) = 0
+                                                             /\ VersionOf(guard[a]) = v
                           THEN /\ state' = [state EXCEPT ![self] = "committing_v"]
                                 /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
                                 /\ pc' = [pc EXCEPT ![self] = "L_writeBack"]
                                /\ UNCHANGED << guard, readSet, writeSet >>
                           ELSE /\ guard' =      [a \in Addr |->
                                            IF a \in writeSet[self]
-                                           THEN MakeGuard(0, GuardVersion(guard[a]))
+                                           THEN MakeEntry(VersionOf(guard[a]))
                                            ELSE guard[a]]
                                /\ readSet' = [readSet EXCEPT ![self] = {}]
                                /\ writeSet' = [writeSet EXCEPT ![self] = {}]
@@ -280,7 +274,7 @@ L_writeBack(self) == /\ pc[self] = "L_writeBack"
 L_release(self) == /\ pc[self] = "L_release"
                    /\ guard' =      [a \in Addr |->
                                IF a \in writeSet[self]
-                               THEN MakeGuard(0, clock)
+                               THEN MakeEntry(clock)
                                ELSE guard[a]]
                    /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                    /\ state' = [state EXCEPT ![self] = "idle"]
@@ -321,7 +315,7 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 (* Invariant 1: A guard is locked iff the owning thread is committing *)
 LockConsistent ==
     \A a \in Addr :
-        GuardLocked(guard[a]) = 1
+        LockBit(guard[a]) = 1
         <=> \E t \in Thread :
             a \in writeSet[t] /\ state[t] \in {"committing", "committing_v", "committing_wb"}
 
@@ -335,7 +329,7 @@ NoDirtyRead ==
     \A t1, t2 \in Thread, a \in Addr :
         (t1 # t2)
         /\ \E v \in 0..MAX_COMMIT : <<a, v>> \in readSet[t1]
-        /\ GuardLocked(guard[a]) = 1
+        /\ LockBit(guard[a]) = 1
         => state[t2] = "idle" \/ a \notin writeSet[t2]
 
 (* Invariant 3: No thread's snapshot exceeds clock *)
@@ -343,9 +337,7 @@ SnapshotInv ==
     \A t \in Thread : snapshot[t] <= clock
 
 (* Invariant 4: Every thread with a non-empty write-set has issued a fence *)
-FenceFidelity ==
-    \A t \in Thread : writeSet[t] # {} =>
-        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelity == TMTypes!FenceFidelity(Thread, writeSet, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant for TLC *)
 Inv ==

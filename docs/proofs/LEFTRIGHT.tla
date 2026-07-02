@@ -332,9 +332,7 @@ AtMostOneCommitting ==
                              "L_release_lock"} )
 
 (* I4: Threads with non-empty write-set have issued a fence *)
-FenceFidelity ==
-    \A t \in Thread : \E a \in Addr : write_set[t][a] # NoWrite =>
-        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelity == TMTypes!FenceFidelityPA(Thread, write_set, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant for TLC *)
 Inv ==

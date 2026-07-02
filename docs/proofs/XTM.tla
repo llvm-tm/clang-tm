@@ -367,9 +367,7 @@ NoDirtyRead ==
             \A p \in Page : xadt_owner[p] # t
 
 (* I7: Every thread with a non-empty write-set has issued a fence *)
-FenceFidelity ==
-    \A t \in Thread : \E p \in Page : write_set[t][p] # NoWrite =>
-        Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelity == TMTypes!FenceFidelityPA(Thread, write_set, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant for TLC *)
 Inv ==
