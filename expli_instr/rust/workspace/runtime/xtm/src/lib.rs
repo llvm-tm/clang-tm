@@ -20,7 +20,7 @@
 use std::cell::RefCell;
 use std::sync::atomic::{fence, AtomicU64, Ordering};
 
-use runtime_core::{Primitive, TypedValue, WriteBack};
+use runtime_core::{Primitive, TmxAbort, TypedValue, WriteBack};
 
 // ── Globals ──────────────────────────────────────────────────────
 const VERSION_TABLE_SIZE: usize = 1 << 20;
@@ -158,6 +158,17 @@ pub fn tm_commit() -> bool {
         }
     }
 
+    // Validate write-set: check no version entry has changed since our snapshot
+    for &(addr, _) in &tx.write_set {
+        let idx = version_index(addr);
+        let ver = VERSION_TABLE[idx].load(Ordering::Acquire);
+        if ver > tx.start_version {
+            COMMIT_LOCK.store(0, Ordering::Release);
+            G_TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+    }
+
     // Increment clock for ordering
     let commit_version = increment_clock();
 
@@ -212,8 +223,7 @@ fn read_word<T: Primitive>(addr: usize) -> T {
     let version_after = VERSION_TABLE[idx].load(Ordering::Acquire);
 
     if observed_version != version_after {
-        // Version changed during read — abort and retry
-        panic!("version_changed_during_read");
+        std::panic::panic_any(TmxAbort);
     }
 
     with_tx(|tx| {

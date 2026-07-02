@@ -175,7 +175,7 @@ public:
         for (auto& re : tx->read_set) {
             word_t current_version = re.orec->r_lock.load(std::memory_order_acquire);
             if (current_version != re.version) {
-                if (is_locked_by(re.orec->r_lock, tx)) {
+                if (is_locked_by(re.orec->w_lock, tx)) {
                     continue;
                 }
                 TM_EVENT2(READ_VERSION_CHECK, (word_t)re.byte_addr, re.version, current_version);
@@ -268,7 +268,7 @@ public:
         if (!tx || !tx->active) return *addr;
 
 #ifdef LLVM_TM_PLUGIN
-        if (!stm::isTMAddress(addr)) {
+        if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
             return *addr;
         }
 #else
@@ -408,7 +408,7 @@ public:
         if (!tx || !tx->active) { *addr = val; return; }
 
 #ifdef LLVM_TM_PLUGIN
-        if (!stm::isTMAddress(addr)) {
+        if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
             *addr = val;
             return;
         }

@@ -325,6 +325,12 @@ read_word_wt(                                           //
 	TM_ASSERT(tx, "read_word_wt: tx is null");
 	TM_ASSERT(tx->active, "read_word_wt: tx not active");
 
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
+		return read_value_from_addr(addr, ValueType::UINT64);
+	}
+#endif
+
 	// Write-set lookup — return the buffered new value if we wrote here
 	{
 		auto *w = tx->ws_find(addr);
@@ -439,6 +445,13 @@ write_word_wt(                                           //
 	TM_ASSERT(tx->active, "write_word_wt: tx not active");
 
 	tx->read_only = false;
+
+#ifdef LLVM_TM_PLUGIN
+	if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
+		write_value_to_addr(addr, val, ValueType::UINT64);
+		return;
+	}
+#endif
 
 	// Existing write-set entry at the same aligned address → update in place
 	{

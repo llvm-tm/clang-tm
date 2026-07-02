@@ -278,7 +278,7 @@ commit()    //
 		// Plugin mode: non-TM addresses are handled by the read/write
 		// bypass in read_word_norec/write_word_norec and never reach
 		// the write-set.  The guard below is a safety net.
-		if (!stm::isTMAddress(w.addr) ||
+		if ((!stm::isTMAddress(w.addr) && !stm::isTMGlobal(w.addr)) ||
 		    w.addr == nullptr || (uintptr_t)w.addr < 0x100000) {
 			continue;
 		}
@@ -414,7 +414,7 @@ read_word_norec(     //
 		return zero;
 	}
 #ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr))
+	if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr))
 		return read_value_from_addr(addr, sz);
 #endif
 
@@ -491,7 +491,8 @@ write_word_norec(    //
 		return; // invalid address — skip
 	}
 #ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr)) {
+	if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
+		tx->read_only = false;
 		write_value_to_addr(addr, val, sz);
 		return;
 	}

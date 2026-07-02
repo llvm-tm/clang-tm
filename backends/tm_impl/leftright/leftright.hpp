@@ -279,7 +279,7 @@ inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
         return wit->second.new_val;
     }
 
-    if (!stm::isTMAddress(addr))
+    if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr))
         return read_value_from_addr(addr, sz);
 
     any_type_t val = read_value_from_addr(addr, sz);
@@ -313,7 +313,7 @@ inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz
 
     tx->read_only = false;
 
-    if (!stm::isTMAddress(addr)) {
+    if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
         write_value_to_addr(addr, val, sz);
         return;
     }

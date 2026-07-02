@@ -226,7 +226,7 @@ inline T tm_read(T *addr)
 		return *addr;
 
 #ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr)) {
+	if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
 		return *addr;
 	}
 #else
@@ -244,7 +244,7 @@ inline void tm_write(T *addr, T val)
 	// Skip safely — the data is garbage anyway.
 	if (!addr || (uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 47) != 0) {
 #ifdef LLVM_TM_PLUGIN
-		if (!stm::isTMAddress(addr)) {
+		if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
 			*addr = val;
 			return;
 		}

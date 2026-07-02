@@ -262,7 +262,7 @@ inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
 		return wit->second.new_val;
 	}
 
-	if (!stm::isTMAddress(addr)) {
+	if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
 		return read_value_from_addr(addr, sz);
 	}
 

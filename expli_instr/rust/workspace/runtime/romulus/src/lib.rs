@@ -9,7 +9,7 @@ use std::collections::HashMap;
 #[cfg(feature = "simulation")]
 use std::cell::UnsafeCell;
 
-pub use runtime_core::{Primitive, TypedValue, WriteBack};
+pub use runtime_core::{Primitive, TmxAbort, TypedValue, WriteBack};
 
 // ── SyncUnsafeCell: UnsafeCell that implements Sync ────
 // Safe because simulation mode is single-threaded.
@@ -235,19 +235,24 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         return T::from_typed(&tv);
     }
 
-    // Read-validate: capture version entry BEFORE reading data.
-    // The Acquire load pairs with the Release store in tm_commit()
-    // so that we observe any concurrent commit's version bump.
+    // Read-validate: capture version, read data, re-check version.
+    // Without the re-check, a concurrent commit's write-back can
+    // race with the data read, producing an inconsistent snapshot.
     let idx = version_index(addr);
-    let ver = VERSION_TABLE[idx].load(Ordering::Acquire);
+    let entry_before = VERSION_TABLE[idx].load(Ordering::Acquire);
 
     let val: T = unsafe { (addr as *const T).read() };
+
+    let entry_after = VERSION_TABLE[idx].load(Ordering::Acquire);
+    if entry_before != entry_after {
+        std::panic::panic_any(TmxAbort);
+    }
 
     // Record (addr, version) for OCC commit-time validation.
     // Skip if already in read-set (dedup to avoid re-checking the same addr).
     with_tx(|tx| {
         if tx.read_set.iter().all(|(a, _)| *a != addr) {
-            tx.read_set.push((addr, ver));
+            tx.read_set.push((addr, entry_before));
         }
     });
 

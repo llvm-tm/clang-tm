@@ -280,7 +280,7 @@ inline T tm_read(T *addr)
 		return *addr;
 
 #ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr)) {
+	if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
 		return *addr;
 	}
 #else
@@ -298,7 +298,7 @@ inline void tm_write(T *addr, T val)
 		return;
 
 #ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr)) {
+	if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
 		*addr = val;
 		return;
 	}

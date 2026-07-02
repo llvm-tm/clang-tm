@@ -13,6 +13,7 @@
 #ifndef TL2_NEW_HPP
 #define TL2_NEW_HPP
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cstdint>
@@ -329,7 +330,7 @@ public:
         assert(tx && tx->active);
 
 #ifdef LLVM_TM_PLUGIN
-        if (!stm::isTMAddress((void*)addr)) {
+        if (!stm::isTMAddress((void*)addr) && !stm::isTMGlobal(addr)) {
             *addr = val;
             return;
         }
@@ -400,7 +401,7 @@ public:
         assert(tx && tx->active);
 
 #ifdef LLVM_TM_PLUGIN
-        if (!stm::isTMAddress((void*)addr)) {
+        if (!stm::isTMAddress((void*)addr) && !stm::isTMGlobal(addr)) {
             if constexpr (std::is_pointer_v<T>) {
                 return const_cast<T>(*addr);
             } else {
@@ -560,6 +561,11 @@ public:
         }
         
         // Step 3: Acquire write-set locks, handling guard-table aliasing
+        // Sort by address to guarantee deadlock-free lock acquisition
+        std::sort(tx->write_set.begin(), tx->write_set.end(),
+            [](const WriteSetEntry& a, const WriteSetEntry& b) {
+                return a.addr < b.addr;
+            });
         bool held_guard[GUARD_TABLE_SIZE] = {false};
         for (auto& e : tx->write_set) {
             word_t idx = get_guard_idx(e.addr);
