@@ -4,7 +4,7 @@
 
 #[cfg(not(feature = "simulation"))]
 use std::cell::RefCell;
-use std::sync::atomic::{fence, AtomicU64, Ordering};
+use std::sync::atomic::{compiler_fence, fence, AtomicU64, Ordering};
 use std::collections::HashMap;
 #[cfg(feature = "simulation")]
 use std::cell::UnsafeCell;
@@ -166,7 +166,7 @@ pub fn tm_commit() -> bool {
         Some(t) => t,
         None => return true,
     };
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
 
     if tx.read_only || tx.write_set.is_empty() {
         return true;
@@ -226,7 +226,6 @@ pub fn tm_commit() -> bool {
 
 // ── Read word ────────────────────────────────────────────────────
 fn read_word<T: Primitive>(addr: usize) -> T {
-    fence(Ordering::SeqCst);
     if !tx_active() {
         return unsafe { (addr as *const T).read() };
     }
@@ -257,7 +256,7 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 
 // ── Write word ───────────────────────────────────────────────────
 fn write_word<T: Primitive>(addr: usize, val: T) {
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
     if !tx_active() {
         unsafe { (addr as *mut T).write(val); }
         return;

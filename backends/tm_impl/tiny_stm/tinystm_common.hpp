@@ -121,7 +121,8 @@ public:
 		}
 		TM_ASSERT(((expected & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS) == 0,
 		               "Lock is unlocked with a owner");
-		bool res = state.compare_exchange_strong(expected, desired);
+		bool res = state.compare_exchange_strong(expected, desired,
+		    std::memory_order_acquire, std::memory_order_relaxed);
 		TM_ASSERT(!res || (res && state.load(std::memory_order_acquire) == desired),
 		               "CAS did not work as expected");
 		return res;

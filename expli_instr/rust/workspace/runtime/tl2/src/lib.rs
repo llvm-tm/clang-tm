@@ -3,7 +3,7 @@
 // Uses a shared lock table (hash-based, 2^20 entries) and
 // a global monotonically increasing clock.
 
-use core::sync::atomic::{fence, AtomicU64, Ordering};
+use core::sync::atomic::{compiler_fence, fence, AtomicU64, Ordering};
 #[cfg(not(feature = "simulation"))]
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -174,7 +174,7 @@ fn flush_tx() -> Option<Box<TxState>> {
 
 // ── Read word ───────────────────────────────────────────
 fn read_word<T: Primitive>(addr: usize) -> T {
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
     if !tx_active() {
         return unsafe { (addr as *const T).read() };
     }
@@ -214,7 +214,7 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 
 // ── Write word ──────────────────────────────────────────
 fn write_word<T: Primitive>(addr: usize, val: T) {
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
     if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
 
     let tv = val.to_typed();
@@ -231,7 +231,7 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 }
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
     if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| {
@@ -266,7 +266,7 @@ fn validate_read_set(rs: &[(usize, u64)]) -> bool {
 // ── Commit ──────────────────────────────────────────────
 pub fn tm_commit() -> bool {
     let tx = match flush_tx() { Some(t) => t, None => return true };
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
 
     if tx.write_set.is_empty() { return true; }
 
@@ -330,7 +330,7 @@ pub fn tm_commit() -> bool {
             locked_idxs.push(idx);
         }
     }
-    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
 
     // 4. Write-back from write-set
     for (addr, tv) in &tx.write_set {

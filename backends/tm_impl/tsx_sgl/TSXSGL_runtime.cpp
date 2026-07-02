@@ -184,7 +184,7 @@ static void real_tm_begin() {
         for (int attempts = 0; attempts < 5; attempts++) {
             unsigned status = _xbegin();
             if (status == _XBEGIN_STARTED) {
-                uint64_t v = sgl_owner.load(std::memory_order_seq_cst);
+                uint64_t v = sgl_owner.load(std::memory_order_relaxed);
                 if (v != 0) {
                     _xabort(LOCK_BUSY);
                 }
@@ -206,7 +206,7 @@ static void real_tm_begin() {
     (void)in_tsx;
 #endif
     global_tx_lock.lock();
-    sgl_owner.store(1, std::memory_order_seq_cst);
+    sgl_owner.store(1, std::memory_order_release);
     in_tsx = false;
 }
 
@@ -216,14 +216,14 @@ static void real_tm_end() {
 
     if (in_tsx) {
 #if defined(__x86_64__) || defined(__i386__)
-        if (sgl_owner.load(std::memory_order_seq_cst) != tsx_start_owner) {
+        if (sgl_owner.load(std::memory_order_acquire) != tsx_start_owner) {
             _xabort(OWNER_CHANGED);
         }
         _xend();
 #endif
         return;
     }
-    sgl_owner.store(0, std::memory_order_seq_cst);
+    sgl_owner.store(0, std::memory_order_release);
     global_tx_lock.unlock();
 }
 

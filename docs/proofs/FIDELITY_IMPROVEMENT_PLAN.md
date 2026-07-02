@@ -568,18 +568,23 @@ actions. Then re-translate and verify TLC passes.
 | 4.1–4.5 | C++ fixes | 0 | ~500 | +0 (correctness) |
 | 5.1–5.3 | Rust models/docs | ~200 | 0 | +0 (documentation) |
 | 6.1 | PlusCal desync fix | 300 | 0 | +0 (prevents regression) |
-| **Total** | | **~2855** | **~506** | |
+| 7.1–7.5 | Over-sync relaxation | 0 | 15 | +0 (performance) |
+| 7.6 | SwissTM analysis | 0 | 0 | +0 (keep acq_rel) |
+| 7.7 | DUDETM redundant fence | 0 | 1 | +0 (done in 4.7) |
+| **Total** | | **~2855** | **~522** | |
 
 ---
 
 ## Recommended order
 
+All phases complete:
 1. **Phase 1** (infrastructure) — ✅ completed 2026-06-24
 2. **Phase 2** (algorithmic gaps) — ✅ completed 2026-06-29
 3. **Phase 3** (add `lastFence` to remaining 9) — ✅ completed 2026-06-30
 4. **Phase 4** (C++ fixes) — ✅ completed 2026-07-01
 5. **Phase 6** (PlusCal desync) — ✅ completed 2026-07-01
-6. **Phase 5** (Rust models) — ✅ completed 2026-07-01 (documentation only; Rust backends are architecturally close to C++, no separate TLA+ models needed)
+6. **Phase 5** (Rust models) — ✅ completed 2026-07-01
+7. **Phase 7** (over-sync relaxation) — ✅ completed 2026-07-02
 
 ## Target scores after all phases
 

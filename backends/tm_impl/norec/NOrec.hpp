@@ -265,7 +265,8 @@ commit()    //
 	word_t expect = tx->snapshot;
 	word_t desire = tx->snapshot + 1;
 	TM_ASSERT((expect & 1) == 0, "Already locked");
-	while (!global_lock.compare_exchange_strong(expect, desire)) {
+	while (!global_lock.compare_exchange_strong(expect, desire,
+	    std::memory_order_acquire, std::memory_order_relaxed)) {
 		tx->snapshot = validate();
 		expect = tx->snapshot;
 		desire = expect + 1;
