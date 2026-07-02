@@ -35,11 +35,6 @@ GuardVersion(g) == g \div 2
 GuardLocked(g) == g % 2
 MakeGuard(locked, ver) == ver * 2 + locked
 
-(* NOTE: Fence tracking exists only in the TLA+ translation below.
-   The PlusCal source has a partial lastRmw update (write action) but lacks
-   the variable declarations and remaining fence points. Running pcal.trans will
-   fail with an undeclared-variable error — a deliberate guardrail. Re-add
-   lastSignalFence, lastThreadFence, lastRmw + all EXCEPT updates after translation. *)
 (* --algorithm TL2
 
 variables
@@ -52,7 +47,10 @@ variables
     writeBuf = [t \in Thread, a \in Addr |-> 0],
     snapshot = [t \in Thread |-> 0],
     readOnly = [t \in Thread |-> TRUE],
-    committed = [t \in Thread |-> 0];
+    committed = [t \in Thread |-> 0],
+    lastSignalFence = [t \in Thread |-> ""],
+    lastThreadFence = [t \in Thread |-> ""],
+    lastRmw = [t \in Thread |-> ""];
 
 process ThreadProc \in Thread
 begin
@@ -64,6 +62,9 @@ L_idle:
         readSet[self] := {};
         writeSet[self] := {};
         readOnly[self] := TRUE;
+        lastSignalFence[self] := "";
+        lastThreadFence[self] := "";
+        lastRmw[self] := "";
     else
         goto L_done;
     end if;
@@ -75,6 +76,7 @@ L_active:
                 readSet[self] := readSet[self] \union {<<a, GuardVersion(guard[a])>>};
             end if;
         end with;
+        lastRmw[self] := "seq_cst";
         goto L_active;
     or \* Write
         with a \in Addr, n \in 0..MAX_COMMIT do
@@ -101,6 +103,7 @@ L_active:
                 THEN MakeGuard(1, GuardVersion(guard[a]))
                 ELSE guard[a]];
             state[self] := "committing";
+            lastRmw[self] := "acquire";
             goto L_incClock;
         else
             goto L_active;
@@ -108,11 +111,13 @@ L_active:
     end either;
 
 L_incClock:
+    lastRmw[self] := "release";
     clock := clock + 1;
 
 L_validate:
     if \A <<a, v>> \in readSet[self] : /\ GuardLocked(guard[a]) = 0
                                         /\ GuardVersion(guard[a]) = v then
+        lastSignalFence[self] := "sc";
         state[self] := "committing_v";
         goto L_writeBack;
     else
@@ -122,6 +127,7 @@ L_validate:
             ELSE guard[a]];
         readSet[self] := {};
         writeSet[self] := {};
+        lastRmw[self] := "release";
         state[self] := "idle";
         goto L_idle;
     end if;
@@ -134,6 +140,7 @@ L_writeBack:
     state[self] := "committing_wb";
 
 L_release:
+    lastRmw[self] := "release";
     guard := [a \in Addr |->
         IF a \in writeSet[self]
         THEN MakeGuard(0, clock)

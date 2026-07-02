@@ -284,6 +284,12 @@ inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
 
     any_type_t val = read_value_from_addr(addr, sz);
 
+    // ARM read-data reorder barrier: prevents the plain data load from
+    // being reordered after the subsequent acquire load in get_clock().
+    // Without this, a reader could see data from version N+1 but a
+    // stale clock version N, causing OCC validation to pass incorrectly.
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+
     if (!isQueueActive()) {
         // Non-queue mode: log reads for OCC read-set validation.
         // In queue mode the read-set is not needed (validation is a no-op

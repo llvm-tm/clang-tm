@@ -112,7 +112,6 @@ publish_batch(const DUDERedoEntry* entries, size_t count)
     for (size_t i = 0; i < count; i++)
         log->entries[(h + i) & RING_LOG_MASK] = entries[i];
 
-    std::atomic_thread_fence(std::memory_order_release);
     log->head.store(h + count, std::memory_order_release);
 }
 

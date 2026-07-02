@@ -27,6 +27,12 @@ thread_local FreeNode *g_deferred_frees = nullptr;
 thread_local std::unordered_set<void *> g_deferred_frees_set;
 thread_local SpecAlloc *g_spec_allocs = nullptr;
 
+// ── RTM/SGL fallback ─────────────────────────────────────────────
+// When RTM is broken or unavailable (begin() returns false), a global
+// mutex serializes all TM operations, matching the SPHT fallback pattern.
+static std::mutex g_nvhtm_fallback_mutex;
+thread_local bool g_nvhtm_rtm_mode = false;
+
 extern const TMRealHooks g_nvhtm_hooks;
 
 extern "C" {
@@ -129,13 +135,26 @@ static void real_tm_begin()
 	tm_clear_spec_allocs();
 	tm_clear_deferred_frees();
 	g_in_tx = true;
-	nvhtm::begin();
+
+	if (nvhtm::begin()) {
+		g_nvhtm_rtm_mode = true;
+	} else if (tm_longjmp_ret != 0) {
+		g_nvhtm_rtm_mode = false;
+	} else {
+		g_nvhtm_rtm_mode = false;
+		g_nvhtm_fallback_mutex.lock();
+	}
+
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 static void real_tm_end()
 {
-	nvhtm::commit();
+	if (g_nvhtm_rtm_mode) {
+		nvhtm::commit();
+	} else {
+		g_nvhtm_fallback_mutex.unlock();
+	}
 	g_in_tx = false;
 	tm_flush_spec_allocs();
 	tm_flush_deferred_frees();

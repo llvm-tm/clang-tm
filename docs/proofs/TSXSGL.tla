@@ -32,9 +32,8 @@ ASSUME Data \subseteq Nat
 ASSUME MaxRetries \in Nat
 ASSUME MaxCommits \in Nat
 
-(* NOTE: lastSignalFence/lastThreadFence/lastRmw fence tracking exists only in the TLA+ translation below.
-   Running pcal.trans will regenerate TLA+ and LOSE all fence tracking.
-   Re-add lastSignalFence/lastThreadFence/lastRmw variable + EXCEPT updates manually after translation. *)
+(* NOTE: lastSignalFence/lastThreadFence/lastRmw fence tracking is now in the PlusCal source above.
+   Running pcal.trans will regenerate TLA+ and PRESERVE the fence tracking. *)
 (* --algorithm TSXSGL
 
 variables
@@ -46,7 +45,10 @@ variables
     txSnapshot = [t \in Thread |-> 0],
     tsxRetries = [t \in Thread |-> 0],
     txCount = [t \in Thread |-> 0],
-    aborted = [t \in Thread |-> 0];
+    aborted = [t \in Thread |-> 0],
+    lastSignalFence = [t \in Thread |-> ""],
+    lastThreadFence = [t \in Thread |-> ""],
+    lastRmw = [t \in Thread |-> ""];
 
 process ThreadProc \in Thread
 begin
@@ -58,10 +60,12 @@ L_idle:
         readSet[self] := Addr;             (* TSX hardware captures all *)
         txSnapshot[self] := sgl;
         tsxRetries[self] := 0;
+        lastSignalFence[self] := "sc";
         goto L_active;
     or \* Start SGL transaction (fallback or direct)
         await sgl = 0;
         sgl := self;
+        lastRmw[self] := "acquire";
         mode[self] := "sgl";
         readSet[self] := {};
         writeSet[self] := {};
@@ -79,12 +83,14 @@ L_active:
     either \* Read (direct load — TSX or SGL provides isolation)
         with a \in Addr do
             readSet[self] := readSet[self] \union {a};
+            lastSignalFence[self] := "sc";
         end with;
         goto L_active;
     or \* Write (direct store)
         with a \in Addr, n \in Data do
             mem[a] := n;
             writeSet[self] := writeSet[self] \union {a};
+            lastRmw[self] := "acquire";
         end with;
         goto L_active;
     or \* Commit (TSX path — re-read sgl)
@@ -93,10 +99,12 @@ L_active:
                 \* TSX commit succeeds
                 mode[self] := "idle";
                 txCount[self] := txCount[self] + 1;
+                lastRmw[self] := "release";
                 goto L_idle;
             else
                 \* TSX abort (concurrent SGL wrote to sgl)
                 aborted[self] := aborted[self] + 1;
+                lastRmw[self] := "release";
                 mode[self] := "idle";
                 readSet[self] := {};
                 writeSet[self] := {};
@@ -109,6 +117,7 @@ L_active:
         if mode[self] = "sgl" then
             await sgl = self;
             sgl := 0;
+            lastRmw[self] := "release";
             mode[self] := "idle";
             txCount[self] := txCount[self] + 1;
             goto L_idle;
@@ -127,6 +136,7 @@ L_active:
         if mode[self] = "tsx" /\ tsxRetries[self] >= MaxRetries then
             await sgl = 0;
             sgl := self;
+            lastRmw[self] := "acquire";
             mode[self] := "sgl";
             aborted[self] := aborted[self] + 1;
             goto L_active;
@@ -136,6 +146,7 @@ L_active:
     or \* TSX abort (concurrent SGL entry detected)
         if mode[self] = "tsx" /\ sgl # txSnapshot[self] then
             aborted[self] := aborted[self] + 1;
+            lastRmw[self] := "release";
             mode[self] := "idle";
             readSet[self] := {};
             writeSet[self] := {};

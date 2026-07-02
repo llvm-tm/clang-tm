@@ -40,10 +40,6 @@ OREC_RVER(o) == o[3]
 OREC_WOWNER(o) == o[4]
 MAKE_OREC(rl, wl, rv, wo) == <<rl, wl, rv, wo>>
 
-(* NOTE: lastSignalFence, lastThreadFence, lastRmw tracking exists only in the
-   TLA+ translation below.  Running pcal.trans will regenerate TLA+ and LOSE
-   all fence tracking.  Re-add these variables + EXCEPT updates manually after
-   translation. *)
 (*--algorithm SwissTM
 
 variables
@@ -51,7 +47,10 @@ variables
     orec = [a \in Addr |-> MAKE_OREC(0, 0, 0, 0)],
     mem = [a \in Addr |-> 0],
     committed = [t \in Thread |-> 0],
-    aborted = [t \in Thread |-> 0];
+    aborted = [t \in Thread |-> 0],
+    lastSignalFence = [t \in Thread |-> ""],
+    lastThreadFence = [t \in Thread |-> ""],
+    lastRmw = [t \in Thread |-> ""];
 
 process ThreadProc \in Thread
 variables
@@ -73,6 +72,9 @@ L_begin:
     readSet := {};
     writeLog := {};
     readOnly := TRUE;
+    lastSignalFence[self] := "";
+    lastThreadFence[self] := "";
+    lastRmw[self] := "";
     goto L_active;
 
 L_active:
@@ -87,6 +89,7 @@ L_active:
                 readSet := readSet \union {<<a, OREC_RVER(orec[a])>>};
             end if;
         end with;
+        lastSignalFence[self] := "sc";
         goto L_active;
     or \* Write (acquire w_lock)
         with a \in Addr, n \in Data do
@@ -96,6 +99,7 @@ L_active:
                 writeBuf[a] := n;
                 oldVal[a] := mem[a];
                 readOnly := FALSE;
+                lastRmw[self] := "acq_rel";
             end if;
         end with;
         goto L_active;
@@ -108,6 +112,7 @@ L_active:
         goto L_active;
     or \* Write (conflict — w_lock held by another)
         if \E a \in Addr : a \notin writeLog /\ OREC_WLOCK(orec[a]) = 1 /\ OREC_WOWNER(orec[a]) # self then
+            lastRmw[self] := "release";
             goto L_abort;
         else
             goto L_active;
@@ -127,6 +132,7 @@ L_active:
                 IF \E entry \in readSet : entry[1] = a
                 THEN MAKE_OREC(1, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
                 ELSE orec[a]];
+            lastSignalFence[self] := "sc";
             goto L_commit;
         else
             goto L_active;
@@ -138,6 +144,7 @@ L_commit:
     if \A <<addr, ver>> \in readSet :
         OREC_WOWNER(orec[addr]) = self \/ OREC_RVER(orec[addr]) = ver
     then
+        lastSignalFence[self] := "sc";
         goto L_commit_wb;
     else
         (* Release all locks (read + write) without bumping versions *)
@@ -149,6 +156,7 @@ L_commit:
                 ELSE orec[a]];
         readSet := {};
         writeLog := {};
+        lastRmw[self] := "release";
         goto L_abort;
     end if;
 
@@ -162,10 +170,12 @@ L_commit_wb:
         ELSE IF \E entry \in readSet : entry[1] = a
             THEN MAKE_OREC(0, OREC_WLOCK(orec[a]), OREC_RVER(orec[a]), OREC_WOWNER(orec[a]))
             ELSE orec[a]];
+    lastRmw[self] := "release";
     committed[self] := committed[self] + 1;
     goto L_idle;
 
 L_abort:
+    lastRmw[self] := "release";
     readSet := {};
     writeLog := {};
     readOnly := TRUE;

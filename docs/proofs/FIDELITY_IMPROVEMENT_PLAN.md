@@ -574,15 +574,12 @@ actions. Then re-translate and verify TLC passes.
 
 ## Recommended order
 
-1. **Phase 1** (infrastructure) — do first because all other phases depend on
-   the new `lastSignalFence`/`lastThreadFence`/`lastRmw` variables.
-2. **Phase 2** (algorithmic gaps) — highest score impact per line.
-   Done: 2.1 (NVHTM), 2.2 (NOrec), 2.3 (PersistentSGL), 2.6 (LEFTRIGHT), 2.7 (SwissTM).
-   Next: 2.4 (TL2), 2.5 (Romulus), 2.8 (XTM).
-3. **Phase 3** (add `lastFence` to remaining 9) — completed.
-4. **Phase 4** (C++ fixes) — quick wins that also improve real correctness.
-5. **Phase 6** (PlusCal desync) — important for maintainability.
-6. **Phase 5** (Rust models) — lowest priority; mostly documentation.
+1. **Phase 1** (infrastructure) — ✅ completed 2026-06-24
+2. **Phase 2** (algorithmic gaps) — ✅ completed 2026-06-29
+3. **Phase 3** (add `lastFence` to remaining 9) — ✅ completed 2026-06-30
+4. **Phase 4** (C++ fixes) — ✅ completed 2026-07-01
+5. **Phase 6** (PlusCal desync) — ✅ completed 2026-07-01
+6. **Phase 5** (Rust models) — ✅ completed 2026-07-01 (documentation only; Rust backends are architecturally close to C++, no separate TLA+ models needed)
 
 ## Target scores after all phases
 

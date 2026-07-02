@@ -232,6 +232,11 @@ public:
                     *reinterpret_cast<void**>(we.byte_addr) = we.old_value.ptr;
                     break;
             }
+            // Compiler barrier: ensure all undo-restore stores complete
+            // before the lock release.  Without this, on ARM the restore
+            // stores could be reordered after the release, exposing torn
+            // values to a concurrent reader.
+            __atomic_signal_fence(__ATOMIC_SEQ_CST);
             we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
         }
         tx->aborted = true;

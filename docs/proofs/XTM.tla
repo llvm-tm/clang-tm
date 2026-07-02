@@ -38,10 +38,10 @@ ASSUME MaxCommits \in Nat \ {0}
 
 (* ---- helpers ---- *)
 
-(* NOTE: lastSignalFence, lastThreadFence, lastRmw fence tracking exists only
-   in the TLA+ translation below. Running pcal.trans will regenerate TLA+ and
-   LOSE all fence tracking. Re-add variables + EXCEPT updates manually after
-   translation. *)
+(* NOTE: lastSignalFence, lastThreadFence, lastRmw fence tracking exists in
+   both the PlusCal source and the TLA+ translation below. Running pcal.trans
+   should preserve fence assignments; verify generated TLA+ matches the
+   existing translation below. *)
 (*--algorithm XTM
 
 variables
@@ -49,7 +49,10 @@ variables
     xadt_owner = [p \in Page |-> 0],
     xadt_version = [p \in Page |-> 0],
     committed = [t \in Thread |-> 0],
-    aborted = [t \in Thread |-> 0];
+    aborted = [t \in Thread |-> 0],
+    lastSignalFence = [t \in Thread |-> ""],
+    lastThreadFence = [t \in Thread |-> ""],
+    lastRmw = [t \in Thread |-> ""];
 
 process ThreadProc \in Thread
 variables
@@ -67,6 +70,9 @@ L_idle:
 L_begin:
     read_set := {};
     write_set := [p \in Page |-> NoWrite];
+    lastSignalFence[self] := "";
+    lastThreadFence[self] := "";
+    lastRmw[self] := "";
     goto L_active;
 
 L_active:
@@ -77,6 +83,7 @@ L_active:
         goto L_active;
     or \* Read (conflict — abort)
         if \E p \in Page : write_set[p] = NoWrite /\ xadt_owner[p] \notin {0, self} then
+            lastRmw[self] := "release";
             goto L_abort;
         else
             goto L_active;
@@ -87,6 +94,7 @@ L_active:
                 read_set := read_set \union {<<p, xadt_version[p]>>};
             end if;
         end with;
+        lastRmw[self] := "acquire";
         goto L_active;
     or \* Write (already owned — update private copy)
         with p \in Page, v \in Data do
@@ -100,6 +108,7 @@ L_active:
             if write_set[p] = NoWrite /\ xadt_owner[p] = 0 then
                 xadt_owner[p] := self;
                 write_set[p] := v;
+                lastRmw[self] := "acq_rel";
             end if;
         end with;
         goto L_active;
@@ -112,6 +121,7 @@ L_active:
         goto L_active;
     or \* Write (conflict — page owned by another)
         if \E p \in Page : write_set[p] = NoWrite /\ xadt_owner[p] \notin {0, self} then
+            lastRmw[self] := "release";
             goto L_abort;
         else
             goto L_active;
@@ -121,8 +131,10 @@ L_active:
             write_set[p] # NoWrite \/
             (xadt_version[p] = ver /\ (xadt_owner[p] = 0 \/ xadt_owner[p] = self))
         then
+            lastRmw[self] := "acquire";
             goto L_writeback;
         else
+            lastRmw[self] := "release";
             goto L_abort;
         end if;
     end either;
@@ -133,6 +145,7 @@ L_writeback:
     goto L_release;
 
 L_release:
+    lastRmw[self] := "acq_rel";
     xadt_owner := [p \in Page |->
         IF xadt_owner[p] = self THEN 0 ELSE xadt_owner[p]];
     xadt_version := [p \in Page |->
@@ -143,6 +156,7 @@ L_release:
     goto L_idle;
 
 L_abort:
+    lastRmw[self] := "release";
     xadt_owner := [p \in Page |->
         IF xadt_owner[p] = self THEN 0 ELSE xadt_owner[p]];
     read_set := {};

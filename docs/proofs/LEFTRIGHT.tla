@@ -44,7 +44,10 @@ variables
     clock = 1,
     commit_lock = 0,
     committed = [t \in Thread |-> 0],
-    aborted = [t \in Thread |-> 0];
+    aborted = [t \in Thread |-> 0],
+    lastSignalFence = [t \in Thread |-> ""],
+    lastThreadFence = [t \in Thread |-> ""],
+    lastRmw = [t \in Thread |-> ""];
 
 process ThreadProc \in Thread
 variables
@@ -66,6 +69,9 @@ L_begin:
     read_set := {};
     write_set := [a \in Addr |-> NoWrite];
     read_only := TRUE;
+    lastSignalFence[self] := "";
+    lastThreadFence[self] := "";
+    lastRmw[self] := "";
     goto L_active;
 
 L_active:
@@ -80,12 +86,14 @@ L_active:
                 read_set := read_set \union {<<a, clock, mem[a]>>};
             end if;
         end with;
+        lastSignalFence[self] := "sc";
         goto L_active;
     or \* Write
         with a \in Addr, v \in Data do
             write_set[a] := v;
             read_only := FALSE;
         end with;
+        lastRmw[self] := "acquire";
         goto L_active;
     or \* Read-only commit
         if read_only then
@@ -97,6 +105,7 @@ L_active:
     or \* Commit (acquire lock)
         if ~read_only /\ commit_lock = 0 then
             commit_lock := self;
+            lastRmw[self] := "acquire";
             goto L_validate;
         else
             goto L_active;
@@ -108,13 +117,16 @@ L_validate:
     if \A <<a, ver, val>> \in read_set :
         ver <= snapshot /\ mem[a] = val
     then
+        lastSignalFence[self] := "sc";
         goto L_inc_clock;
     else
         commit_lock := 0;
+        lastRmw[self] := "release";
         goto L_abort;
     end if;
 
 L_inc_clock:
+    lastSignalFence[self] := "sc";
     clock := clock + 1;
 
 L_write_back:
@@ -123,11 +135,13 @@ L_write_back:
     goto L_release_lock;
 
 L_release_lock:
+    lastRmw[self] := "release";
     commit_lock := 0;
     committed[self] := committed[self] + 1;
     goto L_idle;
 
 L_abort:
+    lastRmw[self] := "release";
     read_set := {};
     write_set := [a \in Addr |-> NoWrite];
     read_only := TRUE;

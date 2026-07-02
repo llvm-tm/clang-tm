@@ -45,6 +45,9 @@ pub struct TxState {
     pub read_only: bool,
     pub write_set: HashMap<usize, TypedValue>,
     pub write_backs: Vec<WriteBack>,
+    /// Read-set: (address, observed_version) pairs for OCC validation.
+    /// Populated on every read that hits main memory (not own write-set).
+    pub read_set: Vec<(usize, u64)>,
 }
 
 // ── Thread-local / simulation state ────────────────────────────
@@ -135,6 +138,7 @@ pub fn tm_begin() {
         read_only: true,
         write_set: HashMap::new(),
         write_backs: Vec::new(),
+        read_set: Vec::new(),
     });
     #[cfg(not(feature = "simulation"))]
     TX.with(|tx| { *tx.borrow_mut() = Some(t); });
@@ -177,11 +181,24 @@ pub fn tm_commit() -> bool {
         std::hint::spin_loop();
     }
 
-    // Verify no version-table entry has changed since our snapshot
+    // Verify no version-table entry has changed since our snapshot (write-set)
     for addr in tx.write_set.keys() {
         let idx = version_index(*addr);
         let ver = VERSION_TABLE[idx].load(Ordering::Acquire);
         if ver > tx.timestamp {
+            COMMIT_LOCK.store(0, Ordering::Release);
+            TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+    }
+
+    // Validate read-set: re-check every address we read during the tx.
+    // If any version changed, a concurrent writer modified the data
+    // after we read it — abort to avoid inconsistent state.
+    for (addr, recorded_ver) in &tx.read_set {
+        let idx = version_index(*addr);
+        let ver = VERSION_TABLE[idx].load(Ordering::Acquire);
+        if ver != *recorded_ver {
             COMMIT_LOCK.store(0, Ordering::Release);
             TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
             return false;
@@ -219,7 +236,22 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         return T::from_typed(&tv);
     }
 
+    // Read-validate: capture version entry BEFORE reading data.
+    // The Acquire load pairs with the Release store in tm_commit()
+    // so that we observe any concurrent commit's version bump.
+    let idx = version_index(addr);
+    let ver = VERSION_TABLE[idx].load(Ordering::Acquire);
+
     let val: T = unsafe { (addr as *const T).read() };
+
+    // Record (addr, version) for OCC commit-time validation.
+    // Skip if already in read-set (dedup to avoid re-checking the same addr).
+    with_tx(|tx| {
+        if tx.read_set.iter().all(|(a, _)| *a != addr) {
+            tx.read_set.push((addr, ver));
+        }
+    });
+
     val
 }
 

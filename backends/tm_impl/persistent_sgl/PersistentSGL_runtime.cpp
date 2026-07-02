@@ -96,42 +96,49 @@ static void* real_tm_read_ptr(void** addr) { return (void*)*addr; }
 static void real_tm_write_i1(uint8_t* addr, uint8_t val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
     if (off != (size_t)-1) persist_write(off, &val, 1);
 }
 
 static void real_tm_write_i2(uint16_t* addr, uint16_t val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
     if (off != (size_t)-1) persist_write(off, &val, 2);
 }
 
 static void real_tm_write_i4(uint32_t* addr, uint32_t val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
     if (off != (size_t)-1) persist_write(off, &val, 4);
 }
 
 static void real_tm_write_i8(uint64_t* addr, int64_t val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
     if (off != (size_t)-1) persist_write(off, &val, 8);
 }
 
 static void real_tm_write_f4(float* addr, float val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
     if (off != (size_t)-1) persist_write(off, &val, 4);
 }
 
 static void real_tm_write_f8(double* addr, double val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
     if (off != (size_t)-1) persist_write(off, &val, 8);
 }
 
 static void real_tm_write_ptr(void** addr, void* val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
     if (off != (size_t)-1) persist_write(off, &val, sizeof(void*));
 }
 

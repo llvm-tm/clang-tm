@@ -72,9 +72,6 @@ VersionOf(entry) == entry \div 2
 MakeEntry(ver) == ver * 2
 VIndex(a) == a % VSIZE
 
-(* NOTE: lastSignalFence[t], lastThreadFence[t], lastRmw[t] fence tracking exists only in the TLA+ translation below.
-   Running pcal.trans will regenerate TLA+ and LOSE all fence tracking.
-   Re-add these variables + EXCEPT updates manually after translation. *)
 (*--algorithm Romulus
 
 variables
@@ -83,7 +80,10 @@ variables
     clock = 1,
     lock = 0,
     committed = [t \in Thread |-> 0],
-    aborted = [t \in Thread |-> 0];
+    aborted = [t \in Thread |-> 0],
+    lastSignalFence = [t \in Thread |-> ""],
+    lastThreadFence = [t \in Thread |-> ""],
+    lastRmw = [t \in Thread |-> ""];
 
 process ThreadProc \in Thread
 variables
@@ -107,6 +107,9 @@ L_begin:
     write_set := [a \in Addr |-> NoWrite];
     read_only := TRUE;
     commit_ts := 0;
+    lastSignalFence[self] := "";
+    lastThreadFence[self] := "";
+    lastRmw[self] := "";
     goto L_active;
 
 L_active:
@@ -117,6 +120,7 @@ L_active:
         goto L_active;
     or \* Read (locked — abort)
         if \E a \in Addr : write_set[a] = NoWrite /\ LockBit(version[VIndex(a)]) = 1 then
+            lastRmw[self] := "release";
             goto L_abort_active;
         else
             goto L_active;
@@ -127,11 +131,13 @@ L_active:
                 read_set := read_set \union {<<a, VersionOf(version[VIndex(a)])>>};
             end if;
         end with;
+        lastSignalFence[self] := "sc";
         goto L_active;
     or \* Write
         with a \in Addr, v \in Data do
             write_set[a] := v;
             read_only := FALSE;
+            lastRmw[self] := "acquire";
         end with;
         goto L_active;
     or \* Read-only commit
@@ -144,6 +150,7 @@ L_active:
     or \* Commit (acquire lock)
         if ~read_only /\ lock = 0 then
             lock := self;
+            lastRmw[self] := "acquire";
             goto L_validate;
         else
             goto L_active;
@@ -160,41 +167,50 @@ L_validate:
             LockBit(version[VIndex(addr)]) = 0
             /\ VersionOf(version[VIndex(addr)]) = ver
     then
+        lastSignalFence[self] := "sc";
         goto L_set_lock_bits;
     else
         lock := 0;
+        lastRmw[self] := "release";
         goto L_abort_active;
     end if;
 
 L_set_lock_bits:
+    lastRmw[self] := "acq_rel";
     version := [i \in 0..VSIZE-1 |->
         IF \E a \in Addr : write_set[a] # NoWrite /\ VIndex(a) = i
         THEN version[i] + 1
         ELSE version[i]];
 
 L_inc_clock:
+    lastRmw[self] := "acq_rel";
+    lastThreadFence[self] := "sc";
     clock := clock + 1;
     commit_ts := clock;
 
 L_write_back:
+    lastThreadFence[self] := "sc";
     mem := [a \in Addr |->
         IF write_set[a] # NoWrite
         THEN write_set[a]
         ELSE mem[a]];
 
 L_update_ver:
+    lastRmw[self] := "release";
     version := [i \in 0..VSIZE-1 |->
         IF \E a \in Addr : write_set[a] # NoWrite /\ VIndex(a) = i
         THEN MakeEntry(commit_ts)
         ELSE version[i]];
 
 L_release_lock:
+    lastRmw[self] := "release";
     lock := 0;
     committed[self] := committed[self] + 1;
     goto L_idle;
 
 L_abort_active:
     (* clean up — no lock held *)
+    lastRmw[self] := "release";
     timestamp := 0;
     read_set := {};
     write_set := [a \in Addr |-> NoWrite];
