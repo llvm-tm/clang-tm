@@ -25,12 +25,13 @@
 
 EXTENDS Naturals, FiniteSets, TLC, TMTypes
 
-CONSTANTS Thread, Addr, Data, MaxRetries, MaxCommits
+CONSTANTS Thread, Addr, Data, MaxRetries, MaxCommits, TSXCapacity
 ASSUME Thread \subseteq Nat \ {0}
 ASSUME Addr \subseteq Nat
 ASSUME Data \subseteq Nat
 ASSUME MaxRetries \in Nat
 ASSUME MaxCommits \in Nat
+ASSUME TSXCapacity \in Nat \ {0}
 
 (* NOTE: lastSignalFence/lastThreadFence/lastRmw fence tracking is now in the PlusCal source above.
    Running pcal.trans will regenerate TLA+ and PRESERVE the fence tracking. *)
@@ -48,7 +49,8 @@ variables
     aborted = [t \in Thread |-> 0],
     lastSignalFence = [t \in Thread |-> ""],
     lastThreadFence = [t \in Thread |-> ""],
-    lastRmw = [t \in Thread |-> ""];
+    lastRmw = [t \in Thread |-> ""],
+    capacity = [t \in Thread |-> 0];
 
 process ThreadProc \in Thread
 begin
@@ -60,6 +62,7 @@ L_idle:
         readSet[self] := Addr;             (* TSX hardware captures all *)
         txSnapshot[self] := sgl;
         tsxRetries[self] := 0;
+        capacity[self] := TSXCapacity;     (* Remaining L1 cache-track slots *)
         lastSignalFence[self] := "sc";
         goto L_active;
     or \* Start SGL transaction (fallback or direct)
@@ -83,6 +86,9 @@ L_active:
     either \* Read (direct load — TSX or SGL provides isolation)
         with a \in Addr do
             readSet[self] := readSet[self] \union {a};
+            if mode[self] = "tsx" then
+                capacity[self] := capacity[self] - 1;
+            end if;
             lastSignalFence[self] := "sc";
         end with;
         goto L_active;
@@ -90,6 +96,9 @@ L_active:
         with a \in Addr, n \in Data do
             mem[a] := n;
             writeSet[self] := writeSet[self] \union {a};
+            if mode[self] = "tsx" then
+                capacity[self] := capacity[self] - 1;
+            end if;
             lastRmw[self] := "acquire";
         end with;
         goto L_active;
@@ -128,12 +137,14 @@ L_active:
         if mode[self] = "tsx" /\ tsxRetries[self] < MaxRetries then
             tsxRetries[self] := tsxRetries[self] + 1;
             aborted[self] := aborted[self] + 1;
+            capacity[self] := TSXCapacity;    (* L1 tracking cleared on abort *)
             goto L_active;
         else
             goto L_active;
         end if;
     or \* TSX fallback to SGL (retries exhausted)
         if mode[self] = "tsx" /\ tsxRetries[self] >= MaxRetries then
+            capacity[self] := TSXCapacity;
             await sgl = 0;
             sgl := self;
             lastRmw[self] := "acquire";
@@ -150,7 +161,20 @@ L_active:
             mode[self] := "idle";
             readSet[self] := {};
             writeSet[self] := {};
+            capacity[self] := TSXCapacity;
             goto L_idle;
+        else
+            goto L_active;
+        end if;
+    or \* TSX capacity abort (non-deterministic: HW cache tracking exhausted)
+        if mode[self] = "tsx" then
+            aborted[self] := aborted[self] + 1;
+            capacity[self] := TSXCapacity;
+            await sgl = 0;
+            sgl := self;
+            lastRmw[self] := "acquire";
+            mode[self] := "sgl";
+            goto L_active;
         else
             goto L_active;
         end if;
@@ -164,10 +188,10 @@ end process;
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "2f212a71" /\ chksum(tla) = "bef00627")
 VARIABLES pc, sgl, mem, mode, readSet, writeSet, txSnapshot, tsxRetries, 
-          txCount, lastSignalFence, lastThreadFence, lastRmw, aborted
+          txCount, lastSignalFence, lastThreadFence, lastRmw, aborted, capacity
 
 vars == << pc, sgl, mem, mode, readSet, writeSet, txSnapshot, tsxRetries, 
-            txCount, lastSignalFence, lastThreadFence, lastRmw, aborted >>
+            txCount, lastSignalFence, lastThreadFence, lastRmw, aborted, capacity >>
 
 ProcSet == (Thread)
 
@@ -184,6 +208,7 @@ Init == (* Global variables *)
         /\ lastThreadFence = [t \in Thread |-> ""]
         /\ lastRmw = [t \in Thread |-> ""]
         /\ aborted = [t \in Thread |-> 0]
+        /\ capacity = [t \in Thread |-> 0]
         /\ pc = [self \in ProcSet |-> "L_idle"]
 
 L_idle(self) == /\ pc[self] = "L_idle"
@@ -192,28 +217,30 @@ L_idle(self) == /\ pc[self] = "L_idle"
                       /\ readSet' = [readSet EXCEPT ![self] = Addr]
                       /\ txSnapshot' = [txSnapshot EXCEPT ![self] = sgl]
                       /\ tsxRetries' = [tsxRetries EXCEPT ![self] = 0]
-                      /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
-                      /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                      /\ UNCHANGED <<sgl, writeSet, lastThreadFence, lastRmw>>
+                       /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
+                       /\ capacity' = [capacity EXCEPT ![self] = TSXCapacity]
+                       /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                       /\ UNCHANGED <<sgl, writeSet, lastThreadFence, lastRmw>>
                    \/ /\ sgl = 0
                       /\ sgl' = self
                       /\ mode' = [mode EXCEPT ![self] = "sgl"]
                       /\ readSet' = [readSet EXCEPT ![self] = {}]
                       /\ writeSet' = [writeSet EXCEPT ![self] = {}]
                       /\ txSnapshot' = [txSnapshot EXCEPT ![self] = 1]
-                      /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
-                      /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                      /\ UNCHANGED <<tsxRetries, lastSignalFence, lastThreadFence>>
+                       /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                       /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                       /\ UNCHANGED <<tsxRetries, lastSignalFence, lastThreadFence, capacity>>
                     \/ /\ IF txCount[self] >= MaxCommits
                               THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
-                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                       /\ UNCHANGED <<sgl, mode, readSet, writeSet, txSnapshot, tsxRetries, lastSignalFence, lastThreadFence, lastRmw>>
-                /\ UNCHANGED << mem, txCount, aborted >>
+                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                         /\ UNCHANGED <<sgl, mode, readSet, writeSet, txSnapshot, tsxRetries, lastSignalFence, lastThreadFence, lastRmw, capacity>>
+                 /\ UNCHANGED << mem, txCount, aborted >>
 
 L_active(self) == /\ pc[self] = "L_active"
                   /\ \/ /\ \E a \in Addr:
                              /\ readSet' = [readSet EXCEPT ![self] = readSet[self] \union {a}]
                              /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
+                             /\ capacity' = [capacity EXCEPT ![self] = IF mode[self] = "tsx" THEN capacity[self] - 1 ELSE capacity[self]]
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ UNCHANGED <<sgl, mem, mode, writeSet, tsxRetries, txCount, aborted, lastThreadFence, lastRmw>>
                      \/ /\ \E a \in Addr:
@@ -221,12 +248,14 @@ L_active(self) == /\ pc[self] = "L_active"
                                /\ mem' = [mem EXCEPT ![a] = n]
                                /\ writeSet' = [writeSet EXCEPT ![self] = writeSet[self] \union {a}]
                                /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                               /\ capacity' = [capacity EXCEPT ![self] = IF mode[self] = "tsx" THEN capacity[self] - 1 ELSE capacity[self]]
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ UNCHANGED <<sgl, mode, readSet, tsxRetries, txCount, aborted, lastSignalFence, lastThreadFence>>
                       \/ /\ (IF mode[self] = "tsx"
                                THEN /\ IF sgl = txSnapshot[self]
                                           THEN /\ mode' = [mode EXCEPT ![self] = "idle"]
                                                /\ txCount' = [txCount EXCEPT ![self] = txCount[self] + 1]
+                                               /\ capacity' = [capacity EXCEPT ![self] = 0]
                                                /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                                /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                                                /\ UNCHANGED << readSet,
@@ -237,13 +266,14 @@ L_active(self) == /\ pc[self] = "L_active"
                                                /\ mode' = [mode EXCEPT ![self] = "idle"]
                                                /\ readSet' = [readSet EXCEPT ![self] = {}]
                                                /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                                               /\ capacity' = [capacity EXCEPT ![self] = TSXCapacity]
                                                /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                                /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                                                /\ UNCHANGED <<txCount, lastSignalFence, lastThreadFence>>
                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                     /\ UNCHANGED << mode, readSet, writeSet, 
-                                                    txCount, aborted, lastSignalFence, lastThreadFence, lastRmw >>)
-                         /\ UNCHANGED <<sgl, mem, tsxRetries, lastSignalFence, lastThreadFence>>
+                                                    txCount, aborted, lastSignalFence, lastThreadFence, lastRmw, capacity >>)
+                         /\ UNCHANGED <<sgl, mem, tsxRetries>>
                       \/ /\ (IF mode[self] = "sgl"
                                THEN /\ sgl = self
                                     /\ sgl' = 0
@@ -252,43 +282,59 @@ L_active(self) == /\ pc[self] = "L_active"
                                     /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                     /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                    /\ UNCHANGED << sgl, mode, txCount, lastSignalFence, lastThreadFence, lastRmw >>)
+                                    /\ UNCHANGED << sgl, mode, txCount, lastSignalFence, lastThreadFence, lastRmw, capacity >>)
                          /\ UNCHANGED <<mem, readSet, writeSet, tsxRetries, aborted, lastSignalFence, lastThreadFence>>
                       \/ /\ (IF mode[self] = "tsx" /\ tsxRetries[self] < MaxRetries
                                THEN /\ tsxRetries' = [tsxRetries EXCEPT ![self] = tsxRetries[self] + 1]
                                     /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
+                                    /\ capacity' = [capacity EXCEPT ![self] = TSXCapacity]
                                     /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                    /\ UNCHANGED << tsxRetries, aborted >>)
+                                    /\ UNCHANGED << tsxRetries, aborted, capacity >>)
                          /\ UNCHANGED <<sgl, mem, mode, readSet, writeSet, txCount, lastSignalFence, lastThreadFence, lastRmw>>
                       \/ /\ (IF mode[self] = "tsx" /\ tsxRetries[self] >= MaxRetries
-                               THEN /\ sgl = 0
+                               THEN /\ capacity' = [capacity EXCEPT ![self] = TSXCapacity]
+                                    /\ sgl = 0
                                     /\ sgl' = self
                                     /\ mode' = [mode EXCEPT ![self] = "sgl"]
                                     /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
                                     /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
                                     /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                    /\ UNCHANGED << sgl, mode, aborted, lastSignalFence, lastThreadFence, lastRmw >>)
+                                    /\ UNCHANGED << sgl, mode, aborted, lastSignalFence, lastThreadFence, lastRmw, capacity >>)
                          /\ UNCHANGED <<mem, readSet, writeSet, tsxRetries, txCount, lastSignalFence, lastThreadFence>>
                       \/ /\ (IF mode[self] = "tsx" /\ sgl # txSnapshot[self]
                                THEN /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
                                     /\ mode' = [mode EXCEPT ![self] = "idle"]
                                     /\ readSet' = [readSet EXCEPT ![self] = {}]
                                     /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                                    /\ capacity' = [capacity EXCEPT ![self] = TSXCapacity]
                                     /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                     /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                     /\ UNCHANGED << mode, readSet, writeSet, 
-                                                    aborted, lastSignalFence, lastThreadFence, lastRmw >>)
+                                                    aborted, lastSignalFence, lastThreadFence, lastRmw, capacity >>)
                          /\ UNCHANGED <<sgl, mem, tsxRetries, txCount, lastSignalFence, lastThreadFence>>
+                      \/ /\ (IF mode[self] = "tsx"
+                               THEN /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
+                                    /\ capacity' = [capacity EXCEPT ![self] = TSXCapacity]
+                                    /\ sgl = 0
+                                    /\ sgl' = self
+                                    /\ mode' = [mode EXCEPT ![self] = "sgl"]
+                                    /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                                    /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                    /\ UNCHANGED << readSet, writeSet, txCount, lastSignalFence, lastThreadFence >>
+                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                    /\ UNCHANGED << mode, readSet, writeSet, aborted, 
+                                                    txCount, lastSignalFence, lastThreadFence, lastRmw, capacity >>)
+                         /\ UNCHANGED <<sgl, mem, tsxRetries>>
                   /\ UNCHANGED txSnapshot
 
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
                 /\ UNCHANGED << sgl, mem, mode, readSet, writeSet, txSnapshot, 
-                                tsxRetries, txCount, lastSignalFence, lastThreadFence, lastRmw, aborted >>
+                                tsxRetries, txCount, lastSignalFence, lastThreadFence, lastRmw, aborted, capacity >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_done(self)
 

@@ -29,12 +29,16 @@ CONSTANTS
     Thread,             (* Set of thread IDs *)
     Page,               (* Set of page numbers *)
     Data,               (* Set of possible data values *)
-    MaxCommits          (* Max commits per thread for bounded model *)
+    MaxCommits,         (* Max commits per thread for bounded model *)
+    ASpace,             (* Address space types *)
+    addrSpace           (* [Page -> ASpace] — page address classification *)
 
 ASSUME Thread \subseteq Nat \ {0}
 ASSUME Page \subseteq Nat
 ASSUME Data \subseteq Nat
 ASSUME MaxCommits \in Nat \ {0}
+ASSUME ASpace \subseteq {"Region", "Stack"}
+ASSUME addrSpace \in [Page -> ASpace]
 
 (* ---- helpers ---- *)
 
@@ -52,7 +56,8 @@ variables
     aborted = [t \in Thread |-> 0],
     lastSignalFence = [t \in Thread |-> ""],
     lastThreadFence = [t \in Thread |-> ""],
-    lastRmw = [t \in Thread |-> ""];
+    lastRmw = [t \in Thread |-> ""],
+    queueMode = [t \in Thread |-> FALSE];
 
 process ThreadProc \in Thread
 variables
@@ -73,6 +78,11 @@ L_begin:
     lastSignalFence[self] := "";
     lastThreadFence[self] := "";
     lastRmw[self] := "";
+    either
+        queueMode[self] := TRUE;
+    or
+        queueMode[self] := FALSE;
+    end either;
     goto L_active;
 
 L_active:
@@ -81,53 +91,72 @@ L_active:
             if write_set[p] # NoWrite then skip; end if;
         end with;
         goto L_active;
-    or \* Read (conflict — abort)
-        if \E p \in Page : write_set[p] = NoWrite /\ xadt_owner[p] \notin {0, self} then
+    or \* Stack read (direct, no TM tracking)
+        with p \in Page do
+            if addrSpace[p] = "Stack" /\ write_set[p] = NoWrite then skip; end if;
+        end with;
+        goto L_active;
+    or \* Region read (conflict — abort)
+        if \E p \in Page : addrSpace[p] = "Region" /\ write_set[p] = NoWrite /\ xadt_owner[p] \notin {0, self} then
             lastRmw[self] := "release";
             goto L_abort;
         else
             goto L_active;
         end if;
-    or \* Read (record version)
+    or \* Region read (record version)
         with p \in Page do
-            if write_set[p] = NoWrite /\ xadt_owner[p] \in {0, self} then
+            if addrSpace[p] = "Region" /\ write_set[p] = NoWrite /\ xadt_owner[p] \in {0, self} then
                 read_set := read_set \union {<<p, xadt_version[p]>>};
             end if;
         end with;
         lastRmw[self] := "acquire";
         goto L_active;
-    or \* Write (already owned — update private copy)
+    or \* Region write (already owned — update private copy)
         with p \in Page, v \in Data do
-            if write_set[p] # NoWrite then
+            if addrSpace[p] = "Region" /\ write_set[p] # NoWrite then
                 write_set[p] := v;
             end if;
         end with;
         goto L_active;
-    or \* Write (acquire ownership from free)
+    or \* Region write (acquire ownership from free)
         with p \in Page, v \in Data do
-            if write_set[p] = NoWrite /\ xadt_owner[p] = 0 then
+            if addrSpace[p] = "Region" /\ write_set[p] = NoWrite /\ xadt_owner[p] = 0 then
                 xadt_owner[p] := self;
                 write_set[p] := v;
                 lastRmw[self] := "acq_rel";
             end if;
         end with;
         goto L_active;
-    or \* Write (already owned by self — but not in write-set yet)
+    or \* Region write (already owned by self — not in write-set yet)
         with p \in Page, v \in Data do
-            if write_set[p] = NoWrite /\ xadt_owner[p] = self then
+            if addrSpace[p] = "Region" /\ write_set[p] = NoWrite /\ xadt_owner[p] = self then
                 write_set[p] := v;
             end if;
         end with;
         goto L_active;
-    or \* Write (conflict — page owned by another)
-        if \E p \in Page : write_set[p] = NoWrite /\ xadt_owner[p] \notin {0, self} then
+    or \* Region write (conflict — page owned by another)
+        if \E p \in Page : addrSpace[p] = "Region" /\ write_set[p] = NoWrite /\ xadt_owner[p] \notin {0, self} then
             lastRmw[self] := "release";
             goto L_abort;
         else
             goto L_active;
         end if;
-    or \* Validate and commit
-        if \A <<p, ver>> \in read_set :
+    or \* Stack write (direct, no TM tracking)
+        with p \in Page, v \in Data do
+            if addrSpace[p] = "Stack" then
+                mem[p] := v;
+            end if;
+        end with;
+        goto L_active;
+    or \* Validate and commit (queue mode — skip read-set validation)
+        if queueMode[self] then
+            lastRmw[self] := "acquire";
+            goto L_writeback;
+        else
+            goto L_active;
+        end if;
+    or \* Validate and commit (normal mode — full validation)
+        if ~queueMode[self] /\ \A <<p, ver>> \in read_set :
             write_set[p] # NoWrite \/
             (xadt_version[p] = ver /\ (xadt_owner[p] = 0 \/ xadt_owner[p] = self))
         then
@@ -173,10 +202,10 @@ end algorithm; *)
 
 \* BEGIN TRANSLATION
 VARIABLES pc, mem, xadt_owner, xadt_version, committed, aborted, lastSignalFence, 
-          lastThreadFence, lastRmw, read_set, write_set
+           lastThreadFence, lastRmw, queueMode, read_set, write_set
 
 vars == << pc, mem, xadt_owner, xadt_version, committed, aborted, lastSignalFence, 
-           lastThreadFence, lastRmw, read_set, write_set >>
+           lastThreadFence, lastRmw, queueMode, read_set, write_set >>
 
 ProcSet == (Thread)
 
@@ -189,17 +218,18 @@ Init == (* Global variables *)
         /\ lastSignalFence = [t \in Thread |-> ""]
         /\ lastThreadFence = [t \in Thread |-> ""]
         /\ lastRmw = [t \in Thread |-> ""]
+        /\ queueMode = [t \in Thread |-> FALSE]
         (* Process ThreadProc *)
         /\ read_set = [self \in Thread |-> {}]
         /\ write_set = [self \in Thread |-> [p \in Page |-> NoWrite]]
         /\ pc = [self \in ProcSet |-> "L_idle"]
 
 L_idle(self) == /\ pc[self] = "L_idle"
-                /\ IF committed[self] >= MaxCommits
-                      THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
-                      ELSE /\ pc' = [pc EXCEPT ![self] = "L_begin"]
-                /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
-                                aborted, lastSignalFence, lastThreadFence, lastRmw, read_set, write_set >>
+                 /\ IF committed[self] >= MaxCommits
+                       THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
+                       ELSE /\ pc' = [pc EXCEPT ![self] = "L_begin"]
+                 /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
+                                 aborted, lastSignalFence, lastThreadFence, lastRmw, queueMode, read_set, write_set >>
 
 L_begin(self) == /\ pc[self] = "L_begin"
                  /\ read_set' = [read_set EXCEPT ![self] = {}]
@@ -207,109 +237,132 @@ L_begin(self) == /\ pc[self] = "L_begin"
                  /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = ""]
                  /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
                  /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
+                 /\ \/ /\ queueMode' = [queueMode EXCEPT ![self] = TRUE]
+                    \/ /\ queueMode' = [queueMode EXCEPT ![self] = FALSE]
                  /\ pc' = [pc EXCEPT ![self] = "L_active"]
                  /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
                                  aborted >>
 
 L_active(self) == /\ pc[self] = "L_active"
-                  /\ \/ /\ \E p \in Page:
-                             IF write_set[self][p] # NoWrite
-                                THEN /\ TRUE
-                                ELSE /\ TRUE
-                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED << xadt_owner, lastSignalFence, lastThreadFence, lastRmw, read_set, write_set >>
-                     \/ /\ IF \E p \in Page : write_set[self][p] = NoWrite /\ xadt_owner[p] \notin {0, self}
-                              THEN /\ pc' = [pc EXCEPT ![self] = "L_abort"]
-                                   /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
-                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                   /\ UNCHANGED <<lastSignalFence, lastThreadFence, lastRmw>>
-                        /\ UNCHANGED <<xadt_owner, lastSignalFence, lastThreadFence, read_set, write_set>>
-                     \/ /\ \E p \in Page:
-                              IF write_set[self][p] = NoWrite /\ xadt_owner[p] \in {0, self}
-                                 THEN /\ read_set' = [read_set EXCEPT ![self] = read_set[self] \union {<<p, xadt_version[p]>>}]
-                                  ELSE /\ TRUE
-                                       /\ UNCHANGED read_set
-                         /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                   /\ \/ /\ \E p \in Page:
+                              IF write_set[self][p] # NoWrite
+                                 THEN /\ TRUE
+                                 ELSE /\ TRUE
                          /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                         /\ UNCHANGED <<xadt_owner, write_set, lastSignalFence, lastThreadFence>>
-                     \/ /\ \E p \in Page:
-                             \E v \in Data:
-                               IF write_set[self][p] # NoWrite
-                                  THEN /\ write_set' = [write_set EXCEPT ![self][p] = v]
-                                  ELSE /\ TRUE
-                                       /\ UNCHANGED write_set
-                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED << xadt_owner, lastSignalFence, lastThreadFence, lastRmw, read_set >>
-                     \/ /\ \E p \in Page:
-                             \E v \in Data:
-                               IF write_set[self][p] = NoWrite /\ xadt_owner[p] = 0
-                                  THEN /\ xadt_owner' = [xadt_owner EXCEPT ![p] = self]
-                                       /\ write_set' = [write_set EXCEPT ![self][p] = v]
-                                        /\ lastRmw' = [lastRmw EXCEPT ![self] = "acq_rel"]
+                         /\ UNCHANGED << xadt_owner, lastSignalFence, lastThreadFence, lastRmw, read_set, write_set >>
+                      \/ /\ \E p \in Page:
+                              IF addrSpace[p] = "Stack" /\ write_set[self][p] = NoWrite
+                                 THEN /\ TRUE
+                                 ELSE /\ TRUE
+                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                         /\ UNCHANGED << xadt_owner, lastSignalFence, lastThreadFence, lastRmw, read_set, write_set >>
+                      \/ /\ IF \E p \in Page : addrSpace[p] = "Region" /\ write_set[self][p] = NoWrite /\ xadt_owner[p] \notin {0, self}
+                               THEN /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                                    /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
+                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                    /\ UNCHANGED <<lastSignalFence, lastThreadFence, lastRmw>>
+                         /\ UNCHANGED <<xadt_owner, lastSignalFence, lastThreadFence, read_set, write_set>>
+                      \/ /\ \E p \in Page:
+                               IF addrSpace[p] = "Region" /\ write_set[self][p] = NoWrite /\ xadt_owner[p] \in {0, self}
+                                  THEN /\ read_set' = [read_set EXCEPT ![self] = read_set[self] \union {<<p, xadt_version[p]>>}]
                                    ELSE /\ TRUE
-                                       /\ UNCHANGED << xadt_owner, write_set, lastSignalFence, lastThreadFence, lastRmw >>
-                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED <<read_set, lastSignalFence, lastThreadFence>>
-                     \/ /\ \E p \in Page:
-                             \E v \in Data:
-                               IF write_set[self][p] = NoWrite /\ xadt_owner[p] = self
-                                  THEN /\ write_set' = [write_set EXCEPT ![self][p] = v]
-                                  ELSE /\ TRUE
-                                       /\ UNCHANGED write_set
-                        /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                        /\ UNCHANGED << xadt_owner, lastSignalFence, lastThreadFence, lastRmw, read_set >>
-                     \/ /\ IF \E p \in Page : write_set[self][p] = NoWrite /\ xadt_owner[p] \notin {0, self}
-                              THEN /\ pc' = [pc EXCEPT ![self] = "L_abort"]
-                                   /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
-                              ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                   /\ UNCHANGED <<lastSignalFence, lastThreadFence, lastRmw>>
-                        /\ UNCHANGED <<xadt_owner, lastSignalFence, lastThreadFence, read_set, write_set>>
-                     \/ /\ IF \A <<p, ver>> \in read_set[self] :
-                               write_set[self][p] # NoWrite \/
-                               (xadt_version[p] = ver /\ (xadt_owner[p] = 0 \/ xadt_owner[p] = self))
+                                        /\ UNCHANGED read_set
+                          /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                          /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                          /\ UNCHANGED <<xadt_owner, write_set, lastSignalFence, lastThreadFence>>
+                      \/ /\ \E p \in Page:
+                              \E v \in Data:
+                                IF addrSpace[p] = "Region" /\ write_set[self][p] # NoWrite
+                                   THEN /\ write_set' = [write_set EXCEPT ![self][p] = v]
+                                   ELSE /\ TRUE
+                                        /\ UNCHANGED write_set
+                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                         /\ UNCHANGED << xadt_owner, lastSignalFence, lastThreadFence, lastRmw, read_set >>
+                      \/ /\ \E p \in Page:
+                              \E v \in Data:
+                                IF addrSpace[p] = "Region" /\ write_set[self][p] = NoWrite /\ xadt_owner[p] = 0
+                                   THEN /\ xadt_owner' = [xadt_owner EXCEPT ![p] = self]
+                                        /\ write_set' = [write_set EXCEPT ![self][p] = v]
+                                        /\ lastRmw' = [lastRmw EXCEPT ![self] = "acq_rel"]
+                                    ELSE /\ TRUE
+                                        /\ UNCHANGED << xadt_owner, write_set, lastSignalFence, lastThreadFence, lastRmw >>
+                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                         /\ UNCHANGED <<read_set, lastSignalFence, lastThreadFence>>
+                      \/ /\ \E p \in Page:
+                              \E v \in Data:
+                                IF addrSpace[p] = "Region" /\ write_set[self][p] = NoWrite /\ xadt_owner[p] = self
+                                   THEN /\ write_set' = [write_set EXCEPT ![self][p] = v]
+                                   ELSE /\ TRUE
+                                        /\ UNCHANGED write_set
+                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                         /\ UNCHANGED << xadt_owner, lastSignalFence, lastThreadFence, lastRmw, read_set >>
+                      \/ /\ IF \E p \in Page : addrSpace[p] = "Region" /\ write_set[self][p] = NoWrite /\ xadt_owner[p] \notin {0, self}
+                               THEN /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                                    /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
+                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                    /\ UNCHANGED <<lastSignalFence, lastThreadFence, lastRmw>>
+                         /\ UNCHANGED <<xadt_owner, lastSignalFence, lastThreadFence, read_set, write_set>>
+                      \/ /\ \E p \in Page:
+                              \E v \in Data:
+                                IF addrSpace[p] = "Stack"
+                                   THEN /\ mem' = [mem EXCEPT ![p] = v]
+                                   ELSE /\ TRUE
+                                        /\ UNCHANGED mem
+                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                         /\ UNCHANGED << xadt_owner, lastSignalFence, lastThreadFence, lastRmw, read_set, write_set >>
+                      \/ /\ IF queueMode[self]
                                THEN /\ pc' = [pc EXCEPT ![self] = "L_writeback"]
-                                     /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
-                                     /\ UNCHANGED <<lastSignalFence, lastThreadFence>>
-                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_abort"]
-                                      /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
+                                    /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                                    /\ UNCHANGED <<lastSignalFence, lastThreadFence>>
+                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
+                                    /\ UNCHANGED <<lastSignalFence, lastThreadFence, lastRmw>>
+                         /\ UNCHANGED <<xadt_owner, read_set, write_set>>
+                      \/ /\ IF ~queueMode[self] /\ \A <<p, ver>> \in read_set[self] :
+                                write_set[self][p] # NoWrite \/
+                                (xadt_version[p] = ver /\ (xadt_owner[p] = 0 \/ xadt_owner[p] = self))
+                                THEN /\ pc' = [pc EXCEPT ![self] = "L_writeback"]
+                                      /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
                                       /\ UNCHANGED <<lastSignalFence, lastThreadFence>>
-                        /\ UNCHANGED <<xadt_owner, read_set, write_set>>
-                  /\ UNCHANGED << mem, xadt_version, committed, aborted >>
+                                 ELSE /\ pc' = [pc EXCEPT ![self] = "L_abort"]
+                                       /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
+                                       /\ UNCHANGED <<lastSignalFence, lastThreadFence>>
+                         /\ UNCHANGED <<xadt_owner, read_set, write_set>>
+                   /\ UNCHANGED << mem, xadt_version, committed, aborted, queueMode >>
 
 L_writeback(self) == /\ pc[self] = "L_writeback"
-                     /\ mem' =    [p \in Page |->
-                               IF write_set[self][p] # NoWrite THEN write_set[self][p] ELSE mem[p]]
-                     /\ pc' = [pc EXCEPT ![self] = "L_release"]
-                     /\ UNCHANGED << xadt_owner, xadt_version, committed, 
-                                     aborted, lastSignalFence, lastThreadFence, lastRmw, read_set, write_set >>
+                      /\ mem' =    [p \in Page |->
+                                IF write_set[self][p] # NoWrite THEN write_set[self][p] ELSE mem[p]]
+                      /\ pc' = [pc EXCEPT ![self] = "L_release"]
+                      /\ UNCHANGED << xadt_owner, xadt_version, committed, 
+                                      aborted, lastSignalFence, lastThreadFence, lastRmw, queueMode, read_set, write_set >>
 
 L_release(self) == /\ pc[self] = "L_release"
-                    /\ lastRmw' = [lastRmw EXCEPT ![self] = "acq_rel"]
-                   /\ xadt_owner' =           [p \in Page |->
-                                    IF xadt_owner[p] = self THEN 0 ELSE xadt_owner[p]]
-                   /\ xadt_version' =             [p \in Page |->
-                                      IF write_set[self][p] # NoWrite THEN xadt_version[p] + 1 ELSE xadt_version[p]]
-                   /\ read_set' = [read_set EXCEPT ![self] = {}]
-                   /\ write_set' = [write_set EXCEPT ![self] = [p \in Page |-> NoWrite]]
-                   /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
-                   /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                   /\ UNCHANGED << mem, aborted, lastSignalFence, lastThreadFence >>
+                     /\ lastRmw' = [lastRmw EXCEPT ![self] = "acq_rel"]
+                    /\ xadt_owner' =           [p \in Page |->
+                                     IF xadt_owner[p] = self THEN 0 ELSE xadt_owner[p]]
+                    /\ xadt_version' =             [p \in Page |->
+                                       IF write_set[self][p] # NoWrite THEN xadt_version[p] + 1 ELSE xadt_version[p]]
+                    /\ read_set' = [read_set EXCEPT ![self] = {}]
+                    /\ write_set' = [write_set EXCEPT ![self] = [p \in Page |-> NoWrite]]
+                    /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
+                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                    /\ UNCHANGED << mem, aborted, lastSignalFence, lastThreadFence, queueMode >>
 
 L_abort(self) == /\ pc[self] = "L_abort"
-                 /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
-                 /\ xadt_owner' =           [p \in Page |->
-                                  IF xadt_owner[p] = self THEN 0 ELSE xadt_owner[p]]
-                 /\ read_set' = [read_set EXCEPT ![self] = {}]
-                 /\ write_set' = [write_set EXCEPT ![self] = [p \in Page |-> NoWrite]]
-                 /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
-                 /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                 /\ UNCHANGED << mem, xadt_version, committed, lastSignalFence, lastThreadFence >>
+                  /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
+                  /\ xadt_owner' =           [p \in Page |->
+                                   IF xadt_owner[p] = self THEN 0 ELSE xadt_owner[p]]
+                  /\ read_set' = [read_set EXCEPT ![self] = {}]
+                  /\ write_set' = [write_set EXCEPT ![self] = [p \in Page |-> NoWrite]]
+                  /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
+                  /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                  /\ UNCHANGED << mem, xadt_version, committed, lastSignalFence, lastThreadFence, queueMode >>
 
 L_done(self) == /\ pc[self] = "L_done"
-                /\ TRUE
-                /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
-                                aborted, lastSignalFence, lastThreadFence, lastRmw, read_set, write_set >>
+                 /\ TRUE
+                 /\ pc' = [pc EXCEPT ![self] = "Done"]
+                 /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
+                                 aborted, lastSignalFence, lastThreadFence, lastRmw, queueMode, read_set, write_set >>
 
 ThreadProc(self) == L_idle(self) \/ L_begin(self) \/ L_active(self)
                        \/ L_writeback(self) \/ L_release(self)
@@ -369,6 +422,22 @@ NoDirtyRead ==
 (* I7: Every thread with a non-empty write-set has issued a fence *)
 FenceFidelity == TMTypes!FenceFidelityPA(Thread, write_set, lastSignalFence, lastThreadFence, lastRmw)
 
+(* I8: Stack pages are never in the write-set *)
+NoStackWrite ==
+    \A t \in Thread, p \in Page :
+        addrSpace[p] = "Stack" => write_set[t][p] = NoWrite
+
+(* I9: Stack pages are never in the read-set *)
+NoStackRead ==
+    \A t \in Thread :
+        \A pair \in read_set[t] :
+            addrSpace[pair[1]] # "Stack"
+
+(* I10: Queue-mode transactions have empty read-sets *)
+QueueModeEmptyReadSet ==
+    \A t \in Thread :
+        queueMode[t] => read_set[t] = {}
+
 (* Combined invariant for TLC *)
 Inv ==
     /\ PageOwnershipExclusion
@@ -378,6 +447,9 @@ Inv ==
     /\ VersionNonNegative
     /\ NoDirtyRead
     /\ FenceFidelity
+    /\ NoStackWrite
+    /\ NoStackRead
+    /\ QueueModeEmptyReadSet
 
 (* Constraint for bounded model checking *)
 ModelBound == \A t \in Thread : aborted[t] <= MaxCommits * 2

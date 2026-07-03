@@ -12,13 +12,24 @@
  *   - write(a, n): buffer (a, n) in write-set.
  *   - commit():
  *       1. If read-only: increment committed count, return to idle.
- *       2. Acquire locks on all write-set addresses (sorted order).
- *       3. Increment global clock G → c.
- *       4. Validate read-set: guard.version == observed for all entries.
- *          On mismatch: release locks, abort (no committed increment).
+ *       2. Acquire locks on write-set addresses ONE AT A TIME (sorted
+ *          order in C++; non-deterministic order here).  If any address
+ *          is already locked, release all acquired so far and abort.
+ *       3. Increment global clock G -> c.
+ *       4. Validate read-set: for entries NOT in our write-set, check
+ *          guard.version == observed.  Entries we wrote are excluded
+ *          (we already hold the lock).
  *       5. Write buffered values to memory.
  *       6. Release locks with version = c.
  *       7. Increment committed count.
+ *
+ * Fidelity notes:
+ *   - Lock acquisition is incremental (per-address CAS), not atomic bulk.
+ *     This matches C++ tl2.hpp which iterates write_set entries one at a
+ *     time via try_acquire_guard().
+ *   - lock_addrs[t] tracks addresses whose guard has been acquired in the
+ *     current commit.  On any acquisition failure, all acquired guards
+ *     are released and the transaction aborts.
  *)
 
 EXTENDS Naturals, FiniteSets, TLC, TMTypes
@@ -42,6 +53,8 @@ variables
     snapshot = [t \in Thread |-> 0],
     readOnly = [t \in Thread |-> TRUE],
     committed = [t \in Thread |-> 0],
+    \* Tracks addresses locked so far in this commit (incremental acquisition)
+    locked_addrs = [t \in Thread |-> {}],
     lastSignalFence = [t \in Thread |-> ""],
     lastThreadFence = [t \in Thread |-> ""],
     lastRmw = [t \in Thread |-> ""];
@@ -55,6 +68,7 @@ L_idle:
         snapshot[self] := clock;
         readSet[self] := {};
         writeSet[self] := {};
+        locked_addrs[self] := {};
         readOnly[self] := TRUE;
         lastSignalFence[self] := "";
         lastThreadFence[self] := "";
@@ -89,38 +103,64 @@ L_active:
         else
             goto L_active;
         end if;
-    or \* Commit Phase 1: acquire locks
-        if ~readOnly[self] /\ writeSet[self] # {}
-           /\ \A a \in writeSet[self] : LockBit(guard[a]) = 0 then
-            guard := [a \in Addr |->
-                IF a \in writeSet[self]
-                THEN MakeEntry(VersionOf(guard[a])) + 1
-                ELSE guard[a]];
-            state[self] := "committing";
-            lastRmw[self] := "acquire";
-            goto L_incClock;
+    or \* Commit Phase 1: start lock acquisition
+        if ~readOnly[self] /\ writeSet[self] # {} then
+            goto L_locking;
         else
             goto L_active;
         end if;
     end either;
+
+L_locking:
+    if locked_addrs[self] = writeSet[self] then
+        \* All write-set addresses locked; proceed.
+        state[self] := "committing";
+        goto L_incClock;
+    else
+        with a \in writeSet[self] \ locked_addrs[self] do
+            if LockBit(guard[a]) = 0 then
+                guard[a] := MakeEntry(VersionOf(guard[a])) + 1;
+                locked_addrs[self] := locked_addrs[self] \union {a};
+                lastRmw[self] := "acquire";
+                goto L_locking;
+            else
+                \* Address already locked by another thread: release all, abort
+                guard := [x \in Addr |->
+                    IF x \in locked_addrs[self]
+                    THEN MakeEntry(VersionOf(guard[x]))
+                    ELSE guard[x]];
+                readSet[self] := {};
+                writeSet[self] := {};
+                locked_addrs[self] := {};
+                state[self] := "idle";
+                goto L_idle;
+            end if;
+        end with;
+    end if;
 
 L_incClock:
     lastRmw[self] := "release";
     clock := clock + 1;
 
 L_validate:
-    if \A <<a, v>> \in readSet[self] : /\ LockBit(guard[a]) = 0
-                                        /\ VersionOf(guard[a]) = v then
+    \* Check read-set entries not in our write-set (we own those guards).
+    \* Our own locked guards have LockBit=1 but are safe — we control them.
+    if \A <<a, v>> \in readSet[self] :
+        (LockBit(guard[a]) = 0 \/ a \in locked_addrs[self]) /\
+        VersionOf(guard[a]) = v
+    then
         lastSignalFence[self] := "sc";
         state[self] := "committing_v";
         goto L_writeBack;
     else
-        guard := [a \in Addr |->
-            IF a \in writeSet[self]
-            THEN MakeEntry(VersionOf(guard[a]))
-            ELSE guard[a]];
+        \* Release our guards, abort
+        guard := [x \in Addr |->
+            IF x \in locked_addrs[self]
+            THEN MakeEntry(VersionOf(guard[x]))
+            ELSE guard[x]];
         readSet[self] := {};
         writeSet[self] := {};
+        locked_addrs[self] := {};
         lastRmw[self] := "release";
         state[self] := "idle";
         goto L_idle;
@@ -136,13 +176,14 @@ L_writeBack:
 L_release:
     lastRmw[self] := "release";
     guard := [a \in Addr |->
-        IF a \in writeSet[self]
+        IF a \in locked_addrs[self]
         THEN MakeEntry(clock)
         ELSE guard[a]];
     committed[self] := committed[self] + 1;
     state[self] := "idle";
     readSet[self] := {};
     writeSet[self] := {};
+    locked_addrs[self] := {};
     goto L_idle;
 
 L_done:
@@ -153,10 +194,11 @@ end process;
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "8e926f83" /\ chksum(tla) = "db4e9901")
 VARIABLES pc, clock, guard, mem, state, readSet, writeSet, writeBuf, snapshot, 
-          readOnly, committed, lastSignalFence, lastThreadFence, lastRmw
+          readOnly, committed, locked_addrs, lastSignalFence, lastThreadFence, lastRmw
 
 vars == << pc, clock, guard, mem, state, readSet, writeSet, writeBuf, 
-           snapshot, readOnly, committed, lastSignalFence, lastThreadFence, lastRmw >>
+           snapshot, readOnly, committed, locked_addrs,
+           lastSignalFence, lastThreadFence, lastRmw >>
 
 ProcSet == (Thread)
 
@@ -171,6 +213,7 @@ Init == (* Global variables *)
         /\ snapshot = [t \in Thread |-> 0]
         /\ readOnly = [t \in Thread |-> TRUE]
         /\ committed = [t \in Thread |-> 0]
+        /\ locked_addrs = [t \in Thread |-> {}]
         /\ lastSignalFence = [t \in Thread |-> ""]
         /\ lastThreadFence = [t \in Thread |-> ""]
         /\ lastRmw = [t \in Thread |-> ""]
@@ -182,14 +225,15 @@ L_idle(self) == /\ pc[self] = "L_idle"
                            /\ snapshot' = [snapshot EXCEPT ![self] = clock]
                            /\ readSet' = [readSet EXCEPT ![self] = {}]
                            /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                           /\ locked_addrs' = [locked_addrs EXCEPT ![self] = {}]
                            /\ readOnly' = [readOnly EXCEPT ![self] = TRUE]
                            /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = ""]
                            /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
                            /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
                            /\ pc' = [pc EXCEPT ![self] = "L_active"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "L_done"]
-                            /\ UNCHANGED << state, readSet, writeSet, snapshot, 
-                                            readOnly, lastSignalFence, 
+                            /\ UNCHANGED << state, readSet, writeSet, locked_addrs,
+                                            snapshot, readOnly, lastSignalFence, 
                                             lastThreadFence, lastRmw >>
                 /\ UNCHANGED << clock, guard, mem, writeBuf, committed >>
 
@@ -201,7 +245,8 @@ L_active(self) == /\ pc[self] = "L_active"
                                      /\ UNCHANGED readSet
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ lastRmw' = [lastRmw EXCEPT ![self] = "seq_cst"]
-                        /\ UNCHANGED <<guard, state, writeSet, writeBuf, readOnly, committed>>
+                        /\ UNCHANGED <<guard, state, writeSet, writeBuf, readOnly,
+                                        locked_addrs, committed>>
                       \/ /\ \E a \in Addr:
                               \E n \in 0..MAX_COMMIT:
                                 /\ writeSet' = [writeSet EXCEPT ![self] = writeSet[self] \union {a}]
@@ -209,7 +254,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                 /\ readOnly' = [readOnly EXCEPT ![self] = FALSE]
                                 /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
                          /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                         /\ UNCHANGED <<guard, state, readSet, committed>>
+                         /\ UNCHANGED <<guard, state, readSet, locked_addrs, committed>>
                      \/ /\ IF readOnly[self]
                               THEN /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                                    /\ state' = [state EXCEPT ![self] = "idle"]
@@ -217,49 +262,69 @@ L_active(self) == /\ pc[self] = "L_active"
                                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                    /\ UNCHANGED << state, readSet, committed >>
-                        /\ UNCHANGED <<guard, writeSet, writeBuf, readOnly, 
+                        /\ UNCHANGED <<guard, writeSet, writeBuf, readOnly, locked_addrs,
                                          lastSignalFence, lastThreadFence, lastRmw>>
                      \/ /\ IF ~readOnly[self] /\ writeSet[self] # {}
-                              /\ \A a \in writeSet[self] : LockBit(guard[a]) = 0
-                              THEN /\ guard' =      [a \in Addr |->
-                                               IF a \in writeSet[self]
-                                               THEN MakeEntry(VersionOf(guard[a])) + 1
-                                               ELSE guard[a]]
-                                   /\ state' = [state EXCEPT ![self] = "committing"]
-                                   /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
-                                   /\ pc' = [pc EXCEPT ![self] = "L_incClock"]
+                              THEN /\ pc' = [pc EXCEPT ![self] = "L_locking"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                   /\ UNCHANGED << guard, state, lastSignalFence, 
-                                                    lastThreadFence, lastRmw >>
-                        /\ UNCHANGED <<readSet, writeSet, writeBuf, readOnly, committed>>
+                        /\ UNCHANGED <<guard, state, readSet, writeSet, writeBuf,
+                                        readOnly, committed, lastSignalFence,
+                                        lastThreadFence, lastRmw, locked_addrs>>
                   /\ UNCHANGED << clock, mem, snapshot >>
 
+L_locking(self) == /\ pc[self] = "L_locking"
+                   /\ IF locked_addrs[self] = writeSet[self]
+                         THEN /\ state' = [state EXCEPT ![self] = "committing"]
+                              /\ pc' = [pc EXCEPT ![self] = "L_incClock"]
+                              /\ UNCHANGED << guard, readSet, writeSet, locked_addrs >>
+                         ELSE /\ \E a \in writeSet[self] \ locked_addrs[self]:
+                                   IF LockBit(guard[a]) = 0
+                                      THEN /\ guard' = [guard EXCEPT ![a] = MakeEntry(VersionOf(guard[a])) + 1]
+                                           /\ locked_addrs' = [locked_addrs EXCEPT ![self] = locked_addrs[self] \union {a}]
+                                           /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
+                                           /\ pc' = [pc EXCEPT ![self] = "L_locking"]
+                                           /\ UNCHANGED << state, readSet, writeSet >>
+                                      ELSE /\ guard' = [x \in Addr |->
+                                                   IF x \in locked_addrs[self]
+                                                   THEN MakeEntry(VersionOf(guard[x]))
+                                                   ELSE guard[x]]
+                                           /\ readSet' = [readSet EXCEPT ![self] = {}]
+                                           /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                                           /\ locked_addrs' = [locked_addrs EXCEPT ![self] = {}]
+                                           /\ state' = [state EXCEPT ![self] = "idle"]
+                                           /\ pc' = [pc EXCEPT ![self] = "L_idle"]
+                                           /\ UNCHANGED lastRmw
+                   /\ UNCHANGED << clock, mem, writeBuf, snapshot, readOnly, 
+                                   committed, lastSignalFence, lastThreadFence >>
+
 L_incClock(self) == /\ pc[self] = "L_incClock"
-                     /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
-                     /\ clock' = clock + 1
-                     /\ pc' = [pc EXCEPT ![self] = "L_validate"]
-                     /\ UNCHANGED << guard, mem, state, readSet, writeSet, 
-                                     writeBuf, snapshot, readOnly, committed, 
-                                     lastSignalFence, lastThreadFence >>
+                    /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
+                    /\ clock' = clock + 1
+                    /\ pc' = [pc EXCEPT ![self] = "L_validate"]
+                    /\ UNCHANGED << guard, mem, state, readSet, writeSet, locked_addrs,
+                                    writeBuf, snapshot, readOnly, committed, 
+                                    lastSignalFence, lastThreadFence >>
 
 L_validate(self) == /\ pc[self] = "L_validate"
-                    /\ IF \A <<a, v>> \in readSet[self] : /\ LockBit(guard[a]) = 0
-                                                             /\ VersionOf(guard[a]) = v
+                    /\ IF \A <<a, v>> \in readSet[self] :
+                           (LockBit(guard[a]) = 0 \/ a \in locked_addrs[self]) /\
+                           VersionOf(guard[a]) = v
                           THEN /\ state' = [state EXCEPT ![self] = "committing_v"]
-                                /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
-                                /\ pc' = [pc EXCEPT ![self] = "L_writeBack"]
-                               /\ UNCHANGED << guard, readSet, writeSet >>
-                          ELSE /\ guard' =      [a \in Addr |->
-                                           IF a \in writeSet[self]
-                                           THEN MakeEntry(VersionOf(guard[a]))
-                                           ELSE guard[a]]
+                               /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
+                               /\ pc' = [pc EXCEPT ![self] = "L_writeBack"]
+                               /\ UNCHANGED << guard, readSet, writeSet, locked_addrs >>
+                          ELSE /\ guard' = [x \in Addr |->
+                                       IF x \in locked_addrs[self]
+                                       THEN MakeEntry(VersionOf(guard[x]))
+                                       ELSE guard[x]]
                                /\ readSet' = [readSet EXCEPT ![self] = {}]
                                /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                               /\ locked_addrs' = [locked_addrs EXCEPT ![self] = {}]
                                /\ state' = [state EXCEPT ![self] = "idle"]
                                /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                     /\ UNCHANGED << clock, mem, writeBuf, snapshot, readOnly, 
-                                    committed >>
+                                    committed, lastThreadFence >>
 
 L_writeBack(self) == /\ pc[self] = "L_writeBack"
                      /\ mem' =    [a \in Addr |->
@@ -268,18 +333,20 @@ L_writeBack(self) == /\ pc[self] = "L_writeBack"
                                ELSE mem[a]]
                      /\ state' = [state EXCEPT ![self] = "committing_wb"]
                      /\ pc' = [pc EXCEPT ![self] = "L_release"]
-                     /\ UNCHANGED << clock, guard, readSet, writeSet, writeBuf, 
-                                     snapshot, readOnly, committed, lastSignalFence, lastThreadFence, lastRmw >>
+                     /\ UNCHANGED << clock, guard, readSet, writeSet, locked_addrs,
+                                     writeBuf, snapshot, readOnly, committed,
+                                     lastSignalFence, lastThreadFence, lastRmw >>
 
 L_release(self) == /\ pc[self] = "L_release"
-                   /\ guard' =      [a \in Addr |->
-                               IF a \in writeSet[self]
+                   /\ guard' = [a \in Addr |->
+                               IF a \in locked_addrs[self]
                                THEN MakeEntry(clock)
                                ELSE guard[a]]
                    /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                    /\ state' = [state EXCEPT ![self] = "idle"]
                    /\ readSet' = [readSet EXCEPT ![self] = {}]
                    /\ writeSet' = [writeSet EXCEPT ![self] = {}]
+                   /\ locked_addrs' = [locked_addrs EXCEPT ![self] = {}]
                    /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                    /\ UNCHANGED << clock, mem, writeBuf, snapshot, readOnly >>
@@ -288,12 +355,12 @@ L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
                 /\ UNCHANGED << clock, guard, mem, state, readSet, writeSet, 
-                                writeBuf, snapshot, readOnly, committed, 
+                                writeBuf, snapshot, readOnly, committed, locked_addrs,
                                 lastSignalFence, lastThreadFence, lastRmw >>
 
-ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_incClock(self)
-                       \/ L_validate(self) \/ L_writeBack(self)
-                       \/ L_release(self) \/ L_done(self)
+ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_locking(self)
+                       \/ L_incClock(self) \/ L_validate(self)
+                       \/ L_writeBack(self) \/ L_release(self) \/ L_done(self)
 
 (* Allow infinite stuttering to prevent deadlock on termination. *)
 Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
@@ -312,31 +379,18 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 (* INVARIANTS                                                          *)
 (*====================================================================*)
 
-(* Invariant 1: A guard is locked iff the owning thread is committing *)
+(* Invariant 1: A guard is locked iff a committing thread has it in locked_addrs *)
 LockConsistent ==
     \A a \in Addr :
         LockBit(guard[a]) = 1
         <=> \E t \in Thread :
-            a \in writeSet[t] /\ state[t] \in {"committing", "committing_v", "committing_wb"}
+            a \in locked_addrs[t] /\ state[t] \in {"committing", "committing_v", "committing_wb"}
 
-(* Invariant 2: No thread reads an address whose guard is locked by another *)
-(* NOTE: Excluded from Inv below — the universal quantifier over ALL t2 triggers   *)
-(* false positives when t2 is the locking thread (state ≠ "idle", a ∈ writeSet).   *)
-(* TL2 tolerates stale read-set entries across concurrent commit; validation        *)
-(* catches them at commit time via version mismatch. TLC would produce spurious     *)
-(* counterexamples if checked.                                                      *)
-NoDirtyRead ==
-    \A t1, t2 \in Thread, a \in Addr :
-        (t1 # t2)
-        /\ \E v \in 0..MAX_COMMIT : <<a, v>> \in readSet[t1]
-        /\ LockBit(guard[a]) = 1
-        => state[t2] = "idle" \/ a \notin writeSet[t2]
-
-(* Invariant 3: No thread's snapshot exceeds clock *)
+(* Invariant 2: No thread's snapshot exceeds clock *)
 SnapshotInv ==
     \A t \in Thread : snapshot[t] <= clock
 
-(* Invariant 4: Every thread with a non-empty write-set has issued a fence *)
+(* Invariant 3: Every thread with a non-empty write-set has issued a fence *)
 FenceFidelity == TMTypes!FenceFidelity(Thread, writeSet, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant for TLC *)

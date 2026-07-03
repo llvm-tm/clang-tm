@@ -258,9 +258,106 @@ For each backend, a `lastFence[t]` variable (""/"acq"/"rel"/"sc") is set at poin
 2. Phase 3 audit: TLA+-only backends (NOrec, DUDETM, NVHTM, SPHT, DistributedSGL, TiKV)
 3. Consider increasing TLC heap for WT parallel model with fence tracking
 
+## Session 2026-07-02 — Implementation review + TLA+ fidelity sweep (items 4/8 done)
+
+### Implementation review: 9 correctness bugs found and fixed across 11 files
+
+**P0 bugs fixed:**
+- Rust XTM missing write-set validation in `read_word` (returned TM memory value without checking own writes)
+- Rust XTM used `panic!("abort")` instead of `panic_any(TmxAbort)` — wrong exception type, catch block never caught
+- Rust Romulus `read_word` missing version re-check after reading data
+
+**P1 bugs fixed:**
+- SwissTM `validate()` checked `r_lock` instead of `w_lock` for self-write detection (`SwissTM.hpp:178`)
+- TL2 write-set lock `sort()` was a weak-ordering hint; 2+ thread concurrent commit could deadlock
+- NOrec write bypass in `write_word_norec()` set `read_only = false` but the write-set insert was skipped for non-TM-region addresses
+
+**P1 (systemic): `isTMGlobal` bypass missing from 8 C++ backends**
+- NOrec, TL2, SwissTM, NVHTM, SPHT, XTM, Romulus, LeftRight all had `LLVM_TM_ADDR_CHECK` that only checked `isTMAddress()` and `isOnCurrentThreadStack()` but NOT `isTMGlobal()`
+- TinySTM WT additionally got the full `LLVM_TM_ADDR_CHECK` macro (was missing entirely)
+- Fixed by adding `|| stm::isTMGlobal(addr)` to the bypass check in each backend
+
+### TLA+ fidelity plan: 4 of 8 remaining items completed
+
+**P2.3 — TL2 incremental lock acquisition** (`TL2.tla`):
+- Replaced atomic bulk-lock with per-address CAS model
+- Added `locked_addrs[t]` set tracking guards acquired so far in this commit
+- On any CAS failure: all acquired guards released, transaction aborts
+- Validation skips self-locked addresses (matching C++ `locked_addrs` check)
+
+**P2.4 — TSXSGL capacity abort** (`TSXSGL.tla`):
+- Added `capacity[t]` counter and `TSXCapacity` constant (config: 4)
+- Decremented on each TSX read/write operation
+- Non-deterministic TSX→SGL fallback branch simulating L1 cache exhaustion
+- Capacity reset on retry, abort, and SGL fallback
+- Cfg: added `TSXCapacity = 4`
+
+**P1.2 — SwissTM combined orec field** (`SwissTM.tla`, ~150 lines changed):
+- Replaced 4-tuple `<<r_lock, w_lock, r_ver, w_owner>>` with 2-tuple `<<r_lock_word, w_lock>>`
+- `r_lock_word` is version OR `READ_LOCKED` sentinel (`(word_t)-1`), matching C++ exactly
+- Read path now checks `OREC_RLOCKED(o)` instead of separate w_lock check — fixes fidelity bug where model blocked reads on w_lock (C++ never does)
+- Phase 1 uses exchange semantics via `readLockVer[t][a]`: captures pre-lock version before setting `READ_LOCKED`
+- Validation compares captured vs observed version (matching C++ `re.old_version == re.version`)
+- Added `NoReadLockWhenIdle` invariant
+- Cfg: added `READ_LOCKED = 65535`
+
+**P2.1 — SwissTM extend/validate** (`SwissTM.tla`, ~50 lines added):
+- Added `valid_ts` per-thread variable tracking snapshot timestamp
+- After read, if `OREC_RVER observed > valid_ts[t]`, goto `L_extend`
+- `L_extend`: re-validates ALL read-set entries against current orec versions
+- On success: advances `valid_ts[t] := g_ts`, returns to `L_active`
+- On failure: releases locks via `L_abort`
+- Matches C++ `extend()` protocol exactly
+
+### Files modified this session
+- `docs/proofs/TL2.tla` — incremental locking rewrite
+- `docs/proofs/TSXSGL.tla` — capacity abort model
+- `docs/proofs/TSXSGL.cfg` — added TSXCapacity constant
+- `docs/proofs/SwissTM.tla` — combined orec + extend model
+- `docs/proofs/SwissTM.cfg` — added READ_LOCKED constant
+- Various C++ files — 9 implementation review bug fixes
+
+### All 8 TLA+ fidelity plan items completed
+
+| Item | Status |
+|------|--------|
+| P1.1: TinySTM validate lock-hold | ✅ (2026-07-02) |
+| P1.2: SwissTM combined orec field | ✅ (2026-07-02) |
+| P2.1: SwissTM extend/validate | ✅ (2026-07-02) |
+| P2.2: SwissTM false sharing | ✅ (2026-07-02) |
+| P2.3: TL2 incremental locking | ✅ (2026-07-02) |
+| P2.4: TSXSGL capacity abort | ✅ (2026-07-02) |
+| P3.1: Queue-mode path (XTM) | ✅ (2026-07-03) |
+| P3.2: Address classification (XTM) | ✅ (2026-07-03) |
+
+Score impact: TinySTM 3→4/5, SwissTM 3→4/5, TL2 3→4/5, TSXSGL 3→4/5, XTM 4/5 confirmed.
+
+## Session 2026-07-03 — TLA+ fidelity plan completion: P3.1 queue-mode + P3.2 address classification
+
+### P3.1 — Queue-mode path (XTM.tla)
+
+Added `queueMode[t]` per-thread variable set non-deterministically at each `L_begin`. When `queueMode[t] = TRUE`, the validate-and-commit branch skips read-set validation and goes directly to `L_writeback`. Queue-mode transactions have empty read-sets (verified by invariant `QueueModeEmptyReadSet`). 11 `either` branches in L_active (was 8).
+
+### P3.2 — Address classification (XTM.tla)
+
+Added `ASpace = {"Region", "Stack"}` space type and `addrSpace[p]` per-page tag. Region pages: normal XTM ownership-based TM. Stack pages: direct memory read/write with zero tracking — no read-set entry, no write-set entry, no ownership acquisition. Verified by invariants `NoStackWrite` and `NoStackRead`. Default cfg uses all-Region pages; Stack variant available via cfg override.
+
+### TLA_FIDELITY_PLAN.md rewritten
+
+All 8 items marked complete. Score impact summary. Every identified gap from the 2026-07-02 audit is now addressed.
+
+### Files modified
+- `docs/proofs/XTM.tla` — +72 lines: queueMode, addrSpace, 3 new either branches, L_begin either, 3 new invariants, queueMode in all UNCHANGED clauses
+- `docs/proofs/XTM.cfg` — ASpace + addrSpace constants
+- `docs/proofs/TLA_FIDELITY_PLAN.md` — rewritten as completion summary
+
 ## Previous sessions
 
 See AGENTS.md for full session history including:
+- Session 2026-07-03: TLA+ fidelity plan completion — P3.1 queue-mode + P3.2 address classification (this session)
+- Session 2026-07-02: Implementation review + TLA+ fidelity sweep (4/8 items)
+- Session 2026-06-24: Liveness sweep + PlusCal conversions + setjmp/longjmp UB analysis
+- Session 2026-06-23: Comprehensive audit (all 18 backends) + TinySTM fidelity improvements
 - Session 2026-06-22: Simulator calibration against real C++ NOrec
 - Session 2026-06-21: Simulator cost mode + machine profile calibration + TSX simulation backend
 - Session 2026-06-20: `.tm_shared` section, TiKV backend, SPHT SGL fallback, LEFTRIGHT OCC correctness fix
