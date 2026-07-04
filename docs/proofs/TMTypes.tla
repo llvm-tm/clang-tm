@@ -27,6 +27,9 @@
  *)
 EXTENDS Naturals
 
+\* ── Sentinel ────────────────────────────────────────────────
+NoWrite == 0 - 1
+
 \* ── Fence tracking ──────────────────────────────────────────
 Fenced(t, signal, thread, rmw) ==
     signal[t] # "" \/ thread[t] # "" \/ rmw[t] # ""
@@ -48,16 +51,12 @@ LockOwnerInv(lock, Thread, state, allowedStates) ==
     \A t \in Thread : (lock = t) => state[t] \in allowedStates
 
 \* ── Liveness ────────────────────────────────────────────────
-ProgressProperty(Thread, label, progressState, targetStates) ==
-    \A self \in Thread :
-        (pc[self] = progressState) ~> (pc[self] \in targetStates)
+\* NOTE: Not defining ProgressProperty here — it depends on `pc` which only
+\* exists in PlusCal-generated modules. Each backend defines it locally.
 
 \* ── Version-lock encoding (TL2, Romulus, LEFTRIGHT) ─────────
 LockBit(e) == e % 2
 VersionOf(e) == e \div 2
 MakeEntry(v) == v * 2
-
-\* ── Sentinel ────────────────────────────────────────────────
-NoWrite == 0 - 1
 
 =======================================================================

@@ -358,13 +358,13 @@ LockOwnerTx ==
 NoLocksAfterCommit ==
     \A t \in Thread : (state[t] = "idle") => \A a \in Addr : ~(lock[a][2] = t)
 
-FenceFidelity == TMTypes!FenceFidelity(Thread, writeSet, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelityInst == FenceFidelity(Thread, writeSet, lastSignalFence, lastThreadFence, lastRmw)
 
 Inv ==
     /\ MutexLocks
     /\ LockOwnerTx
     /\ NoLocksAfterCommit
-    /\ FenceFidelity
+    /\ FenceFidelityInst
 
 THEOREM Spec => []Inv
 
@@ -379,7 +379,7 @@ Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
 Spec_SF == Spec /\ \A self \in Thread : SF_vars(ThreadProc(self))
 
 (* Liveness: every active thread eventually becomes idle *)
-ProgressProperty ==
+ProgressProp ==
     \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_done"})
 
 =======================================================================

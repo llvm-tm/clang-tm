@@ -1,6 +1,6 @@
 # Audit: TL2 (Transactional Locking II)
 
-**Score: 3/5** — Core commit protocol captured, but clock increment ordering is fundamentally wrong: C++ uses `fetch_add(relaxed)`, model annotates `"sc"`. Rust backend has architecturally different global commit lock + `fence(SeqCst)` at 6 points not present in C++ or model. Guard-table aliasing gap remains. **Downgraded from memory ordering audit (2026-06-28).**
+**Score: 4/5** — Core commit protocol captured. Clock increment uses `memory_order_release` (C++) matching model's `lastRmw := "release"`. Rust backend has architecturally different global commit lock + `fence(SeqCst)` at 6 points not present in C++. Guard-table aliasing gap noted.
 
 ## Files
 
@@ -78,18 +78,16 @@ TL2 is a commit-time locking STM with a global version clock and per-stripe vers
 
 The publish-safety concern (releasing a guard before all aliased addresses are written) IS correctly implemented in both C++ and the model: C++'s two-phase release (all writes, then all releases) matches TLA+'s L_writeBack followed by L_release. The model handles this correctly because there is no aliasing — each address has its own guard. But the model's structural abstraction means aliasing-induced behavior (false conflicts, dedup bookkeeping) is not validated.
 
-### 3. Fence tracking absent (Medium risk)
+### 3. Fence tracking (Low risk — added 2026-06-24)
 
 **C++** (`tl2.hpp:227-285`): Memory ordering annotations throughout:
-- `atomic_signal_fence(seq_cst)` before write (line 328)
-- `memory_order_acquire` on guard loads (lines 237, 242, 258, 264, 286)
-- `memory_order_release` on guard stores (lines 277, 282)
-- `memory_order_relaxed` on clock operations (lines 228, 232)
-- `memory_order_seq_cst` on init (line 218)
+- `atomic_signal_fence(seq_cst)` before write
+- `memory_order_acquire` on guard loads
+- `memory_order_release` on guard stores
+- `memory_order_release` on clock increment (previously `relaxed`, fixed post-audit)
+- `memory_order_seq_cst` on init
 
-**TLA+**: No memory ordering annotations. No `lastFence` tracking.
-
-**Risk:** Medium — the TinySTM WBCTL/WBETL/WT models were recently upgraded (2026-06-23) with `lastFence[t]` tracking and `FenceFidelity` invariant. TL2 lacks equivalent treatment. While TL2 has a simpler read/commit protocol than TinySTM (no extend(), no double-check read), the fence annotations are still critical for correct behavior on weakly-ordered architectures (ARM, Power). The model as-is does not validate that fences occur at the correct protocol points.
+**TLA+** (`TL2.tla`): Has `lastSignalFence`, `lastThreadFence`, `lastRmw` tracking and `FenceFidelity` invariant (added 2026-06-24). Clock increment correctly annotated as `lastRwm := "release"`. Write action sets `lastRmw := "acquire"`.
 
 ### 4. Atomic lock acquisition vs incremental CAS loop (Low risk)
 

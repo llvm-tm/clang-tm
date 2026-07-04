@@ -396,7 +396,7 @@ TSXBufferInUse ==
 (* Memory ordering fidelity                                            *)
 (*====================================================================*)
 
-FenceFidelity ==
+FenceFidelityInst ==
     \A t \in Thread :
         /\ (pc[t] = "L_group_commit") => lastThreadFence[t] = "sc"
         /\ (pc[t] = "L_active_sgl_locked" /\ sgl = t)
@@ -417,7 +417,7 @@ TLCBound ==
 Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
               /\ WF_vars(CrashProc)
 
-ProgressProperty ==
+ProgressProp ==
     \A t \in Thread :
         (pc[t] \in {"L_active_tsx", "L_active_sgl", "L_active_sgl_locked"})
         ~> (pc[t] \in {"L_idle", "L_aborting"})

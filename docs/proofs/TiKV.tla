@@ -419,7 +419,7 @@ TLCBound ==
 
 Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
 
-ProgressProperty ==
+ProgressProp ==
     \A t \in Thread :
         (pc[t] \in {"L_active", "L_prewriting", "L_committing"})
         ~> (pc[t] = "L_idle")

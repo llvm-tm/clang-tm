@@ -320,7 +320,7 @@ LockChain ==
             state[t] \in {"locking", "wb"} => LOCK_OWNER(a) = t
 
 (* Lock owner matches the committing thread *)
-LockOwnerInv ==
+LockOwnerInvInst ==
     \A a \in Addr :
         ~LOCK_FREE(a) => \E t \in Thread :
             a \in writeSet[t] /\ state[t] \in {"locking", "wb"} /\ LOCK_OWNER(a) = t
@@ -329,15 +329,15 @@ LockOwnerInv ==
 WriteBackSafe ==
     \A t \in Thread : (state[t] = "wb") => (clock > 0)
 
-FenceFidelity == \A t \in Thread :
+FenceFidelityInst == \A t \in Thread :
     state[t] \in {"locking", "wb"} =>
         Fenced(t, lastSignalFence, lastThreadFence, lastRmw)
 
 Inv ==
     /\ LockChain
-    /\ LockOwnerInv
+    /\ LockOwnerInvInst
     /\ WriteBackSafe
-    /\ FenceFidelity
+    /\ FenceFidelityInst
 
 THEOREM Spec => []Inv
 
@@ -352,7 +352,7 @@ Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
 Spec_SF == Spec /\ \A self \in Thread : SF_vars(ThreadProc(self))
 
 (* Liveness: every active thread eventually becomes idle *)
-ProgressProperty ==
+ProgressProp ==
     \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_done"})
 
 =======================================================================

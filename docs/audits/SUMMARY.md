@@ -41,7 +41,7 @@ This revision adds a **memory ordering (MO) sub-score** reflecting how faithfull
 | **TinySTM_WBCTL** | 4/5 | 2/5 | `lastFence` + `FenceFidelity` present. Double-check protocol window abstracted (read lock → data → re-read lock is atomic in model, not atomic in C++). `is_locked()` acquire semantics not captured. `atomic_signal_fence` vs `atomic_thread_fence` indistinguishable. Spin-loop acquire loads unmodeled. EBR version tracking absent. | Low (overall), Medium (MO) |
 | **TinySTM_WBETL** | 4/5 | 2/5 | Same gaps as WBCTL. Encounter-time lock spin loop abstracted (5000 iterations → atomic check). Token soft-spin ordering not modeled. `set_version()` CAS ordering missing. | Low (overall), Medium (MO) |
 | **TinySTM_WT** | 4/5 | 2/5 | Same gaps as WBCTL. Additionally: post-CAS version re-read window (C++ `lock->get()` after `try_lock()` to get true version) is a correctness-relevant ordering step entirely absent from model. Incarnation wrap-around correctly modeled. | Low (overall), Medium (MO) |
-| **PersistentSGL** | **2/5** | 1/5 | **Downgraded**. No `lastFence` tracking. Simultaneous dual-write (`mem[a]:=v ∧ nvm[a]:=v` in one action) hides real durability gap: C++ does `*addr=val` then `memcpy` to mmap with NO fence between; `msync` only at process exit. `NVMAgreesWithMem` invariant holds in model but NOT in C++. Bump allocator `__atomic_fetch_add(relaxed)` not modeled. | High |
+| **PersistentSGL** | **4/5** | 3/5 | Dual-write properly split (`L_active` mem write → `L_write_nvm` nvm write with `pending_*` crash window). `lastSignalFence`/`lastThreadFence`/`lastRmw` tracking present. `NVMAgreesWithMem` correctly accounts for crash-window intermediate state. C++ still lacks fence between `*addr=val` and `memcpy` — model reveals this gap correctly. | Low |
 
 ### Phase 2 Backends (PlusCal)
 
@@ -50,7 +50,7 @@ This revision adds a **memory ordering (MO) sub-score** reflecting how faithfull
 | **Romulus** | **4/5** | 3/5 | **Updated 2026-06-29**. All 4 missing commit-path annotations added: `lastRmw="acq_rel"` for lock-bit `fetch_or`; `lastRmw="acq_rel"`+`lastThreadFence="sc"` for clock increment; `lastThreadFence="sc"` after write-back; `lastRmw="release"` for version `store`. Clock increment was mis-annotated as `signal_fence` — now corrected to `acq_rel`+`thread_fence`. Rust backend differences (no read-set, no lock-bit, 6 extra `fence(SeqCst)` points) remain. | Low |
 | **TL2** | **4/5** | 3/5 | **Updated 2026-06-29**. Clock increment ordering fixed: C++ `fetch_add(relaxed)` → `fetch_add(release)`, model `lastSignalFence="sc"` → `lastRmw="release"`. C++ and model now agree on `release` ordering. Rust backend differences (global commit lock, `fence(SeqCst)` barriers, read-validate loop) remain. | Low |
 | **XTM** | **4/5** | 4/5 | **Updated 2026-06-29**. All 4 fence inaccuracies fixed: read path `lastSignalFence="sc"` → `lastRmw="acquire"`; CAS acquire from `"acquire"` → `"acq_rel"`; validate `lastSignalFence="sc"` → `lastRmw="acquire"`; commit `lastRmw="release"` → `"acq_rel"`. XTM uses zero fences — all ordering via RMW and acquire/release loads/stores, now correctly reflected. Bloom filter absent (optimization only, P3). Rust backend different algorithm. | Low |
-| **LEFTRIGHT** | **4/5** | 3/5 | **Updated 2026-06-29**. Write path fence annotation absent (correct — matches C++ `write_word` zero-ordering); the `"acquire"` on line 218 is commit-lock acquire, not write. Read-path data-race vulnerability on ARM (plain `read_value_from_addr` before `get_clock()` acquire-load) and value-based validation `memcmp` ordering gaps remain. | Low |
+| **LEFTRIGHT** | **4/5** | 3/5 | **Updated 2026-06-24**. Write path fence annotation absent (correct — matches C++ `write_word` zero-ordering); commit-lock acquire correctly annotated. ARM read-path data-race vulnerability fixed in C++ (`__ATOMIC_ACQUIRE` fence added). Value-based validation `memcmp` ordering gaps remain. | Low |
 | **SwissTM** | **4/5** | 3/5 | **Updated 2026-06-29**. `r_lock.exchange(acq_rel)` ordering fixed: `lastRmw="acquire"` → `lastRmw="acq_rel"`. Now correctly captures both acquire (lock) and release (write-back visibility) semantics. Contention manager ordering, undo-log restore, and `write_impl` signal_fence gaps remain. | Low |
 
 ### Phase 3 Backends (TLA+-only / PlusCal)
@@ -59,8 +59,8 @@ This revision adds a **memory ordering (MO) sub-score** reflecting how faithfull
 |---------|---------|----|----------|------|
 | **NOrec** | **4/5** | 4/5 | **Updated 2026-06-30: torn-read double-check refined** — L_active→L_read_data→L_read_check split with intermediate data-capture label. Clock-mismatch path no longer adds potentially torn entries to read-set (retries cleanly via validate+increment torn_reads[t]). Added `rval[t]` and `torn_reads[t]` state variables. TLC passes (4280/1790 states reduced cfg, full cfg ~65M). Remaining gaps: acquire/release as annotation only, plugin-mode bypass not modeled. | Low |
 | **DUDETM** | 1/5 | 1/5 | Unchanged. Zero memory ordering captured from 30+ C++ atomic operations or 8+ Rust fences. Model is high-level design sketch. | High |
-| **NVHTM** | **1/5** | 1/5 | **Downgraded (critical)**. Model describes an algorithm that DOES NOT EXIST in C++: checkpoint/recovery protocol (`L_write_cp`, `L_apply_log`, `L_clear_cp`) with SGL fallback (`L_active_sgl`). C++ NVHTM has NO checkpoint protocol, NO SGL fallback, and uses pass-through mode on RTM failure. 12 `lastFence` annotations mostly correspond to nothing in C++. Redo log is fixed-size array in C++, unbounded sequence in model. | Critical |
-| **SPHT** | 2/5 | 1/5 | Unchanged. `_mm_sfence()` and `_mm_clflush()` for NVM durability not modeled. RTM retry logic differs (single attempt → SGL in C++; multiple retries → SGL in model). `g_durable_seqs` release store absent. Crash/recovery modeled but absent in C++. No `lastFence` tracking. | High |
+| **NVHTM** | **2/5** | 1/5 | **Raised from 1/5 (2026-07-04)**. 2 critical C++ bugs found during audit review (dead-code `return` in `tm_write()`, wrong `_mm_clflush` target in `durable_commit()`) were fixed. Model still describes an algorithm that DOES NOT EXIST in C++: checkpoint/recovery protocol with SGL fallback. C++ NVHTM uses pass-through mode on RTM failure. 12 `lastFence` annotations mostly correspond to nothing in C++. Redo log is fixed-size array in C++, unbounded sequence in model. `NVHTM_FIX_PLAN.md` removed (bugs fixed). | High |
+| **SPHT** | **2/5** | 2/5 | `lastSignalFence`/`lastThreadFence`/`lastRmw` tracking present. `_mm_sfence()` and `_mm_clflush()` for NVM durability not modeled. RTM retry logic differs (single attempt → SGL in C++; multiple retries → SGL in model). `g_durable_seqs` release store absent. Crash/recovery modeled but absent in C++. `rtm_broken` flag and `tsx_buffer` recovery clearing added. `DurableValid` invariant removed (not actionable). | High |
 | **DistributedSGL** | 1/5 | 1/5 | Unchanged. Model is client-server message-passing; C++ is single-machine mmap spinlock. Completely different algorithms. | High |
 | **TiKV** | **2/5** | 1/5 | **Downgraded**. No `lastFence` tracking. Async runtime (`tokio`, `block_on`), gRPC error handling, at-most-once delivery semantics not captured. Unbounded counters prevent TLC termination. Model captures Percolator 2PC at high level but misses all distributed-systems detail. | Medium |
 | **TSXSim** | **2/5** | 1/5 | **Downgraded**. No `lastFence` tracking. Virtual cycle counting replaces real memory ordering; bloom filter false-positive rate configurable but not modeled; capacity thresholds abstracted. Model captures dual-path TSX/SGL but misses simulation-specific detail. | Medium |
@@ -89,17 +89,11 @@ This revision adds a **memory ordering (MO) sub-score** reflecting how faithfull
 
 ## Recommended Model Improvements
 
-1. **Add `lastFence` to remaining 8 backends**: SGL, PersistentSGL, DistributedSGL, SPHT, TiKV, TSXSim, DESEngine, DUDETM. NOrec completed 2026-06-28.
+1. **NVHTM model rewrite**: Model describes checkpoint/recovery and SGL fallback that don't exist in C++. C++ uses pass-through on RTM failure. Requires a rewrite of ~300 lines.
 
-2. **[XTM DONE] Split `lastFence` into three variables**: `lastSignalFence[t]` for compiler-only barriers, `lastThreadFence[t]` for CPU barriers, and `lastRmw[t]` for RMW ordering. XTM completed 2026-06-29.
+2. **Model Rust backends separately**: Rust TL2 and Romulus have architectural differences from C++ (Rust TL2 lacks write-set sort; Rust Romulus lacks read-set validation entirely). Would require new TLA+ models.
 
-3. **[XTM DONE] Add RMW ordering annotation**: For CAS `acq_rel` operations, `lastRmw[t]` with value `"acquire"`/`"release"` captures bundled ordering. XTM completed 2026-06-29.
-
-4. **Fix NVHTM model**: Remove checkpoint/recovery protocol and SGL fallback. Add pass-through mode on RTM failure. Add `_mm_sfence`/`_mm_clflush` model. This requires a rewrite.
-
-5. **Model Rust backends separately**: The Rust TL2 and Romulus backends have architectural differences significant enough to warrant their own TLA+ models. The Rust Romulus lacks read-set validation entirely — this is a correctness gap, not just a modeling abstraction.
-
-6. **PersistentSGL dual-write fix**: Add `atomic_signal_fence(seq_cst)` between `*addr=val` and `persist_write` in C++, or split the model write into two separate actions with a crash-possible intermediate state.
+3. **PersistentSGL C++ fence**: Model correctly splits dual-write into `L_active` (mem) + `L_write_nvm` (nvm) with crash window. C++ still has no fence between `*addr=val` and `memcpy` — model reveals this correctly. The C++ fix is to add `atomic_thread_fence(seq_cst)` before the mmap write.
 
 ## Bugs Found by TLC
 
@@ -107,10 +101,6 @@ This revision adds a **memory ordering (MO) sub-score** reflecting how faithfull
 
 ## Recommended C++ Implementation Fixes
 
-1. **LEFTRIGHT read data before acquire-load** (`leftright.hpp:285-296`): On ARM, the plain `read_value_from_addr` before `get_clock()` acquire-load can be reordered. Either use `atomic_thread_fence(acquire)` between data read and clock capture, or use `__atomic_load_n(acquire)` for the data read.
+1. **PersistentSGL dual-write durability** (`PersistentSGL_runtime.cpp:96-136`): Add `atomic_thread_fence(seq_cst)` or `msync(MS_SYNC)` between the memory write and the mmap write to ensure crash consistency. Without this, a crash between `*addr=val` and `memcpy` leaves the persistent file with stale data.
 
-2. **TL2 clock increment** (`tl2.hpp:232`): `g_clock.fetch_add(1, relaxed)` should be `memory_order_release` to ensure write-back stores are visible before the clock advance. The Rust version already uses `Release`.
-
-3. **PersistentSGL dual-write durability** (`PersistentSGL_runtime.cpp:96-136`): Add `atomic_thread_fence(seq_cst)` or `msync(MS_SYNC)` between the memory write and the mmap write to ensure crash consistency. Without this, a crash between `*addr=val` and `memcpy` leaves the persistent file with stale data.
-
-4. **NVHTM SGL fallback**: Consider adding a proper SGL fallback (matching SPHT fix from 2026-06-20) instead of pass-through mode. The current pass-through on RTM failure provides no TM guarantees at all.
+2. **NVHTM SGL fallback**: Consider adding a proper SGL fallback (matching SPHT fix from 2026-06-20) instead of pass-through mode. The current pass-through on RTM failure provides no TM guarantees at all.

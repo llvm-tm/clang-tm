@@ -1,6 +1,6 @@
 # Audit: LEFTRIGHT (Global-Clock OCC / Value-Based Validation)
 
-**Score: 3/5** — Write path has ZERO ordering operations in C++ but model annotates `"acq"` (wrong direction). Read-path data-race vulnerability on ARM (plain `read_value_from_addr` before `get_clock()` acquire-load — CPU can reorder). Queue-mode bypass not modeled. **Downgraded from memory ordering audit (2026-06-28).**
+**Score: 4/5** — Write path has ZERO ordering operations (model correctly reflects this after 2026-07-03 fix). ARM read-path ordering fixed via `__atomic_thread_fence(__ATOMIC_ACQUIRE)`. Queue-mode bypass not modeled (cross-cutting, affects multiple backends).
 
 ## Files
 
@@ -64,23 +64,23 @@ Large:      Thread={1,2}, Addr={0,1}, Data={0,1}, MaxCommits=2 → timeout (>120
 
 ## Deviations
 
-### 1. Read-clock ordering (Medium risk — conservative, not unsound)
+### 1. Read-clock ordering (Low risk — false aborts, no correctness issue)
 
 **C++** (`leftright.hpp:285–296`): `read_word()` reads the data value FIRST:
 ```cpp
 any_type_t val = read_value_from_addr(addr, sz);
-// ... concurrent commit could write-back here ...
+__atomic_thread_fence(__ATOMIC_ACQUIRE);  // ARM read-data reorder barrier
 entry.observed_version = get_clock();
 entry.captured_value = val;
 ```
-A concurrent commit writes data and increments the global clock between the data read and the clock read. The result: `captured_value` is consistent with a state at some time `T_data`, but `observed_version` reflects `T_clock > T_data`. At validation, `observed_version > snapshot` fires and the transaction aborts — even though the data was read from a consistent intermediate state (no atomicity violation occurred).
+A concurrent commit writes data and increments the global clock between the data read and the clock read. The result: `captured_value` is consistent with a state at some time `T_data`, but `observed_version` reflects `T_clock > T_data`. At validation, `observed_version > snapshot` fires and the transaction aborts — even though the data was read from a consistent intermediate state (no atomicity violation occurred). The `__ATOMIC_ACQUIRE` fence prevents the plain read from being reordered AFTER the clock load, closing the ARM vulnerability.
 
 **TLA+** (`LEFTRIGHT.tla:192–193`): reads clock and memory atomically:
 ```
 read_set[self] ∪ {<<a, clock, mem[a]>>}
 ```
 
-**Risk**: Medium. The C++ ordering is strictly more conservative — it can cause false aborts that the TLA+ model would not predict. This means a real execution may have a *higher* abort rate than the model implies. No correctness violation, but the model under-estimates abort frequency.
+**Risk**: Low. The C++ ordering is strictly more conservative — it can cause false aborts that the TLA+ model would not predict. The `__ATOMIC_ACQUIRE` fence (added post-audit) ensures ARM correctness. No correctness violation, but the model under-estimates abort frequency.
 
 ### 2. Pre-lock optimistic validate (Low risk)
 

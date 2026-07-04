@@ -469,7 +469,7 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 LockFreeInv ==
     (sgl_lock = 0) <=> ~(\E t \in Thread : mode[t] = "sgl")
 
-LockOwnerInv ==
+LockOwnerInvInst ==
     \A t \in Thread : (sgl_lock = t) => (mode[t] = "sgl")
 
 TSXvsSGLSafety ==

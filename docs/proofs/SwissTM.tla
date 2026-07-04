@@ -481,7 +481,7 @@ NoReadLockWhenIdle ==
             \A i \in ORecIdx : ~OREC_RLOCKED(orec[i])
 
 (* I5: Every thread with a non-empty write-set has issued a fence *)
-FenceFidelity == TMTypes!FenceFidelity(Thread, writeLog, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelityInst == FenceFidelity(Thread, writeLog, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant *)
 Inv ==
@@ -489,7 +489,7 @@ Inv ==
     /\ WriteOwnerInv
     /\ NoPostCommitLocks
     /\ NoReadLockWhenIdle
-    /\ FenceFidelity
+    /\ FenceFidelityInst
 
 (* Constraint for bounded model checking *)
 ModelBound == g_ts <= 5 /\ \A t \in Thread : aborted[t] <= MaxCommits * 2
@@ -505,7 +505,7 @@ Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
 Spec_SF == Spec /\ \A self \in Thread : SF_vars(ThreadProc(self))
 
 (* Liveness: every active thread eventually becomes idle *)
-ProgressProperty ==
-    \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_begin", "L_done"})
+ProgressProp ==
+    \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_done"})
 
 =====

@@ -462,7 +462,7 @@ AtMostOneCommitting ==
                              "L_write_back", "L_update_ver", "L_release_lock"} )
 
 (* I6: Every thread with a non-empty write-set has issued a fence (any kind) *)
-FenceFidelity == TMTypes!FenceFidelityPA(Thread, write_set, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelityInst == FenceFidelityPA(Thread, write_set, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant for TLC *)
 Inv ==
@@ -470,7 +470,7 @@ Inv ==
     /\ LockHeldImpliesCommitting
     /\ ClockMonotonic
     /\ AtMostOneCommitting
-    /\ FenceFidelity
+    /\ FenceFidelityInst
 
 (* Constraint for bounded model checking (bounds unbounded counters) *)
 ModelBound == clock <= 5 /\ \A t \in Thread : aborted[t] <= MaxCommits * 2
@@ -486,7 +486,7 @@ Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
 Spec_SF == Spec /\ \A self \in Thread : SF_vars(ThreadProc(self))
 
 (* Liveness: every active thread eventually becomes idle *)
-ProgressProperty ==
-    \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_begin", "L_done"})
+ProgressProp ==
+    \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_done"})
 
 =====

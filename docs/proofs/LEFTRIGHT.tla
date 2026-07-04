@@ -88,12 +88,11 @@ L_active:
         end with;
         lastSignalFence[self] := "sc";
         goto L_active;
-    or \* Write
+    or \* Write (no fence — relies on commit lock + clock increment for ordering)
         with a \in Addr, v \in Data do
             write_set[a] := v;
             read_only := FALSE;
         end with;
-        lastRmw[self] := "acquire";
         goto L_active;
     or \* Read-only commit
         if read_only then
@@ -332,14 +331,14 @@ AtMostOneCommitting ==
                              "L_release_lock"} )
 
 (* I4: Threads with non-empty write-set have issued a fence *)
-FenceFidelity == TMTypes!FenceFidelityPA(Thread, write_set, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelityInst == FenceFidelityPA(Thread, write_set, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant for TLC *)
 Inv ==
     /\ LockExclusion
     /\ LockHolderCommitting
     /\ AtMostOneCommitting
-    /\ FenceFidelity
+    /\ FenceFidelityInst
 
 (* Constraint for bounded model checking *)
 ModelBound == clock <= 5 /\ \A t \in Thread : aborted[t] <= MaxCommits * 2
@@ -355,7 +354,7 @@ Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
 Spec_SF == Spec /\ \A self \in Thread : SF_vars(ThreadProc(self))
 
 (* Liveness: every active thread eventually becomes idle *)
-ProgressProperty ==
-    \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_begin", "L_done"})
+ProgressProp ==
+    \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_done"})
 
 =====

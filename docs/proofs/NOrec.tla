@@ -443,7 +443,7 @@ WriteBufferInv ==
 (*   ordering guarantee: write-back is made visible before the release   *)
 (*   store that unlocks the global clock.                                *)
 (*====================================================================*)
-FenceFidelity ==
+FenceFidelityInst ==
     \A t \in Thread : (pc[t] = "L_commit_wb") =>
         lastRmw[t] \in {"seq_cst", "release"}
 
@@ -467,7 +467,7 @@ Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
 Spec_SF == Spec /\ \A self \in Thread : SF_vars(ThreadProc(self))
 
 (* Liveness: every transaction eventually commits or aborts *)
-ProgressProperty ==
+ProgressProp ==
     \A t \in Thread :
         (pc[t] \in {"L_active", "L_commit_wb"}) ~> (pc[t] = "L_idle")
 

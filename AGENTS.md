@@ -990,7 +990,7 @@ All TLC-found model bugs are **spec-only** — they reflect abstraction gaps whe
 1. **Add `lastFence` + `FenceFidelity` to remaining backends**: TSXSGL, TL2, XTM, LEFTRIGHT, SwissTM, Romulus (following TinySTM pattern).
 2. **Liveness check**: Run TLC with each backend's `Spec_WF` to verify liveness properties (new `make liveness` target). Currently only `-deadlock` safety checks are used.
 3. **PersistentSGL fix**: Remove deferred flush phase; model write as simultaneous `mem[a]=v ∧ nvm[a]=v` to match C++ dual-write pattern.
-4. **PlusCal conversion**: Convert remaining TLA+-only backends (NOrec, DUDETM, NVHTM, SPHT, SimEngine, DistributedSGL, TiKV, TSXSim) to PlusCal P-syntax.
+4. **PlusCal conversion**: Convert remaining TLA+-only backends (NOrec, DUDETM, NVHTM, SPHT, SimEngine, DistributedSGL, TiKV, TSXSim) to PlusCal P-syntax. (Done: NOrec, DUDETM, DESEngine, NVHTM, SPHT, TiKV. Remaining: DSGL, TSXSim — deprioritized.)
 5. **TLC heap for WT**: WT parallel model with `lastFence` requires >4GB heap — investigate TLC distributed mode or reduce fence granularity.
 6. **TiKV bounded model**: Add `MaxTx=2` counter bound to make TLC termination tractable.
 
@@ -1010,7 +1010,7 @@ Converted from raw TLA+ to `--algorithm` PlusCal:
 - **NOrec** (PASS safety 149K states + liveness)
 - **DUDETM** (PASS safety 716K states + liveness)
 - **DESEngine** (PASS safety + liveness; removed `NoSelfConflict` from sequential.cfg)
-- **NVHTM** (partial — converts PlusCal plus retains raw TLA+ Spec_WF; parses cleanly)
+- **NVHTM** (complete — PlusCal with 5 labels: L_idle, L_active_tsx, L_flush_log, L_aborting, L_pass_through; safety PASS 716K states)
 
 ### PersistentSGL dual-write fix
 
@@ -1034,7 +1034,7 @@ Removed `durable_log`/`Flush`/`"flushing"` state — model now writes `mem[a]=v 
 - `docs/proofs/*-liveness.cfg` — 18 new liveness configs
 
 ### Next Steps
-1. **Complete PlusCal conversions**: SPHT, TiKV (NVHTM partial, DSGL+TSXSim deprioritized)
+1. **Complete PlusCal conversions**: SPHT, TiKV (DSGL+TSXSim deprioritized)
 2. **Investigate TL2 invariant violation**: guard table not updated by PlusCal write action
 3. **Add `lastFence` + `FenceFidelity` to remaining backends**: TSXSGL, TL2, XTM, LEFTRIGHT, SwissTM, Romulus
 4. **TLC heap for WT**: >4GB heap or distributed mode for WT parallel model
@@ -1092,7 +1092,7 @@ No actual UB was found in the codebase, but the TLA+ models cannot verify this p
 - `AGENTS.md` — this session summary
 
 ### Next Steps
-1. **Complete remaining PlusCal conversions**: NVHTM (partial), DistributedSGL, TSXSim (deprioritized — complex msg-passing and bloom-filter models)
+1. **Complete remaining PlusCal conversions**: NVHTM, DistributedSGL, TSXSim (NVHTM done; DSGL+TSXSim deprioritized — complex msg-passing and bloom-filter models)
 2. **Investigate TL2 invariant violation**: guard table not updated by PlusCal write action
 3. **Add `lastFence` + `FenceFidelity` to remaining backends**
 4. **Model jmp_buf validity as a meta-invariant** (optional — see analysis above)

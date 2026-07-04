@@ -1,6 +1,6 @@
 # NV-HTM Backend Audit
 
-## **Score: 1/5** — Model describes checkpoint/recovery + SGL fallback that DO NOT EXIST in C++ implementation. C++ uses pass-through on RTM failure, no checkpoint markers, no SGL. 12 `lastFence` annotations correspond to nothing in C++. **Critical downgrade from memory ordering audit (2026-06-28).**
+## **Score: 2/5** — Model describes checkpoint/recovery + SGL fallback that DO NOT EXIST in C++ implementation. C++ uses pass-through on RTM failure, no checkpoint markers, no SGL. 12 `lastFence` annotations correspond to nothing in C++. **However**, two critical C++ bugs found during review (dead-code `return` in `tm_write()`, wrong `_mm_clflush` target in `durable_commit()`) were fixed. Model remains aspirational. `NVHTM_FIX_PLAN.md` removed (bugs fixed).
 
 ## Files
 

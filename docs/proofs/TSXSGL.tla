@@ -369,7 +369,7 @@ LockFreeInv ==
 (*                                                                     *)
 (*   sgl = t  =>  mode[t] = "sgl"                                      *)
 (*====================================================================*)
-LockOwnerInv ==
+LockOwnerInvInst ==
     \A t \in Thread : (sgl = t) => (mode[t] = "sgl")
 
 (*====================================================================*)
@@ -396,24 +396,24 @@ AtMostOneSGL ==
 (* INVARIANT 4: Every thread with a non-empty write-set has issued a   *)
 (*              fence (acq, rel, or sc).                                *)
 (*====================================================================*)
-FenceFidelity == TMTypes!FenceFidelity(Thread, writeSet, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelityInst == FenceFidelity(Thread, writeSet, lastSignalFence, lastThreadFence, lastRmw)
 
 (*====================================================================*)
 (* Combined invariant                                                  *)
 (*====================================================================*)
 Inv ==
     /\ LockFreeInv
-    /\ LockOwnerInv
+    /\ LockOwnerInvInst
     /\ AtMostOneSGL
-    /\ FenceFidelity
+    /\ FenceFidelityInst
 
 (*====================================================================*)
 (* THEOREM: TSXSGL ensures mutual exclusion + safety                   *)
 (*====================================================================*)
 THEOREM Spec => []LockFreeInv
-THEOREM Spec => []LockOwnerInv
+THEOREM Spec => []LockOwnerInvInst
 THEOREM Spec => []AtMostOneSGL
-THEOREM Spec => []FenceFidelity
+THEOREM Spec => []FenceFidelityInst
 THEOREM Spec => []Inv
 
 (*====================================================================*)
@@ -427,7 +427,7 @@ Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
 Spec_SF == Spec /\ \A self \in Thread : SF_vars(ThreadProc(self))
 
 (* Liveness: every active thread eventually becomes idle *)
-ProgressProperty ==
+ProgressProp ==
     \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_done"})
 
 =======================================================================

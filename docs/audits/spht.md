@@ -1,6 +1,6 @@
 # Audit: SPHT (Scalable Persistent Hardware Transactions)
 
-**Score: 2/5** — TSX retry model fundamentally different (no retry in C++ vs MaxRetries in TLA+); PCL handling in SGL mode diverges (C++ skips PCL entirely); crash/recovery modeled in TLA+ but absent from C++ implementation; DurableValid invariant is buggy (doesn't handle read-only TXs).
+**Score: 2/5** — TSX retry model fundamentally different (no retry in C++ vs MaxRetries in TLA+); PCL handling in SGL mode diverges (C++ skips PCL entirely); crash/recovery modeled in TLA+ but absent from C++ implementation; `DurableValid` invariant removed (not actionable — C++ has `pcl->empty()` guard). `rtm_broken` flag and `tsx_buffer` recovery clearing added to model.
 
 ## Files
 

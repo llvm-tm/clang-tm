@@ -391,13 +391,13 @@ SnapshotInv ==
     \A t \in Thread : snapshot[t] <= clock
 
 (* Invariant 3: Every thread with a non-empty write-set has issued a fence *)
-FenceFidelity == TMTypes!FenceFidelity(Thread, writeSet, lastSignalFence, lastThreadFence, lastRmw)
+FenceFidelityInst == FenceFidelity(Thread, writeSet, lastSignalFence, lastThreadFence, lastRmw)
 
 (* Combined invariant for TLC *)
 Inv ==
     /\ LockConsistent
     /\ SnapshotInv
-    /\ FenceFidelity
+    /\ FenceFidelityInst
 
 (* Verify the algorithm *)
 THEOREM Spec => []Inv
@@ -413,7 +413,7 @@ Spec_WF == Spec /\ \A self \in Thread : WF_vars(ThreadProc(self))
 Spec_SF == Spec /\ \A self \in Thread : SF_vars(ThreadProc(self))
 
 (* Liveness: every active thread eventually becomes idle *)
-ProgressProperty ==
+ProgressProp ==
     \A self \in Thread : (pc[self] = "L_active" ~> pc[self] \in {"L_idle", "L_done"})
 
 =======================================================================
