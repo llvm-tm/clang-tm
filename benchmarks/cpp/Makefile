@@ -4,8 +4,8 @@
 # Auto-detect C++ compiler: prefer clang++ (LLVM versioned or system default),
 # fall back to g++.
 CXX       := $(shell command -v clang++-22 2>/dev/null || command -v clang++-18 2>/dev/null || command -v clang++-17 2>/dev/null || command -v clang++-16 2>/dev/null || command -v clang++-15 2>/dev/null || command -v clang++-14 2>/dev/null || command -v clang++ 2>/dev/null || echo g++)
-CXXFLAGS  = -std=c++20 -O3 -march=native -pthread -DNDEBUG -I$(abspath ../..) -I$(abspath ../..)/expli_instr/cpp
-LDFLAGS   = -pthread
+CXXFLAGS  = -std=c++20 -O3 -march=x86-64 -pthread -DNDEBUG -static -I$(abspath ../..) -I$(abspath ../..)/expli_instr/cpp
+LDFLAGS   = -static -pthread
 
 # --- Choose backend (default: TinySTM/WBCTL) --------------------
 BACKEND ?= TINYSTM
