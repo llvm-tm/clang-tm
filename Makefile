@@ -91,7 +91,7 @@ test_run: plugin-benchmarks
 	@$(PLUGIN_BENCHMARKS_DIR)/STAMP/bin/stamp_uninstrumented -b kmeans -t 2 2>&1
 
 # Run all explicit C++ API benchmarks across all supported backends
-BACKENDS_TESTS := TINYSTM WBETL WT NOREC SWISSTM TL2 SGL LEFTRIGHT ROMULUS XTM SPHT TSXSGL
+BACKENDS_TESTS := TINYSTM WBETL WT NOREC SWISSTM TL2 SGL LEFTRIGHT ROMULUS XTM SPHT TSXSGL GPU_STM_CPU CSMV
 check-all:
 	@echo "=== Building and running all tests across all backends ==="
 	@for be in $(BACKENDS_TESTS); do \

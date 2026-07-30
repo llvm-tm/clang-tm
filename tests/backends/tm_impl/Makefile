@@ -10,7 +10,7 @@ HOOKS_SRC := $(RUNTIME_DIR)/common/tm_hooks.cpp
 INC_BASE := -I../../../backends/tm_impl/common -I$(RUNTIME_DIR)
 
 # ── Backend definitions ────────────────────────────────────────────
-BACKENDS := tl2 tinystm wt wbetl norec swisstm xtm
+BACKENDS := tl2 tinystm wt wbetl norec swisstm xtm gpu_stm_cpu
 
 INC_tl2     := $(INC_BASE) -I../../../backends/tm_impl/tl2
 RUNTIME_tl2 := $(RUNTIME_DIR)/tl2/tl2_runtime.cpp
@@ -40,6 +40,10 @@ FLAGS_swisstm := -DTM_BACKEND_SWISSTM
 INC_xtm := $(INC_BASE) -I../../../backends/tm_impl/xtm
 RUNTIME_xtm := $(RUNTIME_DIR)/xtm/xtm_runtime.cpp
 FLAGS_xtm := -DTM_BACKEND_XTM
+
+INC_gpu_stm_cpu := $(INC_BASE) -I../../../backends/tm_impl/gpu_stm/include
+RUNTIME_gpu_stm_cpu := $(RUNTIME_DIR)/gpu_stm/cpu/gpu_stm_cpu_runtime.cpp
+FLAGS_gpu_stm_cpu := -DTM_BACKEND_GPU_STM_CPU
 
 # ── Test source files ──────────────────────────────────────────────
 TESTS := counter_st counter_mt write_set_validation overlap_stress read_lock_interference readall_write_interference

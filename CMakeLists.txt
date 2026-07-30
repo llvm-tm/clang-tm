@@ -22,6 +22,8 @@ option(BUILD_PLUGIN "Build LLVM TM plugin" ON)
 option(BUILD_BENCHMARKS "Build benchmarks" ON)
 option(BUILD_TESTS "Build plugin tests" ON)
 option(BUILD_SHARED "Build shared plugin" ON)
+option(BUILD_GPU_STM "Build GPU STM backend (PR-STM, requires CUDA)" OFF)
+option(GPU_STM_CPU_FALLBACK "Build CPU-only PR-STM fallback (no GPU)" OFF)
 
 # Backend selection
 set(STM_BACKEND "tinystm" CACHE STRING "STM backend: tinystm, tl2, singlelock, swisstm")
@@ -30,12 +32,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find LLVM (LLVM 22+ required, matching the Makefile-based build)
-find_package(LLVM 22 REQUIRED CONFIG)
+find_package(LLVM 22.1 REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake at: ${LLVM_DIR}")
 
-# Setup LLVM (this creates the tablegen, etc.)
-include(${LLVM_USE_FILE})
+# Setup LLVM (LLVM_USE_FILE deprecated in LLVM 15+, skip if unset)
+if(LLVM_USE_FILE)
+    include(${LLVM_USE_FILE})
+endif()
 
 # Find LLVM tools (handles versioned installs like llvm-22-dev on Ubuntu)
 find_program(LLVM_CLANG clang-22 clang++-22 clang++ clang
@@ -154,6 +158,14 @@ if(BUILD_BENCHMARKS)
 endif()
 
 # ============================================================================
+# GPU STM Backend (optional)
+# ============================================================================
+
+if(BUILD_GPU_STM OR GPU_STM_CPU_FALLBACK)
+    add_subdirectory(${RUNTIMES_DIR}/gpu_stm)
+endif()
+
+# ============================================================================
 # Summary
 # ============================================================================
 
@@ -168,9 +180,11 @@ message(STATUS "Source Dir:     ${CMAKE_SOURCE_DIR}")
 message(STATUS "Binary Dir:    ${CMAKE_BINARY_DIR}")
 message(STATUS "")
 message(STATUS "Features:")
-message(STATUS "  Build Plugin:    ${BUILD_PLUGIN}")
-message(STATUS "  Build Benchmarks: ${BUILD_BENCHMARKS}")
-message(STATUS "  Build Tests:      ${BUILD_TESTS}")
+message(STATUS "  Build Plugin:        ${BUILD_PLUGIN}")
+message(STATUS "  Build Benchmarks:    ${BUILD_BENCHMARKS}")
+message(STATUS "  Build Tests:         ${BUILD_TESTS}")
+message(STATUS "  Build GPU STM:       ${BUILD_GPU_STM}")
+message(STATUS "  GPU STM CPU Fallback: ${GPU_STM_CPU_FALLBACK}")
 message(STATUS "")
 
 enable_testing()

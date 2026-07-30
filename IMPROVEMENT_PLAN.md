@@ -243,13 +243,97 @@ jobs:
 | P4 | 3.1 Concurrent simulation engine | 1-2 weeks | Very High | P0-P2 |
 | P4 | 1.3 LEFTRIGHT 29/114 fix | Unknown | Medium | — |
 
+## Tier 5 — GPU STM Backends
+
+### 5.1 First backend: PR-STM (priority-based lock STM)
+
+**Goal**: Implement publishable GPU STM algorithm as a TMRealHooks backend.
+
+**Algorithm**: PR-STM (Shen et al., 2015) — lock-based, commit-time validation
+with static thread priorities for deadlock-free lock stealing. 32-bit lock word
+(priority + version + locked flag) is GPU-friendly (single atomicCAS per lock).
+
+**Architecture**: CUDA C++ library + C API matching TMRealHooks.
+
+```
+backends/tm_impl/gpu_stm/
+  CMakeLists.txt           -- CUDA-enabled build
+  include/gpu_stm_api.h    -- C API (TMRealHooks-compatible)
+  common/
+    warp_utils.cuh         -- warp-level ballot, sync, mask helpers
+    lock_table.cuh         -- 32-bit lock word manipulation
+    global_clock.cuh       -- device-side atomic clock
+  pr_stm/
+    pr_stm.cuh             -- PR-STM algorithm (device functions)
+    pr_stm_runtime.cpp     -- Host-side dispatcher (launch-per-tx kernel)
+    pr_stm.cu              -- Kernel entry points
+```
+
+**Execution model (Option A — launch-per-transaction)**:
+- `tm_begin()` records transaction parameters on host
+- `tm_read()` / `tm_write()` buffer in host memory
+- `tm_commit()` launches CUDA kernel that executes the transaction on GPU
+- Kernel launch overhead (~5–10 µs) acceptable for large transactions
+
+**Execution model (Option B — persistent kernel)**:
+- `tm_init()` launches a persistent kernel that stays resident on GPU
+- `tm_begin()` pushes a transaction descriptor via circular buffer
+- GPU warps continuously drain buffer, execute transactions, write results
+- Amortizes launch overhead for fine-grained transactions
+
+**Status**: Not started. `docs/proofs/GPU_STM_PLAN.md` has full architecture.
+
+### 5.2 Second backend: CSMV (multi-versioned client-server)
+
+**Goal**: Add CSMV backend (Nunes et al., IPDPS 2022) — multi-versioned STM
+with client-server commit protocol. Server warp validates, clients batch writes.
+K-version read sets allow read-only transactions to commit without validation.
+
+**Status**: Planned. Depends on 5.1 (warp utils, lock table, kernel framework).
+
+### 5.3 Third backend: AccelerateSTM (obstruction-free)
+
+**Goal**: Implement AccelerateSTM (Perlin et al., SBAC-PAD 2025) — obstruction-free
+with warp-level cooperative groups-based GC. Uses locator table instead of locks.
+
+**Status**: Planned. Depends on 5.1 (kernel framework) and 5.2 (shared infrastructure).
+
+### 5.4 TLA+ model for GPU STM backends
+
+**Goal**: Model PR-STM priority-stealing protocol and 32-bit lock encoding as a
+TLA+ spec. Share structure with existing `TL2.tla` / `TinySTM_WBCTL.tla` models.
+
+**Verification**: TLC model checking for safety invariants (lock inv, atomicity)
+and liveness (freedom from priority inversion deadlock).
+
+**Status**: Planned.
+
+### 5.5 Benchmark port
+
+**Goal**: Adapt bank, fuzz_counter, and STAMP subset to GPU execution. Each
+transaction's body runs inside a CUDA kernel. Data structures allocated in
+GPU global memory via `cudaMalloc`.
+
+**Status**: Planned. Depends on 5.1.
+
+## Prioritization (updated)
+
+| Priority | Item | Effort | Impact | Depends on |
+|----------|------|--------|--------|------------|
+| P0 | 5.1 PR-STM backend (CUDA C++, Option A) | 2 weeks | Medium (new platform) | — |
+| P1 | 5.1b PR-STM persistent kernel (Option B) | 2 weeks | Medium | 5.1 |
+| P2 | 5.4 TLA+ model for PR-STM | 1 week | Medium | 5.1 |
+| P3 | 5.2 CSMV backend | 3 weeks | Medium | 5.1 |
+| P4 | 5.5 Benchmark port | 2 weeks | Medium | 5.1 |
+| P5 | 5.3 AccelerateSTM | 3 weeks | Medium | 5.1, 5.2 |
+
 ## Verification
 
 Each item must be verified before marking done:
 
-- **1.1**: All 75 simulator tests pass; `tm-sim` on a multi-threaded bank trace completes without hanging
-- **1.2**: `DeadlockDetector` triggers on TL2/TinySTM when write-set conflicts exist (test in sim_engine_test.rs)
-- **2.1**: `git status` shows no tracked files in deleted directories; `make` and `cargo build` still succeed
-- **2.3**: CI passes on PR with all 5 jobs green; nightly publishes CSV
-- **2.4**: `compare_real_sim.py --sim-only` produces fidelity >90% for all 3 simulator backends
-- **3.1**: Concurrent simulator produces different abort counts than sequential on high-contention traces
+- **5.1**: PR-STM passes `test_tx` (single-thread warp) and `test_ds` (linked-list, rbtree) on GPU
+- **5.1b**: Persistent-kernel variant achieves throughput within 2× of ideal (launch amortized)
+- **5.2**: CSMV passes all tests with read-only transactions never aborting
+- **5.3**: AccelerateSTM passes all tests; no lock-acquisition path in device code
+- **5.4**: TLC checks PR-STM spec with 2+ threads, finds no safety violations
+- **5.5**: Bank benchmark on PR-STM conserves money, fuzz_counter passes invariant

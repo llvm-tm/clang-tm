@@ -4,9 +4,11 @@
 #include <cstdio>
 #include <chrono>
 
+#include "tm_test_common.hpp"
+
 extern "C" void (*tm_wait_prev_tx)(void);
 
-static int counter = 0;
+static TM int counter = 0;
 
 // --- Sync TX (light) ---
 __attribute__((noinline, annotate("shared")))
@@ -65,7 +67,7 @@ int main() {
     printf("heavy-sync: %d tx (%d op) in %.3f s = %.0f tx/s  counter=%d\n",
            N_HEAVY, N_HEAVY * 100, sec3, N_HEAVY / sec3, counter);
 
-    int ok = (counter == 50000 + 50000 + 100000);
+    int ok = (counter == 100000);  // only last phase matters (counter reset between phases)
     printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

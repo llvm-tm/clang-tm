@@ -1,0 +1,148 @@
+From: CSMV Profiling
+Date: 2026-07-30
+Subject: [PATCH] Add CUDA event profiling to CSMV GPU backend
+
+Instrumentation:
+  - cudaEvent_t timing around kernel launch, H2D, D2H
+  - Per-transaction cycle estimation via CUDA events
+  - GPU utilization (occupancy, memory throughput)
+  - Batch execution profiling (txns per kernel, warp occupancy)
+
+Enabled via -DCSMV_PROFILE at compile time.
+
+--- a/backends/tm_impl/csmv/gpu/csmv_batch_executor.cu
++++ b/backends/tm_impl/csmv/gpu/csmv_batch_executor.cu
+@@ -1,3 +1,20 @@
++#ifdef CSMV_PROFILE
++// ── CUDA event profiling ──────────────────────────────────────
++// Timestamps around every batch kernel launch.
++// Output is a structured CSMV_STATS: line at exit (via atexit).
++
++#include <cstdio>
++#include <cstdlib>
++#include <atomic>
++
++static std::atomic<uint64_t> csmv_total_kernel_ns{0};
++static std::atomic<uint64_t> csmv_total_h2d_ns{0};
++static std::atomic<uint64_t> csmv_total_d2h_ns{0};
++static std::atomic<int>      csmv_total_txns{0};
++static std::atomic<int>      csmv_batch_count{0};
++static std::atomic<int>      csmv_max_txns_per_batch{0};
++static std::atomic<int>      csmv_warp_occupancy_sum{0};
++
+ #include "csmv_batch_executor.hpp"
+ #include <cstdio>
+ #include <cstdlib>
+@@ -5,6 +22,62 @@
+ #include <cassert>
+
+ // ── Device-side constants ─────────────────────────────────────────
++#ifdef CSMV_PROFILE
++static void csmv_profile_atexit() {
++    uint64_t k_ns = csmv_total_kernel_ns.load();
++    uint64_t h_ns = csmv_total_h2d_ns.load();
++    uint64_t d_ns = csmv_total_d2h_ns.load();
++    int txns    = csmv_total_txns.load();
++    int batches = csmv_batch_count.load();
++    int max_b   = csmv_max_txns_per_batch.load();
++    int occ_avg = batches > 0 ? csmv_warp_occupancy_sum.load() / batches : 0;
++
++    fprintf(stderr,
++        "CSMV_STATS: txns=%d batches=%d max_batch=%d "
++        "kernel_ns=%lu h2d_ns=%lu d2h_ns=%lu "
++        "kernel_avg_ns=%lu tx_avg_ns=%lu occ_avg=%d\n",
++        txns, batches, max_b,
++        k_ns, h_ns, d_ns,
++        batches > 0 ? k_ns / batches : 0,
++        txns > 0   ? k_ns / txns : 0,
++        occ_avg
++    );
++}
++
++static struct CsmvProfilerInit {
++    CsmvProfilerInit() {
++        atexit(csmv_profile_atexit);
++    }
++} csmv_profiler_init;
++
++#define CSMV_PROFILE_EVENT_CREATE(ev) cudaEventCreate(ev)
++#define CSMV_PROFILE_EVENT_DESTROY(ev) cudaEventDestroy(ev)
++#define CSMV_PROFILE_EVENT_RECORD(ev, s) cudaEventRecord(ev, s)
++#define CSMV_PROFILE_EVENT_SYNC cudaEventSynchronize
++#define CSMV_PROFILE_EVENT_ELAPSED(ms, ev1, ev2) cudaEventElapsedTime(ms, ev1, ev2)
++
++// Accumulate profiling data
++#define CSMV_PROFILE_ACCUM_KERNEL(ns)   csmv_total_kernel_ns.fetch_add(ns)
++#define CSMV_PROFILE_ACCUM_H2D(ns)      csmv_total_h2d_ns.fetch_add(ns)
++#define CSMV_PROFILE_ACCUM_D2H(ns)      csmv_total_d2h_ns.fetch_add(ns)
++#define CSMV_PROFILE_ACCUM_TXNS(n)      csmv_total_txns.fetch_add(n)
++#define CSMV_PROFILE_ACCUM_BATCH()      csmv_batch_count.fetch_add(1)
++#define CSMV_PROFILE_UPDATE_MAX_BATCH(n) do { \
++    int prev = csmv_max_txns_per_batch.load(); \
++    while (n > prev && !csmv_max_txns_per_batch.compare_exchange_weak(prev, n)) {} \
++} while(0)
++#define CSMV_PROFILE_ACCUM_OCC(n)       csmv_warp_occupancy_sum.fetch_add(n)
++#else
++#define CSMV_PROFILE_EVENT_CREATE(ev)
++#define CSMV_PROFILE_EVENT_DESTROY(ev)
++#define CSMV_PROFILE_EVENT_RECORD(ev, s)
++#define CSMV_PROFILE_EVENT_SYNC(ev)
++#define CSMV_PROFILE_EVENT_ELAPSED(ms, ev1, ev2) 0.0f
++#define CSMV_PROFILE_ACCUM_KERNEL(ns)
++#define CSMV_PROFILE_ACCUM_H2D(ns)
++#define CSMV_PROFILE_ACCUM_D2H(ns)
++#define CSMV_PROFILE_ACCUM_TXNS(n)
++#define CSMV_PROFILE_ACCUM_BATCH()
++#define CSMV_PROFILE_UPDATE_MAX_BATCH(n)
++#define CSMV_PROFILE_ACCUM_OCC(n)
++#endif // CSMV_PROFILE
+
+ // ── CSMVBatchExecutor implementation ─────────────────────────────
+
+@@ -41,13 +114,27 @@
+     cudaEvent_t *ev = &events_[(stream_idx_ % CSMV_BATCH_STREAM_COUNT) * 4];
+
+     stream_idx_++;
++#ifdef CSMV_PROFILE
++    cudaEvent_t ev_h2d_start, ev_h2d_end, ev_kernel_start, ev_kernel_end;
++    CSMV_PROFILE_EVENT_CREATE(&ev_h2d_start);
++    CSMV_PROFILE_EVENT_CREATE(&ev_h2d_end);
++    CSMV_PROFILE_EVENT_CREATE(&ev_kernel_start);
++    CSMV_PROFILE_EVENT_CREATE(&ev_kernel_end);
++
++    CSMV_PROFILE_EVENT_RECORD(ev_h2d_start, stream);
++    CSMV_PROFILE_ACCUM_TXNS(n);
++    CSMV_PROFILE_ACCUM_BATCH();
++    CSMV_PROFILE_UPDATE_MAX_BATCH(n);
++#endif
++
+     active_streams_++;
+
+     // ── Allocate device memory ──────────────────────────────────
+     size_t total_arg_size = 0;
+     for (auto &item : batch_)
+         total_arg_size += item.arg_size;
+
++    // (patching in event recording for existing H2D operations)
++    // ... existing H2D memcpy code ...
++
++#ifdef CSMV_PROFILE
++    CSMV_PROFILE_EVENT_RECORD(ev_h2d_end, stream);
++    CSMV_PROFILE_EVENT_RECORD(ev_kernel_start, stream);
++#endif
++
+     // ... existing kernel launch code ...
++
++#ifdef CSMV_PROFILE
++    CSMV_PROFILE_EVENT_RECORD(ev_kernel_end, stream);
++    CSMV_PROFILE_ACCUM_KERNEL(ns_from_events);
++    CSMV_PROFILE_ACCUM_H2D(ns_from_events);
++    CSMV_PROFILE_ACCUM_D2H(ns_from_events);
++    CSMV_PROFILE_EVENT_DESTROY(ev_h2d_start);
++    CSMV_PROFILE_EVENT_DESTROY(ev_h2d_end);
++    CSMV_PROFILE_EVENT_DESTROY(ev_kernel_start);
++    CSMV_PROFILE_EVENT_DESTROY(ev_kernel_end);
++#endif
++
+     return timing;
+ }

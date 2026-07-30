@@ -75,6 +75,23 @@ ifeq ($(BACKEND),TSXSGL)
   DEFS     = -DTM_BACKEND_TSXSGL -mrtm
   EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tsx_sgl
 endif
+ifeq ($(BACKEND),GPU_STM_CPU)
+  RUNTIME  = ../../backends/tm_impl/gpu_stm/cpu/gpu_stm_cpu_runtime.cpp
+  DEFS     = -DTM_BACKEND_GPU_STM_CPU
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/gpu_stm/include
+endif
+ifeq ($(BACKEND),CSMV)
+  RUNTIME  = ../../backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp
+  DEFS     = -DTM_BACKEND_CSMV
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/csmv/include
+endif
+ifeq ($(BACKEND),CSMV_GPU)
+  RUNTIME  = ../../backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp
+  DEFS     = -DTM_BACKEND_CSMV_GPU -DCSMV_BATCH_GPU
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/csmv/include
+  LDFLAGS  = -pthread -lcuda -lcudart
+  CXXFLAGS = -std=c++20 -O3 -march=x86-64 -pthread -DNDEBUG -I$(abspath ../..) -I$(abspath ../..)/expli_instr/cpp
+endif
 
 HOOKS_SRC = ../../backends/tm_impl/common/tm_hooks.cpp
 BUILTINS = $(addprefix ../../backends/tm_impl/common/,tm_alloc_overrides.hpp tm_common.hpp \
