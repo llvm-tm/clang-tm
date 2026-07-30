@@ -1,6 +1,6 @@
-------------------------- MODULE CSMV -------------------------
+------------------------- MODULE GPU_CSMV -------------------------
 (*
- * CSMV — Multi-Versioned Software Transactional Memory for GPUs
+ * GPU_CSMV — Multi-Versioned Software Transactional Memory for GPUs
  *
  * Algorithm (IPDPS 2022 / JPDC 2023, Nunes, Castro, Romano):
  *
@@ -37,7 +37,7 @@ ASSUME Value \subseteq Nat
 
 NoWrite == -1
 
-(* --algorithm CSMV
+(* --algorithm GPU_CSMV
 
 variables
     clock = 0,

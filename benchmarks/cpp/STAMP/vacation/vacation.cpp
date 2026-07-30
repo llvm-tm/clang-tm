@@ -2,7 +2,7 @@
 //
 // Matches the plugin vacation_bench.hpp algorithm:
 // multi-table travel reservation with best-price selection.
-// Build: make -C expli-benchmarks BACKEND=TINYSTM run-vacation
+// Build: make -C benchmarks/cpp BACKEND=TINYSTM run-vacation
 
 #include "expli_tm_api/tm_api.hpp"
 #include "../../tests/benchmark_test.hpp"

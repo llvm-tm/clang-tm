@@ -45,11 +45,16 @@ C API matching the hooks system (`TMRealHooks`).
 
 ```
 backends/tm_impl/
-  gpu_stm/
-    common/           -- shared utilities (warp helpers, lock table, clock)
-    gpu_stm_pr/       -- PR-STM backend (priority-based, 2025-style)
-    gpu_stm_csmv/     -- CSMV backend (multi-versioned, client-server)
-    include/          -- public C API header
+  gpu_stm/              -- PR-STM (Shen et al. 2015)
+    include/            -- public C API header (gpu_stm_api.h)
+    cpu/                -- CPU fallback (gpu_stm_cpu_runtime.cpp, pr_stm_cpu.cpp)
+    cuda/               -- CUDA kernel (pr_stm_kernel.cuh, pr_stm_runtime.cu)
+    tests/              -- smoke test (test_pr_stm.cpp)
+  csmv/                 -- CSMV (Nunes et al. 2022) — separate backend dir
+    include/            -- C API header (csmv_api.h)
+    cpu/                -- CPU fallback (csmv_cpu_runtime.cpp)
+    gpu/                -- CUDA kernel + batch executor (csmv_kernel.cu, *.hpp)
+    CMakeLists.txt      -- CUDA-enabled build
 ```
 
 ### Host-device split

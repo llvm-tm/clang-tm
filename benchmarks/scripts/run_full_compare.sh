@@ -186,7 +186,7 @@ run_ob() {
 # ── Rust runner (interleaved: build then run per backend) ────────────────
 run_rust_backend() {
     local backend="$1"
-    local tdir="$BASE_DIR/rust_tm_api/target/release"
+    local tdir="$BASE_DIR/expli_instr/rust/workspace/target/release"
 
     for bench in "${STAMP_BENCHES[@]}"; do
         local bin="$tdir/stamp_${bench}"
@@ -240,31 +240,31 @@ build_plugin() {
 
 echo ""
 echo "=== Plugin STAMP ==="
-mkdir -p "$BASE_DIR/plugin-benchmarks/STAMP/bin"
-build_plugin "$BASE_DIR/plugin-benchmarks/STAMP" stamp_tinystm_wbctl  "$BASE_DIR/plugin-benchmarks/STAMP/bin/stamp_tinystm_wbctl"
-build_plugin "$BASE_DIR/plugin-benchmarks/STAMP" stamp_tinystm_wt    "$BASE_DIR/plugin-benchmarks/STAMP/bin/stamp_tinystm_wt"
-build_plugin "$BASE_DIR/plugin-benchmarks/STAMP" stamp_norec         "$BASE_DIR/plugin-benchmarks/STAMP/bin/stamp_norec"
+mkdir -p "$BASE_DIR/benchmarks/plugin/STAMP/bin"
+build_plugin "$BASE_DIR/benchmarks/plugin/STAMP" stamp_tinystm_wbctl  "$BASE_DIR/benchmarks/plugin/STAMP/bin/stamp_tinystm_wbctl"
+build_plugin "$BASE_DIR/benchmarks/plugin/STAMP" stamp_tinystm_wt    "$BASE_DIR/benchmarks/plugin/STAMP/bin/stamp_tinystm_wt"
+build_plugin "$BASE_DIR/benchmarks/plugin/STAMP" stamp_norec         "$BASE_DIR/benchmarks/plugin/STAMP/bin/stamp_norec"
 
 echo ""
 echo "=== Plugin TPCC ==="
-mkdir -p "$BASE_DIR/plugin-benchmarks/tpcc/bin"
-build_plugin "$BASE_DIR/plugin-benchmarks/tpcc" tpcc_tinystm_wbctl "$BASE_DIR/plugin-benchmarks/tpcc/bin/tpcc_tinystm_wbctl"
-build_plugin "$BASE_DIR/plugin-benchmarks/tpcc" tpcc_tinystm_wt   "$BASE_DIR/plugin-benchmarks/tpcc/bin/tpcc_tinystm_wt"
-build_plugin "$BASE_DIR/plugin-benchmarks/tpcc" tpcc_norec         "$BASE_DIR/plugin-benchmarks/tpcc/bin/tpcc_norec"
+mkdir -p "$BASE_DIR/benchmarks/plugin/tpcc/bin"
+build_plugin "$BASE_DIR/benchmarks/plugin/tpcc" tpcc_tinystm_wbctl "$BASE_DIR/benchmarks/plugin/tpcc/bin/tpcc_tinystm_wbctl"
+build_plugin "$BASE_DIR/benchmarks/plugin/tpcc" tpcc_tinystm_wt   "$BASE_DIR/benchmarks/plugin/tpcc/bin/tpcc_tinystm_wt"
+build_plugin "$BASE_DIR/benchmarks/plugin/tpcc" tpcc_norec         "$BASE_DIR/benchmarks/plugin/tpcc/bin/tpcc_norec"
 
 echo ""
 echo "=== Plugin STMbench7 ==="
-mkdir -p "$BASE_DIR/plugin-benchmarks/stmbench7/bin"
-build_plugin "$BASE_DIR/plugin-benchmarks/stmbench7" stmbench_tinystm_wbctl "$BASE_DIR/plugin-benchmarks/stmbench7/bin/stmbench_tinystm_wbctl"
-build_plugin "$BASE_DIR/plugin-benchmarks/stmbench7" stmbench_tinystm_wt   "$BASE_DIR/plugin-benchmarks/stmbench7/bin/stmbench_tinystm_wt"
-build_plugin "$BASE_DIR/plugin-benchmarks/stmbench7" stmbench_norec        "$BASE_DIR/plugin-benchmarks/stmbench7/bin/stmbench_norec"
+mkdir -p "$BASE_DIR/benchmarks/plugin/stmbench7/bin"
+build_plugin "$BASE_DIR/benchmarks/plugin/stmbench7" stmbench_tinystm_wbctl "$BASE_DIR/benchmarks/plugin/stmbench7/bin/stmbench_tinystm_wbctl"
+build_plugin "$BASE_DIR/benchmarks/plugin/stmbench7" stmbench_tinystm_wt   "$BASE_DIR/benchmarks/plugin/stmbench7/bin/stmbench_tinystm_wt"
+build_plugin "$BASE_DIR/benchmarks/plugin/stmbench7" stmbench_norec        "$BASE_DIR/benchmarks/plugin/stmbench7/bin/stmbench_norec"
 
 echo ""
 echo "=== Plugin YCSB ==="
-mkdir -p "$BASE_DIR/plugin-benchmarks/ycsb/bin"
-build_plugin "$BASE_DIR/plugin-benchmarks/ycsb" ycsb_tinystm_wbctl "$BASE_DIR/plugin-benchmarks/ycsb/bin/ycsb_tinystm_wbctl"
-build_plugin "$BASE_DIR/plugin-benchmarks/ycsb" ycsb_tinystm_wt   "$BASE_DIR/plugin-benchmarks/ycsb/bin/ycsb_tinystm_wt"
-build_plugin "$BASE_DIR/plugin-benchmarks/ycsb" ycsb_norec        "$BASE_DIR/plugin-benchmarks/ycsb/bin/ycsb_norec"
+mkdir -p "$BASE_DIR/benchmarks/plugin/ycsb/bin"
+build_plugin "$BASE_DIR/benchmarks/plugin/ycsb" ycsb_tinystm_wbctl "$BASE_DIR/benchmarks/plugin/ycsb/bin/ycsb_tinystm_wbctl"
+build_plugin "$BASE_DIR/benchmarks/plugin/ycsb" ycsb_tinystm_wt   "$BASE_DIR/benchmarks/plugin/ycsb/bin/ycsb_tinystm_wt"
+build_plugin "$BASE_DIR/benchmarks/plugin/ycsb" ycsb_norec        "$BASE_DIR/benchmarks/plugin/ycsb/bin/ycsb_norec"
 
 # ── 1c. Expli C++ ──────────────────────────────────────────────────────────
 echo ""
@@ -272,16 +272,16 @@ echo "=== Expli C++ ==="
 for be in TINYSTM WT NOREC; do
     echo "  [build] BACKEND=$be ..."
     set +e
-    make -C "$BASE_DIR/expli-benchmarks" clean > /dev/null 2>&1
-    make -C "$BASE_DIR/expli-benchmarks" all BACKEND="$be" > "/tmp/build_expli_${be}.log" 2>&1
+    make -C "$BASE_DIR/benchmarks/cpp" clean > /dev/null 2>&1
+    make -C "$BASE_DIR/benchmarks/cpp" all BACKEND="$be" > "/tmp/build_expli_${be}.log" 2>&1
     rc=$?; set -e
     if [ "$rc" != 0 ]; then echo "  [build] BACKEND=$be FAILED"; tail -5 "/tmp/build_expli_${be}.log"
     else echo "  [build] BACKEND=$be OK"; fi
     # Map backend name for expli: TINYSTM→wbctl, WT→wt, NOREC→norec
     case "$be" in
-        TINYSTM) run_expli_backend wbctl "$BASE_DIR/expli-benchmarks/bin" ;;
-        WT)      run_expli_backend wt    "$BASE_DIR/expli-benchmarks/bin" ;;
-        NOREC)   run_expli_backend norec "$BASE_DIR/expli-benchmarks/bin" ;;
+        TINYSTM) run_expli_backend wbctl "$BASE_DIR/benchmarks/cpp/bin" ;;
+        WT)      run_expli_backend wt    "$BASE_DIR/benchmarks/cpp/bin" ;;
+        NOREC)   run_expli_backend norec "$BASE_DIR/benchmarks/cpp/bin" ;;
     esac
 done
 
@@ -291,7 +291,7 @@ echo "=== Rust ==="
 for feat in wbctl wt norec; do
     echo "  [build] --features $feat ..."
     set +e
-    cargo build --release --manifest-path "$BASE_DIR/rust_tm_api/Cargo.toml" \
+    cargo build --release --manifest-path "$BASE_DIR/expli_instr/rust/workspace/Cargo.toml" \
         --no-default-features --features "$feat" \
         > "/tmp/build_rust_${feat}.log" 2>&1
     rc=$?; set -e
@@ -319,7 +319,7 @@ echo "Timeout: ${TIMEOUT}s"
 echo ""
 
 # ── 2a. Plugin ─────────────────────────────────────────────────────────────
-PB="$BASE_DIR/plugin-benchmarks"
+PB="$BASE_DIR/benchmarks/plugin"
 run_plugin_impl() {
     local backend="$1" stm_app="$2" tpcc_app="$3" stm7_app="$4" ycsb_app="$5"
     local stm_dir="$PB/STAMP/bin" tpcc_dir="$PB/tpcc/bin"

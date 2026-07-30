@@ -74,7 +74,7 @@ build_all() {
     log "=== BUILD PHASE ==="
 
     # Plugin STAMP — build all backends (CXXFLAGS_EXTRA not used by plugin Makefile)
-    cd plugin-benchmarks/STAMP
+    cd benchmarks/plugin/STAMP
     for target in stamp_tinystm_wbctl stamp_tinystm_wt stamp_norec stamp_singlelock stamp_tsxsgl; do
         log "  Plugin STAMP: $target"
         make -j$(nproc) "$target" 2>&1 | tail -1 || log "  [WARN] Plugin STAMP $target build had issues"
@@ -83,7 +83,7 @@ build_all() {
 
     # Plugin TPCC, YCSB, STM7 — build individually
     for app_dir in tpcc ycsb stmbench7; do
-        local app_bin="plugin-benchmarks/$app_dir"
+        local app_bin="benchmarks/plugin/$app_dir"
         if [ -f "$app_bin/Makefile" ]; then
             for be in tinystm_wbctl tinystm_wt norec singlelock tsxsgl; do
                 local target="${app_dir}_${be}"
@@ -96,7 +96,7 @@ build_all() {
     log "  Expli: will build-on-demand during run phase"
 
     # Rust
-    cd rust_tm_api
+    cd expli_instr/rust/workspace
     for fe in wbctl norec tsxsgl wt; do
         log "  Rust: $fe"
         RUSTFLAGS="-C target-cpu=native" cargo build --release --no-default-features --features "$fe" -p benchmarks 2>&1 | tail -1 || true
@@ -137,7 +137,7 @@ run_one() {
 # ── Run implementations ──────────────────────────────────────────────────
 run_plugin() {
     local backend="$1" threads="$2" sample="$3"
-    local bin="plugin-benchmarks/STAMP/bin/stamp_$backend"
+    local bin="benchmarks/plugin/STAMP/bin/stamp_$backend"
     [ ! -x "$bin" ] && return
 
     for bench in "${STAMP_BENCHES[@]}"; do
@@ -145,23 +145,23 @@ run_plugin() {
     done
 
     # TPCC
-    local tpcc_bin="plugin-benchmarks/tpcc/bin/tpcc_$backend"
+    local tpcc_bin="benchmarks/plugin/tpcc/bin/tpcc_$backend"
     [ -x "$tpcc_bin" ] && run_one "plugin" "$backend" "tpcc" "$threads" "$sample" "$tpcc_bin" -t "$threads" -d 5000 -w 1
 
     # YCSB
-    local ycsb_bin="plugin-benchmarks/ycsb/bin/ycsb_$backend"
+    local ycsb_bin="benchmarks/plugin/ycsb/bin/ycsb_$backend"
     [ -x "$ycsb_bin" ] && run_one "plugin" "$backend" "ycsb" "$threads" "$sample" "$ycsb_bin" -t "$threads" -d 5000 -k 1000 -i 500 -w a
 
     # STMbench7
-    local stm7_bin="plugin-benchmarks/stmbench7/bin/stmbench_$backend"
+    local stm7_bin="benchmarks/plugin/stmbench7/bin/stmbench_$backend"
     [ -x "$stm7_bin" ] && run_one "plugin" "$backend" "stmbench7" "$threads" "$sample" "$stm7_bin" -t "$threads" -d 5000 -w 1
 }
 
 run_expli() {
     local backend="$1" threads="$2" sample="$3"
     local be_tag="$4"  # tinystm_wbctl|tinystm_wt|norec|sgl
-    local bin_dir="expli-benchmarks/bin"
-    local make_dir="expli-benchmarks"
+    local bin_dir="benchmarks/cpp/bin"
+    local make_dir="benchmarks/cpp"
 
     # Build on-demand for this backend
     local defs=""
@@ -194,7 +194,7 @@ run_expli() {
 run_rust() {
     local backend="$1" threads="$2" sample="$3"
     local feature="$4"  # wbctl|norec|tsxsgl|wt
-    local rust_dir="rust_tm_api"
+    local rust_dir="expli_instr/rust/workspace"
 
     for bench in "${STAMP_BENCHES[@]}"; do
         local params="${PRUST[$bench]}"
@@ -204,10 +204,10 @@ run_rust() {
 }
 
 run_uninstrumented() {
-    local bin_dir="expli-benchmarks/bin"
+    local bin_dir="benchmarks/cpp/bin"
     log "  Uninstrumented baseline (1t)..."
     # Build stubs on demand (run_expli's make clean may have wiped them)
-    make -C expli-benchmarks -j$(nproc) stubs 2>&1 | tail -1 || {
+    make -C benchmarks/cpp -j$(nproc) stubs 2>&1 | tail -1 || {
         log "  [WARN] Stubs build failed"
         return
     }

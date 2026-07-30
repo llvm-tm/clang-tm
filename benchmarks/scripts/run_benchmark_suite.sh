@@ -73,7 +73,7 @@ build_all() {
     log "Building all implementations with NDEBUG..."
 
     # Expli C++ — build each backend
-    cd expli-benchmarks
+    cd benchmarks/cpp
     for backend in norec tinystm_wbctl tinystm_wt singlelock; do
         log "  Building expli $backend..."
         case "$backend" in
@@ -88,7 +88,7 @@ build_all() {
     cd ..
 
     # Rust — build each feature
-    cd rust_tm_api
+    cd expli_instr/rust/workspace
     for backend in norec wbctl wt tsxsgl; do
         log "  Building Rust $backend..."
         RUSTFLAGS="-C target-cpu=native" cargo build --release -p benchmarks --features "$backend" 2>&1 | tail -1
@@ -96,7 +96,7 @@ build_all() {
     cd ..
 
     # Plugin — build each backend
-    cd plugin-benchmarks/STAMP
+    cd benchmarks/plugin/STAMP
     for backend in tinystm_wbctl tinystm_wt norec singlelock; do
         log "  Building plugin $backend..."
         make -j$(nproc) BACKEND="$backend" CXXFLAGS_EXTRA="-DNDEBUG" 2>&1 | tail -1
@@ -131,7 +131,7 @@ run_bench() {
 # ── Run plugin implementation ───────────────────────────────────────────
 run_plugin() {
     local backend="$1" threads="$2" sample="$3"
-    local bin_dir="plugin-benchmarks/STAMP/bin"
+    local bin_dir="benchmarks/plugin/STAMP/bin"
 
     case "$backend" in
         norec)          binary="$bin_dir/stamp_norec" ;;
@@ -154,22 +154,22 @@ run_plugin() {
 
     # Non-STAMP
     local tpcc_cmd=$(eval "echo \"$TPCC_PARAMS\"")
-    local tpcc_bin="plugin-benchmarks/tpcc/bin/tpcc_${backend}"
+    local tpcc_bin="benchmarks/plugin/tpcc/bin/tpcc_${backend}"
     [ -x "$tpcc_bin" ] && run_bench "plugin" "$backend" "tpcc" "$threads" "$sample" "$tpcc_bin $tpcc_cmd"
 
     local ycsb_cmd=$(eval "echo \"$YCSB_PARAMS\"")
-    local ycsb_bin="plugin-benchmarks/ycsb/bin/ycsb_${backend}"
+    local ycsb_bin="benchmarks/plugin/ycsb/bin/ycsb_${backend}"
     [ -x "$ycsb_bin" ] && run_bench "plugin" "$backend" "ycsb" "$threads" "$sample" "$ycsb_bin $ycsb_cmd"
 
     local stm7_cmd=$(eval "echo \"$STM7_PLUGIN_PARAMS\"")
-    local stm7_bin="plugin-benchmarks/stmbench7/bin/stmbench7_${backend}"
+    local stm7_bin="benchmarks/plugin/stmbench7/bin/stmbench7_${backend}"
     [ -x "$stm7_bin" ] && run_bench "plugin" "$backend" "stmbench7" "$threads" "$sample" "$stm7_bin $stm7_cmd"
 }
 
 # ── Run expli C++ implementation ────────────────────────────────────────
 run_expli() {
     local backend="$1" threads="$2" sample="$3"
-    local bin_dir="expli-benchmarks/bin"
+    local bin_dir="benchmarks/cpp/bin"
 
     for bench in vacation kmeans labyrinth genome intruder ssca2 bayes yada; do
         local binary="$bin_dir/$bench"
@@ -193,7 +193,7 @@ run_expli() {
 # ── Run Rust implementation ─────────────────────────────────────────────
 run_rust() {
     local backend="$1" threads="$2" sample="$3"
-    local rust_dir="rust_tm_api"
+    local rust_dir="expli_instr/rust/workspace"
 
     # Map backend to Rust feature/bin name
     local feature
@@ -216,7 +216,7 @@ run_uninstrumented() {
     log "Running uninstrumented baseline (1 thread)..."
 
     # For expli, build with bench_stubs (no TM)
-    local bin_dir="expli-benchmarks/bin"
+    local bin_dir="benchmarks/cpp/bin"
     local outdir="$RESULTS_BASE/raw/uninstrumented/none"
     mkdir -p "$outdir"
 

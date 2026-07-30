@@ -259,37 +259,29 @@ with static thread priorities for deadlock-free lock stealing. 32-bit lock word
 backends/tm_impl/gpu_stm/
   CMakeLists.txt           -- CUDA-enabled build
   include/gpu_stm_api.h    -- C API (TMRealHooks-compatible)
-  common/
-    warp_utils.cuh         -- warp-level ballot, sync, mask helpers
-    lock_table.cuh         -- 32-bit lock word manipulation
-    global_clock.cuh       -- device-side atomic clock
-  pr_stm/
-    pr_stm.cuh             -- PR-STM algorithm (device functions)
-    pr_stm_runtime.cpp     -- Host-side dispatcher (launch-per-tx kernel)
-    pr_stm.cu              -- Kernel entry points
+  cpu/
+    gpu_stm_cpu_runtime.cpp -- CPU fallback runtime
+    pr_stm_cpu.cpp          -- CPU emulation (std::thread as lanes)
+  cuda/
+    pr_stm_kernel.cuh      -- CUDA kernel: warp-level PR-STM
+    pr_stm_runtime.cu      -- CUDA host runtime, kernel launch
+  tests/
+    test_pr_stm.cpp        -- Smoke test (CPU + CUDA)
 ```
 
-**Execution model (Option A — launch-per-transaction)**:
-- `tm_begin()` records transaction parameters on host
-- `tm_read()` / `tm_write()` buffer in host memory
-- `tm_commit()` launches CUDA kernel that executes the transaction on GPU
-- Kernel launch overhead (~5–10 µs) acceptable for large transactions
-
-**Execution model (Option B — persistent kernel)**:
-- `tm_init()` launches a persistent kernel that stays resident on GPU
-- `tm_begin()` pushes a transaction descriptor via circular buffer
-- GPU warps continuously drain buffer, execute transactions, write results
-- Amortizes launch overhead for fine-grained transactions
-
-**Status**: Not started. `docs/proofs/GPU_STM_PLAN.md` has full architecture.
+**Status**: **CPU fallback done** (114/114 test_tx, 207/207 test_ds).
+CUDA kernel template exists (`pr_stm_kernel.cuh`) but not built by CI.
+TLA+ model at `docs/proofs/GPU_PRIORITY_STM.tla`.
 
 ### 5.2 Second backend: CSMV (multi-versioned client-server)
 
-**Goal**: Add CSMV backend (Nunes et al., IPDPS 2022) — multi-versioned STM
+**Goal**: Add CSMV backend (Nunes et al., IPDSS 2022) — multi-versioned STM
 with client-server commit protocol. Server warp validates, clients batch writes.
 K-version read sets allow read-only transactions to commit without validation.
 
-**Status**: Planned. Depends on 5.1 (warp utils, lock table, kernel framework).
+**Status**: **CPU fallback done** (114/114 test_tx, 207/207 test_ds).
+CUDA kernel + batch executor exist (`csmv_kernel.cu`, `csmv_batch_executor.cu`).
+TLA+ model at `docs/proofs/CSMV.tla`.
 
 ### 5.3 Third backend: AccelerateSTM (obstruction-free)
 
