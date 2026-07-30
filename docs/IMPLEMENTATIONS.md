@@ -363,6 +363,64 @@ Comprehensive reference covering all 16+ STM/HTM/distributed TM backends.
 
 ---
 
+## 17. Calvin (Two-Phase Collect-Execute)
+
+**Algorithm:** Two-phase deterministic transaction execution. The first execution ("collect phase") buffers all writes and records read/write sets into thread-local storage. On commit, the backend aborts via siglongjmp, preserving the collected sets in TLS. The second execution ("execute phase") uses the predetermined read/write set: writes are applied to memory and reads are validated against the write buffer. If validation fails (concurrent modification), the backend aborts and restarts from the collect phase.
+
+The two-phase overhead (2× execution) is acceptable in async/queue settings where the first execution can be a lightweight speculation and the second a fast, pre-validated path.
+
+**Key files:**
+- `backends/tm_impl/calvin/calvin_runtime.cpp` — 240 lines, TLS buffers + two-phase flow + hook table
+
+**Notes:**
+- Requires the transaction body to be deterministic (same access pattern in both phases)
+- Write-buffer read-back (reading own writes) works correctly in both phases
+- Non-TM allocations (malloc/free inside transaction body) must also be deterministic
+- Best suited for static workloads with known access patterns (YCSB, bank transfers)
+- Test status: TBD
+
+## 18. GAccO (Sorted-Access Lock Ordering)
+
+**Algorithm:** CPU adaptation of the GPU GAccO scheme. The GPU version pre-computes a global sorted access order on the GPU (using auxiliary tables and sort primitives), then hands off locks between transactions deterministically. On CPU, we implement the same principle as address-sorted lock acquisition: every read and write locks the target object's lock table entry. Locks are acquired in ascending address order (guaranteed by the hash-indexed lock table), preventing deadlocks. This is effectively a deadlock-free 2PL.
+
+**Key differences from GPU original:**
+- No GPU pre-computation phase (locks are acquired on-demand)
+- No batch scheduling (CPU threads execute independently)
+- Write-through (writes go directly to memory under the lock)
+- Reads are tracked for validation at commit time
+
+**Key files:**
+- `backends/tm_impl/gacco/gacco_runtime.cpp` — 260 lines, lock table + sorted-lock 2PL + hook table
+
+**Notes:**
+- Lock table: 2^20 entries indexed by (addr >> 4), each an atomic<uint64_t> holder ID
+- Lock acquisition is lazy (on first access), not eager
+- Commit validates that all read locks are still held (no lock stealing)
+- Single-word CAS for lock acquire — no retry limits (assumes forward progress)
+- Test status: TBD
+
+## 19. EPCC (Epic-inspired Priority Concurrency Control)
+
+**Algorithm:** CPU adaptation of the GPU GPUTx rank-based priority scheme. GPUTx assigns each transaction a dynamic rank using atomicMax during pre-computation, then executes transactions in rank order on the GPU. On CPU, conflicts are resolved by priority: each transaction has a rank = (retries << 48) | timestamp. Higher retry count = higher priority (age-based escalation). When two transactions contend on a write lock, the lower-ranked transaction aborts.
+
+**Key differences from GPU original:**
+- No GPU pre-computation phase (ranks are assigned at begin())
+- No atomicMax-based conflict tracking (locks use compare-exchange with priority comparison)
+- Rank increases with each abort (prevents starvation)
+- Reads are lock-free; writes acquire priority-respecting exclusive locks
+
+**Key files:**
+- `backends/tm_impl/epcc/epcc_runtime.cpp` — 280 lines, priority locks + rank system + hook table
+
+**Notes:**
+- Write lock: CAS with priority check. If lock held by lower rank, higher-rank tx spins briefly then retries; lower-rank tx aborts on finding higher rank holder.
+- Read validation at commit: compare current memory values against captured read-set values
+- Priority aging: g_retries is a counter that increases on each abort, making high-abort transactions eventually win all conflicts
+- The priority scheme provides starvation freedom without explicit fairness mechanisms
+- Test status: TBD
+
+---
+
 ## Shared Infrastructure
 
 ### Hook System (`backends/tm_impl/common/tm_hooks.hpp`)

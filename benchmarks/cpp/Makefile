@@ -75,6 +75,7 @@ ifeq ($(BACKEND),TSXSGL)
   DEFS     = -DTM_BACKEND_TSXSGL -mrtm
   EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tsx_sgl
 endif
+<<<<<<< Updated upstream
 ifeq ($(BACKEND),GPU_STM_CPU)
   RUNTIME  = ../../backends/tm_impl/gpu_stm/cpu/gpu_stm_cpu_runtime.cpp
   DEFS     = -DTM_BACKEND_GPU_STM_CPU
@@ -91,6 +92,26 @@ ifeq ($(BACKEND),CSMV_GPU)
   EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/csmv/include
   LDFLAGS  = -pthread -lcuda -lcudart
   CXXFLAGS = -std=c++20 -O3 -march=x86-64 -pthread -DNDEBUG -I$(abspath ../..) -I$(abspath ../..)/expli_instr/cpp
+endif
+ifeq ($(BACKEND),POWER8HTM)
+  RUNTIME  = ../../backends/tm_impl/power8_htm/POWER8HTM_runtime.cpp
+  DEFS     = -DTM_BACKEND_POWER8HTM -mcpu=power8
+  EXTRA_INC = -I../../backends/tm_impl/common
+endif
+ifeq ($(BACKEND),CALVIN)
+  RUNTIME  = ../../backends/tm_impl/calvin/calvin_runtime.cpp
+  DEFS     = -DTM_BACKEND_CALVIN
+  EXTRA_INC = -I../../backends/tm_impl/common
+endif
+ifeq ($(BACKEND),GACCO)
+  RUNTIME  = ../../backends/tm_impl/gacco/gacco_runtime.cpp
+  DEFS     = -DTM_BACKEND_GACCO
+  EXTRA_INC = -I../../backends/tm_impl/common
+endif
+ifeq ($(BACKEND),EPCC)
+  RUNTIME  = ../../backends/tm_impl/epcc/epcc_runtime.cpp
+  DEFS     = -DTM_BACKEND_EPCC
+  EXTRA_INC = -I../../backends/tm_impl/common
 endif
 
 HOOKS_SRC = ../../backends/tm_impl/common/tm_hooks.cpp
