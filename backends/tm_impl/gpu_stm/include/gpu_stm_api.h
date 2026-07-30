@@ -22,14 +22,26 @@
 #define PR_STM_PRIORITY_MASK   (0xFFu << PR_STM_PRIORITY_SHIFT)
 #define PR_STM_VERSION_MASK    ((1u << PR_STM_PRIORITY_SHIFT) - 2)
 
+#if defined(__CUDACC__) || defined(__HIPCC__)
+  #define TM_GPU_HOST_DEVICE __host__ __device__
+#else
+  #define TM_GPU_HOST_DEVICE
+#endif
+
+TM_GPU_HOST_DEVICE
 inline uint32_t pr_stm_make_entry(uint8_t priority, uint32_t version, int locked) {
     return ((uint32_t)priority << PR_STM_PRIORITY_SHIFT) |
            (version << PR_STM_VERSION_SHIFT) |
            (locked ? PR_STM_LOCKED_BIT : 0u);
 }
 
+TM_GPU_HOST_DEVICE
 inline uint8_t  pr_stm_get_priority(uint32_t entry) { return (uint8_t)(entry >> PR_STM_PRIORITY_SHIFT); }
+
+TM_GPU_HOST_DEVICE
 inline uint32_t pr_stm_get_version(uint32_t entry)  { return (entry >> PR_STM_VERSION_SHIFT) & (PR_STM_VERSION_MASK >> PR_STM_VERSION_SHIFT); }
+
+TM_GPU_HOST_DEVICE
 inline int      pr_stm_is_locked(uint32_t entry)    { return (int)(entry & PR_STM_LOCKED_BIT); }
 
 // ── Host API (CPU side, matches TMRealHooks pattern) ──────────────

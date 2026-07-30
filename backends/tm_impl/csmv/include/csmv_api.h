@@ -26,8 +26,10 @@ struct CSMVVersionNode {
 // atomic head pointer to the newest version node.
 
 struct CSMVObjectEntry {
+#if !defined(__CUDACC__) && !defined(__HIPCC__)
     std::mutex                lock;
-    std::atomic<CSMVVersionNode*> head{nullptr};
+#endif
+    CSMVVersionNode          *head;
 };
 
 // ── CSMV Thread Transaction State ───────────────────────────────

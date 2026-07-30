@@ -9,11 +9,13 @@
 //   cudaStreamCreate  → sycl::queue / hipStreamCreate
 //   cudaEventSynchronize → event.wait() / hipEventSynchronize
 
-#include <cuda_runtime.h>
+#include "tm_gpu_platform.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cassert>
+#include <csignal>
+#include <csetjmp>
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -53,17 +55,6 @@ extern __thread int32_t    tm_nested_call_counter;
 extern __thread int32_t    tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;
 }
-
-// ── CUDA error checking ────────────────────────────────────────────
-
-#define CUDA_CHECK(call) do { \
-    cudaError_t err = call; \
-    if (err != cudaSuccess) { \
-        fprintf(stderr, "CUDA error %d at %s:%d: %s\n", \
-                err, __FILE__, __LINE__, cudaGetErrorString(err)); \
-        abort(); \
-    } \
-} while(0)
 
 // ── Device management ──────────────────────────────────────────────
 

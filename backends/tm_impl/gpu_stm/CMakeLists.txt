@@ -104,4 +104,40 @@ if(BUILD_GPU_STM)
     message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 endif()
 
+option(BUILD_GPU_STM_HIP "Build GPU STM backend with HIP" OFF)
+
+if(BUILD_GPU_STM_HIP)
+    find_package(hip REQUIRED)
+    message(STATUS "GPU STM: HIP backend enabled")
+
+    add_library(pr_stm_backend_hip STATIC
+        ${GPU_STM_SRC_DIR}/cuda/pr_stm_runtime.cu
+        ${BACKENDS_REGION}/tm_region_allocator.cpp
+        ${BACKENDS_COMMON}/tm_hooks.cpp
+    )
+    target_compile_features(pr_stm_backend_hip PUBLIC cxx_std_17)
+    target_include_directories(pr_stm_backend_hip PUBLIC
+        ${GPU_STM_INC_DIR}
+        ${BACKENDS_COMMON}
+        ${BACKENDS_REGION}
+    )
+    target_compile_options(pr_stm_backend_hip PRIVATE
+        -x hip
+        --hip-device-lib-path=${HIP_PATH}/lib
+    )
+
+    add_executable(test_pr_stm_gpu_hip
+        ${GPU_STM_SRC_DIR}/cuda/pr_stm_runtime.cu
+        tests/test_pr_stm.cpp
+    )
+    target_compile_features(test_pr_stm_gpu_hip PUBLIC cxx_std_17)
+    target_include_directories(test_pr_stm_gpu_hip PUBLIC
+        ${GPU_STM_INC_DIR}
+        ${BACKENDS_COMMON}
+        ${BACKENDS_REGION}
+    )
+    target_compile_options(test_pr_stm_gpu_hip PRIVATE -x hip)
+    target_link_libraries(test_pr_stm_gpu_hip PRIVATE pthread)
+endif()
+
 

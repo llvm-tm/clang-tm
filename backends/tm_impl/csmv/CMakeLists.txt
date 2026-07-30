@@ -48,3 +48,26 @@ if(BUILD_CSMV AND CMAKE_CUDA_COMPILER)
         cuda
     )
 endif()
+
+# ── HIP backend (optional) ───────────────────────────────────────
+option(BUILD_CSMV_HIP "Build CSMV GPU backend with HIP" OFF)
+
+if(BUILD_CSMV_HIP)
+    find_package(hip REQUIRED)
+
+    add_library(csmv_gpu_backend_hip STATIC
+        gpu/csmv_kernel.cu
+        gpu/csmv_batch_executor.cu
+    )
+
+    target_include_directories(csmv_gpu_backend_hip
+        PUBLIC  include
+        PRIVATE ${CMAKE_SOURCE_DIR}/backends/tm_impl/common
+    )
+
+    target_compile_options(csmv_gpu_backend_hip PRIVATE -x hip)
+
+    target_link_libraries(csmv_gpu_backend_hip PRIVATE
+        csmv_cpu_backend
+    )
+endif()

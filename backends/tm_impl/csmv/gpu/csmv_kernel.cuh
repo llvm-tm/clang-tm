@@ -3,7 +3,7 @@
 #include <cstdint>
 #include "csmv_api.h"
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
 
 // ── Warp-cooperative version list traversal ─────────────────────
 // CSMV on GPU uses warp-level primitives to traverse version lists
@@ -34,4 +34,4 @@ int csmv_gpu_launch(int num_warps,
                                      void *data, void *shared_scratch),
                      void *tx_data);
 
-#endif // __CUDACC__
+#endif // __CUDACC__ / __HIPCC__

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cuda_runtime.h>
+#include "tm_gpu_platform.hpp"
 #include <cstdint>
 
 // ── Lock table (device-side) ──────────────────────────────────────
@@ -107,29 +107,25 @@ __global__ void pr_stm_kernel(
         if (lane == 0) {
             s_read_cnt += my_reads;
             // Warp-level any-of: check if any lane detected locked addr
-            unsigned mask = __ballot_sync(0xFFFFFFFF, s_warp_abort != 0);
+            uint64_t mask = __ballot_sync(~0ULL, s_warp_abort != 0);
             if (mask) s_warp_abort = 1;
         }
         if (s_warp_abort) goto abort_tx;
         __syncwarp();
 
-        // ── Phase 3: WRITE (buffer) ──────────────────────────────
-        // Each lane buffers writes_per_thread addresses.
-        // In a real TM, values come from the transaction body.
-        // Here we write a deterministic value.
+        // ── Phase 3..6 (wrapped to avoid goto-bypass over inits) ──
+        {
+        // Phase 3: WRITE (buffer)
         int my_writes = 0;
         for (int w = 0; w < writes_per_thread; w++) {
             int addr_idx = (lane * writes_per_thread + w + 1) % num_addrs;
-            // Buffered write: we don't touch global data yet.
-            // In a full implementation, we'd track old/new values.
             my_writes++;
         }
         __syncwarp();
 
         if (lane == 0) s_write_cnt += my_writes;
 
-        // ── Phase 4: VALIDATE ────────────────────────────────────
-        // Check every read-set entry: version unchanged AND not locked.
+        // Phase 4: VALIDATE
         int local_valid = 1;
         for (int i = 0; i < my_reads; i++) {
             uint32_t lock_word = pr_stm_load_lock(lock_table, my_read_addr[i]);
@@ -139,35 +135,35 @@ __global__ void pr_stm_kernel(
             }
         }
 
-        // Warp-level any-of: if ANY lane's reads are stale, abort
-        unsigned abort_mask = __ballot_sync(0xFFFFFFFF, local_valid == 0);
+        {
+        uint64_t abort_mask = __ballot_sync(~0ULL, local_valid == 0);
         if (abort_mask) {
             s_warp_abort = 1;
             goto abort_tx;
         }
         __syncwarp();
+        }
 
-        // ── Phase 5: LOCK (priority-based acquisition) ───────────
-        // Each lane tries to acquire locks for its write-set addresses.
-        // If any lock is held by a higher-priority warp, abort.
-        uint8_t my_priority = (uint8_t)(warp + 1);  // static: warp ID + 1
+        // Phase 5: LOCK
+        uint8_t my_priority = (uint8_t)(warp + 1);
 
         for (int w = 0; w < my_writes; w++) {
-            int addr_idx = w;  // simplified: deterministic write set
+            int addr_idx = w;
             uint32_t old = pr_stm_load_lock(lock_table, addr_idx);
 
             if (pr_stm_is_locked(old)) {
                 uint8_t holder_prio = pr_stm_get_priority(old);
                 if (holder_prio > my_priority) {
-                    // Higher-priority holder → abort
                     s_warp_abort = 1;
                     break;
                 }
             }
         }
 
-        abort_mask = __ballot_sync(0xFFFFFFFF, s_warp_abort != 0);
+        {
+        uint64_t abort_mask = __ballot_sync(~0ULL, s_warp_abort != 0);
         if (abort_mask) goto abort_tx;
+        }
 
         // Acquire all write-set locks (atomicCAS)
         for (int w = 0; w < my_writes; w++) {
@@ -180,34 +176,31 @@ __global__ void pr_stm_kernel(
                 uint32_t result = pr_stm_atomic_acquire(
                     lock_table, addr_idx, expected, desired);
                 if (result != expected) {
-                    // CAS failed; another warp acquired it
                     s_warp_abort = 1;
                 }
             }
         }
 
         __syncwarp();
-        abort_mask = __ballot_sync(0xFFFFFFFF, s_warp_abort != 0);
+        {
+        uint64_t abort_mask = __ballot_sync(~0ULL, s_warp_abort != 0);
         if (abort_mask) goto abort_tx;
+        }
 
-        // ── Phase 6: COMMIT ──────────────────────────────────────
-        // 1. Threadfence (visibility)
+        // Phase 6: COMMIT
         __threadfence();
 
-        // 2. Increment global clock
         if (lane == 0) {
             atomicAdd((unsigned long long *)global_clock, 1ULL);
         }
         __syncwarp();
         uint64_t commit_clock = *global_clock;
 
-        // 3. Write-back data values
         for (int w = 0; w < my_writes; w++) {
-            int addr_idx = w;  // simplified
+            int addr_idx = w;
             data[addr_idx] = (uint32_t)(lane + warp * 32 + w);
         }
 
-        // 4. Release locks with new version
         __threadfence();
         for (int w = 0; w < my_writes; w++) {
             int addr_idx = w;
@@ -215,25 +208,17 @@ __global__ void pr_stm_kernel(
             lock_table[addr_idx] = new_entry;
         }
 
-        // 5. Count this commit
         if (lane == 0) {
             atomicAdd((unsigned long long *)committed_count, 1ULL);
         }
 
-        // Transaction succeeded. If this was a one-shot launch, return.
-        // For persistent kernel, continue to next transaction.
-        // For now: single-shot (return after one commit).
         return;
+        }
 
     abort_tx:
-        // ── ABORT ────────────────────────────────────────────────
-        // Release any locks we may have acquired.
-        // (In a full implementation, we'd track acquired locks.)
         if (lane == 0) {
             atomicAdd((unsigned long long *)abort_count, 1ULL);
         }
-        // For one-shot: return with abort status
-        // For persistent: loop back to begin
         return;
     }
 }

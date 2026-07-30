@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include <cuda_runtime.h>
+#include "tm_gpu_platform.hpp"
 #include <vector>
 #include <functional>
 
@@ -103,7 +103,7 @@ private:
 // we use a separate GPU-side table of raw pointers + spinlocks.
 // The host code allocates this table and copies the pointer to
 // __constant__ memory.
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
 
 #define CSMV_GPU_TABLE_SIZE  (1 << 20)  // 1M entries
 
@@ -163,14 +163,14 @@ __device__ uint64_t csmv_gpu_read(CSMVWarpState *ws, void *data_addr) {
     // Warp-cooperative version list traversal
     CSMVVersionNode *node = csmv_gpu_load_head(entry);
     uint64_t result = 0;
-    uint32_t lane_mask = __activemask();
+    uint64_t lane_mask = __activemask();
     int lane_id = threadIdx.x & 31;
 
     while (node) {
         if (lane_id == 0 && node->timestamp <= ws->start_clock) {
             result = node->value;
         }
-        uint32_t found = __ballot_sync(lane_mask, result != 0);
+        uint64_t found = __ballot_sync(lane_mask, result != 0);
         if (found) {
             result = __shfl_sync(lane_mask, result, 0);
             break;
@@ -213,7 +213,7 @@ __device__ uint64_t csmv_gpu_begin(CSMVWarpState *ws) {
 }
 
 __device__ uint64_t csmv_gpu_commit(CSMVWarpState *ws) {
-    uint32_t lane_mask = __activemask();
+    uint64_t lane_mask = __activemask();
     int lane_id = threadIdx.x & 31;
 
     // Validate read-set: leader checks head timestamps
@@ -271,4 +271,4 @@ __global__ void csmv_batch_kernel(
     fns[warp_id](lane_id, warp_id, args[warp_id], scratch);
 }
 
-#endif // __CUDACC__
+#endif // __CUDACC__ / __HIPCC__
