@@ -110,23 +110,41 @@ if(BUILD_GPU_STM_HIP)
     find_package(hip REQUIRED)
     message(STATUS "GPU STM: HIP backend enabled")
 
-    add_library(pr_stm_backend_hip STATIC
-        ${GPU_STM_SRC_DIR}/cuda/pr_stm_runtime.cu
+    # Host-side code compiled with regular C++ (g++/clang++)
+    add_library(pr_stm_backend_hip_host STATIC
+        ${GPU_STM_SRC_DIR}/cuda/pr_stm_host.cpp
         ${BACKENDS_REGION}/tm_region_allocator.cpp
         ${BACKENDS_COMMON}/tm_hooks.cpp
     )
-    target_compile_features(pr_stm_backend_hip PUBLIC cxx_std_17)
-    target_include_directories(pr_stm_backend_hip PUBLIC
+    target_compile_features(pr_stm_backend_hip_host PUBLIC cxx_std_17)
+    target_include_directories(pr_stm_backend_hip_host PUBLIC
+        ${GPU_STM_INC_DIR}
+        ${BACKENDS_COMMON}
+        ${BACKENDS_REGION}
+        ${HIP_PATH}/include
+    )
+    target_link_libraries(pr_stm_backend_hip_host PRIVATE pthread)
+
+    # Device-side kernel compiled with hipcc
+    add_library(pr_stm_backend_hip_kernel STATIC
+        ${GPU_STM_SRC_DIR}/cuda/pr_stm_runtime.cu
+    )
+    target_compile_features(pr_stm_backend_hip_kernel PUBLIC cxx_std_17)
+    target_include_directories(pr_stm_backend_hip_kernel PUBLIC
         ${GPU_STM_INC_DIR}
         ${BACKENDS_COMMON}
         ${BACKENDS_REGION}
     )
-    target_compile_options(pr_stm_backend_hip PRIVATE
-        -x hip
-        --hip-device-lib-path=${HIP_PATH}/lib
+
+    # Combined library
+    add_library(pr_stm_backend_hip INTERFACE)
+    target_link_libraries(pr_stm_backend_hip INTERFACE
+        pr_stm_backend_hip_host
+        pr_stm_backend_hip_kernel
     )
 
     add_executable(test_pr_stm_gpu_hip
+        ${GPU_STM_SRC_DIR}/cuda/pr_stm_host.cpp
         ${GPU_STM_SRC_DIR}/cuda/pr_stm_runtime.cu
         tests/test_pr_stm.cpp
     )
@@ -136,7 +154,6 @@ if(BUILD_GPU_STM_HIP)
         ${BACKENDS_COMMON}
         ${BACKENDS_REGION}
     )
-    target_compile_options(test_pr_stm_gpu_hip PRIVATE -x hip)
     target_link_libraries(test_pr_stm_gpu_hip PRIVATE pthread)
 endif()
 

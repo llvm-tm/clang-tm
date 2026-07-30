@@ -106,9 +106,13 @@ __global__ void pr_stm_kernel(
 
         if (lane == 0) {
             s_read_cnt += my_reads;
-            // Warp-level any-of: check if any lane detected locked addr
-            uint64_t mask = __ballot_sync(~0ULL, s_warp_abort != 0);
-            if (mask) s_warp_abort = 1;
+        }
+        // Warp-level any-of: check if any lane detected locked addr
+        // NOTE: __ballot_sync must be called by ALL active lanes, not
+        // just lane 0 (AMD/HIP hardware exception otherwise).
+        {
+        uint64_t mask = __ballot_sync(~0ULL, s_warp_abort != 0);
+        if (lane == 0 && mask) s_warp_abort = 1;
         }
         if (s_warp_abort) goto abort_tx;
         __syncwarp();

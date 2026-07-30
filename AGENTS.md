@@ -1091,12 +1091,101 @@ No actual UB was found in the codebase, but the TLA+ models cannot verify this p
 - `docs/proofs/TiKV.cfg` — added TLCBound constraint
 - `AGENTS.md` — this session summary
 
+## Session 2026-07-30 — GPU TM backend HIP port (PR-STM on AMD Radeon 8060S)
+
+### CUDA → HIP portability strategy
+
+Single-source, dual-platform approach using `backends/tm_impl/common/tm_gpu_platform.hpp`:
+
+- Under `__HIPCC__`: `#include <hip/hip_runtime.h>` + `#define cuda* → hip*` (22 APIs + 7 types)
+- Under `__CUDACC__`: `#include <cuda_runtime.h>` (zero macro overhead)
+- Under `TM_GPU_USE_HIP` (manual override): same HIP remapping for host code compiled with g++
+- Must also define `__HIP_PLATFORM_AMD__` when compiling host code with g++ (normally set by hipcc)
+
+### Source split: host vs device
+
+`pr_stm_runtime.cu` was split into two files to avoid device-linker seeing host-only symbols:
+
+- **`pr_stm_host.cpp`** — host-only TM hooks (lifecycle, read/write callbacks). Compiled with g++ + `-DTM_GPU_USE_HIP -D__HIP_PLATFORM_AMD__`.
+- **`pr_stm_runtime.cu`** — kernel launch wrapper (`<<<>>>` syntax). Compiled with hipcc.
+
+### Critical bug: `__ballot_sync` must be called by ALL lanes
+
+**Root cause**: `pr_stm_kernel.cuh` had `__ballot_sync()` calls inside `if (lane == 0)` blocks. On NVIDIA GPUs, inactive warp lanes still participate, but on AMD (ROCm 7.2.3 / gfx1151), this causes `HSA_STATUS_ERROR_EXCEPTION`.
+
+**Fix**: Moved `__ballot_sync` calls outside lane-guarded blocks. All active lanes call the intrinsic, then lane 0 conditionally acts on the result.
+
+Pattern:
+```cuda
+// BAD (crashes on AMD):
+if (lane == 0) {
+    uint64_t m = __ballot_sync(~0ULL, flag != 0);
+    if (m) flag = 1;
+}
+
+// FIXED (works on both):
+{
+uint64_t m = __ballot_sync(~0ULL, flag != 0);
+if (lane == 0 && m) flag = 1;
+}
+```
+
+### Compilation workflow (HIP)
+
+```sh
+# 1. Compile host-only code with g++ (must define TM_GPU_USE_HIP + __HIP_PLATFORM_AMD__)
+g++ -c -DTM_GPU_USE_HIP -D__HIP_PLATFORM_AMD__ \
+  -I backends/tm_impl/common \
+  -I backends/tm_impl/gpu_stm/include \
+  -I backends/tm_impl/tm_region_allocator \
+  -I /opt/rocm-7.2.3/include \
+  -std=c++17 \
+  backends/tm_impl/gpu_stm/cuda/pr_stm_host.cpp \
+  -o pr_stm_host.o
+
+# 2. Compile kernel+launch code with hipcc
+hipcc -c --offload-arch=gfx1151 \
+  -I backends/tm_impl/common \
+  -I backends/tm_impl/gpu_stm/include \
+  -I backends/tm_impl/tm_region_allocator \
+  -std=c++17 \
+  backends/tm_impl/gpu_stm/cuda/pr_stm_runtime.cu \
+  -o pr_stm_kernel.o
+
+# 3. Link everything together
+hipcc \
+  -DTM_GPU_USE_HIP -D__HIP_PLATFORM_AMD__ \
+  pr_stm_host.o pr_stm_kernel.o \
+  backends/tm_impl/tm_region_allocator/tm_region_allocator.cpp \
+  backends/tm_impl/common/tm_hooks.cpp \
+  backends/tm_impl/gpu_stm/cpu/pr_stm_cpu.cpp \
+  -I .../include \
+  -std=c++17 \
+  -o pr_stm_gpu_test
+```
+
+Notes:
+- `LD_LIBRARY_PATH=/tmp:...` needed only if `libxml2.so.2` is a non-standard path
+- For CUDA, replace `--offload-arch=gfx1151` with `--gpu-architecture=sm_XX`, replace `-DTM_GPU_USE_HIP -D__HIP_PLATFORM_AMD__` with nothing (only needed for g++ host compilation)
+
+### Verification
+
+- Simple HIP vector-add kernel: **PASS** (GPU functional on gfx1151)
+- PR-STM kernel with fix: **PASS** (4 warps, 4 aborts — expected: all try address 0 simultaneously)
+- All `__ldg`, `__syncwarp`, `__ballot_sync`, `atomicCAS`, `__threadfence` — individually verified on gfx1151
+
+### Files modified
+
+- `backends/tm_impl/common/tm_gpu_platform.hpp` — added `TM_GPU_USE_HIP` manual-override branch for g++ host code
+- `backends/tm_impl/gpu_stm/cuda/pr_stm_kernel.cuh` — moved `__ballot_sync` outside `if (lane == 0)` guard
+
 ### Next Steps
 1. **Complete remaining PlusCal conversions**: NVHTM, DistributedSGL, TSXSim (NVHTM done; DSGL+TSXSim deprioritized — complex msg-passing and bloom-filter models)
 2. **Investigate TL2 invariant violation**: guard table not updated by PlusCal write action
 3. **Add `lastFence` + `FenceFidelity` to remaining backends**
 4. **Model jmp_buf validity as a meta-invariant** (optional — see analysis above)
 5. **TLC heap for WT**: >4GB heap or distributed mode for WT parallel model
+6. **Run STAMP benchmarks on PR-STM GPU** — need a proper multi-transaction workload (not just 4 aborts / 0 commits)
 
 ## Session 2026-07-30 — JVSTM backend + TLA+ models (CPU + GPU)
 
