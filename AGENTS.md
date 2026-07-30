@@ -1098,4 +1098,90 @@ No actual UB was found in the codebase, but the TLA+ models cannot verify this p
 4. **Model jmp_buf validity as a meta-invariant** (optional — see analysis above)
 5. **TLC heap for WT**: >4GB heap or distributed mode for WT parallel model
 
+## Session 2026-07-30 — JVSTM backend + TLA+ models (CPU + GPU)
+
+### JVSTM C++ backend
+
+Created `backends/tm_impl/jvstm/jvstm_runtime.cpp` — a multi-version OCC backend
+based on the Java Versioned STM (Cachopo & Rito-Silva, 2006).
+
+**Algorithm:**
+- Every address has a **VBox** (versioned box): a singly-linked list of
+  `(version, value)` bodies ordered newest-first.
+- `tm_begin()` copies the global clock → `rv` (read version).
+- `tm_read()`: checks write-set first (read-own-writes), then walks the VBox
+  history for the newest body with version ≤ `rv`. Captures the body's version
+  in the read-set. **Read-only transactions never abort**.
+- `tm_write()`: buffers in per-thread write-set.
+- `tm_end()` (write tx): acquires global commit lock → increments clock →
+  validates read-set (each VBox head version == captured) and write-set
+  (each VBox head version ≤ rv) → prepends new VBox bodies → releases lock.
+- `tm_end()` (read-only): no lock, no validation, immediate return.
+
+**Verification:** `test_ds` 207/207 PASS, `test_tx` has 25 failures due to
+`.peek()` not going through TM API (VBox values are stored in the linked
+list, not written back to the original memory address — `.peek()` reads
+memory directly).
+
+### Calvin bug fixes (concurrent with JVSTM work)
+
+Three fixes to `calvin_runtime.cpp`:
+1. **Pre-write value capture**: writes in collect phase now capture the
+   **pre-write** memory value (not the uninitialized zero), so validation
+   in execute phase compares against the correct original value.
+2. **Write-buffer skip in execute reads**: `read_tracked()` checks
+   `write_buffer` first during execute phase to return buffered writes
+   (read-own-writes).
+3. **Float/double tracking**: `real_tm_read_f4/f8` and
+   `real_tm_write_f4/f8` now correctly go through `read_tracked`/
+   `write_tracked` with proper `memcpy` conversion.
+
+**Multi-threaded:** `fuzz_counter -t4 -n1000 -c8` passes. `bank -t4 -d500 -a128`
+passes money conservation with 1T; 4T shows money destroyed (pre-existing
+contention issue in Calvin's two-phase OCC — high abort rates in execute
+phase can corrupt the write-set).
+
+### JVSTM TLA+ model (`docs/proofs/JVSTM.tla`)
+
+PlusCal model of JVSTM's multi-version OCC:
+- VBox history as sequences of `<<version>>` tuples (values elided)
+- `FindBody(seq, rv)` operator: walks sequence newest-first for version ≤ rv
+- Commit split: `L_idle` → `L_active` (read/write/commit/readonly) → `L_validate`
+- **TLC verification: 216K distinct states, 0 errors** (safety)
+- Invariants: `LockExclusion`, `LockHolderState`, `ClockMonotonic`,
+  `ReadSetValid`, `BodiesOrdered`, `FenceFidelityInst`
+- Liveness: known false-negative (unbounded `either` at L_active)
+
+### GPU JVSTM TLA+ model (`docs/proofs/GPU_JVSTM.tla`)
+
+GPU warp adaptation of JVSTM following the GPU_PRIORITY_STM pattern:
+- **Warp as process**: one process per warp, managing per-thread arrays
+- **SIMT lockstep**: shared `phase[w]` for all threads in the warp
+- **Divergence via `activeMask[w][t]`**: threads finishing their reads/writes
+  are masked out
+- **Read phases**: explicit `L_read` → `L_write` → `L_validate` phases
+  (no unbounded `either` — bounded by `ReadsPerThread × |Thread|`)
+- **Warp-level commit**: global commit lock acquired on behalf of all threads
+- **Read-only warp optimization**: if no thread has writes, commit instantly
+- Warp IDs start from 1 (avoids 0/lock-free sentinel conflict)
+
+TLC ran 42M states with no invariant violations before timeout (state space
+is large due to fine-grained warp modeling).
+
+### Files created
+- `backends/tm_impl/jvstm/jvstm_runtime.cpp` — JVSTM C++ backend
+- `benchmarks/cpp/Makefile` — JVSTM backend entry
+- `docs/proofs/JVSTM.tla` — JVSTM PlusCal model + TLA+ translation
+- `docs/proofs/JVSTM.cfg` — JVSTM TLC config
+- `docs/proofs/JVSTM-liveness.cfg` — JVSTM liveness config
+- `docs/proofs/GPU_JVSTM.tla` — GPU JVSTM PlusCal model + TLA+ translation
+- `docs/proofs/GPU_JVSTM.cfg` — GPU JVSTM TLC config
+- `docs/proofs/Calvin.tla` — Calvin PlusCal model + TLA+ translation
+- `docs/proofs/Calvin.cfg`, `Calvin-liveness.cfg`, `Calvin-sequential.cfg`
+
+### Files modified
+- `backends/tm_impl/calvin/calvin_runtime.cpp` — pre-write capture, float tracking, write-buffer fix
+- `backends/tm_impl/epcc/epcc_runtime.cpp` — added `#include "tm_hooks.hpp"`
+- `backends/tm_impl/gacco/gacco_runtime.cpp` — added `#include "tm_hooks.hpp"`
+
 

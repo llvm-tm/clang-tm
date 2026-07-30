@@ -75,7 +75,6 @@ ifeq ($(BACKEND),TSXSGL)
   DEFS     = -DTM_BACKEND_TSXSGL -mrtm
   EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tsx_sgl
 endif
-<<<<<<< Updated upstream
 ifeq ($(BACKEND),GPU_STM_CPU)
   RUNTIME  = ../../backends/tm_impl/gpu_stm/cpu/gpu_stm_cpu_runtime.cpp
   DEFS     = -DTM_BACKEND_GPU_STM_CPU
@@ -111,6 +110,11 @@ endif
 ifeq ($(BACKEND),EPCC)
   RUNTIME  = ../../backends/tm_impl/epcc/epcc_runtime.cpp
   DEFS     = -DTM_BACKEND_EPCC
+  EXTRA_INC = -I../../backends/tm_impl/common
+endif
+ifeq ($(BACKEND),JVSTM)
+  RUNTIME  = ../../backends/tm_impl/jvstm/jvstm_runtime.cpp
+  DEFS     = -DTM_BACKEND_JVSTM
   EXTRA_INC = -I../../backends/tm_impl/common
 endif
 

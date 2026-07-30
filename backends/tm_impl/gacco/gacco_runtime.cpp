@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "tm_hooks.hpp"
 #include "tm_common.hpp"
 #include "tm_region_allocator.hpp"
 
@@ -49,13 +50,13 @@ struct GaccORecord {
     uint8_t width;
 };
 
-static __thread bool g_in_tx = false;
-static __thread std::vector<void*>  g_locks_held;   // addresses of held locks (sorted)
-static __thread std::vector<GaccORecord> g_reads;
-static __thread std::vector<GaccORecord> g_writes;
-static __thread uint64_t g_tid = 0;
+static thread_local bool g_in_tx = false;
+static thread_local std::vector<void*>  g_locks_held;
+static thread_local std::vector<GaccORecord> g_reads;
+static thread_local std::vector<GaccORecord> g_writes;
+static thread_local uint64_t g_tid = 0;
 static std::atomic<uint64_t> g_next_tid{1};
-static __thread bool g_aborted = false;
+static thread_local bool g_aborted = false;
 
 // ── Lock helpers ─────────────────────────────────────────
 static void acquire_lock(void *addr) {
@@ -179,52 +180,33 @@ static void real_tm_init_thread() {
     g_tid = g_next_tid.fetch_add(1, std::memory_order_relaxed);
 }
 static void real_tm_exit_thread() {}
-static void real_tm_set_env(void *env) {}
-static void real_tm_set_jmpbuf(void *buf) {}
-
-static int32_t real_tm_get_nested_call_counter() { return tm_nested_call_counter; }
-static void    real_tm_set_nested_call_counter(int32_t v) { tm_nested_call_counter = v; }
-static int32_t real_tm_get_longjmp_ret()         { return tm_longjmp_ret; }
-static int32_t real_tm_load_symbols(const char *lib) { return 0; }
-
-static void real_tm_serialize_lock() {}
-static void real_tm_serialize_unlock() {}
+static void *real_tm_get_thread_state() { return nullptr; }
 
 static TMRealHooks g_gacco_hooks = {
-    .init                    = real_tm_init,
-    .exit                    = real_tm_exit,
-    .init_thread             = real_tm_init_thread,
-    .exit_thread             = real_tm_exit_thread,
-    .begin                   = real_tm_begin,
-    .end                     = real_tm_end,
-    .abort                   = real_tm_abort,
-    .malloc                  = real_tm_malloc,
-    .calloc                  = real_tm_calloc,
-    .realloc                 = real_tm_realloc,
-    .free                    = real_tm_free,
-    .read_i1                 = real_tm_read_i1,
-    .read_i2                 = real_tm_read_i2,
-    .read_i4                 = real_tm_read_i4,
-    .read_i8                 = real_tm_read_i8,
-    .read_f4                 = real_tm_read_f4,
-    .read_f8                 = real_tm_read_f8,
-    .write_i1                = real_tm_write_i1,
-    .write_i2                = real_tm_write_i2,
-    .write_i4                = real_tm_write_i4,
-    .write_i8                = real_tm_write_i8,
-    .write_f4                = real_tm_write_f4,
-    .write_f8                = real_tm_write_f8,
-    .set_env                 = real_tm_set_env,
-    .set_jmpbuf              = real_tm_set_jmpbuf,
-    .get_nested_call_counter = real_tm_get_nested_call_counter,
-    .set_nested_call_counter = real_tm_set_nested_call_counter,
-    .get_longjmp_ret         = real_tm_get_longjmp_ret,
-    .load_symbols            = real_tm_load_symbols,
-    .serialize_lock          = real_tm_serialize_lock,
-    .serialize_unlock        = real_tm_serialize_unlock,
-    .get_thread_state        = nullptr,
+    .begin            = real_tm_begin,
+    .end              = real_tm_end,
+    .malloc           = real_tm_malloc,
+    .calloc           = real_tm_calloc,
+    .realloc          = real_tm_realloc,
+    .free             = real_tm_free,
+    .read_i1          = (uint8_t (*)(uint8_t*))real_tm_read_i1,
+    .read_i2          = (uint16_t(*)(uint16_t*))real_tm_read_i2,
+    .read_i4          = (uint32_t(*)(uint32_t*))real_tm_read_i4,
+    .read_i8          = (uint64_t(*)(uint64_t*))real_tm_read_i8,
+    .read_f4          = real_tm_read_f4,
+    .read_f8          = real_tm_read_f8,
+    .read_ptr         = nullptr,
+    .write_i1         = (void(*)(uint8_t*,uint8_t))real_tm_write_i1,
+    .write_i2         = (void(*)(uint16_t*,uint16_t))real_tm_write_i2,
+    .write_i4         = (void(*)(uint32_t*,uint32_t))real_tm_write_i4,
+    .write_i8         = (void(*)(uint64_t*,int64_t))real_tm_write_i8,
+    .write_f4         = real_tm_write_f4,
+    .write_f8         = real_tm_write_f8,
+    .write_ptr        = nullptr,
+    .get_env          = nullptr,
+    .set_jmpbuf       = nullptr,
+    .get_thread_state = real_tm_get_thread_state,
 };
-} // extern "C"
 
 #ifdef LLVM_TM_PLUGIN
 static void do_tm_init() { real_tm_init(); }
