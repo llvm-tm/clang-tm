@@ -15,8 +15,8 @@ int gpu_pr_stm_launch(int num_warps,
                        void *tx_data) {
     (void)num_warps; (void)tx_body; (void)tx_data;
     // Check GPU availability via host-side flag
-    extern int gpu_available;
-    if (!gpu_available) {
+    extern int g_gpu_available;
+    if (!g_gpu_available) {
         fprintf(stderr, "[PR-STM] No GPU: cannot launch kernel.\n");
         return -1;
     }

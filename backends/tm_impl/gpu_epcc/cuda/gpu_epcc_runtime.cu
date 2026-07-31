@@ -4,8 +4,8 @@
 #include "gpu_epcc_kernel.cuh"
 
 int gpu_epcc_launch(int num_warps) {
-    extern int gpu_available;
-    if (!gpu_available) {
+    extern int g_gpu_available;
+    if (!g_gpu_available) {
         fprintf(stderr, "[GPU-EPCC] No GPU.\n");
         return -1;
     }

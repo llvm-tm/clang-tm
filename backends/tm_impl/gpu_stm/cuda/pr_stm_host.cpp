@@ -7,6 +7,7 @@
 // the cudaMalloc/hipMalloc remapping so calls are portable.
 
 #include "tm_gpu_platform.hpp"
+#include "tm_gpu_detect.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,7 +39,6 @@ uint64_t *d_aborted = nullptr;
 static uint32_t *h_lock_table = nullptr;
 static uint32_t *h_data = nullptr;
 
-int gpu_available = 0;
 static std::mutex gpu_init_mutex;
 static thread_local int tl_in_tx = 0;
 
@@ -52,9 +52,7 @@ extern __thread sigjmp_buf tm_jmpbuf;
 // ── Device management ──────────────────────────────────────────────
 
 static int check_gpu_available() {
-    int count = 0;
-    cudaError_t err = cudaGetDeviceCount(&count);
-    return (err == cudaSuccess && count > 0) ? 1 : 0;
+    return gpu_check_and_set(0);
 }
 
 static void init_device_memory(int num_addrs) {
@@ -92,10 +90,10 @@ void gpu_tm_init() {
         abort();
     }
 
-    gpu_available = check_gpu_available();
+    g_gpu_available = check_gpu_available();
     gpu_num_addresses = 1024;
 
-    if (gpu_available) {
+    if (g_gpu_available) {
         cudaSetDevice(0);
         init_device_memory(gpu_num_addresses);
         printf("[PR-STM] GPU available. Device memory initialized.\n");
@@ -109,7 +107,7 @@ void gpu_tm_init() {
 }
 
 void gpu_tm_exit() {
-    if (gpu_available) {
+    if (g_gpu_available) {
         cudaFree(d_lock_table);
         cudaFree(d_global_clock);
         cudaFree(d_data);
@@ -140,7 +138,7 @@ void gpu_tm_end() {
 
 void *gpu_tm_malloc(size_t sz) {
     void *p;
-    if (gpu_available) {
+    if (g_gpu_available) {
         CUDA_CHECK(cudaMallocManaged(&p, sz));
     } else {
         p = stm::tm_region_malloc(sz);
@@ -151,7 +149,7 @@ void *gpu_tm_malloc(size_t sz) {
 
 void gpu_tm_free(void *p) {
     if (!p) return;
-    if (gpu_available) {
+    if (g_gpu_available) {
         cudaFree(p);
     } else {
         stm::tm_region_free(p);

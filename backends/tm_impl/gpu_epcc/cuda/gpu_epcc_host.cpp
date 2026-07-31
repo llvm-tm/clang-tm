@@ -1,5 +1,6 @@
 // GPU EPCC host-only TM hooks
 #include "tm_gpu_platform.hpp"
+#include "tm_gpu_detect.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -18,7 +19,6 @@ int       g_gpu_epcc_num_addrs = 1024;
 uint64_t *g_gpu_epcc_committed = nullptr;
 uint64_t *g_gpu_epcc_aborted = nullptr;
 
-int gpu_available = 0;
 static std::mutex init_mutex;
 static thread_local int tl_in_tx = 0;
 
@@ -26,12 +26,6 @@ extern "C" {
 extern __thread int32_t    tm_nested_call_counter;
 extern __thread int32_t    tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;
-}
-
-static int check_gpu() {
-    int count = 0;
-    cudaError_t err = cudaGetDeviceCount(&count);
-    return (err == cudaSuccess && count > 0) ? 1 : 0;
 }
 
 static void init_device_memory() {
@@ -54,9 +48,8 @@ static void init_device_memory() {
 void gpu_epcc_init() {
     std::lock_guard<std::mutex> lock(init_mutex);
     if (stm::tm_region_init() != 0) { abort(); }
-    gpu_available = check_gpu();
-    g_gpu_epcc_num_addrs = 1024;
-    if (gpu_available) {
+    gpu_check_and_set(0);
+    if (g_gpu_available) {
         cudaSetDevice(0);
         init_device_memory();
         printf("[GPU-EPCC] GPU available.\n");
@@ -68,7 +61,7 @@ void gpu_epcc_init() {
 }
 
 void gpu_epcc_exit() {
-    if (gpu_available) {
+    if (g_gpu_available) {
         cudaFree(g_gpu_epcc_lock_table);
         cudaFree(g_gpu_epcc_clock);
         cudaFree(g_gpu_epcc_data);
@@ -85,16 +78,16 @@ void gpu_epcc_end()   { tl_in_tx = 0; }
 
 void *gpu_epcc_malloc(size_t sz) {
     void *p;
-    if (gpu_available) { CUDA_CHECK(cudaMallocManaged(&p, sz)); }
-    else               { p = stm::tm_region_malloc(sz); }
+    if (g_gpu_available) { CUDA_CHECK(cudaMallocManaged(&p, sz)); }
+    else                 { p = stm::tm_region_malloc(sz); }
     if (p) memset(p, 0, sz);
     return p;
 }
 
 void gpu_epcc_free(void *p) {
     if (!p) return;
-    if (gpu_available) cudaFree(p);
-    else               stm::tm_region_free(p);
+    if (g_gpu_available) cudaFree(p);
+    else                 stm::tm_region_free(p);
 }
 
 void *gpu_epcc_calloc(size_t nmemb, size_t sz) {
