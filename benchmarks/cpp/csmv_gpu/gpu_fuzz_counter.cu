@@ -27,11 +27,9 @@ struct TxArg {
 __device__ void tx_increment(int lane_id, int warp_id,
                               void *arg, void *shared_scratch)
 {
-    // Use per-warp state from shared memory
-    // (the kernel already provides ws_array in shared memory; we get it via
-    //  the shared_scratch pointer for demonstration)
+    // The batch kernel passes this warp's own CSMVWarpState as
+    // shared_scratch, so we use it directly.
     CSMVWarpState *ws = (CSMVWarpState*)shared_scratch;
-    ws += threadIdx.x / 32;
 
     TxArg *tx_arg = (TxArg*)arg;
 

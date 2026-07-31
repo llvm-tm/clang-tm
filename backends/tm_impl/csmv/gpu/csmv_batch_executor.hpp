@@ -117,6 +117,10 @@ struct CSMVGpuEntry {
 extern __device__ __constant__ CSMVGpuEntry *g_csmv_gpu_head_table;
 extern __device__ __constant__ uint64_t     *g_csmv_gpu_clock;
 
+// Host lifecycle (defined in csmv_batch_executor.cu)
+extern "C" void csmv_gpu_init(int table_entries);
+extern "C" void csmv_gpu_shutdown();
+
 __device__ inline uint64_t csmv_gpu_atomic_load_clock() {
     return atomicAdd((unsigned long long*)g_csmv_gpu_clock, 0ULL);
 }
@@ -190,6 +194,9 @@ __device__ uint64_t csmv_gpu_read(CSMVWarpState *ws, void *data_addr) {
 }
 
 __device__ void csmv_gpu_write(CSMVWarpState *ws, void *data_addr, uint64_t val) {
+    // Only lane 0 maintains the shared write-set; all lanes must call
+    // this function (for warp convergence) but only lane 0 mutates it.
+    if ((threadIdx.x & 31) != 0) return;
     uint64_t idx = csmv_gpu_entry_idx(data_addr);
 
     for (int i = 0; i < ws->num_writes; i++) {
@@ -216,35 +223,39 @@ __device__ uint64_t csmv_gpu_commit(CSMVWarpState *ws) {
     uint64_t lane_mask = __activemask();
     int lane_id = threadIdx.x & 31;
 
-    // Validate read-set: leader checks head timestamps
+    // Validate read-set: lane 0 checks head timestamps, result is
+    // broadcast to all lanes via ballot (no early return, so the warp
+    // stays converged for the ballot).
+    int fail = 0;
     if (lane_id == 0) {
         for (int i = 0; i < ws->num_reads; i++) {
             CSMVGpuEntry *entry = &g_csmv_gpu_head_table[ws->reads[i].entry_idx];
             CSMVVersionNode *head = csmv_gpu_load_head(entry);
             uint64_t head_ts = head ? head->timestamp : 0;
-            if (head_ts != ws->reads[i].observed_ts)
-                return 0;
+            if (head_ts != ws->reads[i].observed_ts) { fail = 1; break; }
         }
     }
-    int valid = __shfl_sync(lane_mask, 1, 0);
+    if (__ballot_sync(lane_mask, fail)) return 0;
 
-    if (valid) {
-        uint64_t commit_ts = csmv_gpu_atomic_inc_clock() + 1;
-
-        if (lane_id == 0) {
-            __threadfence();  // ensure all prior reads complete
-            for (int i = 0; i < ws->num_writes; i++) {
-                CSMVGpuEntry *entry = &g_csmv_gpu_head_table[ws->writes[i].entry_idx];
-                CSMVVersionNode *node = (CSMVVersionNode*)malloc(sizeof(CSMVVersionNode));
-                node->timestamp = commit_ts;
-                node->value = ws->writes[i].val;
-                node->next = csmv_gpu_load_head(entry);
-                csmv_gpu_store_head(entry, node);
-            }
-        }
-        return commit_ts;
+    // Increment the global clock once (lane 0), broadcast the result.
+    uint64_t commit_ts;
+    if (lane_id == 0) {
+        __threadfence();  // ensure all prior reads complete
+        commit_ts = csmv_gpu_atomic_inc_clock() + 1;
     }
-    return 0;
+    commit_ts = __shfl_sync(lane_mask, commit_ts, 0);
+
+    if (lane_id == 0) {
+        for (int i = 0; i < ws->num_writes; i++) {
+            CSMVGpuEntry *entry = &g_csmv_gpu_head_table[ws->writes[i].entry_idx];
+            CSMVVersionNode *node = (CSMVVersionNode*)malloc(sizeof(CSMVVersionNode));
+            node->timestamp = commit_ts;
+            node->value = ws->writes[i].val;
+            node->next = csmv_gpu_load_head(entry);
+            csmv_gpu_store_head(entry, node);
+        }
+    }
+    return commit_ts;
 }
 
 // ── Persistent GPU kernel for batch execution ──────────────────
@@ -268,7 +279,9 @@ __global__ void csmv_batch_kernel(
     CSMVWarpState *ws = &ws_array[threadIdx.x / warpSize];
     void *scratch = shared_mem + CSMV_BATCH_WARPS_PER_BLOCK * sizeof(CSMVWarpState);
 
-    fns[warp_id](lane_id, warp_id, args[warp_id], scratch);
+    // Pass the warp's own CSMVWarpState to the tx body as shared_scratch,
+    // so transaction code can call csmv_gpu_begin/read/write/commit directly.
+    fns[warp_id](lane_id, warp_id, args[warp_id], ws);
 }
 
 #endif // __CUDACC__ / __HIPCC__
