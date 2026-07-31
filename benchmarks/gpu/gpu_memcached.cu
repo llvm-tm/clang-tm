@@ -37,6 +37,7 @@ __device__ uint64_t g_values[GPU_MEMCACHED_MAX_KEYS];
 
 __device__ unsigned long long g_commits = 0;
 __device__ unsigned long long g_aborts = 0;
+
 __device__ unsigned long long g_gets = 0;
 __device__ unsigned long long g_sets = 0;
 
@@ -90,10 +91,12 @@ __device__ void tx_memcached(int lane_id, int warp_id,
     }
 }
 
+__device__ csmv_tx_body_t g_tx_fn = tx_memcached;
+
 // ── Snapshot: newest committed value per key ─────────────────
 __device__ inline uint64_t current_value(uint64_t *kv) {
     uint64_t idx = csmv_gpu_entry_idx(kv);
-    CSMVGpuEntry *entry = &g_csmv_gpu_head_table[idx];
+    CSMVGpuEntry *entry = &csmv_gpu_table()[idx];
     CSMVVersionNode *head = csmv_gpu_load_head(entry);
     return head ? head->value : 0;
 }
@@ -122,16 +125,19 @@ int main(int argc, char **argv) {
     printf("  Write ratio:  %d%%\n", write_ratio);
     printf("\n");
 
-    cudaMemset(g_values, 0, sizeof(g_values));
     csmv_gpu_init(GPU_MEMCACHED_MAX_KEYS);
 
     CSMVBatchExecutor executor;
+
+    csmv_tx_body_t d_fn;
+    cudaMemcpyFromSymbol(&d_fn, g_tx_fn, sizeof(csmv_tx_body_t));
+
     for (int i = 0; i < num_txns; i++) {
         MemcachedTxArg a;
         a.keys        = keys;
         a.write_ratio = write_ratio;
         a.seed        = seed + (uint32_t)i;
-        executor.enqueue(tx_memcached, &a, sizeof(MemcachedTxArg));
+        executor.enqueue(d_fn, &a, sizeof(MemcachedTxArg));
     }
 
     auto timing = executor.launch();

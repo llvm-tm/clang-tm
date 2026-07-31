@@ -92,11 +92,15 @@ __device__ void tx_ycsb(int lane_id, int warp_id,
     }
 }
 
+// Device function pointer to the tx body, so the host can obtain its valid
+// device address (cudaMemcpyFromSymbol) to pass to the batch executor.
+__device__ csmv_tx_body_t g_tx_fn = tx_ycsb;
+
 // ── Snapshot kernel: read newest committed value of each record ──
 // Reads the version-list head directly (writes prepend, so head is newest).
 __device__ inline uint64_t current_value(uint64_t *rec) {
     uint64_t idx = csmv_gpu_entry_idx(rec);
-    CSMVGpuEntry *entry = &g_csmv_gpu_head_table[idx];
+    CSMVGpuEntry *entry = &csmv_gpu_table()[idx];
     CSMVVersionNode *head = csmv_gpu_load_head(entry);
     return head ? head->value : 0;
 }
@@ -127,12 +131,14 @@ int main(int argc, char **argv) {
     printf("  Write ratio:  %d%%\n", write_ratio);
     printf("\n");
 
-    cudaMemset(g_table, 0, sizeof(g_table));
-
     // ── Initialize CSMV device state ──────────────────────────
     csmv_gpu_init(YCSB_MAX_RECORDS);
 
     CSMVBatchExecutor executor;
+
+    // Obtain the device address of the tx body (NOT the host stub).
+    csmv_tx_body_t d_fn;
+    cudaMemcpyFromSymbol(&d_fn, g_tx_fn, sizeof(csmv_tx_body_t));
 
     // ── Enqueue transactions ──────────────────────────────────
     for (int i = 0; i < num_txns; i++) {
@@ -141,7 +147,7 @@ int main(int argc, char **argv) {
         a.ops         = ops;
         a.write_ratio = write_ratio;
         a.seed        = seed + (uint32_t)i;
-        executor.enqueue(tx_ycsb, &a, sizeof(YCSBTxArg));
+        executor.enqueue(d_fn, &a, sizeof(YCSBTxArg));
     }
 
     // ── Launch batch and measure ─────────────────────────────

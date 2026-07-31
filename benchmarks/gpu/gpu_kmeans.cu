@@ -45,6 +45,7 @@ __device__ uint64_t g_assignments[GPU_KMEANS_MAX_POINTS];  // 8B cells: matches
 __device__ unsigned long long g_commits = 0;
 __device__ unsigned long long g_aborts = 0;
 
+
 struct KMeansTxArg {
     int    nclusters;
     int    ndims;
@@ -71,7 +72,7 @@ __device__ inline double warp_dist_sq(const double *p, const double *c, int ndim
 // ── Version-list head reader (matches ycsb/memcached snapshot pattern) ──
 __device__ inline uint64_t current_value(uint64_t *cell) {
     uint64_t idx = csmv_gpu_entry_idx(cell);
-    CSMVGpuEntry *entry = &g_csmv_gpu_head_table[idx];
+    CSMVGpuEntry *entry = &csmv_gpu_table()[idx];
     CSMVVersionNode *head = csmv_gpu_load_head(entry);
     return head ? head->value : 0;
 }
@@ -122,6 +123,8 @@ __device__ void tx_kmeans_assign(int lane_id, int warp_id,
     }
 }
 
+__device__ csmv_tx_body_t g_tx_fn = tx_kmeans_assign;
+
 // ── Host driver ───────────────────────────────────────────────
 int main(int argc, char **argv) {
     int npoints   = (argc > 1) ? atoi(argv[1]) : 4096;
@@ -157,12 +160,15 @@ int main(int argc, char **argv) {
     csmv_gpu_init(GPU_KMEANS_MAX_POINTS * GPU_KMEANS_MAX_DIMS);
     CSMVBatchExecutor executor;
 
+    csmv_tx_body_t d_fn;
+    cudaMemcpyFromSymbol(&d_fn, g_tx_fn, sizeof(csmv_tx_body_t));
+
     for (int i = 0; i < txns; i++) {
         KMeansTxArg a;
         a.nclusters = nclusters;
         a.ndims     = ndims;
         a.point_idx = i;   // each tx assigns a distinct point (SIMD: distinct data)
-        executor.enqueue(tx_kmeans_assign, &a, sizeof(KMeansTxArg));
+        executor.enqueue(d_fn, &a, sizeof(KMeansTxArg));
     }
 
     auto timing = executor.launch();

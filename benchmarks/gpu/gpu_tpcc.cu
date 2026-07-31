@@ -63,6 +63,7 @@ __device__ uint64_t g_cyt [GPU_TPCC_MAX_W * GPU_TPCC_MAX_D * GPU_TPCC_MAX_C];
 __device__ unsigned long long g_commits = 0;
 __device__ unsigned long long g_aborts = 0;
 
+
 struct TPCCTxArg {
     int    nw, nd, nc;
     uint64_t amount;
@@ -109,10 +110,12 @@ __device__ void tx_tpcc_payment(int lane_id, int warp_id,
     }
 }
 
+__device__ csmv_tx_body_t g_tx_fn = tx_tpcc_payment;
+
 // ── Version-list head readers ─────────────────────────────────
 __device__ inline uint64_t head_value(uint64_t *cell) {
     uint64_t idx = csmv_gpu_entry_idx(cell);
-    CSMVGpuEntry *entry = &g_csmv_gpu_head_table[idx];
+    CSMVGpuEntry *entry = &csmv_gpu_table()[idx];
     CSMVVersionNode *head = csmv_gpu_load_head(entry);
     return head ? head->value : 0;
 }
@@ -167,20 +170,19 @@ int main(int argc, char **argv) {
     //  For the money-conservation check we need an initial total; here we
     //  track the *sum of deltas* instead, which is exact.)
 
-    cudaMemset(g_wyt, 0, sizeof(g_wyt));
-    cudaMemset(g_dyt, 0, sizeof(g_dyt));
-    cudaMemset(g_cbal, 0, sizeof(g_cbal));
-    cudaMemset(g_cyt, 0, sizeof(g_cyt));
-
     csmv_gpu_init(GPU_TPCC_MAX_W * GPU_TPCC_MAX_D * GPU_TPCC_MAX_C * 2);
 
     CSMVBatchExecutor executor;
+
+    csmv_tx_body_t d_fn;
+    cudaMemcpyFromSymbol(&d_fn, g_tx_fn, sizeof(csmv_tx_body_t));
+
     for (int i = 0; i < num_txns; i++) {
         TPCCTxArg a;
         a.nw = nw; a.nd = nd; a.nc = nc;
         a.amount = amt;
         a.seed   = seed + (uint32_t)i;
-        executor.enqueue(tx_tpcc_payment, &a, sizeof(TPCCTxArg));
+        executor.enqueue(d_fn, &a, sizeof(TPCCTxArg));
     }
 
     auto timing = executor.launch();

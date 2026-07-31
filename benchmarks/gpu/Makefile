@@ -18,6 +18,16 @@ HIP     ?= 0
 CUDA    ?= $(shell command -v nvcc 2>/dev/null)
 HIPCC   ?= $(shell command -v hipcc 2>/dev/null)
 
+# Detect the installed GPU's compute capability (via nvidia-smi) to pick a
+# valid -arch for *this* machine.  Override with ARCH=sm_XX if desired.
+# sm_90 (H100) is NOT portable: this repo has been run on GTX 10xx (sm_61),
+# RTX 20xx (sm_75), etc.  A sm_90 binary will fail to load on older GPUs.
+SMID    ?= $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d '.')
+ifeq ($(SMID),)
+  SMID = 90
+endif
+ARCH    ?= sm_$(SMID)
+
 ifeq ($(HIP),1)
   ifeq ($(HIPCC),)
     $(error HIP build requested but hipcc not found. Set HIPCC=/path/to/hipcc)
@@ -29,7 +39,7 @@ else
     $(error nvcc not found. Install CUDA and set CUDA=/path/to/nvcc, or use HIP=1)
   endif
   COMPILER := $(CUDA)
-  ARCH_FLAG := -arch=sm_90
+  ARCH_FLAG := -arch=$(ARCH)
 endif
 
 # ── Paths ──────────────────────────────────────────────────────
@@ -47,28 +57,28 @@ all: $(BINARIES)
 $(BIN)/gpu_ycsb: gpu_ycsb.cu $(CSMV_DIR)/gpu/csmv_batch_executor.cu \
                  $(CSMV_DIR)/gpu/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
 	    gpu_ycsb.cu $(CSMV_DIR)/gpu/csmv_batch_executor.cu \
 	    -o $@
 
 $(BIN)/gpu_kmeans: gpu_kmeans.cu $(CSMV_DIR)/gpu/csmv_batch_executor.cu \
                    $(CSMV_DIR)/gpu/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
 	    gpu_kmeans.cu $(CSMV_DIR)/gpu/csmv_batch_executor.cu \
 	    -o $@
 
 $(BIN)/gpu_memcached: gpu_memcached.cu $(CSMV_DIR)/gpu/csmv_batch_executor.cu \
                       $(CSMV_DIR)/gpu/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
 	    gpu_memcached.cu $(CSMV_DIR)/gpu/csmv_batch_executor.cu \
 	    -o $@
 
 $(BIN)/gpu_tpcc: gpu_tpcc.cu $(CSMV_DIR)/gpu/csmv_batch_executor.cu \
                  $(CSMV_DIR)/gpu/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
 	    gpu_tpcc.cu $(CSMV_DIR)/gpu/csmv_batch_executor.cu \
 	    -o $@
 

@@ -6,8 +6,29 @@
 
 // ── Device-side GPU table (allocated by host, pointer stored in __constant__) ──
 
-__device__ __constant__ CSMVGpuEntry *g_csmv_gpu_head_table = nullptr;
-__device__ __constant__ uint64_t     *g_csmv_gpu_clock = nullptr;
+__device__ CSMVGpuEntry *g_csmv_gpu_head_table = nullptr;
+__device__ uint64_t     *g_csmv_gpu_clock = nullptr;
+
+__device__ CSMVGpuEntry* csmv_gpu_table() { return g_csmv_gpu_head_table; }
+__device__ uint64_t*    csmv_gpu_clock_addr() { return g_csmv_gpu_clock; }
+
+// ── Persistent GPU kernel for batch execution ──────────────────
+// Single device function pointer `fn` (the stored procedure shared by every
+// transaction in the batch); each warp runs one transaction with its own arg.
+__global__ void csmv_batch_kernel(csmv_tx_body_t fn, void **args, int num_txns) {
+    __shared__ uint8_t shared_mem[
+        CSMV_BATCH_WARPS_PER_BLOCK * sizeof(CSMVWarpState) + 4096];
+
+    int warp_id = blockIdx.x * blockDim.x / warpSize + threadIdx.x / warpSize;
+    int lane_id = threadIdx.x & (warpSize - 1);
+
+    if (warp_id >= num_txns) return;
+
+    CSMVWarpState *ws_array = (CSMVWarpState*)shared_mem;
+    CSMVWarpState *ws = &ws_array[threadIdx.x / warpSize];
+
+    fn(lane_id, warp_id, args[warp_id], ws);
+}
 
 // ── CSMVBatchExecutor implementation ─────────────────────────────
 
@@ -38,9 +59,9 @@ CSMVBatchExecutor::~CSMVBatchExecutor() {
 void CSMVBatchExecutor::enqueue(csmv_tx_body_t fn, void *arg, size_t arg_size) {
     CSMVBatchWorkItem item;
     item.fn = fn;
-    item.host_arg = arg;
     item.arg_size = arg_size;
     item.arg = nullptr;
+    item.host_arg_copy.assign((const uint8_t*)arg, (const uint8_t*)arg + arg_size);
     batch_.push_back(item);
 }
 
@@ -68,35 +89,34 @@ CSMVBatchExecutor::BatchTiming CSMVBatchExecutor::launch() {
     if (d_args_) cudaFree(d_args_);
     cudaMalloc(&d_args_, n * sizeof(void*));
 
-    // Device-side function pointer array
-    csmv_tx_body_t *d_fns;
-    cudaMalloc(&d_fns, n * sizeof(csmv_tx_body_t));
-
     // ── Copy argument data H2D (async) ──────────────────────────
     cudaEventRecord(ev[0], stream);
     size_t offset = 0;
-    csmv_tx_body_t *h_fns = new csmv_tx_body_t[n];
+    std::vector<void*> h_args(n);
     for (int i = 0; i < n; i++) {
-        cudaMemcpyAsync(d_arg_data_ + offset, batch_[i].host_arg,
-                         batch_[i].arg_size, cudaMemcpyHostToDevice, stream);
-        batch_[i].arg = (void*)((uintptr_t)d_arg_data_ + offset);
+        if (batch_[i].arg_size > 0) {
+            cudaMemcpyAsync(d_arg_data_ + offset, batch_[i].host_arg_copy.data(),
+                             batch_[i].arg_size, cudaMemcpyHostToDevice, stream);
+        }
+        h_args[i] = d_arg_data_ + offset;
+        batch_[i].arg = d_arg_data_ + offset;
         offset += batch_[i].arg_size;
-        h_fns[i] = batch_[i].fn;
     }
-    cudaMemcpyAsync(d_args_, d_arg_data_, n * sizeof(void*),
+    // d_args_ is a device array of per-transaction argument pointers; build
+    // it from a host array of offsets into d_arg_data_ (NOT the raw bytes).
+    cudaMemcpyAsync(d_args_, h_args.data(), n * sizeof(void*),
                      cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_fns, h_fns, n * sizeof(csmv_tx_body_t),
-                     cudaMemcpyHostToDevice, stream);
-    delete[] h_fns;
     cudaEventRecord(ev[1], stream);
 
     // ── Launch kernel ───────────────────────────────────────────
+    // All transactions share one stored-procedure device function pointer.
+    csmv_tx_body_t d_fn = batch_[0].fn;
     int warps_per_block = CSMV_BATCH_WARPS_PER_BLOCK;
     int threads_per_block = warps_per_block * 32;
     int blocks = (n + warps_per_block - 1) / warps_per_block;
 
     cudaEventRecord(ev[2], stream);
-    csmv_batch_kernel<<<blocks, threads_per_block, 0, stream>>>(d_fns, d_args_, n);
+    csmv_batch_kernel<<<blocks, threads_per_block, 0, stream>>>(d_fn, d_args_, n);
     cudaEventRecord(ev[3], stream);
 
     // ── Synchronize and measure ─────────────────────────────────
@@ -115,8 +135,6 @@ CSMVBatchExecutor::BatchTiming CSMVBatchExecutor::launch() {
     timing.total_ms = total_ms;
 
     profile_events_.push_back({ms_kernel, ms_h2d, timing.d2h_ms, n});
-
-    cudaFree(d_fns);
 
     return timing;
 }
