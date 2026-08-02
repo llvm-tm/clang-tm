@@ -1,9 +1,9 @@
 #pragma once
 #include "tm_gpu_platform.hpp"
-#include "gpu_epcc_api.h"
+#include "gpu_gputx_api.h"
 #include <cstdint>
 
-// ── EPCC GPU kernel ─────────────────────────────────────────────
+// ── GPUTX GPU kernel ─────────────────────────────────────────────
 //
 // Dynamic-priority STM: each warp has a retry-based priority.  When
 // two warps contend for a write lock, the higher priority wins and
@@ -23,10 +23,10 @@
 //   - warp ID breaks ties
 
 // Per-warp abort counter (in device memory, indexed by warp)
-__device__ uint32_t gpu_epcc_abort_counter[1024];
+__device__ uint32_t gpu_gputx_abort_counter[1024];
 
 template <int MAX_READS, int MAX_WRITES>
-__global__ void gpu_epcc_kernel(
+__global__ void gpu_gputx_kernel(
     uint32_t *lock_table,
     uint64_t *global_clock,
     uint32_t *data,
@@ -53,7 +53,7 @@ __global__ void gpu_epcc_kernel(
     if (lane == 0) *s_abort = 0;
     __syncwarp();
 
-    uint32_t my_retries = (warp < 1024) ? gpu_epcc_abort_counter[warp] : 0;
+    uint32_t my_retries = (warp < 1024) ? gpu_gputx_abort_counter[warp] : 0;
     uint32_t my_priority = (my_retries << 8) | (uint32_t)(warp + 1);
 
     // ── Phase 1: READ ──────────────────────────────────────────
@@ -62,8 +62,8 @@ __global__ void gpu_epcc_kernel(
     for (int r = 0; r < reads_per_thread; r++) {
         int idx = (lane * reads_per_thread + r) % num_addrs;
         uint32_t lw = lock_table[idx];
-        if (gpu_epcc_is_locked(lw)) {
-            uint32_t holder_prio = gpu_epcc_get_priority(lw);
+        if (gpu_gputx_is_locked(lw)) {
+            uint32_t holder_prio = gpu_gputx_get_priority(lw);
             if (holder_prio > my_priority) *s_abort = 1;
         }
         my_read_addr[my_reads] = (uint32_t)idx;
@@ -105,8 +105,8 @@ __global__ void gpu_epcc_kernel(
     for (int w = 0; w < my_writes; w++) {
         int addr_idx = (int)my_write_addr[w];
         uint32_t old = lock_table[addr_idx];
-        if (gpu_epcc_is_locked(old)) {
-            uint32_t holder_prio = gpu_epcc_get_priority(old);
+        if (gpu_gputx_is_locked(old)) {
+            uint32_t holder_prio = gpu_gputx_get_priority(old);
             if (holder_prio > my_priority) { *s_abort = 1; break; }
         }
     }
@@ -118,10 +118,10 @@ __global__ void gpu_epcc_kernel(
     for (int w = 0; w < my_writes; w++) {
         int addr_idx = (int)my_write_addr[w];
         uint32_t expected = 0;
-        uint32_t desired = gpu_epcc_make_entry(my_priority, 0);
+        uint32_t desired = gpu_gputx_make_entry(my_priority, 0);
         uint32_t old = atomicCAS(&lock_table[addr_idx], expected, desired);
         if (old != 0) {
-            uint32_t holder_prio = gpu_epcc_get_priority(old);
+            uint32_t holder_prio = gpu_gputx_get_priority(old);
             if (holder_prio > my_priority) { *s_abort = 1; }
             else {
                 for (int s = 0; s < 10; s++) {
@@ -140,7 +140,7 @@ __global__ void gpu_epcc_kernel(
     if (m) {
         for (int w = 0; w < my_writes; w++) {
             int addr_idx = (int)my_write_addr[w];
-            uint32_t expected = gpu_epcc_make_entry(my_priority, 0);
+            uint32_t expected = gpu_gputx_make_entry(my_priority, 0);
             atomicCAS(&lock_table[addr_idx], expected, 0u);
         }
         goto abort_tx;
@@ -165,7 +165,7 @@ __global__ void gpu_epcc_kernel(
 
     if (lane == 0) {
         atomicAdd((unsigned long long*)committed_count, 1ULL);
-        if (warp < 1024) gpu_epcc_abort_counter[warp] = 0;
+        if (warp < 1024) gpu_gputx_abort_counter[warp] = 0;
     }
     return;
     }
@@ -173,6 +173,6 @@ __global__ void gpu_epcc_kernel(
 abort_tx:
     if (lane == 0) {
         atomicAdd((unsigned long long*)abort_count, 1ULL);
-        if (warp < 1024) gpu_epcc_abort_counter[warp]++;
+        if (warp < 1024) gpu_gputx_abort_counter[warp]++;
     }
 }

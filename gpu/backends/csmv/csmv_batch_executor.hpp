@@ -5,7 +5,7 @@
 #include <vector>
 #include <functional>
 
-#include "../include/csmv_api.h"
+#include "csmv_api.h"
 
 // ── CSMV GPU Batch Executor ──────────────────────────────────────
 //

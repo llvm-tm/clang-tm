@@ -45,7 +45,7 @@ The benchmark checks an invariant: the sum of all committed writes must equal
 ## Design notes
 
 - `gpu_ycsb.cu` uses `csmv_gpu_begin/read/write/commit` from the CSMV backend
-  (`backends/tm_impl/csmv/gpu/csmv_batch_executor.hpp`). Each warp executes one
+  (`gpu/backends/csmv/csmv_batch_executor.hpp`). Each warp executes one
   transaction; version-list traversal is warp-cooperative.
 - No TM region allocator, no host-side hooks, no `tm_register_real_hooks`:
   the GPU backend is driven directly.
