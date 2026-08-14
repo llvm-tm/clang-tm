@@ -1,0 +1,39 @@
+\chapter*{A Map of Protocols and Acronyms}
+\addcontentsline{toc}{chapter}{A Map of Protocols and Acronyms}
+The same six-letter families recur throughout this book; pin them down once
+here so later chapters can be read without re-decoding:
+
+\begin{center}
+\begin{tabular}{lp{4.2in}}
+\textbf{Term} & \textbf{Meaning in this book} \\
+\hline
+TM & Transactional Memory (the concept, Ch.~1--2) \\
+STM & Software TM: conflict detection in the runtime (Part~IV) \\
+HTM & Hardware TM: conflict detection in the cache hierarchy (Ch.~16) \\
+SGL & Single Global Lock --- the reference non-speculative design (Ch.~8) \\
+TL2 & Global-clock, versioned-lock STM (Ch.~9) \\
+NOrec & No Read-Lock, value-based validation (Ch.~9) \\
+TinySTM & Lock-based STM with per-object locks (WBCTL/WT variants, Ch.~9) \\
+JVSTM / MVLog & Multi-version STMs (Ch.~9) \\
+PlusCal / TLA+ / TLC & Specification language, logic, and model checker (Ch.~6) \\
+OCC / read-validate & Optimistic concurrency control; validate-then-write-back (Ch.~9) \\
+RTM & Intel Restricted Transactional Memory (Ch.~16) \\
+GUST & AtomicINC commit-log GPU TM (Ch.~17) \\
+\end{tabular}
+\end{center}
+
+\section*{Why the book is ordered this way}
+\begin{itemize}
+    \item The order is deliberately \emph{not} ``hardware then software then
+          formal then compilers.'' Mathematics and verification (Part~III)
+          precede the runtimes (Part~IV) they specify, so that ``what a
+          correct runtime must preserve'' is understood before ``what the
+          runtime does with the calls.'' The runtimes in turn precede the
+          compiler instrumentation (Part~V) that targets them, so the runtime
+          ABI of Chapter~7 is fixed before ``what an instrumentation pass
+          must preserve'' is read.
+    \item Readers who prefer runtimes-first can start at Part~IV and consult
+          Parts~III and V on demand; cross-references mark every such jump.
+\end{itemize}
+
+%  PART I: WHY TRANSACTIONAL MEMORY?

@@ -1,0 +1,17 @@
+
+\chapter{Notation}
+
+\begin{description}
+    \item[$\lambda$] arrival rate of transactions (Little's Law, \S\ref{sec:math-example}).
+    \item[$S$] average service time of one transaction attempt.
+    \item[$L$] average number of in-flight transactions; $L = \lambda S$.
+    \item[$p$ or $p_{abort}$] probability that an attempt aborts; expected
+          attempts $= 1/(1-p)$ (geometric distribution).
+    \item[$\mathit{rs}$, $\mathit{ws}$] read set, write set of a transaction.
+    \item[$T_1, T_2, \ldots$] individual transactions in a history.
+    \item[$\prec$] precedes, in a serial order of transactions.
+    \item[$\mathrm{startTS}$] the GTS snapshot a GUST transaction takes at
+          begin (\S\ref{sec:snapshot-example}).
+    \item[\texttt{Active}, \texttt{Validating}, \texttt{Committed},
+          \texttt{Aborted}] the four lifecycle states of \S\ref{sec:math-example}.
+\end{description}

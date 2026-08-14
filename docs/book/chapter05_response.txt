@@ -1,0 +1,618 @@
+% docs/book/sections/ch05.tex
+% Chapter 5: Mathematical Foundations
+% Part III: Formal Foundations: Mathematics and Verification
+% This chapter introduces automata, Markov chains, queueing laws, and model
+%   checking through worked examples, code listings, figures, tables, and
+%   tagged exercises for transactional-memory analysis.
+\chapter{Mathematical Foundations}
+\index{mathematical foundations!automata, formal languages, Markov chains, queueing theory, Little's Law, model checking}
+
+Transactional memory systems are engineered artifacts, but their failures are often mathematical: a recognizer accepts the wrong input, a validation protocol admits an impossible history, a retry loop explodes under contention, or a throughput estimate ignores wasted work. This chapter gives the small set of mathematical tools used repeatedly in the rest of the book.
+
+The point is not abstraction for its own sake. A DFA recognizes tokens in a compiler front end. A Markov chain estimates retries. Little's Law relates throughput to concurrency. A model checker explores executions that a closed-form model intentionally averages away. The running bank example will keep the distinction visible: performance models count attempts; safety models preserve the account floor and money conservation invariant.
+
+\section{Automata and Formal Languages}
+
+A formal language is a set of strings over an alphabet. In systems work, the strings are usually program text, log records, serialized messages, or traces. Automata give executable recognizers for such sets; grammars give compact descriptions of nested structure.
+
+A deterministic finite automaton has a finite set of states, one start state, a set of accepting states, and a transition function. At each input character it moves to exactly one next state. A nondeterministic finite automaton may have several possible moves, but it recognizes no more languages than a DFA. Regular expressions, NFAs, and DFAs are three views of the same class of languages: the regular languages.
+
+For a TM implementation, regular languages appear first in tooling. The lexer for a benchmark language, trace format, or specification format is a DFA in disguise. It classifies substrings into tokens such as identifiers, integer literals, keywords, punctuation, and comments. That is why the later compiler chapter can draw a lexer as an automaton rather than as ad hoc string manipulation.
+
+Context-free grammars add recursion. They describe balanced parentheses, nested expressions, and blocks. A recursive-descent parser is a direct executable form of a grammar when the grammar is suitable for top-down parsing. Shift-reduce parsers use an automaton over parser items instead. The distinction matters when Chapter~15 connects source text to generated instrumentation: the DFA in Figure~\ref{fig:lexer-dfa} is the lexer's recognizer, and the LR(0) automaton in Figure~\ref{fig:lr0-automaton} is the shift-reduce table that Bison-family generators build from a grammar.
+
+\begin{itemize}
+    \item Finite automata (DFA/NFA) and regular expressions.
+    \item Context-free grammars --- tie back to recursive descent.
+    \item Used for real in Chapter~15: the DFA in Figure~\ref{fig:lexer-dfa} is the lexer's recognizer, and the LR(0) automaton in Figure~\ref{fig:lr0-automaton} is the shift-reduce table that Bison-family generators build from a grammar.
+\end{itemize}
+
+The useful mental model is separation of concerns. A DFA answers whether the next bytes form a valid token. A grammar answers whether the token stream has valid structure. Neither proves that a transaction is serializable. Those semantic properties belong to transition systems and invariants.
+
+\section{Markov Chains}
+
+A discrete-time Markov chain is a state machine with probabilities on its outgoing edges. The next state depends only on the current state, not on the path used to arrive there. This memoryless assumption is strong, but it is often a good first model for retry loops when we want one parameter for contention: the probability that a commit attempt aborts.
+
+For transactional memory, the smallest lifecycle has four states: Active, Validating, Aborted, and Committed. A transaction runs user code in Active, checks its read set or ownership metadata in Validating, either installs its writes and reaches Committed, or discards speculative work and reaches Aborted. Retrying returns the transaction to Active.
+
+\begin{itemize}
+    \item Discrete-time Markov chains (DTMC): states, transition matrices, steady-state probabilities.
+    \item Modeling a transaction's lifecycle: Active, Validating, Aborted, Committed.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[node distance=2.6cm, font=\small]
+  \node[draw,circle,minimum size=1.1cm] (active) {Active};
+  \node[draw,circle,minimum size=1.1cm] (valid) [right=of active] {Validating};
+  \node[draw,circle,minimum size=1.1cm] (committed) [right=of valid] {Committed};
+  \node[draw,circle,minimum size=1.1cm] (aborted) [below=of valid] {Aborted};
+  \draw[-{Stealth}] (active) -- node[above] {commit attempt} (valid);
+  \draw[-{Stealth}] (valid) -- node[above] {$1-p$} (committed);
+  \draw[-{Stealth}] (valid) -- node[right] {$p$} (aborted);
+  \draw[-{Stealth}] (aborted) .. controls (0.5,-2) and (2.2,-2) .. node[below] {retry} (active);
+  \draw[-{Stealth}] (committed) to[bend left=35] node[above] {next tx} (active);
+\end{tikzpicture}
+\caption{The transaction lifecycle as a Markov chain: a commit attempt either succeeds or aborts, and an abort re-enters the active state.}
+\label{fig:tx-lifecycle}
+\end{figure}
+
+    \item The key modeling assumption: memoryless transitions, and when that assumption is reasonable for abort/retry loops.
+    \item Expected number of retries before a successful commit as a function of abort probability; closed-form via the geometric distribution.
+    \item Continuous-time counterpart, CTMC and queueing, used in Part~VI for throughput prediction.
+    \item The model's \emph{purpose} in the book: give every later chapter a number where it can get one, and hand off where it cannot. Data-dependent contention belongs to Part~III's model checking.
+\end{itemize}
+
+If a commit attempt aborts with probability
+
+$$
+p
+$$
+
+and succeeds with probability
+
+$$
+1-p
+$$
+
+then the expected number of attempts per committed transaction is
+
+$$
+E[\mathrm{attempts}] = \frac{1}{1-p}.
+$$
+
+The same expression appears in many guises. In SGL, abort probability is almost zero because the single lock serializes all transactions, but concurrency is also almost zero. In optimistic systems such as NOrec, TL2, TSC-TM, SwissTM, and the multi-version designs, more work may proceed concurrently, but validation can reject an attempt. A one-parameter Markov model does not explain which address caused the conflict; it estimates how much retry work the system must pay for.
+
+\section{Queueing Theory and Little's Law}
+
+Queueing theory studies systems in which jobs arrive, wait, receive service, and depart. In a TM runtime the jobs are transactions. The service center may be a global lock, a commit critical section, an ownership-record table, a persistent log, a GPU commit log, or a distributed two-phase commit coordinator.
+
+Little's Law is the most portable result. It does not require a particular arrival distribution. In a stable system, the average number of jobs in the system equals throughput multiplied by average residence time. For transactions, the residence time includes useful execution, validation, waiting, abort cleanup, back-off, and retry work.
+
+\begin{itemize}
+    \item Basic notions: arrival rate, average service time, and average number in the system.
+    \item Applying Little's Law to a transactional system to estimate congestion.
+    \item Little's Law:
+
+$$
+L = \lambda S
+$$
+
+where
+
+$$
+L
+$$
+
+is the average number of in-flight transactions,
+
+$$
+\lambda
+$$
+
+is the committed throughput, and
+
+$$
+S
+$$
+
+is the average residence time.
+
+    \item Throughput falls when retries inflate the effective service time.
+    \item The ``wasted-work'' multiplier is the retry series:
+
+$$
+\sum_{i=0}^{\infty} p_{\mathrm{abort}}^i
+  =
+\frac{1}{1-p_{\mathrm{abort}}}.
+$$
+
+    \item Where the models break: contention is data-dependent and non-Poisson, which is exactly why Part~III's model checking complements the analysis.
+\end{itemize}
+
+If the useful service time of a transaction is fixed but validation aborts attempts, the effective service time grows by the same geometric multiplier used in the Markov model. A system may therefore look underloaded at the level of committed transactions while being saturated by attempted transactions. This is a common source of misleading benchmark interpretation.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.16\linewidth}p{0.18\linewidth}p{0.30\linewidth}p{0.26\linewidth}}
+\hline
+Tool & Object modeled & Question answered & Typical TM use \\
+\hline
+DFA / grammar & Program text & Is this input syntactically valid? & Lexer and parser construction \\
+DTMC & Transaction lifecycle & How many retries should we expect? & Abort and retry estimates \\
+Little's Law & Queue of transactions & How many transactions are in flight? & Congestion and saturation estimates \\
+Model checking & Reachable executions & Can this bad state occur? & Safety invariants and races \\
+\hline
+\end{tabular}
+\caption{The mathematical tools used in the book. Analytical models estimate cost; model checking explores executions.}
+\label{tab:math-tools}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.20\linewidth}p{0.25\linewidth}p{0.25\linewidth}p{0.20\linewidth}}
+\hline
+Model & Keeps & Abstracts away & Best use \\
+\hline
+DFA & Current recognizer state & Parse tree and semantics & Tokenization \\
+DTMC & Current lifecycle state & History except current state & Retry cost \\
+Little's Law & Long-run averages & Individual schedules & Capacity estimates \\
+TLA+ model & Reachable states & Unmodeled implementation detail & Safety checking \\
+\hline
+\end{tabular}
+\caption{A taxonomy of the chapter's models by the information each one preserves.}
+\label{tab:model-taxonomy}
+\end{table}
+
+\section{Worked Example: Numbers, Not Just Symbols}
+\index{geometric distribution}\index{Little's Law}\index{Markov chain}
+\label{sec:math-example}
+
+The geometric retry model, populated with a few abort probabilities. If a
+transaction aborts with probability
+
+$$
+p
+$$
+
+and retries until it commits, the number of attempts follows a geometric distribution with mean
+
+$$
+\frac{1}{1-p}.
+$$
+
+The probability of committing within a fixed number of attempts is the probability that not all attempts abort:
+
+$$
+P(\mathrm{commit\ within\ } k \mathrm{\ tries}) = 1 - p^k.
+$$
+
+\begin{lstlisting}[caption={The geometric retry model, numerically.}]
+p        E[attempts] = 1/(1-p)     P(commits within 5 tries)
+0.10     1.11                      0.99999
+0.50     2.00                      0.96875
+0.90     10.0                      0.40951
+\end{lstlisting}
+
+\begin{itemize}
+    \item The ``wasted-work'' multiplier of this section is exactly the expected number of attempts.
+    \item At an abort probability of
+
+$$
+0.90
+$$
+
+every committed transaction performs ten attempts on average.
+
+    \item Plug into Little's Law by replacing service time with effective service time:
+
+$$
+S_{\mathrm{effective}} = \frac{S}{1-p}.
+$$
+
+    \item The same probability feeds the Markov chain of Exercise~1, and the model-checking exercises of Part~III inject the corresponding state transitions.
+\end{itemize}
+
+The model explains why a small change in abort rate can dominate a low-level optimization. A transaction that is twice as fast per attempt may still lose if it aborts often enough. Conversely, a conservative design such as SGL can win on tiny critical sections because it removes validation failure entirely, even though it removes parallel commit execution too.
+
+\section{Worked Example: Simulating Retry Cost in the Bank}
+\index{bank transfer}\index{abort probability}\index{money conservation}
+\label{sec:math-bank-simulation}
+
+The next program is deliberately not a TM implementation. It is the mathematical model made executable: a bank transfer retries until the synthetic validator accepts the commit attempt. The committed state must still satisfy the account floor and money-conservation invariant.
+
+\begin{lstlisting}[language=C++, caption={A compilable C++17 simulation of geometric retry cost for bank transfers.}]
+#include <cassert>
+#include <cstdint>
+#include <iostream>
+#include <random>
+#include <stdexcept>
+#include <vector>
+
+struct Bank {
+    std::vector<long long> bal;
+    long long floor;
+};
+
+static long long total(const Bank& b) {
+    long long s = 0;
+    for (long long x : b.bal) s += x;
+    return s;
+}
+
+static bool invariant_holds(const Bank& b, long long initial_total) {
+    if (total(b) != initial_total) return false;
+    for (long long x : b.bal) {
+        if (x < b.floor) return false;
+    }
+    return true;
+}
+
+static int transfer_with_retries(Bank& b,
+                                 int from,
+                                 int to,
+                                 long long amount,
+                                 double abort_probability,
+                                 std::mt19937_64& rng) {
+    if (from == to) throw std::invalid_argument("self-transfer");
+    if (amount < 0) throw std::invalid_argument("negative amount");
+
+    std::bernoulli_distribution aborts(abort_probability);
+    int attempts = 0;
+
+    for (;;) {
+        ++attempts;
+
+        const long long src = b.bal.at(from);
+        const long long dst = b.bal.at(to);
+
+        if (src - amount < b.floor) {
+            return attempts; // transaction is rejected, not committed
+        }
+
+        if (aborts(rng)) {
+            continue;        // validation failed; retry same transaction
+        }
+
+        b.bal.at(from) = src - amount;
+        b.bal.at(to)   = dst + amount;
+        return attempts;
+    }
+}
+
+int main() {
+    Bank b{{1000, 1000}, 0};
+    const long long initial_total = total(b);
+
+    std::mt19937_64 rng(7);
+    const double p_abort = 0.50;
+
+    long long attempts = 0;
+    long long committed = 0;
+
+    for (int i = 0; i < 10000; ++i) {
+        attempts += transfer_with_retries(b, 0, 1, 1, p_abort, rng);
+        ++committed;
+        assert(invariant_holds(b, initial_total));
+    }
+
+    std::cout << "committed=" << committed
+              << " attempts=" << attempts
+              << " mean_attempts="
+              << static_cast<double>(attempts) / committed
+              << "\n";
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item The simulation separates safety from performance: retries change the number of attempts, not the invariant.
+    \item The account floor is checked before the write set is installed.
+    \item The expected mean attempts approach the geometric value as the number of transfers grows.
+    \item Real backends replace the synthetic Bernoulli validator with concrete validation mechanisms: NOrec validates a value-based read set, TL2 validates versions, and MV designs validate snapshots.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.1cm, font=\small]
+  \node[draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm] (read) {Read accounts};
+  \node[draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm,right=of read] (check) {Check floor};
+  \node[draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm,right=of check] (validate) {Validate};
+  \node[draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm,right=of validate] (install) {Install writes};
+  \node[draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm,below=of validate] (abort) {Abort and retry};
+
+  \draw[-{Stealth}] (read) -- (check);
+  \draw[-{Stealth}] (check) -- node[above] {floor holds} (validate);
+  \draw[-{Stealth}] (validate) -- node[above] {read set valid} (install);
+  \draw[-{Stealth}] (validate) -- node[right] {conflict} (abort);
+  \draw[-{Stealth}] (abort) -| ($(read.south)+(0,-0.4)$) -- (read.south);
+\end{tikzpicture}
+\caption{A bank transaction as a validation pipeline. Analytical models collapse the conflict edge into an abort probability; model checking keeps the states explicit.}
+\label{fig:bank-validation-pipeline}
+\end{figure}
+
+\section{Worked Example: Model Checking Money Conservation}
+\index{TLA+}\index{model checking}\index{invariant}
+\label{sec:math-bank-tla}
+
+The same bank example can be written as a finite-state TLA+ model. TLC checks all reachable states for the two invariants used throughout the book: money is conserved and every account remains above the floor.
+
+\begin{lstlisting}[caption={A model-checkable TLA+ specification for a two-account transfer.}]
+---- MODULE BankInvariant ----
+EXTENDS Integers, TLC
+
+Accounts == {0, 1}
+InitBal == [a \in Accounts |-> 10]
+Amount == 3
+Floor == 0
+
+VARIABLES bal, phase, snap
+
+Vars == <<bal, phase, snap>>
+
+Init ==
+    /\ bal = InitBal
+    /\ snap = InitBal
+    /\ phase = "idle"
+
+Begin ==
+    /\ phase = "idle"
+    /\ snap' = bal
+    /\ phase' = "read"
+    /\ UNCHANGED bal
+
+Commit ==
+    /\ phase = "read"
+    /\ snap[0] - Amount >= Floor
+    /\ bal' = [bal EXCEPT ![0] = snap[0] - Amount,
+                          ![1] = snap[1] + Amount]
+    /\ phase' = "idle"
+    /\ UNCHANGED snap
+
+Abort ==
+    /\ phase = "read"
+    /\ snap[0] - Amount < Floor
+    /\ phase' = "idle"
+    /\ UNCHANGED <<bal, snap>>
+
+Next == Begin \/ Commit \/ Abort
+
+Spec == Init /\ [][Next]_Vars
+
+MoneyConserved ==
+    bal[0] + bal[1] = InitBal[0] + InitBal[1]
+
+AccountFloors ==
+    \A a \in Accounts : bal[a] >= Floor
+
+Inv == MoneyConserved /\ AccountFloors
+
+THEOREM Spec => []Inv
+====
+\end{lstlisting}
+
+\begin{itemize}
+    \item The specification is small because the state space is small: two accounts, one transfer amount, one transaction phase variable.
+    \item The invariant is independent of the retry policy. Retry affects liveness and cost; the checked predicate is safety.
+    \item The theorem line states the same obligation enforced by the C++ assertion in \S\ref{sec:math-bank-simulation}.
+    \item Larger TLA+ models in the companion project use the same discipline: explicit state, explicit transition relation, explicit invariant.
+\end{itemize}
+
+The model is intentionally finite. The balances, account set, transfer amount, and phases are bounded, so TLC can enumerate the reachable graph. That bounded graph is not a performance model; it is a safety argument over all interleavings admitted by the transition relation.
+
+\section{Worked Example: Recognizing Transaction Trace Records}
+
+A lexer for trace records is a small automaton. Suppose a TM backend emits one record per transaction with one of three outcomes: commit, abort, or retry. The recognizer below accepts records of the form \texttt{T123 COMMIT}, \texttt{T8 ABORT}, or \texttt{T42 RETRY}. It is not a parser for the full benchmark language; it is a concrete DFA for a regular fragment that later tooling can count.
+
+\begin{lstlisting}[language=C++, caption={A compilable C++17 DFA for simple transaction trace records.}]
+#include <cctype>
+#include <iostream>
+#include <string>
+
+enum class State {
+    Start, T, Digits, Space, C, CO, COM, COMM, COMMI, Commit,
+    A, AB, ABO, ABOR, Abort,
+    R, RE, RET, RETR, RETRY,
+    Accept, Reject
+};
+
+static State step(State s, char ch) {
+    switch (s) {
+    case State::Start: return ch == 'T' ? State::T : State::Reject;
+    case State::T: return std::isdigit(static_cast<unsigned char>(ch)) ? State::Digits : State::Reject;
+    case State::Digits:
+        if (std::isdigit(static_cast<unsigned char>(ch))) return State::Digits;
+        return ch == ' ' ? State::Space : State::Reject;
+    case State::Space:
+        if (ch == 'C') return State::C;
+        if (ch == 'A') return State::A;
+        if (ch == 'R') return State::R;
+        return State::Reject;
+    case State::C: return ch == 'O' ? State::CO : State::Reject;
+    case State::CO: return ch == 'M' ? State::COM : State::Reject;
+    case State::COM: return ch == 'M' ? State::COMM : State::Reject;
+    case State::COMM: return ch == 'I' ? State::COMMI : State::Reject;
+    case State::COMMI: return ch == 'T' ? State::Commit : State::Reject;
+    case State::A: return ch == 'B' ? State::AB : State::Reject;
+    case State::AB: return ch == 'O' ? State::ABO : State::Reject;
+    case State::ABO: return ch == 'R' ? State::ABOR : State::Reject;
+    case State::ABOR: return ch == 'T' ? State::Abort : State::Reject;
+    case State::R: return ch == 'E' ? State::RE : State::Reject;
+    case State::RE: return ch == 'T' ? State::RET : State::Reject;
+    case State::RET: return ch == 'R' ? State::RETR : State::Reject;
+    case State::RETR: return ch == 'Y' ? State::RETRY : State::Reject;
+    default: return State::Reject;
+    }
+}
+
+static bool accepts(const std::string& input) {
+    State s = State::Start;
+    for (char ch : input) {
+        s = step(s, ch);
+        if (s == State::Reject) return false;
+    }
+    return s == State::Commit || s == State::Abort || s == State::RETRY;
+}
+
+int main() {
+    std::cout << accepts("T17 COMMIT") << "\n";
+    std::cout << accepts("T3 ABORT") << "\n";
+    std::cout << accepts("T9 RETRY") << "\n";
+    std::cout << accepts("TX RETRY") << "\n";
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item A DFA is enough because the record language has no nested structure.
+    \item The accepting states encode semantic categories that later analysis can count.
+    \item The rejected input is rejected for syntax, not because the transaction outcome is impossible.
+\end{itemize}
+
+\section{Worked Example: Two-Phase Validation Cost}
+
+Some TM algorithms validate more than once. A read-mostly transaction may validate before acquiring commit metadata and again before publishing writes. The following program simulates two independent validation phases. It is a performance model, not a replacement for a proof of opacity or serializability.
+
+\begin{lstlisting}[language=C++, caption={A compilable C++17 simulation of two independent validation phases.}]
+#include <iostream>
+#include <random>
+#include <stdexcept>
+
+static int attempts_until_commit(double p1, double p2, std::mt19937_64& rng) {
+    if (p1 < 0.0 || p1 > 1.0 || p2 < 0.0 || p2 > 1.0) {
+        throw std::invalid_argument("probability out of range");
+    }
+
+    std::bernoulli_distribution abort1(p1);
+    std::bernoulli_distribution abort2(p2);
+    int attempts = 0;
+
+    for (;;) {
+        ++attempts;
+        if (abort1(rng)) continue;
+        if (abort2(rng)) continue;
+        return attempts;
+    }
+}
+
+int main() {
+    std::mt19937_64 rng(11);
+    const double p1 = 0.10;
+    const double p2 = 0.20;
+
+    long long total_attempts = 0;
+    const int committed = 100000;
+
+    for (int i = 0; i < committed; ++i) {
+        total_attempts += attempts_until_commit(p1, p2, rng);
+    }
+
+    std::cout << "mean_attempts="
+              << static_cast<double>(total_attempts) / committed
+              << "\n";
+}
+\end{lstlisting}
+
+For independent phases, an attempt succeeds only if both validations succeed:
+
+$$
+P(\mathrm{success}) = (1-p_1)(1-p_2).
+$$
+
+Therefore the expected number of attempts is
+
+$$
+E[\mathrm{attempts}] =
+\frac{1}{(1-p_1)(1-p_2)}.
+$$
+
+\begin{itemize}
+    \item Multiple validation points multiply success probabilities when they are independent.
+    \item Correlation cannot be ignored: if both phases fail for the same hot address, multiplying marginal probabilities is wrong.
+    \item Model checking is the right tool for the legal interleavings; the simulation only estimates cost under an assumed probability law.
+\end{itemize}
+
+\section{Summary}
+
+Formal languages describe valid strings and support compiler construction. Automata make these descriptions executable. Markov chains turn retry loops into cost estimates when the memoryless assumption is acceptable. Queueing theory, especially Little's Law, relates committed throughput, residence time, and concurrency. Model checking complements these models by exploring reachable states instead of averaging them away.
+
+In the bank example, this division is sharp. The retry model predicts attempts. Little's Law predicts in-flight work. The C++ simulation estimates the multiplier. The TLA+ model checks that committed states preserve money conservation and the account floor.
+
+\begin{itemize}
+    \item Formal languages underpin compiler construction.
+    \item Markov chains and queueing theory provide first-order performance models for TM.
+    \item Analytical models predict; model checking proves; the two tools answer different questions.
+\end{itemize}
+
+\section{Exercises}
+\begin{enumerate}
+    \item Build a three-state Markov chain for a transaction under contention and compute the expected number of retries before a successful commit.
+    \item In a TM system with arrival rate
+
+$$
+\lambda
+$$
+
+and average transaction length
+
+$$
+T
+$$
+
+use Little's Law to estimate the effect on the number of in-flight transactions when the abort rate doubles.
+
+    \item Model a TM that retries after a random back-off as a Markov chain and determine the back-off probability that maximizes throughput.
+    \item \emph{[implementation]} Extend the simulation in \S\ref{sec:math-bank-simulation} to choose the source and destination accounts uniformly at random. Keep the money-conservation assertion and report the measured mean attempts for abort probabilities
+
+$$
+0.10,\quad 0.50,\quad 0.90.
+$$
+
+    \item \emph{[verification]} Modify the TLA+ model in \S\ref{sec:math-bank-tla} so that an abort may occur nondeterministically even when the floor check succeeds. Check that the invariant still holds.
+    \item \emph{[theory]} Derive the expected attempts per committed transaction when a transaction has two independent validation phases with abort probabilities
+
+$$
+p_1
+$$
+
+and
+
+$$
+p_2.
+$$
+
+State clearly whether the result changes if the two validation phases are correlated.
+    \item \emph{[implementation]} Add counters to the DFA in the trace-record worked example so that it reports the number of commits, aborts, retries, and rejected records in a file.
+    \item \emph{[verification]} Extend the TLA+ bank model to include two transactions that may both begin from the same balance snapshot. Add a validation condition that prevents stale commits, then check money conservation.
+    \item \emph{[theory]} Use Little's Law to compare two systems with the same committed throughput but different residence times. Explain which one has more in-flight transactions and why that matters for contention.
+\end{enumerate}
+
+\index{DFA}
+\index{NFA}
+\index{regular expression}
+\index{regular language}
+\index{context-free grammar}
+\index{recursive descent}
+\index{LR(0) automaton}
+\index{discrete-time Markov chain}
+\index{transition matrix}
+\index{steady-state probability}
+\index{transaction lifecycle}
+\index{commit attempt}
+\index{retry loop}
+\index{geometric retry model}
+\index{wasted-work multiplier}
+\index{continuous-time Markov chain}
+\index{queueing theory}
+\index{arrival rate}
+\index{service time}
+\index{residence time}
+\index{in-flight transactions}
+\index{synthetic validator}
+\index{account floor}
+\index{validation pipeline}
+\index{read set validation}
+\index{version validation}
+\index{snapshot validation}
+\index{TLC}
+\index{reachable state}
+\index{safety invariant}
+\index{two-phase validation}
+\index{correlated validation failures}

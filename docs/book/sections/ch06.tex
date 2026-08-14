@@ -1,0 +1,337 @@
+
+
+\chapter{Formal Design with PlusCal and TLA+}
+\section{TLA+ and PlusCal in a Nutshell}
+\begin{itemize}
+    \item State machines, variables, actions.
+    \item PlusCal syntax: labels, \texttt{either/or}, \texttt{assert}, invariants.
+    \item Safety (bad states never occur) vs.\ liveness (good states eventually occur) --- the two obligations a TM model must state separately.
+    \item Why a model is a design tool, not just a proof tool: the act of writing the model forces the empty corner cases into view.
+\end{itemize}
+
+\section{Specifying and Checking Simple TM Algorithms}
+\begin{itemize}
+    \item Single‑global‑lock TM in PlusCal.
+    \item NOrec (value‑based validation, timestamp‑based writes) in PlusCal.
+    \item Translating PlusCal to TLA+ and running TLC.
+    \item The companion repository contains checked models for every backend in this book: SGL, TL2, NOrec, TinySTM variants, MVLog, JVSTM, plus GPU models (PR-STM, JVSTM, GUST) at warp granularity.
+    \item Invariants that matter: opacity/reduced order, lock exclusion, commit-clock monotonicity, ``no committed transaction can be invalidated.''
+    \item TLC as an oracle that catches the ``obviously correct'' bug --- e.g.\ the read-validate\slash{}snapshot-threshold bugs discussed in Part~IV and Part~VII.
+\end{itemize}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{p{0.15\linewidth}p{0.21\linewidth}p{0.28\linewidth}p{0.26\linewidth}}
+\hline
+\textbf{Design family} & \textbf{Representative backend} & \textbf{Modelled shared state} & \textbf{Main safety check} \\
+\hline
+Serial lock & SGL, PersistentSGL & lock bit, heap & mutual exclusion, opacity \\
+Value validation & NOrec, NOrec-BF & sequence clock, read values & stale read rejection \\
+Versioned locks & TL2, TSC-TM & orecs, versions, ownership & lock/version consistency \\
+Undo/redo STM & TinySTM variants & ownership, write sets & ownership before write-back \\
+Multi-version & JVSTM, MVLog & versions, commit order & visible snapshot consistency \\
+GPU commit-log & GUST & log, CCT, MRV tables & no missed conflict \\
+Distributed 2PC & TiKV/Percolator & locks, writes, timestamps & atomic visibility \\
+\hline
+\end{tabular}
+\caption{A small taxonomy of what the model must remember. The runtime code may contain allocators, barriers, persistence fences, or RPCs; the model keeps only the state needed to falsify the advertised TM property.}
+\label{tab:tla-taxonomy}
+\end{table}
+
+\section{Worked Example: A Single-Global-Lock TM in PlusCal}
+\index{PlusCal}\index{TLA+}\index{TLC}\index{invariant}\index{model checking}\index{counterexample}\index{liveness}
+\label{sec:pluscal-example}
+
+The simplest TM in this book, in the notation that Chapter~6's invariants
+check.  Figure~\ref{fig:pluscal-latex} shows the same algorithm twice:
+once as the PlusCal source that is model-checked (left), and once as the
+pseudo-code that \textsc{TLATeX} (\texttt{tla2tex.TLA}) typesets from that
+same source (right).  This is the point of PlusCal: the algorithm in a
+paper and the specification checked by TLC are \emph{the same text}.
+
+\begin{figure}[ht]
+\centering
+\begin{minipage}[t]{0.47\textwidth}
+\centering\textbf{(a) PlusCal source}\\[2pt]
+\begin{lstlisting}[basicstyle=\ttfamily\footnotesize]
+--algorithm sgl
+variables lock = FALSE, x = 0, y = 0;
+process Tx \in 1..2
+variables rs = {}, ws = {};
+begin
+  begin_tx:
+    await lock = FALSE; lock := TRUE;
+  body:
+    rs := rs \cup {x, y};          (* reads *)
+    ws := ws \cup {x, y};          (* writes *)
+  commit:
+    x := 2; y := 2;                (* write-back *)
+    lock := FALSE;
+end process
+\end{lstlisting}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.47\textwidth}
+\centering\textbf{(b) \textsc{TLATeX} pseudo-code output}\\[2pt]
+{\footnotesize
+\begin{tabbing}
+  \hspace{0.9cm}\=\hspace{3.1cm}\=\hspace{2.6cm}\=\hspace{2.5cm}\=\kill
+  \textbf{--algorithm} \emph{sgl} \\
+  \textbf{variables} \> \texttt{lock = FALSE, x = 0, y = 0}; \\
+  \textbf{process} \> \texttt{Tx in 1..2} \\
+  \> \textbf{variables} \> \texttt{rs = \{\}, ws = \{\}}; \\
+  \textbf{begin} \\
+  \> \texttt{begin\_tx:} \\
+  \> \> \textbf{await} \> \texttt{lock = FALSE}; \texttt{lock := TRUE}; \\
+  \> \texttt{body:} \\
+  \> \> \texttt{rs := rs union \{x, y\}}; \> \> reads \\
+  \> \> \texttt{ws := ws union \{x, y\}}; \> \> writes \\
+  \> \texttt{commit:} \\
+  \> \> \texttt{x := 2; y := 2}; \> \> write-back \\
+  \> \> \texttt{lock := FALSE}; \\
+  \textbf{end process}
+\end{tabbing}
+}
+\end{minipage}
+\caption{A single-global-lock TM, twice. (a) is the PlusCal source kept in the repository and model-checked with TLC; (b) is the pseudo-code that \textsc{TLATeX} produces from the \emph{same} file --- the paper figure can never drift from the verified algorithm.}
+\label{fig:pluscal-latex}
+\end{figure}
+
+\begin{itemize}
+    \item Every invariant of this chapter is trivially true here --- the lock serialises everything --- which is exactly why SGL is the reference design every optimistic backend is checked against.
+    \item The companion repository's \texttt{SGL.tla} is this model plus the opacity invariant, and it passes TLC.
+    \item Exercise~1 asks you to add read-set validation to this model; the point is that even this ``obviously correct'' design needs the check spelled out.
+    \item Contrast with the optimistic designs of Part~IV: the moment the lock disappears, the invariants become non-trivial and TLC earns its keep.
+\end{itemize}
+
+\section{Bug‑Injection and Counterexample Analysis}
+\begin{itemize}
+    \item Deliberately omitting a read‑set validation.
+    \item Reading the TLC counterexample trace to localise the bug.
+    \item Mutation testing for models: remove the guard, remove the fence, remove the re-validation, and confirm TLC finds each injected bug.
+    \item Counterexamples vs.\ crashes: a TLC trace before an invariant violation is a precise, replayable schedule --- exactly the artifact a debugger cannot easily produce for real runs.
+\end{itemize}
+
+\section{Worked Example: Bank Transfer Under a Single Global Lock}
+\index{bank transfer}\index{single global lock}\index{PlusCal}
+
+The running bank example is a two-account transfer.  The model is intentionally
+small: two accounts, two transactions, one unit transferred from account~1 to
+account~2.  The interesting part is not the arithmetic; it is that the floor
+and conservation checks are written at the same point where the runtime would
+return success to the caller.
+
+\begin{lstlisting}[caption={A complete PlusCal model of the bank transfer under SGL.}]
+---- MODULE BankSGL ----
+EXTENDS Naturals, TLC
+
+Accounts == 1..2
+Initial == [a \in Accounts |-> 10]
+Total(b) == b[1] + b[2]
+
+(*--algorithm BankSGL
+variables
+  lock = FALSE,
+  bal = Initial,
+  committed = [t \in 1..2 |-> FALSE];
+
+process Tx \in 1..2
+variables
+  from = 1,
+  to = 2,
+  amount = 1,
+  seen = 0;
+begin
+BeginTx:
+  await lock = FALSE;
+  lock := TRUE;
+
+Read:
+  seen := bal[from];
+
+WriteBack:
+  if seen >= amount then
+    bal[from] := bal[from] - amount;
+    bal[to] := bal[to] + amount;
+    committed[self] := TRUE;
+  end if;
+
+Check:
+  assert Total(bal) = 20;
+  assert bal[1] >= 0 /\ bal[2] >= 0;
+
+Commit:
+  lock := FALSE;
+end process;
+end algorithm; *)
+====
+\end{lstlisting}
+
+\begin{itemize}
+    \item The invariant is checked after write-back, not only at initialization.
+    \item The lock makes the state space small enough that TLC explores all interleavings of both transactions.
+    \item The model does not claim performance.  It claims that every checked execution preserves the account floors and total money.
+    \item SGL is a useful reference because every optimistic backend should refine the same externally visible transfer behavior.
+\end{itemize}
+
+\section{Worked Example: NOrec-Style Validation for the Bank}
+\index{NOrec}\index{validation}\index{opacity}\index{read set}
+
+NOrec replaces ownership metadata with a global sequence clock and value-based
+validation.  A reader records a snapshot and the values it observed.  If the
+clock changes before commit, the read values must still match memory; otherwise
+the transaction aborts.  The following model is deliberately finite and omits
+allocation, privatization, and signal recovery.  It is the core validation
+discipline.
+
+\begin{lstlisting}[caption={A finite PlusCal model of NOrec-style value validation.}]
+---- MODULE BankNOrecValue ----
+EXTENDS Naturals, TLC
+
+Accounts == 1..2
+Initial == [a \in Accounts |-> 10]
+Total(b) == b[1] + b[2]
+
+(*--algorithm BankNOrecValue
+variables
+  commitLock = FALSE,
+  clock = 0,
+  bal = Initial;
+
+process Tx \in 1..2
+variables
+  snap = 0,
+  r1 = 0,
+  r2 = 0,
+  amount = 1,
+  ok = FALSE;
+begin
+BeginTx:
+  snap := clock;
+
+Read1:
+  r1 := bal[1];
+
+Read2:
+  r2 := bal[2];
+
+Validate:
+  if clock = snap then
+    ok := TRUE;
+  else
+    ok := (r1 = bal[1] /\ r2 = bal[2]);
+  end if;
+
+Commit:
+  if ok /\ r1 >= amount then
+    await commitLock = FALSE;
+    commitLock := TRUE;
+
+    if clock = snap /\ r1 = bal[1] /\ r2 = bal[2] then
+      bal[1] := bal[1] - amount;
+      bal[2] := bal[2] + amount;
+      clock := clock + 1;
+    end if;
+
+    assert Total(bal) = 20;
+    assert bal[1] >= 0 /\ bal[2] >= 0;
+
+    commitLock := FALSE;
+  end if;
+end process;
+end algorithm; *)
+====
+\end{lstlisting}
+
+\begin{itemize}
+    \item The first validation is a fast path: if the clock did not change, the read set is still valid.
+    \item The second validation is the commit-time defense.  Removing it is a standard bug-injection test.
+    \item Value validation compares the values read, not only the timestamp.  This is the point that distinguishes NOrec from a naive global-clock scheme.
+    \item The model is small, but it captures the critical opacity question: no transaction may commit after observing a mixed snapshot.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.8cm and 1.9cm,
+    state/.style={draw, rounded corners, minimum width=2.8cm, minimum height=0.85cm, align=center},
+    edge/.style={-{Latex[length=2mm]}, thick}
+]
+\node[state] (begin) {Begin\\record clock};
+\node[state, right=of begin] (read) {Read\\record values};
+\node[state, right=of read] (validate) {Validate\\clock or values};
+\node[state, right=of validate] (commit) {Commit\\lock and recheck};
+\node[state, below=of validate] (abort) {Abort\\discard log};
+
+\draw[edge] (begin) -- (read);
+\draw[edge] (read) -- (validate);
+\draw[edge] (validate) -- node[above, font=\footnotesize]{valid} (commit);
+\draw[edge] (validate) -- node[right, font=\footnotesize]{stale} (abort);
+\draw[edge] (commit) |- node[pos=0.25, right, font=\footnotesize]{failed recheck} (abort);
+\draw[edge] (abort) -| ($(begin.south)+(0,-0.4)$) -- (begin.south);
+\end{tikzpicture}%
+}
+\caption{Validation state machine for the finite NOrec-style model. TLC explores all interleavings through these states; the useful counterexamples are usually the paths where validation succeeds too early or commit omits the final recheck.}
+\label{fig:norec-validation-sm}
+\end{figure}
+
+\section{The Complete Verification Workflow}
+\label{sec:verify-workflow}
+What ``we checked this with TLC'' means, end to end, so the claim is
+reproducible rather than rhetorical:
+
+\begin{enumerate}
+    \item \textbf{Specify} the algorithm in PlusCal (a \texttt{--algorithm} block), with the correctness condition encoded as invariants (e.g.\ opacity via \texttt{InvNoMissedConflict}).
+    \item \textbf{Add temporal properties} where liveness matters (a committed-transaction progress property under weak fairness).
+    \item \textbf{Configure TLC}: a \texttt{.cfg} listing the model constants, the invariant, the optional \texttt{PROPERTY}, and a state bound so the checker terminates.
+    \item \textbf{Run} \texttt{tlc} and read the state-count line --- \emph{how much} of the state space was explored matters as much as the absence of errors.
+    \item \textbf{Inject a bug} (Section ``Bug-Injection'') and confirm the checker finds it: a test of a model that never fails is a test of the model's triviality.
+    \item \textbf{Document the limits}: bounded state spaces and abstraction gaps (no call stack, no jmp-buffer lifetime) are what the model cannot see.
+\end{enumerate}
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{llll}
+\hline
+\textbf{Runtime (Part IV/VII)} & \textbf{TLA+ model} & \textbf{Key invariant} & \textbf{Result} \\
+\hline
+SGL (Ch.~8)     & \texttt{SGL.tla}         & opacity (all invariants) & TLC pass \\
+NOrec (Ch.~9)   & \texttt{NOrec.tla}       & value-validation opacity  & TLC pass \\
+TL2 (Ch.~9)     & \texttt{TL2.tla}         & versioned-lock correctness & TLC pass \\
+TinySTM (Ch.~9) & \texttt{TinySTM\_WBCTL.tla} & lock/ownership invariants & TLC pass \\
+Romulus (Ch.~9) & \texttt{Romulus.tla}     & read-validate OCC          & TLC pass \\
+GPU GUST (Ch.~17)& \texttt{GPU\_GUST.tla}  & \texttt{InvNoMissedConflict} & TLC pass \\
+\hline
+\end{tabular}
+\caption{Runtime-to-model traceability in the companion repository: every chapter that introduces a runtime names the PlusCal/TLA+ file, the invariant checked, and the outcome. The repository's \texttt{docs/proofs} directory is the source of truth; this table is its index.}
+\label{tab:traceability}
+\end{table}
+
+\begin{itemize}
+    \item The workflow is the connective tissue between Part~III (formalism) and Part~IV (runtimes): a backend ``is verified'' only in the sense of steps 1--6 above.
+    \item Figure~\ref{fig:pluscal-latex} is step~1's artifact: the same source that TLC checks is the figure a reader sees.
+    \item Figure~\ref{fig:norec-validation-sm} is the corresponding artifact for optimistic validation: it names the states where injected bugs should be placed.
+\end{itemize}
+
+\section{Summary}
+\begin{itemize}
+    \item Model checking provides formal guarantees about TM algorithm correctness.
+    \item Even simple TM designs can harbour subtle bugs that TLC exposes.
+    \item The model is not the implementation.  It is the executable argument that the implementation's concurrency protocol has the advertised shape.
+    \item The useful models are small, finite, and hostile: they should make wrong interleavings easy for TLC to find.
+\end{itemize}
+
+\section{Exercises}
+\begin{enumerate}
+    \item Extend the single‑global‑lock PlusCal model with an explicit read‑set validation step. Use TLC to check that opacity holds.
+    \item The NOrec model can fail if it uses only timestamp validation without value‑based validation. Insert this bug and show the TLC output that reveals it.
+    \item Specify a TM that uses eager locking and use TLC to find a deadlock scenario.
+    \item \emph{[implementation]} Add a tiny C++ harness that runs the bank transfer under the repository's SGL and NOrec backends with two worker threads. Check the same two runtime assertions used in the models: total money is conserved and no account falls below its floor.
+    \item \emph{[verification]} Mutate the protocol of Figure~\ref{fig:norec-validation-sm} by removing the commit-time recheck from \texttt{BankNOrecValue}. State the invariant that fails and summarize the shortest TLC counterexample trace.
+    \item \emph{[theory]} Explain why lock exclusion alone is insufficient for opacity in an optimistic STM. Give a two-transaction history with a stale read, then identify which validation edge in Figure~\ref{fig:norec-validation-sm} must reject it.
+\end{enumerate}
+
+
+%  PART IV: IMPLEMENTING TRANSACTIONAL MEMORY

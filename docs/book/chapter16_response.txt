@@ -1,0 +1,506 @@
+% docs/book/sections/ch16.tex
+% Chapter 16: Hardware Transactional Memory - Design and Simulation
+% Part VII: Advanced Topics
+% This chapter explains coherence-based HTM design and best-effort execution through worked examples, code listings, figures, tables, simulation guidance, and tagged exercises.
+\chapter{Hardware Transactional Memory – Design and Simulation}
+\index{hardware transactional memory!design}\index{hardware transactional memory!simulation}\index{RTM}\index{TME}\index{cache coherence}\index{capacity aborts}\index{fallback paths}
+
+Hardware transactional memory, or HTM, is the most direct attempt to make transactions disappear into the memory hierarchy. Instead of maintaining read sets, write sets, undo logs, and validation logic in software, the processor extends speculation and coherence so that a region of ordinary loads and stores either commits atomically or aborts and restores the pre-transaction state.
+
+This chapter studies HTM as an architectural idea and as a practical programming interface. The running example remains the two-account bank transfer: a transfer must preserve the account floor and the money-conservation invariant,
+
+$$
+\operatorname{total}(b)=b_0+b_1=\operatorname{constant}.
+$$
+
+The central lesson is deliberately modest: HTM can make the fast path extremely cheap, but it is a best-effort mechanism. Correctness lives in the fallback path.
+
+\section{Extending Cache Coherence for TM}
+
+Herlihy and Moss proposed the basic hardware idea: add transactional states to a MESI-like cache-coherence protocol. A transactional load marks a cache line as part of the transaction's read set. A transactional store marks a line as part of its write set and delays publication until commit. Their proposal used states such as XCOMMIT and XABORT to distinguish speculative lines from ordinary modified or shared lines.
+
+The cache hierarchy then becomes the transaction manager. It tracks which lines have been read, which lines have been written, and whether another core sends a coherence message that invalidates a transactional assumption. A conflicting invalidation to a transactional line is an abort signal. The hardware discards the speculative writes and restarts execution at the checkpointed program counter.
+
+The expensive requirement is undo. If the processor has overwritten a cache line speculatively, it must still be able to restore the pre-transaction value. A simple design keeps both the new value and enough old state inside the cache. This is fast when the transaction fits in the tracked cache structures and brittle when it does not. Evicting a transactional line may lose either the value needed for rollback or the metadata needed for conflict detection. The conservative answer is a capacity abort.
+
+This explains why coherence-based HTM tends to work best for short, cache-resident critical sections. It is ideal for the common case in which a lock protects a small update, such as the bank transfer touching two account records. It is much less robust for long scans, large read sets, or transactions that call into the operating system.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    box/.style={draw, rounded corners, align=center, minimum width=2.8cm, minimum height=0.9cm},
+    smallbox/.style={draw, rounded corners, align=center, minimum width=2.3cm, minimum height=0.8cm},
+    arr/.style={-{Latex}, thick}
+]
+\node[box] (begin) {XBEGIN\\checkpoint PC};
+\node[box, right=1.4cm of begin] (track) {L1 tracks\\read/write lines};
+\node[box, right=1.4cm of track] (body) {speculative\\loads/stores};
+\node[box, right=1.4cm of body] (commit) {XEND\\publish writes};
+
+\node[smallbox, below=1.1cm of track] (inv) {coherence\\invalidation};
+\node[smallbox, below=1.1cm of body] (evict) {capacity\\eviction};
+\node[box, below=1.1cm of $(inv)!0.5!(evict)$] (abort) {abort\\restore checkpoint};
+
+\draw[arr] (begin) -- (track);
+\draw[arr] (track) -- (body);
+\draw[arr] (body) -- (commit);
+\draw[arr] (inv) -- (track);
+\draw[arr] (track) -- node[left, align=center]{conflict} (abort);
+\draw[arr] (evict) -- node[right, align=center]{lost tracking} (abort);
+\draw[arr] (body) -- (evict);
+\draw[arr] (abort.west) -| (begin.south);
+\end{tikzpicture}
+\caption{Coherence-based HTM treats invalidations and capacity loss as abort signals. Commit is cheap only while the read and write sets remain tracked in cache.}
+\label{fig:htm-coherence-abort}
+\end{figure}
+
+The figure is also a useful mental model for software design. Every extra cache line touched inside the transaction becomes part of the speculative footprint. Debug counters, logging buffers, allocator metadata, and accidental reads of shared state all increase the chance of abort. In HTM programming, minimizing the hardware footprint is not merely an optimization; it is part of making progress likely.
+
+\section{Modern HTM Implementations}
+
+Commodity HTM is not one mechanism. It is a family of best-effort mechanisms with similar semantics and different interfaces. Intel Restricted Transactional Memory, or RTM, exposes instructions such as \texttt{xbegin}, \texttt{xend}, and \texttt{xabort}. ARM Transactional Memory Extension, or TME, exposes similar architectural concepts with implementation-defined tracking and diagnostics. IBM's Blue Gene/Q and POWER implementations are the longevity case study: they show that coherence-based HTM can be made practical when the architecture and platform expose a sufficiently mature interface.
+
+The shared semantic contract is simple: a hardware transaction may commit, but software must not depend on eventual commit. It may abort because another core conflicts with its read or write set. It may abort because the transaction exceeds implementation capacity. It may abort because it executes an unsupported instruction, takes an interrupt, faults on a page, or hits a microarchitectural limit that is not visible in the source code.
+
+This best-effort rule distinguishes HTM from the software backends studied earlier. In NOrec, TL2, TinySTM, SwissTM, JVSTM, MVLog, and the persistent and distributed designs, the implementation owns the retry protocol. With HTM, the processor owns only the fast attempt. The program must provide a correct fallback path.
+
+The simplest fallback is a global lock: try HTM a few times, then serialize. The companion codebase includes TSX-SGL as the natural instance of this idea. More elaborate hybrids use phased execution or hybrid STM, switching between hardware and software modes as contention and capacity behavior change. The important correctness rule is unchanged: the hardware path must synchronize with the fallback path, usually by reading the fallback lock inside the transaction. This is called lock subscription.
+
+The glibc lock-elision history is the warning sign. Eliding locks transparently is attractive, but the best-effort contract, platform errata, and subtle subscription rules make correctness and long-term maintenance difficult. When lock elision is used, it must be treated as a performance path over an ordinary correct synchronization protocol, not as a replacement for that protocol.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.18\textwidth}p{0.25\textwidth}p{0.25\textwidth}p{0.22\textwidth}}
+\hline
+\textbf{Mechanism} & \textbf{Tracking} & \textbf{Abort sources} & \textbf{Software obligation}\\
+\hline
+Intel RTM & Cache-resident speculative read/write sets; explicit \texttt{\_xbegin}, \texttt{\_xend}, \texttt{\_xabort}. & Conflict, capacity, unsupported instruction, interrupt, page fault, explicit abort. & Always provide a correct fallback; subscribe to fallback lock inside the transaction.\\
+ARM TME & Architectural transaction begin/end with implementation-defined tracking. & Similar best-effort causes; exact diagnostics are implementation-specific. & Same best-effort rule; never assume eventual commit.\\
+IBM POWER HTM & Coherence-based tracking with a mature architectural interface. & Conflict, capacity, non-transactional events, implementation limits. & Use retry budgets and fallback paths; exploit richer platform diagnostics where available.\\
+gem5 Ruby/TME model & Simulated cache hierarchy and coherence protocol. & Observable conflict and capacity behavior under controlled cache parameters. & Use simulation to separate effects that hardware counters collapse.\\
+\hline
+\end{tabular}
+\caption{HTM implementations differ in interface and diagnostics, but share the same semantic contract: hardware commit is opportunistic and software fallback is mandatory.}
+\label{tab:htm-implementations}
+\end{table}
+
+\section{Worked Example: RTM, From the Inside}
+\index{HTM}\index{RTM}\index{xbegin}\index{xend}
+\label{sec:rtm-example}
+
+Intel RTM is the closest commodity hardware comes to a transaction:
+
+\begin{lstlisting}[language=C, caption={The RTM contract: begin, body, fall back on abort.}]
+unsigned status = _xbegin();
+if (status == _XBEGIN_STARTED) {
+    /* transactional region */
+    *a -= n; *b += n;            /* both become visible atomically */
+    _xend();                     /* commit                        */
+} else {
+    /* abort: status encodes the reason (conflict, capacity, ...) */
+    lock(&g_fallback);           /* best-effort -> serial fallback  */
+    *a -= n; *b += n;
+    unlock(&g_fallback);
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item Compare with \S\ref{sec:api-example}: the STM retry loop becomes a hardware fallback instead of a software retry.
+    \item The \texttt{status} byte is the entire diagnostics interface --- the abort-accounting of Part~VI is far richer, which is why profiling tools must infer RTM reasons (Part~VII).
+    \item Exercise~1 asks for the fallback design; the phased-hybrid and HSTM bullets above are exactly this fallback made adaptive.
+    \item The transaction's atomicity is enforced by the L1/L2 coherence tracking of the first section --- which is why capacity aborts are unavoidable (see Part~VII's GPU contrast).
+    \item \textbf{Abort taxonomy}: RTM collapses many causes into one status byte. The practical breakdown is: \emph{conflict} (another core touched the read/write set), \emph{capacity} (the transaction outgrew the L1 tracking --- unavoidable at large read/write sets), \emph{unsupported instruction} (e.g.\ most syscalls and \texttt{rdfsbase}), and \emph{debug/explicit} (\texttt{\_xabort} or debugger single-step). Profilers cannot distinguish conflict from capacity reliably from the status alone --- the reason the Part~VII simulator model re-measures them.
+    \item \textbf{Fallback correctness is the real contract.} The \texttt{lock(\&g\_fallback)} path above is a second, serial execution of the same body. It must be \emph{called with the same state view} as the aborted TSX attempt and must itself be transactional-safe: a crash between the fallback lock and its unlock is indistinguishable from a crash inside the transaction. The failure mode to design against is the \emph{retry loop deadlock}: a hybrid that falls back to a lock but is also invoked by the STM-style retry loop can deadlock on its own fallback mutex (a real bug class in the companion repo's SPHT backend).
+\end{itemize}
+
+The listing is intentionally small, but it hides two non-negotiable rules. First, the fallback body must be the same logical operation as the transactional body. Second, the fallback lock must be visible to the transaction. Without that visibility, the hardware path and fallback path are merely two unsynchronized implementations of the same update.
+
+\section{Worked Example: RTM Bank Transfer with Lock Subscription}
+\index{lock subscription}\index{fallback lock}\index{money conservation}
+\label{sec:rtm-bank-transfer}
+
+The fallback lock must be visible to the hardware transaction. Otherwise a serialized fallback transfer can race with a hardware transaction that never read the lock.
+
+\begin{lstlisting}[language=C, caption={A compilable RTM bank transfer with account floors and fallback lock subscription.}]
+/* Compile on x86-64 with:
+ *   c++ -std=c++17 -O2 -mrtm bank_rtm.cc -o bank_rtm
+ */
+#include <immintrin.h>
+#include <atomic>
+#include <array>
+#include <cassert>
+#include <thread>
+
+struct Account {
+    long balance;
+    long floor;
+};
+
+static std::atomic<bool> g_fallback{false};
+
+static void lock_fallback() {
+    bool expected = false;
+    while (!g_fallback.compare_exchange_weak(
+               expected, true,
+               std::memory_order_acquire,
+               std::memory_order_relaxed)) {
+        expected = false;
+        std::this_thread::yield();
+    }
+}
+
+static void unlock_fallback() {
+    g_fallback.store(false, std::memory_order_release);
+}
+
+static bool transfer_body(Account& from, Account& to, long amount) {
+    if (amount < 0) return false;
+
+    __int128 after = static_cast<__int128>(from.balance) - amount;
+    if (after < from.floor) return false;
+
+    from.balance -= amount;
+    to.balance += amount;
+    return true;
+}
+
+static bool transfer(Account& from, Account& to, long amount) {
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        unsigned status = _xbegin();
+
+        if (status == _XBEGIN_STARTED) {
+            /*
+             * Lock subscription: if the fallback path is active, abort.
+             * The load places g_fallback in the transactional read set.
+             */
+            if (g_fallback.load(std::memory_order_acquire))
+                _xabort(0xF0);
+
+            bool ok = transfer_body(from, to, amount);
+            _xend();
+            return ok;
+        }
+
+        if ((status & _XABORT_EXPLICIT) &&
+            _XABORT_CODE(status) == 0xF0) {
+            std::this_thread::yield();
+            continue;
+        }
+
+        if ((status & _XABORT_RETRY) == 0)
+            break;
+    }
+
+    lock_fallback();
+    bool ok = transfer_body(from, to, amount);
+    unlock_fallback();
+    return ok;
+}
+
+static long total(const std::array<Account, 2>& a) {
+    return a[0].balance + a[1].balance;
+}
+
+int main() {
+    std::array<Account, 2> bank = {{{100, 0}, {100, 0}}};
+
+    long before = total(bank);
+    bool ok1 = transfer(bank[0], bank[1], 25);
+    bool ok2 = transfer(bank[0], bank[1], 1000);
+
+    assert(ok1);
+    assert(!ok2);
+    assert(bank[0].balance >= bank[0].floor);
+    assert(bank[1].balance >= bank[1].floor);
+    assert(total(bank) == before);
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item The invariant is money conservation: every successful transfer subtracts and adds the same amount.
+    \item The account-floor check is inside both the RTM path and the fallback path; fallback is not a different algorithm.
+    \item The transaction reads \texttt{g\_fallback}. That read is not an optimization; it is the synchronization point between hardware and software execution.
+    \item The retry budget is deliberately finite. A best-effort HTM transaction is allowed to abort forever.
+    \item The explicit abort code \texttt{0xF0} separates ``fallback lock is held'' from ordinary conflicts in local diagnostics. It does not make RTM deterministic.
+\end{itemize}
+
+The companion backends use this same pattern at different levels. SGL serializes everything. TSX-SGL attempts the critical section in hardware and falls back to serialization. Software systems such as TL2, NOrec, TSC-TM, SwissTM, and TinySTM do not depend on cache-resident speculation, but they pay for metadata, validation, and logging. The measured results in the companion project reflect that trade-off: for the fuzz/bank workload on an M1 Pro, TL2 and TSC-TM are around two million transactions per second, while NOrec-BF improves the read-mostly NOrec path by reducing validation cost. These numbers are workload-specific; they are useful here only as a reminder that HTM is one point in a larger design space.
+
+\section{Worked Example: Abort-Cause Counters}
+
+RTM exposes limited status bits. A useful first diagnostic is therefore local accounting: count commits, explicit subscription aborts, retryable aborts, and non-retryable aborts. The counters must be updated outside the transaction. If the transaction aborts, writes performed inside it vanish; if the writes force extra cache lines into the transaction, they also perturb the abort rate being measured.
+
+\begin{lstlisting}[language=C, caption={Per-thread RTM counters kept outside the transactional footprint.}]
+/* Compile on x86-64 with:
+ *   c++ -std=c++17 -O2 -mrtm rtm_counters.cc -o rtm_counters
+ */
+#include <immintrin.h>
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+
+struct Counters {
+    std::uint64_t commits = 0;
+    std::uint64_t explicit_lock = 0;
+    std::uint64_t retryable = 0;
+    std::uint64_t nonretryable = 0;
+};
+
+static std::atomic<bool> g_lock{false};
+
+static void critical_increment(int& x) {
+    ++x;
+}
+
+static void run_once(int& x, Counters& c) {
+    for (int i = 0; i != 4; ++i) {
+        unsigned s = _xbegin();
+        if (s == _XBEGIN_STARTED) {
+            if (g_lock.load(std::memory_order_acquire))
+                _xabort(0xF0);
+            critical_increment(x);
+            _xend();
+            ++c.commits;
+            return;
+        }
+
+        if ((s & _XABORT_EXPLICIT) && _XABORT_CODE(s) == 0xF0) {
+            ++c.explicit_lock;
+        } else if (s & _XABORT_RETRY) {
+            ++c.retryable;
+        } else {
+            ++c.nonretryable;
+            break;
+        }
+    }
+
+    while (g_lock.exchange(true, std::memory_order_acquire)) {
+    }
+    critical_increment(x);
+    g_lock.store(false, std::memory_order_release);
+}
+
+int main() {
+    int x = 0;
+    Counters c;
+    run_once(x, c);
+    assert(x == 1);
+    assert(c.commits + c.explicit_lock + c.retryable + c.nonretryable >= 1);
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item Counters are diagnostic state, not transactional state.
+    \item A counter increment inside RTM would be rolled back on abort and would add another write line on commit.
+    \item The status bits classify symptoms. They do not fully explain the microarchitectural cause.
+\end{itemize}
+
+\section{Worked Example: Capacity Probe}
+
+The following program sweeps the number of cache lines touched by a transaction. It is not a benchmark result; it is a harness for observing the qualitative transition from small, cache-resident transactions to transactions that frequently abort for capacity or other implementation limits.
+
+\begin{lstlisting}[language=C, caption={A small RTM capacity probe that varies the transactional footprint.}]
+/* Compile on x86-64 with:
+ *   c++ -std=c++17 -O2 -mrtm rtm_capacity.cc -o rtm_capacity
+ */
+#include <immintrin.h>
+#include <array>
+#include <cassert>
+#include <cstddef>
+#include <iostream>
+
+struct alignas(64) Line {
+    int value;
+    char pad[60];
+};
+
+int main() {
+    std::array<Line, 256> lines{};
+    for (std::size_t touched = 1; touched <= lines.size(); touched *= 2) {
+        unsigned status = _xbegin();
+        if (status == _XBEGIN_STARTED) {
+            for (std::size_t i = 0; i < touched; ++i)
+                lines[i].value++;
+            _xend();
+            std::cout << touched << " commit\n";
+        } else {
+            std::cout << touched << " abort status=" << status << "\n";
+        }
+    }
+
+    long sum = 0;
+    for (const auto& l : lines)
+        sum += l.value;
+    assert(sum >= 0);
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item Aligning each element to a cache line makes the footprint easier to reason about.
+    \item The program does not assume a particular capacity threshold.
+    \item The same idea is useful in simulation, where cache sizes and associativity can be varied deliberately.
+\end{itemize}
+
+\section{Simulation with gem5}
+
+Simulation answers questions that commodity counters often merge together. A hardware counter may report an abort, or a status byte may hint that the abort was retryable, but it rarely tells whether the root cause was an L1 conflict, an eviction, a coherence race, a TLB event, or an implementation limit. A simulator can expose the cache hierarchy, coherence protocol, and transactional metadata directly.
+
+Gem5's Ruby memory system is the natural tool in this chapter because Ruby models cache hierarchies and coherence protocols explicitly. With HTM or TME support enabled, the workflow is:
+
+\begin{enumerate}
+    \item model the cache hierarchy and coherence domain;
+    \item enable transactional execution in the target ISA model;
+    \item run a minimal transactional workload;
+    \item vary the footprint, contention, and cache parameters;
+    \item separate conflict aborts from capacity aborts in the output.
+\end{enumerate}
+
+The capacity probe above becomes more informative in simulation than on a fixed machine. On real hardware, the abort boundary is affected by undocumented structures and unrelated activity. In simulation, the experimenter can hold the workload constant and vary L1 size, associativity, line size, or contention. This makes transient effects visible: evictions mid-transaction, write-set coalescing, false conflicts inside a coherence domain, and instruction events that force an abort.
+
+The simulator is not a replacement for measurement. It is a microscope. It explains mechanisms under controlled assumptions; the hardware run tells whether those mechanisms dominate on a real platform.
+
+\section{Worked Example: Model Checking HTM Abort and Fallback}
+\index{TLA+}\index{abort}\index{fallback path}
+\label{sec:htm-fallback-tla}
+
+A small model is enough to expose the essential rule: abort may occur at any time before commit, and fallback must preserve the same invariants as the hardware path.
+
+\begin{lstlisting}[language={}, caption={TLA+ model of one transferring transaction, abort, interference, and fallback.}]
+-------------------------- MODULE BankHTMFallback --------------------------
+EXTENDS Integers, TLC
+
+Accounts == {0, 1}
+InitA == 100
+InitB == 100
+Floor == 0
+Amt == 7
+
+VARIABLES bal, pc, snap
+
+vars == <<bal, pc, snap>>
+
+Total(b) == b[0] + b[1]
+
+CanMove(b) == b[0] - Amt >= Floor
+
+Move(b) == [b EXCEPT ![0] = @ - Amt,
+                      ![1] = @ + Amt]
+
+Init ==
+    /\ bal = [a \in Accounts |-> IF a = 0 THEN InitA ELSE InitB]
+    /\ pc = "idle"
+    /\ snap = bal
+
+Begin ==
+    /\ pc = "idle"
+    /\ pc' = "tx"
+    /\ snap' = bal
+    /\ UNCHANGED bal
+
+Abort ==
+    /\ pc = "tx"
+    /\ pc' = "idle"
+    /\ UNCHANGED <<bal, snap>>
+
+Commit ==
+    /\ pc = "tx"
+    /\ bal = snap
+    /\ CanMove(snap)
+    /\ bal' = Move(bal)
+    /\ pc' = "idle"
+    /\ snap' = snap
+
+CommitNoFunds ==
+    /\ pc = "tx"
+    /\ bal = snap
+    /\ ~CanMove(snap)
+    /\ pc' = "idle"
+    /\ UNCHANGED <<bal, snap>>
+
+Fallback ==
+    /\ pc = "idle"
+    /\ CanMove(bal)
+    /\ bal' = Move(bal)
+    /\ pc' = "idle"
+    /\ UNCHANGED snap
+
+InterfereAbort ==
+    /\ pc = "tx"
+    /\ CanMove(bal)
+    /\ bal' = Move(bal)
+    /\ pc' = "idle"
+    /\ snap' = snap
+
+Next ==
+    \/ Begin
+    \/ Abort
+    \/ Commit
+    \/ CommitNoFunds
+    \/ Fallback
+    \/ InterfereAbort
+
+Spec == Init /\ [][Next]_vars
+
+MoneyConserved == Total(bal) = InitA + InitB
+
+FloorSafe == \A a \in Accounts : bal[a] >= Floor
+
+THEOREM Spec => []MoneyConserved
+THEOREM Spec => []FloorSafe
+=============================================================================
+\end{lstlisting}
+
+\begin{itemize}
+    \item \texttt{Commit} requires \texttt{bal = snap}. This is the abstract coherence check: if the snapshot is stale, hardware must not commit it.
+    \item \texttt{InterfereAbort} models another successful transfer that conflicts with the running transaction. The running transaction aborts, but money is still conserved.
+    \item \texttt{Fallback} executes only from \texttt{idle}; it is serialized with respect to the modeled hardware transaction.
+    \item Both invariants are safety properties. They do not claim that a best-effort transaction eventually commits.
+\end{itemize}
+
+The model omits caches, lines, and invalidations. That is intentional. At the proof boundary, HTM contributes one rule: a transaction may commit only if its snapshot is still valid. Everything else is fallback correctness. This is why the companion project model-checks the software contract as well as testing the implementations.
+
+\section{Summary}
+
+HTM leverages existing speculation and cache coherence to make short transactions fast. A commit can be nearly as cheap as leaving a speculative region, and conflict detection can be piggybacked on invalidation traffic already present in the memory hierarchy.
+
+The cost is uncertainty. Transactions can abort for conflicts, capacity, interrupts, faults, unsupported instructions, and implementation limits. Therefore every HTM design is also a fallback design. Correct programs subscribe to the fallback lock, bound their retries, keep diagnostics outside the transactional footprint, and validate the same invariants on the hardware and software paths.
+
+\section{Exercises}
+\begin{enumerate}
+    \item In Intel RTM, a transaction that exceeds the L1 cache capacity always aborts. Propose a software fallback path and discuss its performance implications.
+    \item Using a conceptual pipeline diagram, show why a transaction that triggers a TLB miss is likely to abort.
+    \item Configure gem5 to run a simple transactional program and measure the abort rate as the number of cache lines touched increases. Explain the trend.
+    \item \emph{[implementation]} Extend Listing~\ref{sec:rtm-bank-transfer}'s transfer code to collect per-thread counters for commits, explicit fallback-lock aborts, retryable aborts, and non-retryable aborts. Keep the counters outside the transaction and explain why updating them inside RTM would distort the measured abort rate.
+    \item \emph{[verification]} Modify the TLA+ model in \S\ref{sec:htm-fallback-tla} so that transfers may go in both directions. State and check the money-conservation invariant and an account-floor invariant for both accounts.
+    \item \emph{[theory]} Explain why lock subscription is necessary for opacity in a hybrid HTM plus lock fallback design. Give an execution in which omitting the subscription lets a hardware transaction commit concurrently with the fallback critical section.
+    \item \emph{[implementation]} Modify the capacity probe so that it first reads many cache lines and then writes only two. Compare the expected abort behavior with a write-heavy transaction that writes every touched line.
+    \item \emph{[verification]} Add a boolean fallback-lock variable to the TLA+ model. Permit \texttt{Begin} only when the lock is clear, and add an explicit abort transition when the lock becomes held during a transaction.
+    \item \emph{[theory]} Explain why a best-effort HTM interface cannot provide wait-freedom by itself, even when every individual transaction is finite and conflict-free in the source program.
+\end{enumerate}
+
+\index{Herlihy and Moss}
+\index{XCOMMIT}
+\index{XABORT}
+\index{MESI}
+\index{speculative stores}
+\index{transactional read set}
+\index{transactional write set}
+\index{coherence invalidation}
+\index{capacity abort}
+\index{conflict abort}
+\index{unsupported instruction abort}
+\index{Intel TSX}
+\index{Intel RTM}
+\index{ARM TME}
+\index{IBM POWER HTM}
+\index{gem5}
+\index{Ruby memory system}
+\index{lock elision}
+\index{TSX-SGL}
+\index{phased hybrid TM}
+\index{hybrid STM}
+\index{abort counters}
+\index{cache footprint}
+\index{fallback serialization}
+\index{opacity!HTM fallback}
+\index{bank transfer invariant}

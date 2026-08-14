@@ -1,0 +1,356 @@
+You are co-writing a graduate-level textbook, "Transactional Memory: From
+Principles to Practice" (author Daniel Castro, version 0.1). The book's
+chapters are currently bullet-skeleton drafts. Your job is to expand ONE
+chapter into a complete, publication-ready LaTeX chapter.
+
+The companion codebase (a real C++/Rust/Rust-GPU TM research project) provides
+the facts you may reference — it contains these real backends: SGL (single
+global lock), TSX-SGL, SPHT, NOrec, NOrec-BF, TL2, TSC-TM, TinySTM (WBCTL / WT /
+WBETL), SwissTM, DUDETM, NV-HTM, XTM, Romulus, LeftRight, JVSTM, MVLog,
+PersistentSGL, DistributedSGL, TiKV (distributed, Percolator-2PC), plus GPU
+designs PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, and GUST (AtomicINC commit-log,
+CCT/MRV validation). All are verified with test_tx 114/114 and test_ds 207/207
+and model-checked TLA+ specs. Real measured perf on an M1 Pro (fuzz/bank):
+NOrec-BF ~829K txns/s read-mostly, NOrec ~553K; TL2 ~2.06M, TSC-TM ~2.05M;
+MVLog ~275K write-heavy / ~109K read-mostly; GUST/GPU numbers are on GPUs.
+
+The running example of the book is a two-account bank transfer with an
+account floor and a money-conservation invariant; reuse it wherever natural.
+
+Below is the verbatim bullet-skeleton of the chapter you are expanding. You
+must produce the FULL chapter as a single raw LaTeX block: every section in
+the skeleton becomes a prose section, with the SAME section titles, the SAME
+\label values, the SAME figure and table captions and labels, and the SAME
+exercise set (kept verbatim where present). You may ADD subsections, worked
+examples, prose, listings, and extra figures/tables, but you must not drop or
+rename anything that already exists in the skeleton.
+
+FORMAT — produce EXACTLY this structure, in raw LaTeX, with no markdown fences
+and no preamble:
+
+A header comment block (4 lines) with the EXACT text below — substitute the
+chapter number, title, part title, and a one-sentence description; do NOT
+copy the number or title of any other chapter:
+    % docs/book/sections/ch10.tex
+    % Chapter 10: Compiler Fundamentals - IRs and Passes
+    % Part V: Compiler Instrumentation for TM
+    % This chapter <one-sentence description of the chapter's content and
+    %   artifacts: worked examples, code listings, figures, tables, and
+    %   tagged exercises it contains>.
+The first two comment lines MUST reference chapter 10 (e.g. ch10.tex,
+Chapter 10), never a different chapter number.
+
+2. \chapter{<title>} immediately followed by ONE \index{...} line listing the
+   chapter's main terms (the "sections index"). Keep ONLY this sections-index
+   line at the top. Do NOT put any other \index commands in the body.
+3. An introductory prose paragraph (or two) motivating the chapter.
+4. Each skeleton section, in order, expanded to prose. Keep the section's own
+   \index line inside it if the skeleton has one; otherwise add none. Preserve
+   every figure, table, and lstlisting that the skeleton already contains,
+   verbatim, including its \label. Where the skeleton has math blocks
+   ($$ ... $$) keep them but merge fragmentary blocks into one display formula
+   where sensible (e.g. "$p$" and "$1-p$" and the fraction can stay separate,
+   but avoid a lone symbol on its own display line).
+5. At least two NEW "Worked Example" sections (\section{{Worked Example:
+   <title>}}), each with a concrete \begin{{lstlisting}} — real C/C++/PlusCal/
+   TLA+ code that would compile or model-check — plus a short bullet list of
+   lessons. Reuse the bank-transfer running example where natural. If the
+   skeleton already defines worked examples, keep them and add one or two more
+   only if space permits.
+6. One TikZ figure (\begin{{figure}}[htbp] ... \caption{{...}}
+   \label{{fig:...}} ... \end{{figure}}) — a state machine, timeline, conflict
+   diagram, or architecture diagram relevant to this chapter. Keep the TikZ
+   code simple and compilable with only {{positioning, arrows.meta, calc}}.
+   If the skeleton already has a figure, keep it and add one more only if it
+   clearly helps.
+7. One comparison or taxonomy table (\begin{{table}}[htbp] ... \end{{table}})
+   if the chapter has an obvious comparison to draw (keep the skeleton's table
+   verbatim if it has one).
+8. \section{{Summary}} — a short prose summary.
+9. \section{{Exercises}} — \begin{{enumerate}} with the skeleton's exercises
+   kept verbatim, followed by any NEW exercises, each tagged
+   \emph{{[implementation]}} / \emph{{[verification]}} / \emph{{[theory]}}.
+10. After the exercises, a TRAILING \index{{...}} block with all the finer-
+    grained index terms introduced by the new content (one per line or a
+    couple per line). These trailing indices must NOT appear elsewhere.
+
+RULES:
+- Be concrete and technically precise; the code must be believable and the
+  figures must be about the chapter's actual content, not generic filler.
+- Do NOT invent measurements or new research results. You may restate the
+  real numbers listed above or qualitative claims from the chapter.
+- Match the book's existing voice: terse, technical, teaching.
+- In TikZ node text use \\ (double backslash) for line breaks, never a single
+  backslash. In tabular rows end every row with \\ (double backslash).
+- In listings and TLA+ code use /\ (backslash slash) for conjunction, \A and
+  \E for quantifiers — exactly as valid TLA+/C requires.
+- Respect the ~16K-char answer cap: prefer 2 solid worked examples + 1 figure
+  + 3 exercises over quantity. Terse text.
+
+VERBATIM CHAPTER SOURCE (LaTeX):
+
+\chapter{Compiler Fundamentals – IRs and Passes}
+\section{The Compilation Pipeline}
+\begin{itemize}
+    \item Front end (lexing, parsing, AST), middle end (IR optimization), back end (code generation).
+    \item LLVM IR and GCC GIMPLE: a high‑level view.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.7cm,
+    box/.style={draw, rounded corners, minimum width=2.8cm, minimum height=0.85cm, align=center},
+    smallbox/.style={draw, rounded corners, minimum width=2.4cm, minimum height=0.75cm, align=center},
+    arr/.style={-{Latex[length=2mm]}, thick}
+]
+\node[box] (src) {C/C++ source\\\texttt{atomic\_tx} block};
+\node[box, right=of src] (ir) {LLVM IR\\plain loads/stores};
+\node[box, right=of ir] (pass) {TM pass\\address policy};
+\node[box, right=of pass] (iir) {Instrumented IR\\runtime calls};
+\node[box, right=of iir] (obj) {Object code};
+
+\node[smallbox, below=1.2cm of pass] (shared) {\texttt{.tm\_shared}\\registered globals};
+\node[smallbox, below=1.2cm of iir] (abi) {TM runtime ABI\\\texttt{tm\_hooks}};
+
+\draw[arr] (src) -- (ir);
+\draw[arr] (ir) -- (pass);
+\draw[arr] (pass) -- (iir);
+\draw[arr] (iir) -- (obj);
+\draw[arr] (shared) -- (pass);
+\draw[arr] (iir) -- (abi);
+\draw[arr] (abi) -- (obj);
+\end{tikzpicture}%
+}
+\caption{A compiler TM pass sits between IR optimization and code generation; its output is ordinary code with calls into the runtime ABI.}
+\label{fig:compiler-tm-pass}
+\end{figure}
+
+\section{Instrumentation as a Compiler Pass}
+\begin{itemize}
+    \item Replacing transactional memory accesses with calls to a runtime.
+    \item The structure of a \texttt{FunctionPass} in LLVM (and its GIMPLE equivalent).
+    \item Pseudocode for the instrumentation algorithm, plus a PlusCal specification.
+    \item What a production pass must handle: function calls into uninstrumented code, indirect calls, and escaping pointers.
+    \item The instrumentation decision is a static-address-space question: heap/global addresses go through TM; stack addresses bypass it (the \texttt{LLVM\_TM\_ADDR\_CHECK} pattern).
+    \item Where TM globals get registered so the runtime can recognise them (the \texttt{.tm\_shared} section of the companion implementation).
+    \item Trade-off: instrumenting every load/store (simple, slow) vs.\ annotating shared data (fast, needs programmer discipline).
+\end{itemize}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.22\linewidth}p{0.28\linewidth}p{0.22\linewidth}p{0.16\linewidth}}
+\hline
+Policy & What the pass rewrites & Programmer\slash{}runtime obligation & Typical cost \\
+\hline
+Instrument every load/store & All memory operations inside a transaction become runtime calls. & Runtime must cheaply reject private addresses or tolerate over-instrumentation. & Highest; simple and conservative. \\
+Static address-space check & Heap and global addresses are instrumented; provable stack addresses bypass TM. & Alias analysis must be conservative when provenance is unclear. & Lower; still safe when uncertain cases are instrumented. \\
+Annotated shared section & Only data registered in \texttt{.tm\_shared} is treated as transactional shared state. & Programmer or front end must mark all shared transactional objects. & Lowest common overhead; weakest if annotations are wrong. \\
+Manual runtime calls & Source code calls \texttt{tm\_read\_*} and \texttt{tm\_write\_*} directly. & Programmer maintains ABI discipline by hand. & Useful for tests and microbenchmarks; brittle at scale. \\
+\hline
+\end{tabular}
+\caption{Instrumentation policies differ mainly in where the conservative decision is made: compiler, runtime, or programmer.}
+\label{tab:instrumentation-policies}
+\end{table}
+
+\section{Worked Example: A Load, Before and After the Pass}
+\index{instrumentation}\index{LLVM IR}
+\label{sec:ir-example}
+
+IR is the right place to see what instrumentation actually changes. A single
+transactional read of an \texttt{int} becomes a call into the runtime:
+
+\begin{lstlisting}[language=C, caption={LLVM IR for a transactional load, before and after instrumentation.}]
+; before the pass -- a plain memory load
+%1 = load i32, i32* %p
+
+; after the pass -- the load is replaced by a runtime call
+%1 = call i32 @__tm_read_i4(i32* %p)
+\end{lstlisting}
+
+\begin{itemize}
+    \item The pass rewrites the memory operand of each load/store into a typed runtime call (\texttt{tm\_read\_i4}, \texttt{tm\_write\_i4}, \ldots).
+    \item The static address-space policy decides \emph{which} accesses get rewritten: heap/global go through TM, stack addresses bypass via \texttt{LLVM\_TM\_ADDR\_CHECK}.
+    \item The type in the call name matters: \texttt{i4} vs \texttt{i8} select different runtime fast paths and different read-set log widths.
+    \item Exercise~1 of this chapter asks you to repeat this mapping by hand on a GIMPLE listing.
+    \item The contract the pass instruments \emph{against} --- the exact signatures of \texttt{tm\_read\_*}\slash{}\texttt{tm\_write\_*}, how a transaction begins/ends, and what an abort unwinds --- is the runtime ABI of Chapter~7. If the ABI moves, the pass must move with it; the two are coupled by design, which is why they share the \texttt{tm\_hooks} table rather than a hard-coded call.
+\end{itemize}
+
+\section{Worked Example: Instrumenting a Bank Transfer}
+\index{bank transfer}\index{runtime ABI}
+\label{sec:bank-transfer-instrumented-c}
+
+This listing is not an implementation of NOrec, TL2, or TSC-TM. It is the
+shape of the code produced by the pass: ordinary source-level loads and stores
+have become calls through the transactional ABI. The stub runtime below makes
+the file compile and lets the invariant be tested in a single-threaded run.
+
+\begin{lstlisting}[language=C, caption={Compilable C++17 model of an instrumented bank transfer.}]
+#include <assert.h>
+#include <stdint.h>
+
+struct Account {
+    int balance;
+};
+
+extern "C" void __tm_begin(void) {
+    /* Real backends allocate per-transaction metadata here. */
+}
+
+extern "C" void __tm_end(void) {
+    /* Real backends validate and commit here. */
+}
+
+extern "C" int __tm_read_i4(const int *p) {
+    return *p;
+}
+
+extern "C" void __tm_write_i4(int *p, int value) {
+    *p = value;
+}
+
+static int sum2(const Account *a, const Account *b) {
+    return a->balance + b->balance;
+}
+
+/* This is the post-pass shape of:
+ *
+ *   atomic_tx {
+ *       if (from->balance - amount >= floor) {
+ *           from->balance -= amount;
+ *           to->balance += amount;
+ *       }
+ *   }
+ */
+static void transfer_instrumented(Account *from,
+                                  Account *to,
+                                  int amount,
+                                  int floor) {
+    __tm_begin();
+
+    int from_balance = __tm_read_i4(&from->balance);
+    int to_balance   = __tm_read_i4(&to->balance);
+
+    if (from_balance - amount >= floor) {
+        __tm_write_i4(&from->balance, from_balance - amount);
+        __tm_write_i4(&to->balance,   to_balance + amount);
+    }
+
+    __tm_end();
+}
+
+int main(void) {
+    Account a = { 100 };
+    Account b = {  40 };
+
+    int before = sum2(&a, &b);
+    transfer_instrumented(&a, &b, 30, 50);
+    int after = sum2(&a, &b);
+
+    assert(a.balance >= 50);
+    assert(before == after);
+
+    before = after;
+    transfer_instrumented(&a, &b, 80, 50);
+    after = sum2(&a, &b);
+
+    assert(a.balance >= 50);
+    assert(before == after);
+    return 0;
+}
+\end{lstlisting}
+
+Lessons:
+\begin{itemize}
+    \item The compiler pass does not prove the money-conservation invariant; it preserves the memory operations on which the runtime will enforce atomicity.
+    \item The two writes must be in one transaction. Instrumenting each store independently would preserve type correctness but not the bank invariant under concurrency.
+    \item The generated calls are typed. Here \texttt{balance} is an \texttt{int}, so the pass emits \texttt{\_\_tm\_read\_i4} and \texttt{\_\_tm\_write\_i4}.
+    \item Stack temporaries such as \texttt{from\_balance}, \texttt{to\_balance}, and \texttt{before} are not shared transactional locations and should not be routed through the TM runtime.
+\end{itemize}
+
+\section{Worked Example: Model Checking the Address Policy}
+\index{TLA+}\index{address-space check}
+\label{sec:address-policy-tla}
+
+The pass has a small but important safety rule: do not instrument provably
+private stack locations; do instrument heap and global locations. The following
+TLA+ module models one pass over a three-instruction program and checks that
+the emitted operation stream respects that rule.
+
+\begin{lstlisting}[caption={TLA+ model of the stack-bypass/shared-instrument policy.}]
+---- MODULE InstrumentPass ----
+EXTENDS TLC, Sequences, Naturals
+
+VARIABLES pc, out
+
+Ops == {"load", "store"}
+Addrs == {"stack", "heap", "global"}
+Kinds == {"plain", "tmread", "tmwrite"}
+
+Prog ==
+  << [op |-> "load",  addr |-> "stack"],
+     [op |-> "store", addr |-> "heap"],
+     [op |-> "load",  addr |-> "global"] >>
+
+Instr(op, addr) ==
+  IF addr = "stack" THEN
+      "plain"
+  ELSE IF op = "load" THEN
+      "tmread"
+  ELSE
+      "tmwrite"
+
+Init ==
+  /\ pc = 1
+  /\ out = << >>
+
+Next ==
+  IF pc <= Len(Prog) THEN
+      /\ out' = Append(out, Instr(Prog[pc].op, Prog[pc].addr))
+      /\ pc' = pc + 1
+  ELSE
+      /\ UNCHANGED << pc, out >>
+
+TypeOK ==
+  /\ pc \in 1..(Len(Prog) + 1)
+  /\ out \in Seq(Kinds)
+  /\ Len(out) <= Len(Prog)
+
+StackBypass ==
+  \A i \in 1..Len(out):
+    Prog[i].addr = "stack" => out[i] = "plain"
+
+SharedInstrumented ==
+  \A i \in 1..Len(out):
+    Prog[i].addr # "stack" =>
+      ((Prog[i].op = "load"  => out[i] = "tmread") /\
+       (Prog[i].op = "store" => out[i] = "tmwrite"))
+
+Spec == Init /\ [][Next]_<< pc, out >>
+
+====
+\end{lstlisting}
+
+Lessons:
+\begin{itemize}
+    \item The model is deliberately smaller than LLVM. It isolates the address-policy obligation from parsing, dominance, and code generation.
+    \item \texttt{StackBypass} catches accidental over-instrumentation of private stack slots.
+    \item \texttt{SharedInstrumented} catches the dangerous bug: a heap or global access escaping the TM runtime.
+    \item In a production pass, the hard case is not the rule itself but proving that an address is stack-private after optimization and aliasing.
+\end{itemize}
+
+\section{Summary}
+\begin{itemize}
+    \item Instrumentation is a source‑to‑source (or IR‑to‑IR) transformation.
+    \item A pass that instruments every memory access is the simplest possible TM compiler support.
+    \item A production-quality pass needs an address-space policy, a shared-data registry, and careful handling of uninstrumented callees.
+\end{itemize}
+
+\section{Exercises}
+\begin{enumerate}
+    \item Given a small C function, manually identify which GIMPLE statements would be replaced by calls to a TM runtime barrier.
+    \item Critique a naive instrumentation pass that instruments all loads and stores in the whole program. What performance problems would arise?
+    \item Design an LLVM pass that instruments only loads and stores inside basic blocks marked with a special intrinsic.
+\end{enumerate}
+

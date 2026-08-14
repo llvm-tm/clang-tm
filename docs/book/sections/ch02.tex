@@ -1,0 +1,334 @@
+
+\index{composability}
+\chapter{Transactions: From Databases to Shared Memory}
+\index{transaction}\index{serializability}\index{ACID}
+\section{ACID and Serializability}
+\begin{itemize}
+    \item Database transactions: Atomicity, Consistency, Isolation, Durability.
+    \item Serializability as the gold standard for isolation.
+    \item Why serializability is not directly transferable to in-memory concurrent programming.
+    \item Database mechanisms we will reuse: version clocks, read/write sets, validation, write-ahead logging.
+    \item The database-to-STM mapping: databases use disk-based logging and two-phase locking (2PL); STM replaces both with in-memory metadata and optimistic validation.
+    \item Isolation levels (read committed, repeatable read, serializable) as a spectrum; TM typically targets the strongest end (opacity).
+    \item In-memory difference: no durable media, no disk costs --- the cost centre shifts from I/O to coherence traffic and validation.
+\end{itemize}
+
+\section{Data Hazards and Memory Models}
+\begin{itemize}
+    \item Write-after-read, read-after-write, write-after-write hazards.
+    \item Sequential consistency vs. relaxed memory models (TSO, RMO).
+    \item How memory models affect the visibility of transactional writes.
+    \item The three classical hazard classes (RAW, WAR, WAW) and how each maps to a transactional conflict.
+    \item A transaction is really a sequence of hazards against other threads; concurrency control must resolve them consistently.
+    \item Why relaxed models (TSO on x86, weak on ARM/GPUs) force TM implementations to insert fences; revisited from a compiler and runtime perspective in Parts~II, IV, and VII.
+    \item The happens-before relation as the formal backbone for reasoning about visibility of committed writes.
+\end{itemize}
+
+\section{TM Semantics: Opacity, Sandboxing, Privatization}
+\begin{itemize}
+    \item Opacity: even aborted transactions must see a consistent view.
+    \item The privatization anomaly: why serializability fails when transactions publish objects.
+    \item Sandboxing: why speculative writes must not leak outside a transaction.
+    \item Serializability vs.\ opacity: a history can be serializable while an aborted reader still observes an inconsistent partial state --- opacity closes that gap.
+    \item Opacity also subsumes weak vs.\ strong atomicity debates via a single formal condition.
+    \item Privatization: handing an object from a transactional context to a non-transactional one must publish a consistent version; naive STMs corrupt it.
+    \item Sandboxing: instrumentation, not hardware, must guarantee that accesses outside a transaction are never redirected to speculative state.
+    \item The three conditions are the yardstick used to model-check every backend in Part~III (see, e.g., the \texttt{InvNoMissedConflict} invariant of Part~VII).
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=2.0cm,
+    state/.style={draw, rounded corners, minimum width=2.7cm, minimum height=0.9cm, align=center},
+    edge/.style={-{Latex[length=2mm]}, thick}
+]
+\node[state] (idle) {outside\\transaction};
+\node[state, right=of idle] (active) {active\\read/write set};
+\node[state, right=of active] (validate) {validate\\snapshot};
+\node[state, right=of validate] (commit) {commit\\publish writes};
+\node[state, below=of validate] (abort) {abort\\discard log};
+
+\draw[edge] (idle) -- node[above]{begin} (active);
+\draw[edge] (active) -- node[above]{try commit} (validate);
+\draw[edge] (validate) -- node[above]{valid} (commit);
+\draw[edge] (commit) -- node[above]{end} ($(commit)+(2.0,0)$);
+\draw[edge] (validate) -- node[right]{conflict} (abort);
+\draw[edge] (abort) -| node[pos=0.25, below]{retry} (active);
+\draw[edge] (active) edge[loop above] node{loads and stores} (active);
+\end{tikzpicture}
+\caption{A minimal transactional state machine for the bank example. The programmer marks the operation boundary; the runtime records accesses, validates the observed snapshot, and either publishes all writes or discards them.}
+\label{fig:transactional-state-machine}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.18\linewidth} p{0.22\linewidth} p{0.27\linewidth} p{0.23\linewidth}}
+\hline
+Family & Examples in the codebase & Serialization point & Bank-transfer consequence \\
+\hline
+Coarse lock & SGL, PersistentSGL, DistributedSGL & Lock acquisition or durable lock protocol & Simple proof; poor scalability under independent transfers. \\
+Hardware fast path & TSX-SGL & Hardware transaction commit, with SGL fallback & Fast when transactions fit hardware limits; fallback preserves correctness. \\
+Versioned STM & NOrec, NOrec-BF, TL2, TSC-TM & Global clock or per-object version validation & Detects stale reads of balances or floors before publishing writes. \\
+Multi-version STM & JVSTM, MVLog & Version selection plus commit validation & Readers can observe older committed versions while writers proceed. \\
+Persistent or distributed TM & NV-HTM, Romulus, XTM, TiKV & Durable commit record or distributed commit decision & Atomicity must include recovery or participant agreement. \\
+GPU TM & PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, GUST & Kernel-level commit protocol or commit log & Conflicts are batched across many lightweight threads. \\
+\hline
+\end{tabular}
+\caption{Transactional implementations differ mainly in where they serialize a transaction and how they validate the read set. The companion implementations all pass the same bank-style correctness tests, but expose different performance envelopes.}
+\label{tab:tm-family-taxonomy}
+\end{table}
+
+\section{Worked Example: A History That Is Serializable but Not Opaque}
+\index{opacity}\index{serializable but not opaque}\index{serializability}\index{linearizability}\index{strict serializability}\index{weak atomicity}\index{strong atomicity}\index{commit order}\index{read-set}\index{write-set}\index{validation}\index{conflict detection}\index{version management}\index{write-back}\index{undo log}\index{commit lock}\index{OCC}\index{eager version management}\index{lazy version management}
+
+Consider two transactions $T_1$ and $T_2$ operating on locations $x$ and
+$y$, both initially 0. The following interleaving is \emph{serializable}
+yet \emph{not opaque}:
+
+\begin{lstlisting}[caption={A serializable-but-not-opaque history.}]
+T1: read x = 0            // 1. T1 reads x = 0 (old value)
+T2: write x = 1           // 2. T2 writes x = 1
+T2: write y = 1           // 3. T2 writes y = 1
+T2: commit                // 4. T2 commits: state is now (x,y) = (1,1)
+T1: read y = 1            // 5. T1 reads the *fresh* y = 1
+T1: abort                 // 6. T1 aborts
+\end{lstlisting}
+
+\begin{itemize}
+    \item Only $T_2$ commits, so the committed history is trivially serializable --- an aborted $T_1$ is simply dropped from the serial order.
+    \item But $T_1$ read $x = 0$ \emph{and then} $y = 1$: the combination $(x,y) = (0,1)$ never existed at any single moment. A state that never existed was observed.
+    \item Opacity forbids this: even an aborted transaction must read a state that lies on some valid serialization. Serializability alone says nothing about aborted transactions.
+    \item This is the precise gap the invariants of Part~III encode, e.g.\ \texttt{InvNoMissedConflict} in the GPU chapter.
+    \item We will re-run this exact history on NOrec and TL2 in Chapter~9 to see where opacity is enforced --- and, in the exercises, against a deliberately broken runtime to see where it leaks.
+\end{itemize}
+
+\section{Worked Example: A Minimal Litmus-Test Harness}
+\index{litmus test}\index{invariant test}
+The history above is one instance of a general technique the book reuses
+from here to the GPU chapter: a \emph{litmus test}.  A litmus test is a
+tiny, fixed schedule that either must commit or must abort for the
+implementation to be correct.  The harness is a few lines that run the
+schedule, run a reference serialization, and compare:
+
+\begin{lstlisting}[language=C, caption={A litmus-test harness reused by every protocol chapter.}]
+struct result run_litmus(schedule_fn f, serialize_fn ref) {
+    struct result r = f();          /* execute the schedule on the TM */
+    return (r.serializable == ref(r)) ? r : (struct result){ .abort = 1 };
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item Each chapter that introduces a runtime (11, 12, 16, 17) ships the \emph{same} litmus tests, so a regression in any backend is a one-line change to spot.
+    \item A litmus test has three parts: a fixed thread schedule, an assertion about the committed result, and the corresponding serial-order check.
+    \item The invariant tests of Chapter~12 (e.g.\ the money-conservation test) are litmus tests made stochastic: the schedule is randomized, the assertion is the invariant.
+\end{itemize}
+
+\section{Worked Example: Flattening Nested Bank Transactions}
+
+A single global lock is not a scalable STM, but it is a precise executable
+model of the transactional interface. The important property in this example
+is \emph{flattening}\index{nested transaction!flattening}: a nested transaction
+does not acquire the lock again and does not commit independently.
+
+\begin{lstlisting}[language=C, caption={A compilable flattened transaction wrapper. Build with: cc -std=c11 -pthread tx\_flatten.c -o tx\_flatten}]
+#include <assert.h>
+#include <pthread.h>
+#include <stdio.h>
+
+struct account {
+    int balance;
+};
+
+static pthread_mutex_t tx_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Thread_local int tx_depth = 0;
+
+static struct account alice = { .balance = 100 };
+static struct account bob   = { .balance = 100 };
+static int floor_value = 0;
+static const int initial_total = 200;
+
+static void tx_begin(void) {
+    if (tx_depth == 0) {
+        pthread_mutex_lock(&tx_lock);
+    }
+    tx_depth++;
+}
+
+static void tx_end(void) {
+    assert(tx_depth > 0);
+    tx_depth--;
+    if (tx_depth == 0) {
+        pthread_mutex_unlock(&tx_lock);
+    }
+}
+
+static int total_unlocked(void) {
+    return alice.balance + bob.balance;
+}
+
+static int transfer_tx(struct account *from,
+                       struct account *to,
+                       int amount) {
+    int committed = 0;
+
+    tx_begin();
+
+    if (from->balance - amount >= floor_value &&
+        to->balance >= floor_value) {
+        from->balance -= amount;
+        to->balance += amount;
+        committed = 1;
+    }
+
+    assert(total_unlocked() == initial_total);
+
+    tx_end();
+    return committed;
+}
+
+static int audit_total_tx(void) {
+    int total;
+
+    tx_begin();
+
+    if (alice.balance >= floor_value && bob.balance >= floor_value) {
+        total = total_unlocked();
+    } else {
+        total = -1;
+    }
+
+    tx_end();
+    return total;
+}
+
+static void payroll_tx(void) {
+    tx_begin();
+
+    (void)transfer_tx(&alice, &bob, 10);
+    (void)transfer_tx(&bob, &alice, 5);
+
+    int total = audit_total_tx();
+    assert(total == -1 || total == initial_total);
+
+    tx_end();
+}
+
+int main(void) {
+    payroll_tx();
+
+    printf("alice=%d bob=%d total=%d\n",
+           alice.balance, bob.balance, audit_total_tx());
+
+    return 0;
+}
+\end{lstlisting}
+
+Lessons:
+
+\begin{itemize}
+    \item The outer transaction is the only real synchronization boundary.
+    \item Inner transactions are ordinary function calls with atomicity inherited from the enclosing transaction.
+    \item The money-conservation assertion is checked while the lock is held, so it observes a stable state.
+    \item This SGL implementation is useful as a reference backend and oracle, not as the performance target.
+\end{itemize}
+
+\section{Worked Example: Model Checking Money Conservation}
+
+The locking example shows an execution bug. The corresponding specification
+states the intended atomic step directly: a transfer changes both balances in
+one transition. TLC can check the money-conservation and floor invariants for
+all reachable states under a fixed floor.
+
+\begin{lstlisting}[language={}, caption={A TLA+ model of atomic bank transfers. Save as BankTransferInvariant.tla and run TLC with Floor set to 0.}]
+---- MODULE BankTransferInvariant ----
+EXTENDS Naturals, TLC
+
+CONSTANT Floor
+
+VARIABLES alice, bob
+
+vars == << alice, bob >>
+
+Init ==
+    /\ alice = 100
+    /\ bob = 100
+    /\ alice >= Floor
+    /\ bob >= Floor
+
+CanDebit(x) ==
+    x >= 10 + Floor
+
+TransferAB ==
+    /\ CanDebit(alice)
+    /\ alice' = alice - 10
+    /\ bob' = bob + 10
+
+TransferBA ==
+    /\ CanDebit(bob)
+    /\ bob' = bob - 10
+    /\ alice' = alice + 10
+
+Next ==
+    \/ TransferAB
+    \/ TransferBA
+    \/ UNCHANGED vars
+
+Spec ==
+    Init /\ [][Next]_vars
+
+TypeOK ==
+    /\ alice \in Nat
+    /\ bob \in Nat
+
+MoneyConserved ==
+    alice + bob = 200
+
+FloorsHold ==
+    /\ alice >= Floor
+    /\ bob >= Floor
+
+=============================================================================
+\end{lstlisting}
+
+A minimal TLC configuration is:
+
+\begin{lstlisting}[language={}, caption={TLC configuration for the bank-transfer invariant. Save as BankTransferInvariant.cfg.}]
+CONSTANT
+    Floor = 0
+
+SPECIFICATION
+    Spec
+
+INVARIANTS
+    TypeOK
+    MoneyConserved
+    FloorsHold
+\end{lstlisting}
+
+Lessons:
+
+\begin{itemize}
+    \item The specification has no locks. It describes the atomic state transition.
+    \item Splitting debit and credit into separate actions makes \texttt{MoneyConserved} fail immediately.
+    \item The floor invariant is a precondition on debit, not a post-hoc repair.
+    \item The implementation may use locks, versions, hardware transactions, or a commit log, but it must refine this atomic behavior.
+\end{itemize}
+
+\section{Summary}
+\begin{itemize}
+    \item Database isolation does not directly solve shared-memory concurrency problems.
+    \item TM correctness requires stronger conditions like opacity.
+\end{itemize}
+
+\section{Exercises}
+\begin{enumerate}
+    \item Construct a history of three transactions that is serializable but not opaque.
+    \item Explain why a TM that uses simple timestamp ordering without validation can produce a non-serializable outcome.
+    \item Discuss the performance implications of enforcing opacity in hardware vs. software.
+    \item \emph{[implementation]} Replace the single global lock in the flattened wrapper's execution model with a small redo-log STM for two accounts. Reads should return speculative writes from the log before consulting memory. Commit should validate that both logged source balances still equal the values read at transaction start, then publish both writes while holding one commit mutex.
+    \item \emph{[verification]} Extend \texttt{BankTransferInvariant.tla} with a deliberately broken two-step transfer: one action debits Alice and a later action credits Bob. Check that the invariant $\sum_{\text{account}} \text{balance} = 200$ fails. Then repair the model by adding an explicit pending-transfer record and write the corrected conservation invariant over both balances and the pending amount.
+    \item \emph{[theory]} The table in \S\ref{tab:tm-family-taxonomy} separates serialization points from validation mechanisms. For each of SGL, TL2, NOrec, and a multi-version STM, state where the transaction linearizes in a successful bank transfer. Then explain whether a read-only audit can linearize without blocking a concurrent writer.
+\end{enumerate}
+
+%  PART II: THE MACHINE BENEATH

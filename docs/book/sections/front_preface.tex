@@ -1,0 +1,28 @@
+
+\chapter*{Preface}
+\textbf{Assumed background.}
+\begin{itemize}
+    \item Computer architecture: caches, cache coherence, out-of-order execution (one semester).
+    \item Operating systems / concurrency: threads, locks, semaphores, atomics.
+    \item Compilers: a first course; the essential material is recapped in Part~V.
+    \item Discrete mathematics and basic probability for the modeling parts (Part~III).
+\end{itemize}
+\textbf{How to read this book.}
+\begin{itemize}
+    \item Parts~I--II motivate TM and ground it in real hardware; readers with a strong OS/architecture background may skim them.
+    \item Parts~III and IV (formal verification and runtime designs) are the conceptual core.
+    \item Part~V (compilers) and Part~III (mathematics) are self-contained detours; their notation is reused later.
+    \item A one-semester course could cover Parts~I, III, IV, and VI; a full course adds V and VII.
+    \item A single running example --- a two-account \texttt{transfer()} --- threads through the book: it appears as locked code in Chapter~1, as an API call in Chapter~7, and as the test case for every runtime in Chapter~9.
+\end{itemize}
+\textbf{The companion codebase.}
+\begin{itemize}
+    \item This book is written against a working repository: 20+ STM backends, an LLVM instrumentation plugin, TLA+/PlusCal models, the STAMP benchmarks, and GPU backends.
+    \item Exercises are tagged \emph{[implementation]} (write code), \emph{[verification]} (write a TLA+ model), or \emph{[theory]} (prove or derive) so instructors can mix them.
+    \item Every runtime design in Part~IV exists as buildable code and as a model-checked TLA+ specification.
+\end{itemize}
+\textbf{Getting the code running.}
+\begin{itemize}
+    \item The full toolchain instructions live in the \emph{Development Environment Setup} chapter at the back; the minimum you need for most chapters is: \texttt{make} in the repository root (builds the backends and benchmarks), a recent \texttt{clang}/\texttt{g++} with C++17, and \texttt{java} plus the \texttt{tla2tools.jar} for the model-checking exercises.
+    \item Exercise tracks: the tags let you follow one coherent path end-to-end. The \emph{implementer track} (all \emph{[implementation]}) builds a runtime of each family; the \emph{verifier track} (all \emph{[verification]}) builds a PlusCal/TLA+ model for each design; the \emph{theory track} (all \emph{[theory]}) carries the opacity and performance arguments across chapters. Each track's exercises are cumulative --- later ones reuse the artifacts of earlier ones.
+\end{itemize}

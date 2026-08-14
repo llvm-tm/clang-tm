@@ -1,0 +1,365 @@
+You are co-writing a graduate-level textbook, "Transactional Memory: From
+Principles to Practice" (author Daniel Castro, version 0.1). The book's
+chapters are currently bullet-skeleton drafts. Your job is to expand ONE
+chapter into a complete, publication-ready LaTeX chapter.
+
+The companion codebase (a real C++/Rust/Rust-GPU TM research project) provides
+the facts you may reference — it contains these real backends: SGL (single
+global lock), TSX-SGL, SPHT, NOrec, NOrec-BF, TL2, TSC-TM, TinySTM (WBCTL / WT /
+WBETL), SwissTM, DUDETM, NV-HTM, XTM, Romulus, LeftRight, JVSTM, MVLog,
+PersistentSGL, DistributedSGL, TiKV (distributed, Percolator-2PC), plus GPU
+designs PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, and GUST (AtomicINC commit-log,
+CCT/MRV validation). All are verified with test_tx 114/114 and test_ds 207/207
+and model-checked TLA+ specs. Real measured perf on an M1 Pro (fuzz/bank):
+NOrec-BF ~829K txns/s read-mostly, NOrec ~553K; TL2 ~2.06M, TSC-TM ~2.05M;
+MVLog ~275K write-heavy / ~109K read-mostly; GUST/GPU numbers are on GPUs.
+
+The running example of the book is a two-account bank transfer with an
+account floor and a money-conservation invariant; reuse it wherever natural.
+
+Below is the verbatim bullet-skeleton of the chapter you are expanding. You
+must produce the FULL chapter as a single raw LaTeX block: every section in
+the skeleton becomes a prose section, with the SAME section titles, the SAME
+\label values, the SAME figure and table captions and labels, and the SAME
+exercise set (kept verbatim where present). You may ADD subsections, worked
+examples, prose, listings, and extra figures/tables, but you must not drop or
+rename anything that already exists in the skeleton.
+
+FORMAT — produce EXACTLY this structure, in raw LaTeX, with no markdown fences
+and no preamble:
+
+A header comment block (4 lines) with the EXACT text below — substitute the
+chapter number, title, part title, and a one-sentence description; do NOT
+copy the number or title of any other chapter:
+    % docs/book/sections/ch11.tex
+    % Chapter 11: Compiler Optimizations and Their Impact on TM
+    % Part V: Compiler Instrumentation for TM
+    % This chapter <one-sentence description of the chapter's content and
+    %   artifacts: worked examples, code listings, figures, tables, and
+    %   tagged exercises it contains>.
+The first two comment lines MUST reference chapter 11 (e.g. ch11.tex,
+Chapter 11), never a different chapter number.
+
+2. \chapter{<title>} immediately followed by ONE \index{...} line listing the
+   chapter's main terms (the "sections index"). Keep ONLY this sections-index
+   line at the top. Do NOT put any other \index commands in the body.
+3. An introductory prose paragraph (or two) motivating the chapter.
+4. Each skeleton section, in order, expanded to prose. Keep the section's own
+   \index line inside it if the skeleton has one; otherwise add none. Preserve
+   every figure, table, and lstlisting that the skeleton already contains,
+   verbatim, including its \label. Where the skeleton has math blocks
+   ($$ ... $$) keep them but merge fragmentary blocks into one display formula
+   where sensible (e.g. "$p$" and "$1-p$" and the fraction can stay separate,
+   but avoid a lone symbol on its own display line).
+5. At least two NEW "Worked Example" sections (\section{{Worked Example:
+   <title>}}), each with a concrete \begin{{lstlisting}} — real C/C++/PlusCal/
+   TLA+ code that would compile or model-check — plus a short bullet list of
+   lessons. Reuse the bank-transfer running example where natural. If the
+   skeleton already defines worked examples, keep them and add one or two more
+   only if space permits.
+6. One TikZ figure (\begin{{figure}}[htbp] ... \caption{{...}}
+   \label{{fig:...}} ... \end{{figure}}) — a state machine, timeline, conflict
+   diagram, or architecture diagram relevant to this chapter. Keep the TikZ
+   code simple and compilable with only {{positioning, arrows.meta, calc}}.
+   If the skeleton already has a figure, keep it and add one more only if it
+   clearly helps.
+7. One comparison or taxonomy table (\begin{{table}}[htbp] ... \end{{table}})
+   if the chapter has an obvious comparison to draw (keep the skeleton's table
+   verbatim if it has one).
+8. \section{{Summary}} — a short prose summary.
+9. \section{{Exercises}} — \begin{{enumerate}} with the skeleton's exercises
+   kept verbatim, followed by any NEW exercises, each tagged
+   \emph{{[implementation]}} / \emph{{[verification]}} / \emph{{[theory]}}.
+10. After the exercises, a TRAILING \index{{...}} block with all the finer-
+    grained index terms introduced by the new content (one per line or a
+    couple per line). These trailing indices must NOT appear elsewhere.
+
+RULES:
+- Be concrete and technically precise; the code must be believable and the
+  figures must be about the chapter's actual content, not generic filler.
+- Do NOT invent measurements or new research results. You may restate the
+  real numbers listed above or qualitative claims from the chapter.
+- Match the book's existing voice: terse, technical, teaching.
+- In TikZ node text use \\ (double backslash) for line breaks, never a single
+  backslash. In tabular rows end every row with \\ (double backslash).
+- In listings and TLA+ code use /\ (backslash slash) for conjunction, \A and
+  \E for quantifiers — exactly as valid TLA+/C requires.
+- Respect the ~16K-char answer cap: prefer 2 solid worked examples + 1 figure
+  + 3 exercises over quantity. Terse text.
+
+VERBATIM CHAPTER SOURCE (LaTeX):
+
+\chapter{Compiler Optimizations and Their Impact on TM}
+\section{Common Optimizations}
+\begin{itemize}
+    \item Dead‑store elimination (DSE), loop‑invariant code motion (LICM), common subexpression elimination (CSE).
+    \item Each can silently break transactional semantics by eliminating or reordering instrumented accesses.
+    \item The root problem: most optimizers assume a single-threaded execution model and treat memory accesses as opaque only when told to.
+    \item Optimizations inside a transaction must be rerun \emph{after} instrumentation, not before, or the pass rediscovers and undoes TM calls.
+    \item Stack versus shared memory: it is safe to optimize stack accesses aggressively; shared/global accesses inside a transaction are the only dangerous ones.
+\end{itemize}
+
+\section{Worked Example: Two Optimizations That Break TM}
+\index{DSE}\index{LICM}
+\label{sec:optim-example}
+
+Take the canonical transfer body, already instrumented. Two well-meaning
+optimizations silently delete transactional effects:
+
+\begin{lstlisting}[language=C, caption={DSE and LICM on an instrumented transaction.}]
+/* DSE: the compiler sees a store with no later use in this function. */
+int v = tm_read_i4(&a->balance);
+tm_write_i4(&a->balance, v - n);      /* result never read here */
+return 0;                             /* DSE discards the store! */
+
+/* LICM: a transactional read is loop-invariant under LICM. */
+for (int i = 0; i < 100; ++i)
+    sum += tm_read_i4(&b[i]);         /* hoisted out of the loop,
+                                         reads b[0] once */
+\end{lstlisting}
+
+\begin{itemize}
+    \item Both are correct under single-threaded semantics and both are wrong for TM: the write must reach the write-set, and the read must see fresh data each iteration.
+    \item The fix is the contract of the next section: \texttt{tm\_clobber} and the rule that instrumentation runs \emph{after} optimization.
+    \item These are exactly the ``mismatch bugs seen in the wild'' of the next section --- pass reordering and dead-store elimination of speculative writes.
+\end{itemize}
+
+\section{The Instrumentation Contract}
+\label{sec:instrumentation-contract}
+The precise, mechanical rules a compiler pass and a TM runtime agree on.
+This section turns the previous section's warnings into a checkable list.
+
+\begin{itemize}
+    \item \textbf{Which accesses are instrumented.} Heap and shared-global memory operands inside a transaction are rewritten to \texttt{tm\_read\_*}/\texttt{tm\_write\_*} calls; stack-locals bypass via \texttt{LLVM\_TM\_ADDR\_CHECK}. The \texttt{[[tm::shared]]} annotation (Chapter~4) is the source-level way to put a global on the instrumented side.
+    \item \textbf{Which are exempt.} Accesses that provably target the current thread's stack, addresses registered in the runtime's TM-global registry, and operations in uninstrumented (e.g.\ \texttt{transaction\_pure}) callees are left untouched.
+    \item \textbf{What metadata is preserved.} The pass must not lose the address-space classification or the width of each access --- the call name itself (\texttt{i4} vs.\ \texttt{i8}) encodes both, so type-preserving rewrites are mandatory.
+    \item \textbf{Pass ordering.} Instrumentation is the \emph{last} memory-affecting pass: anything that eliminates or reorders memory operations must run before it. Running DSE or LICM after instrumentation silently discards read-set/write-set side effects (Section~\ref{sec:optim-example}).
+    \item \textbf{Barriers for the optimizer.} Calls to \texttt{tm\_read\_*}/\texttt{tm\_write\_*} are opaque side-effecting calls --- they must be marked \texttt{tm\_clobber}-equivalent so the optimizer never treats them as pure loads/stores.
+\end{itemize}
+
+\section{Worked Example: Barriered Transfer Instrumentation}
+\index{tm\_clobber}
+\label{sec:worked-barriered-transfer}
+
+The following small C file is intentionally boring. That is the point: the
+compiler may optimize stack temporaries, but it must not delete or reorder the
+transactional calls that construct the read-set and write-set.
+
+\begin{lstlisting}[language=C, caption={A compilable transfer body with opaque TM accessors.}]
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct Account {
+    int32_t balance;
+} Account;
+
+typedef struct Tx {
+    int writes;
+} Tx;
+
+/* In a real backend these enter the read-set and write-set.  The attributes
+   force the compiler to treat the calls as side-effecting boundaries. */
+__attribute__((noinline))
+static int32_t tm_read_i4(Tx *tx, const int32_t *p) {
+    (void)tx;
+    __asm__ __volatile__("" ::: "memory");
+    return *p;
+}
+
+__attribute__((noinline))
+static void tm_write_i4(Tx *tx, int32_t *p, int32_t v) {
+    __asm__ __volatile__("" ::: "memory");
+    *p = v;
+    tx->writes++;
+    __asm__ __volatile__("" ::: "memory");
+}
+
+static int transfer(Tx *tx, Account *from, Account *to,
+                    int32_t amount, int32_t floor) {
+    int32_t from0 = tm_read_i4(tx, &from->balance);
+    int32_t to0   = tm_read_i4(tx, &to->balance);
+
+    if (from0 - amount < floor)
+        return 0;              /* abort or user-level failed transfer */
+
+    /* These stores are live even if this function never reads them again. */
+    tm_write_i4(tx, &from->balance, from0 - amount);
+    tm_write_i4(tx, &to->balance,   to0 + amount);
+    return 1;
+}
+
+int main(void) {
+    Account a = { .balance = 100 };
+    Account b = { .balance =  50 };
+    Tx tx = { .writes = 0 };
+
+    int ok = transfer(&tx, &a, &b, 30, 0);
+    if (!ok || a.balance != 70 || b.balance != 80 || tx.writes != 2)
+        return EXIT_FAILURE;
+
+    puts("transfer committed");
+    return EXIT_SUCCESS;
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item \texttt{from0}, \texttt{to0}, and \texttt{ok} are ordinary stack values; scalar replacement and register allocation are harmless there.
+    \item \texttt{tm\_write\_i4} is not a dead store. It is the operation that records the speculative update.
+    \item The inline memory clobber models the minimum compiler contract. Production runtimes encode the same idea with ABI attributes, intrinsics, or opaque calls.
+    \item The bank invariant is not a local property of the function body. It is preserved only if both writes survive to commit.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.5cm and 1.8cm,
+    box/.style={draw, rounded corners, align=center, minimum width=2.9cm, minimum height=0.9cm},
+    bad/.style={draw, rounded corners, align=center, minimum width=2.9cm, minimum height=0.9cm, dashed},
+    arr/.style={-{Latex[length=2mm]}, thick}
+]
+\node[box] (src) {TM source\\annotations};
+\node[box, right=of src] (opt) {ordinary\\optimization};
+\node[box, right=of opt] (inst) {TM\\instrumentation};
+\node[box, right=of inst] (code) {codegen};
+
+\node[bad, below=of inst] (late) {late DSE/LICM\\forbidden};
+
+\draw[arr] (src) -- (opt);
+\draw[arr] (opt) -- (inst);
+\draw[arr] (inst) -- (code);
+\draw[arr] (inst) -- node[right, align=left] {would see\\TM calls} (late);
+\draw[arr] (late) -| node[pos=0.25, below, align=center] {may delete\\read/write-set effects} (code);
+\end{tikzpicture}%
+}
+\caption{Safe pass ordering for TM compilation. Memory-changing optimizations run before instrumentation; afterward, transactional read and write calls are opaque side effects.}
+\label{fig:tm-pass-ordering}
+\end{figure}
+
+\section{Optimization Taxonomy}
+\index{compiler optimization}
+\label{sec:optimization-taxonomy}
+
+Table~\ref{tab:tm-optimization-taxonomy} separates optimizations by what they
+may legally do in a TM-aware compiler. The useful rule is not ``turn the
+optimizer off.'' It is ``keep ordinary optimizations on values that cannot be
+shared; preserve transactional effects on values that can be shared.''
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.18\linewidth} p{0.30\linewidth} p{0.38\linewidth}}
+\hline
+Optimization & Unsafe pattern inside a transaction & TM-aware rule \\
+\hline
+DSE & Removes \texttt{tm\_write\_*} because no later load observes it in the same function. & Treat write instrumentation as an opaque side effect. A speculative write is live until abort or commit. \\
+LICM & Hoists \texttt{tm\_read\_*} out of a loop because the address expression is syntactically invariant. & Do not move transactional reads across iteration, validation, abort, or commit boundaries unless the runtime explicitly proves it safe. \\
+CSE & Reuses one \texttt{tm\_read\_*} result for a later read of the same address. & CSE is valid for stack locals; transactional reads of shared memory are not pure loads. \\
+Store forwarding & Replaces a transactional read with a previous ordinary store or vice versa. & Forward only within the transaction's own write-set semantics, preserving conflict detection. \\
+Inlining & Exposes \texttt{transaction\_pure} or runtime calls to later passes. & Preserve attributes after inlining; do not accidentally reclassify runtime calls as pure. \\
+SROA & Splits aggregate accesses and changes access width. & Legal only if the pass preserves address classification and emits matching width-specific instrumentation. \\
+\hline
+\end{tabular}
+\caption{Common optimizations and the corresponding TM-aware restrictions.}
+\label{tab:tm-optimization-taxonomy}
+\end{table}
+
+\section{Worked Example: A Dropped Debit}
+\index{TLA+}
+\index{money conservation}
+\label{sec:worked-dropped-debit}
+A compiler bug is a semantic transformation, so it can be modeled directly. The
+following TLA+ module has two transfer actions. \texttt{GoodTransfer} debits one
+account and credits the other. \texttt{BadTransfer} models DSE deleting the
+debit-side \texttt{tm\_write}. TLC finds an invariant violation when the bad
+action is enabled.
+
+\begin{lstlisting}[language={}, caption={TLA+ model of DSE deleting one side of a bank transfer.}]
+--------------------------- MODULE DroppedDebit ---------------------------
+EXTENDS Naturals, TLC
+
+CONSTANTS InitA, InitB, Amount, Floor
+
+VARIABLES a, b
+
+Init ==
+    /\ a = InitA
+    /\ b = InitB
+
+GoodTransfer ==
+    /\ a - Amount >= Floor
+    /\ a' = a - Amount
+    /\ b' = b + Amount
+
+BadTransfer ==
+    /\ a - Amount >= Floor
+    /\ a' = a
+    /\ b' = b + Amount
+
+Next ==
+    \/ GoodTransfer
+    \/ BadTransfer
+    \/ UNCHANGED <<a, b>>
+
+MoneyConserved ==
+    a + b = InitA + InitB
+
+FloorOK ==
+    /\ a >= Floor
+    /\ b >= Floor
+
+Spec ==
+    Init /\ [][Next]_<<a, b>>
+
+=============================================================================
+\end{lstlisting}
+
+A minimal TLC configuration is:
+
+\begin{lstlisting}[language={}, caption={TLC configuration for the dropped-debit model.}]
+SPECIFICATION Spec
+INVARIANTS MoneyConserved FloorOK
+CONSTANTS
+    InitA = 100
+    InitB = 50
+    Amount = 30
+    Floor = 0
+\end{lstlisting}
+
+\begin{itemize}
+    \item With only \texttt{GoodTransfer}, both invariants hold for this finite instance.
+    \item Enabling \texttt{BadTransfer} produces a state with \texttt{a = 100} and \texttt{b = 80}; the floor still holds, but money conservation is false.
+    \item The bug is not in the runtime algorithm. It is in the compiler transformation that changed the transaction's abstract write-set.
+    \item This is the same shape of error that a post-instrumentation DSE pass can introduce in C or LLVM IR.
+\end{itemize}
+
+\section{Contract Between Programmer and Compiler}
+\begin{itemize}
+    \item What the programmer must protect (via \texttt{transaction\_safe}\slash{}\texttt{transaction\_pure} annotations).
+    \item Compiler intrinsics like \texttt{tm\_clobber} that inform the optimizer of transactional side effects.
+    \item The annotation contract is the C++ TM TS's central lesson: without a language-level notion of ``transaction'', the compiler cannot keep its promises.
+    \item Mismatch bugs seen in the wild: DATA/TEXT symbol collisions, pass reordering of \texttt{tm\_read}\slash{}\texttt{tm\_write} calls, and dead-store elimination of speculative writes.
+    \item The programmer-facing contract of this section is the user-visible half of Section~\ref{sec:instrumentation-contract}: the annotations the programmer writes exist to feed the pass the classifications it needs.
+\end{itemize}
+
+\section{Summary}
+\begin{itemize}
+    \item Many aggressive optimizations assume a single‑threaded execution model.
+    \item A TM‑aware compiler must disable or constrain certain optimizations within transactional regions.
+    \item The safe pipeline is ordinary optimization first, TM instrumentation last, then only optimizations that respect opaque transactional side effects.
+    \item Shared memory and stack memory must be classified before rewriting; optimizing both under the same rules is either slow or wrong.
+\end{itemize}
+
+\section{Exercises}
+\begin{enumerate}
+    \item A compiler removes a dead store inside a transaction because the variable is not read afterwards. Explain why this is illegal if the store was meant to be part of a speculative state.
+    \item Design a minimal compiler intrinsic \texttt{tm\_clobber(x)} that tells the optimizer: “treat this store as live even if it appears dead.”
+    \item LICM hoists a transactional read out of a loop. Show a correctness violation that results.
+    \item \emph{[implementation]} Write a small LLVM or source-to-source pass that instruments only heap/global accesses in a transaction and leaves provable stack locals untouched. Test it on the transfer body in Section~\ref{sec:worked-barriered-transfer}.
+    \item \emph{[verification]} Modify the TLA+ model in Section~\ref{sec:worked-dropped-debit} so that \texttt{BadTransfer} drops the credit instead of the debit. Which invariant fails, and which account-floor checks still pass?
+    \item \emph{[theory]} State the weakest condition under which CSE of two transactional reads from the same address is sound. Your answer should mention validation, intervening writes, and abort behavior.
+\end{enumerate}
+
+
+%  PART VI: ENGINEERING: TESTING, PITFALLS, AND PERFORMANCE
+

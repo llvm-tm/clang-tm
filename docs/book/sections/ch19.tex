@@ -1,0 +1,128 @@
+
+\chapter{Open Questions and Emerging Directions}
+\section{Current Research Directions}
+\begin{itemize}
+    \item Hardware/software hybrid TM.
+    \item Non-blocking algorithms vs. TM.
+    \item Persistent memory TM.
+    \item Distributed TM.
+    \item GPU TM (see Chapter~\ref{chap:gpu-tm}): no vendor hardware,
+          software conflict detection, and the search for scalable commit
+          protocols at thousands of concurrent transactions.
+    \item Persistent TM: durable commit with volatile metadata; crash-consistency without a database's write-ahead log.
+    \item Distributed TM: exporting the TM API over replicated or geo-distributed storage (the companion repo wraps a TiKV cluster).
+    \item Hybrid systems: HTM fast path, STM (or serialized) fallback, and the theory of `phased' and `shipwreck' hybrids.
+    \item Verified/certified STMs: mechanically checked backends, and the growing standard of TLA+-verified designs.
+    \item Energy-aware TM: correlation between abort rate and power on mobile/embedded cores.
+\end{itemize}
+
+The implementation boundary is now part of the research question. The companion
+repo has working CPU backends from SGL through SwissTM, TinySTM variants,
+NOrec-BF, TL2, TSC-TM, MVLog, persistent and distributed SGL, and a TiKV
+Percolator-style backend; it also contains GPU designs such as PR-STM, CSMV,
+GPUTX, GAccO, GPU-JVSTM, and GUST. All are tested against the same transactional
+and data-structure suites, and the core protocols have TLA+ models. This makes
+the open questions unusually concrete: the same bank invariant should survive
+hardware aborts, validation filters, crash recovery, remote prepare/commit, and
+GPU commit logs.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.18\textwidth}p{0.25\textwidth}p{0.30\textwidth}p{0.14\textwidth}}
+\hline
+Direction & Representative backends & Main pressure point & Repo signal \\
+\hline
+Hybrid HTM/STM & TSX-SGL, phased HTM-to-STM sketches & Capacity aborts, ownership agreement between paths, fallback cliffs & Tested; no portable HTM standard \\
+Classic STM & NOrec, NOrec-BF, TL2, TSC-TM, TinySTM, SwissTM & Validation cost, metadata contention, memory reclamation & Bank fuzz: TL2 about 2.06M txns/s, TSC-TM about 2.05M on M1 Pro \\
+Persistent TM & NV-HTM, Romulus, PersistentSGL & Durable ordering, redo/undo idempotence, volatile metadata after crash & Crash invariants modelled \\
+Distributed TM & DistributedSGL, TiKV Percolator-2PC wrapper & Remote validation, partial failure, coordinator recovery & Same API, higher-latency commit path \\
+GPU TM & PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, GUST & No cache-coherent TM hardware, thousands of concurrent transactions & GPU results are device-dependent \\
+Multi-version TM & JVSTM, MVLog, GPU-JVSTM & Version retention, read-mostly scalability, reclamation & MVLog about 275K write-heavy and 109K read-mostly txns/s on M1 Pro \\
+\hline
+\end{tabular}
+\caption{Emerging TM directions as implementation pressure points. Numbers are the companion repo's fuzz/bank measurements where CPU measurements are available.}
+\label{tab:emerging-directions}
+\end{table}
+
+\section{Challenges}
+\begin{itemize}
+    \item Fairness, progress guarantees (starvation freedom, obstruction freedom).
+    \item Programming model adoption.
+    \item Legacy code integration.
+    \item Performance predictability: HTM's capacity aborts and STM's validation costs make best/worst-case analysis hard.
+    \item The missing standard: no widely adopted language integration after the C++ TS; education must bridge this gap.
+    \item Tooling: debuggers, profilers, and race detectors are lock-oriented; TM tools are nascent by comparison.
+\end{itemize}
+
+\section{Worked Example: A Hybrid, In Miniature}
+\index{hybrid TM}\index{phased hybrid}\index{fallback}\index{capacity abort}\index{wasted work}
+\label{sec:hybrid-example}
+
+The ``hardware fast path, software fallback'' idea, small enough to see whole:
+
+\begin{lstlisting}[language=C, caption={A minimal phased hybrid: try RTM, fall back to the STM.}]
+void tx_region(void) {
+    for (int i = 0; i < MAX_RTM_TRIES; ++i) {
+        unsigned s = _xbegin();
+        if (s == _XBEGIN_STARTED) {
+            body(); _xend(); return;         /* fast path  */
+        }
+        if (s == _XABORT_CAPACITY) break;    /* stop wasting */
+    }
+    stm_begin(); body(); stm_commit();       /* slow path  */
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item This is \S\ref{sec:rtm-example} plus one idea: the fallback is a full STM instead of a global lock, so concurrent commits survive the fallback (no serialisation cliff).
+    \item The capacity check turns a wasted-retry storm into a clean handover --- the performance chapter's ``wasted work'' metric in miniature.
+    \item The ``phased'' theory of the bullets above governs exactly when to flip; the shipwreck hybrids time the flip adversarially.
+    \item Exercise~1 asks whether this is more livelock-prone than pure STM --- the answer turns on whether the hardware and software paths agree on conflict ownership.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=15mm and 23mm,
+    >=Stealth,
+    state/.style={draw, rounded corners, align=center, minimum width=31mm, minimum height=9mm}
+]
+\node[state] (start) {transaction\\request};
+\node[state, right=of start] (rtm) {RTM attempt};
+\node[state, right=of rtm] (hwcommit) {hardware\\commit};
+\node[state, below=of rtm] (classify) {abort\\classification};
+\node[state, left=of classify] (retry) {retry budget\\remaining};
+\node[state, right=of classify] (stm) {STM fallback};
+\node[state, right=of stm] (swcommit) {software\\commit};
+
+\draw[->] (start) -- (rtm);
+\draw[->] (rtm) -- node[above]{success} (hwcommit);
+\draw[->] (rtm) -- node[right]{abort} (classify);
+\draw[->] (classify) -- node[above]{transient} (retry);
+\draw[->] (retry) |- (rtm);
+\draw[->] (classify) -- node[above]{capacity or budget exhausted} (stm);
+\draw[->] (stm) -- (swcommit);
+\end{tikzpicture}
+}%
+
+\caption{A phased hybrid state machine. The research problem is not the branch itself, but the ownership contract between the RTM path and the STM fallback.}
+\label{fig:phased-hybrid-state}
+\end{figure}
+\section{Summary}
+\begin{itemize}
+    \item TM is a rich research field with many unsolved problems.
+    \item The student should leave with a critical understanding of where TM stands and where it might go.
+    \item Directions worth watching divide into three families: hardware (hybrid HTM, GPU), systems (persistent, distributed), and methods (verification, education).
+    \item Read this chapter as a \emph{synthesis organised around where the book's own codebase stops working}, not as a disconnected wish-list. The limits that surface in each family are the same limits the earlier parts hit: HTM's capacity aborts (Ch.~16), STM's validation and reclamation costs (Ch.~9, 13), the missing compiler/language contract (Ch.~11), and the absence of coherence on GPUs (Ch.~17). Each open direction in this chapter is one of those known limits restated as a research target.
+\end{itemize}
+
+\section{Exercises}
+\begin{enumerate}
+    \item Evaluate whether a hybrid TM that starts in hardware and falls back to software is inherently more susceptible to livelock than a pure-STM system.
+    \item Propose a minimal extension to a persistent-memory TM that ensures durability of committed transactions across power failures.
+    \item Argue for or against: “Transactional memory will eventually replace locks as the default concurrency primitive in systems programming.”
+    \item \emph{[theory]} Classify the phased hybrid in Figure~\ref{fig:phased-hybrid-state} under obstruction freedom, starvation freedom, and lock freedom. State which assumptions about retry bounds, fallback admission, and conflict ownership are necessary for each classification.
+\end{enumerate}
+
+%  APPENDICES

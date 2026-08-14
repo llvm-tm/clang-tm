@@ -1,0 +1,482 @@
+You are co-writing a graduate-level textbook, "Transactional Memory: From
+Principles to Practice" (author Daniel Castro, version 0.1). The book's
+chapters are currently bullet-skeleton drafts. Your job is to expand ONE
+chapter into a complete, publication-ready LaTeX chapter.
+
+The companion codebase (a real C++/Rust/Rust-GPU TM research project) provides
+the facts you may reference — it contains these real backends: SGL (single
+global lock), TSX-SGL, SPHT, NOrec, NOrec-BF, TL2, TSC-TM, TinySTM (WBCTL / WT /
+WBETL), SwissTM, DUDETM, NV-HTM, XTM, Romulus, LeftRight, JVSTM, MVLog,
+PersistentSGL, DistributedSGL, TiKV (distributed, Percolator-2PC), plus GPU
+designs PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, and GUST (AtomicINC commit-log,
+CCT/MRV validation). All are verified with test_tx 114/114 and test_ds 207/207
+and model-checked TLA+ specs. Real measured perf on an M1 Pro (fuzz/bank):
+NOrec-BF ~829K txns/s read-mostly, NOrec ~553K; TL2 ~2.06M, TSC-TM ~2.05M;
+MVLog ~275K write-heavy / ~109K read-mostly; GUST/GPU numbers are on GPUs.
+
+The running example of the book is a two-account bank transfer with an
+account floor and a money-conservation invariant; reuse it wherever natural.
+
+Below is the verbatim bullet-skeleton of the chapter you are expanding. You
+must produce the FULL chapter as a single raw LaTeX block: every section in
+the skeleton becomes a prose section, with the SAME section titles, the SAME
+\label values, the SAME figure and table captions and labels, and the SAME
+exercise set (kept verbatim where present). You may ADD subsections, worked
+examples, prose, listings, and extra figures/tables, but you must not drop or
+rename anything that already exists in the skeleton.
+
+FORMAT — produce EXACTLY this structure, in raw LaTeX, with no markdown fences
+and no preamble:
+
+A header comment block (4 lines) with the EXACT text below — substitute the
+chapter number, title, part title, and a one-sentence description; do NOT
+copy the number or title of any other chapter:
+    % docs/book/sections/ch08.tex
+    % Chapter 8: Non-Speculative Designs: Single Lock and Serializers
+    % Part IV: Implementing Transactional Memory
+    % This chapter <one-sentence description of the chapter's content and
+    %   artifacts: worked examples, code listings, figures, tables, and
+    %   tagged exercises it contains>.
+The first two comment lines MUST reference chapter 8 (e.g. ch08.tex,
+Chapter 8), never a different chapter number.
+
+2. \chapter{<title>} immediately followed by ONE \index{...} line listing the
+   chapter's main terms (the "sections index"). Keep ONLY this sections-index
+   line at the top. Do NOT put any other \index commands in the body.
+3. An introductory prose paragraph (or two) motivating the chapter.
+4. Each skeleton section, in order, expanded to prose. Keep the section's own
+   \index line inside it if the skeleton has one; otherwise add none. Preserve
+   every figure, table, and lstlisting that the skeleton already contains,
+   verbatim, including its \label. Where the skeleton has math blocks
+   ($$ ... $$) keep them but merge fragmentary blocks into one display formula
+   where sensible (e.g. "$p$" and "$1-p$" and the fraction can stay separate,
+   but avoid a lone symbol on its own display line).
+5. At least two NEW "Worked Example" sections (\section{{Worked Example:
+   <title>}}), each with a concrete \begin{{lstlisting}} — real C/C++/PlusCal/
+   TLA+ code that would compile or model-check — plus a short bullet list of
+   lessons. Reuse the bank-transfer running example where natural. If the
+   skeleton already defines worked examples, keep them and add one or two more
+   only if space permits.
+6. One TikZ figure (\begin{{figure}}[htbp] ... \caption{{...}}
+   \label{{fig:...}} ... \end{{figure}}) — a state machine, timeline, conflict
+   diagram, or architecture diagram relevant to this chapter. Keep the TikZ
+   code simple and compilable with only {{positioning, arrows.meta, calc}}.
+   If the skeleton already has a figure, keep it and add one more only if it
+   clearly helps.
+7. One comparison or taxonomy table (\begin{{table}}[htbp] ... \end{{table}})
+   if the chapter has an obvious comparison to draw (keep the skeleton's table
+   verbatim if it has one).
+8. \section{{Summary}} — a short prose summary.
+9. \section{{Exercises}} — \begin{{enumerate}} with the skeleton's exercises
+   kept verbatim, followed by any NEW exercises, each tagged
+   \emph{{[implementation]}} / \emph{{[verification]}} / \emph{{[theory]}}.
+10. After the exercises, a TRAILING \index{{...}} block with all the finer-
+    grained index terms introduced by the new content (one per line or a
+    couple per line). These trailing indices must NOT appear elsewhere.
+
+RULES:
+- Be concrete and technically precise; the code must be believable and the
+  figures must be about the chapter's actual content, not generic filler.
+- Do NOT invent measurements or new research results. You may restate the
+  real numbers listed above or qualitative claims from the chapter.
+- Match the book's existing voice: terse, technical, teaching.
+- In TikZ node text use \\ (double backslash) for line breaks, never a single
+  backslash. In tabular rows end every row with \\ (double backslash).
+- In listings and TLA+ code use /\ (backslash slash) for conjunction, \A and
+  \E for quantifiers — exactly as valid TLA+/C requires.
+- Respect the ~16K-char answer cap: prefer 2 solid worked examples + 1 figure
+  + 3 exercises over quantity. Terse text.
+
+VERBATIM CHAPTER SOURCE (LaTeX):
+
+\chapter{Non‑Speculative Designs: Single Lock and Serializers}
+
+\section{Single Global Lock TM}
+\begin{itemize}
+    \item Implementation sketch: acquire global lock at \texttt{tm\_begin}, release at \texttt{tm\_commit}.
+    \item Properties: correct, no rollbacks, trivially opaque.
+    \item Performance analysis: serialisation bottleneck, Amdahl’s law.
+    \item The `correct-by-construction' yardstick: every more powerful STM must degrade gracefully toward SGL under contention.
+    \item The stub-vs-real-hooks subtlety: during single-threaded init a TM must still route \texttt{tm\_malloc}/\texttt{tm\_read} through the real backend, or validation is silently disabled (a real bug fixed in the companion repo).
+    \item The PlusCal/SGL model of Part~III as the reference execution -- one process, one lock, no surprises.
+    \item Thread-serializer / queue-based TM (below) is SGL with the lock replaced by a work queue; it eliminates lock contention but adds submission overhead.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=2.2cm,
+    state/.style={draw, rounded corners, minimum width=2.8cm, minimum height=0.9cm, align=center},
+    edge/.style={-{Latex}, thick}
+]
+\node[state] (idle) {Idle\\lock free};
+\node[state, right=of idle] (active) {Active transaction\\lock held};
+\node[state, right=of active] (commit) {Commit\\publish writes};
+\node[state, below=of active] (queue) {Serializer queue\\pending tasks};
+
+\draw[edge] (idle) -- node[above]{\texttt{tm\_begin}} (active);
+\draw[edge] (active) -- node[above]{\texttt{tm\_commit}} (commit);
+\draw[edge] (commit) to[bend left=25] node[below]{unlock} (idle);
+\draw[edge] (queue) -- node[right]{dequeue one} (active);
+\draw[edge] (idle) -- node[left]{submit} (queue);
+\draw[edge] (active) to[loop above] node{reads/writes} (active);
+\end{tikzpicture}
+\caption{Non-speculative transactional execution. SGL admits one caller by a lock; a serializer admits one submitted task by a queue. Both execute at most one transaction body at a time.}
+\label{fig:nonspec-state-machine}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.22\linewidth}p{0.23\linewidth}p{0.23\linewidth}p{0.22\linewidth}}
+\hline
+Design & Serialization point & Main cost & Correctness argument \\
+\hline
+SGL & Global mutex at \texttt{tm\_begin} & Lock contention and lost parallelism & Mutual exclusion gives a single total order \\
+Thread serializer & Worker dequeues one task & Submission, queueing, loss of locality & Worker order is the serialization order \\
+DistributedSGL & Distributed lock or sequencer & Network latency and failure handling & One distributed owner at a time \\
+PersistentSGL & Persistent critical section protocol & Flushes, fences, recovery metadata & Durable order follows lock-protected commit order \\
+\hline
+\end{tabular}
+\caption{A taxonomy of non-speculative serializers. The mechanism changes, but the proof shape is the same: reduce execution to a sequential history.}
+\label{tab:nonspec-taxonomy}
+\end{table}
+
+Amdahl's law gives the first-order bound. If fraction \(f\) of execution is serialized and \(N\) workers are available, the idealized speedup is
+
+$$
+S_{\max} = \frac{1}{f + \frac{1-f}{N}}
+$$
+
+where \(f\) is the non-parallel fraction and \(N\) is the number of cores. For SGL, transaction execution itself belongs to the serialized fraction. The exact value depends on the workload, but the shape is invariant: once all useful work is inside the global lock, more cores mostly add waiting.
+
+\section{Thread‑Serializer / Queue‑Based TM}
+\begin{itemize}
+    \item A single worker thread executes transactions sequentially from a lock‑free queue.
+    \item How this design eliminates contention on the lock but introduces submission overhead.
+    \item Loss of thread-locality: transaction descriptors must be per-task, since work migrates across threads.
+    \item The moral for later chapters: SGL is the baseline; every speculative design's job is to beat it without losing its guarantees.
+\end{itemize}
+
+A serializer is not merely an optimization of SGL. It changes the calling convention. The submitting thread no longer runs the transaction body; the worker does. Therefore transaction-local state cannot be stored only in thread-local variables of the submitter. The descriptor must travel with the task or be rebuilt by the worker.
+
+\section{Worked Example: Bank Transfer Under SGL}
+\label{sec:worked-sgl-bank}
+
+The running bank example has two invariants. First, no account may fall below its floor. Second, the total amount of money is conserved by transfers. SGL enforces both by making each transfer execute as one sequential critical section.
+
+\begin{lstlisting}[language=C++, caption={A compilable SGL-style transactional bank transfer.}]
+#include <cassert>
+#include <cstdint>
+#include <iostream>
+#include <mutex>
+#include <numeric>
+#include <stdexcept>
+#include <thread>
+#include <vector>
+
+struct Account {
+    std::int64_t balance;
+    std::int64_t floor;
+};
+
+class SGLTM {
+public:
+    class Tx {
+    public:
+        explicit Tx(SGLTM& tm) : tm_(tm), active_(true) {
+            tm_.lock_.lock();
+        }
+
+        Tx(const Tx&) = delete;
+        Tx& operator=(const Tx&) = delete;
+
+        ~Tx() {
+            if (active_) {
+                tm_.lock_.unlock();
+            }
+        }
+
+        template <class T>
+        T read(const T& x) const {
+            return x;
+        }
+
+        template <class T>
+        void write(T& x, const T& v) {
+            x = v;
+        }
+
+        void commit() {
+            if (!active_) {
+                throw std::logic_error("double commit");
+            }
+            active_ = false;
+            tm_.lock_.unlock();
+        }
+
+    private:
+        SGLTM& tm_;
+        bool active_;
+    };
+
+    Tx begin() {
+        return Tx(*this);
+    }
+
+private:
+    std::mutex lock_;
+};
+
+class Bank {
+public:
+    Bank(std::size_t n, std::int64_t initial, std::int64_t floor)
+        : accounts_(n, Account{initial, floor}) {}
+
+    bool transfer(std::size_t from, std::size_t to, std::int64_t amount) {
+        if (from == to || from >= accounts_.size() || to >= accounts_.size()) {
+            return false;
+        }
+
+        auto tx = tm_.begin();
+
+        const std::int64_t from_balance = tx.read(accounts_[from].balance);
+        const std::int64_t from_floor = tx.read(accounts_[from].floor);
+        const std::int64_t to_balance = tx.read(accounts_[to].balance);
+
+        if (from_balance - amount < from_floor) {
+            tx.commit();
+            return false;
+        }
+
+        tx.write(accounts_[from].balance, from_balance - amount);
+        tx.write(accounts_[to].balance, to_balance + amount);
+
+        tx.commit();
+        return true;
+    }
+
+    std::int64_t total() const {
+        return std::accumulate(
+            accounts_.begin(), accounts_.end(), std::int64_t{0},
+            [](std::int64_t s, const Account& a) { return s + a.balance; });
+    }
+
+private:
+    SGLTM tm_;
+    std::vector<Account> accounts_;
+};
+
+int main() {
+    constexpr std::size_t accounts = 8;
+    constexpr std::int64_t initial = 100;
+    constexpr std::int64_t floor = 0;
+
+    Bank bank(accounts, initial, floor);
+    const std::int64_t before = bank.total();
+
+    std::vector<std::thread> threads;
+    for (std::size_t t = 0; t < 4; ++t) {
+        threads.emplace_back([&bank, t] {
+            for (int i = 0; i < 10000; ++i) {
+                const std::size_t from = (t + i) % 8;
+                const std::size_t to = (from + 1) % 8;
+                bank.transfer(from, to, 1);
+            }
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    const std::int64_t after = bank.total();
+    assert(before == after);
+    std::cout << "money conserved: " << after << "\n";
+}
+\end{lstlisting}
+
+Lessons:
+\begin{itemize}
+    \item The linearization point is the interval protected by the global mutex.
+    \item Reads and writes still go through \texttt{read} and \texttt{write}. Replacing them with stubs during initialization can hide validation bugs in later backends.
+    \item Failed transfers still commit a read-only transaction. There is no rollback path because no speculative write has escaped.
+    \item The proof is independent of the number of calling threads: all completed transfers form the mutex acquisition order.
+\end{itemize}
+
+\section{Worked Example: Queue Serializer With Per-Task Descriptors}
+\label{sec:worked-serializer-bank}
+
+A serializer moves execution to a worker thread. The transaction descriptor is therefore attached to the submitted task. In this minimal example the descriptor is just the closure itself plus the returned future; real systems attach allocation logs, statistics, or backend-specific metadata.
+
+\begin{lstlisting}[language=C++, caption={A compilable queue-based serializer for bank transfers.}]
+#include <cassert>
+#include <condition_variable>
+#include <cstdint>
+#include <future>
+#include <iostream>
+#include <mutex>
+#include <numeric>
+#include <queue>
+#include <stdexcept>
+#include <thread>
+#include <type_traits>
+#include <vector>
+#include <functional>
+
+struct Account {
+    std::int64_t balance;
+    std::int64_t floor;
+};
+
+class Serializer {
+public:
+    Serializer() : stopping_(false), worker_([this] { run(); }) {}
+
+    Serializer(const Serializer&) = delete;
+    Serializer& operator=(const Serializer&) = delete;
+
+    ~Serializer() {
+        {
+            std::lock_guard<std::mutex> g(m_);
+            stopping_ = true;
+        }
+        cv_.notify_one();
+        worker_.join();
+    }
+
+    template <class F>
+    auto submit(F&& f) -> std::future<std::invoke_result_t<F&>> {
+        using R = std::invoke_result_t<F&>;
+
+        auto task = std::make_shared<std::packaged_task<R()>>(
+            std::forward<F>(f));
+        std::future<R> result = task->get_future();
+
+        {
+            std::lock_guard<std::mutex> g(m_);
+            if (stopping_) {
+                throw std::runtime_error("submit after stop");
+            }
+            q_.push([task] { (*task)(); });
+        }
+
+        cv_.notify_one();
+        return result;
+    }
+
+private:
+    void run() {
+        for (;;) {
+            std::function<void()> job;
+
+            {
+                std::unique_lock<std::mutex> lk(m_);
+                cv_.wait(lk, [this] { return stopping_ || !q_.empty(); });
+
+                if (stopping_ && q_.empty()) {
+                    return;
+                }
+
+                job = std::move(q_.front());
+                q_.pop();
+            }
+
+            job();
+        }
+    }
+
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::queue<std::function<void()>> q_;
+    bool stopping_;
+    std::thread worker_;
+};
+
+class Bank {
+public:
+    Bank(std::size_t n, std::int64_t initial, std::int64_t floor)
+        : accounts_(n, Account{initial, floor}) {}
+
+    bool transfer_serial(std::size_t from, std::size_t to,
+                         std::int64_t amount) {
+        if (from == to || from >= accounts_.size() || to >= accounts_.size()) {
+            return false;
+        }
+
+        Account& a = accounts_[from];
+        Account& b = accounts_[to];
+
+        if (a.balance - amount < a.floor) {
+            return false;
+        }
+
+        a.balance -= amount;
+        b.balance += amount;
+        return true;
+    }
+
+    std::int64_t total_serial() const {
+        return std::accumulate(
+            accounts_.begin(), accounts_.end(), std::int64_t{0},
+            [](std::int64_t s, const Account& a) { return s + a.balance; });
+    }
+
+private:
+    std::vector<Account> accounts_;
+};
+
+int main() {
+    Serializer ser;
+    Bank bank(8, 100, 0);
+
+    const std::int64_t before =
+        ser.submit([&bank] { return bank.total_serial(); }).get();
+
+    std::vector<std::future<bool>> replies;
+    for (int i = 0; i < 40000; ++i) {
+        replies.push_back(ser.submit([&bank, i] {
+            const std::size_t from = static_cast<std::size_t>(i % 8);
+            const std::size_t to = (from + 1) % 8;
+            return bank.transfer_serial(from, to, 1);
+        }));
+    }
+
+    for (auto& f : replies) {
+        (void)f.get();
+    }
+
+    const std::int64_t after =
+        ser.submit([&bank] { return bank.total_serial(); }).get();
+
+    assert(before == after);
+    std::cout << "money conserved: " << after << "\n";
+}
+\end{lstlisting}
+
+Lessons:
+\begin{itemize}
+    \item The queue order is the serialization order.
+    \item The bank object is unsynchronized internally; safety comes from the single worker.
+    \item The submitter waits on a \texttt{future}. This makes latency visible even when the worker has no lock contention.
+    \item Thread-local transaction descriptors would be wrong here: the submitting thread and executing thread are different.
+\end{itemize}
+
+\section{Summary}
+\begin{itemize}
+    \item Non‑speculative designs are correct by construction and serve as a baseline.
+    \item Their lack of concurrency limits scalability.
+    \item SGL is the simplest opacity proof in the book: every transaction observes a state produced by the previous committed transaction.
+    \item Queue serializers replace lock handoff with task handoff. This can reduce lock contention but cannot create intra-transaction parallelism.
+    \item In the companion codebase, SGL-like designs are not toys: they serve as reference backends and regression oracles alongside speculative systems such as NOrec, TL2, TSC-TM, SwissTM, and others. The reported test suites pass \texttt{test\_tx} 114/114 and \texttt{test\_ds} 207/207 for the implemented backends.
+\end{itemize}
+
+\section{Exercises}
+\begin{enumerate}
+    \item Calculate the maximum speedup achievable with a single‑global‑lock TM on a 16‑core machine when transactions spend 10\% of their time in a critical section.
+    \item A serializing TM uses a single worker thread. Explain why this design can still outperform fine‑grained locking if transactions are very short and lock overhead dominates.
+    \item Propose a hybrid design that starts with a non‑speculative execution and switches to speculative when contention is low. What information does the runtime need to make the switch?
+    \item \emph{[implementation]} Extend Listing~\ref{sec:worked-sgl-bank} with \texttt{tm\_malloc} and \texttt{tm\_free} hooks. The hooks may still use the process allocator, but calls must pass through the backend object. Explain which tests would fail to detect bugs if initialization bypassed these hooks.
+    \item \emph{[verification]} Write a PlusCal model of the bank transfer under SGL with two accounts, one lock, and two clients. State the money conservation invariant and the account-floor invariant. Model-check both with all transfer amounts in the set \texttt{\{0,1,2\}}.
+    \item \emph{[theory]} Compare SGL and a queue serializer with three costs: lock acquisition, queue submission, and transaction body execution. Derive the condition under which the serializer has lower latency for a single transaction, and then explain why that condition may not imply higher throughput under a burst of requests.
+\end{enumerate}
+

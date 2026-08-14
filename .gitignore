@@ -75,6 +75,30 @@ __pycache__/
 *.log
 benchmark_results/
 
+# LaTeX artifacts (docs/book build outputs)
+docs/book/*.aux
+docs/book/*.bbl
+docs/book/*.blg
+docs/book/*.bcf
+docs/book/*.fdb_latexmk
+docs/book/*.fls
+docs/book/*.glo
+docs/book/*.idx
+docs/book/*.ilg
+docs/book/*.ind
+docs/book/*.ist
+docs/book/*.lof
+docs/book/*.lot
+docs/book/*.lol
+docs/book/*.nav
+docs/book/*.out
+docs/book/*.run.xml
+docs/book/*.snm
+docs/book/*.synctex.gz
+docs/book/*.toc
+docs/book/*.vrb
+docs/book/*.xdv
+
 # Profiling data (large CSVs, calibration JSONs — never commit raw data)
 profiling_data/raw/
 profiling_data/calibration/

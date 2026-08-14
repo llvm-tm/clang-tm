@@ -1,0 +1,10 @@
+
+\chapter{PlusCal / TLA+ Quick Reference}
+\begin{itemize}
+    \item Key language constructs: variables, actions, labels, \texttt{either/or}, invariants, properties.
+    \item Common TLC commands: \texttt{tlc -config model.cfg model.tla}, invariant checks, \texttt{-deadlock}.
+    \item Writing a config file: constants, invariants, properties, \texttt{Init}/\texttt{Next}.
+    \item Typical TM model skeleton: a thread (process), per-thread read/write set, global clock, and an opacity invariant.
+    \item Pitfalls in practice: fingerprinting record-valued state, unbounded state spaces, and PlusCal `missing label' errors.
+    \item How to read a counterexample trace: step-by-step from violation to root cause.
+\end{itemize}

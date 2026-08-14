@@ -1,0 +1,373 @@
+You are co-writing a graduate-level textbook, "Transactional Memory: From
+Principles to Practice" (author Daniel Castro, version 0.1). The book's
+chapters are currently bullet-skeleton drafts. Your job is to expand ONE
+chapter into a complete, publication-ready LaTeX chapter.
+
+The companion codebase (a real C++/Rust/Rust-GPU TM research project) provides
+the facts you may reference — it contains these real backends: SGL (single
+global lock), TSX-SGL, SPHT, NOrec, NOrec-BF, TL2, TSC-TM, TinySTM (WBCTL / WT /
+WBETL), SwissTM, DUDETM, NV-HTM, XTM, Romulus, LeftRight, JVSTM, MVLog,
+PersistentSGL, DistributedSGL, TiKV (distributed, Percolator-2PC), plus GPU
+designs PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, and GUST (AtomicINC commit-log,
+CCT/MRV validation). All are verified with test_tx 114/114 and test_ds 207/207
+and model-checked TLA+ specs. Real measured perf on an M1 Pro (fuzz/bank):
+NOrec-BF ~829K txns/s read-mostly, NOrec ~553K; TL2 ~2.06M, TSC-TM ~2.05M;
+MVLog ~275K write-heavy / ~109K read-mostly; GUST/GPU numbers are on GPUs.
+
+The running example of the book is a two-account bank transfer with an
+account floor and a money-conservation invariant; reuse it wherever natural.
+
+Below is the verbatim bullet-skeleton of the chapter you are expanding. You
+must produce the FULL chapter as a single raw LaTeX block: every section in
+the skeleton becomes a prose section, with the SAME section titles, the SAME
+\label values, the SAME figure and table captions and labels, and the SAME
+exercise set (kept verbatim where present). You may ADD subsections, worked
+examples, prose, listings, and extra figures/tables, but you must not drop or
+rename anything that already exists in the skeleton.
+
+FORMAT — produce EXACTLY this structure, in raw LaTeX, with no markdown fences
+and no preamble:
+
+A header comment block (4 lines) with the EXACT text below — substitute the
+chapter number, title, part title, and a one-sentence description; do NOT
+copy the number or title of any other chapter:
+    % docs/book/sections/ch18.tex
+    % Chapter 18: Persistent and Distributed Transactional Memory
+    % Part VII: Advanced Topics
+    % This chapter <one-sentence description of the chapter's content and
+    %   artifacts: worked examples, code listings, figures, tables, and
+    %   tagged exercises it contains>.
+The first two comment lines MUST reference chapter 18 (e.g. ch18.tex,
+Chapter 18), never a different chapter number.
+
+2. \chapter{<title>} immediately followed by ONE \index{...} line listing the
+   chapter's main terms (the "sections index"). Keep ONLY this sections-index
+   line at the top. Do NOT put any other \index commands in the body.
+3. An introductory prose paragraph (or two) motivating the chapter.
+4. Each skeleton section, in order, expanded to prose. Keep the section's own
+   \index line inside it if the skeleton has one; otherwise add none. Preserve
+   every figure, table, and lstlisting that the skeleton already contains,
+   verbatim, including its \label. Where the skeleton has math blocks
+   ($$ ... $$) keep them but merge fragmentary blocks into one display formula
+   where sensible (e.g. "$p$" and "$1-p$" and the fraction can stay separate,
+   but avoid a lone symbol on its own display line).
+5. At least two NEW "Worked Example" sections (\section{{Worked Example:
+   <title>}}), each with a concrete \begin{{lstlisting}} — real C/C++/PlusCal/
+   TLA+ code that would compile or model-check — plus a short bullet list of
+   lessons. Reuse the bank-transfer running example where natural. If the
+   skeleton already defines worked examples, keep them and add one or two more
+   only if space permits.
+6. One TikZ figure (\begin{{figure}}[htbp] ... \caption{{...}}
+   \label{{fig:...}} ... \end{{figure}}) — a state machine, timeline, conflict
+   diagram, or architecture diagram relevant to this chapter. Keep the TikZ
+   code simple and compilable with only {{positioning, arrows.meta, calc}}.
+   If the skeleton already has a figure, keep it and add one more only if it
+   clearly helps.
+7. One comparison or taxonomy table (\begin{{table}}[htbp] ... \end{{table}})
+   if the chapter has an obvious comparison to draw (keep the skeleton's table
+   verbatim if it has one).
+8. \section{{Summary}} — a short prose summary.
+9. \section{{Exercises}} — \begin{{enumerate}} with the skeleton's exercises
+   kept verbatim, followed by any NEW exercises, each tagged
+   \emph{{[implementation]}} / \emph{{[verification]}} / \emph{{[theory]}}.
+10. After the exercises, a TRAILING \index{{...}} block with all the finer-
+    grained index terms introduced by the new content (one per line or a
+    couple per line). These trailing indices must NOT appear elsewhere.
+
+RULES:
+- Be concrete and technically precise; the code must be believable and the
+  figures must be about the chapter's actual content, not generic filler.
+- Do NOT invent measurements or new research results. You may restate the
+  real numbers listed above or qualitative claims from the chapter.
+- Match the book's existing voice: terse, technical, teaching.
+- In TikZ node text use \\ (double backslash) for line breaks, never a single
+  backslash. In tabular rows end every row with \\ (double backslash).
+- In listings and TLA+ code use /\ (backslash slash) for conjunction, \A and
+  \E for quantifiers — exactly as valid TLA+/C requires.
+- Respect the ~16K-char answer cap: prefer 2 solid worked examples + 1 figure
+  + 3 exercises over quantity. Terse text.
+
+VERBATIM CHAPTER SOURCE (LaTeX):
+
+\chapter{Persistent and Distributed Transactional Memory}
+Two extensions of the TM contract change the runtime far more than the
+language: making commits survive crashes (persistent TM) and making the
+same API span multiple machines (distributed TM). Both keep the ordinary
+bank invariant, then add a stronger one --- durability, or agreement across
+nodes --- and both force the commit path to become explicit about ordering.
+The two worked examples below implement and verify each extension.
+
+\section{Worked Example: Durable Bank Commit}
+\index{persistent TM}\index{durability}\index{redo log}\index{crash recovery}
+\label{sec:durable-bank-example}
+
+Persistent TM asks for the ordinary TM invariant plus a crash invariant. A
+committed transfer must not disappear after power loss, and recovery must not
+apply it twice. The small example below uses one durable intent record. The
+record stores the post-state, so redo is idempotent.
+
+\begin{lstlisting}[language=C, caption={A minimal durable two-account transfer with idempotent redo.}]
+#include <array>
+#include <cstdint>
+#include <cstddef>
+#include <stdexcept>
+#include <fcntl.h>
+#include <unistd.h>
+
+static const uint64_t MAGIC = 0x544d5f42414e4b31ULL; /* "TM_BANK1" */
+
+struct Journal {
+    uint64_t magic;
+    uint32_t from, to;
+    int64_t old_from, old_to;
+    int64_t new_from, new_to;
+    uint64_t sum;
+};
+
+struct Image {
+    Journal journal;
+    std::array<int64_t, 2> balance;
+    int64_t floor;
+};
+
+static uint64_t checksum(const Journal& j) {
+    return j.magic ^ j.from ^ (uint64_t(j.to) << 7) ^
+           uint64_t(j.old_from) ^ (uint64_t(j.old_to) << 11) ^
+           uint64_t(j.new_from) ^ (uint64_t(j.new_to) << 17);
+}
+
+static bool valid(const Journal& j) {
+    return j.magic == MAGIC && j.sum == checksum(j);
+}
+
+static void write_all(int fd, const void* p, size_t n, off_t off) {
+    const char* b = static_cast<const char*>(p);
+    while (n != 0) {
+        ssize_t k = ::pwrite(fd, b, n, off);
+        if (k <= 0) throw std::runtime_error("pwrite failed");
+        b += k; n -= size_t(k); off += k;
+    }
+}
+
+static void read_all(int fd, void* p, size_t n, off_t off) {
+    char* b = static_cast<char*>(p);
+    while (n != 0) {
+        ssize_t k = ::pread(fd, b, n, off);
+        if (k <= 0) throw std::runtime_error("pread failed");
+        b += k; n -= size_t(k); off += k;
+    }
+}
+
+class DurableBank {
+    int fd_;
+    Image img_{};
+
+    void sync() {
+        if (::fsync(fd_) != 0) throw std::runtime_error("fsync failed");
+    }
+
+    void clear_journal() {
+        img_.journal = Journal{};
+        write_all(fd_, &img_.journal, sizeof(Journal), 0);
+        sync();
+    }
+
+    void flush_image() {
+        write_all(fd_, &img_, sizeof(Image), 0);
+        sync();
+    }
+
+    void recover() {
+        if (!valid(img_.journal)) return;
+        const Journal& j = img_.journal;
+        if (j.from >= 2 || j.to >= 2) throw std::runtime_error("bad journal");
+        img_.balance[j.from] = j.new_from;  /* idempotent redo */
+        img_.balance[j.to] = j.new_to;
+        write_all(fd_, &img_.balance, sizeof(img_.balance),
+                  offsetof(Image, balance));
+        sync();
+        clear_journal();
+    }
+
+public:
+    explicit DurableBank(const char* path) {
+        fd_ = ::open(path, O_RDWR | O_CREAT, 0644);
+        if (fd_ < 0) throw std::runtime_error("open failed");
+
+        off_t n = ::lseek(fd_, 0, SEEK_END);
+        if (n < off_t(sizeof(Image))) {
+            img_.balance = {1000, 1000};
+            img_.floor = 0;
+            flush_image();
+        } else {
+            read_all(fd_, &img_, sizeof(Image), 0);
+            recover();
+        }
+    }
+
+    ~DurableBank() {
+        if (fd_ >= 0) ::close(fd_);
+    }
+
+    bool transfer(uint32_t from, uint32_t to, int64_t amount) {
+        if (from >= 2 || to >= 2 || from == to || amount < 0) return false;
+        if (img_.balance[from] - amount < img_.floor) return false;
+
+        Journal j{};
+        j.magic = MAGIC;
+        j.from = from; j.to = to;
+        j.old_from = img_.balance[from];
+        j.old_to = img_.balance[to];
+        j.new_from = j.old_from - amount;
+        j.new_to = j.old_to + amount;
+        j.sum = checksum(j);
+
+        img_.journal = j;
+        write_all(fd_, &img_.journal, sizeof(Journal), 0);
+        sync();                         /* durable commit intent */
+
+        img_.balance[from] = j.new_from;
+        img_.balance[to] = j.new_to;
+        write_all(fd_, &img_.balance, sizeof(img_.balance),
+                  offsetof(Image, balance));
+        sync();                         /* durable data */
+
+        clear_journal();                /* recovery no longer needed */
+        return true;
+    }
+
+    int64_t total() const {
+        return img_.balance[0] + img_.balance[1];
+    }
+};
+
+int main() {
+    DurableBank b("bank.img");
+    b.transfer(0, 1, 5);
+    return b.total() == 2000 ? 0 : 2;
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item The durable intent record is not a full database log. It is the minimum needed to make one committed transfer recoverable.
+    \item The post-state makes recovery idempotent: replaying the same journal record writes the same balances.
+    \item The account floor is checked before the durable commit point. Recovery must not re-run policy code; it must complete the already chosen outcome.
+    \item The money-conservation invariant is checked after restart by the same observation used in volatile tests: the total balance remains unchanged.
+\end{itemize}
+
+\section{Worked Example: Model Checking Distributed Commit}
+\index{distributed TM}\index{two-phase commit}\index{TLA+}\index{money conservation}
+\label{sec:distributed-commit-example}
+
+Distributed TM turns validation into a protocol. A coordinator may decide only
+after participants vote, and the data update must remain atomic from the
+client's point of view. This TLA+ model is intentionally small: two accounts,
+one transfer, one prepare phase, and one commit decision.
+
+\begin{lstlisting}[caption={A TLA+ model of one distributed bank transfer with prepare/commit.}]
+--------------------------- MODULE MiniDistributedBank ---------------------------
+EXTENDS Naturals, TLC
+
+Accounts == 1..2
+From == 1
+To == 2
+Amount == 3
+Floor == 0
+InitBal == [a \in Accounts |-> 10]
+
+VARIABLES bal, phase, vote, decision
+
+vars == <<bal, phase, vote, decision>>
+
+Init ==
+    /\ bal = InitBal
+    /\ phase = "idle"
+    /\ vote = [r \in Accounts |-> "none"]
+    /\ decision = "none"
+
+Begin ==
+    /\ phase = "idle"
+    /\ phase' = "prepare"
+    /\ UNCHANGED <<bal, vote, decision>>
+
+Prepare(r) ==
+    /\ phase = "prepare"
+    /\ vote[r] = "none"
+    /\ vote' =
+        [vote EXCEPT ![r] =
+            IF r = From
+            THEN IF bal[From] - Amount >= Floor THEN "yes" ELSE "no"
+            ELSE "yes"]
+    /\ UNCHANGED <<bal, phase, decision>>
+
+AllVoted ==
+    \A r \in Accounts: vote[r] \in {"yes", "no"}
+
+DecideCommit ==
+    /\ phase = "prepare"
+    /\ \A r \in Accounts: vote[r] = "yes"
+    /\ phase' = "commit"
+    /\ decision' = "commit"
+    /\ UNCHANGED <<bal, vote>>
+
+DecideAbort ==
+    /\ phase = "prepare"
+    /\ AllVoted
+    /\ \E r \in Accounts: vote[r] = "no"
+    /\ phase' = "done"
+    /\ decision' = "abort"
+    /\ UNCHANGED <<bal, vote>>
+
+ApplyCommit ==
+    /\ phase = "commit"
+    /\ bal' = [bal EXCEPT ![From] = @ - Amount,
+                          ![To] = @ + Amount]
+    /\ phase' = "done"
+    /\ UNCHANGED <<vote, decision>>
+
+Next ==
+    \/ Begin
+    \/ \E r \in Accounts: Prepare(r)
+    \/ DecideCommit
+    \/ DecideAbort
+    \/ ApplyCommit
+
+Spec == Init /\ [][Next]_vars
+
+TypeOK ==
+    /\ phase \in {"idle", "prepare", "commit", "done"}
+    /\ decision \in {"none", "commit", "abort"}
+    /\ \A a \in Accounts: bal[a] \in Nat
+    /\ \A r \in Accounts: vote[r] \in {"none", "yes", "no"}
+
+MoneyConserved ==
+    bal[1] + bal[2] = InitBal[1] + InitBal[2]
+
+FloorsHold ==
+    \A a \in Accounts: bal[a] >= Floor
+
+=============================================================================
+\end{lstlisting}
+
+\begin{itemize}
+    \item The model separates decision from application. This exposes the window in which a real coordinator must recover enough state to finish.
+    \item The invariant is the same as the sequential bank example: balances stay above the floor and the total amount of money is conserved.
+    \item The prepare votes are local, but the commit is global. This is the essential cost of exporting a TM abstraction over a distributed store.
+    \item The model is small enough for exhaustive checking, but already contains the main distributed failure boundary: a decision without a completed data update.
+\end{itemize}
+
+\section{Summary}
+\begin{itemize}
+    \item Persistent TM adds a crash invariant to the ordinary money-conservation invariant; the durable worked example shows the minimum journal needed.
+    \item Distributed TM turns validation into a protocol; the model-checking example pins the failure boundary at ``a decision without a completed data update.''
+    \item Both extensions keep the same TM API --- only the commit path and its ordering obligations change.
+\end{itemize}
+
+\section{Exercises}
+\begin{enumerate}
+    \item \emph{[implementation]} Extend the durable bank example in \S\ref{sec:durable-bank-example} to four accounts and two concurrent worker threads. Keep one global durable commit lock, then record the throughput change relative to an in-memory SGL version. Do not claim durability until the journal and data writes have both been forced to storage.
+    \item \emph{[verification]} Modify the TLA+ model in \S\ref{sec:distributed-commit-example} so that the coordinator may crash after deciding commit but before applying the update. Add a recovery action and check that \texttt{MoneyConserved} and \texttt{FloorsHold} still hold.
+\end{enumerate}
+
+%  PART VIII: HORIZONS
+

@@ -1,0 +1,362 @@
+You are co-writing a graduate-level textbook, "Transactional Memory: From
+Principles to Practice" (author Daniel Castro, version 0.1). The book's
+chapters are currently bullet-skeleton drafts. Your job is to expand ONE
+chapter into a complete, publication-ready LaTeX chapter.
+
+The companion codebase (a real C++/Rust/Rust-GPU TM research project) provides
+the facts you may reference — it contains these real backends: SGL (single
+global lock), TSX-SGL, SPHT, NOrec, NOrec-BF, TL2, TSC-TM, TinySTM (WBCTL / WT /
+WBETL), SwissTM, DUDETM, NV-HTM, XTM, Romulus, LeftRight, JVSTM, MVLog,
+PersistentSGL, DistributedSGL, TiKV (distributed, Percolator-2PC), plus GPU
+designs PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, and GUST (AtomicINC commit-log,
+CCT/MRV validation). All are verified with test_tx 114/114 and test_ds 207/207
+and model-checked TLA+ specs. Real measured perf on an M1 Pro (fuzz/bank):
+NOrec-BF ~829K txns/s read-mostly, NOrec ~553K; TL2 ~2.06M, TSC-TM ~2.05M;
+MVLog ~275K write-heavy / ~109K read-mostly; GUST/GPU numbers are on GPUs.
+
+The running example of the book is a two-account bank transfer with an
+account floor and a money-conservation invariant; reuse it wherever natural.
+
+Below is the verbatim bullet-skeleton of the chapter you are expanding. You
+must produce the FULL chapter as a single raw LaTeX block: every section in
+the skeleton becomes a prose section, with the SAME section titles, the SAME
+\label values, the SAME figure and table captions and labels, and the SAME
+exercise set (kept verbatim where present). You may ADD subsections, worked
+examples, prose, listings, and extra figures/tables, but you must not drop or
+rename anything that already exists in the skeleton.
+
+FORMAT — produce EXACTLY this structure, in raw LaTeX, with no markdown fences
+and no preamble:
+
+A header comment block (4 lines) with the EXACT text below — substitute the
+chapter number, title, part title, and a one-sentence description; do NOT
+copy the number or title of any other chapter:
+    % docs/book/sections/ch07.tex
+    % Chapter 7: Transaction API Design - Software Engineering Perspectives
+    % Part IV: Implementing Transactional Memory
+    % This chapter <one-sentence description of the chapter's content and
+    %   artifacts: worked examples, code listings, figures, tables, and
+    %   tagged exercises it contains>.
+The first two comment lines MUST reference chapter 7 (e.g. ch07.tex,
+Chapter 7), never a different chapter number.
+
+2. \chapter{<title>} immediately followed by ONE \index{...} line listing the
+   chapter's main terms (the "sections index"). Keep ONLY this sections-index
+   line at the top. Do NOT put any other \index commands in the body.
+3. An introductory prose paragraph (or two) motivating the chapter.
+4. Each skeleton section, in order, expanded to prose. Keep the section's own
+   \index line inside it if the skeleton has one; otherwise add none. Preserve
+   every figure, table, and lstlisting that the skeleton already contains,
+   verbatim, including its \label. Where the skeleton has math blocks
+   ($$ ... $$) keep them but merge fragmentary blocks into one display formula
+   where sensible (e.g. "$p$" and "$1-p$" and the fraction can stay separate,
+   but avoid a lone symbol on its own display line).
+5. At least two NEW "Worked Example" sections (\section{{Worked Example:
+   <title>}}), each with a concrete \begin{{lstlisting}} — real C/C++/PlusCal/
+   TLA+ code that would compile or model-check — plus a short bullet list of
+   lessons. Reuse the bank-transfer running example where natural. If the
+   skeleton already defines worked examples, keep them and add one or two more
+   only if space permits.
+6. One TikZ figure (\begin{{figure}}[htbp] ... \caption{{...}}
+   \label{{fig:...}} ... \end{{figure}}) — a state machine, timeline, conflict
+   diagram, or architecture diagram relevant to this chapter. Keep the TikZ
+   code simple and compilable with only {{positioning, arrows.meta, calc}}.
+   If the skeleton already has a figure, keep it and add one more only if it
+   clearly helps.
+7. One comparison or taxonomy table (\begin{{table}}[htbp] ... \end{{table}})
+   if the chapter has an obvious comparison to draw (keep the skeleton's table
+   verbatim if it has one).
+8. \section{{Summary}} — a short prose summary.
+9. \section{{Exercises}} — \begin{{enumerate}} with the skeleton's exercises
+   kept verbatim, followed by any NEW exercises, each tagged
+   \emph{{[implementation]}} / \emph{{[verification]}} / \emph{{[theory]}}.
+10. After the exercises, a TRAILING \index{{...}} block with all the finer-
+    grained index terms introduced by the new content (one per line or a
+    couple per line). These trailing indices must NOT appear elsewhere.
+
+RULES:
+- Be concrete and technically precise; the code must be believable and the
+  figures must be about the chapter's actual content, not generic filler.
+- Do NOT invent measurements or new research results. You may restate the
+  real numbers listed above or qualitative claims from the chapter.
+- Match the book's existing voice: terse, technical, teaching.
+- In TikZ node text use \\ (double backslash) for line breaks, never a single
+  backslash. In tabular rows end every row with \\ (double backslash).
+- In listings and TLA+ code use /\ (backslash slash) for conjunction, \A and
+  \E for quantifiers — exactly as valid TLA+/C requires.
+- Respect the ~16K-char answer cap: prefer 2 solid worked examples + 1 figure
+  + 3 exercises over quantity. Terse text.
+
+VERBATIM CHAPTER SOURCE (LaTeX):
+
+\chapter{Transaction API Design – Software Engineering Perspectives}
+\section{Classic Synchronous API}
+\begin{itemize}
+    \item \texttt{tm\_begin()}, \texttt{tm\_read()}, \texttt{tm\_write()}, \texttt{tm\_commit()}, \texttt{tm\_abort()}.
+    \item Thread‑local transaction descriptors and the need for thread‑entry instrumentation.
+    \item Typed wrappers (\texttt{tm\_read\_i4}, \texttt{tm\_write\_i4}, \ldots) and how they map onto the byte-oriented core.
+    \item The retry loop: \texttt{sigsetjmp}/\texttt{siglongjmp} (or equivalent) to restart aborted transactions --- and the frame-lifetime hazard this creates (Part~VI).
+    \item The set of primitives is deliberately small; everything else (nested transactions, retry, allocation) is built on top.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.8cm and 2.4cm,
+    state/.style={draw, rounded corners, minimum width=2.8cm, minimum height=0.9cm, align=center},
+    arrow/.style={-{Stealth}, thick}
+]
+\node[state] (outside) {Outside\\transaction};
+\node[state, right=of outside] (active) {Active\\read/write set};
+\node[state, right=of active] (commit) {Commit\\validate};
+\node[state, above right=1.2cm and 1.7cm of commit] (done) {Committed\\visible};
+\node[state, below right=1.2cm and 1.7cm of commit] (retry) {Aborted\\retry};
+
+\draw[arrow] (outside) -- node[above]{\texttt{tm\_begin}} (active);
+\draw[arrow] (active) edge[loop above] node{\texttt{tm\_read}/\texttt{tm\_write}} (active);
+\draw[arrow] (active) -- node[above]{\texttt{tm\_end}} (commit);
+\draw[arrow] (commit) -- node[above left]{valid} (done);
+\draw[arrow] (commit) -- node[below left]{conflict} (retry);
+\draw[arrow] (retry) |- node[pos=0.25, below]{loop} (outside);
+\end{tikzpicture}%
+}
+\caption{Control states exposed by the synchronous transaction API. Backends differ in validation and metadata, but the source-level protocol is the same.}
+\label{fig:api-state-machine}
+\end{figure}
+
+\section{Worked Example: The Transfer, on the Classic API}
+\index{TMD API}\index{tm\_begin}\index{tm\_end}\index{retry loop}
+\label{sec:api-example}
+
+Chapter~1's running example, expressed with the synchronous API and an
+explicit retry loop:
+
+\begin{lstlisting}[language=C, caption={transfer on the synchronous API.}]
+int transfer(int *a, int *b, int n) {
+    int attempts = 0;
+    for (;;) {
+        tm_begin();
+        attempts++;
+        int ba = tm_read_i4(a);
+        int bb = tm_read_i4(b);
+        if (ba - n < 0 || bb + n < 0) { tm_end(); return 0; }
+        tm_write_i4(a, ba - n);
+        tm_write_i4(b, bb + n);
+        if (tm_end() == TM_COMMITTED) return attempts;  /* done */
+        /* aborted: loop and retry */
+    }
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item Compare with Chapter~1's lock-based version: no lock ordering, no unlock on every early-return path, and the two writes are atomic by construction.
+    \item The \texttt{sigsetjmp}/\texttt{siglongjmp} machinery hides in \texttt{tm\_begin} and \texttt{tm\_end} --- the frame-lifetime hazard of Part~VI.
+    \item Every backend in Part~IV implements exactly these five functions, so this source compiles unchanged across all of them.
+    \item Exercise~3 asks for the \texttt{\_\_transaction\_atomic} equivalent; note the retry loop disappears --- the compiler generates it.
+\end{itemize}
+
+\section{Worked Example: A Lambda Wrapper}
+\index{transactional lambda}\index{C++ wrapper}\index{retry loop}
+
+A thin C++ wrapper can remove duplicated retry loops while preserving the same
+backend contract. The body is still responsible for using instrumented loads and
+stores.
+
+\begin{lstlisting}[language=C++, caption={a C++ retry wrapper over the classic API.}]
+extern "C" {
+enum { TM_ABORTED = 0, TM_COMMITTED = 1 };
+
+void tm_begin(void);
+int  tm_end(void);
+int  tm_read_i4(const int *addr);
+void tm_write_i4(int *addr, int value);
+}
+
+template <class Body>
+auto atomic_retry(Body body) -> decltype(body()) {
+    for (;;) {
+        tm_begin();
+
+        auto result = body();
+
+        if (tm_end() == TM_COMMITTED)
+            return result;
+
+        /* aborted: discard result and execute body again */
+    }
+}
+
+int transfer_with_floor(int *from, int *to, int amount, int from_floor) {
+    return atomic_retry([=]() -> int {
+        if (amount <= 0)
+            return 0;
+
+        int bf = tm_read_i4(from);
+        int bt = tm_read_i4(to);
+
+        if (bf - amount < from_floor)
+            return 0;
+
+        tm_write_i4(from, bf - amount);
+        tm_write_i4(to,   bt + amount);
+        return 1;
+    });
+}
+\end{lstlisting}
+
+The money-conservation step for the successful path is local to the closure:
+
+$$
+\mathit{from}' + \mathit{to}' =
+(\mathit{from} - \mathit{amount}) + (\mathit{to} + \mathit{amount})
+=
+\mathit{from} + \mathit{to}
+$$
+
+\begin{itemize}
+    \item The wrapper centralises retry policy; the transfer code only describes the atomic update.
+    \item The closure must be replay-safe. Printing, freeing memory, or sending messages inside the body would repeat on abort.
+    \item This is not language integration. Ordinary loads and stores are still ordinary loads and stores; the wrapper cannot instrument them.
+    \item Destructors are not a complete substitute for the API. If a backend restarts with \texttt{siglongjmp}, C++ stack unwinding does not run.
+\end{itemize}
+
+\section{Language‑Integrated Keywords}
+\begin{itemize}
+    \item GCC’s \texttt{\_\_transaction\_atomic} and its implicit instrumentation.
+    \item How keywords can simplify the programmer’s view.
+    \item Comparison with explicit API: the compiler inserts begin/commit and instruments accesses automatically, removing the risk of a forgotten \texttt{tm\_end}.
+    \item The language-level cost: keywords need compiler support for exception handling, cancellation, and safe/unsafe functions (see Chapter~4 on the C++ TS).
+\end{itemize}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.19\linewidth}p{0.23\linewidth}p{0.23\linewidth}p{0.23\linewidth}}
+\hline
+API style & Instrumentation point & Retry owner & Main engineering risk \\
+\hline
+Classic calls & Programmer / wrapper & Application loop & Forgotten access or end path \\
+Language keyword & Compiler & Compiler/runtime & Compiler and ABI support \\
+Typed object wrapper & Library type & Library/runtime & Escaping raw references \\
+Future-based closure & Executor worker & Executor & Replay of side effects \\
+Distributed transaction & Client coordinator & Coordinator & Partial failure and timeouts \\
+\hline
+\end{tabular}
+\caption{API families used in TM systems. The lower-level runtime may still be TL2, NOrec, SGL, Percolator-style two-phase commit, or another backend; the table classifies the programming interface.}
+\label{tab:api-taxonomy}
+\end{table}
+
+\section{Asynchronous and Future‑Based APIs}
+\begin{itemize}
+    \item Pushing transactions into work queues.
+    \item Transactional futures: submitting a transaction as a future, awaiting results.
+    \item Batching and potential for optimisation.
+    \item The executor model: worker threads consume transaction closures from a queue; transactions become units of work, not thread-stack entities.
+    \item Pipeline implications: with async execution, stack-address checks and thread-entry initialization become per-task concerns, not per-thread.
+    \item Composing futures preserves the composability argument of Chapter~1: an \texttt{atomic} closure is just another value.
+\end{itemize}
+
+\section{Worked Example: Futures for Batched Transfers}
+\index{transactional future}\index{executor}\index{batching}
+
+A future-based API moves the retry loop into the worker. The caller receives a
+handle and later observes the committed result.
+
+\begin{lstlisting}[language=C++, caption={submitting bank transfers as transactional futures.}]
+#include <future>
+#include <utility>
+#include <vector>
+
+extern "C" {
+enum { TM_ABORTED = 0, TM_COMMITTED = 1 };
+
+void tm_begin(void);
+int  tm_end(void);
+int  tm_read_i4(const int *addr);
+void tm_write_i4(int *addr, int value);
+}
+
+/* Concrete helper for transactions returning int. */
+template <class Body>
+std::future<int> submit_tx_int(Body body) {
+    return std::async(std::launch::async,
+        [body = std::move(body)]() mutable -> int {
+            for (;;) {
+                tm_begin();
+
+                int result = body();
+
+                if (tm_end() == TM_COMMITTED)
+                    return result;
+
+                /* aborted: retry on this worker */
+            }
+        });
+}
+
+std::future<int> submit_transfer(int *from, int *to,
+                                 int amount, int from_floor) {
+    return submit_tx_int([=]() -> int {
+        if (amount <= 0)
+            return 0;
+
+        int bf = tm_read_i4(from);
+        int bt = tm_read_i4(to);
+
+        if (bf - amount < from_floor)
+            return 0;
+
+        tm_write_i4(from, bf - amount);
+        tm_write_i4(to,   bt + amount);
+        return 1;
+    });
+}
+
+int submit_batch_and_count(int *a, int *b, int *c) {
+    std::vector<std::future<int>> fs;
+
+    fs.push_back(submit_transfer(a, b, 10, 0));
+    fs.push_back(submit_transfer(b, c,  7, 0));
+    fs.push_back(submit_transfer(c, a,  3, 0));
+
+    int committed_successes = 0;
+    for (auto &f : fs)
+        committed_successes += f.get();
+
+    return committed_successes;
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item The caller no longer owns transaction stack state; the worker does.
+    \item Futures make composition explicit: submit many transactions, then join at the dependency point.
+    \item A real executor can batch validation or scheduling decisions. The source-level API does not require the caller to know which backend is underneath.
+    \item The closure must capture stable addresses. Capturing pointers to caller stack variables is unsafe if the future may outlive the stack frame.
+\end{itemize}
+
+\section{Object‑Oriented and Polymorphic Interfaces}
+\begin{itemize}
+    \item Template-based STMs (e.g., RSTM).
+    \item Trade-offs: expressiveness vs.\ runtime overhead.
+    \item Type-safe wrappers such as \texttt{TM<int>} hide read\slash{}write instrumentation behind \texttt{operator*}.
+    \item Visitor/transaction-object patterns: objects that register their own read/write sets with the runtime.
+    \item The object-granularity problem: per-object locking is coarse; word-level STM reclaims granularity at the cost of metadata indexing.
+\end{itemize}
+
+\section{Summary}
+\begin{itemize}
+    \item API design directly affects usability, safety, and performance.
+    \item Asynchronous interfaces open the door to batching and higher throughput at the cost of programming complexity.
+    \item The API is the contract the rest of the book's runtimes implement: every backend in Part~IV exposes the same synchronous primitives.
+\end{itemize}
+
+\section{Exercises}
+\begin{enumerate}
+    \item A programmer argues that \texttt{tm\_write} should return a status code indicating whether the write caused an immediate abort. Explain why this violates opacity and propose an alternative.
+    \item Sketch an asynchronous API where multiple transactions are submitted to a work queue and later awaited. Discuss how batching might reduce validation overhead.
+    \item Compare using \texttt{tm\_begin}\slash{}\texttt{tm\_end} versus \texttt{\_\_transaction\_\allowbreak atomic}. Which is less error-prone and why?
+    \item \emph{[implementation]} Extend Listing~\ref{sec:api-example}'s transfer into a reusable \texttt{atomic\_retry} helper for transactions returning \texttt{int}. Add a test that forces at least one abort and checks that the final account sum is unchanged.
+    \item \emph{[verification]} Write a small PlusCal or TLA+ model of the state machine in Figure~\ref{fig:api-state-machine}. Check that no execution reaches \emph{Committed} after a failed validation edge.
+    \item \emph{[theory]} Compare explicit calls, compiler keywords, and future-based closures under opacity. Which API makes it easiest to prevent non-transactional side effects from becoming visible before commit?
+\end{enumerate}
+

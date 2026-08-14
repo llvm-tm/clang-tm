@@ -1,0 +1,380 @@
+% docs/book/sections/ch10.tex
+% Chapter 10: Compiler Fundamentals - IRs and Passes
+% Part V: Compiler Instrumentation for TM
+% This chapter develops compiler IR instrumentation for transactional memory with worked examples, code listings, figures, tables, and tagged exercises.
+\chapter{Compiler Fundamentals – IRs and Passes}
+\index{compiler instrumentation!IRs and passes; compilation pipeline; LLVM IR; GCC GIMPLE; TM pass; runtime ABI; address-space check; shared-data registry}
+
+Compiler support for transactional memory is mostly a question of placement. The programmer writes a transaction over ordinary variables; the runtime expects explicit calls that record reads, buffer writes, validate metadata, and commit or abort. A compiler pass is the bridge between those two worlds.
+
+This chapter treats instrumentation as an IR-to-IR transformation. The goal is not to implement NOrec, TL2, TSC-TM, TinySTM, SwissTM, or another backend inside the compiler. The goal is to emit ordinary object code whose transactional memory accesses call a stable runtime ABI. The companion implementation uses this separation throughout: backends differ, but the compiler-facing shape is a transaction boundary plus typed read and write barriers.
+
+\section{The Compilation Pipeline}
+
+A conventional compiler pipeline has three broad stages. The front end turns source text into a structured representation: tokens, parse trees, type-checked abstract syntax trees, and then an initial intermediate representation. The middle end rewrites that IR to simplify, optimize, and normalize the program. The back end lowers the optimized IR to target-specific instructions, schedules them, allocates registers, and emits object code.
+
+A transactional-memory compiler pass normally belongs in the middle end, after the source-level transaction construct has been lowered but before final code generation. At that point the pass can still see memory operations explicitly, can query alias and escape information, and can replace loads and stores with calls into the TM runtime.
+
+LLVM IR and GCC GIMPLE are the two useful reference points. LLVM IR is a typed, static-single-assignment representation with explicit \texttt{load}, \texttt{store}, \texttt{call}, and control-flow instructions. GCC GIMPLE is also a simplified, typed IR, with memory operations made explicit enough for data-flow analysis and transformation. In both systems, the TM pass is conceptually simple: find memory accesses inside transactions, decide whether each access targets transactional shared state, and rewrite the selected operations into runtime calls.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.7cm,
+    box/.style={draw, rounded corners, minimum width=2.8cm, minimum height=0.85cm, align=center},
+    smallbox/.style={draw, rounded corners, minimum width=2.4cm, minimum height=0.75cm, align=center},
+    arr/.style={-{Latex[length=2mm]}, thick}
+]
+\node[box] (src) {C/C++ source\\\texttt{atomic\_tx} block};
+\node[box, right=of src] (ir) {LLVM IR\\plain loads/stores};
+\node[box, right=of ir] (pass) {TM pass\\address policy};
+\node[box, right=of pass] (iir) {Instrumented IR\\runtime calls};
+\node[box, right=of iir] (obj) {Object code};
+
+\node[smallbox, below=1.2cm of pass] (shared) {\texttt{.tm\_shared}\\registered globals};
+\node[smallbox, below=1.2cm of iir] (abi) {TM runtime ABI\\\texttt{tm\_hooks}};
+
+\draw[arr] (src) -- (ir);
+\draw[arr] (ir) -- (pass);
+\draw[arr] (pass) -- (iir);
+\draw[arr] (iir) -- (obj);
+\draw[arr] (shared) -- (pass);
+\draw[arr] (iir) -- (abi);
+\draw[arr] (abi) -- (obj);
+\end{tikzpicture}%
+}
+\caption{A compiler TM pass sits between IR optimization and code generation; its output is ordinary code with calls into the runtime ABI.}
+\label{fig:compiler-tm-pass}
+\end{figure}
+
+The important design point is that the output of the pass is still ordinary code. There is no magic instruction in the object file unless a backend chooses to use one internally. TSX-SGL may execute an optimistic hardware transaction and fall back to a single global lock; NOrec may validate a value-based read set; TL2 may validate versioned locks; TSC-TM may use timestamp-counter ordering. The compiler pass need not know those algorithms. It must only obey the ABI.
+
+\section{Instrumentation as a Compiler Pass}
+
+Instrumentation replaces transactional memory accesses with calls to a runtime. A source-level read such as \texttt{x = a->balance} becomes a typed read barrier. A source-level write such as \texttt{a->balance = x} becomes a typed write barrier. Transaction entry and exit become calls such as \texttt{\_\_tm\_begin} and \texttt{\_\_tm\_end}, or indirect calls through a hooks table when the backend is selected dynamically.
+
+In LLVM, the pass can be structured as a function pass or a module pass. A function pass is convenient when transaction boundaries are already represented inside each function, for example by intrinsics delimiting the transaction. A module pass is needed when global registration, constructor emission, or cross-function rewriting is required. The GCC GIMPLE equivalent traverses statements inside basic blocks, recognizes memory references, and replaces selected statements with calls to declared runtime functions.
+
+A minimal instrumentation algorithm is:
+
+\begin{lstlisting}[language=C, caption={Pseudocode for a conservative TM instrumentation pass.}]
+for each function F in module:
+    in_tx = false
+
+    for each basic block B in F in dominance-safe order:
+        for each instruction I in B:
+            if I is tm_begin intrinsic:
+                replace I with call __tm_begin()
+                in_tx = true
+                continue
+
+            if I is tm_end intrinsic:
+                replace I with call __tm_end()
+                in_tx = false
+                continue
+
+            if not in_tx:
+                continue
+
+            if I is load from address P:
+                if must_bypass_tm(P):
+                    continue
+                replace I with typed call __tm_read_width(P)
+
+            if I is store value V to address P:
+                if must_bypass_tm(P):
+                    continue
+                replace I with typed call __tm_write_width(P, V)
+
+            if I is call:
+                apply call policy: instrumented callee,
+                safe pure callee, or abort/escape barrier
+\end{lstlisting}
+
+The address decision is the pass's most delicate local rule. The companion implementation uses the \texttt{LLVM\_TM\_ADDR\_CHECK} pattern: heap and global addresses go through TM; stack addresses bypass it when they are provably private. This is a static-address-space question, not a runtime performance hint. If the pass is unsure, it must instrument. A false positive costs time. A false negative can break atomicity.
+
+Registered globals are handled through a shared-data registry. In the companion implementation, transactional globals are placed in a \texttt{.tm\_shared} section so that the runtime can recognize the range of shared objects. That lets the fast path reject obviously private addresses and lets the compiler avoid rewriting known-private memory. The discipline is similar to a garbage collector root table or sanitizer metadata section: the compiler emits metadata, and the runtime interprets it.
+
+Production passes must also handle calls. A call inside a transaction may read or write through pointers that the pass cannot see directly. There are only a few safe choices: inline and instrument the callee; require the callee to be compiled with the same TM ABI; prove the callee is pure or private-memory-only; or treat the call as an escape that forces abort, fallback, or global serialization. Indirect calls are harder because the target set may be unknown. Escaping pointers are harder still: once a pointer to shared state leaves the analyzed region, uninstrumented code can violate the transaction.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.22\linewidth}p{0.28\linewidth}p{0.22\linewidth}p{0.16\linewidth}}
+\hline
+Policy & What the pass rewrites & Programmer\slash{}runtime obligation & Typical cost \\
+\hline
+Instrument every load/store & All memory operations inside a transaction become runtime calls. & Runtime must cheaply reject private addresses or tolerate over-instrumentation. & Highest; simple and conservative. \\
+Static address-space check & Heap and global addresses are instrumented; provable stack addresses bypass TM. & Alias analysis must be conservative when provenance is unclear. & Lower; still safe when uncertain cases are instrumented. \\
+Annotated shared section & Only data registered in \texttt{.tm\_shared} is treated as transactional shared state. & Programmer or front end must mark all shared transactional objects. & Lowest common overhead; weakest if annotations are wrong. \\
+Manual runtime calls & Source code calls \texttt{tm\_read\_*} and \texttt{tm\_write\_*} directly. & Programmer maintains ABI discipline by hand. & Useful for tests and microbenchmarks; brittle at scale. \\
+\hline
+\end{tabular}
+\caption{Instrumentation policies differ mainly in where the conservative decision is made: compiler, runtime, or programmer.}
+\label{tab:instrumentation-policies}
+\end{table}
+
+The table makes the central trade-off explicit. Rewriting every load and store is easy to explain and hard to make fast. Annotating only shared data is fast when annotations are complete and dangerous when they are not. Most practical systems choose a middle path: use compiler analysis to bypass obvious stack temporaries, use metadata for known shared globals, and let the runtime make a final conservative decision.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=1.4cm,
+    box/.style={draw, rounded corners, minimum width=3.1cm, minimum height=0.8cm, align=center},
+    decision/.style={draw, diamond, aspect=2.2, align=center, inner sep=1pt},
+    arr/.style={-{Latex[length=2mm]}, thick}
+]
+\node[box] (memop) {IR memory op\\inside transaction};
+\node[decision, below=of memop] (stack) {provably\\stack-private?};
+\node[box, below left=1.0cm and 1.3cm of stack] (plain) {leave as plain\\load/store};
+\node[decision, below right=1.0cm and 1.3cm of stack] (shared) {heap, global,\\or unknown?};
+\node[box, below=of shared] (barrier) {emit typed\\TM barrier};
+\node[box, below=of barrier] (runtime) {runtime validates\\and commits};
+
+\draw[arr] (memop) -- (stack);
+\draw[arr] (stack) -- node[left] {yes} (plain);
+\draw[arr] (stack) -- node[right] {no} (shared);
+\draw[arr] (shared) -- node[right] {yes} (barrier);
+\draw[arr] (barrier) -- (runtime);
+\end{tikzpicture}
+\caption{The address-policy state machine: private stack memory bypasses the runtime; heap, global, and unknown addresses are conservatively instrumented.}
+\label{fig:address-policy-state-machine}
+\end{figure}
+
+\section{Worked Example: A Load, Before and After the Pass}
+\index{instrumentation}\index{LLVM IR}
+\label{sec:ir-example}
+
+IR is the right place to see what instrumentation actually changes. A single
+transactional read of an \texttt{int} becomes a call into the runtime:
+
+\begin{lstlisting}[language=C, caption={LLVM IR for a transactional load, before and after instrumentation.}]
+; before the pass -- a plain memory load
+%1 = load i32, i32* %p
+
+; after the pass -- the load is replaced by a runtime call
+%1 = call i32 @__tm_read_i4(i32* %p)
+\end{lstlisting}
+
+The transformation is local, but it has global consequences. The original load has the normal memory semantics of the target language. The rewritten call records the address in the transaction's read path. In NOrec-style algorithms this may mean reading a value and later validating that the global sequence did not make the read inconsistent. In TL2-style algorithms this may mean checking a versioned lock. In TinySTM variants, the call may interact with write-back, write-through, or encounter-time locking policy. The compiler does not choose among those policies; it preserves the access boundary.
+
+\begin{itemize}
+    \item The pass rewrites the memory operand of each load/store into a typed runtime call (\texttt{tm\_read\_i4}, \texttt{tm\_write\_i4}, \ldots).
+    \item The static address-space policy decides \emph{which} accesses get rewritten: heap/global go through TM, stack addresses bypass via \texttt{LLVM\_TM\_ADDR\_CHECK}.
+    \item The type in the call name matters: \texttt{i4} vs \texttt{i8} select different runtime fast paths and different read-set log widths.
+    \item Exercise~1 of this chapter asks you to repeat this mapping by hand on a GIMPLE listing.
+    \item The contract the pass instruments \emph{against} --- the exact signatures of \texttt{tm\_read\_*}\slash{}\texttt{tm\_write\_*}, how a transaction begins/ends, and what an abort unwinds --- is the runtime ABI of Chapter~7. If the ABI moves, the pass must move with it; the two are coupled by design, which is why they share the \texttt{tm\_hooks} table rather than a hard-coded call.
+\end{itemize}
+
+A store is similar, but the runtime may delay the physical write. A write-back backend records the address and value in a write set and publishes later. A write-through backend may write eagerly after acquiring ownership. The pass's emitted call must therefore be understood as a semantic write, not necessarily as an immediate hardware store.
+
+\section{Worked Example: Instrumenting a Bank Transfer}
+\index{bank transfer}\index{runtime ABI}
+\label{sec:bank-transfer-instrumented-c}
+
+This listing is not an implementation of NOrec, TL2, or TSC-TM. It is the
+shape of the code produced by the pass: ordinary source-level loads and stores
+have become calls through the transactional ABI. The stub runtime below makes
+the file compile and lets the invariant be tested in a single-threaded run.
+
+\begin{lstlisting}[language=C, caption={Compilable C++17 model of an instrumented bank transfer.}]
+#include <assert.h>
+#include <stdint.h>
+
+struct Account {
+    int balance;
+};
+
+extern "C" void __tm_begin(void) {
+    /* Real backends allocate per-transaction metadata here. */
+}
+
+extern "C" void __tm_end(void) {
+    /* Real backends validate and commit here. */
+}
+
+extern "C" int __tm_read_i4(const int *p) {
+    return *p;
+}
+
+extern "C" void __tm_write_i4(int *p, int value) {
+    *p = value;
+}
+
+static int sum2(const Account *a, const Account *b) {
+    return a->balance + b->balance;
+}
+
+/* This is the post-pass shape of:
+ *
+ *   atomic_tx {
+ *       if (from->balance - amount >= floor) {
+ *           from->balance -= amount;
+ *           to->balance += amount;
+ *       }
+ *   }
+ */
+static void transfer_instrumented(Account *from,
+                                  Account *to,
+                                  int amount,
+                                  int floor) {
+    __tm_begin();
+
+    int from_balance = __tm_read_i4(&from->balance);
+    int to_balance   = __tm_read_i4(&to->balance);
+
+    if (from_balance - amount >= floor) {
+        __tm_write_i4(&from->balance, from_balance - amount);
+        __tm_write_i4(&to->balance,   to_balance + amount);
+    }
+
+    __tm_end();
+}
+
+int main(void) {
+    Account a = { 100 };
+    Account b = {  40 };
+
+    int before = sum2(&a, &b);
+    transfer_instrumented(&a, &b, 30, 50);
+    int after = sum2(&a, &b);
+
+    assert(a.balance >= 50);
+    assert(before == after);
+
+    before = after;
+    transfer_instrumented(&a, &b, 80, 50);
+    after = sum2(&a, &b);
+
+    assert(a.balance >= 50);
+    assert(before == after);
+    return 0;
+}
+\end{lstlisting}
+
+Lessons:
+\begin{itemize}
+    \item The compiler pass does not prove the money-conservation invariant; it preserves the memory operations on which the runtime will enforce atomicity.
+    \item The two writes must be in one transaction. Instrumenting each store independently would preserve type correctness but not the bank invariant under concurrency.
+    \item The generated calls are typed. Here \texttt{balance} is an \texttt{int}, so the pass emits \texttt{\_\_tm\_read\_i4} and \texttt{\_\_tm\_write\_i4}.
+    \item Stack temporaries such as \texttt{from\_balance}, \texttt{to\_balance}, and \texttt{before} are not shared transactional locations and should not be routed through the TM runtime.
+\end{itemize}
+
+In a real concurrent execution, the two assertions at the end are not enough. They test the sequential shape of the transformed code. The runtime must additionally guarantee that no other committed transaction can observe the debit without the credit, or the credit without the debit. That is the reason the compiler emits one begin, two reads, up to two writes, and one end for the whole transfer.
+
+\section{Worked Example: Model Checking the Address Policy}
+\index{TLA+}\index{address-space check}
+\label{sec:address-policy-tla}
+
+The pass has a small but important safety rule: do not instrument provably
+private stack locations; do instrument heap and global locations. The following
+TLA+ module models one pass over a three-instruction program and checks that
+the emitted operation stream respects that rule.
+
+\begin{lstlisting}[caption={TLA+ model of the stack-bypass/shared-instrument policy.}]
+---- MODULE InstrumentPass ----
+EXTENDS TLC, Sequences, Naturals
+
+VARIABLES pc, out
+
+Ops == {"load", "store"}
+Addrs == {"stack", "heap", "global"}
+Kinds == {"plain", "tmread", "tmwrite"}
+
+Prog ==
+  << [op |-> "load",  addr |-> "stack"],
+     [op |-> "store", addr |-> "heap"],
+     [op |-> "load",  addr |-> "global"] >>
+
+Instr(op, addr) ==
+  IF addr = "stack" THEN
+      "plain"
+  ELSE IF op = "load" THEN
+      "tmread"
+  ELSE
+      "tmwrite"
+
+Init ==
+  /\ pc = 1
+  /\ out = << >>
+
+Next ==
+  IF pc <= Len(Prog) THEN
+      /\ out' = Append(out, Instr(Prog[pc].op, Prog[pc].addr))
+      /\ pc' = pc + 1
+  ELSE
+      /\ UNCHANGED << pc, out >>
+
+TypeOK ==
+  /\ pc \in 1..(Len(Prog) + 1)
+  /\ out \in Seq(Kinds)
+  /\ Len(out) <= Len(Prog)
+
+StackBypass ==
+  \A i \in 1..Len(out):
+    Prog[i].addr = "stack" => out[i] = "plain"
+
+SharedInstrumented ==
+  \A i \in 1..Len(out):
+    Prog[i].addr # "stack" =>
+      ((Prog[i].op = "load"  => out[i] = "tmread") /\
+       (Prog[i].op = "store" => out[i] = "tmwrite"))
+
+Spec == Init /\ [][Next]_<< pc, out >>
+
+====
+\end{lstlisting}
+
+Lessons:
+\begin{itemize}
+    \item The model is deliberately smaller than LLVM. It isolates the address-policy obligation from parsing, dominance, and code generation.
+    \item \texttt{StackBypass} catches accidental over-instrumentation of private stack slots.
+    \item \texttt{SharedInstrumented} catches the dangerous bug: a heap or global access escaping the TM runtime.
+    \item In a production pass, the hard case is not the rule itself but proving that an address is stack-private after optimization and aliasing.
+\end{itemize}
+
+This model is also a useful template for compiler-pass testing. The invariant to care about is not that the output is short, or that a particular optimization fired. The invariant is semantic: every shared transactional access must cross the runtime boundary. If the implementation later adds a fourth address class, such as \texttt{unknown}, the safe extension is to map it to \texttt{tmread} or \texttt{tmwrite}, not to \texttt{plain}.
+
+\section{Summary}
+
+Instrumentation is a source-to-source or IR-to-IR transformation: it preserves the program's transactional intent while making runtime mediation explicit. A pass that instruments every memory access is the simplest possible TM compiler support, but it usually pays too much overhead on stack temporaries and private data.
+
+A production-quality pass needs three things: an address-space policy, a shared-data registry, and a conservative call policy. The address policy decides which memory operations need barriers. The registry tells the runtime which globals belong to transactional shared state. The call policy prevents uninstrumented callees, indirect calls, and escaping pointers from silently bypassing the transaction.
+
+The companion implementation keeps this boundary clean. The same compiler-facing structure can feed SGL, TSX-SGL, SPHT, NOrec, NOrec-BF, TL2, TSC-TM, TinySTM variants, SwissTM, persistent backends, distributed backends, and GPU-oriented designs. Their commit protocols differ. Their required instrumentation shape is the same: transaction boundaries plus typed access barriers.
+
+\section{Exercises}
+\begin{enumerate}
+    \item Given a small C function, manually identify which GIMPLE statements would be replaced by calls to a TM runtime barrier.
+    \item Critique a naive instrumentation pass that instruments all loads and stores in the whole program. What performance problems would arise?
+    \item Design an LLVM pass that instruments only loads and stores inside basic blocks marked with a special intrinsic.
+    \item \emph{[implementation]} Extend the bank-transfer listing so that \texttt{Account} contains a \texttt{uint64\_t id} and an \texttt{int balance}. Show the post-pass calls for reading the identifier and updating the balance. Use distinct typed barriers for four-byte and eight-byte fields.
+    \item \emph{[verification]} Modify the TLA+ model so that \texttt{Addrs} also includes \texttt{"unknown"}. State and check an invariant requiring unknown addresses to be instrumented.
+    \item \emph{[theory]} Explain why a pass that instruments only syntactic globals but not heap objects can preserve correctness for some benchmarks and still be unsound as a general TM compilation strategy.
+\end{enumerate}
+
+\index{compiler pass!FunctionPass}
+\index{compiler pass!module pass}
+\index{LLVM IR!load instruction}
+\index{LLVM IR!store instruction}
+\index{GIMPLE!memory statement}
+\index{transaction boundary}
+\index{read barrier}
+\index{write barrier}
+\index{typed runtime barrier}
+\index{runtime ABI!tm_hooks}
+\index{address-space policy}
+\index{stack-private memory}
+\index{heap address}
+\index{global address}
+\index{unknown address}
+\index{escaping pointer}
+\index{indirect call}
+\index{uninstrumented callee}
+\index{shared-data registry}
+\index{.tm_shared section}
+\index{LLVM_TM_ADDR_CHECK}
+\index{bank transfer!instrumented}
+\index{money-conservation invariant}
+\index{TLA+!compiler-pass model}
+\index{model checking!instrumentation policy}

@@ -1,0 +1,475 @@
+You are co-writing a graduate-level textbook, "Transactional Memory: From
+Principles to Practice" (author Daniel Castro, version 0.1). The book's
+chapters are currently bullet-skeleton drafts. Your job is to expand ONE
+chapter into a complete, publication-ready LaTeX chapter.
+
+The companion codebase (a real C++/Rust/Rust-GPU TM research project) provides
+the facts you may reference — it contains these real backends: SGL (single
+global lock), TSX-SGL, SPHT, NOrec, NOrec-BF, TL2, TSC-TM, TinySTM (WBCTL / WT /
+WBETL), SwissTM, DUDETM, NV-HTM, XTM, Romulus, LeftRight, JVSTM, MVLog,
+PersistentSGL, DistributedSGL, TiKV (distributed, Percolator-2PC), plus GPU
+designs PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, and GUST (AtomicINC commit-log,
+CCT/MRV validation). All are verified with test_tx 114/114 and test_ds 207/207
+and model-checked TLA+ specs. Real measured perf on an M1 Pro (fuzz/bank):
+NOrec-BF ~829K txns/s read-mostly, NOrec ~553K; TL2 ~2.06M, TSC-TM ~2.05M;
+MVLog ~275K write-heavy / ~109K read-mostly; GUST/GPU numbers are on GPUs.
+
+The running example of the book is a two-account bank transfer with an
+account floor and a money-conservation invariant; reuse it wherever natural.
+
+Below is the verbatim bullet-skeleton of the chapter you are expanding. You
+must produce the FULL chapter as a single raw LaTeX block: every section in
+the skeleton becomes a prose section, with the SAME section titles, the SAME
+\label values, the SAME figure and table captions and labels, and the SAME
+exercise set (kept verbatim where present). You may ADD subsections, worked
+examples, prose, listings, and extra figures/tables, but you must not drop or
+rename anything that already exists in the skeleton.
+
+FORMAT — produce EXACTLY this structure, in raw LaTeX, with no markdown fences
+and no preamble:
+
+A header comment block (4 lines) with the EXACT text below — substitute the
+chapter number, title, part title, and a one-sentence description; do NOT
+copy the number or title of any other chapter:
+    % docs/book/sections/ch05.tex
+    % Chapter 5: Mathematical Foundations
+    % Part III: Formal Foundations: Mathematics and Verification
+    % This chapter <one-sentence description of the chapter's content and
+    %   artifacts: worked examples, code listings, figures, tables, and
+    %   tagged exercises it contains>.
+The first two comment lines MUST reference chapter 5 (e.g. ch05.tex,
+Chapter 5), never a different chapter number.
+
+2. \chapter{<title>} immediately followed by ONE \index{...} line listing the
+   chapter's main terms (the "sections index"). Keep ONLY this sections-index
+   line at the top. Do NOT put any other \index commands in the body.
+3. An introductory prose paragraph (or two) motivating the chapter.
+4. Each skeleton section, in order, expanded to prose. Keep the section's own
+   \index line inside it if the skeleton has one; otherwise add none. Preserve
+   every figure, table, and lstlisting that the skeleton already contains,
+   verbatim, including its \label. Where the skeleton has math blocks
+   ($$ ... $$) keep them but merge fragmentary blocks into one display formula
+   where sensible (e.g. "$p$" and "$1-p$" and the fraction can stay separate,
+   but avoid a lone symbol on its own display line).
+5. At least two NEW "Worked Example" sections (\section{{Worked Example:
+   <title>}}), each with a concrete \begin{{lstlisting}} — real C/C++/PlusCal/
+   TLA+ code that would compile or model-check — plus a short bullet list of
+   lessons. Reuse the bank-transfer running example where natural. If the
+   skeleton already defines worked examples, keep them and add one or two more
+   only if space permits.
+6. One TikZ figure (\begin{{figure}}[htbp] ... \caption{{...}}
+   \label{{fig:...}} ... \end{{figure}}) — a state machine, timeline, conflict
+   diagram, or architecture diagram relevant to this chapter. Keep the TikZ
+   code simple and compilable with only {{positioning, arrows.meta, calc}}.
+   If the skeleton already has a figure, keep it and add one more only if it
+   clearly helps.
+7. One comparison or taxonomy table (\begin{{table}}[htbp] ... \end{{table}})
+   if the chapter has an obvious comparison to draw (keep the skeleton's table
+   verbatim if it has one).
+8. \section{{Summary}} — a short prose summary.
+9. \section{{Exercises}} — \begin{{enumerate}} with the skeleton's exercises
+   kept verbatim, followed by any NEW exercises, each tagged
+   \emph{{[implementation]}} / \emph{{[verification]}} / \emph{{[theory]}}.
+10. After the exercises, a TRAILING \index{{...}} block with all the finer-
+    grained index terms introduced by the new content (one per line or a
+    couple per line). These trailing indices must NOT appear elsewhere.
+
+RULES:
+- Be concrete and technically precise; the code must be believable and the
+  figures must be about the chapter's actual content, not generic filler.
+- Do NOT invent measurements or new research results. You may restate the
+  real numbers listed above or qualitative claims from the chapter.
+- Match the book's existing voice: terse, technical, teaching.
+- In TikZ node text use \\ (double backslash) for line breaks, never a single
+  backslash. In tabular rows end every row with \\ (double backslash).
+- In listings and TLA+ code use /\ (backslash slash) for conjunction, \A and
+  \E for quantifiers — exactly as valid TLA+/C requires.
+- Respect the ~16K-char answer cap: prefer 2 solid worked examples + 1 figure
+  + 3 exercises over quantity. Terse text.
+
+VERBATIM CHAPTER SOURCE (LaTeX):
+
+\chapter{Mathematical Foundations}
+\section{Automata and Formal Languages}
+\begin{itemize}
+    \item Finite automata (DFA/NFA) and regular expressions.
+    \item Context-free grammars --- tie back to recursive descent.
+    \item Used for real in Chapter~15: the DFA in Figure~\ref{fig:lexer-dfa} is the lexer's recognizer, and the LR(0) automaton in Figure~\ref{fig:lr0-automaton} is the shift-reduce table that Bison-family generators build from a grammar.
+\end{itemize}
+
+\section{Markov Chains}
+\begin{itemize}
+    \item Discrete-time Markov chains (DTMC): states, transition matrices, steady-state probabilities.
+    \item Modeling a transaction's lifecycle: Active, Validating, Aborted, Committed.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[node distance=2.6cm, font=\small]
+  \node[draw,circle,minimum size=1.1cm] (active) {Active};
+  \node[draw,circle,minimum size=1.1cm] (valid) [right=of active] {Validating};
+  \node[draw,circle,minimum size=1.1cm] (committed) [right=of valid] {Committed};
+  \node[draw,circle,minimum size=1.1cm] (aborted) [below=of valid] {Aborted};
+  \draw[-{Stealth}] (active) -- node[above] {commit attempt} (valid);
+  \draw[-{Stealth}] (valid) -- node[above] {$1-p$} (committed);
+  \draw[-{Stealth}] (valid) -- node[right] {$p$} (aborted);
+  \draw[-{Stealth}] (aborted) .. controls (0.5,-2) and (2.2,-2) .. node[below] {retry} (active);
+  \draw[-{Stealth}] (committed) to[bend left=35] node[above] {next tx} (active);
+\end{tikzpicture}
+\caption{The transaction lifecycle as a Markov chain: a commit attempt either succeeds or aborts, and an abort re-enters the active state.}
+\label{fig:tx-lifecycle}
+\end{figure}
+
+    \item The key modeling assumption: memoryless transitions, and when that assumption is reasonable for abort/retry loops.
+    \item Expected number of retries before a successful commit as a function of abort probability; closed-form via the geometric distribution.
+    \item Continuous-time counterpart, CTMC and queueing, used in Part~VI for throughput prediction.
+    \item The model's \emph{purpose} in the book: give every later chapter a number where it can get one, and hand off where it cannot. Data-dependent contention belongs to Part~III's model checking.
+\end{itemize}
+
+If a commit attempt aborts with probability
+
+$$
+p
+$$
+
+and succeeds with probability
+
+$$
+1-p
+$$
+
+then the expected number of attempts per committed transaction is
+
+$$
+E[\mathrm{attempts}] = \frac{1}{1-p}.
+$$
+
+\section{Queueing Theory and Little's Law}
+\begin{itemize}
+    \item Basic notions: arrival rate, average service time, and average number in the system.
+    \item Applying Little's Law to a transactional system to estimate congestion.
+    \item Little's Law:
+
+$$
+L = \lambda S
+$$
+
+where
+
+$$
+L
+$$
+
+is the average number of in-flight transactions,
+
+$$
+\lambda
+$$
+
+is the committed throughput, and
+
+$$
+S
+$$
+
+is the average residence time.
+
+    \item Throughput falls when retries inflate the effective service time.
+    \item The ``wasted-work'' multiplier is the retry series:
+
+$$
+\sum_{i=0}^{\infty} p_{\mathrm{abort}}^i
+  =
+\frac{1}{1-p_{\mathrm{abort}}}.
+$$
+
+    \item Where the models break: contention is data-dependent and non-Poisson, which is exactly why Part~III's model checking complements the analysis.
+\end{itemize}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.16\linewidth}p{0.18\linewidth}p{0.30\linewidth}p{0.26\linewidth}}
+\hline
+Tool & Object modeled & Question answered & Typical TM use \\
+\hline
+DFA / grammar & Program text & Is this input syntactically valid? & Lexer and parser construction \\
+DTMC & Transaction lifecycle & How many retries should we expect? & Abort and retry estimates \\
+Little's Law & Queue of transactions & How many transactions are in flight? & Congestion and saturation estimates \\
+Model checking & Reachable executions & Can this bad state occur? & Safety invariants and races \\
+\hline
+\end{tabular}
+\caption{The mathematical tools used in the book. Analytical models estimate cost; model checking explores executions.}
+\label{tab:math-tools}
+\end{table}
+
+\section{Worked Example: Numbers, Not Just Symbols}
+\index{geometric distribution}\index{Little's Law}\index{Markov chain}
+\label{sec:math-example}
+
+The geometric retry model, populated with a few abort probabilities. If a
+transaction aborts with probability
+
+$$
+p
+$$
+
+and retries until it commits, the number of attempts follows a geometric distribution with mean
+
+$$
+\frac{1}{1-p}.
+$$
+
+\begin{lstlisting}[caption={The geometric retry model, numerically.}]
+p        E[attempts] = 1/(1-p)     P(commits within 5 tries)
+0.10     1.11                      0.99999
+0.50     2.00                      0.96875
+0.90     10.0                      0.40951
+\end{lstlisting}
+
+\begin{itemize}
+    \item The ``wasted-work'' multiplier of this section is exactly the expected number of attempts.
+    \item At an abort probability of
+
+$$
+0.90
+$$
+
+every committed transaction performs ten attempts on average.
+
+    \item Plug into Little's Law by replacing service time with effective service time:
+
+$$
+S_{\mathrm{effective}} = \frac{S}{1-p}.
+$$
+
+    \item The same probability feeds the Markov chain of Exercise~1, and the model-checking exercises of Part~III inject the corresponding state transitions.
+\end{itemize}
+
+\section{Worked Example: Simulating Retry Cost in the Bank}
+\index{bank transfer}\index{abort probability}\index{money conservation}
+\label{sec:math-bank-simulation}
+
+The next program is deliberately not a TM implementation. It is the mathematical model made executable: a bank transfer retries until the synthetic validator accepts the commit attempt. The committed state must still satisfy the account floor and money-conservation invariant.
+
+\begin{lstlisting}[language=C++, caption={A compilable C++17 simulation of geometric retry cost for bank transfers.}]
+#include <cassert>
+#include <cstdint>
+#include <iostream>
+#include <random>
+#include <stdexcept>
+#include <vector>
+
+struct Bank {
+    std::vector<long long> bal;
+    long long floor;
+};
+
+static long long total(const Bank& b) {
+    long long s = 0;
+    for (long long x : b.bal) s += x;
+    return s;
+}
+
+static bool invariant_holds(const Bank& b, long long initial_total) {
+    if (total(b) != initial_total) return false;
+    for (long long x : b.bal) {
+        if (x < b.floor) return false;
+    }
+    return true;
+}
+
+static int transfer_with_retries(Bank& b,
+                                 int from,
+                                 int to,
+                                 long long amount,
+                                 double abort_probability,
+                                 std::mt19937_64& rng) {
+    if (from == to) throw std::invalid_argument("self-transfer");
+    if (amount < 0) throw std::invalid_argument("negative amount");
+
+    std::bernoulli_distribution aborts(abort_probability);
+    int attempts = 0;
+
+    for (;;) {
+        ++attempts;
+
+        const long long src = b.bal.at(from);
+        const long long dst = b.bal.at(to);
+
+        if (src - amount < b.floor) {
+            return attempts; // transaction is rejected, not committed
+        }
+
+        if (aborts(rng)) {
+            continue;        // validation failed; retry same transaction
+        }
+
+        b.bal.at(from) = src - amount;
+        b.bal.at(to)   = dst + amount;
+        return attempts;
+    }
+}
+
+int main() {
+    Bank b{{1000, 1000}, 0};
+    const long long initial_total = total(b);
+
+    std::mt19937_64 rng(7);
+    const double p_abort = 0.50;
+
+    long long attempts = 0;
+    long long committed = 0;
+
+    for (int i = 0; i < 10000; ++i) {
+        attempts += transfer_with_retries(b, 0, 1, 1, p_abort, rng);
+        ++committed;
+        assert(invariant_holds(b, initial_total));
+    }
+
+    std::cout << "committed=" << committed
+              << " attempts=" << attempts
+              << " mean_attempts="
+              << static_cast<double>(attempts) / committed
+              << "\n";
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item The simulation separates safety from performance: retries change the number of attempts, not the invariant.
+    \item The account floor is checked before the write set is installed.
+    \item The expected mean attempts approach the geometric value as the number of transfers grows.
+    \item Real backends replace the synthetic Bernoulli validator with concrete validation mechanisms: NOrec validates a value-based read set, TL2 validates versions, and MV designs validate snapshots.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.1cm, font=\small]
+  \node[draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm] (read) {Read accounts};
+  \node[draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm,right=of read] (check) {Check floor};
+  \node[draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm,right=of check] (validate) {Validate};
+  \node[draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm,right=of validate] (install) {Install writes};
+  \node[draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm,below=of validate] (abort) {Abort and retry};
+
+  \draw[-{Stealth}] (read) -- (check);
+  \draw[-{Stealth}] (check) -- node[above] {floor holds} (validate);
+  \draw[-{Stealth}] (validate) -- node[above] {read set valid} (install);
+  \draw[-{Stealth}] (validate) -- node[right] {conflict} (abort);
+  \draw[-{Stealth}] (abort) -| ($(read.south)+(0,-0.4)$) -- (read.south);
+\end{tikzpicture}
+\caption{A bank transaction as a validation pipeline. Analytical models collapse the conflict edge into an abort probability; model checking keeps the states explicit.}
+\label{fig:bank-validation-pipeline}
+\end{figure}
+
+\section{Worked Example: Model Checking Money Conservation}
+\index{TLA+}\index{model checking}\index{invariant}
+\label{sec:math-bank-tla}
+
+The same bank example can be written as a finite-state TLA+ model. TLC checks all reachable states for the two invariants used throughout the book: money is conserved and every account remains above the floor.
+
+\begin{lstlisting}[caption={A model-checkable TLA+ specification for a two-account transfer.}]
+---- MODULE BankInvariant ----
+EXTENDS Integers, TLC
+
+Accounts == {0, 1}
+InitBal == [a \in Accounts |-> 10]
+Amount == 3
+Floor == 0
+
+VARIABLES bal, phase, snap
+
+Vars == <<bal, phase, snap>>
+
+Init ==
+    /\ bal = InitBal
+    /\ snap = InitBal
+    /\ phase = "idle"
+
+Begin ==
+    /\ phase = "idle"
+    /\ snap' = bal
+    /\ phase' = "read"
+    /\ UNCHANGED bal
+
+Commit ==
+    /\ phase = "read"
+    /\ snap[0] - Amount >= Floor
+    /\ bal' = [bal EXCEPT ![0] = snap[0] - Amount,
+                          ![1] = snap[1] + Amount]
+    /\ phase' = "idle"
+    /\ UNCHANGED snap
+
+Abort ==
+    /\ phase = "read"
+    /\ snap[0] - Amount < Floor
+    /\ phase' = "idle"
+    /\ UNCHANGED <<bal, snap>>
+
+Next == Begin \/ Commit \/ Abort
+
+Spec == Init /\ [][Next]_Vars
+
+MoneyConserved ==
+    bal[0] + bal[1] = InitBal[0] + InitBal[1]
+
+AccountFloors ==
+    \A a \in Accounts : bal[a] >= Floor
+
+Inv == MoneyConserved /\ AccountFloors
+
+THEOREM Spec => []Inv
+====
+\end{lstlisting}
+
+\begin{itemize}
+    \item The specification is small because the state space is small: two accounts, one transfer amount, one transaction phase variable.
+    \item The invariant is independent of the retry policy. Retry affects liveness and cost; the checked predicate is safety.
+    \item The theorem line states the same obligation enforced by the C++ assertion in \S\ref{sec:math-bank-simulation}.
+    \item Larger TLA+ models in the companion project use the same discipline: explicit state, explicit transition relation, explicit invariant.
+\end{itemize}
+
+\section{Summary}
+\begin{itemize}
+    \item Formal languages underpin compiler construction.
+    \item Markov chains and queueing theory provide first-order performance models for TM.
+    \item Analytical models predict; model checking proves; the two tools answer different questions.
+\end{itemize}
+
+\section{Exercises}
+\begin{enumerate}
+    \item Build a three-state Markov chain for a transaction under contention and compute the expected number of retries before a successful commit.
+    \item In a TM system with arrival rate
+
+$$
+\lambda
+$$
+
+and average transaction length
+
+$$
+T
+$$
+
+use Little's Law to estimate the effect on the number of in-flight transactions when the abort rate doubles.
+
+    \item Model a TM that retries after a random back-off as a Markov chain and determine the back-off probability that maximizes throughput.
+    \item \emph{[implementation]} Extend the simulation in \S\ref{sec:math-bank-simulation} to choose the source and destination accounts uniformly at random. Keep the money-conservation assertion and report the measured mean attempts for abort probabilities
+
+$$
+0.10,\quad 0.50,\quad 0.90.
+$$
+
+    \item \emph{[verification]} Modify the TLA+ model in \S\ref{sec:math-bank-tla} so that an abort may occur nondeterministically even when the floor check succeeds. Check that the invariant still holds.
+    \item \emph{[theory]} Derive the expected attempts per committed transaction when a transaction has two independent validation phases with abort probabilities
+
+$$
+p_1
+$$
+
+and
+
+$$
+p_2.
+$$
+
+State clearly whether the result changes if the two validation phases are correlated.
+\end{enumerate}
+

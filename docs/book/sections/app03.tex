@@ -1,0 +1,72 @@
+
+\chapter{Glossary}
+\label{chap:glossary}
+Terms are defined in the chapter or section named in \emph{see}. Entries marked
+[TSX] refer to Intel RTM; [GPU] to Part~VII.
+
+\begin{description}
+    \item[abort] \index{abort} The discard of a transaction's speculative
+          writes and restart of its body. Opposed to \emph{commit}
+          (\S\ref{sec:api-example}).
+    \item[atomic block] \index{atomic block} A programming-language construct
+          whose body is executed transactionally; see \S\ref{sec:atomics-example}.
+    \item[ballot] \index{ballot} \texttt{\_\_ballot\_sync}, the GPU primitive
+          that collects one predicate bit per lane into a mask
+          (\S\ref{sec:ballot}).
+    \item[commit] \index{commit} The point at which a transaction's writes
+          become visible atomically (\S\ref{sec:tl2-example}).
+    \item[commit log] \index{commit log} A bounded global record of in-flight
+          transactions used by GPU designs such as GUST for CCT/MRV
+          validation (\S\ref{sec:gust}).
+    \item[CCT] \index{CCT} Concurrently-Committing-Transaction checking; GUST's
+          validation of a commit against still-in-flight transactions
+          (\S\ref{sec:gust}).
+    \item[deadlock] \index{deadlock} A state in which every participant waits
+          on another and no progress is possible (Part~I).
+    \item[divergence] \index{divergence} In SIMT execution, lanes of a warp
+          taking different control paths (\S\ref{sec:ballot}).
+    \item[fallback] \index{fallback} The software path a best-effort HTM takes
+          when hardware speculation aborts (\S\ref{sec:rtm-example}).
+    \item[global clock] \index{global clock} A monotonically increasing
+          version counter used by TL2 and NOrec to stamp commits
+          (\S\ref{sec:norec-example}).
+    \item[GTS] \index{GTS} Global Timestamp in GUST; counts finalized commit-log
+          slots (\S\ref{sec:gust}).
+    \item[intra-warp conflict] \index{intra-warp conflict} A conflict between
+          lanes of the same warp, resolved by predicate voting
+          (\S\ref{sec:ballot-example}).
+    \item[linearizability / serializability] \index{serializability} The
+          guarantee that a history is equivalent to some serial execution
+          (\S\ref{sec:tso-example}).
+    \item[liveness] \index{liveness} The guarantee that a good state is
+          eventually reached; contrasted with \emph{safety}
+          (\S\ref{sec:pluscal-example}).
+    \item[MRV] \index{MRV} Most-Recent-Version checking; GUST's validation of
+          finalised transactions via their latest VBox bodies
+          (\S\ref{sec:gust}).
+    \item[opacity] \index{opacity} Opacity ensures aborted transactions see a
+          consistent state; a serializable-but-not-opaque history is dismantled
+          in \S\ref{sec:tso-example}.
+    \item[read set / write set] \index{read set} \index{write set} The
+          addresses a transaction reads and writes; maintained by the runtime
+          during the body (\S\ref{sec:norec-example}).
+    \item[read-validate] \index{read-validate} The capture$\rightarrow$read
+          $\rightarrow$recheck discipline that prevents partially-visible
+          writes (\S\ref{sec:norec-example}).
+    \item[retry loop] \index{retry loop} The \texttt{sigsetjmp}/
+          \texttt{siglongjmp} machinery that restarts aborted transactions
+          (\S\ref{sec:jmpbuf-example}).
+    \item[safety] \index{safety} The guarantee that a bad state is never
+          reached; contrasted with \emph{liveness} (\S\ref{sec:pluscal-example}).
+    \item[simulation (CPU)] \index{simulation} Time-discrete execution of a
+          trace or model to predict a design's behaviour (Parts~I, III, and VI).
+    \item[store buffer] \index{store buffer} A per-core FIFO that delays store
+          visibility, the source of TSO reordering (\S\ref{sec:tso-example}).
+    \item[TSX] \index{TSX} Intel Transactional Synchronization Extensions; the
+          RTM \texttt{xbegin}/\texttt{xend} instruction pair
+          (\S\ref{sec:rtm-example}).
+    \item[VBox] \index{VBox} Versioned box; per-address history of
+          (version, value) bodies used by JVSTM, GUST, and other multi-version
+          STMs (\S\ref{sec:gust}).
+    \item[versioned box] \index{versioned box} \emph{See} VBox.
+\end{description}

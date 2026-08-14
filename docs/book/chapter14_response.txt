@@ -1,0 +1,563 @@
+% docs/book/sections/ch14.tex
+% Chapter 14: Performance Modeling and Tuning
+% Part VI: Engineering: Testing, Pitfalls, and Performance
+% This chapter develops TM performance models and measurement practice through analytical formulas, calibration tables, TikZ figures, C++ and TLA+ worked examples, and tagged exercises.
+
+\chapter{Performance Modeling and Tuning}
+\index{performance modeling, throughput, abort rate, wasted work, Little's Law, queueing theory, benchmarks, STAMP, profiling, bank benchmark, model checking}
+
+Transactional memory performance is not summarized by a single number. A system can have high throughput while wasting most of its cycles on doomed attempts, or it can have zero aborts while serializing all work through one lock. The useful question is not ``which backend is fastest?'' but ``which cost dominates on this machine, for this workload, at this contention level?''
+
+This chapter gives a compact toolkit for answering that question. We start with metrics, then move to analytical models, measurement hygiene, and worked examples. The running example is again the two-account bank transfer with an account floor and a money-conservation invariant: it is small enough to measure carefully, but rich enough to expose aborts, semantic rejects, validation cost, and serialization.
+
+\section{Metrics and Benchmarks}
+
+The primary metric in most transactional-memory experiments is committed throughput: the number of committed transactions per second. It is attractive because it is easy to compare, but it is also easy to misuse. Throughput hides why transactions are slow. A low number may be caused by validation cost, cache-line bouncing, write-set publication, read-set scanning, logging, persistence barriers, scheduler interference, or simply a workload that does little useful parallel work.
+
+Abort rate is the natural companion metric. For a fixed workload and fixed transaction size, rising abort rate usually predicts falling throughput. But abort rate alone is misleading. A transaction that aborts after one read wastes little work; a transaction that aborts after a long traversal, a large speculative update set, or a persistence flush wastes much more. The better measure is wasted work: restarts multiplied by lost progress, interpreted together with commit latency.
+
+The usual first-order metrics are:
+
+\begin{itemize}
+    \item committed throughput, normally in transactions per second;
+    \item abort rate, split by cause when possible: validation failure, lock conflict, capacity abort, explicit semantic reject, or fallback path;
+    \item attempts per committed transaction;
+    \item latency distribution for committed transactions;
+    \item wasted work, estimated from aborted attempt duration or from progress counters;
+    \item speedup over a single global lock;
+    \item occupancy or parallelism, meaning the mean number of in-flight transactions;
+    \item energy under contention, when the platform exposes trustworthy counters.
+\end{itemize}
+
+Benchmark choice determines which metric matters. The STAMP suite remains a useful vocabulary because its kernels exercise different access shapes. The eight kernels are \texttt{bayes}, \texttt{genome}, \texttt{intruder}, \texttt{kmeans}, \texttt{labyrinth}, \texttt{ssca2}, \texttt{vacation}, and \texttt{yada}. They cover read-heavy phases, write-heavy phases, long transactions, graph traversals, tree-shaped data, and irregular memory access. A backend that performs well on \texttt{kmeans} may still collapse on \texttt{yada}; the former may be dominated by simple reads, while the latter may be dominated by conflict and validation.
+
+Microbenchmarks have a different role. A counter benchmark isolates the cost of one contended location. A bank benchmark controls account count, transfer amount, account floor, and write-set size. A linked-list benchmark varies traversal length and update probability. These tests are not substitutes for applications; they are instruments for parameter sweeps. They tell us whether a performance cliff is caused by contention, read-set length, write-set length, metadata locality, or validation frequency.
+
+For the companion codebase, SGL is the conservative baseline; TL2, NOrec, NOrec-BF, TSC-TM, TinySTM variants, SwissTM, DUDETM, and MVLog show different points in the design space. The measured M1 Pro fuzz/bank anchors in Table~\ref{tab:perf-anchors} are calibration points, not universal rankings. The GPU designs, including GUST, require separate interpretation because their commit and validation costs are shaped by warp occupancy, memory coalescing, and global-memory atomics.
+
+\section{Analytical Models}
+\label{sec:perf-analytical}
+
+Analytical models are not replacements for measurement. They are compression devices: they turn a noisy run into a small set of hypotheses about cost. A good model explains why a curve bends, where a backend stops scaling, and which counter should move if the hypothesis is right.
+
+A minimal optimistic TM model has five states: ready, executing, validating, committing, and aborting. Transactions spend useful time in execution, bookkeeping time in validation and commit, and wasted time on paths that end in abort. Figure~\ref{fig:perf-state-machine} shows this state machine.
+
+Queueing theory gives the first sanity check. Little's Law relates mean concurrency, committed throughput, and mean latency:
+
+$$
+L = \lambda W
+$$
+
+Here, the symbol $L$ is the mean number of in-flight transactions, the symbol $\lambda$ is committed throughput, and the symbol $W$ is mean transaction latency. If latency doubles while the number of in-flight transactions stays fixed, committed throughput must fall. This is why high abort rates are damaging even before CPUs are saturated: retries inflate the residence time of a logical transaction in the system.
+
+A simple retry model assumes that each attempt aborts independently with probability
+
+$$
+p_{\mathrm{abort}}.
+$$
+
+Then the mean attempts per committed transaction is
+
+$$
+E[\mathrm{attempts\ per\ commit}] =
+\frac{1}{1-p_{\mathrm{abort}}}.
+$$
+
+This is useful at low to moderate contention. It lets us read an observed attempts-per-commit column as an implied abort probability, or predict how many attempted transactions a backend must execute to produce one commit.
+
+The model breaks down under high contention for three reasons. First, aborts are not independent: if many threads repeatedly touch the same hot account or ownership record, their retries are correlated. Second, retries change the machine state: cache residency, branch predictor state, coherence traffic, and allocator state are different after a failed attempt. Third, queueing delay feeds back into conflicts. Longer attempts overlap with more peers, increasing the probability of another conflict.
+
+Cost-per-operation models are more concrete. They decompose a transaction into begin, read barrier, write barrier, validation, commit, abort cleanup, and retry delay. Each component is calibrated in cycles or nanoseconds against real runs. This is the machine-profile approach used by the companion simulator. It is especially useful when comparing algorithms with similar throughput but different internal costs, such as TL2 and TSC-TM in the fuzz/bank slice.
+
+The model is strongest when conflicts are approximately independent and the working set fits the relevant cache level. It misses memory-hierarchy cliffs, coherence storms, preemption, cache-line false conflicts, and backend-specific effects such as TSX capacity aborts or persistence fences. When the model fails, the failure is diagnostic: it says the missing cost is now the experiment.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=1.7cm,
+    every node/.style={draw, rounded corners, align=center, minimum width=2.8cm, minimum height=0.8cm},
+    arrow/.style={-{Latex[length=2mm]}, thick}
+]
+\node (ready) {Ready\\transaction};
+\node[right=of ready] (execute) {Execute\\reads/writes};
+\node[right=of execute] (validate) {Validate\\read set};
+\node[right=of validate] (commit) {Commit\\publish writes};
+\node[below=of validate] (abort) {Abort\\discard work};
+
+\draw[arrow] (ready) -- (execute);
+\draw[arrow] (execute) -- (validate);
+\draw[arrow] (validate) -- node[above, draw=none, minimum width=0cm] {valid} (commit);
+\draw[arrow] (validate) -- node[right, draw=none, minimum width=0cm] {conflict} (abort);
+\draw[arrow] (abort.west) -| node[pos=0.25, below, draw=none, minimum width=0cm] {retry} (ready.south);
+\end{tikzpicture}
+\caption{A minimal performance state machine for optimistic TM. Throughput counts transitions into commit; abort rate counts transitions into abort; wasted work is the time spent in execute before an abort.}
+\label{fig:perf-state-machine}
+\end{figure}
+
+\section{Experimental Methodology}
+
+A TM measurement is an experiment on a whole stack: backend, compiler, allocator, scheduler, CPU frequency policy, memory hierarchy, and benchmark. The methodology must make these variables visible.
+
+Warm-up matters. The first seconds of a run may include page faults, allocator growth, branch predictor training, cache population, JIT compilation in managed systems, or lazy initialization. A benchmark should either discard a warm-up interval or run long enough that initialization noise is negligible. Result stabilization matters for the same reason. A single best run is not evidence; repeated runs with variance are.
+
+Profiling with \texttt{perf} or platform-specific counters helps separate algorithm cost from machine cost. Useful events include cycles, instructions, cache misses, branch misses, lock contention, context switches, and, where available, hardware-transaction abort causes. On platforms without \texttt{perf}, equivalent vendor tools or coarse counters can still reveal whether a curve is CPU-bound, memory-bound, or scheduler-bound.
+
+A central rule is to compare against the uninstrumented baseline, not just against other TMs. Transactional instrumentation can dominate algorithmic differences. If an uninstrumented bank transfer runs much faster than every TM backend at one thread, the gap is not contention; it is barrier, metadata, logging, and compiler cost. Only after this baseline is known does it make sense to compare NOrec against TL2 or TinySTM against SwissTM.
+
+Benchmark hygiene includes pinning threads when possible, disabling frequency scaling when appropriate, reporting variance, and using enough repetitions to make five percent differences meaningful. The machine profile should record CPU model, core count, memory configuration, operating system, compiler version, optimization flags, backend configuration, workload parameters, and commit hash. Reproducibility is not a ceremonial appendix; it is the only way to distinguish an algorithmic result from a local accident.
+
+\begin{table}[htbp]
+\centering
+\caption{Measured anchors from the companion M1 Pro fuzz/bank runs. These are calibration points, not universal rankings.}
+\label{tab:perf-anchors}
+\begin{tabular}{p{0.15\linewidth}p{0.19\linewidth}p{0.23\linewidth}p{0.31\linewidth}}
+\hline
+Backend & Workload slice & Throughput & Modeling use \\
+\hline
+NOrec-BF & read-mostly & about 829K txns/s & Bloom-filtered read-set cost \\
+NOrec & read-mostly & about 553K txns/s & global-clock validation cost \\
+TL2 & fuzz/bank & about 2.06M txns/s & ownership-record fast path \\
+TSC-TM & fuzz/bank & about 2.05M txns/s & timestamp fast path \\
+MVLog & write-heavy & about 275K txns/s & multi-version log pressure \\
+MVLog & read-mostly & about 109K txns/s & multi-version read overhead \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Common tuning symptoms and likely causes in optimistic TM experiments.}
+\label{tab:perf-symptoms}
+\begin{tabular}{p{0.28\linewidth}p{0.34\linewidth}p{0.30\linewidth}}
+\hline
+Symptom & Likely cause & First check \\
+\hline
+High abort rate, short attempts & hot metadata or hot data item & conflict-address histogram \\
+High abort rate, long attempts & late validation failure & read-set length and validation point \\
+Low abort rate, low throughput & instrumentation or serialization cost & uninstrumented and SGL baselines \\
+Good one-thread rate, poor scaling & coherence traffic or false sharing & cache-line layout and owner records \\
+Large run-to-run variance & scheduler or frequency noise & pinning, repetitions, variance report \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Worked Example: Measuring Attempts in the Bank Benchmark}
+\index{bank benchmark}\index{single global lock}\index{wasted work}
+\label{sec:perf-bank-attempts}
+
+This standalone C++17 program implements the bank benchmark with a single
+global lock. It is intentionally simple: the point is to produce a clean
+baseline for throughput, attempts, semantic rejects, and the money-conservation
+invariant before replacing the critical section by NOrec, TL2, TinySTM, or
+another backend.
+
+\begin{lstlisting}[language=C++, caption={A compilable SGL bank benchmark that reports attempts and checks conservation.}]
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+#include <mutex>
+#include <random>
+#include <thread>
+#include <vector>
+
+struct Account {
+    long long balance;
+};
+
+struct Stats {
+    std::uint64_t attempts = 0;
+    std::uint64_t commits = 0;
+    std::uint64_t rejects = 0;
+};
+
+static bool transfer_sgl(std::vector<Account>& bank,
+                         std::mutex& global_lock,
+                         std::size_t from,
+                         std::size_t to,
+                         long long amount,
+                         long long floor,
+                         Stats& stats) {
+    ++stats.attempts;
+
+    std::lock_guard<std::mutex> guard(global_lock);
+
+    if (from == to) {
+        ++stats.commits;
+        return true;
+    }
+
+    if (bank[from].balance - amount < floor) {
+        ++stats.rejects;          // semantic reject, not a TM conflict
+        return false;
+    }
+
+    bank[from].balance -= amount;
+    bank[to].balance += amount;
+    ++stats.commits;
+    return true;
+}
+
+int main(int argc, char** argv) {
+    const std::size_t threads =
+        argc > 1 ? static_cast<std::size_t>(std::strtoull(argv[1], nullptr, 10)) : 4;
+    const std::size_t accounts =
+        argc > 2 ? static_cast<std::size_t>(std::strtoull(argv[2], nullptr, 10)) : 64;
+    const int seconds =
+        argc > 3 ? std::atoi(argv[3]) : 2;
+
+    const long long initial_balance = 1000;
+    const long long floor = 0;
+    const long long amount = 1;
+
+    std::vector<Account> bank(accounts, Account{initial_balance});
+    const long long initial_total =
+        static_cast<long long>(accounts) * initial_balance;
+
+    std::mutex global_lock;
+    std::atomic<bool> stop{false};
+    std::vector<Stats> per_thread(threads);
+    std::vector<std::thread> workers;
+
+    auto start = std::chrono::steady_clock::now();
+
+    for (std::size_t tid = 0; tid < threads; ++tid) {
+        workers.emplace_back([&, tid] {
+            std::mt19937_64 rng(0xC0FFEEULL + tid);
+            std::uniform_int_distribution<std::size_t> pick(0, accounts - 1);
+
+            while (!stop.load(std::memory_order_relaxed)) {
+                std::size_t from = pick(rng);
+                std::size_t to = pick(rng);
+                transfer_sgl(bank, global_lock, from, to,
+                             amount, floor, per_thread[tid]);
+            }
+        });
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    stop.store(true, std::memory_order_relaxed);
+
+    for (auto& t : workers) {
+        t.join();
+    }
+
+    auto end = std::chrono::steady_clock::now();
+    double elapsed =
+        std::chrono::duration<double>(end - start).count();
+
+    std::uint64_t attempts = 0;
+    std::uint64_t commits = 0;
+    std::uint64_t rejects = 0;
+    for (const Stats& s : per_thread) {
+        attempts += s.attempts;
+        commits += s.commits;
+        rejects += s.rejects;
+    }
+
+    long long final_total = 0;
+    for (const Account& a : bank) {
+        final_total += a.balance;
+        if (a.balance < floor) {
+            std::cerr << "floor violation\n";
+            return 2;
+        }
+    }
+
+    if (final_total != initial_total) {
+        std::cerr << "money conservation violation\n";
+        return 3;
+    }
+
+    std::cout << "threads=" << threads
+              << " accounts=" << accounts
+              << " commits=" << commits
+              << " attempts=" << attempts
+              << " rejects=" << rejects
+              << " txns_per_sec=" << commits / elapsed
+              << " attempts_per_commit="
+              << (commits == 0 ? 0.0 : static_cast<double>(attempts) / commits)
+              << "\n";
+
+    return 0;
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item SGL has no speculative conflict aborts. Any reject in this program is caused by the account floor, not by validation failure.
+    \item The invariant check is part of the benchmark, not a debugging afterthought. A fast run that loses money is not a performance result.
+    \item The same driver shape can wrap a TM backend: keep the random stream, account count, transfer amount, and invariant checks fixed, then replace only the transaction boundary and memory-access API.
+    \item Attempts per commit is still useful for SGL because it separates useful commits from semantic rejects. For optimistic TM, add a separate counter for validation aborts.
+\end{itemize}
+
+\section{Worked Example: Model Checking a Bounded Contention Counter}
+\index{TLA+}\index{model checking}\index{contention}
+\label{sec:perf-tla-bank}
+
+The next TLA+ module is deliberately small. It models two workers, two
+accounts, a single owner slot, bounded attempts, account floors, and money
+conservation. It is not a full TM algorithm. It is a sanity model for the
+counters used in a performance report: each attempt is either in flight,
+committed, or aborted.
+
+\begin{lstlisting}[caption={A bounded TLA+ model for bank attempts, commits, and aborts.}]
+---- MODULE BankFloorContention ----
+EXTENDS Naturals, TLC
+
+A == {1, 2}
+Workers == {1, 2}
+InitBal == [i \in A |-> 5]
+Floor == 0
+Amount == 1
+MaxAttempts == 6
+
+VARIABLES bal, owner, attempts, commits, aborts
+
+vars == <<bal, owner, attempts, commits, aborts>>
+
+From(w) == IF w = 1 THEN 1 ELSE 2
+To(w) == IF w = 1 THEN 2 ELSE 1
+
+TotalAttempts == attempts[1] + attempts[2]
+
+Init ==
+  /\ bal = InitBal
+  /\ owner = 0
+  /\ attempts = [w \in Workers |-> 0]
+  /\ commits = 0
+  /\ aborts = 0
+
+Acquire(w) ==
+  /\ owner = 0
+  /\ TotalAttempts < MaxAttempts
+  /\ owner' = w
+  /\ attempts' = [attempts EXCEPT ![w] = @ + 1]
+  /\ UNCHANGED <<bal, commits, aborts>>
+
+BusyAbort(w) ==
+  /\ owner # 0
+  /\ owner # w
+  /\ TotalAttempts < MaxAttempts
+  /\ owner' = owner
+  /\ attempts' = [attempts EXCEPT ![w] = @ + 1]
+  /\ aborts' = aborts + 1
+  /\ UNCHANGED <<bal, commits>>
+
+Finish(w) ==
+  LET f == From(w)
+      t == To(w)
+  IN
+    /\ owner = w
+    /\ owner' = 0
+    /\ IF bal[f] >= Floor + Amount
+          THEN /\ bal' = [bal EXCEPT ![f] = @ - Amount,
+                                     ![t] = @ + Amount]
+               /\ commits' = commits + 1
+               /\ aborts' = aborts
+          ELSE /\ bal' = bal
+               /\ commits' = commits
+               /\ aborts' = aborts + 1
+    /\ attempts' = attempts
+
+Next ==
+  \E w \in Workers:
+      Acquire(w) \/ BusyAbort(w) \/ Finish(w)
+
+Spec == Init /\ [][Next]_vars
+
+TypeOK ==
+  /\ bal \in [A -> Nat]
+  /\ owner \in Workers \cup {0}
+  /\ attempts \in [Workers -> Nat]
+  /\ commits \in Nat
+  /\ aborts \in Nat
+
+MoneyConserved ==
+  bal[1] + bal[2] = InitBal[1] + InitBal[2]
+
+Floors ==
+  /\ bal[1] >= Floor
+  /\ bal[2] >= Floor
+
+AttemptsAccounted ==
+  attempts[1] + attempts[2] =
+    commits + aborts + (IF owner = 0 THEN 0 ELSE 1)
+
+\* TLC: check SPECIFICATION Spec
+\* TLC: check INVARIANTS TypeOK MoneyConserved Floors AttemptsAccounted
+====
+\end{lstlisting}
+
+\begin{itemize}
+    \item The invariant \texttt{AttemptsAccounted} is the accounting identity behind the benchmark columns: an attempt is committed, aborted, or still owned.
+    \item The owner slot makes contention explicit. A worker that arrives while another worker owns the slot increments both attempts and aborts.
+    \item The money invariant is independent of the performance counters. Do not infer correctness from high throughput.
+    \item Bounding attempts makes the state space finite; the same idea is used in larger model-checked specifications for the companion backends.
+\end{itemize}
+
+\section{Worked Example: Reading a Benchmark Report}
+\index{benchmark}\index{throughput}\index{abort rate}
+\label{sec:perf-example}
+
+What Part~III's models and this chapter's methodology look like when filled in
+with a real sweep across backends:
+
+\begin{lstlisting}[caption={A protocol for separating instrumentation cost from contention.}]
+backend   threads   tx/s       aborts   attempt/tx
+--------- -------   --------   -------  ----------
+uninstr.  1         8.2M       --       --
+NOrec     1         450K       0        1.00
+NOrec     4         402K       1.2M     1.08
+NOrec     8         313K       3.1M     1.17
+TL2       8         298K       3.3M     1.19
+SGL       8         210K       0        1.00
+\end{lstlisting}
+
+\begin{itemize}
+    \item The \texttt{uninstr.} row is the baseline this chapter insists on: instrumentation cost is
+    $$
+    \frac{8.2\ \mathrm{M}}{450\ \mathrm{K}} \approx 18.2,
+    $$
+    measured against the uninstrumented backend, not against another TM.
+    \item The \texttt{attempt/tx} column is the geometric retry model of \S\ref{sec:perf-analytical} read backwards. At 8 threads, NOrec averages 1.17 attempts per committed transaction, so
+    $$
+    p_{\mathrm{abort}} \approx 1 - \frac{1}{1.17} \approx 0.15.
+    $$
+    \item SGL shows the serialisation bottleneck of Part~IV: zero aborts, but throughput below every speculative backend at 8 threads.
+    \item Exercise~3 asks for the experiment design; the machine-profile record is what the companion simulator's cost calibration consumes.
+\end{itemize}
+
+\section{Worked Example: Estimating a Retry Cost}
+
+The retry model becomes actionable when it is tied to a measurement record. The following C++17 fragment reads committed transactions, attempts, and elapsed seconds from standard input, then reports an implied abort probability and an average time per attempt. It is intentionally backend-neutral: the same calculation can be applied to TL2, NOrec, TSC-TM, or a TinySTM configuration if the counters have the same meaning.
+
+\begin{lstlisting}[language=C++, caption={A small C++17 calculator for retry-model calibration.}]
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <stdexcept>
+
+struct Run {
+    double commits;
+    double attempts;
+    double seconds;
+};
+
+static Run parse(int argc, char** argv) {
+    if (argc != 4) {
+        throw std::runtime_error("usage: retry_cost COMMITS ATTEMPTS SECONDS");
+    }
+    Run r{std::atof(argv[1]), std::atof(argv[2]), std::atof(argv[3])};
+    if (r.commits <= 0.0 || r.attempts < r.commits || r.seconds <= 0.0) {
+        throw std::runtime_error("invalid counters");
+    }
+    return r;
+}
+
+int main(int argc, char** argv) {
+    try {
+        const Run r = parse(argc, argv);
+        const double attempts_per_commit = r.attempts / r.commits;
+        const double p_abort = 1.0 - (1.0 / attempts_per_commit);
+        const double committed_throughput = r.commits / r.seconds;
+        const double attempt_rate = r.attempts / r.seconds;
+        const double seconds_per_attempt = r.seconds / r.attempts;
+
+        std::cout << std::fixed << std::setprecision(6)
+                  << "attempts_per_commit=" << attempts_per_commit << "\n"
+                  << "implied_p_abort=" << p_abort << "\n"
+                  << "committed_txns_per_sec=" << committed_throughput << "\n"
+                  << "attempts_per_sec=" << attempt_rate << "\n"
+                  << "seconds_per_attempt=" << seconds_per_attempt << "\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << "\n";
+        return 2;
+    }
+}
+\end{lstlisting}
+
+For example, if a run reports
+
+$$
+\mathrm{commits}=1{,}000{,}000
+$$
+
+and
+
+$$
+\mathrm{attempts}=1{,}250{,}000,
+$$
+
+then attempts per commit is
+
+$$
+1.25
+$$
+
+and the implied abort probability is
+
+$$
+1 - \frac{1}{1.25} = 0.20.
+$$
+
+The number is not a proof that aborts are independent. It is a compact way to compare runs that use the same workload and counter definitions.
+
+\begin{itemize}
+    \item Attempts and commits must be counted at the same semantic boundary. Counting inner validation retries in one backend and whole transaction retries in another makes the ratio meaningless.
+    \item The implied abort probability is a model parameter, not a directly observed fact.
+    \item Time per attempt is often more revealing than abort rate when comparing read-set validation schemes.
+\end{itemize}
+
+\section{Summary}
+
+Performance evaluation of transactional memory requires both analytical models and careful empirical measurement. Throughput is the headline number, but it must be interpreted with aborts, attempts per commit, latency, wasted work, and validation cost.
+
+A useful report records the uninstrumented baseline, the SGL baseline, backend configuration, machine profile, toolchain, workload parameters, repetitions, variance, and correctness checks. The bank invariant is part of performance methodology: a fast backend that violates the account floor or money conservation is not a faster implementation of the same program.
+
+The best models are deliberately modest. Little's Law explains concurrency and latency. The retry model explains attempts per commit at low contention. Cost-per-operation models explain where cycles go. When measurements disagree with the model, the next experiment should identify the missing cost.
+
+\section{Exercises}
+\begin{enumerate}
+    \item Fit a simple Markov model to STAMP’s \texttt{intruder} benchmark and estimate the abort probability that maximizes throughput.
+    \item Use Little’s Law to explain why a high abort rate causes a sharp drop in throughput even when the system is not CPU-saturated.
+    \item Design an experiment to measure the overhead of TM instrumentation vs. fine-grained locking for a linked list.
+    \item \emph{[implementation]} Modify Listing~\ref{sec:perf-bank-attempts}'s benchmark so that it records per-thread latency samples for committed transfers. Report median, 95th percentile, and maximum latency, and explain why the maximum is unstable under contention.
+    \item \emph{[verification]} Extend the TLA+ model in \S\ref{sec:perf-tla-bank} with a third worker. Add an invariant stating that the number of in-flight attempts is at most one, and check that money conservation still holds.
+    \item \emph{[theory]} Starting from the retry model
+    $$
+    E[\mathrm{attempts\ per\ commit}] =
+    \frac{1}{1-p_{\mathrm{abort}}},
+    $$
+    derive the predicted committed throughput when each attempt costs a fixed time
+    $$
+    C_{\mathrm{attempt}}.
+    $$
+    State two concrete reasons why this prediction fails for TL2 or NOrec under high write contention.
+    \item \emph{[implementation]} Add a conflict-address histogram to the bank benchmark. Report the ten hottest accounts and explain whether the observed aborts are caused by data skew or by metadata layout.
+    \item \emph{[verification]} Add a bounded latency counter to the TLA+ model and state an invariant that every completed attempt is counted exactly once as either a commit or an abort.
+    \item \emph{[theory]} Suppose two backends have the same committed throughput but one has twice the attempts per commit. Give two workload changes under which the higher-attempt backend is likely to become worse.
+\end{enumerate}
+
+\index{attempts per commit}
+\index{semantic reject}
+\index{commit latency}
+\index{latency distribution}
+\index{machine profile}
+\index{cost-per-operation model}
+\index{Bloom-filtered read set}
+\index{global-clock validation}
+\index{ownership record}
+\index{timestamp fast path}
+\index{multi-version log pressure}
+\index{warm-up interval}
+\index{outlier rejection}
+\index{frequency scaling}
+\index{thread pinning}
+\index{uninstrumented baseline}
+\index{conflict-address histogram}
+\index{false sharing}
+\index{coherence storm}
+\index{retry model}
+\index{queueing delay}

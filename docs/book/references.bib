@@ -1,0 +1,127 @@
+% References for the TM book (docs/book/main.tex)
+% Build with: make && bibtex main && make
+
+% ---------------- Core TM foundations ----------------
+
+@inproceedings{herlihy93,
+  author    = {Maurice Herlihy and J. Eliot B. Moss},
+  title     = {Transactional Memory: Architectural Support for Lock-Free Data Structures},
+  booktitle = {Proceedings of the 20th Annual International Symposium on Computer Architecture (ISCA)},
+  year      = {1993},
+  pages     = {289--300}
+}
+
+@inproceedings{dice06tl2,
+  author    = {Dave Dice and Ori Shalev and Nir Shavit},
+  title     = {Transactional Locking {II}},
+  booktitle = {Proceedings of the 20th International Symposium on Distributed Computing (DISC)},
+  year      = {2006},
+  pages     = {194--208}
+}
+
+@inproceedings{riegel06disc,
+  author    = {Torvald Riegel and Pascal Felber and Christof Fetzer},
+  title     = {A Lazy Snapshot Algorithm with Eager Validation},
+  booktitle = {Proceedings of the 20th International Symposium on Distributed Computing (DISC)},
+  year      = {2006},
+  pages     = {284--298}
+}
+
+@inproceedings{dalessandro10norec,
+  author    = {Luke Dalessandro and Michael F. Spear and Michael L. Scott},
+  title     = {{NOrec}: Streamlining {STM} by Abolishing Ownership Records},
+  booktitle = {Proceedings of the 15th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming (PPoPP)},
+  year      = {2010},
+  pages     = {67--78}
+}
+
+@inproceedings{cachopo06,
+  author    = {Jo{\~a}o Cachopo and Ant{\'o}nio Rito-Silva},
+  title     = {Versioned Boxes as the Basis for Memory Transactions},
+  booktitle = {Companion to the 21st ACM SIGPLAN Conference on Object-Oriented Programming Systems, Languages, and Applications (OOPSLA)},
+  year      = {2006},
+  pages     = {25--34}
+}
+
+@inproceedings{minh08stamp,
+  author    = {Chi Cao Minh and JaeWoong Chung and Christos Kozyrakis and Kunle Olukotun},
+  title     = {{STAMP}: Stanford Transactional Applications for Multi-Processing},
+  booktitle = {Proceedings of the IEEE International Symposium on Workload Characterization (IISWC)},
+  year      = {2008},
+  pages     = {35--46}
+}
+
+% ---------------- GPU TM: hardware proposals (simulation only) ----------------
+
+@inproceedings{fung11kilotm,
+  author    = {Wilson W. L. Fung and Inderpreet Singh and Andrew Brownsword and Tor M. Aamodt},
+  title     = {Hardware Transactional Memory for {GPU} Architectures},
+  booktitle = {Proceedings of the 44th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)},
+  year      = {2011},
+  pages     = {296--307}
+}
+
+@inproceedings{fung13warptm,
+  author    = {Wilson W. L. Fung and Tor M. Aamodt},
+  title     = {Energy Efficient {GPU} Transactional Memory via Space-Time Optimizations},
+  booktitle = {Proceedings of the 46th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)},
+  year      = {2013},
+  pages     = {408--420}
+}
+
+@inproceedings{chen17snapshot,
+  author    = {Sui Chen and Lu Peng and Samuel Irving},
+  title     = {Accelerating {GPU} Hardware Transactional Memory with Snapshot Isolation},
+  booktitle = {Proceedings of the 44th Annual International Symposium on Computer Architecture (ISCA)},
+  year      = {2017},
+  pages     = {282--294}
+}
+
+% ---------------- GPU TM: software systems ----------------
+
+@inproceedings{xu14gpustm,
+  author    = {Yunlong Xu and Rui Wang and Nilanjan Goswami and Tao Li and Lan Gao and Depei Qian},
+  title     = {Software Transactional Memory for {GPU} Architectures},
+  booktitle = {Proceedings of the 2014 IEEE/ACM International Symposium on Code Generation and Optimization (CGO)},
+  year      = {2014}
+}
+
+@inproceedings{holey14,
+  author    = {Anup Holey and Antonia Zhai},
+  title     = {Lightweight Software Transactions on {GPUs}},
+  booktitle = {Proceedings of the 43rd International Conference on Parallel Processing (ICPP)},
+  year      = {2014},
+  pages     = {461--470}
+}
+
+@inproceedings{shen15prstm,
+  author    = {Qi Shen and Craig Sharp and William Blewitt and Gary Ushaw and Graham Morgan},
+  title     = {{PR-STM}: Priority Rule Based Software Transactions for the {GPU}},
+  booktitle = {Proceedings of the 2015 IFIP International Conference on Network and Parallel Computing (NPC)},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {9233},
+  year      = {2015},
+  pages     = {361--372}
+}
+
+@inproceedings{nunes22csmv,
+  author    = {Diogo Nunes and Daniel Castro and Paolo Romano},
+  title     = {{CSMV}: A Highly Scalable Multi-Versioned Software Transactional Memory for {GPUs}},
+  booktitle = {Proceedings of the 2022 IEEE International Parallel and Distributed Processing Symposium (IPDPS)},
+  year      = {2022},
+  pages     = {526--536}
+}
+
+@inproceedings{perlin24ofg,
+  author    = {Perlin, Jer{\^o}nimo and others},
+  title     = {{OFG-STM}: Transactional Memory for {GPUs} based on Obstruction-Free {STM}},
+  booktitle = {Proceedings of the XXVIII Brazilian Symposium on Programming Languages (SBLP)},
+  year      = {2024}
+}
+
+@misc{nunes23gust,
+  author       = {Diogo Nunes and Daniel Castro and Paolo Romano},
+  title        = {{GUST}: Scalable Multi-Version Concurrency Control for {GPUs}},
+  howpublished = {Technical report, INESC-ID / IST, Universidade de Lisboa},
+  year         = {2023}
+}

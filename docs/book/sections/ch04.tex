@@ -1,0 +1,291 @@
+
+\chapter{Programming Languages and Memory Semantics for TM}
+\section{C/C++ Memory Model and ABI Hazards: \texttt{volatile}, Inline Assembly, and Atomics}
+\begin{itemize}
+    \item \texttt{volatile} only prevents compile‑time reordering, not CPU reordering.
+    \item C11/C++11 atomics and memory ordering (relaxed, acquire, release, seq\_cst).
+    \item How compiler barriers can replace costly full fences inside a TM.
+    \item The per-operation cost model in STM backends: which ordering each read/write actually needs, and how backends downgrade \texttt{seq\_cst} to \texttt{compiler\_fence(SeqCst)} on the read path.
+    \item Comparing the TM read path to lock-free readers/`-writer patterns: same atomics, different workload.
+    \item ABI hazards specific to C/C++ TM integration: calling-convention mismatches between instrumented and non-instrumented functions, and the DATA-vs-TEXT symbol traps that arise when a runtime exposes hooks as function pointers rather than functions (see the pitfalls chapter).
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.55cm and 1.85cm,
+    box/.style={draw, rounded corners, align=center, minimum width=2.7cm, minimum height=0.85cm},
+    small/.style={draw, rounded corners, align=center, minimum width=2.35cm, minimum height=0.75cm},
+    arr/.style={-{Latex[length=2mm]}, thick}
+]
+\node[box] (src) {source\\\texttt{\_\_transaction\_atomic}};
+\node[box, right=of src] (pass) {compiler pass\\address check};
+\node[box, right=of pass] (abi) {ABI boundary\\real functions};
+\node[box, right=of abi] (rt) {TM runtime\\read/write API};
+
+\node[small, below=of pass] (plain) {plain load/store\\if private};
+\node[small, below=of rt] (atoms) {atomics\\acquire/release};
+\node[small, right=of atoms] (fence) {compiler fences\\read path};
+
+\draw[arr] (src) -- (pass);
+\draw[arr] (pass) -- node[above]{shared} (abi);
+\draw[arr] (abi) -- (rt);
+\draw[arr] (pass) -- node[left]{private} (plain);
+\draw[arr] (rt) -- (atoms);
+\draw[arr] (rt) -- (fence);
+\draw[arr] (atoms) -- (fence);
+\end{tikzpicture}%
+}
+\caption{A language-integrated TM boundary: the compiler decides which memory operations are instrumented; the runtime decides which atomics and fences implement the protocol.}
+\label{fig:language-tm-boundary}
+\end{figure}
+
+\section{Language Integration Case Studies}
+\subsection{Rust: The Borrow Checker and TM}
+\begin{itemize}
+    \item The borrow checker eliminates data races at compile time.
+    \item \texttt{UnsafeCell} and interior mutability: what remains unprotected.
+    \item How Rust’s safety guarantees can reduce (but not eliminate) the need for TM instrumentation.
+    \item Rust's guarantees eliminate \emph{data races} but not \emph{deadlocks} or \emph{lost atomicity} --- the very guarantees TM adds on top of the language.
+    \item \texttt{Sync}/\texttt{Send} traits as a way to reason about which values can be shared across threads; TM reifies ``shared mutable'' safety at runtime instead of compile time.
+    \item The C++ and Rust stories are different in kind, not just degree: C++ gives the programmer \emph{control} over orderings; Rust removes whole classes of hazard at compile time. A TM layer must therefore integrate with each differently --- one C++ ABI, one Rust trait boundary.
+\end{itemize}
+
+\subsection{Language‑Integrated Annotations for TM}
+\begin{itemize}
+    \item GCC’s \texttt{\_\_transaction\_atomic} and \texttt{transaction\_safe} / \texttt{transaction\_pure} attributes.
+    \item The (abandoned) C++ TM Technical Specification: transaction-safe functions, atomic blocks, and why the committee ultimately dropped it.
+    \item Research proposals like \texttt{@atomic} blocks.
+    \item This book's instrumentation plugin: a \texttt{[[tm::shared]]} annotation on globals, and the \texttt{LLVM\_TM\_ADDR\_CHECK} threshold deciding when instrumentation is actually needed.
+    \item The three case studies (GCC, the C++ TS, this book's plugin) are a spectrum of how much the language commits to: the less the compiler enforces, the more the runtime must prove.
+\end{itemize}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.21\textwidth}p{0.25\textwidth}p{0.25\textwidth}p{0.20\textwidth}}
+\hline
+Mechanism & Programmer contract & Runtime/compiler burden & Main hazard \\
+\hline
+\texttt{volatile} & Preserve visible accesses at compile time & Almost none & Not synchronization; CPU may reorder \\
+C/C++ atomics & Choose ordering per operation & Implement the requested ordering & Correct but non-composable protocols \\
+GCC atomic block & Mark transactional regions and safe calls & Compiler lowers loads, stores, and calls & Unsafe escape through non-transactional code \\
+\texttt{[[tm::shared]]} plugin & Mark shared objects explicitly & Instrument only addresses that may alias shared state & Missed annotation loses atomicity \\
+Rust trait boundary & Share only values satisfying \texttt{Send}/\texttt{Sync} contracts & Encapsulate mutation behind safe APIs or \texttt{UnsafeCell} & Interior mutability and FFI escape hatches \\
+\hline
+\end{tabular}
+\caption{Language mechanisms differ in where they place the TM proof obligation.}
+\label{tab:language-tm-taxonomy}
+\end{table}
+
+\section{Worked Example: Atomic Operations for a Counter}
+\index{atomic operations}\index{C11 atomics}\index{volatile}\index{atomic\_signal\_fence}
+\label{sec:atomics-example}
+
+A shared counter is the smallest TM-relevant program. Compare the three
+synchronisation styles on the same three lines of logic:
+
+\begin{lstlisting}[language=C, caption={A shared counter three ways.}]
+/* Locks: correct, coarse, non-composable. */
+pthread_mutex_lock(&m); counter++; pthread_mutex_unlock(&m);
+
+/* C11 atomics: fine-grained, but the orderings are on the programmer. */
+int prev = atomic_fetch_add(&counter, 1, memory_order_relaxed);
+
+/* TM: the block is the unit; orderings are the runtime's problem. */
+__transaction_atomic { counter++; }
+\end{lstlisting}
+
+\begin{itemize}
+    \item The atomic version exposes \emph{which} ordering to use per operation; the TM version hides the whole protocol.
+    \item The TM runtime still needs the right atomics internally --- it just puts them behind one API (Part~IV).
+    \item Composability reappears: two counters in one \texttt{atomic} block compose; two separate \texttt{atomic\_fetch\_add} calls do not.
+    \item Exercise~3 of this chapter asks for the full C++ and Rust comparison.
+\end{itemize}
+
+\section{Worked Example: ABI-Safe Bank Transfer}
+\index{ABI hazards}\index{compiler fence}\index{single global lock}\index{bank transfer}
+\label{sec:abi-safe-bank-transfer}
+
+The following example is deliberately an SGL-style TM. Its purpose is not
+performance; it is the language boundary. The runtime exports functions, not
+data symbols containing function pointers. The instrumented code calls those
+functions and lets the runtime choose atomics and fences internally.
+
+\begin{lstlisting}[language=C++, caption={A compilable C++ TM facade for the bank-transfer invariant.}]
+#include <array>
+#include <atomic>
+#include <cassert>
+#include <cstddef>
+
+struct Account {
+    int balance;
+};
+
+static std::array<Account, 2> bank{{Account{100}, Account{100}}};
+static std::atomic_flag global_lock = ATOMIC_FLAG_INIT;
+
+/* ABI boundary: real functions, not DATA symbols containing function pointers. */
+extern "C" void tm_begin() {
+    while (global_lock.test_and_set(std::memory_order_acquire)) {
+        /* spin */
+    }
+}
+
+extern "C" void tm_commit() {
+    global_lock.clear(std::memory_order_release);
+}
+
+extern "C" int tm_read_i32(const int *p) {
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+    int v = *p;
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+    return v;
+}
+
+extern "C" void tm_write_i32(int *p, int v) {
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+    *p = v;
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+}
+
+class TxGuard {
+public:
+    TxGuard() { tm_begin(); }
+    ~TxGuard() { tm_commit(); }
+
+    TxGuard(const TxGuard&) = delete;
+    TxGuard& operator=(const TxGuard&) = delete;
+};
+
+static bool transfer(std::size_t from, std::size_t to, int amount, int floor) {
+    TxGuard tx;
+
+    int from_balance = tm_read_i32(&bank[from].balance);
+    int to_balance = tm_read_i32(&bank[to].balance);
+
+    if (from_balance - amount < floor) {
+        return false;
+    }
+
+    tm_write_i32(&bank[from].balance, from_balance - amount);
+    tm_write_i32(&bank[to].balance, to_balance + amount);
+    return true;
+}
+
+static int total_money() {
+    return bank[0].balance + bank[1].balance;
+}
+
+int main() {
+    const int initial_total = total_money();
+
+    assert(transfer(0, 1, 30, 0));
+    assert(bank[0].balance >= 0);
+    assert(bank[1].balance >= 0);
+    assert(total_money() == initial_total);
+
+    assert(!transfer(0, 1, 1000, 0));
+    assert(total_money() == initial_total);
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item The acquire on \texttt{tm\_begin} and release on \texttt{tm\_commit} publish the critical section; the per-access fences only constrain the compiler.
+    \item The source-level transaction is compositional: the floor check and both writes are one unit.
+    \item The ABI contract is visible: instrumented code calls \texttt{tm\_read\_i32} and \texttt{tm\_write\_i32}; non-instrumented code must not bypass shared state.
+    \item This is the semantic baseline implemented by SGL and TSX-SGL before more selective protocols such as NOrec, TL2, and TSC-TM reduce contention.
+\end{itemize}
+
+\section{Worked Example: Model Checking Lost Atomicity}
+\index{TLA+}\index{lost atomicity}\index{money conservation}
+\label{sec:tla-bank-language-contract}
+
+Language support for TM should preserve the same invariant as the runtime:
+the transfer either commits as one state transition or has no effect. A small
+TLA+ model captures that contract without mentioning cache lines, fences, or
+calling conventions.
+
+\begin{lstlisting}[language={}, caption={A TLC-checkable TLA+ model of an atomic bank transfer.}]
+---- MODULE BankTMAtomicity ----
+EXTENDS Naturals
+
+A0 == 10
+A1 == 10
+Floor == 0
+Amount == 3
+
+VARIABLES bal, pc
+
+vars == <<bal, pc>>
+
+Init ==
+    /\ bal = [0 |-> A0, 1 |-> A1]
+    /\ pc = "idle"
+
+CanTransfer ==
+    bal[0] >= Amount + Floor
+
+Begin ==
+    /\ pc = "idle"
+    /\ pc' = "active"
+    /\ UNCHANGED bal
+
+Commit ==
+    /\ pc = "active"
+    /\ CanTransfer
+    /\ bal' = [bal EXCEPT ![0] = @ - Amount,
+                          ![1] = @ + Amount]
+    /\ pc' = "idle"
+
+Abort ==
+    /\ pc = "active"
+    /\ ~CanTransfer
+    /\ pc' = "idle"
+    /\ UNCHANGED bal
+
+Idle ==
+    /\ pc = "idle"
+    /\ UNCHANGED vars
+
+Next ==
+    Begin \/ Commit \/ Abort \/ Idle
+
+Spec ==
+    Init /\ [][Next]_vars
+
+InvMoney ==
+    bal[0] + bal[1] = A0 + A1
+
+InvFloor ==
+    bal[0] >= Floor /\ bal[1] >= Floor
+
+THEOREM Spec => []InvMoney
+THEOREM Spec => []InvFloor
+====
+\end{lstlisting}
+
+\begin{itemize}
+    \item The model treats the transaction body as one commit transition; this is the property language integration must preserve.
+    \item \texttt{InvMoney} catches partial instrumentation: debiting without crediting violates conservation.
+    \item \texttt{InvFloor} catches a misplaced check: the account floor must be tested in the same atomic unit as the debit.
+    \item The model abstracts away C++ and Rust details; those details re-enter at the ABI and trait boundaries.
+\end{itemize}
+
+\section{Summary}
+\begin{itemize}
+    \item Different languages offer different levels of memory‑ordering control.
+    \item A type system that prevents data races still cannot enforce atomicity across multiple memory locations without TM support.
+\end{itemize}
+
+\section{Exercises}
+\begin{enumerate}
+    \item In C, a compiler hoists a read of \texttt{x} out of an \texttt{atomic} block. Explain how \texttt{volatile} or an \texttt{asm} barrier can prevent this, and what the runtime cost is.
+    \item A Rust program uses \texttt{RefCell}. Explain why an STM that instruments all loads and stores still cannot protect against a data race without additional runtime checks.
+    \item Compare the programming effort required to add a thread-safe counter using locks, atomics, and a TM in C++ and Rust.
+    \item \emph{[implementation]} Extend the ABI-safe bank-transfer example with a second shared object, \texttt{transfer\_count}. Update it inside the same transaction as the two account balances. Then write a non-transactional version using three separate atomics and identify an interleaving that preserves each individual atomic operation but violates the intended compound invariant.
+    \item \emph{[verification]} Modify the TLA+ model in the lost-atomicity example by splitting \texttt{Commit} into two transitions, one debit and one credit. Run TLC on the finite model and record the shortest counterexample to \texttt{InvMoney}. Explain which source-level compiler or ABI mistake the split transition represents.
+    \item \emph{[theory]} Compare a C++ TM API based on explicit \texttt{std::memory\_order} parameters with a Rust API based on a \texttt{TxCell<T>} wrapper. For each API, state what the type system proves, what the runtime must still validate, and where unsafe escape hatches can break atomicity.
+\end{enumerate}
+
+%  PART III: FORMAL FOUNDATIONS: MATHEMATICS AND VERIFICATION

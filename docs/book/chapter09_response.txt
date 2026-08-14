@@ -1,0 +1,453 @@
+% docs/book/sections/ch09.tex
+% Chapter 9: Speculative Designs: NOrec and Beyond
+% Part IV: Implementing Transactional Memory
+% This chapter explains speculative STM designs with NOrec, TL2, TinySTM, and
+%   multiversion systems, including worked examples, code listings, figures, tables, and tagged exercises.
+\chapter{Speculative Designs: NOrec and Beyond}
+\index{NOrec!sections index; TL2; TinySTM; JVSTM; MVLog; value-based validation; global-clock STM; multiversion STM}
+
+Speculative transactional memory replaces coarse serialization with optimistic execution. A transaction reads shared memory, records enough evidence to justify those reads, buffers or protects its writes, and later tries to make the whole execution appear atomic. The reward is concurrency. The price is aborts, metadata traffic, validation, and proof obligations.
+
+This chapter studies the speculative in-memory families implemented in the companion repository: NOrec and NOrec-BF, TL2 and TSC-TM, TinySTM variants, JVSTM, and MVLog. The running bank-transfer example remains the test case: a transfer must preserve total money and must not take an account below its floor. Each design is judged by the same question: how does it prevent a transaction from committing an inconsistent snapshot?
+
+\section{NOrec: Value‑Based Validation}
+
+NOrec is the smallest useful optimistic STM in the repository. It has one global sequence clock, one commit lock, a buffered write-set, and a read-set containing addresses and the values observed at those addresses. There are no ownership records attached to individual memory locations. That absence is the name: \emph{NO ownership RECords}.
+
+The algorithm is value-based. A transaction starts by sampling the global clock. A read first consults the transaction's own write-set; if the address has already been written speculatively, the buffered value is returned. Otherwise the read performs the read-validate discipline: capture the clock, read the value, re-check the clock, and validate the old read-set before admitting the new read. If the clock changed, some writer committed during the read, so the transaction retries or validates.
+
+At commit time, the transaction acquires the single commit lock, re-reads every address in the read-set, compares each value with the recorded value, writes back the buffered writes, and advances the global clock. The clock advance is the linearization point for update transactions. A read-only transaction may linearize at a stable clock sample after validation.
+
+The central invariant is simple: every committed transaction must have read values that all coexisted at one logical time. NOrec enforces this without per-location metadata by re-reading values. Clock-only validation is not enough. The companion implementation fixed a real bug class of this form: an ``invisible-it-committed'' execution in which a concurrent commit occurred between a transaction's last read and its commit, but the stale snapshot was not detected because values were not revalidated.
+
+The cost model follows directly. NOrec has the smallest metadata footprint among the in-memory STMs considered here, but validation cost grows with the read-set size. The Bloom-filter variant, NOrec-BF, improves read-mostly workloads by avoiding some expensive bookkeeping and validation work when the filter proves an address is irrelevant to the current conflict check. In the repository's M1 Pro bank/fuzz measurements, NOrec-BF reaches about 829K transactions per second on a read-mostly workload, compared with about 553K for baseline NOrec. That is not a new algorithmic law; it is the expected signature of removing work from the read path.
+
+\section{Worked Example: The NOrec Read Path}
+\index{NOrec}\index{read-validate}\index{read-only transaction}\index{commit order}\index{validation}\index{read-set}
+\label{sec:norec-example}
+
+The read-validate discipline in code, mirroring \S\ref{sec:tso-example}'s
+capture$\rightarrow$read$\rightarrow$recheck:
+
+\begin{lstlisting}[language=C, caption={NOrec read: capture clock, read, re-check clock.}]
+int32_t tm_read_i4(const void *addr) {
+    for (;;) {
+        uint64_t t1 = atomic_load(&g_clock);       /* capture   */
+        int32_t v  = *(const int32_t*)addr;        /* read      */
+        uint64_t t2 = atomic_load(&g_clock);       /* re-check  */
+        if (t1 == t2) return v;                    /* consistent */
+        /* a commit raced us: retry */
+    }
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item Two clock reads bracket the data read; any interleaved commit changes the clock and forces a retry.
+    \item This is the read-validate pattern the bullet above names --- the same one Part~II's store-buffer example revealed in hardware.
+    \item Note there is no lock and no CAS: the read path is a plain load plus two acquires. That is the entire NOrec point.
+    \item Exercise~1 of this chapter invites you to drop the second clock read and watch the invariant tests of Part~III fail.
+\end{itemize}
+
+The listing is deliberately minimal. A production NOrec read also checks the transaction's write-set before loading from memory and records the loaded value in the read-set after validation. The essence, however, is the two clock reads around the data read. They prevent a reader from accepting a value that was observed while a writer was publishing.
+
+\section{Worked Example: NOrec Bank Transfer}
+\index{NOrec}\index{bank transfer}\index{money conservation}\index{account floor}\index{value-based validation}
+\label{sec:norec-bank-transfer-example}
+
+The running bank example is deliberately small: transfer money between two
+accounts, preserve total money, and reject transfers that would take the
+source account below its floor.  In NOrec, transaction-local writes are buffered
+until commit; reads first consult the write-set, then perform the
+capture$\rightarrow$read$\rightarrow$recheck protocol.
+
+\begin{lstlisting}[language=C, caption={A compilable C++17 NOrec-style bank transfer with value revalidation.}]
+#include <atomic>
+#include <cstdint>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
+
+struct ReadEntry {
+    const int64_t *addr;
+    int64_t value;
+};
+
+struct WriteEntry {
+    int64_t *addr;
+    int64_t value;
+};
+
+struct Tx {
+    uint64_t start_clock = 0;
+    std::vector<ReadEntry> read_set;
+    std::vector<WriteEntry> write_set;
+};
+
+static std::atomic<uint64_t> g_clock{0};
+static std::mutex g_commit_lock;
+
+static bool validate(const Tx &tx) {
+    for (const ReadEntry &r : tx.read_set) {
+        if (*r.addr != r.value) return false;
+    }
+    return true;
+}
+
+static bool find_write(const Tx &tx, const int64_t *addr, int64_t &out) {
+    for (auto it = tx.write_set.rbegin(); it != tx.write_set.rend(); ++it) {
+        if (it->addr == addr) {
+            out = it->value;
+            return true;
+        }
+    }
+    return false;
+}
+
+static int64_t tx_read(Tx &tx, int64_t *addr) {
+    int64_t buffered = 0;
+    if (find_write(tx, addr, buffered)) return buffered;
+
+    for (;;) {
+        uint64_t c1 = g_clock.load(std::memory_order_acquire);
+        int64_t v = *addr;
+        uint64_t c2 = g_clock.load(std::memory_order_acquire);
+
+        if (c1 == c2 && validate(tx)) {
+            tx.read_set.push_back(ReadEntry{addr, v});
+            return v;
+        }
+
+        tx.read_set.clear();
+        tx.start_clock = g_clock.load(std::memory_order_acquire);
+    }
+}
+
+static void tx_write(Tx &tx, int64_t *addr, int64_t value) {
+    for (WriteEntry &w : tx.write_set) {
+        if (w.addr == addr) {
+            w.value = value;
+            return;
+        }
+    }
+    tx.write_set.push_back(WriteEntry{addr, value});
+}
+
+static bool tx_commit(Tx &tx) {
+    std::lock_guard<std::mutex> guard(g_commit_lock);
+
+    if (!validate(tx)) return false;
+
+    for (const WriteEntry &w : tx.write_set) {
+        *w.addr = w.value;
+    }
+
+    g_clock.fetch_add(1, std::memory_order_release);
+    return true;
+}
+
+static bool transfer(int64_t accounts[2],
+                     int64_t floor[2],
+                     int from,
+                     int to,
+                     int64_t amount) {
+    Tx tx;
+    tx.start_clock = g_clock.load(std::memory_order_acquire);
+
+    int64_t src = tx_read(tx, &accounts[from]);
+    int64_t dst = tx_read(tx, &accounts[to]);
+
+    if (src - amount < floor[from]) return false;
+
+    tx_write(tx, &accounts[from], src - amount);
+    tx_write(tx, &accounts[to], dst + amount);
+
+    return tx_commit(tx);
+}
+
+int main() {
+    int64_t accounts[2] = {100, 100};
+    int64_t floor[2] = {0, 0};
+
+    bool ok = transfer(accounts, floor, 0, 1, 25);
+
+    if (!ok) return 1;
+    if (accounts[0] + accounts[1] != 200) return 2;
+    if (accounts[0] < floor[0] || accounts[1] < floor[1]) return 3;
+
+    return 0;
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item The money-conservation invariant is checked after commit: the sum of
+    committed account balances remains unchanged.
+    \item The floor check is speculative.  It is safe only because commit
+    revalidates the values that justified it.
+    \item The read path validates the old read-set before admitting a new read.
+    Otherwise a transaction can assemble a snapshot from different commit
+    times.
+    \item NOrec has no per-account ownership record; the commit lock and global
+    sequence clock serialize publication.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    font=\small,
+    node distance=1.8cm,
+    box/.style={draw, rectangle, rounded corners, minimum width=2.6cm, minimum height=0.8cm, align=center},
+    edge/.style={-{Stealth}, thick}
+]
+\node[box] (begin) {Begin\\read clock};
+\node[box, right=of begin] (read) {Read account\\record value};
+\node[box, right=of read] (validate) {Validate\\read-set};
+\node[box, right=of validate] (buffer) {Buffer\\debit/credit};
+\node[box, below=of validate] (commit) {Commit lock\\revalidate};
+\node[box, left=of commit] (abort) {Abort\\retry};
+\node[box, right=of commit] (publish) {Write back\\advance clock};
+
+\draw[edge] (begin) -- (read);
+\draw[edge] (read) -- (validate);
+\draw[edge] (validate) -- node[above] {ok} (buffer);
+\draw[edge] (buffer) -- (commit);
+\draw[edge] (commit) -- node[above] {ok} (publish);
+\draw[edge] (validate) -- node[left] {changed} (abort);
+\draw[edge] (commit) -- node[above] {changed} (abort);
+\draw[edge] (abort.west) -| ($(begin.south west)+(-0.4,-0.2)$) -- (begin.south);
+\end{tikzpicture}
+\caption{NOrec bank-transfer state machine.  The transaction may validate during reads and must validate again while holding the commit lock; only then may it publish both account updates and advance the global clock.}
+\label{fig:norec-bank-state-machine}
+\end{figure}
+
+\section{Worked Example: TL2 Read Barrier}
+
+TL2 moves part of the validation burden from values to metadata. Each transactional location has a versioned lock word. A read samples the lock word, reads the payload, then samples the lock word again. The two samples must agree, the location must not be locked by a writer, and the version must not be newer than the transaction's start timestamp.
+
+\begin{lstlisting}[language=C, caption={A compilable C++17 TL2-style read barrier for one integer location.}]
+#include <atomic>
+#include <cstdint>
+
+struct VersionedInt {
+    std::atomic<uint64_t> meta;  // low bit = locked, high bits = version
+    int64_t value;
+};
+
+static constexpr uint64_t LOCKED = 1;
+
+struct ReadRecord {
+    VersionedInt *obj;
+    uint64_t observed_meta;
+    int64_t observed_value;
+};
+
+static bool is_locked(uint64_t meta) {
+    return (meta & LOCKED) != 0;
+}
+
+static uint64_t version(uint64_t meta) {
+    return meta >> 1;
+}
+
+static bool tl2_read(VersionedInt *obj,
+                     uint64_t start_time,
+                     ReadRecord &out) {
+    for (;;) {
+        uint64_t m1 = obj->meta.load(std::memory_order_acquire);
+        if (is_locked(m1) || version(m1) > start_time) return false;
+
+        int64_t v = obj->value;
+
+        uint64_t m2 = obj->meta.load(std::memory_order_acquire);
+        if (m1 == m2 && !is_locked(m2)) {
+            out = ReadRecord{obj, m2, v};
+            return true;
+        }
+    }
+}
+
+int main() {
+    VersionedInt account{{2}, 100}; // version 1, unlocked
+    ReadRecord r{};
+    return tl2_read(&account, 1, r) && r.observed_value == 100 ? 0 : 1;
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item TL2 reads are invisible: the reader does not write to shared metadata.
+    \item The metadata double-check prevents a read from crossing a writer's lock/unlock interval.
+    \item The start timestamp defines the snapshot; versions newer than that timestamp force abort.
+\end{itemize}
+
+\section{TL2: The Textbook Global-Clock STM}
+
+TL2 is the standard global-clock optimistic STM. A transaction reads the global version clock at begin time. That value is its snapshot time. Each transactional location has version metadata; each transaction has a read-set and a buffered write-set. Reads are invisible, but they are not unchecked: the read barrier records the observed version and later validation ensures the version did not change.
+
+The commit protocol is lock-then-validate. The writer acquires ownership of every location in its write-set, validates the read-set against recorded versions, obtains a fresh commit timestamp, writes back the buffered values, installs the new versions, and releases the locks. The commit timestamp is the serialization point.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[font=\small]
+  % global clock timeline
+  \draw[-{Stealth}] (0,0) -- (11,0) node[right] {global clock};
+  \foreach \x/\lab in {1/$5$,3/$5$,5/$6$,7/$6$,9/$7$}
+    \draw (\x,0.08) -- (\x,-0.08) node[below] {\lab};
+  % T1: begins at 5, reads, then aborts after clock advances
+  \node[draw,rectangle,minimum height=0.5cm,minimum width=3.2cm,fill=black!6]
+        (T1) at (2.1,1.0) {\texttt{read x}};
+  \draw[-{Stealth}] (T1.south) -- (1.4,0.05);
+  \draw[-,thick,black!30] (1.4,0.05) -- (5.4,0.05);
+  \node at (4.6,1.0) {$T_1$ begin@5};
+  % T2: begins at 5, writes x, commits at clock 6
+  \node[draw,rectangle,minimum height=0.5cm,minimum width=3.2cm,fill=black!6]
+        (T2) at (4.4,2.2) {\texttt{write x}};
+  \draw[-{Stealth}] (T2.south) -- (3.4,0.05);
+  \draw[-,thick,black!50] (3.4,0.05) -- (5.0,0.05);
+  \draw[-{Stealth},thick] (5.0,0.05) -- (5.4,0.05);
+  \node at (6.6,2.2) {$T_2$ begin@5, commit@6};
+  \node[align=left,text width=7.2cm] at (7.6,1.0)
+        {$T_1$ re-validates at commit: version of \texttt{x}\\
+         moved past its snapshot $\Rightarrow$ abort};
+\end{tikzpicture}
+\caption{TL2 timeline: $T_1$ and $T_2$ both begin at clock 5; $T_2$ commits (advancing the clock to 6) before $T_1$ validates, so $T_1$ must abort.}
+\label{fig:tl2-timeline}
+\end{figure}
+
+The validation rule is the opacity rule in executable form: every read-set entry must still have the recorded version, and that version must be no later than the transaction's snapshot. This is why invisible reads are safe. The reader does not announce itself, but it later proves that no writer changed what it observed.
+
+The repository's TL2 and TSC-TM backends show the expected signature on the M1 Pro bank/fuzz workload: both are around 2.05M transactions per second, with TL2 measured at about 2.06M and TSC-TM at about 2.05M. The important lesson is not the exact number; it is that a tight global-clock OCC design can be far faster than value-only NOrec when metadata checks are cheap and contention is moderate.
+
+\section{TinySTM Design Variants}
+
+TinySTM is not one algorithm but a configurable family. The two main axes are version management and conflict timing. Version management decides where speculative writes live before commit. Write-back mode keeps new values in the transaction's private write-set until commit. Write-through mode installs new values in memory immediately and records undo information for abort. Conflict timing decides whether a transaction acquires ownership eagerly, at write time, or lazily, at commit time.
+
+The repository exposes the important TinySTM styles: WBCTL, WT, and WBETL. In WBCTL, writes are buffered and locks are taken at commit time. Abort is cheap: discard the write-set. In WT, writes go through to memory, so abort must restore old values from an undo log. WT can detect write conflicts early, which helps under some high-contention patterns, but it makes rollback heavier and exposes more metadata traffic.
+
+The observable distinction is where data lives. In write-back, shared memory remains unchanged until commit. In write-through, shared memory may contain speculative state protected by locks and undo records. Both can be correct; they discharge different obligations. Write-back must ensure write-set forwarding for reads-after-writes. Write-through must ensure that no other transaction treats speculative memory as committed.
+
+TinySTM also illustrates cache-level engineering. Versioned write-set entries can avoid repeated metadata reads. Read-set bypass can avoid redundant validation when a read is satisfied from the write-set. These optimizations pay when transaction-local reuse is high; they add overhead when transactions touch many locations once.
+
+\section{Multiversion STMs: JVSTM and MVLog}
+
+Multiversion STMs avoid many read-only aborts by retaining history. A reader does not need to prove that the present still matches the past; it reads the past directly.
+
+JVSTM stores each transactional variable in a VBox, a versioned box containing a history of bodies. Each body records a version and a value. A transaction with read-version walks the VBox history and returns the newest body whose version is no greater than that read-version. Read-only transactions never abort because their snapshot is materialized by the version histories. Writers still validate: at commit, a global clock increments under a lock, and writers append new VBox bodies after checking that the heads they depended on have not changed.
+
+MVLog uses a different representation. It negotiates a commit slot at begin time with a single atomic increment, maintains an ever-growing log of committed write-sets, and tracks the newest writer per address. Its no-false-negative Bloom filter lets reads skip log work when the address is provably clean. The cost is history management. Memory grows with transaction count unless old versions and log entries are reclaimed. Epochs, hazard pointers, or equivalent schemes become part of the algorithm rather than an implementation afterthought.
+
+This is also why multiversion ideas dominate many GPU TM designs. Read-only transactions do not abort, commit slots are cheap atomics, and validation can be expressed as bulk log or version checks. The repository's GPU designs, including CSMV and GUST, use related ideas at warp and block granularity, with GUST using an AtomicINC commit-log design and CCT/MRV validation.
+
+\section{Worked Example: MVLog Snapshot Read}
+
+The following small program is not the repository MVLog backend. It is a compact model of the same idea: a reader chooses a snapshot version and then reads the newest committed version not newer than that snapshot.
+
+\begin{lstlisting}[language=C, caption={A compilable C++17 multiversion account read.}]
+#include <cstdint>
+#include <vector>
+
+struct VersionedValue {
+    uint64_t version;
+    int64_t value;
+};
+
+struct VBox {
+    // Newest entry first.
+    std::vector<VersionedValue> history;
+};
+
+static bool read_at(const VBox &box, uint64_t snapshot, int64_t &out) {
+    for (const VersionedValue &entry : box.history) {
+        if (entry.version <= snapshot) {
+            out = entry.value;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void append_commit(VBox &box, uint64_t version, int64_t value) {
+    box.history.insert(box.history.begin(), VersionedValue{version, value});
+}
+
+int main() {
+    VBox account{{VersionedValue{2, 90}, VersionedValue{1, 100}}};
+
+    int64_t old_snapshot = 0;
+    if (!read_at(account, 1, old_snapshot)) return 1;
+    if (old_snapshot != 100) return 2;
+
+    append_commit(account, 3, 80);
+
+    int64_t stable_snapshot = 0;
+    if (!read_at(account, 2, stable_snapshot)) return 3;
+    return stable_snapshot == 90 ? 0 : 4;
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item The reader's snapshot version, not the current head, determines the value returned.
+    \item Appending a new version does not invalidate an old read-only transaction.
+    \item Reclamation is the hard part: the body at version 1 cannot be freed while any reader may still hold snapshot 1.
+\end{itemize}
+
+\section{Comparing the Family}
+\index{comparison}\index{version management}\index{conflict detection}
+
+The speculative STM design space is small enough to fit in one matrix. The axes are conflict detection, version management, metadata placement, read visibility, and the linearization point. A runtime is a point in this space.
+
+NOrec is the simplicity endpoint: one clock, one commit lock, value re-reading, no ownership records. TL2 adds per-location version metadata and becomes the textbook OCC baseline. TinySTM exposes the engineering trade-off between write-back and write-through. JVSTM and MVLog spend memory to make read-only snapshots stable. The recurring invariant is unchanged: a transaction must not commit a snapshot that never existed.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lp{3.1cm}p{3.4cm}p{3.4cm}}
+\hline
+\textbf{Design} & \textbf{Read-set validation} & \textbf{Write-set ownership} & \textbf{Commit linearization} \\
+\hline
+SGL & none (mutex)           & direct writes under lock      & lock release \\
+NOrec & clock-capture re-read & buffered, no locks            & clock advance \\
+TL2 & per-location version   & buffered, commit lock         & clock advance + write-back \\
+TinySTM WBCTL & lock/version check & commit-time locking           & lock release \\
+TinySTM WT & versioned metadata   & write-through + undo log       & lock release \\
+JVSTM & none (history walk)   & VBox append under lock        & clock increment \\
+MVLog & no-false-negative bloom & commit-log slot + index      & slot publish \\
+\hline
+\end{tabular}
+\caption{The comparison matrix used throughout this chapter and the exercises: each row gives the same four facts --- read validation rule, write ownership, and the linearization point. A backend ``family'' is a choice in each column; opacity arguments in Part~III are written column-by-column.}
+\label{tab:family-matrix}
+\end{table}
+
+Per-runtime performance follows from the same columns. SGL serializes everything, so throughput is capped by the time of one transaction. NOrec validates whole read-sets. TL2 pays clock and metadata traffic, plus commit serialization. TinySTM pays ownership metadata traffic and, in write-through mode, rollback cost. Multiversion systems pay for history, log scans, and reclamation. In the repository measurements, MVLog's cost is visible: about 275K transactions per second on a write-heavy workload and about 109K on a read-mostly workload in the reported M1 Pro bank/fuzz runs.
+
+\section{Backend Taxonomy: The Repository in One Table}
+\index{backend taxonomy}\index{SGL}\index{TinySTM}\index{WBCTL}\index{NOrec}\index{TL2}\index{MVLog}\index{JVSTM}\index{SwissTM}\index{Romulus}\index{XTM}\index{TSX}\index{GPU TM}\index{persistent TM}\index{distributed TM}\index{reclamation}\index{private memory}\index{memory reclamation}
+The companion repository contains 20+ runtimes. This book explains the
+families; the table maps \emph{which repository backend is which family},
+so a reader looking for ``where is the code for X'' can find it and so the
+prose never overclaims that every backend is analysed in depth:
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lll}
+\hline
+\textbf{Repository backend} & \textbf{Family} & \textbf{Chapter} \\
+\hline
+\texttt{sgl}                 & single global lock   & Ch.~8 \\
+\texttt{tsxsgl}, \texttt{spht} & HTM + SGL fallback  & Ch.~8, 16 \\
+\texttt{norec}, \texttt{norec\_bf} & value-based validation & Ch.~9 \\
+\texttt{tl2}, \texttt{tsc\_tm}     & global-clock OCC     & Ch.~9 \\
+\texttt{tinystm} (\texttt{wbctl}/\texttt{wt}/\texttt{wbetl}) & per-object locking & Ch.~9 \\
+\texttt{jvstm}, \texttt{mvlog}      & multiversion         & Ch.~9 \\
+\texttt{swisstm}, \texttt{romulus}, \texttt{leftright} & OCC variants & Ch.~9 \\
+\texttt{xtm}, \texttt{dudetm}, \texttt{nvhtm} & page/persistent/hybrid & Ch.~13 \\
+\texttt{persistent\_sgl}, \texttt{distributed\_sgl}, \texttt{tikv} & persistent/distributed & Ch.~18 \\
+\texttt{gust}, \texttt{csmv}, \texttt{jvstm-gpu}, \texttt{gputx}, \texttt{gacco}, \texttt{gpu\_stm} & GPU warp TM & Ch.~17 \\
+\hline
+\end{tabular}
+\caption{Repository backend $\rightarrow$ family $\rightarrow$ where it is discussed. Backends without a dedicated prose section are still exercised by the benchmark suite and, where present, have a PlusCal/TLA+ model (Table~\ref{tab:traceability}).}
+\label{tab:backend-taxonomy}
+\end{table}
+
+The table is intentionally conservative. It does not claim that SwissTM, Romulus, LeftRight, XTM, DUDETM, NV-HTM, TiKV, or the GPU runtimes are fully developed in this chapter. It places them in the map. Later chapters return to persistence, distribution, hardware transactions, and GPU validation.
+
+The repository test status gives confidence that the implementations share a common semantic target: the transactional tests pass
