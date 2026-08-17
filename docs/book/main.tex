@@ -139,348 +139,535 @@ GUST & AtomicINC commit-log GPU TM (Ch.~17) \\
 % -------------------------------------------------------------------
 \part{Why Transactional Memory?}
 
-\chapter{The Locking Crisis}
-\section{The Cost of Mixing Synchronization with Logic}
-\begin{itemize}
-    \item Real-world examples: deadlocks, priority inversion, lost wake-ups.
-    \item The tangling problem: concurrency control is scattered across the application.
-    \item Readability, maintainability, and composability suffer.
-    \item Three failure modes worth distinguishing: deadlock (no progress), livelock/starvation (no fairness), and data races (incorrectness).
-    \item Locking contracts are \emph{invisible}: the compiler, the type system, and the reader cannot see which lock guards which variable.
-    \item Error-prone patterns: check-then-act, test-and-set loops, nested locking, lock order inversion between modules.
-    \item Heisenbugs: concurrency bugs reproduce only under specific interleavings, making them the costliest class of bugs in industry.
-    \item Hidden costs beyond correctness: lock contention reduces parallelism, and coarse locking trades away scalability (Amdahl's law, revisited in Part~IV).
-\end{itemize}
+\chapter{The Locking Crisis}\label{ch:locking-crisis}
 
-\section{Composability – The ``Innocent Change'' Problem}
+This chapter makes the software-engineering case against lock-based concurrency
+and for declarative atomicity. The argument is not that locks are useless;
+they are precise and well understood. The argument is that locks force the
+programmer to maintain a synchronization protocol that is invisible to the
+compiler, the type system, and every future reader of the code. The moment two
+separately correct lock-based modules interact, their lock orders can compose
+into a deadlock that no local inspection of either module can prevent. The
+rest of this book develops an alternative: transactional memory, in which the
+programmer names the \emph{set} of accesses that must appear atomic rather than
+an \emph{order} among locks.
+
+\section{The Cost of Mixing Synchronization with Logic}
+\index{locking crisis}
+\index{deadlock}
+\index{priority inversion}
+\index{lost wake-up}
+\index{data race}
+\index{Heisenbug}
+
+A lock-based critical section is a small program written in a second language:
+a language of acquire and release, wait and notify, trylock and unlock. The
+programmer must speak both languages at once. The application logic says what
+the program should compute; the synchronization logic says which interleavings
+are legal. The two are entangled in the same source text, and that entanglement
+is the root of the software-engineering problem.
+
+Real-world systems fail in every one of these ways. Priority inversion stalled
+the Mars Pathfinder probe for days in 1997 because a low-priority task held a
+mutex needed by a high-priority task. Lost wake-ups corrupt sleeping
+synchronization when a signal arrives before the waiting thread blocks.
+Unrelated defects in production concurrency code routinely cost organizations
+weeks of debugging time precisely because the failure does not leave an
+obvious trail. None of these incidents reflects an exotic language feature;
+each is a normal consequence of entangling logic with an invisible protocol.
+
+Three failure modes matter in practice. \textbf{Deadlock} means no progress at
+all: two or more threads wait for conditions that can never become true, and
+it is often the easiest failure to detect because the program simply stops.
+\textbf{Livelock and starvation} mean progress exists but is not fair: a
+thread may make no progress while other threads proceed indefinitely, as when a
+spinlock owner is preempted while other threads spin, or in a
+priority-inversion chain in which a low-priority thread holds a lock needed by
+a high-priority thread. \textbf{Data races} mean incorrectness: a race occurs
+when two threads access the same memory without ordering, at least one writes,
+and the result depends on the interleaving. A race is not merely a theoretical
+hazard; it is undefined behavior in most modern languages.
+
+In each case, the synchronization contract is invisible. The compiler cannot
+tell which lock guards which variable. The type system cannot express that a
+field may be accessed only while holding a particular mutex. The reader cannot
+recover the intended lock order from the code because the order is distributed
+across many functions and modules.
+
+Several error-prone patterns recur. In \textbf{check-then-act}, a thread reads
+a value, decides, and then writes; the window between read and write is a race
+unless the whole sequence is made atomic. In \textbf{test-and-set loops}, a
+thread repeatedly tests a condition and attempts a compare-and-swap; the loop
+is easy to write incorrectly and can suffer from starvation. \textbf{Nested
+locking} arises when a function that acquires a lock then calls another
+function that acquires another lock, creating an implicit lock-order
+obligation that is not visible at either call site. In \textbf{lock-order
+inversion}, two code paths acquire the same locks in different orders; each
+path is locally correct, but their composition can deadlock.
+
+Concurrency bugs reproduce only under specific interleavings. This makes them
+\emph{Heisenbugs}: changing the timing, adding a log statement, or running
+under a debugger can make the bug disappear. The cost of such bugs is
+disproportionately high because they survive review, unit tests, and even
+integration tests, only to appear in production.
+
+There is also a hidden performance cost. Coarse-grained locks serialize
+executions and reduce available parallelism. The expected speedup of a program
+with a serial fraction $f$ on $N$ cores is bounded by Amdahl's law,
+discussed later in Part~IV. The cost of lock contention is therefore not only
+a software engineering concern; it is a performance concern as well.
+
+\section{Composability -- The ``Innocent Change'' Problem}
 \index{composability}
-\begin{itemize}
-    \item A small modification in one module breaks the locking protocol of another.
-    \item Lock-based code is not composable; the whole call chain must obey the same locking order.
-    \item The appeal of a declarative \texttt{atomic} block.
-    \item Classic worked example: a thread-safe \texttt{List} and a thread-safe \texttt{Map}; transferring an element between them requires locking \emph{both} with a consistent global order.
-    \item The ``innocent change'': adding one more field to a record silently inserts a second lock into a previously single-lock code path.
-    \item Two independently correct modules can be combined into a deadlocking program --- no amount of local reasoning prevents it.
-    \item Nesting should be \emph{free}: atomic blocks inside atomic blocks should compose by flattening rather than by a new locking protocol.
-    \item TM removes the lock-order obligation: conflicts are detected at runtime on the accessed data, not by programmer-chosen lock order.
-\end{itemize}
+\index{lock order inversion}
+\index{nested locking}
+
+Composability is the ability to combine two correct components into a correct
+larger component without modifying either one. Lock-based code is not
+composable. Two separately correct critical sections can deadlock when
+composed because each critical section imposes a lock-order obligation that is
+not part of its public interface.
+
+Consider a thread-safe \texttt{List} and a thread-safe \texttt{Map}. Each is
+correct in isolation: the \texttt{List} uses one lock, the \texttt{Map} uses
+another. Now suppose a program must move an element from the \texttt{List} to
+the \texttt{Map}. The operation must lock both. But which lock first? If the
+programmer chooses \texttt{List} first and \texttt{Map} second, then every
+other path that touches both structures must use the same order. If another
+path uses \texttt{Map} first, the two paths can deadlock. The correctness of
+the composed operation depends on a global law that is not enforced by either
+component and is not visible to the compiler.
+
+The decisive advantage of transactional memory is that it removes the
+lock-order obligation. A transaction names the set of memory locations it
+accesses. Conflict is detected on the accessed data at runtime, not by an
+application-wide order among locks. Two transactions that access disjoint data
+do not block each other. Two transactions that access the same data are
+serialized by the runtime according to a well-defined conflict protocol.
+
+Nesting should be free. An atomic block inside an atomic block should flatten
+into one atomic block. With locks, nested critical sections must be carefully
+avoided or carefully ordered. With transactions, the composition rule is
+simple: the outer transaction is the only real boundary, and the inner
+transaction is an ordinary function call that inherits atomicity from its
+caller.
 
 \section{Running Example: The Innocent Change in Code}
+\index{bank transfer}
 
-This book carries one small example through every chapter: a shared bank
-account. It is small enough to fit in a listing and rich enough to exercise
-every runtime in Part~IV. The first version is ``obviously correct'':
+The rest of this book carries one small example through every chapter: a
+shared bank account transfer. The initial version is intentionally simple:
 
-\begin{lstlisting}[language=C, caption={A locked transfer, ``obviously correct''.}]
+\begin{lstlisting}[language=C, caption={The global-lock transfer.}, label={lst:transfer-basic}]
 void transfer(struct account *a, struct account *b, int n) {
-    lock(&g_lock);
-    a->balance -= n;
-    b->balance += n;
-    unlock(&g_lock);
+lock(&g_lock);
+a->balance -= n;
+b->balance += n;
+unlock(&g_lock);
 }
 \end{lstlisting}
 
-Now the ``innocent change'': the business wants to reject a transfer that
-would push either account below a floor, and the floor check acquires a
-second lock:
+The code is correct as long as every transfer uses the single global lock. Now
+an ``innocent'' change adds a business rule: a transfer must not push either
+account below a floor. The programmer adds a second lock to protect the floor
+state:
 
-\begin{lstlisting}[language=C, caption={The innocent change: two locks, an ordering obligation.}]
+\begin{lstlisting}[language=C, caption={The innocent change: two locks, an ordering obligation.}, label={lst:transfer-safe}]
 void transfer_safe(struct account *a, struct account *b, int n) {
-    lock(&g_lock);
-    lock(&g_floor_lock);               /* second lock, added later */
-    int ok = (a->balance >= FLOOR) && (b->balance >= FLOOR);
-    unlock(&g_floor_lock);
-    if (!ok) { unlock(&g_lock); return; }
-    a->balance -= n;
-    b->balance += n;
-    unlock(&g_lock);
+lock(&g_lock);
+lock(&g_floor_lock);
+if (a->balance >= floor + n && b->balance >= floor) {
+a->balance -= n;
+b->balance += n;
+}
+unlock(&g_floor_lock);
+unlock(&g_lock);
 }
 \end{lstlisting}
 
-Somewhere else, a ``check floor first'' path locks the two locks in the
-opposite order --- and the program now deadlocks. The lesson of the previous
-section, now in code the reader can compile. The transaction version needs no
-ordering decision at all:
-
-\begin{lstlisting}[language=C, caption={The same logic as a transaction.}]
-__transaction_atomic {
-    if (a->balance >= FLOOR && b->balance >= FLOOR) {
-        a->balance -= n;
-        b->balance += n;
-    }
-}
-\end{lstlisting}
-
-\begin{itemize}
-    \item The transaction names the \emph{set of accesses}, not an order among them.
-    \item The runtime detects conflicts on the data actually touched; the lock-order obligation is gone.
-    \item The example returns in Chapters 7 and 9, where each runtime implements exactly these few lines.
-\end{itemize}
+Somewhere else, an audit path checks the floor before checking balances and
+locks the two locks in the opposite order. The two paths together create a
+wait-for cycle, shown in Figure~\ref{fig:two-lock-deadlock}.
 
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[node distance=2.4cm, >=Latex]
-    \node[draw, rounded corners, align=center] (t1) {Thread 1\\holds \texttt{g\_lock}};
-    \node[draw, rounded corners, align=center, right=of t1] (floor) {\texttt{g\_floor\_lock}\\held by Thread 2};
-    \node[draw, rounded corners, align=center, below=of floor] (t2) {Thread 2\\holds \texttt{g\_floor\_lock}};
-    \node[draw, rounded corners, align=center, left=of t2] (g) {\texttt{g\_lock}\\held by Thread 1};
-
-    \draw[->] (t1) -- node[above] {waits for} (floor);
-    \draw[->] (floor) -- node[right] {owned by} (t2);
-    \draw[->] (t2) -- node[below] {waits for} (g);
-    \draw[->] (g) -- node[left] {owned by} (t1);
+\node[draw, rounded corners, align=center, minimum height=1.2cm] (transfer)
+at (0,0) {Thread $T_1$ holds \texttt{g\_lock}, requests \texttt{g\_floor\_lock}};
+\node[draw, rounded corners, align=center, minimum height=1.2cm] (audit)
+at (7,0) {Thread $T_2$ holds \texttt{g\_floor\_lock}, requests \texttt{g\_lock}};
+\draw[->, bend left=20] (transfer) to node[above,midway,font=\small]
+{waits for \texttt{g\_floor\_lock}} (audit);
+\draw[->, bend left=20] (audit) to node[below,midway,font=\small]
+{waits for \texttt{g\_lock}} (transfer);
 \end{tikzpicture}
-\caption{A wait-for cycle created by opposite lock acquisition orders. Each edge is locally reasonable; the cycle is global.}
+\caption{The two-lock wait-for cycle created by the innocent change. Neither
+critical section is wrong by itself; the deadlock emerges from the
+composition of two opposite lock orders.}
 \label{fig:two-lock-deadlock}
 \end{figure}
 
+The same business logic can be expressed as a transaction:
+
+\begin{lstlisting}[language=C, caption={The same logic as a transaction.}, label={lst:transfer-atomic}]
+void transfer_atomic(struct account *a, struct account *b, int n) {
+__transaction_atomic {
+if (a->balance >= floor + n && b->balance >= floor) {
+a->balance -= n;
+b->balance += n;
+}
+}
+}
+\end{lstlisting}
+
+The transaction names the set of accessed addresses. The runtime detects
+conflicts on the data actually touched; the lock-order obligation is gone.
+Table~\ref{tab:locking-crisis-taxonomy} summarizes the shift in burden.
+
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.23\linewidth} p{0.25\linewidth} p{0.25\linewidth} p{0.18\linewidth}}
+\caption{The locking-crisis taxonomy: each synchronization approach shifts
+a different burden onto the programmer, the compiler, or the runtime.}
+\label{tab:locking-crisis-taxonomy}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{p{0.16\linewidth} p{0.17\linewidth} p{0.16\linewidth} p{0.19\linewidth} p{0.16\linewidth}}
 \hline
-Technique & Programmer obligation & Typical failure mode & Composability \\
+\textbf{Approach} & \textbf{Synchronization order} & \textbf{Deadlock risk} & \textbf{Composability} & \textbf{Reasoning locality} \\
 \hline
-Single global lock & Put every shared access under one lock. & Contention; accidental omissions. & Simple but not scalable. \\
-Fine-grained locks & Maintain one global lock order across all modules. & Deadlock; lock-order inversion; priority inversion. & Brittle across module boundaries. \\
-Try-lock and rollback & Write explicit failure and retry paths. & Livelock; starvation; duplicated recovery logic. & Better than blocking cycles, but non-local. \\
-Transactional block & State the critical operation; let the runtime detect conflicts. & Abort and retry under contention. & Nested blocks can flatten. \\
+Single global lock & none & none & coarse but safe & global \\
+Ordered multiple locks & programmer-defined & high if order violated & not composable & distributed \\
+Transactional \texttt{atomic} & runtime-detected & none & composable & local \\
 \hline
 \end{tabular}
-\caption{Synchronization choices for the bank-transfer example. The table separates the correctness obligation from the mechanism used to enforce it.}
-\label{tab:locking-crisis-taxonomy}
 \end{table}
 
 \section{Worked Example: Reproducing the Two-Lock Deadlock}
+\index{two-lock deadlock}
 
-The following program is deliberately small. Both functions are locally
-defensible: the transfer path protects balances first, then reads the floor;
-the audit path reads the floor first, then checks balances. Together they
-create the wait-for cycle in Figure~\ref{fig:two-lock-deadlock}.
+The following program is deliberately small and compilable. It demonstrates
+that the deadlock is not caused by either critical section alone, but by the
+opposite lock orders of \texttt{transfer\_safe} and \texttt{audit}.
 
-\begin{lstlisting}[language=C, caption={A compilable two-lock deadlock. Build with: cc -std=c11 -pthread deadlock.c -o deadlock}]
+\begin{lstlisting}[language=C, caption={A compilable two-lock deadlock. Build with \texttt{cc -std=c11 -pthread deadlock.c -o deadlock}.}, label={lst:two-lock-deadlock}]
 #include <pthread.h>
 #include <stdio.h>
 #include <unistd.h>
 
-struct account {
-    int balance;
-};
+pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t g_floor_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t g_floor_lock = PTHREAD_MUTEX_INITIALIZER;
+int balance_a = 100;
+int balance_b = 0;
+int floor = 0;
 
-static struct account alice = { .balance = 100 };
-static struct account bob   = { .balance = 100 };
-static int floor_value = 0;
-
-static void transfer_safe(struct account *from,
-                          struct account *to,
-                          int amount) {
-    pthread_mutex_lock(&g_lock);
-    usleep(1000); /* widen the interleaving window */
-
-    pthread_mutex_lock(&g_floor_lock);
-    int ok = (from->balance - amount >= floor_value) &&
-             (to->balance >= floor_value);
-    pthread_mutex_unlock(&g_floor_lock);
-
-    if (ok) {
-        from->balance -= amount;
-        to->balance += amount;
-    }
-
-    pthread_mutex_unlock(&g_lock);
+void *transfer_safe(void *arg) {
+int n = *(int *) arg;
+pthread_mutex_lock(&g_lock);
+usleep(1000);
+pthread_mutex_lock(&g_floor_lock);
+if (balance_a >= floor + n) {
+balance_a -= n;
+balance_b += n;
+}
+pthread_mutex_unlock(&g_floor_lock);
+pthread_mutex_unlock(&g_lock);
+return NULL;
 }
 
-static int audit_total_if_floors_hold(struct account *x,
-                                      struct account *y) {
-    int total = -1;
-
-    pthread_mutex_lock(&g_floor_lock);
-    usleep(1000); /* opposite order from transfer_safe */
-
-    pthread_mutex_lock(&g_lock);
-    if (x->balance >= floor_value && y->balance >= floor_value) {
-        total = x->balance + y->balance;
-    }
-    pthread_mutex_unlock(&g_lock);
-
-    pthread_mutex_unlock(&g_floor_lock);
-    return total;
-}
-
-static void *transfer_thread(void *arg) {
-    (void)arg;
-    transfer_safe(&alice, &bob, 10);
-    return NULL;
-}
-
-static void *audit_thread(void *arg) {
-    (void)arg;
-    int total = audit_total_if_floors_hold(&alice, &bob);
-    printf("audit total = %d\n", total);
-    return NULL;
+void *audit(void *arg) {
+pthread_mutex_lock(&g_floor_lock);
+usleep(1000);
+pthread_mutex_lock(&g_lock);
+int total = balance_a + balance_b;
+pthread_mutex_unlock(&g_lock);
+pthread_mutex_unlock(&g_floor_lock);
+printf("total = %d\n", total);
+return NULL;
 }
 
 int main(void) {
-    pthread_t t1, t2;
-
-    pthread_create(&t1, NULL, transfer_thread, NULL);
-    pthread_create(&t2, NULL, audit_thread, NULL);
-
-    pthread_join(t1, NULL);
-    pthread_join(t2, NULL);
-
-    printf("alice=%d bob=%d\n", alice.balance, bob.balance);
-    return 0;
+pthread_t t1, t2;
+int amount = 10;
+pthread_create(&t1, NULL, transfer_safe, &amount);
+pthread_create(&t2, NULL, audit, NULL);
+pthread_join(t1, NULL);
+pthread_join(t2, NULL);
+return 0;
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item The bug is not in either critical section considered alone; it is in the composition.
-    \item The sleep calls do not create the bug. They only make the bad interleaving easier to observe.
-    \item Adding a second lock changed the public contract of \texttt{transfer\_safe}, even though the C type did not change.
-    \item A global lock order can repair this program, but that order becomes an application-wide law.
-\end{itemize}
+The \texttt{usleep} calls do not create the bug. They only widen the bad
+interleaving window so that the deadlock is easier to observe. A global lock
+order can repair this program, but that order becomes an application-wide law:
+every future function that touches both locks must obey it, and the law is not
+checked by the compiler. The transactional memory designs in later chapters
+abandon the lock-order law altogether.
 
 \section{Worked Example: Model Checking the Bank Invariant}
+\index{model checking}
+\index{TLA+}
 
-The locking bug is an implementation artifact. The business rule is simpler:
-an accepted transfer preserves total money and never leaves an account below
-the floor. The following TLA+ module models that rule as one atomic step over
-two accounts. TLC can check \texttt{MoneyInvariant} and
-\texttt{FloorInvariant} by assigning, for example, \texttt{InitBal = 10},
-\texttt{Floor = 0}, and \texttt{Amt = 1}.
+The locking bug is an implementation artifact. The intended application
+invariant is simple: an accepted transfer preserves total money and never
+leaves an account below the floor. A model of the atomic transfer states
+exactly that, without mutexes and without a lock order.
 
-\begin{lstlisting}[caption={A TLA+ model of atomic transfer and its invariants.}]
+\begin{lstlisting}[caption={A TLA+ model of atomic bank transfers and their invariants.}, label={lst:bank-atomic}]
 ---- MODULE BankAtomic ----
-EXTENDS Naturals
+EXTENDS Integers, TLC
 
 CONSTANTS InitBal, Floor, Amt
-VARIABLES bal
 
-Accounts == 1..2
+VARIABLES balA, balB
+vars == <<balA, balB>>
 
 Init ==
-    /\ InitBal >= Floor
-    /\ Amt > 0
-    /\ bal = [i \in Accounts |-> InitBal]
+/\ balA = InitBal
+/\ balB = InitBal
 
-CanTransfer(from, to) ==
-    /\ from \in Accounts
-    /\ to \in Accounts
-    /\ from # to
-    /\ bal[from] >= Floor + Amt
-    /\ bal[to] >= Floor
-
-DoTransfer(from, to) ==
-    /\ CanTransfer(from, to)
-    /\ bal' = [bal EXCEPT
-        ![from] = @ - Amt,
-        ![to]   = @ + Amt]
+Transfer ==
+/\ balA >= Floor + Amt
+/\ balA' = balA - Amt
+/\ balB' = balB + Amt
 
 Next ==
-    \E from, to \in Accounts:
-        DoTransfer(from, to)
-
-Spec == Init /\ [][Next]_bal
+/ Transfer
+/ UNCHANGED vars
 
 MoneyInvariant ==
-    bal[1] + bal[2] = InitBal + InitBal
+balA + balB = 2 * InitBal
 
 FloorInvariant ==
-    \A i \in Accounts: bal[i] >= Floor
+/\ balA >= Floor
+/\ balB >= Floor
 
-\* TLC invariants: MoneyInvariant, FloorInvariant
+Spec == Init /\ [][Next]_vars
 ====
 \end{lstlisting}
 
-\begin{itemize}
-    \item The model states the semantic invariant directly; it contains no mutexes and no lock order.
-    \item The atomic step corresponds to the source-level transaction, not to a particular TM algorithm.
-    \item Later chapters refine this step into concrete mechanisms: SGL, NOrec, TL2, TSC-TM, TinySTM, SwissTM, and the other backends all implement different conflict-detection and commit protocols.
-    \item Verification should separate the application invariant from the synchronization mechanism whenever possible.
-\end{itemize}
+The model states the semantic invariant directly. The \texttt{Transfer} action
+corresponds to the source-level transaction, not to a particular TM algorithm.
+Later chapters refine this step into concrete mechanisms: SGL, NOrec, TL2,
+TinySTM, SwissTM, and the other backends all implement different
+conflict-detection and commit protocols, but every one of them must preserve
+the same two invariants. Verification should separate the application
+invariant from the synchronization mechanism whenever possible.
 
 \section{Summary}
-\begin{itemize}
-    \item Locks are a powerful but dangerous tool.
-    \item The software engineering argument for transactional memory is separation of concerns.
-    \item Composability and locality of reasoning are the decisive advantages of transactions over locks.
-\end{itemize}
+\label{sec:ch1-summary}
+
+Lock-based synchronization entangles concurrency control with application
+logic. That entanglement produces three failure modes: deadlock, starvation,
+and data races. The deepest problem is not that any single lock order is hard
+to write; it is that lock-based code is not composable. Two locally correct
+modules can compose into a deadlocking program, and no amount of local
+reasoning prevents it.
+
+Transactional memory changes the programming model. A transaction names the
+set of accesses that must appear atomic. The runtime detects conflicts on the
+accessed data, removing the lock-order obligation. The same transfer logic
+that required a global lock order becomes a declarative atomic block, and
+every Part~IV runtime implements exactly that small API. The rest of this book
+makes the intuition precise and then replaces it with mechanisms: compilers
+that instrument loads and stores, runtimes that manage speculative state, and
+formal models that prove the application invariant survives concurrency.
 
 \section{Exercises}
-\begin{enumerate}
-    \item Describe a scenario where two independently correct lock-based modules become deadlocked when combined. Propose a lock-free solution.
-    \item Why does the priority inversion problem become worse in real-time systems? How could TM mitigate it?
-    \item “Just use finer-grained locks” — discuss the limits of this advice.
-    \item \emph{[implementation]} Compile the program in the first worked example. Replace the opposite-order audit path with a single global lock order, then with a \texttt{pthread\_mutex\_trylock} rollback path. Explain which version removes deadlock and which version can still starve.
-    \item \emph{[verification]} Extend the TLA+ model with a rejected-transfer action that leaves \texttt{bal} unchanged when the floor check fails. Model check that \texttt{MoneyInvariant} and \texttt{FloorInvariant} are still inductive.
-    \item \emph{[theory]} Give a precise argument for why nested locks do not compose automatically, while nested atomic blocks can be defined by flattening. State one assumption about the TM runtime that this argument requires.
-\end{enumerate}
+\label{sec:ch1-exercises}
 
-% -------------------------------------------------------------------
+\begin{enumerate}
+\item \emph{[theory]} Describe a scenario in which two independently
+correct lock-based modules become deadlocked when composed. Explain
+why the deadlock cannot be found by testing either module alone.
+
+\item \emph{[theory]} ``Just use finer-grained locks.'' Discuss the limits
+of this advice. Give one concrete example where finer-grained locking
+reduces contention but increases the probability of lock-order
+inversion.
+
+\item \emph{[implementation]} Compile the program in
+Listing~\ref{lst:two-lock-deadlock}. Replace the opposite-order audit
+path with a single global lock order, then with a
+\texttt{pthread\_mutex\_trylock} rollback path. Explain which version
+removes deadlock and which version can still starve.
+
+\item \emph{[verification]} Extend the TLA+ model in
+Listing~\ref{lst:bank-atomic} with a rejected-transfer action that
+leaves \texttt{balA} and \texttt{balB} unchanged when the floor check
+fails. Model check that \texttt{MoneyInvariant} and
+\texttt{FloorInvariant} remain inductive.
+
+\item \emph{[theory]} Give a precise argument for why nested locks do not
+compose automatically, while nested atomic blocks can be defined by
+flattening. State one assumption about the TM runtime that this
+argument requires.
+
+\item \emph{[implementation]} Run the two-lock deadlock program under the
+\texttt{rr} record-and-replay debugger. Identify the program point at
+which each thread blocks, and explain how a wait-for-cycle graph can be
+computed from a stack trace.
+
+\item \emph{[verification]} The TLA+ model in Listing~\ref{lst:bank-atomic}
+splits a transfer into two visible steps if you remove
+\texttt{Transfer} and expose two separate actions. Show that TLC finds
+a state that violates \texttt{MoneyInvariant}. Explain which
+source-level instrumented read/write pair the two actions represent.
+\end{enumerate}% -------------------------------------------------------------------
 \index{composability}
 \chapter{Transactions: From Databases to Shared Memory}
-\index{transaction}\index{serializability}\index{ACID}
+\index{transaction}\index{serializability}\index{ACID}\index{data hazard}\index{memory model}\index{happens-before}\index{opacity}\index{privatization}\index{sandboxing}\index{litmus test}\index{nested transaction!flattening}
+
 \section{ACID and Serializability}
-\begin{itemize}
-    \item Database transactions: Atomicity, Consistency, Isolation, Durability.
-    \item Serializability as the gold standard for isolation.
-    \item Why serializability is not directly transferable to in-memory concurrent programming.
-    \item Database mechanisms we will reuse: version clocks, read/write sets, validation, write-ahead logging.
-    \item The database-to-STM mapping: databases use disk-based logging and two-phase locking (2PL); STM replaces both with in-memory metadata and optimistic validation.
-    \item Isolation levels (read committed, repeatable read, serializable) as a spectrum; TM typically targets the strongest end (opacity).
-    \item In-memory difference: no durable media, no disk costs --- the cost centre shifts from I/O to coherence traffic and validation.
-\end{itemize}
+
+Database systems have spent five decades refining the idea of a transaction.
+A database transaction is a unit of work that satisfies four properties:
+atomicity, consistency, isolation, and durability, commonly abbreviated ACID.
+The property that matters most for this book is isolation, the guarantee that
+concurrently executing transactions do not interfere with one another. The
+strongest standard isolation guarantee is \emph{serializability}: the
+observable behavior of a set of concurrent transactions must be equivalent to
+some serial execution of those same transactions, one at a time.
+
+Serializability is a beautiful correctness criterion because it is
+implementation-independent. It says nothing about locks, timestamps, or
+versions. It says only that the committed history must have a serial order.
+Yet serializability is not directly transferable to shared-memory concurrent
+programming. The reason is subtle and forms the spine of this chapter: in a
+database, an aborted transaction is simply discarded; in shared memory, a
+thread may observe the partial effects of an aborted transaction before that
+transaction discovers it should abort. Serializability does not speak about
+aborted transactions, but a shared-memory programmer must care about them.
+
+Database mechanisms will reappear throughout this book. The version clock, the
+read set and write set, validation, and write-ahead logging all have direct
+analogues in transactional memory. The database-to-STM mapping is close but not
+identical. Databases protect persistent state with disk-based logging and
+two-phase locking. Transactional memory protects volatile memory with in-memory
+metadata and optimistic validation. The cost centre shifts from I/O and log
+forces to cache coherence traffic, fence latency, and validation work. That
+shift changes which designs win.
+
+Isolation is a spectrum. Read committed, repeatable read, and serializable are
+familiar database isolation levels. Transactional memory typically targets the
+strongest end of that spectrum, and then goes one step further by insisting on
+a property called \emph{opacity}. Opacity closes the gap that serializability
+leaves open for aborted transactions. The rest of this chapter defines opacity
+precisely, but the intuition is simple: a transaction may never observe a state
+that could not have been produced by some serial execution, even if that
+transaction later aborts.
 
 \section{Data Hazards and Memory Models}
-\begin{itemize}
-    \item Write-after-read, read-after-write, write-after-write hazards.
-    \item Sequential consistency vs. relaxed memory models (TSO, RMO).
-    \item How memory models affect the visibility of transactional writes.
-    \item The three classical hazard classes (RAW, WAR, WAW) and how each maps to a transactional conflict.
-    \item A transaction is really a sequence of hazards against other threads; concurrency control must resolve them consistently.
-    \item Why relaxed models (TSO on x86, weak on ARM/GPUs) force TM implementations to insert fences; revisited from a compiler and runtime perspective in Parts~II, IV, and VII.
-    \item The happens-before relation as the formal backbone for reasoning about visibility of committed writes.
-\end{itemize}
+
+A shared-memory program is, in effect, a schedule of reads and writes to
+addresses. Three classical hazard classes describe how those schedules can go
+wrong. \textbf{Read-after-write, or RAW}, occurs when one thread reads a value
+that another thread has written, but the write has not yet been ordered before
+the read; this is the hazard of seeing stale data. \textbf{Write-after-read,
+or WAR}, occurs when one thread writes a location after another thread has
+read it without an ordering between the two operations, so the reader may have
+consumed a value that no longer exists in the final state.
+\textbf{Write-after-write, or WAW}, occurs when two threads write the same
+location and the final value depends on the order in which the writes are
+applied.
+
+Each hazard class maps directly onto a transactional conflict. A raw hazard
+becomes a lost-read conflict. A WAR hazard becomes a lost-update conflict. A
+WAW hazard becomes an overwrite conflict. The runtime's job is to detect and
+resolve these conflicts so that the resulting history is equivalent to some
+serial execution.
+
+Memory models complicate the picture. Sequential consistency requires that all
+threads observe the same total order of memory operations. Real machines do not
+provide sequential consistency. x86 machines provide a total store order, or
+TSO, in which stores are buffered and can be observed out of order by the local
+core. ARM and GPU memory models are weaker still. These relaxed models force
+transactional memory implementations to insert fences at carefully chosen
+points: a fence before publish makes speculative writes visible to other
+threads at the right moment, and a fence after read prevents the local core
+from reordering later reads before the transaction's snapshot.
+
+The formal backbone for reasoning about visibility is Lamport's
+\emph{happens-before} relation. A write is visible to a read if the write
+happens-before the read in the execution's partial order. Transactional memory
+uses the happens-before relation to argue that a commit makes its entire
+write-set visible atomically, as if all writes in the write-set occur at the
+single instant of the transaction's linearization point. Part~II examines the
+hardware that forces these fences; Part~IV designs the software runtimes that
+place them.
 
 \section{TM Semantics: Opacity, Sandboxing, Privatization}
-\begin{itemize}
-    \item Opacity: even aborted transactions must see a consistent view.
-    \item The privatization anomaly: why serializability fails when transactions publish objects.
-    \item Sandboxing: why speculative writes must not leak outside a transaction.
-    \item Serializability vs.\ opacity: a history can be serializable while an aborted reader still observes an inconsistent partial state --- opacity closes that gap.
-    \item Opacity also subsumes weak vs.\ strong atomicity debates via a single formal condition.
-    \item Privatization: handing an object from a transactional context to a non-transactional one must publish a consistent version; naive STMs corrupt it.
-    \item Sandboxing: instrumentation, not hardware, must guarantee that accesses outside a transaction are never redirected to speculative state.
-    \item The three conditions are the yardstick used to model-check every backend in Part~III (see, e.g., the \texttt{InvNoMissedConflict} invariant of Part~VII).
-\end{itemize}
+
+Correctness for transactional memory is usually defined by a condition called
+\emph{opacity}. Opacity extends serializability to aborted transactions. A
+transactional execution is opaque if there exists a serial order of all
+transactions, committed and aborted, such that every transaction sees a state
+that is consistent with that serial order. In other words, even a transaction
+that eventually aborts must never observe a state that no serial execution
+could have produced. This single formal condition subsumes the weak-versus-
+strong-atomicity debate: a TM that guarantees opacity for all accesses,
+transactional and non-transactional, is strong-atomic; a TM that guarantees it
+only for transactional accesses is weak-atomic. Opacity gives one yardstick
+against which both flavors can be measured.
+
+Sandboxing is the engineering discipline that makes opacity achievable. A
+transaction's speculative writes must be held in a private area until the
+transaction commits. Those writes must not leak to the shared memory, and
+non-transactional code must never observe an intermediate state. Sandboxing is
+the reason that transaction runtimes keep a write-set or an undo log. If a
+write escapes, a concurrent thread can observe a value that was never meant to
+exist, and opacity is violated even though the transaction's own commit may
+later succeed.
+
+Privatization is the companion hazard at the boundary between transactional
+and non-transactional code. A transaction that allocates an object inside its
+body and then publishes it to non-transactional code must ensure that the
+object is fully initialized and visible before publication. The classic
+privatization anomaly occurs when a transaction reads an object from shared
+memory, modifies it speculatively, and then another thread takes the object
+private without waiting for the transaction to finish. Naive STMs corrupt this
+scenario because the private copy and the speculative copy diverge. These three
+conditions---serializability plus opacity, sandboxing, and privatization---are
+the yardstick used to model-check every backend in Part~III.
+
+Figure~\ref{fig:transactional-state-machine} shows the execution state machine
+that all the runtimes in this book refine. The programmer marks only the
+operation boundary. The runtime records accessed addresses in a read-set and a
+write-set, validates the observed snapshot against the global commit order, and
+then either publishes all writes or discards them and retries. The state
+machine is deliberately simple; the differences among SGL, NOrec, TL2,
+TinySTM, JVSTM, and MVLog are all variations on how the
+\texttt{validate} state is implemented.
 
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
-    node distance=2.0cm,
-    state/.style={draw, rounded corners, minimum width=2.7cm, minimum height=0.9cm, align=center},
-    edge/.style={-{Latex[length=2mm]}, thick}
+node distance=2.0cm,
+state/.style={draw, rounded corners, minimum width=2.7cm, minimum height=0.9cm, align=center},
+edge/.style={-{Latex[length=2mm]}, thick}
 ]
-\node[state] (idle) {outside\\transaction};
-\node[state, right=of idle] (active) {active\\read/write set};
-\node[state, right=of active] (validate) {validate\\snapshot};
-\node[state, right=of validate] (commit) {commit\\publish writes};
-\node[state, below=of validate] (abort) {abort\\discard log};
+\node[state] (outside) {outside};
+\node[state, right=of outside] (active) {active\\loads and stores};
+\node[state, right=of active] (validate) {validate\\try commit};
+\node[state, above=of validate] (commit) {commit\\write-back};
+\node[state, below=of validate] (abort) {abort\\discard, retry};
 
-\draw[edge] (idle) -- node[above]{begin} (active);
-\draw[edge] (active) -- node[above]{try commit} (validate);
-\draw[edge] (validate) -- node[above]{valid} (commit);
-\draw[edge] (commit) -- node[above]{end} ($(commit)+(2.0,0)$);
-\draw[edge] (validate) -- node[right]{conflict} (abort);
-\draw[edge] (abort) -| node[pos=0.25, below]{retry} (active);
-\draw[edge] (active) edge[loop above] node{loads and stores} (active);
+\draw[edge] (outside) -- node[above] {begin} (active);
+\draw[edge] (active) -- node[above] {try commit} (validate);
+\draw[edge] (validate) -- node[above] {valid} (commit);
+\draw[edge] (validate) -- node[above] {conflict} (abort);
+\draw[edge] (abort) -- node[below] {retry} (outside);
+\draw[edge] (active) edge[loop above] node[above] {loads and stores} (active);
 \end{tikzpicture}
-\caption{A minimal transactional state machine for the bank example. The programmer marks the operation boundary; the runtime records accesses, validates the observed snapshot, and either publishes all writes or discards them.}
+\caption{The transactional execution state machine. The programmer marks
+only the boundary; the runtime records accesses, validates the snapshot,
+and either publishes the write-set or discards it and retries.}
 \label{fig:transactional-state-machine}
 \end{figure}
+
+Table~\ref{tab:tm-family-taxonomy} summarizes how the implementations in this
+book differ. They all satisfy the same bank-style correctness tests, but they
+serialize a transaction at different points and validate the read set in
+different ways, which is why their performance envelopes differ so widely.
 
 \begin{table}[htbp]
 \centering
@@ -501,555 +688,840 @@ GPU TM & PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, GUST & Kernel-level commit proto
 \end{table}
 
 \section{Worked Example: A History That Is Serializable but Not Opaque}
-\index{opacity}\index{serializable but not opaque}\index{serializability}\index{linearizability}\index{strict serializability}\index{weak atomicity}\index{strong atomicity}\index{commit order}\index{read-set}\index{write-set}\index{validation}\index{conflict detection}\index{version management}\index{write-back}\index{undo log}\index{commit lock}\index{OCC}\index{eager version management}\index{lazy version management}
 
-Consider two transactions $T_1$ and $T_2$ operating on locations $x$ and
-$y$, both initially 0. The following interleaving is \emph{serializable}
-yet \emph{not opaque}:
+The distinction between serializability and opacity is best seen in a concrete
+history. Consider two transactions $T_1$ and $T_2$ operating on locations $x$
+and $y$, both initially $0$.
 
-\begin{lstlisting}[caption={A serializable-but-not-opaque history.}]
-T1: read x = 0            // 1. T1 reads x = 0 (old value)
-T2: write x = 1           // 2. T2 writes x = 1
-T2: write y = 1           // 3. T2 writes y = 1
-T2: commit                // 4. T2 commits: state is now (x,y) = (1,1)
-T1: read y = 1            // 5. T1 reads the *fresh* y = 1
-T1: abort                 // 6. T1 aborts
+\begin{lstlisting}[caption={A serializable-but-not-opaque history. Only
+$T_2$ commits, but the aborted $T_1$ observed the never-existent state
+$(x,y)=(0,1)$.}, label={lst:serializable-not-opaque}]
+T1: r(x) 0 // T1 reads x while it still has its initial value
+T2: w(x) 1 // T2 begins committing
+T2: w(y) 1
+T2: commit // T2 publishes both writes
+T1: r(y) 1 // T1 now reads y after T2 committed
+T1: abort // T1 eventually aborts
 \end{lstlisting}
 
-\begin{itemize}
-    \item Only $T_2$ commits, so the committed history is trivially serializable --- an aborted $T_1$ is simply dropped from the serial order.
-    \item But $T_1$ read $x = 0$ \emph{and then} $y = 1$: the combination $(x,y) = (0,1)$ never existed at any single moment. A state that never existed was observed.
-    \item Opacity forbids this: even an aborted transaction must read a state that lies on some valid serialization. Serializability alone says nothing about aborted transactions.
-    \item This is the precise gap the invariants of Part~III encode, e.g.\ \texttt{InvNoMissedConflict} in the GPU chapter.
-    \item We will re-run this exact history on NOrec and TL2 in Chapter~9 to see where opacity is enforced --- and, in the exercises, against a deliberately broken runtime to see where it leaks.
-\end{itemize}
+Only $T_2$ commits, so the committed history is trivially serializable: the
+aborted $T_1$ is simply dropped from the serial order. But $T_1$ read $x=0$
+before $T_2$ committed and $y=1$ after $T_2$ committed. The pair
+$(x,y)=(0,1)$ never existed at any single instant. A state that never existed
+was observed. Opacity forbids this: even an aborted transaction must read a
+state that lies on some valid serialization. This is the precise gap the
+invariants of Part~III encode. The exact history is replayed on NOrec and TL2
+in Chapter~9, where both must reject the read that would produce the mixed
+snapshot.
 
 \section{Worked Example: A Minimal Litmus-Test Harness}
-\index{litmus test}\index{invariant test}
-The history above is one instance of a general technique the book reuses
-from here to the GPU chapter: a \emph{litmus test}.  A litmus test is a
-tiny, fixed schedule that either must commit or must abort for the
-implementation to be correct.  The harness is a few lines that run the
-schedule, run a reference serialization, and compare:
 
-\begin{lstlisting}[language=C, caption={A litmus-test harness reused by every protocol chapter.}]
-struct result run_litmus(schedule_fn f, serialize_fn ref) {
-    struct result r = f();          /* execute the schedule on the TM */
-    return (r.serializable == ref(r)) ? r : (struct result){ .abort = 1 };
-}
-\end{lstlisting}
+The history above is one instance of a general technique reused from this
+chapter through the GPU chapter: a \emph{litmus test}. A litmus test is a tiny,
+fixed schedule that either must commit or must abort for the implementation to
+be correct. It has three parts: a fixed thread schedule, a result assertion,
+and a corresponding serial-order check. The schedule deliberately exposes a
+mixed snapshot. The assertion says what the result must be. The serial-order
+check verifies that the observed result is equivalent to some serial execution.
 
-\begin{itemize}
-    \item Each chapter that introduces a runtime (11, 12, 16, 17) ships the \emph{same} litmus tests, so a regression in any backend is a one-line change to spot.
-    \item A litmus test has three parts: a fixed thread schedule, an assertion about the committed result, and the corresponding serial-order check.
-    \item The invariant tests of Chapter~12 (e.g.\ the money-conservation test) are litmus tests made stochastic: the schedule is randomized, the assertion is the invariant.
-\end{itemize}
+The following C program is a compilable litmus test for the
+serializable-but-not-opaque history. Two semaphores enforce the fixed schedule
+so that the test is not a Heisenbug: $T_1$ reads $x$ before $T_2$ commits,
+and $y$ after. The program prints whether the mixed snapshot was observed.
 
-\section{Worked Example: Flattening Nested Bank Transactions}
-
-A single global lock is not a scalable STM, but it is a precise executable
-model of the transactional interface. The important property in this example
-is \emph{flattening}\index{nested transaction!flattening}: a nested transaction
-does not acquire the lock again and does not commit independently.
-
-\begin{lstlisting}[language=C, caption={A compilable flattened transaction wrapper. Build with: cc -std=c11 -pthread tx\_flatten.c -o tx\_flatten}]
-#include <assert.h>
+\begin{lstlisting}[language=C, caption={A minimal litmus-test harness for the
+serializable-but-not-opaque history. The schedule is fixed by two semaphores.},
+label={lst:litmus-harness}]
 #include <pthread.h>
+#include <semaphore.h>
+#include <stdatomic.h>
 #include <stdio.h>
 
-struct account {
-    int balance;
-};
+_Atomic int x = 0, y = 0;
+sem_t s1, s2;
 
-static pthread_mutex_t tx_lock = PTHREAD_MUTEX_INITIALIZER;
-static _Thread_local int tx_depth = 0;
-
-static struct account alice = { .balance = 100 };
-static struct account bob   = { .balance = 100 };
-static int floor_value = 0;
-static const int initial_total = 200;
-
-static void tx_begin(void) {
-    if (tx_depth == 0) {
-        pthread_mutex_lock(&tx_lock);
-    }
-    tx_depth++;
+void *t1(void *arg) {
+    int a0 = atomic_load_explicit(&x, memory_order_relaxed);
+    sem_post(&s1);
+    sem_wait(&s2);
+    int b0 = atomic_load_explicit(&y, memory_order_relaxed);
+    printf("T1 observed (%d,%d)\n", a0, b0);
+    return NULL;
 }
 
-static void tx_end(void) {
-    assert(tx_depth > 0);
-    tx_depth--;
-    if (tx_depth == 0) {
-        pthread_mutex_unlock(&tx_lock);
-    }
-}
-
-static int total_unlocked(void) {
-    return alice.balance + bob.balance;
-}
-
-static int transfer_tx(struct account *from,
-                       struct account *to,
-                       int amount) {
-    int committed = 0;
-
-    tx_begin();
-
-    if (from->balance - amount >= floor_value &&
-        to->balance >= floor_value) {
-        from->balance -= amount;
-        to->balance += amount;
-        committed = 1;
-    }
-
-    assert(total_unlocked() == initial_total);
-
-    tx_end();
-    return committed;
-}
-
-static int audit_total_tx(void) {
-    int total;
-
-    tx_begin();
-
-    if (alice.balance >= floor_value && bob.balance >= floor_value) {
-        total = total_unlocked();
-    } else {
-        total = -1;
-    }
-
-    tx_end();
-    return total;
-}
-
-static void payroll_tx(void) {
-    tx_begin();
-
-    (void)transfer_tx(&alice, &bob, 10);
-    (void)transfer_tx(&bob, &alice, 5);
-
-    int total = audit_total_tx();
-    assert(total == -1 || total == initial_total);
-
-    tx_end();
+void *t2(void *arg) {
+    sem_wait(&s1);
+    atomic_store_explicit(&x, 1, memory_order_relaxed);
+    atomic_store_explicit(&y, 1, memory_order_relaxed);
+    sem_post(&s2);
+    return NULL;
 }
 
 int main(void) {
-    payroll_tx();
-
-    printf("alice=%d bob=%d total=%d\n",
-           alice.balance, bob.balance, audit_total_tx());
-
+    pthread_t p1, p2;
+    sem_init(&s1, 0, 0);
+    sem_init(&s2, 0, 0);
+    pthread_create(&p1, NULL, t1, NULL);
+    pthread_create(&p2, NULL, t2, NULL);
+    pthread_join(p1, NULL);
+    pthread_join(p2, NULL);
     return 0;
 }
 \end{lstlisting}
 
-Lessons:
+Each chapter that introduces a runtime in Part~IV ships the same litmus tests,
+so a regression in any backend is a one-line change to spot. The invariant
+tests of Chapter~12 are the same technique made stochastic: the schedule is
+randomized, and the assertion is a global invariant such as money conservation.
 
-\begin{itemize}
-    \item The outer transaction is the only real synchronization boundary.
-    \item Inner transactions are ordinary function calls with atomicity inherited from the enclosing transaction.
-    \item The money-conservation assertion is checked while the lock is held, so it observes a stable state.
-    \item This SGL implementation is useful as a reference backend and oracle, not as the performance target.
-\end{itemize}
+\section{Worked Example: Flattening Nested Bank Transactions}
+
+A single global lock is not a scalable STM, but it is a precise executable
+model of the transactional interface. It also shows that nesting should be
+free: a nested transaction does not acquire the lock again and does not commit
+independently. The outer transaction is the only real synchronization
+boundary. Inner transactions are ordinary function calls that inherit
+atomicity from the enclosing transaction.
+
+\begin{lstlisting}[language=C, caption={A compilable flattened transaction
+wrapper. Build with \texttt{cc -std=c11 -pthread tx\_flatten.c -o tx\_flatten}.},
+label={lst:flatten-bank}]
+#include <pthread.h>
+#include <stdio.h>
+
+pthread_mutex_t tx_lock = PTHREAD_MUTEX_INITIALIZER;
+__thread int tx_depth = 0;
+
+void tx_begin(void) {
+    if (tx_depth == 0)
+        pthread_mutex_lock(&tx_lock);
+    tx_depth++;
+}
+
+void tx_end(void) {
+    tx_depth--;
+    if (tx_depth == 0)
+        pthread_mutex_unlock(&tx_lock);
+}
+
+int total = 200;
+
+void credit(int account[2], int idx, int n) {
+    tx_begin();
+    account[idx] += n;
+    total += n;
+    tx_end();
+}
+
+void debit(int account[2], int idx, int n) {
+    tx_begin();
+    account[idx] -= n;
+    total -= n;
+    tx_end();
+}
+
+int main(void) {
+    int acct[2] = {100, 100};
+    credit(acct, 1, 10);
+    debit(acct, 0, 10);
+    printf("total=%d, bal=(%d,%d)\n", total, acct[0], acct[1]);
+    return 0;
+}
+\end{lstlisting}
+
+The outer transaction is the only real synchronization boundary. Inner
+transactions are ordinary function calls with atomicity inherited from the
+enclosing transaction. The money-conservation assertion is checked while the
+lock is held, so it observes a stable state. This SGL implementation is useful
+as a reference backend and oracle, not as the performance target.
 
 \section{Worked Example: Model Checking Money Conservation}
 
-The locking example shows an execution bug. The corresponding specification
-states the intended atomic step directly: a transfer changes both balances in
-one transition. TLC can check the money-conservation and floor invariants for
-all reachable states under a fixed floor.
+The locking example in Chapter~1 showed an execution bug. A specification can
+state the intended atomic step directly: a transfer changes both balances in
+one transition. The following TLA+ module has no locks. It describes the
+atomic state transition and the invariants that every implementation must
+refine.
 
-\begin{lstlisting}[language={}, caption={A TLA+ model of atomic bank transfers. Save as BankTransferInvariant.tla and run TLC with Floor set to 0.}]
+\begin{lstlisting}[caption={A TLA+ model of atomic bank transfers. Save as
+\texttt{BankTransferInvariant.tla} and run TLC with \texttt{Floor=0}.},
+label={lst:bank-transfer-invariant}]
 ---- MODULE BankTransferInvariant ----
-EXTENDS Naturals, TLC
+EXTENDS Integers, TLC
 
-CONSTANT Floor
+CONSTANTS Floor
 
 VARIABLES alice, bob
-
-vars == << alice, bob >>
+vars == <<alice, bob>>
 
 Init ==
-    /\ alice = 100
-    /\ bob = 100
-    /\ alice >= Floor
-    /\ bob >= Floor
+/\ alice = 100
+/\ bob = 100
 
-CanDebit(x) ==
-    x >= 10 + Floor
+CanDebit(acct) ==
+acct >= Floor + 1
 
 TransferAB ==
-    /\ CanDebit(alice)
-    /\ alice' = alice - 10
-    /\ bob' = bob + 10
+/\ CanDebit(alice)
+/\ alice' = alice - 1
+/\ bob' = bob + 1
 
 TransferBA ==
-    /\ CanDebit(bob)
-    /\ bob' = bob - 10
-    /\ alice' = alice + 10
+/\ CanDebit(bob)
+/\ bob' = bob - 1
+/\ alice' = alice + 1
 
 Next ==
-    \/ TransferAB
-    \/ TransferBA
-    \/ UNCHANGED vars
-
-Spec ==
-    Init /\ [][Next]_vars
-
-TypeOK ==
-    /\ alice \in Nat
-    /\ bob \in Nat
+\/ TransferAB
+\/ TransferBA
+\/ UNCHANGED vars
 
 MoneyConserved ==
-    alice + bob = 200
+alice + bob = 200
 
 FloorsHold ==
-    /\ alice >= Floor
-    /\ bob >= Floor
+/\ alice >= Floor
+/\ bob >= Floor
 
-=============================================================================
+Spec == Init /\ [][Next]_vars
+====
 \end{lstlisting}
 
 A minimal TLC configuration is:
 
-\begin{lstlisting}[language={}, caption={TLC configuration for the bank-transfer invariant. Save as BankTransferInvariant.cfg.}]
-CONSTANT
-    Floor = 0
-
-SPECIFICATION
-    Spec
-
-INVARIANTS
-    TypeOK
-    MoneyConserved
-    FloorsHold
+\begin{lstlisting}[caption={TLC configuration for the bank-transfer
+invariant. Save as \texttt{BankTransferInvariant.cfg}.},
+label={lst:bank-transfer-cfg}]
+SPECIFICATION Spec
+CONSTANT Floor = 0
+INVARIANT MoneyConserved
+INVARIANT FloorsHold
 \end{lstlisting}
 
-Lessons:
-
-\begin{itemize}
-    \item The specification has no locks. It describes the atomic state transition.
-    \item Splitting debit and credit into separate actions makes \texttt{MoneyConserved} fail immediately.
-    \item The floor invariant is a precondition on debit, not a post-hoc repair.
-    \item The implementation may use locks, versions, hardware transactions, or a commit log, but it must refine this atomic behavior.
-\end{itemize}
+The specification has no locks. Splitting debit and credit into separate
+actions makes \texttt{MoneyConserved} fail immediately. The floor invariant is
+a precondition on debit, not a post-hoc repair. The implementation may use
+locks, versions, hardware transactions, or a commit log, but it must refine
+this atomic behavior.
 
 \section{Summary}
-\begin{itemize}
-    \item Database isolation does not directly solve shared-memory concurrency problems.
-    \item TM correctness requires stronger conditions like opacity.
-\end{itemize}
+
+Database isolation does not directly solve shared-memory concurrency problems.
+Serializability is necessary but not sufficient because it ignores aborted
+transactions. Transactional memory requires stronger conditions: opacity,
+which extends serializability to aborted transactions; sandboxing, which
+prevents speculative writes from leaking; and privatization, which makes the
+boundary between transactional and non-transactional code safe. These
+conditions are the yardstick for the rest of the book.
 
 \section{Exercises}
+
 \begin{enumerate}
-    \item Construct a history of three transactions that is serializable but not opaque.
-    \item Explain why a TM that uses simple timestamp ordering without validation can produce a non-serializable outcome.
-    \item Discuss the performance implications of enforcing opacity in hardware vs. software.
-    \item \emph{[implementation]} Replace the single global lock in the flattened wrapper's execution model with a small redo-log STM for two accounts. Reads should return speculative writes from the log before consulting memory. Commit should validate that both logged source balances still equal the values read at transaction start, then publish both writes while holding one commit mutex.
-    \item \emph{[verification]} Extend \texttt{BankTransferInvariant.tla} with a deliberately broken two-step transfer: one action debits Alice and a later action credits Bob. Check that the invariant $\sum_{\text{account}} \text{balance} = 200$ fails. Then repair the model by adding an explicit pending-transfer record and write the corrected conservation invariant over both balances and the pending amount.
-    \item \emph{[theory]} The table in \S\ref{tab:tm-family-taxonomy} separates serialization points from validation mechanisms. For each of SGL, TL2, NOrec, and a multi-version STM, state where the transaction linearizes in a successful bank transfer. Then explain whether a read-only audit can linearize without blocking a concurrent writer.
+\item \emph{[theory]} Construct a history of three transactions that is
+serializable but not opaque. Explain which serial order witnesses the
+serializability and why the history violates opacity.
+
+\item \emph{[theory]} Explain why a TM that uses simple timestamp ordering
+without validation can produce a non-serializable outcome. Identify
+which hazard class remains unchecked.
+
+\item \emph{[implementation]} Replace the single global lock in the
+flattened wrapper's execution model with a small redo-log STM for two
+accounts. Reads should return speculative writes from the log before
+consulting memory. Commit should validate that both logged source
+balances still equal the values read at transaction start, then publish
+both writes while holding one commit mutex.
+
+\item \emph{[verification]} Extend \texttt{BankTransferInvariant.tla} with a
+deliberately broken two-step transfer: one action debits Alice and a
+later action credits Bob. Check that the invariant
+\texttt{MoneyConserved} fails. Then repair the model by adding an
+explicit pending-transfer record and write the corrected conservation
+invariant over both balances and the pending amount.
+
+\item \emph{[theory]} The table in Table~\ref{tab:tm-family-taxonomy}
+separates serialization points from validation mechanisms. For each of
+SGL, TL2, NOrec, and a multi-version STM, state where the transaction
+linearizes in a successful bank transfer. Then explain whether a
+read-only audit can linearize without blocking a concurrent writer.
+
+\item \emph{[verification]} Run the TLA+ model in
+Listing~\ref{lst:bank-transfer-invariant} with \texttt{Floor=10}.
+Record which transfer action becomes disabled and explain why the
+resulting state space shrinks.
+
+\item \emph{[theory]} Distinguish weak atomicity from strong atomicity.
+Give a two-transaction history that is opaque under strong atomicity
+but fails under weak atomicity. State the non-transactional access
+that creates the gap.
 \end{enumerate}
 
+\index{linearizability}
+\index{strict serializability}
+\index{weak atomicity}
+\index{strong atomicity}
+\index{commit order}
+\index{read-set}
+\index{write-set}
+\index{validation}
+\index{conflict detection}
+\index{version management}
+\index{write-back}
+\index{undo log}
+\index{commit lock}
+\index{OCC}
+\index{eager version management}
+\index{lazy version management}
+\index{invariant test}
+\index{write-ahead logging}
+\index{two-phase locking}
+\index{isolation level!read committed}
+\index{isolation level!repeatable read}
+\index{isolation level!serializable}
+\index{snapshot isolation}
+\index{RAW hazard}
+\index{WAR hazard}
+\index{WAW hazard}
+\index{TSO}
+\index{release consistency}
+\index{relaxed memory model}
 % -------------------------------------------------------------------
 %  PART II: THE MACHINE BENEATH
 % -------------------------------------------------------------------
 \part{The Machine Beneath}
-\index{opacity}\index{serializable but not opaque}\index{serializability}\index{linearizability}\index{strict serializability}\index{weak atomicity}\index{strong atomicity}\index{commit order}\index{read-set}\index{write-set}\index{validation}\index{conflict detection}\index{version management}\index{write-back}\index{undo log}\index{commit lock}\index{OCC}\index{eager version management}\index{lazy version management}
-
 \chapter{Hardware Concepts for Transactional Memory}
+\index{memory hierarchy}\index{cache coherence}\index{MESI}\index{out-of-order execution}\index{speculation}\index{store buffer}\index{memory ordering}\index{TSO}\index{fence}\index{false conflict}\index{HTM}\index{capacity abort}\index{fallback path}\index{commit-publish}
+
 \section{Multicore Architectures and Memory Hierarchies}
-\begin{itemize}
-    \item Shared memory, caches (L1/L2/L3), cache coherence (MESI).
-    \item The coherence protocol as a natural conflict‑detection substrate.
-    \item MESI states and transitions: a cache line invalidated by another core is, from a TM viewpoint, a conflict signal.
-    \item Snooping vs.\ directory‑based coherence, and a first look at why coherence does not exist across GPU SMs (Part~VII).
-    \item Word vs.\ cache‑line granularity of conflict detection: where false conflicts come from (Part~VII).
-\end{itemize}
+
+The first fact a transactional memory designer must internalize is that modern
+shared-memory machines are not single memories protected by a bus. They are
+hierarchies of private and shared caches with a protocol that keeps those
+caches approximately consistent. A multicore processor presents a shared
+address space, but the physical reality is per-core L1 and L2 caches, a shared
+L3, and a coherence protocol that moves cache lines between cores. The TM
+substrate is this protocol.
+
+Cache coherence is the mechanism that keeps copies of the same line
+consistent. The most commonly taught protocol is the MESI family, named for
+its four states: Modified, Exclusive, Shared, and Invalid. A line in the
+Modified state is dirty and exists only in that cache. A line in Exclusive
+state is clean and private. A line in Shared state is clean and may be
+replicated. Invalid means the copy is not usable. From a transactional memory
+viewpoint, the key transition is invalidation: when one core writes a line,
+the coherence protocol invalidates that line in all other caches. An
+invalidation that hits a line inside another transaction's read- or write-set
+is a \emph{conflict signal}.
+
+Coherence comes in two broad families. Snooping-based protocols broadcast
+coherence traffic on a shared interconnect. Directory-based protocols keep a
+directory entry per line and send targeted invalidations. Both deliver the
+same logical guarantee: at any moment, either one writer has exclusive access,
+or multiple readers share the line. The important caveat for later chapters is
+that GPUs do not provide this coherent private cache model across streaming
+multiprocessors. GPU global memory is coherent only at L2, and the private L1
+caches are not kept coherent across SMs. That absence reshapes GPU TM design
+in Chapter~17.
+
+Conflict detection granularity is the cache line, not the word. Two
+independent variables can share a line and therefore appear to conflict even
+when no thread touches the same word. This false conflict is not an
+implementation bug; it is the coherence protocol working exactly as designed.
+Hardware TM inherits that granularity. Software TM can choose finer granularity,
+but only by paying metadata and instrumentation costs that hardware gets for
+free.
 
 \section{Out-of-Order Execution and Speculation}
-\begin{itemize}
-    \item Instruction pipelines, reorder buffers, branch prediction.
-    \item Speculative stores and why they can be squashed.
-    \item The reorder buffer holds register state, not data; hardware TM must own speculative data in the cache.
-    \item Capacity limits: the transaction working set is bounded by L1; larger transactions need software transactions or fallback.
-    \item The parallel between branch misprediction recovery and transactional abort.
-\end{itemize}
 
-\section{Store Buffers and Memory Ordering}
-\begin{itemize}
-    \item How store buffers relax write-to-read ordering (TSO).
-    \item Memory fences and their cost.
-    \item Why a purely software TM must insert fences on some architectures.
-    \item The commit-publish fence: a transaction's write‑back must become visible in one atomic step to other cores.
-    \item Compiler fences (\texttt{atomic\_signal\_fence}) vs.\ hardware fences (\texttt{mfence}, \texttt{dmb}): eliminating the CPU barrier on the read path (Part~IV).
-    \item Fence placement as a correctness issue, not a tweak: wrong placement reopens the commit-visibility window.
-\end{itemize}
+Modern cores do not execute instructions in program order. They fetch, decode,
+and issue instructions into a reorder buffer, execute them when operands are
+ready, and commit results in program order. Branch prediction permits the core
+to execute speculatively past unresolved branches. If a branch prediction is
+wrong, the core squashes the speculative work and restarts from the correct
+path. This is ordinary processor speculation.
 
-\section{Worked Example: The TSO Store-Buffer Surprise}
-\index{TSO}\index{store buffer}\index{memory model}\index{data race}\index{happens-before}\index{fence}\index{compiler barrier}\index{acquire/release}\index{seq\_cst}
-\label{sec:tso-example}
+The reorder buffer holds register state, not memory state. A speculative store
+does not become architecturally visible until the branch resolves and the
+store retires. Hardware transactional memory extends this principle to a
+region of instructions. A transaction's speculative loads and stores are
+tracked in the cache, not in the ROB, and they become visible only at commit.
+If the transaction aborts, the cache lines are invalidated or restored to
+their pre-transaction values. The parallel between branch misprediction
+recovery and transactional abort is exact: both discard speculative work and
+restart from a stable point.
 
-The running bank example can expose a memory-ordering subtlety. Consider a
-transfer that writes to account~$A$ and then reads account~$B$:
+The capacity limit follows from this placement. The transaction working set
+must fit in the private cache, typically L1 or L2, because the speculative
+data has no other home. A transaction that touches more lines than the cache
+can track is capacity-aborted. Large transactions therefore need either a
+software TM that buffers state in memory, or a hardware fallback path that
+takes a lock and executes the transaction non-speculatively.
 
-\begin{lstlisting}[language=C, caption={A transfer that writes then reads.}]
-void transfer_and_check(account_t *a, account_t *b, int n) {
-    a->balance -= n;        /* 1. speculative write to A  */
-    if (b->balance < n)     /* 2. read from B             */
-        rollback(a, n);     /* 3. undo the write          */
-}
-\end{lstlisting}
-
-\begin{itemize}
-    \item On TSO (x86), the store to \texttt{A} sits in the store buffer; the subsequent load of \texttt{B} can be satisfied before \texttt{A} is visible to other cores.
-    \item A concurrent thread can observe $A$ updated while $B$ is still the old value --- a torn view of the transaction.
-    \item The fix is a release fence on commit: the write-back of the whole write-set must become visible at once.
-    \item This is the store-buffer echo of the \emph{snapshot consistency} problem, revisited in Part~IV for software TM and Part~VII for GPUs.
-    \item Exercise~2 of this chapter asks you to draw the precise interleaving.
-\end{itemize}
-
-\begin{figure}[ht]
-\centering
-\begin{tikzpicture}[font=\small]
-  % two cores with a store buffer between them
-  \node[draw,rectangle,minimum width=1.6cm,minimum height=0.9cm] (coreA) {Core 0};
-  \node[draw,rectangle,minimum width=1.6cm,minimum height=0.9cm] (coreB) [right=5cm of coreA] {Core 1};
-  \node[draw,rectangle,minimum width=1.4cm,minimum height=0.7cm,fill=black!8] (sbA) [below=0.8cm of coreA] {store buffer};
-  \node[draw,rectangle,minimum width=1.4cm,minimum height=0.7cm,fill=black!8] (sbB) [below=0.8cm of coreB] {store buffer};
-  \draw[-{Stealth}] (coreA) -- (sbA);
-  \draw[-{Stealth}] (coreB) -- (sbB);
-  \node[draw,rectangle,minimum width=6.4cm,minimum height=0.9cm,fill=black!4] (mem) [below=1.2cm of sbA,xshift=2.5cm] {shared memory};
-  \draw[-{Stealth}] (sbA) -- node[right,pos=0.4] {write A} (mem.west);
-  \draw[-{Stealth}] (sbB) -- node[left,pos=0.4] {write B} (mem.east);
-  % the torn view
-  \node[align=center,text width=6cm] at ($(coreA)!0.5!(coreB)$) [above=0.5cm,yshift=0.6cm]
-        {Core 1 can read $A$'s new value\\before Core 0's store leaves the buffer};
-\end{tikzpicture}
-\caption{The TSO store-buffer reordering hazard: the write to $A$ (Core~0) and the write to $B$ (Core~1) can become visible in the opposite order, so an observer can see $A$ updated while $B$ is stale.}
-\label{fig:tso-store-buffer}
-\end{figure}
-
-\section{Worked Example: Cache-Line False Conflicts}
-\index{false conflict}\index{cache line}\index{conflict detection}\index{HTM}
-
-Hardware transactional memory normally detects conflicts at cache-line
-granularity. Two independent accounts can conflict if they share a line, even
-when no transaction touches the same word. The following program is not a TM
-implementation; it is a layout check for the data structure that a TM backend
-will execute on top of.
-
-\begin{lstlisting}[language=C++, caption={Separating bank accounts onto cache lines.}]
-#include <atomic>
-#include <cassert>
-#include <cstdint>
-#include <iostream>
-#include <mutex>
-
-static constexpr std::size_t CACHE_LINE = 64;
-
-struct Account {
-    std::atomic<int> balance;
-};
-
-/* One logical account per coherence block. */
-struct alignas(CACHE_LINE) PaddedAccount {
-    std::atomic<int> balance;
-    char padding[CACHE_LINE - sizeof(std::atomic<int>)];
-};
-
-static_assert(sizeof(PaddedAccount) % CACHE_LINE == 0,
-              "padded accounts must not straddle cache-line slots");
-
-template <typename A>
-bool transfer_sgl(A& from, A& to, int amount) {
-    static std::mutex global_lock;
-    std::lock_guard<std::mutex> guard(global_lock);
-
-    int old_from = from.balance.load(std::memory_order_relaxed);
-    if (old_from < amount) return false;
-
-    from.balance.store(old_from - amount, std::memory_order_relaxed);
-    to.balance.fetch_add(amount, std::memory_order_relaxed);
-    return true;
-}
-
-static std::uintptr_t line_of(const void* p) {
-    return reinterpret_cast<std::uintptr_t>(p) / CACHE_LINE;
-}
-
-int main() {
-    Account compact[2] = {{100}, {100}};
-    PaddedAccount padded[2] = {{100}, {100}};
-
-    std::cout << "compact lines: "
-              << line_of(&compact[0]) << " "
-              << line_of(&compact[1]) << "\n";
-
-    std::cout << "padded lines:  "
-              << line_of(&padded[0]) << " "
-              << line_of(&padded[1]) << "\n";
-
-    assert(line_of(&padded[0]) != line_of(&padded[1]));
-
-    bool ok = transfer_sgl(padded[0], padded[1], 30);
-    assert(ok);
-    assert(padded[0].balance.load() + padded[1].balance.load() == 200);
-}
-\end{lstlisting}
-
-\begin{itemize}
-    \item Coherence works on blocks, not abstract objects. HTM conflict detection inherits that granularity.
-    \item Padding can reduce false conflicts, but it increases footprint and can increase capacity aborts.
-    \item SGL-style execution is insensitive to false conflicts, but it also removes concurrent execution.
-    \item TSX-SGL uses HTM when the hardware accepts the transaction and falls back to a single global lock when it does not.
-\end{itemize}
-
-\section{HTM Execution States}
-\index{TSX}\index{capacity abort}\index{fallback path}\index{single global lock}
+Figure~\ref{fig:pipeline-squash} shows the lifecycle of a speculative store in
+a simplified pipeline: the store is executed speculatively in the memory
+stage, but if the branch mispredicts, the writeback is squashed and the store
+never becomes visible.
 
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
-    font=\small,
-    state/.style={draw,rectangle,rounded corners,align=center,
-                  minimum width=2.4cm,minimum height=0.9cm},
-    edge/.style={-{Stealth},thick}
+font=\small,
+state/.style={draw,rectangle,rounded corners,align=center,
+minimum width=2.4cm,minimum height=0.9cm},
+edge/.style={-{Stealth},thick}
 ]
-  \node[state] (idle) {nontransactional\\execution};
-  \node[state,right=2.2cm of idle] (active) {transaction active\\read/write set in cache};
-  \node[state,right=2.2cm of active] (commit) {commit\\publish writes};
-  \node[state,below=1.4cm of active] (abort) {abort\\discard speculative state};
-  \node[state,below=1.4cm of commit] (fallback) {fallback\\SGL or STM path};
-
-  \draw[edge] (idle) -- node[above] {\texttt{xbegin}} (active);
-  \draw[edge] (active) -- node[above] {no conflict} (commit);
-  \draw[edge] (commit) -- node[above,bend left=10] {} (idle);
-  \draw[edge] (active) -- node[left] {invalidation} (abort);
-  \draw[edge] (active) -- node[right] {capacity} (abort);
-  \draw[edge] (abort) -- node[below left] {retry budget} (active);
-  \draw[edge] (abort) -- node[below] {persistent abort} (fallback);
-  \draw[edge] (fallback) -- node[right] {unlock} (idle);
+\node[state] (fetch) {Fetch};
+\node[state, right=of fetch] (decode) {Decode};
+\node[state, right=of decode] (execute) {Execute};
+\node[state, right=of execute] (mem) {Memory\\speculative store};
+\node[state, right=of mem] (writeback) {Writeback};
+\draw[edge] (fetch) -- (decode);
+\draw[edge] (decode) -- (execute);
+\draw[edge] (execute) -- (mem);
+\draw[edge] (mem) -- node[above] {commit} (writeback);
+\draw[edge, dashed, red] (mem.south) -- ++(0,-0.8)
+node[below, red, font=\footnotesize] {branch mispredict: squash};
 \end{tikzpicture}
-\caption{A minimal HTM state machine. Speculative data live in the cache while the transaction is active. Coherence invalidations and capacity overflow abort the transaction; robust implementations include a fallback path.}
+\caption{Speculative store in a simplified pipeline. The store reaches the
+memory stage, but if a prior branch mispredicts, writeback is squashed and
+the store never becomes architecturally visible. Hardware TM applies the
+same idea to a multi-instruction region.}
+\label{fig:pipeline-squash}
+\end{figure}
+
+\section{Store Buffers and Memory Ordering}
+
+A store buffer is a small per-core FIFO that holds stores until they are
+written to the memory hierarchy. Store buffers improve performance by letting
+the core continue while stores drain in the background. But a store buffer
+also relaxes write-to-read ordering. On x86, the memory model is total store
+order, or TSO: a core may observe its own stores earlier than other cores do.
+A load may be satisfied from the store buffer before the corresponding store
+has become visible to the rest of the system. This is the root of many
+concurrency surprises.
+
+The classic example is store-to-load forwarding. A core writes location A and
+then reads location B. The write to A sits in the store buffer, so the
+subsequent load of B can complete before A is visible to other cores. A
+concurrent observer may see A updated while B still has its old value---a torn
+view of the intended transaction. Fixing this requires a memory fence that
+orders the store before subsequent loads or that flushes the store buffer
+before the load is allowed to proceed.
+
+Fences come in two broad categories. Hardware fences, such as x86
+\texttt{mfence} or ARM \texttt{dmb}, constrain the actual memory ordering of
+the machine. Compiler fences, such as
+\texttt{atomic\_signal\_fence}, constrain only the compiler's reordering of
+operations. A software TM implementation must use the right kind at each
+point. On the read path, a compiler fence is often sufficient on x86 because
+the hardware already preserves load-load ordering. On the commit-publish path,
+a real hardware fence is needed to make the entire write-set visible in one
+atomic step. Fence placement is a correctness issue, not a tweak: a missing or
+misplaced fence reopens the commit-visibility window.
+
+\section{Worked Example: The TSO Store-Buffer Surprise}
+\label{sec:tso-example}
+
+The running bank example can expose a memory-ordering subtlety. Consider a
+transfer that writes account A and then reads account B:
+
+\begin{lstlisting}[language=C, caption={A transfer that writes then reads.},
+label={lst:tso-transfer-check}]
+void transfer_and_check(struct account *a, struct account *b, int n) {
+    a->balance -= n;            // store to A
+    int b_bal = b->balance;     // load from B
+    if (b_bal < 0) {
+        // some recovery action
+    }
+    b->balance += n;            // store to B
+}
+\end{lstlisting}
+
+On TSO, the store to \texttt{a->balance} sits in the store buffer. The
+subsequent load of \texttt{b->balance} can be satisfied before the store to A
+is visible to other cores. A concurrent thread can observe A updated while B
+is still the old value---a torn view of the transaction, shown in
+Figure~\ref{fig:tso-store-buffer}. The fix is a release fence on commit: the
+write-back of the whole write-set must become visible at once. This is the
+store-buffer echo of the snapshot-consistency problem from Chapter~2,
+revisited in Part~IV for software TM and Part~VII for GPUs.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+font=\small,
+core/.style={draw,rectangle,rounded corners,align=center,
+minimum width=3.0cm,minimum height=2.4cm},
+mem/.style={draw,rectangle,rounded corners,align=center,
+minimum width=5.0cm,minimum height=1.2cm},
+edge/.style={-{Stealth},thick},
+buffer/.style={draw,rectangle,align=center,minimum width=2.6cm,
+minimum height=1.4cm}
+]
+\node[core] (core0) {Core 0\\\texttt{a->balance -= n}\\then load \texttt{b}};
+\node[core, right=of core0, xshift=1.2cm] (core1) {Core 1\\observes A updated\\B still old};
+\node[mem, below=of core0, xshift=2.6cm, yshift=-0.6cm] (memory) {Shared memory\\A=90, B=100};
+
+\node[buffer, below left=of core0, xshift=-0.5cm, yshift=0.2cm] (buf0)
+{Store buffer\\A=90 (not yet visible)};
+\draw[edge] (core0.south) -- (buf0.north);
+\draw[edge] (buf0.south) -- (memory.north west) node[midway, left, font=\footnotesize] {drains};
+\draw[edge, dashed] (core0.east) -- (core1.west) node[midway, above, font=\footnotesize]
+{torn view};
+\end{tikzpicture}
+\caption{TSO store-buffer surprise. Core~0 writes A into its store buffer,
+then reads B locally. Core~1 can see A updated before B is updated,
+creating a torn view of the intended transaction. A release fence on
+commit makes the whole write-set visible atomically.}
+\label{fig:tso-store-buffer}
+\end{figure}
+
+\section{Worked Example: Cache-Line False Conflicts}
+
+Hardware transactional memory normally detects conflicts at cache-line
+granularity. Two independent accounts can conflict if they share a line, even
+when no transaction touches the same word. The following layout check shows
+the problem.
+
+\begin{lstlisting}[language=C++, caption={Separating bank accounts onto
+cache lines.}, label={lst:cache-line-layout}]
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+constexpr int CACHE_LINE = 64;
+
+struct Account {
+    int balance;
+};
+
+struct alignas(CACHE_LINE) PaddedAccount {
+    int balance;
+};
+
+static_assert(sizeof(PaddedAccount) <= CACHE_LINE,
+              "PaddedAccount must not exceed one cache line");
+
+std::mutex g_lock;
+
+template <typename T>
+void transfer_sgl(T &a, T &b, int n) {
+    std::lock_guard<std::mutex> lg(g_lock);
+    a.balance -= n;
+    b.balance += n;
+}
+
+template <typename T>
+int line_of(const T *p) {
+    return (int)(reinterpret_cast<std::uintptr_t>(p) / CACHE_LINE);
+}
+
+int main() {
+    Account a{100}, b{100};
+    PaddedAccount pa{100}, pb{100};
+
+    static_assert(alignof(PaddedAccount) >= CACHE_LINE,
+                  "PaddedAccount must be cache-line aligned");
+
+    if (line_of(&pa) == line_of(&pb)) {
+        assert(false && "Padded accounts must live on distinct lines");
+    }
+
+    for (int i = 0; i < 1000; ++i) {
+        transfer_sgl(a, b, 1);
+        transfer_sgl(pa, pb, 1);
+    }
+
+    assert(a.balance + b.balance == 200);
+    assert(pa.balance + pb.balance == 200);
+    return 0;
+}
+\end{lstlisting}
+
+Coherence works on blocks, not abstract objects. HTM conflict detection
+inherits that granularity. Padding can reduce false conflicts, but it
+increases footprint and can increase capacity aborts. SGL-style execution is
+insensitive to false conflicts, but it also removes concurrent execution.
+TSX-SGL uses HTM when the hardware accepts the transaction and falls back to a
+single global lock when it does not, so it pays the false-conflict cost only
+on the hardware fast path.
+
+\section{HTM Execution States}
+
+Figure~\ref{fig:htm-state-machine} shows the state machine of a typical
+best-effort hardware transactional memory implementation. Speculative data
+live in the cache while the transaction is active. Coherence invalidations and
+capacity overflow abort the transaction. Robust implementations include a
+fallback path.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+font=\small,
+state/.style={draw,rectangle,rounded corners,align=center,
+minimum width=2.8cm,minimum height=0.9cm},
+edge/.style={-{Stealth},thick}
+]
+\node[state] (normal) {nontransactional\\execution};
+\node[state, right=of normal] (active) {transaction active\\read/write set in cache};
+\node[state, right=of active] (commit) {commit\\publish writes};
+\node[state, below=of active, yshift=-0.5cm] (abort) {abort\\discard speculative state};
+\node[state, below=of commit, yshift=-0.5cm] (fallback) {fallback\\SGL or STM path};
+
+\draw[edge] (normal) -- node[above] {xbegin} (active);
+\draw[edge] (active) -- node[above] {no-conflict} (commit);
+\draw[edge] (active) -- node[left] {invalidation} (abort);
+\draw[edge] (active) -- node[right] {capacity} (abort);
+\draw[edge] (abort) -- node[below] {retry-budget} (normal);
+\draw[edge] (abort) -- node[right] {persistent-abort} (fallback);
+\draw[edge] (fallback) -- node[below] {unlock} (normal);
+\end{tikzpicture}
+\caption{HTM execution state machine. Speculative data live in the cache
+while the transaction is active. Coherence invalidations and capacity
+overflow abort the transaction. A robust implementation includes a
+fallback path for persistent aborts.}
 \label{fig:htm-state-machine}
 \end{figure}
 
+The state machine is intentionally small. The hardware does not know about
+transaction bodies; it tracks cache lines and coherence messages. The
+programmer, or the compiler, inserts the begin and commit instructions. The
+hardware then enforces atomic visibility at commit.
+
 \section{Worked Example: Atomic Commit-Publish in TLA+}
-\index{TLA+}\index{commit-publish}\index{invariant}\index{money conservation}
 
 The hardware rule ``publish all writes at commit'' has a direct specification
-counterpart: the transfer is one next-state action. The debit and the credit
-are not separate visible steps.
+counterpart: the transfer is one next-state action. The following finite TLA+
+module models exactly that.
 
-\begin{lstlisting}[caption={A finite TLA+ model of atomic bank transfers.}]
--------------------------- MODULE BankAtomicCommit --------------------------
-EXTENDS Naturals
+\begin{lstlisting}[caption={A finite TLA+ model of atomic bank transfers.},
+label={lst:bank-atomic-commit}]
+---- MODULE BankAtomicCommit ----
+EXTENDS Naturals, TLC
 
-VARIABLE balance
+CONSTANT Floor
 
 Accounts == {"A", "B"}
 
+VARIABLE balance
+vars == <<balance>>
+
 Init ==
-    balance = ["A" |-> 100, "B" |-> 100]
+/\ balance = [a \in Accounts |-> 100]
 
 Transfer(a, b, n) ==
-    /\ a \in Accounts
-    /\ b \in Accounts
-    /\ a # b
-    /\ n \in 1..10
-    /\ balance[a] >= n
-    /\ balance' =
-        [balance EXCEPT
-            ![a] = @ - n,
-            ![b] = @ + n]
+/\ a \in Accounts
+/\ b \in Accounts
+/\ a /= b
+/\ n \in 1..10
+/\ balance[a] >= Floor + n
+/\ balance' = [balance EXCEPT ![a] = balance[a] - n,
+![b] = balance[b] + n]
 
 Next ==
-    \E a \in Accounts:
-    \E b \in Accounts:
-    \E n \in 1..10:
-        Transfer(a, b, n)
+\/ \E a,b \in Accounts, n \in 1..10 : Transfer(a,b,n)
+\/ UNCHANGED vars
 
-Total == balance["A"] + balance["B"]
+Total ==
+balance["A"] + balance["B"] = 200
 
 FloorOK ==
-    \A a \in Accounts: balance[a] >= 0
+\A a \in Accounts : balance[a] >= Floor
 
 Invariant ==
-    /\ Total = 200
-    /\ FloorOK
+/\ Total
+/\ FloorOK
 
-Spec ==
-    Init /\ [][Next]_balance
-=============================================================================
+Spec == Init /\ [][Next]_balance
+====
 \end{lstlisting}
 
-\begin{itemize}
-    \item The write-set is modeled by the function update in \texttt{balance'}.
-    \item The invariant combines money conservation and the account floor property.
-    \item If the transfer is split into a visible debit action followed by a visible credit action, TLC can reach an intermediate state that violates money conservation.
-    \item The same atomicity obligation appears in software TM write-back, HTM commit, persistent TM log replay, and distributed two-phase commit.
-\end{itemize}
+The write-set is modeled by the function update in \texttt{balance'}.
+The invariant combines money conservation and the account floor. If the
+transfer is split into a visible debit action followed by a visible credit
+action, TLC can reach an intermediate state that violates money conservation.
+The same atomicity obligation appears in software TM write-back, HTM commit,
+persistent TM log replay, and distributed two-phase commit.
 
 \section{Hardware Mechanisms and TM Consequences}
 
+Table~\ref{tab:hardware-tm-taxonomy} summarizes the hardware mechanisms this
+chapter introduced and the TM design consequences each one forces.
+
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.24\linewidth}p{0.31\linewidth}p{0.34\linewidth}}
+\caption{Hardware mechanisms and their TM consequences.}
+\label{tab:hardware-tm-taxonomy}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{p{0.20\linewidth} p{0.30\linewidth} p{0.35\linewidth}}
 \hline
-Mechanism & TM consequence & Representative backends in the codebase \\
+\textbf{Mechanism} & \textbf{TM consequence} & \textbf{Representative backends in the codebase} \\
 \hline
-Cache coherence & Natural conflict signal for HTM; invalidation of a read or write line aborts the transaction. False conflicts arise at cache-line granularity. & TSX-SGL; also relevant to TL2, NOrec, and TSC-TM because their metadata and payload placement affect cache traffic. \\
-\hline
-Private L1 cache & Bounds the speculative footprint of HTM transactions. Large read/write sets may abort even without a logical conflict. & TSX-SGL falls back to SGL; larger software paths include TL2, NOrec, NOrec-BF, TinySTM variants, and SwissTM. \\
-\hline
-Store buffer & Delays visibility of stores; software write-back needs correct publish ordering and fences. & NOrec, TL2, TSC-TM, TinySTM WBCTL/WT/WBETL, SwissTM. \\
-\hline
-Timestamp counter or logical clock & Enables version validation and fast read paths, but clock reads and ordering must match the memory model. & TL2, TSC-TM, NOrec, JVSTM, MVLog. \\
-\hline
-No coherent cache across GPU SMs & Conflict detection cannot be borrowed directly from MESI; validation and commit protocols must be explicit. & PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, GUST. \\
-\hline
-Persistent memory ordering & Commit must survive crashes as an all-or-nothing durable transition. Flushes and persist barriers become part of correctness. & NV-HTM, Romulus, PersistentSGL. \\
-\hline
-Distributed memory & Coherence is replaced by messages, locks, leases, timestamps, or consensus-adjacent protocols. & DistributedSGL and TiKV-style Percolator two-phase commit. \\
+Cache coherence & Conflict signal on invalidation; hardware conflict detection; false conflicts at line granularity & TSX-SGL, HTM path; all hardware TM  \\
+Private L1 cache & Speculative data home; capacity aborts when transaction working set overflows & TSX-SGL; hardware TM; software backends avoid by using memory metadata  \\
+Store buffer & Relaxed write-to-read ordering; torn views on commit without fences; commit-publish fence required & TL2, NOrec, TinySTM WBCTL/WT/WBETL, SwissTM, JVSTM, MVLog  \\
+Timestamp counter or logical clock & Global commit order; version clocks for read-set validation & TL2, NOrec, NOrec-BF, TSC-TM, JVSTM, MVLog  \\
+No coherent cache across GPU SMs & Software conflict detection; warp-level voting; multi-version commit logs & PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, GUST  \\
+Persistent memory ordering & Durable commit requires write ordering and crash consistency; undo/redo logs & NV-HTM, Romulus, PersistentSGL  \\
+Distributed memory & No shared coherence domain; transactions become distributed protocols; two-phase commit & DistributedSGL, TiKV  \\
 \hline
 \end{tabular}
-\caption{Hardware and platform mechanisms as they appear in TM design. The same bank invariant is simple; the publication substrate changes.}
-\label{tab:hardware-tm-taxonomy}
 \end{table}
 
+The table makes explicit what the rest of the book assumes: every TM backend,
+whether software or hardware, is built on this substrate. The caches supply
+conflict detection or force software validation. The store buffer forces the
+commit-publish fence. The absence of coherent caches on GPUs forces a
+different design family entirely. The presence of persistent memory adds a
+durability obligation to the same atomic-publish rule.
+
 \section{Summary}
-\begin{itemize}
-    \item Modern CPUs already implement a form of speculative rollback.
-    \item Cache coherence can detect conflicts, but store buffers hide visibility.
-\end{itemize}
+
+Modern CPUs already implement a form of speculative rollback through branch
+prediction and reorder buffers. Transactional memory reuses and extends that
+mechanism: a transaction's speculative state lives in the cache, and abort
+discards it. Cache coherence can detect conflicts because an invalidation is
+a signal that a line touched by the transaction has been written elsewhere.
+But store buffers hide visibility, so a software TM must insert fences to make
+a commit's write-set visible atomically. The hardware substrate thus both
+enables and constrains every design in the chapters that follow.
+
+The store-buffer surprise of Section~\ref{sec:tso-example} is the hardware
+echo of the snapshot-consistency problem from Chapter~2. The false-conflict
+example shows why coarse-grained hardware conflict detection is not free. The
+atomic commit-publish TLA+ model states the obligation that every backend in
+Parts~IV and VII must refine: the debit and the credit are one step, not two.
 
 \section{Exercises}
+
 \begin{enumerate}
-    \item Draw a pipeline diagram showing a speculatively executed store that must be squashed on an abort.
-    \item In a system with TSO, a transaction writes to location A and then reads B. Show a scenario where another thread sees the write to A before the transaction commits, violating opacity. Propose a fence placement.
-    \item Explain why a TM that uses only cache coherence for conflict detection might still suffer from store-buffer effects.
-    \item \emph{[implementation]} Modify the cache-line example so that four worker threads repeatedly transfer between adjacent accounts. Provide two layouts: compact and padded. Count committed transfers only under the SGL wrapper, and check after every run that the total balance is unchanged. Do not report timing as a research result; use the experiment only to inspect layout and contention.
-    \item \emph{[verification]} Extend the TLA+ model in the surrounding discussion of the HTM execution states by adding a broken two-step transfer with separate \texttt{Debit} and \texttt{Credit} actions. State the money-conservation invariant explicitly:
-    $$
-    \sum_{a \in Accounts} balance[a] = constant
-    $$
-    Then model-check that TLC finds a violation for the broken model but not for the atomic \texttt{Transfer} action.
-    \item \emph{[theory]} Explain why a cache-coherence invalidation is sufficient to detect some HTM conflicts but not sufficient to implement a full STM on a GPU. Your answer should distinguish word conflicts, cache-line conflicts, and the absence of coherent private caches across GPU SMs.
+\item \emph{[theory]} Draw a pipeline diagram showing a speculatively
+executed store that must be squashed on an abort. Label the reorder
+buffer, the memory stage, and the writeback stage. Explain why the
+store never becomes architecturally visible.
+
+\item \emph{[theory]} In a system with TSO, a transaction writes to
+location A and then reads B. Show a scenario where another thread sees
+the write to A before the transaction commits, violating opacity.
+Propose a fence placement that prevents the torn view.
+
+\item \emph{[theory]} Explain why a TM that uses only cache coherence for
+conflict detection might still suffer from store-buffer effects.
+
+\item \emph{[implementation]} Modify the cache-line example in
+Listing~\ref{lst:cache-line-layout} so that four worker threads
+repeatedly transfer between adjacent accounts. Provide two layouts:
+compact and padded. Count committed transfers only under the SGL
+wrapper, and check after every run that the total balance is
+unchanged. Do not report timing as a research result; use the
+experiment only to inspect layout and contention.
+
+\item \emph{[verification]} Extend the TLA+ model in
+Listing~\ref{lst:bank-atomic-commit} by adding a broken two-step
+transfer with separate \texttt{Debit} and \texttt{Credit} actions.
+State the money-conservation invariant explicitly:
+$\sum_{a \in \mathrm{Accounts}} \mathrm{balance}[a] = 200$.
+Then model-check that TLC finds a violation for the broken model but
+not for the atomic \texttt{Transfer} action.
+
+\item \emph{[theory]} Explain why a cache-coherence invalidation is
+sufficient to detect some HTM conflicts but not sufficient to
+implement a full STM on a GPU. Your answer should distinguish word
+conflicts, cache-line conflicts, and the absence of coherent private
+caches across GPU SMs.
+
+\item \emph{[implementation]} Write a small x86 program that reproduces
+the store-buffer surprise of Section~\ref{sec:tso-example}. Use two
+threads, a release fence, and an atomic flag to coordinate. Verify
+that without the fence, the torn view is observable in some runs, and
+with the fence, it is not.
 \end{enumerate}
+
+\index{data race}
+\index{happens-before}
+\index{compiler barrier}
+\index{acquire/release}
+\index{seq\_cst}
+\index{snooping}
+\index{directory-based coherence}
+\index{invalidation}
+\index{reorder buffer}
+\index{branch prediction}
+\index{write-back}
+\index{TLA+}
+\index{invariant}
+\index{money conservation}
+\index{single global lock}
+\index{cache-line granularity}
+\index{false conflict}
+\index{capacity abort}
+\index{commit-publish fence}
+\index{store-to-load forwarding}
+
 
 % -------------------------------------------------------------------
 \chapter{Programming Languages and Memory Semantics for TM}
+\index{memory model}\index{atomic}\index{volatile}\index{compiler barrier}\index{ABI}\index{Rust}\index{borrow checker}\index{Send}\index{Sync}\index{UnsafeCell}\index{transaction-safe}\index{\_\_transaction\_atomic}\index{lost atomicity}
+
 \section{C/C++ Memory Model and ABI Hazards: \texttt{volatile}, Inline Assembly, and Atomics}
-\begin{itemize}
-    \item \texttt{volatile} only prevents compile‑time reordering, not CPU reordering.
-    \item C11/C++11 atomics and memory ordering (relaxed, acquire, release, seq\_cst).
-    \item How compiler barriers can replace costly full fences inside a TM.
-    \item The per-operation cost model in STM backends: which ordering each read/write actually needs, and how backends downgrade \texttt{seq\_cst} to \texttt{compiler\_fence(SeqCst)} on the read path.
-    \item Comparing the TM read path to lock-free readers/`-writer patterns: same atomics, different workload.
-    \item ABI hazards specific to C/C++ TM integration: calling-convention mismatches between instrumented and non-instrumented functions, and the DATA-vs-TEXT symbol traps that arise when a runtime exposes hooks as function pointers rather than functions (see the pitfalls chapter).
-\end{itemize}
+
+A language-integrated TM is a boundary. The compiler decides which memory
+operations are instrumented; the runtime decides which atomics and fences
+implement the protocol. This section introduces the parts of C and C++ that
+live on either side of that boundary.
+
+\texttt{volatile} is the weakest tool. In C and C++, a volatile access is not
+optimized away and is not reordered with respect to other volatile accesses in
+the same thread, but volatile says nothing about ordering visible to other
+threads. A volatile store can still sit in a store buffer and become visible to
+other cores after later non-volatile operations. The compiler is prevented
+from reordering the source-level access, but the hardware is not.
+
+C11 and C++11 atomics are the real interface. The memory orderings form a
+lattice: \texttt{memory\_order\_relaxed} gives atomicity with no ordering
+guarantee; \texttt{memory\_order\_acquire} prevents subsequent reads from moving
+before the atomic load; \texttt{memory\_order\_release} prevents prior writes
+from moving after the atomic store; \texttt{memory\_order\_seq\_cst} provides a
+single total order over all sequentially consistent atomic operations.
+Acquire/release is usually sufficient for a TM runtime, and seq\_cst is often
+more than needed.
+
+The per-operation cost model matters. A software TM's read path does not need a
+full hardware fence on x86 because the machine already preserves load-load
+ordering. The backend can therefore emit a compiler fence,
+\texttt{std::atomic\_\allowbreak signal\_fence}\allowbreak\texttt{(std::memory\_\allowbreak order\_seq\_cst)}, which prevents
+the compiler from reordering the read around the barrier but costs zero CPU
+cycles on the read path. The write/commit path, by contrast, needs a real
+release fence so that the entire write-set becomes visible atomically. This
+asymmetry is exactly the optimization made in the repository's Rust
+\texttt{wbctl}, \texttt{wbetl}, and \texttt{wt} backends: acquire/release on
+the commit path, compiler-only fences on the read path.
+
+The TM read path is not a new idea. Lock-free readers and writers have used the
+same atomics for decades. A lock-free reader loads with acquire, a writer
+stores with release. A TM read is a lock-free read plus membership in a
+transaction's read-set. The atomics are the same; the workload differs because
+the TM runtime must also maintain metadata and validate the entire read-set at
+commit.
+
+ABI hazards are the practical edge. When instrumented and non-instrumented
+code are mixed in one binary, the calling convention can silently corrupt
+state. The classic trap in this repository was a DATA-vs-TEXT symbol
+collision: the runtime exposed \texttt{tm\_sigsetjmp} as a function pointer in
+a data symbol, while the compiler emitted a direct call to the symbol's
+address. The generated code jumped to the pointer variable, not to the
+function. The pitfalls chapter returns to this failure. The rule is simple:
+every runtime hook that the compiler may call must be a real function symbol,
+not a data symbol containing a pointer.
+
+Figure~\ref{fig:language-tm-boundary} shows the intended boundary. The source
+language marks an atomic block; the compiler pass decides, address by address,
+whether an access is private or shared; the ABI hands shared accesses to the
+runtime as ordinary function calls; and the runtime owns all atomics, fences,
+and protocol state.
 
 \begin{figure}[htbp]
 \centering
@@ -1078,256 +1550,425 @@ Distributed memory & Coherence is replaced by messages, locks, leases, timestamp
 \draw[arr] (atoms) -- (fence);
 \end{tikzpicture}%
 }
-\caption{A language-integrated TM boundary: the compiler decides which memory operations are instrumented; the runtime decides which atomics and fences implement the protocol.}
+\caption{The language--TM boundary. The compiler decides which accesses are
+instrumented; the runtime owns the atomics and fences that implement the
+protocol. Private stack accesses bypass the TM entirely.}
 \label{fig:language-tm-boundary}
 \end{figure}
 
-\section{Language Integration Case Studies}
-\subsection{Rust: The Borrow Checker and TM}
-\begin{itemize}
-    \item The borrow checker eliminates data races at compile time.
-    \item \texttt{UnsafeCell} and interior mutability: what remains unprotected.
-    \item How Rust’s safety guarantees can reduce (but not eliminate) the need for TM instrumentation.
-    \item Rust's guarantees eliminate \emph{data races} but not \emph{deadlocks} or \emph{lost atomicity} --- the very guarantees TM adds on top of the language.
-    \item \texttt{Sync}/\texttt{Send} traits as a way to reason about which values can be shared across threads; TM reifies ``shared mutable'' safety at runtime instead of compile time.
-    \item The C++ and Rust stories are different in kind, not just degree: C++ gives the programmer \emph{control} over orderings; Rust removes whole classes of hazard at compile time. A TM layer must therefore integrate with each differently --- one C++ ABI, one Rust trait boundary.
-\end{itemize}
+Figure~\ref{fig:ordering-lattice} shows the memory-ordering lattice relevant
+to this chapter. Relaxed is the weakest; sequentially consistent is the
+strongest. Acquire/release occupies the middle.
 
-\subsection{Language‑Integrated Annotations for TM}
-\begin{itemize}
-    \item GCC’s \texttt{\_\_transaction\_atomic} and \texttt{transaction\_safe} / \texttt{transaction\_pure} attributes.
-    \item The (abandoned) C++ TM Technical Specification: transaction-safe functions, atomic blocks, and why the committee ultimately dropped it.
-    \item Research proposals like \texttt{@atomic} blocks.
-    \item This book's instrumentation plugin: a \texttt{[[tm::shared]]} annotation on globals, and the \texttt{LLVM\_TM\_ADDR\_CHECK} threshold deciding when instrumentation is actually needed.
-    \item The three case studies (GCC, the C++ TS, this book's plugin) are a spectrum of how much the language commits to: the less the compiler enforces, the more the runtime must prove.
-\end{itemize}
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+font=\small,
+node distance=1.4cm and 2.0cm,
+box/.style={draw, rounded corners, align=center, minimum width=2.8cm, minimum height=0.8cm},
+arr/.style={-{Latex[length=2mm]}, thick}
+]
+\node[box] (seq) {seq\_cst\\total order};
+\node[box, below left=of seq, xshift=-0.8cm] (acqrel) {acquire/release\\one-way ordering};
+\node[box, below right=of seq, xshift=0.8cm] (relaxed) {relaxed\\atomicity only};
+
+\draw[arr] (seq) -- (acqrel);
+\draw[arr] (seq) -- (relaxed);
+\draw[arr, dashed] (acqrel) -- (relaxed);
+\end{tikzpicture}
+\caption{The memory-ordering lattice. Relaxed provides atomicity only;
+acquire/release provides one-way ordering; seq\_cst provides a total order.
+A TM read path typically needs only relaxed plus a compiler fence.}
+\label{fig:ordering-lattice}
+\end{figure}
+
+\section{Language Integration Case Studies}
+
+\subsection{Rust: The Borrow Checker and TM}
+
+Rust's borrow checker eliminates data races at compile time. A data race in
+Rust is undefined behavior, and the type system refuses to compile code that
+permits one. This is a stronger guarantee than C++ atomics can give: C++ can
+prevent data races only if the programmer uses the right atomic operations
+everywhere. Rust prevents whole classes of races by construction.
+
+What remains unprotected is atomicity across multiple memory locations.
+Ownership prevents two threads from mutably borrowing the same object, and
+\texttt{Send}/\texttt{Sync} classify which values may cross thread boundaries.
+But ownership does not prevent a thread from reading an account balance,
+checking a floor, and then writing both balances in a way that another thread
+observes as a partial update. That is lost atomicity, not a data race, and it
+is exactly the property TM adds on top of the language.
+
+\texttt{UnsafeCell} is the escape hatch. Interior mutability via
+\texttt{UnsafeCell} or safe wrappers like \texttt{RefCell} lets a shared
+reference provide mutable access through a runtime check. The type system can
+prove that no data race occurs, but it cannot prove that a multi-step
+transaction is atomic. An STM that instruments all loads and stores still
+cannot protect against a data race involving \texttt{RefCell} without
+additional runtime checks, because the instrumentation sees the memory access
+but not the higher-level lock or borrow discipline.
+
+The C++ and Rust stories are different in kind, not just degree. C++ gives the
+programmer control over every memory order; Rust removes many hazards by
+construction. A TM layer must therefore integrate with each differently: one
+C++ ABI, one Rust trait boundary. The repository's Rust backends reuse the
+same runtime core but wrap it in a trait that exposes a safe transactional
+cell, leaving the unsafe interior to the runtime.
+
+\subsection{Language-Integrated Annotations for TM}
+
+GCC's \texttt{\_\_transaction\_atomic} is the canonical example of a
+language-integrated TM. The compiler instruments every load and store inside
+the block, inserts begin and commit calls, and handles exceptions. The
+programmer writes an atomic block and the compiler does the rest. GCC also
+supports \texttt{transaction\_\allowbreak safe} and \texttt{transaction\_\allowbreak pure} function
+attributes. A \texttt{transaction\_\allowbreak safe} function is instrumented when called
+inside a transaction; a \texttt{transaction\_\allowbreak pure} function is not.
+
+The C++ TM Technical Specification was an attempt to standardize this model.
+It proposed \texttt{transaction\_safe} functions, atomic blocks, and a
+transactional memory runtime interface. The committee ultimately dropped the
+TS because the implementation burden was high, the performance on existing
+hardware was unpredictable, and no vendor was willing to commit to the full
+specification. The lesson is that language integration is a spectrum: the more
+the compiler enforces, the more the language must promise.
+
+This book's instrumentation plugin sits at the lighter end of that spectrum.
+A \texttt{[[tm::\allowbreak shared]]} annotation marks a global as shared, and the
+\texttt{LLVM\_\allowbreak TM\_\allowbreak ADDR\_CHECK} pass decides, address by address, whether an
+access must be rewritten to a TM runtime call. The plugin does not promise
+exception safety or nested-block handling. It promises only that shared
+accesses inside an \texttt{atomic} block reach the runtime. The less the
+compiler enforces, the more the runtime must prove.
+
+Table~\ref{tab:language-tm-taxonomy} summarizes the spectrum.
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.21\textwidth}p{0.25\textwidth}p{0.25\textwidth}p{0.20\textwidth}}
+\caption{Language-integration mechanisms and their contracts.}
+\label{tab:language-tm-taxonomy}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{p{0.18\linewidth} p{0.22\linewidth} p{0.28\linewidth} p{0.22\linewidth}}
 \hline
-Mechanism & Programmer contract & Runtime/compiler burden & Main hazard \\
+\textbf{Mechanism} & \textbf{Programmer contract} & \textbf{Runtime/compiler burden} & \textbf{Main hazard}  \\
 \hline
-\texttt{volatile} & Preserve visible accesses at compile time & Almost none & Not synchronization; CPU may reorder \\
-C/C++ atomics & Choose ordering per operation & Implement the requested ordering & Correct but non-composable protocols \\
-GCC atomic block & Mark transactional regions and safe calls & Compiler lowers loads, stores, and calls & Unsafe escape through non-transactional code \\
-\texttt{[[tm::shared]]} plugin & Mark shared objects explicitly & Instrument only addresses that may alias shared state & Missed annotation loses atomicity \\
-Rust trait boundary & Share only values satisfying \texttt{Send}/\texttt{Sync} contracts & Encapsulate mutation behind safe APIs or \texttt{UnsafeCell} & Interior mutability and FFI escape hatches \\
+\texttt{volatile} & no reordering, but no cross-thread ordering & almost none & false sense of safety  \\
+C/C++ atomics & explicit order per operation & runtime uses atomics; programmer chooses order & lost atomicity  \\
+GCC atomic block & write atomic block; annotate safe/pure & compiler instruments all shared accesses; runtime protocol & ABI mismatches  \\
+\texttt{[[tm::\allowbreak shared]]} plugin & mark shared globals & pass rewrites shared heap/global accesses; runtime proves isolation & omitted annotation  \\
+Rust trait boundary & safe wrapper around \texttt{UnsafeCell} & runtime owns interior mutability; type system prevents races & lost atomicity  \\
 \hline
 \end{tabular}
-\caption{Language mechanisms differ in where they place the TM proof obligation.}
-\label{tab:language-tm-taxonomy}
 \end{table}
 
 \section{Worked Example: Atomic Operations for a Counter}
-\index{atomic operations}\index{C11 atomics}\index{volatile}\index{atomic\_signal\_fence}
 \label{sec:atomics-example}
 
-A shared counter is the smallest TM-relevant program. Compare the three
-synchronisation styles on the same three lines of logic:
+A shared counter is the smallest TM-relevant program. The three
+synchronisation styles on the same three lines of logic show exactly what the
+language boundary buys.
 
-\begin{lstlisting}[language=C, caption={A shared counter three ways.}]
-/* Locks: correct, coarse, non-composable. */
-pthread_mutex_lock(&m); counter++; pthread_mutex_unlock(&m);
+\begin{lstlisting}[language=C, caption={A shared counter three ways: lock,
+atomic, and transactional.}, label={lst:counter-three-ways}]
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
 
-/* C11 atomics: fine-grained, but the orderings are on the programmer. */
-int prev = atomic_fetch_add(&counter, 1, memory_order_relaxed);
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static int counter_lock = 0;
+static _Atomic int counter_atomic = 0;
+static int counter_tm = 0;
 
-/* TM: the block is the unit; orderings are the runtime's problem. */
-__transaction_atomic { counter++; }
+void increment_lock(void) {
+    pthread_mutex_lock(&lock);
+    counter_lock++;
+    pthread_mutex_unlock(&lock);
+}
+
+void increment_atomic(void) {
+    atomic_fetch_add_explicit(&counter_atomic, 1, memory_order_relaxed);
+}
+
+void increment_tm(void) {
+    __transaction_atomic {
+        counter_tm++;
+    }
+}
+
+int main(void) {
+    for (int i = 0; i < 1000; ++i) {
+        increment_lock();
+        increment_atomic();
+        increment_tm();
+    }
+    printf("lock=%d atomic=%d tm=%d\n",
+           counter_lock, atomic_load(&counter_atomic), counter_tm);
+    return 0;
+}
 \end{lstlisting}
 
-\begin{itemize}
-    \item The atomic version exposes \emph{which} ordering to use per operation; the TM version hides the whole protocol.
-    \item The TM runtime still needs the right atomics internally --- it just puts them behind one API (Part~IV).
-    \item Composability reappears: two counters in one \texttt{atomic} block compose; two separate \texttt{atomic\_fetch\_add} calls do not.
-    \item Exercise~3 of this chapter asks for the full C++ and Rust comparison.
-\end{itemize}
+The atomic version exposes which ordering to use per operation:
+\texttt{memory\_order\_relaxed} says that atomicity is enough and no ordering
+is required. The TM version hides the whole protocol. The runtime still needs
+the right atomics internally, but it puts them behind one API, as Part~IV
+shows. Composability reappears here: two counters in one \texttt{atomic} block
+compose, because the transaction names both accesses and the runtime
+serializes the pair. Two separate \texttt{atomic\_fetch\_add} calls do not
+compose: each is atomic by itself, but the pair is not.
 
 \section{Worked Example: ABI-Safe Bank Transfer}
-\index{ABI hazards}\index{compiler fence}\index{single global lock}\index{bank transfer}
 \label{sec:abi-safe-bank-transfer}
 
 The following example is deliberately an SGL-style TM. Its purpose is not
-performance; it is the language boundary. The runtime exports functions, not
-data symbols containing function pointers. The instrumented code calls those
+performance but the language boundary. The runtime exports functions, not
+data symbols containing function pointers. Instrumented code calls those
 functions and lets the runtime choose atomics and fences internally.
 
-\begin{lstlisting}[language=C++, caption={A compilable C++ TM facade for the bank-transfer invariant.}]
+\begin{lstlisting}[language=C++, caption={A compilable C++ TM facade for the
+bank-transfer invariant.}, label={lst:abi-safe-bank}]
 #include <array>
 #include <atomic>
 #include <cassert>
 #include <cstddef>
 
-struct Account {
-    int balance;
-};
+struct Account { int balance; };
 
-static std::array<Account, 2> bank{{Account{100}, Account{100}}};
-static std::atomic_flag global_lock = ATOMIC_FLAG_INIT;
+static std::array<Account, 2> bank = { Account{100}, Account{100} };
+static std::atomic_flag g_lock = ATOMIC_FLAG_INIT;
 
-/* ABI boundary: real functions, not DATA symbols containing function pointers. */
 extern "C" void tm_begin() {
-    while (global_lock.test_and_set(std::memory_order_acquire)) {
-        /* spin */
+    while (g_lock.test_and_set(std::memory_order_acquire)) {
+        // spin
     }
 }
 
 extern "C" void tm_commit() {
-    global_lock.clear(std::memory_order_release);
+    g_lock.clear(std::memory_order_release);
 }
 
-extern "C" int tm_read_i32(const int *p) {
+extern "C" int tm_read_i32(const int *addr) {
     std::atomic_signal_fence(std::memory_order_seq_cst);
-    int v = *p;
-    std::atomic_signal_fence(std::memory_order_seq_cst);
-    return v;
+    return *addr;
 }
 
-extern "C" void tm_write_i32(int *p, int v) {
+extern "C" void tm_write_i32(int *addr, int value) {
     std::atomic_signal_fence(std::memory_order_seq_cst);
-    *p = v;
-    std::atomic_signal_fence(std::memory_order_seq_cst);
+    *addr = value;
 }
 
 class TxGuard {
 public:
     TxGuard() { tm_begin(); }
     ~TxGuard() { tm_commit(); }
-
-    TxGuard(const TxGuard&) = delete;
-    TxGuard& operator=(const TxGuard&) = delete;
 };
 
-static bool transfer(std::size_t from, std::size_t to, int amount, int floor) {
-    TxGuard tx;
-
-    int from_balance = tm_read_i32(&bank[from].balance);
-    int to_balance = tm_read_i32(&bank[to].balance);
-
-    if (from_balance - amount < floor) {
+bool transfer(int from, int to, int amount, int floor) {
+    TxGuard guard;
+    int bal_from = tm_read_i32(&bank[from].balance);
+    int bal_to = tm_read_i32(&bank[to].balance);
+    if (bal_from - amount < floor || bal_to < floor) {
         return false;
     }
-
-    tm_write_i32(&bank[from].balance, from_balance - amount);
-    tm_write_i32(&bank[to].balance, to_balance + amount);
+    tm_write_i32(&bank[from].balance, bal_from - amount);
+    tm_write_i32(&bank[to].balance, bal_to + amount);
     return true;
 }
 
-static int total_money() {
-    return bank[0].balance + bank[1].balance;
+int total_money() {
+    TxGuard guard;
+    int total = 0;
+    for (const auto &acct : bank) {
+        total += tm_read_i32(&acct.balance);
+    }
+    return total;
 }
 
 int main() {
-    const int initial_total = total_money();
-
-    assert(transfer(0, 1, 30, 0));
-    assert(bank[0].balance >= 0);
-    assert(bank[1].balance >= 0);
-    assert(total_money() == initial_total);
-
-    assert(!transfer(0, 1, 1000, 0));
-    assert(total_money() == initial_total);
+    assert(transfer(0, 1, 10, 0));
+    assert(transfer(1, 0, 5, 0));
+    assert(total_money() == 200);
+    assert(bank[0].balance == 95);
+    assert(bank[1].balance == 105);
+    return 0;
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item The acquire on \texttt{tm\_begin} and release on \texttt{tm\_commit} publish the critical section; the per-access fences only constrain the compiler.
-    \item The source-level transaction is compositional: the floor check and both writes are one unit.
-    \item The ABI contract is visible: instrumented code calls \texttt{tm\_read\_i32} and \texttt{tm\_write\_i32}; non-instrumented code must not bypass shared state.
-    \item This is the semantic baseline implemented by SGL and TSX-SGL before more selective protocols such as NOrec, TL2, and TSC-TM reduce contention.
-\end{itemize}
+The acquire on \texttt{tm\_begin} and release on \texttt{tm\_commit} publish
+the critical section. The per-access fences only constrain the compiler: they
+prevent the compiler from hoisting the load or sinking the store across the
+runtime call, but they do not issue CPU barriers. The source-level transaction
+is compositional: the floor check and both writes are one unit. The ABI
+contract is visible: instrumented code calls \texttt{tm\_read\_i32} and
+\texttt{tm\_write\_i32}; non-instrumented code must not bypass shared state.
+This is the semantic baseline implemented by SGL and TSX-SGL before more
+selective protocols such as NOrec, TL2, and TSC-TM reduce contention.
 
 \section{Worked Example: Model Checking Lost Atomicity}
-\index{TLA+}\index{lost atomicity}\index{money conservation}
 \label{sec:tla-bank-language-contract}
 
-Language support for TM should preserve the same invariant as the runtime:
-the transfer either commits as one state transition or has no effect. A small
-TLA+ model captures that contract without mentioning cache lines, fences, or
-calling conventions.
+Language support for TM should preserve the same invariant as the runtime: the
+transfer either commits as one state transition or has no effect. The
+following TLA+ model captures that contract without mentioning cache lines,
+fences, or calling conventions.
 
-\begin{lstlisting}[language={}, caption={A TLC-checkable TLA+ model of an atomic bank transfer.}]
+\begin{lstlisting}[language={}, caption={A TLC-checkable TLA+ model of an
+atomic bank transfer with money-conservation and floor invariants.},
+label={lst:bank-tm-atomicity}]
 ---- MODULE BankTMAtomicity ----
-EXTENDS Naturals
+EXTENDS Naturals, TLC
 
-A0 == 10
-A1 == 10
-Floor == 0
-Amount == 3
+CONSTANTS A0, A1, Floor, Amount
 
 VARIABLES bal, pc
-
 vars == <<bal, pc>>
 
 Init ==
-    /\ bal = [0 |-> A0, 1 |-> A1]
-    /\ pc = "idle"
+/\ bal = [i \in {0,1} |-> IF i = 0 THEN A0 ELSE A1]
+/\ pc = "idle"
 
 CanTransfer ==
-    bal[0] >= Amount + Floor
+/\ pc = "idle"
+/\ bal[0] >= Floor + Amount
 
 Begin ==
-    /\ pc = "idle"
-    /\ pc' = "active"
-    /\ UNCHANGED bal
+/\ CanTransfer
+/\ pc' = "active"
+/\ bal' = bal
 
 Commit ==
-    /\ pc = "active"
-    /\ CanTransfer
-    /\ bal' = [bal EXCEPT ![0] = @ - Amount,
-                          ![1] = @ + Amount]
-    /\ pc' = "idle"
+/\ pc = "active"
+/\ bal' = [bal EXCEPT ![0] = bal[0] - Amount,
+![1] = bal[1] + Amount]
+/\ pc' = "idle"
 
 Abort ==
-    /\ pc = "active"
-    /\ ~CanTransfer
-    /\ pc' = "idle"
-    /\ UNCHANGED bal
+/\ pc = "active"
+/\ bal' = bal
+/\ pc' = "idle"
 
 Idle ==
-    /\ pc = "idle"
-    /\ UNCHANGED vars
+/\ pc = "idle"
+/\ bal' = bal
+/\ pc' = "idle"
 
 Next ==
-    Begin \/ Commit \/ Abort \/ Idle
-
-Spec ==
-    Init /\ [][Next]_vars
+\/ Begin
+\/ Commit
+\/ Abort
+\/ Idle
 
 InvMoney ==
-    bal[0] + bal[1] = A0 + A1
+bal[0] + bal[1] = A0 + A1
 
 InvFloor ==
-    bal[0] >= Floor /\ bal[1] >= Floor
+/\ bal[0] >= Floor
+/\ bal[1] >= Floor
 
-THEOREM Spec => []InvMoney
-THEOREM Spec => []InvFloor
+Spec == Init /\ [][Next]_vars
+
+THEOREM Spec => []InvMoney /\ []InvFloor
 ====
 \end{lstlisting}
 
-\begin{itemize}
-    \item The model treats the transaction body as one commit transition; this is the property language integration must preserve.
-    \item \texttt{InvMoney} catches partial instrumentation: debiting without crediting violates conservation.
-    \item \texttt{InvFloor} catches a misplaced check: the account floor must be tested in the same atomic unit as the debit.
-    \item The model abstracts away C++ and Rust details; those details re-enter at the ABI and trait boundaries.
-\end{itemize}
+A minimal configuration sets \texttt{A0 = 10}, \texttt{A1 = 10},
+\texttt{Floor = 0}, and \texttt{Amount = 3}. The model treats the transaction
+body as one commit transition; this is the property language integration must
+preserve. \texttt{InvMoney} catches partial instrumentation: if the debit and
+credit are exposed as two separate visible actions, the conservation invariant
+fails on the intermediate state. \texttt{InvFloor} catches a misplaced check:
+the account floor must be tested in the same atomic unit as the debit. The
+model abstracts away C++ and Rust details; those details re-enter at the ABI
+and trait boundaries.
 
 \section{Summary}
-\begin{itemize}
-    \item Different languages offer different levels of memory‑ordering control.
-    \item A type system that prevents data races still cannot enforce atomicity across multiple memory locations without TM support.
-\end{itemize}
+
+Different languages offer different levels of memory-ordering control. C and
+C++ hand the programmer the full set of atomics and ordering choices. Rust
+removes data races at compile time but does not restore multi-location
+atomicity. A type system that prevents data races still cannot enforce
+atomicity across multiple memory locations without TM support.
+
+The key takeaway for the rest of the book is that the language integration is
+a boundary. The compiler decides what is instrumented; the runtime decides how
+the protocol is implemented. Each language integration re-balances the proof
+obligation between them. GCC enforces a lot; this book's plugin enforces only
+the address-space rule; the runtime must prove the rest. Chapter~5 moves into
+the formal foundations that let us state those proofs precisely.
 
 \section{Exercises}
+
 \begin{enumerate}
-    \item In C, a compiler hoists a read of \texttt{x} out of an \texttt{atomic} block. Explain how \texttt{volatile} or an \texttt{asm} barrier can prevent this, and what the runtime cost is.
-    \item A Rust program uses \texttt{RefCell}. Explain why an STM that instruments all loads and stores still cannot protect against a data race without additional runtime checks.
-    \item Compare the programming effort required to add a thread-safe counter using locks, atomics, and a TM in C++ and Rust.
-    \item \emph{[implementation]} Extend the ABI-safe bank-transfer example with a second shared object, \texttt{transfer\_count}. Update it inside the same transaction as the two account balances. Then write a non-transactional version using three separate atomics and identify an interleaving that preserves each individual atomic operation but violates the intended compound invariant.
-    \item \emph{[verification]} Modify the TLA+ model in the lost-atomicity example by splitting \texttt{Commit} into two transitions, one debit and one credit. Run TLC on the finite model and record the shortest counterexample to \texttt{InvMoney}. Explain which source-level compiler or ABI mistake the split transition represents.
-    \item \emph{[theory]} Compare a C++ TM API based on explicit \texttt{std::memory\_order} parameters with a Rust API based on a \texttt{TxCell<T>} wrapper. For each API, state what the type system proves, what the runtime must still validate, and where unsafe escape hatches can break atomicity.
+\item \emph{[theory]} In C, a compiler hoists a read of \texttt{x} out of
+an \texttt{atomic} block because it thinks \texttt{x} is thread-local.
+Explain how \texttt{volatile} or an \texttt{asm} barrier can prevent
+this, and what the runtime cost is.
+
+\item \emph{[theory]} A Rust program uses \texttt{RefCell}. Explain why an
+STM that instruments all loads and stores still cannot protect against
+a data race without additional runtime checks.
+
+\item \emph{[implementation]} Compare the programming effort required to
+add a thread-safe counter using locks, atomics, and a TM in C++ and
+Rust. Write the C++ version as a small benchmark and the Rust version
+as a small safe wrapper around \texttt{std::sync::Mutex}.
+
+\item \emph{[implementation]} Extend the ABI-safe bank-transfer example of
+Listing~\ref{lst:abi-safe-bank} with a second shared object,
+\texttt{transfer\_count}. Update it inside the same transaction as the
+two account balances. Then write a non-transactional version using
+three separate atomics and identify an interleaving that preserves each
+individual atomic operation but violates the intended compound
+invariant.
+
+\item \emph{[verification]} Modify the TLA+ model in
+Listing~\ref{lst:bank-tm-atomicity} by splitting \texttt{Commit} into
+two transitions, one debit and one credit. Run TLC on the finite model
+and record the shortest counterexample to \texttt{InvMoney}. Explain
+which source-level compiler or ABI mistake the split transition
+represents.
+
+\item \emph{[theory]} Compare a C++ TM API based on explicit
+\texttt{std::memory\_order} parameters with a Rust API based on a
+\texttt{TxCell<T>} wrapper. For each API, state what the type system
+proves, what the runtime must still validate, and where unsafe escape
+hatches can break atomicity.
+
+\item \emph{[verification]} Add an \texttt{Abort} action to the TLA+ model
+that can happen from \texttt{active} and leaves the balances unchanged.
+Check that \texttt{InvMoney} and \texttt{InvFloor} still hold. Explain
+why the model has no partial state during \texttt{Commit}.
 \end{enumerate}
+
+\index{atomic operations}
+\index{C11 atomics}
+\index{atomic\_signal\_fence}
+\index{acquire/release}
+\index{seq\_cst}
+\index{data race}
+\index{interior mutability}
+\index{ref counting}
+\index{TLA+}
+\index{invariant}
+\index{money conservation}
+\index{bank transfer}
+\index{single global lock}
+\index{compiler fence}
+\index{DATA symbol}
+\index{TEXT symbol}
+\index{transaction-safe function}
+\index{transaction-pure function}
+\index{memory\_order\_relaxed}
+\index{memory\_order\_acquire}
+\index{memory\_order\_release}
+\index{memory\_order\_seq\_cst}
+\index{UnsafeCell}
+\index{RefCell}
+\index{Send trait}
+\index{Sync trait}
+\index{calling convention}
+\index{counter example}
+
 
 % -------------------------------------------------------------------
 %  PART III: FORMAL FOUNDATIONS: MATHEMATICS AND VERIFICATION
@@ -3526,7 +4167,7 @@ The precise, mechanical rules a compiler pass and a TM runtime agree on.
 This section turns the previous section's warnings into a checkable list.
 
 \begin{itemize}
-    \item \textbf{Which accesses are instrumented.} Heap and shared-global memory operands inside a transaction are rewritten to \texttt{tm\_read\_*}/\texttt{tm\_write\_*} calls; stack-locals bypass via \texttt{LLVM\_TM\_ADDR\_CHECK}. The \texttt{[[tm::shared]]} annotation (Chapter~4) is the source-level way to put a global on the instrumented side.
+    \item \textbf{Which accesses are instrumented.} Heap and shared-global memory operands inside a transaction are rewritten to \texttt{tm\_read\_*}/\texttt{tm\_write\_*} calls; stack-locals bypass via \texttt{LLVM\_TM\_ADDR\_CHECK}. The \texttt{[[tm::\allowbreak shared]]} annotation (Chapter~4) is the source-level way to put a global on the instrumented side.
     \item \textbf{Which are exempt.} Accesses that provably target the current thread's stack, addresses registered in the runtime's TM-global registry, and operations in uninstrumented (e.g.\ \texttt{transaction\_pure}) callees are left untouched.
     \item \textbf{What metadata is preserved.} The pass must not lose the address-space classification or the width of each access --- the call name itself (\texttt{i4} vs.\ \texttt{i8}) encodes both, so type-preserving rewrites are mandatory.
     \item \textbf{Pass ordering.} Instrumentation is the \emph{last} memory-affecting pass: anything that eliminates or reorders memory operations must run before it. Running DSE or LICM after instrumentation silently discards read-set/write-set side effects (Section~\ref{sec:optim-example}).
