@@ -145,12 +145,26 @@ This chapter makes the software-engineering case against lock-based concurrency
 and for declarative atomicity. The argument is not that locks are useless;
 they are precise and well understood. The argument is that locks force the
 programmer to maintain a synchronization protocol that is invisible to the
-compiler, the type system, and every future reader of the code. The moment two
-separately correct lock-based modules interact, their lock orders can compose
-into a deadlock that no local inspection of either module can prevent. The
-rest of this book develops an alternative: transactional memory, in which the
-programmer names the \emph{set} of accesses that must appear atomic rather than
-an \emph{order} among locks.
+compiler, the type system, and every future reader of the code. By
+``invisible'' we mean three concrete things. The compiler cannot see the
+protocol: a \texttt{lock()}/\texttt{unlock()} pair is, to it, just two
+independent function calls, so it has no basis to reorder, cache, or eliminate
+accesses around them, and no way to warn that a field is being touched without
+its lock. The type system cannot express it: nothing in a field's type says
+``this member is protected by \texttt{g\_lock}, and only while it is held,''
+so the compiler cannot reject an unsynchronized access the way it rejects a
+type mismatch. And the protocol is not recoverable by inspection: the lock
+order, the set of guarded fields, and the conditions under which threads may
+wait are spread across many functions and modules, so a reader must reconstruct
+them from scattered acquire and release sites, and any two readers may
+reconstruct different protocols. When synchronization is invisible in this
+way, the language and its tools cannot help; every invariant must be enforced
+by convention alone \cite{boehm05}. The moment two separately correct lock-based
+modules interact, their lock orders can compose into a deadlock that no local
+inspection of either module can prevent. The rest of this book develops an
+alternative: transactional memory \cite{herlihy93}, in which the programmer
+names the \emph{set} of accesses that must appear atomic rather than an
+\emph{order} among locks.
 
 \section{The Cost of Mixing Synchronization with Logic}
 \index{locking crisis}
@@ -169,12 +183,13 @@ is the root of the software-engineering problem.
 
 Real-world systems fail in every one of these ways. Priority inversion stalled
 the Mars Pathfinder probe for days in 1997 because a low-priority task held a
-mutex needed by a high-priority task. Lost wake-ups corrupt sleeping
-synchronization when a signal arrives before the waiting thread blocks.
-Unrelated defects in production concurrency code routinely cost organizations
-weeks of debugging time precisely because the failure does not leave an
-obvious trail. None of these incidents reflects an exotic language feature;
-each is a normal consequence of entangling logic with an invisible protocol.
+mutex needed by a high-priority task \cite{jones97mars,sha90priority}. Lost
+wake-ups corrupt sleeping synchronization when a signal arrives before the
+waiting thread blocks. Unrelated defects in production concurrency code
+routinely cost organizations weeks of debugging time precisely because the
+failure does not leave an obvious trail. None of these incidents reflects an
+exotic language feature; each is a normal consequence of entangling logic with
+an invisible protocol.
 
 Three failure modes matter in practice. \textbf{Deadlock} means no progress at
 all: two or more threads wait for conditions that can never become true, and
@@ -186,7 +201,8 @@ priority-inversion chain in which a low-priority thread holds a lock needed by
 a high-priority thread. \textbf{Data races} mean incorrectness: a race occurs
 when two threads access the same memory without ordering, at least one writes,
 and the result depends on the interleaving. A race is not merely a theoretical
-hazard; it is undefined behavior in most modern languages.
+hazard; it is undefined behavior in most modern languages
+\cite{boehm08memory}.
 
 In each case, the synchronization contract is invisible. The compiler cannot
 tell which lock guards which variable. The type system cannot express that a
@@ -213,9 +229,10 @@ integration tests, only to appear in production.
 
 There is also a hidden performance cost. Coarse-grained locks serialize
 executions and reduce available parallelism. The expected speedup of a program
-with a serial fraction $f$ on $N$ cores is bounded by Amdahl's law,
-discussed later in Part~IV. The cost of lock contention is therefore not only
-a software engineering concern; it is a performance concern as well.
+with a serial fraction $f$ on $N$ cores is bounded by Amdahl's law
+\cite{amdahl67}, discussed later in Part~IV. The cost of lock contention is
+therefore not only a software engineering concern; it is a performance concern
+as well.
 
 \section{Composability -- The ``Innocent Change'' Problem}
 \index{composability}
@@ -260,10 +277,10 @@ shared bank account transfer. The initial version is intentionally simple:
 
 \begin{lstlisting}[language=C, caption={The global-lock transfer.}, label={lst:transfer-basic}]
 void transfer(struct account *a, struct account *b, int n) {
-lock(&g_lock);
-a->balance -= n;
-b->balance += n;
-unlock(&g_lock);
+    lock(&g_lock);
+    a->balance -= n;
+    b->balance += n;
+    unlock(&g_lock);
 }
 \end{lstlisting}
 
@@ -274,14 +291,14 @@ state:
 
 \begin{lstlisting}[language=C, caption={The innocent change: two locks, an ordering obligation.}, label={lst:transfer-safe}]
 void transfer_safe(struct account *a, struct account *b, int n) {
-lock(&g_lock);
-lock(&g_floor_lock);
-if (a->balance >= floor + n && b->balance >= floor) {
-a->balance -= n;
-b->balance += n;
-}
-unlock(&g_floor_lock);
-unlock(&g_lock);
+    lock(&g_lock);
+    lock(&g_floor_lock);
+    if (a->balance >= floor + n && b->balance >= floor) {
+        a->balance -= n;
+        b->balance += n;
+    }
+    unlock(&g_floor_lock);
+    unlock(&g_lock);
 }
 \end{lstlisting}
 
@@ -293,9 +310,9 @@ wait-for cycle, shown in Figure~\ref{fig:two-lock-deadlock}.
 \centering
 \begin{tikzpicture}[node distance=2.4cm, >=Latex]
 \node[draw, rounded corners, align=center, minimum height=1.2cm] (transfer)
-at (0,0) {Thread $T_1$ holds \texttt{g\_lock}, requests \texttt{g\_floor\_lock}};
+at (0,0) {Thread $T_1$ holds \texttt{g\_lock},\\requests \texttt{g\_floor\_lock}};
 \node[draw, rounded corners, align=center, minimum height=1.2cm] (audit)
-at (7,0) {Thread $T_2$ holds \texttt{g\_floor\_lock}, requests \texttt{g\_lock}};
+at (7,0) {Thread $T_2$ holds \texttt{g\_floor\_lock},\\requests \texttt{g\_lock}};
 \draw[->, bend left=20] (transfer) to node[above,midway,font=\small]
 {waits for \texttt{g\_floor\_lock}} (audit);
 \draw[->, bend left=20] (audit) to node[below,midway,font=\small]
@@ -311,12 +328,12 @@ The same business logic can be expressed as a transaction:
 
 \begin{lstlisting}[language=C, caption={The same logic as a transaction.}, label={lst:transfer-atomic}]
 void transfer_atomic(struct account *a, struct account *b, int n) {
-__transaction_atomic {
-if (a->balance >= floor + n && b->balance >= floor) {
-a->balance -= n;
-b->balance += n;
-}
-}
+    __transaction_atomic {
+        if (a->balance >= floor + n && b->balance >= floor) {
+            a->balance -= n;
+            b->balance += n;
+        }
+    }
 }
 \end{lstlisting}
 
@@ -329,8 +346,10 @@ Table~\ref{tab:locking-crisis-taxonomy} summarizes the shift in burden.
 \caption{The locking-crisis taxonomy: each synchronization approach shifts
 a different burden onto the programmer, the compiler, or the runtime.}
 \label{tab:locking-crisis-taxonomy}
+\footnotesize
 \renewcommand{\arraystretch}{1.35}
-\begin{tabular}{p{0.16\linewidth} p{0.17\linewidth} p{0.16\linewidth} p{0.19\linewidth} p{0.16\linewidth}}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{p{0.13\linewidth} p{0.18\linewidth} p{0.14\linewidth} p{0.16\linewidth} p{0.13\linewidth}}
 \hline
 \textbf{Approach} & \textbf{Synchronization order} & \textbf{Deadlock risk} & \textbf{Composability} & \textbf{Reasoning locality} \\
 \hline
@@ -361,38 +380,38 @@ int balance_b = 0;
 int floor = 0;
 
 void *transfer_safe(void *arg) {
-int n = *(int *) arg;
-pthread_mutex_lock(&g_lock);
-usleep(1000);
-pthread_mutex_lock(&g_floor_lock);
-if (balance_a >= floor + n) {
-balance_a -= n;
-balance_b += n;
-}
-pthread_mutex_unlock(&g_floor_lock);
-pthread_mutex_unlock(&g_lock);
-return NULL;
+    int n = *(int *) arg;
+    pthread_mutex_lock(&g_lock);
+    usleep(1000);
+    pthread_mutex_lock(&g_floor_lock);
+    if (balance_a >= floor + n) {
+        balance_a -= n;
+        balance_b += n;
+    }
+    pthread_mutex_unlock(&g_floor_lock);
+    pthread_mutex_unlock(&g_lock);
+    return NULL;
 }
 
 void *audit(void *arg) {
-pthread_mutex_lock(&g_floor_lock);
-usleep(1000);
-pthread_mutex_lock(&g_lock);
-int total = balance_a + balance_b;
-pthread_mutex_unlock(&g_lock);
-pthread_mutex_unlock(&g_floor_lock);
-printf("total = %d\n", total);
-return NULL;
+    pthread_mutex_lock(&g_floor_lock);
+    usleep(1000);
+    pthread_mutex_lock(&g_lock);
+    int total = balance_a + balance_b;
+    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_floor_lock);
+    printf("total = %d\n", total);
+    return NULL;
 }
 
 int main(void) {
-pthread_t t1, t2;
-int amount = 10;
-pthread_create(&t1, NULL, transfer_safe, &amount);
-pthread_create(&t2, NULL, audit, NULL);
-pthread_join(t1, NULL);
-pthread_join(t2, NULL);
-return 0;
+    pthread_t t1, t2;
+    int amount = 10;
+    pthread_create(&t1, NULL, transfer_safe, &amount);
+    pthread_create(&t2, NULL, audit, NULL);
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+    return 0;
 }
 \end{lstlisting}
 
