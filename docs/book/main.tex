@@ -20,7 +20,7 @@
 
 % --- Graphics (for future TikZ figures) ---
 \usepackage{tikz}
-\usetikzlibrary{positioning,arrows.meta,calc}
+\usetikzlibrary{positioning,arrows.meta,calc,shapes.geometric}
 
 % --- Code listings ---
 \usepackage{listings}
@@ -4227,7 +4227,7 @@ The companion implementation keeps this boundary clean. The same compiler-facing
 \index{read barrier}
 \index{write barrier}
 \index{typed runtime barrier}
-\index{runtime ABI!tm_hooks}
+\index{runtime ABI!tm\_hooks}
 \index{address-space policy}
 \index{stack-private memory}
 \index{heap address}
@@ -4237,8 +4237,8 @@ The companion implementation keeps this boundary clean. The same compiler-facing
 \index{indirect call}
 \index{uninstrumented callee}
 \index{shared-data registry}
-\index{.tm_shared section}
-\index{LLVM_TM_ADDR_CHECK}
+\index{.tm\_shared section}
+\index{LLVM\_TM\_ADDR\_CHECK}
 \index{bank transfer!instrumented}
 \index{money-conservation invariant}
 \index{TLA+!compiler-pass model}
@@ -4750,7 +4750,7 @@ A useful extension is to randomize the abort site rather than only the abort dec
 \section{Worked Example: A Sequential Oracle for a Counter Suite}
 \label{sec:oracle-counter-example}
 
-A conservation invariant is not always enough. A set, map, queue, or counter suite often needs a reference object. The following C++ program uses a mutex-protected sequential oracle beside an intentionally simple transactional interface. In a real backend test, \texttt{tm_increment} would be replaced by the backend under test.
+A conservation invariant is not always enough. A set, map, queue, or counter suite often needs a reference object. The following C++ program uses a mutex-protected sequential oracle beside an intentionally simple transactional interface. In a real backend test, \texttt{tm\_increment} would be replaced by the backend under test.
 
 \begin{lstlisting}[language=C++, caption={A compilable sequential-oracle test for committed increments.}]
 #include <cassert>
