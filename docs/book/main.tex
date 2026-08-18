@@ -20,7 +20,7 @@
 
 % --- Graphics (for future TikZ figures) ---
 \usepackage{tikz}
-\usetikzlibrary{positioning,arrows.meta,calc}
+\usetikzlibrary{positioning,arrows.meta,calc,shapes.geometric}
 
 % --- Code listings ---
 \usepackage{listings}
@@ -4432,11 +4432,19 @@ Speculation unlocks concurrency but introduces aborts. Different version-managem
 \part{Compiler Instrumentation for TM}
 
 \chapter{Compiler Fundamentals – IRs and Passes}
+\index{compiler instrumentation!IRs and passes; compilation pipeline; LLVM IR; GCC GIMPLE; TM pass; runtime ABI; address-space check; shared-data registry}
+
+Compiler support for transactional memory is mostly a question of placement. The programmer writes a transaction over ordinary variables; the runtime expects explicit calls that record reads, buffer writes, validate metadata, and commit or abort. A compiler pass is the bridge between those two worlds.
+
+This chapter treats instrumentation as an IR-to-IR transformation. The goal is not to implement NOrec, TL2, TSC-TM, TinySTM, SwissTM, or another backend inside the compiler. The goal is to emit ordinary object code whose transactional memory accesses call a stable runtime ABI. The companion implementation uses this separation throughout: backends differ, but the compiler-facing shape is a transaction boundary plus typed read and write barriers.
+
 \section{The Compilation Pipeline}
-\begin{itemize}
-    \item Front end (lexing, parsing, AST), middle end (IR optimization), back end (code generation).
-    \item LLVM IR and GCC GIMPLE: a high‑level view.
-\end{itemize}
+
+A conventional compiler pipeline has three broad stages. The front end turns source text into a structured representation: tokens, parse trees, type-checked abstract syntax trees, and then an initial intermediate representation. The middle end rewrites that IR to simplify, optimize, and normalize the program. The back end lowers the optimized IR to target-specific instructions, schedules them, allocates registers, and emits object code.
+
+A transactional-memory compiler pass normally belongs in the middle end, after the source-level transaction construct has been lowered but before final code generation. At that point the pass can still see memory operations explicitly, can query alias and escape information, and can replace loads and stores with calls into the TM runtime.
+
+LLVM IR and GCC GIMPLE are the two useful reference points. LLVM IR is a typed, static-single-assignment representation with explicit \texttt{load}, \texttt{store}, \texttt{call}, and control-flow instructions. GCC GIMPLE is also a simplified, typed IR, with memory operations made explicit enough for data-flow analysis and transformation. In both systems, the TM pass is conceptually simple: find memory accesses inside transactions, decide whether each access targets transactional shared state, and rewrite the selected operations into runtime calls.
 
 \begin{figure}[htbp]
 \centering
@@ -4469,16 +4477,55 @@ Speculation unlocks concurrency but introduces aborts. Different version-managem
 \label{fig:compiler-tm-pass}
 \end{figure}
 
+The important design point is that the output of the pass is still ordinary code. There is no magic instruction in the object file unless a backend chooses to use one internally. TSX-SGL may execute an optimistic hardware transaction and fall back to a single global lock; NOrec may validate a value-based read set; TL2 may validate versioned locks; TSC-TM may use timestamp-counter ordering. The compiler pass need not know those algorithms. It must only obey the ABI.
+
 \section{Instrumentation as a Compiler Pass}
-\begin{itemize}
-    \item Replacing transactional memory accesses with calls to a runtime.
-    \item The structure of a \texttt{FunctionPass} in LLVM (and its GIMPLE equivalent).
-    \item Pseudocode for the instrumentation algorithm, plus a PlusCal specification.
-    \item What a production pass must handle: function calls into uninstrumented code, indirect calls, and escaping pointers.
-    \item The instrumentation decision is a static-address-space question: heap/global addresses go through TM; stack addresses bypass it (the \texttt{LLVM\_TM\_ADDR\_CHECK} pattern).
-    \item Where TM globals get registered so the runtime can recognise them (the \texttt{.tm\_shared} section of the companion implementation).
-    \item Trade-off: instrumenting every load/store (simple, slow) vs.\ annotating shared data (fast, needs programmer discipline).
-\end{itemize}
+
+Instrumentation replaces transactional memory accesses with calls to a runtime. A source-level read such as \texttt{x = a->balance} becomes a typed read barrier. A source-level write such as \texttt{a->balance = x} becomes a typed write barrier. Transaction entry and exit become calls such as \texttt{\_\_tm\_begin} and \texttt{\_\_tm\_end}, or indirect calls through a hooks table when the backend is selected dynamically.
+
+In LLVM, the pass can be structured as a function pass or a module pass. A function pass is convenient when transaction boundaries are already represented inside each function, for example by intrinsics delimiting the transaction. A module pass is needed when global registration, constructor emission, or cross-function rewriting is required. The GCC GIMPLE equivalent traverses statements inside basic blocks, recognizes memory references, and replaces selected statements with calls to declared runtime functions.
+
+A minimal instrumentation algorithm is:
+
+\begin{lstlisting}[language=C, caption={Pseudocode for a conservative TM instrumentation pass.}]
+for each function F in module:
+    in_tx = false
+
+    for each basic block B in F in dominance-safe order:
+        for each instruction I in B:
+            if I is tm_begin intrinsic:
+                replace I with call __tm_begin()
+                in_tx = true
+                continue
+
+            if I is tm_end intrinsic:
+                replace I with call __tm_end()
+                in_tx = false
+                continue
+
+            if not in_tx:
+                continue
+
+            if I is load from address P:
+                if must_bypass_tm(P):
+                    continue
+                replace I with typed call __tm_read_width(P)
+
+            if I is store value V to address P:
+                if must_bypass_tm(P):
+                    continue
+                replace I with typed call __tm_write_width(P, V)
+
+            if I is call:
+                apply call policy: instrumented callee,
+                safe pure callee, or abort/escape barrier
+\end{lstlisting}
+
+The address decision is the pass's most delicate local rule. The companion implementation uses the \texttt{LLVM\_TM\_ADDR\_CHECK} pattern: heap and global addresses go through TM; stack addresses bypass it when they are provably private. This is a static-address-space question, not a runtime performance hint. If the pass is unsure, it must instrument. A false positive costs time. A false negative can break atomicity.
+
+Registered globals are handled through a shared-data registry. In the companion implementation, transactional globals are placed in a \texttt{.tm\_shared} section so that the runtime can recognize the range of shared objects. That lets the fast path reject obviously private addresses and lets the compiler avoid rewriting known-private memory. The discipline is similar to a garbage collector root table or sanitizer metadata section: the compiler emits metadata, and the runtime interprets it.
+
+Production passes must also handle calls. A call inside a transaction may read or write through pointers that the pass cannot see directly. There are only a few safe choices: inline and instrument the callee; require the callee to be compiled with the same TM ABI; prove the callee is pure or private-memory-only; or treat the call as an escape that forces abort, fallback, or global serialization. Indirect calls are harder because the target set may be unknown. Escaping pointers are harder still: once a pointer to shared state leaves the analyzed region, uninstrumented code can violate the transaction.
 
 \begin{table}[htbp]
 \centering
@@ -4496,6 +4543,33 @@ Manual runtime calls & Source code calls \texttt{tm\_read\_*} and \texttt{tm\_wr
 \label{tab:instrumentation-policies}
 \end{table}
 
+The table makes the central trade-off explicit. Rewriting every load and store is easy to explain and hard to make fast. Annotating only shared data is fast when annotations are complete and dangerous when they are not. Most practical systems choose a middle path: use compiler analysis to bypass obvious stack temporaries, use metadata for known shared globals, and let the runtime make a final conservative decision.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=1.4cm,
+    box/.style={draw, rounded corners, minimum width=3.1cm, minimum height=0.8cm, align=center},
+    decision/.style={draw, diamond, aspect=2.2, align=center, inner sep=1pt},
+    arr/.style={-{Latex[length=2mm]}, thick}
+]
+\node[box] (memop) {IR memory op\\inside transaction};
+\node[decision, below=of memop] (stack) {provably\\stack-private?};
+\node[box, below left=1.0cm and 1.3cm of stack] (plain) {leave as plain\\load/store};
+\node[decision, below right=1.0cm and 1.3cm of stack] (shared) {heap, global,\\or unknown?};
+\node[box, below=of shared] (barrier) {emit typed\\TM barrier};
+\node[box, below=of barrier] (runtime) {runtime validates\\and commits};
+
+\draw[arr] (memop) -- (stack);
+\draw[arr] (stack) -- node[left] {yes} (plain);
+\draw[arr] (stack) -- node[right] {no} (shared);
+\draw[arr] (shared) -- node[right] {yes} (barrier);
+\draw[arr] (barrier) -- (runtime);
+\end{tikzpicture}
+\caption{The address-policy state machine: private stack memory bypasses the runtime; heap, global, and unknown addresses are conservatively instrumented.}
+\label{fig:address-policy-state-machine}
+\end{figure}
+
 \section{Worked Example: A Load, Before and After the Pass}
 \index{instrumentation}\index{LLVM IR}
 \label{sec:ir-example}
@@ -4511,13 +4585,22 @@ transactional read of an \texttt{int} becomes a call into the runtime:
 %1 = call i32 @__tm_read_i4(i32* %p)
 \end{lstlisting}
 
-\begin{itemize}
-    \item The pass rewrites the memory operand of each load/store into a typed runtime call (\texttt{tm\_read\_i4}, \texttt{tm\_write\_i4}, \ldots).
-    \item The static address-space policy decides \emph{which} accesses get rewritten: heap/global go through TM, stack addresses bypass via \texttt{LLVM\_TM\_ADDR\_CHECK}.
-    \item The type in the call name matters: \texttt{i4} vs \texttt{i8} select different runtime fast paths and different read-set log widths.
-    \item Exercise~1 of this chapter asks you to repeat this mapping by hand on a GIMPLE listing.
-    \item The contract the pass instruments \emph{against} --- the exact signatures of \texttt{tm\_read\_*}\slash{}\texttt{tm\_write\_*}, how a transaction begins/ends, and what an abort unwinds --- is the runtime ABI of Chapter~7. If the ABI moves, the pass must move with it; the two are coupled by design, which is why they share the \texttt{tm\_hooks} table rather than a hard-coded call.
-\end{itemize}
+The transformation is local, but it has global consequences. The original load has the normal memory semantics of the target language. The rewritten call records the address in the transaction's read path. In NOrec-style algorithms this may mean reading a value and later validating that the global sequence did not make the read inconsistent. In TL2-style algorithms this may mean checking a versioned lock. In TinySTM variants, the call may interact with write-back, write-through, or encounter-time locking policy. The compiler does not choose among those policies; it preserves the access boundary.
+
+The pass rewrites the memory operand of each load or store into a typed runtime
+call such as \texttt{tm\_read\_i4} or \texttt{tm\_write\_i4}. The static
+address-space policy decides \emph{which} accesses get rewritten: heap and global
+addresses go through TM, while stack addresses bypass it via
+\texttt{LLVM\_TM\_ADDR\_CHECK}. The type in the call name matters: \texttt{i4}
+versus \texttt{i8} selects different runtime fast paths and different read-set log
+widths. Exercise~1 of this chapter asks you to repeat this mapping by hand on a
+GIMPLE listing. The contract the pass instruments \emph{against} --- the exact
+signatures of \texttt{tm\_read\_*}\slash{}\texttt{tm\_write\_*}, how a transaction
+begins and ends, and what an abort unwinds --- is the runtime ABI of Chapter~7. If
+the ABI moves, the pass must move with it; the two are coupled by design, which is
+why they share the \texttt{tm\_hooks} table rather than a hard-coded call.
+
+A store is similar, but the runtime may delay the physical write. A write-back backend records the address and value in a write set and publishes later. A write-through backend may write eagerly after acquiring ownership. The pass's emitted call must therefore be understood as a semantic write, not necessarily as an immediate hardware store.
 
 \section{Worked Example: Instrumenting a Bank Transfer}
 \index{bank transfer}\index{runtime ABI}
@@ -4603,13 +4686,17 @@ int main(void) {
 }
 \end{lstlisting}
 
-Lessons:
-\begin{itemize}
-    \item The compiler pass does not prove the money-conservation invariant; it preserves the memory operations on which the runtime will enforce atomicity.
-    \item The two writes must be in one transaction. Instrumenting each store independently would preserve type correctness but not the bank invariant under concurrency.
-    \item The generated calls are typed. Here \texttt{balance} is an \texttt{int}, so the pass emits \texttt{\_\_tm\_read\_i4} and \texttt{\_\_tm\_write\_i4}.
-    \item Stack temporaries such as \texttt{from\_balance}, \texttt{to\_balance}, and \texttt{before} are not shared transactional locations and should not be routed through the TM runtime.
-\end{itemize}
+The compiler pass does not prove the money-conservation invariant; it
+preserves the memory operations on which the runtime will enforce atomicity. The
+two writes must therefore remain in one transaction: instrumenting each store
+independently would preserve type correctness but not the bank invariant under
+concurrency. The generated calls are typed; here \texttt{balance} is an
+\texttt{int}, so the pass emits \texttt{\_\_tm\_read\_i4} and
+\texttt{\_\_tm\_write\_i4}. Finally, stack temporaries such as
+\texttt{from\_balance}, \texttt{to\_balance}, and \texttt{before} are not shared
+transactional locations and should not be routed through the TM runtime.
+
+In a real concurrent execution, the two assertions at the end are not enough. They test the sequential shape of the transformed code. The runtime must additionally guarantee that no other committed transaction can observe the debit without the credit, or the credit without the debit. That is the reason the compiler emits one begin, two reads, up to two writes, and one end for the whole transfer.
 
 \section{Worked Example: Model Checking the Address Policy}
 \index{TLA+}\index{address-space check}
@@ -4674,38 +4761,78 @@ Spec == Init /\ [][Next]_<< pc, out >>
 ====
 \end{lstlisting}
 
-Lessons:
-\begin{itemize}
-    \item The model is deliberately smaller than LLVM. It isolates the address-policy obligation from parsing, dominance, and code generation.
-    \item \texttt{StackBypass} catches accidental over-instrumentation of private stack slots.
-    \item \texttt{SharedInstrumented} catches the dangerous bug: a heap or global access escaping the TM runtime.
-    \item In a production pass, the hard case is not the rule itself but proving that an address is stack-private after optimization and aliasing.
-\end{itemize}
+The model is deliberately smaller than LLVM; it isolates the address-policy
+obligation from parsing, dominance, and code generation. \texttt{StackBypass}
+catches accidental over-instrumentation of private stack slots, while
+\texttt{SharedInstrumented} catches the dangerous bug: a heap or global access
+escaping the TM runtime. In a production pass, the hard case is not the rule
+itself but proving that an address is stack-private after optimization and
+aliasing.
+
+This model is also a useful template for compiler-pass testing. The invariant to care about is not that the output is short, or that a particular optimization fired. The invariant is semantic: every shared transactional access must cross the runtime boundary. If the implementation later adds a fourth address class, such as \texttt{unknown}, the safe extension is to map it to \texttt{tmread} or \texttt{tmwrite}, not to \texttt{plain}.
 
 \section{Summary}
-\begin{itemize}
-    \item Instrumentation is a source‑to‑source (or IR‑to‑IR) transformation.
-    \item A pass that instruments every memory access is the simplest possible TM compiler support.
-    \item A production-quality pass needs an address-space policy, a shared-data registry, and careful handling of uninstrumented callees.
-\end{itemize}
+
+Instrumentation is a source-to-source or IR-to-IR transformation: it preserves the program's transactional intent while making runtime mediation explicit. A pass that instruments every memory access is the simplest possible TM compiler support, but it usually pays too much overhead on stack temporaries and private data.
+
+A production-quality pass needs three things: an address-space policy, a shared-data registry, and a conservative call policy. The address policy decides which memory operations need barriers. The registry tells the runtime which globals belong to transactional shared state. The call policy prevents uninstrumented callees, indirect calls, and escaping pointers from silently bypassing the transaction.
+
+The companion implementation keeps this boundary clean. The same compiler-facing structure can feed SGL, TSX-SGL, SPHT, NOrec, NOrec-BF, TL2, TSC-TM, TinySTM variants, SwissTM, persistent backends, distributed backends, and GPU-oriented designs. Their commit protocols differ. Their required instrumentation shape is the same: transaction boundaries plus typed access barriers.
 
 \section{Exercises}
 \begin{enumerate}
     \item Given a small C function, manually identify which GIMPLE statements would be replaced by calls to a TM runtime barrier.
     \item Critique a naive instrumentation pass that instruments all loads and stores in the whole program. What performance problems would arise?
     \item Design an LLVM pass that instruments only loads and stores inside basic blocks marked with a special intrinsic.
+    \item \emph{[implementation]} Extend the bank-transfer listing so that \texttt{Account} contains a \texttt{uint64\_t id} and an \texttt{int balance}. Show the post-pass calls for reading the identifier and updating the balance. Use distinct typed barriers for four-byte and eight-byte fields.
+    \item \emph{[verification]} Modify the TLA+ model so that \texttt{Addrs} also includes \texttt{"unknown"}. State and check an invariant requiring unknown addresses to be instrumented.
+    \item \emph{[theory]} Explain why a pass that instruments only syntactic globals but not heap objects can preserve correctness for some benchmarks and still be unsound as a general TM compilation strategy.
 \end{enumerate}
 
+\index{compiler pass!FunctionPass}
+\index{compiler pass!module pass}
+\index{LLVM IR!load instruction}
+\index{LLVM IR!store instruction}
+\index{GIMPLE!memory statement}
+\index{transaction boundary}
+\index{read barrier}
+\index{write barrier}
+\index{typed runtime barrier}
+\index{runtime ABI!tm\_hooks}
+\index{address-space policy}
+\index{stack-private memory}
+\index{heap address}
+\index{global address}
+\index{unknown address}
+\index{escaping pointer}
+\index{indirect call}
+\index{uninstrumented callee}
+\index{shared-data registry}
+\index{.tm\_shared section}
+\index{LLVM\_TM\_ADDR\_CHECK}
+\index{bank transfer!instrumented}
+\index{money-conservation invariant}
+\index{TLA+!compiler-pass model}
+\index{model checking!instrumentation policy}
 % -------------------------------------------------------------------
 \chapter{Compiler Optimizations and Their Impact on TM}
+\index{compiler optimizations!transactional memory; transactional memory!compiler instrumentation; DSE; LICM; CSE; tm\_clobber; transaction\_safe; transaction\_pure}
+
+A transactional memory implementation is not only a runtime algorithm. It is also a contract with the compiler. The runtime may implement SGL, NOrec, TL2, TinySTM, SwissTM, MVLog, or a GPU design such as GUST, but the generated code must still preserve the abstract transaction: every transactional read must be represented in the read-set or validation discipline, and every transactional write must be represented in the write-set or redo/undo discipline.
+
+This chapter focuses on the danger zone between ordinary optimization and TM instrumentation. The running example is the two-account bank transfer: debit one account, credit another, preserve an account floor, and preserve total money. The compiler is allowed to optimize local arithmetic and stack temporaries aggressively. It is not allowed to erase the debit, hoist a transactional read past a validation boundary, or turn an opaque TM access into an ordinary load.
+
 \section{Common Optimizations}
-\begin{itemize}
-    \item Dead‑store elimination (DSE), loop‑invariant code motion (LICM), common subexpression elimination (CSE).
-    \item Each can silently break transactional semantics by eliminating or reordering instrumented accesses.
-    \item The root problem: most optimizers assume a single-threaded execution model and treat memory accesses as opaque only when told to.
-    \item Optimizations inside a transaction must be rerun \emph{after} instrumentation, not before, or the pass rediscovers and undoes TM calls.
-    \item Stack versus shared memory: it is safe to optimize stack accesses aggressively; shared/global accesses inside a transaction are the only dangerous ones.
-\end{itemize}
+
+The optimizations that create trouble for TM are not exotic. They are exactly the optimizations expected from a competent compiler: dead-store elimination, loop-invariant code motion, common subexpression elimination, scalar replacement, inlining, and store forwarding. In ordinary single-threaded code, these transformations are semantics-preserving because they reason about what the current function can later observe. In transactional code, the relevant observer is larger: the transaction manager, the conflict detector, the commit protocol, and other threads.
+
+Dead-store elimination (DSE) removes a store when the compiler cannot find a later read that depends on it. That is fatal if the store is actually a call that appends to a transactional write-set. Loop-invariant code motion (LICM) moves a load out of a loop when the address appears unchanged. That is fatal if each dynamic read must be separately tracked or validated. Common subexpression elimination (CSE) reuses the result of an earlier read. That is fatal when a later transactional read must detect intervening writes or participate in opacity validation.
+
+The root problem is the compiler's default memory model. Most middle-end optimizers begin with a sequential, intra-thread view of memory and become conservative only when told that an operation is opaque, volatile, atomic, externally visible, or otherwise side-effecting. TM instrumentation must therefore make transactional effects visible to the optimizer as effects, not as ordinary helper calls that can be deleted or reordered.
+
+Pass ordering is the practical rule. Ordinary memory optimizations should run before instrumentation. The instrumentation pass then rewrites shared accesses into calls such as \texttt{tm\_read\_i4} and \texttt{tm\_write\_i4}. After that point, memory-affecting optimizations may not rediscover those calls as removable loads and stores. If late optimization is required, it must understand the TM ABI.
+
+Stack memory and shared memory must not be treated alike. A local variable that provably lives on the current thread's stack can be promoted to a register, split, folded, or removed. A heap object or annotated global inside a transaction cannot be optimized by the same rules, because it may be part of the transaction's abstract read-set or write-set.
 
 \section{Worked Example: Two Optimizations That Break TM}
 \index{DSE}\index{LICM}
@@ -4726,24 +4853,33 @@ for (int i = 0; i < 100; ++i)
                                          reads b[0] once */
 \end{lstlisting}
 
-\begin{itemize}
-    \item Both are correct under single-threaded semantics and both are wrong for TM: the write must reach the write-set, and the read must see fresh data each iteration.
-    \item The fix is the contract of the next section: \texttt{tm\_clobber} and the rule that instrumentation runs \emph{after} optimization.
-    \item These are exactly the ``mismatch bugs seen in the wild'' of the next section --- pass reordering and dead-store elimination of speculative writes.
-\end{itemize}
+The first transformation breaks the write-set. The fact that the function does not read \texttt{a->balance} again is irrelevant: the write is intended to be observed by the TM runtime at commit time. In a write-back algorithm such as TL2, TinySTM-WBCTL, SwissTM, or NOrec, the write may not update memory immediately, but it is still semantically live. It is the speculative debit.
+
+The second transformation breaks the read-set. Even if a source expression looks syntactically stable, a transactional read may have to record an address, observe a version, validate a clock, check a Bloom filter, or participate in a later opacity check. Hoisting it out of the loop changes both the values read and the metadata collected by the runtime.
+
+Both are correct under single-threaded semantics and both are wrong for TM: the write must reach the write-set, and the read must see fresh data each iteration. The fix is the contract of the next section: \texttt{tm\_clobber} and the rule that instrumentation runs \emph{after} optimization. These are exactly the ``mismatch bugs seen in the wild'' of the next section --- pass reordering and dead-store elimination of speculative writes.
+
+For the bank example, the intended invariant is:
+
+$$
+a.balance + b.balance = initial\_a + initial\_b
+$$
+
+where \texttt{a} and \texttt{b} are the two accounts. If the compiler deletes the debit but leaves the credit, the invariant is false even though every individual instruction still looks type-correct.
 
 \section{The Instrumentation Contract}
 \label{sec:instrumentation-contract}
+
 The precise, mechanical rules a compiler pass and a TM runtime agree on.
 This section turns the previous section's warnings into a checkable list.
 
-\begin{itemize}
-    \item \textbf{Which accesses are instrumented.} Heap and shared-global memory operands inside a transaction are rewritten to \texttt{tm\_read\_*}/\texttt{tm\_write\_*} calls; stack-locals bypass via \texttt{LLVM\_TM\_ADDR\_CHECK}. The \texttt{[[tm::\allowbreak shared]]} annotation (Chapter~4) is the source-level way to put a global on the instrumented side.
-    \item \textbf{Which are exempt.} Accesses that provably target the current thread's stack, addresses registered in the runtime's TM-global registry, and operations in uninstrumented (e.g.\ \texttt{transaction\_pure}) callees are left untouched.
-    \item \textbf{What metadata is preserved.} The pass must not lose the address-space classification or the width of each access --- the call name itself (\texttt{i4} vs.\ \texttt{i8}) encodes both, so type-preserving rewrites are mandatory.
-    \item \textbf{Pass ordering.} Instrumentation is the \emph{last} memory-affecting pass: anything that eliminates or reorders memory operations must run before it. Running DSE or LICM after instrumentation silently discards read-set/write-set side effects (Section~\ref{sec:optim-example}).
-    \item \textbf{Barriers for the optimizer.} Calls to \texttt{tm\_read\_*}/\texttt{tm\_write\_*} are opaque side-effecting calls --- they must be marked \texttt{tm\_clobber}-equivalent so the optimizer never treats them as pure loads/stores.
-\end{itemize}
+A TM-aware compiler needs an explicit instrumentation contract. The contract identifies which memory operations are transactional, which are ordinary, what metadata must survive lowering, and which transformations are permitted after instrumentation. Without such a contract, the compiler and runtime are each locally correct but globally unsound.
+
+\textbf{Which accesses are instrumented:} heap and shared-global memory operands inside a transaction are rewritten to \texttt{tm\_read\_*}/\texttt{tm\_write\_*} calls, whereas stack-locals bypass via \texttt{LLVM\_TM\_ADDR\_CHECK}, and the \texttt{[[tm::shared]]} annotation (Chapter~4) is the source-level way to put a global on the instrumented side. \textbf{Which are exempt:} accesses that provably target the current thread's stack, addresses registered in the runtime's TM-global registry, and operations in uninstrumented (e.g.\ \texttt{transaction\_pure}) callees are left untouched. \textbf{What metadata is preserved:} the pass must not lose the address-space classification or the width of each access --- the call name itself (\texttt{i4} vs.\ \texttt{i8}) encodes both, so type-preserving rewrites are mandatory. \textbf{Pass ordering:} instrumentation is the \emph{last} memory-affecting pass, so anything that eliminates or reorders memory operations must run before it; running DSE or LICM after instrumentation silently discards read-set/write-set side effects (Section~\ref{sec:optim-example}). \textbf{Barriers for the optimizer:} calls to \texttt{tm\_read\_*}/\texttt{tm\_write\_*} are opaque side-effecting calls and must be marked \texttt{tm\_clobber}-equivalent so the optimizer never treats them as pure loads/stores.
+
+The contract is intentionally independent of the backend. SGL may implement the transaction as a critical section; TL2 and TSC-TM may use clocks; NOrec may validate against a global sequence lock; TinySTM variants may differ in write-back or write-through policy; GPU designs may batch validation and commit logs. The compiler still owes the same thing: preserve the dynamic sequence of transactional effects that the source program requested.
+
+The contract also explains why measured runtime performance must be interpreted together with compiler correctness. For example, the codebase measurements report TL2 and TSC-TM at roughly 2.06M and 2.05M transactions per second on the M1 Pro fuzz/bank benchmark, and NOrec-BF faster than baseline NOrec on the read-mostly case. Those numbers are meaningful only if the compiler has not optimized away the transactional access stream being measured.
 
 \section{Worked Example: Barriered Transfer Instrumentation}
 \index{tm\_clobber}
@@ -4811,12 +4947,11 @@ int main(void) {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item \texttt{from0}, \texttt{to0}, and \texttt{ok} are ordinary stack values; scalar replacement and register allocation are harmless there.
-    \item \texttt{tm\_write\_i4} is not a dead store. It is the operation that records the speculative update.
-    \item The inline memory clobber models the minimum compiler contract. Production runtimes encode the same idea with ABI attributes, intrinsics, or opaque calls.
-    \item The bank invariant is not a local property of the function body. It is preserved only if both writes survive to commit.
-\end{itemize}
+This listing is not a complete STM. It is a minimal executable model of the compiler boundary. The empty inline assembly with a \texttt{memory} clobber prevents the compiler from proving that the accessor is a pure computation. The \texttt{noinline} attribute prevents inlining from exposing the body to later scalar simplification. Production systems prefer a proper intrinsic or ABI-level attribute, but the lesson is the same: the optimizer must see an effect.
+
+\texttt{from0}, \texttt{to0}, and \texttt{ok} are ordinary stack values, where scalar replacement and register allocation are harmless; \texttt{tm\_write\_i4} is not a dead store but the operation that records the speculative update; the inline memory clobber models the minimum compiler contract, while production runtimes encode the same idea with ABI attributes, intrinsics, or opaque calls; and the bank invariant is not a local property of the function body --- it is preserved only if both writes survive to commit.
+
+A useful compiler test is to build this file with high optimization and inspect the generated assembly or IR. The local variables may disappear. The two write calls must not.
 
 \begin{figure}[htbp]
 \centering
@@ -4872,10 +5007,15 @@ SROA & Splits aggregate accesses and changes access width. & Legal only if the p
 \label{tab:tm-optimization-taxonomy}
 \end{table}
 
+The table should be read operationally. If an optimization changes only stack temporaries, it is usually harmless. If it changes the number, order, width, or address of transactional accessors, it is part of the TM implementation and must be proved against the runtime's semantics.
+
+A width change is a common source of subtle bugs. Rewriting one 64-bit shared load into two 32-bit transactional reads may change atomicity and validation. Rewriting two adjacent 32-bit writes into one 64-bit write may create a conflict where the source program had two separate accesses, or hide one where the runtime tracks at word granularity. The instrumentation pass must therefore preserve the width classification used by the runtime.
+
 \section{Worked Example: A Dropped Debit}
 \index{TLA+}
 \index{money conservation}
 \label{sec:worked-dropped-debit}
+
 A compiler bug is a semantic transformation, so it can be modeled directly. The
 following TLA+ module has two transfer actions. \texttt{GoodTransfer} debits one
 account and credits the other. \texttt{BadTransfer} models DSE deleting the
@@ -4934,29 +5074,36 @@ CONSTANTS
     Floor = 0
 \end{lstlisting}
 
-\begin{itemize}
-    \item With only \texttt{GoodTransfer}, both invariants hold for this finite instance.
-    \item Enabling \texttt{BadTransfer} produces a state with \texttt{a = 100} and \texttt{b = 80}; the floor still holds, but money conservation is false.
-    \item The bug is not in the runtime algorithm. It is in the compiler transformation that changed the transaction's abstract write-set.
-    \item This is the same shape of error that a post-instrumentation DSE pass can introduce in C or LLVM IR.
-\end{itemize}
+With only \texttt{GoodTransfer}, both invariants hold for this finite instance; enabling \texttt{BadTransfer} produces a state with \texttt{a = 100} and \texttt{b = 80}, in which the floor still holds but money conservation is false. The bug is not in the runtime algorithm but in the compiler transformation that changed the transaction's abstract write-set, and it is the same shape of error that a post-instrumentation DSE pass can introduce in C or LLVM IR.
+
+The model deliberately abstracts away locks, timestamps, ownership records, and validation. That is the point. A compiler pass that deletes one side of the transfer has already changed the sequential meaning of the transaction. No commit protocol can repair an update that was never emitted.
 
 \section{Contract Between Programmer and Compiler}
-\begin{itemize}
-    \item What the programmer must protect (via \texttt{transaction\_safe}\slash{}\texttt{transaction\_pure} annotations).
-    \item Compiler intrinsics like \texttt{tm\_clobber} that inform the optimizer of transactional side effects.
-    \item The annotation contract is the C++ TM TS's central lesson: without a language-level notion of ``transaction'', the compiler cannot keep its promises.
-    \item Mismatch bugs seen in the wild: DATA/TEXT symbol collisions, pass reordering of \texttt{tm\_read}\slash{}\texttt{tm\_write} calls, and dead-store elimination of speculative writes.
-    \item The programmer-facing contract of this section is the user-visible half of Section~\ref{sec:instrumentation-contract}: the annotations the programmer writes exist to feed the pass the classifications it needs.
-\end{itemize}
+
+The programmer-facing half of the contract is a set of annotations and restrictions. The compiler cannot infer every semantic boundary from C or C++ syntax alone. It needs to know which functions may execute inside a transaction, which functions are pure with respect to transactional state, and which globals must be treated as shared transactional objects.
+
+The \texttt{transaction\_safe} annotation says that a function may be called from a transaction and must obey the restrictions required by the TM implementation. The \texttt{transaction\_pure} annotation says that a function is allowed because it has no relevant transactional side effects. The dangerous case is misannotation: a function marked pure but performing shared memory I/O gives the optimizer permission to erase exactly the dependency the runtime needed.
+
+Compiler intrinsics such as \texttt{tm\_clobber} exist to bridge source intent and optimizer mechanics. A source-level annotation classifies a region. An IR-level intrinsic prevents a later pass from turning the instrumented region back into ordinary memory operations.
+
+The contract says what the programmer must protect via \texttt{transaction\_safe}\slash{}\texttt{transaction\_pure} annotations, while compiler intrinsics like \texttt{tm\_clobber} inform the optimizer of transactional side effects. The annotation contract is the C++ TM TS's central lesson: without a language-level notion of ``transaction'', the compiler cannot keep its promises, which explains the mismatch bugs seen in the wild --- DATA/TEXT symbol collisions, pass reordering of \texttt{tm\_read}\slash{}\texttt{tm\_write} calls, and dead-store elimination of speculative writes. This programmer-facing contract is the user-visible half of Section~\ref{sec:instrumentation-contract}: the annotations the programmer writes exist to feed the pass the classifications it needs.
+
+A useful way to state the shared responsibility is:
+
+$$
+\text{source transaction} + \text{correct classification} + \text{opaque instrumentation}
+\Rightarrow \text{runtime-visible transaction}
+$$
+
+If any term is missing, the runtime may still be correct in isolation but the compiled program is not.
 
 \section{Summary}
-\begin{itemize}
-    \item Many aggressive optimizations assume a single‑threaded execution model.
-    \item A TM‑aware compiler must disable or constrain certain optimizations within transactional regions.
-    \item The safe pipeline is ordinary optimization first, TM instrumentation last, then only optimizations that respect opaque transactional side effects.
-    \item Shared memory and stack memory must be classified before rewriting; optimizing both under the same rules is either slow or wrong.
-\end{itemize}
+
+Compiler optimizations are not the enemy of transactional memory. Unspecified optimization boundaries are. A practical TM compiler should optimize ordinary code normally, optimize stack temporaries inside transactions normally, and then preserve transactional accessors as opaque side effects after instrumentation.
+
+Many aggressive optimizations assume a single-threaded execution model, so a TM-aware compiler must disable or constrain certain optimizations within transactional regions. The safe pipeline is ordinary optimization first, TM instrumentation last, and then only optimizations that respect opaque transactional side effects; and shared memory and stack memory must be classified before rewriting, because optimizing both under the same rules is either slow or wrong.
+
+The bank-transfer example gives the core test: after compilation, both the debit and the credit must still exist as transactional effects, and the reads that justify them must still participate in the runtime's consistency mechanism.
 
 \section{Exercises}
 \begin{enumerate}
@@ -4968,22 +5115,47 @@ CONSTANTS
     \item \emph{[theory]} State the weakest condition under which CSE of two transactional reads from the same address is sound. Your answer should mention validation, intervening writes, and abort behavior.
 \end{enumerate}
 
-
+\index{dead-store elimination}
+\index{loop-invariant code motion}
+\index{common subexpression elimination}
+\index{scalar replacement of aggregates}
+\index{store forwarding}
+\index{pass ordering}
+\index{TM instrumentation}
+\index{opaque calls}
+\index{transactional read-set}
+\index{transactional write-set}
+\index{write-back STM}
+\index{read validation}
+\index{bank transfer invariant}
+\index{account floor}
+\index{LLVM\_TM\_ADDR\_CHECK}
+\index{transaction\_safe}
+\index{transaction\_pure}
+\index{C++ TM TS}
 % -------------------------------------------------------------------
 %  PART VI: ENGINEERING: TESTING, PITFALLS, AND PERFORMANCE
 % -------------------------------------------------------------------
 \part{Engineering: Testing, Pitfalls, and Performance}
 
 \chapter{Testing, Debugging, and Scheduling}
+\index{testing, debugging, scheduling, fuzzing, deterministic replay, invariant testing, TLA+ model checking}
+
+Transactional memory implementations fail in ways that ordinary unit tests rarely expose. A transaction may read a value that was valid for only a few instructions, validate too early, forget to roll back one write-set entry, or publish a partially committed state. The failure often appears later, after the schedule that caused it has disappeared.
+
+This chapter treats testing as a layered engineering discipline. At the bottom are cheap invariant tests: the bank still conserves money, a counter still has the expected value, a set still agrees with a sequential oracle. Above them are abort fuzzers, deterministic schedulers, replay tools, and abstract model checkers. The goal is not to prove every line of code correct from tests alone. The goal is to make rare transactional bugs reproducible, local, and small enough to fix.
+
 \section{Unit Testing and Fuzzing}
-\begin{itemize}
-    \item Testing transactional data structures for atomicity invariants.
-    \item Fuzzing aborts to stress test undo-log correctness.
-    \item Invariant-based testing: e.g.\ money conservation in a bank benchmark, counter equality in a shared-counter suite --- the assertion that catches lost updates.
-    \item The best invariants are sums: a race-free TM preserves an accumulator; a defect surfaces as a drift in the sum.
-    \item Fuzzing `oracle' question: what is the ground truth for a concurrent data structure? (A sequential reference implementation run in a single thread.)
-    \item Coverage goal: exercise abort paths (capacity aborts, conflicts, explicit aborts) far more often than real workloads do.
-\end{itemize}
+
+The first test for a transactional backend should not assert that a particular interleaving occurred. It should assert that no interleaving can violate an invariant. For transactional data structures, the most useful invariants are usually conservation properties: a sum, a count, a membership relation, or equality with a sequential reference implementation.
+
+The running bank benchmark has two accounts or a vector of accounts. Transactions transfer money between accounts, optionally respecting an account floor. The main invariant is money conservation: a committed transfer may move value, but it must not create or destroy value. In a shared-counter suite, the corresponding invariant is equality between the final counter value and the number of committed increments. In a set or map benchmark, the invariant is agreement with a single-threaded oracle that applies the same logical operations in a known serial order.
+
+The best invariants are sums because they are insensitive to schedule. A correct TM may serialize two transfers in either order, but the total balance must remain fixed. A race-free TM preserves the accumulator; a defective TM allows it to drift. Lost updates, torn write-back, duplicate redo-log replay, failed undo, and non-atomic commit all tend to surface as changes in a sum.
+
+Fuzzing changes the distribution of executions. Real workloads may rarely hit capacity aborts, explicit aborts, or conflict windows at just the wrong point. A fuzzer should hit them constantly. Abort fuzzing injects failures after reads, after the first write, after validation, during write-back, and immediately before commit. The resulting workload is artificial, but that is the point: rollback paths must be exercised far more often than production executes them.
+
+The oracle question is central: what is the ground truth for a concurrent data structure? For many tests the answer is a sequential reference implementation run in one thread. The test records operations, applies them to the TM-backed object and to the oracle under the same logical order, and compares the results. For the bank benchmark, the oracle can be even simpler: the initial sum is the expected final sum.
 
 \begin{table}[htbp]
 \centering
@@ -5002,6 +5174,8 @@ TLA+ model checking & Abstract safety property & Missing validation case, illega
 \end{tabular}
 \end{table}
 
+These layers are complementary. The companion implementation runs concrete tests across the backends in the codebase, including lock-based, versioned, persistent, distributed, and GPU designs. The important testing pattern is backend independence: the same logical workload and the same invariant should apply to SGL, TL2, NOrec, TinySTM variants, SwissTM, persistent backends, distributed backends, and GPU designs. Backend-specific tests are still needed, but they should come after the generic invariants.
+
 \section{Worked Example: An Invariant Test for Lost Updates}
 \index{invariant test}\index{money conservation}
 \label{sec:test-example}
@@ -5017,20 +5191,13 @@ TEST(bank, money_is_conserved) {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item A race-free TM preserves the accumulator; a defect (lost update, torn write-back) surfaces as a drift in the sum --- Exercise~1 of this chapter.
-    \item The same binary runs against every backend in Part~IV with one flag, so one test suite validates the whole family.
-    \item Exercise~1 asks for the abort-fuzzing extension; \S\ref{sec:test-example} feeds the oracle question of this section: what is ground truth?
-    \item Combine with \S\ref{sec:math-example}: at abort probability
-    \[
-    p = 0.9
-    \]
-    eight threads completing ten successful transactions each require the expected number of attempts
-    \[
-    8 \times 10 \div (1-p) = 800 .
-    \]
-    The test still passes only if undo logging is correct.
-\end{itemize}
+This is intentionally small. It does not inspect the internal read set, write set, commit counter, undo log, or lock table. It treats the TM as a black box and checks the property that all correct implementations must preserve.
+
+The test catches a classic lost update. Suppose two transfers read the same destination balance, compute two different increments, and then one write overwrites the other. No account may become corrupted in isolation; each stored value may still look plausible. The sum exposes the defect because one credit vanished.
+
+A race-free TM preserves the accumulator, while a defect such as a lost update or a torn write-back surfaces as a drift in the sum, as Exercise~1 of this chapter asks you to confirm. The same binary runs against every backend in Part~IV with one flag, so one test suite validates the whole family. Exercise~1 also asks for the abort-fuzzing extension, and \S\ref{sec:test-example} feeds the oracle question of this section: what is ground truth? Combined with \S\ref{sec:math-example}, at abort probability $p = 0.9$ eight threads completing ten successful transactions each require the expected number of attempts $8 \times 10 \div (1-p) = 800$. The test still passes only if undo logging is correct.
+
+The formula is useful because it separates test intensity from logical work. The workload still commits only eighty transfers, but the implementation attempts about eight hundred transactions. A backend with a bad abort path may fail quickly even when the normal, low-abort workload passes.
 
 \section{Worked Example: Abort Fuzzing for the Bank Invariant}
 \index{abort fuzzing}\index{undo log}
@@ -5147,22 +5314,89 @@ int main() {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item The injected abort after the debit catches a missing undo entry for the source account.
-    \item The injected abort after the credit catches a rollback loop that restores only the first write.
-    \item A global lock is acceptable in the harness: the test is aimed at rollback correctness, not scalability.
-    \item The same shape appears in production TM tests: run the normal workload, raise the abort rate, assert the invariant after all threads join.
-\end{itemize}
+The injected abort after the debit catches a missing undo entry for the source account, and the injected abort after the credit catches a rollback loop that restores only the first write. A global lock is acceptable in the harness, because the test is aimed at rollback correctness, not scalability. The same shape appears in production TM tests: run the normal workload, raise the abort rate, and assert the invariant after all threads join.
+
+A useful extension is to randomize the abort site rather than only the abort decision. For write-back TMs this means injecting aborts before validation, after validation, before acquiring write locks, after acquiring a prefix of write locks, before publishing, and after publishing a prefix of locations in a private test build. For undo-log TMs this means aborting after every undo-log append and after every in-place write. Each abort site should have a name in the failure report; otherwise a failing seed only says that rollback is wrong, not which rollback path is wrong.
+
+\section{Worked Example: A Sequential Oracle for a Counter Suite}
+\label{sec:oracle-counter-example}
+
+A conservation invariant is not always enough. A set, map, queue, or counter suite often needs a reference object. The following C++ program uses a mutex-protected sequential oracle beside an intentionally simple transactional interface. In a real backend test, \texttt{tm\_increment} would be replaced by the backend under test.
+
+\begin{lstlisting}[language=C++, caption={A compilable sequential-oracle test for committed increments.}]
+#include <cassert>
+#include <atomic>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+struct Oracle {
+    std::mutex mu;
+    int value = 0;
+
+    void increment() {
+        std::lock_guard<std::mutex> g(mu);
+        ++value;
+    }
+
+    int read() const {
+        return value;
+    }
+};
+
+struct TMCounter {
+    std::atomic<int> value{0};
+
+    void tm_increment() {
+        int old = value.load(std::memory_order_relaxed);
+        while (!value.compare_exchange_weak(old, old + 1,
+               std::memory_order_release,
+               std::memory_order_relaxed)) {
+        }
+    }
+
+    int read() const {
+        return value.load(std::memory_order_acquire);
+    }
+};
+
+int main() {
+    Oracle oracle;
+    TMCounter counter;
+
+    const int threads = 8;
+    const int operations = 1000;
+
+    std::vector<std::thread> workers;
+    for (int tid = 0; tid < threads; ++tid) {
+        workers.emplace_back([&] {
+            for (int i = 0; i < operations; ++i) {
+                counter.tm_increment();
+                oracle.increment();
+            }
+        });
+    }
+
+    for (std::thread& t : workers) {
+        t.join();
+    }
+
+    assert(counter.read() == oracle.read());
+    assert(counter.read() == threads * operations);
+}
+\end{lstlisting}
+
+The oracle is deliberately boring: one mutex, one integer, one serial meaning. The implementation may be concurrent, but the expected result is not. A lost update appears as inequality between \texttt{counter.read()} and \texttt{oracle.read()}. The same pattern scales to maps and sets by recording logical operations and comparing final contents.
 
 \section{Record-and-Replay and Deterministic Scheduling}
-\begin{itemize}
-    \item Using \texttt{rr} (Mozilla) for reverse debugging of TM executions.
-    \item Deterministic schedulers (CHESS) to systematically explore interleavings.
-    \item Why reverse debugging matters: a transaction's bug manifests at commit, long after the offending read.
-    \item Deterministic replay as a TM-native debugging tool: replay the exact interleaving that produced a lost update.
-    \item The bound on preemptions: exploring all bounded-preemption schedules for small bounds is tractable; full interleaving space is not.
-    \item Complementarity with model checking: TLA+ explores the abstract state space; \texttt{rr}\slash{}CHESS explore the concrete one.
-\end{itemize}
+
+Record-and-replay tools and deterministic schedulers address the same pain point: a concurrent failure is useless if it cannot be reproduced. A TM bug may manifest at commit even though the causal mistake was an earlier read, a missed version check, or an overwritten metadata bit. Reverse debugging lets the developer start from the bad final state and walk backward to the first invalid transition.
+
+Tools such as \texttt{rr} record a concrete execution and replay it with stable timing and stable thread behavior. This is valuable for ordinary C and C++ debugging: set a watchpoint on the corrupted account, replay, and step backward or forward around the write that changed it. Deterministic schedulers, in the style of CHESS, are more systematic. They control where threads may preempt and explore schedules up to a bound.
+
+The bound on preemptions is what makes the search usable. Full interleaving exploration grows too quickly: every shared-memory access may interleave with every access in every other thread. Bounded-preemption testing assumes that many bugs require only a small number of unlucky context switches. That assumption is often good for TM implementations because many defects live in short windows: after validation but before write-back, after acquiring one lock but before acquiring the next, or after appending to an undo log but before installing the write.
+
+Record-and-replay and model checking are not substitutes. TLA+ explores an abstract protocol state space and can find missing validation cases before code exists. Replay explores the concrete executable and can expose allocator behavior, memory-ordering mistakes, padding assumptions, and integration bugs that the abstract model intentionally omitted.
 
 \begin{figure}[htbp]
 \centering
@@ -5189,6 +5423,8 @@ int main() {
 \caption{A TM debugging loop: random or systematic exploration finds a failing interleaving; replay makes the failure local enough to debug.}
 \label{fig:tm-debugging-loop}
 \end{figure}
+
+The loop is intentionally closed. A failing seed becomes a regression test. A recorded schedule becomes a deterministic unit test. A TLA+ counterexample becomes a protocol test. The fix is not complete until the same failure mode is represented at the cheapest layer that can catch it.
 
 \section{Worked Example: Replay of a Lost-Update}
 \index{deterministic scheduling}\index{replay}
@@ -5281,20 +5517,79 @@ int main() {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item The schedule is the test case. Once recorded, the failure is no longer a Heisenbug.
-    \item Atomics remove undefined behavior from the demonstration; they do not provide transaction atomicity.
-    \item A watchpoint on \texttt{bank.b} identifies the overwrite: thread 0 writes a value computed before thread 1's credit.
-    \item A real TM backend prevents this execution by locking, validating, versioning, or aborting one transaction.
-\end{itemize}
+The schedule is the test case: once recorded, the failure is no longer a Heisenbug. Atomics remove undefined behavior from the demonstration, but they do not provide transaction atomicity. A watchpoint on \texttt{bank.b} identifies the overwrite, because thread 0 writes a value computed before thread 1's credit. A real TM backend prevents this execution by locking, validating, versioning, or aborting one transaction.
+
+The replay script is also a specification of the bug. It says which thread reached which logical point and in what order. That is more useful than a sleep-based test because sleeps encode timing, not causality. Deterministic checkpoints encode the causal edges directly.
+
+\section{Worked Example: A TLA+ Money-Conservation Check}
+\label{sec:tla-bank-conservation}
+
+The following TLA+ model abstracts a single transfer from account \texttt{A} to account \texttt{B}. It includes an abort action that restores both balances from the saved old values. If the restoration of \texttt{a} is removed, the invariant can fail after an abort following the debit.
+
+\begin{lstlisting}[caption={A small TLA+ model for transfer rollback and money conservation.}]
+--------------------------- MODULE BankAbort ---------------------------
+EXTENDS Naturals
+
+CONSTANTS InitA, InitB, Amount
+
+VARIABLES a, b, phase, oldA, oldB
+
+Init ==
+    /\ a = InitA
+    /\ b = InitB
+    /\ phase = "start"
+    /\ oldA = InitA
+    /\ oldB = InitB
+
+Read ==
+    /\ phase = "start"
+    /\ oldA' = a
+    /\ oldB' = b
+    /\ phase' = "read"
+    /\ UNCHANGED <<a, b>>
+
+Debit ==
+    /\ phase = "read"
+    /\ a >= Amount
+    /\ a' = a - Amount
+    /\ phase' = "debited"
+    /\ UNCHANGED <<b, oldA, oldB>>
+
+Credit ==
+    /\ phase = "debited"
+    /\ b' = b + Amount
+    /\ phase' = "credited"
+    /\ UNCHANGED <<a, oldA, oldB>>
+
+Commit ==
+    /\ phase = "credited"
+    /\ phase' = "done"
+    /\ UNCHANGED <<a, b, oldA, oldB>>
+
+Abort ==
+    /\ phase \in {"read", "debited", "credited"}
+    /\ a' = oldA
+    /\ b' = oldB
+    /\ phase' = "done"
+    /\ UNCHANGED <<oldA, oldB>>
+
+Next == Read \/ Debit \/ Credit \/ Commit \/ Abort
+
+MoneyConserved == a + b = InitA + InitB
+
+Spec == Init /\ [][Next]_<<a, b, phase, oldA, oldB>>
+=============================================================================
+\end{lstlisting}
+
+The model is small because it checks one idea: rollback must restore every in-place update. \texttt{MoneyConserved} is the same invariant used by the C++ bank tests, and omitting \texttt{a' = oldA} in \texttt{Abort} models a missing undo-log entry for the debit. The abstraction ignores performance, allocation, and cache behavior; that is why it can exhaustively explore protocol states.
+
+A useful workflow is to keep the TLA+ model close to the implementation test. When the implementation adds account floors, the model should add the same precondition. When the implementation distinguishes explicit aborts from conflict aborts, the model can keep one abstract abort action unless the distinction affects safety.
 
 \section{Summary}
-\begin{itemize}
-    \item Debugging concurrent TM code requires tools that can replay rare interleavings.
-    \item Systematic testing can expose Heisenbugs that appear only under specific schedules.
-    \item Invariant tests are most useful when they are backend-independent: the same bank, counter, or data-structure oracle should run against SGL, TL2, NOrec, TinySTM variants, SwissTM, persistent backends, distributed backends, and GPU designs.
-    \item The companion implementation uses both concrete tests and abstract specifications: the concrete suites check transactional and data-structure behavior, while TLA+ specifications check protocol-level safety.
-\end{itemize}
+
+Testing transactional memory requires a stack of techniques. Invariant tests are cheap and backend-independent; they should run everywhere. Abort fuzzing makes rare rollback paths common. Deterministic scheduling turns timing-sensitive failures into ordinary test cases. Record-and-replay makes concrete executions debuggable. TLA+ model checking explores the abstract protocol and catches missing transitions before they become code.
+
+The most useful tests are small, repeatable, and invariant-driven. A bank sum, a counter value, or agreement with a sequential oracle is often enough to expose a deep atomicity bug. Once a failure is found, the engineering task is to preserve it: keep the seed, keep the schedule, keep the model counterexample, and add the cheapest regression test that still fails without the fix.
 
 \section{Exercises}
 \begin{enumerate}
@@ -5304,20 +5599,54 @@ int main() {
     \item \emph{[implementation]} Extend Listing~\ref{sec:abort-fuzz-bank}'s harness with account floors: no committed transaction may leave an account below zero. Keep money conservation as a separate invariant, and report which invariant fails first.
     \item \emph{[verification]} Write a two-account TLA+ model of transfer with actions \textsc{Read}, \textsc{Debit}, \textsc{Credit}, \textsc{Commit}, and \textsc{Abort}. Add the money-conservation invariant and then intentionally omit rollback for \textsc{Debit}; confirm that the model checker finds a counterexample.
     \item \emph{[theory]} Bounded-preemption testing often finds bugs with a small bound. Give one reason this empirical fact is plausible for TM implementations, and one class of TM bug that may require a larger bound or a different exploration strategy.
+    \item \emph{[implementation]} Add named abort sites to the abort-fuzzing harness and print the seed, thread id, source account, destination account, amount, and abort-site name on failure.
+    \item \emph{[verification]} Modify the TLA+ model in Listing~\ref{sec:tla-bank-conservation} to include an account floor. State the invariant that distinguishes money conservation from floor preservation.
+    \item \emph{[theory]} Explain why a sequential oracle is easy for a counter but harder for a concurrent queue whose operations return values during the execution, not only at the end.
 \end{enumerate}
 
+\index{lost update}
+\index{torn write-back}
+\index{non-atomic commit}
+\index{sequential oracle}
+\index{abort injection}
+\index{rollback path}
+\index{undo-log entry}
+\index{write set}
+\index{capacity abort}
+\index{conflict abort}
+\index{explicit abort}
+\index{bounded preemption}
+\index{Heisenbug}
+\index{watchpoint}
+\index{reverse debugging}
+\index{record-and-replay}
+\index{CHESS}
+\index{rr}
+\index{TLA+}
+\index{money-conservation invariant}
+\index{account floor}
+\index{regression test}
 % -------------------------------------------------------------------
 \chapter{Pitfalls – Memory, Signals, and Optimizations}
+\index{pitfalls!memory management!signal safety!compiler optimization!deferred free!speculative allocation!sigsetjmp!longjmp!TLS retry buffer!barrier hoisting}
+
+Transactional memory makes a hard promise: code inside a transaction should appear to execute atomically, or not at all.  That promise is easy to state for reads and writes to shared objects.  It is harder for memory allocation, object reclamation, signal handling, non-local jumps, compiler transformations, and other mechanisms that sit below the transactional abstraction.
+
+This chapter studies three classes of engineering pitfalls that routinely break otherwise correct TM algorithms.  The first is resource lifetime: \texttt{malloc} and \texttt{free} cannot be treated symmetrically inside a transaction.  The second is control-flow recovery: retry loops implemented with \texttt{sigsetjmp}/\texttt{longjmp} must not jump into dead stack frames.  The third is compilation: transactional reads and writes are not ordinary scalar operations, and optimizers must not silently move or remove them.
+
 \section{Memory Management: malloc and free}
-\begin{itemize}
-    \item Speculative allocation: memory allocated inside a transaction must be freed on abort.
-    \item Deferred freeing: a free executed inside a transaction cannot be released until commit.
-    \item Balanced‑free taxonomy and practical implementations.
-    \item Speculative-allocations list: allocations tracked per transaction and rolled back on abort.
-    \item The double-free trap: a region allocator reusing addresses across transactions makes a naive double-free detector fire on legitimate reuse.
-    \item Deferred-free sets: freed pointers held until commit; visible to other transactions via the read path.
-    \item TM-aware memory allocators (region vs.\ general-purpose) and the interaction with stack-address checks.
-\end{itemize}
+
+The transactional abstraction says that an aborted transaction has no effect.  For a plain write-buffered STM such as TL2, NOrec, or SwissTM, that means discarding the write set.  For a transaction that allocates memory, it also means reclaiming memory that no committed execution can ever reach.  For a transaction that frees memory, it means the opposite: the memory must not be returned to the allocator until the transaction commits.
+
+This asymmetry is the first rule of transactional memory management.  A \texttt{malloc} inside a transaction creates a speculative object.  If the transaction aborts, the object is unreachable from the committed heap and must be released.  If the transaction commits, the allocation becomes ordinary memory.  A \texttt{free} inside a transaction is not an immediate reclamation event.  Until commit, other transactions may still be executing against a snapshot in which the object is live.  Releasing it early can turn a validation failure into a use-after-free.
+
+The practical implementation is small but non-negotiable.  Each transaction maintains a speculative-allocation list and a deferred-free set.  Abort walks the allocation list and releases those objects; it drops the deferred-free set without freeing its payloads.  Commit forgets the allocation list and releases the deferred-free set after the transaction's serialization point.
+
+This chapter's companion implementation tracks two structures: a \textbf{speculative-allocations list} of allocations made by the current transaction and rolled back on abort, and a \textbf{deferred-free set} of pointers whose \texttt{free} must wait until commit yet remain visible to other transactions through the read path. The governing rules are simple: memory allocated inside a transaction is speculative and must be freed on abort, while a \texttt{free} executed inside a transaction cannot be released until the transaction commits. Reasoning about these lists amounts to a balanced-free taxonomy covering both abort and commit actions. Two traps recur. The first is the \emph{double-free trap}: a region allocator that reuses addresses across transactions makes a naive double-free detector fire on legitimate reuse. The second is the interaction between real memory managers and the address-space checks: a TM-aware allocator (a region allocator versus a general-purpose one) changes which addresses the fast path sees as safely bypassable.
+
+Balanced-free reasoning asks whether every committed allocation is eventually matched by a committed free, and whether every aborted allocation is reclaimed without becoming visible.  Region allocators complicate this reasoning because address reuse is common.  A naive detector that remembers only pointer values may conclude that a pointer was freed twice, even when the same numeric address belongs to a later generation of the region.  Production systems therefore attach ownership, epoch, or generation information to allocation records when region reuse is possible.
+
+Deferred freeing also interacts with validation.  Suppose transaction \texttt{T1} frees an account record while transaction \texttt{T2} has read that record.  If \texttt{T1} commits and immediately releases the object to the general allocator, \texttt{T2} may later validate a reused address rather than the original object.  The read path must treat deferred-free metadata as part of the object state, or reclamation must be delayed by epochs, hazard pointers, quiescence, or a global serializing path.
 
 \begin{table}[htbp]
 \centering
@@ -5354,6 +5683,8 @@ Generation advances with region \\
 \caption{Transactional allocation and freeing rules.  The key asymmetry is that speculative allocations are undone on abort, while transactional frees are delayed until commit.}
 \label{tab:tx-memory-rules}
 \end{table}
+
+The companion implementations exercise this rule across simple and realistic backends.  SGL avoids most subtlety by serializing all transactions.  Write-buffered STMs need explicit allocation and deferred-free metadata.  Persistent systems such as Romulus, NV-HTM, and PersistentSGL add another dimension: the allocation decision and the durability decision must agree after recovery.  Distributed systems such as TiKV's Percolator-style two-phase commit add yet another: a participant must not reclaim an object while another participant can still observe the old version.
 
 \section{Worked Example: Deferred Free in a Bank Transfer}
 \index{deferred free}\index{speculative allocation}\index{money conservation}
@@ -5520,12 +5851,7 @@ int main(void) {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item Speculative allocation is private until commit; abort must release it.
-    \item A transactional \texttt{free} is not a memory reclamation event.  It is a commit action.
-    \item The bank invariant is independent of allocation policy, but the audit record's lifetime is not.
-    \item A production TM also needs validation: another transaction must not read an object after its freeing transaction commits.
-\end{itemize}
+Three rules govern this wrapper. Speculative allocation is private until commit, and abort must release it. A transactional \texttt{free} is not a memory-reclamation event; it is a commit action, performed only after the transaction's serialization point. The bank invariant is independent of allocation policy, but the audit record's lifetime is not. Finally, a production TM also needs validation: another transaction must not read an object after its freeing transaction commits.
 
 \begin{figure}[htbp]
 \centering
@@ -5556,13 +5882,19 @@ int main(void) {
 \label{fig:tx-resource-state}
 \end{figure}
 
+The example is intentionally sequential.  It demonstrates lifetime rules, not concurrency control.  A real TL2-style implementation would insert read barriers for the accounts and the audit-log head, buffer or lock writes, validate read versions, then publish the write set at commit.  A NOrec-style implementation would validate against a global sequence lock.  In both cases, the allocator protocol remains the same: allocations disappear on abort, frees become physical reclamation only after the transaction is irrevocably committed.
+
 \section{Signal Safety and \texttt{sigsetjmp}/\texttt{longjmp}}
-\begin{itemize}
-    \item The stack‑corruption hazard: \texttt{begin} inside a function, function returns, abort jumps to corrupted frame.
-    \item Alternate signal stacks and safe checkpointing strategies.
-    \item The DATA-symbol subtlety: the runtime exports \texttt{tm\_sigsetjmp}/\texttt{tm\_longjmp} as function pointers, not functions --- a DATA/TEXT symbol collision with a compiler-generated direct call is a classic segfault (fixed in the companion repo, and instructive).
-    \item TLS vs.\ stack jmp buffers: keeping the retry buffer in thread-local storage so it outlives any single frame.
-\end{itemize}
+
+Abort is a control-flow operation.  In many C and C++ STMs, the runtime records a retry target at transaction begin and returns to it on conflict, validation failure, explicit abort, or signal-triggered recovery.  The usual primitive is \texttt{sigsetjmp}/\texttt{siglongjmp}, or a wrapper with similar semantics.
+
+This mechanism is dangerous because the saved context includes stack state.  If a transaction begins inside a function and that function returns while the retry buffer remains reachable, a later abort jumps into a frame that no longer exists.  The bug is not a failed validation; it is undefined control flow.
+
+The pitfalls fall into several categories. The first is the \emph{stack-corruption hazard}: a transaction begins inside a function, the function returns, and a later abort jumps into the now-corrupted frame. The second concerns alternate signal stacks and safe checkpointing strategies. The third is the DATA-symbol subtlety: the runtime exports \texttt{tm\_sigsetjmp}\slash{}\texttt{tm\_longjmp} as function pointers rather than functions, so a DATA/TEXT symbol collision with a compiler-generated direct call is a classic segfault, fixed in the companion repo and instructive in its own right. The fourth is the choice between TLS and stack-local jmp buffers: the retry buffer should live in thread-local storage so that it outlives any single frame.
+
+Alternate signal stacks solve a different problem: they provide stack space for a signal handler when the normal stack is compromised or too small.  They do not make arbitrary \texttt{longjmp} targets valid.  The retry target must be owned by the runtime and re-established for each attempt.
+
+The DATA-symbol subtlety is easy to miss in mixed compiler/runtime systems.  If the ABI exposes \texttt{tm\_sigsetjmp} as a data object containing a function pointer, generated code must load the pointer and call through it.  If generated code emits a direct call to \texttt{tm\_sigsetjmp} as though it were a text symbol, execution jumps to the address of the pointer object itself.  The result is a crash whose cause looks like signal failure but is actually a symbol-kind mismatch.
 
 \subsection{The Conservative Signal-Safety Policy}
 \index{signal safety}
@@ -5570,12 +5902,9 @@ Because the frame-lifetime hazard is \emph{ubiquitous} (it is hidden inside
 \texttt{tm\_begin}/\texttt{tm\_end}), the book adopts a single, conservative
 policy instead of a list of exceptions:
 
-\begin{itemize}
-    \item \textbf{Allowed inside a transaction:} transactional reads and writes, transactional allocation (\texttt{tm\_malloc}), and the retry loop itself --- everything that stays within the runtime's metadata.
-    \item \textbf{Forbidden:} any \texttt{sigsetjmp} whose frame may outlive the transaction; blocking signals that the runtime's \texttt{tm\_sigsetjmp} wraps; and hand-written \texttt{siglongjmp} to a stack buffer.
-    \item \textbf{Must abort or become irrevocable:} operations with externally visible side effects (I/O, syscalls) that cannot be undone; these force a fallback to a serializing path (Ch.~8) before the operation runs.
-    \item The policy is a property the TLA+ models do \emph{not} check: the models abstract the retry mechanism away entirely (Part~III), so frame validity is enforced by convention plus TLS re-arming --- not by the checker.
-\end{itemize}
+The policy draws three classes. \textbf{Allowed inside a transaction} are transactional reads and writes, transactional allocation (\texttt{tm\_malloc}), and the retry loop itself --- in short, everything that stays within the runtime's metadata. \textbf{Forbidden} are any \texttt{sigsetjmp} whose frame may outlive the transaction, blocking the signals that the runtime's \texttt{tm\_sigsetjmp} wraps, and hand-written \texttt{siglongjmp} to a stack buffer. \textbf{Must abort or become irrevocable} are operations with externally visible side effects (I/O, syscalls) that cannot be undone; these force a fallback to a serializing path (Ch.~8) before the operation runs. This policy is a property the TLA+ models do \emph{not} check: the models abstract the retry mechanism away entirely (Part~III), so frame validity is enforced by convention plus TLS re-arming, not by the checker.
+
+This policy is conservative by design.  It is stricter than what a hand-audited runtime could sometimes permit, but it scales to C APIs, compiler-generated barriers, mixed libraries, and stress tests.  The companion codebase verifies algorithmic safety with tests and TLA+ models, but stack-frame validity remains an implementation discipline.
 
 \section{Worked Example: The Frame-Lifetime Hazard}
 \index{sigsetjmp}\index{siglongjmp}\index{TLS jmp buffer}\index{retry loop}\index{abort}\index{sandboxing}\index{privatization}
@@ -5597,12 +5926,9 @@ void worker() {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item The saved context points into \texttt{helper}'s stack frame, which is gone the moment \texttt{helper} returns.
-    \item The standard fix is the bullet above: keep the \texttt{jmp\_buf} in TLS and re-arm it on every attempt, so the retry target is never a dead frame.
-    \item The DATA-symbol subtlety of this chapter is the other half: the runtime exports \texttt{tm\_sigsetjmp} as a function pointer, and a compiler that emits a direct call jumps to the pointer variable's address --- a classic segfault the companion repo fixed.
-    \item Exercise~2 of this chapter asks you to design the runtime change precisely.
-\end{itemize}
+The hazard is concrete. The saved context points into \texttt{helper}'s stack frame, which is gone the moment \texttt{helper} returns. The standard fix is the recipe developed above: keep the \texttt{jmp\_buf} in TLS and re-arm it on every attempt, so the retry target is never a dead frame. The DATA-symbol subtlety of this chapter is the other half: the runtime exports \texttt{tm\_sigsetjmp} as a function pointer, and a compiler that emits a direct call jumps to the pointer variable's address --- a classic segfault that the companion repo fixed. Exercise~2 of this chapter asks you to design the runtime change precisely.
+
+The example is short because the bug is structural, not algorithmic.  The transfer body might preserve account floors and money conservation perfectly.  The STM might detect conflicts correctly.  None of that matters if abort recovery resumes execution in storage that no longer denotes a live activation record.
 
 \section{Worked Example: TLS Retry Buffer}
 \index{TLS jmp buffer}\index{retry loop}\index{abort}
@@ -5692,20 +6018,21 @@ int main(void) {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item The retry buffer has thread lifetime; it is not tied to the helper function that called \texttt{tm\_begin}.
-    \item Re-arming is per attempt.  Reusing an old checkpoint after commit is a bug.
-    \item The example returns \texttt{false} after one failed attempt to keep the program finite; a real TM retry loop may back off and retry.
-    \item The code still does not make arbitrary signal handlers safe.  It only fixes the lifetime of the transaction's own retry target.
-\end{itemize}
+The design restores the property the frame-lifetime hazard broke. The retry buffer has thread lifetime; it is not tied to the helper function that called \texttt{tm\_begin}. Re-arming is per attempt, and reusing an old checkpoint after commit is a bug. The example returns \texttt{false} after one failed attempt to keep the program finite, whereas a real TM retry loop may back off and retry. Note that the code still does not make arbitrary signal handlers safe; it only fixes the lifetime of the transaction's own retry target.
+
+The program uses \texttt{setjmp} rather than \texttt{sigsetjmp} to keep the listing portable and focused.  The same lifetime rule applies to both.  A runtime that masks signals during critical metadata updates must additionally restore the intended mask on retry; that is a signal-mask policy layered on top of the TLS ownership rule.
 
 \section{Compiler Optimizations Revisited}
-\begin{itemize}
-    \item Dead‑store elimination, LICM, CSE, barrier hoisting – concrete bug examples.
-    \item Intrinsics and annotations to protect transactional regions.
-    \item Crossing the barrier: an optimizer that hoists a transactional load above the instrumentation call observes a state no valid execution has.
-    \item The rule of thumb: transactional memory accesses are special function calls, not plain loads; optimizing through them requires their side effects to be declared.
-\end{itemize}
+
+The compiler sees ordinary C loads and stores.  The TM runtime sees transactional accesses with metadata effects: logging, validation, version checks, lock checks, read-set insertion, write-set insertion, ownership tests, and conflict detection.  If the compiler optimizes through the runtime boundary as though those effects do not exist, it can create executions that no TM algorithm permits.
+
+The failure modes have concrete names: dead-store elimination, loop-invariant code motion, common-subexpression elimination, and barrier hoisting each yield a specific bug when applied across the runtime boundary. The protection comes from intrinsics and annotations that make transactional regions visible to the optimizer. The central danger is crossing the barrier: an optimizer that hoists a transactional load above the instrumentation call observes a state no valid execution has. The rule of thumb is that transactional memory accesses are special function calls, not plain loads; optimizing through them requires their side effects to be declared.
+
+Dead-store elimination is unsafe when the store being removed is a transactional write-barrier effect rather than a redundant scalar store.  Loop-invariant code motion is unsafe when it moves a transactional read outside the validation window.  Common-subexpression elimination is unsafe when it merges two reads that should both validate against intervening commits.  Barrier hoisting is unsafe when it moves the actual memory load before the runtime has checked ownership or recorded the read.
+
+The right interface depends on the implementation.  A pure library STM can use opaque function calls, compiler barriers, volatile metadata accesses, and careful ABI boundaries.  A compiler-integrated TM can represent transactional reads and writes as intrinsics with explicit memory effects.  Hardware-assisted paths such as TSX-SGL still need compiler discipline: the compiler must not move operations across begin, abort, fallback, or commit boundaries in a way that changes transactional semantics.
+
+The key rule is simple.  A transactional access is not merely an access to the program variable.  It is an access to the program variable plus an access to the concurrency-control protocol.
 
 \section{Worked Example: Preventing Barrier Hoisting}
 \index{compiler optimization}\index{barrier hoisting}\index{transactional load}\index{opacity}
@@ -5785,19 +6112,17 @@ int main(void) {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item Transactional reads and writes are observable operations of the runtime, even when the accessed object is an ordinary \texttt{int}.
-    \item Hoisting \texttt{from->balance} above \texttt{tm\_read\_int} skips validation and may observe a value that is not opaque.
-    \item Eliminating the second read because a prior store appears to dominate it is only legal if the compiler also proves the TM metadata effects are preserved.
-    \item Production systems encode this contract with intrinsics, ABI rules, opaque calls, volatile metadata accesses, or compiler passes that understand transactions.
-\end{itemize}
+The listing makes the compiler contract explicit. Transactional reads and writes are observable operations of the runtime, even when the accessed object is an ordinary \texttt{int}. Hoisting \texttt{from->balance} above \texttt{tm\_read\_int} skips validation and may observe a value that is not opaque. Eliminating the second read because a prior store appears to dominate it is only legal if the compiler also proves that the TM metadata effects are preserved. Production systems encode this contract with intrinsics, ABI rules, opaque calls, volatile metadata accesses, or compiler passes that understand transactions.
+
+The barriers in the listing are not a performance recipe.  They are a minimal contract demonstration.  High-performance systems want the compiler to optimize inside transactions, but only with a representation that preserves the abstract events of the TM algorithm.  That representation must expose enough information to distinguish a safe scalar rewrite from an illegal change to the transaction's read set, write set, or validation order.
 
 \section{Summary}
-\begin{itemize}
-    \item A robust TM must handle resource management and OS interactions that break naive transactional boundaries.
-    \item Many pitfalls arise from the impedance mismatch between transactional semantics and low‑level system mechanisms.
-    \item Each pitfall has a canonical fix: deferred frees, TLS jmp buffers, and side-effect declarations.
-\end{itemize}
+
+A robust TM is more than a conflict detector.  It is a runtime system that must account for memory lifetime, OS control-flow mechanisms, compiler transformations, and the gap between source-level atomicity and machine-level execution.
+
+Speculative allocations are undone on abort.  Transactional frees are delayed until after commit.  Retry buffers must have a lifetime that survives the attempt they serve, which normally means thread-local runtime ownership and per-attempt re-arming.  Transactional reads and writes must be visible to the compiler as operations with side effects, not optimized as ordinary scalar memory references.
+
+In summary, a robust TM must handle resource management and OS interactions that break naive transactional boundaries. Many of the pitfalls arise from the impedance mismatch between transactional semantics and low-level system mechanisms. Each has a canonical fix: deferred frees, TLS jmp buffers, and side-effect declarations.
 
 \section{Exercises}
 \begin{enumerate}
@@ -5809,40 +6134,92 @@ int main(void) {
     \item \emph{[theory]} Give a precise compiler-side condition under which common-subexpression elimination of two transactional reads from the same address is semantics-preserving.  Your answer must mention validation, intervening writes, and opacity.
 \end{enumerate}
 
+\index{allocator wrapper}
+\index{audit record}
+\index{balanced free}
+\index{commit action}
+\index{commit point}
+\index{compiler barrier}
+\index{common-subexpression elimination}
+\index{DATA symbol}
+\index{dead-store elimination}
+\index{deferred-free set}
+\index{function pointer ABI}
+\index{generation number}
+\index{jmp buffer lifetime}
+\index{loop-invariant code motion}
+\index{memory reclamation}
+\index{opaque function call}
+\index{read barrier}
+\index{region allocator}
+\index{serialization point}
+\index{signal mask}
+\index{speculative-allocation list}
+\index{stack frame}
+\index{thread-local storage}
+\index{transactional allocation}
+\index{transactional compiler intrinsic}
+\index{transactional free}
+\index{write barrier}
+% -------------------------------------------------------------------
 \chapter{Performance Modeling and Tuning}
+\index{performance modeling, throughput, abort rate, wasted work, Little's Law, queueing theory, benchmarks, STAMP, profiling, bank benchmark, model checking}
+
+Transactional memory performance is not summarized by a single number. A system can have high throughput while wasting most of its cycles on doomed attempts, or it can have zero aborts while serializing all work through one lock. The useful question is not ``which backend is fastest?'' but ``which cost dominates on this machine, for this workload, at this contention level?''
+
+This chapter gives a compact toolkit for answering that question. We start with metrics, then move to analytical models, measurement hygiene, and worked examples. The running example is again the two-account bank transfer with an account floor and a money-conservation invariant: it is small enough to measure carefully, but rich enough to expose aborts, semantic rejects, validation cost, and serialization.
 
 \section{Metrics and Benchmarks}
-\begin{itemize}
-    \item Throughput, abort rate, wasted work.
-    \item The STAMP benchmark suite.
-    \item Secondary metrics: occupancy/parallelism, speedup over SGL, energy under contention.
-    \item Abort rate alone is misleading: wasted work, measured as restarts times lost progress, and commit latency matter more.
-    \item STAMP's eight kernels are \texttt{bayes}, \texttt{genome}, \texttt{intruder}, \texttt{kmeans}, \texttt{labyrinth}, \texttt{ssca2}, \texttt{vacation}, and \texttt{yada}. They stress read-heavy, write-heavy, long, and tree/graph-shaped accesses.
-    \item Microbenchmarks such as counter, bank, and linked-list isolate controlled parameter sweeps.
-\end{itemize}
+
+The primary metric in most transactional-memory experiments is committed throughput: the number of committed transactions per second. It is attractive because it is easy to compare, but it is also easy to misuse. Throughput hides why transactions are slow. A low number may be caused by validation cost, cache-line bouncing, write-set publication, read-set scanning, logging, persistence barriers, scheduler interference, or simply a workload that does little useful parallel work.
+
+Abort rate is the natural companion metric. For a fixed workload and fixed transaction size, rising abort rate usually predicts falling throughput. But abort rate alone is misleading. A transaction that aborts after one read wastes little work; a transaction that aborts after a long traversal, a large speculative update set, or a persistence flush wastes much more. The better measure is wasted work: restarts multiplied by lost progress, interpreted together with commit latency.
+
+The usual first-order metrics are:
+
+Committed throughput is normally reported in transactions per second; abort rate, split by cause when possible (validation failure, lock conflict, capacity abort, explicit semantic reject, or fallback path); attempts per committed transaction; latency distribution for committed transactions; wasted work, estimated from aborted attempt duration or from progress counters; speedup over a single global lock; occupancy or parallelism, meaning the mean number of in-flight transactions; and energy under contention, when the platform exposes trustworthy counters.
+
+Benchmark choice determines which metric matters. The STAMP suite remains a useful vocabulary because its kernels exercise different access shapes. The eight kernels are \texttt{bayes}, \texttt{genome}, \texttt{intruder}, \texttt{kmeans}, \texttt{labyrinth}, \texttt{ssca2}, \texttt{vacation}, and \texttt{yada}. They cover read-heavy phases, write-heavy phases, long transactions, graph traversals, tree-shaped data, and irregular memory access. A backend that performs well on \texttt{kmeans} may still collapse on \texttt{yada}; the former may be dominated by simple reads, while the latter may be dominated by conflict and validation.
+
+Microbenchmarks have a different role. A counter benchmark isolates the cost of one contended location. A bank benchmark controls account count, transfer amount, account floor, and write-set size. A linked-list benchmark varies traversal length and update probability. These tests are not substitutes for applications; they are instruments for parameter sweeps. They tell us whether a performance cliff is caused by contention, read-set length, write-set length, metadata locality, or validation frequency.
+
+For the companion codebase, SGL is the conservative baseline; TL2, NOrec, NOrec-BF, TSC-TM, TinySTM variants, SwissTM, DUDETM, and MVLog show different points in the design space. The measured M1 Pro fuzz/bank anchors in Table~\ref{tab:perf-anchors} are calibration points, not universal rankings. The GPU designs, including GUST, require separate interpretation because their commit and validation costs are shaped by warp occupancy, memory coalescing, and global-memory atomics.
 
 \section{Analytical Models}
 \label{sec:perf-analytical}
-\begin{itemize}
-    \item Markov chain models of contention.
-    \item Applying queueing theory and Little's Law to predict performance:
-    $$
-    L = \lambda W
-    $$
-    where \(L\) is the mean number of in-flight transactions, \(\lambda\) is committed throughput, and \(W\) is mean transaction latency.
-    \item The expected-retries model: if each attempt aborts independently with probability
-    $$
-    p_{\mathrm{abort}},
-    $$
-    then the mean attempts per committed transaction is
-    $$
-    E[\mathrm{attempts\ per\ commit}] =
-    \frac{1}{1-p_{\mathrm{abort}}}.
-    $$
-    This scaling breaks down under high contention because attempts are not independent and because retries change cache residency and queueing delay.
-    \item Cost-per-operation models decompose begin/read/write/commit cycle counts and calibrate them against real runs. This is the machine-profile approach used by the companion simulator.
-    \item The model holds when conflicts are approximately independent and the working set fits the relevant cache level. It misses memory-hierarchy effects, coherence storms, and cache-line false conflicts.
-\end{itemize}
+
+Analytical models are not replacements for measurement. They are compression devices: they turn a noisy run into a small set of hypotheses about cost. A good model explains why a curve bends, where a backend stops scaling, and which counter should move if the hypothesis is right.
+
+A minimal optimistic TM model has five states: ready, executing, validating, committing, and aborting. Transactions spend useful time in execution, bookkeeping time in validation and commit, and wasted time on paths that end in abort. Figure~\ref{fig:perf-state-machine} shows this state machine.
+
+Queueing theory gives the first sanity check. Little's Law relates mean concurrency, committed throughput, and mean latency:
+
+$$
+L = \lambda W
+$$
+
+Here, the symbol $L$ is the mean number of in-flight transactions, the symbol $\lambda$ is committed throughput, and the symbol $W$ is mean transaction latency. If latency doubles while the number of in-flight transactions stays fixed, committed throughput must fall. This is why high abort rates are damaging even before CPUs are saturated: retries inflate the residence time of a logical transaction in the system.
+
+A simple retry model assumes that each attempt aborts independently with probability
+
+$$
+p_{\mathrm{abort}}.
+$$
+
+Then the mean attempts per committed transaction is
+
+$$
+E[\mathrm{attempts\ per\ commit}] =
+\frac{1}{1-p_{\mathrm{abort}}}.
+$$
+
+This is useful at low to moderate contention. It lets us read an observed attempts-per-commit column as an implied abort probability, or predict how many attempted transactions a backend must execute to produce one commit.
+
+The model breaks down under high contention for three reasons. First, aborts are not independent: if many threads repeatedly touch the same hot account or ownership record, their retries are correlated. Second, retries change the machine state: cache residency, branch predictor state, coherence traffic, and allocator state are different after a failed attempt. Third, queueing delay feeds back into conflicts. Longer attempts overlap with more peers, increasing the probability of another conflict.
+
+Cost-per-operation models are more concrete. They decompose a transaction into begin, read barrier, write barrier, validation, commit, abort cleanup, and retry delay. Each component is calibrated in cycles or nanoseconds against real runs. This is the machine-profile approach used by the companion simulator. It is especially useful when comparing algorithms with similar throughput but different internal costs, such as TL2 and TSC-TM in the fuzz/bank slice.
+
+The model is strongest when conflicts are approximately independent and the working set fits the relevant cache level. It misses memory-hierarchy cliffs, coherence storms, preemption, cache-line false conflicts, and backend-specific effects such as TSX capacity aborts or persistence fences. When the model fails, the failure is diagnostic: it says the missing cost is now the experiment.
 
 \begin{figure}[htbp]
 \centering
@@ -5868,13 +6245,16 @@ int main(void) {
 \end{figure}
 
 \section{Experimental Methodology}
-\begin{itemize}
-    \item Profiling with \texttt{perf}; avoiding warm-up and noise pitfalls.
-    \item Warm-up, result stabilization, and outlier rejection.
-    \item Comparing against the uninstrumented baseline, not just against other TMs: instrumentation cost must be separated from algorithm cost.
-    \item Benchmark hygiene: pin threads, disable frequency scaling, report variance, and use enough repetitions to make five percent differences meaningful.
-    \item Reproducibility: record machine profile, toolchain, and configuration alongside every measurement.
-\end{itemize}
+
+A TM measurement is an experiment on a whole stack: backend, compiler, allocator, scheduler, CPU frequency policy, memory hierarchy, and benchmark. The methodology must make these variables visible.
+
+Warm-up matters. The first seconds of a run may include page faults, allocator growth, branch predictor training, cache population, JIT compilation in managed systems, or lazy initialization. A benchmark should either discard a warm-up interval or run long enough that initialization noise is negligible. Result stabilization matters for the same reason. A single best run is not evidence; repeated runs with variance are.
+
+Profiling with \texttt{perf} or platform-specific counters helps separate algorithm cost from machine cost. Useful events include cycles, instructions, cache misses, branch misses, lock contention, context switches, and, where available, hardware-transaction abort causes. On platforms without \texttt{perf}, equivalent vendor tools or coarse counters can still reveal whether a curve is CPU-bound, memory-bound, or scheduler-bound.
+
+A central rule is to compare against the uninstrumented baseline, not just against other TMs. Transactional instrumentation can dominate algorithmic differences. If an uninstrumented bank transfer runs much faster than every TM backend at one thread, the gap is not contention; it is barrier, metadata, logging, and compiler cost. Only after this baseline is known does it make sense to compare NOrec against TL2 or TinySTM against SwissTM.
+
+Benchmark hygiene includes pinning threads when possible, disabling frequency scaling when appropriate, reporting variance, and using enough repetitions to make five percent differences meaningful. The machine profile should record CPU model, core count, memory configuration, operating system, compiler version, optimization flags, backend configuration, workload parameters, and commit hash. Reproducibility is not a ceremonial appendix; it is the only way to distinguish an algorithmic result from a local accident.
 
 \begin{table}[htbp]
 \centering
@@ -5890,6 +6270,23 @@ TL2 & fuzz/bank & about 2.06M txns/s & ownership-record fast path \\
 TSC-TM & fuzz/bank & about 2.05M txns/s & timestamp fast path \\
 MVLog & write-heavy & about 275K txns/s & multi-version log pressure \\
 MVLog & read-mostly & about 109K txns/s & multi-version read overhead \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Common tuning symptoms and likely causes in optimistic TM experiments.}
+\label{tab:perf-symptoms}
+\begin{tabular}{p{0.28\linewidth}p{0.34\linewidth}p{0.30\linewidth}}
+\hline
+Symptom & Likely cause & First check \\
+\hline
+High abort rate, short attempts & hot metadata or hot data item & conflict-address histogram \\
+High abort rate, long attempts & late validation failure & read-set length and validation point \\
+Low abort rate, low throughput & instrumentation or serialization cost & uninstrumented and SGL baselines \\
+Good one-thread rate, poor scaling & coherence traffic or false sharing & cache-line layout and owner records \\
+Large run-to-run variance & scheduler or frequency noise & pinning, repetitions, variance report \\
 \hline
 \end{tabular}
 \end{table}
@@ -6037,12 +6434,7 @@ int main(int argc, char** argv) {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item SGL has no speculative conflict aborts. Any reject in this program is caused by the account floor, not by validation failure.
-    \item The invariant check is part of the benchmark, not a debugging afterthought. A fast run that loses money is not a performance result.
-    \item The same driver shape can wrap a TM backend: keep the random stream, account count, transfer amount, and invariant checks fixed, then replace only the transaction boundary and memory-access API.
-    \item Attempts per commit is still useful for SGL because it separates useful commits from semantic rejects. For optimistic TM, add a separate counter for validation aborts.
-\end{itemize}
+SGL has no speculative conflict aborts, so any reject in this program is caused by the account floor, not by validation failure. The invariant check is part of the benchmark, not a debugging afterthought: a fast run that loses money is not a performance result. The same driver shape can wrap a TM backend: keep the random stream, account count, transfer amount, and invariant checks fixed, then replace only the transaction boundary and memory-access API. Attempts per commit is still useful for SGL because it separates useful commits from semantic rejects; for optimistic TM, add a separate counter for validation aborts.
 
 \section{Worked Example: Model Checking a Bounded Contention Counter}
 \index{TLA+}\index{model checking}\index{contention}
@@ -6142,12 +6534,7 @@ AttemptsAccounted ==
 ====
 \end{lstlisting}
 
-\begin{itemize}
-    \item The invariant \texttt{AttemptsAccounted} is the accounting identity behind the benchmark columns: an attempt is committed, aborted, or still owned.
-    \item The owner slot makes contention explicit. A worker that arrives while another worker owns the slot increments both attempts and aborts.
-    \item The money invariant is independent of the performance counters. Do not infer correctness from high throughput.
-    \item Bounding attempts makes the state space finite; the same idea is used in larger model-checked specifications for the companion backends.
-\end{itemize}
+The invariant \texttt{AttemptsAccounted} is the accounting identity behind the benchmark columns: an attempt is committed, aborted, or still owned. The owner slot makes contention explicit: a worker that arrives while another worker owns the slot increments both attempts and aborts. The money invariant is independent of the performance counters, so do not infer correctness from high throughput. Bounding attempts makes the state space finite; the same idea is used in larger model-checked specifications for the companion backends.
 
 \section{Worked Example: Reading a Benchmark Report}
 \index{benchmark}\index{throughput}\index{abort rate}
@@ -6167,26 +6554,101 @@ TL2       8         298K       3.3M     1.19
 SGL       8         210K       0        1.00
 \end{lstlisting}
 
-\begin{itemize}
-    \item The \texttt{uninstr.} row is the baseline this chapter insists on: instrumentation cost is
-    $$
-    \frac{8.2\ \mathrm{M}}{450\ \mathrm{K}} \approx 18.2,
-    $$
-    measured against the uninstrumented backend, not against another TM.
-    \item The \texttt{attempt/tx} column is the geometric retry model of \S\ref{sec:perf-analytical} read backwards. At 8 threads, NOrec averages 1.17 attempts per committed transaction, so
-    $$
-    p_{\mathrm{abort}} \approx 1 - \frac{1}{1.17} \approx 0.15.
-    $$
-    \item SGL shows the serialisation bottleneck of Part~IV: zero aborts, but throughput below every speculative backend at 8 threads.
-    \item Exercise~3 asks for the experiment design; the machine-profile record is what the companion simulator's cost calibration consumes.
-\end{itemize}
+The \texttt{uninstr.} row is the baseline this chapter insists on: instrumentation cost is
+$$
+\frac{8.2\ \mathrm{M}}{450\ \mathrm{K}} \approx 18.2,
+$$
+measured against the uninstrumented backend, not against another TM. The \texttt{attempt/tx} column is the geometric retry model of \S\ref{sec:perf-analytical} read backwards: at 8 threads, NOrec averages 1.17 attempts per committed transaction, so
+$$
+p_{\mathrm{abort}} \approx 1 - \frac{1}{1.17} \approx 0.15.
+$$
+SGL shows the serialisation bottleneck of Part~IV: zero aborts, but throughput below every speculative backend at 8 threads. Exercise~3 asks for the experiment design; the machine-profile record is what the companion simulator's cost calibration consumes.
+
+\section{Worked Example: Estimating a Retry Cost}
+
+The retry model becomes actionable when it is tied to a measurement record. The following C++17 fragment reads committed transactions, attempts, and elapsed seconds from standard input, then reports an implied abort probability and an average time per attempt. It is intentionally backend-neutral: the same calculation can be applied to TL2, NOrec, TSC-TM, or a TinySTM configuration if the counters have the same meaning.
+
+\begin{lstlisting}[language=C++, caption={A small C++17 calculator for retry-model calibration.}]
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <stdexcept>
+
+struct Run {
+    double commits;
+    double attempts;
+    double seconds;
+};
+
+static Run parse(int argc, char** argv) {
+    if (argc != 4) {
+        throw std::runtime_error("usage: retry_cost COMMITS ATTEMPTS SECONDS");
+    }
+    Run r{std::atof(argv[1]), std::atof(argv[2]), std::atof(argv[3])};
+    if (r.commits <= 0.0 || r.attempts < r.commits || r.seconds <= 0.0) {
+        throw std::runtime_error("invalid counters");
+    }
+    return r;
+}
+
+int main(int argc, char** argv) {
+    try {
+        const Run r = parse(argc, argv);
+        const double attempts_per_commit = r.attempts / r.commits;
+        const double p_abort = 1.0 - (1.0 / attempts_per_commit);
+        const double committed_throughput = r.commits / r.seconds;
+        const double attempt_rate = r.attempts / r.seconds;
+        const double seconds_per_attempt = r.seconds / r.attempts;
+
+        std::cout << std::fixed << std::setprecision(6)
+                  << "attempts_per_commit=" << attempts_per_commit << "\n"
+                  << "implied_p_abort=" << p_abort << "\n"
+                  << "committed_txns_per_sec=" << committed_throughput << "\n"
+                  << "attempts_per_sec=" << attempt_rate << "\n"
+                  << "seconds_per_attempt=" << seconds_per_attempt << "\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << "\n";
+        return 2;
+    }
+}
+\end{lstlisting}
+
+For example, if a run reports
+
+$$
+\mathrm{commits}=1{,}000{,}000
+$$
+
+and
+
+$$
+\mathrm{attempts}=1{,}250{,}000,
+$$
+
+then attempts per commit is
+
+$$
+1.25
+$$
+
+and the implied abort probability is
+
+$$
+1 - \frac{1}{1.25} = 0.20.
+$$
+
+The number is not a proof that aborts are independent. It is a compact way to compare runs that use the same workload and counter definitions.
+
+Attempts and commits must be counted at the same semantic boundary; counting inner validation retries in one backend and whole transaction retries in another makes the ratio meaningless. The implied abort probability is a model parameter, not a directly observed fact. Time per attempt is often more revealing than abort rate when comparing read-set validation schemes.
 
 \section{Summary}
-\begin{itemize}
-    \item Performance evaluation of TM requires both analytical models and careful empirical measurement.
-    \item Throughput must be interpreted with aborts, attempts per commit, latency, and validation cost.
-    \item A benchmark report is incomplete unless it records the uninstrumented baseline, machine profile, toolchain, workload parameters, and correctness checks.
-\end{itemize}
+
+Performance evaluation of transactional memory requires both analytical models and careful empirical measurement. Throughput is the headline number, but it must be interpreted with aborts, attempts per commit, latency, wasted work, and validation cost.
+
+A useful report records the uninstrumented baseline, the SGL baseline, backend configuration, machine profile, toolchain, workload parameters, repetitions, variance, and correctness checks. The bank invariant is part of performance methodology: a fast backend that violates the account floor or money conservation is not a faster implementation of the same program.
+
+The best models are deliberately modest. Little's Law explains concurrency and latency. The retry model explains attempts per commit at low contention. Cost-per-operation models explain where cycles go. When measurements disagree with the model, the next experiment should identify the missing cost.
 
 \section{Exercises}
 \begin{enumerate}
@@ -6205,8 +6667,32 @@ SGL       8         210K       0        1.00
     C_{\mathrm{attempt}}.
     $$
     State two concrete reasons why this prediction fails for TL2 or NOrec under high write contention.
+    \item \emph{[implementation]} Add a conflict-address histogram to the bank benchmark. Report the ten hottest accounts and explain whether the observed aborts are caused by data skew or by metadata layout.
+    \item \emph{[verification]} Add a bounded latency counter to the TLA+ model and state an invariant that every completed attempt is counted exactly once as either a commit or an abort.
+    \item \emph{[theory]} Suppose two backends have the same committed throughput but one has twice the attempts per commit. Give two workload changes under which the higher-attempt backend is likely to become worse.
 \end{enumerate}
 
+\index{attempts per commit}
+\index{semantic reject}
+\index{commit latency}
+\index{latency distribution}
+\index{machine profile}
+\index{cost-per-operation model}
+\index{Bloom-filtered read set}
+\index{global-clock validation}
+\index{ownership record}
+\index{timestamp fast path}
+\index{multi-version log pressure}
+\index{warm-up interval}
+\index{outlier rejection}
+\index{frequency scaling}
+\index{thread pinning}
+\index{uninstrumented baseline}
+\index{conflict-address histogram}
+\index{false sharing}
+\index{coherence storm}
+\index{retry model}
+\index{queueing delay}
 % -------------------------------------------------------------------
 %  PART VII: ADVANCED TOPICS
 % -------------------------------------------------------------------
@@ -6214,13 +6700,21 @@ SGL       8         210K       0        1.00
 
 % -------------------------------------------------------------------
 \chapter{From Source to AST: Lexing and Parsing}
+\index{lexing}\index{parsing}\index{finite automata}\index{DFA}\index{recursive descent}\index{parser generator}\index{AST}\index{atomic block}
+
+A transactional memory system is usually introduced at the runtime boundary: a transaction begins, reads and writes are tracked, validation happens, and a commit either publishes updates or retries. But a programmer does not write read-set manipulation by hand. The programmer writes a source-level construct, a library call, or code that an instrumentation pass recognizes. Somewhere before the runtime can execute, the program has to be decomposed into structure.
+
+This chapter follows that front-end path: characters become tokens, tokens become an abstract syntax tree, and the tree identifies the region that later becomes transactional instrumentation. The companion repository instruments at LLVM IR rather than shipping a source language, but the conceptual pipeline is the same. The tiny language used here is deliberately small: an \texttt{atomic} block, a bank transfer statement, and assertions about money conservation.
 
 \section{Finite Automata and Lexical Analysis}
-\begin{itemize}
-    \item Regular expressions as a thinking tool; every regular expression compiles to a deterministic finite automaton (DFA) via the subset construction, and a DFA is exactly what a hand-written lexer \emph{is}.
-    \item Hand-written lexer for a tiny language containing \texttt{atomic}, identifiers, and braces.
-    \item The classic ``keyword vs.\ identifier'' problem: \texttt{atomic} and \texttt{atomically} share a prefix, so the DFA either gives keywords a dedicated path (Figure~\ref{fig:lexer-dfa}) or checks a reserved-word table after a maximal munch.
-\end{itemize}
+
+Lexical analysis is the first useful compression step in a compiler. It turns a stream of characters into a stream of tokens: \texttt{atomic}, \texttt{\char`\{}, identifiers, numbers, semicolons, and so on. The important fact is that a lexer is not mysterious machinery. It is a finite automaton with a small amount of bookkeeping for token text and source position.
+
+Regular expressions are a convenient notation for such machines. An identifier may be described as a letter followed by zero or more letters or digits. A decimal number may be described as one or more digits. A fixed keyword such as \texttt{atomic} is just a six-character path through the automaton. Every regular expression can be compiled to a nondeterministic finite automaton, then to a deterministic finite automaton by subset construction. A hand-written lexer implements the same transition function directly in code.
+
+The key policy is \emph{maximal munch}: consume the longest prefix that forms a valid token. Without it, \texttt{atomicity} could be tokenized as \texttt{atomic} followed by \texttt{ity}. That would be wrong for ordinary language design. The usual rule is to consume the longest identifier-like string and then check whether the result is a reserved word. The alternative is the dedicated DFA path in Figure~\ref{fig:lexer-dfa}, where \texttt{atomic} is accepted as a keyword only if the word ends exactly there.
+
+For the transactional examples in this book, the lexer has no semantic knowledge. It does not know whether an account has enough money, whether a transfer preserves a floor, or whether a runtime backend is NOrec, TL2, SGL, TinySTM, or SwissTM. It only recognizes surface categories.
 
 \begin{figure}[ht]
 \centering
@@ -6269,13 +6763,27 @@ SGL       8         210K       0        1.00
 \label{fig:lexer-dfa}
 \end{figure}
 
+A practical lexer also records source spans. A token should carry at least its kind, spelling, and byte or line-column position. The parser can then report ``expected \texttt{\char`\}}'' at the right location instead of merely failing. Diagnostics are not an afterthought; they are part of the front-end contract.
+
 \section{Recursive Descent Parsing}
-\begin{itemize}
-    \item Each grammar rule becomes a function.
-    \item Constructing a parse tree / AST for an \texttt{atomic \{ … \}} block.
-    \item Why recursive descent is the simplest didactic parsing algorithm.
-    \item Its limits: no left recursion, no automatic conflict report, no grammar file --- the grammar lives only in the code.
-\end{itemize}
+
+Parsing gives hierarchical meaning to the flat token stream. A sequence such as \texttt{atomic \char`\{ transfer checking savings 7; \char`\}} is not just seven tokens. It is an atomic block containing one statement whose operands are two account identifiers and one amount.
+
+Recursive descent is the simplest didactic parser because each grammar rule becomes one function. A rule for an atomic block becomes \texttt{parse\_atomic}. A rule for a transfer statement becomes \texttt{parse\_transfer}. A rule for an identifier becomes \texttt{expect\_id}. The call stack mirrors the grammar.
+
+A suitable grammar fragment is:
+
+$$
+\begin{array}{rcl}
+\textit{atomic-block} & ::= & \texttt{atomic} \ \texttt{\char`\{} \ \textit{stmt-list} \ \texttt{\char`\}} \\
+\textit{stmt-list} & ::= & \textit{stmt} \ \textit{stmt-list} \mid \epsilon \\
+\textit{stmt} & ::= & \textit{transfer} \mid \textit{assertion}
+\end{array}
+$$
+
+In code, the parser usually avoids writing the recursive list rule literally. Instead it loops until it sees the closing brace. That loop is still the same grammar idea, expressed in a form that gives better error messages and avoids deep recursion on long statement lists.
+
+Recursive descent has limits. Direct left recursion cannot be parsed by a naive recursive function, because the function calls itself before consuming a token. It also provides no automatic conflict report: if two alternatives begin with the same token, the author must decide how much lookahead is needed. Finally, there is no separate grammar artifact unless the team writes one; the grammar lives in the parser source.
 
 \begin{figure}[htbp]
 \centering
@@ -6299,6 +6807,8 @@ SGL       8         210K       0        1.00
 \label{fig:front-end-pipeline}
 \end{figure}
 
+Figure~\ref{fig:front-end-pipeline} separates front-end structure from runtime policy. The lexer and parser identify an atomic region. They do not decide whether the implementation uses a single global lock, TL2 versioned locks, NOrec validation, TinySTM write-back or write-through modes, SwissTM conflict management, persistent logging, or a GPU commit protocol. That boundary is healthy: syntax should remain stable while backend protocols evolve.
+
 \section{Parser Generators: From Yacc to Modern Tools}
 \index{parser generator}\index{yacc}\index{bison}\index{LR(0) automaton}\index{ANTLR}\index{tree-sitter}
 
@@ -6308,14 +6818,11 @@ table-driven parser for free --- is the backbone of countless real compilers,
 and the shift-and-reduce automaton it builds is exactly the kind of object
 this chapter's automata language can describe.
 
-\begin{itemize}
-    \item \emph{Yacc (1975)} compiled a context-free grammar into an \textsc{LALR(1)} parser table; its modern form is \textsc{GNU Bison}, still maintained and still the parser behind many C/C++-adjacent tools (e.g.\ SQL engines, shell grammars).
-    \item \emph{The generated automaton is a real object.}  For a simple grammar, the ``parser'' Bison would produce is an LR(0) automaton with one state per set of viable items, as in Figure~\ref{fig:lr0-automaton} for the grammar in Listing~\ref{lst:expr-grammar}.
-    \item \emph{Recursive descent you write; an LR table you compute.}  This is the trade-off: hand-written parsers read like the grammar but must avoid left recursion; generated parsers accept the grammar as-is but hide the shift/reduce machinery behind the table.
-    \item \emph{Modern tools}.  \textsc{ANTLR} (ALL(*), with Python and many other targets) generates recursive-descent parsers from grammar files; \textsc{tree-sitter} builds error-tolerant, incremental \textsc{GLR} parsers used by editors; Python projects commonly use \textsc{PLY} (a Yacc port), \textsc{SLY} (its successor), or \textsc{Lark} (Earley/LALR from \textsc{EBNF}).
-    \item \emph{What this means for transactional constructs}: nothing about \texttt{atomic} is hard to parse --- any of these tools can host the grammar --- so the interesting work stays downstream, in the instrumentation and runtime, where the rest of this book lives.
-    \item \emph{Scope note}: this section is a deliberate, self-contained detour. The companion repository instruments at the LLVM-IR level (Chapter~10) and does \emph{not} implement a source-level TM language, so no front-end generator is shipped; the DFA and LR(0) automata here exist to ground the vocabulary (``shift'', ``reduce'', ``item set'') rather than to build a product. Readers who want only the TM pipeline may skip to the worked example.
-\end{itemize}
+A parser generator makes the grammar an explicit artifact. Instead of encoding every rule as a function, the programmer writes productions and lets the tool compute states, transitions, lookahead, and reductions. This is valuable when the language grows beyond a small teaching grammar. It is also valuable when diagnostics and maintenance matter: a grammar file can be reviewed independently from semantic actions.
+
+\emph{Yacc (1975)} compiled a context-free grammar into an \textsc{LALR(1)} parser table; its modern form is \textsc{GNU Bison}, still maintained and still the parser behind many C/C++-adjacent tools (e.g.\ SQL engines, shell grammars). \emph{The generated automaton is a real object.} For a simple grammar, the ``parser'' Bison would produce is an LR(0) automaton with one state per set of viable items, as in Figure~\ref{fig:lr0-automaton} for the grammar in Listing~\ref{lst:expr-grammar}. \emph{Recursive descent you write; an LR table you compute.} This is the trade-off: hand-written parsers read like the grammar but must avoid left recursion; generated parsers accept the grammar as-is but hide the shift/reduce machinery behind the table. \emph{Modern tools}. \textsc{ANTLR} (ALL(*), with Python and many other targets) generates recursive-descent parsers from grammar files; \textsc{tree-sitter} builds error-tolerant, incremental \textsc{GLR} parsers used by editors; Python projects commonly use \textsc{PLY} (a Yacc port), \textsc{SLY} (its successor), or \textsc{Lark} (Earley/LALR from \textsc{EBNF}). \emph{What this means for transactional constructs}: nothing about \texttt{atomic} is hard to parse --- any of these tools can host the grammar --- so the interesting work stays downstream, in the instrumentation and runtime, where the rest of this book lives. \emph{Scope note}: this section is a deliberate, self-contained detour. The companion repository instruments at the LLVM-IR level (Chapter~10) and does \emph{not} implement a source-level TM language, so no front-end generator is shipped; the DFA and LR(0) automata here exist to ground the vocabulary (``shift'', ``reduce'', ``item set'') rather than to build a product. Readers who want only the TM pipeline may skip to the worked example.
+
+The table in an LR parser is a compact encoding of two choices. A \emph{shift} consumes another token and moves to a new state. A \emph{reduce} recognizes that the symbols on top of the stack match the right-hand side of a production and replaces them by the left-hand side. Conflicts mean the grammar and parser class do not determine a unique action for a particular state and lookahead token.
 
 \begin{table}[htbp]
 \centering
@@ -6359,6 +6866,8 @@ term  ::= id
 \label{fig:lr0-automaton}
 \end{figure}
 
+The grammar in Listing~\ref{lst:expr-grammar} is intentionally left-recursive. A direct recursive-descent parser for \texttt{expr} would call itself before consuming input. An LR parser has no such problem: left recursion is often the natural way to express left-associative operators in bottom-up parsing.
+
 \section{Worked Example: Lexing and Parsing an Atomic Block}
 \index{lexer}\index{recursive descent parser}\index{AST}
 \label{sec:parser-example}
@@ -6378,12 +6887,13 @@ struct Token next_token(const char **src) {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item Each grammar rule becomes one function in the recursive-descent parser --- the \texttt{atomic \{ \ldots \}} production being a small subtree.
-    \item The DFA for this lexer is Exercise~1 of this chapter: five tokens, all reachable from the start state.
-    \item The output AST is exactly what Part~V's instrumentation pass consumes --- the pass never sees source text.
-    \item Exercise~3 extends the parser to nested atomic blocks and unbalanced-brace detection.
-\end{itemize}
+The listing is schematic: it shows the shape of a lexer, not the complete maximal-munch implementation. A production lexer must avoid accepting \texttt{atomicity} as \texttt{atomic}. The robust version scans a whole identifier first, then compares the spelling with the reserved-word table. That single design choice removes a class of prefix bugs.
+
+A parser for the corresponding atomic block has three phases. First, it expects the keyword. Second, it consumes the opening brace. Third, it parses statements until it sees the matching closing brace. The result is an AST node representing an atomic control region. Later passes lower that node into calls that begin, read, write, validate, commit, or abort a concrete backend transaction.
+
+Each grammar rule becomes one function in the recursive-descent parser --- the \texttt{atomic \{ \ldots \}} production being a small subtree. The DFA for this lexer is Exercise~1 of this chapter: five tokens, all reachable from the start state. The output AST is exactly what Part~V's instrumentation pass consumes --- the pass never sees source text. Exercise~3 extends the parser to nested atomic blocks and unbalanced-brace detection.
+
+The important separation is that the parser recognizes \emph{where} the transaction is; it does not implement the transaction. In the repository, the concrete backends include SGL, TSX-SGL, SPHT, NOrec, NOrec-BF, TL2, TSC-TM, TinySTM modes, SwissTM, DUDETM, NV-HTM, XTM, Romulus, LeftRight, JVSTM, MVLog, PersistentSGL, DistributedSGL, TiKV-style distributed commit, and GPU designs. The front end should not contain special cases for any of them.
 
 \section{Worked Example: A Bank Transfer Front End}
 \index{bank transfer}\index{AST!bank transfer}
@@ -6397,6 +6907,8 @@ atomic {
   assert_conservation;
 }
 \end{lstlisting}
+
+This source says three things. It opens an atomic region. It transfers seven units from \texttt{checking} to \texttt{savings}. It asks the implementation or verifier to check that the total amount of money is preserved. The parser records those facts without choosing a synchronization protocol.
 
 \begin{lstlisting}[language=C++, caption={A complete C++17 lexer and recursive-descent parser for a bank-transfer atomic block.}, label={lst:bank-parser}]
 #include <cctype>
@@ -6549,12 +7061,9 @@ int main() {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item The lexer performs maximal munch and then classifies reserved words; therefore \texttt{atomicity} is an identifier, not \texttt{atomic} followed by \texttt{ity}.
-    \item The parser rejects negative or zero transfer amounts before any runtime backend is involved.
-    \item The AST records \emph{intent}: a transfer and a conservation check. Later chapters lower that intent to read/write instrumentation for concrete backends such as SGL, NOrec, TL2, or TSC-TM.
-    \item Account floors are semantic checks. They do not belong in the lexer and only partly belong in the parser; the parser can reject syntactic nonsense, but balance-dependent checks require execution or verification.
-\end{itemize}
+The lexer performs maximal munch and then classifies reserved words; therefore \texttt{atomicity} is an identifier, not \texttt{atomic} followed by \texttt{ity}. The parser rejects negative or zero transfer amounts before any runtime backend is involved. The AST records \emph{intent}: a transfer and a conservation check. Later chapters lower that intent to read/write instrumentation for concrete backends such as SGL, NOrec, TL2, or TSC-TM. Account floors are semantic checks. They do not belong in the lexer and only partly belong in the parser; the parser can reject syntactic nonsense, but balance-dependent checks require execution or verification.
+
+A useful compiler discipline is to reject errors at the earliest responsible layer. Misspelled keywords and malformed numbers are lexical errors. Missing semicolons and unmatched braces are parse errors. Duplicate declarations can be handled during parsing or a following name-resolution pass. Insufficient balance requires either execution, static analysis, or model checking, because it depends on values.
 
 \section{Worked Example: Model Checking the Parsed Transaction}
 \index{TLA+}\index{model checking}\index{money conservation}
@@ -6590,7 +7099,7 @@ Transfer ==
 
 EndAtomic ==
     /\ pc = "after"
-    /\ pc' = "done"
+    /\ pc' = "after"
     /\ UNCHANGED <<acct0, acct1>>
 
 Next ==
@@ -6615,42 +7124,56 @@ TypeOK ==
 ====
 \end{lstlisting}
 
-\begin{itemize}
-    \item The model is intentionally closer to the AST than to machine code: it has a \texttt{Transfer} action, not individual loads and stores.
-    \item The floor guard appears in \texttt{Transfer}. Removing \texttt{acct0 >= 7} gives TLC a direct counterexample to \texttt{Floors} if the initial balance is smaller than the transfer amount.
-    \item Money conservation is independent of the backend choice. SGL, TL2, NOrec, TinySTM, SwissTM, and the other tested backends differ in synchronization protocol, not in the sequential meaning of this AST.
-    \item The repository's test suites check concrete implementations; the TLA+ model checks the small transition system that the implementation is meant to refine.
-\end{itemize}
+The model is small enough to inspect directly. The parsed transfer is represented by one action. That is intentional: this model checks the sequential meaning of the AST, not the opacity or commit protocol of a particular TM implementation. A lower-level model of TL2, NOrec, or a GPU commit-log protocol would introduce read sets, write sets, versions, validation, and interleavings.
 
-\section{Summary}
-\begin{itemize}
-    \item Lexing and parsing are well‑understood, automaton‑based processes; every regex is a DFA in disguise (Figure~\ref{fig:lexer-dfa}), and every LR grammar is a state machine of viable items (Figure~\ref{fig:lr0-automaton}).
-    \item Recursive descent gives a direct, maintainable way to build an AST for transactional constructs.
-    \item Parser generators trade hand-written control for generated automata; Table~\ref{tab:front-end-choices} summarizes the practical choice.
-    \item The front end should reject malformed programs and preserve intent. Runtime safety, opacity, persistence, and distributed commit belong to the TM backend, not to the lexer.
-    \item Yacc and its successors (Bison, ANTLR, tree-sitter, PLY/SLY/Lark) automate the parser half of that pipeline; the automata they build are exactly the ones drawn in this chapter.
-\end{itemize}
+The model is intentionally closer to the AST than to machine code: it has a \texttt{Transfer} action, not individual loads and stores. The floor guard appears in \texttt{Transfer}. Removing \texttt{acct0 >= 7} gives TLC a direct counterexample to \texttt{Floors} if the initial balance is smaller than the transfer amount. Money conservation is independent of the backend choice. SGL, TL2, NOrec, TinySTM, SwissTM, and the other tested backends differ in synchronization protocol, not in the sequential meaning of this AST. The repository's test suites check concrete implementations; the TLA+ model checks the small transition system that the implementation is meant to refine.
 
-\section{Exercises}
-\begin{enumerate}
-    \item Write the finite automaton for a lexer that recognizes the keyword \texttt{atomic}, identifiers, and curly braces.  Compare your answer with Figure~\ref{fig:lexer-dfa}.
-    \item A student claims LL(1) parsing is obsolete. Argue from first principles why recursive descent remains useful for educational compilers.
-    \item Extend a recursive descent parser to handle nested \texttt{atomic} blocks and report an error for unbalanced braces.
-    \item Compute the LR(0) item sets for the grammar of Listing~\ref{lst:expr-grammar} by hand, then check them against Figure~\ref{fig:lr0-automaton}.
-    \item \emph{[implementation]} Extend Listing~\ref{lst:bank-parser} with account-floor syntax, for example \texttt{floor checking 0;}. The parser should store floors in the AST and reject duplicate floor declarations for the same account.
-    \item \emph{[verification]} Modify Listing~\ref{lst:tla-parsed-bank} so the initial balance of \texttt{acct0} is a model constant rather than the fixed value \texttt{100}. Check which constant assignments preserve \texttt{Floors} for transfer amount \texttt{7}.
-    \item \emph{[theory]} Give a grammar for a sequence of statements inside \texttt{atomic}: transfers, conservation assertions, and floors. Prove or argue that the grammar is unambiguous, and show how the recursive-descent parser would decide which alternative to take at each point.
-\end{enumerate}
+One subtlety is worth noticing: \texttt{TypeOK} allows \texttt{"done"}, but the listed \texttt{EndAtomic} action leaves \texttt{pc} at \texttt{"after"}. A stricter final-state model would set \texttt{pc'} to \texttt{"done"}. That correction does not affect money conservation, but it does affect progress-style properties that distinguish a completed transaction from one still at the end of the block.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\small, node distance=2.2cm]
+  \tikzstyle{state}=[draw,rounded corners,align=center,minimum width=2.5cm,minimum height=0.9cm]
+  \node[state] (src) {Source\\atomic block};
+  \node[state] (tok) [right=of src] {Tokens\\keyword, ids, num};
+  \node[state] (ast) [right=of tok] {AST\\Transfer node};
+  \node[state] (sem) [below=of ast] {Semantic action\\debit and credit};
+  \node[state] (inv) [left=of sem] {Invariant check\\floor, conservation};
+  \node[state] (rt) [left=of inv] {Runtime lowering\\TM backend calls};
+  \draw[-{Stealth}] (src) -- node[above] {lex} (tok);
+  \draw[-{Stealth}] (tok) -- node[above] {parse} (ast);
+  \draw[-{Stealth}] (ast) -- node[right] {eval} (sem);
+  \draw[-{Stealth}] (sem) -- node[above] {check} (inv);
+  \draw[-{Stealth}] (inv) -- node[above] {lower} (rt);
+\end{tikzpicture}
+\caption{The path from transactional source through tokens and an abstract syntax
+tree to the semantic actions, invariant checks, and TM runtime lowering that a
+front end drives.}
+\label{fig:tm-front-end-lowering}
+\end{figure}
 % -------------------------------------------------------------------
 \chapter{Hardware Transactional Memory – Design and Simulation}
+\index{hardware transactional memory!design}\index{hardware transactional memory!simulation}\index{RTM}\index{TME}\index{cache coherence}\index{capacity aborts}\index{fallback paths}
+
+Hardware transactional memory, or HTM, is the most direct attempt to make transactions disappear into the memory hierarchy. Instead of maintaining read sets, write sets, undo logs, and validation logic in software, the processor extends speculation and coherence so that a region of ordinary loads and stores either commits atomically or aborts and restores the pre-transaction state.
+
+This chapter studies HTM as an architectural idea and as a practical programming interface. The running example remains the two-account bank transfer: a transfer must preserve the account floor and the money-conservation invariant,
+
+$$
+\operatorname{total}(b)=b_0+b_1=\operatorname{constant}.
+$$
+
+The central lesson is deliberately modest: HTM can make the fast path extremely cheap, but it is a best-effort mechanism. Correctness lives in the fallback path.
+
 \section{Extending Cache Coherence for TM}
-\begin{itemize}
-    \item The Herlihy \& Moss proposal: XCOMMIT/XABORT states on top of MESI.
-    \item How the cache hierarchy tracks speculative stores and detects conflicts.
-    \item The key burden: a cache must retain the pre-transaction value of every line it will roll back (undo capability in the cache).
-    \item Conflict detection by coherence message: an invalidation to a transactional line is an abort signal.
-    \item Why this scales only when transactions fit in L1 (capacity aborts) and why the design did not reach commodity silicon directly.
-\end{itemize}
+
+Herlihy and Moss proposed the basic hardware idea: add transactional states to a MESI-like cache-coherence protocol. A transactional load marks a cache line as part of the transaction's read set. A transactional store marks a line as part of its write set and delays publication until commit. Their proposal used states such as XCOMMIT and XABORT to distinguish speculative lines from ordinary modified or shared lines.
+
+The cache hierarchy then becomes the transaction manager. It tracks which lines have been read, which lines have been written, and whether another core sends a coherence message that invalidates a transactional assumption. A conflicting invalidation to a transactional line is an abort signal. The hardware discards the speculative writes and restarts execution at the checkpointed program counter.
+
+The expensive requirement is undo. If the processor has overwritten a cache line speculatively, it must still be able to restore the pre-transaction value. A simple design keeps both the new value and enough old state inside the cache. This is fast when the transaction fits in the tracked cache structures and brittle when it does not. Evicting a transactional line may lose either the value needed for rollback or the metadata needed for conflict detection. The conservative answer is a capacity abort.
+
+This explains why coherence-based HTM tends to work best for short, cache-resident critical sections. It is ideal for the common case in which a lock protects a small update, such as the bank transfer touching two account records. It is much less robust for long scans, large read sets, or transactions that call into the operating system.
 
 \begin{figure}[htbp]
 \centering
@@ -6681,16 +7204,19 @@ TypeOK ==
 \label{fig:htm-coherence-abort}
 \end{figure}
 
+The figure is also a useful mental model for software design. Every extra cache line touched inside the transaction becomes part of the speculative footprint. Debug counters, logging buffers, allocator metadata, and accidental reads of shared state all increase the chance of abort. In HTM programming, minimizing the hardware footprint is not merely an optimization; it is part of making progress likely.
+
 \section{Modern HTM Implementations}
-\begin{itemize}
-    \item Intel RTM (xbegin/xend/xabort) – best‑effort contract.
-    \item ARM TME – similar concepts, different implementation details.
-    \item Capacity and instruction‑based abort causes.
-    \item IBM implementations (Blue Gene/Q, POWER8/9) as the longevity case study of coherence-based HTM.
-    \item The `best-effort' contract: no guarantee of commit; software must provide a fallback path on abort.
-    \item Fallback design: from serialized retry to hybrid HTM+STM (phased hybrid, HSTM), and the glibc lock-elision lesson (elision removed in glibc 2.35).
-    \item Abort causes beyond conflicts: capacity, `unsupported instruction', page faults, and how profiling attributes them (Part~VII).
-\end{itemize}
+
+Commodity HTM is not one mechanism. It is a family of best-effort mechanisms with similar semantics and different interfaces. Intel Restricted Transactional Memory, or RTM, exposes instructions such as \texttt{xbegin}, \texttt{xend}, and \texttt{xabort}. ARM Transactional Memory Extension, or TME, exposes similar architectural concepts with implementation-defined tracking and diagnostics. IBM's Blue Gene/Q and POWER implementations are the longevity case study: they show that coherence-based HTM can be made practical when the architecture and platform expose a sufficiently mature interface.
+
+The shared semantic contract is simple: a hardware transaction may commit, but software must not depend on eventual commit. It may abort because another core conflicts with its read or write set. It may abort because the transaction exceeds implementation capacity. It may abort because it executes an unsupported instruction, takes an interrupt, faults on a page, or hits a microarchitectural limit that is not visible in the source code.
+
+This best-effort rule distinguishes HTM from the software backends studied earlier. In NOrec, TL2, TinySTM, SwissTM, JVSTM, MVLog, and the persistent and distributed designs, the implementation owns the retry protocol. With HTM, the processor owns only the fast attempt. The program must provide a correct fallback path.
+
+The simplest fallback is a global lock: try HTM a few times, then serialize. The companion codebase includes TSX-SGL as the natural instance of this idea. More elaborate hybrids use phased execution or hybrid STM, switching between hardware and software modes as contention and capacity behavior change. The important correctness rule is unchanged: the hardware path must synchronize with the fallback path, usually by reading the fallback lock inside the transaction. This is called lock subscription.
+
+The glibc lock-elision history is the warning sign. Eliding locks transparently is attractive, but the best-effort contract, platform errata, and subtle subscription rules make correctness and long-term maintenance difficult. When lock elision is used, it must be treated as a performance path over an ordinary correct synchronization protocol, not as a replacement for that protocol.
 
 \begin{table}[htbp]
 \centering
@@ -6728,14 +7254,9 @@ if (status == _XBEGIN_STARTED) {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item Compare with \S\ref{sec:api-example}: the STM retry loop becomes a hardware fallback instead of a software retry.
-    \item The \texttt{status} byte is the entire diagnostics interface --- the abort-accounting of Part~VI is far richer, which is why profiling tools must infer RTM reasons (Part~VII).
-    \item Exercise~1 asks for the fallback design; the phased-hybrid and HSTM bullets above are exactly this fallback made adaptive.
-    \item The transaction's atomicity is enforced by the L1/L2 coherence tracking of the first section --- which is why capacity aborts are unavoidable (see Part~VII's GPU contrast).
-    \item \textbf{Abort taxonomy}: RTM collapses many causes into one status byte. The practical breakdown is: \emph{conflict} (another core touched the read/write set), \emph{capacity} (the transaction outgrew the L1 tracking --- unavoidable at large read/write sets), \emph{unsupported instruction} (e.g.\ most syscalls and \texttt{rdfsbase}), and \emph{debug/explicit} (\texttt{\_xabort} or debugger single-step). Profilers cannot distinguish conflict from capacity reliably from the status alone --- the reason the Part~VII simulator model re-measures them.
-    \item \textbf{Fallback correctness is the real contract.} The \texttt{lock(\&g\_fallback)} path above is a second, serial execution of the same body. It must be \emph{called with the same state view} as the aborted TSX attempt and must itself be transactional-safe: a crash between the fallback lock and its unlock is indistinguishable from a crash inside the transaction. The failure mode to design against is the \emph{retry loop deadlock}: a hybrid that falls back to a lock but is also invoked by the STM-style retry loop can deadlock on its own fallback mutex (a real bug class in the companion repo's SPHT backend).
-\end{itemize}
+Compare with \S\ref{sec:api-example}: where the STM used a retry loop, RTM uses a hardware fallback instead of a software retry. The \texttt{status} byte is the entire diagnostics interface --- the abort-accounting of Part~VI is far richer, which is why profiling tools must infer RTM reasons (Part~VII). Exercise~1 asks for the fallback design; the phased-hybrid and HSTM bullets above are exactly this fallback made adaptive. The transaction's atomicity is enforced by the L1/L2 coherence tracking of the first section --- which is why capacity aborts are unavoidable (see Part~VII's GPU contrast). \textbf{Abort taxonomy}: RTM collapses many causes into one status byte. The practical breakdown is \emph{conflict} (another core touched the read/write set), \emph{capacity} (the transaction outgrew the L1 tracking --- unavoidable at large read/write sets), \emph{unsupported instruction} (e.g.\ most syscalls and \texttt{rdfsbase}), and \emph{debug/explicit} (\texttt{\_xabort} or a debugger single-step). Profilers cannot distinguish conflict from capacity reliably from the status alone --- this is the reason the Part~VII simulator model re-measures them. \textbf{Fallback correctness is the real contract.} The \texttt{lock(\&g\_fallback)} path above is a second, serial execution of the same body. It must be \emph{called with the same state view} as the aborted TSX attempt and must itself be transactional-safe: a crash between the fallback lock and its unlock is indistinguishable from a crash inside the transaction. The failure mode to design against is the \emph{retry loop deadlock}: a hybrid that falls back to a lock but is also invoked by the STM-style retry loop can deadlock on its own fallback mutex (a real bug class in the companion repo's SPHT backend).
+
+The listing is intentionally small, but it hides two non-negotiable rules. First, the fallback body must be the same logical operation as the transactional body. Second, the fallback lock must be visible to the transaction. Without that visibility, the hardware path and fallback path are merely two unsynchronized implementations of the same update.
 
 \section{Worked Example: RTM Bank Transfer with Lock Subscription}
 \index{lock subscription}\index{fallback lock}\index{money conservation}
@@ -6838,21 +7359,134 @@ int main() {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item The invariant is money conservation: every successful transfer subtracts and adds the same amount.
-    \item The account-floor check is inside both the RTM path and the fallback path; fallback is not a different algorithm.
-    \item The transaction reads \texttt{g\_fallback}. That read is not an optimization; it is the synchronization point between hardware and software execution.
-    \item The retry budget is deliberately finite. A best-effort HTM transaction is allowed to abort forever.
-    \item The explicit abort code \texttt{0xF0} separates ``fallback lock is held'' from ordinary conflicts in local diagnostics. It does not make RTM deterministic.
-\end{itemize}
+The invariant is money conservation: every successful transfer subtracts and adds the same amount. The account-floor check is inside both the RTM path and the fallback path; fallback is not a different algorithm. The transaction reads \texttt{g\_fallback}; that read is not an optimization but the synchronization point between hardware and software execution. The retry budget is deliberately finite, because a best-effort HTM transaction is allowed to abort forever. Finally, the explicit abort code \texttt{0xF0} separates ``fallback lock is held'' from ordinary conflicts in local diagnostics, though it does not make RTM deterministic.
+
+The companion backends use this same pattern at different levels. SGL serializes everything. TSX-SGL attempts the critical section in hardware and falls back to serialization. Software systems such as TL2, NOrec, TSC-TM, SwissTM, and TinySTM do not depend on cache-resident speculation, but they pay for metadata, validation, and logging. The measured results in the companion project reflect that trade-off: for the fuzz/bank workload on an M1 Pro, TL2 and TSC-TM are around two million transactions per second, while NOrec-BF improves the read-mostly NOrec path by reducing validation cost. These numbers are workload-specific; they are useful here only as a reminder that HTM is one point in a larger design space.
+
+\section{Worked Example: Abort-Cause Counters}
+
+RTM exposes limited status bits. A useful first diagnostic is therefore local accounting: count commits, explicit subscription aborts, retryable aborts, and non-retryable aborts. The counters must be updated outside the transaction. If the transaction aborts, writes performed inside it vanish; if the writes force extra cache lines into the transaction, they also perturb the abort rate being measured.
+
+\begin{lstlisting}[language=C, caption={Per-thread RTM counters kept outside the transactional footprint.}]
+/* Compile on x86-64 with:
+ *   c++ -std=c++17 -O2 -mrtm rtm_counters.cc -o rtm_counters
+ */
+#include <immintrin.h>
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+
+struct Counters {
+    std::uint64_t commits = 0;
+    std::uint64_t explicit_lock = 0;
+    std::uint64_t retryable = 0;
+    std::uint64_t nonretryable = 0;
+};
+
+static std::atomic<bool> g_lock{false};
+
+static void critical_increment(int& x) {
+    ++x;
+}
+
+static void run_once(int& x, Counters& c) {
+    for (int i = 0; i != 4; ++i) {
+        unsigned s = _xbegin();
+        if (s == _XBEGIN_STARTED) {
+            if (g_lock.load(std::memory_order_acquire))
+                _xabort(0xF0);
+            critical_increment(x);
+            _xend();
+            ++c.commits;
+            return;
+        }
+
+        if ((s & _XABORT_EXPLICIT) && _XABORT_CODE(s) == 0xF0) {
+            ++c.explicit_lock;
+        } else if (s & _XABORT_RETRY) {
+            ++c.retryable;
+        } else {
+            ++c.nonretryable;
+            break;
+        }
+    }
+
+    while (g_lock.exchange(true, std::memory_order_acquire)) {
+    }
+    critical_increment(x);
+    g_lock.store(false, std::memory_order_release);
+}
+
+int main() {
+    int x = 0;
+    Counters c;
+    run_once(x, c);
+    assert(x == 1);
+    assert(c.commits + c.explicit_lock + c.retryable + c.nonretryable >= 1);
+}
+\end{lstlisting}
+
+Counters are diagnostic state, not transactional state: a counter increment inside RTM would be rolled back on abort and would add another write line on commit. The status bits classify symptoms; they do not fully explain the microarchitectural cause.
+
+\section{Worked Example: Capacity Probe}
+
+The following program sweeps the number of cache lines touched by a transaction. It is not a benchmark result; it is a harness for observing the qualitative transition from small, cache-resident transactions to transactions that frequently abort for capacity or other implementation limits.
+
+\begin{lstlisting}[language=C, caption={A small RTM capacity probe that varies the transactional footprint.}]
+/* Compile on x86-64 with:
+ *   c++ -std=c++17 -O2 -mrtm rtm_capacity.cc -o rtm_capacity
+ */
+#include <immintrin.h>
+#include <array>
+#include <cassert>
+#include <cstddef>
+#include <iostream>
+
+struct alignas(64) Line {
+    int value;
+    char pad[60];
+};
+
+int main() {
+    std::array<Line, 256> lines{};
+    for (std::size_t touched = 1; touched <= lines.size(); touched *= 2) {
+        unsigned status = _xbegin();
+        if (status == _XBEGIN_STARTED) {
+            for (std::size_t i = 0; i < touched; ++i)
+                lines[i].value++;
+            _xend();
+            std::cout << touched << " commit\n";
+        } else {
+            std::cout << touched << " abort status=" << status << "\n";
+        }
+    }
+
+    long sum = 0;
+    for (const auto& l : lines)
+        sum += l.value;
+    assert(sum >= 0);
+}
+\end{lstlisting}
+
+Aligning each element to a cache line makes the footprint easier to reason about. The program does not assume a particular capacity threshold. The same idea is useful in simulation, where cache sizes and associativity can be varied deliberately.
 
 \section{Simulation with gem5}
-\begin{itemize}
-    \item Gem5's Ruby memory system and HTM support for ARM TME.
-    \item Running a minimal HTM workload and measuring abort rates.
-    \item Why simulation is the only way to study transient effects (evictions mid-transaction, coalescing, contention within a coherence domain).
-    \item The workflow: model the cache hierarchy, enable TME, inject a workload, and separate conflict aborts from capacity aborts in output.
-\end{itemize}
+
+Simulation answers questions that commodity counters often merge together. A hardware counter may report an abort, or a status byte may hint that the abort was retryable, but it rarely tells whether the root cause was an L1 conflict, an eviction, a coherence race, a TLB event, or an implementation limit. A simulator can expose the cache hierarchy, coherence protocol, and transactional metadata directly.
+
+Gem5's Ruby memory system is the natural tool in this chapter because Ruby models cache hierarchies and coherence protocols explicitly. With HTM or TME support enabled, the workflow is:
+
+\begin{enumerate}
+    \item model the cache hierarchy and coherence domain;
+    \item enable transactional execution in the target ISA model;
+    \item run a minimal transactional workload;
+    \item vary the footprint, contention, and cache parameters;
+    \item separate conflict aborts from capacity aborts in the output.
+\end{enumerate}
+
+The capacity probe above becomes more informative in simulation than on a fixed machine. On real hardware, the abort boundary is affected by undocumented structures and unrelated activity. In simulation, the experimenter can hold the workload constant and vary L1 size, associativity, line size, or contention. This makes transient effects visible: evictions mid-transaction, write-set coalescing, false conflicts inside a coherence domain, and instruction events that force an abort.
+
+The simulator is not a replacement for measurement. It is a microscope. It explains mechanisms under controlled assumptions; the hardware run tells whether those mechanisms dominate on a real platform.
 
 \section{Worked Example: Model Checking HTM Abort and Fallback}
 \index{TLA+}\index{abort}\index{fallback path}
@@ -6945,18 +7579,15 @@ THEOREM Spec => []FloorSafe
 =============================================================================
 \end{lstlisting}
 
-\begin{itemize}
-    \item \texttt{Commit} requires \texttt{bal = snap}. This is the abstract coherence check: if the snapshot is stale, hardware must not commit it.
-    \item \texttt{InterfereAbort} models another successful transfer that conflicts with the running transaction. The running transaction aborts, but money is still conserved.
-    \item \texttt{Fallback} executes only from \texttt{idle}; it is serialized with respect to the modeled hardware transaction.
-    \item Both invariants are safety properties. They do not claim that a best-effort transaction eventually commits.
-\end{itemize}
+\texttt{Commit} requires \texttt{bal = snap}; this is the abstract coherence check --- if the snapshot is stale, hardware must not commit it. \texttt{InterfereAbort} models another successful transfer that conflicts with the running transaction; the running transaction aborts, but money is still conserved. \texttt{Fallback} executes only from \texttt{idle}, so it is serialized with respect to the modeled hardware transaction. Both invariants are safety properties; they do not claim that a best-effort transaction eventually commits.
+
+The model omits caches, lines, and invalidations. That is intentional. At the proof boundary, HTM contributes one rule: a transaction may commit only if its snapshot is still valid. Everything else is fallback correctness. This is why the companion project model-checks the software contract as well as testing the implementations.
 
 \section{Summary}
-\begin{itemize}
-    \item HTM leverages existing hardware speculation to implement transactions with near‑zero software overhead.
-    \item Limited capacity and unpredictable aborts remain the main challenges.
-\end{itemize}
+
+HTM leverages existing speculation and cache coherence to make short transactions fast. A commit can be nearly as cheap as leaving a speculative region, and conflict detection can be piggybacked on invalidation traffic already present in the memory hierarchy.
+
+The cost is uncertainty. Transactions can abort for conflicts, capacity, interrupts, faults, unsupported instructions, and implementation limits. Therefore every HTM design is also a fallback design. Correct programs subscribe to the fallback lock, bound their retries, keep diagnostics outside the transactional footprint, and validate the same invariants on the hardware and software paths.
 
 \section{Exercises}
 \begin{enumerate}
@@ -6966,8 +7597,38 @@ THEOREM Spec => []FloorSafe
     \item \emph{[implementation]} Extend Listing~\ref{sec:rtm-bank-transfer}'s transfer code to collect per-thread counters for commits, explicit fallback-lock aborts, retryable aborts, and non-retryable aborts. Keep the counters outside the transaction and explain why updating them inside RTM would distort the measured abort rate.
     \item \emph{[verification]} Modify the TLA+ model in \S\ref{sec:htm-fallback-tla} so that transfers may go in both directions. State and check the money-conservation invariant and an account-floor invariant for both accounts.
     \item \emph{[theory]} Explain why lock subscription is necessary for opacity in a hybrid HTM plus lock fallback design. Give an execution in which omitting the subscription lets a hardware transaction commit concurrently with the fallback critical section.
+    \item \emph{[implementation]} Modify the capacity probe so that it first reads many cache lines and then writes only two. Compare the expected abort behavior with a write-heavy transaction that writes every touched line.
+    \item \emph{[verification]} Add a boolean fallback-lock variable to the TLA+ model. Permit \texttt{Begin} only when the lock is clear, and add an explicit abort transition when the lock becomes held during a transaction.
+    \item \emph{[theory]} Explain why a best-effort HTM interface cannot provide wait-freedom by itself, even when every individual transaction is finite and conflict-free in the source program.
 \end{enumerate}
 
+\index{Herlihy and Moss}
+\index{XCOMMIT}
+\index{XABORT}
+\index{MESI}
+\index{speculative stores}
+\index{transactional read set}
+\index{transactional write set}
+\index{coherence invalidation}
+\index{capacity abort}
+\index{conflict abort}
+\index{unsupported instruction abort}
+\index{Intel TSX}
+\index{Intel RTM}
+\index{ARM TME}
+\index{IBM POWER HTM}
+\index{gem5}
+\index{Ruby memory system}
+\index{lock elision}
+\index{TSX-SGL}
+\index{phased hybrid TM}
+\index{hybrid STM}
+\index{abort counters}
+\index{cache footprint}
+\index{fallback serialization}
+\index{opacity!HTM fallback}
+\index{bank transfer invariant}
+% -------------------------------------------------------------------
 \chapter{Transactional Memory for GPUs}
 \label{chap:gpu-tm}
 
@@ -7764,12 +8425,31 @@ contract says \emph{how} the hardware will let you express it.
 \end{enumerate}
 
 \chapter{Persistent and Distributed Transactional Memory}
+\index{persistent TM}\index{distributed TM}\index{durability}\index{crash recovery}\index{two-phase commit}\index{redo log}\index{Percolator}\index{TiKV}\index{PersistentSGL}\index{DistributedSGL}
+
 Two extensions of the TM contract change the runtime far more than the
 language: making commits survive crashes (persistent TM) and making the
 same API span multiple machines (distributed TM). Both keep the ordinary
 bank invariant, then add a stronger one --- durability, or agreement across
 nodes --- and both force the commit path to become explicit about ordering.
 The two worked examples below implement and verify each extension.
+
+The running example remains the two-account bank transfer. In volatile TM,
+the transfer is correct when it preserves the account floor and conserves the
+sum of all balances. In persistent TM, a committed transfer must also survive
+a crash. In distributed TM, all replicas or participants must agree on the same
+commit decision. These are not cosmetic changes. They move the design pressure
+from fast conflict detection to commit ordering, recovery records, stable
+metadata, and replay rules.
+
+The companion implementation includes both minimal and production-shaped
+instances of these ideas: PersistentSGL and NV-HTM for persistent execution,
+Romulus as a persistent object design, DistributedSGL and TiKV-style
+Percolator two-phase commit for distributed execution, plus the volatile
+baselines used earlier in the book. The same test suites exercise the APIs
+across backends: \texttt{test\_tx} passes 114 of 114 cases and
+\texttt{test\_ds} passes 207 of 207 cases. Model checking is used to pin down
+the small-state corner cases that ordinary tests rarely hit.
 
 \section{Worked Example: Durable Bank Commit}
 \index{persistent TM}\index{durability}\index{redo log}\index{crash recovery}
@@ -7779,6 +8459,12 @@ Persistent TM asks for the ordinary TM invariant plus a crash invariant. A
 committed transfer must not disappear after power loss, and recovery must not
 apply it twice. The small example below uses one durable intent record. The
 record stores the post-state, so redo is idempotent.
+
+The commit protocol has three externally visible phases. First, the runtime
+chooses an outcome while all ordinary TM checks still hold. Second, it forces a
+commit intent to durable storage. Third, it installs the data and clears the
+intent. A crash before the intent is forced is an abort. A crash after the
+intent is forced is a commit that recovery must finish.
 
 \begin{lstlisting}[language=C, caption={A minimal durable two-account transfer with idempotent redo.}]
 #include <array>
@@ -7929,6 +8615,13 @@ int main() {
     \item The money-conservation invariant is checked after restart by the same observation used in volatile tests: the total balance remains unchanged.
 \end{itemize}
 
+The example is deliberately conservative. It uses \texttt{fsync} as the storage
+ordering primitive and a single image rather than a segmented log. A real
+persistent TM backend may use cache-line write-back, epoch barriers, nonvolatile
+allocation protocols, or copy-on-write roots. The same correctness rule remains:
+once the commit point is durable, recovery must be able to discover the decision
+and complete the update without consulting volatile state.
+
 \section{Worked Example: Model Checking Distributed Commit}
 \index{distributed TM}\index{two-phase commit}\index{TLA+}\index{money conservation}
 \label{sec:distributed-commit-example}
@@ -8030,6 +8723,246 @@ FloorsHold ==
     \item The model is small enough for exhaustive checking, but already contains the main distributed failure boundary: a decision without a completed data update.
 \end{itemize}
 
+The model also shows why distributed TM is not merely TL2 with sockets. A local
+STM can usually retry when validation fails. A distributed transaction may have
+already locked keys, recorded a primary decision, or exposed a timestamp to
+another node. Abort, retry, and recovery become protocol states rather than
+local control-flow choices.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=1.55cm and 2.2cm,
+    state/.style={draw, rounded corners, align=center, minimum width=2.5cm, minimum height=0.9cm},
+    edge/.style={-{Latex}, thick}
+]
+\node[state] (start) {transaction\\executes};
+\node[state, right=of start] (validate) {validate\\floor and conflicts};
+\node[state, right=of validate] (intent) {force decision\\journal or votes};
+\node[state, below=of intent] (apply) {apply data\\redo or commit};
+\node[state, left=of apply] (done) {clear metadata\\return commit};
+\node[state, below=of validate] (recover) {recovery\\finishes decision};
+
+\draw[edge] (start) -- (validate);
+\draw[edge] (validate) -- node[above, align=center] {success} (intent);
+\draw[edge] (intent) -- (apply);
+\draw[edge] (apply) -- (done);
+\draw[edge] (intent) -- node[right, align=center] {crash} (recover);
+\draw[edge] (recover) -- (apply);
+\draw[edge] (validate) -- node[left, align=center] {abort} (recover);
+\end{tikzpicture}
+\caption{Commit ordering in persistent and distributed TM.}
+\label{fig:persistent-distributed-commit-order}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.17\textwidth}p{0.17\textwidth}p{0.24\textwidth}p{0.24\textwidth}}
+\hline
+Backend or design & Scope & Commit record & Main recovery or agreement rule \\
+\hline
+PersistentSGL & persistent single process & durable log under one lock & redo committed intent once \\
+NV-HTM & persistent HTM hybrid & persistent metadata and fallback path & preserve HTM atomicity across crashes \\
+Romulus & persistent objects & copy or versioned persistent roots & publish a recoverable root atomically \\
+DistributedSGL & distributed service & serialized coordinator decision & one global order across nodes \\
+TiKV / Percolator-2PC & distributed key-value store & primary lock and commit timestamp & commit primary before secondaries \\
+\hline
+\end{tabular}
+\caption{Persistent and distributed TM designs compared by commit obligation.}
+\label{tab:persistent-distributed-taxonomy}
+\end{table}
+
+\section{Worked Example: PersistentSGL Commit Ordering}
+
+A single global lock is the simplest place to add durability because it removes
+interleavings from the commit path. PersistentSGL is not scalable, but it is a
+useful reference design: if the lock is held, the runtime can force the journal,
+force the data, and clear the journal without another transaction observing a
+half-installed update.
+
+The listing below compresses that rule into a small C++ program. It is not a
+replacement for the earlier durable image; it isolates the ordering discipline
+that a persistent SGL backend enforces.
+
+\begin{lstlisting}[language=C++, caption={A small PersistentSGL-style commit path for the bank invariant.}]
+#include <array>
+#include <cstdint>
+#include <mutex>
+#include <stdexcept>
+
+struct Bank {
+    std::array<int64_t, 2> balance{1000, 1000};
+    int64_t floor = 0;
+};
+
+struct Intent {
+    bool valid = false;
+    uint32_t from = 0;
+    uint32_t to = 0;
+    int64_t new_from = 0;
+    int64_t new_to = 0;
+};
+
+class PersistentSGLBank {
+    std::mutex global_;
+    Bank bank_;
+    Intent intent_;
+
+    void persist_intent() {
+        if (!intent_.valid) throw std::runtime_error("empty intent");
+        /* Real backend: write-back intent cache lines, then persist barrier. */
+    }
+
+    void persist_data() {
+        /* Real backend: write-back modified balances, then persist barrier. */
+    }
+
+    void persist_clear() {
+        /* Real backend: persist the invalid journal state. */
+    }
+
+public:
+    bool transfer(uint32_t from, uint32_t to, int64_t amount) {
+        std::lock_guard<std::mutex> guard(global_);
+
+        if (from >= 2 || to >= 2 || from == to || amount < 0) return false;
+        if (bank_.balance[from] - amount < bank_.floor) return false;
+
+        intent_.valid = true;
+        intent_.from = from;
+        intent_.to = to;
+        intent_.new_from = bank_.balance[from] - amount;
+        intent_.new_to = bank_.balance[to] + amount;
+        persist_intent();              /* durable commit point */
+
+        bank_.balance[from] = intent_.new_from;
+        bank_.balance[to] = intent_.new_to;
+        persist_data();
+
+        intent_.valid = false;
+        persist_clear();
+        return true;
+    }
+
+    void recover() {
+        std::lock_guard<std::mutex> guard(global_);
+        if (!intent_.valid) return;
+        bank_.balance[intent_.from] = intent_.new_from;
+        bank_.balance[intent_.to] = intent_.new_to;
+        persist_data();
+        intent_.valid = false;
+        persist_clear();
+    }
+
+    int64_t total() const {
+        return bank_.balance[0] + bank_.balance[1];
+    }
+};
+\end{lstlisting}
+
+\begin{itemize}
+    \item The global lock is a correctness simplifier: it serializes volatile execution and durable publication.
+    \item The durable commit point is the forced intent, not the later balance write.
+    \item Recovery performs no validation and no user policy. It only completes a decision already made durable.
+    \item The design is a baseline. More concurrent persistent algorithms must preserve the same ordering while allowing multiple transactions to prepare or publish.
+\end{itemize}
+
+\section{Worked Example: Percolator-Style Primary Commit}
+
+TiKV-style distributed TM follows the Percolator shape: prewrite locks the
+write set, the primary key records the commit decision, and secondary keys are
+resolved afterward. This splits agreement into a recoverable primary decision
+and idempotent cleanup of secondaries. The small TLA+ model below abstracts
+keys as the two bank accounts.
+
+\begin{lstlisting}[caption={A TLA+ model of a primary-key distributed commit decision.}]
+----------------------------- MODULE MiniPercolatorBank -----------------------------
+EXTENDS Naturals, TLC
+
+Keys == 1..2
+Primary == 1
+Secondary == 2
+Amount == 4
+Floor == 0
+InitBal == [k \in Keys |-> 10]
+
+VARIABLES bal, lock, primaryDecision, phase
+
+vars == <<bal, lock, primaryDecision, phase>>
+
+Init ==
+    /\ bal = InitBal
+    /\ lock = [k \in Keys |-> FALSE]
+    /\ primaryDecision = "none"
+    /\ phase = "begin"
+
+Prewrite(k) ==
+    /\ phase = "begin"
+    /\ lock[k] = FALSE
+    /\ IF k = Primary
+       THEN bal[Primary] - Amount >= Floor
+       ELSE TRUE
+    /\ lock' = [lock EXCEPT ![k] = TRUE]
+    /\ UNCHANGED <<bal, primaryDecision, phase>>
+
+AllLocked ==
+    \A k \in Keys: lock[k] = TRUE
+
+CommitPrimary ==
+    /\ phase = "begin"
+    /\ AllLocked
+    /\ primaryDecision = "none"
+    /\ primaryDecision' = "commit"
+    /\ phase' = "primaryCommitted"
+    /\ UNCHANGED <<bal, lock>>
+
+CommitSecondaries ==
+    /\ phase = "primaryCommitted"
+    /\ primaryDecision = "commit"
+    /\ bal' = [bal EXCEPT ![Primary] = @ - Amount,
+                          ![Secondary] = @ + Amount]
+    /\ lock' = [k \in Keys |-> FALSE]
+    /\ phase' = "done"
+    /\ UNCHANGED primaryDecision
+
+Abort ==
+    /\ phase = "begin"
+    /\ primaryDecision = "none"
+    /\ primaryDecision' = "abort"
+    /\ lock' = [k \in Keys |-> FALSE]
+    /\ phase' = "done"
+    /\ UNCHANGED bal
+
+Next ==
+    \/ \E k \in Keys: Prewrite(k)
+    \/ CommitPrimary
+    \/ CommitSecondaries
+    \/ Abort
+
+Spec == Init /\ [][Next]_vars
+
+MoneyConserved ==
+    bal[1] + bal[2] = InitBal[1] + InitBal[2]
+
+FloorsHold ==
+    \A k \in Keys: bal[k] >= Floor
+
+TypeOK ==
+    /\ phase \in {"begin", "primaryCommitted", "done"}
+    /\ primaryDecision \in {"none", "commit", "abort"}
+    /\ \A k \in Keys: lock[k] \in BOOLEAN
+    /\ \A k \in Keys: bal[k] \in Nat
+
+=============================================================================
+\end{lstlisting}
+
+\begin{itemize}
+    \item The primary record is the distributed commit point.
+    \item Secondary cleanup is allowed to lag because the primary decision can be re-read.
+    \item The account floor is checked before prewrite succeeds on the debit key.
+    \item The model captures the same obligation as the durable log: once commit is discoverable, later recovery must finish the data update.
+\end{itemize}
+
 \section{Summary}
 \begin{itemize}
     \item Persistent TM adds a crash invariant to the ordinary money-conservation invariant; the durable worked example shows the minimum journal needed.
@@ -8037,19 +8970,59 @@ FloorsHold ==
     \item Both extensions keep the same TM API --- only the commit path and its ordering obligations change.
 \end{itemize}
 
+Persistent and distributed TM are therefore best understood as commit-path
+extensions. The speculative body of the transaction still reads, writes,
+validates, and aborts. The difference is that commit becomes an externally
+recoverable fact. PersistentSGL makes that fact a durable journal record.
+Percolator-style distributed TM makes it a primary-key decision. In both cases,
+the implementation must answer the same recovery question: after a crash or
+partition, which transactions are committed, which are aborted, and which
+updates remain to be completed?
+
 \section{Exercises}
 \begin{enumerate}
     \item \emph{[implementation]} Extend the durable bank example in \S\ref{sec:durable-bank-example} to four accounts and two concurrent worker threads. Keep one global durable commit lock, then record the throughput change relative to an in-memory SGL version. Do not claim durability until the journal and data writes have both been forced to storage.
     \item \emph{[verification]} Modify the TLA+ model in \S\ref{sec:distributed-commit-example} so that the coordinator may crash after deciding commit but before applying the update. Add a recovery action and check that \texttt{MoneyConserved} and \texttt{FloorsHold} still hold.
+    \item \emph{[implementation]} Replace the single intent record in \S\ref{sec:durable-bank-example} with a bounded redo-log array. Add sequence numbers, reject torn records during recovery, and keep redo idempotent.
+    \item \emph{[verification]} Extend the Percolator-style model so that secondary cleanup may be skipped nondeterministically. Add a recovery action that consults the primary decision and prove that committed transfers eventually reach \texttt{done} under weak fairness.
+    \item \emph{[theory]} Compare PersistentSGL, Romulus, and TiKV-style two-phase commit as instances of the same abstract rule: a commit decision must become recoverable before its effects are required to be visible.
 \end{enumerate}
 
+\index{commit intent}
+\index{idempotent redo}
+\index{persistent commit point}
+\index{durable publication}
+\index{storage ordering}
+\index{fsync}
+\index{journal clearing}
+\index{crash invariant}
+\index{primary key commit}
+\index{secondary cleanup}
+\index{participant vote}
+\index{coordinator recovery}
+\index{prepare phase}
+\index{commit decision}
+\index{PersistentSGL recovery}
+\index{TiKV}
+\index{Percolator two-phase commit}
+\index{Romulus}
+\index{NV-HTM}
+\index{DistributedSGL}
 % -------------------------------------------------------------------
 %  PART VIII: HORIZONS
 % -------------------------------------------------------------------
 \part{Horizons}
 
 \chapter{Open Questions and Emerging Directions}
+
+\index{open questions, emerging directions, hybrid TM, persistent TM, distributed TM, GPU TM, verified STM, energy-aware TM}
+
+Transactional memory has never been one technique. It is a family of contracts: optimistic execution, conflict detection, validation, commit, and recovery. The earlier chapters studied those contracts in isolation: single-lock serialization, timestamp validation, ownership records, hardware transactions, multi-version histories, crash recovery, distributed prepare/commit, and GPU commit protocols. This chapter asks what remains open once those mechanisms are implemented, tested, and made comparable.
+
+The companion project makes the question unusually concrete. The same two-account bank transfer, with an account floor and a money-conservation invariant, runs across CPU STMs, hardware/software hybrids, persistent variants, distributed variants, and GPU designs. The research frontier is therefore not an abstract list of future work. It is the set of places where the same transactional API must survive a new failure mode: a hardware capacity abort, a torn durable write, a coordinator crash, a stale GPU read-set, or a validation cost that dominates useful work.
+
 \section{Current Research Directions}
+
 \begin{itemize}
     \item Hardware/software hybrid TM.
     \item Non-blocking algorithms vs. TM.
@@ -8075,6 +9048,10 @@ the open questions unusually concrete: the same bank invariant should survive
 hardware aborts, validation filters, crash recovery, remote prepare/commit, and
 GPU commit logs.
 
+A useful way to read the field is to ask what each direction makes scarce. In HTM, the scarce resource is speculative capacity and conflict-free cache state. In STM, it is validation bandwidth and metadata locality. In persistent TM, it is durable ordering: the programmer wants atomicity, but the machine provides cache lines, flushes, fences, and crashes. In distributed TM, it is agreement under partial failure. In GPU TM, it is scalable validation without cache-coherent transactional hardware.
+
+The running bank example exposes the common shape. A transfer reads two balances, checks a floor, writes two balances, and must preserve total money. A backend may implement this with a global lock, timestamps, ownership records, redo logs, multi-version reads, remote locks, or GPU commit records. The invariant is deliberately boring. That is the point: if a backend cannot preserve the simple invariant, it is not ready for a more interesting application.
+
 \begin{table}[htbp]
 \centering
 \begin{tabular}{p{0.18\textwidth}p{0.25\textwidth}p{0.30\textwidth}p{0.14\textwidth}}
@@ -8093,7 +9070,10 @@ Multi-version TM & JVSTM, MVLog, GPU-JVSTM & Version retention, read-mostly scal
 \label{tab:emerging-directions}
 \end{table}
 
+The table should not be read as a scoreboard. The measurements are real companion-repo signals, but they are not universal constants. They say that, on the measured M1 Pro fuzz/bank workload, TL2 and TSC-TM are close, NOrec-BF improves substantially over NOrec on read-mostly bank traffic, and MVLog pays a visible price for maintaining versions. They do not settle the research question. They make it sharper: why does a design win here, and what assumption would make it lose?
+
 \section{Challenges}
+
 \begin{itemize}
     \item Fairness, progress guarantees (starvation freedom, obstruction freedom).
     \item Programming model adoption.
@@ -8101,6 +9081,173 @@ Multi-version TM & JVSTM, MVLog, GPU-JVSTM & Version retention, read-mostly scal
     \item Performance predictability: HTM's capacity aborts and STM's validation costs make best/worst-case analysis hard.
     \item The missing standard: no widely adopted language integration after the C++ TS; education must bridge this gap.
     \item Tooling: debuggers, profilers, and race detectors are lock-oriented; TM tools are nascent by comparison.
+\end{itemize}
+
+The first challenge is semantic rather than mechanical: what does the system promise when contention is high? A single global lock is easy to explain and may be starvation-free if the lock implementation is fair. An obstruction-free STM may guarantee progress only when a transaction eventually runs alone. A hardware fast path may repeatedly abort for reasons the program cannot observe precisely. A GPU commit protocol may let thousands of transactions reach validation together, then serialize a small fraction at the commit point. Each is a transactional memory system, but their progress stories differ.
+
+The second challenge is adoption. Locks have defects, but they are visible, portable, and supported by tools. Transactional memory asks the programmer to trust an invisible commit protocol. That is easier when the transaction boundary is explicit, the memory model is clear, irrevocable operations are rejected or isolated, and the debugger can explain why a transaction aborted.
+
+Legacy code remains awkward. A transaction that calls into code which performs I/O, blocks on a mutex, allocates through a non-transaction-aware allocator, or publishes a raw pointer may violate the isolation contract. Practical systems either forbid such operations, sandbox them, defer them until commit, or route the whole transaction through an irrevocable path. Each choice leaks into the programming model.
+
+Performance predictability is the recurring engineering problem. Best-case TM is attractive because read-mostly code can avoid coarse locking and write-heavy code can express atomicity without hand-written deadlock avoidance. Worst-case TM can be surprising: validation may become a bandwidth bottleneck; read-set growth may become a cache problem; HTM may collapse on capacity; distributed commit may spend most of its time waiting for remote consensus or storage.
+
+Finally, verification is becoming part of the expected artifact. A fast STM with no model is harder to trust than a slightly slower one whose opacity, serializability, or crash invariant has been checked against a small formal model. TLA+ does not prove the C++ implementation correct by itself, but it forces the protocol to say what its states are, what transitions are legal, and which bad executions are excluded.
+
+\section{Worked Example: Persistent Bank Commit}
+
+A persistent TM must make the transaction atomic across crashes, not only across threads. The volatile metadata may disappear after power loss. The durable state must still look as if each committed transaction happened completely or not at all.
+
+The following small C++ example uses a redo-log discipline for the bank transfer. It is intentionally conservative: log the intended writes, persist the log, mark the log committed, persist the mark, then install the writes and clear the log. The code sketches the ordering contract; a production backend would hide the flush primitive behind a platform-specific persistence library.
+
+\begin{lstlisting}[language=C++, caption={A minimal redo-log persistent transfer for the bank invariant.}]
+#include <atomic>
+#include <cstdint>
+#include <cstdlib>
+#include <stdexcept>
+
+struct Account {
+    std::atomic<int64_t> balance;
+};
+
+struct LogEntry {
+    Account* addr;
+    int64_t  value;
+};
+
+struct RedoLog {
+    std::atomic<uint64_t> committed;
+    std::atomic<uint64_t> count;
+    LogEntry entries[2];
+};
+
+/* Placeholder for clwb/clflushopt plus an ordering fence on real PMem. */
+static void persist_range(const void* p, std::size_t n) {
+    (void)p;
+    (void)n;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+
+static void persist_log(RedoLog& log) {
+    persist_range(&log.entries[0], sizeof(log.entries));
+    persist_range(&log.count, sizeof(log.count));
+}
+
+bool persistent_transfer(Account& from,
+                         Account& to,
+                         int64_t amount,
+                         int64_t floor,
+                         RedoLog& log) {
+    const int64_t old_from = from.balance.load(std::memory_order_acquire);
+    const int64_t old_to   = to.balance.load(std::memory_order_acquire);
+
+    if (amount < 0) {
+        throw std::invalid_argument("negative transfer");
+    }
+    if (old_from - amount < floor) {
+        return false;
+    }
+
+    log.entries[0] = LogEntry{&from, old_from - amount};
+    log.entries[1] = LogEntry{&to,   old_to + amount};
+    log.count.store(2, std::memory_order_release);
+    persist_log(log);
+
+    log.committed.store(1, std::memory_order_release);
+    persist_range(&log.committed, sizeof(log.committed));
+
+    from.balance.store(log.entries[0].value, std::memory_order_release);
+    to.balance.store(log.entries[1].value, std::memory_order_release);
+    persist_range(&from, sizeof(from));
+    persist_range(&to, sizeof(to));
+
+    log.committed.store(0, std::memory_order_release);
+    log.count.store(0, std::memory_order_release);
+    persist_range(&log, sizeof(log));
+    return true;
+}
+
+void recover(RedoLog& log) {
+    if (log.committed.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+
+    const uint64_t n = log.count.load(std::memory_order_acquire);
+    for (uint64_t i = 0; i < n; ++i) {
+        log.entries[i].addr->balance.store(log.entries[i].value,
+                                           std::memory_order_release);
+        persist_range(log.entries[i].addr, sizeof(Account));
+    }
+
+    log.committed.store(0, std::memory_order_release);
+    log.count.store(0, std::memory_order_release);
+    persist_range(&log, sizeof(log));
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item The commit point is the durable transition of \texttt{committed} from zero to one.
+    \item Recovery is idempotent: replaying the same redo entries twice writes the same values.
+    \item The bank invariant depends on logging both accounts before the commit mark becomes durable.
+    \item Volatile locks, timestamps, and ownership records need not survive; the durable log is the recovery contract.
+\end{itemize}
+
+\section{Worked Example: A Tiny TLA+ Bank Invariant}
+
+The companion models check small protocols rather than benchmark-sized programs. That is the right scale for finding missing transitions. The following TLA+ module models a two-account transfer with a floor. It omits implementation metadata and focuses on the safety property every backend must preserve: total money is constant.
+
+\begin{lstlisting}[language={}, caption={A small TLA+ model of the bank-transfer invariant.}]
+----------------------------- MODULE BankInvariant -----------------------------
+EXTENDS Integers, TLC
+
+CONSTANTS InitA, InitB, Floor, Amount
+
+VARIABLES a, b
+
+Init ==
+    /\ a = InitA
+    /\ b = InitB
+    /\ InitA >= Floor
+    /\ InitB >= Floor
+    /\ Amount >= 0
+
+TransferAB ==
+    /\ a - Amount >= Floor
+    /\ a' = a - Amount
+    /\ b' = b + Amount
+
+TransferBA ==
+    /\ b - Amount >= Floor
+    /\ b' = b - Amount
+    /\ a' = a + Amount
+
+Stutter ==
+    /\ a' = a
+    /\ b' = b
+
+Next ==
+    \/ TransferAB
+    \/ TransferBA
+    \/ Stutter
+
+MoneyConserved ==
+    a + b = InitA + InitB
+
+FloorRespected ==
+    /\ a >= Floor
+    /\ b >= Floor
+
+Spec ==
+    Init /\ [][Next]_<<a, b>>
+
+THEOREM Spec => []MoneyConserved
+THEOREM Spec => []FloorRespected
+=============================================================================
+\end{lstlisting}
+
+\begin{itemize}
+    \item The invariant is independent of the backend: SGL, TL2, NOrec, MVLog, TiKV, and GPU commit logs must all refine this behavior for committed transfers.
+    \item The model separates the user-level atomic effect from metadata steps such as locking, validation, logging, and commit publication.
+    \item A useful research model starts small. Add timestamps, ownership records, prepare states, or crash states only after the base invariant is explicit.
 \end{itemize}
 
 \section{Worked Example: A Hybrid, In Miniature}
@@ -8158,6 +9305,11 @@ void tx_region(void) {
 \caption{A phased hybrid state machine. The research problem is not the branch itself, but the ownership contract between the RTM path and the STM fallback.}
 \label{fig:phased-hybrid-state}
 \end{figure}
+
+The figure hides one subtlety. If the RTM path reads and writes ordinary locations while the STM path protects the same locations with ownership records, the two paths must still detect each other. Otherwise a hardware transaction may commit through an STM lock, or an STM transaction may validate metadata that the hardware path never touched. Practical hybrids therefore need a shared conflict signal: a global fallback lock, instrumented reads on the hardware path, subscription to metadata, or a phase bit that prevents concurrent execution of incompatible modes.
+
+The miniature also exposes why ``fallback'' is not automatically a progress guarantee. If every thread repeatedly tries RTM, aborts, and re-enters RTM before any fallback transaction can finish, the system may waste work indefinitely. Bounded retries help, but only if the fallback has admission priority and if hardware transactions observe that priority.
+
 \section{Summary}
 \begin{itemize}
     \item TM is a rich research field with many unsolved problems.
@@ -8166,14 +9318,41 @@ void tx_region(void) {
     \item Read this chapter as a \emph{synthesis organised around where the book's own codebase stops working}, not as a disconnected wish-list. The limits that surface in each family are the same limits the earlier parts hit: HTM's capacity aborts (Ch.~16), STM's validation and reclamation costs (Ch.~9, 13), the missing compiler/language contract (Ch.~11), and the absence of coherence on GPUs (Ch.~17). Each open direction in this chapter is one of those known limits restated as a research target.
 \end{itemize}
 
+The central lesson is that the open problems are not separate from the implementations. Hybrid TM asks how two conflict-detection regimes share ownership. Persistent TM asks which commit record survives a crash. Distributed TM asks how a transaction boundary crosses machines without hiding partial failure. GPU TM asks how to validate and commit at massive concurrency without hardware transactions. Verification asks whether the protocol has said enough to be checked.
+
+The bank invariant is the unifying test. It is simple enough to model, small enough to fuzz, and strict enough to expose broken atomicity. A future TM system may be faster, more durable, more distributed, or more parallel, but it still owes the same answer: every committed transfer must preserve the floor and conserve money.
+
 \section{Exercises}
 \begin{enumerate}
     \item Evaluate whether a hybrid TM that starts in hardware and falls back to software is inherently more susceptible to livelock than a pure-STM system.
     \item Propose a minimal extension to a persistent-memory TM that ensures durability of committed transactions across power failures.
     \item Argue for or against: “Transactional memory will eventually replace locks as the default concurrency primitive in systems programming.”
     \item \emph{[theory]} Classify the phased hybrid in Figure~\ref{fig:phased-hybrid-state} under obstruction freedom, starvation freedom, and lock freedom. State which assumptions about retry bounds, fallback admission, and conflict ownership are necessary for each classification.
+    \item \emph{[implementation]} Modify the persistent redo-log example so that recovery can distinguish an empty log from a partially initialized log. State which stores must be persisted before the commit marker.
+    \item \emph{[verification]} Extend the TLA+ bank model with a prepared state and a committed state. Check that money conservation holds even when a transaction stutters forever in the prepared state.
+    \item \emph{[theory]} Compare NOrec-style global validation with TL2-style ownership records for a read-mostly workload. Explain why a Bloom-filter optimization can help one design without changing the abstract transaction semantics.
 \end{enumerate}
 
+\index{bank invariant}
+\index{money conservation}
+\index{account floor}
+\index{redo log}
+\index{durable commit}
+\index{crash recovery}
+\index{idempotent recovery}
+\index{volatile metadata}
+\index{TLA+ invariant}
+\index{opacity}
+\index{serializability}
+\index{RTM retry budget}
+\index{fallback admission}
+\index{conflict ownership}
+\index{commit marker}
+\index{validation bandwidth}
+\index{capacity abort}
+\index{GPU commit log}
+\index{Percolator two-phase commit}
+\index{Bloom-filter validation}
 % -------------------------------------------------------------------
 %  APPENDICES
 % -------------------------------------------------------------------
