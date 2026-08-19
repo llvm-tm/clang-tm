@@ -163,7 +163,7 @@ by convention alone \cite{boehm05}. The moment two separately correct lock-based
 modules interact, their lock orders can compose into a deadlock that no local
 inspection of either module can prevent. The rest of this book develops an
 alternative: transactional memory \cite{herlihy93}, in which the programmer
-names the \emph{set} of accesses that must appear atomic rather than an
+declares the \emph{set} of accesses that must appear atomic rather than an
 \emph{order} among locks.
 
 \section{The Cost of Mixing Synchronization with Logic}
@@ -535,6 +535,20 @@ source-level instrumented read/write pair the two actions represent.
 \index{composability}
 \chapter{Transactions: From Databases to Shared Memory}
 \index{transaction}\index{serializability}\index{ACID}\index{data hazard}\index{memory model}\index{happens-before}\index{opacity}\index{privatization}\index{sandboxing}\index{litmus test}\index{nested transaction!flattening}
+
+A transaction is one of computing's oldest concurrency ideas, and the word
+carries fifty years of database baggage with it. This chapter imports that
+idea into shared memory, where the failure model is different: there is no
+log, no storage engine, and no disk, only loads, stores, and a coherence
+protocol. The database vocabulary --- serializability, isolation, ACID ---
+must therefore be re-derived for the machine that will actually run it.
+
+The running two-account bank transfer remains the example. In a database, the
+transfer is two row updates inside one SQL transaction; in shared memory, it
+is a small set of loads and stores that must appear atomic. Both formulations
+ask the same question --- which concurrent executions are acceptable? --- but
+they answer it with different mechanisms. That difference is the subject of
+this chapter and of every runtime chapter that follows it.
 
 \section{ACID and Serializability}
 
@@ -1011,6 +1025,20 @@ that creates the gap.
 \chapter{Hardware Concepts for Transactional Memory}
 \index{memory hierarchy}\index{cache coherence}\index{MESI}\index{out-of-order execution}\index{speculation}\index{store buffer}\index{memory ordering}\index{TSO}\index{fence}\index{false conflict}\index{HTM}\index{capacity abort}\index{fallback path}\index{commit-publish}
 
+Transactional memory runs on hardware that was not designed for it. The
+machine presents a shared address space, but underneath there are private
+caches, a coherence protocol, store buffers, and speculative execution, and
+every one of those features shapes what a TM design can and cannot do. A
+designer who treats memory as a single flat array will be surprised by false
+conflicts, capacity aborts, and store-buffer reorderings the first time a real
+system runs.
+
+This chapter builds the hardware vocabulary used everywhere else in the book:
+the memory hierarchy, cache coherence, out-of-order execution and speculation,
+and the memory-ordering models that operating systems and compilers expose.
+The point is not to design a processor but to know, for each later algorithm,
+which hardware fact makes it correct and which one makes it cheap.
+
 \section{Multicore Architectures and Memory Hierarchies}
 
 The first fact a transactional memory designer must internalize is that modern
@@ -1484,6 +1512,19 @@ with the fence, it is not.
 % -------------------------------------------------------------------
 \chapter{Programming Languages and Memory Semantics for TM}
 \index{memory model}\index{atomic}\index{volatile}\index{compiler barrier}\index{ABI}\index{Rust}\index{borrow checker}\index{Send}\index{Sync}\index{UnsafeCell}\index{transaction-safe}\index{\_\_transaction\_atomic}\index{lost atomicity}
+
+Transactional memory is only as strong as the language that surrounds it.
+The programmer writes an atomic block over ordinary variables; the compiler
+decides which of those variables are transactional; the runtime decides how
+their accesses are tracked. Between the source text and the runtime sits a
+memory model --- a contract about which reorderings the compiler and hardware
+may perform --- and a set of ABI hazards that break silently when violated.
+
+This chapter examines the language side of that boundary: \texttt{volatile},
+inline assembly, atomics, the C/C++ memory model, and how Rust's ownership
+rules both help and complicate TM. The running bank transfer appears
+throughout as the case any of these mechanisms can break: a lost-update that a
+different memory model would have prevented.
 
 \section{C/C++ Memory Model and ABI Hazards: \texttt{volatile}, Inline Assembly, and Atomics}
 
