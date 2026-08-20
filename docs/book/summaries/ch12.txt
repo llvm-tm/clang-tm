@@ -1,0 +1,24 @@
+CHAPTER 12 — Testing, Debugging, and Scheduling
+Part: VI (Engineering: Testing, Pitfalls, and Performance)
+Lines: ~489 | Sections: 9 | Figures: 1 | Tables: 1 | Listings: 5 | TikZ: 1
+
+PURPOSE: Engineering practice for TM: unit tests, invariant tests, abort
+fuzzing, sequential oracles, record-and-replay, deterministic scheduling.
+
+SECTIONS
+- Unit Testing and Fuzzing
+    Testing layers: unit, invariant, fuzz, replay, model.
+- Worked Example: An Invariant Test for Lost Updates
+- Worked Example: Abort Fuzzing for the Bank Invariant
+- Worked Example: A Sequential Oracle for a Counter Suite
+    Compare parallel result against a single-threaded reference.
+- Record-and-Replay and Deterministic Scheduling
+    Reproduce failing interleavings deterministically.
+- Worked Example: Replay of a Lost-Update
+- Worked Example: A TLA+ Money-Conservation Check
+- Summary
+- Exercises
+
+FIGURES: fig:tm-debugging-loop (exploration -> replay -> debug loop)
+TABLES: tab:tm-testing-layers
+LISTINGS: 5 (invariant test, fuzz, oracle, replay, TLA+)

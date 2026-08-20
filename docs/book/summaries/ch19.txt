@@ -1,0 +1,22 @@
+CHAPTER 19 — Open Questions and Emerging Directions
+Part: VIII (Horizons)
+Lines: ~345 | Sections: 7 | Figures: 1 | Tables: 1 | Listings: 3 | TikZ: 1
+
+PURPOSE: Final chapter: open problems (hybrid TM, persistent TM, distributed
+TM, GPU TM, verification) and where the field is going. The bank invariant is
+the unifying test.
+
+SECTIONS
+- Current Research Directions
+- Challenges
+- Worked Example: Persistent Bank Commit
+- Worked Example: A Tiny TLA+ Bank Invariant
+- Worked Example: A Hybrid, In Miniature
+    Phased hybrid (RTM + STM fallback) ownership contract.
+- Summary
+- Exercises
+    (4 exercises incl. hybrid classification, durable-TM extension)
+
+FIGURES: fig:phased-hybrid-state (phased hybrid state machine)
+TABLES: tab:emerging-directions (backend x pressure point matrix)
+LISTINGS: 3 (persistent bank, TLA+ invariant, hybrid)

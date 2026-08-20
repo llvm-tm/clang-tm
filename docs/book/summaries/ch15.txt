@@ -1,0 +1,24 @@
+CHAPTER 15 — From Source to AST: Lexing and Parsing
+Part: VII (Advanced Topics)
+Lines: ~453 | Sections: 6 | Figures: 4 | Tables: 1 | Listings: 5 | TikZ: 4
+
+PURPOSE: Front-end mechanics for an atomic language construct: DFA/lexical
+analysis, recursive descent parsing, parser generators (Yacc and modern),
+and lowering an atomic block to TM runtime calls.
+
+SECTIONS
+- Finite Automata and Lexical Analysis
+    DFA for the toy lexer (keywords, identifiers, tokens).
+- Recursive Descent Parsing
+- Parser Generators: From Yacc to Modern Tools
+    LR(0) automaton, shift/reduce, generated parsers.
+- Worked Example: Lexing and Parsing an Atomic Block
+- Worked Example: A Bank Transfer Front End
+    Source-level view of the front-end pipeline (repo instruments at LLVM IR).
+- Worked Example: Model Checking the Parsed Transaction
+- (no Summary/Exercises listed in chapter)
+
+FIGURES: fig:lexer-dfa, fig:front-end-pipeline, fig:lr0-automaton,
+         fig:tm-front-end-lowering
+TABLES: tab:front-end-choices
+LISTINGS: 5 (lexer DFA, parser, atomic-block parse, bank front end, TLA+)

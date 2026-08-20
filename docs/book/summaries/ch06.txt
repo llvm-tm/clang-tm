@@ -1,0 +1,35 @@
+CHAPTER 06 — Formal Design with PlusCal and TLA+
+Part: III (Formal Foundations: Mathematics and Verification)
+Lines: ~555 | Sections: 11 | Figures: 2 | Tables: 2 | Listings: 7 | TikZ: 1
+
+PURPOSE: TLA+ and PlusCal as the formal design language for TM algorithms:
+specification, model checking with TLC, bug injection, counterexample
+analysis. Names the companion repo's docs/proofs models.
+
+SECTIONS
+- TLA+ and PlusCal in a Nutshell
+    Syntax, semantics, invariant/property distinction.
+- Specifying and Checking Simple TM Algorithms
+    How to model read/write sets, clocks, commit.
+- Worked Example: A Single-Global-Lock TM in PlusCal
+    SGL model (docs/proofs/SingleGlobalLock).
+- Bug-Injection and Counterexample Analysis
+    Injecting bugs; reading TLC counterexamples.
+- Worked Example: A TLC Configuration for BankSGL
+    cfg file anatomy.
+- Worked Example: A Stale Snapshot Mutation
+    Stale-snapshot bug model.
+- Worked Example: Bank Transfer Under a Single Global Lock
+    Bank invariant checked under SGL.
+- Worked Example: NOrec-Style Validation for the Bank
+    NOrec validation model for bank.
+- The Complete Verification Workflow
+    Source of truth: docs/proofs; model -> TLC -> counterexample loop.
+- Summary
+- Exercises
+
+FIGURES: fig:pluscal-latex (PlusCal source vs TLATeX pseudo-code),
+         fig:norec-validation-sm (NOrec validation state machine)
+TABLES: tab:tla-taxonomy (what a model must remember),
+        tab:traceability (runtime-to-model traceability index)
+LISTINGS: 7 (PlusCal models, TLC configs, invariant definitions)

@@ -1,0 +1,32 @@
+CHAPTER 03 — Hardware Concepts for Transactional Memory
+Part: II (The Machine Beneath)
+Lines: ~488 | Sections: 10 | Figures: 3 | Tables: 1 | Listings: 3 | TikZ: 3
+
+PURPOSE: Hardware vocabulary for TM: memory hierarchy, cache coherence,
+out-of-order execution/speculation, store buffers, memory ordering (TSO),
+false conflicts, HTM execution states.
+
+SECTIONS
+- Multicore Architectures and Memory Hierarchies
+    Caches, NUMA, coherence basics.
+- Out-of-Order Execution and Speculation
+    Pipeline, speculative stores, rollback.
+- Store Buffers and Memory Ordering
+    TSO model, fences.
+- Worked Example: The TSO Store-Buffer Surprise
+    Classic store-buffer reordering demo.
+- Worked Example: Cache-Line False Conflicts
+    False sharing between transactions on one cache line.
+- HTM Execution States
+    Speculative data in cache; commit/abort; capacity.
+- Worked Example: Atomic Commit-Publish in TLA+
+    TLA+ model of commit/abort as atomic publish.
+- Hardware Mechanisms and TM Consequences
+    Mapping each mechanism to a TM design consequence.
+- Summary
+- Exercises
+
+FIGURES: speculative-store pipeline, TSO store-buffer surprise, HTM state machine
+TABLES: tab:hardware-tm-taxonomy (mechanism -> TM consequence)
+LISTINGS: 3 (store-buffer demo, false-conflict, TLA+ commit-publish)
+CITES: (cache-coherence history refs reused from Ch1/Ch2)

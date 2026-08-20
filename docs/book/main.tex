@@ -166,6 +166,46 @@ alternative: transactional memory \cite{herlihy93}, in which the programmer
 declares the \emph{set} of accesses that must appear atomic rather than an
 \emph{order} among locks.
 
+\section{Why Synchronization Became a First-Class Problem}
+\index{history of concurrency}
+\index{distributed shared memory}
+\index{cache coherence!history}
+\index{multicore!history}
+
+Shared memory is so familiar today that it is easy to forget that it had to be
+invented, and that the invention took several decades. The path runs through
+three eras, and each one left its stamp on how we synchronize. In the
+\textbf{distributed era}, processors lived in separate machines and shared
+nothing but a network; coordination meant explicit message passing, and the
+central problem was to make a set of machines with independent clocks and no
+common memory agree on anything at all \cite{lamport78}. Distributed systems
+produced the first general theories of ordering and agreement, but they gave
+programmers no shared address space to think in.
+
+The \textbf{distributed shared-memory era} was an attempt to fix exactly that.
+Researchers built systems that \emph{simulated} a single address space across
+a network, using software protocols --- ownership transfer, invalidation,
+release consistency --- to keep the simulation coherent
+\cite{li89dsm,amza96treadmarks}. These systems made the shared-memory
+programming model available on hardware that did not actually share memory, at
+the cost of high communication overhead. They were a programming convenience,
+not a hardware change.
+
+The \textbf{multicore era} changed the hardware instead. When it became
+cheaper to put several processors on one chip than to make a single processor
+faster \cite{olukotun96case}, the industry built multicore chips in which
+cores \emph{physically} share memory through a hardware cache-coherence
+protocol \cite{goodman83,papamarcos84,archibald86}. Shared memory stopped
+being a simulation and became the machine itself. This is the moment that
+synchronization stopped being a niche concern of distributed-systems
+researchers and became a first-class problem for every programmer: thousands
+of cores, one address space, and only locks --- and, as we will see, their
+successors --- to keep the accesses coherent. The rest of this book is an
+extended answer to the question that this era posed. Chapter~2 recounts the
+full history in more detail; here it is enough to note that the hardware now
+gives us shared memory for free, and the remaining difficulty is purely in how
+we program it.
+
 \section{The Cost of Mixing Synchronization with Logic}
 \index{locking crisis}
 \index{deadlock}
@@ -549,6 +589,108 @@ is a small set of loads and stores that must appear atomic. Both formulations
 ask the same question --- which concurrent executions are acceptable? --- but
 they answer it with different mechanisms. That difference is the subject of
 this chapter and of every runtime chapter that follows it.
+
+\section{How We Got Shared Memory}
+\index{history of concurrency}
+\index{distributed systems}
+\index{message passing}
+\index{distributed shared memory}
+\index{release consistency}
+\index{cache coherence!history}
+\index{snooping protocol}
+\index{directory-based coherence}
+\index{multicore!history}
+
+The programming model this book defends --- a shared address space in which
+threads read and write ordinary variables --- is not the original model of
+parallel computing. It had to be argued for, simulated, and finally built into
+silicon. Understanding how we got here explains both why transactional memory
+exists and why it is hard to build: every design in the rest of this book is,
+in some sense, a descendant of an idea that was first worked out for machines
+that did not share memory at all.
+
+\subsection{The Distributed Era: No Shared Memory}
+\index{logical clock}
+\index{mutual exclusion!distributed}
+
+Computing with many processors began not with shared memory but with
+\emph{distributed systems}: independent machines connected by a network, each
+with its own private memory, coordinating only by sending messages. The
+programming model was message passing, and the central question was how to
+make machines that share nothing agree on an ordering of events. Lamport's
+logical clocks gave the field its first handle on this problem: a mechanism
+to impose a causal order on events without a common clock or shared memory
+\cite{lamport78}. Mutual exclusion, the very problem this book cares about,
+was originally a distributed problem --- Lamport's bakery algorithm solved it
+for processes that communicate only by messages \cite{lamport74bakery}. These
+early results established a lasting lesson: consistency and ordering can be
+achieved without a shared address space, but only by paying a cost in
+protocol complexity and message traffic.
+
+\subsection{The Distributed Shared-Memory Era: Simulating Shared Memory}
+\index{home node}
+\index{invalidation}
+
+Programmers, however, found message passing painful, and a large research
+effort tried to give them the familiar shared-memory model anyway. The result
+was \emph{distributed shared memory} (DSM): software that simulated a single
+virtual address space across a network of machines that shared no physical
+memory. The classic systems --- Ivy \cite{li89dsm} and TreadMarks
+\cite{amza96treadmarks} --- are direct ancestors of transactional memory's
+protocols. They assigned each page a \emph{home node} that owned the current
+value, transferred ownership on write, and used invalidation messages to tell
+readers their copies were stale. Later systems relaxed the coherence contract
+to \emph{release consistency}, letting the programmer declare which accesses
+needed ordering and which did not, in exchange for reduced message traffic.
+Almost every concept used later in this book --- ownership records, read and
+write sets, versioning, invalidation, and the idea that a synchronization
+primitive can be \emph{lazy} about ordering --- appears in some form in the
+DSM literature.
+
+The lesson of this era was double-edged. On one hand, it proved that shared
+memory is a \emph{programming model} that can be provided on top of hardware
+that does not share memory, which is exactly the insight transactional memory
+relies on. On the other hand, the overhead of software coherence --- one
+message per page per transfer --- was so high that DSM never became
+mainstream. Shared memory was clearly desirable; what was missing was hardware
+that made it cheap.
+
+\subsection{The Multicore Era: Hardware Shared Memory}
+\index{snooping protocol}
+\index{directory-based coherence}
+
+The hardware arrived with the multicore processor. Around the turn of the
+millennium it became clear that single-core performance could no longer be
+scaled by increasing clock speed, and the industry turned instead to putting
+several cores on one chip, sharing a physical memory \cite{olukotun96case}.
+This required hardware to keep the cores' private caches coherent, and the
+result was the cache-coherence protocol. The earliest schemes used
+\emph{snooping}: every cache watched the shared bus and invalidated or updated
+lines written by other cores \cite{goodman83,papamarcos84}. As core counts
+grew, snooping could not keep up, and \emph{directory-based} protocols
+centralized the coherence state in a directory that tracked who held each line
+\cite{archibald86}. The important point for this book is not the protocol
+details but the shift in the cost model. In the distributed era, shared memory
+was expensive because coherence was a network message away; in the multicore
+era, shared memory is cheap, and what remains expensive is \emph{coordination}
+--- fences, cache-line transfers between cores, and the serialization imposed
+by locks.
+
+\subsection{The Synchronization Era: Making Shared Memory Programmable}
+
+The multicore era made shared memory the default programming model, and with
+it came a surge of interest in synchronization algorithms. Early work had
+already given us the basics --- semaphores \cite{dijkstra65} and the bakery
+algorithm \cite{lamport74bakery} --- but the multicore machine posed a new
+question: how should thousands of concurrently running threads on one chip
+coordinate access to ordinary variables? Locks were the first answer, and this
+chapter and the next will show that they are not sufficient. The search for
+better primitives produced wait-free and lock-free data structures
+\cite{herlihy91} and, ultimately, transactional memory \cite{herlihy93}, the
+subject of this book. Every subsequent chapter is a descendant of the 
+distributed, distributed-shared-memory, and multicore eras: the protocols we
+study are distributed algorithms, simulated and then hardware-supported,
+adapted to the one shared address space the multicore provides.
 
 \section{ACID and Serializability}
 

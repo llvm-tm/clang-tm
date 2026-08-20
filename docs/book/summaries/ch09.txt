@@ -1,0 +1,34 @@
+CHAPTER 09 — Speculative Designs: NOrec and Beyond
+Part: IV (Implementing Transactional Memory)
+Lines: ~587 | Sections: 15 | Figures: 2 | Tables: 3 | Listings: 7 | TikZ: 2
+
+PURPOSE: The speculative STM family: NOrec (value-based validation), TL2
+(global-clock), TinySTM variants (WBCTL/WBETL/WT), multi-version STMs
+(JVSTM, MVLog), plus a backend taxonomy of the whole companion repo.
+
+SECTIONS
+- NOrec: Value-Based Validation
+    Read/commit protocol; commit lock; global clock; validation.
+- Worked Example: The NOrec Read Path
+- Worked Example: NOrec Bank Transfer
+- Worked Example: TL2 Read Barrier
+- TL2: The Textbook Global-Clock STM
+    TL2 timeline, versioned locks.
+- TinySTM Design Variants
+    WBCTL, WBETL, WT (write-back eager, write-back lazy, write-through).
+- Multiversion STMs: JVSTM and MVLog
+    Versioned boxes (JVSTM); commit-log MVCC (MVLog).
+- Worked Example: MVLog Snapshot Read
+- Comparing the Family
+    family-matrix: read validation rule, write ownership, linearization point.
+- Backend Taxonomy: The Repository in One Table
+    Every repo backend -> family -> where discussed (Table tab:backend-taxonomy).
+- Semantic Obligations Checklist
+- Worked Example: The TL2 Commit Path
+- Worked Example: Account-Floor PlusCal Model
+- Summary
+- Exercises
+
+FIGURES: fig:norec-bank-state-machine (NOrec commit), fig:tl2-timeline
+TABLES: tab:family-matrix, tab:backend-taxonomy, tab:snapshot-taxonomy
+LISTINGS: 7 (NOrec read path, bank, TL2 barrier, MVLog read, TL2 commit, PlusCal)

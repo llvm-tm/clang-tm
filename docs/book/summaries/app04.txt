@@ -1,0 +1,10 @@
+APPENDIX D — PlusCal / TLA+ Quick Reference
+Lines: ~10
+
+Reference chapter: quick-start for TLA+/PlusCal/TLC.
+- Key language constructs: variables, actions, labels, either/or, invariants, properties
+- Common TLC commands: tlc -config model.cfg model.tla, invariant checks, -deadlock
+- Writing a config file: constants, invariants, properties, Init/Next
+- Typical TM model skeleton: thread process, read/write set, global clock, opacity invariant
+- Pitfalls: fingerprinting record-valued state, unbounded state spaces, PlusCal 'missing label' errors
+- Reading a counterexample trace

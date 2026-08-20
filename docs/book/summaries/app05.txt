@@ -1,0 +1,10 @@
+APPENDIX E — TikZ Drawing Guide
+Lines: ~10
+
+Reference chapter: reusable TikZ figure templates.
+- Pipelines, caches, state machines, Markov chains
+- Common TM figures: transaction-lifecycle state machine, cache-coherence
+  conflict diagram, clock/read-set validation timeline, abort/retry waveform
+- Timeline pattern for TL2 (Part IV)
+- Warp-divergence and ballot diagrams (Part VII)
+- Style guide: small accent palette

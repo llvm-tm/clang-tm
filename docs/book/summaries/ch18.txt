@@ -1,0 +1,22 @@
+CHAPTER 18 — Persistent and Distributed Transactional Memory
+Part: VII (Advanced Topics)
+Lines: ~589 | Sections: 6 | Figures: 1 | Tables: 1 | Listings: 4 | TikZ: 1
+
+PURPOSE: TM that must survive or span machines: durable/persistent commit
+(redo logs, idempotent recovery), distributed commit (Percolator-style 2PC,
+TiKV backend), commit ordering obligations.
+
+SECTIONS
+- Worked Example: Durable Bank Commit
+    Persistent bank with durable commit.
+- Worked Example: Model Checking Distributed Commit
+- Worked Example: PersistentSGL Commit Ordering
+    Dual-write mem+nvm pattern.
+- Worked Example: Percolator-Style Primary Commit
+    2PC primary commit; TiKV backend.
+- Summary
+- Exercises
+
+FIGURES: fig:persistent-distributed-commit-order (commit ordering comparison)
+TABLES: tab:persistent-distributed-taxonomy (designs by commit obligation)
+LISTINGS: 4 (durable bank, distributed commit TLA+, PersistentSGL, Percolator)

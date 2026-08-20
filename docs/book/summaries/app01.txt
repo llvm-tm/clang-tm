@@ -1,0 +1,13 @@
+APPENDIX A — Notation
+Lines: ~17
+
+Reference chapter: math notation used throughout the book.
+- lambda = arrival rate of transactions (Little's Law)
+- S = average service time of one transaction attempt
+- L = average in-flight transactions; L = lambda * S
+- p / p_abort = abort probability; expected attempts = 1/(1-p)
+- rs, ws = read set, write set of a transaction
+- T_1, T_2, ... = transactions in a history
+- precedes (serial order)
+- startTS = GTS snapshot GUST takes at begin
+- Active/Validating/Committed (transaction states)

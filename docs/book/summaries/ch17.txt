@@ -1,0 +1,39 @@
+CHAPTER 17 — Transactional Memory for GPUs
+Part: VII (Advanced Topics)
+Lines: ~795 | Sections: 17 | Figures: 1 | Tables: 2 | Listings: 5 | TikZ: 1
+
+PURPOSE: TM on GPUs: execution model, why GPUs lack TM essentials, lock-step
+execution and the ballot contract, capacity limits, GPU-scale commit
+strategies (serial locks -> batched multi-versioning), a taxonomy of GPU TM,
+hardware proposals (KILO TM, WarpTM, Snapshot), software systems (PR-STM,
+CSMV, OFG-STM), and the GUST case study with its snapshot threshold.
+
+SECTIONS
+- The GPU Execution Model
+    SIMT, warps, blocks, shallow memory hierarchy.
+- Three Foundational Absences
+    What GPUs lack that TM assumes.
+- Lock-Step Execution, Divergence, and the Ballot Contract
+    __ballot_sync / __syncwarp lockstep requirement.
+- Worked Example: Counting Aborts With a Ballot
+- Capacity: Large Read/Write Sets in a Shallow Memory Hierarchy
+- Worked Example: Warp-Uniform Bank Transfer With Self-Abort
+- Commit at GPU Scale: From Serial Locks to Batched Multi-Versioning
+    tab:gpu-commit-strategies serialization point.
+- Worked Example: Commit-Slot Allocation, CAS vs. AtomicINC
+- A Taxonomy of GPU TM
+- Hardware Proposals: KILO TM, WarpTM, and Snapshot Isolation
+- Software TM in the Wild
+    PR-STM, CSMV, OFG-STM.
+- Case Study: GUST and the Snapshot Threshold
+    startTS vs startTS+1; CCT + MRV hybrid validation; batch publication.
+- Worked Example: The Snapshot Threshold, in Code
+- Worked Example: Money Conservation in TLA+
+- Verifying GPU Protocols with TLA+
+    GPU_JVSTM, GPU_GUST models.
+- Summary
+- Exercises
+
+FIGURES: fig:gpu-gust-commit-path (GUST commit path)
+TABLES: tab:gpu-commit-strategies, tab:gpu-tm
+LISTINGS: 5 (ballot, warp bank, commit-slot, snapshot threshold, TLA+ money)

@@ -1,0 +1,27 @@
+CHAPTER 16 — Hardware Transactional Memory – Design and Simulation
+Part: VII (Advanced Topics)
+Lines: ~477 | Sections: 10 | Figures: 1 | Tables: 1 | Listings: 5 | TikZ: 1
+
+PURPOSE: HTM: extending cache coherence for transactions, modern HTM
+implementations (Intel RTM), RTM inside, lock subscription, abort-cause
+counters, capacity probes, gem5 simulation, and TLA+ abort/fallback modeling.
+
+SECTIONS
+- Extending Cache Coherence for TM
+    Invalidations and capacity loss as abort signals.
+- Modern HTM Implementations
+    Same semantic contract: opportunistic hardware commit + software fallback.
+- Worked Example: RTM, From the Inside
+- Worked Example: RTM Bank Transfer with Lock Subscription
+    RTM + fallback-lock subscription pattern.
+- Worked Example: Abort-Cause Counters
+- Worked Example: Capacity Probe
+- Simulation with gem5
+- Worked Example: Model Checking HTM Abort and Fallback
+- Summary
+- Exercises
+
+FIGURES: fig:htm-coherence-abort (coherence-based HTM abort)
+TABLES: tab:htm-implementations (HTM interface/diagnostics/contract)
+LISTINGS: 5 (RTM internals, lock-subscription bank, abort counters, capacity,
+          TLA+ abort/fallback)

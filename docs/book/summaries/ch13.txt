@@ -1,0 +1,27 @@
+CHAPTER 13 — Pitfalls – Memory, Signals, and Optimizations
+Part: VI (Engineering: Testing, Pitfalls, and Performance)
+Lines: ~535 | Sections: 9 | Subsections: 1 | Figures: 1 | Tables: 1 | Listings: 4 | TikZ: 1
+
+PURPOSE: The trap layer: TM memory management (malloc/free, deferred free,
+speculative allocs), signal safety (sigsetjmp/siglongjmp, TLS retry buffers,
+frame-lifetime UB), and compiler optimizations revisited (barrier hoisting).
+
+SECTIONS
+- Memory Management: malloc and free
+    Speculative allocations undone on abort; frees deferred to commit.
+- Worked Example: Deferred Free in a Bank Transfer
+- Signal Safety and sigsetjmp
+    Subsection: The Conservative Signal-Safety Policy.
+- Worked Example: The Frame-Lifetime Hazard
+    siglongjmp into a dead frame = UB.
+- Worked Example: TLS Retry Buffer
+    __thread jmpbuf; tm_set_jmpbuf.
+- Compiler Optimizations Revisited
+    Barrier hoisting, DSE across TM ops.
+- Worked Example: Preventing Barrier Hoisting
+- Summary
+- Exercises
+
+FIGURES: fig:tx-resource-state (allocation/free resource state machine)
+TABLES: tab:tx-memory-rules (allocation/free rules, key asymmetry)
+LISTINGS: 4 (deferred free, frame-lifetime, TLS retry, barrier hoisting)

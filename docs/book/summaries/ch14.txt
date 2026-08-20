@@ -1,0 +1,26 @@
+CHAPTER 14 — Performance Modeling and Tuning
+Part: VI (Engineering: Testing, Pitfalls, and Performance)
+Lines: ~537 | Sections: 9 | Figures: 1 | Tables: 2 | Listings: 4 | TikZ: 1
+
+PURPOSE: How to measure and predict TM performance: metrics/benchmarks,
+analytical models, experimental methodology, abort/retry cost estimation,
+calibration anchors from the companion M1 Pro runs.
+
+SECTIONS
+- Metrics and Benchmarks
+    Throughput, abort rate, wasted work, commit latency.
+- Analytical Models
+    Little's law, retry cost, contention models.
+- Experimental Methodology
+    Warmup, calibration, variance, reporting.
+- Worked Example: Measuring Attempts in the Bank Benchmark
+- Worked Example: Model Checking a Bounded Contention Counter
+- Worked Example: Reading a Benchmark Report
+- Worked Example: Estimating a Retry Cost
+- Summary
+- Exercises
+
+FIGURES: fig:perf-state-machine (throughput/abort/wasted-work)
+TABLES: tab:perf-anchors (M1 Pro fuzz/bank measurements),
+        tab:perf-symptoms (tuning symptom -> cause)
+LISTINGS: 4 (attempts measurement, contention TLA+, benchmark report, retry cost)

@@ -1,0 +1,10 @@
+APPENDIX C — Glossary
+Lines: ~73
+
+Reference chapter: glossary of TM terms, each entry pointing to the section
+where it is defined. Entries marked [TSX] refer to Intel RTM; [GPU] to
+Part VII.
+abort, CCT, commit, CSR/CSMV, deadlock, GTS, HTM, intra-warp conflict,
+linearizability/serializability, liveness, MRV, opacity, read set / write set,
+read-validate, retry loop, safety, simulation (CPU), store buffer, TSX, VBox,
+versioned box, ...

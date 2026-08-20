@@ -1,0 +1,25 @@
+CHAPTER 10 — Compiler Fundamentals – IRs and Passes
+Part: V (Compiler Instrumentation for TM)
+Lines: ~384 | Sections: 7 | Figures: 2 | Tables: 1 | Listings: 4 | TikZ: 2
+
+PURPOSE: How a compiler pass instruments loads/stores into TM runtime calls:
+compilation pipeline, pass placement, IR transformation, instrumentation
+policies, address policy.
+
+SECTIONS
+- The Compilation Pipeline
+    Source -> IR -> optimization -> instrumentation -> codegen.
+- Instrumentation as a Compiler Pass
+    Pass sits between IR optimization and codegen; emits ABI calls.
+- Worked Example: A Load, Before and After the Pass
+- Worked Example: Instrumenting a Bank Transfer
+    Transfer's loads/stores become tm_read_*/tm_write_*.
+- Worked Example: Model Checking the Address Policy
+    TLA+ check of the address-bypass policy.
+- Summary
+- Exercises
+
+FIGURES: fig:compiler-tm-pass (pass placement),
+         fig:address-policy-state-machine (private/heap/global/unknown)
+TABLES: tab:instrumentation-policies (compiler/runtime/programmer decision)
+LISTINGS: 4 (load before/after, instrumented transfer, TLA+ policy)

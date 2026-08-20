@@ -1,0 +1,26 @@
+CHAPTER 11 — Compiler Optimizations and Their Impact on TM
+Part: V (Compiler Instrumentation for TM)
+Lines: ~323 | Sections: 9 | Figures: 1 | Tables: 1 | Listings: 4 | TikZ: 1
+
+PURPOSE: Which compiler optimizations break TM and how to guard against them:
+pass ordering, the instrumentation contract, optimization taxonomy, barrier
+hoisting, the "dropped debit" bug.
+
+SECTIONS
+- Common Optimizations
+    DSE, loop invariants, CSE, reordering, vectorization.
+- Worked Example: Two Optimizations That Break TM
+- The Instrumentation Contract
+    After instrumentation, tm_read_*/tm_write_* are opaque side effects.
+- Worked Example: Barriered Transfer Instrumentation
+- Optimization Taxonomy
+    tab:tm-optimization-taxonomy: optimization -> TM-aware restriction.
+- Worked Example: A Dropped Debit
+    Optimization removing a TM write -> money lost.
+- Contract Between Programmer and Compiler
+- Summary
+- Exercises
+
+FIGURES: fig:tm-pass-ordering (safe pass ordering around instrumentation)
+TABLES: tab:tm-optimization-taxonomy
+LISTINGS: 4 (breaking optimizations, barriered transfer, dropped debit)

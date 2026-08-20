@@ -1,0 +1,32 @@
+CHAPTER 05 — Mathematical Foundations
+Part: III (Formal Foundations: Mathematics and Verification)
+Lines: ~563 | Sections: 10 | Figures: 2 | Tables: 2 | Listings: 5 | TikZ: 2
+
+PURPOSE: Math toolkit for TM reasoning: automata/languages, Markov chains,
+queueing theory (Little's law), plus worked examples applying them to the
+bank transfer.
+
+SECTIONS
+- Automata and Formal Languages
+    DFAs, regular languages, recognizers for traces.
+- Markov Chains
+    Discrete-time Markov chains, absorbing states, expected attempts.
+- Queueing Theory and Little's Law
+    L = lambda * S; expected attempts = 1/(1-p) (geometric).
+- Worked Example: Numbers, Not Just Symbols
+    Concrete numbers for the bank retry math.
+- Worked Example: Simulating Retry Cost in the Bank
+    Simulation of abort/retry cost.
+- Worked Example: Model Checking Money Conservation
+    TLA+ money-conservation model.
+- Worked Example: Recognizing Transaction Trace Records
+    DFA that recognizes transaction trace records.
+- Worked Example: Two-Phase Validation Cost
+    Cost analysis of 2-phase validation.
+- Summary
+- Exercises
+
+FIGURES: fig:tx-lifecycle (tx lifecycle as Markov chain),
+         fig:bank-validation-pipeline (validation pipeline)
+TABLES: tab:math-tools (tools used), tab:model-taxonomy (models by info preserved)
+LISTINGS: 5 (DFA, Markov sim, TLA+ model, trace DFA, validation cost)

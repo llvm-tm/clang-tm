@@ -1,0 +1,45 @@
+CHAPTER 02 — Transactions: From Databases to Shared Memory
+Part: I (Why Transactional Memory?)
+Lines: ~591 | Sections: 10 | Subsections: 4 | Figures: 1 | Tables: 1 | Listings: 5 | TikZ: 1
+
+PURPOSE: Imports the database notion of a transaction into shared memory.
+Defines ACID, serializability, hazards, memory models, opacity, sandboxing,
+privatization, litmus tests, and nested-transaction flattening.
+
+SECTIONS
+- How We Got Shared Memory (NEW)
+    Full history. Subsection: The Distributed Era (message passing, logical
+    clocks, distributed mutual exclusion / bakery); The Distributed Shared-
+    Memory Era (DSM: home node, invalidation, release consistency, Ivy +
+    TreadMarks as ancestors of TM protocols); The Multicore Era (snooping
+    then directory-based cache coherence, cost shift to coordination);
+    The Synchronization Era (semaphores, wait-free/lock-free, TM).
+- ACID and Serializability
+    ACID properties; isolation; serializability as implementation-independent
+    criterion. Why it's not directly transferable (aborted transactions).
+    Database mechanisms that reappear in TM. Isolation spectrum + opacity.
+- Data Hazards and Memory Models
+    RAW/WAR/WAW hazards and their conflict mapping (lost-read, lost-update,
+    overwrite). Memory models, happens-before.
+- TM Semantics: Opacity, Sandboxing, Privatization
+    Opacity (no transaction may see a state impossible in some serial exec,
+    even if it later aborts), sandboxing (abort must undo all effects),
+    privatization (making shared data private).
+- Worked Example: A History That Is Serializable but Not Opaque
+    History construction where serializability holds but aborted reader saw
+    an impossible state.
+- Worked Example: A Minimal Litmus-Test Harness
+    Small test harness to expose memory-model/TM behaviors.
+- Worked Example: Flattening Nested Bank Transactions
+    Nested atomic blocks flatten into one transaction (bank example).
+- Worked Example: Model Checking Money Conservation
+    TLA+ money-conservation check.
+- Summary
+- Exercises
+
+FIGURES: fig:transactional-state-machine (tx execution state machine)
+TABLES: tab:tm-family-taxonomy (serialization point + read-set validation)
+LISTINGS: 5 (state machine, litmus harness, flattening, TLA+ model, etc.)
+CITES: lamport78, lamport74bakery, li89dsm, amza96treadmarks,
+       goodman83, papamarcos84, archibald86, olukotun96case, dijkstra65,
+       herlihy91, herlihy93

@@ -1,0 +1,47 @@
+CHAPTER 01 — The Locking Crisis
+Part: I (Why Transactional Memory?)
+Lines: ~434 | Sections: 8 | Figures: 1 | Tables: 1 | Listings: 5 | TikZ: 1
+
+PURPOSE: Software-engineering case against lock-based concurrency and for
+declarative atomicity. Central idea: locks force an invisible protocol
+(compiler can't see it, type system can't express it, not recoverable by
+inspection), so every invariant is enforced by convention alone.
+
+SECTIONS
+- Why Synchronization Became a First-Class Problem (NEW)
+    Three eras: distributed (message passing, Lamport logical clocks),
+    distributed shared memory (DSM simulating an address space over a network,
+    Ivy/TreadMarks, release consistency), and multicore (hardware cache
+    coherence, snooping then directory-based). Shared memory became the
+    default machine; synchronization became a first-class problem. Full
+    history deferred to Ch2.
+- The Cost of Mixing Synchronization with Logic
+    Locked critical section as a "second language". Failure modes: deadlock,
+    livelock/starvation, data races (UB). Recurring error patterns:
+    check-then-act, test-and-set loops, nested locking, lock-order inversion.
+    Heisenbugs. Amdahl's law (hidden perf cost).
+- Composability — The "Innocent Change" Problem
+    Lock-based code is not composable; two correct components deadlock when
+    composed (List/Map example). TM removes the lock-order obligation.
+    Nesting flattens.
+- Running Example: The Innocent Change in Code
+    Bank-transfer running example with floor check: transfer_basic,
+    transfer_safe, transfer_atomic, two-lock-deadlock code listings.
+- Worked Example: Reproducing the Two-Lock Deadlock
+    Compilable C program (transfer_safe vs audit) showing opposite lock order
+    deadlock (lst:two-lock-deadlock). usleep only widens the window.
+- Worked Example: Model Checking the Bank Invariant
+    TLA+ model BankAtomic: Transfer action, MoneyInvariant, FloorInvariant.
+    Application invariant separated from sync mechanism.
+- Summary
+    Locking failure modes; TM changes the programming model.
+- Exercises
+    5 exercises (theory/implementation/verification).
+
+FIGURES: fig:two-lock-deadlock (wait-for cycle from innocent change)
+TABLES: tab:locking-crisis-taxonomy (synchronization approach vs what it shifts)
+LISTINGS: transfer-basic/safe/atomic (C), lst:two-lock-deadlock (C),
+          lst:bank-atomic (TLA+)
+CITES: boehm05, herlihy93, jones97mars, sha90priority, boehm08memory,
+       amdahl67, lamport78, li89dsm, amza96treadmarks, olukotun96case,
+       goodman83, papamarcos84, archibald86

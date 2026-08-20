@@ -1,0 +1,6 @@
+APPENDIX B — Acronyms
+Lines: ~27
+
+Reference chapter: acronyms used in the book.
+CCT, CSMV, DSE, GTS, HTM, JVSTM, MRV, RTM, SGL, STM, TLA+, TLC, TL2, TM, TSO,
+TSX, WBCTL, WBETL, WT, ... (description list with definitions)

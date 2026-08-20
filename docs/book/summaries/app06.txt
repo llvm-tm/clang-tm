@@ -1,0 +1,11 @@
+APPENDIX F — Development Environment Setup
+Lines: ~10
+
+Reference chapter: toolchain setup for the companion repo.
+- Installing LLVM, GCC, TLA+ Toolbox, rr, gem5
+- Building the companion runtime with CMake; selecting a backend; running tests
+- Running STAMP benchmarks and reading output (aborts, throughput, invariants)
+- Model-checking workflow: translate PlusCal, run TLC, inspect counterexample
+- GPU toolchains (CUDA/ROCm, nvcc/hipcc) and where GPU backends need hardware
+- Common failure modes: DATA/TEXT symbol collisions, region-address conflicts,
+  missing LLVM target flags

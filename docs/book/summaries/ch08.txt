@@ -1,0 +1,21 @@
+CHAPTER 08 — Non-Speculative Designs: Single Lock and Serializers
+Part: IV (Implementing Transactional Memory)
+Lines: ~424 | Sections: 6 | Figures: 1 | Tables: 1 | Listings: 2 | TikZ: 1
+
+PURPOSE: Simplest TM designs that reduce execution to a sequential history:
+single global lock (SGL) and thread-serializer / queue-based TM. Proof shape:
+sequential equivalence.
+
+SECTIONS
+- Single Global Lock TM
+    One mutex; begin acquires, end releases; no speculation.
+- Thread-Serializer / Queue-Based TM
+    Tasks submitted to a queue, executed one at a time.
+- Worked Example: Bank Transfer Under SGL
+- Worked Example: Queue Serializer With Per-Task Descriptors
+- Summary
+- Exercises
+
+FIGURES: fig:nonspec-state-machine (SGL admits by lock; serializer by queue)
+TABLES: tab:nonspec-taxonomy (non-speculative serializers)
+LISTINGS: 2 (SGL bank, queue serializer)

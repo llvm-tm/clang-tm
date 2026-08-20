@@ -1,0 +1,13 @@
+FRONT MATTER
+- A Map of Protocols and Acronyms
+    Table pinning down recurring six-letter families: TM, STM, HTM, SGL, TL2,
+    NOrec, TinySTM, JVSTM/MVLog, PlusCal/TLA+/TLC, OCC/read-validate, RTM,
+    GUST. Explains why the book is ordered "math and verification before
+    runtimes before compilers", and the recurring two-account transfer()
+    running example.
+- Preface
+    Assumed background (architecture, OS/concurrency, compilers, discrete
+    math/probability). How to read the book (Part-by-Part guidance, course
+    suggestions). Companion codebase: 20+ STM backends, LLVM plugin, TLA+/PlusCal
+    models, STAMP benchmarks, GPU backends. Exercise tags: [implementation],
+    [verification], [theory]. Getting the code running.

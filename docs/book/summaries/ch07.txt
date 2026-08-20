@@ -1,0 +1,28 @@
+CHAPTER 07 — Transaction API Design – Software Engineering Perspectives
+Part: IV (Implementing Transactional Memory)
+Lines: ~327 | Sections: 9 | Figures: 1 | Tables: 1 | Listings: 3 | TikZ: 1
+
+PURPOSE: Software-engineering view of TM API design: synchronous vs lambda vs
+language-integrated vs future-based vs OO/polymorphic interfaces. The lower
+runtime may be TL2/NOrec/SGL/Percolator; this chapter classifies the
+programming interface.
+
+SECTIONS
+- Classic Synchronous API
+    tm_begin/tm_end/tm_read/tm_write; retry loop.
+- Worked Example: The Transfer, on the Classic API
+- Worked Example: A Lambda Wrapper
+    C++ lambda-based atomic blocks.
+- Language-Integrated Keywords
+    atomic blocks, transaction_safe, annotations.
+- Asynchronous and Future-Based APIs
+    tm_enqueue / queue-based async; futures.
+- Worked Example: Futures for Batched Transfers
+- Object-Oriented and Polymorphic Interfaces
+    TM<T> wrapper types, method-level transactions.
+- Summary
+- Exercises
+
+FIGURES: fig:api-state-machine (control states of the synchronous API)
+TABLES: tab:api-taxonomy (API families)
+LISTINGS: 3 (classic API, lambda wrapper, futures)
