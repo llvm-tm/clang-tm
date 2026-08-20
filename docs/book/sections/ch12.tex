@@ -1,14 +1,21 @@
-
 \chapter{Testing, Debugging, and Scheduling}
+\index{testing, debugging, scheduling, fuzzing, deterministic replay, invariant testing, TLA+ model checking}
+
+Transactional memory implementations fail in ways that ordinary unit tests rarely expose. A transaction may read a value that was valid for only a few instructions, validate too early, forget to roll back one write-set entry, or publish a partially committed state. The failure often appears later, after the schedule that caused it has disappeared.
+
+This chapter treats testing as a layered engineering discipline. At the bottom are cheap invariant tests: the bank still conserves money, a counter still has the expected value, a set still agrees with a sequential oracle. Above them are abort fuzzers, deterministic schedulers, replay tools, and abstract model checkers. The goal is not to prove every line of code correct from tests alone. The goal is to make rare transactional bugs reproducible, local, and small enough to fix.
+
 \section{Unit Testing and Fuzzing}
-\begin{itemize}
-    \item Testing transactional data structures for atomicity invariants.
-    \item Fuzzing aborts to stress test undo-log correctness.
-    \item Invariant-based testing: e.g.\ money conservation in a bank benchmark, counter equality in a shared-counter suite --- the assertion that catches lost updates.
-    \item The best invariants are sums: a race-free TM preserves an accumulator; a defect surfaces as a drift in the sum.
-    \item Fuzzing `oracle' question: what is the ground truth for a concurrent data structure? (A sequential reference implementation run in a single thread.)
-    \item Coverage goal: exercise abort paths (capacity aborts, conflicts, explicit aborts) far more often than real workloads do.
-\end{itemize}
+
+The first test for a transactional backend should not assert that a particular interleaving occurred. It should assert that no interleaving can violate an invariant. For transactional data structures, the most useful invariants are usually conservation properties: a sum, a count, a membership relation, or equality with a sequential reference implementation.
+
+The running bank benchmark has two accounts or a vector of accounts. Transactions transfer money between accounts, optionally respecting an account floor. The main invariant is money conservation: a committed transfer may move value, but it must not create or destroy value. In a shared-counter suite, the corresponding invariant is equality between the final counter value and the number of committed increments. In a set or map benchmark, the invariant is agreement with a single-threaded oracle that applies the same logical operations in a known serial order.
+
+The best invariants are sums because they are insensitive to schedule. A correct TM may serialize two transfers in either order, but the total balance must remain fixed. A race-free TM preserves the accumulator; a defective TM allows it to drift. Lost updates, torn write-back, duplicate redo-log replay, failed undo, and non-atomic commit all tend to surface as changes in a sum.
+
+Fuzzing changes the distribution of executions. Real workloads may rarely hit capacity aborts, explicit aborts, or conflict windows at just the wrong point. A fuzzer should hit them constantly. Abort fuzzing injects failures after reads, after the first write, after validation, during write-back, and immediately before commit. The resulting workload is artificial, but that is the point: rollback paths must be exercised far more often than production executes them.
+
+The oracle question is central: what is the ground truth for a concurrent data structure? For many tests the answer is a sequential reference implementation run in one thread. The test records operations, applies them to the TM-backed object and to the oracle under the same logical order, and compares the results. For the bank benchmark, the oracle can be even simpler: the initial sum is the expected final sum.
 
 \begin{table}[htbp]
 \centering
@@ -27,6 +34,8 @@ TLA+ model checking & Abstract safety property & Missing validation case, illega
 \end{tabular}
 \end{table}
 
+These layers are complementary. The companion implementation runs concrete tests across the backends in the codebase, including lock-based, versioned, persistent, distributed, and GPU designs. The important testing pattern is backend independence: the same logical workload and the same invariant should apply to SGL, TL2, NOrec, TinySTM variants, SwissTM, persistent backends, distributed backends, and GPU designs. Backend-specific tests are still needed, but they should come after the generic invariants.
+
 \section{Worked Example: An Invariant Test for Lost Updates}
 \index{invariant test}\index{money conservation}
 \label{sec:test-example}
@@ -42,20 +51,13 @@ TEST(bank, money_is_conserved) {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item A race-free TM preserves the accumulator; a defect (lost update, torn write-back) surfaces as a drift in the sum --- Exercise~1 of this chapter.
-    \item The same binary runs against every backend in Part~IV with one flag, so one test suite validates the whole family.
-    \item Exercise~1 asks for the abort-fuzzing extension; \S\ref{sec:test-example} feeds the oracle question of this section: what is ground truth?
-    \item Combine with \S\ref{sec:math-example}: at abort probability
-    \[
-    p = 0.9
-    \]
-    eight threads completing ten successful transactions each require the expected number of attempts
-    \[
-    8 \times 10 \div (1-p) = 800 .
-    \]
-    The test still passes only if undo logging is correct.
-\end{itemize}
+This is intentionally small. It does not inspect the internal read set, write set, commit counter, undo log, or lock table. It treats the TM as a black box and checks the property that all correct implementations must preserve.
+
+The test catches a classic lost update. Suppose two transfers read the same destination balance, compute two different increments, and then one write overwrites the other. No account may become corrupted in isolation; each stored value may still look plausible. The sum exposes the defect because one credit vanished.
+
+A race-free TM preserves the accumulator, while a defect such as a lost update or a torn write-back surfaces as a drift in the sum, as Exercise~1 of this chapter asks you to confirm. The same binary runs against every backend in Part~IV with one flag, so one test suite validates the whole family. Exercise~1 also asks for the abort-fuzzing extension, and \S\ref{sec:test-example} feeds the oracle question of this section: what is ground truth? Combined with \S\ref{sec:math-example}, at abort probability $p = 0.9$ eight threads completing ten successful transactions each require the expected number of attempts $8 \times 10 \div (1-p) = 800$. The test still passes only if undo logging is correct.
+
+The formula is useful because it separates test intensity from logical work. The workload still commits only eighty transfers, but the implementation attempts about eight hundred transactions. A backend with a bad abort path may fail quickly even when the normal, low-abort workload passes.
 
 \section{Worked Example: Abort Fuzzing for the Bank Invariant}
 \index{abort fuzzing}\index{undo log}
@@ -172,22 +174,89 @@ int main() {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item The injected abort after the debit catches a missing undo entry for the source account.
-    \item The injected abort after the credit catches a rollback loop that restores only the first write.
-    \item A global lock is acceptable in the harness: the test is aimed at rollback correctness, not scalability.
-    \item The same shape appears in production TM tests: run the normal workload, raise the abort rate, assert the invariant after all threads join.
-\end{itemize}
+The injected abort after the debit catches a missing undo entry for the source account, and the injected abort after the credit catches a rollback loop that restores only the first write. A global lock is acceptable in the harness, because the test is aimed at rollback correctness, not scalability. The same shape appears in production TM tests: run the normal workload, raise the abort rate, and assert the invariant after all threads join.
+
+A useful extension is to randomize the abort site rather than only the abort decision. For write-back TMs this means injecting aborts before validation, after validation, before acquiring write locks, after acquiring a prefix of write locks, before publishing, and after publishing a prefix of locations in a private test build. For undo-log TMs this means aborting after every undo-log append and after every in-place write. Each abort site should have a name in the failure report; otherwise a failing seed only says that rollback is wrong, not which rollback path is wrong.
+
+\section{Worked Example: A Sequential Oracle for a Counter Suite}
+\label{sec:oracle-counter-example}
+
+A conservation invariant is not always enough. A set, map, queue, or counter suite often needs a reference object. The following C++ program uses a mutex-protected sequential oracle beside an intentionally simple transactional interface. In a real backend test, \texttt{tm\_increment} would be replaced by the backend under test.
+
+\begin{lstlisting}[language=C++, caption={A compilable sequential-oracle test for committed increments.}]
+#include <cassert>
+#include <atomic>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+struct Oracle {
+    std::mutex mu;
+    int value = 0;
+
+    void increment() {
+        std::lock_guard<std::mutex> g(mu);
+        ++value;
+    }
+
+    int read() const {
+        return value;
+    }
+};
+
+struct TMCounter {
+    std::atomic<int> value{0};
+
+    void tm_increment() {
+        int old = value.load(std::memory_order_relaxed);
+        while (!value.compare_exchange_weak(old, old + 1,
+               std::memory_order_release,
+               std::memory_order_relaxed)) {
+        }
+    }
+
+    int read() const {
+        return value.load(std::memory_order_acquire);
+    }
+};
+
+int main() {
+    Oracle oracle;
+    TMCounter counter;
+
+    const int threads = 8;
+    const int operations = 1000;
+
+    std::vector<std::thread> workers;
+    for (int tid = 0; tid < threads; ++tid) {
+        workers.emplace_back([&] {
+            for (int i = 0; i < operations; ++i) {
+                counter.tm_increment();
+                oracle.increment();
+            }
+        });
+    }
+
+    for (std::thread& t : workers) {
+        t.join();
+    }
+
+    assert(counter.read() == oracle.read());
+    assert(counter.read() == threads * operations);
+}
+\end{lstlisting}
+
+The oracle is deliberately boring: one mutex, one integer, one serial meaning. The implementation may be concurrent, but the expected result is not. A lost update appears as inequality between \texttt{counter.read()} and \texttt{oracle.read()}. The same pattern scales to maps and sets by recording logical operations and comparing final contents.
 
 \section{Record-and-Replay and Deterministic Scheduling}
-\begin{itemize}
-    \item Using \texttt{rr} (Mozilla) for reverse debugging of TM executions.
-    \item Deterministic schedulers (CHESS) to systematically explore interleavings.
-    \item Why reverse debugging matters: a transaction's bug manifests at commit, long after the offending read.
-    \item Deterministic replay as a TM-native debugging tool: replay the exact interleaving that produced a lost update.
-    \item The bound on preemptions: exploring all bounded-preemption schedules for small bounds is tractable; full interleaving space is not.
-    \item Complementarity with model checking: TLA+ explores the abstract state space; \texttt{rr}\slash{}CHESS explore the concrete one.
-\end{itemize}
+
+Record-and-replay tools and deterministic schedulers address the same pain point: a concurrent failure is useless if it cannot be reproduced. A TM bug may manifest at commit even though the causal mistake was an earlier read, a missed version check, or an overwritten metadata bit. Reverse debugging lets the developer start from the bad final state and walk backward to the first invalid transition.
+
+Tools such as \texttt{rr} record a concrete execution and replay it with stable timing and stable thread behavior. This is valuable for ordinary C and C++ debugging: set a watchpoint on the corrupted account, replay, and step backward or forward around the write that changed it. Deterministic schedulers, in the style of CHESS, are more systematic. They control where threads may preempt and explore schedules up to a bound.
+
+The bound on preemptions is what makes the search usable. Full interleaving exploration grows too quickly: every shared-memory access may interleave with every access in every other thread. Bounded-preemption testing assumes that many bugs require only a small number of unlucky context switches. That assumption is often good for TM implementations because many defects live in short windows: after validation but before write-back, after acquiring one lock but before acquiring the next, or after appending to an undo log but before installing the write.
+
+Record-and-replay and model checking are not substitutes. TLA+ explores an abstract protocol state space and can find missing validation cases before code exists. Replay explores the concrete executable and can expose allocator behavior, memory-ordering mistakes, padding assumptions, and integration bugs that the abstract model intentionally omitted.
 
 \begin{figure}[htbp]
 \centering
@@ -214,6 +283,8 @@ int main() {
 \caption{A TM debugging loop: random or systematic exploration finds a failing interleaving; replay makes the failure local enough to debug.}
 \label{fig:tm-debugging-loop}
 \end{figure}
+
+The loop is intentionally closed. A failing seed becomes a regression test. A recorded schedule becomes a deterministic unit test. A TLA+ counterexample becomes a protocol test. The fix is not complete until the same failure mode is represented at the cheapest layer that can catch it.
 
 \section{Worked Example: Replay of a Lost-Update}
 \index{deterministic scheduling}\index{replay}
@@ -306,20 +377,79 @@ int main() {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item The schedule is the test case. Once recorded, the failure is no longer a Heisenbug.
-    \item Atomics remove undefined behavior from the demonstration; they do not provide transaction atomicity.
-    \item A watchpoint on \texttt{bank.b} identifies the overwrite: thread 0 writes a value computed before thread 1's credit.
-    \item A real TM backend prevents this execution by locking, validating, versioning, or aborting one transaction.
-\end{itemize}
+The schedule is the test case: once recorded, the failure is no longer a Heisenbug. Atomics remove undefined behavior from the demonstration, but they do not provide transaction atomicity. A watchpoint on \texttt{bank.b} identifies the overwrite, because thread 0 writes a value computed before thread 1's credit. A real TM backend prevents this execution by locking, validating, versioning, or aborting one transaction.
+
+The replay script is also a specification of the bug. It says which thread reached which logical point and in what order. That is more useful than a sleep-based test because sleeps encode timing, not causality. Deterministic checkpoints encode the causal edges directly.
+
+\section{Worked Example: A TLA+ Money-Conservation Check}
+\label{sec:tla-bank-conservation}
+
+The following TLA+ model abstracts a single transfer from account \texttt{A} to account \texttt{B}. It includes an abort action that restores both balances from the saved old values. If the restoration of \texttt{a} is removed, the invariant can fail after an abort following the debit.
+
+\begin{lstlisting}[caption={A small TLA+ model for transfer rollback and money conservation.}]
+--------------------------- MODULE BankAbort ---------------------------
+EXTENDS Naturals
+
+CONSTANTS InitA, InitB, Amount
+
+VARIABLES a, b, phase, oldA, oldB
+
+Init ==
+    /\ a = InitA
+    /\ b = InitB
+    /\ phase = "start"
+    /\ oldA = InitA
+    /\ oldB = InitB
+
+Read ==
+    /\ phase = "start"
+    /\ oldA' = a
+    /\ oldB' = b
+    /\ phase' = "read"
+    /\ UNCHANGED <<a, b>>
+
+Debit ==
+    /\ phase = "read"
+    /\ a >= Amount
+    /\ a' = a - Amount
+    /\ phase' = "debited"
+    /\ UNCHANGED <<b, oldA, oldB>>
+
+Credit ==
+    /\ phase = "debited"
+    /\ b' = b + Amount
+    /\ phase' = "credited"
+    /\ UNCHANGED <<a, oldA, oldB>>
+
+Commit ==
+    /\ phase = "credited"
+    /\ phase' = "done"
+    /\ UNCHANGED <<a, b, oldA, oldB>>
+
+Abort ==
+    /\ phase \in {"read", "debited", "credited"}
+    /\ a' = oldA
+    /\ b' = oldB
+    /\ phase' = "done"
+    /\ UNCHANGED <<oldA, oldB>>
+
+Next == Read \/ Debit \/ Credit \/ Commit \/ Abort
+
+MoneyConserved == a + b = InitA + InitB
+
+Spec == Init /\ [][Next]_<<a, b, phase, oldA, oldB>>
+=============================================================================
+\end{lstlisting}
+
+The model is small because it checks one idea: rollback must restore every in-place update. \texttt{MoneyConserved} is the same invariant used by the C++ bank tests, and omitting \texttt{a' = oldA} in \texttt{Abort} models a missing undo-log entry for the debit. The abstraction ignores performance, allocation, and cache behavior; that is why it can exhaustively explore protocol states.
+
+A useful workflow is to keep the TLA+ model close to the implementation test. When the implementation adds account floors, the model should add the same precondition. When the implementation distinguishes explicit aborts from conflict aborts, the model can keep one abstract abort action unless the distinction affects safety.
 
 \section{Summary}
-\begin{itemize}
-    \item Debugging concurrent TM code requires tools that can replay rare interleavings.
-    \item Systematic testing can expose Heisenbugs that appear only under specific schedules.
-    \item Invariant tests are most useful when they are backend-independent: the same bank, counter, or data-structure oracle should run against SGL, TL2, NOrec, TinySTM variants, SwissTM, persistent backends, distributed backends, and GPU designs.
-    \item The companion implementation uses both concrete tests and abstract specifications: the concrete suites check transactional and data-structure behavior, while TLA+ specifications check protocol-level safety.
-\end{itemize}
+
+Testing transactional memory requires a stack of techniques. Invariant tests are cheap and backend-independent; they should run everywhere. Abort fuzzing makes rare rollback paths common. Deterministic scheduling turns timing-sensitive failures into ordinary test cases. Record-and-replay makes concrete executions debuggable. TLA+ model checking explores the abstract protocol and catches missing transitions before they become code.
+
+The most useful tests are small, repeatable, and invariant-driven. A bank sum, a counter value, or agreement with a sequential oracle is often enough to expose a deep atomicity bug. Once a failure is found, the engineering task is to preserve it: keep the seed, keep the schedule, keep the model counterexample, and add the cheapest regression test that still fails without the fix.
 
 \section{Exercises}
 \begin{enumerate}
@@ -329,4 +459,50 @@ int main() {
     \item \emph{[implementation]} Extend Listing~\ref{sec:abort-fuzz-bank}'s harness with account floors: no committed transaction may leave an account below zero. Keep money conservation as a separate invariant, and report which invariant fails first.
     \item \emph{[verification]} Write a two-account TLA+ model of transfer with actions \textsc{Read}, \textsc{Debit}, \textsc{Credit}, \textsc{Commit}, and \textsc{Abort}. Add the money-conservation invariant and then intentionally omit rollback for \textsc{Debit}; confirm that the model checker finds a counterexample.
     \item \emph{[theory]} Bounded-preemption testing often finds bugs with a small bound. Give one reason this empirical fact is plausible for TM implementations, and one class of TM bug that may require a larger bound or a different exploration strategy.
+    \item \emph{[implementation]} Add named abort sites to the abort-fuzzing harness and print the seed, thread id, source account, destination account, amount, and abort-site name on failure.
+    \item \emph{[verification]} Modify the TLA+ model in Listing~\ref{sec:tla-bank-conservation} to include an account floor. State the invariant that distinguishes money conservation from floor preservation.
+    \item \emph{[theory]} Explain why a sequential oracle is easy for a counter but harder for a concurrent queue whose operations return values during the execution, not only at the end.
+    \item \emph{[literature]} Read Musuvathi et al., \emph{Finding and
+          Reproducing Heisenbugs in Concurrent Programs}
+          \cite{musuvathi08chess}, which introduces CHESS.  Compare its
+          bounded-preemption exploration with this chapter's
+          deterministic-scheduler discussion: state one guarantee CHESS
+          gives that a plain stress test does not, and one workload where
+          its bound still leaves a bug undetected.
 \end{enumerate}
+
+\textbf{How to check your work.} The \emph{[implementation]} exercises are
+verified with the companion: extend the harness of \S\ref{sec:abort-fuzz-bank}
+with floors and named abort sites, using \S\ref{sec:replay-lost-update} for
+the \texttt{rr} watchpoint walk.  The \emph{[verification]} exercises are
+checked with TLC against \S\ref{sec:tla-bank-conservation}
+(\texttt{MoneyConserved}, \texttt{FloorsHold}; see
+Appendix~\ref{chap:pluscal-quick-ref}).  The \emph{[theory]} exercises are
+graded against \S\ref{sec:test-example} and \S\ref{sec:oracle-counter-example}.
+The \emph{[literature]} exercise is graded on whether the guarantee you
+attribute to CHESS is real and the workload you name is one its bounded
+exploration genuinely cannot cover.
+
+\index{lost update}
+\index{torn write-back}
+\index{non-atomic commit}
+\index{sequential oracle}
+\index{abort injection}
+\index{rollback path}
+\index{undo-log entry}
+\index{write set}
+\index{capacity abort}
+\index{conflict abort}
+\index{explicit abort}
+\index{bounded preemption}
+\index{Heisenbug}
+\index{watchpoint}
+\index{reverse debugging}
+\index{record-and-replay}
+\index{CHESS}
+\index{rr}
+\index{TLA+}
+\index{money-conservation invariant}
+\index{account floor}
+\index{regression test}
+% -------------------------------------------------------------------

@@ -1,5 +1,5 @@
 APPENDIX D — PlusCal / TLA+ Quick Reference
-Lines: ~10
+Lines: ~163 | Sections: 6 | Listings: 3
 
 Reference chapter: quick-start for TLA+/PlusCal/TLC.
 - Key language constructs: variables, actions, labels, either/or, invariants, properties

@@ -1,4 +1,3 @@
-
 \chapter{Transactional Memory for GPUs}
 \label{chap:gpu-tm}
 
@@ -792,4 +791,34 @@ contract says \emph{how} the hardware will let you express it.
 \item \emph{[verification]} Add an explicit abort action to the TLA+ model in Section~\ref{sec:gpu-bank-tla-example} that leaves \texttt{bal} unchanged. Check that the conservation, floor, and type invariants remain true.
 
 \item \emph{[theory]} Compare the serialisation points in Table~\ref{tab:gpu-commit-strategies}. For each row, identify whether the bottleneck is metadata allocation, validation, version installation, or publication, and explain which bottleneck is most sensitive to increasing warp count.
+
+\item \emph{[literature]} Read the KILO TM paper \cite{fung11kilotm} and the
+          GUST technical report \cite{nunes23gust}.  KILO TM validates with
+          hardware-managed read/write logs and Bloom filters; GUST with
+          CCT/MRV over a commit log.  Compare the two \emph{validation
+          units} --- where the validation state lives, what it is checked
+          against, and what an abort costs in each.
+
+\item \emph{[open]} Every GPU TM in this chapter is either a simulation
+          proposal (KILO TM, WarpTM, snapshot-isolation HTM) or a research
+          system (CSMV, GUST, PR-STM); none ships in a commercial SDK.
+          Argue a position: will GPU TM ever be productized, or should GPUs
+          expose transaction-like higher-level APIs (e.g.\ atomic
+          task/stream abstractions) instead, with TM confined to research?
+          State the hardware or software change your position depends on.
 \end{enumerate}
+
+\textbf{How to check your work.} The \emph{[implementation]} exercise is
+verified with the companion: extend the kernel of
+\S\ref{sec:gpu-bank-transfer-example} with the bounded per-lane retry
+counter, keeping the ballot of \S\ref{sec:ballot} outside the lane-guarded
+branch.  The \emph{[verification]} exercises are checked with TLC against
+\S\ref{sec:gpu-bank-tla-example} (conservation, floor, and type invariants;
+see Appendix~\ref{chap:pluscal-quick-ref}).  The \emph{[theory]} exercises
+are graded against \S\ref{sec:ballot}, \S\ref{sec:gust}, and
+Table~\ref{tab:gpu-commit-strategies}.  The \emph{[literature]} exercise is
+graded on whether your ``validation unit'' contrast is drawn accurately
+for both papers.  The \emph{[open]} exercise has no single right answer;
+it is graded on whether you state the hardware or software change your
+position depends on and defend it against the strongest objection.
+

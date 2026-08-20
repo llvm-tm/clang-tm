@@ -1,15 +1,23 @@
-
 \chapter{Pitfalls – Memory, Signals, and Optimizations}
+\index{pitfalls!memory management!signal safety!compiler optimization!deferred free!speculative allocation!sigsetjmp!longjmp!TLS retry buffer!barrier hoisting}
+
+Transactional memory makes a hard promise: code inside a transaction should appear to execute atomically, or not at all.  That promise is easy to state for reads and writes to shared objects.  It is harder for memory allocation, object reclamation, signal handling, non-local jumps, compiler transformations, and other mechanisms that sit below the transactional abstraction.
+
+This chapter studies three classes of engineering pitfalls that routinely break otherwise correct TM algorithms.  The first is resource lifetime: \texttt{malloc} and \texttt{free} cannot be treated symmetrically inside a transaction.  The second is control-flow recovery: retry loops implemented with \texttt{sigsetjmp}/\texttt{longjmp} must not jump into dead stack frames.  The third is compilation: transactional reads and writes are not ordinary scalar operations, and optimizers must not silently move or remove them.
+
 \section{Memory Management: malloc and free}
-\begin{itemize}
-    \item Speculative allocation: memory allocated inside a transaction must be freed on abort.
-    \item Deferred freeing: a free executed inside a transaction cannot be released until commit.
-    \item Balanced‑free taxonomy and practical implementations.
-    \item Speculative-allocations list: allocations tracked per transaction and rolled back on abort.
-    \item The double-free trap: a region allocator reusing addresses across transactions makes a naive double-free detector fire on legitimate reuse.
-    \item Deferred-free sets: freed pointers held until commit; visible to other transactions via the read path.
-    \item TM-aware memory allocators (region vs.\ general-purpose) and the interaction with stack-address checks.
-\end{itemize}
+
+The transactional abstraction says that an aborted transaction has no effect.  For a plain write-buffered STM such as TL2, NOrec, or SwissTM, that means discarding the write set.  For a transaction that allocates memory, it also means reclaiming memory that no committed execution can ever reach.  For a transaction that frees memory, it means the opposite: the memory must not be returned to the allocator until the transaction commits.
+
+This asymmetry is the first rule of transactional memory management.  A \texttt{malloc} inside a transaction creates a speculative object.  If the transaction aborts, the object is unreachable from the committed heap and must be released.  If the transaction commits, the allocation becomes ordinary memory.  A \texttt{free} inside a transaction is not an immediate reclamation event.  Until commit, other transactions may still be executing against a snapshot in which the object is live.  Releasing it early can turn a validation failure into a use-after-free.
+
+The practical implementation is small but non-negotiable.  Each transaction maintains a speculative-allocation list and a deferred-free set.  Abort walks the allocation list and releases those objects; it drops the deferred-free set without freeing its payloads.  Commit forgets the allocation list and releases the deferred-free set after the transaction's serialization point.
+
+This chapter's companion implementation tracks two structures: a \textbf{speculative-allocations list} of allocations made by the current transaction and rolled back on abort, and a \textbf{deferred-free set} of pointers whose \texttt{free} must wait until commit yet remain visible to other transactions through the read path. The governing rules are simple: memory allocated inside a transaction is speculative and must be freed on abort, while a \texttt{free} executed inside a transaction cannot be released until the transaction commits. Reasoning about these lists amounts to a balanced-free taxonomy covering both abort and commit actions. Two traps recur. The first is the \emph{double-free trap}: a region allocator that reuses addresses across transactions makes a naive double-free detector fire on legitimate reuse. The second is the interaction between real memory managers and the address-space checks: a TM-aware allocator (a region allocator versus a general-purpose one) changes which addresses the fast path sees as safely bypassable.
+
+Balanced-free reasoning asks whether every committed allocation is eventually matched by a committed free, and whether every aborted allocation is reclaimed without becoming visible.  Region allocators complicate this reasoning because address reuse is common.  A naive detector that remembers only pointer values may conclude that a pointer was freed twice, even when the same numeric address belongs to a later generation of the region.  Production systems therefore attach ownership, epoch, or generation information to allocation records when region reuse is possible.
+
+Deferred freeing also interacts with validation.  Suppose transaction \texttt{T1} frees an account record while transaction \texttt{T2} has read that record.  If \texttt{T1} commits and immediately releases the object to the general allocator, \texttt{T2} may later validate a reused address rather than the original object.  The read path must treat deferred-free metadata as part of the object state, or reclamation must be delayed by epochs, hazard pointers, quiescence, or a global serializing path.
 
 \begin{table}[htbp]
 \centering
@@ -46,6 +54,8 @@ Generation advances with region \\
 \caption{Transactional allocation and freeing rules.  The key asymmetry is that speculative allocations are undone on abort, while transactional frees are delayed until commit.}
 \label{tab:tx-memory-rules}
 \end{table}
+
+The companion implementations exercise this rule across simple and realistic backends.  SGL avoids most subtlety by serializing all transactions.  Write-buffered STMs need explicit allocation and deferred-free metadata.  Persistent systems such as Romulus, NV-HTM, and PersistentSGL add another dimension: the allocation decision and the durability decision must agree after recovery.  Distributed systems such as TiKV's Percolator-style two-phase commit add yet another: a participant must not reclaim an object while another participant can still observe the old version.
 
 \section{Worked Example: Deferred Free in a Bank Transfer}
 \index{deferred free}\index{speculative allocation}\index{money conservation}
@@ -212,12 +222,7 @@ int main(void) {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item Speculative allocation is private until commit; abort must release it.
-    \item A transactional \texttt{free} is not a memory reclamation event.  It is a commit action.
-    \item The bank invariant is independent of allocation policy, but the audit record's lifetime is not.
-    \item A production TM also needs validation: another transaction must not read an object after its freeing transaction commits.
-\end{itemize}
+Three rules govern this wrapper. Speculative allocation is private until commit, and abort must release it. A transactional \texttt{free} is not a memory-reclamation event; it is a commit action, performed only after the transaction's serialization point. The bank invariant is independent of allocation policy, but the audit record's lifetime is not. Finally, a production TM also needs validation: another transaction must not read an object after its freeing transaction commits.
 
 \begin{figure}[htbp]
 \centering
@@ -248,13 +253,19 @@ int main(void) {
 \label{fig:tx-resource-state}
 \end{figure}
 
+The example is intentionally sequential.  It demonstrates lifetime rules, not concurrency control.  A real TL2-style implementation would insert read barriers for the accounts and the audit-log head, buffer or lock writes, validate read versions, then publish the write set at commit.  A NOrec-style implementation would validate against a global sequence lock.  In both cases, the allocator protocol remains the same: allocations disappear on abort, frees become physical reclamation only after the transaction is irrevocably committed.
+
 \section{Signal Safety and \texttt{sigsetjmp}/\texttt{longjmp}}
-\begin{itemize}
-    \item The stack‑corruption hazard: \texttt{begin} inside a function, function returns, abort jumps to corrupted frame.
-    \item Alternate signal stacks and safe checkpointing strategies.
-    \item The DATA-symbol subtlety: the runtime exports \texttt{tm\_sigsetjmp}/\texttt{tm\_longjmp} as function pointers, not functions --- a DATA/TEXT symbol collision with a compiler-generated direct call is a classic segfault (fixed in the companion repo, and instructive).
-    \item TLS vs.\ stack jmp buffers: keeping the retry buffer in thread-local storage so it outlives any single frame.
-\end{itemize}
+
+Abort is a control-flow operation.  In many C and C++ STMs, the runtime records a retry target at transaction begin and returns to it on conflict, validation failure, explicit abort, or signal-triggered recovery.  The usual primitive is \texttt{sigsetjmp}/\texttt{siglongjmp}, or a wrapper with similar semantics.
+
+This mechanism is dangerous because the saved context includes stack state.  If a transaction begins inside a function and that function returns while the retry buffer remains reachable, a later abort jumps into a frame that no longer exists.  The bug is not a failed validation; it is undefined control flow.
+
+The pitfalls fall into several categories. The first is the \emph{stack-corruption hazard}: a transaction begins inside a function, the function returns, and a later abort jumps into the now-corrupted frame. The second concerns alternate signal stacks and safe checkpointing strategies. The third is the DATA-symbol subtlety: the runtime exports \texttt{tm\_sigsetjmp}\slash{}\texttt{tm\_longjmp} as function pointers rather than functions, so a DATA/TEXT symbol collision with a compiler-generated direct call is a classic segfault, fixed in the companion repo and instructive in its own right. The fourth is the choice between TLS and stack-local jmp buffers: the retry buffer should live in thread-local storage so that it outlives any single frame.
+
+Alternate signal stacks solve a different problem: they provide stack space for a signal handler when the normal stack is compromised or too small.  They do not make arbitrary \texttt{longjmp} targets valid.  The retry target must be owned by the runtime and re-established for each attempt.
+
+The DATA-symbol subtlety is easy to miss in mixed compiler/runtime systems.  If the ABI exposes \texttt{tm\_sigsetjmp} as a data object containing a function pointer, generated code must load the pointer and call through it.  If generated code emits a direct call to \texttt{tm\_sigsetjmp} as though it were a text symbol, execution jumps to the address of the pointer object itself.  The result is a crash whose cause looks like signal failure but is actually a symbol-kind mismatch.
 
 \subsection{The Conservative Signal-Safety Policy}
 \index{signal safety}
@@ -262,12 +273,9 @@ Because the frame-lifetime hazard is \emph{ubiquitous} (it is hidden inside
 \texttt{tm\_begin}/\texttt{tm\_end}), the book adopts a single, conservative
 policy instead of a list of exceptions:
 
-\begin{itemize}
-    \item \textbf{Allowed inside a transaction:} transactional reads and writes, transactional allocation (\texttt{tm\_malloc}), and the retry loop itself --- everything that stays within the runtime's metadata.
-    \item \textbf{Forbidden:} any \texttt{sigsetjmp} whose frame may outlive the transaction; blocking signals that the runtime's \texttt{tm\_sigsetjmp} wraps; and hand-written \texttt{siglongjmp} to a stack buffer.
-    \item \textbf{Must abort or become irrevocable:} operations with externally visible side effects (I/O, syscalls) that cannot be undone; these force a fallback to a serializing path (Ch.~8) before the operation runs.
-    \item The policy is a property the TLA+ models do \emph{not} check: the models abstract the retry mechanism away entirely (Part~III), so frame validity is enforced by convention plus TLS re-arming --- not by the checker.
-\end{itemize}
+The policy draws three classes. \textbf{Allowed inside a transaction} are transactional reads and writes, transactional allocation (\texttt{tm\_malloc}), and the retry loop itself --- in short, everything that stays within the runtime's metadata. \textbf{Forbidden} are any \texttt{sigsetjmp} whose frame may outlive the transaction, blocking the signals that the runtime's \texttt{tm\_sigsetjmp} wraps, and hand-written \texttt{siglongjmp} to a stack buffer. \textbf{Must abort or become irrevocable} are operations with externally visible side effects (I/O, syscalls) that cannot be undone; these force a fallback to a serializing path (Ch.~8) before the operation runs. This policy is a property the TLA+ models do \emph{not} check: the models abstract the retry mechanism away entirely (Part~III), so frame validity is enforced by convention plus TLS re-arming, not by the checker.
+
+This policy is conservative by design.  It is stricter than what a hand-audited runtime could sometimes permit, but it scales to C APIs, compiler-generated barriers, mixed libraries, and stress tests.  The companion codebase verifies algorithmic safety with tests and TLA+ models, but stack-frame validity remains an implementation discipline.
 
 \section{Worked Example: The Frame-Lifetime Hazard}
 \index{sigsetjmp}\index{siglongjmp}\index{TLS jmp buffer}\index{retry loop}\index{abort}\index{sandboxing}\index{privatization}
@@ -289,12 +297,9 @@ void worker() {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item The saved context points into \texttt{helper}'s stack frame, which is gone the moment \texttt{helper} returns.
-    \item The standard fix is the bullet above: keep the \texttt{jmp\_buf} in TLS and re-arm it on every attempt, so the retry target is never a dead frame.
-    \item The DATA-symbol subtlety of this chapter is the other half: the runtime exports \texttt{tm\_sigsetjmp} as a function pointer, and a compiler that emits a direct call jumps to the pointer variable's address --- a classic segfault the companion repo fixed.
-    \item Exercise~2 of this chapter asks you to design the runtime change precisely.
-\end{itemize}
+The hazard is concrete. The saved context points into \texttt{helper}'s stack frame, which is gone the moment \texttt{helper} returns. The standard fix is the recipe developed above: keep the \texttt{jmp\_buf} in TLS and re-arm it on every attempt, so the retry target is never a dead frame. The DATA-symbol subtlety of this chapter is the other half: the runtime exports \texttt{tm\_sigsetjmp} as a function pointer, and a compiler that emits a direct call jumps to the pointer variable's address --- a classic segfault that the companion repo fixed. Exercise~2 of this chapter asks you to design the runtime change precisely.
+
+The example is short because the bug is structural, not algorithmic.  The transfer body might preserve account floors and money conservation perfectly.  The STM might detect conflicts correctly.  None of that matters if abort recovery resumes execution in storage that no longer denotes a live activation record.
 
 \section{Worked Example: TLS Retry Buffer}
 \index{TLS jmp buffer}\index{retry loop}\index{abort}
@@ -384,20 +389,21 @@ int main(void) {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item The retry buffer has thread lifetime; it is not tied to the helper function that called \texttt{tm\_begin}.
-    \item Re-arming is per attempt.  Reusing an old checkpoint after commit is a bug.
-    \item The example returns \texttt{false} after one failed attempt to keep the program finite; a real TM retry loop may back off and retry.
-    \item The code still does not make arbitrary signal handlers safe.  It only fixes the lifetime of the transaction's own retry target.
-\end{itemize}
+The design restores the property the frame-lifetime hazard broke. The retry buffer has thread lifetime; it is not tied to the helper function that called \texttt{tm\_begin}. Re-arming is per attempt, and reusing an old checkpoint after commit is a bug. The example returns \texttt{false} after one failed attempt to keep the program finite, whereas a real TM retry loop may back off and retry. Note that the code still does not make arbitrary signal handlers safe; it only fixes the lifetime of the transaction's own retry target.
+
+The program uses \texttt{setjmp} rather than \texttt{sigsetjmp} to keep the listing portable and focused.  The same lifetime rule applies to both.  A runtime that masks signals during critical metadata updates must additionally restore the intended mask on retry; that is a signal-mask policy layered on top of the TLS ownership rule.
 
 \section{Compiler Optimizations Revisited}
-\begin{itemize}
-    \item Dead‑store elimination, LICM, CSE, barrier hoisting – concrete bug examples.
-    \item Intrinsics and annotations to protect transactional regions.
-    \item Crossing the barrier: an optimizer that hoists a transactional load above the instrumentation call observes a state no valid execution has.
-    \item The rule of thumb: transactional memory accesses are special function calls, not plain loads; optimizing through them requires their side effects to be declared.
-\end{itemize}
+
+The compiler sees ordinary C loads and stores.  The TM runtime sees transactional accesses with metadata effects: logging, validation, version checks, lock checks, read-set insertion, write-set insertion, ownership tests, and conflict detection.  If the compiler optimizes through the runtime boundary as though those effects do not exist, it can create executions that no TM algorithm permits.
+
+The failure modes have concrete names: dead-store elimination, loop-invariant code motion, common-subexpression elimination, and barrier hoisting each yield a specific bug when applied across the runtime boundary. The protection comes from intrinsics and annotations that make transactional regions visible to the optimizer. The central danger is crossing the barrier: an optimizer that hoists a transactional load above the instrumentation call observes a state no valid execution has. The rule of thumb is that transactional memory accesses are special function calls, not plain loads; optimizing through them requires their side effects to be declared.
+
+Dead-store elimination is unsafe when the store being removed is a transactional write-barrier effect rather than a redundant scalar store.  Loop-invariant code motion is unsafe when it moves a transactional read outside the validation window.  Common-subexpression elimination is unsafe when it merges two reads that should both validate against intervening commits.  Barrier hoisting is unsafe when it moves the actual memory load before the runtime has checked ownership or recorded the read.
+
+The right interface depends on the implementation.  A pure library STM can use opaque function calls, compiler barriers, volatile metadata accesses, and careful ABI boundaries.  A compiler-integrated TM can represent transactional reads and writes as intrinsics with explicit memory effects.  Hardware-assisted paths such as TSX-SGL still need compiler discipline: the compiler must not move operations across begin, abort, fallback, or commit boundaries in a way that changes transactional semantics.
+
+The key rule is simple.  A transactional access is not merely an access to the program variable.  It is an access to the program variable plus an access to the concurrency-control protocol.
 
 \section{Worked Example: Preventing Barrier Hoisting}
 \index{compiler optimization}\index{barrier hoisting}\index{transactional load}\index{opacity}
@@ -477,19 +483,17 @@ int main(void) {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item Transactional reads and writes are observable operations of the runtime, even when the accessed object is an ordinary \texttt{int}.
-    \item Hoisting \texttt{from->balance} above \texttt{tm\_read\_int} skips validation and may observe a value that is not opaque.
-    \item Eliminating the second read because a prior store appears to dominate it is only legal if the compiler also proves the TM metadata effects are preserved.
-    \item Production systems encode this contract with intrinsics, ABI rules, opaque calls, volatile metadata accesses, or compiler passes that understand transactions.
-\end{itemize}
+The listing makes the compiler contract explicit. Transactional reads and writes are observable operations of the runtime, even when the accessed object is an ordinary \texttt{int}. Hoisting \texttt{from->balance} above \texttt{tm\_read\_int} skips validation and may observe a value that is not opaque. Eliminating the second read because a prior store appears to dominate it is only legal if the compiler also proves that the TM metadata effects are preserved. Production systems encode this contract with intrinsics, ABI rules, opaque calls, volatile metadata accesses, or compiler passes that understand transactions.
+
+The barriers in the listing are not a performance recipe.  They are a minimal contract demonstration.  High-performance systems want the compiler to optimize inside transactions, but only with a representation that preserves the abstract events of the TM algorithm.  That representation must expose enough information to distinguish a safe scalar rewrite from an illegal change to the transaction's read set, write set, or validation order.
 
 \section{Summary}
-\begin{itemize}
-    \item A robust TM must handle resource management and OS interactions that break naive transactional boundaries.
-    \item Many pitfalls arise from the impedance mismatch between transactional semantics and low‑level system mechanisms.
-    \item Each pitfall has a canonical fix: deferred frees, TLS jmp buffers, and side-effect declarations.
-\end{itemize}
+
+A robust TM is more than a conflict detector.  It is a runtime system that must account for memory lifetime, OS control-flow mechanisms, compiler transformations, and the gap between source-level atomicity and machine-level execution.
+
+Speculative allocations are undone on abort.  Transactional frees are delayed until after commit.  Retry buffers must have a lifetime that survives the attempt they serve, which normally means thread-local runtime ownership and per-attempt re-arming.  Transactional reads and writes must be visible to the compiler as operations with side effects, not optimized as ordinary scalar memory references.
+
+In summary, a robust TM must handle resource management and OS interactions that break naive transactional boundaries. Many of the pitfalls arise from the impedance mismatch between transactional semantics and low-level system mechanisms. Each has a canonical fix: deferred frees, TLS jmp buffers, and side-effect declarations.
 
 \section{Exercises}
 \begin{enumerate}
@@ -500,3 +504,41 @@ int main(void) {
     \item \emph{[verification]} Write a small TLA+ or PlusCal model of the state machine in Fig.~\ref{fig:tx-resource-state}.  Include two accounts, one transfer operation, an abort action, and invariants for account floors and money conservation.
     \item \emph{[theory]} Give a precise compiler-side condition under which common-subexpression elimination of two transactional reads from the same address is semantics-preserving.  Your answer must mention validation, intervening writes, and opacity.
 \end{enumerate}
+
+\textbf{How to check your work.} The \emph{[implementation]} exercise is
+verified with the companion: add a generation number to the allocator wrapper
+of \S\ref{sec:deferred-free-bank-example}.  The \emph{[verification]}
+exercise is checked with TLC against the state machine of
+Figure~\ref{fig:tx-resource-state} (floors and conservation under both commit
+and abort; see Appendix~\ref{chap:pluscal-quick-ref}).  The
+\emph{[theory]} exercises are graded against \S\ref{sec:tls-retry-buffer-example}
+and \S\ref{sec:jmpbuf-example}.
+
+\index{allocator wrapper}
+\index{audit record}
+\index{balanced free}
+\index{commit action}
+\index{commit point}
+\index{compiler barrier}
+\index{common-subexpression elimination}
+\index{DATA symbol}
+\index{dead-store elimination}
+\index{deferred-free set}
+\index{function pointer ABI}
+\index{generation number}
+\index{jmp buffer lifetime}
+\index{loop-invariant code motion}
+\index{memory reclamation}
+\index{opaque function call}
+\index{read barrier}
+\index{region allocator}
+\index{serialization point}
+\index{signal mask}
+\index{speculative-allocation list}
+\index{stack frame}
+\index{thread-local storage}
+\index{transactional allocation}
+\index{transactional compiler intrinsic}
+\index{transactional free}
+\index{write barrier}
+% -------------------------------------------------------------------

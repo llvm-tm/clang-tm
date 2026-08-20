@@ -1,16 +1,23 @@
-
 \chapter{Non‑Speculative Designs: Single Lock and Serializers}
+\index{single global lock; SGL; serializers; queue-based transactional memory; non-speculative transactional memory; opacity; Amdahl's law}
+
+Non-speculative transactional memory is the control case for the rest of the implementation chapters. It gives up parallel execution inside transactions and obtains, in exchange, the simplest correctness story in the book: one transaction runs at a time, observes a sequential state, and publishes the next sequential state.
+
+This chapter studies two forms of that idea. A single-global-lock TM runs the caller inside one process-wide critical section. A thread serializer sends transaction bodies to a single worker and uses the worker's dequeue order as the serialization order. Both are deliberately simple. That simplicity is useful: SGL-like backends in the companion project are reference implementations, regression oracles, and fallbacks for more optimistic systems such as NOrec, TL2, TSC-TM, SwissTM, TinySTM, and the GPU designs.
 
 \section{Single Global Lock TM}
-\begin{itemize}
-    \item Implementation sketch: acquire global lock at \texttt{tm\_begin}, release at \texttt{tm\_commit}.
-    \item Properties: correct, no rollbacks, trivially opaque.
-    \item Performance analysis: serialisation bottleneck, Amdahl’s law.
-    \item The `correct-by-construction' yardstick: every more powerful STM must degrade gracefully toward SGL under contention.
-    \item The stub-vs-real-hooks subtlety: during single-threaded init a TM must still route \texttt{tm\_malloc}/\texttt{tm\_read} through the real backend, or validation is silently disabled (a real bug fixed in the companion repo).
-    \item The PlusCal/SGL model of Part~III as the reference execution -- one process, one lock, no surprises.
-    \item Thread-serializer / queue-based TM (below) is SGL with the lock replaced by a work queue; it eliminates lock contention but adds submission overhead.
-\end{itemize}
+
+A single-global-lock transactional memory acquires one global mutex at \texttt{tm\_begin} and releases it at \texttt{tm\_commit}. While the mutex is held, ordinary loads and stores are safe because no other transaction can interleave with them. There is no validation phase, no version-clock protocol, no read-set scan, and no rollback of speculative state. The transaction either performs its writes while holding the lock, or performs no writes because its own control flow decides not to.
+
+This design is correct by construction. Every committed transaction has a unique position in the order of lock acquisitions. Every read observes a state produced by the previous committed transaction in that order. Every write becomes visible before the lock is released and before the next transaction begins. Therefore opacity is immediate: even live transactions observe consistent states, because there is never another live writer racing with them.
+
+SGL is also a yardstick. A speculative STM that performs well only on conflict-free benchmarks but collapses into incorrect behavior under contention has failed the basic contract. Under extreme contention, more elaborate systems should degrade toward a safe serial execution, not toward torn reads, failed validation, or memory-management bugs.
+
+The companion codebase exposed one subtle version of this rule. During single-threaded initialization it is tempting to replace \texttt{tm\_malloc}, \texttt{tm\_free}, \texttt{tm\_read}, and \texttt{tm\_write} with direct stubs. That can appear harmless because there is no concurrency yet. It is not harmless. Initialization often creates objects that later participate in transactional validation, allocation tracking, persistence metadata, or ownership protocols. If initialization bypasses the real backend hooks, later tests may execute with silently disabled validation or incomplete metadata. The fixed rule is simple: even single-threaded setup routes memory and access operations through the selected backend.
+
+The PlusCal/SGL model from Part~III is the reference execution: one process owns the lock, executes the transaction body, updates the bank state, and releases the lock. There are no read-write conflicts to discover because the model forbids interleaving at the transaction granularity.
+
+A thread serializer, studied next, is SGL with the mutex replaced by a work queue. It eliminates lock handoff among callers, but it does not create parallel transaction execution. It merely moves the single execution slot from the caller threads to a worker thread.
 
 \begin{figure}[htbp]
 \centering
@@ -51,28 +58,34 @@ PersistentSGL & Persistent critical section protocol & Flushes, fences, recovery
 \label{tab:nonspec-taxonomy}
 \end{table}
 
-Amdahl's law gives the first-order bound. If fraction \(f\) of execution is serialized and \(N\) workers are available, the idealized speedup is
+Amdahl's law gives the first-order bound. If fraction f of execution is serialized and N workers are available, the idealized speedup is
 
 $$
 S_{\max} = \frac{1}{f + \frac{1-f}{N}}
 $$
 
-where \(f\) is the non-parallel fraction and \(N\) is the number of cores. For SGL, transaction execution itself belongs to the serialized fraction. The exact value depends on the workload, but the shape is invariant: once all useful work is inside the global lock, more cores mostly add waiting.
+where f is the non-parallel fraction and N is the number of cores. For SGL, transaction execution itself belongs to the serialized fraction. The exact value depends on the workload, but the shape is invariant: once all useful work is inside the global lock, more cores mostly add waiting.
+
+For example, if nearly all useful application work is performed inside transactions, f approaches one and the speedup approaches one regardless of the number of cores. This is not an implementation accident. It is the price paid for the simple proof.
 
 \section{Thread‑Serializer / Queue‑Based TM}
-\begin{itemize}
-    \item A single worker thread executes transactions sequentially from a lock‑free queue.
-    \item How this design eliminates contention on the lock but introduces submission overhead.
-    \item Loss of thread-locality: transaction descriptors must be per-task, since work migrates across threads.
-    \item The moral for later chapters: SGL is the baseline; every speculative design's job is to beat it without losing its guarantees.
-\end{itemize}
+
+A thread serializer uses one worker thread to execute submitted transactions sequentially from a queue. The calling threads package transaction bodies as tasks, submit them, and wait for results. The worker repeatedly dequeues one task, runs it to completion, records the result, and moves to the next task.
+
+The important shift is that mutual exclusion is no longer obtained by making many callers contend for a single lock. Instead, callers contend for queue insertion, and the worker owns the mutable state by convention. This can reduce lock handoff costs for tiny transactions, especially when the queue is efficient and the worker remains hot in cache. It can also hurt latency, because every operation now pays submission, wakeup, scheduling, and reply costs.
 
 A serializer is not merely an optimization of SGL. It changes the calling convention. The submitting thread no longer runs the transaction body; the worker does. Therefore transaction-local state cannot be stored only in thread-local variables of the submitter. The descriptor must travel with the task or be rebuilt by the worker.
+
+This matters for real TM backends. A transaction descriptor often contains read sets, write sets, allocation logs, statistics counters, nesting state, epoch information, or persistence metadata. In SGL the descriptor may naturally live on the caller's stack. In a serializer it must be part of the submitted closure, stored in the queue node, or allocated in worker-owned storage. Treating the two designs as interchangeable is a common source of bugs.
+
+Queue serializers also clarify the meaning of a serialization point. For SGL, the serialization point may be taken as the lock acquisition or the commit while the lock is held, depending on the proof style. For a serializer, the serialization order is the dequeue order. The transaction may have been submitted much earlier, but it does not observe memory until the worker runs it.
 
 \section{Worked Example: Bank Transfer Under SGL}
 \label{sec:worked-sgl-bank}
 
 The running bank example has two invariants. First, no account may fall below its floor. Second, the total amount of money is conserved by transfers. SGL enforces both by making each transfer execute as one sequential critical section.
+
+The example below keeps the transactional interface even though the implementation is only a mutex. This is intentional. The same application code can later be moved to TL2, NOrec, TinySTM, or another backend without changing every access site. The abstraction boundary is part of the test: reads, writes, allocation, and commit must pass through the backend selected for the run.
 
 \begin{lstlisting}[language=C++, caption={A compilable SGL-style transactional bank transfer.}]
 #include <cassert>
@@ -205,18 +218,20 @@ int main() {
 }
 \end{lstlisting}
 
-Lessons:
-\begin{itemize}
-    \item The linearization point is the interval protected by the global mutex.
-    \item Reads and writes still go through \texttt{read} and \texttt{write}. Replacing them with stubs during initialization can hide validation bugs in later backends.
-    \item Failed transfers still commit a read-only transaction. There is no rollback path because no speculative write has escaped.
-    \item The proof is independent of the number of calling threads: all completed transfers form the mutex acquisition order.
-\end{itemize}
+The linearization point is the interval protected by the global mutex. Reads and writes still go through \texttt{read} and \texttt{write}; replacing them with stubs during initialization can hide validation bugs in later backends. Failed transfers still commit a read-only transaction; there is no rollback path because no speculative write has escaped. The proof is independent of the number of calling threads: all completed transfers form the mutex acquisition order.
+
+The floor invariant is checked before either balance is changed. Since no other transaction can run between the check and the writes, the check remains valid until commit. The conservation invariant follows because the transaction subtracts and adds the same amount in one critical section.
+
+$$
+\sum_i balance_i' = \sum_i balance_i
+$$
 
 \section{Worked Example: Queue Serializer With Per-Task Descriptors}
 \label{sec:worked-serializer-bank}
 
 A serializer moves execution to a worker thread. The transaction descriptor is therefore attached to the submitted task. In this minimal example the descriptor is just the closure itself plus the returned future; real systems attach allocation logs, statistics, or backend-specific metadata.
+
+The bank object below is intentionally not internally synchronized. All access to it is made through the serializer. This is the same proof technique as SGL, but expressed as ownership transfer: while the worker executes a task, it is the only thread touching the bank state.
 
 \begin{lstlisting}[language=C++, caption={A compilable queue-based serializer for bank transfers.}]
 #include <cassert>
@@ -363,22 +378,17 @@ int main() {
 }
 \end{lstlisting}
 
-Lessons:
-\begin{itemize}
-    \item The queue order is the serialization order.
-    \item The bank object is unsynchronized internally; safety comes from the single worker.
-    \item The submitter waits on a \texttt{future}. This makes latency visible even when the worker has no lock contention.
-    \item Thread-local transaction descriptors would be wrong here: the submitting thread and executing thread are different.
-\end{itemize}
+The queue order is the serialization order. The bank object is unsynchronized internally; safety comes from the single worker. The submitter waits on a \texttt{future}, which makes latency visible even when the worker has no lock contention. Thread-local transaction descriptors would be wrong here: the submitting thread and executing thread are different.
+
+The serializer can outperform a contended lock only when the avoided lock traffic is larger than submission and reply overhead. It cannot overcome the fundamental sequential bottleneck. Under a burst of requests, the worker becomes the limiting server and queueing delay dominates.
 
 \section{Summary}
-\begin{itemize}
-    \item Non‑speculative designs are correct by construction and serve as a baseline.
-    \item Their lack of concurrency limits scalability.
-    \item SGL is the simplest opacity proof in the book: every transaction observes a state produced by the previous committed transaction.
-    \item Queue serializers replace lock handoff with task handoff. This can reduce lock contention but cannot create intra-transaction parallelism.
-    \item In the companion codebase, SGL-like designs are not toys: they serve as reference backends and regression oracles alongside speculative systems such as NOrec, TL2, TSC-TM, SwissTM, and others. The reported test suites pass \texttt{test\_tx} 114/114 and \texttt{test\_ds} 207/207 for the implemented backends.
-\end{itemize}
+
+Non-speculative designs are correct by construction and serve as a baseline. Their lack of concurrency limits scalability, but their proof obligations are small: every transaction observes a state produced by the previous committed transaction.
+
+SGL is the simplest opacity proof in the book. Queue serializers replace lock handoff with task handoff. This can reduce lock contention, but it cannot create intra-transaction parallelism.
+
+In the companion codebase, SGL-like designs are not toys. They serve as reference backends and regression oracles alongside speculative systems such as NOrec, TL2, TSC-TM, SwissTM, TinySTM, and others. The reported test suites pass \texttt{test\_tx} 114/114 and \texttt{test\_ds} 207/207 for the implemented backends. Measured results on the M1 Pro fuzz/bank workload also show why the baseline matters: TL2 and TSC-TM reach about 2.06M and 2.05M transactions per second in the reported runs, while NOrec-BF improves over NOrec on the read-mostly case. These numbers are not claims about this chapter's designs; they are evidence that the simple serial yardstick remains useful when evaluating faster speculative backends.
 
 \section{Exercises}
 \begin{enumerate}
@@ -388,4 +398,36 @@ Lessons:
     \item \emph{[implementation]} Extend Listing~\ref{sec:worked-sgl-bank} with \texttt{tm\_malloc} and \texttt{tm\_free} hooks. The hooks may still use the process allocator, but calls must pass through the backend object. Explain which tests would fail to detect bugs if initialization bypassed these hooks.
     \item \emph{[verification]} Write a PlusCal model of the bank transfer under SGL with two accounts, one lock, and two clients. State the money conservation invariant and the account-floor invariant. Model-check both with all transfer amounts in the set \texttt{\{0,1,2\}}.
     \item \emph{[theory]} Compare SGL and a queue serializer with three costs: lock acquisition, queue submission, and transaction body execution. Derive the condition under which the serializer has lower latency for a single transaction, and then explain why that condition may not imply higher throughput under a burst of requests.
+    \item \emph{[implementation]} Modify the queue serializer so that each task carries an explicit transaction descriptor containing a task id, an allocation log, and a commit flag. Ensure that the descriptor is created by the submitter but finalized by the worker.
+    \item \emph{[verification]} State the refinement mapping from a queue serializer to an abstract sequential TM. Identify the concrete variable that determines the abstract transaction order.
+    \item \emph{[theory]} For a workload in which every transaction runs under SGL, explain why increasing the number of caller threads can reduce throughput even though it does not change the sequential work performed.
 \end{enumerate}
+
+\textbf{How to check your work.} The \emph{[implementation]} exercises are
+verified with the companion: route \texttt{tm\_malloc}/\texttt{tm\_free}
+through the backend of \S\ref{sec:worked-sgl-bank}, and finalize the
+serializer task descriptor per \S\ref{sec:worked-serializer-bank}.  The
+\emph{[verification]} exercises are checked with TLC on the SGL bank model
+(\texttt{MoneyConserved}, account floor; see
+Appendix~\ref{chap:pluscal-quick-ref}).  The \emph{[theory]} exercises are
+graded against \S\ref{sec:worked-sgl-bank} and \S\ref{sec:semantic-obligations}.
+
+\index{global mutex}
+\index{transaction descriptor}
+\index{queue submission}
+\index{worker thread}
+\index{serialization order}
+\index{lock acquisition order}
+\index{linearization point}
+\index{bank transfer invariant}
+\index{money conservation}
+\index{account floor invariant}
+\index{backend hooks}
+\index{initialization stubs}
+\index{thread-local state}
+\index{task handoff}
+\index{regression oracle}
+\index{DistributedSGL}
+\index{PersistentSGL}
+
+% -------------------------------------------------------------------

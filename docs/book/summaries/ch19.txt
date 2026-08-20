@@ -1,6 +1,6 @@
 CHAPTER 19 — Open Questions and Emerging Directions
 Part: VIII (Horizons)
-Lines: ~345 | Sections: 7 | Figures: 1 | Tables: 1 | Listings: 3 | TikZ: 1
+Lines: ~359 | Sections: 7 | Figures: 1 | Tables: 1 | Listings: 3 | TikZ: 1
 
 PURPOSE: Final chapter: open problems (hybrid TM, persistent TM, distributed
 TM, GPU TM, verification) and where the field is going. The bank invariant is
@@ -15,7 +15,10 @@ SECTIONS
     Phased hybrid (RTM + STM fallback) ownership contract.
 - Summary
 - Exercises
-    (4 exercises incl. hybrid classification, durable-TM extension)
+    (7 exercises; ex1-3 now tagged [theory] and cross-reference Ch.16
+    fallback-admission / Ch.18 durable-journal / Ch.11 contract; ex5-6
+    cross-ref Ch.18 redo-log and distributed-commit sections to trim
+    overlap. Ends with a "How to check your work." block.)
 
 FIGURES: fig:phased-hybrid-state (phased hybrid state machine)
 TABLES: tab:emerging-directions (backend x pressure point matrix)

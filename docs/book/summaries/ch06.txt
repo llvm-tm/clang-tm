@@ -1,6 +1,6 @@
 CHAPTER 06 — Formal Design with PlusCal and TLA+
 Part: III (Formal Foundations: Mathematics and Verification)
-Lines: ~555 | Sections: 11 | Figures: 2 | Tables: 2 | Listings: 7 | TikZ: 1
+Lines: ~577 | Sections: 11 | Figures: 2 | Tables: 2 | Listings: 7 | TikZ: 1
 
 PURPOSE: TLA+ and PlusCal as the formal design language for TM algorithms:
 specification, model checking with TLC, bug injection, counterexample
@@ -27,6 +27,10 @@ SECTIONS
     Source of truth: docs/proofs; model -> TLC -> counterexample loop.
 - Summary
 - Exercises
+    (9 exercises; the last three added: lock-exclusion-insufficiency
+    theory, NOrec bug-injection via `make -C docs/proofs check-one
+    BACKEND=NOrec`, 3-account BankSGL verification, abstraction-gap
+    theory. Chapter ends with a "How to check your work." block.)
 
 FIGURES: fig:pluscal-latex (PlusCal source vs TLATeX pseudo-code),
          fig:norec-validation-sm (NOrec validation state machine)

@@ -1,10 +1,135 @@
-
 \chapter{TikZ Drawing Guide}
-\begin{itemize}
-    \item How to draw pipelines, caches, state machines, and Markov chains.
-    \item Reusable templates.
-    \item Common TM figures used in this book: transaction-lifecycle state machine, cache-coherence conflict diagram, clock/read-set validation timeline, abort/retry waveform.
-    \item Timeline pattern showing which clock values reads observe during validation (used in the TL2 section of Part~IV).
-    \item Warp-divergence and ballot diagrams for Part~VII.
-    \item Style guide: reuse a small accent palette so figures stay visually consistent.
-\end{itemize}
+\label{chap:tikz-guide}
+
+Every diagram in this book is built from a small set of reusable patterns.
+This appendix collects them so that figures added for an exercise or a new
+section stay visually consistent with the book.  The examples below are
+adapted from figures already used in the chapters; the key ideas are the
+\emph{state box}, the \emph{arrow with a label}, the \emph{pipeline row},
+and the \emph{timeline}.
+
+\section{The Shared Preamble and Styles}
+
+The book's preamble loads the libraries that all figures use
+(\texttt{positioning}, \texttt{arrows.meta}, \texttt{calc},
+\texttt{shapes.geometric}).  Reuse the style names defined here so that
+figures share one look:
+
+\begin{lstlisting}[language={}, caption={Common TikZ styles used throughout the book.}]
+\begin{tikzpicture}[
+    node distance=1.8cm and 2.2cm,
+    state/.style={draw, rounded corners, align=center,
+                  minimum width=2.6cm, minimum height=0.9cm},
+    edge/.style={-{Latex}, thick},
+    abort/.style={-{Latex}, thick, red}
+]
+\end{tikzpicture}
+\end{lstlisting}
+
+\emph{Style guide:} draw states in black, normal transitions with
+\texttt{-{Latex}} in black, and \emph{abort} or \emph{conflict} edges in
+red (\texttt{abort/.style}).  Reserve a third accent colour (e.g. blue) for
+a second, parallel path such as the fallback path in a hybrid design
+(Figure~\ref{fig:phased-hybrid-state}).  Keep fonts at
+\texttt{\textbackslash footnotesize} or smaller on edge labels.
+
+\section{Pattern 1: A Pipeline Row}
+
+A pipeline is a row of boxes with labelled arrows.  See
+Figure~\ref{fig:front-end-pipeline} (the front end) and
+Figure~\ref{fig:compiler-tm-pass} (the compiler pass) for the pattern in
+use:
+
+\begin{lstlisting}[language={}, caption={Pipeline row.}]
+\begin{tikzpicture}[box/.style={draw, rounded corners, align=center,
+    minimum width=2.2cm, minimum height=0.8cm}]
+\node[box] (src) {Source};
+\node[box, right=of src] (lex) {Lexer};
+\node[box, right=of lex] (ast) {AST};
+\draw[-{Stealth}] (src) -- node[above]{tokens} (lex);
+\draw[-{Stealth}] (lex) -- node[above]{parse} (ast);
+\end{tikzpicture}
+\end{lstlisting}
+
+To turn a row into a ring (the retry loop of an abort), route the last box
+back under the row with \texttt{(abort.west) -| (begin.south)} as in
+Figure~\ref{fig:htm-coherence-abort}.
+
+\section{Pattern 2: A State Machine}
+
+A finite-state machine is the book's most common diagram: the transaction
+lifecycle (Figure~\ref{fig:transactional-state-machine}), the API control
+states (Figure~\ref{fig:api-state-machine}), and the resource state machine
+(Figure~\ref{fig:tx-resource-state}) all use it.
+
+\begin{lstlisting}[language={}, caption={State machine with a self-loop and a labelled decision.}]
+\begin{tikzpicture}[
+    node distance=2cm,
+    state/.style={draw, rounded corners, align=center,
+                  minimum width=2.2cm, minimum height=0.8cm},
+    edge/.style={-{Latex}, thick}
+]
+\node[state] (begin) {Begin};
+\node[state, right=of begin] (read) {Read};
+\node[state, right=of read] (commit) {Commit};
+\node[state, below=of read] (abort) {Abort};
+\draw[edge] (begin) -- (read);
+\draw[edge] (read) -- node[above]{valid} (commit);
+\draw[edge] (read) -- node[right]{stale} (abort);
+\draw[edge] (abort.west) -| ($(begin.south)+(0,-0.4)$) -- (begin.south);
+\end{tikzpicture}
+\end{lstlisting}
+
+For a Markov chain (Chapter~5, \S\ref{sec:math-example}), put the
+transition probability on every edge and keep the chain acyclic except for
+the absorbing commit/abort states.
+
+\section{Pattern 3: A Timeline}
+
+A timeline shows when reads observe which clock values, or when a commit
+publishes writes.  It is the pattern behind the TL2 timeline
+(Figure~\ref{fig:tl2-timeline}) and the read-validate diagrams.
+
+\begin{lstlisting}[language={}, caption={A timeline with read and commit markers.}]
+\begin{tikzpicture}[x=1.4cm]
+\draw[-{Latex}] (0,0) -- (5,0) node[right]{time};
+\foreach \t/\v in {1/1,2/2,3/3} {
+    \draw (\t,0.08) -- (\t,-0.08) node[below, font=\scriptsize]{clock=\v};
+}
+\node[above, font=\small] at (1.5,0.1) {read};
+\node[above, font=\small] at (3,0.1) {validate};
+\end{tikzpicture}
+\end{lstlisting}
+
+\section{Pattern 4: An Abort/Retry Waveform}
+
+The waveform that shows an abort, a retry, and a later commit is a row of
+short horizontal segments with a drop at the abort point.  Build it from a
+chain of \texttt{edge} arrows where the \emph{abort} edge uses the red
+style and the retry edge arcs back, as in
+Figure~\ref{fig:phased-hybrid-state}.
+
+\section{Pattern 5: Warp Divergence and Ballot (Part VII)}
+
+GPU diagrams (Chapter~17) draw a warp as a column of lanes, with a
+\emph{divergence} branch shown as two forks.  Keep lanes aligned with
+\texttt{below=of} and mark inactive lanes with a dashed outline.  For a
+ballot result, show the per-lane predicate bits feeding a mask, as in
+\S\ref{sec:ballot}.
+
+\section{Adding a New Figure}
+
+\begin{enumerate}
+    \item Pick the pattern above that matches the concept (pipeline,
+          state machine, timeline, or waveform).
+    \item Copy its template and rename every label.
+    \item Add a \texttt{\textbackslash caption} that states the one
+          conclusion the reader should take away, and a
+          \texttt{\textbackslash label} in the figure's convention
+          (\texttt{fig:}).
+    \item Reuse the shared styles so the figure matches the book's palette.
+\end{enumerate}
+
+The figures already in the book are the reference implementation of these
+patterns.  When in doubt, copy the nearest existing figure and modify it
+rather than inventing new styling.

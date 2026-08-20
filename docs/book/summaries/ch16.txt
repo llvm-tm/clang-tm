@@ -1,6 +1,6 @@
 CHAPTER 16 — Hardware Transactional Memory – Design and Simulation
 Part: VII (Advanced Topics)
-Lines: ~477 | Sections: 10 | Figures: 1 | Tables: 1 | Listings: 5 | TikZ: 1
+Lines: ~491 | Sections: 10 | Figures: 1 | Tables: 1 | Listings: 5 | TikZ: 1
 
 PURPOSE: HTM: extending cache coherence for transactions, modern HTM
 implementations (Intel RTM), RTM inside, lock subscription, abort-cause
@@ -17,9 +17,14 @@ SECTIONS
 - Worked Example: Abort-Cause Counters
 - Worked Example: Capacity Probe
 - Simulation with gem5
+    (labelled sec:htm-simulation; exercises reuse it as the simulator
+    fallback when RTM hardware is absent)
 - Worked Example: Model Checking HTM Abort and Fallback
 - Summary
 - Exercises
+    (9 exercises; ex1/ex3 gain companion fallbacks — TSX-SGL backend +
+    sec:hybrid-example for the fallback design, simulator/ for the gem5
+    sweep. Ends with a "How to check your work." block.)
 
 FIGURES: fig:htm-coherence-abort (coherence-based HTM abort)
 TABLES: tab:htm-implementations (HTM interface/diagnostics/contract)

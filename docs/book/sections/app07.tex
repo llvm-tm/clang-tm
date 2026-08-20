@@ -1,10 +1,750 @@
-
 \chapter{Answers and Hints for Selected Exercises}
-\begin{itemize}
-    \item Brief solutions or pointers to the main text where the concept is explained.
-    \item One concise hint per exercise, referencing the section that resolves it.
-    \item For model-checking exercises, hint at the invariant name and the bound that keeps TLC fast.
-    \item For implementation exercises, point at the companion code location and the command that verifies the solution.
-\end{itemize}
+\label{chap:answers}
 
-% ~~~~~~~~~~~~~~ Back matter ~~~~~~~~~~~~~~
+This appendix gives one concise hint per exercise.  A hint is a pointer,
+not a full solution: it names the section that resolves the question, the
+invariant and TLC bound for \emph{[verification]} exercises, or the
+companion path and verification command for \emph{[implementation]}
+exercises.  Hints are grouped by chapter so they can be handed out
+selectively.
+
+\section*{Chapter 1 --- The Locking Crisis}
+
+\begin{enumerate}
+    \item \emph{[theory]} Two lock-based modules compose only when they
+          share one lock order; the deadlock is a property of the
+          composition, never of either module alone.  The failure mode is
+          lock-order inversion (\S\ref{ch:locking-crisis}, ``Composability'').
+    \item \emph{[theory]} Finer locking trades contention for ordering
+          obligations; the lock-order example is the running bank's audit
+          path (\S\ref{ch:locking-crisis}).
+    \item \emph{[implementation]} Compile and run
+          Listing~\ref{lst:two-lock-deadlock}; a single global lock order
+          removes the deadlock, while \texttt{pthread\_mutex\_trylock}
+          rollback trades it for starvation (one thread can lose every
+          race).  Verify with \texttt{make -C tests run}.
+    \item \emph{[verification]} Add a \texttt{Reject} action to
+          Listing~\ref{lst:bank-atomic} that fires when the floor check
+          fails and leaves both balances unchanged; check
+          \texttt{MoneyInvariant} and \texttt{FloorInvariant} with TLC
+          (Appendix~\ref{chap:pluscal-quick-ref}).
+    \item \emph{[theory]} The assumption is that the TM runtime flattens
+          nesting: an inner \texttt{tm\_begin} on the same thread is a no-op
+          counted by a nesting counter, so the outer commit publishes once.
+    \item \emph{[implementation]} Run under \texttt{rr} and replay; the
+          wait-for-cycle graph is built from each thread's blocked frame and
+          the lock it waits on (\S\ref{ch:locking-crisis}).
+    \item \emph{[verification]} Removing \texttt{Transfer} and exposing two
+          actions lets TLC reach a state where account~1 was debited but
+          account~2 not yet credited --- the two actions correspond to the
+          instrumented write pair for the source-level transfer.
+    \item \emph{[open]} There is no single right answer.  A ``solve'' case
+          argues that opacity, flattening, and automatic reclamation remove
+          the three lock crises; a ``move'' case points at the runtime's
+          own unsolved problems (deferred frees, abort side effects,
+          nesting semantics in \S\ref{sec:api-example} and
+          \S\ref{sec:deferred-free-bank-example}).  A strong answer states
+          one assumption explicitly and concedes the strongest
+          counterexample.
+\end{enumerate}
+
+\section*{Chapter 2 --- Transactions: From Databases to Shared Memory}
+
+\begin{enumerate}
+    \item \emph{[theory]} Let an aborted reader observe a state no serial
+          execution can produce; serializability only constrains committed
+          transactions.  See ``Worked Example: A History That Is
+          Serializable but Not Opaque''.
+    \item \emph{[theory]} Timestamp ordering without validation leaves the
+          read set unguarded; a reader can commit on a snapshot that a
+          concurrent writer has already invalidated (the ``stale read''
+          hazard of the data-hazard section).
+    \item \emph{[implementation]} A redo-log STM checks its write set
+          before memory (read-own-writes), then validates both logged
+          source balances against the values read at begin before
+          publishing under one commit mutex.  The repository's
+          \texttt{tm\_write} implementations in Part~IV follow this shape.
+    \item \emph{[verification]} Debit-as-one-action and credit-as-a-later
+          action fails \texttt{MoneyConserved} (TLC gives a two-step
+          counterexample); the repaired invariant is
+          $\mathrm{bal}_A+\mathrm{bal}_B+\mathrm{pending} = \mathrm{const}$.
+    \item \emph{[theory]} SGL linearizes at lock acquisition, TL2 at commit
+          clock, NOrec at commit publish, and a multi-version STM at
+          commit; a read-only audit can linearize on a consistent snapshot
+          without blocking a writer.
+    \item \emph{[verification]} With \texttt{Floor=10} the debit of a
+          balance-10 account is disabled, so the reachable state space
+          shrinks --- the exercise is about which \emph{transitions}
+          disappear, not about new states.
+    \item \emph{[theory]} The gap is a plain (non-transactional) read or
+          write to a location the transaction also touches; strong
+          atomicity intercepts it, weak atomicity does not.
+    \item \emph{[literature]} Herlihy--Wing give linearizability a
+          \emph{value-range} history and a history-vs-history condition;
+          Guerraoui--Kapalka give opacity a per-iteration witness history
+          whose operations are ordered.  The key contrast to state: opacity
+          must also handle \emph{aborted} transactions' reads, which
+          linearizability is free to ignore because it only ever considers
+          completed operations.
+\end{enumerate}
+
+\section*{Chapter 3 --- Hardware Concepts for Transactional Memory}
+
+\begin{enumerate}
+    \item \emph{[theory]} The store is marked speculative until the memory
+          stage commits it in order; on abort the reorder buffer squashes it
+          before writeback, so it never reaches the cache.
+    \item \emph{[theory]} Another core sees the store to~A through its own
+          cache before the transaction's writes publish; the commit-publish
+          fence (Figure~\ref{fig:tso-store-buffer}) makes the two writes
+          visible together.
+    \item \emph{[theory]} A store buffer can hide the transaction's writes
+          from the coherence protocol until they leave the buffer, so
+          conflict detection alone cannot see an un-published store.
+    \item \emph{[implementation]} Use the two layouts of
+          Listing~\ref{lst:cache-line-layout}; count committed transfers
+          under the SGL wrapper and assert the total balance after each run
+          (\texttt{make -C benchmarks/cpp run-bank}).
+    \item \emph{[verification]} Split into \texttt{Debit} and
+          \texttt{Credit} in Listing~\ref{lst:bank-atomic-commit}; TLC finds
+          a violation of $\sum \mathrm{balance}[a]=200$ for the split model
+          and none for the atomic action.
+    \item \emph{[theory]} An invalidation detects conflicts on cache-line
+          granularity only; a full STM needs word-level detection, and GPUs
+          have no coherent private caches across SMs to hang invalidation
+          on (\S\ref{sec:hardware}).
+    \item \emph{[implementation]} Reproduce the store-buffer surprise of
+          \S\ref{sec:tso-example}: two threads, an atomic flag, and a
+          release fence; without the fence the torn view appears in some
+          runs.
+    \item \emph{[open]} There is no single right answer.  A ``ahead of its
+          time'' case points at Herlihy--Moss needing per-address versioning
+          hardware that never shipped; a ``right on time'' case points at
+          the modern integration of HTM with strong-atomicity fallback and
+          software STM (\S\ref{sec:hardware}).  A strong answer names the
+          hardware primitive that was (or was not) missing in 1993.
+\end{enumerate}
+
+\section*{Chapter 4 --- Programming Languages and Memory Semantics for TM}
+
+\begin{enumerate}
+    \item \emph{[theory]} \texttt{volatile} or an \texttt{asm} barrier turns
+          the load into an opaque side effect the optimizer cannot move;
+          the cost is a lost optimization for every access.
+    \item \emph{[theory]} \texttt{RefCell} enforces the borrow check at
+          runtime, but an STM instruments memory accesses, not ownership;
+          detecting the race requires an explicit runtime check the STM does
+          not perform.
+    \item \emph{[implementation]} The C++ benchmark and Rust
+          \texttt{Mutex} wrapper are independent; compare lines of code and
+          where the invariant lives, not raw speed.
+    \item \emph{[implementation]} Update \texttt{transfer\_count} inside the
+          same transaction as the balances
+          (Listing~\ref{lst:abi-safe-bank}); the three-atomic version has an
+          interleaving where each atomic op succeeds but the compound
+          invariant (count equals committed transfers) breaks.
+    \item \emph{[verification]} Splitting \texttt{Commit} into debit and
+          credit in Listing~\ref{lst:bank-tm-atomicity} gives a
+          counterexample to \texttt{InvMoney}; it represents a runtime or
+          ABI that publishes the write pair in two steps.
+    \item \emph{[theory]} \texttt{std::memory\_order} parameters let the
+          runtime infer little; a \texttt{TxCell<T>} type proves which
+          values are transactional at compile time, leaving validation to
+          the runtime and atomicity to the wrapper.
+    \item \emph{[verification]} An \texttt{Abort} action from
+          \texttt{active} that leaves balances unchanged preserves both
+          invariants; there is no partial state during \texttt{Commit}
+          because a TLA+ action is atomic.
+    \item \emph{[literature]} Blundell et al.\ show that with weak atomicity
+          a transaction can observe a non-transactional access to the same
+          location mid-flight, and they give a practical workaround (the
+          ``dual-granularity'' or explicit-transactional-access encoding).
+          State one scenario where the workaround still leaks, e.g.\ a
+          non-transactional write through an alias the compiler could not
+          see at instrument time.
+\end{enumerate}
+
+\section*{Chapter 5 --- Mathematical Foundations}
+
+\begin{enumerate}
+    \item Model retry as an absorbing Markov chain: expected attempts until
+          commit is $1/(1-p_{\mathrm{abort}})$ (geometric distribution).
+    \item Doubling the abort rate raises the effective arrival rate of
+          useful attempts, so Little's Law $L=\lambda S$ puts more
+          transactions in flight.
+    \item The throughput-maximizing back-off balances wasted-work reduction
+          against added latency; the optimum is where the expected
+          attempts-per-commit curve flattens.
+    \item \emph{[implementation]} Extend \S\ref{sec:math-bank-simulation}:
+          the money-conservation assertion stays; report the measured mean
+          attempts per commit for each probability.
+    \item \emph{[verification]} Add a nondeterministic \texttt{Abort} to
+          \S\ref{sec:math-bank-tla}; the conservation invariant holds
+          because an abort restores the snapshot.
+    \item \emph{[theory]} Independent phases give
+          $1/((1-p_1)(1-p_2))$; if the phases are correlated the product
+          formula no longer applies.
+    \item \emph{[implementation]} Count commits, aborts, retries, and
+          rejected records in the trace-recognizing DFA and write them to a
+          file on exit.
+    \item \emph{[verification]} Two transactions from the same snapshot must
+          re-validate before commit; the validation condition is the
+          read-set check of \S\ref{sec:norec-example}.
+    \item \emph{[theory]} Equal committed throughput with different residence
+          times means the longer-residence system holds more in-flight
+          transactions, raising contention and abort rate.
+\end{enumerate}
+
+\section*{Chapter 6 --- Formal Design with PlusCal and TLA+}
+
+\begin{enumerate}
+    \item Add a read-set validation step before write-back in the SGL model
+          (\S\ref{sec:pluscal-example}); opacity holds because the lock
+          serializes, but the check must be written to be checked.
+    \item \emph{[verification]} Remove the value recheck from
+          \texttt{BankNOrecValue} (commit after a changed clock); the TLC
+          output names the stale-snapshot trace
+          (Appendix~\ref{chap:pluscal-quick-ref}).
+    \item A TM using eager locking holds the lock for the whole
+          transaction; two transactions acquiring opposite locks produce a
+          TLC deadlock report with \texttt{CHECK\_DEADLOCK TRUE}.
+    \item \emph{[implementation]} Build the two-thread harness against
+          \texttt{benchmarks/cpp/bank} with \texttt{BACKEND=sgl} and
+          \texttt{BACKEND=norec}; assert the same invariants the models
+          check (\texttt{make -C benchmarks/cpp run-bank}).
+    \item \emph{[verification]} Removing the commit-time recheck in
+          \texttt{BankNOrecValue} (the second validation in
+          Figure~\ref{fig:norec-validation-sm}) fails opacity; the shortest
+          counterexample is two transactions, one stale commit.
+    \item \emph{[theory]} Lock exclusion prevents concurrent write-back but
+          not stale reads; the history is a reader that commits using values
+          from before another transaction's commit, which the
+          \emph{validate} edge of Figure~\ref{fig:norec-validation-sm} must
+          reject.
+    \item \emph{[implementation]} Run the repository's NOrec model
+          (\texttt{docs/proofs/NOrec.tla}) with
+          \texttt{make -C docs/proofs check-one BACKEND=NOrec}, record the
+          state count, delete the commit-time recheck, and confirm TLC now
+          finds the violation.
+    \item \emph{[verification]} Add a third account and a second transfer
+          direction to \texttt{BankSGL}; write
+          \texttt{MoneyConserved} over all three balances and check
+          \texttt{FloorsHold} for each.
+    \item \emph{[theory]} Model checking is a bounded, finite claim.  Name
+          two gaps --- the C stack and \texttt{jmp\_buf} lifetimes
+          (\S\ref{sec:jmpbuf-example}) and unbounded state (allocator,
+          clock) --- that a model omits and the implementation still owns.
+    \item \emph{[literature]} Lamport's TLA+ report and \emph{Specifying
+          Systems} book describe \emph{what} and \emph{why} (assertions and
+          refinement), not \emph{how} to run TLC at scale.  Contrast that
+          with this chapter's practical workflow: concrete types and
+          bounds, invariants checked in seconds.  A strong answer states one
+          TLA+ feature the book deliberately left out (e.g.\ temporal
+          formulas, refinement mappings) and why the chapter's level skips
+          it.
+\end{enumerate}
+
+\section*{Chapter 7 --- Transaction API Design}
+
+\begin{enumerate}
+    \item \texttt{tm\_write} returning a status at write time would expose
+          whether a later commit will fail, which a transaction must not
+          know; return status from \texttt{tm\_commit} instead.
+    \item Batch validation amortizes the clock check across many
+          transactions at commit (\S\ref{sec:api-example}, asynchronous
+          API).
+    \item \texttt{tm\_begin}/\texttt{tm\_end} are explicit and can be
+          annotated \texttt{transaction\_safe}; \texttt{\_\_transaction\_\allowbreak atomic}
+          moves the boundary into the language and makes accidental
+          side effects a compiler error, but requires the instrumenting
+          compiler.
+    \item \emph{[implementation]} An \texttt{atomic\_retry} helper wraps
+          \S\ref{sec:api-example}'s retry loop; force one abort by
+          contention and assert the account sum is unchanged.
+    \item \emph{[verification]} Model Figure~\ref{fig:api-state-machine};
+          the invariant is that \emph{Committed} is reachable only via the
+          validation-success edge.
+    \item \emph{[theory]} Language-integrated and future-based APIs isolate
+          side effects best; explicit calls leak them by making every
+          statement in the body appear transactional.
+    \item \emph{[implementation]} A \texttt{TM<int>} wrapper hides
+          \texttt{tm\_read\_i4}/\texttt{tm\_write\_i4}; exposing \texttt{int
+          *} lets a caller bypass instrumentation for that one address.
+    \item \emph{[verification]} The invariant for the future states is:
+          a future's returned value must be produced by a \emph{committed}
+          attempt, never an aborted one.
+    \item \emph{[theory]} A receipt is replay-unsafe on abort; an audit-log
+          append is replay-safe only if deferred until commit; a
+          transactional counter is safe when the counter itself is a TM
+          location.
+    \item \emph{[open]} There is no single right answer.  A ``language''
+          position argues opacity and atomicity are type properties the
+          compiler can enforce (\S\ref{sec:api-example}); a ``library''
+          position argues the runtime owns retry and side-effect policy; a
+          ``hardware'' position argues aborts must be engine-visible to be
+          correct at all.  A strong answer states who detects an abort and
+          who decides what gets undone.
+\end{enumerate}
+
+\section*{Chapter 8 --- Non-Speculative Designs: Single Lock and Serializers}
+
+\begin{enumerate}
+    \item Apply Amdahl's law with a 10\% critical fraction and 16 cores:
+          $1/(0.10/16 + 0.90)$.
+    \item A single worker amortizes lock overhead away and never pays
+          contention; when the critical section is a few instructions, the
+          mutex round-trip dominates fine-grained locking.
+    \item The runtime needs a contention signal (abort rate, lock
+          spin-wait time, queue depth) to decide when to switch
+          (\S\ref{sec:worked-sgl-bank}).
+    \item \emph{[implementation]} Route \texttt{tm\_malloc}/\texttt{tm\_free}
+          through the backend object; tests that allocate inside a
+          transaction then abort would miss leaks or double-frees if the
+          hooks were bypassed at init (\S\ref{sec:semantic-obligations}).
+    \item \emph{[verification]} Two clients, one lock, balances in
+          \texttt{\{0,1,2\}} transfers; \texttt{MoneyConserved} and the
+          floor invariant both pass (state space is small --- TLC exhausts
+          it).
+    \item \emph{[theory]} The serializer wins for a single transaction when
+          queue-submission latency is below lock-acquisition latency, but
+          under a burst both serialize, so throughput is bounded by the
+          worker, not the mechanism.
+    \item \emph{[implementation]} The task descriptor is created by the
+          submitter (task id, allocation log, commit flag) and finalized by
+          the worker; see \S\ref{sec:worked-serializer-bank}.
+    \item \emph{[verification]} The concrete variable that fixes the abstract
+          order is the task queue (the submission order); the refinement
+          map sends the queue to the serial TM's linearization order.
+    \item \emph{[theory]} More caller threads raise mutex contention and
+          cache-line ping-pong without changing the serialized work; this is
+          the lock-convoy effect.
+\end{enumerate}
+
+\section*{Chapter 9 --- Speculative Designs: NOrec and Beyond}
+
+\begin{enumerate}
+    \item T1's write set entry for \texttt{x} no longer matches memory when
+          T2 commits; NOrec's commit-time value validation aborts T1
+          (\S\ref{sec:norec-example}).
+    \item Under single-location contention, eager locking (write-through)
+          fails fast on the lock instead of validating a whole read set;
+          predict it, then measure with the STAMP harness.
+    \item Run the same STAMP benchmark under \texttt{NOrec} and
+          \texttt{TinySTM} write-through
+          (\texttt{make -C benchmarks/cpp BACKEND=... run-intruder}); read
+          the abort columns, not just throughput.
+    \item The snapshot must be re-checked against the orec's current
+          version after reading (\S\ref{sec:tl2-example}): capture version,
+          read data, re-check version.
+    \item \emph{[verification]} Omit the read-set re-validation in a TL2
+          commit model; the counterexample is a reader that commits on a
+          partially published write (Part~III workflow).
+    \item NOrec keeps no per-location metadata (smallest), TL2 has orecs,
+          JVSTM and MVLog retain version histories --- the read-mostly
+          case favors JVSTM/MVLog for reads, not memory.
+    \item \emph{[implementation]} Bound the retry loop of
+          \S\ref{sec:norec-bank-transfer-example} and count floor rejections
+          and validation aborts separately.
+    \item \emph{[verification]} Splitting read/check/debit/credit in
+          \S\ref{sec:pluscal-bank-floor-example} and removing the
+          commit-time validation lets a stale \texttt{seen} commit ---
+          \texttt{MoneyConserved} fails.
+    \item \emph{[theory]} Invisible-read families (NOrec, TL2, JVSTM) must
+          prove that a committed snapshot was valid at commit time; the
+          proof obligation is the read-set validation rule in
+          Table~\ref{tab:snapshot-taxonomy}.
+    \item \emph{[literature]} The papers describe implementations --- NOrec's
+          value-based commit-time validation, TL2's per-orec ownership and
+          clock.  The book's read-validate pattern is the abstraction common
+          to both; a real simplification to name is the book's single global
+          clock and its omission of TL2's lock-table hashing or NOrec's
+          Bloom-filter read-set encoding.
+    \item \emph{[open]} There is no single right answer.  A ``simpler wins''
+          case cites the chapter's experiments (NOrec competitive at lower
+          complexity); a ``depth wins'' case cites workloads where
+          asymptotics matter (long-running transactions, high abort rates).
+          A strong answer defines ``better'' explicitly before arguing and
+          concedes the workload where its own choice loses.
+\end{enumerate}
+
+\section*{Chapter 10 --- Compiler Fundamentals: IRs and Passes}
+
+\begin{enumerate}
+    \item Identify the loads and stores that touch shared addresses and
+          replace each with the corresponding \texttt{tm\_read\_*}/%
+          \texttt{tm\_write\_*} barrier call.
+    \item Whole-program instrumentation bloats read/write sets, forces
+          stack-locals through barriers, and destroys register promotion;
+          the instrumentation policy of Chapter~10 fixes this with the
+          address-space classification.
+    \item Mark transaction blocks with an intrinsic and run the pass only
+          over their basic blocks, using \texttt{LLVM\_TM\_ADDR\_CHECK} for
+          the stack case.
+    \item \emph{[implementation]} \texttt{id} is eight bytes
+          (\texttt{tm\_read\_i8}/\texttt{tm\_write\_i8}), \texttt{balance}
+          is four bytes (\texttt{tm\_read\_i4}/\texttt{tm\_write\_i4}); show
+          the post-pass call sequence for both fields.
+    \item \emph{[verification]} Add \texttt{"unknown"} to \texttt{Addrs};
+          the invariant is that every load/store on an unknown address is
+          still instrumented (\S\ref{sec:address-policy-tla}).
+    \item \emph{[theory]} Benchmarks that keep TM data in globals survive
+          global-only instrumentation, but a general compiler must
+          instrument heap objects too or lose atomicity for
+          \texttt{malloc}ed shared data.
+\end{enumerate}
+
+\section*{Chapter 11 --- Compiler Optimizations and Their Impact on TM}
+
+\begin{enumerate}
+    \item The store is speculative state; removing it lets a commit publish
+          nothing, and a subsequent read sees the pre-transaction value.
+    \item \texttt{tm\_clobber(x)} is an opaque side effect on the write set
+          that prevents DSE from eliminating the store
+          (\S\ref{sec:optimization-taxonomy}).
+    \item Hoisting the read out of the loop removes it from the read set;
+          validation then cannot see that the address changed between
+          iterations.
+    \item \emph{[implementation]} Instrument heap/global accesses and leave
+          provable stack locals untouched; test on the transfer body of
+          \S\ref{sec:worked-barriered-transfer}.
+    \item \emph{[verification]} \texttt{BadTransfer} dropping the credit
+          leaves the floor checks (they still pass) but fails
+          \texttt{MoneyConserved} --- the conservation invariant is the one
+          that detects the asymmetric drop.
+    \item \emph{[theory]} CSE is sound if no intervening write or
+          validation invalidates the first read and the abort behavior is
+          unchanged; otherwise the two reads must stay distinct.
+    \item \emph{[open]} There is no single right answer.  A ``preserve the
+          abstract read/write set'' position is compiler-friendly and
+          matches opacity; a ``preserve the exact memory behaviour''
+          position protects debuggers and expects users but blocks
+          reordering.  A strong answer states who is harmed by each
+          relaxation and where opacity's line falls.
+\end{enumerate}
+
+\section*{Chapter 12 --- Testing, Debugging, and Scheduling}
+
+\begin{enumerate}
+    \item Inject aborts at random points and run the undo-log test suite;
+          a failing test must shrink to a minimal reproducer
+          (\S\ref{sec:test-example}).
+    \item Set a hardware watchpoint on the write-set address; step backwards
+          with \texttt{rr reverse} to the point where the log was lost
+          (\S\ref{sec:replay-lost-update}).
+    \item A preemption bound restricts the interleavings explored; complete
+          but intractable for large bounds, tractable but incomplete for
+          small ones.
+    \item \emph{[implementation]} Add floors to the harness of
+          \S\ref{sec:abort-fuzz-bank}; run and observe which of the two
+          invariants fails first.
+    \item \emph{[verification]} Omit rollback for \textsc{Debit}: the model
+          reaches a state where money is debited but never credited, and
+          TLC finds it (\S\ref{sec:tla-bank-conservation}).
+    \item Small bounds find most bugs because most races need few context
+          switches; data races that need a long orderly interleaving (a
+          torn write-back at a specific step) can need a larger bound.
+    \item \emph{[implementation]} Emit the seed, thread, source, destination,
+          amount, and abort-site name on failure so the run is
+          reproducible.
+    \item \emph{[verification]} The new invariant is \texttt{FloorsHold};
+          it is independent of \texttt{MoneyConserved} --- one can hold
+          while the other fails.
+    \item A counter's correctness is a final aggregate; a concurrent queue
+          must be checked against an oracle that returns per-operation
+          values, which a single sequential oracle cannot do.
+    \item \emph{[literature]} CHESS explores all schedules up to a bounded
+          number of preemptions, so it can systematically find a race that
+          a given stress-test seed may never hit; the guarantee is
+          \emph{deterministic exploration}, not probabilistic.  Its blind
+          spot is anything needing an unbounded number of preemptions or a
+          real-time/signal interleaving the model does not schedule.
+\end{enumerate}
+
+\section*{Chapter 13 --- Pitfalls: Memory, Signals, and Optimizations}
+
+\begin{enumerate}
+    \item The node is speculative allocation; freeing it on abort can
+          invalidate a pointer another thread already read --- defer the
+          free until commit (\S\ref{sec:deferred-free-bank-example}).
+    \item After \texttt{f} returns, the frame holding the \texttt{jmp\_buf}
+          is gone; a later \texttt{siglongjmp} lands in dead stack.  Fix:
+          keep the retry buffer in \texttt{\_\_thread} TLS and refresh the
+          backend pointer with \texttt{tm\_set\_jmpbuf}
+          (\S\ref{sec:tls-retry-buffer-example}).
+    \item The eliminated load was part of the read set; without it,
+          validation cannot detect that the address changed.
+    \item \emph{[implementation]} A generation number per allocation lets a
+          double-free detector distinguish reuse from a genuine double-free
+          (\S\ref{sec:deferred-free-bank-example}).
+    \item \emph{[verification]} Model Figure~\ref{fig:tx-resource-state} with
+          two accounts, one transfer, and an abort action; check floors and
+          conservation under both commit and abort paths.
+    \item \emph{[theory]} The condition matches Chapter~11: no intervening
+          write, no invalidation between the reads, and identical abort
+          behavior; otherwise opacity breaks.
+\end{enumerate}
+
+\section*{Chapter 14 --- Performance Modeling and Tuning}
+
+\begin{enumerate}
+    \item Fit a retry chain to STAMP intruder and find where throughput
+          $= \lambda(1-p_{\mathrm{abort}})$ peaks
+          (\S\ref{sec:perf-analytical}).
+    \item Higher abort rate means more wasted attempts per commit, raising
+          the in-flight count under Little's Law even before the CPU is
+          saturated.
+    \item Measure the linked-list workload with and without instrumentation,
+          and against fine-grained locking; report the instrumentation
+          overhead as a fraction of commit time.
+    \item \emph{[implementation]} Extend \S\ref{sec:perf-bank-attempts} to
+          sample committed latencies per thread; the maximum is unstable
+          because it captures rare retry storms.
+    \item \emph{[verification]} Add a third worker to
+          \S\ref{sec:perf-tla-bank} and bound in-flight attempts to one;
+          conservation still holds, and the bound is checkable.
+    \item \emph{[theory]} Predicted throughput is
+          $\lambda = 1/(E[\mathrm{attempts}]\,C_{\mathrm{attempt}})$; it
+          fails under high write contention because attempts cost more than
+          $C_{\mathrm{attempt}}$ (validation work grows) and aborts are
+          correlated, not independent.
+    \item \emph{[implementation]} A conflict-address histogram from the bank
+          benchmark distinguishes hot-account skew (semantic) from
+          metadata-layout false sharing (mechanical).
+    \item \emph{[verification]} Count each completed attempt exactly once as
+          a commit or an abort; the invariant is a one-to-one accounting
+          invariant over the model.
+    \item \emph{[theory]} Raising contention (more writers on the same
+          locations) or raising abort cost (larger read sets) makes the
+          higher-attempt backend lose.
+    \item \emph{[open]} There is no single right answer.  A ``yes, mandatory
+          artifact'' position argues throughput numbers without machine
+          profiles are uninterpretable; a ``no'' position argues the cost
+          (engineering, refereeing time) suppresses exploratory and negative
+          results.  A strong answer states the minimal definition of a
+          reproducible result (binary, seed, machine profile, invariants)
+          and defends it against the cost objection.
+\end{enumerate}
+
+\section*{Chapter 15 --- From Source to AST: Lexing and Parsing}
+
+\begin{enumerate}
+    \item \emph{[theory]} Draw the DFA for the five token kinds (keyword
+          \texttt{atomic}, identifier, number, \texttt{\char`\{},
+          \texttt{\char`\}}, \texttt{;}) so that every accepting state is
+          reachable from the start state; see
+          Figure~\ref{fig:lexer-dfa} for the shape.
+    \item \emph{[theory]} Maximal munch makes \texttt{atomically} a single
+          identifier; a lexer that stops at the \texttt{atomic} prefix
+          produces \texttt{atomic} + \texttt{ity}, which mis-parses
+          ordinary identifiers.
+    \item \emph{[implementation]} Extend \S\ref{sec:parser-example} to
+          nested atomic blocks and report the source position of an
+          unbalanced brace in the error message; the parser must match
+          nesting depth, not just find one closing brace.
+    \item \emph{[implementation]} Add a statement kind to
+          Listing~\ref{lst:bank-parser} (for example a second transfer, or a
+          balance-conditional) and lower it in the AST; recompile and run
+          the harness.
+    \item \emph{[verification]} Fix \texttt{EndAtomic} in
+          Listing~\ref{lst:tla-parsed-bank} so \texttt{pc} reaches
+          \texttt{"done"}; check that \texttt{TypeOK}, \texttt{MoneyConserved},
+          and \texttt{Floors} still hold.
+    \item \emph{[theory]} Justify the choice in
+          Table~\ref{tab:front-end-choices}: an \texttt{atomic} construct is
+          trivial syntax, so the companion instruments at LLVM IR
+          (Chapter~10) rather than shipping a source language; syntax must
+          stay stable while backends evolve
+          (Figure~\ref{fig:front-end-pipeline}).
+\end{enumerate}
+
+\section*{Chapter 16 --- Hardware Transactional Memory}
+
+\begin{enumerate}
+    \item A capacity abort means the hardware path is exhausted; fall back to
+          a lock with subscription (\S\ref{sec:rtm-example}).  Without RTM
+          hardware, study the companion's \texttt{TSX-SGL} backend
+          (\texttt{backends/tm\_impl/tsx\_sgl}) and the phased-hybrid model
+          of \S\ref{sec:hybrid-example} for the fallback shape.
+    \item A TLB miss is an unsupported event inside the transaction: the
+          hardware cannot continue speculatively, so it aborts; draw the
+          pipeline showing the fault interrupting the transactional region.
+    \item \emph{[implementation]} Use gem5 Ruby if installed; otherwise run
+          the capacity probe of \S\ref{sec:rtm-bank-transfer} on an
+          RTM-capable machine or drive the companion's TSX simulation
+          backend (\texttt{simulator/}, \S\ref{sec:htm-simulation}) and
+          report the same trend: abort rate rises as touched lines grow.
+    \item \emph{[implementation]} Keep the counters outside the transaction
+          (Listing in \S\ref{sec:rtm-bank-transfer}); increments inside RTM
+          would be rolled back on abort and would grow the write set.
+    \item \emph{[verification]} Add both transfer directions to
+          \S\ref{sec:htm-fallback-tla}; \texttt{MoneyConserved} and
+          \texttt{FloorSafe} hold for both directions because every action
+          conserves and respects the floor.
+    \item \emph{[theory]} Without subscription, a hardware transaction never
+          reads the fallback lock, so it can commit while a fallback
+          critical section runs; the two paths then race.
+    \item \emph{[implementation]} The read-many/write-two probe aborts less
+          on capacity but still aborts on conflicts; compare with a
+          write-heavy probe that touches every line.
+    \item \emph{[verification]} Add the fallback-lock boolean; \texttt{Begin}
+          requires the lock clear, and a lock-held abort transition fires
+          when the lock becomes held mid-transaction
+          (\S\ref{sec:htm-fallback-tla}).
+    \item \emph{[theory]} Best-effort HTM has no admission control: a
+          transaction may abort forever under interference, so no finite
+          retry budget can promise progress --- wait-freedom needs a
+          guarantee no best-effort mechanism gives.
+    \item \emph{[literature]} Herlihy--Moss propose in-cache transactions
+          with per-transaction commit; the phased hybrid keeps the cache
+          transaction for the common case but adds a software fallback with
+          a phase-change (quiescence + lock handoff).  What survives is the
+          in-cache transactional window; what is replaced is the assumption
+          that every transaction must commit in hardware.  The phase-change
+          criterion (typically a commit/abort counter crossing a threshold
+          over a window) buys a low-overhead common case without forcing
+          every aborted transaction to retry in hardware.
+    \item \emph{[open]} There is no single right answer.  A ``software
+          fallback forever'' position cites capacity and conflict aborts as
+          intrinsic and best-effort as the right bargain; a ``stronger
+          hardware'' position argues deterministic aborts and progress would
+          remove whole classes of bugs (the wait-freedom gap of the previous
+          exercise).  A strong answer ties its position to a concrete
+          mechanism from this chapter and states what that mechanism must
+          provide or give up.
+\end{enumerate}
+
+\section*{Chapter 17 --- Transactional Memory for GPUs}
+
+\begin{enumerate}
+    \item On lock-step hardware (SIMT) a warp spinning on a lock held by its
+          own lane cannot progress --- all lanes spin.  PR-STM's priority
+          stealing lets the higher-priority lane take the lock
+          (\S\ref{sec:gpu-bank-transfer-example}).
+    \item Sort-based locking avoids deadlock under uniform access but adds
+          serialization under hot spots; priority stealing favors the hot
+          lane but can starve it only if priorities collide.
+    \item \texttt{startTS+1} lets a reader include a write whose version
+          equals its snapshot; CCT only checks in-flight entries and MRV
+          only finalised ones, so neither catches the boundary
+          (\S\ref{sec:gust}).
+    \item \texttt{\_\_popc} on the ballot mask counts the lanes that set the
+          predicate; the ballot must be outside the lane-guarded branch
+          because all lanes must call it (\S\ref{sec:ballot}).
+    \item The serialisation point is the server warp's commit service; a
+          read-only workload can bypass it because read-only transactions
+          need no commit service (\S\ref{sec:gpu-bank-tla-example}).
+    \item The invariant is a commit-log consistency check (every published
+          version has a matching log entry); bound the log length and the
+          number of warps to keep TLC tractable.
+    \item \emph{[implementation]} Add a bounded per-lane retry counter to
+          \S\ref{sec:gpu-bank-transfer-example}; the retry loop must not
+          contain a ballot whose trip count differs by lane, and the report
+          must split commits, aborts, and bound-exceeded.
+    \item \emph{[verification]} Add \texttt{Abort} to
+          \S\ref{sec:gpu-bank-tla-example} leaving \texttt{bal} unchanged;
+          conservation, floor, and type invariants all hold.
+    \item \emph{[theory]} Read the serialisation points from
+          Table~\ref{tab:gpu-commit-strategies}; version installation and
+          validation scale worst as warp count grows because they touch
+          shared metadata every commit.
+    \item \emph{[literature]} KILO TM keeps per-thread read/write logs plus
+          a Bloom filter and validates lazily at commit against those logs;
+          GUST validates against a warp-level commit log via CCT/MRV.  The
+          unit contrast to draw: KILO TM's validation state lives in
+          per-thread hardware/bloom structures and is checked against
+          per-location versions; GUST's lives in a shared commit log checked
+          against recorded snapshots.  An abort in KILO TM discards the
+          thread's logs and filter; an abort in GUST must roll back or mask
+          the offending warp's published writes.
+    \item \emph{[open]} There is no single right answer.  A ``no
+          productization'' position cites the aborts, the coherence gap
+          across SMs, and the success of fine-grained atomic ops; a ``yes,
+          in some niche'' position cites the throughput ceiling for
+          complex critical sections and the falling cost of per-SM
+          coherence.  A strong answer names the hardware change (e.g.\
+          cross-SM coherence or an in-SM transaction buffer) or software
+          change (a native transaction API) its position depends on.
+\end{enumerate}
+
+\section*{Chapter 18 --- Persistent and Distributed Transactional Memory}
+
+\begin{enumerate}
+    \item \emph{[implementation]} Extend \S\ref{sec:durable-bank-example} to
+          four accounts and two workers under one global durable commit
+          lock; force both the journal and the data writes before reporting
+          the throughput delta against the in-memory SGL baseline.
+    \item \emph{[verification]} Let the coordinator crash after
+          \texttt{DecideCommit} but before \texttt{ApplyCommit} in
+          \S\ref{sec:distributed-commit-example}; a recovery action completes
+          the update, and \texttt{MoneyConserved} and \texttt{FloorsHold}
+          still hold.
+    \item \emph{[implementation]} Replace the single intent record with a
+          bounded redo-log array, add sequence numbers, reject torn records
+          (checksum mismatch), and keep redo idempotent by storing the
+          post-state.
+    \item \emph{[verification]} Allow \texttt{CommitSecondaries} to be
+          skipped nondeterministically in \S\ref{sec:distributed-commit-example}'s
+          Percolator model; a recovery action re-reads the primary decision,
+          and every committed transfer reaches \texttt{done} under weak
+          fairness.
+    \item \emph{[theory]} All three are instances of one rule: the commit
+          decision must be recoverable before its effects are required to be
+          visible.  PersistentSGL uses a durable journal, Romulus a
+          publishable persistent root, and TiKV a primary-key decision
+          (Table~\ref{tab:persistent-distributed-taxonomy}).
+    \item \emph{[literature]} Percolator's per-row locks and commit
+          timestamps map onto the TLA+ model's decision record and
+          secondary-cleanup actions.  A real guarantee the book omits: the
+          paper handles write-write conflicts via per-row lock acquisition
+          (secondary lock conflicts roll back and retry, and the primary
+          lock conflict aborts), and it relies on the underlying
+          single-key atomic writes plus a replicated storage (BigTable) for
+          the primary decision to survive crashes --- the abstract model has
+          neither replication nor lock-order recovery.
+\end{enumerate}
+
+\section*{Chapter 19 --- Open Questions and Emerging Directions}
+
+\begin{enumerate}
+    \item \emph{[theory]} The answer turns on whether the RTM and STM paths
+          agree on conflict ownership; a hybrid that does not share a
+          conflict signal can livelock where pure STM would not
+          (\S\ref{sec:hybrid-example}).
+    \item \emph{[theory]} Make the commit marker durable before the data is
+          required durable (the redo-log example of this chapter and
+          \S\ref{sec:durable-bank-example}); recovery re-runs the durable
+          marker.
+    \item \emph{[theory]} Argue both directions using the adoption barriers
+          in ``Challenges'': invisible commit protocols, tooling, and the
+          missing language standard.
+    \item \emph{[theory]} Classify against the three progress families with
+          explicit assumptions: bounded retries + fallback admission for
+          starvation freedom, conflict ownership for obstruction freedom.
+    \item \emph{[implementation]} Add a validity field to the redo log so
+          recovery distinguishes an empty log from a partially initialized
+          one; the stores that must precede the commit marker are the
+          entries themselves.
+    \item \emph{[verification]} Extend the tiny bank model with
+          \texttt{prepared} and \texttt{committed} states; money
+          conservation holds even if a transaction stutters forever in
+          \texttt{prepared}.
+    \item \emph{[theory]} NOrec re-validates the whole read set at commit;
+          TL2 re-validates orecs.  A Bloom filter helps NOrec's read-mostly
+          path because it shrinks the value-recheck, without changing the
+          abstract serialization semantics.
+    \item \emph{[open]} There is no single right answer.  A ``yes, invariant
+          is sufficient'' case argues conservation+floor already catch the
+          catastrophic failures (the ones this book found across
+          backends); a ``no'' case argues they miss progress, latency
+          tails, and programmability.  A strong answer either proposes the
+          concrete ``full'' evaluation (e.g.\ invariant + bounded
+          progress + latency distribution) or defends the invariant as
+          sufficient and states what it deliberately does not claim.
+    \item \emph{[open]} There is no single right answer.  A ``locks first''
+          case argues deadlock is a concrete, visible failure a student can
+          reproduce; a ``transactions first'' case argues lost atomicity is
+          the deeper failure and locks hide it behind mechanics.  A strong
+          answer states the evidence it would want (controlled studies of
+          which failure beginners actually meet first) and the systems
+          background caveat.
+\end{enumerate}

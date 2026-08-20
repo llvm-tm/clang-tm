@@ -1,282 +1,510 @@
-\index{opacity}\index{serializable but not opaque}\index{serializability}\index{linearizability}\index{strict serializability}\index{weak atomicity}\index{strong atomicity}\index{commit order}\index{read-set}\index{write-set}\index{validation}\index{conflict detection}\index{version management}\index{write-back}\index{undo log}\index{commit lock}\index{OCC}\index{eager version management}\index{lazy version management}
-
 \chapter{Hardware Concepts for Transactional Memory}
+\index{memory hierarchy}\index{cache coherence}\index{MESI}\index{out-of-order execution}\index{speculation}\index{store buffer}\index{memory ordering}\index{TSO}\index{fence}\index{false conflict}\index{HTM}\index{capacity abort}\index{fallback path}\index{commit-publish}
+
+Transactional memory runs on hardware that was not designed for it. The
+machine presents a shared address space, but underneath there are private
+caches, a coherence protocol, store buffers, and speculative execution, and
+every one of those features shapes what a TM design can and cannot do. A
+designer who treats memory as a single flat array will be surprised by false
+conflicts, capacity aborts, and store-buffer reorderings the first time a real
+system runs.
+
+This chapter builds the hardware vocabulary used everywhere else in the book:
+the memory hierarchy, cache coherence, out-of-order execution and speculation,
+and the memory-ordering models that operating systems and compilers expose.
+The point is not to design a processor but to know, for each later algorithm,
+which hardware fact makes it correct and which one makes it cheap.
+
 \section{Multicore Architectures and Memory Hierarchies}
-\begin{itemize}
-    \item Shared memory, caches (L1/L2/L3), cache coherence (MESI).
-    \item The coherence protocol as a natural conflict‑detection substrate.
-    \item MESI states and transitions: a cache line invalidated by another core is, from a TM viewpoint, a conflict signal.
-    \item Snooping vs.\ directory‑based coherence, and a first look at why coherence does not exist across GPU SMs (Part~VII).
-    \item Word vs.\ cache‑line granularity of conflict detection: where false conflicts come from (Part~VII).
-\end{itemize}
+
+The first fact a transactional memory designer must internalize is that modern
+shared-memory machines are not single memories protected by a bus. They are
+hierarchies of private and shared caches with a protocol that keeps those
+caches approximately consistent. A multicore processor presents a shared
+address space, but the physical reality is per-core L1 and L2 caches, a shared
+L3, and a coherence protocol that moves cache lines between cores. The TM
+substrate is this protocol.
+
+Cache coherence is the mechanism that keeps copies of the same line
+consistent. The most commonly taught protocol is the MESI family, named for
+its four states: Modified, Exclusive, Shared, and Invalid. A line in the
+Modified state is dirty and exists only in that cache. A line in Exclusive
+state is clean and private. A line in Shared state is clean and may be
+replicated. Invalid means the copy is not usable. From a transactional memory
+viewpoint, the key transition is invalidation: when one core writes a line,
+the coherence protocol invalidates that line in all other caches. An
+invalidation that hits a line inside another transaction's read- or write-set
+is a \emph{conflict signal}.
+
+Coherence comes in two broad families. Snooping-based protocols broadcast
+coherence traffic on a shared interconnect. Directory-based protocols keep a
+directory entry per line and send targeted invalidations. Both deliver the
+same logical guarantee: at any moment, either one writer has exclusive access,
+or multiple readers share the line. The important caveat for later chapters is
+that GPUs do not provide this coherent private cache model across streaming
+multiprocessors. GPU global memory is coherent only at L2, and the private L1
+caches are not kept coherent across SMs. That absence reshapes GPU TM design
+in Chapter~17.
+
+Conflict detection granularity is the cache line, not the word. Two
+independent variables can share a line and therefore appear to conflict even
+when no thread touches the same word. This false conflict is not an
+implementation bug; it is the coherence protocol working exactly as designed.
+Hardware TM inherits that granularity. Software TM can choose finer granularity,
+but only by paying metadata and instrumentation costs that hardware gets for
+free.
 
 \section{Out-of-Order Execution and Speculation}
-\begin{itemize}
-    \item Instruction pipelines, reorder buffers, branch prediction.
-    \item Speculative stores and why they can be squashed.
-    \item The reorder buffer holds register state, not data; hardware TM must own speculative data in the cache.
-    \item Capacity limits: the transaction working set is bounded by L1; larger transactions need software transactions or fallback.
-    \item The parallel between branch misprediction recovery and transactional abort.
-\end{itemize}
 
-\section{Store Buffers and Memory Ordering}
-\begin{itemize}
-    \item How store buffers relax write-to-read ordering (TSO).
-    \item Memory fences and their cost.
-    \item Why a purely software TM must insert fences on some architectures.
-    \item The commit-publish fence: a transaction's write‑back must become visible in one atomic step to other cores.
-    \item Compiler fences (\texttt{atomic\_signal\_fence}) vs.\ hardware fences (\texttt{mfence}, \texttt{dmb}): eliminating the CPU barrier on the read path (Part~IV).
-    \item Fence placement as a correctness issue, not a tweak: wrong placement reopens the commit-visibility window.
-\end{itemize}
+Modern cores do not execute instructions in program order. They fetch, decode,
+and issue instructions into a reorder buffer, execute them when operands are
+ready, and commit results in program order. Branch prediction permits the core
+to execute speculatively past unresolved branches. If a branch prediction is
+wrong, the core squashes the speculative work and restarts from the correct
+path. This is ordinary processor speculation.
 
-\section{Worked Example: The TSO Store-Buffer Surprise}
-\index{TSO}\index{store buffer}\index{memory model}\index{data race}\index{happens-before}\index{fence}\index{compiler barrier}\index{acquire/release}\index{seq\_cst}
-\label{sec:tso-example}
+The reorder buffer holds register state, not memory state. A speculative store
+does not become architecturally visible until the branch resolves and the
+store retires. Hardware transactional memory extends this principle to a
+region of instructions. A transaction's speculative loads and stores are
+tracked in the cache, not in the ROB, and they become visible only at commit.
+If the transaction aborts, the cache lines are invalidated or restored to
+their pre-transaction values. The parallel between branch misprediction
+recovery and transactional abort is exact: both discard speculative work and
+restart from a stable point.
 
-The running bank example can expose a memory-ordering subtlety. Consider a
-transfer that writes to account~$A$ and then reads account~$B$:
+The capacity limit follows from this placement. The transaction working set
+must fit in the private cache, typically L1 or L2, because the speculative
+data has no other home. A transaction that touches more lines than the cache
+can track is capacity-aborted. Large transactions therefore need either a
+software TM that buffers state in memory, or a hardware fallback path that
+takes a lock and executes the transaction non-speculatively.
 
-\begin{lstlisting}[language=C, caption={A transfer that writes then reads.}]
-void transfer_and_check(account_t *a, account_t *b, int n) {
-    a->balance -= n;        /* 1. speculative write to A  */
-    if (b->balance < n)     /* 2. read from B             */
-        rollback(a, n);     /* 3. undo the write          */
-}
-\end{lstlisting}
-
-\begin{itemize}
-    \item On TSO (x86), the store to \texttt{A} sits in the store buffer; the subsequent load of \texttt{B} can be satisfied before \texttt{A} is visible to other cores.
-    \item A concurrent thread can observe $A$ updated while $B$ is still the old value --- a torn view of the transaction.
-    \item The fix is a release fence on commit: the write-back of the whole write-set must become visible at once.
-    \item This is the store-buffer echo of the \emph{snapshot consistency} problem, revisited in Part~IV for software TM and Part~VII for GPUs.
-    \item Exercise~2 of this chapter asks you to draw the precise interleaving.
-\end{itemize}
-
-\begin{figure}[ht]
-\centering
-\begin{tikzpicture}[font=\small]
-  % two cores with a store buffer between them
-  \node[draw,rectangle,minimum width=1.6cm,minimum height=0.9cm] (coreA) {Core 0};
-  \node[draw,rectangle,minimum width=1.6cm,minimum height=0.9cm] (coreB) [right=5cm of coreA] {Core 1};
-  \node[draw,rectangle,minimum width=1.4cm,minimum height=0.7cm,fill=black!8] (sbA) [below=0.8cm of coreA] {store buffer};
-  \node[draw,rectangle,minimum width=1.4cm,minimum height=0.7cm,fill=black!8] (sbB) [below=0.8cm of coreB] {store buffer};
-  \draw[-{Stealth}] (coreA) -- (sbA);
-  \draw[-{Stealth}] (coreB) -- (sbB);
-  \node[draw,rectangle,minimum width=6.4cm,minimum height=0.9cm,fill=black!4] (mem) [below=1.2cm of sbA,xshift=2.5cm] {shared memory};
-  \draw[-{Stealth}] (sbA) -- node[right,pos=0.4] {write A} (mem.west);
-  \draw[-{Stealth}] (sbB) -- node[left,pos=0.4] {write B} (mem.east);
-  % the torn view
-  \node[align=center,text width=6cm] at ($(coreA)!0.5!(coreB)$) [above=0.5cm,yshift=0.6cm]
-        {Core 1 can read $A$'s new value\\before Core 0's store leaves the buffer};
-\end{tikzpicture}
-\caption{The TSO store-buffer reordering hazard: the write to $A$ (Core~0) and the write to $B$ (Core~1) can become visible in the opposite order, so an observer can see $A$ updated while $B$ is stale.}
-\label{fig:tso-store-buffer}
-\end{figure}
-
-\section{Worked Example: Cache-Line False Conflicts}
-\index{false conflict}\index{cache line}\index{conflict detection}\index{HTM}
-
-Hardware transactional memory normally detects conflicts at cache-line
-granularity. Two independent accounts can conflict if they share a line, even
-when no transaction touches the same word. The following program is not a TM
-implementation; it is a layout check for the data structure that a TM backend
-will execute on top of.
-
-\begin{lstlisting}[language=C++, caption={Separating bank accounts onto cache lines.}]
-#include <atomic>
-#include <cassert>
-#include <cstdint>
-#include <iostream>
-#include <mutex>
-
-static constexpr std::size_t CACHE_LINE = 64;
-
-struct Account {
-    std::atomic<int> balance;
-};
-
-/* One logical account per coherence block. */
-struct alignas(CACHE_LINE) PaddedAccount {
-    std::atomic<int> balance;
-    char padding[CACHE_LINE - sizeof(std::atomic<int>)];
-};
-
-static_assert(sizeof(PaddedAccount) % CACHE_LINE == 0,
-              "padded accounts must not straddle cache-line slots");
-
-template <typename A>
-bool transfer_sgl(A& from, A& to, int amount) {
-    static std::mutex global_lock;
-    std::lock_guard<std::mutex> guard(global_lock);
-
-    int old_from = from.balance.load(std::memory_order_relaxed);
-    if (old_from < amount) return false;
-
-    from.balance.store(old_from - amount, std::memory_order_relaxed);
-    to.balance.fetch_add(amount, std::memory_order_relaxed);
-    return true;
-}
-
-static std::uintptr_t line_of(const void* p) {
-    return reinterpret_cast<std::uintptr_t>(p) / CACHE_LINE;
-}
-
-int main() {
-    Account compact[2] = {{100}, {100}};
-    PaddedAccount padded[2] = {{100}, {100}};
-
-    std::cout << "compact lines: "
-              << line_of(&compact[0]) << " "
-              << line_of(&compact[1]) << "\n";
-
-    std::cout << "padded lines:  "
-              << line_of(&padded[0]) << " "
-              << line_of(&padded[1]) << "\n";
-
-    assert(line_of(&padded[0]) != line_of(&padded[1]));
-
-    bool ok = transfer_sgl(padded[0], padded[1], 30);
-    assert(ok);
-    assert(padded[0].balance.load() + padded[1].balance.load() == 200);
-}
-\end{lstlisting}
-
-\begin{itemize}
-    \item Coherence works on blocks, not abstract objects. HTM conflict detection inherits that granularity.
-    \item Padding can reduce false conflicts, but it increases footprint and can increase capacity aborts.
-    \item SGL-style execution is insensitive to false conflicts, but it also removes concurrent execution.
-    \item TSX-SGL uses HTM when the hardware accepts the transaction and falls back to a single global lock when it does not.
-\end{itemize}
-
-\section{HTM Execution States}
-\index{TSX}\index{capacity abort}\index{fallback path}\index{single global lock}
+Figure~\ref{fig:pipeline-squash} shows the lifecycle of a speculative store in
+a simplified pipeline: the store is executed speculatively in the memory
+stage, but if the branch mispredicts, the writeback is squashed and the store
+never becomes visible.
 
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
-    font=\small,
-    state/.style={draw,rectangle,rounded corners,align=center,
-                  minimum width=2.4cm,minimum height=0.9cm},
-    edge/.style={-{Stealth},thick}
+font=\small,
+state/.style={draw,rectangle,rounded corners,align=center,
+minimum width=2.4cm,minimum height=0.9cm},
+edge/.style={-{Stealth},thick}
 ]
-  \node[state] (idle) {nontransactional\\execution};
-  \node[state,right=2.2cm of idle] (active) {transaction active\\read/write set in cache};
-  \node[state,right=2.2cm of active] (commit) {commit\\publish writes};
-  \node[state,below=1.4cm of active] (abort) {abort\\discard speculative state};
-  \node[state,below=1.4cm of commit] (fallback) {fallback\\SGL or STM path};
-
-  \draw[edge] (idle) -- node[above] {\texttt{xbegin}} (active);
-  \draw[edge] (active) -- node[above] {no conflict} (commit);
-  \draw[edge] (commit) -- node[above,bend left=10] {} (idle);
-  \draw[edge] (active) -- node[left] {invalidation} (abort);
-  \draw[edge] (active) -- node[right] {capacity} (abort);
-  \draw[edge] (abort) -- node[below left] {retry budget} (active);
-  \draw[edge] (abort) -- node[below] {persistent abort} (fallback);
-  \draw[edge] (fallback) -- node[right] {unlock} (idle);
+\node[state] (fetch) {Fetch};
+\node[state, right=of fetch] (decode) {Decode};
+\node[state, right=of decode] (execute) {Execute};
+\node[state, right=of execute] (mem) {Memory\\speculative store};
+\node[state, right=of mem] (writeback) {Writeback};
+\draw[edge] (fetch) -- (decode);
+\draw[edge] (decode) -- (execute);
+\draw[edge] (execute) -- (mem);
+\draw[edge] (mem) -- node[above] {commit} (writeback);
+\draw[edge, dashed, red] (mem.south) -- ++(0,-0.8)
+node[below, red, font=\footnotesize] {branch mispredict: squash};
 \end{tikzpicture}
-\caption{A minimal HTM state machine. Speculative data live in the cache while the transaction is active. Coherence invalidations and capacity overflow abort the transaction; robust implementations include a fallback path.}
+\caption{Speculative store in a simplified pipeline. The store reaches the
+memory stage, but if a prior branch mispredicts, writeback is squashed and
+the store never becomes architecturally visible. Hardware TM applies the
+same idea to a multi-instruction region.}
+\label{fig:pipeline-squash}
+\end{figure}
+
+\section{Store Buffers and Memory Ordering}
+
+A store buffer is a small per-core FIFO that holds stores until they are
+written to the memory hierarchy. Store buffers improve performance by letting
+the core continue while stores drain in the background. But a store buffer
+also relaxes write-to-read ordering. On x86, the memory model is total store
+order, or TSO: a core may observe its own stores earlier than other cores do.
+A load may be satisfied from the store buffer before the corresponding store
+has become visible to the rest of the system. This is the root of many
+concurrency surprises.
+
+The classic example is store-to-load forwarding. A core writes location A and
+then reads location B. The write to A sits in the store buffer, so the
+subsequent load of B can complete before A is visible to other cores. A
+concurrent observer may see A updated while B still has its old value---a torn
+view of the intended transaction. Fixing this requires a memory fence that
+orders the store before subsequent loads or that flushes the store buffer
+before the load is allowed to proceed.
+
+Fences come in two broad categories. Hardware fences, such as x86
+\texttt{mfence} or ARM \texttt{dmb}, constrain the actual memory ordering of
+the machine. Compiler fences, such as
+\texttt{atomic\_signal\_fence}, constrain only the compiler's reordering of
+operations. A software TM implementation must use the right kind at each
+point. On the read path, a compiler fence is often sufficient on x86 because
+the hardware already preserves load-load ordering. On the commit-publish path,
+a real hardware fence is needed to make the entire write-set visible in one
+atomic step. Fence placement is a correctness issue, not a tweak: a missing or
+misplaced fence reopens the commit-visibility window.
+
+\section{Worked Example: The TSO Store-Buffer Surprise}
+\label{sec:tso-example}
+
+The running bank example can expose a memory-ordering subtlety. Consider a
+transfer that writes account A and then reads account B:
+
+\begin{lstlisting}[language=C, caption={A transfer that writes then reads.},
+label={lst:tso-transfer-check}]
+void transfer_and_check(struct account *a, struct account *b, int n) {
+    a->balance -= n;            // store to A
+    int b_bal = b->balance;     // load from B
+    if (b_bal < 0) {
+        // some recovery action
+    }
+    b->balance += n;            // store to B
+}
+\end{lstlisting}
+
+On TSO, the store to \texttt{a->balance} sits in the store buffer. The
+subsequent load of \texttt{b->balance} can be satisfied before the store to A
+is visible to other cores. A concurrent thread can observe A updated while B
+is still the old value---a torn view of the transaction, shown in
+Figure~\ref{fig:tso-store-buffer}. The fix is a release fence on commit: the
+write-back of the whole write-set must become visible at once. This is the
+store-buffer echo of the snapshot-consistency problem from Chapter~2,
+revisited in Part~IV for software TM and Part~VII for GPUs.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+font=\small,
+core/.style={draw,rectangle,rounded corners,align=center,
+minimum width=3.0cm,minimum height=2.4cm},
+mem/.style={draw,rectangle,rounded corners,align=center,
+minimum width=5.0cm,minimum height=1.2cm},
+edge/.style={-{Stealth},thick},
+buffer/.style={draw,rectangle,align=center,minimum width=2.6cm,
+minimum height=1.4cm}
+]
+\node[core] (core0) {Core 0\\\texttt{a->balance -= n}\\then load \texttt{b}};
+\node[core, right=of core0, xshift=1.2cm] (core1) {Core 1\\observes A updated\\B still old};
+\node[mem, below=of core0, xshift=2.6cm, yshift=-0.6cm] (memory) {Shared memory\\A=90, B=100};
+
+\node[buffer, below left=of core0, xshift=-0.5cm, yshift=0.2cm] (buf0)
+{Store buffer\\A=90 (not yet visible)};
+\draw[edge] (core0.south) -- (buf0.north);
+\draw[edge] (buf0.south) -- (memory.north west) node[midway, left, font=\footnotesize] {drains};
+\draw[edge, dashed] (core0.east) -- (core1.west) node[midway, above, font=\footnotesize]
+{torn view};
+\end{tikzpicture}
+\caption{TSO store-buffer surprise. Core~0 writes A into its store buffer,
+then reads B locally. Core~1 can see A updated before B is updated,
+creating a torn view of the intended transaction. A release fence on
+commit makes the whole write-set visible atomically.}
+\label{fig:tso-store-buffer}
+\end{figure}
+
+\section{Worked Example: Cache-Line False Conflicts}
+
+Hardware transactional memory normally detects conflicts at cache-line
+granularity. Two independent accounts can conflict if they share a line, even
+when no transaction touches the same word. The following layout check shows
+the problem.
+
+\begin{lstlisting}[language=C++, caption={Separating bank accounts onto
+cache lines.}, label={lst:cache-line-layout}]
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+constexpr int CACHE_LINE = 64;
+
+struct Account {
+    int balance;
+};
+
+struct alignas(CACHE_LINE) PaddedAccount {
+    int balance;
+};
+
+static_assert(sizeof(PaddedAccount) <= CACHE_LINE,
+              "PaddedAccount must not exceed one cache line");
+
+std::mutex g_lock;
+
+template <typename T>
+void transfer_sgl(T &a, T &b, int n) {
+    std::lock_guard<std::mutex> lg(g_lock);
+    a.balance -= n;
+    b.balance += n;
+}
+
+template <typename T>
+int line_of(const T *p) {
+    return (int)(reinterpret_cast<std::uintptr_t>(p) / CACHE_LINE);
+}
+
+int main() {
+    Account a{100}, b{100};
+    PaddedAccount pa{100}, pb{100};
+
+    static_assert(alignof(PaddedAccount) >= CACHE_LINE,
+                  "PaddedAccount must be cache-line aligned");
+
+    if (line_of(&pa) == line_of(&pb)) {
+        assert(false && "Padded accounts must live on distinct lines");
+    }
+
+    for (int i = 0; i < 1000; ++i) {
+        transfer_sgl(a, b, 1);
+        transfer_sgl(pa, pb, 1);
+    }
+
+    assert(a.balance + b.balance == 200);
+    assert(pa.balance + pb.balance == 200);
+    return 0;
+}
+\end{lstlisting}
+
+Coherence works on blocks, not abstract objects. HTM conflict detection
+inherits that granularity. Padding can reduce false conflicts, but it
+increases footprint and can increase capacity aborts. SGL-style execution is
+insensitive to false conflicts, but it also removes concurrent execution.
+TSX-SGL uses HTM when the hardware accepts the transaction and falls back to a
+single global lock when it does not, so it pays the false-conflict cost only
+on the hardware fast path.
+
+\section{HTM Execution States}
+
+Figure~\ref{fig:htm-state-machine} shows the state machine of a typical
+best-effort hardware transactional memory implementation. Speculative data
+live in the cache while the transaction is active. Coherence invalidations and
+capacity overflow abort the transaction. Robust implementations include a
+fallback path.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+font=\small,
+state/.style={draw,rectangle,rounded corners,align=center,
+minimum width=2.8cm,minimum height=0.9cm},
+edge/.style={-{Stealth},thick}
+]
+\node[state] (normal) {nontransactional\\execution};
+\node[state, right=of normal] (active) {transaction active\\read/write set in cache};
+\node[state, right=of active] (commit) {commit\\publish writes};
+\node[state, below=of active, yshift=-0.5cm] (abort) {abort\\discard speculative state};
+\node[state, below=of commit, yshift=-0.5cm] (fallback) {fallback\\SGL or STM path};
+
+\draw[edge] (normal) -- node[above] {xbegin} (active);
+\draw[edge] (active) -- node[above] {no-conflict} (commit);
+\draw[edge] (active) -- node[left] {invalidation} (abort);
+\draw[edge] (active) -- node[right] {capacity} (abort);
+\draw[edge] (abort) -- node[below] {retry-budget} (normal);
+\draw[edge] (abort) -- node[right] {persistent-abort} (fallback);
+\draw[edge] (fallback) -- node[below] {unlock} (normal);
+\end{tikzpicture}
+\caption{HTM execution state machine. Speculative data live in the cache
+while the transaction is active. Coherence invalidations and capacity
+overflow abort the transaction. A robust implementation includes a
+fallback path for persistent aborts.}
 \label{fig:htm-state-machine}
 \end{figure}
 
+The state machine is intentionally small. The hardware does not know about
+transaction bodies; it tracks cache lines and coherence messages. The
+programmer, or the compiler, inserts the begin and commit instructions. The
+hardware then enforces atomic visibility at commit.
+
 \section{Worked Example: Atomic Commit-Publish in TLA+}
-\index{TLA+}\index{commit-publish}\index{invariant}\index{money conservation}
 
 The hardware rule ``publish all writes at commit'' has a direct specification
-counterpart: the transfer is one next-state action. The debit and the credit
-are not separate visible steps.
+counterpart: the transfer is one next-state action. The following finite TLA+
+module models exactly that.
 
-\begin{lstlisting}[caption={A finite TLA+ model of atomic bank transfers.}]
--------------------------- MODULE BankAtomicCommit --------------------------
-EXTENDS Naturals
+\begin{lstlisting}[caption={A finite TLA+ model of atomic bank transfers.},
+label={lst:bank-atomic-commit}]
+---- MODULE BankAtomicCommit ----
+EXTENDS Naturals, TLC
 
-VARIABLE balance
+CONSTANT Floor
 
 Accounts == {"A", "B"}
 
+VARIABLE balance
+vars == <<balance>>
+
 Init ==
-    balance = ["A" |-> 100, "B" |-> 100]
+/\ balance = [a \in Accounts |-> 100]
 
 Transfer(a, b, n) ==
-    /\ a \in Accounts
-    /\ b \in Accounts
-    /\ a # b
-    /\ n \in 1..10
-    /\ balance[a] >= n
-    /\ balance' =
-        [balance EXCEPT
-            ![a] = @ - n,
-            ![b] = @ + n]
+/\ a \in Accounts
+/\ b \in Accounts
+/\ a /= b
+/\ n \in 1..10
+/\ balance[a] >= Floor + n
+/\ balance' = [balance EXCEPT ![a] = balance[a] - n,
+![b] = balance[b] + n]
 
 Next ==
-    \E a \in Accounts:
-    \E b \in Accounts:
-    \E n \in 1..10:
-        Transfer(a, b, n)
+\/ \E a,b \in Accounts, n \in 1..10 : Transfer(a,b,n)
+\/ UNCHANGED vars
 
-Total == balance["A"] + balance["B"]
+Total ==
+balance["A"] + balance["B"] = 200
 
 FloorOK ==
-    \A a \in Accounts: balance[a] >= 0
+\A a \in Accounts : balance[a] >= Floor
 
 Invariant ==
-    /\ Total = 200
-    /\ FloorOK
+/\ Total
+/\ FloorOK
 
-Spec ==
-    Init /\ [][Next]_balance
-=============================================================================
+Spec == Init /\ [][Next]_balance
+====
 \end{lstlisting}
 
-\begin{itemize}
-    \item The write-set is modeled by the function update in \texttt{balance'}.
-    \item The invariant combines money conservation and the account floor property.
-    \item If the transfer is split into a visible debit action followed by a visible credit action, TLC can reach an intermediate state that violates money conservation.
-    \item The same atomicity obligation appears in software TM write-back, HTM commit, persistent TM log replay, and distributed two-phase commit.
-\end{itemize}
+The write-set is modeled by the function update in \texttt{balance'}.
+The invariant combines money conservation and the account floor. If the
+transfer is split into a visible debit action followed by a visible credit
+action, TLC can reach an intermediate state that violates money conservation.
+The same atomicity obligation appears in software TM write-back, HTM commit,
+persistent TM log replay, and distributed two-phase commit.
 
 \section{Hardware Mechanisms and TM Consequences}
 
+Table~\ref{tab:hardware-tm-taxonomy} summarizes the hardware mechanisms this
+chapter introduced and the TM design consequences each one forces.
+
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.24\linewidth}p{0.31\linewidth}p{0.34\linewidth}}
+\caption{Hardware mechanisms and their TM consequences.}
+\label{tab:hardware-tm-taxonomy}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{p{0.20\linewidth} p{0.30\linewidth} p{0.35\linewidth}}
 \hline
-Mechanism & TM consequence & Representative backends in the codebase \\
+\textbf{Mechanism} & \textbf{TM consequence} & \textbf{Representative backends in the codebase} \\
 \hline
-Cache coherence & Natural conflict signal for HTM; invalidation of a read or write line aborts the transaction. False conflicts arise at cache-line granularity. & TSX-SGL; also relevant to TL2, NOrec, and TSC-TM because their metadata and payload placement affect cache traffic. \\
-\hline
-Private L1 cache & Bounds the speculative footprint of HTM transactions. Large read/write sets may abort even without a logical conflict. & TSX-SGL falls back to SGL; larger software paths include TL2, NOrec, NOrec-BF, TinySTM variants, and SwissTM. \\
-\hline
-Store buffer & Delays visibility of stores; software write-back needs correct publish ordering and fences. & NOrec, TL2, TSC-TM, TinySTM WBCTL/WT/WBETL, SwissTM. \\
-\hline
-Timestamp counter or logical clock & Enables version validation and fast read paths, but clock reads and ordering must match the memory model. & TL2, TSC-TM, NOrec, JVSTM, MVLog. \\
-\hline
-No coherent cache across GPU SMs & Conflict detection cannot be borrowed directly from MESI; validation and commit protocols must be explicit. & PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, GUST. \\
-\hline
-Persistent memory ordering & Commit must survive crashes as an all-or-nothing durable transition. Flushes and persist barriers become part of correctness. & NV-HTM, Romulus, PersistentSGL. \\
-\hline
-Distributed memory & Coherence is replaced by messages, locks, leases, timestamps, or consensus-adjacent protocols. & DistributedSGL and TiKV-style Percolator two-phase commit. \\
+Cache coherence & Conflict signal on invalidation; hardware conflict detection; false conflicts at line granularity & TSX-SGL, HTM path; all hardware TM  \\
+Private L1 cache & Speculative data home; capacity aborts when transaction working set overflows & TSX-SGL; hardware TM; software backends avoid by using memory metadata  \\
+Store buffer & Relaxed write-to-read ordering; torn views on commit without fences; commit-publish fence required & TL2, NOrec, TinySTM WBCTL/WT/WBETL, SwissTM, JVSTM, MVLog  \\
+Timestamp counter or logical clock & Global commit order; version clocks for read-set validation & TL2, NOrec, NOrec-BF, TSC-TM, JVSTM, MVLog  \\
+No coherent cache across GPU SMs & Software conflict detection; warp-level voting; multi-version commit logs & PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, GUST  \\
+Persistent memory ordering & Durable commit requires write ordering and crash consistency; undo/redo logs & NV-HTM, Romulus, PersistentSGL  \\
+Distributed memory & No shared coherence domain; transactions become distributed protocols; two-phase commit & DistributedSGL, TiKV  \\
 \hline
 \end{tabular}
-\caption{Hardware and platform mechanisms as they appear in TM design. The same bank invariant is simple; the publication substrate changes.}
-\label{tab:hardware-tm-taxonomy}
 \end{table}
 
+The table makes explicit what the rest of the book assumes: every TM backend,
+whether software or hardware, is built on this substrate. The caches supply
+conflict detection or force software validation. The store buffer forces the
+commit-publish fence. The absence of coherent caches on GPUs forces a
+different design family entirely. The presence of persistent memory adds a
+durability obligation to the same atomic-publish rule.
+
 \section{Summary}
-\begin{itemize}
-    \item Modern CPUs already implement a form of speculative rollback.
-    \item Cache coherence can detect conflicts, but store buffers hide visibility.
-\end{itemize}
+
+Modern CPUs already implement a form of speculative rollback through branch
+prediction and reorder buffers. Transactional memory reuses and extends that
+mechanism: a transaction's speculative state lives in the cache, and abort
+discards it. Cache coherence can detect conflicts because an invalidation is
+a signal that a line touched by the transaction has been written elsewhere.
+But store buffers hide visibility, so a software TM must insert fences to make
+a commit's write-set visible atomically. The hardware substrate thus both
+enables and constrains every design in the chapters that follow.
+
+The store-buffer surprise of Section~\ref{sec:tso-example} is the hardware
+echo of the snapshot-consistency problem from Chapter~2. The false-conflict
+example shows why coarse-grained hardware conflict detection is not free. The
+atomic commit-publish TLA+ model states the obligation that every backend in
+Parts~IV and VII must refine: the debit and the credit are one step, not two.
 
 \section{Exercises}
+
 \begin{enumerate}
-    \item Draw a pipeline diagram showing a speculatively executed store that must be squashed on an abort.
-    \item In a system with TSO, a transaction writes to location A and then reads B. Show a scenario where another thread sees the write to A before the transaction commits, violating opacity. Propose a fence placement.
-    \item Explain why a TM that uses only cache coherence for conflict detection might still suffer from store-buffer effects.
-    \item \emph{[implementation]} Modify the cache-line example so that four worker threads repeatedly transfer between adjacent accounts. Provide two layouts: compact and padded. Count committed transfers only under the SGL wrapper, and check after every run that the total balance is unchanged. Do not report timing as a research result; use the experiment only to inspect layout and contention.
-    \item \emph{[verification]} Extend the TLA+ model in the surrounding discussion of the HTM execution states by adding a broken two-step transfer with separate \texttt{Debit} and \texttt{Credit} actions. State the money-conservation invariant explicitly:
-    $$
-    \sum_{a \in Accounts} balance[a] = constant
-    $$
-    Then model-check that TLC finds a violation for the broken model but not for the atomic \texttt{Transfer} action.
-    \item \emph{[theory]} Explain why a cache-coherence invalidation is sufficient to detect some HTM conflicts but not sufficient to implement a full STM on a GPU. Your answer should distinguish word conflicts, cache-line conflicts, and the absence of coherent private caches across GPU SMs.
+\item \emph{[theory]} Draw a pipeline diagram showing a speculatively
+executed store that must be squashed on an abort. Label the reorder
+buffer, the memory stage, and the writeback stage. Explain why the
+store never becomes architecturally visible.
+
+\item \emph{[theory]} In a system with TSO, a transaction writes to
+location A and then reads B. Show a scenario where another thread sees
+the write to A before the transaction commits, violating opacity.
+Propose a fence placement that prevents the torn view.
+
+\item \emph{[theory]} Explain why a TM that uses only cache coherence for
+conflict detection might still suffer from store-buffer effects.
+
+\item \emph{[implementation]} Modify the cache-line example in
+Listing~\ref{lst:cache-line-layout} so that four worker threads
+repeatedly transfer between adjacent accounts. Provide two layouts:
+compact and padded. Count committed transfers only under the SGL
+wrapper, and check after every run that the total balance is
+unchanged. Do not report timing as a research result; use the
+experiment only to inspect layout and contention.
+
+\item \emph{[verification]} Extend the TLA+ model in
+Listing~\ref{lst:bank-atomic-commit} by adding a broken two-step
+transfer with separate \texttt{Debit} and \texttt{Credit} actions.
+State the money-conservation invariant explicitly:
+$\sum_{a \in \mathrm{Accounts}} \mathrm{balance}[a] = 200$.
+Then model-check that TLC finds a violation for the broken model but
+not for the atomic \texttt{Transfer} action.
+
+\item \emph{[theory]} Explain why a cache-coherence invalidation is
+sufficient to detect some HTM conflicts but not sufficient to
+implement a full STM on a GPU. Your answer should distinguish word
+conflicts, cache-line conflicts, and the absence of coherent private
+caches across GPU SMs.  (The coherence machinery itself is surveyed in
+Sorin, Hill, and Wood's primer \cite{sorin11primer}.)
+
+\item \emph{[implementation]} Write a small x86 program that reproduces
+the store-buffer surprise of Section~\ref{sec:tso-example}. Use two
+threads, a release fence, and an atomic flag to coordinate. Verify
+that without the fence, the torn view is observable in some runs, and
+with the fence, it is not.
+
+\item \emph{[open]} Herlihy and Moss' 1993 proposal \cite{herlihy93} gave
+HTM conflict detection ``for free'' by piggybacking on cache
+coherence, yet commodity HTM arrived late, as a best-effort feature,
+and remains marginal.  Argue a position: was the 1993 design ahead of
+its time, or did its assumptions (L1-sized transactions, coherent
+private caches) guarantee that commodity hardware could only ship a
+weakened version?  Point to one concrete mechanism from this chapter
+(store buffers, capacity aborts, TSO) that supports your side.
 \end{enumerate}
+
+\textbf{How to check your work.} The \emph{[implementation]} exercises are
+verified with the companion: run the cache-line layouts of
+Listing~\ref{lst:cache-line-layout} under \texttt{make -C benchmarks/cpp
+run-bank}, and reproduce the store-buffer surprise of
+\S\ref{sec:tso-example}.  The \emph{[verification]} exercise is checked with
+TLC against Listing~\ref{lst:bank-atomic-commit}
+($\sum \mathrm{balance}[a]=200$; see Appendix~\ref{chap:pluscal-quick-ref}).
+The \emph{[theory]} exercises are graded against \S\ref{sec:tso-example} and
+\S\ref{sec:hardware}.  The \emph{[open]} exercise has no single right
+answer; it is graded on whether you connect your position to at least one
+concrete mechanism from this chapter and address the strongest objection.
+
+\index{data race}
+\index{happens-before}
+\index{compiler barrier}
+\index{acquire/release}
+\index{seq\_cst}
+\index{snooping}
+\index{directory-based coherence}
+\index{invalidation}
+\index{reorder buffer}
+\index{branch prediction}
+\index{write-back}
+\index{TLA+}
+\index{invariant}
+\index{money conservation}
+\index{single global lock}
+\index{cache-line granularity}
+\index{false conflict}
+\index{capacity abort}
+\index{commit-publish fence}
+\index{store-to-load forwarding}
+
+
+% -------------------------------------------------------------------

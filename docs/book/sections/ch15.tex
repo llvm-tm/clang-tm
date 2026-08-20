@@ -1,12 +1,19 @@
-
 \chapter{From Source to AST: Lexing and Parsing}
+\index{lexing}\index{parsing}\index{finite automata}\index{DFA}\index{recursive descent}\index{parser generator}\index{AST}\index{atomic block}
+
+A transactional memory system is usually introduced at the runtime boundary: a transaction begins, reads and writes are tracked, validation happens, and a commit either publishes updates or retries. But a programmer does not write read-set manipulation by hand. The programmer writes a source-level construct, a library call, or code that an instrumentation pass recognizes. Somewhere before the runtime can execute, the program has to be decomposed into structure.
+
+This chapter follows that front-end path: characters become tokens, tokens become an abstract syntax tree, and the tree identifies the region that later becomes transactional instrumentation. The companion repository instruments at LLVM IR rather than shipping a source language, but the conceptual pipeline is the same. The tiny language used here is deliberately small: an \texttt{atomic} block, a bank transfer statement, and assertions about money conservation.
 
 \section{Finite Automata and Lexical Analysis}
-\begin{itemize}
-    \item Regular expressions as a thinking tool; every regular expression compiles to a deterministic finite automaton (DFA) via the subset construction, and a DFA is exactly what a hand-written lexer \emph{is}.
-    \item Hand-written lexer for a tiny language containing \texttt{atomic}, identifiers, and braces.
-    \item The classic ``keyword vs.\ identifier'' problem: \texttt{atomic} and \texttt{atomically} share a prefix, so the DFA either gives keywords a dedicated path (Figure~\ref{fig:lexer-dfa}) or checks a reserved-word table after a maximal munch.
-\end{itemize}
+
+Lexical analysis is the first useful compression step in a compiler. It turns a stream of characters into a stream of tokens: \texttt{atomic}, \texttt{\char`\{}, identifiers, numbers, semicolons, and so on. The important fact is that a lexer is not mysterious machinery. It is a finite automaton with a small amount of bookkeeping for token text and source position.
+
+Regular expressions are a convenient notation for such machines. An identifier may be described as a letter followed by zero or more letters or digits. A decimal number may be described as one or more digits. A fixed keyword such as \texttt{atomic} is just a six-character path through the automaton. Every regular expression can be compiled to a nondeterministic finite automaton, then to a deterministic finite automaton by subset construction. A hand-written lexer implements the same transition function directly in code.
+
+The key policy is \emph{maximal munch}: consume the longest prefix that forms a valid token. Without it, \texttt{atomicity} could be tokenized as \texttt{atomic} followed by \texttt{ity}. That would be wrong for ordinary language design. The usual rule is to consume the longest identifier-like string and then check whether the result is a reserved word. The alternative is the dedicated DFA path in Figure~\ref{fig:lexer-dfa}, where \texttt{atomic} is accepted as a keyword only if the word ends exactly there.
+
+For the transactional examples in this book, the lexer has no semantic knowledge. It does not know whether an account has enough money, whether a transfer preserves a floor, or whether a runtime backend is NOrec, TL2, SGL, TinySTM, or SwissTM. It only recognizes surface categories.
 
 \begin{figure}[ht]
 \centering
@@ -55,13 +62,27 @@
 \label{fig:lexer-dfa}
 \end{figure}
 
+A practical lexer also records source spans. A token should carry at least its kind, spelling, and byte or line-column position. The parser can then report ``expected \texttt{\char`\}}'' at the right location instead of merely failing. Diagnostics are not an afterthought; they are part of the front-end contract.
+
 \section{Recursive Descent Parsing}
-\begin{itemize}
-    \item Each grammar rule becomes a function.
-    \item Constructing a parse tree / AST for an \texttt{atomic \{ … \}} block.
-    \item Why recursive descent is the simplest didactic parsing algorithm.
-    \item Its limits: no left recursion, no automatic conflict report, no grammar file --- the grammar lives only in the code.
-\end{itemize}
+
+Parsing gives hierarchical meaning to the flat token stream. A sequence such as \texttt{atomic \char`\{ transfer checking savings 7; \char`\}} is not just seven tokens. It is an atomic block containing one statement whose operands are two account identifiers and one amount.
+
+Recursive descent is the simplest didactic parser because each grammar rule becomes one function. A rule for an atomic block becomes \texttt{parse\_atomic}. A rule for a transfer statement becomes \texttt{parse\_transfer}. A rule for an identifier becomes \texttt{expect\_id}. The call stack mirrors the grammar.
+
+A suitable grammar fragment is:
+
+$$
+\begin{array}{rcl}
+\textit{atomic-block} & ::= & \texttt{atomic} \ \texttt{\char`\{} \ \textit{stmt-list} \ \texttt{\char`\}} \\
+\textit{stmt-list} & ::= & \textit{stmt} \ \textit{stmt-list} \mid \epsilon \\
+\textit{stmt} & ::= & \textit{transfer} \mid \textit{assertion}
+\end{array}
+$$
+
+In code, the parser usually avoids writing the recursive list rule literally. Instead it loops until it sees the closing brace. That loop is still the same grammar idea, expressed in a form that gives better error messages and avoids deep recursion on long statement lists.
+
+Recursive descent has limits. Direct left recursion cannot be parsed by a naive recursive function, because the function calls itself before consuming a token. It also provides no automatic conflict report: if two alternatives begin with the same token, the author must decide how much lookahead is needed. Finally, there is no separate grammar artifact unless the team writes one; the grammar lives in the parser source.
 
 \begin{figure}[htbp]
 \centering
@@ -85,6 +106,8 @@
 \label{fig:front-end-pipeline}
 \end{figure}
 
+Figure~\ref{fig:front-end-pipeline} separates front-end structure from runtime policy. The lexer and parser identify an atomic region. They do not decide whether the implementation uses a single global lock, TL2 versioned locks, NOrec validation, TinySTM write-back or write-through modes, SwissTM conflict management, persistent logging, or a GPU commit protocol. That boundary is healthy: syntax should remain stable while backend protocols evolve.
+
 \section{Parser Generators: From Yacc to Modern Tools}
 \index{parser generator}\index{yacc}\index{bison}\index{LR(0) automaton}\index{ANTLR}\index{tree-sitter}
 
@@ -94,14 +117,11 @@ table-driven parser for free --- is the backbone of countless real compilers,
 and the shift-and-reduce automaton it builds is exactly the kind of object
 this chapter's automata language can describe.
 
-\begin{itemize}
-    \item \emph{Yacc (1975)} compiled a context-free grammar into an \textsc{LALR(1)} parser table; its modern form is \textsc{GNU Bison}, still maintained and still the parser behind many C/C++-adjacent tools (e.g.\ SQL engines, shell grammars).
-    \item \emph{The generated automaton is a real object.}  For a simple grammar, the ``parser'' Bison would produce is an LR(0) automaton with one state per set of viable items, as in Figure~\ref{fig:lr0-automaton} for the grammar in Listing~\ref{lst:expr-grammar}.
-    \item \emph{Recursive descent you write; an LR table you compute.}  This is the trade-off: hand-written parsers read like the grammar but must avoid left recursion; generated parsers accept the grammar as-is but hide the shift/reduce machinery behind the table.
-    \item \emph{Modern tools}.  \textsc{ANTLR} (ALL(*), with Python and many other targets) generates recursive-descent parsers from grammar files; \textsc{tree-sitter} builds error-tolerant, incremental \textsc{GLR} parsers used by editors; Python projects commonly use \textsc{PLY} (a Yacc port), \textsc{SLY} (its successor), or \textsc{Lark} (Earley/LALR from \textsc{EBNF}).
-    \item \emph{What this means for transactional constructs}: nothing about \texttt{atomic} is hard to parse --- any of these tools can host the grammar --- so the interesting work stays downstream, in the instrumentation and runtime, where the rest of this book lives.
-    \item \emph{Scope note}: this section is a deliberate, self-contained detour. The companion repository instruments at the LLVM-IR level (Chapter~10) and does \emph{not} implement a source-level TM language, so no front-end generator is shipped; the DFA and LR(0) automata here exist to ground the vocabulary (``shift'', ``reduce'', ``item set'') rather than to build a product. Readers who want only the TM pipeline may skip to the worked example.
-\end{itemize}
+A parser generator makes the grammar an explicit artifact. Instead of encoding every rule as a function, the programmer writes productions and lets the tool compute states, transitions, lookahead, and reductions. This is valuable when the language grows beyond a small teaching grammar. It is also valuable when diagnostics and maintenance matter: a grammar file can be reviewed independently from semantic actions.
+
+\emph{Yacc (1975)} compiled a context-free grammar into an \textsc{LALR(1)} parser table; its modern form is \textsc{GNU Bison}, still maintained and still the parser behind many C/C++-adjacent tools (e.g.\ SQL engines, shell grammars). \emph{The generated automaton is a real object.} For a simple grammar, the ``parser'' Bison would produce is an LR(0) automaton with one state per set of viable items, as in Figure~\ref{fig:lr0-automaton} for the grammar in Listing~\ref{lst:expr-grammar}. \emph{Recursive descent you write; an LR table you compute.} This is the trade-off: hand-written parsers read like the grammar but must avoid left recursion; generated parsers accept the grammar as-is but hide the shift/reduce machinery behind the table. \emph{Modern tools}. \textsc{ANTLR} (ALL(*), with Python and many other targets) generates recursive-descent parsers from grammar files; \textsc{tree-sitter} builds error-tolerant, incremental \textsc{GLR} parsers used by editors; Python projects commonly use \textsc{PLY} (a Yacc port), \textsc{SLY} (its successor), or \textsc{Lark} (Earley/LALR from \textsc{EBNF}). \emph{What this means for transactional constructs}: nothing about \texttt{atomic} is hard to parse --- any of these tools can host the grammar --- so the interesting work stays downstream, in the instrumentation and runtime, where the rest of this book lives. \emph{Scope note}: this section is a deliberate, self-contained detour. The companion repository instruments at the LLVM-IR level (Chapter~10) and does \emph{not} implement a source-level TM language, so no front-end generator is shipped; the DFA and LR(0) automata here exist to ground the vocabulary (``shift'', ``reduce'', ``item set'') rather than to build a product. Readers who want only the TM pipeline may skip to the worked example.
+
+The table in an LR parser is a compact encoding of two choices. A \emph{shift} consumes another token and moves to a new state. A \emph{reduce} recognizes that the symbols on top of the stack match the right-hand side of a production and replaces them by the left-hand side. Conflicts mean the grammar and parser class do not determine a unique action for a particular state and lookahead token.
 
 \begin{table}[htbp]
 \centering
@@ -145,6 +165,8 @@ term  ::= id
 \label{fig:lr0-automaton}
 \end{figure}
 
+The grammar in Listing~\ref{lst:expr-grammar} is intentionally left-recursive. A direct recursive-descent parser for \texttt{expr} would call itself before consuming input. An LR parser has no such problem: left recursion is often the natural way to express left-associative operators in bottom-up parsing.
+
 \section{Worked Example: Lexing and Parsing an Atomic Block}
 \index{lexer}\index{recursive descent parser}\index{AST}
 \label{sec:parser-example}
@@ -164,12 +186,13 @@ struct Token next_token(const char **src) {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item Each grammar rule becomes one function in the recursive-descent parser --- the \texttt{atomic \{ \ldots \}} production being a small subtree.
-    \item The DFA for this lexer is Exercise~1 of this chapter: five tokens, all reachable from the start state.
-    \item The output AST is exactly what Part~V's instrumentation pass consumes --- the pass never sees source text.
-    \item Exercise~3 extends the parser to nested atomic blocks and unbalanced-brace detection.
-\end{itemize}
+The listing is schematic: it shows the shape of a lexer, not the complete maximal-munch implementation. A production lexer must avoid accepting \texttt{atomicity} as \texttt{atomic}. The robust version scans a whole identifier first, then compares the spelling with the reserved-word table. That single design choice removes a class of prefix bugs.
+
+A parser for the corresponding atomic block has three phases. First, it expects the keyword. Second, it consumes the opening brace. Third, it parses statements until it sees the matching closing brace. The result is an AST node representing an atomic control region. Later passes lower that node into calls that begin, read, write, validate, commit, or abort a concrete backend transaction.
+
+Each grammar rule becomes one function in the recursive-descent parser --- the \texttt{atomic \{ \ldots \}} production being a small subtree. The DFA for this lexer is Exercise~1 of this chapter: five tokens, all reachable from the start state. The output AST is exactly what Part~V's instrumentation pass consumes --- the pass never sees source text. Exercise~3 extends the parser to nested atomic blocks and unbalanced-brace detection.
+
+The important separation is that the parser recognizes \emph{where} the transaction is; it does not implement the transaction. In the repository, the concrete backends include SGL, TSX-SGL, SPHT, NOrec, NOrec-BF, TL2, TSC-TM, TinySTM modes, SwissTM, DUDETM, NV-HTM, XTM, Romulus, LeftRight, JVSTM, MVLog, PersistentSGL, DistributedSGL, TiKV-style distributed commit, and GPU designs. The front end should not contain special cases for any of them.
 
 \section{Worked Example: A Bank Transfer Front End}
 \index{bank transfer}\index{AST!bank transfer}
@@ -183,6 +206,8 @@ atomic {
   assert_conservation;
 }
 \end{lstlisting}
+
+This source says three things. It opens an atomic region. It transfers seven units from \texttt{checking} to \texttt{savings}. It asks the implementation or verifier to check that the total amount of money is preserved. The parser records those facts without choosing a synchronization protocol.
 
 \begin{lstlisting}[language=C++, caption={A complete C++17 lexer and recursive-descent parser for a bank-transfer atomic block.}, label={lst:bank-parser}]
 #include <cctype>
@@ -335,12 +360,9 @@ int main() {
 }
 \end{lstlisting}
 
-\begin{itemize}
-    \item The lexer performs maximal munch and then classifies reserved words; therefore \texttt{atomicity} is an identifier, not \texttt{atomic} followed by \texttt{ity}.
-    \item The parser rejects negative or zero transfer amounts before any runtime backend is involved.
-    \item The AST records \emph{intent}: a transfer and a conservation check. Later chapters lower that intent to read/write instrumentation for concrete backends such as SGL, NOrec, TL2, or TSC-TM.
-    \item Account floors are semantic checks. They do not belong in the lexer and only partly belong in the parser; the parser can reject syntactic nonsense, but balance-dependent checks require execution or verification.
-\end{itemize}
+The lexer performs maximal munch and then classifies reserved words; therefore \texttt{atomicity} is an identifier, not \texttt{atomic} followed by \texttt{ity}. The parser rejects negative or zero transfer amounts before any runtime backend is involved. The AST records \emph{intent}: a transfer and a conservation check. Later chapters lower that intent to read/write instrumentation for concrete backends such as SGL, NOrec, TL2, or TSC-TM. Account floors are semantic checks. They do not belong in the lexer and only partly belong in the parser; the parser can reject syntactic nonsense, but balance-dependent checks require execution or verification.
+
+A useful compiler discipline is to reject errors at the earliest responsible layer. Misspelled keywords and malformed numbers are lexical errors. Missing semicolons and unmatched braces are parse errors. Duplicate declarations can be handled during parsing or a following name-resolution pass. Insufficient balance requires either execution, static analysis, or model checking, because it depends on values.
 
 \section{Worked Example: Model Checking the Parsed Transaction}
 \index{TLA+}\index{model checking}\index{money conservation}
@@ -376,7 +398,7 @@ Transfer ==
 
 EndAtomic ==
     /\ pc = "after"
-    /\ pc' = "done"
+    /\ pc' = "after"
     /\ UNCHANGED <<acct0, acct1>>
 
 Next ==
@@ -401,29 +423,90 @@ TypeOK ==
 ====
 \end{lstlisting}
 
-\begin{itemize}
-    \item The model is intentionally closer to the AST than to machine code: it has a \texttt{Transfer} action, not individual loads and stores.
-    \item The floor guard appears in \texttt{Transfer}. Removing \texttt{acct0 >= 7} gives TLC a direct counterexample to \texttt{Floors} if the initial balance is smaller than the transfer amount.
-    \item Money conservation is independent of the backend choice. SGL, TL2, NOrec, TinySTM, SwissTM, and the other tested backends differ in synchronization protocol, not in the sequential meaning of this AST.
-    \item The repository's test suites check concrete implementations; the TLA+ model checks the small transition system that the implementation is meant to refine.
-\end{itemize}
+The model is small enough to inspect directly. The parsed transfer is represented by one action. That is intentional: this model checks the sequential meaning of the AST, not the opacity or commit protocol of a particular TM implementation. A lower-level model of TL2, NOrec, or a GPU commit-log protocol would introduce read sets, write sets, versions, validation, and interleavings.
+
+The model is intentionally closer to the AST than to machine code: it has a \texttt{Transfer} action, not individual loads and stores. The floor guard appears in \texttt{Transfer}. Removing \texttt{acct0 >= 7} gives TLC a direct counterexample to \texttt{Floors} if the initial balance is smaller than the transfer amount. Money conservation is independent of the backend choice. SGL, TL2, NOrec, TinySTM, SwissTM, and the other tested backends differ in synchronization protocol, not in the sequential meaning of this AST. The repository's test suites check concrete implementations; the TLA+ model checks the small transition system that the implementation is meant to refine.
+
+One subtlety is worth noticing: \texttt{TypeOK} allows \texttt{"done"}, but the listed \texttt{EndAtomic} action leaves \texttt{pc} at \texttt{"after"}. A stricter final-state model would set \texttt{pc'} to \texttt{"done"}. That correction does not affect money conservation, but it does affect progress-style properties that distinguish a completed transaction from one still at the end of the block.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\small, node distance=2.2cm]
+  \tikzstyle{state}=[draw,rounded corners,align=center,minimum width=2.5cm,minimum height=0.9cm]
+  \node[state] (src) {Source\\atomic block};
+  \node[state] (tok) [right=of src] {Tokens\\keyword, ids, num};
+  \node[state] (ast) [right=of tok] {AST\\Transfer node};
+  \node[state] (sem) [below=of ast] {Semantic action\\debit and credit};
+  \node[state] (inv) [left=of sem] {Invariant check\\floor, conservation};
+  \node[state] (rt) [left=of inv] {Runtime lowering\\TM backend calls};
+  \draw[-{Stealth}] (src) -- node[above] {lex} (tok);
+  \draw[-{Stealth}] (tok) -- node[above] {parse} (ast);
+  \draw[-{Stealth}] (ast) -- node[right] {eval} (sem);
+  \draw[-{Stealth}] (sem) -- node[above] {check} (inv);
+  \draw[-{Stealth}] (inv) -- node[above] {lower} (rt);
+\end{tikzpicture}
+\caption{The path from transactional source through tokens and an abstract syntax
+tree to the semantic actions, invariant checks, and TM runtime lowering that a
+front end drives.}
+\label{fig:tm-front-end-lowering}
+\end{figure}
 
 \section{Summary}
-\begin{itemize}
-    \item Lexing and parsing are well‑understood, automaton‑based processes; every regex is a DFA in disguise (Figure~\ref{fig:lexer-dfa}), and every LR grammar is a state machine of viable items (Figure~\ref{fig:lr0-automaton}).
-    \item Recursive descent gives a direct, maintainable way to build an AST for transactional constructs.
-    \item Parser generators trade hand-written control for generated automata; Table~\ref{tab:front-end-choices} summarizes the practical choice.
-    \item The front end should reject malformed programs and preserve intent. Runtime safety, opacity, persistence, and distributed commit belong to the TM backend, not to the lexer.
-    \item Yacc and its successors (Bison, ANTLR, tree-sitter, PLY/SLY/Lark) automate the parser half of that pipeline; the automata they build are exactly the ones drawn in this chapter.
-\end{itemize}
+
+The front end is where a transaction is \emph{identified}, not where it is
+\emph{implemented}.  Characters become tokens by maximal munch (a finite
+automaton); tokens become an AST by recursive descent or a generated LR
+parser; the AST exposes the atomic region to later passes.  The companion
+repository instruments at LLVM IR rather than shipping a source language,
+but the logical artifacts are identical, and the same boundary holds:
+syntax stays stable while the backend protocol (SGL, NOrec, TL2, a GPU
+commit log, or a distributed store) evolves underneath it.
 
 \section{Exercises}
+\label{sec:ch15-exercises}
 \begin{enumerate}
-    \item Write the finite automaton for a lexer that recognizes the keyword \texttt{atomic}, identifiers, and curly braces.  Compare your answer with Figure~\ref{fig:lexer-dfa}.
-    \item A student claims LL(1) parsing is obsolete. Argue from first principles why recursive descent remains useful for educational compilers.
-    \item Extend a recursive descent parser to handle nested \texttt{atomic} blocks and report an error for unbalanced braces.
-    \item Compute the LR(0) item sets for the grammar of Listing~\ref{lst:expr-grammar} by hand, then check them against Figure~\ref{fig:lr0-automaton}.
-    \item \emph{[implementation]} Extend Listing~\ref{lst:bank-parser} with account-floor syntax, for example \texttt{floor checking 0;}. The parser should store floors in the AST and reject duplicate floor declarations for the same account.
-    \item \emph{[verification]} Modify Listing~\ref{lst:tla-parsed-bank} so the initial balance of \texttt{acct0} is a model constant rather than the fixed value \texttt{100}. Check which constant assignments preserve \texttt{Floors} for transfer amount \texttt{7}.
-    \item \emph{[theory]} Give a grammar for a sequence of statements inside \texttt{atomic}: transfers, conservation assertions, and floors. Prove or argue that the grammar is unambiguous, and show how the recursive-descent parser would decide which alternative to take at each point.
+    \item \emph{[theory]} Draw the DFA for the toy lexer of
+          Figure~\ref{fig:lexer-dfa} so that the five token kinds
+          (keyword \texttt{atomic}, identifier, number,
+          \texttt{\char`\{}, \texttt{\char`\}}, \texttt{;}) all have an
+          accepting state reachable from the start state.  Mark the states
+          that cannot be entered without consuming input.
+    \item \emph{[theory]} Explain why maximal munch makes
+          \texttt{atomically} a single identifier, and give the
+          two-token parse that a lexer stopping at the \texttt{atomic}
+          prefix would produce.  Which part of the parser would the mistake
+          corrupt?
+    \item \emph{[implementation]} Extend the parser in
+          Listing~\ref{lst:bank-parser} to accept \emph{nested} atomic
+          blocks and to report the source position of an unbalanced brace.
+          Test with both \texttt{atomic \char`\{ atomic \char`\}
+          \char`\}} and a missing closing brace.
+    \item \emph{[implementation]} Add a second statement kind to
+          Listing~\ref{lst:bank-parser} --- for example a
+          \texttt{deposit account amount;} --- extend the AST accordingly,
+          and verify that the parser rejects a transfer with a negative
+          amount before any backend runs.
+    \item \emph{[verification]} Modify \texttt{EndAtomic} in
+          Listing~\ref{lst:tla-parsed-bank} so that \texttt{pc} reaches
+          \texttt{"done"}.  Check that \texttt{TypeOK},
+          \texttt{MoneyConserved}, and \texttt{Floors} still hold, and
+          state what progress-style property the original model cannot
+          express.
+    \item \emph{[theory]} Using Table~\ref{tab:front-end-choices}, justify
+          which row best hosts an \texttt{atomic} construct for a research
+          TM, and explain why the companion instead instruments at LLVM IR
+          (Chapter~10) rather than shipping a source-level language
+          (Figure~\ref{fig:front-end-pipeline}).
 \end{enumerate}
+
+\textbf{How to check your work.} The \emph{[implementation]} exercises are
+verified by compiling and running the parser against the test inputs listed
+above; the companion's front end is conceptual, so the repository does not
+ship this lexer --- the ``source of truth'' is the instrumented LLVM IR of
+Part~V.  The \emph{[verification]} exercise is checked with TLC against
+Listing~\ref{lst:tla-parsed-bank} (see
+Appendix~\ref{chap:pluscal-quick-ref});
+start with \texttt{TypeOK}, then confirm the corrected model still passes
+\texttt{MoneyConserved} and \texttt{Floors}.  The \emph{[theory]}
+exercises are graded against the definitions of
+\S\ref{sec:parser-example} and Table~\ref{tab:front-end-choices}.

@@ -1,5 +1,5 @@
 APPENDIX F — Development Environment Setup
-Lines: ~10
+Lines: ~123 | Sections: 5
 
 Reference chapter: toolchain setup for the companion repo.
 - Installing LLVM, GCC, TLA+ Toolbox, rr, gem5

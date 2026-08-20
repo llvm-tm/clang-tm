@@ -1,10 +1,124 @@
-
 \chapter{Development Environment Setup}
+\label{chap:dev-setup}
+
+This appendix is the concrete setup behind every \emph{[implementation]}
+exercise.  The preface points here for the toolchain; this chapter makes
+that promise good.  Everything below is tested against the companion
+repository, so a working setup is: run the build, run the tests, run one
+TLA+ check, and only then start an exercise.
+
+\section{Minimum Toolchain}
+
 \begin{itemize}
-    \item Installing LLVM, GCC, TLA+ Toolbox, \texttt{rr}, gem5.
-    \item Building the companion runtime with CMake, selecting a backend, and running the test targets.
-    \item Running the STAMP benchmarks and reading their output (aborts, throughput, invariants).
-    \item Model-checking workflow: translate PlusCal, run TLC, inspect a counterexample, fix the design.
-    \item GPU toolchains (CUDA/ROCm, nvcc/hipcc) and where the GPU backends require dedicated hardware.
-    \item Common failure modes and their fixes: DATA/TEXT symbol collisions, region-address conflicts, missing LLVM target flags.
+    \item \textbf{A C++17 compiler}: \texttt{g++} or \texttt{clang++}.
+          The runtime backends compile with plain C++17; the LLVM
+          instrumentation plugin requires LLVM~22 and its \texttt{clang}.
+    \item \textbf{LLVM 22} (for Part~V exercises): \texttt{llvm-config-22},
+          \texttt{opt-22}, and the \texttt{clang-22} driver used by the
+          \texttt{plugin/clang-tm} wrapper script.
+    \item \textbf{\texttt{make}} and \textbf{CMake} (the plugin builds
+          through CMake; the benchmarks through the top-level Makefile).
+    \item \textbf{Java} and the \texttt{tla2tools.jar} checker (Part~III,
+          Appendix~\ref{chap:pluscal-quick-ref}).  Install once with
+          \texttt{make -C docs/proofs download-jar}.
+    \item \emph{Optional:} \texttt{rr} (record-and-replay, Chapter~12),
+          gem5 (Chapter~16), and a CUDA/ROCm toolchain (Chapter~17).
 \end{itemize}
+
+\section{Building the Companion}
+
+From the repository root:
+
+\begin{verbatim}
+make                # builds the plugin, plugin benchmarks, and
+                    # benchmarks/cpp (explicit-API) binaries
+make -C tests run   # backend unit tests + explicit-API tests
+\end{verbatim}
+
+The \texttt{benchmarks/cpp} Makefile exposes the per-benchmark and per-test
+targets used by exercises:
+
+\begin{verbatim}
+make -C benchmarks/cpp run-bank          # two-account bank + fuzz/bank
+make -C benchmarks/cpp run-fuzz-counter  # fuzz-counter with retry stats
+make -C benchmarks/cpp run-test-tx       # 114 transaction tests
+make -C benchmarks/cpp run-test-ds       # 207 data-structure tests
+make -C benchmarks/cpp run-stamp         # STAMP benchmarks (vacation, yada, ...)
+\end{verbatim}
+
+A backend is selected with the \texttt{BACKEND} variable
+(\texttt{tinystm} is the default; \texttt{norec}, \texttt{tl2},
+\texttt{sgl}, \texttt{jvstm}, \texttt{romulus}, and the others in
+\texttt{backends/tm\_impl/} are valid):
+
+\begin{verbatim}
+make -C benchmarks/cpp BACKEND=norec run-test-tx
+\end{verbatim}
+
+\section{Model-Checking Workflow}
+
+Chapter~6 (\S\ref{sec:verify-workflow}) defines the workflow; the
+\texttt{docs/proofs/Makefile} automates it:
+
+\begin{verbatim}
+make -C docs/proofs download-jar        # one-time: fetches tla2tools.jar
+make -C docs/proofs check               # TLC safety check, all backends
+make -C docs/proofs check-one BACKEND=TL2
+make -C docs/proofs verify-liveness     # fairness-based properties
+\end{verbatim}
+
+For a \emph{[verification]} exercise, drop your model in
+\texttt{docs/proofs/} with a matching \texttt{.cfg} (see
+Appendix~\ref{chap:pluscal-quick-ref}), run \texttt{check-one
+BACKEND=YourModel}, then delete it before committing so the default
+\texttt{check} target stays green.
+
+\section{GPU Toolchains (Chapter 17)}
+
+The GPU backends require dedicated hardware.  Under CUDA, compile kernels
+with \texttt{nvcc} and target your \texttt{sm\_XX}.  Under ROCm, use
+\texttt{hipcc --offload-arch=gfxXXXX} for kernels and compile host-side TM
+hooks with \texttt{g++} defining \texttt{TM\_GPU\_USE\_HIP} and
+\texttt{\_\_HIP\_PLATFORM\_AMD\_\_} (see
+\texttt{backends/tm\_impl/gpu\_stm/}).  The GPU results are device-specific
+by design (Table~\ref{tab:gpu-tm}); a CPU fallback
+(\texttt{pr\_stm\_cpu.cpp}) exists for the simulation exercises.
+
+\section{Common Failure Modes and Their Fixes}
+
+These are the failures that recur when building and running the companion,
+each with the fix that worked in this repository's history:
+
+\begin{itemize}
+    \item \textbf{DATA/TEXT symbol collisions.}  If an instrumented binary
+          crashes jumping into garbage at the first TM call, the runtime was
+          compiled without \texttt{-DLLVM\_TM\_PLUGIN}, so \texttt{tm\_init}
+          and friends are TEXT functions while the plugin emits indirect
+          calls through DATA pointers.  Fix: pass \texttt{-DLLVM\_TM\_PLUGIN}
+          when building the runtime (the \texttt{plugin/clang-tm} wrapper
+          does this automatically).  The same class of bug appears when a
+          benchmark declares \texttt{tm\_malloc} as a function instead of a
+          function-pointer variable.
+    \item \textbf{Region-address conflicts.}  The TM region allocator
+          \texttt{mmap}s a fixed address.  If a process stack or heap
+          lands inside that range, the mapping replaces it and the process
+          crashes (SIGSEGV).  Fix: map the region at the reserved base
+          address and translate addresses, as the simulator does.
+    \item \textbf{Missing LLVM target flags.}  The plugin needs the LLVM
+          version's target and codegen flags.  Use the repository's
+          \texttt{llvm-tool-helper.mk} and \texttt{clang-tm} rather than a
+          hand-rolled build, so the flags stay in one place.
+    \item \textbf{Untracked TM globals.}  If a static
+          \texttt{TM} global is silently bypassed (lost updates), the
+          instrumented binary is missing the \texttt{tm\_register\_global}
+          calls that the queue-init pass emits; rebuild the plugin and
+          recompile the benchmark.
+    \item \textbf{Stale binaries.}  After a runtime change, rebuild the
+          backend objects and the benchmark together; mixing an old
+          instrumented binary with a new runtime produces the DATA/TEXT
+          class of failure above.
+\end{itemize}
+
+The smoke test entry point is \texttt{smoke\_test.sh} at the repository
+root; run it after any change to confirm the ten tested backends still pass
+\texttt{test\_tx} (114/114) and \texttt{test\_ds} (207/207).

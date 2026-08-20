@@ -1,10 +1,164 @@
-
 \chapter{PlusCal / TLA+ Quick Reference}
+\label{chap:pluscal-quick-ref}
+
+This appendix is the working reference behind every \emph{[verification]}
+exercise in the book.  It assumes Chapter~6 (\S\ref{sec:pluscal-example},
+\S\ref{sec:verify-workflow}); here you find the syntax, the TLC commands,
+and the failure modes without re-reading the chapter.  TLA+ is the language
+of state machines; PlusCal is the pseudo-code layer that compiles to it.
+
+\section{The Language at a Glance}
+
+A TLA+ specification names \emph{variables}, sets their \emph{initial
+values}, and lists \emph{actions} that transform one state into the next.
+The temporal formula \texttt{Spec == Init \textbackslash/\ [][Next]\_vars}
+says: start at \texttt{Init}, then take \texttt{Next} (or stutter)
+forever.  TLC then enumerates the reachable states.
+
+\begin{lstlisting}[language={}, caption={A minimal TLA+ state machine.}]
+---- MODULE M ----
+EXTENDS Naturals, TLC
+VARIABLES x
+Init == x = 0
+Inc == x' = x + 1
+Next == Inc
+Spec == Init /\ [][Next]_x
+====
+\end{lstlisting}
+
+\emph{Constants} are declared with \texttt{CONSTANTS} and fixed in the
+configuration file.  An \emph{invariant} is a state predicate that must hold
+in every reachable state; a \emph{property} (temporal) asserts that a good
+state is eventually reached under stated fairness assumptions.  The table in
+\S\ref{sec:verify-workflow} maps every runtime backend in this book to its
+model file, key invariant, and TLC outcome.
+
+\section{Writing a Configuration File}
+
+The configuration is part of the proof artifact.  It names the constants,
+the invariants, and any temporal property, and it keeps the state space
+finite.  The canonical form (matching \S\ref{sec:pluscal-example}) is:
+
+\begin{lstlisting}[language={}, caption={A TLC configuration file.}]
+SPECIFICATION Spec
+
+CONSTANTS
+  Accounts = 1..2
+  Floor = 0
+
+INVARIANT
+  TypeOK
+  MoneyConserved
+  FloorsHold
+
+CHECK_DEADLOCK TRUE
+\end{lstlisting}
+
+\emph{CONSTRAINT} entries further bound the state space (e.g. a maximum
+clock value) when an unbounded counter makes TLC explore forever; see the
+\texttt{TLCBound} pattern used by the SPHT and TiKV models in
+\texttt{docs/proofs/}.  \texttt{CHECK\_DEADLOCK TRUE} turns deadlock into an
+error, which is how \emph{[verification]} exercises about eager locking
+find their deadlock.
+
+\section{A TM Model Skeleton}
+
+Every \emph{[verification]} exercise in this book is a small variation of
+the same skeleton: two accounts, a global clock or lock, and the two
+invariants \texttt{MoneyConserved} and \texttt{FloorsHold}.  The PlusCal
+form (see \S\ref{sec:pluscal-example} for the full running model):
+
+\begin{lstlisting}[language={}, caption={The shared shape of every TM model in the book.}]
+--algorithm Bank
+variables
+  clock = 0, lock = FALSE,
+  bal = [a \in 1..2 |-> 10];
+
+process Tx \in 1..2
+variables snap = 0, r1 = 0, r2 = 0;
+begin
+  BeginTx:  snap := clock;
+  Read:     r1 := bal[1]; r2 := bal[2];
+  Validate: if clock /= snap then abort or re-read; end if;
+  Commit:   await lock = FALSE; lock := TRUE;
+            bal[1] := bal[1] - 1; bal[2] := bal[2] + 1;
+            clock := clock + 1; lock := FALSE;
+end process;
+end algorithm;
+====
+\end{lstlisting}
+
+The three layers of state from \S\ref{sec:pluscal-example} --- application
+state (\texttt{bal}), transaction state (\texttt{snap}, \texttt{r1},
+\texttt{r2}), and metadata (\texttt{lock}, \texttt{clock}) --- are always
+kept separate.  An \emph{opacity} model adds a read set and a
+commit-time recheck; \S\ref{sec:norec-example} and
+\S\ref{sec:pluscal-bank-floor-example} show both validations.
+
+\section{Running TLC}
+
+The companion repository's \texttt{docs/proofs/Makefile} wraps TLC.  After
+downloading the checker once (\texttt{make download-jar}), a single backend
+is checked with:
+
+\begin{verbatim}
+java -cp /tmp/tla2tools.jar tlc2.TLC -deadlock \
+     Bank.tla -config Bank.cfg
+\end{verbatim}
+
+Useful flags: \texttt{-workers N} for parallel checking;
+\texttt{-coverage} to report which actions actually fired (a warning sign
+when an action never fires); \texttt{-maxSetSize N} to bound huge sets.
+Inside the repository, \texttt{make -C docs/proofs check} runs every model
+in one pass, and \texttt{make -C docs/proofs verify-liveness} adds the
+fairness-based properties.
+
+\section{Pitfalls}
+
 \begin{itemize}
-    \item Key language constructs: variables, actions, labels, \texttt{either/or}, invariants, properties.
-    \item Common TLC commands: \texttt{tlc -config model.cfg model.tla}, invariant checks, \texttt{-deadlock}.
-    \item Writing a config file: constants, invariants, properties, \texttt{Init}/\texttt{Next}.
-    \item Typical TM model skeleton: a thread (process), per-thread read/write set, global clock, and an opacity invariant.
-    \item Pitfalls in practice: fingerprinting record-valued state, unbounded state spaces, and PlusCal `missing label' errors.
-    \item How to read a counterexample trace: step-by-step from violation to root cause.
+    \item \textbf{Unbounded state spaces.}  A counter that only increments
+          (the commit clock, retry counters, sequence numbers) makes TLC run
+          forever.  Bound it with a \texttt{CONSTRAINT} or a small
+          \texttt{CONSTANTS} domain; the book's configs use finite
+          \texttt{TLCBound} constraints for exactly this reason.
+    \item \textbf{Record-valued state.}  Function-valued variables such as
+          \texttt{bal = [a $\in$ 1..2 |-> 10]} fingerprint fine in TLC, but a
+          model with per-process records that is translated from PlusCal can
+          blow up because each assignment creates a new record value.
+          Prefer named scalars and small sets.
+    \item \textbf{Missing labels.}  PlusCal requires a label before every
+          statement that touches a shared variable or that other processes
+          must await; the translator errors with ``missing label'' when a
+          loop or a multi-statement block lacks one.
+    \item \textbf{Type errors hide real errors.}  \texttt{TypeOK} (a
+          predicate over the types of every variable) is the first
+          invariant to write; without it, a modelling mistake surfaces as a
+          confusing \texttt{Invariant \ldots\ is violated} on an unrelated
+          formula.
+    \item \textbf{Stuttering.}  A variable missing from \texttt{UNCHANGED}
+          in an action changes the set of legal transitions.  When an
+          exercise asks you to split an action into \textsc{Debit} and
+          \textsc{Credit} steps, the point is precisely to observe the
+          intermediate states that a single atomic action hides.
 \end{itemize}
+
+\section{Reading a Counterexample}
+
+A TLC counterexample is a schedule, and it is read forward.  Start at the
+initial state and step through each state transition:
+
+\begin{enumerate}
+    \item Identify the process that moved and the label that fired.
+    \item Identify the shared variable that changed (the balance, the
+          clock, the lock, the read set).
+    \item Ask which earlier read became stale at that point --- the
+          \emph{[verification]} exercises in this book are almost always
+          about a stale read that validation failed to reject.
+    \item Replay the same schedule mentally on the runtime code: the model
+          step corresponds to a source-level read/write pair (see
+          \S\ref{sec:tla-bank-conservation} for the concrete mapping).
+\end{enumerate}
+
+If the injected-bug exercises (Chapter~6, ``Bug-Injection'') do not
+produce a counterexample, the mutation was either irrelevant or the
+invariant is too weak --- check both before concluding the model is right.

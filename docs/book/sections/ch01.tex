@@ -1,22 +1,69 @@
-% docs/book/sections/ch01.tex
-% Chapter 1: The Locking Crisis
-% Part I: Why Transactional Memory?
-% This chapter motivates the book. It contains worked examples, compilable
-% deadlock code, a TikZ wait-for-cycle figure, a TLA+ model-checking example,
-% a comparison table, and tagged exercises.
-
-\chapter{The Locking Crisis}
+\chapter{The Locking Crisis}\label{ch:locking-crisis}
 
 This chapter makes the software-engineering case against lock-based concurrency
 and for declarative atomicity. The argument is not that locks are useless;
 they are precise and well understood. The argument is that locks force the
 programmer to maintain a synchronization protocol that is invisible to the
-compiler, the type system, and every future reader of the code. The moment two
-separately correct lock-based modules interact, their lock orders can compose
-into a deadlock that no local inspection of either module can prevent. The
-rest of this book develops an alternative: transactional memory, in which the
-programmer names the \emph{set} of accesses that must appear atomic rather than
-an \emph{order} among locks.
+compiler, the type system, and every future reader of the code. By
+``invisible'' we mean three concrete things. The compiler cannot see the
+protocol: a \texttt{lock()}/\texttt{unlock()} pair is, to it, just two
+independent function calls, so it has no basis to reorder, cache, or eliminate
+accesses around them, and no way to warn that a field is being touched without
+its lock. The type system cannot express it: nothing in a field's type says
+``this member is protected by \texttt{g\_lock}, and only while it is held,''
+so the compiler cannot reject an unsynchronized access the way it rejects a
+type mismatch. And the protocol is not recoverable by inspection: the lock
+order, the set of guarded fields, and the conditions under which threads may
+wait are spread across many functions and modules, so a reader must reconstruct
+them from scattered acquire and release sites, and any two readers may
+reconstruct different protocols. When synchronization is invisible in this
+way, the language and its tools cannot help; every invariant must be enforced
+by convention alone \cite{boehm05}. The moment two separately correct lock-based
+modules interact, their lock orders can compose into a deadlock that no local
+inspection of either module can prevent. The rest of this book develops an
+alternative: transactional memory \cite{herlihy93}, in which the programmer
+declares the \emph{set} of accesses that must appear atomic rather than an
+\emph{order} among locks.
+
+\section{Why Synchronization Became a First-Class Problem}
+\index{history of concurrency}
+\index{distributed shared memory}
+\index{cache coherence!history}
+\index{multicore!history}
+
+Shared memory is so familiar today that it is easy to forget that it had to be
+invented, and that the invention took several decades. The path runs through
+three eras, and each one left its stamp on how we synchronize. In the
+\textbf{distributed era}, processors lived in separate machines and shared
+nothing but a network; coordination meant explicit message passing, and the
+central problem was to make a set of machines with independent clocks and no
+common memory agree on anything at all \cite{lamport78}. Distributed systems
+produced the first general theories of ordering and agreement, but they gave
+programmers no shared address space to think in.
+
+The \textbf{distributed shared-memory era} was an attempt to fix exactly that.
+Researchers built systems that \emph{simulated} a single address space across
+a network, using software protocols --- ownership transfer, invalidation,
+release consistency --- to keep the simulation coherent
+\cite{li89dsm,amza96treadmarks}. These systems made the shared-memory
+programming model available on hardware that did not actually share memory, at
+the cost of high communication overhead. They were a programming convenience,
+not a hardware change.
+
+The \textbf{multicore era} changed the hardware instead. When it became
+cheaper to put several processors on one chip than to make a single processor
+faster \cite{olukotun96case}, the industry built multicore chips in which
+cores \emph{physically} share memory through a hardware cache-coherence
+protocol \cite{goodman83,papamarcos84,archibald86}. Shared memory stopped
+being a simulation and became the machine itself. This is the moment that
+synchronization stopped being a niche concern of distributed-systems
+researchers and became a first-class problem for every programmer: thousands
+of cores, one address space, and only locks --- and, as we will see, their
+successors --- to keep the accesses coherent. The rest of this book is an
+extended answer to the question that this era posed. Chapter~2 recounts the
+full history in more detail; here it is enough to note that the hardware now
+gives us shared memory for free, and the remaining difficulty is purely in how
+we program it.
 
 \section{The Cost of Mixing Synchronization with Logic}
 \index{locking crisis}
@@ -33,22 +80,28 @@ the program should compute; the synchronization logic says which interleavings
 are legal. The two are entangled in the same source text, and that entanglement
 is the root of the software-engineering problem.
 
-Three failure modes matter in practice:
+Real-world systems fail in every one of these ways. Priority inversion stalled
+the Mars Pathfinder probe for days in 1997 because a low-priority task held a
+mutex needed by a high-priority task \cite{jones97mars,sha90priority}. Lost
+wake-ups corrupt sleeping synchronization when a signal arrives before the
+waiting thread blocks. Unrelated defects in production concurrency code
+routinely cost organizations weeks of debugging time precisely because the
+failure does not leave an obvious trail. None of these incidents reflects an
+exotic language feature; each is a normal consequence of entangling logic with
+an invisible protocol.
 
-\begin{itemize}
-\item \textbf{Deadlock} means no progress at all. Two or more threads wait
-for conditions that can never become true. Deadlock is often the
-easiest failure to detect because the program simply stops.
-\item \textbf{Livelock and starvation} mean progress exists but is not
-fair. A thread may make no progress while other threads proceed
-indefinitely. A classic example is a spinlock owner preempted while
-other threads spin, or a priority-inversion chain in which a low
-priority thread holds a lock needed by a high priority thread.
-\item \textbf{Data races} mean incorrectness. A race occurs when two
-threads access the same memory without ordering, at least one writes,
-and the result depends on the interleaving. A race is not merely a
-theoretical hazard; it is undefined behavior in most modern languages.
-\end{itemize}
+Three failure modes matter in practice. \textbf{Deadlock} means no progress at
+all: two or more threads wait for conditions that can never become true, and
+it is often the easiest failure to detect because the program simply stops.
+\textbf{Livelock and starvation} mean progress exists but is not fair: a
+thread may make no progress while other threads proceed indefinitely, as when a
+spinlock owner is preempted while other threads spin, or in a
+priority-inversion chain in which a low-priority thread holds a lock needed by
+a high-priority thread. \textbf{Data races} mean incorrectness: a race occurs
+when two threads access the same memory without ordering, at least one writes,
+and the result depends on the interleaving. A race is not merely a theoretical
+hazard; it is undefined behavior in most modern languages
+\cite{boehm08memory}.
 
 In each case, the synchronization contract is invisible. The compiler cannot
 tell which lock guards which variable. The type system cannot express that a
@@ -56,23 +109,16 @@ field may be accessed only while holding a particular mutex. The reader cannot
 recover the intended lock order from the code because the order is distributed
 across many functions and modules.
 
-Several error-prone patterns recur:
-
-\begin{itemize}
-\item \textbf{Check-then-act}. A thread reads a value, decides, and then
-writes. The window between read and write is a race unless the whole
-sequence is made atomic.
-\item \textbf{Test-and-set loops}. A thread repeatedly tests a condition
-and attempts a compare-and-swap. The loop is easy to write incorrectly
-and can suffer from starvation.
-\item \textbf{Nested locking}. A function that acquires a lock and then
-calls another function that acquires another lock creates an implicit
-lock-order obligation. That obligation is not visible at either call
-site.
-\item \textbf{Lock order inversion}. Two code paths acquire the same locks
-in different orders. Each path is locally correct, but their
-composition can deadlock.
-\end{itemize}
+Several error-prone patterns recur. In \textbf{check-then-act}, a thread reads
+a value, decides, and then writes; the window between read and write is a race
+unless the whole sequence is made atomic. In \textbf{test-and-set loops}, a
+thread repeatedly tests a condition and attempts a compare-and-swap; the loop
+is easy to write incorrectly and can suffer from starvation. \textbf{Nested
+locking} arises when a function that acquires a lock then calls another
+function that acquires another lock, creating an implicit lock-order
+obligation that is not visible at either call site. In \textbf{lock-order
+inversion}, two code paths acquire the same locks in different orders; each
+path is locally correct, but their composition can deadlock.
 
 Concurrency bugs reproduce only under specific interleavings. This makes them
 \emph{Heisenbugs}: changing the timing, adding a log statement, or running
@@ -81,12 +127,13 @@ disproportionately high because they survive review, unit tests, and even
 integration tests, only to appear in production.
 
 There is also a hidden performance cost. Coarse-grained locks serialize
-executions and reduce available parallelism: the expected speedup of a program
-whose running time is mostly serial work is bounded by Amdahl's law, discussed
-in Part~IV. The cost of lock contention is therefore not only a software
-engineering concern; it is a performance concern as well.
+executions and reduce available parallelism. The expected speedup of a program
+with a serial fraction $f$ on $N$ cores is bounded by Amdahl's law
+\cite{amdahl67}, discussed later in Part~IV. The cost of lock contention is
+therefore not only a software engineering concern; it is a performance concern
+as well.
 
-\section{Composability \textendash{} The ``Innocent Change'' Problem}
+\section{Composability -- The ``Innocent Change'' Problem}
 \index{composability}
 \index{lock order inversion}
 \index{nested locking}
@@ -160,15 +207,15 @@ wait-for cycle, shown in Figure~\ref{fig:two-lock-deadlock}.
 
 \begin{figure}[htbp]
 \centering
-\begin{tikzpicture}[node distance=4.2cm, >=Latex]
-    \node[draw, rounded corners, align=center, minimum height=1.2cm] (transfer)
-      at (0,0) {Thread~$T_1$\\holds \texttt{g\_lock}\\requests \texttt{g\_floor\_lock}};
-    \node[draw, rounded corners, align=center, minimum height=1.2cm] (audit)
-      at (7,0) {Thread~$T_2$\\holds \texttt{g\_floor\_lock}\\requests \texttt{g\_lock}};
-    \draw[->, bend left=20] (transfer) to node[above, font=\small]
-      {waits for \texttt{g\_floor\_lock}} (audit);
-    \draw[->, bend left=20] (audit) to node[below, font=\small]
-      {waits for \texttt{g\_lock}} (transfer);
+\begin{tikzpicture}[node distance=2.4cm, >=Latex]
+\node[draw, rounded corners, align=center, minimum height=1.2cm] (transfer)
+at (0,0) {Thread $T_1$ holds \texttt{g\_lock},\\requests \texttt{g\_floor\_lock}};
+\node[draw, rounded corners, align=center, minimum height=1.2cm] (audit)
+at (7,0) {Thread $T_2$ holds \texttt{g\_floor\_lock},\\requests \texttt{g\_lock}};
+\draw[->, bend left=20] (transfer) to node[above,midway,font=\small]
+{waits for \texttt{g\_floor\_lock}} (audit);
+\draw[->, bend left=20] (audit) to node[below,midway,font=\small]
+{waits for \texttt{g\_lock}} (transfer);
 \end{tikzpicture}
 \caption{The two-lock wait-for cycle created by the innocent change. Neither
 critical section is wrong by itself; the deadlock emerges from the
@@ -195,25 +242,25 @@ Table~\ref{tab:locking-crisis-taxonomy} summarizes the shift in burden.
 
 \begin{table}[htbp]
 \centering
-\renewcommand{\arraystretch}{1.35}
-\begin{tabular}{p{0.15\linewidth} p{0.20\linewidth} p{0.14\linewidth} p{0.18\linewidth} p{0.15\linewidth}}
-\hline
-\textbf{Approach} & \textbf{Synchronization order} & \textbf{Deadlock risk} & \textbf{Composability} & \textbf{Reasoning locality} \\
-\hline
-Single global lock & none & none, but coarse & coarse but safe & local \\
-Ordered multiple locks & programmer-defined & high if order violated & not composable & distributed \\
-Try-lock and rollback & explicit failure paths & livelock and starvation & better than blocking cycles, but non-local & scattered \\
-Transactional \texttt{atomic} & runtime-detected & none & composable & local \\
-\hline
-\end{tabular}
 \caption{The locking-crisis taxonomy: each synchronization approach shifts
 a different burden onto the programmer, the compiler, or the runtime.}
 \label{tab:locking-crisis-taxonomy}
+\footnotesize
+\renewcommand{\arraystretch}{1.35}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{p{0.13\linewidth} p{0.18\linewidth} p{0.14\linewidth} p{0.16\linewidth} p{0.13\linewidth}}
+\hline
+\textbf{Approach} & \textbf{Synchronization order} & \textbf{Deadlock risk} & \textbf{Composability} & \textbf{Reasoning locality} \\
+\hline
+Single global lock & none & none & coarse but safe & global \\
+Ordered multiple locks & programmer-defined & high if order violated & not composable & distributed \\
+Transactional \texttt{atomic} & runtime-detected & none & composable & local \\
+\hline
+\end{tabular}
 \end{table}
 
-\section{Worked Example: The Two-Lock Deadlock}
+\section{Worked Example: Reproducing the Two-Lock Deadlock}
 \index{two-lock deadlock}
-\index{priority inversion}
 
 The following program is deliberately small and compilable. It demonstrates
 that the deadlock is not caused by either critical section alone, but by the
@@ -285,7 +332,7 @@ exactly that, without mutexes and without a lock order.
 
 \begin{lstlisting}[caption={A TLA+ model of atomic bank transfers and their invariants.}, label={lst:bank-atomic}]
 ---- MODULE BankAtomic ----
-EXTENDS Integers
+EXTENDS Integers, TLC
 
 CONSTANTS InitBal, Floor, Amt
 
@@ -293,24 +340,24 @@ VARIABLES balA, balB
 vars == <<balA, balB>>
 
 Init ==
-    /\ balA = InitBal
-    /\ balB = InitBal
+/\ balA = InitBal
+/\ balB = InitBal
 
 Transfer ==
-    /\ balA >= Floor + Amt
-    /\ balB >= Floor
-    /\ balA' = balA - Amt
-    /\ balB' = balB + Amt
+/\ balA >= Floor + Amt
+/\ balA' = balA - Amt
+/\ balB' = balB + Amt
 
 Next ==
-    Transfer
+/ Transfer
+/ UNCHANGED vars
 
 MoneyInvariant ==
-    balA + balB = 2 * InitBal
+balA + balB = 2 * InitBal
 
 FloorInvariant ==
-    /\ balA >= Floor
-    /\ balB >= Floor
+/\ balA >= Floor
+/\ balB >= Floor
 
 Spec == Init /\ [][Next]_vars
 ====
@@ -325,6 +372,7 @@ the same two invariants. Verification should separate the application
 invariant from the synchronization mechanism whenever possible.
 
 \section{Summary}
+\label{sec:ch1-summary}
 
 Lock-based synchronization entangles concurrency control with application
 logic. That entanglement produces three failure modes: deadlock, starvation,
@@ -343,6 +391,7 @@ that instrument loads and stores, runtimes that manage speculative state, and
 formal models that prove the application invariant survives concurrency.
 
 \section{Exercises}
+\label{sec:ch1-exercises}
 
 \begin{enumerate}
 \item \emph{[theory]} Describe a scenario in which two independently
@@ -353,10 +402,6 @@ why the deadlock cannot be found by testing either module alone.
 of this advice. Give one concrete example where finer-grained locking
 reduces contention but increases the probability of lock-order
 inversion.
-
-\item \emph{[theory]} Explain why the priority-inversion problem becomes
-worse in a real-time system, and how a transactional (abort-and-retry)
-model would mitigate it.
 
 \item \emph{[implementation]} Compile the program in
 Listing~\ref{lst:two-lock-deadlock}. Replace the opposite-order audit
@@ -381,8 +426,28 @@ which each thread blocks, and explain how a wait-for-cycle graph can be
 computed from a stack trace.
 
 \item \emph{[verification]} The TLA+ model in Listing~\ref{lst:bank-atomic}
-splits a transfer into two visible steps if you expose two separate
-actions. Show that TLC finds a state that violates
-\texttt{Money\-Invariant}. Explain which source-level instrumented
-\texttt{read}\slash{}\texttt{write} pair the two actions represent.
-\end{enumerate}
+splits a transfer into two visible steps if you remove
+\texttt{Transfer} and expose two separate actions. Show that TLC finds
+a state that violates \texttt{MoneyInvariant}. Explain which
+source-level instrumented read/write pair the two actions represent.
+
+\item \emph{[open]} The ``locking crisis'' is usually described as a
+failure of \emph{composability}.  Argue a position: does transactional
+memory \emph{solve} the crisis or merely \emph{move} it into the
+runtime, where the remaining problems (reclamation, retries, abort
+side effects, nesting) are simply harder to see?  State the assumption
+about programmers or about runtimes your position rests on, and give
+the strongest argument against it.
+\end{enumerate}% -------------------------------------------------------------------
+
+\textbf{How to check your work.} The \emph{[implementation]} exercises are
+verified with the companion: compile Listing~\ref{lst:two-lock-deadlock} and
+run \texttt{make -C tests run}.  The \emph{[verification]} exercises are
+checked with TLC against Listing~\ref{lst:bank-atomic}
+(\texttt{MoneyInvariant}, \texttt{FloorInvariant}; see
+Appendix~\ref{chap:pluscal-quick-ref}).  The \emph{[theory]} exercises are
+graded against \S\ref{ch:locking-crisis}.  The \emph{[open]} exercise has
+no single right answer; it is graded on whether you state the assumption
+your position rests on and address the strongest counterargument.
+
+\index{composability}

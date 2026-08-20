@@ -1,6 +1,13 @@
-
 \chapter{Open Questions and Emerging Directions}
+
+\index{open questions, emerging directions, hybrid TM, persistent TM, distributed TM, GPU TM, verified STM, energy-aware TM}
+
+Transactional memory has never been one technique. It is a family of contracts: optimistic execution, conflict detection, validation, commit, and recovery. The earlier chapters studied those contracts in isolation: single-lock serialization, timestamp validation, ownership records, hardware transactions, multi-version histories, crash recovery, distributed prepare/commit, and GPU commit protocols. This chapter asks what remains open once those mechanisms are implemented, tested, and made comparable.
+
+The companion project makes the question unusually concrete. The same two-account bank transfer, with an account floor and a money-conservation invariant, runs across CPU STMs, hardware/software hybrids, persistent variants, distributed variants, and GPU designs. The research frontier is therefore not an abstract list of future work. It is the set of places where the same transactional API must survive a new failure mode: a hardware capacity abort, a torn durable write, a coordinator crash, a stale GPU read-set, or a validation cost that dominates useful work.
+
 \section{Current Research Directions}
+
 \begin{itemize}
     \item Hardware/software hybrid TM.
     \item Non-blocking algorithms vs. TM.
@@ -26,6 +33,10 @@ the open questions unusually concrete: the same bank invariant should survive
 hardware aborts, validation filters, crash recovery, remote prepare/commit, and
 GPU commit logs.
 
+A useful way to read the field is to ask what each direction makes scarce. In HTM, the scarce resource is speculative capacity and conflict-free cache state. In STM, it is validation bandwidth and metadata locality. In persistent TM, it is durable ordering: the programmer wants atomicity, but the machine provides cache lines, flushes, fences, and crashes. In distributed TM, it is agreement under partial failure. In GPU TM, it is scalable validation without cache-coherent transactional hardware.
+
+The running bank example exposes the common shape. A transfer reads two balances, checks a floor, writes two balances, and must preserve total money. A backend may implement this with a global lock, timestamps, ownership records, redo logs, multi-version reads, remote locks, or GPU commit records. The invariant is deliberately boring. That is the point: if a backend cannot preserve the simple invariant, it is not ready for a more interesting application.
+
 \begin{table}[htbp]
 \centering
 \begin{tabular}{p{0.18\textwidth}p{0.25\textwidth}p{0.30\textwidth}p{0.14\textwidth}}
@@ -44,7 +55,10 @@ Multi-version TM & JVSTM, MVLog, GPU-JVSTM & Version retention, read-mostly scal
 \label{tab:emerging-directions}
 \end{table}
 
+The table should not be read as a scoreboard. The measurements are real companion-repo signals, but they are not universal constants. They say that, on the measured M1 Pro fuzz/bank workload, TL2 and TSC-TM are close, NOrec-BF improves substantially over NOrec on read-mostly bank traffic, and MVLog pays a visible price for maintaining versions. They do not settle the research question. They make it sharper: why does a design win here, and what assumption would make it lose?
+
 \section{Challenges}
+
 \begin{itemize}
     \item Fairness, progress guarantees (starvation freedom, obstruction freedom).
     \item Programming model adoption.
@@ -52,6 +66,173 @@ Multi-version TM & JVSTM, MVLog, GPU-JVSTM & Version retention, read-mostly scal
     \item Performance predictability: HTM's capacity aborts and STM's validation costs make best/worst-case analysis hard.
     \item The missing standard: no widely adopted language integration after the C++ TS; education must bridge this gap.
     \item Tooling: debuggers, profilers, and race detectors are lock-oriented; TM tools are nascent by comparison.
+\end{itemize}
+
+The first challenge is semantic rather than mechanical: what does the system promise when contention is high? A single global lock is easy to explain and may be starvation-free if the lock implementation is fair. An obstruction-free STM may guarantee progress only when a transaction eventually runs alone. A hardware fast path may repeatedly abort for reasons the program cannot observe precisely. A GPU commit protocol may let thousands of transactions reach validation together, then serialize a small fraction at the commit point. Each is a transactional memory system, but their progress stories differ.
+
+The second challenge is adoption. Locks have defects, but they are visible, portable, and supported by tools. Transactional memory asks the programmer to trust an invisible commit protocol. That is easier when the transaction boundary is explicit, the memory model is clear, irrevocable operations are rejected or isolated, and the debugger can explain why a transaction aborted.
+
+Legacy code remains awkward. A transaction that calls into code which performs I/O, blocks on a mutex, allocates through a non-transaction-aware allocator, or publishes a raw pointer may violate the isolation contract. Practical systems either forbid such operations, sandbox them, defer them until commit, or route the whole transaction through an irrevocable path. Each choice leaks into the programming model.
+
+Performance predictability is the recurring engineering problem. Best-case TM is attractive because read-mostly code can avoid coarse locking and write-heavy code can express atomicity without hand-written deadlock avoidance. Worst-case TM can be surprising: validation may become a bandwidth bottleneck; read-set growth may become a cache problem; HTM may collapse on capacity; distributed commit may spend most of its time waiting for remote consensus or storage.
+
+Finally, verification is becoming part of the expected artifact. A fast STM with no model is harder to trust than a slightly slower one whose opacity, serializability, or crash invariant has been checked against a small formal model. TLA+ does not prove the C++ implementation correct by itself, but it forces the protocol to say what its states are, what transitions are legal, and which bad executions are excluded.
+
+\section{Worked Example: Persistent Bank Commit}
+
+A persistent TM must make the transaction atomic across crashes, not only across threads. The volatile metadata may disappear after power loss. The durable state must still look as if each committed transaction happened completely or not at all.
+
+The following small C++ example uses a redo-log discipline for the bank transfer. It is intentionally conservative: log the intended writes, persist the log, mark the log committed, persist the mark, then install the writes and clear the log. The code sketches the ordering contract; a production backend would hide the flush primitive behind a platform-specific persistence library.
+
+\begin{lstlisting}[language=C++, caption={A minimal redo-log persistent transfer for the bank invariant.}]
+#include <atomic>
+#include <cstdint>
+#include <cstdlib>
+#include <stdexcept>
+
+struct Account {
+    std::atomic<int64_t> balance;
+};
+
+struct LogEntry {
+    Account* addr;
+    int64_t  value;
+};
+
+struct RedoLog {
+    std::atomic<uint64_t> committed;
+    std::atomic<uint64_t> count;
+    LogEntry entries[2];
+};
+
+/* Placeholder for clwb/clflushopt plus an ordering fence on real PMem. */
+static void persist_range(const void* p, std::size_t n) {
+    (void)p;
+    (void)n;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+
+static void persist_log(RedoLog& log) {
+    persist_range(&log.entries[0], sizeof(log.entries));
+    persist_range(&log.count, sizeof(log.count));
+}
+
+bool persistent_transfer(Account& from,
+                         Account& to,
+                         int64_t amount,
+                         int64_t floor,
+                         RedoLog& log) {
+    const int64_t old_from = from.balance.load(std::memory_order_acquire);
+    const int64_t old_to   = to.balance.load(std::memory_order_acquire);
+
+    if (amount < 0) {
+        throw std::invalid_argument("negative transfer");
+    }
+    if (old_from - amount < floor) {
+        return false;
+    }
+
+    log.entries[0] = LogEntry{&from, old_from - amount};
+    log.entries[1] = LogEntry{&to,   old_to + amount};
+    log.count.store(2, std::memory_order_release);
+    persist_log(log);
+
+    log.committed.store(1, std::memory_order_release);
+    persist_range(&log.committed, sizeof(log.committed));
+
+    from.balance.store(log.entries[0].value, std::memory_order_release);
+    to.balance.store(log.entries[1].value, std::memory_order_release);
+    persist_range(&from, sizeof(from));
+    persist_range(&to, sizeof(to));
+
+    log.committed.store(0, std::memory_order_release);
+    log.count.store(0, std::memory_order_release);
+    persist_range(&log, sizeof(log));
+    return true;
+}
+
+void recover(RedoLog& log) {
+    if (log.committed.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+
+    const uint64_t n = log.count.load(std::memory_order_acquire);
+    for (uint64_t i = 0; i < n; ++i) {
+        log.entries[i].addr->balance.store(log.entries[i].value,
+                                           std::memory_order_release);
+        persist_range(log.entries[i].addr, sizeof(Account));
+    }
+
+    log.committed.store(0, std::memory_order_release);
+    log.count.store(0, std::memory_order_release);
+    persist_range(&log, sizeof(log));
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item The commit point is the durable transition of \texttt{committed} from zero to one.
+    \item Recovery is idempotent: replaying the same redo entries twice writes the same values.
+    \item The bank invariant depends on logging both accounts before the commit mark becomes durable.
+    \item Volatile locks, timestamps, and ownership records need not survive; the durable log is the recovery contract.
+\end{itemize}
+
+\section{Worked Example: A Tiny TLA+ Bank Invariant}
+
+The companion models check small protocols rather than benchmark-sized programs. That is the right scale for finding missing transitions. The following TLA+ module models a two-account transfer with a floor. It omits implementation metadata and focuses on the safety property every backend must preserve: total money is constant.
+
+\begin{lstlisting}[language={}, caption={A small TLA+ model of the bank-transfer invariant.}]
+----------------------------- MODULE BankInvariant -----------------------------
+EXTENDS Integers, TLC
+
+CONSTANTS InitA, InitB, Floor, Amount
+
+VARIABLES a, b
+
+Init ==
+    /\ a = InitA
+    /\ b = InitB
+    /\ InitA >= Floor
+    /\ InitB >= Floor
+    /\ Amount >= 0
+
+TransferAB ==
+    /\ a - Amount >= Floor
+    /\ a' = a - Amount
+    /\ b' = b + Amount
+
+TransferBA ==
+    /\ b - Amount >= Floor
+    /\ b' = b - Amount
+    /\ a' = a + Amount
+
+Stutter ==
+    /\ a' = a
+    /\ b' = b
+
+Next ==
+    \/ TransferAB
+    \/ TransferBA
+    \/ Stutter
+
+MoneyConserved ==
+    a + b = InitA + InitB
+
+FloorRespected ==
+    /\ a >= Floor
+    /\ b >= Floor
+
+Spec ==
+    Init /\ [][Next]_<<a, b>>
+
+THEOREM Spec => []MoneyConserved
+THEOREM Spec => []FloorRespected
+=============================================================================
+\end{lstlisting}
+
+\begin{itemize}
+    \item The invariant is independent of the backend: SGL, TL2, NOrec, MVLog, TiKV, and GPU commit logs must all refine this behavior for committed transfers.
+    \item The model separates the user-level atomic effect from metadata steps such as locking, validation, logging, and commit publication.
+    \item A useful research model starts small. Add timestamps, ownership records, prepare states, or crash states only after the base invariant is explicit.
 \end{itemize}
 
 \section{Worked Example: A Hybrid, In Miniature}
@@ -109,6 +290,11 @@ void tx_region(void) {
 \caption{A phased hybrid state machine. The research problem is not the branch itself, but the ownership contract between the RTM path and the STM fallback.}
 \label{fig:phased-hybrid-state}
 \end{figure}
+
+The figure hides one subtlety. If the RTM path reads and writes ordinary locations while the STM path protects the same locations with ownership records, the two paths must still detect each other. Otherwise a hardware transaction may commit through an STM lock, or an STM transaction may validate metadata that the hardware path never touched. Practical hybrids therefore need a shared conflict signal: a global fallback lock, instrumented reads on the hardware path, subscription to metadata, or a phase bit that prevents concurrent execution of incompatible modes.
+
+The miniature also exposes why ``fallback'' is not automatically a progress guarantee. If every thread repeatedly tries RTM, aborts, and re-enters RTM before any fallback transaction can finish, the system may waste work indefinitely. Bounded retries help, but only if the fallback has admission priority and if hardware transactions observe that priority.
+
 \section{Summary}
 \begin{itemize}
     \item TM is a rich research field with many unsolved problems.
@@ -117,12 +303,76 @@ void tx_region(void) {
     \item Read this chapter as a \emph{synthesis organised around where the book's own codebase stops working}, not as a disconnected wish-list. The limits that surface in each family are the same limits the earlier parts hit: HTM's capacity aborts (Ch.~16), STM's validation and reclamation costs (Ch.~9, 13), the missing compiler/language contract (Ch.~11), and the absence of coherence on GPUs (Ch.~17). Each open direction in this chapter is one of those known limits restated as a research target.
 \end{itemize}
 
+The central lesson is that the open problems are not separate from the implementations. Hybrid TM asks how two conflict-detection regimes share ownership. Persistent TM asks which commit record survives a crash. Distributed TM asks how a transaction boundary crosses machines without hiding partial failure. GPU TM asks how to validate and commit at massive concurrency without hardware transactions. Verification asks whether the protocol has said enough to be checked.
+
+The bank invariant is the unifying test. It is simple enough to model, small enough to fuzz, and strict enough to expose broken atomicity. A future TM system may be faster, more durable, more distributed, or more parallel, but it still owes the same answer: every committed transfer must preserve the floor and conserve money.
+
 \section{Exercises}
 \begin{enumerate}
-    \item Evaluate whether a hybrid TM that starts in hardware and falls back to software is inherently more susceptible to livelock than a pure-STM system.
-    \item Propose a minimal extension to a persistent-memory TM that ensures durability of committed transactions across power failures.
-    \item Argue for or against: “Transactional memory will eventually replace locks as the default concurrency primitive in systems programming.”
+    \item \emph{[theory]} Evaluate whether a hybrid TM that starts in hardware and falls back to software is inherently more susceptible to livelock than a pure-STM system.  (The fallback-admission and conflict-ownership machinery of Ch.~16, \S\ref{sec:htm-fallback-tla}, is the vocabulary the answer needs.)
+    \item \emph{[theory]} Propose a minimal extension to a persistent-memory TM that ensures durability of committed transactions across power failures.  (The persistent side of Ch.~18, \S\ref{sec:durable-bank-example}, already gives the durable-journal pattern; the minimal extension is the commit marker that makes recovery idempotent.)
+    \item \emph{[theory]} Argue for or against: “Transactional memory will eventually replace locks as the default concurrency primitive in systems programming.”  (Ground the argument in the adoption barriers catalogued in this chapter's synthesis and the compiler/language contract of Ch.~11.)
     \item \emph{[theory]} Classify the phased hybrid in Figure~\ref{fig:phased-hybrid-state} under obstruction freedom, starvation freedom, and lock freedom. State which assumptions about retry bounds, fallback admission, and conflict ownership are necessary for each classification.
+    \item \emph{[implementation]} Modify the persistent redo-log example so that recovery can distinguish an empty log from a partially initialized log. State which stores must be persisted before the commit marker.  (This extends the redo-log walk-through in \S\ref{sec:durable-bank-example} of Ch.~18; reuse its journal layout.)
+    \item \emph{[verification]} Extend the TLA+ bank model with a prepared state and a committed state. Check that money conservation holds even when a transaction stutters forever in the prepared state.  (Start from the Ch.~18 distributed-commit model of \S\ref{sec:distributed-commit-example}; add the \texttt{prepared} state and re-check \texttt{MoneyConserved}.)
+    \item \emph{[theory]} Compare NOrec-style global validation with TL2-style ownership records for a read-mostly workload. Explain why a Bloom-filter optimization can help one design without changing the abstract transaction semantics.
+    \item \emph{[open]} This book argues the bank invariant is the unifying
+          test --- the same \texttt{MoneyConserved} and floor must survive
+          hardware aborts, validation filters, crash recovery, and GPU
+          commit logs.  Argue a position: is invariant-based evaluation the
+          right way to compare TM systems, or does it reward implementations
+          that merely preserve one observable while hiding what really
+          matters (progress, predictability, programmability)?  Propose
+          what a ``full'' evaluation would require, or defend the invariant
+          as sufficient.
+    \item \emph{[open]} A first concurrency course can teach locks first,
+          transactions first, or both in parallel.  Argue a position on
+          ordering for a student who will encounter both in practice:
+          which failure mode (deadlock or lost atomicity) is more
+          instructive to meet first, and does the answer depend on the
+          student's background (systems vs.\ algorithms)?  State the
+          evidence you would want to settle the question.
 \end{enumerate}
 
+\textbf{How to check your work.} Exercise~6 is verified with TLC: extend
+\S\ref{sec:distributed-commit-example}'s model with \texttt{prepared},
+then run \texttt{make -C docs/proofs check-one BACKEND=BankPrepare} (the
+TLC commands are in Appendix~\ref{chap:pluscal-quick-ref}) and confirm
+\texttt{MoneyConserved} still passes.  Exercise~5 is verified against the
+companion's persistent backends: the commit-marker ordering is the one the
+\texttt{PersistentSGL} and \texttt{Romulus} backends
+(\texttt{backends/tm\_impl/persistent\_sgl},
+\texttt{backends/tm\_impl/romulus}) already implement, so you can diff
+your proposed ordering against theirs.  The \emph{[theory]} exercises are
+graded against this chapter's synthesis and the definitions in
+\S\ref{sec:hybrid-example}, \S\ref{sec:durable-bank-example}, and
+\S\ref{sec:htm-fallback-tla}.  The \emph{[open]} exercises have no single
+right answer: they are graded on whether you either propose a concrete
+``full'' evaluation or defend the invariant as sufficient, and whether
+you state the evidence a fair answer would require.
+
+\index{bank invariant}
+\index{money conservation}
+\index{account floor}
+\index{redo log}
+\index{durable commit}
+\index{crash recovery}
+\index{idempotent recovery}
+\index{volatile metadata}
+\index{TLA+ invariant}
+\index{opacity}
+\index{serializability}
+\index{RTM retry budget}
+\index{fallback admission}
+\index{conflict ownership}
+\index{commit marker}
+\index{validation bandwidth}
+\index{capacity abort}
+\index{GPU commit log}
+\index{Percolator two-phase commit}
+\index{Bloom-filter validation}
+% -------------------------------------------------------------------
 %  APPENDICES
+% -------------------------------------------------------------------
+\appendix
+

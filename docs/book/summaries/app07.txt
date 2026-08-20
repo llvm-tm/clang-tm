@@ -1,7 +1,7 @@
 APPENDIX G — Answers and Hints for Selected Exercises
-Lines: ~17
+Lines: ~617
 
-Reference chapter: brief solutions/pointers for selected exercises.
+Reference chapter: one concise hint per exercise for all ~136 exercises, grouped by chapter.
 - One concise hint per exercise, referencing the section that resolves it
 - Model-checking exercises: hint at the invariant name and the bound that keeps TLC fast
 - Implementation exercises: point at companion code location and the verifying command

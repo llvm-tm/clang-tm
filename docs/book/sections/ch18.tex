@@ -1,11 +1,29 @@
-
 \chapter{Persistent and Distributed Transactional Memory}
+\index{persistent TM}\index{distributed TM}\index{durability}\index{crash recovery}\index{two-phase commit}\index{redo log}\index{Percolator}\index{TiKV}\index{PersistentSGL}\index{DistributedSGL}
+
 Two extensions of the TM contract change the runtime far more than the
 language: making commits survive crashes (persistent TM) and making the
 same API span multiple machines (distributed TM). Both keep the ordinary
 bank invariant, then add a stronger one --- durability, or agreement across
 nodes --- and both force the commit path to become explicit about ordering.
 The two worked examples below implement and verify each extension.
+
+The running example remains the two-account bank transfer. In volatile TM,
+the transfer is correct when it preserves the account floor and conserves the
+sum of all balances. In persistent TM, a committed transfer must also survive
+a crash. In distributed TM, all replicas or participants must agree on the same
+commit decision. These are not cosmetic changes. They move the design pressure
+from fast conflict detection to commit ordering, recovery records, stable
+metadata, and replay rules.
+
+The companion implementation includes both minimal and production-shaped
+instances of these ideas: PersistentSGL and NV-HTM for persistent execution,
+Romulus as a persistent object design, DistributedSGL and TiKV-style
+Percolator two-phase commit for distributed execution, plus the volatile
+baselines used earlier in the book. The same test suites exercise the APIs
+across backends: \texttt{test\_tx} passes 114 of 114 cases and
+\texttt{test\_ds} passes 207 of 207 cases. Model checking is used to pin down
+the small-state corner cases that ordinary tests rarely hit.
 
 \section{Worked Example: Durable Bank Commit}
 \index{persistent TM}\index{durability}\index{redo log}\index{crash recovery}
@@ -15,6 +33,12 @@ Persistent TM asks for the ordinary TM invariant plus a crash invariant. A
 committed transfer must not disappear after power loss, and recovery must not
 apply it twice. The small example below uses one durable intent record. The
 record stores the post-state, so redo is idempotent.
+
+The commit protocol has three externally visible phases. First, the runtime
+chooses an outcome while all ordinary TM checks still hold. Second, it forces a
+commit intent to durable storage. Third, it installs the data and clears the
+intent. A crash before the intent is forced is an abort. A crash after the
+intent is forced is a commit that recovery must finish.
 
 \begin{lstlisting}[language=C, caption={A minimal durable two-account transfer with idempotent redo.}]
 #include <array>
@@ -165,6 +189,13 @@ int main() {
     \item The money-conservation invariant is checked after restart by the same observation used in volatile tests: the total balance remains unchanged.
 \end{itemize}
 
+The example is deliberately conservative. It uses \texttt{fsync} as the storage
+ordering primitive and a single image rather than a segmented log. A real
+persistent TM backend may use cache-line write-back, epoch barriers, nonvolatile
+allocation protocols, or copy-on-write roots. The same correctness rule remains:
+once the commit point is durable, recovery must be able to discover the decision
+and complete the update without consulting volatile state.
+
 \section{Worked Example: Model Checking Distributed Commit}
 \index{distributed TM}\index{two-phase commit}\index{TLA+}\index{money conservation}
 \label{sec:distributed-commit-example}
@@ -266,6 +297,246 @@ FloorsHold ==
     \item The model is small enough for exhaustive checking, but already contains the main distributed failure boundary: a decision without a completed data update.
 \end{itemize}
 
+The model also shows why distributed TM is not merely TL2 with sockets. A local
+STM can usually retry when validation fails. A distributed transaction may have
+already locked keys, recorded a primary decision, or exposed a timestamp to
+another node. Abort, retry, and recovery become protocol states rather than
+local control-flow choices.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=1.55cm and 2.2cm,
+    state/.style={draw, rounded corners, align=center, minimum width=2.5cm, minimum height=0.9cm},
+    edge/.style={-{Latex}, thick}
+]
+\node[state] (start) {transaction\\executes};
+\node[state, right=of start] (validate) {validate\\floor and conflicts};
+\node[state, right=of validate] (intent) {force decision\\journal or votes};
+\node[state, below=of intent] (apply) {apply data\\redo or commit};
+\node[state, left=of apply] (done) {clear metadata\\return commit};
+\node[state, below=of validate] (recover) {recovery\\finishes decision};
+
+\draw[edge] (start) -- (validate);
+\draw[edge] (validate) -- node[above, align=center] {success} (intent);
+\draw[edge] (intent) -- (apply);
+\draw[edge] (apply) -- (done);
+\draw[edge] (intent) -- node[right, align=center] {crash} (recover);
+\draw[edge] (recover) -- (apply);
+\draw[edge] (validate) -- node[left, align=center] {abort} (recover);
+\end{tikzpicture}
+\caption{Commit ordering in persistent and distributed TM.}
+\label{fig:persistent-distributed-commit-order}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.17\textwidth}p{0.17\textwidth}p{0.24\textwidth}p{0.24\textwidth}}
+\hline
+Backend or design & Scope & Commit record & Main recovery or agreement rule \\
+\hline
+PersistentSGL & persistent single process & durable log under one lock & redo committed intent once \\
+NV-HTM & persistent HTM hybrid & persistent metadata and fallback path & preserve HTM atomicity across crashes \\
+Romulus & persistent objects & copy or versioned persistent roots & publish a recoverable root atomically \\
+DistributedSGL & distributed service & serialized coordinator decision & one global order across nodes \\
+TiKV / Percolator-2PC & distributed key-value store & primary lock and commit timestamp & commit primary before secondaries \\
+\hline
+\end{tabular}
+\caption{Persistent and distributed TM designs compared by commit obligation.}
+\label{tab:persistent-distributed-taxonomy}
+\end{table}
+
+\section{Worked Example: PersistentSGL Commit Ordering}
+
+A single global lock is the simplest place to add durability because it removes
+interleavings from the commit path. PersistentSGL is not scalable, but it is a
+useful reference design: if the lock is held, the runtime can force the journal,
+force the data, and clear the journal without another transaction observing a
+half-installed update.
+
+The listing below compresses that rule into a small C++ program. It is not a
+replacement for the earlier durable image; it isolates the ordering discipline
+that a persistent SGL backend enforces.
+
+\begin{lstlisting}[language=C++, caption={A small PersistentSGL-style commit path for the bank invariant.}]
+#include <array>
+#include <cstdint>
+#include <mutex>
+#include <stdexcept>
+
+struct Bank {
+    std::array<int64_t, 2> balance{1000, 1000};
+    int64_t floor = 0;
+};
+
+struct Intent {
+    bool valid = false;
+    uint32_t from = 0;
+    uint32_t to = 0;
+    int64_t new_from = 0;
+    int64_t new_to = 0;
+};
+
+class PersistentSGLBank {
+    std::mutex global_;
+    Bank bank_;
+    Intent intent_;
+
+    void persist_intent() {
+        if (!intent_.valid) throw std::runtime_error("empty intent");
+        /* Real backend: write-back intent cache lines, then persist barrier. */
+    }
+
+    void persist_data() {
+        /* Real backend: write-back modified balances, then persist barrier. */
+    }
+
+    void persist_clear() {
+        /* Real backend: persist the invalid journal state. */
+    }
+
+public:
+    bool transfer(uint32_t from, uint32_t to, int64_t amount) {
+        std::lock_guard<std::mutex> guard(global_);
+
+        if (from >= 2 || to >= 2 || from == to || amount < 0) return false;
+        if (bank_.balance[from] - amount < bank_.floor) return false;
+
+        intent_.valid = true;
+        intent_.from = from;
+        intent_.to = to;
+        intent_.new_from = bank_.balance[from] - amount;
+        intent_.new_to = bank_.balance[to] + amount;
+        persist_intent();              /* durable commit point */
+
+        bank_.balance[from] = intent_.new_from;
+        bank_.balance[to] = intent_.new_to;
+        persist_data();
+
+        intent_.valid = false;
+        persist_clear();
+        return true;
+    }
+
+    void recover() {
+        std::lock_guard<std::mutex> guard(global_);
+        if (!intent_.valid) return;
+        bank_.balance[intent_.from] = intent_.new_from;
+        bank_.balance[intent_.to] = intent_.new_to;
+        persist_data();
+        intent_.valid = false;
+        persist_clear();
+    }
+
+    int64_t total() const {
+        return bank_.balance[0] + bank_.balance[1];
+    }
+};
+\end{lstlisting}
+
+\begin{itemize}
+    \item The global lock is a correctness simplifier: it serializes volatile execution and durable publication.
+    \item The durable commit point is the forced intent, not the later balance write.
+    \item Recovery performs no validation and no user policy. It only completes a decision already made durable.
+    \item The design is a baseline. More concurrent persistent algorithms must preserve the same ordering while allowing multiple transactions to prepare or publish.
+\end{itemize}
+
+\section{Worked Example: Percolator-Style Primary Commit}
+
+TiKV-style distributed TM follows the Percolator shape: prewrite locks the
+write set, the primary key records the commit decision, and secondary keys are
+resolved afterward. This splits agreement into a recoverable primary decision
+and idempotent cleanup of secondaries. The small TLA+ model below abstracts
+keys as the two bank accounts.
+
+\begin{lstlisting}[caption={A TLA+ model of a primary-key distributed commit decision.}]
+----------------------------- MODULE MiniPercolatorBank -----------------------------
+EXTENDS Naturals, TLC
+
+Keys == 1..2
+Primary == 1
+Secondary == 2
+Amount == 4
+Floor == 0
+InitBal == [k \in Keys |-> 10]
+
+VARIABLES bal, lock, primaryDecision, phase
+
+vars == <<bal, lock, primaryDecision, phase>>
+
+Init ==
+    /\ bal = InitBal
+    /\ lock = [k \in Keys |-> FALSE]
+    /\ primaryDecision = "none"
+    /\ phase = "begin"
+
+Prewrite(k) ==
+    /\ phase = "begin"
+    /\ lock[k] = FALSE
+    /\ IF k = Primary
+       THEN bal[Primary] - Amount >= Floor
+       ELSE TRUE
+    /\ lock' = [lock EXCEPT ![k] = TRUE]
+    /\ UNCHANGED <<bal, primaryDecision, phase>>
+
+AllLocked ==
+    \A k \in Keys: lock[k] = TRUE
+
+CommitPrimary ==
+    /\ phase = "begin"
+    /\ AllLocked
+    /\ primaryDecision = "none"
+    /\ primaryDecision' = "commit"
+    /\ phase' = "primaryCommitted"
+    /\ UNCHANGED <<bal, lock>>
+
+CommitSecondaries ==
+    /\ phase = "primaryCommitted"
+    /\ primaryDecision = "commit"
+    /\ bal' = [bal EXCEPT ![Primary] = @ - Amount,
+                          ![Secondary] = @ + Amount]
+    /\ lock' = [k \in Keys |-> FALSE]
+    /\ phase' = "done"
+    /\ UNCHANGED primaryDecision
+
+Abort ==
+    /\ phase = "begin"
+    /\ primaryDecision = "none"
+    /\ primaryDecision' = "abort"
+    /\ lock' = [k \in Keys |-> FALSE]
+    /\ phase' = "done"
+    /\ UNCHANGED bal
+
+Next ==
+    \/ \E k \in Keys: Prewrite(k)
+    \/ CommitPrimary
+    \/ CommitSecondaries
+    \/ Abort
+
+Spec == Init /\ [][Next]_vars
+
+MoneyConserved ==
+    bal[1] + bal[2] = InitBal[1] + InitBal[2]
+
+FloorsHold ==
+    \A k \in Keys: bal[k] >= Floor
+
+TypeOK ==
+    /\ phase \in {"begin", "primaryCommitted", "done"}
+    /\ primaryDecision \in {"none", "commit", "abort"}
+    /\ \A k \in Keys: lock[k] \in BOOLEAN
+    /\ \A k \in Keys: bal[k] \in Nat
+
+=============================================================================
+\end{lstlisting}
+
+\begin{itemize}
+    \item The primary record is the distributed commit point.
+    \item Secondary cleanup is allowed to lag because the primary decision can be re-read.
+    \item The account floor is checked before prewrite succeeds on the debit key.
+    \item The model captures the same obligation as the durable log: once commit is discoverable, later recovery must finish the data update.
+\end{itemize}
+
 \section{Summary}
 \begin{itemize}
     \item Persistent TM adds a crash invariant to the ordinary money-conservation invariant; the durable worked example shows the minimum journal needed.
@@ -273,10 +544,60 @@ FloorsHold ==
     \item Both extensions keep the same TM API --- only the commit path and its ordering obligations change.
 \end{itemize}
 
+Persistent and distributed TM are therefore best understood as commit-path
+extensions. The speculative body of the transaction still reads, writes,
+validates, and aborts. The difference is that commit becomes an externally
+recoverable fact. PersistentSGL makes that fact a durable journal record.
+Percolator-style distributed TM makes it a primary-key decision. In both cases,
+the implementation must answer the same recovery question: after a crash or
+partition, which transactions are committed, which are aborted, and which
+updates remain to be completed?
+
 \section{Exercises}
 \begin{enumerate}
     \item \emph{[implementation]} Extend the durable bank example in \S\ref{sec:durable-bank-example} to four accounts and two concurrent worker threads. Keep one global durable commit lock, then record the throughput change relative to an in-memory SGL version. Do not claim durability until the journal and data writes have both been forced to storage.
     \item \emph{[verification]} Modify the TLA+ model in \S\ref{sec:distributed-commit-example} so that the coordinator may crash after deciding commit but before applying the update. Add a recovery action and check that \texttt{MoneyConserved} and \texttt{FloorsHold} still hold.
+    \item \emph{[implementation]} Replace the single intent record in \S\ref{sec:durable-bank-example} with a bounded redo-log array. Add sequence numbers, reject torn records during recovery, and keep redo idempotent.
+    \item \emph{[verification]} Extend the Percolator-style model so that secondary cleanup may be skipped nondeterministically. Add a recovery action that consults the primary decision and prove that committed transfers eventually reach \texttt{done} under weak fairness.
+    \item \emph{[theory]} Compare PersistentSGL, Romulus, and TiKV-style two-phase commit as instances of the same abstract rule: a commit decision must become recoverable before its effects are required to be visible.
+    \item \emph{[literature]} Read Peng and Dabek's Percolator paper
+          \cite{peng10percolator}, which this chapter's TiKV-style model
+          abbreviates.  Map its per-row locks and commit timestamps onto
+          the TLA+ model of \S\ref{sec:distributed-commit-example}, and
+          identify one guarantee of the paper (e.g.\ write-write
+          conflict resolution, the two-phase protocol under replication)
+          that the book's abstract model does not represent.
 \end{enumerate}
 
-%  PART VIII: HORIZONS
+\textbf{How to check your work.} The \emph{[implementation]} exercises are
+verified with the companion: extend the durable bank of
+\S\ref{sec:durable-bank-example} to four accounts and a bounded redo-log
+array.  The \emph{[verification]} exercises are checked with TLC against
+\S\ref{sec:distributed-commit-example} (crash recovery,
+\texttt{MoneyConserved}, \texttt{FloorsHold}; see
+Appendix~\ref{chap:pluscal-quick-ref}).  The \emph{[theory]} exercise is
+graded against Table~\ref{tab:persistent-distributed-taxonomy}.  The
+\emph{[literature]} exercise is graded on whether the guarantee you name
+as unrepresented is real in the paper and genuinely absent from the
+book's model.
+
+\index{commit intent}
+\index{idempotent redo}
+\index{persistent commit point}
+\index{durable publication}
+\index{storage ordering}
+\index{fsync}
+\index{journal clearing}
+\index{crash invariant}
+\index{primary key commit}
+\index{secondary cleanup}
+\index{participant vote}
+\index{coordinator recovery}
+\index{prepare phase}
+\index{commit decision}
+\index{PersistentSGL recovery}
+\index{TiKV}
+\index{Percolator two-phase commit}
+\index{Romulus}
+\index{NV-HTM}
+\index{DistributedSGL}

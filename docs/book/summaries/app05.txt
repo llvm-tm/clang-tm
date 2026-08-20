@@ -1,5 +1,5 @@
 APPENDIX E — TikZ Drawing Guide
-Lines: ~10
+Lines: ~134 | Sections: 7 | Listings: 4 | TikZ: 4
 
 Reference chapter: reusable TikZ figure templates.
 - Pipelines, caches, state machines, Markov chains
