@@ -30,16 +30,16 @@ inline bool available()
                 _xend();
                 cached = 1;
             } else {
-#ifndef GEM5_M5OPS
+#if !defined(GEM5_M5OPS) || defined(TM_RTM_DEBUG)
                 fprintf(stderr,
-                    "[tm_rtm] CPUID RTM bit set but _xbegin() fails "
-                    "(disabled by microcode/BIOS) -- using SGL fallback\n");
+                    "[tm_rtm] CPUID RTM bit set but _xbegin() fails (status=0x%x) "
+                    "-- using SGL fallback\n", status);
 #endif
                 cached = 0;
             }
         } else {
-#ifndef GEM5_M5OPS
-            fprintf(stderr, "[tm_rtm] RTM not available -- using SGL fallback\n");
+#if !defined(GEM5_M5OPS) || defined(TM_RTM_DEBUG)
+            fprintf(stderr, "[tm_rtm] RTM not available (CPUID.07H:EBX=0x%x) -- using SGL fallback\n", b);
 #endif
             cached = 0;
         }

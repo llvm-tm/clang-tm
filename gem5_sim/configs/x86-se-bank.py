@@ -71,6 +71,11 @@ def parse_args():
 
 args = parse_args()
 
+if args.cpu_type == "atomic":
+    print("ERROR: HTM (XBEGIN/XEND) is not implemented for Atomic CPU (htm.cc:44). Use --cpu-type timing or o3.")
+    print("       For a diagnostic run without Ruby HTM, use gem5_sim/configs/x86-se-bank-classic.py")
+    raise SystemExit(2)
+
 CPU_TYPE = {
     "timing": CPUTypes.TIMING,
     "atomic": CPUTypes.ATOMIC,

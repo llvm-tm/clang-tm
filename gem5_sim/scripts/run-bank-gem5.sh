@@ -46,8 +46,20 @@ fi
 file "$BIN" | grep -q "ELF 64-bit.*x86-64.*static" || {
     echo "ERROR: $BIN is not a static x86-64 ELF"; exit 1; }
 
+# --- 1b. HTM fast-path pre-check (TSXSGL/SPHT built with -mrtm) --------
+if [[ "$BACKEND" == "TSXSGL" || "$BACKEND" == "tsxsgl" || "$BACKEND" == "SPHT" || "$BACKEND" == "spht" ]]; then
+    if ! llvm-objdump -d "$BIN" 2>/dev/null | grep -q "xbegin"; then
+        echo "ERROR: $BIN lacks xbegin/xend (built without -mrtm) — rebuild with BACKEND=$BACKEND GEM5=1"
+        exit 1
+    fi
+fi
+
 # --- 2. Run gem5 -----------------------------------------------------------
 ENVS=()
+# Make HTM probe visible even under GEM5_M5OPS (tm_rtm.hpp: TM_RTM_DEBUG)
+if [[ "$BACKEND" == "TSXSGL" || "$BACKEND" == "tsxsgl" || "$BACKEND" == "SPHT" || "$BACKEND" == "spht" ]]; then
+    ENVS+=(--env "TM_RTM_DEBUG=1")
+fi
 if [ "$TRACE" = "1" ]; then
     # SE mode forwards guest file I/O to the host FS: the trace lands in $OUT.
     mkdir -p "$OUT"

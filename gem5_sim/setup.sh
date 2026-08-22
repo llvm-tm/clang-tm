@@ -135,13 +135,14 @@ if [ "$DO_BUILD" -eq 1 ]; then
 
     if [ "$BUILD_ALL" -eq 1 ]; then
         info "Building gem5 for ALL ISAs..."
-        PYTHON_CONFIG="$PYTHON_CONFIG" scons build/ALL/gem5.opt -j"$GEM5_JOBS" --with-ruby
+        PYTHON_CONFIG="$PYTHON_CONFIG" scons build/ALL/gem5.opt -j"$GEM5_JOBS"
         info "Build complete: build/ALL/gem5.opt"
     else
         BUILD_DIR="build/$GEM5_TARGET"
         info "Building gem5 for $GEM5_TARGET..."
         info "  Jobs: $GEM5_JOBS  Type: $GEM5_BUILD_TYPE  Ruby: yes"
-        PYTHON_CONFIG="$PYTHON_CONFIG" scons "$BUILD_DIR/gem5.$GEM5_BUILD_TYPE" -j"$GEM5_JOBS" --with-ruby
+        # --with-ruby removed in gem5 v25.1 (RUBY=y via build_opts/X86_TSX)
+        PYTHON_CONFIG="$PYTHON_CONFIG" scons "$BUILD_DIR/gem5.$GEM5_BUILD_TYPE" -j"$GEM5_JOBS"
         info "Build complete: $GEM5_DIR/$BUILD_DIR/gem5.$GEM5_BUILD_TYPE"
     fi
 fi
