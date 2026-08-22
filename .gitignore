@@ -120,3 +120,7 @@ perf.data
 # TLC state cache
 states/
 states.*
+
+# gem5 simulation (cloned by gem5_sim/setup.sh, never committed)
+gem5_sim/gem5/
+gem5_sim/m5out/

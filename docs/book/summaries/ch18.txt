@@ -1,6 +1,6 @@
 CHAPTER 18 — Persistent and Distributed Transactional Memory
 Part: VII (Advanced Topics)
-Lines: ~589 | Sections: 6 | Figures: 1 | Tables: 1 | Listings: 4 | TikZ: 1
+Lines: 752 | Sections: 6 | Figures: 1 | Tables: 1 | Listings: 4 | TikZ: 1
 
 PURPOSE: TM that must survive or span machines: durable/persistent commit
 (redo logs, idempotent recovery), distributed commit (Percolator-style 2PC,

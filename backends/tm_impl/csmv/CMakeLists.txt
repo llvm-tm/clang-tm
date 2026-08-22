@@ -3,6 +3,10 @@
 #
 # CPU-only fallback: requires only a C++17 compiler
 # Full GPU backend: requires CUDA Toolkit 12.0+
+#
+# Note: the GPU kernels live in gpu/backends/csmv/ (top-level gpu/ tree).
+
+set(CSMV_GPU_DIR ${CMAKE_SOURCE_DIR}/gpu/backends/csmv)
 
 option(BUILD_CSMV "Build CSMV GPU STM backend" OFF)
 option(CSMV_CPU_FALLBACK "Build CSMV CPU-only fallback (no GPU)" ON)
@@ -31,12 +35,13 @@ if(BUILD_CSMV AND CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
 
     add_library(csmv_gpu_backend STATIC
-        gpu/csmv_kernel.cu
+        ${CSMV_GPU_DIR}/csmv_kernel.cu
     )
 
     target_include_directories(csmv_gpu_backend
         PUBLIC  include
         PRIVATE ${CMAKE_SOURCE_DIR}/backends/tm_impl/common
+        PRIVATE ${CSMV_GPU_DIR}
     )
 
     set_target_properties(csmv_gpu_backend PROPERTIES
@@ -56,13 +61,14 @@ if(BUILD_CSMV_HIP)
     find_package(hip REQUIRED)
 
     add_library(csmv_gpu_backend_hip STATIC
-        gpu/csmv_kernel.cu
-        gpu/csmv_batch_executor.cu
+        ${CSMV_GPU_DIR}/csmv_kernel.cu
+        ${CSMV_GPU_DIR}/csmv_batch_executor.cu
     )
 
     target_include_directories(csmv_gpu_backend_hip
         PUBLIC  include
         PRIVATE ${CMAKE_SOURCE_DIR}/backends/tm_impl/common
+        PRIVATE ${CSMV_GPU_DIR}
     )
 
     target_compile_options(csmv_gpu_backend_hip PRIVATE -x hip)

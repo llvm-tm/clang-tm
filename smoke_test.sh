@@ -37,11 +37,6 @@ for be in "${BACKENDS[@]}"; do
     fi
     pass "${be} build"
 
-    # Skip run for backends with pre-existing algorithm bugs
-    case "$be" in
-        LEFTRIGHT|ROMULUS) continue ;;
-    esac
-
     if ./bin/test_tx > /tmp/smoke-${be}-tx.log 2>&1; then
         pass "${be} test_tx"
     else

@@ -106,6 +106,7 @@ leftright-single = ["tm/leftright-single"]
 romulus   = ["tm/romulus"]
 xtm       = ["tm/xtm"]
 tikv      = ["tm/tikv"]
+mvlog     = ["tm/mvlog"]
 
 [dependencies]
 tm = { path = "../../expli_instr/rust/workspace/tm", default-features = false }

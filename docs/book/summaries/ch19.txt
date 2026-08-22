@@ -1,6 +1,6 @@
 CHAPTER 19 — Open Questions and Emerging Directions
 Part: VIII (Horizons)
-Lines: ~359 | Sections: 7 | Figures: 1 | Tables: 1 | Listings: 3 | TikZ: 1
+Lines: 417 | Sections: 7 | Figures: 1 | Tables: 1 | Listings: 3 | TikZ: 1
 
 PURPOSE: Final chapter: open problems (hybrid TM, persistent TM, distributed
 TM, GPU TM, verification) and where the field is going. The bank invariant is

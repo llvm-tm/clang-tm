@@ -1140,7 +1140,7 @@ g++ -c -DTM_GPU_USE_HIP -D__HIP_PLATFORM_AMD__ \
   -I backends/tm_impl/tm_region_allocator \
   -I /opt/rocm-7.2.3/include \
   -std=c++17 \
-  backends/tm_impl/gpu_stm/cuda/pr_stm_host.cpp \
+  gpu/backends/gpu_stm/pr_stm_host.cpp \
   -o pr_stm_host.o
 
 # 2. Compile kernel+launch code with hipcc
@@ -1149,7 +1149,7 @@ hipcc -c --offload-arch=gfx1151 \
   -I backends/tm_impl/gpu_stm/include \
   -I backends/tm_impl/tm_region_allocator \
   -std=c++17 \
-  backends/tm_impl/gpu_stm/cuda/pr_stm_runtime.cu \
+  gpu/backends/gpu_stm/pr_stm_runtime.cu \
   -o pr_stm_kernel.o
 
 # 3. Link everything together
@@ -1177,7 +1177,7 @@ Notes:
 ### Files modified
 
 - `backends/tm_impl/common/tm_gpu_platform.hpp` — added `TM_GPU_USE_HIP` manual-override branch for g++ host code
-- `backends/tm_impl/gpu_stm/cuda/pr_stm_kernel.cuh` — moved `__ballot_sync` outside `if (lane == 0)` guard
+- `gpu/backends/gpu_stm/pr_stm_kernel.cuh` — moved `__ballot_sync` outside `if (lane == 0)` guard
 
 ### Next Steps
 1. **Complete remaining PlusCal conversions**: NVHTM, DistributedSGL, TSXSim (NVHTM done; DSGL+TSXSim deprioritized — complex msg-passing and bloom-filter models)
@@ -1243,7 +1243,7 @@ PlusCal model of JVSTM's multi-version OCC:
 
 ### GPU JVSTM TLA+ model (`docs/proofs/GPU_JVSTM.tla`)
 
-GPU warp adaptation of JVSTM following the GPU_PRIORITY_STM pattern:
+GPU warp adaptation of JVSTM following the GPU_PR_STM pattern:
 - **Warp as process**: one process per warp, managing per-thread arrays
 - **SIMT lockstep**: shared `phase[w]` for all threads in the warp
 - **Divergence via `activeMask[w][t]`**: threads finishing their reads/writes
@@ -1270,7 +1270,330 @@ is large due to fine-grained warp modeling).
 
 ### Files modified
 - `backends/tm_impl/calvin/calvin_runtime.cpp` — pre-write capture, float tracking, write-buffer fix
-- `backends/tm_impl/epcc/epcc_runtime.cpp` — added `#include "tm_hooks.hpp"`
+- `backends/tm_impl/gputx/gputx_runtime.cpp` — added `#include "tm_hooks.hpp"` (renamed from `epcc/`, EPCC → GPUTX)
 - `backends/tm_impl/gacco/gacco_runtime.cpp` — added `#include "tm_hooks.hpp"`
 
+## Session 2026-07-31 — GUST GPU backend + TLA+ model + paper cleanup
 
+### GUST backend implementation (`gpu/backends/gpu_gust/`)
+
+Wire-modeled from the paper "GUST: Scalable Multi-Version Concurrency
+Control for GPUs" (Nunes, Castro, Romano — IST/INESC-ID). MVCC with
+**Versioned Boxes**, a **Commit Log**, and **AtomicINC-based** commit
+timestamps (no CAS, no commit lock).
+
+**Files created:**
+- `gpu/backends/gpu_gust/include/gpu_gust_api.h` — `GUSTVBox` (circular version array,
+  atomic `head`), `GUSTCLEntry` (state + write-set), host TM API
+- `gpu/backends/gpu_gust/cuda/gpu_gust_kernel.cuh` — single-pass warp-cooperative kernel
+- `gpu/backends/gpu_gust/cuda/gpu_gust_host.cpp` — host TM hooks (`TM_GPU_USE_HIP` portable)
+- `gpu/backends/gpu_gust/cuda/gpu_gust_runtime.cu` — launch wrapper
+- `gpu/backends/gpu_gust/README.md` — algorithm + fidelity notes
+
+**Kernel protocol (per warp, one transaction per lane):**
+1. READ snapshot (`startTS = *gts`) → VBox walk for newest version ≤ startTS
+2. WRITE buffer (private write-set)
+3. PRE-VALIDATION: `__ballot_sync` intra-warp conflicts (higher lane aborts)
+4. CL INSERTION: leader `atomicAdd(writePtr, WARP_SIZE)` → CTS = base + lane;
+   lane writes state + write-set into `CL[CTS % CL_SIZE]` + `__threadfence()`
+5. VALIDATION (hybrid **CCT + MRV**): scan valPtr from CTS-1 downward;
+   `valPtr ≥ gts` → CCT (compare read-set vs CL write-set); `valPtr < gts`
+   → MRV (abort if any read VBox has version > startTS)
+6. WRITE-BACK: append versions, leader waits `gts == base` then advances
+   GTS by WARP_SIZE (batch publication)
+
+**Two kernel bugs fixed during review (both the `__ballot_sync`
+divergence class from the PR-STM HIP port):**
+- **Early return after abort**: aborted lanes returned before surviving
+  lanes reached `__syncwarp()` (line 244) and `__ballot_sync` (line 251) —
+  UB on AMD, fragile on NVIDIA. Fixed: all lanes write their CL state,
+  then all lanes reach the ballot (mask = `is_aborted ? 0 : 1`); the
+  leader counts committed/aborted via `__popc(cmask)`.
+- **Short-circuited pre-validation loop**: `for (w = 0; w < my_writes &&
+  !conflict; w++)` let lanes exit the loop early, desynchronizing the
+  `__ballot_sync` inside it. Fixed: every lane iterates all writes.
+
+**Snapshot-threshold semantic fix (`startTS` vs `startTS+1`):**
+- The kernel used `snapshot = startTS + 1`, but GTS counts FINALIZED
+  slots (a writer with `CTS = c` publishes version `c+1` and is visible
+  iff `c < startTS`). The `+1` let an in-flight writer (`CTS == startTS`,
+  not yet finalized) slip into the snapshot — a missed-conflict hole that
+  CCT also misses (CCT scans `> startTS`). Fixed to `snapshot = startTS`,
+  matching the TLA+ model.
+
+### GUST TLA+ model (`docs/proofs/GPU_GUST.tla`)
+
+PlusCal model following the GPU_JVSTM convention (warp-as-process,
+SIMT lockstep, per-thread arrays, activeMask divergence):
+
+- **AtomicINC CL**: warp reserves `|Thread|` contiguous slots via a
+  single atomic step; CTS = base + lane; CL states
+  free/pending/committed/aborted; **no commit lock, no CAS**
+- **GTS counts finalized slots** (aborted transactions still consume
+  slots and advance GTS — required for the MRV threshold)
+- **Hybrid CCT + MRV validation**: `Valid(w,t)` checks slots `≥ gts` via
+  CL write-set intersection and slots `< gts` via VBox head version
+- **Batch publication**: `L_wait` spins until `gts = base`, then
+  advances GTS by `|Thread|` (write-back happens before GTS advance)
+- **9 invariants**: phase coherence, read/write-set bounds, clock
+  progress, batch alignment, read-set validity, commit budget, slot
+  states, and `InvNoMissedConflict` (opacity — no committed tx c has a
+  committed s with `st_c < s < c` writing an addr c read)
+
+**TLC verification:**
+- `GPU_GUST-small.cfg` (MaxCommits=1): **1.9M states, 0 errors** (safety)
+- `GPU_GUST.cfg` (MaxCommits=2, 2 warps × 2 threads × 2 addrs): 25M+
+  distinct states, **no violations found** before timeout (like
+  GPU_JVSTM's 42M-state run)
+- `GPU_GUST-liveness.cfg` (Spec_WF + ProgressProp): **PASS** on small
+  config (1.9M states, no deadlock, no temporal violations)
+
+**Model bugs found during development:**
+- `InvBatchAlignment` used `\E k \in Nat` (non-enumerable for TLC) →
+  `gts % Cardinality(Thread) = 0`
+- `writeAddrs()` in `L_write` read the *pre-update* write-set (PlusCal
+  define-block operators bind unprimed vars) → inlined the set
+  comprehension so the mask check sees `writeSet'`
+- `NewVersion` used an inline `\E ... /\ P` set-builder filter (invalid
+  TLA+ comprehension) → `LET committedWriters == {t2 \in Thread : ...}`
+- MRV extracted `vbox[addr][1]` (a `<<v>>` tuple) instead of
+  `vbox[addr][1][1]`
+
+### Paper cleanup (external)
+
+Cleaned LaTeX project at `~/Documents/overleaf_papers/GUST/` with a
+`Makefile`; 14-page PDF reproduces from a clean source tree. GUST paper
+essentials documented in the backend README (VBoxes, GTS, AtomicINC CL,
+CCT+MRV, warp-cooperative batch commit).
+
+### Files created
+- `gpu/backends/gpu_gust/include/gpu_gust_api.h`
+- `gpu/backends/gpu_gust/cuda/gpu_gust_kernel.cuh`
+- `gpu/backends/gpu_gust/cuda/gpu_gust_host.cpp`
+- `gpu/backends/gpu_gust/cuda/gpu_gust_runtime.cu`
+- `gpu/backends/gpu_gust/README.md`
+- `docs/proofs/GPU_GUST.tla` — PlusCal model + TLA+ translation
+- `docs/proofs/GPU_GUST.cfg`, `GPU_GUST-small.cfg`, `GPU_GUST-liveness.cfg`
+
+### Files modified
+- `docs/IMPLEMENTATIONS.md` — added §16a GUST section + TLA+ table row
+- `AGENTS.md` — this session summary
+
+### Next steps
+1. **Compile-check the kernel on real CUDA/HIP hardware** (no nvcc/hipcc
+   on this machine) — verify `__ballot_sync`/`__syncwarp` lockstep
+2. **Full `MaxCommits=2` TLC run to completion** (currently 25M+ states
+   with no violations; may need `-workers` for parallelism)
+3. **Complete remaining PlusCal conversions** (DSGL, TSXSim), TL2 guard
+   table investigation, `lastFence`/`FenceFidelity` sweep
+4. Run STAMP-style multi-transaction workload on GPU GUST once hardware
+   is available
+
+## Session 2026-07-31 — GUST benchmark suite (Bank RQ1/RQ2, YCSB, Memcached)
+
+### GUST batch executor (`gpu/backends/gpu_gust/cuda/gpu_gust_batch_executor.{cuh,cu}`)
+
+Reusable warp-batch executor so arbitrary benchmark bodies can run on GUST
+(the original `gpu_gust_runtime.cu` only launches a hardcoded microbenchmark):
+
+- One transaction per lane; `gust_tx_body_t = void(*)(int,int,void*,GUSTWarpState*)`.
+- Device API: `gust_gpu_init/shutdown/snapshot/seed/committed_count/aborted_count`
+  (host-callable) + inline `gust_gpu_begin/read/write/commit` device functions.
+- Implements the full commit protocol as reusable device functions: CL AtomicINC
+  insert, hybrid CCT + MRV validation, full-warp batch publication.
+- Device globals exposed via accessor functions to avoid the nvcc
+  header-definition trap (same pattern as CSMV).
+- **Batch sizes MUST be multiples of 32** — GTS publication advances by one
+  full warp; `abort()` on non-multiple-of-32 (programming error, not data).
+
+### Batch-executor protocol notes (differs from the single-pass microbenchmark)
+
+- Per-lane tx bodies write different numbers of addresses, so every
+  `__ballot_sync` in pre-validation must run with a uniform trip count.
+  The warp-max write count is reduced first via `__shfl_down_sync` (the same
+  class of bug as the PR-STM HIP port: divergent `__ballot_sync` = UB on AMD).
+- The snapshot threshold is `startTS` (finalized-slot semantics), matching the
+  TLA+ model — no `startTS+1` (missed-conflict hole).
+
+### Benchmark drivers (`gpu/benchmarks/`, CSMV batch-dispatch pattern)
+
+- **`gpu_bank.cu`** — RQ1 (read-mostly) / RQ2 (transfer) with RO-ratio config,
+  hosted seeding, money-conservation verification.
+- **`gpu_ycsb_gust.cu`** — YCSB-style workload; invariant
+  `final_sum == committed_writes`.
+- **`gpu_memcached_gust.cu`** — memcached-style set/get; payload = key+1 verify.
+- **`gpu_gust_smoke.cu`** — smoke test for the batch executor
+  (transfers + money conservation).
+
+### Build wiring
+
+- `gpu/benchmarks/Makefile`: added `GUST_DIR`, `GUST_EXEC` from
+  `gpu_gust_batch_executor.cu`, targets `gpu_bank`, `gpu_ycsb_gust`,
+  `gpu_memcached_gust`, `gpu_gust_smoke` (added to `all` and `run`).
+- `make -n CUDA=/usr/bin/true` verified: correct `-I` include paths
+  (`../../backends/tm_impl/common`, `../../gpu/backends/csmv`,
+  `../../gpu/backends/gpu_gust/cuda`).
+
+### docs/proofs/Makefile fix
+
+`BACKENDS` was derived from all non-liveness `*.cfg` files, so suffix variant
+configs (`GPU_GUST-small`, and pre-existing `*-sequential`, `*-large`,
+`*-buggy`, `*-check`) created invalid pseudo-backends with no matching `.tla`
+— `make check` failed on the first one. Fixed by filtering `BACKENDS` through
+`TLA_BASES` (basenames of existing `.tla` files); variant configs remain
+driven by their dedicated targets. Verified via `make -pn`:
+`BACKENDS` now holds only backends with a matching `.tla`, `GPU_GUST` is in
+`LIVENESS_BACKENDS`, and `make BACKEND=GPU_GUST check-one` targets the right
+files.
+
+### Documentation
+
+`docs/IMPLEMENTATIONS.md` §16a updated: added the batch executor, smoke test,
+three benchmark drivers, build info, and the batch-executor protocol notes
+(uniform-trip-count ballot, full-warp publication, multiple-of-32 batches).
+
+### Verification limits
+
+No nvcc/hipcc on this machine — kernels/benchmarks are written but unverified
+for compilation. Only TLC (`GPU_GUST.tla` re-verified clean, 0 errors),
+`make -n` dry runs, and include-path/API-symbol cross-checks are possible.
+Pre-existing unrelated failures unchanged (GPU_STM_CPU counter_mt,
+write_set_validation; three PR-STM tests fail to build on macOS).
+
+## Session 2026-08-01 — NOrec-BF + TSC-TM backends + MVLog design & TLA+ model
+
+### NOrec-BF (Bloom-filter read-set, read-mostly accelerator)
+
+New backend `backends/tm_impl/norec_bf/` (NOrec + a Bloom filter over the
+write-set). Read fast path: consult the Bloom filter; a clean miss returns the
+value without touching the read-set or tracking. Clean misses dominate in
+read-mostly workloads, so the common path is a plain load + one filter test.
+
+- **Files**: `NOrec_BF.hpp` (bloom filter, commit protocol), `NOrec_BF_globals.hpp`,
+  `NOrec_BF_runtime.cpp` (hooks + LLVM_TM_PLUGIN guards), `Implementation_notes.md`.
+- **Verification**: `test_tx` 114/114, `test_ds` 207/207, `fuzz_counter`
+  and `fuzz_bank` PASS.
+- **Perf** (M1 Pro, `bank -d 2000 -a 512 -t 4 -r 90`): NOrec-BF 829,304 vs
+  NOrec 552,901 txn/s (~+50% read-mostly); ~7% slower on small-read-set transfers.
+
+### TSC-TM (TSC clock TL2)
+
+New backend `backends/tm_impl/tsc_tm/`: TL2 structure but `get_clock()` returns
+the TSC (`stm::tm_timestamp()`), using `release_guard_with_version` to stamp
+write-backs. Optional `kTscWaitCycles` spin when the guard clock appears
+stalled.
+
+- **Files**: `TSC_TM.hpp`, `TSC_TM_globals.hpp`, `TSC_TM_runtime.cpp`,
+  `Implementation_notes.md`.
+- **Verification**: `test_tx` 114/114, `test_ds` 207/207, fuzz PASS (also with
+  `kTscWaitCycles=2000`, then reverted to 0).
+- **Perf** (M1 Pro): TSC-TM 2,050,306 vs TL2 2,060,831 txn/s (~1.6% slower).
+- Makefile wiring: `benchmarks/cpp/Makefile` NORECBF + TSC_TM blocks;
+  top-level `Makefile` `BACKENDS_TESTS` includes NORECBF, TSC_TM.
+
+### MVLog — multi-version commit-log STM (C++ + Rust + TLA+)
+
+MVLog negotiates its commit slot at `tm_begin()` (one `fetch_add` on `g_next`),
+logs write-sets in a global ever-growing commit log, tracks the newest
+committed writer per address (`index`), and uses a no-false-negative Bloom
+filter (`dirty`) so the read fast path is a plain `g_mem` load.
+
+- **Design**: `backends/tm_impl/mvlog/Implementation_notes.md` (protocol,
+  correctness lemma, reclamation, related work, open questions).
+- **Implementation (C++)**: `backends/tm_impl/mvlog/` — `MVLog.hpp`
+  (ring log 2^17, per-address open-addressing index 2^20, `stm::BloomFilter<64>`
+  fast path, commit lock, reclamation), `MVLog_globals.hpp`, `MVLog_runtime.cpp`
+  (hook registration, sigsetjmp/retry wiring, LLVM_TM_PLUGIN guards).
+  Verified: `test_tx` 114/114, `test_ds` 207/207, fuzz_counter/fuzz_bank PASS
+  at 2/4/8/16 threads. Key fixes found during bring-up: **write-through on
+  commit** (peek()/direct reads see newest committed values), **commit lock**
+  (`g_commit_lock`, standard spinlock) serializing validate → publish per the
+  TLA+ single-action commit model — without it fuzz_counter lost updates
+  (sum off by 58); predecessor-wait breaks on any non-PROGRESS state (slot 0
+  with tag==s was a never-claimed FREE and hung).
+  Benchmarks (M1 Pro, `bank -d 2000 -a 512 -t 4`): read-mostly `-r 90`
+  MVLog 108,552 vs NOrec 109,412 vs NOrec-BF 110,040; write-heavy `-r 0`
+  MVLog 275,141 vs NOrec 286,025; 8-thread `-t 8 -a 1024 -r 50` MVLog 42,123
+  vs NOrec 39,401.
+- **Implementation (Rust)**: `expli_instr/rust/workspace/runtime/mvlog/`
+  (same algorithm; atomics inside ring entries for interior mutability,
+  `TmxAbort` panic + `catch_unwind` retry; `simulation` feature). Registered
+  in workspace members, `tm/Cargo.toml` (`mvlog = ["runtime-mvlog"]`), all
+  exclusivity/at-least-one/transaction() cfg lists, and `benchmarks/rust`
+  feature passthrough. Examples `simple` / `mt_test` / `time_cells` PASS.
+  Note: `benchmarks/rust --features mvlog` fails to build with pre-existing
+  `error[E0252]` because `tm-executor` forces the default `wbctl` feature
+  (same failure with `--features tl2`, unrelated to MVLog).
+- **TLA+ model**: `docs/proofs/MVLog.tla` (PlusCal). TLC verification:
+  **821,655 states generated / 329,041 distinct, 0 errors** (safety);
+  `make check-one BACKEND=MVLog` PASS. Key invariant
+  `CommittedReadsConsistent` captures opacity (every committed slot's recorded
+  reads match `ReadValue(a, slot)`).
+- **Liveness**: known false-negative (unbounded `either` at `L_active` — a
+  thread may spin doing read/write steps, each satisfying weak fairness over
+  the process disjunction, without committing). Same result as JVSTM/SPHT/
+  DUDETM; safety is the meaningful check here.
+- **TLC fingerprinting pitfall (documented)**: record values
+  (`log = [s |-> [state: ..., ws: ..., rs: ...]]`) cannot be fingerprinted by
+  TLC 2.14 (`/tmp/tla2tools.jar`) — "can't enumerate the value of the
+  `state' field". Parallel-array encoding (`logState`/`logWs`/`logRs`
+  functions indexed by slot) works. Verified the same jar runs JVSTM.tla
+  cleanly (216,057 distinct), confirming the toolchain is fine.
+- **pcal.trans note**: consecutive nested record-field assignments
+  (`log[slot].state := ...; log[slot].ws := ...`) trigger "Missing labels at
+  line N"; a single whole-element assignment `log[slot] := [state: ...]` or
+  per-array assignments work. `==`/`=` adjacency in a definition
+  (`Init == log = [..]`) can raise "Precedence conflict"; parenthesize the
+  RHS.
+- MVLog.cfg / MVLog-liveness.cfg auto-wired into docs/proofs/Makefile
+  (`BACKENDS`, `LIVENESS_BACKENDS`) via the TLA_BASES filter.
+
+
+
+## Session 2026-08-13 — Book expansion: Ch17 merge cleanup + Ch18 (final chapter) via AIedu
+
+Continued the AIedu-driven expansion of `docs/book/main.tex` (each chapter gets
+worked examples, code listings, TikZ diagrams, tables, exercises). This session:
+
+- **Ch17 (TM for GPUs) dedup**: A previous partial merge had already inserted
+  the four blocks (bank-transfer example, GUST commit-path figure, commit
+  strategies table, TLA+ money-conservation example, 3 exercises). Re-running
+  the merge script duplicated blockA + blockE and added a raw `llllp{5.8cm}`
+  duplicate of the already-fixed p-col table plus a second TLA section. Removed
+  the duplicate copies (verified each removed range matched the exact block
+  file), restoring the 185-page build. Lesson: verify `src.count(anchor)==1`
+  asserts still hold at merge time and check for pre-existing content before
+  splicing.
+- **Ch18 (Open Questions and Emerging Directions)**: final main chapter
+  (before the appendices). Extracted 69-line chapter, expanded via AIedu
+  (thread `aiedu-model-6b31c19f7d9b4f029d8f0633a77d5e52`) to a strict superset
+  (+228 lines, 0 removed): new `tab:emerging-directions` (backend × pressure
+  point matrix), `sec:hybrid-example` + `fig:phased-hybrid-state` TikZ,
+  `sec:durable-bank-example` (idempotent journal/redo C++ listing),
+  `sec:distributed-commit-example` (prepare/commit TLA+ model), 3 tagged
+  exercises. Fixed: 3 non-breaking hyphens (U+2011), `fig:phased-hybrid-state`
+  wrapped in `\resizebox` (81pt overfull), `tab:emerging-directions` col widths
+  0.20/0.27/0.30 → 0.18/0.25/0.30 (5.7pt overfull).
+- **Final rebuild**: `pdflatex` ×3 + `makeindex` → **192 pages**, exit 0, no
+  undefined references/citations, no multiply-defined labels, 46 overfulls
+  (all pre-existing ≤2pt except two known Ch17 residuals: 9.2pt at
+  OFG-STM bullet, 4.2pt section title).
+
+### Book page progression (all verified clean)
+Ch5 121 → Ch6 128 → Ch7 132 → Ch8 137 → Ch9 141 → Ch10 144 → Ch11 151 →
+Ch12 158 → Ch13 164 → Ch14 171 → Ch15 176 → Ch16 181 → Ch17 185 → **Ch18 191
+→ final 192** (with index).
+
+### Book workflow notes (this session)
+- Splice via Python `str.index` anchors, assert `count==1`; **check the file
+  did not already contain the target content before splicing** (Ch17 dup bug).
+- `expand_chapter.py <name> --source chapter_source.tex` in
+  `~/Projects/INESCID/AIedu_model`; output `chapter_expansions/ch<N>.tex`
+  (superset for small chapters, lossy rewrite for >15KB — those need surgical
+  merge, keeping original content).
+- Common overfull fixes: p-cols tables, `\resizebox{\textwidth}{!}{%...%}` on
+  wide TikZ, `\slash{}` for unbreakable `/` tokens, `\allowbreak` in long tt
+  tokens, shorten long `\section` titles, strip U+2011 non-breaking hyphens.
+- New labels added Ch18: `tab:emerging-directions`, `sec:hybrid-example`,
+  `fig:phased-hybrid-state`, `sec:durable-bank-example`,
+  `sec:distributed-commit-example`.

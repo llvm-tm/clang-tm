@@ -20,7 +20,7 @@ extern __thread int32_t tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;
 }
 
-// ── EPCC: Epic-inspired Priority Concurrency Control ────
+// ── GPUTX: GPUTx-style Priority Concurrency Control ──────
 //
 // Adaptation of the GPUTx rank-based priority scheme to CPU.
 // Each transaction has a dynamic priority (rank).  When two
@@ -37,7 +37,7 @@ extern __thread sigjmp_buf tm_jmpbuf;
 // conflict resolution with a simpler CPU-side abort decision.
 
 // ── Global lock table ────────────────────────────────────
-struct EPCCLock {
+struct GPUTXLock {
     std::atomic<uint64_t> holder{0}; // 0 = unlocked, non-zero = holder's rank
     std::atomic<uint64_t> tid{0};    // thread ID of holder
 };
@@ -45,7 +45,7 @@ struct EPCCLock {
 static constexpr size_t LOCK_TABLE_BITS = 20;
 static constexpr size_t LOCK_TABLE_SIZE = 1ull << LOCK_TABLE_BITS;
 static constexpr int    LOCK_SHIFT      = 4;
-static EPCCLock g_locks[LOCK_TABLE_SIZE];
+static GPUTXLock g_locks[LOCK_TABLE_SIZE];
 
 static inline size_t lock_idx(const void *addr) {
     return ((uintptr_t)addr >> LOCK_SHIFT) & (LOCK_TABLE_SIZE - 1);
@@ -64,7 +64,7 @@ static std::atomic<uint64_t> g_next_tid{1};
 static std::atomic<uint64_t> g_clock{0}; // global timestamp for ranking
 
 // ── Lock helpers ─────────────────────────────────────────
-// EPCC write-lock with priority-based conflict resolution.
+// GPUTX write-lock with priority-based conflict resolution.
 // If someone else holds the lock, compare ranks — lower rank aborts.
 static bool try_lock_write(void *addr) {
     size_t idx = lock_idx(addr);
@@ -161,7 +161,7 @@ static void real_tm_abort() {
 }
 
 // ── Read / Write operations ──────────────────────────────
-// EPCC: reads are lock-free (value-based validation at commit).
+// GPUTX: reads are lock-free (value-based validation at commit).
 // Writes acquire a priority-respecting exclusive lock.
 
 static uint64_t do_read(void *addr, uint8_t width) {
@@ -241,7 +241,7 @@ static void real_tm_init_thread() {
 static void real_tm_exit_thread() {}
 static void *real_tm_get_thread_state() { return nullptr; }
 
-static TMRealHooks g_epcc_hooks = {
+static TMRealHooks g_gputx_hooks = {
     .begin            = real_tm_begin,
     .end              = real_tm_end,
     .malloc           = real_tm_malloc,
@@ -281,7 +281,7 @@ void (*tm_exit_thread)() = do_tm_exit_thread;
 }
 #else
 extern "C" {
-void tm_init()        { real_tm_init();        tm_register_real_hooks(&g_epcc_hooks); }
+void tm_init()        { real_tm_init();        tm_register_real_hooks(&g_gputx_hooks); }
 void tm_exit()        { real_tm_exit(); }
 void tm_init_thread() { real_tm_init_thread(); }
 void tm_exit_thread() { real_tm_exit_thread(); }

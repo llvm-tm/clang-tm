@@ -1,5 +1,14 @@
 # Implementation Notes: Left-Right Synchronization
 
+> **⚠️ Name-vs-content caution:** The `leftright` backend in this repository
+> is **not** an implementation of the Left-Right synchronization pattern
+> described below. It is a **global-clock OCC** design (snapshot timestamp,
+> read-set validation, commit-lock write-back — structurally similar to the
+> `romulus` backend). The generic Left-Right theory in this file is kept as
+> background reading only; for what the backend actually does, read
+> `leftright.hpp` (value-based validation under a commit lock) and the
+> history in `AGENTS.md` (2026-06-20 session).
+
 ## Overview
 
 Left-Right Synchronization (LRS) is a general framework for coordinating concurrent processes that is based on the principle of **Left-Right ordering**. The system ensures that all "Left" operations from one process are ordered before any "Right" operations from another process.

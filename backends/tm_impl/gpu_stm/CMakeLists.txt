@@ -24,10 +24,12 @@ set(GPU_STM_SRC_DIR  ${CMAKE_CURRENT_SOURCE_DIR})
 set(GPU_STM_INC_DIR  ${GPU_STM_SRC_DIR}/include)
 set(BACKENDS_COMMON  ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 set(BACKENDS_REGION  ${CMAKE_CURRENT_SOURCE_DIR}/../tm_region_allocator)
+set(GPU_STM_CUDA_DIR ${CMAKE_SOURCE_DIR}/gpu/backends/gpu_stm)
 
 include_directories(${GPU_STM_INC_DIR})
 include_directories(${BACKENDS_COMMON})
 include_directories(${BACKENDS_REGION})
+include_directories(${GPU_STM_CUDA_DIR})
 
 # ── CPU-only fallback ──────────────────────────────────────────────
 
@@ -71,7 +73,7 @@ if(BUILD_GPU_STM)
 
     # PR-STM kernel + host runtime
     add_library(pr_stm_backend STATIC
-        ${GPU_STM_SRC_DIR}/cuda/pr_stm_runtime.cu
+        ${GPU_STM_CUDA_DIR}/pr_stm_runtime.cu
         ${BACKENDS_REGION}/tm_region_allocator.cpp
         ${BACKENDS_COMMON}/tm_hooks.cpp
     )
@@ -87,7 +89,7 @@ if(BUILD_GPU_STM)
 
     # ── Test: PR-STM GPU smoke test ───────────────────────────────
     add_executable(test_pr_stm_gpu
-        ${GPU_STM_SRC_DIR}/cuda/pr_stm_runtime.cu
+        ${GPU_STM_CUDA_DIR}/pr_stm_runtime.cu
         tests/test_pr_stm.cpp
     )
     target_compile_features(test_pr_stm_gpu PUBLIC cxx_std_17)
@@ -112,7 +114,7 @@ if(BUILD_GPU_STM_HIP)
 
     # Host-side code compiled with regular C++ (g++/clang++)
     add_library(pr_stm_backend_hip_host STATIC
-        ${GPU_STM_SRC_DIR}/cuda/pr_stm_host.cpp
+        ${GPU_STM_CUDA_DIR}/pr_stm_host.cpp
         ${BACKENDS_REGION}/tm_region_allocator.cpp
         ${BACKENDS_COMMON}/tm_hooks.cpp
     )
@@ -127,7 +129,7 @@ if(BUILD_GPU_STM_HIP)
 
     # Device-side kernel compiled with hipcc
     add_library(pr_stm_backend_hip_kernel STATIC
-        ${GPU_STM_SRC_DIR}/cuda/pr_stm_runtime.cu
+        ${GPU_STM_CUDA_DIR}/pr_stm_runtime.cu
     )
     target_compile_features(pr_stm_backend_hip_kernel PUBLIC cxx_std_17)
     target_include_directories(pr_stm_backend_hip_kernel PUBLIC
@@ -144,8 +146,8 @@ if(BUILD_GPU_STM_HIP)
     )
 
     add_executable(test_pr_stm_gpu_hip
-        ${GPU_STM_SRC_DIR}/cuda/pr_stm_host.cpp
-        ${GPU_STM_SRC_DIR}/cuda/pr_stm_runtime.cu
+        ${GPU_STM_CUDA_DIR}/pr_stm_host.cpp
+        ${GPU_STM_CUDA_DIR}/pr_stm_runtime.cu
         tests/test_pr_stm.cpp
     )
     target_compile_features(test_pr_stm_gpu_hip PUBLIC cxx_std_17)

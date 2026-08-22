@@ -10,8 +10,8 @@ Instrumentation:
 
 Enabled via -DCSMV_PROFILE at compile time.
 
---- a/backends/tm_impl/csmv/gpu/csmv_batch_executor.cu
-+++ b/backends/tm_impl/csmv/gpu/csmv_batch_executor.cu
+--- a/gpu/backends/csmv/csmv_batch_executor.cu
++++ b/gpu/backends/csmv/csmv_batch_executor.cu
 @@ -1,3 +1,20 @@
 +#ifdef CSMV_PROFILE
 +// ── CUDA event profiling ──────────────────────────────────────

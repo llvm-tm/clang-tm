@@ -126,7 +126,9 @@
   author    = {Yunlong Xu and Rui Wang and Nilanjan Goswami and Tao Li and Lan Gao and Depei Qian},
   title     = {Software Transactional Memory for {GPU} Architectures},
   booktitle = {Proceedings of the 2014 IEEE/ACM International Symposium on Code Generation and Optimization (CGO)},
-  year      = {2014}
+  year      = {2014},
+  pages     = {1--10},
+  doi       = {10.1145/2544137.2544139}
 }
 
 @inproceedings{holey14,
@@ -156,10 +158,12 @@
 }
 
 @inproceedings{perlin24ofg,
-  author    = {Perlin, Jer{\^o}nimo and others},
-  title     = {{OFG-STM}: Transactional Memory for {GPUs} based on Obstruction-Free {STM}},
-  booktitle = {Proceedings of the XXVIII Brazilian Symposium on Programming Languages (SBLP)},
-  year      = {2024}
+  author    = {Tiago Perlin and Gerson G. H. Cavalheiro and Andr{\'e} Rauber Du Bois},
+  title     = {{OFG-STM}: Transactional Memory for {GPUs} based on Obstruction-Free {STM} algorithms},
+  booktitle = {Proceedings of the 28th Brazilian Symposium on Programming Languages (SBLP)},
+  year      = {2024},
+  pages     = {35--43},
+  doi       = {10.5753/sblp.2024.3465}
 }
 
 @misc{nunes23gust,
@@ -341,4 +345,112 @@
   series    = {Synthesis Lectures on Computer Architecture},
   publisher = {Morgan \& Claypool},
   year      = {2011}
+}
+
+@inproceedings{shavit95stm,
+  author    = {Nir Shavit and Dan Touitou},
+  title     = {Software Transactional Memory},
+  booktitle = {Proceedings of the 14th Annual ACM Symposium on Principles of Distributed Computing (PODC)},
+  year      = {1995},
+  pages     = {204--213}
+}
+
+@inproceedings{liu17dudetm,
+  author    = {Mengxing Liu and Mingxing Zhang and Kang Chen and Xuehai Qian and Yongwei Wu and Weimin Zheng and Jinglei Ren},
+  title     = {{DudeTM}: Building Durable Transactions with Decoupling for Persistent Memory},
+  booktitle = {Proceedings of the 22nd International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)},
+  year      = {2017},
+  pages     = {329--343}
+}
+
+@inproceedings{castro18nvhtm,
+  author    = {Daniel Castro and Paolo Romano and Jo{\~a}o Barreto},
+  title     = {Hardware Transactional Memory Meets Memory Persistency},
+  booktitle = {Proceedings of the 32nd IEEE International Parallel and Distributed Processing Symposium (IPDPS)},
+  year      = {2018}
+}
+
+@inproceedings{castro21spht,
+  author    = {Daniel Castro and Alexandro Baldassin and Jo{\~a}o Barreto and Paolo Romano},
+  title     = {{SPHT}: Scalable Persistent Hardware Transactions},
+  booktitle = {19th USENIX Conference on File and Storage Technologies (FAST)},
+  year      = {2021},
+  pages     = {155--169}
+}
+
+@inproceedings{correia18romulus,
+  author    = {Andreia Correia and Pascal Felber and Pedro Ramalhete},
+  title     = {{Romulus}: Efficient Algorithms for Persistent Transactional Memory},
+  booktitle = {Proceedings of the 30th ACM Symposium on Parallelism in Algorithms and Architectures (SPAA)},
+  year      = {2018},
+  pages     = {271--282}
+}
+
+@inproceedings{thomson12calvin,
+  author    = {Alexander Thomson and Thaddeus Diamond and Shu-Chun Weng and Kun Ren and Philip Shao and Daniel J. Abadi},
+  title     = {{Calvin}: Fast Distributed Transactions for Partitioned Database Systems},
+  booktitle = {Proceedings of the ACM SIGMOD International Conference on Management of Data},
+  year      = {2012},
+  pages     = {1--12}
+}
+
+@misc{arm25tmew,
+  author       = {{Arm Ltd.}},
+  title        = {Arm Architecture Reference Manual for A-profile architecture, Known Issue {D24093}: {FEAT\_TME} withdrawal},
+  year         = {2025},
+  note         = {FEAT\_TME withdrawn from all future versions of the Arm ARM; removed from LLVM~22 (llvm-project PR \#167687)}
+}
+
+@inproceedings{binkert11gem5,
+  author    = {Nathan Binkert and Bradford Beckmann and Gabriel Black and Steven K. Reinhardt and Ali Saidi and Arkaprava Basu and Joel Hestness and Derek R. Hower and Tushar Krishna and Somayeh Sardashti and Rathijit Sen and Korey Sewell and Muhammad Shoaib and Nilay Vaish and Mark D. Hill and David A. Wood},
+  title     = {The gem5 Simulator},
+  booktitle = {ACM SIGARCH Computer Architecture News},
+  year      = {2011}
+}
+
+% ---------------- TM correctness theory (ch05) ----------------
+
+@article{papadimitriou79serializability,
+  author  = {Christos H. Papadimitriou},
+  title   = {The Serializability of Concurrent Database Updates},
+  journal = {Journal of the ACM},
+  volume  = {26},
+  number  = {4},
+  pages   = {631--653},
+  year    = {1979}
+}
+
+@inproceedings{herlihy03tms1,
+  author    = {Maurice Herlihy and Victor Luchangco and Mark Moir and William N. Scherer III},
+  title     = {Transactional Memory: Structural Details and Composition},
+  booktitle = {Proceedings of the 17th International Symposium on Distributed Computing (DISC)},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {2848},
+  year      = {2003},
+  pages     = {324--338}
+}
+
+@inproceedings{herlihy03tms2,
+  author    = {Maurice Herlihy and Victor Luchangco and Mark Moir},
+  title     = {Software Transactional Memory for Dynamic-Sized Data Structures},
+  booktitle = {Proceedings of the 22nd Annual ACM Symposium on Principles of Distributed Computing (PODC)},
+  year      = {2003},
+  pages     = {92--101}
+}
+
+@inproceedings{herlihy03obstructionfree,
+  author    = {Maurice Herlihy and Victor Luchangco and Mark Moir},
+  title     = {Obstruction-Free Synchronization: Double-Ended Queues as an Example},
+  booktitle = {Proceedings of the 23rd International Conference on Distributed Computing Systems (ICDCS)},
+  year      = {2003},
+  pages     = {522--529}
+}
+
+@article{imbs12vwc,
+  author  = {Damien Imbs and Michel Raynal},
+  title   = {Virtual World Consistency: A Condition for {STM} Systems (with a Versatile Protocol with Invisible Read Operations)},
+  journal = {Theoretical Computer Science},
+  volume  = {444},
+  pages   = {22--38},
+  year    = {2012}
 }

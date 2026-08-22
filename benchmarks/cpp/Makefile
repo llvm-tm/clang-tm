@@ -9,6 +9,9 @@ LDFLAGS   = -static -pthread
 
 # --- Choose backend (default: TinySTM/WBCTL) --------------------
 BACKEND ?= TINYSTM
+# Normalize to uppercase so `make BACKEND=norec` and `BACKEND=NOREC` both work
+# (the top-level Makefile passes lowercase; the blocks below compare uppercase).
+override BACKEND := $(shell echo "$(BACKEND)" | tr '[:lower:]' '[:upper:]')
 
 CXXFLAGS += -I../.. -I../../expli_instr/cpp
 EXTRA_INC =
@@ -35,6 +38,16 @@ ifeq ($(BACKEND),NOREC)
   DEFS     = -DTM_BACKEND_NOREC
   EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/norec
 endif
+ifeq ($(BACKEND),NORECBF)
+  RUNTIME  = ../../backends/tm_impl/norec_bf/NOrec_BF_runtime.cpp
+  DEFS     = -DTM_BACKEND_NORECBF
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/norec_bf
+endif
+ifeq ($(BACKEND),MVLOG)
+  RUNTIME  = ../../backends/tm_impl/mvlog/MVLog_runtime.cpp
+  DEFS     = -DTM_BACKEND_MVLOG
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/mvlog
+endif
 ifeq ($(BACKEND),SWISSTM)
   RUNTIME  = ../../backends/tm_impl/swisstm/SwissTM_runtime.cpp
   DEFS     = -DTM_BACKEND_SWISSTM
@@ -44,6 +57,11 @@ ifeq ($(BACKEND),TL2)
   RUNTIME  = ../../backends/tm_impl/tl2/tl2_runtime.cpp
   DEFS     = -DTM_BACKEND_TL2
   EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tl2
+endif
+ifeq ($(BACKEND),TSC_TM)
+  RUNTIME  = ../../backends/tm_impl/tsc_tm/tsc_tm_runtime.cpp
+  DEFS     = -DTM_BACKEND_TSC_TM
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tsc_tm
 endif
 ifeq ($(BACKEND),SGL)
   RUNTIME  = ../../backends/tm_impl/single_global_lock/SingleGlobalLock_runtime.cpp
@@ -107,9 +125,9 @@ ifeq ($(BACKEND),GACCO)
   DEFS     = -DTM_BACKEND_GACCO
   EXTRA_INC = -I../../backends/tm_impl/common
 endif
-ifeq ($(BACKEND),EPCC)
-  RUNTIME  = ../../backends/tm_impl/epcc/epcc_runtime.cpp
-  DEFS     = -DTM_BACKEND_EPCC
+ifeq ($(BACKEND),GPUTX)
+  RUNTIME  = ../../backends/tm_impl/gputx/gputx_runtime.cpp
+  DEFS     = -DTM_BACKEND_GPUTX
   EXTRA_INC = -I../../backends/tm_impl/common
 endif
 ifeq ($(BACKEND),JVSTM)
@@ -142,6 +160,19 @@ RBTREE_BIN   = bin/rbtree
 # --- tests --------------------------------------------------------
 BANK_SRC     = bank/bank.cpp
 BANK_BIN     = bin/bank
+
+# --- gem5 simulation build (GEM5=1) --------------------------------
+# Adds m5 pseudo-instruction ROI markers (stats reset/dump bracket the
+# benchmark phase; see gem5_roi.hpp) and shrinks the TM mmap region to
+# 512 MiB for the simulated address space.  Run with -n <txns> for a
+# bounded deterministic workload inside the ROI.
+GEM5 ?= 0
+ifeq ($(GEM5),1)
+  CXXFLAGS += -DGEM5_M5OPS -DTM_REGION_SIZE=536870912
+  # Per-backend output name so backend sweeps don't clobber each other
+  # (the build rule has no backend in its dependency list).
+  BANK_BIN := bin/bank_gem5_$(shell echo $(BACKEND) | tr 'A-Z' 'a-z')
+endif
 FUZZ_CTR_SRC = fuzz-counter/fuzz_counter.cpp
 FUZZ_CTR_BIN = bin/fuzz_counter
 FUZZ_BANK_SRC = fuzz-bank/fuzz_bank.cpp

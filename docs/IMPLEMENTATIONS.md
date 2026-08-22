@@ -285,10 +285,11 @@ Comprehensive reference covering all 16+ STM/HTM/distributed TM backends.
 - `backends/tm_impl/gpu_stm/include/gpu_stm_api.h` — lock word encoding + public C API
 - `backends/tm_impl/gpu_stm/cpu/gpu_stm_cpu_runtime.cpp` — CPU fallback via TMRealHooks
 - `backends/tm_impl/gpu_stm/cpu/pr_stm_cpu.cpp` — std::thread warp emulation
-- `backends/tm_impl/gpu_stm/cuda/gpu_stm.cu` — CUDA kernel
-- `backends/tm_impl/gpu_stm/cuda/host_stm.cpp` — host-side init/memory management
+- `gpu/backends/gpu_stm/pr_stm_kernel.cuh` — CUDA/HIP kernel
+- `gpu/backends/gpu_stm/pr_stm_host.cpp` — host-side TM hooks / memory management
+- `gpu/backends/gpu_stm/pr_stm_runtime.cu` — kernel launch wrapper
 - `backends/tm_impl/gpu_stm/CMakeLists.txt` — CUDA-enabled CMake build
-- `docs/proofs/GPU_PRIORITY_STM.tla` — TLA+ model (13 states, 4 distinct, all invariants pass)
+- `docs/proofs/GPU_PR_STM.tla` — TLA+ model (13 states, 4 distinct, all invariants pass)
 
 **Build options:** `-DBUILD_GPU_STM=ON`, `-DGPU_STM_CPU_FALLBACK=ON` (CPU-only, no GPU required)
 
@@ -329,8 +330,8 @@ Comprehensive reference covering all 16+ STM/HTM/distributed TM backends.
 **Key files:**
 - `backends/tm_impl/csmv/include/csmv_api.h` — Version node + object entry structures, public C API
 - `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp` — CPU fallback via TMRealHooks
-- `backends/tm_impl/csmv/gpu/csmv_kernel.cuh` — GPU kernel header (warp-cooperative traversal)
-- `backends/tm_impl/csmv/gpu/csmv_kernel.cu` — GPU kernel + persistent launch
+- `gpu/backends/csmv/csmv_kernel.cuh` — GPU kernel header (warp-cooperative traversal)
+- `gpu/backends/csmv/csmv_kernel.cu` — GPU kernel + persistent launch
 - `backends/tm_impl/csmv/CMakeLists.txt` — Build (CPU: `CSMV_CPU_FALLBACK=ON`, GPU: `BUILD_CSMV=ON`)
 - `docs/proofs/CSMV.tla` — PlusCal model with read-consistency + version-chain monotonic invariants
 
@@ -339,6 +340,58 @@ Comprehensive reference covering all 16+ STM/HTM/distributed TM backends.
 **Test status:** CPU fallback: `test_tx` 114/114, `test_ds` 207/207
 
 **Portability:** CUDA kernel structured for SYCL/HIP portability (same warp primitive pattern as PR-STM).
+
+---
+
+## 16a. GUST (Scalable MVCC for GPUs) — CUDA
+
+**Paper:** "GUST: Scalable Multi-Version Concurrency Control for GPUs" (Nunes, Castro, Romano — IST/INESC-ID). MVCC that replaces the CAS-based commit-log append of classic MVCC (JVSTM/CSMV) with an **AtomicINC**, which never fails and scales under massive GPU parallelism.
+
+**Algorithm:** Multi-version OCC with three core structures:
+- **VBox** — per-address Versioned Box: circular array of the most recent committed `(version, value)` pairs, newest at `(head-1)%DEPTH`. `head` is an atomic monotonic append counter. Versions are stored as `CTS+1` (0 = empty sentinel).
+- **GTS** — global timestamp counting *finalized* CL slots (committed or aborted). Transactions snapshot it at begin → `startTS`.
+- **CL** — bounded circular Commit Log. Each update transaction reserves a slot (its commit timestamp CTS) via `AtomicINC` on a global `writePtr` and records its write-set there for validation.
+
+### Transaction Protocol
+
+| Phase | Action |
+|-------|--------|
+| **Begin** | Snapshot GTS → `startTS`. |
+| **Read** | Walk VBox history for newest version ≤ `startTS` (snapshot threshold is `startTS`, matching finalized-slot semantics). Record in read-set. |
+| **Write** | Buffer in private write-set. |
+| **Pre-validate** | Intra-warp conflicts via `__ballot_sync`: if a lower lane touches an address this lane writes, the higher lane aborts early. |
+| **CL Insertion** | Warp leader `AtomicINC`s `writePtr` by WARP_SIZE, broadcasts base; CTS = base + lane. Each lane writes state + write-set into `CL[CTS % CL_SIZE]` + `__threadfence()`. |
+| **Validate** | Hybrid **CCT + MRV**: scan `valPtr` from CTS-1 downward. For `valPtr ≥ GTS` (may be in-flight) do CCT — compare read-set against the CL write-set (skip aborted). Once `valPtr < GTS` all earlier slots are finalized, so do MRV — abort if any read VBox holds a version newer than `startTS`. |
+| **Write-back** | Append new versions to VBoxes (parallel), then leader waits until `GTS == base` and advances GTS by WARP_SIZE (batch publication). |
+
+### Key design notes
+- **AtomicINC instead of CAS**: the paper measures ~100× more concurrent AtomicINCs than CASes at 8960 threads on an RTX 6000 Ada.
+- **Aborted transactions still consume slots** and advance GTS — required for the MRV threshold.
+- **Snapshot threshold `startTS`** (not `startTS+1`): GTS is a *count* of finalized slots, so a writer with `CTS=c` is visible iff `c < startTS`; using `+1` would let an in-flight writer slip into the snapshot.
+
+### Files
+- `gpu/backends/gpu_gust/include/gpu_gust_api.h` — VBox/CL structs + host TM API
+- `gpu/backends/gpu_gust/cuda/gpu_gust_kernel.cuh` — single-pass warp-cooperative kernel (read→write→prevalidate→CL insert→CCT/MRV validate→write-back→batch publish)
+- `gpu/backends/gpu_gust/cuda/gpu_gust_host.cpp` — host TM hooks (g++/hipcc compatible, `TM_GPU_USE_HIP` portable)
+- `gpu/backends/gpu_gust/cuda/gpu_gust_runtime.cu` — kernel launch wrapper
+- `gpu/backends/gpu_gust/cuda/gpu_gust_batch_executor.cuh` / `.cu` — reusable warp-batch executor: one transaction per lane, full commit protocol (CL AtomicINC insert, CCT+MRV validate, full-warp batch publish) as device functions usable by arbitrary benchmark bodies via `gust_tx_body_t`
+- `gpu/backends/gpu_gust/cuda/gpu_gust_smoke.cu` — smoke test for the batch executor (transfers + money conservation)
+- `gpu/benchmarks/gpu_bank.cu` — RQ1/RQ2 bank (read-mostly + transfer with RO ratio, hosted seeding, money-conservation verify)
+- `gpu/benchmarks/gpu_ycsb_gust.cu` — YCSB-style workload (invariant `final_sum == committed_writes`)
+- `gpu/benchmarks/gpu_memcached_gust.cu` — memcached-style set/get workload (payload = key+1 verify)
+- `gpu/backends/gpu_gust/README.md` — algorithm + fidelity notes
+- `docs/proofs/GPU_GUST.tla` — PlusCal model (warp-as-process, AtomicINC CL, hybrid CCT+MRV)
+
+**Build:** requires `nvcc` (CUDA) or `hipcc` (HIP); not compiled locally (no GPU toolchain on this machine). Benchmark targets in `gpu/benchmarks/Makefile` (`gpu_bank`, `gpu_ycsb_gust`, `gpu_memcached_gust`, `gpu_gust_smoke`).
+
+**GUST batch-executor notes** (differences from the single-pass microbenchmark kernel):
+- Batch sizes must be multiples of 32 — GTS publication advances by one full warp.
+- Per-lane tx bodies may write different numbers of addresses; every `__ballot_sync` in pre-validation must have a uniform trip count, so the warp-max write count is reduced first via `__shfl_down_sync`.
+- `abort()` is used to reject non-multiple-of-32 batch launches (programming error, not data).
+
+**Test status:** TLA+ model: `MaxCommits=1` config 1.9M states PASS; `MaxCommits=2` full config runs large (13M+ distinct states, no violations found). No GPU smoke test yet (no GPU).
+
+**Portability:** same `tm_gpu_platform.hpp` CUDA/HIP layer as PR-STM; all `__ballot_sync` calls are outside lane-guarded blocks (AMD-safe).
 
 ---
 
@@ -399,9 +452,11 @@ The two-phase overhead (2× execution) is acceptable in async/queue settings whe
 - Single-word CAS for lock acquire — no retry limits (assumes forward progress)
 - Test status: TBD
 
-## 19. EPCC (Epic-inspired Priority Concurrency Control)
+## 19. GPUTX (GPUTx-style Priority Concurrency Control)
 
 **Algorithm:** CPU adaptation of the GPU GPUTx rank-based priority scheme. GPUTx assigns each transaction a dynamic rank using atomicMax during pre-computation, then executes transactions in rank order on the GPU. On CPU, conflicts are resolved by priority: each transaction has a rank = (retries << 48) | timestamp. Higher retry count = higher priority (age-based escalation). When two transactions contend on a write lock, the lower-ranked transaction aborts.
+
+> Naming note: this backend is **GPUTx-style**, NOT the OSDI'24 "Epic" system. Epic is a deterministic multi-versioned GPU OLTP database (batched execution, no rollback conflicts); GPUTx uses rank-based priority resolution. Do not confuse the two.
 
 **Key differences from GPU original:**
 - No GPU pre-computation phase (ranks are assigned at begin())
@@ -410,7 +465,8 @@ The two-phase overhead (2× execution) is acceptable in async/queue settings whe
 - Reads are lock-free; writes acquire priority-respecting exclusive locks
 
 **Key files:**
-- `backends/tm_impl/epcc/epcc_runtime.cpp` — 280 lines, priority locks + rank system + hook table
+- `backends/tm_impl/gputx/gputx_runtime.cpp` — 280 lines, priority locks + rank system + hook table
+- `gpu/backends/gpu_gputx/` — GPU version of the same priority scheme (kernels)
 
 **Notes:**
 - Write lock: CAS with priority check. If lock held by lower rank, higher-rank tx spins briefly then retries; lower-rank tx aborts on finding higher rank holder.
@@ -418,6 +474,51 @@ The two-phase overhead (2× execution) is acceptable in async/queue settings whe
 - Priority aging: g_retries is a counter that increases on each abort, making high-abort transactions eventually win all conflicts
 - The priority scheme provides starvation freedom without explicit fairness mechanisms
 - Test status: TBD
+
+---
+
+## 20. MVLog (Multi-Version Commit-Log STM)
+
+**Algorithm:** A commit-log STM where every transaction negotiates its **commit position at `tm_begin()`** via one `fetch_add` on a global next-slot counter (`g_next`). The log is a single ever-growing append-only array of write-sets (like SPHT's PCL, but global and versioned). Per-address `index` entries point at the newest committed writer slot, and a **Bloom filter** (`g_dirty`, no false negatives) makes the read fast path a plain memory access.
+
+**Design status:** implemented in C++ (`backends/tm_impl/mvlog/`) and Rust (`runtime/mvlog/`); verified in TLA+ (safety) and against the test suite (`test_tx` 114/114, `test_ds` 207/207, fuzz_counter/fuzz_bank multi-thread PASS).
+
+**Design sketch:**
+- `tm_begin`: `slot = g_next.fetch_add(1)`; `g_log[slot].state = PROGRESS`.
+- `tm_read(addr)`: own write-set first; on Bloom **miss** → return `g_mem[addr]` exactly (no log walk); on **hit** → look up `g_index[addr]` → newest committed writer slot `< slot` → read value from its log write-set; record `<<addr, v>>` in read-set.
+- `tm_write(addr, v)`: buffer in write-set only (no log/validation work).
+- `tm_commit`: wait until every slot `< slot` is COMMITTED/ABORTED (predecessor quiescence); acquire the **commit lock** (makes validate → publish atomic, as in the TLA+ model's single-action commit); value-validate the read-set against `ReadValue(a, slot)`; publish `(COMMITTED, ws)` + write-through to `g_mem` (so `peek()`/direct reads see committed values) + update `index` + insert addresses into `g_dirty`; reclaim the prefix `[g_wm, slot)` when the window exceeds `kReclaimThreshold` (fold into `g_mem`, advance `g_wm`, clear `g_dirty` with release/acquire fences).
+- `tm_abort`: slot stays PROGRESS; the retry's `begin()` resolves it as ABORTED before re-claiming.
+
+**Correctness lemma:** no slot `U > S` can commit while `S` is in flight, so a reader at slot `S` always snoops a committed prefix `< S`; the slot-wait graph is acyclic (no deadlock). Read-only transactions **must** validate (read-skew is possible without it). Bloom false positives are harmless (they just take the slow path); false negatives are impossible.
+
+**Related work:** write-set logging (SPHT), ordered commit logs (RingSTM, LSA), value validation vs. global clock (TL2, NOrec-BF).
+
+**Implementation notes:**
+- **Write-through on commit** (not just at reclamation): `peek()`-style direct memory reads expect `g_mem` to hold the newest committed value; reclamation alone (every 2^14 slots) would leave them stale.
+- **Commit lock**: the C++ commit serializes validate → publish with a spinlock (`g_commit_lock`), implementing the TLA+ model's single atomic commit action. Without it, a higher-slot writer committing between a transaction's validation and publish produces lost updates (observed in fuzz_counter/fuzz_bank).
+- **Tagged ring slots**: each log slot carries a monotonically increasing `tag` so readers can detect ring recycling; the Phase-1 predecessor wait treats any non-PROGRESS state (FREE/resolved) as done.
+- Ring: 2^17 slots (kMaxInlineWs=8 inline writes, overflow boxed vector); index: 2^20 buckets; Bloom: `stm::BloomFilter<64>` (no false negatives).
+
+**Verification (C++, M1 Pro, `bank -d 2000 -a 512 -t 4`):**
+| Workload | MVLog | NOrec | NOrec-BF |
+|----------|-------|-------|----------|
+| read-mostly (`-r 90`) | 108,552 | 109,412 | 110,040 |
+| write-heavy (`-r 0`) | 275,141 | 286,025 | 284,632 |
+| 8-thread mixed (`-t 8 -a 1024 -r 50`) | 42,123 | 39,401 | — |
+
+MVLog is within ~1–4% of NOrec across workloads (commit lock + slot-claim overhead), and matches/edges NOrec at higher thread counts.
+
+**Open questions:** NVM/group-commit (SPHT-style), snapshot read-only transactions, epochs to amortize the predecessor spin, skip-list watermark to bound head-of-line blocking, and full reclamation modeling (the current TLA+ model abstracts reclamation).
+
+**Key files:**
+- `backends/tm_impl/mvlog/MVLog.hpp` — algorithm (ring log, index, Bloom fast path, commit lock, reclaim, typed wrappers)
+- `backends/tm_impl/mvlog/MVLog_globals.hpp` — global definitions
+- `backends/tm_impl/mvlog/MVLog_runtime.cpp` — hook registration + LLVM_TM_PLUGIN guards
+- `backends/tm_impl/mvlog/Implementation_notes.md` — full design (protocol, lemma, reclamation, related work)
+- `expli_instr/rust/workspace/runtime/mvlog/` — Rust port (same algorithm, `TmxAbort` panic-based retry)
+- `docs/proofs/MVLog.tla` — PlusCal model + TLA+ translation
+- `docs/proofs/MVLog.cfg`, `MVLog-liveness.cfg` — TLC configs
 
 ---
 
@@ -473,12 +574,17 @@ All 19 backends have TLA+ specifications under `docs/proofs/`:
 | SPHT | 34K+ | PASS | FAIL (starvation) | Done |
 | NVHTM | 716K | PASS | PASS | Done |
 | DUDETM | 716K | PASS | FAIL (starvation) | Done |
-| GPU_PRIORITY_STM | 13 | PASS | — | — |
+| GPU_PR_STM | 13 | PASS | — | — |
+| GPU_JVSTM | 42M | PASS | — | Done |
+| GPU_GUST | 1.9M+ | PASS | — | Done |
 | **CSMV** | TBD | TBD (4 invariants) | TBD | Done |
 | TiKV | bounded | PASS | FAIL (starvation) | Done |
 | DSGL | — | PASS | FAIL (deadlock) | — |
 | TSXSim | — | PASS | N/A | — |
 | DESEngine | sequential | PASS | FAIL (starvation) | Done |
+| **MVLog** | 329K | PASS | FAIL (starvation)¹ | Done |
+
+¹ Known false-negative: a transaction may spin forever in `L_active` doing read/write steps (each satisfies weak fairness over the process disjunction) without committing — same result as JVSTM/SPHT/DUDETM. Safety (incl. the key `CommittedReadsConsistent` opacity invariant) passes.
 
 ---
 
@@ -499,6 +605,7 @@ The Rust workspace in `expli_instr/rust/workspace/` implements the same algorith
 | XTM | `runtime/xtm` | Version-table OCC (note: not XTM algorithm) |
 | TiKV | `runtime/tikv` | Distributed TM via tikv-client |
 | TSXSim | `runtime/tsx_sim` | TSX simulation model |
+| MVLog | `runtime/mvlog` | Multi-version commit-log STM (ring log + index + Bloom) |
 
 ---
 
@@ -522,6 +629,7 @@ The Rust workspace in `expli_instr/rust/workspace/` implements the same algorith
 | DUDETM | 114/114 | 207/207 | PASS | PASS | — | — |
 | GPU_STM_CPU | 114/114 | 207/207 | PASS** | — | — | — |
 | **CSMV_CPU** | 114/114 | 207/207 | TBD | — | — | — |
+| MVLog | 114/114 | 207/207 | PASS | PASS | — | — |
 | TIKV | — | — | PASS | — | — | — |
 
 *\*NOrec plugin mode has bypass bug (see §3). PLAIN mode (not plugin) passes all tests.*\

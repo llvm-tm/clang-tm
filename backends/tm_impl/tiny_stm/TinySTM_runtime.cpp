@@ -16,7 +16,6 @@ int tm_serialize_unlock_all();
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <execinfo.h>
 #include <mutex>
 #include <new>
 #include <pthread.h>
@@ -28,6 +27,7 @@ int tm_serialize_unlock_all();
 #include "tm_alloc_overrides.hpp"
 #include "tm_thread_state.hpp"
 #include "tm_hooks.hpp"
+#include "tm_platform.hpp" // stm::tm_backtrace_print (portable, musl-safe)
 
 // Shared TLS variables (defined in tm_hooks.cpp, used by all backends)
 extern "C" {
@@ -407,20 +407,29 @@ static void real_tm_free(void *ptr)
 {
 	if (!ptr) return;
 	if (g_in_tx) {
-		if (g_deferred_frees_set.count(ptr)) {
-			fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
-			void *buf[64];
-			int n = backtrace(buf, 64);
-			backtrace_symbols_fd(buf, n, 2);
-			fflush(stderr);
-			_exit(1);
+		// Only track deferred frees for addresses in the TM region.
+		// The region allocator reuses addresses across transactions;
+		// checking g_deferred_frees_set for non-TM addresses causes
+		// false-positive "double-free" when the same address is
+		// legitimately reused (e.g. rbtree duplicate key path).
+		if (stm::isTMAddress(ptr)) {
+			if (g_deferred_frees_set.count(ptr)) {
+				fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
+				stm::tm_backtrace_print(2);
+				fflush(stderr);
+				_exit(1);
+			}
+			tm_untrack_spec_alloc(ptr);
+			g_deferred_frees_set.insert(ptr);
+			auto *node = static_cast<FreeNode *>(std::malloc(sizeof(FreeNode)));
+			node->ptr = ptr;
+			node->next = g_deferred_frees;
+			g_deferred_frees = node;
+		} else {
+			// Non-TM address (e.g. regular heap from ::operator new);
+			// just delete directly without deferred tracking.
+			::operator delete(ptr);
 		}
-		tm_untrack_spec_alloc(ptr);
-		g_deferred_frees_set.insert(ptr);
-		auto *node = static_cast<FreeNode *>(std::malloc(sizeof(FreeNode)));
-		node->ptr = ptr;
-		node->next = g_deferred_frees;
-		g_deferred_frees = node;
 	} else {
 		if (stm::isTMAddress(ptr))
 			stm::tm_region_free(ptr);

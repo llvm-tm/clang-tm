@@ -153,7 +153,8 @@ bool conflict = (read_set_overlap(&mine, &yours, lane));
 uint32_t mask = __ballot_sync(0xffffffffu, conflict);
 if (lane == 0) {
     int aborted = __popc(mask);      /* lanes that lost the vote */
-    if (aborted == WARP_SIZE) { /* deadlock-free: nobody can proceed */ }
+    if (aborted == WARP_SIZE)
+        *retry_budget -= 1;          /* all lost: fall back or back off */
 }
 \end{lstlisting}
 
@@ -368,9 +369,11 @@ TM becomes a hard bottleneck:
     \item \textbf{No commit locks.} A global commit lock that serialises
           commits (as in TL2 \cite{dice06tl2}) or any CAS-based append to a
           shared structure leads to one winner and thousands of spinning
-          losers. GUST reports that an AtomicINC-based commit-log append
-          sustains roughly \textbf{100$\times$ more concurrent commits} than
-          a CAS-based append at RTX~6000 scale \cite{nunes23gust}. The design
+          losers. GUST reports that, at 8960 threads on an RTX~6000~Ada,
+          the hardware sustains roughly \textbf{100$\times$ more concurrent
+          AtomicINCs than CASes} \cite{nunes23gust} --- an atomic-append
+          throughput comparison, not a commit-rate measurement, but it is
+          exactly the operation a commit-log append performs. The design
           rule: commit-slot allocation must be \emph{never-failing}
           (AtomicINC), not \emph{contended} (CAS).
     \item \textbf{Validation cost is a sum, not a constant.} Commit-time
@@ -415,9 +418,10 @@ int base = atomicAdd(&g_next, WARP_SIZE);   /* no retry, no loop */
     \item Both allocate \texttt{WARP\_SIZE} contiguous slots; the CAS version
           makes concurrent warps contend for the \emph{right} to allocate,
           the AtomicINC version lets them all allocate and sort it out later.
-    \item GUST reports this single choice sustains roughly $100\times$ more
-          concurrent commits than a CAS append at RTX~6000 scale
-          \cite{nunes23gust} --- the ``no commit locks'' bullet quantified.
+    \item GUST reports the underlying hardware asymmetry quantified:
+          roughly $100\times$ more concurrent AtomicINCs than CASes at
+          8960 threads (RTX~6000~Ada) \cite{nunes23gust} --- the ``no
+          commit locks'' bullet, measured.
     \item The \texttt{base} value is the warp's commit timestamp; lane
           \texttt{l} owns slot \texttt{base + l}, exactly the GUST batch
           publication of Section~\ref{sec:gust}.
@@ -453,11 +457,14 @@ Read-only transactions never abort, matching the JVSTM and CSMV design point. \\
 
 Table~\ref{tab:gpu-tm} summarises the main published designs, both the
 simulated hardware proposals and the software systems that run on real
-silicon. All of the software rows are realised, at some level, in the
+silicon. Three of the software rows are realised, at some level, in the
 backends accompanying this book: PR-STM in
 \texttt{backends\slash{}tm\_impl\slash{}gpu\_stm}, CSMV in \texttt{backends\slash{}tm\_impl\slash{}csmv},
-GPUTX in \texttt{backends\slash{}tm\_impl\slash{}gputx}, and GUST in
-\texttt{gpu\slash{}backends\slash{}gpu\_gust}.
+and GUST in \texttt{gpu\slash{}backends\slash{}gpu\_gust}. The repository
+additionally implements GPUTX
+(\texttt{backends\slash{}tm\_impl\slash{}gputx}), which is not a table row;
+the remaining literature rows (GPU-STM, the Holey--Zhai lightweight STMs,
+OFG-STM) have no companion implementation.
 
 \begin{table}[ht]
 \centering
@@ -549,11 +556,12 @@ textbook version of the CPU STM evolution of Part~IV:
 
 GUST \cite{nunes23gust}, implemented in this project's
 \texttt{gpu/backends/gpu\_gust}, is a multi-version system whose one idea is
-to replace contended commit-time synchronisation with an AtomicINC. Several
-of its design points are worth teaching on their own. It is \emph{one
-design point} in the GPU commit-protocol space, not the canonical answer:
-the rest of the chapter positions it against serial-lock, per-block-log,
-and global-log alternatives (Section ``Commit at GPU Scale''). Several of
+to replace contended commit-time synchronisation with an AtomicINC. It is
+\emph{one design point} in the GPU commit-protocol space, not the canonical
+answer: the rest of the chapter positions it against the global-lock,
+CAS-append, client--server, and read-only MVCC alternatives of
+Table~\ref{tab:gpu-commit-strategies} (Section ``Commit at GPU Scale'').
+Several of
 its design points are worth teaching on their own:
 
 \begin{itemize}
@@ -708,8 +716,8 @@ TypeOK ==
 Because GPU protocols replace hardware guarantees with software discipline,
 they are prime candidates for the model-checking workflow of Part~III. The
 models accompanying this book --- \texttt{GPU\_PR\_STM.tla},
-\texttt{GPU\_SIMT.tla}, \texttt{GPU\_JVSTM.tla}, \texttt{GPU\_GUST.tla} ---
-make the warp the unit of concurrency and encode the SIMT lock step as a
+\texttt{GPU\_SIMT.tla}, \texttt{GPU\_JVSTM.tla}, \texttt{GPU\_CSMV.tla},
+\texttt{GPU\_GUST.tla} --- make the warp the unit of concurrency and encode the SIMT lock step as a
 shared warp \texttt{phase} with per-thread arrays and an \texttt{activeMask}
 to express divergence:
 
@@ -734,12 +742,16 @@ to express divergence:
 TLC has checked tens of millions of states across these models with no
 violations: the GUST model ran 1.9M states on the small configuration (0
 errors) and over 25M on the large one without violations before timing out.
-The models caught real bugs --- the \texttt{startTS} vs.\
-\texttt{startTS+1} snapshot hole of Section~\ref{sec:gust} (found first in
-the model, then confirmed in the kernel) and, more fundamentally, the
-\texttt{\_\_ballot\_sync} divergence class of Section~\ref{sec:ballot}. The
-two tools worked as a pair: TLA+ says \emph{what} must be true; the ballot
-contract says \emph{how} the hardware will let you express it.
+The models caught real bugs --- most notably the \texttt{startTS} vs.\
+\texttt{startTS+1} snapshot hole of Section~\ref{sec:gust}, found first in
+the model (via \texttt{InvNoMissedConflict}) and then confirmed in the
+kernel. The \texttt{\_\_ballot\_sync} divergence class of
+Section~\ref{sec:ballot}, by contrast, was caught by on-target testing and
+review, not by the models: the all-lanes ballot contract is a hardware
+convention that sits below the models' abstraction, and no amount of TLC
+state exploration would have found it. That division of labour is the
+lesson: TLA+ says \emph{what} must be true; only the hardware says
+\emph{how} it will let you express it.
 
 \section{Summary}
 
@@ -765,25 +777,25 @@ contract says \emph{how} the hardware will let you express it.
 
 \section{Exercises}
 \begin{enumerate}
-    \item A warp of 32 lanes runs a transaction that spins on a lock held by
+    \item \emph{[theory]} A warp of 32 lanes runs a transaction that spins on a lock held by
           another lane of the same warp. Explain on which hardware this
           deadlocks and why. How does PR-STM's priority stealing turn the same
           situation into progress?
-    \item GPU-STM sorts locks to avoid deadlock while PR-STM steals locks by
+    \item \emph{[theory]} GPU-STM sorts locks to avoid deadlock while PR-STM steals locks by
           priority. Contrast the two contention policies under (a) uniformly
           random and (b) skewed (hot-spot) access patterns.
-    \item GUST uses \texttt{snapshot = startTS}, not \texttt{startTS + 1}.
+    \item \emph{[theory]} GUST uses \texttt{snapshot = startTS}, not \texttt{startTS + 1}.
           Construct a two-transaction history where the $+1$ variant lets an
           in-flight writer's version appear in a reader's snapshot, and
           explain why neither CCT nor MRV catches it.
-    \item Using the ballot pattern of Section~\ref{sec:ballot}, compute the
+    \item \emph{[theory]} Using the ballot pattern of Section~\ref{sec:ballot}, compute the
           number of aborted lanes in a warp via \texttt{\_\_popc} on the
           ballot result, and explain why the ballot cannot be moved inside a
           lane-guarded branch.
-    \item CSMV dedicates server warps to committing client warps' writes.
+    \item \emph{[theory]} CSMV dedicates server warps to committing client warps' writes.
           Identify the serialisation point this creates, and propose how a
           workload dominated by read-only transactions could bypass it.
-    \item Using the TLA+ workflow of Part~III, sketch an invariant for a
+    \item \emph{[verification]} Using the TLA+ workflow of Part~III, sketch an invariant for a
           warp-level commit log that would have caught the GUST snapshot bug.
           What bounds would you impose to keep TLC tractable?
 \item \emph{[implementation]} Extend the kernel in Section~\ref{sec:gpu-bank-transfer-example} with a bounded per-lane retry counter. The retry loop must not contain a ballot whose trip count differs by lane. Report, for a fixed input batch, the number of commits, aborts, and transactions that exceeded the retry bound.

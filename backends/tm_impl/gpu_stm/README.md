@@ -40,7 +40,7 @@ PR-STM (Priority Rule STM for GPUs, Shen et al. 2015):
 - **Warp-level abort**: if any lane detects conflict, entire warp aborts together
 - **Encounter-time lock sorting**: prevent deadlock within warp writes
 
-### Transaction phases (matched to PlusCal model in docs/proofs/GPU_PRIORITY_STM.tla)
+### Transaction phases (matched to PlusCal model in docs/proofs/GPU_PR_STM.tla)
 
 ```
 L_begin:   snapshot global clock, clear read/write sets
@@ -153,7 +153,7 @@ make -j$(nproc) pr_stm_backend
 | File | Description |
 |------|-------------|
 | `include/gpu_stm_api.h` | Public C API (TMRealHooks-compatible) |
-| `cuda/pr_stm_kernel.cuh` | CUDA kernel: PR-STM warp-level algorithm |
-| `cuda/pr_stm_runtime.cu` | Host runtime: CUDA device management, kernel launch |
+| `gpu/backends/gpu_stm/pr_stm_kernel.cuh` | CUDA kernel: PR-STM warp-level algorithm |
+| `gpu/backends/gpu_stm/pr_stm_runtime.cu` | Host runtime: CUDA device management, kernel launch |
 | `cpu/pr_stm_cpu.cpp` | CPU fallback: std::thread-based PR-STM emulation |
 | `CMakeLists.txt` | CUDA-enabled CMake build |

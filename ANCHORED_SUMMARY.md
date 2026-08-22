@@ -18,7 +18,7 @@ A multi-paradigm C++ transactional memory framework (LLVM plugin, explicit C++ A
 - ✓ **rbtree benchmark bugs fixed** — sentinel UB, insert duplicate, pool bounds checks
 - ✓ **bank benchmarked on all 3 pipelines** — Queue pipeline 27–37% faster, 62% fewer aborts
 - ✓ **GPU_STM_CPU backend (PR-STM)**: new priority-based OCC backend with shared lock table + global clock. `test_tx` 114/114, `test_ds` 207/207. TLA+ model verified (13 states, all invariants PASS).
-- ✓ **GPU_PRIORITY_STM TLA+ model** (`docs/proofs/GPU_PRIORITY_STM.tla`): warp-cooperative TM with per-warp commit counter, `InvCommitBudget` invariant
+- ✓ **GPU_PR_STM TLA+ model** (`docs/proofs/GPU_PR_STM.tla`): warp-cooperative TM with per-warp commit counter, `InvCommitBudget` invariant
 - ✓ **CMake integration**: `BUILD_GPU_STM`/`GPU_STM_CPU_FALLBACK` options, `add_subdirectory(gpu_stm)`, LLVM 22→22.1 version fix
 - ✓ **PR-STM correctness fixes**: write-back phase, read-own-writes, find_write backwards, lock spin-loop, priority comparison, `__ATOMIC_ACQUIRE` semantics
 - ✓ **Linkage bug fix**: Added `extern "C"` to lifecycle functions in non-plugin paths
@@ -70,10 +70,10 @@ A multi-paradigm C++ transactional memory framework (LLVM plugin, explicit C++ A
 - **`backends/tm_impl/gpu_stm/include/gpu_stm_api.h`** — PR-STM lock word encoding
 - **`backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`** — CSMV CPU fallback (MV-STM, reads never abort)
 - **`backends/tm_impl/csmv/include/csmv_api.h`** — CSMV version node + object entry structures
-- **`backends/tm_impl/csmv/gpu/csmv_kernel.cu`** — CSMV CUDA kernel (warp-cooperative traversal)
+- **`gpu/backends/csmv/csmv_kernel.cu`** — CSMV CUDA kernel (warp-cooperative traversal)
 - **`backends/tm_impl/csmv/CMakeLists.txt`** — CSMV CMake build (CSMV_CPU_FALLBACK / BUILD_CSMV)
 - **`docs/proofs/CSMV.tla`** — PlusCal model with ReadConsistencyOK + VersionChainMonotonicOK invariants
-- **`docs/proofs/GPU_PRIORITY_STM.tla`** — TLA+ model for PR-STM
+- **`docs/proofs/GPU_PR_STM.tla`** — TLA+ model for PR-STM
 - **`docs/IMPLEMENTATIONS.md`** — Comprehensive backend reference (17 backends)
 - **`backends/tm_impl/tiny_stm/TinySTM_runtime.cpp`** — Reference backend (extern "C" wrapping pattern)
 - **`backends/tm_impl/common/tm_hooks.hpp`** — TMRealHooks registration system

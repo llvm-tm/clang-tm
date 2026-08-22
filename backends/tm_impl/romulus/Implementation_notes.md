@@ -1,102 +1,72 @@
-# Implementation Notes: Romulus
+# Implementation Notes: Romulus (version-table OCC)
+
+## Naming caution
+
+Despite the directory name, this backend is **not** the persistent Romulus of
+Correia, Felber, and Ramalhete (SPAA 2018), "Romulus: Efficient Algorithms for
+Persistent Transactional Memory". That paper describes persistent objects with
+copy-on-write roots and a recovery sweep; this backend is a **volatile,
+shared-memory, version-table OCC** design that merely borrows the name. See
+`docs/book` Chapter 18 for the disambiguation.
 
 ## Overview
 
-**Romulus** (RObust Multi-version Lock-Free Solution) is a practical implementation of Left-Right Synchronization designed for shared-memory multiprocessor systems. It addresses the challenge of coordinating concurrent transactions without traditional locking.
+A single-global-clock OCC STM:
 
-## Key Design Principles
+- Writes are buffered in a per-transaction write-set (no in-place mutation,
+  no undo log).
+- Reads go through a **version table** and a read-set with read-validate.
+- Commits serialize on one spinlock, write back, then publish new versions.
 
-### 1. Lock-Free Coordination
+## Core data structures
 
-Romulus uses **atomic operations** (CAS - Compare-And-Swap) instead of traditional locks to avoid:
-- Lock contention
-- Deadlock
-- Priority inversion
+| Structure | Purpose |
+|-----------|---------|
+| `g_version_table[]` | 2^20 entries of `atomic<uint64_t>`, indexed by `(addr >> 3) & mask`. Independent of data addresses — the table is *not* overlaid on user memory. |
+| `g_commit_lock` | Spinlock serializing the commit path. |
+| Per-tx read/write sets | Write-set buffers values; read-set records `(addr, observed_version)`. |
 
-### 2. Multi-Versioning
+## Protocol
 
-Multiple versions of shared data structures allow concurrent reads without blocking writes.
+### Begin
 
-### 3. Bipartite Execution
+Copy the global clock into `tx->timestamp` (the snapshot version).
 
-Each transaction goes through two phases:
-- **Phase L (Left)**: Read and validate
-- **Phase R (Right)**: Write and commit
+### Read (`read_word`) — read-validate
 
-### 4. Timestamp-Based Ordering
+1. Look up the local write-set first (read-own-writes).
+2. Load the version-table entry **before** reading data; abort if the lock
+   bit is set.
+3. Read the value from memory.
+4. Re-load the entry **after** the read; abort if it changed (version bump or
+   lock acquisition during the read).
 
-Each transaction receives a unique timestamp to establish a total ordering.
+The re-check closes the classic OCC hole: without it, a concurrent commit's
+write-back can land between the version check and the data load, and the
+reader silently assembles an inconsistent snapshot that end-of-transaction
+validation cannot detect (this was a real multi-threaded bank failure,
+fixed 2026-06-15).
 
-## Architecture
+### Commit
 
-### Transaction Structure
+1. Validate: every read-set address's current version ≤ `tx->timestamp`.
+2. Acquire `g_commit_lock`; re-validate (writers serialize here).
+3. Increment the global clock → `commit_ts`.
+4. Write back the whole write-set.
+5. Fence.
+6. Store `make_version_entry(commit_ts)` into each written address's table
+   entry.
+7. Release the lock.
 
-```c
-struct Transaction {
-    uint64_t timestamp;      // Global ordering
-    uint64_t left_id;        // Left phase ID
-    uint64_t right_id;       // Right phase ID
-    bool committed;
-    // ... other fields
-};
-```
+## Verification status
 
-### Shared Memory Layout
-
-```
-┌─────────────────────────────────────────────────────┐
-│                    Shared Memory                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐ │
-│  │Version 1    │  │Version 2    │  │Version 3    │ │
-│  │  (Read Only)│  │  (Read Only)│  │  (Read Only)│ │
-│  └─────────────┘  └─────────────┘  └─────────────┘ │
-└─────────────────────────────────────────────────────┘
-             ▲                ▲
-             │                │
-       ┌─────┴─────┐    ┌─────┴─────┐
-       │  Left     │    │  Right    │
-       │  Phase    │    │  Phase    │
-       └───────────┘    └───────────┘
-```
-
-## Synchronization Mechanism
-
-### Coordination Buffer
-
-```
-┌─────────────────────────────────────────────────────┐
-│              Coordination Buffer                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐ │
-│  │  Left Queue │  │  Right Q.   │  │  Commit Q.  │ │
-│  └─────────────┘  └─────────────┘  └─────────────┘ │
-└─────────────────────────────────────────────────────┘
-```
-
-### Key Operations
-
-1. **Transaction Creation**: Allocate and initialize a new transaction with a unique timestamp
-2. **Left Phase Execution**: Read data, validate dependencies, prepare for commit
-3. **Right Phase Execution**: Write changes, validate write-set, commit
-
-## Advantages
-
-1. **High Scalability**: No lock contention
-2. **No Deadlocks**: Lock-free by design
-3. **Strong Consistency**: Total ordering guarantees
-4. **Multi-Version Support**: Allows concurrent reads and writes
+- `test_tx`: 114/114 PASS
+- `test_ds`: 207/207 PASS
+- `bank -t 4 -d 500 -a 128`: money conserved (after the read-validate fix)
 
 ## Trade-offs
 
-- **Memory Overhead**: Multiple versions of data
-- **Complexity**: More sophisticated than simple locking
-- **Latency**: May have higher latency than pessimistic approaches for write-heavy workloads
-
-## Use Cases
-
-- High-contention transactional memory systems
-- Large-scale parallel computing
-- Systems requiring strong consistency without locks
-
----
-
-*Note: This explanation is based on the general principles of Romulus as described in the referenced paper.*
+- Validation cost grows with read-set size (full re-validation at commit).
+- The commit lock serializes all writers — throughput ceiling under
+  write-heavy contention.
+- No persistence: everything lives in volatile memory.

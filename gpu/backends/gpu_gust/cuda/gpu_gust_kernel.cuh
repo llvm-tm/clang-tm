@@ -64,6 +64,28 @@ inline uint64_t gpu_gust_vbox_read(const GUSTVBox *vb, uint64_t threshold) {
     return 0;
 }
 
+// Newest committed value ≤ threshold (with its version).  Variant of
+// gpu_gust_vbox_read that also returns the payload value, so transaction
+// bodies can do read-modify-write (the batch executor's read phase
+// captures both).  Returns 0 (version 0, value 0) if no such version.
+GPU_GUST_DEVICE
+inline uint64_t gpu_gust_vbox_read_value(const GUSTVBox *vb, uint64_t threshold,
+                                         uint64_t *ver_out, uint32_t *val_out) {
+    uint32_t head = *(volatile uint32_t*)&vb->head;
+    for (int d = 0; d < GPU_GUST_VBOX_DEPTH; d++) {
+        uint32_t slot = (head - 1 - d) & (GPU_GUST_VBOX_DEPTH - 1);
+        uint64_t v = gpu_gust_vbox_version(vb, slot);
+        if (v != 0 && v <= threshold) {
+            *ver_out = v;
+            *val_out = vb->values[slot];
+            return v;
+        }
+    }
+    *ver_out = 0;
+    *val_out = 0;
+    return 0;
+}
+
 // True if any slot holds a committed version newer than `threshold`
 // (used by MRV).  Scans the whole circular buffer for robustness
 // against concurrent out-of-order appends.

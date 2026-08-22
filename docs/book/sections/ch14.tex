@@ -5,6 +5,8 @@ Transactional memory performance is not summarized by a single number. A system 
 
 This chapter gives a compact toolkit for answering that question. We start with metrics, then move to analytical models, measurement hygiene, and worked examples. The running example is again the two-account bank transfer with an account floor and a money-conservation invariant: it is small enough to measure carefully, but rich enough to expose aborts, semantic rejects, validation cost, and serialization.
 
+The companion repository carries this toolkit as code, and the exercises refer to it. Real-hardware costs come from RDTSC-instrumented profiling patches (\texttt{patches/profile/tsx/} measures XBEGIN/XEND/abort cycle costs of the TSX-SGL backend on Broadwell-EP); they are packaged as portable \emph{machine profiles} (\texttt{machine\_profiles/broadwell\_ep\_v4.json}, \texttt{skylake.json}); and the discrete-event simulators (\texttt{simulator/}, binaries \texttt{tm-des} and \texttt{tm-sim}) replay transaction traces against either the real backend or a calibrated per-event cost model, so a design question can be answered at three fidelities: measured, cycle-accurate simulated (Chapter~16's gem5 flow), and cost-model estimated.
+
 \section{Metrics and Benchmarks}
 
 The primary metric in most transactional-memory experiments is committed throughput: the number of committed transactions per second. It is attractive because it is easy to compare, but it is also easy to misuse. Throughput hides why transactions are slow. A low number may be caused by validation cost, cache-line bouncing, write-set publication, read-set scanning, logging, persistence barriers, scheduler interference, or simply a workload that does little useful parallel work.
@@ -478,6 +480,79 @@ The number is not a proof that aborts are independent. It is a compact way to co
 
 Attempts and commits must be counted at the same semantic boundary; counting inner validation retries in one backend and whole transaction retries in another makes the ratio meaningless. The implied abort probability is a model parameter, not a directly observed fact. Time per attempt is often more revealing than abort rate when comparing read-set validation schemes.
 
+\section{Worked Example: Calibrating a Cost Model from a Machine Profile}
+\index{calibration}\index{machine profile}\index{cost model}\index{Broadwell-EP}
+\label{sec:perf-calibration}
+
+A cost model is only as honest as its constants. The companion keeps those
+constants in \emph{machine profile} files --- JSON records of measured cycle
+costs --- so that the same profile feeds the simulator's cost mode, the DES
+engine, and back-of-envelope arithmetic like this one. Here is the TSX block
+of \texttt{simulator/machine\_profiles/broadwell\_ep\_v4.json}, collected on
+an Xeon E5-2648L v4 (1.8~GHz, RTM available, microcode \texttt{0xb000040})
+with the RDTSC profiling patch of \texttt{patches/profile/tsx}:
+
+\begin{lstlisting}[caption={The measured TSX block of the Broadwell-EP machine profile.}]
+"tsx": {
+    "xbegin_cycles": 60.0,
+    "xend_cycles": 178.0,
+    "xabort_cycles": 1500.0,
+    "read_l1_cycles": 5.0,
+    "write_l1_cycles": 6.0,
+    "mutex_lock_cycles": 75.0,
+    "conflict_abort_penalty": 2500.0,
+    "max_read_lines": 512,
+    "max_write_lines": 128
+}
+\end{lstlisting}
+
+The numbers repay attention. Entering a hardware transaction costs
+$60$ cycles --- thirty L1 reads. Committing costs $178$: the write-back and
+publication protocol is three times the entry cost. A conflict abort costs
+$2500$, fourteen times a commit, because the pipeline flush and retry machinery
+dominate everything else. Now predict the single-thread cost of the two-account
+bank transfer under the TSX fast path: begin ($60$), two L1 reads ($2\times5$),
+two L1 writes ($2\times6$), commit ($178$):
+
+$$
+C_{\mathrm{tx}} = 60 + 2{\cdot}5 + 2{\cdot}6 + 178 = 260\ \mathrm{cycles}
+\;\approx\; 144\ \mathrm{ns} @ 1.8\ \mathrm{GHz},
+$$
+
+a ceiling of roughly $6.9$M committed transfers per second per core --- before
+memory misses, retries, or fallback. Contention enters through the renewal
+argument of \S\ref{sec:math-example}: every attempt pays begin plus body
+($82$ cycles), a success adds $178$, an abort adds $2500$ and forces a full
+retry, so with abort probability $p$ per attempt,
+
+$$
+E[C] \;=\; 260 \;+\; \frac{p}{1-p}\,(82 + 2500).
+$$
+
+At $p=0.05$ the expected cost is ${\approx}396$ cycles ($1.53\times$ the
+contention-free figure); at $p=0.20$ it is ${\approx}906$ cycles
+($3.5\times$). The nonlinearity is the point: each abort does not merely waste
+one attempt's work, it replaces a $178$-cycle commit with a $2500$-cycle
+penalty, which is why abort-rate reductions dominate instruction-count
+optimizations in HTM tuning --- and why the capacity probe of
+\S\ref{sec:htm-capacity-probe} exists.
+
+Two methodological cautions, both learned the hard way in the companion's own
+calibration sessions. First, calibrate against \emph{uninstrumented} runs:
+the event-logging build used to produce traces can be over $100\times$ slower
+than the plain binary, and a cost model fitted to it models the logger, not
+the machine. Second, distinguish measured from estimated constants: in this
+profile the TSX numbers are RDTSC measurements, while the software-backend
+overheads (NOrec begin $25$/commit $60$, TL2 begin $35$/commit $90$) are
+structured estimates --- the JSON's \texttt{description} field says so
+explicitly, and any consumer of the profile should carry the same caveat
+forward. The simulator's \texttt{--machine-profile} and
+\texttt{--clock-mode cost} flags make the contract executable: given a trace
+and this file, it reports estimated wall time, and the gap between that
+estimate and the real run is the residual error of the model, to be attacked
+with the next measurement.
+
+
 \section{Summary}
 
 Performance evaluation of transactional memory requires both analytical models and careful empirical measurement. Throughput is the headline number, but it must be interpreted with aborts, attempts per commit, latency, wasted work, and validation cost.
@@ -513,11 +588,23 @@ The best models are deliberately modest. Little's Law explains concurrency and l
           for TM systems research, or would that raise the bar so high that
           exploratory and negative results stop being published at all?
           State what you think a ``reproducible result'' minimally requires.
+    \item \emph{[implementation]} Using the Broadwell-EP profile of
+          \S\ref{sec:perf-calibration}, extend the retry-cost calculator of
+          \S\ref{sec:perf-example} to read the JSON profile and report the
+          predicted cost per committed transfer at abort probabilities
+          $0.01$, $0.05$, and $0.20$. Then run the companion's bank benchmark
+          on any available backend, compute its measured attempts per commit,
+          and report predicted-versus-measured throughput with the residual
+          attributed (one paragraph) to the costs the TSX block omits.
 \end{enumerate}
 
 \textbf{How to check your work.} The \emph{[implementation]} exercises are
 verified with the companion: extend \S\ref{sec:perf-bank-attempts} for
-per-thread latency samples and a conflict-address histogram.  The
+per-thread latency samples and a conflict-address histogram; Exercise~11 is
+graded on the prediction arithmetic
+($E[C] = 260 + \frac{p}{1-p}\cdot 2582$ cycles from the profile's constants)
+and on an honest residual analysis rather than on matching the measurement.
+The
 \emph{[verification]} exercises are checked with TLC against
 \S\ref{sec:perf-tla-bank} (in-flight bound and one-to-one commit/abort
 accounting; see Appendix~\ref{chap:pluscal-quick-ref}).  The

@@ -90,10 +90,13 @@ void     (*tm_write_f8)(double*, double)      = stub_write_f8;
 void     (*tm_write_ptr)(void**, void*)        = stub_write_ptr;
 #if defined(__APPLE__)
 int      (*tm_sigsetjmp)(void*, int)            = (int(*)(void*, int))sigsetjmp;
-#else
+#elif defined(__GLIBC__)
 // glibc: sigsetjmp is a macro expanding to __sigsetjmp(env, savemask);
 // taking its address requires the underlying function name.
 int      (*tm_sigsetjmp)(void*, int)            = (int(*)(void*, int))__sigsetjmp;
+#else
+// musl and other libcs: sigsetjmp is a real exported function symbol.
+int      (*tm_sigsetjmp)(void*, int)            = (int(*)(void*, int))sigsetjmp;
 #endif
 void    *(*tm_get_env)()                        = stub_tm_get_env;
 void     (*tm_set_jmpbuf)(void*)               = stub_tm_set_jmpbuf;

@@ -1,4 +1,4 @@
---------------------------- MODULE GPU_PRIORITY_STM ---------------------------
+--------------------------- MODULE GPU_PR_STM ---------------------------
 (*
  * GPU PR-STM — PlusCal Specification (TLC-checkable)
  *
@@ -106,7 +106,7 @@ TotalReadsPerWarp  == Cardinality(Thread) * ReadsPerThread
 TotalWritesPerWarp == Cardinality(Thread) * WritesPerThread
 
 (*
---algorithm GPU_PRIORITY_STM
+--algorithm GPU_PR_STM
 
 variables
   \* ── Shared state ──────────────────────────────────────────────

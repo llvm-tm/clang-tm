@@ -1,0 +1,15 @@
+diff --git a/src/arch/x86/isa/decoder/two_byte_opcodes.isa b/src/arch/x86/isa/decoder/two_byte_opcodes.isa
+index e51efa07a0..fefcd3a2c0 100644
+--- a/src/arch/x86/isa/decoder/two_byte_opcodes.isa
++++ b/src/arch/x86/isa/decoder/two_byte_opcodes.isa
+@@ -97,6 +97,10 @@
+                     0x3: decode MODRM_RM {
+                         0x0: xgetbv();
+                         0x1: xsetbv();
++                        // XEND: 0F 01 D5 (mod=3, reg=2, r/m=5)
++                        0x5: XEnd();
++                        // XTEST: 0F 01 D6 (mod=3, reg=2, r/m=6)
++                        0x6: XTest();
+                     }
+                     default: decode MODE_SUBMODE {
+                         0x0: Cpl0Inst::LGDT(M);

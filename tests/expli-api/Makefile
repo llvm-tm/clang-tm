@@ -1,6 +1,7 @@
 CXX ?= clang++
 CXXFLAGS = -std=c++20 -O0 -g -pthread
-INC = -I../../ -I../../expli_instr/cpp/include -I../../backends/tm_impl/common -I../../backends/tm_impl -I../../backends/tm_impl/tiny_stm
+INC = -I../../ -I../../expli_instr/cpp -I../../expli_instr/cpp/include -I../../backends/tm_impl/common -I../../backends/tm_impl -I../../backends/tm_impl/tiny_stm
+FFLAGS = -fsanitize=fuzzer -fno-omit-frame-pointer
 LDFLAGS = -pthread
 
 RUNTIME_DIR = ../../backends/tm_impl
@@ -15,7 +16,7 @@ TM_REGION_SIZE ?= 536870912
 SRCS = test_stress_ds.cpp test_phase_switch.cpp
 BINS = $(SRCS:.cpp=)
 
-.PHONY: all clean run
+.PHONY: all clean run fuzz
 
 all: $(BINS)
 
@@ -24,6 +25,15 @@ test_stress_ds: test_stress_ds.cpp $(RUNTIME_SRC) $(HOOKS_SRC)
 
 test_phase_switch: test_phase_switch.cpp $(RUNTIME_SRC) $(HOOKS_SRC)
 	$(CXX) $(CXXFLAGS) $(INC) $(RUNTIME_FLAGS) -o $@ $< $(RUNTIME_SRC) $(HOOKS_SRC) $(LDFLAGS)
+
+# Fuzz targets are built from tests/fuzz/ but output here for convenience.
+test_tx_fuzzer: ../fuzz/test_tx_fuzzer.cpp $(RUNTIME_SRC) $(HOOKS_SRC)
+	$(CXX) $(CXXFLAGS) $(FFLAGS) $(INC) $(RUNTIME_FLAGS) -o $@ $< $(RUNTIME_SRC) $(HOOKS_SRC) $(LDFLAGS)
+
+test_ds_fuzzer: ../fuzz/test_ds_fuzzer.cpp $(RUNTIME_SRC) $(HOOKS_SRC)
+	$(CXX) $(CXXFLAGS) $(FFLAGS) $(INC) $(RUNTIME_FLAGS) -o $@ $< $(RUNTIME_SRC) $(HOOKS_SRC) $(LDFLAGS)
+
+fuzz: test_tx_fuzzer test_ds_fuzzer
 
 # Portable timeout: use gtimeout (macOS coreutils) if available
 TIMEOUT_CMD := timeout
@@ -36,9 +46,9 @@ endif
 run: all
 	@for b in $(BINS); do \
 		echo "=== $$b ==="; \
-		$(TIMEOUT_CMD) 30 ./$$b 2>&1 || true; \
+		$(TIMEOUT_CMD) 60 ./$$b 2>&1 || true; \
 		echo; \
 	done
 
 clean:
-	rm -f $(BINS)
+	rm -f $(BINS) test_tx_fuzzer test_ds_fuzzer

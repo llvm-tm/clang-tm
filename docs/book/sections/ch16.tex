@@ -64,6 +64,10 @@ The simplest fallback is a global lock: try HTM a few times, then serialize. The
 
 The glibc lock-elision history is the warning sign. Eliding locks transparently is attractive, but the best-effort contract, platform errata, and subtle subscription rules make correctness and long-term maintenance difficult. When lock elision is used, it must be treated as a performance path over an ordinary correct synchronization protocol, not as a replacement for that protocol.
 
+Two further interface details complete the picture. \texttt{XTEST} is the introspection instruction of the x86 TSX family: it returns true when executed inside a transactional region (RTM or HLE) and false otherwise, so that \emph{shared} code --- a lock acquisition, a library call --- can detect that it is running speculatively and adjust, most commonly by making lock operations no-ops inside an enclosing transaction instead of aborting it. Any design that routes hardware and software executions through one function body needs exactly this predicate; the companion's runtimes carry the same idea in software form (\texttt{current\_tx->active}). Second, RTM had a sibling interface: Hardware Lock Elision (HLE) marked ordinary \texttt{LOCK}-prefixed instructions with \texttt{xacquire}/\texttt{xrelease} prefixes and asked the processor to elide the lock speculatively, falling back to the plain locked operation on abort. HLE required no new control flow, which made it attractive to libc implementers --- and precisely because the elision was invisible at the source level, programmers could not add subscription reads, retry budgets, or abort accounting to the elided region. That asymmetry, more than any single erratum, is why HLE aged out of the ecosystem while explicit RTM loops survived in HTM-aware codebases.
+
+The availability reality is the final fact, and it motivates this chapter's simulation section. TSX arrived on Haswell (2013) as RTM plus HLE; early steppings had it disabled by microcode once, and in 2021 Intel again shipped microcode disabling TSX on Haswell, Broadwell, and Skylake-family client parts. Cascade Lake server parts shipped with TSX present but disabled by default (enableable in firmware), while recent client generations removed it outright. AMD has never implemented TSX. Arm's TME was specified but never shipped in a commercial core and was withdrawn from the architecture reference manual in 2025~\cite{arm25tmew} --- removed from LLVM~22, the very toolchain Part~V's plugin builds with. Only IBM POWER continues to expose a coherence-based HTM with a mature interface (\texttt{tbegin.}/\texttt{tend.}/\texttt{tabort.}/\texttt{tsr.}, the TEXASR failure-record register, and rollback-only-transaction state). The practical consequence for this book: on most machines you can buy today, none of Table~\ref{tab:htm-implementations}'s first two rows can be executed at all, which is exactly why \S\ref{sec:htm-simulation} exists --- a simulated ISA keeps the instruction set available regardless of what the host implements, and the companion's RDTSC profiling patch (\texttt{patches/profile/tsx}) preserves measurements from the last widely available RTM parts.
+
 \begin{table}[htbp]
 \centering
 \begin{tabular}{p{0.18\textwidth}p{0.25\textwidth}p{0.25\textwidth}p{0.22\textwidth}}
@@ -71,9 +75,9 @@ The glibc lock-elision history is the warning sign. Eliding locks transparently 
 \textbf{Mechanism} & \textbf{Tracking} & \textbf{Abort sources} & \textbf{Software obligation}\\
 \hline
 Intel RTM & Cache-resident speculative read/write sets; explicit \texttt{\_xbegin}, \texttt{\_xend}, \texttt{\_xabort}. & Conflict, capacity, unsupported instruction, interrupt, page fault, explicit abort. & Always provide a correct fallback; subscribe to fallback lock inside the transaction.\\
-ARM TME & Architectural transaction begin/end with implementation-defined tracking. & Similar best-effort causes; exact diagnostics are implementation-specific. & Same best-effort rule; never assume eventual commit.\\
-IBM POWER HTM & Coherence-based tracking with a mature architectural interface. & Conflict, capacity, non-transactional events, implementation limits. & Use retry budgets and fallback paths; exploit richer platform diagnostics where available.\\
-gem5 Ruby/TME model & Simulated cache hierarchy and coherence protocol. & Observable conflict and capacity behavior under controlled cache parameters. & Use simulation to separate effects that hardware counters collapse.\\
+ARM TME & Architectural transaction begin/end (\texttt{TSTART}/\allowbreak\texttt{TCOMMIT}/\allowbreak\texttt{TCANCEL}/\allowbreak\texttt{TTEST}) with implementation-defined tracking. & Similar best-effort causes; exact diagnostics are implementation-specific. & Same best-effort rule; never assume eventual commit. \emph{TME never shipped in a commercial core and was withdrawn from the Arm ARM in 2025~\cite{arm25tmew}; it is studied here as a design point, not a shipping ISA.}\\
+IBM POWER HTM & Coherence-based tracking with a mature architectural interface (\texttt{tbegin.}/\allowbreak\texttt{tend.}/\allowbreak\texttt{tabort.}/\allowbreak\texttt{tsr.}, TEXASR failure recording, ROT). & Conflict, capacity, non-transactional events, implementation limits. & Use retry budgets and fallback paths; exploit richer platform diagnostics where available.\\
+gem5 Ruby/HTM model & Simulated cache hierarchy and coherence protocol (\texttt{MESI\_Three\_Level\_HTM}); ISA-agnostic HTM sequencer with calibrated begin/commit latencies. & Commit path is modeled faithfully; conflict/capacity abort wiring is ISA-dependent and incomplete for x86 TSX (see \S\ref{sec:htm-simulation}). & Use simulation to separate effects that hardware counters collapse; check the companion fork's gap list before interpreting abort stats.\\
 \hline
 \end{tabular}
 \caption{HTM implementations differ in interface and diagnostics, but share the same semantic contract: hardware commit is opportunistic and software fallback is mandatory.}
@@ -93,14 +97,14 @@ if (status == _XBEGIN_STARTED) {
     *a -= n; *b += n;            /* both become visible atomically */
     _xend();                     /* commit                        */
 } else {
-    /* abort: status encodes the reason (conflict, capacity, ...) */
+    /* abort: EAX status word encodes the reason (conflict, ...) */
     lock(&g_fallback);           /* best-effort -> serial fallback  */
     *a -= n; *b += n;
     unlock(&g_fallback);
 }
 \end{lstlisting}
 
-Compare with \S\ref{sec:api-example}: where the STM used a retry loop, RTM uses a hardware fallback instead of a software retry. The \texttt{status} byte is the entire diagnostics interface --- the abort-accounting of Part~VI is far richer, which is why profiling tools must infer RTM reasons (Part~VII). Exercise~1 asks for the fallback design; the phased-hybrid and HSTM bullets above are exactly this fallback made adaptive. The transaction's atomicity is enforced by the L1/L2 coherence tracking of the first section --- which is why capacity aborts are unavoidable (see Part~VII's GPU contrast). \textbf{Abort taxonomy}: RTM collapses many causes into one status byte. The practical breakdown is \emph{conflict} (another core touched the read/write set), \emph{capacity} (the transaction outgrew the L1 tracking --- unavoidable at large read/write sets), \emph{unsupported instruction} (e.g.\ most syscalls and \texttt{rdfsbase}), and \emph{debug/explicit} (\texttt{\_xabort} or a debugger single-step). Profilers cannot distinguish conflict from capacity reliably from the status alone --- this is the reason the Part~VII simulator model re-measures them. \textbf{Fallback correctness is the real contract.} The \texttt{lock(\&g\_fallback)} path above is a second, serial execution of the same body. It must be \emph{called with the same state view} as the aborted TSX attempt and must itself be transactional-safe: a crash between the fallback lock and its unlock is indistinguishable from a crash inside the transaction. The failure mode to design against is the \emph{retry loop deadlock}: a hybrid that falls back to a lock but is also invoked by the STM-style retry loop can deadlock on its own fallback mutex (a real bug class in the companion repo's SPHT backend).
+Compare with \S\ref{sec:api-example}: where the STM used a retry loop, RTM uses a hardware fallback instead of a software retry. The \texttt{status} value is a 32-bit word written to \texttt{EAX}: bit~0 set means the abort came from \texttt{\_xabort} (bits 31:24 then carry the \texttt{\_xabort} argument), bit~1 means the transaction \emph{may} succeed on retry, bit~2 a data conflict, bit~3 a capacity overflow, bit~4 a debug breakpoint, bit~5 nesting overflow. It is the entire diagnostics interface --- far poorer than the abort-accounting of Part~VI, which is why profiling tools must infer RTM reasons (Part~VII). Exercise~1 asks for the fallback design; the phased-hybrid and HSTM discussion above is exactly this fallback made adaptive. The transaction's atomicity is enforced by the L1/L2 coherence tracking of the first section --- which is why capacity aborts are unavoidable (see Part~VII's GPU contrast). \textbf{Abort taxonomy}: RTM collapses many causes into the single EAX status word. The practical breakdown is \emph{conflict} (another core touched the read/write set), \emph{capacity} (the transaction outgrew the L1 tracking --- unavoidable at large read/write sets), \emph{unsupported instruction} (e.g.\ most syscalls and \texttt{rdfsbase}), and \emph{debug/explicit} (\texttt{\_xabort} or a debugger single-step). Profilers cannot distinguish conflict from capacity reliably from the status alone --- this is the reason the Part~VII simulator model re-measures them. \textbf{Fallback correctness is the real contract.} The \texttt{lock(\&g\_fallback)} path above is a second, serial execution of the same body. It must be \emph{called with the same state view} as the aborted TSX attempt and must itself be transactional-safe: a crash between the fallback lock and its unlock is indistinguishable from a crash inside the transaction. The failure mode to design against is the \emph{retry loop deadlock}: a hybrid that falls back to a lock but is also invoked by the STM-style retry loop can deadlock on its own fallback mutex (a real bug class in the companion repo's SPHT backend).
 
 The listing is intentionally small, but it hides two non-negotiable rules. First, the fallback body must be the same logical operation as the transactional body. Second, the fallback lock must be visible to the transaction. Without that visibility, the hardware path and fallback path are merely two unsynchronized implementations of the same update.
 
@@ -210,6 +214,7 @@ The invariant is money conservation: every successful transfer subtracts and add
 The companion backends use this same pattern at different levels. SGL serializes everything. TSX-SGL attempts the critical section in hardware and falls back to serialization. Software systems such as TL2, NOrec, TSC-TM, SwissTM, and TinySTM do not depend on cache-resident speculation, but they pay for metadata, validation, and logging. The measured results in the companion project reflect that trade-off: for the fuzz/bank workload on an M1 Pro, TL2 and TSC-TM are around two million transactions per second, while NOrec-BF improves the read-mostly NOrec path by reducing validation cost. These numbers are workload-specific; they are useful here only as a reminder that HTM is one point in a larger design space.
 
 \section{Worked Example: Abort-Cause Counters}
+\label{sec:htm-abort-counters}
 
 RTM exposes limited status bits. A useful first diagnostic is therefore local accounting: count commits, explicit subscription aborts, retryable aborts, and non-retryable aborts. The counters must be updated outside the transaction. If the transaction aborts, writes performed inside it vanish; if the writes force extra cache lines into the transaction, they also perturb the abort rate being measured.
 
@@ -275,6 +280,7 @@ int main() {
 Counters are diagnostic state, not transactional state: a counter increment inside RTM would be rolled back on abort and would add another write line on commit. The status bits classify symptoms; they do not fully explain the microarchitectural cause.
 
 \section{Worked Example: Capacity Probe}
+\label{sec:htm-capacity-probe}
 
 The following program sweeps the number of cache lines touched by a transaction. It is not a benchmark result; it is a harness for observing the qualitative transition from small, cache-resident transactions to transactions that frequently abort for capacity or other implementation limits.
 
@@ -319,21 +325,25 @@ Aligning each element to a cache line makes the footprint easier to reason about
 \section{Simulation with gem5}
 \label{sec:htm-simulation}
 
-Simulation answers questions that commodity counters often merge together. A hardware counter may report an abort, or a status byte may hint that the abort was retryable, but it rarely tells whether the root cause was an L1 conflict, an eviction, a coherence race, a TLB event, or an implementation limit. A simulator can expose the cache hierarchy, coherence protocol, and transactional metadata directly.
+Simulation answers questions that commodity counters often merge together. A hardware counter may report an abort, or the EAX status word may hint that the abort was retryable, but it rarely tells whether the root cause was an L1 conflict, an eviction, a coherence race, a TLB event, or an implementation limit. A simulator can expose the cache hierarchy, coherence protocol, and transactional metadata directly.
 
-Gem5's Ruby memory system is the natural tool in this chapter because Ruby models cache hierarchies and coherence protocols explicitly. With HTM or TME support enabled, the workflow is:
+Simulation has a second role for this book's audience: \emph{running TM code on machines that do not implement a TM instruction set at all.} TSX is unavailable on AMD CPUs and has been removed or disabled on many recent Intel parts; TME never shipped and was withdrawn from the Arm ARM in 2025 (it is gone from LLVM~22, the very toolchain used by Part~V's plugin). A simulated ISA makes the instruction set available regardless of the host.
+
+The companion gem5 fork (the \textsc{TM-SIM} repository, gem5 v25.1~\cite{binkert11gem5} plus an in-tree x86 TSX implementation) is the concrete vehicle. Upstream gem5 contains \emph{no} x86 TSX support; the fork adds the decoder and instruction semantics for \texttt{XBEGIN}/\texttt{XEND}/\texttt{XABORT}/\texttt{XTEST} and drives them through Ruby's \texttt{MESI\_Three\_Level\_HTM} protocol, whose ISA-agnostic \texttt{HTMSequencer} is calibrated with the measured Broadwell-EP costs of Chapter~14's machine profiles (\texttt{htm\_start\_\allowbreak latency}\,\allowbreak${}=60$ and \texttt{htm\_commit\_\allowbreak latency}\,\allowbreak${}=178$ cycles, matching the RDTSC-profiled XBEGIN/XEND costs from real hardware). The workflow is:
 
 \begin{enumerate}
-    \item model the cache hierarchy and coherence domain;
-    \item enable transactional execution in the target ISA model;
-    \item run a minimal transactional workload;
-    \item vary the footprint, contention, and cache parameters;
-    \item separate conflict aborts from capacity aborts in the output.
+    \item build the TSX target: \texttt{scons build/X86\_TSX/gem5.opt --with-ruby};
+    \item cross-compile a static benchmark against a TSX-consuming backend (\texttt{make BACKEND=TSXSGL GEM5=1} in the companion repository --- the host needs no TSX; only the simulated CPU executes it);
+    \item run in syscall-emulation mode with a bounded, ROI-delimited workload (\texttt{bank -n 500}), with \texttt{m5} statistics reset/dump markers bracketing the transactional phase;
+    \item read per-transaction cycles and read/write-set histograms from the Ruby HTM sequencer statistics;
+    \item for full-system fidelity, boot once, checkpoint, and restore with the detailed CPU model so that only the region of interest is simulated slowly.
 \end{enumerate}
 
-The capacity probe above becomes more informative in simulation than on a fixed machine. On real hardware, the abort boundary is affected by undocumented structures and unrelated activity. In simulation, the experimenter can hold the workload constant and vary L1 size, associativity, line size, or contention. This makes transient effects visible: evictions mid-transaction, write-set coalescing, false conflicts inside a coherence domain, and instruction events that force an abort.
+\paragraph{Current limits of the fork (honest status).} The calibration target met so far is single-threaded commit-path fidelity: on the bank microbenchmark the simulated per-transaction cost lands within $\sim$1\% of the cycle cost model. Three gaps are documented in the fork's \texttt{IMPROVEMENT\_PLAN.md}: \texttt{XABORT} currently raises \texttt{InvalidOpcode} instead of delivering the EAX status; conflict and capacity aborts are not yet wired from the L0 cache's \texttt{LD\_FAIL}/\texttt{ST\_FAIL} callbacks to the XBEGIN fallback; and the abort path has only been exercised single-threaded. Until those land, multi-threaded abort behavior should be studied through the repository's real-hardware RDTSC profiling patch (\texttt{patches/profile/tsx}) and the Rust \texttt{tsx\_sim} cost-model backend, and gem5 results should be read as commit-path numbers.
 
-The simulator is not a replacement for measurement. It is a microscope. It explains mechanisms under controlled assumptions; the hardware run tells whether those mechanisms dominate on a real platform.
+The capacity probe above becomes more informative in simulation than on a fixed machine --- once the capacity-abort wiring lands. On real hardware, the abort boundary is affected by undocumented structures and unrelated activity. In simulation, the experimenter can hold the workload constant and vary L1 size, associativity, line size, or contention. This makes transient effects visible: evictions mid-transaction, write-set coalescing, false conflicts inside a coherence domain, and instruction events that force an abort.
+
+The simulator is not a replacement for measurement. It is a microscope. It explains mechanisms under controlled assumptions; the hardware run tells whether those mechanisms dominate on a real platform. The three instruments used together --- real-hardware profiling patches, the gem5 fork, and the Rust cost-model simulator --- cover, respectively, ground truth, mechanism, and speed.
 
 \section{Worked Example: Model Checking HTM Abort and Fallback}
 \index{TLA+}\index{abort}\index{fallback path}
@@ -438,9 +448,9 @@ The cost is uncertainty. Transactions can abort for conflicts, capacity, interru
 
 \section{Exercises}
 \begin{enumerate}
-    \item In Intel RTM, a transaction that exceeds the L1 cache capacity always aborts. Propose a software fallback path and discuss its performance implications. If you do not have RTM hardware, ground the design in the companion's TSX-SGL backend (\texttt{backends/tm\_impl/tsx\_sgl}) and the phased-hybrid model of \S\ref{sec:hybrid-example}.
-    \item Using a conceptual pipeline diagram, show why a transaction that triggers a TLB miss is likely to abort.
-    \item Configure gem5 (\S\ref{sec:htm-simulation}) to run a simple transactional program and measure the abort rate as the number of cache lines touched increases. Explain the trend. If gem5 is not installed, run the same footprint sweep against the companion's TSX simulation backend (\texttt{simulator/}, \S\ref{sec:htm-simulation}) and report the trend it produces.
+    \item \emph{[implementation]} In Intel RTM, a transaction that exceeds the L1 cache capacity always aborts. Propose a software fallback path and discuss its performance implications. If you do not have RTM hardware, ground the design in the companion's TSX-SGL backend (\texttt{backends/tm\_impl/tsx\_sgl}) and the phased-hybrid model of \S\ref{sec:hybrid-example}.
+    \item \emph{[theory]} Using a conceptual pipeline diagram, show why a transaction that triggers a TLB miss is likely to abort.
+    \item \emph{[implementation]} Footprint sweep: run the capacity probe of \S\ref{sec:htm-capacity-probe} on RTM hardware with the companion's RDTSC profiling patch (\texttt{patches/profile/tsx}), or on any host against the companion's TSX simulation backend (\texttt{simulator/}, \texttt{runtime/tsx\_sim}), and plot the abort rate as the number of touched cache lines grows. Explain the trend. (The gem5 fork of \S\ref{sec:htm-simulation} cannot yet answer this one: its capacity-abort wiring is an open gap.)
     \item \emph{[implementation]} Extend Listing~\ref{sec:rtm-bank-transfer}'s transfer code to collect per-thread counters for commits, explicit fallback-lock aborts, retryable aborts, and non-retryable aborts. Keep the counters outside the transaction and explain why updating them inside RTM would distort the measured abort rate.
     \item \emph{[verification]} Modify the TLA+ model in \S\ref{sec:htm-fallback-tla} so that transfers may go in both directions. State and check the money-conservation invariant and an account-floor invariant for both accounts.
     \item \emph{[theory]} Explain why lock subscription is necessary for opacity in a hybrid HTM plus lock fallback design. Give an execution in which omitting the subscription lets a hardware transaction commit concurrently with the fallback critical section.
@@ -466,10 +476,10 @@ The cost is uncertainty. Transactions can abort for conflicts, capacity, interru
 \textbf{How to check your work.} The \emph{[implementation]} exercises
 verify on the companion: the fallback design of Exercise~1 maps onto
 \texttt{backends/tm\_impl/tsx\_sgl} (TSX path with lock subscription);
-Exercise~4 is checked with the abort counters in
-\S\ref{sec:rtm-bank-transfer}; and Exercise~7 runs the capacity probe from
-\S\ref{sec:rtm-bank-transfer} or, without RTM, the simulator described in
-\S\ref{sec:htm-simulation}.  The \emph{[verification]} exercises are
+Exercise~4 is checked with the abort counters of
+\S\ref{sec:htm-abort-counters}; and Exercise~3/7 run the capacity probe of
+\S\ref{sec:htm-capacity-probe} on real RTM hardware or against the
+\texttt{tsx\_sim} cost-model backend.  The \emph{[verification]} exercises are
 checked with TLC against the model of \S\ref{sec:htm-fallback-tla} using
 the workflow of Appendix~\ref{chap:pluscal-quick-ref}.  The
 \emph{[theory]} exercises are graded against the definition of
@@ -494,6 +504,11 @@ your position is tied to a concrete mechanism from this chapter.
 \index{Intel RTM}
 \index{ARM TME}
 \index{IBM POWER HTM}
+\index{XTEST}
+\index{HLE}
+\index{xacquire}
+\index{xrelease}
+\index{TSX availability}
 \index{gem5}
 \index{Ruby memory system}
 \index{lock elision}

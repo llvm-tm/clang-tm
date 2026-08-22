@@ -10,9 +10,11 @@ TLA+ check, and only then start an exercise.
 \section{Minimum Toolchain}
 
 \begin{itemize}
-    \item \textbf{A C++17 compiler}: \texttt{g++} or \texttt{clang++}.
-          The runtime backends compile with plain C++17; the LLVM
-          instrumentation plugin requires LLVM~22 and its \texttt{clang}.
+    \item \textbf{A C++20 compiler}: \texttt{g++} or \texttt{clang++}.
+          The runtime backends and benchmarks build with
+          \texttt{-std=c++20}; the LLVM instrumentation plugin requires
+          LLVM~22 and its \texttt{clang}. (Note: LLVM~22 removed Arm TME
+          support after the architecture withdrew it --- Chapter~16.)
     \item \textbf{LLVM 22} (for Part~V exercises): \texttt{llvm-config-22},
           \texttt{opt-22}, and the \texttt{clang-22} driver used by the
           \texttt{plugin/clang-tm} wrapper script.
@@ -22,7 +24,8 @@ TLA+ check, and only then start an exercise.
           Appendix~\ref{chap:pluscal-quick-ref}).  Install once with
           \texttt{make -C docs/proofs download-jar}.
     \item \emph{Optional:} \texttt{rr} (record-and-replay, Chapter~12),
-          gem5 (Chapter~16), and a CUDA/ROCm toolchain (Chapter~17).
+          the gem5 fork (Chapter~16 --- see below), Docker (cross-builds
+          and Linux CI on macOS), and a CUDA/ROCm toolchain (Chapter~17).
 \end{itemize}
 
 \section{Building the Companion}
@@ -30,9 +33,11 @@ TLA+ check, and only then start an exercise.
 From the repository root:
 
 \begin{verbatim}
-make                # builds the plugin, plugin benchmarks, and
-                    # benchmarks/cpp (explicit-API) binaries
-make -C tests run   # backend unit tests + explicit-API tests
+make                        # builds the plugin, plugin benchmarks, and
+                            # benchmarks/cpp (explicit-API) binaries
+make -C tests run           # backend (backends/tm_impl) unit tests
+make -C benchmarks/cpp run-test-tx   # explicit-API tests, built+run below
+make -C plugin run                   # plugin pipeline tests (18)
 \end{verbatim}
 
 The \texttt{benchmarks/cpp} Makefile exposes the per-benchmark and per-test
@@ -46,14 +51,41 @@ make -C benchmarks/cpp run-test-ds       # 207 data-structure tests
 make -C benchmarks/cpp run-stamp         # STAMP benchmarks (vacation, yada, ...)
 \end{verbatim}
 
-A backend is selected with the \texttt{BACKEND} variable
-(\texttt{tinystm} is the default; \texttt{norec}, \texttt{tl2},
-\texttt{sgl}, \texttt{jvstm}, \texttt{romulus}, and the others in
-\texttt{backends/tm\_impl/} are valid):
+A backend is selected with the \texttt{BACKEND} variable. In
+\texttt{benchmarks/cpp} the values are \textbf{uppercase}
+(\texttt{TINYSTM} is the default; \texttt{NOREC}, \texttt{TL2},
+\texttt{SGL}, \texttt{JVSTM}, \texttt{ROMULUS}, \texttt{TSXSGL}, and the
+others named in \texttt{benchmarks/cpp/Makefile} are valid):
 
 \begin{verbatim}
-make -C benchmarks/cpp BACKEND=norec run-test-tx
+make -C benchmarks/cpp BACKEND=NOREC run-test-tx
 \end{verbatim}
+
+(The top-level Makefile's own \texttt{BACKEND} passthrough historically
+used lowercase; when in doubt, match the case of the \texttt{ifeq} blocks
+in the Makefile you are driving.)
+
+\paragraph{gem5 (Chapter~16).} Upstream gem5 has no x86 TSX support; use
+the companion fork (the \textsc{TM-SIM} repository, gem5 v25.1 plus the
+in-tree TSX commit). Build and smoke-test:
+
+\begin{verbatim}
+scons build/X86_TSX/gem5.opt --with-ruby -j$(nproc)
+tsx-comparison/scripts/run-bank-gem5.sh TSXSGL 1 64 500
+\end{verbatim}
+
+Benchmarks for gem5 are built as static x86-64 binaries with the ROI
+markers of Chapter~16 --- on any host, including macOS, via Docker
+(\texttt{linux/amd64} Alpine image, musl toolchain):
+
+\begin{verbatim}
+docker run --rm --platform linux/amd64 -v $PWD:/w -w /w/benchmarks/cpp \
+  alpine:3.20 sh -c "apk add --no-cache g++ make >/dev/null && \
+                     make BACKEND=TSXSGL GEM5=1"
+\end{verbatim}
+
+The full simulation workflow (checkpointing, ROI discipline, known gaps)
+is in the fork's \texttt{IMPROVEMENT\_PLAN.md}.
 
 \section{Model-Checking Workflow}
 

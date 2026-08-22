@@ -271,7 +271,7 @@ backends/tm_impl/gpu_stm/
 
 **Status**: **CPU fallback done** (114/114 test_tx, 207/207 test_ds).
 CUDA kernel template exists (`pr_stm_kernel.cuh`) but not built by CI.
-TLA+ model at `docs/proofs/GPU_PRIORITY_STM.tla`.
+TLA+ model at `docs/proofs/GPU_PR_STM.tla`.
 
 ### 5.2 Second backend: CSMV (multi-versioned client-server)
 

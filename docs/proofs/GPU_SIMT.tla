@@ -3,11 +3,11 @@
  * GPU_SIMT — Warp-Cooperative (SIMT) Execution Semantics for the
  * CSMV GPU Batch Executor
  *
- * The existing GPU models (GPU_CSMV, GPU_JVSTM, GPU_PRIORITY_STM) verify the
+ * The existing GPU models (GPU_CSMV, GPU_JVSTM, GPU_PR_STM) verify the
  * *algorithms* (version lists, VBoxes, lock priorities).  None of them model
  * the SIMT execution semantics that the batch executor
- * (backends/tm_impl/csmv/gpu/csmv_batch_executor.hpp) and the benchmarks in
- * benchmarks/gpu/ depend on:
+ * (gpu/backends/csmv/csmv_batch_executor.hpp) and the benchmarks in
+ * gpu/benchmarks/ depend on:
  *
  *   1. ONE TRANSACTION PER WARP.  A warp (32 lanes in hardware) cooperates on
  *      a single transaction: a shared read-set, shared write-set, shared

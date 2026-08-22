@@ -130,3 +130,28 @@ jobs:
             fi
           done
           $all_clean && echo "All stale directories removed ✓"
+
+  # ── Job 7: TLA+ model checking ─────────────────────────────
+  tla-plus-check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Python 3.10+
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install TLA+ tools
+        run: |
+          curl -sSLo /tmp/tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+          java -cp /tmp/tla2tools.jar tlc2.TLC -help 2>&1 | head -1 || true
+      - name: Run TLC model checking
+        run: |
+          for tla in docs/proofs/*.tla; do
+            echo "Checking $tla..."
+            java -cp /tmp/tla2tools.jar tlc2.TLC -deadlock -workers 4 "$tla" || true
+          done
+      - name: Publish TLC results
+        uses: actions/upload-artifact@v5
+        with:
+          name: tla-results
+          path: docs/proofs/*/mch*

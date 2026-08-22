@@ -58,6 +58,21 @@ PersistentSGL & Persistent critical section protocol & Flushes, fences, recovery
 \label{tab:nonspec-taxonomy}
 \end{table}
 
+The thread-serializer row is not just a thought experiment: the companion
+repository ships one as the \texttt{expli::QueueExecutor}
+(\texttt{expli\_instr/cpp/include/\allowbreak tx\_executor.hpp}, backed by
+\texttt{queue\_runtime.cpp}), and the bank benchmark runs in this mode with
+\texttt{-{}-queue}. Transaction bodies are submitted as closures to a pool of
+worker threads; each worker initializes its own TM thread state and drains
+its queue serially. Two details repay attention when reading the code: the
+worker threads record their stack bounds so the runtime can prove that a
+referenced address is stack-local and bypass instrumentation
+(\texttt{stm::tm\_record\_\allowbreak stack\_bounds}), and statically allocated
+TM-annotated globals are registered explicitly
+(\texttt{tm\_register\_\allowbreak global})
+because they do not live in the TM region --- both are invisible at the
+algorithmic level but load-bearing in practice.
+
 Amdahl's law gives the first-order bound. If fraction f of execution is serialized and N workers are available, the idealized speedup is
 
 $$
@@ -381,6 +396,42 @@ int main() {
 The queue order is the serialization order. The bank object is unsynchronized internally; safety comes from the single worker. The submitter waits on a \texttt{future}, which makes latency visible even when the worker has no lock contention. Thread-local transaction descriptors would be wrong here: the submitting thread and executing thread are different.
 
 The serializer can outperform a contended lock only when the avoided lock traffic is larger than submission and reply overhead. It cannot overcome the fundamental sequential bottleneck. Under a burst of requests, the worker becomes the limiting server and queueing delay dominates.
+
+\paragraph{The companion's version: \texttt{bank --queue}.}
+The repository's bank benchmark runs its transfer workload through exactly
+this pattern, with two production hardenings worth noticing. The executor is
+\texttt{expli::QueueExecutor} constructed with as many workers as queues
+(\texttt{QueueExecutor(nb\_threads, nb\_threads)}), installed in a global hook
+so that every \texttt{TM<T>::transaction(...)} call site is routed through it
+transparently --- inline mode executes the body immediately, queue mode
+enqueues it. Synchronous calls enqueue the closure plus an atomic done-flag
+and spin-wait; asynchronous calls return a future instead. The hardenings:
+first, worker threads record their stack bounds at startup
+(\texttt{stm::tm\_record\_stack\_bounds}) so the address classifier can prove
+stack-locality for bypass decisions, and TM-annotated globals are registered
+explicitly (\texttt{tm\_register\_global}) because static storage is outside
+the mmap'd TM region --- omit either and the instrumentation silently stops
+tracking real accesses, the Bug-1 pattern of \S\ref{sec:debugging-story}.
+Second, all workers park on a start-gate barrier before the measurement
+region begins, so throughput numbers measure transactions rather than thread
+startup. Running it:
+
+\begin{lstlisting}[caption={The companion bank under queue serialization versus inline execution.}]
+$ bank -a 64 -t 4 -d 2000            # inline: callers run TXs directly
+Mode: inline
+...
+$ bank -a 64 -t 4 -d 2000 --queue    # queue: N workers drain N queues
+Mode: queue (4 workers, 4 queues)
+...
+\end{lstlisting}
+
+The instructive observation is that queue mode does not beat inline mode on
+this workload: each caller-thread/worker pair adds a handoff, and the money
+invariant holds in both modes. The exercise is not to find a winner but to see
+the serialization point move from ``caller holds the backend'' to ``worker
+dequeues the task'' with the application code unchanged --- which is precisely
+the property that makes the serializer a drop-in backend rather than a
+rewrite.
 
 \section{Summary}
 

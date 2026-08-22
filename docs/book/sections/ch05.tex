@@ -3,7 +3,7 @@
 
 Transactional memory systems are engineered artifacts, but their failures are often mathematical: a recognizer accepts the wrong input, a validation protocol admits an impossible history, a retry loop explodes under contention, or a throughput estimate ignores wasted work. This chapter gives the small set of mathematical tools used repeatedly in the rest of the book.
 
-The point is not abstraction for its own sake. A DFA recognizes tokens in a compiler front end. A Markov chain estimates retries. Little's Law relates throughput to concurrency. A model checker explores executions that a closed-form model intentionally averages away. The running bank example will keep the distinction visible: performance models count attempts; safety models preserve the account floor and money conservation invariant.
+The point is not abstraction for its own sake. A DFA recognizes tokens in a compiler front end. A Markov chain estimates retries. Little's Law relates throughput to concurrency. Histories and their legality predicates define what ``correct'' means for every backend in the book. A model checker explores executions that a closed-form model intentionally averages away. The running bank example will keep the distinction visible: performance models count attempts; safety models preserve the account floor and money conservation invariant.
 
 \section{Automata and Formal Languages}
 
@@ -15,7 +15,7 @@ For a TM implementation, regular languages appear first in tooling. The lexer fo
 
 Context-free grammars add recursion. They describe balanced parentheses, nested expressions, and blocks. A recursive-descent parser is a direct executable form of a grammar when the grammar is suitable for top-down parsing. Shift-reduce parsers use an automaton over parser items instead. The distinction matters when Chapter~15 connects source text to generated instrumentation: the DFA in Figure~\ref{fig:lexer-dfa} is the lexer's recognizer, and the LR(0) automaton in Figure~\ref{fig:lr0-automaton} is the shift-reduce table that Bison-family generators build from a grammar. Finite automata (DFA/NFA) and regular expressions cover the flat token layer; context-free grammars tie back to recursive descent for the nested structure, and both are used for real in Chapter~15.
 
-The useful mental model is separation of concerns. A DFA answers whether the next bytes form a valid token. A grammar answers whether the token stream has valid structure. Neither proves that a transaction is serializable. Those semantic properties belong to transition systems and invariants.
+The useful mental model is separation of concerns. A DFA answers whether the next bytes form a valid token. A grammar answers whether the token stream has valid structure. Neither proves that a transaction is serializable. Those semantic properties belong to transition systems and invariants: the correctness conditions that this book actually checks --- serializability, strict serializability, and opacity, with the serializable-but-not-opaque history of Listing~\ref{lst:serializable-not-opaque} as the canonical separating example --- are introduced in Chapter~2 and exercised as checked invariants in Chapter~6; the models there are precisely the transition systems this paragraph points at.
 
 \section{Markov Chains}
 
@@ -104,6 +104,48 @@ The models break where contention is data-dependent and non-Poisson, which is ex
 
 If the useful service time of a transaction is fixed but validation aborts attempts, the effective service time grows by the same geometric multiplier used in the Markov model. A system may therefore look underloaded at the level of committed transactions while being saturated by attempted transactions. This is a common source of misleading benchmark interpretation.
 
+\section{Histories, Legality, and Opacity}
+\label{sec:histories-legality-opacity}
+\index{history!transactional}
+\index{legality}
+\index{read-from relation}
+\index{strict serializability}
+\index{opacity!formal definition}
+\index{virtual world consistency}
+\index{TMS1}
+\index{TMS2}
+\index{obstruction-freedom}
+\index{lock-freedom}
+\index{wait-freedom}
+\index{progress condition}
+
+Chapter~2 introduced opacity informally through the mixed-snapshot history of Listing~\ref{lst:serializable-not-opaque}. Every invariant checked in Part~III is ultimately a statement about histories, so this section gives the definitions their formal clothing. The vocabulary is small --- one data type and four predicates --- and it is reused verbatim when Chapter~6 turns correctness into checkable invariants.
+
+A \emph{history} $H$ is a finite sequence of events. Each event belongs to a transaction $T$ and takes one of five forms: $\mathrm{begin}(T)$, a read $r_T(x)\!\to\!v$ returning value $v$ from location $x$, a write $w_T(x)\!\leftarrow\!v$, and the two terminal events $\mathrm{commit}(T)$ and $\mathrm{abort}(T)$. A history is \emph{well-formed} if every transaction begins before it reads or writes, acts only between its begin and its terminal event, and has at most one terminal event. Real executions are always prefixes of well-formed histories: a thread may be mid-transaction when we stop observing.
+
+Two derived sequences matter. The \emph{committed projection} $\mathrm{comm}(H)$ keeps only the events of transactions that committed. The \emph{real-time order} $<_{RT}$ relates two transactions when every event of the first precedes every event of the second; overlapping transactions are unrelated. Both are mechanical to compute from a trace, which is why they reappear as assertions in test harnesses.
+
+A history becomes meaningful once we choose a \emph{serialization}: a total order of a set of transactions consistent with their event order inside $H$. Given a serialization $S$, each read event has a \emph{read-from} source: the latest write to the same location by an earlier transaction in $S$, or the initial value if none exists. $S$ is \emph{legal} if every read returns exactly its read-from value under ordinary sequential semantics. Legality is the entire content of ``the transaction saw a state that could really have existed.''
+
+With these pieces, the correctness ladder has three rungs:
+
+\begin{itemize}
+\item \textbf{Serializability} (of commits): $\mathrm{comm}(H)$ admits a legal serialization. Aborted transactions are irrelevant --- this is the database-classic condition of Papadimitriou \cite{papadimitriou79serializability}.
+\item \textbf{Strict serializability}: the serialization must additionally preserve $<_{RT}$. This is what a global-clock backend such as TL2 or TSC-TM buys you and what a coarse lock trivially guarantees.
+\item \textbf{Opacity} \cite{guerraoui08correctness}: \emph{every finite prefix} of $H$ admits a legal serialization of \emph{all} transactions live or finished in that prefix, preserving $<_{RT}$ where it is defined. Aborted transactions must observe legal states too.
+\end{itemize}
+
+Opacity is strictly stronger than serializability, and the gap is exactly one aborted transaction's illegal observation. Recast Listing~\ref{lst:serializable-not-opaque} in the new vocabulary. The history contains $r_{T_1}(x)\!\to\!0$, then $w_{T_2}(x)\!\leftarrow\!1$, $w_{T_2}(y)\!\leftarrow\!1$, $\mathrm{commit}(T_2)$, then $r_{T_1}(y)\!\to\!1$, then $\mathrm{abort}(T_1)$. Try any serialization $S$ of $\{T_1, T_2\}$. If $T_2$ precedes $T_1$, the read-from source of $r_{T_1}(x)$ is $w_{T_2}(x)$, so legality demands the read return $1$ --- it returned $0$. If $T_1$ precedes $T_2$, the read-from source of $r_{T_1}(y)$ is the initial value, so legality demands $0$ --- it returned $1$. No legal total order exists: the history is not opaque. Yet $\mathrm{comm}(H) = \{T_2\}$ serializes trivially: the history is serializable. One predicate separates them, and only the aborted transaction feels the difference.
+
+Opacity is expensive to guarantee for aborted transactions that read many locations. \emph{Virtual world consistency} \cite{imbs12vwc} weakens it: committed transactions must serialize legally as before, but an aborted transaction needs only consistency with its own causal past. The weakening permits invisible-read protocols that never validate aborted readers, at the price of letting a doomed transaction see states no serial execution produced. Multi-version designs sit naturally near this end of the spectrum; value-validated designs such as NOrec pay the opacity price on every read.
+
+The definitions descend from the original STM papers. Shavit and Touitou proposed the abstraction \cite{shavit95stm}; TMS1 \cite{herlihy03tms1} supplied structural details --- nesting, composition, the locator-based object model that JVSTM's VBox and OFG-STM's locators inherit --- and TMS2 \cite{herlihy03tms2} made dynamic-sized data structures transactional. All three treated only committed transactions; opacity arrived later precisely because implementations kept failing on aborted ones.
+
+Safety says nothing about whether a transaction ever commits. That is the domain of \emph{progress conditions}. An implementation is \emph{wait-free} if every operation completes in a bounded number of its own steps; \emph{lock-free} if some operation completes in finitely many steps system-wide; and \emph{obstruction-free} \cite{herlihy03obstructionfree} if a transaction completes when it runs alone long enough. Obstruction-freedom is the classic TM bargain: optimistic validation gives it cheaply, but under sustained contention the system may livelock unless a contention manager intervenes. Lock-based designs (the SGL family) offer only deadlock-freedom and can starve individual transactions. This distinction is why the liveness columns in the companion's proof suite distinguish ``passes'' from ``starvation possible'' --- most optimistic backends admit schedules where one thread retries forever, and weak fairness on the retry step does not rule them out.
+
+Finally, note what makes these predicates tractable for a model checker. Opacity quantifies over all finite prefixes and all serializations --- apparently unbounded. Bounding the universe (two accounts, one amount, at most $k$ transactions) bounds both quantities, and the read-from legality condition collapses into per-state invariants of the form ``every committed slot's recorded reads match the values a replay would produce,'' which is literally the shape of the strongest invariant in the companion's multi-version models. What TLC then establishes is opacity for the bounded fragment; the transfer of trust to the unbounded system rests on the modeling discipline of keeping the invariant structure identical.
+
+
 \begin{table}[htbp]
 \centering
 \begin{tabular}{p{0.16\linewidth}p{0.18\linewidth}p{0.30\linewidth}p{0.26\linewidth}}
@@ -113,6 +155,7 @@ Tool & Object modeled & Question answered & Typical TM use \\
 DFA / grammar & Program text & Is this input syntactically valid? & Lexer and parser construction \\
 DTMC & Transaction lifecycle & How many retries should we expect? & Abort and retry estimates \\
 Little's Law & Queue of transactions & How many transactions are in flight? & Congestion and saturation estimates \\
+History analysis & Transactional executions & Is this execution correct? & Opacity and serializability arguments \\
 Model checking & Reachable executions & Can this bad state occur? & Safety invariants and races \\
 \hline
 \end{tabular}
@@ -129,6 +172,7 @@ Model & Keeps & Abstracts away & Best use \\
 DFA & Current recognizer state & Parse tree and semantics & Tokenization \\
 DTMC & Current lifecycle state & History except current state & Retry cost \\
 Little's Law & Long-run averages & Individual schedules & Capacity estimates \\
+History + serialization & Read-from relations & Timing within transactions & Correctness definitions \\
 TLA+ model & Reachable states & Unmodeled implementation detail & Safety checking \\
 \hline
 \end{tabular}
@@ -481,9 +525,9 @@ Multiple validation points multiply success probabilities when they are independ
 
 \section{Summary}
 
-Formal languages describe valid strings and support compiler construction. Automata make these descriptions executable. Markov chains turn retry loops into cost estimates when the memoryless assumption is acceptable. Queueing theory, especially Little's Law, relates committed throughput, residence time, and concurrency. Model checking complements these models by exploring reachable states instead of averaging them away.
+Formal languages describe valid strings and support compiler construction. Automata make these descriptions executable. Markov chains turn retry loops into cost estimates when the memoryless assumption is acceptable. Queueing theory, especially Little's Law, relates committed throughput, residence time, and concurrency. Histories with legality, serializability, and opacity define correctness itself: serializability orders committed transactions, strict serializability preserves real time, and opacity extends the obligation to aborted transactions --- the condition whose violation Listing~\ref{lst:serializable-not-opaque} exhibits and whose bounded-fragment verification Part~III mechanizes. Progress conditions (obstruction-freedom, lock-freedom) are the liveness counterparts of these safety properties. Model checking complements all of these models by exploring reachable states instead of averaging them away.
 
-In the bank example, this division is sharp. The retry model predicts attempts. Little's Law predicts in-flight work. The C++ simulation estimates the multiplier. The TLA+ model checks that committed states preserve money conservation and the account floor. Formal languages underpin compiler construction; Markov chains and queueing theory provide first-order performance models for TM. Analytical models predict, model checking proves, and the two tools answer different questions.
+In the bank example, this division is sharp. The retry model predicts attempts. Little's Law predicts in-flight work. The C++ simulation estimates the multiplier. The TLA+ model checks that committed states preserve money conservation and the account floor --- a bounded-fragment stand-in for the opacity argument of \S\ref{sec:histories-legality-opacity}. Formal languages underpin compiler construction; Markov chains and queueing theory provide first-order performance models for TM. Analytical models predict, model checking proves, and the two tools answer different questions.
 
 \section{Exercises}
 \begin{enumerate}
@@ -526,6 +570,8 @@ State clearly whether the result changes if the two validation phases are correl
     \item \emph{[implementation]} Add counters to the DFA in the trace-record worked example so that it reports the number of commits, aborts, retries, and rejected records in a file.
     \item \emph{[verification]} Extend the TLA+ bank model to include two transactions that may both begin from the same balance snapshot. Add a validation condition that prevents stale commits, then check money conservation.
     \item \emph{[theory]} Use Little's Law to compare two systems with the same committed throughput but different residence times. Explain which one has more in-flight transactions and why that matters for contention.
+    \item \emph{[theory]} Consider the history $H$ over locations $x$ and $y$, both initially $0$: $r_{T_1}(x)\!\to\!0$; $w_{T_2}(x)\!\leftarrow\!5$; $\mathrm{commit}(T_2)$; $w_{T_3}(y)\!\leftarrow\!7$; $\mathrm{commit}(T_3)$; $r_{T_1}(y)\!\to\!7$; $\mathrm{abort}(T_1)$. Prove $H$ is serializable by exhibiting a legal serialization of its committed projection, then prove it is not opaque by showing that no legal serialization of all three transactions exists.
+    \item \emph{[theory]} A backend guarantees virtual world consistency but not opacity. Describe a concrete bank scenario in which an aborted transaction's illegal observation is harmless, and one in which the same observation becomes harmful once the transaction's \emph{compensating action} (a plain, non-transactional write) executes after the abort.
 \end{enumerate}
 
 \textbf{How to check your work.} The \emph{[implementation]} exercises are
@@ -535,7 +581,11 @@ verified with the companion: extend the simulation of
 \S\ref{sec:math-bank-tla} (money conservation; see
 Appendix~\ref{chap:pluscal-quick-ref}), with Exercise~8's stale-commit
 validation following the read-set check of \S\ref{sec:norec-example}.  The
-\emph{[theory]} exercises are graded against \S\ref{sec:math-example}.
+\emph{[theory]} exercises are graded against \S\ref{sec:math-example}, with
+Exercises~10--11 additionally graded against the definitions of
+\S\ref{sec:histories-legality-opacity} (Exercise~10's expected answer:
+$\mathrm{comm}(H)$ serializes as $T_2 < T_3$, while every placement of $T_1$
+in a full serialization makes one of its two reads illegal).
 
 \index{DFA}
 \index{NFA}
@@ -569,4 +619,9 @@ validation following the read-set check of \S\ref{sec:norec-example}.  The
 \index{safety invariant}
 \index{two-phase validation}
 \index{correlated validation failures}
+\index{committed projection}
+\index{real-time order}
+\index{serialization}
+\index{contention manager}
+\index{deadlock-freedom}
 

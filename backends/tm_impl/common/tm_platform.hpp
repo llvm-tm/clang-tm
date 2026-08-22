@@ -49,7 +49,16 @@
 
 // glibc / Linux (where execinfo.h backtrace() is native)
 #if defined(__linux__) || defined(__linux)
-  #define TM_PLATFORM_HAS_EXECINFO 1
+  // musl (e.g. Alpine) has no <execinfo.h>; probe when possible.
+  #if defined(__has_include)
+    #if __has_include(<execinfo.h>)
+      #define TM_PLATFORM_HAS_EXECINFO 1
+    #else
+      #define TM_PLATFORM_HAS_EXECINFO 0
+    #endif
+  #else
+    #define TM_PLATFORM_HAS_EXECINFO 1
+  #endif
 #elif defined(__APPLE__)
   // macOS provides backtrace/backtrace_symbols_fd from <execinfo.h>
   // (Apple's own implementation, not glibc).

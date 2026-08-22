@@ -1,5 +1,5 @@
 \chapter{Formal Design with PlusCal and TLA+}
-\index{TLA+;PlusCal;TLC;model checking;invariant;opacity;transactional memory;formal verification}
+\index{TLA+}\index{PlusCal}\index{TLC}\index{model checking}\index{invariant}\index{opacity}\index{transactional memory!formal verification}
 
 Transactional memory is a concurrency protocol before it is a library.  The
 implementation contains atomics, locks, fences, compiler boundaries, cache
@@ -15,6 +15,77 @@ optimistic validation.  The aim is not to prove that the C++, Rust, or GPU code
 has no defect.  The aim is to make the concurrency argument explicit, finite,
 and hostile enough that TLC can search for the interleavings humans routinely
 miss.
+
+\section{Why TLA+ and PlusCal (and Not a Proof Assistant)?}
+\label{sec:why-tla}
+
+A reader with a formal-methods background will reasonably ask why this book
+standardizes on TLA+/PlusCal and the TLC model checker instead of a proof
+assistant such as Lean, Coq, or Isabelle, or another model checker such as
+Alloy or SPIN.  The choice is deliberate, and it is worth making the argument
+explicitly, because it explains both what the book's models \emph{are} and what
+they are \emph{not}.
+
+\paragraph{The job to be done.}  Every verification artifact in this book
+answers the same engineering question: \emph{does this specific protocol
+design, at this level of abstraction, admit a bad interleaving?}  TM protocols
+are small, closed, finite-state systems once the data values are abstracted:
+two or three threads, a handful of addresses, a global clock, a lock word, a
+commit log.  What makes them hard is not mathematical depth but
+\emph{interleaving explosion} --- the bugs live in the schedules, not in the
+arithmetic.  That is exactly the profile at which explicit-state model checking
+excels: push a button, and TLC either exhausts the state space or returns a
+concrete counterexample trace that can be read off state by state and replayed
+against the C++ implementation.
+
+\paragraph{What the alternatives would buy and cost.}
+
+\begin{itemize}
+\item \textbf{Lean~4 / Coq / Isabelle (interactive theorem provers).}
+  A proof assistant gives a \emph{parametric} theorem --- ``opaque for any
+  number of threads and addresses'' --- rather than a finite-instance check.
+  The price is steep: the proof is written by hand as tactics or structured
+  scripts, typically person-months for a single realistic TM protocol, and the
+  artifact reads as proof syntax rather than as the algorithm.  That trade
+  inverts this book's goal: Part~IV and Part~VII iterate over \emph{many}
+  backend designs (20+ in the companion repository), each of which needs a
+  checkable model in hours, not months, and the model must stay close enough to
+  the code that a reader can move between them.  When a parametric theorem is
+  genuinely wanted --- say, that value-based validation implies opacity for
+  \emph{any} workload, not just the checked instance --- a proof assistant is
+  the right tool, and the literature's published opacity proofs
+  (e.g.\ Guerraoui and Kapalka's~\cite{guerraoui08correctness}) were done
+  paper-style for the same reason.  We flag that as a research exercise rather
+  than pretend TLC subsumes it.
+\item \textbf{Alloy.}  Alloy's relational logic is excellent for data-shape
+  invariants (``this graph is always a tree''), but its idioms fit protocol
+  \emph{steps} awkwardly and its analyzer is bounded-satisfiability rather than
+  temporal; liveness properties such as ``a transaction that keeps retrying
+  eventually commits'' are outside its comfort zone.
+\item \textbf{SPIN (Promela).}  SPIN is the closest relative: an
+  explicit-state LTL model checker with an algorithm-like input language.  It
+  would serve.  TLA+ wins on three practical points: the PlusCal surface syntax
+  is closer to the pseudo-code used elsewhere in the book; the specification is
+  ordinary math (sets, functions, records) rather than a C-like DSL, so the
+  models double as precise definitions; and the TLA+ ecosystem (TLC, the
+  PlusCal translator, TLATeX pretty-printing) is a single mature toolchain that
+  the companion repository drives with one \texttt{Makefile}
+  (\texttt{docs/proofs}).
+\end{itemize}
+
+\paragraph{What TLC does \emph{not} give us.}  Three honest limitations recur
+throughout the book.  First, \emph{finiteness}: TLC checks the instance it is
+given --- two threads, three addresses, a bounded log --- so ``TLC pass'' is
+evidence, not a theorem; the liveness false-negatives noted in
+Part~VII are the price of bounding unbounded counters.  Second,
+\emph{abstraction}: the models abstract away the \texttt{sigsetjmp} retry
+machinery, cache geometry, and compiler effects, so they cannot catch bugs
+that live below the abstraction line (Chapter~13's DATA/TEXT symbol collision
+is a real example).  Third, \emph{extraction}: nothing guarantees the C++ code
+implements the model; the repository manages that risk by keeping model and
+runtime side by side and by tracing each chapter's runtime to its model file
+(Table~\ref{tab:traceability}).  A proof assistant would address only the first
+of these, at a cost this book is not willing to pay per backend.
 
 \section{TLA+ and PlusCal in a Nutshell}
 

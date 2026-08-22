@@ -413,10 +413,13 @@ read_word_norec(     //
 		any_type_t zero = {};
 		return zero;
 	}
-#ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr))
-		return read_value_from_addr(addr, sz);
-#endif
+	// Only bypass if address is on current thread's stack (defense-in-depth).
+	// Heap/TM-region addresses always go through TM tracking, even in plugin mode,
+	// matching TinySTM's LLVM_TM_ADDR_CHECK pattern.
+	if (stm::isOnCurrentThreadStack(addr)) {
+		any_type_t zero = {};
+		return zero;
+	}
 
 	// NOREC write-back: a concurrent writer holds the global lock
 	// (clock_is_odd) while writing to memory.  A reader who reads during this
@@ -490,13 +493,14 @@ write_word_norec(    //
 	    ((uintptr_t)addr >> 47) != 0) {
 		return; // invalid address — skip
 	}
-#ifdef LLVM_TM_PLUGIN
-	if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
+	// Only bypass if address is on current thread's stack (defense-in-depth).
+	// Heap/TM-region addresses always go through TM tracking, even in plugin mode,
+	// matching TinySTM's LLVM_TM_ADDR_CHECK pattern.
+	if (stm::isOnCurrentThreadStack(addr)) {
 		tx->read_only = false;
 		write_value_to_addr(addr, val, sz);
 		return;
 	}
-#endif
 
 	tx->read_only = false; // TODO: shouldn't the TX abort?
 

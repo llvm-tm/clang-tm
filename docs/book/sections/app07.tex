@@ -528,7 +528,7 @@ selectively.
 \section*{Chapter 15 --- From Source to AST: Lexing and Parsing}
 
 \begin{enumerate}
-    \item \emph{[theory]} Draw the DFA for the five token kinds (keyword
+    \item \emph{[theory]} Draw the DFA for the six token kinds (keyword
           \texttt{atomic}, identifier, number, \texttt{\char`\{},
           \texttt{\char`\}}, \texttt{;}) so that every accepting state is
           reachable from the start state; see
@@ -541,10 +541,9 @@ selectively.
           nested atomic blocks and report the source position of an
           unbalanced brace in the error message; the parser must match
           nesting depth, not just find one closing brace.
-    \item \emph{[implementation]} Add a statement kind to
-          Listing~\ref{lst:bank-parser} (for example a second transfer, or a
-          balance-conditional) and lower it in the AST; recompile and run
-          the harness.
+    \item \emph{[implementation]} Add the \texttt{deposit account amount;}
+          statement to Listing~\ref{lst:bank-parser}'s grammar and lower it
+          in the AST; recompile and run the harness.
     \item \emph{[verification]} Fix \texttt{EndAtomic} in
           Listing~\ref{lst:tla-parsed-bank} so \texttt{pc} reaches
           \texttt{"done"}; check that \texttt{TypeOK}, \texttt{MoneyConserved},
@@ -616,24 +615,25 @@ selectively.
 \section*{Chapter 17 --- Transactional Memory for GPUs}
 
 \begin{enumerate}
-    \item On lock-step hardware (SIMT) a warp spinning on a lock held by its
+    \item \emph{[theory]} On lock-step hardware (SIMT) a warp spinning on a lock held by its
           own lane cannot progress --- all lanes spin.  PR-STM's priority
           stealing lets the higher-priority lane take the lock
-          (\S\ref{sec:gpu-bank-transfer-example}).
-    \item Sort-based locking avoids deadlock under uniform access but adds
+          (\S\ref{sec:ballot}).
+    \item \emph{[theory]} Sort-based locking avoids deadlock under uniform access but adds
           serialization under hot spots; priority stealing favors the hot
           lane but can starve it only if priorities collide.
-    \item \texttt{startTS+1} lets a reader include a write whose version
+    \item \emph{[theory]} \texttt{startTS+1} lets a reader include a write whose version
           equals its snapshot; CCT only checks in-flight entries and MRV
           only finalised ones, so neither catches the boundary
           (\S\ref{sec:gust}).
-    \item \texttt{\_\_popc} on the ballot mask counts the lanes that set the
+    \item \emph{[theory]} \texttt{\_\_popc} on the ballot mask counts the lanes that set the
           predicate; the ballot must be outside the lane-guarded branch
           because all lanes must call it (\S\ref{sec:ballot}).
-    \item The serialisation point is the server warp's commit service; a
+    \item \emph{[theory]} The serialisation point is the server warp's commit service; a
           read-only workload can bypass it because read-only transactions
-          need no commit service (\S\ref{sec:gpu-bank-tla-example}).
-    \item The invariant is a commit-log consistency check (every published
+          need no commit service (\S\ref{sec:software},
+          \S\ref{sec:commit}).
+    \item \emph{[verification]} The invariant is a commit-log consistency check (every published
           version has a matching log entry); bound the log length and the
           number of warps to keep TLC tractable.
     \item \emph{[implementation]} Add a bounded per-lane retry counter to
@@ -683,7 +683,8 @@ selectively.
           (checksum mismatch), and keep redo idempotent by storing the
           post-state.
     \item \emph{[verification]} Allow \texttt{CommitSecondaries} to be
-          skipped nondeterministically in \S\ref{sec:distributed-commit-example}'s
+          skipped nondeterministically in
+          \S\ref{sec:percolator-commit-example}'s
           Percolator model; a recovery action re-reads the primary decision,
           and every committed transfer reaches \texttt{done} under weak
           fairness.

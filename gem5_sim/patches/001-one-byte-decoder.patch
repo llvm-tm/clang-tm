@@ -1,0 +1,52 @@
+diff --git a/src/arch/x86/isa/decoder/one_byte_opcodes.isa b/src/arch/x86/isa/decoder/one_byte_opcodes.isa
+index 6e65e78fb1..5b1a2f8e6d 100644
+--- a/src/arch/x86/isa/decoder/one_byte_opcodes.isa
++++ b/src/arch/x86/isa/decoder/one_byte_opcodes.isa
+@@ -38,6 +38,30 @@
+ // Decode the one byte opcodes
+ //
+
++//=== TSX instruction format definitions ===
++def format XBegin() {{
++    decode_block = '''
++        return new X86ISAInst::XBeginInst(machInst,
++            (int64_t)machInst.immediate);
++    '''
++}};
++
++def format XAbort() {{
++    decode_block = '''
++        return new X86ISAInst::XAbortInst(machInst,
++            machInst.immediate & 0xff);
++    '''
++}};
++
++def format XEnd() {{
++    decode_block = 'return new X86ISAInst::XEndInst(machInst);'
++}};
++
++def format XTest() {{
++    decode_block = 'return new X86ISAInst::XTestInst(machInst);'
++}};
++//=========================================
++
+ 'X86ISA::OneByteOpcode': decode OPCODE_OP_TOP5 {
+     format Inst {
+         0x00: decode OPCODE_OP_BOTTOM3 {
+@@ -406,11 +430,16 @@
+             //0x6: group12_Eb_Ib();
+             0x6: decode MODRM_REG {
+                 0x0: MOV(Eb,Ib);
++                // XABORT: C6 /7 imm8 (ModRM.reg == 7)
++                0x7: XAbort();
+                 default: UD2();
+             }
+             //0x7: group12_Ev_Iz();
+             0x7: decode MODRM_REG {
+                 0x0: MOV(Ev,Iz);
++                // XBEGIN: C7 /3 rel32 (hint taken), C7 /7 rel32 (hint not taken)
++                0x3: XBegin();
++                0x7: XBegin();
+                 default: UD2();
+             }
+         }

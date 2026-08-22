@@ -1,6 +1,6 @@
 CHAPTER 05 — Mathematical Foundations
 Part: III (Formal Foundations: Mathematics and Verification)
-Lines: ~563 | Sections: 10 | Figures: 2 | Tables: 2 | Listings: 5 | TikZ: 2
+Lines: 627 | Sections: 10 | Figures: 2 | Tables: 2 | Listings: 5 | TikZ: 2
 
 PURPOSE: Math toolkit for TM reasoning: automata/languages, Markov chains,
 queueing theory (Little's law), plus worked examples applying them to the

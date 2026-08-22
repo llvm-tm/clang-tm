@@ -1,6 +1,6 @@
 \chapter{Open Questions and Emerging Directions}
 
-\index{open questions, emerging directions, hybrid TM, persistent TM, distributed TM, GPU TM, verified STM, energy-aware TM}
+\index{open questions}\index{emerging directions}\index{hybrid TM}\index{persistent TM}\index{distributed TM}\index{GPU TM}\index{verified STM}\index{energy-aware TM}
 
 Transactional memory has never been one technique. It is a family of contracts: optimistic execution, conflict detection, validation, commit, and recovery. The earlier chapters studied those contracts in isolation: single-lock serialization, timestamp validation, ownership records, hardware transactions, multi-version histories, crash recovery, distributed prepare/commit, and GPU commit protocols. This chapter asks what remains open once those mechanisms are implemented, tested, and made comparable.
 
@@ -18,7 +18,7 @@ The companion project makes the question unusually concrete. The same two-accoun
           protocols at thousands of concurrent transactions.
     \item Persistent TM: durable commit with volatile metadata; crash-consistency without a database's write-ahead log.
     \item Distributed TM: exporting the TM API over replicated or geo-distributed storage (the companion repo wraps a TiKV cluster).
-    \item Hybrid systems: HTM fast path, STM (or serialized) fallback, and the theory of `phased' and `shipwreck' hybrids.
+    \item Hybrid systems: HTM fast path, STM (or serialized) fallback, and the theory of phased hybrids (PhTM~\cite{lev07phased}, Hybrid-NOrec, Invyswell).
     \item Verified/certified STMs: mechanically checked backends, and the growing standard of TLA+-verified designs.
     \item Energy-aware TM: correlation between abort rate and power on mobile/embedded cores.
 \end{itemize}
@@ -27,8 +27,12 @@ The implementation boundary is now part of the research question. The companion
 repo has working CPU backends from SGL through SwissTM, TinySTM variants,
 NOrec-BF, TL2, TSC-TM, MVLog, persistent and distributed SGL, and a TiKV
 Percolator-style backend; it also contains GPU designs such as PR-STM, CSMV,
-GPUTX, GAccO, GPU-JVSTM, and GUST. All are tested against the same transactional
-and data-structure suites, and the core protocols have TLA+ models. This makes
+GPUTX, GAccO, and GUST (GPU-JVSTM exists as a checked TLA+ model,
+\texttt{GPU\_JVSTM.tla}, but has no implementation). The volatile CPU backends
+are tested against the same transactional and data-structure suites; the GPU,
+persistent, and distributed backends carry partial coverage (some are
+plugin-pipeline-only, and the GPU kernels await on-target verification), and
+the core protocols have TLA+ models. This makes
 the open questions unusually concrete: the same bank invariant should survive
 hardware aborts, validation filters, crash recovery, remote prepare/commit, and
 GPU commit logs.
@@ -45,10 +49,10 @@ Direction & Representative backends & Main pressure point & Repo signal \\
 \hline
 Hybrid HTM/STM & TSX-SGL, phased HTM-to-STM sketches & Capacity aborts, ownership agreement between paths, fallback cliffs & Tested; no portable HTM standard \\
 Classic STM & NOrec, NOrec-BF, TL2, TSC-TM, TinySTM, SwissTM & Validation cost, metadata contention, memory reclamation & Bank fuzz: TL2 about 2.06M txns/s, TSC-TM about 2.05M on M1 Pro \\
-Persistent TM & NV-HTM, Romulus, PersistentSGL & Durable ordering, redo/undo idempotence, volatile metadata after crash & Crash invariants modelled \\
+Persistent TM & NV-HTM (scaffold), DUDETM, SPHT, PersistentSGL & Durable ordering, redo/undo idempotence, volatile metadata after crash & Crash invariants modelled; repo backends DRAM-backed today \\
 Distributed TM & DistributedSGL, TiKV Percolator-2PC wrapper & Remote validation, partial failure, coordinator recovery & Same API, higher-latency commit path \\
-GPU TM & PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, GUST & No cache-coherent TM hardware, thousands of concurrent transactions & GPU results are device-dependent \\
-Multi-version TM & JVSTM, MVLog, GPU-JVSTM & Version retention, read-mostly scalability, reclamation & MVLog about 275K write-heavy and 109K read-mostly txns/s on M1 Pro \\
+GPU TM & PR-STM, CSMV, GPUTX, GAccO, GUST; GPU-JVSTM (model only) & No cache-coherent TM hardware, thousands of concurrent transactions & GPU results are device-dependent \\
+Multi-version TM & JVSTM, MVLog; GPU-JVSTM (model only) & Version retention, read-mostly scalability, reclamation & MVLog about 275K write-heavy and 109K read-mostly txns/s on M1 Pro \\
 \hline
 \end{tabular}
 \caption{Emerging TM directions as implementation pressure points. Numbers are the companion repo's fuzz/bank measurements where CPU measurements are available.}
@@ -77,6 +81,43 @@ Legacy code remains awkward. A transaction that calls into code which performs I
 Performance predictability is the recurring engineering problem. Best-case TM is attractive because read-mostly code can avoid coarse locking and write-heavy code can express atomicity without hand-written deadlock avoidance. Worst-case TM can be surprising: validation may become a bandwidth bottleneck; read-set growth may become a cache problem; HTM may collapse on capacity; distributed commit may spend most of its time waiting for remote consensus or storage.
 
 Finally, verification is becoming part of the expected artifact. A fast STM with no model is harder to trust than a slightly slower one whose opacity, serializability, or crash invariant has been checked against a small formal model. TLA+ does not prove the C++ implementation correct by itself, but it forces the protocol to say what its states are, what transitions are legal, and which bad executions are excluded.
+
+\section{Known Limits in the Companion}
+\index{known limitations}\index{open defects}
+
+An honest map of open directions includes an honest map of open defects. The
+companion repository carries several unresolved issues that bound what this
+book can claim about it; each is also, usefully, a worked instance of a
+failure class this book has cataloged. Table~\ref{tab:companion-known-limits}
+lists the load-bearing ones.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{p{0.24\linewidth}p{0.36\linewidth}p{0.30\linewidth}}
+\hline
+Limit & Root cause & Failure class (\S refs) \\
+\hline
+stmbench7 hangs with $>$1 thread & \texttt{ts\_multimap::lower\_bound()} drops its mutex before iterating, leaving a raw iterator into TM-managed memory; NOrec, TL2, SwissTM race on it (TinySTM survives by lock granularity, not by correctness) & privatization hazard (Ch.~2); non-TM read escaping isolation \\
+rbtree double-free under the TM allocator & the region allocator reuses addresses across transactions; the thread-local deferred-free set fires a false positive when the same address is freed again by a different thread & metadata keyed by address only --- the aliasing trap of Ch.~13 \\
+NOrec plugin-mode bypass & \texttt{\#ifdef LLVM\_TM\_PLUGIN} guards send every access outside the mmap'd TM region straight to memory; benchmarks allocating TM data on the regular heap get \emph{zero} transactional protection (the DeathStarBench social workload exposed it: high throughput, lost updates) & fast-path predicate silently disabling the algorithm (Bug~1 of \S\ref{sec:debugging-story}) \\
+JVSTM \texttt{test\_tx} failures (25 cases) & \texttt{.peek()} reads memory directly while VBox values live in the version list, not in place --- the multi-version design does not write back to the original address & API-semantics mismatch: what ``read'' means under MVCC (Ch.~9) \\
+XTM rbtree segfault & page-level private-copy scheme interacts badly with double-free detection or region boundaries & interaction defect between orthogonal mechanisms (Ch.~13) \\
+gem5 fork TSX gaps (TM-SIM repo) & \texttt{XABORT} decodes to InvalidOpcode; conflict/capacity aborts are unwired in the x86 path & simulation fidelity limits (\S\ref{sec:htm-simulation}) \\
+\hline
+\end{tabular}
+\caption{Open defects in the companion repositories and the failure classes they instantiate. Each bounds a claim this book makes: coverage numbers exclude affected backends, and exercises grounded in these paths say so.}
+\label{tab:companion-known-limits}
+\end{table}
+
+Two habits emerge from the table. First, most of these defects were found by
+invariant checks or cross-backend test sweeps, not by inspection --- the
+testing layers of Chapter~12 earning their keep. Second, none of them
+invalidates the algorithms; they live in the seams between mechanisms
+(allocator and detector, plugin and runtime, iterator and lock discipline),
+which is where systems defects concentrate. Treat the table as a reading list:
+reproducing any one of these failures locally teaches more than another
+passing benchmark run.
+
 
 \section{Worked Example: Persistent Bank Commit}
 
@@ -248,7 +289,7 @@ void tx_region(void) {
         if (s == _XBEGIN_STARTED) {
             body(); _xend(); return;         /* fast path  */
         }
-        if (s == _XABORT_CAPACITY) break;    /* stop wasting */
+        if (s & _XABORT_CAPACITY) break;     /* stop wasting */
     }
     stm_begin(); body(); stm_commit();       /* slow path  */
 }
@@ -257,7 +298,7 @@ void tx_region(void) {
 \begin{itemize}
     \item This is \S\ref{sec:rtm-example} plus one idea: the fallback is a full STM instead of a global lock, so concurrent commits survive the fallback (no serialisation cliff).
     \item The capacity check turns a wasted-retry storm into a clean handover --- the performance chapter's ``wasted work'' metric in miniature.
-    \item The ``phased'' theory of the bullets above governs exactly when to flip; the shipwreck hybrids time the flip adversarially.
+    \item The phased-hybrid theory~\cite{lev07phased} governs exactly when to flip; adversarial timing of the flip (flip just before the STM path would have won) is the pathological case to analyse.
     \item Exercise~1 asks whether this is more livelock-prone than pure STM --- the answer turns on whether the hardware and software paths agree on conflict ownership.
 \end{itemize}
 
@@ -267,10 +308,12 @@ void tx_region(void) {
 \begin{tikzpicture}[
     node distance=15mm and 23mm,
     >=Stealth,
-    state/.style={draw, rounded corners, align=center, minimum width=31mm, minimum height=9mm}
+    state/.style={draw, rounded corners, align=center, minimum width=31mm, minimum height=9mm},
+    abort/.style={red, thick},
+    fallback/.style={blue, thick}
 ]
 \node[state] (start) {transaction\\request};
-\node[state, right=of start] (rtm) {RTM attempt};
+\node[state] (rtm) {RTM attempt};
 \node[state, right=of rtm] (hwcommit) {hardware\\commit};
 \node[state, below=of rtm] (classify) {abort\\classification};
 \node[state, left=of classify] (retry) {retry budget\\remaining};
@@ -279,11 +322,11 @@ void tx_region(void) {
 
 \draw[->] (start) -- (rtm);
 \draw[->] (rtm) -- node[above]{success} (hwcommit);
-\draw[->] (rtm) -- node[right]{abort} (classify);
-\draw[->] (classify) -- node[above]{transient} (retry);
-\draw[->] (retry) |- (rtm);
-\draw[->] (classify) -- node[above]{capacity or budget exhausted} (stm);
-\draw[->] (stm) -- (swcommit);
+\draw[->, abort] (rtm) -- node[right]{abort} (classify);
+\draw[->, abort] (classify) -- node[above]{transient} (retry);
+\draw[->, abort] (retry) |- (rtm);
+\draw[->, fallback] (classify) -- node[above]{capacity or budget exhausted} (stm);
+\draw[->, fallback] (stm) -- (swcommit);
 \end{tikzpicture}
 }%
 
@@ -371,8 +414,4 @@ you state the evidence a fair answer would require.
 \index{GPU commit log}
 \index{Percolator two-phase commit}
 \index{Bloom-filter validation}
-% -------------------------------------------------------------------
-%  APPENDICES
-% -------------------------------------------------------------------
-\appendix
 

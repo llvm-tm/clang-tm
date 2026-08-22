@@ -24,9 +24,12 @@ TLC_OPTS      ?=
 
 JAVA ?= java
 
-# All backends with .tla and .cfg files (exclude liveness configs)
+# All backends with .tla and .cfg files (exclude liveness configs and any
+# cfg whose basename has no matching .tla, e.g. *-sequential/-large/-small/
+# -buggy/-check variant configs — those are driven by dedicated targets)
 ALL_CFGS := $(wildcard *.cfg)
-BACKENDS := $(patsubst %.cfg,%,$(filter-out %-liveness.cfg,$(ALL_CFGS)))
+TLA_BASES := $(patsubst %.tla,%,$(wildcard *.tla))
+BACKENDS := $(filter $(TLA_BASES),$(patsubst %.cfg,%,$(filter-out %-liveness.cfg,$(ALL_CFGS))))
 LIVENESS_BACKENDS := $(patsubst %-liveness.cfg,%,$(filter %-liveness.cfg,$(ALL_CFGS)))
 # Backends that use PlusCal (have $${$}--algorithm comment)
 PLUSCAL_BACKENDS := $(shell grep -l '\-\-algorithm' *.tla 2>/dev/null | sed 's/\.tla//')

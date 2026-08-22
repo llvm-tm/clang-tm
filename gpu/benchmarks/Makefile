@@ -46,14 +46,16 @@ endif
 ROOT    := ../..
 CSMV_DIR:= $(ROOT)/gpu/backends/csmv
 CSMV_API:= $(ROOT)/backends/tm_impl/csmv/include
+GUST_DIR:= $(ROOT)/gpu/backends/gpu_gust/cuda
 COMMON  := $(ROOT)/backends/tm_impl/common
-INCS    := -I$(CSMV_API) -I$(CSMV_DIR) -I$(COMMON)
+INCS    := -I$(CSMV_API) -I$(CSMV_DIR) -I$(GUST_DIR) -I$(COMMON)
 BIN     := bin
 
 # ── Targets ────────────────────────────────────────────────────
 BINARIES := $(BIN)/gpu_ycsb $(BIN)/gpu_kmeans $(BIN)/gpu_memcached $(BIN)/gpu_tpcc $(BIN)/gpu_fuzz_counter
+GUST_BINARIES := $(BIN)/gpu_bank $(BIN)/gpu_ycsb_gust $(BIN)/gpu_memcached_gust $(BIN)/gpu_gust_smoke
 
-all: $(BINARIES)
+all: $(BINARIES) $(GUST_BINARIES)
 
 $(BIN)/gpu_fuzz_counter: gpu_fuzz_counter.cu $(CSMV_DIR)/csmv_batch_executor.cu \
                          $(CSMV_DIR)/csmv_batch_executor.hpp
@@ -91,12 +93,40 @@ $(BIN)/gpu_tpcc: gpu_tpcc.cu $(CSMV_DIR)/csmv_batch_executor.cu \
 	    gpu_tpcc.cu $(CSMV_DIR)/csmv_batch_executor.cu \
 	    -o $@
 
+# ── GUST-bound benchmarks (one tx per lane, warp-cooperative commit) ──
+GUST_EXEC := $(GUST_DIR)/gpu_gust_batch_executor.cu
+
+$(BIN)/gpu_bank: gpu_bank.cu $(GUST_EXEC) $(GUST_DIR)/gpu_gust_batch_executor.cuh
+	@mkdir -p $(BIN)
+	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
+	    gpu_bank.cu $(GUST_EXEC) -o $@
+
+$(BIN)/gpu_ycsb_gust: gpu_ycsb_gust.cu $(GUST_EXEC) $(GUST_DIR)/gpu_gust_batch_executor.cuh
+	@mkdir -p $(BIN)
+	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
+	    gpu_ycsb_gust.cu $(GUST_EXEC) -o $@
+
+$(BIN)/gpu_memcached_gust: gpu_memcached_gust.cu $(GUST_EXEC) $(GUST_DIR)/gpu_gust_batch_executor.cuh
+	@mkdir -p $(BIN)
+	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
+	    gpu_memcached_gust.cu $(GUST_EXEC) -o $@
+
+$(BIN)/gpu_gust_smoke: $(GUST_DIR)/gpu_gust_smoke.cu $(GUST_EXEC) $(GUST_DIR)/gpu_gust_batch_executor.cuh
+	@mkdir -p $(BIN)
+	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
+	    $(GUST_DIR)/gpu_gust_smoke.cu $(GUST_EXEC) -o $@
+
 run: all
 	$(BIN)/gpu_ycsb 4096 1024 8 50
 	$(BIN)/gpu_kmeans 4096 2 8 1024
 	$(BIN)/gpu_memcached 4096 1024 50
 	$(BIN)/gpu_tpcc 8 4 64 1024 10
 	$(BIN)/gpu_fuzz_counter 1024 4
+	$(BIN)/gpu_gust_smoke 4 256 1000
+	$(BIN)/gpu_bank 32 1024 1000 0
+	$(BIN)/gpu_bank 32 1024 1000 90
+	$(BIN)/gpu_ycsb_gust 4096 1024 8 50
+	$(BIN)/gpu_memcached_gust 4096 1024 50
 
 .PHONY: all run clean
 clean:

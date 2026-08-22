@@ -34,6 +34,19 @@ TLA+ model checking & Abstract safety property & Missing validation case, illega
 \end{tabular}
 \end{table}
 
+The companion repository instantiates every layer. The invariant-test layer
+is \texttt{tests/expli-api/\allowbreak test\_tx.cpp} (114 transaction-semantics cases)
+and \texttt{test\_ds.cpp} (207 data-structure cases), run per backend;
+fuzzing is \texttt{fuzz\_counter}/\texttt{\allowbreak fuzz\_bank} with configurable
+thread and counter counts; the static-analysis layer is the LLVM race
+checker (\texttt{libTMRaceChecker.so}), which scans uninstrumented functions
+for accesses to TM-annotated globals at build time; debug
+\texttt{fprintf}s are kept out of the sources and applied on demand from
+\texttt{patches/debug/}; and \texttt{smoke\_test.sh} sweeps all testable
+backends. Knowing the concrete artifacts matters for the exercises: when one
+asks you to ``add a test,'' it lands in these suites and runs against every
+backend, not just the one you are reading.
+
 These layers are complementary. The companion implementation runs concrete tests across the backends in the codebase, including lock-based, versioned, persistent, distributed, and GPU designs. The important testing pattern is backend independence: the same logical workload and the same invariant should apply to SGL, TL2, NOrec, TinySTM variants, SwissTM, persistent backends, distributed backends, and GPU designs. Backend-specific tests are still needed, but they should come after the generic invariants.
 
 \section{Worked Example: An Invariant Test for Lost Updates}
@@ -285,6 +298,63 @@ Record-and-replay and model checking are not substitutes. TLA+ explores an abstr
 \end{figure}
 
 The loop is intentionally closed. A failing seed becomes a regression test. A recorded schedule becomes a deterministic unit test. A TLA+ counterexample becomes a protocol test. The fix is not complete until the same failure mode is represented at the cheapest layer that can catch it.
+
+\section{A Debugging Story: Three Bugs, One Symptom}
+\index{debugging!case study}\index{LEFTRIGHT backend}\index{money conservation}
+\label{sec:debugging-story}
+
+The loop above is best understood through a real failure from the companion
+repository. The \texttt{leftright} backend --- despite its name, a global-clock
+OCC design --- passed every single-threaded test and lost money consistently
+with two or more threads on the bank benchmark: \emph{Money created/destroyed}.
+One symptom, three independent bugs, none of which alone explains the loss,
+and none of which a stack trace would have pointed at.
+
+\textbf{Bug 1: the stub allocator.} During process initialization only one
+thread exists, so the hook layer helpfully served \texttt{tm\_malloc} from the
+ordinary system heap ``until real backends are needed.'' Every account object
+allocated during init therefore lived outside the TM region, and the address
+classifier concluded --- correctly! --- that reads and writes to those accounts
+needed no transactional tracking. The OCC machinery ran flawlessly on a
+write-set that was always empty. Lesson: a fast-path predicate
+(\texttt{isTMAddress}) silently disables your entire algorithm when its input
+distribution changes; test the predicate, not just the protocol.
+
+\textbf{Bug 2: the null jump buffer.} The retry loop executed
+\texttt{sigsetjmp} into a thread-local buffer but never told the backend where
+that buffer lived, so the backend's pointer stayed null. On abort, the backend
+executed \texttt{siglongjmp(*nullptr, 1)} --- undefined behavior that, on the
+platform in question, dereferenced page zero and faulted in a way the runtime
+absorbed, so control \emph{fell through as if the transaction had committed}.
+The retry loop observed success and moved on. An abort that silently becomes a
+commit is the most dangerous failure mode a TM can have: every invariant test
+will eventually catch it, but no amount of staring at the validation logic
+will find it, because the validation logic never ran. Lesson: wire the
+abort path first and test it with a deliberately-aborting workload before
+trusting any pass.
+
+\textbf{Bug 3: the version-only validation blind spot.} The commit protocol
+checked \texttt{observed\_version > end\_version} --- catches a concurrent
+commit that landed \emph{between} two reads, but not one that lands
+\emph{after the last read}. Both transactions validate cleanly at clock~5;
+one commits at clock~6 and writes back; the other then writes back its stale
+snapshot over the fresh data. Money vanished. The fix was value-based
+validation: record the bytes each read returned, and under the commit lock
+re-read and compare --- detecting actual conflicts rather than inferring them
+from clock arithmetic. Lesson: version checks are a filter, not a proof;
+when in doubt, validate values.
+
+The three bugs compounded: any one of them voids the protocol, so fixing any
+single one changed nothing observable. Only the conjunction restored
+correctness (\texttt{test\_tx} 114/114, bank invariant conserved at 2 and 4
+threads). This is the normal shape of TM failures --- a symptom at the
+invariant layer caused by uncorrelated defects at the allocator, control-flow,
+and protocol layers --- and it is why Chapter~13's pitfall catalog and this
+chapter's layered tests exist. When you meet an unexplained invariant failure,
+resist the urge to debug the protocol first: audit what the hooks actually
+received, whether the abort path actually aborts, and what the validator
+actually compares.
+
 
 \section{Worked Example: Replay of a Lost-Update}
 \index{deterministic scheduling}\index{replay}

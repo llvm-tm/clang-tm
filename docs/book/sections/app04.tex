@@ -30,8 +30,9 @@ Spec == Init /\ [][Next]_x
 configuration file.  An \emph{invariant} is a state predicate that must hold
 in every reachable state; a \emph{property} (temporal) asserts that a good
 state is eventually reached under stated fairness assumptions.  The table in
-\S\ref{sec:verify-workflow} maps every runtime backend in this book to its
-model file, key invariant, and TLC outcome.
+\S\ref{sec:verify-workflow} maps representative runtime backends in this book
+to their model file, key invariant, and TLC outcome; the full set of models
+(about three dozen) lives in \texttt{docs/proofs}.
 
 \section{Writing a Configuration File}
 
@@ -69,22 +70,30 @@ invariants \texttt{MoneyConserved} and \texttt{FloorsHold}.  The PlusCal
 form (see \S\ref{sec:pluscal-example} for the full running model):
 
 \begin{lstlisting}[language={}, caption={The shared shape of every TM model in the book.}]
+--------------------- MODULE BankSkeleton ---------------------
+EXTENDS Integers
+(*
 --algorithm Bank
 variables
   clock = 0, lock = FALSE,
   bal = [a \in 1..2 |-> 10];
 
 process Tx \in 1..2
-variables snap = 0, r1 = 0, r2 = 0;
+variables snap = 0, r1 = 0, r2 = 0, ok = TRUE;
 begin
   BeginTx:  snap := clock;
   Read:     r1 := bal[1]; r2 := bal[2];
-  Validate: if clock /= snap then abort or re-read; end if;
-  Commit:   await lock = FALSE; lock := TRUE;
-            bal[1] := bal[1] - 1; bal[2] := bal[2] + 1;
-            clock := clock + 1; lock := FALSE;
+  Validate: if clock /= snap then
+              ok := FALSE;        \* abort: the caller retries
+            end if;
+  Commit:   if ok then
+              await lock = FALSE; lock := TRUE;
+              bal[1] := bal[1] - 1; bal[2] := bal[2] + 1;
+              clock := clock + 1; lock := FALSE;
+            end if;
 end process;
 end algorithm;
+*)
 ====
 \end{lstlisting}
 
@@ -121,15 +130,25 @@ fairness-based properties.
           forever.  Bound it with a \texttt{CONSTRAINT} or a small
           \texttt{CONSTANTS} domain; the book's configs use finite
           \texttt{TLCBound} constraints for exactly this reason.
-    \item \textbf{Record-valued state.}  Function-valued variables such as
-          \texttt{bal = [a $\in$ 1..2 |-> 10]} fingerprint fine in TLC, but a
-          model with per-process records that is translated from PlusCal can
-          blow up because each assignment creates a new record value.
-          Prefer named scalars and small sets.
-    \item \textbf{Missing labels.}  PlusCal requires a label before every
-          statement that touches a shared variable or that other processes
-          must await; the translator errors with ``missing label'' when a
-          loop or a multi-statement block lacks one.
+    \item \textbf{Nested records break TLC's fingerprinting.}  Plain
+          function-valued variables such as
+          \texttt{bal = [a $\in$ 1..2 |-> 10]} fingerprint fine, but a
+          record-of-records value such as
+          \texttt{log = [s |-> [state: ..., ws: ..., rs: ...]]} makes
+          TLC~2.14 fail with \emph{``can't enumerate the value of the
+          `state' field''}.  The working idiom (used by the repository's
+          \texttt{MVLog.tla}) is parallel arrays indexed by slot:
+          \texttt{logState[s]}, \texttt{logWs[s]}, \texttt{logRs[s]}.
+    \item \textbf{Nested record-field assignment confuses the PlusCal
+          translator.}  Consecutive statements such as
+          \texttt{log[slot].state := Committed;} followed by
+          \texttt{log[slot].ws := ...} trigger \emph{``Missing labels''}
+          errors; assign the whole element at once instead:
+          \texttt{log[slot] := [state |-> Committed, ws |-> ...]}.
+    \item \textbf{\texttt{==} followed by \texttt{=} is a precedence
+          trap.}  A definition like \texttt{Init == log = [..]} can raise a
+          parser precedence conflict; parenthesize the right-hand side:
+          \texttt{Init == (log = [..])}.
     \item \textbf{Type errors hide real errors.}  \texttt{TypeOK} (a
           predicate over the types of every variable) is the first
           invariant to write; without it, a modelling mistake surfaces as a

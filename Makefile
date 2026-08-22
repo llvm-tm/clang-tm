@@ -91,7 +91,7 @@ test_run: plugin-benchmarks
 	@$(PLUGIN_BENCHMARKS_DIR)/STAMP/bin/stamp_uninstrumented -b kmeans -t 2 2>&1
 
 # Run all explicit C++ API benchmarks across all supported backends
-BACKENDS_TESTS := TINYSTM WBETL WT NOREC SWISSTM TL2 SGL LEFTRIGHT ROMULUS XTM SPHT TSXSGL GPU_STM_CPU CSMV
+BACKENDS_TESTS := TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL LEFTRIGHT ROMULUS XTM SPHT TSXSGL GPU_STM_CPU CSMV
 check-all:
 	@echo "=== Building and running all tests across all backends ==="
 	@for be in $(BACKENDS_TESTS); do \
@@ -120,3 +120,11 @@ check-all:
 		echo ""; \
 	done
 	@echo "=== All backend tests complete ==="
+
+# --- gem5 simulation -------------------------------------------------------
+.PHONY: gem5 gem5-clean
+gem5:
+	./gem5_sim/setup.sh
+
+gem5-clean:
+	rm -rf gem5_sim/gem5/build

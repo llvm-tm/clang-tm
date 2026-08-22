@@ -119,7 +119,7 @@ this chapter's automata language can describe.
 
 A parser generator makes the grammar an explicit artifact. Instead of encoding every rule as a function, the programmer writes productions and lets the tool compute states, transitions, lookahead, and reductions. This is valuable when the language grows beyond a small teaching grammar. It is also valuable when diagnostics and maintenance matter: a grammar file can be reviewed independently from semantic actions.
 
-\emph{Yacc (1975)} compiled a context-free grammar into an \textsc{LALR(1)} parser table; its modern form is \textsc{GNU Bison}, still maintained and still the parser behind many C/C++-adjacent tools (e.g.\ SQL engines, shell grammars). \emph{The generated automaton is a real object.} For a simple grammar, the ``parser'' Bison would produce is an LR(0) automaton with one state per set of viable items, as in Figure~\ref{fig:lr0-automaton} for the grammar in Listing~\ref{lst:expr-grammar}. \emph{Recursive descent you write; an LR table you compute.} This is the trade-off: hand-written parsers read like the grammar but must avoid left recursion; generated parsers accept the grammar as-is but hide the shift/reduce machinery behind the table. \emph{Modern tools}. \textsc{ANTLR} (ALL(*), with Python and many other targets) generates recursive-descent parsers from grammar files; \textsc{tree-sitter} builds error-tolerant, incremental \textsc{GLR} parsers used by editors; Python projects commonly use \textsc{PLY} (a Yacc port), \textsc{SLY} (its successor), or \textsc{Lark} (Earley/LALR from \textsc{EBNF}). \emph{What this means for transactional constructs}: nothing about \texttt{atomic} is hard to parse --- any of these tools can host the grammar --- so the interesting work stays downstream, in the instrumentation and runtime, where the rest of this book lives. \emph{Scope note}: this section is a deliberate, self-contained detour. The companion repository instruments at the LLVM-IR level (Chapter~10) and does \emph{not} implement a source-level TM language, so no front-end generator is shipped; the DFA and LR(0) automata here exist to ground the vocabulary (``shift'', ``reduce'', ``item set'') rather than to build a product. Readers who want only the TM pipeline may skip to the worked example.
+\emph{Yacc (1975)} compiled a context-free grammar into an \textsc{LALR(1)} parser table; its modern form is \textsc{GNU Bison}, still maintained and still the parser behind many C/C++-adjacent tools (e.g.\ SQL engines, shell grammars). \emph{The generated automaton is a real object.} For a simple grammar, the parser Bison produces is an \textsc{LALR(1)} table built over the LR(0) item-set automaton with one state per set of viable items, as in Figure~\ref{fig:lr0-automaton} for the grammar in Listing~\ref{lst:expr-grammar}. The LR(0) skeleton alone is not a parser: state~$I_1$ in the figure contains both $E' \to E\cdot$ (accept/reduce) and $E \to E\cdot+T$ (shift), a shift/reduce conflict that is resolved only because LALR(1) consults the lookahead token. Keep that in mind when reading the figure: it shows the states, not the lookahead that disambiguates them. \emph{Recursive descent you write; an LR table you compute.} This is the trade-off: hand-written parsers read like the grammar but must avoid left recursion; generated parsers accept the grammar as-is but hide the shift/reduce machinery behind the table. \emph{Modern tools}. \textsc{ANTLR} (ALL(*), with Python and many other targets) generates recursive-descent parsers from grammar files; \textsc{tree-sitter} builds error-tolerant, incremental \textsc{GLR} parsers used by editors; Python projects commonly use \textsc{PLY} (a Yacc port), \textsc{SLY} (its successor), or \textsc{Lark} (Earley/LALR from \textsc{EBNF}). \emph{What this means for transactional constructs}: nothing about \texttt{atomic} is hard to parse --- any of these tools can host the grammar --- so the interesting work stays downstream, in the instrumentation and runtime, where the rest of this book lives. \emph{Scope note}: this section is a deliberate, self-contained detour. The companion repository instruments at the LLVM-IR level (Chapter~10) and does \emph{not} implement a source-level TM language, so no front-end generator is shipped; the DFA and LR(0) automata here exist to ground the vocabulary (``shift'', ``reduce'', ``item set'') rather than to build a product. Readers who want only the TM pipeline may skip to the worked example.
 
 The table in an LR parser is a compact encoding of two choices. A \emph{shift} consumes another token and moves to a new state. A \emph{reduce} recognizes that the symbols on top of the stack match the right-hand side of a production and replaces them by the left-hand side. Conflicts mean the grammar and parser class do not determine a unique action for a particular state and lookahead token.
 
@@ -161,7 +161,7 @@ term  ::= id
   \draw[-{Stealth}] (I4) -- node[right] {$T$} (I5);
   \draw[-{Stealth}] (I4) to[out=-165,in=15,looseness=1.0] node[below,pos=0.35] {$id$} (I3);
 \end{tikzpicture}
-\caption{The LR(0) automaton for Listing~\ref{lst:expr-grammar}, augmented with $E'\to E$ so the accept state is visible.  Reading the ``$\cdot$'' as a parse position, each state is a set of viable items; a dot before a non-terminal is a shift, and a dot at the end of a complete item is a reduce.  This is the machine a Yacc-family generator would build and then walk at parse time.}
+\caption{The LR(0) item-set automaton for Listing~\ref{lst:expr-grammar}, augmented with $E'\to E$ so the accept state is visible.  Reading the ``$\cdot$'' as a parse position, each state is a set of viable items; a dot before a non-terminal is a shift, and a dot at the end of a complete item is a reduce.  A Yacc-family generator computes this skeleton and then overlays LALR(1) lookahead sets to resolve states such as $I_1$ (which mixes $E' \to E\cdot$ and $E \to E\cdot+T$); the tables it walks at parse time encode both.}
 \label{fig:lr0-automaton}
 \end{figure}
 
@@ -190,7 +190,7 @@ The listing is schematic: it shows the shape of a lexer, not the complete maxima
 
 A parser for the corresponding atomic block has three phases. First, it expects the keyword. Second, it consumes the opening brace. Third, it parses statements until it sees the matching closing brace. The result is an AST node representing an atomic control region. Later passes lower that node into calls that begin, read, write, validate, commit, or abort a concrete backend transaction.
 
-Each grammar rule becomes one function in the recursive-descent parser --- the \texttt{atomic \{ \ldots \}} production being a small subtree. The DFA for this lexer is Exercise~1 of this chapter: five tokens, all reachable from the start state. The output AST is exactly what Part~V's instrumentation pass consumes --- the pass never sees source text. Exercise~3 extends the parser to nested atomic blocks and unbalanced-brace detection.
+Each grammar rule becomes one function in the recursive-descent parser --- the \texttt{atomic \{ \ldots \}} production being a small subtree. The DFA for this lexer is Exercise~1 of this chapter: six token kinds, all reachable from the start state. The AST's atomic control region is the source-level analogue of the region the companion instrumentation pass recovers from LLVM IR in Part~V --- the pass operates on IR, never on source text or ASTs. Exercise~3 extends the parser to nested atomic blocks and unbalanced-brace detection.
 
 The important separation is that the parser recognizes \emph{where} the transaction is; it does not implement the transaction. In the repository, the concrete backends include SGL, TSX-SGL, SPHT, NOrec, NOrec-BF, TL2, TSC-TM, TinySTM modes, SwissTM, DUDETM, NV-HTM, XTM, Romulus, LeftRight, JVSTM, MVLog, PersistentSGL, DistributedSGL, TiKV-style distributed commit, and GPU designs. The front end should not contain special cases for any of them.
 
@@ -465,12 +465,13 @@ commit log, or a distributed store) evolves underneath it.
 \section{Exercises}
 \label{sec:ch15-exercises}
 \begin{enumerate}
-    \item \emph{[theory]} Draw the DFA for the toy lexer of
-          Figure~\ref{fig:lexer-dfa} so that the five token kinds
-          (keyword \texttt{atomic}, identifier, number,
-          \texttt{\char`\{}, \texttt{\char`\}}, \texttt{;}) all have an
-          accepting state reachable from the start state.  Mark the states
-          that cannot be entered without consuming input.
+    \item \emph{[theory]} Figure~\ref{fig:lexer-dfa} shows the DFA for the
+          six token kinds of the toy lexer (keyword \texttt{atomic},
+          identifier, number, \texttt{\char`\{}, \texttt{\char`\}},
+          \texttt{;}).  Extend it: add an \texttt{assert\_conservation}
+          keyword token, and say what happens --- and which state is
+          reached --- when the input ends mid-keyword (``\texttt{atom}'').
+          Then minimize the DFA and state which states merge.
     \item \emph{[theory]} Explain why maximal munch makes
           \texttt{atomically} a single identifier, and give the
           two-token parse that a lexer stopping at the \texttt{atomic}

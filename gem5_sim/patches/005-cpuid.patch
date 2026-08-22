@@ -1,0 +1,12 @@
+diff --git a/src/arch/x86/X86ISA.py b/src/arch/x86/X86ISA.py
+index 8cbeacac75..e8f9a17d11 100644
+--- a/src/arch/x86/X86ISA.py
++++ b/src/arch/x86/X86ISA.py
+@@ -84,6 +84,6 @@ class X86ISA(SimObject):
+     # 0000_0007h
+     ExtendedFeatures = VectorParam.UInt32(
+-        [0x00000000, 0x01800000, 0x00000000, 0x00000000], "feature flags"
++        [0x00000000, 0x01800800, 0x00000000, 0x00000000], "feature flags"
+     )
+     # 0000_000Dh
+     XSave = VectorParam.UInt32(

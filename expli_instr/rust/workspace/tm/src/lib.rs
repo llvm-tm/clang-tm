@@ -137,6 +137,19 @@ pub use runtime_leftright_single::{
     tm_read_raw, tm_write_raw,
 };
 
+#[cfg(feature = "mvlog")]
+pub use runtime_mvlog::{
+    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
+    tm_begin, tm_commit, tm_abort_count, tm_abort,
+    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
+    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
+    tm_read_f32, tm_read_f64, tm_read_ptr,
+    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
+    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
+    tm_write_f32, tm_write_f64, tm_write_ptr,
+    tm_read_raw, tm_write_raw,
+};
+
 #[cfg(feature = "xtm")]
 pub use runtime_xtm::{
     tm_init, tm_exit, tm_init_thread, tm_exit_thread,
@@ -214,20 +227,21 @@ macro_rules! exclusive_backend {
     };
 }
 
-exclusive_backend!("norec",             "tl2", "swisstm", "dudetm", "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "wbctl", "wbetl", "wt");
-exclusive_backend!("tl2",               "swisstm", "dudetm", "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "wbctl", "wbetl", "wt");
-exclusive_backend!("swisstm",           "dudetm", "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "wbctl", "wbetl", "wt");
-exclusive_backend!("dudetm",            "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "wbctl", "wbetl", "wt");
-exclusive_backend!("tsxsgl",            "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "wbctl", "wbetl", "wt");
-exclusive_backend!("nvhtm",             "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "wbctl", "wbetl", "wt");
-exclusive_backend!("spht",              "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "wbctl", "wbetl", "wt");
-exclusive_backend!("leftright",         "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "wbctl", "wbetl", "wt");
-exclusive_backend!("leftright-single",  "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "wbctl", "wbetl", "wt");
-exclusive_backend!("romulus",           "xtm", "sgl-persistent", "sgl-distributed", "tikv", "wbctl", "wbetl", "wt");
-exclusive_backend!("xtm",               "sgl-persistent", "sgl-distributed", "tikv", "wbctl", "wbetl", "wt");
-exclusive_backend!("sgl-persistent",    "sgl-distributed", "tikv", "wbctl", "wbetl", "wt");
-exclusive_backend!("sgl-distributed",   "tikv", "wbctl", "wbetl", "wt");
-exclusive_backend!("tikv",              "wbctl", "wbetl", "wt");
+exclusive_backend!("norec",             "tl2", "swisstm", "dudetm", "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("tl2",               "swisstm", "dudetm", "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("swisstm",           "dudetm", "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("dudetm",            "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("tsxsgl",            "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("nvhtm",             "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("spht",              "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("leftright",         "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("leftright-single",  "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("romulus",           "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("xtm",               "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("sgl-persistent",    "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("sgl-distributed",   "tikv", "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("tikv",              "mvlog", "wbctl", "wbetl", "wt");
+exclusive_backend!("mvlog",             "wbctl", "wbetl", "wt");
 exclusive_backend!("wbctl",             "wbetl", "wt");
 exclusive_backend!("wbetl",             "wt");
 
@@ -238,10 +252,10 @@ exclusive_backend!("wbetl",             "wt");
     feature = "leftright", feature = "leftright_single",
     feature = "romulus", feature = "xtm",
     feature = "sgl_persistent", feature = "sgl_distributed",
-    feature = "tikv",
+    feature = "tikv", feature = "mvlog",
 )))]
 compile_error!(
-    "At least one backend feature must be enabled: wbctl, wbetl, wt, norec, tl2, swisstm, dudetm, tsxsgl, nvhtm, spht, leftright, leftright_single, romulus, xtm, sgl_persistent, sgl_distributed, tikv"
+    "At least one backend feature must be enabled: wbctl, wbetl, wt, norec, tl2, swisstm, dudetm, tsxsgl, nvhtm, spht, leftright, leftright_single, romulus, xtm, sgl_persistent, sgl_distributed, tikv, mvlog"
 );
 
 // ── TmPrimitive trait ──────────────────────────────────
@@ -395,7 +409,7 @@ impl Transaction {
     feature = "spht", feature = "leftright", feature = "leftright-single",
     feature = "romulus", feature = "xtm",
     feature = "sgl-persistent", feature = "sgl-distributed",
-    feature = "tikv",
+    feature = "tikv", feature = "mvlog",
 ))]
 pub fn transaction<T, F>(f: F) -> T
 where
@@ -427,7 +441,7 @@ where
     feature = "spht", feature = "leftright", feature = "leftright-single",
     feature = "romulus", feature = "xtm",
     feature = "sgl-persistent", feature = "sgl-distributed",
-    feature = "tikv",
+    feature = "tikv", feature = "mvlog",
 )))]
 pub fn transaction<T, F>(f: F) -> T
 where

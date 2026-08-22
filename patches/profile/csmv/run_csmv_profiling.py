@@ -120,7 +120,7 @@ def generate_calibration(results: list) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description='CSMV GPU profiling')
-    parser.add_argument('--benchmarks-dir', default='benchmarks/cpp')
+    parser.add_argument('--benchmarks-dir', default='gpu/benchmarks')
     parser.add_argument('--output-dir', default='profiling_data/csmv')
     parser.add_argument('--build', action='store_true', help='Build benchmarks first')
     args = parser.parse_args()

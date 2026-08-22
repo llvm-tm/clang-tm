@@ -11,13 +11,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <execinfo.h>
 #include <mutex>
 #include <unordered_set>
 #include <unistd.h>
 #include <new>
 
 #include "tm_common.hpp"
+#include "tm_platform.hpp" // stm::tm_backtrace_print (portable, musl-safe)
 #include "nvhtm_globals.hpp"
 #include "tm_alloc_overrides.hpp"
 #include "tm_hooks.hpp"
@@ -218,9 +218,7 @@ static void real_tm_free(void *ptr)
 		if (g_deferred_frees_set.count(ptr)) {
 			TM_EVENT(DOUBLE_FREE, ptr, 0);
 			fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
-			void *buf[64];
-			int n = backtrace(buf, 64);
-			backtrace_symbols_fd(buf, n, 2);
+			stm::tm_backtrace_print(2);
 			fflush(stderr);
 			_exit(1);
 		}
