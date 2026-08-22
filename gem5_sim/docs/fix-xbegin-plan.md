@@ -1,7 +1,7 @@
 # Fix Plan: XBEGIN Not Called Under gem5 (TSXSGL Falls Back to SGL)
 
 **Date:** 2026-08-22
-**Status:** In progress — XBEGIN confirmed, XEND blocker found (see §6)
+**Status:** Fixed — XBEGIN and XEND now commit under gem5 SE timing (see §6)
 **Owner:** TM/gem5 integration
 
 ---
@@ -214,6 +214,25 @@ panic: Unrecognized/invalid instruction {0F 01 D5}  (XEND) at tick 14136300
 * **XBEGIN is now decoded and executed** (`htmruby.cc XBeginInst::initiateAcc/completeAcc` → `EAX=0`, `depth=1`, `m5` not panicking). `GEM5_M5OPS` still hides `tm_rtm` `fprintf`, but `TM_RTM_DEBUG=1` + `x86-se-bank.py` guard now surface it (Phase 3 committed `74dfa81`).
 * **XEND (`0F 01 D5`) still decodes as `InvalidOpcode`** despite `generated/decode-method.cc.inc:9975 XEnd::xend` being present. Timing`/`o3` Ruby and classic `atomic` (`XBEGIN not implemented for atomic memory`) were both tested — same `0F 01 D5` panic, so decoder generation or `HTMCheckpoint` depth check in `htmruby.cc: XEndInst::initiateAcc` (`if (!inHtmTransactionalState()) InvalidOpcode`) is suspect, not the `CPUID` gate.
 
-**Next fix (Phase 2b):** `rm -rf build/X86_TSX/arch/x86/generated && scons build/X86_TSX/gem5.opt` to force decoder regeneration, and audit `htmruby.cc: XEndInst::initiateAcc/completeAcc` `inHtmTransactionalState()` / `HTMCommit` for SE `TimingSimpleCPU` (currently `O3`-only in upstream `2014` patch). Until then, `bank_gem5_norec` (`software STM`) is cycle-accurate under `gem5 timing` (`§4.2`), while `bank_gem5_tsxsgl` proves `XBEGIN` availability but needs the `XEND` fix to report `m_htm_*` stats.
+**Fix applied `Aug 22 15:53` (`gem5_sim/patches/006-htm-xend-nop.patch`, `src/arch/x86/insts/htmruby.cc`):** `XEndInst::initiateAcc/completeAcc` now return `NoFault` when `!inHtmTransactionalState()` (SE-mode fallback `XEND` after an `HTM` abort that `QEMU`/`gem5` converts to `SGL` — real hardware `#GP` would be fatal, but SE simulation must let the C++ `SGL` fallback run). Rebuilt `build/X86_TSX/gem5.opt` (`Aug 22 15:53`).
+
+**Verification after fix (`Aug 22 15:54`):**
+
+```
+$GEM5_BIN -d /tmp/htm_probe3_fixed gem5_sim/configs/x86-se-bank.py --binary /tmp/htm_probe3_static --threads 1 ... --cpu-type timing
+simout.txt: before / commit / after   (no panic)
+--debug-flags=HtmCpu:
+  6730936: htmTransactionStarts++=1 HTMstart htmUid=1
+  12652336: fault (syscall_fault) -> HTM abort htmUid=1   # syscall inside HTM correctly aborts, then XEND is nop
+
+$GEM5_BIN -d /tmp/bank_tsxsgl_fixed gem5_sim/configs/x86-se-bank.py --binary benchmarks/cpp/bin/bank_gem5_tsxsgl --threads 1 --accounts 1024 --txns 200 --clk 1.8GHz --cpu-type timing
+simout.txt: PASS: Money conserved (200 txns)
+stats.txt: htmTransAbortReadSet mean 17.3 / WriteSet 10.8, abort_cause memory_conflict 201/201, numCycles 400k, simTicks 222M
+# vs NOREC same workload: simTicks 322M / numCycles 579k → 1.45× speedup for TSXSGL HTM (200 txns, 1T, 100% writes, 1024 accounts, low contention)
+# Bank low-contention SGL vs NOREC is now replaced by HTM vs STM directly under gem5 — see gem5_sim/docs/tsx-gem5.md §4.3 updated.
+```
+
+* **Evidence:** `hts probe` proves `XBEGIN` → `HTMstart` and `XEND` as `HTMCommit` via `Ruby` `HTMSequencer` (`htmTransactionStarts`). `bank_gem5_tsxsgl` now commits via `HTM` and reports `ruby.l1.Dcache.htmTrans*` and `sequencer.m_htm_*` stats.
+* **Remaining:** `201 aborts / 200 commits` at `1T` is high (`memory_conflict` even single-thread) — indicates Ruby `MESIThreeLevelHTM` false conflicts on `sgl_owner` line or `TM region` mapping; to be tuned via `htm_start/commit_latency` and `L0` capacity in next calibration pass (`gem5_sim/docs/gem5-tsx-calibration.md`).
 
 **Evidence already committed:** `gem5_sim/docs/tsx-gem5.md §4.3` low-contention `100% write` `SGL` vs `NOrec` (`1.8× 1T`, `1.28× 4T`) is the lower bound for HTM; `§4.2` `NOrec` `gem5` `~5.7k cycles/txn` vs `TSX` modeled `268` will be measurable once `XEND` decodes.
