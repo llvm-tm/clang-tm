@@ -1,7 +1,7 @@
 # Fix Plan: XBEGIN Not Called Under gem5 (TSXSGL Falls Back to SGL)
 
 **Date:** 2026-08-22
-**Status:** Draft — not yet executed
+**Status:** In progress — XBEGIN confirmed, XEND blocker found (see §6)
 **Owner:** TM/gem5 integration
 
 ---
@@ -189,3 +189,31 @@ The low-contention `100% write` workload (`bank -a 1024 -r 0`) was measured as `
 * Phase 2: 1 build (`15–30 min` on `M1`, cached)
 * Phases 3–4: 1h bench + doc update
 * **Total:** `~2h` wall, mostly `gem5` compile.
+
+---
+
+## 6. Update 2026-08-22 — XBEGIN Is Called, XEND Is the Blocker
+
+**Re-test after rebuild `Aug 22 15:26` (`scons build/X86_TSX/gem5.opt -j10`, `RUBY=y`, `--with-ruby` removed):**
+
+Minimal probe `htm_probe_static` (`-mrtm -static`, `xbegin`/`xend` verified via `objdump`):
+
+```c
+printf("before XBEGIN\n");
+unsigned s=_xbegin(); if(s==_XBEGIN_STARTED){ printf("IN_TX before XEND\n"); _xend(); printf("XEND done\n"); }
+```
+
+```
+$GEM5_BIN -d /tmp/htm_probe_out gem5_sim/configs/x86-se-bank.py --binary /tmp/htm_probe_static --threads 1 --accounts 16 --txns 1 --clk 1.8GHz --cpu-type timing
+simout.txt:
+  before XBEGIN
+  IN_TX before XEND
+panic: Unrecognized/invalid instruction {0F 01 D5}  (XEND) at tick 14136300
+```
+
+* **XBEGIN is now decoded and executed** (`htmruby.cc XBeginInst::initiateAcc/completeAcc` → `EAX=0`, `depth=1`, `m5` not panicking). `GEM5_M5OPS` still hides `tm_rtm` `fprintf`, but `TM_RTM_DEBUG=1` + `x86-se-bank.py` guard now surface it (Phase 3 committed `74dfa81`).
+* **XEND (`0F 01 D5`) still decodes as `InvalidOpcode`** despite `generated/decode-method.cc.inc:9975 XEnd::xend` being present. Timing`/`o3` Ruby and classic `atomic` (`XBEGIN not implemented for atomic memory`) were both tested — same `0F 01 D5` panic, so decoder generation or `HTMCheckpoint` depth check in `htmruby.cc: XEndInst::initiateAcc` (`if (!inHtmTransactionalState()) InvalidOpcode`) is suspect, not the `CPUID` gate.
+
+**Next fix (Phase 2b):** `rm -rf build/X86_TSX/arch/x86/generated && scons build/X86_TSX/gem5.opt` to force decoder regeneration, and audit `htmruby.cc: XEndInst::initiateAcc/completeAcc` `inHtmTransactionalState()` / `HTMCommit` for SE `TimingSimpleCPU` (currently `O3`-only in upstream `2014` patch). Until then, `bank_gem5_norec` (`software STM`) is cycle-accurate under `gem5 timing` (`§4.2`), while `bank_gem5_tsxsgl` proves `XBEGIN` availability but needs the `XEND` fix to report `m_htm_*` stats.
+
+**Evidence already committed:** `gem5_sim/docs/tsx-gem5.md §4.3` low-contention `100% write` `SGL` vs `NOrec` (`1.8× 1T`, `1.28× 4T`) is the lower bound for HTM; `§4.2` `NOrec` `gem5` `~5.7k cycles/txn` vs `TSX` modeled `268` will be measurable once `XEND` decodes.
