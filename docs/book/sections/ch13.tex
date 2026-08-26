@@ -21,9 +21,9 @@ Deferred freeing also interacts with validation.  Suppose transaction \texttt{T1
 
 \begin{table}[htbp]
 \centering
- \begin{tabular}{|p{0.22\linewidth}|p{0.24\linewidth}|p{0.22\linewidth}|p{0.22\linewidth}|}
+ \begin{tabular}{|M{0.22\linewidth}|M{0.24\linewidth}|M{0.22\linewidth}|M{0.22\linewidth}|}
 \hline
-\textbf{Operation} & \textbf{When executed} & \textbf{Abort action} & \textbf{Commit action} \\
+\thb{0.22\textwidth}{\textbf{Operation}} & \thb{0.24\textwidth}{\textbf{When executed}} & \thb{0.22\textwidth}{\textbf{Abort action}} & \thb{0.22\textwidth}{\textbf{Commit action}} \\
 \hline
 \texttt{malloc} outside transaction &
 Immediately visible &

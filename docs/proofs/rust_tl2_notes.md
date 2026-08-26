@@ -4,7 +4,7 @@
 
 The C++ TL2 model (`TL2.tla`) is authoritative for the C++ implementation at
 `backends/tm_impl/tl2/tl2.hpp`. The Rust implementation at
-`expli_instr/rust/workspace/runtime/tl2/src/lib.rs` differs architecturally in
+`explicit_api/rust/workspace/runtime/tl2/src/lib.rs` differs architecturally in
 three ways.
 
 ## Architectural Differences

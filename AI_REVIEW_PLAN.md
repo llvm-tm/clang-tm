@@ -20,7 +20,7 @@ The project has a clear research architecture: one transactional-memory semantic
 
 Key examples:
 
-- Explicit C++ API in `expli_instr/cpp/include/tm_api.hpp`.
+- Explicit C++ API in `explicit_api/cpp/include/tm_api.hpp`.
 - LLVM/Clang instrumentation plugin in `plugin/`, with the documented five-pass Honorio pipeline:
   - `tm-clone`
   - `tm-collect`
@@ -28,7 +28,7 @@ Key examples:
   - `tm-instrument`
   - `tm-cleanup`
 - Runtime-swappable backend hook table through `TMRealHooks`, `tm_swap_runtime()`, and `tm_register_real_hooks()` in `backends/tm_impl/common/tm_hooks.hpp` and `backends/tm_impl/common/tm_hooks.cpp`.
-- Rust workspace in `expli_instr/rust/workspace/`, with backend selection via cargo features and `exclusive_backend!`.
+- Rust workspace in `explicit_api/rust/workspace/`, with backend selection via cargo features and `exclusive_backend!`.
 
 The hook-table architecture is especially useful for experimentation: the same frontend can drive TL2, NOrec, TinySTM, SGL, TSX, GPU-oriented runtimes, persistent runtimes, and distributed variants without rewriting the API layer.
 
@@ -169,7 +169,7 @@ Specific examples from the dossier:
 - `docs/proofs/DUDETM.tla` models only the durability pipeline, while `backends/tm_impl/dudetm/DUDETM_runtime.cpp` has many atomics and fences not modeled.
 - `docs/proofs/SPHT.tla` clears PCL entries on TSX abort, while `backends/tm_impl/spht/SPHT_runtime.cpp` reportedly does not.
 - `docs/proofs/DESEngine.tla` models `simulator/src/engine.rs`, not `simulator/src/sim_engine.rs`, despite the SimEngine naming.
-- `docs/proofs/TiKV.tla` does not capture async/gRPC behavior from `expli_instr/rust/workspace/runtime/tikv/src/lib.rs` and the C++ shim `backends/tm_impl/tikv/tikv_backend.cpp`.
+- `docs/proofs/TiKV.tla` does not capture async/gRPC behavior from `explicit_api/rust/workspace/runtime/tikv/src/lib.rs` and the C++ shim `backends/tm_impl/tikv/tikv_backend.cpp`.
 
 This means TLC PASS does not uniformly imply implementation confidence. For high-fidelity models like SGL or TinySTM, it is meaningful. For low-fidelity models, it may mostly verify a design sketch.
 
@@ -253,7 +253,7 @@ The project goal includes C++ ↔ TLA+ ↔ Rust cross-validation, but the dossie
 - Rust benchmarks have significant simplifications versus C++ in 7 of 10 cases.
 - `benchmarks/rust --features mvlog/tl2` fails to build due to `error[E0252]` from `tm-executor` forcing default `wbctl`.
 
-Relevant paths include `expli_instr/rust/workspace/`, `benchmarks/rust/`, and Rust runtime crates under `expli_instr/rust/workspace/runtime/*`.
+Relevant paths include `explicit_api/rust/workspace/`, `benchmarks/rust/`, and Rust runtime crates under `explicit_api/rust/workspace/runtime/*`.
 
 This weakens the intended three-way cross-validation story.
 
@@ -311,8 +311,8 @@ Effort is qualitative:
 | P2 | Repair low-fidelity models | Prioritize `docs/proofs/DistributedSGL.tla`, `docs/proofs/DUDETM.tla`, `docs/proofs/DESEngine.tla`, `docs/proofs/TiKV.tla`, and `docs/proofs/TSXSim.tla`. | These models currently provide limited assurance about their corresponding implementations. | L | Depends on owners deciding which backends matter most. |
 | P2 | Assert defined GPU properties in TLC configs | Update configs for `docs/proofs/GPU_PR_STM.tla` and `docs/proofs/GPU_SIMT.tla` so defined progress/invariant properties are actually checked where tractable. Continue `CSMV.tla` invariant completion. | Avoids having properties that look verified but are not asserted. | M | Requires TLC state-space tuning. |
 | P2 | Add GPU hardware validation path | Add documented build/test targets for `backends/tm_impl/gpu_stm/`, `backends/tm_impl/csmv/`, `backends/tm_impl/gpu_gust/`, and `benchmarks/gpu/` on CUDA and HIP-capable systems. | GPU bugs are often platform-specific; make-n and include checks are insufficient. | L | Requires access to appropriate CUDA/HIP hardware and toolchains. |
-| P2 | Align Rust ports with C++ semantics or label them as variants | For `expli_instr/rust/workspace/`, document or fix divergences such as Rust TL2's global commit lock, Rust Romulus lacking a read-set, and Rust XTM being version-table OCC rather than page-granularity. | The project's cross-validation story depends on the Rust port being comparable to C++ and TLA+. | L | Requires choosing between "faithful ports" and "inspired variants." |
-| P2 | Fix Rust benchmark feature build failure | Resolve `benchmarks/rust --features mvlog/tl2` failure caused by `tm-executor` forcing default `wbctl`. | Broken feature combinations reduce benchmark coverage. | M | Requires Cargo feature cleanup under `benchmarks/rust/` and `expli_instr/rust/workspace/`. |
+| P2 | Align Rust ports with C++ semantics or label them as variants | For `explicit_api/rust/workspace/`, document or fix divergences such as Rust TL2's global commit lock, Rust Romulus lacking a read-set, and Rust XTM being version-table OCC rather than page-granularity. | The project's cross-validation story depends on the Rust port being comparable to C++ and TLA+. | L | Requires choosing between "faithful ports" and "inspired variants." |
+| P2 | Fix Rust benchmark feature build failure | Resolve `benchmarks/rust --features mvlog/tl2` failure caused by `tm-executor` forcing default `wbctl`. | Broken feature combinations reduce benchmark coverage. | M | Requires Cargo feature cleanup under `benchmarks/rust/` and `explicit_api/rust/workspace/`. |
 | P2 | Normalize backend naming and docs | In `docs/IMPLEMENTATIONS.md` and backend READMEs, explicitly rename or subtitle misleading backends: Romulus as version-table OCC, LeftRight as global-clock OCC, GPUTX as not Epic. | Reduces research confusion and prevents users from citing the wrong algorithm. | S | No code dependency. |
 
 ---

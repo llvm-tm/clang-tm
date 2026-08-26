@@ -1,5 +1,5 @@
 \chapter{Speculative Designs: NOrec and Beyond}
-\index{NOrec!sections index; TL2; TinySTM; JVSTM; MVLog; value-based validation; global-clock STM; multiversion STM}
+\index{NOrec}\index{TL2}\index{TinySTM}\index{JVSTM}\index{MVLog}\index{value-based validation}\index{global-clock STM}\index{multiversion STM}
 
 Speculative transactional memory replaces coarse serialization with optimistic execution. A transaction reads shared memory, records enough evidence to justify those reads, buffers or protects its writes, and later tries to make the whole execution appear atomic. The reward is concurrency. The price is aborts, metadata traffic, validation, and proof obligations.
 
@@ -371,9 +371,9 @@ NOrec is the simplicity endpoint: one clock, one commit lock, value re-reading, 
 \begin{table}[ht]
 \centering
 \small
-\begin{tabular}{lp{3.1cm}p{3.4cm}p{3.4cm}}
+\begin{tabular}{lM{3.1cm}M{3.4cm}M{3.4cm}}
 \hline
-\textbf{Design} & \textbf{Read-set validation} & \textbf{Write-set ownership} & \textbf{Commit linearization} \\
+\textbf{Design} & \thb{3.1cm}{\textbf{Read-set validation}} & \thb{3.4cm}{\textbf{Write-set ownership}} & \thb{3.4cm}{\textbf{Commit linearization}} \\
 \hline
 SGL & none (mutex)           & direct writes under lock      & lock release \\
 NOrec & clock-capture re-read & buffered, no locks            & clock advance \\
@@ -518,9 +518,9 @@ The invariant \texttt{TotalOK} is the money-conservation property: transfers mov
 \begin{table}[htbp]
 \centering
 \small
-\begin{tabular}{p{0.16\linewidth}p{0.30\linewidth}p{0.14\linewidth}p{0.26\linewidth}}
+\begin{tabular}{M{0.16\linewidth}M{0.30\linewidth}M{0.14\linewidth}M{0.26\linewidth}}
 \hline
-\textbf{Backend family} & \textbf{Snapshot mechanism} & \textbf{Read-only aborts} & \textbf{Main cost} \\
+\thb{0.16\textwidth}{\textbf{Backend family}} & \thb{0.30\textwidth}{\textbf{Snapshot mechanism}} & \thb{0.14\textwidth}{\textbf{Read-only aborts}} & \thb{0.26\textwidth}{\textbf{Main cost}} \\
 \hline
 NOrec & global clock + value re-read & possible & read-set validation \\
 NOrec-BF & global clock + bloom-filter bypass & possible & false positives and validation \\
@@ -535,9 +535,367 @@ MVLog & commit log + newest-writer index & no for stable snapshots & log scan an
 \label{tab:snapshot-taxonomy}
 \end{table}
 
+\section{A Complete NOrec in Rust}
+\index{Rust}\index{sequence lock}\index{commit lock}\index{NOrec!complete implementation}\index{opacity!local justification}
+\label{sec:norec-rust-complete}
+
+The worked examples of this chapter showed fragments: a read path in
+\S\ref{sec:norec-example}, a transfer in
+\S\ref{sec:norec-bank-transfer-example}. This section assembles the whole
+algorithm --- begin, read, write, commit, and the retry loop around them ---
+into one compilable program, and explains every line that matters. The
+language is Rust, and the choice is didactic rather than cosmetic: in
+\emph{safe} Rust there are no casts between integers and pointers, so the
+implementation cannot quietly rely on undefined behavior. Every design
+decision must be made explicitly, which is exactly the discipline an STM
+author needs. The repository ships a full-featured Rust NOrec with these
+same bones (\rep{explicit\_api/rust/workspace/runtime/norec}); the version
+below strips it to roughly two hundred lines of standard-library-only code,
+verified with the compiler and the bank test that follows.
+
+Four choices define the design, and each is the smallest honest version of
+a choice NOrec makes \cite{dalessandro10norec}:
+
+\begin{itemize}
+    \item One global sequence clock, with the commit lock encoded in its
+          low bit --- even means ``version $v$,'' odd means ``version $v$
+          under commit.''
+    \item Writes buffered in a per-transaction write-set, visible only at
+          commit.
+    \item Reads recorded as $(slot, value)$ pairs and validated against
+          the \emph{begin} snapshot version.
+    \item Any detected staleness aborts the whole transaction; the retry
+          loop re-executes it from scratch.
+\end{itemize}
+
+Listing~\ref{lst:norec-rust-state} is the state. Cells live in a region:
+one machine word each, addressed by slot index, guarded by nothing but the
+clock. The \texttt{Word} trait admits any fixed-size \texttt{Copy} type;
+the two implementations shown cover the accounts of this chapter, and more
+are added mechanically. Note what the type system contributes: a
+\texttt{TmCell<T>} is just an index plus a phantom type, so threads share
+the region through an \texttt{Arc} and cells by copy, and no unsafe block
+appears anywhere in the file.
+
+\begin{lstlisting}[language=Rust, caption={State: a word-trait, the shared region, typed cell handles, and the per-thread transaction log.}, label={lst:norec-rust-state}]
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering as O};
+use std::sync::{Arc, atomic::AtomicBool};
+use std::thread;
+
+pub trait Word: Copy {
+    fn pack(self) -> u64;
+    fn unpack(raw: u64) -> Self;
+}
+impl Word for u64 {
+    fn pack(self) -> u64 { self }
+    fn unpack(raw: u64) -> u64 { raw }
+}
+impl Word for i64 {
+    fn pack(self) -> u64 { self as u64 }
+    fn unpack(raw: u64) -> i64 { raw as i64 }
+}
+
+pub struct Region {
+    clock: AtomicU64,      // even = version v; odd = v, commit lock held
+    mem: Vec<AtomicU64>,   // the TM heap: one machine word per cell
+}
+
+#[derive(Clone, Copy)]
+pub struct TmCell<T> {
+    slot: usize,
+    _pd: PhantomData<T>,
+}
+
+/// Zero-sized signal: this attempt made no sense; retry.
+pub struct Abort;
+
+/// Per-thread transaction state, created fresh by `transaction`.
+pub struct Tx<'r> {
+    region: &'r Region,
+    rv: u64,                  // snapshot version taken at begin
+    ws: HashMap<usize, u64>,  // write-set: slot -> buffered value
+    rs: Vec<(usize, u64)>,    // read-set: slot -> value observed
+}
+
+impl Region {
+    pub fn new() -> Self {
+        Region { clock: AtomicU64::new(0), mem: Vec::new() }
+    }
+
+    /// Allocate a cell. Call only during single-threaded setup:
+    /// the heap does not grow once threads share the region.
+    pub fn alloc<T: Word>(&mut self, init: T) -> TmCell<T> {
+        self.mem.push(AtomicU64::new(init.pack()));
+        TmCell { slot: self.mem.len() - 1, _pd: PhantomData }
+    }
+\end{lstlisting}
+
+Allocation takes \texttt{\&mut self} on purpose. Growing the heap while
+other threads hold slots would require the same kind of careful protocol
+the companion's region allocators implement; here the rule is simply that
+all allocation happens before the region is frozen into an \texttt{Arc},
+and the signature enforces it.
+
+Listing~\ref{lst:norec-rust-begin} adds the driver and \texttt{begin}.
+The retry loop has exactly three exits per attempt: the body returns a
+value, the body signals \texttt{Abort}, or \texttt{commit} fails. All
+three land in the same place --- clear the logs, sample the clock, run
+again. This is the explicit-API shape of Chapter~8's \texttt{tm\_begin}
+and \texttt{tm\_end}, collapsed into one closure. Sampling the clock in
+\texttt{begin} waits out any in-flight commit; the wait is bounded because
+the commit lock is held only for the write-back of one transaction's
+write-set, never across arbitrary user code.
+
+\begin{lstlisting}[language=Rust, caption={The retry loop and begin: sample an unlocked clock, clear the logs, run, commit or retry.}, label={lst:norec-rust-begin}]
+    /// Run `body` as an atomic action, retrying until it commits.
+    pub fn transaction<R>(
+        &self,
+        body: impl Fn(&mut Tx<'_>) -> Result<R, Abort>,
+    ) -> R {
+        let mut tx =
+            Tx { region: self, rv: 0, ws: HashMap::new(), rs: Vec::new() };
+        loop {
+            tx.begin();                     // sample clock, clear logs
+            match body(&mut tx) {
+                Ok(value) => match tx.commit() {
+                    Ok(()) => return value, // committed
+                    Err(Abort) => {}        // lost the race: retry
+                },
+                Err(Abort) => {}            // invalid snapshot: retry
+            }
+        }
+    }
+}
+
+impl<'r> Tx<'r> {
+    fn begin(&mut self) {
+        self.ws.clear();
+        self.rs.clear();
+        // Sample the clock; wait out any in-flight commit (bit0 set).
+        self.rv = loop {
+            let s = self.region.clock.load(O::Acquire);
+            if s & 1 == 0 { break s; }
+        };
+    }
+\end{lstlisting}
+
+Listing~\ref{lst:norec-rust-readwrite} is the heart. A read first serves
+itself from the write-set (read-own-writes), then performs the
+capture$\rightarrow$read$\rightarrow$recheck discipline of
+\S\ref{sec:norec-example} with one addition: the captured value must equal
+\texttt{rv}, the version sampled at \emph{begin}. That single comparison
+is what validates the entire prior read-set. Because every commit moves
+the global clock, a stable clock proves that no commit has interleaved
+since the snapshot was taken, so every earlier recorded read still
+coexists with the value about to be admitted. This is precisely the
+chapter's earlier sentence --- ``validate the old read-set before
+admitting the new read'' --- reduced, under a single global clock, to one
+integer comparison. It is also the mechanism that lifts the design above
+plain serializability toward the local-justification form of opacity
+defined in \S\ref{sec:histories-legality-opacity}: a live transaction's
+reads are always justified by the memory state at version \texttt{rv}.
+
+\begin{lstlisting}[language=Rust, caption={Read and write: serve from the write-set first; otherwise capture--read--recheck against the begin version.}, label={lst:norec-rust-readwrite}]
+    /// Transactional read: write-set first, then capture-read-recheck
+    /// against the *begin* version. Every successful read re-validates
+    /// the entire snapshot implicitly: any commit since begin would
+    /// have moved the clock away from `rv`.
+    pub fn read<T: Word>(&mut self, cell: &TmCell<T>) -> Result<T, Abort> {
+        let slot = cell.slot;
+        if let Some(&v) = self.ws.get(&slot) {
+            return Ok(T::unpack(v));       // read own buffered write
+        }
+        let s1 = self.region.clock.load(O::Acquire);   // capture
+        if s1 != self.rv {
+            return Err(Abort);             // snapshot is stale already
+        }
+        let raw = self.region.mem[slot].load(O::Relaxed);  // read data
+        let s2 = self.region.clock.load(O::Acquire);   // re-check
+        if s1 != s2 {
+            return Err(Abort);             // a commit raced the read
+        }
+        self.rs.push((slot, raw));
+        Ok(T::unpack(raw))
+    }
+
+    /// Transactional write: buffer only; visible at commit time.
+    pub fn write<T: Word>(&mut self, cell: &TmCell<T>, value: T) {
+        self.ws.insert(cell.slot, value.pack());
+    }
+\end{lstlisting}
+
+One simplification deserves honesty: the real NOrec lets a transaction
+\emph{extend} its snapshot --- on detecting a moved clock it re-validates
+its old read-set under the newer version and continues. This
+implementation instead aborts whenever the clock leaves \texttt{rv},
+which is strictly more conservative and easier to prove correct; the
+extension policy is Exercise~13.
+
+Listing~\ref{lst:norec-rust-commit} is the commit protocol. A writer
+acquires the single commit lock by flipping bit~0 of the clock with a
+CAS; the loser aborts immediately, making the design weakly progressive
+in the ladder of \S\ref{sec:progress-ladder}. Under the lock, memory is
+frozen --- every writer in the system needs this same lock --- so comparing
+each recorded read against current memory is meaningful. On mismatch the
+transaction stores \texttt{rv} back: the same version, lock cleared,
+nothing published, because it changed nothing. On success it writes the
+buffered values and publishes with \texttt{rv + 2}. The bump by two (not
+one) keeps versions even forever; odd numbers exist only transiently
+while a writer holds the lock.
+
+\begin{lstlisting}[language=Rust, caption={Commit: acquire the lock bit, re-validate reads against frozen memory, write back, publish with a Release clock bump.}, label={lst:norec-rust-commit}]
+    // ---------- 4. Commit protocol ----------
+
+    fn commit(&mut self) -> Result<(), Abort> {
+        if self.ws.is_empty() {
+            return Ok(());  // read-only: reads validated continuously
+        }
+        let rv = self.rv;
+        // Acquire the single commit lock by setting bit0 of the clock.
+        if self.region.clock
+            .compare_exchange(rv, rv | 1, O::Acquire, O::Relaxed)
+            .is_err()
+        {
+            return Err(Abort);             // another writer went first
+        }
+        // Lock held: no other writer can touch memory now, so value
+        // comparisons against our recorded reads are meaningful.
+        for &(slot, observed) in &self.rs {
+            if self.region.mem[slot].load(O::Relaxed) != observed {
+                self.region.clock.store(rv, O::Release); // unlock, no bump
+                return Err(Abort);
+            }
+        }
+        // Publish: write back, then bump the clock (unlock + new version).
+        for (&slot, &v) in &self.ws {
+            self.region.mem[slot].store(v, O::Relaxed);
+        }
+        self.region.clock.store(rv + 2, O::Release);
+        Ok(())
+    }
+\end{lstlisting}
+
+The memory orderings are load-bearing, and they are the portable answer to
+the puzzle of \S\ref{sec:tso-example}. Every data access is
+\texttt{Relaxed}; all synchronization is carried by the single clock
+variable. A writer's data stores precede its \texttt{Release} store of the
+new version; a reader whose \texttt{Acquire} load observes that version is
+guaranteed to see every write published with it. That Release/Acquire pair
+is the generalization of the store-buffer story from Part~II to weakly
+ordered machines: on x86 the relaxed accesses would compile to plain
+moves, while on ARM the pairing emits the barriers the litmus tests of
+Chapter~3 demanded. The commit-time validation loads are sound under
+\texttt{Relaxed} for the same reason --- they execute after the
+\texttt{Acquire} CAS, so no previously committed state can be invisible
+to them.
+
+A read-only transaction commits trivially: its reads were validated
+continuously, so there is nothing to do, and it linearizes at its last
+successful read. An update transaction linearizes at the clock bump ---
+the moment its writes become visible to every subsequent snapshot.
+
+Listing~\ref{lst:norec-rust-demo} runs the chapter's example end to end:
+eight mover threads transfer 10 units between accounts $A$ and $B$
+honoring the floor rule, while a checker thread continuously executes
+read-only transactions asserting conservation \emph{mid-flight}. Note the
+distinction in the mover body: a floor violation returns
+\texttt{Ok(false)} --- a committed business outcome, exactly as in
+Listing~\ref{lst:rust-bank} --- whereas \texttt{Abort} is reserved for the
+STM's own invalid-snapshot signal.
+
+\begin{lstlisting}[language=Rust, caption={The bank demo: movers honor the floor; a checker thread asserts conservation inside concurrent read-only transactions.}, label={lst:norec-rust-demo}]
+const THREADS: usize = 8;
+const ITERS: usize = 25_000;
+const START: i64 = 1_000_000;
+
+fn main() {
+    let mut region = Region::new();
+    let a = region.alloc(START);
+    let b = region.alloc(START);
+    let region = Arc::new(region);
+
+    let done = Arc::new(AtomicBool::new(false));
+
+    // Mover threads: transfer 10 between A and B, honouring a floor 10.
+    let mut handles = Vec::new();
+    for t in 0..THREADS {
+        let region = Arc::clone(&region);
+        let done = Arc::clone(&done);
+        handles.push(thread::spawn(move || {
+            let (src, dst) = if t % 2 == 0 { (a, b) } else { (b, a) };
+            let (mut moved, mut rejected) = (0u64, 0u64);
+            while !done.load(O::Relaxed) && moved < ITERS as u64 {
+                let ok = region.transaction(|tx| {
+                    let s = tx.read(&src)?;
+                    let d = tx.read(&dst)?;
+                    if s < 10 { return Ok(false); } // floor: real outcome
+                    tx.write(&src, s - 10);
+                    tx.write(&dst, d + 10);
+                    Ok(true)
+                });
+                if ok { moved += 1 } else { rejected += 1 }
+            }
+            (moved, rejected)
+        }));
+    }
+
+    // Checker thread: every committed snapshot must conserve money.
+    let region2 = Arc::clone(&region);
+    let done2 = Arc::clone(&done);
+    let checker = thread::spawn(move || {
+        let mut checks = 0u64;
+        while !done2.load(O::Relaxed) {
+            let total = region2.transaction(|tx| {
+                Ok(tx.read(&a)? + tx.read(&b)?)
+            });
+            assert_eq!(total, 2 * START, "invariant violated");
+            checks += 1;
+        }
+        checks
+    });
+
+    for h in handles { h.join().unwrap(); }
+    done.store(true, O::Relaxed);
+    let checks = checker.join().unwrap();
+
+    let total = region.transaction(|tx| Ok(tx.read(&a)? + tx.read(&b)?));
+    println!("final total = {}", total);
+    println!("snapshot checks passed: {}", checks);
+    assert_eq!(total, 2 * START);
+}
+\end{lstlisting}
+
+Typical output on the development machine (Apple M1 Pro, rustc 1.96):
+
+\begin{quote}
+\small\ttfamily
+final total = 2000000\\
+snapshot checks passed: 229337
+\end{quote}
+
+Money is conserved at the end, and --- the stronger property --- every one
+of the hundreds of thousands of concurrent read-only snapshots observed a
+consistent world. That is opacity demonstrated empirically: the checker
+thread shares no locks with the movers, yet it never observes half of a
+transfer.
+
+Three caveats bound the claim. First, correctness assumes all accesses to
+cells go through transactions; a plain write to \texttt{mem} would be
+invisible to validation, exactly as in every backend of Part~VII.
+Second, the design has no starvation guarantee. Under sustained write
+contention, readers can lose the race repeatedly --- the retry loop is
+unbounded and unfair --- which is why production backends pair speculation
+with fallback locks and why the progress ladder of
+\S\ref{sec:progress-ladder} ranks guarantees the way it does. Third, the
+fixed-snapshot policy aborts where the paper's forward-extension policy
+would proceed, trading throughput for proof simplicity; measuring that
+trade is Exercise~12.
+
 \section{Summary}
 
-Speculation unlocks concurrency but introduces aborts. Different version-management policies trade off simplicity for performance. The design space is small: clocks, locks, logs, and history --- every real STM is a combination of these. NOrec shows the value-only endpoint, TL2 the metadata-based baseline, TinySTM the write-back versus write-through engineering choice, and JVSTM and MVLog the multiversion alternative that buys read-only stability at the price of reclamation.
+Speculation unlocks concurrency but introduces aborts. Different version-management policies trade off simplicity for performance. The design space is small: clocks, locks, logs, and history --- every real STM is a combination of these. NOrec shows the value-only endpoint, TL2 the metadata-based baseline, TinySTM the write-back versus write-through engineering choice, and JVSTM and MVLog the multiversion alternative that buys read-only stability at the price of reclamation. Section~\ref{sec:norec-rust-complete} closes the loop by assembling the NOrec endpoint into a complete, compilable implementation.
 
 \section{Exercises}
 \begin{enumerate}
@@ -564,11 +922,30 @@ Speculation unlocks concurrency but introduces aborts. Different version-managem
           domains) a net positive, or has it pushed designers toward
           complexity that simpler value-based designs would beat in
           practice?  Define what ``better'' should mean before you argue.
+    \item \emph{[implementation]} Instrument the complete Rust NOrec of
+          \S\ref{sec:norec-rust-complete} with abort counters: classify
+          each retry as (a)~stale at read (\texttt{s1 != rv}), (b)~raced
+          mid-read (\texttt{s1 != s2}), (c)~commit-CAS loss, or
+          (d)~commit-time validation failure.  Run the bank demo with 2,
+          8, and 16 mover threads and report the distribution.  Explain
+          why category~(d) shrinks toward zero as contention rises.
+    \item \emph{[theory]} The real NOrec extends a transaction's snapshot:
+          on observing a moved clock it re-validates its recorded reads
+          against the new version and continues instead of restarting.
+          Prove that this extension preserves opacity as defined in
+          \S\ref{sec:histories-legality-opacity}.  Then construct an
+          interleaving of the bank demo in which the extension policy
+          commits a transfer that the fixed-snapshot policy of
+          Listing~\ref{lst:norec-rust-readwrite} aborts, and argue which
+          policy you would ship.
 \end{enumerate}
 
 \textbf{How to check your work.} The \emph{[implementation]} exercises are
 verified with the companion: bound the retry loop of
-\S\ref{sec:norec-bank-transfer-example}, and compare abort rates with
+\S\ref{sec:norec-bank-transfer-example}, instrument the abort
+classification of \S\ref{sec:norec-rust-complete} (compile the listing
+with any stable Rust toolchain; it needs only the standard library), and
+compare abort rates with
 \texttt{make -C benchmarks/cpp BACKEND=... run-intruder}.  The
 \emph{[verification]} exercises are checked with TLC against
 \S\ref{sec:pluscal-bank-floor-example} and a TL2 commit model that omits the

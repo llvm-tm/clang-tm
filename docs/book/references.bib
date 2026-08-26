@@ -454,3 +454,127 @@
   pages   = {22--38},
   year    = {2012}
 }
+
+% ---------------- Memory models (ch03) ----------------
+
+@article{lamport79sc,
+  author  = {Leslie Lamport},
+  title   = {How to Make a Multiprocessor Computer That Correctly Executes Multiprocess Programs},
+  journal = {IEEE Transactions on Computers},
+  volume  = {C-28},
+  number  = {9},
+  pages   = {690--691},
+  year    = {1979}
+}
+
+@article{sewell10cacm,
+  author  = {Peter Sewell and Susmit Sarkar and Scott Owens and Francesco Zappa Nardelli and Magnus O. Myreen},
+  title   = {x86-{TSO}: A Rigorous and Usable Programmer's Model for x86 Multiprocessors},
+  journal = {Communications of the ACM},
+  volume  = {53},
+  number  = {7},
+  pages   = {89--97},
+  year    = {2010}
+}
+
+@article{adve96tutorial,
+  author  = {Sarita V. Adve and Kourosh Gharachorloo},
+  title   = {Shared Memory Consistency Models: A Tutorial},
+  journal = {Computer},
+  volume  = {29},
+  number  = {12},
+  pages   = {66--76},
+  year    = {1996}
+}
+
+@article{alglave17fencing,
+  author  = {Jade Alglave and Luc Maranget and Michael Tautschnig},
+  title   = {Fencing Weakly Ordered Memory},
+  journal = {ACM Transactions on Programming Languages and Systems},
+  volume  = {39},
+  number  = {2},
+  pages   = {6:1--6:39},
+  year    = {2017}
+}
+
+% ---------------- Backend citations (ch03 table and beyond) ----------------
+
+@inproceedings{felber08tinystm,
+  author    = {Pascal Felber and Christof Fetzer and Torvald Riegel},
+  title     = {Dynamic Performance Tuning of Word-Based Software Transactional Memory},
+  booktitle = {Proceedings of the 13th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming (PPoPP)},
+  year      = {2008},
+  pages     = {237--246}
+}
+
+@inproceedings{dragojevic09swiss,
+  author    = {Aleksandar Dragovi{\'c} and Rachid Guerraoui and Michal Kapalka},
+  title     = {Stretching Transactional Memory},
+  booktitle = {Proceedings of the ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI)},
+  year      = {2009},
+  pages     = {155--165}
+}
+
+@inproceedings{chung06xtm,
+  author    = {JaeWoong Chung and Chi Cao Minh and Austen McDonald and Travis Skare and Hassan Chafi and Brian D. Carlstrom and Christos Kozyrakis and Kunle Olukotun},
+  title     = {Tradeoffs in Transactional Memory Virtualization},
+  booktitle = {Proceedings of the 12th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)},
+  year      = {2006},
+  pages     = {371--381}
+}
+
+@misc{ramalhete15leftright,
+  author       = {Pedro Ramalhete and Andreia Correia},
+  title        = {Left-Right: A Concurrency Control Technique with Wait-Free Popularity-Based Reads},
+  howpublished = {arXiv:1510.02585},
+  year         = {2015}
+}
+
+@misc{intel13tsx,
+  author       = {{Intel Corporation}},
+  title        = {Intel Architecture Instruction Set Extensions Programming Reference: Restricted Transactional Memory ({RTM}) and Hardware Lock Elision ({HLE})},
+  howpublished = {Technical report 319433},
+  year         = {2013}
+}
+
+% ---------------- Progress and semantics conditions (ch05) ----------------
+
+@misc{kuznetsov15obstructionfree,
+  author       = {Petr Kuznetsov and Srivatsan Ravi},
+  title        = {Why Transactional Memory Should Not Be Obstruction-Free},
+  howpublished = {arXiv:1502.02725},
+  year         = {2015}
+}
+
+@inproceedings{imbs09vwc,
+  author    = {Damien Imbs and Jos{\'e} R. Gonz{\'a}lez de Mend{\'i}vil and Michel Raynal},
+  title     = {Brief Announcement: Virtual World Consistency: A New Condition for {STM} Systems},
+  booktitle = {Proceedings of the 28th ACM Symposium on Principles of Distributed Computing (PODC)},
+  year      = {2009},
+  pages     = {280--281}
+}
+
+@article{doherty13tms,
+  author  = {Simon Doherty and Lindsay Groves and Victor Luchangco and Mark Moir},
+  title   = {Towards Formally Specifying and Verifying Transactional Memory},
+  journal = {Formal Aspects of Computing},
+  volume  = {25},
+  number  = {5},
+  pages   = {769--799},
+  year    = {2013}
+}
+
+@book{guerraoui10principles,
+  author    = {Rachid Guerraoui and Michal Kapalka},
+  title     = {Principles of Transactional Memory},
+  series    = {Synthesis Lectures on Distributed Computing Theory},
+  publisher = {Morgan \& Claypool},
+  year      = {2010}
+}
+
+@inproceedings{lesani12putting,
+  author    = {Mohsen Lesani and Victor Luchangco and Mark Moir},
+  title     = {Putting Opacity in Its Place},
+  booktitle = {Proceedings of the 6th Workshop on the Theory of Transactional Computing (WTTM)},
+  year      = {2012}
+}

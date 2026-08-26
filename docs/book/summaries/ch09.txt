@@ -26,9 +26,21 @@ SECTIONS
 - Semantic Obligations Checklist
 - Worked Example: The TL2 Commit Path
 - Worked Example: Account-Floor PlusCal Model
+- A Complete NOrec in Rust (sec:norec-rust-complete)
+    Whole algorithm end to end in safe Rust (~200 lines, std only): Word trait,
+    Region (sequence clock with commit lock in bit 0 + word heap), TmCell<T>,
+    Tx {rv, ws, rs}; retry loop; read = write-set lookup then
+    capture-read-recheck against the BEGIN version (validates whole read-set
+    implicitly); commit = CAS lock bit, re-validate reads under lock, write
+    back, publish rv+2 with Release. Fixed-snapshot policy (conservative vs
+    paper's forward extension). Memory orderings: Relaxed data + one
+    Release/Acquire clock variable. Bank demo: 8 movers + checker thread,
+    money conserved, 170k-233k mid-flight snapshot checks pass. Verified:
+    rustc 1.96, source at docs/book/listings/norec_rust_complete.rs.
+    Exercises 12 (abort classification) and 13 (snapshot-extension proof).
 - Summary
 - Exercises
 
 FIGURES: fig:norec-bank-state-machine (NOrec commit), fig:tl2-timeline
 TABLES: tab:family-matrix, tab:backend-taxonomy, tab:snapshot-taxonomy
-LISTINGS: 7 (NOrec read path, bank, TL2 barrier, MVLog read, TL2 commit, PlusCal)
+LISTINGS: 11 (NOrec read path, bank, TL2 barrier, MVLog read, TL2 commit, PlusCal model+cfg, NOrec-in-Rust state/begin/readwrite/commit/demo)

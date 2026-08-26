@@ -1,6 +1,6 @@
 CHAPTER 04 — Programming Languages and Memory Semantics for TM
 Part: II (The Machine Beneath)
-Lines: ~525 | Sections: 7 | Subsections: 2 | Figures: 2 | Tables: 1 | Listings: 3 | TikZ: 2
+Lines: ~700 | Sections: 7 | Subsections: 2 | Figures: 2 | Tables: 1 | Listings: 5 | TikZ: 2
 
 PURPOSE: Language side of the TM boundary: how C/C++/Rust express the memory
 model, ABI hazards, volatile/inline-asm/atomics, and how TM annotations
@@ -8,16 +8,19 @@ integrate into a language.
 
 SECTIONS
 - C/C++ Memory Model and ABI Hazards: volatile, Inline Assembly, and Atomics
-    (section title continues: "and Atomics"). Data-race UB, compiler
-    reorderings, barrier semantics, DATA/TEXT symbol pitfalls, sigsetjmp
-    hazards.
+    Data-race UB, compiler reorderings, barrier semantics, DATA/TEXT symbol
+    pitfalls, sigsetjmp hazards.
 - Language Integration Case Studies
-    Subsection: Rust: The Borrow Checker and TM (Send/Sync, ownership vs
-    shared-memory TM, UnsafeCell, TM-safe types).
-    Subsection: Language-Integrated Annotations for TM (transaction_safe,
-    atomic blocks, [[tm::shared]] style annotations).
+    Intro contrasts ruling-things-out (Rust) vs rewriting (annotations).
+  * Rust: The Borrow Checker and TM
+    Send/Sync, ownership vs shared-memory TM, UnsafeCell; safe Rust bank
+    transfer with the companion tm crate (TmCell/transaction, no unsafe in
+    client code); what the type system proves vs what the runtime owes.
+  * Language-Integrated Annotations for TM
+    transaction_safe, atomic blocks, [[tm::shared]] style annotations.
 - Worked Example: Atomic Operations for a Counter
-    Building atomic increments vs TM counter; compiler view.
+    Counter three ways in C AND in Rust (Mutex / AtomicI32 / TmCell
+    transaction, 4 threads); composability argument.
 - Worked Example: ABI-Safe Bank Transfer
     Bank transfer written to survive ABI hazards (function-pointer DATA
     symbols, sigsetjmp).
@@ -29,4 +32,7 @@ SECTIONS
 FIGURES: fig:language-tm-boundary (language-TM boundary),
          fig:ordering-lattice (memory-ordering lattice)
 TABLES: tab:language-tm-taxonomy (language-integration mechanisms + contracts)
-LISTINGS: 3 (counter, ABI-safe bank, TLA+ lost-atomicity)
+LISTINGS: 5 (counter C, Rust bank transfer with tm crate, counter Rust,
+ABI-safe bank C++, TLA+ lost-atomicity)
+CITES: (boehm08memory via Ch.2; Rust std::sync::atomic orderings map to the
+Ch.3 litmus table)

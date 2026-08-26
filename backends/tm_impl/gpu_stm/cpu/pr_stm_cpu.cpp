@@ -106,7 +106,7 @@ static void pr_stm_lane_thread(LaneState *ls, int num_addrs,
 
     for (int tx_iter = 0; tx_iter < 10; tx_iter++) {
         // ── BEGIN ─────────────────────────────────────────────────
-        uint64_t start_clock = cpu_global_clock.load(std::memory_order_relaxed);
+        uint64_t start_clock = cpu_global_clock.load(std::memory_order_acquire);
         ls->num_reads = 0;
         ls->num_writes = 0;
         sync->warp_abort.store(0, std::memory_order_relaxed);
@@ -116,7 +116,7 @@ static void pr_stm_lane_thread(LaneState *ls, int num_addrs,
         for (int r = 0; r < reads_per_thread; r++) {
             int addr_idx = (lane * reads_per_thread + r) % num_addrs;
             uint32_t lock_word = __atomic_load_n(
-                &cpu_lock_table[addr_idx], __ATOMIC_RELAXED);
+                &cpu_lock_table[addr_idx], __ATOMIC_ACQUIRE);
 
             // Check lock not held by another warp
             if (pr_stm_is_locked(lock_word)) {
@@ -135,7 +135,7 @@ static void pr_stm_lane_thread(LaneState *ls, int num_addrs,
         sync->barrier->arrive_and_wait();  // SIMT barrier: all lanes done reading
 
         // Check warp-level abort
-        if (sync->warp_abort.load(std::memory_order_relaxed)) {
+        if (sync->warp_abort.load(std::memory_order_acquire)) {
             goto abort_tx;
         }
 
@@ -153,8 +153,18 @@ static void pr_stm_lane_thread(LaneState *ls, int num_addrs,
         sync->phase = 3;
         { int local_valid = 1;
         for (int i = 0; i < ls->num_reads; i++) {
+            // Skip validation if this read is also in our write-set (read-own-write)
+            bool in_write_set = false;
+            for (int w = 0; w < ls->num_writes; w++) {
+                if (ls->write_addrs[w] == ls->read_addrs[i]) {
+                    in_write_set = true;
+                    break;
+                }
+            }
+            if (in_write_set) continue;
+
             uint32_t lock_word = __atomic_load_n(
-                &cpu_lock_table[ls->read_addrs[i]], __ATOMIC_RELAXED);
+                &cpu_lock_table[ls->read_addrs[i]], __ATOMIC_ACQUIRE);
             if (pr_stm_get_version(lock_word) != ls->read_vers[i] ||
                 pr_stm_is_locked(lock_word)) {
                 local_valid = 0;
@@ -165,28 +175,31 @@ static void pr_stm_lane_thread(LaneState *ls, int num_addrs,
             sync->warp_abort.store(1, std::memory_order_relaxed);
         }
         sync->barrier->arrive_and_wait();
-        if (sync->warp_abort.load(std::memory_order_relaxed)) {
+        if (sync->warp_abort.load(std::memory_order_acquire)) {
             goto abort_tx;
         }
         }
 
         // ── LOCK phase (priority-based) ──────────────────────────
         sync->phase = 4;
+        // First, check if we can acquire all locks
         for (int w = 0; w < ls->num_writes; w++) {
             int ai = (int)ls->write_addrs[w];
             uint32_t old = __atomic_load_n(
-                &cpu_lock_table[ai], __ATOMIC_RELAXED);
+                &cpu_lock_table[ai], __ATOMIC_ACQUIRE);
 
             if (pr_stm_is_locked(old)) {
                 uint8_t holder = pr_stm_get_priority(old);
-                if (holder > ls->priority) {
+                // Can only acquire if we already hold it (same priority)
+                // Higher priority holder = abort; lower = wait
+                if (holder != ls->priority) {
                     sync->warp_abort.store(1, std::memory_order_relaxed);
                     break;
                 }
             }
         }
         sync->barrier->arrive_and_wait();
-        if (sync->warp_abort.load(std::memory_order_relaxed)) {
+        if (sync->warp_abort.load(std::memory_order_acquire)) {
             goto abort_tx;
         }
 
@@ -194,18 +207,69 @@ static void pr_stm_lane_thread(LaneState *ls, int num_addrs,
         for (int w = 0; w < ls->num_writes && !sync->warp_abort.load(); w++) {
             int ai = (int)ls->write_addrs[w];
             uint32_t expected = __atomic_load_n(&cpu_lock_table[ai],
-                __ATOMIC_RELAXED);
-            if (!pr_stm_is_locked(expected) ||
-                pr_stm_get_priority(expected) <= ls->priority) {
+                __ATOMIC_ACQUIRE);
+            if (!pr_stm_is_locked(expected)) {
                 uint32_t desired = pr_stm_make_entry(
                     ls->priority, pr_stm_get_version(expected), 1);
                 __atomic_compare_exchange_n(&cpu_lock_table[ai],
                     &expected, desired, 0,
                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
             }
+            // If already locked by us, skip (already hold it)
         }
         sync->barrier->arrive_and_wait();
-        if (sync->warp_abort.load(std::memory_order_relaxed)) {
+        if (sync->warp_abort.load(std::memory_order_acquire)) {
+            goto abort_tx;
+        }
+
+        // ── RE-VALIDATE after lock acquisition ────────────────────
+        // Ensure no concurrent warp modified our read-set while
+        // we were acquiring locks. Skip reads in our write-set.
+        for (int i = 0; i < ls->num_reads; i++) {
+            // Skip if read-own-write
+            bool in_write_set = false;
+            for (int w = 0; w < ls->num_writes; w++) {
+                if (ls->write_addrs[w] == ls->read_addrs[i]) {
+                    in_write_set = true;
+                    break;
+                }
+            }
+            if (in_write_set) continue;
+
+            uint32_t lock_word = __atomic_load_n(
+                &cpu_lock_table[ls->read_addrs[i]], __ATOMIC_ACQUIRE);
+            if (pr_stm_is_locked(lock_word)) {
+                uint8_t holder = pr_stm_get_priority(lock_word);
+                if (holder != ls->priority) {
+                    // Another warp holds the lock - abort
+                    sync->warp_abort.store(1, std::memory_order_relaxed);
+                    break;
+                }
+                // We hold the lock - version must still match
+                if (pr_stm_get_version(lock_word) != ls->read_vers[i]) {
+                    sync->warp_abort.store(1, std::memory_order_relaxed);
+                    break;
+                }
+            } else {
+                // Lock free - version must match
+                if (pr_stm_get_version(lock_word) != ls->read_vers[i]) {
+                    sync->warp_abort.store(1, std::memory_order_relaxed);
+                    break;
+                }
+            }
+        }
+        sync->barrier->arrive_and_wait();
+        if (sync->warp_abort.load(std::memory_order_acquire)) {
+            // Release locks we acquired
+            for (int w = 0; w < ls->num_writes; w++) {
+                int ai = (int)ls->write_addrs[w];
+                uint32_t lw = __atomic_load_n(&cpu_lock_table[ai],
+                    __ATOMIC_RELAXED);
+                if (pr_stm_is_locked(lw) && pr_stm_get_priority(lw) == ls->priority) {
+                    uint32_t new_entry = pr_stm_make_entry(0, pr_stm_get_version(lw), 0);
+                    __atomic_store_n(&cpu_lock_table[ai], new_entry, __ATOMIC_RELEASE);
+                }
+            }
             goto abort_tx;
         }
 
@@ -217,7 +281,7 @@ static void pr_stm_lane_thread(LaneState *ls, int num_addrs,
 
         // Increment global clock (warp-level: only lane 0 does this)
         if (lane == 0) {
-            cpu_global_clock.fetch_add(1, std::memory_order_release);
+            cpu_global_clock.fetch_add(1, std::memory_order_acq_rel);
         }
         sync->barrier->arrive_and_wait();
         uint64_t commit_clock = cpu_global_clock.load(std::memory_order_acquire);
@@ -234,7 +298,7 @@ static void pr_stm_lane_thread(LaneState *ls, int num_addrs,
         // Release locks
         for (int w = 0; w < ls->num_writes; w++) {
             int ai = (int)ls->write_addrs[w];
-            uint32_t new_entry = pr_stm_make_entry(0, commit_clock, 0);
+            uint32_t new_entry = pr_stm_make_entry(0, (uint32_t)commit_clock, 0);
             __atomic_store_n(&cpu_lock_table[ai], new_entry, __ATOMIC_RELEASE);
         }
 
@@ -249,6 +313,16 @@ static void pr_stm_lane_thread(LaneState *ls, int num_addrs,
 
     abort_tx:
         // ── ABORT ────────────────────────────────────────────────
+        // Release any locks we may have acquired
+        for (int w = 0; w < ls->num_writes; w++) {
+            int ai = (int)ls->write_addrs[w];
+            uint32_t lw = __atomic_load_n(&cpu_lock_table[ai],
+                __ATOMIC_RELAXED);
+            if (pr_stm_is_locked(lw) && pr_stm_get_priority(lw) == ls->priority) {
+                uint32_t new_entry = pr_stm_make_entry(0, pr_stm_get_version(lw), 0);
+                __atomic_store_n(&cpu_lock_table[ai], new_entry, __ATOMIC_RELEASE);
+            }
+        }
         if (lane == 0) {
             cpu_aborted.fetch_add(1, std::memory_order_relaxed);
         }

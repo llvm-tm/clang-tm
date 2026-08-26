@@ -109,9 +109,9 @@ tikv      = ["tm/tikv"]
 mvlog     = ["tm/mvlog"]
 
 [dependencies]
-tm = { path = "../../expli_instr/rust/workspace/tm", default-features = false }
-tm-executor = { path = "../../expli_instr/rust/workspace/tm-executor" }
-containers = { path = "../../expli_instr/rust/workspace/containers" }
-addrspace = { path = "../../expli_instr/rust/workspace/addrspace" }
+tm = { path = "../../explicit_api/rust/workspace/tm", default-features = false }
+tm-executor = { path = "../../explicit_api/rust/workspace/tm-executor" }
+containers = { path = "../../explicit_api/rust/workspace/containers" }
+addrspace = { path = "../../explicit_api/rust/workspace/addrspace" }
 fastrand = "2"
 libc = "0.2"

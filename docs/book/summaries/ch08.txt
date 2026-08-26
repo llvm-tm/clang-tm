@@ -13,6 +13,14 @@ SECTIONS
     Tasks submitted to a queue, executed one at a time.
 - Worked Example: Bank Transfer Under SGL
 - Worked Example: Queue Serializer With Per-Task Descriptors
+- Calvin: Static Transactions and Deterministic Execution (sec:calvin-static)
+    Static declarations (read-set, write-set, body) → sequencer assigns total
+    order → snapshot declared addresses → body runs against snapshot → writes
+    published. No abort-retry loop (stale snapshots rejected at declaration,
+    not execution). Deterministic commit order. Trade-off: access sets must be
+    known upfront (natural for message handlers, batch work; awkward for
+    interactive code). Companion "calvin" backend = two-phase OCC, not this.
+    3 listings (state, execute, demo bank transfer). Exercises 10-11.
 - Summary
 - Exercises
 

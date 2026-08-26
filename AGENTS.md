@@ -145,7 +145,7 @@ Running `libTMRaceChecker.so` on all benchmarks revealed only false positives:
 
 **Issue**: Rust XTM used version-table OCC (same as Romulus) but claimed to implement the XTM page-granularity private-copy algorithm from ASPLOS 2006. The algorithms are completely different.
 
-**Fix**: Updated the implementation note in `expli_instr/rust/workspace/runtime/xtm/src/lib.rs` to accurately describe the Rust version as version-table OCC and document the difference from C++ XTM.
+**Fix**: Updated the implementation note in `explicit_api/rust/workspace/runtime/xtm/src/lib.rs` to accurately describe the Rust version as version-table OCC and document the difference from C++ XTM.
 
 ### Rust XTM read-validate fix
 
@@ -163,7 +163,7 @@ Same OCC read-validate race as C++ Romulus: capture version AFTER reading from m
 - `benchmarks/plugin/bank/bank.cpp` — removed debug fprintf with TM global access
 - `README.md` — updated ROMULUS test status (114/114 pass)
 - `AGENTS.md` — this session summary
-- `expli_instr/rust/workspace/runtime/xtm/src/lib.rs` — XTM implementation note + read-validate fix
+- `explicit_api/rust/workspace/runtime/xtm/src/lib.rs` — XTM implementation note + read-validate fix
 - `benchmarks/rust/src/bins/fuzz_counter.rs` — added --version ASCII art
 - `benchmarks/rust/src/bins/fuzz_bank.rs` — added --version ASCII art, fixed default accounts (16→64)
 
@@ -240,7 +240,7 @@ Lazy-abort (`tx.aborted = true` instead of `siglongjmp`) accounts for only ~1.84
 
 ### Changes
 
-1. **`transaction()` split** (`expli_instr/rust/workspace/tm/src/lib.rs`):
+1. **`transaction()` split** (`explicit_api/rust/workspace/tm/src/lib.rs`):
    - `#[cfg(any(panic_backends))]`: keeps `catch_unwind` + `panic_any(TmxAbort)` for backends that need panic-based abort (tl2, xtm, romulus, norec, swisstm).
    - `#[cfg(not(any(panic_backends)))]`: plain loop with `tx.aborted = true` flag for lazy-abort backends (wbctl, wbetl, wt).
 2. **`HashMap<usize, WriteEntry>` → `Vec<(usize, WriteEntry)>`** (`common.rs`): linear scan for small write-sets (1–10 entries typical). No bucket reallocation on retry. Added `ws_contains`, `ws_get`, `ws_write`, `ws_keys` helpers.
@@ -257,11 +257,11 @@ All workspace tests pass. `tm-executor` `queue_spec_alloc_inside_tx` only hangs 
 
 ### Files modified
 
-- `expli_instr/rust/workspace/tm/src/lib.rs` — `transaction()` split into two `#[cfg]` versions
-- `expli_instr/rust/workspace/runtime/tinystm/src/wbctl.rs` — `compiler_fence(SeqCst)` + Vec write-set ops
-- `expli_instr/rust/workspace/runtime/tinystm/src/wbetl.rs` — same
-- `expli_instr/rust/workspace/runtime/tinystm/src/wt.rs` — same
-- `expli_instr/rust/workspace/runtime/tinystm/src/common.rs` — `HashMap`→`Vec` write-set, helper functions
+- `explicit_api/rust/workspace/tm/src/lib.rs` — `transaction()` split into two `#[cfg]` versions
+- `explicit_api/rust/workspace/runtime/tinystm/src/wbctl.rs` — `compiler_fence(SeqCst)` + Vec write-set ops
+- `explicit_api/rust/workspace/runtime/tinystm/src/wbetl.rs` — same
+- `explicit_api/rust/workspace/runtime/tinystm/src/wt.rs` — same
+- `explicit_api/rust/workspace/runtime/tinystm/src/common.rs` — `HashMap`→`Vec` write-set, helper functions
 - `.github/workflows/ci.yml` — `--test-threads=1` for Rust workspace tests
 
 ## Session 2026-06-20 — STAMP plugin-instrumented binary crash fix (DATA/TEXT symbol conflict)
@@ -367,16 +367,16 @@ Bridges the C++ hook system to the Rust FFI library. Declares `extern "C"` funct
 
 ### Files created
 
-- `expli_instr/rust/workspace/runtime/tikv/Cargo.toml` — depends on `tikv-client = "0.4"` (crates.io)
-- `expli_instr/rust/workspace/runtime/tikv/src/lib.rs` — TiKV-backed TM implementation
+- `explicit_api/rust/workspace/runtime/tikv/Cargo.toml` — depends on `tikv-client = "0.4"` (crates.io)
+- `explicit_api/rust/workspace/runtime/tikv/src/lib.rs` — TiKV-backed TM implementation
 - `backends/tm_impl/tikv/tikv_backend.cpp` — C++ -> Rust FFI shim
 - `backends/tm_impl/tikv/README.md` — architecture docs + build instructions
 
 ### Files modified
 
-- `expli_instr/rust/workspace/Cargo.toml` — added `runtime/tikv` to workspace members
-- `expli_instr/rust/workspace/tm/Cargo.toml` — added `tikv` feature + `runtime-tikv` dependency
-- `expli_instr/rust/workspace/tm/src/lib.rs` — added `#[cfg(feature = "tikv")]` re-export block, exclusivity checks
+- `explicit_api/rust/workspace/Cargo.toml` — added `runtime/tikv` to workspace members
+- `explicit_api/rust/workspace/tm/Cargo.toml` — added `tikv` feature + `runtime-tikv` dependency
+- `explicit_api/rust/workspace/tm/src/lib.rs` — added `#[cfg(feature = "tikv")]` re-export block, exclusivity checks
 - `benchmarks/rust/Cargo.toml` — added `tikv` feature passthrough
 
 ### Usage
@@ -453,16 +453,16 @@ Key decisions:
 
 ### Files created
 
-- `expli_instr/rust/workspace/runtime/tikv/src/lib.rs` — Full TiKV TM backend (396 lines)
-- `expli_instr/rust/workspace/runtime/tikv/Cargo.toml` — Crate manifest
+- `explicit_api/rust/workspace/runtime/tikv/src/lib.rs` — Full TiKV TM backend (396 lines)
+- `explicit_api/rust/workspace/runtime/tikv/Cargo.toml` — Crate manifest
 - `backends/tm_impl/tikv/tikv_backend.cpp` — C++ → Rust FFI shim + LLVM_TM_PLUGIN guards
 - `backends/tm_impl/tikv/README.md` — Architecture docs and build instructions
 
 ### Files modified
 
-- `expli_instr/rust/workspace/tm/src/lib.rs` — Added `use runtime_core::TmxAbort`; `tikv` feature re-export block; `tikv` to exclusivity checks, at-least-one check, and `transaction()` cfg lists; fixed `transaction()` retry on TmxAbort
-- `expli_instr/rust/workspace/tm/Cargo.toml` — Added `tikv` feature → `runtime-tikv`
-- `expli_instr/rust/workspace/Cargo.toml` — Added `runtime/tikv` workspace member
+- `explicit_api/rust/workspace/tm/src/lib.rs` — Added `use runtime_core::TmxAbort`; `tikv` feature re-export block; `tikv` to exclusivity checks, at-least-one check, and `transaction()` cfg lists; fixed `transaction()` retry on TmxAbort
+- `explicit_api/rust/workspace/tm/Cargo.toml` — Added `tikv` feature → `runtime-tikv`
+- `explicit_api/rust/workspace/Cargo.toml` — Added `runtime/tikv` workspace member
 - `benchmarks/rust/Cargo.toml` — Added `tikv` feature passthrough
 
 ### Verification
@@ -807,10 +807,10 @@ Confirmed all Rust benchmarks already use named flags (no positional args). Fuzz
 
 ### Files modified
 
-- `expli_instr/rust/workspace/runtime/tl2/src/lib.rs` — spin_loop sim guard
-- `expli_instr/rust/workspace/runtime/tinystm/src/raw.rs` — spin_loop sim guards (2)
-- `expli_instr/rust/workspace/runtime/tinystm/src/common.rs` — spin_loop sim guard
-- `expli_instr/rust/workspace/runtime/romulus/src/lib.rs` — spin_loop sim guard
+- `explicit_api/rust/workspace/runtime/tl2/src/lib.rs` — spin_loop sim guard
+- `explicit_api/rust/workspace/runtime/tinystm/src/raw.rs` — spin_loop sim guards (2)
+- `explicit_api/rust/workspace/runtime/tinystm/src/common.rs` — spin_loop sim guard
+- `explicit_api/rust/workspace/runtime/romulus/src/lib.rs` — spin_loop sim guard
 - `benchmarks/rust/src/clis/stamp_bayes.rs` — --test flag
 - `benchmarks/rust/src/clis/stamp_yada.rs` — --test flag
 
@@ -1515,7 +1515,7 @@ filter (`dirty`) so the read fast path is a plain `g_mem` load.
   MVLog 108,552 vs NOrec 109,412 vs NOrec-BF 110,040; write-heavy `-r 0`
   MVLog 275,141 vs NOrec 286,025; 8-thread `-t 8 -a 1024 -r 50` MVLog 42,123
   vs NOrec 39,401.
-- **Implementation (Rust)**: `expli_instr/rust/workspace/runtime/mvlog/`
+- **Implementation (Rust)**: `explicit_api/rust/workspace/runtime/mvlog/`
   (same algorithm; atomics inside ring entries for interior mutability,
   `TmxAbort` panic + `catch_unwind` retry; `simulation` feature). Registered
   in workspace members, `tm/Cargo.toml` (`mvlog = ["runtime-mvlog"]`), all
@@ -1597,3 +1597,69 @@ Ch12 158 → Ch13 164 → Ch14 171 → Ch15 176 → Ch16 181 → Ch17 185 → **
 - New labels added Ch18: `tab:emerging-directions`, `sec:hybrid-example`,
   `fig:phased-hybrid-state`, `sec:durable-bank-example`,
   `sec:distributed-commit-example`.
+
+## Session 2026-08-25 — Book: complete NOrec TM in Rust (ch09) + expli_instr rename
+
+### `expli_instr` → `explicit_api` (repo-wide rename)
+- `git mv expli_instr explicit_api` (history preserved). The folder holds the
+  explicit-API stacks (C++ `expli::` headers + the Rust workspace) — the old
+  name implied instrumentation, which lives in `plugin/`.
+- 34 tracked files updated (`git grep` for both `expli_instr` and LaTeX-escaped
+  `expli\_instr`): CI workflow, AGENTS.md, READMEs, Makefiles (benchmarks/cpp,
+  tests/expli-api, tests/fuzz), Cargo path deps (benchmarks/rust, simulator),
+  docs + book (ch03 ×4 spots, ch08, digest.txt). Verified 0 remaining
+  references; `cargo metadata --no-deps` resolves for workspace/simulator/
+  benchmarks; book rebuilt clean (300 pages).
+
+### Book ch09 §9.14 "A Complete NOrec in Rust" (sec:norec-rust-complete)
+Whole NOrec algorithm as one compilable safe-Rust program (~200 lines, std
+only, zero `unsafe`), placed before ch09 Summary. Design: word-addressed
+Region (sequence clock with commit lock in bit 0; every commit bumps version
+by 2), `TmCell<T>` typed slot handles, `Tx{rv,ws,rs}` per-thread logs,
+`transaction()` retry loop, read = write-set-first then capture-read-recheck
+against the *begin* version (single `s1==rv` comparison validates the entire
+prior read-set — any commit moves the global clock), commit = CAS lock bit →
+re-read recorded reads under lock (memory frozen) → write back → publish
+`rv+2` with Release store; mismatch releases via `store(rv)` (same version,
+nothing published). Relaxed data accesses + one Acquire/Release clock variable
+carry all ordering. Fixed-snapshot policy is deliberately more conservative
+than the paper's forward-extension (Exercise 13). Honest claims: no starvation
+freedom; correctness assumes all cell access through transactions.
+- 5 listings (state, begin+driver, read/write, commit, bank demo) + prose;
+  cross-refs to sec:norec-example, sec:tso-example (ch03),
+  sec:histories-legality-opacity, sec:progress-ladder, fig:condition-lattice,
+  lst:rust-bank (ch04), \cite{dalessandro10norec};
+  \rep{explicit\_api/rust/workspace/runtime/norec} companion pointer.
+- Bank demo: 8 movers + a checker thread running concurrent read-only
+  transactions asserting conservation mid-flight. Verified with rustc 1.96:
+  money conserved (2,000,000), 170k–233k snapshot checks pass per run
+  (229,337 first run; 16-thread stress 500k+). Tested source kept at
+  `docs/book/listings/norec_rust_complete.rs` (re-compiled from repo copy).
+- Exercises 12 ([implementation] abort classification) and 13 ([theory]
+  snapshot-extension opacity proof) appended; Summary + "How to check your
+  work" updated. Build: 306 pages (+6), 20 overfulls (≤3pt), 0 undefined
+  refs/citations; §9.14 starts book page 111 (physical 129).
+- Book maps synced: summaries/ch09.txt (new section, LISTINGS 7→11),
+  digest.txt (new `== A Complete NOrec in Rust ==` block + 2 exercises +
+  Summary bullet).
+
+### Calvin section (ch08 §8.3) + Rust mistakes appendix (app08)
+
+**Calvin: Static Transactions and Deterministic Execution** — new section in
+ch08 before Summary. Static declarations (read-set, write-set, body closure)
+→ sequencer assigns total order → snapshot declared addresses → body runs
+against snapshot → writes buffered and published. No abort-retry loop (stale
+snapshots rejected at declaration, not execution). Deterministic commit order.
+Trade-off: access sets must be known upfront. 3 listings (state, execute,
+bank demo in Rust). Exercises 10-11 appended. Summary updated.
+
+**app08 "Common Rust Mistakes in Transactional Memory"** — new appendix with 5
+worked examples: (1) forgetting `?` on Result (E0277), (2) closure lifetime
+errors (E0597), (3) Send/Sync violations with Rc, (4) incorrect memory
+ordering (Relaxed where Acquire/Release needed — no compile error, visible for
+review), (5) unsafe aliasing (visible `unsafe` flag). Summary table comparing
+C++ silent failures vs Rust compile errors. Cross-referenced from ch08
+exercise 10.
+
+Book: 314 pages (+8), 20 overfulls, 0 undefined refs.
+Rust-preference note: new examples default to Rust; C++ listings preserved.

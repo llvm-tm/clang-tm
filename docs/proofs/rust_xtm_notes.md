@@ -4,7 +4,7 @@
 
 The C++ XTM model (`XTM.tla`) models page-granularity private-copy TM
 (XADT/XSW/XF via `mprotect`).  The Rust XTM at
-`expli_instr/rust/workspace/runtime/xtm/src/lib.rs` uses version-table OCC
+`explicit_api/rust/workspace/runtime/xtm/src/lib.rs` uses version-table OCC
 (the same algorithm as the Rust Romulus backend) because Rust's ownership
 model cannot express the page-fault-based private-copy scheme.
 

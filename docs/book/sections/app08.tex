@@ -1,0 +1,202 @@
+\chapter{Common Rust Mistakes in Transactional Memory}
+\label{chap:rust-mistakes}
+\index{Rust!compiler errors}\index{transactional memory!common mistakes}
+
+Rust's compiler catches many mistakes that would silently compile in C++ and
+surface only as rare data races, use-after-free, or silent lost updates
+under concurrency. This appendix catalogues mistakes that arise specifically
+in transactional-memory code, explains what the compiler says, and shows
+what would go wrong in C++. Every code fragment compiles under
+\texttt{rustc 1.96}; the errors shown are the actual compiler output when the
+indicated line is removed or altered.
+
+\section*{Mistake 1: Forgetting the Abort Signal}
+
+\begin{lstlisting}[language=Rust, caption={Reading a cell that may return \texttt{Abort}.}]
+let val = tx.read(&a);     // ERROR: expected u64, found Result<u64, Abort>
+let doubled = val * 2;
+\end{lstlisting}
+
+The compiler says:
+
+\begin{quote}
+\texttt{error[E0277]:} the type \`Result<u64, Abort>' cannot be
+multipled by \`u64'
+\end{quote}
+
+\textbf{What the programmer intended:} read the value and double it.
+
+\textbf{What Rust enforces:} \texttt{tx.read} returns
+\texttt{Result<T, Abort>} because a read may detect a stale snapshot. The
+programmer must handle the abort case explicitly --- either with \texttt{?}
+(propagating the abort to the caller) or with \texttt{match}/\texttt{if
+let}. This is not optional: the \texttt{Result} type is in the function
+signature, and Rust refuses to let you use a \texttt{Result} as if it
+were the inner value.
+
+\textbf{What would happen in C++:} the C++ \texttt{tm\_read\_i4} returns
+\texttt{int32\_t} directly (the abort is signaled via \texttt{siglongjmp},
+not a return value). The programmer can silently use the return value
+without checking for abort, and the compiler will not complain. If the
+runtime \emph{did} abort, the value would be stale --- a silent lost update.
+
+\textbf{Fix:} \texttt{let val = tx.read(\&a)?;}
+
+\section*{Mistake 2: Closure Captures and Lifetime Errors}
+
+\begin{lstlisting}[language=Rust, caption={A closure that captures a stack reference.}]
+let cell = TmCell::new(42_u64);
+let r = &cell;                           // borrow of local
+region.transaction(|tx| {
+    let v = tx.read(r)?;                 // ERROR: `r` does not live long enough
+    Ok(v)
+});
+\end{lstlisting}
+
+The compiler says:
+
+\begin{quote}
+\texttt{error[E0597]:} \texttt{\`r'} does not live long enough\\
+\texttt{note:} closure invoked with a reference that would be dropped\\
+before the closure completes
+\end{quote}
+
+\textbf{What the programmer intended:} read \texttt{cell} inside the closure
+by borrowing it.
+
+\textbf{What Rust enforces:} the closure passed to \texttt{transaction}
+may be called multiple times (the retry loop). The borrow checker ensures
+that every reference captured by the closure lives at least as long as the
+closure itself. A stack reference that would be dropped at the end of the
+function does not satisfy this constraint, so the compiler rejects it.
+
+\textbf{What would happen in C++:} the equivalent C++ code passes a
+pointer to a local variable into the transaction body. If the transaction
+aborts and retries, the pointer is still valid (the caller's stack frame
+is alive during \texttt{tm\_begin}/\texttt{tm\_end}). But if the closure
+were stored and executed later (as in an executor), the pointer would
+dangle --- a use-after-free that the compiler cannot detect.
+
+\textbf{Fix:} pass the \texttt{TmCell} by copy (\texttt{cell} is
+\texttt{Copy}), not by reference: \texttt{tx.read(\&cell)?;}.
+
+\section*{Mistake 3: \texttt{Send} and \texttt{Sync} Violations}
+
+\begin{lstlisting}[language=Rust, caption={Sharing non-thread-safe state across threads.}]
+use std::rc::Rc;
+let shared = Rc::new(TmCell::new(0_u64));
+std::thread::spawn(move || {
+    region.transaction(|tx| {             // ERROR: `Rc<TmCell<u64>>`
+        tx.write(&shared, 1);             //      cannot be sent between
+        Ok(())                            //      threads safely
+    });
+});
+\end{lstlisting}
+
+The compiler says:
+
+\begin{quote}
+\texttt{error[E0277]:} \`Rc<TmCell<u64>>' cannot be sent between
+threads safely\\
+\texttt{note:} the trait \`Send' is not implemented for
+\`Rc<TmCell<u64>>'
+\end{quote}
+
+\textbf{What the programmer intended:} share a cell across threads using
+reference counting.
+
+\textbf{What Rust enforces:} \texttt{Rc} is not atomic; its reference count
+is not thread-safe. The compiler enforces the \texttt{Send} bound on
+closures passed to \texttt{thread::spawn}, which prevents non-thread-safe
+types from crossing thread boundaries. This catches a real bug: two threads
+incrementing the same \texttt{Rc} count without synchronization would corrupt
+the count.
+
+\textbf{What would happen in C++:} \texttt{std::shared\_ptr} has the same
+bug in its default \texttt{make\_shared} form (non-atomic control block).
+The C++ compiler silently allows it; the runtime segfaults under high
+contention. Only \texttt{std::atomic\_shared\_ptr} (C++20) fixes it, and
+the programmer must remember to use it.
+
+\textbf{Fix:} use \texttt{Arc<TmCell<u64>>} instead of \texttt{Rc}.
+\texttt{Arc} uses an atomic reference count and implements both
+\texttt{Send} and \texttt{Sync}.
+
+\section*{Mistake 4: Incorrect Memory Ordering}
+
+\begin{lstlisting}[language=Rust, caption={Using \texttt{Relaxed} where \texttt{Acquire}/\texttt{Release} is required.}]
+// In the sequencer's publish path:
+self.data[a].store(v, O::Relaxed);  // BUG: no release fence
+
+// In the reader's load path:
+let val = self.data[a].load(O::Relaxed);  // BUG: no acquire fence
+\end{lstlisting}
+
+The compiler does \emph{not} reject this --- \texttt{Relaxed} is a valid
+memory ordering for both loads and stores. But the resulting program may
+exhibit reordering on weakly-ordered architectures (ARM, POWER): a reader
+on another core may observe the new value of \texttt{data[a]} before the
+committing thread's write-set is fully visible. On x86 this happens to
+work because of the strong store-ordering model; on ARM it does not.
+
+\textbf{What Rust enforces:} the compiler forces you to \emph{choose} an
+ordering. The three choices (\texttt{Relaxed}, \texttt{Acquire},
+\texttt{Release}, \texttt{AcqRel}, \texttt{SeqCst}) are all explicit in
+the source code, making the ordering assumption visible and reviewable. A
+code review can check whether the Release store / Acquire load pair is
+correct for the protocol. In C++ the same explicit orderings exist, but
+programmers routinely default to \texttt{memory\_order\_seq\_cst} or
+\texttt{memory\_order\_relaxed} without understanding the difference,
+because the compiler does not remind them that the choice matters.
+
+\textbf{Fix:} use \texttt{Release} on the publish store and
+\texttt{Acquire} on the snapshot load, as in \S\ref{sec:norec-rust-complete}.
+
+\section*{Mistake 5: Mutable Aliasing Through Unsafe}
+
+\begin{lstlisting}[language=Rust, caption={Bypassing the borrow checker to share a cell.}]
+let cell = TmCell::new(0_u64);
+let ptr = &cell as *const TmCell<u64> as *mut TmCell<u64>;
+unsafe { &mut *ptr }  // ERROR: would allow two mutable references
+\end{lstlisting}
+
+If the programmer writes this (using \texttt{unsafe} to create a mutable
+reference from a shared one), the Rust compiler accepts it --- but
+\texttt{unsafe} blocks are \emph{visible in the source code}. Every
+\texttt{unsafe} line is a bright flag for code review: ``something here
+requires manual proof of correctness.'' The compiler does not verify the
+soundness of \texttt{unsafe} blocks, but it does force the programmer to
+write \texttt{unsafe} at the exact point where the invariant is at risk.
+
+\textbf{What would happen in C++:} the equivalent cast (\texttt{const\_cast}
+or a C-style cast) is silent. There is no compiler warning, no source-level
+marker, and no code-review flag. The aliasing violation compiles without
+comment and produces undefined behavior that may manifest as intermittent
+corruption.
+
+\textbf{Rule:} never write \texttt{unsafe} inside a transaction unless the
+invariant it depends on is documented and tested. The companion's TM runtimes
+concentrate \texttt{unsafe} in the region allocator and the retry mechanism,
+where it can be audited once; the transaction bodies themselves are safe.
+
+\section*{Summary}
+
+\begin{tabular}{M{0.22\linewidth}M{0.38\linewidth}M{0.30\linewidth}}
+\hline
+\thb{0.22\textwidth}{\textbf{Mistake}} & \thb{0.38\textwidth}{\textbf{C++ consequence}} & \thb{0.30\textwidth}{\textbf{Rust compile error}} \\
+\hline
+Missing abort check & stale value used silently & \texttt{E0277} (Result not Unwrap) \\
+Lifetime escape & use-after-free on retry & \texttt{E0597} (does not live long enough) \\
+Non-thread-safe sharing & data race on ref count & \texttt{E0277} (Send not implemented) \\
+Wrong memory order & invisible reordering & no error (visible for review) \\
+Unsafe aliasing & silent undefined behavior & \texttt{unsafe} flag visible in source \\
+\hline
+\end{tabular}
+
+The table summarizes the pattern: C++ allows all five mistakes silently; the
+runtime either crashes or produces wrong results under specific
+interleavings. Rust catches four at compile time and makes the fifth
+(\texttt{Relaxed} ordering) explicit in the source. That is the practical
+value of the compiler as a correctness partner: not that it proves
+everything right, but that it makes the remaining assumptions visible enough
+to review.

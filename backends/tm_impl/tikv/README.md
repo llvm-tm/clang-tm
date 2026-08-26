@@ -54,7 +54,7 @@ The Rust crate is added as a Cargo dependency
 ## Building (Rust)
 
 ```sh
-cd expli_instr/rust/workspace
+cd explicit_api/rust/workspace
 cargo build --release -p bench-tinystm --features tikv
 TM_TIKV_PD=127.0.0.1:2379 cargo run --release --features tikv --bin fuzz_counter
 ```

@@ -43,9 +43,9 @@ The running bank example exposes the common shape. A transfer reads two balances
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.18\textwidth}p{0.25\textwidth}p{0.30\textwidth}p{0.14\textwidth}}
+\begin{tabular}{M{0.18\textwidth}M{0.25\textwidth}M{0.30\textwidth}M{0.14\textwidth}}
 \hline
-Direction & Representative backends & Main pressure point & Repo signal \\
+\thb{0.18\textwidth}{Direction} & \thb{0.25\textwidth}{Representative backends} & \thb{0.30\textwidth}{Main pressure point} & \thb{0.14\textwidth}{Repo signal} \\
 \hline
 Hybrid HTM/STM & TSX-SGL, phased HTM-to-STM sketches & Capacity aborts, ownership agreement between paths, fallback cliffs & Tested; no portable HTM standard \\
 Classic STM & NOrec, NOrec-BF, TL2, TSC-TM, TinySTM, SwissTM & Validation cost, metadata contention, memory reclamation & Bank fuzz: TL2 about 2.06M txns/s, TSC-TM about 2.05M on M1 Pro \\
@@ -72,7 +72,7 @@ The table should not be read as a scoreboard. The measurements are real companio
     \item Tooling: debuggers, profilers, and race detectors are lock-oriented; TM tools are nascent by comparison.
 \end{itemize}
 
-The first challenge is semantic rather than mechanical: what does the system promise when contention is high? A single global lock is easy to explain and may be starvation-free if the lock implementation is fair. An obstruction-free STM may guarantee progress only when a transaction eventually runs alone. A hardware fast path may repeatedly abort for reasons the program cannot observe precisely. A GPU commit protocol may let thousands of transactions reach validation together, then serialize a small fraction at the commit point. Each is a transactional memory system, but their progress stories differ.
+The first challenge is semantic rather than mechanical: what does the system promise when contention is high? A single global lock is easy to explain and may be starvation-free if the lock implementation is fair. An obstruction-free STM may guarantee progress only when a transaction eventually runs alone --- and Kuznetsov and Ravi's lower bounds (\S\ref{sec:progress-ladder}) explain why that promise is not worth much. A hardware fast path may repeatedly abort for reasons the program cannot observe precisely. A GPU commit protocol may let thousands of transactions reach validation together, then serialize a small fraction at the commit point. Each is a transactional memory system, but their progress stories differ.
 
 The second challenge is adoption. Locks have defects, but they are visible, portable, and supported by tools. Transactional memory asks the programmer to trust an invisible commit protocol. That is easier when the transaction boundary is explicit, the memory model is clear, irrevocable operations are rejected or isolated, and the debugger can explain why a transaction aborted.
 
@@ -93,9 +93,9 @@ lists the load-bearing ones.
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.24\linewidth}p{0.36\linewidth}p{0.30\linewidth}}
+\begin{tabular}{M{0.24\linewidth}M{0.36\linewidth}M{0.30\linewidth}}
 \hline
-Limit & Root cause & Failure class (\S refs) \\
+\thb{0.24\textwidth}{Limit} & \thb{0.36\textwidth}{Root cause} & \thb{0.30\textwidth}{Failure class (\S refs)} \\
 \hline
 stmbench7 hangs with $>$1 thread & \texttt{ts\_multimap::lower\_bound()} drops its mutex before iterating, leaving a raw iterator into TM-managed memory; NOrec, TL2, SwissTM race on it (TinySTM survives by lock granularity, not by correctness) & privatization hazard (Ch.~2); non-TM read escaping isolation \\
 rbtree double-free under the TM allocator & the region allocator reuses addresses across transactions; the thread-local deferred-free set fires a false positive when the same address is freed again by a different thread & metadata keyed by address only --- the aliasing trap of Ch.~13 \\

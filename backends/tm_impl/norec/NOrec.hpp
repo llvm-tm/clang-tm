@@ -274,15 +274,6 @@ commit()    //
 	TM_EVENT2(COMMIT_LOCK_ACQUIRE, expect, desire, 0);
 
 	for (auto &w : tx->write_set) {
-#ifdef LLVM_TM_PLUGIN
-		// Plugin mode: non-TM addresses are handled by the read/write
-		// bypass in read_word_norec/write_word_norec and never reach
-		// the write-set.  The guard below is a safety net.
-		if ((!stm::isTMAddress(w.addr) && !stm::isTMGlobal(w.addr)) ||
-		    w.addr == nullptr || (uintptr_t)w.addr < 0x100000) {
-			continue;
-		}
-#endif
 		TM_EVENT2(COMMIT_WRITEBACK, (word_t)w.addr, (word_t)w.type, 0);
 		write_value_to_addr(w.addr, w.new_val, w.type);
 	}

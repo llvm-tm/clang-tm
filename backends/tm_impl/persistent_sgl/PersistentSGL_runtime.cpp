@@ -96,49 +96,49 @@ static void* real_tm_read_ptr(void** addr) { return (void*)*addr; }
 static void real_tm_write_i1(uint8_t* addr, uint8_t val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
-    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    std::atomic_thread_fence(std::memory_order_release);
     if (off != (size_t)-1) persist_write(off, &val, 1);
 }
 
 static void real_tm_write_i2(uint16_t* addr, uint16_t val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
-    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    std::atomic_thread_fence(std::memory_order_release);
     if (off != (size_t)-1) persist_write(off, &val, 2);
 }
 
 static void real_tm_write_i4(uint32_t* addr, uint32_t val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
-    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    std::atomic_thread_fence(std::memory_order_release);
     if (off != (size_t)-1) persist_write(off, &val, 4);
 }
 
 static void real_tm_write_i8(uint64_t* addr, int64_t val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
-    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    std::atomic_thread_fence(std::memory_order_release);
     if (off != (size_t)-1) persist_write(off, &val, 8);
 }
 
 static void real_tm_write_f4(float* addr, float val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
-    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    std::atomic_thread_fence(std::memory_order_release);
     if (off != (size_t)-1) persist_write(off, &val, 4);
 }
 
 static void real_tm_write_f8(double* addr, double val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
-    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    std::atomic_thread_fence(std::memory_order_release);
     if (off != (size_t)-1) persist_write(off, &val, 8);
 }
 
 static void real_tm_write_ptr(void** addr, void* val) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     *addr = val;
-    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    std::atomic_thread_fence(std::memory_order_release);
     if (off != (size_t)-1) persist_write(off, &val, sizeof(void*));
 }
 
@@ -477,6 +477,7 @@ void tm_write_i16(void *addr, void *val) {
     for (int i = 0; i < 2; i++) {
         size_t off = addr_to_file_off((uintptr_t)(vaddr + i));
         vaddr[i] = val_words[i];
+        std::atomic_thread_fence(std::memory_order_release);
         if (off != (size_t)-1) persist_write(off, &val_words[i], 8);
     }
 }
@@ -486,6 +487,7 @@ void tm_write_i32(void *addr, void *val) {
     for (int i = 0; i < 4; i++) {
         size_t off = addr_to_file_off((uintptr_t)(vaddr + i));
         vaddr[i] = val_words[i];
+        std::atomic_thread_fence(std::memory_order_release);
         if (off != (size_t)-1) persist_write(off, &val_words[i], 8);
     }
 }
@@ -495,6 +497,7 @@ void tm_write_i64(void *addr, void *val) {
     for (int i = 0; i < 8; i++) {
         size_t off = addr_to_file_off((uintptr_t)(vaddr + i));
         vaddr[i] = val_words[i];
+        std::atomic_thread_fence(std::memory_order_release);
         if (off != (size_t)-1) persist_write(off, &val_words[i], 8);
     }
 }
@@ -502,12 +505,14 @@ void tm_write_i64(void *addr, void *val) {
 void tm_write_z(volatile uint8_t* dst, volatile uint8_t* src, uint64_t len) {
     size_t off = addr_to_file_off((uintptr_t)dst);
     memcpy((void*)dst, (const void*)src, len);
+    std::atomic_thread_fence(std::memory_order_release);
     if (off != (size_t)-1) persist_write(off, (const void*)src, len);
 }
 
 void tm_memset(volatile uint8_t* addr, uint8_t val, uint64_t len) {
     size_t off = addr_to_file_off((uintptr_t)addr);
     memset((void*)addr, val, len);
+    std::atomic_thread_fence(std::memory_order_release);
     if (off != (size_t)-1) {
         uint8_t* buf = (uint8_t*)malloc(len);
         memset(buf, val, len);

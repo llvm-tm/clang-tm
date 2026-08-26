@@ -7,7 +7,9 @@ OUT := $(MAIN).pdf
 
 all: $(OUT)
 
-$(OUT): $(MAIN).tex references.bib
+SECTIONS := sections/*.tex
+
+$(OUT): $(MAIN).tex references.bib $(SECTIONS)
 	@if command -v latexmk >/dev/null 2>&1; then \
 		latexmk -pdf -interaction=nonstopmode $(MAIN); \
 	else \

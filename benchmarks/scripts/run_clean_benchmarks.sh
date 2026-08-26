@@ -96,7 +96,7 @@ build_all() {
     log "  Expli: will build-on-demand during run phase"
 
     # Rust
-    cd expli_instr/rust/workspace
+    cd explicit_api/rust/workspace
     for fe in wbctl norec tsxsgl wt; do
         log "  Rust: $fe"
         RUSTFLAGS="-C target-cpu=native" cargo build --release --no-default-features --features "$fe" -p benchmarks 2>&1 | tail -1 || true
@@ -194,7 +194,7 @@ run_expli() {
 run_rust() {
     local backend="$1" threads="$2" sample="$3"
     local feature="$4"  # wbctl|norec|tsxsgl|wt
-    local rust_dir="expli_instr/rust/workspace"
+    local rust_dir="explicit_api/rust/workspace"
 
     for bench in "${STAMP_BENCHES[@]}"; do
         local params="${PRUST[$bench]}"

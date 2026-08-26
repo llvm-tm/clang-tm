@@ -11,13 +11,13 @@ serde_json = "1"
 bincode = "1"
 
 # Real TM backend crates (simulation mode)
-runtime-core = { path = "../expli_instr/rust/workspace/runtime/core", features = ["simulation", "serde", "stats"] }
-runtime-norec = { path = "../expli_instr/rust/workspace/runtime/norec", features = ["simulation", "serde", "stats"] }
-runtime-tl2 = { path = "../expli_instr/rust/workspace/runtime/tl2", features = ["simulation", "serde", "stats"] }
-runtime-tinystm = { path = "../expli_instr/rust/workspace/runtime/tinystm", features = ["simulation", "serde", "stats", "wbctl"] }
-runtime-romulus = { path = "../expli_instr/rust/workspace/runtime/romulus", features = ["simulation", "serde", "stats"] }
-runtime-swisstm = { path = "../expli_instr/rust/workspace/runtime/swisstm", features = ["simulation", "serde", "stats"] }
-runtime-tsx-sim = { path = "../expli_instr/rust/workspace/runtime/tsx_sim", features = ["simulation", "serde", "stats"] }
+runtime-core = { path = "../explicit_api/rust/workspace/runtime/core", features = ["simulation", "serde", "stats"] }
+runtime-norec = { path = "../explicit_api/rust/workspace/runtime/norec", features = ["simulation", "serde", "stats"] }
+runtime-tl2 = { path = "../explicit_api/rust/workspace/runtime/tl2", features = ["simulation", "serde", "stats"] }
+runtime-tinystm = { path = "../explicit_api/rust/workspace/runtime/tinystm", features = ["simulation", "serde", "stats", "wbctl"] }
+runtime-romulus = { path = "../explicit_api/rust/workspace/runtime/romulus", features = ["simulation", "serde", "stats"] }
+runtime-swisstm = { path = "../explicit_api/rust/workspace/runtime/swisstm", features = ["simulation", "serde", "stats"] }
+runtime-tsx-sim = { path = "../explicit_api/rust/workspace/runtime/tsx_sim", features = ["simulation", "serde", "stats"] }
 libc = "0.2"
 libloading = "0.8"
 

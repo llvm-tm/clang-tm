@@ -351,9 +351,9 @@ local control-flow choices.
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.17\textwidth}p{0.17\textwidth}p{0.24\textwidth}p{0.24\textwidth}}
+\begin{tabular}{M{0.17\textwidth}M{0.17\textwidth}M{0.24\textwidth}M{0.24\textwidth}}
 \hline
-Backend or design & Scope & Commit record & Main recovery or agreement rule \\
+\thb{0.17\textwidth}{Backend or design} & \thb{0.17\textwidth}{Scope} & \thb{0.24\textwidth}{Commit record} & \thb{0.24\textwidth}{Main recovery or agreement rule} \\
 \hline
 PersistentSGL & persistent single process & dual write to a persistent file under one lock & write-through: memory and file updated together at commit \\
 NV-HTM (paper~\cite{castro18nvhtm}) & persistent HTM hybrid & per-thread redo logs + checkpoints & durable commit only after the log (and dependencies) reach PM \\
@@ -396,7 +396,7 @@ state that is visible-but-not-yet-durable must be reconstructible purely from
 the log, which is why log completeness markers are load-bearing. The checked
 model \texttt{docs/proofs/DUDETM.tla} (PlusCal) encodes exactly this split;
 TLC verifies \texttt{LogBounds} (the per-thread ring log never overruns its
-tail) and \texttt{PersistFileValid} (every persisted entry is well-typed ---
+tail) and \texttt{Persist\allowbreak FileValid} (every persisted entry is well-typed ---
 the recovery machinery may assume structure even for entries it has not
 replayed yet).
 
@@ -421,15 +421,15 @@ state machine and crash/recovery; TLC verifies \texttt{TSXSafety},
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.20\linewidth}p{0.28\linewidth}p{0.22\linewidth}p{0.20\linewidth}}
+\begin{tabular}{M{0.20\linewidth}M{0.28\linewidth}M{0.22\linewidth}M{0.20\linewidth}}
 \hline
-Backend & Durability enters at & Checked model & Key invariants \\
+\thb{0.20\textwidth}{Backend} & \thb{0.28\textwidth}{Durability enters at} & \thb{0.22\textwidth}{Checked model} & \thb{0.20\textwidth}{Key invariants} \\
 \hline
-PersistentSGL & inside the global lock (dual write) & \texttt{PersistentSGL.tla} & \texttt{NVMAgreesWithMem} \\
-DUDETM & after visibility, in a background flusher & \texttt{DUDETM.tla} & \texttt{LogBounds}, \texttt{PersistFileValid} \\
-SPHT & at epoch boundaries (group commit) & \texttt{SPHT.tla} & \texttt{DurableSeqMonotonic}, \texttt{PCLBounds} \\
+PersistentSGL & inside the global lock (dual write) & \texttt{PersistentSGL.tla} & \texttt{NVMAgrees\allowbreak WithMem} \\
+DUDETM & after visibility, in a background flusher & \texttt{DUDETM.tla} & \texttt{LogBounds}, \texttt{Persist\allowbreak FileValid} \\
+SPHT & at epoch boundaries (group commit) & \texttt{SPHT.tla} & \texttt{DurableSeq\allowbreak Monotonic}, \texttt{PCL\allowbreak Bounds} \\
 NV-HTM (repo scaffold) & nowhere yet (DRAM-backed region) & \texttt{NVHTM.tla} & \texttt{TSXSafety}, \texttt{RetryBound} \\
-TiKV backend & at the TiKV 2PC commit record & \texttt{TiKV.tla} & \texttt{SnapshotIsolation}, \texttt{CommitOrdering} \\
+TiKV backend & at the TiKV 2PC commit record & \texttt{TiKV.tla} & \texttt{Snapshot\allowbreak Isolation}, \texttt{Commit\allowbreak Ordering} \\
 \hline
 \end{tabular}
 \caption{Where durability enters each companion backend, and the TLA+ model that pins it down. All five models live in \texttt{docs/proofs} and pass TLC safety checks.}

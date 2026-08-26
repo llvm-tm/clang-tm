@@ -400,10 +400,10 @@ Comprehensive reference covering all 16+ STM/HTM/distributed TM backends.
 **Algorithm:** Wraps TiKV's Percolator-style 2PC (via `tikv-client` 0.4 from crates.io) with TM semantics. TM addresses map to TiKV keys as `tm:{region_offset:016x}`. Reads: local write-set → local read-set → TiKV `get()`. Writes: buffer in local write-set, flushed at commit via TiKV 2PC. Lazy-abort retry loop.
 
 **Key files:**
-- `expli_instr/rust/workspace/runtime/tikv/src/lib.rs` — Rust backend (396 lines)
+- `explicit_api/rust/workspace/runtime/tikv/src/lib.rs` — Rust backend (396 lines)
 - `backends/tm_impl/tikv/tikv_backend.cpp` — C++ FFI shim with LLVM_TM_PLUGIN guards
 - `backends/tm_impl/tikv/README.md` — architecture + build docs (98 lines)
-- `expli_instr/rust/workspace/runtime/tikv/Cargo.toml` — `tikv-client = "0.4"`
+- `explicit_api/rust/workspace/runtime/tikv/Cargo.toml` — `tikv-client = "0.4"`
 
 **Prerequisites:** Running TiKV cluster (PD at `TM_TIKV_PD=127.0.0.1:2379`)
 
@@ -516,7 +516,7 @@ MVLog is within ~1–4% of NOrec across workloads (commit lock + slot-claim over
 - `backends/tm_impl/mvlog/MVLog_globals.hpp` — global definitions
 - `backends/tm_impl/mvlog/MVLog_runtime.cpp` — hook registration + LLVM_TM_PLUGIN guards
 - `backends/tm_impl/mvlog/Implementation_notes.md` — full design (protocol, lemma, reclamation, related work)
-- `expli_instr/rust/workspace/runtime/mvlog/` — Rust port (same algorithm, `TmxAbort` panic-based retry)
+- `explicit_api/rust/workspace/runtime/mvlog/` — Rust port (same algorithm, `TmxAbort` panic-based retry)
 - `docs/proofs/MVLog.tla` — PlusCal model + TLA+ translation
 - `docs/proofs/MVLog.cfg`, `MVLog-liveness.cfg` — TLC configs
 
@@ -590,7 +590,7 @@ All 19 backends have TLA+ specifications under `docs/proofs/`:
 
 ## Rust Backend Coverage
 
-The Rust workspace in `expli_instr/rust/workspace/` implements the same algorithms with TM trait abstraction:
+The Rust workspace in `explicit_api/rust/workspace/` implements the same algorithms with TM trait abstraction:
 
 | Backend | Rust crate | Status |
 |---------|-----------|--------|

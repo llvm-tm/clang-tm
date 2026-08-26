@@ -1,5 +1,5 @@
 \chapter{Compiler Fundamentals – IRs and Passes}
-\index{compiler instrumentation!IRs and passes; compilation pipeline; LLVM IR; GCC GIMPLE; TM pass; runtime ABI; address-space check; shared-data registry}
+\index{compiler instrumentation!IRs and passes}\index{compilation pipeline}\index{LLVM IR}\index{GCC GIMPLE}\index{TM pass}\index{runtime ABI}\index{address-space check}\index{shared-data registry}
 
 Compiler support for transactional memory is mostly a question of placement. The programmer writes a transaction over ordinary variables; the runtime expects explicit calls that record reads, buffer writes, validate metadata, and commit or abort. A compiler pass is the bridge between those two worlds.
 
@@ -96,9 +96,9 @@ Production passes must also handle calls. A call inside a transaction may read o
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.22\linewidth}p{0.28\linewidth}p{0.22\linewidth}p{0.16\linewidth}}
+\begin{tabular}{M{0.22\linewidth}M{0.28\linewidth}M{0.22\linewidth}M{0.16\linewidth}}
 \hline
-Policy & What the pass rewrites & Programmer\slash{}runtime obligation & Typical cost \\
+\thb{0.22\textwidth}{Policy} & \thb{0.28\textwidth}{What the pass rewrites} & \thb{0.22\textwidth}{Programmer\slash{}runtime obligation} & \thb{0.16\textwidth}{Typical cost} \\
 \hline
 Instrument every load/store & All memory operations inside a transaction become runtime calls. & Runtime must cheaply reject private addresses or tolerate over-instrumentation. & Highest; simple and conservative. \\
 Static address-space check & Heap and global addresses are instrumented; provable stack addresses bypass TM. & Alias analysis must be conservative when provenance is unclear. & Lower; still safe when uncertain cases are instrumented. \\

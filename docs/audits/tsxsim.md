@@ -7,8 +7,8 @@
 | Artifact | Path | Lines |
 |----------|------|-------|
 | TLA+ spec | `docs/proofs/TSXSim.tla` | 503 |
-| Rust implementation | `expli_instr/rust/workspace/runtime/tsx_sim/src/lib.rs` | 997 |
-| Cargo manifest | `expli_instr/rust/workspace/runtime/tsx_sim/Cargo.toml` | 15 |
+| Rust implementation | `explicit_api/rust/workspace/runtime/tsx_sim/src/lib.rs` | 997 |
+| Cargo manifest | `explicit_api/rust/workspace/runtime/tsx_sim/Cargo.toml` | 15 |
 | TLC config | `docs/proofs/TSXSim.cfg` | 20 |
 
 ## Algorithm Summary

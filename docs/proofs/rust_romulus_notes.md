@@ -3,7 +3,7 @@
 ## Status
 
 After Phase 4.5 (read-set validation added), the Rust Romulus at
-`expli_instr/rust/workspace/runtime/romulus/src/lib.rs` is architecturally
+`explicit_api/rust/workspace/runtime/romulus/src/lib.rs` is architecturally
 close to the C++ Romulus (`Romulus.tla`).  One structural gap remains:
 
 ## Gap: Lock-bit phase (missing in Rust)

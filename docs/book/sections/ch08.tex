@@ -1,5 +1,5 @@
 \chapter{Non‑Speculative Designs: Single Lock and Serializers}
-\index{single global lock; SGL; serializers; queue-based transactional memory; non-speculative transactional memory; opacity; Amdahl's law}
+\index{single global lock}\index{SGL}\index{serializers}\index{queue-based transactional memory}\index{non-speculative transactional memory}\index{opacity}\index{Amdahl's law}
 
 Non-speculative transactional memory is the control case for the rest of the implementation chapters. It gives up parallel execution inside transactions and obtains, in exchange, the simplest correctness story in the book: one transaction runs at a time, observes a sequential state, and publishes the next sequential state.
 
@@ -44,9 +44,9 @@ A thread serializer, studied next, is SGL with the mutex replaced by a work queu
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.22\linewidth}p{0.23\linewidth}p{0.23\linewidth}p{0.22\linewidth}}
+\begin{tabular}{M{0.22\linewidth}M{0.23\linewidth}M{0.23\linewidth}M{0.22\linewidth}}
 \hline
-Design & Serialization point & Main cost & Correctness argument \\
+\thb{0.22\textwidth}{Design} & \thb{0.23\textwidth}{Serialization point} & \thb{0.23\textwidth}{Main cost} & \thb{0.22\textwidth}{Correctness argument} \\
 \hline
 SGL & Global mutex at \texttt{tm\_begin} & Lock contention and lost parallelism & Mutual exclusion gives a single total order \\
 Thread serializer & Worker dequeues one task & Submission, queueing, loss of locality & Worker order is the serialization order \\
@@ -60,14 +60,14 @@ PersistentSGL & Persistent critical section protocol & Flushes, fences, recovery
 
 The thread-serializer row is not just a thought experiment: the companion
 repository ships one as the \texttt{expli::QueueExecutor}
-(\texttt{expli\_instr/cpp/include/\allowbreak tx\_executor.hpp}, backed by
+(\texttt{explicit\_api/cpp/include/\allowbreak tx\_executor.hpp}, backed by
 \texttt{queue\_runtime.cpp}), and the bank benchmark runs in this mode with
 \texttt{-{}-queue}. Transaction bodies are submitted as closures to a pool of
 worker threads; each worker initializes its own TM thread state and drains
 its queue serially. Two details repay attention when reading the code: the
 worker threads record their stack bounds so the runtime can prove that a
 referenced address is stack-local and bypass instrumentation
-(\texttt{stm::tm\_record\_\allowbreak stack\_bounds}), and statically allocated
+(\texttt{stm::tm\_record\_\allowbreak stack\_\allowbreak bounds}), and statically allocated
 TM-annotated globals are registered explicitly
 (\texttt{tm\_register\_\allowbreak global})
 because they do not live in the TM region --- both are invisible at the
@@ -433,11 +433,169 @@ dequeues the task'' with the application code unchanged --- which is precisely
 the property that makes the serializer a drop-in backend rather than a
 rewrite.
 
+\section{Calvin: Static Transactions and Deterministic Execution}
+\index{static transaction}\index{Calvin}\index{deterministic execution}\index{sequencer}\index{snapshot isolation}
+\label{sec:calvin-static}
+
+The serializer of \S\ref{sec:worked-serializer-bank} executes one transaction body at a time, but the calling threads still build the transaction body \emph{speculatively}: they read shared memory, guess, and hope the guess was right. Calvin takes a different position. A transaction is declared \emph{before} it executes: the read-set, the write-set, and the computation are all fixed up front. The sequencer then assigns a total order, snapshots the declared addresses, and runs each body against its own snapshot. Writes are buffered and published only after the body returns successfully.
+
+The word ``static'' is the distinguishing property. In NOrec, TL2, or TinySTM the runtime discovers the read-set and write-set as the transaction executes --- those sets may be different on every retry. In Calvin, the programmer specifies the access sets at declaration time. That static knowledge has two consequences. First, the runtime can validate every declared read against the snapshot \emph{before} executing the body, so no work is wasted on a transaction whose snapshot is already stale. Second, execution is deterministic: given the same snapshot, the body always produces the same writes. Determinism simplifies reasoning about correctness, because the commit of one transaction cannot depend on timing details that differ between runs.
+
+The trade-off is inflexibility. If the read-set is not known until the body runs, the programmer must over-approximate (declaring more addresses than needed, which widens the conflict window) or structure the code so that the access set is visible at the call site. This is natural for message-queue workers, financial settlements, and event-driven simulations where each event's inputs are known before the computation starts, but awkward for interactive code where the read-set depends on data read during execution.
+
+The companion codebase's \texttt{calvin} backend is named after, but is not, the deterministic distributed database of Thomson et al.~\cite{thomson12calvin}; it is a two-phase OCC shared-memory backend. The model below is closer to the original Calvin idea: static declarations, sequenced execution, deterministic results.
+
+\subsection{State: declarations, memory, and a sequencer}
+
+Listing~\ref{lst:calvin-state} defines the shared memory (one atomic word per account), the transaction declaration type (read-set, write-set, and a body that receives a snapshot and returns writes or abort), and the sequencer that dequeues declarations in order, snapshots the read-set, and executes each body.
+
+\begin{lstlisting}[language=Rust, caption={Calvin state: word-addressed memory, static transaction declarations, and the sequencer.}, label={lst:calvin-state}]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as O};
+use std::sync::Arc;
+use std::thread;
+
+struct Mem { data: Vec<AtomicU64> }
+impl Mem {
+    fn new(n: usize) -> Self {
+        Mem { data: (0..n).map(|_| AtomicU64::new(0)).collect() }
+    }
+    fn alloc(&mut self, v: u64) -> usize {
+        let i = self.data.len();
+        self.data.push(AtomicU64::new(v));
+        i
+    }
+    fn get(&self, a: usize) -> u64 {
+        self.data[a].load(O::Acquire)
+    }
+    fn set(&self, a: usize, v: u64) {
+        self.data[a].store(v, O::Release);
+    }
+}
+
+type BodyFn =
+    Box<dyn Fn(&[u64]) -> Option<Vec<(usize, u64)>> + Send>;
+
+struct TxDecl {
+    reads:  Vec<usize>,            // addresses to snapshot
+    writes: Vec<usize>,            // addresses the body may modify
+    body:   BodyFn,                // None = abort; Some(writes) = commit
+}
+
+struct Sequencer { mem: Arc<Mem>, seqno: AtomicUsize }
+impl Sequencer {
+    fn new(mem: Arc<Mem>) -> Self {
+        Sequencer { mem, seqno: AtomicUsize::new(0) }
+    }
+    fn snapshot(&self, addrs: &[usize]) -> Vec<u64> {
+        addrs.iter().map(|&a| self.mem.get(a)).collect()
+    }
+\end{lstlisting}
+
+The \texttt{TxDecl} type is the static contract. The \texttt{reads} and \texttt{writes} vectors declare which addresses the body will touch; the \texttt{body} closure receives the snapshot values at those addresses and returns \texttt{None} (abort) or \texttt{Some(writes)} (commit). The body never touches shared memory directly --- all reads come from the snapshot, all writes are buffered.
+
+\subsection{Execute and publish}
+
+Listing~\ref{lst:calvin-exec} is the execution loop. The sequencer dequeues one declaration, snapshots the read-set, calls the body, and publishes the writes. The important property is that the body is never retried: if the snapshot is stale, the declaration fails immediately at the \emph{declaration} phase, not the \emph{execution} phase. This is the fundamental difference from speculative STMs: there is no ``abort and retry the body'' because the body is never allowed to see stale data.
+
+\begin{lstlisting}[language=Rust, caption={Calvin execution: snapshot, run body, publish writes. No retry needed.}, label={lst:calvin-exec}]
+    fn run(&self, queue: Vec<TxDecl>) {
+        for decl in queue {
+            let seq = self.seqno.fetch_add(1, O::Relaxed);
+            let snap = self.snapshot(&decl.reads);
+            match (decl.body)(&snap) {
+                None => {
+                    eprintln!("[seq={}] abort (stale snap)", seq);
+                }
+                Some(writes) => {
+                    for (a, v) in writes {
+                        self.mem.set(a, v);
+                    }
+                    println!("[seq={}] committed  snap={:?}",
+                             seq, snap);
+                }
+            }
+        }
+    }
+}
+\end{lstlisting}
+
+The sequencer is single-threaded, which makes the total order explicit: the dequeue order \emph{is} the serialization order. In a distributed Calvin system the sequencer would be a separate process assigning sequence numbers; here the in-process loop is enough to show the idea. The \texttt{AtomicUsize} counter records how many transactions have been processed, and the \texttt{Relaxed} ordering on \texttt{fetch\_add} is sufficient because the total order is established by the sequential loop itself, not by the counter value.
+
+\subsection{Worked Example: Bank Transfer}
+
+Listing~\ref{lst:calvin-demo} builds the transaction queue: transfer declarations interleaved with read-only checker assertions. The deterministic Fisher-Yates shuffle (fixed seed) ensures reproducible interleaving across runs. Each transfer declares its read-set and write-set explicitly; the checker declares read-only addresses and asserts conservation.
+
+\begin{lstlisting}[language=Rust, caption={Calvin bank demo: static transfer declarations, deterministic shuffle, conservation assertion mid-flight.}, label={lst:calvin-demo}]
+const ITERS: u64 = 500;
+const START: u64 = 1_000_000;
+
+fn main() {
+    let mut mem = Mem::new(0);
+    let a = mem.alloc(START);
+    let b = mem.alloc(START);
+    let mem = Arc::new(mem);
+
+    let mut txs: Vec<TxDecl> = Vec::new();
+    for t in 0..8 {
+        let (src, dst) = if t % 2 == 0 { (a, b) }
+                         else { (b, a) };
+        for _ in 0..ITERS {
+            txs.push(TxDecl {
+                reads:  vec![src, dst],
+                writes: vec![src, dst],
+                body: Box::new(move |snap| {
+                    let (s, d) = (snap[0], snap[1]);
+                    if s < 10 { return None; }
+                    Some(vec![(src, s - 10), (dst, d + 10)])
+                }),
+            });
+        }
+    }
+    for _ in 0..500 {
+        txs.push(TxDecl {
+            reads:  vec![a, b],
+            writes: vec![],
+            body: Box::new(move |snap| {
+                assert_eq!(snap[0] + snap[1], 2 * START);
+                Some(vec![])
+            }),
+        });
+    }
+    // Deterministic shuffle (fixed seed).
+    { let mut s: u64 = 0xDEAD_BEEF_CAFE_1234;
+      for i in (1..txs.len()).rev() {
+          s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+          let j = (s >> 33) as usize % (i + 1);
+          txs.swap(i, j);
+      }
+    }
+
+    let seq = Sequencer::new(mem.clone());
+    thread::spawn(move || seq.run(txs)).join().unwrap();
+
+    let (fa, fb) = (mem.get(a), mem.get(b));
+    println!("\nfinal A={} B={} total={}", fa, fb, fa + fb);
+    assert_eq!(fa + fb, 2 * START);
+}
+\end{lstlisting}
+
+The checker runs inside the sequencer's total order, interleaved with transfers at deterministic positions. Because the snapshot is taken before each body runs, the checker sees a consistent world at every point --- money is either pre-transfer or post-transfer, never half-transferred. This is opacity by construction: no concurrent mutation can sneak between the snapshot and the body because the sequencer is single-threaded.
+
+Three properties distinguish Calvin from the speculative designs of Chapter~9:
+
+\begin{itemize}
+    \item \textbf{No abort-retry loop}. A speculative STM retries the body when validation fails; Calvin rejects stale declarations before the body runs. The body is never wasted work.
+    \item \textbf{Determinism}. Given the same declaration queue, the commit order and the final memory state are identical across runs. Speculative STMs can produce different outcomes depending on thread scheduling.
+    \item \textbf{Static access sets}. The read-set and write-set are visible at declaration time, enabling the runtime to batch, reorder, or optimize declarations before executing them.
+\end{itemize}
+
+The price is the loss of dynamic read-sets. A body that reads an address discovered during execution cannot declare that address up front, so Calvin is best suited for workloads where inputs are known: message processing, event handlers, map-reduce workers, and batch settlement. For interactive or exploratory code, the speculative designs of Chapter~9 remain the right tool.
+
 \section{Summary}
 
 Non-speculative designs are correct by construction and serve as a baseline. Their lack of concurrency limits scalability, but their proof obligations are small: every transaction observes a state produced by the previous committed transaction.
 
-SGL is the simplest opacity proof in the book. Queue serializers replace lock handoff with task handoff. This can reduce lock contention, but it cannot create intra-transaction parallelism.
+SGL is the simplest opacity proof in the book. Queue serializers replace lock handoff with task handoff. Calvin replaces speculative execution with static declarations and deterministic sequencing: the read-set is fixed before the body runs, so stale snapshots are rejected without wasting execution work. The trade-off is inflexibility --- the access set must be known at declaration time.
 
 In the companion codebase, SGL-like designs are not toys. They serve as reference backends and regression oracles alongside speculative systems such as NOrec, TL2, TSC-TM, SwissTM, TinySTM, and others. The reported test suites pass \texttt{test\_tx} 114/114 and \texttt{test\_ds} 207/207 for the implemented backends. Measured results on the M1 Pro fuzz/bank workload also show why the baseline matters: TL2 and TSC-TM reach about 2.06M and 2.05M transactions per second in the reported runs, while NOrec-BF improves over NOrec on the read-mostly case. These numbers are not claims about this chapter's designs; they are evidence that the simple serial yardstick remains useful when evaluating faster speculative backends.
 
@@ -452,6 +610,8 @@ In the companion codebase, SGL-like designs are not toys. They serve as referenc
     \item \emph{[implementation]} Modify the queue serializer so that each task carries an explicit transaction descriptor containing a task id, an allocation log, and a commit flag. Ensure that the descriptor is created by the submitter but finalized by the worker.
     \item \emph{[verification]} State the refinement mapping from a queue serializer to an abstract sequential TM. Identify the concrete variable that determines the abstract transaction order.
     \item \emph{[theory]} For a workload in which every transaction runs under SGL, explain why increasing the number of caller threads can reduce throughput even though it does not change the sequential work performed.
+    \item \emph{[implementation]} Build the Calvin bank demo of \S\ref{sec:calvin-static} from the source in Appendix~\ref{chap:rust-mistakes}. Replace the deterministic shuffle with a random one and run it five times. Verify that the final total is always \texttt{2000000} but the committed snapshot values differ. Explain why determinism of the commit \emph{order} does not affect correctness here.
+    \item \emph{[theory]} Calvin rejects stale declarations before executing the body. A speculative STM (Chapter~9) executes the body first, then validates. Derive the condition under which Calvin does strictly less work than a speculative STM for a given workload, and the condition under which the opposite holds. Hint: compare the cost of body execution with the cost of snapshot validation.
 \end{enumerate}
 
 \textbf{How to check your work.} The \emph{[implementation]} exercises are

@@ -1,10 +1,10 @@
 CHAPTER 05 — Mathematical Foundations
 Part: III (Formal Foundations: Mathematics and Verification)
-Lines: 627 | Sections: 10 | Figures: 2 | Tables: 2 | Listings: 5 | TikZ: 2
+Lines: ~740 | Sections: 12 | Figures: 3 | Tables: 3 | Listings: 5 | TikZ: 3
 
 PURPOSE: Math toolkit for TM reasoning: automata/languages, Markov chains,
-queueing theory (Little's law), plus worked examples applying them to the
-bank transfer.
+queueing theory (Little's law), formal histories and correctness/progress
+conditions, plus worked examples applying them to the bank transfer.
 
 SECTIONS
 - Automata and Formal Languages
@@ -13,6 +13,24 @@ SECTIONS
     Discrete-time Markov chains, absorbing states, expected attempts.
 - Queueing Theory and Little's Law
     L = lambda * S; expected attempts = 1/(1-p) (geometric).
+- Histories, Legality, and Opacity
+    History/event vocabulary; committed projection; real-time order;
+    serialization and legality; serializability vs strict serializability
+    vs opacity; VWC first mention; TMS1/TMS2 provenance; model-checker
+    tractability of opacity.
+- Progress and the Family of Correctness Conditions
+  * The Progress Ladder and the Fall of Obstruction-Freedom
+    Wait-free > lock-free > obstruction-free; progressiveness (weak/strong)
+    and conflict-freedom; Kuznetsov-Ravi lower bounds for OF TMs and the
+    linear blocking-vs-nonblocking separation; companion backends are
+    blocking by design; tab:progress-taxonomy maps every backend family
+    to its progress guarantee.
+  * Safety Beyond Opacity: VWC and the TMS Specifications
+    TMS1 (one execution for commits) vs TMS2 (one memory-state sequence);
+    Doherty et al. formal I/O-automaton specs; VWC (one world per causal
+    past); machine-checked chain TMS2 => opacity => TMS1 (Lesani et al.);
+    fig:condition-lattice; which condition a backend should target
+    (pure transactions vs leaking compensating actions).
 - Worked Example: Numbers, Not Just Symbols
     Concrete numbers for the bank retry math.
 - Worked Example: Simulating Retry Cost in the Bank
@@ -27,6 +45,12 @@ SECTIONS
 - Exercises
 
 FIGURES: fig:tx-lifecycle (tx lifecycle as Markov chain),
-         fig:bank-validation-pipeline (validation pipeline)
-TABLES: tab:math-tools (tools used), tab:model-taxonomy (models by info preserved)
+         fig:bank-validation-pipeline (validation pipeline),
+         fig:condition-lattice (TMS2/opacity/TMS1/VWC/serializability)
+TABLES: tab:math-tools (tools used), tab:model-taxonomy (models by info
+        preserved), tab:progress-taxonomy (backend progress guarantees)
 LISTINGS: 5 (DFA, Markov sim, TLA+ model, trace DFA, validation cost)
+CITES: papadimitriou79serializability, guerraoui08correctness,
+       imbs09vwc, imbs12vwc, herlihy03tms1, herlihy03tms2, shavit95stm,
+       herlihy91, herlihy03obstructionfree, guerraoui10principles,
+       kuznetsov15obstructionfree, doherty13tms, lesani12putting

@@ -4,7 +4,7 @@
 # Auto-detect C++ compiler: prefer clang++ (LLVM versioned or system default),
 # fall back to g++.
 CXX       := $(shell command -v clang++-22 2>/dev/null || command -v clang++-18 2>/dev/null || command -v clang++-17 2>/dev/null || command -v clang++-16 2>/dev/null || command -v clang++-15 2>/dev/null || command -v clang++-14 2>/dev/null || command -v clang++ 2>/dev/null || echo g++)
-CXXFLAGS  = -std=c++20 -O3 -march=x86-64 -pthread -DNDEBUG -static -I$(abspath ../..) -I$(abspath ../..)/expli_instr/cpp
+CXXFLAGS  = -std=c++20 -O3 -march=x86-64 -pthread -DNDEBUG -static -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp
 LDFLAGS   = -static -pthread
 
 # --- Choose backend (default: TinySTM/WBCTL) --------------------
@@ -13,7 +13,7 @@ BACKEND ?= TINYSTM
 # (the top-level Makefile passes lowercase; the blocks below compare uppercase).
 override BACKEND := $(shell echo "$(BACKEND)" | tr '[:lower:]' '[:upper:]')
 
-CXXFLAGS += -I../.. -I../../expli_instr/cpp
+CXXFLAGS += -I../.. -I../../explicit_api/cpp
 EXTRA_INC =
 RUNTIME =
 REGION_ALLOC = ../../backends/tm_impl/tm_region_allocator/tm_region_allocator.cpp
@@ -108,7 +108,7 @@ ifeq ($(BACKEND),CSMV_GPU)
   DEFS     = -DTM_BACKEND_CSMV_GPU -DCSMV_BATCH_GPU
   EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/csmv/include
   LDFLAGS  = -pthread -lcuda -lcudart
-  CXXFLAGS = -std=c++20 -O3 -march=x86-64 -pthread -DNDEBUG -I$(abspath ../..) -I$(abspath ../..)/expli_instr/cpp
+  CXXFLAGS = -std=c++20 -O3 -march=x86-64 -pthread -DNDEBUG -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp
 endif
 ifeq ($(BACKEND),POWER8HTM)
   RUNTIME  = ../../backends/tm_impl/power8_htm/POWER8HTM_runtime.cpp

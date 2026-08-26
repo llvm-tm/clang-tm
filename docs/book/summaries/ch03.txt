@@ -1,32 +1,61 @@
 CHAPTER 03 — Hardware Concepts for Transactional Memory
 Part: II (The Machine Beneath)
-Lines: ~488 | Sections: 10 | Figures: 3 | Tables: 1 | Listings: 3 | TikZ: 3
+Lines: ~870 | Sections: 11 | Subsections: 4 | Figures: 6 | Tables: 2 | Listings: 5 | TikZ: 6
 
 PURPOSE: Hardware vocabulary for TM: memory hierarchy, cache coherence,
-out-of-order execution/speculation, store buffers, memory ordering (TSO),
-false conflicts, HTM execution states.
+out-of-order execution/speculation, store buffers, the memory-model ladder
+(SC -> TSO -> ARM/POWER weak), litmus tests, false conflicts, HTM execution
+states.
 
 SECTIONS
 - Multicore Architectures and Memory Hierarchies
-    Caches, NUMA, coherence basics.
+    Caches, coherence basics, MESI; conflict signal on invalidation;
+    false conflicts at line granularity; no coherence across GPU SMs.
 - Out-of-Order Execution and Speculation
-    Pipeline, speculative stores, rollback.
+    Pipeline, speculative stores, rollback; ROB holds register state;
+    capacity limits; branch-mispredict/abort parallel.
 - Store Buffers and Memory Ordering
-    TSO model, fences.
+    Store buffer; memory consistency models defined via litmus tests.
+  * Sequential Consistency
+    Lamport's SC; one global order; no anomalies; no commercial SC machine.
+  * Total Store Order (x86-64, SPARC)
+    Store buffer is the only reordering source (W->R only); store-buffering
+    (Dekker/SB) litmus anomaly diagram; torn multi-word views; mfence fix.
+  * The Relaxed Models of ARM and POWER
+    All four pairs relaxable; barriers (dmb, sync/lwsync/isync),
+    ldar/stlr, dependencies; message-passing litmus anomaly diagram;
+    IRIW; POWER8 HTM backend tie-in (backends/tm_impl/power8_htm).
+  * Other Models and the C/C++ Contract
+    RISC-V RVWMO cousin; GPU scopes (Ch.17); C11/C++11 atomics as the
+    portable contract; litmus summary table (SB/MP/IRIW x TSO/ARM-POWER).
 - Worked Example: The TSO Store-Buffer Surprise
-    Classic store-buffer reordering demo.
+    Bank transfer writes A then reads B; torn-view diagram (drain window).
+- Worked Example: The Message-Passing Surprise on ARM and POWER
+    Commit-marker idiom; broken relaxed vs fixed release/acquire in
+    compilable C++ AND Rust; write against the weak column discipline.
 - Worked Example: Cache-Line False Conflicts
-    False sharing between transactions on one cache line.
+    False sharing between transactions on one cache line; padded layout;
+    TSX-SGL + SGL repo paths.
 - HTM Execution States
-    Speculative data in cache; commit/abort; capacity.
+    State machine: xbegin, no-conflict commit, conflict/capacity abort,
+    retry budget, persistent-abort fallback, unlock.
 - Worked Example: Atomic Commit-Publish in TLA+
-    TLA+ model of commit/abort as atomic publish.
+    TLA+ model of commit/abort as atomic publish; money conservation.
 - Hardware Mechanisms and TM Consequences
-    Mapping each mechanism to a TM design consequence.
+    Mechanism -> TM consequence table with per-backend citations and
+    repository paths (backends/tm_impl/*, gpu/backends/*).
 - Summary
 - Exercises
 
-FIGURES: speculative-store pipeline, TSO store-buffer surprise, HTM state machine
-TABLES: tab:hardware-tm-taxonomy (mechanism -> TM consequence)
-LISTINGS: 3 (store-buffer demo, false-conflict, TLA+ commit-publish)
-CITES: (cache-coherence history refs reused from Ch1/Ch2)
+FIGURES: speculative-store pipeline (commit label above boxes), SC total
+order, TSO store-buffer anomaly, ARM/POWER message-passing anomaly, TSO
+store-buffer surprise (drain window), HTM state machine
+TABLES: tab:litmus-models (litmus x model matrix), tab:hardware-tm-taxonomy
+(mechanism -> consequence -> cite + repo path)
+LISTINGS: 5 (TSO transfer C, message-passing C++ broken/fixed,
+message-passing Rust, cache-line C++, TLA+ commit-publish)
+CITES: lamport79sc, sewell10cacm, adve96tutorial, alglave17fencing,
+sorin11primer, herlihy93, intel13tsx, chung06xtm, dice06tl2,
+dalessandro10norec, felber08tinystm, dragojevic09swiss, cachopo06,
+correia18romulus, castro18nvhtm, liu17dudetm, shen15prstm, nunes22csmv,
+xu14gpustm, holey14, nunes23gust, peng10percolator, ramalhete15leftright

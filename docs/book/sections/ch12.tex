@@ -21,9 +21,9 @@ The oracle question is central: what is the ground truth for a concurrent data s
 \centering
 \caption{Testing layers for transactional-memory implementations.}
 \label{tab:tm-testing-layers}
-\begin{tabular}{p{0.22\linewidth}p{0.26\linewidth}p{0.26\linewidth}p{0.16\linewidth}}
+\begin{tabular}{M{0.22\linewidth}M{0.26\linewidth}M{0.26\linewidth}M{0.16\linewidth}}
 \hline
-Layer & Oracle & Bugs exposed & Cost profile \\
+\thb{0.22\textwidth}{Layer} & \thb{0.26\textwidth}{Oracle} & \thb{0.26\textwidth}{Bugs exposed} & \thb{0.16\textwidth}{Cost profile} \\
 \hline
 Invariant test & Sum, count, set membership, or sequential reference result & Lost update, torn write-back, non-atomic commit & Cheap; run on every backend \\
 Abort fuzzing & Same invariant after injected aborts & Bad undo log, leaked write-set entry, failed rollback & Moderate; many retries \\
@@ -35,7 +35,7 @@ TLA+ model checking & Abstract safety property & Missing validation case, illega
 \end{table}
 
 The companion repository instantiates every layer. The invariant-test layer
-is \texttt{tests/expli-api/\allowbreak test\_tx.cpp} (114 transaction-semantics cases)
+is \texttt{tests/\allowbreak expli-api/\allowbreak test\_tx.cpp} (114 transaction-semantics cases)
 and \texttt{test\_ds.cpp} (207 data-structure cases), run per backend;
 fuzzing is \texttt{fuzz\_counter}/\texttt{\allowbreak fuzz\_bank} with configurable
 thread and counter counts; the static-analysis layer is the LLVM race

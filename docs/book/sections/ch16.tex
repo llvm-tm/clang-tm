@@ -70,14 +70,14 @@ The availability reality is the final fact, and it motivates this chapter's simu
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.18\textwidth}p{0.25\textwidth}p{0.25\textwidth}p{0.22\textwidth}}
+\begin{tabular}{M{0.18\textwidth}M{0.25\textwidth}M{0.25\textwidth}M{0.22\textwidth}}
 \hline
-\textbf{Mechanism} & \textbf{Tracking} & \textbf{Abort sources} & \textbf{Software obligation}\\
+\thb{0.18\textwidth}{\textbf{Mechanism}} & \thb{0.25\textwidth}{\textbf{Tracking}} & \thb{0.25\textwidth}{\textbf{Abort sources}} & \thb{0.22\textwidth}{\textbf{Software obligation}} \\
 \hline
 Intel RTM & Cache-resident speculative read/write sets; explicit \texttt{\_xbegin}, \texttt{\_xend}, \texttt{\_xabort}. & Conflict, capacity, unsupported instruction, interrupt, page fault, explicit abort. & Always provide a correct fallback; subscribe to fallback lock inside the transaction.\\
 ARM TME & Architectural transaction begin/end (\texttt{TSTART}/\allowbreak\texttt{TCOMMIT}/\allowbreak\texttt{TCANCEL}/\allowbreak\texttt{TTEST}) with implementation-defined tracking. & Similar best-effort causes; exact diagnostics are implementation-specific. & Same best-effort rule; never assume eventual commit. \emph{TME never shipped in a commercial core and was withdrawn from the Arm ARM in 2025~\cite{arm25tmew}; it is studied here as a design point, not a shipping ISA.}\\
 IBM POWER HTM & Coherence-based tracking with a mature architectural interface (\texttt{tbegin.}/\allowbreak\texttt{tend.}/\allowbreak\texttt{tabort.}/\allowbreak\texttt{tsr.}, TEXASR failure recording, ROT). & Conflict, capacity, non-transactional events, implementation limits. & Use retry budgets and fallback paths; exploit richer platform diagnostics where available.\\
-gem5 Ruby/HTM model & Simulated cache hierarchy and coherence protocol (\texttt{MESI\_Three\_Level\_HTM}); ISA-agnostic HTM sequencer with calibrated begin/commit latencies. & Commit path is modeled faithfully; conflict/capacity abort wiring is ISA-dependent and incomplete for x86 TSX (see \S\ref{sec:htm-simulation}). & Use simulation to separate effects that hardware counters collapse; check the companion fork's gap list before interpreting abort stats.\\
+gem5 Ruby/HTM model & Simulated cache hierarchy and coherence protocol (\texttt{MESI\_Three\_\allowbreak Level\_HTM}); ISA-agnostic HTM sequencer with calibrated begin/commit latencies. & Commit path is modeled faithfully; conflict/capacity abort wiring is ISA-dependent and incomplete for x86 TSX (see \S\ref{sec:htm-simulation}). & Use simulation to separate effects that hardware counters collapse; check the companion fork's gap list before interpreting abort stats.\\
 \hline
 \end{tabular}
 \caption{HTM implementations differ in interface and diagnostics, but share the same semantic contract: hardware commit is opportunistic and software fallback is mandatory.}

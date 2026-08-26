@@ -1,6 +1,6 @@
 CXX ?= clang++
 CXXFLAGS = -std=c++20 -O1 -g -fsanitize=fuzzer -fno-omit-frame-pointer -pthread
-INC = -I../../ -I../../expli_instr/cpp -I../../expli_instr/cpp/include -I../../backends/tm_impl/common -I../../backends/tm_impl/tiny_stm
+INC = -I../../ -I../../explicit_api/cpp -I../../explicit_api/cpp/include -I../../backends/tm_impl/common -I../../backends/tm_impl/tiny_stm
 LDFLAGS = -pthread
 
 RUNTIME_DIR = ../../backends/tm_impl

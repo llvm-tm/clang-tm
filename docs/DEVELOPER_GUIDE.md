@@ -15,7 +15,7 @@ The TM API C++ project implements Software Transactional Memory (STM) across 16 
 │   ├── cpp/                  # Explicit API benchmarks (bank, STAMP, stmbench7, ...)
 │   ├── plugin/               # Plugin benchmarks (LLVM-pass instrumented)
 │   └── rust/                 # Rust benchmarks (Cargo workspace)
-├── expli_instr/              # Explicit instrumentation (no LLVM plugin)
+├── explicit_api/              # Explicit instrumentation (no LLVM plugin)
 │   ├── cpp/include/          # C++ API: tm_api.hpp, containers, tx_executor, etc.
 │   └── rust/workspace/       # Rust API: tm crate + 14 runtime backends + simulator
 ├── plugin/                   # LLVM TM plugin (passes, runtimes, race checker)
@@ -65,7 +65,7 @@ make -C plugin run              # Run plugin tests
 ### Rust Workspace
 
 ```
-cd expli_instr/rust/workspace
+cd explicit_api/rust/workspace
 cargo check --features wbctl -p tm
 cargo test --features wbctl -p tm
 cargo test --features wbctl -p runtime-tinystm  # individual backend test (no sim)
@@ -117,7 +117,7 @@ Pipeline: `collect → clone → redirect → instrument-fn → cleanup`
 
 ## How to Add a Rust Backend
 
-1. Create `expli_instr/rust/workspace/runtime/<name>/` with `Cargo.toml` + `src/lib.rs`
+1. Create `explicit_api/rust/workspace/runtime/<name>/` with `Cargo.toml` + `src/lib.rs`
 2. Export all `tm_read_*` / `tm_write_*` functions + `tm_begin`/`tm_commit`/`tm_abort`/lifecycle
 3. Optionally add `pub mod sim` with simulation support
 4. Register in `tm/Cargo.toml` and `tm/src/lib.rs`

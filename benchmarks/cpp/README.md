@@ -190,7 +190,7 @@ benchmarks/cpp/
 └── bin/                             # Compiled binaries
 ```
 
-The TM API itself lives in `expli_instr/cpp/include/tm_api.hpp` and the backends
+The TM API itself lives in `explicit_api/cpp/include/tm_api.hpp` and the backends
 live in `backends/tm_impl/`. No LLVM plugin, no bitcode pipeline, no cloning —
 just a C++20 compiler and pthreads. See `backends/README.md` for backend
 selection and architecture details.

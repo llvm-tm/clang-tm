@@ -2,8 +2,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include "../../expli_instr/cpp/include/tm_api.hpp"
-#include "../../expli_instr/cpp/include/tm_map.hpp"
+#include "../../explicit_api/cpp/include/tm_api.hpp"
+#include "../../explicit_api/cpp/include/tm_map.hpp"
 
 static int failures = 0;
 

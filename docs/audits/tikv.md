@@ -9,7 +9,7 @@ The TLA+ model captures the high-level TM semantics (begin, read, write, commit 
 | File | Role |
 |------|------|
 | `docs/proofs/TiKV.tla` | TLA+ specification of the TiKV TM backend (345 lines) |
-| `expli_instr/rust/workspace/runtime/tikv/src/lib.rs` | Rust implementation (406 lines) |
+| `explicit_api/rust/workspace/runtime/tikv/src/lib.rs` | Rust implementation (406 lines) |
 | `backends/tm_impl/tikv/tikv_backend.cpp` | C++ FFI shim (174 lines) |
 | `backends/tm_impl/tikv/README.md` | Architecture documentation (98 lines) |
 

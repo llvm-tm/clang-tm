@@ -125,9 +125,9 @@ The table in an LR parser is a compact encoding of two choices. A \emph{shift} c
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.20\linewidth}p{0.24\linewidth}p{0.30\linewidth}p{0.16\linewidth}}
+\begin{tabular}{M{0.20\linewidth}M{0.24\linewidth}M{0.30\linewidth}M{0.16\linewidth}}
 \hline
-Approach & Parser shape & Strength & Cost \\
+\thb{0.20\textwidth}{Approach} & \thb{0.24\textwidth}{Parser shape} & \thb{0.30\textwidth}{Strength} & \thb{0.16\textwidth}{Cost} \\
 \hline
 Hand recursive descent & Functions over tokens & Transparent AST construction & No left recursion \\
 Yacc/Bison & Table-driven LALR & Compact grammar file & Shift/reduce debugging \\

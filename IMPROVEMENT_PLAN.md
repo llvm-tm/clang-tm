@@ -158,11 +158,11 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Build all Rust workspace members
-        run: cargo build --manifest-path expli_instr/rust/workspace/Cargo.toml
+        run: cargo build --manifest-path explicit_api/rust/workspace/Cargo.toml
       - name: Build all Rust benchmarks
         run: cargo build --manifest-path benchmarks/rust/Cargo.toml
       - name: Run Rust tests
-        run: cargo test --manifest-path expli_instr/rust/workspace/Cargo.toml
+        run: cargo test --manifest-path explicit_api/rust/workspace/Cargo.toml
 
   # ── Job 4: Cross-backend correctness (push to main only) ─
   cross-backend:

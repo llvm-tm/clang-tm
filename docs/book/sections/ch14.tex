@@ -98,9 +98,9 @@ Benchmark hygiene includes pinning threads when possible, disabling frequency sc
 \centering
 \caption{Measured anchors from the companion M1 Pro fuzz/bank runs. These are calibration points, not universal rankings.}
 \label{tab:perf-anchors}
-\begin{tabular}{p{0.15\linewidth}p{0.19\linewidth}p{0.23\linewidth}p{0.31\linewidth}}
+\begin{tabular}{M{0.15\linewidth}M{0.19\linewidth}M{0.23\linewidth}M{0.31\linewidth}}
 \hline
-Backend & Workload slice & Throughput & Modeling use \\
+\thb{0.15\textwidth}{Backend} & \thb{0.19\textwidth}{Workload slice} & \thb{0.23\textwidth}{Throughput} & \thb{0.31\textwidth}{Modeling use} \\
 \hline
 NOrec-BF & read-mostly & about 829K txns/s & Bloom-filtered read-set cost \\
 NOrec & read-mostly & about 553K txns/s & global-clock validation cost \\
@@ -116,9 +116,9 @@ MVLog & read-mostly & about 109K txns/s & multi-version read overhead \\
 \centering
 \caption{Common tuning symptoms and likely causes in optimistic TM experiments.}
 \label{tab:perf-symptoms}
-\begin{tabular}{p{0.28\linewidth}p{0.34\linewidth}p{0.30\linewidth}}
+\begin{tabular}{M{0.28\linewidth}M{0.34\linewidth}M{0.30\linewidth}}
 \hline
-Symptom & Likely cause & First check \\
+\thb{0.28\textwidth}{Symptom} & \thb{0.34\textwidth}{Likely cause} & \thb{0.30\textwidth}{First check} \\
 \hline
 High abort rate, short attempts & hot metadata or hot data item & conflict-address histogram \\
 High abort rate, long attempts & late validation failure & read-set length and validation point \\
@@ -274,7 +274,7 @@ int main(int argc, char** argv) {
 
 SGL has no speculative conflict aborts, so any reject in this program is caused by the account floor, not by validation failure. The invariant check is part of the benchmark, not a debugging afterthought: a fast run that loses money is not a performance result. The same driver shape can wrap a TM backend: keep the random stream, account count, transfer amount, and invariant checks fixed, then replace only the transaction boundary and memory-access API. Attempts per commit is still useful for SGL because it separates useful commits from semantic rejects; for optimistic TM, add a separate counter for validation aborts.
 
-\section{Worked Example: Model Checking a Bounded Contention Counter}
+\section[Model Checking a Bounded Contention Counter]{Worked Example: Model Checking a Bounded Contention Counter}
 \index{TLA+}\index{model checking}\index{contention}
 \label{sec:perf-tla-bank}
 

@@ -683,13 +683,11 @@ public:
         TM_EVENT(TX_ABORT, (word_t)tx, tx->start_version);
         g_tm_abort_count.fetch_add(1, std::memory_order_relaxed);
         
-        // TL2 is write-back — values only reach memory during commit step 7.
-        // On abort, no writes were applied to memory, so we just release guards
-        // and retry.  No old-value restore needed.
-        for (auto& e : tx->write_set) {
-            TM_EVENT2(LOCK_RELEASE, (word_t)e.addr, 0, 0);
-            release_guard(e.addr);
-        }
+        // TL2 is write-back — values only reach memory during commit.
+        // Guards are only acquired during commit (step 3), and commit handles
+        // its own guard release on validation failure. abort_tx() is called
+        // either during transaction body (no guards held) or from exit_thread()
+        // (no guards held). Do NOT release guards here.
         
         tx->active = false;
         tx->aborted = true;

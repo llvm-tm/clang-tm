@@ -92,7 +92,7 @@ def make_bin_name(bench_name: str) -> str:
 
 def build_cxx_flags(backend: str) -> tuple:
     """Return (cxxflags, extra_inc, defs, runtime) for a given backend."""
-    base_inc = f"-I{PROJECT_ROOT} -I{PROJECT_ROOT}/expli_instr/cpp"
+    base_inc = f"-I{PROJECT_ROOT} -I{PROJECT_ROOT}/explicit_api/cpp"
     common_inc = "-I" + str(PROJECT_ROOT / "backends" / "tm_impl" / "common")
     common_inc2 = f"-I{PROJECT_ROOT}/backends/tm_impl"
     CXX = os.environ.get("CXX", "clang++-22")

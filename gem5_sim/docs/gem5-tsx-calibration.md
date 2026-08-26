@@ -370,7 +370,7 @@ For multi-threaded workloads, the following gem5 changes are needed:
 | `simulator/` | Rust bank benchmark for tsx_sim |
 | `gem5_sim/scripts/compare_gem5_tsxsim.py` | Comparison script |
 | `tm_api_cpp/machine_profiles/broadwell_ep_v4.json` | Hardware profile |
-| `tm_api_cpp/expli_instr/rust/workspace/runtime/tsx_sim/src/lib.rs` | Rust DES backend with cycle costs |
+| `tm_api_cpp/explicit_api/rust/workspace/runtime/tsx_sim/src/lib.rs` | Rust DES backend with cycle costs |
 
 ---
 
@@ -407,7 +407,7 @@ Ensure the `runtime-tsx-sim` dependency path in `Cargo.toml` is correct:
 
 ```toml
 [dependencies]
-runtime-tsx-sim = { path = "../../expli_instr/rust/workspace/runtime/tsx_sim", features = ["simulation", "stats"] }
+runtime-tsx-sim = { path = "../../explicit_api/rust/workspace/runtime/tsx_sim", features = ["simulation", "stats"] }
 ```
 
 The path is relative from `simulator/`.

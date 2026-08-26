@@ -8,6 +8,15 @@
 % --- Mathematics ---
 \usepackage{amsmath}
 
+% --- Tables: middle-aligned body cells, bottom-aligned header cells ---
+\usepackage{array}
+% M{width}: body cell, vertically centered, ragged-right
+\newcolumntype{M}[1]{>{\raggedright\arraybackslash}m{#1}}
+% \thb{width}{text}: header cell, vertically aligned to the bottom of the row
+\newcommand{\thb}[2]{\multicolumn{1}{@{}>{\raggedright\arraybackslash}b{#1}@{}}{#2}}
+% \rep{path}: compact repository path
+\newcommand{\rep}[1]{{\footnotesize\texttt{#1}}}
+
 % --- Page geometry ---
 \usepackage[inner=2.5cm,outer=2.0cm,top=2.5cm,bottom=2.5cm]{geometry}
 
@@ -20,10 +29,25 @@
 
 % --- Graphics (for future TikZ figures) ---
 \usepackage{tikz}
-\usetikzlibrary{positioning,arrows.meta,calc,shapes.geometric}
+\usetikzlibrary{positioning,arrows.meta,calc,shapes.geometric,fit}
 
 % --- Code listings ---
 \usepackage{listings}
+
+% --- Paragraph breaking: allow a third pass with extra stretch so that
+%     lines with long \texttt tokens (repo paths, identifiers) find a
+%     feasible breakpoint instead of overflowing into the margin ---
+\setlength{\emergencystretch}{3em}
+\lstdefinelanguage{Rust}{
+    keywords={fn,let,mut,const,static,struct,enum,impl,trait,pub,use,mod,
+              match,if,else,loop,while,for,in,return,unsafe,as,move,where,
+              Self,self,type,ref,dyn,async,await,crate,super},
+    sensitive=true,
+    comment=[l]{//},
+    morecomment=[s]{/*}{*/},
+    morestring=[b]",
+    morestring=[b]',
+}
 \lstdefinestyle{bookcode}{
     basicstyle=\ttfamily\footnotesize,
     frame=single,
@@ -42,6 +66,34 @@
     \usepackage{titlesec}
     \titleformat{\chapter}[hang]{\Huge\bfseries}{\thechapter.\ }{0pt}{\Huge\bfseries}
 }{}
+
+% --- Running heads: set the chapter/section mark in \small so that long
+%     titles (e.g. Ch.~4) no longer collide with the page number or run
+%     into the margins.  Structure mirrors the standard book-class
+%     \ps@headings; only the font of the mark changes. ---
+\makeatletter
+\if@twoside
+    \def\ps@headings{%
+        \let\@oddfoot\@empty\let\@evenfoot\@empty
+        \def\@evenhead{\thepage\hfil{\slshape\small\leftmark}}%
+        \def\@oddhead{{\slshape\small\rightmark}\hfil\thepage}%
+        \let\@mkboth\markboth
+        \def\chaptermark##1{\markboth {\MakeUppercase{\ifnum \c@secnumdepth>\m@ne
+            \@chapapp\ \thechapter. \ \fi##1}}{}}%
+        \def\sectionmark##1{\markright{\MakeUppercase{\ifnum \c@secnumdepth >\z@
+            \thesection. \ \fi##1}}}}%
+\else
+    \def\ps@headings{%
+        \let\@oddfoot\@empty
+        \def\@oddhead{{\slshape\small\rightmark}\hfil\thepage}%
+        \let\@mkboth\markboth
+        \def\chaptermark##1{\markright {\MakeUppercase{\ifnum \c@secnumdepth>\m@ne
+            \@chapapp\ \thechapter. \ \fi##1}}}%
+        \def\sectionmark##1{\markright{\MakeUppercase{\ifnum \c@secnumdepth >\z@
+            \thesection. \ \fi##1}}}}%
+\fi
+\pagestyle{headings}% (re)execute \ps@headings with the new definitions
+\makeatother
 
 % --- ToC depth ---
 \setcounter{tocdepth}{2}   % show sections in ToC
@@ -138,6 +190,7 @@
 \input{sections/app05}
 \input{sections/app06}
 \input{sections/app07}
+\input{sections/app08}
 
 % -------------------------------------------------------------------
 % ~~~~~~~~~~~~~~ Back matter ~~~~~~~~~~~~~~

@@ -248,9 +248,9 @@ a different burden onto the programmer, the compiler, or the runtime.}
 \footnotesize
 \renewcommand{\arraystretch}{1.35}
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{p{0.13\linewidth} p{0.18\linewidth} p{0.14\linewidth} p{0.16\linewidth} p{0.13\linewidth}}
+\begin{tabular}{M{0.13\linewidth} M{0.18\linewidth} M{0.14\linewidth} M{0.16\linewidth} M{0.13\linewidth}}
 \hline
-\textbf{Approach} & \textbf{Synchronization order} & \textbf{Deadlock risk} & \textbf{Composability} & \textbf{Reasoning locality} \\
+\thb{0.13\textwidth}{\textbf{Approach}} & \thb{0.18\textwidth}{\textbf{Synchronization order}} & \thb{0.14\textwidth}{\textbf{Deadlock risk}} & \thb{0.16\textwidth}{\textbf{Composability}} & \thb{0.13\textwidth}{\textbf{Reasoning locality}} \\
 \hline
 Single global lock & none & none & coarse but safe & global \\
 Ordered multiple locks & programmer-defined & high if order violated & not composable & distributed \\

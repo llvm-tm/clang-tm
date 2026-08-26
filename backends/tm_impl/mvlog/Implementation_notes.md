@@ -1,7 +1,7 @@
 # MVLog — Multi-Version Log-based STM (Design)
 
 **Status: implemented in C++ (`MVLog.hpp` / `MVLog_globals.hpp` / `MVLog_runtime.cpp`)
-and Rust (`expli_instr/rust/workspace/runtime/mvlog/`). Verified: `test_tx` 114/114,
+and Rust (`explicit_api/rust/workspace/runtime/mvlog/`). Verified: `test_tx` 114/114,
 `test_ds` 207/207, fuzz_counter/fuzz_bank multi-thread PASS; TLA+ model safety PASS.
 Design document retained below for the protocol, correctness lemma, and open questions.**
 

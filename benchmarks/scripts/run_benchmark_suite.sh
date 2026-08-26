@@ -88,7 +88,7 @@ build_all() {
     cd ..
 
     # Rust — build each feature
-    cd expli_instr/rust/workspace
+    cd explicit_api/rust/workspace
     for backend in norec wbctl wt tsxsgl; do
         log "  Building Rust $backend..."
         RUSTFLAGS="-C target-cpu=native" cargo build --release -p benchmarks --features "$backend" 2>&1 | tail -1
@@ -193,7 +193,7 @@ run_expli() {
 # ── Run Rust implementation ─────────────────────────────────────────────
 run_rust() {
     local backend="$1" threads="$2" sample="$3"
-    local rust_dir="expli_instr/rust/workspace"
+    local rust_dir="explicit_api/rust/workspace"
 
     # Map backend to Rust feature/bin name
     local feature

@@ -27,7 +27,7 @@ Based on the 2026-06-19 Rust benchmark audit, updated 2026-06-20.
 ## Verification
 
 - [x] All changes verified with `cargo test -- --test-threads=1` in `simulator/` (26/26 PASS)
-- [x] Rust workspace compiles (`cargo check` in `expli_instr/rust/workspace`)
+- [x] Rust workspace compiles (`cargo check` in `explicit_api/rust/workspace`)
 - [x] Bayes `--test`: All 15 tests pass
 - [x] Yada `--test`: All 1008 tests pass
 - [x] Bank `--queue`: Compiles cleanly

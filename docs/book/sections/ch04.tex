@@ -14,7 +14,7 @@ rules both help and complicate TM. The running bank transfer appears
 throughout as the case any of these mechanisms can break: a lost-update that a
 different memory model would have prevented.
 
-\section{C/C++ Memory Model and ABI Hazards: \texttt{volatile}, Inline Assembly, and Atomics}
+\section[C/C++ Memory Model and ABI Hazards]{C/C++ Memory Model and ABI Hazards: \texttt{volatile}, Inline Assembly, and Atomics}
 
 A language-integrated TM is a boundary. The compiler decides which memory
 operations are instrumented; the runtime decides which atomics and fences
@@ -132,6 +132,18 @@ A TM read path typically needs only relaxed plus a compiler fence.}
 
 \section{Language Integration Case Studies}
 
+The two case studies in this section sit at opposite ends of the
+integration spectrum. Rust integrates by \emph{ruling things out}: the
+borrow checker removes data races before the program runs, and the TM
+layer supplies only the multi-location atomicity that the type system
+cannot prove. Annotation-based integration (GCC's
+\texttt{\_\_transaction\_atomic}, this book's \texttt{[[tm::shared]]}
+plugin) integrates by \emph{rewriting}: the compiler instruments the
+accesses an annotation marks and hands them to the runtime. Reading the
+two side by side makes the trade-off concrete: what each mechanism proves
+at compile time, what it leaves to the runtime, and what breaks when the
+contract is violated.
+
 \subsection{Rust: The Borrow Checker and TM}
 
 Rust's borrow checker eliminates data races at compile time. A data race in
@@ -163,6 +175,53 @@ construction. A TM layer must therefore integrate with each differently: one
 C++ ABI, one Rust trait boundary. The repository's Rust backends reuse the
 same runtime core but wrap it in a trait that exposes a safe transactional
 cell, leaving the unsafe interior to the runtime.
+
+The companion's Rust API makes the split visible in three lines of client
+code. A \texttt{TmCell<T>} owns a value that ordinary code cannot touch
+(its contents are behind \texttt{UnsafeCell}); a \texttt{transaction}
+closure receives a transaction handle whose \texttt{read}/\texttt{write}
+methods are the only way in; and the runtime---selected at link time from
+the same backend zoo as the C++ side---owns every fence and retry.
+Listing~\ref{lst:rust-bank} is the bank transfer of this chapter's C++
+examples, in safe Rust: no \texttt{unsafe} block appears anywhere in the
+client, yet both balances update as one atomic unit or not at all.
+
+\begin{lstlisting}[language=Rust, caption={The bank transfer in safe Rust
+with the companion \texttt{tm} crate: atomicity without a single
+\texttt{unsafe} block in client code.}, label={lst:rust-bank}]
+use tm::{TmCell, transaction, tm_init, tm_exit};
+use std::sync::Arc;
+
+fn main() {
+    tm_init();
+    let a = Arc::new(TmCell::new(100_i64));
+    let b = Arc::new(TmCell::new(100_i64));
+
+    // Both reads and both writes are one atomic unit.
+    let ok = transaction(|tx| {
+        let bal_a = tx.read(&a);
+        let bal_b = tx.read(&b);
+        if bal_a < 10 {
+            return false; // floor check: abort, no effect at all
+        }
+        tx.write(&a, bal_a - 10);
+        tx.write(&b, bal_b + 10);
+        true
+    });
+    assert!(ok);
+
+    let total = transaction(|tx| tx.read(&a) + tx.read(&b));
+    assert_eq!(total, 200);
+    tm_exit();
+}
+\end{lstlisting}
+
+What the borrow checker proved here: no thread can read or write
+\texttt{a} or \texttt{b} outside \texttt{transaction} (the cells' interiors
+are inaccessible), and the cells may be shared across threads only because
+\texttt{TmCell} is \texttt{Sync}. What it did \emph{not} prove: that the
+two writes commit together. That is the runtime's obligation, and it is
+discharged by the same OCC protocols as the C++ backends of Part~IV.
 
 \subsection{Language-Integrated Annotations for TM}
 
@@ -197,9 +256,9 @@ Table~\ref{tab:language-tm-taxonomy} summarizes the spectrum.
 \caption{Language-integration mechanisms and their contracts.}
 \label{tab:language-tm-taxonomy}
 \renewcommand{\arraystretch}{1.3}
-\begin{tabular}{p{0.18\linewidth} p{0.22\linewidth} p{0.28\linewidth} p{0.22\linewidth}}
+\begin{tabular}{M{0.18\linewidth} M{0.22\linewidth} M{0.28\linewidth} M{0.22\linewidth}}
 \hline
-\textbf{Mechanism} & \textbf{Programmer contract} & \textbf{Runtime/compiler burden} & \textbf{Main hazard}  \\
+\thb{0.18\textwidth}{\textbf{Mechanism}} & \thb{0.22\textwidth}{\textbf{Programmer contract}} & \thb{0.28\textwidth}{\textbf{Runtime/compiler burden}} & \thb{0.22\textwidth}{\textbf{Main hazard}} \\
 \hline
 \texttt{volatile} & no reordering, but no cross-thread ordering & almost none & false sense of safety  \\
 C/C++ atomics & explicit order per operation & runtime uses atomics; programmer chooses order & lost atomicity  \\
@@ -264,6 +323,55 @@ shows. Composability reappears here: two counters in one \texttt{atomic} block
 compose, because the transaction names both accesses and the runtime
 serializes the pair. Two separate \texttt{atomic\_fetch\_add} calls do not
 compose: each is atomic by itself, but the pair is not.
+
+Rust states the same three-way choice with the borrow checker standing
+guard over each door. In Listing~\ref{lst:counter-rust} the mutex wrapper
+makes the critical section unmissable, the atomic makes the ordering an
+explicit argument at each call, and the TM path is the only one that can
+touch \emph{two} cells in one indivisible step---try extending the first
+two styles to increment a second counter together with the first and the
+lost-update window opens immediately, while the transaction closure keeps
+the pair atomic by construction.
+
+\begin{lstlisting}[language=Rust, caption={The shared counter three ways
+in Rust: lock, atomic, and transaction (companion \texttt{tm} crate).},
+label={lst:counter-rust}]
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
+use tm::{TmCell, transaction, tm_init, tm_exit, tm_init_thread,
+         tm_exit_thread};
+
+fn main() {
+    tm_init();
+    let lock = Arc::new(Mutex::new(0_i32));   // way 1: lock
+    let atomic = AtomicI32::new(0);            // way 2: atomic
+    let cell = Arc::new(TmCell::new(0_i32));   // way 3: transaction
+
+    let mut handles = Vec::new();
+    for _ in 0..4 {
+        let (lock, cell) = (lock.clone(), cell.clone());
+        handles.push(std::thread::spawn(move || {
+            tm_init_thread();
+            for _ in 0..1000 {
+                *lock.lock().unwrap() += 1;
+                atomic.fetch_add(1, Relaxed);
+                transaction(|tx| {
+                    let v = tx.read(&cell);
+                    tx.write(&cell, v + 1);
+                });
+            }
+            tm_exit_thread();
+        }));
+    }
+    for h in handles { h.join().unwrap(); }
+
+    assert_eq!(*lock.lock().unwrap(), 4000);
+    assert_eq!(atomic.load(Relaxed), 4000);
+    let total = transaction(|tx| tx.read(&cell));
+    assert_eq!(total, 4000);
+    tm_exit();
+}
+\end{lstlisting}
 
 \section{Worked Example: ABI-Safe Bank Transfer}
 \label{sec:abi-safe-bank-transfer}
@@ -435,7 +543,10 @@ Different languages offer different levels of memory-ordering control. C and
 C++ hand the programmer the full set of atomics and ordering choices. Rust
 removes data races at compile time but does not restore multi-location
 atomicity. A type system that prevents data races still cannot enforce
-atomicity across multiple memory locations without TM support.
+atomicity across multiple memory locations without TM support; the Rust
+listings of this chapter (Listings~\ref{lst:rust-bank}
+and~\ref{lst:counter-rust}) show where the language's guarantees end and
+the runtime's begin.
 
 The key takeaway for the rest of the book is that the language integration is
 a boundary. The compiler decides what is instrumented; the runtime decides how
@@ -458,8 +569,11 @@ a data race without additional runtime checks.
 
 \item \emph{[implementation]} Compare the programming effort required to
 add a thread-safe counter using locks, atomics, and a TM in C++ and
-Rust. Write the C++ version as a small benchmark and the Rust version
-as a small safe wrapper around \texttt{std::sync::Mutex}.
+Rust. Start from the C++ version in Listing~\ref{lst:counter-three-ways}
+and the Rust version in Listing~\ref{lst:counter-rust}, then extend
+both so that a second counter is incremented in the \emph{same}
+indivisible step as the first. Which of the six combinations composes
+without further machinery, and why?
 
 \item \emph{[implementation]} Extend the ABI-safe bank-transfer example of
 Listing~\ref{lst:abi-safe-bank} with a second shared object,

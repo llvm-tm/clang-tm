@@ -53,18 +53,22 @@ struct CalvinReadEntry {
 struct CalvinState {
     bool collecting;
     bool use_collected;
+    bool holds_global_lock;
     std::vector<CalvinReadEntry>             read_entries;
     std::vector<CalvinWriteEntry>            write_set;
     std::unordered_map<void*,CalvinWriteEntry> write_buffer;
 };
 
 static __thread CalvinState *g_cs = nullptr;
+static std::mutex g_commit_mutex;
+static std::mutex g_calvin_global_lock;
 
 static CalvinState *ensure_state() {
     if (!g_cs) {
         g_cs = new CalvinState();
         g_cs->collecting = true;
         g_cs->use_collected = false;
+        g_cs->holds_global_lock = false;
     }
     return g_cs;
 }
@@ -73,10 +77,14 @@ static void real_tm_begin() {
     CalvinState *s = ensure_state();
     if (tm_nested_call_counter > 1) return;
     if (s->use_collected) {
+        // Entering execute phase - global lock already held from collect phase
         s->collecting = false;
         s->write_set.clear();
         s->write_buffer.clear();
     } else {
+        // Entering collect phase - acquire global lock for entire transaction
+        g_calvin_global_lock.lock();
+        s->holds_global_lock = true;
         s->collecting = true;
         s->read_entries.clear();
         s->write_set.clear();
@@ -94,26 +102,49 @@ static void real_tm_end() {
         return;
     }
     // Execute phase: validate reads, apply writes.
+    // Must hold commit mutex to serialize validation+apply against other commits.
+    g_commit_mutex.lock();
+    bool valid = true;
     for (auto &re : s->read_entries) {
         uint64_t cur = 0;
         memcpy(&cur, re.addr, re.width);
         if (cur != re.captured) {
-            s->collecting = true;
-            s->use_collected = false;
-            s->read_entries.clear();
-            s->write_set.clear();
-            s->write_buffer.clear();
-            siglongjmp(tm_jmpbuf, 1);
+            valid = false;
+            break;
         }
+    }
+    if (!valid) {
+        g_commit_mutex.unlock();
+        // Abort: release global lock and retry from collect phase
+        if (s->holds_global_lock) {
+            g_calvin_global_lock.unlock();
+            s->holds_global_lock = false;
+        }
+        s->collecting = true;
+        s->use_collected = false;
+        s->read_entries.clear();
+        s->write_set.clear();
+        s->write_buffer.clear();
+        siglongjmp(tm_jmpbuf, 1);
     }
     for (auto &w : s->write_set) {
         memcpy(w.addr, &w.value, w.width);
     }
     s->use_collected = false;
+    g_commit_mutex.unlock();
+    // Success: release global lock
+    if (s->holds_global_lock) {
+        g_calvin_global_lock.unlock();
+        s->holds_global_lock = false;
+    }
 }
 
 static void real_tm_abort() {
     CalvinState *s = ensure_state();
+    if (s->holds_global_lock) {
+        g_calvin_global_lock.unlock();
+        s->holds_global_lock = false;
+    }
     s->collecting = true;
     s->use_collected = false;
     s->read_entries.clear();

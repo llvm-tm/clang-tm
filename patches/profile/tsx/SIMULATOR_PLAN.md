@@ -65,7 +65,7 @@ patches/profile/tsx/
   results/                                        — CSV profiling results
   calibration/                                    — Calibration JSON + MachineProfile JSON
 
-expli_instr/rust/workspace/runtime/tsx_sim/
+explicit_api/rust/workspace/runtime/tsx_sim/
   src/lib.rs         — TSX simulation backend (bloom + write-set + conflict)
   Cargo.toml
 ```

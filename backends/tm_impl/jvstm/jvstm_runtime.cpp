@@ -120,11 +120,14 @@ static void real_tm_end() {
         }
     }
     if (valid) {
-        // Prepend new bodies to each written VBox
+        // Prepend new bodies to each written VBox AND write-through to memory
+        // so that .peek() (direct memory read) sees latest committed value
         for (auto &we : t_write_set) {
             VBox *box = get_or_create_vbox(we.addr);
             VBoxBody *new_body = new VBoxBody{ct, we.value, box->head.load(std::memory_order_relaxed)};
             box->head.store(new_body, std::memory_order_release);
+            // Write-through: update the original memory location
+            memcpy(we.addr, &we.value, sizeof(uint64_t));
         }
         g_commit_lock.unlock();
     } else {

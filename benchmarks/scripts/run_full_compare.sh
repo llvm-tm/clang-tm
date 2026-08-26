@@ -186,7 +186,7 @@ run_ob() {
 # ── Rust runner (interleaved: build then run per backend) ────────────────
 run_rust_backend() {
     local backend="$1"
-    local tdir="$BASE_DIR/expli_instr/rust/workspace/target/release"
+    local tdir="$BASE_DIR/explicit_api/rust/workspace/target/release"
 
     for bench in "${STAMP_BENCHES[@]}"; do
         local bin="$tdir/stamp_${bench}"
@@ -291,7 +291,7 @@ echo "=== Rust ==="
 for feat in wbctl wt norec; do
     echo "  [build] --features $feat ..."
     set +e
-    cargo build --release --manifest-path "$BASE_DIR/expli_instr/rust/workspace/Cargo.toml" \
+    cargo build --release --manifest-path "$BASE_DIR/explicit_api/rust/workspace/Cargo.toml" \
         --no-default-features --features "$feat" \
         > "/tmp/build_rust_${feat}.log" 2>&1
     rc=$?; set -e

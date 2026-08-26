@@ -168,9 +168,9 @@ the bad state.
 \begin{table}[htbp]
 \centering
 \small
-\begin{tabular}{p{0.15\linewidth}p{0.21\linewidth}p{0.28\linewidth}p{0.26\linewidth}}
+\begin{tabular}{M{0.15\linewidth}M{0.21\linewidth}M{0.28\linewidth}M{0.26\linewidth}}
 \hline
-\textbf{Design family} & \textbf{Representative backend} & \textbf{Modelled shared state} & \textbf{Main safety check} \\
+\thb{0.15\textwidth}{\textbf{Design family}} & \thb{0.21\textwidth}{\textbf{Representative backend}} & \thb{0.28\textwidth}{\textbf{Modelled shared state}} & \thb{0.26\textwidth}{\textbf{Main safety check}} \\
 \hline
 Serial lock & SGL, PersistentSGL & lock bit, heap & mutual exclusion, opacity \\
 Value validation & NOrec, NOrec-BF & sequence clock, read values & stale read rejection \\

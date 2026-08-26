@@ -10,7 +10,7 @@ backends/          — TM runtime implementations (TinySTM, NOrec, TL2, SGL, Swi
 plugin/            — LLVM instrumentation plugin (5-pass Honorio pipeline)
 benchmarks/        — Benchmarks (plugin-instrumented, C++ explicit, Rust)
 tests/             — Tests for all components
-expli_instr/       — Explicit C++ API headers + Rust workspace
+explicit_api/       — Explicit C++ API headers + Rust workspace
 tools/             — Build/install scripts
 simulator/         — Rust discrete event simulator for TM trace replay
 ```
@@ -194,7 +194,7 @@ Run with the default backend (TinySTM/WBCTL):
 cargo run --bin myapp
 ```
 
-See `expli_instr/rust/workspace/README.md` for backend selection and benchmark details.
+See `explicit_api/rust/workspace/README.md` for backend selection and benchmark details.
 
 ---
 

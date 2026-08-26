@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
+#include <csetjmp>
 #include <atomic>
 #include <thread>
 #include <vector>
@@ -18,6 +19,12 @@ thread_local SpecAlloc *g_spec_allocs = nullptr;
 thread_local FreeNode *g_retired_frees = nullptr;
 std::mutex g_retired_global_mutex;
 std::unordered_set<void *> g_retired_global_set;
+
+extern "C" {
+extern __thread int32_t    tm_nested_call_counter;
+extern __thread int32_t    tm_longjmp_ret;
+extern __thread sigjmp_buf tm_jmpbuf;
+}
 
 // ── Shared state (per-backend-process, not per-GPU-warp) ──────────
 // This runtime implements PR-STM WITHOUT warp barriers — each thread
@@ -61,10 +68,8 @@ static void real_tm_end() {
         }
     }
     // ── ACQUIRE locks (priority-based spin-loop) ──────────────
-    // PR-STM: if a higher-priority thread holds a lock, abort.
-    // If a lower-priority thread holds it, spin until release.
-    // If we already hold it (same thread, same lock entry for two
-    // different addresses), skip.
+    // PR-STM: can only acquire if lock is free OR we already hold it (same priority).
+    // If another thread holds it (different priority), abort.
     for (int i = 0; i < g_tx.num_writes; i++) {
         uint32_t lock_idx = g_tx.writes[i].lock_idx;
         // Check if we already hold this lock entry (same lock_idx acquired earlier)
@@ -77,10 +82,11 @@ static void real_tm_end() {
         }
         if (already_held) continue;
         while (true) {
-            uint32_t expected = __atomic_load_n(&gpu_lock_table[lock_idx], __ATOMIC_RELAXED);
+            uint32_t expected = __atomic_load_n(&gpu_lock_table[lock_idx], __ATOMIC_ACQUIRE);
             if (pr_stm_is_locked(expected)) {
-                if (pr_stm_get_priority(expected) != priority)
+                if (pr_stm_get_priority(expected) != priority) {
                     goto abort_tx;
+                }
                 // Same priority — we already hold it (shouldn't reach here if already_held check works)
                 break;
             }
@@ -88,6 +94,31 @@ static void real_tm_end() {
             if (__atomic_compare_exchange_n(&gpu_lock_table[lock_idx], &expected, desired, 0,
                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
                 break;
+        }
+    }
+    // ── RE-VALIDATE after lock acquisition ────────────────────
+    // Ensure no concurrent transaction modified our read-set while
+    // we were acquiring locks. Check ALL reads (including read-own-write).
+    // If another transaction modified an address we read, the version
+    // will have changed even if we later wrote to it.
+    for (int i = 0; i < g_tx.num_reads; i++) {
+        uint32_t read_lock_idx = g_tx.reads[i].lock_idx;
+        
+        uint32_t lw = __atomic_load_n(&gpu_lock_table[read_lock_idx], __ATOMIC_ACQUIRE);
+        if (pr_stm_is_locked(lw)) {
+            if (pr_stm_get_priority(lw) != priority) {
+                // Another thread holds the lock - abort
+                goto abort_tx;
+            }
+            // We hold the lock - version must still match what we read
+            if (pr_stm_get_version(lw) != g_tx.reads[i].ver) {
+                goto abort_tx;
+            }
+        } else {
+            // Lock free - version must match what we read
+            if (pr_stm_get_version(lw) != g_tx.reads[i].ver) {
+                goto abort_tx;
+            }
         }
     }
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -123,6 +154,7 @@ abort_tx:
             __atomic_store_n(&gpu_lock_table[lock_idx], new_entry, __ATOMIC_RELEASE);
         }
     }
+    siglongjmp(tm_jmpbuf, 1);
 }
 
 // ── Read / Write helpers ──────────────────────────────────────────
@@ -141,21 +173,26 @@ static int find_write(void *data_addr) {
     return -1;
 }
 
-static uint32_t read_common(uint32_t *lock_entry_ptr, uint32_t *data_ptr) {
+static uint64_t read_common(uint32_t *lock_entry_ptr, void *data_ptr, uint8_t bytes) {
     // Check write-set first (read-own-writes)
     int wi = find_write(data_ptr);
     if (wi >= 0) {
-        uint64_t val = g_tx.writes[wi].val;
-        return (uint32_t)val;
+        return g_tx.writes[wi].val;
     }
-    uint32_t lw = __atomic_load_n(lock_entry_ptr, __ATOMIC_RELAXED);
+    uint32_t lw = __atomic_load_n(lock_entry_ptr, __ATOMIC_ACQUIRE);
     if (g_tx.num_reads < PR_STM_MAX_READS) {
         uint32_t idx = (uint32_t)(lock_entry_ptr - gpu_lock_table);
         g_tx.reads[g_tx.num_reads].lock_idx = idx;
         g_tx.reads[g_tx.num_reads].ver = pr_stm_get_version(lw);
         g_tx.num_reads++;
     }
-    return __atomic_load_n(data_ptr, __ATOMIC_RELAXED);
+    if (bytes == 8) {
+        uint64_t val;
+        __builtin_memcpy(&val, data_ptr, 8);
+        return val;
+    } else {
+        return __atomic_load_n((uint32_t*)data_ptr, __ATOMIC_ACQUIRE);
+    }
 }
 
 static void write_common(uint32_t *lock_entry_ptr, uint32_t *data_ptr, uint64_t val, uint8_t bytes) {
@@ -178,20 +215,13 @@ static void  real_tm_free(void* p)       { stm::tm_region_free(p); }
 
 // ── Read stubs ────────────────────────────────────────────────────
 
-static uint8_t  real_tm_read_i1(uint8_t  *a) { return (uint8_t) read_common(get_lock_entry(a), (uint32_t*)a); }
-static uint16_t real_tm_read_i2(uint16_t *a) { return (uint16_t)read_common(get_lock_entry(a), (uint32_t*)a); }
-static uint32_t real_tm_read_i4(uint32_t *a) { return read_common(get_lock_entry(a), a); }
-static uint64_t real_tm_read_i8(uint64_t *a) {
-    int wi = find_write(a);
-    if (wi >= 0)
-        return g_tx.writes[wi].val;
-    uint32_t lo = read_common(get_lock_entry(a),   (uint32_t*)a);
-    uint32_t hi = read_common(get_lock_entry(a)+1, (uint32_t*)a+1);
-    return ((uint64_t)hi << 32) | lo;
-}
-static float    real_tm_read_f4(float    *a) { float v; int wi = find_write(a); if (wi >= 0) { uint32_t r = (uint32_t)g_tx.writes[wi].val; __builtin_memcpy(&v, &r, 4); return v; } uint32_t r = read_common(get_lock_entry(a), (uint32_t*)a); __builtin_memcpy(&v, &r, 4); return v; }
-static double   real_tm_read_f8(double   *a) { int wi = find_write(a); if (wi >= 0) { double v; uint64_t r = g_tx.writes[wi].val; __builtin_memcpy(&v, &r, 8); return v; } double v; uint64_t r; __builtin_memcpy(&r, a, 8); r = real_tm_read_i8(&r); __builtin_memcpy(&v, &r, 8); return v; }
-static void*    real_tm_read_ptr(void*    *a) { int wi = find_write(a); if (wi >= 0) { uint64_t r = g_tx.writes[wi].val; void *v; __builtin_memcpy(&v, &r, 8); return v; } void *v; uint64_t r; __builtin_memcpy(&r, a, 8); r = real_tm_read_i8(&r); __builtin_memcpy(&v, &r, 8); return v; }
+static uint8_t  real_tm_read_i1(uint8_t  *a) { return (uint8_t) read_common(get_lock_entry(a), (uint32_t*)a, 1); }
+static uint16_t real_tm_read_i2(uint16_t *a) { return (uint16_t)read_common(get_lock_entry(a), (uint32_t*)a, 2); }
+static uint32_t real_tm_read_i4(uint32_t *a) { return (uint32_t)read_common(get_lock_entry(a), a, 4); }
+static uint64_t real_tm_read_i8(uint64_t *a) { return read_common(get_lock_entry(a), a, 8); }
+static float    real_tm_read_f4(float    *a) { float v; int wi = find_write(a); if (wi >= 0) { uint32_t r = (uint32_t)g_tx.writes[wi].val; __builtin_memcpy(&v, &r, 4); return v; } uint32_t r = (uint32_t)read_common(get_lock_entry(a), (uint32_t*)a, 4); __builtin_memcpy(&v, &r, 4); return v; }
+static double   real_tm_read_f8(double   *a) { int wi = find_write(a); if (wi >= 0) { double v; uint64_t r = g_tx.writes[wi].val; __builtin_memcpy(&v, &r, 8); return v; } double v; uint64_t r = read_common(get_lock_entry(a), a, 8); __builtin_memcpy(&v, &r, 8); return v; }
+static void*    real_tm_read_ptr(void*    *a) { int wi = find_write(a); if (wi >= 0) { uint64_t r = g_tx.writes[wi].val; void *v; __builtin_memcpy(&v, &r, 8); return v; } void *v; uint64_t r = read_common(get_lock_entry(a), a, 8); __builtin_memcpy(&v, &r, 8); return v; }
 
 // ── Write stubs ───────────────────────────────────────────────────
 

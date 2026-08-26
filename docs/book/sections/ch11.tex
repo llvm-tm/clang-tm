@@ -1,5 +1,5 @@
 \chapter{Compiler Optimizations and Their Impact on TM}
-\index{compiler optimizations!transactional memory; transactional memory!compiler instrumentation; DSE; LICM; CSE; tm\_clobber; transaction\_safe; transaction\_pure}
+\index{compiler optimizations!transactional memory}\index{transactional memory!compiler instrumentation}\index{DSE}\index{LICM}\index{CSE}\index{tm\_clobber}\index{transaction\_safe}\index{transaction\_pure}
 
 A transactional memory implementation is not only a runtime algorithm. It is also a contract with the compiler. The runtime may implement SGL, NOrec, TL2, TinySTM, SwissTM, MVLog, or a GPU design such as GUST, but the generated code must still preserve the abstract transaction: every transactional read must be represented in the read-set or validation discipline, and every transactional write must be represented in the write-set or redo/undo discipline.
 
@@ -174,9 +174,9 @@ shared; preserve transactional effects on values that can be shared.''
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.18\linewidth} p{0.30\linewidth} p{0.38\linewidth}}
+\begin{tabular}{M{0.18\linewidth} M{0.30\linewidth} M{0.38\linewidth}}
 \hline
-Optimization & Unsafe pattern inside a transaction & TM-aware rule \\
+\thb{0.18\textwidth}{Optimization} & \thb{0.30\textwidth}{Unsafe pattern inside a transaction} & \thb{0.38\textwidth}{TM-aware rule} \\
 \hline
 DSE & Removes \texttt{tm\_write\_*} because no later load observes it in the same function. & Treat write instrumentation as an opaque side effect. A speculative write is live until abort or commit. \\
 LICM & Hoists \texttt{tm\_read\_*} out of a loop because the address expression is syntactically invariant. & Do not move transactional reads across iteration, validation, abort, or commit boundaries unless the runtime explicitly proves it safe. \\
@@ -269,14 +269,15 @@ The \texttt{transaction\_safe} annotation says that a function may be called fro
 
 Compiler intrinsics such as \texttt{tm\_clobber} exist to bridge source intent and optimizer mechanics. A source-level annotation classifies a region. An IR-level intrinsic prevents a later pass from turning the instrumented region back into ordinary memory operations.
 
-The contract says what the programmer must protect via \texttt{transaction\_safe}\slash{}\texttt{transaction\_pure} annotations, while compiler intrinsics like \texttt{tm\_clobber} inform the optimizer of transactional side effects. The annotation contract is the C++ TM TS's central lesson: without a language-level notion of ``transaction'', the compiler cannot keep its promises, which explains the mismatch bugs seen in the wild --- DATA/TEXT symbol collisions, pass reordering of \texttt{tm\_read}\slash{}\texttt{tm\_write} calls, and dead-store elimination of speculative writes. This programmer-facing contract is the user-visible half of Section~\ref{sec:instrumentation-contract}: the annotations the programmer writes exist to feed the pass the classifications it needs.
+The contract says what the programmer must protect via \texttt{transaction\_safe} and \texttt{transaction\_pure} annotations, while compiler intrinsics like \texttt{tm\_clobber} inform the optimizer of transactional side effects. The annotation contract is the C++ TM TS's central lesson: without a language-level notion of ``transaction'', the compiler cannot keep its promises, which explains the mismatch bugs seen in the wild --- DATA/TEXT symbol collisions, pass reordering of \texttt{tm\_read}\slash{}\texttt{tm\_write} calls, and dead-store elimination of speculative writes. This programmer-facing contract is the user-visible half of Section~\ref{sec:instrumentation-contract}: the annotations the programmer writes exist to feed the pass the classifications it needs.
 
 A useful way to state the shared responsibility is:
 
-$$
+\[
+\small
 \text{source transaction} + \text{correct classification} + \text{opaque instrumentation}
 \Rightarrow \text{runtime-visible transaction}
-$$
+\]
 
 If any term is missing, the runtime may still be correct in isolation but the compiled program is not.
 

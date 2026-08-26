@@ -150,7 +150,7 @@ done
 ## Project Structure
 
 ```
-expli_instr/rust/workspace/
+explicit_api/rust/workspace/
 ├── Cargo.toml                # Workspace root
 ├── runtime/
 │   ├── core/                 # Shared types: Primitive, TypedValue, WriteBack, TmRaw

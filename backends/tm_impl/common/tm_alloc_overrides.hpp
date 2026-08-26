@@ -387,6 +387,13 @@ inline void* tm_track_alloc_result(void* p, size_t size) {
 //   - insert into g_deferred_frees_set
 //   - push FreeNode onto g_deferred_frees
 inline void tm_free_append_deferred(void* ptr) {
+    // Only track TM-region addresses in the deferred-free set.
+    // Non-TM addresses (e.g., from ::operator new) are not tracked
+    // and go directly to the standard allocator. This prevents
+    // false-positive double-free detection when the region allocator
+    // reuses addresses across transactions/threads.
+    if (!stm::isTMAddress(ptr)) return;
+
     if (g_deferred_frees_set.count(ptr)) {
         TM_EVENT(DOUBLE_FREE, ptr, 0);
         fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);

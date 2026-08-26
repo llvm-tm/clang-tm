@@ -1,5 +1,5 @@
-\chapter{Transaction API Design – Software Engineering Perspectives}
-\index{transaction API design; classic synchronous API; language-integrated transactions; transactional futures; object-oriented transactional interfaces}
+\chapter[Transaction API Design]{Transaction API Design – Software Engineering Perspectives}
+\index{transaction API design}\index{classic synchronous API}\index{language-integrated transactions}\index{transactional futures}\index{object-oriented transactional interfaces}
 
 A transactional-memory backend is only useful if programmers can call it correctly. The algorithm may be TL2, NOrec, SGL, TSC-TM, TinySTM, SwissTM, JVSTM, MVLog, or a distributed Percolator-style coordinator, but the application sees a smaller surface: begin, read, write, commit, abort, retry, and sometimes a higher-level wrapper around them. API design is therefore not decoration. It determines where instrumentation happens, who owns retry, which side effects are safe, and how much of the runtime contract is visible in ordinary source code.
 
@@ -165,9 +165,9 @@ An explicit API is easier to port across backends because it is just function ca
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.19\linewidth}p{0.23\linewidth}p{0.23\linewidth}p{0.23\linewidth}}
+\begin{tabular}{M{0.19\linewidth}M{0.23\linewidth}M{0.23\linewidth}M{0.23\linewidth}}
 \hline
-API style & Instrumentation point & Retry owner & Main engineering risk \\
+\thb{0.19\textwidth}{API style} & \thb{0.23\textwidth}{Instrumentation point} & \thb{0.23\textwidth}{Retry owner} & \thb{0.23\textwidth}{Main engineering risk} \\
 \hline
 Classic calls & Programmer / wrapper & Application loop & Forgotten access or end path \\
 Language keyword & Compiler & Compiler/runtime & Compiler and ABI support \\

@@ -235,9 +235,12 @@ CHAPTER: Hardware Concepts for Transactional Memory
   * The parallel between branch misprediction recovery and transactional abort.
 
 == Store Buffers and Memory Ordering ==
-  * How store buffers relax write-to-read ordering (TSO).
-  * Memory fences and their cost.
-  * Why a purely software TM must insert fences on some architectures.
+  * Store buffer; memory consistency models defined via two-thread litmus tests.
+  * Sequential consistency (Lamport): one global order, no anomalies, no commercial SC machine.
+  * Total Store Order (x86-64, SPARC): the store buffer is the only reordering source (store-then-load pair only); the store-buffering (Dekker) litmus anomaly; torn multi-word views; mfence fix.
+  * Relaxed models of ARM and POWER: all four pairs reorderable; barriers (dmb, sync/lwsync/isync), ldar/stlr, dependencies; message-passing litmus anomaly; IRIW; POWER8 HTM backend tie-in (backends/tm_impl/power8_htm).
+  * Other models: RISC-V RVWMO cousin; GPU coherence scopes (Ch.17); C11/C++11 atomics as the portable contract.
+  * Litmus summary table: SB/MP/IRIW outcomes under SC, TSO, ARM/POWER.
   * The commit-publish fence: a transaction's write‑back must become visible in one atomic step to other cores.
   * Compiler fences (atomic_signal_fence) vs. hardware fences (mfence, dmb): eliminating the CPU barrier on the read path (Part VII).
   * Fence placement as a correctness issue, not a tweak: wrong placement reopens the commit-visibility window.
@@ -252,6 +255,15 @@ transfer that writes to account A and then reads account B :
   * This is the store-buffer echo of the snapshot consistency problem, revisited in Part VII for software TM and Part X for GPUs.
   * Exercise 2 of this chapter asks you to draw the precise interleaving.
 
+== Worked Example: The Message-Passing Surprise on ARM and POWER ==
+The commit-marker idiom breaks differently on weakly ordered machines.
+  [listing: Message passing with atomics (C++): relaxed fails on ARM/POWER; release/acquire cannot.]
+  [listing: The same message-passing protocol in Rust.]
+  * Broken pair: relaxed on both sides = plain loads/stores as far as the model is concerned.
+  * Fixed pair: release publishes the commit marker, acquire observes it (stlr/ldar on AArch64; nothing extra on x86).
+  * The repository's Rust runtimes use exactly these orderings (explicit_api/rust/workspace/runtime/).
+  * Discipline: write the commit protocol against the ARM/POWER column of the litmus table; treat TSO as an optimization.
+
 == Worked Example: Cache-Line False Conflicts ==
 Hardware transactional memory normally detects conflicts at cache-line
 granularity.
@@ -263,6 +275,7 @@ will execute on top of.
   * Padding can reduce false conflicts, but it increases footprint and can increase capacity aborts.
   * SGL-style execution is insensitive to false conflicts, but it also removes concurrent execution.
   * TSX-SGL uses HTM when the hardware accepts the transaction and falls back to a single global lock when it does not.
+  * Both live in the companion: backends/tm_impl/tsx_sgl/ and backends/tm_impl/single_global_lock/.
 
 == HTM Execution States ==
 
@@ -313,6 +326,7 @@ CHAPTER: Programming Languages and Memory Semantics for TM
   * Rust's guarantees eliminate data races but not deadlocks or lost atomicity - the very guarantees TM adds on top of the language.
   * Sync/Send traits as a way to reason about which values can be shared across threads; TM reifies "shared mutable" safety at runtime instead of compile time.
   * The C++ and Rust stories are different in kind, not just degree: C++ gives the programmer control over orderings; Rust removes whole classes of hazard at compile time. A TM layer must therefore integrate with each differently - one C++ ABI, one Rust trait boundary.
+  * Safe Rust bank transfer with the companion tm crate (TmCell/transaction): no unsafe in client code; the type system proves access safety, the runtime owes atomicity.
 
 -- Language‑Integrated Annotations for TM --
   * GCC’s __transaction_atomic and transaction_safe / transaction_pure attributes.
@@ -328,6 +342,7 @@ synchronisation styles on the same three lines of logic:
   * The atomic version exposes which ordering to use per operation; the TM version hides the whole protocol.
   * The TM runtime still needs the right atomics internally - it just puts them behind one API (Part VII).
   * Composability reappears: two counters in one atomic block compose; two separate atomic_fetch_add calls do not.
+  * Rust counter three ways (Mutex / AtomicI32 / TmCell transaction, 4 threads): only the transaction closure can touch two cells in one indivisible step.
   * Exercise 3 of this chapter asks for the full C++ and Rust comparison.
 
 == Worked Example: ABI-Safe Bank Transfer ==
@@ -628,6 +643,14 @@ _ i=0 ^ p_ abort ^i
 1 1-p_ abort .
   * Where the models break: contention is data-dependent and non-Poisson, which is exactly why Part V's model checking complements the analysis.
 
+== Progress and the Family of Correctness Conditions ==
+  * Progress ladder: wait-free, lock-free, obstruction-free, progressive (weak/strong), conflict-freedom.
+  * Kuznetsov-Ravi lower bounds for obstruction-free TMs (no wait-free termination with reads/writes, no strict DAP, no invisible reads, linear stalls/RAW-AWAR) vs a lock-based progressive opaque TM that beats them all: the linear blocking-vs-nonblocking separation.
+  * Every companion backend is blocking by design; tab:progress-taxonomy maps each family (SGL, TL2/NOrec/TinySTM/SwissTM/MVLog, JVSTM/Calvin, HTM paths, queue executor) to its guarantee.
+  * Safety family: TMS1 (one execution for commits) vs TMS2 (one memory-state sequence) vs opacity vs VWC (one world per causal past); Doherty et al. formalize TMS1/TMS2 as I/O automata and prove TMS2 implements TMS1.
+  * Machine-checked chain: TMS2 => opacity => TMS1 (Lesani-Luchangco-Moir); opacity => VWC strictly; TMS1 and VWC incomparable weakenings.
+  * Choosing a rung: pure transaction bodies can live with weaker conditions; leaking compensating actions require opacity (ties to the VWC-vs-opacity exercise).
+
 == Worked Example: Numbers, Not Just Symbols ==
 The geometric retry model, populated with a few abort probabilities.
 transaction aborts with probability
@@ -905,6 +928,7 @@ Lessons:
   * Their lack of concurrency limits scalability.
   * SGL is the simplest opacity proof in the book: every transaction observes a state produced by the previous committed transaction.
   * Queue serializers replace lock handoff with task handoff. This can reduce lock contention but cannot create intra-transaction parallelism.
+  * Calvin replaces speculative execution with static declarations and deterministic sequencing: the read-set is fixed before the body runs, stale snapshots rejected without wasting execution work; trade-off is inflexibility (access set known at declaration time).
   * In the companion codebase, SGL-like designs are not toys: they serve as reference backends and regression oracles alongside speculative systems such as NOrec, TL2, TSC-TM, SwissTM, and others. The reported test suites pass test_tx 114/114 and test_ds 207/207 for the implemented backends.
 
 == Exercises ==
@@ -1035,10 +1059,36 @@ value.
 The implementation models add clocks, read-sets, write-sets, locks, or
 version histories.
 
+== A Complete NOrec in Rust ==
+The whole algorithm end to end in one compilable safe-Rust program
+(std only, ~200 lines). State (Word trait, Region = sequence clock with
+commit lock in bit 0 + word-addressed heap, TmCell<T> typed slot,
+Tx{rv,ws,rs}); transaction() retry loop (body returns Ok/Err(Abort),
+commit may also fail); begin samples an even clock. Read: write-set
+first, then capture-read-recheck against the *begin* version rv - a
+single s1==rv comparison validates the entire prior read-set because any
+commit moves the global clock. Write: buffer only. Commit: CAS flips
+clock bit0 to lock; under the lock memory is frozen so re-reading each
+recorded read is a sound value comparison; mismatch releases with store(rv)
+(same version - we changed nothing); success writes back then publishes
+rv+2 with a Release store (linearization point; versions stay even).
+Memory orderings: data accesses Relaxed, all ordering carried by the one
+clock variable (Acquire load / Release store) - the portable answer to
+Part II's store-buffer story; sound on ARM, plain moves on x86.
+Read-only tx commits trivially, linearizing at its last validated read.
+Fixed-snapshot policy is strictly more conservative than the paper's
+forward-extension (Exercise 13). Bank demo: 8 movers honour floor
+(Ok(false) = committed business outcome, vs Err(Abort) = STM signal) + a
+checker thread running concurrent read-only transactions asserts
+conservation mid-flight; measured 2000000 conserved with 170k-233k
+snapshot checks passing (rustc 1.96, M1 Pro). Verified source kept at
+docs/book/listings/norec_rust_complete.rs.
+
 == Summary ==
   * Speculation unlocks concurrency but introduces aborts.
   * Different version‑management policies trade off simplicity for performance.
   * The design space is small: clocks, locks, logs, and history - every real STM is a combination of these.
+  * Section sec:norec-rust-complete closes the loop by assembling the NOrec endpoint into a complete, compilable implementation.
 
 == Exercises ==
   * In NOrec, T1 writes to x, then T2 writes to x and commits. Explain why T1 will abort.
@@ -1050,6 +1100,8 @@ version histories.
   * [implementation] Modify the NOrec bank-transfer example in :norec-bank-transfer-example to retry aborted transactions in a bounded loop. Report separately the number of floor rejections and validation aborts.
   * [verification] Extend the PlusCal model in :pluscal-bank-floor-example with a speculative local variable seen. Split the transfer into read, check, debit, and credit actions, then add a commit-time validation action. Show which invariant fails when the validation action is removed.
   * [theory] In Table tab:snapshot-taxonomy, identify which families implement invisible reads. For each such family, state the proof obligation that prevents an inconsistent snapshot from being committed.
+  * [implementation] Instrument the complete Rust NOrec of sec:norec-rust-complete with abort counters; classify retries as (a) stale at read, (b) raced mid-read, (c) commit-CAS loss, (d) commit-time validation failure; report the distribution at 2/8/16 movers and explain why (d) shrinks as contention rises.
+  * [theory] Prove that NOrec's forward snapshot-extension (re-validate recorded reads against the newer clock and continue) preserves opacity; construct a bank interleaving where extension commits but the fixed-snapshot policy of lst:norec-rust-readwrite aborts, and argue which to ship.
 
 ############################################################
 PART: Testing, Debugging, and Avoiding Pitfalls

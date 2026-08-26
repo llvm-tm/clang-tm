@@ -358,7 +358,7 @@ __global__ void bank_transfer_kernel(int *balances,
 \end{figure}
 
 
-\section{Commit at GPU Scale: From Serial Locks to Batched Multi-Versioning}
+\section[Commit at GPU Scale]{Commit at GPU Scale: From Serial Locks to Batched Multi-Versioning}
 \label{sec:commit}
 
 A CPU system runs a few dozen cores; a GPU kernel launches thousands of
@@ -431,9 +431,9 @@ int base = atomicAdd(&g_next, WARP_SIZE);   /* no retry, no loop */
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.14\linewidth}p{0.15\linewidth}p{0.13\linewidth}p{0.16\linewidth}p{0.26\linewidth}}
+\begin{tabular}{M{0.14\linewidth}M{0.15\linewidth}M{0.13\linewidth}M{0.16\linewidth}M{0.26\linewidth}}
 \hline
-\textbf{Commit style} & \textbf{Allocator} & \textbf{Waiting} & \textbf{Reader rule} & \textbf{GPU consequence} \\
+\thb{0.14\textwidth}{\textbf{Commit style}} & \thb{0.15\textwidth}{\textbf{Allocator}} & \thb{0.13\textwidth}{\textbf{Waiting}} & \thb{0.16\textwidth}{\textbf{Reader rule}} & \thb{0.26\textwidth}{\textbf{GPU consequence}} \\
 \hline
 Global lock & one lock & spin or block & single latest value &
 Simple, but one serial point throttles thousands of lanes. \\
@@ -468,9 +468,9 @@ OFG-STM) have no companion implementation.
 
 \begin{table}[ht]
 \centering
-\begin{tabular}{lllp{9cm}}
+\begin{tabular}{lllM{9cm}}
 \hline
-\textbf{System} & \textbf{Year} & \textbf{Type} & \textbf{Key idea} \\
+\textbf{System} & \textbf{Year} & \textbf{Type} & \thb{9cm}{\textbf{Key idea}} \\
 \hline
 KILO TM \cite{fung11kilotm} & 2011 & HW & word-level, value-based conflicts; commit units; no coherence \\
 WarpTM \cite{fung13warptm} & 2013 & HW & warp-level management; temporal conflict detection \\

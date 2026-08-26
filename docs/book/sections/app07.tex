@@ -94,7 +94,7 @@ selectively.
     \item \emph{[theory]} The store is marked speculative until the memory
           stage commits it in order; on abort the reorder buffer squashes it
           before writeback, so it never reaches the cache.
-    \item \emph{[theory]} Another core sees the store to~A through its own
+    \item \emph{[theory]} Another core sees the store to~$A$ through its own
           cache before the transaction's writes publish; the commit-publish
           fence (Figure~\ref{fig:tso-store-buffer}) makes the two writes
           visible together.
@@ -117,6 +117,13 @@ selectively.
           \S\ref{sec:tso-example}: two threads, an atomic flag, and a
           release fence; without the fence the torn view appears in some
           runs.
+    \item \emph{[implementation]} With \texttt{relaxed} on both sides of
+          Listing~\ref{lst:mp-rust}'s protocol, the observer can read the
+          stale balance; the stale count is zero or near-zero on x86-64
+          (TSO already orders the pairs) and routinely non-zero on
+          AArch64/POWER. Switching the marker to
+          \texttt{Release}/\texttt{Acquire} drives the stale count to zero
+          on every architecture, per Table~\ref{tab:litmus-models}.
     \item \emph{[open]} There is no single right answer.  A ``ahead of its
           time'' case points at Herlihy--Moss needing per-address versioning
           hardware that never shipped; a ``right on time'' case points at
@@ -254,7 +261,8 @@ selectively.
           transactions at commit (\S\ref{sec:api-example}, asynchronous
           API).
     \item \texttt{tm\_begin}/\texttt{tm\_end} are explicit and can be
-          annotated \texttt{transaction\_safe}; \texttt{\_\_transaction\_\allowbreak atomic}
+          annotated \texttt{transaction\_safe}, while the language-level
+          \texttt{\_\_transaction\_\allowbreak atomic}
           moves the boundary into the language and makes accidental
           side effects a compiler error, but requires the instrumenting
           compiler.

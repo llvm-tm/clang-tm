@@ -148,9 +148,9 @@ Finally, note what makes these predicates tractable for a model checker. Opacity
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.16\linewidth}p{0.18\linewidth}p{0.30\linewidth}p{0.26\linewidth}}
+\begin{tabular}{M{0.16\linewidth}M{0.18\linewidth}M{0.30\linewidth}M{0.26\linewidth}}
 \hline
-Tool & Object modeled & Question answered & Typical TM use \\
+\thb{0.16\textwidth}{Tool} & \thb{0.18\textwidth}{Object modeled} & \thb{0.30\textwidth}{Question answered} & \thb{0.26\textwidth}{Typical TM use} \\
 \hline
 DFA / grammar & Program text & Is this input syntactically valid? & Lexer and parser construction \\
 DTMC & Transaction lifecycle & How many retries should we expect? & Abort and retry estimates \\
@@ -165,9 +165,9 @@ Model checking & Reachable executions & Can this bad state occur? & Safety invar
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.20\linewidth}p{0.25\linewidth}p{0.25\linewidth}p{0.20\linewidth}}
+\begin{tabular}{M{0.20\linewidth}M{0.25\linewidth}M{0.25\linewidth}M{0.20\linewidth}}
 \hline
-Model & Keeps & Abstracts away & Best use \\
+\thb{0.20\textwidth}{Model} & \thb{0.25\textwidth}{Keeps} & \thb{0.25\textwidth}{Abstracts away} & \thb{0.20\textwidth}{Best use} \\
 \hline
 DFA & Current recognizer state & Parse tree and semantics & Tokenization \\
 DTMC & Current lifecycle state & History except current state & Retry cost \\
@@ -179,6 +179,220 @@ TLA+ model & Reachable states & Unmodeled implementation detail & Safety checkin
 \caption{A taxonomy of the chapter's models by the information each one preserves.}
 \label{tab:model-taxonomy}
 \end{table}
+
+\section{Progress and the Family of Correctness Conditions}
+\label{sec:progress-semantics}
+\index{progress condition}
+\index{obstruction-freedom}
+\index{progressiveness}
+\index{conflict-freedom}
+\index{disjoint-access parallelism}
+\index{contention manager}
+
+Opacity says what a transaction may observe; it says nothing about whether
+the transaction ever finishes. Two orthogonal questions complete the
+specification of a TM: how much \emph{progress} is guaranteed, and how much
+of opacity's safety can be relaxed before the abstraction stops protecting
+the programmer. Both questions have sharp answers, and both shaped which
+backends exist in the companion repository.
+
+\subsection{The Progress Ladder and the Fall of Obstruction-Freedom}
+\label{sec:progress-ladder}
+
+Progress conditions form a ladder, strongest first
+\cite{herlihy91,guerraoui10principles}:
+
+\begin{itemize}
+\item \textbf{Wait-freedom}: every operation completes in a bounded number
+of its \emph{own} steps, regardless of what the other threads do. The gold
+standard, and the rarest.
+\item \textbf{Lock-freedom}: some operation completes in finitely many
+steps system-wide; individual operations may starve.
+\item \textbf{Obstruction-freedom} \cite{herlihy03obstructionfree}: a
+transaction completes if it eventually \emph{runs alone} long enough ---
+that is, if all other threads stop taking steps. Nothing is promised under
+sustained contention: two conflicting obstruction-free transactions may
+abort each other forever (livelock).
+\item \textbf{Progressiveness} \cite{guerraoui10principles}: a transaction
+may be aborted \emph{only} when it conflicts with a concurrent
+transaction --- they access the same object and at least one access is a
+write. \emph{Weak} progressiveness permits aborting any conflicting pair;
+\emph{strong} progressiveness additionally guarantees that every
+transaction commits when it runs conflict-free (no concurrent transaction
+touches an object it accesses). Conflict-freedom is the corresponding
+execution property: no two concurrent transactions conflict.
+\end{itemize}
+
+Obstruction-freedom and progressiveness answer different questions ---
+obstruction-freedom bounds aborts by \emph{step contention}, progressiveness
+bounds them by \emph{data conflicts} --- and the early TM literature bet on
+the former. The first dynamic-size STMs were obstruction-free precisely
+because optimistic validation gives it almost for free: never take a lock,
+validate, abort on doubt. The bet failed in practice, and
+Kuznetsov and Ravi explained why it \emph{had} to fail
+\cite{kuznetsov15obstructionfree}. They proved a cluster of lower bounds
+for obstruction-free TMs: with only read and write primitives, an
+obstruction-free TM cannot even provide wait-free operation termination;
+it cannot provide strict disjoint-access parallelism (transactions touching
+disjoint objects must not contend on the same base object); it cannot have
+invisible reads; and its reads cannot avoid incurring a linear number of
+memory stalls or expensive read-after-write primitives. Then they
+exhibited a simple \emph{lock-based}, progressive, opaque TM that violates
+every one of those bounds at once. The conclusion is a linear complexity
+separation between non-blocking and blocking TMs: the obstruction-free
+class is not merely unfashionable, it is provably weaker in the currency
+that matters.
+
+This is the theoretical vindication of a design decision made throughout
+the companion: \emph{every} backend in the repository is blocking by
+choice. The SGL family takes a single mutex (deadlock-free trivially ---
+one lock cannot form a cycle --- but individual transactions may starve).
+TL2, NOrec, TinySTM, SwissTM, and MVLog take per-stripe
+or commit locks: they are weakly progressive (an abort always traces to a
+data conflict or a failed validation) and deadlock-free, but the liveness
+columns of the companion's proof suite mark them ``starvation possible''
+because a retrying transaction can lose repeatedly to fresh competitors.
+The HTM paths (TSX-SGL, SPHT, POWER8) add aborts the program cannot
+attribute to any conflict --- capacity and microarchitectural events ---
+and buy their progress with the fallback lock. None of the backends is
+obstruction-free, and after Kuznetsov and Ravi, none should be.
+
+\begin{table}[htbp]
+\centering
+\caption{Progress guarantees across the companion's backend families.
+``Blocking'' means locks are held across transaction steps; all rows are
+deadlock-free.}
+\label{tab:progress-taxonomy}
+\renewcommand{\arraystretch}{1.3}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{M{0.22\linewidth} M{0.24\linewidth} M{0.36\linewidth}}
+\hline
+\thb{0.22\textwidth}{\textbf{Backend family}} &
+\thb{0.24\textwidth}{\textbf{Progress guarantee}} &
+\thb{0.36\textwidth}{\textbf{Aborts permitted when}} \\
+\hline
+SGL, PersistentSGL, DistributedSGL &
+blocking; starvation depends on lock fairness &
+never abort --- they serialize \\
+TL2, TSC-TM, TinySTM (WBCTL/WT), SwissTM &
+blocking, weakly progressive &
+validation fails: a data conflict with a committed transaction \\
+NOrec, NOrec-BF, MVLog &
+blocking, weakly progressive &
+value re-read differs: a committed write intervened \\
+JVSTM, Calvin (execute phase) &
+blocking; read-only transactions never abort &
+read-set validation fails against a newer version \\
+TSX-SGL, SPHT, POWER8-HTM &
+blocking via fallback lock; hardware path abort-driven &
+conflict, capacity, or explicit \texttt{xabort} --- not attributable to a data conflict \\
+Queue executor (serializers) &
+blocking; per-worker serial &
+never abort inside a worker --- serialization replaces speculation \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Safety Beyond Opacity: VWC and the TMS Specifications}
+\label{sec:safety-family}
+
+Opacity is one point in a family of safety conditions, and the family is
+best understood as four answers to one question: \emph{how many executions
+may be invoked to justify what the transactions saw?} Opacity demands one
+execution justify everyone, including aborted transactions. The other
+members relax that demand in different directions.
+
+\textbf{TMS1 and TMS2} descend from the structural specifications of
+Herlihy, Luchangco, Moir, and Scherer \cite{herlihy03tms1,herlihy03tms2}.
+TMS1 requires the \emph{committed} transactions of a history to be
+justified by a single legal execution consistent with real-time order;
+each \emph{live or aborted} transaction may appeal to its own, different
+execution. TMS1 is essentially strict serializability restricted to
+transactions on a single object. TMS2 strengthens this for multi-object
+transactions: all reads must be justified by a \emph{single sequence of
+memory states} --- the states produced by committed transactions in
+commit order --- where a writing transaction's reads must match the latest
+state at the time its operations take effect, while a read-only
+transaction may read from any state that existed during its lifetime.
+TMS2 is thus stricter than TMS1 but still more permissive than opacity.
+Doherty, Groves, Luchangco, and Moir made both conditions fully formal by
+specifying them as I/O automata, proved that TMS2 implements TMS1 by a
+simulation argument, exhibited histories separating the two, and framed
+the pragmatic question of which condition proofs should target
+\cite{doherty13tms}.
+
+\textbf{Virtual world consistency} \cite{imbs09vwc,imbs12vwc} relaxes
+opacity from the multi-version side. Committed transactions must serialize
+legally exactly as before, but a live or aborted transaction need only be
+consistent with its own \emph{causal past}: each of its reads must return
+a value from some global state that existed in some serial execution of
+the committed prefix --- its ``virtual world'' --- and different reads may
+come from different worlds. No single execution need justify a doomed
+transaction's whole snapshot. Every opaque history is virtually
+consistent, and the inclusion is strict: multi-version designs (JVSTM's
+VBox walks are the canonical example) can serve a transaction from stale
+versions that no single serialization would assemble, satisfy VWC, and
+still fail opacity.
+
+The relationships are not folklore --- they have been machine-checked.
+Lesani, Luchangco, and Moir proved with PVS that \emph{TMS2 satisfies
+opacity} and \emph{opacity satisfies TMS1} \cite{lesani12putting},
+yielding the chain
+\[
+\text{TMS2} \;\Longrightarrow\; \text{opacity} \;\Longrightarrow\; \text{TMS1},
+\]
+with each implication strict, and opacity also strictly implying VWC.
+Figure~\ref{fig:condition-lattice} arranges the family by the set of
+histories each condition permits: TMS2 is the tightest contract, TMS1 and
+VWC are two incomparable weakenings of opacity, and plain serializability
+of commits sits at the permissive end where aborted transactions are
+never constrained at all.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+font=\small,
+cond/.style={draw,rectangle,rounded corners,align=center,
+minimum width=4.3cm,minimum height=0.85cm},
+edge/.style={-{Stealth},thick},
+lab/.style={font=\footnotesize,fill=white,inner sep=1.5pt}
+]
+\node[cond] (tms2)  at (0,0)     {\textbf{TMS2}\\one memory-state sequence};
+\node[cond] (opac)  at (0,-1.9)  {\textbf{opacity}\\one execution for everyone};
+\node[cond] (tms1)  at (-4.1,-3.8) {\textbf{TMS1}\\one execution for commits};
+\node[cond] (vwc)   at (4.1,-3.8)  {\textbf{VWC}\\one world per causal past};
+\node[cond] (serial) at (0,-5.7) {\textbf{serializability}\\commits only};
+\draw[edge] (tms2) -- node[lab,right=2pt] {strict} (opac);
+\draw[edge] (opac) -- node[lab,above left=0pt and -4pt] {strict} (tms1);
+\draw[edge] (opac) -- node[lab,above right=0pt and -4pt] {strict} (vwc);
+\draw[edge] (tms1.south) |- ($(serial.west)+(-0.5,0)$) -- (serial.west);
+\draw[edge] (vwc.south)  |- ($(serial.east)+(0.5,0)$)  -- (serial.east);
+\node[font=\footnotesize, anchor=north, align=center] at (0,-6.6)
+  {arrows point from the stronger condition to the weaker one:\\
+   every history satisfying the source also satisfies the target};
+\end{tikzpicture}
+\caption{The correctness-condition family as a lattice of permitted
+histories. TMS2 $\Rightarrow$ opacity $\Rightarrow$ TMS1 is machine-checked
+\cite{lesani12putting}; opacity $\Rightarrow$ VWC is strict
+\cite{imbs12vwc}. TMS1 and VWC weaken opacity along different axes and are
+incomparable.}
+\label{fig:condition-lattice}
+\end{figure}
+
+Which condition should a backend target? The answer depends on what
+aborted transactions are allowed to do with what they saw. If transaction
+bodies are pure --- reads feed only local computation, and an abort
+discards everything --- the weaker conditions cost nothing and buy
+performance: invisible reads, stale multi-version snapshots, no
+read-set validation. The moment a transaction's observations leak into
+non-transactional state (a compensating write after an abort, an error
+message derived from an illegal read), only opacity guarantees the leak
+is harmless, and opacity is what every backend in Part~IV is tested
+against. The companion's fuzz harness enforces the money invariant on
+committed state for all backends, and the opacity-sensitive tests
+(``\S\ref{sec:histories-legality-opacity}'') fail a backend whose aborted
+transactions can poison it. Exercise~\ref{ex:vwc-vs-opacity} asks you to
+construct the poisoning scenario by hand.
 
 \section{Worked Example: Numbers, Not Just Symbols}
 \index{geometric distribution}\index{Little's Law}\index{Markov chain}
@@ -525,7 +739,7 @@ Multiple validation points multiply success probabilities when they are independ
 
 \section{Summary}
 
-Formal languages describe valid strings and support compiler construction. Automata make these descriptions executable. Markov chains turn retry loops into cost estimates when the memoryless assumption is acceptable. Queueing theory, especially Little's Law, relates committed throughput, residence time, and concurrency. Histories with legality, serializability, and opacity define correctness itself: serializability orders committed transactions, strict serializability preserves real time, and opacity extends the obligation to aborted transactions --- the condition whose violation Listing~\ref{lst:serializable-not-opaque} exhibits and whose bounded-fragment verification Part~III mechanizes. Progress conditions (obstruction-freedom, lock-freedom) are the liveness counterparts of these safety properties. Model checking complements all of these models by exploring reachable states instead of averaging them away.
+Formal languages describe valid strings and support compiler construction. Automata make these descriptions executable. Markov chains turn retry loops into cost estimates when the memoryless assumption is acceptable. Queueing theory, especially Little's Law, relates committed throughput, residence time, and concurrency. Histories with legality, serializability, and opacity define correctness itself: serializability orders committed transactions, strict serializability preserves real time, and opacity extends the obligation to aborted transactions --- the condition whose violation Listing~\ref{lst:serializable-not-opaque} exhibits and whose bounded-fragment verification Part~III mechanizes. Progress conditions (obstruction-freedom, lock-freedom, progressiveness) are the liveness counterparts of these safety properties, and the Kuznetsov--Ravi separation (\S\ref{sec:progress-ladder}) explains why every backend in the companion is blocking by design. The safety family itself forms a lattice --- TMS2 $\Rightarrow$ opacity $\Rightarrow$ TMS1, with VWC weakening opacity along a second axis (\S\ref{sec:safety-family}) --- and choosing a rung on that lattice is choosing how much an aborted transaction may be trusted. Model checking complements all of these models by exploring reachable states instead of averaging them away.
 
 In the bank example, this division is sharp. The retry model predicts attempts. Little's Law predicts in-flight work. The C++ simulation estimates the multiplier. The TLA+ model checks that committed states preserve money conservation and the account floor --- a bounded-fragment stand-in for the opacity argument of \S\ref{sec:histories-legality-opacity}. Formal languages underpin compiler construction; Markov chains and queueing theory provide first-order performance models for TM. Analytical models predict, model checking proves, and the two tools answer different questions.
 
@@ -571,7 +785,7 @@ State clearly whether the result changes if the two validation phases are correl
     \item \emph{[verification]} Extend the TLA+ bank model to include two transactions that may both begin from the same balance snapshot. Add a validation condition that prevents stale commits, then check money conservation.
     \item \emph{[theory]} Use Little's Law to compare two systems with the same committed throughput but different residence times. Explain which one has more in-flight transactions and why that matters for contention.
     \item \emph{[theory]} Consider the history $H$ over locations $x$ and $y$, both initially $0$: $r_{T_1}(x)\!\to\!0$; $w_{T_2}(x)\!\leftarrow\!5$; $\mathrm{commit}(T_2)$; $w_{T_3}(y)\!\leftarrow\!7$; $\mathrm{commit}(T_3)$; $r_{T_1}(y)\!\to\!7$; $\mathrm{abort}(T_1)$. Prove $H$ is serializable by exhibiting a legal serialization of its committed projection, then prove it is not opaque by showing that no legal serialization of all three transactions exists.
-    \item \emph{[theory]} A backend guarantees virtual world consistency but not opacity. Describe a concrete bank scenario in which an aborted transaction's illegal observation is harmless, and one in which the same observation becomes harmful once the transaction's \emph{compensating action} (a plain, non-transactional write) executes after the abort.
+    \item \emph{[theory]}\label{ex:vwc-vs-opacity} A backend guarantees virtual world consistency but not opacity. Describe a concrete bank scenario in which an aborted transaction's illegal observation is harmless, and one in which the same observation becomes harmful once the transaction's \emph{compensating action} (a plain, non-transactional write) executes after the abort.
 \end{enumerate}
 
 \textbf{How to check your work.} The \emph{[implementation]} exercises are

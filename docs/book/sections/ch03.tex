@@ -90,18 +90,22 @@ never becomes visible.
 \begin{tikzpicture}[
 font=\small,
 state/.style={draw,rectangle,rounded corners,align=center,
-minimum width=2.4cm,minimum height=0.9cm},
+minimum width=2.2cm,minimum height=0.9cm},
 edge/.style={-{Stealth},thick}
 ]
 \node[state] (fetch) {Fetch};
-\node[state, right=of fetch] (decode) {Decode};
-\node[state, right=of decode] (execute) {Execute};
-\node[state, right=of execute] (mem) {Memory\\speculative store};
-\node[state, right=of mem] (writeback) {Writeback};
+\node[state, right=0.85cm of fetch] (decode) {Decode};
+\node[state, right=0.85cm of decode] (execute) {Execute};
+\node[state, right=0.85cm of execute] (mem) {Memory\\speculative\\store};
+\node[state, right=0.85cm of mem] (writeback) {Writeback};
 \draw[edge] (fetch) -- (decode);
 \draw[edge] (decode) -- (execute);
 \draw[edge] (execute) -- (mem);
-\draw[edge] (mem) -- node[above] {commit} (writeback);
+\draw[edge] (mem) -- (writeback);
+% commit annotation routed above the boxes
+\draw[edge, dashed] (mem.north) -- ++(0,0.6) -|
+  node[pos=0.25, above, font=\footnotesize]
+  {commit: store becomes visible} (writeback.north);
 \draw[edge, dashed, red] (mem.south) -- ++(0,-0.8)
 node[below, red, font=\footnotesize] {branch mispredict: squash};
 \end{tikzpicture}
@@ -114,39 +118,306 @@ same idea to a multi-instruction region.}
 
 \section{Store Buffers and Memory Ordering}
 
-A store buffer is a small per-core FIFO that holds stores until they are
-written to the memory hierarchy. Store buffers improve performance by letting
-the core continue while stores drain in the background. But a store buffer
-also relaxes write-to-read ordering. On x86, the memory model is total store
-order, or TSO: a core may observe its own stores earlier than other cores do.
-A load may be satisfied from the store buffer before the corresponding store
-has become visible to the rest of the system. This is the root of many
-concurrency surprises.
+Between the core and the cache sits one more small, private structure: the
+\emph{store buffer}. A store buffer is a small per-core FIFO that holds
+completed stores until they are written to the memory hierarchy. Store
+buffers improve performance by letting the core continue while stores drain
+in the background. But a store buffer also relaxes write-to-read ordering,
+and it is the reason that two cores can disagree about the order in which
+two stores became visible.
 
-The classic example is store-to-load forwarding. A core writes location A and
-then reads location B. The write to A sits in the store buffer, so the
-subsequent load of B can complete before A is visible to other cores. A
-concurrent observer may see A updated while B still has its old value---a torn
-view of the intended transaction. Fixing this requires a memory fence that
-orders the store before subsequent loads or that flushes the store buffer
-before the load is allowed to proceed.
+A \emph{memory consistency model} is the contract that says which such
+reorderings are legal. The contract is easiest to state with \emph{litmus
+tests}: tiny two-thread programs with a question attached (``can this
+outcome occur?''). Each litmus test exercises one pair of operations---store
+then load, load then load---and the model answers yes or no for each. This
+section walks through the models a TM author actually meets, from the
+strongest (sequential consistency) through TSO, the model of x86-64
+processors, to the weakly ordered ARM and POWER families, and names the
+anomaly each model permits. The pattern to watch for is always the same: the
+model permits an interleaving that sequential consistency forbids, that
+forbidden interleaving breaks a transaction's atomicity, and a fence or a
+stronger atomic closes the hole.
 
-Fences come in two broad categories. Hardware fences, such as x86
-\texttt{mfence} or ARM \texttt{dmb}, constrain the actual memory ordering of
-the machine. Compiler fences, such as
-\texttt{atomic\_signal\_fence}, constrain only the compiler's reordering of
-operations. A software TM implementation must use the right kind at each
-point. On the read path, a compiler fence is often sufficient on x86 because
-the hardware already preserves load-load ordering. On the commit-publish path,
-a real hardware fence is needed to make the entire write-set visible in one
-atomic step. Fence placement is a correctness issue, not a tweak: a missing or
-misplaced fence reopens the commit-visibility window.
+\subsection{Sequential Consistency}
+
+Lamport's sequential consistency (SC) is the strongest shared-memory
+contract \cite{lamport79sc}: the result of any execution is the same as if
+the operations of all cores had been executed in \emph{some} sequential
+order, and the operations of each individual core appear in that order in
+program order. Figure~\ref{fig:sc-model} shows the shape of such an order
+for a two-thread execution. There is nothing to add and nothing to take
+away: every execution is one interleaving, and a transaction maps onto it
+naturally as a contiguous segment.
+
+Under SC no litmus test has a surprising outcome. The price is that the
+hardware may not reuse a store buffer to hide write latency: a store must
+reach the coherent memory order before the next load of the same core
+completes. No commercial multicore processor is sequentially consistent,
+precisely because that prohibition costs performance. SC is nevertheless
+the model worth naming first, because it is the reference against which
+every weaker model is defined---and because the correctness conditions of
+Chapter~5 (serializability, opacity) are stated in its image.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+font=\small,
+op/.style={draw,rectangle,rounded corners,align=center,
+minimum width=5.6cm,minimum height=0.7cm}
+]
+\node[op] (o1) {1. \; \texttt{W} $A{=}1$ \hfill (Core 0)};
+\node[op, below=0.22cm of o1] (o2) {2. \; \texttt{W} $B{=}1$ \hfill (Core 0)};
+\node[op, below=0.22cm of o2] (o3) {3. \; \texttt{R} $B \to 1$ \hfill (Core 1)};
+\node[op, below=0.22cm of o3] (o4) {4. \; \texttt{R} $A \to 1$ \hfill (Core 1)};
+\draw[dashed,rounded corners]
+  ($(o1.north west)+(-0.35,0.35)$) rectangle ($(o4.south east)+(0.35,-0.3)$);
+\node[font=\footnotesize, above=0.42cm of o1] {one global order (an interleaving)};
+\end{tikzpicture}
+\caption{Sequential consistency. All operations from all cores are woven
+into a single global order; each core's operations keep their program
+order inside it. No outcome of a litmus test can deviate from this shape,
+so no anomaly exists by construction.}
+\label{fig:sc-model}
+\end{figure}
+
+\subsection{Total Store Order (x86-64, SPARC)}
+\label{sec:tso-model}
+
+The memory model of x86-64 (and SPARC's TSO variant) can be described in
+one sentence: \emph{the store buffer is the only source of reordering}
+\cite{sewell10cacm,adve96tutorial}. Loads and stores keep their order with
+respect to each other---load after load, store after store, load then
+store---except for one pair: a \emph{store followed by a load to a
+different address} may appear to complete out of order, because the load
+can execute while the earlier store is still sitting in the store buffer.
+A load to the \emph{same} address as a buffered store is forwarded from
+the buffer itself (store-to-load forwarding), so the core always sees its
+own writes in order. The model remains multi-copy atomic: a store becomes
+visible to all other cores at once, in one global memory order.
+
+Figure~\ref{fig:tso-model} shows the one anomaly this relaxation permits,
+in its purest form. Both threads store to one variable and then load the
+other. Each load bypasses its own store buffer, reads the shared memory,
+and finds $0$. The outcome $r_1{=}r_2{=}0$---both threads believe they went
+first---is forbidden under SC and allowed under TSO. This litmus test is
+the classic \emph{store-buffering} (SB) test, also known as Dekker's
+example, and closing it requires a full \texttt{mfence} between the store
+and the load.
+
+Two further consequences follow from the same relaxation. First, a core
+observes its own stores before anyone else does, so a value read back
+locally is not evidence that other cores can see it. Second, stores drain
+from the buffer one at a time, so other cores can observe a multi-word
+write in a partially drained state---the torn view that Section~\ref{sec:tso-example}
+exploits. What TSO \emph{does} guarantee is store-store and load-load
+order: the message-passing idiom of Section~\ref{sec:weak-model} is safe
+on x86-64 with no hardware fence at all, which is why a protocol tuned on
+x86 can silently hide a missing barrier until it is ported to ARM.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+font=\small,
+core/.style={draw,rectangle,rounded corners,align=center,
+minimum width=4.4cm,minimum height=1.1cm},
+buf/.style={draw,rectangle,align=center,
+minimum width=4.4cm,minimum height=1.0cm},
+mem/.style={draw,rectangle,rounded corners,align=center,
+minimum width=11.2cm,minimum height=1.0cm},
+edge/.style={-{Stealth},thick},
+lab/.style={font=\footnotesize,fill=white,inner sep=1.5pt}
+]
+\node[core] (core0) at (0,0)
+  {Core 0\\\texttt{W} $A{=}1$; \ then \texttt{R} $B \to r_1$};
+\node[core] (core1) at (6.6,0)
+  {Core 1\\\texttt{W} $B{=}1$; \ then \texttt{R} $A \to r_2$};
+\node[buf]  (buf0)  at (0,-2.1) {store buffer\\$A{=}1$ pending};
+\node[buf]  (buf1)  at (6.6,-2.1) {store buffer\\$B{=}1$ pending};
+\node[mem]  (memory) at (3.3,-4.2)
+  {shared memory: \ $A{=}0$, $B{=}0$ \ (nothing drained yet)};
+
+\draw[edge] (core0) -- (buf0);
+\draw[edge] (core1) -- (buf1);
+\draw[edge,dashed] (buf0) -- (memory.north -| buf0)
+  node[lab, midway, right=2pt] {drains later};
+\draw[edge,dashed] (buf1) -- (memory.north -| buf1);
+\draw[edge,densely dotted,gray]
+  ($(core0.south east)+(-0.3,0)$) .. controls (2.6,-1.5)
+  .. ($(memory.north)+(2.9,0)$);
+\draw[edge,densely dotted,gray]
+  ($(core1.south west)+(0.3,0)$) .. controls (4.0,-1.5)
+  .. ($(memory.north)+(3.7,0)$);
+\node[font=\footnotesize,gray] at (3.3,-1.35)
+  {loads bypass the buffer, read memory directly};
+\node[draw=red,dashed,rounded corners,align=center,font=\footnotesize,
+      text width=10.6cm] (anom) at (3.3,-5.9)
+ {outcome $r_1{=}0$ and $r_2{=}0$: each load bypasses its own pending store
+  and reads old memory.\\ Forbidden under SC --- allowed under TSO (the
+  store-buffer anomaly). A full \texttt{mfence} between the store and the
+  load forbids it.};
+\end{tikzpicture}
+\caption{Total store order. Each core's store waits in its private store
+buffer (solid arrow) and drains to shared memory later (dashed arrows);
+the subsequent load bypasses the buffer (dotted arrows) and reads the old
+value. The only reordering TSO permits is exactly this store-then-load
+pair.}
+\label{fig:tso-model}
+\end{figure}
+
+\subsection{The Relaxed Models of ARM and POWER}
+\label{sec:weak-model}
+
+ARM (before and after ARMv8) and POWER are \emph{weakly ordered}: for
+ordinary loads and stores, all four pairs---store after store, load after
+load, load then store, and store then load---may be reordered, subject to
+per-location coherence and to data/address/control dependencies
+\cite{alglave17fencing,sorin11primer}. The relaxation has several physical
+sources at once: a store queue that can bypass and coalesce, write-back
+caches that propagate at different times, and loads that execute
+speculatively or complete out of order while waiting on misses. Ordering
+is recovered only where the program asks for it: explicit barriers (ARM
+\texttt{dmb}, POWER \texttt{sync}/\texttt{lwsync}/\texttt{isync}),
+the ARMv8 acquire/release load-store instructions (\texttt{ldar}/
+\texttt{stlr}), or the one-way ordering that dependencies already provide
+(an address-dependent load cannot be hoisted above the load that computes
+its address).
+
+Figure~\ref{fig:weak-model} shows the canonical anomaly: the
+\emph{message-passing} (MP) litmus test. The writer publishes a payload
+and then a flag; the reader polls the flag and then reads the payload.
+On ARM or POWER, with plain loads and stores, the reader can see the flag
+set and still read the old payload: the two stores left the writer in a
+different order, or the two loads completed out of order. The transactional
+reading of the failure is exactly the commit-publish problem: the flag is
+a commit marker, the payload is the write-set, and a reader that trusts
+the marker without a barrier observes a torn commit. The fix is a release
+store for the flag and an acquire load for it (or \texttt{dmb ish} on
+ARM, \texttt{lwsync} on POWER); Section~\ref{sec:mp-example} turns this
+into compilable C++ and Rust.
+
+Weak models permit the store-buffering outcome of
+Figure~\ref{fig:tso-model} as well, and one more test that TSO forbids:
+IRIW (independent reads of independent writes), where two readers
+disagree about the order of two independent stores. Table~\ref{tab:litmus-models}
+summarizes. What survives on every platform is per-location coherence
+(two writes to the same word are seen in one order by everyone) and
+dependency-ordered reads---facts that the lock-free read paths of
+Part~IV lean on heavily.
+
+The repository carries one backend that targets this family directly:
+a POWER8 HTM-with-fallback runtime (\texttt{backends/tm\_impl/
+power8\_htm/}), which uses the hardware transactional instructions of
+POWER8 and inherits exactly these ordering rules for its fallback path.
+Every x86-tuned fence placement in this book was audited against the
+ARM/POWER column of Table~\ref{tab:litmus-models} before the Rust and C++
+runtimes shipped.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+font=\small,
+core/.style={draw,rectangle,rounded corners,align=center,
+minimum width=5.0cm,minimum height=1.5cm},
+mem/.style={draw,rectangle,rounded corners,align=center,
+minimum width=11.2cm,minimum height=1.0cm},
+edge/.style={-{Stealth},thick},
+lab/.style={font=\footnotesize,fill=white,inner sep=1.5pt}
+]
+\node[core] (w) at (0,0)
+  {Core 0 (writer)\\\texttt{W} $A{=}1$; \ then \texttt{W} $f{=}1$};
+\node[core] (r) at (6.8,0)
+  {Core 1 (reader)\\\texttt{R} $f \to 1$; \ then \texttt{R} $A \to 0$};
+\node[mem] (memory) at (3.4,-3.5)
+  {shared memory: \ $A{=}1$, $f{=}1$ \ (eventually)};
+\draw[edge] (w.south) -- (memory.north -| w.south)
+  node[lab, midway, right=2pt, align=left]
+  {stores may leave\\in either order};
+\draw[edge] (r.south) -- (memory.north -| r.south)
+  node[lab, midway, left=2pt, align=right]
+  {loads may complete\\out of order};
+\node[draw=red,dashed,rounded corners,align=center,font=\footnotesize,
+      text width=10.6cm] (anom) at (3.4,-5.2)
+ {the reader sees the flag $f{=}1$ but the stale $A{=}0$: the
+  ``committed'' message arrived before the data it announces.\\
+  Forbidden under SC and TSO --- allowed on ARM and POWER with plain
+  loads and stores. Fix: release store of $f$, acquire load of $f$
+  (\texttt{stlr}/\texttt{ldar}, \texttt{dmb ish}, \texttt{lwsync}).};
+\end{tikzpicture}
+\caption{The weakly ordered ARM and POWER models. Both the store-store
+pair on the writer and the load-load pair on the reader may be reordered,
+so the message-passing idiom fails unless release/acquire ordering (or a
+barrier) is inserted on at least one side.}
+\label{fig:weak-model}
+\end{figure}
+
+\subsection{Other Models and the C/C++ Contract}
+
+Two further points on the spectrum matter for later chapters. RISC-V's
+RVWMO is, for practical purposes, a cousin of the ARM/POWER column of
+Table~\ref{tab:litmus-models}: ordinary accesses are weakly ordered, and
+acquire/release annotations plus explicit fences recover order. GPUs are
+weaker still in a different dimension: the private L1 caches of a
+streaming multiprocessor are not coherent across SMs at all, so
+``the order in which stores become visible'' is a per-scope question;
+Chapter~17 rebuilds conflict detection from scratch under that constraint.
+
+The portable contract over all of these is the C11/C++11 atomic memory
+model (Chapter~4): \texttt{seq\_cst} gives the SC column, acquire/release
+gives exactly the one-way ordering needed for the message-passing idiom on
+every architecture in the table, and \texttt{relaxed} gives atomicity with
+no ordering at all. A compiler fence
+(\texttt{atomic\_signal\_fence}) constrains only the compiler's
+reordering; a hardware fence (\texttt{mfence}, \texttt{dmb},
+\texttt{sync}) constrains the machine. The TM runtimes of Part~IV choose
+the weakest tool at each point: compiler fences on read paths that x86
+already orders, release/acquire on commit-publish paths, and full fences
+only where a protocol's correctness proof requires them.
+
+Table~\ref{tab:litmus-models} collects the litmus answers developed in
+this section.
+
+\begin{table}[htbp]
+\centering
+\caption{Litmus tests under the three memory-model families. Sequential
+consistency forbids every surprising outcome listed, so it has no column:
+``allowed'' means some execution of the litmus test may observe the
+outcome. Fence and atomic fixes are discussed in the text.}
+\label{tab:litmus-models}
+\renewcommand{\arraystretch}{1.3}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{M{0.11\linewidth} M{0.28\linewidth} M{0.23\linewidth} M{0.12\linewidth} M{0.14\linewidth}}
+\hline
+\thb{0.11\textwidth}{\textbf{Test}} &
+\thb{0.28\textwidth}{\textbf{Program (per thread)}} &
+\thb{0.23\textwidth}{\textbf{Surprising outcome}} &
+\thb{0.12\textwidth}{\textbf{TSO}} &
+\thb{0.14\textwidth}{\textbf{ARM / POWER}} \\
+\hline
+SB (store buffering) &
+T1: \texttt{W} $x{=}1$; \texttt{R} $y \to r_1$.\ T2: \texttt{W} $y{=}1$; \texttt{R} $x \to r_2$. &
+$r_1{=}0$ and $r_2{=}0$ (both ``went first'') &
+allowed &
+allowed \\
+MP (message passing) &
+T1: \texttt{W} $x{=}1$; \texttt{W} $f{=}1$.\ T2: \texttt{R} $f \to r_1$; \texttt{R} $x \to r_2$. &
+$r_1{=}1$ but $r_2{=}0$ (flag seen, payload stale) &
+forbidden &
+allowed \\
+IRIW (independent reads of independent writes) &
+T1: \texttt{R} $x \to r_1$; \texttt{R} $y \to r_2$.\ T2: \texttt{R} $y \to r_3$; \texttt{R} $x \to r_4$. &
+$r_1{=}r_3{=}1$ but $r_2{=}r_4{=}0$ (readers disagree on store order) &
+forbidden &
+allowed \\
+\hline
+\end{tabular}
+\end{table}
 
 \section{Worked Example: The TSO Store-Buffer Surprise}
 \label{sec:tso-example}
 
 The running bank example can expose a memory-ordering subtlety. Consider a
-transfer that writes account A and then reads account B:
+transfer that writes account $A$ and then reads account $B$:
 
 \begin{lstlisting}[language=C, caption={A transfer that writes then reads.},
 label={lst:tso-transfer-check}]
@@ -160,44 +431,150 @@ void transfer_and_check(struct account *a, struct account *b, int n) {
 }
 \end{lstlisting}
 
-On TSO, the store to \texttt{a->balance} sits in the store buffer. The
-subsequent load of \texttt{b->balance} can be satisfied before the store to A
-is visible to other cores. A concurrent thread can observe A updated while B
-is still the old value---a torn view of the transaction, shown in
-Figure~\ref{fig:tso-store-buffer}. The fix is a release fence on commit: the
-write-back of the whole write-set must become visible at once. This is the
-store-buffer echo of the snapshot-consistency problem from Chapter~2,
-revisited in Part~IV for software TM and Part~VII for GPUs.
+On TSO (\S\ref{sec:tso-model}), the store to \texttt{a->balance} sits in the store
+buffer. The subsequent load of \texttt{b->balance} can be satisfied before
+the store to $A$ is visible to other cores. A concurrent thread can observe
+$A$ updated while $B$ is still the old value---a torn view of the
+transaction, shown in Figure~\ref{fig:tso-store-buffer}. The fix is a
+release fence on commit: the write-back of the whole write-set must become
+visible at once. This is the store-buffer echo of the snapshot-consistency
+problem from Chapter~2, revisited in Part~IV for software TM and Part~VII
+for GPUs.
 
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
 font=\small,
-core/.style={draw,rectangle,rounded corners,align=center,
-minimum width=3.0cm,minimum height=2.4cm},
-mem/.style={draw,rectangle,rounded corners,align=center,
-minimum width=5.0cm,minimum height=1.2cm},
+box/.style={draw,rounded corners,align=center,
+minimum width=4.6cm,minimum height=1.05cm},
 edge/.style={-{Stealth},thick},
-buffer/.style={draw,rectangle,align=center,minimum width=2.6cm,
-minimum height=1.4cm}
+lab/.style={font=\footnotesize,fill=white,inner sep=1.5pt}
 ]
-\node[core] (core0) {Core 0\\\texttt{a->balance -= n}\\then load \texttt{b}};
-\node[core, right=of core0, xshift=1.2cm] (core1) {Core 1\\observes A updated\\B still old};
-\node[mem, below=of core0, xshift=2.6cm, yshift=-0.6cm] (memory) {Shared memory\\A=90, B=100};
-
-\node[buffer, below left=of core0, xshift=-0.5cm, yshift=0.2cm] (buf0)
-{Store buffer\\A=90 (not yet visible)};
-\draw[edge] (core0.south) -- (buf0.north);
-\draw[edge] (buf0.south) -- (memory.north west) node[midway, left, font=\footnotesize] {drains};
-\draw[edge, dashed] (core0.east) -- (core1.west) node[midway, above, font=\footnotesize]
-{torn view};
+% left column: core 0 pipeline
+\node[box] (core0) at (0,0)
+  {Core 0\\transfer: \texttt{W} $A{=}90$; \ then \texttt{W} $B{=}90$};
+\node[box] (buf0) at (0,-2.0)
+  {store buffer\\pending: $A{=}90$, $B{=}90$};
+\node[box] (memory) at (0,-4.0)
+  {shared memory (draining)\\$A{=}90$, \ $B{=}100$};
+% right: observing core
+\node[box] (core1) at (7.0,-2.0)
+  {Core 1\\reads $A$, then reads $B$};
+% arrows
+\draw[edge] (core0) -- (buf0)
+  node[lab, midway, right=2pt] {stores enter};
+\draw[edge,dashed] (buf0) -- (memory)
+  node[lab, midway, right=2pt, align=left]
+  {drains one store\\at a time};
+\draw[edge,dashed,red] (core1.south) -- (memory.east)
+  node[lab, pos=0.45, above=2pt]
+  {observes the torn state};
+\node[font=\footnotesize, align=left, anchor=north west]
+  at ($(memory.south west)+(-0.1,-0.35)$)
+  {window between the two drains: $A$ updated, $B$ not yet};
 \end{tikzpicture}
-\caption{TSO store-buffer surprise. Core~0 writes A into its store buffer,
-then reads B locally. Core~1 can see A updated before B is updated,
-creating a torn view of the intended transaction. A release fence on
-commit makes the whole write-set visible atomically.}
+\caption{TSO store-buffer surprise. Core~0 debits $A$ and credits $B$;
+the two stores drain from the store buffer one at a time. A reader in the
+window between the two drains observes $A{=}90$ with $B{=}100$: money has
+appeared. A release fence on commit makes the whole write-set visible
+atomically.}
 \label{fig:tso-store-buffer}
 \end{figure}
+
+\section[The Message-Passing Surprise]{Worked Example: The Message-Passing Surprise on ARM and POWER}
+\label{sec:mp-example}
+
+The same bank transfer breaks differently on a weakly ordered machine. The
+idiom is message passing (\S\ref{sec:weak-model}): the runtime publishes the write-set
+and then a commit marker; readers poll the marker and then trust the
+write-set. On x86 the store-store and load-load pairs are already ordered,
+so the idiom survives with compiler fences alone. On ARM or POWER, plain
+stores and loads permit the outcome of Figure~\ref{fig:weak-model}: a
+reader sees \emph{committed} and then reads the old balance.
+
+The listing below shows the failure and the fix in compilable C++. The
+broken pair uses \texttt{relaxed} on both sides---atomicity without
+ordering, which is exactly ``plain load and store'' as far as the memory
+model is concerned. The fixed pair publishes the balance with a release
+store and observes the marker with an acquire load, which compiles to
+\texttt{stlr}/\texttt{ldar} on AArch64, \texttt{lwsync}-compatible code on
+POWER, and---on x86---to nothing beyond ordinary stores and loads.
+
+\begin{lstlisting}[language=C++, caption={Message passing with atomics:
+the relaxed pair can fail on ARM/POWER; the release/acquire pair cannot.},
+label={lst:mp-atomics}]
+#include <atomic>
+
+std::atomic<int> balance{100};     // the payload (the write-set)
+std::atomic<bool> committed{false}; // the commit marker
+
+void deposit_broken() {
+    balance.store(90, std::memory_order_relaxed);
+    committed.store(true, std::memory_order_relaxed);   // no ordering!
+}
+
+bool observe_broken(int &out) {
+    if (!committed.load(std::memory_order_relaxed)) return false;
+    out = balance.load(std::memory_order_relaxed);  // may read 100
+    return true;
+}
+
+void deposit_fixed() {
+    balance.store(90, std::memory_order_relaxed);
+    committed.store(true, std::memory_order_release);   // publish
+}
+
+bool observe_fixed(int &out) {
+    if (!committed.load(std::memory_order_acquire)) return false;
+    out = balance.load(std::memory_order_relaxed);  // guaranteed 90
+    return true;
+}
+\end{lstlisting}
+
+Rust expresses the identical protocol through its atomic types, and the
+type system adds one guarantee C++ cannot: a \texttt{\&T} shared across
+threads cannot be mutated outside an atomic or a transaction at all, so
+the ``forgot the ordering'' failure mode below is the only one left. The
+repository's Rust runtimes (\texttt{explicit\_api/rust/workspace/runtime/})
+use exactly these orderings: compiler fences on read paths that x86
+already orders, release/acquire on the commit-publish path, and a full
+fence where the backend's proof requires one.
+
+\begin{lstlisting}[language=Rust, caption={The same message-passing
+protocol in Rust: release publishes the commit, acquire observes it.},
+label={lst:mp-rust}]
+use std::sync::atomic::{
+    AtomicI32, AtomicBool,
+    Ordering::{Acquire, Relaxed, Release},
+};
+
+static BALANCE: AtomicI32 = AtomicI32::new(100); // the write-set
+static COMMITTED: AtomicBool = AtomicBool::new(false); // the marker
+
+fn deposit() {
+    BALANCE.store(90, Relaxed);
+    COMMITTED.store(true, Release); // publish (stlr on AArch64)
+}
+
+fn observe() -> Option<i32> {
+    if !COMMITTED.load(Acquire) {   // subscribe (ldar on AArch64)
+        return None;
+    }
+    Some(BALANCE.load(Relaxed))     // guaranteed 90, never 100
+}
+
+fn main() {
+    deposit();
+    assert_eq!(observe(), Some(90));
+}
+\end{lstlisting}
+
+A useful discipline falls out of Table~\ref{tab:litmus-models}: write the
+commit protocol against the ARM/POWER column, and treat the TSO column as
+an optimization. A protocol correct on the weak column is correct
+everywhere in this book's backend zoo, from x86 laptops to the POWER8
+HTM backend to the GPU designs of Part~VII (where the coherence scope
+shrinks further still).
 
 \section{Worked Example: Cache-Line False Conflicts}
 
@@ -268,9 +645,13 @@ Coherence works on blocks, not abstract objects. HTM conflict detection
 inherits that granularity. Padding can reduce false conflicts, but it
 increases footprint and can increase capacity aborts. SGL-style execution is
 insensitive to false conflicts, but it also removes concurrent execution.
-TSX-SGL uses HTM when the hardware accepts the transaction and falls back to a
-single global lock when it does not, so it pays the false-conflict cost only
-on the hardware fast path.
+TSX-SGL~\cite{intel13tsx} uses HTM when the hardware accepts the transaction
+and falls back to a single global lock when it does not, so it pays the
+false-conflict cost only on the hardware fast path. Both live in the
+companion repository: TSX-SGL in
+\texttt{backends/\allowbreak tm\_impl/\allowbreak tsx\_sgl/} and
+the pure-lock reference in
+\texttt{backends/\allowbreak tm\_impl/\allowbreak single\_global\_lock/}.
 
 \section{HTM Execution States}
 
@@ -285,22 +666,24 @@ fallback path.
 \begin{tikzpicture}[
 font=\small,
 state/.style={draw,rectangle,rounded corners,align=center,
-minimum width=2.8cm,minimum height=0.9cm},
-edge/.style={-{Stealth},thick}
+minimum width=3.2cm,minimum height=1.0cm},
+edge/.style={-{Stealth},thick},
+lab/.style={font=\footnotesize,fill=white,inner sep=2pt}
 ]
-\node[state] (normal) {nontransactional\\execution};
-\node[state, right=of normal] (active) {transaction active\\read/write set in cache};
-\node[state, right=of active] (commit) {commit\\publish writes};
-\node[state, below=of active, yshift=-0.5cm] (abort) {abort\\discard speculative state};
-\node[state, below=of commit, yshift=-0.5cm] (fallback) {fallback\\SGL or STM path};
+\node[state] (normal)   at (0,0)       {nontransactional\\execution};
+\node[state] (active)   at (5.6,0)     {transaction active\\read/write set in cache};
+\node[state] (commit)   at (12.2,0)    {commit\\publish writes};
+\node[state] (abort)    at (5.6,-2.8)  {abort\\discard speculative state};
+\node[state] (fallback) at (12.2,-2.8) {fallback\\SGL or STM path};
 
-\draw[edge] (normal) -- node[above] {xbegin} (active);
-\draw[edge] (active) -- node[above] {no-conflict} (commit);
-\draw[edge] (active) -- node[left] {invalidation} (abort);
-\draw[edge] (active) -- node[right] {capacity} (abort);
-\draw[edge] (abort) -- node[below] {retry-budget} (normal);
-\draw[edge] (abort) -- node[right] {persistent-abort} (fallback);
-\draw[edge] (fallback) -- node[below] {unlock} (normal);
+\draw[edge] (normal) -- node[lab] {xbegin} (active);
+\draw[edge] (active) -- node[lab] {no conflict} (commit);
+\draw[edge] (active) -- node[lab, right=3pt, align=left]
+  {coherence conflict\\or capacity} (abort);
+\draw[edge] (abort) -- node[lab, above left=1pt and -8pt] {retry budget} (normal);
+\draw[edge] (abort) -- node[lab] {persistent abort} (fallback);
+\draw[edge] (fallback.south) -- ++(0,-0.55) -|
+  node[lab, pos=0.25, below] {unlock} (normal.south);
 \end{tikzpicture}
 \caption{HTM execution state machine. Speculative data live in the cache
 while the transaction is active. Coherence invalidations and capacity
@@ -376,20 +759,39 @@ chapter introduced and the TM design consequences each one forces.
 
 \begin{table}[htbp]
 \centering
-\caption{Hardware mechanisms and their TM consequences.}
+\caption{Hardware mechanisms and their TM consequences. Each representative
+backend lists its citation and its implementation directory in the
+companion repository (Rust runtimes live under
+\texttt{explicit\_api/rust/workspace/runtime/}).}
 \label{tab:hardware-tm-taxonomy}
 \renewcommand{\arraystretch}{1.3}
-\begin{tabular}{p{0.20\linewidth} p{0.30\linewidth} p{0.35\linewidth}}
+\begin{tabular}{M{0.17\linewidth} M{0.30\linewidth} M{0.41\linewidth}}
 \hline
-\textbf{Mechanism} & \textbf{TM consequence} & \textbf{Representative backends in the codebase} \\
+\thb{0.17\textwidth}{\textbf{Mechanism}} &
+\thb{0.30\textwidth}{\textbf{TM consequence}} &
+\thb{0.41\textwidth}{\textbf{Representative backends (cite, repo path)}} \\
 \hline
-Cache coherence & Conflict signal on invalidation; hardware conflict detection; false conflicts at line granularity & TSX-SGL, HTM path; all hardware TM  \\
-Private L1 cache & Speculative data home; capacity aborts when transaction working set overflows & TSX-SGL; hardware TM; software backends avoid by using memory metadata  \\
-Store buffer & Relaxed write-to-read ordering; torn views on commit without fences; commit-publish fence required & TL2, NOrec, TinySTM WBCTL/WT/WBETL, SwissTM, JVSTM, MVLog  \\
-Timestamp counter or logical clock & Global commit order; version clocks for read-set validation & TL2, NOrec, NOrec-BF, TSC-TM, JVSTM, MVLog  \\
-No coherent cache across GPU SMs & Software conflict detection; warp-level voting; multi-version commit logs & PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, GUST  \\
-Persistent memory ordering & Durable commit requires write ordering and crash consistency; undo/redo logs & NV-HTM, Romulus, PersistentSGL  \\
-Distributed memory & No shared coherence domain; transactions become distributed protocols; two-phase commit & DistributedSGL, TiKV  \\
+Cache coherence &
+Conflict signal on invalidation; hardware conflict detection; false conflicts at line granularity &
+TSX-SGL~\cite{intel13tsx,herlihy93} (\rep{backends/\allowbreak tm\_impl/\allowbreak tsx\_sgl}); POWER8-HTM (\rep{backends/\allowbreak tm\_impl/\allowbreak power8\_htm}); all HTM paths of Ch.~16 \\
+Private L1 cache &
+Speculative data home; capacity aborts when transaction working set overflows &
+TSX-SGL~\cite{intel13tsx}; XTM~\cite{chung06xtm} virtualizes capacity at page granularity (\rep{backends/\allowbreak tm\_impl/\allowbreak xtm}); software backends avoid it by keeping metadata in main memory (Part~IV) \\
+Store buffer &
+Relaxed write-to-read ordering; torn views on commit without fences; commit-publish fence required &
+TL2~\cite{dice06tl2}, NOrec~\cite{dalessandro10norec}, TinySTM~\cite{felber08tinystm}, SwissTM~\cite{dragojevic09swiss}, JVSTM~\cite{cachopo06}, MVLog (companion); all under \rep{backends/\allowbreak tm\_impl/}\,$\langle$name$\rangle$ \\
+Timestamp counter or logical clock &
+Global commit order; version clocks for read-set validation &
+TL2~\cite{dice06tl2}, TSC-TM (companion variant of TL2), NOrec-BF~\cite{dalessandro10norec} (companion extension), JVSTM~\cite{cachopo06}, MVLog (companion), LEFTRIGHT~\cite{ramalhete15leftright} (companion OCC variant, \rep{backends/\allowbreak tm\_impl/\allowbreak leftright}) \\
+No coherent cache across GPU SMs &
+Software conflict detection; warp-level voting; multi-version commit logs &
+PR-STM~\cite{shen15prstm}, CSMV~\cite{nunes22csmv}, GPUTX~\cite{xu14gpustm}, GAccO~\cite{holey14}, GUST~\cite{nunes23gust}; \rep{gpu/\allowbreak backends/} \\
+Persistent memory ordering &
+Durable commit requires write ordering and crash consistency; undo/redo logs &
+NV-HTM~\cite{castro18nvhtm}, Romulus~\cite{correia18romulus}, DUDETM~\cite{liu17dudetm}, PersistentSGL (companion); all under \rep{backends/\allowbreak tm\_impl/}\,$\langle$name$\rangle$ \\
+Distributed memory &
+No shared coherence domain; transactions become distributed protocols; two-phase commit &
+DistributedSGL (companion), TiKV~\cite{peng10percolator} (\rep{backends/\allowbreak tm\_impl/\allowbreak tikv}; Rust: \rep{explicit\_api/\allowbreak rust/\allowbreak workspace/\allowbreak runtime/\allowbreak tikv}) \\
 \hline
 \end{tabular}
 \end{table}
@@ -412,10 +814,19 @@ But store buffers hide visibility, so a software TM must insert fences to make
 a commit's write-set visible atomically. The hardware substrate thus both
 enables and constrains every design in the chapters that follow.
 
+The memory-model ladder of \S3.3 gives that obligation a precise shape.
+Sequential consistency has no anomalies; TSO has exactly one (the
+store-buffering outcome of Figure~\ref{fig:tso-model}); the ARM and POWER
+family adds message-passing and IRIW anomalies (Figure~\ref{fig:weak-model}).
+A commit-publish protocol that is correct in the weakest column of
+Table~\ref{tab:litmus-models} is correct everywhere in this book.
+
 The store-buffer surprise of Section~\ref{sec:tso-example} is the hardware
-echo of the snapshot-consistency problem from Chapter~2. The false-conflict
-example shows why coarse-grained hardware conflict detection is not free. The
-atomic commit-publish TLA+ model states the obligation that every backend in
+echo of the snapshot-consistency problem from Chapter~2, and the
+message-passing surprise of Section~\ref{sec:mp-example} is its portable
+repair in both C++ and Rust. The false-conflict example shows why
+coarse-grained hardware conflict detection is not free. The atomic
+commit-publish TLA+ model states the obligation that every backend in
 Parts~IV and VII must refine: the debit and the credit are one step, not two.
 
 \section{Exercises}
@@ -463,6 +874,16 @@ threads, a release fence, and an atomic flag to coordinate. Verify
 that without the fence, the torn view is observable in some runs, and
 with the fence, it is not.
 
+\item \emph{[implementation]} Port the message-passing litmus test of
+Listing~\ref{lst:mp-rust} to a loop that runs \texttt{deposit}/
+\texttt{observe} pairs from two threads with \texttt{relaxed} ordering
+on both sides, and count how often \texttt{observe} returns the stale
+value. Then switch the marker to \texttt{Release}/\texttt{Acquire} and
+verify the stale count drops to zero. If you have access to an AArch64
+machine (for example an Apple Silicon or Raspberry Pi host), run both
+variants there and on x86-64, and explain the difference using
+Table~\ref{tab:litmus-models}.
+
 \item \emph{[open]} Herlihy and Moss' 1993 proposal \cite{herlihy93} gave
 HTM conflict detection ``for free'' by piggybacking on cache
 coherence, yet commodity HTM arrived late, as a best-effort feature,
@@ -476,14 +897,18 @@ weakened version?  Point to one concrete mechanism from this chapter
 \textbf{How to check your work.} The \emph{[implementation]} exercises are
 verified with the companion: run the cache-line layouts of
 Listing~\ref{lst:cache-line-layout} under \texttt{make -C benchmarks/cpp
-run-bank}, and reproduce the store-buffer surprise of
-\S\ref{sec:tso-example}.  The \emph{[verification]} exercise is checked with
+run-bank}, reproduce the store-buffer surprise of
+\S\ref{sec:tso-example}, and run the Rust litmus loop of the
+message-passing exercise (the crate in
+\texttt{explicit\_api/rust/workspace/} builds with \texttt{cargo build
+--release}).  The \emph{[verification]} exercise is checked with
 TLC against Listing~\ref{lst:bank-atomic-commit}
 ($\sum \mathrm{balance}[a]=200$; see Appendix~\ref{chap:pluscal-quick-ref}).
-The \emph{[theory]} exercises are graded against \S\ref{sec:tso-example} and
-\S\ref{sec:hardware}.  The \emph{[open]} exercise has no single right
-answer; it is graded on whether you connect your position to at least one
-concrete mechanism from this chapter and address the strongest objection.
+The \emph{[theory]} exercises are graded against
+\S\ref{sec:tso-example} and \S\ref{sec:hardware}.  The \emph{[open]}
+exercise has no single right answer; it is graded on whether you connect
+your position to at least one concrete mechanism from this chapter and
+address the strongest objection.
 
 \index{data race}
 \index{happens-before}
@@ -505,6 +930,17 @@ concrete mechanism from this chapter and address the strongest objection.
 \index{capacity abort}
 \index{commit-publish fence}
 \index{store-to-load forwarding}
+\index{sequential consistency}
+\index{litmus test}
+\index{message passing}
+\index{IRIW}
+\index{Dekker's example}
+\index{mfence}
+\index{dmb barrier}
+\index{lwsync}
+\index{multi-copy atomic}
+\index{RVWMO}
+\index{memory consistency model}
 
 
 % -------------------------------------------------------------------

@@ -272,9 +272,9 @@ different ways, which is why their performance envelopes differ so widely.
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{p{0.18\linewidth} p{0.22\linewidth} p{0.27\linewidth} p{0.23\linewidth}}
+\begin{tabular}{M{0.18\linewidth} M{0.22\linewidth} M{0.27\linewidth} M{0.23\linewidth}}
 \hline
-Family & Examples in the codebase & Serialization point & Bank-transfer consequence \\
+\thb{0.18\textwidth}{Family} & \thb{0.22\textwidth}{Examples in the codebase} & \thb{0.27\textwidth}{Serialization point} & \thb{0.23\textwidth}{Bank-transfer consequence} \\
 \hline
 Coarse lock & SGL, PersistentSGL, DistributedSGL & Lock acquisition or durable lock protocol & Simple proof; poor scalability under independent transfers. \\
 Hardware fast path & TSX-SGL & Hardware transaction commit, with SGL fallback & Fast when transactions fit hardware limits; fallback preserves correctness. \\
@@ -444,8 +444,8 @@ one transition. The following TLA+ module has no locks. It describes the
 atomic state transition and the invariants that every implementation must
 refine.
 
-\begin{lstlisting}[caption={A TLA+ model of atomic bank transfers. Save as
-\texttt{BankTransferInvariant.tla} and run TLC with \texttt{Floor=0}.},
+\begin{lstlisting}[caption={A TLA+ model of atomic bank transfers; run TLC
+with \texttt{Floor=0}.},
 label={lst:bank-transfer-invariant}]
 ---- MODULE BankTransferInvariant ----
 EXTENDS Integers, TLC
@@ -491,7 +491,7 @@ Spec == Init /\ [][Next]_vars
 A minimal TLC configuration is:
 
 \begin{lstlisting}[caption={TLC configuration for the bank-transfer
-invariant. Save as \texttt{BankTransferInvariant.cfg}.},
+invariant.},
 label={lst:bank-transfer-cfg}]
 SPECIFICATION Spec
 CONSTANT Floor = 0
