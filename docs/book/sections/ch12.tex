@@ -515,6 +515,8 @@ The model is small because it checks one idea: rollback must restore every in-pl
 
 A useful workflow is to keep the TLA+ model close to the implementation test. When the implementation adds account floors, the model should add the same precondition. When the implementation distinguishes explicit aborts from conflict aborts, the model can keep one abstract abort action unless the distinction affects safety.
 
+\input{sections/ch12_new_section}
+
 \section{Summary}
 
 Testing transactional memory requires a stack of techniques. Invariant tests are cheap and backend-independent; they should run everywhere. Abort fuzzing makes rare rollback paths common. Deterministic scheduling turns timing-sensitive failures into ordinary test cases. Record-and-replay makes concrete executions debuggable. TLA+ model checking explores the abstract protocol and catches missing transitions before they become code.

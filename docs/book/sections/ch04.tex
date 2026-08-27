@@ -186,35 +186,10 @@ Listing~\ref{lst:rust-bank} is the bank transfer of this chapter's C++
 examples, in safe Rust: no \texttt{unsafe} block appears anywhere in the
 client, yet both balances update as one atomic unit or not at all.
 
-\begin{lstlisting}[language=Rust, caption={The bank transfer in safe Rust
+\lstinputlisting[language=Rust, caption={The bank transfer in safe Rust
 with the companion \texttt{tm} crate: atomicity without a single
-\texttt{unsafe} block in client code.}, label={lst:rust-bank}]
-use tm::{TmCell, transaction, tm_init, tm_exit};
-use std::sync::Arc;
-
-fn main() {
-    tm_init();
-    let a = Arc::new(TmCell::new(100_i64));
-    let b = Arc::new(TmCell::new(100_i64));
-
-    // Both reads and both writes are one atomic unit.
-    let ok = transaction(|tx| {
-        let bal_a = tx.read(&a);
-        let bal_b = tx.read(&b);
-        if bal_a < 10 {
-            return false; // floor check: abort, no effect at all
-        }
-        tx.write(&a, bal_a - 10);
-        tx.write(&b, bal_b + 10);
-        true
-    });
-    assert!(ok);
-
-    let total = transaction(|tx| tx.read(&a) + tx.read(&b));
-    assert_eq!(total, 200);
-    tm_exit();
-}
-\end{lstlisting}
+\texttt{unsafe} block in client code.}, label={lst:rust-bank},
+firstline=6, lastline=31]{listings/rust_bank_transfer.rs}
 
 What the borrow checker proved here: no thread can read or write
 \texttt{a} or \texttt{b} outside \texttt{transaction} (the cells' interiors

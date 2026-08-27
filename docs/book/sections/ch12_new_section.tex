@@ -1,0 +1,216 @@
+\section{Worked Example: Using the Companion's Debug and Profiling Tools}
+\index{debug tools}\index{profiling}\index{event logger}\index{TSX profiling}\index{race checker}
+\label{sec:debug-profiling-tools}
+
+The preceding sections built tests, fuzzers, schedulers, and model
+checkers.  This section introduces three toolchains from the companion
+repository that support a different phase of development: diagnosing why
+a backend fails a test, understanding where it spends its cycles, and
+catching missing TM annotations before they become data races.
+
+\subsection{The STM Bug Tool}
+\index{STM bug tool}\index{event log parser}\index{invariant checker}
+\label{sec:stm-bug-tool}
+
+When an invariant test fails, the raw symptom---``Money destroyed by
+32''---is rarely enough.  The implementation must expose what happened
+inside the failing transactions: which addresses were read and written,
+in what order, and where the protocol diverged from correctness.  The
+companion's \texttt{tools/stm\_bug\_tool/} provides two stages of
+analysis.
+
+\paragraph{Event parsing.}
+The file \texttt{event\_parser.py}~(\rep{tools/stm\_bug\_tool/event\_parser.py})
+parses the output of a binary compiled with \texttt{-DTM\_EVENT\_LOGGER}.
+The logger emits one line per TM operation in a ring buffer that the
+tool flattens into structured records.  The core pattern is:
+
+\begin{lstlisting}[language=Python, caption={Event regex from event\_parser.py.}]
+EVENT_RE = re.compile(
+    r'^\[\s*(\d+)\]\s+thr=0x([0-9a-fA-F]+)\s+(\S+)\s+'
+    r'addr1=0x([0-9a-fA-F]+)\s+addr2=0x([0-9a-fA-F]+)\s+'
+    r'data=(\d+)'
+)
+\end{lstlisting}
+
+\noindent
+Each match yields a dictionary with keys \texttt{timestamp},
+\texttt{thread\_id}, \texttt{type}, \texttt{addr1}, \texttt{addr2},
+and \texttt{data}.  Types include \texttt{TX\_BEGIN},
+\texttt{COMMIT\_SUCCESS}, \texttt{TX\_ABORT}, \texttt{READ},
+\texttt{WRITE}, \texttt{LOCK\_ACQUIRE}, and \texttt{LOCK\_RELEASE}.
+A companion function \texttt{window\_around\_failure()} truncates the
+log to the last $N$ events before an invariant violation, keeping
+analysis tractable for logs exceeding 100\,000 lines.
+
+\paragraph{Invariant checking.}
+The file \texttt{invariant\_checker.py}~(\rep{tools/stm\_bug\_tool/invariant\_checker.py})
+applies a suite of structural checks to the parsed events.  Each check
+returns a list of violations:
+
+\begin{lstlisting}[language=Python, caption={Lifecycle checker signature.}]
+def check_complete_tx_lifecycle(parsed: dict) -> list:
+    """Every TX_BEGIN must end with COMMIT_SUCCESS or TX_ABORT."""
+\end{lstlisting}
+
+\noindent
+Other checks include lock discipline (every acquire must have a matching
+release), read-write consistency (reads return values from the most
+recent committed write to the same address), and absence of duplicate
+reads within a single transaction.  The typical workflow is:
+
+\begin{enumerate}
+    \item Compile the benchmark with \texttt{-DTM\_EVENT\_LOGGER -O0}.
+    \item Run the binary; on invariant failure it dumps the ring buffer to
+          \texttt{stderr}.
+    \item Pipe the output through the bug tool: \texttt{./my\_benchmark
+          2\&1 | python3 tools/stm\_bug\_tool/invariant\_checker.py}.
+    \item The tool prints violations with event ranges, narrowing the
+          search to a handful of operations.
+\end{enumerate}
+
+The tool is backend-agnostic: the event logger is compiled into the
+common runtime, so the same commands work for NOrec, TinySTM, TL2, or
+any other backend.
+
+\subsection{Debug Patches}
+\index{debug patches}\index{patches/debug/}
+\label{sec:debug-patches}
+
+Debug output is useful during development but harmful in production:
+\texttt{fprintf} calls on the hot path slow down benchmarks and clutter
+CI logs.  The companion's solution is to keep debug output in
+\emph{patches}, not in source.  The directory
+\texttt{patches/debug/patches/}~(\rep{patches/debug/patches/})
+contains numbered patch files that each add one category of diagnostics:
+
+\begin{table}[htbp]
+\centering
+\caption{Debug patches and their purpose.}
+\label{tab:debug-patches}
+\begin{tabular}{M{0.32\linewidth}M{0.55\linewidth}}
+\hline
+\thb{0.32\textwidth}{Patch} & \thb{0.55\textwidth}{What it adds} \\
+\hline
+\texttt{002-tinystm-rs-ws-debug.patch} & Max read-set and write-set sizes on transaction exit \\
+\texttt{003-tinystm-wbctl-debug ASSERT} & Lock-version mismatch diagnostics \\
+\texttt{004-tm-region-alloc-debug.patch} & Mmap region base and size on allocation \\
+\texttt{005-test-stress-ds-debug.patch} & Red-black tree pointer tracing \\
+\texttt{006-swisstm-stats.patch} & SwissTM begin/end counts via \texttt{atexit} \\
+\hline
+\end{tabular}
+\end{table}
+
+\noindent
+Applying all patches at once:
+
+\begin{lstlisting}[language=bash, caption={Applying debug patches.}]
+patches/debug/apply.sh     # applies all *.patch files
+# ... run the backend under test ...
+git checkout -- .           # or: patches/debug/revert.sh
+\end{lstlisting}
+
+\noindent
+The \texttt{apply.sh} script refuses to run over a dirty working tree,
+preventing accidental interleaving with uncommitted changes.  The
+principle is simple: \emph{debug output should live in patches, not in
+source}.  A developer debugging a TinySTM regression applies patch
+002, rebuilds, reproduces, and reverts---the production source is
+never touched.
+
+\subsection{TSX Profiling}
+\index{TSX profiling}\index{RDTSC instrumentation}
+\label{sec:tsx-profiling}
+
+Understanding performance requires hardware-level measurement.  The
+companion's TSX profiling infrastructure instruments the TSXSGL
+backend with RDTSC timestamps at each TSX primitive and produces
+calibration data for the simulator's cost model.
+
+The profiling patch (\rep{patches/profile/tsx/0001-tsxsgl-tsx-timing-instrumentation.patch})
+adds cycle-level counters for: successful and failed \texttt{\_xbegin()}
+calls, \texttt{\_xend()} commit time, explicit \texttt{\_xabort()}
+penalty, SGL fallback lock/unlock/spin cycles, and per-operation read
+and write latencies.  The workflow is fully scripted:
+
+\begin{lstlisting}[language=bash, caption={The profiling workflow.}]
+cd patches/profile/tsx
+bash run_workflow.sh tsxsgl   # 1. apply patch
+                       # 2. build
+                       # 3. run experiments
+                       # 4. revert patch
+\end{lstlisting}
+
+\noindent
+The experiment runner \texttt{run\_tsx\_profiling.py}~(\rep{patches/profile/tsx/run\_tsx\_profiling.py})
+executes \texttt{fuzz\_counter} and the bank benchmark across thread
+counts 1, 2, 4, and 8 under both high-contention (64 accounts) and
+low-contention (512 accounts) configurations.  It parses the
+\texttt{TSX\_STATS} output lines, writes per-benchmark CSV results to
+\texttt{profiling\_data/raw/}, and produces a calibration JSON that
+maps each TSX event type to a measured cycle cost.
+
+The calibration JSON feeds directly into the simulator's cost model.
+The key insight is that the
+profiling data captures real hardware costs on the target machine; the
+simulator can then replay event traces with cycle-accurate timing
+without re-running the instrumented binary.  The resulting
+\texttt{machine\_profile.json} is portable: collect it on one machine,
+simulate on another.
+
+\subsection{LLVM Race Checker}
+\index{race checker}\index{TM annotation check}
+\label{sec:race-checker}
+
+The instrumentation pass (\S\ref{sec:instrumentation-contract}) inserts
+\texttt{tm\_read\_*/tm\_write\_*} calls for every access to a
+TM-annotated global.  But non-transactional helper functions that
+access the same globals are never instrumented---they execute outside
+the transaction boundary and silently bypass conflict detection.
+
+The race checker is a standalone LLVM pass
+(\rep{plugin/passes/TMRaceCheckerPass.cpp}) that scans all
+non-transactional functions for loads and stores to TM-annotated
+globals and emits source-location warnings suggesting
+\texttt{[[tm::shared]]} annotation:
+
+\begin{lstlisting}[language=bash, caption={Running the race checker.}]
+opt-22 -load-pass-plugin=plugin/bin/libTMRaceChecker.so \
+       -passes="tm-race-checker" myapp.bc -o /dev/null
+\end{lstlisting}
+
+\noindent
+The pass reuses \texttt{tracesFromTMGlobal()} from the instrumentation
+pipeline---the same analysis that determines which variables need
+instrumentation---and applies it in reverse: instead of instrumenting
+accesses, it reports them.  A typical session is:
+
+\begin{enumerate}
+    \item Compile the application to LLVM IR: \texttt{clang-tm
+          -emit-llvm -c myapp.cpp -o myapp.bc}.
+    \item Run the race checker on the IR.
+    \item For each warning, decide whether the access should be inside a
+          transaction (annotate the caller with
+          \texttt{[[tm::transaction\_al]]}) or whether the variable
+          should be shared explicitly (annotate with
+          \texttt{[[tm::shared]]}).
+    \item Rebuild with the annotations and re-run the race checker to
+          confirm the warning is resolved.
+\end{enumerate}
+
+The checker runs in under a second on typical benchmarks and integrates
+into the build via the instrumentation plugin, which also calls
+\texttt{checkMissingTransactionAnnotations()} at build time to warn
+about missing annotations without a separate \texttt{opt} invocation.
+
+\paragraph{Putting the tools together.}
+A typical debugging session combines all four tools.  A bank test fails
+with ``Money destroyed by 32'' on the NOrec backend.  The event logger
+pinpoints a two-address write-back where one thread's commit overwrote
+another's.  Debug patches reveal the write-set size was at the
+capacity threshold, causing a partial rollback.  TSX profiling
+(against the TL2 backend on the same workload) shows that the
+conflict-avoidance benefit of back-off outweighs the validation cost.
+The race checker confirms that all TM-annotated globals are properly
+instrumented.  The failure is understood, the fix is targeted, and no
+production source was modified along the way.

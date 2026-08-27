@@ -677,6 +677,103 @@ TypeOK ==
     \item The model captures the same obligation as the durable log: once commit is discoverable, later recovery must finish the data update.
 \end{itemize}
 
+\section{Queue Execution and Async TM}
+\index{queue execution}\index{async TM}\index{QueueExecutor}\index{worker pool}
+\label{sec:queue-execution}
+
+The synchronous API of \S\ref{sec:api-example} assumes a dedicated thread
+per transaction: the thread calls \texttt{tm\_begin}, executes the body, and
+calls \texttt{tm\_end}.  The queue runtime inverts this model: the application
+enqueues transactional closures, and a pool of worker threads executes them.
+This is the ``future-based closure'' row of Table~\ref{tab:api-taxonomy}, made
+concrete.
+
+\begin{center}
+\begin{tikzpicture}[
+    qnode/.style={draw, rounded corners, align=center, minimum width=2.4cm, minimum height=0.7cm},
+    node distance=2.2cm
+]
+\node[qnode] (caller) {Caller\\thread};
+\node[qnode, right=of caller] (queue) {Shared\\queue};
+\node[qnode, right=of queue] (worker) {Worker\\pool};
+\node[qnode, right=of worker] (backend) {TM\\backend};
+\draw[->] (caller) -- node[above]{\texttt{tm\_enqueue}} (queue);
+\draw[->] (queue) -- node[above]{dequeue} (worker);
+\draw[->] (worker) -- node[above]{begin/end} (backend);
+\draw[->] (worker.south) |- node[below, pos=0.3]{result} (caller.south);
+\end{tikzpicture}
+\end{center}
+
+\noindent
+The C++ queue runtime (\rep{backends/tm\_impl/queue/queue\_runtime.cpp})
+implements this pattern.  The entry point is:
+
+\begin{lstlisting}[language=C++, caption={Enqueuing a transaction (\texttt{queue\_runtime.cpp}).}]
+void real_tm_enqueue(void (*fn)(void*), void *arg) {
+    {
+        std::lock_guard<std::mutex> lock(g_queue_mutex);
+        g_queue.push({fn, arg});
+    }
+    g_queue_cv.notify_one();
+}
+\end{lstlisting}
+
+\noindent
+The caller does not know which worker thread will run the transaction.
+Worker threads spin in a loop that dequeues work items and executes them
+inside \texttt{tm\_begin}/\texttt{tm\_end} retry loops:
+
+\begin{lstlisting}[language=C++, caption={Worker loop (\texttt{queue\_runtime.cpp}).}]
+void worker_loop() {
+    tm_init_thread();
+    stm::tm_record_stack_bounds();
+    while (!g_stop.load()) {
+        QueueItem item;
+        {
+            std::unique_lock lock(g_queue_mutex);
+            g_queue_cv.wait(lock, []{
+                return !g_queue.empty() || g_stop.load();
+            });
+            if (g_stop.load()) break;
+            item = g_queue.front();
+            g_queue.pop();
+        }
+        bool done = false;
+        while (!done) {
+            tm_begin();
+            if (tm_longjmp_ret != 0) continue;
+            item.fn(item.arg);
+            done = (tm_end() == TM_COMMITTED);
+        }
+    }
+    tm_exit_thread();
+}
+\end{lstlisting}
+
+\noindent
+The Rust executor (\rep{explicit\_api/rust/workspace/tm-executor/src/lib.rs})
+provides the same pattern through a \texttt{QueueExecutor} trait with
+\texttt{execute} (synchronous) and \texttt{execute\_async} (returns a
+\texttt{JoinHandle}) methods.
+
+\paragraph{Concurrency and the TM invariant.}
+When multiple workers dequeue transactions simultaneously, the TM backend
+provides the same conflict detection and atomicity guarantees as the
+synchronous case.  The bank invariant holds: if two concurrent transfers
+touch disjoint accounts, both commit; if they touch the same account, one
+aborts and retries.  The queue layer adds no new correctness obligations
+beyond ensuring that each worker calls \texttt{tm\_init\_thread()} before
+its first transaction and \texttt{tm\_exit\_thread()} at shutdown.
+
+\paragraph{The global registration problem.}
+Static TM-annotated globals (e.g.\ \texttt{static TM int counter}) live in
+the BSS segment, not in the TM region allocated by \texttt{tm\_malloc}.
+The \texttt{LLVM\_TM\_ADDR\_CHECK} macro would normally bypass them.  The
+companion solves this with \texttt{tm\_register\_global()}, which the
+instrumentation pass calls during \texttt{main()} for every TM-annotated
+global.  Registered globals are tracked in a global vector and exempted from
+the bypass, ensuring that queue worker threads see consistent values.
+
 \section{Summary}
 \begin{itemize}
     \item Persistent TM adds a crash invariant to the ordinary money-conservation invariant; the durable worked example shows the minimum journal needed.

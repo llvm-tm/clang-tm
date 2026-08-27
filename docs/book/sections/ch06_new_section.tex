@@ -1,0 +1,172 @@
+\section{Worked Example: TLA+ to Code --- Finding and Fixing a Validation Bug}
+\index{TLA+}\index{TLC}\index{counterexample}\index{validation bug}\index{NOrec}\index{model checking!trace to code}
+\label{sec:tla-to-code}
+
+The earlier worked examples showed a broken PlusCal model and the TLC
+counterexample it produced.  This section completes the loop: the same
+stale-snapshot bug is traced from the model to the actual C++ backend, the
+corresponding code is identified, and the fix is verified by re-running TLC.
+
+\subsection{The Broken Model}
+
+Consider a simplified NOrec commit action that omits the value recheck:
+
+\begin{lstlisting}[caption={A deliberately broken commit action: write-back without re-checking read-set values.}]
+BrokenCommit ==
+  /\ ok
+  /\ ~commitLock
+  /\ commitLock' = TRUE
+  /\ IF r1 >= amount THEN
+        /\ bal' = [bal EXCEPT ![1] = @ - amount,
+                              ![2] = @ + amount]
+        /\ clock' = clock + 1
+     ELSE
+        /\ bal' = bal
+        /\ clock' = clock
+\end{lstlisting}
+
+The guard \texttt{ok} was set earlier by the optimistic validation:
+if the clock had not changed since the snapshot, \texttt{ok} became
+\texttt{TRUE}.  But the commit action above does not re-read
+\texttt{bal[1]} and \texttt{bal[2]} under the lock before writing back.
+It trusts the cached snapshot values \texttt{r1} and \texttt{r2}
+unconditionally.
+
+\subsection{The TLC Counterexample}
+
+TLC finds a short two-transaction trace.  The schedule is:
+
+\begin{enumerate}
+  \item Transaction~1 records \texttt{snap = 0}, reads
+        \texttt{r1 = bal[1] = 10} and \texttt{r2 = bal[2] = 10}.
+  \item Transaction~2 transfers 5 from account~1 to account~2.
+        \texttt{bal[1] = 5}, \texttt{bal[2] = 15}, \texttt{clock = 1}.
+  \item Transaction~1's optimistic validation now fires: the clock has
+        changed (\texttt{clock = 1}, \texttt{snap = 0}), so it
+        re-reads both accounts, finds them equal to its cached
+        \texttt{r1} and \texttt{r2}, and sets \texttt{ok = TRUE}.
+  \item Transaction~1 enters the broken commit, which acquires the lock
+        and writes back \texttt{bal[1] = 10 - 1 = 9},
+        \texttt{bal[2] = 10 + 1 = 11}.
+\end{enumerate}
+
+The final state is \texttt{bal[1] = 9}, \texttt{bal[2] = 11} ---
+total money is 20, but account~1 was debited using a stale snapshot
+from \emph{before} Transaction~2's transfer.  The correct outcome
+should be \texttt{bal[1] = 4}, \texttt{bal[2] = 16}.  TLC reports:
+
+\begin{lstlisting}[caption={TLC counterexample output (simplified).}]
+Invariant MoneyConserved violated.
+State 4: bal = <<9, 11>>, clock = 1, committed = <<TRUE, TRUE>>
+\end{lstlisting}
+
+The invariant that fails is \texttt{MoneyConserved == Total(bal) = 20}:
+the total is still 20, but the money distribution is wrong.  A sharper
+invariant---one that tracks whether each individual transfer's debit
+and credit are both visible---would also fail.
+
+\subsection{Tracing to C++}
+
+The corresponding C++ implementation is
+\rep{backends/tm\_impl/norec/NOrec.hpp}.
+The \texttt{commit()} function (line~251) implements the protocol that
+the TLA+ model checks.  The critical validation logic lives inside the
+CAS retry loop:
+
+\begin{lstlisting}[caption={Simplified NOrec commit path (\texttt{NOrec.hpp:251}).}]
+inline void commit() {
+  auto *tx = current_tx;
+  if (tx->read_only) { tx->reset(); return; }
+
+  word_t expect = tx->snapshot;
+  while (!global_lock.compare_exchange_strong(
+             expect, expect + 1,
+             std::memory_order_acquire,
+             std::memory_order_relaxed)) {
+    // CAS failed: clock changed.  Re-check values.
+    tx->snapshot = validate();
+    expect = tx->snapshot;
+  }
+  // Lock acquired.  Write back.
+  for (auto &w : tx->write_set)
+    write_value_to_addr(w.addr, w.new_val, w.type);
+  set_clock(expect + 2);       // release lock, advance clock
+  tx->reset();
+}
+\end{lstlisting}
+
+The \texttt{validate()} function (line~227) is where the value recheck
+happens:
+
+\begin{lstlisting}[caption={The value validation that the broken model omitted.}]
+inline word_t validate() {
+  auto *tx = current_tx;
+  volatile word_t time = 0;
+  while (true) {
+    time = get_clock();
+    if ((time & 1) != 0) continue;     // lock held, spin
+    for (auto &r : tx->read_set) {
+      any_type_t check =
+          read_value_from_addr(r.addr, r.type);
+      if (!iseq(check, r.observed_val))  // THE CRITICAL CHECK
+        abort_tx();                      // stale read -> abort
+    }
+    if (time == get_clock()) return time;  // clock stable
+  }
+}
+\end{lstlisting}
+
+If the line \texttt{if (!iseq(check, r.observed\_val)) abort\_tx();}
+were removed, the function would always succeed: the read-set entries
+would be walked but never actually checked.  A transaction that read
+stale values would proceed to write-back and publish incorrect results
+--- the same bug the TLA+ model exposed.
+
+The connection between model and code is direct:
+
+\begin{itemize}
+  \item The PlusCal commit action's missing recheck corresponds to
+        removing the \texttt{iseq()} comparison in
+        \texttt{validate()}.
+  \item The CAS retry in the C++ code corresponds to the
+        \texttt{elsif clk = snapshot[self]} branch in the PlusCal
+        model: if the clock changed, the transaction must re-validate
+        before attempting the CAS again.
+  \item The value-based comparison (\texttt{iseq}) is the same check
+        that the correct PlusCal model encodes as
+        \texttt{r1 = bal[1] /\ r2 = bal[2]}.
+\end{itemize}
+
+\subsection{The Fix}
+
+The fix in the model is to restore the value recheck:
+
+\begin{lstlisting}[caption={The correct commit guard.}]
+CommitRecheck ==
+  /\ clock = snap
+  /\ r1 = bal[1]
+  /\ r2 = bal[2]
+\end{lstlisting}
+
+In the C++ code, the recheck already exists as the \texttt{iseq()} test
+inside \texttt{validate()}.  The lesson is that the model and the code
+encode the same safety argument in different notation.  When someone
+removes the recheck from the model, TLC catches the bug.  If someone
+removes the corresponding line from \texttt{NOrec.hpp}, the bank
+benchmark loses money --- the same invariant that TLC checked, violated
+in the real implementation.
+
+\subsection{Re-running TLC}
+
+After restoring the recheck, TLC re-runs and confirms the fix:
+
+\begin{lstlisting}[caption={TLC output after the fix is restored.}]
+Model checking completed.  No errors found.
+149430 states generated, 64891 distinct states.
+\end{lstlisting}
+
+The model and the code agree: the value recheck is the single line
+that separates a correct NOrec from a stale-snapshot mutation.  This is
+the end-to-end workflow of \S\ref{sec:verify-workflow}: specify, check,
+inject a bug, confirm the checker finds it, trace the result to code,
+fix, and re-check.

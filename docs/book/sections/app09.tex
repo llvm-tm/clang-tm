@@ -1,0 +1,401 @@
+\chapter{Repository Walkthrough}
+\label{chap:repo-walkthrough}
+\index{repository walkthrough}\index{hook system}\index{explicit TM API}
+
+This appendix is a guided tour of the companion repository.  Every
+\emph{[implementation]} exercise in the book refers to at least one
+directory listed here; this chapter maps those references to concrete
+paths and explains the role of each component.  Read this appendix before
+starting Part~IV or Part~V exercises.
+
+\section{Repository Structure}
+\label{sec:repo-structure}
+\index{repository!directory layout}
+
+The top-level layout of the repository:
+
+\begin{verbatim}
+clang-tm/
++-- backends/tm_impl/        # TM backend implementations (C++)
+|   +-- common/              # hook system, region allocator, macros
+|   +-- tiny_stm/            # TinySTM WBCTL/WT/WBETL
+|   +-- norec/               # NOrec + NOrec-BF
+|   +-- tl2/                 # TL2 + TSC-TM
+|   +-- romulus/             # version-table OCC
+|   +-- leftright/           # global-clock OCC
+|   +-- xtm/                 # page-private copy
+|   +-- single_global_lock/  # SGL baseline
+|   +-- tsx_sgl/             # Intel TSX + SGL fallback
+|   +-- spht/                # group-commit persistent HTM
+|   +-- calvin/              # deterministic two-phase OCC
+|   +-- mvlog/               # multi-version commit-log STM
+|   +-- jvstm/               # multi-version OCC (VBox)
+|   +-- norec_bf/            # NOrec + Bloom-filter read set
+|   +-- tikv/                # distributed TiKV 2PC
+|   +-- queue/               # async queue runtime
+|   +-- tm_region_allocator/ # mmap region + deferred frees
+|   +-- ...                  # 20+ backends total
++-- explicit_api/cpp/        # C++ explicit TM API (TM<T>)
++-- explicit_api/rust/       # Rust workspace (backends + executor)
++-- benchmarks/cpp/          # bank, fuzz-counter, fuzz-bank, STAMP
++-- benchmarks/rust/         # Rust benchmark ports
++-- benchmarks/plugin/       # plugin-instrumented benchmarks
++-- gpu/                     # GPU backends (PR-STM, CSMV, GUST, GPUTX)
++-- tests/                   # test_tx, test_ds, fuzz, plugin tests
++-- plugin/                  # LLVM instrumentation pass + clang-tm driver
++-- docs/proofs/             # TLA+/PlusCal models for all backends
++-- docs/book/               # this book's LaTeX source
++-- simulator/               # discrete-event TM simulator
++-- patches/                 # debug patches, TSX profiling patches
++-- tools/                   # stm_bug_tool, profiling, debug patches
+\end{verbatim}
+
+Each directory under \rep{backends/tm\_impl/} contains one or more
+backend implementations.  The \emph{common} subdirectory
+(\rep{backends/tm\_impl/common/}) is the central hub: it defines the
+hook system that connects benchmarks to backends, the region allocator
+that provides the TM address space, and the address-classification macros
+used by the LLVM pass.  Individual backends do \emph{not} contain
+the hook definitions; they only register their implementations at
+\texttt{tm\_init()} time.
+
+The \rep{explicit\_api/} tree holds the typed C++ and Rust API layers
+that wrap the raw hook function pointers.  The \rep{plugin/} tree
+contains the LLVM pass that instruments source code and the
+\texttt{clang-tm} driver script.  The \rep{docs/proofs/} directory
+holds the TLA+ models verified by TLC (see \S\ref{sec:repo-tla}).
+
+\section{The Hook System}
+\label{sec:repo-hooks}
+\index{hook system}\index{TMRealHooks}\index{tm\_register\_real\_hooks}
+
+The hook system is the central dispatch mechanism that connects
+benchmarks to backends.  It lives entirely in
+\rep{backends/tm\_impl/common/}---not inside individual backends.
+
+\subsection{Architecture}
+
+The system has three layers:
+
+\begin{enumerate}
+    \item \textbf{Global function-pointer variables} (DATA symbols)
+          declared in \rep{backends/tm\_impl/common/tm\_hooks.hpp}.  Each
+          TM operation (\texttt{tm\_begin}, \texttt{tm\_end}, seven reads,
+          seven writes, \texttt{tm\_malloc}, \texttt{tm\_calloc}, and
+          several more) is a \texttt{void (*tm\_op)(...)} variable.
+    \item \textbf{Stub defaults} defined in
+          \rep{backends/tm\_impl/common/tm\_hooks.cpp}.  At program start,
+          every pointer points to a stub that performs plain memory access
+          with zero TM overhead.
+    \item \textbf{Backend registration}: each backend's
+          \texttt{***\_runtime.cpp} populates a \texttt{TMRealHooks}
+          struct and calls \texttt{tm\_register\_real\_hooks()} to replace
+          the stubs with real implementations.
+\end{enumerate}
+
+\subsection{The Registration Pattern}
+
+Every backend follows the same pattern.  The NOrec runtime
+(\rep{backends/tm\_impl/norec/NOrec\_runtime.cpp}) is representative:
+
+\begin{lstlisting}[language=C++, caption={Hook registration in the NOrec backend (abridged).}]
+// 1. Static implementations of each hook
+static void real_tm_begin() {
+    if (tm_longjmp_ret == 0) {
+        tm_clear_spec_allocs();
+        tm_clear_deferred_frees();
+        g_in_tx = true;
+        norec::begin();
+    }
+}
+// ... real_tm_end, real_tm_read_i4, etc.
+
+// 2. Registration table (designated initializers)
+const TMRealHooks g_norec_hooks = {
+    .begin    = real_tm_begin,
+    .end      = real_tm_end,
+    .malloc   = real_tm_malloc,
+    .calloc   = real_tm_calloc,
+    .read_i4  = real_tm_read_i4,
+    .write_i4 = real_tm_write_i4,
+    // ... all 24 fields
+};
+
+// 3. Called from tm_init()
+void tm_init() {
+    norec::init();
+    tm_register_real_hooks(&g_norec_hooks);
+}
+\end{lstlisting}
+
+The \texttt{TMRealHooks} struct (\rep{backends/tm\_impl/common/tm\_hooks.hpp:117})
+has 24 function-pointer fields covering lifecycle, memory, reads, writes,
+and thread-state queries.  Calling \texttt{tm\_register\_real\_hooks}
+(\rep{backends/tm\_impl/common/tm\_hooks.cpp:215}) copies the struct
+into a module-static \texttt{s\_real\_hooks} variable and calls
+\texttt{apply\_hooks\_unlocked()}, which writes each function pointer
+into the global DATA variables.
+
+\subsection{Why DATA, Not TEXT}
+
+The LLVM instrumentation pass emits indirect calls through the global
+function pointers: \texttt{call *(\%rax)} where \texttt{\%rax} was loaded
+from \texttt{tm\_read\_i4}.  Because the pointer is a DATA symbol, the
+linker resolves it to the variable's address; the generated code loads
+the function address from that variable at call time.  This is why
+\texttt{tm\_begin} must be a function \emph{pointer} (DATA), not a
+function \emph{declaration} (TEXT).  If it were TEXT, the pass would emit
+a direct call to the function's machine code, which on some platforms
+collides with the DATA symbol of the same name---see
+Appendix~\ref{chap:rust-mistakes} Exercise~3 for the concrete failure.
+
+\subsection{Runtime Backend Swapping}
+
+Because every TM operation dispatches through a global pointer,
+\texttt{tm\_swap\_runtime()} (\rep{backends/tm\_impl/common/tm\_hooks.cpp:252})
+can replace all hooks atomically under a mutex.  This enables
+phase-based TM: run with NOrec, then swap to TinySTM mid-execution, with
+all subsequent TM calls going through the new backend.  Benchmarks call
+the function pointers---they never call backend functions directly.
+
+\section{The Explicit API}
+\label{sec:repo-explicit-api}
+\index{explicit TM API}\index{TM<T>}
+
+The C++ explicit API wraps the raw hook function pointers in a typed
+class.  The header is
+\rep{explicit\_api/cpp/expli\_tm\_api/tm\_api.hpp}.
+
+\subsection{The TM<T> Class}
+
+\begin{lstlisting}[language=C++, caption={\texttt{TM<T>} -- the transactional memory handle.}]
+template<typename T>
+class TM {
+    T *value_ = nullptr;  // allocated via tm_malloc
+
+    T* ptr() {
+        if (!value_)
+            value_ = (T*)tm_malloc(sizeof(T));
+        return value_;
+    }
+public:
+    // ... lifecycle, read, write
+    T read() const {
+        return tm_type_traits<T>::read(const_cast<T*>(ptr()));
+    }
+    void write(const T &v) {
+        tm_type_traits<T>::write(ptr(), v);
+    }
+};
+\end{lstlisting}
+
+\texttt{TM<T>} is a typed handle.  The value lives in the TM address
+space (allocated via \texttt{tm\_malloc}).  The
+\texttt{tm\_type\_traits<T>} template dispatches \texttt{read()} and
+\texttt{write()} to the correct typed hook---\texttt{tm\_read\_i4} for
+\texttt{int32\_t}, \texttt{tm\_read\_i8} for \texttt{int64\_t}, and so
+on.  This indirection is the instrumentation point: the LLVM pass
+identifies these calls and routes them through the backend's
+read-set/write-set tracking.
+
+\subsection{The Retry Loop}
+
+\texttt{TM<T>::transaction(body)} (\rep{explicit\_api/cpp/expli\_tm\_api/tm\_api.hpp:144})
+wraps the body in a \texttt{sigsetjmp}/\texttt{siglongjmp} retry loop:
+
+\begin{lstlisting}[language=C++, caption={Safe retry loop in \texttt{TM<T>::transaction}.}]
+template<typename F>
+static void transaction(F&& body) {
+    volatile bool done = false;
+    while (!done) {
+        sigsetjmp(tm_jmpbuf, 0);
+        tm_nested_call_counter = 1;
+        tm_set_jmpbuf(&tm_jmpbuf);
+        tm_begin();
+        body();
+        tm_end();
+        done = true;
+    }
+    tm_nested_call_counter = 0;
+}
+\end{lstlisting}
+
+The \texttt{sigsetjmp} call lives in the same frame as the retry loop, so
+the \texttt{jmp\_buf} is always valid when \texttt{tm\_end} triggers an
+abort via \texttt{siglongjmp}.  This eliminates the undefined behavior of
+older designs where the \texttt{jmp\_buf} resided in a function that had
+already returned (\S\ref{sec:tls-retry-buffer-example}).
+
+\section{Benchmark Entry Points}
+\label{sec:repo-benchmarks}
+\index{benchmarks}\index{bank benchmark}\index{fuzz benchmark}
+
+The bank benchmark (\rep{benchmarks/cpp/bank/bank.cpp}) demonstrates the
+explicit API style:
+
+\begin{lstlisting}[language=C++, caption={Bank transfer and worker thread (abridged).}]
+void transfer(int src, int dst, int amount) {
+    run_tx([&]() {
+        int bal = g_bank->accounts[src].balance.read();
+        bal -= amount;
+        g_bank->accounts[src].balance.write(bal);
+
+        bal = g_bank->accounts[dst].balance.read();
+        bal += amount;
+        g_bank->accounts[dst].balance.write(bal);
+    });
+}
+
+void worker_thread(ThreadData &data) {
+    expli::TM<int>::thread_init();
+    // ... setup ...
+    while (!g_stop.load()) {
+        transfer(src, dst, 1);
+    }
+    expli::TM<int>::thread_exit();
+}
+\end{lstlisting}
+
+The \texttt{transfer} function reads two balances, debits the source, and
+credits the destination, all inside one transaction.  The
+\texttt{total\_transactional()} function sums every balance inside a TX;
+\texttt{total\_non\_transactional()} reads without TM (safe only after all
+threads join).  The \texttt{worker\_thread} function shows the per-thread
+lifecycle: \texttt{thread\_init} before the loop, \texttt{thread\_exit}
+after.
+
+The fuzz benchmarks (\rep{benchmarks/cpp/fuzz\_counter/},
+\rep{benchmarks/cpp/fuzz\_bank/}) use the raw hook API with explicit
+\texttt{tm\_begin}/\texttt{tm\_end} and a manual retry loop, showing the
+alternative style without the \texttt{TM<T>} wrapper.
+
+\section{Queue and Async Execution}
+\label{sec:repo-queue}
+\index{queue runtime}\index{async execution}
+
+The queue runtime (\rep{backends/tm\_impl/queue/queue\_runtime.h}) provides
+asynchronous transaction execution via a thread pool:
+
+\begin{itemize}
+    \item \texttt{tm\_enqueue(fn, args)} --- DATA function pointer that
+          submits a transaction body for background execution.
+    \item \texttt{tm\_wait\_prev\_tx()} --- block until all pending
+          transactions submitted by the calling thread complete.
+    \item \texttt{tm\_queue\_init(workers, queues)} --- start the thread
+          pool with the given worker and queue counts.
+\end{itemize}
+
+The Rust workspace provides an equivalent executor at
+\rep{explicit\_api/rust/workspace/tm-executor/src/lib.rs}:
+
+\begin{itemize}
+    \item \texttt{TxExecutor} trait with \texttt{execute()} and
+          \texttt{execute\_async()} methods.
+    \item \texttt{InlineExecutor} runs transactions on the calling thread.
+    \item \texttt{QueueExecutor} dispatches to a worker pool.
+    \item \texttt{spec\_alloc()} / \texttt{spec\_free()} for fast
+          per-thread allocation inside TX bodies.
+\end{itemize}
+
+\section{TLA+ Model Checking}
+\label{sec:repo-tla}
+\index{TLA+}\index{model checking}\index{PlusCal}
+
+Every backend has a corresponding TLA+ model in
+\rep{docs/proofs/}.  The key models:
+
+\begin{itemize}
+    \item \textbf{Volatile backends:} \rep{NOrec.tla}, \rep{SGL.tla},
+          \rep{TL2.tla}, \rep{TinySTM\_WBCTL.tla},
+          \rep{Leftright.tla}, \rep{Romulus.tla}, \rep{XTM.tla},
+          \rep{SwissTM.tla}, \rep{JVSTM.tla}, \rep{MVLog.tla},
+          \rep{TSC\_TM.tla}
+    \item \textbf{Persistent backends:} \rep{PersistentSGL.tla},
+          \rep{DUDETM.tla}, \rep{SPHT.tla}, \rep{NVHTM.tla}
+    \item \textbf{Distributed backends:} \rep{DistributedSGL.tla},
+          \rep{TiKV.tla}
+    \item \textbf{GPU and deterministic:} \rep{GPU\_GUST.tla},
+          \rep{GPU\_JVSTM.tla}, \rep{Calvin.tla}
+    \item \textbf{Simulator:} \rep{SimEngine.tla}, \rep{TSXSim.tla}
+\end{itemize}
+
+Verify a single backend:
+
+\begin{verbatim}
+make -C docs/proofs check-one BACKEND=NOrec
+\end{verbatim}
+
+Verify all backends and liveness properties:
+
+\begin{verbatim}
+make -C docs/proofs check              # safety (all backends)
+make -C docs/proofs verify-liveness    # fairness-based liveness
+\end{verbatim}
+
+Table~6.1 in Chapter~6 gives the full traceability table linking each
+TLA+ model to its C++ implementation, state-space size, and invariant
+count.
+
+\section{Debugging and Profiling Tools}
+\label{sec:repo-tools}
+\index{debugging tools}\index{profiling}
+
+\begin{itemize}
+    \item \textbf{Event parser and invariant checker}
+          (\rep{tools/stm\_bug\_tool/}): parses TM execution traces and
+          checks invariants (money conservation, floor safety) offline.
+          Use after a fuzz run finds a failing seed.
+    \item \textbf{Debug printf patches}
+          (\rep{patches/debug/}): on-demand instrumentation that adds
+          \texttt{fprintf} statements to backend internals.  Apply with
+          \rep{patches/debug/apply.sh}, revert with
+          \rep{patches/debug/revert.sh}.  Useful for tracing read-set
+          / write-set sizes, commit decisions, or allocator state during
+          active debugging.
+    \item \textbf{TSX timing instrumentation}
+          (\rep{patches/profile/tsx/}): RDTSC-based profiling of
+          \texttt{xbegin}, \texttt{xend}, read/write cycles, and abort
+          reason breakdowns.  The \texttt{run\_workflow.sh} script applies
+          the patch, builds, runs experiments, and reverts.
+    \item \textbf{Discrete-event simulator}
+          (\rep{simulator/}): replays instrumented traces through a
+          simulated backend with cost-mode timing.  Use \texttt{tm-sim}
+          with \texttt{--machine-profile} and \texttt{--clock-mode cost}
+          to estimate throughput without hardware.
+\end{itemize}
+
+\section{Exercises}
+\label{sec:repo-exercises}
+
+\begin{enumerate}
+    \item \emph{[implementation]} Build and run the bank benchmark with
+          the NOrec backend, then swap to TinySTM at runtime using
+          \texttt{tm\_swap\_runtime()}.  Verify money conservation across
+          both phases.  The swap test at
+          \rep{tests/expli-api/test\_swap\_backends.cpp} demonstrates the
+          pattern with two backends linked in a single binary.
+
+    \item \emph{[verification]} Pick any backend from the traceability
+          table (Table~6.1), read its PlusCal model in
+          \rep{docs/proofs/}, and identify which state variable corresponds
+          to which C++ field.  For example, in the NOrec model
+          (\rep{NOrec.tla}), the variable \texttt{clock} corresponds to
+          the global \texttt{norec::clock} in
+          \rep{backends/tm\_impl/norec/NOrec\_globals.hpp}.
+
+    \item \emph{[theory]} Explain why the hook system uses DATA function
+          pointers instead of TEXT function calls.  What would break if
+          \texttt{tm\_begin} were a regular \texttt{void tm\_begin(void)}
+          function?  (Hint: consider the LLVM pass's code generation
+          strategy and the linker's symbol resolution, as discussed in
+          \S\ref{sec:repo-hooks}.)
+\end{enumerate}
+
+\index{repository walkthrough|)}
+\index{hook system|)}
+\index{explicit TM API|)}
+\index{TMRealHooks|)}
+\index{tm\_register\_real\_hooks|)}
+\index{queue runtime|)}
+\index{TLA+|)}
+\index{model checking|)}

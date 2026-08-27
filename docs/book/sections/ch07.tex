@@ -279,6 +279,106 @@ The central trade-off is granularity. Per-object locking and validation are simp
 
 Polymorphism adds another cost. Virtual dispatch inside a transaction can obscure which memory locations are touched. If a virtual method performs non-transactional I/O, the runtime cannot roll it back. A good object-oriented API therefore needs a visible distinction between transactional methods, irrevocable methods, and methods forbidden inside a transaction.
 
+\section{The Hook System: Connecting Backends to Benchmarks}
+\index{hook system}\index{function pointer dispatch}\index{TMRealHooks}\index{backend registration}
+\label{sec:hook-system}
+
+Every API style in the preceding sections ultimately calls the same set of
+C functions: \texttt{tm\_begin}, \texttt{tm\_end}, \texttt{tm\_read\_i4},
+\texttt{tm\_write\_i4}, and so on.  In the companion codebase these are not
+ordinary functions but \emph{DATA function-pointer variables}---their addresses
+are taken and called through, not called directly.  This indirection is the
+hook system: a single dispatch layer that connects any benchmark to any backend
+without recompilation.
+
+\paragraph{The hook table.}
+The file \rep{backends/tm\_impl/common/tm\_hooks.hpp} declares a struct
+containing one function pointer per TM operation:
+
+\begin{lstlisting}[caption={The TMRealHooks struct (\texttt{tm\_hooks.hpp}).}]
+struct TMRealHooks {
+    void  (*tm_begin)(void);
+    void  (*tm_end)(void);
+    void  (*tm_init)(void);
+    void  (*tm_exit)(void);
+    void  (*tm_init_thread)(void);
+    void  (*tm_exit_thread)(void);
+    void* (*tm_malloc)(size_t);
+    void* (*tm_calloc)(size_t, size_t);
+    void  (*tm_read_i4)(const void*);
+    void  (*tm_write_i4)(void*, int);
+    void  (*tm_read_u8)(const void*);
+    void  (*tm_write_u8)(void*, uint64_t);
+    void  (*tm_read_f4)(const void*);
+    void  (*tm_write_f4)(void*, float);
+    void  (*tm_read_f8)(void*);
+    void  (*tm_write_f8)(void*, double);
+    void  (*tm_trace)(int, void*, size_t);
+    void* (*tm_get_thread_state)(void);
+    /* ... additional typed read/write pairs ... */
+};
+\end{lstlisting}
+
+\noindent
+The global variables \texttt{tm\_begin}, \texttt{tm\_end},
+\texttt{tm\_read\_i4}, etc.\ (lowercase, matching the classic API names)
+are initialized to stubs that do nothing or return zero.  When a backend
+registers, these stubs are replaced with real implementations.
+
+\paragraph{Backend registration.}
+Each backend's \texttt{*\_runtime.cpp} file calls
+\texttt{tm\_register\_real\_hooks()} at startup.  The NOrec runtime
+(\rep{backends/tm\_impl/norec/NOrec\_runtime.cpp}) is a representative
+example:
+
+\begin{lstlisting}[caption={NOrec hook registration (\texttt{NOrec\_runtime.cpp}).}]
+static TMRealHooks hooks;
+hooks.tm_begin  = norec_begin;
+hooks.tm_end    = norec_end;
+hooks.tm_read_i4  = norec_read_i4;
+hooks.tm_write_i4 = norec_write_i4;
+hooks.tm_malloc = norec_malloc;
+hooks.tm_init   = norec_init;
+hooks.tm_exit   = norec_exit;
+/* ... all fields filled ... */
+tm_register_real_hooks(&hooks);
+\end{lstlisting}
+
+\noindent
+After this call, every subsequent \texttt{tm\_read\_i4(addr)} in the
+benchmark resolves through the global function pointer to
+\texttt{norec\_read\_i4(addr)}.  The benchmark never includes
+\texttt{NOrec.hpp}; it links against the runtime object file, and the
+dispatch happens at the function-pointer level.
+
+\paragraph{Runtime swap.}
+Because the dispatch is through DATA variables, the backend can be swapped at
+runtime: \texttt{tm\_swap\_runtime()} saves the current hooks, installs a
+different backend's hooks, and the next \texttt{tm\_begin()} call enters the
+new algorithm.  The function \texttt{tm\_get\_real\_hooks()} retrieves the
+currently registered hooks for inspection or save/restore.
+
+\paragraph{The dispatch path.}
+A typical read goes through three levels:
+
+\begin{enumerate}
+  \item The benchmark calls \texttt{tm\_read\_i4(\&x)} (a DATA function
+        pointer).
+  \item The pointer resolves to \texttt{norec\_read\_i4} (or TinySTM,
+        TL2, etc.), which checks whether the address is in the TM region
+        and either tracks it in the read-set or passes through to a
+        direct load.
+  \item If the address is not in the TM region (e.g.\ stack-local), the
+        \texttt{LLVM\_TM\_ADDR\_CHECK} macro bypasses the backend
+        entirely and performs a plain load.
+\end{enumerate}
+
+\noindent
+This design means the same benchmark binary can link against different
+backends by swapping the runtime object file, or even swap backends at
+runtime via \texttt{tm\_swap\_runtime()}.  The hook system is the
+\emph{only} coupling between benchmarks and backends.
+
 \section{Summary}
 
 API design directly affects usability, safety, and performance. The classic synchronous API is small, portable, and close to the runtime, but it relies on programmers or wrappers to place boundaries and instrument accesses correctly. Language keywords shift responsibility to the compiler, reducing common mistakes at the cost of toolchain complexity. Lambda and object wrappers improve structure while preserving a conventional backend ABI, but they cannot make ordinary side effects transactional. Future-based interfaces turn transactions into scheduled work, opening the door to batching and executor-level policies while introducing lifetime and replay hazards.
