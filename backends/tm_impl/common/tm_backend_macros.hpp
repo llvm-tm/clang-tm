@@ -127,7 +127,7 @@
             tm_buffer[i] = ns::tm_read_i8(((uint64_t *)addr) + i); \
         uint64_t rem = len % 8; \
         for (uint64_t i = 0; i < rem; i++) \
-            tm_buffer[i] = ns::tm_read_i1(addr + (len - rem - 1) + i); \
+            tm_buffer[i] = ns::tm_read_i1(addr + (len - rem) + i); \
         return tm_buffer; \
     } \
     void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len) { \
