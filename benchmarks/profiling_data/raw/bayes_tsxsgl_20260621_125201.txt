@@ -1,3 +1,0 @@
-  Time: 0.045792 sec
-  PASS
-TSX_STATS: xbegin_ok=1260(53668) xbegin_abort=13644(11915242) xend=1260(219210) xabort=0(0) sgl_begin=2557(152697669) sgl_end=2557(8705182) sgl_spin=1921(58420444) read=454376(15437148) write=9527(564634) depth=1260(1626015) conflict=11670 capacity=37 explicit=1921 other=16

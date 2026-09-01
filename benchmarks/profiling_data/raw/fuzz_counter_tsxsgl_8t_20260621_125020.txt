@@ -1,2 +1,0 @@
-INVARIANT: counter sum: PASS (284732 == 284732)
-TSX_STATS: xbegin_ok=5482(190001) xbegin_abort=178513(118909871) xend=5482(849487) xabort=0(0) sgl_begin=34518(577133179) sgl_end=34518(153093139) sgl_spin=16477(11412558) read=40000(5586569) write=40000(7810584) depth=5482(3521498) conflict=161727 capacity=225 explicit=16477 other=84
