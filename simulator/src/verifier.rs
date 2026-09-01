@@ -123,7 +123,14 @@ impl Verifier {
     /// previous transaction was implicitly aborted (e.g. by C++ siglongjmp
     /// retry), it must call `tx_abort` before `tx_begin`.
     pub fn tx_begin(&mut self, tid: u64) {
-        *self.tx_depth.entry(tid).or_insert(0) += 1;
+        let depth = self.tx_depth.entry(tid).or_insert(0);
+        if *depth > 0 {
+            self.violations.push(format!(
+                "DOUBLE-TX-BEGIN tid={} (already in transaction, depth={})",
+                tid, *depth
+            ));
+        }
+        *depth += 1;
     }
 
     pub fn tx_commit(&mut self, tid: u64) {

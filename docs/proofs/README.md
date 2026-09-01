@@ -401,6 +401,26 @@ constant `Addr` set).  Removed the prior deferred-flush model (separate
 `durable_log` + flush phase) to match the C++ implementation's write
 semantics.
 
+**TSXSim (TSXSim.tla)** — The spec models a 6-bit bloom filter (2 hash
+functions); the real implementation uses a 4096-bit bloom filter (double-hash).
+Both share the same no-false-negatives property.  The spec's `ConflictFree`
+predicate checks both bloom filter AND write-set overlap; the real
+implementation does the same.  Capacity limits (`MAX_READ_LINES=3`,
+`MAX_WRITE_LINES=2`) are model-checking constants; the real implementation
+defaults to `TSX_SIM_MAX_READ_LINES=512`, `TSX_SIM_MAX_WRITE_LINES=128`.
+Virtual cycle costs are modeled as per-action token updates (not verified as
+invariants — they are simulation artifacts, not correctness properties).
+
+**TiKV (TiKV.tla)** — The spec models Percolator 2PC as three phases: Prewrite
+(acquire locks), CommitPrimary (single-key commit point), CommitSecondary
+(bulk write-back).  The real TiKV client (`tikv-client` 0.4) handles these
+phases internally via `begin_optimistic()` / `commit()`.  The spec's
+`snapshot` variable is a placeholder (TLC constant); the real TiKV uses a
+hybrid logical clock (HLC) for snapshot timestamps.  The `TxnConflict` action
+models TiKV's `TxnNotFound` error during reads (concurrent commit in
+progress), which the real backend handles by rolling back and signalling
+`TmxAbort`.
+
 ### Coverage
 
 - Fully verified (TLAPS): **SGL** (42/42 obligations).
