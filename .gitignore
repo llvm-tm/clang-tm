@@ -73,7 +73,6 @@ __pycache__/
 # Documents
 *.pdf
 *.log
-benchmark_results/
 
 # LaTeX artifacts (docs/book build outputs)
 docs/book/*.aux
