@@ -76,7 +76,7 @@ public:
 	void unlock(word_t tx_id)
 	{
 		// TINYSTM_ASSERT(is_locked() && get_owner() == tx_id, "Not the owner of the lock");
-		if (is_locked() && get_owner() == tx_id) { // TODO: should not happen!
+		if (is_locked() && get_owner() == tx_id) { // TODO.md: TinySTM lock owner re-check (P1)
 			state.fetch_and((~OWNED_MASK) & (~(THREAD_MASK << LOCK_BITS)),
 			                std::memory_order_release); // sets owned and tx_id bits to 0
 		}
@@ -168,7 +168,7 @@ public:
 	{
 		word_t current_state = state.load(std::memory_order_acquire);
 		word_t new_incarnation = ((current_state >> OWNED_BITS) & INCARNATION_MASK) + 1;
-		// TODO: does this work with wrap around?
+		// TODO.md: TinySTM clock wrap-around (P1)
 		word_t current_version = (current_state >> META_BITS);
 		word_t desired = (current_version << META_BITS) |
 		                 ((new_incarnation & INCARNATION_MASK) << OWNED_BITS);
@@ -352,8 +352,7 @@ extern std::atomic<uint64_t> g_tm_abort_count;
 // next read/write/validate/commit operation (see `proactive_stop` in
 // tinystm_{wbctl,wbetl,wt}.hpp).  Introduced in commit 0496686 as a
 // workaround for a worker-thread hang at >=2 threads, but masks the
-// underlying deadlock/contention bug.  TODO: remove the proactive_stop
-// aborts and fix the root cause.
+// underlying deadlock/contention bug.  TODO.md: proactive_stop cleanup (P0).
 extern std::atomic<bool> g_tm_stop_requested;
 extern thread_local bool rng_initialized;
 extern thread_local std::mt19937 rng;

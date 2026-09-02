@@ -12,7 +12,7 @@
 // the same centroid list in lockstep (warp-uniform control flow), so the
 // distance computation is cooperative and divergence-free.
 //
-// NOTE: this is a draft skeleton — algorithm choices marked with TODO
+// NOTE: this is a draft skeleton — algorithm choices marked (TODO.md: GPU benchmark stubs, P1).
 // are deliberately simplified for the batch-executor pattern.
 //
 // Reads of points/centroids for the *distance computation* use the raw

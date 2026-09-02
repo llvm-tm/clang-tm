@@ -188,7 +188,7 @@ inline void init()
 
 inline void exit()
 {
-	// TODO: free shared structures
+	// TODO.md: NOrec shared-structure cleanup (P1)
 }
 
 inline word_t get_clock() { return global_lock.load(std::memory_order_acquire); }
@@ -579,7 +579,7 @@ write_word_norec(    //
 	}
 #endif
 
-	tx->read_only = false; // TODO: shouldn't the TX abort?
+	tx->read_only = false; // TODO.md: NOrec read-only flag semantics (P1)
 
 	auto typeSize = [](ValueType t) -> unsigned {
 		switch (t) {

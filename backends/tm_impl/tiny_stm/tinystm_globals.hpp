@@ -20,9 +20,7 @@ std::atomic<tinystm::word_t> thr_counter{1};
 	thread_local sigjmp_buf *g_tx_exit_jmpbuf = nullptr;
 	// NOTE: proactive_stop aborts all in-flight transactions when stop is
 	// requested, masking the root cause of the TinySTM worker hang at >=2
-	// threads (commit 0496686). TODO: remove proactive_stop and fix the
-	// underlying issue (likely a deadlock or contention bug in the commit
-	// protocol / lock manager / contention manager).
+	// threads (commit 0496686).  TODO.md: proactive_stop cleanup (P0).
 	std::atomic<bool> g_tm_stop_requested{false};
 } // namespace tinystm
 #elif defined(DESIGN_WBCTL)
@@ -41,9 +39,7 @@ std::atomic<tinystm::word_t> thr_counter{1};
 	thread_local sigjmp_buf *g_tx_exit_jmpbuf = nullptr;
 	// NOTE: proactive_stop aborts all in-flight transactions when stop is
 	// requested, masking the root cause of the TinySTM worker hang at >=2
-	// threads (commit 0496686). TODO: remove proactive_stop and fix the
-	// underlying issue (likely a deadlock or contention bug in the commit
-	// protocol / lock manager / contention manager).
+	// threads (commit 0496686).  TODO.md: proactive_stop cleanup (P0).
 	std::atomic<bool> g_tm_stop_requested{false};
 } // namespace tinystm
 #elif defined(DESIGN_WT)
@@ -62,9 +58,7 @@ std::atomic<tinystm::word_t> thr_counter{1};
 	thread_local sigjmp_buf *g_tx_exit_jmpbuf = nullptr;
 	// NOTE: proactive_stop aborts all in-flight transactions when stop is
 	// requested, masking the root cause of the TinySTM worker hang at >=2
-	// threads (commit 0496686). TODO: remove proactive_stop and fix the
-	// underlying issue (likely a deadlock or contention bug in the commit
-	// protocol / lock manager / contention manager).
+	// threads (commit 0496686).  TODO.md: proactive_stop cleanup (P0).
 	std::atomic<bool> g_tm_stop_requested{false};
 }
 #else

@@ -317,11 +317,7 @@ static void testnloadnstore(size_t load_nb, size_t store_nb)
   printf("%12s %12lu %12.2f %12lu\n", "commit", (unsigned long)min, avg, (unsigned long)med);
 }
 
-/* TODO
- *  Add clock perturbation to avoid fast commit
- *  Add write after write / load after write measurements
- *  Add stm_malloc/stm_free measurements
- */
+/* TODO.md: old_code perf.c unfinished measurements (P2) */
 
 int main(int argc, char **argv)
 {

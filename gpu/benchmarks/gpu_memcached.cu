@@ -17,7 +17,7 @@
 // consistency (each stored value == its key+1).
 //
 // NOTE: draft skeleton — hash collision handling and multi-op txns are
-// simplified.  See TODO markers.
+// simplified.  See TODO.md: GPU benchmark stubs (P1).
 //
 // Usage:
 //   ./gpu_memcached [keys] [txns] [write_ratio_percent]
