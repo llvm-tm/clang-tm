@@ -124,3 +124,5 @@ states.*
 gem5_sim/gem5/
 gem5_sim/m5out/
 gem5_sim/gem5
+/m5out/
+/m5out.*
