@@ -4,8 +4,21 @@
 # Auto-detect C++ compiler: prefer clang++ (LLVM versioned or system default),
 # fall back to g++.
 CXX       := $(shell command -v clang++-22 2>/dev/null || command -v clang++-18 2>/dev/null || command -v clang++-17 2>/dev/null || command -v clang++-16 2>/dev/null || command -v clang++-15 2>/dev/null || command -v clang++-14 2>/dev/null || command -v clang++ 2>/dev/null || echo g++)
-CXXFLAGS  = -std=c++20 -O3 -march=x86-64 -pthread -DNDEBUG -static -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp
-LDFLAGS   = -static -pthread
+# Native microarchitecture flag: x86-64 on x86_64, armv8-a on arm64.
+HOST_ARCH := $(shell uname -m)
+ifeq ($(HOST_ARCH),arm64)
+  MARCH    = -march=armv8-a
+else
+  MARCH    = -march=x86-64
+endif
+# -static is unsupported by the macOS linker; only use it on Linux.
+ifeq ($(shell uname -s),Linux)
+  STATIC   = -static
+else
+  STATIC   =
+endif
+CXXFLAGS  = -std=c++20 -O3 $(MARCH) -pthread -DNDEBUG $(STATIC) -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp
+LDFLAGS   = $(STATIC) -pthread
 
 # --- Choose backend (default: TinySTM/WBCTL) --------------------
 BACKEND ?= TINYSTM
@@ -108,7 +121,7 @@ ifeq ($(BACKEND),CSMV_GPU)
   DEFS     = -DTM_BACKEND_CSMV_GPU -DCSMV_BATCH_GPU
   EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/csmv/include
   LDFLAGS  = -pthread -lcuda -lcudart
-  CXXFLAGS = -std=c++20 -O3 -march=x86-64 -pthread -DNDEBUG -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp
+  CXXFLAGS = -std=c++20 -O3 $(MARCH) -pthread -DNDEBUG -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp
 endif
 ifeq ($(BACKEND),POWER8HTM)
   RUNTIME  = ../../backends/tm_impl/power8_htm/POWER8HTM_runtime.cpp
@@ -166,12 +179,23 @@ BANK_BIN     = bin/bank
 # benchmark phase; see gem5_roi.hpp) and shrinks the TM mmap region to
 # 512 MiB for the simulated address space.  Run with -n <txns> for a
 # bounded deterministic workload inside the ROI.
+#
+# GEM5_CKPT=1 additionally emits gem5 work-item annotations
+# (m5_work_begin / m5_work_end) around the ROI so gem5 can take a
+# checkpoint at the ROI start and a restore-phase run can resume there
+# (see gem5_sim/configs/x86-se-bank-checkpoint.py / -restore.py).
 GEM5 ?= 0
+GEM5_CKPT ?= 0
 ifeq ($(GEM5),1)
   CXXFLAGS += -DGEM5_M5OPS -DTM_REGION_SIZE=536870912
-  # Per-backend output name so backend sweeps don't clobber each other
-  # (the build rule has no backend in its dependency list).
-  BANK_BIN := bin/bank_gem5_$(shell echo $(BACKEND) | tr 'A-Z' 'a-z')
+  ifeq ($(GEM5_CKPT),1)
+    CXXFLAGS += -DGEM5_CKPT
+    # Per-backend output name so backend sweeps don't clobber each other
+    # (the build rule has no backend in its dependency list).
+    BANK_BIN := bin/bank_gem5_ckpt_$(shell echo $(BACKEND) | tr 'A-Z' 'a-z')
+  else
+    BANK_BIN := bin/bank_gem5_$(shell echo $(BACKEND) | tr 'A-Z' 'a-z')
+  endif
 endif
 FUZZ_CTR_SRC = fuzz-counter/fuzz_counter.cpp
 FUZZ_CTR_BIN = bin/fuzz_counter
