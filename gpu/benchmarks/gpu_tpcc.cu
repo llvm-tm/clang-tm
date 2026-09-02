@@ -25,7 +25,7 @@
 // four table cells.
 //
 // NOTE: draft skeleton — the HISTORY append and the c_data 200-char
-// field are elided for the word-granularity version list (see TODO).
+// field are elided for the word-granularity version list (TODO.md: GPU benchmark stubs, P1).
 //
 // Usage:
 //   ./gpu_tpcc [warehouses] [districts] [customers] [txns] [amount]

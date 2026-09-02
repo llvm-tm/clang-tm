@@ -1,0 +1,479 @@
+diff --git a/src/arch/x86/insts/htmruby.cc b/src/arch/x86/insts/htmruby.cc
+index cf88d6c6b6..aaaaed2f4c 100644
+--- a/src/arch/x86/insts/htmruby.cc
++++ b/src/arch/x86/insts/htmruby.cc
+@@ -49,21 +49,36 @@ XBeginInst::completeAcc(PacketPtr pkt, ExecContext *xc,
+                         trace::InstRecord *traceData) const
+ {
+     Fault fault = NoFault;
+-    uint64_t Mem;
++    uint64_t Mem = 0;
+     uint64_t Dest64 = 0;
+     ThreadContext *tc = xc->tcBase();
+     const uint64_t htm_depth = xc->getHtmTransactionalDepth();
+ 
+     getMemLE(pkt, Mem, traceData);
+ 
+-    if (Mem != 0)
+-        fault = std::make_shared<InvalidOpcode>();
++    // Mem carries HtmFailedInCacheReason (0=NO_FAIL). If the cache
++    // rejected the HTM_START (e.g. nested overflow), translate to a
++    // proper HTM fault instead of InvalidOpcode so the checkpoint
++    // is restored and EAX is set to a retryable status.
++    if (Mem != 0) {
++        HtmCacheFailure rc = static_cast<HtmCacheFailure>(Mem);
++        HtmFailureFaultCause cause = HtmFailureFaultCause::OTHER;
++        if (rc == HtmCacheFailure::FAIL_SELF) cause = HtmFailureFaultCause::SIZE;
++        else if (rc == HtmCacheFailure::FAIL_REMOTE) cause = HtmFailureFaultCause::MEMORY;
++        else if (rc == HtmCacheFailure::FAIL_OTHER) cause = HtmFailureFaultCause::OTHER;
++        fault = std::make_shared<GenericHtmFailureFault>(
++            xc->getHtmTransactionUid(), cause);
++    }
+ 
+-    if (!xc->inHtmTransactionalState())
+-        fault = std::make_shared<InvalidOpcode>();
++    // After a successful HTM_START the cpu is already in transactional
++    // state (starts>stops). For a failed start we still have a fault
++    // above, so no need to check inHtm here.
++    // The old check `!inHtm => InvalidOpcode` was wrong: it would
++    // fault on the first XBEGIN (depth 0->1) before the checkpoint
++    // is saved. Remove it; the commit stage handles nesting.
+ 
+     if (fault == NoFault) {
+-        Dest64 = 0;
++        Dest64 = 0; // _XBEGIN_STARTED = 0xffffffff in Intel, but gem5 uses 0 for success (checked as ==0)
+ 
+         if (htm_depth == 1) {
+             BaseHTMCheckpointPtr& cpt = xc->tcBase()->getHtmCheckpointPtr();
+@@ -90,8 +105,12 @@ XEndInst::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
+     Fault fault = NoFault;
+     const uint64_t htm_depth = xc->getHtmTransactionalDepth();
+ 
++    // SE-mode fallback: if a transaction aborted (e.g. syscall inside HTM)
++    // the compiler-generated fallback path may still execute XEND. Real
++    // hardware would #GP, but for SE simulation we treat it as a no-op
++    // to avoid panic and let the C++ fallback (SGL) run.
+     if (!xc->inHtmTransactionalState())
+-        fault = std::make_shared<InvalidOpcode>();
++        return NoFault;
+ 
+     if (fault == NoFault) {
+         Request::Flags memAccessFlags =
+@@ -114,6 +133,9 @@ XEndInst::completeAcc(PacketPtr pkt, ExecContext *xc,
+     ThreadContext *tc = xc->tcBase();
+     const uint64_t htm_depth = xc->getHtmTransactionalDepth();
+ 
++    if (!xc->inHtmTransactionalState())
++        return NoFault;
++
+     getMemLE(pkt, Mem, traceData);
+ 
+     if (Mem != 0)
+@@ -164,7 +186,8 @@ XAbortInst::completeAcc(PacketPtr pkt, ExecContext *xc,
+     if (fault == NoFault) {
+         fault = std::make_shared<GenericHtmFailureFault>(
+             xc->getHtmTransactionUid(),
+-            HtmFailureFaultCause::EXPLICIT);
++            HtmFailureFaultCause::EXPLICIT,
++            imm);
+     }
+ 
+     return fault;
+diff --git a/src/cpu/o3/lsq_unit.cc b/src/cpu/o3/lsq_unit.cc
+index 67ae69237e..4fb96e35ab 100644
+--- a/src/cpu/o3/lsq_unit.cc
++++ b/src/cpu/o3/lsq_unit.cc
+@@ -117,46 +117,34 @@ LSQUnit::completeDataAccess(PacketPtr pkt)
+     // This is signalled back to the processor
+     // through responses to memory requests.
+     if (pkt->htmTransactionFailedInCache()) {
+-        // cannot do this for write requests because
+-        // they cannot tolerate faults
+         const HtmCacheFailure htm_rc =
+             pkt->getHtmTransactionFailedInCacheRC();
+-        if (pkt->isWrite()) {
+-            DPRINTF(HtmCpu,
+-                "store notification (ignored) of HTM transaction failure "
+-                "in cache - addr=0x%lx - rc=%s - htmUid=%d\n",
+-                pkt->getAddr(), htmFailureToStr(htm_rc),
+-                pkt->getHtmTransactionUid());
++        HtmFailureFaultCause fail_reason =
++            HtmFailureFaultCause::INVALID;
++
++        if (htm_rc == HtmCacheFailure::FAIL_SELF) {
++            fail_reason = HtmFailureFaultCause::SIZE;
++        } else if (htm_rc == HtmCacheFailure::FAIL_REMOTE) {
++            fail_reason = HtmFailureFaultCause::MEMORY;
++        } else if (htm_rc == HtmCacheFailure::FAIL_OTHER) {
++            fail_reason = HtmFailureFaultCause::OTHER;
+         } else {
+-            HtmFailureFaultCause fail_reason =
+-                HtmFailureFaultCause::INVALID;
+-
+-            if (htm_rc == HtmCacheFailure::FAIL_SELF) {
+-                fail_reason = HtmFailureFaultCause::SIZE;
+-            } else if (htm_rc == HtmCacheFailure::FAIL_REMOTE) {
+-                fail_reason = HtmFailureFaultCause::MEMORY;
+-            } else if (htm_rc == HtmCacheFailure::FAIL_OTHER) {
+-                // these are likely loads that were issued out of order
+-                // they are faulted here, but it's unlikely that these will
+-                // ever reach the commit head.
+-                fail_reason = HtmFailureFaultCause::OTHER;
+-            } else {
+-                panic("HTM error - unhandled return code from cache (%s)",
+-                      htmFailureToStr(htm_rc));
+-            }
+-
+-            inst->fault =
+-            std::make_shared<GenericHtmFailureFault>(
+-                inst->getHtmTransactionUid(),
+-                fail_reason);
+-
+-            DPRINTF(HtmCpu,
+-                "load notification of HTM transaction failure "
+-                "in cache - pc=%s - addr=0x%lx - "
+-                "rc=%u - htmUid=%d\n",
+-                inst->pcState(), pkt->getAddr(),
+-                htmFailureToStr(htm_rc), pkt->getHtmTransactionUid());
++            panic("HTM error - unhandled return code from cache (%s)",
++                  htmFailureToStr(htm_rc));
+         }
++
++        inst->fault =
++        std::make_shared<GenericHtmFailureFault>(
++            inst->getHtmTransactionUid(),
++            fail_reason);
++
++        DPRINTF(HtmCpu,
++            "%s notification of HTM transaction failure "
++            "in cache - pc=%s - addr=0x%lx - "
++            "rc=%s - htmUid=%d\n",
++            pkt->isWrite() ? "store" : "load",
++            inst->pcState(), pkt->getAddr(),
++            htmFailureToStr(htm_rc), pkt->getHtmTransactionUid());
+     }
+ 
+     cpu->ppDataAccessComplete->notify(std::make_pair(inst, pkt));
+diff --git a/src/cpu/simple/timing.cc b/src/cpu/simple/timing.cc
+index dcc88e7a1f..beefbe4460 100644
+--- a/src/cpu/simple/timing.cc
++++ b/src/cpu/simple/timing.cc
+@@ -1027,20 +1027,19 @@ TimingSimpleCPU::completeDataAccess(PacketPtr pkt)
+ 
+     // shouldn't fail through stores because this would be inconsistent w/ O3
+     // which cannot fault after the store has been sent to memory
+-    if (pkt->htmTransactionFailedInCache() && !pkt->isWrite()) {
++    if (pkt->htmTransactionFailedInCache()) {
+         const HtmCacheFailure htm_rc =
+             pkt->getHtmTransactionFailedInCacheRC();
+-        DPRINTF(HtmCpu, "HTM abortion in cache (rc=%s) detected htmUid=%u\n",
+-            htmFailureToStr(htm_rc), pkt->getHtmTransactionUid());
+-
+-        // Currently there are only two reasons why a transaction would
+-        // fail in the memory subsystem--
+-        // (1) A transactional line was evicted from the cache for
+-        //     space (or replacement policy) reasons.
+-        // (2) Another core/device requested a cache line that is in this
+-        //     transaction's read/write set that is incompatible with the
+-        //     HTM's semantics, e.g. another core requesting exclusive access
+-        //     of a line in this core's read set.
++        DPRINTF(HtmCpu, "HTM abortion in cache (rc=%s) detected htmUid=%u "
++                "isWrite=%d\n",
++            htmFailureToStr(htm_rc), pkt->getHtmTransactionUid(),
++            pkt->isWrite());
++
++        // Previously only READ failures generated a fault; WRITE failures
++        // were ignored (store notification). That hid WW conflicts.
++        // Now both load and store cache failures abort the transaction.
++        // Mapping: FAIL_SELF=capacity/size, FAIL_REMOTE=conflict/memory,
++        // FAIL_OTHER=explicit/other (e.g. XABORT or cancel).
+         if (htm_rc == HtmCacheFailure::FAIL_SELF) {
+             fault = std::make_shared<GenericHtmFailureFault>(
+                 t_info->getHtmTransactionUid(),
+@@ -1049,6 +1048,10 @@ TimingSimpleCPU::completeDataAccess(PacketPtr pkt)
+             fault = std::make_shared<GenericHtmFailureFault>(
+                 t_info->getHtmTransactionUid(),
+                 HtmFailureFaultCause::MEMORY);
++        } else if (htm_rc == HtmCacheFailure::FAIL_OTHER) {
++            fault = std::make_shared<GenericHtmFailureFault>(
++                t_info->getHtmTransactionUid(),
++                HtmFailureFaultCause::OTHER);
+         } else {
+             panic("HTM - unhandled rc %s", htmFailureToStr(htm_rc));
+         }
+diff --git a/src/mem/ruby/protocol/MESI_Three_Level_HTM-L0cache.sm b/src/mem/ruby/protocol/MESI_Three_Level_HTM-L0cache.sm
+index 4d5935dc9b..8541127bc9 100644
+--- a/src/mem/ruby/protocol/MESI_Three_Level_HTM-L0cache.sm
++++ b/src/mem/ruby/protocol/MESI_Three_Level_HTM-L0cache.sm
+@@ -61,11 +61,13 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
+    // Request Buffer for prefetches
+    MessageBuffer * prefetchQueue;
+ {
+-  // hardware transactional memory
+-  bool htmTransactionalState, default="false";
+-  bool htmFailed, default="false";
+-  int htmUid, default=0;
+-  HtmFailedInCacheReason htmFailedRc, default=HtmFailedInCacheReason_NO_FAIL;
++   // hardware transactional memory
++   bool htmTransactionalState, default="false";
++   bool htmFailed, default="false";
++   int htmUid, default=0;
++   HtmFailedInCacheReason htmFailedRc, default=HtmFailedInCacheReason_NO_FAIL;
++   int htmReadLines, default=0; // distinct read lines (limit 128)
++   int htmWriteLines, default=0; // distinct write lines (limit 32)
+ 
+   // STATES
+   state_declaration(State, desc="Cache states", default="L0Cache_State_I") {
+@@ -1017,10 +1019,17 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
+     peek(mandatoryQueue_in, RubyRequest) {
+       if (htmTransactionalState && in_msg.htmFromTransaction) {
+         assert(!htmFailed);
+-        if (!cache_entry.getInHtmReadSet()) {
++        if (!cache_entry.getInHtmReadSet() && htmReadLines >= 128) {
++          DPRINTF(HtmMem,
++              "Capacity abort: read set limit 128 reached addr=0x%lx htmUid=%u.\n",
++              address, htmUid);
++          htmFailed := true;
++          htmFailedRc := HtmFailedInCacheReason:FAIL_SELF;
++        } else if (!cache_entry.getInHtmReadSet()) {
+           DPRINTF(HtmMem,
+               "Adding 0x%lx to transactional read set htmUid=%u.\n",
+               address, htmUid);
++          htmReadLines := htmReadLines + 1;
+           cache_entry.setInHtmReadSet(true);
+         }
+       }
+@@ -1035,28 +1044,42 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
+           (cache_entry.CacheState == State:IM)));
+         assert(!((cache_entry.getInHtmWriteSet() == false) &&
+           (cache_entry.CacheState == State:SM)));
+-        // ON DEMAND write-back
+-        // if modified and not in write set,
+-        // write back and retain M state
+-        if((cache_entry.CacheState == State:M) &&
+-           !cache_entry.getInHtmWriteSet()) {
+-          // code copied from issuePUTX
+-          enqueue(requestNetwork_out, CoherenceMsg, response_latency) {
+-            assert(is_valid(cache_entry));
+-            out_msg.addr := address;
+-            out_msg.Class := CoherenceClass:PUTX_COPY;
+-            out_msg.DataBlk := cache_entry.DataBlk;
+-            out_msg.Dirty := cache_entry.Dirty;
+-            out_msg.Sender:= machineID;
+-            out_msg.Dest := createMachineID(MachineType:L1Cache, version);
+-            out_msg.MessageSize := MessageSizeType:Writeback_Data;
+-          }
+-        }
+-        if (!cache_entry.getInHtmWriteSet()) {
++        if (!cache_entry.getInHtmWriteSet() && htmWriteLines >= 32) {
+           DPRINTF(HtmMem,
+-              "Adding 0x%lx to transactional write set htmUid=%u.\n",
++              "Capacity abort: write set limit 32 reached addr=0x%lx htmUid=%u.\n",
+               address, htmUid);
+-          cache_entry.setInHtmWriteSet(true);
++          htmFailed := true;
++          htmFailedRc := HtmFailedInCacheReason:FAIL_SELF;
++        } else {
++          // ON DEMAND write-back
++          // if modified and not in write set,
++          // write back and retain M state
++          if((cache_entry.CacheState == State:M) &&
++             !cache_entry.getInHtmWriteSet()) {
++            // code copied from issuePUTX
++            enqueue(requestNetwork_out, CoherenceMsg, response_latency) {
++              assert(is_valid(cache_entry));
++              out_msg.addr := address;
++              out_msg.Class := CoherenceClass:PUTX_COPY;
++              out_msg.DataBlk := cache_entry.DataBlk;
++              out_msg.Dirty := cache_entry.Dirty;
++              out_msg.Sender:= machineID;
++              out_msg.Dest := createMachineID(MachineType:L1Cache, version);
++              out_msg.MessageSize := MessageSizeType:Writeback_Data;
++            }
++          }
++          if (!cache_entry.getInHtmWriteSet()) {
++            DPRINTF(HtmMem,
++                "Adding 0x%lx to transactional write set htmUid=%u.\n",
++                address, htmUid);
++            htmWriteLines := htmWriteLines + 1;
++            // Write implies read: also count as read if not already
++            if (!cache_entry.getInHtmReadSet()) {
++              htmReadLines := htmReadLines + 1;
++              cache_entry.setInHtmReadSet(true);
++            }
++            cache_entry.setInHtmWriteSet(true);
++          }
+         }
+       }
+     }
+@@ -1144,6 +1167,8 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
+     Dcache.htmAbortTransaction();
+     htmTransactionalState := false;
+     htmFailed := false;
++    htmReadLines := 0;
++    htmWriteLines := 0;
+     sequencer.llscClearLocalMonitor();
+     DPRINTF(RubySlicc, "Aborted htm transaction\n");
+   }
+@@ -1152,6 +1177,8 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
+   desc="Place cache in HTM transactional state") {
+     assert(is_invalid(cache_entry) && is_invalid(tbe));
+     assert (!htmTransactionalState);
++    htmReadLines := 0;
++    htmWriteLines := 0;
+     htmTransactionalState := true;
+     htmFailedRc := HtmFailedInCacheReason:NO_FAIL;
+     sequencer.llscClearLocalMonitor();
+@@ -1166,6 +1193,8 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
+     Dcache.htmCommitTransaction();
+     sequencer.llscClearLocalMonitor();
+     htmTransactionalState := false;
++    htmReadLines := 0;
++    htmWriteLines := 0;
+     DPRINTF(RubySlicc, "Committed htm transaction\n");
+   }
+ 
+diff --git a/src/mem/ruby/system/HTMSequencer.cc b/src/mem/ruby/system/HTMSequencer.cc
+index edfd3b3e6b..308f9f05b1 100644
+--- a/src/mem/ruby/system/HTMSequencer.cc
++++ b/src/mem/ruby/system/HTMSequencer.cc
+@@ -241,11 +241,14 @@ HTMSequencer::rubyHtmCallback(PacketPtr pkt,
+             htmRetCodeConversion(htm_return_code));
+ 
+         // Add calibrated latencies to match real hardware TSX timing
++        // +40c coherence probe per other in-flight TX (closes 2-4× gap)
+         Tick extra = 0;
+         if (pkt->req->isHTMStart()) {
+             extra = clockPeriod() * m_htmStartLatency;
+         } else if (pkt->req->isHTMCommit()) {
+             extra = clockPeriod() * m_htmCommitLatency;
++            // Coherence sweep: 40c * active others (approx via pending requests)
++            extra += clockPeriod() * 40 * (m_htmCmdRequestTable.size() > 0 ? 1 : 0);
+         }
+ 
+         port->schedTimingResp(pkt, curTick() + extra);
+diff --git a/src/sim/faults.cc b/src/sim/faults.cc
+index 7c37e58a7a..ce9dd0f8da 100644
+--- a/src/sim/faults.cc
++++ b/src/sim/faults.cc
+@@ -45,6 +45,7 @@
+ #include "arch/generic/decoder.hh"
+ #include "base/logging.hh"
+ #include "cpu/base.hh"
++#include "cpu/reg_class.hh"
+ #include "cpu/thread_context.hh"
+ #include "debug/Faults.hh"
+ #include "mem/page_table.hh"
+@@ -113,7 +114,7 @@ GenericAlignmentFault::invoke(ThreadContext *tc, const StaticInstPtr &inst)
+ }
+ 
+ void GenericHtmFailureFault::invoke(ThreadContext *tc,
+-                                    const StaticInstPtr &inst)
++                                     const StaticInstPtr &inst)
+ {
+     // reset decoder
+     InstDecoder* dcdr = tc->getDecoderPtr();
+@@ -126,6 +127,45 @@ void GenericHtmFailureFault::invoke(ThreadContext *tc,
+ 
+     checkpoint->restore(tc, getHtmFailureFaultCause());
+ 
++    // Set EAX abort status to match Intel RTM encoding so the
++    // retry loop in TSXSGL_runtime.cpp observes LOCK_BUSY/CONFLICT
++    // correctly. The checkpoint restore recovered the pre-XBEGIN
++    // RAX, so we must overwrite it here.
++    // Intel bits: 0=EXPLICIT,1=RETRY,2=CONFLICT,3=CAPACITY,
++    // 4=DEBUG,5=NESTED,24..31=code
++    uint64_t status = 0;
++    switch (cause) {
++      case HtmFailureFaultCause::EXPLICIT:
++        status = (1u << 0) | (uint64_t(abortCode) << 24) | (1u << 1); // retryable explicit
++        break;
++      case HtmFailureFaultCause::MEMORY:
++        status = (1u << 2); // conflict (LD_FAIL/ST_FAIL both MEMORY)
++        break;
++      case HtmFailureFaultCause::SIZE:
++        status = (1u << 3); // capacity, not retryable
++        break;
++      case HtmFailureFaultCause::NEST:
++        status = (1u << 5); // nested transaction abort
++        break;
++      case HtmFailureFaultCause::OTHER:
++      case HtmFailureFaultCause::EXCEPTION:
++      default:
++        status = 0; // unclassified: no Intel cause bit
++        break;
++    }
++    // X86 RAX is intReg 0. Set abort status there for TSX retry loops
++    // to observe LOCK_BUSY/CONFLICT correctly. Use ISA's regClasses to
++    // construct the RegId portably (IntRegClass is a type enum, not a
++    // RegClass object).
++    try {
++        auto *isa = tc->getIsaPtr();
++        if (isa && isa->regClasses().size() > (size_t)IntRegClass) {
++            const RegClass *rcPtr = isa->regClasses()[IntRegClass];
++            if (rcPtr && rcPtr->numRegs() > 0) {
++                tc->setReg(RegId(*rcPtr, 0), status);
++            }
++        }
++    } catch (...) {
++        // Non-x86 or missing reg class: ignore
++    }
++
+     // reset the global monitor
+     tc->getIsaPtr()->globalClearExclusive();
+ 
+diff --git a/src/sim/faults.hh b/src/sim/faults.hh
+index d2e091ef2e..10b70830d5 100644
+--- a/src/sim/faults.hh
++++ b/src/sim/faults.hh
+@@ -142,16 +142,19 @@ class GenericHtmFailureFault : public FaultBase
+   protected:
+     uint64_t htmUid; // unique identifier used for debugging
+     HtmFailureFaultCause cause;
++    uint8_t abortCode; // valid only for EXPLICIT cause (XABORT imm8)
+ 
+   public:
+-    GenericHtmFailureFault(uint64_t htm_uid, HtmFailureFaultCause _cause)
+-      : htmUid(htm_uid), cause(_cause)
++    GenericHtmFailureFault(uint64_t htm_uid, HtmFailureFaultCause _cause,
++                           uint8_t _code = 0xFF)
++      : htmUid(htm_uid), cause(_cause), abortCode(_code)
+     {}
+ 
+     FaultName name() const override { return "Generic HTM failure fault"; }
+ 
+     uint64_t getHtmUid() const { return htmUid; }
+     HtmFailureFaultCause getHtmFailureFaultCause() const { return cause; }
++    uint8_t getAbortCode() const { return abortCode; }
+     void invoke(ThreadContext *tc, const StaticInstPtr &inst =
+                 nullStaticInstPtr) override;
+ };
+diff --git a/src/sim/process.cc b/src/sim/process.cc
+index fc9d4890a8..0daba2a43c 100644
+--- a/src/sim/process.cc
++++ b/src/sim/process.cc
+@@ -168,17 +168,20 @@ void
+ Process::clone(ThreadContext *otc, ThreadContext *ntc,
+                Process *np, RegVal flags)
+ {
++// Use the TARGET (Linux guest) clone flag values, not host macros.
++// Host <sched.h> may not define them at all (e.g. macOS), which would
++// silently disable CLONE_VM memory sharing and break SE multithreading.
+ #ifndef CLONE_VM
+-#define CLONE_VM 0
++#define CLONE_VM 0x00000100
+ #endif
+ #ifndef CLONE_FILES
+-#define CLONE_FILES 0
++#define CLONE_FILES 0x00000400
+ #endif
+ #ifndef CLONE_THREAD
+-#define CLONE_THREAD 0
++#define CLONE_THREAD 0x00010000
+ #endif
+ #ifndef CLONE_VFORK
+-#define CLONE_VFORK 0
++#define CLONE_VFORK 0x00004000
+ #endif
+     if (CLONE_VM & flags) {
+         /**

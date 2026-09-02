@@ -17,7 +17,7 @@ backend's API directly (currently CSMV via the batch executor).
 `gpu_ycsb.cu` is the reference implementation (validated design, see
 `REVIEW.md`). The other three are drafts: skeletons demonstrating the
 batch-executor + warp-cooperative pattern with simplified algorithms
-(TODO markers note simplifications).
+(tracked in `TODO.md` under "GPU benchmark stubs", P1).
 
 ## Build
 

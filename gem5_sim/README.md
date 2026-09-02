@@ -31,7 +31,7 @@ docker run --rm --platform linux/amd64 \
 - **Software STM cross-checks**: NOrec, TinySTM, TL2 run on the same simulated hardware
 
 All simulations use the calibrated `MESI_Three_Level_HTM` Ruby cache hierarchy
-with Broadwell-EP timing parameters (xbegin=60 cycles, xend=178 cycles).
+with Broadwell-EP timing parameters (xbegin=60 cycles, xend=178 cycles). `patches/030` fixes in-tree HTM bugs (WW `ST_FAIL` was ignored, 32-line capacity was 512, `RAX` abort code was never set, `CLONE_VM` broken on macOS SE) — run `./gem5_sim/setup.sh --build` to rebuild after pulling.
 
 ## Directory Layout
 

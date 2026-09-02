@@ -1,2 +1,0 @@
-Time taken for all is 0.178000 sec.
-TSX_STATS: xbegin_ok=29400(842462) xbegin_abort=376102(191397690) xend=29400(3656647) xabort=0(0) sgl_begin=70620(423346551) sgl_end=70620(179039349) sgl_spin=32812(17570382) read=309510(17622757) write=0(0) depth=29400(18056735) conflict=342988 capacity=233 explicit=32812 other=69

@@ -334,24 +334,19 @@ For workloads with larger working sets (cache misses), tune:
 
 ## Abort Handling (Multi-Threaded)
 
-Current limitations:
+Fixed in `patches/030-htm-functionality.patch` (applies on top of in-tree `v25.1`):
 
-| Scenario | gem5 | tsx_sim |
-|----------|------|---------|
-| Explicit abort (XABORT) | Returns `InvalidOpcode` (broken) | Supported (`self_aborts`) |
-| Conflict abort | Not implemented | Supported (`conflict_aborts`) |
-| Capacity abort | Not implemented | Supported (`capacity_aborts`) |
+| Scenario | gem5 (before) | gem5 (after) | tsx_sim |
+|----------|---------------|--------------|---------|
+| Explicit abort (XABORT) | `InvalidOpcode` (broken) | `GenericHtmFailureFault EXPLICIT` with `RAX=(code<<24)\|1` | Supported |
+| Conflict abort (RW/WW) | `LD_FAIL` only, `ST` ignored (hid WW) | Both `LD_FAIL` + `ST_FAIL` → `MEMORY` fault `RAX=0x08\|0x02` (conflict+retry) | Supported |
+| Capacity abort (32 lines) | Not implemented (512 lines) | `FAIL_SELF` → `SIZE` `RAX=0x10` (capacity, no retry) via `htmTxLines` counter in `L0cache.sm` | Supported |
 
-For multi-threaded workloads, the following gem5 changes are needed:
-
-1. **XBEGIN abort path**: `XBeginInst::completeAcc()` on abort must set EAX
-   to the abort status and jump to the fallback address (relative offset),
-   instead of returning `InvalidOpcode`.
-2. **L0 cache conflict detection**: The MESI_Three_Level_HTM SLICC protocol
-   already supports `LD_FAIL`/`ST_FAIL` callbacks; these need to be wired
-   to trigger XBEGIN fallback.
-3. **Multi-threaded CPU**: Use `X86TimingSimpleCPU` with multiple threads,
-   or port to a CPU model that supports it.
+Changes:
+1. **`XBeginInst::completeAcc()`** (`src/arch/x86/insts/htmruby.cc:49`): `Mem!=0` now maps `HtmCacheFailure` → `GenericHtmFailureFault` (`SIZE/MEMORY/OTHER`) instead of `InvalidOpcode`; checkpoint restore sets `PC` to `rel` fallback and `faults.cc:115` sets `EAX` status bits (`EXPLICIT 0x01`, `RETRY 0x02`, `CONFLICT 0x08`, `CAPACITY 0x10`, `code<<24`).
+2. **`XAbortInst::completeAcc()`**: passes `imm8` to `GenericHtmFailureFault` so `LOCK_BUSY 0xFF` vs `OWNER_CHANGED 0x01` are distinguishable for the `TSXSGL` spin loop (`TSXSGL_runtime.cpp:196`).
+3. **`TimingSimpleCPU::completeDataAccess()`** (`src/cpu/simple/timing.cc:1030`): now faults on **both** `LD` and `ST` `htmTransactionFailedInCache()` and handles `FAIL_OTHER` → `OTHER`.
+4. **`L0cache.sm`**: added `htmTxLines` counter (limit `32`) in `hars`/`haws` (`src/mem/ruby/protocol/MESI_Three_Level_HTM-L0cache.sm:65`); `hst`/`hat`/`hct` reset it. Eviction of transactional line still aborts via `hfts`/`hftm`. multi-threaded `X86TimingSimpleCPU` with Ruby `MESI_Three_Level_HTM` is already supported; `O3` needs `LSQ` `ST` path as well (not yet patched, use `timing` for HTM).
 
 ---
 

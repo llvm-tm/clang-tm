@@ -1,2 +1,0 @@
-PASS: Money conserved
-TSX_STATS: xbegin_ok=458800(21650504) xbegin_abort=89768(2783864396) xend=458800(40239136) xabort=0(0) sgl_begin=89768(6334776) sgl_end=89768(6535067) sgl_spin=0(0) read=56999256(1284465230) write=877912(23283312) depth=458800(1194323767) conflict=0 capacity=87292 explicit=0 other=2476

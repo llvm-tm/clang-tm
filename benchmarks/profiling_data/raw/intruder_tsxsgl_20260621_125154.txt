@@ -1,2 +1,0 @@
-Elapsed time = 0.000000 seconds
-TSX_STATS: xbegin_ok=11(444) xbegin_abort=41(46830) xend=11(2042) xabort=0(0) sgl_begin=9(11586) sgl_end=9(12624) sgl_spin=6(173682) read=1130(83974) write=94(4416) depth=11(74824) conflict=33 capacity=0 explicit=6 other=2

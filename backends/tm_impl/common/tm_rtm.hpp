@@ -20,11 +20,18 @@ inline bool available()
     if (cached < 0) {
         unsigned int a = 0, b = 0, c = 0, d = 0;
         __cpuid_count(7, 0, a, b, c, d);
-        // Under gem5 (GEM5_M5OPS) never touch stdio here: this probe runs on
-        // the HTM fast path, and stderr write() syscalls issued while the
-        // simulator still holds HTM transactional state get converted into
-        // HTM aborts, wedging the fallback path.
-        if (b & (1 << 11)) {
+        // Under gem5 (GEM5_M5OPS) the X86 CPUID may not advertise RTM
+        // (gem5's X86CPUID table doesn't set leaf7 EBX bit11), but the
+        // Ruby MESI_Three_Level_HTM still implements XBEGIN/XEND via
+        // HTMSequencer. Probe regardless in gem5. Never touch stdio
+        // here when in HTM fast path: stderr write() syscalls while
+        // holding transactional state become HTM aborts.
+#if defined(GEM5_M5OPS)
+        bool try_probe = true;
+#else
+        bool try_probe = (b & (1 << 11));
+#endif
+        if (try_probe) {
             unsigned status = _xbegin();
             if (status == _XBEGIN_STARTED) {
                 _xend();
@@ -32,8 +39,8 @@ inline bool available()
             } else {
 #if !defined(GEM5_M5OPS) || defined(TM_RTM_DEBUG)
                 fprintf(stderr,
-                    "[tm_rtm] CPUID RTM bit set but _xbegin() fails (status=0x%x) "
-                    "-- using SGL fallback\n", status);
+                    "[tm_rtm] RTM probe _xbegin() fails (CPUID.07H:EBX=0x%x status=0x%x) "
+                    "-- using SGL fallback\n", b, status);
 #endif
                 cached = 0;
             }

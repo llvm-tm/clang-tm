@@ -53,6 +53,10 @@ const DEFAULT_MAX_WRITE_LINES: usize = 32;
 
 /// Default max RTM retries before SGL fallback (matches TSXSGL: 5).
 const DEFAULT_MAX_RETRIES: u64 = 5;
+/// L1 associativity: 32KiB / 64B = 512 lines, 8-way → 64 sets (Broadwell L1D).
+const L1_SETS: usize = 64;
+const L1_WAYS: usize = 8;
+
 /// Bloom filter size in bits (m).
 const BLOOM_BITS: usize = 4096;
 
@@ -76,11 +80,14 @@ const COST_WRITE_L1: u64 = 6;
 const COST_MUTEX_LOCK: u64 = 75;
 /// Mutex unlock (cycles).
 const COST_MUTEX_UNLOCK: u64 = 75;
-/// Cache line invalidation from another core (cycles) —
-/// approximate cost of the MESI invalidation + TSX abort.
-const COST_CONFLICT_ABORT: u64 = 2000;
+/// Cache line invalidation from another core (cycles) — calibrated Cary 2500 vs 2000
+/// Broadwell 28% abort at 4t bank vs 10% ideal → +2500 base.
+const COST_CONFLICT_ABORT: u64 = 2500;
 /// Bloom filter check per address (cycles).
 const COST_BLOOM_CHECK: u64 = 2;
+/// Coherence probe per other thread (L3 lookup) and backoff base for eager aborts.
+const COST_COHERENCE_PROBE: u64 = 40;
+const COST_BACKOFF_BASE: u64 = 250;
 
 
 // ── Helper: cache-line address ──────────────────────────────
@@ -478,7 +485,8 @@ pub fn tm_commit() -> bool {
         s.conflict_aborts += 1;
         s.abort_count += 1;
         s.persistent_retries += 1;
-        s.cycles += COST_XABORT + COST_CONFLICT_ABORT;
+        let backoff = COST_BACKOFF_BASE * (1u64 << s.persistent_retries.min(4));
+        s.cycles += COST_XABORT + COST_CONFLICT_ABORT + backoff + COST_COHERENCE_PROBE;
         s.reset_tx();
         return false;
     }
@@ -508,15 +516,16 @@ pub fn tm_commit() -> bool {
         if !other_state.active { continue; }
         if !other_state.in_tsx { continue; }
 
-        // WR check: our write vs their read → abort them only
+        // WR check: our write vs their read → abort them only (eager invalidation)
         for wl in &write_lines {
             if other_state.read_bloom.might_contain(*wl) {
+                let backoff = COST_BACKOFF_BASE * (1u64 << other_state.persistent_retries.min(4));
                 other_state.active = false;
                 other_state.committed_successfully = false;
                 other_state.conflict_aborts += 1;
                 other_state.abort_count += 1;
                 other_state.persistent_retries += 1;
-                other_state.cycles += COST_CONFLICT_ABORT;
+                other_state.cycles += COST_CONFLICT_ABORT + backoff + COST_COHERENCE_PROBE;
                 other_state.reset_tx();
                 break;
             }
@@ -529,12 +538,13 @@ pub fn tm_commit() -> bool {
             if write_lines.contains(other_wl) {
                 ww_conflict = true;
                 if other_state.active {
+                    let backoff = COST_BACKOFF_BASE * (1u64 << other_state.persistent_retries.min(4));
                     other_state.active = false;
                     other_state.committed_successfully = false;
                     other_state.conflict_aborts += 1;
                     other_state.abort_count += 1;
                     other_state.persistent_retries += 1;
-                    other_state.cycles += COST_CONFLICT_ABORT;
+                    other_state.cycles += COST_CONFLICT_ABORT + backoff + COST_COHERENCE_PROBE;
                     other_state.reset_tx();
                 }
                 break;
@@ -543,13 +553,14 @@ pub fn tm_commit() -> bool {
     }
 
     if ww_conflict {
-        // Write-write: our transaction must also abort
+        // Write-write: our transaction must also abort (second writer loses, first wins in eager, but at commit we abort both for safety)
         let our_state = guard.get_mut(&our_tid).unwrap();
         our_state.active = false;
         our_state.committed_successfully = false;
         our_state.conflict_aborts += 1;
         our_state.abort_count += 1;
-        our_state.cycles += COST_XABORT + COST_CONFLICT_ABORT;
+        let backoff = COST_BACKOFF_BASE * (1u64 << our_state.persistent_retries.min(4));
+        our_state.cycles += COST_XABORT + COST_CONFLICT_ABORT + backoff + COST_COHERENCE_PROBE;
         our_state.persistent_retries += 1;
         our_state.reset_tx();
         return false;

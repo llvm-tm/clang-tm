@@ -1,2 +1,0 @@
-Time = 0.000000
-TSX_STATS: xbegin_ok=0(0) xbegin_abort=0(0) xend=0(0) xabort=0(0) sgl_begin=0(0) sgl_end=0(0) sgl_spin=0(0) read=0(0) write=0(0) depth=0(0) conflict=0 capacity=0 explicit=0 other=0

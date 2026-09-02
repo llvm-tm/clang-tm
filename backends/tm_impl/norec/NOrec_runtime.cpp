@@ -13,6 +13,7 @@
 #include "tm_alloc_overrides.hpp"
 #include "tm_thread_state.hpp"
 #include "tm_hooks.hpp"
+#include "tm_backend_macros.hpp"
 
 // Shared TLS variables (defined in tm_hooks.cpp, used by all backends)
 extern "C" {
@@ -206,65 +207,7 @@ static void real_tm_end()
 	g_tm_tx_count.fetch_add(1, std::memory_order_relaxed);
 }
 
-static uint8_t real_tm_read_i1(uint8_t *addr) { return norec::tm_read_i1(addr); }
-
-static uint16_t real_tm_read_i2(uint16_t *addr)
-{
-	return norec::tm_read_i2(addr);
-}
-
-static uint32_t real_tm_read_i4(uint32_t *addr)
-{
-	return norec::tm_read_i4(addr);
-}
-
-static uint64_t real_tm_read_i8(uint64_t *addr)
-{
-	return norec::tm_read_i8(addr);
-}
-
-static float real_tm_read_f4(float *addr) { return norec::tm_read_f4(addr); }
-
-static double real_tm_read_f8(double *addr) { return norec::tm_read_f8(addr); }
-
-static void *real_tm_read_ptr(void **addr) {
-    return norec::tm_read_ptr(addr);
-}
-
-static void real_tm_write_i1(uint8_t *addr, uint8_t val)
-{
-	norec::tm_write_i1(addr, val);
-}
-
-static void real_tm_write_i2(uint16_t *addr, uint16_t val)
-{
-	norec::tm_write_i2(addr, val);
-}
-
-static void real_tm_write_i4(uint32_t *addr, uint32_t val)
-{
-	norec::tm_write_i4(addr, val);
-}
-
-static void real_tm_write_i8(uint64_t *addr, int64_t val)
-{
-	norec::tm_write_i8(addr, static_cast<uint64_t>(val));
-}
-
-static void real_tm_write_f4(float *addr, float val)
-{
-	norec::tm_write_f4(addr, val);
-}
-
-static void real_tm_write_f8(double *addr, double val)
-{
-	norec::tm_write_f8(addr, val);
-}
-
-static void real_tm_write_ptr(void **addr, void *val)
-{
-	norec::tm_write_ptr(addr, val);
-}
+TM_DEFINE_READ_WRITE_HOOKS_WITH_I8_CAST(norec, static_cast<uint64_t>(v))
 
 // TM allocator stubs.
 static void* real_tm_malloc(size_t size) {
@@ -303,72 +246,7 @@ static void  real_tm_free(void* ptr) {
 
 extern "C" {
 
-void tm_read_i16(void *addr, void *out) {
-    auto *out_words = static_cast<uint64_t *>(out);
-    out_words[0] = norec::tm_read_i8(static_cast<uint64_t *>(addr) + 0);
-    out_words[1] = norec::tm_read_i8(static_cast<uint64_t *>(addr) + 1);
-}
-
-void tm_read_i32(void *addr, void *out) {
-    auto *out_words = static_cast<uint64_t *>(out);
-    for (int i = 0; i < 4; i++)
-        out_words[i] = norec::tm_read_i8(static_cast<uint64_t *>(addr) + i);
-}
-
-void tm_read_i64(void *addr, void *out) {
-    auto *out_words = static_cast<uint64_t *>(out);
-    for (int i = 0; i < 8; i++)
-        out_words[i] = norec::tm_read_i8(static_cast<uint64_t *>(addr) + i);
-}
-
-void tm_write_i16(void *addr, void *val) {
-    auto *val_words = static_cast<const uint64_t *>(val);
-    for (int i = 0; i < 2; i++)
-        norec::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
-}
-
-void tm_write_i32(void *addr, void *val) {
-    auto *val_words = static_cast<const uint64_t *>(val);
-    for (int i = 0; i < 4; i++)
-        norec::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
-}
-
-void tm_write_i64(void *addr, void *val) {
-    auto *val_words = static_cast<const uint64_t *>(val);
-    for (int i = 0; i < 8; i++)
-        norec::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);
-}
-
-void *tm_read_z(uint8_t *addr, uint64_t len)
-{
-	assert(len < TM_BUFFER_SIZE);
-	for (uint64_t i = 0; i < len / 8; i++) {
-		tm_buffer[i] = norec::tm_read_i8(((uint64_t *)addr) + i);
-	}
-	uint64_t rem = len % 8;
-	for (uint64_t i = 0; i < rem; i++) { // rem > 0
-		tm_buffer[i] = norec::tm_read_i1(addr + (len - rem - 1) + i);
-	}
-	return tm_buffer;
-}
-
-void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len)
-{
-	for (uint64_t i = 0; i < len / 8; i++) {
-		norec::tm_write_i8(((uint64_t *)dst) + i, *(((uint64_t *)src) + i));
-	}
-	uint64_t rem = len % 8;
-	for (uint64_t i = 0; i < rem; i++) { // rem > 0
-		norec::tm_write_i1(dst + (len - rem - 1) + i, *(src + (len - rem - 1) + i));
-	}
-}
-
-void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)
-{
-	for (uint64_t i = 0; i < len; i++) {
-		norec::tm_write_i1(&addr[i], val);
-	}
-}
+TM_DEFINE_PLUGIN_RW(norec)
 
 void tm_load_symbols(void *symbol_table, uint32_t symbol_count)
 {
@@ -384,26 +262,4 @@ void consume_ptr(volatile void *ptr) { (void)ptr; }
 //  Hook registration table
 // ═══════════════════════════════════════════════════════════════════
 
-const TMRealHooks g_norec_hooks = {
-    .begin    = real_tm_begin,
-    .end      = real_tm_end,
-    .malloc   = real_tm_malloc,
-    .calloc   = real_tm_calloc,
-    .realloc  = real_tm_realloc,
-    .free     = real_tm_free,
-    .read_i1  = real_tm_read_i1,
-    .read_i2  = real_tm_read_i2,
-    .read_i4  = real_tm_read_i4,
-    .read_i8  = real_tm_read_i8,
-    .read_f4  = real_tm_read_f4,
-    .read_f8  = real_tm_read_f8,
-    .read_ptr = real_tm_read_ptr,
-    .write_i1  = real_tm_write_i1,
-    .write_i2  = real_tm_write_i2,
-    .write_i4  = real_tm_write_i4,
-    .write_i8  = real_tm_write_i8,
-    .write_f4  = real_tm_write_f4,
-    .write_f8  = real_tm_write_f8,
-    .write_ptr = real_tm_write_ptr,
-    .get_thread_state = real_tm_get_thread_state,
-};
+TM_REAL_HOOKS_TABLE(norec)

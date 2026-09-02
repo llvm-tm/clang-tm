@@ -1,0 +1,47 @@
+# intel14v2 E5-2660 v4 Broadwell-EP 2026-08-29
+# gcc 12.2 -O2 -mrtm -pthread, pinned 1/13
+
+## Conflict matrix (200k iters, short TX, free-running, pinned 1/13)
+
+### RR
+mode=RR pinned 1/13 free-running 200k iters (short TX: 1 access + xend)
+  T1 R: commits=199996 aborts=4 (0.0% abort, 0 conflict)
+  T2 R: commits=199993 aborts=7 (0.0% abort, 1 conflict)
+
+### RW
+mode=RW pinned 1/13 free-running 200k iters (short TX: 1 access + xend)
+  T1 R: commits=65648 aborts=134352 (67.2% abort, 134344 conflict)
+  T2 W: commits=195921 aborts=4079 (2.0% abort, 4067 conflict)
+
+### WR
+mode=WR pinned 1/13 free-running 200k iters (short TX: 1 access + xend)
+  T1 W: commits=199927 aborts=73 (0.0% abort, 70 conflict)
+  T2 R: commits=96083 aborts=103917 (52.0% abort, 103902 conflict)
+
+### WW
+mode=WW pinned 1/13 free-running 200k iters (short TX: 1 access + xend)
+  T1 W: commits=199931 aborts=69 (0.0% abort, 65 conflict)
+  T2 W: commits=199589 aborts=411 (0.2% abort, 405 conflict)
+
+## Spurious (1M iters, single thread)
+iterations=1000000 background_thrash_threads=0
+commits=999994 aborts=6
+spurious abort rate = 0.000600%
+
+iterations=1000000 background_thrash_threads=4
+commits=999994 aborts=6
+spurious abort rate = 0.000600%
+
+# Notes
+# - Free-running (no per-iteration barrier) with one outer barrier.
+# - Transactions are intentionally short (1 access + xend); abort rate
+#   reflects conflict semantics, not time-out.  A 2000-pause TX aborts ~100%
+#   on this hardware due to timer-interrupt / capacity time-out.
+# - Per-iteration barrier or handshake *inside* TX yields 100% false aborts
+#   (the handshake line itself conflicts); time-based stagger inside TX also
+#   over-constrains and aborts.  Verified by running both variants.
+# - Pinning to different physical cores is required; unpinned or same-core
+#   siblings give ~50% higher abort rates due to migration and L1 sharing.
+# - WW shows ~0.1% aborts for a 1-access TX because the overlap window is
+#   tiny; a 4-access bank transfer shows ~40-60% aborts (see tsx_contention
+#   runs in the same session).
