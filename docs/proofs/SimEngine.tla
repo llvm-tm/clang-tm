@@ -37,10 +37,12 @@ EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
     LP,                 (* Set of LP (thread) IDs *)
-    Addr                (* Set of memory addresses *)
+    Addr,               (* Set of memory addresses *)
+    MaxTx               (* Per-LP bound on begin events (tx+abort+attempts) *)
 
 ASSUME LP \subseteq Nat
 ASSUME Addr \subseteq Nat
+ASSUME MaxTx \in Nat \ {0}
 
 VARIABLES
     in_flight_writes,   (* Set of <<lp, addr>>: LPs currently writing each addr *)
@@ -95,6 +97,8 @@ Init ==
 BeginTx(lp) ==
     /\ pc[lp] = "idle"
     /\ ~in_tx[lp]
+    (* Cannot begin while another LP holds the SGL mutex *)
+    /\ \A other \in LP : ~sgl_mode[other]
     /\ in_tx' = [in_tx EXCEPT ![lp] = TRUE]
     /\ pc' = [pc EXCEPT ![lp] = "active"]
     /\ UNCHANGED <<in_flight_writes, in_flight_reads, sgl_mode,
@@ -107,9 +111,8 @@ ReadAddr(lp, a) ==
     /\ pc[lp] = "active"
     /\ in_tx[lp] = TRUE
     /\ a \in Addr
-    LET conflicting_writers == FindWriter(lp, a) IN
-    /\ IF conflicting_writers # {}
-        THEN
+    /\ LET conflicting_writers == FindWriter(lp, a) IN
+        IF conflicting_writers # {} THEN
             (* Abort the older writer(s) *)
             /\ \A w \in conflicting_writers :
                 in_tx' = [in_tx EXCEPT ![w] = FALSE]
@@ -120,7 +123,7 @@ ReadAddr(lp, a) ==
         ELSE
             (* No conflict: add to read-set *)
             /\ in_flight_reads' = in_flight_reads \cup {<<lp, a>>}
-            /\ UNCHANGED <<in_tx, abort_count, conflict_aborts>>
+            /\ UNCHANGED <<in_tx, abort_count, conflict_aborts, in_flight_writes>>
     /\ UNCHANGED <<pc, sgl_mode, tx_count>>
     (* Note: the \A w quantifier in the THEN branch non-deterministically
        chooses an ordering for aborting multiple conflicting writers.
@@ -129,26 +132,25 @@ ReadAddr(lp, a) ==
        same regardless of order. *)
 
 (*── Write address (inside transaction) ──────────────────────────────*)
-(*  Check RAW conflict: if another LP is reading the same address,
-    abort that older reader. *)
+(*  Check RAW + WAW conflict: if another LP is reading or writing the
+    same address, abort that older reader/writer. *)
 WriteAddr(lp, a) ==
     /\ pc[lp] = "active"
     /\ in_tx[lp] = TRUE
     /\ a \in Addr
-    LET conflicting_readers == FindReader(lp, a) IN
-    /\ IF conflicting_readers # {}
-        THEN
-            (* Abort the older reader(s) *)
-            /\ \A r \in conflicting_readers :
-                in_tx' = [in_tx EXCEPT ![r] = FALSE]
-                /\ abort_count' = [abort_count EXCEPT ![r] = abort_count[r] + 1]
-                /\ in_flight_reads' = in_flight_reads \ {<<r, a2>> : a2 \in Addr}
-                /\ in_flight_writes' = in_flight_writes \ {<<r, a2>> : a2 \in Addr}
-                /\ conflict_aborts' = conflict_aborts + Cardinality(conflicting_readers)
+    /\ LET conflicting_others == FindReader(lp, a) \cup FindWriter(lp, a) IN
+        IF conflicting_others # {} THEN
+            (* Abort the older reader(s)/writer(s) *)
+            /\ \A o \in conflicting_others :
+                in_tx' = [in_tx EXCEPT ![o] = FALSE]
+                /\ abort_count' = [abort_count EXCEPT ![o] = abort_count[o] + 1]
+                /\ in_flight_reads' = in_flight_reads \ {<<o, a2>> : a2 \in Addr}
+                /\ in_flight_writes' = in_flight_writes \ {<<o, a2>> : a2 \in Addr}
+                /\ conflict_aborts' = conflict_aborts + Cardinality(conflicting_others)
         ELSE
             (* No conflict: add to write-set *)
             /\ in_flight_writes' = in_flight_writes \cup {<<lp, a>>}
-            /\ UNCHANGED <<in_tx, abort_count, conflict_aborts>>
+            /\ UNCHANGED <<in_tx, abort_count, conflict_aborts, in_flight_reads>>
     /\ UNCHANGED <<pc, sgl_mode, tx_count>>
 
 (*── Commit transaction ─────────────────────────────────────────────*)
@@ -179,6 +181,8 @@ AbortTx(lp) ==
 EnterSGL(lp) ==
     (* Can only enter SGL when no other LP is in SGL mode *)
     /\ \A other \in LP : other = lp \/ sgl_mode[other] = FALSE
+    (* No other LP may be in a transaction (it could still issue ops) *)
+    /\ \A other \in LP : other = lp \/ ~in_tx[other]
     (* No other LP has conflicting in-flight writes/reads *)
     /\ \A other \in LP \ {lp} :
         /\ \A a \in Addr : ~IsWriting(other, a)
@@ -194,8 +198,12 @@ ExitSGL(lp) ==
     /\ sgl_mode[lp] = TRUE
     /\ sgl_mode' = [sgl_mode EXCEPT ![lp] = FALSE]
     /\ pc' = [pc EXCEPT ![lp] = "idle"]
-    /\ UNCHANGED <<in_flight_writes, in_flight_reads, in_tx,
-                   tx_count, abort_count, conflict_aborts>>
+    (* Conclude the transaction: clear in-flight ops, commit *)
+    /\ in_tx' = [in_tx EXCEPT ![lp] = FALSE]
+    /\ in_flight_writes' = in_flight_writes \ {<<lp, a>> : a \in Addr}
+    /\ in_flight_reads' = in_flight_reads \ {<<lp, a>> : a \in Addr}
+    /\ tx_count' = [tx_count EXCEPT ![lp] = tx_count[lp] + 1]
+    /\ UNCHANGED <<abort_count, conflict_aborts>>
 
 (*── Conflict abort (external: triggered by a different LP's action) ─*)
 (* This is a non-deterministic action modeling that any LP can be
@@ -204,7 +212,7 @@ ExitSGL(lp) ==
 ConflictAbort(lp) ==
     /\ pc[lp] = "active"
     /\ in_tx[lp] = TRUE
-    (* This LP is being aborted by another LP's operation *\)
+    (* This LP is being aborted by another LP's operation *)
     /\ in_tx' = [in_tx EXCEPT ![lp] = FALSE]
     /\ in_flight_writes' = in_flight_writes \ {<<lp, a>> : a \in Addr}
     /\ in_flight_reads' = in_flight_reads \ {<<lp, a>> : a \in Addr}
@@ -229,6 +237,12 @@ Next ==
         \/ ConflictAbort(lp)
 
 Spec == Init /\ [][Next]_vars
+
+(* Model bound: each LP may start at most MaxTx transactions.  Without
+   this, the unbounded tx_count/abort_count/conflict_aborts give TLC an
+   infinite state graph. *)
+ModelBound ==
+    \A lp \in LP : tx_count[lp] + abort_count[lp] <= MaxTx
 
 (*====================================================================*)
 (* Invariants                                                         *)
