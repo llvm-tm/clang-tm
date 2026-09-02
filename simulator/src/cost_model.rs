@@ -107,17 +107,21 @@ fn tsx_event_cost(kind: &EventKind, machine: &MachineProfile) -> u64 {
         EventKind::Abort { reason } => {
             let base = machine.tsx.xabort_cycles as u64;
             if *reason == 0xFF || *reason == 0x01 {
-                // Explicit abort with spin (LOCK_BUSY, OWNER_CHANGED)
-                base + 200
+                // Explicit abort with spin (LOCK_BUSY, OWNER_CHANGED) + backoff
+                base + 250 + machine.tsx.conflict_abort_penalty as u64 / 4
+            } else if *reason == 4 {
+                // Conflict abort: full coherence + backoff
+                base + machine.tsx.conflict_abort_penalty as u64
             } else {
                 base
             }
         }
         EventKind::Read { .. } => {
-            (machine.tsx.read_l1_cycles + machine.tsx.bloom_check_cycles + bk.read_overhead) as u64
+            // L1 + bloom + 40c coherence probe amortized per read in contended case
+            (machine.tsx.read_l1_cycles + machine.tsx.bloom_check_cycles + bk.read_overhead) as u64 + 2
         }
         EventKind::Write { .. } => {
-            (machine.tsx.write_l1_cycles + machine.tsx.bloom_check_cycles + bk.write_overhead) as u64
+            (machine.tsx.write_l1_cycles + machine.tsx.bloom_check_cycles + bk.write_overhead) as u64 + 4
         }
         EventKind::Alloc { .. } => ALLOC_COST,
         EventKind::Free { .. } => FREE_COST,

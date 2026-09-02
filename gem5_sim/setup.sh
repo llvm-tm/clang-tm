@@ -98,26 +98,38 @@ if [ "$DO_CLONE" -eq 1 ]; then
         info "Clone complete."
     fi
 
-    # Verify x86 TSX in-tree support
+    # Verify x86 TSX in-tree support and apply local fixes
     TSX_MARKER="$GEM5_DIR/src/arch/x86/insts/microcode/rtm.uca"
     if [ -f "$TSX_MARKER" ]; then
         info "x86 TSX in-tree support detected (rtm.uca exists)."
     else
-        info "x86 TSX not found in gem5 tree; checking for reference patches..."
-        PATCH_DIR="$SCRIPT_DIR/patches"
-        if ls "$PATCH_DIR"/*.patch &>/dev/null; then
-            info "Applying reference patches from $PATCH_DIR..."
-            cd "$GEM5_DIR"
-            for p in "$PATCH_DIR"/*.patch; do
+        info "x86 TSX not found in gem5 tree (old version)."
+    fi
+    # Always apply local HTM fixes (idempotent): 003,004,030 correct
+    # in-tree bugs (InvalidOpcode on abort, missing WW detection,
+    # 32-line capacity, CLONE_VM/RAX status). Each patch is skipped if
+    # already applied.
+    PATCH_DIR="$SCRIPT_DIR/patches"
+    if ls "$PATCH_DIR"/*.patch &>/dev/null; then
+        info "Applying local HTM patches from $PATCH_DIR..."
+        cd "$GEM5_DIR"
+        for p in "$PATCH_DIR"/*.patch; do
+            info "  Checking $(basename "$p")..."
+            if git apply --check "$p" 2>/dev/null; then
                 info "  Applying $(basename "$p")..."
-                git apply --check "$p" 2>/dev/null && git apply "$p" || {
-                    info "  Patch $(basename "$p") did not apply cleanly (may already be applied or needs rebase)."
-                }
-            done
-            info "Patch application complete."
-        else
-            error "No TSX support and no patches found. Cannot build X86_TSX."
-        fi
+                git apply "$p" || info "  Patch $(basename "$p") failed to apply."
+            else
+                # Check if already applied by reverse check
+                if git apply --check --reverse "$p" 2>/dev/null; then
+                    info "  $(basename "$p") already applied, skipping."
+                else
+                    info "  Patch $(basename "$p") needs rebase or manual fix."
+                fi
+            fi
+        done
+        info "Patch application complete."
+    else
+        [ -f "$TSX_MARKER" ] || error "No TSX support and no patches found. Cannot build X86_TSX."
     fi
 fi
 

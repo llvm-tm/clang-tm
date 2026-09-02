@@ -102,7 +102,6 @@ rbtree double-free under the TM allocator & the region allocator reuses addresse
 NOrec plugin-mode bypass & \texttt{\#ifdef LLVM\_TM\_PLUGIN} guards send every access outside the mmap'd TM region straight to memory; benchmarks allocating TM data on the regular heap get \emph{zero} transactional protection (the DeathStarBench social workload exposed it: high throughput, lost updates) & fast-path predicate silently disabling the algorithm (Bug~1 of \S\ref{sec:debugging-story}) \\
 JVSTM \texttt{test\_tx} failures (25 cases) & \texttt{.peek()} reads memory directly while VBox values live in the version list, not in place --- the multi-version design does not write back to the original address & API-semantics mismatch: what ``read'' means under MVCC (Ch.~9) \\
 XTM rbtree segfault & page-level private-copy scheme interacts badly with double-free detection or region boundaries & interaction defect between orthogonal mechanisms (Ch.~13) \\
-gem5 fork TSX gaps (TM-SIM repo) & \texttt{XABORT} decodes to InvalidOpcode; conflict/capacity aborts are unwired in the x86 path & simulation fidelity limits (\S\ref{sec:htm-simulation}) \\
 \hline
 \end{tabular}
 \caption{Open defects in the companion repositories and the failure classes they instantiate. Each bounds a claim this book makes: coverage numbers exclude affected backends, and exercises grounded in these paths say so.}

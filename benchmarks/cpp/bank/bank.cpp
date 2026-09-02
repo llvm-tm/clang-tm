@@ -255,6 +255,10 @@ int main(int argc, char *argv[]) {
     // All workers are parked on the start gate: arm the ROI, then release.
     barrier.wait();
     ROI_RESET_STATS();
+    // With -DGEM5_CKPT this is m5_work_begin: gem5 can take a checkpoint
+    // right here (process fully initialised, stats freshly reset) so a
+    // restore-phase run resumes at the ROI start without re-running init.
+    ROI_CKPT_BEGIN();
     g_start.store(true, std::memory_order_release);
 
     if (g_max_txns) {
@@ -267,6 +271,7 @@ int main(int argc, char *argv[]) {
         g_stop.store(true);
     }
     for (int i = 0; i < nb_threads; ++i) threads[i].join();
+    ROI_CKPT_END();
     ROI_DUMP_STATS();
 
     int final_total = total_non_transactional();

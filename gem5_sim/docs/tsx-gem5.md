@@ -139,14 +139,14 @@ arch/x86/faults.cc:132 panic: Unrecognized/invalid instruction { op two-byte 0x0
 arch/x86/insts/htm.cc:44 panic: XBEGIN not implemented for atomic memory
 ```
 
-*Cause:* the decoder patch (`gem5_sim/patches/001..005`: `XEnd::xend()` at `two_byte_opcodes.isa:0x5`) is present in source (`grep XEnd src/arch/x86/isa/decoder/two_byte_opcodes.isa`) but the installed `X86_TSX` binary was built before the `two_byte` hunk was refreshed; `htmruby.cc` only services `Timing`/`O3` + Ruby, `Atomic` is intentionally unimplemented.
+*Cause (historical):* the decoder patch (`gem5_sim/patches/001..005`: `XEnd::xend()` at `two_byte_opcodes.isa:0x5`) was present in source but the installed `X86_TSX` binary was built before the `two_byte` hunk was refreshed; `htmruby.cc` only services `Timing`/`O3` + Ruby, `Atomic` is intentionally unimplemented.
 
-*Fix:* rebuild (from `gem5` source root):
+*Fix (now in `patches/030`):* `setup.sh` now always applies `030-htm-functionality.patch` (XEND nop if `!inHtm`, WW `ST_FAIL`, 32-line `htmTxLines`, `RAX` status, `CLONE_VM` fix for macOS SE). Rebuild:
 
 ```bash
+./gem5_sim/setup.sh --build   # applies 003,004,030 idempotently, then scons
+# or manual:
 PYTHON_CONFIG=python3.12-config scons build/X86_TSX/gem5.opt -j$(nproc)
-# or from repo root:
-./gem5_sim/setup.sh --build
 ```
 
 The previous `--with-ruby` flag was removed in `v25.1`; `RUBY=y` is selected via `build_opts/X86_TSX`. After rebuild, the `TSXSGL` commands in §3.3 succeed and `stats.txt` gains:
