@@ -256,11 +256,12 @@ inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz) {
 
     TM_ASSERT(tx && tx->active, "xtm read: no active tx");
 
-#ifdef LLVM_TM_PLUGIN
+    // Non-TM addresses (e.g. regular heap from ::operator new in
+    // TM<int*>::alloc()) cannot go through the page-granularity path:
+    // the page bookkeeping assumes page-aligned TM-region memory.
     if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
         return read_value_from_addr(addr, sz);
     }
-#endif
 
     void *page = (void *)((uintptr_t)addr & PAGE_MASK);
     size_t idx = xadt_index(page);
@@ -295,12 +296,13 @@ inline void write_word(Transaction *tx, void *addr, any_type_t val,
 
     TM_ASSERT(tx && tx->active, "xtm write: no active tx");
 
-#ifdef LLVM_TM_PLUGIN
+    // Non-TM addresses (e.g. regular heap from ::operator new in
+    // TM<int*>::alloc()) cannot go through the page-granularity path:
+    // the page bookkeeping assumes page-aligned TM-region memory.
     if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
         write_value_to_addr(addr, val, sz);
         return;
     }
-#endif
 
     tx->read_only = false;
 

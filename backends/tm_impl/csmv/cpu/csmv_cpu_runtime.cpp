@@ -361,7 +361,7 @@ extern "C" void tm_init()
     // Initialize each entry's head to nullptr
     for (uint64_t i = 0; i < CSMV_TABLE_SIZE; i++) {
         new (&g_csmv_table[i].lock) std::mutex();
-        g_csmv_table[i].head.store(nullptr, std::memory_order_relaxed);
+        new (&g_csmv_table[i].head) std::atomic<CSMVVersionNode *>{nullptr};
     }
 
     g_csmv_clock.store(0, std::memory_order_relaxed);

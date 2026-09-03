@@ -29,7 +29,7 @@ struct CSMVObjectEntry {
 #if !defined(__CUDACC__) && !defined(__HIPCC__)
     std::mutex                lock;
 #endif
-    CSMVVersionNode          *head;
+    std::atomic<CSMVVersionNode *> head;
 };
 
 // ── CSMV Thread Transaction State ───────────────────────────────
