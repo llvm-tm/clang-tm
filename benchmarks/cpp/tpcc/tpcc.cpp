@@ -67,18 +67,47 @@ constexpr int MAX_ORDERS_PER_DISTRICT = 10000;
 constexpr int MAX_OL_PER_ORDER   = 15;
 constexpr int MAX_HISTORY_ROWS   = 1000000;
 
+// Transaction mix defaults (§2.3); sum must equal 100
+constexpr int DEFAULT_PCT_NEW_ORDER    = 45;
+constexpr int DEFAULT_PCT_PAYMENT      = 43;
+constexpr int DEFAULT_PCT_ORDER_STATUS = 4;
+constexpr int DEFAULT_PCT_DELIVERY     = 4;
+constexpr int DEFAULT_PCT_STOCK_LEVEL  = 4;
+
 static int g_num_threads = 4;
 static int g_duration = 10000;
 static int g_num_warehouses = DEFAULT_WAREHOUSES;
 static int g_num_districts = DEFAULT_DISTRICTS;
 static int g_num_customers = DEFAULT_CUSTOMERS;
 static int g_num_items = DEFAULT_ITEMS;
+static int g_pct_new_order    = DEFAULT_PCT_NEW_ORDER;
+static int g_pct_payment      = DEFAULT_PCT_PAYMENT;
+static int g_pct_order_status = DEFAULT_PCT_ORDER_STATUS;
+static int g_pct_delivery     = DEFAULT_PCT_DELIVERY;
+static int g_pct_stock_level  = DEFAULT_PCT_STOCK_LEVEL;
 
 static void parse_args(int argc, char* argv[]) {
     for (int i = 1; i < argc; i++) {
         if      (strcmp(argv[i], "-t") == 0 && i+1 < argc) g_num_threads   = atoi(argv[++i]);
         else if (strcmp(argv[i], "-d") == 0 && i+1 < argc) g_duration  = atoi(argv[++i]);
         else if (strcmp(argv[i], "-w") == 0 && i+1 < argc) g_num_warehouses = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--new-order") == 0 && i+1 < argc)   g_pct_new_order    = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--payment") == 0 && i+1 < argc)     g_pct_payment      = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--status") == 0 && i+1 < argc)      g_pct_order_status = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--delivery") == 0 && i+1 < argc)    g_pct_delivery     = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--stock-level") == 0 && i+1 < argc) g_pct_stock_level  = atoi(argv[++i]);
+    }
+    int sum = g_pct_new_order + g_pct_payment + g_pct_order_status +
+              g_pct_delivery + g_pct_stock_level;
+    if (g_pct_new_order < 0 || g_pct_payment < 0 || g_pct_order_status < 0 ||
+        g_pct_delivery < 0 || g_pct_stock_level < 0 || sum != 100) {
+        fprintf(stderr,
+                "FATAL: transaction mix must be non-negative and sum to 100 "
+                "(new-order=%d, payment=%d, status=%d, delivery=%d, "
+                "stock-level=%d, sum=%d)\n",
+                g_pct_new_order, g_pct_payment, g_pct_order_status,
+                g_pct_delivery, g_pct_stock_level, sum);
+        exit(1);
     }
 }
 
@@ -423,7 +452,7 @@ static void init_data() {
 }
 
 // ── Transaction: New-Order (§2.4) ──────────────────────────────────
-// 45% of transaction mix
+// Default 45% of transaction mix (--new-order)
 static int txn_new_order(int w_id, int d_id, int c_id,
                          int num_items, int* item_ids,
                          int* supplier_ws, int* quantities) {
@@ -493,7 +522,7 @@ static int txn_new_order(int w_id, int d_id, int c_id,
 }
 
 // ── Transaction: Payment (§2.5) ────────────────────────────────────
-// 43% of transaction mix
+// Default 43% of transaction mix (--payment)
 static void txn_payment(int w_id, int d_id, int c_id, float amount) {
     int w_idx = idx_w(w_id);
     fwrite(&g_warehouse[w_idx].w_ytd, fread(&g_warehouse[w_idx].w_ytd) + amount);
@@ -519,7 +548,7 @@ static void txn_payment(int w_id, int d_id, int c_id, float amount) {
 }
 
 // ── Transaction: Order-Status (§2.6) ───────────────────────────────
-// 4% of transaction mix
+// Default 4% of transaction mix (--status)
 static float txn_order_status(int w_id, int d_id, int c_id) {
     int c_idx = idx_c(w_id, d_id, c_id);
     float balance = fread(&g_customer[c_idx].c_balance);
@@ -550,7 +579,7 @@ static float txn_order_status(int w_id, int d_id, int c_id) {
 }
 
 // ── Transaction: Delivery (§2.7) ───────────────────────────────────
-// 4% of transaction mix
+// Default 4% of transaction mix (--delivery)
 static void txn_delivery(int w_id, int carrier_id) {
     for (int d_id = 1; d_id <= g_num_districts; d_id++) {
         int found_no = -1;
@@ -584,7 +613,7 @@ static void txn_delivery(int w_id, int carrier_id) {
 }
 
 // ── Transaction: Stock-Level (§2.8) ────────────────────────────────
-// 4% of transaction mix
+// Default 4% of transaction mix (--stock-level)
 static int txn_stock_level(int w_id, int d_id, int threshold) {
     int d_idx = idx_d(w_id, d_id);
     int next_o_id = iread(&g_district[d_idx].d_next_o_id);
@@ -633,13 +662,19 @@ static void run_worker(int id, int loops) {
     std::uniform_int_distribution<int> olcount_dist(5, 15);
     std::uniform_int_distribution<int> threshold_dist(10, 20);
 
+    // Cumulative mix thresholds (percentages validated to sum to 100)
+    int t_no  = g_pct_new_order;
+    int t_pay = t_no + g_pct_payment;
+    int t_os  = t_pay + g_pct_order_status;
+    int t_dl  = t_os + g_pct_delivery;
+
     while (!g_done.load() && loops > 0) {
         loops--;
         int r = op_dist(rng);
         int w_id = wdist(rng);
         int d_id = ddist(rng);
 
-        if (r < 45) {
+        if (r < t_no) {
             int c_id = cdist(rng);
             int num_items = olcount_dist(rng);
 
@@ -671,7 +706,7 @@ static void run_worker(int id, int loops) {
             });
             g_counts[0].fetch_add(1);
 
-        } else if (r < 88) {
+        } else if (r < t_pay) {
             int pay_w_id = w_id;
             if ((rng() % 100) < 15 && g_num_warehouses > 1) {
                 do { pay_w_id = wdist(rng); } while (pay_w_id == w_id);
@@ -683,14 +718,14 @@ static void run_worker(int id, int loops) {
             });
             g_counts[1].fetch_add(1);
 
-        } else if (r < 92) {
+        } else if (r < t_os) {
             int c_id = cdist(rng);
             tx_run([&]() {
                 txn_order_status(w_id, d_id, c_id);
             });
             g_counts[2].fetch_add(1);
 
-        } else if (r < 96) {
+        } else if (r < t_dl) {
             int carrier_id = (int)(rng() % 10) + 1;
             tx_run([&]() {
                 txn_delivery(w_id, carrier_id);
@@ -714,15 +749,34 @@ static void run_worker(int id, int loops) {
 static void test_cli_flags() {
     printf("  Testing CLI flags...\n");
     int save_t = g_num_threads, save_d = g_duration, save_w = g_num_warehouses;
+    int save_no = g_pct_new_order, save_pay = g_pct_payment,
+        save_os = g_pct_order_status, save_dl = g_pct_delivery,
+        save_sl = g_pct_stock_level;
     TEST_EQ(g_num_threads, 4, "default threads");
     TEST_EQ(g_duration, 10000, "default duration");
     TEST_EQ(g_num_warehouses, 1, "default warehouses");
-    const char* test_args[] = {"prog", "-t", "2", "-d", "500", "-w", "3"};
-    parse_args(7, (char**)test_args);
+    TEST_EQ(g_pct_new_order, DEFAULT_PCT_NEW_ORDER, "default mix new-order");
+    TEST_EQ(g_pct_payment, DEFAULT_PCT_PAYMENT, "default mix payment");
+    TEST_EQ(g_pct_order_status, DEFAULT_PCT_ORDER_STATUS, "default mix status");
+    TEST_EQ(g_pct_delivery, DEFAULT_PCT_DELIVERY, "default mix delivery");
+    TEST_EQ(g_pct_stock_level, DEFAULT_PCT_STOCK_LEVEL, "default mix stock-level");
+    const char* test_args[] = {
+        "prog", "-t", "2", "-d", "500", "-w", "3",
+        "--new-order", "40", "--payment", "40",
+        "--status", "10", "--delivery", "5", "--stock-level", "5"};
+    parse_args(17, (char**)test_args);
     TEST_EQ(g_num_threads, 2, "override threads");
     TEST_EQ(g_duration, 500, "override duration");
     TEST_EQ(g_num_warehouses, 3, "override warehouses");
+    TEST_EQ(g_pct_new_order, 40, "override mix new-order");
+    TEST_EQ(g_pct_payment, 40, "override mix payment");
+    TEST_EQ(g_pct_order_status, 10, "override mix status");
+    TEST_EQ(g_pct_delivery, 5, "override mix delivery");
+    TEST_EQ(g_pct_stock_level, 5, "override mix stock-level");
     g_num_threads = save_t; g_duration = save_d; g_num_warehouses = save_w;
+    g_pct_new_order = save_no; g_pct_payment = save_pay;
+    g_pct_order_status = save_os; g_pct_delivery = save_dl;
+    g_pct_stock_level = save_sl;
     if (test_result() != 0) exit(1);
 }
 
@@ -803,7 +857,11 @@ int main(int argc, char* argv[]) {
     printf("  Items:      %d\n", g_num_items);
     printf("  Orders:     %d per district (pre-populated)\n", PREPOPULATED_ORDERS);
     printf("  Threads:    %d\n", g_num_threads);
-    printf("  Duration:   %d ms\n\n", g_duration);
+    printf("  Duration:   %d ms\n", g_duration);
+    printf("  Mix:        new-order %d%%, payment %d%%, status %d%%, "
+           "delivery %d%%, stock-level %d%%\n\n",
+           g_pct_new_order, g_pct_payment, g_pct_order_status,
+           g_pct_delivery, g_pct_stock_level);
 
     printf("Initializing data...\n");
     init_data();

@@ -10,7 +10,8 @@
  *   Warehouse (W), District (D), Customer (C), History (H),
  *   Orders (O), New-Order (NO), Order-Line (OL), Item (I), Stock (S)
  *
- * 5 Transaction Types:
+ * 5 Transaction Types (defaults, mix is configurable via
+ * --new-order / --payment / --status / --delivery / --stock-level):
  *   New-Order (§2.4) - 45%, Payment (§2.5) - 43%,
  *   Order-Status (§2.6) - 4%, Delivery (§2.7) - 4%,
  *   Stock-Level (§2.8) - 4%
@@ -42,6 +43,13 @@ constexpr int PREPOPULATED_ORDERS = 3000; // initial orders per district (§4.3.
 constexpr int
     MAX_ORDERS_PER_DISTRICT = 10000; // allocated slots (3000 init + room for new)
 constexpr int MAX_OL_PER_ORDER = 15;
+
+// Transaction mix defaults (§2.3); sum must equal 100
+constexpr int DEFAULT_PCT_NEW_ORDER = 45;
+constexpr int DEFAULT_PCT_PAYMENT = 43;
+constexpr int DEFAULT_PCT_ORDER_STATUS = 4;
+constexpr int DEFAULT_PCT_DELIVERY = 4;
+constexpr int DEFAULT_PCT_STOCK_LEVEL = 4;
 
 // ==========================================================================
 // Table struct definitions (§4.1)
@@ -191,6 +199,13 @@ TM int g_num_warehouses = DEFAULT_WAREHOUSES;
 TM int g_num_districts = DEFAULT_DISTRICTS;
 TM int g_num_customers = DEFAULT_CUSTOMERS;
 TM int g_num_items = DEFAULT_ITEMS;
+
+// --- Transaction mix (read-only after CLI parse; sum must equal 100) ---
+int g_pct_new_order = DEFAULT_PCT_NEW_ORDER;
+int g_pct_payment = DEFAULT_PCT_PAYMENT;
+int g_pct_order_status = DEFAULT_PCT_ORDER_STATUS;
+int g_pct_delivery = DEFAULT_PCT_DELIVERY;
+int g_pct_stock_level = DEFAULT_PCT_STOCK_LEVEL;
 
 // --- Global counters ---
 TM int g_order_count = 0;
@@ -742,8 +757,8 @@ TX int txn_stock_level(int w_id, int d_id, int threshold)
 // ==========================================================================
 // Worker thread (§2.3: Transaction profile)
 // ==========================================================================
-// Transaction mix: New-Order 45%, Payment 43%,
-//                  Order-Status 4%, Delivery 4%, Stock-Level 4%
+// Transaction mix (defaults, configurable via CLI):
+// New-Order 45%, Payment 43%, Order-Status 4%, Delivery 4%, Stock-Level 4%
 
 std::atomic<bool> done{false};
 std::atomic<uint64_t> total_ops{0};
@@ -765,13 +780,19 @@ THREAD void run(Worker *w)
 	std::uniform_int_distribution<int> olcount_dist(5, 15);
 	std::uniform_int_distribution<int> threshold_dist(10, 20);
 
+	// Cumulative mix thresholds (percentages validated to sum to 100)
+	int t_no = g_pct_new_order;
+	int t_pay = t_no + g_pct_payment;
+	int t_os = t_pay + g_pct_order_status;
+	int t_dl = t_os + g_pct_delivery;
+
 	while (!done.load() && w->loops > 0) {
 		w->loops--;
 		int r = op_dist(*w->rng);
 		int w_id = wdist(*w->rng);
 		int d_id = ddist(*w->rng);
 
-		if (r < 45) {
+		if (r < t_no) {
 			// ---- New-Order (§2.4) ----
 			int c_id = cdist(*w->rng);
 			int num_items = olcount_dist(*w->rng);
@@ -808,7 +829,7 @@ THREAD void run(Worker *w)
 
 			txn_new_order(w_id, d_id, c_id, num_items, item_ids, supplier_ws, quantities);
 
-		} else if (r < 88) {
+		} else if (r < t_pay) {
 			// ---- Payment (§2.5) ----
 			// §2.5.1.2: 15% of payments involve a remote customer's warehouse
 			int pay_w_id = w_id;
@@ -821,12 +842,12 @@ THREAD void run(Worker *w)
 			float amount = 100.00f + (float)((*w->rng)() % 9900); // [100, 10000]
 			txn_payment(pay_w_id, d_id, c_id, amount);
 
-		} else if (r < 92) {
+		} else if (r < t_os) {
 			// ---- Order-Status (§2.6) ----
 			int c_id = cdist(*w->rng);
 			txn_order_status(w_id, d_id, c_id);
 
-		} else if (r < 96) {
+		} else if (r < t_dl) {
 			// ---- Delivery (§2.7) ----
 			int carrier_id = ((int)((*w->rng)() % 10) + 1);
 			txn_delivery(w_id, carrier_id);
@@ -861,6 +882,28 @@ MAIN int main(int argc, char *argv[])
 			duration = std::atoi(argv[++i]);
 		else if (strcmp(argv[i], "-w") == 0 && i + 1 < argc)
 			g_num_warehouses = std::atoi(argv[++i]);
+		else if (strcmp(argv[i], "--new-order") == 0 && i + 1 < argc)
+			g_pct_new_order = std::atoi(argv[++i]);
+		else if (strcmp(argv[i], "--payment") == 0 && i + 1 < argc)
+			g_pct_payment = std::atoi(argv[++i]);
+		else if (strcmp(argv[i], "--status") == 0 && i + 1 < argc)
+			g_pct_order_status = std::atoi(argv[++i]);
+		else if (strcmp(argv[i], "--delivery") == 0 && i + 1 < argc)
+			g_pct_delivery = std::atoi(argv[++i]);
+		else if (strcmp(argv[i], "--stock-level") == 0 && i + 1 < argc)
+			g_pct_stock_level = std::atoi(argv[++i]);
+	}
+
+	int pct_sum = g_pct_new_order + g_pct_payment + g_pct_order_status +
+	              g_pct_delivery + g_pct_stock_level;
+	if (g_pct_new_order < 0 || g_pct_payment < 0 || g_pct_order_status < 0 ||
+	    g_pct_delivery < 0 || g_pct_stock_level < 0 || pct_sum != 100) {
+		std::cerr << "FATAL: transaction mix must be non-negative and sum to 100"
+		             " (new-order=" << g_pct_new_order << ", payment="
+		          << g_pct_payment << ", status=" << g_pct_order_status
+		          << ", delivery=" << g_pct_delivery << ", stock-level="
+		          << g_pct_stock_level << ", sum=" << pct_sum << ")\n";
+		return 1;
 	}
 
 	// Allocate flat arrays (§4.3.3)
@@ -896,7 +939,11 @@ MAIN int main(int argc, char *argv[])
 	std::cout << "  Orders:     " << PREPOPULATED_ORDERS
 	          << " per district (pre-populated)\n";
 	std::cout << "  Threads:    " << threads << "\n";
-	std::cout << "  Duration:   " << duration << " ms\n\n";
+	std::cout << "  Duration:   " << duration << " ms\n";
+	std::cout << "  Mix:        new-order " << g_pct_new_order
+	          << "%, payment " << g_pct_payment << "%, status "
+	          << g_pct_order_status << "%, delivery " << g_pct_delivery
+	          << "%, stock-level " << g_pct_stock_level << "%\n\n";
 
 	std::cout << "Initializing data..." << std::endl;
 	std::cout.flush();

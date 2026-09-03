@@ -32,8 +32,14 @@ make tpcc_uninstrumented     # Baseline (no TM)
 ## Usage
 
 ```sh
-./bin/tpcc_<backend> -t <threads> -d <duration_ms>
+./bin/tpcc_<backend> -t <threads> -d <duration_ms> [-w <warehouses>] \
+    [--new-order <pct>] [--payment <pct>] [--status <pct>] \
+    [--delivery <pct>] [--stock-level <pct>]
 ```
+
+The transaction mix is configurable and must sum to 100.
+Defaults (TPC-C profile): New-Order 45, Payment 43, Order-Status 4,
+Delivery 4, Stock-Level 4.
 
 ## Official Resources
 

@@ -120,6 +120,11 @@ All benchmarks accept `-t <threads>` and `-d <duration_ms>`:
 | `-a <n>`    | bank        | Number of accounts                     |
 | `-r <pct>`  | bank        | Percentage of read-all transactions    |
 | `-w <n>`    | tpcc        | Number of warehouses                   |
+| `--new-order <pct>`   | tpcc | New-Order mix percentage (default 45)    |
+| `--payment <pct>`     | tpcc | Payment mix percentage (default 43)      |
+| `--status <pct>`      | tpcc | Order-Status mix percentage (default 4)  |
+| `--delivery <pct>`    | tpcc | Delivery mix percentage (default 4)      |
+| `--stock-level <pct>` | tpcc | Stock-Level mix percentage (default 4)   |
 | `-w <a..f>` | ycsb        | Workload letter                        |
 | `-n <n>`    | fuzz        | Number of iterations per thread        |
 | `-c <n>`    | fuzz_counter| Number of counters                     |

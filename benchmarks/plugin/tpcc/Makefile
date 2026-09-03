@@ -10,7 +10,7 @@ all: tpcc_singlelock tpcc_tl2 tpcc_tinystm tpcc_persistentsgl tpcc_uninstrumente
 	tpcc_dudetm tpcc_spht tpcc_norec
 
 tpcc_uninstrumented: TPCC.cpp | $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $< -o $(BIN_DIR)/$@
+	$(CXX) $(CXXFLAGS) -I$(BACKENDS_DIR)/tm_impl/common $< -o $(BIN_DIR)/$@
 
 $(eval $(call tm_target, tpcc_singlelock, TPCC.cpp, singlelock))
 $(eval $(call tm_target, tpcc_tl2, TPCC.cpp, tl2))
