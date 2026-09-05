@@ -1,0 +1,467 @@
+From 7c6b9275014ec1e7975d4911d5a53d4620e172d4 Mon Sep 17 00:00:00 2001
+From: Daniel Castro <daniel.castro@tecnico.ulisboa.pt>
+Date: Tue, 1 Sep 2026 23:02:31 +0100
+Subject: [PATCH 2/2] power: POWER8 HTM checkpoint, TEXASR/TFIAR int regs, TM
+ instruction classes
+
+- htm.hh/htm.cc: HTMCheckpoint with save/restore of all arch state.
+  restore() rolls back GPRs/FPRs/CR/XER/LR/CTR/TAR/FPSCR, clears
+  MSR[ts] (non-transactional), drops the reservation, sets CR0[EQ]=1
+  so the software `tbegin.; beq abort_handler` fallback is taken,
+  writes TEXASR failure cause + TFIAR, and redirects PC to the TFHAR
+  fallback (tbegin+4). CR0 polarity verified against the Linux kernel
+  TM docs and LLVM's HTM builtins (EQ=0 started / EQ=1 failed).
+- regs/int.hh: register TEXASR and TFIAR as architectural int regs
+  (int_reg::Texasr, int_reg::Tfiar) used to surface abort status.
+- insts/tm.hh: HtmMemInst base + TBegin/TEnd/TAbort (HTM mem mgmt)
+  and TCheck/TSr (memory-free execute) classes with decoder fields.
+
+Part of the 8-patch POWER8 HTM plan (docs/power8-htm-patches.md).
+---
+ src/arch/power/htm.cc      | 155 +++++++++++++++++++++++++++++++++++++
+ src/arch/power/htm.hh      |  81 +++++++++++++++++++
+ src/arch/power/insts/tm.hh | 154 ++++++++++++++++++++++++++++++++++++
+ src/arch/power/regs/int.hh |   6 +-
+ 4 files changed, 395 insertions(+), 1 deletion(-)
+ create mode 100644 src/arch/power/htm.cc
+ create mode 100644 src/arch/power/htm.hh
+ create mode 100644 src/arch/power/insts/tm.hh
+
+diff --git a/src/arch/power/htm.cc b/src/arch/power/htm.cc
+new file mode 100644
+index 0000000000..c2cd5a9f2c
+--- /dev/null
++++ b/src/arch/power/htm.cc
+@@ -0,0 +1,155 @@
++/*
++ * Copyright (c) 2026
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are
++ * met: redistributions of source code must retain the above copyright
++ * notice, this list of conditions and the following disclaimer;
++ * redistributions in binary form must reproduce the above copyright
++ * notice, this list of conditions and the following disclaimer in the
++ * documentation and/or other materials provided with the distribution;
++ * neither the name of the copyright holders nor the names of its
++ * contributors may be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "arch/power/htm.hh"
++
++#include "arch/power/regs/misc.hh"
++#include "cpu/thread_context.hh"
++#include "mem/htm.hh"
++
++namespace gem5
++{
++
++namespace PowerISA
++{
++
++void
++HTMCheckpoint::reset()
++{
++    gpr.fill(0);
++    fpr.fill(0);
++    cr = 0;
++    xer = 0;
++    lr = 0;
++    ctr = 0;
++    tar = 0;
++    fpscr = 0;
++    msr = 0;
++    rsv = 0;
++    rsvAddr = 0;
++    nPc = 0;
++    texasr = 0;
++    tfiar = 0;
++    BaseHTMCheckpoint::reset();
++}
++
++void
++HTMCheckpoint::save(ThreadContext *tc)
++{
++    for (auto n = 0; n < int_reg::NumArchRegs; n++)
++        gpr[n] = tc->getReg(intRegClass[n]);
++    for (auto n = 0; n < 32; n++)
++        fpr[n] = tc->getReg(floatRegClass[n]);
++    cr = tc->getReg(int_reg::Cr);
++    xer = tc->getReg(int_reg::Xer);
++    lr = tc->getReg(int_reg::Lr);
++    ctr = tc->getReg(int_reg::Ctr);
++    tar = tc->getReg(int_reg::Tar);
++    fpscr = tc->getReg(int_reg::Fpscr);
++    msr = tc->getReg(int_reg::Msr);
++    rsv = tc->getReg(int_reg::Rsv);
++    rsvAddr = tc->getReg(int_reg::RsvAddr);
++
++    BaseHTMCheckpoint::save(tc);
++}
++
++void
++HTMCheckpoint::restore(ThreadContext *tc, HtmFailureFaultCause cause)
++{
++    for (auto n = 0; n < int_reg::NumArchRegs; n++)
++        tc->setReg(intRegClass[n], gpr[n]);
++    for (auto n = 0; n < 32; n++)
++        tc->setReg(floatRegClass[n], fpr[n]);
++    tc->setReg(int_reg::Cr, cr);
++    tc->setReg(int_reg::Xer, xer);
++    tc->setReg(int_reg::Lr, lr);
++    tc->setReg(int_reg::Ctr, ctr);
++    tc->setReg(int_reg::Tar, tar);
++    tc->setReg(int_reg::Fpscr, fpscr);
++
++    // Non-transactional state on rollback
++    Msr msrReg = msr;
++    msrReg.ts = 0;
++    tc->setReg(int_reg::Msr, msrReg);
++
++    // Clear the reservation (lwarx/stcx sequence inside the tx)
++    tc->setReg(int_reg::Rsv, 0);
++    tc->setReg(int_reg::RsvAddr, 0);
++
++    // Set CR0[EQ]=1 so the software fallback follows
++    //   `tbegin.; beq abort_handler`  (EQ=1 => abort taken)
++    // Verified vs kernel doc + LLVM HTM builtins comment
++    // ("successfully started (0) or failed (1)").
++    Cr crReg = cr;
++    crReg.cr0.lt = 0;
++    crReg.cr0.gt = 0;
++    crReg.cr0.eq = 1;
++    crReg.cr0.so = 0;
++    tc->setReg(int_reg::Cr, crReg);
++
++    // Record abort status in TEXASR / TFIAR
++    // Failure code layout (kept aligned with Power8HTM.tla FMAbort):
++    //   bit0 = EXPLICIT, bit1 = CONFLICT/MEMORY, bit2 = CAPACITY/SIZE,
++    //   bit4 = NEST, bit8+ = abort code / EXCEPTION / OTHER.
++    uint64_t failureCode = 0;
++    switch (cause) {
++      case HtmFailureFaultCause::EXPLICIT:
++        failureCode = 1ull;
++        break;
++      case HtmFailureFaultCause::MEMORY:
++        failureCode = 1ull << 1;
++        break;
++      case HtmFailureFaultCause::SIZE:
++        failureCode = 1ull << 2;
++        break;
++      case HtmFailureFaultCause::NEST:
++        failureCode = 1ull << 4;
++        break;
++      case HtmFailureFaultCause::EXCEPTION:
++        failureCode = 1ull << 5;
++        break;
++      case HtmFailureFaultCause::OTHER:
++      default:
++        failureCode = 1ull << 6;
++        break;
++    }
++    texasr = failureCode;
++    tfiar = nPc;    // fallback address; real HW would store failing inst
++    tc->setReg(int_reg::Texasr, texasr);
++    tc->setReg(int_reg::Tfiar, tfiar);
++
++    // Redirect to TFHAR (fallback handler registered by tbegin.)
++    PCState pc = tc->pcState().as<PCState>();
++    pc.set(nPc);
++    tc->pcState(pc);
++
++    BaseHTMCheckpoint::restore(tc, cause);
++}
++
++} // namespace PowerISA
++} // namespace gem5
+\ No newline at end of file
+diff --git a/src/arch/power/htm.hh b/src/arch/power/htm.hh
+new file mode 100644
+index 0000000000..47a1adf0a5
+--- /dev/null
++++ b/src/arch/power/htm.hh
+@@ -0,0 +1,81 @@
++/*
++ * Copyright (c) 2026
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are
++ * met: redistributions of source code must retain the above copyright
++ * notice, this list of conditions and the following disclaimer;
++ * redistributions in binary form must reproduce the above copyright
++ * notice, this list of conditions and the following disclaimer in the
++ * documentation and/or other materials provided with the distribution;
++ * neither the name of the copyright holders nor the names of its
++ * contributors may be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/**
++ * @file
++ *
++ * ISA-specific types for hardware transactional memory on POWER.
++ */
++
++#ifndef __ARCH_POWER_HTM_HH__
++#define __ARCH_POWER_HTM_HH__
++
++#include <array>
++
++#include "arch/generic/htm.hh"
++#include "arch/power/pcstate.hh"
++#include "arch/power/regs/int.hh"
++#include "base/types.hh"
++#include "cpu/thread_context.hh"
++
++namespace gem5
++{
++
++namespace PowerISA
++{
++
++class HTMCheckpoint : public BaseHTMCheckpoint
++{
++  public:
++    HTMCheckpoint()
++      : BaseHTMCheckpoint(), nPc(0), texasr(0), tfiar(0)
++    {}
++
++    const static int MAX_HTM_DEPTH = 255;
++
++    void reset() override;
++    void save(ThreadContext *tc) override;
++    void restore(ThreadContext *tc, HtmFailureFaultCause cause) override;
++
++    /** TFHAR: fallback address recorded by tbegin. */
++    void tbeginTarget(Addr target) { nPc = target; }
++
++  private:
++    std::array<RegVal, int_reg::NumArchRegs> gpr;   // GPR 0..31
++    std::array<RegVal, 32> fpr;                     // FPR 0..31
++    RegVal cr, xer, lr, ctr, tar, fpscr, msr;       // arch int regs
++    RegVal rsv, rsvAddr;                            // reservation slots
++    Addr nPc;                                       // TFHAR fallback
++    uint64_t texasr;                                // TM abort status
++    uint64_t tfiar;                                 // failure address
++};
++
++} // namespace PowerISA
++} // namespace gem5
++
++#endif // __ARCH_POWER_HTM_HH__
+\ No newline at end of file
+diff --git a/src/arch/power/insts/tm.hh b/src/arch/power/insts/tm.hh
+new file mode 100644
+index 0000000000..e20d90990d
+--- /dev/null
++++ b/src/arch/power/insts/tm.hh
+@@ -0,0 +1,154 @@
++/*
++ * Copyright (c) 2026
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are
++ * met: redistributions of source code must retain the above copyright
++ * notice, this list of conditions and the following disclaimer;
++ * redistributions in binary form must reproduce the above copyright
++ * notice, this list of conditions and the following disclaimer in the
++ * documentation and/or other materials provided with the distribution;
++ * neither the name of the copyright holders nor the names of its
++ * contributors may be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/*
++ * POWER8 Transactional Memory (HTM) instructions: tbegin, tend,
++ * tabort, tcheck, tsr, tresume, tsuspend.
++ */
++
++#ifndef __ARCH_POWER_INSTS_TM_HH__
++#define __ARCH_POWER_INSTS_TM_HH__
++
++#include "arch/power/insts/static_inst.hh"
++
++namespace gem5
++{
++
++namespace PowerISA
++{
++
++/**
++ * Base class for memory-fence-style HTM management instructions
++ * (HTM_START / HTM_COMMIT / HTM_CANCEL). These are non-speculative
++ * memory operations that drive the Ruby L0 HTM controller.
++ */
++class HtmMemInst : public PowerStaticInst
++{
++  public:
++    HtmMemInst(const char *mnem, ExtMachInst _machInst, OpClass __opClass)
++        : PowerStaticInst(mnem, _machInst, __opClass)
++    {
++        flags[IsNonSpeculative] = true;
++        flags[IsMemoryRef] = true;
++        flags[IsQuiesce] = true;
++    }
++};
++
++/** tbegin. t  (XO=0x28e, R=bit25, L=bit21) */
++class TBeginInst : public HtmMemInst
++{
++  public:
++    TBeginInst(ExtMachInst _machInst, uint64_t _L)
++        : HtmMemInst("tbegin", _machInst, MemReadOp), L(_L)
++    {
++        flags[IsHtmStart] = true;
++        flags[IsLoad] = true;
++        flags[IsInteger] = true;
++    }
++
++    Fault initiateAcc(ExecContext *xc,
++                      trace::InstRecord *traceData) const override;
++    Fault completeAcc(PacketPtr pkt, ExecContext *xc,
++                      trace::InstRecord *traceData) const override;
++
++  private:
++    uint64_t L;
++};
++
++/** tend. (XO=0x2ae, all >tendall if BA bit25) */
++class TEndInst : public HtmMemInst
++{
++  public:
++    TEndInst(ExtMachInst _machInst)
++        : HtmMemInst("tend", _machInst, MemReadOp)
++    {
++        flags[IsHtmStop] = true;
++        flags[IsLoad] = true;
++    }
++
++    Fault initiateAcc(ExecContext *xc,
++                      trace::InstRecord *traceData) const override;
++    Fault completeAcc(PacketPtr pkt, ExecContext *xc,
++                      trace::InstRecord *traceData) const override;
++};
++
++/** tabort. (XO=0x38e, RA has abort code) */
++class TAbortInst : public HtmMemInst
++{
++  public:
++    TAbortInst(ExtMachInst _machInst)
++        : HtmMemInst("tabort", _machInst, MemReadOp)
++    {
++        flags[IsHtmCancel] = true;
++        flags[IsLoad] = true;
++    }
++
++    Fault initiateAcc(ExecContext *xc,
++                      trace::InstRecord *traceData) const override;
++    Fault completeAcc(PacketPtr pkt, ExecContext *xc,
++                      trace::InstRecord *traceData) const override;
++};
++
++/** tcheck (XO=0x2ce): writes CR field BF, memory-free */
++class TCheckInst : public PowerStaticInst
++{
++  public:
++    TCheckInst(ExtMachInst _machInst, uint64_t _BF)
++        : PowerStaticInst("tcheck", _machInst, IntAluOp), BF(_BF)
++    {
++        flags[IsInteger] = true;
++    }
++
++    Fault execute(ExecContext *xc,
++                  trace::InstRecord *traceData) const override;
++
++  private:
++    uint64_t BF;
++};
++
++/** tsr (XO=0x2ee, L=bit21), tresume, tsuspend: memory-free */
++class TSrInst : public PowerStaticInst
++{
++  public:
++    TSrInst(ExtMachInst _machInst, uint64_t _L)
++        : PowerStaticInst("tsr", _machInst, IntAluOp), L(_L)
++    {
++        flags[IsInteger] = true;
++    }
++
++    Fault execute(ExecContext *xc,
++                  trace::InstRecord *traceData) const override;
++
++  private:
++    uint64_t L;
++};
++
++} // namespace PowerISA
++} // namespace gem5
++
++#endif // __ARCH_POWER_INSTS_TM_HH__
+\ No newline at end of file
+diff --git a/src/arch/power/regs/int.hh b/src/arch/power/regs/int.hh
+index 6bb95cdc7f..5fc84e25a2 100644
+--- a/src/arch/power/regs/int.hh
++++ b/src/arch/power/regs/int.hh
+@@ -89,6 +89,8 @@ enum : RegIndex
+     _RsvIdx,
+     _RsvLenIdx,
+     _RsvAddrIdx,
++    _TexasrIdx,
++    _TfiarIdx,
+ 
+     NumRegs
+ };
+@@ -144,7 +146,9 @@ inline constexpr RegId
+     Msr = intRegClass[_MsrIdx],
+     Rsv = intRegClass[_RsvIdx],
+     RsvLen = intRegClass[_RsvLenIdx],
+-    RsvAddr = intRegClass[_RsvAddrIdx];
++    RsvAddr = intRegClass[_RsvAddrIdx],
++    Texasr = intRegClass[_TexasrIdx],
++    Tfiar = intRegClass[_TfiarIdx];
+ 
+ } // namespace int_reg
+ 
+-- 
+2.50.1 (Apple Git-155)
+
