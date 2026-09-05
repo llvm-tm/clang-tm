@@ -353,7 +353,7 @@ index edfd3b3e6b..308f9f05b1 100644
  
          port->schedTimingResp(pkt, curTick() + extra);
 diff --git a/src/sim/faults.cc b/src/sim/faults.cc
-index 7c37e58a7a..ce9dd0f8da 100644
+index 7c37e58a7a..e69097da63 100644
 --- a/src/sim/faults.cc
 +++ b/src/sim/faults.cc
 @@ -45,6 +45,7 @@
@@ -373,7 +373,7 @@ index 7c37e58a7a..ce9dd0f8da 100644
  {
      // reset decoder
      InstDecoder* dcdr = tc->getDecoderPtr();
-@@ -126,6 +127,45 @@ void GenericHtmFailureFault::invoke(ThreadContext *tc,
+@@ -126,6 +127,48 @@ void GenericHtmFailureFault::invoke(ThreadContext *tc,
  
      checkpoint->restore(tc, getHtmFailureFaultCause());
  

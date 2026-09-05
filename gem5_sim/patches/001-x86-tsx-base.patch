@@ -1,0 +1,949 @@
+From 6eb3dca1e7f783a1ba6264a09e6ce6cf875786f6 Mon Sep 17 00:00:00 2001
+From: Daniel Castro <daniel.castro@tecnico.ulisboa.pt>
+Date: Sun, 5 Jul 2026 11:25:09 +0100
+Subject: [PATCH 1/2] x86 TSX: decoder, instructions, HTM sequencer calibration
+
+Add x86 TSX instruction support (XBEGIN, XEND, XABORT, XTEST):
+- New decoder formats in htm.isa
+- Instruction implementations in insts/htm.cc and htmruby.cc
+- HTM checkpoint save/restore in htm.hh/htm.cc
+- Ruby HTM sequencer with calibratable start/commit latencies
+
+Calibration to Broadwell-EP v4 (Xeon E5-2648L v4 @ 1.80 GHz):
+- htm_start_latency=60 cycles (XBEGIN cost)
+- htm_commit_latency=178 cycles (XEND cost)
+- RubyHTMSequencer params in Sequencer.py
+
+Also:
+- Set CPUID RTM bit in X86ISA.py
+- Add ISA::startup() for HTM checkpoint initialization
+- Add build_opts/X86_TSX for TSX + Ruby builds
+---
+ build_opts/X86_TSX                            |   6 +
+ configs/example/tsx_se.py                     |  97 ++++++++++
+ src/arch/x86/SConscript                       |   6 +
+ src/arch/x86/X86ISA.py                        |   3 +-
+ src/arch/x86/htm.cc                           |  33 ++++
+ src/arch/x86/htm.hh                           |  35 ++++
+ src/arch/x86/insts/htm.cc                     | 148 +++++++++++++++
+ src/arch/x86/insts/htm.hh                     |  75 ++++++++
+ src/arch/x86/insts/htmclassic.cc              |  53 ++++++
+ src/arch/x86/insts/htmruby.cc                 | 174 ++++++++++++++++++
+ src/arch/x86/isa.cc                           |  11 ++
+ src/arch/x86/isa.hh                           |   1 +
+ src/arch/x86/isa/decoder/one_byte_opcodes.isa |   9 +-
+ src/arch/x86/isa/decoder/two_byte_opcodes.isa |   4 +
+ src/arch/x86/isa/formats/formats.isa          |   3 +
+ src/arch/x86/isa/formats/htm.isa              |  23 +++
+ src/arch/x86/isa/includes.isa                 |   1 +
+ src/mem/ruby/system/HTMSequencer.cc           |  13 +-
+ src/mem/ruby/system/HTMSequencer.hh           |   5 +
+ src/mem/ruby/system/Sequencer.py              |   3 +
+ 20 files changed, 699 insertions(+), 4 deletions(-)
+ create mode 100644 build_opts/X86_TSX
+ create mode 100644 configs/example/tsx_se.py
+ create mode 100644 src/arch/x86/htm.cc
+ create mode 100644 src/arch/x86/htm.hh
+ create mode 100644 src/arch/x86/insts/htm.cc
+ create mode 100644 src/arch/x86/insts/htm.hh
+ create mode 100644 src/arch/x86/insts/htmclassic.cc
+ create mode 100644 src/arch/x86/insts/htmruby.cc
+ create mode 100644 src/arch/x86/isa/formats/htm.isa
+
+diff --git a/build_opts/X86_TSX b/build_opts/X86_TSX
+new file mode 100644
+index 0000000000..e9f11b2df3
+--- /dev/null
++++ b/build_opts/X86_TSX
+@@ -0,0 +1,6 @@
++RUBY=y
++NUMBER_BITS_PER_SET=128
++PROTOCOL="MESI_Three_Level_HTM"
++RUBY_PROTOCOL_MESI_Three_Level_HTM=y
++BUILD_ISA=y
++USE_X86_ISA=y
+diff --git a/configs/example/tsx_se.py b/configs/example/tsx_se.py
+new file mode 100644
+index 0000000000..dd29576e60
+--- /dev/null
++++ b/configs/example/tsx_se.py
+@@ -0,0 +1,97 @@
++import m5
++from m5.objects import *
++
++m5.util.addToPath("../../")
++
++from common.FileSystemConfig import config_filesystem
++from common.Caches import *
++
++import os
++import sys
++
++system = System()
++system.clk_domain = SrcClockDomain()
++system.clk_domain.clock = "2GHz"
++system.clk_domain.voltage_domain = VoltageDomain()
++system.mem_mode = "timing"
++system.mem_ranges = [AddrRange("512MiB")]
++
++binary = sys.argv[1]
++cpu = X86TimingSimpleCPU(cpu_id=0)
++system.cpu = cpu
++
++system.mem_ctrl = MemCtrl()
++system.mem_ctrl.dram = DDR3_1600_8x8()
++system.mem_ctrl.dram.range = system.mem_ranges[0]
++
++cpu.createInterruptController()
++
++# Ruby MESI_Three_Level_HTM setup
++system.ruby = RubySystem()
++system.ruby.number_of_virtual_networks = 3
++
++from topologies.SimplePt2pt import SimplePt2pt
++system.ruby.network = SimplePt2pt()
++system.ruby.network.number_of_virtual_networks = 3
++
++system.kernel = sys.argv[2] if len(sys.argv) > 2 else None
++
++# Set up the Ruby sequencer and cache controllers manually.
++# For simplicity, use a single controller with an ideal L0/L1/L2.
++
++# L0 cache controller (closest to core)
++system.ruby.l0_cntrl = RubyCacheController(
++    version=0,
++    ruby_system=system.ruby,
++)
++
++# L1 cache controller
++system.ruby.l1_cntrl = RubyCacheController(
++    version=0,
++    ruby_system=system.ruby,
++)
++
++# L2 cache controller
++system.ruby.l2_cntrl = RubyCacheController(
++    version=0,
++    ruby_system=system.ruby,
++)
++
++# Directory controller
++system.ruby.dir_cntrl = RubyDirectoryController(
++    version=0,
++    ruby_system=system.ruby,
++)
++
++# Sequencer
++system.ruby.sequencer = RubySequencer(
++    version=0,
++    ruby_system=system.ruby,
++)
++
++# Connect sequencer to CPU
++cpu.connectMemoryPorts(system.ruby.sequencer.in_ports)
++
++# Connect network
++system.ruby.network.connectControllers([
++    system.ruby.l0_cntrl,
++    system.ruby.l1_cntrl,
++    system.ruby.l2_cntrl,
++    system.ruby.dir_cntrl,
++])
++system.ruby.network.setup_buffers()
++
++process = Process()
++process.cmd = [binary]
++cpu.workload = process
++cpu.createThreads()
++
++system.workload = SEWorkload.init_compatible(binary)
++config_filesystem(system)
++
++root = Root(full_system=False, system=system)
++m5.instantiate()
++
++print(f"Beginning simulation! Running: {binary}")
++exit_event = m5.simulate()
++print(f"Exiting @ tick {m5.curTick()} because {exit_event.getCause()}")
+diff --git a/src/arch/x86/SConscript b/src/arch/x86/SConscript
+index 969f79846f..84b8a36e9a 100644
+--- a/src/arch/x86/SConscript
++++ b/src/arch/x86/SConscript
+@@ -54,6 +54,12 @@ Source('emulenv.cc', tags=['x86 isa'])
+ Source('faults.cc', tags=['x86 isa'])
+ Source('fs_workload.cc', tags=['x86 isa'])
+ Source('insts/badmicroop.cc', tags=['x86 isa'])
++Source('htm.cc', tags=['x86 isa'])
++Source('insts/htm.cc', tags=['x86 isa'])
++if env["CONF"]["RUBY_PROTOCOL_MESI_Three_Level_HTM"]:
++    Source('insts/htmruby.cc', tags=['x86 isa'])
++else:
++    Source('insts/htmclassic.cc', tags=['x86 isa'])
+ Source('insts/microop.cc', tags=['x86 isa'])
+ Source('insts/microregop.cc', tags=['x86 isa'])
+ Source('insts/static_inst.cc', tags=['x86 isa'])
+diff --git a/src/arch/x86/X86ISA.py b/src/arch/x86/X86ISA.py
+index aa48d1aa6e..333c33bb4c 100644
+--- a/src/arch/x86/X86ISA.py
++++ b/src/arch/x86/X86ISA.py
+@@ -82,8 +82,9 @@ class X86ISA(BaseISA):
+         "cache configuration descriptors",
+     )
+     # 0000_0007h
++    # Bit 11 in EBX (index 1) = RTM (Restricted Transactional Memory)
+     ExtendedFeatures = VectorParam.UInt32(
+-        [0x00000000, 0x01800000, 0x00000000, 0x00000000], "feature flags"
++        [0x00000000, 0x01800800, 0x00000000, 0x00000000], "feature flags"
+     )
+     # 0000_000Dh - This uses ECX index, so the last entry must be all zeros
+     ExtendedState = VectorParam.UInt32(
+diff --git a/src/arch/x86/htm.cc b/src/arch/x86/htm.cc
+new file mode 100644
+index 0000000000..ca7fbbeee9
+--- /dev/null
++++ b/src/arch/x86/htm.cc
+@@ -0,0 +1,33 @@
++#include "arch/x86/htm.hh"
++
++namespace gem5
++{
++
++void
++X86ISA::HTMCheckpoint::reset()
++{
++    nPc = 0;
++    gpr.fill(0);
++    BaseHTMCheckpoint::reset();
++}
++
++void
++X86ISA::HTMCheckpoint::save(ThreadContext *tc)
++{
++    for (auto n = 0; n < int_reg::NumArchRegs; n++)
++        gpr[n] = tc->getReg(intRegClass[n]);
++    BaseHTMCheckpoint::save(tc);
++}
++
++void
++X86ISA::HTMCheckpoint::restore(ThreadContext *tc, HtmFailureFaultCause cause)
++{
++    for (auto n = 0; n < int_reg::NumArchRegs; n++)
++        tc->setReg(intRegClass[n], gpr[n]);
++    PCState pc = tc->pcState().as<PCState>();
++    pc.set(nPc);
++    tc->pcState(pc);
++    BaseHTMCheckpoint::restore(tc, cause);
++}
++
++} // namespace gem5
+diff --git a/src/arch/x86/htm.hh b/src/arch/x86/htm.hh
+new file mode 100644
+index 0000000000..3e80ce8041
+--- /dev/null
++++ b/src/arch/x86/htm.hh
+@@ -0,0 +1,35 @@
++#ifndef __ARCH_X86_HTM_HH__
++#define __ARCH_X86_HTM_HH__
++
++#include "arch/generic/htm.hh"
++#include "arch/x86/pcstate.hh"
++#include "arch/x86/regs/int.hh"
++#include "base/types.hh"
++#include "cpu/thread_context.hh"
++
++namespace gem5
++{
++
++namespace X86ISA
++{
++
++class HTMCheckpoint : public BaseHTMCheckpoint
++{
++  public:
++    static constexpr int MAX_HTM_DEPTH = 255;
++
++    void reset() override;
++    void save(ThreadContext *tc) override;
++    void restore(ThreadContext *tc, HtmFailureFaultCause cause) override;
++
++    void xbeginTarget(Addr target) { nPc = target; }
++
++  private:
++    std::array<RegVal, int_reg::NumArchRegs> gpr;
++    Addr nPc;
++};
++
++} // namespace X86ISA
++} // namespace gem5
++
++#endif
+diff --git a/src/arch/x86/insts/htm.cc b/src/arch/x86/insts/htm.cc
+new file mode 100644
+index 0000000000..24fa2d26a1
+--- /dev/null
++++ b/src/arch/x86/insts/htm.cc
+@@ -0,0 +1,148 @@
++#include "arch/x86/insts/htm.hh"
++
++#include <sstream>
++
++#include "arch/x86/htm.hh"
++#include "arch/x86/faults.hh"
++#include "base/condcodes.hh"
++#include "cpu/exec_context.hh"
++#include "debug/X86.hh"
++#include "mem/htm.hh"
++#include "mem/packet.hh"
++#include "mem/packet_access.hh"
++#include "mem/request.hh"
++
++namespace gem5
++{
++
++using namespace X86ISA;
++
++namespace X86ISAInst
++{
++
++XBeginInst::XBeginInst(ExtMachInst machInst, int64_t _rel)
++    : X86ISA::X86StaticInst("xbegin", machInst, MemReadOp), rel(_rel)
++{
++    setRegIdxArrays(
++        nullptr,
++        reinterpret_cast<RegIdArrayPtr>(
++            &std::remove_pointer_t<decltype(this)>::destRegIdxArr));
++
++    _numSrcRegs = 0;
++    _numDestRegs = 0;
++    setDestRegIdx(_numDestRegs++, intRegClass[0]);
++    _numTypedDestRegs[IntRegClass]++;
++    flags[IsHtmStart] = true;
++    flags[IsInteger] = true;
++    flags[IsLoad] = true;
++    flags[IsNonSpeculative] = true;
++}
++
++Fault
++XBeginInst::execute(ExecContext *xc, trace::InstRecord *traceData) const
++{
++    panic("XBEGIN not implemented for atomic memory");
++    return NoFault;
++}
++
++std::string
++XBeginInst::generateDisassembly(Addr pc,
++                                const loader::SymbolTable *symtab) const
++{
++    std::stringstream ss;
++    printMnemonic(ss, mnemonic);
++    ccprintf(ss, " %#x", pc + this->size() + rel);
++    return ss.str();
++}
++
++XEndInst::XEndInst(ExtMachInst machInst)
++    : X86ISA::X86StaticInst("xend", machInst, MemReadOp)
++{
++    _numSrcRegs = 0;
++    _numDestRegs = 0;
++    flags[IsHtmStop] = true;
++    flags[IsLoad] = true;
++    flags[IsNonSpeculative] = true;
++}
++
++Fault
++XEndInst::execute(ExecContext *xc, trace::InstRecord *traceData) const
++{
++    panic("XEND not implemented for atomic memory");
++    return NoFault;
++}
++
++std::string
++XEndInst::generateDisassembly(Addr pc,
++                              const loader::SymbolTable *symtab) const
++{
++    std::stringstream ss;
++    printMnemonic(ss, mnemonic);
++    return ss.str();
++}
++
++XAbortInst::XAbortInst(ExtMachInst machInst, uint8_t _imm)
++    : X86ISA::X86StaticInst("xabort", machInst, MemReadOp), imm(_imm)
++{
++    _numSrcRegs = 0;
++    _numDestRegs = 0;
++    flags[IsLoad] = true;
++    flags[IsNonSpeculative] = true;
++    flags[IsHtmCancel] = true;
++}
++
++Fault
++XAbortInst::execute(ExecContext *xc, trace::InstRecord *traceData) const
++{
++    panic("XABORT not implemented for atomic memory");
++    return NoFault;
++}
++
++std::string
++XAbortInst::generateDisassembly(Addr pc,
++                                const loader::SymbolTable *symtab) const
++{
++    std::stringstream ss;
++    printMnemonic(ss, mnemonic);
++    ccprintf(ss, " $%#x", imm);
++    return ss.str();
++}
++
++XTestInst::XTestInst(ExtMachInst machInst)
++    : X86ISA::X86StaticInst("xtest", machInst, MemReadOp)
++{
++    setRegIdxArrays(
++        nullptr,
++        reinterpret_cast<RegIdArrayPtr>(
++            &std::remove_pointer_t<decltype(this)>::destRegIdxArr));
++
++    _numSrcRegs = 0;
++    _numDestRegs = 0;
++    setDestRegIdx(_numDestRegs++, intRegClass[0]);
++    _numTypedDestRegs[IntRegClass]++;
++    flags[IsInteger] = true;
++}
++
++Fault
++XTestInst::execute(ExecContext *xc, trace::InstRecord *traceData) const
++{
++    Fault fault = NoFault;
++    uint64_t Dest64 = xc->inHtmTransactionalState() ? 1 : 0;
++    xc->setRegOperand(this, 0, Dest64);
++    uint64_t final_val = Dest64;
++    if (traceData)
++        traceData->setData(intRegClass, final_val);
++    return fault;
++}
++
++std::string
++XTestInst::generateDisassembly(Addr pc,
++                               const loader::SymbolTable *symtab) const
++{
++    std::stringstream ss;
++    printMnemonic(ss, mnemonic);
++    return ss.str();
++}
++
++} // namespace X86ISAInst
++} // namespace gem5
+diff --git a/src/arch/x86/insts/htm.hh b/src/arch/x86/insts/htm.hh
+new file mode 100644
+index 0000000000..e37164a591
+--- /dev/null
++++ b/src/arch/x86/insts/htm.hh
+@@ -0,0 +1,75 @@
++#ifndef __ARCH_X86_INSTS_HTM_HH__
++#define __ARCH_X86_INSTS_HTM_HH__
++
++#include "arch/x86/insts/static_inst.hh"
++#include "base/types.hh"
++
++namespace gem5
++{
++
++namespace X86ISAInst
++{
++
++class XBeginInst : public X86ISA::X86StaticInst
++{
++  private:
++    RegId destRegIdxArr[1];
++    int64_t rel;
++
++  public:
++    XBeginInst(ExtMachInst machInst, int64_t _rel);
++
++    Fault execute(ExecContext *, trace::InstRecord *) const override;
++    Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;
++    Fault completeAcc(PacketPtr, ExecContext *, trace::InstRecord *) const override;
++
++    std::string generateDisassembly(Addr pc,
++            const loader::SymbolTable *symtab) const override;
++};
++
++class XEndInst : public X86ISA::X86StaticInst
++{
++  public:
++    XEndInst(ExtMachInst machInst);
++
++    Fault execute(ExecContext *, trace::InstRecord *) const override;
++    Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;
++    Fault completeAcc(PacketPtr, ExecContext *, trace::InstRecord *) const override;
++
++    std::string generateDisassembly(Addr pc,
++            const loader::SymbolTable *symtab) const override;
++};
++
++class XAbortInst : public X86ISA::X86StaticInst
++{
++  public:
++    uint8_t imm;
++
++    XAbortInst(ExtMachInst machInst, uint8_t _imm);
++
++    Fault execute(ExecContext *, trace::InstRecord *) const override;
++    Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;
++    Fault completeAcc(PacketPtr, ExecContext *, trace::InstRecord *) const override;
++
++    std::string generateDisassembly(Addr pc,
++            const loader::SymbolTable *symtab) const override;
++};
++
++class XTestInst : public X86ISA::X86StaticInst
++{
++  private:
++    RegId destRegIdxArr[1];
++
++  public:
++    XTestInst(ExtMachInst machInst);
++
++    Fault execute(ExecContext *, trace::InstRecord *) const override;
++
++    std::string generateDisassembly(Addr pc,
++            const loader::SymbolTable *symtab) const override;
++};
++
++} // namespace X86ISAInst
++} // namespace gem5
++
++#endif
+diff --git a/src/arch/x86/insts/htmclassic.cc b/src/arch/x86/insts/htmclassic.cc
+new file mode 100644
+index 0000000000..980407cce5
+--- /dev/null
++++ b/src/arch/x86/insts/htmclassic.cc
+@@ -0,0 +1,53 @@
++#include "arch/x86/insts/htm.hh"
++
++#include "arch/x86/faults.hh"
++
++namespace gem5
++{
++
++using namespace X86ISA;
++
++namespace X86ISAInst
++{
++
++Fault
++XBeginInst::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
++{
++    return std::make_shared<InvalidOpcode>();
++}
++
++Fault
++XBeginInst::completeAcc(PacketPtr pkt, ExecContext *xc,
++                        trace::InstRecord *traceData) const
++{
++    return std::make_shared<InvalidOpcode>();
++}
++
++Fault
++XEndInst::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
++{
++    return std::make_shared<InvalidOpcode>();
++}
++
++Fault
++XEndInst::completeAcc(PacketPtr pkt, ExecContext *xc,
++                      trace::InstRecord *traceData) const
++{
++    return std::make_shared<InvalidOpcode>();
++}
++
++Fault
++XAbortInst::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
++{
++    return std::make_shared<InvalidOpcode>();
++}
++
++Fault
++XAbortInst::completeAcc(PacketPtr pkt, ExecContext *xc,
++                        trace::InstRecord *traceData) const
++{
++    return std::make_shared<InvalidOpcode>();
++}
++
++} // namespace X86ISAInst
++} // namespace gem5
+diff --git a/src/arch/x86/insts/htmruby.cc b/src/arch/x86/insts/htmruby.cc
+new file mode 100644
+index 0000000000..cf88d6c6b6
+--- /dev/null
++++ b/src/arch/x86/insts/htmruby.cc
+@@ -0,0 +1,174 @@
++#include "arch/x86/insts/htm.hh"
++
++#include "arch/generic/memhelpers.hh"
++#include "arch/x86/faults.hh"
++#include "arch/x86/htm.hh"
++#include "cpu/exec_context.hh"
++#include "debug/X86.hh"
++#include "mem/htm.hh"
++#include "mem/packet.hh"
++#include "mem/packet_access.hh"
++#include "mem/request.hh"
++
++namespace gem5
++{
++
++using namespace X86ISA;
++
++namespace X86ISAInst
++{
++
++Fault
++XBeginInst::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
++{
++    Fault fault = NoFault;
++    const uint64_t htm_depth = xc->getHtmTransactionalDepth();
++
++    DPRINTF(X86, "XBEGIN: htm depth is %d\n", htm_depth);
++
++    if (htm_depth > X86ISA::HTMCheckpoint::MAX_HTM_DEPTH) {
++        const uint64_t htm_uid = xc->getHtmTransactionUid();
++        fault = std::make_shared<GenericHtmFailureFault>(
++            htm_uid, HtmFailureFaultCause::NEST);
++    }
++
++    if (fault == NoFault) {
++        Request::Flags memAccessFlags =
++            Request::STRICT_ORDER | Request::PHYSICAL | Request::HTM_START;
++        if (htm_depth > 1)
++            memAccessFlags = memAccessFlags | Request::NO_ACCESS;
++
++        fault = xc->initiateMemMgmtCmd(memAccessFlags);
++    }
++
++    return fault;
++}
++
++Fault
++XBeginInst::completeAcc(PacketPtr pkt, ExecContext *xc,
++                        trace::InstRecord *traceData) const
++{
++    Fault fault = NoFault;
++    uint64_t Mem;
++    uint64_t Dest64 = 0;
++    ThreadContext *tc = xc->tcBase();
++    const uint64_t htm_depth = xc->getHtmTransactionalDepth();
++
++    getMemLE(pkt, Mem, traceData);
++
++    if (Mem != 0)
++        fault = std::make_shared<InvalidOpcode>();
++
++    if (!xc->inHtmTransactionalState())
++        fault = std::make_shared<InvalidOpcode>();
++
++    if (fault == NoFault) {
++        Dest64 = 0;
++
++        if (htm_depth == 1) {
++            BaseHTMCheckpointPtr& cpt = xc->tcBase()->getHtmCheckpointPtr();
++            HTMCheckpoint *ckpt = dynamic_cast<HTMCheckpoint*>(cpt.get());
++            assert(ckpt != nullptr);
++            ckpt->save(tc);
++            PCState pc = tc->pcState().as<PCState>();
++            Addr target = pc.pc() + this->size() + rel;
++            ckpt->xbeginTarget(target);
++        }
++
++        xc->setRegOperand(this, 0, Dest64);
++        uint64_t final_val = Dest64;
++        if (traceData)
++            traceData->setData(intRegClass, final_val);
++    }
++
++    return fault;
++}
++
++Fault
++XEndInst::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
++{
++    Fault fault = NoFault;
++    const uint64_t htm_depth = xc->getHtmTransactionalDepth();
++
++    if (!xc->inHtmTransactionalState())
++        fault = std::make_shared<InvalidOpcode>();
++
++    if (fault == NoFault) {
++        Request::Flags memAccessFlags =
++            Request::STRICT_ORDER | Request::PHYSICAL | Request::HTM_COMMIT;
++        if (htm_depth > 1)
++            memAccessFlags = memAccessFlags | Request::NO_ACCESS;
++
++        fault = xc->initiateMemMgmtCmd(memAccessFlags);
++    }
++
++    return fault;
++}
++
++Fault
++XEndInst::completeAcc(PacketPtr pkt, ExecContext *xc,
++                      trace::InstRecord *traceData) const
++{
++    Fault fault = NoFault;
++    uint64_t Mem;
++    ThreadContext *tc = xc->tcBase();
++    const uint64_t htm_depth = xc->getHtmTransactionalDepth();
++
++    getMemLE(pkt, Mem, traceData);
++
++    if (Mem != 0)
++        fault = std::make_shared<InvalidOpcode>();
++
++    if (fault == NoFault) {
++        if (htm_depth == 1) {
++            HTMCheckpoint *ckpt = static_cast<HTMCheckpoint*>(
++                xc->tcBase()->getHtmCheckpointPtr().get());
++            assert(ckpt);
++            assert(ckpt->valid());
++            ckpt->reset();
++        }
++    }
++
++    return fault;
++}
++
++Fault
++XAbortInst::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
++{
++    Fault fault = NoFault;
++
++    if (!xc->inHtmTransactionalState())
++        fault = std::make_shared<InvalidOpcode>();
++
++    if (fault == NoFault) {
++        Request::Flags memAccessFlags =
++            Request::STRICT_ORDER | Request::PHYSICAL | Request::HTM_CANCEL;
++        fault = xc->initiateMemMgmtCmd(memAccessFlags);
++    }
++
++    return fault;
++}
++
++Fault
++XAbortInst::completeAcc(PacketPtr pkt, ExecContext *xc,
++                        trace::InstRecord *traceData) const
++{
++    Fault fault = NoFault;
++    uint64_t Mem;
++
++    getMemLE(pkt, Mem, traceData);
++
++    if (Mem != 0)
++        fault = std::make_shared<InvalidOpcode>();
++
++    if (fault == NoFault) {
++        fault = std::make_shared<GenericHtmFailureFault>(
++            xc->getHtmTransactionUid(),
++            HtmFailureFaultCause::EXPLICIT);
++    }
++
++    return fault;
++}
++
++} // namespace X86ISAInst
++} // namespace gem5
+diff --git a/src/arch/x86/isa.cc b/src/arch/x86/isa.cc
+index 65618dc857..5f17d17778 100644
+--- a/src/arch/x86/isa.cc
++++ b/src/arch/x86/isa.cc
+@@ -29,6 +29,7 @@
+ #include "arch/x86/isa.hh"
+ 
+ #include "arch/x86/decoder.hh"
++#include "arch/x86/htm.hh"
+ #include "arch/x86/mmu.hh"
+ #include "arch/x86/regs/ccr.hh"
+ #include "arch/x86/regs/float.hh"
+@@ -521,6 +522,16 @@ ISA::unserialize(CheckpointIn &cp)
+                      regVal[misc_reg::Rflags]);
+ }
+ 
++void
++ISA::startup()
++{
++    BaseISA::startup();
++    if (tc) {
++        std::unique_ptr<BaseHTMCheckpoint> cpt(new HTMCheckpoint());
++        tc->setHtmCheckpointPtr(std::move(cpt));
++    }
++}
++
+ void
+ ISA::setThreadContext(ThreadContext *_tc)
+ {
+diff --git a/src/arch/x86/isa.hh b/src/arch/x86/isa.hh
+index 9c6dcf0921..7411e31f57 100644
+--- a/src/arch/x86/isa.hh
++++ b/src/arch/x86/isa.hh
+@@ -92,6 +92,7 @@ class ISA : public BaseISA
+     void unserialize(CheckpointIn &cp) override;
+ 
+     void setThreadContext(ThreadContext *_tc) override;
++    void startup() override;
+ 
+     std::string getVendorString() const;
+ 
+diff --git a/src/arch/x86/isa/decoder/one_byte_opcodes.isa b/src/arch/x86/isa/decoder/one_byte_opcodes.isa
+index 13b05e62ff..9d2b1eb4d9 100644
+--- a/src/arch/x86/isa/decoder/one_byte_opcodes.isa
++++ b/src/arch/x86/isa/decoder/one_byte_opcodes.isa
+@@ -406,12 +406,17 @@
+             //0x6: group12_Eb_Ib();
+             0x6: decode MODRM_REG {
+                 0x0: MOV(Eb,Ib);
+-                default: UD2();
++                // XABORT: C6 /7 imm8 (ModRM.reg == 7)
++                0x7: XAbort::xabort();
++                default: XAbort::xabort();
+             }
+             //0x7: group12_Ev_Iz();
+             0x7: decode MODRM_REG {
+                 0x0: MOV(Ev,Iz);
+-                default: UD2();
++                // XBEGIN: C7 /3 rel32 (hint taken), C7 /7 rel32 (hint not taken)
++                0x3: XBegin::xbegin();
++                0x7: XBegin::xbegin();
++                default: XBegin::xbegin();
+             }
+         }
+         format WarnUnimpl {
+diff --git a/src/arch/x86/isa/decoder/two_byte_opcodes.isa b/src/arch/x86/isa/decoder/two_byte_opcodes.isa
+index a32d41a169..0df8e79574 100644
+--- a/src/arch/x86/isa/decoder/two_byte_opcodes.isa
++++ b/src/arch/x86/isa/decoder/two_byte_opcodes.isa
+@@ -97,6 +97,10 @@
+                     0x3: decode MODRM_RM {
+                         0x0: xgetbv();
+                         0x1: xsetbv();
++                        // XEND: 0F 01 D5 (mod=3, reg=2, r/m=5)
++                        0x5: XEnd::xend();
++                        // XTEST: 0F 01 D6 (mod=3, reg=2, r/m=6)
++                        0x6: XTest::xtest();
+                     }
+                     default: decode MODE_SUBMODE {
+                         0x0: Cpl0Inst::LGDT(M);
+diff --git a/src/arch/x86/isa/formats/formats.isa b/src/arch/x86/isa/formats/formats.isa
+index f597bc56fa..14d29c44fb 100644
+--- a/src/arch/x86/isa/formats/formats.isa
++++ b/src/arch/x86/isa/formats/formats.isa
+@@ -74,3 +74,6 @@
+ //Include a format which is like Inst, except it conditionally decodes to the
+ //specified instruction, or if the condition fails decodes to UD2.
+ ##include "cond.isa"
++
++//Include a format for TSX instruction creation.
++##include "htm.isa"
+diff --git a/src/arch/x86/isa/formats/htm.isa b/src/arch/x86/isa/formats/htm.isa
+new file mode 100644
+index 0000000000..e79e03da09
+--- /dev/null
++++ b/src/arch/x86/isa/formats/htm.isa
+@@ -0,0 +1,23 @@
++// TSX (Transactional Synchronization Extensions) format definitions.
++
++def format XBegin() {{
++    decode_block = '''
++        return new X86ISAInst::XBeginInst(machInst,
++            (int64_t)machInst.immediate);
++    '''
++}};
++
++def format XAbort() {{
++    decode_block = '''
++        return new X86ISAInst::XAbortInst(machInst,
++            machInst.immediate & 0xff);
++    '''
++}};
++
++def format XEnd() {{
++    decode_block = 'return new X86ISAInst::XEndInst(machInst);'
++}};
++
++def format XTest() {{
++    decode_block = 'return new X86ISAInst::XTestInst(machInst);'
++}};
+diff --git a/src/arch/x86/isa/includes.isa b/src/arch/x86/isa/includes.isa
+index 9445f2032b..d1ed6baba7 100644
+--- a/src/arch/x86/isa/includes.isa
++++ b/src/arch/x86/isa/includes.isa
+@@ -63,6 +63,7 @@ output header {{
+ #include "arch/x86/insts/microregop.hh"
+ #include "arch/x86/insts/microspecop.hh"
+ #include "arch/x86/insts/static_inst.hh"
++#include "arch/x86/insts/htm.hh"
+ #include "arch/x86/isa.hh"
+ #include "arch/x86/regs/ccr.hh"
+ #include "arch/x86/regs/int.hh"
+diff --git a/src/mem/ruby/system/HTMSequencer.cc b/src/mem/ruby/system/HTMSequencer.cc
+index 98f6d35b42..edfd3b3e6b 100644
+--- a/src/mem/ruby/system/HTMSequencer.cc
++++ b/src/mem/ruby/system/HTMSequencer.cc
+@@ -68,6 +68,8 @@ HTMSequencer::htmRetCodeConversion(
+ 
+ HTMSequencer::HTMSequencer(const RubyHTMSequencerParams &p)
+     : Sequencer(p),
++      m_htmStartLatency(p.htm_start_latency),
++      m_htmCommitLatency(p.htm_commit_latency),
+       ADD_STAT(m_htm_transaction_cycles, "number of cycles spent in an outer "
+                                          "transaction"),
+       ADD_STAT(m_htm_transaction_instructions, "number of instructions spent "
+@@ -237,7 +239,16 @@ HTMSequencer::rubyHtmCallback(PacketPtr pkt,
+         DPRINTF(RubyPort, "Sending packet back over port\n");
+         pkt->makeHtmTransactionalReqResponse(
+             htmRetCodeConversion(htm_return_code));
+-        port->schedTimingResp(pkt, curTick());
++
++        // Add calibrated latencies to match real hardware TSX timing
++        Tick extra = 0;
++        if (pkt->req->isHTMStart()) {
++            extra = clockPeriod() * m_htmStartLatency;
++        } else if (pkt->req->isHTMCommit()) {
++            extra = clockPeriod() * m_htmCommitLatency;
++        }
++
++        port->schedTimingResp(pkt, curTick() + extra);
+     } else {
+         delete pkt;
+     }
+diff --git a/src/mem/ruby/system/HTMSequencer.hh b/src/mem/ruby/system/HTMSequencer.hh
+index 3b3933159e..7b32995749 100644
+--- a/src/mem/ruby/system/HTMSequencer.hh
++++ b/src/mem/ruby/system/HTMSequencer.hh
+@@ -99,6 +99,11 @@ class HTMSequencer : public Sequencer
+     Tick m_htmstart_tick;
+     Counter m_htmstart_instruction;
+ 
++    // Extra latency for HTM start (XBEGIN) and commit (XEND) to match
++    // real hardware cycle costs (e.g. Broadwell-EP: xbegin=60, xend=178)
++    Cycles m_htmStartLatency;
++    Cycles m_htmCommitLatency;
++
+     //! Histogram of cycle latencies of HTM transactions
+     statistics::Histogram m_htm_transaction_cycles;
+     //! Histogram of instruction lengths of HTM transactions
+diff --git a/src/mem/ruby/system/Sequencer.py b/src/mem/ruby/system/Sequencer.py
+index 49c6374b14..a836f237c6 100644
+--- a/src/mem/ruby/system/Sequencer.py
++++ b/src/mem/ruby/system/Sequencer.py
+@@ -139,6 +139,9 @@ class RubyHTMSequencer(RubySequencer):
+     cxx_class = "gem5::ruby::HTMSequencer"
+     cxx_header = "mem/ruby/system/HTMSequencer.hh"
+ 
++    htm_start_latency = Param.Cycles(60, "Extra latency (in CPU cycles) for XBEGIN (HTM start)")
++    htm_commit_latency = Param.Cycles(178, "Extra latency (in CPU cycles) for XEND (HTM commit)")
++
+ 
+ class DMASequencer(RubyPort):
+     type = "DMASequencer"
+-- 
+2.50.1 (Apple Git-155)
+
