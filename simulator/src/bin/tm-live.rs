@@ -52,7 +52,10 @@ fn main() {
         cli.app.clone()
     };
 
-    eprintln!("tm-live: SimBackend={:?} App={:?}", sim_backend_path, app_path);
+    eprintln!(
+        "tm-live: SimBackend={:?} App={:?}",
+        sim_backend_path, app_path
+    );
     eprintln!("tm-live: args={:?}", cli.app_args);
 
     // Initialise the live simulation state.

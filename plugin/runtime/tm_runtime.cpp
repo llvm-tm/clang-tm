@@ -3,8 +3,8 @@
 #include <csetjmp>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <pthread.h>
@@ -17,13 +17,13 @@
 //   COUNTER_OFFSET = 0  (nested_call_counter)
 //   JMPRET_OFFSET  = 4  (longjmp_ret)
 struct TMThreadState {
-    int32_t nested_call_counter;
-    int32_t longjmp_ret;
+	int32_t nested_call_counter;
+	int32_t longjmp_ret;
 };
 
 // ── Per-thread state (must match what tm_hooks.hpp declares) ────────
-__thread int32_t    tm_nested_call_counter = 0;
-__thread int32_t    tm_longjmp_ret = 0;
+__thread int32_t tm_nested_call_counter = 0;
+__thread int32_t tm_longjmp_ret = 0;
 __thread unsigned char tm_jmpbuf[256];
 __thread uint8_t is_tm_init_thread_ready = 0;
 thread_local uint8_t tm_buffer[TM_BUFFER_SIZE] = {0};
@@ -32,52 +32,52 @@ thread_local bool g_in_tx = false;
 
 // ── Speculative-allocation tracking ───────────────────────
 struct SpecAlloc {
-    SpecAlloc* next;
-    void* ptr;
+	SpecAlloc *next;
+	void *ptr;
 };
 
-thread_local SpecAlloc* g_spec_allocs = nullptr;
+thread_local SpecAlloc *g_spec_allocs = nullptr;
 
-static void tm_track_spec_alloc(void* ptr)
+static void tm_track_spec_alloc(void *ptr)
 {
-    if (g_in_tx && ptr) {
-        auto* node = static_cast<SpecAlloc*>(::malloc(sizeof(SpecAlloc)));
-        node->ptr = ptr;
-        node->next = g_spec_allocs;
-        g_spec_allocs = node;
-    }
+	if (g_in_tx && ptr) {
+		auto *node = static_cast<SpecAlloc *>(::malloc(sizeof(SpecAlloc)));
+		node->ptr = ptr;
+		node->next = g_spec_allocs;
+		g_spec_allocs = node;
+	}
 }
 
 static void tm_clear_spec_allocs()
 {
-    auto* node = g_spec_allocs;
-    while (node) {
-        auto* next = node->next;
-        ::free(node->ptr);
-        ::free(node);
-        node = next;
-    }
-    g_spec_allocs = nullptr;
+	auto *node = g_spec_allocs;
+	while (node) {
+		auto *next = node->next;
+		::free(node->ptr);
+		::free(node);
+		node = next;
+	}
+	g_spec_allocs = nullptr;
 }
 
 static void tm_flush_spec_allocs()
 {
-    auto* node = g_spec_allocs;
-    while (node) {
-        auto* next = node->next;
-        ::free(node);
-        node = next;
-    }
-    g_spec_allocs = nullptr;
+	auto *node = g_spec_allocs;
+	while (node) {
+		auto *next = node->next;
+		::free(node);
+		node = next;
+	}
+	g_spec_allocs = nullptr;
 }
 
 // ── Deferred-free (transaction-safe free) ──────────────────
 struct FreeNode {
-    FreeNode* next;
-    void* ptr;
+	FreeNode *next;
+	void *ptr;
 };
 
-thread_local FreeNode* g_deferred_frees = nullptr;
+thread_local FreeNode *g_deferred_frees = nullptr;
 
 std::atomic<int8_t> tm_is_init_ready{0};
 
@@ -95,7 +95,7 @@ extern "C" {
 
 static void stub_begin()
 {
-	auto *ts = (TMThreadState*)&tm_nested_call_counter;
+	auto *ts = (TMThreadState *)&tm_nested_call_counter;
 	printf("tm_nested_call_counter=%d  --  ", ts->nested_call_counter);
 	if (ts->nested_call_counter == 1) {
 		printf("tm_begin outer\n");
@@ -109,7 +109,7 @@ static void stub_begin()
 
 static void stub_end()
 {
-	auto *ts = (TMThreadState*)&tm_nested_call_counter;
+	auto *ts = (TMThreadState *)&tm_nested_call_counter;
 	printf("tm_nested_call_counter=%d  --  ", ts->nested_call_counter);
 	if (ts->nested_call_counter == 1) {
 		tm_flush_spec_allocs();
@@ -121,30 +121,103 @@ static void stub_end()
 	}
 }
 
-static int8_t  stub_read_i1(void  *a) { printf("tm_read_i1\n");       return *(int8_t*)a; }
-static int16_t stub_read_i2(void  *a) { printf("tm_read_i2\n");       return *(int16_t*)a; }
-static int32_t stub_read_i4(void  *a) { int32_t v = *(int32_t*)a; printf("tm_read_i4 (%p --> %i)\n", a, v); return v; }
-static int64_t stub_read_i8(void  *a) { printf("tm_read_i8\n");       return *(int64_t*)a; }
-static float   stub_read_f4(void  *a) { printf("tm_read_f4\n");       return *(float*)a; }
-static double  stub_read_f8(void  *a) { printf("tm_read_f8\n");       return *(double*)a; }
-static void   *stub_read_ptr(void **a) { printf("tm_read_ptr\n");      return *a; }
+static int8_t stub_read_i1(void *a)
+{
+	printf("tm_read_i1\n");
+	return *(int8_t *)a;
+}
+static int16_t stub_read_i2(void *a)
+{
+	printf("tm_read_i2\n");
+	return *(int16_t *)a;
+}
+static int32_t stub_read_i4(void *a)
+{
+	int32_t v = *(int32_t *)a;
+	printf("tm_read_i4 (%p --> %i)\n", a, v);
+	return v;
+}
+static int64_t stub_read_i8(void *a)
+{
+	printf("tm_read_i8\n");
+	return *(int64_t *)a;
+}
+static float stub_read_f4(void *a)
+{
+	printf("tm_read_f4\n");
+	return *(float *)a;
+}
+static double stub_read_f8(void *a)
+{
+	printf("tm_read_f8\n");
+	return *(double *)a;
+}
+static void *stub_read_ptr(void **a)
+{
+	printf("tm_read_ptr\n");
+	return *a;
+}
 
-static void stub_write_i1(void  *a, uint8_t  v) { printf("tm_write_i1\n");  fflush(stdout); *(uint8_t*)a  = v; }
-static void stub_write_i2(void  *a, int16_t  v) { printf("tm_write_i2\n");  *(int16_t*)a = v; }
-static void stub_write_i4(void  *a, int32_t  v) { printf("tm_write_i4 (%p <-- %i)\n", a, v); *(int32_t*)a = v; }
-static void stub_write_i8(void  *a, int64_t  v) { printf("tm_write_i8\n");  *(int64_t*)a = v; }
-static void stub_write_f4(void  *a, float    v) { printf("tm_write_f4\n");  *(float*)a   = v; }
-static void stub_write_f8(void  *a, double   v) { printf("tm_write_f8\n");  *(double*)a  = v; }
-static void stub_write_ptr(void **a, void    *v) { printf("tm_write_ptr\n"); *a = v; }
+static void stub_write_i1(void *a, uint8_t v)
+{
+	printf("tm_write_i1\n");
+	fflush(stdout);
+	*(uint8_t *)a = v;
+}
+static void stub_write_i2(void *a, int16_t v)
+{
+	printf("tm_write_i2\n");
+	*(int16_t *)a = v;
+}
+static void stub_write_i4(void *a, int32_t v)
+{
+	printf("tm_write_i4 (%p <-- %i)\n", a, v);
+	*(int32_t *)a = v;
+}
+static void stub_write_i8(void *a, int64_t v)
+{
+	printf("tm_write_i8\n");
+	*(int64_t *)a = v;
+}
+static void stub_write_f4(void *a, float v)
+{
+	printf("tm_write_f4\n");
+	*(float *)a = v;
+}
+static void stub_write_f8(void *a, double v)
+{
+	printf("tm_write_f8\n");
+	*(double *)a = v;
+}
+static void stub_write_ptr(void **a, void *v)
+{
+	printf("tm_write_ptr\n");
+	*a = v;
+}
 
-static void *stub_malloc(size_t s) { void *p = ::malloc(s); tm_track_spec_alloc(p); return p; }
-static void *stub_calloc(size_t n, size_t s) { void *p = ::calloc(n, s); tm_track_spec_alloc(p); return p; }
-static void *stub_realloc(void *p, size_t s) { p = ::realloc(p, s); tm_track_spec_alloc(p); return p; }
+static void *stub_malloc(size_t s)
+{
+	void *p = ::malloc(s);
+	tm_track_spec_alloc(p);
+	return p;
+}
+static void *stub_calloc(size_t n, size_t s)
+{
+	void *p = ::calloc(n, s);
+	tm_track_spec_alloc(p);
+	return p;
+}
+static void *stub_realloc(void *p, size_t s)
+{
+	p = ::realloc(p, s);
+	tm_track_spec_alloc(p);
+	return p;
+}
 
 static void stub_free(void *p)
 {
 	if (g_in_tx) {
-		auto* node = static_cast<FreeNode*>(::malloc(sizeof(FreeNode)));
+		auto *node = static_cast<FreeNode *>(::malloc(sizeof(FreeNode)));
 		node->ptr = p;
 		node->next = g_deferred_frees;
 		g_deferred_frees = node;
@@ -185,22 +258,24 @@ static void stub_exit_thread()
 	}
 }
 
-static void stub_set_jmpbuf(void*) {}
+static void stub_set_jmpbuf(void *) {}
 
-static void *stub_get_env() { return (sigjmp_buf*)&tm_jmpbuf; }
+static void *stub_get_env() { return (sigjmp_buf *)&tm_jmpbuf; }
 
-static TMThreadState *stub_get_thread_state() {
-    return (TMThreadState*)&tm_nested_call_counter;
+static TMThreadState *stub_get_thread_state()
+{
+	return (TMThreadState *)&tm_nested_call_counter;
 }
 
 static std::recursive_mutex g_serialize_mutex;
 static void stub_serialize_lock() { g_serialize_mutex.lock(); }
 static void stub_serialize_unlock() { g_serialize_mutex.unlock(); }
 
-static void stub_memset(void *dst, uint8_t value, size_t sz) {
-    assert(sz < TM_BUFFER_SIZE);
-    memset(dst, value, sz);
-    printf("tm_memset\n");
+static void stub_memset(void *dst, uint8_t value, size_t sz)
+{
+	assert(sz < TM_BUFFER_SIZE);
+	memset(dst, value, sz);
+	printf("tm_memset\n");
 }
 
 } // extern "C"
@@ -212,37 +287,37 @@ static void stub_memset(void *dst, uint8_t value, size_t sz) {
 
 extern "C" {
 
-void     (*tm_init)()                          = stub_init;
-void     (*tm_exit)()                          = stub_exit;
-void     (*tm_init_thread)()                   = stub_init_thread;
-void     (*tm_exit_thread)()                   = stub_exit_thread;
-void     (*tm_begin)()                         = (void(*)())stub_begin;
-void     (*tm_end)()                           = (void(*)())stub_end;
-void     (*tm_set_jmpbuf)(void*)               = stub_set_jmpbuf;
-void    *(*tm_get_env)()                       = stub_get_env;
-void     (*tm_serialize_lock)()                = stub_serialize_lock;
-void     (*tm_serialize_unlock)()              = stub_serialize_unlock;
-void     (*tm_memset)(void*, uint8_t, size_t)  = stub_memset;
+void (*tm_init)() = stub_init;
+void (*tm_exit)() = stub_exit;
+void (*tm_init_thread)() = stub_init_thread;
+void (*tm_exit_thread)() = stub_exit_thread;
+void (*tm_begin)() = (void (*)())stub_begin;
+void (*tm_end)() = (void (*)())stub_end;
+void (*tm_set_jmpbuf)(void *) = stub_set_jmpbuf;
+void *(*tm_get_env)() = stub_get_env;
+void (*tm_serialize_lock)() = stub_serialize_lock;
+void (*tm_serialize_unlock)() = stub_serialize_unlock;
+void (*tm_memset)(void *, uint8_t, size_t) = stub_memset;
 
-void    *(*tm_malloc)(size_t)               = (void*(*)(size_t))stub_malloc;
-void    *(*tm_calloc)(size_t, size_t)       = (void*(*)(size_t,size_t))stub_calloc;
-void    *(*tm_realloc)(void*, size_t)       = (void*(*)(void*,size_t))stub_realloc;
-void     (*tm_free)(void*)                  = (void(*)(void*))stub_free;
-uint8_t  (*tm_read_i1)(uint8_t*)            = (uint8_t(*)(uint8_t*))stub_read_i1;
-uint16_t (*tm_read_i2)(uint16_t*)           = (uint16_t(*)(uint16_t*))stub_read_i2;
-uint32_t (*tm_read_i4)(uint32_t*)           = (uint32_t(*)(uint32_t*))stub_read_i4;
-uint64_t (*tm_read_i8)(uint64_t*)           = (uint64_t(*)(uint64_t*))stub_read_i8;
-float    (*tm_read_f4)(float*)              = (float(*)(float*))stub_read_f4;
-double   (*tm_read_f8)(double*)             = (double(*)(double*))stub_read_f8;
-void    *(*tm_read_ptr)(void**)             = (void*(*)(void**))stub_read_ptr;
-void     (*tm_write_i1)(uint8_t*, uint8_t)  = (void(*)(uint8_t*,uint8_t))stub_write_i1;
-void     (*tm_write_i2)(uint16_t*, uint16_t)= (void(*)(uint16_t*,uint16_t))stub_write_i2;
-void     (*tm_write_i4)(uint32_t*, uint32_t)= (void(*)(uint32_t*,uint32_t))stub_write_i4;
-void     (*tm_write_i8)(uint64_t*, int64_t) = (void(*)(uint64_t*,int64_t))stub_write_i8;
-void     (*tm_write_f4)(float*, float)      = (void(*)(float*,float))stub_write_f4;
-void     (*tm_write_f8)(double*, double)    = (void(*)(double*,double))stub_write_f8;
-void     (*tm_write_ptr)(void**, void*)      = (void(*)(void**,void*))stub_write_ptr;
-void *(*tm_get_thread_state)() = (void*(*)())stub_get_thread_state;
+void *(*tm_malloc)(size_t) = (void *(*)(size_t))stub_malloc;
+void *(*tm_calloc)(size_t, size_t) = (void *(*)(size_t, size_t))stub_calloc;
+void *(*tm_realloc)(void *, size_t) = (void *(*)(void *, size_t))stub_realloc;
+void (*tm_free)(void *) = (void (*)(void *))stub_free;
+uint8_t (*tm_read_i1)(uint8_t *) = (uint8_t (*)(uint8_t *))stub_read_i1;
+uint16_t (*tm_read_i2)(uint16_t *) = (uint16_t (*)(uint16_t *))stub_read_i2;
+uint32_t (*tm_read_i4)(uint32_t *) = (uint32_t (*)(uint32_t *))stub_read_i4;
+uint64_t (*tm_read_i8)(uint64_t *) = (uint64_t (*)(uint64_t *))stub_read_i8;
+float (*tm_read_f4)(float *) = (float (*)(float *))stub_read_f4;
+double (*tm_read_f8)(double *) = (double (*)(double *))stub_read_f8;
+void *(*tm_read_ptr)(void **) = (void *(*)(void **))stub_read_ptr;
+void (*tm_write_i1)(uint8_t *, uint8_t) = (void (*)(uint8_t *, uint8_t))stub_write_i1;
+void (*tm_write_i2)(uint16_t *, uint16_t) = (void (*)(uint16_t *, uint16_t))stub_write_i2;
+void (*tm_write_i4)(uint32_t *, uint32_t) = (void (*)(uint32_t *, uint32_t))stub_write_i4;
+void (*tm_write_i8)(uint64_t *, int64_t) = (void (*)(uint64_t *, int64_t))stub_write_i8;
+void (*tm_write_f4)(float *, float) = (void (*)(float *, float))stub_write_f4;
+void (*tm_write_f8)(double *, double) = (void (*)(double *, double))stub_write_f8;
+void (*tm_write_ptr)(void **, void *) = (void (*)(void **, void *))stub_write_ptr;
+void *(*tm_get_thread_state)() = (void *(*)())stub_get_thread_state;
 
 // ── Functions called directly (not through hook pointers) ───
 // These are called directly by the LLVM pass preamble, so they
@@ -251,9 +326,9 @@ void *(*tm_get_thread_state)() = (void*(*)())stub_get_thread_state;
 
 void tm_flush_deferred_frees()
 {
-	auto* node = g_deferred_frees;
+	auto *node = g_deferred_frees;
 	while (node) {
-		auto* next = node->next;
+		auto *next = node->next;
 		std::free(node->ptr);
 		std::free(node);
 		node = next;
@@ -263,9 +338,9 @@ void tm_flush_deferred_frees()
 
 void tm_clear_deferred_frees()
 {
-	auto* node = g_deferred_frees;
+	auto *node = g_deferred_frees;
 	while (node) {
-		auto* next = node->next;
+		auto *next = node->next;
 		std::free(node);
 		node = next;
 	}
@@ -287,7 +362,7 @@ void consume_ptr(volatile void *ptr) { (void)ptr; }
 // On glibc, sigsetjmp is a macro expanding to __sigsetjmp(env, savemask);
 // taking its address requires the underlying function name.
 #if defined(__APPLE__)
-int (*tm_sigsetjmp)(void*, int) = (int(*)(void*, int))sigsetjmp;
+int (*tm_sigsetjmp)(void *, int) = (int (*)(void *, int))sigsetjmp;
 #else
-int (*tm_sigsetjmp)(void*, int) = (int(*)(void*, int))__sigsetjmp;
+int (*tm_sigsetjmp)(void *, int) = (int (*)(void *, int))__sigsetjmp;
 #endif

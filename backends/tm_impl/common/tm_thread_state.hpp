@@ -11,8 +11,8 @@
 //   COUNTER_OFFSET = 0  (nested_call_counter)
 //   JMPRET_OFFSET  = 4  (longjmp_ret)
 struct TMThreadState {
-    int32_t nested_call_counter;
-    int32_t longjmp_ret;
+	int32_t nested_call_counter;
+	int32_t longjmp_ret;
 };
 
 #endif // TM_THREAD_STATE_HPP

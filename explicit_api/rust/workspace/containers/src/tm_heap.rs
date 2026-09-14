@@ -13,7 +13,10 @@ impl<T: TmPrimitive + PartialOrd + Copy, const MAX: usize> TMHeap<T, MAX> {
         for _ in 0..MAX {
             data.push(TmCell::new(init));
         }
-        TMHeap { data, size: TmCell::new(0) }
+        TMHeap {
+            data,
+            size: TmCell::new(0),
+        }
     }
 
     pub fn len(&self, tx: &Transaction) -> i32 {

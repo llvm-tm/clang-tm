@@ -17,6 +17,7 @@
  *   Stock-Level (§2.8) - 4%
  */
 
+#include "tm_hash_set.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -27,7 +28,6 @@
 #include <random>
 #include <thread>
 #include <vector>
-#include "tm_hash_set.hpp"
 
 #define TM __attribute__((annotate("tm")))
 #define TX __attribute__((annotate("shared"), noinline))
@@ -894,15 +894,16 @@ MAIN int main(int argc, char *argv[])
 			g_pct_stock_level = std::atoi(argv[++i]);
 	}
 
-	int pct_sum = g_pct_new_order + g_pct_payment + g_pct_order_status +
-	              g_pct_delivery + g_pct_stock_level;
+	int pct_sum = g_pct_new_order + g_pct_payment + g_pct_order_status + g_pct_delivery +
+	              g_pct_stock_level;
 	if (g_pct_new_order < 0 || g_pct_payment < 0 || g_pct_order_status < 0 ||
 	    g_pct_delivery < 0 || g_pct_stock_level < 0 || pct_sum != 100) {
 		std::cerr << "FATAL: transaction mix must be non-negative and sum to 100"
-		             " (new-order=" << g_pct_new_order << ", payment="
-		          << g_pct_payment << ", status=" << g_pct_order_status
-		          << ", delivery=" << g_pct_delivery << ", stock-level="
-		          << g_pct_stock_level << ", sum=" << pct_sum << ")\n";
+		             " (new-order="
+		          << g_pct_new_order << ", payment=" << g_pct_payment
+		          << ", status=" << g_pct_order_status << ", delivery=" << g_pct_delivery
+		          << ", stock-level=" << g_pct_stock_level << ", sum=" << pct_sum
+		          << ")\n";
 		return 1;
 	}
 
@@ -940,10 +941,9 @@ MAIN int main(int argc, char *argv[])
 	          << " per district (pre-populated)\n";
 	std::cout << "  Threads:    " << threads << "\n";
 	std::cout << "  Duration:   " << duration << " ms\n";
-	std::cout << "  Mix:        new-order " << g_pct_new_order
-	          << "%, payment " << g_pct_payment << "%, status "
-	          << g_pct_order_status << "%, delivery " << g_pct_delivery
-	          << "%, stock-level " << g_pct_stock_level << "%\n\n";
+	std::cout << "  Mix:        new-order " << g_pct_new_order << "%, payment "
+	          << g_pct_payment << "%, status " << g_pct_order_status << "%, delivery "
+	          << g_pct_delivery << "%, stock-level " << g_pct_stock_level << "%\n\n";
 
 	std::cout << "Initializing data..." << std::endl;
 	std::cout.flush();

@@ -1,16 +1,20 @@
+use super::Config;
+use crate::Rng;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tm::{transaction, TmCell};
-use crate::Rng;
-use super::Config;
 
 fn sqrt_approx(x: f64) -> f64 {
-    if x <= 0.0 { return 0.0; }
+    if x <= 0.0 {
+        return 0.0;
+    }
     let mut s = x;
     for _ in 0..25 {
         let ns = (s + x / s) * 0.5;
-        if (ns - s).abs() < 1e-15 { break; }
+        if (ns - s).abs() < 1e-15 {
+            break;
+        }
         s = ns;
     }
     s
@@ -29,8 +33,13 @@ struct KMeansData {
     new_centers_count: Vec<TmCell<i32>>,
 }
 
-fn accumulate(tid: usize, num_threads: usize, d: &KMeansData,
-              local_sum: &RefCell<Vec<f64>>, local_count: &RefCell<Vec<i32>>) {
+fn accumulate(
+    tid: usize,
+    num_threads: usize,
+    d: &KMeansData,
+    local_sum: &RefCell<Vec<f64>>,
+    local_count: &RefCell<Vec<i32>>,
+) {
     let chunk = (d.npoints + num_threads - 1) / num_threads;
     let start = tid * chunk;
     let end = (start + chunk).min(d.npoints);
@@ -45,10 +54,13 @@ fn accumulate(tid: usize, num_threads: usize, d: &KMeansData,
                 let mut dist = 0.0;
                 for dim in 0..d.ndims {
                     let diff = tx.read(&d.points[i * d.ndims + dim])
-                            - tx.read(&d.centroids[c * d.ndims + dim]);
+                        - tx.read(&d.centroids[c * d.ndims + dim]);
                     dist += diff * diff;
                 }
-                if dist < best_dist { best_dist = dist; best = c as i32; }
+                if dist < best_dist {
+                    best_dist = dist;
+                    best = c as i32;
+                }
             }
             tx.write(&d.assignments[i], best);
             lc[best as usize] += 1;
@@ -63,17 +75,29 @@ pub fn test() -> i32 {
     let mut fails = 0;
     // Test sqrt_approx
     let r = sqrt_approx(4.0);
-    if (r - 2.0).abs() > 1e-10 { eprintln!("FAIL: sqrt(4) = {}", r); fails += 1; }
+    if (r - 2.0).abs() > 1e-10 {
+        eprintln!("FAIL: sqrt(4) = {}", r);
+        fails += 1;
+    }
     let r = sqrt_approx(0.0);
-    if r != 0.0 { eprintln!("FAIL: sqrt(0) = {}", r); fails += 1; }
+    if r != 0.0 {
+        eprintln!("FAIL: sqrt(0) = {}", r);
+        fails += 1;
+    }
 
     // Test euclidean distance logic
     let p1 = [1.0, 2.0, 3.0];
     let p2 = [4.0, 5.0, 6.0];
     let mut dist_sq = 0.0;
-    for i in 0..3 { let d = p1[i] - p2[i]; dist_sq += d * d; }
+    for i in 0..3 {
+        let d = p1[i] - p2[i];
+        dist_sq += d * d;
+    }
     let expected = 27.0f64;
-    if (dist_sq - expected).abs() > 1e-10 { eprintln!("FAIL: dist_sq = {}", dist_sq); fails += 1; }
+    if (dist_sq - expected).abs() > 1e-10 {
+        eprintln!("FAIL: dist_sq = {}", dist_sq);
+        fails += 1;
+    }
 
     // Test cluster assignment
     let pts = [0.0, 0.0, 6.0, 0.0, 10.0, 0.0];
@@ -87,12 +111,20 @@ pub fn test() -> i32 {
                 let diff = pts[pi * 2 + j] - cents[ci * 2 + j];
                 d += diff * diff;
             }
-            if d < best_d { best_d = d; best = ci as i32; }
+            if d < best_d {
+                best_d = d;
+                best = ci as i32;
+            }
         }
         let expected = [0, 1, 1];
-        if best != expected[pi] { eprintln!("FAIL: point {} assigned to cluster {}", pi, best); fails += 1; }
+        if best != expected[pi] {
+            eprintln!("FAIL: point {} assigned to cluster {}", pi, best);
+            fails += 1;
+        }
     }
-    if fails > 0 { eprintln!("kmeans: {} test(s) failed", fails); }
+    if fails > 0 {
+        eprintln!("kmeans: {} test(s) failed", fails);
+    }
     fails
 }
 
@@ -102,11 +134,16 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
     let nclusters = config.clusters.max(1);
     let ndims = config.dims.max(1);
     let threshold = 0.00001;
-    println!("  Points: {}  Dims: {}  Clusters: {}  Threshold: {}",
-             npoints, ndims, nclusters, threshold);
+    println!(
+        "  Points: {}  Dims: {}  Clusters: {}  Threshold: {}",
+        npoints, ndims, nclusters, threshold
+    );
 
     let d = KMeansData {
-        npoints, ndims, nclusters, threshold,
+        npoints,
+        ndims,
+        nclusters,
+        threshold,
         points: (0..npoints * ndims).map(|_| TmCell::new(0.0)).collect(),
         centroids: (0..nclusters * ndims).map(|_| TmCell::new(0.0)).collect(),
         assignments: (0..npoints).map(|_| TmCell::new(-1)).collect(),
@@ -120,14 +157,18 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
         for dim in 0..ndims {
             let u = rng.uniform();
             let val = (-10.0 + u * 20.0) + cluster * 5.0;
-            unsafe { *d.points[i * ndims + dim].ptr() = val; }
+            unsafe {
+                *d.points[i * ndims + dim].ptr() = val;
+            }
         }
     }
     for c in 0..nclusters {
         for dim in 0..ndims {
             let u = rng.uniform();
             let val = -10.0 + u * 20.0;
-            unsafe { *d.centroids[c * ndims + dim].ptr() = val; }
+            unsafe {
+                *d.centroids[c * ndims + dim].ptr() = val;
+            }
         }
     }
 
@@ -161,7 +202,8 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
                             unsafe {
                                 *d.new_centers_count[c].ptr() += lc[c];
                                 for dim in 0..ndims {
-                                    *d.new_centers_sum[c * ndims + dim].ptr() += ls[c * ndims + dim];
+                                    *d.new_centers_sum[c * ndims + dim].ptr() +=
+                                        ls[c * ndims + dim];
                                 }
                             }
                         }
@@ -178,11 +220,17 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
                                 let old_val = unsafe { *d.centroids[c * ndims + dim].ptr() };
                                 let diff = old_val - new_val;
                                 delta += diff * diff;
-                                unsafe { *d.centroids[c * ndims + dim].ptr() = new_val; }
-                                unsafe { *d.new_centers_sum[c * ndims + dim].ptr() = 0.0; }
+                                unsafe {
+                                    *d.centroids[c * ndims + dim].ptr() = new_val;
+                                }
+                                unsafe {
+                                    *d.new_centers_sum[c * ndims + dim].ptr() = 0.0;
+                                }
                             }
                         }
-                        unsafe { *d.new_centers_count[c].ptr() = 0; }
+                        unsafe {
+                            *d.new_centers_count[c].ptr() = 0;
+                        }
                     }
                     delta = sqrt_approx(delta / (nclusters * ndims) as f64);
                     if delta < threshold {
@@ -196,18 +244,30 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
 
     let elapsed = t0.elapsed().as_millis() as u64;
     let iter_ops = g_ops.load(Ordering::Relaxed);
-    println!("  Operations: {}  Elapsed: {} ms  Rate: {} ops/s",
-             iter_ops, elapsed, if elapsed > 0 { iter_ops * 1000 / elapsed } else { 0 });
+    println!(
+        "  Operations: {}  Elapsed: {} ms  Rate: {} ops/s",
+        iter_ops,
+        elapsed,
+        if elapsed > 0 {
+            iter_ops * 1000 / elapsed
+        } else {
+            0
+        }
+    );
 
     println!("  Centroids:");
     let d = &*data;
     for c in 0..nclusters.min(10) {
         print!("    [{c}] ");
         for dim in 0..ndims.min(5) {
-            if dim > 0 { print!(", "); }
+            if dim > 0 {
+                print!(", ");
+            }
             print!("{:.6}", unsafe { *d.centroids[c * ndims + dim].ptr() });
         }
-        if ndims > 5 { print!(", ..."); }
+        if ndims > 5 {
+            print!(", ...");
+        }
         println!();
     }
 }

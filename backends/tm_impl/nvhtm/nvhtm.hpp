@@ -31,31 +31,30 @@
 #pragma once
 
 #include <atomic>
-#include <cstdint>
+#include <cpuid.h>
 #include <cstddef>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <atomic>
-#include <new>
-#include <cstdio>
-#include <thread>
 #include <immintrin.h>
-#include <cpuid.h>
+#include <new>
+#include <thread>
 
 namespace nvhtm
 {
 
 using stm::any_type_t;
-using stm::ValueType;
 using stm::fill_any_type;
-using stm::return_any_type;
 using stm::read_value_from_addr;
+using stm::return_any_type;
+using stm::ValueType;
 using stm::write_value_to_addr;
 
 constexpr const char *VERSION = "1.0.0-nvhtm";
 
-constexpr size_t LOG_CAPACITY = 4096;   // max TM writes per TX (within L1)
-constexpr int    MAX_RETRIES   = 12;     // max HTM retries before fallback
+constexpr size_t LOG_CAPACITY = 4096; // max TM writes per TX (within L1)
+constexpr int MAX_RETRIES = 12;       // max HTM retries before fallback
 
 // ── Log entry ──────────────────────────────────────────────────────────
 struct LogEntry {
@@ -68,9 +67,9 @@ struct LogEntry {
 struct Transaction {
 	bool active = false;
 	bool read_only = true;
-	int  retry_count = 0;
+	int retry_count = 0;
 	size_t log_count = 0;
-	LogEntry log[LOG_CAPACITY];   // redo log buffer
+	LogEntry log[LOG_CAPACITY]; // redo log buffer
 
 	void reset()
 	{
@@ -80,10 +79,7 @@ struct Transaction {
 		log_count = 0;
 	}
 
-	void clear()
-	{
-		log_count = 0;
-	}
+	void clear() { log_count = 0; }
 };
 
 extern __thread Transaction *current_tx;
@@ -101,7 +97,7 @@ inline bool rtm_available()
 	if (cached < 0) {
 		unsigned int a = 0, b = 0, c = 0, d = 0;
 		__cpuid_count(7, 0, a, b, c, d);
-		cached = (b & (1 << 11)) ? 1 : 0;  // EBX[11] = RTM
+		cached = (b & (1 << 11)) ? 1 : 0; // EBX[11] = RTM
 		if (!cached)
 			fprintf(stderr, "[NVHTM] RTM not available — running without HTM\n");
 	}
@@ -171,14 +167,16 @@ inline bool begin()
 inline void abort_tx()
 {
 	if (!rtm_available()) {
-		if (current_tx) current_tx->active = false;
+		if (current_tx)
+			current_tx->active = false;
 		siglongjmp(*jmpbuf, 1);
 		return;
 	}
 	_xabort(1);
 	// _xabort rolls back to _xbegin() inside begin(), which then
 	// drives the retry via siglongjmp.  Never reaches here on RTM CPUs.
-	if (current_tx) current_tx->active = false;
+	if (current_tx)
+		current_tx->active = false;
 	siglongjmp(*jmpbuf, 1);
 }
 
@@ -219,8 +217,7 @@ inline bool commit()
 // Read / Write operations
 // =========================================================================
 
-template <typename T, ValueType SZ>
-inline T tm_read(T *addr)
+template <typename T, ValueType SZ> inline T tm_read(T *addr)
 {
 	if (!current_tx || !current_tx->active)
 		return *addr;
@@ -236,8 +233,7 @@ inline T tm_read(T *addr)
 	return *addr; // HTM tracks the read-set in hardware
 }
 
-template <typename T, ValueType SZ>
-inline void tm_write(T *addr, T val)
+template <typename T, ValueType SZ> inline void tm_write(T *addr, T val)
 {
 	// Null-address guard: writing to < 0x100000 or kernel-space (> 47-bit
 	// top bit set) is either a moved-from null pointer GEP or a bug.
@@ -290,20 +286,59 @@ inline void tm_write(T *addr, T val)
 // Typed wrappers (14 functions matching plugin interface)
 // =========================================================================
 
-inline uint8_t  tm_read_i1(uint8_t  *addr) { return tm_read<uint8_t,  ValueType::UINT8>(addr);   }
-inline uint16_t tm_read_i2(uint16_t *addr) { return tm_read<uint16_t, ValueType::UINT16>(addr);  }
-inline uint32_t tm_read_i4(uint32_t *addr) { return tm_read<uint32_t, ValueType::UINT32>(addr);  }
-inline uint64_t tm_read_i8(uint64_t *addr) { return tm_read<uint64_t, ValueType::UINT64>(addr);  }
-inline float    tm_read_f4(float    *addr) { return tm_read<float,    ValueType::FLOAT>(addr);   }
-inline double   tm_read_f8(double   *addr) { return tm_read<double,   ValueType::DOUBLE>(addr);  }
-inline void *   tm_read_ptr(void   **addr) { return tm_read<void *,   ValueType::POINTER>(addr); }
+inline uint8_t tm_read_i1(uint8_t *addr)
+{
+	return tm_read<uint8_t, ValueType::UINT8>(addr);
+}
+inline uint16_t tm_read_i2(uint16_t *addr)
+{
+	return tm_read<uint16_t, ValueType::UINT16>(addr);
+}
+inline uint32_t tm_read_i4(uint32_t *addr)
+{
+	return tm_read<uint32_t, ValueType::UINT32>(addr);
+}
+inline uint64_t tm_read_i8(uint64_t *addr)
+{
+	return tm_read<uint64_t, ValueType::UINT64>(addr);
+}
+inline float tm_read_f4(float *addr) { return tm_read<float, ValueType::FLOAT>(addr); }
+inline double tm_read_f8(double *addr)
+{
+	return tm_read<double, ValueType::DOUBLE>(addr);
+}
+inline void *tm_read_ptr(void **addr)
+{
+	return tm_read<void *, ValueType::POINTER>(addr);
+}
 
-inline void tm_write_i1(uint8_t  *addr, uint8_t  val) { tm_write<uint8_t,  ValueType::UINT8>(addr, val);   }
-inline void tm_write_i2(uint16_t *addr, uint16_t val) { tm_write<uint16_t, ValueType::UINT16>(addr, val); }
-inline void tm_write_i4(uint32_t *addr, uint32_t val) { tm_write<uint32_t, ValueType::UINT32>(addr, val); }
-inline void tm_write_i8(uint64_t *addr, uint64_t val) { tm_write<uint64_t, ValueType::UINT64>(addr, val); }
-inline void tm_write_f4(float    *addr, float    val) { tm_write<float,    ValueType::FLOAT>(addr, val);   }
-inline void tm_write_f8(double   *addr, double   val) { tm_write<double,   ValueType::DOUBLE>(addr, val);  }
-inline void tm_write_ptr(void   **addr, void    *val) { tm_write<void *,   ValueType::POINTER>(addr, val); }
+inline void tm_write_i1(uint8_t *addr, uint8_t val)
+{
+	tm_write<uint8_t, ValueType::UINT8>(addr, val);
+}
+inline void tm_write_i2(uint16_t *addr, uint16_t val)
+{
+	tm_write<uint16_t, ValueType::UINT16>(addr, val);
+}
+inline void tm_write_i4(uint32_t *addr, uint32_t val)
+{
+	tm_write<uint32_t, ValueType::UINT32>(addr, val);
+}
+inline void tm_write_i8(uint64_t *addr, uint64_t val)
+{
+	tm_write<uint64_t, ValueType::UINT64>(addr, val);
+}
+inline void tm_write_f4(float *addr, float val)
+{
+	tm_write<float, ValueType::FLOAT>(addr, val);
+}
+inline void tm_write_f8(double *addr, double val)
+{
+	tm_write<double, ValueType::DOUBLE>(addr, val);
+}
+inline void tm_write_ptr(void **addr, void *val)
+{
+	tm_write<void *, ValueType::POINTER>(addr, val);
+}
 
 } // namespace nvhtm

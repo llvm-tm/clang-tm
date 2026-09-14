@@ -142,9 +142,7 @@ static volatile uint64_t g_ww_var;
 static void thread_write_write(int id)
 {
 	tm_init_thread();
-	tx_loop(2000, [&]() {
-		tm_test_write_i8((uint64_t *)&g_ww_var, (uint64_t)(id + 1));
-	});
+	tx_loop(2000, [&]() { tm_test_write_i8((uint64_t *)&g_ww_var, (uint64_t)(id + 1)); });
 	tm_exit_thread();
 }
 
@@ -159,8 +157,7 @@ static void test_write_write()
 	for (auto &t : threads)
 		t.join();
 
-	TEST_ASSERT(g_ww_var >= 1 && g_ww_var <= 4,
-	            "ww_var is a valid thread ID (1-4)");
+	TEST_ASSERT(g_ww_var >= 1 && g_ww_var <= 4, "ww_var is a valid thread ID (1-4)");
 }
 
 // ══════════════════════════════════════════════════════════════════════

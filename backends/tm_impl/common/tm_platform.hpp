@@ -24,72 +24,71 @@
 // ── 1. Platform-detection helpers ─────────────────────────────────
 // These are used throughout the section guards below.
 // x86 family
-#if defined(__x86_64__) || defined(__i386__) || defined(_M_IX86) || \
-    defined(_M_AMD64) || defined(_M_X64)
-  #define TM_PLATFORM_X86 1
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_IX86) || defined(_M_AMD64) || \
+    defined(_M_X64)
+#define TM_PLATFORM_X86 1
 #else
-  #define TM_PLATFORM_X86 0
+#define TM_PLATFORM_X86 0
 #endif
 
 // ARM 64-bit
 #if defined(__aarch64__) || defined(_M_ARM64)
-  #define TM_PLATFORM_ARM64 1
+#define TM_PLATFORM_ARM64 1
 #else
-  #define TM_PLATFORM_ARM64 0
+#define TM_PLATFORM_ARM64 0
 #endif
 
 // POSIX family (macOS, Linux, *BSD, Solaris, etc.)
-#if defined(__APPLE__) || defined(__linux__) || defined(__linux) ||  \
-    defined(__FreeBSD__) || defined(__OpenBSD__) ||                   \
-    defined(__NetBSD__) || defined(__sun)
-  #define TM_PLATFORM_POSIX 1
+#if defined(__APPLE__) || defined(__linux__) || defined(__linux) ||                      \
+    defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) ||               \
+    defined(__sun)
+#define TM_PLATFORM_POSIX 1
 #else
-  #define TM_PLATFORM_POSIX 0
+#define TM_PLATFORM_POSIX 0
 #endif
 
 // glibc / Linux (where execinfo.h backtrace() is native)
 #if defined(__linux__) || defined(__linux)
-  // musl (e.g. Alpine) has no <execinfo.h>; probe when possible.
-  #if defined(__has_include)
-    #if __has_include(<execinfo.h>)
-      #define TM_PLATFORM_HAS_EXECINFO 1
-    #else
-      #define TM_PLATFORM_HAS_EXECINFO 0
-    #endif
-  #else
-    #define TM_PLATFORM_HAS_EXECINFO 1
-  #endif
-#elif defined(__APPLE__)
-  // macOS provides backtrace/backtrace_symbols_fd from <execinfo.h>
-  // (Apple's own implementation, not glibc).
-  #define TM_PLATFORM_HAS_EXECINFO 1
+// musl (e.g. Alpine) has no <execinfo.h>; probe when possible.
+#if defined(__has_include)
+#if __has_include(<execinfo.h>)
+#define TM_PLATFORM_HAS_EXECINFO 1
 #else
-  #define TM_PLATFORM_HAS_EXECINFO 0
+#define TM_PLATFORM_HAS_EXECINFO 0
+#endif
+#else
+#define TM_PLATFORM_HAS_EXECINFO 1
+#endif
+#elif defined(__APPLE__)
+// macOS provides backtrace/backtrace_symbols_fd from <execinfo.h>
+// (Apple's own implementation, not glibc).
+#define TM_PLATFORM_HAS_EXECINFO 1
+#else
+#define TM_PLATFORM_HAS_EXECINFO 0
 #endif
 
 // ── 2. System includes (selected per platform) ───────────────────
 
 // POSIX threads + sysconf
 #if TM_PLATFORM_POSIX
-  #include <pthread.h>
-  #include <unistd.h>   // sysconf(_SC_PAGESIZE)
+#include <pthread.h>
+#include <unistd.h> // sysconf(_SC_PAGESIZE)
 #endif
 
 // Windows thread / stack API
 #if defined(_WIN32) || defined(_WIN64)
-  #include <windows.h>
+#include <windows.h>
 #endif
 
 // Solaris thr_stksegment
 #if defined(__sun)
-  #include <thread.h>
+#include <thread.h>
 #endif
 
 // execinfo.h for backtrace (glibc / macOS)
 #if TM_PLATFORM_HAS_EXECINFO
-  #include <execinfo.h>
+#include <execinfo.h>
 #endif
-
 
 namespace stm
 {
@@ -135,14 +134,11 @@ inline void tm_backtrace_print(int fd)
 }
 
 /// Like tm_backtrace_print but includes a labelled value.
-inline void tm_backtrace_print_labeled(int fd,
-                                        const char *label,
-                                        uint64_t val)
+inline void tm_backtrace_print_labeled(int fd, const char *label, uint64_t val)
 {
 	dprintf(fd, "%s: 0x%llx\n", label, (unsigned long long)val);
 	tm_backtrace_print(fd);
 }
-
 
 // ── 5. CPU relax / spin-loop hint ────────────────────────────────
 //
@@ -160,7 +156,6 @@ inline void tm_cpu_relax()
 	// No hint available on this architecture.
 #endif
 }
-
 
 // ── 6. Cycle-accurate timestamp (for event logging) ──────────────
 //
@@ -183,7 +178,6 @@ inline uint64_t tm_timestamp()
 #endif
 }
 
-
 // ── 7. Page size ──────────────────────────────────────────────────
 //
 // Returns the system's memory page size in bytes.  Used by the TM
@@ -205,6 +199,5 @@ inline long tm_page_size()
 	return 4096;
 #endif
 }
-
 
 } // namespace stm

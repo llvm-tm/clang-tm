@@ -69,11 +69,7 @@ const ASSERT_COST: u64 = 10;
 const LOG_COST: u64 = 20;
 
 /// Compute cycle cost for an event given a machine profile and backend.
-pub fn event_cost(
-    kind: &EventKind,
-    machine: &MachineProfile,
-    backend: BackendProfile,
-) -> u64 {
+pub fn event_cost(kind: &EventKind, machine: &MachineProfile, backend: BackendProfile) -> u64 {
     match backend {
         BackendProfile::Tsxsgl | BackendProfile::TsxSim => tsx_event_cost(kind, machine),
         _ => generic_event_cost(kind, machine, backend.machine_profile_name()),
@@ -118,10 +114,13 @@ fn tsx_event_cost(kind: &EventKind, machine: &MachineProfile) -> u64 {
         }
         EventKind::Read { .. } => {
             // L1 + bloom + 40c coherence probe amortized per read in contended case
-            (machine.tsx.read_l1_cycles + machine.tsx.bloom_check_cycles + bk.read_overhead) as u64 + 2
+            (machine.tsx.read_l1_cycles + machine.tsx.bloom_check_cycles + bk.read_overhead) as u64
+                + 2
         }
         EventKind::Write { .. } => {
-            (machine.tsx.write_l1_cycles + machine.tsx.bloom_check_cycles + bk.write_overhead) as u64 + 4
+            (machine.tsx.write_l1_cycles + machine.tsx.bloom_check_cycles + bk.write_overhead)
+                as u64
+                + 4
         }
         EventKind::Alloc { .. } => ALLOC_COST,
         EventKind::Free { .. } => FREE_COST,
@@ -170,9 +169,19 @@ impl CalibratedCostModel {
             tx_end_cost: event_cost(&EventKind::TxEnd, machine, backend),
             abort_cost: event_cost(&EventKind::Abort { reason: 0 }, machine, backend),
             read_cost: event_cost(&EventKind::Read { addr: 0, width: 8 }, machine, backend),
-            write_cost: event_cost(&EventKind::Write { addr: 0, width: 8, val: 0 }, machine, backend),
-            sgl_begin_cost: (machine.backend("tsxsgl").begin_overhead + machine.tsx.mutex_lock_cycles) as u64,
-            sgl_end_cost: (machine.backend("tsxsgl").commit_overhead + machine.tsx.mutex_unlock_cycles) as u64,
+            write_cost: event_cost(
+                &EventKind::Write {
+                    addr: 0,
+                    width: 8,
+                    val: 0,
+                },
+                machine,
+                backend,
+            ),
+            sgl_begin_cost: (machine.backend("tsxsgl").begin_overhead
+                + machine.tsx.mutex_lock_cycles) as u64,
+            sgl_end_cost: (machine.backend("tsxsgl").commit_overhead
+                + machine.tsx.mutex_unlock_cycles) as u64,
         }
     }
 

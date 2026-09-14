@@ -106,7 +106,11 @@ impl LiveSimState {
             }
         }
 
-        t.read_set.push(ReadEntry { addr, width, value: shadow_val });
+        t.read_set.push(ReadEntry {
+            addr,
+            width,
+            value: shadow_val,
+        });
         self.stats.reads += 1;
         self.clock += 5;
         shadow_val
@@ -121,7 +125,11 @@ impl LiveSimState {
         if let Some(w) = t.write_set.iter_mut().find(|w| w.addr == addr) {
             w.value = val;
         } else {
-            t.write_set.push(WriteEntry { addr, width, value: val });
+            t.write_set.push(WriteEntry {
+                addr,
+                width,
+                value: val,
+            });
         }
         self.stats.writes += 1;
         self.clock += 6;
@@ -191,11 +199,7 @@ impl LiveSimState {
             "═══ live sim report ═══\n\
              Commits: {}  Aborts: {}  Reads: {}  Writes: {}\n\
              TM cycles: {}",
-            self.stats.commits,
-            self.stats.aborts,
-            self.stats.reads,
-            self.stats.writes,
-            self.clock,
+            self.stats.commits, self.stats.aborts, self.stats.reads, self.stats.writes, self.clock,
         );
     }
 }

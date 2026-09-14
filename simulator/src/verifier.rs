@@ -30,6 +30,12 @@ pub struct Verifier {
     pub initial_value_sum: u64,
 }
 
+impl Default for Verifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Verifier {
     pub fn new() -> Self {
         Verifier {
@@ -94,22 +100,24 @@ impl Verifier {
             }
             _ => {}
         }
-        self.shadow.insert(addr, Allocation { size, is_freed: false });
+        self.shadow.insert(
+            addr,
+            Allocation {
+                size,
+                is_freed: false,
+            },
+        );
     }
 
     pub fn free(&mut self, addr: u64) {
         match self.shadow.get_mut(&addr) {
             None => {
-                self.violations.push(format!(
-                    "FREE of unallocated address 0x{:x}",
-                    addr
-                ));
+                self.violations
+                    .push(format!("FREE of unallocated address 0x{:x}", addr));
             }
             Some(a) if a.is_freed => {
-                self.violations.push(format!(
-                    "DOUBLE-FREE of address 0x{:x}",
-                    addr
-                ));
+                self.violations
+                    .push(format!("DOUBLE-FREE of address 0x{:x}", addr));
             }
             Some(a) => {
                 a.is_freed = true;
@@ -137,10 +145,8 @@ impl Verifier {
         let d = match self.tx_depth.get_mut(&tid) {
             Some(d) if *d > 0 => d,
             _ => {
-                self.violations.push(format!(
-                    "COMMIT-WITHOUT-BEGIN tid={}",
-                    tid
-                ));
+                self.violations
+                    .push(format!("COMMIT-WITHOUT-BEGIN tid={}", tid));
                 return;
             }
         };
@@ -155,10 +161,9 @@ impl Verifier {
                 self.aborts += 1;
             }
             // Thread never began a transaction — this is a real abort-without-begin.
-            None => self.violations.push(format!(
-                "ABORT-WITHOUT-BEGIN tid={}",
-                tid
-            )),
+            None => self
+                .violations
+                .push(format!("ABORT-WITHOUT-BEGIN tid={}", tid)),
             // Depth already 0 — this can happen when a panic-based backend
             // (e.g. NOrec, TL2) throws TmxAbort on a read that follows the
             // abort point in a C++ siglongjmp trace.  The previous abort event
@@ -189,12 +194,15 @@ impl Verifier {
     pub fn report(&self) -> Vec<String> {
         let mut lines = Vec::new();
 
-        lines.push(format!("Commits: {}  Aborts: {}  Abort rate: {:.1}%",
+        lines.push(format!(
+            "Commits: {}  Aborts: {}  Abort rate: {:.1}%",
             self.commits,
             self.aborts,
             if self.commits + self.aborts > 0 {
                 100.0 * self.aborts as f64 / (self.commits + self.aborts) as f64
-            } else { 0.0 },
+            } else {
+                0.0
+            },
         ));
 
         if self.violations.is_empty() {
@@ -207,17 +215,26 @@ impl Verifier {
         }
 
         if self.reads_outside > 0 {
-            lines.push(format!("⚠ {} read(s) outside transaction", self.reads_outside));
+            lines.push(format!(
+                "⚠ {} read(s) outside transaction",
+                self.reads_outside
+            ));
         }
         if self.writes_outside > 0 {
-            lines.push(format!("⚠ {} write(s) outside transaction", self.writes_outside));
+            lines.push(format!(
+                "⚠ {} write(s) outside transaction",
+                self.writes_outside
+            ));
         }
 
         let final_total = self.total_value();
         if self.initial_value_sum > 0 {
-            lines.push(format!("Total value: {}  (initial: {})  Δ={}",
-                final_total, self.initial_value_sum,
-                final_total as i64 - self.initial_value_sum as i64));
+            lines.push(format!(
+                "Total value: {}  (initial: {})  Δ={}",
+                final_total,
+                self.initial_value_sum,
+                final_total as i64 - self.initial_value_sum as i64
+            ));
             if final_total == self.initial_value_sum {
                 lines.push("MONEY CONSERVED ✓".into());
             } else {
@@ -227,7 +244,10 @@ impl Verifier {
 
         for (&tid, &d) in &self.tx_depth {
             if d > 0 {
-                lines.push(format!("⚠ Thread {} still in transaction (depth={}) at end", tid, d));
+                lines.push(format!(
+                    "⚠ Thread {} still in transaction (depth={}) at end",
+                    tid, d
+                ));
             }
         }
 
@@ -498,14 +518,19 @@ mod tests {
     fn test_commit_without_begin_recorded() {
         let mut v = Verifier::new();
         v.tx_commit(0);
-        assert!(v.violations.iter().any(|l| l.contains("COMMIT-WITHOUT-BEGIN")));
+        assert!(v
+            .violations
+            .iter()
+            .any(|l| l.contains("COMMIT-WITHOUT-BEGIN")));
     }
 
     #[test]
     fn test_abort_without_begin_recorded() {
         let mut v = Verifier::new();
         v.tx_abort(0);
-        assert!(v.violations.iter().any(|l| l.contains("ABORT-WITHOUT-BEGIN")));
+        assert!(v
+            .violations
+            .iter()
+            .any(|l| l.contains("ABORT-WITHOUT-BEGIN")));
     }
 }
-

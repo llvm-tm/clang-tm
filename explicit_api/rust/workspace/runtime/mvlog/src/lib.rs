@@ -9,9 +9,9 @@
 // Mirrors backends/tm_impl/mvlog/MVLog.hpp (C++).
 
 use core::sync::atomic::{fence, AtomicPtr, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
 #[cfg(not(feature = "simulation"))]
 use std::cell::RefCell;
-pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
 
 // ── Global geometry (matches C++ MVLog.hpp) ─────────────
 const KLOG_BITS: usize = 17; // 2^17 ring entries
@@ -445,14 +445,19 @@ fn begin_impl(tx: &mut TxState) {
 }
 
 // ── Abort ───────────────────────────────────────────────
+// Commit-time conflict cleanup.  Marks the claimed slot ABORTED so the
+// Phase-1 predecessor wait never blocks on it, and signals the retry loop
+// by making tm_commit() return false (not by panicking — tm_commit runs
+// outside transaction()'s catch_unwind region).
 fn abort_impl(tx: &mut TxState) {
     tx.abort_count += 1;
     TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
     tx.read_set.clear();
     tx.write_set.clear();
-    // The slot stays PROGRESS; the retry's begin() resolves it as
-    // ABORTED.  Signal the retry loop via panic.
-    std::panic::panic_any(TmxAbort);
+    G_LOG[tx.slot as usize & KLOG_MASK]
+        .state
+        .store(LogState::Aborted as u64, Ordering::Release);
+    tx.reset();
 }
 
 // ── Commit ──────────────────────────────────────────────
@@ -460,7 +465,7 @@ fn abort_impl(tx: &mut TxState) {
 // resolve (enforcing commit order == slot-claim order).
 // Phase 2: value-validate the read-set against the final index.
 // Phase 3: publish the write-set, update the index, reclaim if due.
-fn commit_impl(tx: &mut TxState) {
+fn commit_impl(tx: &mut TxState) -> bool {
     debug_assert!(tx.active, "tx not active");
     let slot = tx.slot;
 
@@ -492,7 +497,9 @@ fn commit_impl(tx: &mut TxState) {
     // Acquired AFTER the predecessor wait so we never hold the lock while
     // waiting on a slot whose resolution requires another commit.
     loop {
-        if G_COMMIT_LOCK.compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok()
+        if G_COMMIT_LOCK
+            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
         {
             break;
         }
@@ -512,6 +519,7 @@ fn commit_impl(tx: &mut TxState) {
     if conflict {
         G_COMMIT_LOCK.store(0, Ordering::Release);
         abort_impl(tx);
+        return false;
     }
     // Phase 3 — publish.
     let e = &G_LOG[slot as usize & KLOG_MASK];
@@ -521,7 +529,7 @@ fn commit_impl(tx: &mut TxState) {
         e.state.store(LogState::Committed as u64, Ordering::Release);
         G_COMMIT_LOCK.store(0, Ordering::Release);
         tx.reset();
-        return;
+        return true;
     }
 
     let n = tx.write_set.len().min(KMAX_INLINE_WS);
@@ -537,7 +545,8 @@ fn commit_impl(tx: &mut TxState) {
             ov.push((we.addr, value_type_tag(&we.value), tv_to_u64(&we.value)));
         }
         let boxed = Box::new(ov);
-        e.overflow.store(Box::into_raw(boxed).cast(), Ordering::Relaxed);
+        e.overflow
+            .store(Box::into_raw(boxed).cast(), Ordering::Relaxed);
     }
     e.ws_count.store(tx.write_set.len(), Ordering::Relaxed);
 
@@ -587,6 +596,7 @@ fn commit_impl(tx: &mut TxState) {
     G_COMMIT_LOCK.store(0, Ordering::Release);
 
     tx.reset();
+    true
 }
 
 // ── Read / write ────────────────────────────────────────
@@ -631,7 +641,9 @@ fn read_word<T: Primitive>(addr: usize) -> T {
                 observed_val: val_u64,
             });
             #[cfg(feature = "stats")]
-            TM_STATS.total_read_set_entries.fetch_add(1, Ordering::Relaxed);
+            TM_STATS
+                .total_read_set_entries
+                .fetch_add(1, Ordering::Relaxed);
         });
         return val;
     }
@@ -652,7 +664,9 @@ fn read_word<T: Primitive>(addr: usize) -> T {
             observed_val: val_u64,
         });
         #[cfg(feature = "stats")]
-        TM_STATS.total_read_set_entries.fetch_add(1, Ordering::Relaxed);
+        TM_STATS
+            .total_read_set_entries
+            .fetch_add(1, Ordering::Relaxed);
     });
     val
 }
@@ -660,7 +674,9 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 fn write_word<T: Primitive>(addr: usize, val: T) {
     fence(Ordering::SeqCst);
     if !tx_active() {
-        unsafe { (addr as *mut T).write(val); }
+        unsafe {
+            (addr as *mut T).write(val);
+        }
         return;
     }
 
@@ -687,7 +703,9 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
 
         tx.write_set.push(WriteEntry { addr, value: tv });
         #[cfg(feature = "stats")]
-        TM_STATS.total_write_set_entries.fetch_add(1, Ordering::Relaxed);
+        TM_STATS
+            .total_write_set_entries
+            .fetch_add(1, Ordering::Relaxed);
     });
 }
 
@@ -773,8 +791,7 @@ pub fn tm_commit() -> bool {
         None => return true,
     };
     fence(Ordering::SeqCst);
-    commit_impl(&mut tx);
-    true
+    commit_impl(&mut tx)
 }
 
 pub fn tm_abort() {
@@ -889,14 +906,18 @@ pub mod sim {
     #[cfg(feature = "stats")]
     pub fn take_stats() -> runtime_core::SyncCounters {
         let s = runtime_core::SyncCounters::new();
-        s.validations
-            .store(TM_STATS.validations.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.validations.store(
+            TM_STATS.validations.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         s.validation_failures.store(
             TM_STATS.validation_failures.load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
-        s.lock_contentions
-            .store(TM_STATS.lock_contentions.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.lock_contentions.store(
+            TM_STATS.lock_contentions.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         s.lock_acquire_failures.store(
             TM_STATS.lock_acquire_failures.load(Ordering::Relaxed),
             Ordering::Relaxed,

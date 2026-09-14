@@ -4,6 +4,7 @@
 // Uses raw tm_begin/tm_end with sigsetjmp retry loop to avoid
 // the nesting-counter issue in TM<T>::begin()/end().
 
+#include "../gem5_roi.hpp"
 #include "expli_tm_api/tm_api.hpp"
 
 #include <csetjmp>
@@ -54,6 +55,8 @@ int main(int argc, char *argv[])
 
 	uint64_t *thread_committed = new uint64_t[num_threads]();
 
+	ROI_RESET_STATS();
+	ROI_CKPT_BEGIN();
 	std::vector<std::thread> threads;
 	for (int t = 0; t < num_threads; t++) {
 		threads.emplace_back([t, iters, seed, &thread_committed]() {
@@ -85,6 +88,8 @@ int main(int argc, char *argv[])
 	}
 	for (auto &th : threads)
 		th.join();
+	ROI_CKPT_END();
+	ROI_DUMP_STATS();
 
 	uint64_t final_sum = 0;
 	for (int i = 0; i < g_num_counters; i++)

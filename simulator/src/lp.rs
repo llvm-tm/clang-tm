@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::rng::CheckpointableRng;
+use serde::{Deserialize, Serialize};
 
 /// Logical process (thread) state.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,12 +1,16 @@
+use super::Config;
+use crate::Rng;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tm::{transaction, TmCell};
-use crate::Rng;
-use super::Config;
 
 #[allow(dead_code)]
-struct Edge { src: u64, dst: u64, weight: i64 }
+struct Edge {
+    src: u64,
+    dst: u64,
+    weight: i64,
+}
 
 #[allow(dead_code)]
 struct CSR {
@@ -20,7 +24,9 @@ fn has_edge(csr: &CSR, src: u64, dst: u64) -> bool {
         let start = tx.read(&csr.row_ptr[src as usize]);
         let end = tx.read(&csr.row_ptr[src as usize + 1]);
         for i in start..end {
-            if tx.read(&csr.col_idx[i as usize]) == dst { return true; }
+            if tx.read(&csr.col_idx[i as usize]) == dst {
+                return true;
+            }
         }
         false
     })
@@ -32,8 +38,12 @@ pub fn test() -> i32 {
     let edges = [(0u64, 1u64), (1u64, 2u64), (2u64, 0u64), (1u64, 3u64)];
     let num_vertices = 4u64;
     let mut row_ptr = vec![0u64; num_vertices as usize + 1];
-    for &(s, _) in &edges { row_ptr[s as usize + 1] += 1; }
-    for i in 1..=num_vertices as usize { row_ptr[i] += row_ptr[i - 1]; }
+    for &(s, _) in &edges {
+        row_ptr[s as usize + 1] += 1;
+    }
+    for i in 1..=num_vertices as usize {
+        row_ptr[i] += row_ptr[i - 1];
+    }
     let mut col_idx = vec![0u64; edges.len()];
     let mut temp_pos = row_ptr.clone();
     for &(s, d) in &edges {
@@ -42,19 +52,40 @@ pub fn test() -> i32 {
         col_idx[pos] = d;
     }
     // Check CSR structure
-    if row_ptr.len() != 5 { eprintln!("FAIL: row_ptr len"); fails += 1; }
-    if col_idx.len() != 4 { eprintln!("FAIL: col_idx len"); fails += 1; }
+    if row_ptr.len() != 5 {
+        eprintln!("FAIL: row_ptr len");
+        fails += 1;
+    }
+    if col_idx.len() != 4 {
+        eprintln!("FAIL: col_idx len");
+        fails += 1;
+    }
     // Check edges
     let has_edge = |s: u64, d: u64| -> bool {
         let start = row_ptr[s as usize];
         let end = row_ptr[s as usize + 1];
         (start..end).any(|i| col_idx[i as usize] == d)
     };
-    if !has_edge(0, 1) { eprintln!("FAIL: missing edge 0->1"); fails += 1; }
-    if !has_edge(1, 2) { eprintln!("FAIL: missing edge 1->2"); fails += 1; }
-    if !has_edge(2, 0) { eprintln!("FAIL: missing edge 2->0"); fails += 1; }
-    if !has_edge(1, 3) { eprintln!("FAIL: missing edge 1->3"); fails += 1; }
-    if has_edge(0, 2) { eprintln!("FAIL: unexpected edge 0->2"); fails += 1; }
+    if !has_edge(0, 1) {
+        eprintln!("FAIL: missing edge 0->1");
+        fails += 1;
+    }
+    if !has_edge(1, 2) {
+        eprintln!("FAIL: missing edge 1->2");
+        fails += 1;
+    }
+    if !has_edge(2, 0) {
+        eprintln!("FAIL: missing edge 2->0");
+        fails += 1;
+    }
+    if !has_edge(1, 3) {
+        eprintln!("FAIL: missing edge 1->3");
+        fails += 1;
+    }
+    if has_edge(0, 2) {
+        eprintln!("FAIL: unexpected edge 0->2");
+        fails += 1;
+    }
     // Check triangle (0,1,2)
     let mut found_triangle = false;
     for a in 0..num_vertices {
@@ -62,12 +93,19 @@ pub fn test() -> i32 {
             let b = col_idx[i as usize];
             for j in row_ptr[b as usize]..row_ptr[b as usize + 1] {
                 let c = col_idx[j as usize];
-                if has_edge(c, a) { found_triangle = true; }
+                if has_edge(c, a) {
+                    found_triangle = true;
+                }
             }
         }
     }
-    if !found_triangle { eprintln!("FAIL: triangle (0,1,2) not found"); fails += 1; }
-    if fails > 0 { eprintln!("ssca2: {} test(s) failed", fails); }
+    if !found_triangle {
+        eprintln!("FAIL: triangle (0,1,2) not found");
+        fails += 1;
+    }
+    if fails > 0 {
+        eprintln!("ssca2: {} test(s) failed", fails);
+    }
     fails
 }
 
@@ -99,7 +137,8 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
     let mut clique_sizes: Vec<usize> = Vec::new();
     let mut assigned = 0u64;
     while assigned < tot_vertices {
-        let sz = ((rng.next() as usize) % max_clique_size + 1).min((tot_vertices - assigned) as usize);
+        let sz =
+            ((rng.next() as usize) % max_clique_size + 1).min((tot_vertices - assigned) as usize);
         clique_sizes.push(sz);
         assigned += sz as u64;
     }
@@ -114,7 +153,9 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
         let csize = clique_sizes[c];
         for i in 0..csize {
             for j in 0..csize {
-                if i == j { continue; }
+                if i == j {
+                    continue;
+                }
                 if rng.uniform() < prob_unidirectional {
                     let si = perm[(start_v + i as u64) as usize];
                     let sj = perm[(start_v + j as u64) as usize];
@@ -124,7 +165,11 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
                         } else {
                             -(rng.next() as i64 % scale as i64)
                         };
-                        temp_edges.push(Edge { src: si, dst: sj, weight: w });
+                        temp_edges.push(Edge {
+                            src: si,
+                            dst: sj,
+                            weight: w,
+                        });
                     }
                 }
             }
@@ -150,7 +195,11 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
                                 } else {
                                     -(rng.next() as i64 % scale as i64)
                                 };
-                                temp_edges.push(Edge { src: v, dst: neighbor, weight: w });
+                                temp_edges.push(Edge {
+                                    src: v,
+                                    dst: neighbor,
+                                    weight: w,
+                                });
                             }
                         }
                     }
@@ -166,7 +215,11 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
     temp_edges.dedup_by(|a, b| a.src == b.src && a.dst == b.dst);
 
     let num_edges = temp_edges.len();
-    let max_v = temp_edges.iter().map(|e| e.src.max(e.dst)).max().unwrap_or(0);
+    let max_v = temp_edges
+        .iter()
+        .map(|e| e.src.max(e.dst))
+        .max()
+        .unwrap_or(0);
     let num_vertices = max_v + 1;
 
     // Build CSR (plain Vec, no TM — matches C++ build_csr which uses tm_calloc but
@@ -235,6 +288,10 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
 
     let elapsed = t0.elapsed().as_millis() as u64;
     let ops = g_ops.load(Ordering::Relaxed);
-    println!("  Triangles: {}  Elapsed: {} ms  Rate: {} ops/s",
-             ops, elapsed, if elapsed > 0 { ops * 1000 / elapsed } else { 0 });
+    println!(
+        "  Triangles: {}  Elapsed: {} ms  Rate: {} ops/s",
+        ops,
+        elapsed,
+        if elapsed > 0 { ops * 1000 / elapsed } else { 0 }
+    );
 }

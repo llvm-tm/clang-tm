@@ -1,9 +1,9 @@
+use super::Config;
+use crate::Rng;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tm::transaction;
-use crate::Rng;
-use super::Config;
 
 const INTRUDER_MAX_DATA: usize = 256;
 const INTRUDER_MAX_PACKETS: usize = 128;
@@ -99,12 +99,14 @@ fn get_packet(data: &IntruderData) -> Packet {
 }
 
 fn process_decoder(data: &IntruderData, pkt: &Packet) {
-    if pkt.flow_id < 0 { return; }
+    if pkt.flow_id < 0 {
+        return;
+    }
     transaction(|_tx| unsafe {
         let fid = pkt.flow_id;
         let idx = (fid - 1) as usize;
         let storage_off = (fid - 1) as usize * INTRUDER_MAX_PACKETS * INTRUDER_MAX_DATA
-                          + pkt.fragment_id as usize * INTRUDER_MAX_DATA;
+            + pkt.fragment_id as usize * INTRUDER_MAX_DATA;
 
         for i in 0..(pkt.length as usize).min(INTRUDER_MAX_DATA) {
             tm::tm_write_i8(data.fragment_storage.add(storage_off + i), pkt.data[i]);
@@ -118,10 +120,12 @@ fn process_decoder(data: &IntruderData, pkt: &Packet) {
             let mut total: usize = 0;
             for f in 0..pkt.num_fragments as usize {
                 let off = (fid - 1) as usize * INTRUDER_MAX_PACKETS * INTRUDER_MAX_DATA
-                         + f * INTRUDER_MAX_DATA;
+                    + f * INTRUDER_MAX_DATA;
                 let flen = pkt.length as usize;
                 for i in 0..flen.min(INTRUDER_MAX_DATA) {
-                    if total >= INTRUDER_MAX_DATA * 2 { break; }
+                    if total >= INTRUDER_MAX_DATA * 2 {
+                        break;
+                    }
                     let byte = tm::tm_read_i8(data.fragment_storage.add(off + i));
                     tm::tm_write_i8(std::ptr::addr_of_mut!((*df_ptr).data[total]), byte);
                     total += 1;
@@ -133,7 +137,10 @@ fn process_decoder(data: &IntruderData, pkt: &Packet) {
 
             let qtail = tm::tm_read_i32(data.decoded_q_tail);
             if qtail < data.decoded_q_capacity {
-                let dst_ptr = data.decoded_queue.add(qtail as usize * size_of::<DecodedFlow>()) as *mut DecodedFlow;
+                let dst_ptr = data
+                    .decoded_queue
+                    .add(qtail as usize * size_of::<DecodedFlow>())
+                    as *mut DecodedFlow;
                 tm::tm_write_i64(std::ptr::addr_of_mut!((*dst_ptr).flow_id), fid);
                 tm::tm_write_i32(std::ptr::addr_of_mut!((*dst_ptr).data_len), total as i32);
                 for i in 0..total {
@@ -152,7 +159,10 @@ fn get_complete(data: &IntruderData) -> DecodedFlow {
         let head = tm::tm_read_i32(data.decoded_q_head);
         let tail = tm::tm_read_i32(data.decoded_q_tail);
         if head < tail {
-            let src = data.decoded_queue.add(head as usize * size_of::<DecodedFlow>()) as *mut DecodedFlow;
+            let src = data
+                .decoded_queue
+                .add(head as usize * size_of::<DecodedFlow>())
+                as *mut DecodedFlow;
             let data_len = tm::tm_read_i32(std::ptr::addr_of_mut!((*src).data_len)) as usize;
             let df = DecodedFlow {
                 flow_id: tm::tm_read_i64(std::ptr::addr_of_mut!((*src).flow_id)),
@@ -212,26 +222,39 @@ pub fn test() -> i32 {
     let mut fails = 0;
     // Test detect_attack with dictionary
     let dict: Vec<String> = vec![
-        "attack".to_string(), "virus".to_string(), "malware".to_string(),
+        "attack".to_string(),
+        "virus".to_string(),
+        "malware".to_string(),
     ];
     let mut data = [0i8; 256];
     let msg = b"this is an attack message";
-    for (i, &c) in msg.iter().enumerate() { data[i] = c as i8; }
+    for (i, &c) in msg.iter().enumerate() {
+        data[i] = c as i8;
+    }
     if !detect_attack(&data, msg.len(), &dict) {
-        eprintln!("FAIL: 'attack' not detected"); fails += 1;
+        eprintln!("FAIL: 'attack' not detected");
+        fails += 1;
     }
     let safe = b"hello world this is fine";
-    for (i, &c) in safe.iter().enumerate() { data[i] = c as i8; }
+    for (i, &c) in safe.iter().enumerate() {
+        data[i] = c as i8;
+    }
     if detect_attack(&data, safe.len(), &dict) {
-        eprintln!("FAIL: false positive for safe message"); fails += 1;
+        eprintln!("FAIL: false positive for safe message");
+        fails += 1;
     }
     // Test case-insensitive matching
     let mixed = b"Virus found here";
-    for (i, &c) in mixed.iter().enumerate() { data[i] = c as i8; }
-    if !detect_attack(&data, mixed.len(), &dict) {
-        eprintln!("FAIL: case-insensitive 'Virus' not detected"); fails += 1;
+    for (i, &c) in mixed.iter().enumerate() {
+        data[i] = c as i8;
     }
-    if fails > 0 { eprintln!("intruder: {} test(s) failed", fails); }
+    if !detect_attack(&data, mixed.len(), &dict) {
+        eprintln!("FAIL: case-insensitive 'Virus' not detected");
+        fails += 1;
+    }
+    if fails > 0 {
+        eprintln!("intruder: {} test(s) failed", fails);
+    }
     fails
 }
 
@@ -241,17 +264,13 @@ pub fn run(config: &Config, _stop: &AtomicBool, ops: &AtomicU64) {
 
     // ── Build dictionary ──
     let wordlist: &[&str] = &[
-        "about", "attack", "back", "root", "system", "access",
-        "all", "after", "also", "and", "any", "are", "but",
-        "can", "come", "could", "did", "do", "each", "find",
-        "first", "for", "from", "get", "go", "has", "have",
-        "her", "here", "him", "his", "how", "into", "its",
-        "just", "know", "like", "look", "make", "man", "may",
-        "more", "most", "must", "new", "no", "not", "now",
-        "old", "one", "only", "other", "our", "out", "over",
-        "own", "part", "people", "said", "say", "see", "she",
-        "shell", "should", "site", "some", "such", "take",
-        "than", "that", "their", "them", "then", "there",
+        "about", "attack", "back", "root", "system", "access", "all", "after", "also", "and",
+        "any", "are", "but", "can", "come", "could", "did", "do", "each", "find", "first", "for",
+        "from", "get", "go", "has", "have", "her", "here", "him", "his", "how", "into", "its",
+        "just", "know", "like", "look", "make", "man", "may", "more", "most", "must", "new", "no",
+        "not", "now", "old", "one", "only", "other", "our", "out", "over", "own", "part", "people",
+        "said", "say", "see", "she", "shell", "should", "site", "some", "such", "take", "than",
+        "that", "their", "them", "then", "there",
     ];
     let dictionary: Vec<String> = wordlist.iter().map(|s| s.to_string()).collect();
 
@@ -296,13 +315,17 @@ pub fn run(config: &Config, _stop: &AtomicBool, ops: &AtomicU64) {
                 let sig = dictionary[sig_idx].as_bytes();
                 let slen = sig.len().min(INTRUDER_MAX_DATA * 2);
                 let mut buf = [0i8; INTRUDER_MAX_DATA * 2];
-                for i in 0..slen { buf[i] = sig[i] as i8; }
+                for i in 0..slen {
+                    buf[i] = sig[i] as i8;
+                }
                 (buf, slen)
             } else {
                 let plen = ((rng.next() % config.max_length as u64) + 1) as usize;
                 let plen = plen.min(INTRUDER_MAX_DATA * 2);
                 let mut buf = [0i8; INTRUDER_MAX_DATA * 2];
-                for i in 0..plen { buf[i] = (32 + (rng.next() % 95)) as i8; }
+                for i in 0..plen {
+                    buf[i] = (32 + (rng.next() % 95)) as i8;
+                }
                 (buf, plen)
             };
 
@@ -364,7 +387,11 @@ pub fn run(config: &Config, _stop: &AtomicBool, ops: &AtomicU64) {
     let elapsed = start.elapsed().as_millis();
 
     let total_ops = ops.load(Ordering::Relaxed);
-    println!("Elapsed time = {}.{:03} seconds", elapsed / 1000, elapsed % 1000);
+    println!(
+        "Elapsed time = {}.{:03} seconds",
+        elapsed / 1000,
+        elapsed % 1000
+    );
     println!("Num found = {}", total_ops);
 
     // ── Cleanup ──

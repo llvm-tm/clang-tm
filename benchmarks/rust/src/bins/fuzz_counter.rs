@@ -1,18 +1,20 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tm::{TmCell, transaction, tm_init, tm_exit, tm_abort_count};
+use tm::{tm_abort_count, tm_exit, tm_init, transaction, TmCell};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 2 && (args[1] == "--version" || args[1] == "-V") {
-        println!("\n\
+        println!(
+            "\n\
 ━┏━━━┓┏┓━┏┓┏━━━━┓┏━━━━┓\n\
 ━┃┏━━┛┃┃━┃┃┗━━┓━┃┗━━┓━┃\n\
 ━┃┗━━┓┃┃━┃┃━━┏┛┏┛━━┏┛┏┛\n\
 ━┃┏━━┛┃┃━┃┃━┏┛┏┛━━┏┛┏┛━\n\
 ┏┛┗┓━━┃┗━┛┃┏┛━┗━┓┏┛━┗━┓\n\
 ┗━━┛━━┗━━━┛┗━━━━┛┗━━━━┛\n\
-    fuzz-counter v1.0.0\n");
+    fuzz-counter v1.0.0\n"
+        );
         return;
     }
 
@@ -24,15 +26,27 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-t" if i+1 < args.len() => { threads = args[i+1].parse().unwrap_or(4); i+=2; }
-            "-n" if i+1 < args.len() => { iters = args[i+1].parse().unwrap_or(1000); i+=2; }
-            "-c" if i+1 < args.len() => { counters = args[i+1].parse().unwrap_or(8); i+=2; }
-            "-s" if i+1 < args.len() => { seed = args[i+1].parse().unwrap_or(42); i+=2; }
+            "-t" if i + 1 < args.len() => {
+                threads = args[i + 1].parse().unwrap_or(4);
+                i += 2;
+            }
+            "-n" if i + 1 < args.len() => {
+                iters = args[i + 1].parse().unwrap_or(1000);
+                i += 2;
+            }
+            "-c" if i + 1 < args.len() => {
+                counters = args[i + 1].parse().unwrap_or(8);
+                i += 2;
+            }
+            "-s" if i + 1 < args.len() => {
+                seed = args[i + 1].parse().unwrap_or(42);
+                i += 2;
+            }
             "-h" | "--help" => {
                 eprintln!("Usage: fuzz_counter [-t threads] [-n iters] [-c counters] [-s seed]");
                 return;
             }
-            _ => i+=1,
+            _ => i += 1,
         }
     }
 
@@ -75,7 +89,10 @@ fn main() {
 
     println!("\nResults:");
     println!("  Initial sum: {initial_sum}");
-    println!("  Total deltas: {expected} - {initial_sum} = {}", expected - initial_sum);
+    println!(
+        "  Total deltas: {expected} - {initial_sum} = {}",
+        expected - initial_sum
+    );
     println!("  Final sum:   {final_sum}");
     println!("  Expected:    {expected}");
     println!("  TM aborts:   {}", tm_abort_count());
@@ -87,9 +104,19 @@ fn main() {
     }
 
     eprintln!("FAIL: Counter invariant violated");
-    eprintln!("  Got {final_sum}, expected {expected}, diff = {}({})",
-             if final_sum > expected { final_sum - expected } else { expected - final_sum },
-             if final_sum > expected { "created" } else { "lost" });
+    eprintln!(
+        "  Got {final_sum}, expected {expected}, diff = {}({})",
+        if final_sum > expected {
+            final_sum - expected
+        } else {
+            expected - final_sum
+        },
+        if final_sum > expected {
+            "created"
+        } else {
+            "lost"
+        }
+    );
     tm_exit();
     std::process::exit(1);
 }

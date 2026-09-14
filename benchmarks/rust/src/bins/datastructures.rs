@@ -13,9 +13,15 @@ fn parse_args() -> (usize, usize) {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-t" if i + 1 < args.len() => { threads = args[i+1].parse().unwrap_or(4); i+=2; }
-            "-d" if i + 1 < args.len() => { duration = args[i+1].parse().unwrap_or(5000); i+=2; }
-            _ => i+=1,
+            "-t" if i + 1 < args.len() => {
+                threads = args[i + 1].parse().unwrap_or(4);
+                i += 2;
+            }
+            "-d" if i + 1 < args.len() => {
+                duration = args[i + 1].parse().unwrap_or(5000);
+                i += 2;
+            }
+            _ => i += 1,
         }
     }
     (threads, duration)
@@ -23,10 +29,23 @@ fn parse_args() -> (usize, usize) {
 
 struct Rng(u64);
 impl Rng {
-    fn new(seed: u64) -> Self { Self(seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)) }
-    fn next(&mut self) -> u64 { self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); self.0 >> 33 }
+    fn new(seed: u64) -> Self {
+        Self(
+            seed.wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407),
+        )
+    }
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
     #[allow(dead_code)]
-    fn range(&mut self, lo: u64, hi: u64) -> u64 { lo + self.next() % (hi - lo) }
+    fn range(&mut self, lo: u64, hi: u64) -> u64 {
+        lo + self.next() % (hi - lo)
+    }
     fn shuffle<T>(&mut self, slice: &mut [T]) {
         for i in (1..slice.len()).rev() {
             let j = (self.next() % (i as u64 + 1)) as usize;
@@ -45,7 +64,11 @@ unsafe impl Sync for SLNode {}
 
 impl SLNode {
     fn new(key: i64, val: i64) -> *mut Self {
-        Box::into_raw(Box::new(Self { key, val: TmCell::new(val), next: TmCell::new(TmPtr::null()) }))
+        Box::into_raw(Box::new(Self {
+            key,
+            val: TmCell::new(val),
+            next: TmCell::new(TmPtr::null()),
+        }))
     }
     #[allow(dead_code)]
     unsafe fn drop_from(head: *mut Self) {
@@ -65,11 +88,15 @@ fn sl_insert(tx: &Transaction, head: &TmCell<TmPtr<SLNode>>, key: i64, val: i64)
         let cur = tx.read(prev);
         if cur.get().is_null() || unsafe { (*cur.get()).key >= key } {
             if !cur.get().is_null() && unsafe { (*cur.get()).key == key } {
-                unsafe { drop(Box::from_raw(new_node)); }
+                unsafe {
+                    drop(Box::from_raw(new_node));
+                }
                 tx.write(&mut unsafe { &mut *cur.get() }.val, val);
                 return;
             }
-            unsafe { (*new_node).next = TmCell::new(cur); }
+            unsafe {
+                (*new_node).next = TmCell::new(cur);
+            }
             tx.write(prev, TmPtr::new(new_node));
             return;
         }
@@ -81,8 +108,12 @@ fn sl_find(tx: &Transaction, head: &TmCell<TmPtr<SLNode>>, key: i64) -> Option<i
     let mut cur_ptr = tx.read(head);
     while !cur_ptr.get().is_null() {
         let node = unsafe { &*cur_ptr.get() };
-        if node.key == key { return Some(tx.read(&node.val)); }
-        if node.key > key { return None; }
+        if node.key == key {
+            return Some(tx.read(&node.val));
+        }
+        if node.key > key {
+            return None;
+        }
         cur_ptr = tx.read(&node.next);
     }
     None
@@ -92,14 +123,18 @@ fn sl_erase(tx: &Transaction, head: &TmCell<TmPtr<SLNode>>, key: i64) {
     let mut prev_ptr = head;
     loop {
         let cur_ptr = tx.read(prev_ptr);
-        if cur_ptr.get().is_null() { return; }
+        if cur_ptr.get().is_null() {
+            return;
+        }
         let node = unsafe { &*cur_ptr.get() };
         if node.key == key {
             let next_ptr = tx.read(&node.next);
             tx.write(prev_ptr, next_ptr);
             return;
         }
-        if node.key > key { return; }
+        if node.key > key {
+            return;
+        }
         prev_ptr = &mut unsafe { &mut *(cur_ptr.get() as *mut SLNode) }.next;
     }
 }
@@ -111,7 +146,9 @@ fn sl_verify(head: *mut SLNode, count: i64) -> bool {
     let mut prev_key = i64::MIN;
     while !cur.is_null() {
         unsafe {
-            if (*cur).key <= prev_key { return false; }
+            if (*cur).key <= prev_key {
+                return false;
+            }
             prev_key = (*cur).key;
             seen += 1;
         }
@@ -128,7 +165,9 @@ fn bench_sorted_list(threads: usize, _duration_ms: usize) -> (Arc<AtomicU64>, Ar
     let mut keys: Vec<i64> = (0..2000).map(|_i| (rng.next() % 100000) as i64).collect();
     rng.shuffle(&mut keys);
     transaction(|tx| {
-        for &k in &keys { sl_insert(tx, &head2, k, k * 2); }
+        for &k in &keys {
+            sl_insert(tx, &head2, k, k * 2);
+        }
     });
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -145,9 +184,13 @@ fn bench_sorted_list(threads: usize, _duration_ms: usize) -> (Arc<AtomicU64>, Ar
                 let k = (rng.next() % 200000) as i64;
                 let v = (rng.next() % 1000) as i64;
                 transaction(|tx| {
-                    if choice < 60 { sl_find(tx, &h, k); }
-                    else if choice < 85 { sl_insert(tx, &h, k, v); }
-                    else { sl_erase(tx, &h, k); }
+                    if choice < 60 {
+                        sl_find(tx, &h, k);
+                    } else if choice < 85 {
+                        sl_insert(tx, &h, k, v);
+                    } else {
+                        sl_erase(tx, &h, k);
+                    }
                 });
                 o.fetch_add(1, Ordering::Relaxed);
             }
@@ -169,15 +212,22 @@ unsafe impl Sync for TreapNode {}
 
 impl TreapNode {
     fn new(key: i64, val: i64, prio: u64) -> *mut Self {
-        Box::into_raw(Box::new(Self { key, prio, val: TmCell::new(val),
-            left: TmCell::new(TmPtr::null()), right: TmCell::new(TmPtr::null()) }))
+        Box::into_raw(Box::new(Self {
+            key,
+            prio,
+            val: TmCell::new(val),
+            left: TmCell::new(TmPtr::null()),
+            right: TmCell::new(TmPtr::null()),
+        }))
     }
 }
 
 fn treap_rotate_right(node: *mut TreapNode) -> *mut TreapNode {
     unsafe {
         let l = read_cell_ptr(&(*node).left);
-        if l.is_null() { return node; }
+        if l.is_null() {
+            return node;
+        }
         (*node).left = TmCell::new(TmPtr::new(read_cell_ptr(&(*l).right)));
         (*l).right = TmCell::new(TmPtr::new(node));
         l
@@ -187,7 +237,9 @@ fn treap_rotate_right(node: *mut TreapNode) -> *mut TreapNode {
 fn treap_rotate_left(node: *mut TreapNode) -> *mut TreapNode {
     unsafe {
         let r = read_cell_ptr(&(*node).right);
-        if r.is_null() { return node; }
+        if r.is_null() {
+            return node;
+        }
         (*node).right = TmCell::new(TmPtr::new(read_cell_ptr(&(*r).left)));
         (*r).left = TmCell::new(TmPtr::new(node));
         r
@@ -195,18 +247,28 @@ fn treap_rotate_left(node: *mut TreapNode) -> *mut TreapNode {
 }
 
 fn treap_insert(root: *mut TreapNode, key: i64, val: i64, prio: u64) -> *mut TreapNode {
-    if root.is_null() { return TreapNode::new(key, val, prio); }
+    if root.is_null() {
+        return TreapNode::new(key, val, prio);
+    }
     unsafe {
         if key < (*root).key {
             let new_left = treap_insert(read_cell_ptr(&(*root).left), key, val, prio);
-            if new_left.is_null() { return root; }
+            if new_left.is_null() {
+                return root;
+            }
             (*root).left = TmCell::new(TmPtr::new(new_left));
-            if (*new_left).prio > (*root).prio { return treap_rotate_right(root); }
+            if (*new_left).prio > (*root).prio {
+                return treap_rotate_right(root);
+            }
         } else if key > (*root).key {
             let new_right = treap_insert(read_cell_ptr(&(*root).right), key, val, prio);
-            if new_right.is_null() { return root; }
+            if new_right.is_null() {
+                return root;
+            }
             (*root).right = TmCell::new(TmPtr::new(new_right));
-            if (*new_right).prio > (*root).prio { return treap_rotate_left(root); }
+            if (*new_right).prio > (*root).prio {
+                return treap_rotate_left(root);
+            }
         } else {
             (*root).val = TmCell::new(val);
         }
@@ -218,35 +280,50 @@ fn treap_find(root: *mut TreapNode, key: i64) -> Option<i64> {
     let mut cur = root;
     unsafe {
         while !cur.is_null() {
-            if key < (*cur).key { cur = read_cell_ptr(&(*cur).left); }
-            else if key > (*cur).key { cur = read_cell_ptr(&(*cur).right); }
-            else { return Some(*(*cur).val.ptr()); }
+            if key < (*cur).key {
+                cur = read_cell_ptr(&(*cur).left);
+            } else if key > (*cur).key {
+                cur = read_cell_ptr(&(*cur).right);
+            } else {
+                return Some(*(*cur).val.ptr());
+            }
         }
     }
     None
 }
 
 fn treap_merge(left: *mut TreapNode, right: *mut TreapNode) -> *mut TreapNode {
-    if left.is_null() { return right; }
-    if right.is_null() { return left; }
+    if left.is_null() {
+        return right;
+    }
+    if right.is_null() {
+        return left;
+    }
     unsafe {
         if (*left).prio > (*right).prio {
-            (*left).right = TmCell::new(TmPtr::new(treap_merge(read_cell_ptr(&(*left).right), right)));
+            (*left).right = TmCell::new(TmPtr::new(treap_merge(
+                read_cell_ptr(&(*left).right),
+                right,
+            )));
             left
         } else {
-            (*right).left = TmCell::new(TmPtr::new(treap_merge(left, read_cell_ptr(&(*right).left))));
+            (*right).left =
+                TmCell::new(TmPtr::new(treap_merge(left, read_cell_ptr(&(*right).left))));
             right
         }
     }
 }
 
 fn treap_erase(root: *mut TreapNode, key: i64) -> *mut TreapNode {
-    if root.is_null() { return std::ptr::null_mut(); }
+    if root.is_null() {
+        return std::ptr::null_mut();
+    }
     unsafe {
         if key < (*root).key {
             (*root).left = TmCell::new(TmPtr::new(treap_erase(read_cell_ptr(&(*root).left), key)));
         } else if key > (*root).key {
-            (*root).right = TmCell::new(TmPtr::new(treap_erase(read_cell_ptr(&(*root).right), key)));
+            (*root).right =
+                TmCell::new(TmPtr::new(treap_erase(read_cell_ptr(&(*root).right), key)));
         } else {
             return treap_merge(read_cell_ptr(&(*root).left), read_cell_ptr(&(*root).right));
         }
@@ -256,17 +333,27 @@ fn treap_erase(root: *mut TreapNode, key: i64) -> *mut TreapNode {
 
 #[allow(dead_code)]
 fn treap_verify(root: *mut TreapNode) -> bool {
-    if root.is_null() { return true; }
+    if root.is_null() {
+        return true;
+    }
     unsafe {
         let l = read_cell_ptr(&(*root).left);
         let r = read_cell_ptr(&(*root).right);
         if !l.is_null() {
-            if (*l).key >= (*root).key || (*l).prio > (*root).prio { return false; }
-            if !treap_verify(l) { return false; }
+            if (*l).key >= (*root).key || (*l).prio > (*root).prio {
+                return false;
+            }
+            if !treap_verify(l) {
+                return false;
+            }
         }
         if !r.is_null() {
-            if (*r).key <= (*root).key || (*r).prio > (*root).prio { return false; }
-            if !treap_verify(r) { return false; }
+            if (*r).key <= (*root).key || (*r).prio > (*root).prio {
+                return false;
+            }
+            if !treap_verify(r) {
+                return false;
+            }
         }
     }
     true
@@ -298,12 +385,21 @@ fn bench_treap(_threads: usize, _duration_ms: usize) -> (Arc<AtomicU64>, Arc<Ato
             let v = (rng.next() % 1000) as i64;
             let p = rng.next();
             match choice {
-                0..=59 => { treap_find(rt.load(Ordering::Relaxed), k); }
+                0..=59 => {
+                    treap_find(rt.load(Ordering::Relaxed), k);
+                }
                 60..=84 => {
                     let r = treap_insert(rt.load(Ordering::Relaxed), k, v, p);
-                    if !r.is_null() { rt.store(r, Ordering::Relaxed); }
+                    if !r.is_null() {
+                        rt.store(r, Ordering::Relaxed);
+                    }
                 }
-                _ => { rt.store(treap_erase(rt.load(Ordering::Relaxed), k), Ordering::Relaxed); }
+                _ => {
+                    rt.store(
+                        treap_erase(rt.load(Ordering::Relaxed), k),
+                        Ordering::Relaxed,
+                    );
+                }
             }
             o.fetch_add(1, Ordering::Relaxed);
         }
@@ -324,7 +420,11 @@ unsafe impl Sync for HMEntry {}
 
 impl HMEntry {
     fn new(key: i64, val: i64) -> *mut Self {
-        Box::into_raw(Box::new(Self { key, val: TmCell::new(val), next: TmCell::new(TmPtr::null()) }))
+        Box::into_raw(Box::new(Self {
+            key,
+            val: TmCell::new(val),
+            next: TmCell::new(TmPtr::null()),
+        }))
     }
 }
 
@@ -334,7 +434,9 @@ struct HashMap {
 
 impl HashMap {
     fn new() -> Self {
-        let buckets = (0..HM_NBUCKETS).map(|_| TmCell::new(TmPtr::null())).collect();
+        let buckets = (0..HM_NBUCKETS)
+            .map(|_| TmCell::new(TmPtr::null()))
+            .collect();
         HashMap { buckets }
     }
 
@@ -349,7 +451,9 @@ impl HashMap {
             let cur = tx.read(prev);
             if cur.get().is_null() || unsafe { (*cur.get()).key > key } {
                 let new = HMEntry::new(key, val);
-                unsafe { (*new).next = TmCell::new(cur); }
+                unsafe {
+                    (*new).next = TmCell::new(cur);
+                }
                 tx.write(prev, TmPtr::new(new));
                 return;
             }
@@ -365,8 +469,12 @@ impl HashMap {
         let mut cur = tx.read(self.bucket(key));
         while !cur.get().is_null() {
             let node = unsafe { &*cur.get() };
-            if node.key == key { return Some(tx.read(&node.val)); }
-            if node.key > key { return None; }
+            if node.key == key {
+                return Some(tx.read(&node.val));
+            }
+            if node.key > key {
+                return None;
+            }
             cur = tx.read(&node.next);
         }
         None
@@ -377,10 +485,17 @@ impl HashMap {
         let mut prev = b;
         loop {
             let cur = tx.read(prev);
-            if cur.get().is_null() { return; }
+            if cur.get().is_null() {
+                return;
+            }
             let node = unsafe { &*cur.get() };
-            if node.key == key { tx.write(prev, tx.read(&node.next)); return; }
-            if node.key > key { return; }
+            if node.key == key {
+                tx.write(prev, tx.read(&node.next));
+                return;
+            }
+            if node.key > key {
+                return;
+            }
             prev = &mut unsafe { &mut *(cur.get() as *mut HMEntry) }.next;
         }
     }
@@ -391,7 +506,10 @@ impl HashMap {
         for b in &self.buckets {
             let mut cur = unsafe { *b.ptr() }.get();
             while !cur.is_null() {
-                unsafe { count += 1; cur = read_cell_ptr(&(*cur).next); }
+                unsafe {
+                    count += 1;
+                    cur = read_cell_ptr(&(*cur).next);
+                }
             }
         }
         count == expected_count
@@ -402,9 +520,9 @@ fn bench_hashmap(threads: usize, _duration_ms: usize) -> (Arc<AtomicU64>, Arc<At
     let hm = Arc::new(HashMap::new());
 
     let mut rng = Rng::new(42);
-    let keys: Vec<(i64, i64)> = (0..2000).map(|_| {
-        ((rng.next() % 100000) as i64, (rng.next() % 1000) as i64)
-    }).collect();
+    let keys: Vec<(i64, i64)> = (0..2000)
+        .map(|_| ((rng.next() % 100000) as i64, (rng.next() % 1000) as i64))
+        .collect();
     transaction(|tx| {
         for &(k, v) in &keys {
             hm.insert_tx(tx, k, v);
@@ -424,11 +542,15 @@ fn bench_hashmap(threads: usize, _duration_ms: usize) -> (Arc<AtomicU64>, Arc<At
                 let choice = rng.next() % 100;
                 let k = (rng.next() % 200000) as i64;
                 let v = (rng.next() % 1000) as i64;
-                transaction(|tx| {
-                    match choice {
-                        0..=59 => { h.find_tx(tx, k); }
-                        60..=84 => { h.insert_tx(tx, k, v); }
-                        _ => { h.erase_tx(tx, k); }
+                transaction(|tx| match choice {
+                    0..=59 => {
+                        h.find_tx(tx, k);
+                    }
+                    60..=84 => {
+                        h.insert_tx(tx, k, v);
+                    }
+                    _ => {
+                        h.erase_tx(tx, k);
                     }
                 });
                 o.fetch_add(1, Ordering::Relaxed);
@@ -451,7 +573,10 @@ fn main() {
     ll_stop.store(true, Ordering::Relaxed);
     std::thread::sleep(std::time::Duration::from_millis(100));
     let ll_total = ll_ops.load(Ordering::Relaxed);
-    println!("  Ops: {ll_total}  Throughput: {:.0} ops/s\n", ll_total as f64 * 1000.0 / duration as f64);
+    println!(
+        "  Ops: {ll_total}  Throughput: {:.0} ops/s\n",
+        ll_total as f64 * 1000.0 / duration as f64
+    );
 
     println!("=== Treap ===");
     let (tr_ops, tr_stop) = bench_treap(threads, duration);
@@ -459,7 +584,10 @@ fn main() {
     tr_stop.store(true, Ordering::Relaxed);
     std::thread::sleep(std::time::Duration::from_millis(100));
     let tr_total = tr_ops.load(Ordering::Relaxed);
-    println!("  Ops: {tr_total}  Throughput: {:.0} ops/s\n", tr_total as f64 * 1000.0 / duration as f64);
+    println!(
+        "  Ops: {tr_total}  Throughput: {:.0} ops/s\n",
+        tr_total as f64 * 1000.0 / duration as f64
+    );
 
     println!("=== Hash Map ===");
     let (hm_ops, hm_stop) = bench_hashmap(threads, duration);
@@ -467,7 +595,10 @@ fn main() {
     hm_stop.store(true, Ordering::Relaxed);
     std::thread::sleep(std::time::Duration::from_millis(100));
     let hm_total = hm_ops.load(Ordering::Relaxed);
-    println!("  Ops: {hm_total}  Throughput: {:.0} ops/s\n", hm_total as f64 * 1000.0 / duration as f64);
+    println!(
+        "  Ops: {hm_total}  Throughput: {:.0} ops/s\n",
+        hm_total as f64 * 1000.0 / duration as f64
+    );
 
     let aborts = tm::tm_abort_count();
     println!("\nTotal TM aborts across all stages: {aborts}");

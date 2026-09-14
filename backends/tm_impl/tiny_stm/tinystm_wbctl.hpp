@@ -99,15 +99,16 @@ begin()     //
 	tx->end_version = tx->start_version;
 	tx->active = true;
 	tx->read_only = true;
-	if (!tx->is_retry) tx->abort_count = 0;
+	if (!tx->is_retry)
+		tx->abort_count = 0;
 	tx->is_retry = false;
 	TM_EVENT(TX_BEGIN, tx->id, tx->start_version);
 
 	return true;
 }
 
-inline void //
-abort_tx(const char *loc="")  //
+inline void                    //
+abort_tx(const char *loc = "") //
 {
 	auto *tx = current_tx_wbctl;
 
@@ -182,7 +183,8 @@ compareByAddr(     //
 // pointer so the difference exceeds the threshold.
 // This is more reliable than pthread_getattr_np which can return
 // incorrect bounds for the main thread (encompassing BSS/data).
-inline bool is_stack_addr(void *addr) {
+inline bool is_stack_addr(void *addr)
+{
 	char marker;
 	uintptr_t a = (uintptr_t)addr;
 	uintptr_t m = (uintptr_t)&marker;
@@ -213,13 +215,14 @@ commit()    //
 		for (void *addr : sorted_addrs) {
 			// Null/low addresses from linked-list traversal bugs: don't lock
 			// (there's nothing to write back) and assert on the read-side.
-			if (addr == nullptr || (uintptr_t)addr < 0x100000) continue;
+			if (addr == nullptr || (uintptr_t)addr < 0x100000)
+				continue;
 			auto &w = *tx->ws_find(addr);
 			ByteOffset bo((word_t)addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 			volatile word_t l = lock->get();
 			word_t owner = (l & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS;
-			if (owner != tx->id) {                // skip self-locks
+			if (owner != tx->id) { // skip self-locks
 				// Retry limit on lock acquisition to break circular-wait deadlock:
 				// when two threads hold a lock each and need each other's, extend()
 				// keeps validating successfully (neither has committed) so no abort
@@ -238,10 +241,13 @@ commit()    //
 					}
 				}
 				tx->locks_held.push_back(lock); // keep track of locks
-				TM_EVENT2(COMMIT_LOCK_ACQUIRE, (uint64_t)lock, (uint64_t)addr, (uint64_t)w.type);
+				TM_EVENT2(COMMIT_LOCK_ACQUIRE,
+				          (uint64_t)lock,
+				          (uint64_t)addr,
+				          (uint64_t)w.type);
 			}
 			TM_ASSERT(lock->is_locked() && lock->get_owner() == tx->id,
-			               "Lock not locked or wrong owner");
+			          "Lock not locked or wrong owner");
 		}
 
 		// can commit, increase the global clock
@@ -276,11 +282,13 @@ commit()    //
 				// _tm_clone frames and writing back corrupts the current stack.
 				// In expli API path, TM fields on the stack need write-back.
 				// Also skip TM-region addresses are never on the stack.
-				if (!g_tm_expli_mode && !stm::isTMAddress(addr) && is_stack_addr(addr)) continue;
+				if (!g_tm_expli_mode && !stm::isTMAddress(addr) && is_stack_addr(addr))
+					continue;
 				// Skip null/low addresses — the plugin can generate these during
 				// linked-list traversal (e.g., null _M_next pointer in std::map).
 				// The read path already handles them; the write path must as well.
-				if (addr == nullptr || (uintptr_t)addr < 0x100000) continue;
+				if (addr == nullptr || (uintptr_t)addr < 0x100000)
+					continue;
 				ByteOffset bo((word_t)addr);
 				Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 				write_value_to_addr(addr, w.new_val, w.type);
@@ -291,7 +299,8 @@ commit()    //
 			auto &addr = it.first;
 			auto &w = it.second;
 			// Same null-guard as write-back for consistency
-			if (addr == nullptr || (uintptr_t)addr < 0x100000) continue;
+			if (addr == nullptr || (uintptr_t)addr < 0x100000)
+				continue;
 			ByteOffset bo((word_t)addr);
 			Lock *lock = &g_locks_wbctl.get(bo.base_addr);
 			if (!lock->is_locked_by(tx->id)) {
@@ -304,12 +313,11 @@ commit()    //
 				lock->unlock(tx->id);
 			} else {
 				TM_ASSERT(lock->get_version() <= commit_version,
-				               "Lock version not updated");
+				          "Lock version not updated");
 				lock->unlock_with_version(tx->id, commit_version);
 			}
 			TM_EVENT2(LOCK_RELEASE, (uint64_t)lock, (uint64_t)addr, commit_version);
-			TM_ASSERT(lock->get_version() >= commit_version,
-			               "Lock version not updated");
+			TM_ASSERT(lock->get_version() >= commit_version, "Lock version not updated");
 		}
 
 		// clear lock list
@@ -435,14 +443,23 @@ read_word_ctl(                                                //
 	{
 		unsigned read_size = 0;
 		switch (sz) {
-		case ValueType::UINT8:   read_size = 1; break;
-		case ValueType::UINT16:  read_size = 2; break;
+		case ValueType::UINT8:
+			read_size = 1;
+			break;
+		case ValueType::UINT16:
+			read_size = 2;
+			break;
 		case ValueType::UINT32:
-		case ValueType::FLOAT:   read_size = 4; break;
+		case ValueType::FLOAT:
+			read_size = 4;
+			break;
 		case ValueType::UINT64:
 		case ValueType::DOUBLE:
-		case ValueType::POINTER: read_size = 8; break;
-		default: break;
+		case ValueType::POINTER:
+			read_size = 8;
+			break;
+		default:
+			break;
 		}
 		if (read_size > 0) {
 			uint64_t merged = 0;
@@ -505,7 +522,8 @@ read_word_ctl(                                                //
 		void *u32_addr = reinterpret_cast<void *>((uintptr_t)addr & ~3ULL);
 		auto *w32 = tx->ws_find(u32_addr);
 		if (w32 && w32->type == ValueType::UINT32) {
-			unsigned byte_off = static_cast<unsigned>((uintptr_t)addr - (uintptr_t)u32_addr);
+			unsigned byte_off = static_cast<unsigned>((uintptr_t)addr -
+			                                          (uintptr_t)u32_addr);
 			unsigned u32_shift = byte_off * 8;
 			switch (sz) {
 			case ValueType::UINT8: {
@@ -531,7 +549,8 @@ read_word_ctl(                                                //
 		void *u16_addr = reinterpret_cast<void *>((uintptr_t)addr & ~1ULL);
 		auto *w16 = tx->ws_find(u16_addr);
 		if (w16 && w16->type == ValueType::UINT16) {
-			unsigned byte_off = static_cast<unsigned>((uintptr_t)addr - (uintptr_t)u16_addr);
+			unsigned byte_off = static_cast<unsigned>((uintptr_t)addr -
+			                                          (uintptr_t)u16_addr);
 			if (byte_off < 2 && sz == ValueType::UINT8) {
 				any_type_t result;
 				result.u1 = static_cast<uint8_t>(w16->new_val.u2 >> (byte_off * 8));
@@ -570,46 +589,52 @@ read_from_memory:
 				continue;
 			}
 
-		word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
-		volatile any_type_t value = read_value_from_addr(addr, sz);
-		volatile word_t l2 = lock->get();
+			word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
+			volatile any_type_t value = read_value_from_addr(addr, sz);
+			volatile word_t l2 = lock->get();
 
-		if (l != l2) {
-			l = l2;
-			continue;
-		}
-
-		if (version > tx->end_version) {
-			if (extend()) {
-				TM_EVENT2(READ_VERSION_CHECK, (uint64_t)addr, (uint64_t)lock, version);
-				continue; // needs to read again
-			} else {
-				TM_EVENT2(READ_VERSION_CHECK, (uint64_t)addr, (uint64_t)lock, version);
-				if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 5)) {
-					continue;
-				}
-				abort_tx("read_version_check");
+			if (l != l2) {
+				l = l2;
+				continue;
 			}
+
+			if (version > tx->end_version) {
+				if (extend()) {
+					TM_EVENT2(READ_VERSION_CHECK,
+					          (uint64_t)addr,
+					          (uint64_t)lock,
+					          version);
+					continue; // needs to read again
+				} else {
+					TM_EVENT2(READ_VERSION_CHECK,
+					          (uint64_t)addr,
+					          (uint64_t)lock,
+					          version);
+					if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 5)) {
+						continue;
+					}
+					abort_tx("read_version_check");
+				}
+			}
+
+			any_type_t val = {.u8 = value.u8};
+
+			TM_EVENT2(READ_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, version);
+
+			ReadLogEntry_wbctl r;
+			r.addr = addr;
+			r.observed_version = version;
+			r.observed_val = val;
+			r.type = sz;
+			tx->read_set.push_back(r);
+
+			return val;
 		}
-
-		any_type_t val = {.u8 = value.u8};
-
-		TM_EVENT2(READ_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, version);
-
-		ReadLogEntry_wbctl r;
-		r.addr = addr;
-		r.observed_version = version;
-		r.observed_val = val;
-		r.type = sz;
-		tx->read_set.push_back(r);
-
-		return val;
-	}
 	}
 }
 
 inline void                                                   //
-write_word_ctl(                                                //
+write_word_ctl(                                               //
     Transaction<ReadLogEntry_wbctl, WriteLogEntry_wbctl> *tx, //
     void *addr,                                               //
     any_type_t val,                                           //
@@ -624,7 +649,6 @@ write_word_ctl(                                                //
 
 	TM_ASSERT(tx, "tx not defined");
 	TM_ASSERT(tx->active, "tx not active");
-
 
 	// Stack-address detection: writing to the stack via tm_write would create
 	// a write-set entry that gets written back at commit time — by then the
@@ -693,14 +717,22 @@ write_word_ctl(                                                //
 	// Helper: byte width of a ValueType
 	auto typeSize = [](ValueType t) -> unsigned {
 		switch (t) {
-		case ValueType::UINT8:   return 1;
-		case ValueType::UINT16:  return 2;
-		case ValueType::UINT32:  return 4;
-		case ValueType::FLOAT:   return 4;
-		case ValueType::UINT64:  return 8;
-		case ValueType::POINTER: return 8;
-		case ValueType::DOUBLE:  return 8;
-		default:                 return 0;
+		case ValueType::UINT8:
+			return 1;
+		case ValueType::UINT16:
+			return 2;
+		case ValueType::UINT32:
+			return 4;
+		case ValueType::FLOAT:
+			return 4;
+		case ValueType::UINT64:
+			return 8;
+		case ValueType::POINTER:
+			return 8;
+		case ValueType::DOUBLE:
+			return 8;
+		default:
+			return 0;
 		}
 	};
 

@@ -49,7 +49,9 @@ impl MemAccess for TmAccess {
         // for const generics in expressions (yet).
         // This casts through raw bytes — safe because tm_read returns the
         // correct bit pattern for the requested size.
-        if core::mem::size_of::<*const u8>() == size && core::mem::align_of::<T>() >= core::mem::align_of::<*const u8>() {
+        if core::mem::size_of::<*const u8>() == size
+            && core::mem::align_of::<T>() >= core::mem::align_of::<*const u8>()
+        {
             // Pointer-sized: use tm_read_ptr
             let result = tm_read_ptr(addr as *const *mut u8);
             ptr::read(&result as *const *mut u8 as *const T)
@@ -86,8 +88,13 @@ impl MemAccess for TmAccess {
             fn tm_write_ptr(addr: *mut *mut u8, val: *mut u8);
         }
         let size = core::mem::size_of::<T>();
-        if core::mem::size_of::<*const u8>() == size && core::mem::align_of::<T>() >= core::mem::align_of::<*const u8>() {
-            tm_write_ptr(addr as *mut *mut u8, ptr::read(&val as *const T as *const *mut u8));
+        if core::mem::size_of::<*const u8>() == size
+            && core::mem::align_of::<T>() >= core::mem::align_of::<*const u8>()
+        {
+            tm_write_ptr(
+                addr as *mut *mut u8,
+                ptr::read(&val as *const T as *const *mut u8),
+            );
         } else {
             match size {
                 1 => tm_write_i1(addr as *mut u8, ptr::read(&val as *const T as *const u8)),

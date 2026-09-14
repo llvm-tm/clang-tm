@@ -1,7 +1,14 @@
 # CMakeLists.txt - CMake build for TM API C++ Project
 # Requires CMake 3.16+
 #
-# Usage:
+# NOTE: The Make-based build is CANONICAL. `make check-fast`, `make check-all`,
+# the plugin pipeline, and all CI use the Makefiles. This CMake build is
+# intended ONLY for IDE integration (e.g. generating compile_commands.json for
+# clangd) and is NOT a supported build/test path — it covers a subset of the
+# plugin tests and does not build the benchmark suites. LLVM tool discovery is
+# owned by plugin/llvm-tool-helper.sh; keep the two in sync.
+#
+# Usage (IDE only):
 #   mkdir build && cd build
 #   cmake .. -DCMAKE_BUILD_TYPE=Release
 #   make -j$(nproc)

@@ -4,6 +4,17 @@
 # Auto-detect C++ compiler: prefer clang++ (LLVM versioned or system default),
 # fall back to g++.
 CXX       := $(shell command -v clang++-22 2>/dev/null || command -v clang++-18 2>/dev/null || command -v clang++-17 2>/dev/null || command -v clang++-16 2>/dev/null || command -v clang++-15 2>/dev/null || command -v clang++-14 2>/dev/null || command -v clang++ 2>/dev/null || echo g++)
+# clang 22 prefers gcc 16 headers, but libstdc++-16-dev may not be installed
+# (only gcc-16 without dev). Fall back to the newest available libstdc++ dev.
+ifeq ($(findstring clang++,$(CXX)),clang++)
+  ifeq ($(wildcard /usr/include/c++/16),)
+    ifneq ($(wildcard /usr/lib/gcc/x86_64-linux-gnu/15),)
+      CXXFLAGS_GCC_FIX := --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/15
+    else ifneq ($(wildcard /usr/lib/gcc/x86_64-linux-gnu/12),)
+      CXXFLAGS_GCC_FIX := --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/12
+    endif
+  endif
+endif
 # Native microarchitecture flag: x86-64 on x86_64, armv8-a on arm64.
 HOST_ARCH := $(shell uname -m)
 ifeq ($(HOST_ARCH),arm64)
@@ -11,14 +22,21 @@ ifeq ($(HOST_ARCH),arm64)
 else
   MARCH    = -march=x86-64
 endif
-# -static is unsupported by the macOS linker; only use it on Linux.
+# -static is unsupported by the macOS linker, so static linking (self-contained
+# binaries) is the default only on Linux. Override with STATIC=0 to link
+# dynamically (faster builds) or STATIC=1 to force static on any platform.
 ifeq ($(shell uname -s),Linux)
-  STATIC   = -static
+  STATIC ?= 1
 else
-  STATIC   =
+  STATIC ?= 0
 endif
-CXXFLAGS  = -std=c++20 -O3 $(MARCH) -pthread -DNDEBUG $(STATIC) -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp
-LDFLAGS   = $(STATIC) -pthread
+ifeq ($(STATIC),1)
+  STATIC_FLAG := -static
+else
+  STATIC_FLAG :=
+endif
+CXXFLAGS  = -std=c++20 -O3 $(MARCH) -pthread -DNDEBUG $(STATIC_FLAG) -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp $(CXXFLAGS_GCC_FIX)
+LDFLAGS   = $(STATIC_FLAG) -pthread $(CXXFLAGS_GCC_FIX)
 
 # --- Choose backend (default: TinySTM/WBCTL) --------------------
 BACKEND ?= TINYSTM
@@ -219,8 +237,19 @@ KMEANS_SRC     = STAMP/kmeans/kmeans.cpp
 KMEANS_BIN     = bin/kmeans
 GENOME_SRC     = STAMP/genome/genome.cpp
 GENOME_BIN     = bin/genome
-INTRUDER_SRC   = STAMP/intruder/intruder.cpp
-INTRUDER_BIN   = bin/intruder
+ INTRUDER_SRC   = STAMP/intruder/intruder.cpp
+ INTRUDER_BIN   = bin/intruder
+
+ # GEM5=1: per-backend gem5 binary names (same scheme as BANK_BIN)
+ ifeq ($(GEM5),1)
+   ifeq ($(GEM5_CKPT),1)
+     FUZZ_CTR_BIN := bin/fuzz_counter_gem5_ckpt_$(shell echo $(BACKEND) | tr 'A-Z' 'a-z')
+     INTRUDER_BIN := bin/intruder_gem5_ckpt_$(shell echo $(BACKEND) | tr 'A-Z' 'a-z')
+   else
+     FUZZ_CTR_BIN := bin/fuzz_counter_gem5_$(shell echo $(BACKEND) | tr 'A-Z' 'a-z')
+     INTRUDER_BIN := bin/intruder_gem5_$(shell echo $(BACKEND) | tr 'A-Z' 'a-z')
+   endif
+ endif
 SSCA2_SRC      = STAMP/ssca2/ssca2.cpp
 SSCA2_BIN      = bin/ssca2
 BAYES_SRC      = STAMP/bayes/bayes.cpp
@@ -244,6 +273,8 @@ TEST_DS_SRC = ../../tests/expli-api/test_ds.cpp
 TEST_DS_BIN = bin/test_ds
 TEST_TX_SRC = ../../tests/expli-api/test_tx.cpp
 TEST_TX_BIN = bin/test_tx
+TEST_RO2RW_SRC = ../../tests/expli-api/test_norec_ro2rw.cpp
+TEST_RO2RW_BIN = bin/test_norec_ro2rw
 
 # --- Stubs runtime (uninstrumented baseline) --------------------
 STUBS = ../../backends/stubs/tm_stubs.cpp
@@ -273,10 +304,10 @@ STAMP_BINS = $(VACATION_BIN) $(LABYRINTH_BIN) $(KMEANS_BIN) $(GENOME_BIN) $(INTR
 
 .PHONY: all stubs clean run-bank run-eigenbench run-bench7 run-vacation run-labyrinth run-kmeans
 .PHONY: run-genome run-intruder run-ssca2 run-bayes run-yada run-fuzz-counter run-fuzz-bank run-fuzz
-.PHONY: run-tpcc run-ycsb run-test-ds run-test-tx run-tests run run-stamp
+.PHONY: run-tpcc run-ycsb run-test-ds run-test-tx run-test-ro2rw run-tests run run-stamp
 
 all: bin $(BANK_BIN) $(EIGEN_BIN) $(BENCH7_BIN) $(STAMP_BINS) \
-     $(FUZZ_CTR_BIN) $(FUZZ_BANK_BIN) $(TPCC_BIN) $(YCSB_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN) $(RBTREE_BIN)
+     $(FUZZ_CTR_BIN) $(FUZZ_BANK_BIN) $(TPCC_BIN) $(YCSB_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN) $(TEST_RO2RW_BIN) $(RBTREE_BIN)
 
 stubs: bin $(BANK_STUBS) $(EIGEN_STUBS) $(BENCH7_STUBS) $(STAMP_STUBS) \
        $(FUZZ_CTR_STUBS) $(FUZZ_BANK_STUBS) $(TPCC_STUBS) $(YCSB_STUBS)
@@ -311,6 +342,7 @@ $(eval $(call BUILD_RULE,$(TPCC_BIN),$(TPCC_SRC)))
 $(eval $(call BUILD_RULE,$(YCSB_BIN),$(YCSB_SRC)))
 $(eval $(call BUILD_RULE,$(TEST_DS_BIN),$(TEST_DS_SRC)))
 $(eval $(call BUILD_RULE,$(TEST_TX_BIN),$(TEST_TX_SRC)))
+$(eval $(call BUILD_RULE,$(TEST_RO2RW_BIN),$(TEST_RO2RW_SRC)))
 $(eval $(call BUILD_RULE,$(RBTREE_BIN),$(RBTREE_SRC)))
 
 # --- Stubs build rules (uninstrumented baseline) ------------------
@@ -377,6 +409,9 @@ run-test-ds: $(TEST_DS_BIN)
 run-test-tx: $(TEST_TX_BIN)
 	./$(TEST_TX_BIN)
 
+run-test-ro2rw: $(TEST_RO2RW_BIN)
+	./$(TEST_RO2RW_BIN)
+
 run-bench7: $(BENCH7_BIN)
 	./$(BENCH7_BIN) 4 5000
 
@@ -386,7 +421,7 @@ run-tpcc: $(TPCC_BIN)
 run-ycsb: $(YCSB_BIN)
 	./$(YCSB_BIN) -t 4 -d 3000
 
-run-tests: run-test-ds run-test-tx
+run-tests: run-test-ds run-test-tx run-test-ro2rw
 run: run-bank run-eigenbench run-bench7 run-stamp run-fuzz run-tpcc run-ycsb run-tests
 
 clean:

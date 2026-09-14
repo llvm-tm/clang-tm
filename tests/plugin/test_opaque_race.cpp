@@ -31,8 +31,8 @@
 #include "tm_test_common.hpp"
 
 TM struct SharedData {
-    double value;
-    char   buffer[64];
+	double value;
+	char buffer[64];
 };
 
 SharedData g_data = {42.0, "hello"};
@@ -40,47 +40,56 @@ SharedData g_data = {42.0, "hello"};
 // ── TX without opaque: pass instruments all loads/stores. ───────────
 // External library calls (e.g. std::log) are known-safe — the pass
 // allows them without annotation.
-TX static void compute_direct(double a) {
-    double v = g_data.value;
-    v = v + log(a);                              // log is external → safe
-    g_data.value = v;
+TX static void compute_direct(double a)
+{
+	double v = g_data.value;
+	v = v + log(a); // log is external → safe
+	g_data.value = v;
 }
 
 // ── TX with opaque: pass skips the opaque-call check. ───────────────
 // The loads/stores (g_data.value, g_data.buffer) are STILL instrumented.
 // The annotation only says: "trust me, the calls I make are safe".
-TX __attribute__((annotate("tm_allow_opaque")))
-static void copy_with_opaque(const char* src) {
-    double v = g_data.value;                     // instrumented load
-    memcpy(g_data.buffer, src, strlen(src) + 1); // memcpy is opaque
-    g_data.value = v + 1.0;                      // instrumented store
+TX __attribute__((annotate("tm_allow_opaque"))) static void copy_with_opaque(
+    const char *src)
+{
+	double v = g_data.value;                     // instrumented load
+	memcpy(g_data.buffer, src, strlen(src) + 1); // memcpy is opaque
+	g_data.value = v + 1.0;                      // instrumented store
 }
 
 // ── Worker helpers ──────────────────────────────────────────────────
-THREAD static void worker_direct() {
-    for (int i = 0; i < 1000; i++) compute_direct(1.0 + i);
+THREAD static void worker_direct()
+{
+	for (int i = 0; i < 1000; i++)
+		compute_direct(1.0 + i);
 }
 
-THREAD static void worker_opaque() {
-    for (int i = 0; i < 1000; i++) copy_with_opaque("world");
+THREAD static void worker_opaque()
+{
+	for (int i = 0; i < 1000; i++)
+		copy_with_opaque("world");
 }
 
-MAIN int main() {
-    printf("opaque_race: tm_allow_opaque allows external calls in TX\n");
-    printf("  (loads/stores of the annotated function ARE instrumented)\n");
-    fflush(stdout);
+MAIN int main()
+{
+	printf("opaque_race: tm_allow_opaque allows external calls in TX\n");
+	printf("  (loads/stores of the annotated function ARE instrumented)\n");
+	fflush(stdout);
 
-    std::thread t1(worker_direct);
-    std::thread t2(worker_direct);
-    t1.join(); t2.join();
+	std::thread t1(worker_direct);
+	std::thread t2(worker_direct);
+	t1.join();
+	t2.join();
 
-    std::thread t3(worker_opaque);
-    std::thread t4(worker_opaque);
-    t3.join(); t4.join();
+	std::thread t3(worker_opaque);
+	std::thread t4(worker_opaque);
+	t3.join();
+	t4.join();
 
-    printf("  g_data.value  = %f\n", g_data.value);
-    printf("  g_data.buffer = \"%s\"\n", g_data.buffer);
-    printf("opaque_race: done\n");
-    fflush(stdout);
-    return 0;
+	printf("  g_data.value  = %f\n", g_data.value);
+	printf("  g_data.buffer = \"%s\"\n", g_data.buffer);
+	printf("opaque_race: done\n");
+	fflush(stdout);
+	return 0;
 }

@@ -18,24 +18,23 @@ template <typename K, typename V> class TMSafeMap
 		std::pair<K, V> kv;
 	};
 
-	Slot*  m_data = nullptr;
-	size_t m_cap  = 0;   // power of 2, 0 = empty
-	size_t m_size = 0;   // occupied count
+	Slot *m_data = nullptr;
+	size_t m_cap = 0;  // power of 2, 0 = empty
+	size_t m_size = 0; // occupied count
 
 	static constexpr double MAX_LOAD = 0.75;
 
-	size_t hash_idx(const K &k) const
-	{
-		return std::hash<K>{}(k) & (m_cap - 1);
-	}
+	size_t hash_idx(const K &k) const { return std::hash<K>{}(k) & (m_cap - 1); }
 
 	// Find occupied slot for key, or return m_cap if not found.
 	size_t find_occupied(const K &k) const
 	{
-		if (m_cap == 0) return 0;
+		if (m_cap == 0)
+			return 0;
 		size_t i = hash_idx(k);
 		while (m_data[i].occupied) {
-			if (m_data[i].kv.first == k) return i;
+			if (m_data[i].kv.first == k)
+				return i;
 			i = (i + 1) & (m_cap - 1);
 		}
 		return m_cap;
@@ -55,7 +54,7 @@ template <typename K, typename V> class TMSafeMap
 	void grow()
 	{
 		size_t nc = m_cap ? m_cap * 2 : 16;
-		auto* nd = static_cast<Slot*>(::operator new(nc * sizeof(Slot)));
+		auto *nd = static_cast<Slot *>(::operator new(nc * sizeof(Slot)));
 		for (size_t i = 0; i < nc; i++)
 			nd[i].occupied = false;
 
@@ -73,7 +72,7 @@ template <typename K, typename V> class TMSafeMap
 		}
 
 		m_data = nd;
-		m_cap  = nc;
+		m_cap = nc;
 	}
 
 	// Backward-shift deletion (Knuth).  Slides subsequent entries back
@@ -85,7 +84,8 @@ template <typename K, typename V> class TMSafeMap
 		size_t hole = i;
 		for (;;) {
 			size_t next = (hole + 1) & (m_cap - 1);
-			if (!m_data[next].occupied) break;
+			if (!m_data[next].occupied)
+				break;
 			size_t h = std::hash<K>{}(m_data[next].kv.first) & (m_cap - 1);
 			// Entry at next slides into the current hole iff the
 			// CURRENT hole position is on the probe chain of next
@@ -98,7 +98,8 @@ template <typename K, typename V> class TMSafeMap
 				else
 					return hole >= h || hole <= next;
 			}();
-			if (!must_slide) break;
+			if (!must_slide)
+				break;
 			m_data[hole] = m_data[next];
 			m_data[next].occupied = false;
 			hole = next;
@@ -108,8 +109,8 @@ template <typename K, typename V> class TMSafeMap
 	// Iterator that skips empty slots.  operator* returns a reference
 	// to the std::pair<K, V> stored in the slot (lvalue).
 	template <typename SlotT, typename PairT> struct MapIter {
-		SlotT* slot;
-		SlotT* end_slot;
+		SlotT *slot;
+		SlotT *end_slot;
 
 		MapIter &operator++()
 		{
@@ -121,45 +122,73 @@ template <typename K, typename V> class TMSafeMap
 		bool operator!=(const MapIter &o) const { return slot != o.slot; }
 		bool operator==(const MapIter &o) const { return slot == o.slot; }
 		template <typename SlotT2, typename PairT2>
-		bool operator!=(const MapIter<SlotT2, PairT2> &o) const { return slot != o.slot; }
+		bool operator!=(const MapIter<SlotT2, PairT2> &o) const
+		{
+			return slot != o.slot;
+		}
 		template <typename SlotT2, typename PairT2>
-		bool operator==(const MapIter<SlotT2, PairT2> &o) const { return slot == o.slot; }
-		PairT &operator*()  const { return slot->kv; }
+		bool operator==(const MapIter<SlotT2, PairT2> &o) const
+		{
+			return slot == o.slot;
+		}
+		PairT &operator*() const { return slot->kv; }
 		PairT *operator->() const { return &slot->kv; }
 	};
 
 public:
 	TMSafeMap() = default;
-	TMSafeMap(const TMSafeMap &o) { for (size_t i = 0; i < o.m_cap; i++) { if (o.m_data[i].occupied) (*this)[o.m_data[i].kv.first] = o.m_data[i].kv.second; } }
-	TMSafeMap &operator=(const TMSafeMap &o) { if (this != &o) { clear(); for (size_t i = 0; i < o.m_cap; i++) { if (o.m_data[i].occupied) (*this)[o.m_data[i].kv.first] = o.m_data[i].kv.second; } } return *this; }
+	TMSafeMap(const TMSafeMap &o)
+	{
+		for (size_t i = 0; i < o.m_cap; i++) {
+			if (o.m_data[i].occupied)
+				(*this)[o.m_data[i].kv.first] = o.m_data[i].kv.second;
+		}
+	}
+	TMSafeMap &operator=(const TMSafeMap &o)
+	{
+		if (this != &o) {
+			clear();
+			for (size_t i = 0; i < o.m_cap; i++) {
+				if (o.m_data[i].occupied)
+					(*this)[o.m_data[i].kv.first] = o.m_data[i].kv.second;
+			}
+		}
+		return *this;
+	}
 	~TMSafeMap() { ::operator delete(m_data); }
 
-	using iterator       = MapIter<      Slot,       std::pair<K,       V>>;
+	using iterator = MapIter<Slot, std::pair<K, V>>;
 	using const_iterator = MapIter<const Slot, const std::pair<K, V>>;
 
 	const_iterator begin() const
 	{
-		if (!m_data) return {nullptr, nullptr};
+		if (!m_data)
+			return {nullptr, nullptr};
 		for (size_t i = 0; i < m_cap; i++)
-			if (m_data[i].occupied) return {m_data + i, m_data + m_cap};
+			if (m_data[i].occupied)
+				return {m_data + i, m_data + m_cap};
 		return {m_data + m_cap, m_data + m_cap};
 	}
 	const_iterator end() const
 	{
-		if (!m_data) return {nullptr, nullptr};
+		if (!m_data)
+			return {nullptr, nullptr};
 		return {m_data + m_cap, m_data + m_cap};
 	}
 
 	iterator begin()
 	{
-		if (!m_data) return {nullptr, nullptr};
+		if (!m_data)
+			return {nullptr, nullptr};
 		for (size_t i = 0; i < m_cap; i++)
-			if (m_data[i].occupied) return {m_data + i, m_data + m_cap};
+			if (m_data[i].occupied)
+				return {m_data + i, m_data + m_cap};
 		return {m_data + m_cap, m_data + m_cap};
 	}
 	iterator end()
 	{
-		if (!m_data) return {nullptr, nullptr};
+		if (!m_data)
+			return {nullptr, nullptr};
 		return {m_data + m_cap, m_data + m_cap};
 	}
 
@@ -178,7 +207,7 @@ public:
 			return m_data[i].kv.second;
 		i = find_empty(k);
 		m_data[i].occupied = true;
-		m_data[i].kv.first  = k;
+		m_data[i].kv.first = k;
 		m_data[i].kv.second = V{};
 		m_size++;
 		return m_data[i].kv.second;
@@ -187,7 +216,8 @@ public:
 	size_t erase(const K &k)
 	{
 		size_t i = find_occupied(k);
-		if (i >= m_cap) return 0;
+		if (i >= m_cap)
+			return 0;
 		do_erase(i);
 		return 1;
 	}
@@ -207,22 +237,24 @@ public:
 // Same explicit-loop + field-by-field assignment approach as TMSafeMap.
 template <typename K, typename V> class TMSafeMultiMap
 {
-	std::pair<K, V>* m_data = nullptr;
-	size_t           m_size = 0;
-	size_t           m_cap  = 0;
+	std::pair<K, V> *m_data = nullptr;
+	size_t m_size = 0;
+	size_t m_cap = 0;
 
 	void grow(size_t min_cap)
 	{
 		size_t nc = m_cap ? m_cap : 4;
-		while (nc < min_cap) nc *= 2;
-		auto* nd = static_cast<std::pair<K, V>*>(::operator new(nc * sizeof(std::pair<K, V>)));
+		while (nc < min_cap)
+			nc *= 2;
+		auto *nd = static_cast<std::pair<K, V> *>(
+		    ::operator new(nc * sizeof(std::pair<K, V>)));
 		for (size_t i = 0; i < m_size; i++) {
-			nd[i].first  = m_data[i].first;
+			nd[i].first = m_data[i].first;
 			nd[i].second = m_data[i].second;
 		}
 		::operator delete(m_data);
 		m_data = nd;
-		m_cap  = nc;
+		m_cap = nc;
 	}
 
 	size_t lower_pos(const K &k) const
@@ -261,39 +293,65 @@ template <typename K, typename V> class TMSafeMultiMap
 
 public:
 	TMSafeMultiMap() = default;
-	TMSafeMultiMap(const TMSafeMultiMap& o) { reserve(o.m_size); for (size_t i = 0; i < o.m_size; i++) { m_data[i].first = o.m_data[i].first; m_data[i].second = o.m_data[i].second; } m_size = o.m_size; }
-	TMSafeMultiMap& operator=(const TMSafeMultiMap& o) { if (this != &o) { clear(); reserve(o.m_size); for (size_t i = 0; i < o.m_size; i++) { m_data[i].first = o.m_data[i].first; m_data[i].second = o.m_data[i].second; } m_size = o.m_size; } return *this; }
-	~TMSafeMultiMap() { clear(); ::operator delete(m_data); }
+	TMSafeMultiMap(const TMSafeMultiMap &o)
+	{
+		reserve(o.m_size);
+		for (size_t i = 0; i < o.m_size; i++) {
+			m_data[i].first = o.m_data[i].first;
+			m_data[i].second = o.m_data[i].second;
+		}
+		m_size = o.m_size;
+	}
+	TMSafeMultiMap &operator=(const TMSafeMultiMap &o)
+	{
+		if (this != &o) {
+			clear();
+			reserve(o.m_size);
+			for (size_t i = 0; i < o.m_size; i++) {
+				m_data[i].first = o.m_data[i].first;
+				m_data[i].second = o.m_data[i].second;
+			}
+			m_size = o.m_size;
+		}
+		return *this;
+	}
+	~TMSafeMultiMap()
+	{
+		clear();
+		::operator delete(m_data);
+	}
 
-	using const_iterator = const std::pair<K, V>*;
+	using const_iterator = const std::pair<K, V> *;
 
-	void reserve(size_t n) { if (n > m_cap) grow(n); }
+	void reserve(size_t n)
+	{
+		if (n > m_cap)
+			grow(n);
+	}
 
 	void insert(const std::pair<K, V> &p)
 	{
 		auto pos = upper_pos(p.first);
-		if (m_size >= m_cap) grow(m_size + 1);
+		if (m_size >= m_cap)
+			grow(m_size + 1);
 		for (size_t i = m_size; i > pos; i--) {
-			m_data[i].first  = m_data[i - 1].first;
+			m_data[i].first = m_data[i - 1].first;
 			m_data[i].second = m_data[i - 1].second;
 		}
-		m_data[pos].first  = p.first;
+		m_data[pos].first = p.first;
 		m_data[pos].second = p.second;
 		m_size++;
 	}
 
-	using iterator = const std::pair<K, V>*;
+	using iterator = const std::pair<K, V> *;
 
-	void clear()
-	{
-		m_size = 0;
-	}
+	void clear() { m_size = 0; }
 
 	size_t size() const { return m_size; }
 	bool empty() const { return m_size == 0; }
 
 	iterator begin() const { return m_data; }
-	iterator end()   const { return m_data + m_size; }
+	iterator end() const { return m_data + m_size; }
 
 	const_iterator lower_bound(const K &k) const
 	{

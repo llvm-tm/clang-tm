@@ -1,7 +1,7 @@
-use std::collections::BinaryHeap;
-use serde::{Deserialize, Serialize};
 use crate::event::Event;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 /// Wrapper so BinaryHeap orders by ascending timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,7 +10,10 @@ pub struct OrdEvent(pub Event);
 impl Ord for OrdEvent {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse: BinaryHeap is a max-heap, so smaller timestamp = higher priority
-        other.0.timestamp.cmp(&self.0.timestamp)
+        other
+            .0
+            .timestamp
+            .cmp(&self.0.timestamp)
             .then_with(|| other.0.thread_id.cmp(&self.0.thread_id))
             .then_with(|| other.0.seq.cmp(&self.0.seq))
     }
@@ -36,6 +39,12 @@ impl Eq for OrdEvent {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventQueue {
     heap: BinaryHeap<OrdEvent>,
+}
+
+impl Default for EventQueue {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EventQueue {

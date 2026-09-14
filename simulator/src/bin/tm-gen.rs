@@ -3,7 +3,10 @@ use tm_des::bank_sim::{self, generate_all_scenarios};
 use tm_des::trace::Trace;
 
 #[derive(Parser, Debug)]
-#[command(name = "tm-gen", about = "Generate TM simulation traces for bank benchmark")]
+#[command(
+    name = "tm-gen",
+    about = "Generate TM simulation traces for bank benchmark"
+)]
 struct Cli {
     /// Output file (use '-' for stdout).
     #[arg(short, long, default_value = "-")]

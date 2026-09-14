@@ -4,10 +4,21 @@ use std::sync::Arc;
 use tm::{transaction, TmCell, TmPtr, Transaction};
 
 #[derive(Clone, Copy, PartialEq)]
-enum Workload { A, B, C, D, E, F }
+enum Workload {
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+}
 
 #[derive(Clone, Copy, PartialEq)]
-enum Distribution { Uniform, Zipfian, Latest }
+enum Distribution {
+    Uniform,
+    Zipfian,
+    Latest,
+}
 
 #[derive(Clone)]
 struct Config {
@@ -22,7 +33,8 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            threads: 4, duration: 10000,
+            threads: 4,
+            duration: 10000,
             workload: Workload::A,
             dist: Distribution::Zipfian,
             key_range: 10000,
@@ -37,28 +49,44 @@ fn parse_args() -> Config {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-t" if i+1<args.len() => { c.threads = args[i+1].parse().unwrap_or(4); i+=2; }
-            "-d" if i+1<args.len() => { c.duration = args[i+1].parse().unwrap_or(10000); i+=2; }
-            "-w" if i+1<args.len() => {
-                c.workload = match args[i+1].to_lowercase().as_str() {
-                    "a" => Workload::A, "b" => Workload::B, "c" => Workload::C,
-                    "d" => Workload::D, "e" => Workload::E, "f" => Workload::F,
+            "-t" if i + 1 < args.len() => {
+                c.threads = args[i + 1].parse().unwrap_or(4);
+                i += 2;
+            }
+            "-d" if i + 1 < args.len() => {
+                c.duration = args[i + 1].parse().unwrap_or(10000);
+                i += 2;
+            }
+            "-w" if i + 1 < args.len() => {
+                c.workload = match args[i + 1].to_lowercase().as_str() {
+                    "a" => Workload::A,
+                    "b" => Workload::B,
+                    "c" => Workload::C,
+                    "d" => Workload::D,
+                    "e" => Workload::E,
+                    "f" => Workload::F,
                     _ => Workload::A,
                 };
-                i+=2;
+                i += 2;
             }
-            "-k" if i+1<args.len() => { c.key_range = args[i+1].parse().unwrap_or(10000); i+=2; }
-            "-i" if i+1<args.len() => { c.initial_records = args[i+1].parse().unwrap_or(10000); i+=2; }
-            "-dist" if i+1<args.len() => {
-                c.dist = match args[i+1].to_lowercase().as_str() {
-                    "u"|"uniform" => Distribution::Uniform,
-                    "z"|"zipfian" => Distribution::Zipfian,
-                    "l"|"latest" => Distribution::Latest,
+            "-k" if i + 1 < args.len() => {
+                c.key_range = args[i + 1].parse().unwrap_or(10000);
+                i += 2;
+            }
+            "-i" if i + 1 < args.len() => {
+                c.initial_records = args[i + 1].parse().unwrap_or(10000);
+                i += 2;
+            }
+            "-dist" if i + 1 < args.len() => {
+                c.dist = match args[i + 1].to_lowercase().as_str() {
+                    "u" | "uniform" => Distribution::Uniform,
+                    "z" | "zipfian" => Distribution::Zipfian,
+                    "l" | "latest" => Distribution::Latest,
                     _ => Distribution::Zipfian,
                 };
-                i+=2;
+                i += 2;
             }
-            _ => i+=1,
+            _ => i += 1,
         }
     }
     c
@@ -81,7 +109,9 @@ fn build_zipfian_cdf(n: usize, theta: f64) -> Vec<f64> {
 
 fn zipfian_sample(cdf: &[f64], r: f64) -> usize {
     for (i, &v) in cdf.iter().enumerate() {
-        if r < v { return i; }
+        if r < v {
+            return i;
+        }
     }
     cdf.len() - 1
 }
@@ -97,13 +127,16 @@ struct Record {
 
 impl Record {
     fn new(key: i64) -> Self {
-        let mut data: [TmCell<u8>; NUM_FIELDS * FIELD_SIZE] = unsafe { std::mem::zeroed() };
-        for (i, cell) in data.iter_mut().enumerate() {
+        let data = std::array::from_fn(|i| {
             let ch = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
                 [(key as usize + i) % 62];
-            unsafe { *cell.ptr() = ch; }
+            TmCell::new(ch)
+        });
+        Record {
+            key,
+            data,
+            timestamp: TmCell::new(key),
         }
-        Record { key, data, timestamp: TmCell::new(key) }
     }
 
     fn read_field0(&self, tx: &Transaction) -> [u8; FIELD_SIZE] {
@@ -133,9 +166,16 @@ struct Database {
 
 impl Database {
     fn new(max_records: usize) -> Self {
-        let records = (0..max_records).map(|_| TmCell::new(TmPtr::null())).collect();
+        let records = (0..max_records)
+            .map(|_| TmCell::new(TmPtr::null()))
+            .collect();
         let key_to_idx = (0..max_records).map(|_| TmCell::new(-1i64)).collect();
-        Database { records, key_to_idx, count: AtomicU64::new(0), max_records }
+        Database {
+            records,
+            key_to_idx,
+            count: AtomicU64::new(0),
+            max_records,
+        }
     }
 
     fn hash(&self, key: i64) -> usize {
@@ -144,7 +184,9 @@ impl Database {
     }
 
     fn insert(&self, tx: &Transaction, key: i64) {
-        if self.count.load(Ordering::Relaxed) as usize >= self.max_records { return; }
+        if self.count.load(Ordering::Relaxed) as usize >= self.max_records {
+            return;
+        }
         let h = self.hash(key);
         for offset in 0..self.max_records {
             let idx = (h + offset) % self.max_records;
@@ -156,7 +198,9 @@ impl Database {
                 self.count.fetch_add(1, Ordering::Relaxed);
                 return;
             }
-            if stored == key { return; }
+            if stored == key {
+                return;
+            }
         }
     }
 
@@ -165,7 +209,9 @@ impl Database {
         for offset in 0..self.max_records {
             let idx = (h + offset) % self.max_records;
             let stored = tx.read(&self.key_to_idx[idx]);
-            if stored == -1 { return None; }
+            if stored == -1 {
+                return None;
+            }
             if stored == key {
                 let ptr = tx.read(&self.records[idx]);
                 return Some(ptr.get());
@@ -182,7 +228,8 @@ impl Database {
     }
 
     fn read_field0(&self, tx: &Transaction, key: i64) -> Option<[u8; FIELD_SIZE]> {
-        self.find(tx, key).map(|rec| unsafe { (*rec).read_field0(tx) })
+        self.find(tx, key)
+            .map(|rec| unsafe { (*rec).read_field0(tx) })
     }
 
     fn scan(&self, tx: &Transaction, start_key: i64, count: usize) -> Vec<i64> {
@@ -215,11 +262,10 @@ fn run_worker(
                 let sample = zipfian_sample(cdf, r);
                 (sample as i64) % config.key_range as i64
             }
-            Distribution::Uniform => {
-                (rng.next() % config.key_range as u64) as i64
-            }
+            Distribution::Uniform => (rng.next() % config.key_range as u64) as i64,
             Distribution::Latest => {
-                let max = (config.key_range as i64 + insert_counter as i64).min(config.key_range as i64 * 2);
+                let max = (config.key_range as i64 + insert_counter as i64)
+                    .min(config.key_range as i64 * 2);
                 max - 1 - (rng.next() % 1000u64) as i64
             }
         };
@@ -274,8 +320,19 @@ fn run_worker(
 
 struct Rng(u64);
 impl Rng {
-    fn new(seed: u64) -> Self { Self(seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)) }
-    fn next(&mut self) -> u64 { self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); self.0 >> 33 }
+    fn new(seed: u64) -> Self {
+        Self(
+            seed.wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407),
+        )
+    }
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
 }
 
 fn main() {
@@ -327,7 +384,9 @@ fn main() {
 
     std::thread::sleep(std::time::Duration::from_millis(duration_ms as u64));
     stop.store(true, Ordering::Relaxed);
-    for h in handles { h.join().unwrap(); }
+    for h in handles {
+        h.join().unwrap();
+    }
 
     let ops = total_ops.load(Ordering::Relaxed);
     let elapsed = duration_ms as f64 / 1000.0;

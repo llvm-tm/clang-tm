@@ -20,7 +20,8 @@
 
 using namespace llvm;
 
-namespace {
+namespace
+{
 
 static bool stripLifetimeIntrinsics(Module &M)
 {
@@ -80,8 +81,8 @@ static bool verifyInstrumentation(Module &M)
 	for (auto &F : M) {
 		if (F.isDeclaration())
 			continue;
-		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT)
-		    && !F.getName().contains(TM_CLONE_SUFFIX)) {
+		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT) &&
+		    !F.getName().contains(TM_CLONE_SUFFIX)) {
 			continue;
 		}
 		for (auto &BB : F) {
@@ -103,14 +104,14 @@ static bool verifyInstrumentation(Module &M)
 					continue;
 				allOk = false;
 				errs() << "TM-CHECK: UNINSTRUMENTED "
-				       << (isa<LoadInst>(I) ? "LOAD" : "STORE")
-				       << " in " << F.getName() << "\n  ";
+				       << (isa<LoadInst>(I) ? "LOAD" : "STORE") << " in " << F.getName()
+				       << "\n  ";
 				I.print(errs());
 				errs() << "\n";
 				if (auto *DIL = I.getDebugLoc().get())
 					if (auto *Scope = dyn_cast_or_null<DIScope>(DIL->getScope()))
-						errs() << "  at " << Scope->getFilename() << ":"
-						       << DIL->getLine() << ":" << DIL->getColumn() << "\n";
+						errs() << "  at " << Scope->getFilename() << ":" << DIL->getLine()
+						       << ":" << DIL->getColumn() << "\n";
 			}
 		}
 	}
@@ -129,7 +130,8 @@ public:
 		bool lifetimeStripped = stripLifetimeIntrinsics(M);
 
 		if (!verifyInstrumentation(M)) {
-			errs() << "error: TM instrumentation check failed (use -tm-strict-check to enable, "
+			errs() << "error: TM instrumentation check failed (use -tm-strict-check to "
+			          "enable, "
 			          "-tm-allow-opaque to suppress)\n";
 			exit(1);
 		}
@@ -141,8 +143,7 @@ public:
 		if (S)
 			S->modified = false;
 
-		return lifetimeStripped ? PreservedAnalyses::none()
-		                       : PreservedAnalyses::all();
+		return lifetimeStripped ? PreservedAnalyses::none() : PreservedAnalyses::all();
 	}
 	static bool isRequired() { return true; }
 };

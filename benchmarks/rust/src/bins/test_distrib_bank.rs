@@ -47,11 +47,20 @@ impl ShmRegion {
                 0,
             )
         };
-        unsafe { libc::close(fd); }
+        unsafe {
+            libc::close(fd);
+        }
         assert!(ptr != libc::MAP_FAILED, "mmap({}) failed", path);
-        unsafe { std::ptr::write_bytes(ptr, 0, size); }
-        unsafe { libc::msync(ptr, size, libc::MS_SYNC); }
-        ShmRegion { ptr: ptr as *mut u8, size }
+        unsafe {
+            std::ptr::write_bytes(ptr, 0, size);
+        }
+        unsafe {
+            libc::msync(ptr, size, libc::MS_SYNC);
+        }
+        ShmRegion {
+            ptr: ptr as *mut u8,
+            size,
+        }
     }
 
     fn accounts(&self) -> *mut i64 {
@@ -61,7 +70,9 @@ impl ShmRegion {
 
 impl Drop for ShmRegion {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.size); }
+        unsafe {
+            libc::munmap(self.ptr as *mut libc::c_void, self.size);
+        }
         let _ = std::fs::remove_file(ACCOUNT_FILE);
     }
 }
@@ -71,12 +82,18 @@ fn do_transfers(accounts: *mut i64, count: usize) {
         tm::transaction(|_tx| unsafe {
             let src = fastrand::usize(0..NUM_ACCOUNTS);
             let dst = fastrand::usize(0..NUM_ACCOUNTS);
-            if src == dst { return; }
+            if src == dst {
+                return;
+            }
             let amount = fastrand::i64(1..=MAX_AMOUNT);
             let sb = accounts.add(1 + src).read();
-            if sb < amount { return; }
+            if sb < amount {
+                return;
+            }
             accounts.add(1 + src).write(sb - amount);
-            accounts.add(1 + dst).write(accounts.add(1 + dst).read() + amount);
+            accounts
+                .add(1 + dst)
+                .write(accounts.add(1 + dst).read() + amount);
         });
     }
 }
@@ -94,7 +111,9 @@ fn main() {
             accounts.add(1 + i).write(INITIAL_BALANCE);
         }
     });
-    unsafe { libc::msync(shm.ptr as *mut libc::c_void, shm.size, libc::MS_SYNC); }
+    unsafe {
+        libc::msync(shm.ptr as *mut libc::c_void, shm.size, libc::MS_SYNC);
+    }
 
     // Fork child processes
     let pid = unsafe { libc::fork() };
@@ -115,7 +134,9 @@ fn main() {
 
         // Wait for child
         let mut status: i32 = 0;
-        unsafe { libc::waitpid(pid, &mut status as *mut i32, 0); }
+        unsafe {
+            libc::waitpid(pid, &mut status as *mut i32, 0);
+        }
 
         // Verify total is conserved
         tm::transaction(|_tx| {
@@ -125,8 +146,11 @@ fn main() {
                 assert!(bal >= 0, "account {} has negative balance {}", i, bal);
                 total += bal;
             }
-            assert_eq!(total, EXPECTED_TOTAL,
-                "total mismatch: got {}, expected {}", total, EXPECTED_TOTAL);
+            assert_eq!(
+                total, EXPECTED_TOTAL,
+                "total mismatch: got {}, expected {}",
+                total, EXPECTED_TOTAL
+            );
             eprintln!("PASS: total={}, conserved across {} processes", total, 2);
         });
     }

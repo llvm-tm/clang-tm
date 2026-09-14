@@ -47,13 +47,18 @@ impl ShmRegion {
                 0,
             )
         };
-        unsafe { libc::close(fd); }
+        unsafe {
+            libc::close(fd);
+        }
         assert!(ptr != libc::MAP_FAILED, "mmap({}) failed", path);
         // Only zero the file on first creation (if it was just truncated from 0).
         // We detect this by checking if the file was empty before truncation.
         // For MAP_SHARED, the file offset 0 starts zeroed on creation.
         // We avoid re-zeroing on subsequent runs so persisted data survives.
-        ShmRegion { ptr: ptr as *mut u8, size }
+        ShmRegion {
+            ptr: ptr as *mut u8,
+            size,
+        }
     }
 
     fn accounts(&self) -> *mut i64 {
@@ -63,7 +68,9 @@ impl ShmRegion {
 
 impl Drop for ShmRegion {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.size); }
+        unsafe {
+            libc::munmap(self.ptr as *mut libc::c_void, self.size);
+        }
     }
 }
 
@@ -77,7 +84,7 @@ fn main() {
     if magic == MAGIC {
         // ── Verify + transfer mode ──
         let src = fastrand::usize(0..NUM_ACCOUNTS);
-        let dst = fastrand::usize(0..NUM_ACCOUNTS);
+        let dst = (src + 1) % NUM_ACCOUNTS;
         let amount: i64 = 10;
 
         tm::transaction(|_tx| unsafe {
@@ -93,8 +100,11 @@ fn main() {
             for i in 0..NUM_ACCOUNTS {
                 total += unsafe { accounts.add(1 + i).read() };
             }
-            assert_eq!(total, EXPECTED_TOTAL,
-                "total mismatch: got {}, expected {}", total, EXPECTED_TOTAL);
+            assert_eq!(
+                total, EXPECTED_TOTAL,
+                "total mismatch: got {}, expected {}",
+                total, EXPECTED_TOTAL
+            );
             eprintln!("PASS: total={}, conserved after transfer", total);
         });
     } else {
@@ -105,9 +115,13 @@ fn main() {
                 accounts.add(1 + i).write(INITIAL_BALANCE);
             }
         });
-        unsafe { libc::msync(shm.ptr as *mut libc::c_void, shm.size, libc::MS_SYNC); }
-        eprintln!("INIT: {} accounts @ {} each, total={}",
-            NUM_ACCOUNTS, INITIAL_BALANCE, EXPECTED_TOTAL);
+        unsafe {
+            libc::msync(shm.ptr as *mut libc::c_void, shm.size, libc::MS_SYNC);
+        }
+        eprintln!(
+            "INIT: {} accounts @ {} each, total={}",
+            NUM_ACCOUNTS, INITIAL_BALANCE, EXPECTED_TOTAL
+        );
         eprintln!("Run again to verify persistence + do a transfer");
     }
 

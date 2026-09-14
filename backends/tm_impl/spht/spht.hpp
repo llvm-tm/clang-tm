@@ -23,14 +23,13 @@
 #pragma once
 
 #include <atomic>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <atomic>
-#include <thread>
 #include <immintrin.h>
 #include <new>
+#include <thread>
 
 #include "tm_rtm.hpp"
 #include <cstdio>
@@ -39,33 +38,33 @@ namespace spht
 {
 
 using stm::any_type_t;
-using stm::ValueType;
 using stm::fill_any_type;
-using stm::return_any_type;
 using stm::read_value_from_addr;
+using stm::return_any_type;
+using stm::ValueType;
 using stm::write_value_to_addr;
 
 constexpr const char *VERSION = "1.0.0-spht";
 
 // ── Configuration ──────────────────────────────────────────────────
-constexpr size_t PCL_CAPACITY         = 65536;
+constexpr size_t PCL_CAPACITY = 65536;
 constexpr size_t GROUP_COMMIT_INTERVAL = 16;
-constexpr int    MAX_RETRIES           = 12;
+constexpr int MAX_RETRIES = 12;
 
 // ── Log entry types ────────────────────────────────────────────────
 enum LogEntryType : uint8_t {
-	LOG_WRITE  = 0,  // ordinary write (addr, type, new_val)
-	LOG_MALLOC = 1,  // tm_malloc inside TX: addr = pointer, new_val = size
-	LOG_FREE   = 2,  // tm_free inside TX: addr = pointer being freed
+	LOG_WRITE = 0,  // ordinary write (addr, type, new_val)
+	LOG_MALLOC = 1, // tm_malloc inside TX: addr = pointer, new_val = size
+	LOG_FREE = 2,   // tm_free inside TX: addr = pointer being freed
 };
 
 // ── Log entry ──────────────────────────────────────────────────────
 struct LogEntry {
 	LogEntryType op_type;
-	uint8_t      _pad[7];
-	void        *addr;
-	ValueType    type;
-	any_type_t   new_val;   // for LOG_MALLOC: size; for LOG_WRITE: written value
+	uint8_t _pad[7];
+	void *addr;
+	ValueType type;
+	any_type_t new_val; // for LOG_MALLOC: size; for LOG_WRITE: written value
 };
 
 // ── Per-Thread Commit Log ──────────────────────────────────────────
@@ -73,12 +72,19 @@ struct PCL {
 	std::vector<LogEntry> entries;
 	size_t epoch_start = 0;
 
-	void reset_epoch() { entries.clear(); epoch_start = 0; }
+	void reset_epoch()
+	{
+		entries.clear();
+		epoch_start = 0;
+	}
 
-	void append(void *addr, ValueType type, const any_type_t &val,
+	void append(void *addr,
+	            ValueType type,
+	            const any_type_t &val,
 	            LogEntryType op_type = LOG_WRITE)
 	{
-		if (entries.size() >= PCL_CAPACITY) return;
+		if (entries.size() >= PCL_CAPACITY)
+			return;
 		entries.push_back({op_type, {}, addr, type, val});
 	}
 };
@@ -87,7 +93,7 @@ struct PCL {
 struct Transaction {
 	bool active = false;
 	bool read_only = true;
-	int  retry_count = 0;
+	int retry_count = 0;
 	uint64_t tx_seq = 0;
 	PCL *pcl = nullptr;
 
@@ -146,7 +152,8 @@ inline void init_thread()
 
 	uint64_t tid = g_num_threads.fetch_add(1, std::memory_order_acq_rel);
 	if (tid == 0) {
-		g_durable_seqs = (std::atomic<uint64_t> *)calloc(64, sizeof(std::atomic<uint64_t>));
+		g_durable_seqs = (std::atomic<uint64_t> *)calloc(64,
+		                                                 sizeof(std::atomic<uint64_t>));
 	}
 	current_tx->pcl = g_pcl;
 	current_tx->tx_seq = 0;
@@ -244,12 +251,14 @@ inline bool begin()
 inline void abort_tx()
 {
 	if (!rtm_available()) {
-		if (current_tx) current_tx->active = false;
+		if (current_tx)
+			current_tx->active = false;
 		siglongjmp(*jmpbuf, 1);
 		return;
 	}
 	_xabort(1);
-	if (current_tx) current_tx->active = false;
+	if (current_tx)
+		current_tx->active = false;
 	siglongjmp(*jmpbuf, 1);
 }
 
@@ -273,8 +282,7 @@ inline bool commit()
 // Read / Write operations
 // =========================================================================
 
-template <typename T, ValueType SZ>
-inline T tm_read(T *addr)
+template <typename T, ValueType SZ> inline T tm_read(T *addr)
 {
 	if (!current_tx || !current_tx->active)
 		return *addr;
@@ -290,8 +298,7 @@ inline T tm_read(T *addr)
 	return *addr;
 }
 
-template <typename T, ValueType SZ>
-inline void tm_write(T *addr, T val)
+template <typename T, ValueType SZ> inline void tm_write(T *addr, T val)
 {
 	// Null-address guard
 	if (!addr || (uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 47) != 0)
@@ -336,20 +343,59 @@ inline void tm_write(T *addr, T val)
 // Typed wrappers (14 functions matching plugin interface)
 // =========================================================================
 
-inline uint8_t  tm_read_i1(uint8_t  *addr) { return tm_read<uint8_t,  ValueType::UINT8>(addr);   }
-inline uint16_t tm_read_i2(uint16_t *addr) { return tm_read<uint16_t, ValueType::UINT16>(addr);  }
-inline uint32_t tm_read_i4(uint32_t *addr) { return tm_read<uint32_t, ValueType::UINT32>(addr);  }
-inline uint64_t tm_read_i8(uint64_t *addr) { return tm_read<uint64_t, ValueType::UINT64>(addr);  }
-inline float    tm_read_f4(float    *addr) { return tm_read<float,    ValueType::FLOAT>(addr);   }
-inline double   tm_read_f8(double   *addr) { return tm_read<double,   ValueType::DOUBLE>(addr);  }
-inline void *   tm_read_ptr(void   **addr) { return tm_read<void *,   ValueType::POINTER>(addr); }
+inline uint8_t tm_read_i1(uint8_t *addr)
+{
+	return tm_read<uint8_t, ValueType::UINT8>(addr);
+}
+inline uint16_t tm_read_i2(uint16_t *addr)
+{
+	return tm_read<uint16_t, ValueType::UINT16>(addr);
+}
+inline uint32_t tm_read_i4(uint32_t *addr)
+{
+	return tm_read<uint32_t, ValueType::UINT32>(addr);
+}
+inline uint64_t tm_read_i8(uint64_t *addr)
+{
+	return tm_read<uint64_t, ValueType::UINT64>(addr);
+}
+inline float tm_read_f4(float *addr) { return tm_read<float, ValueType::FLOAT>(addr); }
+inline double tm_read_f8(double *addr)
+{
+	return tm_read<double, ValueType::DOUBLE>(addr);
+}
+inline void *tm_read_ptr(void **addr)
+{
+	return tm_read<void *, ValueType::POINTER>(addr);
+}
 
-inline void tm_write_i1(uint8_t  *addr, uint8_t  val) { tm_write<uint8_t,  ValueType::UINT8>(addr, val);   }
-inline void tm_write_i2(uint16_t *addr, uint16_t val) { tm_write<uint16_t, ValueType::UINT16>(addr, val); }
-inline void tm_write_i4(uint32_t *addr, uint32_t val) { tm_write<uint32_t, ValueType::UINT32>(addr, val); }
-inline void tm_write_i8(uint64_t *addr, uint64_t val) { tm_write<uint64_t, ValueType::UINT64>(addr, val); }
-inline void tm_write_f4(float    *addr, float    val) { tm_write<float,    ValueType::FLOAT>(addr, val);   }
-inline void tm_write_f8(double   *addr, double   val) { tm_write<double,   ValueType::DOUBLE>(addr, val);  }
-inline void tm_write_ptr(void   **addr, void    *val) { tm_write<void *,   ValueType::POINTER>(addr, val); }
+inline void tm_write_i1(uint8_t *addr, uint8_t val)
+{
+	tm_write<uint8_t, ValueType::UINT8>(addr, val);
+}
+inline void tm_write_i2(uint16_t *addr, uint16_t val)
+{
+	tm_write<uint16_t, ValueType::UINT16>(addr, val);
+}
+inline void tm_write_i4(uint32_t *addr, uint32_t val)
+{
+	tm_write<uint32_t, ValueType::UINT32>(addr, val);
+}
+inline void tm_write_i8(uint64_t *addr, uint64_t val)
+{
+	tm_write<uint64_t, ValueType::UINT64>(addr, val);
+}
+inline void tm_write_f4(float *addr, float val)
+{
+	tm_write<float, ValueType::FLOAT>(addr, val);
+}
+inline void tm_write_f8(double *addr, double val)
+{
+	tm_write<double, ValueType::DOUBLE>(addr, val);
+}
+inline void tm_write_ptr(void **addr, void *val)
+{
+	tm_write<void *, ValueType::POINTER>(addr, val);
+}
 
 } // namespace spht

@@ -7,23 +7,25 @@
  * The counter should continue incrementing.
  */
 
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 
 #include "tm_test_common.hpp"
 
 TM int32_t counter = 0;
 
-TX void increment() {
-    printf("increment: counter before = %d\n", counter);
-    counter++;
-    printf("increment: counter after = %d\n", counter);
+TX void increment()
+{
+	printf("increment: counter before = %d\n", counter);
+	counter++;
+	printf("increment: counter after = %d\n", counter);
 }
 
-MAIN int main() {
-    printf("main: starting, counter = %d\n", counter);
-    increment();
-    increment();
-    printf("main: done, final counter = %d\n", counter);
-    return 0;
+MAIN int main()
+{
+	printf("main: starting, counter = %d\n", counter);
+	increment();
+	increment();
+	printf("main: done, final counter = %d\n", counter);
+	return 0;
 }

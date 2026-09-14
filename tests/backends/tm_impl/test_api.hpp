@@ -1,7 +1,7 @@
 #pragma once
+#include <csetjmp>
 #include <cstddef>
 #include <cstdint>
-#include <csetjmp>
 
 // ── Thread-local state (common to all backends) ──
 extern "C" {

@@ -10,26 +10,26 @@
 
 static int g_test_failures = 0;
 
-#define TEST_ASSERT(cond, msg)                                                             \
-	do {                                                                                   \
-		if (!(cond)) {                                                                     \
-			fprintf(stderr, "  FAIL [%s:%d] %s\n", __FILE__, __LINE__, msg);              \
-			g_test_failures++;                                                             \
-		}                                                                                  \
+#define TEST_ASSERT(cond, msg)                                                           \
+	do {                                                                                 \
+		if (!(cond)) {                                                                   \
+			fprintf(stderr, "  FAIL [%s:%d] %s\n", __FILE__, __LINE__, msg);             \
+			g_test_failures++;                                                           \
+		}                                                                                \
 	} while (0)
 
-#define TEST_ASSERT_EQ(a, b, msg)                                                          \
-	do {                                                                                   \
-		if ((a) != (b)) {                                                                  \
-			fprintf(stderr,                                                                \
-			        "  FAIL [%s:%d] %s: expected %llu, got %llu\n",                       \
-			        __FILE__,                                                              \
-			        __LINE__,                                                              \
-			        msg,                                                                   \
-			        (unsigned long long)(b),                                               \
-			        (unsigned long long)(a));                                              \
-			g_test_failures++;                                                             \
-		}                                                                                  \
+#define TEST_ASSERT_EQ(a, b, msg)                                                        \
+	do {                                                                                 \
+		if ((a) != (b)) {                                                                \
+			fprintf(stderr,                                                              \
+			        "  FAIL [%s:%d] %s: expected %llu, got %llu\n",                      \
+			        __FILE__,                                                            \
+			        __LINE__,                                                            \
+			        msg,                                                                 \
+			        (unsigned long long)(b),                                             \
+			        (unsigned long long)(a));                                            \
+			g_test_failures++;                                                           \
+		}                                                                                \
 	} while (0)
 
 struct Barrier {
@@ -42,8 +42,10 @@ struct Barrier {
 	void wait()
 	{
 		int prev = count_.fetch_add(1, std::memory_order_acq_rel);
-		while (count_.load(std::memory_order_acquire) < n_) {}
-		if (prev + 1 == n_) reset();
+		while (count_.load(std::memory_order_acquire) < n_) {
+		}
+		if (prev + 1 == n_)
+			reset();
 	}
 	void reset() { count_.store(0, std::memory_order_release); }
 };
@@ -55,7 +57,8 @@ struct Timer {
 	int64_t elapsed_ms() const
 	{
 		auto end = std::chrono::high_resolution_clock::now();
-		return std::chrono::duration_cast<std::chrono::milliseconds>(end - start_).count();
+		return std::chrono::duration_cast<std::chrono::milliseconds>(end - start_)
+		    .count();
 	}
 };
 

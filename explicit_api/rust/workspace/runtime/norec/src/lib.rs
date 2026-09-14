@@ -5,9 +5,9 @@
 // serializes via CAS on the global lock.
 
 use core::sync::atomic::{fence, AtomicU64, Ordering};
+pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
 #[cfg(not(feature = "simulation"))]
 use std::cell::RefCell;
-pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
 
 // ── Thread-local / simulation state ──────────────────────
 // Normal mode: thread_local! for production multi-threaded use.
@@ -46,7 +46,7 @@ pub static TM_STATS: runtime_core::SyncCounters = runtime_core::SyncCounters::ne
 #[derive(Clone)]
 pub struct ReadEntry {
     pub addr: usize,
-    pub sz: u8,           // byte size of the read
+    pub sz: u8,            // byte size of the read
     pub observed_val: u64, // value at read time, zero-extended to u64
 }
 
@@ -251,16 +251,16 @@ fn read_word<T: Primitive>(addr: usize) -> T {
                     observed_val: val_u64,
                 });
                 #[cfg(feature = "stats")]
-                TM_STATS.total_read_set_entries.fetch_add(1, Ordering::Relaxed);
+                TM_STATS
+                    .total_read_set_entries
+                    .fetch_add(1, Ordering::Relaxed);
             });
             return val;
         }
 
-        with_tx(|tx| {
-            match validate_impl(tx) {
-                Some(s) => tx.snapshot = s,
-                None => std::panic::panic_any(TmxAbort),
-            }
+        with_tx(|tx| match validate_impl(tx) {
+            Some(s) => tx.snapshot = s,
+            None => std::panic::panic_any(TmxAbort),
         });
     }
 }
@@ -269,7 +269,9 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 fn write_word<T: Primitive>(addr: usize, val: T) {
     fence(Ordering::SeqCst);
     if !tx_active() {
-        unsafe { (addr as *mut T).write(val); }
+        unsafe {
+            (addr as *mut T).write(val);
+        }
         return;
     }
 
@@ -296,7 +298,9 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
 
         tx.write_set.push(WriteEntry { addr, value: tv });
         #[cfg(feature = "stats")]
-        TM_STATS.total_write_set_entries.fetch_add(1, Ordering::Relaxed);
+        TM_STATS
+            .total_write_set_entries
+            .fetch_add(1, Ordering::Relaxed);
     });
 }
 
@@ -364,8 +368,8 @@ pub fn tm_init_thread() {
     {
         let tid = runtime_core::current_sim_thread_id();
         let store = sim_tx_store();
-    let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
-    map.entry(tid).or_insert(None);
+        let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(tid).or_insert(None);
     }
 }
 
@@ -427,7 +431,15 @@ pub fn tm_commit() -> bool {
         // CAS failed — validate and retry
         #[cfg(feature = "stats")]
         TM_STATS.lock_contentions.fetch_add(1, Ordering::Relaxed);
-        snapshot = match validate_impl(&mut tx) { Some(s) => s, None => { TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed); #[cfg(feature = "stats")] TM_STATS.aborts.fetch_add(1, Ordering::Relaxed); return false; } };
+        snapshot = match validate_impl(&mut tx) {
+            Some(s) => s,
+            None => {
+                TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "stats")]
+                TM_STATS.aborts.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+        };
     }
 
     // We hold the global lock. Write-back from write-set.
@@ -540,7 +552,9 @@ pub mod sim {
 
     /// Clear current thread's state (for reset between scenarios).
     pub fn reset() {
-        let Some(tid) = runtime_core::try_current_sim_thread_id() else { return; };
+        let Some(tid) = runtime_core::try_current_sim_thread_id() else {
+            return;
+        };
         let store = sim_tx_store();
         let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
         map.remove(&tid);
@@ -550,14 +564,34 @@ pub mod sim {
     #[cfg(feature = "stats")]
     pub fn take_stats() -> runtime_core::SyncCounters {
         let s = runtime_core::SyncCounters::new();
-        s.validations.store(TM_STATS.validations.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.validation_failures.store(TM_STATS.validation_failures.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.lock_contentions.store(TM_STATS.lock_contentions.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.lock_acquire_failures.store(TM_STATS.lock_acquire_failures.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.total_read_set_entries.store(TM_STATS.total_read_set_entries.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.total_write_set_entries.store(TM_STATS.total_write_set_entries.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.commits.store(TM_STATS.commits.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.aborts.store(TM_STATS.aborts.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.validations.store(
+            TM_STATS.validations.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        s.validation_failures.store(
+            TM_STATS.validation_failures.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        s.lock_contentions.store(
+            TM_STATS.lock_contentions.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        s.lock_acquire_failures.store(
+            TM_STATS.lock_acquire_failures.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        s.total_read_set_entries.store(
+            TM_STATS.total_read_set_entries.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        s.total_write_set_entries.store(
+            TM_STATS.total_write_set_entries.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        s.commits
+            .store(TM_STATS.commits.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.aborts
+            .store(TM_STATS.aborts.load(Ordering::Relaxed), Ordering::Relaxed);
         TM_STATS.reset();
         s
     }
@@ -569,13 +603,15 @@ pub mod sim {
         let val = s.validations.load(Ordering::Relaxed);
         let vfail = s.validation_failures.load(Ordering::Relaxed);
         let lcon = s.lock_contentions.load(Ordering::Relaxed);
-        let laf  = s.lock_acquire_failures.load(Ordering::Relaxed);
-        let trs  = s.total_read_set_entries.load(Ordering::Relaxed);
-        let tws  = s.total_write_set_entries.load(Ordering::Relaxed);
-        let com  = s.commits.load(Ordering::Relaxed);
-        let abt  = s.aborts.load(Ordering::Relaxed);
+        let laf = s.lock_acquire_failures.load(Ordering::Relaxed);
+        let trs = s.total_read_set_entries.load(Ordering::Relaxed);
+        let tws = s.total_write_set_entries.load(Ordering::Relaxed);
+        let com = s.commits.load(Ordering::Relaxed);
+        let abt = s.aborts.load(Ordering::Relaxed);
         eprintln!("  STATS (NOrec):");
-        eprintln!("    Commits={}  Aborts={}  Val={}  VFail={}  Locks={}  LAqFail={}  RS={}  WS={}",
-                  com, abt, val, vfail, lcon, laf, trs, tws);
+        eprintln!(
+            "    Commits={}  Aborts={}  Val={}  VFail={}  Locks={}  LAqFail={}  RS={}  WS={}",
+            com, abt, val, vfail, lcon, laf, trs, tws
+        );
     }
 }

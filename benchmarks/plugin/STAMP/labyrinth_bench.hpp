@@ -8,204 +8,240 @@
 #include <vector>
 
 struct Point3D {
-    int x, y, z;
-    bool operator==(const Point3D& o) const { return x == o.x && y == o.y && z == o.z; }
-    bool operator!=(const Point3D& o) const { return !(*this == o); }
-    bool operator<(const Point3D& o) const {
-        if (x != o.x) return x < o.x;
-        if (y != o.y) return y < o.y;
-        return z < o.z;
-    }
+	int x, y, z;
+	bool operator==(const Point3D &o) const { return x == o.x && y == o.y && z == o.z; }
+	bool operator!=(const Point3D &o) const { return !(*this == o); }
+	bool operator<(const Point3D &o) const
+	{
+		if (x != o.x)
+			return x < o.x;
+		if (y != o.y)
+			return y < o.y;
+		return z < o.z;
+	}
 };
 
 struct PathRequest {
-    Point3D src;
-    Point3D dst;
+	Point3D src;
+	Point3D dst;
 };
 
 struct TM LabyrinthData {
-    PathRequest* requests;
-    int* request_handled;
-    long* grid;
-    int width, height, depth;
-    int num_requests;
-    int gridsize;
-    long x_cost, y_cost, z_cost;
-    long bend_cost;
+	PathRequest *requests;
+	int *request_handled;
+	long *grid;
+	int width, height, depth;
+	int num_requests;
+	int gridsize;
+	long x_cost, y_cost, z_cost;
+	long bend_cost;
 };
 
 struct ExpansionCell {
-    int x, y, z;
-    long value;
+	int x, y, z;
+	long value;
 };
 
-static LabyrinthData* g_labyrinth = nullptr;
+static LabyrinthData *g_labyrinth = nullptr;
 
-inline void labyrinth_generate_maze() {
-    auto data = new LabyrinthData();
-    data->width = g_labyrinth_x;
-    data->height = g_labyrinth_y;
-    data->depth = g_labyrinth_z;
-    data->x_cost = 1;
-    data->y_cost = 1;
-    data->z_cost = 2;
-    data->bend_cost = 1;
-    data->num_requests = g_labyrinth_n;
+inline void labyrinth_generate_maze()
+{
+	auto data = new LabyrinthData();
+	data->width = g_labyrinth_x;
+	data->height = g_labyrinth_y;
+	data->depth = g_labyrinth_z;
+	data->x_cost = 1;
+	data->y_cost = 1;
+	data->z_cost = 2;
+	data->bend_cost = 1;
+	data->num_requests = g_labyrinth_n;
 
-    data->gridsize = data->width * data->height * data->depth;
-    data->grid = new long[data->gridsize]();
-    PRNG rng(42);
-    for (int i = 0; i < data->gridsize; i++) {
-        data->grid[i] = -1L;
-    }
+	data->gridsize = data->width * data->height * data->depth;
+	data->grid = new long[data->gridsize]();
+	PRNG rng(42);
+	for (int i = 0; i < data->gridsize; i++) {
+		data->grid[i] = -1L;
+	}
 
-    int num_walls = data->gridsize / 8;
-    for (int i = 0; i < num_walls; i++) {
-        int idx = (int)(rng.next() % data->gridsize);
-        if (data->grid[idx] == -1L) {
-            data->grid[idx] = -2L;
-        }
-    }
+	int num_walls = data->gridsize / 8;
+	for (int i = 0; i < num_walls; i++) {
+		int idx = (int)(rng.next() % data->gridsize);
+		if (data->grid[idx] == -1L) {
+			data->grid[idx] = -2L;
+		}
+	}
 
-    data->requests = new PathRequest[data->num_requests]();
-    data->request_handled = new int[data->num_requests]();
+	data->requests = new PathRequest[data->num_requests]();
+	data->request_handled = new int[data->num_requests]();
 
-    for (int i = 0; i < data->num_requests; i++) {
-        int sx, sy, sz, dx, dy, dz;
-        do {
-            sx = (int)(rng.next() % data->width);
-            sy = (int)(rng.next() % data->height);
-            sz = (int)(rng.next() % data->depth);
-        } while (data->grid[(sz * data->height + sy) * data->width + sx] != -1L);
-        do {
-            dx = (int)(rng.next() % data->width);
-            dy = (int)(rng.next() % data->height);
-            dz = (int)(rng.next() % data->depth);
-        } while (data->grid[(dz * data->height + dy) * data->width + dx] != -1L ||
-                 (dx == sx && dy == sy && dz == sz));
+	for (int i = 0; i < data->num_requests; i++) {
+		int sx, sy, sz, dx, dy, dz;
+		do {
+			sx = (int)(rng.next() % data->width);
+			sy = (int)(rng.next() % data->height);
+			sz = (int)(rng.next() % data->depth);
+		} while (data->grid[(sz * data->height + sy) * data->width + sx] != -1L);
+		do {
+			dx = (int)(rng.next() % data->width);
+			dy = (int)(rng.next() % data->height);
+			dz = (int)(rng.next() % data->depth);
+		} while (data->grid[(dz * data->height + dy) * data->width + dx] != -1L ||
+		         (dx == sx && dy == sy && dz == sz));
 
-        data->requests[i] = {{sx, sy, sz}, {dx, dy, dz}};
-    }
+		data->requests[i] = {{sx, sy, sz}, {dx, dy, dz}};
+	}
 
-    g_labyrinth = data;
+	g_labyrinth = data;
 
-    printf("Maze size:    %ix%ix%i\n", data->width, data->height, data->depth);
-    printf("Paths to route: %i\n", data->num_requests);
-    fflush(stdout);
+	printf("Maze size:    %ix%ix%i\n", data->width, data->height, data->depth);
+	printf("Paths to route: %i\n", data->num_requests);
+	fflush(stdout);
 }
 
-static inline int grid_idx(const LabyrinthData* data, int x, int y, int z) {
-    return (z * data->height + y) * data->width + x;
+static inline int grid_idx(const LabyrinthData *data, int x, int y, int z)
+{
+	return (z * data->height + y) * data->width + x;
 }
 
 // ── TX wrapper: atomically verify and mark path cells ─────────
-TX static bool labyrinth_mark(LabyrinthData* data, const Point3D* path, int path_len) {
-    for (int i = 1; i + 1 < path_len; i++) {
-        int idx = (path[i].z * data->height + path[i].y) * data->width + path[i].x;
-        if (data->grid[idx] != -1L) return false;
-    }
-    for (int i = 1; i + 1 < path_len; i++) {
-        int idx = (path[i].z * data->height + path[i].y) * data->width + path[i].x;
-        data->grid[idx] = -2L;
-    }
-    return true;
+TX static bool labyrinth_mark(LabyrinthData *data, const Point3D *path, int path_len)
+{
+	for (int i = 1; i + 1 < path_len; i++) {
+		int idx = (path[i].z * data->height + path[i].y) * data->width + path[i].x;
+		if (data->grid[idx] != -1L)
+			return false;
+	}
+	for (int i = 1; i + 1 < path_len; i++) {
+		int idx = (path[i].z * data->height + path[i].y) * data->width + path[i].x;
+		data->grid[idx] = -2L;
+	}
+	return true;
 }
 
 // ── BFS expansion: computes distance field (non-TX, raw memory) ───
-static int do_expansion(long* dist, const long* cell_states,
-                         int w, int h, int d,
-                         const Point3D& src, const Point3D& dst,
-                         int* queue) {
-    int gridsize = w * h * d;
-    for (int i = 0; i < gridsize; i++) dist[i] = -1L;
+static int do_expansion(long *dist,
+                        const long *cell_states,
+                        int w,
+                        int h,
+                        int d,
+                        const Point3D &src,
+                        const Point3D &dst,
+                        int *queue)
+{
+	int gridsize = w * h * d;
+	for (int i = 0; i < gridsize; i++)
+		dist[i] = -1L;
 
-    int qh = 0, qt = 0;
-    int idx = (src.z * h + src.y) * w + src.x;
-    dist[idx] = 0;
-    queue[qt++] = idx;
+	int qh = 0, qt = 0;
+	int idx = (src.z * h + src.y) * w + src.x;
+	dist[idx] = 0;
+	queue[qt++] = idx;
 
-    int dirs[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-    while (qh < qt) {
-        int cur = queue[qh++];
-        int cx = cur % w, cy = (cur / w) % h, cz = cur / (w * h);
-        if (cx == dst.x && cy == dst.y && cz == dst.z) return 1;
+	int dirs[6][3] =
+	    {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+	while (qh < qt) {
+		int cur = queue[qh++];
+		int cx = cur % w, cy = (cur / w) % h, cz = cur / (w * h);
+		if (cx == dst.x && cy == dst.y && cz == dst.z)
+			return 1;
 
-        for (int d2 = 0; d2 < 6; d2++) {
-            int nx = cx + dirs[d2][0], ny = cy + dirs[d2][1], nz = cz + dirs[d2][2];
-            if (nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d) continue;
-            int nidx = (nz * h + ny) * w + nx;
-            if (cell_states[nidx] == -2L) continue;
-            if (dist[nidx] == -1L) {
-                dist[nidx] = dist[cur] + 1;
-                queue[qt++] = nidx;
-            }
-        }
-    }
-    return 0;
+		for (int d2 = 0; d2 < 6; d2++) {
+			int nx = cx + dirs[d2][0], ny = cy + dirs[d2][1], nz = cz + dirs[d2][2];
+			if (nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d)
+				continue;
+			int nidx = (nz * h + ny) * w + nx;
+			if (cell_states[nidx] == -2L)
+				continue;
+			if (dist[nidx] == -1L) {
+				dist[nidx] = dist[cur] + 1;
+				queue[qt++] = nidx;
+			}
+		}
+	}
+	return 0;
 }
 
 // ── Greedy traceback: reconstruct path from distance field ────
-static int do_traceback(Point3D* path, const long* dist,
-                         int w, int h, int d,
-                         const Point3D& src, const Point3D& dst) {
-    int pc = 0;
-    int cx = dst.x, cy = dst.y, cz = dst.z;
-    int dirs[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-    while (true) {
-        path[pc++] = {cx, cy, cz};
-        int idx = (cz * h + cy) * w + cx;
-        if (idx == (src.z * h + src.y) * w + src.x) break;
+static int do_traceback(Point3D *path,
+                        const long *dist,
+                        int w,
+                        int h,
+                        int d,
+                        const Point3D &src,
+                        const Point3D &dst)
+{
+	int pc = 0;
+	int cx = dst.x, cy = dst.y, cz = dst.z;
+	int dirs[6][3] =
+	    {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+	while (true) {
+		path[pc++] = {cx, cy, cz};
+		int idx = (cz * h + cy) * w + cx;
+		if (idx == (src.z * h + src.y) * w + src.x)
+			break;
 
-        int best_d = -1;
-        long best_val = dist[idx];
-        for (int d2 = 0; d2 < 6; d2++) {
-            int nx = cx + dirs[d2][0], ny = cy + dirs[d2][1], nz = cz + dirs[d2][2];
-            if (nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d) continue;
-            long nv = dist[(nz * h + ny) * w + nx];
-            if (nv >= 0 && nv < best_val) { best_val = nv; best_d = d2; }
-        }
-        if (best_d < 0) { pc = 0; break; }
-        cx += dirs[best_d][0]; cy += dirs[best_d][1]; cz += dirs[best_d][2];
-    }
-    // Reverse in place
-    for (int i = 0; i < pc / 2; i++) {
-        Point3D tmp = path[i];
-        path[i] = path[pc - 1 - i];
-        path[pc - 1 - i] = tmp;
-    }
-    return pc;
+		int best_d = -1;
+		long best_val = dist[idx];
+		for (int d2 = 0; d2 < 6; d2++) {
+			int nx = cx + dirs[d2][0], ny = cy + dirs[d2][1], nz = cz + dirs[d2][2];
+			if (nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d)
+				continue;
+			long nv = dist[(nz * h + ny) * w + nx];
+			if (nv >= 0 && nv < best_val) {
+				best_val = nv;
+				best_d = d2;
+			}
+		}
+		if (best_d < 0) {
+			pc = 0;
+			break;
+		}
+		cx += dirs[best_d][0];
+		cy += dirs[best_d][1];
+		cz += dirs[best_d][2];
+	}
+	// Reverse in place
+	for (int i = 0; i < pc / 2; i++) {
+		Point3D tmp = path[i];
+		path[i] = path[pc - 1 - i];
+		path[pc - 1 - i] = tmp;
+	}
+	return pc;
 }
 
-THREAD void worker_labyrinth(ThreadData* td) {
-    auto data = g_labyrinth;
-    int gsize = data->gridsize;
-    long* local_grid = new long[gsize];
-    long* dist = new long[gsize];
-    int* queue = new int[gsize];
-    Point3D* path = new Point3D[gsize];
+THREAD void worker_labyrinth(ThreadData *td)
+{
+	auto data = g_labyrinth;
+	int gsize = data->gridsize;
+	long *local_grid = new long[gsize];
+	long *dist = new long[gsize];
+	int *queue = new int[gsize];
+	Point3D *path = new Point3D[gsize];
 
-    for (int i = td->thread_id; i < data->num_requests; i += g_num_threads) {
-        if (data->request_handled[i]) continue;
+	for (int i = td->thread_id; i < data->num_requests; i += g_num_threads) {
+		if (data->request_handled[i])
+			continue;
 
-        int w = data->width, h = data->height, d = data->depth;
-        PathRequest& req = data->requests[i];
+		int w = data->width, h = data->height, d = data->depth;
+		PathRequest &req = data->requests[i];
 
-        while (true) {
-            // Copy grid locally (non-TX)
-            std::memcpy(local_grid, data->grid, gsize * sizeof(long));
+		while (true) {
+			// Copy grid locally (non-TX)
+			std::memcpy(local_grid, data->grid, gsize * sizeof(long));
 
-            int ok = do_expansion(dist, local_grid, w, h, d, req.src, req.dst, queue);
-            int plen = ok ? do_traceback(path, dist, w, h, d, req.src, req.dst) : 0;
-            if (plen == 0) break;
+			int ok = do_expansion(dist, local_grid, w, h, d, req.src, req.dst, queue);
+			int plen = ok ? do_traceback(path, dist, w, h, d, req.src, req.dst) : 0;
+			if (plen == 0)
+				break;
 
-            if (labyrinth_mark(data, path, plen)) {
-                total_ops.fetch_add(1, std::memory_order_relaxed);
-                break;
-            }
-        }
-    }
-    delete[] local_grid;
-    delete[] dist;
-    delete[] queue;
-    delete[] path;
+			if (labyrinth_mark(data, path, plen)) {
+				total_ops.fetch_add(1, std::memory_order_relaxed);
+				break;
+			}
+		}
+	}
+	delete[] local_grid;
+	delete[] dist;
+	delete[] queue;
+	delete[] path;
 }

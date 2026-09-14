@@ -20,6 +20,9 @@ BINS = $(SRCS:.cpp=)
 
 all: $(BINS)
 
+test_tinystm_clock_wrap: test_tinystm_clock_wrap.cpp
+	$(CXX) $(CXXFLAGS) -DDESIGN_WBCTL -DTM_BACKEND_TINYSTM -I../../backends/tm_impl/common -I../../backends/tm_impl/tiny_stm -o $@ $< $(LDFLAGS)
+
 test_stress_ds: test_stress_ds.cpp $(RUNTIME_SRC) $(HOOKS_SRC)
 	$(CXX) $(CXXFLAGS) $(INC) $(RUNTIME_FLAGS) -o $@ $< $(RUNTIME_SRC) $(HOOKS_SRC) $(LDFLAGS)
 

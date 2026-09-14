@@ -184,18 +184,29 @@ impl DeadlockDetector {
         if self.reports.is_empty() {
             return lines;
         }
-        lines.push(format!("⚠ {} DEADLOCK/LIVELOCK DETECTION(S):", self.reports.len()));
+        lines.push(format!(
+            "⚠ {} DEADLOCK/LIVELOCK DETECTION(S):",
+            self.reports.len()
+        ));
         for (i, r) in self.reports.iter().enumerate() {
             lines.push(format!(
                 "  ⚠ Cycle {}: threads [{}] — {} retries each",
                 i + 1,
-                r.cycle.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "),
+                r.cycle
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 r.retries
             ));
             if !r.conflicting_addrs.is_empty() {
                 lines.push(format!(
                     "     Conflicting addresses: [{}]",
-                    r.conflicting_addrs.iter().map(|a| format!("0x{:x}", a)).collect::<Vec<_>>().join(", ")
+                    r.conflicting_addrs
+                        .iter()
+                        .map(|a| format!("0x{:x}", a))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
         }
@@ -234,7 +245,10 @@ mod tests {
             d.record_abort(1, &[0x1000]);
         }
         let reports = d.check();
-        assert!(!reports.is_empty(), "should detect cycle after 3 aborts (threshold 2)");
+        assert!(
+            !reports.is_empty(),
+            "should detect cycle after 3 aborts (threshold 2)"
+        );
     }
 
     #[test]
@@ -257,7 +271,10 @@ mod tests {
             d.record_abort(1, &[0x2000]);
         }
         let reports = d.check();
-        assert!(reports.is_empty(), "different addresses should not conflict");
+        assert!(
+            reports.is_empty(),
+            "different addresses should not conflict"
+        );
     }
 
     #[test]

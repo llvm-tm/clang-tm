@@ -32,7 +32,13 @@ impl ShadowMemory {
     }
 
     pub fn alloc(&mut self, addr: u64, size: u64) {
-        self.allocations.insert(addr, Allocation { size, is_freed: false });
+        self.allocations.insert(
+            addr,
+            Allocation {
+                size,
+                is_freed: false,
+            },
+        );
     }
 
     pub fn free(&mut self, addr: u64) -> Result<bool, String> {
@@ -47,10 +53,10 @@ impl ShadowMemory {
     }
 
     pub fn is_valid_ptr(&self, addr: u64) -> bool {
-        self.allocations.get(&addr).map_or(false, |a| !a.is_freed)
+        self.allocations.get(&addr).is_some_and(|a| !a.is_freed)
     }
 
     pub fn was_freed(&self, addr: u64) -> bool {
-        self.allocations.get(&addr).map_or(false, |a| a.is_freed)
+        self.allocations.get(&addr).is_some_and(|a| a.is_freed)
     }
 }

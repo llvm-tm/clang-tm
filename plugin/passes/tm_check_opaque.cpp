@@ -21,8 +21,7 @@
 #include "tm_runtime_hooks.hpp"
 using namespace llvm;
 
-bool checkOpaqueFunctions(Module &M,
-                          SmallPtrSetImpl<Function *> &TxReachableFuncs)
+bool checkOpaqueFunctions(Module &M, SmallPtrSetImpl<Function *> &TxReachableFuncs)
 {
 	bool foundOpaque = false;
 	StringSet<> UnresolvedSymbols;
@@ -65,7 +64,8 @@ bool checkOpaqueFunctions(Module &M,
 				}
 				if (Callee->isIntrinsic())
 					continue;
-				if (tm_platform::isHeapAllocationCall(Call) || tm_platform::isDeallocationCall(Call))
+				if (tm_platform::isHeapAllocationCall(Call) ||
+				    tm_platform::isDeallocationCall(Call))
 					continue;
 				if (!Callee->isDeclaration())
 					continue;
@@ -120,8 +120,7 @@ bool checkOpaqueFunctions(Module &M,
 	return !foundOpaque;
 }
 
-void checkOpaqueOrAbort(Module &M,
-                        SmallPtrSetImpl<Function *> &TxReachableFuncs)
+void checkOpaqueOrAbort(Module &M, SmallPtrSetImpl<Function *> &TxReachableFuncs)
 {
 	if (TxReachableFuncs.empty())
 		return;

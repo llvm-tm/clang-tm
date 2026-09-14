@@ -1,6 +1,6 @@
+use crate::event::Event;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::event::Event;
 
 /// Verifies TM correctness properties on a trace or during replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,15 +74,11 @@ impl Checker {
                     self.aborted_tx += 1;
                 }
             }
-            crate::event::EventKind::Read { .. } => {
-                if depth == 0 {
-                    self.out_of_tx_reads += 1;
-                }
+            crate::event::EventKind::Read { .. } if depth == 0 => {
+                self.out_of_tx_reads += 1;
             }
-            crate::event::EventKind::Write { .. } => {
-                if depth == 0 {
-                    self.out_of_tx_writes += 1;
-                }
+            crate::event::EventKind::Write { .. } if depth == 0 => {
+                self.out_of_tx_writes += 1;
             }
             _ => {}
         }
@@ -93,14 +89,23 @@ impl Checker {
         let mut warnings = Vec::new();
         for (&tid, &d) in &self.tx_depth {
             if d > 0 {
-                warnings.push(format!("Thread {} still in transaction (depth={}) at end of trace", tid, d));
+                warnings.push(format!(
+                    "Thread {} still in transaction (depth={}) at end of trace",
+                    tid, d
+                ));
             }
         }
         if self.out_of_tx_reads > 0 {
-            warnings.push(format!("{} read(s) performed outside TX", self.out_of_tx_reads));
+            warnings.push(format!(
+                "{} read(s) performed outside TX",
+                self.out_of_tx_reads
+            ));
         }
         if self.out_of_tx_writes > 0 {
-            warnings.push(format!("{} write(s) performed outside TX", self.out_of_tx_writes));
+            warnings.push(format!(
+                "{} write(s) performed outside TX",
+                self.out_of_tx_writes
+            ));
         }
         warnings
     }

@@ -23,8 +23,8 @@
 //   COUNTER_OFFSET = 0  (nested_call_counter)
 //   JMPRET_OFFSET  = 4  (longjmp_ret)
 struct TMThreadState {
-    int32_t nested_call_counter;
-    int32_t longjmp_ret;
+	int32_t nested_call_counter;
+	int32_t longjmp_ret;
 };
 
 // Thread-local state
@@ -44,9 +44,7 @@ extern const uint32_t tm_symbol_count;
 // Hook implementations (static — internal linkage)
 // ═══════════════════════════════════════════════════════════════
 
-static TMThreadState *impl_get_thread_state() {
-    return &g_tm_state;
-}
+static TMThreadState *impl_get_thread_state() { return &g_tm_state; }
 
 static void impl_init()
 {
@@ -173,7 +171,7 @@ static std::recursive_mutex g_serialize_mutex;
 static void impl_serialize_lock() { g_serialize_mutex.lock(); }
 static void impl_serialize_unlock() { g_serialize_mutex.unlock(); }
 
-static void impl_set_jmpbuf(void *buf) { }
+static void impl_set_jmpbuf(void *buf) {}
 static sigjmp_buf *impl_get_env() { return (sigjmp_buf *)tm_jmpbuf; }
 
 static void impl_begin()
@@ -199,22 +197,85 @@ static void impl_end()
 }
 
 // Read functions
-static int8_t  impl_read_i1(void  *a) { int8_t  v = *(int8_t*)a;  printf("tm_read_i1\n"); return v; }
-static int16_t impl_read_i2(void  *a) { int16_t v = *(int16_t*)a; printf("tm_read_i2\n"); return v; }
-static int32_t impl_read_i4(void  *a) { int32_t v = *(int32_t*)a; printf("tm_read_i4\n"); return v; }
-static int64_t impl_read_i8(void  *a) { int64_t v = *(int64_t*)a; printf("tm_read_i8\n"); return v; }
-static float   impl_read_f4(void  *a) { float   v = *(float*)a;   printf("tm_read_f4\n"); return v; }
-static double  impl_read_f8(void  *a) { double  v = *(double*)a;  printf("tm_read_f8\n"); return v; }
-static void   *impl_read_ptr(void **a) { void   *v = *a;           printf("tm_read_ptr\n"); return v; }
+static int8_t impl_read_i1(void *a)
+{
+	int8_t v = *(int8_t *)a;
+	printf("tm_read_i1\n");
+	return v;
+}
+static int16_t impl_read_i2(void *a)
+{
+	int16_t v = *(int16_t *)a;
+	printf("tm_read_i2\n");
+	return v;
+}
+static int32_t impl_read_i4(void *a)
+{
+	int32_t v = *(int32_t *)a;
+	printf("tm_read_i4\n");
+	return v;
+}
+static int64_t impl_read_i8(void *a)
+{
+	int64_t v = *(int64_t *)a;
+	printf("tm_read_i8\n");
+	return v;
+}
+static float impl_read_f4(void *a)
+{
+	float v = *(float *)a;
+	printf("tm_read_f4\n");
+	return v;
+}
+static double impl_read_f8(void *a)
+{
+	double v = *(double *)a;
+	printf("tm_read_f8\n");
+	return v;
+}
+static void *impl_read_ptr(void **a)
+{
+	void *v = *a;
+	printf("tm_read_ptr\n");
+	return v;
+}
 
 // Write functions
-static void impl_write_i1(void  *a, int8_t  v) { printf("tm_write_i1\n");  *(int8_t*)a  = v; }
-static void impl_write_i2(void  *a, int16_t v) { printf("tm_write_i2\n");  *(int16_t*)a = v; }
-static void impl_write_i4(void  *a, int32_t v) { printf("tm_write_i4\n");  *(int32_t*)a = v; }
-static void impl_write_i8(void  *a, int64_t v) { printf("tm_write_i8\n");  *(int64_t*)a = v; }
-static void impl_write_f4(void  *a, float   v) { printf("tm_write_f4\n");  *(float*)a   = v; }
-static void impl_write_f8(void  *a, double  v) { printf("tm_write_f8\n");  *(double*)a  = v; }
-static void impl_write_ptr(void **a, void   *v) { printf("tm_write_ptr\n"); *a = v; }
+static void impl_write_i1(void *a, int8_t v)
+{
+	printf("tm_write_i1\n");
+	*(int8_t *)a = v;
+}
+static void impl_write_i2(void *a, int16_t v)
+{
+	printf("tm_write_i2\n");
+	*(int16_t *)a = v;
+}
+static void impl_write_i4(void *a, int32_t v)
+{
+	printf("tm_write_i4\n");
+	*(int32_t *)a = v;
+}
+static void impl_write_i8(void *a, int64_t v)
+{
+	printf("tm_write_i8\n");
+	*(int64_t *)a = v;
+}
+static void impl_write_f4(void *a, float v)
+{
+	printf("tm_write_f4\n");
+	*(float *)a = v;
+}
+static void impl_write_f8(void *a, double v)
+{
+	printf("tm_write_f8\n");
+	*(double *)a = v;
+}
+static void impl_write_ptr(void **a, void *v)
+{
+	printf("tm_write_ptr\n");
+	*a = v;
+}
 
 static void impl_memset(void *dst, uint8_t val, size_t sz) { memset(dst, val, sz); }
 
@@ -225,37 +286,37 @@ static void impl_memset(void *dst, uint8_t val, size_t sz) { memset(dst, val, sz
 
 extern "C" {
 
-void     (*tm_init)()                          = impl_init;
-void     (*tm_exit)()                          = impl_exit;
-void     (*tm_init_thread)()                   = impl_init_thread;
-void     (*tm_exit_thread)()                   = impl_exit_thread;
-void     (*tm_begin)()                         = (void(*)())impl_begin;
-void     (*tm_end)()                           = (void(*)())impl_end;
-void     (*tm_set_jmpbuf)(void*)               = impl_set_jmpbuf;
-void    *(*tm_get_env)()                       = (void*(*)())impl_get_env;
-void     (*tm_serialize_lock)()                = impl_serialize_lock;
-void     (*tm_serialize_unlock)()              = impl_serialize_unlock;
-void     (*tm_memset)(void*, uint8_t, size_t)  = impl_memset;
+void (*tm_init)() = impl_init;
+void (*tm_exit)() = impl_exit;
+void (*tm_init_thread)() = impl_init_thread;
+void (*tm_exit_thread)() = impl_exit_thread;
+void (*tm_begin)() = (void (*)())impl_begin;
+void (*tm_end)() = (void (*)())impl_end;
+void (*tm_set_jmpbuf)(void *) = impl_set_jmpbuf;
+void *(*tm_get_env)() = (void *(*)())impl_get_env;
+void (*tm_serialize_lock)() = impl_serialize_lock;
+void (*tm_serialize_unlock)() = impl_serialize_unlock;
+void (*tm_memset)(void *, uint8_t, size_t) = impl_memset;
 
-void    *(*tm_malloc)(size_t)               = (void*(*)(size_t))nullptr;
-void    *(*tm_calloc)(size_t, size_t)       = (void*(*)(size_t,size_t))nullptr;
-void    *(*tm_realloc)(void*, size_t)       = (void*(*)(void*,size_t))nullptr;
-void     (*tm_free)(void*)                  = (void(*)(void*))nullptr;
-uint8_t  (*tm_read_i1)(uint8_t*)            = (uint8_t(*)(uint8_t*))impl_read_i1;
-uint16_t (*tm_read_i2)(uint16_t*)           = (uint16_t(*)(uint16_t*))impl_read_i2;
-uint32_t (*tm_read_i4)(uint32_t*)           = (uint32_t(*)(uint32_t*))impl_read_i4;
-uint64_t (*tm_read_i8)(uint64_t*)           = (uint64_t(*)(uint64_t*))impl_read_i8;
-float    (*tm_read_f4)(float*)              = (float(*)(float*))impl_read_f4;
-double   (*tm_read_f8)(double*)             = (double(*)(double*))impl_read_f8;
-void    *(*tm_read_ptr)(void**)             = (void*(*)(void**))impl_read_ptr;
-void     (*tm_write_i1)(uint8_t*, uint8_t)  = (void(*)(uint8_t*,uint8_t))impl_write_i1;
-void     (*tm_write_i2)(uint16_t*, uint16_t)= (void(*)(uint16_t*,uint16_t))impl_write_i2;
-void     (*tm_write_i4)(uint32_t*, uint32_t)= (void(*)(uint32_t*,uint32_t))impl_write_i4;
-void     (*tm_write_i8)(uint64_t*, int64_t) = (void(*)(uint64_t*,int64_t))impl_write_i8;
-void     (*tm_write_f4)(float*, float)      = (void(*)(float*,float))impl_write_f4;
-void     (*tm_write_f8)(double*, double)    = (void(*)(double*,double))impl_write_f8;
-void     (*tm_write_ptr)(void**, void*)      = (void(*)(void**,void*))impl_write_ptr;
-void     (*tm_get_thread_state)() = (void(*)())impl_get_thread_state;
+void *(*tm_malloc)(size_t) = (void *(*)(size_t)) nullptr;
+void *(*tm_calloc)(size_t, size_t) = (void *(*)(size_t, size_t)) nullptr;
+void *(*tm_realloc)(void *, size_t) = (void *(*)(void *, size_t)) nullptr;
+void (*tm_free)(void *) = (void (*)(void *)) nullptr;
+uint8_t (*tm_read_i1)(uint8_t *) = (uint8_t (*)(uint8_t *))impl_read_i1;
+uint16_t (*tm_read_i2)(uint16_t *) = (uint16_t (*)(uint16_t *))impl_read_i2;
+uint32_t (*tm_read_i4)(uint32_t *) = (uint32_t (*)(uint32_t *))impl_read_i4;
+uint64_t (*tm_read_i8)(uint64_t *) = (uint64_t (*)(uint64_t *))impl_read_i8;
+float (*tm_read_f4)(float *) = (float (*)(float *))impl_read_f4;
+double (*tm_read_f8)(double *) = (double (*)(double *))impl_read_f8;
+void *(*tm_read_ptr)(void **) = (void *(*)(void **))impl_read_ptr;
+void (*tm_write_i1)(uint8_t *, uint8_t) = (void (*)(uint8_t *, uint8_t))impl_write_i1;
+void (*tm_write_i2)(uint16_t *, uint16_t) = (void (*)(uint16_t *, uint16_t))impl_write_i2;
+void (*tm_write_i4)(uint32_t *, uint32_t) = (void (*)(uint32_t *, uint32_t))impl_write_i4;
+void (*tm_write_i8)(uint64_t *, int64_t) = (void (*)(uint64_t *, int64_t))impl_write_i8;
+void (*tm_write_f4)(float *, float) = (void (*)(float *, float))impl_write_f4;
+void (*tm_write_f8)(double *, double) = (void (*)(double *, double))impl_write_f8;
+void (*tm_write_ptr)(void **, void *) = (void (*)(void **, void *))impl_write_ptr;
+void (*tm_get_thread_state)() = (void (*)())impl_get_thread_state;
 
 // ── Functions called directly (not through hook pointers) ───
 // These are called directly by the LLVM pass preamble, so they
@@ -279,7 +340,7 @@ void consume_ptr(volatile void *ptr) { (void)ptr; }
 // On glibc, sigsetjmp is a macro expanding to __sigsetjmp(env, savemask);
 // taking its address requires the underlying function name.
 #if defined(__APPLE__)
-int (*tm_sigsetjmp)(void*, int) = (int(*)(void*, int))sigsetjmp;
+int (*tm_sigsetjmp)(void *, int) = (int (*)(void *, int))sigsetjmp;
 #else
-int (*tm_sigsetjmp)(void*, int) = (int(*)(void*, int))__sigsetjmp;
+int (*tm_sigsetjmp)(void *, int) = (int (*)(void *, int))__sigsetjmp;
 #endif

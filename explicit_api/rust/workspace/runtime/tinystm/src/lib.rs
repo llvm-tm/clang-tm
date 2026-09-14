@@ -80,6 +80,9 @@ pub use wbetl::*;
 #[cfg(feature = "wt")]
 pub use wt::*;
 
-pub use common::{tm_init, tm_exit, tm_begin, tm_init_thread, tm_exit_thread, tm_abort_count, tm_commit_count, tm_reset_stats, TxState, WriteEntry};
 #[cfg(feature = "simulation")]
 pub use common::sim;
+pub use common::{
+    tm_abort_count, tm_begin, tm_commit_count, tm_exit, tm_exit_thread, tm_init, tm_init_thread,
+    tm_reset_stats, TxState, WriteEntry,
+};

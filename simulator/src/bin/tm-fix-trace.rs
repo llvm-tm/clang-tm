@@ -5,7 +5,10 @@ use tm_des::event::{Event, EventKind};
 use tm_des::trace::Trace;
 
 #[derive(Parser, Debug)]
-#[command(name = "tm-fix-trace", about = "Fix trace BEGIN/END mismatches from siglongjmp retry")]
+#[command(
+    name = "tm-fix-trace",
+    about = "Fix trace BEGIN/END mismatches from siglongjmp retry"
+)]
 struct Cli {
     #[arg(short, long, default_value = "-")]
     input: String,
@@ -19,13 +22,17 @@ fn main() {
     let reader: Box<dyn BufRead> = if cli.input == "-" {
         Box::new(std::io::BufReader::new(std::io::stdin()))
     } else {
-        let f = std::fs::File::open(&cli.input)
-            .unwrap_or_else(|e| { eprintln!("Error: open {}: {}", cli.input, e); std::process::exit(1); });
+        let f = std::fs::File::open(&cli.input).unwrap_or_else(|e| {
+            eprintln!("Error: open {}: {}", cli.input, e);
+            std::process::exit(1);
+        });
         Box::new(std::io::BufReader::new(f))
     };
 
-    let trace: Trace = Trace::from_jsonl(reader)
-        .unwrap_or_else(|e| { eprintln!("Error: parse JSONL: {}", e); std::process::exit(1); });
+    let trace: Trace = Trace::from_jsonl(reader).unwrap_or_else(|e| {
+        eprintln!("Error: parse JSONL: {}", e);
+        std::process::exit(1);
+    });
 
     // Per-thread tx depth tracker
     let mut tx_depth: HashMap<u32, u32> = HashMap::new();
@@ -63,7 +70,9 @@ fn main() {
         }
     }
 
-    let fixed_trace = Trace { events: fixed_events };
+    let fixed_trace = Trace {
+        events: fixed_events,
+    };
 
     let mut out: Box<dyn std::io::Write> = if cli.output == "-" {
         Box::new(std::io::stdout())

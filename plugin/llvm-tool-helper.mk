@@ -18,3 +18,18 @@ LLVM_CC     := $(if $(LLVM_BINDIR),$(LLVM_BINDIR)/clang,clang)
 LLVM_CXXFLAGS := $(shell $(LLVM_CONFIG) --cxxflags 2>/dev/null)
 LLVM_LDFLAGS  := $(shell $(LLVM_CONFIG) --ldflags 2>/dev/null)
 LLVM_LIBS     := $(shell $(LLVM_CONFIG) --libs core analysis passes 2>/dev/null)
+# clang 22 prefers gcc 16 headers, but libstdc++-16-dev may be missing.
+# ONLY when /usr/include/c++/16 is absent, fall back to the newest available
+# GCC toolchain that has headers, so -I search finds C++ headers.  The flag is
+# appended to LLVM_CXX so ALL targets using $(LLVM_CXX) inherit it.
+ifneq ($(LLVM_CXX),)
+  LLVM_STDLIB_FLAG :=
+  ifeq ($(wildcard /usr/include/c++/16),)
+    ifneq ($(wildcard /usr/lib/gcc/x86_64-linux-gnu/15),)
+      LLVM_STDLIB_FLAG += --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/15
+    else ifneq ($(wildcard /usr/lib/gcc/x86_64-linux-gnu/12),)
+      LLVM_STDLIB_FLAG += --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/12
+    endif
+  endif
+  LLVM_CXX := $(LLVM_CXX) $(LLVM_STDLIB_FLAG)
+endif

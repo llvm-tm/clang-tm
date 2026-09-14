@@ -4,10 +4,10 @@
 
 #[cfg(not(feature = "simulation"))]
 use std::cell::RefCell;
-use std::sync::atomic::{compiler_fence, fence, AtomicU64, Ordering};
-use std::collections::HashMap;
 #[cfg(feature = "simulation")]
 use std::cell::UnsafeCell;
+use std::collections::HashMap;
+use std::sync::atomic::{compiler_fence, fence, AtomicU64, Ordering};
 
 pub use runtime_core::{Primitive, TmxAbort, TypedValue, WriteBack};
 
@@ -19,8 +19,12 @@ struct SyncUnsafeCell<T>(UnsafeCell<T>);
 unsafe impl<T: Send> Sync for SyncUnsafeCell<T> {}
 #[cfg(feature = "simulation")]
 impl<T> SyncUnsafeCell<T> {
-    fn new(val: T) -> Self { Self(UnsafeCell::new(val)) }
-    fn get(&self) -> *mut T { self.0.get() }
+    fn new(val: T) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut T {
+        self.0.get()
+    }
 }
 
 // ── Globals ──────────────────────────────────────────────────────
@@ -87,7 +91,9 @@ fn tx_active() -> bool {
 
 #[cfg(feature = "simulation")]
 fn tx_active() -> bool {
-    let Some(tid) = runtime_core::try_current_sim_thread_id() else { return false; };
+    let Some(tid) = runtime_core::try_current_sim_thread_id() else {
+        return false;
+    };
     let store = sim_tx_store();
     let map = unsafe { &*store.get() };
     map.get(&tid).map_or(false, |s| s.is_some())
@@ -141,7 +147,9 @@ pub fn tm_begin() {
         read_set: Vec::new(),
     });
     #[cfg(not(feature = "simulation"))]
-    TX.with(|tx| { *tx.borrow_mut() = Some(t); });
+    TX.with(|tx| {
+        *tx.borrow_mut() = Some(t);
+    });
     #[cfg(feature = "simulation")]
     {
         let tid = runtime_core::current_sim_thread_id();
@@ -263,7 +271,9 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 fn write_word<T: Primitive>(addr: usize, val: T) {
     compiler_fence(Ordering::SeqCst);
     if !tx_active() {
-        unsafe { (addr as *mut T).write(val); }
+        unsafe {
+            (addr as *mut T).write(val);
+        }
         return;
     }
 
@@ -360,7 +370,9 @@ pub mod sim {
     }
 
     pub fn reset() {
-        let Some(tid) = runtime_core::try_current_sim_thread_id() else { return; };
+        let Some(tid) = runtime_core::try_current_sim_thread_id() else {
+            return;
+        };
         let store = sim_tx_store();
         let map = unsafe { &mut *store.get() };
         map.remove(&tid);
@@ -369,7 +381,8 @@ pub mod sim {
     #[cfg(feature = "stats")]
     pub fn take_stats() -> runtime_core::SyncCounters {
         let s = runtime_core::SyncCounters::new();
-        s.aborts.store(TM_ABORT_COUNT.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.aborts
+            .store(TM_ABORT_COUNT.load(Ordering::Relaxed), Ordering::Relaxed);
         TM_ABORT_COUNT.store(0, Ordering::Relaxed);
         s
     }

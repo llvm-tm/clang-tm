@@ -35,12 +35,17 @@ The TM API C++ project implements Software Transactional Memory (STM) across 16 
 ### Top-level Makefile
 
 ```
+make                            # Print help (default target; same as `make help`)
+make check-fast                 # ~60s smoke: plugin + 3 C++ backends + Rust (start here)
 make all                        # Build plugin + plugin-benchmarks + expli-benchmarks
 make plugin                     # Build libTMInstrument.so
 make -C benchmarks/cpp all      # Build all expli benchmarks (BACKEND=tinystm default)
 make -C plugin run              # Build and run plugin tests
 make check-all                  # Build+test all C++ backends (12 with auto-init)
 ```
+
+> **New here?** Run `make check-fast` to confirm the whole toolchain works, then
+> read the [documentation index](README.md) to find the doc you need.
 
 Backend selection: `BACKEND={TINYSTM,WBETL,WT,NOREC,SWISSTM,TL2,SGL,XTM,LEFTRIGHT,ROMULUS,SPHT,TSXSGL}`
 

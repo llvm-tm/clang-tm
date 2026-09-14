@@ -23,6 +23,7 @@ sgl-persistent  = ["runtime-sgl-persistent"]
 sgl-distributed = ["runtime-sgl-distributed"]
 tikv = ["runtime-tikv"]
 mvlog = ["runtime-mvlog"]
+tsx_sim = ["runtime-tsx-sim"]
 
 [dependencies]
 addrspace = { path = "../addrspace" }
@@ -43,3 +44,4 @@ runtime-sgl-persistent  = { path = "../runtime/sgl-persistent", optional = true 
 runtime-sgl-distributed = { path = "../runtime/sgl-distributed", optional = true }
 runtime-tikv = { path = "../runtime/tikv", optional = true }
 runtime-mvlog = { path = "../runtime/mvlog", optional = true }
+runtime-tsx-sim = { path = "../runtime/tsx_sim", optional = true }

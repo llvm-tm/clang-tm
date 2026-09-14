@@ -53,7 +53,9 @@ impl LockWord {
     }
 
     pub fn unlock_owner(&mut self, tid: u64) {
-        if self.owner() != tid { return; }
+        if self.owner() != tid {
+            return;
+        }
         let clear = 0x3 | (((1u64 << THREAD_BITS) - 1) << LOCK_BITS);
         self.0 &= !clear;
     }
@@ -153,6 +155,12 @@ pub struct TmModel {
     pub abort_reasons: HashMap<String, u64>,
 }
 
+impl Default for TmModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TmModel {
     pub fn new() -> Self {
         TmModel {
@@ -175,7 +183,9 @@ impl TmModel {
     }
 
     pub fn get_or_create_tx(&mut self, tid: u64) -> &mut TxState {
-        self.tx_states.entry(tid).or_insert_with(|| TxState::new(tid))
+        self.tx_states
+            .entry(tid)
+            .or_insert_with(|| TxState::new(tid))
     }
 
     // ── Helpers that take state by value to avoid borrow conflicts ────
@@ -276,7 +286,7 @@ impl TmModel {
                 if !self.validate_read_set(tid) {
                     if let Some(tx) = self.tx_states.get_mut(&tid) {
                         self.total_spin_iterations += spins as u64;
-                tx.spin_iterations += spins;
+                        tx.spin_iterations += spins;
                     }
                     return Err("read_validate_fail".into());
                 }
@@ -293,7 +303,10 @@ impl TmModel {
             if let Some(tx) = self.tx_states.get_mut(&tid) {
                 self.total_spin_iterations += spins as u64;
                 tx.spin_iterations += spins;
-                tx.read_set.push(ReadEntry { addr, observed_version: version });
+                tx.read_set.push(ReadEntry {
+                    addr,
+                    observed_version: version,
+                });
                 tx.peak_read_set_size = tx.peak_read_set_size.max(tx.read_set.len() as u32);
             }
             return Ok(value);
@@ -301,7 +314,7 @@ impl TmModel {
 
         if let Some(tx) = self.tx_states.get_mut(&tid) {
             self.total_spin_iterations += spins as u64;
-                tx.spin_iterations += spins;
+            tx.spin_iterations += spins;
         }
         Err("read_spin_timeout".into())
     }
@@ -341,7 +354,7 @@ impl TmModel {
                 if !self.validate_read_set(tid) {
                     if let Some(tx) = self.tx_states.get_mut(&tid) {
                         self.total_spin_iterations += spins as u64;
-                tx.spin_iterations += spins;
+                        tx.spin_iterations += spins;
                     }
                     return Err("write_lock_validate_fail".into());
                 }
@@ -365,7 +378,7 @@ impl TmModel {
                 if !self.validate_read_set(tid) {
                     if let Some(tx) = self.tx_states.get_mut(&tid) {
                         self.total_spin_iterations += spins as u64;
-                tx.spin_iterations += spins;
+                        tx.spin_iterations += spins;
                     }
                     return Err("write_version_extension_fail".into());
                 }
@@ -382,7 +395,10 @@ impl TmModel {
                 self.total_spin_iterations += spins as u64;
                 tx.spin_iterations += spins;
                 tx.write_set.push(WriteEntry { addr, new_val: val });
-                tx.read_set.push(ReadEntry { addr, observed_version: version });
+                tx.read_set.push(ReadEntry {
+                    addr,
+                    observed_version: version,
+                });
                 tx.peak_read_set_size = tx.peak_read_set_size.max(tx.read_set.len() as u32);
                 tx.peak_write_set_size = tx.peak_write_set_size.max(tx.write_set.len() as u32);
             }
@@ -391,7 +407,7 @@ impl TmModel {
 
         if let Some(tx) = self.tx_states.get_mut(&tid) {
             self.total_spin_iterations += spins as u64;
-                tx.spin_iterations += spins;
+            tx.spin_iterations += spins;
         }
         Err("write_spin_timeout".into())
     }
@@ -401,7 +417,11 @@ impl TmModel {
             return Err("commit without active tx".into());
         }
 
-        let is_read_only = self.tx_states.get(&tid).map(|t| t.read_only).unwrap_or(true);
+        let is_read_only = self
+            .tx_states
+            .get(&tid)
+            .map(|t| t.read_only)
+            .unwrap_or(true);
 
         if !is_read_only {
             let write_addrs: Vec<u64>;
@@ -421,11 +441,9 @@ impl TmModel {
                 let li = addr_to_lock_idx(addr);
                 let mut acquired = false;
                 for _ in 0..SPIN_ITERATIONS {
-                    if !self.locks[li].is_locked() {
-                        if self.locks[li].try_lock(tid) {
-                            acquired = true;
-                            break;
-                        }
+                    if !self.locks[li].is_locked() && self.locks[li].try_lock(tid) {
+                        acquired = true;
+                        break;
                     }
                     self.total_lock_contentions += 1;
                     self.total_validations += 1;

@@ -1925,6 +1925,7 @@ dependencies = [
  "runtime-tikv",
  "runtime-tinystm",
  "runtime-tl2",
+ "runtime-tsx-sim",
  "runtime-tsxsgl",
  "runtime-xtm",
 ]

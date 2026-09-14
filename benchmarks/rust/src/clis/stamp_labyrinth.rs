@@ -1,12 +1,14 @@
+use benchmarks::Rng;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tm::*;
-use benchmarks::Rng;
 
 #[derive(Clone, Copy, PartialEq)]
 struct Point3D {
-    x: i32, y: i32, z: i32,
+    x: i32,
+    y: i32,
+    z: i32,
 }
 
 struct PathRequest {
@@ -22,8 +24,11 @@ fn grid_idx(w: i32, _h: i32, x: i32, y: i32, z: i32) -> usize {
 fn do_expansion(
     dist: &mut [i32],
     cell_states: &[i32],
-    w: i32, h: i32, d: i32,
-    src: Point3D, dst: Point3D,
+    w: i32,
+    h: i32,
+    d: i32,
+    src: Point3D,
+    dst: Point3D,
     queue: &mut [usize],
 ) -> bool {
     dist.fill(-1);
@@ -35,7 +40,14 @@ fn do_expansion(
     queue[qt] = idx;
     qt += 1;
 
-    let dirs = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+    let dirs = [
+        [1, 0, 0],
+        [-1, 0, 0],
+        [0, 1, 0],
+        [0, -1, 0],
+        [0, 0, 1],
+        [0, 0, -1],
+    ];
 
     while qh < qt {
         let cur = queue[qh];
@@ -52,9 +64,13 @@ fn do_expansion(
             let nx = cx + dir[0];
             let ny = cy + dir[1];
             let nz = cz + dir[2];
-            if nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d { continue; }
+            if nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d {
+                continue;
+            }
             let nidx = grid_idx(w, h, nx, ny, nz);
-            if cell_states[nidx] == -2 { continue; }
+            if cell_states[nidx] == -2 {
+                continue;
+            }
             if dist[nidx] == -1 {
                 dist[nidx] = dist[cur] + 1;
                 queue[qt] = nidx;
@@ -69,20 +85,36 @@ fn do_expansion(
 fn do_traceback(
     path: &mut Vec<Point3D>,
     dist: &[i32],
-    w: i32, h: i32, d: i32,
-    src: Point3D, dst: Point3D,
+    w: i32,
+    h: i32,
+    d: i32,
+    src: Point3D,
+    dst: Point3D,
 ) -> bool {
     path.clear();
     let mut cx = dst.x;
     let mut cy = dst.y;
     let mut cz = dst.z;
-    let dirs = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+    let dirs = [
+        [1, 0, 0],
+        [-1, 0, 0],
+        [0, 1, 0],
+        [0, -1, 0],
+        [0, 0, 1],
+        [0, 0, -1],
+    ];
     let sidx = grid_idx(w, h, src.x, src.y, src.z);
 
     loop {
-        path.push(Point3D { x: cx, y: cy, z: cz });
+        path.push(Point3D {
+            x: cx,
+            y: cy,
+            z: cz,
+        });
         let idx = grid_idx(w, h, cx, cy, cz);
-        if idx == sidx { break; }
+        if idx == sidx {
+            break;
+        }
 
         let mut best_di = -1i32;
         let mut best_val = dist[idx];
@@ -90,23 +122,29 @@ fn do_traceback(
             let nx = cx + dir[0];
             let ny = cy + dir[1];
             let nz = cz + dir[2];
-            if nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d { continue; }
+            if nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d {
+                continue;
+            }
             let nv = dist[grid_idx(w, h, nx, ny, nz)];
-            if nv >= 0 && nv < best_val { best_val = nv; best_di = di as i32; }
+            if nv >= 0 && nv < best_val {
+                best_val = nv;
+                best_di = di as i32;
+            }
         }
-        if best_di < 0 { path.clear(); return false; }
+        if best_di < 0 {
+            path.clear();
+            return false;
+        }
         let dir = dirs[best_di as usize];
-        cx += dir[0]; cy += dir[1]; cz += dir[2];
+        cx += dir[0];
+        cy += dir[1];
+        cz += dir[2];
     }
     path.reverse();
     !path.is_empty()
 }
 
-fn labyrinth_mark(
-    grid: &[TmCell<i32>],
-    w: i32, h: i32,
-    path: &[Point3D],
-) -> bool {
+fn labyrinth_mark(grid: &[TmCell<i32>], w: i32, h: i32, path: &[Point3D]) -> bool {
     transaction(|tx| {
         for i in 1..path.len().saturating_sub(1) {
             let idx = grid_idx(w, h, path[i].x, path[i].y, path[i].z);
@@ -133,11 +171,26 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-p" => { i += 1; num_threads = args[i].parse().unwrap(); }
-            "-x" => { i += 1; w = args[i].parse().unwrap(); }
-            "-y" => { i += 1; h = args[i].parse().unwrap(); }
-            "-z" => { i += 1; d = args[i].parse().unwrap(); }
-            "-n" => { i += 1; num_requests = args[i].parse().unwrap(); }
+            "-p" => {
+                i += 1;
+                num_threads = args[i].parse().unwrap();
+            }
+            "-x" => {
+                i += 1;
+                w = args[i].parse().unwrap();
+            }
+            "-y" => {
+                i += 1;
+                h = args[i].parse().unwrap();
+            }
+            "-z" => {
+                i += 1;
+                d = args[i].parse().unwrap();
+            }
+            "-n" => {
+                i += 1;
+                num_requests = args[i].parse().unwrap();
+            }
             _ => {}
         }
         i += 1;
@@ -158,7 +211,9 @@ fn main() {
     // Place walls
     for _ in 0..num_walls {
         let idx = rng.next() as usize % gridsize;
-        unsafe { *grid[idx].ptr() = -2; }
+        unsafe {
+            *grid[idx].ptr() = -2;
+        }
     }
 
     // Generate requests
@@ -168,16 +223,31 @@ fn main() {
             let cx = (rng.next() as usize % w as usize) as i32;
             let cy = (rng.next() as usize % h as usize) as i32;
             let cz = (rng.next() as usize % d as usize) as i32;
-            if unsafe { *grid[grid_idx(w, h, cx, cy, cz)].ptr() } == -1 { break (cx, cy, cz); }
+            if unsafe { *grid[grid_idx(w, h, cx, cy, cz)].ptr() } == -1 {
+                break (cx, cy, cz);
+            }
         };
         let (dx, dy, dz) = loop {
             let cx = (rng.next() as usize % w as usize) as i32;
             let cy = (rng.next() as usize % h as usize) as i32;
             let cz = (rng.next() as usize % d as usize) as i32;
             let idx = grid_idx(w, h, cx, cy, cz);
-            if unsafe { *grid[idx].ptr() } == -1 && !(cx == sx && cy == sy && cz == sz) { break (cx, cy, cz); }
+            if unsafe { *grid[idx].ptr() } == -1 && !(cx == sx && cy == sy && cz == sz) {
+                break (cx, cy, cz);
+            }
         };
-        requests.push(PathRequest { src: Point3D { x: sx, y: sy, z: sz }, dst: Point3D { x: dx, y: dy, z: dz } });
+        requests.push(PathRequest {
+            src: Point3D {
+                x: sx,
+                y: sy,
+                z: sz,
+            },
+            dst: Point3D {
+                x: dx,
+                y: dy,
+                z: dz,
+            },
+        });
     }
 
     let requests = Arc::new(requests);
@@ -209,16 +279,32 @@ fn main() {
                         let lg_ptr = &mut local_grid[0] as *mut i32;
                         transaction(|tx| {
                             for g in 0..gridsize {
-                                unsafe { *lg_ptr.add(g) = tx.read(&grid[g]); }
+                                unsafe {
+                                    *lg_ptr.add(g) = tx.read(&grid[g]);
+                                }
                             }
                         });
 
-                        let ok = do_expansion(&mut dist, &local_grid, w, h, d, req.src, req.dst, &mut queue);
-                        let traced = ok && do_traceback(&mut path, &dist, w, h, d, req.src, req.dst);
-                        if !ok || !traced || path.is_empty() { break; }
+                        let ok = do_expansion(
+                            &mut dist,
+                            &local_grid,
+                            w,
+                            h,
+                            d,
+                            req.src,
+                            req.dst,
+                            &mut queue,
+                        );
+                        let traced =
+                            ok && do_traceback(&mut path, &dist, w, h, d, req.src, req.dst);
+                        if !ok || !traced || path.is_empty() {
+                            break;
+                        }
 
                         let success = labyrinth_mark(&grid, w, h, &path);
-                        if success { break; }
+                        if success {
+                            break;
+                        }
                     }
 
                     total_ops.fetch_add(1, Ordering::Relaxed);

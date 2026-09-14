@@ -13,7 +13,10 @@ impl<T: TmPrimitive + PartialEq + Copy, const MAX: usize> TMSmallSet<T, MAX> {
         for _ in 0..MAX {
             data.push(TmCell::new(init));
         }
-        TMSmallSet { data, count: TmCell::new(0) }
+        TMSmallSet {
+            data,
+            count: TmCell::new(0),
+        }
     }
 
     pub fn count(&self, tx: &Transaction) -> i32 {

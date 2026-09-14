@@ -2,11 +2,14 @@ use clap::Parser;
 use std::collections::HashMap;
 use tm_des::event::{Event, EventKind};
 use tm_des::memory::ShadowMemory;
-use tm_des::trace::Trace;
 use tm_des::tm_model::TmModel;
+use tm_des::trace::Trace;
 
 #[derive(Parser, Debug)]
-#[command(name = "tm-check", about = "Replay TM trace through model and verify correctness")]
+#[command(
+    name = "tm-check",
+    about = "Replay TM trace through model and verify correctness"
+)]
 struct Cli {
     /// Trace file (JSONL) to check. Use '-' for stdin.
     #[arg(short, long, default_value = "-")]
@@ -32,7 +35,8 @@ fn parse_u64(s: &str) -> Result<u64, String> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u64::from_str_radix(hex, 16).map_err(|e| format!("bad hex '{}': {}", s, e))
     } else {
-        s.parse::<u64>().map_err(|e| format!("bad value '{}': {}", s, e))
+        s.parse::<u64>()
+            .map_err(|e| format!("bad value '{}': {}", s, e))
     }
 }
 
@@ -46,13 +50,19 @@ fn check_trace(events: &[Event], cli: &Cli) {
 
     // ── Load initial committed values ────────────────────────
     if let Some(path) = &cli.initial_values {
-        let data: String = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| { eprintln!("Cannot read {}: {}", path, e); std::process::exit(1); });
-        let initial: HashMap<String, u64> = serde_json::from_str(&data)
-            .unwrap_or_else(|e| { eprintln!("JSON parse error in {}: {}", path, e); std::process::exit(1); });
+        let data: String = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("Cannot read {}: {}", path, e);
+            std::process::exit(1);
+        });
+        let initial: HashMap<String, u64> = serde_json::from_str(&data).unwrap_or_else(|e| {
+            eprintln!("JSON parse error in {}: {}", path, e);
+            std::process::exit(1);
+        });
         for (k, v) in &initial {
-            let addr = u64::from_str_radix(k.trim_start_matches("0x"), 16)
-                .unwrap_or_else(|_| { eprintln!("Bad addr '{}'", k); std::process::exit(1); });
+            let addr = u64::from_str_radix(k.trim_start_matches("0x"), 16).unwrap_or_else(|_| {
+                eprintln!("Bad addr '{}'", k);
+                std::process::exit(1);
+            });
             model.committed_values.insert(addr, *v);
         }
         eprintln!("Loaded {} initial committed values", initial.len());
@@ -108,15 +118,9 @@ fn check_trace(events: &[Event], cli: &Cli) {
                 model.tm_begin(tid);
                 Ok(())
             }
-            EventKind::TxEnd => {
-                model.tm_end(tid)
-            }
-            EventKind::Read { addr, .. } => {
-                model.tm_read(tid, *addr, 4).map(|_| ())
-            }
-            EventKind::Write { addr, val, .. } => {
-                model.tm_write(tid, *addr, *val, 4)
-            }
+            EventKind::TxEnd => model.tm_end(tid),
+            EventKind::Read { addr, .. } => model.tm_read(tid, *addr, 4).map(|_| ()),
+            EventKind::Write { addr, val, .. } => model.tm_write(tid, *addr, *val, 4),
             EventKind::Abort { reason } => {
                 if model.get_or_create_tx(tid).active {
                     model.tm_abort_reason(tid, &format!("abort_from_trace reason={}", reason));
@@ -156,7 +160,9 @@ fn check_trace(events: &[Event], cli: &Cli) {
             if initial_val != final_val {
                 value_mismatches.push(format!(
                     "addr=0x{:x}: initial=0x{:x} final=0x{:x} (delta={})",
-                    addr, initial_val, final_val,
+                    addr,
+                    initial_val,
+                    final_val,
                     final_val as i64 - initial_val as i64
                 ));
             }
@@ -165,20 +171,37 @@ fn check_trace(events: &[Event], cli: &Cli) {
 
     // ── Summary counts ────────────────────────────────────────
     let total_violations = violations.len();
-    let double_frees = violations.iter().filter(|v| v.contains("double-free")).count();
-    let dangling_frees = violations.iter().filter(|v| v.contains("unallocated")).count();
-    let null_derefs = violations.iter().filter(|v| v.contains("NULL-DEREF")).count();
-    let uaf = violations.iter().filter(|v| v.contains("USE-AFTER-FREE")).count();
+    let double_frees = violations
+        .iter()
+        .filter(|v| v.contains("double-free"))
+        .count();
+    let dangling_frees = violations
+        .iter()
+        .filter(|v| v.contains("unallocated"))
+        .count();
+    let null_derefs = violations
+        .iter()
+        .filter(|v| v.contains("NULL-DEREF"))
+        .count();
+    let uaf = violations
+        .iter()
+        .filter(|v| v.contains("USE-AFTER-FREE"))
+        .count();
 
     // ── Report ────────────────────────────────────────────────
     eprintln!();
     eprintln!("═══ tm-check report ═══");
     eprintln!("Events processed: {}", n_events);
-    eprintln!("Commits: {}  Aborts: {}  Abort rate: {:.1}%",
-              model.commits, model.aborts,
-              if model.commits + model.aborts > 0 {
-                  100.0 * model.aborts as f64 / (model.commits + model.aborts) as f64
-              } else { 0.0 });
+    eprintln!(
+        "Commits: {}  Aborts: {}  Abort rate: {:.1}%",
+        model.commits,
+        model.aborts,
+        if model.commits + model.aborts > 0 {
+            100.0 * model.aborts as f64 / (model.commits + model.aborts) as f64
+        } else {
+            0.0
+        }
+    );
     eprintln!();
 
     // ── Violations ─────────────────────────────────────────────
@@ -203,7 +226,10 @@ fn check_trace(events: &[Event], cli: &Cli) {
         }
         eprintln!();
     } else if !initial_snapshot.is_empty() {
-        eprintln!("VALUE INTEGRITY: {} addresses verified ✓", initial_snapshot.len());
+        eprintln!(
+            "VALUE INTEGRITY: {} addresses verified ✓",
+            initial_snapshot.len()
+        );
         eprintln!();
     }
 
@@ -221,31 +247,63 @@ fn check_trace(events: &[Event], cli: &Cli) {
     // ── Synchronization overhead ──────────────────────────────
     let total_tx = model.commits + model.aborts;
     eprintln!("Synchronization overhead (WBCTL model):");
-    eprintln!("  Validations:         {}  ({:.1}/tx)",
-              model.total_validations,
-              if total_tx > 0 { model.total_validations as f64 / total_tx as f64 } else { 0.0 });
-    eprintln!("  Snapshot extensions: {}  ({:.1}/tx)",
-              model.total_snapshot_extensions,
-              if total_tx > 0 { model.total_snapshot_extensions as f64 / total_tx as f64 } else { 0.0 });
-    eprintln!("  Spin iterations:     {}  ({:.1}/tx)",
-              model.total_spin_iterations,
-              if total_tx > 0 { model.total_spin_iterations as f64 / total_tx as f64 } else { 0.0 });
-    eprintln!("  Lock contentions:    {}  ({:.1}/tx)",
-              model.total_lock_contentions,
-              if total_tx > 0 { model.total_lock_contentions as f64 / total_tx as f64 } else { 0.0 });
+    eprintln!(
+        "  Validations:         {}  ({:.1}/tx)",
+        model.total_validations,
+        if total_tx > 0 {
+            model.total_validations as f64 / total_tx as f64
+        } else {
+            0.0
+        }
+    );
+    eprintln!(
+        "  Snapshot extensions: {}  ({:.1}/tx)",
+        model.total_snapshot_extensions,
+        if total_tx > 0 {
+            model.total_snapshot_extensions as f64 / total_tx as f64
+        } else {
+            0.0
+        }
+    );
+    eprintln!(
+        "  Spin iterations:     {}  ({:.1}/tx)",
+        model.total_spin_iterations,
+        if total_tx > 0 {
+            model.total_spin_iterations as f64 / total_tx as f64
+        } else {
+            0.0
+        }
+    );
+    eprintln!(
+        "  Lock contentions:    {}  ({:.1}/tx)",
+        model.total_lock_contentions,
+        if total_tx > 0 {
+            model.total_lock_contentions as f64 / total_tx as f64
+        } else {
+            0.0
+        }
+    );
     eprintln!();
 
     // ── Per-thread stats ───────────────────────────────────────
     let mut tx_stats: Vec<(u64, u32, u32, u32, u32, u32)> = Vec::new();
     for (&tid, tx) in &model.tx_states {
-        tx_stats.push((tid, tx.peak_read_set_size, tx.peak_write_set_size,
-                       tx.validations, tx.spin_iterations, tx.snapshot_extensions));
+        tx_stats.push((
+            tid,
+            tx.peak_read_set_size,
+            tx.peak_write_set_size,
+            tx.validations,
+            tx.spin_iterations,
+            tx.snapshot_extensions,
+        ));
     }
     tx_stats.sort_by_key(|s| s.0);
     eprintln!("Per-thread statistics (peak read-set / write-set / validations / spins / ext):");
     for (tid, rs, ws, val, spin, ext) in &tx_stats {
-        eprintln!("  T{:>2}:  RS={:>4}  WS={:>4}  V={:>5}  S={:>6}  Ext={}",
-                  tid, rs, ws, val, spin, ext);
+        eprintln!(
+            "  T{:>2}:  RS={:>4}  WS={:>4}  V={:>5}  S={:>6}  Ext={}",
+            tid, rs, ws, val, spin, ext
+        );
     }
     eprintln!();
 
@@ -267,7 +325,10 @@ fn main() {
     } else {
         Trace::from_jsonl_file(&cli.trace)
     }
-    .unwrap_or_else(|e| { eprintln!("Trace error: {}", e); std::process::exit(1); })
+    .unwrap_or_else(|e| {
+        eprintln!("Trace error: {}", e);
+        std::process::exit(1);
+    })
     .events;
 
     check_trace(&events, &cli);

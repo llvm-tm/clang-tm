@@ -40,22 +40,22 @@ const LARGE_MAGIC: u32 = 0x544D4C52; // "TMLR"
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct ChunkHeader {
-    pub magic: u32,         // CHUNK_MAGIC
-    pub size_class: u16,    // 0..MAX_CLASSES-1
-    pub flags: u16,         // bit 0 = bitmap mode
-    pub block_size: u32,    // bytes per block
-    pub block_count: u32,   // total blocks in this chunk
-    pub free_count: u32,    // free blocks remaining
-    pub alloc_hint: u32,    // bitmap: next scan index; freelist: head offset
-    _pad: [u32; 2],         // padding to 32 bytes
+    pub magic: u32,       // CHUNK_MAGIC
+    pub size_class: u16,  // 0..MAX_CLASSES-1
+    pub flags: u16,       // bit 0 = bitmap mode
+    pub block_size: u32,  // bytes per block
+    pub block_count: u32, // total blocks in this chunk
+    pub free_count: u32,  // free blocks remaining
+    pub alloc_hint: u32,  // bitmap: next scan index; freelist: head offset
+    _pad: [u32; 2],       // padding to 32 bytes
 }
 const _: () = assert!(std::mem::size_of::<ChunkHeader>() == 32);
 
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct LargeHdr {
-    pub magic: u32,       // LARGE_MAGIC
-    pub size: u32,        // user-requested size
+    pub magic: u32, // LARGE_MAGIC
+    pub size: u32,  // user-requested size
     pub next: *mut LargeHdr,
 }
 
@@ -83,10 +83,16 @@ struct TlState {
 
 impl TlState {
     const fn new() -> Self {
-        const FL_INIT: TLFreeList = TLFreeList { head: std::ptr::null_mut(), count: 0 };
+        const FL_INIT: TLFreeList = TLFreeList {
+            head: std::ptr::null_mut(),
+            count: 0,
+        };
         const NULL: *mut ChunkHeader = std::ptr::null_mut();
         TlState {
-            slab: Slab { bump: std::ptr::null_mut(), end: std::ptr::null_mut() },
+            slab: Slab {
+                bump: std::ptr::null_mut(),
+                end: std::ptr::null_mut(),
+            },
             free_lists: [FL_INIT; MAX_CLASSES],
             hot_chunks: [NULL; MAX_CLASSES],
             large_free_list: std::ptr::null_mut(),
@@ -122,10 +128,8 @@ static SC_DATA_OFF: OnceLock<[u16; MAX_CLASSES]> = OnceLock::new();
 
 // Size-class table at compile time
 const SIZE_TABLE: [u16; MAX_CLASSES] = [
-    16, 24, 32, 40, 48, 56, 64, 80,
-    96, 112, 128, 160, 192, 224, 256, 320,
-    384, 448, 512, 640, 768, 896, 1024, 1280,
-    1536, 1792, 2048, 2560, 3072, 3584, 4096, 0,
+    16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768,
+    896, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 0,
 ];
 
 // ════════════════════════════════════════════════════════════════
@@ -171,7 +175,6 @@ pub fn record_stack_bounds() {
         STACK_LOW.with(|c| unsafe { *c.get() = stack_addr as usize });
         STACK_HIGH.with(|c| unsafe { *c.get() = stack_addr as usize + stack_size });
     }
-
 }
 
 /// Returns `true` if `ptr` falls within the calling thread's stack bounds.
@@ -293,34 +296,49 @@ pub fn tm_region_calloc(nmemb: usize, sz: usize) -> *mut u8 {
 /// Alignment: 16 bytes.  Frees via `tm_system_free(sz)`.
 pub fn tm_system_calloc(nmemb: usize, sz: usize) -> *mut u8 {
     let total = nmemb * sz;
-    if total == 0 { return std::ptr::null_mut(); }
-    let layout = std::alloc::Layout::from_size_align(total, 16)
-        .expect("tm_system_calloc: invalid layout");
+    if total == 0 {
+        return std::ptr::null_mut();
+    }
+    let layout =
+        std::alloc::Layout::from_size_align(total, 16).expect("tm_system_calloc: invalid layout");
     unsafe { std::alloc::alloc_zeroed(layout) }
 }
 
 /// Allocate uninitialized memory from the system heap (not the TM region).
 pub fn tm_system_malloc(sz: usize) -> *mut u8 {
-    if sz == 0 { return std::ptr::null_mut(); }
+    if sz == 0 {
+        return std::ptr::null_mut();
+    }
     let sz = (sz + 15) & !15;
-    let layout = std::alloc::Layout::from_size_align(sz, 16)
-        .expect("tm_system_malloc: invalid layout");
+    let layout =
+        std::alloc::Layout::from_size_align(sz, 16).expect("tm_system_malloc: invalid layout");
     unsafe { std::alloc::alloc(layout) }
 }
 
 /// Free memory allocated with `tm_system_malloc` or `tm_system_calloc`.
 /// `sz` must be the original allocation size (or the total from calloc).
+/// FFI-style: `ptr` must come from `tm_system_malloc`/`tm_system_calloc`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn tm_system_free(ptr: *mut u8, sz: usize) {
-    if ptr.is_null() || sz == 0 { return; }
-    let layout = std::alloc::Layout::from_size_align(sz, 16)
-        .expect("tm_system_free: invalid layout");
+    if ptr.is_null() || sz == 0 {
+        return;
+    }
+    let layout =
+        std::alloc::Layout::from_size_align(sz, 16).expect("tm_system_free: invalid layout");
     unsafe { std::alloc::dealloc(ptr, layout) }
 }
 
 /// Reallocate a pointer obtained from `tm_system_malloc`/`tm_system_calloc`.
+/// FFI-style: `ptr` must come from `tm_system_malloc`/`tm_system_calloc`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn tm_system_realloc(ptr: *mut u8, old_sz: usize, new_sz: usize) -> *mut u8 {
-    if ptr.is_null() { return tm_system_malloc(new_sz); }
-    if new_sz == 0 { tm_system_free(ptr, old_sz); return std::ptr::null_mut(); }
+    if ptr.is_null() {
+        return tm_system_malloc(new_sz);
+    }
+    if new_sz == 0 {
+        tm_system_free(ptr, old_sz);
+        return std::ptr::null_mut();
+    }
     let np = tm_system_malloc(new_sz);
     if !np.is_null() && !ptr.is_null() {
         let copy = if old_sz < new_sz { old_sz } else { new_sz };
@@ -331,6 +349,8 @@ pub fn tm_system_realloc(ptr: *mut u8, old_sz: usize, new_sz: usize) -> *mut u8 
 }
 
 /// Reallocate a pointer obtained from `tm_region_malloc`.
+/// FFI-style: `ptr` must come from `tm_region_malloc`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn tm_region_realloc(ptr: *mut u8, new_sz: usize) -> *mut u8 {
     if ptr.is_null() {
         return tm_region_malloc(new_sz);
@@ -353,6 +373,8 @@ pub fn tm_region_realloc(ptr: *mut u8, new_sz: usize) -> *mut u8 {
 /// Free a pointer obtained from `tm_region_malloc`.
 ///
 /// Pushes to the per-thread free list — no atomic RMW.
+/// FFI-style: `ptr` must come from `tm_region_malloc`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn tm_region_free(ptr: *mut u8) {
     if ptr.is_null() {
         return;
@@ -379,7 +401,7 @@ pub fn tm_region_free(ptr: *mut u8) {
             }
         } else {
             // Large allocation
-            let lh = (ptr as *mut u8).sub(std::mem::size_of::<LargeHdr>()) as *mut LargeHdr;
+            let lh = ptr.sub(std::mem::size_of::<LargeHdr>()) as *mut LargeHdr;
             if (*lh).magic == LARGE_MAGIC {
                 let tl = tl_mut();
                 (*lh).next = tl.large_free_list;
@@ -529,7 +551,9 @@ pub fn tm_region_init_file(path: &str, shared: bool) -> i32 {
 
     for sc in 0..MAX_CLASSES {
         let bbs = SIZE_TABLE[sc];
-        if bbs == 0 { break; }
+        if bbs == 0 {
+            break;
+        }
         bs[sc] = bbs;
         if (bbs as usize) <= BITMAP_THRESHOLD {
             let max_try = (CHUNK_SIZE - CHUNK_HEADER_SZ) / (bbs as usize);
@@ -561,7 +585,11 @@ pub fn tm_region_init_file(path: &str, shared: bool) -> i32 {
         TM_REGION_SIZE
     };
 
-    let flags = if shared { libc::MAP_SHARED } else { libc::MAP_PRIVATE };
+    let flags = if shared {
+        libc::MAP_SHARED
+    } else {
+        libc::MAP_PRIVATE
+    };
     let addr = mmap_file(path, region_size, flags);
     if addr.is_null() {
         NEXT_SLAB_IDX.store(0, Ordering::Release);
@@ -633,7 +661,11 @@ pub fn tm_region_start() -> usize {
 pub fn tm_region_size() -> usize {
     let start = REGION_START.load(Ordering::Acquire);
     let end = REGION_END.load(Ordering::Relaxed);
-    if start == 0 { 0 } else { end - start }
+    if start == 0 {
+        0
+    } else {
+        end - start
+    }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -644,7 +676,11 @@ fn page_size() -> usize {
     // Safe: the POSIX `sysconf` call is reentrant and does not retain
     // pointers.  Fallback to 4096 if the value is bogus.
     let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    if ps <= 0 { 4096 } else { ps as usize }
+    if ps <= 0 {
+        4096
+    } else {
+        ps as usize
+    }
 }
 
 fn mmap_region(size: usize) -> *mut u8 {
@@ -685,7 +721,9 @@ fn mmap_file(path: &str, size: usize, flags: libc::c_int) -> *mut u8 {
     }
     if unsafe { libc::ftruncate(fd, size as i64) } < 0 {
         eprintln!("addrspace: ftruncate({path}, {size}) failed");
-        unsafe { libc::close(fd); }
+        unsafe {
+            libc::close(fd);
+        }
         return std::ptr::null_mut();
     }
     let addr = unsafe {
@@ -698,7 +736,9 @@ fn mmap_file(path: &str, size: usize, flags: libc::c_int) -> *mut u8 {
             0,
         )
     };
-    unsafe { libc::close(fd); }
+    unsafe {
+        libc::close(fd);
+    }
     if addr == libc::MAP_FAILED {
         eprintln!("addrspace: mmap file {path} failed");
         std::ptr::null_mut()
@@ -910,10 +950,7 @@ fn malloc_large(sz: usize) -> *mut u8 {
         let slab_sz = SLAB_SIZE.load(Ordering::Relaxed);
         let needed = (alloc_sz + slab_sz - 1) >> SLAB_SHIFT.load(Ordering::Relaxed);
         let idx = NEXT_SLAB_IDX.fetch_add(needed, Ordering::Relaxed);
-        let slab = unsafe {
-            (REGION_START.load(Ordering::Relaxed) as *mut u8)
-                .add(idx * slab_sz)
-        };
+        let slab = unsafe { (REGION_START.load(Ordering::Relaxed) as *mut u8).add(idx * slab_sz) };
         if unsafe { slab.add(needed * slab_sz) } as usize > REGION_END.load(Ordering::Relaxed) {
             eprintln!("FATAL: TM region exhausted");
             std::process::abort();
@@ -947,10 +984,7 @@ fn chunk_alloc(sc: usize) -> *mut ChunkHeader {
     if next > tl.slab.end {
         let slab_sz = SLAB_SIZE.load(Ordering::Relaxed);
         let idx = NEXT_SLAB_IDX.fetch_add(1, Ordering::Relaxed);
-        let slab = unsafe {
-            (REGION_START.load(Ordering::Relaxed) as *mut u8)
-                .add(idx * slab_sz)
-        };
+        let slab = unsafe { (REGION_START.load(Ordering::Relaxed) as *mut u8).add(idx * slab_sz) };
         if unsafe { slab.add(slab_sz) } as usize > REGION_END.load(Ordering::Relaxed) {
             eprintln!("FATAL: TM region exhausted");
             std::process::abort();
@@ -985,11 +1019,7 @@ fn init_chunk(hdr: *mut ChunkHeader, sc: usize) {
             // Bitmap mode: zero bitmap (all blocks free)
             (*hdr).flags = 1;
             (*hdr).alloc_hint = 0;
-            std::ptr::write_bytes(
-                (hdr as *mut u8).add(CHUNK_HEADER_SZ),
-                0,
-                bm_bytes as usize,
-            );
+            std::ptr::write_bytes((hdr as *mut u8).add(CHUNK_HEADER_SZ), 0, bm_bytes as usize);
         } else {
             // Freelist mode: link all blocks
             for i in 0..(bcnt as u32 - 1) {
@@ -1015,7 +1045,7 @@ fn old_size(ptr: *mut u8) -> usize {
         if hdr.magic == CHUNK_MAGIC && (hdr.size_class as usize) < MAX_CLASSES - 1 {
             sc_block_size(hdr.size_class as usize) as usize
         } else {
-            let lh = &*((ptr as *mut u8).sub(std::mem::size_of::<LargeHdr>()) as *mut LargeHdr);
+            let lh = &*(ptr.sub(std::mem::size_of::<LargeHdr>()) as *mut LargeHdr);
             if lh.magic == LARGE_MAGIC {
                 lh.size as usize
             } else {
@@ -1024,8 +1054,6 @@ fn old_size(ptr: *mut u8) -> usize {
         }
     }
 }
-
-
 
 // Tiny helpers to work around `*mut LargeHdr` field access in `static mut`
 fn lh_mut(ptr: *mut LargeHdr) -> &'static mut LargeHdr {
@@ -1229,8 +1257,13 @@ mod tests {
             for (i, &addr) in ptrs.iter().enumerate() {
                 let p = addr as *mut u8;
                 let val = unsafe { std::ptr::read(p as *mut u32) };
-                assert_eq!(val, (t * 64 + i) as u32,
-                           "thread {} iter {}: data mismatch", t, i);
+                assert_eq!(
+                    val,
+                    (t * 64 + i) as u32,
+                    "thread {} iter {}: data mismatch",
+                    t,
+                    i
+                );
             }
             // Clean up this thread's allocations
             for &addr in &ptrs {

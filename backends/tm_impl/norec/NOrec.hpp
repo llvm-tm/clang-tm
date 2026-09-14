@@ -144,7 +144,13 @@ inline void init()
 
 inline void exit()
 {
-	// TODO.md: NOrec shared-structure cleanup (P1)
+	// Nothing to free: the shared globals (global_lock, thr_counter,
+	// g_tm_abort_count) have static storage duration and are reclaimed by
+	// the OS at process exit. The only dynamic allocation, the per-thread
+	// Transaction, is freed by exit_thread(). The 64 GB TM region mapping
+	// is likewise OS-reclaimed (see stm::tm_region_destroy). The old
+	// "shared-structure cleanup" TODO was a misreading (it assumed these
+	// were heap/mmap-allocated). review-02 S05, resolved 2026-09-13.
 }
 
 inline word_t get_clock() { return global_lock.load(std::memory_order_acquire); }
@@ -197,7 +203,9 @@ begin()     //
 	auto *tx = current_tx;
 	TM_ASSERT(tx, "tx not defined");
 
-	do { tx->snapshot = get_clock(); } while (tx->snapshot & 1);
+	do {
+		tx->snapshot = get_clock();
+	} while (tx->snapshot & 1);
 	tx->active = true;
 	tx->read_only = true;
 	tx->abort_count = 0;
@@ -225,7 +233,7 @@ abort_tx()  //
 }
 
 inline __attribute__((noinline)) word_t //
-validate()    //
+validate()                              //
 {
 	auto *tx = current_tx;
 	volatile word_t time = 0;
@@ -265,8 +273,10 @@ commit()    //
 	word_t expect = tx->snapshot;
 	word_t desire = tx->snapshot + 1;
 	TM_ASSERT((expect & 1) == 0, "Already locked");
-	while (!global_lock.compare_exchange_strong(expect, desire,
-	    std::memory_order_acquire, std::memory_order_relaxed)) {
+	while (!global_lock.compare_exchange_strong(expect,
+	                                            desire,
+	                                            std::memory_order_acquire,
+	                                            std::memory_order_relaxed)) {
 		tx->snapshot = validate();
 		expect = tx->snapshot;
 		desire = expect + 1;
@@ -292,11 +302,11 @@ commit()    //
   * Stubs for Transaction read/write instrumentation.
   * ---------------------------------------------------- */
 
-inline __attribute__((noinline)) any_type_t    //
-read_word_norec(     //
-    Transaction *tx, //
-    void *addr,      //
-    ValueType sz     //
+inline __attribute__((noinline)) any_type_t //
+read_word_norec(                            //
+    Transaction *tx,                        //
+    void *addr,                             //
+    ValueType sz                            //
 )
 {
 	TM_ASSERT(tx, "tx not defined");
@@ -327,18 +337,24 @@ read_word_norec(     //
 	// Also handles wider-to-narrower extraction (UINT64→UINT8/16/32) and
 	// byte-level merge (8× UINT8 entries → POINTER/UINT64).
 	for (auto it = tx->write_set.rbegin(); it != tx->write_set.rend(); ++it) {
-		if (it->addr != addr) continue;
+		if (it->addr != addr)
+			continue;
 
 		auto entrySize = [](ValueType t) -> unsigned {
 			switch (t) {
-			case ValueType::UINT8:   return 1;
-			case ValueType::UINT16:  return 2;
+			case ValueType::UINT8:
+				return 1;
+			case ValueType::UINT16:
+				return 2;
 			case ValueType::UINT32:
-			case ValueType::FLOAT:   return 4;
+			case ValueType::FLOAT:
+				return 4;
 			case ValueType::UINT64:
 			case ValueType::DOUBLE:
-			case ValueType::POINTER: return 8;
-			default:                 return 0;
+			case ValueType::POINTER:
+				return 8;
+			default:
+				return 0;
 			}
 		};
 		unsigned es = entrySize(it->type);
@@ -350,22 +366,34 @@ read_word_norec(     //
 
 		// Wider to narrower: extract sub-word from wider entry
 		if (es == 8 && rs == 4 && (sz == ValueType::UINT32 || sz == ValueType::FLOAT)) {
-			any_type_t r; r.u4 = (uint32_t)(it->new_val.u8 & 0xFFFFFFFF); return r;
+			any_type_t r;
+			r.u4 = (uint32_t)(it->new_val.u8 & 0xFFFFFFFF);
+			return r;
 		}
 		if (es == 8 && rs == 2 && sz == ValueType::UINT16) {
-			any_type_t r; r.u2 = (uint16_t)(it->new_val.u8 & 0xFFFF); return r;
+			any_type_t r;
+			r.u2 = (uint16_t)(it->new_val.u8 & 0xFFFF);
+			return r;
 		}
 		if (es == 8 && rs == 1 && sz == ValueType::UINT8) {
-			any_type_t r; r.u1 = (uint8_t)(it->new_val.u8 & 0xFF); return r;
+			any_type_t r;
+			r.u1 = (uint8_t)(it->new_val.u8 & 0xFF);
+			return r;
 		}
 		if (es == 4 && rs == 2 && sz == ValueType::UINT16) {
-			any_type_t r; r.u2 = (uint16_t)(it->new_val.u4 & 0xFFFF); return r;
+			any_type_t r;
+			r.u2 = (uint16_t)(it->new_val.u4 & 0xFFFF);
+			return r;
 		}
 		if (es == 4 && rs == 1 && sz == ValueType::UINT8) {
-			any_type_t r; r.u1 = (uint8_t)(it->new_val.u4 & 0xFF); return r;
+			any_type_t r;
+			r.u1 = (uint8_t)(it->new_val.u4 & 0xFF);
+			return r;
 		}
 		if (es == 2 && rs == 1 && sz == ValueType::UINT8) {
-			any_type_t r; r.u1 = (uint8_t)(it->new_val.u2 & 0xFF); return r;
+			any_type_t r;
+			r.u1 = (uint8_t)(it->new_val.u2 & 0xFF);
+			return r;
 		}
 	}
 
@@ -377,7 +405,7 @@ read_word_norec(     //
 		uint64_t merged = 0;
 		bool all_byte = true;
 		for (unsigned i = 0; i < 8; i++) {
-			void *byte_addr = (void*)((uintptr_t)addr + i);
+			void *byte_addr = (void *)((uintptr_t)addr + i);
 			bool found = false;
 			for (auto it = tx->write_set.rbegin(); it != tx->write_set.rend(); ++it) {
 				if (it->addr == byte_addr && it->type == ValueType::UINT8) {
@@ -386,7 +414,10 @@ read_word_norec(     //
 					break;
 				}
 			}
-			if (!found) { all_byte = false; break; }
+			if (!found) {
+				all_byte = false;
+				break;
+			}
 		}
 		if (all_byte) {
 			any_type_t result;
@@ -449,7 +480,9 @@ read_word_norec(     //
 			       "read_word_norec: POINTER re-read from memory is kernel-space");
 		}
 		if (tx->read_set.size() > 1000000) {
-			fprintf(stderr, "FATAL: read_set overflow (%zu entries)\n", tx->read_set.size());
+			fprintf(stderr,
+			        "FATAL: read_set overflow (%zu entries)\n",
+			        tx->read_set.size());
 			abort_tx();
 		}
 	}
@@ -465,12 +498,12 @@ read_word_norec(     //
 	return value;
 }
 
-inline __attribute__((noinline)) void  //
-write_word_norec(    //
-    Transaction *tx, //
-    void *addr,      //
-    any_type_t val,  //
-    ValueType sz     //
+inline __attribute__((noinline)) void //
+write_word_norec(                     //
+    Transaction *tx,                  //
+    void *addr,                       //
+    any_type_t val,                   //
+    ValueType sz                      //
 )
 {
 	TM_ASSERT(tx, "tx not defined");
@@ -480,8 +513,7 @@ write_word_norec(    //
 	// The LLVM plugin can instrument null-derived GEP addresses.
 	// Guard unconditionally (even in expli API mode) to prevent
 	// SIGSEGV from writes to invalid addresses.
-	if (addr == nullptr || (uintptr_t)addr < 0x100000 ||
-	    ((uintptr_t)addr >> 47) != 0) {
+	if (addr == nullptr || (uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 47) != 0) {
 		return; // invalid address — skip
 	}
 	// Only bypass if address is on current thread's stack (defense-in-depth).
@@ -493,18 +525,29 @@ write_word_norec(    //
 		return;
 	}
 
-	tx->read_only = false; // TODO.md: NOrec read-only flag semantics (P1)
+	tx->read_only = false; // RO→RW promotion (review-02 S04): reads made while
+	                       // read_only are ALWAYS recorded in read_set, so the
+	                       // commit path validates them. Regression:
+	                       // tests/expli-api/test_norec_ro2rw.cpp.
 
 	auto typeSize = [](ValueType t) -> unsigned {
 		switch (t) {
-		case ValueType::UINT8:   return 1;
-		case ValueType::UINT16:  return 2;
-		case ValueType::UINT32:  return 4;
-		case ValueType::FLOAT:   return 4;
-		case ValueType::UINT64:  return 8;
-		case ValueType::POINTER: return 8;
-		case ValueType::DOUBLE:  return 8;
-		default:                 return 0;
+		case ValueType::UINT8:
+			return 1;
+		case ValueType::UINT16:
+			return 2;
+		case ValueType::UINT32:
+			return 4;
+		case ValueType::FLOAT:
+			return 4;
+		case ValueType::UINT64:
+			return 8;
+		case ValueType::POINTER:
+			return 8;
+		case ValueType::DOUBLE:
+			return 8;
+		default:
+			return 0;
 		}
 	};
 	unsigned sz_bytes = typeSize(sz);
@@ -512,7 +555,8 @@ write_word_norec(    //
 	// Assert: POINTER values must be in user space (below 0x800000000000)
 	if (sz == ValueType::POINTER) {
 		uint64_t ptr_val = reinterpret_cast<uint64_t>(val.ptr);
-		assert(ptr_val < 0x800000000000ULL && "write_word_norec: POINTER value in kernel space");
+		assert(ptr_val < 0x800000000000ULL &&
+		       "write_word_norec: POINTER value in kernel space");
 	}
 
 	// Scan from end (most recent) so repeated writes to the same address
@@ -524,9 +568,11 @@ write_word_norec(    //
 				// Assert: when updating a POINTER entry with a same-size non-POINTER type,
 				// the new value might be a non-pointer value. This is only safe if the
 				// non-POINTER value is a valid user-space address (for type interchange).
-				if (it->type == ValueType::POINTER && sz_bytes == 8 && sz != ValueType::POINTER) {
+				if (it->type == ValueType::POINTER && sz_bytes == 8 &&
+				    sz != ValueType::POINTER) {
 					assert(val.u8 < 0x800000000000ULL &&
-					       "write_word_norec: non-POINTER update to POINTER entry got kernel-space value");
+					       "write_word_norec: non-POINTER update to POINTER entry got "
+					       "kernel-space value");
 				}
 				it->new_val = val; // same type: update most recent entry
 				return;

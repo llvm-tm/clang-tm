@@ -12,14 +12,14 @@
 // retry penalty is added. This makes throughput drop with thread
 // count, matching real backends.
 
-use serde::{Deserialize, Serialize};
-use crate::event::{Event, EventKind};
-use crate::queue::EventQueue;
-use crate::lp::LpState;
-use crate::memory::ShadowMemory;
 use crate::checker::Checker;
 use crate::cost_model::{BackendProfile, CalibratedCostModel};
+use crate::event::{Event, EventKind};
+use crate::lp::LpState;
 use crate::machine_profile::MachineProfile;
+use crate::memory::ShadowMemory;
+use crate::queue::EventQueue;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Clock advancement mode.
@@ -72,7 +72,9 @@ pub struct SimState {
     pub effective_freq_ghz: f64,
 }
 
-fn default_retry_mult() -> u64 { 3 }
+fn default_retry_mult() -> u64 {
+    3
+}
 
 impl SimState {
     pub fn new(threads: u32, tm_base: u64, tm_size: u64) -> Self {
@@ -224,7 +226,10 @@ impl SimState {
         let tid = event.thread_id;
 
         if let Err(reason) = self.checker.check(event) {
-            eprintln!("VIOLATION at ts={} tid={}: {}", event.timestamp, tid, reason);
+            eprintln!(
+                "VIOLATION at ts={} tid={}: {}",
+                event.timestamp, tid, reason
+            );
         }
 
         // Handle conflict detection BEFORE touching lp (avoids borrow conflicts).
@@ -241,13 +246,14 @@ impl SimState {
             self.abort_lp(victim);
         }
 
-        let lp = self.lps.entry(tid)
-            .or_insert_with(|| LpState::new(tid, 0));
+        let lp = self.lps.entry(tid).or_insert_with(|| LpState::new(tid, 0));
 
         match &event.kind {
             EventKind::ThreadSpawn(child_id) => {
                 let seed = event.timestamp.wrapping_add(*child_id as u64);
-                self.lps.entry(*child_id).or_insert_with(|| LpState::new(*child_id, seed));
+                self.lps
+                    .entry(*child_id)
+                    .or_insert_with(|| LpState::new(*child_id, seed));
             }
             EventKind::TxBegin => {
                 lp.in_tx = true;
@@ -275,13 +281,20 @@ impl SimState {
             }
             EventKind::Read { addr, .. } => {
                 if lp.in_tx {
-                    lp.read_set.push(crate::lp::ReadEntry { addr: *addr, version: 0 });
+                    lp.read_set.push(crate::lp::ReadEntry {
+                        addr: *addr,
+                        version: 0,
+                    });
                     self.track_read(tid, *addr);
                 }
             }
             EventKind::Write { addr, val, .. } => {
                 if lp.in_tx {
-                    lp.write_set.push(crate::lp::WriteEntry { addr: *addr, old_val: 0, new_val: *val });
+                    lp.write_set.push(crate::lp::WriteEntry {
+                        addr: *addr,
+                        old_val: 0,
+                        new_val: *val,
+                    });
                     self.track_write(tid, *addr);
                 }
             }
@@ -298,7 +311,10 @@ impl SimState {
             }
             EventKind::Assert { cond, msg } => {
                 if !cond {
-                    eprintln!("ASSERTION FAILED at ts={} tid={}: {}", event.timestamp, tid, msg);
+                    eprintln!(
+                        "ASSERTION FAILED at ts={} tid={}: {}",
+                        event.timestamp, tid, msg
+                    );
                 }
             }
             EventKind::Log { msg } => {
@@ -333,8 +349,10 @@ impl SimState {
         eprintln!("═══ TM-DES SIMULATION ═══");
         eprintln!("  Events processed: {}", self.events_processed);
         eprintln!("  Clock mode: {:?}", self.clock_mode);
-        eprintln!("  TX commits: {}  aborts: {} (conflict: {})",
-            self.total_tx_commits, self.total_tx_aborts, self.conflict_aborts);
+        eprintln!(
+            "  TX commits: {}  aborts: {} (conflict: {})",
+            self.total_tx_commits, self.total_tx_aborts, self.conflict_aborts
+        );
         if self.total_tx_commits + self.total_tx_aborts > 0 {
             let rate = 100.0 * self.total_tx_aborts as f64
                 / (self.total_tx_commits + self.total_tx_aborts) as f64;
@@ -342,13 +360,24 @@ impl SimState {
         }
         if self.clock_mode == ClockMode::Cost {
             eprintln!("  Estimated cycles: {}", self.total_estimated_cycles);
-            eprintln!("  Machine: {} @ {:.1} GHz", self.machine_profile.cpu, self.machine_profile.freq_ghz);
+            eprintln!(
+                "  Machine: {} @ {:.1} GHz",
+                self.machine_profile.cpu, self.machine_profile.freq_ghz
+            );
             eprintln!("  Backend profile: {:?}", self.backend_profile);
-            let freq = if self.effective_freq_ghz > 0.0 { self.effective_freq_ghz } else { self.machine_profile.freq_ghz };
+            let freq = if self.effective_freq_ghz > 0.0 {
+                self.effective_freq_ghz
+            } else {
+                self.machine_profile.freq_ghz
+            };
             if self.total_estimated_cycles > 0 && freq > 0.0 {
                 let estimated_us = self.total_estimated_cycles as f64 / (freq * 1000.0);
-                eprintln!("  Effective freq: {:.2} GHz  Estimated time: {:.2} us ({:.3} ms)",
-                    freq, estimated_us, estimated_us / 1000.0);
+                eprintln!(
+                    "  Effective freq: {:.2} GHz  Estimated time: {:.2} us ({:.3} ms)",
+                    freq,
+                    estimated_us,
+                    estimated_us / 1000.0
+                );
             }
             eprintln!("  Retry cost multiplier: {}", self.retry_cost_multiplier);
         }

@@ -6,10 +6,10 @@
 
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassManager.h>
-#include <llvm/IR/IRBuilder.h>
 
 #include "tm_annotation_utils.hpp"
 #include "tm_debug.hpp"
@@ -36,7 +36,8 @@ public:
 			std::string CloneName = (F.getName() + TM_CLONE_SUFFIX).str();
 			if (M->getFunction(CloneName)) {
 				TM_DEBUG("%s has queue clone %s, skipping re-instrumentation",
-				         F.getName().str().c_str(), CloneName.c_str());
+				         F.getName().str().c_str(),
+				         CloneName.c_str());
 				return PreservedAnalyses::all();
 			}
 		}

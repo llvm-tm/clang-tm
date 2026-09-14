@@ -51,15 +51,16 @@ public:
 		if (S->ClonedMap.empty()) {
 			TM_DEBUG("TMRedirectPass: no clones to redirect, skipping");
 		} else {
-			TM_DEBUG("TMRedirectPass: redirecting %d clones",
-			         (int)S->ClonedMap.size());
+			TM_DEBUG("TMRedirectPass: redirecting %d clones", (int)S->ClonedMap.size());
 
-			tm_method_instrumentation::redirectTXFunctionsToClones(
-			    M, S->TxReachableFuncs, S->ClonedMap,
-			    tm_method_instrumentation::CloneMode::CloneOnly);
+			tm_method_instrumentation::
+			    redirectTXFunctionsToClones(M,
+			                                S->TxReachableFuncs,
+			                                S->ClonedMap,
+			                                tm_method_instrumentation::CloneMode::
+			                                    CloneOnly);
 
-			tm_method_instrumentation::instrumentAllClones(
-			    S->ClonedMap, M, S->H);
+			tm_method_instrumentation::instrumentAllClones(S->ClonedMap, M, S->H);
 
 			S->modified = true;
 		}

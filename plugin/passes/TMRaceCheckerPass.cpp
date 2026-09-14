@@ -38,7 +38,8 @@
 
 using namespace llvm;
 
-namespace {
+namespace
+{
 
 // ── Shared: inline the tracesFromTMGlobal check here ──
 // (tm_local_vars.hpp already defines it; we just call it.)
@@ -52,257 +53,269 @@ namespace {
 // pstatic_rebuild, and tm_allow_opaque functions are NOT used as seeds — they
 // are checked individually (they call TX functions, but the TX function calls
 // are what provide safety, not the annotation on the caller).
-static void collectReachableFromTX(Module &M,
-                                   SmallPtrSetImpl<Function *> &SafeSet) {
-    SmallVector<Function *, 32> Worklist;
+static void collectReachableFromTX(Module &M, SmallPtrSetImpl<Function *> &SafeSet)
+{
+	SmallVector<Function *, 32> Worklist;
 
-    // Seed: only functions annotated with "shared" or "async_shared"
-    for (auto &F : M) {
-        if (F.isDeclaration())
-            continue;
-        if (hasAnnotation(F, TX_ANNOT) ||
-            hasAnnotation(F, ASYNC_TX_ANNOT))
-            Worklist.push_back(&F);
-    }
+	// Seed: only functions annotated with "shared" or "async_shared"
+	for (auto &F : M) {
+		if (F.isDeclaration())
+			continue;
+		if (hasAnnotation(F, TX_ANNOT) || hasAnnotation(F, ASYNC_TX_ANNOT))
+			Worklist.push_back(&F);
+	}
 
-    // BFS through the call graph
-    while (!Worklist.empty()) {
-        Function *F = Worklist.pop_back_val();
-        if (!SafeSet.insert(F).second)
-            continue; // already visited
+	// BFS through the call graph
+	while (!Worklist.empty()) {
+		Function *F = Worklist.pop_back_val();
+		if (!SafeSet.insert(F).second)
+			continue; // already visited
 
-        for (auto &BB : *F) {
-            for (auto &I : BB) {
-                auto *CB = dyn_cast<CallBase>(&I);
-                if (!CB)
-                    continue;
-                Function *Callee = CB->getCalledFunction();
-                if (Callee && !Callee->isDeclaration() &&
-                    !SafeSet.count(Callee))
-                    Worklist.push_back(Callee);
-            }
-        }
-    }
+		for (auto &BB : *F) {
+			for (auto &I : BB) {
+				auto *CB = dyn_cast<CallBase>(&I);
+				if (!CB)
+					continue;
+				Function *Callee = CB->getCalledFunction();
+				if (Callee && !Callee->isDeclaration() && !SafeSet.count(Callee))
+					Worklist.push_back(Callee);
+			}
+		}
+	}
 
-    TM_DEBUG("Call graph: %u functions reachable from TX/thread/main",
-             (unsigned)SafeSet.size());
+	TM_DEBUG("Call graph: %u functions reachable from TX/thread/main",
+	         (unsigned)SafeSet.size());
 }
 
 // Trace a pointer back through the same path as tracesFromTMGlobal and return
 // the first TM-annotated GlobalVariable name found. Falls back to "<TM global>"
 // when no GlobalVariable is reachable (e.g. call results from tm_read_ptr).
-static StringRef findTMGlobalName(Value *V, Module &M,
+static StringRef findTMGlobalName(Value *V,
+                                  Module &M,
                                   SmallPtrSetImpl<const PHINode *> *VisitedPHIs,
-                                  int Depth = 0) {
-    if (Depth > 15 || !V)
-        return "<TM global>";
-    V = V->stripPointerCasts();
+                                  int Depth = 0)
+{
+	if (Depth > 15 || !V)
+		return "<TM global>";
+	V = V->stripPointerCasts();
 
-    if (auto *GV = dyn_cast<GlobalVariable>(V)) {
-        if (isTMAnnotatedGlobal(GV, M))
-            return GV->getName();
-        return "<TM global>";
-    }
-    if (auto *GEP = dyn_cast<GetElementPtrInst>(V))
-        return findTMGlobalName(const_cast<Value *>(GEP->getPointerOperand()),
-                                M, VisitedPHIs, Depth + 1);
-    if (auto *GEPOp = dyn_cast<GEPOperator>(V))
-        return findTMGlobalName(const_cast<Value *>(GEPOp->getPointerOperand()),
-                                M, VisitedPHIs, Depth + 1);
-    if (auto *Load = dyn_cast<LoadInst>(V))
-        return findTMGlobalName(const_cast<Value *>(Load->getPointerOperand()),
-                                M, VisitedPHIs, Depth + 1);
-    // Call result: check if any argument traces to a named global
-    if (auto *Call = dyn_cast<CallBase>(V)) {
-        for (unsigned i = 0; i < Call->arg_size(); i++) {
-            StringRef N = findTMGlobalName(Call->getArgOperand(i), M,
-                                           VisitedPHIs, Depth + 1);
-            if (N != "<TM global>") return N;
-        }
-        return "<TM global>";
-    }
-    // PHI: search incoming values (cycle-safe via VisitedPHIs)
-    if (auto *Phi = dyn_cast<PHINode>(V)) {
-        if (VisitedPHIs && VisitedPHIs->count(Phi))
-            return "<TM global>";
-        SmallPtrSet<const PHINode *, 4> LocalVisitedPHIs;
-        if (!VisitedPHIs)
-            VisitedPHIs = &LocalVisitedPHIs;
-        VisitedPHIs->insert(Phi);
-        for (Value *Inc : Phi->incoming_values()) {
-            StringRef N = findTMGlobalName(Inc, M, VisitedPHIs, Depth + 1);
-            if (N != "<TM global>") return N;
-        }
-        return "<TM global>";
-    }
-    if (auto *Sel = dyn_cast<SelectInst>(V)) {
-        StringRef N = findTMGlobalName(Sel->getTrueValue(), M,
-                                       VisitedPHIs, Depth + 1);
-        if (N != "<TM global>") return N;
-        return findTMGlobalName(Sel->getFalseValue(), M,
-                                VisitedPHIs, Depth + 1);
-    }
-    if (auto *PTI = dyn_cast<PtrToIntInst>(V))
-        return findTMGlobalName(PTI->getPointerOperand(), M,
-                                VisitedPHIs, Depth + 1);
-    if (auto *ITP = dyn_cast<IntToPtrInst>(V))
-        return findTMGlobalName(ITP->getOperand(0), M,
-                                VisitedPHIs, Depth + 1);
-    // Function argument: follow through call sites like tracesFromTMGlobal does
-    if (auto *Arg = dyn_cast<Argument>(V)) {
-        Function *Parent = Arg->getParent();
-        if (!Parent) return "<TM global>";
-        for (User *U : Parent->users()) {
-            auto *Call = dyn_cast<CallBase>(U);
-            if (!Call || Call->getCalledFunction() != Parent)
-                continue;
-            StringRef N = findTMGlobalName(Call->getArgOperand(Arg->getArgNo()),
-                                           M, VisitedPHIs, Depth + 1);
-            if (N != "<TM global>") return N;
-        }
-        return "<TM global>";
-    }
-    // Alloca: check stores to it (same logic as tracesFromTMGlobal)
-    if (auto *AI = dyn_cast<AllocaInst>(V)) {
-        for (User *U : AI->users()) {
-            if (auto *Store = dyn_cast<StoreInst>(U)) {
-                StringRef N = findTMGlobalName(
-                    Store->getValueOperand(), M, VisitedPHIs, Depth + 1);
-                if (N != "<TM global>") return N;
-            }
-        }
-        return "<TM global>";
-    }
-    return "<TM global>";
+	if (auto *GV = dyn_cast<GlobalVariable>(V)) {
+		if (isTMAnnotatedGlobal(GV, M))
+			return GV->getName();
+		return "<TM global>";
+	}
+	if (auto *GEP = dyn_cast<GetElementPtrInst>(V))
+		return findTMGlobalName(const_cast<Value *>(GEP->getPointerOperand()),
+		                        M,
+		                        VisitedPHIs,
+		                        Depth + 1);
+	if (auto *GEPOp = dyn_cast<GEPOperator>(V))
+		return findTMGlobalName(const_cast<Value *>(GEPOp->getPointerOperand()),
+		                        M,
+		                        VisitedPHIs,
+		                        Depth + 1);
+	if (auto *Load = dyn_cast<LoadInst>(V))
+		return findTMGlobalName(const_cast<Value *>(Load->getPointerOperand()),
+		                        M,
+		                        VisitedPHIs,
+		                        Depth + 1);
+	// Call result: check if any argument traces to a named global
+	if (auto *Call = dyn_cast<CallBase>(V)) {
+		for (unsigned i = 0; i < Call->arg_size(); i++) {
+			StringRef N = findTMGlobalName(Call->getArgOperand(i),
+			                               M,
+			                               VisitedPHIs,
+			                               Depth + 1);
+			if (N != "<TM global>")
+				return N;
+		}
+		return "<TM global>";
+	}
+	// PHI: search incoming values (cycle-safe via VisitedPHIs)
+	if (auto *Phi = dyn_cast<PHINode>(V)) {
+		if (VisitedPHIs && VisitedPHIs->count(Phi))
+			return "<TM global>";
+		SmallPtrSet<const PHINode *, 4> LocalVisitedPHIs;
+		if (!VisitedPHIs)
+			VisitedPHIs = &LocalVisitedPHIs;
+		VisitedPHIs->insert(Phi);
+		for (Value *Inc : Phi->incoming_values()) {
+			StringRef N = findTMGlobalName(Inc, M, VisitedPHIs, Depth + 1);
+			if (N != "<TM global>")
+				return N;
+		}
+		return "<TM global>";
+	}
+	if (auto *Sel = dyn_cast<SelectInst>(V)) {
+		StringRef N = findTMGlobalName(Sel->getTrueValue(), M, VisitedPHIs, Depth + 1);
+		if (N != "<TM global>")
+			return N;
+		return findTMGlobalName(Sel->getFalseValue(), M, VisitedPHIs, Depth + 1);
+	}
+	if (auto *PTI = dyn_cast<PtrToIntInst>(V))
+		return findTMGlobalName(PTI->getPointerOperand(), M, VisitedPHIs, Depth + 1);
+	if (auto *ITP = dyn_cast<IntToPtrInst>(V))
+		return findTMGlobalName(ITP->getOperand(0), M, VisitedPHIs, Depth + 1);
+	// Function argument: follow through call sites like tracesFromTMGlobal does
+	if (auto *Arg = dyn_cast<Argument>(V)) {
+		Function *Parent = Arg->getParent();
+		if (!Parent)
+			return "<TM global>";
+		for (User *U : Parent->users()) {
+			auto *Call = dyn_cast<CallBase>(U);
+			if (!Call || Call->getCalledFunction() != Parent)
+				continue;
+			StringRef N = findTMGlobalName(Call->getArgOperand(Arg->getArgNo()),
+			                               M,
+			                               VisitedPHIs,
+			                               Depth + 1);
+			if (N != "<TM global>")
+				return N;
+		}
+		return "<TM global>";
+	}
+	// Alloca: check stores to it (same logic as tracesFromTMGlobal)
+	if (auto *AI = dyn_cast<AllocaInst>(V)) {
+		for (User *U : AI->users()) {
+			if (auto *Store = dyn_cast<StoreInst>(U)) {
+				StringRef N = findTMGlobalName(Store->getValueOperand(),
+				                               M,
+				                               VisitedPHIs,
+				                               Depth + 1);
+				if (N != "<TM global>")
+					return N;
+			}
+		}
+		return "<TM global>";
+	}
+	return "<TM global>";
 }
 
 // Emit a structured warning with source location
-static void emitWarning(Function &F, Instruction &I, StringRef GlobalName) {
-    DebugLoc DL = I.getDebugLoc();
-    std::string LocStr;
-    if (DL) {
-        auto *Scope = dyn_cast<DIScope>(DL.getScope());
-        StringRef File = Scope ? Scope->getFilename() : "";
-        unsigned Line = DL.getLine();
-        unsigned Col = DL.getCol();
-        LocStr = (File.str() + ":" + std::to_string(Line) + ":" + std::to_string(Col));
-    } else {
-        LocStr = "<unknown location>";
-    }
+static void emitWarning(Function &F, Instruction &I, StringRef GlobalName)
+{
+	DebugLoc DL = I.getDebugLoc();
+	std::string LocStr;
+	if (DL) {
+		auto *Scope = dyn_cast<DIScope>(DL.getScope());
+		StringRef File = Scope ? Scope->getFilename() : "";
+		unsigned Line = DL.getLine();
+		unsigned Col = DL.getCol();
+		LocStr = (File.str() + ":" + std::to_string(Line) + ":" + std::to_string(Col));
+	} else {
+		LocStr = "<unknown location>";
+	}
 
-    errs() << "TM-RACE-CHECKER: " << LocStr << ": "
-           << (isa<StoreInst>(I) ? "write" : "read")
-           << " to TM-annotated global '" << GlobalName
-           << "' in function '" << F.getName()
-           << "' without transaction annotation\n";
-    errs() << "  note: add [[tm::shared]] to function '"
-           << F.getName()
-           << "', or suppress with [[tm::nontx]] if intentional\n";
+	errs() << "TM-RACE-CHECKER: " << LocStr << ": "
+	       << (isa<StoreInst>(I) ? "write" : "read") << " to TM-annotated global '"
+	       << GlobalName << "' in function '" << F.getName()
+	       << "' without transaction annotation\n";
+	errs() << "  note: add [[tm::shared]] to function '" << F.getName()
+	       << "', or suppress with [[tm::nontx]] if intentional\n";
 }
 
-class TMRaceCheckerPass : public PassInfoMixin<TMRaceCheckerPass> {
-    bool Verbose = false;
+class TMRaceCheckerPass : public PassInfoMixin<TMRaceCheckerPass>
+{
+	bool Verbose = false;
+
 public:
-    TMRaceCheckerPass() {
-        Verbose = (getenv("TM_RACE_CHECKER_VERBOSE") != nullptr);
-    }
+	TMRaceCheckerPass() { Verbose = (getenv("TM_RACE_CHECKER_VERBOSE") != nullptr); }
 
-    PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
-        TM_DEBUG("TMRaceCheckerPass: scanning module %s",
-                 M.getName().str().c_str());
+	PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
+	{
+		TM_DEBUG("TMRaceCheckerPass: scanning module %s", M.getName().str().c_str());
 
-        // Collect TM-annotated globals once
-        SmallPtrSet<const Value *, 16> TMGlobals;
-        collectTMGlobals(M, TMGlobals);
+		// Collect TM-annotated globals once
+		SmallPtrSet<const Value *, 16> TMGlobals;
+		collectTMGlobals(M, TMGlobals);
 
-        if (TMGlobals.empty()) {
-            if (Verbose) TM_DEBUG("No TM-annotated globals found, skipping");
-            return PreservedAnalyses::all();
-        }
+		if (TMGlobals.empty()) {
+			if (Verbose)
+				TM_DEBUG("No TM-annotated globals found, skipping");
+			return PreservedAnalyses::all();
+		}
 
-        // Build call-graph reachable set: functions transitively called from
-        // TX/THREAD/MAIN are safe (the pipeline instruments them).
-        SmallPtrSet<Function *, 32> SafeSet;
-        collectReachableFromTX(M, SafeSet);
+		// Build call-graph reachable set: functions transitively called from
+		// TX/THREAD/MAIN are safe (the pipeline instruments them).
+		SmallPtrSet<Function *, 32> SafeSet;
+		collectReachableFromTX(M, SafeSet);
 
-        bool Found = false;
-        for (auto &F : M) {
-            // Skip declarations
-            if (F.isDeclaration())
-                continue;
-            // Skip annotation-marked functions (they are transaction boundaries,
-            // thread entry points, or have other special semantics)
-            if (hasAnnotation(F, TX_ANNOT) ||
-                hasAnnotation(F, ASYNC_TX_ANNOT) ||
-                hasAnnotation(F, THREAD_ANNOT) ||
-                hasAnnotation(F, PSTATIC_REBUILD_ANNOT) ||
-                hasAnnotation(F, ALLOW_OPAQUE_ANNOT) ||
-                hasAnnotation(F, NONTX_ANNOT))
-                continue;
-            // Skip main (entry point, may do setup/teardown outside TX)
-            if (F.getName() == "main")
-                continue;
-            // Skip functions reachable from TX via call graph — the
-            // instrumentation pipeline clones+instruments these.
-            if (SafeSet.count(&F))
-                continue;
+		bool Found = false;
+		for (auto &F : M) {
+			// Skip declarations
+			if (F.isDeclaration())
+				continue;
+			// Skip annotation-marked functions (they are transaction boundaries,
+			// thread entry points, or have other special semantics)
+			if (hasAnnotation(F, TX_ANNOT) || hasAnnotation(F, ASYNC_TX_ANNOT) ||
+			    hasAnnotation(F, THREAD_ANNOT) ||
+			    hasAnnotation(F, PSTATIC_REBUILD_ANNOT) ||
+			    hasAnnotation(F, ALLOW_OPAQUE_ANNOT) || hasAnnotation(F, NONTX_ANNOT))
+				continue;
+			// Skip main (entry point, may do setup/teardown outside TX)
+			if (F.getName() == "main")
+				continue;
+			// Skip functions reachable from TX via call graph — the
+			// instrumentation pipeline clones+instruments these.
+			if (SafeSet.count(&F))
+				continue;
 
-            if (Verbose)
-                TM_DEBUG("Checking function: %s", F.getName().str().c_str());
-            for (auto &BB : F) {
-                for (auto &I : BB) {
-                    Value *Ptr = nullptr;
-                    if (auto *Load = dyn_cast<LoadInst>(&I)) {
-                        Ptr = Load->getPointerOperand();
-                    } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
-                        Ptr = Store->getPointerOperand();
-                    } else {
-                        continue;
-                    }
+			if (Verbose)
+				TM_DEBUG("Checking function: %s", F.getName().str().c_str());
+			for (auto &BB : F) {
+				for (auto &I : BB) {
+					Value *Ptr = nullptr;
+					if (auto *Load = dyn_cast<LoadInst>(&I)) {
+						Ptr = Load->getPointerOperand();
+					} else if (auto *Store = dyn_cast<StoreInst>(&I)) {
+						Ptr = Store->getPointerOperand();
+					} else {
+						continue;
+					}
 
-                    if (!Ptr)
-                        continue;
+					if (!Ptr)
+						continue;
 
-                    // Reuse the same tracesFromTMGlobal analysis
-                    // that the instrumentation pipeline uses
-                    if (tracesFromTMGlobal(Ptr, M)) {
-                        // Trace through the same path as tracesFromTMGlobal to
-                        // find the actual TM-annotated global variable name
-                        SmallPtrSet<const PHINode *, 4> DummyVisited;
-                        StringRef GlobalName = findTMGlobalName(Ptr, M, &DummyVisited);
+					// Reuse the same tracesFromTMGlobal analysis
+					// that the instrumentation pipeline uses
+					if (tracesFromTMGlobal(Ptr, M)) {
+						// Trace through the same path as tracesFromTMGlobal to
+						// find the actual TM-annotated global variable name
+						SmallPtrSet<const PHINode *, 4> DummyVisited;
+						StringRef GlobalName = findTMGlobalName(Ptr, M, &DummyVisited);
 
-                        emitWarning(F, I, GlobalName);
-                        Found = true;
-                    }
-                }
-            }
-        }
+						emitWarning(F, I, GlobalName);
+						Found = true;
+					}
+				}
+			}
+		}
 
-        if (!Found && Verbose)
-            TM_DEBUG("No TM-race candidates found");
+		if (!Found && Verbose)
+			TM_DEBUG("No TM-race candidates found");
 
-        return PreservedAnalyses::all();
-    }
-    static bool isRequired() { return true; }
+		return PreservedAnalyses::all();
+	}
+	static bool isRequired() { return true; }
 };
 
 } // anonymous namespace
 
-extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
-    return {
-        LLVM_PLUGIN_API_VERSION,
-        "TMRaceCheckerPass",
-        LLVM_VERSION_STRING,
-        [](PassBuilder &PB) {
-            PB.registerPipelineParsingCallback(
-                [](StringRef Name,
-                   ModulePassManager &MPM,
-                   ArrayRef<PassBuilder::PipelineElement>) {
-                    if (Name == "tm-race-checker") {
-                        MPM.addPass(TMRaceCheckerPass());
-                        return true;
-                    }
-                    return false;
-                });
-        }};
+extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
+{
+	return {LLVM_PLUGIN_API_VERSION,
+	        "TMRaceCheckerPass",
+	        LLVM_VERSION_STRING,
+	        [](PassBuilder &PB) {
+		        PB.registerPipelineParsingCallback(
+		            [](StringRef Name,
+		               ModulePassManager &MPM,
+		               ArrayRef<PassBuilder::PipelineElement>) {
+			            if (Name == "tm-race-checker") {
+				            MPM.addPass(TMRaceCheckerPass());
+				            return true;
+			            }
+			            return false;
+		            });
+	        }};
 }

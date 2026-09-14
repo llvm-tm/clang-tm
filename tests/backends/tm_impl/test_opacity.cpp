@@ -1,7 +1,7 @@
 #include "test_api.hpp"
 #include "test_harness.hpp"
-#include <cstring>
 #include <atomic>
+#include <cstring>
 
 // ══════════════════════════════════════════════════════════════════════
 // Section 1: Write-skew — classic SI anomaly
@@ -120,8 +120,10 @@ static void test_read_validation()
 	uint64_t final_x = g_rv_x;
 	uint64_t final_y = g_rv_y;
 	uint64_t max_x = 2 * RV_ITERS;
-	fprintf(stderr, "  Final X=%lu Y=%lu (max X: %lu)\n",
-	        (unsigned long)final_x, (unsigned long)final_y,
+	fprintf(stderr,
+	        "  Final X=%lu Y=%lu (max X: %lu)\n",
+	        (unsigned long)final_x,
+	        (unsigned long)final_y,
 	        (unsigned long)max_x);
 	TEST_ASSERT(final_x <= max_x, "X in range");
 	TEST_ASSERT(final_y <= final_x * 2, "Y consistent with X");

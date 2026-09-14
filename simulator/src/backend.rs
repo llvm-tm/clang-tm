@@ -90,9 +90,8 @@ impl Backend {
     /// the SimEngine after `max_retries` consecutive `try_begin()` failures.
     /// No-op for non-TSX backends.
     pub fn force_sgl(&self) {
-        match self {
-            Backend::TsxSim => runtime_tsx_sim::sim::force_sgl(),
-            _ => {}
+        if matches!(self, Backend::TsxSim) {
+            runtime_tsx_sim::sim::force_sgl();
         }
     }
 
@@ -311,10 +310,18 @@ impl Backend {
         }
     }
 
-    pub fn is_norec(&self) -> bool { matches!(self, Backend::Norec) }
-    pub fn is_tl2(&self) -> bool { matches!(self, Backend::Tl2) }
-    pub fn is_tinystm(&self) -> bool { matches!(self, Backend::Tinystm) }
-    pub fn is_tsx_sim(&self) -> bool { matches!(self, Backend::TsxSim) }
+    pub fn is_norec(&self) -> bool {
+        matches!(self, Backend::Norec)
+    }
+    pub fn is_tl2(&self) -> bool {
+        matches!(self, Backend::Tl2)
+    }
+    pub fn is_tinystm(&self) -> bool {
+        matches!(self, Backend::Tinystm)
+    }
+    pub fn is_tsx_sim(&self) -> bool {
+        matches!(self, Backend::TsxSim)
+    }
 
     /// Take snapshot of internal sync counters and reset them.
     pub fn take_stats(&self) -> runtime_core::SyncCounters {
@@ -344,8 +351,8 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
     use std::sync::atomic::AtomicU64;
+    use std::sync::OnceLock;
 
     fn alloc_tid() -> u64 {
         static NEXT: AtomicU64 = AtomicU64::new(1000);
@@ -354,20 +361,18 @@ mod tests {
 
     fn mmap_tm_region() {
         static MMAP: OnceLock<()> = OnceLock::new();
-        MMAP.get_or_init(|| {
-            unsafe {
-                let addr = 0x7f00_0000_0000 as *mut libc::c_void;
-                let result = libc::mmap(
-                    addr,
-                    256 * 1024 * 1024,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
-                    -1,
-                    0,
-                );
-                if result == libc::MAP_FAILED {
-                    panic!("mmap failed: {}", std::io::Error::last_os_error());
-                }
+        MMAP.get_or_init(|| unsafe {
+            let addr = 0x7f00_0000_0000 as *mut libc::c_void;
+            let result = libc::mmap(
+                addr,
+                256 * 1024 * 1024,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+                -1,
+                0,
+            );
+            if result == libc::MAP_FAILED {
+                panic!("mmap failed: {}", std::io::Error::last_os_error());
             }
         });
     }
@@ -382,7 +387,9 @@ mod tests {
         let addr = 0x7f00_0000_8000 as *mut u64;
 
         // Write outside TX (raw write)
-        unsafe { addr.write(0); }
+        unsafe {
+            addr.write(0);
+        }
 
         b.begin();
         let v = b.read_u64(addr);
@@ -476,7 +483,9 @@ mod tests {
         b.sim_set_thread_id(tid);
         b.init_thread();
         let addr = 0x7f00_0000_9000 as *mut u8;
-        unsafe { addr.write(0); }
+        unsafe {
+            addr.write(0);
+        }
         b.begin();
         b.write_u8(addr, 255);
         let v = b.read_u8(addr);
@@ -523,7 +532,9 @@ mod tests {
         b.sim_set_thread_id(tid);
         b.init_thread();
         let addr = 0x7f00_0000_A000 as *mut u16;
-        unsafe { addr.write(0); }
+        unsafe {
+            addr.write(0);
+        }
         b.begin();
         b.write_u16(addr, 0xCAFE);
         let v = b.read_u16(addr);
@@ -543,7 +554,9 @@ mod tests {
         b.sim_set_thread_id(tid);
         b.init_thread();
         let addr = 0x7f00_0000_D000 as *mut u64;
-        unsafe { addr.write(0); }
+        unsafe {
+            addr.write(0);
+        }
         b.begin();
         let v = b.read_u64(addr);
         assert_eq!(v, 0);
@@ -598,7 +611,9 @@ mod tests {
         b.sim_set_thread_id(tid);
         b.init_thread();
         let addr = 0x7f00_0000_E000 as *mut u32;
-        unsafe { addr.write(0); }
+        unsafe {
+            addr.write(0);
+        }
         b.begin();
         b.write_u32(addr, 0xDEAD);
         let v = b.read_u32(addr);
@@ -618,7 +633,9 @@ mod tests {
         b.sim_set_thread_id(tid);
         b.init_thread();
         let addr = 0x7f00_0000_F000 as *mut u64;
-        unsafe { addr.write(0); }
+        unsafe {
+            addr.write(0);
+        }
         b.begin();
         let v = b.read_u64(addr);
         assert_eq!(v, 0);
@@ -666,7 +683,9 @@ mod tests {
         b.sim_set_thread_id(tid);
         b.init_thread();
         let addr = 0x7f00_0000_F100 as *mut u8;
-        unsafe { addr.write(0); }
+        unsafe {
+            addr.write(0);
+        }
         b.begin();
         b.write_u8(addr, 0xAB);
         let v = b.read_u8(addr);
@@ -680,13 +699,21 @@ mod tests {
     #[test]
     fn test_all_backends_produce_identical_commits() {
         mmap_tm_region();
-        for b in [Backend::Norec, Backend::Tl2, Backend::Tinystm, Backend::Romulus, Backend::Swisstm] {
+        for b in [
+            Backend::Norec,
+            Backend::Tl2,
+            Backend::Tinystm,
+            Backend::Romulus,
+            Backend::Swisstm,
+        ] {
             let tid = alloc_tid();
             b.init();
             b.sim_set_thread_id(tid);
             b.init_thread();
             let addr = 0x7f00_0000_B000 as *mut u64;
-            unsafe { addr.write(0); }
+            unsafe {
+                addr.write(0);
+            }
             b.begin();
             b.write_u64(addr, 100);
             assert!(b.commit(), "{} commit should succeed", b.name());
@@ -699,12 +726,20 @@ mod tests {
     #[test]
     fn test_thread_isolation() {
         mmap_tm_region();
-        for b in [Backend::Norec, Backend::Tl2, Backend::Tinystm, Backend::Romulus, Backend::Swisstm] {
+        for b in [
+            Backend::Norec,
+            Backend::Tl2,
+            Backend::Tinystm,
+            Backend::Romulus,
+            Backend::Swisstm,
+        ] {
             let tid0 = alloc_tid();
             let tid1 = alloc_tid();
             b.init();
             let addr = 0x7f00_0000_C000 as *mut u64;
-            unsafe { addr.write(0); }
+            unsafe {
+                addr.write(0);
+            }
 
             // Thread 0
             b.sim_set_thread_id(tid0);
@@ -719,7 +754,12 @@ mod tests {
             b.init_thread();
             b.begin();
             let v = b.read_u64(addr);
-            assert_eq!(v, 10, "{}: thread 1 should see thread 0's committed value", b.name());
+            assert_eq!(
+                v,
+                10,
+                "{}: thread 1 should see thread 0's committed value",
+                b.name()
+            );
             b.sim_clear_thread_id();
         }
     }
@@ -729,7 +769,13 @@ mod tests {
     #[test]
     fn test_sim_reset_clears_state() {
         mmap_tm_region();
-        for b in [Backend::Norec, Backend::Tl2, Backend::Tinystm, Backend::Romulus, Backend::Swisstm] {
+        for b in [
+            Backend::Norec,
+            Backend::Tl2,
+            Backend::Tinystm,
+            Backend::Romulus,
+            Backend::Swisstm,
+        ] {
             let tid = alloc_tid();
             b.init();
             b.sim_set_thread_id(tid);
@@ -759,7 +805,9 @@ mod tests {
         b.sim_set_thread_id(tid);
         b.init_thread();
         let addr = 0x7f00_0000_2800 as *mut u64;
-        unsafe { addr.write(0); }
+        unsafe {
+            addr.write(0);
+        }
 
         b.begin();
         b.write_u64(addr, 42);

@@ -30,44 +30,50 @@
 
 #include <cstdint>
 
-namespace gem5_roi {
+namespace gem5_roi
+{
 
 // Arguments are passed in rdi/rsi per the SysV ABI (as in util/m5).
-static inline void reset_stats(uint64_t delay, uint64_t period) {
-    __asm__ volatile(".byte 0x0F, 0x04; .word 0x40"
-                     :
-                     : "D"(delay), "S"(period)
-                     : "memory", "cc");
+static inline void reset_stats(uint64_t delay, uint64_t period)
+{
+	__asm__ volatile(".byte 0x0F, 0x04; .word 0x40"
+	                 :
+	                 : "D"(delay), "S"(period)
+	                 : "memory", "cc");
 }
 
-static inline void dump_stats(uint64_t delay, uint64_t period) {
-    __asm__ volatile(".byte 0x0F, 0x04; .word 0x41"
-                     :
-                     : "D"(delay), "S"(period)
-                     : "memory", "cc");
+static inline void dump_stats(uint64_t delay, uint64_t period)
+{
+	__asm__ volatile(".byte 0x0F, 0x04; .word 0x41"
+	                 :
+	                 : "D"(delay), "S"(period)
+	                 : "memory", "cc");
 }
 
-static inline void work_begin(uint64_t workid, uint64_t threadid) {
-    __asm__ volatile(".byte 0x0F, 0x04; .word 0x5a"
-                     :
-                     : "D"(workid), "S"(threadid)
-                     : "memory", "cc");
+static inline void work_begin(uint64_t workid, uint64_t threadid)
+{
+	__asm__ volatile(".byte 0x0F, 0x04; .word 0x5a"
+	                 :
+	                 : "D"(workid), "S"(threadid)
+	                 : "memory", "cc");
 }
 
-static inline void work_end(uint64_t workid, uint64_t threadid) {
-    __asm__ volatile(".byte 0x0F, 0x04; .word 0x5b"
-                     :
-                     : "D"(workid), "S"(threadid)
-                     : "memory", "cc");
+static inline void work_end(uint64_t workid, uint64_t threadid)
+{
+	__asm__ volatile(".byte 0x0F, 0x04; .word 0x5b"
+	                 :
+	                 : "D"(workid), "S"(threadid)
+	                 : "memory", "cc");
 }
 
 // End the simulation immediately from inside the guest (FS mode: skips
 // the OS shutdown entirely — the ROI is over, nothing else matters).
-static inline void sim_exit(uint64_t delay, uint64_t code) {
-    __asm__ volatile(".byte 0x0F, 0x04; .word 0x21"
-                     :
-                     : "D"(delay), "S"(code)
-                     : "memory", "cc");
+static inline void sim_exit(uint64_t delay, uint64_t code)
+{
+	__asm__ volatile(".byte 0x0F, 0x04; .word 0x21"
+	                 :
+	                 : "D"(delay), "S"(code)
+	                 : "memory", "cc");
 }
 
 } // namespace gem5_roi

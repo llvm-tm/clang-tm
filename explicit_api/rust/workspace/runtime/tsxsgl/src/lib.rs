@@ -12,7 +12,7 @@
 // implement the correct SGL fallback path directly.
 // The functional semantics are identical.
 
-use core::sync::atomic::{AtomicBool, fence, Ordering};
+use core::sync::atomic::{fence, AtomicBool, Ordering};
 use std::cell::RefCell;
 
 pub use runtime_core::{Primitive, TypedValue};
@@ -38,10 +38,14 @@ thread_local! {
 }
 
 #[allow(dead_code)]
-fn tx_active() -> bool { ACTIVE.with(|a| *a.borrow()) }
+fn tx_active() -> bool {
+    ACTIVE.with(|a| *a.borrow())
+}
 
 #[allow(dead_code)]
-fn tx_aborted() -> bool { false }
+fn tx_aborted() -> bool {
+    false
+}
 
 // ── Public API ──────────────────────────────────────────
 pub fn tm_init() {}
@@ -68,7 +72,9 @@ pub fn tm_abort() {
     unlock_global();
 }
 
-pub fn tm_abort_count() -> u64 { 0 }
+pub fn tm_abort_count() -> u64 {
+    0
+}
 
 // ── Read/write — direct memory access (SGL provides isolation) ──
 
@@ -84,7 +90,9 @@ macro_rules! def_write {
     ($n:ident, $t:ty) => {
         #[inline]
         pub fn $n(addr: *mut $t, val: $t) {
-            unsafe { addr.write(val); }
+            unsafe {
+                addr.write(val);
+            }
         }
     };
 }
@@ -112,16 +120,30 @@ def_write!(tm_write_f32, f32);
 def_write!(tm_write_f64, f64);
 
 #[inline]
-pub fn tm_read_ptr<T>(addr: *mut *mut T) -> *mut T { unsafe { addr.read() } }
+pub fn tm_read_ptr<T>(addr: *mut *mut T) -> *mut T {
+    unsafe { addr.read() }
+}
 
 #[inline]
-pub fn tm_write_ptr<T>(addr: *mut *mut T, val: *mut T) { unsafe { addr.write(val); } }
+pub fn tm_write_ptr<T>(addr: *mut *mut T, val: *mut T) {
+    unsafe {
+        addr.write(val);
+    }
+}
 
 #[inline]
-pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) { unsafe { std::ptr::copy_nonoverlapping(addr, dst.as_mut_ptr(), dst.len()); } }
+pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) {
+    unsafe {
+        std::ptr::copy_nonoverlapping(addr, dst.as_mut_ptr(), dst.len());
+    }
+}
 
 #[inline]
-pub fn tm_write_raw(addr: *mut u8, src: &[u8]) { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr, src.len()); } }
+pub fn tm_write_raw(addr: *mut u8, src: &[u8]) {
+    unsafe {
+        std::ptr::copy_nonoverlapping(src.as_ptr(), addr, src.len());
+    }
+}
 
 // ── Drop Guard for Mutex ────────────────────────────────
 // We use force_unlock in tm_commit instead of a proper guard

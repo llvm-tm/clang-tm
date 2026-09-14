@@ -26,14 +26,14 @@ extern "C" {
 //
 // DATA variable (function pointer) — the LLVM pass declares this as
 // external global ptr and emits indirect calls through it.
-extern void (*tm_enqueue)(void (*fn)(void*), void* args);
+extern void (*tm_enqueue)(void (*fn)(void *), void *args);
 
 // Extended enqueue with queue routing and transaction ID.
 // queue_id: target queue index (0..num_queues-1), or -1 for default round-robin.
 // Returns: a globally unique transaction ID, or 0 if executed inline.
 // The caller can later pass this ID to tm_wait_tx() to block until that
 // specific transaction completes (not necessarily the last one enqueued).
-uint64_t tm_enqueue_ex(void (*fn)(void*), void* args, int queue_id);
+uint64_t tm_enqueue_ex(void (*fn)(void *), void *args, int queue_id);
 
 // Block until the transaction identified by tx_id completes.
 // Safe to call from any thread, but only the enqueuing thread's

@@ -9,7 +9,7 @@
 // ── Usage ─────────────────────────────────────────────────────────
 //
 //   Build with -UNDEBUG to enable.
-//   
+//
 //   (1) Insert DBG_EVT at interesting points in the backend:
 //         DBG_EVT(0, *addr);          // type=READ, val=counter
 //         DBG_EVT(2, ts);             // type=COMMIT_OK, val=timestamp
@@ -86,8 +86,8 @@
 //
 // ─────────────────────────────────────────────────────────────────
 
-#include <cstdint>
 #include <chrono>
+#include <cstdint>
 
 #ifndef NDEBUG
 
@@ -101,77 +101,92 @@
 constexpr int TM_DBG_LOG_SIZE = 16384;
 
 struct TmDbgEvent {
-	uint64_t wall;  // steady_clock timestamp
-	uint16_t type;  // user-defined event type
-	uint32_t seq;   // per-thread monotonic sequence
-	uint64_t val;   // event value
+	uint64_t wall; // steady_clock timestamp
+	uint16_t type; // user-defined event type
+	uint32_t seq;  // per-thread monotonic sequence
+	uint64_t val;  // event value
 };
 
-static inline uint64_t tm_dbg_wall() {
+static inline uint64_t tm_dbg_wall()
+{
 	return std::chrono::steady_clock::now().time_since_epoch().count();
 }
 
 // Per-thread state (function-local to avoid ODR issues)
-static inline TmDbgEvent *tm_dbg_log() {
+static inline TmDbgEvent *tm_dbg_log()
+{
 	static thread_local TmDbgEvent buf[TM_DBG_LOG_SIZE];
 	return buf;
 }
-static inline int &tm_dbg_idx() {
+static inline int &tm_dbg_idx()
+{
 	static thread_local int idx = 0;
 	return idx;
 }
-static inline uint64_t &tm_dbg_seq() {
+static inline uint64_t &tm_dbg_seq()
+{
 	static thread_local uint64_t seq = 0;
 	return seq;
 }
 
 // Global registry of per-thread logs + indices
-static std::mutex &tm_dbg_mutex() {
+static std::mutex &tm_dbg_mutex()
+{
 	static std::mutex m;
 	return m;
 }
-static std::vector<TmDbgEvent*> &tm_dbg_logs() {
-	static std::vector<TmDbgEvent*> v;
+static std::vector<TmDbgEvent *> &tm_dbg_logs()
+{
+	static std::vector<TmDbgEvent *> v;
 	return v;
 }
-static std::vector<int*> &tm_dbg_idxs() {
-	static std::vector<int*> v;
+static std::vector<int *> &tm_dbg_idxs()
+{
+	static std::vector<int *> v;
 	return v;
 }
-static int &tm_dbg_registered() {
+static int &tm_dbg_registered()
+{
 	static thread_local int reg = 0;
 	return reg;
 }
 
 // Auto-register this thread's log buffer on first DBG_EVT call.
-static inline void tm_dbg_ensure_registered() {
-	if (tm_dbg_registered()) return;
+static inline void tm_dbg_ensure_registered()
+{
+	if (tm_dbg_registered())
+		return;
 	std::lock_guard<std::mutex> lock(tm_dbg_mutex());
 	tm_dbg_logs().push_back(tm_dbg_log());
 	tm_dbg_idxs().push_back(&tm_dbg_idx());
 	tm_dbg_registered() = 1;
 }
 
-#define DBG_EVT(t, v) do { \
-	tm_dbg_ensure_registered(); \
-	TmDbgEvent *__log = tm_dbg_log(); \
-	int &__idx = tm_dbg_idx(); \
-	if (__idx < TM_DBG_LOG_SIZE) { \
-		__log[__idx] = {tm_dbg_wall(), (uint16_t)(t), \
-		                (uint32_t)tm_dbg_seq()++, (uint64_t)(v)}; \
-		__idx++; \
-	} \
-} while(0)
+#define DBG_EVT(t, v)                                                                    \
+	do {                                                                                 \
+		tm_dbg_ensure_registered();                                                      \
+		TmDbgEvent *__log = tm_dbg_log();                                                \
+		int &__idx = tm_dbg_idx();                                                       \
+		if (__idx < TM_DBG_LOG_SIZE) {                                                   \
+			__log[__idx] = {tm_dbg_wall(),                                               \
+			                (uint16_t)(t),                                               \
+			                (uint32_t)tm_dbg_seq()++,                                    \
+			                (uint64_t)(v)};                                              \
+			__idx++;                                                                     \
+		}                                                                                \
+	} while (0)
 
 // Dump all registered thread logs to stderr.
-static inline void tm_dbg_dump_all() {
+static inline void tm_dbg_dump_all()
+{
 	std::lock_guard<std::mutex> lock(tm_dbg_mutex());
 	int total_events = 0;
 	for (size_t t = 0; t < tm_dbg_logs().size(); t++) {
 		int end = *tm_dbg_idxs()[t];
 		total_events += end;
 	}
-	if (total_events == 0) return;
+	if (total_events == 0)
+		return;
 
 	// Collect all events, sort by wall clock
 	std::vector<std::pair<uint64_t, std::pair<int, int>>> sorted;
@@ -191,16 +206,33 @@ static inline void tm_dbg_dump_all() {
 		auto &e = tm_dbg_logs()[t][i];
 		const char *type_str = "?";
 		switch (e.type) {
-			case 0: type_str = "READ"; break;
-			case 1: type_str = "WRITE_NEW"; break;
-			case 2: type_str = "COMMIT_OK"; break;
-			case 3: type_str = "ABORT"; break;
-			case 5: type_str = "P3_OK"; break;
-			case 6: type_str = "P3_FAIL"; break;
-			case 7: type_str = "EAGER"; break;
+		case 0:
+			type_str = "READ";
+			break;
+		case 1:
+			type_str = "WRITE_NEW";
+			break;
+		case 2:
+			type_str = "COMMIT_OK";
+			break;
+		case 3:
+			type_str = "ABORT";
+			break;
+		case 5:
+			type_str = "P3_OK";
+			break;
+		case 6:
+			type_str = "P3_FAIL";
+			break;
+		case 7:
+			type_str = "EAGER";
+			break;
 		}
-		fprintf(stderr, "T%d [%llu] %s val=%lu\n",
-		        t, (unsigned long long)e.wall, type_str,
+		fprintf(stderr,
+		        "T%d [%llu] %s val=%lu\n",
+		        t,
+		        (unsigned long long)e.wall,
+		        type_str,
 		        (unsigned long)e.val);
 	}
 	fflush(stderr);

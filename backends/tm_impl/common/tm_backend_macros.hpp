@@ -45,39 +45,42 @@
 //  ⚠ PersistentSGL: overrides all writes with persist logic manually.
 // ═══════════════════════════════════════════════════════════════════════
 
-#define TM_DEFINE_READ_WRITE_HOOKS(ns) \
-    static uint8_t  real_tm_read_i1(uint8_t  *a) { return ns::tm_read_i1(a); } \
-    static uint16_t real_tm_read_i2(uint16_t *a) { return ns::tm_read_i2(a); } \
-    static uint32_t real_tm_read_i4(uint32_t *a) { return ns::tm_read_i4(a); } \
-    static uint64_t real_tm_read_i8(uint64_t *a) { return ns::tm_read_i8(a); } \
-    static float    real_tm_read_f4(float    *a) { return ns::tm_read_f4(a); } \
-    static double   real_tm_read_f8(double   *a) { return ns::tm_read_f8(a); } \
-    static void    *real_tm_read_ptr(void   **a) { return ns::tm_read_ptr(a); } \
-    static void real_tm_write_i1(uint8_t  *a, uint8_t  v) { ns::tm_write_i1(a, v); } \
-    static void real_tm_write_i2(uint16_t *a, uint16_t v) { ns::tm_write_i2(a, v); } \
-    static void real_tm_write_i4(uint32_t *a, uint32_t v) { ns::tm_write_i4(a, v); } \
-    static void real_tm_write_i8(uint64_t *a, int64_t  v) { ns::tm_write_i8(a, v); } \
-    static void real_tm_write_f4(float    *a, float    v) { ns::tm_write_f4(a, v); } \
-    static void real_tm_write_f8(double   *a, double   v) { ns::tm_write_f8(a, v); } \
-    static void real_tm_write_ptr(void   **a, void    *v) { ns::tm_write_ptr(a, v); }
+#define TM_DEFINE_READ_WRITE_HOOKS(ns)                                                   \
+	static uint8_t real_tm_read_i1(uint8_t *a) { return ns::tm_read_i1(a); }             \
+	static uint16_t real_tm_read_i2(uint16_t *a) { return ns::tm_read_i2(a); }           \
+	static uint32_t real_tm_read_i4(uint32_t *a) { return ns::tm_read_i4(a); }           \
+	static uint64_t real_tm_read_i8(uint64_t *a) { return ns::tm_read_i8(a); }           \
+	static float real_tm_read_f4(float *a) { return ns::tm_read_f4(a); }                 \
+	static double real_tm_read_f8(double *a) { return ns::tm_read_f8(a); }               \
+	static void *real_tm_read_ptr(void **a) { return ns::tm_read_ptr(a); }               \
+	static void real_tm_write_i1(uint8_t *a, uint8_t v) { ns::tm_write_i1(a, v); }       \
+	static void real_tm_write_i2(uint16_t *a, uint16_t v) { ns::tm_write_i2(a, v); }     \
+	static void real_tm_write_i4(uint32_t *a, uint32_t v) { ns::tm_write_i4(a, v); }     \
+	static void real_tm_write_i8(uint64_t *a, int64_t v) { ns::tm_write_i8(a, v); }      \
+	static void real_tm_write_f4(float *a, float v) { ns::tm_write_f4(a, v); }           \
+	static void real_tm_write_f8(double *a, double v) { ns::tm_write_f8(a, v); }         \
+	static void real_tm_write_ptr(void **a, void *v) { ns::tm_write_ptr(a, v); }
 
 // Version with an explicit cast expression on write_i8's val parameter.
 // Example: TM_DEFINE_READ_WRITE_HOOKS_WITH_I8_CAST(norec, static_cast<uint64_t>(v))
-#define TM_DEFINE_READ_WRITE_HOOKS_WITH_I8_CAST(ns, cast_expr) \
-    static uint8_t  real_tm_read_i1(uint8_t  *a) { return ns::tm_read_i1(a); } \
-    static uint16_t real_tm_read_i2(uint16_t *a) { return ns::tm_read_i2(a); } \
-    static uint32_t real_tm_read_i4(uint32_t *a) { return ns::tm_read_i4(a); } \
-    static uint64_t real_tm_read_i8(uint64_t *a) { return ns::tm_read_i8(a); } \
-    static float    real_tm_read_f4(float    *a) { return ns::tm_read_f4(a); } \
-    static double   real_tm_read_f8(double   *a) { return ns::tm_read_f8(a); } \
-    static void    *real_tm_read_ptr(void   **a) { return ns::tm_read_ptr(a); } \
-    static void real_tm_write_i1(uint8_t  *a, uint8_t  v) { ns::tm_write_i1(a, v); } \
-    static void real_tm_write_i2(uint16_t *a, uint16_t v) { ns::tm_write_i2(a, v); } \
-    static void real_tm_write_i4(uint32_t *a, uint32_t v) { ns::tm_write_i4(a, v); } \
-    static void real_tm_write_i8(uint64_t *a, int64_t  v) { ns::tm_write_i8(a, cast_expr); } \
-    static void real_tm_write_f4(float    *a, float    v) { ns::tm_write_f4(a, v); } \
-    static void real_tm_write_f8(double   *a, double   v) { ns::tm_write_f8(a, v); } \
-    static void real_tm_write_ptr(void   **a, void    *v) { ns::tm_write_ptr(a, v); }
+#define TM_DEFINE_READ_WRITE_HOOKS_WITH_I8_CAST(ns, cast_expr)                           \
+	static uint8_t real_tm_read_i1(uint8_t *a) { return ns::tm_read_i1(a); }             \
+	static uint16_t real_tm_read_i2(uint16_t *a) { return ns::tm_read_i2(a); }           \
+	static uint32_t real_tm_read_i4(uint32_t *a) { return ns::tm_read_i4(a); }           \
+	static uint64_t real_tm_read_i8(uint64_t *a) { return ns::tm_read_i8(a); }           \
+	static float real_tm_read_f4(float *a) { return ns::tm_read_f4(a); }                 \
+	static double real_tm_read_f8(double *a) { return ns::tm_read_f8(a); }               \
+	static void *real_tm_read_ptr(void **a) { return ns::tm_read_ptr(a); }               \
+	static void real_tm_write_i1(uint8_t *a, uint8_t v) { ns::tm_write_i1(a, v); }       \
+	static void real_tm_write_i2(uint16_t *a, uint16_t v) { ns::tm_write_i2(a, v); }     \
+	static void real_tm_write_i4(uint32_t *a, uint32_t v) { ns::tm_write_i4(a, v); }     \
+	static void real_tm_write_i8(uint64_t *a, int64_t v)                                 \
+	{                                                                                    \
+		ns::tm_write_i8(a, cast_expr);                                                   \
+	}                                                                                    \
+	static void real_tm_write_f4(float *a, float v) { ns::tm_write_f4(a, v); }           \
+	static void real_tm_write_f8(double *a, double v) { ns::tm_write_f8(a, v); }         \
+	static void real_tm_write_ptr(void **a, void *v) { ns::tm_write_ptr(a, v); }
 
 // ═══════════════════════════════════════════════════════════════════════
 //  TM_DEFINE_PLUGIN_RW(ns) — Plugin extern "C" read/write functions
@@ -90,57 +93,66 @@
 //  defined in the including file.
 // ═══════════════════════════════════════════════════════════════════════
 
-#define TM_DEFINE_PLUGIN_RW(ns) \
-    void tm_read_i16(void *addr, void *out) { \
-        auto *out_words = static_cast<uint64_t *>(out); \
-        out_words[0] = ns::tm_read_i8(static_cast<uint64_t *>(addr) + 0); \
-        out_words[1] = ns::tm_read_i8(static_cast<uint64_t *>(addr) + 1); \
-    } \
-    void tm_read_i32(void *addr, void *out) { \
-        auto *out_words = static_cast<uint64_t *>(out); \
-        for (int i = 0; i < 4; i++) \
-            out_words[i] = ns::tm_read_i8(static_cast<uint64_t *>(addr) + i); \
-    } \
-    void tm_read_i64(void *addr, void *out) { \
-        auto *out_words = static_cast<uint64_t *>(out); \
-        for (int i = 0; i < 8; i++) \
-            out_words[i] = ns::tm_read_i8(static_cast<uint64_t *>(addr) + i); \
-    } \
-    void tm_write_i16(void *addr, void *val) { \
-        auto *val_words = static_cast<const uint64_t *>(val); \
-        for (int i = 0; i < 2; i++) \
-            ns::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]); \
-    } \
-    void tm_write_i32(void *addr, void *val) { \
-        auto *val_words = static_cast<const uint64_t *>(val); \
-        for (int i = 0; i < 4; i++) \
-            ns::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]); \
-    } \
-    void tm_write_i64(void *addr, void *val) { \
-        auto *val_words = static_cast<const uint64_t *>(val); \
-        for (int i = 0; i < 8; i++) \
-            ns::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]); \
-    } \
-    void *tm_read_z(uint8_t *addr, uint64_t len) { \
-        assert(len < TM_BUFFER_SIZE); \
-        for (uint64_t i = 0; i < len / 8; i++) \
-            tm_buffer[i] = ns::tm_read_i8(((uint64_t *)addr) + i); \
-        uint64_t rem = len % 8; \
-        for (uint64_t i = 0; i < rem; i++) \
-            tm_buffer[i] = ns::tm_read_i1(addr + (len - rem) + i); \
-        return tm_buffer; \
-    } \
-    void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len) { \
-        for (uint64_t i = 0; i < len / 8; i++) \
-            ns::tm_write_i8(((uint64_t *)dst) + i, *(((uint64_t *)src) + i)); \
-        uint64_t rem = len % 8; \
-        for (uint64_t i = 0; i < rem; i++) \
-            ns::tm_write_i1(dst + (len - rem - 1) + i, *(src + (len - rem - 1) + i)); \
-    } \
-    void tm_memset(uint8_t *addr, uint8_t val, uint64_t len) { \
-        for (uint64_t i = 0; i < len; i++) \
-            ns::tm_write_i1(&addr[i], val); \
-    }
+#define TM_DEFINE_PLUGIN_RW(ns)                                                          \
+	void tm_read_i16(void *addr, void *out)                                              \
+	{                                                                                    \
+		auto *out_words = static_cast<uint64_t *>(out);                                  \
+		out_words[0] = ns::tm_read_i8(static_cast<uint64_t *>(addr) + 0);                \
+		out_words[1] = ns::tm_read_i8(static_cast<uint64_t *>(addr) + 1);                \
+	}                                                                                    \
+	void tm_read_i32(void *addr, void *out)                                              \
+	{                                                                                    \
+		auto *out_words = static_cast<uint64_t *>(out);                                  \
+		for (int i = 0; i < 4; i++)                                                      \
+			out_words[i] = ns::tm_read_i8(static_cast<uint64_t *>(addr) + i);            \
+	}                                                                                    \
+	void tm_read_i64(void *addr, void *out)                                              \
+	{                                                                                    \
+		auto *out_words = static_cast<uint64_t *>(out);                                  \
+		for (int i = 0; i < 8; i++)                                                      \
+			out_words[i] = ns::tm_read_i8(static_cast<uint64_t *>(addr) + i);            \
+	}                                                                                    \
+	void tm_write_i16(void *addr, void *val)                                             \
+	{                                                                                    \
+		auto *val_words = static_cast<const uint64_t *>(val);                            \
+		for (int i = 0; i < 2; i++)                                                      \
+			ns::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);            \
+	}                                                                                    \
+	void tm_write_i32(void *addr, void *val)                                             \
+	{                                                                                    \
+		auto *val_words = static_cast<const uint64_t *>(val);                            \
+		for (int i = 0; i < 4; i++)                                                      \
+			ns::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);            \
+	}                                                                                    \
+	void tm_write_i64(void *addr, void *val)                                             \
+	{                                                                                    \
+		auto *val_words = static_cast<const uint64_t *>(val);                            \
+		for (int i = 0; i < 8; i++)                                                      \
+			ns::tm_write_i8(static_cast<uint64_t *>(addr) + i, val_words[i]);            \
+	}                                                                                    \
+	void *tm_read_z(uint8_t *addr, uint64_t len)                                         \
+	{                                                                                    \
+		assert(len < TM_BUFFER_SIZE);                                                    \
+		for (uint64_t i = 0; i < len / 8; i++)                                           \
+			tm_buffer[i] = ns::tm_read_i8(((uint64_t *)addr) + i);                       \
+		uint64_t rem = len % 8;                                                          \
+		for (uint64_t i = 0; i < rem; i++)                                               \
+			tm_buffer[i] = ns::tm_read_i1(addr + (len - rem) + i);                       \
+		return tm_buffer;                                                                \
+	}                                                                                    \
+	void tm_write_z(uint8_t *dst, uint8_t *src, uint64_t len)                            \
+	{                                                                                    \
+		for (uint64_t i = 0; i < len / 8; i++)                                           \
+			ns::tm_write_i8(((uint64_t *)dst) + i, *(((uint64_t *)src) + i));            \
+		uint64_t rem = len % 8;                                                          \
+		for (uint64_t i = 0; i < rem; i++)                                               \
+			ns::tm_write_i1(dst + (len - rem - 1) + i, *(src + (len - rem - 1) + i));    \
+	}                                                                                    \
+	void tm_memset(uint8_t *addr, uint8_t val, uint64_t len)                             \
+	{                                                                                    \
+		for (uint64_t i = 0; i < len; i++)                                               \
+			ns::tm_write_i1(&addr[i], val);                                              \
+	}
 
 // ═══════════════════════════════════════════════════════════════════════
 //  TM_REAL_HOOKS_TABLE(prefix) — TMRealHooks registration table
@@ -152,54 +164,54 @@
 //  Extended version includes .get_env and .set_jmpbuf.
 // ═══════════════════════════════════════════════════════════════════════
 
-#define TM_REAL_HOOKS_TABLE(prefix) \
-    const TMRealHooks g_##prefix##_hooks = { \
-        .begin    = real_tm_begin, \
-        .end      = real_tm_end, \
-        .malloc   = real_tm_malloc, \
-        .calloc   = real_tm_calloc, \
-        .realloc  = real_tm_realloc, \
-        .free     = real_tm_free, \
-        .read_i1  = real_tm_read_i1, \
-        .read_i2  = real_tm_read_i2, \
-        .read_i4  = real_tm_read_i4, \
-        .read_i8  = real_tm_read_i8, \
-        .read_f4  = real_tm_read_f4, \
-        .read_f8  = real_tm_read_f8, \
-        .read_ptr = real_tm_read_ptr, \
-        .write_i1  = real_tm_write_i1, \
-        .write_i2  = real_tm_write_i2, \
-        .write_i4  = real_tm_write_i4, \
-        .write_i8  = real_tm_write_i8, \
-        .write_f4  = real_tm_write_f4, \
-        .write_f8  = real_tm_write_f8, \
-        .write_ptr = real_tm_write_ptr, \
-        .get_thread_state = real_tm_get_thread_state, \
-    }; // <-- semicolon required by macro invocation syntax
+#define TM_REAL_HOOKS_TABLE(prefix)                                                      \
+	const TMRealHooks g_##prefix##_hooks = {                                             \
+	    .begin = real_tm_begin,                                                          \
+	    .end = real_tm_end,                                                              \
+	    .malloc = real_tm_malloc,                                                        \
+	    .calloc = real_tm_calloc,                                                        \
+	    .realloc = real_tm_realloc,                                                      \
+	    .free = real_tm_free,                                                            \
+	    .read_i1 = real_tm_read_i1,                                                      \
+	    .read_i2 = real_tm_read_i2,                                                      \
+	    .read_i4 = real_tm_read_i4,                                                      \
+	    .read_i8 = real_tm_read_i8,                                                      \
+	    .read_f4 = real_tm_read_f4,                                                      \
+	    .read_f8 = real_tm_read_f8,                                                      \
+	    .read_ptr = real_tm_read_ptr,                                                    \
+	    .write_i1 = real_tm_write_i1,                                                    \
+	    .write_i2 = real_tm_write_i2,                                                    \
+	    .write_i4 = real_tm_write_i4,                                                    \
+	    .write_i8 = real_tm_write_i8,                                                    \
+	    .write_f4 = real_tm_write_f4,                                                    \
+	    .write_f8 = real_tm_write_f8,                                                    \
+	    .write_ptr = real_tm_write_ptr,                                                  \
+	    .get_thread_state = real_tm_get_thread_state,                                    \
+	}; // <-- semicolon required by macro invocation syntax
 
-#define TM_REAL_HOOKS_TABLE_EXT(prefix) \
-    const TMRealHooks g_##prefix##_hooks = { \
-        .begin    = real_tm_begin, \
-        .end      = real_tm_end, \
-        .malloc   = real_tm_malloc, \
-        .calloc   = real_tm_calloc, \
-        .realloc  = real_tm_realloc, \
-        .free     = real_tm_free, \
-        .read_i1  = real_tm_read_i1, \
-        .read_i2  = real_tm_read_i2, \
-        .read_i4  = real_tm_read_i4, \
-        .read_i8  = real_tm_read_i8, \
-        .read_f4  = real_tm_read_f4, \
-        .read_f8  = real_tm_read_f8, \
-        .read_ptr = real_tm_read_ptr, \
-        .write_i1  = real_tm_write_i1, \
-        .write_i2  = real_tm_write_i2, \
-        .write_i4  = real_tm_write_i4, \
-        .write_i8  = real_tm_write_i8, \
-        .write_f4  = real_tm_write_f4, \
-        .write_f8  = real_tm_write_f8, \
-        .write_ptr = real_tm_write_ptr, \
-        .get_env    = real_tm_get_env, \
-        .set_jmpbuf = real_tm_set_jmpbuf, \
-        .get_thread_state = real_tm_get_thread_state, \
-    };
+#define TM_REAL_HOOKS_TABLE_EXT(prefix)                                                  \
+	const TMRealHooks g_##prefix##_hooks = {                                             \
+	    .begin = real_tm_begin,                                                          \
+	    .end = real_tm_end,                                                              \
+	    .malloc = real_tm_malloc,                                                        \
+	    .calloc = real_tm_calloc,                                                        \
+	    .realloc = real_tm_realloc,                                                      \
+	    .free = real_tm_free,                                                            \
+	    .read_i1 = real_tm_read_i1,                                                      \
+	    .read_i2 = real_tm_read_i2,                                                      \
+	    .read_i4 = real_tm_read_i4,                                                      \
+	    .read_i8 = real_tm_read_i8,                                                      \
+	    .read_f4 = real_tm_read_f4,                                                      \
+	    .read_f8 = real_tm_read_f8,                                                      \
+	    .read_ptr = real_tm_read_ptr,                                                    \
+	    .write_i1 = real_tm_write_i1,                                                    \
+	    .write_i2 = real_tm_write_i2,                                                    \
+	    .write_i4 = real_tm_write_i4,                                                    \
+	    .write_i8 = real_tm_write_i8,                                                    \
+	    .write_f4 = real_tm_write_f4,                                                    \
+	    .write_f8 = real_tm_write_f8,                                                    \
+	    .write_ptr = real_tm_write_ptr,                                                  \
+	    .get_env = real_tm_get_env,                                                      \
+	    .set_jmpbuf = real_tm_set_jmpbuf,                                                \
+	    .get_thread_state = real_tm_get_thread_state,                                    \
+	};

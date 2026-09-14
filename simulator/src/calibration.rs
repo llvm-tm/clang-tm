@@ -6,7 +6,9 @@
 // patch on real hardware.  The output (TSX_STATS lines) is
 // parsed and converted into a hardware-agnostic profile.
 
-use crate::machine_profile::{BackendCharacteristics, MachineProfile, MemoryCharacteristics, TsxCharacteristics};
+use crate::machine_profile::{
+    BackendCharacteristics, MachineProfile, MemoryCharacteristics, TsxCharacteristics,
+};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -45,7 +47,9 @@ pub fn load_calibration(path: &Path) -> Result<HashMap<String, CalibrationRecord
 
 /// Compute a weighted average of calibration records.
 pub fn average_records(records: &HashMap<String, CalibrationRecord>) -> Option<CalibrationRecord> {
-    if records.is_empty() { return None; }
+    if records.is_empty() {
+        return None;
+    }
     let n = records.len() as f64;
     Some(CalibrationRecord {
         xbegin_ok_cycles: records.values().map(|r| r.xbegin_ok_cycles).sum::<f64>() / n,
@@ -158,28 +162,49 @@ pub fn machine_profile_from_tsx_stats(
     let mut count = 0u64;
 
     for line in tsx_stats_lines {
-        if !line.trim().starts_with("TSX_STATS:") { continue; }
+        if !line.trim().starts_with("TSX_STATS:") {
+            continue;
+        }
         let body = line.trim().strip_prefix("TSX_STATS:").unwrap_or("");
         for part in body.split_whitespace() {
             let kv: Vec<&str> = part.split('=').collect();
-            if kv.len() != 2 { continue; }
+            if kv.len() != 2 {
+                continue;
+            }
             let (key, val) = (kv[0], kv[1]);
             let paren = val.find('(');
             let cnt: u64 = if let Some(p) = paren {
                 val[..p].parse().unwrap_or(0)
-            } else { 0 };
+            } else {
+                0
+            };
             let acc: f64 = if let Some(p) = paren {
-                val[p+1..val.len()-1].parse().unwrap_or(0.0)
-            } else { 0.0 };
-            if cnt == 0 { continue; }
+                val[p + 1..val.len() - 1].parse().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            if cnt == 0 {
+                continue;
+            }
             let avg = acc / cnt as f64;
 
             match key {
-                "xbegin_ok" => { xbegin_ok_acc += avg; count += 1; }
-                "xend" => { xend_acc += avg; }
-                "xabort" => { xabort_acc += avg; }
-                "read" => { read_acc += avg; }
-                "write" => { write_acc += avg; }
+                "xbegin_ok" => {
+                    xbegin_ok_acc += avg;
+                    count += 1;
+                }
+                "xend" => {
+                    xend_acc += avg;
+                }
+                "xabort" => {
+                    xabort_acc += avg;
+                }
+                "read" => {
+                    read_acc += avg;
+                }
+                "write" => {
+                    write_acc += avg;
+                }
                 _ => {}
             }
         }

@@ -33,7 +33,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use tikv_client::{TransactionClient, Transaction};
+use tikv_client::{Transaction, TransactionClient};
 
 pub use runtime_core::{Primitive, TmxAbort, TypedValue};
 
@@ -109,7 +109,9 @@ pub fn tm_abort() {
     tikv_abort();
 }
 
-pub fn tm_abort_count() -> u64 { 0 }
+pub fn tm_abort_count() -> u64 {
+    0
+}
 
 // ── C FFI exports ────────────────────────────────────────
 // Used by the C++ hook shim (tikv_backend.cpp).
@@ -124,62 +126,110 @@ pub fn tm_abort_count() -> u64 { 0 }
 // then link libruntime_tikv.a with the C++ binary.
 
 #[no_mangle]
-pub extern "C" fn tikv_tm_init()        { tikv_init() }
+pub extern "C" fn tikv_tm_init() {
+    tikv_init()
+}
 
 #[no_mangle]
-pub extern "C" fn tikv_tm_exit()        { tikv_shutdown() }
+pub extern "C" fn tikv_tm_exit() {
+    tikv_shutdown()
+}
 
 #[no_mangle]
-pub extern "C" fn tikv_tm_begin()       { tikv_begin() }
+pub extern "C" fn tikv_tm_begin() {
+    tikv_begin()
+}
 
 #[no_mangle]
-pub extern "C" fn tikv_tm_end() -> bool { tikv_commit() }
+pub extern "C" fn tikv_tm_end() -> bool {
+    tikv_commit()
+}
 
 #[no_mangle]
-pub extern "C" fn tikv_tm_read_u8(a: *const u8)    -> u8    { tm_read_u8(a as *mut u8) }
+pub extern "C" fn tikv_tm_read_u8(a: *const u8) -> u8 {
+    tm_read_u8(a as *mut u8)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_read_u16(a: *const u16)  -> u16   { tm_read_u16(a as *mut u16) }
+pub extern "C" fn tikv_tm_read_u16(a: *const u16) -> u16 {
+    tm_read_u16(a as *mut u16)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_read_u32(a: *const u32)  -> u32   { tm_read_u32(a as *mut u32) }
+pub extern "C" fn tikv_tm_read_u32(a: *const u32) -> u32 {
+    tm_read_u32(a as *mut u32)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_read_u64(a: *const u64)  -> u64   { tm_read_u64(a as *mut u64) }
+pub extern "C" fn tikv_tm_read_u64(a: *const u64) -> u64 {
+    tm_read_u64(a as *mut u64)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_read_i8(a: *const i8)    -> i8    { tm_read_i8(a as *mut i8) }
+pub extern "C" fn tikv_tm_read_i8(a: *const i8) -> i8 {
+    tm_read_i8(a as *mut i8)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_read_i16(a: *const i16)  -> i16   { tm_read_i16(a as *mut i16) }
+pub extern "C" fn tikv_tm_read_i16(a: *const i16) -> i16 {
+    tm_read_i16(a as *mut i16)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_read_i32(a: *const i32)  -> i32   { tm_read_i32(a as *mut i32) }
+pub extern "C" fn tikv_tm_read_i32(a: *const i32) -> i32 {
+    tm_read_i32(a as *mut i32)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_read_i64(a: *const i64)  -> i64   { tm_read_i64(a as *mut i64) }
+pub extern "C" fn tikv_tm_read_i64(a: *const i64) -> i64 {
+    tm_read_i64(a as *mut i64)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_read_f32(a: *const f32)  -> f32   { tm_read_f32(a as *mut f32) }
+pub extern "C" fn tikv_tm_read_f32(a: *const f32) -> f32 {
+    tm_read_f32(a as *mut f32)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_read_f64(a: *const f64)  -> f64   { tm_read_f64(a as *mut f64) }
+pub extern "C" fn tikv_tm_read_f64(a: *const f64) -> f64 {
+    tm_read_f64(a as *mut f64)
+}
 #[no_mangle]
 pub extern "C" fn tikv_tm_read_ptr(a: *const *const std::ffi::c_void) -> *mut std::ffi::c_void {
     tm_read_ptr(a as *mut *mut u8) as *mut std::ffi::c_void
 }
 
 #[no_mangle]
-pub extern "C" fn tikv_tm_write_u8(a: *mut u8, v: u8)               { tm_write_u8(a, v) }
+pub extern "C" fn tikv_tm_write_u8(a: *mut u8, v: u8) {
+    tm_write_u8(a, v)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_write_u16(a: *mut u16, v: u16)            { tm_write_u16(a, v) }
+pub extern "C" fn tikv_tm_write_u16(a: *mut u16, v: u16) {
+    tm_write_u16(a, v)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_write_u32(a: *mut u32, v: u32)            { tm_write_u32(a, v) }
+pub extern "C" fn tikv_tm_write_u32(a: *mut u32, v: u32) {
+    tm_write_u32(a, v)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_write_u64(a: *mut u64, v: u64)            { tm_write_u64(a, v) }
+pub extern "C" fn tikv_tm_write_u64(a: *mut u64, v: u64) {
+    tm_write_u64(a, v)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_write_i8(a: *mut i8, v: i8)               { tm_write_i8(a, v) }
+pub extern "C" fn tikv_tm_write_i8(a: *mut i8, v: i8) {
+    tm_write_i8(a, v)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_write_i16(a: *mut i16, v: i16)            { tm_write_i16(a, v) }
+pub extern "C" fn tikv_tm_write_i16(a: *mut i16, v: i16) {
+    tm_write_i16(a, v)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_write_i32(a: *mut i32, v: i32)            { tm_write_i32(a, v) }
+pub extern "C" fn tikv_tm_write_i32(a: *mut i32, v: i32) {
+    tm_write_i32(a, v)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_write_i64(a: *mut i64, v: i64)            { tm_write_i64(a, v) }
+pub extern "C" fn tikv_tm_write_i64(a: *mut i64, v: i64) {
+    tm_write_i64(a, v)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_write_f32(a: *mut f32, v: f32)            { tm_write_f32(a, v) }
+pub extern "C" fn tikv_tm_write_f32(a: *mut f32, v: f32) {
+    tm_write_f32(a, v)
+}
 #[no_mangle]
-pub extern "C" fn tikv_tm_write_f64(a: *mut f64, v: f64)            { tm_write_f64(a, v) }
+pub extern "C" fn tikv_tm_write_f64(a: *mut f64, v: f64) {
+    tm_write_f64(a, v)
+}
 #[no_mangle]
 pub extern "C" fn tikv_tm_write_ptr(a: *mut *mut std::ffi::c_void, v: *mut std::ffi::c_void) {
     tm_write_ptr(a as *mut *mut u8, v as *mut u8)
@@ -194,12 +244,10 @@ pub extern "C" fn tikv_tm_get_thread_state() -> *mut std::ffi::c_void {
 // Shared by both the Rust API and C FFI paths.
 
 fn tikv_init() {
-    let pd_str = std::env::var("TM_TIKV_PD")
-        .unwrap_or_else(|_| "127.0.0.1:2379".to_string());
+    let pd_str = std::env::var("TM_TIKV_PD").unwrap_or_else(|_| "127.0.0.1:2379".to_string());
     let endpoints: Vec<&str> = pd_str.split(',').map(|s| s.trim()).collect();
 
-    let runtime = tokio::runtime::Runtime::new()
-        .expect("tikv: failed to create Tokio runtime");
+    let runtime = tokio::runtime::Runtime::new().expect("tikv: failed to create Tokio runtime");
 
     let client = runtime.block_on(async {
         TransactionClient::new(endpoints)
@@ -227,7 +275,8 @@ fn tikv_shutdown() {
 fn tikv_begin() {
     let g = global();
     let txn = g.runtime.block_on(async {
-        g.client.begin_optimistic()
+        g.client
+            .begin_optimistic()
             .await
             .expect("tikv: begin_optimistic failed")
     });
@@ -245,15 +294,17 @@ fn tikv_commit() -> bool {
         let g = global();
         for (key, val) in &state.write_set {
             g.runtime.block_on(async {
-                state.txn
+                state
+                    .txn
                     .put(key.clone(), val.clone())
                     .await
                     .expect("tikv: put during commit failed");
             });
         }
-        let ok = g.runtime.block_on(async {
-            state.txn.commit().await
-        }).is_ok();
+        let ok = g
+            .runtime
+            .block_on(async { state.txn.commit().await })
+            .is_ok();
         ok
     });
     TX.with(|cell| *cell.borrow_mut() = None);
@@ -280,9 +331,9 @@ fn tikv_read(key: &[u8]) -> Option<Vec<u8>> {
             return Some(val.clone());
         }
         let g = global();
-        let val = g.runtime.block_on(async {
-            state.txn.get(key.to_vec()).await
-        });
+        let val = g
+            .runtime
+            .block_on(async { state.txn.get(key.to_vec()).await });
         match val {
             Ok(Some(kv)) => {
                 let bytes = kv.to_vec();
@@ -293,9 +344,7 @@ fn tikv_read(key: &[u8]) -> Option<Vec<u8>> {
             Err(_) => {
                 // TiKV error (e.g. TxnNotFound from concurrent commit).
                 // Abort the TiKV txn so it releases locks, then signal retry.
-                let _ = g.runtime.block_on(async {
-                    state.txn.rollback().await
-                });
+                let _ = g.runtime.block_on(async { state.txn.rollback().await });
                 std::panic::panic_any(TmxAbort);
             }
         }
@@ -335,27 +384,27 @@ macro_rules! def_write {
     };
 }
 
-def_read!(tm_read_u8,   u8);
-def_read!(tm_read_u16,  u16);
-def_read!(tm_read_u32,  u32);
-def_read!(tm_read_u64,  u64);
-def_read!(tm_read_i8,   i8);
-def_read!(tm_read_i16,  i16);
-def_read!(tm_read_i32,  i32);
-def_read!(tm_read_i64,  i64);
-def_read!(tm_read_f32,  f32);
-def_read!(tm_read_f64,  f64);
+def_read!(tm_read_u8, u8);
+def_read!(tm_read_u16, u16);
+def_read!(tm_read_u32, u32);
+def_read!(tm_read_u64, u64);
+def_read!(tm_read_i8, i8);
+def_read!(tm_read_i16, i16);
+def_read!(tm_read_i32, i32);
+def_read!(tm_read_i64, i64);
+def_read!(tm_read_f32, f32);
+def_read!(tm_read_f64, f64);
 
-def_write!(tm_write_u8,   u8);
-def_write!(tm_write_u16,  u16);
-def_write!(tm_write_u32,  u32);
-def_write!(tm_write_u64,  u64);
-def_write!(tm_write_i8,   i8);
-def_write!(tm_write_i16,  i16);
-def_write!(tm_write_i32,  i32);
-def_write!(tm_write_i64,  i64);
-def_write!(tm_write_f32,  f32);
-def_write!(tm_write_f64,  f64);
+def_write!(tm_write_u8, u8);
+def_write!(tm_write_u16, u16);
+def_write!(tm_write_u32, u32);
+def_write!(tm_write_u64, u64);
+def_write!(tm_write_i8, i8);
+def_write!(tm_write_i16, i16);
+def_write!(tm_write_i32, i32);
+def_write!(tm_write_i64, i64);
+def_write!(tm_write_f32, f32);
+def_write!(tm_write_f64, f64);
 
 #[inline]
 pub fn tm_read_ptr<T>(addr: *mut *mut T) -> *mut T {

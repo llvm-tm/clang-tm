@@ -16,30 +16,36 @@
 use crate::memory_access::MemAccess;
 
 pub struct Node<K, V> {
-    pub key:   K,
-    pub val:   V,
-    pub left:  *mut Node<K, V>,
+    pub key: K,
+    pub val: V,
+    pub left: *mut Node<K, V>,
     pub right: *mut Node<K, V>,
 }
 
 pub struct RBTree<K, V, A: MemAccess> {
     pub root: *mut Node<K, V>,
-    _access:  core::marker::PhantomData<A>,
+    _access: core::marker::PhantomData<A>,
 }
 
 impl<K, V, A: MemAccess> RBTree<K, V, A> {
     pub fn new() -> Self {
-        RBTree { root: core::ptr::null_mut(), _access: core::marker::PhantomData }
+        RBTree {
+            root: core::ptr::null_mut(),
+            _access: core::marker::PhantomData,
+        }
     }
 
     pub fn lookup(&self, key: &K) -> Option<&Node<K, V>>
-    where K: Ord + Copy,
+    where
+        K: Ord + Copy,
     {
         unsafe {
             let mut n = A::load(&self.root);
             while !n.is_null() {
                 let nk = A::load(&(*n).key);
-                if *key == nk { return Some(&*n); }
+                if *key == nk {
+                    return Some(&*n);
+                }
                 n = if *key < nk {
                     A::load(&(*n).left)
                 } else {
@@ -51,13 +57,15 @@ impl<K, V, A: MemAccess> RBTree<K, V, A> {
     }
 
     pub fn find(&self, key: &K) -> Option<&V>
-    where K: Ord + Copy,
+    where
+        K: Ord + Copy,
     {
         self.lookup(key).map(|n| &n.val)
     }
 
     pub fn contains(&self, key: &K) -> bool
-    where K: Ord + Copy,
+    where
+        K: Ord + Copy,
     {
         self.lookup(key).is_some()
     }

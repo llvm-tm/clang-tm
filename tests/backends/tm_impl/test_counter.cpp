@@ -18,8 +18,10 @@ static void thread_func(int)
 
 int main()
 {
-	fprintf(stderr, "\n=== Counter Test: %d threads x %d iterations ===\n\n",
-	        NUM_THREADS, ITERS_PER_THREAD);
+	fprintf(stderr,
+	        "\n=== Counter Test: %d threads x %d iterations ===\n\n",
+	        NUM_THREADS,
+	        ITERS_PER_THREAD);
 
 	tm_init();
 
@@ -37,8 +39,11 @@ int main()
 	tm_exit();
 
 	uint64_t expected = (uint64_t)NUM_THREADS * ITERS_PER_THREAD;
-	fprintf(stderr, "\nCounter: %lu (expected %lu) in %d ms\n",
-	        (unsigned long)g_counter, (unsigned long)expected, ms);
+	fprintf(stderr,
+	        "\nCounter: %lu (expected %lu) in %d ms\n",
+	        (unsigned long)g_counter,
+	        (unsigned long)expected,
+	        ms);
 
 	if (g_counter == expected) {
 		fprintf(stderr, "TEST PASSED\n\n");

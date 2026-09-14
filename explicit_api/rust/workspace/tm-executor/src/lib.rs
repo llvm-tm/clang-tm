@@ -130,8 +130,7 @@ impl QueueExecutor {
     fn worker_loop(inner: &QueueInner) {
         addrspace::record_stack_bounds();
         loop {
-            let start_q =
-                inner.next_wq.fetch_add(1, Ordering::Relaxed) % inner.num_q;
+            let start_q = inner.next_wq.fetch_add(1, Ordering::Relaxed) % inner.num_q;
 
             let task: Option<Box<dyn FnOnce() + Send>>;
             let mut waited = false;
@@ -148,8 +147,7 @@ impl QueueExecutor {
                         // Block on our starting queue
                         guard = inner.cvs[q]
                             .wait_while(guard, |q| {
-                                q.is_empty()
-                                    && !inner.shutdown.load(Ordering::Relaxed)
+                                q.is_empty() && !inner.shutdown.load(Ordering::Relaxed)
                             })
                             .unwrap();
                         waited = true;
@@ -181,8 +179,7 @@ impl QueueExecutor {
     }
 
     fn enqueue(&self, task: Box<dyn FnOnce() + Send>) {
-        let qidx =
-            self.inner.next_q.fetch_add(1, Ordering::Relaxed) % self.inner.num_q;
+        let qidx = self.inner.next_q.fetch_add(1, Ordering::Relaxed) % self.inner.num_q;
         {
             let mut lock = self.inner.queues[qidx].lock().unwrap();
             lock.push_back(task);
@@ -314,7 +311,9 @@ mod tests {
             let p = spec_alloc(64);
             assert!(!p.is_null());
             assert!(addrspace::is_tm_address(p));
-            unsafe { std::ptr::write(p as *mut u64, 42u64); }
+            unsafe {
+                std::ptr::write(p as *mut u64, 42u64);
+            }
             val_c.store(unsafe { std::ptr::read(p as *mut u64) }, Ordering::Release);
             spec_free(p);
         }));
@@ -326,7 +325,9 @@ mod tests {
         let p = spec_alloc(128);
         assert!(!p.is_null());
         assert!(addrspace::is_tm_address(p));
-        unsafe { std::ptr::write(p as *mut u64, 1234u64); }
+        unsafe {
+            std::ptr::write(p as *mut u64, 1234u64);
+        }
         assert_eq!(unsafe { std::ptr::read(p as *mut u64) }, 1234);
         spec_free(p);
     }

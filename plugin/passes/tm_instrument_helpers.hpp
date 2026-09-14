@@ -95,9 +95,12 @@ static void checkMissingTransactionAnnotations(Module &M)
 							// Try arguments in reverse (last arg is often 'this')
 							for (unsigned a = Call->arg_size(); a > 0; a--) {
 								Value *A = Call->getArgOperand(a - 1);
-								if (tracesFromTMGlobal(A, M))
-									{ Trace = A; break; }
-								if (a == 1) Trace = nullptr;
+								if (tracesFromTMGlobal(A, M)) {
+									Trace = A;
+									break;
+								}
+								if (a == 1)
+									Trace = nullptr;
 							}
 						} else {
 							break;
@@ -109,15 +112,13 @@ static void checkMissingTransactionAnnotations(Module &M)
 					if (DL) {
 						auto *Scope = dyn_cast<DIScope>(DL.getScope());
 						if (Scope)
-							errs() << Scope->getFilename() << ":"
-							       << DL.getLine() << ":" << DL.getCol() << ": ";
+							errs() << Scope->getFilename() << ":" << DL.getLine() << ":"
+							       << DL.getCol() << ": ";
 					}
-					errs() << "access to TM-annotated global '"
-					       << GlobalName << "' in function '"
-					       << F.getName()
+					errs() << "access to TM-annotated global '" << GlobalName
+					       << "' in function '" << F.getName()
 					       << "' without shared annotation. "
-					       << "Add [[tm::shared]] to '"
-					       << F.getName()
+					       << "Add [[tm::shared]] to '" << F.getName()
 					       << "', or suppress with [[tm::nontx]] "
 					       << "if intentional.\n";
 				}
@@ -139,7 +140,8 @@ static ModulePassContext setupModulePass(Module &M)
 	createTMSymbolTables(M, TMSymbols);
 
 	for (auto &F : M) {
-		if (!F.isDeclaration() && (hasAnnotation(F, TX_ANNOT) || hasAnnotation(F, ASYNC_TX_ANNOT)))
+		if (!F.isDeclaration() &&
+		    (hasAnnotation(F, TX_ANNOT) || hasAnnotation(F, ASYNC_TX_ANNOT)))
 			collectTransactionCallGraph(F, M, CtxOut.TxReachableFuncs);
 	}
 
@@ -398,7 +400,9 @@ static bool handleMallocFree(CallBase *Call,
 			Args.push_back(Call->getArgOperand(i));
 		if (isInvoke) {
 			auto *II = cast<InvokeInst>(Call);
-			auto *NewInvoke = createHookInvoke(II->getContext(), Target, Args,
+			auto *NewInvoke = createHookInvoke(II->getContext(),
+			                                   Target,
+			                                   Args,
 			                                   II->getNormalDest(),
 			                                   II->getUnwindDest(),
 			                                   Call->getName());
@@ -436,8 +440,10 @@ static bool handleMallocFree(CallBase *Call,
 		// with a bitcast pointer, matching the existing CallInst pattern.
 		if (isInvoke) {
 			auto *II = cast<InvokeInst>(Call);
-			auto *NewInvoke = createHookInvoke(B.getContext(), H.free_fn,
-			                                   {B.CreateBitCast(Call->getArgOperand(0), B.getPtrTy())},
+			auto *NewInvoke = createHookInvoke(B.getContext(),
+			                                   H.free_fn,
+			                                   {B.CreateBitCast(Call->getArgOperand(0),
+			                                                    B.getPtrTy())},
 			                                   II->getNormalDest(),
 			                                   II->getUnwindDest(),
 			                                   Call->getName());
@@ -651,7 +657,8 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 	Value *StatePtr = emitHookCall(Builder, H.get_thread_state, {}, "tm_state");
 
 	// Access nested_call_counter at offset 0
-	Value *CounterPtr = Builder.CreateGEP(i32Ty, Builder.CreateBitCast(StatePtr, i8PtrTy),
+	Value *CounterPtr = Builder.CreateGEP(i32Ty,
+	                                      Builder.CreateBitCast(StatePtr, i8PtrTy),
 	                                      {Builder.getInt64(0)},
 	                                      "cnt_ptr");
 	Value *CounterVal = Builder.CreateLoad(i32Ty, CounterPtr, "counter");
@@ -660,7 +667,8 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 	                                      "is_outer");
 #ifndef DISABLE_SETJMP
 	// Access longjmp_ret at offset 4
-	Value *JmpRetPtr = Builder.CreateGEP(i32Ty, Builder.CreateBitCast(StatePtr, i8PtrTy),
+	Value *JmpRetPtr = Builder.CreateGEP(i32Ty,
+	                                     Builder.CreateBitCast(StatePtr, i8PtrTy),
 	                                     {Builder.getInt64(1)},
 	                                     "jmpret_ptr");
 	Value *JmpRetVal = Builder.CreateLoad(i32Ty, JmpRetPtr, "jmpret");
@@ -679,9 +687,9 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 #ifndef DISABLE_SETJMP
 	Value *JmpBufPtr = emitHookCall(OuterBuilder, H.get_env);
 	emitHookCall(OuterBuilder, H.set_jmpbuf, {JmpBufPtr});
-	auto *SigJmpRetCall = emitHookCall(OuterBuilder, H.sigsetjmp,
-	                                   {JmpBufPtr,
-	                                    ConstantInt::get(i32Ty, 0)});
+	auto *SigJmpRetCall = emitHookCall(OuterBuilder,
+	                                   H.sigsetjmp,
+	                                   {JmpBufPtr, ConstantInt::get(i32Ty, 0)});
 	SigJmpRetCall->addFnAttr(Attribute::ReturnsTwice);
 	// Store sigsetjmp result to longjmp_ret, then clear
 	OuterBuilder.CreateStore(SigJmpRetCall, JmpRetPtr);
@@ -755,8 +763,10 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 //
 // Only active when --emit-tm-trace is set.  These events make the trace
 // self-contained for cost-mode throughput estimation.
-static void emitComputationEvents(Function &F, TargetTransformInfo &TTI,
-                                  const TMRuntimeHooks &H, Module &M)
+static void emitComputationEvents(Function &F,
+                                  TargetTransformInfo &TTI,
+                                  const TMRuntimeHooks &H,
+                                  Module &M)
 {
 	if (!EmitTrace)
 		return;
@@ -790,8 +800,9 @@ static void emitComputationEvents(Function &F, TargetTransformInfo &TTI,
 				}
 			}
 
-			InstructionCost cost = TTI.getInstructionCost(
-			    &I, TargetTransformInfo::TCK_RecipThroughput);
+			InstructionCost
+			    cost = TTI.getInstructionCost(&I,
+			                                  TargetTransformInfo::TCK_RecipThroughput);
 			if (cost.isValid()) {
 				uint64_t c = cost.getValue();
 				if (c > 0) {

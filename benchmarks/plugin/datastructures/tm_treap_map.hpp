@@ -15,375 +15,458 @@
 // since the entire TM region is freed as a unit by tm_region_destroy().
 extern char *g_tm_region_start;
 extern char *g_tm_region_end;
-inline bool is_tm_addr(const void *p) noexcept {
-    const char *cp = static_cast<const char *>(p);
-    return cp >= g_tm_region_start && cp < g_tm_region_end;
+inline bool is_tm_addr(const void *p) noexcept
+{
+	const char *cp = static_cast<const char *>(p);
+	return cp >= g_tm_region_start && cp < g_tm_region_end;
 }
 
 // ── Map (unique keys) ─────────────────────────────────────────
 
-template<typename K, typename V>
-class TMTreapMap {
-    struct Node {
-        std::pair<const K, V> data;
-        int    prio;
-        Node * left;
-        Node * right;
-        Node * parent;
+template <typename K, typename V> class TMTreapMap
+{
+	struct Node {
+		std::pair<const K, V> data;
+		int prio;
+		Node *left;
+		Node *right;
+		Node *parent;
 
-        static int prio_from_key(const K &k) {
-            uint64_t h = (uint64_t)std::hash<K>{}(k);
-            h ^= h >> 33;
-            h *= 0xFF51AFD7ED558CCDULL;
-            h ^= h >> 33;
-            h *= 0xC4CEB9FE1A85EC53ULL;
-            h ^= h >> 33;
-            return (int)(h & 0x7FFFFFFF);
-        }
+		static int prio_from_key(const K &k)
+		{
+			uint64_t h = (uint64_t)std::hash<K>{}(k);
+			h ^= h >> 33;
+			h *= 0xFF51AFD7ED558CCDULL;
+			h ^= h >> 33;
+			h *= 0xC4CEB9FE1A85EC53ULL;
+			h ^= h >> 33;
+			return (int)(h & 0x7FFFFFFF);
+		}
 
-        Node(const K &k, const V &v)
-            : data(k, v), prio(prio_from_key(k)),
-              left(nullptr), right(nullptr), parent(nullptr) {}
-    };
+		Node(const K &k, const V &v)
+		    : data(k, v),
+		      prio(prio_from_key(k)),
+		      left(nullptr),
+		      right(nullptr),
+		      parent(nullptr)
+		{
+		}
+	};
 
-    Node * m_root;
-    size_t m_size;
+	Node *m_root;
+	size_t m_size;
 
-    static void set_parent(Node *n, Node *p) {
-        if (n) n->parent = p;
-    }
+	static void set_parent(Node *n, Node *p)
+	{
+		if (n)
+			n->parent = p;
+	}
 
-    // Split tree t by key k: left = keys < k, right = keys >= k
-    static void split(Node *t, const K &k, Node *&l, Node *&r) {
-        if (!t) { l = r = nullptr; return; }
-        if (t->data.first < k) {
-            split(t->right, k, t->right, r);
-            l = t;
-            set_parent(l->right, l);
-            set_parent(r, nullptr);
-        } else {
-            split(t->left, k, l, t->left);
-            r = t;
-            set_parent(r->left, r);
-            set_parent(l, nullptr);
-        }
-    }
+	// Split tree t by key k: left = keys < k, right = keys >= k
+	static void split(Node *t, const K &k, Node *&l, Node *&r)
+	{
+		if (!t) {
+			l = r = nullptr;
+			return;
+		}
+		if (t->data.first < k) {
+			split(t->right, k, t->right, r);
+			l = t;
+			set_parent(l->right, l);
+			set_parent(r, nullptr);
+		} else {
+			split(t->left, k, l, t->left);
+			r = t;
+			set_parent(r->left, r);
+			set_parent(l, nullptr);
+		}
+	}
 
-    // Merge two treaps where all keys in l < all keys in r
-    static Node *merge(Node *l, Node *r) {
-        if (!l) { set_parent(r, nullptr); return r; }
-        if (!r) { set_parent(l, nullptr); return l; }
-        if (l->prio > r->prio) {
-            l->right = merge(l->right, r);
-            set_parent(l->right, l);
-            set_parent(l, nullptr);
-            return l;
-        } else {
-            r->left = merge(l, r->left);
-            set_parent(r->left, r);
-            set_parent(r, nullptr);
-            return r;
-        }
-    }
+	// Merge two treaps where all keys in l < all keys in r
+	static Node *merge(Node *l, Node *r)
+	{
+		if (!l) {
+			set_parent(r, nullptr);
+			return r;
+		}
+		if (!r) {
+			set_parent(l, nullptr);
+			return l;
+		}
+		if (l->prio > r->prio) {
+			l->right = merge(l->right, r);
+			set_parent(l->right, l);
+			set_parent(l, nullptr);
+			return l;
+		} else {
+			r->left = merge(l, r->left);
+			set_parent(r->left, r);
+			set_parent(r, nullptr);
+			return r;
+		}
+	}
 
-    Node *find_node(const K &k) const {
-        Node *x = m_root;
-        while (x) {
-            if (k < x->data.first)       x = x->left;
-            else if (x->data.first < k)  x = x->right;
-            else                         return x;
-        }
-        return nullptr;
-    }
+	Node *find_node(const K &k) const
+	{
+		Node *x = m_root;
+		while (x) {
+			if (k < x->data.first)
+				x = x->left;
+			else if (x->data.first < k)
+				x = x->right;
+			else
+				return x;
+		}
+		return nullptr;
+	}
 
-    void clear_subtree(Node *n) {
-        if (!n) return;
-        Node *x = n;
-        while (x) {
-            if (x->left) {
-                x = x->left;
-            } else if (x->right) {
-                x = x->right;
-            } else {
-                Node *p = x->parent;
-                if (p) {
-                    if (p->left == x) p->left = nullptr;
-                    else              p->right = nullptr;
-                }
-                if (!is_tm_addr(x))
-                    delete x;
-                x = p;
-            }
-        }
-    }
+	void clear_subtree(Node *n)
+	{
+		if (!n)
+			return;
+		Node *x = n;
+		while (x) {
+			if (x->left) {
+				x = x->left;
+			} else if (x->right) {
+				x = x->right;
+			} else {
+				Node *p = x->parent;
+				if (p) {
+					if (p->left == x)
+						p->left = nullptr;
+					else
+						p->right = nullptr;
+				}
+				if (!is_tm_addr(x))
+					delete x;
+				x = p;
+			}
+		}
+	}
 
 public:
-    using value_type = std::pair<const K, V>;
+	using value_type = std::pair<const K, V>;
 
-    class Iterator {
-        friend class TMTreapMap;
-        Node * m_node;
-        explicit Iterator(Node *n) : m_node(n) {}
-    public:
-        using value_type = std::pair<const K, V>;
-        using reference  = std::pair<const K, V> &;
-        using pointer    = std::pair<const K, V> *;
+	class Iterator
+	{
+		friend class TMTreapMap;
+		Node *m_node;
+		explicit Iterator(Node *n)
+		    : m_node(n)
+		{
+		}
 
-        reference operator*()  const { return m_node->data; }
-        pointer   operator->() const { return &m_node->data; }
+	public:
+		using value_type = std::pair<const K, V>;
+		using reference = std::pair<const K, V> &;
+		using pointer = std::pair<const K, V> *;
 
-        Iterator &operator++() {
-            if (m_node->right) {
-                m_node = m_node->right;
-                while (m_node->left) m_node = m_node->left;
-            } else {
-                while (m_node->parent && m_node == m_node->parent->right)
-                    m_node = m_node->parent;
-                m_node = m_node->parent;
-            }
-            return *this;
-        }
+		reference operator*() const { return m_node->data; }
+		pointer operator->() const { return &m_node->data; }
 
-        bool operator==(const Iterator &o) const { return m_node == o.m_node; }
-        bool operator!=(const Iterator &o) const { return m_node != o.m_node; }
-    };
+		Iterator &operator++()
+		{
+			if (m_node->right) {
+				m_node = m_node->right;
+				while (m_node->left)
+					m_node = m_node->left;
+			} else {
+				while (m_node->parent && m_node == m_node->parent->right)
+					m_node = m_node->parent;
+				m_node = m_node->parent;
+			}
+			return *this;
+		}
 
-    TMTreapMap() : m_root(nullptr), m_size(0) {}
-    ~TMTreapMap() { clear(); }
+		bool operator==(const Iterator &o) const { return m_node == o.m_node; }
+		bool operator!=(const Iterator &o) const { return m_node != o.m_node; }
+	};
 
-    TMTreapMap(const TMTreapMap &) = delete;
-    TMTreapMap &operator=(const TMTreapMap &) = delete;
+	TMTreapMap()
+	    : m_root(nullptr),
+	      m_size(0)
+	{
+	}
+	~TMTreapMap() { clear(); }
 
-    void clear() {
-        clear_subtree(m_root);
-        m_root = nullptr;
-        m_size = 0;
-    }
+	TMTreapMap(const TMTreapMap &) = delete;
+	TMTreapMap &operator=(const TMTreapMap &) = delete;
 
-    Iterator begin() const {
-        if (!m_root) return end();
-        Node *x = m_root;
-        while (x->left) x = x->left;
-        return Iterator(x);
-    }
+	void clear()
+	{
+		clear_subtree(m_root);
+		m_root = nullptr;
+		m_size = 0;
+	}
 
-    Iterator end() const { return Iterator(nullptr); }
+	Iterator begin() const
+	{
+		if (!m_root)
+			return end();
+		Node *x = m_root;
+		while (x->left)
+			x = x->left;
+		return Iterator(x);
+	}
 
-    Iterator find(const K &k) const {
-        Node *n = find_node(k);
-        return Iterator(n);
-    }
+	Iterator end() const { return Iterator(nullptr); }
 
-    V &operator[](const K &k) {
-        Node *ex = find_node(k);
-        if (ex) return ex->data.second;
+	Iterator find(const K &k) const
+	{
+		Node *n = find_node(k);
+		return Iterator(n);
+	}
 
-        auto *z = new Node(k, V{});
-        Node *l, *r;
-        split(m_root, k, l, r);
-        m_root = merge(merge(l, z), r);
-        m_size++;
-        return z->data.second;
-    }
+	V &operator[](const K &k)
+	{
+		Node *ex = find_node(k);
+		if (ex)
+			return ex->data.second;
 
-    static Node *erase_node(Node *t, const K &k) {
-        if (!t) return nullptr;
-        if (k < t->data.first) {
-            t->left = erase_node(t->left, k);
-            set_parent(t->left, t);
-        } else if (t->data.first < k) {
-            t->right = erase_node(t->right, k);
-            set_parent(t->right, t);
-        } else {
-            Node *n = merge(t->left, t->right);
-            delete t;
-            return n;
-        }
-        return t;
-    }
+		auto *z = new Node(k, V{});
+		Node *l, *r;
+		split(m_root, k, l, r);
+		m_root = merge(merge(l, z), r);
+		m_size++;
+		return z->data.second;
+	}
 
-    size_t erase(const K &k) {
-        if (!find_node(k)) return 0;
-        m_root = erase_node(m_root, k);
-        m_size--;
-        return 1;
-    }
+	static Node *erase_node(Node *t, const K &k)
+	{
+		if (!t)
+			return nullptr;
+		if (k < t->data.first) {
+			t->left = erase_node(t->left, k);
+			set_parent(t->left, t);
+		} else if (t->data.first < k) {
+			t->right = erase_node(t->right, k);
+			set_parent(t->right, t);
+		} else {
+			Node *n = merge(t->left, t->right);
+			delete t;
+			return n;
+		}
+		return t;
+	}
 
-    size_t size() const { return m_size; }
-    bool empty() const { return m_size == 0; }
+	size_t erase(const K &k)
+	{
+		if (!find_node(k))
+			return 0;
+		m_root = erase_node(m_root, k);
+		m_size--;
+		return 1;
+	}
+
+	size_t size() const { return m_size; }
+	bool empty() const { return m_size == 0; }
 };
 
 // ── MultiMap (duplicate keys allowed) ─────────────────────────
 
-template<typename K, typename V>
-class TMTreapMultiMap {
-    struct Node {
-        std::pair<const K, V> data;
-        int    prio;
-        Node * left;
-        Node * right;
-        Node * parent;
+template <typename K, typename V> class TMTreapMultiMap
+{
+	struct Node {
+		std::pair<const K, V> data;
+		int prio;
+		Node *left;
+		Node *right;
+		Node *parent;
 
-        static inline std::atomic<uint64_t> s_counter{0};
+		static inline std::atomic<uint64_t> s_counter{0};
 
-        static int random_prio() {
-            uint64_t v = s_counter.fetch_add(1, std::memory_order_relaxed);
-            v ^= v >> 33;
-            v *= 0xFF51AFD7ED558CCDULL;
-            v ^= v >> 33;
-            v *= 0xC4CEB9FE1A85EC53ULL;
-            v ^= v >> 33;
-            return (int)(v & 0x7FFFFFFF);
-        }
+		static int random_prio()
+		{
+			uint64_t v = s_counter.fetch_add(1, std::memory_order_relaxed);
+			v ^= v >> 33;
+			v *= 0xFF51AFD7ED558CCDULL;
+			v ^= v >> 33;
+			v *= 0xC4CEB9FE1A85EC53ULL;
+			v ^= v >> 33;
+			return (int)(v & 0x7FFFFFFF);
+		}
 
-        Node(const K &k, const V &v)
-            : data(k, v), prio(random_prio()),
-              left(nullptr), right(nullptr), parent(nullptr) {}
-    };
+		Node(const K &k, const V &v)
+		    : data(k, v),
+		      prio(random_prio()),
+		      left(nullptr),
+		      right(nullptr),
+		      parent(nullptr)
+		{
+		}
+	};
 
-    Node * m_root;
-    size_t m_size;
+	Node *m_root;
+	size_t m_size;
 
-    static void set_parent(Node *n, Node *p) {
-        if (n) n->parent = p;
-    }
+	static void set_parent(Node *n, Node *p)
+	{
+		if (n)
+			n->parent = p;
+	}
 
-    void clear_subtree(Node *n) {
-        if (!n) return;
-        Node *x = n;
-        while (x) {
-            if (x->left) {
-                x = x->left;
-            } else if (x->right) {
-                x = x->right;
-            } else {
-                Node *p = x->parent;
-                if (p) {
-                    if (p->left == x) p->left = nullptr;
-                    else              p->right = nullptr;
-                }
-                if (!is_tm_addr(x))
-                    delete x;
-                x = p;
-            }
-        }
-    }
+	void clear_subtree(Node *n)
+	{
+		if (!n)
+			return;
+		Node *x = n;
+		while (x) {
+			if (x->left) {
+				x = x->left;
+			} else if (x->right) {
+				x = x->right;
+			} else {
+				Node *p = x->parent;
+				if (p) {
+					if (p->left == x)
+						p->left = nullptr;
+					else
+						p->right = nullptr;
+				}
+				if (!is_tm_addr(x))
+					delete x;
+				x = p;
+			}
+		}
+	}
 
 public:
-    using value_type = std::pair<const K, V>;
+	using value_type = std::pair<const K, V>;
 
-    class Iterator {
-        friend class TMTreapMultiMap;
-        Node * m_node;
-        explicit Iterator(Node *n) : m_node(n) {}
-    public:
-        using value_type = std::pair<const K, V>;
-        using reference  = std::pair<const K, V> &;
-        using pointer    = std::pair<const K, V> *;
+	class Iterator
+	{
+		friend class TMTreapMultiMap;
+		Node *m_node;
+		explicit Iterator(Node *n)
+		    : m_node(n)
+		{
+		}
 
-        reference operator*()  const { return m_node->data; }
-        pointer   operator->() const { return &m_node->data; }
+	public:
+		using value_type = std::pair<const K, V>;
+		using reference = std::pair<const K, V> &;
+		using pointer = std::pair<const K, V> *;
 
-        Iterator &operator++() {
-            if (m_node->right) {
-                m_node = m_node->right;
-                while (m_node->left) m_node = m_node->left;
-            } else {
-                while (m_node->parent && m_node == m_node->parent->right)
-                    m_node = m_node->parent;
-                m_node = m_node->parent;
-            }
-            return *this;
-        }
+		reference operator*() const { return m_node->data; }
+		pointer operator->() const { return &m_node->data; }
 
-        bool operator==(const Iterator &o) const { return m_node == o.m_node; }
-        bool operator!=(const Iterator &o) const { return m_node != o.m_node; }
-    };
+		Iterator &operator++()
+		{
+			if (m_node->right) {
+				m_node = m_node->right;
+				while (m_node->left)
+					m_node = m_node->left;
+			} else {
+				while (m_node->parent && m_node == m_node->parent->right)
+					m_node = m_node->parent;
+				m_node = m_node->parent;
+			}
+			return *this;
+		}
 
-    TMTreapMultiMap() : m_root(nullptr), m_size(0) {}
-    ~TMTreapMultiMap() { clear(); }
+		bool operator==(const Iterator &o) const { return m_node == o.m_node; }
+		bool operator!=(const Iterator &o) const { return m_node != o.m_node; }
+	};
 
-    TMTreapMultiMap(const TMTreapMultiMap &) = delete;
-    TMTreapMultiMap &operator=(const TMTreapMultiMap &) = delete;
+	TMTreapMultiMap()
+	    : m_root(nullptr),
+	      m_size(0)
+	{
+	}
+	~TMTreapMultiMap() { clear(); }
 
-    void clear() {
-        clear_subtree(m_root);
-        m_root = nullptr;
-        m_size = 0;
-    }
+	TMTreapMultiMap(const TMTreapMultiMap &) = delete;
+	TMTreapMultiMap &operator=(const TMTreapMultiMap &) = delete;
 
-    Iterator begin() const {
-        if (!m_root) return end();
-        Node *x = m_root;
-        while (x->left) x = x->left;
-        return Iterator(x);
-    }
+	void clear()
+	{
+		clear_subtree(m_root);
+		m_root = nullptr;
+		m_size = 0;
+	}
 
-    Iterator end() const { return Iterator(nullptr); }
+	Iterator begin() const
+	{
+		if (!m_root)
+			return end();
+		Node *x = m_root;
+		while (x->left)
+			x = x->left;
+		return Iterator(x);
+	}
 
-    Iterator lower_bound(const K &k) const {
-        Node *x = m_root;
-        Node *ans = nullptr;
-        while (x) {
-            if (!(x->data.first < k)) {
-                ans = x;
-                x = x->left;
-            } else {
-                x = x->right;
-            }
-        }
-        return Iterator(ans);
-    }
+	Iterator end() const { return Iterator(nullptr); }
 
-    void insert(const std::pair<K, V> &p) {
-        auto *z = new Node(p.first, p.second);
-        if (!m_root) {
-            m_root = z;
-            m_size = 1;
-            return;
-        }
-        // Standard BST insert as leaf, then rotate up by priority
-        Node *x = m_root, *y = nullptr;
-        while (x) {
-            y = x;
-            if (p.first < x->data.first)
-                x = x->left;
-            else
-                x = x->right;
-        }
-        // y is the parent
-        z->parent = y;
-        if (p.first < y->data.first)
-            y->left = z;
-        else
-            y->right = z;
-        // Rotate z up while its priority exceeds its parent's
-        while (z->parent && z->prio > z->parent->prio) {
-            Node *p = z->parent;
-            Node *g = p->parent;
-            if (p->left == z) {
-                // Right rotation at p
-                p->left = z->right;
-                if (z->right) z->right->parent = p;
-                z->right = p;
-            } else {
-                // Left rotation at p
-                p->right = z->left;
-                if (z->left) z->left->parent = p;
-                z->left = p;
-            }
-            p->parent = z;
-            z->parent = g;
-            if (g) {
-                if (g->left == p) g->left = z;
-                else g->right = z;
-            }
-        }
-        if (!z->parent)
-            m_root = z;
-        m_size++;
-    }
+	Iterator lower_bound(const K &k) const
+	{
+		Node *x = m_root;
+		Node *ans = nullptr;
+		while (x) {
+			if (!(x->data.first < k)) {
+				ans = x;
+				x = x->left;
+			} else {
+				x = x->right;
+			}
+		}
+		return Iterator(ans);
+	}
 
-    size_t size() const { return m_size; }
-    bool empty() const { return m_size == 0; }
+	void insert(const std::pair<K, V> &p)
+	{
+		auto *z = new Node(p.first, p.second);
+		if (!m_root) {
+			m_root = z;
+			m_size = 1;
+			return;
+		}
+		// Standard BST insert as leaf, then rotate up by priority
+		Node *x = m_root, *y = nullptr;
+		while (x) {
+			y = x;
+			if (p.first < x->data.first)
+				x = x->left;
+			else
+				x = x->right;
+		}
+		// y is the parent
+		z->parent = y;
+		if (p.first < y->data.first)
+			y->left = z;
+		else
+			y->right = z;
+		// Rotate z up while its priority exceeds its parent's
+		while (z->parent && z->prio > z->parent->prio) {
+			Node *p = z->parent;
+			Node *g = p->parent;
+			if (p->left == z) {
+				// Right rotation at p
+				p->left = z->right;
+				if (z->right)
+					z->right->parent = p;
+				z->right = p;
+			} else {
+				// Left rotation at p
+				p->right = z->left;
+				if (z->left)
+					z->left->parent = p;
+				z->left = p;
+			}
+			p->parent = z;
+			z->parent = g;
+			if (g) {
+				if (g->left == p)
+					g->left = z;
+				else
+					g->right = z;
+			}
+		}
+		if (!z->parent)
+			m_root = z;
+		m_size++;
+	}
+
+	size_t size() const { return m_size; }
+	bool empty() const { return m_size == 0; }
 };

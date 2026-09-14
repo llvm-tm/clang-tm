@@ -107,10 +107,11 @@ romulus   = ["tm/romulus"]
 xtm       = ["tm/xtm"]
 tikv      = ["tm/tikv"]
 mvlog     = ["tm/mvlog"]
+tsx_sim   = ["tm/tsx_sim", "tm-executor/tsx_sim"]
 
 [dependencies]
 tm = { path = "../../explicit_api/rust/workspace/tm", default-features = false }
-tm-executor = { path = "../../explicit_api/rust/workspace/tm-executor" }
+tm-executor = { path = "../../explicit_api/rust/workspace/tm-executor", default-features = false }
 containers = { path = "../../explicit_api/rust/workspace/containers" }
 addrspace = { path = "../../explicit_api/rust/workspace/addrspace" }
 fastrand = "2"

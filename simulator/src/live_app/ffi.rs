@@ -30,9 +30,7 @@ pub extern "C" fn sim_tm_begin(thread_id: u32) {
 
 #[no_mangle]
 pub extern "C" fn sim_tm_end(thread_id: u32) -> u8 {
-    with_state(|s| {
-        if s.tm_end(thread_id) { 1 } else { 0 }
-    })
+    with_state(|s| if s.tm_end(thread_id) { 1 } else { 0 })
 }
 
 #[no_mangle]

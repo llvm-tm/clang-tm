@@ -23,8 +23,11 @@ use tm_des::sim_engine::{SimClockMode, SimEngine};
 use tm_des::trace::Trace;
 
 #[derive(Parser, Debug)]
-#[command(name = "tm-sim", about = "Replay TM trace through the real backend",
-          version = "0.1.0")]
+#[command(
+    name = "tm-sim",
+    about = "Replay TM trace through the real backend",
+    version = "0.1.0"
+)]
 struct Cli {
     /// Trace file (JSONL) to replay.
     #[arg(short, long, default_value = "-")]
@@ -63,7 +66,10 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
     let Some(backend) = Backend::from_name(&cli.backend) else {
-        eprintln!("Unknown backend '{}'. Available: norec, tl2, tinystm, romulus, swisstm, tsx-sim", cli.backend);
+        eprintln!(
+            "Unknown backend '{}'. Available: norec, tl2, tinystm, romulus, swisstm, tsx-sim",
+            cli.backend
+        );
         std::process::exit(1);
     };
 
@@ -93,14 +99,20 @@ fn main() {
         "cost" => {
             let freq = cli.freq_ghz.unwrap_or(3.0);
             let model = if let Some(path) = &cli.machine_profile {
-                let data: String = std::fs::read_to_string(path)
-                    .unwrap_or_else(|e| { eprintln!("Cannot read {}: {}", path, e); std::process::exit(1); });
-                let mp: MachineProfile = serde_json::from_str(&data)
-                    .unwrap_or_else(|e| { eprintln!("JSON parse error in {}: {}", path, e); std::process::exit(1); });
+                let data: String = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                    eprintln!("Cannot read {}: {}", path, e);
+                    std::process::exit(1);
+                });
+                let mp: MachineProfile = serde_json::from_str(&data).unwrap_or_else(|e| {
+                    eprintln!("JSON parse error in {}: {}", path, e);
+                    std::process::exit(1);
+                });
                 let bp = BackendProfile::from_name(&cli.backend);
                 let cm = CalibratedCostModel::from_profile(&mp, bp);
-                eprintln!("Cost mode: machine={} backend={:?} freq={} GHz",
-                    mp.cpu, bp, freq);
+                eprintln!(
+                    "Cost mode: machine={} backend={:?} freq={} GHz",
+                    mp.cpu, bp, freq
+                );
                 cm
             } else {
                 eprintln!("Cost mode: defaults (no machine profile)");
@@ -118,8 +130,11 @@ fn main() {
     if let Some(path) = &cli.baseline_profile {
         match ComputationProfile::load(path) {
             Ok(profile) => {
-                eprintln!("Baseline profile: {} seqs, {:.6}s computation",
-                    profile.count, profile.seconds());
+                eprintln!(
+                    "Baseline profile: {} seqs, {:.6}s computation",
+                    profile.count,
+                    profile.seconds()
+                );
                 engine.set_computation_profile(profile);
             }
             Err(e) => {
@@ -131,13 +146,19 @@ fn main() {
 
     // Load initial committed values for money conservation check
     if let Some(path) = &cli.initial_values {
-        let data: String = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| { eprintln!("Cannot read {}: {}", path, e); std::process::exit(1); });
-        let initial: HashMap<String, u64> = serde_json::from_str(&data)
-            .unwrap_or_else(|e| { eprintln!("JSON parse error in {}: {}", path, e); std::process::exit(1); });
+        let data: String = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("Cannot read {}: {}", path, e);
+            std::process::exit(1);
+        });
+        let initial: HashMap<String, u64> = serde_json::from_str(&data).unwrap_or_else(|e| {
+            eprintln!("JSON parse error in {}: {}", path, e);
+            std::process::exit(1);
+        });
         for (k, v) in &initial {
-            let addr = u64::from_str_radix(k.trim_start_matches("0x"), 16)
-                .unwrap_or_else(|_| { eprintln!("Bad addr '{}'", k); std::process::exit(1); });
+            let addr = u64::from_str_radix(k.trim_start_matches("0x"), 16).unwrap_or_else(|_| {
+                eprintln!("Bad addr '{}'", k);
+                std::process::exit(1);
+            });
             engine.verifier.set_initial_value(addr, *v);
         }
         engine.verifier.initial_value_sum = engine.verifier.total_value();
@@ -159,7 +180,11 @@ fn main() {
         }
 
         if matches!(event.kind, EventKind::Checkpoint) {
-            eprintln!("  Scenario {}: {} events processed", scenario, i - scenario_start);
+            eprintln!(
+                "  Scenario {}: {} events processed",
+                scenario,
+                i - scenario_start
+            );
             engine.reset();
             scenario += 1;
             scenario_start = i + 1;
@@ -188,15 +213,19 @@ fn main() {
                 "═══ cost mode: {} TM cycles ≈ {:.4}s TM + {:.4}s baseline = {:.4}s total @ {} GHz ═══",
                 engine.estimated_cycles, tm_secs, baseline_secs, total_secs, engine.freq_ghz
             );
-            eprintln!("  (using baseline profile: {} seqs, {:.6}s computation)",
-                profile.count, baseline_secs);
+            eprintln!(
+                "  (using baseline profile: {} seqs, {:.6}s computation)",
+                profile.count, baseline_secs
+            );
         } else if engine.computed_cycles > 0 {
             let total_secs = tm_secs + comp_secs;
             eprintln!(
                 "═══ cost mode: {} cycles ({}+{}) ≈ {:.4}s total @ {} GHz ═══",
                 engine.estimated_cycles + engine.computed_cycles,
-                engine.estimated_cycles, engine.computed_cycles,
-                total_secs, engine.freq_ghz
+                engine.estimated_cycles,
+                engine.computed_cycles,
+                total_secs,
+                engine.freq_ghz
             );
         } else {
             eprintln!(

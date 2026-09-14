@@ -264,9 +264,7 @@ static bool isTMTracedPtr(const Value *Ptr)
 	return true;
 }
 
-static void instrumentLoadsStoresInFunction(Function *F,
-                                            Module *M,
-                                            TMRuntimeHooks &H)
+static void instrumentLoadsStoresInFunction(Function *F, Module *M, TMRuntimeHooks &H)
 {
 	if (TMAudit) {
 		SmallPtrSet<const Value *, 32> LocalVars;

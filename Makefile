@@ -22,7 +22,11 @@ TESTS_DIR := $(PROJECT_ROOT)/tests
 
 PLUGIN := $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
 
-.PHONY: all clean plugin plugin-benchmarks expli-benchmarks tests check help info test_run
+# `make` with no args prints help (discovery-first for newcomers).
+# Build everything with `make all`; run the ~60s smoke test with `make check-fast`.
+.DEFAULT_GOAL := help
+
+.PHONY: all clean plugin plugin-benchmarks expli-benchmarks tests check check-fast help info test_run fmt fmt-check
 
 all: info plugin plugin-benchmarks expli-benchmarks
 
@@ -61,6 +65,34 @@ check: tests
 	@echo "Running tests..."
 	@$(MAKE) -C $(LLVM_PLUGIN_DIR) run 2>&1
 
+# --- Fast smoke test (~60s, fails on the first error) --------------------
+# The "does it work?" command: plugin build + 18 instrumented plugin tests +
+# C++ test_tx/test_ds for three representative backends + both Rust workspaces.
+# Use `make check-all` for the full multi-backend sweep.
+CHECK_FAST_BACKENDS := TINYSTM NOREC TL2
+
+check-fast:
+	@echo "=== check-fast [1/4] plugin build + 18 plugin tests ==="
+	$(MAKE) -C $(LLVM_PLUGIN_DIR)
+	$(MAKE) -C $(LLVM_PLUGIN_DIR) run
+	@echo "=== check-fast [2/4] C++ test_tx/test_ds: $(CHECK_FAST_BACKENDS) ==="
+	@for be in $(CHECK_FAST_BACKENDS); do \
+		echo "--- $$be ---"; \
+		$(MAKE) -C $(EXPLI_BENCHMARKS_DIR) -j4 bin/test_tx bin/test_ds BACKEND=$$be > /tmp/check-fast-$$be-build.log 2>&1 \
+			|| { echo "  build FAIL"; tail -5 /tmp/check-fast-$$be-build.log; exit 1; }; \
+		$(EXPLI_BENCHMARKS_DIR)/bin/test_tx > /tmp/check-fast-$$be-tx.log 2>&1 \
+			|| { echo "  test_tx FAIL"; tail -5 /tmp/check-fast-$$be-tx.log; exit 1; }; \
+		echo "  test_tx: $$(tail -1 /tmp/check-fast-$$be-tx.log)"; \
+		$(EXPLI_BENCHMARKS_DIR)/bin/test_ds > /tmp/check-fast-$$be-ds.log 2>&1 \
+			|| { echo "  test_ds FAIL"; tail -5 /tmp/check-fast-$$be-ds.log; exit 1; }; \
+		echo "  test_ds: $$(tail -1 /tmp/check-fast-$$be-ds.log)"; \
+	done
+	@echo "=== check-fast [3/4] Rust simulator tests ==="
+	cargo test --manifest-path simulator/Cargo.toml -- --test-threads=1
+	@echo "=== check-fast [4/4] Rust workspace tests ==="
+	cargo test --manifest-path explicit_api/rust/workspace/Cargo.toml -- --test-threads=1
+	@echo "=== check-fast: ALL PASSED ==="
+
 clean:
 	-$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/bank clean 2>&1
 	-$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/datastructures clean 2>&1
@@ -74,16 +106,39 @@ help:
 	@echo "TM API C++ Build System"
 	@echo "======================"
 	@echo ""
-	@echo "Targets:"
-	@echo "  all               - Plugin + plugin benchmarks + expli benchmarks"
-	@echo "  plugin            - Build LLVM TM plugin"
-	@echo "  plugin-benchmarks - Build plugin-based benchmarks"
-	@echo "  expli-benchmarks  - Build explicit C++ API benchmarks"
-	@echo "  tests             - Build plugin tests"
-	@echo "  check             - Build and run plugin tests"
-	@echo "  clean             - Clean all build artifacts"
+	@echo "Quick start:"
+	@echo "  make help             - Show this help (default target)"
+	@echo "  make check-fast       - ~60s smoke: plugin tests + 3 C++ backends + Rust"
+	@echo "  make all              - Build plugin + plugin benchmarks + expli benchmarks"
 	@echo ""
-	@echo "Options: BACKEND=tl2, DEBUG=1"
+	@echo "Build targets:"
+	@echo "  plugin              - Build the LLVM TM instrumentation plugin"
+	@echo "  plugin-benchmarks   - Build plugin-based benchmarks (bank, avltree, STAMP)"
+	@echo "  expli-benchmarks    - Build explicit C++ API benchmarks (BACKEND=<name>)"
+	@echo "  tests               - Build the instrumented plugin test suite"
+	@echo ""
+	@echo "Test targets:"
+	@echo "  check               - Build + run the instrumented plugin tests"
+	@echo "  check-fast          - Fast smoke: plugin + TINYSTM/NOREC/TL2 + Rust workspaces"
+	@echo "  check-all           - Full sweep: test_tx/test_ds across all C++ backends"
+	@echo "  test_run            - Run a couple of plugin benchmarks"
+	@echo ""
+	@echo "Other targets:"
+	@echo "  gem5                - Clone + build gem5 (X86_TSX simulation target)"
+	@echo "  gem5-clean          - Remove gem5 build artifacts"
+	@echo "  fmt                 - Apply clang-format (C++) + rustfmt (Rust)"
+	@echo "  fmt-check           - Verify formatting + clippy (no changes; CI gate)"
+	@echo "  clean               - Clean all build artifacts"
+	@echo ""
+	@echo "Options:"
+	@echo "  BACKEND=<name>      - expli benchmark backend (e.g. tinystm, norec, tl2)"
+	@echo "  DEBUG=1             - Build with -O0 -g"
+	@echo "  STATIC=0            - benchmarks/cpp: link dynamically instead of -static"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make check-fast"
+	@echo "  make expli-benchmarks BACKEND=tl2"
+	@echo "  make -C benchmarks/cpp bin/bank BACKEND=norec"
 
 test_run: plugin-benchmarks
 	@$(PLUGIN_BENCHMARKS_DIR)/bank/bin/bank_singlelock -t 2 -d 1000 2>&1
@@ -120,6 +175,40 @@ check-all:
 		echo ""; \
 	done
 	@echo "=== All backend tests complete ==="
+
+# --- Format / lint (S15) ----------------------------------------------------
+# `make fmt`      — apply clang-format (C++) + rustfmt (Rust) across the repo.
+# `make fmt-check`— verify formatting without changing files (CI gate).
+CLANG_FORMAT ?= $(shell command -v clang-format-22 || command -v clang-format || true)
+CPP_SRC_DIRS  := backends plugin benchmarks/cpp benchmarks/plugin explicit_api/cpp tests
+RUST_DIRS     := explicit_api/rust/workspace simulator benchmarks/rust
+
+fmt:
+	@test -n "$(CLANG_FORMAT)" || { echo "ERROR: clang-format not found (install clang-format-22)"; exit 1; }
+	@echo "=== fmt: C++ ==="
+	@find $(CPP_SRC_DIRS) \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' \) -not -path '*/target/*' -print0 2>/dev/null \
+		| xargs -0 -r $(CLANG_FORMAT) -i --style=file
+	@echo "=== fmt: Rust (rustfmt) ==="
+	@for d in $(RUST_DIRS); do \
+		echo "  $$d"; \
+		(cd $$d && cargo fmt --all) || exit 1; \
+	done
+	@echo "=== fmt: done ==="
+
+fmt-check:
+	@test -n "$(CLANG_FORMAT)" || { echo "ERROR: clang-format not found (install clang-format-22)"; exit 1; }
+	@echo "=== fmt-check: C++ (clang-format --dry-run --Werror) ==="
+	@find $(CPP_SRC_DIRS) \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' \) -not -path '*/target/*' -print0 2>/dev/null \
+		| xargs -0 -r $(CLANG_FORMAT) --dry-run --Werror --style=file
+	@echo "=== fmt-check: Rust (cargo fmt --check) ==="
+	@for d in $(RUST_DIRS); do \
+		echo "  $$d"; \
+		(cd $$d && cargo fmt --all --check) || exit 1; \
+	done
+	@echo "=== fmt-check: Rust (clippy -D warnings: tm, simulator) ==="
+	@(cd explicit_api/rust/workspace && cargo clippy --features wbctl -p tm -- -D warnings)
+	@(cd simulator && cargo clippy -- -D warnings)
+	@echo "=== fmt-check: all clean ==="
 
 # --- gem5 simulation -------------------------------------------------------
 .PHONY: gem5 gem5-clean

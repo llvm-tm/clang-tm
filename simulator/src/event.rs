@@ -11,8 +11,8 @@ pub struct Event {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventKind {
-    ThreadSpawn(u32),              // (child_id)
-    ThreadJoin(u32),               // (child_id)
+    ThreadSpawn(u32), // (child_id)
+    ThreadJoin(u32),  // (child_id)
     TxBegin,
     TxEnd,
     Abort {
@@ -61,17 +61,20 @@ impl Event {
     }
 
     pub fn is_tx_lifecycle(&self) -> bool {
-        matches!(self.kind, EventKind::TxBegin | EventKind::TxEnd | EventKind::Abort { .. })
-    }
-
-    pub fn is_memory_op(&self) -> bool {
         matches!(
             self.kind,
-            EventKind::Read { .. } | EventKind::Write { .. }
+            EventKind::TxBegin | EventKind::TxEnd | EventKind::Abort { .. }
         )
     }
 
+    pub fn is_memory_op(&self) -> bool {
+        matches!(self.kind, EventKind::Read { .. } | EventKind::Write { .. })
+    }
+
     pub fn is_tx_boundary(&self) -> bool {
-        matches!(self.kind, EventKind::TxBegin | EventKind::TxEnd | EventKind::Abort { .. })
+        matches!(
+            self.kind,
+            EventKind::TxBegin | EventKind::TxEnd | EventKind::Abort { .. }
+        )
     }
 }

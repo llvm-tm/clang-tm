@@ -69,6 +69,9 @@ compile_commands.json
 # Python
 __pycache__/
 *.pyc
+.venv/
+venv/
+.pytest_cache/
 
 # Documents
 *.pdf
@@ -126,3 +129,7 @@ gem5_sim/m5out/
 gem5_sim/gem5
 /m5out/
 /m5out.*
+
+# Local review workspaces (never committed)
+review-01/
+review-02/

@@ -24,6 +24,7 @@
  * - R3_o: Outer loop non-transactional ops
  */
 
+#include "tm_vector.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -34,7 +35,6 @@
 #include <random>
 #include <thread>
 #include <vector>
-#include "tm_vector.hpp"
 
 #define TM __attribute__((annotate("tm")))
 #define TX __attribute__((annotate("shared"), noinline))

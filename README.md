@@ -32,6 +32,10 @@ make -C benchmarks/cpp -j4 BACKEND=TINYSTM bin/bank
 
 Available backends: `TINYSTM`, `WBETL`, `WT`, `NOREC`, `SWISSTM`, `TL2`, `SGL`, `LEFTRIGHT`, `ROMULUS`, `XTM`, `SPHT`, `TSXSGL`.
 
+> **Note (Linux):** `benchmarks/cpp` links statically by default (self-contained
+> binaries). Pass `STATIC=0` to link dynamically instead (faster builds):
+> `make -C benchmarks/cpp BACKEND=NOREC STATIC=0 bin/bank`.
+
 ## Quick Start — LLVM Plugin
 
 ```bash
@@ -56,15 +60,20 @@ cargo run --release --no-default-features --features tm/norec --bin bank -- -d 1
 cargo run --release --bin bank -- -d 100 -t 2 --test
 ```
 
-## Build and Run All Tests
+## Verify Your Setup
 
 ```bash
-# Explicit C++ API across all 12 backends
-make check-all
+# ~60s smoke test: plugin + 18 instrumented plugin tests +
+# test_tx/test_ds for TINYSTM/NOREC/TL2 + Rust simulator + Rust workspace.
+# Stops at the first failure.
+make check-fast
 
-# Or use the smoke test
-./smoke_test.sh
+# Full sweep: test_tx/test_ds across all C++ backends (slow).
+make check-all
 ```
+
+`make` with no arguments prints a summary of all top-level targets
+(`make help`).
 
 ## All Backend-Specific Plugin Benchmarks
 
@@ -198,13 +207,26 @@ See `explicit_api/rust/workspace/README.md` for backend selection and benchmark 
 
 ---
 
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to add a backend (6-step
+C++/Rust walkthrough), run the test suite, commit style, and the PR checklist.
+Verify your toolchain with `make check-fast` and formatting with
+`make fmt-check`.
+
+---
+
 ## Known Issues
+
+> The full, current list of open work items lives in [`TODO.md`](TODO.md).
+> This table highlights the backend-specific gotchas.
 
 | Issue | Details |
 |-------|---------|
-| **LeftRight test_tx fails** | 29/114 tests fail (pre-existing algorithm bug, not related to build fixes) |
-| **Romulus test_tx passes** | All 114 tests pass after OCC read-validate fix (version-table re-check on read_word) |
-| **DUDETM, NVHTM, DistributedSGL, PersistentSGL** | Build but depend on plugin-provided symbols (`tm_symbol_count`, `tm_symbol_addresses`, `tm_symbol_sizes`) not available in explicit C++ API |
-| **rbtree benchmark timing** | Reports 0ms duration (pre-existing) |
-| **stmbench7 times out** | Data race in `ts_multimap::lower_bound()` (pre-existing) |
-| **Plugin pipeline tests** | Need `clang-tm` wrapper testing (auto-link of `tm_hooks.cpp` fix not fully verified) |
+| **JVSTM `test_tx` (25 fails)** | All via direct/`.peek()` reads: VBox values live in a linked list and are not written back to the original address, so `.peek()` (a plain memory load) misses them. `.peek()` is not backend-portable. |
+| **Calvin multi-thread** | `bank` conserves money at 1T; 4T can destroy money under high abort rates in the execute phase (pre-existing two-phase OCC contention issue). |
+| **Romulus test_tx passes** | All 114 tests pass after the OCC read-validate fix (version-table re-check on `read_word`). |
+| **DUDETM, NVHTM, DistributedSGL, PersistentSGL** | Build, but depend on plugin-provided symbols (`tm_symbol_count`, `tm_symbol_addresses`, `tm_symbol_sizes`) not available in the explicit C++ API. |
+| **rbtree benchmark timing** | Reports 0ms duration (pre-existing). |
+| **stmbench7 times out** | Data race in `ts_multimap::lower_bound()` (pre-existing). |
+| **Plugin pipeline tests** | Need `clang-tm` wrapper testing (auto-link of `tm_hooks.cpp` fix not fully verified). |

@@ -16,10 +16,10 @@
 #include <csignal>
 #include <random>
 
-#include "tm_spin_token.hpp"
+#include "tinystm_common.hpp"
 #include "tm_event_logger.hpp"
 #include "tm_platform.hpp"
-#include "tinystm_common.hpp"
+#include "tm_spin_token.hpp"
 
 extern "C" {
 extern __thread int32_t tm_nested_call_counter;
@@ -59,14 +59,19 @@ struct WriteLogEntry_wt {
 };
 
 // ── Factory functions ──────────────────────────────────────────
-inline ReadLogEntry_wt make_read_entry(void *addr, word_t version, word_t incarnation,
-                                       const any_type_t &val) {
+inline ReadLogEntry_wt make_read_entry(void *addr,
+                                       word_t version,
+                                       word_t incarnation,
+                                       const any_type_t &val)
+{
 	return {addr, version, incarnation, val};
 }
 
 inline WriteLogEntry_wt make_write_entry(const any_type_t &old_val,
                                          const any_type_t &new_val,
-                                         word_t version, word_t incarnation) {
+                                         word_t version,
+                                         word_t incarnation)
+{
 	return {old_val, new_val, version, incarnation};
 }
 
@@ -193,8 +198,7 @@ abort_tx(const char *loc = "") //
 
 // ── Validate read-set after clock increment ────────────────
 // Detects concurrent commits between read and write time.
-inline void
-validate_read_set_wt(word_t commit_version)
+inline void validate_read_set_wt(word_t commit_version)
 {
 	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
 		abort_tx("proactive_stop"); // TODO.md: proactive_stop cleanup (P0)
@@ -227,8 +231,7 @@ validate_read_set_wt(word_t commit_version)
 }
 
 // ── Release write-locks with commit version ────────────────
-inline void
-release_write_locks_wt(word_t commit_version)
+inline void release_write_locks_wt(word_t commit_version)
 {
 	auto *tx = current_tx_wt;
 	for (auto &it : tx->write_set) {
@@ -240,8 +243,6 @@ release_write_locks_wt(word_t commit_version)
 		}
 	}
 }
-
-
 
 inline bool //
 commit()    //
@@ -294,7 +295,8 @@ try_soft_spin(                                          //
 	{
 		int ts_spin = 0;
 		while ((lock->get() & OWNED_MASK) != 0) {
-			if (++ts_spin > 5000) return false;
+			if (++ts_spin > 5000)
+				return false;
 			stm::tm_cpu_relax();
 		}
 	}
@@ -339,7 +341,6 @@ read_word_wt(                                           //
 		}
 	}
 
-
 	Lock_wt *lock = &g_locks_wt.get(ByteOffset((word_t)addr).base_addr);
 
 	if (lock->is_locked_by(tx->id)) {
@@ -361,75 +362,76 @@ read_word_wt(                                           //
 				continue;
 			}
 
-		word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
-		word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
-		volatile any_type_t val = read_value_from_addr(addr, ValueType::UINT64);
-		volatile word_t l2 = lock->get();
+			word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
+			word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
+			volatile any_type_t val = read_value_from_addr(addr, ValueType::UINT64);
+			volatile word_t l2 = lock->get();
 
-		if (l != l2) {
-			l = l2;
-			continue;
-		}
-
-		if (version > tx->end_version) {
-			TM_EVENT2(READ_VERSION_CHECK, (uint64_t)addr, (uint64_t)lock, version);
-			// Version-extension (same pattern as WBCTL)
-			if (tx->read_only) {
-				abort_tx("read_only_version_overflow");
+			if (l != l2) {
+				l = l2;
+				continue;
 			}
 
-			bool extended = false;
-			for (auto &r : tx->read_set) {
-				Lock_wt *rl = &g_locks_wt.get(ByteOffset((word_t)r.addr).base_addr);
-				word_t rv = (rl->get() & (VERSION_MASK << META_BITS)) >> META_BITS;
-				if (rv > tx->start_version) {
-					extended = true;
-					break;
+			if (version > tx->end_version) {
+				TM_EVENT2(READ_VERSION_CHECK, (uint64_t)addr, (uint64_t)lock, version);
+				// Version-extension (same pattern as WBCTL)
+				if (tx->read_only) {
+					abort_tx("read_only_version_overflow");
 				}
-			}
 
-			if (!extended) {
-				// Try full extend or abort
-				word_t last_version = get_clock();
-				bool valid = true;
+				bool extended = false;
 				for (auto &r : tx->read_set) {
 					Lock_wt *rl = &g_locks_wt.get(ByteOffset((word_t)r.addr).base_addr);
-					word_t lv = rl->get();
-					word_t rv = (lv & (VERSION_MASK << META_BITS)) >> META_BITS;
-					if (rv > r.observed_version) {
-						valid = false;
+					word_t rv = (rl->get() & (VERSION_MASK << META_BITS)) >> META_BITS;
+					if (rv > tx->start_version) {
+						extended = true;
 						break;
 					}
 				}
-				if (!valid) {
-					abort_tx("read_extend_validation");
+
+				if (!extended) {
+					// Try full extend or abort
+					word_t last_version = get_clock();
+					bool valid = true;
+					for (auto &r : tx->read_set) {
+						Lock_wt *rl = &g_locks_wt.get(
+						    ByteOffset((word_t)r.addr).base_addr);
+						word_t lv = rl->get();
+						word_t rv = (lv & (VERSION_MASK << META_BITS)) >> META_BITS;
+						if (rv > r.observed_version) {
+							valid = false;
+							break;
+						}
+					}
+					if (!valid) {
+						abort_tx("read_extend_validation");
+					}
+					tx->end_version = last_version;
+					if (tx->end_version < version) {
+						abort_tx("read_extend_version_stale");
+					}
+				} else {
+					tx->end_version = get_clock();
+					if (tx->end_version < version) {
+						abort_tx("read_extend_version_stale_shared");
+					}
 				}
-				tx->end_version = last_version;
-				if (tx->end_version < version) {
-					abort_tx("read_extend_version_stale");
-				}
-			} else {
-				tx->end_version = get_clock();
-				if (tx->end_version < version) {
-					abort_tx("read_extend_version_stale_shared");
-				}
+				continue;
 			}
-			continue;
+
+			any_type_t result = {.u8 = val.u8};
+
+			TM_EVENT2(READ_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, version);
+
+			tx->read_set.push_back(make_read_entry(addr, version, incarnation, result));
+
+			return result;
 		}
-
-		any_type_t result = {.u8 = val.u8};
-
-		TM_EVENT2(READ_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, version);
-
-		tx->read_set.push_back(make_read_entry(addr, version, incarnation, result));
-
-		return result;
-	}
 	}
 }
 
 static void                                             //
-write_word_wt(                                           //
+write_word_wt(                                          //
     Transaction<ReadLogEntry_wt, WriteLogEntry_wt> *tx, //
     void *addr,                                         //
     any_type_t val,                                     //
@@ -463,8 +465,6 @@ write_word_wt(                                           //
 		}
 	}
 
-
-
 	Lock_wt *lock = &g_locks_wt.get(ByteOffset((word_t)addr).base_addr);
 
 	{
@@ -473,67 +473,80 @@ write_word_wt(                                           //
 			volatile word_t l = lock->get();
 
 			if ((l & OWNED_MASK) == 0) {
-			// Lock is free — try to acquire
-			word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
-			word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
+				// Lock is free — try to acquire
+				word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
+				word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
 
-			if (lock->try_lock(tx->id)) {
-				// Acquired — save old value and write through.
-				// Re-read version from the lock AFTER acquisition: the
-				// version cached in `l` (from line 377) may be stale if
-				// another thread committed and unlocked between line 377
-				// and the successful try_lock.  Since try_lock preserves
-				// the version bits, reading after CAS gives the true
-				// version at lock-acquisition time.
-				word_t acquired_state = lock->get();
-				version = (acquired_state & (VERSION_MASK << META_BITS)) >> META_BITS;
-				incarnation = (acquired_state >> OWNED_BITS) & INCARNATION_MASK;
+				if (lock->try_lock(tx->id)) {
+					// Acquired — save old value and write through.
+					// Re-read version from the lock AFTER acquisition: the
+					// version cached in `l` (from line 377) may be stale if
+					// another thread committed and unlocked between line 377
+					// and the successful try_lock.  Since try_lock preserves
+					// the version bits, reading after CAS gives the true
+					// version at lock-acquisition time.
+					word_t acquired_state = lock->get();
+					version = (acquired_state & (VERSION_MASK << META_BITS)) >> META_BITS;
+					incarnation = (acquired_state >> OWNED_BITS) & INCARNATION_MASK;
 
-				any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
+					any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
 
-				WriteLogEntry_wt w = make_write_entry(old_val, val, version, incarnation);
-				tx->ws_get_or_insert(addr) = w;
-				tx->locks_held.push_back(lock);
+					WriteLogEntry_wt w = make_write_entry(old_val,
+					                                      val,
+					                                      version,
+					                                      incarnation);
+					tx->ws_get_or_insert(addr) = w;
+					tx->locks_held.push_back(lock);
 
-				TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, l);
-				TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)8);
+					TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, l);
+					TM_EVENT2(WRITE_SET_INSERT,
+					          (uint64_t)addr,
+					          (uint64_t)lock,
+					          (uint64_t)8);
 
-				write_value_to_addr(addr, val, ValueType::UINT64);
-				return;
+					write_value_to_addr(addr, val, ValueType::UINT64);
+					return;
+				} else if (lock->is_locked_by(tx->id)) {
+					// CAS failed but the lock is ours — another sub-address in this
+					// TX acquired the same lock between our l check and the CAS.
+					any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
+
+					WriteLogEntry_wt w = make_write_entry(old_val,
+					                                      val,
+					                                      version,
+					                                      incarnation);
+					tx->ws_get_or_insert(addr) = w;
+
+					TM_EVENT2(WRITE_SET_INSERT,
+					          (uint64_t)addr,
+					          (uint64_t)lock,
+					          (uint64_t)8);
+
+					write_value_to_addr(addr, val, ValueType::UINT64);
+					return;
+				} else {
+					if (try_soft_spin(tx, lock))
+						continue;
+					abort_tx("write_lock_contention");
+				}
 			} else if (lock->is_locked_by(tx->id)) {
-				// CAS failed but the lock is ours — another sub-address in this
-				// TX acquired the same lock between our l check and the CAS.
+				// Lock already held by us
+				word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
+				word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
 				any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
 
-				WriteLogEntry_wt w = make_write_entry(old_val, val, version, incarnation);
-				tx->ws_get_or_insert(addr) = w;
-
-				TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)8);
-
+				tx->ws_get_or_insert(
+				    addr) = make_write_entry(old_val, val, version, incarnation);
 				write_value_to_addr(addr, val, ValueType::UINT64);
+				TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)8);
 				return;
-			} else {
-				if (try_soft_spin(tx, lock))
-					continue;
-				abort_tx("write_lock_contention");
 			}
-		} else if (lock->is_locked_by(tx->id)) {
-			// Lock already held by us
-			word_t version = (l & (VERSION_MASK << META_BITS)) >> META_BITS;
-			word_t incarnation = (l >> OWNED_BITS) & INCARNATION_MASK;
-			any_type_t old_val = read_value_from_addr(addr, ValueType::UINT64);
-
-			tx->ws_get_or_insert(addr) = make_write_entry(old_val, val, version, incarnation);
-			write_value_to_addr(addr, val, ValueType::UINT64);
-			TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)8);
-			return;
+			// Lock held by someone else → bounded busy-wait with abort
+			if (++write_spin_count > 5000) {
+				abort_tx("write_spin_timeout");
+			}
+			stm::tm_cpu_relax();
 		}
-		// Lock held by someone else → bounded busy-wait with abort
-		if (++write_spin_count > 5000) {
-			abort_tx("write_spin_timeout");
-		}
-		stm::tm_cpu_relax();
-	}
 	}
 }
 

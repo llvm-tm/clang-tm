@@ -45,9 +45,9 @@
 // (821,655 states generated / 329,041 distinct, 0 errors).  See
 // backends/tm_impl/mvlog/Implementation_notes.md for the full design.
 #ifndef NDEBUG
-#define MVLOG_ASSERT_VALID_TX(tx, msg)                                                 \
-	TM_ASSERT((tx) != nullptr, msg);                                                   \
-	TM_ASSERT((tx)->active, "Transaction must be active: " msg);                       \
+#define MVLOG_ASSERT_VALID_TX(tx, msg)                                                   \
+	TM_ASSERT((tx) != nullptr, msg);                                                     \
+	TM_ASSERT((tx)->active, "Transaction must be active: " msg);                         \
 	TM_ASSERT(!(tx)->aborted, "Transaction must not be aborted: " msg)
 #else
 #define MVLOG_ASSERT_VALID_TX(tx, msg) /* EMPTY */
@@ -71,10 +71,10 @@ using stm::write_value_to_addr;
 // Ring-log size and reclamation threshold.  The live window is bounded by
 //   g_next - g_wm <= T + kReclaimThreshold  (T = thread count; each thread
 // has at most one outstanding slot claim), so kLogSlots must exceed that.
-static constexpr size_t kLogBits = 17;          // 2^17 ring entries
+static constexpr size_t kLogBits = 17; // 2^17 ring entries
 static constexpr uint64_t kLogSlots = 1ULL << kLogBits;
 static constexpr uint64_t kLogMask = kLogSlots - 1;
-static constexpr uint32_t kMaxInlineWs = 8;     // inline write entries per log entry
+static constexpr uint32_t kMaxInlineWs = 8; // inline write entries per log entry
 static constexpr uint64_t kReclaimThreshold = 1ULL << 14; // reclaim when window exceeds
 
 // Index table: open addressing, addr -> newest committed writer slot.
@@ -98,11 +98,11 @@ struct LogWrite {
 };
 
 struct LogEntry {
-	std::atomic<uint32_t> state;  // LogState
-	std::atomic<uint32_t> tag;    // owning slot (detects recycling)
+	std::atomic<uint32_t> state; // LogState
+	std::atomic<uint32_t> tag;   // owning slot (detects recycling)
 	uint32_t ws_count;
 	LogWrite ws[kMaxInlineWs];
-	LogWrite *overflow;           // heap write-set for ws_count > kMaxInlineWs
+	LogWrite *overflow; // heap write-set for ws_count > kMaxInlineWs
 };
 
 // ── Index table ────────────────────────────────────────────────────
@@ -173,7 +173,8 @@ inline int64_t index_lookup(uint64_t addr)
 		if (a == addr) {
 			return b.slot.load(std::memory_order_acquire);
 		}
-		if (a == 0) return -1; // empty bucket: not present
+		if (a == 0)
+			return -1; // empty bucket: not present
 	}
 	return -1;
 }
@@ -240,26 +241,35 @@ inline void exit_thread()
 // NOrec-BF's write-set scan (exact-size match, ptr<->u64, wider-to-narrower
 // extraction, byte-level merge of UINT8 entries).
 template <typename GetT>
-inline bool scan_write_entries(
-    size_t n, void *addr, ValueType sz, any_type_t &out, GetT &&get)
+inline bool scan_write_entries(size_t n,
+                               void *addr,
+                               ValueType sz,
+                               any_type_t &out,
+                               GetT &&get)
 {
 	auto entrySize = [](ValueType t) -> unsigned {
 		switch (t) {
-		case ValueType::UINT8:   return 1;
-		case ValueType::UINT16:  return 2;
+		case ValueType::UINT8:
+			return 1;
+		case ValueType::UINT16:
+			return 2;
 		case ValueType::UINT32:
-		case ValueType::FLOAT:   return 4;
+		case ValueType::FLOAT:
+			return 4;
 		case ValueType::UINT64:
 		case ValueType::DOUBLE:
-		case ValueType::POINTER: return 8;
-		default:                 return 0;
+		case ValueType::POINTER:
+			return 8;
+		default:
+			return 0;
 		}
 	};
 	unsigned rs = entrySize(sz);
 
 	for (size_t i = 0; i < n; i++) {
 		auto [a, t, v] = get(i);
-		if (a != addr) continue;
+		if (a != addr)
+			continue;
 		unsigned es = entrySize(t);
 		if (es == rs && t == sz) {
 			out = v;
@@ -335,8 +345,9 @@ inline bool log_value(const LogEntry *e, void *addr, ValueType sz, any_type_t &o
 	uint32_t n;
 	const LogWrite *ws = log_ws(e, n);
 	return scan_write_entries(n, addr, sz, out, [&](size_t i) {
-		return std::tuple<void *, ValueType, any_type_t>{
-		    ws[i].addr, (ValueType)ws[i].type, ws[i].val};
+		return std::tuple<void *, ValueType, any_type_t>{ws[i].addr,
+		                                                 (ValueType)ws[i].type,
+		                                                 ws[i].val};
 	});
 }
 
@@ -432,9 +443,11 @@ inline void commit()
 			uint32_t st = e->state.load(std::memory_order_acquire);
 			// Free (never claimed, e.g. slot 0) or resolved = done; only a
 			// claimed-and-unresolved predecessor makes us wait.
-			if (st != LS_PROGRESS) break;
+			if (st != LS_PROGRESS)
+				break;
 			uint32_t tag = e->tag.load(std::memory_order_acquire);
-			if (tag != (uint32_t)s) break; // recycled → resolved & folded
+			if (tag != (uint32_t)s)
+				break; // recycled → resolved & folded
 			stm::tm_cpu_relax();
 		}
 	}
@@ -554,12 +567,12 @@ inline any_type_t read_word(Transaction *tx, void *addr, ValueType sz)
 	// Read-own-writes: scan from the most recent entry.
 	if (!tx->write_set.empty()) {
 		any_type_t v;
-		if (scan_write_entries(
-		        tx->write_set.size(), addr, sz, v, [&](size_t i) {
-			        const WriteLogEntry &we = tx->write_set[i];
-			        return std::tuple<void *, ValueType, any_type_t>{we.addr, we.type,
-			                                                         we.new_val};
-		        })) {
+		if (scan_write_entries(tx->write_set.size(), addr, sz, v, [&](size_t i) {
+			    const WriteLogEntry &we = tx->write_set[i];
+			    return std::tuple<void *, ValueType, any_type_t>{we.addr,
+			                                                     we.type,
+			                                                     we.new_val};
+		    })) {
 			return v;
 		}
 	}
@@ -586,8 +599,7 @@ inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz
 {
 	MVLOG_ASSERT_VALID_TX(tx, "write_word");
 
-	if (addr == nullptr || (uintptr_t)addr < 0x100000 ||
-	    ((uintptr_t)addr >> 47) != 0) {
+	if (addr == nullptr || (uintptr_t)addr < 0x100000 || ((uintptr_t)addr >> 47) != 0) {
 		return; // invalid address — skip
 	}
 #ifdef LLVM_TM_PLUGIN
@@ -599,14 +611,19 @@ inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz
 
 	auto typeSize = [](ValueType t) -> unsigned {
 		switch (t) {
-		case ValueType::UINT8:   return 1;
-		case ValueType::UINT16:  return 2;
+		case ValueType::UINT8:
+			return 1;
+		case ValueType::UINT16:
+			return 2;
 		case ValueType::UINT32:
-		case ValueType::FLOAT:   return 4;
+		case ValueType::FLOAT:
+			return 4;
 		case ValueType::UINT64:
 		case ValueType::DOUBLE:
-		case ValueType::POINTER: return 8;
-		default:                 return 0;
+		case ValueType::POINTER:
+			return 8;
+		default:
+			return 0;
 		}
 	};
 	unsigned sz_bytes = typeSize(sz);
@@ -614,7 +631,8 @@ inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz
 	// Scan from the end: update the most recent same-size entry, skip a
 	// write covered by a wider entry, otherwise append.
 	for (auto it = tx->write_set.rbegin(); it != tx->write_set.rend(); ++it) {
-		if (it->addr != addr) continue;
+		if (it->addr != addr)
+			continue;
 		unsigned es = typeSize(it->type);
 		if (es == sz_bytes) {
 			it->new_val = val;
@@ -633,35 +651,72 @@ inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz
 }
 
 // ── Typed wrappers ─────────────────────────────────────────────────
-template <typename T, ValueType SZ>
-inline T tm_read(T *addr)
+template <typename T, ValueType SZ> inline T tm_read(T *addr)
 {
 	any_type_t r = read_word(current_tx, (void *)addr, SZ);
 	return return_any_type<T>(r);
 }
 
-template <typename T, ValueType SZ>
-inline void tm_write(T *addr, T val)
+template <typename T, ValueType SZ> inline void tm_write(T *addr, T val)
 {
 	any_type_t w;
 	fill_any_type(w, &val, SZ);
 	write_word(current_tx, (void *)addr, w, SZ);
 }
 
-inline uint8_t  tm_read_i1(uint8_t *addr)  { return tm_read<uint8_t, ValueType::UINT8>(addr); }
-inline uint16_t tm_read_i2(uint16_t *addr) { return tm_read<uint16_t, ValueType::UINT16>(addr); }
-inline uint32_t tm_read_i4(uint32_t *addr) { return tm_read<uint32_t, ValueType::UINT32>(addr); }
-inline uint64_t tm_read_i8(uint64_t *addr) { return tm_read<uint64_t, ValueType::UINT64>(addr); }
-inline float    tm_read_f4(float *addr)    { return tm_read<float, ValueType::FLOAT>(addr); }
-inline double   tm_read_f8(double *addr)   { return tm_read<double, ValueType::DOUBLE>(addr); }
-inline void    *tm_read_ptr(void **addr)   { return tm_read<void *, ValueType::POINTER>(addr); }
+inline uint8_t tm_read_i1(uint8_t *addr)
+{
+	return tm_read<uint8_t, ValueType::UINT8>(addr);
+}
+inline uint16_t tm_read_i2(uint16_t *addr)
+{
+	return tm_read<uint16_t, ValueType::UINT16>(addr);
+}
+inline uint32_t tm_read_i4(uint32_t *addr)
+{
+	return tm_read<uint32_t, ValueType::UINT32>(addr);
+}
+inline uint64_t tm_read_i8(uint64_t *addr)
+{
+	return tm_read<uint64_t, ValueType::UINT64>(addr);
+}
+inline float tm_read_f4(float *addr) { return tm_read<float, ValueType::FLOAT>(addr); }
+inline double tm_read_f8(double *addr)
+{
+	return tm_read<double, ValueType::DOUBLE>(addr);
+}
+inline void *tm_read_ptr(void **addr)
+{
+	return tm_read<void *, ValueType::POINTER>(addr);
+}
 
-inline void tm_write_i1(uint8_t *addr, uint8_t val)  { tm_write<uint8_t, ValueType::UINT8>(addr, val); }
-inline void tm_write_i2(uint16_t *addr, uint16_t val) { tm_write<uint16_t, ValueType::UINT16>(addr, val); }
-inline void tm_write_i4(uint32_t *addr, uint32_t val) { tm_write<uint32_t, ValueType::UINT32>(addr, val); }
-inline void tm_write_i8(uint64_t *addr, uint64_t val) { tm_write<uint64_t, ValueType::UINT64>(addr, val); }
-inline void tm_write_f4(float *addr, float val)       { tm_write<float, ValueType::FLOAT>(addr, val); }
-inline void tm_write_f8(double *addr, double val)     { tm_write<double, ValueType::DOUBLE>(addr, val); }
-inline void tm_write_ptr(void **addr, void *val)      { tm_write<void *, ValueType::POINTER>(addr, val); }
+inline void tm_write_i1(uint8_t *addr, uint8_t val)
+{
+	tm_write<uint8_t, ValueType::UINT8>(addr, val);
+}
+inline void tm_write_i2(uint16_t *addr, uint16_t val)
+{
+	tm_write<uint16_t, ValueType::UINT16>(addr, val);
+}
+inline void tm_write_i4(uint32_t *addr, uint32_t val)
+{
+	tm_write<uint32_t, ValueType::UINT32>(addr, val);
+}
+inline void tm_write_i8(uint64_t *addr, uint64_t val)
+{
+	tm_write<uint64_t, ValueType::UINT64>(addr, val);
+}
+inline void tm_write_f4(float *addr, float val)
+{
+	tm_write<float, ValueType::FLOAT>(addr, val);
+}
+inline void tm_write_f8(double *addr, double val)
+{
+	tm_write<double, ValueType::DOUBLE>(addr, val);
+}
+inline void tm_write_ptr(void **addr, void *val)
+{
+	tm_write<void *, ValueType::POINTER>(addr, val);
+}
 
 } // namespace mvlog

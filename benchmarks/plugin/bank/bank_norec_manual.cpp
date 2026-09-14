@@ -5,6 +5,7 @@
  * Used to verify equivalence with plugin instrumentation.
  */
 
+#include "tm_vector.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -18,7 +19,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include "tm_vector.hpp"
 
 #include "NOrec.hpp"
 

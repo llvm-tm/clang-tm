@@ -60,8 +60,7 @@ inline const char *sigsetjmpName(llvm::Module &)
 inline bool isOperatorNew(llvm::StringRef N)
 {
 	return N == "malloc" || N == "_Znwm" || N == "_Znam" || N == "_Znwj" ||
-	       N == "_Znaj" || N == "_ZnwmSt11align_val_t" ||
-	       N == "_ZnamSt11align_val_t";
+	       N == "_Znaj" || N == "_ZnwmSt11align_val_t" || N == "_ZnamSt11align_val_t";
 }
 
 inline bool isOperatorDelete(llvm::StringRef N)

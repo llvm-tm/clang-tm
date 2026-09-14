@@ -17,19 +17,28 @@
 // if the address falls in a registered TM global range (registered via
 // tm_register_global at startup).  Bypass for addresses on this thread's stack
 // (defense-in-depth — async worker threads should not TM-track stack memory).
-#define LLVM_TM_ADDR_CHECK(addr) do { \
-    if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) { \
-        if (stm::isOnCurrentThreadStack(addr)) { return *(addr); } \
-    } \
-} while(0)
-#define LLVM_TM_ADDR_CHECK_WRITE(addr, val) do { \
-    if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) { \
-        if (stm::isOnCurrentThreadStack(addr)) { *(addr) = (val); return; } \
-    } \
-} while(0)
+#define LLVM_TM_ADDR_CHECK(addr)                                                         \
+	do {                                                                                 \
+		if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {                         \
+			if (stm::isOnCurrentThreadStack(addr)) {                                     \
+				return *(addr);                                                          \
+			}                                                                            \
+		}                                                                                \
+	} while (0)
+#define LLVM_TM_ADDR_CHECK_WRITE(addr, val)                                              \
+	do {                                                                                 \
+		if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {                         \
+			if (stm::isOnCurrentThreadStack(addr)) {                                     \
+				*(addr) = (val);                                                         \
+				return;                                                                  \
+			}                                                                            \
+		}                                                                                \
+	} while (0)
 #else
-#define LLVM_TM_ADDR_CHECK(addr) TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space")
-#define LLVM_TM_ADDR_CHECK_WRITE(addr, val) TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space")
+#define LLVM_TM_ADDR_CHECK(addr)                                                         \
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space")
+#define LLVM_TM_ADDR_CHECK_WRITE(addr, val)                                              \
+	TM_ASSERT(stm::isTMAddress(addr), "Address not in TM address space")
 #endif
 
 #ifndef NDEBUG
@@ -49,9 +58,9 @@
 #define TM_ASSERT(cond, msg) /* EMPTY */
 #endif
 
-#define TM_ASSERT_VALID_TX(tx, msg) \
-    TM_ASSERT((tx) != nullptr, msg); \
-    TM_ASSERT((tx)->active, msg)
+#define TM_ASSERT_VALID_TX(tx, msg)                                                      \
+	TM_ASSERT((tx) != nullptr, msg);                                                     \
+	TM_ASSERT((tx)->active, msg)
 
 namespace stm
 {
@@ -68,17 +77,22 @@ enum class ValueType : uint8_t {
 	POINTER = 7
 };
 
-inline unsigned type_size(ValueType t) {
-    switch (t) {
-        case ValueType::UINT8:   return 1;
-        case ValueType::UINT16:  return 2;
-        case ValueType::UINT32:
-        case ValueType::FLOAT:   return 4;
-        case ValueType::UINT64:
-        case ValueType::DOUBLE:
-        case ValueType::POINTER: return 8;
-    }
-    return 0;
+inline unsigned type_size(ValueType t)
+{
+	switch (t) {
+	case ValueType::UINT8:
+		return 1;
+	case ValueType::UINT16:
+		return 2;
+	case ValueType::UINT32:
+	case ValueType::FLOAT:
+		return 4;
+	case ValueType::UINT64:
+	case ValueType::DOUBLE:
+	case ValueType::POINTER:
+		return 8;
+	}
+	return 0;
 }
 
 struct any_type_t {
@@ -99,14 +113,8 @@ template <typename T> struct any_type_mapping;
 	template <> struct any_type_mapping<T> {                                             \
 		static T &get(any_type_t &t) { return t.M; }                                     \
 		static void set(any_type_t &t, T v) { t.M = v; }                                 \
-		static void setp(any_type_t &t, void *a)                                         \
-		{                                                                                \
-			memcpy(&t.AM, a, sizeof(AT));                                                \
-		}                                                                                \
-		static void store(any_type_t &t, void *a)                                        \
-		{                                                                                \
-			memcpy(a, &t.AM, sizeof(AT));                                                \
-		}                                                                                \
+		static void setp(any_type_t &t, void *a) { memcpy(&t.AM, a, sizeof(AT)); }       \
+		static void store(any_type_t &t, void *a) { memcpy(a, &t.AM, sizeof(AT)); }      \
 	};
 
 MAP_ANY(uint8_t, uint8_t, u1, u1)
@@ -187,14 +195,10 @@ write_value_to_addr( //
 #define BYTE_MASK(n) ((n) >= 8 ? ~0ULL : ((1ULL << ((n) * 8)) - 1))
 
 // ── Extract raw u64 from any_type_t (union-based, always u8) ──
-inline uint64_t any_to_u64(const any_type_t &val, ValueType /*sz*/) {
-    return val.u8;
-}
+inline uint64_t any_to_u64(const any_type_t &val, ValueType /*sz*/) { return val.u8; }
 
 // ── Store raw u64 into any_type_t (union-based, always u8) ────
-inline void u64_to_any(any_type_t &out, uint64_t val, ValueType /*sz*/) {
-    out.u8 = val;
-}
+inline void u64_to_any(any_type_t &out, uint64_t val, ValueType /*sz*/) { out.u8 = val; }
 
 // ===========================================================================
 // TM region bypass check: an address bypasses TM instrumentation iff it

@@ -41,6 +41,13 @@ Ensure the LLVM `bin/` directory is on `PATH` (usually
 Run `./tools/check-requirements.sh` in the project root to verify all tools are
 available at compatible versions.
 
+To confirm the full toolchain (plugin, C++ backends, Rust) works end-to-end,
+run the ~60s smoke test:
+
+```sh
+make check-fast
+```
+
 ## Project Structure After Copying to Remote Machine
 
 ```
@@ -79,8 +86,16 @@ make plugin
 ### Build and run a benchmark
 
 ```sh
-# Build a plugin-instrumented benchmark
+# Plugin-instrumented benchmark
 cd benchmarks/plugin/bank
 make bank_singlelock
 ./bin/bank_singlelock -t 4 -d 5000
+
+# Explicit C++ API benchmark (no plugin needed)
+make -C benchmarks/cpp BACKEND=NOREC bin/bank
+./benchmarks/cpp/bin/bank -t 2 -d 1000 --test
 ```
+
+> **Note (Linux):** `benchmarks/cpp` links statically by default. Pass
+> `STATIC=0` to link dynamically instead (faster builds):
+> `make -C benchmarks/cpp BACKEND=NOREC STATIC=0 bin/bank`.

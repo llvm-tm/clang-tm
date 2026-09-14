@@ -60,7 +60,6 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
-#include <cstdlib>
 #include <mutex>
 #include <new>
 #include <unordered_set>
@@ -147,7 +146,7 @@ inline void tm_clear_spec_allocs()
 			TM_EVENT(CLEAR_SPEC_ALLOC, (uintptr_t)node->ptr, 0);
 			stm::tm_region_free(node->ptr);
 		}
-		std::free(node);                  // free the bookkeeping node (std::malloc'd)
+		std::free(node); // free the bookkeeping node (std::malloc'd)
 		node = next;
 	}
 	g_spec_allocs = nullptr;
@@ -185,7 +184,7 @@ inline void tm_flush_spec_allocs()
 
 struct FreeNode {
 	FreeNode *next;
-	void *ptr; // the user pointer to be freed on commit
+	void *ptr;               // the user pointer to be freed on commit
 	uint64_t retire_version; // EBR: clock version when this was retired
 };
 
@@ -266,26 +265,28 @@ extern thread_local FreeNode *g_retired_frees;
 // when both threads independently defer the same shared buffer.
 inline bool isValidFreeNode(FreeNode *node)
 {
-	if (!node) return true;
-	if ((reinterpret_cast<uintptr_t>(node) & 7) != 0) return false;
-	if (reinterpret_cast<uintptr_t>(node) < 0x1000) return false;
+	if (!node)
+		return true;
+	if ((reinterpret_cast<uintptr_t>(node) & 7) != 0)
+		return false;
+	if (reinterpret_cast<uintptr_t>(node) < 0x1000)
+		return false;
 	return true;
 }
 
 // Check if a next pointer stored inside a FreeNode is reasonable.
 // (The node pointer itself may be valid but its ->next field may not be.)
-inline bool isValidNextPtr(FreeNode *next)
-{
-	return !next || isValidFreeNode(next);
-}
+inline bool isValidNextPtr(FreeNode *next) { return !next || isValidFreeNode(next); }
 
 inline void tm_move_deferred_to_retired(uint64_t commit_version)
 {
 	auto *node = g_deferred_frees;
 	while (node) {
 		if (!isValidFreeNode(node)) {
-			fprintf(stderr, "FATAL: corrupted deferred list node=%p g_deferred_frees=%p\n",
-			        (void*)node, (void*)g_deferred_frees);
+			fprintf(stderr,
+			        "FATAL: corrupted deferred list node=%p g_deferred_frees=%p\n",
+			        (void *)node,
+			        (void *)g_deferred_frees);
 			fflush(stderr);
 			_exit(1);
 		}
@@ -374,10 +375,11 @@ inline void tm_flush_retired_frees(uint64_t safe_version)
 
 // Inside a TX, tm_malloc / tm_calloc / tm_realloc call this to record
 // the allocation as speculative (freed on abort, kept on commit).
-inline void* tm_track_alloc_result(void* p, size_t size) {
-    TM_EVENT(MALLOC, p, size);
-    tm_track_spec_alloc(p);
-    return p;
+inline void *tm_track_alloc_result(void *p, size_t size)
+{
+	TM_EVENT(MALLOC, p, size);
+	tm_track_spec_alloc(p);
+	return p;
 }
 
 // Inside a TX, tm_free calls this AFTER the backend-specific dummy write
@@ -386,35 +388,40 @@ inline void* tm_track_alloc_result(void* p, size_t size) {
 //   - untrack spec_alloc
 //   - insert into g_deferred_frees_set
 //   - push FreeNode onto g_deferred_frees
-inline void tm_free_append_deferred(void* ptr) {
-    // Only track TM-region addresses in the deferred-free set.
-    // Non-TM addresses (e.g., from ::operator new) are not tracked
-    // and go directly to the standard allocator. This prevents
-    // false-positive double-free detection when the region allocator
-    // reuses addresses across transactions/threads.
-    if (!stm::isTMAddress(ptr)) return;
+inline void tm_free_append_deferred(void *ptr)
+{
+	// Only track TM-region addresses in the deferred-free set.
+	// Non-TM addresses (e.g., from ::operator new) are not tracked
+	// and go directly to the standard allocator. This prevents
+	// false-positive double-free detection when the region allocator
+	// reuses addresses across transactions/threads.
+	if (!stm::isTMAddress(ptr))
+		return;
 
-    if (g_deferred_frees_set.count(ptr)) {
-        TM_EVENT(DOUBLE_FREE, ptr, 0);
-        fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
-        fflush(stderr);
-        stm::tm_backtrace_print(2);
-        _exit(1);
-    }
-    tm_untrack_spec_alloc(ptr);
-    g_deferred_frees_set.insert(ptr);
-    // Validate g_deferred_frees before linking — catches TLS corruption
-    // or use-after-free of the FreeNode chain.
-    if (!isValidNextPtr(g_deferred_frees)) {
-        fprintf(stderr, "FATAL: corrupt g_deferred_frees=%p before tm_free_append_deferred ptr=%p\n",
-                (void*)g_deferred_frees, ptr);
-        fflush(stderr);
-        _exit(1);
-    }
-    auto* node = static_cast<FreeNode*>(std::malloc(sizeof(FreeNode)));
-    node->ptr = ptr;
-    node->next = g_deferred_frees;
-    g_deferred_frees = node;
+	if (g_deferred_frees_set.count(ptr)) {
+		TM_EVENT(DOUBLE_FREE, ptr, 0);
+		fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
+		fflush(stderr);
+		stm::tm_backtrace_print(2);
+		_exit(1);
+	}
+	tm_untrack_spec_alloc(ptr);
+	g_deferred_frees_set.insert(ptr);
+	// Validate g_deferred_frees before linking — catches TLS corruption
+	// or use-after-free of the FreeNode chain.
+	if (!isValidNextPtr(g_deferred_frees)) {
+		fprintf(stderr,
+		        "FATAL: corrupt g_deferred_frees=%p before tm_free_append_deferred "
+		        "ptr=%p\n",
+		        (void *)g_deferred_frees,
+		        ptr);
+		fflush(stderr);
+		_exit(1);
+	}
+	auto *node = static_cast<FreeNode *>(std::malloc(sizeof(FreeNode)));
+	node->ptr = ptr;
+	node->next = g_deferred_frees;
+	g_deferred_frees = node;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -441,5 +448,3 @@ inline void tm_free_append_deferred(void* ptr) {
 //
 // TL;DR: Runtime internals → standard allocator.
 //        User TM code      → tm_malloc/tm_free (via plugin).
-
-

@@ -9,27 +9,28 @@ extern "C" void (*tm_wait_prev_tx)(void);
 
 static int shared = 0;
 
-__attribute__((noinline, annotate("shared")))
-void increment(int delta) {
-    shared += delta;
+__attribute__((noinline, annotate("shared"))) void increment(int delta)
+{
+	shared += delta;
 }
 
-__attribute__((noinline, annotate("async_shared")))
-void async_increment(int delta) {
-    shared += delta;
+__attribute__((noinline, annotate("async_shared"))) void async_increment(int delta)
+{
+	shared += delta;
 }
 
-int main() {
-    increment(42);
-    async_increment(58);
-    tm_wait_prev_tx();
+int main()
+{
+	increment(42);
+	async_increment(58);
+	tm_wait_prev_tx();
 
-    int expected = 42 + 58;
-    if (shared == expected) {
-        printf("PASS\n");
-        return 0;
-    } else {
-        printf("FAIL: shared=%d expected=%d\n", shared, expected);
-        return 1;
-    }
+	int expected = 42 + 58;
+	if (shared == expected) {
+		printf("PASS\n");
+		return 0;
+	} else {
+		printf("FAIL: shared=%d expected=%d\n", shared, expected);
+		return 1;
+	}
 }

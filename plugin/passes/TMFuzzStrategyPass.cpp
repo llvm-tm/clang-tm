@@ -69,375 +69,399 @@ static cl::opt<unsigned> MinThreadAccess(
     cl::desc("Minimum threads accessing a global to flag as shared"),
     cl::init(2));
 
-namespace {
+namespace
+{
 
 // ── Helper: extract source location for diagnostics ─────────────────
-static std::string getSourceLoc(Instruction &I) {
-    DebugLoc DL = I.getDebugLoc();
-    if (!DL) return "<unknown>";
-    auto *Scope = dyn_cast_or_null<DIScope>(DL.getScope());
-    if (!Scope) return "<unknown>";
-    return (Twine(Scope->getFilename()) + ":" +
-            Twine(DL.getLine()) + ":" +
-            Twine(DL.getCol())).str();
+static std::string getSourceLoc(Instruction &I)
+{
+	DebugLoc DL = I.getDebugLoc();
+	if (!DL)
+		return "<unknown>";
+	auto *Scope = dyn_cast_or_null<DIScope>(DL.getScope());
+	if (!Scope)
+		return "<unknown>";
+	return (Twine(Scope->getFilename()) + ":" + Twine(DL.getLine()) + ":" +
+	        Twine(DL.getCol()))
+	    .str();
 }
 
 // ── Helper: !tm.strategic metadata node types ───────────────────────
 enum class StrategicKind : uint8_t {
-    TransactionBoundary = 0,
-    SharedDataRead,
-    SharedDataWrite,
-    SyncPoint,
-    HotLoop
+	TransactionBoundary = 0,
+	SharedDataRead,
+	SharedDataWrite,
+	SyncPoint,
+	HotLoop
 };
 
-static MDNode *createStrategyMD(LLVMContext &Ctx, StrategicKind kind,
-                                 const char *desc) {
-    Metadata *MDs[] = {
-        MDString::get(Ctx, "tm.strategic"),
-        ConstantAsMetadata::get(
-            ConstantInt::get(Type::getInt8Ty(Ctx), (uint8_t)kind)),
-        MDString::get(Ctx, desc),
-    };
-    return MDNode::get(Ctx, MDs);
+static MDNode *createStrategyMD(LLVMContext &Ctx, StrategicKind kind, const char *desc)
+{
+	Metadata *MDs[] = {
+	    MDString::get(Ctx, "tm.strategic"),
+	    ConstantAsMetadata::get(ConstantInt::get(Type::getInt8Ty(Ctx), (uint8_t)kind)),
+	    MDString::get(Ctx, desc),
+	};
+	return MDNode::get(Ctx, MDs);
 }
 
 // ── Strategic Point Detection Pass ──────────────────────────────────
-class TMFuzzStrategyPass : public PassInfoMixin<TMFuzzStrategyPass> {
+class TMFuzzStrategyPass : public PassInfoMixin<TMFuzzStrategyPass>
+{
 public:
-    PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
-        TM_DEBUG("TMFuzzStrategyPass: scanning module %s",
-                 M.getName().str().c_str());
+	PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
+	{
+		TM_DEBUG("TMFuzzStrategyPass: scanning module %s", M.getName().str().c_str());
 
-        // ── Step 1: Build call graph from main and thread entry points ──
-        SmallPtrSet<Function *, 32> ThreadReachable;
-        SmallPtrSet<Function *, 32> AllReachable;
-        collectThreadReachableFunctions(M, ThreadReachable, AllReachable);
+		// ── Step 1: Build call graph from main and thread entry points ──
+		SmallPtrSet<Function *, 32> ThreadReachable;
+		SmallPtrSet<Function *, 32> AllReachable;
+		collectThreadReachableFunctions(M, ThreadReachable, AllReachable);
 
-        // ── Step 2: Identify transaction boundaries ───────────────────
-        findTransactionBoundaries(M, ThreadReachable, AllReachable);
+		// ── Step 2: Identify transaction boundaries ───────────────────
+		findTransactionBoundaries(M, ThreadReachable, AllReachable);
 
-        // ── Step 3: Identify shared data ──────────────────────────────
-        findSharedData(M, ThreadReachable);
+		// ── Step 3: Identify shared data ──────────────────────────────
+		findSharedData(M, ThreadReachable);
 
-        // ── Step 4: Identify sync points ───────────────────────────────
-        findSyncPoints(M, ThreadReachable);
+		// ── Step 4: Identify sync points ───────────────────────────────
+		findSyncPoints(M, ThreadReachable);
 
-        // ── Step 5: Identify hot loops ─────────────────────────────────
-        findHotLoops(M, ThreadReachable);
+		// ── Step 5: Identify hot loops ─────────────────────────────────
+		findHotLoops(M, ThreadReachable);
 
-        if (!StrategyDump && !StrategyMetadata)
-            TM_DEBUG("Use -tm-strategy-dump to see results or "
-                     "-tm-strategy-metadata to annotate IR");
+		if (!StrategyDump && !StrategyMetadata)
+			TM_DEBUG("Use -tm-strategy-dump to see results or "
+			         "-tm-strategy-metadata to annotate IR");
 
-        return PreservedAnalyses::all(); // metadata-only, no IR changes
-    }
+		return PreservedAnalyses::all(); // metadata-only, no IR changes
+	}
 
-    static bool isRequired() { return true; }
+	static bool isRequired() { return true; }
 
 private:
-    // ── Call graph collection ──────────────────────────────────────
-    void collectThreadReachableFunctions(
-        Module &M,
-        SmallPtrSetImpl<Function *> &ThreadReachable,
-        SmallPtrSetImpl<Function *> &AllReachable) {
+	// ── Call graph collection ──────────────────────────────────────
+	void collectThreadReachableFunctions(Module &M,
+	                                     SmallPtrSetImpl<Function *> &ThreadReachable,
+	                                     SmallPtrSetImpl<Function *> &AllReachable)
+	{
+		// Seed: functions reachable from main
+		SmallVector<Function *, 32> Worklist;
 
-        // Seed: functions reachable from main
-        SmallVector<Function *, 32> Worklist;
+		if (Function *MainFn = M.getFunction("main"))
+			Worklist.push_back(MainFn);
 
-        if (Function *MainFn = M.getFunction("main"))
-            Worklist.push_back(MainFn);
+		// Also seed: functions that take/return pthread_t or are passed
+		// to pthread_create
+		for (auto &F : M) {
+			if (F.isDeclaration())
+				continue;
+			if (hasAnnotation(F, THREAD_ANNOT))
+				Worklist.push_back(&F);
+		}
 
-        // Also seed: functions that take/return pthread_t or are passed
-        // to pthread_create
-        for (auto &F : M) {
-            if (F.isDeclaration()) continue;
-            if (hasAnnotation(F, THREAD_ANNOT))
-                Worklist.push_back(&F);
-        }
+		// BFS through call graph
+		while (!Worklist.empty()) {
+			Function *F = Worklist.pop_back_val();
+			if (!AllReachable.insert(F).second)
+				continue;
+			if (F->getName().starts_with("pthread_") ||
+			    F->getName().starts_with("std::thread::"))
+				continue;
+			for (auto &BB : *F) {
+				for (auto &I : BB) {
+					auto *CB = dyn_cast<CallBase>(&I);
+					if (!CB)
+						continue;
+					Function *Callee = CB->getCalledFunction();
+					if (Callee && !Callee->isDeclaration() && !AllReachable.count(Callee))
+						Worklist.push_back(Callee);
+				}
+			}
+		}
 
-        // BFS through call graph
-        while (!Worklist.empty()) {
-            Function *F = Worklist.pop_back_val();
-            if (!AllReachable.insert(F).second)
-                continue;
-            if (                F->getName().starts_with("pthread_") ||
-                F->getName().starts_with("std::thread::"))
-                continue;
-            for (auto &BB : *F) {
-                for (auto &I : BB) {
-                    auto *CB = dyn_cast<CallBase>(&I);
-                    if (!CB) continue;
-                    Function *Callee = CB->getCalledFunction();
-                    if (Callee && !Callee->isDeclaration() &&
-                        !AllReachable.count(Callee))
-                        Worklist.push_back(Callee);
-                }
-            }
-        }
+		// Separate thread-reachable functions
+		for (Function *F : AllReachable) {
+			if (F->getName() == "main")
+				continue;
+			ThreadReachable.insert(F);
+		}
 
-        // Separate thread-reachable functions
-        for (Function *F : AllReachable) {
-            if (F->getName() == "main") continue;
-            ThreadReachable.insert(F);
-        }
+		TM_DEBUG("Call graph: %zu main-reachable, %zu thread-reachable",
+		         (size_t)AllReachable.size(),
+		         (size_t)ThreadReachable.size());
+	}
 
-        TM_DEBUG("Call graph: %zu main-reachable, %zu thread-reachable",
-                 (size_t)AllReachable.size(), (size_t)ThreadReachable.size());
-    }
+	// ── Transaction boundary detection ─────────────────────────────
+	void findTransactionBoundaries(Module &M,
+	                               SmallPtrSetImpl<Function *> &ThreadReachable,
+	                               SmallPtrSetImpl<Function *> &AllReachable)
+	{
+		// Mark functions that should be wrapped in transactions
+		for (Function *F : ThreadReachable) {
+			if (F->isDeclaration())
+				continue;
 
-    // ── Transaction boundary detection ─────────────────────────────
-    void findTransactionBoundaries(
-        Module &M,
-        SmallPtrSetImpl<Function *> &ThreadReachable,
-        SmallPtrSetImpl<Function *> &AllReachable) {
+			// Skip very small functions (likely accessors/helpers)
+			if (F->size() <= 1)
+				continue;
 
-        // Mark functions that should be wrapped in transactions
-        for (Function *F : ThreadReachable) {
-            if (F->isDeclaration()) continue;
+			// Check if this function accesses globals
+			bool accessesGlobal = false;
+			for (auto &BB : *F) {
+				for (auto &I : BB) {
+					if (auto *LI = dyn_cast<LoadInst>(&I)) {
+						if (isa<GlobalVariable>(
+						        LI->getPointerOperand()->stripPointerCasts()))
+							accessesGlobal = true;
+					} else if (auto *SI = dyn_cast<StoreInst>(&I)) {
+						if (isa<GlobalVariable>(
+						        SI->getPointerOperand()->stripPointerCasts()))
+							accessesGlobal = true;
+					}
+				}
+			}
 
-            // Skip very small functions (likely accessors/helpers)
-            if (F->size() <= 1) continue;
+			if (!accessesGlobal)
+				continue;
 
-            // Check if this function accesses globals
-            bool accessesGlobal = false;
-            for (auto &BB : *F) {
-                for (auto &I : BB) {
-                    if (auto *LI = dyn_cast<LoadInst>(&I)) {
-                        if (isa<GlobalVariable>(
-                                LI->getPointerOperand()->stripPointerCasts()))
-                            accessesGlobal = true;
-                    } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
-                        if (isa<GlobalVariable>(
-                                SI->getPointerOperand()->stripPointerCasts()))
-                            accessesGlobal = true;
-                    }
-                }
-            }
+			if (StrategyDump)
+				errs() << "TM-STRATEGY: boundary " << F->getName()
+				       << " (thread-reachable, accesses globals)\n";
 
-            if (!accessesGlobal) continue;
+			if (StrategyMetadata) {
+				F->setMetadata("tm.strategic",
+				               createStrategyMD(M.getContext(),
+				                                StrategicKind::TransactionBoundary,
+				                                "thread-reachable function with global "
+				                                "access"));
+			}
+		}
+	}
 
-            if (StrategyDump)
-                errs() << "TM-STRATEGY: boundary " << F->getName()
-                       << " (thread-reachable, accesses globals)\n";
+	// ── Shared data detection ──────────────────────────────────────
+	void findSharedData(Module &M, SmallPtrSetImpl<Function *> &ThreadReachable)
+	{
+		// Map global → set of accessing functions
+		// Using SmallVector + manual lookup (no MapVector in LLVM 22 ADT)
+		struct GlobalAccessEntry {
+			GlobalVariable *GV;
+			SmallSet<Function *, 8> Funcs;
+		};
+		SmallVector<GlobalAccessEntry, 32> GlobalAccess;
 
-            if (StrategyMetadata) {
-                F->setMetadata("tm.strategic",
-                    createStrategyMD(M.getContext(),
-                                     StrategicKind::TransactionBoundary,
-                                     "thread-reachable function with global access"));
-            }
-        }
-    }
+		for (Function *F : ThreadReachable) {
+			if (F->isDeclaration())
+				continue;
+			for (auto &BB : *F) {
+				for (auto &I : BB) {
+					Value *Ptr = nullptr;
+					if (auto *LI = dyn_cast<LoadInst>(&I))
+						Ptr = LI->getPointerOperand();
+					else if (auto *SI = dyn_cast<StoreInst>(&I))
+						Ptr = SI->getPointerOperand();
+					else
+						continue;
 
-    // ── Shared data detection ──────────────────────────────────────
-    void findSharedData(Module &M,
-                        SmallPtrSetImpl<Function *> &ThreadReachable) {
+					if (auto *GV = dyn_cast<GlobalVariable>(Ptr->stripPointerCasts())) {
+						// Find or create entry
+						bool found = false;
+						for (auto &Entry : GlobalAccess) {
+							if (Entry.GV == GV) {
+								Entry.Funcs.insert(F);
+								found = true;
+								break;
+							}
+						}
+						if (!found) {
+							GlobalAccessEntry Entry;
+							Entry.GV = GV;
+							Entry.Funcs.insert(F);
+							GlobalAccess.push_back(Entry);
+						}
+					}
+				}
+			}
+		}
 
-        // Map global → set of accessing functions
-        // Using SmallVector + manual lookup (no MapVector in LLVM 22 ADT)
-        struct GlobalAccessEntry {
-            GlobalVariable *GV;
-            SmallSet<Function *, 8> Funcs;
-        };
-        SmallVector<GlobalAccessEntry, 32> GlobalAccess;
+		// Flag globals accessed by >= MinThreadAccess different functions
+		for (auto &Entry : GlobalAccess) {
+			GlobalVariable *GV = Entry.GV;
+			auto &Funcs = Entry.Funcs;
+			if (Funcs.size() < MinThreadAccess)
+				continue;
 
-        for (Function *F : ThreadReachable) {
-            if (F->isDeclaration()) continue;
-            for (auto &BB : *F) {
-                for (auto &I : BB) {
-                    Value *Ptr = nullptr;
-                    if (auto *LI = dyn_cast<LoadInst>(&I))
-                        Ptr = LI->getPointerOperand();
-                    else if (auto *SI = dyn_cast<StoreInst>(&I))
-                        Ptr = SI->getPointerOperand();
-                    else
-                        continue;
+			bool isWrite = false;
+			for (auto *F : Funcs) {
+				for (auto &BB : *F) {
+					for (auto &I : BB) {
+						Value *Ptr = nullptr;
+						if (auto *SI = dyn_cast<StoreInst>(&I))
+							Ptr = SI->getPointerOperand();
+						if (Ptr && GV == Ptr->stripPointerCasts()) {
+							isWrite = true;
+							break;
+						}
+					}
+					if (isWrite)
+						break;
+				}
+			}
 
-                    if (auto *GV = dyn_cast<GlobalVariable>(
-                            Ptr->stripPointerCasts())) {
-                        // Find or create entry
-                        bool found = false;
-                        for (auto &Entry : GlobalAccess) {
-                            if (Entry.GV == GV) {
-                                Entry.Funcs.insert(F);
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found) {
-                            GlobalAccessEntry Entry;
-                            Entry.GV = GV;
-                            Entry.Funcs.insert(F);
-                            GlobalAccess.push_back(Entry);
-                        }
-                    }
-                }
-            }
-        }
+			if (StrategyDump)
+				errs() << "TM-STRATEGY: shared " << GV->getName() << " (" << Funcs.size()
+				       << " functions, " << (isWrite ? "read-write" : "read-only")
+				       << ")\n";
 
-        // Flag globals accessed by >= MinThreadAccess different functions
-        for (auto &Entry : GlobalAccess) {
-            GlobalVariable *GV = Entry.GV;
-            auto &Funcs = Entry.Funcs;
-            if (Funcs.size() < MinThreadAccess) continue;
+			if (StrategyMetadata) {
+				GV->setMetadata("tm.strategic",
+				                createStrategyMD(M.getContext(),
+				                                 isWrite ? StrategicKind::SharedDataWrite
+				                                         : StrategicKind::SharedDataRead,
+				                                 (Twine("shared global: ") +
+				                                  GV->getName())
+				                                     .str()
+				                                     .c_str()));
+			}
+		}
 
-            bool isWrite = false;
-            for (auto *F : Funcs) {
-                for (auto &BB : *F) {
-                    for (auto &I : BB) {
-                        Value *Ptr = nullptr;
-                        if (auto *SI = dyn_cast<StoreInst>(&I))
-                            Ptr = SI->getPointerOperand();
-                        if (Ptr && GV == Ptr->stripPointerCasts()) {
-                            isWrite = true;
-                            break;
-                        }
-                    }
-                    if (isWrite) break;
-                }
-            }
+		TM_DEBUG("Shared data: %zu globals with >= %u thread accesses",
+		         (size_t)GlobalAccess.size(),
+		         (unsigned)MinThreadAccess);
+	}
 
-            if (StrategyDump)
-                errs() << "TM-STRATEGY: shared " << GV->getName()
-                       << " (" << Funcs.size() << " functions, "
-                       << (isWrite ? "read-write" : "read-only") << ")\n";
+	// ── Sync point detection ───────────────────────────────────────
+	void findSyncPoints(Module &M, SmallPtrSetImpl<Function *> &ThreadReachable)
+	{
+		for (Function *F : ThreadReachable) {
+			if (F->isDeclaration())
+				continue;
+			for (auto &BB : *F) {
+				for (auto &I : BB) {
+					auto *CB = dyn_cast<CallBase>(&I);
+					if (!CB)
+						continue;
+					Function *Callee = CB->getCalledFunction();
+					if (!Callee)
+						continue;
 
-            if (StrategyMetadata) {
-                GV->setMetadata("tm.strategic",
-                    createStrategyMD(M.getContext(),
-                        isWrite ? StrategicKind::SharedDataWrite
-                                : StrategicKind::SharedDataRead,
-                        (Twine("shared global: ") + GV->getName()).str().c_str()));
-            }
-        }
+					StringRef Name = Callee->getName();
+					if (!Name.contains("pthread_mutex") &&
+					    !Name.contains("pthread_rwlock") && !Name.contains("atomic") &&
+					    !Name.contains("__sync") && !Name.contains("__atomic") &&
+					    !Name.contains("std::atomic"))
+						continue;
 
-        TM_DEBUG("Shared data: %zu globals with >= %u thread accesses",
-                 (size_t)GlobalAccess.size(), (unsigned)MinThreadAccess);
-    }
+					if (StrategyDump)
+						errs() << "TM-STRATEGY: sync " << getSourceLoc(I) << " " << Name
+						       << "\n";
 
-    // ── Sync point detection ───────────────────────────────────────
-    void findSyncPoints(Module &M,
-                        SmallPtrSetImpl<Function *> &ThreadReachable) {
-        for (Function *F : ThreadReachable) {
-            if (F->isDeclaration()) continue;
-            for (auto &BB : *F) {
-                for (auto &I : BB) {
-                    auto *CB = dyn_cast<CallBase>(&I);
-                    if (!CB) continue;
-                    Function *Callee = CB->getCalledFunction();
-                    if (!Callee) continue;
+					if (StrategyMetadata)
+						I.setMetadata("tm.strategic",
+						              createStrategyMD(M.getContext(),
+						                               StrategicKind::SyncPoint,
+						                               (Twine("sync: ") + Name)
+						                                   .str()
+						                                   .c_str()));
+				}
+			}
+		}
+	}
 
-                    StringRef Name = Callee->getName();
-                    if (!Name.contains("pthread_mutex") &&
-                        !Name.contains("pthread_rwlock") &&
-                        !Name.contains("atomic") &&
-                        !Name.contains("__sync") &&
-                        !Name.contains("__atomic") &&
-                        !Name.contains("std::atomic"))
-                        continue;
+	// ── Hot loop detection ─────────────────────────────────────────
+	void findHotLoops(Module &M, SmallPtrSetImpl<Function *> &ThreadReachable)
+	{
+		for (Function *F : ThreadReachable) {
+			if (F->isDeclaration())
+				continue;
 
-                    if (StrategyDump)
-                        errs() << "TM-STRATEGY: sync " << getSourceLoc(I)
-                               << " " << Name << "\n";
+			// Find loops by looking for back edges
+			for (auto &BB : *F) {
+				// Check if this block branches backwards
+				Instruction *Term = BB.getTerminator();
+				if (!Term)
+					continue;
 
-                    if (StrategyMetadata)
-                        I.setMetadata("tm.strategic",
-                            createStrategyMD(M.getContext(),
-                                             StrategicKind::SyncPoint,
-                                             (Twine("sync: ") + Name).str().c_str()));
-                }
-            }
-        }
-    }
+				for (unsigned i = 0; i < Term->getNumSuccessors(); ++i) {
+					BasicBlock *Succ = Term->getSuccessor(i);
+					// Back edge: successor dominates current block
+					if (Succ && Succ != &BB)
+						continue; // simplified check
+				}
+			}
 
-    // ── Hot loop detection ─────────────────────────────────────────
-    void findHotLoops(Module &M,
-                      SmallPtrSetImpl<Function *> &ThreadReachable) {
-        for (Function *F : ThreadReachable) {
-            if (F->isDeclaration()) continue;
+			// Simple loop detection via PHI nodes with backedge incoming
+			for (auto &BB : *F) {
+				for (auto &I : BB) {
+					auto *PN = dyn_cast<PHINode>(&I);
+					if (!PN)
+						continue;
 
-            // Find loops by looking for back edges
-            for (auto &BB : *F) {
-                // Check if this block branches backwards
-                Instruction *Term = BB.getTerminator();
-                if (!Term) continue;
+					// Count how many incoming blocks are predecessors
+					// that also appear as predecessors of predecessors
+					// (crude loop detector)
+					bool hasBackEdge = false;
+					for (unsigned i = 0; i < PN->getNumIncomingValues(); ++i) {
+						BasicBlock *Incoming = PN->getIncomingBlock(i);
+						if (Incoming == &BB) { // self-loop
+							hasBackEdge = true;
+							break;
+						}
+					}
 
-                for (unsigned i = 0; i < Term->getNumSuccessors(); ++i) {
-                    BasicBlock *Succ = Term->getSuccessor(i);
-                    // Back edge: successor dominates current block
-                    if (Succ && Succ != &BB) continue; // simplified check
-                }
-            }
+					if (!hasBackEdge) {
+						// Check if any incoming block is reachable from BB
+						for (unsigned i = 0; i < PN->getNumIncomingValues(); ++i) {
+							BasicBlock *Incoming = PN->getIncomingBlock(i);
+							auto Preds = predecessors(Incoming);
+							for (auto PredBB = Preds.begin(); PredBB != Preds.end();
+							     ++PredBB) {
+								if (*PredBB == &BB) {
+									hasBackEdge = true;
+									break;
+								}
+							}
+							if (hasBackEdge)
+								break;
+						}
+					}
 
-            // Simple loop detection via PHI nodes with backedge incoming
-            for (auto &BB : *F) {
-                for (auto &I : BB) {
-                    auto *PN = dyn_cast<PHINode>(&I);
-                    if (!PN) continue;
+					if (!hasBackEdge)
+						continue;
 
-                    // Count how many incoming blocks are predecessors
-                    // that also appear as predecessors of predecessors
-                    // (crude loop detector)
-                    bool hasBackEdge = false;
-                    for (unsigned i = 0; i < PN->getNumIncomingValues(); ++i) {
-                        BasicBlock *Incoming = PN->getIncomingBlock(i);
-                        if (Incoming == &BB) { // self-loop
-                            hasBackEdge = true;
-                            break;
-                        }
-                    }
+					if (StrategyDump)
+						errs() << "TM-STRATEGY: loop " << getSourceLoc(I) << " in "
+						       << F->getName() << "\n";
 
-                    if (!hasBackEdge) {
-                        // Check if any incoming block is reachable from BB
-                        for (unsigned i = 0; i < PN->getNumIncomingValues(); ++i) {
-                            BasicBlock *Incoming = PN->getIncomingBlock(i);
-                            auto Preds = predecessors(Incoming);
-                            for (auto PredBB = Preds.begin(); PredBB != Preds.end(); ++PredBB) {
-                                if (*PredBB == &BB) {
-                                    hasBackEdge = true;
-                                    break;
-                                }
-                            }
-                            if (hasBackEdge) break;
-                        }
-                    }
-
-                    if (!hasBackEdge) continue;
-
-                    if (StrategyDump)
-                        errs() << "TM-STRATEGY: loop " << getSourceLoc(I)
-                               << " in " << F->getName() << "\n";
-
-                    if (StrategyMetadata)
-                        I.setMetadata("tm.strategic",
-                            createStrategyMD(M.getContext(),
-                                             StrategicKind::HotLoop,
-                                             "loop with back edge"));
-                    break; // one annotation per BB
-                }
-            }
-        }
-    }
+					if (StrategyMetadata)
+						I.setMetadata("tm.strategic",
+						              createStrategyMD(M.getContext(),
+						                               StrategicKind::HotLoop,
+						                               "loop with back edge"));
+					break; // one annotation per BB
+				}
+			}
+		}
+	}
 };
 
 } // anonymous namespace
 
-extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
-    return {
-        LLVM_PLUGIN_API_VERSION,
-        "TMFuzzStrategyPass",
-        LLVM_VERSION_STRING,
-        [](PassBuilder &PB) {
-            PB.registerPipelineParsingCallback(
-                [](StringRef Name,
-                   ModulePassManager &MPM,
-                   ArrayRef<PassBuilder::PipelineElement>) {
-                    if (Name == "tm-fuzz-strategy") {
-                        MPM.addPass(TMFuzzStrategyPass());
-                        return true;
-                    }
-                    return false;
-                });
-        }};
+extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
+{
+	return {LLVM_PLUGIN_API_VERSION,
+	        "TMFuzzStrategyPass",
+	        LLVM_VERSION_STRING,
+	        [](PassBuilder &PB) {
+		        PB.registerPipelineParsingCallback(
+		            [](StringRef Name,
+		               ModulePassManager &MPM,
+		               ArrayRef<PassBuilder::PipelineElement>) {
+			            if (Name == "tm-fuzz-strategy") {
+				            MPM.addPass(TMFuzzStrategyPass());
+				            return true;
+			            }
+			            return false;
+		            });
+	        }};
 }

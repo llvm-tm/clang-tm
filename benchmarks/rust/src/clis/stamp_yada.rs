@@ -11,10 +11,15 @@ const SPACING: f64 = 4.0;
 const PI: f64 = std::f64::consts::PI;
 
 #[derive(Clone, Copy)]
-struct Point { x: f64, y: f64 }
+struct Point {
+    x: f64,
+    y: f64,
+}
 
 impl PartialEq for Point {
-    fn eq(&self, other: &Self) -> bool { self.x == other.x && self.y == other.y }
+    fn eq(&self, other: &Self) -> bool {
+        self.x == other.x && self.y == other.y
+    }
 }
 impl Eq for Point {}
 impl std::hash::Hash for Point {
@@ -25,7 +30,10 @@ impl std::hash::Hash for Point {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct Edge { a: Point, b: Point }
+struct Edge {
+    a: Point,
+    b: Point,
+}
 
 fn make_edge(a: Point, b: Point) -> Edge {
     if b.x < a.x || (b.x == a.x && b.y < a.y) {
@@ -43,13 +51,17 @@ fn dist2(a: Point, b: Point) -> f64 {
 
 fn circumcircle(a: Point, b: Point, c: Point) -> (f64, f64, f64) {
     let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
-    if d.abs() < 1e-15 { return (0.0, 0.0, 1e15); }
+    if d.abs() < 1e-15 {
+        return (0.0, 0.0, 1e15);
+    }
     let cx = ((a.x * a.x + a.y * a.y) * (b.y - c.y)
         + (b.x * b.x + b.y * b.y) * (c.y - a.y)
-        + (c.x * c.x + c.y * c.y) * (a.y - b.y)) / d;
+        + (c.x * c.x + c.y * c.y) * (a.y - b.y))
+        / d;
     let cy = ((a.x * a.x + a.y * a.y) * (c.x - b.x)
         + (b.x * b.x + b.y * b.y) * (a.x - c.x)
-        + (c.x * c.x + c.y * c.y) * (b.x - a.x)) / d;
+        + (c.x * c.x + c.y * c.y) * (b.x - a.x))
+        / d;
     let cr = dist2(Point { x: cx, y: cy }, a).sqrt();
     (cx, cy, cr)
 }
@@ -57,14 +69,18 @@ fn circumcircle(a: Point, b: Point, c: Point) -> (f64, f64, f64) {
 fn angle_at(p: Point, q: Point, r: Point) -> f64 {
     let d1 = dist2(p, q).sqrt();
     let d2 = dist2(p, r).sqrt();
-    if d1 < 1e-15 || d2 < 1e-15 { return 180.0; }
+    if d1 < 1e-15 || d2 < 1e-15 {
+        return 180.0;
+    }
     let dot = ((q.x - p.x) * (r.x - p.x) + (q.y - p.y) * (r.y - p.y)) / (d1 * d2);
     let dot = dot.clamp(-1.0, 1.0);
     dot.acos() * 180.0 / PI
 }
 
 fn tri_min_angle(a: Point, b: Point, c: Point) -> f64 {
-    angle_at(a, b, c).min(angle_at(b, a, c)).min(angle_at(c, a, b))
+    angle_at(a, b, c)
+        .min(angle_at(b, a, c))
+        .min(angle_at(c, a, b))
 }
 
 fn is_encroached(edge_a: Point, edge_b: Point, c: Point) -> bool {
@@ -77,13 +93,17 @@ fn is_encroached(edge_a: Point, edge_b: Point, c: Point) -> bool {
 // ── LCG matching yada C++ pattern ────────────────────────────────
 struct Lcg(u32);
 impl Lcg {
-    fn new(seed: u32) -> Self { Lcg(if seed == 0 { 1 } else { seed }) }
+    fn new(seed: u32) -> Self {
+        Lcg(if seed == 0 { 1 } else { seed })
+    }
     fn next(&mut self) -> u32 {
         self.0 = self.0.wrapping_mul(1103515245).wrapping_add(12345);
         self.0 & 0x7fffffff
     }
 }
-fn uniform(rng: &mut Lcg) -> f64 { rng.next() as f64 / 2147483648.0 }
+fn uniform(rng: &mut Lcg) -> f64 {
+    rng.next() as f64 / 2147483648.0
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -99,9 +119,18 @@ fn main() {
                 println!("yada test: {} failures", fails);
                 std::process::exit(if fails == 0 { 0 } else { 1 });
             }
-            "-a" => { i += 1; angle_constraint = args[i].parse().unwrap(); }
-            "-j" => { i += 1; jitter = args[i].parse().unwrap(); }
-            "-p" | "-t" => { i += 1; num_threads = args[i].parse().unwrap(); }
+            "-a" => {
+                i += 1;
+                angle_constraint = args[i].parse().unwrap();
+            }
+            "-j" => {
+                i += 1;
+                jitter = args[i].parse().unwrap();
+            }
+            "-p" | "-t" => {
+                i += 1;
+                num_threads = args[i].parse().unwrap();
+            }
             _ => {}
         }
         i += 1;
@@ -143,12 +172,16 @@ fn main() {
 
     // ── Compute neighbors ───────────────────────────────────────
     let nbr_cnt_cell: std::cell::RefCell<Vec<i64>> = std::cell::RefCell::new(vec![0i64; nelem]);
-    let nbr_data_cell: std::cell::RefCell<Vec<i64>> = std::cell::RefCell::new(vec![0i64; nelem * MAX_NEIGHBORS]);
+    let nbr_data_cell: std::cell::RefCell<Vec<i64>> =
+        std::cell::RefCell::new(vec![0i64; nelem * MAX_NEIGHBORS]);
     for i in 0..nelem {
         let (a1, b1, c1) = init_pts[i];
         for j in (i + 1)..nelem {
             let (a2, b2, c2) = init_pts[j];
-            let share = [a1, b1, c1].iter().filter(|&p| *p == a2 || *p == b2 || *p == c2).count();
+            let share = [a1, b1, c1]
+                .iter()
+                .filter(|&p| *p == a2 || *p == b2 || *p == c2)
+                .count();
             if share == 2 {
                 let mut cnt = nbr_cnt_cell.borrow_mut();
                 let mut data = nbr_data_cell.borrow_mut();
@@ -165,17 +198,38 @@ fn main() {
     let init_nbr_data = nbr_data_cell.into_inner();
 
     // ── Compute circumcircles and min angles ────────────────────
-    let init_circ_x: Vec<f64> = init_pts.iter().map(|&(a,b,c)| circumcircle(a,b,c).0).collect();
-    let init_circ_y: Vec<f64> = init_pts.iter().map(|&(a,b,c)| circumcircle(a,b,c).1).collect();
-    let init_circ_r: Vec<f64> = init_pts.iter().map(|&(a,b,c)| circumcircle(a,b,c).2).collect();
-    let init_min_angle: Vec<f64> = init_pts.iter().map(|&(a,b,c)| tri_min_angle(a,b,c)).collect();
-    let init_encroached: Vec<i64> = init_pts.iter().map(|&(a,b,c)| {
-        let mut e = 0;
-        if is_encroached(a, b, c) { e = 1; }
-        if is_encroached(b, c, a) { e = 1; }
-        if is_encroached(c, a, b) { e = 1; }
-        e
-    }).collect();
+    let init_circ_x: Vec<f64> = init_pts
+        .iter()
+        .map(|&(a, b, c)| circumcircle(a, b, c).0)
+        .collect();
+    let init_circ_y: Vec<f64> = init_pts
+        .iter()
+        .map(|&(a, b, c)| circumcircle(a, b, c).1)
+        .collect();
+    let init_circ_r: Vec<f64> = init_pts
+        .iter()
+        .map(|&(a, b, c)| circumcircle(a, b, c).2)
+        .collect();
+    let init_min_angle: Vec<f64> = init_pts
+        .iter()
+        .map(|&(a, b, c)| tri_min_angle(a, b, c))
+        .collect();
+    let init_encroached: Vec<i64> = init_pts
+        .iter()
+        .map(|&(a, b, c)| {
+            let mut e = 0;
+            if is_encroached(a, b, c) {
+                e = 1;
+            }
+            if is_encroached(b, c, a) {
+                e = 1;
+            }
+            if is_encroached(c, a, b) {
+                e = 1;
+            }
+            e
+        })
+        .collect();
 
     // ── Allocate TM-tracked arrays ─────────────────────────────
     // All fields use TmCell so they can be read/written inside transaction closures.
@@ -184,34 +238,65 @@ fn main() {
     let encroached: Vec<TmCell<i64>> = (0..MAX_ELEMENTS).map(|_| TmCell::new(0)).collect();
     let is_garbage: Vec<TmCell<i64>> = (0..MAX_ELEMENTS).map(|_| TmCell::new(0)).collect();
     let is_referenced: Vec<TmCell<i64>> = (0..MAX_ELEMENTS).map(|_| TmCell::new(0)).collect();
-    let nbr_cnt: Vec<TmCell<i64>> = (0..MAX_ELEMENTS).map(|i| TmCell::new(if i < nelem { init_nbr_cnt[i] } else { 0 })).collect();
+    let nbr_cnt: Vec<TmCell<i64>> = (0..MAX_ELEMENTS)
+        .map(|i| TmCell::new(if i < nelem { init_nbr_cnt[i] } else { 0 }))
+        .collect();
     let nbr_data: Vec<TmCell<i64>> = (0..MAX_ELEMENTS * MAX_NEIGHBORS)
-        .map(|i| TmCell::new(if i < init_nbr_data.len() { init_nbr_data[i] } else { 0 })).collect();
+        .map(|i| {
+            TmCell::new(if i < init_nbr_data.len() {
+                init_nbr_data[i]
+            } else {
+                0
+            })
+        })
+        .collect();
     let work_heap: Vec<TmCell<i64>> = (0..MAX_ELEMENTS).map(|_| TmCell::new(0)).collect();
     let work_heap_cnt = TmCell::new(0i64);
     let elem_count = TmCell::new(nelem as i64);
 
     // Geometry — also TmCell for mutation inside transactions
-    let pt_x: Vec<TmCell<f64>> = (0..MAX_ELEMENTS * 3).map(|i| {
-        TmCell::new(if i / 3 < nelem {
-            let (a, b, c) = init_pts[i / 3];
-            match i % 3 { 0 => a.x, 1 => b.x, 2 => c.x, _ => unreachable!() }
-        } else { 0.0 })
-    }).collect();
-    let pt_y: Vec<TmCell<f64>> = (0..MAX_ELEMENTS * 3).map(|i| {
-        TmCell::new(if i / 3 < nelem {
-            let (a, b, c) = init_pts[i / 3];
-            match i % 3 { 0 => a.y, 1 => b.y, 2 => c.y, _ => unreachable!() }
-        } else { 0.0 })
-    }).collect();
+    let pt_x: Vec<TmCell<f64>> = (0..MAX_ELEMENTS * 3)
+        .map(|i| {
+            TmCell::new(if i / 3 < nelem {
+                let (a, b, c) = init_pts[i / 3];
+                match i % 3 {
+                    0 => a.x,
+                    1 => b.x,
+                    2 => c.x,
+                    _ => unreachable!(),
+                }
+            } else {
+                0.0
+            })
+        })
+        .collect();
+    let pt_y: Vec<TmCell<f64>> = (0..MAX_ELEMENTS * 3)
+        .map(|i| {
+            TmCell::new(if i / 3 < nelem {
+                let (a, b, c) = init_pts[i / 3];
+                match i % 3 {
+                    0 => a.y,
+                    1 => b.y,
+                    2 => c.y,
+                    _ => unreachable!(),
+                }
+            } else {
+                0.0
+            })
+        })
+        .collect();
     let circ_x: Vec<TmCell<f64>> = (0..MAX_ELEMENTS)
-        .map(|i| TmCell::new(if i < nelem { init_circ_x[i] } else { 0.0 })).collect();
+        .map(|i| TmCell::new(if i < nelem { init_circ_x[i] } else { 0.0 }))
+        .collect();
     let circ_y: Vec<TmCell<f64>> = (0..MAX_ELEMENTS)
-        .map(|i| TmCell::new(if i < nelem { init_circ_y[i] } else { 0.0 })).collect();
+        .map(|i| TmCell::new(if i < nelem { init_circ_y[i] } else { 0.0 }))
+        .collect();
     let circ_r: Vec<TmCell<f64>> = (0..MAX_ELEMENTS)
-        .map(|i| TmCell::new(if i < nelem { init_circ_r[i] } else { 0.0 })).collect();
+        .map(|i| TmCell::new(if i < nelem { init_circ_r[i] } else { 0.0 }))
+        .collect();
     let min_angle: Vec<TmCell<f64>> = (0..MAX_ELEMENTS)
-        .map(|i| TmCell::new(if i < nelem { init_min_angle[i] } else { 0.0 })).collect();
+        .map(|i| TmCell::new(if i < nelem { init_min_angle[i] } else { 0.0 }))
+        .collect();
 
     // ── Initial work heap ───────────────────────────────────────
     let init_bad = transaction(|tx| {
@@ -244,8 +329,10 @@ fn main() {
         circ_r: circ_r.into(),
         min_angle: min_angle.into(),
     };
-    eprintln!("  Initial elements: {}  Bad: {} (angle constraint={}°)",
-              nelem, init_bad, angle_constraint);
+    eprintln!(
+        "  Initial elements: {}  Bad: {} (angle constraint={}°)",
+        nelem, init_bad, angle_constraint
+    );
 
     let stop = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicI64::new(0));
@@ -268,7 +355,9 @@ fn main() {
                     // ── TX 1: Pop work ──────────────────────────
                     let el_id = transaction(|tx| {
                         let n = tx.read(&d.work_heap_cnt);
-                        if n == 0 { return -1i64 }
+                        if n == 0 {
+                            return -1i64;
+                        }
                         let mut best_i = 0usize;
                         let mut best_id = tx.read(&d.work_heap[0]);
                         let mut max_enc = tx.read(&d.encroached[best_id as usize]);
@@ -305,7 +394,9 @@ fn main() {
                         continue;
                     }
 
-                    transaction(|tx| { tx.write(&d.is_referenced[el_id as usize], 0); });
+                    transaction(|tx| {
+                        tx.write(&d.is_referenced[el_id as usize], 0);
+                    });
 
                     let _old_count = transaction(|tx| tx.read(&d.elem_count));
 
@@ -394,7 +485,9 @@ fn main() {
 
                         for edge in &edges {
                             let tid = tx.read(&d.elem_count) as usize;
-                            if tid >= maxel { break; }
+                            if tid >= maxel {
+                                break;
+                            }
                             tx.write(&d.elem_count, tid as i64 + 1);
 
                             tx.write(&d.pt_x[tid * 3], centroid.x);
@@ -416,10 +509,18 @@ fn main() {
                             tx.write(&d.is_referenced[tid], 0);
 
                             let mut enc = false;
-                            if is_encroached(centroid, edge.a, edge.b) { enc = true; }
-                            if is_encroached(edge.a, edge.b, centroid) { enc = true; }
-                            if is_encroached(edge.b, centroid, edge.a) { enc = true; }
-                            if enc { tx.write(&d.encroached[tid], 1); }
+                            if is_encroached(centroid, edge.a, edge.b) {
+                                enc = true;
+                            }
+                            if is_encroached(edge.a, edge.b, centroid) {
+                                enc = true;
+                            }
+                            if is_encroached(edge.b, centroid, edge.a) {
+                                enc = true;
+                            }
+                            if enc {
+                                tx.write(&d.encroached[tid], 1);
+                            }
 
                             if ma < ac || enc {
                                 if tx.read(&d.is_referenced[tid]) == 0 {
@@ -467,7 +568,6 @@ fn main() {
                         });
                         total_ops.fetch_add(1, Ordering::Relaxed);
                     }
-
                 }
 
                 tm_exit_thread();
@@ -481,14 +581,18 @@ fn main() {
     let final_garb = transaction(|tx| {
         let mut g = 0i64;
         for i in 0..final_ec as usize {
-            if tx.read(&shared_alloc.is_garbage[i]) != 0 { g += 1; }
+            if tx.read(&shared_alloc.is_garbage[i]) != 0 {
+                g += 1;
+            }
         }
         g
     });
 
     println!("\nResults ({} ms):", elapsed.as_millis());
-    println!("  Operations: {}  Total elements: {} (garbage: {})",
-             ops, final_ec, final_garb);
+    println!(
+        "  Operations: {}  Total elements: {} (garbage: {})",
+        ops, final_ec, final_garb
+    );
     println!("  Time: {:.6} sec", elapsed.as_secs_f64());
     println!("  Rate: {:.0} ops/sec", ops as f64 / elapsed.as_secs_f64());
     println!("  PASS");
@@ -536,16 +640,28 @@ mod tests {
         assert!((cx - 0.5).abs() < 1e-10, "cx = {}", cx);
         assert!((cy - 0.5).abs() < 1e-10, "cy = {}", cy);
         let expected_r = (2.0f64).sqrt() / 2.0;
-        assert!((cr - expected_r).abs() < 1e-10, "cr = {}, expected = {}", cr, expected_r);
+        assert!(
+            (cr - expected_r).abs() < 1e-10,
+            "cr = {}, expected = {}",
+            cr,
+            expected_r
+        );
     }
 
     #[test]
     fn test_tri_min_angle_equilateral() {
         let a = Point { x: 0.0, y: 0.0 };
         let b = Point { x: 1.0, y: 0.0 };
-        let c = Point { x: 0.5, y: (3.0f64).sqrt() / 2.0 };
+        let c = Point {
+            x: 0.5,
+            y: (3.0f64).sqrt() / 2.0,
+        };
         let angle = tri_min_angle(a, b, c);
-        assert!((angle - 60.0).abs() < 1e-10, "angle = {}, expected 60", angle);
+        assert!(
+            (angle - 60.0).abs() < 1e-10,
+            "angle = {}, expected 60",
+            angle
+        );
     }
 
     #[test]
@@ -554,7 +670,11 @@ mod tests {
         let b = Point { x: 1.0, y: 0.0 };
         let c = Point { x: 0.0, y: 1.0 };
         let angle = tri_min_angle(a, b, c);
-        assert!((angle - 45.0).abs() < 1e-10, "angle = {}, expected 45", angle);
+        assert!(
+            (angle - 45.0).abs() < 1e-10,
+            "angle = {}, expected 45",
+            angle
+        );
     }
 
     #[test]

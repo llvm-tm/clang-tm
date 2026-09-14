@@ -14,108 +14,112 @@
  */
 
 #include "test_helpers.hpp"
-#include <thread>
 #include <chrono>
 #include <pthread.h>
+#include <thread>
 
 static constexpr int NUM_THREADS = 2;
 static constexpr int ITERATIONS = 5000;
 
 struct alignas(64) PaddedVar {
-    volatile uint64_t val;
+	volatile uint64_t val;
 };
 
-int main() {
-    printf("Read-Lock Interference Test\n");
-    printf("===========================\n\n");
-    printf("Threads:    %d\n", NUM_THREADS);
-    printf("Iterations: %d per thread\n\n", ITERATIONS);
+int main()
+{
+	printf("Read-Lock Interference Test\n");
+	printf("===========================\n\n");
+	printf("Threads:    %d\n", NUM_THREADS);
+	printf("Iterations: %d per thread\n\n", ITERATIONS);
 
-    tm_init();
-    auto g_a = (PaddedVar*)tm_malloc(sizeof(PaddedVar));
-    auto g_b = (PaddedVar*)tm_malloc(sizeof(PaddedVar));
-    g_a->val = 0;
-    g_b->val = 0;
+	tm_init();
+	auto g_a = (PaddedVar *)tm_malloc(sizeof(PaddedVar));
+	auto g_b = (PaddedVar *)tm_malloc(sizeof(PaddedVar));
+	g_a->val = 0;
+	g_b->val = 0;
 
-    auto start = std::chrono::high_resolution_clock::now();
+	auto start = std::chrono::high_resolution_clock::now();
 
-    pthread_barrier_t bar;
-    pthread_barrier_init(&bar, NULL, NUM_THREADS + 1);
-    std::thread t0([&]() {
-        tm_init_thread();
-        tm_nested_call_counter++;
-        for (int i = 0; i < ITERATIONS; ++i) {
-            pthread_barrier_wait(&bar);
-            tm_transaction([&]() {
-                // Read both — overlap with thread 1's read set
-                uint64_t av = tm_r8((uint64_t*)&g_a->val);
-                uint64_t bv = tm_r8((uint64_t*)&g_b->val);
-                (void)av; (void)bv;
-                tm_w8((uint64_t*)&g_a->val, g_a->val + 1);
-            });
-            pthread_barrier_wait(&bar);
-        }
-        tm_nested_call_counter--;
-        tm_exit_thread();
-    });
+	pthread_barrier_t bar;
+	pthread_barrier_init(&bar, NULL, NUM_THREADS + 1);
+	std::thread t0([&]() {
+		tm_init_thread();
+		tm_nested_call_counter++;
+		for (int i = 0; i < ITERATIONS; ++i) {
+			pthread_barrier_wait(&bar);
+			tm_transaction([&]() {
+				// Read both — overlap with thread 1's read set
+				uint64_t av = tm_r8((uint64_t *)&g_a->val);
+				uint64_t bv = tm_r8((uint64_t *)&g_b->val);
+				(void)av;
+				(void)bv;
+				tm_w8((uint64_t *)&g_a->val, g_a->val + 1);
+			});
+			pthread_barrier_wait(&bar);
+		}
+		tm_nested_call_counter--;
+		tm_exit_thread();
+	});
 
-    std::thread t1([&]() {
-        tm_init_thread();
-        tm_nested_call_counter++;
-        for (int i = 0; i < ITERATIONS; ++i) {
-            pthread_barrier_wait(&bar);
-            tm_transaction([&]() {
-                // Read both — overlap with thread 0's read set
-                uint64_t av = tm_r8((uint64_t*)&g_a->val);
-                uint64_t bv = tm_r8((uint64_t*)&g_b->val);
-                (void)av; (void)bv;
-                tm_w8((uint64_t*)&g_b->val, g_b->val + 1);
-            });
-            pthread_barrier_wait(&bar);
-        }
-        tm_exit_thread();
-    });
+	std::thread t1([&]() {
+		tm_init_thread();
+		tm_nested_call_counter++;
+		for (int i = 0; i < ITERATIONS; ++i) {
+			pthread_barrier_wait(&bar);
+			tm_transaction([&]() {
+				// Read both — overlap with thread 0's read set
+				uint64_t av = tm_r8((uint64_t *)&g_a->val);
+				uint64_t bv = tm_r8((uint64_t *)&g_b->val);
+				(void)av;
+				(void)bv;
+				tm_w8((uint64_t *)&g_b->val, g_b->val + 1);
+			});
+			pthread_barrier_wait(&bar);
+		}
+		tm_exit_thread();
+	});
 
-    // Drive the main barrier
-    for (int i = 0; i < ITERATIONS; ++i) {
-        pthread_barrier_wait(&bar);
-        pthread_barrier_wait(&bar);
-    }
+	// Drive the main barrier
+	for (int i = 0; i < ITERATIONS; ++i) {
+		pthread_barrier_wait(&bar);
+		pthread_barrier_wait(&bar);
+	}
 
-    t0.join();
-    t1.join();
-    pthread_barrier_destroy(&bar);
+	t0.join();
+	t1.join();
+	pthread_barrier_destroy(&bar);
 
-    auto end = std::chrono::high_resolution_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+	auto end = std::chrono::high_resolution_clock::now();
+	auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
-    tm_exit();
+	tm_exit();
 
-    uint64_t final_a = g_a->val;
-    uint64_t final_b = g_b->val;
-    uint64_t expected_a = ITERATIONS;
-    uint64_t expected_b = ITERATIONS;
+	uint64_t final_a = g_a->val;
+	uint64_t final_b = g_b->val;
+	uint64_t expected_a = ITERATIONS;
+	uint64_t expected_b = ITERATIONS;
 
-    printf("A = %llu (expected %llu)\n",
-           (unsigned long long)final_a, (unsigned long long)expected_a);
-    printf("B = %llu (expected %llu)\n",
-           (unsigned long long)final_b, (unsigned long long)expected_b);
-    printf("Total TXs attempted: %d\n", 2 * ITERATIONS);
-    printf("Total increments:    %llu\n",
-           (unsigned long long)(final_a + final_b));
-    printf("Time: %llu ms\n\n", (unsigned long long)ms.count());
+	printf("A = %llu (expected %llu)\n",
+	       (unsigned long long)final_a,
+	       (unsigned long long)expected_a);
+	printf("B = %llu (expected %llu)\n",
+	       (unsigned long long)final_b,
+	       (unsigned long long)expected_b);
+	printf("Total TXs attempted: %d\n", 2 * ITERATIONS);
+	printf("Total increments:    %llu\n", (unsigned long long)(final_a + final_b));
+	printf("Time: %llu ms\n\n", (unsigned long long)ms.count());
 
-    int fail = 0;
-    if (final_a + final_b == 0) {
-        printf("  FAIL: no increments — hang or livelock\n");
-        fail = 1;
-    } else if (ms.count() > 30000) {
-        printf("  FAIL: completed but abnormally slow (%llu ms)\n",
-               (unsigned long long)ms.count());
-        fail = 1;
-    } else {
-        printf("  PASS (%llu ms, no hang)\n", (unsigned long long)ms.count());
-    }
-    printf("\n  Result: %s\n", fail ? "FAIL" : "PASS");
-    return fail;
+	int fail = 0;
+	if (final_a + final_b == 0) {
+		printf("  FAIL: no increments — hang or livelock\n");
+		fail = 1;
+	} else if (ms.count() > 30000) {
+		printf("  FAIL: completed but abnormally slow (%llu ms)\n",
+		       (unsigned long long)ms.count());
+		fail = 1;
+	} else {
+		printf("  PASS (%llu ms, no hang)\n", (unsigned long long)ms.count());
+	}
+	printf("\n  Result: %s\n", fail ? "FAIL" : "PASS");
+	return fail;
 }

@@ -2,9 +2,9 @@ pub mod ffi;
 pub mod sim_state;
 
 use sim_state::LiveSimState;
-use std::sync::Mutex;
-use std::ffi::{CString, CStr};
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::sync::Mutex;
 
 /// Global live simulation state, accessed by the C FFI functions.
 static LIVE_STATE: Mutex<Option<LiveSimState>> = Mutex::new(None);

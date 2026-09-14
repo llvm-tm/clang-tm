@@ -29,9 +29,11 @@ public:
 		TM_DEBUG("TMClonePass: cloning %d tx-reachable functions",
 		         (int)S->TxReachableFuncs.size());
 
-		auto &ClonedMap = tm_method_instrumentation::cloneTxReachableGraph(
-		    M, S->TxReachableFuncs, S->H,
-		    tm_method_instrumentation::CloneMode::CloneOnly);
+		auto &ClonedMap = tm_method_instrumentation::
+		    cloneTxReachableGraph(M,
+		                          S->TxReachableFuncs,
+		                          S->H,
+		                          tm_method_instrumentation::CloneMode::CloneOnly);
 
 		S->ClonedMap.clear();
 		for (auto &pair : ClonedMap)

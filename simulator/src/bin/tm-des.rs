@@ -1,13 +1,13 @@
 use clap::Parser;
 use std::path::Path;
 use tm_des::{
-    Cli,
     calibration::{self, calibration_to_machine_profile},
     cost_model::BackendProfile,
     engine::{ClockMode, SimState},
     machine_profile::MachineProfile,
-    trace::Trace,
     ser,
+    trace::Trace,
+    Cli,
 };
 
 fn main() {
@@ -39,8 +39,12 @@ fn main() {
     if let Some(ref cal_path) = cli.calibration {
         match calibration::load_calibration(Path::new(cal_path)) {
             Ok(records) => {
-                let profile = calibration_to_machine_profile(&records, "calibrated", 0.0,
-                    &format!("Auto-generated from {}", cal_path));
+                let profile = calibration_to_machine_profile(
+                    &records,
+                    "calibrated",
+                    0.0,
+                    &format!("Auto-generated from {}", cal_path),
+                );
                 // Compute effective frequency if records contain depth_cycles info
                 if let Some(avg) = calibration::average_records(&records) {
                     if avg.depth_cycles > 0.0 && avg.samples > 0 {
@@ -51,23 +55,35 @@ fn main() {
                         state.effective_freq_ghz = profile.freq_ghz;
                     }
                 }
-                eprintln!("Loaded calibration from '{}': {} records, {} backends",
-                          cal_path, records.len(), profile.backends.len());
+                eprintln!(
+                    "Loaded calibration from '{}': {} records, {} backends",
+                    cal_path,
+                    records.len(),
+                    profile.backends.len()
+                );
                 state.set_machine_profile(profile);
             }
             Err(e) => {
-                eprintln!("Warning: failed to load calibration '{}': {}; using defaults", cal_path, e);
+                eprintln!(
+                    "Warning: failed to load calibration '{}': {}; using defaults",
+                    cal_path, e
+                );
             }
         }
     } else if let Some(ref mp_path) = cli.machine_profile {
         match MachineProfile::load(Path::new(mp_path)) {
             Ok(profile) => {
-                eprintln!("Loaded machine profile from '{}': {} @ {:.1} GHz",
-                          mp_path, profile.cpu, profile.freq_ghz);
+                eprintln!(
+                    "Loaded machine profile from '{}': {} @ {:.1} GHz",
+                    mp_path, profile.cpu, profile.freq_ghz
+                );
                 state.set_machine_profile(profile);
             }
             Err(e) => {
-                eprintln!("Warning: failed to load machine profile '{}': {}; using defaults", mp_path, e);
+                eprintln!(
+                    "Warning: failed to load machine profile '{}': {}; using defaults",
+                    mp_path, e
+                );
             }
         }
     }
@@ -75,7 +91,10 @@ fn main() {
     // Apply backend profile from CLI
     if cli.backend != "default" {
         let backend = BackendProfile::from_name(&cli.backend);
-        eprintln!("Using backend profile: {:?} (from '{}')", backend, cli.backend);
+        eprintln!(
+            "Using backend profile: {:?} (from '{}')",
+            backend, cli.backend
+        );
         state.set_backend_profile(backend);
     }
 
@@ -144,9 +163,9 @@ fn main() {
     // Write processed events to output file
     if !processed.is_empty() {
         let out_path = cli.output.as_deref().unwrap_or("tm-des.output.jsonl");
-        if let Err(e) = (tm_des::trace::Trace { events: processed }).to_jsonl(
-            &mut std::fs::File::create(out_path).unwrap()
-        ) {
+        if let Err(e) = (tm_des::trace::Trace { events: processed })
+            .to_jsonl(&mut std::fs::File::create(out_path).unwrap())
+        {
             eprintln!("Output error: {}", e);
         } else {
             eprintln!("Output written to '{}'", out_path);

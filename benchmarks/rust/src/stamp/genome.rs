@@ -1,7 +1,7 @@
+use super::Config;
+use crate::Rng;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use crate::Rng;
-use super::Config;
 
 fn str_hash(s: &[u8], start: usize, len: usize) -> u64 {
     let mut h = 0u64;
@@ -15,20 +15,37 @@ pub fn test() -> i32 {
     let mut fails = 0;
     let mut rng = Rng::new(42);
     let bases = [b'a', b'c', b'g', b't'];
-    let gene_len = 100; let seg_len = 10;
-    let gene: Vec<u8> = (0..gene_len).map(|_| bases[(rng.next() % 4) as usize]).collect();
-    if gene.len() != 100 { eprintln!("FAIL: gene length {}", gene.len()); fails += 1; }
+    let gene_len = 100;
+    let seg_len = 10;
+    let gene: Vec<u8> = (0..gene_len)
+        .map(|_| bases[(rng.next() % 4) as usize])
+        .collect();
+    if gene.len() != 100 {
+        eprintln!("FAIL: gene length {}", gene.len());
+        fails += 1;
+    }
     for _ in 0..50 {
         let start = (rng.next() as usize) % (gene_len - seg_len);
         let seg = &gene[start..start + seg_len];
-        if seg.len() != seg_len { eprintln!("FAIL: segment length"); fails += 1; }
-        if seg.len() > gene.len() { eprintln!("FAIL: segment > gene"); fails += 1; }
+        if seg.len() != seg_len {
+            eprintln!("FAIL: segment length");
+            fails += 1;
+        }
+        if seg.len() > gene.len() {
+            eprintln!("FAIL: segment > gene");
+            fails += 1;
+        }
     }
     // Test str_hash
     let h1 = str_hash(&gene, 0, 5);
     let h2 = str_hash(&gene, 0, 5);
-    if h1 != h2 { eprintln!("FAIL: hash not deterministic"); fails += 1; }
-    if fails > 0 { eprintln!("genome: {} test(s) failed", fails); }
+    if h1 != h2 {
+        eprintln!("FAIL: hash not deterministic");
+        fails += 1;
+    }
+    if fails > 0 {
+        eprintln!("genome: {} test(s) failed", fails);
+    }
     fails
 }
 
@@ -37,14 +54,18 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
     let gene_len = config.gene_length.max(1).min(1 << 20);
     let seg_len = config.segment_length.max(1).min(gene_len - 1);
     let num_seg = config.num_segments.max(1).min(1 << 20);
-    println!("  Gene length: {}  Segment length: {}  Segments: {}",
-             gene_len, seg_len, num_seg);
+    println!(
+        "  Gene length: {}  Segment length: {}  Segments: {}",
+        gene_len, seg_len, num_seg
+    );
 
     let mut rng = Rng::new(42);
     let bases = [b'a', b'c', b'g', b't'];
 
     // Generate gene
-    let gene: Vec<u8> = (0..gene_len).map(|_| bases[(rng.next() % 4) as usize]).collect();
+    let gene: Vec<u8> = (0..gene_len)
+        .map(|_| bases[(rng.next() % 4) as usize])
+        .collect();
 
     // Generate segments
     let segments: Vec<Vec<u8>> = (0..num_seg)
@@ -71,13 +92,19 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
     let mut matches = 0u64;
     for j in (1..seg_len).rev() {
         for (idx, s) in unique_segs.iter().enumerate() {
-            if s.len() <= j { continue; }
+            if s.len() <= j {
+                continue;
+            }
             let end_h = str_hash(s, s.len() - j, j);
             if let Some(candidates) = hash_table.get(&end_h) {
                 for &cidx in candidates {
-                    if cidx == idx { continue; }
+                    if cidx == idx {
+                        continue;
+                    }
                     let cs = &unique_segs[cidx];
-                    if cs.len() < j { continue; }
+                    if cs.len() < j {
+                        continue;
+                    }
                     if s[s.len() - j..s.len()] == cs[0..j] {
                         matches += 1;
                     }

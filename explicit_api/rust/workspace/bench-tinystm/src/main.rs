@@ -31,7 +31,9 @@ fn single_tx() {
 
 fn multi_tx(num_threads: usize) {
     let cells = Arc::new(
-        (0..NUM_CELLS).map(|i| TmCell::new(i as u64)).collect::<Vec<_>>(),
+        (0..NUM_CELLS)
+            .map(|i| TmCell::new(i as u64))
+            .collect::<Vec<_>>(),
     );
     let stop = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();

@@ -11,22 +11,20 @@ extern "C" void (*tm_wait_prev_tx)(void);
 
 static int counter = 0;
 
-__attribute__((noinline, annotate("async_shared")))
-void async_add_one() {
-    counter++;
-}
+__attribute__((noinline, annotate("async_shared"))) void async_add_one() { counter++; }
 
-MAIN int main() {
-    counter = 0;
-    async_add_one();
-    async_add_one();
-    tm_wait_prev_tx();
-    int expected = 2;
-    if (counter == expected) {
-        printf("PASS\n");
-        return 0;
-    } else {
-        printf("FAIL: counter=%d expected=%d\n", counter, expected);
-        return 1;
-    }
+MAIN int main()
+{
+	counter = 0;
+	async_add_one();
+	async_add_one();
+	tm_wait_prev_tx();
+	int expected = 2;
+	if (counter == expected) {
+		printf("PASS\n");
+		return 0;
+	} else {
+		printf("FAIL: counter=%d expected=%d\n", counter, expected);
+		return 1;
+	}
 }

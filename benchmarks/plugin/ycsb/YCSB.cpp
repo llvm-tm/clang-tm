@@ -21,6 +21,8 @@
  * - Optional: Uniform, Latest
  */
 
+#include "tm_safe_map.hpp"
+#include "tm_vector.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -29,8 +31,6 @@
 #include <mutex>
 #include <random>
 #include <thread>
-#include "tm_safe_map.hpp"
-#include "tm_vector.hpp"
 
 #define TM __attribute__((annotate("tm")))
 #define TX __attribute__((annotate("shared"), noinline))

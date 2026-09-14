@@ -25,15 +25,15 @@ int tm_serialize_unlock_all();
 
 #include "tinystm_globals.hpp"
 #include "tm_alloc_overrides.hpp"
-#include "tm_thread_state.hpp"
+#include "tm_backend_macros.hpp"
 #include "tm_hooks.hpp"
 #include "tm_platform.hpp" // stm::tm_backtrace_print (portable, musl-safe)
-#include "tm_backend_macros.hpp"
+#include "tm_thread_state.hpp"
 
 // Shared TLS variables (defined in tm_hooks.cpp, used by all backends)
 extern "C" {
-extern __thread int32_t    tm_nested_call_counter;
-extern __thread int32_t    tm_longjmp_ret;
+extern __thread int32_t tm_nested_call_counter;
+extern __thread int32_t tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;
 }
 
@@ -151,13 +151,10 @@ static void do_tm_init_thread()
 #endif
 }
 
-static void do_tm_exit_thread()
-{
-	tm_hook_exit_thread();
-}
+static void do_tm_exit_thread() { tm_hook_exit_thread(); }
 
-void (*tm_init)()        = do_tm_init;
-void (*tm_exit)()        = do_tm_exit;
+void (*tm_init)() = do_tm_init;
+void (*tm_exit)() = do_tm_exit;
 void (*tm_init_thread)() = do_tm_init_thread;
 void (*tm_exit_thread)() = do_tm_exit_thread;
 
@@ -273,17 +270,11 @@ static __thread TMThreadState g_tm_thread_state = {0, 0};
 //  Hook implementations (static; registered via tm_register_real_hooks)
 // ═══════════════════════════════════════════════════════════════════
 
-static void *real_tm_get_env() {
-    return (void*)&tm_jmpbuf;
-}
+static void *real_tm_get_env() { return (void *)&tm_jmpbuf; }
 
-static void real_tm_set_jmpbuf(void *buf) {
-    tinystm::jmpbuf = (sigjmp_buf *)buf;
-}
+static void real_tm_set_jmpbuf(void *buf) { tinystm::jmpbuf = (sigjmp_buf *)buf; }
 
-static void *real_tm_get_thread_state() {
-    return &g_tm_thread_state;
-}
+static void *real_tm_get_thread_state() { return &g_tm_thread_state; }
 
 static void real_tm_begin()
 {
@@ -291,7 +282,7 @@ static void real_tm_begin()
 	tm_begin_count++;
 	auto *ts = real_tm_get_thread_state();
 	int32_t tc = tm_nested_call_counter;
-	int32_t sc = ((TMThreadState*)ts)->nested_call_counter;
+	int32_t sc = ((TMThreadState *)ts)->nested_call_counter;
 	if (tc > 0 && sc == 0)
 		g_tm_expli_mode = true;
 	else if (sc > 0 && tc == 0)
@@ -329,7 +320,7 @@ static void real_tm_end()
 	tm_end_count++;
 	auto *ts = real_tm_get_thread_state();
 	int32_t tc = tm_nested_call_counter;
-	int32_t sc = ((TMThreadState*)ts)->nested_call_counter;
+	int32_t sc = ((TMThreadState *)ts)->nested_call_counter;
 	int32_t c = (tc > 0) ? tc : sc;
 	if (c == 1) {
 		g_in_tx = false;
@@ -392,7 +383,8 @@ static void *real_tm_realloc(void *ptr, size_t size)
 }
 static void real_tm_free(void *ptr)
 {
-	if (!ptr) return;
+	if (!ptr)
+		return;
 	if (g_in_tx) {
 		// Only track deferred frees for addresses in the TM region.
 		// The region allocator reuses addresses across transactions;
@@ -440,8 +432,6 @@ void tm_load_symbols(void *symbol_table, uint32_t symbol_count)
 }
 void consume_ptr(volatile void *ptr) { (void)ptr; }
 
-
-
 } // extern "C"
 
 // ═══════════════════════════════════════════════════════════════════
@@ -466,7 +456,8 @@ TM_REAL_HOOKS_TABLE_EXT(tinystm)
 
 static void tm_delete_impl(void *ptr) noexcept
 {
-	if (!ptr) return;
+	if (!ptr)
+		return;
 	if (stm::isTMAddress(ptr))
 		stm::tm_region_free(ptr);
 	else
@@ -476,8 +467,14 @@ static void tm_delete_impl(void *ptr) noexcept
 void operator delete(void *ptr) noexcept { tm_delete_impl(ptr); }
 void operator delete(void *ptr, size_t) noexcept { tm_delete_impl(ptr); }
 void operator delete(void *ptr, std::align_val_t) noexcept { tm_delete_impl(ptr); }
-void operator delete(void *ptr, size_t, std::align_val_t) noexcept { tm_delete_impl(ptr); }
+void operator delete(void *ptr, size_t, std::align_val_t) noexcept
+{
+	tm_delete_impl(ptr);
+}
 void operator delete[](void *ptr) noexcept { tm_delete_impl(ptr); }
 void operator delete[](void *ptr, size_t) noexcept { tm_delete_impl(ptr); }
 void operator delete[](void *ptr, std::align_val_t) noexcept { tm_delete_impl(ptr); }
-void operator delete[](void *ptr, size_t, std::align_val_t) noexcept { tm_delete_impl(ptr); }
+void operator delete[](void *ptr, size_t, std::align_val_t) noexcept
+{
+	tm_delete_impl(ptr);
+}

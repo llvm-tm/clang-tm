@@ -1,9 +1,9 @@
+use super::Config;
+use crate::Rng;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::cell::RefCell;
 use tm::{transaction, TmCell};
-use crate::Rng;
-use super::Config;
 
 pub fn test() -> i32 {
     let mut fails = 0;
@@ -11,13 +11,26 @@ pub fn test() -> i32 {
     let num = 5;
     let mut num_free = num;
     let mut num_used = 0;
-    num_free -= 1; num_used += 1;
-    if num_free != 4 || num_used != 1 { eprintln!("FAIL: reservation"); fails += 1; }
+    num_free -= 1;
+    num_used += 1;
+    if num_free != 4 || num_used != 1 {
+        eprintln!("FAIL: reservation");
+        fails += 1;
+    }
     num_free += 100;
-    if num_free != 104 { eprintln!("FAIL: add inventory"); fails += 1; }
-    num_free += 1; num_used -= 1;
-    if num_free != 105 || num_used != 0 { eprintln!("FAIL: cancel"); fails += 1; }
-    if fails > 0 { eprintln!("vacation: {} test(s) failed", fails); }
+    if num_free != 104 {
+        eprintln!("FAIL: add inventory");
+        fails += 1;
+    }
+    num_free += 1;
+    num_used -= 1;
+    if num_free != 105 || num_used != 0 {
+        eprintln!("FAIL: cancel");
+        fails += 1;
+    }
+    if fails > 0 {
+        eprintln!("vacation: {} test(s) failed", fails);
+    }
     fails
 }
 
@@ -28,8 +41,10 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
         let qr = (nr as f64 * 0.9) as usize;
         (nr, qr.max(1), 2usize, 98)
     };
-    println!("  Relations: {}  Query range: {}  Queries/TX: {}  User%: {}",
-             num_relations, query_range, num_queries_per_tx, percent_user);
+    println!(
+        "  Relations: {}  Query range: {}  Queries/TX: {}  User%: {}",
+        num_relations, query_range, num_queries_per_tx, percent_user
+    );
 
     // Reservation table entry with TM-tracked fields
     struct ResEntry {
@@ -43,9 +58,12 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     impl ResEntry {
         fn new() -> Self {
             ResEntry {
-                active: TmCell::new(0), id: TmCell::new(0),
-                num_used: TmCell::new(0), num_free: TmCell::new(0),
-                num_total: TmCell::new(0), price: TmCell::new(0),
+                active: TmCell::new(0),
+                id: TmCell::new(0),
+                num_used: TmCell::new(0),
+                num_free: TmCell::new(0),
+                num_total: TmCell::new(0),
+                price: TmCell::new(0),
             }
         }
     }
@@ -58,59 +76,73 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     }
     impl CustEntry {
         fn new() -> Self {
-            CustEntry { active: TmCell::new(0), id: TmCell::new(0), bill: TmCell::new(0) }
+            CustEntry {
+                active: TmCell::new(0),
+                id: TmCell::new(0),
+                bill: TmCell::new(0),
+            }
         }
     }
 
     // Generate initial data — read-only after init
     let mut init_rng = Rng::new(42);
-    let cars: Vec<ResEntry> = (0..num_relations).map(|j| {
-        let e = ResEntry::new();
-        let num = ((init_rng.next() % 5) + 1) as i32 * 100;
-        let p_val = ((init_rng.next() % 5) * 10 + 50) as i32;
-        unsafe {
-            *e.active.ptr() = 1;
-            *e.id.ptr() = (j + 1) as i32;
-            *e.num_used.ptr() = 0;
-            *e.num_free.ptr() = num;
-            *e.num_total.ptr() = num;
-            *e.price.ptr() = p_val;
-        }
-        e
-    }).collect();
-    let rooms: Vec<ResEntry> = (0..num_relations).map(|j| {
-        let e = ResEntry::new();
-        let num = ((init_rng.next() % 5) + 1) as i32 * 100;
-        let p_val = ((init_rng.next() % 5) * 10 + 50) as i32;
-        unsafe {
-            *e.active.ptr() = 1;
-            *e.id.ptr() = (j + 1) as i32;
-            *e.num_used.ptr() = 0;
-            *e.num_free.ptr() = num;
-            *e.num_total.ptr() = num;
-            *e.price.ptr() = p_val;
-        }
-        e
-    }).collect();
-    let flights: Vec<ResEntry> = (0..num_relations).map(|j| {
-        let e = ResEntry::new();
-        let num = ((init_rng.next() % 5) + 1) as i32 * 100;
-        let p_val = ((init_rng.next() % 5) * 10 + 50) as i32;
-        unsafe {
-            *e.active.ptr() = 1;
-            *e.id.ptr() = (j + 1) as i32;
-            *e.num_used.ptr() = 0;
-            *e.num_free.ptr() = num;
-            *e.num_total.ptr() = num;
-            *e.price.ptr() = p_val;
-        }
-        e
-    }).collect();
-    let customers: Vec<CustEntry> = (0..num_relations).map(|j| {
-        let e = CustEntry::new();
-        unsafe { *e.id.ptr() = (j + 1) as i32; }
-        e
-    }).collect();
+    let cars: Vec<ResEntry> = (0..num_relations)
+        .map(|j| {
+            let e = ResEntry::new();
+            let num = ((init_rng.next() % 5) + 1) as i32 * 100;
+            let p_val = ((init_rng.next() % 5) * 10 + 50) as i32;
+            unsafe {
+                *e.active.ptr() = 1;
+                *e.id.ptr() = (j + 1) as i32;
+                *e.num_used.ptr() = 0;
+                *e.num_free.ptr() = num;
+                *e.num_total.ptr() = num;
+                *e.price.ptr() = p_val;
+            }
+            e
+        })
+        .collect();
+    let rooms: Vec<ResEntry> = (0..num_relations)
+        .map(|j| {
+            let e = ResEntry::new();
+            let num = ((init_rng.next() % 5) + 1) as i32 * 100;
+            let p_val = ((init_rng.next() % 5) * 10 + 50) as i32;
+            unsafe {
+                *e.active.ptr() = 1;
+                *e.id.ptr() = (j + 1) as i32;
+                *e.num_used.ptr() = 0;
+                *e.num_free.ptr() = num;
+                *e.num_total.ptr() = num;
+                *e.price.ptr() = p_val;
+            }
+            e
+        })
+        .collect();
+    let flights: Vec<ResEntry> = (0..num_relations)
+        .map(|j| {
+            let e = ResEntry::new();
+            let num = ((init_rng.next() % 5) + 1) as i32 * 100;
+            let p_val = ((init_rng.next() % 5) * 10 + 50) as i32;
+            unsafe {
+                *e.active.ptr() = 1;
+                *e.id.ptr() = (j + 1) as i32;
+                *e.num_used.ptr() = 0;
+                *e.num_free.ptr() = num;
+                *e.num_total.ptr() = num;
+                *e.price.ptr() = p_val;
+            }
+            e
+        })
+        .collect();
+    let customers: Vec<CustEntry> = (0..num_relations)
+        .map(|j| {
+            let e = CustEntry::new();
+            unsafe {
+                *e.id.ptr() = (j + 1) as i32;
+            }
+            e
+        })
+        .collect();
 
     let tables = Arc::new((cars, rooms, flights, customers));
 
@@ -128,7 +160,9 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
             s.spawn(move || {
                 let rng = RefCell::new(Rng::new(tid as u64 * 12345 + 42));
                 for _ in 0..total_tasks {
-                    if sc.load(Ordering::Relaxed) { break; }
+                    if sc.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let customer_id = ((rng.borrow_mut().next() % query_range as u64) + 1) as usize;
                     let choice = rng.borrow_mut().next() % 100;
 
@@ -151,7 +185,8 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
                             let nq = (rng.borrow_mut().next() % num_queries_per_tx as u64) + 1;
                             for _ in 0..nq {
                                 let tt = (rng.borrow_mut().next() % 3) as usize;
-                                let id = ((rng.borrow_mut().next() % query_range as u64) + 1) as usize;
+                                let id =
+                                    ((rng.borrow_mut().next() % query_range as u64) + 1) as usize;
                                 let e = &tables_arr[tt][id - 1];
                                 if tx.read(&e.active) != 0 {
                                     let avail = tx.read(&e.num_free);
@@ -233,6 +268,14 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     });
     let elapsed = t0.elapsed().as_millis() as u64;
     let ops_count = g_ops_counter.load(Ordering::Relaxed);
-    println!("  Operations: {}  Elapsed: {} ms  Rate: {} ops/s",
-             ops_count, elapsed, if elapsed > 0 { ops_count * 1000 / elapsed } else { 0 });
+    println!(
+        "  Operations: {}  Elapsed: {} ms  Rate: {} ops/s",
+        ops_count,
+        elapsed,
+        if elapsed > 0 {
+            ops_count * 1000 / elapsed
+        } else {
+            0
+        }
+    );
 }

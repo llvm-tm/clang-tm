@@ -22,7 +22,7 @@ using namespace llvm;
 // FunctionType* (for constructing indirect call IR).
 struct TMRuntimeHook {
 	GlobalVariable *gv = nullptr;
-	FunctionType  *fnTy = nullptr;
+	FunctionType *fnTy = nullptr;
 
 	explicit operator bool() const { return gv && fnTy; }
 
@@ -35,52 +35,70 @@ struct TMRuntimeHook {
 // Get or create a GlobalVariable for the given hook name.
 // If the user's bitcode already declares `extern void (*tm_begin)()`,
 // we find that existing GlobalVariable. Otherwise we create one.
-static GlobalVariable *getOrCreateHookGV(Module &M, StringRef Name) {
+static GlobalVariable *getOrCreateHookGV(Module &M, StringRef Name)
+{
 	if (auto *GV = M.getGlobalVariable(Name))
 		return GV;
-	return new GlobalVariable(M, PointerType::getUnqual(M.getContext()), false,
-	                          GlobalValue::ExternalLinkage, nullptr, Name);
+	return new GlobalVariable(M,
+	                          PointerType::getUnqual(M.getContext()),
+	                          false,
+	                          GlobalValue::ExternalLinkage,
+	                          nullptr,
+	                          Name);
 }
 
 // Declare a single hook variable and return the TMRuntimeHook wrapper.
-static TMRuntimeHook declareHook(Module &M, StringRef Name,
-                                 Type *RetTy, ArrayRef<Type *> ParamTys) {
+static TMRuntimeHook declareHook(Module &M,
+                                 StringRef Name,
+                                 Type *RetTy,
+                                 ArrayRef<Type *> ParamTys)
+{
 	TMRuntimeHook H;
 	H.fnTy = FunctionType::get(RetTy, ParamTys, false);
-	H.gv   = getOrCreateHookGV(M, Name);
+	H.gv = getOrCreateHookGV(M, Name);
 	return H;
 }
 
 // Emit an indirect call through a TMRuntimeHook.
 // Generates: %ptr = load ptr, ptr @hook_name
 //            call <fnTy> %ptr(args...)
-static CallInst *emitHookCall(IRBuilder<> &B, const TMRuntimeHook &Hook,
-                              ArrayRef<Value *> Args = {}, const Twine &Name = "") {
+static CallInst *emitHookCall(IRBuilder<> &B,
+                              const TMRuntimeHook &Hook,
+                              ArrayRef<Value *> Args = {},
+                              const Twine &Name = "")
+{
 	Value *FnPtr = B.CreateLoad(PointerType::getUnqual(B.getContext()),
-	                            Hook.gv, "hook." + Hook.gv->getName());
+	                            Hook.gv,
+	                            "hook." + Hook.gv->getName());
 	return B.CreateCall(Hook.fnTy, FnPtr, Args, Name);
 }
 
 // Emit an indirect invoke through a TMRuntimeHook.
-static InvokeInst *emitHookInvoke(IRBuilder<> &B, const TMRuntimeHook &Hook,
+static InvokeInst *emitHookInvoke(IRBuilder<> &B,
+                                  const TMRuntimeHook &Hook,
                                   ArrayRef<Value *> Args,
-                                  BasicBlock *Normal, BasicBlock *Unwind,
-                                  const Twine &Name = "") {
+                                  BasicBlock *Normal,
+                                  BasicBlock *Unwind,
+                                  const Twine &Name = "")
+{
 	Value *FnPtr = B.CreateLoad(PointerType::getUnqual(B.getContext()),
-	                            Hook.gv, "hook." + Hook.gv->getName());
+	                            Hook.gv,
+	                            "hook." + Hook.gv->getName());
 	return B.CreateInvoke(Hook.fnTy, FnPtr, Normal, Unwind, Args, Name);
 }
 
 // Create an InvokeInst directly (when no IRBuilder is available, e.g. in
 // helper lambdas that create new instructions).
-static InvokeInst *createHookInvoke(LLVMContext &Ctx, const TMRuntimeHook &Hook,
+static InvokeInst *createHookInvoke(LLVMContext &Ctx,
+                                    const TMRuntimeHook &Hook,
                                     ArrayRef<Value *> Args,
-                                    BasicBlock *Normal, BasicBlock *Unwind,
-                                    const Twine &Name = "") {
+                                    BasicBlock *Normal,
+                                    BasicBlock *Unwind,
+                                    const Twine &Name = "")
+{
 	auto *FnPtrTy = PointerType::getUnqual(Ctx);
 	auto It = Unwind->getFirstNonPHIIt();
-	auto *FnPtr   = new LoadInst(FnPtrTy, Hook.gv, "hook." + Hook.gv->getName(),
-	                             false, It);
+	auto *FnPtr = new LoadInst(FnPtrTy, Hook.gv, "hook." + Hook.gv->getName(), false, It);
 	return InvokeInst::Create(Hook.fnTy, FnPtr, Normal, Unwind, Args, {}, Name);
 }
 
@@ -183,22 +201,47 @@ struct TMRuntimeHooks {
 		// function-pointer variable, NOT a TM-annotated user global, and
 		// must NOT be instrumented with tm_read/tm_write.
 		auto reg = [&](auto &hook) {
-			if (hook.gv) h.hookGVs.insert(hook.gv);
+			if (hook.gv)
+				h.hookGVs.insert(hook.gv);
 		};
-		reg(h.read_i1); reg(h.read_i2); reg(h.read_i4); reg(h.read_i8);
-		reg(h.read_i16); reg(h.read_i32); reg(h.read_i64);
-		reg(h.read_f4); reg(h.read_f8); reg(h.read_ptr);
-		reg(h.write_i1); reg(h.write_i2); reg(h.write_i4); reg(h.write_i8);
-		reg(h.write_i16); reg(h.write_i32); reg(h.write_i64);
-		reg(h.write_f4); reg(h.write_f8); reg(h.write_ptr);
-		reg(h.begin); reg(h.end);
-		reg(h.set_jmpbuf); reg(h.get_env); reg(h.sigsetjmp);
-		reg(h.init); reg(h.exit_fn);
-		reg(h.init_thread); reg(h.exit_thread);
-		reg(h.serialize_lock); reg(h.serialize_unlock);
-		reg(h.malloc_fn); reg(h.calloc_fn); reg(h.realloc_fn); reg(h.free_fn);
+		reg(h.read_i1);
+		reg(h.read_i2);
+		reg(h.read_i4);
+		reg(h.read_i8);
+		reg(h.read_i16);
+		reg(h.read_i32);
+		reg(h.read_i64);
+		reg(h.read_f4);
+		reg(h.read_f8);
+		reg(h.read_ptr);
+		reg(h.write_i1);
+		reg(h.write_i2);
+		reg(h.write_i4);
+		reg(h.write_i8);
+		reg(h.write_i16);
+		reg(h.write_i32);
+		reg(h.write_i64);
+		reg(h.write_f4);
+		reg(h.write_f8);
+		reg(h.write_ptr);
+		reg(h.begin);
+		reg(h.end);
+		reg(h.set_jmpbuf);
+		reg(h.get_env);
+		reg(h.sigsetjmp);
+		reg(h.init);
+		reg(h.exit_fn);
+		reg(h.init_thread);
+		reg(h.exit_thread);
+		reg(h.serialize_lock);
+		reg(h.serialize_unlock);
+		reg(h.malloc_fn);
+		reg(h.calloc_fn);
+		reg(h.realloc_fn);
+		reg(h.free_fn);
 		reg(h.memset_fn);
-		reg(h.enqueue_fn); reg(h.wait_prev_tx_fn);
+		reg(h.enqueue_fn);
+		reg(h.wait_prev_tx_fn);
 		reg(h.get_thread_state);
 		reg(h.trace_fn);
 

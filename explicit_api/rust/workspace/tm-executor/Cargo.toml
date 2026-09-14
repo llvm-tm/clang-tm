@@ -15,6 +15,7 @@ dudetm  = ["tm/dudetm"]
 tsxsgl  = ["tm/tsxsgl"]
 nvhtm   = ["tm/nvhtm"]
 spht    = ["tm/spht"]
+tsx_sim = ["tm/tsx_sim"]
 
 [dependencies]
 addrspace = { path = "../addrspace" }

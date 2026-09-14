@@ -5,7 +5,10 @@ use tm_des::event::{Event, EventKind};
 use tm_des::trace::Trace;
 
 #[derive(Parser, Debug)]
-#[command(name = "tm-trace2jsonl", about = "Convert raw TM trace to JSONL for simulator")]
+#[command(
+    name = "tm-trace2jsonl",
+    about = "Convert raw TM trace to JSONL for simulator"
+)]
 struct Cli {
     #[arg(short, long, default_value = "-")]
     input: String,
@@ -41,11 +44,14 @@ fn parse_trace(input: &str) -> Result<Vec<RawEntry>, String> {
         if parts.len() < 4 {
             return Err(format!("line {}: need at least 4 columns", line_no + 1));
         }
-        let timestamp: u64 = parts[0].parse()
+        let timestamp: u64 = parts[0]
+            .parse()
             .map_err(|e| format!("line {} timestamp: {}", line_no + 1, e))?;
-        let thread_id: u32 = parts[1].parse()
+        let thread_id: u32 = parts[1]
+            .parse()
             .map_err(|e| format!("line {} thread_id: {}", line_no + 1, e))?;
-        let type_code: u32 = parts[2].parse()
+        let type_code: u32 = parts[2]
+            .parse()
             .map_err(|e| format!("line {} type_code: {}", line_no + 1, e))?;
 
         // Two trace formats are in use:
@@ -63,28 +69,43 @@ fn parse_trace(input: &str) -> Result<Vec<RawEntry>, String> {
                 .map_err(|e| format!("line {} addr: {}", line_no + 1, e))?;
             let width = if parts.len() > 4 {
                 parts[4].parse().unwrap_or(8)
-            } else { 8 };
+            } else {
+                8
+            };
             let value_str = if parts.len() > 5 {
                 parts[5].trim_start_matches("0x")
-            } else { "0" };
+            } else {
+                "0"
+            };
             let value = u64::from_str_radix(value_str, 16).unwrap_or(0);
             (addr, width, value)
         } else {
             // Extended format (8+ fields): ts tid type txid 0x<addr> width 0x<value> cont
             if parts.len() < 7 {
-                return Err(format!("line {}: extended format needs at least 7 columns", line_no + 1));
+                return Err(format!(
+                    "line {}: extended format needs at least 7 columns",
+                    line_no + 1
+                ));
             }
             let addr_str = parts[4].trim_start_matches("0x");
             let addr = u64::from_str_radix(addr_str, 16)
                 .map_err(|e| format!("line {} addr: {}", line_no + 1, e))?;
-            let width: u64 = parts[5].parse()
+            let width: u64 = parts[5]
+                .parse()
                 .map_err(|e| format!("line {} width: {}", line_no + 1, e))?;
             let value_str = parts[6].trim_start_matches("0x");
             let value = u64::from_str_radix(value_str, 16).unwrap_or(0);
             (addr, width, value)
         };
 
-        entries.push(RawEntry { timestamp, thread_id, type_code, addr, width, value });
+        entries.push(RawEntry {
+            timestamp,
+            thread_id,
+            type_code,
+            addr,
+            width,
+            value,
+        });
     }
     Ok(entries)
 }
@@ -104,17 +125,31 @@ fn infer_events(entries: &[RawEntry]) -> Vec<Event> {
 
         for entry in sorted {
             let kind = match entry.type_code {
-                0 => EventKind::Read { addr: entry.addr, width: entry.width as u8 },
-                1 => EventKind::Write { addr: entry.addr, width: entry.width as u8, val: entry.value },
+                0 => EventKind::Read {
+                    addr: entry.addr,
+                    width: entry.width as u8,
+                },
+                1 => EventKind::Write {
+                    addr: entry.addr,
+                    width: entry.width as u8,
+                    val: entry.value,
+                },
                 2 => EventKind::TxBegin,
                 3 => EventKind::TxEnd,
-                4 => EventKind::Alloc { addr: entry.addr, size: entry.width },
+                4 => EventKind::Alloc {
+                    addr: entry.addr,
+                    size: entry.width,
+                },
                 5 => EventKind::Free { addr: entry.addr },
-                6 => EventKind::Abort { reason: entry.value },
+                6 => EventKind::Abort {
+                    reason: entry.value,
+                },
                 7 => EventKind::Computation { cycles: entry.addr },
                 code => {
-                    eprintln!("warning: unsupported type_code {} at line (ts={}, tid={}) — skipped",
-                              code, entry.timestamp, entry.thread_id);
+                    eprintln!(
+                        "warning: unsupported type_code {} at line (ts={}, tid={}) — skipped",
+                        code, entry.timestamp, entry.thread_id
+                    );
                     continue;
                 }
             };
@@ -144,5 +179,9 @@ fn main() {
     };
 
     trace.to_jsonl(&mut out).unwrap();
-    eprintln!("Converted {} raw entries → {} JSONL events", entries.len(), trace.events.len());
+    eprintln!(
+        "Converted {} raw entries → {} JSONL events",
+        entries.len(),
+        trace.events.len()
+    );
 }

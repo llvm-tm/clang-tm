@@ -66,13 +66,13 @@ static void test_adjacent()
 // Section 3: Mixed data types in one transaction
 // ══════════════════════════════════════════════════════════════════════
 
-static uint8_t  g_mt_i1;
+static uint8_t g_mt_i1;
 static uint16_t g_mt_i2;
 static uint32_t g_mt_i4;
 static uint64_t g_mt_i8;
-static float    g_mt_f4;
-static double   g_mt_f8;
-static void    *g_mt_ptr;
+static float g_mt_f4;
+static double g_mt_f8;
+static void *g_mt_ptr;
 
 static void test_mixed_types()
 {

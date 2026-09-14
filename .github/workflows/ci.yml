@@ -92,9 +92,9 @@ jobs:
             echo "  $name: $warnings warning(s)"
           done
 
-  # ── Job 5: Cross-backend correctness (push to main only) ─
+  # ── Job 5: Cross-backend correctness (PRs + push to main) ─
   cross-backend:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
@@ -106,13 +106,24 @@ jobs:
             llvm-toolchain-jammy-22 main"
           sudo apt-get update
           sudo apt-get install -y llvm-22-dev clang-22 lld make
-      - name: Build and test all backends
+      - name: Build and test backends
         run: |
-          for backend in TINYSTM WBETL WT NOREC SWISSTM TL2 SGL XTM LEFTRIGHT ROMULUS; do
-            make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=$backend 2>/dev/null
+          # PRs gate on 3 core backends (fast); push to main tests all.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            BACKENDS="TINYSTM WBETL WT NOREC SWISSTM TL2 SGL XTM LEFTRIGHT ROMULUS"
+          else
+            BACKENDS="TINYSTM NOREC TL2"
+          fi
+          for backend in $BACKENDS; do
+            if ! make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=$backend; then
+              echo "BUILD FAILED: $backend"
+              exit 1
+            fi
             tx_pass=$(./benchmarks/cpp/bin/test_tx 2>&1 | grep -c "ALL.*PASSED" || true)
             ds_pass=$(./benchmarks/cpp/bin/test_ds 2>&1 | grep -c "ALL.*PASSED" || true)
-            echo "=== $backend: test_tx=$([ "$tx_pass" -ge 1 ] && echo PASS || echo FAIL) test_ds=$([ "$ds_pass" -ge 1 ] && echo PASS || echo FAIL) ==="
+            echo "=== $backend: test_tx=$tx_pass test_ds=$ds_pass ==="
+            [ "$tx_pass" -ge 1 ] || { echo "CROSS-BACKEND FAIL (test_tx): $backend"; exit 1; }
+            [ "$ds_pass" -ge 1 ] || { echo "CROSS-BACKEND FAIL (test_ds): $backend"; exit 1; }
           done
 
   # ── Job 6: Stale directory check ────────────────────────
@@ -155,3 +166,35 @@ jobs:
         with:
           name: tla-results
           path: docs/proofs/*/mch*
+
+  # ── Job 8: TLA+ smoke gate (3 small models, blocking, <5 min) ─
+  tla-smoke:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download tla2tools.jar
+        run: curl -sSLo /tmp/tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+      - name: TLC smoke check (3 small models, 60s timeout each)
+        run: make -C docs/proofs smoke-check
+
+  # ── Job 9: Format + lint gate (clang-format + rustfmt + clippy) ─
+  lint:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install clang-format-22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y clang-format-22 make
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Check formatting + clippy
+        run: make fmt-check

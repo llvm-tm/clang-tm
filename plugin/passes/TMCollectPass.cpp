@@ -37,9 +37,8 @@ public:
 		TM_DEBUG("TMCollectPass: %d tx-reachable functions found",
 		         (int)S->TxReachableFuncs.size());
 
-		return S->TxReachableFuncs.empty()
-		           ? PreservedAnalyses::all()
-		           : PreservedAnalyses::none();
+		return S->TxReachableFuncs.empty() ? PreservedAnalyses::all()
+		                                   : PreservedAnalyses::none();
 	}
 	static bool isRequired() { return true; }
 };

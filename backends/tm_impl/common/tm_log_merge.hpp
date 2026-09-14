@@ -8,7 +8,7 @@ namespace merge
 {
 
 // ── Alignment constants (8-byte slot = 64-bit word) ───────────
-constexpr unsigned K_BITS_PER_BYTE_SHIFT = 3;   // log2(8)
+constexpr unsigned K_BITS_PER_BYTE_SHIFT = 3; // log2(8)
 constexpr uintptr_t K_ALIGN_MASK = sizeof(stm::word_t) - 1;
 
 // ── Align a raw address down to 8-byte boundary ────────────────
@@ -182,8 +182,10 @@ inline word_t merge_words(word_t base_val,
                           unsigned write_sz,
                           unsigned offset)
 {
-	word_t mask = static_cast<word_t>(BYTE_MASK(write_sz)) << (offset << K_BITS_PER_BYTE_SHIFT);
-	return (base_val & ~mask) | ((write_val & BYTE_MASK(write_sz)) << (offset << K_BITS_PER_BYTE_SHIFT));
+	word_t mask = static_cast<word_t>(BYTE_MASK(write_sz))
+	              << (offset << K_BITS_PER_BYTE_SHIFT);
+	return (base_val & ~mask) |
+	       ((write_val & BYTE_MASK(write_sz)) << (offset << K_BITS_PER_BYTE_SHIFT));
 }
 
 // Merge a same-address entry when types differ.

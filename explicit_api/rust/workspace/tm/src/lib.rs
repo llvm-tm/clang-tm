@@ -1,5 +1,22 @@
 /// Safe public TM API.
 
+#[cfg(any(
+    feature = "norec",
+    feature = "tl2",
+    feature = "swisstm",
+    feature = "dudetm",
+    feature = "tsxsgl",
+    feature = "nvhtm",
+    feature = "spht",
+    feature = "leftright",
+    feature = "leftright-single",
+    feature = "romulus",
+    feature = "xtm",
+    feature = "sgl-persistent",
+    feature = "sgl-distributed",
+    feature = "tikv",
+    feature = "mvlog",
+))]
 use runtime_core::TmxAbort;
 
 // ── Backend selection via feature flags ─────────────────
@@ -9,210 +26,155 @@ use runtime_core::TmxAbort;
 
 #[cfg(feature = "norec")]
 pub use runtime_norec::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "tl2")]
 pub use runtime_tl2::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "swisstm")]
 pub use runtime_swisstm::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "dudetm")]
 pub use runtime_dudetm::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "tsxsgl")]
 pub use runtime_tsxsgl::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
+};
+
+#[cfg(feature = "tsx_sim")]
+pub use runtime_tsx_sim::{
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "nvhtm")]
 pub use runtime_nvhtm::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "spht")]
 pub use runtime_spht::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "leftright")]
 pub use runtime_leftright::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "romulus")]
 pub use runtime_romulus::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "leftright-single")]
 pub use runtime_leftright_single::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "mvlog")]
 pub use runtime_mvlog::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "xtm")]
 pub use runtime_xtm::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "sgl-persistent")]
 pub use runtime_sgl_persistent::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "sgl-distributed")]
 pub use runtime_sgl_distributed::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "tikv")]
 pub use runtime_tikv::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
+    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
+    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
+    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
+    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(any(feature = "wbctl", feature = "wbetl", feature = "wt"))]
 pub use runtime_tinystm::{
-    tm_init, tm_exit, tm_init_thread, tm_exit_thread,
-    tm_begin, tm_commit, tm_abort_count, tm_commit_count, tm_reset_stats, tm_abort,
-    tm_read_u8, tm_read_u16, tm_read_u32, tm_read_u64,
-    tm_read_i8, tm_read_i16, tm_read_i32, tm_read_i64,
-    tm_read_f32, tm_read_f64, tm_read_ptr,
-    tm_write_u8, tm_write_u16, tm_write_u32, tm_write_u64,
-    tm_write_i8, tm_write_i16, tm_write_i32, tm_write_i64,
-    tm_write_f32, tm_write_f64, tm_write_ptr,
-    tm_read_raw, tm_write_raw,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_commit_count, tm_exit, tm_exit_thread,
+    tm_init, tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64,
+    tm_read_i8, tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8,
+    tm_reset_stats, tm_write_f32, tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64,
+    tm_write_i8, tm_write_ptr, tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 // ── Feature exclusivity ─────────────────────────────────
@@ -227,42 +189,269 @@ macro_rules! exclusive_backend {
     };
 }
 
-exclusive_backend!("norec",             "tl2", "swisstm", "dudetm", "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("tl2",               "swisstm", "dudetm", "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("swisstm",           "dudetm", "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("dudetm",            "tsxsgl", "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("tsxsgl",            "nvhtm", "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("nvhtm",             "spht", "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("spht",              "leftright", "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("leftright",         "leftright-single", "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("leftright-single",  "romulus", "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("romulus",           "xtm", "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("xtm",               "sgl-persistent", "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("sgl-persistent",    "sgl-distributed", "tikv", "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("sgl-distributed",   "tikv", "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("tikv",              "mvlog", "wbctl", "wbetl", "wt");
-exclusive_backend!("mvlog",             "wbctl", "wbetl", "wt");
-exclusive_backend!("wbctl",             "wbetl", "wt");
-exclusive_backend!("wbetl",             "wt");
+exclusive_backend!(
+    "norec",
+    "tl2",
+    "swisstm",
+    "dudetm",
+    "tsxsgl",
+    "nvhtm",
+    "spht",
+    "leftright",
+    "leftright-single",
+    "romulus",
+    "xtm",
+    "sgl-persistent",
+    "sgl-distributed",
+    "tikv",
+    "mvlog",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "tsx_sim"
+);
+exclusive_backend!(
+    "tl2",
+    "swisstm",
+    "dudetm",
+    "tsxsgl",
+    "nvhtm",
+    "spht",
+    "leftright",
+    "leftright-single",
+    "romulus",
+    "xtm",
+    "sgl-persistent",
+    "sgl-distributed",
+    "tikv",
+    "mvlog",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "tsx_sim"
+);
+exclusive_backend!(
+    "swisstm",
+    "dudetm",
+    "tsxsgl",
+    "nvhtm",
+    "spht",
+    "leftright",
+    "leftright-single",
+    "romulus",
+    "xtm",
+    "sgl-persistent",
+    "sgl-distributed",
+    "tikv",
+    "mvlog",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "tsx_sim"
+);
+exclusive_backend!(
+    "dudetm",
+    "tsxsgl",
+    "nvhtm",
+    "spht",
+    "leftright",
+    "leftright-single",
+    "romulus",
+    "xtm",
+    "sgl-persistent",
+    "sgl-distributed",
+    "tikv",
+    "mvlog",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "tsx_sim"
+);
+exclusive_backend!(
+    "tsxsgl",
+    "nvhtm",
+    "spht",
+    "leftright",
+    "leftright-single",
+    "romulus",
+    "xtm",
+    "sgl-persistent",
+    "sgl-distributed",
+    "tikv",
+    "mvlog",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "tsx_sim"
+);
+exclusive_backend!(
+    "nvhtm",
+    "spht",
+    "leftright",
+    "leftright-single",
+    "romulus",
+    "xtm",
+    "sgl-persistent",
+    "sgl-distributed",
+    "tikv",
+    "mvlog",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "tsx_sim"
+);
+exclusive_backend!(
+    "spht",
+    "leftright",
+    "leftright-single",
+    "romulus",
+    "xtm",
+    "sgl-persistent",
+    "sgl-distributed",
+    "tikv",
+    "mvlog",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "tsx_sim"
+);
+exclusive_backend!(
+    "leftright",
+    "leftright-single",
+    "romulus",
+    "xtm",
+    "sgl-persistent",
+    "sgl-distributed",
+    "tikv",
+    "mvlog",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "tsx_sim"
+);
+exclusive_backend!(
+    "leftright-single",
+    "romulus",
+    "xtm",
+    "sgl-persistent",
+    "sgl-distributed",
+    "tikv",
+    "mvlog",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "tsx_sim"
+);
+exclusive_backend!(
+    "romulus",
+    "xtm",
+    "sgl-persistent",
+    "sgl-distributed",
+    "tikv",
+    "mvlog",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "tsx_sim"
+);
+exclusive_backend!(
+    "xtm",
+    "sgl-persistent",
+    "sgl-distributed",
+    "tikv",
+    "mvlog",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "tsx_sim"
+);
+exclusive_backend!(
+    "sgl-persistent",
+    "sgl-distributed",
+    "tikv",
+    "mvlog",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "tsx_sim"
+);
+exclusive_backend!(
+    "sgl-distributed",
+    "tikv",
+    "mvlog",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "tsx_sim"
+);
+exclusive_backend!("tikv", "mvlog", "wbctl", "wbetl", "wt", "tsx_sim");
+exclusive_backend!("mvlog", "wbctl", "wbetl", "wt", "tsx_sim");
+exclusive_backend!("wbctl", "wbetl", "wt", "tsx_sim");
+exclusive_backend!("wbetl", "wt", "tsx_sim");
+exclusive_backend!(
+    "tsx_sim",
+    "wbctl",
+    "wbetl",
+    "wt",
+    "norec",
+    "tl2",
+    "swisstm",
+    "dudetm",
+    "tsxsgl",
+    "nvhtm",
+    "spht",
+    "leftright",
+    "leftright-single",
+    "romulus",
+    "xtm",
+    "sgl-persistent",
+    "sgl-distributed",
+    "tikv",
+    "mvlog"
+);
 
 #[cfg(not(any(
-    feature = "wbctl", feature = "wbetl", feature = "wt",
-    feature = "norec", feature = "tl2", feature = "swisstm", feature = "dudetm",
-    feature = "tsxsgl", feature = "nvhtm", feature = "spht",
-    feature = "leftright", feature = "leftright_single",
-    feature = "romulus", feature = "xtm",
-    feature = "sgl_persistent", feature = "sgl_distributed",
-    feature = "tikv", feature = "mvlog",
+    feature = "wbctl",
+    feature = "wbetl",
+    feature = "wt",
+    feature = "norec",
+    feature = "tl2",
+    feature = "swisstm",
+    feature = "dudetm",
+    feature = "tsxsgl",
+    feature = "nvhtm",
+    feature = "spht",
+    feature = "leftright",
+    feature = "leftright-single",
+    feature = "romulus",
+    feature = "xtm",
+    feature = "sgl-persistent",
+    feature = "sgl-distributed",
+    feature = "tikv",
+    feature = "mvlog",
+    feature = "tsx_sim",
 )))]
 compile_error!(
-    "At least one backend feature must be enabled: wbctl, wbetl, wt, norec, tl2, swisstm, dudetm, tsxsgl, nvhtm, spht, leftright, leftright_single, romulus, xtm, sgl_persistent, sgl_distributed, tikv, mvlog"
+    "At least one backend feature must be enabled: wbctl, wbetl, wt, norec, tl2, swisstm, dudetm, tsxsgl, nvhtm, spht, leftright, leftright_single, romulus, xtm, sgl_persistent, sgl_distributed, tikv, mvlog, tsx_sim"
 );
 
 // ── TmPrimitive trait ──────────────────────────────────
 pub use runtime_core::TmRaw;
 
 pub trait TmPrimitive: Copy + Send + Sync + 'static {
+    /// Read the TM-tracked value at `ptr`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be a valid, TM-tracked pointer to `Self` for the duration
+    /// of the read, and the call must occur inside a TM context.
     unsafe fn tm_read(ptr: *mut Self) -> Self;
+    /// Write `val` to the TM-tracked location `ptr`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be a valid, TM-tracked pointer to `Self` for the duration
+    /// of the write, and the call must occur inside a TM context.
     unsafe fn tm_write(ptr: *mut Self, val: Self);
 }
 
@@ -279,8 +468,8 @@ macro_rules! impl_primitive {
     };
 }
 
-impl_primitive!(u8,  tm_read_u8,  tm_write_u8);
-impl_primitive!(i8,  tm_read_i8,  tm_write_i8);
+impl_primitive!(u8, tm_read_u8, tm_write_u8);
+impl_primitive!(i8, tm_read_i8, tm_write_i8);
 impl_primitive!(u16, tm_read_u16, tm_write_u16);
 impl_primitive!(i16, tm_read_i16, tm_write_i16);
 impl_primitive!(u32, tm_read_u32, tm_write_u32);
@@ -291,18 +480,32 @@ impl_primitive!(f32, tm_read_f32, tm_write_f32);
 impl_primitive!(f64, tm_read_f64, tm_write_f64);
 
 // ── TmPtr<T> — pointer wrapper for TM-tracked pointers ──
-pub struct TmPtr<T> { ptr: *mut T }
+pub struct TmPtr<T> {
+    ptr: *mut T,
+}
 
 unsafe impl<T: Send> Send for TmPtr<T> {}
 unsafe impl<T: Send> Sync for TmPtr<T> {}
 
-impl<T> Clone for TmPtr<T> { fn clone(&self) -> Self { TmPtr { ptr: self.ptr } } }
+impl<T> Clone for TmPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
 impl<T> Copy for TmPtr<T> {}
 
 impl<T> TmPtr<T> {
-    pub fn new(ptr: *mut T) -> Self { TmPtr { ptr } }
-    pub fn null() -> Self { TmPtr { ptr: std::ptr::null_mut() } }
-    pub fn get(self) -> *mut T { self.ptr }
+    pub fn new(ptr: *mut T) -> Self {
+        TmPtr { ptr }
+    }
+    pub fn null() -> Self {
+        TmPtr {
+            ptr: std::ptr::null_mut(),
+        }
+    }
+    pub fn get(self) -> *mut T {
+        self.ptr
+    }
 }
 
 impl<T: Send + Sync + 'static> TmPrimitive for TmPtr<T> {
@@ -316,17 +519,6 @@ impl<T: Send + Sync + 'static> TmPrimitive for TmPtr<T> {
 }
 
 // ── TmCell ─────────────────────────────────────────────
-/// A TM-tracked cell whose value lives in the TM address-space region.
-///
-/// `TmCell::new(val)` allocates space in the 16 GB mmap'ed TM region
-/// (via `addrspace::tm_region_malloc`) and writes `val` there.
-/// Inside a transaction, `tx.read(&cell)` / `tx.write(&cell, …)`
-/// use the TM backend's protocol to ensure atomicity and isolation.
-///
-/// The backing TM-region allocation is **not** freed on `drop` —
-/// it persists until process exit, matching the C++ `expli::TM<T>`
-/// convention.
-
 /// Unconditionally Send + Sync wrapper around `*mut T`.
 /// SAFETY: TmCell guarantees that all access goes through the TM
 /// protocol, so raw pointer synchronization is always correct.
@@ -335,6 +527,16 @@ struct TmCellPtr<T>(*mut T);
 unsafe impl<T> Send for TmCellPtr<T> {}
 unsafe impl<T> Sync for TmCellPtr<T> {}
 
+/// A TM-tracked cell whose value lives in the TM address-space region.
+///
+/// `TmCell::new(val)` allocates space in the 16 GB mmap'ed TM region
+/// (via `addrspace::tm_region_malloc`) and writes `val` there.
+/// Inside a transaction, `tx.read(&cell)` / `tx.write(&cell, …)`
+/// use the TM backend's protocol to ensure atomicity and isolation.
+///
+/// The backing TM-region allocation is **not** freed on `drop` —
+/// it persists until process exit, matching the C++ `expli::TM<T>`
+/// convention.
 pub struct TmCell<T: TmPrimitive> {
     ptr: TmCellPtr<T>,
 }
@@ -342,11 +544,17 @@ pub struct TmCell<T: TmPrimitive> {
 impl<T: TmPrimitive> TmCell<T> {
     pub fn new(val: T) -> Self {
         let raw_ptr = addrspace::tm_region_malloc(size_of::<T>()) as *mut T;
-        unsafe { raw_ptr.write(val); }
-        TmCell { ptr: TmCellPtr(raw_ptr) }
+        unsafe {
+            raw_ptr.write(val);
+        }
+        TmCell {
+            ptr: TmCellPtr(raw_ptr),
+        }
     }
 
-    pub fn ptr(&self) -> *mut T { self.ptr.0 }
+    pub fn ptr(&self) -> *mut T {
+        self.ptr.0
+    }
 }
 
 impl TmCell<u8> {
@@ -363,7 +571,9 @@ impl TmCell<u8> {
 }
 
 // ── Transaction ─────────────────────────────────────────
-pub struct Transaction { _private: () }
+pub struct Transaction {
+    _private: (),
+}
 
 impl Transaction {
     pub fn read<T: TmPrimitive>(&self, cell: &TmCell<T>) -> T {
@@ -404,12 +614,21 @@ impl Transaction {
 
 /// Panic-based backends: must catch TmxAbort panics.
 #[cfg(any(
-    feature = "norec", feature = "tl2", feature = "swisstm",
-    feature = "dudetm", feature = "tsxsgl", feature = "nvhtm",
-    feature = "spht", feature = "leftright", feature = "leftright-single",
-    feature = "romulus", feature = "xtm",
-    feature = "sgl-persistent", feature = "sgl-distributed",
-    feature = "tikv", feature = "mvlog",
+    feature = "norec",
+    feature = "tl2",
+    feature = "swisstm",
+    feature = "dudetm",
+    feature = "tsxsgl",
+    feature = "nvhtm",
+    feature = "spht",
+    feature = "leftright",
+    feature = "leftright-single",
+    feature = "romulus",
+    feature = "xtm",
+    feature = "sgl-persistent",
+    feature = "sgl-distributed",
+    feature = "tikv",
+    feature = "mvlog",
 ))]
 pub fn transaction<T, F>(f: F) -> T
 where
@@ -418,11 +637,18 @@ where
     loop {
         tm_begin();
         let tx = Transaction { _private: () };
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&tx)));
+        // tm_commit is inside the catch_unwind region: a backend that
+        // signals commit-time abort with TmxAbort (like mvlog's
+        // commit-time validation) must be caught here, not leak out and
+        // kill the calling thread.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let val = f(&tx);
+            let committed = tm_commit();
+            (val, committed)
+        }));
         match result {
-            Ok(val) => {
-                if tm_commit() { return val; }
-            }
+            Ok((val, true)) => return val,
+            Ok((_, false)) => { /* commit declined: retry */ }
             Err(payload) => {
                 tm_abort();
                 if payload.downcast_ref::<TmxAbort>().is_some() {
@@ -436,12 +662,21 @@ where
 
 /// Lazy-abort backends (TinySTM family): retry without catch_unwind.
 #[cfg(not(any(
-    feature = "norec", feature = "tl2", feature = "swisstm",
-    feature = "dudetm", feature = "tsxsgl", feature = "nvhtm",
-    feature = "spht", feature = "leftright", feature = "leftright-single",
-    feature = "romulus", feature = "xtm",
-    feature = "sgl-persistent", feature = "sgl-distributed",
-    feature = "tikv", feature = "mvlog",
+    feature = "norec",
+    feature = "tl2",
+    feature = "swisstm",
+    feature = "dudetm",
+    feature = "tsxsgl",
+    feature = "nvhtm",
+    feature = "spht",
+    feature = "leftright",
+    feature = "leftright-single",
+    feature = "romulus",
+    feature = "xtm",
+    feature = "sgl-persistent",
+    feature = "sgl-distributed",
+    feature = "tikv",
+    feature = "mvlog",
 )))]
 pub fn transaction<T, F>(f: F) -> T
 where
@@ -451,6 +686,8 @@ where
         tm_begin();
         let tx = Transaction { _private: () };
         let val = f(&tx);
-        if tm_commit() { return val; }
+        if tm_commit() {
+            return val;
+        }
     }
 }

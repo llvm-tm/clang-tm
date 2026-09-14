@@ -19,7 +19,9 @@ pub fn tm_install_tmx_hook() {
     HOOK_INSTALLED.get_or_init(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            if info.payload().downcast_ref::<TmxAbort>().is_some() { return; }
+            if info.payload().downcast_ref::<TmxAbort>().is_some() {
+                return;
+            }
             prev(info);
         }));
     });
@@ -43,9 +45,11 @@ pub enum WriteBack {
 impl WriteBack {
     pub fn addr(&self) -> usize {
         match *self {
-            WriteBack::U8(a, _) | WriteBack::U16(a, _)
-                | WriteBack::U32(a, _) | WriteBack::U64(a, _)
-                | WriteBack::Bytes(a, _) => a,
+            WriteBack::U8(a, _)
+            | WriteBack::U16(a, _)
+            | WriteBack::U32(a, _)
+            | WriteBack::U64(a, _)
+            | WriteBack::Bytes(a, _) => a,
         }
     }
 
@@ -122,44 +126,114 @@ pub trait Primitive: Copy + 'static {
 }
 
 impl Primitive for u8 {
-    fn to_typed(self) -> TypedValue { TypedValue::U8(self) }
-    fn from_typed(v: &TypedValue) -> Self { match *v { TypedValue::U8(x) => x, _ => unreachable!() } }
+    fn to_typed(self) -> TypedValue {
+        TypedValue::U8(self)
+    }
+    fn from_typed(v: &TypedValue) -> Self {
+        match *v {
+            TypedValue::U8(x) => x,
+            _ => unreachable!(),
+        }
+    }
 }
 impl Primitive for u16 {
-    fn to_typed(self) -> TypedValue { TypedValue::U16(self) }
-    fn from_typed(v: &TypedValue) -> Self { match *v { TypedValue::U16(x) => x, _ => unreachable!() } }
+    fn to_typed(self) -> TypedValue {
+        TypedValue::U16(self)
+    }
+    fn from_typed(v: &TypedValue) -> Self {
+        match *v {
+            TypedValue::U16(x) => x,
+            _ => unreachable!(),
+        }
+    }
 }
 impl Primitive for u32 {
-    fn to_typed(self) -> TypedValue { TypedValue::U32(self) }
-    fn from_typed(v: &TypedValue) -> Self { match *v { TypedValue::U32(x) => x, _ => unreachable!() } }
+    fn to_typed(self) -> TypedValue {
+        TypedValue::U32(self)
+    }
+    fn from_typed(v: &TypedValue) -> Self {
+        match *v {
+            TypedValue::U32(x) => x,
+            _ => unreachable!(),
+        }
+    }
 }
 impl Primitive for u64 {
-    fn to_typed(self) -> TypedValue { TypedValue::U64(self) }
-    fn from_typed(v: &TypedValue) -> Self { match *v { TypedValue::U64(x) => x, _ => unreachable!() } }
+    fn to_typed(self) -> TypedValue {
+        TypedValue::U64(self)
+    }
+    fn from_typed(v: &TypedValue) -> Self {
+        match *v {
+            TypedValue::U64(x) => x,
+            _ => unreachable!(),
+        }
+    }
 }
 impl Primitive for i32 {
-    fn to_typed(self) -> TypedValue { TypedValue::U32(self as u32) }
-    fn from_typed(v: &TypedValue) -> Self { match *v { TypedValue::U32(x) => x as i32, _ => unreachable!() } }
+    fn to_typed(self) -> TypedValue {
+        TypedValue::U32(self as u32)
+    }
+    fn from_typed(v: &TypedValue) -> Self {
+        match *v {
+            TypedValue::U32(x) => x as i32,
+            _ => unreachable!(),
+        }
+    }
 }
 impl Primitive for i64 {
-    fn to_typed(self) -> TypedValue { TypedValue::U64(self as u64) }
-    fn from_typed(v: &TypedValue) -> Self { match *v { TypedValue::U64(x) => x as i64, _ => unreachable!() } }
+    fn to_typed(self) -> TypedValue {
+        TypedValue::U64(self as u64)
+    }
+    fn from_typed(v: &TypedValue) -> Self {
+        match *v {
+            TypedValue::U64(x) => x as i64,
+            _ => unreachable!(),
+        }
+    }
 }
 impl Primitive for i16 {
-    fn to_typed(self) -> TypedValue { TypedValue::U16(self as u16) }
-    fn from_typed(v: &TypedValue) -> Self { match *v { TypedValue::U16(x) => x as i16, _ => unreachable!() } }
+    fn to_typed(self) -> TypedValue {
+        TypedValue::U16(self as u16)
+    }
+    fn from_typed(v: &TypedValue) -> Self {
+        match *v {
+            TypedValue::U16(x) => x as i16,
+            _ => unreachable!(),
+        }
+    }
 }
 impl Primitive for i8 {
-    fn to_typed(self) -> TypedValue { TypedValue::U8(self as u8) }
-    fn from_typed(v: &TypedValue) -> Self { match *v { TypedValue::U8(x) => x as i8, _ => unreachable!() } }
+    fn to_typed(self) -> TypedValue {
+        TypedValue::U8(self as u8)
+    }
+    fn from_typed(v: &TypedValue) -> Self {
+        match *v {
+            TypedValue::U8(x) => x as i8,
+            _ => unreachable!(),
+        }
+    }
 }
 impl Primitive for f32 {
-    fn to_typed(self) -> TypedValue { TypedValue::U32(self.to_bits()) }
-    fn from_typed(v: &TypedValue) -> Self { match *v { TypedValue::U32(x) => f32::from_bits(x), _ => unreachable!() } }
+    fn to_typed(self) -> TypedValue {
+        TypedValue::U32(self.to_bits())
+    }
+    fn from_typed(v: &TypedValue) -> Self {
+        match *v {
+            TypedValue::U32(x) => f32::from_bits(x),
+            _ => unreachable!(),
+        }
+    }
 }
 impl Primitive for f64 {
-    fn to_typed(self) -> TypedValue { TypedValue::U64(self.to_bits()) }
-    fn from_typed(v: &TypedValue) -> Self { match *v { TypedValue::U64(x) => f64::from_bits(x), _ => unreachable!() } }
+    fn to_typed(self) -> TypedValue {
+        TypedValue::U64(self.to_bits())
+    }
+    fn from_typed(v: &TypedValue) -> Self {
+        match *v {
+            TypedValue::U64(x) => f64::from_bits(x),
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// Trait for TM-trackable types of any size.
@@ -444,7 +518,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             current_sim_thread_id();
         }));
-        assert!(result.is_err(), "current_sim_thread_id should panic after clear");
+        assert!(
+            result.is_err(),
+            "current_sim_thread_id should panic after clear"
+        );
     }
 
     #[test]

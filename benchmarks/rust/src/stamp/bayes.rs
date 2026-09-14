@@ -1,9 +1,9 @@
+use super::Config;
+use crate::Rng;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::cell::RefCell;
 use tm::{transaction, TmCell};
-use crate::Rng;
-use super::Config;
 
 const MAX_TASKS: usize = 131072;
 const MAX_PARENTS: usize = 8;
@@ -15,12 +15,26 @@ struct ParentSet {
 
 impl ParentSet {
     fn new() -> Self {
-        ParentSet { count: TmCell::new(0), data: [TmCell::new(-1), TmCell::new(-1), TmCell::new(-1), TmCell::new(-1), TmCell::new(-1), TmCell::new(-1), TmCell::new(-1), TmCell::new(-1)] }
+        ParentSet {
+            count: TmCell::new(0),
+            data: [
+                TmCell::new(-1),
+                TmCell::new(-1),
+                TmCell::new(-1),
+                TmCell::new(-1),
+                TmCell::new(-1),
+                TmCell::new(-1),
+                TmCell::new(-1),
+                TmCell::new(-1),
+            ],
+        }
     }
     fn contains(&self, tx: &tm::Transaction, val: i32) -> bool {
         let n = tx.read(&self.count);
         for i in 0..n as usize {
-            if tx.read(&self.data[i]) == val { return true; }
+            if tx.read(&self.data[i]) == val {
+                return true;
+            }
         }
         false
     }
@@ -31,13 +45,21 @@ impl ParentSet {
             tx.write(&self.count, (n + 1) as i32);
         }
     }
-    fn peek_count(&self) -> i32 { unsafe { *self.count.ptr() } }
-    fn peek_get(&self, i: usize) -> i32 { unsafe { *self.data[i].ptr() } }
+    fn peek_count(&self) -> i32 {
+        unsafe { *self.count.ptr() }
+    }
+    fn peek_get(&self, i: usize) -> i32 {
+        unsafe { *self.data[i].ptr() }
+    }
     fn peek_insert(&self, val: i32) {
         let n = self.peek_count() as usize;
         if n < MAX_PARENTS {
-            unsafe { *self.data[n].ptr() = val; }
-            unsafe { *self.count.ptr() = (n + 1) as i32; }
+            unsafe {
+                *self.data[n].ptr() = val;
+            }
+            unsafe {
+                *self.count.ptr() = (n + 1) as i32;
+            }
         }
     }
     fn collect(&self, tx: &tm::Transaction) -> Vec<i32> {
@@ -55,7 +77,12 @@ struct TaskList {
 }
 
 #[derive(Clone)]
-struct Task { op: i32, from: i32, to: i32, score: f64 }
+struct Task {
+    op: i32,
+    from: i32,
+    to: i32,
+    score: f64,
+}
 
 impl TaskList {
     fn new() -> Self {
@@ -70,11 +97,19 @@ impl TaskList {
             from_ids.push(TmCell::new(0));
             to_ids.push(TmCell::new(0));
         }
-        TaskList { scores, ops, from_ids, to_ids, count: TmCell::new(0) }
+        TaskList {
+            scores,
+            ops,
+            from_ids,
+            to_ids,
+            count: TmCell::new(0),
+        }
     }
     fn push(&self, tx: &tm::Transaction, op: i32, from: i32, to: i32, score: f64) {
         let i = tx.read(&self.count) as usize;
-        if i >= MAX_TASKS { return; }
+        if i >= MAX_TASKS {
+            return;
+        }
         tx.write(&self.scores[i], score);
         tx.write(&self.ops[i], op);
         tx.write(&self.from_ids[i], from);
@@ -83,12 +118,22 @@ impl TaskList {
     }
     fn pop_best(&self, tx: &tm::Transaction) -> Task {
         let n = tx.read(&self.count) as usize;
-        if n == 0 { return Task { op: -1, from: -1, to: -1, score: -1e100 }; }
+        if n == 0 {
+            return Task {
+                op: -1,
+                from: -1,
+                to: -1,
+                score: -1e100,
+            };
+        }
         let mut best = 0usize;
         let mut best_score = tx.read(&self.scores[0]);
         for i in 1..n {
             let s = tx.read(&self.scores[i]);
-            if s > best_score { best_score = s; best = i; }
+            if s > best_score {
+                best_score = s;
+                best = i;
+            }
         }
         let last = n - 1;
         let t = Task {
@@ -129,20 +174,32 @@ fn compute_density_ll(data: &BayesData, var: usize, parents: &[i32]) -> f64 {
     for r in 0..data.num_records {
         let mut config = 0usize;
         for (i, &p) in parents.iter().enumerate() {
-            if data.records[r][p as usize] != 0 { config |= 1 << i; }
+            if data.records[r][p as usize] != 0 {
+                config |= 1 << i;
+            }
         }
-        if data.records[r][var] != 0 { c1[config] += 1; } else { c0[config] += 1; }
+        if data.records[r][var] != 0 {
+            c1[config] += 1;
+        } else {
+            c0[config] += 1;
+        }
     }
     let mut ll = 0.0f64;
     let nf = data.num_records as f64;
     for c in 0..num_configs {
         let total = c0[c] + c1[c];
-        if total == 0 { continue; }
+        if total == 0 {
+            continue;
+        }
         let frac = total as f64 / nf;
         let p0 = c0[c] as f64 / total as f64;
         let p1 = c1[c] as f64 / total as f64;
-        if p0 > 0.0 { ll += frac * p0 * p0.ln(); }
-        if p1 > 0.0 { ll += frac * p1 * p1.ln(); }
+        if p0 > 0.0 {
+            ll += frac * p0 * p0.ln();
+        }
+        if p1 > 0.0 {
+            ll += frac * p1 * p1.ln();
+        }
     }
     ll
 }
@@ -161,14 +218,22 @@ fn has_path(data: &BayesData, from: i32, to: i32) -> bool {
             stack.clear();
             stack.push(from);
             while let Some(cur) = stack.pop() {
-                if cur == to { return true; }
-                if cur as usize >= data.num_var { continue; }
-                if visited[cur as usize] { continue; }
+                if cur == to {
+                    return true;
+                }
+                if cur as usize >= data.num_var {
+                    continue;
+                }
+                if visited[cur as usize] {
+                    continue;
+                }
                 visited[cur as usize] = true;
                 let n = data.children[cur as usize].peek_count();
                 for i in 0..n as usize {
                     let child = data.children[cur as usize].peek_get(i);
-                    if child >= 0 && !visited[child as usize] { stack.push(child); }
+                    if child >= 0 && !visited[child as usize] {
+                        stack.push(child);
+                    }
                 }
             }
             false
@@ -178,21 +243,44 @@ fn has_path(data: &BayesData, from: i32, to: i32) -> bool {
 
 fn find_best_insert(data: &BayesData, to: i32, tx: &tm::Transaction) -> Task {
     if tx.read(&data.total_parents) >= data.global_max_edges * data.num_var as i32 {
-        return Task { op: -1, from: -1, to: -1, score: -1e100 };
+        return Task {
+            op: -1,
+            from: -1,
+            to: -1,
+            score: -1e100,
+        };
     }
-    let mut best = Task { op: 0, from: -1, to: -1, score: -1e100 };
+    let mut best = Task {
+        op: 0,
+        from: -1,
+        to: -1,
+        score: -1e100,
+    };
     let base_ll = tx.read(&data.local_ll[to as usize]);
     for from in 0..data.num_var as i32 {
-        if from == to { continue; }
-        if data.parents[to as usize].contains(tx, from) { continue; }
-        if has_path(data, to, from) { continue; }
+        if from == to {
+            continue;
+        }
+        if data.parents[to as usize].contains(tx, from) {
+            continue;
+        }
+        if has_path(data, to, from) {
+            continue;
+        }
         let mut par = data.parents[to as usize].collect(tx);
         par.push(from);
         let new_ll = compute_density_ll(data, to as usize, &par);
         let delta = new_ll - base_ll;
         let score = tx.read(&data.total_parents) as f64 * data.base_penalty
-                  + data.num_records as f64 * (tx.read(&data.base_log_likelihood) + delta);
-        if score > best.score { best = Task { op: 0, from, to, score }; }
+            + data.num_records as f64 * (tx.read(&data.base_log_likelihood) + delta);
+        if score > best.score {
+            best = Task {
+                op: 0,
+                from,
+                to,
+                score,
+            };
+        }
     }
     best
 }
@@ -206,13 +294,19 @@ const TEST_DEFAULT_MAX_EDGES_PER_VAR: i32 = 2;
 const TEST_DEFAULT_NUM_THREADS: i32 = 4;
 
 // ── d2l/l2d: bit-preserving f64 ↔ i64 (matching C++ memcpy) ─────
-fn d2l(v: f64) -> i64 { v.to_bits() as i64 }
-fn l2d(v: i64) -> f64 { f64::from_bits(v as u64) }
+fn d2l(v: f64) -> i64 {
+    v.to_bits() as i64
+}
+fn l2d(v: i64) -> f64 {
+    f64::from_bits(v as u64)
+}
 
 // ── LCG matching C++ bayes RNG ──────────────────────────────────
 struct TestLcg(u32);
 impl TestLcg {
-    fn new(seed: u32) -> Self { TestLcg(if seed == 0 { 1 } else { seed }) }
+    fn new(seed: u32) -> Self {
+        TestLcg(if seed == 0 { 1 } else { seed })
+    }
     fn next(&mut self) -> u32 {
         self.0 = self.0.wrapping_mul(1103515245).wrapping_add(12345);
         self.0 & 0x7fffffff
@@ -226,12 +320,36 @@ pub fn test() -> i32 {
     // ── CLI flags defaults ─────────────────────────────────────
     eprintln!("  Testing CLI defaults...");
     // Use canonical values matching C++ bayes defaults at bayes.cpp:30-36
-    total += 1; if TEST_DEFAULT_NUM_VAR != 32 { eprintln!("  FAIL: default vars"); fails += 1; }
-    total += 1; if TEST_DEFAULT_NUM_RECORD != 1024 { eprintln!("  FAIL: default records"); fails += 1; }
-    total += 1; if TEST_DEFAULT_MAX_PARENTS != 2 { eprintln!("  FAIL: default max parents"); fails += 1; }
-    total += 1; if TEST_DEFAULT_INSERT_PENALTY != 2 { eprintln!("  FAIL: default penalty"); fails += 1; }
-    total += 1; if TEST_DEFAULT_MAX_EDGES_PER_VAR != 2 { eprintln!("  FAIL: default max edges"); fails += 1; }
-    total += 1; if TEST_DEFAULT_NUM_THREADS != 4 { eprintln!("  FAIL: default threads"); fails += 1; }
+    total += 1;
+    if TEST_DEFAULT_NUM_VAR != 32 {
+        eprintln!("  FAIL: default vars");
+        fails += 1;
+    }
+    total += 1;
+    if TEST_DEFAULT_NUM_RECORD != 1024 {
+        eprintln!("  FAIL: default records");
+        fails += 1;
+    }
+    total += 1;
+    if TEST_DEFAULT_MAX_PARENTS != 2 {
+        eprintln!("  FAIL: default max parents");
+        fails += 1;
+    }
+    total += 1;
+    if TEST_DEFAULT_INSERT_PENALTY != 2 {
+        eprintln!("  FAIL: default penalty");
+        fails += 1;
+    }
+    total += 1;
+    if TEST_DEFAULT_MAX_EDGES_PER_VAR != 2 {
+        eprintln!("  FAIL: default max edges");
+        fails += 1;
+    }
+    total += 1;
+    if TEST_DEFAULT_NUM_THREADS != 4 {
+        eprintln!("  FAIL: default threads");
+        fails += 1;
+    }
 
     // ── RNG determinism ────────────────────────────────────────
     eprintln!("  Testing RNG determinism...");
@@ -242,7 +360,13 @@ pub fn test() -> i32 {
         for i in 0..5 {
             let got = b.next();
             total += 1;
-            if got != first5[i] { eprintln!("  FAIL: LCG determinism at {}: expected {} got {}", i, first5[i], got); fails += 1; }
+            if got != first5[i] {
+                eprintln!(
+                    "  FAIL: LCG determinism at {}: expected {} got {}",
+                    i, first5[i], got
+                );
+                fails += 1;
+            }
         }
     }
 
@@ -254,7 +378,8 @@ pub fn test() -> i32 {
         let back = l2d(bits);
         total += 1;
         if (back - orig).abs() > 1e-12 {
-            eprintln!("  FAIL: d2l/l2d roundtrip: expected {} got {}", orig, back); fails += 1;
+            eprintln!("  FAIL: d2l/l2d roundtrip: expected {} got {}", orig, back);
+            fails += 1;
         }
     }
 
@@ -266,7 +391,8 @@ pub fn test() -> i32 {
         let base_penalty = -0.5 * (num_record as f64).ln() * insert_penalty as f64;
         total += 1;
         if base_penalty >= 0.0 {
-            eprintln!("  FAIL: base penalty not negative: {}", base_penalty); fails += 1;
+            eprintln!("  FAIL: base penalty not negative: {}", base_penalty);
+            fails += 1;
         }
     }
 
@@ -277,15 +403,20 @@ pub fn test() -> i32 {
     {
         let nvar = 2usize;
         let nrec = 100usize;
-        let records: Vec<Vec<i32>> = (0..nrec).map(|r| {
-            vec![(r % 2) as i32, ((r * 7) % 2) as i32]
-        }).collect();
+        let records: Vec<Vec<i32>> = (0..nrec)
+            .map(|r| vec![(r % 2) as i32, ((r * 7) % 2) as i32])
+            .collect();
         let parents: Vec<ParentSet> = (0..nvar).map(|_| ParentSet::new()).collect();
         let children: Vec<ParentSet> = (0..nvar).map(|_| ParentSet::new()).collect();
         let local_ll: Vec<TmCell<f64>> = (0..nvar).map(|_| TmCell::new(0.0)).collect();
         let data = BayesData {
-            num_var: nvar, num_records: nrec, base_penalty: 1.0,
-            records, parents, children, local_ll,
+            num_var: nvar,
+            num_records: nrec,
+            base_penalty: 1.0,
+            records,
+            parents,
+            children,
+            local_ll,
             base_log_likelihood: TmCell::new(0.0),
             total_parents: TmCell::new(0),
             global_max_edges: 2,
@@ -295,13 +426,18 @@ pub fn test() -> i32 {
         let ll_empty = compute_density_ll(&data, 0, &[]);
         total += 1;
         if ll_empty >= 0.0 || ll_empty.is_nan() {
-            eprintln!("  FAIL: LL with no parents should be negative, got {}", ll_empty); fails += 1;
+            eprintln!(
+                "  FAIL: LL with no parents should be negative, got {}",
+                ll_empty
+            );
+            fails += 1;
         }
 
         let ll_with = compute_density_ll(&data, 1, &[0]);
         total += 1;
         if ll_with.is_nan() || ll_with.is_infinite() {
-            eprintln!("  FAIL: LL with parent is {}", ll_with); fails += 1;
+            eprintln!("  FAIL: LL with parent is {}", ll_with);
+            fails += 1;
         }
     }
 
@@ -321,8 +457,10 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     let insert_penalty = 2.0;
     let base_penalty = -0.5 * (num_records as f64).ln() * insert_penalty;
     let global_max_edges = 2i32;
-    println!("  Vars: {}  Records: {}  Max parents: {}  Penalty: {:.0}",
-             num_var, num_records, max_parents, insert_penalty);
+    println!(
+        "  Vars: {}  Records: {}  Max parents: {}  Penalty: {:.0}",
+        num_var, num_records, max_parents, insert_penalty
+    );
 
     let mut rng = Rng::new(42);
     let mut parents_init: Vec<Vec<i32>> = (0..num_var).map(|_| Vec::new()).collect();
@@ -366,11 +504,17 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     let total_parents = TmCell::new(0);
     let task_list = TaskList::new();
     let data = Arc::new(BayesData {
-        num_var, num_records, base_penalty,
+        num_var,
+        num_records,
+        base_penalty,
         records: records.clone(),
-        parents, children, local_ll,
-        base_log_likelihood, total_parents,
-        global_max_edges, task_list,
+        parents,
+        children,
+        local_ll,
+        base_log_likelihood,
+        total_parents,
+        global_max_edges,
+        task_list,
     });
 
     for v in 0..num_var {
@@ -407,12 +551,16 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
                 for v in start..end {
                     let base_ll = transaction(|tx| tx.read(&d.local_ll[v]));
                     for from in 0..d.num_var as i32 {
-                        if from == v as i32 { continue; }
+                        if from == v as i32 {
+                            continue;
+                        }
                         let with_ll = compute_density_ll(&d, v, &[from]);
                         if with_ll > base_ll {
                             let delta = with_ll - base_ll;
                             let score = transaction(|tx| {
-                                d.base_penalty + d.num_records as f64 * (tx.read(&d.base_log_likelihood) + delta)
+                                d.base_penalty
+                                    + d.num_records as f64
+                                        * (tx.read(&d.base_log_likelihood) + delta)
                             });
                             transaction(|tx| {
                                 d.task_list.push(tx, 0, from, v as i32, score);
@@ -423,13 +571,23 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
 
                 // Phase 3: Greedy search loop (all threads participate)
                 loop {
-                    if sc.load(Ordering::Relaxed) { break; }
+                    if sc.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let task = transaction(|tx| d.task_list.pop_best(tx));
-                    if task.op < 0 { break; }
+                    if task.op < 0 {
+                        break;
+                    }
                     let ok = transaction(|tx| {
-                        if d.parents[task.to as usize].contains(tx, task.from) { return false; }
-                        if has_path(&d, task.to, task.from) { return false; }
-                        if tx.read(&d.total_parents) >= d.global_max_edges * d.num_var as i32 { return false; }
+                        if d.parents[task.to as usize].contains(tx, task.from) {
+                            return false;
+                        }
+                        if has_path(&d, task.to, task.from) {
+                            return false;
+                        }
+                        if tx.read(&d.total_parents) >= d.global_max_edges * d.num_var as i32 {
+                            return false;
+                        }
 
                         d.parents[task.to as usize].insert(tx, task.from);
                         d.children[task.from as usize].insert(tx, task.to);
@@ -439,11 +597,15 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
                         let new_ll = compute_density_ll(&d, task.to as usize, &par);
                         let delta = new_ll - tx.read(&d.local_ll[task.to as usize]);
                         tx.write(&d.local_ll[task.to as usize], new_ll);
-                        tx.write(&d.base_log_likelihood, tx.read(&d.base_log_likelihood) + delta);
+                        tx.write(
+                            &d.base_log_likelihood,
+                            tx.read(&d.base_log_likelihood) + delta,
+                        );
 
                         let next = find_best_insert(&d, task.to, tx);
                         if next.from >= 0 {
-                            d.task_list.push(tx, next.op, next.from, next.to, next.score);
+                            d.task_list
+                                .push(tx, next.op, next.from, next.to, next.score);
                         }
                         true
                     });
@@ -460,5 +622,8 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     let elapsed = t0.elapsed().as_millis() as u64;
     let ops_count = g_ops.load(Ordering::Relaxed);
     let total_par = unsafe { *data.total_parents.ptr() };
-    println!("  Operations: {}  Total parents: {}  Elapsed: {} ms", ops_count, total_par, elapsed);
+    println!(
+        "  Operations: {}  Total parents: {}  Elapsed: {} ms",
+        ops_count, total_par, elapsed
+    );
 }

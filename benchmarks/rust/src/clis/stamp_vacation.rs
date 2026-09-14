@@ -1,8 +1,8 @@
+use benchmarks::Rng;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tm::*;
-use benchmarks::Rng;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -15,11 +15,26 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-p" => { i += 1; num_threads = args[i].parse().unwrap(); }
-            "-r" => { i += 1; num_relations = args[i].parse().unwrap(); }
-            "-n" => { i += 1; num_queries_per_tx = args[i].parse().unwrap(); }
-            "-u" => { i += 1; percent_user = args[i].parse().unwrap(); }
-            "-t" => { i += 1; total_tasks = args[i].parse().unwrap(); }
+            "-p" => {
+                i += 1;
+                num_threads = args[i].parse().unwrap();
+            }
+            "-r" => {
+                i += 1;
+                num_relations = args[i].parse().unwrap();
+            }
+            "-n" => {
+                i += 1;
+                num_queries_per_tx = args[i].parse().unwrap();
+            }
+            "-u" => {
+                i += 1;
+                percent_user = args[i].parse().unwrap();
+            }
+            "-t" => {
+                i += 1;
+                total_tasks = args[i].parse().unwrap();
+            }
             _ => {}
         }
         i += 1;
@@ -39,17 +54,19 @@ fn main() {
 
     // Initialize tables: cars, rooms, flights — each with num_relations entries
     // Each entry: [num_used, num_free, num_total, price, active]
-    let mut tables: Vec<Vec<TmCell<i32>>> = (0..3).map(|_| Vec::with_capacity(num_relations * 5)).collect();
+    let mut tables: Vec<Vec<TmCell<i32>>> = (0..3)
+        .map(|_| Vec::with_capacity(num_relations * 5))
+        .collect();
     let mut rng = Rng::new(42);
     for t in 0..3 {
         for _ in 0..num_relations {
             let num = ((rng.next() % 5 + 1) * 100) as i32;
             let price = (rng.next() % 5 * 10 + 50) as i32;
-            tables[t].push(TmCell::new(0));  // num_used
-            tables[t].push(TmCell::new(num));  // num_free
-            tables[t].push(TmCell::new(num));  // num_total
-            tables[t].push(TmCell::new(price));  // price
-            tables[t].push(TmCell::new(1));  // active
+            tables[t].push(TmCell::new(0)); // num_used
+            tables[t].push(TmCell::new(num)); // num_free
+            tables[t].push(TmCell::new(num)); // num_total
+            tables[t].push(TmCell::new(price)); // price
+            tables[t].push(TmCell::new(1)); // active
         }
     }
 
@@ -137,8 +154,10 @@ fn main() {
                                             tx.write(&tables[t][idx], tx.read(&tables[t][idx]) + 1); // num_used++
                                             tx.write(&tables[t][idx + 1], p - 1); // num_free--
                                             let price = tx.read(&tables[t][idx + 3]);
-                                            tx.write(&customers[customer_id - 1],
-                                                     tx.read(&customers[customer_id - 1]) + price);
+                                            tx.write(
+                                                &customers[customer_id - 1],
+                                                tx.read(&customers[customer_id - 1]) + price,
+                                            );
                                         }
                                     }
                                 }
@@ -155,8 +174,11 @@ fn main() {
                         let t = (rng.next() % 3) as usize;
                         let id = (rng.next() % qrange as u64 + 1) as usize;
                         let op = rng.next() % 2;
-                        let price_val =
-                            if op == 1 { (rng.next() % 5 * 10 + 50) as i32 } else { 0 };
+                        let price_val = if op == 1 {
+                            (rng.next() % 5 * 10 + 50) as i32
+                        } else {
+                            0
+                        };
 
                         // update_tables_tx
                         transaction(|tx| {
@@ -193,7 +215,10 @@ fn main() {
 
     println!("    Time = {} ms", elapsed.as_millis());
     println!("    Ops = {}", ops);
-    println!("    Throughput = {:.2} ops/sec", ops as f64 / elapsed.as_secs_f64());
+    println!(
+        "    Throughput = {:.2} ops/sec",
+        ops as f64 / elapsed.as_secs_f64()
+    );
 
     tm_exit();
 }
@@ -222,11 +247,26 @@ mod tests {
         let mut i = 1;
         while i < args.len() {
             match args[i].as_str() {
-                "-p" => { i += 1; num_threads = args[i].parse().unwrap(); }
-                "-r" => { i += 1; num_relations = args[i].parse().unwrap(); }
-                "-n" => { i += 1; num_queries_per_tx = args[i].parse().unwrap(); }
-                "-u" => { i += 1; percent_user = args[i].parse().unwrap(); }
-                "-t" => { i += 1; total_tasks = args[i].parse().unwrap(); }
+                "-p" => {
+                    i += 1;
+                    num_threads = args[i].parse().unwrap();
+                }
+                "-r" => {
+                    i += 1;
+                    num_relations = args[i].parse().unwrap();
+                }
+                "-n" => {
+                    i += 1;
+                    num_queries_per_tx = args[i].parse().unwrap();
+                }
+                "-u" => {
+                    i += 1;
+                    percent_user = args[i].parse().unwrap();
+                }
+                "-t" => {
+                    i += 1;
+                    total_tasks = args[i].parse().unwrap();
+                }
                 _ => {}
             }
             i += 1;
@@ -242,11 +282,16 @@ mod tests {
     fn test_cli_parsing() {
         let args: Vec<String> = vec![
             "stamp_vacation".into(),
-            "-p".into(), "8".into(),
-            "-r".into(), "100".into(),
-            "-n".into(), "5".into(),
-            "-u".into(), "50".into(),
-            "-t".into(), "1000".into(),
+            "-p".into(),
+            "8".into(),
+            "-r".into(),
+            "100".into(),
+            "-n".into(),
+            "5".into(),
+            "-u".into(),
+            "50".into(),
+            "-t".into(),
+            "1000".into(),
         ];
         let mut num_threads = 4;
         let mut num_relations = 16384;
@@ -256,11 +301,26 @@ mod tests {
         let mut i = 1;
         while i < args.len() {
             match args[i].as_str() {
-                "-p" => { i += 1; num_threads = args[i].parse().unwrap(); }
-                "-r" => { i += 1; num_relations = args[i].parse().unwrap(); }
-                "-n" => { i += 1; num_queries_per_tx = args[i].parse().unwrap(); }
-                "-u" => { i += 1; percent_user = args[i].parse().unwrap(); }
-                "-t" => { i += 1; total_tasks = args[i].parse().unwrap(); }
+                "-p" => {
+                    i += 1;
+                    num_threads = args[i].parse().unwrap();
+                }
+                "-r" => {
+                    i += 1;
+                    num_relations = args[i].parse().unwrap();
+                }
+                "-n" => {
+                    i += 1;
+                    num_queries_per_tx = args[i].parse().unwrap();
+                }
+                "-u" => {
+                    i += 1;
+                    percent_user = args[i].parse().unwrap();
+                }
+                "-t" => {
+                    i += 1;
+                    total_tasks = args[i].parse().unwrap();
+                }
                 _ => {}
             }
             i += 1;
@@ -299,16 +359,20 @@ mod tests {
         let num_queries_per_tx = 3i32;
         let _query_range = (0.9 * num_relations as f64) as i32;
         let tables: Vec<Vec<i32>> = (0..3)
-            .map(|_| (0..num_relations * 5).map(|i| {
-                let slot = i / 5;
-                match i % 5 {
-                    0 => 0,
-                    1 => 100,
-                    2 => 100,
-                    3 => slot as i32 * 10 + 50,
-                    _ => 1,
-                }
-            }).collect())
+            .map(|_| {
+                (0..num_relations * 5)
+                    .map(|i| {
+                        let slot = i / 5;
+                        match i % 5 {
+                            0 => 0,
+                            1 => 100,
+                            2 => 100,
+                            3 => slot as i32 * 10 + 50,
+                            _ => 1,
+                        }
+                    })
+                    .collect()
+            })
             .collect();
 
         let mut best_prices = [-1i32; 3];

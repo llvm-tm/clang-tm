@@ -4,11 +4,11 @@
 // a global monotonically increasing clock.
 
 use core::sync::atomic::{compiler_fence, fence, AtomicU64, Ordering};
+pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
 #[cfg(not(feature = "simulation"))]
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
 
 // ── Constants ───────────────────────────────────────────
 const LOCK_MASK: u64 = 0xFF;
@@ -28,20 +28,27 @@ struct Lock {
 
 impl Lock {
     const fn new() -> Self {
-        Lock { data: AtomicU64::new(0) }
+        Lock {
+            data: AtomicU64::new(0),
+        }
     }
     fn is_locked(&self) -> bool {
         self.data.load(Ordering::Relaxed) & LOCK_MASK != 0
     }
     fn try_lock_exclusive(&self) -> bool {
         let cur = self.data.load(Ordering::Relaxed);
-        if cur & LOCK_MASK != 0 { return false; }
-        self.data.compare_exchange_weak(cur, cur | 1, Ordering::Acquire, Ordering::Relaxed).is_ok()
+        if cur & LOCK_MASK != 0 {
+            return false;
+        }
+        self.data
+            .compare_exchange_weak(cur, cur | 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
     }
     fn unlock_exclusive(&self) {
         let cur = self.data.load(Ordering::Relaxed);
         let ver = (cur & !LOCK_MASK) >> VERSION_SHIFT;
-        self.data.store((ver + 1) << VERSION_SHIFT, Ordering::Release);
+        self.data
+            .store((ver + 1) << VERSION_SHIFT, Ordering::Release);
     }
     fn version(&self) -> u64 {
         let v = self.data.load(Ordering::Acquire);
@@ -75,7 +82,10 @@ static LOCK_TABLE: OnceLock<Box<[Lock]>> = OnceLock::new();
 
 fn locks() -> &'static [Lock] {
     LOCK_TABLE.get_or_init(|| {
-        (0..TABLE_SIZE).map(|_| Lock::new()).collect::<Vec<_>>().into_boxed_slice()
+        (0..TABLE_SIZE)
+            .map(|_| Lock::new())
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
     })
 }
 
@@ -102,7 +112,7 @@ fn sim_tx_store() -> &'static Mutex<HashMap<u64, Option<Box<TxState>>>> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
 pub struct TxState {
-    read_set: Vec<(usize, u64)>,  // (addr, version_at_read)
+    read_set: Vec<(usize, u64)>, // (addr, version_at_read)
     write_set: HashMap<usize, TypedValue>,
     #[allow(dead_code)]
     write_backs: Vec<WriteBack>,
@@ -193,7 +203,9 @@ fn read_word<T: Primitive>(addr: usize) -> T {
         }
         let ver = read_version(addr);
         let val: T = unsafe { (addr as *const T).read() };
-        if read_version(addr) != ver { continue; }
+        if read_version(addr) != ver {
+            continue;
+        }
 
         if with_tx(|tx| {
             if ver > tx.start_version {
@@ -204,10 +216,14 @@ fn read_word<T: Primitive>(addr: usize) -> T {
                 }
                 tx.read_set.push((addr, ver));
                 #[cfg(feature = "stats")]
-                TM_STATS.total_read_set_entries.fetch_add(1, Ordering::Relaxed);
+                TM_STATS
+                    .total_read_set_entries
+                    .fetch_add(1, Ordering::Relaxed);
                 false
             }
-        }) { std::panic::panic_any(TmxAbort); }
+        }) {
+            std::panic::panic_any(TmxAbort);
+        }
         return val;
     }
 }
@@ -215,24 +231,40 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 // ── Write word ──────────────────────────────────────────
 fn write_word<T: Primitive>(addr: usize, val: T) {
     compiler_fence(Ordering::SeqCst);
-    if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
+    if !tx_active() {
+        unsafe {
+            (addr as *mut T).write(val);
+        }
+        return;
+    }
 
     let tv = val.to_typed();
     with_tx(|tx| {
-        let is_new = tx.write_set.insert(addr, tv).is_none();
+        let _is_new = tx.write_set.insert(addr, tv).is_none();
         #[cfg(feature = "stats")]
-        if is_new { TM_STATS.total_write_set_entries.fetch_add(1, Ordering::Relaxed); }
+        if _is_new {
+            TM_STATS
+                .total_write_set_entries
+                .fetch_add(1, Ordering::Relaxed);
+        }
     });
 }
 
 // ── Raw byte operations ─────────────────────────────────
 fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
-    for (i, byte) in dst.iter_mut().enumerate() { *byte = read_word::<u8>(addr + i); }
+    for (i, byte) in dst.iter_mut().enumerate() {
+        *byte = read_word::<u8>(addr + i);
+    }
 }
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
     compiler_fence(Ordering::SeqCst);
-    if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
+    if !tx_active() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len());
+        }
+        return;
+    }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| {
         tx.write_set.insert(addr, tv);
@@ -259,22 +291,33 @@ fn validate_read_set(rs: &[(usize, u64)]) -> bool {
     TM_STATS.validations.fetch_add(1, Ordering::Relaxed);
     let ok = rs.iter().all(|(a, v)| read_version(*a) == *v);
     #[cfg(feature = "stats")]
-    if !ok { TM_STATS.validation_failures.fetch_add(1, Ordering::Relaxed); }
+    if !ok {
+        TM_STATS.validation_failures.fetch_add(1, Ordering::Relaxed);
+    }
     ok
 }
 
 // ── Commit ──────────────────────────────────────────────
 pub fn tm_commit() -> bool {
-    let tx = match flush_tx() { Some(t) => t, None => return true };
+    let tx = match flush_tx() {
+        Some(t) => t,
+        None => return true,
+    };
     compiler_fence(Ordering::SeqCst);
 
-    if tx.write_set.is_empty() { return true; }
+    if tx.write_set.is_empty() {
+        return true;
+    }
 
     // 1. Acquire global commit lock
     let my_id = 1;
     loop {
         let cur = COMMIT_LOCK.load(Ordering::Relaxed);
-        if cur == 0 && COMMIT_LOCK.compare_exchange_weak(0, my_id, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        if cur == 0
+            && COMMIT_LOCK
+                .compare_exchange_weak(0, my_id, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+        {
             break;
         }
         // In simulation mode, if another thread holds the commit lock,
@@ -323,7 +366,9 @@ pub fn tm_commit() -> bool {
                 #[cfg(not(feature = "simulation"))]
                 {
                     #[cfg(feature = "stats")]
-                    TM_STATS.lock_acquire_failures.fetch_add(1, Ordering::Relaxed);
+                    TM_STATS
+                        .lock_acquire_failures
+                        .fetch_add(1, Ordering::Relaxed);
                     std::hint::spin_loop();
                 }
             }
@@ -372,7 +417,9 @@ pub fn tm_exit() {}
 
 pub fn tm_init_thread() {
     #[cfg(not(feature = "simulation"))]
-    TX.with(|tx| { *tx.borrow_mut() = None; });
+    TX.with(|tx| {
+        *tx.borrow_mut() = None;
+    });
     #[cfg(feature = "simulation")]
     {
         let tid = runtime_core::current_sim_thread_id();
@@ -387,7 +434,9 @@ pub fn tm_exit_thread() {}
 #[cfg(not(feature = "simulation"))]
 pub fn tm_begin() {
     let sv = G_CLOCK.load(Ordering::Acquire);
-    TX.with(|tx| { *tx.borrow_mut() = Some(Box::new(TxState::new(sv))); });
+    TX.with(|tx| {
+        *tx.borrow_mut() = Some(Box::new(TxState::new(sv)));
+    });
 }
 
 #[cfg(feature = "simulation")]
@@ -399,16 +448,30 @@ pub fn tm_begin() {
     *map.get_mut(&tid).expect("no sim state for thread") = Some(Box::new(TxState::new(sv)));
 }
 
-pub fn tm_abort() { flush_tx(); }
+pub fn tm_abort() {
+    flush_tx();
+}
 
-pub fn tm_abort_count() -> u64 { TM_ABORT_COUNT.load(Ordering::Relaxed) }
+pub fn tm_abort_count() -> u64 {
+    TM_ABORT_COUNT.load(Ordering::Relaxed)
+}
 
 // ── Typed wrappers ─────────────────────────────────────
 macro_rules! def_read {
-    ($n:ident, $t:ty) => { #[inline] pub fn $n(addr: *mut $t) -> $t { read_word::<$t>(addr as usize) } };
+    ($n:ident, $t:ty) => {
+        #[inline]
+        pub fn $n(addr: *mut $t) -> $t {
+            read_word::<$t>(addr as usize)
+        }
+    };
 }
 macro_rules! def_write {
-    ($n:ident, $t:ty) => { #[inline] pub fn $n(addr: *mut $t, val: $t) { write_word::<$t>(addr as usize, val) } };
+    ($n:ident, $t:ty) => {
+        #[inline]
+        pub fn $n(addr: *mut $t, val: $t) {
+            write_word::<$t>(addr as usize, val)
+        }
+    };
 }
 
 def_read!(tm_read_u8, u8);
@@ -433,10 +496,22 @@ def_write!(tm_write_i64, i64);
 def_write!(tm_write_f32, f32);
 def_write!(tm_write_f64, f64);
 
-#[inline] pub fn tm_read_ptr<T>(addr: *mut *mut T) -> *mut T { read_word::<u64>(addr as usize) as *mut T }
-#[inline] pub fn tm_write_ptr<T>(addr: *mut *mut T, val: *mut T) { write_word::<u64>(addr as usize, val as u64); }
-#[inline] pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) { read_raw_bytes(addr as usize, dst); }
-#[inline] pub fn tm_write_raw(addr: *mut u8, src: &[u8]) { write_raw_bytes(addr as usize, src); }
+#[inline]
+pub fn tm_read_ptr<T>(addr: *mut *mut T) -> *mut T {
+    read_word::<u64>(addr as usize) as *mut T
+}
+#[inline]
+pub fn tm_write_ptr<T>(addr: *mut *mut T, val: *mut T) {
+    write_word::<u64>(addr as usize, val as u64);
+}
+#[inline]
+pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) {
+    read_raw_bytes(addr as usize, dst);
+}
+#[inline]
+pub fn tm_write_raw(addr: *mut u8, src: &[u8]) {
+    write_raw_bytes(addr as usize, src);
+}
 
 // ── Simulation-only API ──────────────────────────────────
 #[cfg(feature = "simulation")]
@@ -464,7 +539,9 @@ pub mod sim {
     }
 
     pub fn reset() {
-        let Some(tid) = runtime_core::try_current_sim_thread_id() else { return; };
+        let Some(tid) = runtime_core::try_current_sim_thread_id() else {
+            return;
+        };
         let store = sim_tx_store();
         let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
         map.remove(&tid);
@@ -473,14 +550,34 @@ pub mod sim {
     #[cfg(feature = "stats")]
     pub fn take_stats() -> runtime_core::SyncCounters {
         let s = runtime_core::SyncCounters::new();
-        s.validations.store(TM_STATS.validations.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.validation_failures.store(TM_STATS.validation_failures.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.lock_contentions.store(TM_STATS.lock_contentions.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.lock_acquire_failures.store(TM_STATS.lock_acquire_failures.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.total_read_set_entries.store(TM_STATS.total_read_set_entries.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.total_write_set_entries.store(TM_STATS.total_write_set_entries.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.commits.store(TM_STATS.commits.load(Ordering::Relaxed), Ordering::Relaxed);
-        s.aborts.store(TM_STATS.aborts.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.validations.store(
+            TM_STATS.validations.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        s.validation_failures.store(
+            TM_STATS.validation_failures.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        s.lock_contentions.store(
+            TM_STATS.lock_contentions.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        s.lock_acquire_failures.store(
+            TM_STATS.lock_acquire_failures.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        s.total_read_set_entries.store(
+            TM_STATS.total_read_set_entries.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        s.total_write_set_entries.store(
+            TM_STATS.total_write_set_entries.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        s.commits
+            .store(TM_STATS.commits.load(Ordering::Relaxed), Ordering::Relaxed);
+        s.aborts
+            .store(TM_STATS.aborts.load(Ordering::Relaxed), Ordering::Relaxed);
         TM_STATS.reset();
         s
     }
@@ -491,13 +588,15 @@ pub mod sim {
         let val = s.validations.load(Ordering::Relaxed);
         let vfail = s.validation_failures.load(Ordering::Relaxed);
         let lcon = s.lock_contentions.load(Ordering::Relaxed);
-        let laf  = s.lock_acquire_failures.load(Ordering::Relaxed);
-        let trs  = s.total_read_set_entries.load(Ordering::Relaxed);
-        let tws  = s.total_write_set_entries.load(Ordering::Relaxed);
-        let com  = s.commits.load(Ordering::Relaxed);
-        let abt  = s.aborts.load(Ordering::Relaxed);
+        let laf = s.lock_acquire_failures.load(Ordering::Relaxed);
+        let trs = s.total_read_set_entries.load(Ordering::Relaxed);
+        let tws = s.total_write_set_entries.load(Ordering::Relaxed);
+        let com = s.commits.load(Ordering::Relaxed);
+        let abt = s.aborts.load(Ordering::Relaxed);
         eprintln!("  STATS (TL2):");
-        eprintln!("    Commits={}  Aborts={}  Val={}  VFail={}  CLock={}  LAqFail={}  RS={}  WS={}",
-                  com, abt, val, vfail, lcon, laf, trs, tws);
+        eprintln!(
+            "    Commits={}  Aborts={}  Val={}  VFail={}  CLock={}  LAqFail={}  RS={}  WS={}",
+            com, abt, val, vfail, lcon, laf, trs, tws
+        );
     }
 }

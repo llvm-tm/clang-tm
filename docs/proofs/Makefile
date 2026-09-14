@@ -34,7 +34,7 @@ LIVENESS_BACKENDS := $(patsubst %-liveness.cfg,%,$(filter %-liveness.cfg,$(ALL_C
 # Backends that use PlusCal (have $${$}--algorithm comment)
 PLUSCAL_BACKENDS := $(shell grep -l '\-\-algorithm' *.tla 2>/dev/null | sed 's/\.tla//')
 
-.PHONY: check-all tla clean
+.PHONY: check-all tla clean smoke-check
 
 # Default: TLC on all backends (safety only)
 check:
@@ -47,6 +47,24 @@ check:
 # TLC with coverage
 check-all: TLC_OPTS += -coverage 1
 check-all: check
+
+# Fast smoke gate: 3 small models, 60s timeout each (blocking CI, <5 min total).
+# Base configs are the "small" models (Addr={0}); -large/-liveness are excluded.
+SMOKE_BACKENDS := SGL NOrec TinySTM_WBCTL
+
+smoke-check: TLC_OPTS += -workers 2
+smoke-check:
+	@for b in $(SMOKE_BACKENDS); do \
+	    echo "=== TLC smoke: $$b (60s timeout) ==="; \
+	    out=$$(timeout 60 $(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) $$b.tla -config $$b.cfg 2>&1); \
+	    rc=$$?; \
+	    echo "$$out" | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'; \
+	    if [ $$rc -eq 124 ]; then echo "TIMEOUT: $$b exceeded 60s"; exit 1; \
+	    elif [ $$rc -ne 0 ]; then echo "TLC FAILED: $$b (rc=$$rc)"; exit 1; \
+	    fi; \
+	    echo; \
+	done
+	@echo "=== TLC smoke: all passed ==="
 
 # TLC on a single backend: make BACKEND=TL2 check-one
 check-one:

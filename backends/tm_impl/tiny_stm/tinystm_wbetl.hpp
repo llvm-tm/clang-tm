@@ -25,7 +25,8 @@ namespace tinystm
 
 constexpr const char *VERSION = "0.2.0-wbetl";
 
-struct ReadLogEntry_wbetl : stm::BitmapReadEntry<void *> {};
+struct ReadLogEntry_wbetl : stm::BitmapReadEntry<void *> {
+};
 
 struct WriteLogEntry_wbetl : stm::BitmapRedoEntry<void *> {
 	volatile word_t version;
@@ -126,7 +127,7 @@ begin()     //
 }
 
 __attribute__((noreturn)) inline void //
-abort_tx(const char *loc = "")       //
+abort_tx(const char *loc = "")        //
 {
 	auto *tx = current_tx_wbetl;
 
@@ -217,10 +218,10 @@ commit()    //
 			auto &w = it.second;
 			for (unsigned byte_off = 0; byte_off < 8; byte_off++) {
 				if (w.valid & (1 << byte_off)) {
-					void *byte_addr =
-					    reinterpret_cast<void *>((uintptr_t)aligned + byte_off);
-					uint8_t byte_val =
-					    static_cast<uint8_t>((w.value >> (byte_off * 8)) & 0xFF);
+					void *byte_addr = reinterpret_cast<void *>((uintptr_t)aligned +
+					                                           byte_off);
+					uint8_t byte_val = static_cast<uint8_t>((w.value >> (byte_off * 8)) &
+					                                        0xFF);
 					write_value_to_addr(byte_addr,
 					                    any_type_t{.u1 = byte_val},
 					                    ValueType::UINT8);
@@ -265,8 +266,7 @@ read_word_etl(                                                //
 		auto *w = tx->ws_find(aligned);
 		if (w) {
 			any_type_t result;
-			if (stm::merge::bitmap_read(result, w->value, w->valid,
-			                           sz, addr)) {
+			if (stm::merge::bitmap_read(result, w->value, w->valid, sz, addr)) {
 				return result;
 			}
 		}
@@ -324,7 +324,12 @@ read_word_etl(                                                //
 				}
 			}
 			if (!found) {
-				tx->read_set.push_back(stm::merge::make_read_entry<ReadLogEntry_wbetl>(aligned, version, val, sz, addr));
+				tx->read_set.push_back(
+				    stm::merge::make_read_entry<ReadLogEntry_wbetl>(aligned,
+				                                                    version,
+				                                                    val,
+				                                                    sz,
+				                                                    addr));
 			}
 		}
 
@@ -333,7 +338,7 @@ read_word_etl(                                                //
 }
 
 inline void                                                   //
-write_word_etl(                                                //
+write_word_etl(                                               //
     Transaction<ReadLogEntry_wbetl, WriteLogEntry_wbetl> *tx, //
     void *addr,                                               //
     any_type_t val,                                           //
@@ -391,7 +396,7 @@ write_word_etl(                                                //
 			if (!lock->try_lock(tx->id)) {
 				if (stm::tm_token_soft_spin(tx->abort_count, tx->id, 3)) {
 					while (lock->is_locked()) {
-					stm::tm_cpu_relax();
+						stm::tm_cpu_relax();
 					}
 					if (!lock->try_lock(tx->id))
 						abort_tx("write_unlock_race");
@@ -408,8 +413,7 @@ write_word_etl(                                                //
 	}
 
 	if (acquired) {
-		TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock,
-		          lock->get());
+		TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, lock->get());
 	} else {
 		TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, 0);
 	}
@@ -427,7 +431,12 @@ write_word_etl(                                                //
 		}
 	}
 
-	tx->ws_get_or_insert(aligned) = stm::merge::make_write_entry<WriteLogEntry_wbetl>(aligned, val, sz, addr, lock->get_version());
+	tx->ws_get_or_insert(
+	    aligned) = stm::merge::make_write_entry<WriteLogEntry_wbetl>(aligned,
+	                                                                 val,
+	                                                                 sz,
+	                                                                 addr,
+	                                                                 lock->get_version());
 	TM_EVENT2(WRITE_SET_INSERT, (uint64_t)addr, (uint64_t)lock, (uint64_t)sz);
 }
 

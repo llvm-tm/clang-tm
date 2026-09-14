@@ -54,8 +54,7 @@ constexpr char TM_SYMBOL_SIZES[] = "tm_symbol_sizes";
 // Iterate all entries in @llvm.global.annotations, calling Fn for each.
 // Fn receives (Constant *Annotation, Value *AnnotatedValue, StringRef AnnotationStr).
 // Return false from Fn to stop iteration early (useful for hasAnnotation).
-template <typename Fn>
-static void forEachAnnotation(Module &M, Fn Callback)
+template <typename Fn> static void forEachAnnotation(Module &M, Fn Callback)
 {
 	if (GlobalVariable *GVA = M.getNamedGlobal(ANNOTATION_GLOBAL)) {
 		if (Constant *Init = GVA->getInitializer()) {
@@ -63,10 +62,8 @@ static void forEachAnnotation(Module &M, Fn Callback)
 				Constant *Annotation = cast<Constant>(Init->getOperand(i));
 				if (Annotation->getNumOperands() < ANNOTATION_MIN_OPERANDS)
 					continue;
-				Value *AnnotatedValue = Annotation->getOperand(0)
-				                            ->stripPointerCasts();
-				Value *StrOperand = Annotation->getOperand(1)
-				                        ->stripPointerCasts();
+				Value *AnnotatedValue = Annotation->getOperand(0)->stripPointerCasts();
+				Value *StrOperand = Annotation->getOperand(1)->stripPointerCasts();
 				if (auto *StrGV = dyn_cast<GlobalVariable>(StrOperand)) {
 					if (auto *StrArray = dyn_cast<ConstantDataArray>(
 					        StrGV->getInitializer())) {
@@ -137,14 +134,11 @@ static void collectTMGlobals(Module &M, SmallPtrSetImpl<const Value *> &TMValues
 			return true;
 		if (auto *AnnotatedGV = dyn_cast<GlobalVariable>(V)) {
 			TMValues.insert(AnnotatedGV);
-			TM_DEBUG("Added TM global to set: %s",
-			         AnnotatedGV->getName().str().c_str());
+			TM_DEBUG("Added TM global to set: %s", AnnotatedGV->getName().str().c_str());
 		}
 		return true;
 	});
 }
-
-
 
 // Check if a specific GlobalVariable has the "tm" annotation.
 // Uses a cached set for O(1) lookups.

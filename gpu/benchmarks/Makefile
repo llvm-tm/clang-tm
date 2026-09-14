@@ -47,9 +47,17 @@ ROOT    := ../..
 CSMV_DIR:= $(ROOT)/gpu/backends/csmv
 CSMV_API:= $(ROOT)/backends/tm_impl/csmv/include
 GUST_DIR:= $(ROOT)/gpu/backends/gpu_gust/cuda
+GUST_API:= $(ROOT)/gpu/backends/gpu_gust/include
 COMMON  := $(ROOT)/backends/tm_impl/common
-INCS    := -I$(CSMV_API) -I$(CSMV_DIR) -I$(GUST_DIR) -I$(COMMON)
+INCS    := -I$(CSMV_API) -I$(CSMV_DIR) -I$(GUST_DIR) -I$(GUST_API) -I$(COMMON)
 BIN     := bin
+
+# RDC flag differs: nvcc uses -rdc=true, hipcc uses -fgpu-rdc
+ifeq ($(HIP),1)
+  RDC_FLAG := -fgpu-rdc
+else
+  RDC_FLAG := -rdc=true
+endif
 
 # ── Targets ────────────────────────────────────────────────────
 BINARIES := $(BIN)/gpu_ycsb $(BIN)/gpu_kmeans $(BIN)/gpu_memcached $(BIN)/gpu_tpcc $(BIN)/gpu_fuzz_counter
@@ -60,7 +68,7 @@ all: $(BINARIES) $(GUST_BINARIES)
 $(BIN)/gpu_fuzz_counter: gpu_fuzz_counter.cu $(CSMV_DIR)/csmv_batch_executor.cu \
                          $(CSMV_DIR)/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
 	    gpu_fuzz_counter.cu $(CSMV_DIR)/csmv_batch_executor.cu \
 	    -o $@
 
@@ -68,28 +76,28 @@ $(BIN)/gpu_fuzz_counter: gpu_fuzz_counter.cu $(CSMV_DIR)/csmv_batch_executor.cu 
 $(BIN)/gpu_ycsb: gpu_ycsb.cu $(CSMV_DIR)/csmv_batch_executor.cu \
                  $(CSMV_DIR)/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
 	    gpu_ycsb.cu $(CSMV_DIR)/csmv_batch_executor.cu \
 	    -o $@
 
 $(BIN)/gpu_kmeans: gpu_kmeans.cu $(CSMV_DIR)/csmv_batch_executor.cu \
                    $(CSMV_DIR)/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
 	    gpu_kmeans.cu $(CSMV_DIR)/csmv_batch_executor.cu \
 	    -o $@
 
 $(BIN)/gpu_memcached: gpu_memcached.cu $(CSMV_DIR)/csmv_batch_executor.cu \
                       $(CSMV_DIR)/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
 	    gpu_memcached.cu $(CSMV_DIR)/csmv_batch_executor.cu \
 	    -o $@
 
 $(BIN)/gpu_tpcc: gpu_tpcc.cu $(CSMV_DIR)/csmv_batch_executor.cu \
                  $(CSMV_DIR)/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
 	    gpu_tpcc.cu $(CSMV_DIR)/csmv_batch_executor.cu \
 	    -o $@
 
@@ -98,22 +106,22 @@ GUST_EXEC := $(GUST_DIR)/gpu_gust_batch_executor.cu
 
 $(BIN)/gpu_bank: gpu_bank.cu $(GUST_EXEC) $(GUST_DIR)/gpu_gust_batch_executor.cuh
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
 	    gpu_bank.cu $(GUST_EXEC) -o $@
 
 $(BIN)/gpu_ycsb_gust: gpu_ycsb_gust.cu $(GUST_EXEC) $(GUST_DIR)/gpu_gust_batch_executor.cuh
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
 	    gpu_ycsb_gust.cu $(GUST_EXEC) -o $@
 
 $(BIN)/gpu_memcached_gust: gpu_memcached_gust.cu $(GUST_EXEC) $(GUST_DIR)/gpu_gust_batch_executor.cuh
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
 	    gpu_memcached_gust.cu $(GUST_EXEC) -o $@
 
 $(BIN)/gpu_gust_smoke: $(GUST_DIR)/gpu_gust_smoke.cu $(GUST_EXEC) $(GUST_DIR)/gpu_gust_batch_executor.cuh
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 -rdc=true $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
 	    $(GUST_DIR)/gpu_gust_smoke.cu $(GUST_EXEC) -o $@
 
 run: all

@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
 use crate::backend::Backend;
 use crate::event::Event;
-use crate::verifier::Verifier;
 use crate::sim_engine::ReplayStats;
+use crate::verifier::Verifier;
+use std::collections::{HashMap, HashSet};
 
 /// Serializable snapshot of the simulation engine state.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -20,21 +20,19 @@ pub struct Checkpoint {
 
 impl Checkpoint {
     pub fn save_to_file(&self, path: &str) -> Result<(), String> {
-        let encoded = bincode::serialize(self)
-            .map_err(|e| format!("serialize checkpoint: {}", e))?;
-        std::fs::write(path, &encoded)
-            .map_err(|e| format!("write checkpoint: {}", e))
+        let encoded =
+            bincode::serialize(self).map_err(|e| format!("serialize checkpoint: {}", e))?;
+        std::fs::write(path, &encoded).map_err(|e| format!("write checkpoint: {}", e))
     }
 
     pub fn load_from_file(path: &str) -> Result<Self, String> {
-        let data = std::fs::read(path)
-            .map_err(|e| format!("read checkpoint: {}", e))?;
-        bincode::deserialize(&data)
-            .map_err(|e| format!("deserialize checkpoint: {}", e))
+        let data = std::fs::read(path).map_err(|e| format!("read checkpoint: {}", e))?;
+        bincode::deserialize(&data).map_err(|e| format!("deserialize checkpoint: {}", e))
     }
 }
 
 /// Snapshot the current engine state for checkpointing.
+#[allow(clippy::too_many_arguments)] // mirrors the engine fields captured
 pub fn snapshot_engine(
     backend: &Backend,
     events_remaining: &[Event],
@@ -60,11 +58,19 @@ pub fn snapshot_engine(
 }
 
 /// Restore engine state from a checkpoint.
+#[allow(clippy::type_complexity)] // tuple mirrors the engine fields restored
 pub fn restore_engine(
     cp: &Checkpoint,
     backend: &Backend,
 ) -> Result<
-    (Vec<Event>, ReplayStats, Verifier, HashMap<u64, bool>, HashSet<u64>, u64),
+    (
+        Vec<Event>,
+        ReplayStats,
+        Verifier,
+        HashMap<u64, bool>,
+        HashSet<u64>,
+        u64,
+    ),
     String,
 > {
     backend.sim_restore_bytes(&cp.backend_blob)?;

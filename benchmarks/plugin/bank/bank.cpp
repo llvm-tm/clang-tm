@@ -20,6 +20,7 @@
  *   - The program returns 0 if conserved, 1 if violated.
  */
 
+#include "tm_vector.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -30,7 +31,6 @@
 #include <random>
 #include <thread>
 #include <vector>
-#include "tm_vector.hpp"
 
 // Transaction annotations
 #define TM __attribute__((annotate("tm")))

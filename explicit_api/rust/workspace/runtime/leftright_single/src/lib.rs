@@ -39,7 +39,9 @@ impl SyncMap {
         unsafe { (*self.0.get()).get(&addr).copied() }
     }
     fn write(&self, addr: usize, val: u64) {
-        unsafe { (*self.0.get()).insert(addr, val); }
+        unsafe {
+            (*self.0.get()).insert(addr, val);
+        }
     }
     fn get_mut(&self) -> &mut HashMap<usize, u64> {
         unsafe { &mut *self.0.get() }
@@ -84,7 +86,9 @@ pub fn tm_exit() {}
 pub fn tm_init_thread() {}
 pub fn tm_exit_thread() {}
 
-pub fn tm_abort_count() -> u64 { 0 }
+pub fn tm_abort_count() -> u64 {
+    0
+}
 
 // ── Write lock (spinlock) ───────────────────────────────────────
 // The lock serializes write transactions.  Held from first tm_write
@@ -96,7 +100,10 @@ fn write_lock_acquire() {
     if LOCK_HELD.with(|h| *h.borrow()) {
         return;
     }
-    while LOCK.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err() {
+    while LOCK
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
         hint::spin_loop();
     }
     LOCK_HELD.with(|h| *h.borrow_mut() = true);
@@ -126,7 +133,11 @@ pub fn tm_abort() {
 
     // Determine which copy is inactive (the one we wrote to)
     // Since we hold the write lock, no other writer has flipped ACTIVE.
-    let inactive = if ACTIVE.load(Ordering::Relaxed) { &*LEFT } else { &*RIGHT };
+    let inactive = if ACTIVE.load(Ordering::Relaxed) {
+        &*LEFT
+    } else {
+        &*RIGHT
+    };
 
     // Restore old values
     for &e in &ws {
@@ -169,8 +180,8 @@ pub fn tm_commit() -> bool {
     }
 
     // ── Step 4: Sync old active (now inactive) from new active ──
-    let dst = if active_was_left { &*LEFT } else { &*RIGHT };  // old active, now inactive
-    let src = if active_was_left { &*RIGHT } else { &*LEFT };  // new active
+    let dst = if active_was_left { &*LEFT } else { &*RIGHT }; // old active, now inactive
+    let src = if active_was_left { &*RIGHT } else { &*LEFT }; // new active
     for &e in &ws {
         if let Some(v) = src.read(e.addr) {
             dst.write(e.addr, v);
@@ -181,7 +192,9 @@ pub fn tm_commit() -> bool {
     // Safe: no old reader is in-flight (barrier passed).  New readers read
     // from the new active copy, not from memory.
     for &e in &ws {
-        unsafe { write_memory(e.addr, e.val, e.bytes); }
+        unsafe {
+            write_memory(e.addr, e.val, e.bytes);
+        }
     }
 
     // ── Step 6: Release write lock ──
@@ -194,7 +207,11 @@ pub fn tm_commit() -> bool {
 fn read_word_bytes(addr: usize, bytes: u8) -> u64 {
     // Read-your-writes: check thread-local write set first
     if let Some(v) = WRITE_SET.with(|ws| {
-        ws.borrow().iter().rev().find(|e| e.addr == addr).map(|e| e.val)
+        ws.borrow()
+            .iter()
+            .rev()
+            .find(|e| e.addr == addr)
+            .map(|e| e.val)
     }) {
         return v;
     }
@@ -208,7 +225,11 @@ fn read_word_bytes(addr: usize, bytes: u8) -> u64 {
     }
 
     // Read from the active copy
-    let val = if active { RIGHT.read(addr) } else { LEFT.read(addr) };
+    let val = if active {
+        RIGHT.read(addr)
+    } else {
+        LEFT.read(addr)
+    };
 
     // Reader-exit
     if active {
@@ -237,7 +258,11 @@ fn write_word(addr: usize, val: u64, bytes: u8) {
     write_lock_acquire();
 
     // Determine inactive copy (the one we write to — no readers touch it)
-    let inactive = if ACTIVE.load(Ordering::Relaxed) { &*LEFT } else { &*RIGHT };
+    let inactive = if ACTIVE.load(Ordering::Relaxed) {
+        &*LEFT
+    } else {
+        &*RIGHT
+    };
 
     // Save old value for undo
     let old_val = inactive.read(addr).unwrap_or(0);
@@ -247,7 +272,12 @@ fn write_word(addr: usize, val: u64, bytes: u8) {
 
     // Record in write set for commit/abort
     WRITE_SET.with(|ws| {
-        ws.borrow_mut().push(WriteEntry { addr, val, old_val, bytes });
+        ws.borrow_mut().push(WriteEntry {
+            addr,
+            val,
+            old_val,
+            bytes,
+        });
     });
 }
 
@@ -277,16 +307,36 @@ pub fn tm_read_f64(addr: *mut f64) -> f64 {
     f64::from_bits(read_word_bytes(addr as usize, 8) as u64)
 }
 
-pub fn tm_write_u8(addr: *mut u8, val: u8)     { write_word(addr as usize, val as u64, 1); }
-pub fn tm_write_u16(addr: *mut u16, val: u16)   { write_word(addr as usize, val as u64, 2); }
-pub fn tm_write_u32(addr: *mut u32, val: u32)   { write_word(addr as usize, val as u64, 4); }
-pub fn tm_write_u64(addr: *mut u64, val: u64)   { write_word(addr as usize, val, 8); }
-pub fn tm_write_i8(addr: *mut i8, val: i8)      { write_word(addr as usize, val as u64, 1); }
-pub fn tm_write_i16(addr: *mut i16, val: i16)   { write_word(addr as usize, val as u64, 2); }
-pub fn tm_write_i32(addr: *mut i32, val: i32)   { write_word(addr as usize, val as u64, 4); }
-pub fn tm_write_i64(addr: *mut i64, val: i64)   { write_word(addr as usize, val as u64, 8); }
-pub fn tm_write_f32(addr: *mut f32, val: f32)   { write_word(addr as usize, val.to_bits() as u64, 4); }
-pub fn tm_write_f64(addr: *mut f64, val: f64)   { write_word(addr as usize, val.to_bits(), 8); }
+pub fn tm_write_u8(addr: *mut u8, val: u8) {
+    write_word(addr as usize, val as u64, 1);
+}
+pub fn tm_write_u16(addr: *mut u16, val: u16) {
+    write_word(addr as usize, val as u64, 2);
+}
+pub fn tm_write_u32(addr: *mut u32, val: u32) {
+    write_word(addr as usize, val as u64, 4);
+}
+pub fn tm_write_u64(addr: *mut u64, val: u64) {
+    write_word(addr as usize, val, 8);
+}
+pub fn tm_write_i8(addr: *mut i8, val: i8) {
+    write_word(addr as usize, val as u64, 1);
+}
+pub fn tm_write_i16(addr: *mut i16, val: i16) {
+    write_word(addr as usize, val as u64, 2);
+}
+pub fn tm_write_i32(addr: *mut i32, val: i32) {
+    write_word(addr as usize, val as u64, 4);
+}
+pub fn tm_write_i64(addr: *mut i64, val: i64) {
+    write_word(addr as usize, val as u64, 8);
+}
+pub fn tm_write_f32(addr: *mut f32, val: f32) {
+    write_word(addr as usize, val.to_bits() as u64, 4);
+}
+pub fn tm_write_f64(addr: *mut f64, val: f64) {
+    write_word(addr as usize, val.to_bits(), 8);
+}
 
 pub fn tm_read_ptr<T>(addr: *mut *mut T) -> *mut T {
     read_word_bytes(addr as usize, 8) as *mut T

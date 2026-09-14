@@ -8,6 +8,7 @@
  * same extern "C" runtime wrappers the plugin uses.
  */
 
+#include "tm_vector.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -21,7 +22,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include "tm_vector.hpp"
 
 extern "C" {
 void tm_init();

@@ -60,7 +60,11 @@ pub struct ReplayStats {
 impl ReplayStats {
     pub fn abort_rate(&self) -> f64 {
         let total = self.commits + self.aborts;
-        if total == 0 { 0.0 } else { 100.0 * self.aborts as f64 / total as f64 }
+        if total == 0 {
+            0.0
+        } else {
+            100.0 * self.aborts as f64 / total as f64
+        }
     }
 }
 
@@ -185,10 +189,12 @@ impl SimEngine {
         // or heap, so we always map at the safe default and translate.
         let (mapped_base, addend) = unsafe {
             let r = libc::mmap(
-                DEFAULT_TM_BASE as *mut libc::c_void, size,
+                DEFAULT_TM_BASE as *mut libc::c_void,
+                size,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
-                -1, 0,
+                -1,
+                0,
             );
             if r != libc::MAP_FAILED {
                 let addend = DEFAULT_TM_BASE as i64 - trace_addr as i64;
@@ -196,16 +202,21 @@ impl SimEngine {
             } else {
                 // Fall back to kernel-chosen address.
                 let r = libc::mmap(
-                    std::ptr::null_mut(), size,
+                    std::ptr::null_mut(),
+                    size,
                     libc::PROT_READ | libc::PROT_WRITE,
                     libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                    -1, 0,
+                    -1,
+                    0,
                 );
                 if r == libc::MAP_FAILED {
                     panic!("mmap failed: {}", std::io::Error::last_os_error());
                 }
                 let addend = r as i64 - trace_addr as i64;
-                eprintln!("  [sim] kernel-chosen mmap at {:p}, addend={:#x}", r, addend);
+                eprintln!(
+                    "  [sim] kernel-chosen mmap at {:p}, addend={:#x}",
+                    r, addend
+                );
                 (r as u64, addend)
             }
         };
@@ -213,8 +224,13 @@ impl SimEngine {
         self.addr_addend = addend;
 
         // Zero the mapped region so uninitialized reads return 0.
-        unsafe { std::ptr::write_bytes(mapped_base as *mut u8, 0, size); }
-        eprintln!("  [sim] addr_addend={:#x} mapped={:#x} size={}", addend, mapped_base, size);
+        unsafe {
+            std::ptr::write_bytes(mapped_base as *mut u8, 0, size);
+        }
+        eprintln!(
+            "  [sim] addr_addend={:#x} mapped={:#x} size={}",
+            addend, mapped_base, size
+        );
 
         let b = self.backend;
         let tid0 = self.btid(0);
@@ -280,7 +296,10 @@ impl SimEngine {
         let event_cost = if *self.sgl_mode.get(&tid).unwrap_or(&false)
             && matches!(event.kind, EventKind::TxEnd)
         {
-            self.cost_model.as_ref().map(|m| m.sgl_end_cost).unwrap_or(self.event_cost(&event.kind))
+            self.cost_model
+                .as_ref()
+                .map(|m| m.sgl_end_cost)
+                .unwrap_or(self.event_cost(&event.kind))
         } else {
             self.event_cost(&event.kind)
         };
@@ -299,7 +318,7 @@ impl SimEngine {
         // In cost mode, print a summary line every 10k events
         if self.sim_clock_mode == SimClockMode::Cost
             && self.events_processed > 0
-            && self.events_processed % 10000 == 0
+            && self.events_processed.is_multiple_of(10000)
         {
             let secs = self.estimated_cycles as f64 / (self.freq_ghz * 1e9);
             eprintln!(
@@ -317,13 +336,21 @@ impl SimEngine {
 
         // Run deadlock check periodically
         self.events_processed += 1;
-        if self.events_processed % 100 == 0 {
+        if self.events_processed.is_multiple_of(100) {
             let reports = self.deadlock.check();
             for r in &reports {
                 eprintln!(
                     "  ⚠ LIVELOCK CYCLE: threads [{}] at addrs [{}] — {} retries",
-                    r.cycle.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "),
-                    r.conflicting_addrs.iter().map(|a| format!("0x{:x}", a)).collect::<Vec<_>>().join(", "),
+                    r.cycle
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    r.conflicting_addrs
+                        .iter()
+                        .map(|a| format!("0x{:x}", a))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     r.retries,
                 );
             }
@@ -371,10 +398,14 @@ impl SimEngine {
         let mut in_tx: HashSet<u64> = HashSet::new();
 
         for _round in 0..max_r {
-            if pending.is_empty() { break; }
+            if pending.is_empty() {
+                break;
+            }
             let still_pending: Vec<u64> = pending.clone();
             for &raw_tid in &still_pending {
-                if in_tx.contains(&raw_tid) { continue; }
+                if in_tx.contains(&raw_tid) {
+                    continue;
+                }
                 let a = attempts.entry(raw_tid).or_insert(0);
                 let btid = self.btid(raw_tid);
 
@@ -416,7 +447,9 @@ impl SimEngine {
         // Any stragglers that didn't enter (shouldn't happen since we force
         // SGL after max_r rounds, but be safe): force SGL
         for &raw_tid in &pending {
-            if in_tx.contains(&raw_tid) { continue; }
+            if in_tx.contains(&raw_tid) {
+                continue;
+            }
             let btid = self.btid(raw_tid);
             self.backend.sim_set_thread_id(btid);
             self.backend.force_sgl();
@@ -501,14 +534,12 @@ impl SimEngine {
 
                 let val: u64 = match *width {
                     1 | 2 | 4 | 8 => {
-                        let read_result = panic::catch_unwind(AssertUnwindSafe(|| {
-                            match width {
-                                1 => b.read_u8(mem_addr as *mut u8) as u64,
-                                2 => b.read_u16(mem_addr as *mut u16) as u64,
-                                4 => b.read_u32(mem_addr as *mut u32) as u64,
-                                8 => b.read_u64(mem_addr as *mut u64),
-                                _ => unreachable!(),
-                            }
+                        let read_result = panic::catch_unwind(AssertUnwindSafe(|| match width {
+                            1 => b.read_u8(mem_addr as *mut u8) as u64,
+                            2 => b.read_u16(mem_addr as *mut u16) as u64,
+                            4 => b.read_u32(mem_addr as *mut u32) as u64,
+                            8 => b.read_u64(mem_addr as *mut u64),
+                            _ => unreachable!(),
                         }));
                         match read_result {
                             Ok(v) => v,
@@ -516,7 +547,8 @@ impl SimEngine {
                                 if e.downcast_ref::<TmxAbort>().is_some() {
                                     self.in_tx.insert(tid, false);
                                     self.aborted.insert(tid, true);
-                                    let ws = self.current_write_set.remove(&tid).unwrap_or_default();
+                                    let ws =
+                                        self.current_write_set.remove(&tid).unwrap_or_default();
                                     self.stats.aborts += 1;
                                     self.verifier.tx_abort(tid);
                                     self.deadlock.record_abort(btid, &ws);
@@ -546,14 +578,12 @@ impl SimEngine {
 
                 match *width {
                     1 | 2 | 4 | 8 => {
-                        let write_result = panic::catch_unwind(AssertUnwindSafe(|| {
-                            match width {
-                                1 => b.write_u8(mem_addr as *mut u8, *val as u8),
-                                2 => b.write_u16(mem_addr as *mut u16, *val as u16),
-                                4 => b.write_u32(mem_addr as *mut u32, *val as u32),
-                                8 => b.write_u64(mem_addr as *mut u64, *val),
-                                _ => unreachable!(),
-                            }
+                        let write_result = panic::catch_unwind(AssertUnwindSafe(|| match width {
+                            1 => b.write_u8(mem_addr as *mut u8, *val as u8),
+                            2 => b.write_u16(mem_addr as *mut u16, *val as u16),
+                            4 => b.write_u32(mem_addr as *mut u32, *val as u32),
+                            8 => b.write_u64(mem_addr as *mut u64, *val),
+                            _ => unreachable!(),
                         }));
                         if let Err(e) = write_result {
                             if e.downcast_ref::<TmxAbort>().is_some() {
@@ -590,9 +620,7 @@ impl SimEngine {
                 self.verifier.free(*addr);
                 Ok(())
             }
-            EventKind::Checkpoint => {
-                Ok(())
-            }
+            EventKind::Checkpoint => Ok(()),
             EventKind::Assert { cond, msg } => {
                 if !cond {
                     return Err(format!("assertion failed: {}", msg));
@@ -603,9 +631,7 @@ impl SimEngine {
                 eprintln!("  [log] {}", msg);
                 Ok(())
             }
-            EventKind::ThreadJoin(_) => {
-                Ok(())
-            }
+            EventKind::ThreadJoin(_) => Ok(()),
             EventKind::Computation { .. } => {
                 // Handled in process_event() before dispatch. Unreachable here.
                 Ok(())
@@ -672,9 +698,16 @@ pub fn compute_address_range(events: &[Event]) -> (*mut libc::c_void, usize) {
 
     for event in events {
         match &event.kind {
-            EventKind::Read { addr, .. } | EventKind::Write { addr, .. } | EventKind::Alloc { addr, .. } | EventKind::Free { addr } => {
-                if *addr < min_addr { min_addr = *addr; }
-                if *addr > max_addr { max_addr = *addr; }
+            EventKind::Read { addr, .. }
+            | EventKind::Write { addr, .. }
+            | EventKind::Alloc { addr, .. }
+            | EventKind::Free { addr } => {
+                if *addr < min_addr {
+                    min_addr = *addr;
+                }
+                if *addr > max_addr {
+                    max_addr = *addr;
+                }
             }
             _ => {}
         }
@@ -692,7 +725,7 @@ pub fn compute_address_range(events: &[Event]) -> (*mut libc::c_void, usize) {
     let range = (max_addr - base) as usize;
     let size = cmp::max(range + TM_REGION_SIZE / 4, TM_REGION_SIZE);
     // Round up to page boundary
-    let size = ((size + page_size as usize - 1) / page_size as usize) * page_size as usize;
+    let size = size.div_ceil(page_size as usize) * page_size as usize;
 
     (base as *mut libc::c_void, size)
 }

@@ -19,32 +19,57 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
 - **Fix**: Diagnose and remove all `proactive_stop` calls (15 occurrences
   across 5 files).
 
-### TinySTM lock owner re-check
-- **File**: `backends/tm_impl/tiny_stm/tinystm_common.hpp` (line 79)
-- **Issue**: Inside `get_version_versioned()` the case `is_locked() &&
-  get_owner() == tx_id` is flagged `// TODO: should not happen!`. This
-  indicates an internal invariant assumption that deserves verification.
+### TinySTM lock owner re-check — RESOLVED (review-02 S03)
+- **File**: `backends/tm_impl/tiny_stm/tinystm_common.hpp` (`Lock::unlock()`)
+- **Resolution (2026-09-13)**: `unlock()` now counts the "unlock on a lock
+  owned by a DIFFERENT transaction" case via `g_unlock_owner_mismatch`
+  (atomic counter in the `tinystm` namespace) and fires a `TM_ASSERT` in
+  debug builds. All call sites guard with `is_locked_by(tx->id)` first
+  (commit paths) or iterate `locks_held` (abort paths), so the counter
+  should stay 0; tests can assert it. The old silent-skip is unchanged
+  for the benign already-released case.
 
-### TinySTM clock wrap-around
-- **File**: `backends/tm_impl/tiny_stm/tinystm_common.hpp` (line 171)
-- **Issue**: `// TODO: does this work with wrap around?` — the version-clock
-  arithmetic is untested against a 64-bit counter overflow. Practically
-  unreachable, but unverified.
+### TinySTM clock wrap-around — RESOLVED (review-02 S03)
+- **File**: `backends/tm_impl/tiny_stm/tinystm_common.hpp` (`inc_abort()`, `increment_clock()`, `get_clock()`)
+- **Resolution (2026-09-13)**: The version clock never overflows raw:
+  `increment_clock()` detects `res >= VERSION_MAX` (2^46-1), elects one
+  thread via the `reset_locks_thr` CAS, zeroes the entire lock table
+  (`reset_locks()`), and stores clock = 1; `get_clock()` spins while
+  clock `>= VERSION_MASK`, so no reader observes an intermediate state.
+  The incarnation counter in `inc_abort()` is masked to 3 bits and a wrap
+  to 0 is safe (all acquires CAS the full state). The reset path is now
+  verified by `tests/expli-api/test_tinystm_clock_wrap.cpp` (drives the
+  clock to `VERSION_MAX - 1` and checks the reset; 11/11 checks).
 
-### NOrec shared-structure cleanup
-- **Files**: `backends/tm_impl/norec/NOrec.hpp` (line 147),
-  `backends/tm_impl/norec_bf/NOrec_BF.hpp` (line 191)
-- **Issue**: `tm_exit()` does not free the shared global clock, commit lock,
-  or Bloom filter (if allocated). Memory leak on process shutdown.
+### NOrec shared-structure cleanup — RESOLVED (review-02 S05)
+- **Files**: `backends/tm_impl/norec/NOrec.hpp` (`exit()`),
+  `backends/tm_impl/norec_bf/NOrec_BF.hpp` (`exit()`)
+- **Issue (original)**: `tm_exit()` does not free the shared global clock,
+  commit lock, or Bloom filter (if allocated).
+- **Resolution (2026-09-13)**: Premise was a misreading. The shared globals
+  (`global_lock`, `thr_counter`, `g_tm_abort_count`, and for NOrec-BF
+  `g_gc_gen` + the Bloom filter `g_gc`) all have **static storage duration**
+  (the filter is a fixed `std::atomic` array) — nothing is heap/mmap-allocated,
+  so there is nothing to `munmap`/`free`; the OS reclaims them at exit. The
+  only dynamic allocation, the per-thread `Transaction`, is already freed by
+  `exit_thread()`. The 64 GB TM region mapping is deliberately OS-reclaimed
+  (see `stm::tm_region_destroy`). Verified with
+  `valgrind --leak-check=full ./benchmarks/cpp/bin/bank -t 2 -d 30`:
+  `0 bytes in use at exit, no leaks are possible`.
 
-### NOrec read-only flag semantics
-- **Files**: `backends/tm_impl/norec/NOrec.hpp` (line 496),
-  `backends/tm_impl/norec_bf/NOrec_BF.hpp` (line 582)
-- **Issue**: When a read-only transaction performs its first write, the code
-  clears `tx->read_only` but does not abort the transaction. This means the
-  transaction proceeds with a stale read-set that was not tracked for
-  validation. Needs investigation: should the TX abort and restart as a
-  write transaction?
+### NOrec read-only → read-write promotion semantics — RESOLVED (review-02 S04)
+
+- **Files**: `backends/tm_impl/norec/NOrec.hpp`, `backends/tm_impl/norec_bf/NOrec_BF.hpp`
+- **Resolution (2026-09-13)**: Investigation showed reads are **always**
+  recorded in `read_set` regardless of the `read_only` flag (the flag only
+  gates the commit fast-path skip for pure read-only transactions). When the
+  first write clears `read_only`, the commit path runs the full validation
+  over the entire read-set, so reads made during the RO phase are validated.
+  No abort-and-restart is needed.
+- **Regression**: `tests/expli-api/test_norec_ro2rw.cpp` — a conservation
+  stress test where every transaction reads strictly before its first write
+  (forcing RO→RW promotion mid-tx); fails if RO-phase reads are ever skipped.
+  PASS on NOREC, NORECBF, TINYSTM.
 
 ---
 
@@ -84,12 +109,16 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   a simplified key-value scheme; `gpu_tpcc` elides version lists.
 
 ### NOrec plugin-mode bypass (incomplete)
-- **File**: `backends/tm_impl/norec/NOrec.hpp`
+- **File**: `backends/tm_impl/norec_bf/NOrec_BF.hpp`
 - **Issue**: `#ifdef LLVM_TM_PLUGIN` guards in `read_word_norec()` and
   `write_word_norec()` bypass TM tracking for addresses outside the mmap'd
   TM region. Benchmarks allocating on the regular heap get zero
   transactional protection. Partially fixed (commit path); read/write
   paths still affected.
+- **Fixed 2026-09-13 (review-02 S01)**: `NOrec.hpp` was already migrated to
+  the `isOnCurrentThreadStack` pattern; `NOrec_BF.hpp` read/write/commit
+  paths were migrated the same way. Verified `bank_norec -a 128 -t 4`
+  conserves money and `social_tm_norec -u 256 -t 4` invariant PASS.
 
 ---
 
@@ -122,4 +151,5 @@ Items below were fixed and kept here for historical reference only.
 - [x] SPHT SGL fallback (fixed 2026-06-20)
 - [x] TinySTM spin loops in simulation mode (fixed 2026-06-20)
 - [x] ROMULUS read-validate (fixed 2026-06-15)
+- [x] NOrec plugin-mode read/write bypass (fixed 2026-09-13, review-02 S01; NOrec.hpp earlier, NOrec_BF.hpp now)
 - [x] All 18 TLA+ backends pass safety invariants (fixed 2026-06-24)

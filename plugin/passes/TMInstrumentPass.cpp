@@ -65,15 +65,13 @@ cl::opt<std::string> OpaqueSymbolsFile(
     cl::desc("Write unresolved opaque symbols to this file for external resolution"),
     cl::init(""));
 
-cl::opt<bool> TMAudit(
-    "tm-audit",
-    cl::desc("Print detailed instrumentation audit to stderr"),
-    cl::init(false));
+cl::opt<bool> TMAudit("tm-audit",
+                      cl::desc("Print detailed instrumentation audit to stderr"),
+                      cl::init(false));
 
-cl::opt<bool> EmitTrace(
-    "emit-tm-trace",
-    cl::desc("Emit tm_trace before each instrumented access"),
-    cl::init(false));
+cl::opt<bool> EmitTrace("emit-tm-trace",
+                        cl::desc("Emit tm_trace before each instrumented access"),
+                        cl::init(false));
 
 // ===========================================================================
 // Backward-compatibility pass aliases — delegate to the 5-step state
@@ -109,9 +107,12 @@ public:
 			                                          Ctx.H,
 			                                          tm_method_instrumentation::
 			                                              CloneMode::AlwaysInline);
-			tm_method_instrumentation::redirectTXFunctionsToClones(
-			    M, Ctx.TxReachableFuncs, *Ctx.ClonedMap,
-			    tm_method_instrumentation::CloneMode::AlwaysInline);
+			tm_method_instrumentation::
+			    redirectTXFunctionsToClones(M,
+			                                Ctx.TxReachableFuncs,
+			                                *Ctx.ClonedMap,
+			                                tm_method_instrumentation::CloneMode::
+			                                    AlwaysInline);
 			modified = true;
 		}
 
@@ -170,8 +171,8 @@ class TMInstrumentInlinePass : public PassInfoMixin<TMInstrumentInlinePass>
 public:
 	PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM)
 	{
-		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT)
-		    && !F.getName().ends_with(TM_CLONE_SUFFIX)) {
+		if (!hasAnnotation(F, TX_ANNOT) && !hasAnnotation(F, ASYNC_TX_ANNOT) &&
+		    !F.getName().ends_with(TM_CLONE_SUFFIX)) {
 			return PreservedAnalyses::all();
 		}
 		Module *M = F.getParent();
@@ -179,7 +180,8 @@ public:
 			std::string CloneName = (F.getName() + TM_CLONE_SUFFIX).str();
 			if (M->getFunction(CloneName)) {
 				TM_DEBUG("%s has queue clone %s, skipping re-instrumentation",
-				         F.getName().str().c_str(), CloneName.c_str());
+				         F.getName().str().c_str(),
+				         CloneName.c_str());
 				return PreservedAnalyses::all();
 			}
 		}
@@ -246,7 +248,8 @@ public:
 			std::string CloneName = (F.getName() + TM_CLONE_SUFFIX).str();
 			if (M->getFunction(CloneName)) {
 				TM_DEBUG("%s has queue clone %s, skipping re-instrumentation",
-				         F.getName().str().c_str(), CloneName.c_str());
+				         F.getName().str().c_str(),
+				         CloneName.c_str());
 				return PreservedAnalyses::all();
 			}
 		}
@@ -317,9 +320,9 @@ public:
 
 		if (!Ctx.TxReachableFuncs.empty()) {
 			Ctx.ClonedMap = &cloneTxReachableGraph(M,
-			                                        Ctx.TxReachableFuncs,
-			                                        Ctx.H,
-			                                        CloneMode::AlwaysInline);
+			                                       Ctx.TxReachableFuncs,
+			                                       Ctx.H,
+			                                       CloneMode::AlwaysInline);
 			redirectTXFunctionsToClones(M,
 			                            Ctx.TxReachableFuncs,
 			                            *Ctx.ClonedMap,
@@ -371,12 +374,14 @@ static StructType *createArgsStructType(Function *F, LLVMContext &Ctx)
 	return StructType::create(Ctx, ArgTypes, StructName);
 }
 
-static Function *createDispatchWrapper(Function *Original, Function *Clone,
-                                       Module &M, IRBuilder<> &B)
+static Function *createDispatchWrapper(Function *Original,
+                                       Function *Clone,
+                                       Module &M,
+                                       IRBuilder<> &B)
 {
 	LLVMContext &Ctx = M.getContext();
 	auto *i8PtrTy = PointerType::getUnqual(Ctx);
-	auto *voidTy  = Type::getVoidTy(Ctx);
+	auto *voidTy = Type::getVoidTy(Ctx);
 
 	auto *DispFT = FunctionType::get(voidTy, {i8PtrTy}, false);
 	auto *DispF = Function::Create(DispFT,
@@ -409,7 +414,9 @@ static Function *createDispatchWrapper(Function *Original, Function *Clone,
 	B.CreateCall(Clone, LoadedArgs);
 
 	FunctionCallee FreeFn = M.getOrInsertFunction("free",
-	    FunctionType::get(voidTy, {i8PtrTy}, false));
+	                                              FunctionType::get(voidTy,
+	                                                                {i8PtrTy},
+	                                                                false));
 	B.CreateCall(FreeFn, {RawArg});
 
 	B.CreateRetVoid();
@@ -418,9 +425,12 @@ static Function *createDispatchWrapper(Function *Original, Function *Clone,
 	return DispF;
 }
 
-static void replaceCallWithEnqueue(CallBase *Call, Function *DispatchFn,
-                                   Module &M, IRBuilder<> &B,
-                                   const TMRuntimeHooks &H, bool sync)
+static void replaceCallWithEnqueue(CallBase *Call,
+                                   Function *DispatchFn,
+                                   Module &M,
+                                   IRBuilder<> &B,
+                                   const TMRuntimeHooks &H,
+                                   bool sync)
 {
 	LLVMContext &Ctx = M.getContext();
 	auto *i8PtrTy = PointerType::getUnqual(Ctx);
@@ -434,9 +444,10 @@ static void replaceCallWithEnqueue(CallBase *Call, Function *DispatchFn,
 	StructType *ArgsTy = createArgsStructType(CalledFn, Ctx);
 	if (!ArgsTy) {
 		B.SetInsertPoint(Call);
-		emitHookCall(B, H.enqueue_fn, {
-		    B.CreateBitCast(DispatchFn, i8PtrTy),
-		    ConstantPointerNull::get(i8PtrTy)});
+		emitHookCall(B,
+		             H.enqueue_fn,
+		             {B.CreateBitCast(DispatchFn, i8PtrTy),
+		              ConstantPointerNull::get(i8PtrTy)});
 		if (sync)
 			emitHookCall(B, H.wait_prev_tx_fn, {});
 		return;
@@ -446,7 +457,9 @@ static void replaceCallWithEnqueue(CallBase *Call, Function *DispatchFn,
 	uint64_t StructSize = DL.getTypeAllocSize(ArgsTy);
 
 	FunctionCallee MallocFn = M.getOrInsertFunction("malloc",
-	    FunctionType::get(i8PtrTy, {i64Ty}, false));
+	                                                FunctionType::get(i8PtrTy,
+	                                                                  {i64Ty},
+	                                                                  false));
 	B.SetInsertPoint(Call);
 	Value *RawArgs = B.CreateCall(MallocFn, {ConstantInt::get(i64Ty, StructSize)});
 	Value *ArgsPtr = B.CreateBitCast(RawArgs, PointerType::getUnqual(Ctx));
@@ -471,12 +484,19 @@ static void replaceCallWithEnqueue(CallBase *Call, Function *DispatchFn,
 class TMQueueGlobalInitPass : public PassInfoMixin<TMQueueGlobalInitPass>
 {
 public:
-	TMQueueGlobalInitPass() : injectWait_(true) {}
-	TMQueueGlobalInitPass(bool injectWait) : injectWait_(injectWait) {}
+	TMQueueGlobalInitPass()
+	    : injectWait_(true)
+	{
+	}
+	TMQueueGlobalInitPass(bool injectWait)
+	    : injectWait_(injectWait)
+	{
+	}
 
 	PreservedAnalyses run(Module &M, ModuleAnalysisManager &)
 	{
-		TM_DEBUG("TMQueueGlobalInitPass: processing module %s", M.getName().str().c_str());
+		TM_DEBUG("TMQueueGlobalInitPass: processing module %s",
+		         M.getName().str().c_str());
 		checkAnnotationConsistency(M);
 		auto Ctx = setupModulePass(M);
 		bool &modified = Ctx.modified;
@@ -493,13 +513,21 @@ public:
 					continue;
 				bool already = false;
 				for (auto &pair : AllClones)
-					if (pair.first == &F) { already = true; break; }
+					if (pair.first == &F) {
+						already = true;
+						break;
+					}
 				if (already)
 					continue;
 
-				Function *Clone = tm_method_instrumentation::cloneMethod(
-				    &F, TM_CLONE_SUFFIX, &M, M.getContext(), TMG, Ctx.H,
-				    CloneMode::CloneOnly);
+				Function
+				    *Clone = tm_method_instrumentation::cloneMethod(&F,
+				                                                    TM_CLONE_SUFFIX,
+				                                                    &M,
+				                                                    M.getContext(),
+				                                                    TMG,
+				                                                    Ctx.H,
+				                                                    CloneMode::CloneOnly);
 				AllClones.push_back({&F, Clone});
 				TM_DEBUG("Queue: cloned TX function %s -> %s",
 				         F.getName().str().c_str(),
@@ -509,9 +537,9 @@ public:
 
 		if (!Ctx.TxReachableFuncs.empty()) {
 			Ctx.ClonedMap = &cloneTxReachableGraph(M,
-			                                        Ctx.TxReachableFuncs,
-			                                        Ctx.H,
-			                                        CloneMode::CloneOnly);
+			                                       Ctx.TxReachableFuncs,
+			                                       Ctx.H,
+			                                       CloneMode::CloneOnly);
 			redirectTXFunctionsToClones(M,
 			                            Ctx.TxReachableFuncs,
 			                            *Ctx.ClonedMap,
@@ -579,9 +607,12 @@ public:
 		auto getOrCreateTLS = [&](StringRef Name, Type *Ty) -> GlobalVariable * {
 			if (auto *GV = M.getGlobalVariable(Name))
 				return GV;
-			auto *GV = new GlobalVariable(M, Ty, false,
+			auto *GV = new GlobalVariable(M,
+			                              Ty,
+			                              false,
 			                              GlobalValue::ExternalLinkage,
-			                              nullptr, Name);
+			                              nullptr,
+			                              Name);
 			GV->setThreadLocal(true);
 			return GV;
 		};
@@ -596,23 +627,28 @@ public:
 			auto *i32Ty2 = Type::getInt32Ty(CtxRef);
 			auto *i64Ty = Type::getInt64Ty(CtxRef);
 			auto *ptrTy = PointerType::getUnqual(CtxRef);
-			FunctionCallee QueueInit =
-			    M.getOrInsertFunction("tm_queue_init",
-			        FunctionType::get(Type::getVoidTy(CtxRef),
-			                          {i32Ty2, i32Ty2}, false));
+			FunctionCallee
+			    QueueInit = M.getOrInsertFunction("tm_queue_init",
+			                                      FunctionType::get(Type::getVoidTy(
+			                                                            CtxRef),
+			                                                        {i32Ty2, i32Ty2},
+			                                                        false));
 			CallInst *QueueInitCall = nullptr;
 			{
 				IRBuilder<> Builder(&MainFn->getEntryBlock(),
 				                    MainFn->getEntryBlock().begin());
 				QueueInitCall = Builder.CreateCall(QueueInit,
-				                   {ConstantInt::get(i32Ty2, 4),
-				                    ConstantInt::get(i32Ty2, 4)});
+				                                   {ConstantInt::get(i32Ty2, 4),
+				                                    ConstantInt::get(i32Ty2, 4)});
 			}
 
 			auto MainReturns = collectReturns(*MainFn);
-			FunctionCallee QueueShutdown =
-			    M.getOrInsertFunction("tm_queue_shutdown",
-			        FunctionType::get(Type::getVoidTy(CtxRef), {}, false));
+			FunctionCallee
+			    QueueShutdown = M.getOrInsertFunction("tm_queue_shutdown",
+			                                          FunctionType::get(Type::getVoidTy(
+			                                                                CtxRef),
+			                                                            {},
+			                                                            false));
 			for (auto *Ret : MainReturns) {
 				IRBuilder<> RetBuilder(Ret);
 				RetBuilder.CreateCall(QueueShutdown, {});
@@ -628,10 +664,12 @@ public:
 				SmallVector<std::pair<GlobalVariable *, StringRef>, 8> TMSymbols;
 				collectTMSymbols(M, TMSymbols);
 				if (!TMSymbols.empty()) {
-					FunctionCallee RegFn =
-					    M.getOrInsertFunction("tm_register_global",
-					        FunctionType::get(Type::getVoidTy(CtxRef),
-					                          {ptrTy, i64Ty}, false));
+					FunctionCallee
+					    RegFn = M.getOrInsertFunction("tm_register_global",
+					                                  FunctionType::get(Type::getVoidTy(
+					                                                        CtxRef),
+					                                                    {ptrTy, i64Ty},
+					                                                    false));
 					IRBuilder<> RegBuilder(QueueInitCall);
 					const DataLayout &DL = M.getDataLayout();
 					for (auto &Sym : TMSymbols) {
@@ -639,7 +677,7 @@ public:
 						Constant *GVCast = ConstantExpr::getBitCast(GV, ptrTy);
 						uint64_t Size = DL.getTypeAllocSize(GV->getValueType());
 						RegBuilder.CreateCall(RegFn,
-						    {GVCast, ConstantInt::get(i64Ty, Size)});
+						                      {GVCast, ConstantInt::get(i64Ty, Size)});
 						TM_DEBUG("Emitting tm_register_global(%s)",
 						         Sym.second.str().c_str());
 					}
@@ -648,7 +686,8 @@ public:
 			}
 		}
 
-		TM_DEBUG("TMQueueGlobalInitPass: %s", modified ? "modified module" : "no changes");
+		TM_DEBUG("TMQueueGlobalInitPass: %s",
+		         modified ? "modified module" : "no changes");
 		return modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
 	}
 	static bool isRequired() { return true; }
@@ -716,22 +755,23 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
 				                createModuleToFunctionPassAdaptor(TMInstrumentPass()));
 				            return true;
 			            }
-			    // ---- Queue pipeline (auto-wait) ----
-			    if (Name == "tm-instrument-queue") {
-				    TM_DEBUG("Registering tm-instrument-queue pass pipeline");
-				    MPM.addPass(TMQueueGlobalInitPass(true));
-				    MPM.addPass(createModuleToFunctionPassAdaptor(
-				        TMInstrumentInlinePass()));
-				    return true;
-			    }
-			    // ---- Queue pipeline (manual-wait) ----
-			    if (Name == "tm-instrument-queue-manual") {
-				    TM_DEBUG("Registering tm-instrument-queue-manual pass pipeline");
-				    MPM.addPass(TMQueueGlobalInitPass(false));
-				    MPM.addPass(createModuleToFunctionPassAdaptor(
-				        TMInstrumentInlinePass()));
-				    return true;
-			    }
+			            // ---- Queue pipeline (auto-wait) ----
+			            if (Name == "tm-instrument-queue") {
+				            TM_DEBUG("Registering tm-instrument-queue pass pipeline");
+				            MPM.addPass(TMQueueGlobalInitPass(true));
+				            MPM.addPass(createModuleToFunctionPassAdaptor(
+				                TMInstrumentInlinePass()));
+				            return true;
+			            }
+			            // ---- Queue pipeline (manual-wait) ----
+			            if (Name == "tm-instrument-queue-manual") {
+				            TM_DEBUG(
+				                "Registering tm-instrument-queue-manual pass pipeline");
+				            MPM.addPass(TMQueueGlobalInitPass(false));
+				            MPM.addPass(createModuleToFunctionPassAdaptor(
+				                TMInstrumentInlinePass()));
+				            return true;
+			            }
 			            // ---- Individual 5-step passes ----
 			            if (Name == "tm-collect")
 				            return registerTMCollectPass(MPM);

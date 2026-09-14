@@ -39,12 +39,16 @@ struct Lock {
 
 impl Lock {
     const fn new() -> Self {
-        Lock { data: AtomicU64::new(0) }
+        Lock {
+            data: AtomicU64::new(0),
+        }
     }
 
     fn try_lock_exclusive(&self) -> bool {
         let cur = self.data.load(Ordering::Relaxed);
-        if cur & 1 != 0 { return false; }
+        if cur & 1 != 0 {
+            return false;
+        }
         self.data
             .compare_exchange_weak(cur, cur | 1, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
@@ -69,7 +73,10 @@ static LOCK_TABLE: OnceLock<Box<[Lock]>> = OnceLock::new();
 
 fn locks() -> &'static [Lock] {
     LOCK_TABLE.get_or_init(|| {
-        (0..TABLE_SIZE).map(|_| Lock::new()).collect::<Vec<_>>().into_boxed_slice()
+        (0..TABLE_SIZE)
+            .map(|_| Lock::new())
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
     })
 }
 
@@ -80,13 +87,19 @@ fn gc_acquire() {
     loop {
         let cur = G_CLOCK.load(Ordering::Relaxed);
         if cur & 1 == 0
-            && G_CLOCK.compare_exchange_weak(cur, cur | 1, Ordering::Acquire, Ordering::Relaxed).is_ok()
-        { return; }
+            && G_CLOCK
+                .compare_exchange_weak(cur, cur | 1, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+        {
+            return;
+        }
         std::hint::spin_loop();
     }
 }
 
-fn gc_release_and_inc() { G_CLOCK.fetch_add(1, Ordering::Release); }
+fn gc_release_and_inc() {
+    G_CLOCK.fetch_add(1, Ordering::Release);
+}
 
 // ── Transaction state ───────────────────────────────────
 struct TxState {
@@ -145,7 +158,9 @@ fn lock_write_addrs(write_set: &HashMap<usize, TypedValue>) -> Vec<usize> {
     idxs.dedup();
     for &idx in &idxs {
         loop {
-            if locks()[idx].try_lock_exclusive() { break; }
+            if locks()[idx].try_lock_exclusive() {
+                break;
+            }
             std::hint::spin_loop();
         }
     }
@@ -196,12 +211,18 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 // ── Write word ──────────────────────────────────────────
 fn write_word<T: Primitive>(addr: usize, val: T) {
     fence(Ordering::SeqCst);
-    if tx_aborted() { return; }
-    if !tx_active() {
-        unsafe { (addr as *mut T).write(val); }
+    if tx_aborted() {
         return;
     }
-    if is_null_addr(addr) { return; }
+    if !tx_active() {
+        unsafe {
+            (addr as *mut T).write(val);
+        }
+        return;
+    }
+    if is_null_addr(addr) {
+        return;
+    }
 
     let tv = val.to_typed();
     with_tx(|tx| {
@@ -219,12 +240,18 @@ fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
     fence(Ordering::SeqCst);
-    if tx_aborted() { return; }
-    if !tx_active() {
-        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); }
+    if tx_aborted() {
         return;
     }
-    if is_null_addr(addr) { return; }
+    if !tx_active() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len());
+        }
+        return;
+    }
+    if is_null_addr(addr) {
+        return;
+    }
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| {
         tx.write_set.insert(addr, tv.clone());
@@ -246,7 +273,9 @@ pub fn tm_exit_thread() {}
 pub fn tm_begin() {
     let snapshot = loop {
         let v = G_CLOCK.load(Ordering::Acquire);
-        if v & 1 == 0 { break v; }
+        if v & 1 == 0 {
+            break v;
+        }
         std::hint::spin_loop();
     };
     TX.with(|tx| {
@@ -308,7 +337,6 @@ pub fn tm_abort() {
     drop(flush_tx());
     TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
-
 
 pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
 

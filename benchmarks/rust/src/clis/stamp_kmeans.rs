@@ -1,8 +1,8 @@
+use benchmarks::Rng;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
 use tm::*;
-use benchmarks::Rng;
 
 fn euclidean_dist_sq(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
@@ -19,13 +19,31 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-p" => { i += 1; num_threads = args[i].parse().unwrap(); }
-            "-n" => { i += 1; npoints = args[i].parse().unwrap(); }
-            "-c" => { i += 1; nclusters = args[i].parse().unwrap(); }
-            "-d" => { i += 1; ndims = args[i].parse().unwrap(); }
-            "-i" => { i += 1; max_iter = args[i].parse().unwrap(); }
+            "-p" => {
+                i += 1;
+                num_threads = args[i].parse().unwrap();
+            }
+            "-n" => {
+                i += 1;
+                npoints = args[i].parse().unwrap();
+            }
+            "-c" => {
+                i += 1;
+                nclusters = args[i].parse().unwrap();
+            }
+            "-d" => {
+                i += 1;
+                ndims = args[i].parse().unwrap();
+            }
+            "-i" => {
+                i += 1;
+                max_iter = args[i].parse().unwrap();
+            }
             "-h" => {
-                println!("Usage: {} -p <threads> -n <points> -c <clusters> -d <dims> -i <max_iter>", args[0]);
+                println!(
+                    "Usage: {} -p <threads> -n <points> -c <clusters> -d <dims> -i <max_iter>",
+                    args[0]
+                );
                 return;
             }
             _ => {}
@@ -51,10 +69,12 @@ fn main() {
             points.push(TmCell::new((-10.0 + u * 20.0) + cluster as f64 * 5.0));
         }
     }
-    let clusters: Vec<TmCell<f64>> = (0..nclusters * ndims).map(|_| {
-        let u = rng.uniform();
-        TmCell::new(-10.0 + u * 20.0)
-    }).collect();
+    let clusters: Vec<TmCell<f64>> = (0..nclusters * ndims)
+        .map(|_| {
+            let u = rng.uniform();
+            TmCell::new(-10.0 + u * 20.0)
+        })
+        .collect();
     let assignments: Vec<TmCell<i32>> = (0..npoints).map(|_| TmCell::new(0)).collect();
     let _membership: Vec<TmCell<i32>> = (0..npoints).map(|_| TmCell::new(0)).collect();
 
@@ -83,7 +103,9 @@ fn main() {
                 let end_pt = std::cmp::min(start_pt + chunk, npoints);
 
                 for _iter in 0..max_iter {
-                    if converged.load(Ordering::Acquire) { break; }
+                    if converged.load(Ordering::Acquire) {
+                        break;
+                    }
 
                     // Phase 1: assign each point to nearest cluster
                     for p in start_pt..end_pt {
@@ -132,7 +154,9 @@ fn main() {
                                 }
                                 delta.sqrt() < 0.001
                             });
-                            if cvd { converged.store(true, Ordering::Release); }
+                            if cvd {
+                                converged.store(true, Ordering::Release);
+                            }
                         }
                     }
 
@@ -153,7 +177,9 @@ fn main() {
         print!("    [{}] ", c);
         for d in 0..ndims {
             let v = unsafe { *clusters[c * ndims + d].ptr() };
-            if d > 0 { print!(", "); }
+            if d > 0 {
+                print!(", ");
+            }
             print!("{:.6}", v);
         }
         println!();

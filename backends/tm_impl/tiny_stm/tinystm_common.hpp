@@ -8,8 +8,8 @@
 #include <vector>
 
 #include "tm_common.hpp"
-#include "tm_spin_token.hpp"
 #include "tm_event_logger.hpp"
+#include "tm_spin_token.hpp"
 #include <random>
 #include <thread>
 
@@ -35,6 +35,13 @@ using stm::write_value_to_addr;
 
 extern __thread sigjmp_buf *jmpbuf;
 extern thread_local sigjmp_buf *g_tx_exit_jmpbuf;
+
+// review-02 S03: invariant-violation counter (ex TODO.md:22 "lock owner
+// re-check").  Incremented when Lock::unlock() is called on a lock owned by a
+// DIFFERENT transaction — all call sites guard with is_locked_by(tx->id)
+// first, so this should never fire.  Declared here (before class Lock) so
+// unlock() can reference it; defined in tinystm_globals.hpp.
+extern std::atomic<uint64_t> g_unlock_owner_mismatch;
 
 constexpr word_t OWNED_BITS = 2L;       // read mask is not used, but kept
 constexpr word_t INCARNATION_BITS = 3L; // wt only
@@ -75,11 +82,21 @@ public:
 
 	void unlock(word_t tx_id)
 	{
-		// TINYSTM_ASSERT(is_locked() && get_owner() == tx_id, "Not the owner of the lock");
-		if (is_locked() && get_owner() == tx_id) { // TODO.md: TinySTM lock owner re-check (P1)
+		if (is_locked() && get_owner() == tx_id) {
 			state.fetch_and((~OWNED_MASK) & (~(THREAD_MASK << LOCK_BITS)),
 			                std::memory_order_release); // sets owned and tx_id bits to 0
+		} else if (is_locked()) {
+			// review-02 S03 (ex TODO.md:22 "lock owner re-check"):
+			// A Transaction tries to unlock a lock it does NOT own.  This
+			// violates the invariant that locks_held only contains locks
+			// acquired by this transaction (commit paths guard with
+			// is_locked_by(tx->id) first).  It *should not happen*; count it
+			// so tests can assert zero.  Do NOT force-release: the real owner
+			// will release it on its own commit/abort.
+			g_unlock_owner_mismatch.fetch_add(1, std::memory_order_relaxed);
+			TM_ASSERT(false, "TinySTM unlock() called on a lock owned by another tx");
 		}
+		// else: not locked — benign (already released or never acquired).
 	}
 
 	void reset_version()
@@ -114,17 +131,19 @@ public:
 		                 (((tx_id & THREAD_MASK) << LOCK_BITS) | WRITE_MASK) |
 		                 (current_state & (INCARNATION_MASK << OWNED_BITS));
 		TM_ASSERT((desired & WRITE_MASK) == 1 &&
-		                   ((desired & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS) == tx_id,
-		               "Wrong lock configuration");
+		              ((desired & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS) == tx_id,
+		          "Wrong lock configuration");
 		if ((expected & OWNED_MASK) != 0) {
 			return false;
 		}
 		TM_ASSERT(((expected & (THREAD_MASK << LOCK_BITS)) >> LOCK_BITS) == 0,
-		               "Lock is unlocked with a owner");
-		bool res = state.compare_exchange_strong(expected, desired,
-		    std::memory_order_acquire, std::memory_order_relaxed);
+		          "Lock is unlocked with a owner");
+		bool res = state.compare_exchange_strong(expected,
+		                                         desired,
+		                                         std::memory_order_acquire,
+		                                         std::memory_order_relaxed);
 		TM_ASSERT(!res || (res && state.load(std::memory_order_acquire) == desired),
-		               "CAS did not work as expected");
+		          "CAS did not work as expected");
 		return res;
 	}
 
@@ -168,7 +187,10 @@ public:
 	{
 		word_t current_state = state.load(std::memory_order_acquire);
 		word_t new_incarnation = ((current_state >> OWNED_BITS) & INCARNATION_MASK) + 1;
-		// TODO.md: TinySTM clock wrap-around (P1)
+		// Incarnation wrap: masked to 3 bits below; a wrap to 0 is safe
+		// because every acquire (try_lock / try_lock_with_incarnation)
+		// CASes the full state, so a stale incarnation can only collide
+		// with an already-acquired lock, which the CAS rejects.
 		word_t current_version = (current_state >> META_BITS);
 		word_t desired = (current_version << META_BITS) |
 		                 ((new_incarnation & INCARNATION_MASK) << OWNED_BITS);
@@ -202,9 +224,9 @@ class Transaction
 {
 public:
 	volatile word_t id = 0;
-    word_t start_version = 0;
-    volatile word_t end_version = 0;
-    word_t commit_version = 0; // set by commit() for EBR
+	word_t start_version = 0;
+	volatile word_t end_version = 0;
+	word_t commit_version = 0; // set by commit() for EBR
 	bool active = false;
 	bool aborted = false;
 	bool read_only = true;
@@ -239,14 +261,16 @@ public:
 	WriteLogEntry *ws_find(void *addr)
 	{
 		for (auto &kv : write_set)
-			if (kv.first == addr) return &kv.second;
+			if (kv.first == addr)
+				return &kv.second;
 		return nullptr;
 	}
 
 	const WriteLogEntry *ws_find(void *addr) const
 	{
 		for (auto &kv : write_set)
-			if (kv.first == addr) return &kv.second;
+			if (kv.first == addr)
+				return &kv.second;
 		return nullptr;
 	}
 
@@ -254,7 +278,8 @@ public:
 	WriteLogEntry &ws_get_or_insert(void *addr)
 	{
 		for (auto &kv : write_set)
-			if (kv.first == addr) return kv.second;
+			if (kv.first == addr)
+				return kv.second;
 		write_set.emplace_back(addr, WriteLogEntry{});
 		return write_set.back().second;
 	}
@@ -361,8 +386,8 @@ extern thread_local std::mt19937 rng;
 // Thread-local Mersenne Twister seeded once per thread.
 constexpr int K_MAX_BACKOFF_DELAY_US = 100000;
 
-inline void  //
-init_rand()  //
+inline void //
+init_rand() //
 {
 	if (!rng_initialized) {
 		std::random_device rd;
@@ -373,8 +398,8 @@ init_rand()  //
 
 // Exponential backoff using the thread-local RNG.  Callers pass their
 // per-tx abort_count so the mean delay decreases as the TX retries.
-inline void      //
-random_backoff(  //
+inline void     //
+random_backoff( //
     unsigned abort_count)
 {
 	init_rand();
@@ -385,22 +410,20 @@ random_backoff(  //
 
 inline void init()
 {
-    // Initialize the TM address-space region (mmap bump allocator).
-    // If this fails, isTMAddress() returns false for all addresses,
-    // so all TM reads/writes bypass the lock table (safe but dead).
-    if (stm::tm_region_init() != 0) {
-        fprintf(stderr, "FATAL: tm_region_init() failed — TM address space unavailable\n");
-        std::abort();
-    }
+	// Initialize the TM address-space region (mmap bump allocator).
+	// If this fails, isTMAddress() returns false for all addresses,
+	// so all TM reads/writes bypass the lock table (safe but dead).
+	if (stm::tm_region_init() != 0) {
+		fprintf(stderr,
+		        "FATAL: tm_region_init() failed — TM address space unavailable\n");
+		std::abort();
+	}
 	g_clock.store(1, std::memory_order_release);
 	thr_counter.store(1, std::memory_order_release);
 	// Events already no-ops unless TM_EVENT_LOG defined.
 }
 
-inline void exit()
-{
-	stm::tm_region_destroy();
-}
+inline void exit() { stm::tm_region_destroy(); }
 
 inline word_t get_clock()
 {

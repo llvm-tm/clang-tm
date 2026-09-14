@@ -10,10 +10,10 @@
 // memory and survive crashes.
 
 use core::sync::atomic::{fence, AtomicU64, Ordering};
+pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-pub use runtime_core::{tm_install_tmx_hook, Primitive, TmxAbort, TypedValue, WriteBack};
 
 // ── Constants ───────────────────────────────────────────
 const LOCK_MASK: u64 = 0xFF;
@@ -33,20 +33,27 @@ struct Lock {
 
 impl Lock {
     const fn new() -> Self {
-        Lock { data: AtomicU64::new(0) }
+        Lock {
+            data: AtomicU64::new(0),
+        }
     }
     fn is_locked(&self) -> bool {
         self.data.load(Ordering::Relaxed) & LOCK_MASK != 0
     }
     fn try_lock_exclusive(&self) -> bool {
         let cur = self.data.load(Ordering::Relaxed);
-        if cur & LOCK_MASK != 0 { return false; }
-        self.data.compare_exchange_weak(cur, cur | 1, Ordering::Acquire, Ordering::Relaxed).is_ok()
+        if cur & LOCK_MASK != 0 {
+            return false;
+        }
+        self.data
+            .compare_exchange_weak(cur, cur | 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
     }
     fn unlock_exclusive(&self) {
         let cur = self.data.load(Ordering::Relaxed);
         let ver = (cur & !LOCK_MASK) >> VERSION_SHIFT;
-        self.data.store((ver + 1) << VERSION_SHIFT, Ordering::Release);
+        self.data
+            .store((ver + 1) << VERSION_SHIFT, Ordering::Release);
     }
     fn version(&self) -> u64 {
         let v = self.data.load(Ordering::Acquire);
@@ -80,7 +87,10 @@ static LOCK_TABLE: OnceLock<Box<[Lock]>> = OnceLock::new();
 
 fn locks() -> &'static [Lock] {
     LOCK_TABLE.get_or_init(|| {
-        (0..TABLE_SIZE).map(|_| Lock::new()).collect::<Vec<_>>().into_boxed_slice()
+        (0..TABLE_SIZE)
+            .map(|_| Lock::new())
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
     })
 }
 
@@ -154,24 +164,36 @@ fn read_word<T: Primitive>(addr: usize) -> T {
     }
 
     if let Some(tv) = TX.with(|tx| {
-        tx.borrow().as_ref().and_then(|t| t.write_set.get(&addr).cloned())
-    }) { return T::from_typed(&tv); }
+        tx.borrow()
+            .as_ref()
+            .and_then(|t| t.write_set.get(&addr).cloned())
+    }) {
+        return T::from_typed(&tv);
+    }
 
     loop {
-        while is_locked(addr) { std::hint::spin_loop(); }
+        while is_locked(addr) {
+            std::hint::spin_loop();
+        }
         let ver = read_version(addr);
         let val: T = unsafe { (addr as *const T).read() };
-        if read_version(addr) != ver { continue; }
+        if read_version(addr) != ver {
+            continue;
+        }
 
         if with_tx(|tx| {
             if ver > tx.start_version {
                 true
             } else {
-                if tx.read_set.len() > 1_000_000 { return true; }
+                if tx.read_set.len() > 1_000_000 {
+                    return true;
+                }
                 tx.read_set.push((addr, ver));
                 false
             }
-        }) { std::panic::panic_any(TmxAbort); }
+        }) {
+            std::panic::panic_any(TmxAbort);
+        }
         return val;
     }
 }
@@ -179,7 +201,12 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 // ── Write word ──────────────────────────────────────────
 fn write_word<T: Primitive>(addr: usize, val: T) {
     fence(Ordering::SeqCst);
-    if !tx_active() { unsafe { (addr as *mut T).write(val); } return; }
+    if !tx_active() {
+        unsafe {
+            (addr as *mut T).write(val);
+        }
+        return;
+    }
 
     let tv = val.to_typed();
     with_tx(|tx| {
@@ -201,12 +228,19 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
 
 // ── Raw byte operations ─────────────────────────────────
 fn read_raw_bytes(addr: usize, dst: &mut [u8]) {
-    for (i, byte) in dst.iter_mut().enumerate() { *byte = read_word::<u8>(addr + i); }
+    for (i, byte) in dst.iter_mut().enumerate() {
+        *byte = read_word::<u8>(addr + i);
+    }
 }
 
 fn write_raw_bytes(addr: usize, src: &[u8]) {
     fence(Ordering::SeqCst);
-    if !tx_active() { unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); } return; }
+    if !tx_active() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len());
+        }
+        return;
+    }
 
     let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
     with_tx(|tx| {
@@ -232,10 +266,15 @@ fn validate_read_set(rs: &[(usize, u64)]) -> bool {
 
 // ── Commit ──────────────────────────────────────────────
 pub fn tm_commit() -> bool {
-    let tx = match flush_tx() { Some(t) => t, None => return true };
+    let tx = match flush_tx() {
+        Some(t) => t,
+        None => return true,
+    };
     fence(Ordering::SeqCst);
 
-    if tx.write_set.is_empty() { return true; }
+    if tx.write_set.is_empty() {
+        return true;
+    }
 
     // Lock all write-set addresses (sorted for deadlock freedom)
     let mut addrs: Vec<usize> = tx.write_set.keys().copied().collect();
@@ -248,7 +287,9 @@ pub fn tm_commit() -> bool {
                 // Validate read-set during lock contention
                 if !validate_read_set(&tx.read_set) {
                     // Unlock what we've locked so far
-                    for &li in &locked_idxs { lock_at_index(li).unlock_exclusive(); }
+                    for &li in &locked_idxs {
+                        lock_at_index(li).unlock_exclusive();
+                    }
                     TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
                     return false;
                 }
@@ -261,8 +302,12 @@ pub fn tm_commit() -> bool {
 
     // Validate read-set after acquiring all locks
     if !validate_read_set(&tx.read_set) {
-        for &li in &locked_idxs { lock_at_index(li).unlock_exclusive(); }
-        REDO_LOG.with(|log| { log.borrow_mut().truncate(0); });
+        for &li in &locked_idxs {
+            lock_at_index(li).unlock_exclusive();
+        }
+        REDO_LOG.with(|log| {
+            log.borrow_mut().truncate(0);
+        });
         TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
         return false;
     }
@@ -273,7 +318,9 @@ pub fn tm_commit() -> bool {
     }
 
     // Unlock write-set addresses
-    for &idx in locked_idxs.iter().rev() { lock_at_index(idx).unlock_exclusive(); }
+    for &idx in locked_idxs.iter().rev() {
+        lock_at_index(idx).unlock_exclusive();
+    }
     fence(Ordering::SeqCst);
 
     // Advance global clock
@@ -298,7 +345,8 @@ pub fn tm_commit() -> bool {
             for (i, e) in l.iter().enumerate() {
                 if e.commit_marker {
                     markers_found += 1;
-                    if markers_found == 1000 { // keep last 1000 committed TXs
+                    if markers_found == 1000 {
+                        // keep last 1000 committed TXs
                         new_start = i + 1;
                         break;
                     }
@@ -336,22 +384,38 @@ pub fn tm_exit_thread() {}
 
 pub fn tm_begin() {
     let sv = G_CLOCK.load(Ordering::Acquire);
-    TX.with(|tx| { *tx.borrow_mut() = Some(Box::new(TxState::new(sv))); });
+    TX.with(|tx| {
+        *tx.borrow_mut() = Some(Box::new(TxState::new(sv)));
+    });
 }
 
 pub fn tm_abort() {
-    REDO_LOG.with(|log| { log.borrow_mut().truncate(0); });
+    REDO_LOG.with(|log| {
+        log.borrow_mut().truncate(0);
+    });
     flush_tx();
 }
 
-pub fn tm_abort_count() -> u64 { TM_ABORT_COUNT.load(Ordering::Relaxed) }
+pub fn tm_abort_count() -> u64 {
+    TM_ABORT_COUNT.load(Ordering::Relaxed)
+}
 
 // ── Typed wrappers ─────────────────────────────────────
 macro_rules! def_read {
-    ($n:ident, $t:ty) => { #[inline] pub fn $n(addr: *mut $t) -> $t { read_word::<$t>(addr as usize) } };
+    ($n:ident, $t:ty) => {
+        #[inline]
+        pub fn $n(addr: *mut $t) -> $t {
+            read_word::<$t>(addr as usize)
+        }
+    };
 }
 macro_rules! def_write {
-    ($n:ident, $t:ty) => { #[inline] pub fn $n(addr: *mut $t, val: $t) { write_word::<$t>(addr as usize, val) } };
+    ($n:ident, $t:ty) => {
+        #[inline]
+        pub fn $n(addr: *mut $t, val: $t) {
+            write_word::<$t>(addr as usize, val)
+        }
+    };
 }
 
 def_read!(tm_read_u8, u8);
@@ -376,7 +440,19 @@ def_write!(tm_write_i64, i64);
 def_write!(tm_write_f32, f32);
 def_write!(tm_write_f64, f64);
 
-#[inline] pub fn tm_read_ptr<T>(addr: *mut *mut T) -> *mut T { read_word::<u64>(addr as usize) as *mut T }
-#[inline] pub fn tm_write_ptr<T>(addr: *mut *mut T, val: *mut T) { write_word::<u64>(addr as usize, val as u64); }
-#[inline] pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) { read_raw_bytes(addr as usize, dst); }
-#[inline] pub fn tm_write_raw(addr: *mut u8, src: &[u8]) { write_raw_bytes(addr as usize, src); }
+#[inline]
+pub fn tm_read_ptr<T>(addr: *mut *mut T) -> *mut T {
+    read_word::<u64>(addr as usize) as *mut T
+}
+#[inline]
+pub fn tm_write_ptr<T>(addr: *mut *mut T, val: *mut T) {
+    write_word::<u64>(addr as usize, val as u64);
+}
+#[inline]
+pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) {
+    read_raw_bytes(addr as usize, dst);
+}
+#[inline]
+pub fn tm_write_raw(addr: *mut u8, src: &[u8]) {
+    write_raw_bytes(addr as usize, src);
+}

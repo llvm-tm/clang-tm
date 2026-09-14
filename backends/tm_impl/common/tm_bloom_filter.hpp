@@ -28,8 +28,8 @@
 // NOrec-BF relies on the global sequence lock for that.
 
 #include <atomic>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 
 namespace stm
 {
@@ -44,8 +44,7 @@ inline uint64_t bloom_mix64(uint64_t z)
 }
 
 // Fixed-size Bloom filter, WORDS × 64 bits, k = 2 independent hashes.
-template <size_t WORDS = 16>
-class BloomFilter
+template <size_t WORDS = 16> class BloomFilter
 {
 public:
 	static constexpr size_t kWords = WORDS;
@@ -57,7 +56,8 @@ public:
 	// concurrently (NOrec-BF rebuilds under the global commit lock).
 	void clear()
 	{
-		for (size_t i = 0; i < WORDS; i++) words_[i].store(0, std::memory_order_relaxed);
+		for (size_t i = 0; i < WORDS; i++)
+			words_[i].store(0, std::memory_order_relaxed);
 	}
 
 	// Insert a key (fetch_or; single-writer safe).
@@ -74,8 +74,10 @@ public:
 	{
 		uint64_t h1 = bloom_mix64(key);
 		uint64_t h2 = bloom_mix64(key ^ 0x9e3779b97f4a7c15ULL);
-		if (!(words_[bit_index(h1)].load(std::memory_order_relaxed) & bit_mask(h1))) return false;
-		if (!(words_[bit_index(h2)].load(std::memory_order_relaxed) & bit_mask(h2))) return false;
+		if (!(words_[bit_index(h1)].load(std::memory_order_relaxed) & bit_mask(h1)))
+			return false;
+		if (!(words_[bit_index(h2)].load(std::memory_order_relaxed) & bit_mask(h2)))
+			return false;
 		return true;
 	}
 
@@ -87,7 +89,8 @@ public:
 		for (size_t i = 0; i < WORDS; i++) {
 			uint64_t a = words_[i].load(std::memory_order_relaxed);
 			uint64_t b = other.words_[i].load(std::memory_order_relaxed);
-			if (a & b) return false;
+			if (a & b)
+				return false;
 		}
 		return true;
 	}
@@ -107,7 +110,8 @@ public:
 	bool empty() const
 	{
 		for (size_t i = 0; i < WORDS; i++) {
-			if (words_[i].load(std::memory_order_relaxed)) return false;
+			if (words_[i].load(std::memory_order_relaxed))
+				return false;
 		}
 		return true;
 	}

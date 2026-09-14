@@ -54,7 +54,9 @@ const DEFAULT_MAX_WRITE_LINES: usize = 32;
 /// Default max RTM retries before SGL fallback (matches TSXSGL: 5).
 const DEFAULT_MAX_RETRIES: u64 = 5;
 /// L1 associativity: 32KiB / 64B = 512 lines, 8-way → 64 sets (Broadwell L1D).
+#[allow(dead_code)]
 const L1_SETS: usize = 64;
+#[allow(dead_code)]
 const L1_WAYS: usize = 8;
 
 /// Bloom filter size in bits (m).
@@ -89,7 +91,6 @@ const COST_BLOOM_CHECK: u64 = 2;
 const COST_COHERENCE_PROBE: u64 = 40;
 const COST_BACKOFF_BASE: u64 = 250;
 
-
 // ── Helper: cache-line address ──────────────────────────────
 
 #[inline]
@@ -104,7 +105,8 @@ fn cache_line_addr(addr: u64) -> u64 {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug)]
 pub(crate) struct BloomFilter {
-    bits: Vec<u64>,  // bit array stored as u64 words
+    bits: Vec<u64>, // bit array stored as u64 words
+    #[allow(dead_code)]
     word_count: usize,
 }
 
@@ -128,7 +130,10 @@ impl BloomFilter {
     }
 
     fn hash2(addr: u64) -> usize {
-        (addr.wrapping_mul(0xBF58476D1CE4E5B9).wrapping_add(0x9E3779B9) as usize) % BLOOM_BITS
+        (addr
+            .wrapping_mul(0xBF58476D1CE4E5B9)
+            .wrapping_add(0x9E3779B9) as usize)
+            % BLOOM_BITS
     }
 
     fn insert(&mut self, addr: u64) {
@@ -169,7 +174,14 @@ pub struct TsxThreadState {
     /// True when the transaction is running in simulated TSX mode.
     /// False = SGL fallback (mutex-based).
     in_tsx: bool,
+    /// Set when the transaction is aborted mid-closure (by another
+    /// thread's commit-time WR/WW invalidation or a capacity abort).
+    /// Remaining closure ops after an abort must be no-ops: the
+    /// transaction() retry re-runs the closure from scratch, and
+    /// leaking plain writes would be read back as "committed" values.
+    mid_abort: bool,
     /// Max _xbegin() retries before falling to SGL (default 5).
+    #[allow(dead_code)]
     max_retries: u64,
     /// Consecutive transaction aborts tracked across TxBegin/TxEnd
     /// cycles.  When >= max_retries, the next tm_begin() falls to SGL
@@ -195,6 +207,7 @@ pub struct TsxThreadState {
     conflict_aborts: u64,
     self_aborts: u64,
     explicit_aborts: u64,
+    #[allow(dead_code)]
     other_aborts: u64,
     fallback_count: u64,
     peak_read_set: usize,
@@ -207,6 +220,7 @@ impl TsxThreadState {
             active: false,
             committed_successfully: false,
             in_tsx: false,
+            mid_abort: false,
             max_retries: Self::max_retries(),
             persistent_retries: 0,
             read_bloom: BloomFilter::new(),
@@ -229,6 +243,7 @@ impl TsxThreadState {
 
     fn reset_tx(&mut self) {
         self.read_bloom.clear();
+        self.mid_abort = false;
         self.read_lines.clear();
         self.write_lines.clear();
         self.writes.clear();
@@ -275,9 +290,39 @@ fn max_write() -> usize {
     *CONFIG_MAX_WRITE.get_or_init(TsxThreadState::max_write_lines)
 }
 
-/// Simulated SGL owner: 0 = free, non-zero = thread ID holds the lock.
-/// Written by the thread that acquires the SGL fallback, read by every
-/// `tm_begin()` retry loop iteration to simulate the LOCK_BUSY check.
+#[allow(dead_code)]
+fn dbg_enabled() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var("TSX_SIM_DEBUG").is_ok());
+    *ON
+}
+
+/// Publish ring for loss analysis: every TSX commit publish and SGL write
+/// is recorded as (addr, mem_before, new, kind, tid).  kind: 0=TSX commit,
+/// 1=SGL write.  Appended only while holding GLOBAL_STATE, so ordering with
+/// TM ops is consistent; dumped by tm_exit when TSX_SIM_RING is set.
+static RING: std::sync::LazyLock<Mutex<Vec<(u64, u64, u64, u8, u64)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+fn ring_push(addr: u64, before: u64, newv: u64, kind: u8, tid: u64) {
+    RING.lock().unwrap().push((addr, before, newv, kind, tid));
+}
+
+/// DBG: log a u64 at addr (debug only).
+fn dbg_u64(addr: u64) -> u64 {
+    unsafe { std::ptr::read_unaligned(addr as *const u64) }
+}
+
+/// Simulated SGL lock.  `SGL_HELD` is the actual mutex (CAS on it);
+/// `SGL_OWNER` records the holder for diagnostics and the ring.
+///
+/// The lock MUST NOT be encoded as "owner == 0 means free": native thread
+/// IDs are 0-based (`NATIVE_TID_COUNTER` starts at 0), so thread 0's
+/// `compare_exchange(0, 0, ...)` is a no-op that "acquires" the lock while
+/// leaving it free for every other thread — two threads end up in SGL mode
+/// simultaneously and their write-through RMWs clobber each other and
+/// in-flight TSX commits (lost updates).
+static SGL_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SGL_OWNER: AtomicU64 = AtomicU64::new(0);
 
 // ── Thread management ─────────────────────────────────────
@@ -286,8 +331,20 @@ thread_local! {
     static THREAD_TID: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
+/// Native (non-DES) runs have no simulator to assign IDs: each OS thread
+/// self-assigns the next free ID on first use.  DES runs call
+/// `sim::set_thread_id()` first, which wins.
+static NATIVE_TID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn my_tid() -> u64 {
-    THREAD_TID.with(|c| c.get().expect("TSX Sim: thread_id not set"))
+    THREAD_TID.with(|c| {
+        if let Some(t) = c.get() {
+            return t;
+        }
+        let id = NATIVE_TID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        c.set(Some(id));
+        id
+    })
 }
 
 fn with_state<F, R>(tid: u64, f: F) -> R
@@ -307,6 +364,42 @@ pub fn tm_init() {
 }
 
 pub fn tm_exit() {
+    if let Ok(ring) = RING.try_lock() {
+        if let Ok(path) = std::env::var("TSX_SIM_RING_FILE") {
+            use std::io::Write;
+            let mut f = std::fs::File::create(path).unwrap();
+            for &(addr, before, newv, kind, tid) in ring.iter() {
+                writeln!(f, "{addr:#x} {before:#x} {newv:#x} {kind} {tid}").unwrap();
+            }
+        }
+        if !ring.is_empty() {
+            // Detect stale publishes: for the fuzz RMW workload, every
+            // publish must be mem_before + inc with inc in [1,10].
+            let mut stale = Vec::new();
+            for &(addr, before, newv, kind, tid) in ring.iter() {
+                let d = (newv as i128) - (before as i128);
+                if d < 1 || d > 10 {
+                    stale.push((addr, before, newv, kind, tid, d));
+                }
+            }
+            eprintln!(
+                "[RING] events={} stale_publishes={}",
+                ring.len(),
+                stale.len(),
+            );
+            for (addr, before, newv, kind, tid, d) in stale.iter().take(20) {
+                eprintln!(
+                    "[RING] STALE addr={:#x} before={:#x} new={:#x} kind={} tid={} delta={}",
+                    addr,
+                    before,
+                    newv,
+                    if *kind == 0 { "TSX" } else { "SGL" },
+                    tid,
+                    d,
+                );
+            }
+        }
+    }
     // Print aggregated stats
     let guard = GLOBAL_STATE.lock().unwrap();
     let mut total_commits = 0u64;
@@ -323,7 +416,10 @@ pub fn tm_exit() {
     }
     eprintln!(
         "[TSX_SIM] commits={} aborts={} (capacity={}, conflict={}, self={}) fallback={}",
-        total_commits, total_aborts, total_capacity, total_conflict,
+        total_commits,
+        total_aborts,
+        total_capacity,
+        total_conflict,
         total_aborts - total_capacity - total_conflict,
         total_fallback
     );
@@ -366,8 +462,7 @@ fn try_begin_single(tid: u64) -> bool {
     with_state(tid, |s| {
         s.reset_tx();
 
-        let owner = SGL_OWNER.load(Ordering::Relaxed);
-        if owner != 0 && owner != tid {
+        if SGL_HELD.load(Ordering::Relaxed) {
             s.cycles += COST_XBEGIN + COST_XABORT;
             s.abort_count += 1;
             s.explicit_aborts += 1;
@@ -401,13 +496,31 @@ pub fn tm_begin() {
     let should_sgl = with_state(tid, |s| s.persistent_retries >= max_r);
 
     if should_sgl {
+        // Acquire the SGL lock: CAS on SGL_HELD (the real mutex).
+        // A plain store here is NOT a mutex — two threads falling back
+        // concurrently would both "hold" the SGL and its writes (which
+        // carry no undo/rollback) would clobber each other and in-flight
+        // TSX commits.  SGL_OWNER is set only after a successful CAS.
+        loop {
+            match SGL_HELD.compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::Acquire,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(_) => std::hint::spin_loop(),
+            }
+        }
+        SGL_OWNER.store(tid, Ordering::Relaxed);
         with_state(tid, |s| {
             s.active = true;
             s.in_tsx = false;
+            s.mid_abort = false;
             s.fallback_count += 1;
             s.cycles += COST_MUTEX_LOCK;
         });
-        SGL_OWNER.store(tid, Ordering::Release);
+        ring_push(0, 0, tid, 3, tid); // SGL begin
         return;
     }
 
@@ -423,6 +536,7 @@ pub fn tm_begin() {
     with_state(tid, |s| {
         s.active = true;
         s.in_tsx = true;
+        s.mid_abort = false;
     });
 }
 
@@ -434,6 +548,42 @@ pub fn tm_commit() -> bool {
 
     // Lock global state once for the entire commit operation
     let mut guard = GLOBAL_STATE.lock().unwrap();
+
+    // SGL fallback commit: our writes are already in memory (write-through).
+    // Invalidate every in-flight transaction whose read-set intersects our
+    // write-set before releasing SGL — without this, a TSX thread that read
+    // a line during the SGL window would commit a stale value afterwards.
+    // (Snapshot first: get_mut + iter_mut on the same map can't be live together.)
+    let (is_sgl, our_writes) = match guard.get(&tid) {
+        Some(st) if st.active && !st.in_tsx => {
+            (true, st.write_lines.iter().copied().collect::<Vec<u64>>())
+        }
+        _ => (false, Vec::new()),
+    };
+    if is_sgl {
+        for (other_tid, other) in guard.iter_mut() {
+            if *other_tid == tid {
+                continue;
+            }
+            if !other.active {
+                continue;
+            }
+            for wl in &our_writes {
+                if other.read_bloom.might_contain(*wl) {
+                    other.active = false;
+                    other.committed_successfully = false;
+                    other.conflict_aborts += 1;
+                    other.abort_count += 1;
+                    other.persistent_retries += 1;
+                    let backoff = COST_BACKOFF_BASE * (1u64 << other.persistent_retries.min(4));
+                    other.cycles += COST_CONFLICT_ABORT + backoff + COST_COHERENCE_PROBE;
+                    other.reset_tx();
+                    other.mid_abort = true;
+                    break;
+                }
+            }
+        }
+    }
 
     let state = guard.get_mut(&tid);
     let s = match state {
@@ -447,9 +597,11 @@ pub fn tm_commit() -> bool {
     }
     s.committed_successfully = false; // will be set to true on actual commit below
 
-    // SGL fallback: commit via mutex (no conflict detection), release SGL
+    // SGL fallback: commit via mutex, release SGL
     if !s.in_tsx {
-        SGL_OWNER.store(0, Ordering::Release);
+        ring_push(0, 0, SGL_OWNER.load(Ordering::Relaxed), 4, tid); // SGL end (owner before release)
+        SGL_OWNER.store(0, Ordering::Relaxed);
+        SGL_HELD.store(false, Ordering::Release);
         s.cycles += COST_MUTEX_UNLOCK;
         s.active = false;
         s.committed_successfully = true;
@@ -459,7 +611,7 @@ pub fn tm_commit() -> bool {
         return true;
     }
 
-    // ── SGL_OWNER check (OWNER_CHANGED) ────────────────────
+    // ── SGL_HELD check (OWNER_CHANGED) ─────────────────────
     //
     // Matches real TSXSGL's guard at _xend():
     //   if (sgl_owner.load() != tsx_start_owner) _xabort(OWNER_CHANGED)
@@ -470,16 +622,10 @@ pub fn tm_commit() -> bool {
     // mode from coexisting: once one thread falls to SGL, all TSX
     // transactions that overlap with its SGL window abort.
     //
-    // Artificial: real TSXSGL stores tsx_start_owner at begin() time
-    // and checks equality with the current sgl_owner.  We simplify
-    // to checking whether ANY thread holds SGL.  The difference:
-    // if the SGL holder is the SAME thread that's now committing TSX
-    // (impossible in our model — one thread can't be in both modes),
-    // or if the SGL holder released before we reached commit (in
-    // which case owner=0 and we pass).  Both are correct simplifications
-    // because the SimEngine's sequential event ordering means an SGL
-    // thread will always release SGL_OWNER before the next TSX commit.
-    if SGL_OWNER.load(Ordering::Relaxed) != 0 {
+    // We check the SGL_HELD flag (the real lock), not SGL_OWNER: the
+    // owner field is diagnostic only and is 0-based-ID-unsafe (thread 0
+    // would be indistinguishable from "free").
+    if SGL_HELD.load(Ordering::Acquire) {
         s.active = false;
         s.committed_successfully = false;
         s.conflict_aborts += 1;
@@ -488,6 +634,7 @@ pub fn tm_commit() -> bool {
         let backoff = COST_BACKOFF_BASE * (1u64 << s.persistent_retries.min(4));
         s.cycles += COST_XABORT + COST_CONFLICT_ABORT + backoff + COST_COHERENCE_PROBE;
         s.reset_tx();
+        s.mid_abort = true;
         return false;
     }
 
@@ -509,12 +656,18 @@ pub fn tm_commit() -> bool {
     let write_lines: Vec<u64> = s.write_lines.iter().copied().collect();
     let our_tid = tid;
 
-    let mut ww_conflict = false;  // write-write → abort BOTH
+    let mut ww_conflict = false; // write-write → abort BOTH
 
     for (other_tid, other_state) in guard.iter_mut() {
-        if *other_tid == our_tid { continue; }
-        if !other_state.active { continue; }
-        if !other_state.in_tsx { continue; }
+        if *other_tid == our_tid {
+            continue;
+        }
+        if !other_state.active {
+            continue;
+        }
+        if !other_state.in_tsx {
+            continue;
+        }
 
         // WR check: our write vs their read → abort them only (eager invalidation)
         for wl in &write_lines {
@@ -527,6 +680,7 @@ pub fn tm_commit() -> bool {
                 other_state.persistent_retries += 1;
                 other_state.cycles += COST_CONFLICT_ABORT + backoff + COST_COHERENCE_PROBE;
                 other_state.reset_tx();
+                other_state.mid_abort = true;
                 break;
             }
         }
@@ -538,7 +692,8 @@ pub fn tm_commit() -> bool {
             if write_lines.contains(other_wl) {
                 ww_conflict = true;
                 if other_state.active {
-                    let backoff = COST_BACKOFF_BASE * (1u64 << other_state.persistent_retries.min(4));
+                    let backoff =
+                        COST_BACKOFF_BASE * (1u64 << other_state.persistent_retries.min(4));
                     other_state.active = false;
                     other_state.committed_successfully = false;
                     other_state.conflict_aborts += 1;
@@ -546,6 +701,7 @@ pub fn tm_commit() -> bool {
                     other_state.persistent_retries += 1;
                     other_state.cycles += COST_CONFLICT_ABORT + backoff + COST_COHERENCE_PROBE;
                     other_state.reset_tx();
+                    other_state.mid_abort = true;
                 }
                 break;
             }
@@ -563,6 +719,7 @@ pub fn tm_commit() -> bool {
         our_state.cycles += COST_XABORT + COST_CONFLICT_ABORT + backoff + COST_COHERENCE_PROBE;
         our_state.persistent_retries += 1;
         our_state.reset_tx();
+        our_state.mid_abort = true;
         return false;
     }
 
@@ -573,6 +730,18 @@ pub fn tm_commit() -> bool {
     our_state.cycles += COST_XEND;
     our_state.active = false;
     our_state.committed_successfully = true;
+    // Publish write-set to memory (RTM: _xend makes speculative writes
+    // globally visible).  Must happen under the global lock, after all
+    // conflict checks, so no thread observes a half-published set.
+    for w in &our_state.writes {
+        if w.width == 8 {
+            let newv = u64::from_le_bytes(w.value);
+            ring_push(w.addr, dbg_u64(w.addr), newv, 0, our_tid);
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(w.value.as_ptr(), w.addr as *mut u8, w.width as usize);
+        }
+    }
     our_state.commit_count += 1;
     our_state.peak_read_set = our_state.peak_read_set.max(our_state.read_lines.len());
     our_state.peak_write_set = our_state.peak_write_set.max(our_state.write_lines.len());
@@ -585,10 +754,13 @@ pub fn tm_commit() -> bool {
 pub fn tm_abort() {
     let tid = my_tid();
     with_state(tid, |s| {
-        if !s.active { return; }
+        if !s.active {
+            return;
+        }
         // Release SGL owner if we held it (SGL fallback mode)
         if !s.in_tsx {
-            SGL_OWNER.store(0, Ordering::Release);
+            SGL_OWNER.store(0, Ordering::Relaxed);
+            SGL_HELD.store(false, Ordering::Release);
         }
         s.self_aborts += 1;
         s.abort_count += 1;
@@ -596,6 +768,7 @@ pub fn tm_abort() {
         s.cycles += COST_XABORT;
         s.active = false;
         s.reset_tx();
+        s.mid_abort = true;
     });
 }
 
@@ -619,7 +792,9 @@ macro_rules! def_read {
                         if w.addr == addr as u64 {
                             s.cycles += COST_READ_L1 + COST_BLOOM_CHECK;
                             let bytes = w.value;
-                            return unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const $t) };
+                            return unsafe {
+                                std::ptr::read_unaligned(bytes.as_ptr() as *const $t)
+                            };
                         }
                     }
 
@@ -635,11 +810,18 @@ macro_rules! def_read {
                         s.abort_count += 1;
                         s.cycles += COST_XABORT;
                         s.reset_tx();
+                        s.mid_abort = true;
                         // Still return the actual memory value
                         return unsafe { addr.read() };
                     }
 
                     s.cycles += COST_READ_L1 + COST_BLOOM_CHECK;
+                }
+                if s.active && !s.in_tsx {
+                    if std::mem::size_of::<$t>() == 8 {
+                        let v = unsafe { addr.read() } as u64;
+                        ring_push(addr as u64, v, 0, 2, tid); // SGL read
+                    }
                 }
                 unsafe { addr.read() }
             })
@@ -674,17 +856,17 @@ pub fn tm_read_ptr<T>(addr: *mut *mut T) -> *mut T {
             s.read_bloom.insert(cl);
             s.read_lines.insert(cl);
             if s.read_lines.len() > max_read() {
-                        s.active = false;
-                        s.capacity_aborts += 1;
-                        s.abort_count += 1;
-                        s.cycles += COST_XABORT;
-                        s.reset_tx();
-                        return unsafe { addr.read() };
-                    }
+                s.active = false;
+                s.capacity_aborts += 1;
+                s.abort_count += 1;
+                s.cycles += COST_XABORT;
+                s.reset_tx();
+                return unsafe { addr.read() };
+            }
 
-                    s.cycles += COST_READ_L1 + COST_BLOOM_CHECK;
-                }
-                unsafe { addr.read() }
+            s.cycles += COST_READ_L1 + COST_BLOOM_CHECK;
+        }
+        unsafe { addr.read() }
     })
 }
 
@@ -735,20 +917,46 @@ macro_rules! def_write {
                     s.peak_read_set = s.peak_read_set.max(s.read_lines.len());
 
                     // Check capacity
-                    if s.write_lines.len() > max_write()
-                        || s.read_lines.len() > max_read()
-                    {
+                    if s.write_lines.len() > max_write() || s.read_lines.len() > max_read() {
                         s.active = false;
                         s.capacity_aborts += 1;
                         s.abort_count += 1;
                         s.cycles += COST_XABORT;
                         s.reset_tx();
+                        s.mid_abort = true;
                         return;
                     }
 
                     s.cycles += COST_WRITE_L1 + COST_BLOOM_CHECK;
+                    // Speculative write (RTM semantics): buffer only, publish at
+                    // commit, discard at abort.  Writing through here would leak
+                    // uncommitted values into other threads' reads and survive
+                    // aborts (no undo log) → lost/created updates.
+                    return;
                 }
-                unsafe { addr.write(val); }
+                if s.mid_abort {
+                    // Aborted mid-closure: this op is outside any transaction.
+                    // The transaction() retry re-runs the closure, so skip it —
+                    // a plain write here would leak a value the retry then
+                    // reads back as if it were committed.
+                    return;
+                }
+                if s.active && !s.in_tsx {
+                    // SGL fallback: write-through is safe (the mutex
+                    // serializes SGL writers), but the line must be tracked
+                    // so the SGL commit can invalidate overlapping in-flight
+                    // transactions (their reads are now stale).
+                    s.write_lines.insert(cl);
+                    s.peak_write_set = s.peak_write_set.max(s.write_lines.len());
+                    s.cycles += COST_WRITE_L1 + COST_BLOOM_CHECK;
+                    if std::mem::size_of::<$t>() == 8 {
+                        let before = unsafe { addr.read() } as u64;
+                        ring_push(addr as u64, before, val as u64, 1, tid);
+                    }
+                }
+                unsafe {
+                    addr.write(val);
+                }
             });
         }
     };
@@ -773,9 +981,8 @@ pub fn tm_write_ptr<T>(addr: *mut *mut T, val: *mut T) {
         if s.active && s.in_tsx {
             let offset = (addr as u64) & (CACHE_LINE - 1);
             let mut bytes = [0u8; 8];
-            let ptr_bytes = unsafe {
-                std::slice::from_raw_parts(&val as *const *mut T as *const u8, 8)
-            };
+            let ptr_bytes =
+                unsafe { std::slice::from_raw_parts(&val as *const *mut T as *const u8, 8) };
             bytes.copy_from_slice(ptr_bytes);
             let mut found = false;
             for w in &mut s.writes {
@@ -806,7 +1013,9 @@ pub fn tm_write_ptr<T>(addr: *mut *mut T, val: *mut T) {
             }
             s.cycles += COST_WRITE_L1 + COST_BLOOM_CHECK;
         }
-        unsafe { addr.write(val); }
+        unsafe {
+            addr.write(val);
+        }
     });
 }
 
@@ -826,12 +1035,16 @@ pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) {
                 s.abort_count += 1;
                 s.cycles += COST_XABORT;
                 s.reset_tx();
-                unsafe { std::ptr::copy_nonoverlapping(addr, dst.as_mut_ptr(), dst.len()); }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(addr, dst.as_mut_ptr(), dst.len());
+                }
                 return;
             }
             s.cycles += COST_READ_L1 + COST_BLOOM_CHECK;
         }
-        unsafe { std::ptr::copy_nonoverlapping(addr, dst.as_mut_ptr(), dst.len()); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(addr, dst.as_mut_ptr(), dst.len());
+        }
     });
 }
 
@@ -871,12 +1084,16 @@ pub fn tm_write_raw(addr: *mut u8, src: &[u8]) {
                 s.abort_count += 1;
                 s.cycles += COST_XABORT;
                 s.reset_tx();
-                unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr, src.len()); }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.as_ptr(), addr, src.len());
+                }
                 return;
             }
             s.cycles += COST_WRITE_L1 + COST_BLOOM_CHECK;
         }
-        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), addr, src.len()); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), addr, src.len());
+        }
     });
 }
 
@@ -903,8 +1120,7 @@ pub mod sim {
         let tid = my_tid();
         with_state(tid, |s| {
             s.reset_tx();
-            let owner = SGL_OWNER.load(Ordering::Relaxed);
-            if owner != 0 && owner != tid {
+            if SGL_HELD.load(Ordering::Relaxed) {
                 s.cycles += COST_XBEGIN + COST_XABORT;
                 s.explicit_aborts += 1;
                 s.abort_count += 1;
@@ -922,10 +1138,12 @@ pub mod sim {
     /// consecutive try_begin() failures.
     pub fn force_sgl() {
         let tid = my_tid();
-        SGL_OWNER.store(tid, Ordering::Release);
+        SGL_HELD.store(true, Ordering::Release);
+        SGL_OWNER.store(tid, Ordering::Relaxed);
         with_state(tid, |s| {
             s.active = true;
             s.in_tsx = false;
+            s.mid_abort = false;
             s.fallback_count += 1;
             s.cycles += COST_MUTEX_LOCK;
         });
@@ -933,9 +1151,10 @@ pub mod sim {
 
     pub fn snapshot_states() -> std::collections::HashMap<u64, Option<Box<TsxThreadState>>> {
         let guard = GLOBAL_STATE.lock().unwrap();
-        guard.iter().map(|(&k, v)| {
-            (k, Some(Box::new(v.clone())))
-        }).collect()
+        guard
+            .iter()
+            .map(|(&k, v)| (k, Some(Box::new(v.clone()))))
+            .collect()
     }
 
     pub fn restore_states(states: std::collections::HashMap<u64, Option<Box<TsxThreadState>>>) {
@@ -949,7 +1168,9 @@ pub mod sim {
     }
 
     pub fn reset() {
-        let Some(tid) = runtime_core::try_current_sim_thread_id() else { return; };
+        let Some(tid) = runtime_core::try_current_sim_thread_id() else {
+            return;
+        };
         let mut guard = GLOBAL_STATE.lock().unwrap();
         guard.remove(&tid);
     }
@@ -995,10 +1216,19 @@ pub mod sim {
         let fallback = s.sim_fallback.load(Ordering::Relaxed);
         let other = aborts.saturating_sub(conflict + capacity + self_ab + explicit);
         eprintln!("  STATS (TSX SIM):");
-        eprintln!("    Commits={} Aborts={} (rate={:.1}%)",
-                  commits, aborts,
-                  if commits + aborts > 0 { 100.0 * aborts as f64 / (commits + aborts) as f64 } else { 0.0 });
-        eprintln!("    Abort breakdown: conflict={} capacity={} explicit={} self={} other={} fallback={}",
-                  conflict, capacity, explicit, self_ab, other, fallback);
+        eprintln!(
+            "    Commits={} Aborts={} (rate={:.1}%)",
+            commits,
+            aborts,
+            if commits + aborts > 0 {
+                100.0 * aborts as f64 / (commits + aborts) as f64
+            } else {
+                0.0
+            }
+        );
+        eprintln!(
+            "    Abort breakdown: conflict={} capacity={} explicit={} self={} other={} fallback={}",
+            conflict, capacity, explicit, self_ab, other, fallback
+        );
     }
 }

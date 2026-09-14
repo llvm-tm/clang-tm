@@ -1,6 +1,6 @@
+use crate::event::Event;
 use serde::{Deserialize, Serialize};
 use std::io::BufRead;
-use crate::event::Event;
 
 /// Load trace events from a JSONL file or stdin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,16 +11,15 @@ pub struct Trace {
 impl Trace {
     pub fn from_jsonl<R: std::io::Read>(reader: R) -> Result<Self, String> {
         let mut events = Vec::new();
-        let mut line_num = 0u64;
-        for line in std::io::BufReader::new(reader).lines() {
-            line_num += 1;
+        for (i, line) in std::io::BufReader::new(reader).lines().enumerate() {
+            let line_num = i as u64 + 1;
             let line = line.map_err(|e| format!("line {}: {}", line_num, e))?;
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let event: Event = serde_json::from_str(trimmed)
-                .map_err(|e| format!("line {}: {}", line_num, e))?;
+            let event: Event =
+                serde_json::from_str(trimmed).map_err(|e| format!("line {}: {}", line_num, e))?;
             events.push(event);
         }
         Ok(Trace { events })
@@ -34,10 +33,8 @@ impl Trace {
 
     pub fn to_jsonl<W: std::io::Write>(&self, writer: &mut W) -> Result<(), String> {
         for event in &self.events {
-            let line = serde_json::to_string(event)
-                .map_err(|e| format!("serialize: {}", e))?;
-            writeln!(writer, "{}", line)
-                .map_err(|e| format!("write: {}", e))?;
+            let line = serde_json::to_string(event).map_err(|e| format!("serialize: {}", e))?;
+            writeln!(writer, "{}", line).map_err(|e| format!("write: {}", e))?;
         }
         Ok(())
     }

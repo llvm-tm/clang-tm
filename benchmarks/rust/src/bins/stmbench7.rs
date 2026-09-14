@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tm::{TmCell, Transaction, transaction, tm_init, tm_exit, tm_init_thread, tm_exit_thread};
+use tm::{tm_exit, tm_exit_thread, tm_init, tm_init_thread, transaction, TmCell, Transaction};
 
 // ── Spec constants (§2: medium OO7 size) ─────────────────────────
 const FANOUT: usize = 3;
@@ -12,8 +12,8 @@ const AP_PER_CP: usize = 200;
 const CONN_PER_AP: usize = 3;
 const MAX_BA: usize = 729;
 const MAX_CA: usize = 364;
-const MAX_AP: usize = MAX_CP * AP_PER_CP;  // 100,000
-const MAX_CONN: usize = MAX_AP * CONN_PER_AP;  // 300,000
+const MAX_AP: usize = MAX_CP * AP_PER_CP; // 100,000
+const MAX_CONN: usize = MAX_AP * CONN_PER_AP; // 300,000
 const MAX_DOCS: usize = MAX_CP;
 const MAX_CP_BA_BAG: usize = 5;
 
@@ -82,10 +82,16 @@ struct Module {
 struct Xsrng(u64);
 impl Xsrng {
     fn new(seed: u64) -> Self {
-        Self(seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407))
+        Self(
+            seed.wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407),
+        )
     }
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 33
     }
     fn range(&mut self, lo: usize, hi: usize) -> usize {
@@ -119,7 +125,10 @@ impl Database {
         let _rng = Xsrng::new(42);
 
         let mut modules = Vec::new();
-        modules.push(Module { id: 0, root_assembly_id: 0 });
+        modules.push(Module {
+            id: 0,
+            root_assembly_id: 0,
+        });
 
         // Pre-allocate assembly tree
         let capacity_ca = MAX_CA;
@@ -172,7 +181,9 @@ impl Database {
                 let parent_idx = parent_off + p;
                 for c in 0..FANOUT {
                     let child_idx = child_off + p * FANOUT + c;
-                    complex_assemblies[parent_idx].child_assembly_ids.push(child_idx);
+                    complex_assemblies[parent_idx]
+                        .child_assembly_ids
+                        .push(child_idx);
                     complex_assemblies[child_idx].parent_id = parent_idx as i32;
                 }
             }
@@ -192,7 +203,9 @@ impl Database {
                     composite_part_ids: Vec::new(),
                     valid: TmCell::new(1),
                 });
-                complex_assemblies[parent_idx].child_base_assembly_ids.push(ba_id as usize);
+                complex_assemblies[parent_idx]
+                    .child_base_assembly_ids
+                    .push(ba_id as usize);
                 ba_id += 1;
             }
         }
@@ -232,7 +245,9 @@ impl Database {
         }
 
         // Date index for CP (sorted for binary search)
-        let mut raw_idx: Vec<(i32, usize)> = composite_parts.iter().enumerate()
+        let mut raw_idx: Vec<(i32, usize)> = composite_parts
+            .iter()
+            .enumerate()
             .map(|(i, cp)| (unsafe { *cp.build_date.ptr() }, i))
             .collect();
         raw_idx.sort_by(|a, b| a.0.cmp(&b.0));
@@ -338,9 +353,13 @@ impl Database {
         while atomic_parts.len() < capacity_ap {
             atomic_parts.push(AtomicPart {
                 id: atomic_parts.len() as i32,
-                x: TmCell::new(0), y: TmCell::new(0), z: TmCell::new(0),
-                build_date: TmCell::new(0), weight: TmCell::new(0),
-                composite_part_id: -1, connection_ids: Vec::new(),
+                x: TmCell::new(0),
+                y: TmCell::new(0),
+                z: TmCell::new(0),
+                build_date: TmCell::new(0),
+                weight: TmCell::new(0),
+                composite_part_id: -1,
+                connection_ids: Vec::new(),
                 valid: TmCell::new(0),
             });
         }
@@ -348,14 +367,17 @@ impl Database {
         while connections.len() < capacity_conn {
             connections.push(Connection {
                 id: connections.len() as i32,
-                from_atomic_part_id: -1, to_atomic_part_id: -1,
-                conn_type: TmCell::new(0), valid: TmCell::new(0),
+                from_atomic_part_id: -1,
+                to_atomic_part_id: -1,
+                conn_type: TmCell::new(0),
+                valid: TmCell::new(0),
             });
         }
         while documents.len() < MAX_DOCS + MAX_CP {
             documents.push(Document {
                 id: documents.len() as i32,
-                doc_type: TmCell::new(0), build_date: TmCell::new(0),
+                doc_type: TmCell::new(0),
+                build_date: TmCell::new(0),
                 composite_part_id: -1,
             });
         }
@@ -445,7 +467,10 @@ fn op_lt5(db: &Database, tx: &Transaction) -> i64 {
     let mut sum = 0i64;
     for c in &db.connections {
         if tx.read(&c.valid) != 0 {
-            sum += c.id as i64 + c.from_atomic_part_id as i64 + c.to_atomic_part_id as i64 + tx.read(&c.conn_type) as i64;
+            sum += c.id as i64
+                + c.from_atomic_part_id as i64
+                + c.to_atomic_part_id as i64
+                + tx.read(&c.conn_type) as i64;
         }
     }
     sum
@@ -455,17 +480,25 @@ fn op_lt5(db: &Database, tx: &Transaction) -> i64 {
 
 fn op_st1(db: &Database, tx: &Transaction) -> i64 {
     let mut sum = 0i64;
-    if db.modules.is_empty() { return 0; }
+    if db.modules.is_empty() {
+        return 0;
+    }
     let mut ci = db.modules[0].root_assembly_id as usize;
     if ci < db.complex_assemblies.len() {
         sum += db.complex_assemblies[ci].id as i64;
     }
     for _l in 0..TREE_LEVELS - 1 {
-        if ci >= db.complex_assemblies.len() || db.complex_assemblies[ci].child_assembly_ids.is_empty() { break; }
+        if ci >= db.complex_assemblies.len()
+            || db.complex_assemblies[ci].child_assembly_ids.is_empty()
+        {
+            break;
+        }
         ci = db.complex_assemblies[ci].child_assembly_ids[0];
         sum += db.complex_assemblies[ci].id as i64;
     }
-    if ci < db.complex_assemblies.len() && !db.complex_assemblies[ci].child_base_assembly_ids.is_empty() {
+    if ci < db.complex_assemblies.len()
+        && !db.complex_assemblies[ci].child_base_assembly_ids.is_empty()
+    {
         let bi = db.complex_assemblies[ci].child_base_assembly_ids[0];
         if bi < db.base_assemblies.len() && tx.read(&db.base_assemblies[bi].valid) != 0 {
             sum += tx.read(&db.base_assemblies[bi].build_date) as i64;
@@ -481,8 +514,11 @@ fn op_st1(db: &Database, tx: &Transaction) -> i64 {
 }
 
 fn op_st2(db: &Database, tx: &Transaction, doc_idx: usize) -> i64 {
-    if doc_idx >= db.documents.len() { return 0; }
-    let mut sum = tx.read(&db.documents[doc_idx].build_date) as i64 + tx.read(&db.documents[doc_idx].doc_type) as i64;
+    if doc_idx >= db.documents.len() {
+        return 0;
+    }
+    let mut sum = tx.read(&db.documents[doc_idx].build_date) as i64
+        + tx.read(&db.documents[doc_idx].doc_type) as i64;
     let ci = db.documents[doc_idx].composite_part_id as usize;
     if ci < db.composite_parts.len() && tx.read(&db.composite_parts[ci].valid) != 0 {
         for &ai in &db.composite_parts[ci].atomic_part_ids {
@@ -495,9 +531,15 @@ fn op_st2(db: &Database, tx: &Transaction, doc_idx: usize) -> i64 {
 }
 
 fn op_st3(db: &Database, tx: &Transaction, ap_idx: usize) -> i64 {
-    if ap_idx >= db.atomic_parts.len() { return 0; }
-    if tx.read(&db.atomic_parts[ap_idx].valid) == 0 { return 0; }
-    let mut sum = (tx.read(&db.atomic_parts[ap_idx].x) + tx.read(&db.atomic_parts[ap_idx].y) + tx.read(&db.atomic_parts[ap_idx].z)) as i64;
+    if ap_idx >= db.atomic_parts.len() {
+        return 0;
+    }
+    if tx.read(&db.atomic_parts[ap_idx].valid) == 0 {
+        return 0;
+    }
+    let mut sum = (tx.read(&db.atomic_parts[ap_idx].x)
+        + tx.read(&db.atomic_parts[ap_idx].y)
+        + tx.read(&db.atomic_parts[ap_idx].z)) as i64;
     for &cid in &db.atomic_parts[ap_idx].connection_ids {
         if cid < db.connections.len() && tx.read(&db.connections[cid].valid) != 0 {
             let nb = if db.connections[cid].from_atomic_part_id == ap_idx as i32 {
@@ -516,7 +558,10 @@ fn op_st3(db: &Database, tx: &Transaction, ap_idx: usize) -> i64 {
 fn op_st4(db: &Database, tx: &Transaction, ca_idx: usize) {
     if ca_idx < db.complex_assemblies.len() {
         let d = tx.read(&db.complex_assemblies[ca_idx].build_date);
-        tx.write(&db.complex_assemblies[ca_idx].build_date, (d + 1) % 365 + 1000);
+        tx.write(
+            &db.complex_assemblies[ca_idx].build_date,
+            (d + 1) % 365 + 1000,
+        );
     }
 }
 
@@ -540,7 +585,9 @@ fn op_st6(db: &Database, tx: &Transaction, ap_idx: usize) {
 }
 
 fn op_st7(db: &Database, tx: &Transaction, cp_idx: usize) -> i32 {
-    if cp_idx >= db.composite_parts.len() || tx.read(&db.composite_parts[cp_idx].valid) == 0 { return 0; }
+    if cp_idx >= db.composite_parts.len() || tx.read(&db.composite_parts[cp_idx].valid) == 0 {
+        return 0;
+    }
     let mut max_w = 0i32;
     for &ai in &db.composite_parts[cp_idx].atomic_part_ids {
         if ai < db.atomic_parts.len() && tx.read(&db.atomic_parts[ai].valid) != 0 {
@@ -558,7 +605,9 @@ fn op_st8(db: &Database, tx: &Transaction, ba_idx: usize) {
 }
 
 fn op_st9(db: &Database, tx: &Transaction, cp_idx: usize) -> i64 {
-    if cp_idx >= db.composite_parts.len() || tx.read(&db.composite_parts[cp_idx].valid) == 0 { return 0; }
+    if cp_idx >= db.composite_parts.len() || tx.read(&db.composite_parts[cp_idx].valid) == 0 {
+        return 0;
+    }
     let mut sum = 0i64;
     for &ai in &db.composite_parts[cp_idx].atomic_part_ids {
         if ai < db.atomic_parts.len() && tx.read(&db.atomic_parts[ai].valid) != 0 {
@@ -569,7 +618,9 @@ fn op_st9(db: &Database, tx: &Transaction, cp_idx: usize) -> i64 {
 }
 
 fn op_st10(db: &Database, tx: &Transaction, cp_idx: usize) {
-    if cp_idx >= db.composite_parts.len() || tx.read(&db.composite_parts[cp_idx].valid) == 0 { return; }
+    if cp_idx >= db.composite_parts.len() || tx.read(&db.composite_parts[cp_idx].valid) == 0 {
+        return;
+    }
     let di = db.composite_parts[cp_idx].document_id as usize;
     if di < db.documents.len() {
         let d = tx.read(&db.documents[di].build_date);
@@ -581,50 +632,72 @@ fn op_st10(db: &Database, tx: &Transaction, cp_idx: usize) {
 
 fn op_op1(db: &Database, tx: &Transaction, id: usize) -> i64 {
     if id < db.atomic_parts.len() && tx.read(&db.atomic_parts[id].valid) != 0 {
-        (tx.read(&db.atomic_parts[id].x) + tx.read(&db.atomic_parts[id].y) + tx.read(&db.atomic_parts[id].z)) as i64
-    } else { 0 }
+        (tx.read(&db.atomic_parts[id].x)
+            + tx.read(&db.atomic_parts[id].y)
+            + tx.read(&db.atomic_parts[id].z)) as i64
+    } else {
+        0
+    }
 }
 
 fn op_op2(db: &Database, tx: &Transaction, id: usize) -> i64 {
     if id < db.composite_parts.len() && tx.read(&db.composite_parts[id].valid) != 0 {
         tx.read(&db.composite_parts[id].build_date) as i64
-    } else { 0 }
+    } else {
+        0
+    }
 }
 
 fn op_op3(db: &Database, tx: &Transaction, id: usize) -> i64 {
     if id < db.documents.len() {
         (tx.read(&db.documents[id].build_date) + tx.read(&db.documents[id].doc_type)) as i64
-    } else { 0 }
+    } else {
+        0
+    }
 }
 
 fn op_op4(db: &Database, tx: &Transaction, id: usize) -> i64 {
     if id < db.base_assemblies.len() && tx.read(&db.base_assemblies[id].valid) != 0 {
         tx.read(&db.base_assemblies[id].build_date) as i64
-    } else { 0 }
+    } else {
+        0
+    }
 }
 
 fn op_op5(db: &Database, tx: &Transaction, id: usize) -> i64 {
     if id < db.complex_assemblies.len() {
         tx.read(&db.complex_assemblies[id].build_date) as i64
-    } else { 0 }
+    } else {
+        0
+    }
 }
 
 fn op_op6(db: &Database, tx: &Transaction, ap_idx: usize) -> i64 {
     if ap_idx < db.atomic_parts.len() && tx.read(&db.atomic_parts[ap_idx].valid) != 0 {
-        (tx.read(&db.atomic_parts[ap_idx].x) + tx.read(&db.atomic_parts[ap_idx].y) + tx.read(&db.atomic_parts[ap_idx].z)) as i64
-    } else { 0 }
+        (tx.read(&db.atomic_parts[ap_idx].x)
+            + tx.read(&db.atomic_parts[ap_idx].y)
+            + tx.read(&db.atomic_parts[ap_idx].z)) as i64
+    } else {
+        0
+    }
 }
 
 fn op_op7(db: &Database, tx: &Transaction, cp_idx: usize) -> i64 {
     if cp_idx < db.composite_parts.len() && tx.read(&db.composite_parts[cp_idx].valid) != 0 {
         tx.read(&db.composite_parts[cp_idx].build_date) as i64
-    } else { 0 }
+    } else {
+        0
+    }
 }
 
-fn op_op8(db: &Database, _tx: &Transaction, _cp_idx: usize) -> i64 { 1 }
+fn op_op8(db: &Database, _tx: &Transaction, _cp_idx: usize) -> i64 {
+    1
+}
 
 fn op_op9(db: &Database, tx: &Transaction, cp_idx: usize) -> i64 {
-    if cp_idx >= db.composite_parts.len() || tx.read(&db.composite_parts[cp_idx].valid) == 0 { return 0; }
+    if cp_idx >= db.composite_parts.len() || tx.read(&db.composite_parts[cp_idx].valid) == 0 {
+        return 0;
+    }
     let mut sum = 0i64;
     for &ai in &db.composite_parts[cp_idx].atomic_part_ids {
         if ai < db.atomic_parts.len() && tx.read(&db.atomic_parts[ai].valid) != 0 {
@@ -637,7 +710,9 @@ fn op_op9(db: &Database, tx: &Transaction, cp_idx: usize) -> i64 {
 fn op_op10(db: &Database, tx: &Transaction, ap_idx: usize) -> usize {
     if ap_idx < db.atomic_parts.len() && tx.read(&db.atomic_parts[ap_idx].valid) != 0 {
         db.atomic_parts[ap_idx].connection_ids.len()
-    } else { 0 }
+    } else {
+        0
+    }
 }
 
 fn op_op11(db: &Database, tx: &Transaction, ap_idx: usize, nx: i32, ny: i32) {
@@ -676,7 +751,9 @@ fn op_op15(db: &Database, tx: &Transaction, ba_idx: usize, nd: i32) {
 fn op_sm1(db: &Database, tx: &Transaction, new_id: i32) {
     let slot = db.next_cp_slot.fetch_add(1, Ordering::Relaxed);
     let doc_slot = slot; // one doc per CP
-    if slot >= db.composite_parts.len() { return; }
+    if slot >= db.composite_parts.len() {
+        return;
+    }
     let cp = &db.composite_parts[slot];
     tx.write(&cp.valid, 1);
     tx.write(&cp.build_date, 2000);
@@ -706,10 +783,16 @@ fn op_sm2(db: &Database, tx: &Transaction, ci: usize) {
 }
 
 fn op_sm3(db: &Database, tx: &Transaction, cp_idx: usize) {
-    if cp_idx >= db.composite_parts.len() { return; }
-    if tx.read(&db.composite_parts[cp_idx].valid) == 0 { return; }
+    if cp_idx >= db.composite_parts.len() {
+        return;
+    }
+    if tx.read(&db.composite_parts[cp_idx].valid) == 0 {
+        return;
+    }
     let slot = db.next_ap_slot.fetch_add(1, Ordering::Relaxed);
-    if slot >= db.atomic_parts.len() { return; }
+    if slot >= db.atomic_parts.len() {
+        return;
+    }
     tx.write(&db.atomic_parts[slot].valid, 1);
     tx.write(&db.atomic_parts[slot].x, 0);
     tx.write(&db.atomic_parts[slot].y, 0);
@@ -725,9 +808,13 @@ fn op_sm4(db: &Database, tx: &Transaction, ai: usize) {
 }
 
 fn op_sm5(db: &Database, tx: &Transaction, from_ap: usize, to_ap: usize, typ: i32) {
-    if from_ap >= db.atomic_parts.len() || to_ap >= db.atomic_parts.len() { return; }
+    if from_ap >= db.atomic_parts.len() || to_ap >= db.atomic_parts.len() {
+        return;
+    }
     let slot = db.next_conn_slot.fetch_add(1, Ordering::Relaxed);
-    if slot >= db.connections.len() { return; }
+    if slot >= db.connections.len() {
+        return;
+    }
     tx.write(&db.connections[slot].valid, 1);
     tx.write(&db.connections[slot].conn_type, typ);
 }
@@ -739,10 +826,16 @@ fn op_sm6(db: &Database, tx: &Transaction, ci: usize) {
 }
 
 fn op_sm7(db: &Database, tx: &Transaction, parent_ca_idx: usize) {
-    if parent_ca_idx >= db.complex_assemblies.len() { return; }
-    if db.complex_assemblies[parent_ca_idx].level as usize != TREE_LEVELS - 1 { return; }
+    if parent_ca_idx >= db.complex_assemblies.len() {
+        return;
+    }
+    if db.complex_assemblies[parent_ca_idx].level as usize != TREE_LEVELS - 1 {
+        return;
+    }
     let slot = db.next_ba_slot.fetch_add(1, Ordering::Relaxed);
-    if slot >= db.base_assemblies.len() { return; }
+    if slot >= db.base_assemblies.len() {
+        return;
+    }
     tx.write(&db.base_assemblies[slot].valid, 1);
     tx.write(&db.base_assemblies[slot].build_date, 2000);
 }
@@ -755,7 +848,12 @@ fn op_sm8(db: &Database, tx: &Transaction, bi: usize) {
 
 // ── Operation dispatch ──────────────────────────────────────────
 
-enum OpClass { LongTrav, ShortTrav, ShortOp, StructMod }
+enum OpClass {
+    LongTrav,
+    ShortTrav,
+    ShortOp,
+    StructMod,
+}
 
 struct OpDesc {
     cat: OpClass,
@@ -764,16 +862,27 @@ struct OpDesc {
 
 fn pick_operation(rng: &mut Xsrng, write_percent: i32) -> OpDesc {
     let r = rng.range(0, 100);
-    let cat = if r < 5 { OpClass::LongTrav }
-    else if r < 45 { OpClass::ShortTrav }
-    else if r < 90 { OpClass::ShortOp }
-    else { OpClass::StructMod };
+    let cat = if r < 5 {
+        OpClass::LongTrav
+    } else if r < 45 {
+        OpClass::ShortTrav
+    } else if r < 90 {
+        OpClass::ShortOp
+    } else {
+        OpClass::StructMod
+    };
 
     match cat {
-        OpClass::StructMod => OpDesc { cat, is_read: false },
+        OpClass::StructMod => OpDesc {
+            cat,
+            is_read: false,
+        },
         _ => {
             let want_read = (rng.range(0, 100) as i32) < (100 - write_percent);
-            OpDesc { cat, is_read: want_read }
+            OpDesc {
+                cat,
+                is_read: want_read,
+            }
         }
     }
 }
@@ -783,53 +892,109 @@ fn execute_op(db: &Database, tx: &Transaction, desc: &OpDesc, rng: &mut Xsrng) {
         OpClass::LongTrav => {
             if desc.is_read {
                 match rng.range(0, 3) {
-                    0 => { op_lt1(db, tx); }
-                    1 => { op_lt3(db, tx); }
-                    _ => { op_lt5(db, tx); }
+                    0 => {
+                        op_lt1(db, tx);
+                    }
+                    1 => {
+                        op_lt3(db, tx);
+                    }
+                    _ => {
+                        op_lt5(db, tx);
+                    }
                 }
             } else {
                 match rng.range(0, 2) {
-                    0 => { op_lt2(db, tx); }
-                    _ => { op_lt4(db, tx); }
+                    0 => {
+                        op_lt2(db, tx);
+                    }
+                    _ => {
+                        op_lt4(db, tx);
+                    }
                 }
             }
         }
         OpClass::ShortTrav => {
             if desc.is_read {
                 match rng.range(0, 5) {
-                    0 => { let di = rng.range(0, db.documents.len()); op_st2(db, tx, di); }
-                    1 => { let ai = rng.range(0, db.atomic_parts.len()); op_st3(db, tx, ai); }
+                    0 => {
+                        let di = rng.range(0, db.documents.len());
+                        op_st2(db, tx, di);
+                    }
+                    1 => {
+                        let ai = rng.range(0, db.atomic_parts.len());
+                        op_st3(db, tx, ai);
+                    }
                     2 => {
                         let lo = 1000 + rng.range(0, 100) as i32;
                         let hi = 1000 + 200 + rng.range(0, 100) as i32;
                         op_st5(db, tx, lo, hi);
                     }
-                    3 => { let ci = rng.range(0, db.composite_parts.len()); op_st7(db, tx, ci); }
-                    _ => { let ci = rng.range(0, db.composite_parts.len()); op_st9(db, tx, ci); }
+                    3 => {
+                        let ci = rng.range(0, db.composite_parts.len());
+                        op_st7(db, tx, ci);
+                    }
+                    _ => {
+                        let ci = rng.range(0, db.composite_parts.len());
+                        op_st9(db, tx, ci);
+                    }
                 }
             } else {
                 match rng.range(0, 5) {
-                    0 => { let ci = rng.range(0, db.complex_assemblies.len()); op_st4(db, tx, ci); }
-                    1 => { let ai = rng.range(0, db.atomic_parts.len()); op_st6(db, tx, ai); }
-                    2 => { let bi = rng.range(0, db.base_assemblies.len()); op_st8(db, tx, bi); }
-                    3 => { let ci = rng.range(0, db.composite_parts.len()); op_st10(db, tx, ci); }
-                    _ => { op_st1(db, tx); }
+                    0 => {
+                        let ci = rng.range(0, db.complex_assemblies.len());
+                        op_st4(db, tx, ci);
+                    }
+                    1 => {
+                        let ai = rng.range(0, db.atomic_parts.len());
+                        op_st6(db, tx, ai);
+                    }
+                    2 => {
+                        let bi = rng.range(0, db.base_assemblies.len());
+                        op_st8(db, tx, bi);
+                    }
+                    3 => {
+                        let ci = rng.range(0, db.composite_parts.len());
+                        op_st10(db, tx, ci);
+                    }
+                    _ => {
+                        op_st1(db, tx);
+                    }
                 }
             }
         }
         OpClass::ShortOp => {
             if desc.is_read {
                 match rng.range(0, 10) {
-                    0 => { op_op1(db, tx, rng.range(0, MAX_AP)); }
-                    1 => { op_op2(db, tx, rng.range(0, MAX_CP)); }
-                    2 => { op_op3(db, tx, rng.range(0, db.documents.len())); }
-                    3 => { op_op4(db, tx, rng.range(0, MAX_BA)); }
-                    4 => { op_op5(db, tx, rng.range(0, MAX_CA)); }
-                    5 => { op_op6(db, tx, rng.range(0, db.atomic_parts.len())); }
-                    6 => { op_op7(db, tx, rng.range(0, db.composite_parts.len())); }
-                    7 => { op_op8(db, tx, rng.range(0, db.composite_parts.len())); }
-                    8 => { op_op9(db, tx, rng.range(0, db.composite_parts.len())); }
-                    _ => { op_op10(db, tx, rng.range(0, db.atomic_parts.len())); }
+                    0 => {
+                        op_op1(db, tx, rng.range(0, MAX_AP));
+                    }
+                    1 => {
+                        op_op2(db, tx, rng.range(0, MAX_CP));
+                    }
+                    2 => {
+                        op_op3(db, tx, rng.range(0, db.documents.len()));
+                    }
+                    3 => {
+                        op_op4(db, tx, rng.range(0, MAX_BA));
+                    }
+                    4 => {
+                        op_op5(db, tx, rng.range(0, MAX_CA));
+                    }
+                    5 => {
+                        op_op6(db, tx, rng.range(0, db.atomic_parts.len()));
+                    }
+                    6 => {
+                        op_op7(db, tx, rng.range(0, db.composite_parts.len()));
+                    }
+                    7 => {
+                        op_op8(db, tx, rng.range(0, db.composite_parts.len()));
+                    }
+                    8 => {
+                        op_op9(db, tx, rng.range(0, db.composite_parts.len()));
+                    }
+                    _ => {
+                        op_op10(db, tx, rng.range(0, db.atomic_parts.len()));
+                    }
                 }
             } else {
                 match rng.range(0, 5) {
@@ -858,27 +1023,47 @@ fn execute_op(db: &Database, tx: &Transaction, desc: &OpDesc, rng: &mut Xsrng) {
         }
         OpClass::StructMod => {
             match rng.range(0, 8) {
-                0 => { let nid = (MAX_CP + rng.range(0, 1000)) as i32; op_sm1(db, tx, nid); }
-                1 => { let ci = rng.range(0, db.composite_parts.len()); op_sm2(db, tx, ci); }
-                2 => { let ci = rng.range(0, db.composite_parts.len()); op_sm3(db, tx, ci); }
-                3 => { let ai = rng.range(0, db.atomic_parts.len()); op_sm4(db, tx, ai); }
+                0 => {
+                    let nid = (MAX_CP + rng.range(0, 1000)) as i32;
+                    op_sm1(db, tx, nid);
+                }
+                1 => {
+                    let ci = rng.range(0, db.composite_parts.len());
+                    op_sm2(db, tx, ci);
+                }
+                2 => {
+                    let ci = rng.range(0, db.composite_parts.len());
+                    op_sm3(db, tx, ci);
+                }
+                3 => {
+                    let ai = rng.range(0, db.atomic_parts.len());
+                    op_sm4(db, tx, ai);
+                }
                 4 => {
                     let a = rng.range(0, db.atomic_parts.len());
                     let b = rng.range(0, db.atomic_parts.len());
                     op_sm5(db, tx, a, b, rng.range_i32(0, 3));
                 }
-                5 => { let ci = rng.range(0, db.connections.len()); op_sm6(db, tx, ci); }
+                5 => {
+                    let ci = rng.range(0, db.connections.len());
+                    op_sm6(db, tx, ci);
+                }
                 6 => {
                     // Find a leaf CA (level TREE_LEVELS-1)
                     for _ in 0..100 {
                         let idx = rng.range(0, db.complex_assemblies.len());
-                        if idx < db.complex_assemblies.len() && db.complex_assemblies[idx].level as usize == TREE_LEVELS - 1 {
+                        if idx < db.complex_assemblies.len()
+                            && db.complex_assemblies[idx].level as usize == TREE_LEVELS - 1
+                        {
                             op_sm7(db, tx, idx);
                             return;
                         }
                     }
                 }
-                _ => { let bi = rng.range(0, db.base_assemblies.len()); op_sm8(db, tx, bi); }
+                _ => {
+                    let bi = rng.range(0, db.base_assemblies.len());
+                    op_sm8(db, tx, bi);
+                }
             }
         }
     }
@@ -886,8 +1071,13 @@ fn execute_op(db: &Database, tx: &Transaction, desc: &OpDesc, rng: &mut Xsrng) {
 
 // ── Worker ──────────────────────────────────────────────────────
 
-fn worker(tid: usize, db: &Database, stop: &AtomicBool,
-          total_ops: &AtomicUsize, write_percent: i32) {
+fn worker(
+    tid: usize,
+    db: &Database,
+    stop: &AtomicBool,
+    total_ops: &AtomicUsize,
+    write_percent: i32,
+) {
     let rng_cell = RefCell::new(Xsrng::new((tid as u64) * 12345 + 42 + 1));
 
     while !stop.load(Ordering::Relaxed) {
@@ -910,9 +1100,18 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-d" if i + 1 < args.len() => { i += 1; duration_ms = args[i].parse().unwrap_or(10000); }
-            "-t" if i + 1 < args.len() => { i += 1; nb_threads = args[i].parse().unwrap_or(4); }
-            "-w" if i + 1 < args.len() => { i += 1; workload = args[i].parse().unwrap_or(1); }
+            "-d" if i + 1 < args.len() => {
+                i += 1;
+                duration_ms = args[i].parse().unwrap_or(10000);
+            }
+            "-t" if i + 1 < args.len() => {
+                i += 1;
+                nb_threads = args[i].parse().unwrap_or(4);
+            }
+            "-w" if i + 1 < args.len() => {
+                i += 1;
+                workload = args[i].parse().unwrap_or(1);
+            }
             _ => {}
         }
         i += 1;
@@ -925,16 +1124,26 @@ fn main() {
     };
 
     println!("STMbench7 — Rust TM API (full 45-op spec)");
-    println!("Workload: {} ({}% read, {}% write)", workload, 100 - write_percent, write_percent);
+    println!(
+        "Workload: {} ({}% read, {}% write)",
+        workload,
+        100 - write_percent,
+        write_percent
+    );
     println!("Duration: {} ms  Threads: {}", duration_ms, nb_threads);
 
     tm_init();
 
     let db = Arc::new(Database::new());
-    println!("  CA: {}  BA: {}  CP: {}  AP: {}  Conn: {}  Docs: {}",
-             db.complex_assemblies.len(), db.base_assemblies.len(),
-             db.composite_parts.len(), db.atomic_parts.len(),
-             db.connections.len(), db.documents.len());
+    println!(
+        "  CA: {}  BA: {}  CP: {}  AP: {}  Conn: {}  Docs: {}",
+        db.complex_assemblies.len(),
+        db.base_assemblies.len(),
+        db.composite_parts.len(),
+        db.atomic_parts.len(),
+        db.connections.len(),
+        db.documents.len()
+    );
 
     let stop = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicUsize::new(0));
@@ -954,7 +1163,9 @@ fn main() {
     std::thread::sleep(Duration::from_millis(duration_ms));
     stop.store(true, Ordering::Relaxed);
 
-    for h in handles { h.join().unwrap(); }
+    for h in handles {
+        h.join().unwrap();
+    }
 
     let total = total_ops.load(Ordering::Relaxed);
     let elapsed = duration_ms as f64 / 1000.0;
@@ -966,7 +1177,15 @@ fn main() {
     println!("Elapsed:   {:.1}s", elapsed);
     println!("Total ops: {}", total);
     println!("Throughput: {:.0} txns/sec", total as f64 / elapsed);
-    println!("TM aborts: {} ({:.1}%)", aborts, if total > 0 { aborts as f64 / total as f64 * 100.0 } else { 0.0 });
+    println!(
+        "TM aborts: {} ({:.1}%)",
+        aborts,
+        if total > 0 {
+            aborts as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        }
+    );
 
     tm_exit();
     println!("PASS");

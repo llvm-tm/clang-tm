@@ -1,3 +1,8 @@
+#include "NOrec_globals.hpp"
+#include "tm_alloc_overrides.hpp"
+#include "tm_backend_macros.hpp"
+#include "tm_hooks.hpp"
+#include "tm_thread_state.hpp"
 #include <atomic>
 #include <cassert>
 #include <csetjmp>
@@ -5,57 +10,56 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <unordered_set>
-#include <unistd.h>
 #include <mutex>
 #include <new>
-#include "NOrec_globals.hpp"
-#include "tm_alloc_overrides.hpp"
-#include "tm_thread_state.hpp"
-#include "tm_hooks.hpp"
-#include "tm_backend_macros.hpp"
+#include <unistd.h>
+#include <unordered_set>
 
 // Shared TLS variables (defined in tm_hooks.cpp, used by all backends)
 extern "C" {
-extern __thread int32_t    tm_nested_call_counter;
-extern __thread int32_t    tm_longjmp_ret;
+extern __thread int32_t tm_nested_call_counter;
+extern __thread int32_t tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;
 }
 
 // Debug: catch absurd operator new sizes with backtrace
 #ifndef NOREC_AS_WRAPPER
-void* operator new(size_t size) {
-    if (size > (1ULL << 42)) { // > 4TB
-        fprintf(stderr, "\nFATAL: operator new(%zu) called with absurd size!\n", size);
-        fflush(stderr);
-        stm::tm_backtrace_print(2);
-        _exit(1);
-    }
-    void* p = std::malloc(size);
-    if (!p) throw std::bad_alloc();
-    return p;
+void *operator new(size_t size)
+{
+	if (size > (1ULL << 42)) { // > 4TB
+		fprintf(stderr, "\nFATAL: operator new(%zu) called with absurd size!\n", size);
+		fflush(stderr);
+		stm::tm_backtrace_print(2);
+		_exit(1);
+	}
+	void *p = std::malloc(size);
+	if (!p)
+		throw std::bad_alloc();
+	return p;
 }
-void* operator new[](size_t size) {
-    if (size > (1ULL << 42)) {
-        fprintf(stderr, "\nFATAL: operator new[](%zu) called with absurd size!\n", size);
-        fflush(stderr);
-        stm::tm_backtrace_print(2);
-        _exit(1);
-    }
-    void* p = std::malloc(size);
-    if (!p) throw std::bad_alloc();
-    return p;
+void *operator new[](size_t size)
+{
+	if (size > (1ULL << 42)) {
+		fprintf(stderr, "\nFATAL: operator new[](%zu) called with absurd size!\n", size);
+		fflush(stderr);
+		stm::tm_backtrace_print(2);
+		_exit(1);
+	}
+	void *p = std::malloc(size);
+	if (!p)
+		throw std::bad_alloc();
+	return p;
 }
-void operator delete(void* p) noexcept { std::free(p); }
-void operator delete[](void* p) noexcept { std::free(p); }
-void operator delete(void* p, size_t) noexcept { std::free(p); }
-void operator delete[](void* p, size_t) noexcept { std::free(p); }
+void operator delete(void *p) noexcept { std::free(p); }
+void operator delete[](void *p) noexcept { std::free(p); }
+void operator delete(void *p, size_t) noexcept { std::free(p); }
+void operator delete[](void *p, size_t) noexcept { std::free(p); }
 #endif // !NOREC_AS_WRAPPER
 
 thread_local bool g_in_tx = false;
-thread_local FreeNode* g_deferred_frees = nullptr;
-thread_local std::unordered_set<void*> g_deferred_frees_set;
-thread_local SpecAlloc* g_spec_allocs = nullptr;
+thread_local FreeNode *g_deferred_frees = nullptr;
+thread_local std::unordered_set<void *> g_deferred_frees_set;
+thread_local SpecAlloc *g_spec_allocs = nullptr;
 
 extern const TMRealHooks g_norec_hooks;
 
@@ -94,8 +98,8 @@ static void do_tm_exit();
 static void do_tm_init_thread();
 static void do_tm_exit_thread();
 
-void (*tm_init)()        = do_tm_init;
-void (*tm_exit)()        = do_tm_exit;
+void (*tm_init)() = do_tm_init;
+void (*tm_exit)() = do_tm_exit;
 void (*tm_init_thread)() = do_tm_init_thread;
 void (*tm_exit_thread)() = do_tm_exit_thread;
 
@@ -104,12 +108,13 @@ static void do_tm_init()
 void tm_init()
 #endif
 {
-    if (stm::tm_region_init() != 0) {
-        fprintf(stderr, "FATAL: tm_region_init() failed — TM address space unavailable\n");
-        std::abort();
-    }
-    norec::init();
-    tm_register_real_hooks(&g_norec_hooks);
+	if (stm::tm_region_init() != 0) {
+		fprintf(stderr,
+		        "FATAL: tm_region_init() failed — TM address space unavailable\n");
+		std::abort();
+	}
+	norec::init();
+	tm_register_real_hooks(&g_norec_hooks);
 }
 
 #ifdef LLVM_TM_PLUGIN
@@ -118,8 +123,8 @@ static void do_tm_exit()
 void tm_exit()
 #endif
 {
-    norec::exit();
-    stm::tm_region_destroy();
+	norec::exit();
+	stm::tm_region_destroy();
 }
 
 #ifdef LLVM_TM_PLUGIN
@@ -141,11 +146,12 @@ static void do_tm_exit_thread()
 #else
 void tm_exit_thread()
 #endif
-{ tm_hook_exit_thread(); norec::exit_thread(); }
-
-static void *real_tm_get_thread_state() {
-    return (void*)&tm_nested_call_counter;
+{
+	tm_hook_exit_thread();
+	norec::exit_thread();
 }
+
+static void *real_tm_get_thread_state() { return (void *)&tm_nested_call_counter; }
 
 static std::recursive_mutex g_serialize_mutex;
 
@@ -155,11 +161,11 @@ void tm_serialize_unlock() { g_serialize_mutex.unlock(); }
 
 int tm_serialize_unlock_all()
 {
-    if (g_serialize_mutex.try_lock()) {
-        g_serialize_mutex.unlock();
-        return 1;
-    }
-    return 0;
+	if (g_serialize_mutex.try_lock()) {
+		g_serialize_mutex.unlock();
+		return 1;
+	}
+	return 0;
 }
 
 int tm_setjmp()
@@ -168,8 +174,6 @@ int tm_setjmp()
 	// Just return 0 to satisfy the linker
 	return 0;
 }
-
-
 
 void tm_set_env(sigjmp_buf *env)
 {
@@ -210,34 +214,40 @@ static void real_tm_end()
 TM_DEFINE_READ_WRITE_HOOKS_WITH_I8_CAST(norec, static_cast<uint64_t>(v))
 
 // TM allocator stubs.
-static void* real_tm_malloc(size_t size) {
-    void* p = stm::tm_region_malloc(size);
-    std::memset(p, 0, size);
-    return tm_track_alloc_result(p, size);
+static void *real_tm_malloc(size_t size)
+{
+	void *p = stm::tm_region_malloc(size);
+	std::memset(p, 0, size);
+	return tm_track_alloc_result(p, size);
 }
-static void* real_tm_calloc(size_t nmemb, size_t size) {
-    void* p = stm::tm_region_malloc(nmemb * size);
-    std::memset(p, 0, nmemb * size);
-    return tm_track_alloc_result(p, nmemb * size);
+static void *real_tm_calloc(size_t nmemb, size_t size)
+{
+	void *p = stm::tm_region_malloc(nmemb * size);
+	std::memset(p, 0, nmemb * size);
+	return tm_track_alloc_result(p, nmemb * size);
 }
-static void* real_tm_realloc(void* ptr, size_t size) {
-    if (!ptr) return real_tm_malloc(size);
-    void* p = stm::tm_region_malloc(size);
-    if (p) {
-        std::memcpy(p, ptr, size);
-        stm::tm_region_free(ptr);
-    }
-    return tm_track_alloc_result(p, size);
+static void *real_tm_realloc(void *ptr, size_t size)
+{
+	if (!ptr)
+		return real_tm_malloc(size);
+	void *p = stm::tm_region_malloc(size);
+	if (p) {
+		std::memcpy(p, ptr, size);
+		stm::tm_region_free(ptr);
+	}
+	return tm_track_alloc_result(p, size);
 }
-static void  real_tm_free(void* ptr) {
-    if (!ptr || !stm::isTMAddress(ptr)) return;
-    TM_EVENT(FREE, ptr, 0);
-    if (g_in_tx) {
-        norec::tm_write_i1(reinterpret_cast<uint8_t*>(ptr), 0);
-        tm_free_append_deferred(ptr);
-    } else {
-        stm::tm_region_free(ptr);
-    }
+static void real_tm_free(void *ptr)
+{
+	if (!ptr || !stm::isTMAddress(ptr))
+		return;
+	TM_EVENT(FREE, ptr, 0);
+	if (g_in_tx) {
+		norec::tm_write_i1(reinterpret_cast<uint8_t *>(ptr), 0);
+		tm_free_append_deferred(ptr);
+	} else {
+		stm::tm_region_free(ptr);
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════════

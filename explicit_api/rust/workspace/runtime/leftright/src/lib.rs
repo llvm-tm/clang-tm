@@ -175,7 +175,9 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 fn write_word<T: Primitive>(addr: usize, val: T) {
     fence(Ordering::SeqCst);
     if !tx_active() {
-        unsafe { (addr as *mut T).write(val); }
+        unsafe {
+            (addr as *mut T).write(val);
+        }
         return;
     }
 
