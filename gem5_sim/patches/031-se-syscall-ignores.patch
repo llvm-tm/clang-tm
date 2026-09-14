@@ -1,0 +1,13 @@
+diff --git a/src/arch/x86/linux/syscall_tbl64.cc b/src/arch/x86/linux/syscall_tbl64.cc
+index 8914afd2a6..fc31c798da 100644
+--- a/src/arch/x86/linux/syscall_tbl64.cc
++++ b/src/arch/x86/linux/syscall_tbl64.cc
+@@ -288,7 +288,7 @@ SyscallDescTable<EmuLinux::SyscallABI64> EmuLinux::syscallDescs64 = {
+     {227, "clock_settime"},
+     {228, "clock_gettime", clock_gettimeFunc<X86Linux64>},
+     {229, "clock_getres", clock_getresFunc<X86Linux64>},
+-    {230, "clock_nanosleep"},
++    {230, "clock_nanosleep", ignoreWarnOnceFunc},
+     {231, "exit_group", exitGroupFunc},
+     {232, "epoll_wait"},
+     {233, "epoll_ctl"},

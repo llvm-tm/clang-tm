@@ -62,6 +62,10 @@ def parse_args():
                    help="timing = cycle-accurate; atomic = fast functional check")
     p.add_argument("--env", action="append", default=[],
                    help="guest env var, KEY=VALUE (repeatable), e.g. TM_TRACE_PATH=...")
+    p.add_argument("--raw-args", default=None,
+                   help="space-separated guest argv, verbatim; overrides the "
+                        "bank-style -a/-t/-r/-n synthesis (for fuzz_counter "
+                        "positional args, intruder -p/-a/-l/-n/-s, ...)")
     p.add_argument("--max-ticks", type=int, default=0,
                    help="abort simulation after this many ticks (0 = unlimited); "
                         "1 tick = 1 ps, so 1e12 ticks = 1 s of simulated time "
@@ -112,12 +116,15 @@ board = SimpleBoard(
     cache_hierarchy=cache_hierarchy,
 )
 
-bench_args = ["-a", str(args.accounts), "-t", str(args.threads),
-              "-r", str(args.read_all)]
-if args.txns > 0:
-    bench_args += ["-n", str(args.txns)]
+if args.raw_args is not None:
+    bench_args = args.raw_args.split()
 else:
-    bench_args += ["-d", str(args.duration)]
+    bench_args = ["-a", str(args.accounts), "-t", str(args.threads),
+                  "-r", str(args.read_all)]
+    if args.txns > 0:
+        bench_args += ["-n", str(args.txns)]
+    else:
+        bench_args += ["-d", str(args.duration)]
 
 import m5
 from pathlib import Path

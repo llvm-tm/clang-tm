@@ -1,8 +1,8 @@
 diff --git a/src/arch/x86/insts/htmruby.cc b/src/arch/x86/insts/htmruby.cc
-index cf88d6c6b6..aaaaed2f4c 100644
+index cf88d6c6b6..42f118e1ab 100644
 --- a/src/arch/x86/insts/htmruby.cc
 +++ b/src/arch/x86/insts/htmruby.cc
-@@ -49,21 +49,36 @@ XBeginInst::completeAcc(PacketPtr pkt, ExecContext *xc,
+@@ -49,21 +49,42 @@ XBeginInst::completeAcc(PacketPtr pkt, ExecContext *xc,
                          trace::InstRecord *traceData) const
  {
      Fault fault = NoFault;
@@ -41,11 +41,17 @@ index cf88d6c6b6..aaaaed2f4c 100644
  
      if (fault == NoFault) {
 -        Dest64 = 0;
-+        Dest64 = 0; // _XBEGIN_STARTED = 0xffffffff in Intel, but gem5 uses 0 for success (checked as ==0)
++        // Intel ABI: XBEGIN writes _XBEGIN_STARTED (-1, i.e. 0xFFFFFFFF in
++        // EAX) on success and an abort reason on failure. Unmodified real
++        // binaries (e.g. TSXSGL) check `status == _XBEGIN_STARTED`; the
++        // previous gem5 convention (0) made that check fail and silently
++        // forced every transaction to the SGL fallback, so no TSX was
++        // ever exercised. Match Intel so real RTM code runs unmodified.
++        Dest64 = 0xFFFFFFFF;
  
          if (htm_depth == 1) {
              BaseHTMCheckpointPtr& cpt = xc->tcBase()->getHtmCheckpointPtr();
-@@ -90,8 +105,12 @@ XEndInst::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
+@@ -90,8 +111,12 @@ XEndInst::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
      Fault fault = NoFault;
      const uint64_t htm_depth = xc->getHtmTransactionalDepth();
  
@@ -59,7 +65,7 @@ index cf88d6c6b6..aaaaed2f4c 100644
  
      if (fault == NoFault) {
          Request::Flags memAccessFlags =
-@@ -114,6 +133,9 @@ XEndInst::completeAcc(PacketPtr pkt, ExecContext *xc,
+@@ -114,6 +139,9 @@ XEndInst::completeAcc(PacketPtr pkt, ExecContext *xc,
      ThreadContext *tc = xc->tcBase();
      const uint64_t htm_depth = xc->getHtmTransactionalDepth();
  
@@ -69,7 +75,7 @@ index cf88d6c6b6..aaaaed2f4c 100644
      getMemLE(pkt, Mem, traceData);
  
      if (Mem != 0)
-@@ -164,7 +186,8 @@ XAbortInst::completeAcc(PacketPtr pkt, ExecContext *xc,
+@@ -164,7 +192,8 @@ XAbortInst::completeAcc(PacketPtr pkt, ExecContext *xc,
      if (fault == NoFault) {
          fault = std::make_shared<GenericHtmFailureFault>(
              xc->getHtmTransactionUid(),
@@ -155,10 +161,23 @@ index 67ae69237e..4fb96e35ab 100644
  
      cpu->ppDataAccessComplete->notify(std::make_pair(inst, pkt));
 diff --git a/src/cpu/simple/timing.cc b/src/cpu/simple/timing.cc
-index dcc88e7a1f..beefbe4460 100644
+index dcc88e7a1f..facab4a096 100644
 --- a/src/cpu/simple/timing.cc
 +++ b/src/cpu/simple/timing.cc
-@@ -1027,20 +1027,19 @@ TimingSimpleCPU::completeDataAccess(PacketPtr pkt)
+@@ -308,7 +308,11 @@ TimingSimpleCPU::sendData(const RequestPtr &req, uint8_t *data, uint64_t *res,
+     // to abort a transaction, the packet should reflect that it is
+     // transactional and also contain a HtmUid for debugging.
+     const bool is_htm_speculative = t_info.inHtmTransactionalState();
+-    if (is_htm_speculative || req->isHTMAbort()) {
++    // HTM_START must carry the new htmUid even though the CPU has not
++    // entered the transactional state yet (depth increments only after the
++    // start is acknowledged). Without the stamp the Ruby L0cache adopts
++    // uid 0 and the subsequent HTM_Commit mismatches htmVerifyUid.
++    if (is_htm_speculative || req->isHTMAbort() || req->isHTMStart()) {
+         pkt->setHtmTransactional(t_info.getHtmTransactionUid());
+     }
+     if (req->isHTMAbort())
+@@ -1027,20 +1031,19 @@ TimingSimpleCPU::completeDataAccess(PacketPtr pkt)
  
      // shouldn't fail through stores because this would be inconsistent w/ O3
      // which cannot fault after the store has been sent to memory
@@ -190,7 +209,7 @@ index dcc88e7a1f..beefbe4460 100644
          if (htm_rc == HtmCacheFailure::FAIL_SELF) {
              fault = std::make_shared<GenericHtmFailureFault>(
                  t_info->getHtmTransactionUid(),
-@@ -1049,6 +1048,10 @@ TimingSimpleCPU::completeDataAccess(PacketPtr pkt)
+@@ -1049,6 +1052,10 @@ TimingSimpleCPU::completeDataAccess(PacketPtr pkt)
              fault = std::make_shared<GenericHtmFailureFault>(
                  t_info->getHtmTransactionUid(),
                  HtmFailureFaultCause::MEMORY);
