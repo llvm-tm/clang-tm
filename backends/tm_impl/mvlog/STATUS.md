@@ -2,4 +2,4 @@
 
 **Status:** `incubating`
 
-MVLog backend builds/tests in the sweep, but simulator coverage and broader stabilization remain open.
+MVLog builds/tests in the sweep and has Rust simulator coverage (`tm-sim --backend mvlog`); broader stabilization remains open.

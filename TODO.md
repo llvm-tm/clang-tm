@@ -112,6 +112,15 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   from reported numbers. Reopen as P1 only if they are promoted to real
   benchmarks with full algorithms.
 
+### TSC-TM/CSMV simulator coverage (remaining from review-02 S24)
+- **Files**: `explicit_api/rust/workspace/runtime/` (no `tsc_tm` or `csmv` crates yet), `simulator/Cargo.toml`, `simulator/src/backend.rs`
+- **Issue**: Review-02 S24 added MVLog simulator coverage and expanded fidelity
+  to 6 backends, but TSC-TM and CSMV cannot be simulated until Rust runtime
+  crates exist.
+- **Next step**: Port TSC-TM as a TL2-derived Rust runtime, or decide whether
+  CSMV should be simulated as a GPU/CPU variant before adding a simulator
+  backend.
+
 ### NOrec plugin-mode bypass (incomplete)
 - **File**: `backends/tm_impl/norec_bf/NOrec_BF.hpp`
 - **Issue**: `#ifdef LLVM_TM_PLUGIN` guards in `read_word_norec()` and
@@ -157,3 +166,4 @@ Items below were fixed and kept here for historical reference only.
 - [x] ROMULUS read-validate (fixed 2026-06-15)
 - [x] NOrec plugin-mode read/write bypass (fixed 2026-09-13, review-02 S01; NOrec.hpp earlier, NOrec_BF.hpp now)
 - [x] All 18 TLA+ backends pass safety invariants (fixed 2026-06-24)
+- [x] MVLog simulator coverage and 6-backend fidelity sweep (fixed 2026-09-17, review-02 S24 feasible scope)

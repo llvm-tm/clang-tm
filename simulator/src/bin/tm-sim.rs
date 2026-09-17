@@ -33,7 +33,7 @@ struct Cli {
     #[arg(short, long, default_value = "-")]
     trace: String,
 
-    /// Backend to use: norec, tl2, tinystm, romulus, swisstm, tsx-sim.
+    /// Backend to use: norec, tl2, tinystm, romulus, swisstm, mvlog, tsx-sim.
     #[arg(short, long, default_value = "norec")]
     backend: String,
 
@@ -67,7 +67,7 @@ fn main() {
     let cli = Cli::parse();
     let Some(backend) = Backend::from_name(&cli.backend) else {
         eprintln!(
-            "Unknown backend '{}'. Available: norec, tl2, tinystm, romulus, swisstm, tsx-sim",
+            "Unknown backend '{}'. Available: norec, tl2, tinystm, romulus, swisstm, mvlog, tsx-sim",
             cli.backend
         );
         std::process::exit(1);

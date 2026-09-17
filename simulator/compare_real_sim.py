@@ -41,14 +41,15 @@ SIM_BACKENDS = {
     "NOREC": "norec",
     "TL2": "tl2",
     "TINYSTM": "tinystm",
+    "SWISSTM": "swisstm",
+    "ROMULUS": "romulus",
+    "MVLOG": "mvlog",
 }
 
 # Additional C++ backends (timing + trace only, no sim comparison)
 CPP_ONLY_BACKENDS = [
-    "SWISSTM",
     "SGL",
     "LEFTRIGHT",
-    "ROMULUS",
     "XTM",
     # "SPHT",    # requires -mrtm (HW TM)
     # "TSXSGL",  # requires -mrtm
@@ -126,6 +127,9 @@ def build_cxx_flags(backend: str) -> tuple:
         "ROMULUS": {"defs": "-DTM_BACKEND_ROMULUS",
                     "extra_inc": f"-I{PROJECT_ROOT}/backends/tm_impl/romulus",
                     "runtime": f"{PROJECT_ROOT}/backends/tm_impl/romulus/romulus_runtime.cpp"},
+        "MVLOG":   {"defs": "-DTM_BACKEND_MVLOG",
+                    "extra_inc": f"-I{PROJECT_ROOT}/backends/tm_impl/mvlog",
+                    "runtime": f"{PROJECT_ROOT}/backends/tm_impl/mvlog/MVLog_runtime.cpp"},
         "XTM":     {"defs": "-DTM_BACKEND_XTM",
                     "extra_inc": f"-I{PROJECT_ROOT}/backends/tm_impl/xtm",
                     "runtime": f"{PROJECT_ROOT}/backends/tm_impl/xtm/xtm_runtime.cpp"},
@@ -595,7 +599,7 @@ def main():
                         mc, mc, ma, ma, "100.0%", "OK", f"events={model_res.get('trace_events',0)}")
 
         # Sim backends
-        for backend in ["norec", "tl2", "tinystm"]:
+        for backend in SIM_BACKENDS.values():
             print(f"\n── Rust {backend} (tm-sim) ──")
             sim_res = run_synthetic_sim(backend, args.threads)
             if "error" in sim_res:

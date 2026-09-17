@@ -493,7 +493,7 @@ The two-phase overhead (2× execution) is acceptable in async/queue settings whe
 
 **Algorithm:** A commit-log STM where every transaction negotiates its **commit position at `tm_begin()`** via one `fetch_add` on a global next-slot counter (`g_next`). The log is a single ever-growing append-only array of write-sets (like SPHT's PCL, but global and versioned). Per-address `index` entries point at the newest committed writer slot, and a **Bloom filter** (`g_dirty`, no false negatives) makes the read fast path a plain memory access.
 
-**Design status:** implemented in C++ (`backends/tm_impl/mvlog/`) and Rust (`runtime/mvlog/`); verified in TLA+ (safety) and against the test suite (`test_tx` 114/114, `test_ds` 207/207, fuzz_counter/fuzz_bank multi-thread PASS).
+**Design status:** implemented in C++ (`backends/tm_impl/mvlog/`) and Rust (`runtime/mvlog/`); simulator-enabled (`tm-sim --backend mvlog`); verified in TLA+ (safety) and against the test suite (`test_tx` 114/114, `test_ds` 207/207, fuzz_counter/fuzz_bank multi-thread PASS).
 
 **Design sketch:**
 - `tm_begin`: `slot = g_next.fetch_add(1)`; `g_log[slot].state = PROGRESS`.

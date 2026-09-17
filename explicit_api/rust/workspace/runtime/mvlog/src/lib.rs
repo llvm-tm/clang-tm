@@ -733,9 +733,7 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     });
 }
 
-// ── Public API ──────────────────────────────────────────
-pub fn tm_init() {
-    tm_install_tmx_hook();
+fn reset_shared_state() {
     G_NEXT.store(1, Ordering::Release);
     G_WM.store(0, Ordering::Release);
     G_COMMIT_LOCK.store(0, Ordering::Release);
@@ -743,6 +741,31 @@ pub fn tm_init() {
     bloom_clear();
     #[cfg(feature = "stats")]
     TM_STATS.reset();
+
+    for entry in G_LOG.iter() {
+        entry.state.store(LogState::Free as u64, Ordering::Relaxed);
+        entry.tag.store(0, Ordering::Relaxed);
+        entry.ws_count.store(0, Ordering::Relaxed);
+        for i in 0..KMAX_INLINE_WS {
+            entry.ws_addr[i].store(0, Ordering::Relaxed);
+            entry.ws_type[i].store(0, Ordering::Relaxed);
+            entry.ws_val[i].store(0, Ordering::Relaxed);
+        }
+        entry
+            .overflow
+            .store(core::ptr::null_mut(), Ordering::Relaxed);
+    }
+
+    for bucket in G_INDEX.iter() {
+        bucket.addr.store(0, Ordering::Relaxed);
+        bucket.slot.store(u64::MAX, Ordering::Relaxed);
+    }
+}
+
+// ── Public API ──────────────────────────────────────────
+pub fn tm_init() {
+    tm_install_tmx_hook();
+    reset_shared_state();
 }
 
 pub fn tm_exit() {}
@@ -892,14 +915,12 @@ pub mod sim {
         *map = states;
     }
 
-    /// Clear current thread's state (for reset between scenarios).
+    /// Clear all thread state and shared backend state (reset between scenarios).
     pub fn reset() {
-        let Some(tid) = runtime_core::try_current_sim_thread_id() else {
-            return;
-        };
         let store = sim_tx_store();
         let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
-        map.remove(&tid);
+        map.clear();
+        reset_shared_state();
     }
 
     /// Read the current stats snapshot and reset counters.

@@ -998,6 +998,80 @@ fn test_swisstm_thread_spawn() {
     assert_eq!(engine.stats.commits, 1, "SwissTM: spawned thread commits");
 }
 
+// ── MVLog backend integration ───────────────────────────
+
+#[serial]
+#[test]
+fn test_mvlog_simple_tx() {
+    let events = vec![
+        make_event(0, 0, 1, EventKind::ThreadSpawn(0)),
+        make_event(1, 0, 2, EventKind::TxBegin),
+        make_event(
+            2,
+            0,
+            3,
+            EventKind::Read {
+                addr: 0x7f00_0000_F400,
+                width: 8,
+            },
+        ),
+        make_event(
+            3,
+            0,
+            4,
+            EventKind::Write {
+                addr: 0x7f00_0000_F400,
+                width: 8,
+                val: 123,
+            },
+        ),
+        make_event(4, 0, 5, EventKind::TxEnd),
+    ];
+    let engine = run_events(Backend::Mvlog, &events);
+    assert_eq!(engine.stats.commits, 1, "MVLog: simple tx commits");
+    assert_eq!(engine.stats.aborts, 0);
+}
+
+#[serial]
+#[test]
+fn test_mvlog_conflict_detection() {
+    let events = conflict_events_different_values();
+    let engine = run_events(Backend::Mvlog, &events);
+    assert_eq!(engine.stats.commits, 1, "MVLog: conflict → abort");
+    assert_eq!(engine.stats.aborts, 1);
+}
+
+#[serial]
+#[test]
+fn test_mvlog_disjoint_no_conflict() {
+    let events = disjoint_access_events();
+    let engine = run_events(Backend::Mvlog, &events);
+    assert_eq!(engine.stats.commits, 2, "MVLog: disjoint → 2 commits");
+    assert_eq!(engine.stats.aborts, 0);
+}
+
+#[serial]
+#[test]
+fn test_mvlog_thread_spawn() {
+    let events = vec![
+        make_event(0, 0, 1, EventKind::ThreadSpawn(0)),
+        make_event(0, 1, 2, EventKind::ThreadSpawn(1)),
+        make_event(1, 1, 3, EventKind::TxBegin),
+        make_event(
+            2,
+            1,
+            4,
+            EventKind::Read {
+                addr: 0x7f00_0000_F500,
+                width: 8,
+            },
+        ),
+        make_event(3, 1, 5, EventKind::TxEnd),
+    ];
+    let engine = run_events(Backend::Mvlog, &events);
+    assert_eq!(engine.stats.commits, 1, "MVLog: spawned thread commits");
+}
+
 // ── Checkpoint roundtrip ───────────────────────────────────
 // Verify that checkpoint/restore produces identical results.
 #[serial]
@@ -1010,6 +1084,7 @@ fn test_checkpoint_roundtrip() {
         Backend::Tinystm,
         Backend::Romulus,
         Backend::Swisstm,
+        Backend::Mvlog,
     ] {
         mmap_tm_region();
 

@@ -2057,3 +2057,26 @@ DX/CI/docs hygiene items S10–S15.
   gates and `bench_*` files are local measurements.
 - Documented the same boundary in `benchmarks/plugin/README.md`, with new
   performance workloads normally living under `benchmarks/plugin/`.
+## Session 2026-09-17 — Review-02 S24: MVLog simulator coverage
+
+### S24 — Simulator backend coverage
+- Wired the existing Rust MVLog runtime into the deterministic simulator with
+  `Backend::Mvlog`, dispatch for lifecycle/typed read-write/checkpoint/reset
+  paths, and `mvlog`/`mv-log` CLI/backend aliases.
+- Added MVLog backend tests and integration scenarios for simple commits,
+  conflict detection, disjoint commits, thread spawn, thread isolation, reset,
+  checkpoint roundtrips, and cross-backend consistency.
+- Fixed repeated-scenario simulator hangs in MVLog by resetting shared log,
+  index, Bloom, counters, and commit-lock state during `tm_init()` and
+  `sim::reset()`.
+- Extended simulator cost/profile support with `BackendProfile::Mvlog` and
+  updated `tm-sim` help text to include the new backend.
+- Expanded fidelity coverage from 3 to 6 simulation backends in
+  `simulator/compare_real_sim.py` and `nightly.yml` (`NOREC`, `TL2`,
+  `TINYSTM`, `SWISSTM`, `ROMULUS`, `MVLOG`), and expanded the CI synthetic trace
+  fidelity sweep to include `mvlog`.
+- Expanded the CI push-main cross-backend sweep to include `NORECBF`, `TSC_TM`,
+  and `MVLOG`; expanded the nightly cross-backend sweep to 15 backends.
+- Updated simulator/developer docs, MVLog backend status, and `TODO.md` notes.
+  TSC-TM and CSMV simulator coverage remains open because no Rust runtime
+  crates exist for either backend.

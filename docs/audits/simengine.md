@@ -11,7 +11,7 @@
 | TLC config (sequential) | `docs/proofs/DESEngine-sequential.cfg` | 15 | LP={0}, Addr={0} |
 | Trace replay engine | `simulator/src/sim_engine.rs` | 686 | Real-backend trace replayer (cost mode + timestamp mode) |
 | DES engine | `simulator/src/engine.rs` | 357 | Pure DES engine: SimState, conflict detection, cost model |
-| Backend dispatch | `simulator/src/backend.rs` | 775 | Backend 6-way dispatch (Norec/Tl2/Tinystm/Romulus/Swisstm/TsxSim) |
+| Backend dispatch | `simulator/src/backend.rs` | 775 | Backend 7-way dispatch (Norec/Tl2/Tinystm/Romulus/Swisstm/Mvlog/TsxSim) |
 | Event types | `simulator/src/event.rs` | 77 | Event/EventKind definitions |
 | Verifier | `simulator/src/verifier.rs` | 500 | Shadow memory + correctness checks |
 | Computation profile | `simulator/src/computation_profile.rs` | 57 | Baseline wall-time parser |

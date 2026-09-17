@@ -293,6 +293,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-mvlog"
+version = "0.1.0"
+dependencies = [
+ "runtime-core",
+ "serde",
+]
+
+[[package]]
 name = "runtime-norec"
 version = "0.1.0"
 dependencies = [
@@ -453,6 +461,7 @@ dependencies = [
  "libc",
  "libloading",
  "runtime-core",
+ "runtime-mvlog",
  "runtime-norec",
  "runtime-romulus",
  "runtime-swisstm",

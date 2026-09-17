@@ -26,15 +26,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Build simulator (release)
         run: cargo build --release --manifest-path simulator/Cargo.toml
-      - name: Build C++ benchmarks for 3 sim backends
+      - name: Build C++ benchmarks for 6 sim backends
         run: |
-          for backend in NOREC TL2 TINYSTM; do
+          for backend in NOREC TL2 TINYSTM SWISSTM ROMULUS MVLOG; do
             make -C benchmarks/cpp -j4 BACKEND=$backend
           done
       - name: Run comparison
         run: |
           python3 simulator/compare_real_sim.py \
-            --backends NOREC,TL2,TINYSTM \
+            --backends NOREC,TL2,TINYSTM,SWISSTM,ROMULUS,MVLOG \
             --benchmarks bank,vacation,kmeans \
             --csv nightly_results.csv 2>&1
       - name: Fidelity gate (fail if avg fidelity < 50%)
@@ -74,10 +74,10 @@ jobs:
             llvm-toolchain-jammy-22 main"
           sudo apt-get update
           sudo apt-get install -y llvm-22-dev clang-22 lld make
-      - name: Build and test all 10 backends
+      - name: Build and test all 15 backends
         run: |
           echo "backend,test_tx,test_ds" > cross_backend_results.csv
-          for backend in TINYSTM WBETL WT NOREC SWISSTM TL2 SGL XTM LEFTRIGHT ROMULUS; do
+          for backend in TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL LEFTRIGHT ROMULUS XTM SPHT TSXSGL; do
             make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=$backend 2>/dev/null
             ./benchmarks/cpp/bin/test_tx > /dev/null 2>&1 && tx="PASS" || tx="FAIL"
             ./benchmarks/cpp/bin/test_ds > /dev/null 2>&1 && ds="PASS" || ds="FAIL"

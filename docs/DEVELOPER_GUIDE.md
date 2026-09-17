@@ -165,7 +165,7 @@ Pipeline: `collect → clone → redirect → instrument-fn → cleanup`
 - **Hooks**: All C++ backends register via `TMRealHooks` struct (22 function pointers). Hooks must be `static` to avoid TEXT-vs-DATA symbol conflicts.
 - **Allocation**: `tm_region_malloc` allocates from a fixed mmap'd region. Inside transactions, `tm_track_spec_alloc` adds to the speculative allocation list (cleared on abort).
 - **TLS**: Three shared TLS variables (`tm_jmpbuf`, `tm_nested_call_counter`, `tm_longjmp_ret`) defined in `tm_hooks.cpp`.
-- **Simulation**: Rust backends gate thread-local state behind `#[cfg(feature = "simulation")]` — replaces `thread_local!` with `SyncUnsafeCell<HashMap<u64, State>>`. No `Mutex` needed since the simulator is single-threaded. Currently enabled for: norec, tl2, tinystm, romulus, swisstm.
+- **Simulation**: Rust backends gate thread-local state behind `#[cfg(feature = "simulation")]` — replaces `thread_local!` with `SyncUnsafeCell<HashMap<u64, State>>`. No `Mutex` needed since the simulator is single-threaded. Currently enabled for: norec, tl2, tinystm, romulus, swisstm, mvlog, tsx_sim.
 - **Checkpoint/Restore**: `sim_snapshot_bytes()` / `sim_restore_bytes()` serialize per-thread backend state via `bincode` for deterministic replay.
 - **Adding sim to a new backend**: `pub TxState` (Clone + Serialize + Deserialize) + `#[cfg(feature = "simulation")]` variants of `with_tx`/`tx_active`/`flush_tx` + `pub mod sim` with 7 exported functions. See `runtime/norec/src/lib.rs` for the canonical pattern.
 

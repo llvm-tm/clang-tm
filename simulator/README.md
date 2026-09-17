@@ -1,12 +1,12 @@
 # TM Discrete Event Simulator
 
-Replays TM traces through both a software-TM model and real TM backends (NOrec, TL2, TinySTM) for correctness checking and synchronization statistics.
+Replays TM traces through both a software-TM model and real TM backends (NOrec, TL2, TinySTM, SwissTM, Romulus, MVLog, TSX-SIM) for correctness checking and synchronization statistics.
 
 ## Tools
 
 | Binary | Purpose |
 |--------|---------|
-| `tm-sim` | Replays traces through a **real TM backend** (NOrec/TL2/TinySTM) with verifier and deadlock detection |
+| `tm-sim` | Replays traces through a **real TM backend** (NOrec/TL2/TinySTM/SwissTM/Romulus/MVLog/TSX-SIM) with verifier and deadlock detection |
 | `tm-des` | Full discrete-event simulation engine with checkpoint/restore, live lock detection, opacity checks |
 | `tm-check` | Fast trace replayer — validates against a model and collects statistics |
 | `tm-gen` | Generates TM bank-scenario traces for validation |
@@ -23,6 +23,10 @@ cargo run --release --bin tm-gen -- --scenario all -o /tmp/trace.jsonl
 cargo run --release --bin tm-sim -- --backend norec --trace /tmp/trace.jsonl
 cargo run --release --bin tm-sim -- --backend tl2 --trace /tmp/trace.jsonl
 cargo run --release --bin tm-sim -- --backend tinystm --trace /tmp/trace.jsonl
+cargo run --release --bin tm-sim -- --backend swisstm --trace /tmp/trace.jsonl
+cargo run --release --bin tm-sim -- --backend romulus --trace /tmp/trace.jsonl
+cargo run --release --bin tm-sim -- --backend mvlog --trace /tmp/trace.jsonl
+cargo run --release --bin tm-sim -- --backend tsx-sim --trace /tmp/trace.jsonl
 
 # Replay trace through the DES model
 cargo run --release --bin tm-des -- --trace /tmp/trace.jsonl
@@ -183,7 +187,7 @@ Simulation mode uses a thread-ID multiplexing layer (`sim_tx_store`) instead of 
 
 ## Rust vs C++ backend comparison
 
-The Rust backends (under `runtime-norec`, `runtime-tl2`, `runtime-tinystm`) are reimplementations of the C++ backends (under `backends/tm_impl/`). The simulator enables direct comparison:
+The Rust backends (under `runtime-norec`, `runtime-tl2`, `runtime-tinystm`, `runtime-romulus`, `runtime-swisstm`, `runtime-mvlog`, and `runtime-tsx-sim`) are reimplementations or models of the C++ backends (under `backends/tm_impl/`). The simulator enables direct comparison:
 
 - Same trace + same backend algorithm → should produce same commit/abort behavior
 - Any divergence indicates a bug in Rust vs C++ translation

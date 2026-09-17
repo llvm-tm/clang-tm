@@ -60,7 +60,7 @@ jobs:
       - name: Generate synthetic trace
         run: simulator/target/debug/tm-gen > /tmp/synth_trace.jsonl
       - name: Synthetic trace fidelity check
-        run: python3 simulator/compare_sim.py --sim-only --cargo-profile debug --backends norec,tl2,tinystm,romulus,swisstm --trace /tmp/synth_trace.jsonl 2>&1
+        run: python3 simulator/compare_sim.py --sim-only --cargo-profile debug --backends norec,tl2,tinystm,romulus,swisstm,mvlog --trace /tmp/synth_trace.jsonl 2>&1
 
   # ── Job 3: Rust workspace build ────────────────────────
   rust-build:
@@ -122,7 +122,7 @@ jobs:
         run: |
           # PRs gate on 3 core backends (fast); push to main tests all.
           if [ "${{ github.event_name }}" = "push" ]; then
-            BACKENDS="TINYSTM WBETL WT NOREC SWISSTM TL2 SGL XTM LEFTRIGHT ROMULUS"
+            BACKENDS="TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL XTM LEFTRIGHT ROMULUS"
           else
             BACKENDS="TINYSTM NOREC TL2"
           fi
