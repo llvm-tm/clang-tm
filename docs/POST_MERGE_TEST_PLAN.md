@@ -117,7 +117,7 @@ make check-all            # 17 backends: TINYSTM WBETL WT NOREC NORECBF SWISSTM
 ## 5. Simulator (touched by merge: `verifier.rs`, Cargo.toml)
 
 - [ ] `cargo build --manifest-path simulator/Cargo.toml`
-- [ ] `cargo test --manifest-path simulator/Cargo.toml -- --test-threads=1`
+- [ ] `cargo test --manifest-path simulator/Cargo.toml`
       (26 integration tests; `sim_engine_test.rs` + `tsx_ground_truth.rs`)
 - [ ] `cargo test -p tm-sim` (SimEngine driver)
 - [ ] verifier regression: replay a real trace through `tm-sim --backend norec`,

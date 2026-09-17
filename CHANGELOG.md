@@ -1749,7 +1749,7 @@ write `0xFFFFFFFF` (Intel ABI). After rebuild, `bank_gem5_tsxsgl` t1 shows
 - `gem5_sim/scripts/run_gem5_sweep.py`, `parse_gem5_stats.py` — new
 - `gem5_sim/docs/x86-tsx-validation.md` — new validation report
 
-## Session 2026-09-13 — review-02 execution: correctness fixes + DX/CI/docs hygiene (S01–S08, S10–S16, S18–S20, S21–S23, S26–S28, S30, S31, S32)
+## Session 2026-09-13 — review-02 execution: correctness fixes + DX/CI/docs hygiene (S01–S08, S10–S20, S21–S23, S26–S28, S30, S31, S32)
 
 Continuing the `review-02/report.md` improvement plan. Correctness fixes
 S01–S06 (tracked in `TODO.md` + `docs/CORRECTNESS_FIXES.md` §9–12), then the
@@ -2004,6 +2004,19 @@ DX/CI/docs hygiene items S10–S15.
   `cargo-llvm-cov` for the Rust workspace and simulator.
 - Local ASan validation passed for NOREC: `test_tx` 114/114, `test_ds` 207/207,
   and `bank -t 4 -d 1000`.
+
+### S17 — Simulator `--test-threads=1` workaround
+- `SimEngine::init_at` now maps a kernel-chosen anonymous TM region, stores the
+  mapping base/size, and munmaps the region on drop after resetting backend
+  state. This removes the fixed `MAP_FIXED` base collision for `SimEngine`
+  instances.
+- Added `serial_test` and marked simulator backend/integration tests `#[serial]`
+  because the Rust runtime backends still keep global static clocks/locks per
+  backend type.
+- Removed the simulator `--test-threads=1` workaround from `make check-fast`,
+  CI, nightly coverage, `tools/post-merge-check.sh`, AGENTS/docs/PR templates.
+- Verified `cargo test --manifest-path simulator/Cargo.toml` passes with default
+  test threads (33 + 4 integration tests green).
 
 ### S18 — Supply-chain hygiene
 - Added `.github/dependabot.yml` with weekly GitHub Actions and Cargo

@@ -98,7 +98,7 @@ fi
 # ── §5 Simulator ───────────────────────────────────────────────────────────
 if run_section simulator; then
   step "§5 Simulator (tests, single-threaded)"
-  timeout "$SIM_T" cargo test --manifest-path simulator/Cargo.toml -- --test-threads=1
+  timeout "$SIM_T" cargo test --manifest-path simulator/Cargo.toml
 fi
 
 # ── §8 merge-integrity sweep ───────────────────────────────────────────────

@@ -17,6 +17,7 @@
 //       overlap case is the relevant oracle: one writer must abort.
 //       Our fix changes WW from "both abort" to "other abort only".
 
+use serial_test::serial;
 use tm_des::backend::Backend;
 use tm_des::event::{Event, EventKind};
 use tm_des::sim_engine::SimEngine;
@@ -53,6 +54,7 @@ fn run(backend: Backend, events: &[Event]) -> SimEngine {
 
 const LINE: u64 = 0x7f00_0000_8000;
 
+#[serial]
 #[test]
 fn tsx_rr_both_commit() {
     // No writes -> no conflict, both must commit. Disable spurious for determinism.
@@ -90,6 +92,7 @@ fn tsx_rr_both_commit() {
     assert_eq!(eng.stats.aborts, 0, "RR: no aborts");
 }
 
+#[serial]
 #[test]
 fn tsx_rw_reader_aborts() {
     std::env::set_var("TSX_SIM_SPURIOUS_RATE", "0");
@@ -129,6 +132,7 @@ fn tsx_rw_reader_aborts() {
     );
 }
 
+#[serial]
 #[test]
 fn tsx_ww_first_committer_wins() {
     std::env::set_var("TSX_SIM_SPURIOUS_RATE", "0");
@@ -167,6 +171,7 @@ fn tsx_ww_first_committer_wins() {
     );
 }
 
+#[serial]
 #[test]
 fn tsx_spurious_rate_sanity() {
     std::env::set_var("TSX_SIM_SPURIOUS_RATE", "0.000006");

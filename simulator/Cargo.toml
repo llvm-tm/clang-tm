@@ -21,6 +21,9 @@ runtime-tsx-sim = { path = "../explicit_api/rust/workspace/runtime/tsx_sim", fea
 libc = "0.2"
 libloading = "0.8"
 
+[dev-dependencies]
+serial_test = "3"
+
 [[bin]]
 name = "tm-des"
 path = "src/bin/tm-des.rs"

@@ -351,6 +351,7 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::sync::atomic::AtomicU64;
     use std::sync::OnceLock;
 
@@ -409,34 +410,40 @@ mod tests {
 
     // ── Backend parsing ────────────────────────────────────
 
+    #[serial]
     #[test]
     fn test_backend_from_name_norec() {
         assert_eq!(Backend::from_name("norec"), Some(Backend::Norec));
         assert_eq!(Backend::from_name("no-rec"), Some(Backend::Norec));
     }
 
+    #[serial]
     #[test]
     fn test_backend_from_name_tl2() {
         assert_eq!(Backend::from_name("tl2"), Some(Backend::Tl2));
         assert_eq!(Backend::from_name("TL2"), Some(Backend::Tl2));
     }
 
+    #[serial]
     #[test]
     fn test_backend_from_name_tinystm() {
         assert_eq!(Backend::from_name("tinystm"), Some(Backend::Tinystm));
     }
 
+    #[serial]
     #[test]
     fn test_backend_from_name_romulus() {
         assert_eq!(Backend::from_name("romulus"), Some(Backend::Romulus));
     }
 
+    #[serial]
     #[test]
     fn test_backend_from_name_swisstm() {
         assert_eq!(Backend::from_name("swisstm"), Some(Backend::Swisstm));
         assert_eq!(Backend::from_name(""), None);
     }
 
+    #[serial]
     #[test]
     fn test_backend_name() {
         assert_eq!(Backend::Norec.name(), "norec");
@@ -447,11 +454,13 @@ mod tests {
 
     // ── NOrec backend simulation ──────────────────────────
 
+    #[serial]
     #[test]
     fn test_norec_simple_tx() {
         run_simple_tx(Backend::Norec);
     }
 
+    #[serial]
     #[test]
     fn test_norec_commit_without_tx() {
         let tid = alloc_tid();
@@ -463,6 +472,7 @@ mod tests {
         Backend::Norec.sim_clear_thread_id();
     }
 
+    #[serial]
     #[test]
     fn test_norec_abort_without_tx() {
         let tid = alloc_tid();
@@ -474,6 +484,7 @@ mod tests {
         Backend::Norec.sim_clear_thread_id();
     }
 
+    #[serial]
     #[test]
     fn test_norec_read_write_u8() {
         let tid = alloc_tid();
@@ -496,11 +507,13 @@ mod tests {
 
     // ── TL2 backend simulation ─────────────────────────────
 
+    #[serial]
     #[test]
     fn test_tl2_simple_tx() {
         run_simple_tx(Backend::Tl2);
     }
 
+    #[serial]
     #[test]
     fn test_tl2_commit_without_tx() {
         let tid = alloc_tid();
@@ -512,6 +525,7 @@ mod tests {
         Backend::Tl2.sim_clear_thread_id();
     }
 
+    #[serial]
     #[test]
     fn test_tl2_abort_without_tx() {
         let tid = alloc_tid();
@@ -523,6 +537,7 @@ mod tests {
         Backend::Tl2.sim_clear_thread_id();
     }
 
+    #[serial]
     #[test]
     fn test_tl2_read_write_u16() {
         let tid = alloc_tid();
@@ -545,6 +560,7 @@ mod tests {
 
     // ── TinySTM backend simulation ────────────────────────
 
+    #[serial]
     #[test]
     fn test_tinystm_simple_tx() {
         let tid = alloc_tid();
@@ -575,11 +591,13 @@ mod tests {
 
     // ── ROMULUS backend simulation ────────────────────────
 
+    #[serial]
     #[test]
     fn test_romulus_simple_tx() {
         run_simple_tx(Backend::Romulus);
     }
 
+    #[serial]
     #[test]
     fn test_romulus_commit_without_tx() {
         let tid = alloc_tid();
@@ -591,6 +609,7 @@ mod tests {
         Backend::Romulus.sim_clear_thread_id();
     }
 
+    #[serial]
     #[test]
     fn test_romulus_abort_without_tx() {
         let tid = alloc_tid();
@@ -602,6 +621,7 @@ mod tests {
         Backend::Romulus.sim_clear_thread_id();
     }
 
+    #[serial]
     #[test]
     fn test_romulus_read_write_u32() {
         let tid = alloc_tid();
@@ -624,6 +644,7 @@ mod tests {
 
     // ── SwissTM backend simulation ────────────────────────
 
+    #[serial]
     #[test]
     fn test_swisstm_simple_tx() {
         let tid = alloc_tid();
@@ -652,6 +673,7 @@ mod tests {
         b.sim_clear_thread_id();
     }
 
+    #[serial]
     #[test]
     fn test_swisstm_commit_without_tx() {
         let tid = alloc_tid();
@@ -663,6 +685,7 @@ mod tests {
         Backend::Swisstm.sim_clear_thread_id();
     }
 
+    #[serial]
     #[test]
     fn test_swisstm_abort_without_tx() {
         let tid = alloc_tid();
@@ -674,6 +697,7 @@ mod tests {
         Backend::Swisstm.sim_clear_thread_id();
     }
 
+    #[serial]
     #[test]
     fn test_swisstm_read_write_u8() {
         let tid = alloc_tid();
@@ -696,6 +720,7 @@ mod tests {
 
     // ── Cross-backend consistency ─────────────────────────
 
+    #[serial]
     #[test]
     fn test_all_backends_produce_identical_commits() {
         mmap_tm_region();
@@ -723,6 +748,7 @@ mod tests {
 
     // ── Simulation thread isolation ───────────────────────
 
+    #[serial]
     #[test]
     fn test_thread_isolation() {
         mmap_tm_region();
@@ -766,6 +792,7 @@ mod tests {
 
     // ── Sim reset ─────────────────────────────────────────
 
+    #[serial]
     #[test]
     fn test_sim_reset_clears_state() {
         mmap_tm_region();
@@ -796,6 +823,7 @@ mod tests {
 
     // ── Checkpoint/restore ────────────────────────────────
 
+    #[serial]
     #[test]
     fn test_romulus_checkpoint_restore() {
         mmap_tm_region();

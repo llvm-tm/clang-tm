@@ -19,7 +19,7 @@ make help              # list all targets (default target)
 
 - Build/test a single backend: `make -C benchmarks/cpp bin/test_tx BACKEND=NOREC`
 - Plugin tests: `make -C plugin run`
-- Simulator: `cd simulator && cargo test -- --test-threads=1`
+- Simulator: `cd simulator && cargo test`
 - Rust workspace: `cd explicit_api/rust/workspace && cargo test --features wbctl -p tm`
 
 ## Where to log work (important)
@@ -76,7 +76,7 @@ Start at [`docs/README.md`](docs/README.md) (index of all docs). Key entries:
 - Plugin change → `make -C plugin run`.
 - Rust change → `cargo test` in the affected crate (use `--test-threads=1` for
   the workspace `tm` crate to avoid a pre-existing Condvar race).
-- Simulator change → `cd simulator && cargo test -- --test-threads=1`.
+- Simulator change → `cd simulator && cargo test`.
 
 ## Do not
 

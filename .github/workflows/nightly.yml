@@ -173,4 +173,4 @@ jobs:
       - name: Coverage — Rust workspace
         run: cargo llvm-cov --manifest-path explicit_api/rust/workspace/Cargo.toml --features wbctl -p tm -- --test-threads=1
       - name: Coverage — simulator
-        run: cargo llvm-cov --manifest-path simulator/Cargo.toml -- --test-threads=1
+        run: cargo llvm-cov --manifest-path simulator/Cargo.toml

@@ -104,6 +104,10 @@ pub struct SimEngine {
     /// to SGL after TSX retry exhaustion. Affects cost accounting:
     /// TxEnd uses sgl_end_cost instead of tx_end_cost.
     sgl_mode: HashMap<u64, bool>,
+    /// Kernel-chosen mapped TM region base (0 when no region is mapped).
+    mapped_base: u64,
+    /// Size of the mapped TM region in bytes.
+    mapped_size: usize,
 }
 
 impl SimEngine {
@@ -128,6 +132,22 @@ impl SimEngine {
             addr_addend: 0,
             pending_begins: VecDeque::new(),
             sgl_mode: HashMap::new(),
+            mapped_base: 0,
+            mapped_size: 0,
+        }
+    }
+
+    fn unmap_region(&mut self) {
+        if self.mapped_size == 0 {
+            return;
+        }
+
+        let base = self.mapped_base as *mut libc::c_void;
+        let size = self.mapped_size;
+        self.mapped_base = 0;
+        self.mapped_size = 0;
+        unsafe {
+            libc::munmap(base, size);
         }
     }
 
@@ -168,7 +188,8 @@ impl SimEngine {
     }
 
     /// Initialize the backend and back the TM address space.
-    /// Uses the default fixed address (0x7f00_0000_0000).
+    /// Uses a kernel-chosen anonymous mapping and translates trace addresses
+    /// into that region via `addr_addend`.
     pub fn init(&mut self) {
         self.init_at(0x7f00_0000_0000 as *mut libc::c_void, 256 * 1024 * 1024);
     }
@@ -181,56 +202,39 @@ impl SimEngine {
     }
 
     /// Low-level initialization at a given address range.
-    /// Maps memory at the trace's expected address if possible, otherwise
-    /// maps at the default TM region and sets an address translation addend.
+    /// The requested trace address is translated into a kernel-chosen mmap so
+    /// multiple engines can coexist in the same process.
     pub fn init_at(&mut self, trace_addr: *mut libc::c_void, size: usize) {
-        // Map at the default TM region (safe — never overlaps process segments).
-        // The trace_addr computed from events may overlap the process stack
-        // or heap, so we always map at the safe default and translate.
-        let (mapped_base, addend) = unsafe {
+        unsafe {
+            let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
+            #[cfg(target_os = "linux")]
+            let flags = flags | libc::MAP_NORESERVE;
+
             let r = libc::mmap(
-                DEFAULT_TM_BASE as *mut libc::c_void,
+                std::ptr::null_mut(),
                 size,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+                flags,
                 -1,
                 0,
             );
-            if r != libc::MAP_FAILED {
-                let addend = DEFAULT_TM_BASE as i64 - trace_addr as i64;
-                (DEFAULT_TM_BASE, addend)
-            } else {
-                // Fall back to kernel-chosen address.
-                let r = libc::mmap(
-                    std::ptr::null_mut(),
-                    size,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                    -1,
-                    0,
-                );
-                if r == libc::MAP_FAILED {
-                    panic!("mmap failed: {}", std::io::Error::last_os_error());
-                }
-                let addend = r as i64 - trace_addr as i64;
-                eprintln!(
-                    "  [sim] kernel-chosen mmap at {:p}, addend={:#x}",
-                    r, addend
-                );
-                (r as u64, addend)
+            if r == libc::MAP_FAILED {
+                panic!("mmap failed: {}", std::io::Error::last_os_error());
             }
-        };
 
-        self.addr_addend = addend;
+            let r = r as u64;
+            self.mapped_base = r;
+            self.mapped_size = size;
+            self.addr_addend = r as i64 - trace_addr as i64;
 
-        // Zero the mapped region so uninitialized reads return 0.
-        unsafe {
-            std::ptr::write_bytes(mapped_base as *mut u8, 0, size);
+            // Zero the mapped region so uninitialized reads return 0.
+            std::ptr::write_bytes(r as *mut u8, 0, size);
+
+            eprintln!(
+                "  [sim] kernel-chosen mmap at {:#x}, addend={:#x}, size={}",
+                r, self.addr_addend, size
+            );
         }
-        eprintln!(
-            "  [sim] addr_addend={:#x} mapped={:#x} size={}",
-            addend, mapped_base, size
-        );
 
         let b = self.backend;
         let tid0 = self.btid(0);
@@ -682,6 +686,13 @@ impl SimEngine {
         self.estimated_cycles = 0;
         self.pending_begins.clear();
         self.sgl_mode.clear();
+    }
+}
+
+impl Drop for SimEngine {
+    fn drop(&mut self) {
+        self.backend.sim_reset();
+        self.unmap_region();
     }
 }
 

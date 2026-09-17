@@ -191,8 +191,8 @@ The Rust backends (under `runtime-norec`, `runtime-tl2`, `runtime-tinystm`) are 
 
 ## Known limitations
 
-- **Global static state**: The Rust TM backends use `static` variables (`GLOBAL_LOCK`, `COMMIT_LOCK`, `G_CLOCK`). Running multiple `SimEngine` instances in the same process causes cross-contamination. Use `--test-threads=1` for test isolation. This is a fundamental limitation of the backend architecture.
-- **Linux-only mmap**: The TM address space is mapped at `0x7f00_0000_0000` via `MAP_FIXED`. This address is Linux x86_64-specific. macOS/Windows will likely fail. The C++ backends have the same limitation.
+- **Global static state**: The Rust TM backends use `static` variables (`GLOBAL_LOCK`, `COMMIT_LOCK`, `G_CLOCK`). Running multiple `SimEngine` instances for the same backend type in the same process can still cross-contaminate, so simulator tests that touch backend state are marked `#[serial]`.
+- **Linux-only mmap**: `SimEngine` maps an anonymous Linux mmap region for the simulated TM address space. macOS/Windows will likely fail. The C++ backends have the same limitation.
 - **Exact-address verification**: The verifier tracks allocations by base address only. Out-of-bounds or sub-offset accesses (e.g., `addr+4` within a 64-byte allocation) are not detected. Range-based verification would require an interval tree data structure.
 - **Money conservation**: Requires `--initial-values` to be specified (a JSON file mapping hex addresses to their initial values). Without it, the check is skipped. The bank scenarios in this repository do not embed initial values in the trace format.
 - **tm-des.output.jsonl**: The output file contains processed events in timestamp order. It is a debugging aid, not a stable output format. Field names and serialization may change.
@@ -201,7 +201,6 @@ The Rust backends (under `runtime-norec`, `runtime-tl2`, `runtime-tinystm`) are 
 ## Running tests
 
 ```sh
-cargo test                    # Unit + integration tests
-cargo test -- --test-threads=1  # If concurrent NOrec tests conflict
+cargo test                    # Unit + integration tests (default test threads)
 cargo test --test sim_engine_test  # Integration tests only
 ```

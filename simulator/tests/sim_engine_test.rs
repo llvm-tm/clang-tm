@@ -3,10 +3,11 @@
 // SimEngine, verify stats for both NOrec and TL2.
 //
 // NOTE: All backends use shared global state (GLOBAL_LOCK for NOrec,
-// LOCK_TABLE/COMMIT_LOCK/G_CLOCK for TL2, lock table for TinySTM),
-// so multiple SimEngine instances running in parallel produce false
-// conflicts. Requires `--test-threads=1`. All tests pass serially.
+// LOCK_TABLE/COMMIT_LOCK/G_CLOCK for TL2, lock table for TinySTM), so
+// backend-touching integration tests are marked #[serial] and may run
+// concurrently with other test binaries.
 
+use serial_test::serial;
 use tm_des::backend::Backend;
 use tm_des::event::{Event, EventKind};
 use tm_des::sim_engine::SimEngine;
@@ -46,6 +47,7 @@ fn make_event(ts: u64, tid: u32, seq: u64, kind: EventKind) -> Event {
 
 // ── Basic single-threaded transactions ──────────────────
 
+#[serial]
 #[test]
 fn test_simple_read_write_commit() {
     for b in [Backend::Norec, Backend::Tl2] {
@@ -79,6 +81,7 @@ fn test_simple_read_write_commit() {
     }
 }
 
+#[serial]
 #[test]
 fn test_read_only_transaction() {
     for b in [Backend::Norec, Backend::Tl2] {
@@ -115,6 +118,7 @@ fn test_read_only_transaction() {
     }
 }
 
+#[serial]
 #[test]
 fn test_abort_detected_outside_tx_read() {
     for b in [Backend::Norec, Backend::Tl2] {
@@ -137,6 +141,7 @@ fn test_abort_detected_outside_tx_read() {
     }
 }
 
+#[serial]
 #[test]
 fn test_abort_detected_outside_tx_write() {
     for b in [Backend::Norec, Backend::Tl2] {
@@ -218,6 +223,7 @@ fn conflict_events_same_value() -> Vec<Event> {
     ]
 }
 
+#[serial]
 #[test]
 fn test_idempotent_write_conflict_norec() {
     // NOrec value-based validation: same value = no conflict
@@ -230,6 +236,7 @@ fn test_idempotent_write_conflict_norec() {
     assert_eq!(engine.stats.aborts, 0);
 }
 
+#[serial]
 #[test]
 fn test_idempotent_write_conflict_tl2() {
     // TL2 version-based validation: T1 sees stale version → aborts
@@ -294,6 +301,7 @@ fn conflict_events_different_values() -> Vec<Event> {
     ]
 }
 
+#[serial]
 #[test]
 fn test_conflict_different_values_norec() {
     let events = conflict_events_different_values();
@@ -303,6 +311,7 @@ fn test_conflict_different_values_norec() {
     assert_eq!(engine.stats.aborts, 1);
 }
 
+#[serial]
 #[test]
 fn test_conflict_different_values_tl2() {
     let events = conflict_events_different_values();
@@ -365,6 +374,7 @@ fn disjoint_access_events() -> Vec<Event> {
     ]
 }
 
+#[serial]
 #[test]
 fn test_disjoint_access_no_conflict() {
     for b in [Backend::Norec, Backend::Tl2] {
@@ -382,6 +392,7 @@ fn test_disjoint_access_no_conflict() {
 
 // ── Verifier integration ───────────────────────────────
 
+#[serial]
 #[test]
 fn test_verifier_tracks_inside_tx_operations() {
     let events = vec![
@@ -415,6 +426,7 @@ fn test_verifier_tracks_inside_tx_operations() {
     assert!(engine.verifier.violations.is_empty());
 }
 
+#[serial]
 #[test]
 fn test_verifier_shadow_alloc_free_detection() {
     let events = vec![
@@ -450,6 +462,7 @@ fn test_verifier_shadow_alloc_free_detection() {
     assert!(engine.verifier.violations[0].contains("DOUBLE-FREE"));
 }
 
+#[serial]
 #[test]
 fn test_verifier_free_of_unallocated() {
     let events = vec![make_event(
@@ -465,6 +478,7 @@ fn test_verifier_free_of_unallocated() {
     assert!(engine.verifier.violations[0].contains("FREE of unallocated"));
 }
 
+#[serial]
 #[test]
 fn test_verifier_use_after_free() {
     let events = vec![
@@ -504,6 +518,7 @@ fn test_verifier_use_after_free() {
 
 // ── Scenario / checkpoint boundary ─────────────────────
 
+#[serial]
 #[test]
 fn test_scenario_boundary_reset() {
     for b in [Backend::Norec, Backend::Tl2] {
@@ -560,6 +575,7 @@ fn test_scenario_boundary_reset() {
 
 // ── Assert events ──────────────────────────────────────
 
+#[serial]
 #[test]
 fn test_assert_true_passes() {
     let events = vec![make_event(
@@ -574,6 +590,7 @@ fn test_assert_true_passes() {
     run_events(Backend::Norec, &events); // no panic
 }
 
+#[serial]
 #[test]
 fn test_assert_false_fails() {
     let events = vec![make_event(
@@ -591,6 +608,7 @@ fn test_assert_false_fails() {
 
 // ── Log events ─────────────────────────────────────────
 
+#[serial]
 #[test]
 fn test_log_event_does_not_crash() {
     let events = vec![make_event(
@@ -606,6 +624,7 @@ fn test_log_event_does_not_crash() {
 
 // ── Thread spawn/join ──────────────────────────────────
 
+#[serial]
 #[test]
 fn test_thread_spawn_initializes_thread() {
     let events = vec![
@@ -633,6 +652,7 @@ fn test_thread_spawn_initializes_thread() {
     }
 }
 
+#[serial]
 #[test]
 fn test_thread_join_does_not_crash() {
     let events = vec![
@@ -644,6 +664,7 @@ fn test_thread_join_does_not_crash() {
 
 // ─── various read/write widths ──────────────────────────
 
+#[serial]
 #[test]
 fn test_u8_read_write_width() {
     for b in [Backend::Norec, Backend::Tl2] {
@@ -675,6 +696,7 @@ fn test_u8_read_write_width() {
     }
 }
 
+#[serial]
 #[test]
 fn test_u16_read_write_width() {
     for b in [Backend::Norec, Backend::Tl2] {
@@ -706,6 +728,7 @@ fn test_u16_read_write_width() {
     }
 }
 
+#[serial]
 #[test]
 fn test_u32_read_write_width() {
     for b in [Backend::Norec, Backend::Tl2] {
@@ -737,6 +760,7 @@ fn test_u32_read_write_width() {
     }
 }
 
+#[serial]
 #[test]
 fn test_unsupported_read_width_errors() {
     let events = vec![
@@ -756,6 +780,7 @@ fn test_unsupported_read_width_errors() {
     let _engine = run_events(Backend::Norec, &events);
 }
 
+#[serial]
 #[test]
 fn test_unsupported_write_width_errors() {
     let events = vec![
@@ -780,6 +805,7 @@ fn test_unsupported_write_width_errors() {
 // addresses so validate() catches version changes from concurrent writers.
 // Rust TinySTM WBCTL omitted this, allowing lost updates when a write-only
 // address was modified by another transaction.
+#[serial]
 #[test]
 fn test_tinystm_write_only_conflict() {
     // T0: read A, write B=100. T1: write B=200.
@@ -847,6 +873,7 @@ fn test_tinystm_write_only_conflict() {
 
 // ── Romulus backend integration ──────────────────────────
 
+#[serial]
 #[test]
 fn test_romulus_simple_tx() {
     let events = vec![
@@ -878,6 +905,7 @@ fn test_romulus_simple_tx() {
     assert_eq!(engine.stats.aborts, 0);
 }
 
+#[serial]
 #[test]
 fn test_romulus_conflict_detection() {
     let events = conflict_events_different_values();
@@ -887,6 +915,7 @@ fn test_romulus_conflict_detection() {
     assert_eq!(engine.stats.aborts, 1);
 }
 
+#[serial]
 #[test]
 fn test_romulus_disjoint_no_conflict() {
     let events = disjoint_access_events();
@@ -897,6 +926,7 @@ fn test_romulus_disjoint_no_conflict() {
 
 // ── SwissTM backend integration ─────────────────────────
 
+#[serial]
 #[test]
 fn test_swisstm_simple_tx() {
     let events = vec![
@@ -928,6 +958,7 @@ fn test_swisstm_simple_tx() {
     assert_eq!(engine.stats.aborts, 0);
 }
 
+#[serial]
 #[test]
 fn test_swisstm_conflict_detection() {
     let events = conflict_events_different_values();
@@ -936,6 +967,7 @@ fn test_swisstm_conflict_detection() {
     assert_eq!(engine.stats.aborts, 1);
 }
 
+#[serial]
 #[test]
 fn test_swisstm_disjoint_no_conflict() {
     let events = disjoint_access_events();
@@ -944,6 +976,7 @@ fn test_swisstm_disjoint_no_conflict() {
     assert_eq!(engine.stats.aborts, 0);
 }
 
+#[serial]
 #[test]
 fn test_swisstm_thread_spawn() {
     let events = vec![
@@ -967,6 +1000,7 @@ fn test_swisstm_thread_spawn() {
 
 // ── Checkpoint roundtrip ───────────────────────────────────
 // Verify that checkpoint/restore produces identical results.
+#[serial]
 #[test]
 fn test_checkpoint_roundtrip() {
     use tm_des::checkpoint;

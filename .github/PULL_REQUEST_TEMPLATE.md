@@ -18,7 +18,7 @@
       - C++: `make -C benchmarks/cpp bin/test_tx BACKEND=<B>` + `bin/test_ds`
       - Plugin: `make -C plugin run`
       - Rust: `cargo test --features <name> -p tm -- --test-threads=1`
-      - Simulator: `cd simulator && cargo test -- --test-threads=1`
+      - Simulator: `cd simulator && cargo test`
 
 ## Notes
 

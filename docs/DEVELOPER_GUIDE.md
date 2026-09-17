@@ -83,7 +83,7 @@ cargo test --all-features -p runtime-romulus    # test with sim/serde/stats feat
 cd simulator
 cargo run -- tm-sim --backend norec --trace /tmp/trace.jsonl
 cargo run -- tm-gen --bank   # Generate synthetic traces
-cargo test -- --test-threads=1
+cargo test
 ```
 
 ### IDE / clangd
@@ -147,7 +147,7 @@ Pipeline: `collect → clone → redirect → instrument-fn → cleanup`
 | Data structure correctness | `make run-test-ds BACKEND=NOREC` | 207 |
 | All C++ backends | `make check-all` | 10 backends × 321 each |
 | Plugin tests | `make -C plugin run` | 50+ |
-| Simulator lib tests | `cargo test --lib -- --test-threads=1` | 60 (5 backends × ~12 each) |
+| Simulator lib tests | `cargo test --lib` | 60 (5 backends × ~12 each) |
 | Simulator integration | `cargo test --test sim_engine_test` | 26 |
 | Rust workspace | `cargo test --features wbctl` | 9 |
 

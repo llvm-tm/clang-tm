@@ -88,7 +88,7 @@ check-fast:
 		echo "  test_ds: $$(tail -1 /tmp/check-fast-$$be-ds.log)"; \
 	done
 	@echo "=== check-fast [3/4] Rust simulator tests ==="
-	cargo test --manifest-path simulator/Cargo.toml -- --test-threads=1
+	cargo test --manifest-path simulator/Cargo.toml
 	@echo "=== check-fast [4/4] Rust workspace tests ==="
 	cargo test --manifest-path explicit_api/rust/workspace/Cargo.toml -- --test-threads=1
 	@echo "=== check-fast: ALL PASSED ==="
