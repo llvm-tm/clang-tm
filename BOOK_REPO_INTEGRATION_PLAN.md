@@ -1,7 +1,7 @@
 # Book ↔ Repository Integration Plan
 
 **Date:** 2026-08-26
-**Status:** Draft
+**Status:** Items 1–3 substantially done (review-02 S24/S13, 2026-09-17); items 4–7 open
 **Goal:** Close the gap between the textbook (docs/book/) and the working code (the rest of the repo), so that a reader can go from any book concept to running code and back in ≤3 steps.
 
 ---
@@ -27,6 +27,15 @@
 
 ### 1. Repository Walkthrough Appendix (NEW: app09)
 
+> **Status (2026-09-17, review-02 S13): DONE.** `app09.tex` exists
+> (~9 pages, well under the 20-page cap) and now pulls its four key listings
+> directly from the live repo via `\lstinputlisting` (`NOrec_runtime.cpp`,
+> `tm_api.hpp` ×2, `bank.cpp`), so they cannot drift. A "Backend Directory Map"
+> section covers all 28 directories under `backends/tm_impl/` with `\rep{}` and
+> the production/incubating/experimental tiers from `backends/README.md`.
+> `docs/book/main.pdf` builds cleanly (`texlive-latex-extra` +
+> `texlive-pictures` + `listingsutf8`).
+
 **Problem.** A reader finishes the book and has no map of the actual repository. They know the theory but not where to find the code that implements it.
 
 **Deliverable.** New appendix `app09.tex`: "The Companion Repository — A Guided Walk"
@@ -45,6 +54,12 @@
 ---
 
 ### 2. Replace Textbook Listings with Real Repo Listings (ch01–ch19)
+
+> **Status (2026-09-17, review-02 S13): PARTIAL.** The S13 acceptance bar is met
+> (≥5 `\lstinputlisting`; there are 10, sourced live from the repo in `app09`
+> and from curated `docs/book/listings/*.rs` in `ch04`/`ch09`). The full
+> 15-listing `ch01–ch19` sweep below (notably `ch01:lst:transfer-basic`) is
+> **still open** and is not required by review-02.
 
 **Problem.** The book's 31 labeled listings are all written directly in the `.tex` files. They look like the code but aren't the code. A reader who copies a listing into an editor gets something that doesn't compile against the repo.
 
@@ -69,6 +84,12 @@
 ---
 
 ### 3. New Section: "The Hook System" (ch07 or ch08)
+
+> **Status (2026-09-17, review-02 S13): DONE (in app09).** The hook-system
+> walkthrough (`tm_hooks.cpp` registration/dispatch + the NOrec hook listing +
+> the DATA-vs-TEXT rationale) now lives in `app09` §"The Hook System" with
+> repo-sourced `\lstinputlisting`, which satisfies review-02. A dedicated
+> `sec:hook-system` inside ch07/ch08 remains optional.
 
 **Problem.** The hook system (`tm_hooks.cpp`, `tm_hooks.hpp`) is the central dispatch that connects all backends to all benchmarks. The book mentions `tm_begin`/`tm_end` as API calls but never shows the function-pointer table or explains how a backend registers.
 

@@ -10,6 +10,7 @@
 
 % --- Tables: middle-aligned body cells, bottom-aligned header cells ---
 \usepackage{array}
+\usepackage{booktabs}
 % M{width}: body cell, vertically centered, ragged-right
 \newcolumntype{M}[1]{>{\raggedright\arraybackslash}m{#1}}
 % \thb{width}{text}: header cell, vertically aligned to the bottom of the row
@@ -33,6 +34,7 @@
 
 % --- Code listings ---
 \usepackage{listings}
+\usepackage{listingsutf8}
 
 % --- Paragraph breaking: allow a third pass with extra stretch so that
 %     lines with long \texttt tokens (repo paths, identifiers) find a
@@ -58,6 +60,8 @@
     belowskip=8pt,
     commentstyle=\itshape,
     columns=fullflexible,
+    inputencoding=utf8,
+    keepspaces=true,
 }
 \lstset{style=bookcode}
 

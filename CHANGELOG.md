@@ -2099,3 +2099,27 @@ DX/CI/docs hygiene items S10–S15.
   `gem5_sim/docs/x86-tsx-validation.md`, `docs/REQUIREMENTS.md`, `TODO.md`.
 - Verification: `python3 -m compileall gem5_sim/scripts/run_gem5_sweep.py`;
   `run_gem5_sweep.py --help`; `pre-commit run --all-files` (all pass).
+
+## Session 2026-09-17 — Review-02 S13: Book ↔ repo integration (book listings)
+
+- Sourced `app09`'s four key listings live from the repo via `\lstinputlisting`
+  instead of hand-retyped abridgements, so they cannot drift:
+  `NOrec_runtime.cpp` (hook impls, 168-190), `tm_api.hpp` (TM<T> handle 97-117
+  + `transaction()` retry loop 153-166), and `bank.cpp` (`worker_thread`
+  lifecycle 164-203). Excerpt ranges chosen ASCII-only to avoid TeX Unicode
+  issues.
+- Added an `app09` "Backend Directory Map" section covering all 28
+  `backends/tm_impl/` directories via `\rep{}` with the
+  production/incubating/experimental tiers from `backends/README.md`.
+- `docs/book/main.tex`: loaded `booktabs` (tier tables) and `listingsutf8` +
+  `inputencoding=utf8`/`keepspaces` in the `bookcode` style so repo-sourced
+  listings compile.
+- Marked `BOOK_REPO_INTEGRATION_PLAN.md` items 1–3 done/partial (the full
+  `ch01–ch19` 15-listing sweep of item 2 remains open; not required by S13).
+- Files changed: `docs/book/main.tex`, `docs/book/sections/app09.tex`,
+  `BOOK_REPO_INTEGRATION_PLAN.md`.
+- Verification: `make -C docs/book` builds `main.pdf` (Appendix I spans pp.
+  294–302, <20 pages); `grep -c lstinputlisting docs/book/sections/*.tex` =
+  app09 4 + ch04 1 + ch09 5 = 10 (≥5); `app09.tex` has 79 distinct `\rep{}`
+  paths covering all backends; `pre-commit run` on the changed `.tex` passes.
+  Build toolchain: user-installed `texlive-latex-extra`/`texlive-pictures`.

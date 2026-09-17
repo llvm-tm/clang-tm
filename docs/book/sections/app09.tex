@@ -98,35 +98,7 @@ The system has three layers:
 Every backend follows the same pattern.  The NOrec runtime
 (\rep{backends/tm\_impl/norec/NOrec\_runtime.cpp}) is representative:
 
-\begin{lstlisting}[language=C++, caption={Hook registration in the NOrec backend (abridged).}]
-// 1. Static implementations of each hook
-static void real_tm_begin() {
-    if (tm_longjmp_ret == 0) {
-        tm_clear_spec_allocs();
-        tm_clear_deferred_frees();
-        g_in_tx = true;
-        norec::begin();
-    }
-}
-// ... real_tm_end, real_tm_read_i4, etc.
-
-// 2. Registration table (designated initializers)
-const TMRealHooks g_norec_hooks = {
-    .begin    = real_tm_begin,
-    .end      = real_tm_end,
-    .malloc   = real_tm_malloc,
-    .calloc   = real_tm_calloc,
-    .read_i4  = real_tm_read_i4,
-    .write_i4 = real_tm_write_i4,
-    // ... all 24 fields
-};
-
-// 3. Called from tm_init()
-void tm_init() {
-    norec::init();
-    tm_register_real_hooks(&g_norec_hooks);
-}
-\end{lstlisting}
+\lstinputlisting[language=C++, linerange=168-190, caption={NOrec hook implementations, straight from \rep{NOrec\_runtime.cpp}: \texttt{real\_tm\_begin}/\texttt{real\_tm\_end} are \texttt{static} and are collected into the \texttt{TMRealHooks} table registered at \texttt{tm\_init()}.}]{../../backends/tm_impl/norec/NOrec_runtime.cpp}
 
 The \texttt{TMRealHooks} struct (\rep{backends/tm\_impl/common/tm\_hooks.hpp:117})
 has 24 function-pointer fields covering lifecycle, memory, reads, writes,
@@ -168,26 +140,7 @@ class.  The header is
 
 \subsection{The TM<T> Class}
 
-\begin{lstlisting}[language=C++, caption={\texttt{TM<T>} -- the transactional memory handle.}]
-template<typename T>
-class TM {
-    T *value_ = nullptr;  // allocated via tm_malloc
-
-    T* ptr() {
-        if (!value_)
-            value_ = (T*)tm_malloc(sizeof(T));
-        return value_;
-    }
-public:
-    // ... lifecycle, read, write
-    T read() const {
-        return tm_type_traits<T>::read(const_cast<T*>(ptr()));
-    }
-    void write(const T &v) {
-        tm_type_traits<T>::write(ptr(), v);
-    }
-};
-\end{lstlisting}
+\lstinputlisting[language=C++, linerange=97-117, caption={\texttt{TM<T>} --- the transactional memory handle, from \rep{tm\_api.hpp}. The value is lazily allocated in the TM address space via \texttt{tm\_malloc}.}]{../../explicit_api/cpp/expli_tm_api/tm_api.hpp}
 
 \texttt{TM<T>} is a typed handle.  The value lives in the TM address
 space (allocated via \texttt{tm\_malloc}).  The
@@ -200,25 +153,10 @@ read-set/write-set tracking.
 
 \subsection{The Retry Loop}
 
-\texttt{TM<T>::transaction(body)} (\rep{explicit\_api/cpp/expli\_tm\_api/tm\_api.hpp:144})
+\texttt{TM<T>::transaction(body)} (\rep{explicit\_api/cpp/expli\_tm\_api/tm\_api.hpp:153})
 wraps the body in a \texttt{sigsetjmp}/\texttt{siglongjmp} retry loop:
 
-\begin{lstlisting}[language=C++, caption={Safe retry loop in \texttt{TM<T>::transaction}.}]
-template<typename F>
-static void transaction(F&& body) {
-    volatile bool done = false;
-    while (!done) {
-        sigsetjmp(tm_jmpbuf, 0);
-        tm_nested_call_counter = 1;
-        tm_set_jmpbuf(&tm_jmpbuf);
-        tm_begin();
-        body();
-        tm_end();
-        done = true;
-    }
-    tm_nested_call_counter = 0;
-}
-\end{lstlisting}
+\lstinputlisting[language=C++, linerange=153-166, caption={Safe retry loop in \texttt{TM<T>::transaction}, from \rep{tm\_api.hpp}.}]{../../explicit_api/cpp/expli_tm_api/tm_api.hpp}
 
 The \texttt{sigsetjmp} call lives in the same frame as the retry loop, so
 the \texttt{jmp\_buf} is always valid when \texttt{tm\_end} triggers an
@@ -233,28 +171,7 @@ already returned (\S\ref{sec:tls-retry-buffer-example}).
 The bank benchmark (\rep{benchmarks/cpp/bank/bank.cpp}) demonstrates the
 explicit API style:
 
-\begin{lstlisting}[language=C++, caption={Bank transfer and worker thread (abridged).}]
-void transfer(int src, int dst, int amount) {
-    run_tx([&]() {
-        int bal = g_bank->accounts[src].balance.read();
-        bal -= amount;
-        g_bank->accounts[src].balance.write(bal);
-
-        bal = g_bank->accounts[dst].balance.read();
-        bal += amount;
-        g_bank->accounts[dst].balance.write(bal);
-    });
-}
-
-void worker_thread(ThreadData &data) {
-    expli::TM<int>::thread_init();
-    // ... setup ...
-    while (!g_stop.load()) {
-        transfer(src, dst, 1);
-    }
-    expli::TM<int>::thread_exit();
-}
-\end{lstlisting}
+\lstinputlisting[language=C++, linerange=164-203, caption={Worker thread lifecycle from \rep{bank.cpp}: \texttt{thread\_init()}, the transaction loop (each iteration calls \texttt{transfer}/\texttt{total\_transactional}/\texttt{reset}, each of which runs \texttt{TM<T>::transaction}), then \texttt{thread\_exit()}.}]{../../benchmarks/cpp/bank/bank.cpp}
 
 The \texttt{transfer} function reads two balances, debits the source, and
 credits the destination, all inside one transaction.  The
@@ -363,6 +280,93 @@ count.
           with \texttt{--machine-profile} and \texttt{--clock-mode cost}
           to estimate throughput without hardware.
 \end{itemize}
+
+\section{Backend Directory Map}
+\label{sec:repo-backend-map}
+\index{backends!directory map}
+
+Every backend lives in its own directory under
+\rep{backends/tm\_impl/}.  The tiers below mirror the lifecycle table in
+\rep{backends/README.md}; \emph{experimental} entries are research
+scaffolds and should not be treated as stable.  Each entry pairs the
+directory with its PlusCal model under \rep{docs/proofs/} (see the
+traceability table in Chapter~6).
+
+\subsection{Production}
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+Directory & Notes \\
+\midrule
+\rep{backends/tm\_impl/tiny\_stm} & TinySTM (WBCTL/WBETL/WT via \texttt{-DDESIGN\_*}) \\
+\rep{backends/tm\_impl/tl2} & TL2 version-table OCC \\
+\rep{backends/tm\_impl/norec} & NOrec single-lock OCC \\
+\rep{backends/tm\_impl/norec\_bf} & NOrec + Bloom-filter read set \\
+\rep{backends/tm\_impl/swisstm} & SwissTM (hardware cache hints) \\
+\rep{backends/tm\_impl/single\_global\_lock} & SGL baseline \\
+\rep{backends/tm\_impl/tsx\_sgl} & Intel TSX + SGL fallback \\
+\rep{backends/tm\_impl/persistent\_sgl} & Persistent SGL (PM) \\
+\rep{backends/tm\_impl/xtm} & XTM page-private copy \\
+\rep{backends/tm\_impl/romulus} & Romulus (hardware-verified OCC) \\
+\rep{backends/tm\_impl/leftright} & Left/Right global-clock OCC \\
+\rep{backends/tm\_impl/spht} & SPHT group-commit persistent HTM \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Incubating}
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+Directory & Notes \\
+\midrule
+\rep{backends/tm\_impl/tsc\_tm} & TSC-TM (timestamp-counter OCC) \\
+\rep{backends/tm\_impl/mvlog} & MvLog multi-version commit log \\
+\rep{backends/tm\_impl/csmv} & CSMV (GPU multi-version) \\
+\rep{backends/tm\_impl/gpu\_stm} & GPU STM host/CPU path \\
+\rep{backends/tm\_impl/nvhtm} & NVIDIA HTM \\
+\rep{backends/tm\_impl/dudetm} & DudETM (fuzz/debug) \\
+\rep{backends/tm\_impl/distributed\_sgl} & Distributed SGL \\
+\rep{backends/tm\_impl/queue} & Async queue runtime \\
+\rep{backends/tm\_impl/jvstm} & JVSTM multi-version (VBox) \\
+\rep{backends/tm\_impl/tikv} & TiKV 2PC distributed \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Experimental}
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+Directory & Notes \\
+\midrule
+\rep{backends/tm\_impl/calvin} & Calvin deterministic two-phase OCC \\
+\rep{backends/tm\_impl/gacco} & Gacco transactional caches \\
+\rep{backends/tm\_impl/gputx} & GPUTX (GPU) \\
+\rep{backends/tm\_impl/power8\_htm} & POWER8 HTM (gem5) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Shared Infrastructure (not backends)}
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+Directory & Notes \\
+\midrule
+\rep{backends/tm\_impl/common} & Hook table, region allocator API, macros \\
+\rep{backends/tm\_impl/tm\_region\_allocator} & mmap TM region + deferred frees \\
+\bottomrule
+\end{tabular}
+\end{center}
 
 \section{Exercises}
 \label{sec:repo-exercises}
