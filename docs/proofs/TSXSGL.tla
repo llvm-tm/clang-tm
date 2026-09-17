@@ -187,10 +187,10 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "2f212a71" /\ chksum(tla) = "bef00627")
-VARIABLES pc, sgl, mem, mode, readSet, writeSet, txSnapshot, tsxRetries, 
+VARIABLES pc, sgl, mem, mode, readSet, writeSet, txSnapshot, tsxRetries,
           txCount, lastSignalFence, lastThreadFence, lastRmw, aborted, capacity
 
-vars == << pc, sgl, mem, mode, readSet, writeSet, txSnapshot, tsxRetries, 
+vars == << pc, sgl, mem, mode, readSet, writeSet, txSnapshot, tsxRetries,
             txCount, lastSignalFence, lastThreadFence, lastRmw, aborted, capacity >>
 
 ProcSet == (Thread)
@@ -271,7 +271,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                                /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                                                /\ UNCHANGED <<txCount, lastSignalFence, lastThreadFence>>
                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                    /\ UNCHANGED << mode, readSet, writeSet, 
+                                    /\ UNCHANGED << mode, readSet, writeSet,
                                                     txCount, aborted, lastSignalFence, lastThreadFence, lastRmw, capacity >>)
                          /\ UNCHANGED <<sgl, mem, tsxRetries>>
                       \/ /\ (IF mode[self] = "sgl"
@@ -312,7 +312,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                     /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                     /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                    /\ UNCHANGED << mode, readSet, writeSet, 
+                                    /\ UNCHANGED << mode, readSet, writeSet,
                                                     aborted, lastSignalFence, lastThreadFence, lastRmw, capacity >>)
                          /\ UNCHANGED <<sgl, mem, tsxRetries, txCount, lastSignalFence, lastThreadFence>>
                       \/ /\ (IF mode[self] = "tsx"
@@ -325,7 +325,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                     /\ pc' = [pc EXCEPT ![self] = "L_active"]
                                     /\ UNCHANGED << readSet, writeSet, txCount, lastSignalFence, lastThreadFence >>
                                ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                    /\ UNCHANGED << mode, readSet, writeSet, aborted, 
+                                    /\ UNCHANGED << mode, readSet, writeSet, aborted,
                                                     txCount, lastSignalFence, lastThreadFence, lastRmw, capacity >>)
                          /\ UNCHANGED <<sgl, mem, tsxRetries>>
                   /\ UNCHANGED txSnapshot
@@ -333,7 +333,7 @@ L_active(self) == /\ pc[self] = "L_active"
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << sgl, mem, mode, readSet, writeSet, txSnapshot, 
+                /\ UNCHANGED << sgl, mem, mode, readSet, writeSet, txSnapshot,
                                 tsxRetries, txCount, lastSignalFence, lastThreadFence, lastRmw, aborted, capacity >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_done(self)

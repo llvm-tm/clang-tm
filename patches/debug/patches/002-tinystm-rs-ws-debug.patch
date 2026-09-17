@@ -4,7 +4,7 @@ diff --git a/backends/tm_impl/tiny_stm/TinySTM_runtime.cpp b/backends/tm_impl/ti
 @@ -125,6 +125,12 @@ static void do_tm_exit()
  	fprintf(stdout, " aborts=%llu\n", (unsigned long long)ac);
  	fflush(stdout);
- 
+
 +#ifndef NDEBUG
 +	fprintf(stderr,
 +	        "\n=== TinySTM max read-set = %llu, max write-set = %llu ===\n",
@@ -17,7 +17,7 @@ diff --git a/backends/tm_impl/tiny_stm/TinySTM_runtime.cpp b/backends/tm_impl/ti
 @@ -193,6 +199,12 @@ void tm_exit()
  	fprintf(stdout, " aborts=%llu\n", (unsigned long long)ac);
  	fflush(stdout);
- 
+
 +#ifndef NDEBUG
 +	fprintf(stderr,
 +	        "\n=== TinySTM max read-set = %llu, max write-set = %llu ===\n",

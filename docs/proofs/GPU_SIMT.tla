@@ -286,8 +286,8 @@ end process;
 end algorithm; *)
 
 \* BEGIN TRANSLATION (chksum(pcal) = "" /\ chksum(tla) = "")
-VARIABLES clock, committedTxns, versionList, phase, startClock, activeMask, 
-          readSet, readVersions, writeSet, numWrites, numReads, syncError, 
+VARIABLES clock, committedTxns, versionList, phase, startClock, activeMask,
+          readSet, readVersions, writeSet, numWrites, numReads, syncError,
           lastFence, pc
 
 (* define statement *)
@@ -336,8 +336,8 @@ TLCBound ==
     /\ \A w \in Warp : Cardinality(readSet[w]) < 3
 
 
-vars == << clock, committedTxns, versionList, phase, startClock, activeMask, 
-           readSet, readVersions, writeSet, numWrites, numReads, syncError, 
+vars == << clock, committedTxns, versionList, phase, startClock, activeMask,
+           readSet, readVersions, writeSet, numWrites, numReads, syncError,
            lastFence, pc >>
 
 ProcSet == (Warp)
@@ -419,8 +419,8 @@ L_active(self) == /\ pc[self] = "L_active"
                                                                    THEN << <<clock', writeSet[self][aa]>> >> \o versionList[aa]
                                                                    ELSE versionList[aa]]
                                          ELSE /\ TRUE
-                                              /\ UNCHANGED << clock, 
-                                                              committedTxns, 
+                                              /\ UNCHANGED << clock,
+                                                              committedTxns,
                                                               versionList >>
                                    /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
                                    /\ readSet' = [readSet EXCEPT ![self] = {}]
@@ -443,8 +443,8 @@ L_active(self) == /\ pc[self] = "L_active"
                                                                    THEN << <<clock', writeSet[self][aa]>> >> \o versionList[aa]
                                                                    ELSE versionList[aa]]
                                          ELSE /\ TRUE
-                                              /\ UNCHANGED << clock, 
-                                                              committedTxns, 
+                                              /\ UNCHANGED << clock,
+                                                              committedTxns,
                                                               versionList >>
                                    /\ lastFence' = [lastFence EXCEPT ![self] = "rel"]
                                    /\ readSet' = [readSet EXCEPT ![self] = {}]

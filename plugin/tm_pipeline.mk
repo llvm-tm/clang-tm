@@ -74,11 +74,12 @@ LLVM_PLUGIN_DIR  := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BACKENDS_DIR     ?= $(abspath $(LLVM_PLUGIN_DIR)/../backends)
 
 # Discover LLVM tools via clang-tm script (handles versioned installs robustly)
-# clang-tm auto-discovers the correct clang++, opt, and llvm-link via llvm-config
+# clang-tm auto-discovers the correct clang++, opt, and llvm-link via llvm-config.
+LLVM_VERSION     ?= 22
 CLANG_TM         := $(LLVM_PLUGIN_DIR)/clang-tm
-CXX              := $(shell $(CLANG_TM) --print-tool cxx 2>/dev/null || command -v clang++-22 2>/dev/null || echo clang++)
-OPT              := $(shell $(CLANG_TM) --print-tool opt 2>/dev/null || command -v opt-22 2>/dev/null || echo opt)
-LLVM_LINK        := $(shell $(CLANG_TM) --print-tool llvm-link 2>/dev/null || command -v llvm-link-22 2>/dev/null || echo llvm-link)
+CXX              := $(shell $(CLANG_TM) --print-tool cxx 2>/dev/null || command -v clang++-$(LLVM_VERSION) 2>/dev/null || command -v clang++-22 2>/dev/null || echo clang++)
+OPT              := $(shell $(CLANG_TM) --print-tool opt 2>/dev/null || command -v opt-$(LLVM_VERSION) 2>/dev/null || command -v opt-22 2>/dev/null || echo opt)
+LLVM_LINK        := $(shell $(CLANG_TM) --print-tool llvm-link 2>/dev/null || command -v llvm-link-$(LLVM_VERSION) 2>/dev/null || command -v llvm-link-22 2>/dev/null || echo llvm-link)
 RUNTIMES_DIR     ?= $(BACKENDS_DIR)/tm_impl
 TINYSTM_DIR      ?= $(BACKENDS_DIR)/tm_impl/tiny_stm
 TL2_DIR          ?= $(BACKENDS_DIR)/tm_impl/tl2

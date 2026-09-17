@@ -291,7 +291,7 @@ void tm_wait_prev_tx(void) {
 ## Integration with LLVM Plugin
 
 The plugin currently has three pipelines:
-1. `tm-instrument` — CloneOnly + instrument, NoInline clones, separate `-O3` pass  
+1. `tm-instrument` — CloneOnly + instrument, NoInline clones, separate `-O3` pass
 2. `tm-instrument-inline` — AlwaysInline, inline after instrument
 3. `tm-instrument-then-inline` — Instrument + AlwaysInline
 

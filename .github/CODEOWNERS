@@ -1,0 +1,22 @@
+# CODEOWNERS for clang-tm
+#
+# GitHub expects GitHub usernames or teams here. Replace the placeholder team
+# with the actual maintainer/team before relying on automatic review requests.
+#
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+*                       @llvm-tm/maintainers
+
+# Core instrumentation plugin: pass order, hook call generation, bitcode passes.
+/plugin/                @llvm-tm/maintainers
+/plugin/passes/         @llvm-tm/maintainers
+/plugin/analysis/       @llvm-tm/maintainers
+
+# Shared backend hook/runtime contract used by all C++ backends.
+/backends/tm_impl/common/ @llvm-tm/maintainers
+
+# Build and CI gates.
+/Makefile               @llvm-tm/maintainers
+/plugin/Makefile        @llvm-tm/maintainers
+/plugin/tm_pipeline.mk  @llvm-tm/maintainers
+/.github/workflows/     @llvm-tm/maintainers

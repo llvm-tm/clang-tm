@@ -1,0 +1,36 @@
+# Pre-commit hygiene — catch formatting/whitespace drift locally before CI.
+#
+#   install once:   pre-commit install
+#   run manually:   pre-commit run --all-files
+#
+# The two formatter hooks are `local` so they reuse the exact tooling that
+# `make fmt-check` uses (the repo-pinned `clang-format-22` and `cargo`),
+# instead of pulling a different `clang-format`/rust version that may not
+# exist. `clang-format` checks only the staged C/C++ files; `cargo fmt`
+# checks the whole Rust workspaces (pass_filenames: false).
+# See CONTRIBUTING.md ("Local pre-commit hooks").
+repos:
+  - repo: local
+    hooks:
+      - id: clang-format
+        name: clang-format-22 (C++ --dry-run --Werror)
+        entry: clang-format-22 --dry-run --Werror --style=file
+        language: system
+        files: '\.(cpp|hpp|h)$'
+        # Match `make fmt-check` (Makefile CPP_SRC_DIRS); these dirs are not
+        # formatted by the repo gate, so don't flag them here either.
+        exclude: '^(gem5_sim|gpu|simulator/live_app)/'
+
+      - id: cargo-fmt
+        name: cargo fmt (Rust --check)
+        entry: bash -c 'set -e; for d in explicit_api/rust/workspace simulator benchmarks/rust; do (cd "$d" && cargo fmt --all --check); done'
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml

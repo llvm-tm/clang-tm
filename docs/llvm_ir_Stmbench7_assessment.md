@@ -153,7 +153,7 @@ The cloning propagation should distinguish between:
 
 Examples of functions that should NOT be cloned:
 - `vector::begin()` / `vector::end()` — return iterators
-- `__wrap_iter` constructors — wrap pointers  
+- `__wrap_iter` constructors — wrap pointers
 - `__tree::__root_ptr()` — pointer arithmetic
 - `pair` constructors — aggregate init
 - `pointer_traits::pointer_to` — address-of operator

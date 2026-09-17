@@ -4,7 +4,7 @@ diff --git a/backends/tm_impl/tm_region_allocator/tm_region_allocator.cpp b/back
 @@ -145,6 +145,15 @@ int tm_region_init() noexcept {
      g_num_slabs = aligned_size >> g_slab_size_shift;
      g_next_slab_idx.store(0, std::memory_order_relaxed);
- 
+
 +#ifndef NDEBUG
 +    fprintf(stderr,
 +            "[TM-REGION] mmap %p .. %p  (%zu MB, %zu slabs, "
@@ -16,4 +16,3 @@ diff --git a/backends/tm_impl/tm_region_allocator/tm_region_allocator.cpp b/back
 +
      return 0;
  }
- 

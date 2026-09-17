@@ -11,9 +11,9 @@ index cf88d6c6b6..42f118e1ab 100644
      uint64_t Dest64 = 0;
      ThreadContext *tc = xc->tcBase();
      const uint64_t htm_depth = xc->getHtmTransactionalDepth();
- 
+
      getMemLE(pkt, Mem, traceData);
- 
+
 -    if (Mem != 0)
 -        fault = std::make_shared<InvalidOpcode>();
 +    // Mem carries HtmFailedInCacheReason (0=NO_FAIL). If the cache
@@ -29,7 +29,7 @@ index cf88d6c6b6..42f118e1ab 100644
 +        fault = std::make_shared<GenericHtmFailureFault>(
 +            xc->getHtmTransactionUid(), cause);
 +    }
- 
+
 -    if (!xc->inHtmTransactionalState())
 -        fault = std::make_shared<InvalidOpcode>();
 +    // After a successful HTM_START the cpu is already in transactional
@@ -38,7 +38,7 @@ index cf88d6c6b6..42f118e1ab 100644
 +    // The old check `!inHtm => InvalidOpcode` was wrong: it would
 +    // fault on the first XBEGIN (depth 0->1) before the checkpoint
 +    // is saved. Remove it; the commit stage handles nesting.
- 
+
      if (fault == NoFault) {
 -        Dest64 = 0;
 +        // Intel ABI: XBEGIN writes _XBEGIN_STARTED (-1, i.e. 0xFFFFFFFF in
@@ -48,13 +48,13 @@ index cf88d6c6b6..42f118e1ab 100644
 +        // forced every transaction to the SGL fallback, so no TSX was
 +        // ever exercised. Match Intel so real RTM code runs unmodified.
 +        Dest64 = 0xFFFFFFFF;
- 
+
          if (htm_depth == 1) {
              BaseHTMCheckpointPtr& cpt = xc->tcBase()->getHtmCheckpointPtr();
 @@ -90,8 +111,12 @@ XEndInst::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
      Fault fault = NoFault;
      const uint64_t htm_depth = xc->getHtmTransactionalDepth();
- 
+
 +    // SE-mode fallback: if a transaction aborted (e.g. syscall inside HTM)
 +    // the compiler-generated fallback path may still execute XEND. Real
 +    // hardware would #GP, but for SE simulation we treat it as a no-op
@@ -62,18 +62,18 @@ index cf88d6c6b6..42f118e1ab 100644
      if (!xc->inHtmTransactionalState())
 -        fault = std::make_shared<InvalidOpcode>();
 +        return NoFault;
- 
+
      if (fault == NoFault) {
          Request::Flags memAccessFlags =
 @@ -114,6 +139,9 @@ XEndInst::completeAcc(PacketPtr pkt, ExecContext *xc,
      ThreadContext *tc = xc->tcBase();
      const uint64_t htm_depth = xc->getHtmTransactionalDepth();
- 
+
 +    if (!xc->inHtmTransactionalState())
 +        return NoFault;
 +
      getMemLE(pkt, Mem, traceData);
- 
+
      if (Mem != 0)
 @@ -164,7 +192,8 @@ XAbortInst::completeAcc(PacketPtr pkt, ExecContext *xc,
      if (fault == NoFault) {
@@ -83,7 +83,7 @@ index cf88d6c6b6..42f118e1ab 100644
 +            HtmFailureFaultCause::EXPLICIT,
 +            imm);
      }
- 
+
      return fault;
 diff --git a/src/cpu/o3/lsq_unit.cc b/src/cpu/o3/lsq_unit.cc
 index 67ae69237e..4fb96e35ab 100644
@@ -158,7 +158,7 @@ index 67ae69237e..4fb96e35ab 100644
 +            inst->pcState(), pkt->getAddr(),
 +            htmFailureToStr(htm_rc), pkt->getHtmTransactionUid());
      }
- 
+
      cpu->ppDataAccessComplete->notify(std::make_pair(inst, pkt));
 diff --git a/src/cpu/simple/timing.cc b/src/cpu/simple/timing.cc
 index dcc88e7a1f..facab4a096 100644
@@ -178,7 +178,7 @@ index dcc88e7a1f..facab4a096 100644
      }
      if (req->isHTMAbort())
 @@ -1027,20 +1031,19 @@ TimingSimpleCPU::completeDataAccess(PacketPtr pkt)
- 
+
      // shouldn't fail through stores because this would be inconsistent w/ O3
      // which cannot fault after the store has been sent to memory
 -    if (pkt->htmTransactionFailedInCache() && !pkt->isWrite()) {
@@ -240,7 +240,7 @@ index 4d5935dc9b..8541127bc9 100644
 +   HtmFailedInCacheReason htmFailedRc, default=HtmFailedInCacheReason_NO_FAIL;
 +   int htmReadLines, default=0; // distinct read lines (limit 128)
 +   int htmWriteLines, default=0; // distinct write lines (limit 32)
- 
+
    // STATES
    state_declaration(State, desc="Cache states", default="L0Cache_State_I") {
 @@ -1017,10 +1019,17 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
@@ -351,14 +351,14 @@ index 4d5935dc9b..8541127bc9 100644
 +    htmWriteLines := 0;
      DPRINTF(RubySlicc, "Committed htm transaction\n");
    }
- 
+
 diff --git a/src/mem/ruby/system/HTMSequencer.cc b/src/mem/ruby/system/HTMSequencer.cc
 index edfd3b3e6b..308f9f05b1 100644
 --- a/src/mem/ruby/system/HTMSequencer.cc
 +++ b/src/mem/ruby/system/HTMSequencer.cc
 @@ -241,11 +241,14 @@ HTMSequencer::rubyHtmCallback(PacketPtr pkt,
              htmRetCodeConversion(htm_return_code));
- 
+
          // Add calibrated latencies to match real hardware TSX timing
 +        // +40c coherence probe per other in-flight TX (closes 2-4× gap)
          Tick extra = 0;
@@ -369,7 +369,7 @@ index edfd3b3e6b..308f9f05b1 100644
 +            // Coherence sweep: 40c * active others (approx via pending requests)
 +            extra += clockPeriod() * 40 * (m_htmCmdRequestTable.size() > 0 ? 1 : 0);
          }
- 
+
          port->schedTimingResp(pkt, curTick() + extra);
 diff --git a/src/sim/faults.cc b/src/sim/faults.cc
 index 7c37e58a7a..e69097da63 100644
@@ -385,7 +385,7 @@ index 7c37e58a7a..e69097da63 100644
  #include "mem/page_table.hh"
 @@ -113,7 +114,7 @@ GenericAlignmentFault::invoke(ThreadContext *tc, const StaticInstPtr &inst)
  }
- 
+
  void GenericHtmFailureFault::invoke(ThreadContext *tc,
 -                                    const StaticInstPtr &inst)
 +                                     const StaticInstPtr &inst)
@@ -393,9 +393,9 @@ index 7c37e58a7a..e69097da63 100644
      // reset decoder
      InstDecoder* dcdr = tc->getDecoderPtr();
 @@ -126,6 +127,48 @@ void GenericHtmFailureFault::invoke(ThreadContext *tc,
- 
+
      checkpoint->restore(tc, getHtmFailureFaultCause());
- 
+
 +    // Set EAX abort status to match Intel RTM encoding so the
 +    // retry loop in TSXSGL_runtime.cpp observes LOCK_BUSY/CONFLICT
 +    // correctly. The checkpoint restore recovered the pre-XBEGIN
@@ -440,7 +440,7 @@ index 7c37e58a7a..e69097da63 100644
 +
      // reset the global monitor
      tc->getIsaPtr()->globalClearExclusive();
- 
+
 diff --git a/src/sim/faults.hh b/src/sim/faults.hh
 index d2e091ef2e..10b70830d5 100644
 --- a/src/sim/faults.hh
@@ -450,7 +450,7 @@ index d2e091ef2e..10b70830d5 100644
      uint64_t htmUid; // unique identifier used for debugging
      HtmFailureFaultCause cause;
 +    uint8_t abortCode; // valid only for EXPLICIT cause (XABORT imm8)
- 
+
    public:
 -    GenericHtmFailureFault(uint64_t htm_uid, HtmFailureFaultCause _cause)
 -      : htmUid(htm_uid), cause(_cause)
@@ -458,9 +458,9 @@ index d2e091ef2e..10b70830d5 100644
 +                           uint8_t _code = 0xFF)
 +      : htmUid(htm_uid), cause(_cause), abortCode(_code)
      {}
- 
+
      FaultName name() const override { return "Generic HTM failure fault"; }
- 
+
      uint64_t getHtmUid() const { return htmUid; }
      HtmFailureFaultCause getHtmFailureFaultCause() const { return cause; }
 +    uint8_t getAbortCode() const { return abortCode; }

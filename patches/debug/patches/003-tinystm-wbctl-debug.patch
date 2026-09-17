@@ -21,9 +21,9 @@ index d4a32e4..c51631d 100644
  			               "Lock version not updated");
  		}
 @@ -338,6 +349,25 @@ read_word_ctl(                                                //
- 
+
  	// No bypass: the plugin ensures only TM-tracked addresses reach the runtime.
- 
+
 +#ifdef DEBUG_WBCTL
 +	// Debug: detect corrupted addresses
 +	static std::atomic<uint64_t> read_count{0};
@@ -44,5 +44,5 @@ index d4a32e4..c51631d 100644
 +#endif
 +
  	// Corrupted address detection removed (was shadowing root cause).
- 
+
  	// Check write-set for this exact address

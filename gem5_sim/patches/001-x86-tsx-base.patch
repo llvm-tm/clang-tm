@@ -757,7 +757,7 @@ index 65618dc857..5f17d17778 100644
 +++ b/src/arch/x86/isa.cc
 @@ -29,6 +29,7 @@
  #include "arch/x86/isa.hh"
- 
+
  #include "arch/x86/decoder.hh"
 +#include "arch/x86/htm.hh"
  #include "arch/x86/mmu.hh"
@@ -766,7 +766,7 @@ index 65618dc857..5f17d17778 100644
 @@ -521,6 +522,16 @@ ISA::unserialize(CheckpointIn &cp)
                       regVal[misc_reg::Rflags]);
  }
- 
+
 +void
 +ISA::startup()
 +{
@@ -786,12 +786,12 @@ index 9c6dcf0921..7411e31f57 100644
 +++ b/src/arch/x86/isa.hh
 @@ -92,6 +92,7 @@ class ISA : public BaseISA
      void unserialize(CheckpointIn &cp) override;
- 
+
      void setThreadContext(ThreadContext *_tc) override;
 +    void startup() override;
- 
+
      std::string getVendorString() const;
- 
+
 diff --git a/src/arch/x86/isa/decoder/one_byte_opcodes.isa b/src/arch/x86/isa/decoder/one_byte_opcodes.isa
 index 13b05e62ff..9d2b1eb4d9 100644
 --- a/src/arch/x86/isa/decoder/one_byte_opcodes.isa
@@ -888,7 +888,7 @@ index 98f6d35b42..edfd3b3e6b 100644
 --- a/src/mem/ruby/system/HTMSequencer.cc
 +++ b/src/mem/ruby/system/HTMSequencer.cc
 @@ -68,6 +68,8 @@ HTMSequencer::htmRetCodeConversion(
- 
+
  HTMSequencer::HTMSequencer(const RubyHTMSequencerParams &p)
      : Sequencer(p),
 +      m_htmStartLatency(p.htm_start_latency),
@@ -921,7 +921,7 @@ index 3b3933159e..7b32995749 100644
 @@ -99,6 +99,11 @@ class HTMSequencer : public Sequencer
      Tick m_htmstart_tick;
      Counter m_htmstart_instruction;
- 
+
 +    // Extra latency for HTM start (XBEGIN) and commit (XEND) to match
 +    // real hardware cycle costs (e.g. Broadwell-EP: xbegin=60, xend=178)
 +    Cycles m_htmStartLatency;
@@ -937,13 +937,12 @@ index 49c6374b14..a836f237c6 100644
 @@ -139,6 +139,9 @@ class RubyHTMSequencer(RubySequencer):
      cxx_class = "gem5::ruby::HTMSequencer"
      cxx_header = "mem/ruby/system/HTMSequencer.hh"
- 
+
 +    htm_start_latency = Param.Cycles(60, "Extra latency (in CPU cycles) for XBEGIN (HTM start)")
 +    htm_commit_latency = Param.Cycles(178, "Extra latency (in CPU cycles) for XEND (HTM commit)")
 +
- 
+
  class DMASequencer(RubyPort):
      type = "DMASequencer"
--- 
+--
 2.50.1 (Apple Git-155)
-

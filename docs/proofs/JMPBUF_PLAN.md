@@ -92,7 +92,7 @@ begin
 L_meta:
     (* Check safety invariant *)
     assert \A t \in Thread : (InTx[t] => ValidJmpBuf[t] # NONE);
-    
+
     either (* sigsetjmp: begin transaction *)
         with (t \in Thread, fid \in FrameId) {
             ValidJmpBuf' := [ValidJmpBuf EXCEPT ![t] = fid];

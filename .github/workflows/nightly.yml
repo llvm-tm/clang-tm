@@ -2,7 +2,8 @@ name: Nightly
 
 on:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 6 * * *'      # daily: fidelity + cross-backend
+    - cron: '0 5 * * 0'      # weekly (Sun): + post-merge verification (S31)
 
 env:
   CARGO_TERM_COLOR: always
@@ -88,3 +89,88 @@ jobs:
         with:
           name: cross-backend-results
           path: cross_backend_results.csv
+
+  # ── Post-merge verification (S31): full matrix, weekly (Sunday) ────────
+  post-merge-check:
+    if: contains(github.event.schedule, '0 5 * * 0')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 lld make
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Post-merge verification matrix (<10 min)
+        timeout-minutes: 10
+        run: make post-merge-check
+
+  # ── Weekly supply-chain audit (S18) ───────────────────────────────────────
+  audit:
+    if: contains(github.event.schedule, '0 5 * * 0')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit simulator dependencies
+        timeout-minutes: 10
+        working-directory: simulator
+        run: cargo audit
+
+  # ── Weekly TSan sweep (non-blocking race detector) ────────────────────────
+  tsan:
+    if: contains(github.event.schedule, '0 5 * * 0')
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [NOREC, TL2]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      TSAN_OPTIONS: halt_on_error=0:second_deadlock_stack=1
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 lld make
+      - name: Build TSan bank (${{ matrix.backend }})
+        run: make -C benchmarks/cpp bin/bank BACKEND=${{ matrix.backend }} SANITIZE=thread
+      - name: Run TSan bank (${{ matrix.backend }})
+        run: ./benchmarks/cpp/bin/bank -t 4 -d 1000
+      - name: Build TSan test_tx/test_ds (${{ matrix.backend }})
+        run: make -C benchmarks/cpp bin/test_tx bin/test_ds BACKEND=${{ matrix.backend }} SANITIZE=thread
+      - name: Run TSan test_tx/test_ds (${{ matrix.backend }})
+        run: |
+          ./benchmarks/cpp/bin/test_tx
+          ./benchmarks/cpp/bin/test_ds
+
+  # ── Weekly Rust coverage report (non-blocking) ────────────────────────────
+  coverage:
+    if: contains(github.event.schedule, '0 5 * * 0')
+    continue-on-error: true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Coverage — Rust workspace
+        run: cargo llvm-cov --manifest-path explicit_api/rust/workspace/Cargo.toml --features wbctl -p tm -- --test-threads=1
+      - name: Coverage — simulator
+        run: cargo llvm-cov --manifest-path simulator/Cargo.toml -- --test-threads=1

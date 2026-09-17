@@ -90,19 +90,28 @@ else
 fi
 
 # ---- Discover LLVM tools ----
-# Try versioned llvm-config first (apt.llvm.org installs
-# clang++-22 / opt-22), then bare llvm-config.
-LLVM_BINDIR=""
-for cfg in llvm-config-22 llvm-config-22.1 llvm-config; do
-    if command -v "$cfg" &>/dev/null; then
-        LLVM_BINDIR="$("$cfg" --bindir 2>/dev/null || true)"
-        [ -n "$LLVM_BINDIR" ] && break
-    fi
-done
+# Reuse llvm-tool-helper.sh. It honors LLVM_VERSION (default: 22) and
+# searches versioned llvm-config installs first.
+if [ -f "$SCRIPT_DIR/llvm-tool-helper.sh" ]; then
+    # shellcheck source=./llvm-tool-helper.sh
+    source "$SCRIPT_DIR/llvm-tool-helper.sh"
+else
+    LLVM_VERSION="${LLVM_VERSION:-22}"
+    LLVM_BINDIR=""
+    for cfg in llvm-config-"$LLVM_VERSION" llvm-config-"${LLVM_VERSION}.1" llvm-config-22 llvm-config-22.1 llvm-config; do
+        if command -v "$cfg" &>/dev/null; then
+            LLVM_BINDIR="$("$cfg" --bindir 2>/dev/null || true)"
+            [ -n "$LLVM_BINDIR" ] && break
+        fi
+    done
+    LLVM_CXX="${LLVM_BINDIR:+$LLVM_BINDIR/}clang++"
+    LLVM_OPT="${LLVM_BINDIR:+$LLVM_BINDIR/}opt"
+    LLVM_LINK="${LLVM_BINDIR:+$LLVM_BINDIR/}llvm-link"
+fi
 
-CXX="${LLVM_BINDIR:+$LLVM_BINDIR/}clang++"
-OPT="${LLVM_BINDIR:+$LLVM_BINDIR/}opt"
-LLVM_LINK="${LLVM_BINDIR:+$LLVM_BINDIR/}llvm-link"
+CXX="$LLVM_CXX"
+OPT="$LLVM_OPT"
+LLVM_LINK="$LLVM_LINK"
 
 # ---- GCC toolchain discovery ----
 # clang 22 (and newer) default to the latest GCC install, which may be
@@ -148,7 +157,7 @@ check_deps() {
         missing=1
     fi
     if [ "$missing" -eq 1 ]; then
-        echo "clang-tm: Install the LLVM toolchain (apt install clang++-22 llvm-22-dev)" >&2
+        echo "clang-tm: Install the LLVM toolchain (apt install clang++-22 llvm-22-dev or clang++-23 llvm-23-dev)" >&2
         exit 1
     fi
 }
@@ -380,7 +389,7 @@ if [ "$MODE" = "link-only" ]; then
                 -fno-stack-protector -pthread "${CXXFLAGS[@]+"${CXXFLAGS[@]}"}"
             LINK_OBJS+=("$REGION_O")
         fi
-        
+
         # Also compile tm_hooks.cpp if the runtime does NOT already provide
         # the hook function-pointer variables (plugin/runtime/ files now define
         # them directly to avoid linker conflicts).
@@ -393,7 +402,7 @@ if [ "$MODE" = "link-only" ]; then
                 -fno-stack-protector -pthread "${CXXFLAGS[@]+"${CXXFLAGS[@]}"}"
             LINK_OBJS+=("$HOOKS_O")
         fi
-        
+
         $CXX ${CXX_STDLIB_FLAG} "${LINK_CXXFLAGS[@]}" "$INPUT" "${LINK_OBJS[@]}" -o "$OUTPUT"
     else
         $CXX ${CXX_STDLIB_FLAG} "${LINK_CXXFLAGS[@]}" "$INPUT" "$RESOLVED_RUNTIME" -o "$OUTPUT"

@@ -249,7 +249,7 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION
-VARIABLES pc, mem, mode, read_set, write_set, ws_new, wowner, aborted_thread, 
+VARIABLES pc, mem, mode, read_set, write_set, ws_new, wowner, aborted_thread,
           committed, c_rs, c_ws
 
 (* define statement *)
@@ -272,7 +272,7 @@ WriteBack(t) ==
         IF a \in write_set[t] THEN ws_new[t][a] ELSE mem[a]]
 
 
-vars == << pc, mem, mode, read_set, write_set, ws_new, wowner, aborted_thread, 
+vars == << pc, mem, mode, read_set, write_set, ws_new, wowner, aborted_thread,
            committed, c_rs, c_ws >>
 
 ProcSet == (Thread)
@@ -297,7 +297,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
                       /\ pc' = [pc EXCEPT ![self] = "L_active"]
                    \/ /\ pc' = [pc EXCEPT ![self] = "L_done"]
                       /\ UNCHANGED <<mode, read_set, write_set>>
-                /\ UNCHANGED << mem, ws_new, wowner, aborted_thread, committed, 
+                /\ UNCHANGED << mem, ws_new, wowner, aborted_thread, committed,
                                 c_rs, c_ws >>
 
 L_chk(self) == /\ pc[self] = "L_chk"
@@ -309,7 +309,7 @@ L_chk(self) == /\ pc[self] = "L_chk"
                           /\ aborted_thread' = [aborted_thread EXCEPT ![self] = aborted_thread[self] + 1]
                           /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                      ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                          /\ UNCHANGED << mode, read_set, write_set, wowner, 
+                          /\ UNCHANGED << mode, read_set, write_set, wowner,
                                           aborted_thread >>
                /\ UNCHANGED << mem, ws_new, committed, c_rs, c_ws >>
 
@@ -325,7 +325,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                      /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                                 ELSE /\ read_set' = [read_set EXCEPT ![self] = read_set[self] \union {a}]
                                      /\ pc' = [pc EXCEPT ![self] = "L_chk"]
-                                     /\ UNCHANGED << mode, write_set, wowner, 
+                                     /\ UNCHANGED << mode, write_set, wowner,
                                                      aborted_thread >>
                         /\ UNCHANGED <<mem, ws_new, committed, c_rs, c_ws>>
                      \/ /\ \E a \in Addr:
@@ -334,7 +334,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                      /\ write_set' = [write_set EXCEPT ![self] = write_set[self] \union {a}]
                                      /\ ws_new' = [ws_new EXCEPT ![self][a] = (mem[a] + 1) % 2]
                                      /\ pc' = [pc EXCEPT ![self] = "L_chk"]
-                                     /\ UNCHANGED << mode, read_set, 
+                                     /\ UNCHANGED << mode, read_set,
                                                      aborted_thread >>
                                 ELSE /\ IF \E t2 \in Thread : wowner[a] # 0 /\ wowner[a] # self
                                            THEN /\ wowner' = [q \in Addr |-> IF q \in write_set[self] /\ wowner[q] = self THEN 0 ELSE wowner[q]]
@@ -348,7 +348,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                                 /\ write_set' = [write_set EXCEPT ![self] = write_set[self] \union {a}]
                                                 /\ ws_new' = [ws_new EXCEPT ![self][a] = (mem[a] + 1) % 2]
                                                 /\ pc' = [pc EXCEPT ![self] = "L_chk"]
-                                                /\ UNCHANGED << mode, read_set, 
+                                                /\ UNCHANGED << mode, read_set,
                                                                 aborted_thread >>
                         /\ UNCHANGED <<mem, committed, c_rs, c_ws>>
                      \/ /\ IF ConflictPolicy = "POWER8"
@@ -369,11 +369,11 @@ L_active(self) == /\ pc[self] = "L_active"
                                          ELSE /\ wowner' = [a \in Addr |-> IF a \in write_set[self] THEN self ELSE wowner[a]]
                                               /\ mode' = [mode EXCEPT ![self] = "tsx"]
                                               /\ pc' = [pc EXCEPT ![self] = "L_chk"]
-                                              /\ UNCHANGED << read_set, 
-                                                              write_set, 
+                                              /\ UNCHANGED << read_set,
+                                                              write_set,
                                                               aborted_thread >>
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_chk"]
-                                   /\ UNCHANGED << mode, read_set, write_set, 
+                                   /\ UNCHANGED << mode, read_set, write_set,
                                                    wowner, aborted_thread >>
                         /\ UNCHANGED <<mem, ws_new, committed, c_rs, c_ws>>
                      \/ /\ IF committed[self] < MaxCommit
@@ -384,7 +384,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                               /\ write_set' = [write_set EXCEPT ![self] = {}]
                                               /\ aborted_thread' = [aborted_thread EXCEPT ![self] = aborted_thread[self] + 1]
                                               /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                                              /\ UNCHANGED << mem, committed, 
+                                              /\ UNCHANGED << mem, committed,
                                                               c_rs, c_ws >>
                                          ELSE /\ mem' = WriteBack(self)
                                               /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
@@ -400,16 +400,16 @@ L_active(self) == /\ pc[self] = "L_active"
                                               /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                                               /\ UNCHANGED aborted_thread
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_done"]
-                                   /\ UNCHANGED << mem, mode, read_set, 
-                                                   write_set, wowner, 
-                                                   aborted_thread, committed, 
+                                   /\ UNCHANGED << mem, mode, read_set,
+                                                   write_set, wowner,
+                                                   aborted_thread, committed,
                                                    c_rs, c_ws >>
                         /\ UNCHANGED ws_new
 
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << mem, mode, read_set, write_set, ws_new, wowner, 
+                /\ UNCHANGED << mem, mode, read_set, write_set, ws_new, wowner,
                                 aborted_thread, committed, c_rs, c_ws >>
 
 ThreadProc(self) == L_idle(self) \/ L_chk(self) \/ L_active(self)

@@ -38,8 +38,15 @@ set(STM_BACKEND "tinystm" CACHE STRING "STM backend: tinystm, tl2, singlelock, s
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find LLVM (LLVM 22+ required, matching the Makefile-based build)
-find_package(LLVM 22.1 REQUIRED CONFIG)
+# Find LLVM (LLVM 22+ required, matching the Makefile-based build).
+# The default dev/pinned version remains LLVM 22; CI may also validate LLVM 23.
+find_package(LLVM 22 REQUIRED CONFIG)
+if(NOT DEFINED LLVM_VERSION_MAJOR)
+    message(FATAL_ERROR "LLVM 22+ required, but LLVM_VERSION_MAJOR was not set")
+endif()
+if(LLVM_VERSION_MAJOR LESS 22)
+    message(FATAL_ERROR "LLVM 22+ required, found ${LLVM_PACKAGE_VERSION}")
+endif()
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake at: ${LLVM_DIR}")
 
@@ -48,12 +55,14 @@ if(LLVM_USE_FILE)
     include(${LLVM_USE_FILE})
 endif()
 
-# Find LLVM tools (handles versioned installs like llvm-22-dev on Ubuntu)
-find_program(LLVM_CLANG clang-22 clang++-22 clang++ clang
-    PATHS ${LLVM_TOOLS_BINARY_DIR} /usr/lib/llvm-22/bin
+# Find LLVM tools (handles versioned installs like llvm-22-dev / llvm-23-dev)
+find_program(LLVM_CLANG
+    NAMES clang++-${LLVM_VERSION_MAJOR} clang++-22 clang++ clang
+    PATHS ${LLVM_TOOLS_BINARY_DIR} "/usr/lib/llvm-${LLVM_VERSION_MAJOR}/bin" /usr/lib/llvm-22/bin
     NO_DEFAULT_PATH)
-find_program(LLVM_OPT opt-22 opt
-    PATHS ${LLVM_TOOLS_BINARY_DIR} /usr/lib/llvm-22/bin
+find_program(LLVM_OPT
+    NAMES opt-${LLVM_VERSION_MAJOR} opt-22 opt
+    PATHS ${LLVM_TOOLS_BINARY_DIR} "/usr/lib/llvm-${LLVM_VERSION_MAJOR}/bin" /usr/lib/llvm-22/bin
     NO_DEFAULT_PATH)
 if(NOT LLVM_CLANG)
     find_program(LLVM_CLANG clang)

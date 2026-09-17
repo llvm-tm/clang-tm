@@ -212,7 +212,9 @@ See `explicit_api/rust/workspace/README.md` for backend selection and benchmark 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to add a backend (6-step
 C++/Rust walkthrough), run the test suite, commit style, and the PR checklist.
 Verify your toolchain with `make check-fast` and formatting with
-`make fmt-check`.
+`make fmt-check`. Security reports are handled in [`SECURITY.md`](SECURITY.md);
+`.github/CODEOWNERS` marks the plugin/common backend/build paths as
+maintainer-owned.
 
 ---
 

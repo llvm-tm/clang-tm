@@ -869,7 +869,7 @@ When the optimizer inlines $F_a$ and $F_b$, each inlined body begins with a
 that `atomic_signal_fence(memory_order_seq_cst)` is a **full compiler barrier
 for memory access ordering**: no load or store (including non-atomic and
 volatile accesses) may be reordered across the fence in either direction
-([atomics.fences]). 
+([atomics.fences]).
 
 Consider the sequence of operations surrounding the barriers:
 

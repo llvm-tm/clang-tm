@@ -157,12 +157,12 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION
-VARIABLES in_flight_writes, in_flight_reads, in_tx, sgl_mode, lp_state, 
-          tx_count, abort_count, conflict_aborts, pc, conflicting_writers, 
+VARIABLES in_flight_writes, in_flight_reads, in_tx, sgl_mode, lp_state,
+          tx_count, abort_count, conflict_aborts, pc, conflicting_writers,
           conflicting_readers
 
-vars == << in_flight_writes, in_flight_reads, in_tx, sgl_mode, lp_state, 
-           tx_count, abort_count, conflict_aborts, pc, conflicting_writers, 
+vars == << in_flight_writes, in_flight_reads, in_tx, sgl_mode, lp_state,
+           tx_count, abort_count, conflict_aborts, pc, conflicting_writers,
            conflicting_readers >>
 
 ProcSet == (LP)
@@ -198,8 +198,8 @@ L_entry(self) == /\ pc[self] = "L_entry"
                                        /\ in_flight_reads' = in_flight_reads \ {<<w, a2>> : w \in conflicting_writers'[self], a2 \in Addr}
                                        /\ conflict_aborts' = conflict_aborts + Cardinality(conflicting_writers'[self])
                                   ELSE /\ in_flight_reads' = (in_flight_reads \cup {<<self, a>>})
-                                       /\ UNCHANGED << in_flight_writes, in_tx, 
-                                                       lp_state, abort_count, 
+                                       /\ UNCHANGED << in_flight_writes, in_tx,
+                                                       lp_state, abort_count,
                                                        conflict_aborts >>
                        /\ UNCHANGED <<sgl_mode, tx_count, conflicting_readers>>
                     \/ /\ lp_state[self] = "active" /\ in_tx[self] = TRUE
@@ -216,8 +216,8 @@ L_entry(self) == /\ pc[self] = "L_entry"
                                        /\ in_flight_writes' = in_flight_writes \ {<<wp, a2>> : wp \in conflicting_readers'[self] \union conflicting_writers'[self], a2 \in Addr}
                                        /\ conflict_aborts' = conflict_aborts + Cardinality(conflicting_readers'[self]) + Cardinality(conflicting_writers'[self])
                                   ELSE /\ in_flight_writes' = (in_flight_writes \cup {<<self, a>>})
-                                       /\ UNCHANGED << in_flight_reads, in_tx, 
-                                                       lp_state, abort_count, 
+                                       /\ UNCHANGED << in_flight_reads, in_tx,
+                                                       lp_state, abort_count,
                                                        conflict_aborts >>
                        /\ UNCHANGED <<sgl_mode, tx_count>>
                     \/ /\ lp_state[self] = "active" /\ in_tx[self] = TRUE

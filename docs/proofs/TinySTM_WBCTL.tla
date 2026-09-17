@@ -148,10 +148,10 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "92399dd6" /\ chksum(tla) = "5f6cdf19")
-VARIABLES pc, clock, lock, mem, state, readSet, writeSet, writeBuf, readOnly, 
+VARIABLES pc, clock, lock, mem, state, readSet, writeSet, writeBuf, readOnly,
           endVersion, committed, lastSignalFence, lastThreadFence, lastRmw
 
-vars == << pc, clock, lock, mem, state, readSet, writeSet, writeBuf, readOnly, 
+vars == << pc, clock, lock, mem, state, readSet, writeSet, writeBuf, readOnly,
            endVersion, committed, lastSignalFence, lastThreadFence, lastRmw >>
 
 ProcSet == (Thread)
@@ -181,9 +181,9 @@ L_idle(self) == /\ pc[self] = "L_idle"
                            /\ endVersion' = [endVersion EXCEPT ![self] = clock]
                            /\ pc' = [pc EXCEPT ![self] = "L_active"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "L_done"]
-                           /\ UNCHANGED << state, readSet, writeSet, readOnly, 
+                           /\ UNCHANGED << state, readSet, writeSet, readOnly,
                                            endVersion >>
-                /\ UNCHANGED << clock, lock, mem, writeBuf, committed, 
+                /\ UNCHANGED << clock, lock, mem, writeBuf, committed,
                                 lastSignalFence, lastThreadFence, lastRmw >>
 
 L_active(self) == /\ pc[self] = "L_active"
@@ -238,7 +238,7 @@ L_incClock(self) == /\ pc[self] = "L_incClock"
                     /\ lastRmw' = [lastRmw EXCEPT ![self] = "acq_rel"]
                     /\ clock' = clock + 1
                     /\ pc' = [pc EXCEPT ![self] = "L_validate"]
-                    /\ UNCHANGED << lock, mem, state, readSet, writeSet, 
+                    /\ UNCHANGED << lock, mem, state, readSet, writeSet,
                                     writeBuf, readOnly, endVersion, committed, lastSignalFence, lastThreadFence >>
 
 L_validate(self) == /\ pc[self] = "L_validate"
@@ -246,7 +246,7 @@ L_validate(self) == /\ pc[self] = "L_validate"
                            (lock[a][1] = 0 \/ lock[a][2] = self) /\ lock[a][3] <= endVersion[self]
                            THEN /\ state' = [state EXCEPT ![self] = "wb"]
                                /\ pc' = [pc EXCEPT ![self] = "L_writeBack"]
-                               /\ UNCHANGED << lock, readSet, writeSet, 
+                               /\ UNCHANGED << lock, readSet, writeSet,
                                                lastSignalFence, lastThreadFence, lastRmw >>
                           ELSE /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                /\ lock' =     [a \in Addr |->
@@ -257,7 +257,7 @@ L_validate(self) == /\ pc[self] = "L_validate"
                                /\ writeSet' = [writeSet EXCEPT ![self] = {}]
                                /\ state' = [state EXCEPT ![self] = "idle"]
                                /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                    /\ UNCHANGED << clock, mem, writeBuf, readOnly, endVersion, 
+                    /\ UNCHANGED << clock, mem, writeBuf, readOnly, endVersion,
                                     committed, lastSignalFence, lastThreadFence >>
 
 L_writeBack(self) == /\ pc[self] = "L_writeBack"
@@ -277,8 +277,8 @@ L_writeBack(self) == /\ pc[self] = "L_writeBack"
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << clock, lock, mem, state, readSet, writeSet, 
-                                writeBuf, readOnly, endVersion, committed, 
+                /\ UNCHANGED << clock, lock, mem, state, readSet, writeSet,
+                                writeBuf, readOnly, endVersion, committed,
                                 lastSignalFence, lastThreadFence, lastRmw >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_incClock(self)

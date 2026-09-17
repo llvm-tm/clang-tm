@@ -78,16 +78,16 @@ for title, smain, emain, sidx, eidx in chapters:
     # Collect all lines from main.tex and included section files for this chapter range
     # A simple approach: count lines in main.tex within the range, plus content from input files
     body_main = main_lines[smain:emain+1]
-    
+
     # Count how many \input directives are within this range (to understand structure)
     # But for structural metrics, we need to look at the included files
-    
+
     # Figure out which section files are included in this chapter
     # by looking at all \input directives in main.tex and which chapter they belong to
     # For now, just use the main.tex body
-    
+
     nlines = len(body_main)
-    
+
     # Count sections within the body's \section directives
     secs = []
     for l in body_main:
@@ -102,7 +102,7 @@ for title, smain, emain, sidx, eidx in chapters:
     lsts = sum(1 for l in body_main if '\\begin{lstlisting}' in l)
     tbls_env = sum(1 for l in body_main if '\\begin{tabular}' in l)
     tiks = sum(1 for l in body_main if '\\begin{tikzpicture}' in l)
-    
+
     print(f"### {title}")
     print(f"  lines={nlines} sections={len(secs)} subsections={len(subs)} figures={figs} tables={tabs} listings={lsts} tikz={tiks}")
     for s in secs: print(f"    SEC: {clean_sec(s)}")

@@ -48,7 +48,7 @@ opt-22 -load-pass-plugin=plugin/bin/libTMRaceChecker.so \
 
 `plugin/bin/tm-race-checker` (shell wrapper) and `fuzz-counter`/`fuzz-bank` (C++ benchmarks) support `--version` / `-V`. Each prints box‑drawing letter art:
 
-- **tm-race-checker** — "RACE" (leading ━) + "CHECKER" (7‑block)  
+- **tm-race-checker** — "RACE" (leading ━) + "CHECKER" (7‑block)
 - **fuzz-counter**, **fuzz-bank** — "FUZZ" (4‑block)
 
 ### TM memory debug allocation
@@ -620,7 +620,7 @@ The architecture was reviewed and refactored for maximum modularity:
 2. **Validate**: replay same traces through real TSXSGL and TSX-SIM backend, compare commit/abort decisions + timing
 3. **Tune TSX simulation parameters**: bloom filter false positive rate, capacity thresholds, conflict detection granularity
 4. **SPHT profiling patch**: similar RDTSC instrumentation for SPHT (branch overflow + mutex fallback)
-5. **NV-HTM profiling**: Intel TSX extortion detection + 2-phase abort semantics  
+5. **NV-HTM profiling**: Intel TSX extortion detection + 2-phase abort semantics
 
 ## Session 2026-06-21 — Simulator cost mode: SimEngine + machine profile calibration
 
@@ -1749,7 +1749,7 @@ write `0xFFFFFFFF` (Intel ABI). After rebuild, `bank_gem5_tsxsgl` t1 shows
 - `gem5_sim/scripts/run_gem5_sweep.py`, `parse_gem5_stats.py` — new
 - `gem5_sim/docs/x86-tsx-validation.md` — new validation report
 
-## Session 2026-09-13 — review-02 execution: correctness fixes + DX/CI/docs hygiene (S01–S06, S10–S15)
+## Session 2026-09-13 — review-02 execution: correctness fixes + DX/CI/docs hygiene (S01–S08, S10–S16, S18–S20, S21–S23, S26–S28, S30, S31, S32)
 
 Continuing the `review-02/report.md` improvement plan. Correctness fixes
 S01–S06 (tracked in `TODO.md` + `docs/CORRECTNESS_FIXES.md` §9–12), then the
@@ -1817,9 +1817,230 @@ DX/CI/docs hygiene items S10–S15.
 - New CI `lint` job (clang-format-22 + clippy/rustfmt, `make fmt-check`), gates
   PRs + push:main.
 
+### S09 — clean tree + git hygiene
+- Added `.venv/`, `venv/`, `.pytest_cache/` to `.gitignore` (the 74M `.venv` is
+  now ignored; `m5out/` was already covered).
+- Committed the accumulated tree in two single-concern commits: the 2026-09-05
+  gem5 session (sweep/parse scripts, TSX validation report, SE
+  syscall-ignores patch) and this review-02 work. `git status --short` is now
+  empty on `main`.
+
 ### Files changed (S10–S15)
 - `docs/README.md`, `README.md`, `docs/DEVELOPER_GUIDE.md` (S10)
 - `CHANGELOG.md`, `AGENTS.md`, `docs/sessions/README.md` (S11)
 - `.github/workflows/ci.yml`, `docs/proofs/Makefile` (S14)
 - `Makefile`, `plugin/clang-tm`, `backends/**` (reformat), Rust workspace +
   simulator (reformat + clippy fixes) (S15)
+
+### S21 — dedup `LLVM_TM_PLUGIN` lifecycle boilerplate
+- Added two macros to `backends/tm_impl/common/tm_backend_macros.hpp`:
+  - `TM_PLUGIN_LIFECYCLE_VARS()` — emits the 4 fwd decls + 4 data-variable
+    initializers in plugin builds; empty in non-plugin builds.
+  - `TM_PLUGIN_LIFECYCLE_FN(impl, nonplugin)` — expands to `static void impl()`
+    (plugin) or the plain/`extern "C"` declaration (non-plugin).
+  - Both use `#ifdef LLVM_TM_PLUGIN` **wrapping** the `#define` (an `#ifdef`
+    inside a `#define` body is invalid preprocessor).
+- Migrated 17 `*_runtime.cpp` files (4 lifecycle `#ifdef` blocks each →
+  `TM_PLUGIN_LIFECYCLE_VARS()` + 4× `TM_PLUGIN_LIFECYCLE_FN`), auto-adding the
+  include where missing: DistributedSGL, DUDETM, leftright, MVLog, NOrec_BF,
+  NOrec, NVHTM, PersistentSGL, POWER8HTM, romulus, SingleGlobalLock, SPHT,
+  SwissTM, TSXSGL, TL2, tsc_tm, xtm.
+- `#ifdef LLVM_TM_PLUGIN` in `backends/tm_impl/*/*_runtime.cpp`: **73 → 5**
+  (93% cut; the 5 remaining are the 1-`#ifdef` GPU/misc backends: calvin,
+  gacco, gputx, jvstm, TinySTM). Target was ≤50%.
+- Gotcha hit: the macro body initially used literal `\t` (backslash-t, 2 chars)
+  for indent → a stray `\` at namespace scope ("expected unqualified-id") in the
+  **plugin** branch only (non-plugin `VARS()` is empty, so it hid in the C++
+  build). Fixed to real tabs.
+- `make fmt-check` (clang-format clean) + `make check-fast` (plugin 18 tests +
+  3×(114 test_tx / 207 test_ds) + Rust) all pass. `tl2.hpp`/`tsc_tm.hpp` have a
+  pre-existing `volatile`→`isTMGlobal` cast error under `-DLLVM_TM_PLUGIN`,
+  but those two are C++-only backends (not in the plugin build) — confirmed
+  present in the pre-migration `HEAD` code.
+
+### S30 — pre-commit hooks
+- Added `.pre-commit-config.yaml` (5 hooks):
+  - `clang-format` — **local** hook running `clang-format-22 --dry-run --Werror
+    --style=file` on staged C/C++ (`language: system`), `exclude`d for
+    `gem5_sim/`+`gpu/`+`simulator/live_app/` so it matches `make fmt-check`
+    (`Makefile` `CPP_SRC_DIRS`) exactly — the repo does not format those dirs.
+  - `cargo-fmt` — **local** hook (`pass_filenames: false`) running
+    `cargo fmt --all --check` in the 3 `RUST_DIRS` (workspace, simulator,
+    benchmarks/rust).
+  - `trailing-whitespace`, `end-of-file-fixer`, `check-yaml` — from
+    `pre-commit-hooks` v5.0.0.
+  - Rationale for local formatter hooks: the repo pins `clang-format-22`
+    (no generic `clang-format` in PATH), so a `local` hook reuses the same
+    tooling as `make fmt-check` instead of pulling a mismatched binary.
+- Documented `pre-commit install` / `pre-commit run --all-files` in
+  `CONTRIBUTING.md` (new "Local pre-commit hooks" subsection).
+- First `pre-commit run --all-files` (pre-commit 4.6.2, temp venv) applied a
+  one-time cleanup of trailing-whitespace + final-newline across ~150 files
+  (book `.tex`/`.txt`, TLA+ `.cfg`, plugin `.cpp`, etc.) — all whitespace-only,
+  no semantic changes. Second run: **all 5 hooks green (exit 0)**, meeting the
+  "green on main" acceptance.
+- **Not yet committed** — the S30 changes remain in the working tree along
+  with the broader review-02 batch; no commit was made in this session.
+
+### S31 — runnable post-merge verification
+- Added `tools/post-merge-check.sh` (fail-fast `set -euo pipefail`, per-section
+  `timeout`) executing the `docs/POST_MERGE_TEST_PLAN.md` matrix across 8
+  sections: `toolchain` (§0), `plugin` (§3, 18 tests), `cpp` (§1, 17 backends),
+  `rust` (§4), `simulator` (§5), `integrity` (§8), `tla` (§7, if jar present),
+  `gem5` (§6, if built). Selectable via `POST_MERGE_ONLY=<section>` and
+  `POST_MERGE_BACKENDS=...`; SGL/LEFTRIGHT/ROMULUS build-only (explicit
+  `tm_init`), matching the plan.
+- Added `make post-merge-check` (+ `help`, `.PHONY`) and a **weekly (Sunday)**
+  gate in `.github/workflows/nightly.yml` (second cron `'0 5 * * 0'`, job gated
+  by `contains(github.event.schedule, '0 5 * * 0')`, `timeout-minutes: 10`).
+  `docs/POST_MERGE_TEST_PLAN.md` now points at the runner.
+- **SPHT build fix (blocking the matrix):** `spht.hpp` used `stm::any_type_t` /
+  `stm::ValueType` but never included the header that defines `namespace stm`
+  (`tm_common.hpp`); it relied on fragile include order and **did not compile**
+  (pre-existing — the `HEAD` version fails identically, 20 errors). Added
+  `#include "tm_common.hpp"` to `spht.hpp` to make it self-contained. SPHT now
+  builds and passes test_tx (114) + test_ds (207).
+- **Also fixed a pre-existing `nightly.yml` YAML error:** the
+  `Upload cross-backend results` step was indented 7 spaces (vs 6), making the
+  whole workflow invalid YAML; corrected.
+- `make post-merge-check` runs the full matrix **green in ~1 min** locally
+  (exit 0); `make fmt-check` clean.
+
+### S32 — TLA+ proof hygiene
+- Documented `docs/proofs/Makefile` `$(BACKENDS)` filtering in
+  `docs/proofs/README.md` (new "Makefile targets & backend selection" section):
+  a backend is checked only when it has **both** a `<B>.tla` and a base
+  `<B>.cfg`; variant configs (`*-liveness/-sequential/-large/-small/-buggy/-check`),
+  helper modules (`TMTypes`, `TLAPS`), and TLC `*_TTrace_*` artifacts are
+  excluded. Added a `make check-one BACKEND=NOrec` example.
+- Added a `docs/proofs/Makefile` comment noting helper modules are never in
+  `BACKENDS` and that `make -n check` lists the set (no jar needed).
+- Verified `make -n check` lists exactly **29** backends, each with a matching
+  `.tla` (no helpers/artifacts). The report's "37" acceptance number was a
+  miscount — it included 6 gitignored `CSMV_TTrace_*` local artifacts + 2
+  helper modules; the 29 are the correct tracked backend set.
+
+### S07 — LLVM 22 + 23 CI matrix
+- Centralized LLVM tool discovery behind an overridable `LLVM_VERSION`
+  (default: `22`). Search order is `llvm-config-<major>`,
+  `llvm-config-<major>.1`, then the legacy `llvm-config-22`/`22.1`/generic
+  fallbacks. When `LLVM_VERSION` is explicitly set from the environment or
+  command line, the discovered major version must match it; otherwise builds
+  can fall back but still fail if LLVM `< 22`.
+- Threaded the setting through `plugin/llvm-tool-helper.mk`/`.sh`,
+  `plugin/Makefile`, `plugin/tm_pipeline.mk`, `plugin/clang-tm`,
+  `CMakeLists.txt`, and `tools/check-requirements.sh`.
+- CI plugin job now runs a matrix `llvm: [22, 23]` with
+  `continue-on-error: ${{ matrix.llvm != 22 }}`, so LLVM 22 remains required
+  while LLVM 23 is a non-blocking compatibility probe.
+- `CMakeLists.txt` now uses `find_package(LLVM 22 REQUIRED CONFIG)` and checks
+  `LLVM_VERSION_MAJOR >= 22` rather than pinning `22.1`; tool lookup prefers
+  versioned clang/opt from the discovered LLVM major.
+- Fixed the `tools/check-requirements.sh` C++20 probe on Linux clang installs
+  that select a GCC major without matching `libstdc++` dev headers: it now
+  retries with `--gcc-install-dir=/usr/lib/gcc/*/NN` candidates, matching the
+  workaround already used by `benchmarks/cpp/Makefile`.
+- Local validation: plugin discovery/build and `make check-fast` remain green
+  with the default LLVM 22 toolchain. LLVM 23 itself is not installed in this
+  container, so strict `LLVM_VERSION=23` discovery is CI-only.
+
+### S08 — `compile_commands.json` for Make
+- Added `make compiledb`, backed by `tools/generate-compiledb.sh`. The target
+  uses `bear` when available, otherwise falls back to `compiledb`, and errors
+  with install hints when neither is installed.
+- Captures plugin builds plus a representative C++ benchmark backend
+  (`NOREC` `test_tx`/`test_ds`), writes intermediate JSON under ignored
+  `build/`, and merges everything into root `compile_commands.json` (also
+  ignored).
+- The merge step expands multi-source compile commands (e.g. the plugin `.so`
+  build) into one compilation-database entry per source file, which is easier
+  for `clangd` to consume.
+- Documented `make compiledb` in `docs/DEVELOPER_GUIDE.md` and added the target
+  to `make help`.
+- Local validation with `compiledb` (temp venv fallback): `make compiledb`
+  produced a valid root `compile_commands.json` with 15 expanded entries.
+
+### S28 — `SECURITY.md` + `CODEOWNERS`
+- Added `SECURITY.md` with supported-version guidance, private reporting
+  instructions, scope (plugin passes, C++ runtimes, Rust workspace/simulator),
+  disclosure expectations, and a reminder that `main` should require passing
+  `lint` + `plugin-test` CI checks.
+- Added `.github/CODEOWNERS` for the plugin paths, shared backend hook/runtime
+  path, build/CI gates, and a root fallback. It uses a placeholder team
+  (`@llvm-tm/maintainers`) so the repo maintainers can replace it with the real
+  GitHub team/usernames before relying on automatic review requests.
+- Linked the new governance files from `README.md`.
+
+### S22 — Python dependency manifest
+- Added `requirements.txt` for optional Python plotting/analysis tools
+  (`numpy`, `pandas`, `matplotlib`). Core pipeline scripts such as
+  `plugin/tm-resolve-opaque.py` remain standard-library-only.
+- Documented `python3 -m pip install -r requirements.txt` in
+  `docs/REQUIREMENTS.md`.
+- Extended the CI `lint` job with Python 3.11, dependency install, and
+  `python3 -m compileall` over the Python tool directories so syntax regressions
+  are caught alongside formatting/clippy.
+
+### S23 — Working-tree / artifact hygiene
+- Added `make clean-book` (and included it in `make clean`) to remove
+  `docs/book` LaTeX/PDF build outputs.
+- Added `make clean-proofs` and wired TLA+ artifact cleanup into `make clean`
+  via `docs/proofs/Makefile clean`; this removes the ignored TLC
+  `docs/proofs/states/` directory, which can otherwise grow to ~19 GB locally.
+- Verified `.gitignore` already covers `.venv/`, root `m5out/`, ignored
+  `build/`/`compile_commands.json`, `docs/proofs/states/`, and book LaTeX
+  artifacts/PDFs.
+- Documented the optional gem5 tree size in `docs/REQUIREMENTS.md`: only
+  `make gem5` clones/builds it; `make check-fast` does not.
+
+### S16 — Sanitizer + coverage
+- Added `SANITIZE=address|thread|undefined|none` support to
+  `benchmarks/cpp/Makefile`; sanitizer builds force dynamic linking and add
+  ASan/UBSan or TSan flags.
+- Added a blocking CI `sanitizer` job that builds/runs `bank -t 4 -d 1000`
+  plus `test_tx`/`test_ds` for NOREC and TL2 with ASan+UBSan.
+- Added weekly `tsan` and `coverage` jobs to `nightly.yml`: TSan runs the same
+  two-backend sweep as a non-blocking race detector, while `coverage` uses
+  `cargo-llvm-cov` for the Rust workspace and simulator.
+- Local ASan validation passed for NOREC: `test_tx` 114/114, `test_ds` 207/207,
+  and `bank -t 4 -d 1000`.
+
+### S18 — Supply-chain hygiene
+- Added `.github/dependabot.yml` with weekly GitHub Actions and Cargo
+  (`simulator/`) update checks.
+- Added a weekly `audit` job to `nightly.yml` that installs `cargo-audit` and
+  audits `simulator/Cargo.lock`.
+- Documented the automated dependency checks in `SECURITY.md`.
+
+### S19 — `review-01` reproducibility
+- Added local `review-01/README.md` mapping each retained `review-01/*.log`
+  file to the `make`/`cargo` command that regenerates it and noting which logs
+  are historical failed runs.
+- Kept `review-02/report.md` as the canonical current review.
+
+### S20 — Backend lifecycle triage
+- Added `backends/tm_impl/*/STATUS.md` for all 28 backend/support directories
+  (`production`, `incubating`, `experimental`, or `support`) with a one-line
+  reason for each status.
+- Added lifecycle tables to `backends/README.md` and `docs/IMPLEMENTATIONS.md`
+  so the directory list and backend reference agree.
+- Production set is intentionally limited to the standard, stable C++ backends;
+  GPU/persistence/distributed/queue backends remain explicitly triaged rather
+  than implied by their presence in `backends/tm_impl/`.
+
+### S26 — GPU benchmark fidelity triage
+- Marked `gpu_kmeans`, `gpu_memcached`, and `gpu_tpcc` as `@experimental` in
+  `gpu/benchmarks/README.md` and in each source header.
+- Added an explicit note that `@experimental` GPU workloads are design/API
+  smoke tests only and must not be used for reported performance numbers.
+- Downgraded the `TODO.md` GPU benchmark stubs entry with the same
+  `@experimental` status and reopen criteria.
+
+### S27 — Benchmark vs test boundary
+- Renamed `tests/plugin/perf_tm_hash_set.cpp` to
+  `bench_perf_tm_hash_set.cpp` so files under `tests/plugin/` follow the clear
+  `test_*` / `bench_*` convention.
+- Added `tests/plugin/README.md` explaining that `test_*` files are correctness
+  gates and `bench_*` files are local measurements.
+- Documented the same boundary in `benchmarks/plugin/README.md`, with new
+  performance workloads normally living under `benchmarks/plugin/`.

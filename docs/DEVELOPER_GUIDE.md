@@ -86,6 +86,16 @@ cargo run -- tm-gen --bank   # Generate synthetic traces
 cargo test -- --test-threads=1
 ```
 
+### IDE / clangd
+
+```
+make compiledb                  # Generates compile_commands.json (requires bear or compiledb)
+```
+
+`make compiledb` rebuilds the plugin and one representative C++ backend
+(`NOREC` `test_tx`/`test_ds`) under `bear` or `compiledb`, then merges the
+captured commands into `compile_commands.json` for `clangd`.
+
 ## Two Instrumentation Pipelines
 
 ### Explicit API (Expli)

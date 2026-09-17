@@ -22,10 +22,29 @@ ifeq ($(HOST_ARCH),arm64)
 else
   MARCH    = -march=x86-64
 endif
+# Sanitizer support: SANITIZE=address|thread|undefined|none.
+# Sanitizer builds force dynamic linking because ASan/UBSan/TSan do not work
+# reliably with -static.
+SANITIZE ?= none
+ifeq ($(SANITIZE),address)
+  SANITIZE_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
+  SANITIZE_FORCE_DYNAMIC := 1
+else ifeq ($(SANITIZE),thread)
+  SANITIZE_FLAGS := -fsanitize=thread -fno-omit-frame-pointer -g -O1
+  SANITIZE_FORCE_DYNAMIC := 1
+else ifeq ($(SANITIZE),undefined)
+  SANITIZE_FLAGS := -fsanitize=undefined -fno-omit-frame-pointer -g
+  SANITIZE_FORCE_DYNAMIC := 1
+else
+  SANITIZE_FLAGS :=
+  SANITIZE_FORCE_DYNAMIC :=
+endif
 # -static is unsupported by the macOS linker, so static linking (self-contained
 # binaries) is the default only on Linux. Override with STATIC=0 to link
 # dynamically (faster builds) or STATIC=1 to force static on any platform.
-ifeq ($(shell uname -s),Linux)
+ifeq ($(SANITIZE_FORCE_DYNAMIC),1)
+  STATIC := 0
+else ifeq ($(shell uname -s),Linux)
   STATIC ?= 1
 else
   STATIC ?= 0
@@ -35,8 +54,8 @@ ifeq ($(STATIC),1)
 else
   STATIC_FLAG :=
 endif
-CXXFLAGS  = -std=c++20 -O3 $(MARCH) -pthread -DNDEBUG $(STATIC_FLAG) -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp $(CXXFLAGS_GCC_FIX)
-LDFLAGS   = $(STATIC_FLAG) -pthread $(CXXFLAGS_GCC_FIX)
+CXXFLAGS  = -std=c++20 -O3 $(MARCH) -pthread -DNDEBUG $(STATIC_FLAG) $(SANITIZE_FLAGS) -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp $(CXXFLAGS_GCC_FIX)
+LDFLAGS   = $(STATIC_FLAG) -pthread $(SANITIZE_FLAGS) $(CXXFLAGS_GCC_FIX)
 
 # --- Choose backend (default: TinySTM/WBCTL) --------------------
 BACKEND ?= TINYSTM

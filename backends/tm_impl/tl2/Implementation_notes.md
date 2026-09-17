@@ -35,7 +35,7 @@ Low-Cost Read-Only TransactionsOne of the goals of the proposed methodology’s 
 1.Sample the global version-clock:Load the current value of the global version-clock and store it in a local variable called read-version (rv).
 
 2.Run through a speculative execution: Execute the transaction code. Each load instruction is post-validated by checking that the location’s versioned write-lock is free and making sure that the lock’s version field is ≤
-rv. If it is greater than rv the transaction is aborted, otherwise commits. As can be seen, the read-only implementation is highly efficient because it does not construct or validate a read-set. Detection of read-only behavior can be done at the level of of each specific transaction site (e.g., method or atomic block). This can be done at compile time or by simply running all methods first as read-only, and upon detecting the first transactional write, abort and set a flag to indicate that this method should henceforth be executed in write mode. 
+rv. If it is greater than rv the transaction is aborted, otherwise commits. As can be seen, the read-only implementation is highly efficient because it does not construct or validate a read-set. Detection of read-only behavior can be done at the level of of each specific transaction site (e.g., method or atomic block). This can be done at compile time or by simply running all methods first as read-only, and upon detecting the first transactional write, abort and set a flag to indicate that this method should henceforth be executed in write mode.
 
 ## A Low Contention Global Version-Clock Implementation
 

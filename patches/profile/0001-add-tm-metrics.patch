@@ -3,7 +3,7 @@ index bbf88d4..045faa0 100644
 --- a/backends/tm_impl/tiny_stm/TinySTM_runtime.cpp
 +++ b/backends/tm_impl/tiny_stm/TinySTM_runtime.cpp
 @@ -74,6 +74,11 @@ thread_local uint64_t tm_tx_count{0};
- 
+
  std::atomic<uint64_t> g_tm_max_read_set{0};
  std::atomic<uint64_t> g_tm_max_write_set{0};
 +std::atomic<uint64_t> g_tm_min_read_set{UINT64_MAX};
@@ -15,7 +15,7 @@ index bbf88d4..045faa0 100644
  thread_local uint64_t g_tm_tx_write_set{0};
  static std::atomic<uint64_t> g_tm_begin_count{0};
 @@ -88,12 +93,30 @@ void tm_init() {
- 
+
  void tm_exit() {
  	tinystm::exit();
 +	auto cc = g_tm_commit_count.load();
@@ -79,7 +79,7 @@ index 3c3440f..c24770e 100644
  	    << "  intruder: -a <pct_attack> -l <max_packets> -n <streams> -s <seed>\n"
 @@ -260,7 +260,7 @@ MAIN int main(int argc, char *argv[])
  	g_num_threads = DEFAULT_NB_THREADS;
- 
+
  	for (int i = 1; i < argc; i++) {
 -		if (strcmp(argv[i], "-t") == 0) {
 +		if (strcmp(argv[i], "-p") == 0) {
@@ -101,7 +101,7 @@ index 1cdbf06..de00459 100644
 +++ b/benchmarks/plugin/STAMP/bayes_bench.hpp
 @@ -1,48 +1,35 @@
  #pragma once
- 
+
 -// NOTE: Bayes avoids std::string and other complex STL types in TM structs.
 -//
 -// The TM instrumentation pass cannot see into opaque library functions
@@ -125,7 +125,7 @@ index 1cdbf06..de00459 100644
 -#include <vector>
 +
 +#define BAYES_MAX_PARENTS 64
- 
+
  struct Task {
      int op;
      int from_id;
@@ -133,7 +133,7 @@ index 1cdbf06..de00459 100644
      double score;
 -    bool operator<(const Task& o) const { return score > o.score; }
  };
- 
+
  struct TM BayesData {
 +    int* records;
      int num_var;
@@ -163,7 +163,7 @@ index 1cdbf06..de00459 100644
 @@ -50,17 +37,49 @@ struct TM BayesData {
  static BayesData* g_bayes = nullptr;
  static std::mutex g_init_mutex;
- 
+
 +static inline bool task_heap_empty(int count) { return count == 0; }
 +
 +static inline void task_heap_push(Task* heap, int& count, const Task& t) {
@@ -204,7 +204,7 @@ index 1cdbf06..de00459 100644
 -    std::vector<int> c0(ncfg, 0), c1(ncfg, 0);
 +    int c0[128], c1[128];
 +    for (int i = 0; i < ncfg; i++) c0[i] = c1[i] = 0;
- 
+
      for (int r = 0; r < data->num_record; r++) {
          int cfg = 0;
          for (int i = 0; i < np; i++)
@@ -213,7 +213,7 @@ index 1cdbf06..de00459 100644
 +            cfg = (cfg << 1) | data->records[r * data->num_var + parents_vec[i]];
 +        if (data->records[r * data->num_var + var] == 0) c0[cfg]++; else c1[cfg]++;
      }
- 
+
      double ll = 0.0;
 @@ -73,6 +92,7 @@ static double compute_density_ll(BayesData* data, int var,
          if (p0 > 0) ll += frac * p0 * std::log(p0);
@@ -222,11 +222,11 @@ index 1cdbf06..de00459 100644
 +    tm_serialize_unlock();
      return ll;
  }
- 
+
 @@ -86,45 +106,66 @@ inline void bayes_generate_network() {
      data->global_max_edges = g_bayes_e;
      data->quality_factor = 1.0;
- 
+
 -    data->parents.resize(data->num_var);
 -    data->children.resize(data->num_var);
 -    data->local_ll.resize(data->num_var, 0.0);
@@ -244,10 +244,10 @@ index 1cdbf06..de00459 100644
 +    data->task_list = new Task[task_cap]();
 +    data->task_count = 0;
 +    data->task_capacity = task_cap;
- 
+
      PRNG rng(g_bayes_s);
 -    data->records.resize(data->num_record, std::vector<int>(data->num_var));
- 
+
 -    for (int v = 1; v < data->num_var; v++) {
 +    for (int v = 1; v < nvar; v++) {
          int max_np = std::min(g_bayes_n, v);
@@ -274,7 +274,7 @@ index 1cdbf06..de00459 100644
              }
          }
      }
- 
+
 -    for (int r = 0; r < data->num_record; r++) {
 -        for (int v = 0; v < data->num_var; v++) {
 -            if (data->parents[v].empty()) {
@@ -301,17 +301,17 @@ index 1cdbf06..de00459 100644
              }
          }
      }
- 
+
      data->base_penalty = g_bayes_i > 0
 -        ? -0.5 * std::log((double)data->num_record) * g_bayes_i
 +        ? -0.5 * std::log((double)nrec) * g_bayes_i
          : 0.0;
      g_bayes = data;
- 
+
 @@ -141,51 +182,78 @@ inline void bayes_generate_network() {
      fflush(stdout);
  }
- 
+
 +static int parents_has(BayesData* data, int var, int p) {
 +    int* pv = &data->parents[var * BAYES_MAX_PARENTS];
 +    int pc = data->parents_cnt[var];
@@ -347,7 +347,7 @@ index 1cdbf06..de00459 100644
      }
      return false;
  }
- 
+
 +__attribute__((annotate("tm_allow_opaque")))
  TX static Task pop_best_task(BayesData* data) {
      tm_serialize_lock();
@@ -364,7 +364,7 @@ index 1cdbf06..de00459 100644
      tm_serialize_unlock();
      return t;
  }
- 
+
 +__attribute__((annotate("tm_allow_opaque")))
  TX static void insert_task(BayesData* data, const Task& t) {
      tm_serialize_lock();
@@ -374,7 +374,7 @@ index 1cdbf06..de00459 100644
 +        task_heap_push(data->task_list, data->task_count, t);
      tm_serialize_unlock();
  }
- 
+
 +__attribute__((annotate("tm_allow_opaque")))
  TX static bool apply_insert(BayesData* data, int from, int to) {
      tm_serialize_lock();
@@ -385,7 +385,7 @@ index 1cdbf06..de00459 100644
 +    if (data->global_max_edges > 0 &&
 +        data->parents_cnt[to] >= data->global_max_edges)
          { tm_serialize_unlock(); return false; }
- 
+
 -    data->parents[to].insert(from);
 -    data->children[from].insert(to);
 +    int pc = data->parents_cnt[to];
@@ -395,7 +395,7 @@ index 1cdbf06..de00459 100644
 +    data->children_adj[from * BAYES_MAX_PARENTS + cc] = to;
 +    data->children_cnt[from] = cc + 1;
      data->total_parents++;
- 
+
 -    std::vector<int> par(data->parents[to].begin(), data->parents[to].end());
 -    double new_ll = compute_density_ll(data, to, par);
 +    int par[BAYES_MAX_PARENTS];
@@ -409,7 +409,7 @@ index 1cdbf06..de00459 100644
 @@ -193,27 +261,32 @@ TX static bool apply_insert(BayesData* data, int from, int to) {
      return true;
  }
- 
+
 +__attribute__((annotate("tm_allow_opaque")))
  TX static Task find_best_insert(BayesData* data, int to) {
      tm_serialize_lock();
@@ -417,7 +417,7 @@ index 1cdbf06..de00459 100644
 +    Task best;
 +    best.op = -1; best.from_id = -1; best.to_id = -1; best.score = -1e100;
      double base_ll = data->local_ll[to];
- 
+
 +    int pc = data->parents_cnt[to];
      for (int from = 0; from < data->num_var; from++) {
          if (from == to) continue;
@@ -427,7 +427,7 @@ index 1cdbf06..de00459 100644
 -        if (data->global_max_edges > 0 && (int)data->parents[to].size() >= data->global_max_edges)
 -            continue;
 +        if (data->global_max_edges > 0 && pc >= data->global_max_edges) continue;
- 
+
 -        std::vector<int> par(data->parents[to].begin(), data->parents[to].end());
 -        par.push_back(from);
 -        double new_ll = compute_density_ll(data, to, par);
@@ -439,7 +439,7 @@ index 1cdbf06..de00459 100644
          double delta = new_ll - base_ll;
          double score = data->total_parents * data->base_penalty +
                         data->num_record * (data->base_log_likelihood + delta);
- 
+
 -        if (score > best.score)
 -            best = {0, from, to, score};
 +        if (score > best.score) {
@@ -449,7 +449,7 @@ index 1cdbf06..de00459 100644
      tm_serialize_unlock();
      return best;
 @@ -221,18 +294,22 @@ TX static Task find_best_insert(BayesData* data, int to) {
- 
+
  static void init_worker(BayesData* data, int nvar, int start, int end) {
      for (int v = start; v < end; v++) {
 -        data->local_ll[v] = compute_density_ll(data, v, {});
@@ -477,7 +477,7 @@ index 1cdbf06..de00459 100644
 @@ -245,7 +322,6 @@ THREAD void worker_bayes(ThreadData* td) {
      int start = td->thread_id * chunk;
      int end = std::min(start + chunk, nvar);
- 
+
 -    // Serialize initialization to avoid data races on non-TX code
      {
          std::lock_guard<std::mutex> lock(g_init_mutex);

@@ -1,6 +1,6 @@
 /**
  * TL2 - Full Implementation per Paper Specification
- * 
+ *
  * Features:
  * - Global version-clock (incremented on each commit)
  * - Versioned write-locks (lock word contains version number)

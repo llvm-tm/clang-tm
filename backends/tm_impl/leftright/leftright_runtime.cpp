@@ -1,3 +1,4 @@
+#include "tm_backend_macros.hpp"
 #include <atomic>
 #include <csetjmp>
 #include <cstdint>
@@ -50,21 +51,8 @@ extern const TMRealHooks g_leftright_hooks;
 
 extern "C" {
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_init();
-static void do_tm_exit();
-static void do_tm_init_thread();
-static void do_tm_exit_thread();
-
-void (*tm_init)() = do_tm_init;
-void (*tm_exit)() = do_tm_exit;
-void (*tm_init_thread)() = do_tm_init_thread;
-void (*tm_exit_thread)() = do_tm_exit_thread;
-
-static void do_tm_init()
-#else
-void tm_init()
-#endif
+TM_PLUGIN_LIFECYCLE_VARS()
+TM_PLUGIN_LIFECYCLE_FN(do_tm_init, void tm_init())
 {
 	if (stm::tm_region_init() != 0) {
 		fprintf(stderr, "FATAL: tm_region_init() failed\n");
@@ -74,11 +62,7 @@ void tm_init()
 	tm_register_real_hooks(&g_leftright_hooks);
 }
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_exit()
-#else
-void tm_exit()
-#endif
+TM_PLUGIN_LIFECYCLE_FN(do_tm_exit, void tm_exit())
 {
 	leftright::exit();
 	if (auto ac = leftright::g_tm_abort_count.load(); ac > 0) {
@@ -88,21 +72,13 @@ void tm_exit()
 	}
 }
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_init_thread()
-#else
-void tm_init_thread()
-#endif
+TM_PLUGIN_LIFECYCLE_FN(do_tm_init_thread, void tm_init_thread())
 {
 	tm_hook_init_thread();
 	leftright::init_thread();
 }
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_exit_thread()
-#else
-void tm_exit_thread()
-#endif
+TM_PLUGIN_LIFECYCLE_FN(do_tm_exit_thread, void tm_exit_thread())
 {
 	tm_hook_exit_thread();
 }

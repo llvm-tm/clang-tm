@@ -5,7 +5,7 @@ index 0403444..0cd7b0b 100644
 @@ -41,6 +41,23 @@
  #include "../common/tm_region_allocator.hpp"
  #include "../common/tm_alloc_overrides.hpp"
- 
+
 +// ── TSX profiling instrumentation ───────────────────────
 +// Define TSX_PROFILE to enable detailed cycle-level timing
 +// via RDTSC.  Prints a TSX_STATS: line at exit.
@@ -24,12 +24,12 @@ index 0403444..0cd7b0b 100644
 +#endif
 +
  extern const TMRealHooks g_tsxsgl_hooks;
- 
+
  thread_local bool g_in_tx = false;
 @@ -50,9 +67,45 @@ thread_local SpecAlloc *g_spec_allocs = nullptr;
  thread_local bool in_tsx = false;
  thread_local uint64_t tsx_start_owner = 0;
- 
+
 +#ifdef TSX_PROFILE
 +thread_local uint64_t tsx_depth_start = 0;
 +thread_local uint64_t tsx_read_set_count = 0;
@@ -40,7 +40,7 @@ index 0403444..0cd7b0b 100644
 +
  static std::mutex global_tx_lock;
  static std::atomic<uint64_t> sgl_owner{0};
- 
+
 +// ── TSX profile counters (atomically aggregated) ────────
 +#ifdef TSX_PROFILE
 +static std::atomic<uint64_t> tsx_acc_xbegin_ok{0};
@@ -122,7 +122,7 @@ index 0403444..0cd7b0b 100644
 @@ -179,11 +272,23 @@ static void real_tm_begin() {
      if (tm_nested_call_counter > 1) return;
      g_in_tx = true;
- 
+
 +#ifdef TSX_PROFILE
 +    tsx_depth_start = 0;
 +    tsx_read_set_count = 0;
@@ -160,7 +160,7 @@ index 0403444..0cd7b0b 100644
 +                tsx_abort_other.fetch_add(1, std::memory_order_relaxed);
 +            }
 +#endif
- 
+
              if ((status & _XABORT_EXPLICIT) &&
                  _XABORT_CODE(status) == LOCK_BUSY) {
 +                uint64_t sp_s = tsx_rdtsc();
@@ -182,11 +182,11 @@ index 0403444..0cd7b0b 100644
 +    tsx_cnt_sgl_begin.fetch_add(1, std::memory_order_relaxed);
      in_tsx = false;
  }
- 
+
 @@ -214,34 +338,83 @@ static void real_tm_end() {
      if (tm_nested_call_counter > 1) return;
      g_in_tx = false;
- 
+
 +#ifdef TSX_PROFILE
 +    tsx_read_set_count = tsx_read_set_lines.size();
 +    tsx_write_set_count = tsx_write_set_lines.size();
@@ -215,7 +215,7 @@ index 0403444..0cd7b0b 100644
 +    tsx_acc_sgl_end.fetch_add(tsx_rdtsc() - sgle_s, std::memory_order_relaxed);
 +    tsx_cnt_sgl_end.fetch_add(1, std::memory_order_relaxed);
  }
- 
+
 -static uint8_t  real_tm_read_i1(uint8_t *addr)  { return *addr; }
 -static uint16_t real_tm_read_i2(uint16_t *addr) { return *addr; }
 -static uint32_t real_tm_read_i4(uint32_t *addr) { return *addr; }
@@ -279,6 +279,6 @@ index 0403444..0cd7b0b 100644
 +    *(volatile uint64_t*)addr = (uint64_t)val;
 +}
 +#endif
- 
+
  static void* real_tm_malloc(size_t size) {
      void* p = stm::tm_region_malloc(size);

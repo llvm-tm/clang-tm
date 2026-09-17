@@ -73,7 +73,7 @@ Cluster centers varied from `m` to `n`. Convergence threshold `t`. Input `i`: `n
 ```
 The reference inputs are at https://github.com/ccaominh/stamp/tree/master/kmeans/inputs — they are `random-n16384-d24-c16.txt.gz` etc. These files are synthetically generated; the algorithm below reproduces them.
 
-> **Generating kmeans inputs** (`tools/gen_kmeans_input.py` planned):  
+> **Generating kmeans inputs** (`tools/gen_kmeans_input.py` planned):
 > `c` cluster centers are chosen uniformly at random within a unit hypercube of `d` dimensions. Each of `n` points is assigned to the nearest center plus Gaussian noise (`σ = 0.01`). This matches the reference STAMP generator.
 
 ### labyrinth

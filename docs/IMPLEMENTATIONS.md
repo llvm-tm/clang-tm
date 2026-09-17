@@ -2,6 +2,18 @@
 
 Comprehensive reference covering all 16+ STM/HTM/distributed TM backends.
 
+## Lifecycle triage
+
+Per-backend lifecycle status is authoritative in
+`backends/tm_impl/<backend>/STATUS.md`:
+
+- `production`: TinySTM (WBCTL/WBETL/WT), TL2, NOrec, NOrec-BF, SwissTM, SGL,
+  TSXSGL, PersistentSGL, XTM, Romulus, LeftRight, SPHT.
+- `incubating`: TSC-TM, MVLog, CSMV, GPU STM/PR-STM, NV-HTM, DudeTM,
+  DistributedSGL, queue, JVSTM, TiKV.
+- `experimental`: Calvin, GAccO, GPUTx, POWER8 HTM.
+- `support`: `common`, `tm_region_allocator`.
+
 ---
 
 ## 1. TinySTM (WBCTL / WBETL / WT)

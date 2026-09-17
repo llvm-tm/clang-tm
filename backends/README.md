@@ -66,6 +66,18 @@ only the final link step differs.
 | PersistentSGL      | `PersistentSGL_runtime.cpp`          | *(none)*                  | *(none)*                    |
 | DistributedSGL     | `DistributedSGL_runtime.cpp`         | *(none)*                  | *(none)*                    |
 
+## Lifecycle triage
+
+Each directory under `backends/tm_impl/` has a `STATUS.md`. The current
+triage is:
+
+| Status | Directories | Meaning |
+|--------|-------------|---------|
+| `production` | `tiny_stm`, `tl2`, `norec`, `norec_bf`, `swisstm`, `single_global_lock`, `tsx_sgl`, `persistent_sgl`, `xtm`, `romulus`, `leftright`, `spht` | Safe to depend on; covered by the standard C++ correctness path or explicitly documented as hardware-required. |
+| `incubating` | `tsc_tm`, `mvlog`, `csmv`, `gpu_stm`, `nvhtm`, `dudetm`, `distributed_sgl`, `queue`, `jvstm`, `tikv` | Useful and partially tested, but still moving toward a stable gate. |
+| `experimental` | `calvin`, `gacco`, `gputx`, `power8_htm` | Design/research scaffolds; do not treat as stable backends. |
+| `support` | `common`, `tm_region_allocator` | Shared infrastructure, not selectable STMs. |
+
 ## Runtime API
 
 Each runtime wrapper exports the following functions:

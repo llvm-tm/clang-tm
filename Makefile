@@ -26,7 +26,7 @@ PLUGIN := $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
 # Build everything with `make all`; run the ~60s smoke test with `make check-fast`.
 .DEFAULT_GOAL := help
 
-.PHONY: all clean plugin plugin-benchmarks expli-benchmarks tests check check-fast help info test_run fmt fmt-check
+.PHONY: all clean plugin plugin-benchmarks expli-benchmarks tests check check-fast check-all post-merge-check compiledb clean-book clean-proofs help info test_run fmt fmt-check
 
 all: info plugin plugin-benchmarks expli-benchmarks
 
@@ -98,6 +98,8 @@ clean:
 	-$(MAKE) -C $(PLUGIN_BENCHMARKS_DIR)/datastructures clean 2>&1
 	-$(MAKE) -C $(LLVM_PLUGIN_DIR) clean 2>&1
 	-$(MAKE) -C $(EXPLI_BENCHMARKS_DIR) clean 2>&1
+	-$(MAKE) -C docs/proofs clean 2>&1
+	-$(MAKE) -C docs/book cleanall 2>&1
 	rm -rf $(LLVM_PLUGIN_DIR)/bin $(LLVM_PLUGIN_DIR)/out
 	rm -f /tmp/tm_persistent_state.bin
 	@echo "Clean complete."
@@ -121,7 +123,9 @@ help:
 	@echo "  check               - Build + run the instrumented plugin tests"
 	@echo "  check-fast          - Fast smoke: plugin + TINYSTM/NOREC/TL2 + Rust workspaces"
 	@echo "  check-all           - Full sweep: test_tx/test_ds across all C++ backends"
+	@echo "  post-merge-check    - Full post-merge matrix (plugin+C+++Rust+sim+integrity)"
 	@echo "  test_run            - Run a couple of plugin benchmarks"
+	@echo "  compiledb           - Generate compile_commands.json for clangd"
 	@echo ""
 	@echo "Other targets:"
 	@echo "  gem5                - Clone + build gem5 (X86_TSX simulation target)"
@@ -129,6 +133,8 @@ help:
 	@echo "  fmt                 - Apply clang-format (C++) + rustfmt (Rust)"
 	@echo "  fmt-check           - Verify formatting + clippy (no changes; CI gate)"
 	@echo "  clean               - Clean all build artifacts"
+	@echo "  clean-book          - Remove docs/book LaTeX build artifacts"
+	@echo "  clean-proofs        - Remove TLA+ proof/TLC artifacts under docs/proofs"
 	@echo ""
 	@echo "Options:"
 	@echo "  BACKEND=<name>      - expli benchmark backend (e.g. tinystm, norec, tl2)"
@@ -176,6 +182,22 @@ check-all:
 	done
 	@echo "=== All backend tests complete ==="
 
+# --- Post-merge verification (S31) ------------------------------------------
+# Runs the full matrix from docs/POST_MERGE_TEST_PLAN.md (toolchain, plugin,
+# C++ backends, Rust workspace, simulator, merge-integrity, TLA+ smoke, gem5).
+# Fail-fast with per-section timeouts; target <10 min on CI. Gated weekly in
+# .github/workflows/nightly.yml.
+#   make post-merge-check                       # full matrix
+#   POST_MERGE_ONLY=cpp make post-merge-check   # one section
+post-merge-check:
+	./tools/post-merge-check.sh
+
+# --- IDE / clangd support (S08) ---------------------------------------------
+# Generate root compile_commands.json from the plugin and a representative C++
+# benchmark backend build. Requires either `bear` or `compiledb`.
+compiledb:
+	@./tools/generate-compiledb.sh
+
 # --- Format / lint (S15) ----------------------------------------------------
 # `make fmt`      — apply clang-format (C++) + rustfmt (Rust) across the repo.
 # `make fmt-check`— verify formatting without changing files (CI gate).
@@ -209,6 +231,14 @@ fmt-check:
 	@(cd explicit_api/rust/workspace && cargo clippy --features wbctl -p tm -- -D warnings)
 	@(cd simulator && cargo clippy -- -D warnings)
 	@echo "=== fmt-check: all clean ==="
+
+clean-book:
+	-$(MAKE) -C docs/book cleanall 2>&1
+	@echo "Book build artifacts removed."
+
+clean-proofs:
+	-$(MAKE) -C docs/proofs clean 2>&1
+	@echo "TLA+ proof artifacts removed."
 
 # --- gem5 simulation -------------------------------------------------------
 .PHONY: gem5 gem5-clean

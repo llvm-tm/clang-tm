@@ -173,7 +173,7 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION
-VARIABLES next, logState, logWs, logRs, index, dirty, mem, committed, aborted, 
+VARIABLES next, logState, logWs, logRs, index, dirty, mem, committed, aborted,
           lastSignalFence, lastThreadFence, lastRmw, pc
 
 (* define statement *)
@@ -192,8 +192,8 @@ ReadValue(a, s) ==
 
 VARIABLES slot, read_set, write_set
 
-vars == << next, logState, logWs, logRs, index, dirty, mem, committed, 
-           aborted, lastSignalFence, lastThreadFence, lastRmw, pc, slot, 
+vars == << next, logState, logWs, logRs, index, dirty, mem, committed,
+           aborted, lastSignalFence, lastThreadFence, lastRmw, pc, slot,
            read_set, write_set >>
 
 ProcSet == (Thread)
@@ -220,15 +220,15 @@ Init == (* Global variables *)
 L_idle(self) == /\ pc[self] = "L_idle"
                 /\ IF committed[self] >= MaxCommits \/ aborted[self] >= MaxAborts
                       THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
-                           /\ UNCHANGED << next, logState, lastSignalFence, 
-                                           lastThreadFence, lastRmw, slot, 
+                           /\ UNCHANGED << next, logState, lastSignalFence,
+                                           lastThreadFence, lastRmw, slot,
                                            read_set, write_set >>
                       ELSE /\ IF next >= MaxSlots
                                  THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
-                                      /\ UNCHANGED << next, logState, 
-                                                      lastSignalFence, 
-                                                      lastThreadFence, lastRmw, 
-                                                      slot, read_set, 
+                                      /\ UNCHANGED << next, logState,
+                                                      lastSignalFence,
+                                                      lastThreadFence, lastRmw,
+                                                      slot, read_set,
                                                       write_set >>
                                  ELSE /\ slot' = [slot EXCEPT ![self] = next]
                                       /\ next' = next + 1
@@ -239,7 +239,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
                                       /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
                                       /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
                                       /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                /\ UNCHANGED << logWs, logRs, index, dirty, mem, committed, 
+                /\ UNCHANGED << logWs, logRs, index, dirty, mem, committed,
                                 aborted >>
 
 L_active(self) == /\ pc[self] = "L_active"
@@ -261,17 +261,17 @@ L_active(self) == /\ pc[self] = "L_active"
                         /\ UNCHANGED <<lastSignalFence, read_set>>
                      \/ /\ pc' = [pc EXCEPT ![self] = "L_wait"]
                         /\ UNCHANGED <<lastSignalFence, lastRmw, read_set, write_set>>
-                  /\ UNCHANGED << next, logState, logWs, logRs, index, dirty, 
-                                  mem, committed, aborted, lastThreadFence, 
+                  /\ UNCHANGED << next, logState, logWs, logRs, index, dirty,
+                                  mem, committed, aborted, lastThreadFence,
                                   slot >>
 
 L_wait(self) == /\ pc[self] = "L_wait"
                 /\ IF \A s \in 0..(slot[self]-1) : logState[s] \in {"committed", "aborted"}
                       THEN /\ pc' = [pc EXCEPT ![self] = "L_validate"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "L_wait"]
-                /\ UNCHANGED << next, logState, logWs, logRs, index, dirty, 
-                                mem, committed, aborted, lastSignalFence, 
-                                lastThreadFence, lastRmw, slot, read_set, 
+                /\ UNCHANGED << next, logState, logWs, logRs, index, dirty,
+                                mem, committed, aborted, lastSignalFence,
+                                lastThreadFence, lastRmw, slot, read_set,
                                 write_set >>
 
 L_validate(self) == /\ pc[self] = "L_validate"
@@ -292,17 +292,17 @@ L_validate(self) == /\ pc[self] = "L_validate"
                                /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
                                /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                               /\ UNCHANGED << logWs, logRs, index, dirty, 
+                               /\ UNCHANGED << logWs, logRs, index, dirty,
                                                committed, lastSignalFence >>
-                    /\ UNCHANGED << next, mem, lastThreadFence, slot, read_set, 
+                    /\ UNCHANGED << next, mem, lastThreadFence, slot, read_set,
                                     write_set >>
 
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << next, logState, logWs, logRs, index, dirty, 
-                                mem, committed, aborted, lastSignalFence, 
-                                lastThreadFence, lastRmw, slot, read_set, 
+                /\ UNCHANGED << next, logState, logWs, logRs, index, dirty,
+                                mem, committed, aborted, lastSignalFence,
+                                lastThreadFence, lastRmw, slot, read_set,
                                 write_set >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_wait(self)

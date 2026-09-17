@@ -146,10 +146,10 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION
-VARIABLES mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, 
+VARIABLES mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw,
           pc, phase, read_entries, write_set, has_write
 
-vars == << mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, 
+vars == << mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw,
            pc, phase, read_entries, write_set, has_write >>
 
 ProcSet == (Thread)
@@ -171,8 +171,8 @@ Init == (* Global variables *)
 L_idle(self) == /\ pc[self] = "L_idle"
                 /\ IF committed[self] >= MaxCommits
                       THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
-                           /\ UNCHANGED << lastSignalFence, lastThreadFence, 
-                                           lastRmw, phase, read_entries, 
+                           /\ UNCHANGED << lastSignalFence, lastThreadFence,
+                                           lastRmw, phase, read_entries,
                                            write_set, has_write >>
                       ELSE /\ phase' = [phase EXCEPT ![self] = "collect"]
                            /\ read_entries' = [read_entries EXCEPT ![self] = {}]
@@ -192,7 +192,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                 ELSE /\ IF write_set[self][a] = NoWrite
                                            THEN /\ TRUE
                                            ELSE /\ TRUE
-                                     /\ UNCHANGED << lastSignalFence, 
+                                     /\ UNCHANGED << lastSignalFence,
                                                      read_entries >>
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ UNCHANGED <<mem, committed, aborted, lastRmw, phase, write_set, has_write>>
@@ -210,9 +210,9 @@ L_active(self) == /\ pc[self] = "L_active"
                      \/ /\ IF phase[self] = "collect"
                               THEN /\ phase' = [phase EXCEPT ![self] = "execute"]
                                    /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                   /\ UNCHANGED << mem, committed, aborted, 
-                                                   lastSignalFence, 
-                                                   read_entries, write_set, 
+                                   /\ UNCHANGED << mem, committed, aborted,
+                                                   lastSignalFence,
+                                                   read_entries, write_set,
                                                    has_write >>
                               ELSE /\ IF has_write[self] /\ \E a \in Addr : write_set[self][a] # NoWrite
                                          THEN /\ IF \A <<addr, captured>> \in read_entries[self] :
@@ -223,9 +223,9 @@ L_active(self) == /\ pc[self] = "L_active"
                                                          /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                                                          /\ phase' = [phase EXCEPT ![self] = "idle"]
                                                          /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                                                         /\ UNCHANGED << aborted, 
-                                                                         read_entries, 
-                                                                         write_set, 
+                                                         /\ UNCHANGED << aborted,
+                                                                         read_entries,
+                                                                         write_set,
                                                                          has_write >>
                                                     ELSE /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
                                                          /\ phase' = [phase EXCEPT ![self] = "collect"]
@@ -233,16 +233,16 @@ L_active(self) == /\ pc[self] = "L_active"
                                                          /\ write_set' = [write_set EXCEPT ![self] = [a \in Addr |-> NoWrite]]
                                                          /\ has_write' = [has_write EXCEPT ![self] = FALSE]
                                                          /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                                         /\ UNCHANGED << mem, 
-                                                                         committed, 
+                                                         /\ UNCHANGED << mem,
+                                                                         committed,
                                                                          lastSignalFence >>
                                          ELSE /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                                               /\ phase' = [phase EXCEPT ![self] = "idle"]
                                               /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                                              /\ UNCHANGED << mem, aborted, 
-                                                              lastSignalFence, 
-                                                              read_entries, 
-                                                              write_set, 
+                                              /\ UNCHANGED << mem, aborted,
+                                                              lastSignalFence,
+                                                              read_entries,
+                                                              write_set,
                                                               has_write >>
                         /\ UNCHANGED lastRmw
                   /\ UNCHANGED lastThreadFence
@@ -250,8 +250,8 @@ L_active(self) == /\ pc[self] = "L_active"
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << mem, committed, aborted, lastSignalFence, 
-                                lastThreadFence, lastRmw, phase, read_entries, 
+                /\ UNCHANGED << mem, committed, aborted, lastSignalFence,
+                                lastThreadFence, lastRmw, phase, read_entries,
                                 write_set, has_write >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_done(self)

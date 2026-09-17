@@ -29,10 +29,10 @@ for f in files:
         continue
     base = basename[:-4]
     parts = base.split('_')
-    
+
     # Determine suite
     suite = parts[0]  # stamp, tpcc, ycsb, stmbench7
-    
+
     # Parse backend, thread count, sample
     if suite == 'stmbench7':
         # stmbench7_{backend}_{t}t_s{s}
@@ -65,22 +65,22 @@ for f in files:
                 thread_part = int(p[:-1])
             elif p.startswith('s') and p[1:].isdigit():
                 sample_part = int(p[1:])
-    
+
     if thread_part is None or sample_part is None:
         continue
-    
+
     try:
         text = open(f).read()
     except:
         continue
-    
+
     metrics = {}
-    
+
     # STAMP: Time = X or Time: X
     m = re.search(r'Time\s*[=:]\s*([0-9.]+)', text)
     if m:
         metrics['time'] = float(m.group(1))
-    
+
     # TPCC/YCSB: Ops/sec (handles int, float, and scientific notation like 1.13335e+06)
     m = re.search(r'Ops/sec[:\s]*([0-9.eE+\-]+)', text)
     if m:
@@ -88,7 +88,7 @@ for f in files:
             metrics['ops'] = float(m.group(1))
         except ValueError:
             pass
-    
+
     # STMbench7: Read-only / Update
     m = re.search(r'Read-only:\s*(\d+)', text)
     if m:
@@ -96,19 +96,19 @@ for f in files:
     m = re.search(r'Update:\s*(\d+)', text)
     if m:
         metrics['upd'] = int(m.group(1))
-    
+
     # Aborts (TinySTM)
     m = re.search(r'total aborts = (\d+)', text)
     if m:
         metrics['aborts'] = int(m.group(1))
-    
+
     # TSX stats
     m = re.search(r'TSXSTATS started=(\d+) committed=(\d+) aborted=(\d+)', text)
     if m:
         metrics['tsx_started'] = int(m.group(1))
         metrics['tsx_committed'] = int(m.group(2))
         metrics['tsx_aborted'] = int(m.group(3))
-    
+
     # Check for crash/timeout
     if os.path.getsize(f) == 0:
         metrics['status'] = 'EMPTY'
@@ -116,11 +116,11 @@ for f in files:
         metrics['status'] = 'CRASH'
     elif 'Aborted' in text or 'SIGABRT' in text:
         metrics['status'] = 'ABORT'
-    
+
     # Flag as CRASH if no metrics extracted and file is basically empty (just header)
     if not metrics and os.path.getsize(f) < 200:
         metrics['status'] = 'CRASH'
-    
+
     key = (suite, backend, thread_part, sample_part)
     results[key] = metrics
 
@@ -146,7 +146,7 @@ for suite in suites_order:
     print(f"\n{'='*80}")
     print(f"  {suite_labels.get(suite, suite)}")
     print(f"{'='*80}")
-    
+
     # Collect backends and thread counts for this suite
     backends = set()
     threads_set = set()
@@ -154,21 +154,21 @@ for suite in suites_order:
         if s == suite:
             backends.add(bk)
             threads_set.add(t)
-    
+
     backends = sorted(backends)
     threads = sorted(threads_set)
-    
+
     if not backends:
         print("  No results")
         continue
-    
+
     # Print header
     header = f"{'Threads':>8}"
     for bk in backends:
         header += f"  {bk:>14}"
     print(header)
     print('-' * len(header))
-    
+
     for t in threads:
         row = f"{t:>8}"
         for bk in backends:
@@ -207,7 +207,7 @@ for suite in suites_order:
             else:
                 row += f"  {'MISSING':>14}"
         print(row)
-    
+
     # Print aborts if available (only TinySTM reports them)
     if suite in ('tpcc', 'ycsb') and any(('tinystm' in bk for bk in backends)):
         print()

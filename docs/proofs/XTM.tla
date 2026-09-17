@@ -201,10 +201,10 @@ end process;
 end algorithm; *)
 
 \* BEGIN TRANSLATION
-VARIABLES pc, mem, xadt_owner, xadt_version, committed, aborted, lastSignalFence, 
+VARIABLES pc, mem, xadt_owner, xadt_version, committed, aborted, lastSignalFence,
            lastThreadFence, lastRmw, queueMode, read_set, write_set
 
-vars == << pc, mem, xadt_owner, xadt_version, committed, aborted, lastSignalFence, 
+vars == << pc, mem, xadt_owner, xadt_version, committed, aborted, lastSignalFence,
            lastThreadFence, lastRmw, queueMode, read_set, write_set >>
 
 ProcSet == (Thread)
@@ -228,7 +228,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
                  /\ IF committed[self] >= MaxCommits
                        THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
                        ELSE /\ pc' = [pc EXCEPT ![self] = "L_begin"]
-                 /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
+                 /\ UNCHANGED << mem, xadt_owner, xadt_version, committed,
                                  aborted, lastSignalFence, lastThreadFence, lastRmw, queueMode, read_set, write_set >>
 
 L_begin(self) == /\ pc[self] = "L_begin"
@@ -240,7 +240,7 @@ L_begin(self) == /\ pc[self] = "L_begin"
                  /\ \/ /\ queueMode' = [queueMode EXCEPT ![self] = TRUE]
                     \/ /\ queueMode' = [queueMode EXCEPT ![self] = FALSE]
                  /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                 /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
+                 /\ UNCHANGED << mem, xadt_owner, xadt_version, committed,
                                  aborted >>
 
 L_active(self) == /\ pc[self] = "L_active"
@@ -333,7 +333,7 @@ L_writeback(self) == /\ pc[self] = "L_writeback"
                       /\ mem' =    [p \in Page |->
                                 IF write_set[self][p] # NoWrite THEN write_set[self][p] ELSE mem[p]]
                       /\ pc' = [pc EXCEPT ![self] = "L_release"]
-                      /\ UNCHANGED << xadt_owner, xadt_version, committed, 
+                      /\ UNCHANGED << xadt_owner, xadt_version, committed,
                                       aborted, lastSignalFence, lastThreadFence, lastRmw, queueMode, read_set, write_set >>
 
 L_release(self) == /\ pc[self] = "L_release"
@@ -361,7 +361,7 @@ L_abort(self) == /\ pc[self] = "L_abort"
 L_done(self) == /\ pc[self] = "L_done"
                  /\ TRUE
                  /\ pc' = [pc EXCEPT ![self] = "Done"]
-                 /\ UNCHANGED << mem, xadt_owner, xadt_version, committed, 
+                 /\ UNCHANGED << mem, xadt_owner, xadt_version, committed,
                                  aborted, lastSignalFence, lastThreadFence, lastRmw, queueMode, read_set, write_set >>
 
 ThreadProc(self) == L_idle(self) \/ L_begin(self) \/ L_active(self)

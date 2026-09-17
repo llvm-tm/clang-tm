@@ -182,14 +182,14 @@ end process;
 end algorithm; *)
 
 \* BEGIN TRANSLATION
-VARIABLES kv_store, kv_locks, write_set, read_set, snapshot, primary_key, 
+VARIABLES kv_store, kv_locks, write_set, read_set, snapshot, primary_key,
           prewrite_ok, commit_ts, committed, aborted, retry_count, pc
 
 (* define statement *)
 HasWritten(t, k) == write_set[t][k] # NoWrite
 
 
-vars == << kv_store, kv_locks, write_set, read_set, snapshot, primary_key, 
+vars == << kv_store, kv_locks, write_set, read_set, snapshot, primary_key,
            prewrite_ok, commit_ts, committed, aborted, retry_count, pc >>
 
 ProcSet == (Thread)
@@ -216,7 +216,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
                       /\ pc' = [pc EXCEPT ![self] = "L_active"]
                    \/ /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                       /\ UNCHANGED <<write_set, read_set, snapshot, retry_count>>
-                /\ UNCHANGED << kv_store, kv_locks, primary_key, prewrite_ok, 
+                /\ UNCHANGED << kv_store, kv_locks, primary_key, prewrite_ok,
                                 commit_ts, committed, aborted >>
 
 L_active(self) == /\ pc[self] = "L_active"
@@ -250,8 +250,8 @@ L_active(self) == /\ pc[self] = "L_active"
                                                              IF HasWritten(self, k) THEN self ELSE kv_locks[k]]
                                               /\ prewrite_ok' = [prewrite_ok EXCEPT ![self] = TRUE]
                                               /\ pc' = [pc EXCEPT ![self] = "L_prewriting"]
-                                              /\ UNCHANGED << write_set, 
-                                                              read_set, 
+                                              /\ UNCHANGED << write_set,
+                                                              read_set,
                                                               aborted >>
                                          ELSE /\ kv_locks' =         [k \in Key |->
                                                              IF HasWritten(self, k) /\ kv_locks[k] = self
@@ -262,8 +262,8 @@ L_active(self) == /\ pc[self] = "L_active"
                                               /\ read_set' = [read_set EXCEPT ![self] = {}]
                                               /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                   /\ UNCHANGED << kv_locks, write_set, 
-                                                   read_set, prewrite_ok, 
+                                   /\ UNCHANGED << kv_locks, write_set,
+                                                   read_set, prewrite_ok,
                                                    aborted >>
                         /\ UNCHANGED <<primary_key, committed, retry_count>>
                      \/ /\ IF retry_count[self] < MaxRetries
@@ -276,8 +276,8 @@ L_active(self) == /\ pc[self] = "L_active"
                                    /\ prewrite_ok' = [prewrite_ok EXCEPT ![self] = FALSE]
                                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                   /\ UNCHANGED << kv_locks, write_set, 
-                                                   read_set, prewrite_ok, 
+                                   /\ UNCHANGED << kv_locks, write_set,
+                                                   read_set, prewrite_ok,
                                                    aborted, retry_count >>
                         /\ UNCHANGED <<primary_key, committed>>
                      \/ /\ IF retry_count[self] >= MaxRetries
@@ -289,8 +289,8 @@ L_active(self) == /\ pc[self] = "L_active"
                                    /\ prewrite_ok' = [prewrite_ok EXCEPT ![self] = FALSE]
                                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                   /\ UNCHANGED << kv_locks, write_set, 
-                                                   read_set, prewrite_ok, 
+                                   /\ UNCHANGED << kv_locks, write_set,
+                                                   read_set, prewrite_ok,
                                                    aborted >>
                         /\ UNCHANGED <<primary_key, committed, retry_count>>
                      \/ /\ kv_locks' =         [k \in Key |->
@@ -321,7 +321,7 @@ L_prewriting(self) == /\ pc[self] = "L_prewriting"
                             /\ prewrite_ok' = [prewrite_ok EXCEPT ![self] = FALSE]
                             /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                             /\ UNCHANGED <<kv_store, commit_ts>>
-                      /\ UNCHANGED << snapshot, primary_key, committed, 
+                      /\ UNCHANGED << snapshot, primary_key, committed,
                                       retry_count >>
 
 L_committing(self) == /\ pc[self] = "L_committing"
@@ -336,7 +336,7 @@ L_committing(self) == /\ pc[self] = "L_committing"
                       /\ read_set' = [read_set EXCEPT ![self] = {}]
                       /\ write_set' = [write_set EXCEPT ![self] = [k \in Key |-> NoWrite]]
                       /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                      /\ UNCHANGED << snapshot, primary_key, prewrite_ok, 
+                      /\ UNCHANGED << snapshot, primary_key, prewrite_ok,
                                       commit_ts, aborted, retry_count >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_prewriting(self)

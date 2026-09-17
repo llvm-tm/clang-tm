@@ -164,7 +164,7 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION
-VARIABLES clock, commit_lock, vbox_hist, committed, aborted, lastSignalFence, 
+VARIABLES clock, commit_lock, vbox_hist, committed, aborted, lastSignalFence,
           lastThreadFence, lastRmw, pc
 
 (* define statement *)
@@ -173,8 +173,8 @@ FindBody(seq, read_ver) ==
 
 VARIABLES rv, read_set, write_set, has_write, ct
 
-vars == << clock, commit_lock, vbox_hist, committed, aborted, lastSignalFence, 
-           lastThreadFence, lastRmw, pc, rv, read_set, write_set, has_write, 
+vars == << clock, commit_lock, vbox_hist, committed, aborted, lastSignalFence,
+           lastThreadFence, lastRmw, pc, rv, read_set, write_set, has_write,
            ct >>
 
 ProcSet == (Thread)
@@ -199,8 +199,8 @@ Init == (* Global variables *)
 L_idle(self) == /\ pc[self] = "L_idle"
                 /\ IF committed[self] >= MaxCommits
                       THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
-                           /\ UNCHANGED << lastSignalFence, lastThreadFence, 
-                                           lastRmw, rv, read_set, write_set, 
+                           /\ UNCHANGED << lastSignalFence, lastThreadFence,
+                                           lastRmw, rv, read_set, write_set,
                                            has_write, ct >>
                       ELSE /\ rv' = [rv EXCEPT ![self] = clock]
                            /\ read_set' = [read_set EXCEPT ![self] = {}]
@@ -211,7 +211,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
                            /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
                            /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
                            /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                /\ UNCHANGED << clock, commit_lock, vbox_hist, committed, 
+                /\ UNCHANGED << clock, commit_lock, vbox_hist, committed,
                                 aborted >>
 
 L_active(self) == /\ pc[self] = "L_active"
@@ -244,7 +244,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                    /\ clock' = clock + 1
                                    /\ pc' = [pc EXCEPT ![self] = "L_validate"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                   /\ UNCHANGED << clock, commit_lock, lastRmw, 
+                                   /\ UNCHANGED << clock, commit_lock, lastRmw,
                                                    ct >>
                         /\ UNCHANGED <<committed, lastSignalFence, read_set, write_set, has_write>>
                   /\ UNCHANGED << vbox_hist, aborted, lastThreadFence, rv >>
@@ -270,17 +270,17 @@ L_validate(self) == /\ pc[self] = "L_validate"
                                /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
                                /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                               /\ UNCHANGED << vbox_hist, committed, 
+                               /\ UNCHANGED << vbox_hist, committed,
                                                lastSignalFence >>
-                    /\ UNCHANGED << clock, lastThreadFence, rv, read_set, 
+                    /\ UNCHANGED << clock, lastThreadFence, rv, read_set,
                                     write_set, has_write, ct >>
 
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << clock, commit_lock, vbox_hist, committed, 
-                                aborted, lastSignalFence, lastThreadFence, 
-                                lastRmw, rv, read_set, write_set, has_write, 
+                /\ UNCHANGED << clock, commit_lock, vbox_hist, committed,
+                                aborted, lastSignalFence, lastThreadFence,
+                                lastRmw, rv, read_set, write_set, has_write,
                                 ct >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_validate(self)

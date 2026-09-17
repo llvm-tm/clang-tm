@@ -3,8 +3,18 @@
 This directory contains benchmarks for evaluating Software
 Transactional Memory (STM) implementations using the LLVM TM plugin.
 
+## Benchmarks vs tests
+
+Use `benchmarks/` for performance workloads and `tests/plugin/` for correctness
+checks. `tests/plugin/` files follow a naming convention:
+
+- `test_*.cpp` / `test_*.sh` — correctness tests that assert pass/fail behavior.
+- `bench_*.cpp` — pipeline or throughput comparisons kept next to the related
+  correctness tests; results are not gate assertions.
+
 ## Table of Contents
 
+- [Benchmarks vs tests](#benchmarks-vs-tests)
 - [Building](#building)
 - [Available Benchmarks](#available-benchmarks)
 - [Quick Start](#quick-start)

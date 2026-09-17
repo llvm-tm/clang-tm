@@ -193,10 +193,10 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "8e926f83" /\ chksum(tla) = "db4e9901")
-VARIABLES pc, clock, guard, mem, state, readSet, writeSet, writeBuf, snapshot, 
+VARIABLES pc, clock, guard, mem, state, readSet, writeSet, writeBuf, snapshot,
           readOnly, committed, locked_addrs, lastSignalFence, lastThreadFence, lastRmw
 
-vars == << pc, clock, guard, mem, state, readSet, writeSet, writeBuf, 
+vars == << pc, clock, guard, mem, state, readSet, writeSet, writeBuf,
            snapshot, readOnly, committed, locked_addrs,
            lastSignalFence, lastThreadFence, lastRmw >>
 
@@ -233,7 +233,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
                            /\ pc' = [pc EXCEPT ![self] = "L_active"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "L_done"]
                             /\ UNCHANGED << state, readSet, writeSet, locked_addrs,
-                                            snapshot, readOnly, lastSignalFence, 
+                                            snapshot, readOnly, lastSignalFence,
                                             lastThreadFence, lastRmw >>
                 /\ UNCHANGED << clock, guard, mem, writeBuf, committed >>
 
@@ -294,7 +294,7 @@ L_locking(self) == /\ pc[self] = "L_locking"
                                            /\ state' = [state EXCEPT ![self] = "idle"]
                                            /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                                            /\ UNCHANGED lastRmw
-                   /\ UNCHANGED << clock, mem, writeBuf, snapshot, readOnly, 
+                   /\ UNCHANGED << clock, mem, writeBuf, snapshot, readOnly,
                                    committed, lastSignalFence, lastThreadFence >>
 
 L_incClock(self) == /\ pc[self] = "L_incClock"
@@ -302,7 +302,7 @@ L_incClock(self) == /\ pc[self] = "L_incClock"
                     /\ clock' = clock + 1
                     /\ pc' = [pc EXCEPT ![self] = "L_validate"]
                     /\ UNCHANGED << guard, mem, state, readSet, writeSet, locked_addrs,
-                                    writeBuf, snapshot, readOnly, committed, 
+                                    writeBuf, snapshot, readOnly, committed,
                                     lastSignalFence, lastThreadFence >>
 
 L_validate(self) == /\ pc[self] = "L_validate"
@@ -323,7 +323,7 @@ L_validate(self) == /\ pc[self] = "L_validate"
                                /\ state' = [state EXCEPT ![self] = "idle"]
                                /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                    /\ UNCHANGED << clock, mem, writeBuf, snapshot, readOnly, 
+                    /\ UNCHANGED << clock, mem, writeBuf, snapshot, readOnly,
                                     committed, lastThreadFence >>
 
 L_writeBack(self) == /\ pc[self] = "L_writeBack"
@@ -354,7 +354,7 @@ L_release(self) == /\ pc[self] = "L_release"
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << clock, guard, mem, state, readSet, writeSet, 
+                /\ UNCHANGED << clock, guard, mem, state, readSet, writeSet,
                                 writeBuf, snapshot, readOnly, committed, locked_addrs,
                                 lastSignalFence, lastThreadFence, lastRmw >>
 
@@ -373,7 +373,7 @@ Spec == Init /\ [][Next]_vars
 
 Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
-\* END TRANSLATION 
+\* END TRANSLATION
 
 (*====================================================================*)
 (* INVARIANTS                                                          *)

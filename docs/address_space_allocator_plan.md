@@ -18,7 +18,7 @@ void caller() {
 
 ### 1.2 Distinguishing TM Memory from Non-TM Memory
 Currently the runtime uses `isStackAddress(addr)` to detect and bypass TM instrumentation for stack-address loads/stores. This check is:
-- **Fragile**: platform-specific (pthread_getattr_np on Linux, pthread_get_stackaddr_np on macOS)  
+- **Fragile**: platform-specific (pthread_getattr_np on Linux, pthread_get_stackaddr_np on macOS)
 - **Incorrect**: It only catches stack addresses but not other non-TM heap allocations (e.g., `std::vector` internal buffers that should NOT go through TM).
 - **Read-side gap**: The check is only applied to WRITES in some backends; READS from stack addresses are still TM-instrumented in others, corrupting read-set validation.
 
@@ -32,7 +32,7 @@ A dedicated TM address space would replace the negative check ("is this address 
 In the queue pipeline pass (`TMQueueGlobalInitPass`), at the point where we replace a TX-function call site with `tm_enqueue` (step 5, `replaceCallWithEnqueue`), trace each pointer argument back:
 
 1. If the argument is an `AllocaInst` → error
-2. If the argument is a GEP whose base is an `AllocaInst` → error  
+2. If the argument is a GEP whose base is an `AllocaInst` → error
 3. If the argument is a `LoadInst` that loads from an alloca-stored pointer → error
 4. If the argument is a `BitCast` → strip and check the operand recursively
 

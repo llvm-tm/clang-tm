@@ -18,6 +18,27 @@ echo ""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../plugin/llvm-tool-helper.sh"
 
+if [ -z "${LLVM_CONFIG:-}" ]; then
+    fail "llvm-config not found (install llvm-22-dev or llvm-23-dev; optional LLVM_VERSION=22|23)"
+fi
+
+LLVM_VER="$("$LLVM_CONFIG" --version 2>/dev/null || true)"
+LLVM_MAJOR="${LLVM_VER%%.*}"
+case "$LLVM_MAJOR" in
+    ''|*[!0-9]*) fail "could not determine LLVM version from $LLVM_CONFIG" ;;
+esac
+if [ "$LLVM_MAJOR" -lt 22 ]; then
+    fail "LLVM 22+ required, found $LLVM_VER"
+fi
+
+if [ -n "${LLVM_VERSION:-}" ]; then
+    LLVM_VERSION_MAJOR_REQ="${LLVM_VERSION%%.*}"
+    if [ "$LLVM_VERSION_MAJOR_REQ" != "$LLVM_MAJOR" ]; then
+        fail "LLVM_VERSION=$LLVM_VERSION requested, but $LLVM_CONFIG reports $LLVM_VER"
+    fi
+fi
+pass "LLVM version $LLVM_VER (>=22)"
+
 if command -v "$LLVM_OPT" &>/dev/null; then
     ver=$("$LLVM_OPT" --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
     pass "opt found (version $ver)"
@@ -90,7 +111,21 @@ fi
 echo "#include <atomic>" > /tmp/tm_test_cpp20.cpp
 echo "thread_local bool test_var = false;" >> /tmp/tm_test_cpp20.cpp
 echo "int main() { std::atomic<int> x{0}; return x.load(); }" >> /tmp/tm_test_cpp20.cpp
+CXX20_OK=false
 if "$LLVM_CXX" -std=c++20 /tmp/tm_test_cpp20.cpp -o /tmp/tm_test_cpp20 2>/dev/null; then
+    CXX20_OK=true
+else
+    # Some Linux clang installs select a GCC major whose libstdc++ dev headers
+    # are not installed; retry with the newest matching GCC install dir, the
+    # same workaround used by benchmarks/cpp/Makefile.
+    for dir in /usr/lib/gcc/*/16 /usr/lib/gcc/*/15 /usr/lib/gcc/*/14 /usr/lib/gcc/*/13 /usr/lib/gcc/*/12; do
+        if [ -d "$dir" ] && "$LLVM_CXX" --gcc-install-dir="$dir" -std=c++20 /tmp/tm_test_cpp20.cpp -o /tmp/tm_test_cpp20 2>/dev/null; then
+            CXX20_OK=true
+            break
+        fi
+    done
+fi
+if [ "$CXX20_OK" = true ]; then
     pass "C++20 compilation works"
     rm -f /tmp/tm_test_cpp20 /tmp/tm_test_cpp20.cpp
 else

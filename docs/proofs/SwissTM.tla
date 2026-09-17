@@ -234,10 +234,10 @@ end process;
 end algorithm; *)
 
 \* BEGIN TRANSLATION
-VARIABLES pc, g_ts, orec, mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, readSet, writeLog, 
+VARIABLES pc, g_ts, orec, mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, readSet, writeLog,
           writeBuf, oldVal, readOnly, readLockVer, valid_ts, owned_orecs
 
-vars == << pc, g_ts, orec, mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, readSet, writeLog, 
+vars == << pc, g_ts, orec, mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, readSet, writeLog,
            writeBuf, oldVal, readOnly, readLockVer, valid_ts, owned_orecs >>
 
 ProcSet == (Thread)
@@ -266,7 +266,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
                 /\ IF committed[self] >= MaxCommits
                       THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "L_begin"]
-                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, readSet, 
+                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, readSet,
                                 writeLog, writeBuf, oldVal, readOnly, readLockVer, valid_ts, owned_orecs >>
 L_begin(self) == /\ pc[self] = "L_begin"
                  /\ readSet' = [readSet EXCEPT ![self] = {}]
@@ -279,7 +279,7 @@ L_begin(self) == /\ pc[self] = "L_begin"
                  /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = ""]
                  /\ lastRmw' = [lastRmw EXCEPT ![self] = ""]
                  /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                 /\ UNCHANGED << g_ts, orec, mem, committed, aborted, writeBuf, 
+                 /\ UNCHANGED << g_ts, orec, mem, committed, aborted, writeBuf,
                                  oldVal >>
 
 L_active(self) == /\ pc[self] = "L_active"
@@ -383,7 +383,7 @@ L_commit(self) == /\ pc[self] = "L_commit"
                              /\ owned_orecs' = [owned_orecs EXCEPT ![self] = {}]
                              /\ pc' = [pc EXCEPT ![self] = "L_abort"]
                              /\ UNCHANGED << lastSignalFence, lastThreadFence, valid_ts >>
-                  /\ UNCHANGED << mem, committed, aborted, writeBuf, oldVal, 
+                  /\ UNCHANGED << mem, committed, aborted, writeBuf, oldVal,
                                   readOnly, valid_ts >>
 
 L_commit_wb(self) == /\ pc[self] = "L_commit_wb"
@@ -398,7 +398,7 @@ L_commit_wb(self) == /\ pc[self] = "L_commit_wb"
                      /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                      /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                      /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                     /\ UNCHANGED << g_ts, aborted, readSet, writeLog, 
+                     /\ UNCHANGED << g_ts, aborted, readSet, writeLog,
                                      writeBuf, oldVal, readOnly, readLockVer, valid_ts, owned_orecs,
                                      lastSignalFence, lastThreadFence >>
 
@@ -410,7 +410,7 @@ L_abort(self) == /\ pc[self] = "L_abort"
                  /\ aborted' = [aborted EXCEPT ![self] = aborted[self] + 1]
                  /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                  /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                 /\ UNCHANGED << g_ts, orec, mem, committed, writeBuf, oldVal, 
+                 /\ UNCHANGED << g_ts, orec, mem, committed, writeBuf, oldVal,
                                  lastSignalFence, lastThreadFence, readLockVer, valid_ts >>
 
 L_extend(self) == /\ pc[self] = "L_extend"
@@ -431,7 +431,7 @@ L_extend(self) == /\ pc[self] = "L_extend"
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, readSet, 
+                /\ UNCHANGED << g_ts, orec, mem, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, readSet,
                                 writeLog, writeBuf, oldVal, readOnly, readLockVer, valid_ts, owned_orecs >>
 
 ThreadProc(self) == L_idle(self) \/ L_begin(self) \/ L_active(self)

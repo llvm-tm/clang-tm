@@ -32,6 +32,50 @@
 #include <cstring>
 
 // ═══════════════════════════════════════════════════════════════════════
+//  TM_PLUGIN_LIFECYCLE — lifecycle entry-point DATA/TEXT wrappers
+//
+//  In LLVM_TM_PLUGIN builds tm_init / tm_exit / tm_init_thread /
+//  tm_exit_thread are DATA variables (function pointers) assigned to
+//  always-defined static do_tm_*() bodies; in plain builds they are ordinary
+//  (optionally `extern "C"`) functions. Call TM_PLUGIN_LIFECYCLE_VARS() once
+//  before the four definitions, then TM_PLUGIN_LIFECYCLE_FN() immediately
+//  before each body.
+//
+//    TM_PLUGIN_LIFECYCLE_VARS()
+//    TM_PLUGIN_LIFECYCLE_FN(do_tm_init, void tm_init)
+//    { /* body */ }
+//    TM_PLUGIN_LIFECYCLE_FN(do_tm_exit, void tm_exit)
+//    { /* body */ }
+//    ...
+// ═══════════════════════════════════════════════════════════════════════
+
+// Forward declarations + data-variable initializers (plugin builds only).
+// (The `#ifdef` wraps the `#define` so it acts as conditional compilation.)
+#ifdef LLVM_TM_PLUGIN
+#define TM_PLUGIN_LIFECYCLE_VARS()                                                       \
+	static void do_tm_init();                                                            \
+	static void do_tm_exit();                                                            \
+	static void do_tm_init_thread();                                                     \
+	static void do_tm_exit_thread();                                                     \
+	void (*tm_init)() = do_tm_init;                                                      \
+	void (*tm_exit)() = do_tm_exit;                                                      \
+	void (*tm_init_thread)() = do_tm_init_thread;                                        \
+	void (*tm_exit_thread)() = do_tm_exit_thread;
+#else
+#define TM_PLUGIN_LIFECYCLE_VARS()
+#endif
+
+// Per-function wrapper. `impl` is the always-defined static body
+// (do_tm_init / do_tm_exit / do_tm_init_thread / do_tm_exit_thread);
+// `nonplugin` is the plain-build declaration, e.g. `void tm_init()` or
+// `extern "C" void tm_init()`.
+#ifdef LLVM_TM_PLUGIN
+#define TM_PLUGIN_LIFECYCLE_FN(impl, nonplugin) static void impl()
+#else
+#define TM_PLUGIN_LIFECYCLE_FN(impl, nonplugin) nonplugin
+#endif
+
+// ═══════════════════════════════════════════════════════════════════════
 //  TM_DEFINE_READ_WRITE_HOOKS(ns) — 14 read/write wrappers
 //
 //  Generates static functions real_tm_read_i1 through real_tm_write_ptr

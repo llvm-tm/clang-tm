@@ -183,12 +183,12 @@ end process;
 end algorithm; *)
 
 \* BEGIN TRANSLATION
-VARIABLES mem, sgl, tsx_mode, retry_cnt, tx_seq, pcl, pcl_epoch_start, 
-          tsx_buffer, durable_seq, crashed, recovered, lastSignalFence, 
+VARIABLES mem, sgl, tsx_mode, retry_cnt, tx_seq, pcl, pcl_epoch_start,
+          tsx_buffer, durable_seq, crashed, recovered, lastSignalFence,
           lastThreadFence, lastRmw, pc
 
-vars == << mem, sgl, tsx_mode, retry_cnt, tx_seq, pcl, pcl_epoch_start, 
-           tsx_buffer, durable_seq, crashed, recovered, lastSignalFence, 
+vars == << mem, sgl, tsx_mode, retry_cnt, tx_seq, pcl, pcl_epoch_start,
+           tsx_buffer, durable_seq, crashed, recovered, lastSignalFence,
            lastThreadFence, lastRmw, pc >>
 
 ProcSet == (Thread) \cup {0}
@@ -224,11 +224,11 @@ L_idle(self) == /\ pc[self] = "L_idle"
                            /\ pcl_epoch_start' = [pcl_epoch_start EXCEPT ![self] = 1]
                            /\ recovered' = [recovered EXCEPT ![self] = TRUE]
                            /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                           /\ UNCHANGED << tsx_mode, retry_cnt, 
+                           /\ UNCHANGED << tsx_mode, retry_cnt,
                                            lastThreadFence >>
                       ELSE /\ IF recovered[self] /\ crashed[self]
                                  THEN /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                                      /\ UNCHANGED << tsx_mode, retry_cnt, 
+                                      /\ UNCHANGED << tsx_mode, retry_cnt,
                                                       lastThreadFence >>
                                  ELSE /\ \/ /\ sgl = 0
                                             /\ tsx_mode' = [tsx_mode EXCEPT ![self] = TRUE]
@@ -237,9 +237,9 @@ L_idle(self) == /\ pc[self] = "L_idle"
                                             /\ pc' = [pc EXCEPT ![self] = "L_active_tsx"]
                                          \/ /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                                             /\ UNCHANGED <<tsx_mode, retry_cnt, lastThreadFence>>
-                           /\ UNCHANGED << mem, pcl, pcl_epoch_start, 
+                           /\ UNCHANGED << mem, pcl, pcl_epoch_start,
                                            tsx_buffer, recovered >>
-                /\ UNCHANGED << sgl, tx_seq, durable_seq, crashed, 
+                /\ UNCHANGED << sgl, tx_seq, durable_seq, crashed,
                                 lastSignalFence, lastRmw >>
 
 L_active_tsx(self) == /\ pc[self] = "L_active_tsx"
@@ -268,8 +268,8 @@ L_active_tsx(self) == /\ pc[self] = "L_active_tsx"
                             /\ retry_cnt' = [retry_cnt EXCEPT ![self] = retry_cnt[self] + 1]
                             /\ pc' = [pc EXCEPT ![self] = "L_aborting"]
                             /\ UNCHANGED <<mem, tx_seq, pcl, lastThreadFence>>
-                      /\ UNCHANGED << sgl, pcl_epoch_start, durable_seq, 
-                                      crashed, recovered, lastSignalFence, 
+                      /\ UNCHANGED << sgl, pcl_epoch_start, durable_seq,
+                                      crashed, recovered, lastSignalFence,
                                       lastRmw >>
 
 L_aborting(self) == /\ pc[self] = "L_aborting"
@@ -283,9 +283,9 @@ L_aborting(self) == /\ pc[self] = "L_aborting"
                                /\ pc' = [pc EXCEPT ![self] = "L_active_tsx"]
                           ELSE /\ pc' = [pc EXCEPT ![self] = "L_active_sgl"]
                                /\ UNCHANGED tsx_mode
-                    /\ UNCHANGED << mem, sgl, retry_cnt, tx_seq, 
-                                    pcl_epoch_start, tsx_buffer, durable_seq, 
-                                    crashed, recovered, lastSignalFence, 
+                    /\ UNCHANGED << mem, sgl, retry_cnt, tx_seq,
+                                    pcl_epoch_start, tsx_buffer, durable_seq,
+                                    crashed, recovered, lastSignalFence,
                                     lastThreadFence, lastRmw >>
 
 L_active_sgl(self) == /\ pc[self] = "L_active_sgl"
@@ -300,9 +300,9 @@ L_active_sgl(self) == /\ pc[self] = "L_active_sgl"
                             /\ lastRmw' = [lastRmw EXCEPT ![self] = "acquire"]
                             /\ pc' = [pc EXCEPT ![self] = "L_active_sgl_locked"]
                             /\ UNCHANGED tsx_mode
-                      /\ UNCHANGED << mem, tx_seq, pcl, pcl_epoch_start, 
-                                      tsx_buffer, durable_seq, crashed, 
-                                      recovered, lastSignalFence, 
+                      /\ UNCHANGED << mem, tx_seq, pcl, pcl_epoch_start,
+                                      tsx_buffer, durable_seq, crashed,
+                                      recovered, lastSignalFence,
                                       lastThreadFence >>
 
 L_active_sgl_locked(self) == /\ pc[self] = "L_active_sgl_locked"
@@ -321,9 +321,9 @@ L_active_sgl_locked(self) == /\ pc[self] = "L_active_sgl_locked"
                                          THEN /\ pc' = [pc EXCEPT ![self] = "L_group_commit"]
                                          ELSE /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                                    /\ UNCHANGED <<mem, pcl>>
-                             /\ UNCHANGED << tsx_mode, retry_cnt, 
-                                             pcl_epoch_start, tsx_buffer, 
-                                             durable_seq, crashed, recovered, 
+                             /\ UNCHANGED << tsx_mode, retry_cnt,
+                                             pcl_epoch_start, tsx_buffer,
+                                             durable_seq, crashed, recovered,
                                              lastSignalFence, lastThreadFence >>
 
 L_group_commit(self) == /\ pc[self] = "L_group_commit"
@@ -331,8 +331,8 @@ L_group_commit(self) == /\ pc[self] = "L_group_commit"
                         /\ pcl_epoch_start' = [pcl_epoch_start EXCEPT ![self] = Len(pcl[self]) + 1]
                         /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = "sc"]
                         /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                        /\ UNCHANGED << mem, sgl, tsx_mode, retry_cnt, tx_seq, 
-                                        pcl, tsx_buffer, crashed, recovered, 
+                        /\ UNCHANGED << mem, sgl, tsx_mode, retry_cnt, tx_seq,
+                                        pcl, tsx_buffer, crashed, recovered,
                                         lastSignalFence, lastRmw >>
 
 ThreadProc(self) == L_idle(self) \/ L_active_tsx(self) \/ L_aborting(self)
@@ -343,8 +343,8 @@ L_crash == /\ pc[0] = "L_crash"
            /\ \A t \in Thread : pc[t] # "L_group_commit"
            /\ crashed' = [t \in Thread |-> TRUE]
            /\ pc' = [pc EXCEPT ![0] = "Done"]
-           /\ UNCHANGED << mem, sgl, tsx_mode, retry_cnt, tx_seq, pcl, 
-                           pcl_epoch_start, tsx_buffer, durable_seq, recovered, 
+           /\ UNCHANGED << mem, sgl, tsx_mode, retry_cnt, tx_seq, pcl,
+                           pcl_epoch_start, tsx_buffer, durable_seq, recovered,
                            lastSignalFence, lastThreadFence, lastRmw >>
 
 CrashProc == L_crash

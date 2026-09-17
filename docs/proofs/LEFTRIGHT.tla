@@ -156,10 +156,10 @@ end process;
 end algorithm; *)
 
 \* BEGIN TRANSLATION
-VARIABLES pc, mem, clock, commit_lock, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, snapshot, read_set, 
+VARIABLES pc, mem, clock, commit_lock, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, snapshot, read_set,
           write_set, read_only
 
-vars == << pc, mem, clock, commit_lock, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, snapshot, 
+vars == << pc, mem, clock, commit_lock, committed, aborted, lastSignalFence, lastThreadFence, lastRmw, snapshot,
            read_set, write_set, read_only >>
 
 ProcSet == (Thread)
@@ -246,21 +246,21 @@ L_validate(self) == /\ pc[self] = "L_validate"
                           ELSE /\ commit_lock' = 0
                                /\ pc' = [pc EXCEPT ![self] = "L_abort"]
                                /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
-                    /\ UNCHANGED << mem, clock, committed, aborted, snapshot, 
+                    /\ UNCHANGED << mem, clock, committed, aborted, snapshot,
                                     read_set, write_set, read_only >>
 
 L_inc_clock(self) == /\ pc[self] = "L_inc_clock"
                      /\ lastSignalFence' = [lastSignalFence EXCEPT ![self] = "sc"]
                      /\ clock' = clock + 1
                      /\ pc' = [pc EXCEPT ![self] = "L_write_back"]
-                     /\ UNCHANGED << mem, commit_lock, committed, aborted, 
+                     /\ UNCHANGED << mem, commit_lock, committed, aborted,
                                      snapshot, read_set, write_set, read_only >>
 
 L_write_back(self) == /\ pc[self] = "L_write_back"
                       /\ mem' =    [a \in Addr |->
                                 IF write_set[self][a] # NoWrite THEN write_set[self][a] ELSE mem[a]]
                       /\ pc' = [pc EXCEPT ![self] = "L_release_lock"]
-                      /\ UNCHANGED << clock, commit_lock, committed, aborted, 
+                      /\ UNCHANGED << clock, commit_lock, committed, aborted,
                                       snapshot, read_set, write_set, read_only, lastSignalFence, lastThreadFence, lastRmw >>
 
 L_release_lock(self) == /\ pc[self] = "L_release_lock"
@@ -268,7 +268,7 @@ L_release_lock(self) == /\ pc[self] = "L_release_lock"
                         /\ commit_lock' = 0
                         /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                         /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                        /\ UNCHANGED << mem, clock, aborted, snapshot, 
+                        /\ UNCHANGED << mem, clock, aborted, snapshot,
                                         read_set, write_set, read_only >>
 
 L_abort(self) == /\ pc[self] = "L_abort"
@@ -284,7 +284,7 @@ L_abort(self) == /\ pc[self] = "L_abort"
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << mem, clock, commit_lock, committed, aborted, 
+                /\ UNCHANGED << mem, clock, commit_lock, committed, aborted,
                                 snapshot, read_set, write_set, read_only, lastSignalFence, lastThreadFence, lastRmw >>
 
 ThreadProc(self) == L_idle(self) \/ L_begin(self) \/ L_active(self)

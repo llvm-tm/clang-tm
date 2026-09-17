@@ -192,11 +192,11 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION
-VARIABLES mem, state, stm_ws, stm_rs, stm_clock, stm_committed, log, log_head, 
+VARIABLES mem, state, stm_ws, stm_rs, stm_clock, stm_committed, log, log_head,
           log_tail, replayer_state, persist_file, batch_marker, recovered, pc
 
-vars == << mem, state, stm_ws, stm_rs, stm_clock, stm_committed, log, 
-           log_head, log_tail, replayer_state, persist_file, batch_marker, 
+vars == << mem, state, stm_ws, stm_rs, stm_clock, stm_committed, log,
+           log_head, log_tail, replayer_state, persist_file, batch_marker,
            recovered, pc >>
 
 ProcSet == (Thread) \cup {0} \cup {-1}
@@ -226,8 +226,8 @@ L_idle(self) == /\ pc[self] = "L_idle"
                       /\ pc' = [pc EXCEPT ![self] = "L_active"]
                    \/ /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                       /\ UNCHANGED <<state, stm_ws, stm_rs>>
-                /\ UNCHANGED << mem, stm_clock, stm_committed, log, log_head, 
-                                log_tail, replayer_state, persist_file, 
+                /\ UNCHANGED << mem, stm_clock, stm_committed, log, log_head,
+                                log_tail, replayer_state, persist_file,
                                 batch_marker, recovered >>
 
 L_active(self) == /\ pc[self] = "L_active"
@@ -259,7 +259,7 @@ L_active(self) == /\ pc[self] = "L_active"
                         /\ state' = [state EXCEPT ![self] = "logging"]
                         /\ pc' = [pc EXCEPT ![self] = "L_log"]
                         /\ UNCHANGED <<stm_ws, stm_rs>>
-                  /\ UNCHANGED << log_tail, replayer_state, persist_file, 
+                  /\ UNCHANGED << log_tail, replayer_state, persist_file,
                                   batch_marker, recovered >>
 
 L_log(self) == /\ pc[self] = "L_log"
@@ -273,8 +273,8 @@ L_log(self) == /\ pc[self] = "L_log"
                   \/ /\ state' = [state EXCEPT ![self] = "idle"]
                      /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                      /\ UNCHANGED <<log, log_head>>
-               /\ UNCHANGED << mem, stm_ws, stm_rs, stm_clock, stm_committed, 
-                               log_tail, replayer_state, persist_file, 
+               /\ UNCHANGED << mem, stm_ws, stm_rs, stm_clock, stm_committed,
+                               log_tail, replayer_state, persist_file,
                                batch_marker, recovered >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_log(self)
@@ -282,8 +282,8 @@ ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_log(self)
 L_replayer_idle == /\ pc[0] = "L_replayer_idle"
                    /\ replayer_state' = "active"
                    /\ pc' = [pc EXCEPT ![0] = "L_replayer_active"]
-                   /\ UNCHANGED << mem, state, stm_ws, stm_rs, stm_clock, 
-                                   stm_committed, log, log_head, log_tail, 
+                   /\ UNCHANGED << mem, state, stm_ws, stm_rs, stm_clock,
+                                   stm_committed, log, log_head, log_tail,
                                    persist_file, batch_marker, recovered >>
 
 L_replayer_active == /\ pc[0] = "L_replayer_active"
@@ -297,8 +297,8 @@ L_replayer_active == /\ pc[0] = "L_replayer_active"
                            /\ replayer_state' = "idle"
                            /\ pc' = [pc EXCEPT ![0] = "L_replayer_idle"]
                            /\ UNCHANGED <<log_tail, persist_file>>
-                     /\ UNCHANGED << mem, state, stm_ws, stm_rs, stm_clock, 
-                                     stm_committed, log, log_head, 
+                     /\ UNCHANGED << mem, state, stm_ws, stm_rs, stm_clock,
+                                     stm_committed, log, log_head,
                                      batch_marker, recovered >>
 
 ReplayerProc == L_replayer_idle \/ L_replayer_active
@@ -322,7 +322,7 @@ L_recover == /\ pc[-1] = "L_recover"
              /\ log_tail' = [t \in Thread |-> 0]
              /\ recovered' = TRUE
              /\ pc' = [pc EXCEPT ![-1] = "Done"]
-             /\ UNCHANGED << state, stm_ws, stm_rs, stm_clock, stm_committed, 
+             /\ UNCHANGED << state, stm_ws, stm_rs, stm_clock, stm_committed,
                              replayer_state, persist_file, batch_marker >>
 
 RecoveryProc == L_recover

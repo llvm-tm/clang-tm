@@ -10,29 +10,41 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ── Job 1: Plugin smoke test ────────────────────────────
+  # ── Job 1: Plugin smoke test (LLVM 22 required; LLVM 23 allow-failure) ─
   plugin-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        llvm: [22, 23]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
-      - name: Install LLVM 22
+      - name: Install LLVM ${{ matrix.llvm }}
+        continue-on-error: ${{ matrix.llvm != 22 }}
         run: |
           sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
             https://apt.llvm.org/llvm-snapshot.gpg.key
           sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
-            llvm-toolchain-jammy-22 main"
+            llvm-toolchain-jammy-${{ matrix.llvm }} main"
           sudo apt-get update
-          sudo apt-get install -y llvm-22-dev clang-22 lld make
-      - name: Build plugin
-        run: make plugin
+          sudo apt-get install -y llvm-${{ matrix.llvm }}-dev clang-${{ matrix.llvm }} make
+          if ! sudo apt-get install -y lld-${{ matrix.llvm }}; then sudo apt-get install -y lld; fi
+          llvm-config-${{ matrix.llvm }} --version
+      - name: Build plugin (LLVM ${{ matrix.llvm }})
+        continue-on-error: ${{ matrix.llvm != 22 }}
+        run: LLVM_VERSION=${{ matrix.llvm }} make plugin
       - name: Build race checker
-        run: make -C plugin race-checker
+        continue-on-error: ${{ matrix.llvm != 22 }}
+        run: LLVM_VERSION=${{ matrix.llvm }} make -C plugin race-checker
       - name: Build plugin tests
-        run: make -C plugin test
+        continue-on-error: ${{ matrix.llvm != 22 }}
+        run: LLVM_VERSION=${{ matrix.llvm }} make -C plugin test
       - name: Run plugin tests
-        run: make -C plugin run 2>&1
+        continue-on-error: ${{ matrix.llvm != 22 }}
+        run: LLVM_VERSION=${{ matrix.llvm }} make -C plugin run 2>&1
       - name: Verify annotations
-        run: make -C plugin check
+        continue-on-error: ${{ matrix.llvm != 22 }}
+        run: LLVM_VERSION=${{ matrix.llvm }} make -C plugin check
 
   # ── Job 2: Simulator tests ─────────────────────────────
   simulator-test:
@@ -192,9 +204,50 @@ jobs:
             llvm-toolchain-jammy-22 main"
           sudo apt-get update
           sudo apt-get install -y clang-format-22 make
+      - name: Install Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Python tool dependencies
+        run: python3 -m pip install -r requirements.txt
+      - name: Compile Python tools
+        run: python3 -m compileall -q tools plugin simulator patches benchmarks gem5_sim
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - name: Check formatting + clippy
         run: make fmt-check
+
+  # ── Job 10: ASan/UBSan correctness gate (PRs + main) ─
+  sanitizer:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [NOREC, TL2]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      ASAN_OPTIONS: detect_leaks=0
+      UBSAN_OPTIONS: print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 lld make
+      - name: Build sanitized bank (${{ matrix.backend }})
+        run: make -C benchmarks/cpp bin/bank BACKEND=${{ matrix.backend }} SANITIZE=address
+      - name: Run sanitized bank (${{ matrix.backend }})
+        run: ./benchmarks/cpp/bin/bank -t 4 -d 1000
+      - name: Build sanitized test_tx/test_ds (${{ matrix.backend }})
+        run: make -C benchmarks/cpp bin/test_tx bin/test_ds BACKEND=${{ matrix.backend }} SANITIZE=address
+      - name: Run sanitized test_tx/test_ds (${{ matrix.backend }})
+        run: |
+          ./benchmarks/cpp/bin/test_tx
+          ./benchmarks/cpp/bin/test_ds

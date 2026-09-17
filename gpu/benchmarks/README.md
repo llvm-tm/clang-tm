@@ -7,17 +7,22 @@ backend's API directly (currently CSMV via the batch executor).
 
 ## Contents
 
-| File           | Workload                                              |
-|----------------|-------------------------------------------------------|
-| `gpu_ycsb.cu`  | YCSB-style read/write mix on a shared table, batch-executed |
-| `gpu_kmeans.cu`| STAMP kmeans assignment (draft: warp-cooperative distance) |
-| `gpu_memcached.cu` | MemcachedGPU-style KV GET/SET (draft)               |
-| `gpu_tpcc.cu`  | TPC-C Payment transaction, money-conservation check (draft) |
+| File           | Workload                                              | Status          |
+|----------------|-------------------------------------------------------|-----------------|
+| `gpu_ycsb.cu`  | YCSB-style read/write mix on a shared table, batch-executed | reference |
+| `gpu_kmeans.cu`| STAMP kmeans assignment (warp-cooperative distance) | `@experimental` |
+| `gpu_memcached.cu` | MemcachedGPU-style KV GET/SET                    | `@experimental` |
+| `gpu_tpcc.cu`  | TPC-C Payment transaction, money-conservation check  | `@experimental` |
 
 `gpu_ycsb.cu` is the reference implementation (validated design, see
-`REVIEW.md`). The other three are drafts: skeletons demonstrating the
+`REVIEW.md`). The other three are `@experimental` skeletons demonstrating the
 batch-executor + warp-cooperative pattern with simplified algorithms
 (tracked in `TODO.md` under "GPU benchmark stubs", P1).
+
+> **Do not use `@experimental` workloads for reported performance numbers.**
+> They are useful for API/design smoke tests only: `gpu_kmeans` has no
+> convergence loop, `gpu_memcached` uses a simplified key-value scheme, and
+> `gpu_tpcc` elides version lists.
 
 ## Build
 

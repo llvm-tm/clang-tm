@@ -74,10 +74,10 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "c92c2eb6" /\ chksum(tla) = "5823be12")
-VARIABLES pc, lock, version, mem, readSet, writeSet, readVersion, committed, 
+VARIABLES pc, lock, version, mem, readSet, writeSet, readVersion, committed,
           aborted
 
-vars == << pc, lock, version, mem, readSet, writeSet, readVersion, committed, 
+vars == << pc, lock, version, mem, readSet, writeSet, readVersion, committed,
            aborted >>
 
 ProcSet == (Thread)
@@ -123,7 +123,7 @@ L_active(self) == /\ pc[self] = "L_active"
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << lock, version, mem, readSet, writeSet, 
+                /\ UNCHANGED << lock, version, mem, readSet, writeSet,
                                 readVersion, committed, aborted >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_done(self)
@@ -139,7 +139,7 @@ Spec == Init /\ [][Next]_vars
 
 Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
-\* END TRANSLATION 
+\* END TRANSLATION
 
 (* Bounds for model checking: version is unbounded in the spec,
    but for finite-state TLC we bound it.  The invariants checked

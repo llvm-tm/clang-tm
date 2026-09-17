@@ -245,8 +245,8 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "589ec8ef" /\ chksum(tla) = "25b974a8")
-VARIABLES pc, mem, sgl_lock, mode, write_set, write_data, bloom, read_lines, 
-          sgl_write_set, sgl_write_data, tsx_retries, cycles, committed, 
+VARIABLES pc, mem, sgl_lock, mode, write_set, write_data, bloom, read_lines,
+          sgl_write_set, sgl_write_data, tsx_retries, cycles, committed,
           aborted, capacity_aborts, conflict_aborts
 
 (* define statement *)
@@ -273,8 +273,8 @@ SGLWriteBack(t) ==
         ELSE mem[a]]
 
 
-vars == << pc, mem, sgl_lock, mode, write_set, write_data, bloom, read_lines, 
-           sgl_write_set, sgl_write_data, tsx_retries, cycles, committed, 
+vars == << pc, mem, sgl_lock, mode, write_set, write_data, bloom, read_lines,
+           sgl_write_set, sgl_write_data, tsx_retries, cycles, committed,
            aborted, capacity_aborts, conflict_aborts >>
 
 ProcSet == (Thread)
@@ -316,7 +316,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
                       /\ cycles' = [cycles EXCEPT ![self] = cycles[self] + 100]
                       /\ pc' = [pc EXCEPT ![self] = "L_sgl"]
                       /\ UNCHANGED <<write_set, write_data, bloom, read_lines, tsx_retries>>
-                /\ UNCHANGED << mem, committed, aborted, capacity_aborts, 
+                /\ UNCHANGED << mem, committed, aborted, capacity_aborts,
                                 conflict_aborts >>
 
 L_tsx(self) == /\ pc[self] = "L_tsx"
@@ -325,8 +325,8 @@ L_tsx(self) == /\ pc[self] = "L_tsx"
                              THEN /\ read_lines' = [read_lines EXCEPT ![self] = read_lines[self] \union {CL(a)}]
                                   /\ bloom' = [bloom EXCEPT ![self] = bloom[self] \union Hash[CL(a)]]
                                   /\ cycles' = [cycles EXCEPT ![self] = cycles[self] + 4]
-                                  /\ UNCHANGED << mode, write_set, write_data, 
-                                                  tsx_retries, aborted, 
+                                  /\ UNCHANGED << mode, write_set, write_data,
+                                                  tsx_retries, aborted,
                                                   capacity_aborts >>
                              ELSE /\ mode' = [mode EXCEPT ![self] = "idle"]
                                   /\ write_set' = [write_set EXCEPT ![self] = {}]
@@ -344,8 +344,8 @@ L_tsx(self) == /\ pc[self] = "L_tsx"
                              THEN /\ write_set' = [write_set EXCEPT ![self] = write_set[self] \union {CL(a)}]
                                   /\ write_data' = [write_data EXCEPT ![self][CL(a)] = mem[a]]
                                   /\ cycles' = [cycles EXCEPT ![self] = cycles[self] + 5]
-                                  /\ UNCHANGED << mode, bloom, read_lines, 
-                                                  tsx_retries, aborted, 
+                                  /\ UNCHANGED << mode, bloom, read_lines,
+                                                  tsx_retries, aborted,
                                                   capacity_aborts >>
                              ELSE /\ mode' = [mode EXCEPT ![self] = "idle"]
                                   /\ write_set' = [write_set EXCEPT ![self] = {}]
@@ -367,7 +367,7 @@ L_tsx(self) == /\ pc[self] = "L_tsx"
                                 /\ read_lines' = [read_lines EXCEPT ![self] = {}]
                                 /\ cycles' = [cycles EXCEPT ![self] = cycles[self] + 80]
                                 /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
-                                /\ UNCHANGED << tsx_retries, aborted, 
+                                /\ UNCHANGED << tsx_retries, aborted,
                                                 conflict_aborts >>
                            ELSE /\ mode' = [mode EXCEPT ![self] = "idle"]
                                 /\ write_set' = [write_set EXCEPT ![self] = {}]
@@ -403,7 +403,7 @@ L_tsx_retry(self) == /\ pc[self] = "L_tsx_retry"
                                 /\ read_lines' = [read_lines EXCEPT ![self] = {}]
                                 /\ cycles' = [cycles EXCEPT ![self] = cycles[self] + 20]
                                 /\ pc' = [pc EXCEPT ![self] = "L_tsx"]
-                                /\ UNCHANGED << sgl_lock, sgl_write_set, 
+                                /\ UNCHANGED << sgl_lock, sgl_write_set,
                                                 sgl_write_data >>
                            ELSE /\ sgl_lock = 0 /\ \A other \in Thread \ {self} : mode[other] # "tsx"
                                 /\ sgl_lock' = self
@@ -412,9 +412,9 @@ L_tsx_retry(self) == /\ pc[self] = "L_tsx_retry"
                                 /\ sgl_write_data' = [sgl_write_data EXCEPT ![self] = [cl \in CacheLine |-> NoWrite]]
                                 /\ cycles' = [cycles EXCEPT ![self] = cycles[self] + 100]
                                 /\ pc' = [pc EXCEPT ![self] = "L_sgl"]
-                                /\ UNCHANGED << write_set, write_data, bloom, 
+                                /\ UNCHANGED << write_set, write_data, bloom,
                                                 read_lines >>
-                     /\ UNCHANGED << mem, tsx_retries, committed, aborted, 
+                     /\ UNCHANGED << mem, tsx_retries, committed, aborted,
                                      capacity_aborts, conflict_aborts >>
 
 L_sgl(self) == /\ pc[self] = "L_sgl"
@@ -438,8 +438,8 @@ L_sgl(self) == /\ pc[self] = "L_sgl"
                      /\ cycles' = [cycles EXCEPT ![self] = cycles[self] + 75]
                      /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                      /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-               /\ UNCHANGED << write_set, write_data, bloom, read_lines, 
-                               tsx_retries, aborted, capacity_aborts, 
+               /\ UNCHANGED << write_set, write_data, bloom, read_lines,
+                               tsx_retries, aborted, capacity_aborts,
                                conflict_aborts >>
 
 ThreadProc(self) == L_idle(self) \/ L_tsx(self) \/ L_tsx_retry(self)
@@ -456,7 +456,7 @@ Spec == Init /\ [][Next]_vars
 
 Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
-\* END TRANSLATION 
+\* END TRANSLATION
 
 (***********************************************************************)
 (* pcal.trans output will be inserted here                             *)

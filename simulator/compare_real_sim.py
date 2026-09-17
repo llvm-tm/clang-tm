@@ -153,7 +153,7 @@ def build_benchmark(backend: str, bench_name: str, out_dir: str, rebuild: bool =
         return None
 
     hooks_src = (f"{BACKENDS_DIR}/tm_hooks.cpp {BACKENDS_DIR}/tm_trace_runtime.cpp")
-    
+
     # Ensure bin/ dir exists
     os.makedirs(os.path.join(CPP_DIR, "bin"), exist_ok=True)
     os.makedirs(os.path.join(CPP_DIR, "STAMP", "kmeans"), exist_ok=True)
@@ -315,7 +315,7 @@ def run_synthetic_sim(backend: str, num_threads: int = 2) -> dict:
     for line in gen_proc.stdout.strip().split("\n"):
         if line:
             events.append(json.loads(line))
-    
+
     trace_data = "\n".join(json.dumps(e) for e in events)
 
     # Write to temp file

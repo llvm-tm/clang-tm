@@ -26,7 +26,9 @@ JAVA ?= java
 
 # All backends with .tla and .cfg files (exclude liveness configs and any
 # cfg whose basename has no matching .tla, e.g. *-sequential/-large/-small/
-# -buggy/-check variant configs — those are driven by dedicated targets)
+# -buggy/-check variant configs — those are driven by dedicated targets).
+# Helper modules (TMTypes.tla, TLAPS.tla) have no base .cfg and are therefore
+# never in BACKENDS. Inspect the exact set (no jar required) via `make -n check`.
 ALL_CFGS := $(wildcard *.cfg)
 TLA_BASES := $(patsubst %.tla,%,$(wildcard *.tla))
 BACKENDS := $(filter $(TLA_BASES),$(patsubst %.cfg,%,$(filter-out %-liveness.cfg,$(ALL_CFGS))))

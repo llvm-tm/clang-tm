@@ -1,5 +1,6 @@
 #include "MVLog_globals.hpp"
 #include "tm_alloc_overrides.hpp"
+#include "tm_backend_macros.hpp"
 #include "tm_hooks.hpp"
 #include "tm_thread_state.hpp"
 #include <atomic>
@@ -74,21 +75,8 @@ static std::atomic<int64_t> g_tm_begin_count{0};
 static std::atomic<int64_t> g_tm_end_count{0};
 static std::atomic<int64_t> g_tm_tx_count{0};
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_init();
-static void do_tm_exit();
-static void do_tm_init_thread();
-static void do_tm_exit_thread();
-
-void (*tm_init)() = do_tm_init;
-void (*tm_exit)() = do_tm_exit;
-void (*tm_init_thread)() = do_tm_init_thread;
-void (*tm_exit_thread)() = do_tm_exit_thread;
-
-static void do_tm_init()
-#else
-void tm_init()
-#endif
+TM_PLUGIN_LIFECYCLE_VARS()
+TM_PLUGIN_LIFECYCLE_FN(do_tm_init, void tm_init())
 {
 	if (stm::tm_region_init() != 0) {
 		fprintf(stderr,
@@ -99,21 +87,13 @@ void tm_init()
 	tm_register_real_hooks(&g_mvlog_hooks);
 }
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_exit()
-#else
-void tm_exit()
-#endif
+TM_PLUGIN_LIFECYCLE_FN(do_tm_exit, void tm_exit())
 {
 	mvlog::exit();
 	stm::tm_region_destroy();
 }
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_init_thread()
-#else
-void tm_init_thread()
-#endif
+TM_PLUGIN_LIFECYCLE_FN(do_tm_init_thread, void tm_init_thread())
 {
 	tm_hook_init_thread();
 	mvlog::init_thread();
@@ -123,11 +103,7 @@ void tm_init_thread()
 	sigsetjmp(tm_jmpbuf, 0);
 }
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_exit_thread()
-#else
-void tm_exit_thread()
-#endif
+TM_PLUGIN_LIFECYCLE_FN(do_tm_exit_thread, void tm_exit_thread())
 {
 	tm_hook_exit_thread();
 	mvlog::exit_thread();

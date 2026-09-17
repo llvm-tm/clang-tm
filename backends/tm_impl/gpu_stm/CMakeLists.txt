@@ -158,5 +158,3 @@ if(BUILD_GPU_STM_HIP)
     )
     target_link_libraries(test_pr_stm_gpu_hip PRIVATE pthread)
 endif()
-
-

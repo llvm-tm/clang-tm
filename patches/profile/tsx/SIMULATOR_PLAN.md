@@ -81,7 +81,7 @@ explicit_api/rust/workspace/runtime/tsx_sim/
 
 ### Phase 2: Cost Model ✅
 - `MachineProfile` struct with serde JSON serialization
-- `WorkloadProfile` struct with serde JSON serialization  
+- `WorkloadProfile` struct with serde JSON serialization
 - `cost_model.rs` — `event_cost(kind, &machine, backend)` → cycles
 - `CalibratedCostModel` — pre-computed per-event costs for fast dispatch
 - `estimate_workload()` — predict total execution time from workload + machine

@@ -405,8 +405,8 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION
-VARIABLES clock, commit_lock, vbox_hist, committedTxns, phase, rv, activeMask, 
-          readsDone, writesDone, has_warp_write, ct, warpCommits, readSet, 
+VARIABLES clock, commit_lock, vbox_hist, committedTxns, phase, rv, activeMask,
+          readsDone, writesDone, has_warp_write, ct, warpCommits, readSet,
           writeSet, pc
 
 (* define statement *)
@@ -461,8 +461,8 @@ Inv == /\ InvWarpPhaseCoherent
        /\ InvCommitBudget
 
 
-vars == << clock, commit_lock, vbox_hist, committedTxns, phase, rv, 
-           activeMask, readsDone, writesDone, has_warp_write, ct, warpCommits, 
+vars == << clock, commit_lock, vbox_hist, committedTxns, phase, rv,
+           activeMask, readsDone, writesDone, has_warp_write, ct, warpCommits,
            readSet, writeSet, pc >>
 
 ProcSet == (Warp)
@@ -498,7 +498,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
                       /\ pc' = [pc EXCEPT ![self] = "L_read"]
                    \/ /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                       /\ UNCHANGED <<phase, rv, activeMask, readsDone, writesDone, has_warp_write, ct, readSet, writeSet>>
-                /\ UNCHANGED << clock, commit_lock, vbox_hist, committedTxns, 
+                /\ UNCHANGED << clock, commit_lock, vbox_hist, committedTxns,
                                 warpCommits >>
 
 L_read(self) == /\ pc[self] = "L_read"
@@ -513,8 +513,8 @@ L_read(self) == /\ pc[self] = "L_read"
                                 ELSE /\ TRUE
                                      /\ UNCHANGED activeMask
                 /\ pc' = [pc EXCEPT ![self] = "L_read_next"]
-                /\ UNCHANGED << clock, commit_lock, vbox_hist, committedTxns, 
-                                phase, rv, writesDone, has_warp_write, ct, 
+                /\ UNCHANGED << clock, commit_lock, vbox_hist, committedTxns,
+                                phase, rv, writesDone, has_warp_write, ct,
                                 warpCommits, writeSet >>
 
 L_read_next(self) == /\ pc[self] = "L_read_next"
@@ -530,9 +530,9 @@ L_read_next(self) == /\ pc[self] = "L_read_next"
                                 /\ writesDone' = [writesDone EXCEPT ![self] = 0]
                                 /\ activeMask' = [activeMask EXCEPT ![self] = [t \in Thread |-> TRUE]]
                                 /\ pc' = [pc EXCEPT ![self] = "L_write"]
-                     /\ UNCHANGED << clock, commit_lock, vbox_hist, 
-                                     committedTxns, rv, readsDone, 
-                                     has_warp_write, ct, warpCommits, readSet, 
+                     /\ UNCHANGED << clock, commit_lock, vbox_hist,
+                                     committedTxns, rv, readsDone,
+                                     has_warp_write, ct, warpCommits, readSet,
                                      writeSet >>
 
 L_write(self) == /\ pc[self] = "L_write"
@@ -544,15 +544,15 @@ L_write(self) == /\ pc[self] = "L_write"
                                       /\ has_warp_write' = [has_warp_write EXCEPT ![self] = TRUE]
                                       /\ writesDone' = [writesDone EXCEPT ![self] = writesDone[self] + 1]
                                  ELSE /\ TRUE
-                                      /\ UNCHANGED << writesDone, 
+                                      /\ UNCHANGED << writesDone,
                                                       has_warp_write, writeSet >>
                            /\ IF Cardinality({a2 \in Addr : writeSet'[self][t][a2]}) >= WritesPerThread
                                  THEN /\ activeMask' = [activeMask EXCEPT ![self][t] = FALSE]
                                  ELSE /\ TRUE
                                       /\ UNCHANGED activeMask
                  /\ pc' = [pc EXCEPT ![self] = "L_write_next"]
-                 /\ UNCHANGED << clock, commit_lock, vbox_hist, committedTxns, 
-                                 phase, rv, readsDone, ct, warpCommits, 
+                 /\ UNCHANGED << clock, commit_lock, vbox_hist, committedTxns,
+                                 phase, rv, readsDone, ct, warpCommits,
                                  readSet >>
 
 L_write_next(self) == /\ pc[self] = "L_write_next"
@@ -567,9 +567,9 @@ L_write_next(self) == /\ pc[self] = "L_write_next"
                             ELSE /\ phase' = [phase EXCEPT ![self] = "validating"]
                                  /\ pc' = [pc EXCEPT ![self] = "L_validate"]
                                  /\ UNCHANGED activeMask
-                      /\ UNCHANGED << clock, commit_lock, vbox_hist, 
-                                      committedTxns, rv, readsDone, writesDone, 
-                                      has_warp_write, ct, warpCommits, readSet, 
+                      /\ UNCHANGED << clock, commit_lock, vbox_hist,
+                                      committedTxns, rv, readsDone, writesDone,
+                                      has_warp_write, ct, warpCommits, readSet,
                                       writeSet >>
 
 L_validate(self) == /\ pc[self] = "L_validate"
@@ -579,10 +579,10 @@ L_validate(self) == /\ pc[self] = "L_validate"
                                /\ committedTxns' = committedTxns + 1
                                /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                           ELSE /\ pc' = [pc EXCEPT ![self] = "L_validate_try_lock"]
-                               /\ UNCHANGED << committedTxns, phase, 
+                               /\ UNCHANGED << committedTxns, phase,
                                                warpCommits >>
-                    /\ UNCHANGED << clock, commit_lock, vbox_hist, rv, 
-                                    activeMask, readsDone, writesDone, 
+                    /\ UNCHANGED << clock, commit_lock, vbox_hist, rv,
+                                    activeMask, readsDone, writesDone,
                                     has_warp_write, ct, readSet, writeSet >>
 
 L_validate_try_lock(self) == /\ pc[self] = "L_validate_try_lock"
@@ -595,9 +595,9 @@ L_validate_try_lock(self) == /\ pc[self] = "L_validate_try_lock"
                                    ELSE /\ phase' = [phase EXCEPT ![self] = "aborting"]
                                         /\ pc' = [pc EXCEPT ![self] = "L_abort"]
                                         /\ UNCHANGED << clock, commit_lock, ct >>
-                             /\ UNCHANGED << vbox_hist, committedTxns, rv, 
-                                             activeMask, readsDone, writesDone, 
-                                             has_warp_write, warpCommits, 
+                             /\ UNCHANGED << vbox_hist, committedTxns, rv,
+                                             activeMask, readsDone, writesDone,
+                                             has_warp_write, warpCommits,
                                              readSet, writeSet >>
 
 L_validate_readsets(self) == /\ pc[self] = "L_validate_readsets"
@@ -614,9 +614,9 @@ L_validate_readsets(self) == /\ pc[self] = "L_validate_readsets"
                                    ELSE /\ commit_lock' = 0
                                         /\ phase' = [phase EXCEPT ![self] = "aborting"]
                                         /\ pc' = [pc EXCEPT ![self] = "L_abort"]
-                             /\ UNCHANGED << clock, vbox_hist, committedTxns, 
-                                             rv, activeMask, readsDone, 
-                                             writesDone, has_warp_write, ct, 
+                             /\ UNCHANGED << clock, vbox_hist, committedTxns,
+                                             rv, activeMask, readsDone,
+                                             writesDone, has_warp_write, ct,
                                              warpCommits, readSet, writeSet >>
 
 L_prepend(self) == /\ pc[self] = "L_prepend"
@@ -631,7 +631,7 @@ L_prepend(self) == /\ pc[self] = "L_prepend"
                    /\ phase' = [phase EXCEPT ![self] = "idle"]
                    /\ activeMask' = [activeMask EXCEPT ![self] = [t \in Thread |-> FALSE]]
                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                   /\ UNCHANGED << clock, rv, readsDone, writesDone, 
+                   /\ UNCHANGED << clock, rv, readsDone, writesDone,
                                    has_warp_write, ct, readSet, writeSet >>
 
 L_abort(self) == /\ pc[self] = "L_abort"
@@ -643,7 +643,7 @@ L_abort(self) == /\ pc[self] = "L_abort"
                  /\ activeMask' = [activeMask EXCEPT ![self] = [t \in Thread |-> TRUE]]
                  /\ phase' = [phase EXCEPT ![self] = "reading"]
                  /\ pc' = [pc EXCEPT ![self] = "L_read"]
-                 /\ UNCHANGED << clock, commit_lock, vbox_hist, committedTxns, 
+                 /\ UNCHANGED << clock, commit_lock, vbox_hist, committedTxns,
                                  rv, ct, warpCommits >>
 
 WARP(self) == L_idle(self) \/ L_read(self) \/ L_read_next(self)

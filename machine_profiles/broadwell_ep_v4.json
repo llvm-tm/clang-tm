@@ -75,5 +75,5 @@
     }
   ],
   "collected": "2026-08-29",
-  "description": "Broadwell-EP v4 calibration from TSX_STATS profiling + benchmarks/tsx ground truth (intel14v2 E5-2660 v4, 2026-08-29). TSXSGL xbegin=60, xend=178 measured. Conflict matrix (RR 0%, RW/WR reader 52-67% abort free-running, spurious 0.0006% @1M) validates tsx_sim bloom+WW semantics and spurious injection (TSX_SIM_SPURIOUS_RATE=6e-06). SW backends: calibrated approximations based on algorithm complexity." 
+  "description": "Broadwell-EP v4 calibration from TSX_STATS profiling + benchmarks/tsx ground truth (intel14v2 E5-2660 v4, 2026-08-29). TSXSGL xbegin=60, xend=178 measured. Conflict matrix (RR 0%, RW/WR reader 52-67% abort free-running, spurious 0.0006% @1M) validates tsx_sim bloom+WW semantics and spurious injection (TSX_SIM_SPURIOUS_RATE=6e-06). SW backends: calibrated approximations based on algorithm complexity."
 }

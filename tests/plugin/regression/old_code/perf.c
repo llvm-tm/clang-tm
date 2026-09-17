@@ -95,14 +95,14 @@ static void test1load(int ro)
     start = rdtsc() - start;
     if (start < m_rdtsc)
       m_rdtsc = start;
-  } 
+  }
 
   for (i = 0; i < MEASURE_NB; i++) {
     sigjmp_buf *_e;
     start = rdtsc();
     _e = stm_start(_a);
     m_s[i] = rdtsc() - start;
-    sigsetjmp(*_e, 0); 
+    sigsetjmp(*_e, 0);
     stm_load(&global_ctr[0]);
     stm_inc_clock();
     stm_commit();
@@ -110,39 +110,39 @@ static void test1load(int ro)
 
   for (i = 0; i < MEASURE_NB; i++) {
     sigjmp_buf *_e = stm_start(_a);
-    sigsetjmp(*_e, 0); 
+    sigsetjmp(*_e, 0);
     start = rdtsc();
     stm_load(&global_ctr[0]);
     m_r[i] = rdtsc() - start;
     stm_inc_clock();
     stm_commit();
   }
-  
+
   for (i = 0; i < MEASURE_NB; i++) {
     sigjmp_buf *_e = stm_start(_a);
-    sigsetjmp(*_e, 0); 
+    sigsetjmp(*_e, 0);
     stm_load(&global_ctr[0]);
     stm_inc_clock();
     start = rdtsc();
     stm_commit();
     m_c[i] = rdtsc() - start;
   }
- 
+
   remove_cst_cost(m_s, MEASURE_NB, m_rdtsc);
   remove_cst_cost(m_r, MEASURE_NB, m_rdtsc);
   remove_cst_cost(m_c, MEASURE_NB, m_rdtsc);
 
-  if (ro) 
+  if (ro)
     printf("RO transaction - 1 load\n");
   else
     printf("RW transaction - 1 load\n");
 
   printf("%12s %12s %12s %12s\n", "", "min", "avg", "med");
-  stats(m_s, MEASURE_NB, &min, &avg, &med); 
+  stats(m_s, MEASURE_NB, &min, &avg, &med);
   printf("%12s %12lu %12.2f %12lu\n", "start", (unsigned long)min, avg, (unsigned long)med);
-  stats(m_r, MEASURE_NB, &min, &avg, &med); 
+  stats(m_r, MEASURE_NB, &min, &avg, &med);
   printf("%12s %12lu %12.2f %12lu\n", "load", (unsigned long)min, avg, (unsigned long)med);
-  stats(m_c, MEASURE_NB, &min, &avg, &med); 
+  stats(m_c, MEASURE_NB, &min, &avg, &med);
   printf("%12s %12lu %12.2f %12lu\n", "commit", (unsigned long)min, avg, (unsigned long)med);
 }
 
@@ -166,14 +166,14 @@ static void testnload(int ro, size_t load_nb)
     start = rdtsc() - start;
     if (start < m_rdtsc)
       m_rdtsc = start;
-  } 
+  }
 
   for (i = 0; i < MEASURE_NB; i++) {
     sigjmp_buf *_e;
     start = rdtsc();
     _e = stm_start(_a);
     m_s[i] = rdtsc() - start;
-    sigsetjmp(*_e, 0); 
+    sigsetjmp(*_e, 0);
     for (j = 0; j < load_nb; j++)
       stm_load(&global_ctr[j]);
     stm_inc_clock();
@@ -182,7 +182,7 @@ static void testnload(int ro, size_t load_nb)
 
   for (i = 0; i < MEASURE_NB; i++) {
     sigjmp_buf *_e = stm_start(_a);
-    sigsetjmp(*_e, 0); 
+    sigsetjmp(*_e, 0);
     start = rdtsc();
     for (j = 0; j < load_nb; j++)
       stm_load(&global_ctr[j]);
@@ -190,10 +190,10 @@ static void testnload(int ro, size_t load_nb)
     stm_inc_clock();
     stm_commit();
   }
-  
+
   for (i = 0; i < MEASURE_NB; i++) {
     sigjmp_buf *_e = stm_start(_a);
-    sigsetjmp(*_e, 0); 
+    sigsetjmp(*_e, 0);
     for (j = 0; j < load_nb; j++)
       stm_load(&global_ctr[j]);
     stm_inc_clock();
@@ -201,23 +201,23 @@ static void testnload(int ro, size_t load_nb)
     stm_commit();
     m_c[i] = rdtsc() - start;
   }
- 
+
   remove_cst_cost(m_s, MEASURE_NB, m_rdtsc);
   remove_cst_cost(m_r, MEASURE_NB, m_rdtsc);
   remove_cst_cost(m_c, MEASURE_NB, m_rdtsc);
 
-  if (ro) 
+  if (ro)
     printf("RO transaction - %lu load\n", (unsigned long)load_nb);
   else
     printf("RW transaction - %lu load\n", (unsigned long)load_nb);
 
   printf("%12s %12s %12s %12s\n", "", "min", "avg", "med");
-  stats(m_s, MEASURE_NB, &min, &avg, &med); 
+  stats(m_s, MEASURE_NB, &min, &avg, &med);
   printf("%12s %12lu %12.2f %12lu\n", "start", (unsigned long)min, avg, (unsigned long)med);
-  stats(m_r, MEASURE_NB, &min, &avg, &med); 
+  stats(m_r, MEASURE_NB, &min, &avg, &med);
   if (load_nb)
     printf("%12s %12lu %12.2f %12lu\n", "load", (unsigned long)min/load_nb, avg/load_nb, (unsigned long)med/load_nb);
-  stats(m_c, MEASURE_NB, &min, &avg, &med); 
+  stats(m_c, MEASURE_NB, &min, &avg, &med);
   printf("%12s %12lu %12.2f %12lu\n", "commit", (unsigned long)min, avg, (unsigned long)med);
 }
 
@@ -242,14 +242,14 @@ static void testnloadnstore(size_t load_nb, size_t store_nb)
     start = rdtsc() - start;
     if (start < m_rdtsc)
       m_rdtsc = start;
-  } 
+  }
 
   for (i = 0; i < MEASURE_NB; i++) {
     sigjmp_buf *_e;
     start = rdtsc();
     _e = stm_start(_a);
     m_s[i] = rdtsc() - start;
-    sigsetjmp(*_e, 0); 
+    sigsetjmp(*_e, 0);
     for (j = 0; j < load_nb; j++)
       stm_load(&global_ctr[j]);
     for (j = 0; j < store_nb; j++)
@@ -260,7 +260,7 @@ static void testnloadnstore(size_t load_nb, size_t store_nb)
 
   for (i = 0; i < MEASURE_NB; i++) {
     sigjmp_buf *_e = stm_start(_a);
-    sigsetjmp(*_e, 0); 
+    sigsetjmp(*_e, 0);
     start = rdtsc();
     for (j = 0; j < load_nb; j++)
       stm_load(&global_ctr[j]);
@@ -270,10 +270,10 @@ static void testnloadnstore(size_t load_nb, size_t store_nb)
     stm_inc_clock();
     stm_commit();
   }
-  
+
   for (i = 0; i < MEASURE_NB; i++) {
     sigjmp_buf *_e = stm_start(_a);
-    sigsetjmp(*_e, 0); 
+    sigsetjmp(*_e, 0);
     for (j = 0; j < load_nb; j++)
       stm_load(&global_ctr[j]);
     start = rdtsc();
@@ -283,10 +283,10 @@ static void testnloadnstore(size_t load_nb, size_t store_nb)
     stm_inc_clock();
     stm_commit();
   }
-  
+
   for (i = 0; i < MEASURE_NB; i++) {
     sigjmp_buf *_e = stm_start(_a);
-    sigsetjmp(*_e, 0); 
+    sigsetjmp(*_e, 0);
     for (j = 0; j < load_nb; j++)
       stm_load(&global_ctr[j]);
     for (j = 0; j < store_nb; j++)
@@ -296,7 +296,7 @@ static void testnloadnstore(size_t load_nb, size_t store_nb)
     stm_commit();
     m_c[i] = rdtsc() - start;
   }
- 
+
   remove_cst_cost(m_s, MEASURE_NB, m_rdtsc);
   remove_cst_cost(m_r, MEASURE_NB, m_rdtsc);
   remove_cst_cost(m_w, MEASURE_NB, m_rdtsc);
@@ -305,15 +305,15 @@ static void testnloadnstore(size_t load_nb, size_t store_nb)
   printf("RW transaction - %lu load - %lu store\n", (unsigned long)load_nb, (unsigned long)store_nb);
 
   printf("%12s %12s %12s %12s\n", "", "min", "avg", "med");
-  stats(m_s, MEASURE_NB, &min, &avg, &med); 
+  stats(m_s, MEASURE_NB, &min, &avg, &med);
   printf("%12s %12lu %12.2f %12lu\n", "start", (unsigned long)min, avg, (unsigned long)med);
-  stats(m_r, MEASURE_NB, &min, &avg, &med); 
+  stats(m_r, MEASURE_NB, &min, &avg, &med);
   if (load_nb)
     printf("%12s %12lu %12.2f %12lu\n", "load", (unsigned long)min/load_nb, avg/load_nb, (unsigned long)med/load_nb);
-  stats(m_w, MEASURE_NB, &min, &avg, &med); 
+  stats(m_w, MEASURE_NB, &min, &avg, &med);
   if (store_nb)
     printf("%12s %12lu %12.2f %12lu\n", "store", (unsigned long)min/store_nb, avg/store_nb, (unsigned long)med/store_nb);
-  stats(m_c, MEASURE_NB, &min, &avg, &med); 
+  stats(m_c, MEASURE_NB, &min, &avg, &med);
   printf("%12s %12lu %12.2f %12lu\n", "commit", (unsigned long)min, avg, (unsigned long)med);
 }
 

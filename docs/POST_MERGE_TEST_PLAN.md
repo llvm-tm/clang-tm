@@ -6,6 +6,17 @@
 > plan verifies nothing is broken after that merge. The GitLab remote was removed;
 > **`origin` (GitHub) is now the only remote.**
 
+**Automated runner (S31):** the reliable core of this matrix is now runnable
+via `make post-merge-check`
+([`tools/post-merge-check.sh`](../tools/post-merge-check.sh)) — it executes
+§0 toolchain, §3 plugin, §1 C++ backends, §4 Rust workspace, §5 simulator, and
+§8 merge-integrity fail-fast with per-section `timeout`s (and §7 TLA+ / §6 gem5
+when the TLC jar / a gem5 build are available). It is gated **weekly (Sunday)**
+in [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml),
+budgeted at 10 min. The checkboxes below remain the full *manual* plan (some
+items are intentionally not automated: the Rust feature sweep, the benchmark
+smoke, and the known-broken cases are called out inline).
+
 **Status legend**: `[ ]` pending · `[x]` done · `[SKIP]` intentionally skipped
 
 ---

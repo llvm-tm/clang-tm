@@ -57,7 +57,8 @@ Start at [`docs/README.md`](docs/README.md) (index of all docs). Key entries:
 - **Simulation**: Rust backends gate TLS behind `#[cfg(feature = "simulation")]`;
   add `pub mod sim` (7 exported fns) + `TxState` (Clone+Serialize+Deserialize)
   for a new sim backend. See `runtime/norec/src/lib.rs`.
-- **LLVM version is 22** (`llvm-config-22`, `opt-22`, `clang++-22`).
+- **Default LLVM version is 22** (`llvm-config-22`, `opt-22`, `clang++-22`);
+  tooling honors optional `LLVM_VERSION` (CI also probes LLVM 23).
 - **Backends**: `TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL
   LEFTRIGHT ROMULUS XTM SPHT TSXSGL` + GPU (`GPU_STM_CPU`, `CSMV`, …).
 
@@ -80,6 +81,6 @@ Start at [`docs/README.md`](docs/README.md) (index of all docs). Key entries:
 ## Do not
 
 - Append session history to this file.
-- Bump the LLVM version away from 22.
+- Change the default LLVM version away from 22.
 - Make hook functions non-`static`.
 - Commit secrets/keys or build artifacts (`**/bin/`, `m5out/` are gitignored).

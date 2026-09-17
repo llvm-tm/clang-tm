@@ -178,12 +178,12 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "80e933cf" /\ chksum(tla) = "38de78dc")
-VARIABLES clock, lock, mem, state, readSet, writeSet, undoLog, readOnly, 
-          endVersion, committed, aborted, lastSignalFence, lastThreadFence, 
+VARIABLES clock, lock, mem, state, readSet, writeSet, undoLog, readOnly,
+          endVersion, committed, aborted, lastSignalFence, lastThreadFence,
           lastRmw, pc
 
-vars == << clock, lock, mem, state, readSet, writeSet, undoLog, readOnly, 
-           endVersion, committed, aborted, lastSignalFence, lastThreadFence, 
+vars == << clock, lock, mem, state, readSet, writeSet, undoLog, readOnly,
+           endVersion, committed, aborted, lastSignalFence, lastThreadFence,
            lastRmw, pc >>
 
 ProcSet == (Thread)
@@ -214,9 +214,9 @@ L_idle(self) == /\ pc[self] = "L_idle"
                            /\ endVersion' = [endVersion EXCEPT ![self] = clock]
                            /\ pc' = [pc EXCEPT ![self] = "L_active"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "L_done"]
-                           /\ UNCHANGED << state, readSet, writeSet, readOnly, 
+                           /\ UNCHANGED << state, readSet, writeSet, readOnly,
                                            endVersion >>
-                /\ UNCHANGED << clock, lock, mem, undoLog, committed, aborted, 
+                /\ UNCHANGED << clock, lock, mem, undoLog, committed, aborted,
                                 lastSignalFence, lastThreadFence, lastRmw >>
 
 L_active(self) == /\ pc[self] = "L_active"
@@ -224,7 +224,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                lock[a][2] = self \/ (lock[a][1] = 0 /\ lock[a][3] = v /\ lock[a][4] = i)
                               THEN /\ endVersion' = [endVersion EXCEPT ![self] = clock]
                                    /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                   /\ UNCHANGED << state, readSet, writeSet, 
+                                   /\ UNCHANGED << state, readSet, writeSet,
                                                    lastRmw >>
                               ELSE /\ lastRmw' = [lastRmw EXCEPT ![self] = "release"]
                                    /\ readSet' = [readSet EXCEPT ![self] = {}]
@@ -251,7 +251,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                        /\ writeSet' = [writeSet EXCEPT ![self] = writeSet[self] \union {a}]
                                        /\ readOnly' = [readOnly EXCEPT ![self] = FALSE]
                                   ELSE /\ TRUE
-                                       /\ UNCHANGED << lock, mem, writeSet, 
+                                       /\ UNCHANGED << lock, mem, writeSet,
                                                        undoLog, readOnly >>
                         /\ pc' = [pc EXCEPT ![self] = "L_active"]
                         /\ UNCHANGED <<clock, state, readSet, endVersion, committed, aborted, lastSignalFence>>
@@ -296,7 +296,7 @@ L_active(self) == /\ pc[self] = "L_active"
                                    /\ state' = [state EXCEPT ![self] = "idle"]
                                    /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L_active"]
-                                   /\ UNCHANGED << lock, mem, state, readSet, 
+                                   /\ UNCHANGED << lock, mem, state, readSet,
                                                    writeSet, aborted, lastRmw >>
                         /\ UNCHANGED <<clock, undoLog, readOnly, endVersion, committed, lastSignalFence>>
                   /\ UNCHANGED lastThreadFence
@@ -307,9 +307,9 @@ L_validateWT(self) == /\ pc[self] = "L_validateWT"
                              lock[a][2] = self \/ (lock[a][1] = 0 /\ lock[a][3] = v /\ lock[a][4] = i)
                             THEN /\ pc' = [pc EXCEPT ![self] = "L_unlock"]
                             ELSE /\ pc' = [pc EXCEPT ![self] = "L_abort"]
-                      /\ UNCHANGED << clock, lock, mem, state, readSet, 
-                                      writeSet, undoLog, readOnly, endVersion, 
-                                      committed, aborted, lastThreadFence, 
+                      /\ UNCHANGED << clock, lock, mem, state, readSet,
+                                      writeSet, undoLog, readOnly, endVersion,
+                                      committed, aborted, lastThreadFence,
                                       lastRmw >>
 
 L_unlock(self) == /\ pc[self] = "L_unlock"
@@ -321,7 +321,7 @@ L_unlock(self) == /\ pc[self] = "L_unlock"
                   /\ readSet' = [readSet EXCEPT ![self] = {}]
                   /\ writeSet' = [writeSet EXCEPT ![self] = {}]
                   /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                  /\ UNCHANGED << clock, mem, undoLog, readOnly, endVersion, 
+                  /\ UNCHANGED << clock, mem, undoLog, readOnly, endVersion,
                                   aborted, lastSignalFence, lastThreadFence >>
 
 L_abort(self) == /\ pc[self] = "L_abort"
@@ -337,15 +337,15 @@ L_abort(self) == /\ pc[self] = "L_abort"
                  /\ writeSet' = [writeSet EXCEPT ![self] = {}]
                  /\ state' = [state EXCEPT ![self] = "idle"]
                  /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                 /\ UNCHANGED << clock, undoLog, readOnly, endVersion, 
+                 /\ UNCHANGED << clock, undoLog, readOnly, endVersion,
                                  committed, lastSignalFence, lastThreadFence >>
 
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << clock, lock, mem, state, readSet, writeSet, 
-                                undoLog, readOnly, endVersion, committed, 
-                                aborted, lastSignalFence, lastThreadFence, 
+                /\ UNCHANGED << clock, lock, mem, state, readSet, writeSet,
+                                undoLog, readOnly, endVersion, committed,
+                                aborted, lastSignalFence, lastThreadFence,
                                 lastRmw >>
 
 ThreadProc(self) == L_idle(self) \/ L_active(self) \/ L_validateWT(self)

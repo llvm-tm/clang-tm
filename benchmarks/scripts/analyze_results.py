@@ -25,11 +25,11 @@ for fname in os.listdir(RESULTS_DIR):
     m = pattern.match(fname)
     if not m:
         continue
-    
+
     fpath = os.path.join(RESULTS_DIR, fname)
     with open(fpath) as f:
         content = f.read()
-    
+
     # Extract Ops/sec
     ops_match = re.search(r'Ops/sec\s*:\s*([\d.]+)', content)
     if not ops_match:
@@ -60,10 +60,10 @@ for fname in os.listdir(RESULTS_DIR):
             ops_sec2 = total_ops / (elapsed_ms / 1000.0)
             if abs(ops_sec - ops_sec2) > 0.01:
                 ops_sec = ops_sec2  # Use more precise computation
-    
+
     if ops_sec is None or ops_sec == 0:
         continue
-    
+
     entry = {
         'bench': m.group('bench'),
         'backend': m.group('backend'),
@@ -111,7 +111,7 @@ for r in results:
         print(f"  {label.upper()}")
         print(f"{'='*60}")
         current_bench = label
-    
+
     if threads == 1:
         print(f"  {backend:12s} t={threads:2d}  mean={mean:8.1f}  std={std:6.2f}  n={n}")
     else:

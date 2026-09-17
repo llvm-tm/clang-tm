@@ -32,7 +32,7 @@ variables
     crashed = FALSE,
     recovered = FALSE,
     \* Dual-write intermediate state: thread has written mem but not yet nvm.
-    \* A crash during this window leaves nvm with stale data (no fence between 
+    \* A crash during this window leaves nvm with stale data (no fence between
     \* *addr=val and memcpy in C++).  Recovery restores mem from nvm, losing
     \* the mem-only write.
     pending_nvm = [t \in Thread |-> FALSE],
@@ -161,7 +161,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
                                  THEN /\ pc' = [pc EXCEPT ![self] = "L_done"]
                                  ELSE /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                            /\ UNCHANGED << lock, state, lastRmw >>
-                /\ UNCHANGED << mem, nvm, version, committed, crashed, 
+                /\ UNCHANGED << mem, nvm, version, committed, crashed,
                                 recovered, pending_nvm, pending_addr,
                                 pending_val, lastSignalFence, lastThreadFence >>
 
@@ -211,7 +211,7 @@ L_write_nvm(self) == /\ pc[self] = "L_write_nvm"
 L_done(self) == /\ pc[self] = "L_done"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << lock, mem, nvm, state, version, committed, 
+                /\ UNCHANGED << lock, mem, nvm, state, version, committed,
                                 crashed, recovered, pending_nvm, pending_addr,
                                 pending_val, lastSignalFence, lastThreadFence,
                                 lastRmw >>

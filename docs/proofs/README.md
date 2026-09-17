@@ -147,6 +147,41 @@ runs TLC/pcal.trans, and handles liveness configs:
 
 Run `./tla.sh help` for full usage.
 
+## Makefile targets & backend selection
+
+A [Makefile](Makefile) also drives TLC directly (in addition to `tla.sh`):
+
+```bash
+cd docs/proofs
+make check                       # TLC safety check on every backend in $(BACKENDS)
+make check-one BACKEND=NOrec     # TLC on a single backend
+make check-all                   # as check, plus `-coverage 1`
+make smoke-check                 # 3 small models (SGL, NOrec, TinySTM_WBCTL), 60s each — CI gate
+make verify-liveness             # Spec_WF + PROPERTY on every *-liveness.cfg
+make -n check                    # print exactly which backends will be checked (no jar needed)
+```
+
+### Which files count as a "backend"
+
+`$(BACKENDS)` is `$(filter $(TLA_BASES), <base .cfg names>)`, where
+`$(TLA_BASES)` is the set of names `<B>` for which a `<B>.tla` exists. A backend
+is therefore only checked when it has **both** a `<B>.tla` spec and a base
+`<B>.cfg` instance. Everything else is **deliberately excluded**:
+
+- **variant configs** — `*-liveness.cfg` (explicitly `filter-out`), plus
+  `*-sequential.cfg` / `*-large.cfg` / `*-small.cfg` / `*-buggy.cfg` /
+  `*-check.cfg`, whose basenames have no matching `.tla` and are driven by their
+  own targets (`verify-sequential`, `verify-large`, …);
+- **helper modules** — `TMTypes.tla` and `TLAPS.tla` are shared TLA+ modules,
+  not standalone backends (no base `.cfg`);
+- **TLC trace artifacts** — e.g. `CSMV_TTrace_<ts>.tla`, written by TLC after an
+  error; gitignored and removed by `make clean`, never a real spec.
+
+`make -n check` lists the exact backends that will run. As of this writing that
+is **29** backends; any `<B>.tla` without a base `<B>.cfg` is intentionally not
+model-checked. (The "37" sometimes quoted is a miscount — it includes the 6
+local `CSMV_TTrace_*` artifacts and the 2 helper modules above.)
+
 ## Verifying the Proofs
 
 ### SGL.tla — TLAPS Mechanical Proof

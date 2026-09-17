@@ -24,15 +24,11 @@ else
   TM_LINK_OPT = -O1
 endif
 
-# Discover LLVM config (handle versioned installs: llvm-config-22, llvm-config-22.1, llvm-config)
-LLVM_CONFIG := $(shell command -v llvm-config-22 2>/dev/null || command -v llvm-config-22.1 2>/dev/null || command -v llvm-config 2>/dev/null || echo "")
-
-# Check LLVM version (22+ required)
-LLVM_VER := $(shell $(LLVM_CONFIG) --version 2>/dev/null || echo "0")
-LLVM_MAJOR := $(word 1,$(subst ., ,$(LLVM_VER)))
-OLD_VERSIONS := 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20
-ifneq ($(filter $(LLVM_MAJOR),$(OLD_VERSIONS)),)
-  $(error LLVM 22+ required, found $(LLVM_VER))
+# Discover LLVM config/tools. LLVM_VERSION selects the major version
+# (default: 22; CI may explicitly set LLVM_VERSION=23).
+include llvm-tool-helper.mk
+ifeq ($(LLVM_CONFIG),)
+$(error llvm-config not found; LLVM 22+ required (install llvm-22-dev or llvm-23-dev, or set LLVM_VERSION))
 endif
 
 # Derive LLVM build flags (tools discovered by tm_pipeline.mk below)

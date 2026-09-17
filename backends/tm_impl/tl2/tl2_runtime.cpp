@@ -16,6 +16,7 @@
 
 #include "tl2.hpp"
 #include "tm_alloc_overrides.hpp"
+#include "tm_backend_macros.hpp"
 #include "tm_hooks.hpp"
 #include "tm_thread_state.hpp"
 thread_local bool g_in_tx = false;
@@ -43,21 +44,8 @@ std::atomic<uint64_t> g_tm_abort_count{0};
 
 extern const TMRealHooks g_tl2_hooks;
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_init();
-static void do_tm_exit();
-static void do_tm_init_thread();
-static void do_tm_exit_thread();
-
-void (*tm_init)() = do_tm_init;
-void (*tm_exit)() = do_tm_exit;
-void (*tm_init_thread)() = do_tm_init_thread;
-void (*tm_exit_thread)() = do_tm_exit_thread;
-
-static void do_tm_init()
-#else
-extern "C" void tm_init()
-#endif
+TM_PLUGIN_LIFECYCLE_VARS()
+TM_PLUGIN_LIFECYCLE_FN(do_tm_init, extern "C" void tm_init())
 {
 	if (stm::tm_region_init() != 0) {
 		fprintf(stderr,
@@ -68,30 +56,18 @@ extern "C" void tm_init()
 	tm_register_real_hooks(&g_tl2_hooks);
 }
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_exit()
-#else
-extern "C" void tm_exit()
-#endif
+TM_PLUGIN_LIFECYCLE_FN(do_tm_exit, extern "C" void tm_exit())
 {
 	stm::tm_region_destroy();
 }
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_init_thread()
-#else
-extern "C" void tm_init_thread()
-#endif
+TM_PLUGIN_LIFECYCLE_FN(do_tm_init_thread, extern "C" void tm_init_thread())
 {
 	tm_hook_init_thread();
 	tl2::init_thread();
 }
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_exit_thread()
-#else
-extern "C" void tm_exit_thread()
-#endif
+TM_PLUGIN_LIFECYCLE_FN(do_tm_exit_thread, extern "C" void tm_exit_thread())
 {
 	tm_hook_exit_thread();
 	tl2::exit_thread();

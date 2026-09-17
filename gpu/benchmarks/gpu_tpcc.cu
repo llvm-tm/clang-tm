@@ -1,4 +1,4 @@
-// ── GPU TPC-C TM benchmark (DRAFT) ─────────────────────────────
+// ── GPU TPC-C TM benchmark (@experimental) ─────────────────────
 //
 // TPC-C Payment transaction adapted to the CSMV batch executor.
 // Payment is the classic high-contention TPC-C transaction:

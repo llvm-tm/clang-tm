@@ -1,4 +1,4 @@
-// ── GPU Memcached TM benchmark (DRAFT) ─────────────────────────
+// ── GPU Memcached TM benchmark (@experimental) ─────────────────
 //
 // MemcachedGPU-style key-value workload (Kotni et al., ICPP 2016):
 // a hash-table backed KV store where each transaction is a batch of

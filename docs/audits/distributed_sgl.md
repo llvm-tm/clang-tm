@@ -69,34 +69,34 @@ java -cp /tmp/tla2tools.jar tlc2.TLC -deadlock docs/proofs/DistributedSGL.tla \
 
 ## Deviations
 
-1. **Model describes client-server network protocol; C++ is shared-memory mmap SGL**  
+1. **Model describes client-server network protocol; C++ is shared-memory mmap SGL**
    The TLA+ spec models three explicit message types (`LOCK_REQ`, `LOCK_GRANT`, `UNLOCK`) exchanged between N clients and a central lock server over a message queue. The C++ implementation uses a shared-memory `mmap` file with a CAS spinlock. There is no network, no message queue, no lock server, and no client-server topology. The C++ implementation is a standard single-machine SGL with no distributed semantics whatsoever.
 
-2. **No `ProcessLockReq` / `RecvLockGrant` / `ProcessUnlock` in C++**  
+2. **No `ProcessLockReq` / `RecvLockGrant` / `ProcessUnlock` in C++**
    These three actions form the core of the TLA+ spec (the server receives and processes lock requests, grants them one at a time, and processes unlocks). In C++, `real_tm_begin` atomically acquires the spinlock via `compare_exchange_weak` — there is no intermediary "waiting" state, no server decision, no grant message.
 
-3. **C++ read/write hooks have zero TM tracking**  
+3. **C++ read/write hooks have zero TM tracking**
    The TLA+ model assumes that `ClientRead` and `ClientWrite` occur under the protection of the lock, which is correct in both. However, the C++ hooks are plain memory dereferences (`return *a`, `*a = v`) with no read-set capturing, no write-set recording, no version checking, and no conflict detection. This means the C++ backend cannot detect when a transaction reads stale data or when a concurrent write conflicts — it relies entirely on the coarse-grained global spinlock for serialisation.
 
-4. **C++ has a complex init/exit lifecycle not reflected in TLA+**  
+4. **C++ has a complex init/exit lifecycle not reflected in TLA+**
    `tm_init` opens a file, `mmap`s it, sets up process-count barrier, handles the `TM_NPROCESSES` environment variable, and distinguishes "first process" (writes initial data) from "subsequent processes" (reads shared data). `tm_exit` decrements the barrier and optionally unmaps+unlinks. The TLA+ spec has `Init` only (all variables initialised to constants).
 
-5. **No `g_first_begin` / first-transaction publish in TLA+**  
+5. **No `g_first_begin` / first-transaction publish in TLA+**
    The C++ code publishes local state to the mmap on the first `tm_begin` per thread (because benchmarks initialise TM globals after `tm_init`). This is a workaround for a timing issue that has no analogue in the TLA+ model.
 
-6. **`epoch` in C++ is incremented but never read**  
+6. **`epoch` in C++ is incremented but never read**
    The TLA+ `version` variable serves as a logical clock. In C++, `g_state->epoch` is incremented at each commit (`fetch_add(1)`) but no code ever reads its value — it is dead state that does not contribute to correctness or conflict detection.
 
-7. **No `pc` (program counter) state machine in C++**  
+7. **No `pc` (program counter) state machine in C++**
    The TLA+ models each client through states `"idle"` → `"waiting"` → `"active"` → `"done"` → `"idle"`. The C++ code has no such state machine: `real_tm_begin` and `real_tm_end` are the only states, and there is no concept of waiting for a grant or marking completion.
 
-8. **Conflicting names: "2PC" in comments is not two-phase commit**  
+8. **Conflicting names: "2PC" in comments is not two-phase commit**
    The C++ code labels phases "PREPARE" (acquire lock + sync) and "COMMIT" (sync + release), suggesting a two-phase commit protocol. True 2PC requires a coordinator, prepare votes, and a commit decision. The C++ implementation is a single-phase coarse-grained lock-and-copy — no voting phase, no prepare/commit distinction, no recovery protocol.
 
-9. **Missing header file (`DistributedSGL.hpp`)**  
+9. **Missing header file (`DistributedSGL.hpp`)**
    No C++ header exists for this backend. The entire implementation lives in the single `.cpp` file.
 
-10. **Missing `Implementation_notes.md`**  
+10. **Missing `Implementation_notes.md`**
     The implementation notes file that typically documents design decisions, protocol details, and abstraction choices does not exist for this backend.
 
 ---

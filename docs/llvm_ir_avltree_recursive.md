@@ -46,7 +46,7 @@ txn_insert (TX)
   └── insert (cloned to _tm_clone)
         ├── insert _tm_clone       ← recursive call redirected to clone
         ├── height _tm_clone       ← cloned
-        ├── max _tm_clone          ← cloned  
+        ├── max _tm_clone          ← cloned
         ├── getBalance _tm_clone   ← cloned
         ├── rotateRight _tm_clone  ← cloned
         └── rotateLeft _tm_clone   ← cloned
@@ -60,8 +60,8 @@ insert_tm_clone
   ├── node_keys[root] → tm_read_i4     ← TM-read for key comparison
   ├── insert_tm_clone(recursive)       ← redirected to itself
   ├── height_tm_clone(...)             ← redirected
-  │     ├── node_left[n] → tm_read_i4  
-  │     ├── node_right[n] → tm_read_i4 
+  │     ├── node_left[n] → tm_read_i4
+  │     ├── node_right[n] → tm_read_i4
   │     └── height_tm_clone(recursive) ← redirected
   ├── max_tm_clone(...)                ← redirected
   ├── getBalance_tm_clone(...)         ← redirected

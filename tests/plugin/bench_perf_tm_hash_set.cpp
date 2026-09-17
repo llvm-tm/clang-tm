@@ -1,5 +1,5 @@
 // Performance benchmark: TMSafeHashSet vs std::unordered_set
-// Compile: clang++ -std=c++20 -O3 -march=native -DNDEBUG -I../../backends/tm_impl/common perf_tm_hash_set.cpp -o perf_tm_hash_set
+// Compile: clang++ -std=c++20 -O3 -march=native -DNDEBUG -I../../backends/tm_impl/common bench_perf_tm_hash_set.cpp -o bench_perf_tm_hash_set
 
 #include <algorithm>
 #include <chrono>

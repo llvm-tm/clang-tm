@@ -1,7 +1,7 @@
 # STAMP Benchmark Suite - Modern C++ Implementation
 
-Based on: STAMP: Stanford Transactional Applications for Multi-Processing  
-Authors: Chi Cao Minh, JaeWoong Chung, Christos Kozyrakis, Kunle Olukotun  
+Based on: STAMP: Stanford Transactional Applications for Multi-Processing
+Authors: Chi Cao Minh, JaeWoong Chung, Christos Kozyrakis, Kunle Olukotun
 Published: IISWC 2008
 
 GitHub: https://github.com/kozyraki/stamp

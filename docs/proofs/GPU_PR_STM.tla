@@ -410,8 +410,8 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION
-VARIABLES lockTable, globalClock, committedTxns, phase, activeMask, 
-          startClock, readsDone, writesDone, readSet, readVer, writeSet, 
+VARIABLES lockTable, globalClock, committedTxns, phase, activeMask,
+          startClock, readsDone, writesDone, readSet, readVer, writeSet,
           warpCommits, pc
 
 (* define statement *)
@@ -467,8 +467,8 @@ ProgressProperty ==
 
 VARIABLE priority
 
-vars == << lockTable, globalClock, committedTxns, phase, activeMask, 
-           startClock, readsDone, writesDone, readSet, readVer, writeSet, 
+vars == << lockTable, globalClock, committedTxns, phase, activeMask,
+           startClock, readsDone, writesDone, readSet, readVer, writeSet,
            warpCommits, pc, priority >>
 
 ProcSet == (Warp)
@@ -503,7 +503,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
                       /\ pc' = [pc EXCEPT ![self] = "L_read"]
                    \/ /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                       /\ UNCHANGED <<phase, startClock, readsDone, writesDone, readSet, readVer, writeSet>>
-                /\ UNCHANGED << lockTable, globalClock, committedTxns, 
+                /\ UNCHANGED << lockTable, globalClock, committedTxns,
                                 activeMask, warpCommits, priority >>
 
 L_read(self) == /\ pc[self] = "L_read"
@@ -518,8 +518,8 @@ L_read(self) == /\ pc[self] = "L_read"
                                 ELSE /\ TRUE
                                      /\ UNCHANGED activeMask
                 /\ pc' = [pc EXCEPT ![self] = "L_read_next"]
-                /\ UNCHANGED << lockTable, globalClock, committedTxns, phase, 
-                                startClock, writesDone, writeSet, warpCommits, 
+                /\ UNCHANGED << lockTable, globalClock, committedTxns, phase,
+                                startClock, writesDone, writeSet, warpCommits,
                                 priority >>
 
 L_read_next(self) == /\ pc[self] = "L_read_next"
@@ -535,8 +535,8 @@ L_read_next(self) == /\ pc[self] = "L_read_next"
                                 /\ writesDone' = [writesDone EXCEPT ![self] = 0]
                                 /\ activeMask' = [activeMask EXCEPT ![self] = [t \in Thread |-> TRUE]]
                                 /\ pc' = [pc EXCEPT ![self] = "L_write"]
-                     /\ UNCHANGED << lockTable, globalClock, committedTxns, 
-                                     startClock, readsDone, readSet, readVer, 
+                     /\ UNCHANGED << lockTable, globalClock, committedTxns,
+                                     startClock, readsDone, readSet, readVer,
                                      writeSet, warpCommits, priority >>
 
 L_write(self) == /\ pc[self] = "L_write"
@@ -550,8 +550,8 @@ L_write(self) == /\ pc[self] = "L_write"
                                  ELSE /\ TRUE
                                       /\ UNCHANGED activeMask
                  /\ pc' = [pc EXCEPT ![self] = "L_write_next"]
-                 /\ UNCHANGED << lockTable, globalClock, committedTxns, phase, 
-                                 startClock, readsDone, readSet, readVer, 
+                 /\ UNCHANGED << lockTable, globalClock, committedTxns, phase,
+                                 startClock, readsDone, readSet, readVer,
                                  warpCommits, priority >>
 
 L_write_next(self) == /\ pc[self] = "L_write_next"
@@ -566,9 +566,9 @@ L_write_next(self) == /\ pc[self] = "L_write_next"
                             ELSE /\ phase' = [phase EXCEPT ![self] = "validating"]
                                  /\ pc' = [pc EXCEPT ![self] = "L_validate"]
                                  /\ UNCHANGED activeMask
-                      /\ UNCHANGED << lockTable, globalClock, committedTxns, 
-                                      startClock, readsDone, writesDone, 
-                                      readSet, readVer, writeSet, warpCommits, 
+                      /\ UNCHANGED << lockTable, globalClock, committedTxns,
+                                      startClock, readsDone, writesDone,
+                                      readSet, readVer, writeSet, warpCommits,
                                       priority >>
 
 L_validate(self) == /\ pc[self] = "L_validate"
@@ -577,17 +577,17 @@ L_validate(self) == /\ pc[self] = "L_validate"
                                lockTable[Hash(a)][3]
                           THEN /\ pc' = [pc EXCEPT ![self] = "L_abort"]
                           ELSE /\ pc' = [pc EXCEPT ![self] = "L_validate_pass"]
-                    /\ UNCHANGED << lockTable, globalClock, committedTxns, 
-                                    phase, activeMask, startClock, readsDone, 
-                                    writesDone, readSet, readVer, writeSet, 
+                    /\ UNCHANGED << lockTable, globalClock, committedTxns,
+                                    phase, activeMask, startClock, readsDone,
+                                    writesDone, readSet, readVer, writeSet,
                                     warpCommits, priority >>
 
 L_validate_pass(self) == /\ pc[self] = "L_validate_pass"
                          /\ phase' = [phase EXCEPT ![self] = "locking"]
                          /\ pc' = [pc EXCEPT ![self] = "L_lock_check"]
-                         /\ UNCHANGED << lockTable, globalClock, committedTxns, 
-                                         activeMask, startClock, readsDone, 
-                                         writesDone, readSet, readVer, 
+                         /\ UNCHANGED << lockTable, globalClock, committedTxns,
+                                         activeMask, startClock, readsDone,
+                                         writesDone, readSet, readVer,
                                          writeSet, warpCommits, priority >>
 
 L_lock_check(self) == /\ pc[self] = "L_lock_check"
@@ -596,9 +596,9 @@ L_lock_check(self) == /\ pc[self] = "L_lock_check"
                                  lockTable[Hash(a)][1] > priority[self]
                             THEN /\ pc' = [pc EXCEPT ![self] = "L_abort"]
                             ELSE /\ pc' = [pc EXCEPT ![self] = "L_lock_acquire"]
-                      /\ UNCHANGED << lockTable, globalClock, committedTxns, 
-                                      phase, activeMask, startClock, readsDone, 
-                                      writesDone, readSet, readVer, writeSet, 
+                      /\ UNCHANGED << lockTable, globalClock, committedTxns,
+                                      phase, activeMask, startClock, readsDone,
+                                      writesDone, readSet, readVer, writeSet,
                                       warpCommits, priority >>
 
 L_lock_acquire(self) == /\ pc[self] = "L_lock_acquire"
@@ -608,9 +608,9 @@ L_lock_acquire(self) == /\ pc[self] = "L_lock_acquire"
                                             ELSE lockTable[i]
                                         ]
                         /\ pc' = [pc EXCEPT ![self] = "L_commit"]
-                        /\ UNCHANGED << globalClock, committedTxns, phase, 
-                                        activeMask, startClock, readsDone, 
-                                        writesDone, readSet, readVer, writeSet, 
+                        /\ UNCHANGED << globalClock, committedTxns, phase,
+                                        activeMask, startClock, readsDone,
+                                        writesDone, readSet, readVer, writeSet,
                                         warpCommits, priority >>
 
 L_commit(self) == /\ pc[self] = "L_commit"
@@ -622,8 +622,8 @@ L_commit(self) == /\ pc[self] = "L_commit"
                                       ELSE lockTable[i]
                                   ]
                   /\ pc' = [pc EXCEPT ![self] = "L_commit_finish"]
-                  /\ UNCHANGED << committedTxns, activeMask, startClock, 
-                                  readsDone, writesDone, readSet, readVer, 
+                  /\ UNCHANGED << committedTxns, activeMask, startClock,
+                                  readsDone, writesDone, readSet, readVer,
                                   writeSet, warpCommits, priority >>
 
 L_commit_finish(self) == /\ pc[self] = "L_commit_finish"
@@ -632,8 +632,8 @@ L_commit_finish(self) == /\ pc[self] = "L_commit_finish"
                          /\ phase' = [phase EXCEPT ![self] = "idle"]
                          /\ activeMask' = [activeMask EXCEPT ![self] = [t \in Thread |-> FALSE]]
                          /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                         /\ UNCHANGED << lockTable, globalClock, startClock, 
-                                         readsDone, writesDone, readSet, 
+                         /\ UNCHANGED << lockTable, globalClock, startClock,
+                                         readsDone, writesDone, readSet,
                                          readVer, writeSet, priority >>
 
 L_abort(self) == /\ pc[self] = "L_abort"
@@ -646,7 +646,7 @@ L_abort(self) == /\ pc[self] = "L_abort"
                  /\ activeMask' = [activeMask EXCEPT ![self] = [t \in Thread |-> TRUE]]
                  /\ phase' = [phase EXCEPT ![self] = "reading"]
                  /\ pc' = [pc EXCEPT ![self] = "L_read"]
-                 /\ UNCHANGED << lockTable, globalClock, committedTxns, 
+                 /\ UNCHANGED << lockTable, globalClock, committedTxns,
                                  startClock, warpCommits, priority >>
 
 WARP(self) == L_idle(self) \/ L_read(self) \/ L_read_next(self)

@@ -1,4 +1,4 @@
-// ── GPU K-means TM benchmark (DRAFT) ───────────────────────────
+// ── GPU K-means TM benchmark (@experimental) ───────────────────
 //
 // STAMP kmeans transactional kernel adapted to the GPU CSMV batch
 // executor.  No LLVM plugin: device tx bodies call the CSMV API.

@@ -153,10 +153,10 @@ end process;
 end algorithm; *)
 
 \* BEGIN TRANSLATION
-VARIABLES mem, tsx_mode, retry_cnt, redo_log, read_only, committed, aborted, 
+VARIABLES mem, tsx_mode, retry_cnt, redo_log, read_only, committed, aborted,
           lastSignalFence, lastThreadFence, lastRmw, pc
 
-vars == << mem, tsx_mode, retry_cnt, redo_log, read_only, committed, aborted, 
+vars == << mem, tsx_mode, retry_cnt, redo_log, read_only, committed, aborted,
            lastSignalFence, lastThreadFence, lastRmw, pc >>
 
 ProcSet == (Thread)
@@ -187,7 +187,7 @@ L_idle(self) == /\ pc[self] = "L_idle"
                       /\ lastRmw' = [lastRmw EXCEPT ![self] = "seq_cst"]
                       /\ pc' = [pc EXCEPT ![self] = "L_pass_through"]
                       /\ UNCHANGED tsx_mode
-                /\ UNCHANGED << mem, committed, aborted, lastSignalFence, 
+                /\ UNCHANGED << mem, committed, aborted, lastSignalFence,
                                 lastThreadFence >>
 
 L_active_tsx(self) == /\ pc[self] = "L_active_tsx"
@@ -227,8 +227,8 @@ L_flush_log(self) == /\ pc[self] = "L_flush_log"
                      /\ lastThreadFence' = [lastThreadFence EXCEPT ![self] = "seq_cst"]
                      /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                      /\ pc' = [pc EXCEPT ![self] = "L_idle"]
-                     /\ UNCHANGED << mem, tsx_mode, retry_cnt, redo_log, 
-                                     read_only, aborted, lastSignalFence, 
+                     /\ UNCHANGED << mem, tsx_mode, retry_cnt, redo_log,
+                                     read_only, aborted, lastSignalFence,
                                      lastRmw >>
 
 L_aborting(self) == /\ pc[self] = "L_aborting"
@@ -245,7 +245,7 @@ L_aborting(self) == /\ pc[self] = "L_aborting"
                                /\ lastRmw' = [lastRmw EXCEPT ![self] = "seq_cst"]
                                /\ pc' = [pc EXCEPT ![self] = "L_pass_through"]
                                /\ UNCHANGED tsx_mode
-                    /\ UNCHANGED << mem, retry_cnt, committed, lastSignalFence, 
+                    /\ UNCHANGED << mem, retry_cnt, committed, lastSignalFence,
                                     lastThreadFence >>
 
 L_pass_through(self) == /\ pc[self] = "L_pass_through"
@@ -261,8 +261,8 @@ L_pass_through(self) == /\ pc[self] = "L_pass_through"
                            \/ /\ committed' = [committed EXCEPT ![self] = committed[self] + 1]
                               /\ pc' = [pc EXCEPT ![self] = "L_idle"]
                               /\ mem' = mem
-                        /\ UNCHANGED << tsx_mode, retry_cnt, redo_log, 
-                                        read_only, aborted, lastSignalFence, 
+                        /\ UNCHANGED << tsx_mode, retry_cnt, redo_log,
+                                        read_only, aborted, lastSignalFence,
                                         lastThreadFence, lastRmw >>
 
 ThreadProc(self) == L_idle(self) \/ L_active_tsx(self) \/ L_flush_log(self)

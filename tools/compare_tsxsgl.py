@@ -103,11 +103,11 @@ def load_real_abort_rate(bench, threads):
 
 def generate_trace(bench, threads, iters, hot_ratio=0.5, num_counters=8):
     """Generate JSONL trace matching benchmark pattern.
-    
+
     Events within each transaction iteration are kept sequential, but all
     threads' iterations are interleaved at the phase level so multiple
     transactions overlap in time, enabling realistic conflict detection.
-    
+
     Parameters:
     - hot_ratio: fraction of iterations where all threads hit the same counter
       (hot spot contention). Higher = more aborts, matching TSXSGL RTM behavior.

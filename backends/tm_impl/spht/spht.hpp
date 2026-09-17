@@ -31,6 +31,7 @@
 #include <new>
 #include <thread>
 
+#include "tm_common.hpp" // stm::any_type_t / ValueType + read/write helpers
 #include "tm_rtm.hpp"
 #include <cstdio>
 

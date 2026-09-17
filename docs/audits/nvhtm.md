@@ -62,17 +62,17 @@ Raw TLC output (sequential config, without the two failing invariants): timed ou
 
 ### 1. Redo-log semantics: `Append` vs deduplication-by-address
 
-**C++ lines**: NVHTM.hpp:258-279  
-**TLA+**: NVHTM.tla:118 (`redo_log' = Append(redo_log[t], <<a, v>>)`)  
-**Risk**: Medium  
+**C++ lines**: NVHTM.hpp:258-279
+**TLA+**: NVHTM.tla:118 (`redo_log' = Append(redo_log[t], <<a, v>>)`)
+**Risk**: Medium
 
 C++ redo log deduplicates: a write to the same address overwrites the existing log entry (NVHTM.hpp:259-265). The TLA+ model uses `Append`, which grows the sequence indefinitely with duplicate address entries. This causes two problems: (a) infinite TLC state space (no bound on log sequence length), (b) `ApplyLog` in TLA+ must handle duplicate entries with a "last write wins" heuristic (lines 171-178) that the C++ code approaches more naturally via overwrite semantics.
 
 ### 2. No checkpoint in C++ (state machine mismatch)
 
-**C++ lines**: NVHTM.hpp:178-197 (`durable_commit()`)  
-**TLA+**: NVHTM.tla:144-191 (`WriteCheckpoint`, `ApplyLog`, `ClearCheckpoint`)  
-**Risk**: High  
+**C++ lines**: NVHTM.hpp:178-197 (`durable_commit()`)
+**TLA+**: NVHTM.tla:144-191 (`WriteCheckpoint`, `ApplyLog`, `ClearCheckpoint`)
+**Risk**: High
 
 The TLA+ model defines a 4-step post-commit durable phase: FlushLog → WriteCheckpoint → ApplyLog → ClearCheckpoint. The C++ code does: clflush → sfence → apply writes — with **no checkpoint marker at all**. This means:
 
@@ -82,61 +82,61 @@ The TLA+ model defines a 4-step post-commit durable phase: FlushLog → WriteChe
 
 ### 3. Write-through during HTM (contradicts TLA+ spec)
 
-**C++ lines**: NVHTM.hpp:263, 279 (`*addr = val;`)  
-**TLA+**: NVHTM.tla:118-119 (`mem is NOT changed — RTM will discard on abort`)  
-**Risk**: Low  
+**C++ lines**: NVHTM.hpp:263, 279 (`*addr = val;`)
+**TLA+**: NVHTM.tla:118-119 (`mem is NOT changed — RTM will discard on abort`)
+**Risk**: Low
 
 C++ writes through to `*addr` within the RTM transaction (HTM hardware rolls back on abort). TLA+ explicitly says `mem` is unchanged. The practical difference is nil — HTM ensures atomicity of the write-through at the same point as the log write. However, the `durable_commit()` must re-apply values (NVHTM.hpp:192) to ensure NVM persistence, since the write-through during HTM may have only hit volatile cache. This is idempotent but redundant.
 
 ### 4. No SGL fallback in C++ (pass-through instead)
 
-**C++ lines**: NVHTM.hpp:137-141  
-**TLA+**: NVHTM.tla:225-264 (`SGLBegin`, `SGLRead`, `SGLWrite`, `SGLCommit`)  
-**Risk**: High  
+**C++ lines**: NVHTM.hpp:137-141
+**TLA+**: NVHTM.tla:225-264 (`SGLBegin`, `SGLRead`, `SGLWrite`, `SGLCommit`)
+**Risk**: High
 
 When RTM is unavailable, C++ enters pass-through mode: `tx->active = false; return false;`. Every subsequent read/write becomes a plain load/store with **zero TM protection** and **zero mutual exclusion**. Multi-threaded correctness is entirely lost. The TLA+ model, by contrast, has a full SGL mutex protocol with mutual exclusion, redo logging for durability, and proper commit. **The C++ implementation abandons all safety guarantees** when RTM is absent — the TLA+ model incorrectly suggests NV-HTM provides a safe fallback.
 
 ### 5. No recovery mechanism in C++
 
-**C++ lines**: — (no recovery code anywhere)  
-**TLA+**: NVHTM.tla:271-287 (`Recovery(t)`)  
-**Risk**: High  
+**C++ lines**: — (no recovery code anywhere)
+**TLA+**: NVHTM.tla:271-287 (`Recovery(t)`)
+**Risk**: High
 
 The TLA+ model defines a `Recovery` action that scans checkpoints and replays redo logs. The C++ code has zero recovery logic. Since the C++ code also lacks checkpoint markers (deviations #2), there is nothing to recover from — but this also means any NVM-persistent state after a crash may be inconsistent. The `durable_commit()` function tries to persist data, but without a recovery mechanism, a crash between `_xend()` and the completion of `durable_commit()` leaves the system in an unrecoverable state.
 
 ### 6. Retry backoff not modeled
 
-**C++ lines**: NVHTM.hpp:155-158  
-**TLA+**: NVHTM.tla:206-218 (`TSXRetryOrFallback`)  
-**Risk**: None  
+**C++ lines**: NVHTM.hpp:155-158
+**TLA+**: NVHTM.tla:206-218 (`TSXRetryOrFallback`)
+**Risk**: None
 
 C++ applies exponential backoff: `sleep_for(10 * (1 << (retry_count - 3)))` for retry_count > 3. The TLA+ model retries immediately. Backoff affects performance but not correctness.
 
 ### 7. `FreshLogOnBegin` invariant is incorrectly formulated
 
-**TLA+**: NVHTM.tla:348-353  
-**Risk**: Low (model artifact, not C++ bug)  
+**TLA+**: NVHTM.tla:348-353
+**Risk**: Low (model artifact, not C++ bug)
 
 The invariant requires `pc[t] ∈ {"active_tsx", "active_sgl"} ⇒ redo_log[t] = << >>`. But after `TSXWrite`, pc is still `"active_tsx"` while the log is non-empty. The intended check is "redo_log must be empty when entering a transaction", not "throughout the entire transaction." A correct formulation would be either a transition invariant (`pc'[t] = "active_tsx" ⇒ redo_log'[t] = << >>`) or a state invariant on idle: `pc[t] = "idle" ⇒ redo_log[t] = << >>`.
 
 ### 8. `CommitPhaseOrdering` invariant violated by model's own state machine
 
-**TLA+**: NVHTM.tla:356-359  
-**Risk**: Low (model artifact, but reflects real C++ gap)  
+**TLA+**: NVHTM.tla:356-359
+**Risk**: Low (model artifact, but reflects real C++ gap)
 
 The invariant requires `checkpoint[t] = TRUE` whenever `pc[t] ∈ {"flush_log", "write_cp", "apply_log", "clear_cp"}`. But `TSXCommit` transitions to `"flush_log"` without setting `checkpoint`. The checkpoint is only set in `WriteCheckpoint`, after `FlushLog`. This means the model itself violates the invariant — the invariant is misaligned with the model's own protocol. In the C++ code this is moot (no checkpoint exists at all), but the invariant was presumably meant to enforce crash-recovery safety.
 
 ### 9. Null-address guard not modeled
 
-**C++ lines**: NVHTM.hpp:238  
-**Risk**: None  
+**C++ lines**: NVHTM.hpp:238
+**Risk**: None
 
 C++ silently drops writes to addresses < 0x100000 or with bit 47 set. Purely a safety feature; not relevant to formal model.
 
 ### 10. LLVM_TM_PLUGIN address bypass not modeled
 
-**C++ lines**: NVHTM.hpp:221-224, 240-244  
-**Risk**: None  
+**C++ lines**: NVHTM.hpp:221-224, 240-244
+**Risk**: None
 
 Plugin-specific bypass for non-TM-region addresses. Automatically handled by the hook dispatch layer.
 

@@ -448,7 +448,7 @@ index 6bb95cdc7f..5fc84e25a2 100644
      _RsvAddrIdx,
 +    _TexasrIdx,
 +    _TfiarIdx,
- 
+
      NumRegs
  };
 @@ -144,7 +146,9 @@ inline constexpr RegId
@@ -459,9 +459,8 @@ index 6bb95cdc7f..5fc84e25a2 100644
 +    RsvAddr = intRegClass[_RsvAddrIdx],
 +    Texasr = intRegClass[_TexasrIdx],
 +    Tfiar = intRegClass[_TfiarIdx];
- 
- } // namespace int_reg
- 
--- 
-2.50.1 (Apple Git-155)
 
+ } // namespace int_reg
+
+--
+2.50.1 (Apple Git-155)

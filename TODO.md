@@ -100,13 +100,17 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   have inverted polarity — do not mimic. SPR map: TFHAR=128, TFIAR=129,
   TEXASR=130. tcheck CR field: 0 non-tx / 1 suspended / 2 transactional.
 
-### GPU benchmark stubs
+### GPU benchmark stubs (@experimental)
 - **Files**: `gpu/benchmarks/gpu_tpcc.cu` (line 28),
   `gpu/benchmarks/gpu_memcached.cu` (line 20),
   `gpu/benchmarks/gpu_kmeans.cu` (line 15)
 - **Issue**: Three GPU benchmarks are draft skeletons with simplified
   algorithms. `gpu_kmeans` has no convergence loop; `gpu_memcached` uses
   a simplified key-value scheme; `gpu_tpcc` elides version lists.
+- **Status (2026-09-13, review-02 S26)**: Downgraded to `@experimental`.
+  `gpu/benchmarks/README.md` marks these as non-reference and excludes them
+  from reported numbers. Reopen as P1 only if they are promoted to real
+  benchmarks with full algorithms.
 
 ### NOrec plugin-mode bypass (incomplete)
 - **File**: `backends/tm_impl/norec_bf/NOrec_BF.hpp`

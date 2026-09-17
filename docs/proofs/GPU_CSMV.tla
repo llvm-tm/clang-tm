@@ -134,7 +134,7 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "8c8c3714" /\ chksum(tla) = "9b32581d")
-VARIABLES pc, clock, versionList, startTime, readSet, readVersions, writeSet, 
+VARIABLES pc, clock, versionList, startTime, readSet, readVersions, writeSet,
           lockedSet, lastFence
 
 (* define statement *)
@@ -163,7 +163,7 @@ TLCBound ==
     /\ \A t \in Thread : Cardinality(readSet[t]) < 3
 
 
-vars == << pc, clock, versionList, startTime, readSet, readVersions, writeSet, 
+vars == << pc, clock, versionList, startTime, readSet, readVersions, writeSet,
            lockedSet, lastFence >>
 
 ProcSet == (Thread)
@@ -239,7 +239,7 @@ Spec == Init /\ [][Next]_vars
 
 Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
-\* END TRANSLATION 
+\* END TRANSLATION
 
 Spec_WF == Spec /\ \A t \in Thread : WF_vars(ThreadProc(t))
 

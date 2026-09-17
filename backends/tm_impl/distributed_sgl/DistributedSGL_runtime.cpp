@@ -39,6 +39,7 @@
 #include <cstring>
 #include <thread>
 thread_local bool g_in_tx = false;
+#include "tm_backend_macros.hpp"
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -112,21 +113,8 @@ static void sync_shared_to_local()
 
 // ── tm_init ─────────────────────────────────────────────────────
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_init();
-static void do_tm_exit();
-static void do_tm_init_thread();
-static void do_tm_exit_thread();
-
-void (*tm_init)() = do_tm_init;
-void (*tm_exit)() = do_tm_exit;
-void (*tm_init_thread)() = do_tm_init_thread;
-void (*tm_exit_thread)() = do_tm_exit_thread;
-
-static void do_tm_init()
-#else
-void tm_init()
-#endif
+TM_PLUGIN_LIFECYCLE_VARS()
+TM_PLUGIN_LIFECYCLE_FN(do_tm_init, void tm_init())
 {
 	if (stm::tm_region_init() != 0) {
 		fprintf(stderr, "FATAL: tm_region_init() failed\n");
@@ -190,11 +178,7 @@ void tm_init()
 	}
 }
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_exit()
-#else
-void tm_exit()
-#endif
+TM_PLUGIN_LIFECYCLE_FN(do_tm_exit, void tm_exit())
 {
 	if (g_data_base && g_state) {
 		sync_local_to_shared();
@@ -289,19 +273,11 @@ void tm_memset(volatile uint8_t *a, uint8_t v, uint64_t l) { memset((void *)a, v
 
 // ── Stubs ───────────────────────────────────────────────────────
 
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_init_thread()
-#else
-void tm_init_thread()
-#endif
+TM_PLUGIN_LIFECYCLE_FN(do_tm_init_thread, void tm_init_thread())
 {
 	tm_hook_init_thread();
 }
-#ifdef LLVM_TM_PLUGIN
-static void do_tm_exit_thread()
-#else
-void tm_exit_thread()
-#endif
+TM_PLUGIN_LIFECYCLE_FN(do_tm_exit_thread, void tm_exit_thread())
 {
 	tm_hook_exit_thread();
 }

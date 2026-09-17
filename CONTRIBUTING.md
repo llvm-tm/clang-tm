@@ -30,6 +30,22 @@ make fmt          # apply clang-format (C++) + rustfmt (Rust)
 make fmt-check    # verify: clang-format --Werror + cargo fmt --check + clippy -D warnings
 ```
 
+### Local pre-commit hooks
+
+The same checks run on every commit via [`pre-commit`](https://pre-commit.com)
+(see [`.pre-commit-config.yaml`](.pre-commit-config.yaml)): `clang-format-22` on
+staged C/C++ (scoped to the same dirs as `make fmt-check`), `cargo fmt --check`
+on the Rust workspaces, plus trailing-whitespace, end-of-file, and YAML checks.
+
+```sh
+pip install pre-commit          # once
+pre-commit install              # wire into git (runs on `git commit`)
+pre-commit run --all-files      # or run everything now, without committing
+```
+
+The hooks reuse the repo-pinned `clang-format-22` (not a generic `clang-format`),
+so the Toolchain requirements above must be met.
+
 ## How to add a C++ backend
 
 1. Create `backends/tm_impl/<name>/<Name>_runtime.cpp` and `<name>.hpp`.
