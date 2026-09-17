@@ -120,3 +120,13 @@ make -C benchmarks/cpp BACKEND=NOREC bin/bank
 The optional gem5 checkout under `gem5_sim/gem5` is large: expect a multi-GB
 clone plus a multi-GB build tree. Only run `make gem5` when you need gem5
 experiments; `make check-fast` never clones or builds gem5.
+
+**Known limitation — multi-core Ruby livelock:** the Ruby HTM path
+(`gem5_sim/configs/x86-se-bank.py`, `MESI_Three_Level_HTM`) hangs once 2+ cores
+are active (an upstream `MESI_Three_Level` coherence livelock, unrelated to the
+TSX patches). Keep `--threads 1` for reliable Ruby runs, pass `--max-ticks` to
+cap multi-core runs (applied automatically by `scripts/run_gem5_sweep.py` via
+`--mt-ticks`), or use the non-Ruby `gem5_sim/configs/x86-se-bank-classic.py`
+for unbounded multi-core timing. See
+[`gem5_sim/docs/x86-tsx-validation.md`](../gem5_sim/docs/x86-tsx-validation.md)
+("Known limitations").

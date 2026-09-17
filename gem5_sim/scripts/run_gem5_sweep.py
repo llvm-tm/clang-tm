@@ -29,7 +29,13 @@ PARSE = os.path.join(HERE, "parse_gem5_stats.py")
 CLK = "1.8GHz"
 
 # (tag, binary, threads, raw_args|None, bank_txns|None, extra_envs, max_ticks)
-def matrix():
+#
+# NOTE: Ruby's MESI_Three_Level(_HTM) coherence livelocks on any gem5 run with
+# 2+ cores (see gem5_sim/docs/x86-tsx-validation.md, "Known limitations"). A
+# bounded tick budget is applied to multithreaded runs so the sweep terminates
+# with stats instead of hanging until the wall timeout. Pass --mt-ticks 0 to
+# disable the guard (at your own risk of a hang).
+def matrix(mt_ticks=0):
     M = []
     # bank: -a accounts -t threads -r readpct -n total-txns (config default synth)
     for be in ("norec", "tsxsgl"):
@@ -53,6 +59,10 @@ def matrix():
     for m in M:
         if m["binary"].endswith("tsxsgl"):
             m["env"].append("TM_RTM_DEBUG=1")
+    if mt_ticks > 0:
+        for m in M:
+            if m["threads"] >= 2 and m["ticks"] == 0:
+                m["ticks"] = mt_ticks
     return M
 
 
@@ -72,10 +82,14 @@ def run_one(m, outdir, timeout):
     if m["ticks"]:
         cmd += ["--max-ticks", str(m["ticks"])]
     t0 = time.time()
+    capped = False
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
                            timeout=timeout, cwd=REPO)
         rc = p.returncode
+        log = (p.stdout or "") + (p.stderr or "")
+        if "max-ticks" in log or "max ticks" in log.lower():
+            capped = True
     except subprocess.TimeoutExpired:
         rc = "TIMEOUT"
     wall = time.time() - t0
@@ -89,6 +103,14 @@ def run_one(m, outdir, timeout):
         row = {"tag": m["tag"], "error": str(e)}
     row["wall_secs"] = round(wall, 1)
     row["rc"] = rc
+    if rc == "TIMEOUT":
+        row["status"] = "hang/timeout"
+    elif capped:
+        row["status"] = "tick-capped (likely livelock; see docs)"
+    elif rc == 0:
+        row["status"] = "ok"
+    else:
+        row["status"] = "error"
     return row
 
 
@@ -97,6 +119,9 @@ def main():
     ap.add_argument("--jobs", type=int, default=12)
     ap.add_argument("--timeout", type=int, default=900,
                     help="wall timeout per gem5 run (s)")
+    ap.add_argument("--mt-ticks", type=int, default=2_000_000_000,
+                    help="tick guard applied to runs with >=2 threads to dodge the "
+                         "Ruby MESI_Three_Level livelock (0 disables it)")
     ap.add_argument("--tag", default=None, help="substring filter on tags")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -105,9 +130,9 @@ def main():
         TSXC, "m5out", "sweep-" + time.strftime("%Y%m%d-%H%M%S"))
     os.makedirs(outdir, exist_ok=True)
 
-    M = [m for m in matrix() if not args.tag or args.tag in m["tag"]]
-    print(f">>> {len(M)} runs, jobs={args.jobs}, timeout={args.timeout}s, out={outdir}",
-          flush=True)
+    M = [m for m in matrix(args.mt_ticks) if not args.tag or args.tag in m["tag"]]
+    print(f">>> {len(M)} runs, jobs={args.jobs}, timeout={args.timeout}s, "
+          f"mt-ticks={args.mt_ticks}, out={outdir}", flush=True)
 
     rows = []
     with cf.ThreadPoolExecutor(max_workers=args.jobs) as ex:

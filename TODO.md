@@ -75,11 +75,16 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
 
 ## P1 — Fidelity
 
-### gem5 multi-threaded livelock
+### gem5 multi-threaded livelock (review-02 S25: documented)
 - **Files**: `gem5_sim/configs/x86-se-bank.py`, `gem5_sim/gem5/src/mem/ruby/protocol/`
 - **Issue**: Any gem5 run with 2+ threads hangs (Ruby livelock in
   `MESI_Three_Level` coherence protocol). Affects all backends. Pre-existing.
-- **Workaround**: Use `--max-ticks` or reduce thread count to 1.
+- **Workaround**: Use `--max-ticks` or reduce thread count to 1. Documented in
+  `gem5_sim/docs/x86-tsx-validation.md` ("Known limitations") and
+  `docs/REQUIREMENTS.md`; `scripts/run_gem5_sweep.py` now auto-applies a tick
+  guard to ≥2-thread runs (`--mt-ticks`, default 2e9) so the sweep terminates
+  with `status="tick-capped"` instead of hanging. A real fix means porting the
+  HTM logic to a livelock-free `MESI_Two_Level` hierarchy — **still open**.
 
 ### gem5 POWER8 HTM implementation (8-patch plan, in progress)
 - **Plan**: `gem5_sim/docs/power8-htm-patches.md`

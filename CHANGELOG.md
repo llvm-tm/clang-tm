@@ -2077,6 +2077,25 @@ DX/CI/docs hygiene items S10–S15.
   fidelity sweep to include `mvlog`.
 - Expanded the CI push-main cross-backend sweep to include `NORECBF`, `TSC_TM`,
   and `MVLOG`; expanded the nightly cross-backend sweep to 15 backends.
-- Updated simulator/developer docs, MVLog backend status, and `TODO.md` notes.
+-   Updated simulator/developer docs, MVLog backend status, and `TODO.md` notes.
   TSC-TM and CSMV simulator coverage remains open because no Rust runtime
   crates exist for either backend.
+
+## Session 2026-09-17 — Review-02 S25: document gem5 multi-threaded Ruby livelock
+
+- Documented the pre-existing `MESI_Three_Level(_HTM)` coherence livelock that
+  hangs any Ruby-path gem5 run with 2+ cores as a **known limitation** with
+  workarounds (single-core, `--max-ticks`, or the non-Ruby
+  `configs/x86-se-bank-classic.py`) in `gem5_sim/docs/x86-tsx-validation.md`
+  (new "Known limitations" section) and `docs/REQUIREMENTS.md` (gem5 section).
+- Hardened `gem5_sim/scripts/run_gem5_sweep.py`: multi-thread runs (≥2 threads)
+  now get an automatic tick guard (`--mt-ticks`, default 2e9) so the sweep
+  finishes with stats instead of hitting the wall timeout, and each row records a
+  `status` (`ok` / `tick-capped` / `hang/timeout` / `error`). `--mt-ticks 0`
+  restores the previous unbounded behavior.
+- Updated `TODO.md` ("gem5 multi-threaded livelock") to mark the workaround as
+  documented; the real fix (porting HTM onto `MESI_Two_Level`) stays open.
+- Files changed: `gem5_sim/scripts/run_gem5_sweep.py`,
+  `gem5_sim/docs/x86-tsx-validation.md`, `docs/REQUIREMENTS.md`, `TODO.md`.
+- Verification: `python3 -m compileall gem5_sim/scripts/run_gem5_sweep.py`;
+  `run_gem5_sweep.py --help`; `pre-commit run --all-files` (all pass).

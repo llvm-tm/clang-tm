@@ -139,3 +139,32 @@ Tier 2 on calibration changes, Tier 3 per hardware visit.
   `EXCEPTION` (RAX=0) rather than Intel's conflict code (RAX=4); retry loops
   still work (0 is retryable) but cause classification in
   `m_htm_transaction_abort_cause` under-reports `conflict`.
+
+## 7. Known limitations
+
+### Multi-threaded Ruby livelock (`MESI_Three_Level_HTM`)
+
+Any SE-mode run on the Ruby HTM path (`configs/x86-se-bank.py`, which uses the
+`MESI_Three_Level_HTM` protocol) hangs once **2 or more cores** are active: the
+`MESI_Three_Level` directory livelocks during coherence traffic and never makes
+forward progress. This is a pre-existing upstream Ruby issue, not specific to
+the TSX patches, and it affects every backend that runs on the Ruby path.
+
+Workarounds, in order of preference:
+
+1. **Single-core timing** — keep `-t/--threads 1` (the default) for Ruby HTM
+   runs; this is what Tier 1 of the sweep uses and is fully reliable.
+2. **Tick guard for multi-core runs** — pass `--max-ticks N` (e.g.
+   `2000000000`) to `x86-se-bank.py` so the run is force-stopped and emits
+   partial stats instead of hanging forever. `scripts/run_gem5_sweep.py` applies
+   this guard automatically for any run with ≥2 threads (`--mt-ticks`, default
+   `2000000000`; `--mt-ticks 0` disables it). Capped runs are recorded in
+   `results.csv` with `status = "tick-capped (likely livelock; see docs)"`
+   rather than a bogus `ok`.
+3. **Classic (non-Ruby) path for multi-threaded timing** — use
+   `configs/x86-se-bank-classic.py` (classic caches, no Ruby HTM) when you need
+   unbounded multi-core runs and do not need the Ruby HTM abort semantics.
+
+A real fix would require porting the HTM logic onto a livelock-free
+`MESI_Two_Level` hierarchy; that is tracked in `TODO.md` ("gem5
+multi-threaded livelock") and left as future work.
