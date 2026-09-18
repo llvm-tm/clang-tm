@@ -1,9 +1,15 @@
 # Build artifacts (but not Rust src/bin/ which are source files)
 **/bin/
 !**/src/bin/
-# Test binaries (compiled in-tree)
+# Test binaries (compiled in-tree) — but never the .cpp/.hpp/.h sources
 tests/*/test_*
 tests/*/bench_*
+!tests/*/test_*.cpp
+!tests/*/test_*.hpp
+!tests/*/test_*.h
+!tests/*/bench_*.cpp
+!tests/*/bench_*.hpp
+!tests/*/bench_*.h
 # Generated yada mesh files
 .yada_meshes/
 benchmark_yada
