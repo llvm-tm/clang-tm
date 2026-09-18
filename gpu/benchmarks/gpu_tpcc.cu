@@ -33,7 +33,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <cuda_runtime.h>
+#include "tm_gpu_platform.hpp"
 
 #include "csmv_api.h"
 #include "csmv_batch_executor.hpp"

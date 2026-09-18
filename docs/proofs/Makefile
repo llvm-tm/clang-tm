@@ -51,14 +51,19 @@ check-all: TLC_OPTS += -coverage 1
 check-all: check
 
 # Fast smoke gate: 3 small models, 60s timeout each (blocking CI, <5 min total).
-# Base configs are the "small" models (Addr={0}); -large/-liveness are excluded.
+# A backend may ship a $${b}-smoke.cfg with a deliberately small state space so
+# the gate stays <60s (the full model still runs under `make check`/nightly).
+# NOrec-smoke.cfg uses Addr={0}: the full NOrec.cfg (Addr={0,1}) needs ~124s and
+# blows the timeout. See review-03.
 SMOKE_BACKENDS := SGL NOrec TinySTM_WBCTL
 
 smoke-check: TLC_OPTS += -workers 2
 smoke-check:
 	@for b in $(SMOKE_BACKENDS); do \
-	    echo "=== TLC smoke: $$b (60s timeout) ==="; \
-	    out=$$(timeout 60 $(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) $$b.tla -config $$b.cfg 2>&1); \
+	    cfg=$$b-smoke.cfg; \
+	    [ -f $$cfg ] || cfg=$$b.cfg; \
+	    echo "=== TLC smoke: $$b (cfg=$$cfg, 60s timeout) ==="; \
+	    out=$$(timeout 60 $(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) $$b.tla -config $$cfg 2>&1); \
 	    rc=$$?; \
 	    echo "$$out" | grep -E '(Error:|Model checking completed|^[0-9]+ states|Finished in)'; \
 	    if [ $$rc -eq 124 ]; then echo "TIMEOUT: $$b exceeded 60s"; exit 1; \

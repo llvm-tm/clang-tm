@@ -27,7 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <cuda_runtime.h>
+#include "tm_gpu_platform.hpp"
 
 #include "csmv_api.h"
 #include "csmv_batch_executor.hpp"
@@ -64,7 +64,7 @@ __device__ inline double warp_dist_sq(const double *p, const double *c, int ndim
     }
     // Warp reduction
     for (int off = 16; off > 0; off >>= 1) {
-        local += __shfl_xor_sync(~0u, local, off);
+        local += __shfl_xor_sync(TM_FULL_MASK, local, off);
     }
     return local;   // identical on all lanes
 }

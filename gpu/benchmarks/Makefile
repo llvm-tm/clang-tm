@@ -28,12 +28,26 @@ ifeq ($(SMID),)
 endif
 ARCH    ?= sm_$(SMID)
 
+# C++ standard library header fix (HIP path only; nvcc uses host gcc and does
+# not understand --gcc-install-dir).  ROCm's clang prefers the gcc-16 libstdc++
+# headers, but only 15/12 -dev packages may be installed, causing
+# "Could not find standard C++ header 'cmath'".  Mirror the fix that
+# benchmarks/cpp/Makefile applies for the clang++ toolchain.  See review-03.
+STDLIB_FLAG :=
+
 ifeq ($(HIP),1)
   ifeq ($(HIPCC),)
     $(error HIP build requested but hipcc not found. Set HIPCC=/path/to/hipcc)
   endif
   COMPILER := $(HIPCC)
   ARCH_FLAG := --offload-arch=native
+  ifeq ($(wildcard /usr/include/c++/16),)
+    ifneq ($(wildcard /usr/lib/gcc/x86_64-linux-gnu/15),)
+      STDLIB_FLAG := --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/15
+    else ifneq ($(wildcard /usr/lib/gcc/x86_64-linux-gnu/12),)
+      STDLIB_FLAG := --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/12
+    endif
+  endif
 else
   ifeq ($(CUDA),)
     $(error nvcc not found. Install CUDA and set CUDA=/path/to/nvcc, or use HIP=1)
@@ -68,7 +82,7 @@ all: $(BINARIES) $(GUST_BINARIES)
 $(BIN)/gpu_fuzz_counter: gpu_fuzz_counter.cu $(CSMV_DIR)/csmv_batch_executor.cu \
                          $(CSMV_DIR)/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(STDLIB_FLAG) $(INCS) \
 	    gpu_fuzz_counter.cu $(CSMV_DIR)/csmv_batch_executor.cu \
 	    -o $@
 
@@ -76,28 +90,28 @@ $(BIN)/gpu_fuzz_counter: gpu_fuzz_counter.cu $(CSMV_DIR)/csmv_batch_executor.cu 
 $(BIN)/gpu_ycsb: gpu_ycsb.cu $(CSMV_DIR)/csmv_batch_executor.cu \
                  $(CSMV_DIR)/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(STDLIB_FLAG) $(INCS) \
 	    gpu_ycsb.cu $(CSMV_DIR)/csmv_batch_executor.cu \
 	    -o $@
 
 $(BIN)/gpu_kmeans: gpu_kmeans.cu $(CSMV_DIR)/csmv_batch_executor.cu \
                    $(CSMV_DIR)/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(STDLIB_FLAG) $(INCS) \
 	    gpu_kmeans.cu $(CSMV_DIR)/csmv_batch_executor.cu \
 	    -o $@
 
 $(BIN)/gpu_memcached: gpu_memcached.cu $(CSMV_DIR)/csmv_batch_executor.cu \
                       $(CSMV_DIR)/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(STDLIB_FLAG) $(INCS) \
 	    gpu_memcached.cu $(CSMV_DIR)/csmv_batch_executor.cu \
 	    -o $@
 
 $(BIN)/gpu_tpcc: gpu_tpcc.cu $(CSMV_DIR)/csmv_batch_executor.cu \
                  $(CSMV_DIR)/csmv_batch_executor.hpp
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(STDLIB_FLAG) $(INCS) \
 	    gpu_tpcc.cu $(CSMV_DIR)/csmv_batch_executor.cu \
 	    -o $@
 
@@ -106,22 +120,22 @@ GUST_EXEC := $(GUST_DIR)/gpu_gust_batch_executor.cu
 
 $(BIN)/gpu_bank: gpu_bank.cu $(GUST_EXEC) $(GUST_DIR)/gpu_gust_batch_executor.cuh
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(STDLIB_FLAG) $(INCS) \
 	    gpu_bank.cu $(GUST_EXEC) -o $@
 
 $(BIN)/gpu_ycsb_gust: gpu_ycsb_gust.cu $(GUST_EXEC) $(GUST_DIR)/gpu_gust_batch_executor.cuh
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(STDLIB_FLAG) $(INCS) \
 	    gpu_ycsb_gust.cu $(GUST_EXEC) -o $@
 
 $(BIN)/gpu_memcached_gust: gpu_memcached_gust.cu $(GUST_EXEC) $(GUST_DIR)/gpu_gust_batch_executor.cuh
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(STDLIB_FLAG) $(INCS) \
 	    gpu_memcached_gust.cu $(GUST_EXEC) -o $@
 
 $(BIN)/gpu_gust_smoke: $(GUST_DIR)/gpu_gust_smoke.cu $(GUST_EXEC) $(GUST_DIR)/gpu_gust_batch_executor.cuh
 	@mkdir -p $(BIN)
-	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(INCS) \
+	$(COMPILER) -std=c++17 $(RDC_FLAG) $(ARCH_FLAG) $(STDLIB_FLAG) $(INCS) \
 	    $(GUST_DIR)/gpu_gust_smoke.cu $(GUST_EXEC) -o $@
 
 run: all

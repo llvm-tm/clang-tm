@@ -18,6 +18,11 @@ Replays TM traces through both a software-TM model and real TM backends (NOrec, 
 # Build first (all five binaries)
 cargo build --release
 
+> **Note on `tm-gen` output:** trace events go to **stdout** (or a `-o FILE`);
+> the human summary (`Generated N events`) goes to **stderr**. When redirecting
+> to a file, use `tm-gen > trace.jsonl` **without** `2>&1` — merging stderr in
+> appends a non-JSON line that breaks `tm-sim`'s parser on the last event.
+
 # Generate all scenarios to file and replay
 cargo run --release --bin tm-gen -- --scenario all -o /tmp/trace.jsonl
 cargo run --release --bin tm-sim -- --backend norec --trace /tmp/trace.jsonl

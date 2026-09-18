@@ -80,7 +80,7 @@ mod tests {
     fn insert_and_find() {
         // Untracked (plain) test
         // In real usage, TmAccess would go through the TM runtime.
-        let tree = RBTree::<i64, i64, UntrackedAccess>::new();
+        let _tree = RBTree::<i64, i64, UntrackedAccess>::new();
         // For a full test we'd need insert, which requires &mut self.
     }
 }

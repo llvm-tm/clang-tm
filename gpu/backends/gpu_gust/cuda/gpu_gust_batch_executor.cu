@@ -153,27 +153,65 @@ static int g_num_addrs = 0;
 
 extern "C" void gust_gpu_init(int num_addrs) {
     g_num_addrs = num_addrs;
-    CUDA_CHECK(cudaMalloc(&g_gust_vboxes, num_addrs * sizeof(GUSTVBox)));
-    CUDA_CHECK(cudaMemset(g_gust_vboxes, 0, num_addrs * sizeof(GUSTVBox)));
-    CUDA_CHECK(cudaMalloc(&g_gust_gts, sizeof(uint64_t)));
-    CUDA_CHECK(cudaMemset(g_gust_gts, 0, sizeof(uint64_t)));
-    CUDA_CHECK(cudaMalloc(&g_gust_write_ptr, sizeof(uint64_t)));
-    CUDA_CHECK(cudaMemset(g_gust_write_ptr, 0, sizeof(uint64_t)));
-    CUDA_CHECK(cudaMalloc(&g_gust_cl, GPU_GUST_CL_SIZE * sizeof(GUSTCLEntry)));
-    CUDA_CHECK(cudaMemset(g_gust_cl, 0, GPU_GUST_CL_SIZE * sizeof(GUSTCLEntry)));
-    CUDA_CHECK(cudaMalloc(&g_gust_committed, sizeof(uint64_t)));
-    CUDA_CHECK(cudaMemset(g_gust_committed, 0, sizeof(uint64_t)));
-    CUDA_CHECK(cudaMalloc(&g_gust_aborted, sizeof(uint64_t)));
-    CUDA_CHECK(cudaMemset(g_gust_aborted, 0, sizeof(uint64_t)));
+    // cudaMalloc cannot write a pointer into a __device__ variable (it needs a
+    // host void**; the device global would stay null and every kernel that
+    // dereferences it faults with an illegal memory access — on BOTH CUDA and
+    // HIP).  Allocate host-side pointers and copy the values into the device
+    // globals with cudaMemcpyToSymbol (same idiom as csmv_gpu_init). See review-03.
+    GUSTVBox    *d_vboxes = nullptr;
+    uint64_t    *d_gts = nullptr;
+    uint64_t    *d_write_ptr = nullptr;
+    GUSTCLEntry *d_cl = nullptr;
+    uint64_t    *d_committed = nullptr;
+    uint64_t    *d_aborted = nullptr;
+
+    CUDA_CHECK(cudaMalloc(&d_vboxes, num_addrs * sizeof(GUSTVBox)));
+    CUDA_CHECK(cudaMemset(d_vboxes, 0, num_addrs * sizeof(GUSTVBox)));
+    CUDA_CHECK(cudaMemcpyToSymbol(g_gust_vboxes, &d_vboxes, sizeof(d_vboxes)));
+
+    CUDA_CHECK(cudaMalloc(&d_gts, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(d_gts, 0, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemcpyToSymbol(g_gust_gts, &d_gts, sizeof(d_gts)));
+
+    CUDA_CHECK(cudaMalloc(&d_write_ptr, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(d_write_ptr, 0, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemcpyToSymbol(g_gust_write_ptr, &d_write_ptr, sizeof(d_write_ptr)));
+
+    CUDA_CHECK(cudaMalloc(&d_cl, GPU_GUST_CL_SIZE * sizeof(GUSTCLEntry)));
+    CUDA_CHECK(cudaMemset(d_cl, 0, GPU_GUST_CL_SIZE * sizeof(GUSTCLEntry)));
+    CUDA_CHECK(cudaMemcpyToSymbol(g_gust_cl, &d_cl, sizeof(d_cl)));
+
+    CUDA_CHECK(cudaMalloc(&d_committed, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(d_committed, 0, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemcpyToSymbol(g_gust_committed, &d_committed, sizeof(d_committed)));
+
+    CUDA_CHECK(cudaMalloc(&d_aborted, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(d_aborted, 0, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemcpyToSymbol(g_gust_aborted, &d_aborted, sizeof(d_aborted)));
 }
 
 extern "C" void gust_gpu_shutdown(void) {
-    CUDA_CHECK(cudaFree(g_gust_vboxes));
-    CUDA_CHECK(cudaFree(g_gust_gts));
-    CUDA_CHECK(cudaFree(g_gust_write_ptr));
-    CUDA_CHECK(cudaFree(g_gust_cl));
-    CUDA_CHECK(cudaFree(g_gust_committed));
-    CUDA_CHECK(cudaFree(g_gust_aborted));
+    // Read the device-side pointers back to host before freeing (the device
+    // globals hold the values set in gust_gpu_init; &global in host code is not
+    // their value).
+    GUSTVBox    *d_vboxes = nullptr;
+    uint64_t    *d_gts = nullptr;
+    uint64_t    *d_write_ptr = nullptr;
+    GUSTCLEntry *d_cl = nullptr;
+    uint64_t    *d_committed = nullptr;
+    uint64_t    *d_aborted = nullptr;
+    cudaMemcpyFromSymbol(&d_vboxes, g_gust_vboxes, sizeof(d_vboxes));
+    cudaMemcpyFromSymbol(&d_gts, g_gust_gts, sizeof(d_gts));
+    cudaMemcpyFromSymbol(&d_write_ptr, g_gust_write_ptr, sizeof(d_write_ptr));
+    cudaMemcpyFromSymbol(&d_cl, g_gust_cl, sizeof(d_cl));
+    cudaMemcpyFromSymbol(&d_committed, g_gust_committed, sizeof(d_committed));
+    cudaMemcpyFromSymbol(&d_aborted, g_gust_aborted, sizeof(d_aborted));
+    if (d_vboxes) cudaFree(d_vboxes);
+    if (d_gts) cudaFree(d_gts);
+    if (d_write_ptr) cudaFree(d_write_ptr);
+    if (d_cl) cudaFree(d_cl);
+    if (d_committed) cudaFree(d_committed);
+    if (d_aborted) cudaFree(d_aborted);
 }
 
 extern "C" void gust_gpu_snapshot(uint32_t *h_out, int n) {
@@ -187,16 +225,21 @@ extern "C" void gust_gpu_snapshot(uint32_t *h_out, int n) {
 }
 
 extern "C" uint64_t gust_gpu_committed_count(void) {
+    // g_gust_committed is a __device__ pointer variable; read the pointer value
+    // first (FromSymbol), then copy the counter it points to.  Passing the
+    // device-symbol address directly to cudaMemcpy is invalid on HIP.
+    uint64_t *d_ptr = nullptr;
+    cudaMemcpyFromSymbol(&d_ptr, g_gust_committed, sizeof(d_ptr));
     uint64_t v = 0;
-    CUDA_CHECK(cudaMemcpy(&v, g_gust_committed, sizeof(uint64_t),
-                          cudaMemcpyDeviceToHost));
+    if (d_ptr) CUDA_CHECK(cudaMemcpy(&v, d_ptr, sizeof(uint64_t), cudaMemcpyDeviceToHost));
     return v;
 }
 
 extern "C" uint64_t gust_gpu_aborted_count(void) {
+    uint64_t *d_ptr = nullptr;
+    cudaMemcpyFromSymbol(&d_ptr, g_gust_aborted, sizeof(d_ptr));
     uint64_t v = 0;
-    CUDA_CHECK(cudaMemcpy(&v, g_gust_aborted, sizeof(uint64_t),
-                          cudaMemcpyDeviceToHost));
+    if (d_ptr) CUDA_CHECK(cudaMemcpy(&v, d_ptr, sizeof(uint64_t), cudaMemcpyDeviceToHost));
     return v;
 }
 

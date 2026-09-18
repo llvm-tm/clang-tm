@@ -26,7 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <cuda_runtime.h>
+#include "tm_gpu_platform.hpp"
 
 #include "gpu_gust_batch_executor.cuh"
 

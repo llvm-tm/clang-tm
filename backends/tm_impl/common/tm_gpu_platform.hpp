@@ -132,3 +132,14 @@
 #else
 #define TM_GPU_COMPILER 0
 #endif
+
+// ── Full-warp/wavefront participation mask for *sync intrinsics ──
+// NVIDIA warp = 32 lanes → 32-bit mask; AMD wavefront = 64 lanes → 64-bit
+// mask (HIP static_asserts on narrower masks: "The mask must be a 64-bit
+// integer").  Use TM_FULL_MASK instead of a literal like ~0u when passing a
+// mask to __shfl_*_sync / __ballot_sync / __reduce_*.
+#if defined(__HIPCC__) || defined(__HIP_PLATFORM_AMD__) || defined(__HIP_PLATFORM_HCC__)
+#define TM_FULL_MASK 0xFFFFFFFFFFFFFFFFULL
+#else
+#define TM_FULL_MASK 0xFFFFFFFFu
+#endif

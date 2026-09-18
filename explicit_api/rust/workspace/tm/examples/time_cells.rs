@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables)] // example: TPC-C schema mirrors tables that are not all exercised
 use std::sync::Arc;
 use tm::{tm_init, transaction, TmCell};
 

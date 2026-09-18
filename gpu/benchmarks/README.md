@@ -7,17 +7,45 @@ backend's API directly (currently CSMV via the batch executor).
 
 ## Contents
 
-| File           | Workload                                              | Status          |
-|----------------|-------------------------------------------------------|-----------------|
-| `gpu_ycsb.cu`  | YCSB-style read/write mix on a shared table, batch-executed | reference |
-| `gpu_kmeans.cu`| STAMP kmeans assignment (warp-cooperative distance) | `@experimental` |
-| `gpu_memcached.cu` | MemcachedGPU-style KV GET/SET                    | `@experimental` |
-| `gpu_tpcc.cu`  | TPC-C Payment transaction, money-conservation check  | `@experimental` |
+| File           | Workload                                              | Backend | Status          |
+|----------------|-------------------------------------------------------|---------|-----------------|
+| `gpu_ycsb.cu`  | YCSB-style read/write mix on a shared table, batch-executed | CSMV  | reference |
+| `gpu_fuzz_counter.cu` | Batch fuzz counter: one cell per tx (conflict-free), sum checked | CSMV | reference |
+| `gpu_kmeans.cu`| STAMP kmeans assignment (warp-cooperative distance) | CSMV  | `@experimental` |
+| `gpu_memcached.cu` | MemcachedGPU-style KV GET/SET                    | CSMV  | `@experimental` |
+| `gpu_tpcc.cu`  | TPC-C Payment transaction, money-conservation check  | CSMV  | `@experimental` |
+| `gpu_bank.cu`  | Bank transfer over GUST MVCC boxes                   | GUST  | `@broken` |
+| `gpu_ycsb_gust.cu` | YCSB over GUST (one tx per lane)                 | GUST  | `@broken` |
+| `gpu_memcached_gust.cu` | KV over GUST                                 | GUST  | `@broken` |
+| `gpu_gust_smoke.cu`  | GUST batch-executor smoke (`../backends/gpu_gust/cuda`) | GUST | `@broken` |
 
 `gpu_ycsb.cu` is the reference implementation (validated design, see
-`REVIEW.md`). The other three are `@experimental` skeletons demonstrating the
-batch-executor + warp-cooperative pattern with simplified algorithms
-(tracked in `TODO.md` under "GPU benchmark stubs", P1).
+`REVIEW.md`). The other CSMV workloads are `@experimental` skeletons
+demonstrating the batch-executor + warp-cooperative pattern with simplified
+algorithms (tracked in `TODO.md` under "GPU benchmark stubs", P1).
+
+## Cross-platform build + run status (review-03)
+
+Built and run on **AMD** (ROCm 7.2.3 / `hipcc`, gfx1151) and **NVIDIA** (CUDA
+13.3 / `nvcc`, RTX 2080 SUPER, sm_75). All nine compile on **both** toolchains
+(after the review-03 portability fixes: shim includes, `--gcc-install-dir`,
+`TM_FULL_MASK` warp masks, device-function-pointer enqueue). Run results are
+identical across vendors, i.e. the remaining GUST failures are genuine
+algorithmic bugs, **not** portability/wave-width issues:
+
+| Benchmark | AMD | NVIDIA |
+|-----------|-----|--------|
+| gpu_ycsb, gpu_kmeans, gpu_memcached, gpu_tpcc, gpu_fuzz_counter (CSMV) | build + run + **PASS** | build + run + **PASS** |
+| gpu_bank, gpu_gust_smoke (GUST) | build; runs but **money conservation fails** | same |
+| gpu_ycsb_gust, gpu_memcached_gust (GUST) | build; **launch failure** | build; **hangs** |
+
+> **`@broken` (GUST):** the GUST benchmarks no longer crash at `gust_gpu_init`
+> (that null-pointer bug — `cudaMalloc(&__device__ var)` — was fixed in review-03
+> to the `cudaMemcpyToSymbol` idiom), but they still fail their invariants: the
+> batch commit aborts almost every transaction so balances drift, and the
+> YCSB/memcached-over-GUST batch kernels hang (NVIDIA) or raise a hardware
+> exception (AMD). They are build-only smoke tests until the GUST backend's
+> concurrency protocol is fixed.
 
 > **Do not use `@experimental` workloads for reported performance numbers.**
 > They are useful for API/design smoke tests only: `gpu_kmeans` has no

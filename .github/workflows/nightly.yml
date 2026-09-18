@@ -174,3 +174,32 @@ jobs:
         run: cargo llvm-cov --manifest-path explicit_api/rust/workspace/Cargo.toml --features wbctl -p tm -- --test-threads=1
       - name: Coverage — simulator
         run: cargo llvm-cov --manifest-path simulator/Cargo.toml
+
+  # ── Weekly GPU compile-only check (S37, review-03, non-blocking) ──────────
+  # Compiles the GPU TM benchmarks to catch source/toolchain rot. Compilation
+  # does not need a physical GPU, but does need a CUDA/HIP toolchain, which is
+  # absent on default GitHub-hosted runners; those legs skip with exit 0. On a
+  # GPU-enabled (self-hosted) runner with nvcc/hipcc installed, this actually
+  # builds all nine benchmarks. Kept continue-on-error so it can never red the
+  # pipeline; it is an early-warning signal only.
+  gpu-compile-check:
+    if: contains(github.event.schedule, '0 5 * * 0')
+    continue-on-error: true
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Detect GPU toolchain
+        id: tc
+        run: |
+          if command -v hipcc >/dev/null 2>&1; then echo "mode=hip"  >> "$GITHUB_OUTPUT";
+          elif command -v nvcc  >/dev/null 2>&1; then echo "mode=cuda" >> "$GITHUB_OUTPUT";
+          else echo "mode=none" >> "$GITHUB_OUTPUT"; fi
+      - name: Compile (HIP)
+        if: steps.tc.outputs.mode == 'hip'
+        run: make -C gpu/benchmarks HIP=1 all
+      - name: Compile (CUDA)
+        if: steps.tc.outputs.mode == 'cuda'
+        run: make -C gpu/benchmarks all
+      - name: Skip (no toolchain)
+        if: steps.tc.outputs.mode == 'none'
+        run: echo "No nvcc/hipcc on runner; skipping GPU compile check."
