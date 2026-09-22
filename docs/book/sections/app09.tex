@@ -34,18 +34,20 @@ clang-tm/
 |   +-- tikv/                # distributed TiKV 2PC
 |   +-- queue/               # async queue runtime
 |   +-- tm_region_allocator/ # mmap region + deferred frees
-|   +-- ...                  # 20+ backends total
+|   +-- ...                  # 26 backend dirs total (see §"Backend Directory Map")
 +-- explicit_api/cpp/        # C++ explicit TM API (TM<T>)
 +-- explicit_api/rust/       # Rust workspace (backends + executor)
 +-- benchmarks/cpp/          # bank, fuzz-counter, fuzz-bank, STAMP
 +-- benchmarks/rust/         # Rust benchmark ports
 +-- benchmarks/plugin/       # plugin-instrumented benchmarks
-+-- gpu/                     # GPU backends (PR-STM, CSMV, GUST, GPUTX)
++-- gpu/                     # GPU backends (CSMV, GUST, GAccO, GPU_STM, GPUTX) + GPU benchmarks
 +-- tests/                   # test_tx, test_ds, fuzz, plugin tests
 +-- plugin/                  # LLVM instrumentation pass + clang-tm driver
 +-- docs/proofs/             # TLA+/PlusCal models for all backends
 +-- docs/book/               # this book's LaTeX source
 +-- simulator/               # discrete-event TM simulator
++-- gem5_sim/                # gem5-based HTM/TSX simulation (setup.sh clones upstream gem5)
++-- machine_profiles/        # CPU microarch profiles consumed by the simulator
 +-- patches/                 # debug patches, TSX profiling patches
 +-- tools/                   # stm_bug_tool, profiling, debug patches
 \end{verbatim}
@@ -181,8 +183,8 @@ threads join).  The \texttt{worker\_thread} function shows the per-thread
 lifecycle: \texttt{thread\_init} before the loop, \texttt{thread\_exit}
 after.
 
-The fuzz benchmarks (\rep{benchmarks/cpp/fuzz\_counter/},
-\rep{benchmarks/cpp/fuzz\_bank/}) use the raw hook API with explicit
+The fuzz benchmarks (\rep{benchmarks/cpp/fuzz-counter/} and
+\rep{benchmarks/cpp/fuzz-bank/}) use the raw hook API with explicit
 \texttt{tm\_begin}/\texttt{tm\_end} and a manual retry loop, showing the
 alternative style without the \texttt{TM<T>} wrapper.
 
@@ -224,9 +226,8 @@ Every backend has a corresponding TLA+ model in
 \begin{itemize}
     \item \textbf{Volatile backends:} \rep{NOrec.tla}, \rep{SGL.tla},
           \rep{TL2.tla}, \rep{TinySTM\_WBCTL.tla},
-          \rep{Leftright.tla}, \rep{Romulus.tla}, \rep{XTM.tla},
-          \rep{SwissTM.tla}, \rep{JVSTM.tla}, \rep{MVLog.tla},
-          \rep{TSC\_TM.tla}
+          \rep{LEFTRIGHT.tla}, \rep{Romulus.tla}, \rep{XTM.tla},
+          \rep{SwissTM.tla}, \rep{JVSTM.tla}, \rep{MVLog.tla}
     \item \textbf{Persistent backends:} \rep{PersistentSGL.tla},
           \rep{DUDETM.tla}, \rep{SPHT.tla}, \rep{NVHTM.tla}
     \item \textbf{Distributed backends:} \rep{DistributedSGL.tla},
@@ -266,7 +267,7 @@ count.
           (\rep{patches/debug/}): on-demand instrumentation that adds
           \texttt{fprintf} statements to backend internals.  Apply with
           \rep{patches/debug/apply.sh}, revert with
-          \rep{patches/debug/revert.sh}.  Useful for tracing read-set
+          \rep{patches/debug/remove.sh}.  Useful for tracing read-set
           / write-set sizes, commit decisions, or allocator state during
           active debugging.
     \item \textbf{TSX timing instrumentation}
@@ -376,7 +377,7 @@ Directory & Notes \\
           the NOrec backend, then swap to TinySTM at runtime using
           \texttt{tm\_swap\_runtime()}.  Verify money conservation across
           both phases.  The swap test at
-          \rep{tests/expli-api/test\_swap\_backends.cpp} demonstrates the
+          \rep{tests/expli-api/test\_phase\_switch.cpp} demonstrates the
           pattern with two backends linked in a single binary.
 
     \item \emph{[verification]} Pick any backend from the traceability

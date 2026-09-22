@@ -1,3 +1,4 @@
+#include <atomic>
 #include <csetjmp>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +13,17 @@ char *g_tm_region_end = nullptr;
 __thread int32_t tm_nested_call_counter = 0;
 __thread int32_t tm_longjmp_ret = 0;
 __thread sigjmp_buf tm_jmpbuf;
+
+// ── stmbench7 uninstrumented link needs (B-07 / B-29, R-07) ─────
+// These are referenced by STMbench7.cpp's extern declarations at file
+// scope and inside namespace tinystm. The real definitions live in the
+// TinySTM runtime, which is not linked for the uninstrumented target.
+void tm_set_num_threads(int n) { (void)n; }
+namespace tinystm
+{
+thread_local sigjmp_buf *g_tx_exit_jmpbuf = nullptr;
+std::atomic<bool> g_tm_stop_requested{false};
+} // namespace tinystm
 
 // ── Lifecycle — all no-ops ──────────────────────────────────────
 extern "C" void tm_init() {}

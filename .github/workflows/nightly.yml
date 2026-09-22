@@ -76,12 +76,16 @@ jobs:
           sudo apt-get install -y llvm-22-dev clang-22 lld make
       - name: Build and test all 15 backends
         run: |
-          echo "backend,test_tx,test_ds" > cross_backend_results.csv
+          echo "backend,test_tx,test_ds,note" > cross_backend_results.csv
           for backend in TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL LEFTRIGHT ROMULUS XTM SPHT TSXSGL; do
+            case "$backend" in
+              SPHT|TSXSGL) note="requires -mrtm (FAIL expected on non-TSX runner)" ;;
+              *)           note="" ;;
+            esac
             make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=$backend 2>/dev/null
             ./benchmarks/cpp/bin/test_tx > /dev/null 2>&1 && tx="PASS" || tx="FAIL"
             ./benchmarks/cpp/bin/test_ds > /dev/null 2>&1 && ds="PASS" || ds="FAIL"
-            echo "$backend,$tx,$ds" >> cross_backend_results.csv
+            echo "$backend,$tx,$ds,$note" >> cross_backend_results.csv
           done
           cat cross_backend_results.csv
       - name: Upload cross-backend results

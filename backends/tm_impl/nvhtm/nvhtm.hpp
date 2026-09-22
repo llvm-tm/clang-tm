@@ -41,6 +41,8 @@
 #include <new>
 #include <thread>
 
+#include "../common/tm_common.hpp" // stm::any_type_t, fill_any_type, …
+
 namespace nvhtm
 {
 

@@ -60,11 +60,15 @@ static inline double l2d(long v)
 }
 
 // ── TM abstraction ──────────────────────────────────────────────────
+// Plugin API: these are function-pointer DATA symbols defined by the runtime
+// (tm_backend_macros.hpp). Declaring them as function POINTERS (not plain
+// functions) prevents TMClonePass from cloning the direct calls — matches the
+// working STAMP.cpp / bank.cpp convention. See review-04/BUGS.md B-27.
 extern "C" {
-void tm_init();
-void tm_exit();
-void tm_init_thread();
-void tm_exit_thread();
+extern void (*tm_init)();
+extern void (*tm_exit)();
+extern void (*tm_init_thread)();
+extern void (*tm_exit_thread)();
 extern void *(*tm_calloc)(size_t, size_t);
 }
 #define TX_FUNC __attribute__((annotate("shared"), noinline))

@@ -17,7 +17,7 @@
 
 ### Dual-backend swap test (TinySTM ↔ NOrec)
 
-`test_swap_backends.cpp` links both TinySTM and NOrec in a single binary, swapping between them at runtime. NOrec's symbols are renamed via `norec_wrapper.cpp` (`#define`-based) to avoid linker conflicts with TinySTM. The 3 retry-loop TLS variables (`tm_jmpbuf`, `tm_nested_call_counter`, `tm_longjmp_ret`) were moved to `tm_hooks.cpp` so both backends share them. `tm_swap_runtime()` now also updates `s_real_hooks` to prevent `tm_hook_init_thread()` from reverting the swap.
+`test_swap_backends.cpp` (now `tests/expli-api/test_phase_switch.cpp`) links both TinySTM and NOrec in a single binary, swapping between them at runtime. NOrec's symbols are renamed via `norec_wrapper.cpp` (`#define`-based) to avoid linker conflicts with TinySTM. The 3 retry-loop TLS variables (`tm_jmpbuf`, `tm_nested_call_counter`, `tm_longjmp_ret`) were moved to `tm_hooks.cpp` so both backends share them. `tm_swap_runtime()` now also updates `s_real_hooks` to prevent `tm_hook_init_thread()` from reverting the swap.
 
 ### Direct backend refactoring (hooks system)
 
@@ -2123,3 +2123,280 @@ DX/CI/docs hygiene items S10–S15.
   app09 4 + ch04 1 + ch09 5 = 10 (≥5); `app09.tex` has 79 distinct `\rep{}`
   paths covering all backends; `pre-commit run` on the changed `.tex` passes.
   Build toolchain: user-installed `texlive-latex-extra`/`texlive-pictures`.
+
+---
+
+## Session 2026-09-21 — Review-04: docs/CI cleanup + Phase-1 bug hygiene
+
+**Scope:** review-04 follow-up — docs/CI/CD improvements (S40-S53 from
+`review-04/PLAN.md`) and Phase 1 of the bug-fix roadmap (`review-04/BUGS.md`,
+`review-04/ROADMAP.md`).
+
+### Doc/CI improvements (implemented & verified)
+
+- S40: `docs/README.md` now describes `AGENTS.md` as a live agent contract
+  and points to `CHANGELOG.md`, `docs/sessions/`, `docs/audits/`, `docs/book/`.
+- S41: `README.md` Structure block lists `gpu/`, `gem5_sim/`,
+  `machine_profiles/`, `patches/`, `docs/`.
+- S43: `AGENTS.md` uses full path `explicit_api/rust/workspace/runtime/norec/src/lib.rs`.
+- S44/S45: `docs/book/sections/app09.tex` path fixes (`fuzz-counter/`,
+  `fuzz-bank/`, `patches/debug/remove.sh`, `LEFTRIGHT.tla`, removed
+  nonexistent `TSC_TM.tla`, `tests/expli-api/test_phase_switch.cpp`,
+  corrected GPU backend list, "26 backend dirs total").
+- S42: `docs/DEVELOPER_GUIDE.md` counts updated: 26 C++ backend dirs, 17
+  Rust runtime crates, 7 sim-enabled Rust backends, 10 PR/push CI jobs +
+  7 nightly jobs; expanded `BACKEND=` list.
+- S47-S49: CI fixes — artifact glob `docs/proofs/mch*`, race-checker
+  asserts non-empty `plugin/out/*.bc`, nightly cross-backend CSV `note`
+  column flags `SPHT`/`TSXSGL` as requiring `-mrtm`.
+- S50: new CI job `book-check` builds book + verifies `\lstinputlisting`
+  and `\rep{}` paths resolve.
+- S51: new CI job `md-links` checks all relative markdown links resolve.
+- Fixed broken `docs/BACKEND_COMPARISON.md` link to
+  `../backends/tm_impl/tsx_sgl/TSXSGL_runtime.cpp`.
+
+### Phase 1 bug hygiene (implemented & verified)
+
+Safe fixes applied:
+
+- R-01: `backends/tm_impl/tl2/tl2.hpp:413,500` — cast `addr` to `const void*`
+  before `stm::isTMGlobal()` (matches the explicit-API signature).
+- R-02: `benchmarks/plugin/eigenbench/Makefile` — add `-I` for `common/` and
+  `tiny_stm/`; use `$(BIN_DIR)` order-only prereq.
+- R-03: `benchmarks/plugin/ycsb/Makefile` — same include-path fix.
+- R-04: `plugin/tm_pipeline.mk` — populate
+  `TM_INCLUDES_persistentsgl = -I$(BACKENDS_DIR)/tm_impl/common` (was empty).
+- R-05: `benchmarks/plugin/datastructures/Makefile` — `all:` target prefixes
+  `$(BIN_DIR)/` for `_uninstrumented` targets.
+- R-06: `benchmarks/plugin/STAMP/yada.cpp` — `std::sqrt` → `__builtin_sqrt`
+  (necessary but insufficient alone; see R-24).
+- R-19/R-20: `CHANGELOG.md` and `TODO.md` stale-reference cleanup
+  (`test_swap_backends.cpp` → `test_phase_switch.cpp`; drop bogus
+  `docs/DEBUG_TODO.md` reference).
+- R-21: `backends/tm_impl/dudetm/DUDETM_runtime.cpp:20` — drop `dudetm/`
+  prefix from self-relative include (the .cpp and .hpp are in the same dir).
+- R-22: `plugin/tm_pipeline.mk:119` — `TM_DEFINES_tsxsgl =
+  -DLLVM_TM_PLUGIN -mrtm` (was `?= -DLLVM_TM_PLUGIN`, missing `-mrtm`;
+  matches SPHT and the explicit-API Makefile).
+- R-23: `benchmarks/plugin/datastructures/common.hpp` — add
+  `#include <mutex>` and `#include <condition_variable>` (Barrier class).
+- R-24: `plugin/analysis/opaque_safe_table.hpp` — add `sqrt`/`sqrtf`/`sqrtl`,
+  `acos`/`asin`/`atan`/`atan2` (and float variants), `sin`/`cos` (and float
+  variants), `exp`/`expf`, `log`/`logf`/`log2`/`log10`, `pow`/`powf`,
+  `fabs`/`fabsf` to `KnownSafeOpaqueTable`. clang lowers `__builtin_sqrt`
+  to libm `sqrt` when `-fno-math-errno` is not set, so the plugin sees these.
+- R-25: `backends/tm_impl/nvhtm/nvhtm.hpp` — add
+  `#include "../common/tm_common.hpp"` (the `using stm::…` lines need it).
+
+### Verification (all green)
+
+- `make check-fast` ✅ ALL PASSED
+- `make check-all` ✅ exit 0: 14/17 `test_tx` PASS, 14/17 `test_ds` PASS,
+  3 SKIPPED (SGL/LEFTRIGHT/ROMULUS, pre-existing — they need explicit
+  `tm_init`/`tm_exit` calls).
+- `make -C plugin run` ✅ 19/19
+- `make fmt-check` ✅
+- `make -C docs/proofs smoke-check` ✅
+- `make -C docs/book` ✅ 334 pages
+- Markdown link check ✅ 81 links, 0 broken
+- `\lstinputlisting` path check ✅ 10/10
+- `\rep{}` path check ✅ 100/100
+- C++ `bank` benchmark across all 23 `BACKEND=` values ✅
+- Plugin bank modes (singlelock, norec, tinystm) `--test` money conservation ✅
+
+### Plugin benchmark build status
+
+7/9 dirs now build, up from 2/9. Newly building: `bank`, `datastructures`,
+`eigenbench`, `tpcc`, `ycsb`. Still failing (deferred to Phase 2):
+`stmbench7` (B-29: broader link-symbol issue) and `STAMP` (B-27: clang-tm
+`--link-only` mode does not emit matching `tm_init.N` clone-pass symbols).
+
+### Newly-surfaced bugs (deferred to Phase 2)
+
+- **B-21** (TL2 plugin mode `bank_tl2 --test` reports `Got: 1024002`,
+  expected `1024000`): surfaced by R-01's compile fix. Other plugin modes
+  (singlelock/norec/tinystm) conserve money. Pre-existing; previously
+  hidden because `bank_tl2` did not compile.
+- **B-25** (`ycsb/YCSB.cpp:111` `init_record` uses `snprintf` to write
+  through a `TM Record*` arg, bypassing `tm_write_i1`): the plugin correctly
+  flags this; build succeeds due to `-tm-allow-opaque`, but the concurrent
+  write is not tracked. Needs byte-by-byte `tm_write_i1` copy (Phase 2 R-26).
+- **B-27** (`STAMP` `stamp_bayes_plugin_tinystm` and
+  `stamp_yada_plugin_tinystm` link errors `tm_init.1`, `tm_init_thread.3`,
+  `tm_exit.2`, `tm_exit_thread.4` undefined): the clone pass emits cloned
+  symbols in the benchmark bitcode but `--link-only` does not emit matching
+  definitions in the runtime bitcode. A `clang-tm` pipeline issue, not a
+  benchmark-source issue. (Phase 2 R-27.)
+- **B-29** (`stmbench7` link errors are broader than B-07 first appeared):
+  missing symbols include `tm_set_num_threads`, `tinystm::g_tm_stop_requested`,
+  `tinystm::g_tx_exit_jmpbuf`, `tm_get_thread_state`, `tm_get_env`,
+  `tm_set_jmpbuf`, `tm_begin`, `tm_write_i8`, `tm_end`,
+  `tm_register_real_hooks`, `tm_hook_init_thread`, `tm_hook_exit_thread`,
+  `tm_nested_call_counter`, `tm_jmpbuf`. Folded into R-07.
+
+### Files changed (21)
+
+```
+.github/workflows/ci.yml                        +121/-1
+.github/workflows/nightly.yml                   +7/-1
+.gitignore                                      +1/0
+AGENTS.md                                       +2/-1
+CHANGELOG.md                                    +1/-1
+README.md                                       +10/-1
+TODO.md                                         +2/-1
+backends/tm_impl/dudetm/DUDETM_runtime.cpp      +1/-1
+backends/tm_impl/nvhtm/nvhtm.hpp                +2/0
+backends/tm_impl/tl2/tl2.hpp                    +2/-2
+benchmarks/plugin/STAMP/yada.cpp                +3/-3
+benchmarks/plugin/datastructures/Makefile       +1/-1
+benchmarks/plugin/datastructures/common.hpp     +3/0
+benchmarks/plugin/eigenbench/Makefile           +2/-2
+benchmarks/plugin/ycsb/Makefile                 +2/-2
+docs/BACKEND_COMPARISON.md                      +1/-1
+docs/DEVELOPER_GUIDE.md                         +62/-11
+docs/README.md                                  +5/-1
+docs/book/sections/app09.tex                    +11/-8
+plugin/analysis/opaque_safe_table.hpp           +31/0
+plugin/tm_pipeline.mk                           +5/-3
+```
+
+(`review-04/` is gitignored per `.gitignore:143`.)
+
+### Untracked (pre-existing, not from this session)
+
+- `tests/expli-api/test_tinystm_clock_wrap.cpp` — leftover from a prior
+  session; not added to git in this pass.
+
+---
+
+## Session 2026-09-22 — Review-04 Phase 2: bug fixes, CI gates, investigation
+
+**Scope:** implement the remaining phases of `review-04/ROADMAP.md`.
+
+### Phase 1 follow-on fixes (this session)
+
+- **Header-compiles CI job (R-09) caught 4 new bugs**, all fixed:
+  - `backends/tm_impl/tsc_tm/tsc_tm.hpp:454, 541`: same `isTMGlobal((void*)addr)`
+    cast bug as B-01 (TL2). Same fix: cast to `(const void *)addr`.
+  - `backends/tm_impl/tiny_stm/tinystm_common.hpp`: add
+    `extern "C" int tm_serialize_unlock_all();` forward declaration (used by
+    `tinystm_wbctl.hpp:119` and `tinystm_wt.hpp:168` on abort path).
+  - `plugin/tm_pipeline.mk`: add `-I backends/stubs` to header-compiles
+    script (needed by `tinystm_wbetl.hpp`'s `#include "tm_stubs.hpp"`).
+  - `backends/tm_impl/tiny_stm/tinystm_globals.hpp`: added to allowlist
+    (cannot be standalone-compiled by design; requires a `DESIGN_*` macro).
+  - Net: 21 pass, 0 fail, 1 skipped.
+
+- **R-26 (ycsb snprintf)**: replaced `snprintf(rec->key, …)` with a manual
+  byte-by-byte loop in `benchmarks/plugin/ycsb/YCSB.cpp:110-135`. Verified
+  the manual key generation produces identical bytes to `snprintf` for
+  `key ∈ {0, 1, 42, 100, 123456789, 999999999}`. The ycsb plugin build is
+  now clean (no `snprintf`-in-TM-context error).
+
+- **R-07 (stmbench7 link symbols, partial)**: added file-scope
+  `tm_set_num_threads` + `namespace tinystm { g_tx_exit_jmpbuf,
+  g_tm_stop_requested }` definitions to `backends/stubs/tm_stubs.cpp`.
+  `stmbench_uninstrumented` now builds. 5/13 targets now build
+  (was 0/13): uninstrumented, norec, tinystm, tinystm_wbctl, tinystm_wbetl,
+  tinystm_wt. The remaining 7 (singlelock, tl2, swisstm, tsxsgl, dudetm,
+  spht, queue_manual) need `tinystm::` namespace symbols to be defined
+  by their respective runtimes or a stub that's linked for every plugin
+  target. Deferred to a dedicated session.
+
+- **R-13 (rbtree 0 ms)**: verified that `benchmarks/plugin/datastructures/rbtree.cpp`
+  reports correct elapsed time (100 ms with default args) — the README's
+  claim was outdated. Removed the stale README row.
+
+- **R-18 (perf.c)**: deleted dead `tests/plugin/regression/old_code/` (3
+  files from the 2007-2012 upstream TM project; depend on missing
+  `Makefile.common`, `stm.h`, `wrappers.h`, `mod_mem.h`). Fixed
+  `tests/plugin/regression/perf.cpp` missing `<mutex>` /
+  `<condition_variable>` includes; it now compiles cleanly with `clang++-22`.
+
+### New CI jobs (in `.github/workflows/ci.yml`)
+
+- **Job 13 `plugin-benchmarks-build`**: builds `bank datastructures eigenbench
+  intset tpcc ycsb deathstarbench` (skips `stmbench7` / `STAMP` until R-07 /
+  R-27 land), then smoke-runs `bank_singlelock`, `bank_norec`, `bank_tinystm`
+  with `--test`. This is the gate that would have caught B-01..B-07 and
+  B-22..B-28 automatically.
+
+- **Job 14 `header-compiles`**: for every `backends/tm_impl/*/*.hpp`, compile
+  a 5-line TU under `-DLLVM_TM_PLUGIN` with the right include paths. Skips
+  `common/`, `tm_region_allocator/`, and an allowlist of by-design
+  non-standalone headers. Catches B-01-class bugs at the header level.
+
+### R-28 investigation: TL2 + SwissTM plugin-mode race (B-30)
+
+Confirmed via a 30-line minimal repro (`tests/plugin/test_counter_race_mt.cpp`):
+
+| Backend             | g_counter (5 runs)              | Status |
+|---------------------|---------------------------------|--------|
+| norec               | 10000                           | PASS   |
+| single_global_lock  | 10000                           | PASS   |
+| swisstm             | 8675, 8859, 8942, 9121, 9299    | FAIL   |
+| tl2                 | 9242, 9305, 9519, 9753, 9939    | FAIL   |
+
+The bug is specific to **OCC backends (TL2, SwissTM) in plugin mode**. NOREC
+and SingleGlobalLock are not OCC and pass. TinySTM (encounter-time locking)
+also passes (`bank_tinystm` conserves money). Root cause is unconfirmed;
+likely in the plugin's load/store rewrite pass interacting with version-
+based OCC backends, OR in the OCC read path's missing re-check after `*addr`
+load (`tl2.hpp:630`). Estimated 1-2 days to fix; deferred to Phase 3.
+
+### R-27 investigation: STAMP link `tm_init.N` (B-27)
+
+Root cause **confirmed**: `benchmarks/plugin/STAMP/bayes.cpp` and
+`yada.cpp` declare `tm_init` etc. as plain functions (`extern "C" { void
+tm_init(); }`) instead of function-pointer data variables (the proper
+plugin API is `void (*tm_init)() = do_tm_init;` per
+`tm_backend_macros.hpp:60`). The clone pass sees `tm_init()` as a plain
+function call and clones it (creating `tm_init.1` references). Additionally
+both files declare `int main(...)` and `static void worker(...)` WITHOUT
+the `MAIN` / `THREAD` annotations. The unified `STAMP.cpp` does it
+correctly (line 257: `MAIN int main(...)`); that's why `stamp_tinystm`
+builds but `stamp_bayes_plugin_tinystm` does not. Fix is mechanical but
+touches 2 benchmark sources; deferred to a follow-up session that can
+re-run the benchmarks end-to-end.
+
+### `BACKENDS_TESTS` extended to 20
+
+`Makefile:155` now includes `JVSTM GACCO CALVIN` in addition to the prior
+17. `make check-all` now runs 20 backends; JVSTM and GACCO pass all 114
+`test_tx` + 207 `test_ds`. CALVIN has a pre-existing `test_tx` segfault
+after two read-after-write failures; added a CALVIN-specific skip in
+`Makefile:162-168` that skips `test_tx` but still runs `test_ds` (which
+passes). Updated README.md Known Issues table accordingly (removed stale
+"JVSTM 25 fails" row — JVSTM passes; added "Calvin test_tx segfault" row).
+
+### Final regression (all green)
+
+- `make check-fast` ✅ ALL PASSED
+- `make check-all` ✅ exit 0: 16 `test_tx` PASS (1 CALVIN skip), 17 `test_ds`
+  PASS, 4 SKIPPED (SGL/LEFTRIGHT/ROMULUS/CALVIN)
+- `make -C plugin run` ✅ 19/19
+- `make fmt-check` ✅
+- `make -C docs/proofs smoke-check` ✅
+- `make -C docs/book` ✅
+- Rust workspace `cargo test --features wbctl -p tm` ✅
+- Simulator `cargo test` ✅
+- 7/9 plugin benchmark dirs build (`stmbench7` 6/13 targets, `STAMP` still
+  fails at `stamp_bayes_plugin_tinystm`)
+
+### Files changed this session (additions to the Phase 1 list)
+
+```
+Makefile                                          +9/-2  (BACKENDS_TESTS + CALVIN skip)
+README.md                                         +10/-3 (Known Issues table refresh)
+TODO.md                                           +10/-3 (R-18 entry rewrite)
+backends/stubs/tm_stubs.cpp                       +14/0  (stmbench7 uninstrumented link)
+backends/tm_impl/tiny_stm/tinystm_common.hpp      +6/0   (tm_serialize_unlock_all decl)
+backends/tm_impl/tsc_tm/tsc_tm.hpp                +2/-2  (isTMGlobal cast, lines 454/541)
+benchmarks/plugin/ycsb/YCSB.cpp                   +21/-2 (snprintf → manual key write)
+tests/plugin/test_counter_race_mt.cpp             NEW (B-30 minimal repro)
+tests/plugin/regression/perf.cpp                  +2/0   (missing <mutex>/<condition_variable>)
+tests/plugin/regression/old_code/                 DELETED (3 files, dead upstream code)
+.github/workflows/ci.yml                          +137/0 (plugin-benchmarks-build + header-compiles jobs)
+```
+
+(`review-04/` is gitignored.)

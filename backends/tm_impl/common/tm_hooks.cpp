@@ -119,6 +119,22 @@ __attribute__((weak)) void (*tm_trace)(uint32_t,
 } // extern "C"
 
 // ═══════════════════════════════════════════════════════════════
+// Weak tinystm-namespace stubs (B-07 / B-29 / R-07).
+// benchmarks/plugin/stmbench7/STMbench7.cpp uses tinystm::g_tx_exit_jmpbuf
+// and tinystm::g_tm_stop_requested UNCONDITIONALLY (its "exit-on-stop"
+// worker mechanism), but only the TinySTM runtime defines them (strong, via
+// tinystm_globals.hpp).  clang-tm auto-links tm_hooks.cpp into every plugin
+// build, so providing WEAK definitions here lets the non-TinySTM plugin
+// backends (singlelock/tl2/swisstm/tsxsgl/dudetm/spht) link, while the real
+// TinySTM builds keep their strong definitions. Do NOT make these strong.
+// ═══════════════════════════════════════════════════════════════
+namespace tinystm
+{
+__attribute__((weak)) thread_local sigjmp_buf *g_tx_exit_jmpbuf = nullptr;
+__attribute__((weak)) std::atomic<bool> g_tm_stop_requested{false};
+} // namespace tinystm
+
+// ═══════════════════════════════════════════════════════════════
 // Thread counting + hook swap
 // ═══════════════════════════════════════════════════════════════
 

@@ -28,10 +28,19 @@ $(eval $(call tm_target, stmbench_spht, STMbench7.cpp, spht))
 
 # ─── Queue-manual benchmark ──────────────────────────────────────────────
 # Queue runtime objects (compiled from backends)
-QUEUE_RT_OBJS := $(OUT_DIR)/tinystm_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o
+QUEUE_RT_OBJS := $(OUT_DIR)/tinystm_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o $(OUT_DIR)/tm_hooks.o
 
 # Override link flags for queue objects: DESIGN_WBCTL + LLVM_TM_PLUGIN needed
 $(OUT_DIR)/tinystm_runtime.o: $(BACKENDS_DIR)/tm_impl/tiny_stm/TinySTM_runtime.cpp | $(OUT_DIR)
+	$(CXX) -c -std=c++20 $(TM_LINK_OPT) -pthread -DDESIGN_WBCTL -DLLVM_TM_PLUGIN \
+	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR)/tm_impl/common -I $(BACKENDS_DIR) $< -o $@
+
+# tm_hooks.cpp provides the function-pointer DATA symbols (tm_begin, tm_get_env,
+# tm_get_thread_state, tm_set_jmpbuf, tm_sigsetjmp, ...) that queue_runtime.o
+# references. Normally clang-tm's --link-only mode auto-links these, but the
+# queue_manual target links via raw $(CXX), so we compile them explicitly here
+# (B-07 / B-29 / R-07).
+$(OUT_DIR)/tm_hooks.o: $(BACKENDS_DIR)/tm_impl/common/tm_hooks.cpp | $(OUT_DIR)
 	$(CXX) -c -std=c++20 $(TM_LINK_OPT) -pthread -DDESIGN_WBCTL -DLLVM_TM_PLUGIN \
 	  -I $(TINYSTM_DIR) -I $(BACKENDS_DIR)/tm_impl/common -I $(BACKENDS_DIR) $< -o $@
 

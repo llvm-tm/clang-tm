@@ -143,18 +143,22 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
 ## P2 — Cleanup
 
 ### stmbench7 -O1 crash
-- **File**: `docs/DEBUG_TODO.md` (standalone debug document)
+- **Files**: `benchmarks/plugin/stmbench7/STMbench7.cpp`,
+  `plugin/passes/TMInstrumentFnPass.cpp`
 - **Issue**: `stmbench_tinystm_wbctl` crashes with null-pointer deref in
   `__tree_balance_after_insert_tm_clone` at O1. The instrumentation pass
   does not handle `invoke` instructions (only `CallInst`), so `_Znwm` calls
   inside inlined STL code are not replaced with `tm_malloc`.
 - **Next step**: Add `InvokeInst` handling to the instrument pass, or use
-  `-O0 -always-inline` to avoid `invoke` generation.
+   `-O0 -always-inline` to avoid `invoke` generation.
 
-### old_code perf.c
-- **File**: `tests/plugin/regression/old_code/perf.c` (line 320)
-- **Issue**: Old regression test with unfinished measurement items (clock
-  perturbation, WAR/WAW measurements, stm_malloc/free measurements).
+### `tests/plugin/regression/perf.cpp` include fix (R-18)
+- **File**: `tests/plugin/regression/perf.cpp`
+- **Status**: ✅ Fixed 2026-09-21. Modernized perf.cpp's missing `<mutex>` /
+  `<condition_variable>` includes; it now compiles cleanly with `clang++-22`.
+- **Removed**: the dead `tests/plugin/regression/old_code/` directory (3 files
+  from the 2007-2012 upstream TM project, depends on a missing `Makefile.common`
+  and on `stm.h` / `wrappers.h` / `mod_mem.h` that are not in this repo).
 
 ---
 

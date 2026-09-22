@@ -11,8 +11,8 @@ all: out bin ycsb_uninstrumented ycsb_singlelock ycsb_tl2 ycsb_tinystm \
 	ycsb_tsxsgl ycsb_dudetm ycsb_spht \
 	ycsb_tinystm_wbctl ycsb_tinystm_wt ycsb_norec
 
-ycsb_uninstrumented: bin
-	$(CXX) $(CXXFLAGS) $(SRC) -o bin/ycsb_uninstrumented
+ycsb_uninstrumented: $(SRC) | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -I$(BACKENDS_DIR)/tm_impl/common -I$(BACKENDS_DIR)/tm_impl/tiny_stm $< -o $(BIN_DIR)/$@
 
 $(eval $(call tm_target, ycsb_singlelock, $(SRC), singlelock))
 $(eval $(call tm_target, ycsb_tl2, $(SRC), tl2))

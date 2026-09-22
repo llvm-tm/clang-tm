@@ -17,7 +17,7 @@
 // Forward declarations required by tinystm_wbctl.hpp (included via tinystm_globals.hpp)
 extern "C" int tm_serialize_unlock_all();
 
-#include "dudetm/dudetm_base.hpp"
+#include "dudetm_base.hpp"
 #include "tinystm_globals.hpp"
 #include "tm_alloc_overrides.hpp"
 extern const TMRealHooks g_dudetm_hooks;

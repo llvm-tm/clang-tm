@@ -70,4 +70,4 @@ Only singlelock produced valid results for STMbench7 and TPC-C. norec segfaults 
 
 3. **tinystm_wbctl works on STAMP** (all 8 benchmarks, 287/288 runs) but is the slowest backend (6.87x–20.04x overhead at 1t). It cannot run STMbench7 or TPC-C due to the fundamental STL-in-TM incompatibility.
 
-4. **RTM detection via `_xbegin()` probe** (see [tm_rtm.hpp](../plugin/passes/tm_rtm.hpp)) successfully prevents the "system has RTM" false positive on newer AMD hardware, allowing both SPHT and TSXSGL backends to fall back to their software paths.
+4. **RTM detection via `_xbegin()` probe** (see [TSXSGL_runtime.cpp](../backends/tm_impl/tsx_sgl/TSXSGL_runtime.cpp)) successfully prevents the "system has RTM" false positive on newer AMD hardware, allowing both SPHT and TSXSGL backends to fall back to their software paths.

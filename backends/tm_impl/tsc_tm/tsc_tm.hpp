@@ -451,7 +451,7 @@ public:
 		assert(tx && tx->active);
 
 #ifdef LLVM_TM_PLUGIN
-		if (!stm::isTMAddress((void *)addr) && !stm::isTMGlobal(addr)) {
+		if (!stm::isTMAddress((void *)addr) && !stm::isTMGlobal((const void *)addr)) {
 			*addr = val;
 			return;
 		}
@@ -538,7 +538,7 @@ public:
 		assert(tx && tx->active);
 
 #ifdef LLVM_TM_PLUGIN
-		if (!stm::isTMAddress((void *)addr) && !stm::isTMGlobal(addr)) {
+		if (!stm::isTMAddress((void *)addr) && !stm::isTMGlobal((const void *)addr)) {
 			if constexpr (std::is_pointer_v<T>) {
 				return const_cast<T>(*addr);
 			} else {

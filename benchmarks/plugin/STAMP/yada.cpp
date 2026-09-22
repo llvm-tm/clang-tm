@@ -92,11 +92,15 @@ static inline double l2d(long v)
 }
 
 // ── TM abstraction ──────────────────────────────────────────────────
+// Plugin API: these are function-pointer DATA symbols defined by the runtime
+// (tm_backend_macros.hpp). Declaring them as `extern` function POINTERS (not
+// plain functions) prevents TMClonePass from cloning the direct calls — matches
+// the working STAMP.cpp / bank.cpp convention. See review-04/BUGS.md B-27.
 extern "C" {
-void tm_init();
-void tm_exit();
-void tm_init_thread();
-void tm_exit_thread();
+extern void (*tm_init)();
+extern void (*tm_exit)();
+extern void (*tm_init_thread)();
+extern void (*tm_exit_thread)();
 extern void *(*tm_calloc)(size_t, size_t);
 }
 #define TX_FUNC __attribute__((annotate("shared"), noinline))
@@ -153,14 +157,14 @@ static void circumcircle(double &cx,
 	cy = ((a.x * a.x + a.y * a.y) * (c.x - b.x) + (b.x * b.x + b.y * b.y) * (a.x - c.x) +
 	      (c.x * c.x + c.y * c.y) * (b.x - a.x)) /
 	     d;
-	cr = std::sqrt(dist2({cx, cy}, a));
+	cr = __builtin_sqrt(dist2({cx, cy}, a));
 }
 
 static double tri_min_angle(const Point &a, const Point &b, const Point &c)
 {
 	auto angle = [](const Point &p, const Point &q, const Point &r) {
-		double d1 = std::sqrt(dist2(p, q));
-		double d2 = std::sqrt(dist2(p, r));
+		double d1 = __builtin_sqrt(dist2(p, q));
+		double d2 = __builtin_sqrt(dist2(p, r));
 		if (d1 < 1e-15 || d2 < 1e-15)
 			return 180.0;
 		double dot = ((q.x - p.x) * (r.x - p.x) + (q.y - p.y) * (r.y - p.y)) / (d1 * d2);

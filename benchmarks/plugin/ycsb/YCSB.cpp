@@ -108,7 +108,25 @@ static inline int hash_key(int key)
 
 static void init_record(Record *rec, int key)
 {
-	snprintf(rec->key, sizeof(rec->key), "user%09d", key);
+	// Manual key write (was snprintf). snprintf is opaque to the plugin and
+	// its internal stores bypass the STM's write tracking. Writing the chars
+	// one-by-one lets the plugin's load/store rewrite pass route every store
+	// through tm_write_i8, so concurrent transactions observe the key.
+	// See review-04/BUGS.md B-25 / ROADMAP R-26.
+	// Format: "user" + 9 zero-padded decimal digits + '\0' = 14 chars.
+	static const char prefix[] = "user";
+	int ki = 0;
+	for (int i = 0; i < 4; i++)
+		rec->key[ki++] = prefix[i];
+	int k = key;
+	for (int d = 8; d >= 0; d--) {
+		int digit = k % 10;
+		rec->key[4 + d] = char('0' + digit);
+		if (k > 0)
+			k /= 10;
+	}
+	ki = 13;
+	rec->key[ki++] = '\0';
 	for (int f = 0; f < NUM_FIELDS; f++) {
 		for (int i = 0; i < FIELD_SIZE - 1; i++) {
 			rec->data[f][i] = CHARS[(key + f + i) % 62];

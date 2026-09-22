@@ -53,4 +53,8 @@ work items, see [`../TODO.md`](../TODO.md).
 
 | Document | What it is | Read it when… |
 |----------|-----------|---------------|
-| [AGENTS.md](AGENTS.md) | Historical project-summary / session log (**frozen**) | You need historical context; new sessions go to `CHANGELOG.md` / `docs/sessions/` |
+| [AGENTS.md](AGENTS.md) | Live agent contract: build/test commands, hook invariants, LLVM-version policy, verification gates | You (or an agent) are about to change code in this repo |
+| [../CHANGELOG.md](../CHANGELOG.md) | Session log (`## Session YYYY-MM-DD` entries); the historical project summary is the undated section at the top | You want the history of a fix, or where to append your own session notes |
+| [sessions/](sessions/) | Long-form per-day session write-ups (referenced from `CHANGELOG.md`) | A `CHANGELOG.md` entry says "see docs/sessions/…" |
+| [audits/](audits/) | Per-backend audit notes (one file per backend) | You want a one-page risk/coverage summary for a specific backend |
+| [book/](book/) | The companion textbook *"Transactional Memory — From Principles to Practice"* (19 chapters + 9 appendices, LaTeX) | You want the theory behind a backend, or to cite/extend the book |

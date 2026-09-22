@@ -9,8 +9,8 @@ SRC := EigenBench.cpp
 all: out bin eigen_uninstrumented eigen_singlelock eigen_tl2 eigen_tinystm \
 	eigen_norec eigen_swisstm
 
-eigen_uninstrumented: bin
-	$(CXX) $(CXXFLAGS) $(SRC) -o bin/eigen_uninstrumented
+eigen_uninstrumented: $(SRC) | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -I$(BACKENDS_DIR)/tm_impl/common -I$(BACKENDS_DIR)/tm_impl/tiny_stm $< -o $(BIN_DIR)/$@
 
 $(eval $(call tm_target, eigen_singlelock, $(SRC), singlelock))
 $(eval $(call tm_target, eigen_tl2, $(SRC), tl2))

@@ -10,10 +10,19 @@ backends/          — TM runtime implementations (TinySTM, NOrec, TL2, SGL, Swi
 plugin/            — LLVM instrumentation plugin (5-pass Honorio pipeline)
 benchmarks/        — Benchmarks (plugin-instrumented, C++ explicit, Rust)
 tests/             — Tests for all components
-explicit_api/       — Explicit C++ API headers + Rust workspace
+explicit_api/      — Explicit C++ API headers + Rust workspace
 tools/             — Build/install scripts
 simulator/         — Rust discrete event simulator for TM trace replay
+gpu/               — GPU TM backends (CUDA + HIP) and GPU benchmarks
+gem5_sim/          — gem5-based HTM/TSX simulation (setup.sh clones upstream gem5)
+machine_profiles/  — CPU microarchitecture profiles consumed by the simulator
+patches/           — Debug printfs + TSX timing instrumentation patches
+docs/              — Documentation index, audits, proofs (TLA+), and the book
 ```
+
+The full documentation index lives in [`docs/README.md`](docs/README.md);
+session history in [`CHANGELOG.md`](CHANGELOG.md); open work in
+[`TODO.md`](TODO.md).
 
 ## Quick Start — Explicit C++ API (no LLVM plugin needed)
 
@@ -225,10 +234,18 @@ maintainer-owned.
 
 | Issue | Details |
 |-------|---------|
-| **JVSTM `test_tx` (25 fails)** | All via direct/`.peek()` reads: VBox values live in a linked list and are not written back to the original address, so `.peek()` (a plain memory load) misses them. `.peek()` is not backend-portable. |
-| **Calvin multi-thread** | `bank` conserves money at 1T; 4T can destroy money under high abort rates in the execute phase (pre-existing two-phase OCC contention issue). |
-| **Romulus test_tx passes** | All 114 tests pass after the OCC read-validate fix (version-table re-check on `read_word`). |
+| **JVSTM `.peek()` reads** | Direct/`.peek()` reads on a `TM<T>` use a plain memory load. For most backends this is correct, but for JVSTM (where values live in a `VBox` linked list and are not written back to the original address) it can miss committed values. `test_tx`/`test_ds` pass for JVSTM as of 2026-09-21; if you write new code that calls `.peek()` on a JVSTM-backed `TM<T>`, prefer the `TM<T>::load()` accessor instead. |
+| **Calvin `test_tx` segfault** | After two read-after-write failures, `test_tx` segfaults (pre-existing). `check-all` skips Calvin's `test_tx` (but still runs `test_ds`, which passes 207/207). See [`review-04/BUGS.md`](review-04/BUGS.md). |
+| **Calvin multi-thread `bank`** | `bank` conserves money at 1T; 4T can destroy money under high abort rates in the execute phase (pre-existing two-phase OCC contention issue). |
+| **TinySTM `proactive_stop` workaround** | `tm_proactive_stop` masks a real hang at ≥2 threads under high contention; the workaround is load-bearing and must not be removed without a root-cause fix. See [`review-04/BUGS.md`](review-04/BUGS.md) B-14. |
+| **TL2 plugin-mode bank (`bank_tl2 --test`)** | Reports small money drift (`Got: 1024002` vs expected `1024000`). Surfaced after the B-01 compile fix; other plugin modes (`singlelock`, `norec`, `tinystm`) conserve money. See [`review-04/BUGS.md`](review-04/BUGS.md) B-21. |
+| **`ycsb` plugin-mode `init_record`** | `snprintf` writes through a `TM Record*` arg, bypassing `tm_write_i1`. The build succeeds (the Makefile sets `-tm-allow-opaque`), but the concurrent write is not tracked by any STM. See [`review-04/BUGS.md`](review-04/BUGS.md) B-25. |
+| **`STAMP` plugin-mode `stamp_*_plugin_tinystm`** | Link fails with `undefined reference to 'tm_init.1'` etc. — the clone pass emits cloned symbols in the benchmark bitcode but `--link-only` mode does not emit matching definitions in the runtime bitcode. See [`review-04/BUGS.md`](review-04/BUGS.md) B-27. |
+| **`stmbench7` plugin-mode link** | Uninstrumented link missing `tm_set_num_threads`, `tinystm::g_tm_stop_requested`, `tm_get_thread_state`, `tm_get_env`, `tm_set_jmpbuf`, etc. See [`review-04/BUGS.md`](review-04/BUGS.md) B-07 / B-29. |
+| **stmbench7 runtime hang** | Data race in `ts_multimap::lower_bound()` causes hangs under TinySTM / TL2 (pre-existing). |
 | **DUDETM, NVHTM, DistributedSGL, PersistentSGL** | Build, but depend on plugin-provided symbols (`tm_symbol_count`, `tm_symbol_addresses`, `tm_symbol_sizes`) not available in the explicit C++ API. |
-| **rbtree benchmark timing** | Reports 0ms duration (pre-existing). |
-| **stmbench7 times out** | Data race in `ts_multimap::lower_bound()` (pre-existing). |
 | **Plugin pipeline tests** | Need `clang-tm` wrapper testing (auto-link of `tm_hooks.cpp` fix not fully verified). |
+| **gem5 Ruby `MESI_Three_Level` livelock** | gem5 HTM multi-thread livelock under `MESI_Three_Level`; port to `MESI_Two_Level` is open work. See [`review-04/BUGS.md`](review-04/BUGS.md) B-15. |
+| **GPU benchmark stubs (`gpu_tpcc`, `gpu_memcached`, `gpu_kmeans`)** | Compile and run but are not real implementations; they exercise the API surface only. Either promote to real implementations or delete. See [`review-04/BUGS.md`](review-04/BUGS.md) B-16. |
+| **TSC-TM / CSMV simulator coverage** | The Rust deterministic simulator does not yet have TSC-TM or CSMV backends; see [`review-04/BUGS.md`](review-04/BUGS.md) B-17. |
+| **`tests/plugin/regression/old_code/perf.c`** | Unfinished measurements; either complete or delete. See [`review-04/BUGS.md`](review-04/BUGS.md) B-18. |

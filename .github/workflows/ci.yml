@@ -91,12 +91,21 @@ jobs:
           sudo apt-get install -y llvm-22-dev clang-22 lld make
       - name: Build plugin (produces .bc files) + race checker
         run: make plugin && make -C plugin race-checker
+      - name: Assert plugin/out/ has .bc files before scanning
+        run: |
+          shopt -s nullglob
+          bc=(plugin/out/*.bc)
+          echo "found ${#bc[@]} .bc file(s) under plugin/out/"
+          if [ "${#bc[@]}" -eq 0 ]; then
+            echo "FAIL: plugin build produced no .bc files under plugin/out/"
+            exit 1
+          fi
       - name: Check for race warnings on plugin benchmarks
         run: |
           echo "=== Race checker analysis ==="
           cd plugin
+          shopt -s nullglob
           for bc in out/*.bc; do
-            [ -f "$bc" ] || continue
             name=$(basename "$bc" .bc)
             warnings=$(opt-22 -load-pass-plugin=bin/libTMRaceChecker.so \
               -passes="tm-race-checker" "$bc" -o /dev/null 2>&1 | \
@@ -177,7 +186,7 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: tla-results
-          path: docs/proofs/*/mch*
+          path: docs/proofs/mch*
 
   # ── Job 8: TLA+ smoke gate (3 small models, blocking, <5 min) ─
   tla-smoke:
@@ -251,3 +260,221 @@ jobs:
         run: |
           ./benchmarks/cpp/bin/test_tx
           ./benchmarks/cpp/bin/test_ds
+
+  # ── Job 11: Build the book + verify its repo path refs resolve ─
+  book-check:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install TeX Live (latexmk + listingsutf8 + tikz + booktabs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            texlive-latex-base texlive-latex-recommended texlive-latex-extra \
+            texlive-pictures texlive-fonts-recommended latexmk python3
+      - name: Build book
+        run: make -C docs/book
+      - name: Verify lstinputlisting paths resolve
+        run: |
+          python3 - <<'PY'
+          import re, sys, pathlib
+          book = pathlib.Path('docs/book').resolve()   # build dir; main.tex lives here
+          sections = book / 'sections'
+          bad = []
+          total = 0
+          for tex in sections.glob('*.tex'):
+              text = tex.read_text()
+              for m in re.finditer(r'\\lstinputlisting(?:\[[^\]]*\])?\{([^}]+)\}', text):
+                  total += 1
+                  rel = m.group(1)
+                  p = (book / rel).resolve()           # LaTeX resolves relative to the main .tex
+                  if not p.exists():
+                      bad.append(f'{tex.relative_to(book.parent)}: {rel} -> {p}')
+          print(f'checked {total} \\lstinputlisting path(s); {len(bad)} broken')
+          if bad:
+              print('\n'.join(bad)); sys.exit(1)
+          PY
+      - name: Verify \\rep{} repo-path references resolve
+        run: |
+          python3 - <<'PY'
+          import re, sys, pathlib
+          root = pathlib.Path('.').resolve()
+          sections = root / 'docs' / 'book' / 'sections'
+          bad = []
+          total = 0
+          for tex in sections.glob('*.tex'):
+              text = tex.read_text()
+              for m in re.finditer(r'\\rep\{([^}]+)\}', text):
+                  raw = m.group(1)
+                  # strip line-number suffix ":123"
+                  path = raw.split(':', 1)[0]
+                  # strip LaTeX line-break hints, then unescape chars
+                  path = re.sub(r'\\allowbreak\s*', '', path)
+                  path = path.replace('\\_','_').replace('\\-','-').replace('\\','')
+                  path = path.rstrip('/')
+                  # only consider things that look like repo-root-relative paths
+                  # (must contain a slash, OR end in .tla under docs/proofs)
+                  has_slash = '/' in path
+                  tla_short = path.endswith('.tla')
+                  if not has_slash and not tla_short: continue
+                  total += 1
+                  if pathlib.Path(path).exists(): continue
+                  if tla_short and (root / 'docs' / 'proofs' / path).exists(): continue
+                  bad.append(f'{tex.relative_to(root)}: {raw!r} -> {path}')
+          print(f'checked {total} \\rep path(s); {len(bad)} unresolved')
+          if bad:
+              print('\n'.join(f'  {b}' for b in bad[:30])); sys.exit(1)
+          PY
+      - name: Upload book PDF
+        uses: actions/upload-artifact@v5
+        with:
+          name: book-pdf
+          path: docs/book/main.pdf
+
+  # ── Job 12: Markdown link integrity (relative links only) ─
+  md-links:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check markdown relative links resolve
+        run: |
+          python3 - <<'PY'
+          import re, os, sys, pathlib
+          root = pathlib.Path('.').resolve()
+          mds = [root/'README.md', root/'AGENTS.md', root/'CONTRIBUTING.md',
+                 root/'SECURITY.md', root/'TODO.md', root/'CHANGELOG.md',
+                 root/'BOOK_REPO_INTEGRATION_PLAN.md']
+          mds += list((root/'docs').glob('**/*.md'))
+          bad = []; total = 0
+          for md in mds:
+              if not md.exists(): continue
+              real = pathlib.Path(os.path.realpath(md))   # follow symlink (docs/AGENTS.md)
+              text = real.read_text(errors='replace')
+              for m in re.finditer(r'\[[^\]]+\]\(([^)\s]+)(?:\s+"[^"]*")?\)', text):
+                  link = m.group(1)
+                  if re.match(r'^([a-z]+:|mailto:|/|#)', link): continue
+                  path = link.split('#', 1)[0]
+                  if not path: continue
+                  total += 1
+                  if (real.parent / path).resolve().exists(): continue
+                  bad.append(f'{md.relative_to(root)}: {link}')
+          print(f'markdown relative links checked: {total}; broken: {len(bad)}')
+          for b in bad: print(' ', b)
+          sys.exit(1 if bad else 0)
+          PY
+          echo "=== md-links: all relative links resolve ==="
+
+
+  # ── Job 13: Plugin benchmark build (would have caught B-01..B-07, B-22..B-28) ──
+  plugin-benchmarks-build:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: plugin-test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 make
+          if ! sudo apt-get install -y lld-22; then sudo apt-get install -y lld; fi
+      - name: Build plugin
+        run: make plugin
+      - name: Build plugin benchmarks (skip stmbench7/STAMP until B-07/B-27/B-29 land)
+        run: |
+          set -e
+          for d in bank datastructures eigenbench intset tpcc ycsb deathstarbench; do
+            echo "=== make -C benchmarks/plugin/$d ==="
+            make -C benchmarks/plugin/$d -j$(nproc)
+          done
+      - name: Smoke-run a few benchmark targets
+        run: |
+          set -e
+          ./benchmarks/plugin/bank/bin/bank_singlelock -t 2 -d 500 --test
+          ./benchmarks/plugin/bank/bin/bank_norec     -t 2 -d 500 --test
+          ./benchmarks/plugin/bank/bin/bank_tinystm   -t 2 -d 500 --test
+          # NOTE: bank_tl2 --test is intentionally NOT run here; it is B-21
+          # (TL2 plugin-mode money drift). See review-04/BUGS.md B-21.
+
+  # ── Job 14: Backend header compiles under LLVM_TM_PLUGIN (would have caught B-01) ──
+  header-compiles:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: plugin-test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 make
+      - name: Compile every backend header standalone under -DLLVM_TM_PLUGIN
+        run: |
+          set -e
+          TMP=$(mktemp -d)
+          COMMON=backends/tm_impl/common
+          REG=backends/tm_impl/tm_region_allocator
+          # Reuse the same C++ compiler + gcc-install-dir auto-detect that
+          # benchmarks/cpp/Makefile uses, so this job works on any box where
+          # check-fast passes.
+          CXX=$(command -v clang++-22 2>/dev/null || command -v clang++-18 2>/dev/null \
+             || command -v clang++-17 2>/dev/null || command -v clang++-16 2>/dev/null \
+             || command -v clang++-15 2>/dev/null || command -v clang++-14 2>/dev/null \
+             || command -v clang++ 2>/dev/null || echo g++)
+          GCCFIX=""
+          if echo "$CXX" | grep -q clang++; then
+            if [ ! -d /usr/include/c++/16 ]; then
+              if [ -d /usr/lib/gcc/x86_64-linux-gnu/15 ]; then
+                GCCFIX="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/15"
+              elif [ -d /usr/lib/gcc/x86_64-linux-gnu/12 ]; then
+                GCCFIX="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/12"
+              fi
+            fi
+          fi
+          echo "=== header-compiles: using CXX=$CXX GCCFIX=$GCCFIX ==="
+          STUBS=backends/stubs
+          PASS=0; FAIL=0; SKIP=0
+          # Allow-list: headers that cannot be standalone-compiled by design
+          # (e.g. require a DESIGN_* macro). Update as fixes land.
+          ALLOW="
+            backends/tm_impl/tiny_stm/tinystm_globals.hpp
+            backends/tm_impl/queue/queue_runtime.hpp
+            backends/tm_impl/tsc_tm/tsc_tm_base.hpp
+          "
+          for h in backends/tm_impl/*/*.hpp; do
+            dir=$(dirname "$h")
+            case "$dir" in
+              "$COMMON"|"$REG") continue ;;
+            esac
+            skip=0
+            for a in $ALLOW; do
+              if [ "$h" = "$a" ]; then SKIP=$((SKIP+1)); skip=1; break; fi
+            done
+            [ $skip = 1 ] && continue
+            cat > "$TMP/tu.cpp" << TU
+          #include "$PWD/$h"
+          int main() { return 0; }
+          TU
+            if "$CXX" -std=c++20 -DLLVM_TM_PLUGIN \
+               $GCCFIX \
+               -I"$PWD/$COMMON" -I"$PWD/$dir" -I"$PWD/$STUBS" \
+               -c "$TMP/tu.cpp" -o "$TMP/tu.o" 2>"$TMP/err"; then
+              PASS=$((PASS+1))
+            else
+              echo "=== FAIL: $h ==="
+              head -20 "$TMP/err"
+              FAIL=$((FAIL+1))
+            fi
+          done
+          echo "header-compiles: $PASS pass, $FAIL fail, $SKIP skipped"
+          [ "$FAIL" = 0 ]

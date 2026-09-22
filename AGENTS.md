@@ -56,7 +56,8 @@ Start at [`docs/README.md`](docs/README.md) (index of all docs). Key entries:
   `tm_hooks.cpp`.
 - **Simulation**: Rust backends gate TLS behind `#[cfg(feature = "simulation")]`;
   add `pub mod sim` (7 exported fns) + `TxState` (Clone+Serialize+Deserialize)
-  for a new sim backend. See `runtime/norec/src/lib.rs`.
+  for a new sim backend. See
+  `explicit_api/rust/workspace/runtime/norec/src/lib.rs`.
 - **Default LLVM version is 22** (`llvm-config-22`, `opt-22`, `clang++-22`);
   tooling honors optional `LLVM_VERSION` (CI also probes LLVM 23).
 - **Backends**: `TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL

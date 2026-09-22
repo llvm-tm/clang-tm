@@ -18,6 +18,11 @@
 
 // Assertions: use TM_ASSERT / TM_ASSERT_VALID_TX from tm_common.hpp.
 
+// Forward declaration of the serialization helper defined in TinySTM_runtime.cpp.
+// wbctl/wt call this on abort to release the global serialize lock; wbetl does
+// not (it uses encounter-time locking with no serialize phase).
+extern "C" int tm_serialize_unlock_all();
+
 namespace tinystm
 {
 

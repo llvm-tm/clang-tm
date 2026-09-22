@@ -116,14 +116,14 @@ TM_DEFINES_singlelock   = -DLLVM_TM_PLUGIN
 TM_DEFINES_norec        = -DLLVM_TM_PLUGIN
 TM_DEFINES_persistentsgl = -DLLVM_TM_PLUGIN
 TM_DEFINES_distributedsgl = -DLLVM_TM_PLUGIN
-TM_DEFINES_tsxsgl       ?= -DLLVM_TM_PLUGIN
+TM_DEFINES_tsxsgl       = -DLLVM_TM_PLUGIN -mrtm
 TM_DEFINES_tinystm_wbctl = -DDESIGN_WBCTL -DNDEBUG -DLLVM_TM_PLUGIN
 TM_DEFINES_tinystm_wbetl = -DDESIGN_WBETL -DNDEBUG -DLLVM_TM_PLUGIN
 TM_DEFINES_tinystm_wt    = -DDESIGN_WT -DNDEBUG -DLLVM_TM_PLUGIN
 TM_DEFINES_dudetm        = -DDESIGN_WBCTL -DLLVM_TM_PLUGIN
 
-TM_INCLUDES_persistentsgl =
-TM_INCLUDES_distributedsgl =
+TM_INCLUDES_persistentsgl = -I$(BACKENDS_DIR)/tm_impl/common
+TM_INCLUDES_distributedsgl = -I$(BACKENDS_DIR)/tm_impl/common
 TM_INCLUDES_tl2          = -I$(BACKENDS_DIR)/tm_impl -I$(BACKENDS_DIR)/tm_impl/common
 TM_INCLUDES_swisstm      = -I$(SWISSTM_DIR) -I$(BACKENDS_DIR)/tm_impl/common
 TM_INCLUDES_singlelock   = -I$(BACKENDS_DIR)/tm_impl/common
@@ -136,7 +136,7 @@ TM_INCLUDES_tinystm_wt    = -I$(TINYSTM_DIR) -I$(BACKENDS_DIR)/tm_impl/common -I
 TM_DEFINES_spht          = -DTM_BACKEND_SPHT -DLLVM_TM_PLUGIN -mrtm
 TM_INCLUDES_spht         = -I$(SPHT_DIR) -I$(BACKENDS_DIR)/tm_impl/common
 
-TM_INCLUDES_dudetm        = -I$(TINYSTM_DIR) -I$(DUDETM_DIR) -I$(BACKENDS_DIR)/tm_impl/common
+TM_INCLUDES_dudetm        = -I$(TINYSTM_DIR) -I$(DUDETM_DIR) -I$(BACKENDS_DIR)/tm_impl/common -I$(BACKENDS_DIR)/tm_impl
 TM_DEFINES_leftright      = -DLLVM_TM_PLUGIN
 TM_INCLUDES_leftright     = -I$(LEFTRIGHT_DIR) -I$(BACKENDS_DIR)/tm_impl/common
 

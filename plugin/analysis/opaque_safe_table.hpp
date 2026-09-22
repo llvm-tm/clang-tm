@@ -71,6 +71,37 @@ static const OpaqueSafeEntry KnownSafeOpaqueTable[] = {
     {"posix_memalign", false},
     {"drand48", false},
     {"srand48", false},
+    // Pure libm math functions: take scalar args, return scalar; no pointer
+    // args, no global state, no side effects. Safe to call inside a TM
+    // transaction (clang lowers __builtin_sqrt to a libm call when -O1
+    // -fno-math-errno is not set, which is why the plugin sees these).
+    {"sqrt", false},
+    {"sqrtf", false},
+    {"sqrtl", false},
+    {"acos", false},
+    {"acosf", false},
+    {"acosl", false},
+    {"asin", false},
+    {"asinf", false},
+    {"asinl", false},
+    {"atan", false},
+    {"atanf", false},
+    {"atan2", false},
+    {"atan2f", false},
+    {"cos", false},
+    {"cosf", false},
+    {"sin", false},
+    {"sinf", false},
+    {"exp", false},
+    {"expf", false},
+    {"log", false},
+    {"logf", false},
+    {"log2", false},
+    {"log10", false},
+    {"pow", false},
+    {"powf", false},
+    {"fabs", false},
+    {"fabsf", false},
 };
 
 static constexpr size_t KnownSafeOpaqueTableSize = sizeof(KnownSafeOpaqueTable) /

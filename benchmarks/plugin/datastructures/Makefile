@@ -8,7 +8,7 @@ LOCAL_BENCHES := avltree avltree_recursive rbtree hashmap bitmap list set heap
 .PHONY: all clean
 
 all: $(OUT_DIR) $(BIN_DIR) \
-	$(foreach b,$(LOCAL_BENCHES),$(b)_uninstrumented $(b)_SingleGlobalLock $(b)_NOrec $(b)_TinySTM)
+	$(foreach b,$(LOCAL_BENCHES),$(BIN_DIR)/$(b)_uninstrumented $(b)_SingleGlobalLock $(b)_NOrec $(b)_TinySTM)
 
 $(BIN_DIR)/%_uninstrumented: %.cpp | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $< -o $@

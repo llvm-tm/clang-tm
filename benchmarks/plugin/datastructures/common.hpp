@@ -1,6 +1,9 @@
 #pragma once
 
 // Synchronization
+#include <condition_variable>
+#include <mutex>
+
 class Barrier
 {
 private:
