@@ -2400,3 +2400,38 @@ tests/plugin/regression/old_code/                 DELETED (3 files, dead upstrea
 ```
 
 (`review-04/` is gitignored.)
+
+## Session 2026-09-22 — Review-04: B-30 fix committed + TL2 serializability proof (B-21 reframe)
+
+**B-30 (P0, fixed).** Registered static TM globals into `g_tm_globals` via a weak
+extern bridge in `backends/tm_impl/tm_region_allocator/tm_region_allocator.cpp`
+(end of `tm_region_init()`). Root cause: the default `tm-instrument` pipeline
+emits the `tm_symbol_*` table but never feeds `isTMGlobal()`, so locking/OCC
+backends treated static globals as plain memory. Counter race now exact for
+TL2/SwissTM/NOrec; committed as `fix(plugin): register static TM globals in
+default pipeline (B-30)`.
+
+**TL2 serializability (design verified).** Per the `review-04` direction to lean
+on TLA+/TLC, added `docs/proofs/TL2RMW.tla` — a raw-TLA+ model that ties a read
+value into a later write (true RMW) and models the read as the **two separate
+accesses** the implementation performs (observe guard, then load `*addr`, **no**
+guard re-check). Asserts `mem == commits` (lost-update invariant). TLC: **no
+violation** — 786 states (`Thread={1,2},MaxCommits=2`, added to `make
+smoke-check`) and 1.58 M states (`Thread={1,2,3},MaxCommits=3`,
+`TL2RMW-strong.cfg`).
+
+Key findings:
+- The pre-existing `TL2.tla` never checked serializability — only guard
+  bookkeeping. `TL2RMW.tla` closes that proof gap.
+- The "double-check read" the `docs/proofs.md` §3.2 prose assumes is present is
+  **not present** in `tl2.hpp:615-632`, and the model proves it is **not needed**
+  for serializability (commit-time version validation suffices).
+- Therefore **B-21 (bank `tl2` money drift) is an implementation deviation, not a
+  design or memory-model/fence flaw.** Empirically: `-r 0` (100% transfers, high
+  contention) drifts ~-800; `-r 20` drifts ~-5 — so it is a contention-sensitive
+  RMW bug, on a heap address (already `isTMAddress`-tracked), not a static-global
+  issue.
+
+Files: `docs/proofs/TL2RMW.tla` (new), `TL2RMW.cfg`/`TL2RMW-strong.cfg` (new),
+`docs/proofs/Makefile` (+TL2RMW smoke), `docs/proofs.md` (+§3.3, fidelity
+correction). `review-04/BUGS.md` summary table updated (B-30 fixed, B-21 open).

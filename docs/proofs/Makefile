@@ -55,7 +55,10 @@ check-all: check
 # the gate stays <60s (the full model still runs under `make check`/nightly).
 # NOrec-smoke.cfg uses Addr={0}: the full NOrec.cfg (Addr={0,1}) needs ~124s and
 # blows the timeout. See review-03.
-SMOKE_BACKENDS := SGL NOrec TinySTM_WBCTL
+# TL2RMW is the serializability / lost-update check for the TL2 read+commit path
+# (mem == commits RMW invariant).  Sub-second at Thread={1,2}, MaxCommits=2; the
+# stronger Thread={1,2,3},MaxCommits=3 run lives in TL2RMW-strong.cfg (nightly).
+SMOKE_BACKENDS := SGL NOrec TinySTM_WBCTL TL2RMW
 
 smoke-check: TLC_OPTS += -workers 2
 smoke-check:

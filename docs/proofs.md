@@ -224,6 +224,38 @@ transaction commit:
 - Version changed → abort on next validation.
 After the writer releases the guard, the version is $c$, which is ≥ any snapshot in flight; the reader will abort on the next validation. No reader sees partial updates. ∎
 
+### 3.3 Machine-checked serializability (`TL2RMW.tla`)
+
+> **Fidelity correction.** §3.1–3.2 state that a reader "reads the version
+> atomically with a double-check pattern" (guard → value → guard). The actual
+> implementation (`backends/tm_impl/tl2/tl2.hpp:615`-`632`) does **not** do a
+> double-check: it loads the guard **once** (recording `observed_version`
+> regardless of the lock bit), then loads `*addr` as a separate plain access,
+> with **no** second guard read and **no** lock-bit spin.
+
+This raises the question the prose left open: is the commit-time version
+validation alone (without the double-check) enough to guarantee serializability?
+`docs/proofs/TL2RMW.tla` answers it with TLC. Unlike `TL2.tla` — which collapses
+the read into one atomic step and asserts only guard-bookkeeping invariants
+(`LockConsistent`, `SnapshotInv`, `FenceFidelity`), never a lost-update property —
+`TL2RMW.tla` models a **true read-modify-write** (`buf := val + 1`) so a lost
+update is observable, models the read as the **two separate accesses** the
+implementation actually performs (observe guard, then load value), and asserts
+the invariant `mem == commits` (applied increments equal successful commits).
+
+Result: TLC finds **no violation** — 1.58 M distinct states at `Thread={1,2,3},
+MaxCommits=3` (`TL2RMW-strong.cfg`); 786 states at `Thread={1,2}, MaxCommits=2`
+(`TL2RMW.cfg`, wired into `make smoke-check`). Conclusion: the TL2 OCC design,
+**as implemented** (two-phase read + commit-time version validation + spin
+acquire), is serializable; the missing double-check read is **not** required and
+does **not** cause lost updates.
+
+**Consequence for B-21** (bank `tl2` money drift): since the *design* is
+machine-verified serializable, the observed drift is an **implementation**
+deviation from this model (a bug in how the real `commit()`/read path behaves at
+runtime), **not** an algorithmic or memory-model/fence flaw. `TL2RMW.tla` is the
+specification such a fix must be checked against.
+
 ---
 
 ## 4. TinySTM — Design Variants
