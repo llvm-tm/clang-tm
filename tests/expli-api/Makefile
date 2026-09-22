@@ -15,10 +15,13 @@ TM_REGION_SIZE ?= 536870912
 
 SRCS = test_stress_ds.cpp test_phase_switch.cpp
 BINS = $(SRCS:.cpp=)
+# Tests with custom build rules (own compiler flags, must not link the runtime
+# TU). Built by `all` and exercised by `run`, but not via the generic SRCS rule.
+EXTRA_BINS = test_tinystm_clock_wrap
 
 .PHONY: all clean run fuzz
 
-all: $(BINS)
+all: $(BINS) $(EXTRA_BINS)
 
 test_tinystm_clock_wrap: test_tinystm_clock_wrap.cpp
 	$(CXX) $(CXXFLAGS) -DDESIGN_WBCTL -DTM_BACKEND_TINYSTM -I../../backends/tm_impl/common -I../../backends/tm_impl/tiny_stm -o $@ $< $(LDFLAGS)
@@ -47,11 +50,11 @@ ifeq ($(shell command -v timeout 2>/dev/null),)
 endif
 
 run: all
-	@for b in $(BINS); do \
+	@for b in $(BINS) $(EXTRA_BINS); do \
 		echo "=== $$b ==="; \
 		$(TIMEOUT_CMD) 60 ./$$b 2>&1 || true; \
 		echo; \
 	done
 
 clean:
-	rm -f $(BINS) test_tx_fuzzer test_ds_fuzzer
+	rm -f $(BINS) $(EXTRA_BINS) test_tx_fuzzer test_ds_fuzzer
