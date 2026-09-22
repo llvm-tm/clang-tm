@@ -47,6 +47,56 @@ thread_local const char *g_tm_stack_high = nullptr;
 
 static std::atomic<int> g_region_inited{0};
 
+// ── Static TM-global registration bridge (review-04 B-30 / B-21) ──────
+// The LLVM plugin's createTMSymbolTables() emits, into every instrumented
+// module, a compile-time table of TM-annotated static globals:
+//     tm_symbol_names[] / tm_symbol_addresses[] / tm_symbol_sizes[] / tm_symbol_count
+// The DUDETM/PersistentSGL/DistributedSGL runtimes consume that table directly.
+// But the locking/OCC runtimes (TL2, SwissTM, NOrec, TinySTM, SingleGlobalLock)
+// decide whether an address is transactional via isTMGlobal() → g_tm_globals,
+// which was ONLY ever populated by explicit tm_register_global() calls that the
+// *queue* pipeline emits. The default `tm-instrument` pipeline emits the symbol
+// table but never feeds it into g_tm_globals, so static TM globals went
+// untracked (isTMGlobal()==false) and their accesses bypassed version/lock
+// bookkeeping — a silent data race (B-30). We bridge the two mechanisms here,
+// once, at tm_region_init() (called from every backend's real_tm_init before
+// any transaction runs). Declared weak so explicit-API builds (which compile
+// this file but have no plugin, hence no table) still link: the weak count then
+// reads 0 and the loop is skipped.
+extern "C" {
+extern const uint32_t tm_symbol_count __attribute__((weak));
+extern void *const tm_symbol_addresses[] __attribute__((weak));
+extern const uint64_t tm_symbol_sizes[] __attribute__((weak));
+}
+
+static void registerStaticTMSymbols()
+{
+	// Weak symbols resolve to 0 when the plugin did not emit the table
+	// (e.g. explicit-API builds, or a module with no TM globals).
+	if (&tm_symbol_count == nullptr || tm_symbol_addresses == nullptr ||
+	    tm_symbol_sizes == nullptr)
+		return;
+	const uint32_t n = tm_symbol_count;
+	for (uint32_t i = 0; i < n; i++) {
+		void *addr = tm_symbol_addresses[i];
+		const uint64_t size = tm_symbol_sizes[i];
+		if (addr == nullptr || size == 0)
+			continue;
+		// Skip if an explicit tm_register_global() already added this exact
+		// range (idempotency with the queue pipeline).
+		bool dup = false;
+		for (auto &r : g_tm_globals) {
+			if (r.start == (const char *)addr) {
+				dup = true;
+				break;
+			}
+		}
+		if (!dup)
+			g_tm_globals.push_back(
+			    TMGlobalRange{(const char *)addr, (const char *)addr + size});
+	}
+}
+
 // ── Size class table (compile-time) ───────────────────────
 static constexpr uint16_t kSizeTable[MAX_CLASSES] = {16,   24,   32,   40,   48,   56,
                                                      64,   80,   96,   112,  128,  160,
@@ -153,6 +203,10 @@ int tm_region_init() noexcept
 
 	g_num_slabs = aligned_size >> g_slab_size_shift;
 	g_next_slab_idx.store(0, std::memory_order_relaxed);
+
+	// Register static TM globals (B-30/B-21): runs once inside the CAS-winner
+	// path, i.e. during the first tm_init(), before any transaction runs.
+	registerStaticTMSymbols();
 
 	return 0;
 }
