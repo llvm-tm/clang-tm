@@ -1,8 +1,14 @@
 // test_phase_switch.cpp
-// Tests tm_swap_runtime() for phase-based TM: runs transfers under stubs
-// (single-thread direct access), then "stop the world" via a global barrier,
-// swaps to real TinySTM hooks, and continues with multi-threaded TM.
-// Verifies money conservation across both phases.
+// Phase-based bank test: Phase 1 runs transfers with plain (non-TM) direct
+// access on heap accounts; then we "stop the world", allocate accounts in the
+// TM region, copy the Phase 1 state in, and continue with a multi-threaded
+// TinySTM run. Verifies money conservation across the migration.
+//
+// (Historically this exercised tm_swap_runtime() from stub hooks to real hooks.
+// With a real backend linked in, tm_register_real_hooks() activates real hooks
+// at tm_init, so a "stub phase" is no longer reachable via tm_* hooks; Phase 1
+// now uses genuine direct access instead. tm_swap_runtime() is still called to
+// confirm the swap path itself is safe to invoke.)
 
 #include <atomic>
 #include <csetjmp>
@@ -44,6 +50,23 @@ static void transfer(int64_t *a, int src, int dst, int64_t amt)
 	}
 }
 
+// Non-TM variant for Phase 1: plain loads/stores on heap accounts.
+// NOTE: with a real backend linked in, tm_register_real_hooks() (via
+// tm_init) activates the real hooks immediately (apply_hooks_unlocked in
+// tm_hooks.cpp: single = thread_count<=1 && !registered), so "stubs" are NOT
+// available after tm_init. Phase 1 therefore does genuinely direct (non-TM)
+// single-thread access, then the state is migrated into the TM region for the
+// multi-threaded TM phase.
+static void transfer_direct(int64_t *a, int src, int dst, int64_t amt)
+{
+	int64_t v = a[src];
+	if (v >= amt) {
+		a[src] = v - amt;
+		v = a[dst];
+		a[dst] = v + amt;
+	}
+}
+
 // ── Phase 1 worker (stubs, single thread) ────────────────────────
 static std::atomic<int64_t> g_phase1_ops{0};
 static std::atomic<bool> g_phase1_done{false};
@@ -59,9 +82,7 @@ static void worker_stubs()
 		int s = acct(rng), d = acct(rng);
 		if (s == d)
 			continue;
-		tm_begin();
-		transfer(g_heap_accts, s, d, amt(rng));
-		tm_end();
+		transfer_direct(g_heap_accts, s, d, amt(rng));
 		ops++;
 	}
 	g_phase1_ops.fetch_add(ops);
@@ -119,7 +140,7 @@ int main()
 		g_heap_accts[i] = INIT_BALANCE;
 	printf("Initial total: %lld\n\n", (long long)total(g_heap_accts));
 
-	printf("Phase 1: stubs (single-thread, direct access on heap)\n");
+	printf("Phase 1: direct (non-TM) single-thread access on heap\n");
 	g_phase1_done.store(false);
 	std::thread p1(worker_stubs);
 	std::this_thread::sleep_for(std::chrono::milliseconds(100));

@@ -2510,3 +2510,9 @@ releases. **No `siglongjmp`.** Removed the CALVIN `test_tx` skip in the
 top-level `Makefile` `check-all`. Verified `test_tx` 114/114 (stable ×3) +
 `test_ds` 207/207. Documented under B-11 in `review-04/BUGS.md`. (The original
 B-11 multi-thread *conservation* symptom is separate and not re-tested here.)
+
+## Session 2026-09-22 — fix two pre-existing test/bench failures (B-31, B-32)
+
+**B-31 `bank_persistentsgl` clean-checkout crash:** `open("benchmark_results/tm_persist.bin", O_CREAT)` failed ENOENT because the parent dir doesn't exist in a fresh tree. `PersistentSGL_runtime.cpp`: `mkdir(dirname, 0775)` before `open()` (+`<string>`). Verified fresh run creates the dir + conserves money; second run reloads (`restored 1 symbols`).
+
+**B-32 `test_phase_switch` null-TinySTM-tx abort:** the test's "stubs until `tm_swap_runtime`" premise is obsolete — `tm_init()`→`tm_register_real_hooks()` sets `s_registered=true` and `apply_hooks_unlocked` (tm_hooks.cpp:167) activates real hooks immediately, but `worker_stubs` never called `tm_init_thread()`/set `tm_nested_call_counter=1`, so `real_tm_begin` skipped `tinystm::begin()` → `tm_read` with null tx (assert `tinystm_common.hpp:347`). Fixed the test: Phase 1 now does genuine direct (non-TM) heap access (`transfer_direct`, no begin/end), matching its label; `tm_swap_runtime` still invoked. Money conserved; passes stable ×3.

@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
 thread_local bool g_in_tx = false;
 #include "tm_backend_macros.hpp"
@@ -293,6 +294,19 @@ TM_PLUGIN_LIFECYCLE_FN(do_tm_init, void tm_init())
 
 	// Offset within the mmap where the allocator heap starts
 	heap_start_off_global = hdr_size + data_size;
+
+	// Ensure the persistence file's parent directory exists (e.g.
+	// "benchmark_results/"). open(O_CREAT) creates the file but NOT its parent
+	// dir, which otherwise fails with ENOENT when run from a clean checkout.
+	{
+		std::string dir(PERSIST_FILE);
+		size_t slash = dir.find_last_of('/');
+		if (slash != std::string::npos) {
+			dir = dir.substr(0, slash);
+			if (!dir.empty())
+				mkdir(dir.c_str(), 0775); // ignore EEXIST
+		}
+	}
 
 	int fd = open(PERSIST_FILE, O_RDWR | O_CREAT, 0644);
 	if (fd < 0) {
