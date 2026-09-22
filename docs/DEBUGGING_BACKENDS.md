@@ -155,6 +155,35 @@ any transactional data that is **not** in the TM region and **not** a registered
 static global is invisible to address-filtered backends. See
 [CORRECTNESS_FIXES.md](CORRECTNESS_FIXES.md).
 
+**Cross-implementation scope (it is *not* a protocol bug).** Running the same
+`bank` scenario through all three pipelines with `tl2`:
+
+| Pipeline | Result | Why |
+|---|---|---|
+| LLVM plugin (`bank_tl2`) | drifts | `TMSafeVector` → `::operator new` → heap → bypassed |
+| C++ explicit API (`benchmarks/cpp/bank -t N`, `BACKEND=TL2`) | **conserves** | `expli::vector` → `tm_malloc` → in-region → tracked |
+| Rust simulator (`tm-sim --backend tl2`) | **conserves** | tracks every address |
+
+So `TL2RMW.tla` is right: the OCC protocol is serializable in all three. The
+divergence is an **allocation / address-tracking contract**, not an interleaving,
+so it can't be caught by a concurrency model — only by a runtime contract check.
+
+### Fail-loud guard (`TM_STRICT_ADDR=1`)
+
+That contract is now enforced (opt-in) in `tl2.hpp` / `SwissTM.hpp`: when the
+plugin instruments an access *as transactional* but the address is neither in the
+TM region nor a registered global, set `TM_STRICT_ADDR=1` to **abort loudly**
+(`TM-ADDR-CONTRACT: transactional read/write to UNTRACKED address …`) instead of
+silently corrupting. Default stays OFF (bypass) so existing benchmarks are
+unaffected; `TM_ALLOW_UNTRACKED=1` keeps bypass explicitly.
+
+```sh
+make -C plugin test-strict-addr        # regression: default=bypass, strict=abort
+TM_STRICT_ADDR=1 ./benchmarks/plugin/bank/bin/bank_tl2 -t 4 -d 200 --test   # now aborts on the heap access
+```
+The fix is then mechanical: allocate the offending container from the TM region
+(like `expli::vector`) so the access becomes tracked.
+
 ---
 
 ## See also

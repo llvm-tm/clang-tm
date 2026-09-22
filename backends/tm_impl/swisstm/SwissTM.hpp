@@ -286,6 +286,7 @@ public:
 
 #ifdef LLVM_TM_PLUGIN
 		if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
+			stm::tm_enforce_tracked((const void *)addr, "read");
 			return *addr;
 		}
 #else
@@ -452,6 +453,7 @@ public:
 
 #ifdef LLVM_TM_PLUGIN
 		if (!stm::isTMAddress(addr) && !stm::isTMGlobal(addr)) {
+			stm::tm_enforce_tracked((const void *)addr, "write");
 			*addr = val;
 			return;
 		}

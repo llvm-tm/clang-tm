@@ -2466,3 +2466,26 @@ debug patches):
 Verification: `make -C plugin test-access-trace` PASS (2/2, reads=1 writes=1);
 `make -C plugin run` all pass (no regressions); `race-checker`/`fuzz-strategy`
 still build; `make fmt-check` C++ clean.
+
+## Session 2026-09-22 — B-21: fail-loud address-tracking contract (plugin TL2/SwissTM)
+
+Answered "is B-21 in all 3 impls or plugin-only?": **plugin-only**. Ran the same
+`bank` scenario through all pipelines with `tl2`: plugin `bank_tl2` drifts;
+C++ explicit-API `benchmarks/cpp/bank` (region `expli::vector` → `tm_malloc`)
+conserves (789k txns); Rust `tm-sim --backend tl2` reports no violations. Same
+`tl2.hpp` + `TL2RMW.tla` (serializable) ⇒ not a protocol bug; it's an
+allocation/address-tracking **contract**. `TMSafeVector::grow` uses `::operator
+new` (heap, out-of-region); plugin-mode `tl2.hpp`/`SwissTM.hpp` silently bypass
+out-of-region accesses → unprotected balances. The explicit API instead asserts
+in-region (satisfied by `expli::vector`), which is why only the plugin diverges.
+
+Fix (user chose **fail-loud**, not a silent container change): added
+`stm::tm_enforce_tracked(addr,op)` in `backends/tm_impl/common/tm_region_allocator.hpp`,
+wired into the 4 plugin bypass sites (`tl2.hpp` read/write, `SwissTM.hpp`
+read/write). Default behavior unchanged (bypass retained); **`TM_STRICT_ADDR=1`**
+aborts loudly with `TM-ADDR-CONTRACT: transactional <op> to UNTRACKED address …`;
+`TM_ALLOW_UNTRACKED=1` suppresses. Regression `tests/plugin/run_strict_addr_test.sh`
+(`make -C plugin test-strict-addr`): default→no abort, strict→SIGABRT naming the
+heap address. Docs: `docs/DEBUGGING_BACKENDS.md` (3-way table + guard), B-21
+updated in `review-04/BUGS.md`. Verified: `make -C plugin run` all pass,
+`test_tx TL2`/`SWISSTM` 114/114, `make fmt-check` clean.

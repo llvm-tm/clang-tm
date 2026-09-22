@@ -239,6 +239,51 @@ inline bool isTMAddress(const void *addr) noexcept
 	return a >= g_tm_region_start && a < g_tm_region_end;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Address-tracking contract guard (plugin builds).
+//
+// In the LLVM-plugin path the read/write hooks silently *bypass* (raw
+// load/store) any address that is neither in the TM region (isTMAddress) nor
+// a registered TM global (isTMGlobal). That is correct ONLY for genuinely
+// thread-local data. If an instrumented (i.e. intended-shared) access lands on
+// heap data allocated outside the region — e.g. a container that uses
+// ::operator new — the access is unprotected and lost updates happen SILENTLY
+// (see B-21: bank_tl2 money drift).
+//
+// Setting TM_STRICT_ADDR=1 turns such a bypass into a loud, immediate abort
+// that names the offending address, instead of silent corruption. Default is
+// OFF so existing benchmarks (some of which still bypass benign thread-local
+// data) are unaffected; opt in when debugging a conservation/consistency bug.
+// TM_ALLOW_UNTRACKED=1 is the documented escape hatch to keep bypassing.
+inline bool tm_strict_addr() noexcept
+{
+	static const bool v = []() {
+		const char *allow = getenv("TM_ALLOW_UNTRACKED");
+		if (allow && allow[0] == '1')
+			return false;
+		const char *s = getenv("TM_STRICT_ADDR");
+		return s && s[0] == '1';
+	}();
+	return v;
+}
+
+inline void tm_enforce_tracked(const void *addr, const char *op)
+{
+	if (!tm_strict_addr())
+		return;
+	fprintf(stderr,
+	        "TM-ADDR-CONTRACT: transactional %s to UNTRACKED address %p — it is "
+	        "outside the TM region and not a registered TM global. Shared "
+	        "transactional data MUST be allocated in the TM region (tm_malloc / "
+	        "a region container) or be a registered TM global; otherwise it is "
+	        "silently unprotected (B-21). Rebuild with region allocation, or set "
+	        "TM_ALLOW_UNTRACKED=1 to suppress. Aborting.\n",
+	        op,
+	        addr);
+	fflush(stderr);
+	abort();
+}
+
 // ═══════════════════════════════════════════════════════════
 // Size-class helper
 // ═══════════════════════════════════════════════════════════

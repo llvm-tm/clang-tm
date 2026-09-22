@@ -359,3 +359,7 @@ access-trace: $(BIN_DIR)/libTMAccessTrace.so
 .PHONY: test-access-trace
 test-access-trace: $(BIN_DIR)/libTMAccessTrace.so $(BIN_DIR)/libTMInstrument.so
 	bash ../tests/plugin/run_access_trace_test.sh
+
+.PHONY: test-strict-addr
+test-strict-addr:
+	bash ../tests/plugin/run_strict_addr_test.sh
