@@ -162,13 +162,6 @@ check-all:
 			echo "  Build: OK"; \
 			if [ "$$be" = "SGL" ] || [ "$$be" = "LEFTRIGHT" ] || [ "$$be" = "ROMULUS" ]; then \
 				echo "  Run: SKIPPED (these backends use explicit tm_init/tm_exit — run ./bin/test_tx manually)"; \
-			elif [ "$$be" = "CALVIN" ]; then \
-				echo "  Run: SKIPPED for test_tx (pre-existing segfault after 2 read fails; see review-04/BUGS.md); test_ds still runs"; \
-				if $(EXPLI_BENCHMARKS_DIR)/bin/test_ds > /tmp/check-$$be-ds.log 2>&1; then \
-					echo "  test_ds: $$(tail -1 /tmp/check-$$be-ds.log)"; \
-				else \
-					echo "  test_ds: FAIL"; \
-				fi; \
 			else \
 				if $(EXPLI_BENCHMARKS_DIR)/bin/test_tx > /tmp/check-$$be-tx.log 2>&1; then \
 					echo "  test_tx: $$(tail -1 /tmp/check-$$be-tx.log)"; \

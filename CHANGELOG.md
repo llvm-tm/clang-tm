@@ -2489,3 +2489,24 @@ aborts loudly with `TM-ADDR-CONTRACT: transactional <op> to UNTRACKED address �
 heap address. Docs: `docs/DEBUGGING_BACKENDS.md` (3-way table + guard), B-21
 updated in `review-04/BUGS.md`. Verified: `make -C plugin run` all pass,
 `test_tx TL2`/`SWISSTM` 114/114, `make fmt-check` clean.
+
+## Session 2026-09-22 — CALVIN: collapse pointless 2-phase restart (fixes test_tx segfault, B-11-related)
+
+`bin/test_tx BACKEND=CALVIN` segfaulted deterministically (exit 139) right after
+`FAIL [xv==10]/[yv==20]`. Root cause: the two-phase OCC `real_tm_end()`
+`siglongjmp`-restarted the body from a collect pass, but `test_tx.cpp` uses the
+explicit API's **manual `begin();…;end();`** pattern (10 sites), which does NOT
+establish a `sigsetjmp` frame (`tm_api.hpp:125` warns against this) → longjmp to
+a garbage PC. The collect pass also served *stale* reads (ignored
+`write_buffer`), so side-effectful `CHECK` bodies misfired. Since the backend
+already holds `g_calvin_global_lock` for the whole transaction, the
+collect→execute restart can never observe interference → it was pointless.
+
+Fix: single-phase collapse in `backends/tm_impl/calvin/calvin_runtime.cpp` —
+`begin()` takes the global lock + clears sets; `read_tracked` consults
+`write_buffer` (read-your-writes) else reads memory + records the read-set;
+`write_tracked` buffers; `end()` applies the write-set under the held lock and
+releases. **No `siglongjmp`.** Removed the CALVIN `test_tx` skip in the
+top-level `Makefile` `check-all`. Verified `test_tx` 114/114 (stable ×3) +
+`test_ds` 207/207. Documented under B-11 in `review-04/BUGS.md`. (The original
+B-11 multi-thread *conservation* symptom is separate and not re-tested here.)

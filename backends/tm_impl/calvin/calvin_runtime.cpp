@@ -19,24 +19,26 @@ extern __thread int32_t tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;
 }
 
-// ── Calvin: Two-Phase OCC ───────────────────────────────
+// ── Calvin: deterministic execution, single-phase here ─────
 //
-// Phase 1 (Collect):  Execute transaction body, buffer all writes
-//   in a write-set, record read-set addresses AND captured values.
-//   On commit, ABORT via siglongjmp.  The read/write set survives
-//   in TLS.
+// Classic Calvin separates a "collect" phase (derive the read/write set,
+// speculatively) from an "execute" phase (apply writes under a deterministic
+// order), typically restarted via siglongjmp. That restart only pays off in an
+// async/queue scheduler. This backend serialises every transaction on a global
+// lock for its whole duration, so the two-phase restart buys nothing and is
+// unsafe with the explicit begin()/end() API (which does NOT establish a
+// sigsetjmp frame — see explicit_api/cpp/include/tm_api.hpp). It also re-runs
+// the transaction body, corrupting side-effectful callers.
 //
-// Phase 2 (Execute):  Re-execute transaction body.  Reads check
-//   the write-buffer (read-own-writes).  Writes are buffered.
-//   On commit, validate each read-set address against its captured
-//   value.  If any changed, abort back to Phase 1.
-//   Otherwise, apply write-set to memory.
+// We therefore execute the body ONCE under the global lock:
+//   - reads   : consult the local write_buffer first (read-your-writes), else
+//               read memory and record the address in the read-set.
+//   - writes  : buffered into write_buffer + write_set (not applied yet).
+//   - end()   : apply the write_set to memory under the already-held lock, then
+//               release it.  No siglongjmp, so end() never unwinds.
 //
-// The two-phase approach is at a disadvantage vs normal OCC
-// (executes the body twice).  Its advantage emerges with
-// async/queue execution where the collect phase can be
-// a lightweight speculation and the execute phase a fast,
-// pre-validated deterministic replay.
+// read_entries is retained for diagnostics / future validation but is not on
+// the critical path (the global lock already guarantees no interference).
 
 struct CalvinWriteEntry {
 	void *addr;
@@ -51,8 +53,6 @@ struct CalvinReadEntry {
 };
 
 struct CalvinState {
-	bool collecting;
-	bool use_collected;
 	bool holds_global_lock;
 	std::vector<CalvinReadEntry> read_entries;
 	std::vector<CalvinWriteEntry> write_set;
@@ -67,32 +67,34 @@ static CalvinState *ensure_state()
 {
 	if (!g_cs) {
 		g_cs = new CalvinState();
-		g_cs->collecting = true;
-		g_cs->use_collected = false;
 		g_cs->holds_global_lock = false;
 	}
 	return g_cs;
 }
 
+// Single-phase execution model.
+//
+// CALVIN normally separates a logical "collect" phase (derive the read/write
+// set) from a physical "execute" phase (apply under ordering). This backend
+// already serialises every transaction on g_calvin_global_lock for the WHOLE
+// transaction, so no concurrent mutation can occur between capture and commit.
+// A collect→execute siglongjmp restart is therefore pointless — and actively
+// broken: it re-runs the (side-effectful) transaction body and requires a
+// sigsetjmp-guarded frame the explicit begin()/end() API does not provide.
+// We instead run the body ONCE: reads consult the local write_buffer
+// (read-your-writes), writes are buffered, and end() applies the write set
+// under the already-held global lock. No siglongjmp, so manual begin()/end()
+// and restart-free backends behave identically.
 static void real_tm_begin()
 {
 	CalvinState *s = ensure_state();
 	if (tm_nested_call_counter > 1)
 		return;
-	if (s->use_collected) {
-		// Entering execute phase - global lock already held from collect phase
-		s->collecting = false;
-		s->write_set.clear();
-		s->write_buffer.clear();
-	} else {
-		// Entering collect phase - acquire global lock for entire transaction
-		g_calvin_global_lock.lock();
-		s->holds_global_lock = true;
-		s->collecting = true;
-		s->read_entries.clear();
-		s->write_set.clear();
-		s->write_buffer.clear();
-	}
+	g_calvin_global_lock.lock();
+	s->holds_global_lock = true;
+	s->read_entries.clear();
+	s->write_set.clear();
+	s->write_buffer.clear();
 }
 
 static void real_tm_end()
@@ -100,44 +102,14 @@ static void real_tm_end()
 	if (tm_nested_call_counter > 1)
 		return;
 	CalvinState *s = ensure_state();
-	if (s->collecting) {
-		s->use_collected = true;
-		tm_longjmp_ret = 1;
-		siglongjmp(tm_jmpbuf, 1);
-		return;
-	}
-	// Execute phase: validate reads, apply writes.
-	// Must hold commit mutex to serialize validation+apply against other commits.
+	// Apply writes under the global lock (held since begin()).
 	g_commit_mutex.lock();
-	bool valid = true;
-	for (auto &re : s->read_entries) {
-		uint64_t cur = 0;
-		memcpy(&cur, re.addr, re.width);
-		if (cur != re.captured) {
-			valid = false;
-			break;
-		}
-	}
-	if (!valid) {
-		g_commit_mutex.unlock();
-		// Abort: release global lock and retry from collect phase
-		if (s->holds_global_lock) {
-			g_calvin_global_lock.unlock();
-			s->holds_global_lock = false;
-		}
-		s->collecting = true;
-		s->use_collected = false;
-		s->read_entries.clear();
-		s->write_set.clear();
-		s->write_buffer.clear();
-		siglongjmp(tm_jmpbuf, 1);
-	}
-	for (auto &w : s->write_set) {
+	for (auto &w : s->write_set)
 		memcpy(w.addr, &w.value, w.width);
-	}
-	s->use_collected = false;
+	s->read_entries.clear();
+	s->write_set.clear();
+	s->write_buffer.clear();
 	g_commit_mutex.unlock();
-	// Success: release global lock
 	if (s->holds_global_lock) {
 		g_calvin_global_lock.unlock();
 		s->holds_global_lock = false;
@@ -147,26 +119,18 @@ static void real_tm_end()
 static void real_tm_abort()
 {
 	CalvinState *s = ensure_state();
+	s->read_entries.clear();
+	s->write_set.clear();
+	s->write_buffer.clear();
 	if (s->holds_global_lock) {
 		g_calvin_global_lock.unlock();
 		s->holds_global_lock = false;
 	}
-	s->collecting = true;
-	s->use_collected = false;
-	s->read_entries.clear();
-	s->write_set.clear();
-	s->write_buffer.clear();
 }
 
 static uint64_t read_tracked(void *addr, uint8_t width)
 {
 	CalvinState *s = ensure_state();
-	if (s->collecting) {
-		uint64_t val = 0;
-		memcpy(&val, addr, width);
-		s->read_entries.push_back({addr, val, width});
-		return val;
-	}
 	auto it = s->write_buffer.find(addr);
 	if (it != s->write_buffer.end()) {
 		uint64_t val = 0;
@@ -175,17 +139,13 @@ static uint64_t read_tracked(void *addr, uint8_t width)
 	}
 	uint64_t val = 0;
 	memcpy(&val, addr, width);
+	s->read_entries.push_back({addr, val, width});
 	return val;
 }
 
 static void write_tracked(void *addr, uint64_t val, uint8_t width)
 {
 	CalvinState *s = ensure_state();
-	if (s->collecting) {
-		uint64_t prev = 0;
-		memcpy(&prev, addr, width);
-		s->read_entries.push_back({addr, prev, width});
-	}
 	s->write_buffer[addr] = {addr, val, width};
 	s->write_set.push_back({addr, val, width});
 }
