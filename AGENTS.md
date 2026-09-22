@@ -41,6 +41,7 @@ Start at [`docs/README.md`](docs/README.md) (index of all docs). Key entries:
 - [`docs/IMPLEMENTATIONS.md`](docs/IMPLEMENTATIONS.md) — per-backend reference.
 - [`docs/proofs.md`](docs/proofs.md) — TLA+ models; run via `docs/proofs/Makefile`.
 - [`docs/CORRECTNESS_FIXES.md`](docs/CORRECTNESS_FIXES.md) — bug-fix history.
+- [`docs/DEBUGGING_BACKENDS.md`](docs/DEBUGGING_BACKENDS.md) — backend debugging: event logger, debug patches, trace replay. Start here when a backend races/loses updates/hangs.
 - [`docs/INSTRUMENTATION_DEBUGGING.md`](docs/INSTRUMENTATION_DEBUGGING.md) — missing-instrumentation diagnosis.
 
 ## Key conventions

@@ -1,0 +1,88 @@
+diff --git a/backends/tm_impl/tl2/tl2.hpp b/backends/tm_impl/tl2/tl2.hpp
+index d4844ef..88b210f 100644
+--- a/backends/tm_impl/tl2/tl2.hpp
++++ b/backends/tm_impl/tl2/tl2.hpp
+@@ -76,6 +76,15 @@ constexpr unsigned BLOOM_FILTER_BITS = 64;
+ constexpr word_t LOCK_MASK = 1;
+ constexpr word_t VERSION_MASK = ~LOCK_MASK;
+ 
++// [DEBUG 007-tl2-bypass-trace] instrumentation counters
++inline std::atomic<uint64_t> g_bypass_read{0};
++inline std::atomic<uint64_t> g_bypass_write{0};
++inline std::atomic<uint64_t> g_tracked_read{0};
++inline std::atomic<uint64_t> g_tracked_write{0};
++inline std::atomic<uint64_t> g_max_rs{0};
++inline std::atomic<uint64_t> g_max_ws{0};
++inline std::atomic<uint64_t> g_commit_n{0};
++
+ enum class DataType : uint8_t {
+ 	UINT8 = 1,
+ 	UINT16 = 2,
+@@ -411,6 +420,7 @@ public:
+ 
+ #ifdef LLVM_TM_PLUGIN
+ 		if (!stm::isTMAddress((void *)addr) && !stm::isTMGlobal((const void *)addr)) {
++			g_bypass_write.fetch_add(1, std::memory_order_relaxed); // [DEBUG 007]
+ 			*addr = val;
+ 			return;
+ 		}
+@@ -457,6 +467,7 @@ public:
+ 		e.set_new(to_word(val));
+ 		tx->write_set.push_back(e);
+ 		bloom_set(tx, (word_t *)addr);
++		g_tracked_write.fetch_add(1, std::memory_order_relaxed); // [DEBUG 007]
+ 		TM_EVENT(WRITE_SET_INSERT, (word_t)addr, (word_t)e.dtype);
+ 	}
+ 
+@@ -498,6 +509,7 @@ public:
+ 
+ #ifdef LLVM_TM_PLUGIN
+ 		if (!stm::isTMAddress((void *)addr) && !stm::isTMGlobal((const void *)addr)) {
++			g_bypass_read.fetch_add(1, std::memory_order_relaxed); // [DEBUG 007]
+ 			if constexpr (std::is_pointer_v<T>) {
+ 				return const_cast<T>(*addr);
+ 			} else {
+@@ -626,6 +638,7 @@ public:
+ 		e.dtype = DT;
+ 		e.locked_by_me = locked;
+ 		tx->read_set.push_back(e);
++		g_tracked_read.fetch_add(1, std::memory_order_relaxed); // [DEBUG 007]
+ 
+ 		return from_word<T>(to_word(*addr));
+ 	}
+@@ -665,6 +678,13 @@ public:
+ 		if (!tx || !tx->active)
+ 			return false;
+ 
++		// [DEBUG 007] track max read/write-set sizes seen at commit
++		g_commit_n.fetch_add(1, std::memory_order_relaxed);
++		if (tx->read_set.size() > g_max_rs.load(std::memory_order_relaxed))
++			g_max_rs.store(tx->read_set.size(), std::memory_order_relaxed);
++		if (tx->write_set.size() > g_max_ws.load(std::memory_order_relaxed))
++			g_max_ws.store(tx->write_set.size(), std::memory_order_relaxed);
++
+ 		// Read-only commit optimization (ROCO): skip validation for read-only
+ 		// TXs.  The original TL2 paper specifies that read-only transactions
+ 		// don't need read-set validation because they never write.  Even with
+diff --git a/backends/tm_impl/tl2/tl2_runtime.cpp b/backends/tm_impl/tl2/tl2_runtime.cpp
+index 93ea8c7..59443aa 100644
+--- a/backends/tm_impl/tl2/tl2_runtime.cpp
++++ b/backends/tm_impl/tl2/tl2_runtime.cpp
+@@ -58,6 +58,17 @@ TM_PLUGIN_LIFECYCLE_FN(do_tm_init, extern "C" void tm_init())
+ 
+ TM_PLUGIN_LIFECYCLE_FN(do_tm_exit, extern "C" void tm_exit())
+ {
++	// [DEBUG 007-tl2-bypass-trace]
++	fprintf(stderr,
++	        "\n=== TL2 trace: commits=%llu bypass_read=%llu bypass_write=%llu "
++	        "tracked_read=%llu tracked_write=%llu max_rs=%llu max_ws=%llu ===\n",
++	        (unsigned long long)tl2::g_commit_n.load(),
++	        (unsigned long long)tl2::g_bypass_read.load(),
++	        (unsigned long long)tl2::g_bypass_write.load(),
++	        (unsigned long long)tl2::g_tracked_read.load(),
++	        (unsigned long long)tl2::g_tracked_write.load(),
++	        (unsigned long long)tl2::g_max_rs.load(),
++	        (unsigned long long)tl2::g_max_ws.load());
+ 	stm::tm_region_destroy();
+ }
+ 

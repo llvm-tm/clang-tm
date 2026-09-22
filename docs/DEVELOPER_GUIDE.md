@@ -156,11 +156,15 @@ Pipeline: `collect → clone → redirect → instrument-fn → cleanup`
 
 ## Debugging
 
+Full playbook: **[DEBUGGING_BACKENDS.md](DEBUGGING_BACKENDS.md)** (event logger +
+debug patches + Rust `tm-sim` trace replay, with a worked `bank_tl2` example).
+
 - `DEBUG=1` — `-O0 -g` for all builds
 - `-DTM_DEBUG_ALLOC` — track live TM allocations, detect leaks
-- `-DTM_EVENT_LOG` — thread-local ring buffer with SIGSEGV handler
-- `TM_TRACE_PATH=/tmp/trc.jsonl` — generate JSONL traces for simulator replay
-- `patches/debug/apply.sh` — add back removed debug printfs
+- `-DTM_EVENT_LOG` — thread-local ring buffer with SIGSEGV auto-dump (`backends/tm_impl/common/tm_event_logger.hpp`); backends already emit `WRITE_SET_INSERT`/`READ_LOCK_ACQUIRE`/`COMMIT_*` events
+- `TM_TRACE_PATH=/tmp/trc.jsonl` — emit JSONL traces for simulator replay
+- `patches/debug/` — add back removed debug printfs without dirtying git: `./apply.sh` (whole set) / `git apply patches/debug/patches/NNN.patch` (single), `./remove.sh`, `./status.sh`; example `007-tl2-bypass-trace.patch` (count TL2 read/write-set vs `isTMAddress` bypass)
+- `simulator/` — replay a trace through a real backend deterministically: `tm-gen`/`tm-sim`/`tm-check` (reproduce intermittent lost updates)
 - `opt -passes="tm-race-checker"` — scan for missing TM annotations
 
 ## Key Patterns

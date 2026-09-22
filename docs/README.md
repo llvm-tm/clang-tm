@@ -22,6 +22,7 @@ work items, see [`../TODO.md`](../TODO.md).
 | [CORRECTNESS_FIXES.md](CORRECTNESS_FIXES.md) | Status of each known-correctness fix (root cause → fix → verification) | A correctness bug is reported and you want the history/fix |
 | [BUG_ASSESSMENT.md](BUG_ASSESSMENT.md) | `_tm_clone` + LLVM `-O3` broken-IR assessment (STL in TM) | STL containers inside a TX misbehave |
 | [EBR_DOUBLE_FREE_ANALYSIS.md](EBR_DOUBLE_FREE_ANALYSIS.md) | TinySTM EBR double-free (fixed) | Investigating heap corruption in TinySTM |
+| [DEBUGGING_BACKENDS.md](DEBUGGING_BACKENDS.md) | **Backend debugging playbook**: event logger (`TM_EVENT_LOG`), `patches/debug/` tracing, and Rust `tm-sim` trace replay | A backend races/loses updates/misbehaves and you need to trace read/write sets or replay a schedule deterministically |
 | [INSTRUMENTATION_DEBUGGING.md](INSTRUMENTATION_DEBUGGING.md) | How to diagnose *missing* TM instrumentation | A TM program races/leaves money unconserved and you suspect an un-instrumented access |
 | [plugin-debug.md](plugin-debug.md) | Debug builds, GDB, and the plugin test binaries | You need to step through the plugin or a test |
 | [proofs.md](proofs.md) | TLA+ / formal correctness models per backend | You want the formal model or to run TLC |

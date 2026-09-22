@@ -2435,3 +2435,34 @@ Key findings:
 Files: `docs/proofs/TL2RMW.tla` (new), `TL2RMW.cfg`/`TL2RMW-strong.cfg` (new),
 `docs/proofs/Makefile` (+TL2RMW smoke), `docs/proofs.md` (+§3.3, fidelity
 correction). `review-04/BUGS.md` summary table updated (B-30 fixed, B-21 open).
+
+## Session 2026-09-22 — Debugging discoverability + `tm-access-trace` LLVM pass
+
+Made the three built-in backend-debugging mechanisms discoverable (a future
+agent couldn't find them): new playbook `docs/DEBUGGING_BACKENDS.md` (event
+logger `TM_EVENT_LOG`, external `patches/debug/` workflow, Rust `tm-sim` trace
+replay) + pointers from `AGENTS.md`, `docs/README.md`, `docs/DEVELOPER_GUIDE.md`.
+Added `patches/debug/patches/007-tl2-bypass-trace.patch` — the worked example
+that root-caused **B-21** (`bank_tl2` money drift): the trace showed
+`tracked_write=0 max_ws=0`, i.e. TL2's `isTMAddress` fast-path bypass skips the
+heap-allocated `TMSafeVector` accounts (`::operator new`, outside the TM region),
+so balance RMWs are untracked → `commit_fail=0` → lost updates. NOrec/TinySTM
+pass because they have no address filter.
+
+New feature — `tm-access-trace` LLVM pass (elegant alternative to access-tracing
+debug patches):
+- `plugin/passes/tm_access_hooks.hpp` — shared header-only classification of
+  `tm_read_*`/`tm_write_*` calls (kind/addr/value/width); reusable by other passes.
+- `plugin/passes/TMAccessTracePass.cpp` — standalone `libTMAccessTrace.so`,
+  pipeline `tm-access-trace`; injects `tm_trace(read=0/write=1, addr, width,
+  value)` before each tracked access of already-instrumented IR (idempotent;
+  reuses existing sink `tm_trace_runtime.cpp` + `TM_TRACE_FILE`). Decoupled from
+  `libTMInstrument`.
+- Tests (first): `tests/plugin/test_access_trace.cpp` + `run_access_trace_test.sh`
+  (IR gate: injected traces == accesses; end-to-end: ≥1 read + ≥1 write event).
+- Makefile targets `access-trace` / `test-access-trace`; excluded from
+  `libTMInstrument` to stay standalone. Roadmap in `docs/tm-access-trace-plan.md`.
+
+Verification: `make -C plugin test-access-trace` PASS (2/2, reads=1 writes=1);
+`make -C plugin run` all pass (no regressions); `race-checker`/`fuzz-strategy`
+still build; `make fmt-check` C++ clean.
