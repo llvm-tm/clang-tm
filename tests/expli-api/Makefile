@@ -50,11 +50,25 @@ ifeq ($(shell command -v timeout 2>/dev/null),)
 endif
 
 run: all
-	@for b in $(BINS) $(EXTRA_BINS); do \
+	@fails=""; total=0; \
+	for b in $(BINS) $(EXTRA_BINS); do \
+		total=$$((total+1)); \
 		echo "=== $$b ==="; \
-		$(TIMEOUT_CMD) 60 ./$$b 2>&1 || true; \
+		$(TIMEOUT_CMD) 60 ./$$b; rc=$$?; \
+		if [ $$rc -ne 0 ]; then \
+			if [ $$rc -eq 124 ]; then reason="TIMEOUT"; \
+			elif [ $$rc -ge 128 ]; then reason="SIGNAL $$((rc-128))"; \
+			else reason="exit $$rc"; fi; \
+			echo "!!! $$b FAILED ($$reason)"; \
+			fails="$$fails $$b[$$reason]"; \
+		fi; \
 		echo; \
-	done
+	done; \
+	if [ -n "$$fails" ]; then \
+		echo "=== expli-api run: FAIL — failures:$$fails ==="; \
+		exit 1; \
+	fi; \
+	echo "=== expli-api run: all $$total targets passed ==="
 
 clean:
 	rm -f $(BINS) $(EXTRA_BINS) test_tx_fuzzer test_ds_fuzzer

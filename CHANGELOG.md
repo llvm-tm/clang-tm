@@ -2516,3 +2516,13 @@ B-11 multi-thread *conservation* symptom is separate and not re-tested here.)
 **B-31 `bank_persistentsgl` clean-checkout crash:** `open("benchmark_results/tm_persist.bin", O_CREAT)` failed ENOENT because the parent dir doesn't exist in a fresh tree. `PersistentSGL_runtime.cpp`: `mkdir(dirname, 0775)` before `open()` (+`<string>`). Verified fresh run creates the dir + conserves money; second run reloads (`restored 1 symbols`).
 
 **B-32 `test_phase_switch` null-TinySTM-tx abort:** the test's "stubs until `tm_swap_runtime`" premise is obsolete — `tm_init()`→`tm_register_real_hooks()` sets `s_registered=true` and `apply_hooks_unlocked` (tm_hooks.cpp:167) activates real hooks immediately, but `worker_stubs` never called `tm_init_thread()`/set `tm_nested_call_counter=1`, so `real_tm_begin` skipped `tinystm::begin()` → `tm_read` with null tx (assert `tinystm_common.hpp:347`). Fixed the test: Phase 1 now does genuine direct (non-TM) heap access (`transfer_direct`, no begin/end), matching its label; `tm_swap_runtime` still invoked. Money conserved; passes stable ×3.
+
+## Session 2026-09-22 — expli-api test runner now fails loudly
+
+`tests/expli-api/Makefile` `run:` previously piped every target through
+`|| true`, hiding crashes/failures (that's how B-32's null-tx abort went
+unnoticed in-suite). Rewrote the loop to capture each target's exit code,
+classify TIMEOUT (124) / SIGNAL (n>128) / exit-N, print `!!! <bin> FAILED (...)`,
+and `exit 1` with a `FAIL — failures:` summary while still running every target.
+Verified: `make run` → all 3 targets pass, exit 0; forced-failure injection →
+correct `!!! FAILED (exit 127)` + non-zero exit.
