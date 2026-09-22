@@ -2526,3 +2526,15 @@ classify TIMEOUT (124) / SIGNAL (n>128) / exit-N, print `!!! <bin> FAILED (...)`
 and `exit 1` with a `FAIL — failures:` summary while still running every target.
 Verified: `make run` → all 3 targets pass, exit 0; forced-failure injection →
 correct `!!! FAILED (exit 127)` + non-zero exit.
+
+## Session 2026-09-22 — `check-all` fails loudly (aggregated exit code)
+
+Top-level `Makefile` `check-all` printed per-backend `FAIL` but always exited 0.
+Rewrote to accumulate `$be[build|test_tx|test_ds]` failures across all backends,
+still build+run every backend, and `exit 1` with a `FAIL — failures: …` summary
+on any failure (else `all N backends passed`). Caught+fixed a first-draft bug
+where the summary ran in a separate shell (lost `$$fails`/`$$total`) — merged
+into the loop's single shell invocation. Verified: full matrix → `all 20 backends
+passed`, exit 0 (17×test_tx 114/114 + 17×test_ds 207/207, 3 explicit-init
+backends skipped); forced bogus backend → `FAIL — failures: NOSUCHBE[build]`,
+exit non-zero.
