@@ -169,3 +169,21 @@ These are pre-existing uncommitted WIP files; the merge must not break them.
 Fastest signal for merge regressions is §8 (path sweep) + §1/§4/§5 (builds),
 because the merge conflict risk is concentrated in path rewrites
 (`expli_instr` → `explicit_api`) and the Rust/simulator files.
+
+## §9–§11 additions (session 2026-09-23)
+
+The post-merge script (`tools/post-merge-check.sh`) gained three sections so
+it is a true single regression gate:
+
+- **§9 Lint** — `make fmt-check` (clang-format + rustfmt + clippy
+  `--workspace --all-targets -D warnings`).
+- **§10 Unit matrix** — `make -C tests/backends/tm_impl run-<backend>` for
+  all 11 CPU backends (incl. the GPU-family fallbacks).
+- **§11 GPU battery** — HIP build of `gpu/benchmarks` + all 9 benchmark
+  binaries (skipped when hipcc is absent).
+
+Known pre-existing failures (review-05 G-20 swisstm `write_set_validation`;
+G-21 GPUTX/GACCO `test_tx` peek path) are **allowlisted** as expected-fail;
+an allowlisted test that starts passing also fails the gate, so the lists
+cannot silently rot. Note: `make check-all` (Makefile) predates this and has
+no allowlist — prefer `make post-merge-check` / the script.

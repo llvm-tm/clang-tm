@@ -2674,3 +2674,15 @@ exclusive-window contract) and a never-executing labeled loop in the
 queue executor's worker. 11 mixed-case hex literals normalized in the
 simulator. Workspace (46 result lines), simulator (11), `make fmt-check`,
 and the extended unit matrix are green.
+
+## Session 2026-09-23 — single regression gate (post-merge-check extended)
+
+`tools/post-merge-check.sh` is now the one command that tests everything:
+added §9 lint (`make fmt-check`), §10 the 11-backend `tests/backends/tm_impl`
+unit matrix, and §11 the GPU HIP build + 9-benchmark battery (skipped without
+hipcc). GPUTX joined the C++ sweep; known pre-existing failures (G-20
+swisstm, G-21 GPUTX/GACCO test_tx) are allowlisted as expected-fail with an
+unexpected-pass tripwire so the allowlist cannot rot. Fixed two latent bugs
+in the script itself along the way (`set -e` killing `cmd; rc=$?`; the
+integrity sweep matching its own pattern). Full gate: EXIT=0, all sections,
+~3 min warm.

@@ -124,7 +124,7 @@ help:
 	@echo "  check               - Build + run the instrumented plugin tests"
 	@echo "  check-fast          - Fast smoke: plugin + TINYSTM/NOREC/TL2 + Rust workspaces"
 	@echo "  check-all           - Full sweep: test_tx/test_ds across all C++ backends"
-	@echo "  post-merge-check    - Full post-merge matrix (plugin+C+++Rust+sim+integrity)"
+	@echo "  post-merge-check    - Everything gate: plugin+C+++Rust+sim+lint+units+GPU battery+integrity"
 	@echo "  test_run            - Run a couple of plugin benchmarks"
 	@echo "  compiledb           - Generate compile_commands.json for clangd"
 	@echo ""
