@@ -87,10 +87,17 @@ SlotState == {"free", "pending", "committed", "aborted"}
 TotalReadsPerWarp  == Cardinality(Thread) * ReadsPerThread
 TotalWritesPerWarp == Cardinality(Thread) * WritesPerThread
 
-\* FindBody(seq, rv): newest body in seq (newest-first) with version <= rv.
-\* Returns the <<version>> tuple; versions are CTS+1 (0 = empty sentinel).
+\* FindBody(seq, rv): body with the MAXIMUM version <= rv (versions are
+\* globally unique CTS+1; 0 = empty sentinel).  NOT merely "first entry
+\* with version <= rv": L_writeback appends can land out of version order
+\* (a lower-version body may be prepended after a higher-version one), so
+\* the first element is not necessarily the newest.  Review-05 found the
+\* old first-element semantics violated InvNoMissedConflict (MaxCommits=2);
+\* the implementation must mirror this: read = max version <= threshold.
 FindBody(seq, rv) ==
-    seq[CHOOSE i \in 1..Len(seq) : seq[i][1] <= rv]
+    seq[CHOOSE i \in 1..Len(seq) :
+          /\ seq[i][1] <= rv
+          /\ \A j \in 1..Len(seq) : seq[j][1] <= rv => seq[j][1] <= seq[i][1]]
 
 (* --algorithm GPU_GUST
 
@@ -141,7 +148,10 @@ define
              s >= gts => (cl[s].state = "aborted"
                           \/ cl[s].ws \cap readAddrs(w, t) = {})
         /\ \A <<addr, ver>> \in readSet[w][t] :
-             vbox[addr][1][1] <= startTS[w]
+             \* MRV: NO body in the read VBox may carry a version newer
+             \* than the snapshot — scanning all bodies, not just the
+             \* first, because writeback appends are not version-ordered.
+             \A i \in 1..Len(vbox[addr]) : vbox[addr][i][1] <= startTS[w]
 
     \* Newest version published by a committed thread of warp w writing a.
     NewVersion(w, a) ==
@@ -396,7 +406,7 @@ Valid(w, t) ==
          s >= gts => (cl[s].state = "aborted"
                       \/ cl[s].ws \cap readAddrs(w, t) = {})
     /\ \A <<addr, ver>> \in readSet[w][t] :
-         vbox[addr][1][1] <= startTS[w]
+         \A i \in 1..Len(vbox[addr]) : vbox[addr][i][1] <= startTS[w]
 
 
 NewVersion(w, a) ==

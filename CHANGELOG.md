@@ -2538,3 +2538,139 @@ into the loop's single shell invocation. Verified: full matrix → `all 20 backe
 passed`, exit 0 (17×test_tx 114/114 + 17×test_ds 207/207, 3 explicit-init
 backends skipped); forced bogus backend → `FAIL — failures: NOSUCHBE[build]`,
 exit non-zero.
+
+## Session 2026-09-23 — GUST GPU backend: money conserved via TLA+ alignment (review-05)
+
+Aligned `gpu/backends/gpu_gust/` with `docs/proofs/GPU_GUST.tla` and fixed
+the model itself (TLC found `Inv` violated in `GPU_GUST.cfg` at
+MaxCommits=2: out-of-order writeback prepends + first-element-only MRV).
+Implementation fixes: bootstrap GTS/writePtr at WARP_SIZE (first batch could
+not see seeded VBoxes and committed 0 over real balances), VBox value→version
+publication order + max-version≤threshold snapshot reads + overflow-abort
+(no slot reuse), CL entry epoch (`cts`) + payload-before-state publication +
+spin-until-published validation, unconditional MRV, `__shfl_xor` butterfly
+max-reduce (the `shfl_down` "reduction" desynchronized ballot counts → AMD
+HSA exceptions), read/write-set overflow forces abort, single uniform
+`gust_gpu_commit` call site in `gpu_memcached_gust.cu`, host ring-size assert.
+Verified on AMD (ROCm 7.2.5): smoke 12/12 configs × 3 seeds, bank incl.
+72 704-slot run crossing the 65536-entry CL ring, ycsb/memcached at write
+ratios 0/50/100 (incl. hot keys) — all PASS, no exceptions; fuzz_counter and
+`check-fast`/`fmt-check` green. TLC `GPU_GUST-small.cfg` green; full
+`GPU_GUST.cfg` on the fixed model is large (250M+ states) — follow-ups in
+TODO.md. Details: `docs/CORRECTNESS_FIXES.md` §13, `review-05/GUST_PLAN.md`.
+
+## Session 2026-09-23 — GPU source tree layout pass (review-05)
+
+Unified every `gpu/backends/<name>/` directory to `include/` (public
+headers) + `cuda/` (device/host implementation): `csmv` (was flat —
+`csmv_batch_executor.hpp` → `include/`, kernel/executor `.cu/.cuh` →
+`cuda/`) and `gpu_stm` (was flat — three files → `cuda/`) now match
+`gpu_gust`/`gpu_gputx`/`gpu_gacco`. Moved the test driver
+`gpu_gust_smoke.cu` out of the backend into `gpu/benchmarks/` —
+benchmark/test drivers no longer live inside backend directories. Updated
+`gpu/benchmarks/Makefile`, the (unreachable-but-live) csmv/gpu_stm
+CMakeLists paths, and `gpu/README.md` (incl. fixing its stale
+"auto-detects nvcc/hipcc" and CSMV-CMake claims per review-05 G-10),
+`gpu/benchmarks/README.md` (`@broken` tags retired for the GUST four),
+`gpu/backends/gpu_gust/README.md`, `docs/IMPLEMENTATIONS.md`, and
+`backends/tm_impl/gpu_stm/README.md`. Verified: clean `make HIP=1` build
+of all 9 binaries; fuzz_counter/ycsb/kmeans/tpcc/memcached + the four GUST
+benchmarks all pass through the new paths.
+
+## Session 2026-09-23 — Rust runtime P0 correctness batch (review-05 R-01..R-07)
+
+Test-first fixes (every bug got a regression test; `cargo test --workspace`
+38 green incl. 24 new, simulator 107 green): TinySTM WT undo order + a new
+abort-version-livelock fix (R-13); NOrec mixed-size write merge/read slice
+(R-02); tsx_sim `tm_write_ptr`/`tm_write_raw` stop leaking buffered writes to
+memory in TSX mode (R-03); leftright_single Option-based undo (no more
+shadowing 0s), reverse undos, proper LeftRight reader handshake (R-04);
+MVLog fold now uses each entry's real width instead of hardcoded 8 and no
+longer regresses values published by the triggering commit (R-05); SwissTM
+records dirty reads of WLocked addresses for validation (R-06); TL2/DuDeTM
+commit-time lock dedup checks the whole locked vector instead of only the
+last index, removing a self-deadlock (R-07). Details:
+`docs/CORRECTNESS_FIXES.md` §14; new follow-ups R-14 (MVLog overflow entries
+never folded) and R-15 in `review-05/BUGS.md`.
+
+## Session 2026-09-23 — review-05 P1/P2 cleanup batch (#5, #8..#13)
+
+`tests/expli-api` → `tests/explicit-api` with all references swept (#12/T-05).
+`check-fast` now includes CSMV; nightly builds+runs all four GPU-family CPU
+fallbacks (CSMV/GPU_STM_CPU/GPUTX/GACCO, verified 114/207 locally) (#5/T-04).
+Top-level CMake now actually configures the GPU backends: added
+`BUILD_GPU_STM_HIP`/`BUILD_CSMV`/`BUILD_CSMV_HIP` wiring, versionless
+`find_package(LLVM)` (a bare "22" broke LLVM's ConfigVersion), HIP language
+routing for the .cu trees, and the sources the phantom targets didn't build;
+verified CPU and HIP configure+build on gfx1151 (#10/#11). Removed the
+vestigial `CSMV_GPU` make target and the empty `cpu_pr_stm_*` stubs.
+`gpu/benchmarks/Makefile` gained `kernel-check` (compiles every
+benchmark/kernel TU host-side; needs `-x c++` + `-D__HIP_PLATFORM_AMD__`
+under hipcc) (#9/G-08). Dead Rust code deleted (`tinystm/raw.rs`,
+`containers/memory_access.rs`, `containers/explicit_rbtree.rs`), `containers`
+standalone check fixed via feature pass-through, norec/tl2 got real
+commit counters, and CI gates the bench-tinystm feature matrix (#8/R-12).
+`docs/IMPLEMENTATIONS.md` §18 documents per-backend `tm_abort()`/
+`tm_abort_count()` semantics; the SGL family and NOrec now count aborts for
+real (were hardcoded 0) (#13/R-10/R-11). Regressions caught and fixed during
+this pass: a `with_tx(...)` statement typo in NOrec (caught by workspace
+tests, not CI), and the Makefile-only CMake guards that silently skipped
+GPU subdirs.
+
+## Session 2026-09-23 — CSMV validation alignment + version-node GC (review-05 G-04)
+
+The PLAN-recommended head-ts validation convention was implemented and then
+*falsified* by measurement: it admits lost updates. GPU and CPU CSMV are now
+unified on node-ts (validate the head is still the exact node observed), and
+the GPU commit is lock→validate→prepend like the CPU mutex path (it
+previously validated before locking — a real validate-vs-prepend window).
+Version nodes are GC'd: commits retire entries older than the batch
+watermark; a drain kernel between batches recycles them through a device free
+list (previously one malloc per commit, never freed). Collateral P1s found
+while making the gate meaningful: `csmv_gpu_entry_idx` aliasing above 2^20
+cells (+ new `csmv_gpu_set_data_arena` direct-index API) and three latent
+gpu_tpcc bugs (CYT_IDX out-of-bounds global writes, snapshot/transaction
+stride mismatch, unsigned invariant under c_balance underflow). gpu_tpcc
+invariant green across {1,2,3,8,64}-warehouse configs × seeds (GC on/off);
+full HIP battery + CPU CSMV 114/207. Details:
+`docs/CORRECTNESS_FIXES.md` §15.
+
+## Session 2026-09-23 — CPU-fallback fidelity (review-05 G-05/G-06/G-07, item #7)
+
+GAccO CPU: replaced the never-implemented "sorted 2PL" promise with honest,
+deadlock-free mechanics — bounded spin, rollback (undo log of old values for
+its write-through writes), backoff, and float/pointer hooks routed through
+the locked path. GPUTX CPU: fixed a cluster of real bugs — sub-byte accesses
+recorded/validated/applied as 8 bytes (corrupting neighbours and making
+read-modify-write never validate), a rank-0 transaction that looked
+unlocked, self-aborts on aliasing lock slots, and aborts that longjmped
+while still holding locks (poisoning the slot process-wide); float/ptr hooks
+wired. gpu_stm CPU: the `&g_tx % 255` priority hash let two threads own the
+same lock — replaced ownership-by-priority-equality with a per-slot owner
+table keyed by unique thread ids; width-correct 1/2-byte loads. Unit matrix
+(`tests/backends/tm_impl/`) extended with gputx/gacco/csmv and two new
+regression vectors (abba_deadlock, subword_counters); `run-%` now aggregates
+test exit codes (it previously swallowed every failure — that's how the new
+findings G-20 (SwissTM loses updates in write_set_validation) and G-21
+(GPU-family test_tx peek path) surfaced; both verified pre-existing on HEAD
+and left open with repro steps). 8/8 unit tests green on all four CPU
+fallbacks; test_ds 207/207 on all four.
+
+## Session 2026-09-23 — clippy gate + raw-pointer API contract (review-05 R-09/T-01, item #4)
+
+Decided the R-09 design question: the Rust `tm_*` surface keeps safe
+signatures (matching the C++ hook ABI) with a documented safety contract —
+callers (instrumentation pipeline / explicit-API drivers) guarantee aligned,
+correctly-sized, live pointers — recorded as crate-level
+`#![allow(clippy::not_unsafe_ptr_arg_deref)]` + contract comments in the six
+crates that deref address arguments directly (tikv, tsxsgl, sgl-persistent,
+sgl-distributed, leftright-single, tsx-sim). Making all 40+ symbols
+`unsafe fn` was rejected: it would infect every instrumented call site.
+T-01 closed by widening `make fmt-check` to `cargo clippy --workspace
+--all-targets -- -D warnings` (plus `tm --features wbctl` and simulator
+`--all-targets`); fixing the gate surfaced ~20 real lints, including
+`mut_from_ref` on LeftRight's shadow map (now an explicit `as_ptr` with the
+exclusive-window contract) and a never-executing labeled loop in the
+queue executor's worker. 11 mixed-case hex literals normalized in the
+simulator. Workspace (46 result lines), simulator (11), `make fmt-check`,
+and the extended unit matrix are green.

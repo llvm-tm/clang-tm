@@ -297,9 +297,9 @@ Per-backend lifecycle status is authoritative in
 - `backends/tm_impl/gpu_stm/include/gpu_stm_api.h` — lock word encoding + public C API
 - `backends/tm_impl/gpu_stm/cpu/gpu_stm_cpu_runtime.cpp` — CPU fallback via TMRealHooks
 - `backends/tm_impl/gpu_stm/cpu/pr_stm_cpu.cpp` — std::thread warp emulation
-- `gpu/backends/gpu_stm/pr_stm_kernel.cuh` — CUDA/HIP kernel
-- `gpu/backends/gpu_stm/pr_stm_host.cpp` — host-side TM hooks / memory management
-- `gpu/backends/gpu_stm/pr_stm_runtime.cu` — kernel launch wrapper
+- `gpu/backends/gpu_stm/cuda/pr_stm_kernel.cuh` — CUDA/HIP kernel
+- `gpu/backends/gpu_stm/cuda/pr_stm_host.cpp` — host-side TM hooks / memory management
+- `gpu/backends/gpu_stm/cuda/pr_stm_runtime.cu` — kernel launch wrapper
 - `backends/tm_impl/gpu_stm/CMakeLists.txt` — CUDA-enabled CMake build
 - `docs/proofs/GPU_PR_STM.tla` — TLA+ model (13 states, 4 distinct, all invariants pass)
 
@@ -342,8 +342,8 @@ Per-backend lifecycle status is authoritative in
 **Key files:**
 - `backends/tm_impl/csmv/include/csmv_api.h` — Version node + object entry structures, public C API
 - `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp` — CPU fallback via TMRealHooks
-- `gpu/backends/csmv/csmv_kernel.cuh` — GPU kernel header (warp-cooperative traversal)
-- `gpu/backends/csmv/csmv_kernel.cu` — GPU kernel + persistent launch
+- `gpu/backends/csmv/cuda/csmv_kernel.cuh` — GPU kernel header (warp-cooperative traversal)
+- `gpu/backends/csmv/cuda/csmv_kernel.cu` — GPU kernel + persistent launch
 - `backends/tm_impl/csmv/CMakeLists.txt` — Build (CPU: `CSMV_CPU_FALLBACK=ON`, GPU: `BUILD_CSMV=ON`)
 - `docs/proofs/CSMV.tla` — PlusCal model with read-consistency + version-chain monotonic invariants
 
@@ -386,8 +386,8 @@ Per-backend lifecycle status is authoritative in
 - `gpu/backends/gpu_gust/cuda/gpu_gust_kernel.cuh` — single-pass warp-cooperative kernel (read→write→prevalidate→CL insert→CCT/MRV validate→write-back→batch publish)
 - `gpu/backends/gpu_gust/cuda/gpu_gust_host.cpp` — host TM hooks (g++/hipcc compatible, `TM_GPU_USE_HIP` portable)
 - `gpu/backends/gpu_gust/cuda/gpu_gust_runtime.cu` — kernel launch wrapper
-- `gpu/backends/gpu_gust/cuda/gpu_gust_batch_executor.cuh` / `.cu` — reusable warp-batch executor: one transaction per lane, full commit protocol (CL AtomicINC insert, CCT+MRV validate, full-warp batch publish) as device functions usable by arbitrary benchmark bodies via `gust_tx_body_t`
-- `gpu/backends/gpu_gust/cuda/gpu_gust_smoke.cu` — smoke test for the batch executor (transfers + money conservation)
+- `gpu/backends/gpu_gust/include/gpu_gust_batch_executor.cuh` / `cuda/gpu_gust_batch_executor.cu` — reusable warp-batch executor: one transaction per lane, full commit protocol (CL AtomicINC insert, CCT+MRV validate, full-warp batch publish) as device functions usable by arbitrary benchmark bodies via `gust_tx_body_t`
+- `gpu/benchmarks/gpu_gust_smoke.cu` — smoke test for the batch executor (transfers + money conservation)
 - `gpu/benchmarks/gpu_bank.cu` — RQ1/RQ2 bank (read-mostly + transfer with RO ratio, hosted seeding, money-conservation verify)
 - `gpu/benchmarks/gpu_ycsb_gust.cu` — YCSB-style workload (invariant `final_sum == committed_writes`)
 - `gpu/benchmarks/gpu_memcached_gust.cu` — memcached-style set/get workload (payload = key+1 verify)
@@ -646,3 +646,25 @@ The Rust workspace in `explicit_api/rust/workspace/` implements the same algorit
 
 *\*NOrec plugin mode has bypass bug (see §3). PLAIN mode (not plugin) passes all tests.*\
 *\*\*GPU_STM_CPU bank multi-thread: under investigation — shows money creation in some contention scenarios.*
+
+## 18. Per-backend `tm_abort()` / `tm_abort_count()` semantics (review-05 R-10/R-11)
+
+The façade (`tm` crate) exposes one API, but abort mechanics differ by
+concurrency-control family. Consumers must not assume uniform behavior:
+
+| Family | Rust backends | Effect of `tm_abort()` | What `tm_abort_count()` counts | Out-of-transaction access |
+|---|---|---|---|---|
+| TinySTM (WBCTL/WBETL/WT) | `tinystm` | Undo write-set (WT applies `undo_backs` newest-first, R-01), release locks | Validation/lock-wait aborts detected at `tm_commit` + explicit aborts | Falls through to plain memory (outside a TX) |
+| TL2 / DuDeTM | `tl2`, `dudetm` | Discard write-set (nothing applied yet), release held locks | Conflict aborts (validation/lock) + explicit aborts | Falls through to plain memory |
+| NOrec | `norec` | Discard write-set (buffered; never applied) | Commit-CAS validation aborts **and** read-path validation panics (`panic_any(TmxAbort)`) — both counted since review-05 R-10 | Falls through to plain memory |
+| SwissTM | `swisstm` | Discard write-set; release Orecs | Contention/preemption aborts + explicit aborts | Falls through to plain memory |
+| SGL family | `sgl-persistent`, `sgl-distributed`, `tsxsgl` | **Writes already visible** — abort only unlocks the global lock; there is no undo (SGL has no validation) | Only explicit `tm_abort()` calls (constant 0 before review-05 R-10 — now a real counter) | Falls through to plain memory |
+| MVLog | `mvlog` | Mark slot ABORTED; nothing published | Commit-time conflicts + explicit aborts | Falls through to plain memory |
+| TiKV | `tikv` | Abort the region transaction | Region-conflict aborts | **Panics** outside a transaction (see decision below) |
+
+Decision (review-05 R-11), tikv out-of-transaction behavior: **keep the
+panic** (`with_tx` expect at `runtime/tikv/src/lib.rs:64-73`). A distributed
+TM has no safe local fall-through for tracked addresses (the caller cannot
+observe region state correctly), so fail-fast beats silently divergent
+semantics; the panic is the documented contract. Other backends keep the
+fall-through behavior, matching their C++ siblings.

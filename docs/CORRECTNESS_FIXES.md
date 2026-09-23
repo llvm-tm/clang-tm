@@ -194,7 +194,7 @@ first write clears `read_only`, the commit path validates the entire read-set
 (including reads made during the RO phase). No correctness bug existed; the
 TODO's "stale read-set not tracked" premise was a misreading.
 
-**Action:** Added `tests/expli-api/test_norec_ro2rw.cpp` — a conservation
+**Action:** Added `tests/explicit-api/test_norec_ro2rw.cpp` — a conservation
 stress test where every transaction performs its reads strictly before its
 first write (forcing RO→RW promotion mid-transaction). If an implementation
 ever dropped or failed to validate RO-phase reads, money conservation would
@@ -224,9 +224,9 @@ semantics.
 - `inc_abort()`: stale `// TODO.md: clock wrap` replaced with a rationale
   comment (3-bit incarnation wrap is safe because all acquires CAS the full
   lock state).
-- **Clock wrap verified**: `tests/expli-api/test_tinystm_clock_wrap.cpp`
+- **Clock wrap verified**: `tests/explicit-api/test_tinystm_clock_wrap.cpp`
   (new, header-only unit test, `make test_tinystm_clock_wrap` in
-  `tests/expli-api`) drives the global clock to `VERSION_MAX - 1` and
+  `tests/explicit-api`) drives the global clock to `VERSION_MAX - 1` and
   verifies `increment_clock()`'s reset path: lock table zeroed, clock
   back to 1, `reset_locks_thr` cleared, repeat with a second tx id.
 
@@ -288,6 +288,192 @@ with accurate comments documenting that nothing is allocated and why the
 - TODO.md "NOrec shared-structure cleanup" marked RESOLVED.
 
 ---
+
+## 13. GUST GPU backend — money conservation via TLA+ alignment (review-05) ✅
+
+**Symptom:** `gpu_gust_smoke` / `gpu_bank` lost money (e.g. 250000 vs
+256000) on every seed; `gpu_ycsb_gust` / `gpu_memcached_gust` died with AMD
+`HSA_STATUS_ERROR_EXCEPTION` at any nonzero write ratio (documented `@broken`
+since review-03).
+
+**Root causes** (found by checking the implementation against
+`docs/proofs/GPU_GUST.tla` — the model itself was broken too, see below):
+
+1. **Bootstrap clock (dominant money bug):** GTS/writePtr started at 0 while
+   seeded VBoxes carry version 1; the first batch snapshotted `startTS=0`,
+   could not see the seeded balances, read "absent" (0) and **committed 0
+   back** over the seed values.
+2. **VBox publication order:** write-back advanced `head`, stored `versions`
+   *then* `values` — readers could observe the new window with a
+   half-written (version, value) pair, and after wrap, a fresh `value`
+   behind an *old* version (torn pair).
+3. **Snapshot read picked the first slot in scan order** with version ≤
+   threshold instead of the maximum — out-of-order concurrent write-backs
+   make slot order differ from version order, so the read can return a stale
+   value while a newer committed version ≤ threshold exists (lost update).
+   The TLA+ model had the mirror-image flaws: `FindBody` CHOOSE'd any body
+   ≤ rv and `Valid`'s MRV conjunct checked only the **first** history
+   element (`vbox[addr][1][1]`) — TLC found `Inv` (InvNoMissedConflict)
+   violated in `GPU_GUST.cfg` exactly through that hole (out-of-order
+   prepend hid version 4 behind version 1).
+4. **CL entry published state before payload:** `state=PENDING` written
+   before `write_addrs/vals`; concurrent CCT scans saw PENDING entries with
+   stale/zero write-sets → missed conflicts.
+5. **CL ring had no epoch:** entries never returned to FREE (after one
+   revolution every transaction aborts), and the wrap guard *overwrote* live
+   foreign entries with ABORTED.
+6. **Reserve-vs-publish race:** the AtomicINC reservation outpaced entry
+   publication; validators treated not-yet-published slots as FREE →
+   missed conflicts (the spec models insertion as atomic).
+7. **MRV skipped when the CCT loop never crossed below GTS** — spec `Valid`
+   is CCT ∧ MRV, unconditionally.
+8. **`shfl_down` + local max in pre-validation is not a warp reduction:**
+   lanes ended with different `max_writes`, running different numbers of
+   `__ballot_sync` — partial-mask ballots → the AMD hardware exceptions.
+9. **Oversized read/write-sets were silently truncated** (dropped writes =
+   lost updates; untracked reads never validate).
+10. `gpu_memcached_gust.cu` called the warp-collective `gust_gpu_commit`
+    from two divergent branches (second HSA-exception source).
+
+**Fix** (`gpu/backends/gpu_gust/`, `gpu/benchmarks/gpu_memcached_gust.cu`):
+init `gts = writePtr = WARP_SIZE`; publish VBox payload (value) first and
+version last as the marker, reserve-all-slots-then-publish, overflow-abort
+instead of overwriting live versions (slots never reused); snapshot reads
+take max version ≤ threshold; CL entries carry a `cts` epoch (validators
+ignore foreign generations and spin until the reserved epoch publishes);
+insertion writes payload → fence → state marker; MRV unconditional
+(`has_newer` scans every slot); butterfly `__shfl_xor` max-reduce;
+set-overflow forces abort; single uniform `gust_gpu_commit` call site in
+memcached; host asserts `num_warps < CL_SIZE/WARP_SIZE` (ring safety).
+Model fixes in `docs/proofs/GPU_GUST.tla`: `FindBody` = max version ≤ rv;
+MRV = *no* body newer than the snapshot (both `define` and translation).
+
+**Verification (AMD, ROCm 7.2.5, gfx1151):**
+- `gpu_gust_smoke`: 12/12 configs (warps 4–32 × accounts 32–1024 × 3 seeds)
+  — money conserved, all lanes finalized. (Was: fail on every seed.)
+- `gpu_bank`: PASS incl. `32×70` iterations = 72 704 CL slots (**crosses one
+  full 65536-slot ring revolution** — epoch reclamation exercised) and hot
+  `accounts=8, iterations=40`.
+- `gpu_ycsb_gust` / `gpu_memcached_gust`: PASS at write ratios 0/50/100,
+  incl. hot 64-key contention; no HSA exceptions. `gpu_fuzz_counter` (CSMV)
+  unaffected.
+- TLC: `GPU_GUST-small.cfg` green post-fix; full `GPU_GUST.cfg` green:
+  532 116 729 states generated / 222 033 780 distinct, **no error** (15 m
+  33 s, 8 workers) — the corrected protocol checks out; the pre-fix model
+  violated `Inv` in under 3 minutes.
+
+---
+
+## 14. Rust runtime P0 batch (review-05 R-01..R-07) ✅
+
+**Root causes → fixes → verification** (all fixed in-tree with regression
+tests; `cargo test --workspace` 38 tests, `simulator` 107 tests, all green):
+
+- **R-01 TinySTM WT** (`runtime/tinystm/src/wt.rs`): `undo_backs` applied in
+  forward order, so a repeated write left an intermediate value after abort.
+  Fix: apply undos newest-first at all three apply sites. 4 tests (abort
+  restores pre-TX value, fresh TX observes it, commit keeps last, raw-bytes
+  variant).
+- **R-01 follow-up (WT version livelock)** (`common.rs`): `unlock_exclusive`
+  bumped the lock version even on abort, moving versions past `G_CLOCK`; a
+  later transaction's read then looped forever in `read_word`
+  (`snapshot_extend` could never reach the version). Fix: WT records each
+  acquired lock's old version (`locked_old_versions`), restores it on abort
+  (`unlock_indices_restore`), and stamps the commit timestamp on success
+  (`unlock_indices_stamp`). Caught by the new R-01 test hanging.
+- **R-02 NOrec** (`runtime/norec/src/lib.rs`): a narrower write into a wider
+  buffered entry was silently dropped (`esz >= sz → return`) and narrower
+  reads of wider entries fell through to memory. Fix: little-endian merge at
+  the shared base address (narrow write splices into wide entry; wide write
+  supersedes), reads slice wider buffered entries or splice a narrower
+  prefix into a wider memory read (the read-set still records the pure
+  memory observation, so validation stays honest — verified by
+  `test_conflict_different_values_norec` in the simulator, which caught an
+  over-aggressive first attempt that skipped own-address validation).
+- **R-03 tsx_sim** (`runtime/tsx_sim/src/lib.rs`): `tm_write_ptr` /
+  `tm_write_raw` buffered the write and then fell through to a raw store in
+  TSX mode, leaking speculative values into memory where they survived
+  abort. Fix: `return` after buffering in the `in_tsx` path (mirrors the
+  typed `def_write!`). 4 tests (commit publishes, abort discards).
+- **R-04 leftright_single** (`runtime/leftright_single/src/lib.rs`): undo
+  materialized `0` via `unwrap_or(0)` for never-written addresses (shadowing
+  memory forever); repeated-write undo applied forward; readers loaded
+  `ACTIVE` before registering on the reader counter (writer could flip and
+  drain the old counter while the reader was entering → concurrent HashMap
+  get/insert UB). Fix: `old_val: Option<u64>` with remove-on-None, reverse
+  undo order, and the classic LeftRight handshake (register → fence →
+  re-check `ACTIVE` → retry on flip). 4 tests.
+- **R-05 MVLog** (`runtime/mvlog/src/lib.rs`): reclaimed log entries were
+  folded back into memory with a hardcoded width of 8 (clobbering up to 7
+  neighbouring bytes of 1/2/4-byte writes), and a fold could regress an
+  address the triggering commit had already published a newer value for.
+  Fix: fold uses the per-entry type tag (`0/1/2/3 → 1/2/4/8` bytes) and
+  skips addresses present in the committing transaction's write-set.
+  Tests drive the 16384-slot reclaim window (~2.7 s).
+- **R-06 SwissTM** (`runtime/swisstm/src/lib.rs`): reading an address whose
+  `w_lock` was held returned the value without recording it in the read-set,
+  so the dirty read was never validated. Fix: record `(addr, ver)` before
+  returning. Test forces `w_lock` and asserts the read-set contains the
+  address.
+- **R-07 TL2 & DuDeTM** (`runtime/tl2/src/lib.rs`, `runtime/dudetm/src/lib.rs`):
+  commit-time lock dedup checked only `locked_idxs.last()`, but the
+  write-set sorts by address, not lock index — two addresses sharing one
+  lock with a third address between them made the transaction re-lock a lock
+  it held and spin forever (non-simulation builds). Fix: dedup against the
+  whole locked-vector (`contains`), matching tinystm's `common.rs`. Tests
+  scan a 32 MiB buffer for a genuine hash collision and commit through it.
+
+## 15. CSMV GPU/CPU validation alignment + version-node GC (review-05 G-04) ✅
+
+**Root cause (two-sided).** The GPU executor and the CPU fallback recorded
+opposite validation stamps: GPU recorded the *observed version node's* ts,
+CPU recorded the *head's* ts. Empirically (gpu_tpcc with a collision-free
+table), the head-ts scheme loses updates — a transaction that reads an
+older-than-head snapshot and validates "head unchanged" commits over
+concurrent prepends (money-conservation invariant breaks, sum below
+expectation). The node-ts scheme is the sound one: validation demands the
+head still equals the exact node we read.
+
+**Fix.** Unified both implementations on the node-ts convention
+(`csmv_gpu_read`, `csmv_cpu_runtime.cpp`). Additionally the GPU commit
+reordered to *lock → validate → prepend* (it previously validated before
+taking the write locks, leaving the classic validate-vs-prepend window
+where two transactions both pass and both prepend); this now matches the
+CPU's mutex ordering. `gpu_tpcc` invariant holds across
+{1,2,8,64}-warehouse configs and multiple seeds.
+
+**Version-node GC.** Device nodes were `malloc`'d per commit and never
+freed. Commits now retire chain entries older than the batch watermark
+(the clock at batch launch; every reader in the batch and after has
+start_clock ≥ it) once a watermark-visible entry supersedes them; retired
+nodes are drained to a device free list by a tiny kernel between batch
+launches (host-sequenced, so no batch is in flight). Recycled memory is
+reused via the free list; retirement keeps nodes linked-out but readable
+until the drain, so lock-free readers never touch freed memory.
+
+**Collateral fixes found along the way (G-18/G-19).**
+`csmv_gpu_entry_idx` masked with the compile-time 2^20 table size even when
+`csmv_gpu_init` allocated more — working sets above 2^20 cells aliased
+entries and corrupted unrelated addresses. Now a runtime mask, plus a new
+`csmv_gpu_set_data_arena(base, bytes)` giving contiguous cell arrays
+collision-free direct indices. `gpu_tpcc` itself had three latent bugs: a
+`CYT_IDX` macro indexing past the end of `g_cyt` (out-of-bounds global
+writes), a snapshot kernel that read cells with compact strides while the
+transaction wrote MAX_D/MAX_C strides (matched only at the full-size
+config), and a uint64 money invariant that failed spuriously once
+c_balance went negative (now signed accumulation). The benchmark runs its
+cells from a single cudaMalloc'd arena registered as the TM arena.
+
+**Commit-ratio note.** `gpu_tpcc` commits ≈ #warehouses (one winner per
+hot warehouse cell per batch): the GPU executor deliberately never spins
+on write locks (abort-on-contention, no in-kernel retry), so the old "8
+commits / 1024 txns" was the contention model of this design, not extra
+validation over-abort; the validation-convention fix changed soundness,
+not the ratio.
+
+**Verification.** `gpu_tpcc` (all configs × seeds, GC on and off),
+`gpu_fuzz_counter`, full `gpu/benchmarks` battery (9 binaries, HIP),
+CPU CSMV `bin/test_tx` 114/114 + `bin/test_ds` 207/207.
 
 ## Known remaining issues (not yet fixed)
 

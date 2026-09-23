@@ -24,7 +24,7 @@ The TM API C++ project implements Software Transactional Memory (STM) across 26 
 │   └── bin/                  # libTMInstrument.so, libTMRaceChecker.so
 ├── simulator/                # Deterministic discrete-event simulator (Rust)
 │   └── src/                  # Engine, model, backend abstraction, binaries
-├── tests/                    # Test suites (expli-api, plugin, backends)
+├── tests/                    # Test suites (explicit-api, plugin, backends)
 ├── docs/                     # Documentation
 ├── gpu/                      # GPU TM backends (CUDA + HIP) and GPU benchmarks
 ├── gem5_sim/                 # gem5-based HTM/TSX simulation
@@ -50,7 +50,7 @@ make check-all                  # Build+test all C++ backends (17 in $(BACKENDS_
 > **New here?** Run `make check-fast` to confirm the whole toolchain works, then
 > read the [documentation index](README.md) to find the doc you need.
 
-Backend selection: `BACKEND={TINYSTM,WBETL,WT,NOREC,NORECBF,SWISSTM,TL2,TSC_TM,MVLOG,SGL,LEFTRIGHT,ROMULUS,XTM,SPHT,TSXSGL,GPU_STM_CPU,CSMV,CSMV_GPU,POWER8HTM,CALVIN,GACCO,GPUTX,JVSTM}` (23 values accepted by `benchmarks/cpp/Makefile`; `$(BACKENDS_TESTS)` in the top-level `Makefile` covers 17 of them for the auto-init sweep).
+Backend selection: `BACKEND={TINYSTM,WBETL,WT,NOREC,NORECBF,SWISSTM,TL2,TSC_TM,MVLOG,SGL,LEFTRIGHT,ROMULUS,XTM,SPHT,TSXSGL,GPU_STM_CPU,CSMV,POWER8HTM,CALVIN,GACCO,GPUTX,JVSTM}` (22 values accepted by `benchmarks/cpp/Makefile`; `$(BACKENDS_TESTS)` in the top-level `Makefile` covers 17 of them for the auto-init sweep).
 
 ### Explicit API (no LLVM needed)
 
