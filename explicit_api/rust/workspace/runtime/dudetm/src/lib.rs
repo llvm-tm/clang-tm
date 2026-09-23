@@ -282,7 +282,12 @@ pub fn tm_commit() -> bool {
     let mut locked_idxs: Vec<usize> = Vec::new();
     for &a in &addrs {
         let idx = lock_index(a);
-        if locked_idxs.last().copied() != Some(idx) {
+        // Dedup against ALL locked indices: addresses sort by address, not
+        // by lock index, so two addresses sharing one lock are not
+        // necessarily adjacent here — an adjacency check lets the
+        // transaction re-lock its own lock and spin forever (review-05
+        // R-07).
+        if !locked_idxs.contains(&idx) {
             while !lock_at_index(idx).try_lock_exclusive() {
                 // Validate read-set during lock contention
                 if !validate_read_set(&tx.read_set) {
@@ -455,4 +460,46 @@ pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) {
 #[inline]
 pub fn tm_write_raw(addr: *mut u8, src: &[u8]) {
     write_raw_bytes(addr as usize, src);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static DUDE_LOCK: Mutex<()> = Mutex::new(());
+
+    // R-07: shared-lock-index commit must not self-deadlock (see TL2 twin).
+    #[test]
+    fn commit_with_shared_lock_index_does_not_self_deadlock() {
+        let _g = DUDE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        // Find a second address in the same 32 MiB buffer whose lock index
+        // collides with the first. The 20-bit multiplicative hash repeats
+        // every ~2^20 lines, so a linear scan over the buffer finds a true
+        // collision in expectation after ~100k probes (verified at runtime
+        // against the actual base).
+        let mut buf = vec![0u64; 1 << 22];
+        let base = buf.as_mut_ptr() as usize;
+        let base_idx = lock_index(base);
+        let mut off = 0usize;
+        for i in 1..(1usize << 22) {
+            if lock_index(base + i * 8) == base_idx {
+                off = i * 8;
+                break;
+            }
+        }
+        assert_ne!(off, 0, "test setup: no colliding lock index found");
+        tm_begin();
+        tm_write_u64(base as *mut u64, 1);
+        tm_write_u64((base + off) as *mut u64, 2);
+        let ok = tm_commit(); // pre-fix this hangs forever (self-deadlock)
+        assert!(ok, "commit must succeed with a shared lock index");
+        assert_eq!(buf[0], 1);
+        assert_eq!(buf[off / 8], 2);
+        tm_begin();
+        assert_eq!(tm_read_u64(base as *mut u64), 1);
+        assert_eq!(tm_read_u64((base + off) as *mut u64), 2);
+        assert!(tm_commit());
+    }
 }

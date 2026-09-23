@@ -195,7 +195,7 @@ fn cm_should_abort(tx: &TxState, orec: &Orec, spin_count: &mut u32) -> bool {
 
 fn cm_backoff(abort_count: u64) {
     let ac = abort_count & 0x3F;
-    let delay_us = 50u64 * (1u64 << (ac.min(7) as u64));
+    let delay_us = 50u64 * (1u64 << ac.min(7));
     if delay_us <= 200 {
         #[cfg(not(feature = "simulation"))]
         for _ in 0..delay_us * 2000 {
@@ -434,7 +434,15 @@ fn read_word<T: Primitive>(addr: usize) -> T {
                     return unsafe { core::mem::zeroed() };
                 }
             }
-            return unsafe { (addr as *const T).read() };
+            // w_lock held (heavy owner, or spin timeout): take the value but
+            // RECORD the read with its version, otherwise the dirty read is
+            // never validated — a serializability hole (review-05 R-06).
+            let ver = orec.version();
+            let val: T = unsafe { (addr as *const T).read() };
+            with_tx(|tx| {
+                tx.read_set.push((addr, ver));
+            });
+            return val;
         }
 
         // Spin while commit Phase 1 has version_lock READ_LOCKED
@@ -618,11 +626,8 @@ fn validate(tx: &TxState) -> bool {
 // ── Extend (validate + advance valid_ts) ────────────────
 fn extend(tx: &mut TxState) -> bool {
     let ts = G_CLOCK.load(Ordering::Acquire);
-    if ts > tx.valid_ts {
-        if validate(tx) {
-            tx.valid_ts = ts;
-            return true;
-        }
+    if ts > tx.valid_ts && validate(tx) {
+        return true;
     }
     false
 }
@@ -898,5 +903,52 @@ pub mod sim {
         let abt = s.aborts.load(Ordering::Relaxed);
         eprintln!("  STATS (SwissTM):");
         eprintln!("    Aborts={}", abt);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static SW_LOCK: Mutex<()> = Mutex::new(());
+
+    // R-06: reading an address whose write-lock is held must still be
+    // recorded in the read-set so it gets validated at commit.
+    #[test]
+    fn dirty_read_while_wlock_is_recorded() {
+        let _g = SW_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let a = Box::into_raw(Box::new(5u64));
+        let o = orec_for(a as usize);
+        o.w_lock.store(true, Ordering::Relaxed);
+        tm_begin();
+        let v = tm_read_u64(a);
+        assert_eq!(v, 5, "dirty read returns the committed value");
+        let recorded = with_tx(|tx| tx.read_set.iter().any(|(x, _)| *x == a as usize));
+        o.w_lock.store(false, Ordering::Relaxed);
+        assert!(tm_commit());
+        assert!(
+            recorded,
+            "read of a WLocked address must be recorded for validation (R-06)"
+        );
+        unsafe { drop(Box::from_raw(a)) };
+    }
+
+    #[test]
+    fn basic_commit_regression() {
+        let _g = SW_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let a = Box::into_raw(Box::new(0u64));
+        tm_begin();
+        tm_write_u64(a, 7);
+        assert!(tm_commit());
+        tm_begin();
+        assert_eq!(tm_read_u64(a), 7);
+        assert!(tm_commit());
+        unsafe {
+            assert_eq!(*a, 7);
+            drop(Box::from_raw(a));
+        }
     }
 }

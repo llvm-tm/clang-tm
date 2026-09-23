@@ -1,4 +1,13 @@
 // ── TSXSGL Rust backend ─────────────────────────────────
+
+// Safety contract (review-05 R-09): the `tm_read_*`/`tm_write_*` entry
+// points below dereference raw pointers inside otherwise-safe functions.
+// This mirrors the C++ hook ABI (tm_read_i1/tm_write_i8/...): callers —
+// the LLVM instrumentation pipeline or the explicit-API test drivers —
+// guarantee every pointer is aligned, correctly sized for its access
+// width, and live for the duration of the access. Passing arbitrary or
+// dangling pointers through these functions is UB by contract.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 // Single Global Lock (atomic spinlock) protecting all
 // transaction execution.  Reads/writes are direct memory
 // access — the lock serializes everything.  No write-set,
@@ -12,7 +21,7 @@
 // implement the correct SGL fallback path directly.
 // The functional semantics are identical.
 
-use core::sync::atomic::{fence, AtomicBool, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::cell::RefCell;
 
 pub use runtime_core::{Primitive, TypedValue};
@@ -66,14 +75,20 @@ pub fn tm_commit() -> bool {
     true
 }
 
+// review-05 R-10: SGL-family aborts were reported as a constant 0;
+// they only arise from explicit tm_abort() calls (no validation).
+static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
+
 pub fn tm_abort() {
     fence(Ordering::SeqCst);
     ACTIVE.with(|a| *a.borrow_mut() = false);
     unlock_global();
+    // SGL has no validation: only explicit tm_abort() calls count (review-05 R-10).
+    TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn tm_abort_count() -> u64 {
-    0
+    TM_ABORT_COUNT.load(Ordering::Relaxed)
 }
 
 // ── Read/write — direct memory access (SGL provides isolation) ──

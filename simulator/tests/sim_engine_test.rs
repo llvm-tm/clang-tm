@@ -470,7 +470,7 @@ fn test_verifier_free_of_unallocated() {
         0,
         1,
         EventKind::Free {
-            addr: 0x7f00_0000_BEEF,
+            addr: 0x7F00_0000_BEEF,
         },
     )];
     let engine = run_events(Backend::Norec, &events);
@@ -884,7 +884,7 @@ fn test_romulus_simple_tx() {
             0,
             3,
             EventKind::Read {
-                addr: 0x7f00_0000_C000,
+                addr: 0x7F00_0000_C000,
                 width: 8,
             },
         ),
@@ -893,7 +893,7 @@ fn test_romulus_simple_tx() {
             0,
             4,
             EventKind::Write {
-                addr: 0x7f00_0000_C000,
+                addr: 0x7F00_0000_C000,
                 width: 8,
                 val: 77,
             },
@@ -937,7 +937,7 @@ fn test_swisstm_simple_tx() {
             0,
             3,
             EventKind::Read {
-                addr: 0x7f00_0000_D000,
+                addr: 0x7F00_0000_D000,
                 width: 8,
             },
         ),
@@ -946,7 +946,7 @@ fn test_swisstm_simple_tx() {
             0,
             4,
             EventKind::Write {
-                addr: 0x7f00_0000_D000,
+                addr: 0x7F00_0000_D000,
                 width: 8,
                 val: 99,
             },
@@ -988,7 +988,7 @@ fn test_swisstm_thread_spawn() {
             1,
             4,
             EventKind::Read {
-                addr: 0x7f00_0000_E000,
+                addr: 0x7F00_0000_E000,
                 width: 8,
             },
         ),
@@ -1011,7 +1011,7 @@ fn test_mvlog_simple_tx() {
             0,
             3,
             EventKind::Read {
-                addr: 0x7f00_0000_F400,
+                addr: 0x7F00_0000_F400,
                 width: 8,
             },
         ),
@@ -1020,7 +1020,7 @@ fn test_mvlog_simple_tx() {
             0,
             4,
             EventKind::Write {
-                addr: 0x7f00_0000_F400,
+                addr: 0x7F00_0000_F400,
                 width: 8,
                 val: 123,
             },
@@ -1062,7 +1062,7 @@ fn test_mvlog_thread_spawn() {
             1,
             4,
             EventKind::Read {
-                addr: 0x7f00_0000_F500,
+                addr: 0x7F00_0000_F500,
                 width: 8,
             },
         ),

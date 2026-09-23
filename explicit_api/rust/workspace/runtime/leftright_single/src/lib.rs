@@ -1,4 +1,13 @@
 // ── LeftRight Phase-Lock TM Backend ──────────────────────────────
+
+// Safety contract (review-05 R-09): the `tm_read_*`/`tm_write_*` entry
+// points below dereference raw pointers inside otherwise-safe functions.
+// This mirrors the C++ hook ABI (tm_read_i1/tm_write_i8/...): callers —
+// the LLVM instrumentation pipeline or the explicit-API test drivers —
+// guarantee every pointer is aligned, correctly sized for its access
+// width, and live for the duration of the access. Passing arbitrary or
+// dangling pointers through these functions is UB by contract.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 //
 // True Left-Right (Ramalhete/Correia 2015) for TM with phase-based writes:
 //   - Phase 1 (TX body): writer holds a global lock, writes eagerly to the
@@ -23,7 +32,10 @@ use std::sync::LazyLock;
 struct WriteEntry {
     addr: usize,
     val: u64,
-    old_val: u64, // for undo on abort
+    // None = address absent from the shadow map before this write; undo must
+    // remove the key again, not insert 0 (which would shadow memory forever
+    // — review-05 R-04).
+    old_val: Option<u64>,
     bytes: u8,
 }
 
@@ -43,14 +55,19 @@ impl SyncMap {
             (*self.0.get()).insert(addr, val);
         }
     }
-    fn get_mut(&self) -> &mut HashMap<usize, u64> {
-        unsafe { &mut *self.0.get() }
+    fn remove(&self, addr: usize) {
+        unsafe {
+            (*self.0.get()).remove(&addr);
+        }
+    }
+    fn as_ptr(&self) -> *mut HashMap<usize, u64> {
+        self.0.get()
     }
 }
 
 // ── Globals ──────────────────────────────────────────────────────
-static LEFT: LazyLock<SyncMap> = LazyLock::new(|| SyncMap::new());
-static RIGHT: LazyLock<SyncMap> = LazyLock::new(|| SyncMap::new());
+static LEFT: LazyLock<SyncMap> = LazyLock::new(SyncMap::new);
+static RIGHT: LazyLock<SyncMap> = LazyLock::new(SyncMap::new);
 static ACTIVE: AtomicBool = AtomicBool::new(false); // false = LEFT
 static LEFT_READERS: AtomicU64 = AtomicU64::new(0);
 static RIGHT_READERS: AtomicU64 = AtomicU64::new(0);
@@ -74,8 +91,8 @@ unsafe fn write_memory(addr: usize, val: u64, bytes: u8) {
 
 // ── Init / Exit ──────────────────────────────────────────────────
 pub fn tm_init() {
-    LEFT.get_mut().clear();
-    RIGHT.get_mut().clear();
+    unsafe { LEFT.as_ptr().as_mut() }.unwrap().clear();
+    unsafe { RIGHT.as_ptr().as_mut() }.unwrap().clear();
     ACTIVE.store(false, Ordering::Release);
     LEFT_READERS.store(0, Ordering::Release);
     RIGHT_READERS.store(0, Ordering::Release);
@@ -139,9 +156,14 @@ pub fn tm_abort() {
         &*RIGHT
     };
 
-    // Restore old values
-    for &e in &ws {
-        inactive.write(e.addr, e.old_val);
+    // Restore old values newest-first: repeated writes to one address form
+    // a chain and forward order would leave an intermediate value (04/R-01
+    // class); an absent key is restored by removing it again.
+    for e in ws.iter().rev() {
+        match e.old_val {
+            Some(v) => inactive.write(e.addr, v),
+            None => inactive.remove(e.addr),
+        }
     }
 
     write_lock_release();
@@ -216,16 +238,35 @@ fn read_word_bytes(addr: usize, bytes: u8) -> u64 {
         return v;
     }
 
-    // Reader-enter: track which copy we're reading from
-    let active = ACTIVE.load(Ordering::Acquire);
-    if active {
-        RIGHT_READERS.fetch_add(1, Ordering::Acquire);
-    } else {
-        LEFT_READERS.fetch_add(1, Ordering::Acquire);
+    // Reader-enter (review-05 R-04): register on the counter BEFORE
+    // observing ACTIVE, then re-check ACTIVE; if it flipped while we were
+    // registering, the writer may drain a counter that did not yet include
+    // us, so retry.  Increment → fence → check is the classic LeftRight
+    // handshake; loading ACTIVE first (as here used to) allows a writer to
+    // mutate the map we are about to read.
+    let (val, active);
+    loop {
+        let seen = ACTIVE.load(Ordering::Acquire);
+        if seen {
+            RIGHT_READERS.fetch_add(1, Ordering::Acquire);
+        } else {
+            LEFT_READERS.fetch_add(1, Ordering::Acquire);
+        }
+        fence(Ordering::SeqCst);
+        if ACTIVE.load(Ordering::Acquire) == seen {
+            active = seen;
+            break;
+        }
+        // Flipped during registration: back off and retry.
+        if seen {
+            RIGHT_READERS.fetch_sub(1, Ordering::Release);
+        } else {
+            LEFT_READERS.fetch_sub(1, Ordering::Release);
+        }
     }
 
     // Read from the active copy
-    let val = if active {
+    val = if active {
         RIGHT.read(addr)
     } else {
         LEFT.read(addr)
@@ -264,8 +305,9 @@ fn write_word(addr: usize, val: u64, bytes: u8) {
         &*RIGHT
     };
 
-    // Save old value for undo
-    let old_val = inactive.read(addr).unwrap_or(0);
+    // Save old value for undo; None means "absent from the map" (memory
+    // fallback), not 0.
+    let old_val = inactive.read(addr);
 
     // Write to inactive copy
     inactive.write(addr, val);
@@ -304,7 +346,7 @@ pub fn tm_read_f32(addr: *mut f32) -> f32 {
     f32::from_bits(read_word_bytes(addr as usize, 4) as u32)
 }
 pub fn tm_read_f64(addr: *mut f64) -> f64 {
-    f64::from_bits(read_word_bytes(addr as usize, 8) as u64)
+    f64::from_bits(read_word_bytes(addr as usize, 8))
 }
 
 pub fn tm_write_u8(addr: *mut u8, val: u8) {
@@ -353,5 +395,91 @@ pub fn tm_read_raw(addr: *mut u8, dst: &mut [u8]) {
 pub fn tm_write_raw(addr: *mut u8, src: &[u8]) {
     for (i, &s) in src.iter().enumerate() {
         write_word(addr as usize + i, s as u64, 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static LR_LOCK: Mutex<()> = Mutex::new(());
+
+    // R-04: aborting a transaction that first-wrote an address must not
+    // leave a shadowing entry (old implementation inserted 0 forever).
+    #[test]
+    fn abort_first_write_does_not_shadow_memory() {
+        let _g = LR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let a = Box::into_raw(Box::new(0x77u64));
+        tm_begin();
+        tm_write_u64(a, 5);
+        tm_abort();
+        unsafe {
+            assert_eq!(*a, 0x77, "memory must be untouched");
+        }
+        assert_eq!(
+            tm_read_u64(a),
+            0x77,
+            "a never-written address must fall back to memory after abort, not read a shadowed 0"
+        );
+        unsafe { drop(Box::from_raw(a)) };
+    }
+
+    // R-01 class: repeated writes undo in reverse (chain back to pre-TX value).
+    #[test]
+    fn repeated_writes_abort_restores_pre_value() {
+        let _g = LR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let a = Box::into_raw(Box::new(0x77u64));
+        tm_begin();
+        tm_write_u64(a, 1);
+        tm_write_u64(a, 2);
+        tm_write_u64(a, 3);
+        tm_abort();
+        unsafe {
+            assert_eq!(*a, 0x77);
+        }
+        assert_eq!(tm_read_u64(a), 0x77);
+        unsafe { drop(Box::from_raw(a)) };
+    }
+
+    #[test]
+    fn commit_publishes_and_reads_agree() {
+        let _g = LR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let a = Box::into_raw(Box::new(0x77u64));
+        let b = Box::into_raw(Box::new(0x11u64));
+        tm_begin();
+        assert_eq!(tm_read_u64(a), 0x77);
+        tm_write_u64(a, 42);
+        assert_eq!(tm_read_u64(a), 42, "read-your-writes");
+        assert!(tm_commit());
+        assert_eq!(tm_read_u64(a), 42);
+        assert_eq!(tm_read_u64(b), 0x11);
+        unsafe {
+            assert_eq!(*a, 42);
+            drop(Box::from_raw(a));
+            drop(Box::from_raw(b));
+        }
+    }
+
+    #[test]
+    fn abort_partial_then_commit_full() {
+        let _g = LR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let a = Box::into_raw(Box::new(10u64));
+        tm_begin();
+        tm_write_u64(a, 20);
+        tm_abort();
+        assert_eq!(tm_read_u64(a), 10);
+        tm_begin();
+        tm_write_u64(a, 30);
+        assert!(tm_commit());
+        assert_eq!(tm_read_u64(a), 30);
+        unsafe {
+            assert_eq!(*a, 30);
+            drop(Box::from_raw(a));
+        }
     }
 }

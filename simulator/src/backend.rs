@@ -586,7 +586,7 @@ mod tests {
         b.init();
         b.sim_set_thread_id(tid);
         b.init_thread();
-        let addr = 0x7f00_0000_A000 as *mut u16;
+        let addr = 0x7F00_0000_A000 as *mut u16;
         unsafe {
             addr.write(0);
         }
@@ -609,7 +609,7 @@ mod tests {
         b.init();
         b.sim_set_thread_id(tid);
         b.init_thread();
-        let addr = 0x7f00_0000_D000 as *mut u64;
+        let addr = 0x7F00_0000_D000 as *mut u64;
         unsafe {
             addr.write(0);
         }
@@ -670,7 +670,7 @@ mod tests {
         b.init();
         b.sim_set_thread_id(tid);
         b.init_thread();
-        let addr = 0x7f00_0000_E000 as *mut u32;
+        let addr = 0x7F00_0000_E000 as *mut u32;
         unsafe {
             addr.write(0);
         }
@@ -693,7 +693,7 @@ mod tests {
         b.init();
         b.sim_set_thread_id(tid);
         b.init_thread();
-        let addr = 0x7f00_0000_F000 as *mut u64;
+        let addr = 0x7F00_0000_F000 as *mut u64;
         unsafe {
             addr.write(0);
         }
@@ -746,7 +746,7 @@ mod tests {
         b.init();
         b.sim_set_thread_id(tid);
         b.init_thread();
-        let addr = 0x7f00_0000_F100 as *mut u8;
+        let addr = 0x7F00_0000_F100 as *mut u8;
         unsafe {
             addr.write(0);
         }
@@ -769,7 +769,7 @@ mod tests {
         b.init();
         b.sim_set_thread_id(tid);
         b.init_thread();
-        let addr = 0x7f00_0000_F200 as *mut u64;
+        let addr = 0x7F00_0000_F200 as *mut u64;
         unsafe {
             addr.write(0);
         }
@@ -822,7 +822,7 @@ mod tests {
         b.init();
         b.sim_set_thread_id(tid);
         b.init_thread();
-        let addr = 0x7f00_0000_F300 as *mut u8;
+        let addr = 0x7F00_0000_F300 as *mut u8;
         unsafe {
             addr.write(0);
         }
@@ -852,7 +852,7 @@ mod tests {
             b.init();
             b.sim_set_thread_id(tid);
             b.init_thread();
-            let addr = 0x7f00_0000_B000 as *mut u64;
+            let addr = 0x7F00_0000_B000 as *mut u64;
             unsafe {
                 addr.write(0);
             }
@@ -880,7 +880,7 @@ mod tests {
             let tid0 = alloc_tid();
             let tid1 = alloc_tid();
             b.init();
-            let addr = 0x7f00_0000_C000 as *mut u64;
+            let addr = 0x7F00_0000_C000 as *mut u64;
             unsafe {
                 addr.write(0);
             }

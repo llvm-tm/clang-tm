@@ -92,12 +92,15 @@ pub struct QueueExecutor {
     workers: Vec<JoinHandle<()>>,
 }
 
+/// One runnable piece of work.
+pub type Task = Box<dyn FnOnce() + Send>;
+
 struct QueueInner {
     num_q: usize,
     shutdown: AtomicBool,
     next_q: AtomicUsize,
     next_wq: AtomicUsize,
-    queues: Vec<Mutex<VecDeque<Box<dyn FnOnce() + Send>>>>,
+    queues: Vec<Mutex<VecDeque<Task>>>,
     cvs: Vec<Condvar>,
 }
 
@@ -132,16 +135,16 @@ impl QueueExecutor {
         loop {
             let start_q = inner.next_wq.fetch_add(1, Ordering::Relaxed) % inner.num_q;
 
-            let task: Option<Box<dyn FnOnce() + Send>>;
             let mut waited = false;
 
-            'search: loop {
+            // Labeled block (was labeled loop — clippy::never_loop: every
+            // path exits on the first pass, the loop never looped).
+            let task: Option<Task> = 'search: {
                 for a in 0..inner.num_q {
                     let q = (start_q + a) % inner.num_q;
                     let mut guard = inner.queues[q].lock().unwrap();
                     if let Some(f) = guard.pop_front() {
-                        task = Some(f);
-                        break 'search;
+                        break 'search Some(f);
                     }
                     if !waited && a == 0 {
                         // Block on our starting queue
@@ -153,8 +156,7 @@ impl QueueExecutor {
                         waited = true;
                         // Re-check after wake
                         if let Some(f) = guard.pop_front() {
-                            task = Some(f);
-                            break 'search;
+                            break 'search Some(f);
                         }
                     }
                 }
@@ -162,9 +164,8 @@ impl QueueExecutor {
                 if inner.shutdown.load(Ordering::Relaxed) {
                     return;
                 }
-                task = None;
-                break;
-            }
+                None
+            };
 
             match task {
                 Some(f) => f(),

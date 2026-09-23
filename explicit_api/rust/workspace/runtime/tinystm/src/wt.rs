@@ -145,12 +145,14 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
         std::hint::spin_loop();
     }
     let old_val: T = unsafe { (addr as *const T).read() };
+    let old_ver = version_at_index(lock_idx);
     unsafe {
         (addr as *mut T).write(val);
     }
     let old_tv = old_val.to_typed();
     with_tx(|tx| {
         tx.locked_addrs.push(lock_idx);
+        tx.locked_old_versions.push((lock_idx, old_ver));
         tx.undo_backs.push(old_tv.into_write_back(addr));
         ws_write(&mut tx.write_set, addr, tv);
         tx.read_set.push((addr, version));
@@ -253,6 +255,7 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
         std::hint::spin_loop();
     }
     let mut old_buf = vec![0u8; src.len()];
+    let old_ver = version_at_index(lock_idx);
     unsafe {
         std::ptr::copy_nonoverlapping(addr as *const u8, old_buf.as_mut_ptr(), src.len());
     }
@@ -263,6 +266,7 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
     let old_tv = TypedValue::Bytes(old_buf.into_boxed_slice());
     with_tx(|tx| {
         tx.locked_addrs.push(lock_idx);
+        tx.locked_old_versions.push((lock_idx, old_ver));
         tx.undo_backs.push(old_tv.into_write_back(addr));
         ws_write(&mut tx.write_set, addr, tv);
     });
@@ -270,11 +274,14 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
 
 pub fn tm_abort() {
     if let Some(tx) = flush_tx() {
-        for u in tx.undo_backs {
+        // Reverse order: repeated writes to one address form a chain
+        // (pre -> v1 -> v2); undo entries must be applied newest-first so
+        // the oldest (pre-transaction) value wins (review-05 R-01).
+        for u in tx.undo_backs.into_iter().rev() {
             u.apply();
         }
         if !tx.locked_addrs.is_empty() {
-            unlock_indices(&tx.locked_addrs);
+            unlock_indices_restore(&tx.locked_old_versions);
         }
     }
 }
@@ -286,10 +293,10 @@ pub fn tm_commit() -> bool {
     };
     fence(Ordering::SeqCst);
     if tx.aborted {
-        for u in tx.undo_backs {
+        for u in tx.undo_backs.into_iter().rev() {
             u.apply();
         }
-        unlock_indices(&tx.locked_addrs);
+        unlock_indices_restore(&tx.locked_old_versions);
         TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "stats")]
         crate::common::TM_STATS
@@ -300,13 +307,13 @@ pub fn tm_commit() -> bool {
     if tx.write_set.is_empty() {
         return true;
     }
-    gc_tick();
+    let ts = gc_tick();
     fence(Ordering::SeqCst);
     if !validate_read_set(&tx.read_set) {
-        for u in tx.undo_backs {
+        for u in tx.undo_backs.into_iter().rev() {
             u.apply();
         }
-        unlock_indices(&tx.locked_addrs);
+        unlock_indices_restore(&tx.locked_old_versions);
         TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "stats")]
         crate::common::TM_STATS
@@ -314,7 +321,7 @@ pub fn tm_commit() -> bool {
             .fetch_add(1, Ordering::Relaxed);
         return false;
     }
-    unlock_indices(&tx.locked_addrs);
+    unlock_indices_stamp(&tx.locked_addrs, ts);
     true
 }
 
@@ -355,4 +362,94 @@ pub fn tm_read_raw(a: *mut u8, d: &mut [u8]) {
 #[inline]
 pub fn tm_write_raw(a: *mut u8, s: &[u8]) {
     write_raw_bytes(a as usize, s);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // WT keeps a process-global lock table; serialize tests so two cells that
+    // hash to the same lock index cannot make a test spin-abort (flaky).
+    static TM_LOCK: Mutex<()> = Mutex::new(());
+
+    fn init_and_alloc() -> *mut u64 {
+        crate::tm_init();
+        let p = addrspace::tm_region_malloc(core::mem::size_of::<u64>()) as *mut u64;
+        assert!(!p.is_null());
+        unsafe { p.write(0) };
+        p
+    }
+
+    // R-01: undo_backs must be applied in reverse; repeated writes to one
+    // address form a value chain (pre -> v1 -> v2) and the pre-transaction
+    // value must survive abort.
+    #[test]
+    fn repeated_write_then_abort_restores_pre_txn_value() {
+        let _g = TM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = init_and_alloc();
+        crate::tm_begin();
+        crate::tm_write_u64(a, 1);
+        crate::tm_write_u64(a, 2);
+        with_tx(|tx| tx.aborted = true);
+        assert!(!crate::tm_commit());
+        unsafe {
+            assert_eq!(a.read(), 0, "abort must restore the pre-transaction value");
+        }
+    }
+
+    #[test]
+    fn repeated_write_then_abort_then_new_txn_sees_pre_txn_value() {
+        let _g = TM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = init_and_alloc();
+        crate::tm_begin();
+        crate::tm_write_u64(a, 10);
+        crate::tm_write_u64(a, 20);
+        crate::tm_write_u64(a, 30);
+        with_tx(|tx| tx.aborted = true);
+        assert!(!crate::tm_commit());
+        crate::tm_begin();
+        let seen = crate::tm_read_u64(a);
+        assert!(crate::tm_commit());
+        assert_eq!(
+            seen, 0,
+            "fresh transaction must observe the pre-abort value"
+        );
+    }
+
+    #[test]
+    fn repeated_write_then_commit_keeps_last_value() {
+        let _g = TM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = init_and_alloc();
+        crate::tm_begin();
+        crate::tm_write_u64(a, 1);
+        crate::tm_write_u64(a, 2);
+        crate::tm_write_u64(a, 3);
+        assert!(crate::tm_commit());
+        unsafe {
+            assert_eq!(a.read(), 3);
+        }
+    }
+
+    #[test]
+    fn repeated_raw_write_then_abort_restores_pre_txn_bytes() {
+        let _g = TM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::tm_init();
+        let p = addrspace::tm_region_malloc(8) as *mut u8;
+        assert!(!p.is_null());
+        unsafe { std::ptr::write_bytes(p, 0, 8) };
+        crate::tm_begin();
+        crate::tm_write_raw(p, b"AAAAAAA");
+        crate::tm_write_raw(p, b"BBBBBBB");
+        with_tx(|tx| tx.aborted = true);
+        assert!(!crate::tm_commit());
+        let mut buf = [0u8; 7];
+        unsafe {
+            std::ptr::copy_nonoverlapping(p as *const u8, buf.as_mut_ptr(), 7);
+        }
+        assert_eq!(
+            &buf, b"\0\0\0\0\0\0\0",
+            "abort must restore the raw pre-transaction bytes"
+        );
+    }
 }

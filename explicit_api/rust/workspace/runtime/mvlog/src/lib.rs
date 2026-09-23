@@ -90,6 +90,9 @@ struct LogEntry {
     overflow: AtomicPtr<u8>,
 }
 
+// Atomics initialised to zero/tag-sentinel; shared only as static-array
+// templates (never read in place), so interior mutability here is inert.
+#[allow(clippy::declare_interior_mutable_const)]
 const LOG_ENTRY_FREE: LogEntry = LogEntry {
     state: AtomicU64::new(0),
     tag: AtomicU64::new(0),
@@ -108,6 +111,7 @@ struct IndexBucket {
     slot: AtomicU64,
 }
 
+#[allow(clippy::declare_interior_mutable_const)]
 const INDEX_BUCKET_FREE: IndexBucket = IndexBucket {
     addr: AtomicU64::new(0),
     slot: AtomicU64::new(u64::MAX), // -1 as u64 sentinel
@@ -121,6 +125,7 @@ struct BloomFilter {
     words: [AtomicU64; BLOOM_WORDS],
 }
 
+#[allow(clippy::declare_interior_mutable_const)]
 const BLOOM_FREE: BloomFilter = BloomFilter {
     words: [const { AtomicU64::new(0) }; BLOOM_WORDS],
 };
@@ -573,11 +578,22 @@ fn commit_impl(tx: &mut TxState) -> bool {
             if (le.state.load(Ordering::Acquire) as u32 & 0xFF) == LogState::Committed as u32 {
                 let cnt = le.ws_count.load(Ordering::Relaxed).min(KMAX_INLINE_WS);
                 for i in 0..cnt {
-                    write_mem_val(
-                        le.ws_addr[i].load(Ordering::Relaxed),
-                        le.ws_val[i].load(Ordering::Relaxed),
-                        8,
-                    );
+                    let a = le.ws_addr[i].load(Ordering::Relaxed);
+                    // An address rewritten by THIS commit (already folded
+                    // through to memory) must not be regressed by the older
+                    // value from the reclaimed entry (review-05 R-05).
+                    if tx.write_set.iter().any(|w| w.addr == a) {
+                        continue;
+                    }
+                    // Fold with the entry's real width; a hardcoded 8
+                    // clobbered up to 7 neighbouring bytes (review-05 R-05).
+                    let sz: u8 = match le.ws_type[i].load(Ordering::Relaxed) {
+                        0 => 1,
+                        1 => 2,
+                        2 => 4,
+                        _ => 8,
+                    };
+                    write_mem_val(a, le.ws_val[i].load(Ordering::Relaxed), sz);
                 }
             }
         }
@@ -976,5 +992,90 @@ pub mod sim {
             "    Commits={}  Aborts={}  Val={}  VFail={}  Locks={}  LAqFail={}  RS={}  WS={}",
             com, abt, val, vfail, lcon, laf, trs, tws
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static MVLOG_LOCK: Mutex<()> = Mutex::new(());
+
+    // Enough commits to push the slot window past KRECLAIM_THRESHOLD and
+    // fire reclamation (fold) of the early entries.
+    const FILLERS: usize = KRECLAIM_THRESHOLD as usize + 16;
+
+    // R-05: folding a 1-byte log entry must write 1 byte, not 8.
+    #[test]
+    fn fold_uses_true_entry_width() {
+        let _g = MVLOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let buf = Box::into_raw(Box::new([0xAAu8; 8]));
+        let scratch = Box::into_raw(Box::new(0u64));
+        tm_begin();
+        tm_write_u8(buf as *mut u8, 0x42);
+        assert!(tm_commit());
+        for i in 0..FILLERS {
+            tm_begin();
+            tm_write_u64(scratch, i as u64 + 1);
+            assert!(tm_commit());
+        }
+        unsafe {
+            let bp = buf as *const u8;
+            assert_eq!(*bp, 0x42);
+            assert_eq!(
+                std::slice::from_raw_parts(bp.add(1), 7),
+                &[0xAAu8; 7][..],
+                "fold of a 1-byte entry clobbered neighbouring bytes (width-8 fold)"
+            );
+            drop(Box::from_raw(buf));
+            drop(Box::from_raw(scratch));
+        }
+    }
+
+    // R-05: reclaim must not regress an address the current commit has
+    // already published newer values for.
+    #[test]
+    fn fold_does_not_regress_newer_committed_value() {
+        let _g = MVLOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let addr = Box::into_raw(Box::new(0u64));
+        let scratch = Box::into_raw(Box::new(0u64));
+        tm_begin();
+        tm_write_u64(addr, 1);
+        assert!(tm_commit());
+        for i in 0..FILLERS {
+            tm_begin();
+            tm_write_u64(scratch, i as u64 + 1);
+            if i + 1 == FILLERS {
+                // The commit that triggers reclamation also rewrites `addr`;
+                // folding the old v=1 entry afterwards must not undo it.
+                tm_write_u64(addr, 999);
+            }
+            assert!(tm_commit());
+        }
+        unsafe {
+            assert_eq!(*addr, 999, "fold regressed a newer committed value");
+            drop(Box::from_raw(addr));
+            drop(Box::from_raw(scratch));
+        }
+    }
+
+    #[test]
+    fn basic_commit_read_regression() {
+        let _g = MVLOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let a = Box::into_raw(Box::new(0u64));
+        tm_begin();
+        tm_write_u64(a, 7);
+        assert!(tm_commit());
+        tm_begin();
+        assert_eq!(tm_read_u64(a), 7);
+        assert!(tm_commit());
+        unsafe {
+            assert_eq!(*a, 7);
+            drop(Box::from_raw(a));
+        }
     }
 }

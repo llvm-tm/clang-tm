@@ -7,9 +7,15 @@ pub struct TMBitVector<const N: usize> {
     words: Vec<AtomicU64>,
 }
 
+impl<const N: usize> Default for TMBitVector<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> TMBitVector<N> {
     pub fn new() -> Self {
-        let nwords = (N + 63) / 64;
+        let nwords = N.div_ceil(64);
         let mut words = Vec::with_capacity(nwords);
         for _ in 0..nwords {
             words.push(AtomicU64::new(0));
@@ -41,7 +47,7 @@ impl<const N: usize> TMBitVector<N> {
     }
 
     pub fn all(&self) -> bool {
-        let nwords = (N + 63) / 64;
+        let nwords = N.div_ceil(64);
         let last_bits = N % 64;
         for i in 0..nwords - 1 {
             if self.words[i].load(Ordering::Relaxed) != !0u64 {

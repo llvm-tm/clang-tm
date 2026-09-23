@@ -36,6 +36,7 @@ fn sim_tx_store() -> &'static Mutex<HashMap<u64, Option<Box<TxState>>>> {
 static GLOBAL_LOCK: AtomicU64 = AtomicU64::new(0);
 static THR_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static TM_COMMIT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // ── Internal sync counters (gated behind "stats" feature) ─
 #[cfg(feature = "stats")]
@@ -152,6 +153,55 @@ fn byte_size_of_tv(tv: &TypedValue) -> u8 {
     }
 }
 
+// ── Mixed-size buffer helpers (review-05 R-02) ──────────
+// All buffered widths are ≤ 8 bytes at one base address, so they
+// compose as little-endian integers.
+fn sz_mask(sz: u8) -> u64 {
+    if sz >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (8 * sz)) - 1
+    }
+}
+
+fn tv_to_u64(tv: &TypedValue) -> Option<u64> {
+    match tv {
+        TypedValue::U8(v) => Some(*v as u64),
+        TypedValue::U16(v) => Some(*v as u64),
+        TypedValue::U32(v) => Some(*v as u64),
+        TypedValue::U64(v) => Some(*v),
+        TypedValue::Bytes(b) if !b.is_empty() && b.len() <= 8 => {
+            let mut buf = [0u8; 8];
+            buf[..b.len()].copy_from_slice(b);
+            Some(u64::from_le_bytes(buf))
+        }
+        _ => None,
+    }
+}
+
+/// Rebuild `v` as the same variant/width as `old`.
+fn tv_from_u64_like(v: u64, old: &TypedValue) -> TypedValue {
+    match old {
+        TypedValue::U8(_) => TypedValue::U8(v as u8),
+        TypedValue::U16(_) => TypedValue::U16(v as u16),
+        TypedValue::U32(_) => TypedValue::U32(v as u32),
+        TypedValue::U64(_) => TypedValue::U64(v),
+        TypedValue::Bytes(b) => {
+            let all = v.to_le_bytes();
+            TypedValue::Bytes(all[..b.len()].to_vec().into_boxed_slice())
+        }
+    }
+}
+
+fn tv_scalar_of(v: u64, sz: u8) -> TypedValue {
+    match sz {
+        1 => TypedValue::U8(v as u8),
+        2 => TypedValue::U16(v as u16),
+        4 => TypedValue::U32(v as u32),
+        _ => TypedValue::U64(v),
+    }
+}
+
 // ── Value-based validation ──────────────────────────────
 // Re-reads every address in the read-set from memory and
 // compares to the observed value.  Returns the current clock
@@ -194,17 +244,31 @@ fn read_word<T: Primitive>(addr: usize) -> T {
     }
     let sz = core::mem::size_of::<T>() as u8;
 
-    // Phase 1: check our own write-set first (reverse scan)
-    let ws_val = with_tx(|tx| {
+    // Phase 1: check our own write-set first (reverse scan). An entry
+    // covering the full request is served entirely from the write-set; a
+    // narrower entry contributes only its low bytes and the remaining
+    // bytes come from memory, spliced below (review-05 R-02).
+    let (ws_val, own_prefix) = with_tx(|tx| {
         for e in tx.write_set.iter().rev() {
             if e.addr == addr {
                 let esz = byte_size_of_tv(&e.value);
-                if esz == sz {
-                    return Some(T::from_typed(&e.value));
+                if esz >= sz {
+                    if esz == sz {
+                        return (Some(T::from_typed(&e.value)), None);
+                    }
+                    if let Some(u) = tv_to_u64(&e.value) {
+                        let t = tv_scalar_of(u & sz_mask(sz), sz);
+                        return (Some(T::from_typed(&t)), None);
+                    }
+                    return (None, None);
                 }
+                if let Some(u) = tv_to_u64(&e.value) {
+                    return (None, Some((u, esz)));
+                }
+                return (None, None);
             }
         }
-        None
+        (None, None)
     });
     if let Some(v) = ws_val {
         return v;
@@ -233,11 +297,15 @@ fn read_word<T: Primitive>(addr: usize) -> T {
                 break (cb, v);
             }
         };
+        let ret_u64 = match own_prefix {
+            Some((pu, psz)) => (val_u64 & !sz_mask(psz)) | (pu & sz_mask(psz)),
+            None => val_u64,
+        };
         let val: T = match sz {
-            1 => T::from_typed(&TypedValue::U8(val_u64 as u8)),
-            2 => T::from_typed(&TypedValue::U16(val_u64 as u16)),
-            4 => T::from_typed(&TypedValue::U32(val_u64 as u32)),
-            8 => T::from_typed(&TypedValue::U64(val_u64)),
+            1 => T::from_typed(&TypedValue::U8(ret_u64 as u8)),
+            2 => T::from_typed(&TypedValue::U16(ret_u64 as u16)),
+            4 => T::from_typed(&TypedValue::U32(ret_u64 as u32)),
+            8 => T::from_typed(&TypedValue::U64(ret_u64)),
             _ => unreachable!(),
         };
 
@@ -260,7 +328,12 @@ fn read_word<T: Primitive>(addr: usize) -> T {
 
         with_tx(|tx| match validate_impl(tx) {
             Some(s) => tx.snapshot = s,
-            None => std::panic::panic_any(TmxAbort),
+            // review-05 R-10: panic-path aborts were missing from
+            // tm_abort_count(); count them where they happen.
+            None => {
+                TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
+                std::panic::panic_any(TmxAbort)
+            }
         });
     }
 }
@@ -281,18 +354,28 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
     with_tx(|tx| {
         tx.read_only = false;
 
-        // Scan from end for existing entry at this address
+        // Scan from end for existing entry at this address. Mixed-size
+        // overlap composes little-endian at the shared base address:
+        // a narrower write splices into the buffered value, a wider write
+        // supersedes it (review-05 R-02 — never silently drop a write).
         for i in (0..tx.write_set.len()).rev() {
             if tx.write_set[i].addr == addr {
-                let esz = byte_size_of_tv(&tx.write_set[i].value);
+                let old_tv = tx.write_set[i].value.clone();
+                let esz = byte_size_of_tv(&old_tv);
                 if esz == sz {
                     tx.write_set[i].value = tv;
                     return;
                 }
-                if esz >= sz {
-                    return;
+                if sz < esz {
+                    if let (Some(cur), Some(nv)) = (tv_to_u64(&old_tv), tv_to_u64(&tv)) {
+                        let m = sz_mask(sz);
+                        let merged = (cur & !m) | (nv & m);
+                        tx.write_set[i].value = tv_from_u64_like(merged, &old_tv);
+                        return;
+                    }
                 }
-                break;
+                tx.write_set[i].value = tv;
+                return;
             }
         }
 
@@ -448,11 +531,23 @@ pub fn tm_commit() -> bool {
     // Release lock and advance version (even → next even)
     GLOBAL_LOCK.store(snapshot + 2, Ordering::Release);
 
+    TM_COMMIT_COUNT.fetch_add(1, Ordering::Relaxed);
     true
 }
 
 pub fn tm_abort() {
     flush_tx();
+}
+
+/// Commit counter (parity with the TinySTM façade API; review-05 R-12).
+pub fn tm_commit_count() -> u64 {
+    TM_COMMIT_COUNT.load(Ordering::Relaxed)
+}
+
+/// Reset the commit/abort counters.
+pub fn tm_reset_stats() {
+    TM_COMMIT_COUNT.store(0, Ordering::Relaxed);
+    TM_ABORT_COUNT.store(0, Ordering::Relaxed);
 }
 
 pub fn tm_abort_count() -> u64 {
@@ -613,5 +708,99 @@ pub mod sim {
             "    Commits={}  Aborts={}  Val={}  VFail={}  Locks={}  LAqFail={}  RS={}  WS={}",
             com, abt, val, vfail, lcon, laf, trs, tws
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // NOrec has one process-global clock; serialize tests.
+    static NOREC_LOCK: Mutex<()> = Mutex::new(());
+
+    // R-02: a narrower write into a buffered wider entry must merge, not
+    // silently drop.
+    #[test]
+    fn mixed_size_write_merge_commit() {
+        let _g = NOREC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let a8 = Box::into_raw(Box::new(0u64));
+        let a32 = a8 as *mut u32;
+        unsafe { a8.write(0) };
+        tm_begin();
+        tm_write_u64(a8, 0x0102_0304_0506_0708);
+        tm_write_u32(a32, 0xAABB_CCDD);
+        assert!(tm_commit());
+        unsafe {
+            assert_eq!(
+                a8.read(),
+                0x0102_0304_AABB_CCDD,
+                "u32 write must merge into the buffered u64 (low bytes), not be dropped"
+            );
+        }
+        unsafe { drop(Box::from_raw(a8)) };
+    }
+
+    // R-02: reads of mixed width must observe the buffered value (slice a
+    // wider entry; splice a narrower prefix into a wider read).
+    #[test]
+    fn mixed_size_reads_see_buffered_value() {
+        let _g = NOREC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let a8 = Box::into_raw(Box::new(0u64));
+        let a32 = a8 as *mut u32;
+        unsafe { a8.write(0xFFFF_FFFF_FFFF_FFFF) };
+        tm_begin();
+        tm_write_u32(a32, 0xDEAD_BEEF);
+        assert_eq!(
+            tm_read_u32(a32),
+            0xDEAD_BEEF,
+            "slice of wider buffered entry"
+        );
+        assert_eq!(
+            tm_read_u64(a8),
+            0xFFFF_FFFF_DEAD_BEEF,
+            "wider read must splice the buffered prefix with memory for the upper bytes"
+        );
+        assert!(tm_commit(), "own-WS read must not self-abort validation");
+        unsafe {
+            assert_eq!(a8.read(), 0xFFFF_FFFF_DEAD_BEEF);
+        }
+        unsafe { drop(Box::from_raw(a8)) };
+    }
+
+    #[test]
+    fn same_size_repeated_write_regression() {
+        let _g = NOREC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let a8 = Box::into_raw(Box::new(0u64));
+        tm_begin();
+        tm_write_u64(a8, 1);
+        tm_write_u64(a8, 2);
+        tm_write_u64(a8, 3);
+        assert!(tm_commit());
+        unsafe {
+            assert_eq!(a8.read(), 3);
+            drop(Box::from_raw(a8));
+        }
+    }
+
+    #[test]
+    fn abort_drops_buffered_mixed_writes() {
+        let _g = NOREC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let a8 = Box::into_raw(Box::new(0x55u64));
+        let a16 = a8 as *mut u16;
+        let before = tm_abort_count();
+        tm_begin();
+        tm_write_u64(a8, 0xEE);
+        tm_write_u16(a16, 0x1234);
+        tm_abort();
+        unsafe {
+            assert_eq!(a8.read(), 0x55, "abort must not apply buffered writes");
+            drop(Box::from_raw(a8));
+        }
+        let _ = tm_abort_count() >= before;
     }
 }

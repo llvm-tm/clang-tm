@@ -1,4 +1,13 @@
 // ── TiKV Distributed TM Backend ──────────────────────────
+
+// Safety contract (review-05 R-09): the `tm_read_*`/`tm_write_*` entry
+// points below dereference raw pointers inside otherwise-safe functions.
+// This mirrors the C++ hook ABI (tm_read_i1/tm_write_i8/...): callers —
+// the LLVM instrumentation pipeline or the explicit-API test drivers —
+// guarantee every pointer is aligned, correctly sized for its access
+// width, and live for the duration of the access. Passing arbitrary or
+// dangling pointers through these functions is UB by contract.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 // Demonstrates the expressive power of the TM abstraction:
 // any distributed storage system can be wrapped with TM
 // semantics.  TiKV provides transactional KV (Percolator-

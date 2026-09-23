@@ -26,20 +26,20 @@ use runtime_core::TmxAbort;
 
 #[cfg(feature = "norec")]
 pub use runtime_norec::{
-    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
-    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
-    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
-    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
-    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_commit_count, tm_exit, tm_exit_thread,
+    tm_init, tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64,
+    tm_read_i8, tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8,
+    tm_reset_stats, tm_write_f32, tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64,
+    tm_write_i8, tm_write_ptr, tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "tl2")]
 pub use runtime_tl2::{
-    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
-    tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64, tm_read_i8,
-    tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8, tm_write_f32,
-    tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8, tm_write_ptr,
-    tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_commit_count, tm_exit, tm_exit_thread,
+    tm_init, tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64,
+    tm_read_i8, tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8,
+    tm_reset_stats, tm_write_f32, tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64,
+    tm_write_i8, tm_write_ptr, tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
 #[cfg(feature = "swisstm")]

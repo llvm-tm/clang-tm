@@ -1,4 +1,13 @@
 // ── TSX Simulation Backend ──────────────────────────────────
+
+// Safety contract (review-05 R-09): the `tm_read_*`/`tm_write_*` entry
+// points below dereference raw pointers inside otherwise-safe functions.
+// This mirrors the C++ hook ABI (tm_read_i1/tm_write_i8/...): callers —
+// the LLVM instrumentation pipeline or the explicit-API test drivers —
+// guarantee every pointer is aligned, correctly sized for its access
+// width, and live for the duration of the access. Passing arbitrary or
+// dangling pointers through these functions is UB by contract.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 // Models Intel TSX (RTM) for simulation/debugging without
 // requiring RTM-capable hardware.
 //
@@ -112,7 +121,7 @@ pub(crate) struct BloomFilter {
 
 impl BloomFilter {
     fn new() -> Self {
-        let word_count = (BLOOM_BITS + 63) / 64;
+        let word_count = BLOOM_BITS.div_ceil(64);
         BloomFilter {
             bits: vec![0u64; word_count],
             word_count,
@@ -301,7 +310,9 @@ fn dbg_enabled() -> bool {
 /// is recorded as (addr, mem_before, new, kind, tid).  kind: 0=TSX commit,
 /// 1=SGL write.  Appended only while holding GLOBAL_STATE, so ordering with
 /// TM ops is consistent; dumped by tm_exit when TSX_SIM_RING is set.
-static RING: std::sync::LazyLock<Mutex<Vec<(u64, u64, u64, u8, u64)>>> =
+type RingEntry = (u64, u64, u64, u8, u64);
+
+static RING: std::sync::LazyLock<Mutex<Vec<RingEntry>>> =
     std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
 
 fn ring_push(addr: u64, before: u64, newv: u64, kind: u8, tid: u64) {
@@ -378,7 +389,7 @@ pub fn tm_exit() {
             let mut stale = Vec::new();
             for &(addr, before, newv, kind, tid) in ring.iter() {
                 let d = (newv as i128) - (before as i128);
-                if d < 1 || d > 10 {
+                if !(1..=10).contains(&d) {
                     stale.push((addr, before, newv, kind, tid, d));
                 }
             }
@@ -1012,6 +1023,10 @@ pub fn tm_write_ptr<T>(addr: *mut *mut T, val: *mut T) {
                 return;
             }
             s.cycles += COST_WRITE_L1 + COST_BLOOM_CHECK;
+            // RTM semantics: buffer only — writing through here leaks the
+            // speculative value into memory where it would survive abort
+            // (review-05 R-03).
+            return;
         }
         unsafe {
             addr.write(val);
@@ -1090,6 +1105,8 @@ pub fn tm_write_raw(addr: *mut u8, src: &[u8]) {
                 return;
             }
             s.cycles += COST_WRITE_L1 + COST_BLOOM_CHECK;
+            // RTM semantics: buffer only (review-05 R-03).
+            return;
         }
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), addr, src.len());
@@ -1230,5 +1247,111 @@ pub mod sim {
             "    Abort breakdown: conflict={} capacity={} explicit={} self={} other={} fallback={}",
             conflict, capacity, explicit, self_ab, other, fallback
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static TSX_LOCK: Mutex<()> = Mutex::new(());
+
+    // R-03: buffered TSX writes must not fall through to memory before commit.
+    #[test]
+    fn write_ptr_does_not_leak_until_commit() {
+        let _g = TSX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let cell = Box::into_raw(Box::new(0usize));
+        let cellptr = cell as *mut *mut u8;
+        let target = Box::into_raw(Box::new(7u8));
+        unsafe { *cellptr = std::ptr::null_mut() };
+        tm_begin();
+        assert!(
+            with_state(my_tid(), |s| s.active && s.in_tsx),
+            "must start in TSX mode"
+        );
+        tm_write_ptr(cellptr, target);
+        unsafe {
+            assert_eq!(
+                *cellptr,
+                std::ptr::null_mut(),
+                "buffered write_ptr leaked the speculative value into memory"
+            );
+        }
+        assert!(tm_commit());
+        unsafe {
+            assert_eq!(*cellptr, target, "commit must publish the buffered write");
+        }
+        unsafe {
+            drop(Box::from_raw(target));
+            drop(Box::from_raw(cell));
+        }
+    }
+
+    #[test]
+    fn write_raw_does_not_leak_until_commit() {
+        let _g = TSX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let buf = Box::into_raw(Box::new([0u8; 8]));
+        unsafe { std::ptr::write_bytes(buf as *mut u8, 0, 8) };
+        tm_begin();
+        assert!(with_state(my_tid(), |s| s.active && s.in_tsx));
+        let src = *b"ABCDEFG";
+        tm_write_raw(buf as *mut u8, &src);
+        unsafe {
+            assert_eq!(
+                std::slice::from_raw_parts(buf as *const u8, 7),
+                b"\0\0\0\0\0\0\0",
+                "buffered write_raw leaked bytes into memory"
+            );
+        }
+        assert!(tm_commit());
+        unsafe {
+            assert_eq!(std::slice::from_raw_parts(buf as *const u8, 7), b"ABCDEFG");
+            drop(Box::from_raw(buf));
+        }
+    }
+
+    #[test]
+    fn write_ptr_abort_discards_buffered_write() {
+        let _g = TSX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let cell = Box::into_raw(Box::new(0usize));
+        let cellptr = cell as *mut *mut u8;
+        let target = Box::into_raw(Box::new(9u8));
+        unsafe { *cellptr = std::ptr::null_mut() };
+        tm_begin();
+        tm_write_ptr(cellptr, target);
+        tm_abort();
+        unsafe {
+            assert_eq!(
+                *cellptr,
+                std::ptr::null_mut(),
+                "abort must discard the buffered pointer write"
+            );
+            drop(Box::from_raw(target));
+            drop(Box::from_raw(cell));
+        }
+    }
+
+    #[test]
+    fn write_raw_abort_discards_buffered_bytes() {
+        let _g = TSX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let buf = Box::into_raw(Box::new([0u8; 8]));
+        unsafe { std::ptr::write_bytes(buf as *mut u8, 0, 8) };
+        tm_begin();
+        let src = *b"ZZZZZZZ";
+        tm_write_raw(buf as *mut u8, &src);
+        tm_abort();
+        unsafe {
+            assert_eq!(
+                std::slice::from_raw_parts(buf as *const u8, 7),
+                b"\0\0\0\0\0\0\0",
+                "abort must discard the buffered raw bytes"
+            );
+            drop(Box::from_raw(buf));
+        }
     }
 }

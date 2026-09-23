@@ -94,6 +94,7 @@ static COMMIT_LOCK: AtomicU64 = AtomicU64::new(0);
 static G_CLOCK: AtomicU64 = AtomicU64::new(0);
 
 pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static TM_COMMIT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(feature = "stats")]
 pub static TM_STATS: runtime_core::SyncCounters = runtime_core::SyncCounters::new();
@@ -350,7 +351,12 @@ pub fn tm_commit() -> bool {
     let mut locked_idxs: Vec<usize> = Vec::with_capacity(addrs.len());
     for &a in &addrs {
         let idx = lock_index(a);
-        if locked_idxs.last().copied() != Some(idx) {
+        // Dedup against ALL locked indices: addresses sort by address, not
+        // by lock index, so two addresses sharing one lock are not
+        // necessarily adjacent here — an adjacency check lets the
+        // transaction re-lock its own lock and spin forever (review-05
+        // R-07).
+        if !locked_idxs.contains(&idx) {
             while !lock_at_index(idx).try_lock_exclusive() {
                 // In simulation mode, if the lock is held by another
                 // thread, it will never be released — abort.
@@ -396,6 +402,7 @@ pub fn tm_commit() -> bool {
 
     #[cfg(feature = "stats")]
     TM_STATS.commits.fetch_add(1, Ordering::Relaxed);
+    TM_COMMIT_COUNT.fetch_add(1, Ordering::Relaxed);
 
     true
 }
@@ -454,6 +461,17 @@ pub fn tm_abort() {
 
 pub fn tm_abort_count() -> u64 {
     TM_ABORT_COUNT.load(Ordering::Relaxed)
+}
+
+/// Commit counter (parity with the TinySTM façade API; review-05 R-12).
+pub fn tm_commit_count() -> u64 {
+    TM_COMMIT_COUNT.load(Ordering::Relaxed)
+}
+
+/// Reset the commit/abort counters.
+pub fn tm_reset_stats() {
+    TM_COMMIT_COUNT.store(0, Ordering::Relaxed);
+    TM_ABORT_COUNT.store(0, Ordering::Relaxed);
 }
 
 // ── Typed wrappers ─────────────────────────────────────
@@ -598,5 +616,49 @@ pub mod sim {
             "    Commits={}  Aborts={}  Val={}  VFail={}  CLock={}  LAqFail={}  RS={}  WS={}",
             com, abt, val, vfail, lcon, laf, trs, tws
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static TL2_LOCK: Mutex<()> = Mutex::new(());
+
+    // R-07: two write-set addresses hashing to the same lock index must be
+    // locked once; the old adjacency-only dedup re-locked a held lock and
+    // spun forever (non-simulation builds).
+    #[test]
+    fn commit_with_shared_lock_index_does_not_self_deadlock() {
+        let _g = TL2_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        // Find a second address in the same 32 MiB buffer whose lock index
+        // collides with the first. The 20-bit multiplicative hash repeats
+        // every ~2^20 lines, so a linear scan over the buffer finds a true
+        // collision in expectation after ~100k probes (verified at runtime
+        // against the actual base).
+        let mut buf = vec![0u64; 1 << 22];
+        let base = buf.as_mut_ptr() as usize;
+        let base_idx = lock_index(base);
+        let mut off = 0usize;
+        for i in 1..(1usize << 22) {
+            if lock_index(base + i * 8) == base_idx {
+                off = i * 8;
+                break;
+            }
+        }
+        assert_ne!(off, 0, "test setup: no colliding lock index found");
+        tm_begin();
+        tm_write_u64(base as *mut u64, 1);
+        tm_write_u64((base + off) as *mut u64, 2);
+        let ok = tm_commit(); // pre-fix this hangs forever (self-deadlock)
+        assert!(ok, "commit must succeed with a shared lock index");
+        assert_eq!(buf[0], 1);
+        assert_eq!(buf[off / 8], 2);
+        tm_begin();
+        assert_eq!(tm_read_u64(base as *mut u64), 1);
+        assert_eq!(tm_read_u64((base + off) as *mut u64), 2);
+        assert!(tm_commit());
     }
 }

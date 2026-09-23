@@ -51,6 +51,14 @@ impl Lock {
             .store((ver + 1) << VERSION_SHIFT, Ordering::Release);
     }
 
+    /// Release without incrementing: installs `ver` as the new version.
+    /// WT uses this to restore the pre-transaction version on abort (a blind
+    /// bump would move the version past the global clock and livelock later
+    /// readers) and to stamp every written lock with the commit timestamp.
+    pub fn unlock_exclusive_to(&self, ver: u64) {
+        self.data.store(ver << VERSION_SHIFT, Ordering::Release);
+    }
+
     pub fn version(&self) -> u64 {
         let v = self.data.load(Ordering::Acquire);
         (v & !LOCK_MASK) >> VERSION_SHIFT
@@ -72,6 +80,10 @@ pub fn try_lock_at_index(idx: usize) -> bool {
 
 pub fn unlock_at_index(idx: usize) {
     locks()[idx].unlock_exclusive();
+}
+
+pub fn unlock_at_index_to(idx: usize, ver: u64) {
+    locks()[idx].unlock_exclusive_to(ver);
 }
 
 pub fn version_at_index(idx: usize) -> u64 {
@@ -156,6 +168,8 @@ pub struct TxState {
     pub write_backs: Vec<WriteBack>,
     #[cfg(feature = "wt")]
     pub undo_backs: Vec<WriteBack>,
+    #[cfg(feature = "wt")]
+    pub locked_old_versions: Vec<(usize, u64)>,
     pub start_version: u64,
     pub end_version: u64,
     #[allow(dead_code)]
@@ -173,6 +187,8 @@ impl TxState {
             write_backs: Vec::new(),
             #[cfg(feature = "wt")]
             undo_backs: Vec::new(),
+            #[cfg(feature = "wt")]
+            locked_old_versions: Vec::new(),
             start_version,
             end_version: start_version,
             aborted: false,
@@ -378,6 +394,28 @@ pub fn unlock_indices(idxs: &[usize]) {
     deduped.dedup();
     for &idx in &deduped {
         unlock_at_index(idx);
+    }
+    fence(Ordering::SeqCst);
+}
+
+/// WT abort: release every held lock with the version it had at acquisition.
+pub fn unlock_indices_restore(old: &[(usize, u64)]) {
+    let mut deduped: Vec<(usize, u64)> = old.to_vec();
+    deduped.sort_unstable();
+    deduped.dedup_by(|a, b| a.0 == b.0);
+    for &(idx, ver) in &deduped {
+        unlock_at_index_to(idx, ver);
+    }
+    fence(Ordering::SeqCst);
+}
+
+/// WT commit: release every held lock stamped with the commit timestamp.
+pub fn unlock_indices_stamp(idxs: &[usize], ver: u64) {
+    let mut deduped: Vec<usize> = idxs.to_vec();
+    deduped.sort_unstable();
+    deduped.dedup();
+    for &idx in &deduped {
+        unlock_at_index_to(idx, ver);
     }
     fence(Ordering::SeqCst);
 }

@@ -300,20 +300,20 @@ fn main() {
     {
         const N: usize = 10000;
         let mut ptrs = [ptr::null_mut::<Node>(); N];
-        for i in 0..N {
-            ptrs[i] = node_alloc_tm(i as i64);
+        for (i, p) in ptrs.iter_mut().enumerate() {
+            *p = node_alloc_tm(i as i64);
         }
-        for i in 0..N {
-            addrspace::tm_region_free(ptrs[i].cast::<u8>());
+        for p in ptrs.iter().copied() {
+            addrspace::tm_region_free(p.cast::<u8>());
         }
-        for i in 0..N {
-            ptrs[i] = node_alloc_tm((i + N) as i64);
+        for (i, p) in ptrs.iter_mut().enumerate() {
+            *p = node_alloc_tm((i + N) as i64);
         }
         let ok = (0..N).all(|i| unsafe { ptrs[i].is_null() || (*ptrs[i]).value == (i + N) as i64 });
         println!("  free+reuse: {}", if ok { "PASS" } else { "FAIL" });
         assert!(ok, "free/reuse corruption");
-        for i in 0..N {
-            addrspace::tm_region_free(ptrs[i].cast::<u8>());
+        for p in ptrs.iter().copied() {
+            addrspace::tm_region_free(p.cast::<u8>());
         }
     }
 

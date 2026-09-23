@@ -1171,9 +1171,9 @@ mod tests {
         init_once();
         const N: usize = 256;
         let mut ptrs: [*mut u8; N] = [std::ptr::null_mut(); N];
-        for i in 0..N {
-            ptrs[i] = tm_region_malloc(16);
-            assert!(!ptrs[i].is_null());
+        for p in ptrs.iter_mut() {
+            *p = tm_region_malloc(16);
+            assert!(!p.is_null());
         }
         // All pointers should be 16-byte aligned and non-overlapping
         // (same-chunk order should be ascending)
@@ -1202,28 +1202,28 @@ mod tests {
         init_once();
         const N: usize = 1000;
         let mut ptrs: [*mut u8; N] = [std::ptr::null_mut(); N];
-        for i in 0..N {
-            ptrs[i] = tm_region_malloc(32);
-            unsafe { std::ptr::write(ptrs[i] as *mut u32, i as u32) };
+        for (i, p) in ptrs.iter_mut().enumerate() {
+            *p = tm_region_malloc(32);
+            unsafe { std::ptr::write(*p as *mut u32, i as u32) };
         }
         // Free all
-        for i in 0..N {
-            tm_region_free(ptrs[i]);
+        for p in ptrs.iter().copied() {
+            tm_region_free(p);
         }
         // Re-allocate — blocks should be recycled from TL list
-        for i in 0..N {
-            ptrs[i] = tm_region_malloc(32);
-            assert!(!ptrs[i].is_null());
-            unsafe { std::ptr::write(ptrs[i] as *mut u32, (i + 1000) as u32) };
+        for (i, p) in ptrs.iter_mut().enumerate() {
+            *p = tm_region_malloc(32);
+            assert!(!p.is_null());
+            unsafe { std::ptr::write(*p as *mut u32, (i + 1000) as u32) };
         }
         // Verify data
-        for i in 0..N {
-            let val = unsafe { std::ptr::read(ptrs[i] as *mut u32) };
+        for (i, &p) in ptrs.iter().enumerate() {
+            let val = unsafe { std::ptr::read(p as *mut u32) };
             assert_eq!(val, (i + 1000) as u32);
         }
         // Clean up
-        for i in 0..N {
-            tm_region_free(ptrs[i]);
+        for p in ptrs.iter().copied() {
+            tm_region_free(p);
         }
     }
 

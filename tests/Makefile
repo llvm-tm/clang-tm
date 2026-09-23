@@ -2,13 +2,13 @@
 # Sub-makefiles:
 #   backends/  — backend unit tests (counter, validation, region allocator)
 #   plugin/    — LLVM plugin integration tests (37 tests)
-#   expli-api/ — Explicit C++ API tests
+#   explicit-api/ — Explicit C++ API tests
 
 .PHONY: all run clean
 
 all:
 	$(MAKE) -C backends/tm_impl all
-	$(MAKE) -C expli-api all
+	$(MAKE) -C explicit-api all
 
 run:
 	$(MAKE) -C backends/tm_impl run
@@ -17,4 +17,4 @@ run:
 
 clean:
 	$(MAKE) -C backends/tm_impl clean
-	$(MAKE) -C expli-api clean
+	$(MAKE) -C explicit-api clean
