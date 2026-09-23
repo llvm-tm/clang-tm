@@ -232,29 +232,7 @@ struct CpuLaneState {
     volatile int phase;
 };
 
-static std::mutex cpu_pr_stm_mutex;
-
-void cpu_pr_stm_begin(int warp_id, int lane_id) {
-    (void)warp_id; (void)lane_id;
-}
-
-void cpu_pr_stm_read(int warp_id, int lane_id, uint32_t *addr) {
-    (void)warp_id; (void)lane_id; (void)addr;
-}
-
-void cpu_pr_stm_write(int warp_id, int lane_id, uint32_t *addr, uint32_t val) {
-    (void)warp_id; (void)lane_id; (void)addr; (void)val;
-}
-
-int cpu_pr_stm_commit(int warp_id, int lane_id) {
-    (void)warp_id; (void)lane_id;
-    return 1;
-}
-
-void cpu_pr_stm_abort(int warp_id, int lane_id) {
-    (void)warp_id; (void)lane_id;
-}
-
-void cpu_pr_stm_end(int warp_id, int lane_id) {
-    (void)warp_id; (void)lane_id;
-}
+// review-05 G-09: the former cpu_pr_stm_begin/read/write/commit/abort/end
+// stubs (no-ops, commit returning success) were deleted here — a silent
+// no-op "TM" if ever linked. The real CPU emulation lives in
+// backends/tm_impl/gpu_stm/cpu/pr_stm_cpu.cpp (cpu_pr_stm_emulate).

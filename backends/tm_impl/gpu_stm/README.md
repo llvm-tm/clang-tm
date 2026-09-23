@@ -153,7 +153,7 @@ make -j$(nproc) pr_stm_backend
 | File | Description |
 |------|-------------|
 | `include/gpu_stm_api.h` | Public C API (TMRealHooks-compatible) |
-| `gpu/backends/gpu_stm/pr_stm_kernel.cuh` | CUDA kernel: PR-STM warp-level algorithm |
-| `gpu/backends/gpu_stm/pr_stm_runtime.cu` | Host runtime: CUDA device management, kernel launch |
+| `gpu/backends/gpu_stm/cuda/pr_stm_kernel.cuh` | CUDA kernel: PR-STM warp-level algorithm |
+| `gpu/backends/gpu_stm/cuda/pr_stm_runtime.cu` | Host runtime: CUDA device management, kernel launch |
 | `cpu/pr_stm_cpu.cpp` | CPU fallback: std::thread-based PR-STM emulation |
 | `CMakeLists.txt` | CUDA-enabled CMake build |

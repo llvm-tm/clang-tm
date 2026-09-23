@@ -1,6 +1,7 @@
 #include "csmv_batch_executor.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <cstdlib>
 #include <cstring>
 #include <cassert>
 
@@ -10,10 +11,16 @@ __device__ CSMVGpuEntry *g_csmv_gpu_head_table = nullptr;
 __device__ uint64_t     *g_csmv_gpu_clock = nullptr;
 __device__ uintptr_t     g_csmv_gpu_free_list = 0;
 __device__ uintptr_t     g_csmv_gpu_retire_list = 0;
+__device__ uint64_t      g_csmv_gpu_table_mask = CSMV_GPU_TABLE_SIZE - 1;
+__device__ uintptr_t     g_csmv_gpu_arena_base = 0;
+__device__ uintptr_t     g_csmv_gpu_arena_end = 0;
 
 __device__ CSMVGpuEntry* csmv_gpu_table() { return g_csmv_gpu_head_table; }
 __device__ uint64_t*    csmv_gpu_clock_addr() { return g_csmv_gpu_clock; }
 __device__ uintptr_t*   csmv_gpu_free_list_addr() { return &g_csmv_gpu_free_list; }
+__device__ uint64_t csmv_gpu_table_mask() { return g_csmv_gpu_table_mask; }
+__device__ uintptr_t csmv_gpu_arena_base() { return g_csmv_gpu_arena_base; }
+__device__ uintptr_t csmv_gpu_arena_end() { return g_csmv_gpu_arena_end; }
 __device__ uintptr_t*   csmv_gpu_retire_list_addr() { return &g_csmv_gpu_retire_list; }
 
 // Moves nodes retired by the previous batch onto the free list.  Runs
@@ -159,7 +166,7 @@ CSMVBatchExecutor::BatchTiming CSMVBatchExecutor::launch() {
     // are unreachable once superseded.
     csmv_gpu_drain_retire_kernel<<<1, 1, 0, stream>>>();
     uint64_t batch_snapshot = 0;
-    if (g_clock_host) batch_snapshot = *g_clock_host;
+    if (g_clock_host && !getenv("CSMV_NO_GC")) batch_snapshot = *g_clock_host;  else batch_snapshot = 0;
     csmv_batch_kernel<<<blocks, threads_per_block, 0, stream>>>(d_fn, d_args_, n,
                                                                 batch_snapshot);
     cudaEventRecord(ev[3], stream);
@@ -194,10 +201,19 @@ extern "C" void csmv_gpu_init(int table_entries) {
     if (table_entries <= 0)
         table_entries = CSMV_GPU_TABLE_SIZE;
 
+    // Round up to a power of two; entry_idx masks with this mask, NOT the
+    // compile-time default — a caller asking for a bigger table must not
+    // silently alias entries mod 2^20 (corrupts unrelated addresses).
+    uint64_t cap = CSMV_GPU_TABLE_SIZE;
+    while (cap < (uint64_t)table_entries) cap <<= 1;
+    table_entries = (int)cap;
+
     // Allocate GPU-side entry table + clock
     CSMVGpuEntry *d_table = nullptr;
     uint64_t     *d_clock = nullptr;
     cudaMalloc(&d_table, table_entries * sizeof(CSMVGpuEntry));
+    uint64_t mask = cap - 1;
+    cudaMemcpyToSymbol(g_csmv_gpu_table_mask, &mask, sizeof(uint64_t));
     cudaMalloc(&d_clock, sizeof(uint64_t));
     cudaMemset(d_table, 0, table_entries * sizeof(CSMVGpuEntry));
     cudaMemset(d_clock, 0, sizeof(uint64_t));
@@ -206,6 +222,12 @@ extern "C" void csmv_gpu_init(int table_entries) {
     cudaMemcpyToSymbol(g_csmv_gpu_head_table, &d_table, sizeof(CSMVGpuEntry*));
     cudaMemcpyToSymbol(g_csmv_gpu_clock,     &d_clock, sizeof(uint64_t*));
     if (!g_clock_host) g_clock_host = new uint64_t(0);
+}
+
+extern "C" void csmv_gpu_set_data_arena(void *base, size_t bytes) {
+    uintptr_t b = (uintptr_t)(uintptr_t)base, e = b + bytes;
+    cudaMemcpyToSymbol(g_csmv_gpu_arena_base, &b, sizeof(uintptr_t));
+    cudaMemcpyToSymbol(g_csmv_gpu_arena_end,  &e, sizeof(uintptr_t));
 }
 
 extern "C" void csmv_gpu_shutdown() {

@@ -81,14 +81,21 @@ updates are visible.
 ## Layout
 
 - `include/gpu_gust_api.h`     — constants, device structs, host API
+- `include/gpu_gust_batch_executor.cuh` — batch-executor public interface
+  (device inline protocol + host `GUSTBatchExecutor`), consumed by
+  `gpu/benchmarks/`
 - `cuda/gpu_gust_kernel.cuh`   — VBox/CL helpers + single-pass kernel
+- `cuda/gpu_gust_batch_executor.cu` — device globals, batch kernel, host lifecycle
 - `cuda/gpu_gust_host.cpp`     — host TM hooks (g++/hipcc compatible)
 - `cuda/gpu_gust_runtime.cu`   — kernel launch wrapper (`<<< >>>`)
-- `../../common/tm_gpu_platform.hpp` — CUDA/HIP portability layer
+- `gpu/benchmarks/gpu_gust_smoke.cu` — smoke/test driver (moved out of the
+  backend directory in the review-05 layout pass; built by
+  `gpu/benchmarks/Makefile`)
+- `backends/tm_impl/common/tm_gpu_platform.hpp` (repo root) — CUDA/HIP
+  portability layer
 
-Build requires CUDA (`nvcc`) or HIP (`hipcc`); no GPU is available on
-this development machine (macOS arm64), so the kernel is compile-time
-reviewed only.
+Build requires CUDA (`nvcc`) or HIP (`hipcc`). Verified on Linux/AMD
+(ROCm 7.2.5, gfx1151) during review-05; NVIDIA re-verification pending.
 
 ## Verification
 

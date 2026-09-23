@@ -166,8 +166,26 @@ struct CSMVWarpState {
 };
 
 // Look up GPU entry index from data address
+__device__ uint64_t csmv_gpu_table_mask();
+__device__ uintptr_t csmv_gpu_arena_base();
+__device__ uintptr_t csmv_gpu_arena_end();
+
+// Register a contiguous device array whose 8-byte cells get DIRECT (collision
+// free) version-table slots: index = (addr - base)/8.  Callers whose data
+// lives outside the arena fall back to the masked address hash, which is
+// injective only while the working set stays well under the table size —
+// benchmarks with multi-million-cell arrays MUST use an arena.
+extern "C" void csmv_gpu_set_data_arena(void *base, size_t bytes);
+
 __device__ inline uint64_t csmv_gpu_entry_idx(void *data_addr) {
-    return ((uintptr_t)data_addr >> 3) & (CSMV_GPU_TABLE_SIZE - 1);
+    uintptr_t a = (uintptr_t)data_addr;
+    uintptr_t base = csmv_gpu_arena_base();
+    if (base && a >= base && a < csmv_gpu_arena_end())
+        return (a - base) >> 3;
+    // Runtime mask: csmv_gpu_init may allocate a larger table than the
+    // compile-time default; aliasing by the old constant mask corrupted
+    // unrelated cells once the working set exceeded 2^20 entries.
+    return (a >> 3) & csmv_gpu_table_mask();
 }
 
 // Node allocation with a device-side free list.  Retired nodes (see
@@ -213,22 +231,26 @@ __device__ inline uint64_t csmv_gpu_read(CSMVWarpState *ws, void *data_addr) {
 
     // Warp-cooperative version list traversal.  The list is newest-first, so
     // the *first* node with ts <= start_clock is the newest value visible to
-    // this snapshot.  All lanes follow the identical chain (same head, same
-    // next pointers), so they diverge together; lane 0 records the value and
-    // the *head's* timestamp as the observed version, matching the CPU
-    // fallback convention: commit-time validation re-checks that the head is
-    // still exactly the head we saw, so any concurrent prepend (which would
-    // change the head) aborts us.
+    // this snapshot.  Lane 0 records the value and the OBSERVED NODE's own
+    // timestamp — the shared CSMV convention (CPU fallback matches).  Commit
+    // validation then demands the head still be exactly that node: any commit
+    // to this address after our read (or a head that was ahead of us when we
+    // read) changes the head, so validation fails.  Recording the HEAD ts
+    // instead would let a transaction that reads an older-than-head snapshot
+    // commit over a concurrent prepend — a lost update (verified: sum
+    // invariant in gpu_tpcc breaks with the head-ts variant).
     CSMVVersionNode *node = csmv_gpu_load_head(entry);
-    uint64_t observed = node ? node->timestamp : 0;
     uint64_t result = 0;
+    uint64_t observed = 0;
     uint64_t lane_mask = __activemask();
     int lane_id = threadIdx.x & 31;
 
     while (node) {
         if (node->timestamp <= ws->start_clock) {
-            if (lane_id == 0)
+            if (lane_id == 0) {
                 result = node->value;
+                observed = node->timestamp;
+            }
             break;
         }
         node = node->next;
@@ -278,27 +300,16 @@ __device__ inline uint64_t csmv_gpu_commit(CSMVWarpState *ws) {
     int num_writes = ws->num_writes;
     int num_reads = ws->num_reads;
 
-    // Fast-path optimistic read-set validation (no locks).
-    int fail = 0;
-    if (lane_id == 0) {
-        for (int i = 0; i < num_reads; i++) {
-            CSMVGpuEntry *entry = &csmv_gpu_table()[ws->reads[i].entry_idx];
-            CSMVVersionNode *head = csmv_gpu_load_head(entry);
-            uint64_t head_ts = head ? head->timestamp : 0;
-            if (head_ts != ws->reads[i].observed_ts) { fail = 1; break; }
-        }
-    }
-    if (__ballot_sync(lane_mask, fail)) return 0;
-
-    // Acquire per-entry locks on every write-set entry (lane 0).  We never
-    // spin: on contention we release and abort, so no deadlock is possible.
-    // This closes the validate-vs-prepend race (two txns reading the same
-    // record, both passing validation before either prepends) that otherwise
-    // loses increments when both commits are counted but only one node's
-    // value survives as the head.
-    // NOTE: `fail` must be set only by lane 0 (the validation loops use the
-    // same pattern); do NOT ballot on a per-lane counter like `locked`, which
-    // is 0 on lanes 1-31 and would make every write tx falsely abort.
+    // Acquire per-entry locks on every write-set entry (lane 0) BEFORE
+    // validating.  Lock-then-validate-then-prepend is the shared CSMV
+    // commit order (the CPU fallback does the same under its entry mutex);
+    // validating first and locking after leaves the validate-vs-prepend
+    // window open: two txns can both pass validation on the same head and
+    // both prepend, silently losing one update.  We never spin: on lock
+    // contention we release and abort, so no deadlock is possible.
+    // NOTE: flags must be set only by lane 0 (lane 0 runs the loops); do NOT
+    // ballot on a per-lane counter like `locked`, which is 0 on lanes 1-31
+    // and would make every write tx falsely abort.
     int lock_fail = 0;
     int locked = 0;
     if (lane_id == 0) {
@@ -317,11 +328,11 @@ __device__ inline uint64_t csmv_gpu_commit(CSMVWarpState *ws) {
         return 0;
     }
 
-    // Re-validate the read-set under the write locks: between the fast-path
-    // validation and acquiring the locks, a concurrent commit could have
-    // changed a read entry.  Any read entry that is also a locked write entry
-    // is safe (we hold its lock).
-    fail = 0;
+    // Validate the read-set under the write locks: between acquiring the
+    // locks and this point, a concurrent commit could have changed a read
+    // entry.  Any read entry that is also a locked write entry is safe
+    // (we hold its lock).
+    int fail = 0;
     if (lane_id == 0) {
         for (int i = 0; i < num_reads; i++) {
             CSMVGpuEntry *entry = &csmv_gpu_table()[ws->reads[i].entry_idx];

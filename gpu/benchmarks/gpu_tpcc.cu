@@ -50,19 +50,28 @@
 // Sum of all four arrays grows by exactly 2*amount per committed payment
 // (see invariant above); the host checks total == 2*amount*commits.
 
-#define WYT_IDX(w)       (w)
-#define DYT_IDX(w,d)     ((w) * GPU_TPCC_MAX_D + (d))
-#define CBAL_IDX(w,d,c)  (((w) * GPU_TPCC_MAX_D + (d)) * GPU_TPCC_MAX_C + (c))
-#define CYT_IDX(w,d,c)   (CBAL_IDX(w,d,c) + GPU_TPCC_MAX_W*GPU_TPCC_MAX_D*GPU_TPCC_MAX_C)
+// Single contiguous arena (collision-free direct table indices via
+// csmv_gpu_set_data_arena).  Old layout used four __device__ arrays and a
+// CYT_IDX macro that walked past the end of g_cyt — the CY offset below
+// keeps every index inside the allocation.
+#define W_OFF  0
+#define D_OFF  (GPU_TPCC_MAX_W)
+#define C_OFF  (D_OFF + GPU_TPCC_MAX_W * GPU_TPCC_MAX_D)
+#define CY_OFF (C_OFF + GPU_TPCC_MAX_W * GPU_TPCC_MAX_D * GPU_TPCC_MAX_C)
+#define ARENA_CELLS (CY_OFF + GPU_TPCC_MAX_W * GPU_TPCC_MAX_D * GPU_TPCC_MAX_C)
 
-__device__ uint64_t g_wyt [GPU_TPCC_MAX_W];
-__device__ uint64_t g_dyt [GPU_TPCC_MAX_W * GPU_TPCC_MAX_D];
-__device__ uint64_t g_cbal[GPU_TPCC_MAX_W * GPU_TPCC_MAX_D * GPU_TPCC_MAX_C];
-__device__ uint64_t g_cyt [GPU_TPCC_MAX_W * GPU_TPCC_MAX_D * GPU_TPCC_MAX_C];
+#define WYT_IDX(w)       (W_OFF + (w))
+#define DYT_IDX(w,d)     (D_OFF + (w) * GPU_TPCC_MAX_D + (d))
+#define CBAL_IDX(w,d,c)  (C_OFF + (((w) * GPU_TPCC_MAX_D + (d)) * GPU_TPCC_MAX_C + (c)))
+#define CYT_IDX(w,d,c)   (CY_OFF + (((w) * GPU_TPCC_MAX_D + (d)) * GPU_TPCC_MAX_C + (c)))
+
+__device__ uint64_t *g_arena = nullptr;   // set from host; cells are arena[i]
 
 __device__ unsigned long long g_commits = 0;
 __device__ unsigned long long g_aborts = 0;
 
+
+__device__ inline uint64_t head_value(uint64_t *cell);
 
 struct TPCCTxArg {
     int    nw, nd, nc;
@@ -91,20 +100,23 @@ __device__ void tx_tpcc_payment(int lane_id, int warp_id,
     csmv_gpu_begin(ws);
 
     // Read phase (read set = 4 cells).
-    uint64_t wyt  = csmv_gpu_read(ws, &g_wyt[WYT_IDX(w)]);
-    uint64_t dyt  = csmv_gpu_read(ws, &g_dyt[DYT_IDX(w,d)]);
-    uint64_t cbal = csmv_gpu_read(ws, &g_cbal[CBAL_IDX(w,d,c)]);
-    uint64_t cyt  = csmv_gpu_read(ws, &g_cyt[CYT_IDX(w,d,c)]);
+    uint64_t wyt  = csmv_gpu_read(ws, &g_arena[WYT_IDX(w)]);
+    uint64_t dyt  = csmv_gpu_read(ws, &g_arena[DYT_IDX(w,d)]);
+    uint64_t cbal = csmv_gpu_read(ws, &g_arena[CBAL_IDX(w,d,c)]);
+    uint64_t cyt  = csmv_gpu_read(ws, &g_arena[CYT_IDX(w,d,c)]);
 
     // Money moves: customer pays amount.
     //   w_ytd += amt, d_ytd += amt, c_balance -= amt, c_ytd += amt
-    csmv_gpu_write(ws, &g_wyt[WYT_IDX(w)],      wyt  + a->amount);
-    csmv_gpu_write(ws, &g_dyt[DYT_IDX(w,d)],    dyt  + a->amount);
-    csmv_gpu_write(ws, &g_cbal[CBAL_IDX(w,d,c)],cbal - a->amount);
-    csmv_gpu_write(ws, &g_cyt[CYT_IDX(w,d,c)],  cyt  + a->amount);
+    csmv_gpu_write(ws, &g_arena[WYT_IDX(w)],      wyt  + a->amount);
+    csmv_gpu_write(ws, &g_arena[DYT_IDX(w,d)],     dyt  + a->amount);
+    csmv_gpu_write(ws, &g_arena[CBAL_IDX(w,d,c)],  cbal - a->amount);
+    csmv_gpu_write(ws, &g_arena[CYT_IDX(w,d,c)],   cyt  + a->amount);
 
-    if (csmv_gpu_commit(ws) != 0) {
-        if (lane_id == 0) atomicAdd((unsigned long long*)&g_commits, 1ULL);
+    uint64_t ok = csmv_gpu_commit(ws);
+    if (ok != 0) {
+        if (lane_id == 0) {
+            atomicAdd((unsigned long long*)&g_commits, 1ULL);
+        }
     } else {
         if (lane_id == 0) atomicAdd((unsigned long long*)&g_aborts, 1ULL);
     }
@@ -119,10 +131,10 @@ __device__ inline uint64_t head_value(uint64_t *cell) {
     CSMVVersionNode *head = csmv_gpu_load_head(entry);
     return head ? head->value : 0;
 }
-__device__ inline uint64_t current_wyt(int i)  { return head_value(&g_wyt[i]); }
-__device__ inline uint64_t current_dyt(int i)  { return head_value(&g_dyt[i]); }
-__device__ inline uint64_t current_cbal(int i) { return head_value(&g_cbal[i]); }
-__device__ inline uint64_t current_cyt(int i)  { return head_value(&g_cyt[i]); }
+__device__ inline uint64_t current_wyt(int i)  { return head_value(&g_arena[W_OFF + i]); }
+__device__ inline uint64_t current_dyt(int i)  { return head_value(&g_arena[D_OFF + i]); }
+__device__ inline uint64_t current_cbal(int i) { return head_value(&g_arena[C_OFF + i]); }
+__device__ inline uint64_t current_cyt(int i)  { return head_value(&g_arena[CY_OFF + i]); }
 
 // ── Snapshot kernel: sum all four arrays (money conservation) ──
 __global__ void snapshot_kernel(uint64_t *out_wyt, uint64_t *out_dyt,
@@ -130,10 +142,13 @@ __global__ void snapshot_kernel(uint64_t *out_wyt, uint64_t *out_dyt,
                                 int nw, int nd, int nc)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < nw)            out_wyt[i]  = current_wyt(WYT_IDX(i));
-    if (i < nw * nd)       out_dyt[i]  = current_dyt(DYT_IDX(i / nd, i % nd));
-    if (i < nw * nd * nc)  out_cbal[i] = current_cbal(CBAL_IDX(i / (nd*nc), (i / nc) % nd, i % nc));
-    if (i < nw * nd * nc)  out_cyt[i]  = current_cyt(CYT_IDX(i / (nd*nc), (i / nc) % nd, i % nc));
+
+    // Map compact snapshot indices back to the transaction layout, which
+    // strides with MAX_D/MAX_C (not the runtime nd/nc).
+    if (i < nw)            out_wyt[i]  = head_value(&g_arena[WYT_IDX(i)]);
+    if (i < nw * nd)       out_dyt[i]  = head_value(&g_arena[DYT_IDX(i / nd, i % nd)]);
+    if (i < nw * nd * nc)  out_cbal[i] = head_value(&g_arena[CBAL_IDX(i / (nd*nc), (i / nc) % nd, i % nc)]);
+    if (i < nw * nd * nc)  out_cyt[i]  = head_value(&g_arena[CYT_IDX(i / (nd*nc), (i / nc) % nd, i % nc)]);
 }
 
 // ── Host driver ───────────────────────────────────────────────
@@ -170,7 +185,14 @@ int main(int argc, char **argv) {
     //  For the money-conservation check we need an initial total; here we
     //  track the *sum of deltas* instead, which is exact.)
 
-    csmv_gpu_init(GPU_TPCC_MAX_W * GPU_TPCC_MAX_D * GPU_TPCC_MAX_C * 2);
+    // One contiguous arena for all TM cells + direct-index registration.
+    uint64_t *d_arena = nullptr;
+    cudaMalloc(&d_arena, ARENA_CELLS * sizeof(uint64_t));
+    cudaMemset(d_arena, 0, ARENA_CELLS * sizeof(uint64_t));
+    cudaMemcpyToSymbol(g_arena, &d_arena, sizeof(uint64_t*));
+    csmv_gpu_set_data_arena(d_arena, ARENA_CELLS * sizeof(uint64_t));
+
+    csmv_gpu_init(ARENA_CELLS);
 
     CSMVBatchExecutor executor;
 
@@ -207,10 +229,14 @@ int main(int argc, char **argv) {
     // Invariant: every committed payment moves the sum of all fields by
     // exactly +2*amount (w_ytd +amt, d_ytd +amt, c_balance -amt, c_ytd +amt).
     // Aborted transactions contribute nothing (version nodes only on commit).
-    uint64_t total = 0;
-    for (size_t i = 0; i < total_cells; i++) total += h[i];
+    // Signed accumulation: c_balance goes negative when a customer spends
+    // more than their (zero) starting balance; uint64 wrap-around would make
+    // the delta invariant fail spuriously.  Two's-complement addition gives
+    // the true net delta.
+    long long total = 0;
+    for (size_t i = 0; i < total_cells; i++) total += (long long)h[i];
 
-    uint64_t expected = 2ULL * amt * (uint64_t)commits;
+    long long expected = 2LL * (long long)amt * (long long)commits;
     bool pass = (commits + aborts == (unsigned long long)num_txns) &&
                 (total == expected);
 
@@ -228,6 +254,7 @@ int main(int argc, char **argv) {
     printf("\n");
 
     delete[] h;
+    if (d_arena) cudaFree(d_arena);
     csmv_gpu_shutdown();
     return pass ? 0 : 1;
 }

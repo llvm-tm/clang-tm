@@ -32,8 +32,16 @@ enum {
 
 // ── Versioned Box (device struct) ───────────────────────────────
 // Each shared data item maps to one VBox holding the most recent
-// committed versions as a circular array, newest at (head-1) % DEPTH.
-// `head` is an atomic, monotonic append counter (slot = head % DEPTH).
+// committed versions.  `head` is an atomic append counter; writers
+// reserve a slot with atomicAdd(head), then publish payload first
+// (value) and version LAST — the version is the publish marker, so a
+// reader that sees a non-zero version is guaranteed to see its value
+// (review-05 fixed the reverse order).  Slots are never reused: if
+// head reaches DEPTH the writing transaction aborts (overflow), which
+// keeps every live (version, value) pair immutable.  Because concurrent
+// write-backs append out of version order, snapshot reads must take the
+// MAXIMUM version <= threshold across all slots, not the first slot
+// found (mirrors FindBody in docs/proofs/GPU_GUST.tla).
 // Version 0 is a sentinel meaning "no committed version yet".
 struct GUSTVBox {
     uint64_t versions[GPU_GUST_VBOX_DEPTH];   // commit timestamps
@@ -45,9 +53,20 @@ struct GUSTVBox {
 // ── Commit Log entry (device struct) ────────────────────────────
 // One entry per reserved commit timestamp.  write-set is stored so that
 // concurrent transactions can perform CCT validation against it.
+//
+// `cts` is the FULL commit timestamp of the transaction that currently
+// owns this ring slot (0 = never used).  The CL is circular, so an entry
+// seen at slot (CTS % CL_SIZE) belongs to epoch `cts`; validators compare
+// cts against the valPtr they are scanning and ignore foreign generations
+// (review-05: without the epoch, wrap-around made validators read another
+// transaction's write-set — and made aborted transactions overwrite live
+// foreign entries).  Safe reclamation of a stale slot requires
+// gts > stale cts, guaranteed when num_warps < CL_SIZE / WARP_SIZE at
+// launch (asserted by the batch executor).
 struct GUSTCLEntry {
     uint32_t state;                            // GUST_CL_*
     uint32_t num_writes;
+    uint64_t cts;                              // owning epoch (see above)
     uint32_t write_addrs[GPU_GUST_MAX_WRITES];
     uint32_t write_vals[GPU_GUST_MAX_WRITES];
 };

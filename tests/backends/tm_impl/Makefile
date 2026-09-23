@@ -10,7 +10,7 @@ HOOKS_SRC := $(RUNTIME_DIR)/common/tm_hooks.cpp
 INC_BASE := -I../../../backends/tm_impl/common -I$(RUNTIME_DIR)
 
 # ── Backend definitions ────────────────────────────────────────────
-BACKENDS := tl2 tinystm wt wbetl norec swisstm xtm gpu_stm_cpu
+BACKENDS := tl2 tinystm wt wbetl norec swisstm xtm gpu_stm_cpu gputx gacco csmv
 
 INC_tl2     := $(INC_BASE) -I../../../backends/tm_impl/tl2
 RUNTIME_tl2 := $(RUNTIME_DIR)/tl2/tl2_runtime.cpp
@@ -45,8 +45,20 @@ INC_gpu_stm_cpu := $(INC_BASE) -I../../../backends/tm_impl/gpu_stm/include
 RUNTIME_gpu_stm_cpu := $(RUNTIME_DIR)/gpu_stm/cpu/gpu_stm_cpu_runtime.cpp
 FLAGS_gpu_stm_cpu := -DTM_BACKEND_GPU_STM_CPU
 
+INC_gputx := $(INC_BASE) -I../../../backends/tm_impl/gputx
+RUNTIME_gputx := $(RUNTIME_DIR)/gputx/gputx_runtime.cpp
+FLAGS_gputx := -DTM_BACKEND_GPUTX
+
+INC_gacco := $(INC_BASE) -I../../../backends/tm_impl/gacco
+RUNTIME_gacco := $(RUNTIME_DIR)/gacco/gacco_runtime.cpp
+FLAGS_gacco := -DTM_BACKEND_GACCO
+
+INC_csmv := $(INC_BASE) -I../../../backends/tm_impl/csmv/include
+RUNTIME_csmv := $(RUNTIME_DIR)/csmv/cpu/csmv_cpu_runtime.cpp
+FLAGS_csmv := -DTM_BACKEND_CSMV
+
 # ── Test source files ──────────────────────────────────────────────
-TESTS := counter_st counter_mt write_set_validation overlap_stress read_lock_interference readall_write_interference
+TESTS := counter_st counter_mt write_set_validation overlap_stress read_lock_interference readall_write_interference abba_deadlock subword_counters
 
 # ── Standalone allocator tests (no backend runtime) ─────────────────
 ALLOC_TESTS := region_alloc region_stress
@@ -93,10 +105,11 @@ RUN_TARGETS := $(addprefix run-,$(BACKENDS))
 
 $(RUN_TARGETS): run-%: $(foreach t,$(TESTS),bin/%/$(t))
 	@echo "=== Backend: $* ==="
-	@$(foreach t,$(TESTS),\
-		echo "--- $(t) ---"; \
-		bin/$*/$(t) 2>&1; \
-		echo;)
+	@rc=0; for t in $(TESTS); do \
+		echo "--- $$t ---"; \
+		bin/$*/$$t 2>&1 || rc=1; \
+		echo; \
+	done; exit $$rc
 
 run-allocs:
 	@echo "=== TM Region Allocator Tests ==="

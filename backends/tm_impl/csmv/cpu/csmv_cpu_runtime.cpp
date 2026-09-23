@@ -235,31 +235,40 @@ static uint64_t read_common(void *data_addr)
 	// Traverse version list to find newest version ≤ start_clock
 	CSMVVersionNode *head = entry->head.load(std::memory_order_consume);
 	uint64_t result;
+	uint64_t observed;
 
 	if (head == nullptr) {
 		// No versions yet — return raw value (initial state before any write)
 		// This supports non-TM initialization (e.g., TM<int> x(10))
 		result = *(uint64_t *)data_addr;
+		observed = 0;
 	} else if (head->timestamp <= g_tx.start_clock) {
 		// Head is the newest version and within our snapshot → fast path
 		result = head->value;
+		observed = head->timestamp;
 	} else {
 		// Head is too new — traverse to find the right version
 		CSMVVersionNode *node = head;
 		result = 0;
+		observed = 0;
 		while (node) {
 			if (node->timestamp <= g_tx.start_clock) {
 				result = node->value;
+				observed = node->timestamp;
 				break;
 			}
 			node = node->next;
 		}
 	}
 
-	// Record read for validation (record the head timestamp)
+	// Record read for validation: the OBSERVED NODE's timestamp (shared CSMV
+	// convention with the GPU executor).  Commit validation demands the head
+	// still equals this ts; recording the head ts instead admits lost updates
+	// when the read hit an older-than-head version (see docs/CORRECTNESS_FIXES
+	// .md, review-05 G-04).
 	if (g_tx.num_reads < CSMV_MAX_READS) {
 		g_tx.reads[g_tx.num_reads].entry = entry;
-		g_tx.reads[g_tx.num_reads].observed_ts = head ? head->timestamp : 0;
+		g_tx.reads[g_tx.num_reads].observed_ts = observed;
 		g_tx.num_reads++;
 	}
 

@@ -51,48 +51,49 @@ inline uint64_t gpu_gust_vbox_version(const GUSTVBox *vb, int slot) {
     return vb->versions[slot];
 }
 
-// Newest committed version ≤ threshold (versions are stored as CTS+1,
-// so 0 means "empty slot").  Returns 0 if no such version exists.
+// Snapshot read: the MAXIMUM version <= threshold across ALL slots
+// (versions are stored as CTS+1; 0 = empty sentinel).  Concurrent
+// write-backs append out of version order, so scanning head-first and
+// stopping at the first hit can return a stale body — see FindBody in
+// docs/proofs/GPU_GUST.tla (review-05).
 GPU_GUST_DEVICE
 inline uint64_t gpu_gust_vbox_read(const GUSTVBox *vb, uint64_t threshold) {
-    uint32_t head = *(volatile uint32_t*)&vb->head;
+    uint64_t best = 0;
     for (int d = 0; d < GPU_GUST_VBOX_DEPTH; d++) {
-        uint32_t slot = (head - 1 - d) & (GPU_GUST_VBOX_DEPTH - 1);
-        uint64_t v = gpu_gust_vbox_version(vb, slot);
-        if (v != 0 && v <= threshold) return v;
+        uint64_t v = *(volatile const uint64_t*)&vb->versions[d];
+        if (v != 0 && v <= threshold && v > best) best = v;
     }
-    return 0;
+    return best;
 }
 
-// Newest committed value ≤ threshold (with its version).  Variant of
-// gpu_gust_vbox_read that also returns the payload value, so transaction
-// bodies can do read-modify-write (the batch executor's read phase
-// captures both).  Returns 0 (version 0, value 0) if no such version.
+// Snapshot read with payload: max version <= threshold and its value.
+// A non-zero version is the publish marker (written after the value,
+// release-ordered by __threadfence), so reading the value after the
+// version is safe; slots are never reused (overflow-abort policy), so
+// the pair cannot tear.  Returns 0 (version 0, value 0) if no such
+// version exists.
 GPU_GUST_DEVICE
 inline uint64_t gpu_gust_vbox_read_value(const GUSTVBox *vb, uint64_t threshold,
                                          uint64_t *ver_out, uint32_t *val_out) {
-    uint32_t head = *(volatile uint32_t*)&vb->head;
+    uint64_t best = 0;
+    uint32_t best_slot = 0;
     for (int d = 0; d < GPU_GUST_VBOX_DEPTH; d++) {
-        uint32_t slot = (head - 1 - d) & (GPU_GUST_VBOX_DEPTH - 1);
-        uint64_t v = gpu_gust_vbox_version(vb, slot);
-        if (v != 0 && v <= threshold) {
-            *ver_out = v;
-            *val_out = vb->values[slot];
-            return v;
-        }
+        uint64_t v = *(volatile const uint64_t*)&vb->versions[d];
+        if (v != 0 && v <= threshold && v > best) { best = v; best_slot = (uint32_t)d; }
     }
-    *ver_out = 0;
-    *val_out = 0;
-    return 0;
+    *ver_out = best;
+    *val_out = best ? vb->values[best_slot] : 0;
+    return best;
 }
 
 // True if any slot holds a committed version newer than `threshold`
-// (used by MRV).  Scans the whole circular buffer for robustness
-// against concurrent out-of-order appends.
+// (used by MRV).  Scans the whole window: per the spec's Valid() the
+// abort condition is "ANY body newer than the snapshot", not "the
+// first-ordered body is newer" (review-05 / GPU_GUST.tla counterexample).
 GPU_GUST_DEVICE
 inline int gpu_gust_vbox_has_newer(const GUSTVBox *vb, uint64_t threshold) {
     for (int s = 0; s < GPU_GUST_VBOX_DEPTH; s++) {
-        uint64_t v = gpu_gust_vbox_version(vb, s);
+        uint64_t v = *(volatile const uint64_t*)&vb->versions[s];
         if (v != 0 && v > threshold) return 1;
     }
     return 0;
@@ -198,49 +199,68 @@ __global__ void gpu_gust_kernel(
     uint32_t cl_slot = (uint32_t)(CTS & GPU_GUST_CL_MASK);
     GUSTCLEntry *my_entry = &cl[cl_slot];
 
-    // Defensive: bounded CL may have wrapped.  If the slot is still
-    // in use by a transaction that may still be validated against,
-    // abort (paper: "transactions attempting to reuse that entry
-    // abort and retry").
     int is_aborted = conflict;
-    if (my_entry->state != GPU_GUST_CL_FREE) is_aborted = 1;
-
-    if (is_aborted) {
-        my_entry->state = GPU_GUST_CL_ABORTED;
-    } else {
-        my_entry->state = GPU_GUST_CL_PENDING;
-        my_entry->num_writes = (uint32_t)my_writes;
-        for (int w = 0; w < my_writes; w++) {
-            my_entry->write_addrs[w] = my_wa[w];
-            my_entry->write_vals[w]  = my_wv[w];
+    // Epoch-based ring-slot reclamation (review-05): a foreign entry at
+    // this slot is exactly one revolution stale (cts == CTS - CL_SIZE).
+    // It may be taken over only once GTS has passed it; under the launch
+    // bound num_warps < CL_SIZE / WARP_SIZE (writePtr - gts < CL_SIZE) a
+    // live foreign entry is impossible.  The old code overwrote whatever
+    // was there (trampling live entries) and, worse, entries never
+    // returned to FREE, so after one revolution every transaction
+    // aborted.
+    int owns_slot = 1;
+    uint64_t old_cts = *(volatile uint64_t*)&my_entry->cts;
+    if (old_cts != 0 && old_cts != CTS) {
+        if ((uint64_t)*(volatile uint64_t*)gts <= old_cts) {
+            // Defensive: CL too small for this grid.  Abort locally
+            // WITHOUT touching the foreign entry.
+            is_aborted = 1;
+            owns_slot = 0;
         }
     }
-    __threadfence();               // publish CL entry before validation
+
+    if (owns_slot) {
+        // Publish payload FIRST, then cts, then state as the marker
+        // (review-05: the old code wrote state=PENDING before
+        // write_addrs/vals, so a concurrent CCT scan could observe
+        // PENDING with an empty or stale write-set and miss the
+        // conflict → lost update).
+        my_entry->num_writes = (uint32_t)(is_aborted ? 0 : my_writes);
+        if (!is_aborted) {
+            for (int w = 0; w < my_writes; w++) {
+                my_entry->write_addrs[w] = my_wa[w];
+                my_entry->write_vals[w]  = my_wv[w];
+            }
+        }
+        my_entry->cts = CTS;                 // epoch tag, payload group
+        __threadfence();                     // release: payload before marker
+        my_entry->state = is_aborted ? GPU_GUST_CL_ABORTED
+                                     : GPU_GUST_CL_PENDING;
+    }
 
     // ── Phase 5: VALIDATION (hybrid CCT + MRV) ────────────────
     if (!is_aborted) {
         int64_t valPtr = (int64_t)CTS - 1;
         const int64_t start = (int64_t)startTS;
         while (valPtr > start) {
-            if ((uint64_t)valPtr < *gts) {
-                // MRV: every slot before valPtr is finalized.  All
-                // preceding update transactions have published (or
-                // will never publish) their versions, so a single
-                // read-set scan against VBox versions is sound.
-                for (int i = 0; i < my_reads; i++) {
-                    if (gpu_gust_vbox_has_newer(&vboxes[my_ra[i]], snapshot)) {
-                        is_aborted = 1;
-                        break;
-                    }
-                }
+            if ((uint64_t)valPtr < *(volatile uint64_t*)gts) {
+                // Every slot below valPtr is finalized; the unconditional
+                // MRV below covers them (spec: Valid = CCT ∧ MRV).
                 break;
             }
-            // CCT: valPtr ≥ GTS → that transaction may still commit
-            // (or already aborted).  Validate read-set against its
-            // recorded write-set.
+            // CCT: valPtr ≥ GTS → that transaction may still be in
+            // flight.  The slot reservation (AtomicINC) outpaces entry
+            // publication, so spin until this epoch is published (the
+            // owner publishes independently of GTS; bounded).
             GUSTCLEntry *e = &cl[(uint32_t)((uint64_t)valPtr & GPU_GUST_CL_MASK)];
-            if (e->state == GPU_GUST_CL_ABORTED) { valPtr--; continue; }
-            if (e->state != GPU_GUST_CL_FREE) {
+            while (*(volatile uint64_t*)&e->cts != (uint64_t)valPtr &&
+                   *(volatile uint64_t*)gts <= (uint64_t)valPtr) { }
+            if (*(volatile uint64_t*)&e->cts != (uint64_t)valPtr) {
+                valPtr--; continue;          // stale generation / silent abort
+            }
+            __threadfence();                 // acquire: payload after marker
+            uint32_t st = *(volatile uint32_t*)&e->state;
+            if (st != GPU_GUST_CL_ABORTED) {
                 int nw = (int)e->num_writes;
                 for (int i = 0; i < my_reads && !is_aborted; i++) {
                     for (int j = 0; j < nw; j++) {
@@ -250,25 +270,57 @@ __global__ void gpu_gust_kernel(
             }
             valPtr--;
         }
+        // MRV — unconditional (spec Valid = CCT ∧ MRV; review-05: the old
+        // code skipped it whenever the CCT loop never crossed below GTS,
+        // missing committed concurrent writers).  Abort if ANY read VBox
+        // holds ANY version newer than the snapshot.
+        if (!is_aborted) {
+            for (int i = 0; i < my_reads; i++) {
+                if (gpu_gust_vbox_has_newer(&vboxes[my_ra[i]], snapshot)) {
+                    is_aborted = 1;
+                    break;
+                }
+            }
+        }
     }
 
     if (is_aborted) {
-        my_entry->state = GPU_GUST_CL_ABORTED;
-        __threadfence();
+        if (owns_slot) {
+            // Finalize after validation failed on a published entry.
+            __threadfence();
+            my_entry->state = GPU_GUST_CL_ABORTED;
+        }
     } else {
         // ── Phase 6: WRITE-BACK ─────────────────────────────────
-        // Append new version (CTS+1) to each written VBox.  Slot is
-        // reserved via atomicAdd; value published before head (fence).
+        // Reserve every slot first (AtomicINC on head); if any VBox
+        // window is full the transaction overflows and aborts instead
+        // of clobbering a live committed version (keeps every published
+        // (version, value) pair immutable).  Then publish value FIRST
+        // and version LAST — the version is the publish marker
+        // (review-05: old order was head → version → value, so readers
+        // could observe an advanced window with a half-written pair).
+        uint32_t slot_of[GPU_GUST_MAX_WRITES];
+        int overflow = 0;
         for (int w = 0; w < my_writes; w++) {
             GUSTVBox *vb = &vboxes[my_wa[w]];
-            uint32_t slot = (uint32_t)(atomicAdd(&vb->head, 1u)
-                                       & (GPU_GUST_VBOX_DEPTH - 1));
-            vb->versions[slot] = CTS + 1;
-            __threadfence();
-            vb->values[slot] = my_wv[w];
+            uint32_t s = (uint32_t)atomicAdd(&vb->head, 1u);
+            slot_of[w] = s & (GPU_GUST_VBOX_DEPTH - 1);
+            if (s >= GPU_GUST_VBOX_DEPTH) overflow = 1;
         }
-        my_entry->state = GPU_GUST_CL_COMMITTED;
-        __threadfence();
+        if (overflow) {
+            is_aborted = 1;
+            __threadfence();
+            my_entry->state = GPU_GUST_CL_ABORTED;
+        } else {
+            for (int w = 0; w < my_writes; w++) {
+                GUSTVBox *vb = &vboxes[my_wa[w]];
+                vb->values[slot_of[w]] = my_wv[w];    // payload first
+                __threadfence();
+                vb->versions[slot_of[w]] = CTS + 1;   // version = marker
+            }
+            __threadfence();
+            my_entry->state = GPU_GUST_CL_COMMITTED;
+        }
     }
     __syncwarp();
 

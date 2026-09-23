@@ -17,7 +17,7 @@ divergence is essentially zero by construction.
 | All threads do the same code | ✅ | `tx_ycsb` body runs identically on all 32 lanes |
 | Threads operate on different data | ✅ | each warp gets its own `warp_id` → own RNG → own records |
 | No data-dependent `if`/loops causing divergence | ✅ | loop bound `a->ops` and write-ratio branch are warp-uniform (`r` and `a->write_ratio` identical on all lanes) |
-| Warp-cooperative memory access | ✅ | `csmv_gpu_read` walks the version list with all lanes in lockstep via `__ballot_sync`/`__shfl_sync` |
+| Warp-cooperative memory access | ✅ | `csmv_gpu_read` walks the version list with all lanes in lockstep (same chain); lane 0 records and `__shfl_sync` broadcasts the value — no ballot in the walk itself (wording fixed in review-05 G-10) |
 | Leader-only mutations | ✅ | read-set/write-set recorded only by lane 0; commit write-back only lane 0 |
 
 ## Key design decisions

@@ -32,6 +32,20 @@ extern __thread sigjmp_buf tm_jmpbuf;
 // shared across all threads.
 
 static uint32_t *gpu_lock_table = nullptr;
+// Ownership table: the 32-bit PR-STM lock word packs a 1-byte priority,
+// and (&g_tx % 255 + 1) makes two threads collide on the same priority —
+// both then passed the old "same priority means I hold it" test.  Actual
+// ownership is tracked per lock slot with a unique thread id (review-05
+// G-07); the priority nibble in the lock word is kept for layout parity.
+static std::atomic<uint32_t> *gpu_lock_owner = nullptr;
+static std::atomic<uint32_t> gpu_next_prid{1};
+static thread_local uint32_t gpu_prid = 0;
+static inline uint32_t my_prid()
+{
+	if (gpu_prid == 0)
+		gpu_prid = gpu_next_prid.fetch_add(1, std::memory_order_relaxed);
+	return gpu_prid;
+}
 static std::atomic<uint64_t> gpu_global_clock{0};
 
 // ── Per-thread PR-STM state ───────────────────────────────────────
@@ -67,7 +81,8 @@ static void real_tm_begin()
 
 static void real_tm_end()
 {
-	uint8_t priority = (uint8_t)((uintptr_t)&g_tx % 255 + 1);
+	uint8_t priority = (uint8_t)(my_prid() % 255 + 1);
+	uint32_t prid = my_prid();
 	uint64_t commit_clock = 0;
 
 	// ── VALIDATE (acquire semantics) ──────────────────────────
@@ -97,11 +112,9 @@ static void real_tm_end()
 			uint32_t expected = __atomic_load_n(&gpu_lock_table[lock_idx],
 			                                    __ATOMIC_ACQUIRE);
 			if (pr_stm_is_locked(expected)) {
-				if (pr_stm_get_priority(expected) != priority) {
-					goto abort_tx;
-				}
-				// Same priority — we already hold it (shouldn't reach here if already_held check works)
-				break;
+				if (gpu_lock_owner[lock_idx].load(std::memory_order_acquire) != prid)
+					goto abort_tx; // held by a different transaction
+				break;             // we already hold it
 			}
 			uint32_t desired = pr_stm_make_entry(priority,
 			                                     pr_stm_get_version(expected),
@@ -111,8 +124,10 @@ static void real_tm_end()
 			                                desired,
 			                                0,
 			                                __ATOMIC_ACQUIRE,
-			                                __ATOMIC_RELAXED))
+			                                __ATOMIC_RELAXED)) {
+				gpu_lock_owner[lock_idx].store(prid, std::memory_order_release);
 				break;
+			}
 		}
 	}
 	// ── RE-VALIDATE after lock acquisition ────────────────────
@@ -125,7 +140,7 @@ static void real_tm_end()
 
 		uint32_t lw = __atomic_load_n(&gpu_lock_table[read_lock_idx], __ATOMIC_ACQUIRE);
 		if (pr_stm_is_locked(lw)) {
-			if (pr_stm_get_priority(lw) != priority) {
+			if (gpu_lock_owner[read_lock_idx].load(std::memory_order_acquire) != prid) {
 				// Another thread holds the lock - abort
 				goto abort_tx;
 			}
@@ -165,6 +180,7 @@ static void real_tm_end()
 	__atomic_thread_fence(__ATOMIC_SEQ_CST);
 	for (int i = 0; i < g_tx.num_writes; i++) {
 		uint32_t lock_idx = g_tx.writes[i].lock_idx;
+		gpu_lock_owner[lock_idx].store(0, std::memory_order_release);
 		uint32_t new_entry = pr_stm_make_entry(0, commit_clock, 0);
 		__atomic_store_n(&gpu_lock_table[lock_idx], new_entry, __ATOMIC_RELEASE);
 	}
@@ -176,7 +192,9 @@ abort_tx:
 	for (int i = 0; i < g_tx.num_writes; i++) {
 		uint32_t lock_idx = g_tx.writes[i].lock_idx;
 		uint32_t lw = __atomic_load_n(&gpu_lock_table[lock_idx], __ATOMIC_RELAXED);
-		if (pr_stm_is_locked(lw) && pr_stm_get_priority(lw) == priority) {
+		if (pr_stm_is_locked(lw) &&
+		    gpu_lock_owner[lock_idx].load(std::memory_order_acquire) == prid) {
+			gpu_lock_owner[lock_idx].store(0, std::memory_order_release);
 			uint32_t new_entry = pr_stm_make_entry(0, pr_stm_get_version(lw), 0);
 			__atomic_store_n(&gpu_lock_table[lock_idx], new_entry, __ATOMIC_RELEASE);
 		}
@@ -216,13 +234,24 @@ static uint64_t read_common(uint32_t *lock_entry_ptr, void *data_ptr, uint8_t by
 		g_tx.reads[g_tx.num_reads].ver = pr_stm_get_version(lw);
 		g_tx.num_reads++;
 	}
-	if (bytes == 8) {
-		uint64_t val;
+	// Load exactly `bytes` — a 1-byte object must not be widened to a
+	// 4-byte load (OOB read of adjacent bytes, review-05 G-07).
+	uint64_t val = 0;
+	switch (bytes) {
+	case 1:
+		val = __atomic_load_n((uint8_t *)data_ptr, __ATOMIC_ACQUIRE);
+		break;
+	case 2:
+		val = __atomic_load_n((uint16_t *)data_ptr, __ATOMIC_ACQUIRE);
+		break;
+	case 4:
+		val = __atomic_load_n((uint32_t *)data_ptr, __ATOMIC_ACQUIRE);
+		break;
+	default:
 		__builtin_memcpy(&val, data_ptr, 8);
-		return val;
-	} else {
-		return __atomic_load_n((uint32_t *)data_ptr, __ATOMIC_ACQUIRE);
+		break;
 	}
+	return val;
 }
 
 static void write_common(uint32_t *lock_entry_ptr,
@@ -399,7 +428,8 @@ extern "C" void tm_init()
 {
 	stm::tm_region_init();
 	gpu_lock_table = (uint32_t *)std::calloc(PR_STM_LOCKTABLE_SIZE, sizeof(uint32_t));
-	if (!gpu_lock_table) {
+	gpu_lock_owner = new std::atomic<uint32_t>[PR_STM_LOCKTABLE_SIZE]();
+	if (!gpu_lock_table || !gpu_lock_owner) {
 		fprintf(stderr, "FATAL: gpu_stm_cpu: calloc lock table failed\n");
 		std::abort();
 	}
@@ -415,6 +445,8 @@ extern "C" void tm_exit()
 {
 	std::free(gpu_lock_table);
 	gpu_lock_table = nullptr;
+	delete[] gpu_lock_owner;
+	gpu_lock_owner = nullptr;
 }
 
 #ifdef LLVM_TM_PLUGIN

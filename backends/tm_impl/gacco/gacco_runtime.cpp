@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <csetjmp>
 #include <cstdint>
 #include <cstdio>
@@ -7,6 +8,7 @@
 #include <cstring>
 #include <mutex>
 #include <pthread.h>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -21,13 +23,18 @@ extern __thread sigjmp_buf tm_jmpbuf;
 }
 
 // ── Global lock table ────────────────────────────────────
-// GaccO: sorted-access lock ordering (GPU-inspired).
-// On CPU, this becomes address-sorted lock acquisition
-// to guarantee deadlock-free 2PL.
-//
-// We maintain a global array of per-object locks.  Each
-// lock is an atomic<pid> (0 = unlocked, non-zero = holder).
-// All locks are acquired in ascending address order.
+// GaccO: GPU-inspired lock-every-access 2PL.  The GPU original
+// sorts accesses by object index (warp-wide); a lazy hook-based
+// CPU adaptation cannot sort access order after the fact, so
+// instead of promising sorted 2PL (the old comment did) we make
+// deadlock-freedom a property of *restart*:
+//   * locks are acquired in program order,
+//   * acquisition spins only up to a bound, and
+//   * exceeding the bound (AB-BA cycle) rolls the transaction's
+//     buffered undo log back, releases every held lock, and
+//     restarts the transaction.
+// Write-through writes are compensated via the undo log, so an
+// aborted transaction leaves no visible writes (review-05 G-05).
 
 struct GaccOLock {
 	std::atomic<uint64_t> holder{0};
@@ -51,30 +58,59 @@ struct GaccORecord {
 	uint8_t width;
 };
 
+struct GaccOUndo {
+	void *addr;
+	uint64_t old;
+	uint8_t width;
+};
+
 static thread_local bool g_in_tx = false;
 static thread_local std::vector<void *> g_locks_held;
 static thread_local std::vector<GaccORecord> g_reads;
 static thread_local std::vector<GaccORecord> g_writes;
+static thread_local std::vector<GaccOUndo> g_undo; // first-write-old-values
 static thread_local uint64_t g_tid = 0;
 static std::atomic<uint64_t> g_next_tid{1};
 static thread_local bool g_aborted = false;
+static thread_local unsigned g_deadlock_retries = 0;
+static thread_local unsigned g_backoff_seed = 1;
+
+// Bounded spin: well beyond any real critical section (each transaction
+// body is a handful of memory ops), short enough that an AB-BA cycle is
+// detected and broken by restart instead of hanging (review-05 G-05).
+static constexpr int GACCO_SPIN_BOUND = 4096;
 
 // ── Lock helpers ─────────────────────────────────────────
-static void acquire_lock(void *addr)
+// Returns false when the spin bound is exhausted (deadlock detected);
+// the caller must then roll back and restart the transaction.
+static bool acquire_lock(void *addr)
 {
 	size_t idx = lock_idx(addr);
 	auto &lk = g_locks[idx];
-	uint64_t expected = 0;
 	uint64_t desired = g_tid;
-	while (!lk.holder.compare_exchange_weak(expected,
-	                                        desired,
-	                                        std::memory_order_acquire,
-	                                        std::memory_order_relaxed)) {
-		if (expected == g_tid)
-			break; // already own it
-		expected = 0;
+	uint64_t expected = 0;
+	if (lk.holder.compare_exchange_weak(expected,
+	                                    desired,
+	                                    std::memory_order_acquire,
+	                                    std::memory_order_relaxed)) {
+		g_locks_held.push_back(addr);
+		return true;
 	}
-	g_locks_held.push_back(addr);
+	if (expected == g_tid) // already own it
+		return true;
+	for (int i = 0; i < GACCO_SPIN_BOUND; i++) {
+		expected = 0;
+		if (lk.holder.compare_exchange_weak(expected,
+		                                    desired,
+		                                    std::memory_order_acquire,
+		                                    std::memory_order_relaxed)) {
+			g_locks_held.push_back(addr);
+			return true;
+		}
+		if (expected == g_tid)
+			return true;
+	}
+	return false; // spin bound exhausted → restart this transaction
 }
 
 static void release_all_locks()
@@ -84,6 +120,31 @@ static void release_all_locks()
 		g_locks[idx].holder.store(0, std::memory_order_release);
 	}
 	g_locks_held.clear();
+}
+
+// Undo all write-through writes in reverse program order.  g_undo holds
+// exactly one entry per touched address (the value before this tx wrote
+// it), so repeated writes to the same address undo to the original.
+static void rollback_writes()
+{
+	for (auto it = g_undo.rbegin(); it != g_undo.rend(); ++it)
+		memcpy(it->addr, &it->old, it->width);
+	g_undo.clear();
+	g_writes.clear();
+}
+
+// Full abort: undo writes, release locks, restart from tm_begin.
+static void real_tm_abort()
+{
+	if (!g_in_tx)
+		return;
+	rollback_writes();
+	release_all_locks();
+	g_reads.clear();
+	g_in_tx = false;
+	g_aborted = false;
+	tm_longjmp_ret = 1;
+	siglongjmp(tm_jmpbuf, 1);
 }
 
 // ── Static backend implementation ────────────────────────
@@ -96,6 +157,7 @@ static void real_tm_begin()
 	g_aborted = false;
 	g_reads.clear();
 	g_writes.clear();
+	g_undo.clear();
 	// Locks are acquired lazily on first access.
 }
 
@@ -104,8 +166,10 @@ static void real_tm_end()
 	if (tm_nested_call_counter > 1)
 		return;
 	if (g_aborted) {
+		rollback_writes();
 		release_all_locks();
 		g_in_tx = false;
+		g_aborted = false;
 		return;
 	}
 	// Commit: writes already applied (GaccO writes through).
@@ -115,6 +179,7 @@ static void real_tm_end()
 		size_t idx = lock_idx(rd.addr);
 		if (g_locks[idx].holder.load(std::memory_order_acquire) != g_tid) {
 			// Lock was stolen — concurrent write corrupted our read.
+			rollback_writes();
 			release_all_locks();
 			g_in_tx = false;
 			tm_longjmp_ret = 1;
@@ -123,16 +188,32 @@ static void real_tm_end()
 		}
 	}
 	release_all_locks();
+	g_deadlock_retries = 0;
 	g_in_tx = false;
 }
-
-static void real_tm_abort() { g_aborted = true; }
 
 // ── Read / Write operations ──────────────────────────────
 // GaccO GPU: lock on every access, sorted by object index.
 // CPU adaptation: lock on first write to an address,
 //                 read-only accesses bypass locking.
 //                 Writes go directly to memory (write-through).
+
+static void bail_deadlock()
+{
+	rollback_writes();
+	release_all_locks();
+	g_reads.clear();
+	g_in_tx = false;
+	g_aborted = false;
+	// Break symmetry: without a backoff, two threads that just killed an
+	// AB-BA cycle restart together, collide again, and livelock.
+	g_deadlock_retries++;
+	unsigned jitter = (rand_r(&g_backoff_seed) % 64) + 1;
+	std::this_thread::sleep_for(std::chrono::microseconds(
+	    jitter * (g_deadlock_retries > 8 ? 8 : g_deadlock_retries)));
+	tm_longjmp_ret = 1;
+	siglongjmp(tm_jmpbuf, 1);
+}
 
 static uint64_t do_read(void *addr, uint8_t width)
 {
@@ -141,7 +222,8 @@ static uint64_t do_read(void *addr, uint8_t width)
 		memcpy(&v, addr, width);
 		return v;
 	}
-	acquire_lock(addr);
+	if (!acquire_lock(addr))
+		bail_deadlock();
 	uint64_t v = 0;
 	memcpy(&v, addr, width);
 	g_reads.push_back({addr, v, width});
@@ -154,7 +236,20 @@ static void do_write(void *addr, uint64_t val, uint8_t width)
 		memcpy(addr, &val, width);
 		return;
 	}
-	acquire_lock(addr);
+	if (!acquire_lock(addr))
+		bail_deadlock();
+	bool first = true;
+	for (auto &w : g_writes) {
+		if (w.addr == addr) {
+			first = false;
+			break;
+		}
+	}
+	if (first) {
+		uint64_t old = 0;
+		memcpy(&old, addr, width);
+		g_undo.push_back({addr, old, width});
+	}
 	memcpy(addr, &val, width);
 	g_writes.push_back({addr, val, width});
 }
@@ -182,15 +277,17 @@ static uint64_t real_tm_read_i8(int64_t *a)
 static float real_tm_read_f4(float *a)
 {
 	LLVM_TM_ADDR_CHECK(a);
+	uint64_t r = do_read((void *)a, 4);
 	float v;
-	memcpy(&v, a, 4);
+	memcpy(&v, &r, 4);
 	return v;
 }
 static double real_tm_read_f8(double *a)
 {
 	LLVM_TM_ADDR_CHECK(a);
+	uint64_t r = do_read((void *)a, 8);
 	double v;
-	memcpy(&v, a, 8);
+	memcpy(&v, &r, 8);
 	return v;
 }
 
@@ -217,12 +314,27 @@ static void real_tm_write_i8(int64_t *a, uint64_t v)
 static void real_tm_write_f4(float *a, float v)
 {
 	LLVM_TM_ADDR_CHECK_WRITE(a, v);
-	memcpy(a, &v, 4);
+	uint64_t r;
+	memcpy(&r, &v, 4);
+	do_write((void *)a, r, 4);
 }
 static void real_tm_write_f8(double *a, double v)
 {
 	LLVM_TM_ADDR_CHECK_WRITE(a, v);
-	memcpy(a, &v, 8);
+	uint64_t r;
+	memcpy(&r, &v, 8);
+	do_write((void *)a, r, 8);
+}
+
+static void *real_tm_read_ptr(void **a)
+{
+	LLVM_TM_ADDR_CHECK(a);
+	return (void *)do_read((void *)a, 8);
+}
+static void real_tm_write_ptr(void **a, void *v)
+{
+	LLVM_TM_ADDR_CHECK_WRITE(a, v);
+	do_write((void *)a, (uintptr_t)v, 8);
 }
 
 static void *real_tm_malloc(size_t s) { return stm::tm_region_malloc(s); }
@@ -259,6 +371,9 @@ static void real_tm_init_thread()
 {
 	tm_hook_init_thread();
 	g_tid = g_next_tid.fetch_add(1, std::memory_order_relaxed);
+	g_backoff_seed = (unsigned)(g_tid * 2654435761u) ^ (unsigned)(uintptr_t)&g_tid;
+	if (g_backoff_seed == 0)
+		g_backoff_seed = 1;
 }
 static void real_tm_exit_thread() {}
 static void *real_tm_get_thread_state() { return nullptr; }
@@ -276,14 +391,14 @@ static TMRealHooks g_gacco_hooks = {
     .read_i8 = (uint64_t (*)(uint64_t *))real_tm_read_i8,
     .read_f4 = real_tm_read_f4,
     .read_f8 = real_tm_read_f8,
-    .read_ptr = nullptr,
+    .read_ptr = real_tm_read_ptr,
     .write_i1 = (void (*)(uint8_t *, uint8_t))real_tm_write_i1,
     .write_i2 = (void (*)(uint16_t *, uint16_t))real_tm_write_i2,
     .write_i4 = (void (*)(uint32_t *, uint32_t))real_tm_write_i4,
     .write_i8 = (void (*)(uint64_t *, int64_t))real_tm_write_i8,
     .write_f4 = real_tm_write_f4,
     .write_f8 = real_tm_write_f8,
-    .write_ptr = nullptr,
+    .write_ptr = real_tm_write_ptr,
     .get_env = nullptr,
     .set_jmpbuf = nullptr,
     .get_thread_state = real_tm_get_thread_state,

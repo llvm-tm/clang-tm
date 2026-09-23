@@ -50,24 +50,24 @@ __device__ void tx_memcached(int lane_id, int warp_id,
     uint32_t key = r % (uint32_t)a->keys;
 
     uint64_t cur = gust_gpu_read(ws, key);
+    (void)cur;   // GET observes the value; SET overwrites it below.
 
-    if ((int)(r % 100) < a->write_ratio) {
+    // Decide the op as a per-lane flag, then commit ONCE (review-05):
+    // gust_gpu_commit is warp-collective (ballots/shuffles); the old
+    // shape called it from inside two divergent branches, so the warp
+    // entered the collectives twice with partial lane sets — a
+    // guaranteed hardware exception on AMD (and UB on NVIDIA).
+    int is_set = ((int)(r % 100) < a->write_ratio);
+    if (is_set) {
         // SET key = key+1 (deterministic payload)
         gust_gpu_write(ws, key, key + 1);
-        if (gust_gpu_commit(ws) != 0) {
-            atomicAdd((unsigned long long*)&g_commits, 1ULL);
-            atomicAdd((unsigned long long*)&g_sets, 1ULL);
-        } else {
-            atomicAdd((unsigned long long*)&g_aborts, 1ULL);
-        }
+    }
+    // GET: read-only commit (validation only).
+    if (gust_gpu_commit(ws) != 0) {
+        atomicAdd((unsigned long long*)&g_commits, 1ULL);
+        atomicAdd((unsigned long long*)(is_set ? &g_sets : &g_gets), 1ULL);
     } else {
-        // GET: read-only commit (validation only).
-        if (gust_gpu_commit(ws) != 0) {
-            atomicAdd((unsigned long long*)&g_commits, 1ULL);
-            atomicAdd((unsigned long long*)&g_gets, 1ULL);
-        } else {
-            atomicAdd((unsigned long long*)&g_aborts, 1ULL);
-        }
+        atomicAdd((unsigned long long*)&g_aborts, 1ULL);
     }
 }
 

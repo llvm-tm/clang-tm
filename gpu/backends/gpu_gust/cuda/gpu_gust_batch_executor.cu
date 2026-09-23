@@ -89,6 +89,16 @@ GUSTBatchExecutor::BatchTiming GUSTBatchExecutor::launch() {
                 n, GPU_GUST_WARP_SIZE);
         abort();
     }
+    // Ring safety (review-05): CL epoch reclamation is only sound when
+    // in-flight reservations can never span the whole ring, i.e.
+    // num_warps * WARP_SIZE < CL_SIZE.  Beyond that, a batch could
+    // reserve a slot whose stale epoch is still being validated.
+    if (n / GPU_GUST_WARP_SIZE >= GPU_GUST_CL_SIZE / GPU_GUST_WARP_SIZE) {
+        fprintf(stderr, "[GUST-Batch] num_txns (%d) too large: warps %d must "
+                        "stay below CL_SIZE/WARP_SIZE = %d\n",
+                n, n / GPU_GUST_WARP_SIZE, GPU_GUST_CL_SIZE / GPU_GUST_WARP_SIZE);
+        abort();
+    }
 
     // ── Allocate device argument storage ──────────────────────
     size_t total_arg_size = 0;
@@ -171,10 +181,24 @@ extern "C" void gust_gpu_init(int num_addrs) {
 
     CUDA_CHECK(cudaMalloc(&d_gts, sizeof(uint64_t)));
     CUDA_CHECK(cudaMemset(d_gts, 0, sizeof(uint64_t)));
+    // Bootstrap clock (review-05): GTS and the write pointer start at one
+    // full warp batch.  The seeded VBoxes carry version 1, and snapshot
+    // reads keep versions <= startTS; with a zero-initialized GTS the very
+    // first batch snapshotted 0, could not see the seeded balances, read
+    // "absent" (0) and committed 0 back — destroying money before any
+    // contention even started.  Starting at WARP_SIZE makes every first
+    // startTS >= 1 (seed visible) while keeping batch publication
+    // 32-aligned; first published versions are CTS+1 >= 33 (no seed
+    // collision).
+    uint64_t boot = GPU_GUST_WARP_SIZE;
+    CUDA_CHECK(cudaMemcpy(d_gts, &boot, sizeof(uint64_t),
+                          cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpyToSymbol(g_gust_gts, &d_gts, sizeof(d_gts)));
 
     CUDA_CHECK(cudaMalloc(&d_write_ptr, sizeof(uint64_t)));
     CUDA_CHECK(cudaMemset(d_write_ptr, 0, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemcpy(d_write_ptr, &boot, sizeof(uint64_t),
+                          cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpyToSymbol(g_gust_write_ptr, &d_write_ptr, sizeof(d_write_ptr)));
 
     CUDA_CHECK(cudaMalloc(&d_cl, GPU_GUST_CL_SIZE * sizeof(GUSTCLEntry)));

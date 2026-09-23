@@ -100,13 +100,8 @@ int gpu_pr_stm_launch(int num_warps, pr_stm_tx_body_t tx_body, void *tx_data);
 // Emulates PR-STM using std::thread. Each thread simulates one
 // GPU thread (lane) within a warp. A std::barrier or spin-loop
 // enforces phase lockstep matching the SIMT model.
-
-void cpu_pr_stm_begin(int warp_id, int lane_id);
-void cpu_pr_stm_read(int warp_id, int lane_id, uint32_t *addr);
-void cpu_pr_stm_write(int warp_id, int lane_id, uint32_t *addr, uint32_t val);
-int cpu_pr_stm_commit(int warp_id, int lane_id);
-void cpu_pr_stm_abort(int warp_id, int lane_id);
-void cpu_pr_stm_end(int warp_id, int lane_id);
+// (review-05 G-09: the former per-lane cpu_pr_stm_* declarations had no
+// live definitions — removed.)
 
 // High-level CPU emulation (one-shot: runs all threads to completion)
 void cpu_pr_stm_emulate(int num_warps,

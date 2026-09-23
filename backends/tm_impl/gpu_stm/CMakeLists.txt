@@ -14,7 +14,7 @@ cmake_minimum_required(VERSION 3.18)
 option(BUILD_GPU_STM "Build GPU STM backend (PR-STM)" OFF)
 option(GPU_STM_CPU_FALLBACK "Build CPU-only fallback (no GPU)" OFF)
 
-if(NOT BUILD_GPU_STM AND NOT GPU_STM_CPU_FALLBACK)
+if(NOT BUILD_GPU_STM AND NOT GPU_STM_CPU_FALLBACK AND NOT BUILD_GPU_STM_HIP)
     return()
 endif()
 
@@ -29,7 +29,7 @@ set(GPU_STM_CUDA_DIR ${CMAKE_SOURCE_DIR}/gpu/backends/gpu_stm)
 include_directories(${GPU_STM_INC_DIR})
 include_directories(${BACKENDS_COMMON})
 include_directories(${BACKENDS_REGION})
-include_directories(${GPU_STM_CUDA_DIR})
+include_directories(${GPU_STM_CUDA_DIR} ${GPU_STM_CUDA_DIR}/cuda)
 
 # ── CPU-only fallback ──────────────────────────────────────────────
 
@@ -71,11 +71,19 @@ if(BUILD_GPU_STM)
     set(CMAKE_CUDA_ARCHITECTURES "70;75;80;90" CACHE STRING
         "CUDA architectures to compile for")
 
+    # review-05 T-03: this target previously omitted pr_stm_host.cpp and
+    # tm_gpu_detect.cpp (gpu_check_and_set undefined) and used a
+    # FindCUDA-era cudart_static:: imported target that enable_language(CUDA)
+    # does not produce.
+    find_package(CUDAToolkit REQUIRED)
+
     # PR-STM kernel + host runtime
     add_library(pr_stm_backend STATIC
-        ${GPU_STM_CUDA_DIR}/pr_stm_runtime.cu
+        ${GPU_STM_CUDA_DIR}/cuda/pr_stm_runtime.cu
+        ${GPU_STM_CUDA_DIR}/cuda/pr_stm_host.cpp
         ${BACKENDS_REGION}/tm_region_allocator.cpp
         ${BACKENDS_COMMON}/tm_hooks.cpp
+        ${BACKENDS_COMMON}/tm_gpu_detect.cpp
     )
     target_compile_features(pr_stm_backend PUBLIC cxx_std_17)
     target_include_directories(pr_stm_backend PUBLIC
@@ -84,12 +92,14 @@ if(BUILD_GPU_STM)
         ${BACKENDS_REGION}
     )
     target_link_libraries(pr_stm_backend PUBLIC
-        cudart_static::cudart_static
+        CUDA::cudart_static
     )
 
     # ── Test: PR-STM GPU smoke test ───────────────────────────────
     add_executable(test_pr_stm_gpu
-        ${GPU_STM_CUDA_DIR}/pr_stm_runtime.cu
+        ${GPU_STM_CUDA_DIR}/cuda/pr_stm_runtime.cu
+        ${GPU_STM_CUDA_DIR}/cuda/pr_stm_host.cpp
+        ${BACKENDS_COMMON}/tm_gpu_detect.cpp
         tests/test_pr_stm.cpp
     )
     target_compile_features(test_pr_stm_gpu PUBLIC cxx_std_17)
@@ -99,7 +109,7 @@ if(BUILD_GPU_STM)
         ${BACKENDS_REGION}
     )
     target_link_libraries(test_pr_stm_gpu PRIVATE
-        cudart_static::cudart_static
+        CUDA::cudart_static
     )
 
     message(STATUS "GPU STM: CUDA backend enabled")
@@ -110,13 +120,20 @@ option(BUILD_GPU_STM_HIP "Build GPU STM backend with HIP" OFF)
 
 if(BUILD_GPU_STM_HIP)
     find_package(hip REQUIRED)
+    enable_language(HIP)
     message(STATUS "GPU STM: HIP backend enabled")
+
+    # .cu defaults to the CUDA language; route it to HIP (hipcc) explicitly.
+    set_source_files_properties(
+        ${GPU_STM_CUDA_DIR}/cuda/pr_stm_runtime.cu
+        PROPERTIES LANGUAGE HIP)
 
     # Host-side code compiled with regular C++ (g++/clang++)
     add_library(pr_stm_backend_hip_host STATIC
-        ${GPU_STM_CUDA_DIR}/pr_stm_host.cpp
+        ${GPU_STM_CUDA_DIR}/cuda/pr_stm_host.cpp
         ${BACKENDS_REGION}/tm_region_allocator.cpp
         ${BACKENDS_COMMON}/tm_hooks.cpp
+        ${BACKENDS_COMMON}/tm_gpu_detect.cpp
     )
     target_compile_features(pr_stm_backend_hip_host PUBLIC cxx_std_17)
     target_include_directories(pr_stm_backend_hip_host PUBLIC
@@ -125,12 +142,13 @@ if(BUILD_GPU_STM_HIP)
         ${BACKENDS_REGION}
         ${HIP_PATH}/include
     )
-    target_link_libraries(pr_stm_backend_hip_host PRIVATE pthread)
+    target_link_libraries(pr_stm_backend_hip_host PRIVATE pthread hip::host)
 
     # Device-side kernel compiled with hipcc
     add_library(pr_stm_backend_hip_kernel STATIC
-        ${GPU_STM_CUDA_DIR}/pr_stm_runtime.cu
+        ${GPU_STM_CUDA_DIR}/cuda/pr_stm_runtime.cu
     )
+    target_link_libraries(pr_stm_backend_hip_kernel PUBLIC hip::host)
     target_compile_features(pr_stm_backend_hip_kernel PUBLIC cxx_std_17)
     target_include_directories(pr_stm_backend_hip_kernel PUBLIC
         ${GPU_STM_INC_DIR}
@@ -146,8 +164,12 @@ if(BUILD_GPU_STM_HIP)
     )
 
     add_executable(test_pr_stm_gpu_hip
-        ${GPU_STM_CUDA_DIR}/pr_stm_host.cpp
-        ${GPU_STM_CUDA_DIR}/pr_stm_runtime.cu
+        ${GPU_STM_CUDA_DIR}/cuda/pr_stm_host.cpp
+        ${GPU_STM_CUDA_DIR}/cuda/pr_stm_runtime.cu
+        ${BACKENDS_REGION}/tm_region_allocator.cpp
+        ${BACKENDS_COMMON}/tm_hooks.cpp
+        ${BACKENDS_COMMON}/tm_gpu_detect.cpp
+        ${GPU_STM_SRC_DIR}/cpu/pr_stm_cpu.cpp
         tests/test_pr_stm.cpp
     )
     target_compile_features(test_pr_stm_gpu_hip PUBLIC cxx_std_17)
@@ -156,5 +178,5 @@ if(BUILD_GPU_STM_HIP)
         ${BACKENDS_COMMON}
         ${BACKENDS_REGION}
     )
-    target_link_libraries(test_pr_stm_gpu_hip PRIVATE pthread)
+    target_link_libraries(test_pr_stm_gpu_hip PRIVATE pthread hip::host)
 endif()

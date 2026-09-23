@@ -9,14 +9,23 @@ holds everything that requires a CUDA/HIP toolchain.
 
 ```
 gpu/
-├── backends/
-│   ├── csmv/          CSMV kernels (csmv_kernel.{cu,cuh}, csmv_batch_executor.{cu,hpp})
-│   ├── gpu_stm/       PR-STM kernels (pr_stm_kernel.cuh, pr_stm_host.cpp, pr_stm_runtime.cu)
-│   ├── gpu_gputx/     GPUTX GPU kernels (priority concurrency control)
-│   ├── gpu_gacco/     GACCO GPU kernels
-│   └── gpu_gust/      GUST GPU kernels (MVCC, versioned boxes + commit log)
-└── benchmarks/        gpu_ycsb, gpu_kmeans, gpu_memcached, gpu_tpcc, gpu_fuzz_counter
+├── backends/               one directory per GPU backend, unified shape:
+│   ├── <name>/
+│   │   ├── include/        public headers (API + batch-executor headers used by benchmarks)
+│   │   └── cuda/           device/host implementation (.cu/.cuh/.cpp)
+│   ├── csmv/               csmv_kernel.{cu,cuh} + csmv_batch_executor.{cu} / include: .hpp
+│   ├── gpu_stm/            pr_stm_kernel.cuh, pr_stm_host.cpp, pr_stm_runtime.cu
+│   ├── gpu_gputx/          GPUTX kernels (priority concurrency control)
+│   ├── gpu_gacco/          GACCO kernels
+│   └── gpu_gust/           GUST kernels (MVCC, versioned boxes + commit log)
+└── benchmarks/             ALL drivers live here — gpu_ycsb, gpu_kmeans, gpu_memcached,
+                            gpu_tpcc, gpu_fuzz_counter, gpu_bank, gpu_ycsb_gust,
+                            gpu_memcached_gust, gpu_gust_smoke (test driver, moved out
+                            of the backend dir in the review-05 layout pass)
 ```
+
+Rule: benchmark/test drivers never live inside a backend directory; backend
+directories only contain protocol + host glue.
 
 ## CPU fallbacks (kept in backends/tm_impl/)
 
@@ -24,12 +33,16 @@ gpu/
 - `backends/tm_impl/csmv/cpu/` — CSMV CPU fallback
 - `backends/tm_impl/gputx/` — GPUTX CPU-only backend (priority CC, no GPU)
 
-Shared headers (public APIs) stay in `backends/tm_impl/<name>/include/`;
-the CUDA/HIP platform shim is `backends/tm_impl/common/tm_gpu_platform.hpp`.
+Shared headers (public APIs consumed by both CPU and GPU code) stay in
+`backends/tm_impl/<name>/include/`; headers used only by GPU code live in
+`gpu/backends/<name>/include/`. The CUDA/HIP platform shim is
+`backends/tm_impl/common/tm_gpu_platform.hpp`.
 
 ## Building
 
-The GPU benchmarks are built with `make -C gpu/benchmarks` (auto-detects
-nvcc/hipcc; `HIP=1 HIPCC=...` for AMD).  CMake users can enable
-`BUILD_GPU_STM`/`GPU_STM_CPU_FALLBACK` and `BUILD_CSMV`/`CSMV_CPU_FALLBACK`
-via the top-level `CMakeLists.txt`.
+The GPU benchmarks are built with `make -C gpu/benchmarks` (requires `nvcc`;
+for AMD use `make HIP=1` — hipcc detection is explicit, and the Makefile
+fails loudly if neither is present). CMake: `BUILD_GPU_STM` is wired via the
+top-level `CMakeLists.txt`; the `BUILD_CSMV*` options in
+`backends/tm_impl/csmv/CMakeLists.txt` exist but are not yet `add_subdirectory`'d
+(review-05 T-02/T-03 track fixing or removing them).

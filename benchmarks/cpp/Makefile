@@ -153,13 +153,10 @@ ifeq ($(BACKEND),CSMV)
   DEFS     = -DTM_BACKEND_CSMV
   EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/csmv/include
 endif
-ifeq ($(BACKEND),CSMV_GPU)
-  RUNTIME  = ../../backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp
-  DEFS     = -DTM_BACKEND_CSMV_GPU -DCSMV_BATCH_GPU
-  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/csmv/include
-  LDFLAGS  = -pthread -lcuda -lcudart
-  CXXFLAGS = -std=c++20 -O3 $(MARCH) -pthread -DNDEBUG -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp
-endif
+# review-05 T-02: the CSMV_GPU BACKEND target was removed here — it
+# compiled the CPU runtime behind a CSMV_BATCH_GPU macro referenced nowhere,
+# and hard-linked -lcuda/-lcudart (broken on HIP hosts). GPU CSMV builds via
+# gpu/benchmarks/Makefile; the CPU fallback is BACKEND=CSMV.
 ifeq ($(BACKEND),POWER8HTM)
   RUNTIME  = ../../backends/tm_impl/power8_htm/POWER8HTM_runtime.cpp
   DEFS     = -DTM_BACKEND_POWER8HTM -mcpu=power8
@@ -288,11 +285,11 @@ YCSB_BIN    = bin/ycsb
 # TODO: implement linked-list, hash-map, treap, skip-list, queue, stack
 
 # --- expli_tm_api tests ------------------------------------------
-TEST_DS_SRC = ../../tests/expli-api/test_ds.cpp
+TEST_DS_SRC = ../../tests/explicit-api/test_ds.cpp
 TEST_DS_BIN = bin/test_ds
-TEST_TX_SRC = ../../tests/expli-api/test_tx.cpp
+TEST_TX_SRC = ../../tests/explicit-api/test_tx.cpp
 TEST_TX_BIN = bin/test_tx
-TEST_RO2RW_SRC = ../../tests/expli-api/test_norec_ro2rw.cpp
+TEST_RO2RW_SRC = ../../tests/explicit-api/test_norec_ro2rw.cpp
 TEST_RO2RW_BIN = bin/test_norec_ro2rw
 
 # --- Stubs runtime (uninstrumented baseline) --------------------

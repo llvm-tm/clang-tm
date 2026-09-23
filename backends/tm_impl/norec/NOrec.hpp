@@ -528,7 +528,7 @@ write_word_norec(                     //
 	tx->read_only = false; // RO→RW promotion (review-02 S04): reads made while
 	                       // read_only are ALWAYS recorded in read_set, so the
 	                       // commit path validates them. Regression:
-	                       // tests/expli-api/test_norec_ro2rw.cpp.
+	                       // tests/explicit-api/test_norec_ro2rw.cpp.
 
 	auto typeSize = [](ValueType t) -> unsigned {
 		switch (t) {

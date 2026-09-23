@@ -14,10 +14,10 @@ backend's API directly (currently CSMV via the batch executor).
 | `gpu_kmeans.cu`| STAMP kmeans assignment (warp-cooperative distance) | CSMV  | `@experimental` |
 | `gpu_memcached.cu` | MemcachedGPU-style KV GET/SET                    | CSMV  | `@experimental` |
 | `gpu_tpcc.cu`  | TPC-C Payment transaction, money-conservation check  | CSMV  | `@experimental` |
-| `gpu_bank.cu`  | Bank transfer over GUST MVCC boxes                   | GUST  | `@broken` |
-| `gpu_ycsb_gust.cu` | YCSB over GUST (one tx per lane)                 | GUST  | `@broken` |
-| `gpu_memcached_gust.cu` | KV over GUST                                 | GUST  | `@broken` |
-| `gpu_gust_smoke.cu`  | GUST batch-executor smoke (`../backends/gpu_gust/cuda`) | GUST | `@broken` |
+| `gpu_bank.cu`  | Bank transfer over GUST MVCC boxes                   | GUST  | — (fixed review-05) |
+| `gpu_ycsb_gust.cu` | YCSB over GUST (one tx per lane)                 | GUST  | — (fixed review-05) |
+| `gpu_memcached_gust.cu` | KV over GUST                                 | GUST  | — (fixed review-05) |
+| `gpu_gust_smoke.cu`  | GUST batch-executor smoke (local driver since the review-05 layout pass) | GUST | — (fixed review-05) |
 
 `gpu_ycsb.cu` is the reference implementation (validated design, see
 `REVIEW.md`). The other CSMV workloads are `@experimental` skeletons
@@ -36,16 +36,20 @@ algorithmic bugs, **not** portability/wave-width issues:
 | Benchmark | AMD | NVIDIA |
 |-----------|-----|--------|
 | gpu_ycsb, gpu_kmeans, gpu_memcached, gpu_tpcc, gpu_fuzz_counter (CSMV) | build + run + **PASS** | build + run + **PASS** |
-| gpu_bank, gpu_gust_smoke (GUST) | build; runs but **money conservation fails** | same |
-| gpu_ycsb_gust, gpu_memcached_gust (GUST) | build; **launch failure** | build; **hangs** |
+| gpu_bank, gpu_gust_smoke (GUST) | build + run + **PASS** (review-05) | review-03: failed invariants — **re-test needed** after review-05 fix |
+| gpu_ycsb_gust, gpu_memcached_gust (GUST) | build + run + **PASS** (review-05) | review-03: hang — **re-test needed** after review-05 fix |
 
-> **`@broken` (GUST):** the GUST benchmarks no longer crash at `gust_gpu_init`
-> (that null-pointer bug — `cudaMalloc(&__device__ var)` — was fixed in review-03
-> to the `cudaMemcpyToSymbol` idiom), but they still fail their invariants: the
-> batch commit aborts almost every transaction so balances drift, and the
-> YCSB/memcached-over-GUST batch kernels hang (NVIDIA) or raise a hardware
-> exception (AMD). They are build-only smoke tests until the GUST backend's
-> concurrency protocol is fixed.
+> **GUST status (review-05):** the four GUST benchmarks' concurrency bugs are
+> fixed (bootstrap clock, VBox value-before-version publication, max-version
+> snapshot reads, CL epoch + payload-before-state publication, spin-until-
+> published validation, unconditional MRV, butterfly warp max-reduce, uniform
+> commit call sites, overflow-abort instead of silent truncation — see
+> `docs/CORRECTNESS_FIXES.md` §13 and `review-05/GUST_PLAN.md`).  Verified on
+> AMD incl. runs that cross a full commit-log ring revolution; **not yet
+> re-verified on NVIDIA** (no CUDA host available).  Note the fixed protocol
+> aborts writers once an address accumulates more than
+> `GPU_GUST_VBOX_DEPTH` (currently 8) committed versions — hot-address
+> throughput suffers until the depth/GC follow-up lands (TODO.md).
 
 > **Do not use `@experimental` workloads for reported performance numbers.**
 > They are useful for API/design smoke tests only: `gpu_kmeans` has no
@@ -78,7 +82,7 @@ The benchmark checks an invariant: the sum of all committed writes must equal
 ## Design notes
 
 - `gpu_ycsb.cu` uses `csmv_gpu_begin/read/write/commit` from the CSMV backend
-  (`gpu/backends/csmv/csmv_batch_executor.hpp`). Each warp executes one
+  (`gpu/backends/csmv/include/csmv_batch_executor.hpp`). Each warp executes one
   transaction; version-list traversal is warp-cooperative.
 - No TM region allocator, no host-side hooks, no `tm_register_real_hooks`:
   the GPU backend is driven directly.
