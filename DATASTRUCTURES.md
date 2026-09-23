@@ -95,7 +95,7 @@ Allocation uses `tm_malloc`/`tm_free` directly. Built for the explicit instrumen
 **Source files:**
 - `explicit_api/cpp/include/tm_api.hpp` — `expli::vector<T>`
 - `explicit_api/cpp/include/tm_map.hpp` — `expli::flat_set<K>`, `expli::flat_map<K,V>`, `expli::flat_multimap<K,V>`
-- `tests/expli-api/test_tx.cpp` — unit tests using these containers
+- `tests/explicit-api/test_tx.cpp` — unit tests using these containers
 
 ### 2.1 expli::vector<T> (`tm_api.hpp`, namespace `expli`)
 

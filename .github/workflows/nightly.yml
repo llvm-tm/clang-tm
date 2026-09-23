@@ -77,9 +77,10 @@ jobs:
       - name: Build and test all 15 backends
         run: |
           echo "backend,test_tx,test_ds,note" > cross_backend_results.csv
-          for backend in TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL LEFTRIGHT ROMULUS XTM SPHT TSXSGL; do
+          for backend in TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL LEFTRIGHT ROMULUS XTM SPHT TSXSGL GPU_STM_CPU CSMV GPUTX GACCO; do
             case "$backend" in
               SPHT|TSXSGL) note="requires -mrtm (FAIL expected on non-TSX runner)" ;;
+              GPU_STM_CPU|CSMV|GPUTX|GACCO) note="GPU-family CPU fallback (review-05 T-04)" ;;
               *)           note="" ;;
             esac
             make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=$backend 2>/dev/null

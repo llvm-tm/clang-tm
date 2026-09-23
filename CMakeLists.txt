@@ -31,6 +31,10 @@ option(BUILD_TESTS "Build plugin tests" ON)
 option(BUILD_SHARED "Build shared plugin" ON)
 option(BUILD_GPU_STM "Build GPU STM backend (PR-STM, requires CUDA)" OFF)
 option(GPU_STM_CPU_FALLBACK "Build CPU-only PR-STM fallback (no GPU)" OFF)
+option(BUILD_GPU_STM_HIP "Build GPU STM backend with HIP" OFF)
+option(BUILD_CSMV "Build CSMV GPU STM backend (requires CUDA)" OFF)
+option(CSMV_CPU_FALLBACK "Build CSMV CPU-only fallback (no GPU)" OFF)
+option(BUILD_CSMV_HIP "Build CSMV GPU backend with HIP" OFF)
 
 # Backend selection
 set(STM_BACKEND "tinystm" CACHE STRING "STM backend: tinystm, tl2, singlelock, swisstm")
@@ -40,7 +44,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find LLVM (LLVM 22+ required, matching the Makefile-based build).
 # The default dev/pinned version remains LLVM 22; CI may also validate LLVM 23.
-find_package(LLVM 22 REQUIRED CONFIG)
+# No version argument: LLVM's own ConfigVersion file rejects a bare "22"
+# against e.g. 22.1.2 (review-05 T-03); the major-version guard below does
+# the real work.
+find_package(LLVM REQUIRED CONFIG)
 if(NOT DEFINED LLVM_VERSION_MAJOR)
     message(FATAL_ERROR "LLVM 22+ required, but LLVM_VERSION_MAJOR was not set")
 endif()
@@ -177,8 +184,13 @@ endif()
 # GPU STM Backend (optional)
 # ============================================================================
 
-if(BUILD_GPU_STM OR GPU_STM_CPU_FALLBACK)
+if(BUILD_GPU_STM OR GPU_STM_CPU_FALLBACK OR BUILD_GPU_STM_HIP)
     add_subdirectory(${RUNTIMES_DIR}/gpu_stm)
+endif()
+
+# review-05 T-03: csmv was never added here, so its options were unreachable.
+if(BUILD_CSMV OR CSMV_CPU_FALLBACK OR BUILD_CSMV_HIP)
+    add_subdirectory(${RUNTIMES_DIR}/csmv)
 endif()
 
 # ============================================================================

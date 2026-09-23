@@ -13,7 +13,7 @@ API and an LLVM 22 plugin) and benchmark suites (STAMP, TPC-C, STMbench7, bank).
 ## First things to do
 
 ```sh
-make check-fast        # ~60s smoke: plugin + 3 C++ backends + Rust; run this to verify the toolchain
+make check-fast        # ~60s smoke: plugin + 4 C++ backends (incl. CSMV CPU) + Rust; run this to verify the toolchain
 make help              # list all targets (default target)
 ```
 

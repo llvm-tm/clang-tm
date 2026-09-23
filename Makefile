@@ -67,9 +67,10 @@ check: tests
 
 # --- Fast smoke test (~60s, fails on the first error) --------------------
 # The "does it work?" command: plugin build + 18 instrumented plugin tests +
-# C++ test_tx/test_ds for three representative backends + both Rust workspaces.
+# C++ test_tx/test_ds for four representative backends (incl. the CSMV GPU-
+# family CPU fallback, review-05 T-04) + both Rust workspaces.
 # Use `make check-all` for the full multi-backend sweep.
-CHECK_FAST_BACKENDS := TINYSTM NOREC TL2
+CHECK_FAST_BACKENDS := TINYSTM NOREC TL2 CSMV
 
 check-fast:
 	@echo "=== check-fast [1/4] plugin build + 18 plugin tests ==="
@@ -234,9 +235,10 @@ fmt-check:
 		echo "  $$d"; \
 		(cd $$d && cargo fmt --all --check) || exit 1; \
 	done
-	@echo "=== fmt-check: Rust (clippy -D warnings: tm, simulator) ==="
-	@(cd explicit_api/rust/workspace && cargo clippy --features wbctl -p tm -- -D warnings)
-	@(cd simulator && cargo clippy -- -D warnings)
+	@echo "=== fmt-check: Rust (clippy -D warnings: workspace --all-targets, tm+wbctl, simulator) ==="
+	@(cd explicit_api/rust/workspace && cargo clippy --workspace --all-targets -- -D warnings)
+	@(cd explicit_api/rust/workspace && cargo clippy --features wbctl -p tm --all-targets -- -D warnings)
+	@(cd simulator && cargo clippy --all-targets -- -D warnings)
 	@echo "=== fmt-check: all clean ==="
 
 clean-book:

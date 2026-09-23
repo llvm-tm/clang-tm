@@ -75,6 +75,16 @@ jobs:
         run: cargo build --manifest-path benchmarks/rust/Cargo.toml
       - name: Run Rust workspace tests
         run: cargo test --manifest-path explicit_api/rust/workspace/Cargo.toml -- --test-threads=1
+      # review-05 R-12: bench-tinystm and containers were only green via
+      # workspace feature unification; gate each backend combo explicitly.
+      - name: bench-tinystm compiles with every backend feature
+        run: |
+          for f in wbctl wbetl wt norec tl2; do
+            cargo check --manifest-path explicit_api/rust/workspace/Cargo.toml \
+              -p bench-tinystm --no-default-features --features $f
+          done
+      - name: containers standalone check
+        run: cargo check --manifest-path explicit_api/rust/workspace/Cargo.toml -p containers
 
   # ── Job 4: Race checker warnings ────────────────────────
   race-checker:

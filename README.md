@@ -188,7 +188,7 @@ make -C benchmarks/cpp BACKEND=TINYSTM run-tests
 # The test suite includes test_tx which exercises this pattern.
 ```
 
-See `tests/expli-api/test_tx.cpp` for complete unit tests
+See `tests/explicit-api/test_tx.cpp` for complete unit tests
 (`./bin/test_tx` after `make -C benchmarks/cpp all`).
 A money-conservation benchmark is at `benchmarks/cpp/bank/bank.cpp`.
 

@@ -38,7 +38,7 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   clock `>= VERSION_MASK`, so no reader observes an intermediate state.
   The incarnation counter in `inc_abort()` is masked to 3 bits and a wrap
   to 0 is safe (all acquires CAS the full state). The reset path is now
-  verified by `tests/expli-api/test_tinystm_clock_wrap.cpp` (drives the
+  verified by `tests/explicit-api/test_tinystm_clock_wrap.cpp` (drives the
   clock to `VERSION_MAX - 1` and checks the reset; 11/11 checks).
 
 ### NOrec shared-structure cleanup — RESOLVED (review-02 S05)
@@ -66,7 +66,7 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   first write clears `read_only`, the commit path runs the full validation
   over the entire read-set, so reads made during the RO phase are validated.
   No abort-and-restart is needed.
-- **Regression**: `tests/expli-api/test_norec_ro2rw.cpp` — a conservation
+- **Regression**: `tests/explicit-api/test_norec_ro2rw.cpp` — a conservation
   stress test where every transaction reads strictly before its first write
   (forcing RO→RW promotion mid-tx); fails if RO-phase reads are ever skipped.
   PASS on NOREC, NORECBF, TINYSTM.
@@ -116,6 +116,26 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   `gpu/benchmarks/README.md` marks these as non-reference and excludes them
   from reported numbers. Reopen as P1 only if they are promoted to real
   benchmarks with full algorithms.
+
+### GUST follow-ups after review-05 correctness fix
+- **Files**: `gpu/backends/gpu_gust/include/gpu_gust_api.h`,
+  `docs/proofs/GPU_GUST.cfg` / `GPU_GUST-liveness.cfg`
+- **Issue**: (a) The fixed protocol never reuses VBox slots; with
+  `GPU_GUST_VBOX_DEPTH = 8`, addresses that accumulate > 7 committed
+  versions permanently abort their writers (money-safe but throughput-starved
+  under hot-key skew). Needs per-address window sizing or log compaction/GC.
+  (b) The fixed `GPU_GUST.cfg` safety check completed green (532M states,
+  222M distinct, 15 m 33 s on 8 workers — fine for nightly); the
+  `GPU_GUST-liveness.cfg` run exceeded 15 min on this host and was never
+  completed — wire both into the proofs nightly with a proper time budget.
+  (c) review-05 fix verified on AMD only — re-run the four GUST benchmarks on
+  the CUDA/RTX runner. (d) `gpu_gust_kernel.cuh` microbench path still not
+  built by any canonical target (carries the same protocol fixes, untested).
+- **Status (2026-09-23, review-05)**: opened; correctness fixes landed
+  (`docs/CORRECTNESS_FIXES.md` §13).
+- **Next step**: size VBox depth from the benchmark's max writes/address, or
+  add reclaim; add `check-GPU_GUST` nightly job with a bounded `-traceGC`/
+  `-workers` budget; CUDA re-verification when the NVIDIA host is available.
 
 ### TSC-TM/CSMV simulator coverage (remaining from review-02 S24)
 - **Files**: `explicit_api/rust/workspace/runtime/` (no `tsc_tm` or `csmv` crates yet), `simulator/Cargo.toml`, `simulator/src/backend.rs`
