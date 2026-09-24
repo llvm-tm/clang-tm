@@ -9,7 +9,7 @@ pub use runtime_core::{Primitive, TypedValue, WriteBack};
 use std::cell::RefCell;
 #[cfg(feature = "simulation")]
 use std::cell::UnsafeCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 // ── SyncUnsafeCell: UnsafeCell that implements Sync ────
@@ -135,6 +135,11 @@ pub static TM_ABORT_COUNT: AtomicU64 = AtomicU64::new(0);
 pub struct TxState {
     pub read_set: Vec<(usize, u64)>, // (addr, observed_version)
     pub write_set: HashMap<usize, TypedValue>,
+    /// Byte addresses whose old value is already in `undo_backs` (R-06:
+    /// mixed typed/raw writes must record undo exactly once per byte —
+    /// keying by write-set base addresses double-recorded or missed bytes
+    /// when entries overlapped).
+    pub undo_recorded: HashSet<usize>,
     /// Deferred undo closures (safe to apply on rollback).
     pub undo_backs: Vec<WriteBack>,
     pub locked_orecs: Vec<usize>, // orec indices locked for writing
@@ -154,6 +159,7 @@ impl TxState {
         TxState {
             read_set: Vec::with_capacity(64),
             write_set: HashMap::with_capacity(8),
+            undo_recorded: HashSet::new(),
             undo_backs: Vec::new(),
             locked_orecs: Vec::new(),
             valid_ts: global_clock,
@@ -343,18 +349,6 @@ fn flush_tx() -> Option<Box<TxState>> {
 static THR_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // ── Memory helpers ─────────────────────────────────────
-fn read_mem_val(addr: usize, sz: u8) -> u64 {
-    unsafe {
-        match sz {
-            1 => (addr as *const u8).read() as u64,
-            2 => (addr as *const u16).read() as u64,
-            4 => (addr as *const u32).read() as u64,
-            8 => (addr as *const u64).read(),
-            _ => 0,
-        }
-    }
-}
-
 fn write_mem_typed(addr: usize, tv: &TypedValue) {
     unsafe {
         match tv {
@@ -528,16 +522,17 @@ fn write_word<T: Primitive>(addr: usize, val: T) {
             }
         }
 
-        // Save old value in undo log (first write only)
-        if !tx.write_set.contains_key(&addr) {
-            let old_val = read_mem_val(addr, sz);
-            let wb = match sz {
-                1 => WriteBack::U8(addr, old_val as u8),
-                2 => WriteBack::U16(addr, old_val as u16),
-                4 => WriteBack::U32(addr, old_val as u32),
-                _ => WriteBack::U64(addr, old_val),
-            };
-            tx.undo_backs.push(wb);
+        // Save old value in undo log, once per byte (R-06): an
+        // address-range check against write-set keys breaks when typed and
+        // raw entries partially overlap within one transaction.
+        for j in 0..sz as usize {
+            let baddr = addr + j;
+            if tx.undo_recorded.contains(&baddr) {
+                continue;
+            }
+            let old = unsafe { (baddr as *const u8).read() };
+            tx.undo_backs.push(WriteBack::U8(baddr, old));
+            tx.undo_recorded.insert(baddr);
         }
 
         write_mem_typed(addr, &tv);
@@ -592,11 +587,13 @@ fn write_raw_bytes(addr: usize, src: &[u8]) {
 
         for (i, _) in src.iter().enumerate() {
             let byte_addr = addr + i;
-            if !tx.write_set.contains_key(&byte_addr) {
-                let old_val = unsafe { (byte_addr as *const u8).read() };
-                tx.undo_backs
-                    .push(old_val.to_typed().into_write_back(byte_addr));
+            if tx.undo_recorded.contains(&byte_addr) {
+                continue;
             }
+            let old_val = unsafe { (byte_addr as *const u8).read() };
+            tx.undo_backs
+                .push(old_val.to_typed().into_write_back(byte_addr));
+            tx.undo_recorded.insert(byte_addr);
         }
 
         let tv = TypedValue::Bytes(src.to_vec().into_boxed_slice());
@@ -933,6 +930,38 @@ mod tests {
             "read of a WLocked address must be recorded for validation (R-06)"
         );
         unsafe { drop(Box::from_raw(a)) };
+    }
+
+    // R-06 residual: overlapping typed and raw writes in one transaction
+    // must record undo exactly once per byte — abort restores every byte.
+    #[test]
+    fn mixed_typed_and_raw_writes_undo_cleanly() {
+        let _g = SW_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let buf = Box::into_raw(Box::new([0u8; 8]));
+        let p = buf as usize;
+        unsafe {
+            for i in 0..8 {
+                *((p + i) as *mut u8) = (i as u8) + 1;
+            }
+        }
+        tm_begin();
+        tm_write_raw(p as *mut u8, &[0xA2, 0xA3]); // bytes 0-1
+        let w3 = (p + 3) as *mut u32;
+        tm_write_u32(w3, 0xBEEF_0BAD); // bytes 3-6
+        tm_write_raw((p + 5) as *mut u8, &[0xC5, 0xC6]); // bytes 5-6
+        tm_abort();
+        unsafe {
+            for i in 0..8 {
+                assert_eq!(
+                    *((p + i) as *const u8),
+                    (i as u8) + 1,
+                    "byte {} must be restored on abort (R-06 undo overlap)",
+                    i
+                );
+            }
+            drop(Box::from_raw(buf));
+        }
     }
 
     #[test]

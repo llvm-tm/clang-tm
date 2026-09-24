@@ -576,24 +576,46 @@ fn commit_impl(tx: &mut TxState) -> bool {
                 continue; // already folded by an earlier reclamation
             }
             if (le.state.load(Ordering::Acquire) as u32 & 0xFF) == LogState::Committed as u32 {
-                let cnt = le.ws_count.load(Ordering::Relaxed).min(KMAX_INLINE_WS);
-                for i in 0..cnt {
-                    let a = le.ws_addr[i].load(Ordering::Relaxed);
+                let n = le.ws_count.load(Ordering::Relaxed);
+                let cnt = n.min(KMAX_INLINE_WS);
+                let fold_addr = |a: usize, t: u8, v: u64| {
                     // An address rewritten by THIS commit (already folded
                     // through to memory) must not be regressed by the older
                     // value from the reclaimed entry (review-05 R-05).
                     if tx.write_set.iter().any(|w| w.addr == a) {
-                        continue;
+                        return;
                     }
                     // Fold with the entry's real width; a hardcoded 8
                     // clobbered up to 7 neighbouring bytes (review-05 R-05).
-                    let sz: u8 = match le.ws_type[i].load(Ordering::Relaxed) {
+                    let sz: u8 = match t {
                         0 => 1,
                         1 => 2,
                         2 => 4,
                         _ => 8,
                     };
-                    write_mem_val(a, le.ws_val[i].load(Ordering::Relaxed), sz);
+                    write_mem_val(a, v, sz);
+                };
+                for i in 0..cnt {
+                    fold_addr(
+                        le.ws_addr[i].load(Ordering::Relaxed),
+                        le.ws_type[i].load(Ordering::Relaxed),
+                        le.ws_val[i].load(Ordering::Relaxed),
+                    );
+                }
+                // R-14: >KMAX_INLINE_WS entries live in the overflow box;
+                // folding only the inline prefix silently dropped every
+                // excess write the moment G_WM advanced past this slot.
+                if n > KMAX_INLINE_WS {
+                    let p = le.overflow.load(Ordering::Relaxed);
+                    if !p.is_null() {
+                        // SAFETY: the box is published before the state
+                        // release-store and never freed (same invariant the
+                        // resolve path relies on), so it is valid here.
+                        let ov = unsafe { &*(p as *const Vec<(usize, u8, u64)>) };
+                        for &(a, t, v) in ov.iter() {
+                            fold_addr(a, t, v);
+                        }
+                    }
                 }
             }
         }
@@ -1058,6 +1080,43 @@ mod tests {
         unsafe {
             assert_eq!(*addr, 999, "fold regressed a newer committed value");
             drop(Box::from_raw(addr));
+            drop(Box::from_raw(scratch));
+        }
+    }
+
+    // R-14: transactions with >KMAX_INLINE_WS writes stash the write-set
+    // in a boxed overflow list; reclamation must fold ALL of those entries
+    // into memory, not just the first 8 inline ones.
+    #[test]
+    fn fold_applies_overflow_entries() {
+        let _g = MVLOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        tm_init();
+        let vals = Box::new([0u64; 12]);
+        let base = Box::into_raw(vals) as *mut u64;
+        let scratch = Box::into_raw(Box::new(0u64));
+        tm_begin();
+        for i in 0..12 {
+            tm_write_u64(unsafe { base.add(i) }, (i as u64) + 100);
+        }
+        assert!(tm_commit());
+        // Clobber memory behind the backend: after reclamation folds the
+        // committed entry through, the values must be restored.
+        unsafe {
+            for i in 0..12 {
+                base.add(i).write(0);
+            }
+        }
+        for i in 0..FILLERS {
+            tm_begin();
+            tm_write_u64(scratch, i as u64 + 1);
+            assert!(tm_commit());
+        }
+        unsafe {
+            for i in 0..12 {
+                let v = base.add(i).read();
+                assert_eq!(v, (i as u64) + 100, "overflow entry {} not folded", i);
+            }
+            drop(Box::from_raw(base));
             drop(Box::from_raw(scratch));
         }
     }

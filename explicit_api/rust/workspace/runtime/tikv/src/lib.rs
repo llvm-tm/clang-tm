@@ -253,6 +253,11 @@ pub extern "C" fn tikv_tm_get_thread_state() -> *mut std::ffi::c_void {
 // Shared by both the Rust API and C FFI paths.
 
 fn tikv_init() {
+    // R-08: map the TM region FIRST so the documented cross-process key
+    // agreement ("tm:{offset:016x}", offsets relative to the region base)
+    // holds even when no other component has initialized the region.
+    let rc = addrspace::tm_region_init();
+    assert_eq!(rc, 0, "tikv: tm_region_init failed");
     let pd_str = std::env::var("TM_TIKV_PD").unwrap_or_else(|_| "127.0.0.1:2379".to_string());
     let endpoints: Vec<&str> = pd_str.split(',').map(|s| s.trim()).collect();
 
