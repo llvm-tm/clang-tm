@@ -5,9 +5,11 @@
 #include <chrono>
 #include <csetjmp>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <list>
+#include <mutex>
 #include <pthread.h>
 #include <random>
 #include <thread>
@@ -249,12 +251,21 @@ public:
 				*reinterpret_cast<void **>(we.byte_addr) = we.old_value.ptr;
 				break;
 			}
-			// Compiler barrier: ensure all undo-restore stores complete
-			// before the lock release.  Without this, on ARM the restore
-			// stores could be reordered after the release, exposing torn
-			// values to a concurrent reader.
-			__atomic_signal_fence(__ATOMIC_SEQ_CST);
-			we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
+		}
+		// Compiler barrier: ensure all undo-restore stores complete
+		// before the lock releases.  Without this, on ARM the restore
+		// stores could be reordered after the release, exposing torn
+		// values to a concurrent reader.
+		__atomic_signal_fence(__ATOMIC_SEQ_CST);
+		// Release each owned w_lock EXACTLY ONCE.  Releasing per
+		// write-log entry was broken when two writes of one transaction
+		// share an OREC (LOCK_EXTENT=4 maps two adjacent 8-byte words
+		// to one OREC): the second release landed after a third TX had
+		// already acquired the lock between the two stores, stealing
+		// that TX's lock and producing concurrent holders + lost updates
+		// (G-20, caught by the abba/write_set_validation vectors).
+		for (auto *orec : tx->owned_orecs) {
+			orec->w_lock.store(UNLOCKED, std::memory_order_release);
 		}
 		tx->aborted = true;
 		tx->succ_abort_count++;
@@ -621,9 +632,11 @@ public:
 			return;
 
 		if (tx->aborted) {
-			for (auto &we : tx->write_log) {
-				we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
-			}
+			// Every w_lock we ever acquired has already been released by
+			// rollback() (guarded by owned_orecs).  Releasing write_log
+			// entries here again — including entries whose CAS never
+			// succeeded — could unlock a w_lock a different TX currently
+			// owns (G-20 lock-steal hazard).
 			stm::tm_token_release_if_held(tx->id);
 			tx->active = false;
 			return;
@@ -688,9 +701,12 @@ public:
 					continue;
 				re2.orec->r_lock.store(re2.old_version, std::memory_order_release);
 			}
-			for (auto &we : tx->write_log) {
-				we.orec->w_lock.store(UNLOCKED, std::memory_order_release);
-			}
+			// DO NOT release write locks here: rollback() (called
+			// immediately below) releases each owned w_lock exactly once.
+			// Releasing here too created a double-release window: another
+			// TX could acquire the freed w_lock and commit, after which
+			// rollback's undo-restore clobbered that committed value and
+			// released the OTHER TX's lock (G-20 lost updates).
 			rollback(tx);
 			return;
 		}

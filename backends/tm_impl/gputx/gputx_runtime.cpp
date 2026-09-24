@@ -240,11 +240,15 @@ static void do_write(void *addr, uint64_t val, uint8_t width)
 		}
 	}
 	g_write_buffer[addr] = {val, width};
-	// Only track the first write per address in g_writes (for lock release);
-	// later writes update the buffered value which commit applies.
+	// g_writes is the apply list (commit writes these to memory), so a
+	// re-write to the same address MUST update the tracked entry — leaving
+	// the first value there made commit apply a stale write (G-21: two
+	// writes to one address in a TX committed the first, not the last).
 	bool already_written = false;
 	for (auto &w : g_writes) {
 		if (w.addr == addr) {
+			w.val = val;
+			w.width = width;
 			already_written = true;
 			break;
 		}
