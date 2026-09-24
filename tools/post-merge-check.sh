@@ -49,8 +49,8 @@ ONLY="${POST_MERGE_ONLY:-}"
 run_section() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 
 # review-05 allowlists: "<key>"="BUG id". Key = "backend:suite".
-declare -A EXPECT_FAIL_CPP=( ["GPUTX:test_tx"]="G-21" )
-declare -A EXPECT_FAIL_UNITS=( ["swisstm"]="G-20" )
+declare -A EXPECT_FAIL_CPP=()
+declare -A EXPECT_FAIL_UNITS=()
 # check <rc> <key> <allowlist-name> — returns 0 (pass or expected-fail) or 1.
 check_rc() { # $1=rc $2=key $3=name-of-allow-array
   local rc=$1 key=$2

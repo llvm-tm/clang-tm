@@ -2686,3 +2686,33 @@ unexpected-pass tripwire so the allowlist cannot rot. Fixed two latent bugs
 in the script itself along the way (`set -e` killing `cmd; rc=$?`; the
 integrity sweep matching its own pattern). Full gate: EXIT=0, all sections,
 ~3 min warm.
+
+## Session 2026-09-24 — pre-existing issue sweep (G-20, G-21, R-06 residual, R-08, R-14)
+
+Closed every open correctness issue on the review-05 tracker, each with a
+repro first:
+- **G-20 (SwissTM C++)**: two `w_lock` double-release paths — the commit
+  failure path released locks that `rollback()` then released again, and
+  `rollback()` released per write-log entry while `LOCK_EXTENT=4` maps two
+  adjacent words (e.g. `a` at +0, `b` at +8) to ONE OREC, so the second
+  release stole a third TX's lock acquired in between. Caught with a
+  lock-free event trace showing overlapping holders + `ROLLBACK-restore`
+  over a committed value. Fix: single-owner release (`rollback()` restores
+  all, then releases each owned OREC exactly once; the commit-failure and
+  `aborted` paths no longer release). `run-swisstm` 5/5 (was failing ~1/3),
+  stress repro 75/75.
+- **G-21 (GPUTX)**: `g_writes` (apply list) kept the FIRST value when a TX
+  wrote an address twice, so commit committed the stale write (`peek()==100`
+  saw 42). Re-writes now update the tracked entry; test_tx 114/114 (3×).
+- **R-06 residual (SwissTM Rust)**: overlapping typed/raw writes double- or
+  miss-recorded undo (keys per-byte vs write-set base addresses). Added
+  `undo_recorded` byte set; new test `mixed_typed_and_raw_writes_undo_cleanly`.
+- **R-08 (TiKV)**: `tikv_init` now maps the TM region first, so the
+  documented `tm:{offset:016x}` cross-process key agreement holds
+  standalone (runtime verification needs a live cluster).
+- **R-14 (MVLog Rust)**: reclamation now folds overflow-box entries (>8
+  writes); previously those writes were silently dropped when the watermark
+  advanced. New `fold_applies_overflow_entries` test (fails at entry 8 on
+  HEAD). The C++ MVLog already folded via `log_ws()` (unaffected).
+Post-merge allowlists (`EXPECT_FAIL_*`) are now EMPTY — every gate is a real
+gate again.
