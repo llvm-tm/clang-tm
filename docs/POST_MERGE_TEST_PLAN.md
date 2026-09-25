@@ -106,7 +106,7 @@ make check-all            # 17 backends: TINYSTM WBETL WT NOREC NORECBF SWISSTM
       (all backends; `--test-threads=1` avoids the pre-existing QueueExecutor
       hang / mmap-address conflicts)
 - [ ] Backend feature sweep builds: `--features wbctl/wbetl/wt/norec/tl2/
-      swisstm/dudetm/tsxsgl/nvhtm/spht/leftright/romulus/xtm/tikv/mvlog`
+      swisstm/dudetm/tsxsgl/nvhtm/spht/leftright/romulus/xtm/tikv/mvlog/tsc-tm`
 - [ ] `cargo build --manifest-path benchmarks/rust/Cargo.toml`
       (NB: `--features mvlog`/`tl2` fail to build with pre-existing E0252
       because `tm-executor` forces default `wbctl` — not a merge regression)

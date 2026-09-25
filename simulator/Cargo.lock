@@ -342,6 +342,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-tsc-tm"
+version = "0.1.0"
+dependencies = [
+ "runtime-core",
+ "serde",
+]
+
+[[package]]
 name = "runtime-tsx-sim"
 version = "0.1.0"
 dependencies = [
@@ -467,6 +475,7 @@ dependencies = [
  "runtime-swisstm",
  "runtime-tinystm",
  "runtime-tl2",
+ "runtime-tsc-tm",
  "runtime-tsx-sim",
  "serde",
  "serde_json",

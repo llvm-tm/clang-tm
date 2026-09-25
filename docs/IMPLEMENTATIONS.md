@@ -618,6 +618,7 @@ The Rust workspace in `explicit_api/rust/workspace/` implements the same algorit
 | TiKV | `runtime/tikv` | Distributed TM via tikv-client |
 | TSXSim | `runtime/tsx_sim` | TSX simulation model |
 | MVLog | `runtime/mvlog` | Multi-version commit-log STM (ring log + index + Bloom) |
+| TSC-TM | `runtime/tsc_tm` | TL2 variant with guard-locked version stamps (no global clock); simulator backend `tm-sim --backend tsc-tm` |
 
 ---
 
@@ -660,6 +661,7 @@ concurrency-control family. Consumers must not assume uniform behavior:
 | SwissTM | `swisstm` | Discard write-set; release Orecs | Contention/preemption aborts + explicit aborts | Falls through to plain memory |
 | SGL family | `sgl-persistent`, `sgl-distributed`, `tsxsgl` | **Writes already visible** — abort only unlocks the global lock; there is no undo (SGL has no validation) | Only explicit `tm_abort()` calls (constant 0 before review-05 R-10 — now a real counter) | Falls through to plain memory |
 | MVLog | `mvlog` | Mark slot ABORTED; nothing published | Commit-time conflicts + explicit aborts | Falls through to plain memory |
+| TSC-TM | `tsc-tm` | Discard write-set; unlock held guards (version untouched) | Validation/lock-conflict aborts at `tm_commit` + explicit aborts | Falls through to plain memory |
 | TiKV | `tikv` | Abort the region transaction | Region-conflict aborts | **Panics** outside a transaction (see decision below) |
 
 Decision (review-05 R-11), tikv out-of-transaction behavior: **keep the

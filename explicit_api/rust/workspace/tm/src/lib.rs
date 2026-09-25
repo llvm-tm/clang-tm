@@ -16,6 +16,7 @@
     feature = "sgl-distributed",
     feature = "tikv",
     feature = "mvlog",
+    feature = "tsc-tm",
 ))]
 use runtime_core::TmxAbort;
 
@@ -132,6 +133,15 @@ pub use runtime_mvlog::{
     tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
 };
 
+#[cfg(feature = "tsc-tm")]
+pub use runtime_tsc_tm::{
+    tm_abort, tm_abort_count, tm_begin, tm_commit, tm_commit_count, tm_exit, tm_exit_thread,
+    tm_init, tm_init_thread, tm_read_f32, tm_read_f64, tm_read_i16, tm_read_i32, tm_read_i64,
+    tm_read_i8, tm_read_ptr, tm_read_raw, tm_read_u16, tm_read_u32, tm_read_u64, tm_read_u8,
+    tm_write_f32, tm_write_f64, tm_write_i16, tm_write_i32, tm_write_i64, tm_write_i8,
+    tm_write_ptr, tm_write_raw, tm_write_u16, tm_write_u32, tm_write_u64, tm_write_u8,
+};
+
 #[cfg(feature = "xtm")]
 pub use runtime_xtm::{
     tm_abort, tm_abort_count, tm_begin, tm_commit, tm_exit, tm_exit_thread, tm_init,
@@ -205,6 +215,7 @@ exclusive_backend!(
     "sgl-distributed",
     "tikv",
     "mvlog",
+    "tsc-tm",
     "wbctl",
     "wbetl",
     "wt",
@@ -225,6 +236,7 @@ exclusive_backend!(
     "sgl-distributed",
     "tikv",
     "mvlog",
+    "tsc-tm",
     "wbctl",
     "wbetl",
     "wt",
@@ -244,6 +256,7 @@ exclusive_backend!(
     "sgl-distributed",
     "tikv",
     "mvlog",
+    "tsc-tm",
     "wbctl",
     "wbetl",
     "wt",
@@ -262,6 +275,7 @@ exclusive_backend!(
     "sgl-distributed",
     "tikv",
     "mvlog",
+    "tsc-tm",
     "wbctl",
     "wbetl",
     "wt",
@@ -279,6 +293,7 @@ exclusive_backend!(
     "sgl-distributed",
     "tikv",
     "mvlog",
+    "tsc-tm",
     "wbctl",
     "wbetl",
     "wt",
@@ -295,6 +310,7 @@ exclusive_backend!(
     "sgl-distributed",
     "tikv",
     "mvlog",
+    "tsc-tm",
     "wbctl",
     "wbetl",
     "wt",
@@ -310,6 +326,7 @@ exclusive_backend!(
     "sgl-distributed",
     "tikv",
     "mvlog",
+    "tsc-tm",
     "wbctl",
     "wbetl",
     "wt",
@@ -324,6 +341,7 @@ exclusive_backend!(
     "sgl-distributed",
     "tikv",
     "mvlog",
+    "tsc-tm",
     "wbctl",
     "wbetl",
     "wt",
@@ -337,6 +355,7 @@ exclusive_backend!(
     "sgl-distributed",
     "tikv",
     "mvlog",
+    "tsc-tm",
     "wbctl",
     "wbetl",
     "wt",
@@ -349,6 +368,7 @@ exclusive_backend!(
     "sgl-distributed",
     "tikv",
     "mvlog",
+    "tsc-tm",
     "wbctl",
     "wbetl",
     "wt",
@@ -360,6 +380,7 @@ exclusive_backend!(
     "sgl-distributed",
     "tikv",
     "mvlog",
+    "tsc-tm",
     "wbctl",
     "wbetl",
     "wt",
@@ -370,6 +391,7 @@ exclusive_backend!(
     "sgl-distributed",
     "tikv",
     "mvlog",
+    "tsc-tm",
     "wbctl",
     "wbetl",
     "wt",
@@ -379,13 +401,15 @@ exclusive_backend!(
     "sgl-distributed",
     "tikv",
     "mvlog",
+    "tsc-tm",
     "wbctl",
     "wbetl",
     "wt",
     "tsx_sim"
 );
 exclusive_backend!("tikv", "mvlog", "wbctl", "wbetl", "wt", "tsx_sim");
-exclusive_backend!("mvlog", "wbctl", "wbetl", "wt", "tsx_sim");
+exclusive_backend!("mvlog", "tsc-tm", "wbctl", "wbetl", "wt", "tsx_sim");
+exclusive_backend!("tsc-tm", "wbctl", "wbetl", "wt", "tsx_sim");
 exclusive_backend!("wbctl", "wbetl", "wt", "tsx_sim");
 exclusive_backend!("wbetl", "wt", "tsx_sim");
 exclusive_backend!(
@@ -429,6 +453,7 @@ exclusive_backend!(
     feature = "sgl-distributed",
     feature = "tikv",
     feature = "mvlog",
+    feature = "tsc-tm",
     feature = "tsx_sim",
 )))]
 compile_error!(
@@ -629,6 +654,7 @@ impl Transaction {
     feature = "sgl-distributed",
     feature = "tikv",
     feature = "mvlog",
+    feature = "tsc-tm",
 ))]
 pub fn transaction<T, F>(f: F) -> T
 where
@@ -677,6 +703,7 @@ where
     feature = "sgl-distributed",
     feature = "tikv",
     feature = "mvlog",
+    feature = "tsc-tm",
 )))]
 pub fn transaction<T, F>(f: F) -> T
 where

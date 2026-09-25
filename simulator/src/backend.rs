@@ -13,6 +13,7 @@ pub enum Backend {
     Romulus,
     Swisstm,
     Mvlog,
+    TscTm,
     TsxSim,
 }
 
@@ -25,6 +26,7 @@ impl Backend {
             "romulus" => Some(Backend::Romulus),
             "swisstm" => Some(Backend::Swisstm),
             "mvlog" | "mv-log" => Some(Backend::Mvlog),
+            "tsc-tm" | "tsc_tm" | "tsctm" => Some(Backend::TscTm),
             "tsx-sim" | "tsx_sim" => Some(Backend::TsxSim),
             _ => None,
         }
@@ -38,6 +40,7 @@ impl Backend {
             Backend::Romulus => "romulus",
             Backend::Swisstm => "swisstm",
             Backend::Mvlog => "mvlog",
+            Backend::TscTm => "tsc-tm",
             Backend::TsxSim => "tsx-sim",
         }
     }
@@ -50,6 +53,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::tm_init(),
             Backend::Swisstm => runtime_swisstm::tm_init(),
             Backend::Mvlog => runtime_mvlog::tm_init(),
+            Backend::TscTm => runtime_tsc_tm::tm_init(),
             Backend::TsxSim => runtime_tsx_sim::tm_init(),
         }
     }
@@ -62,6 +66,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::tm_init_thread(),
             Backend::Swisstm => runtime_swisstm::tm_init_thread(),
             Backend::Mvlog => runtime_mvlog::tm_init_thread(),
+            Backend::TscTm => runtime_tsc_tm::tm_init_thread(),
             Backend::TsxSim => runtime_tsx_sim::tm_init_thread(),
         }
     }
@@ -74,6 +79,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::tm_begin(),
             Backend::Swisstm => runtime_swisstm::tm_begin(),
             Backend::Mvlog => runtime_mvlog::tm_begin(),
+            Backend::TscTm => runtime_tsc_tm::tm_begin(),
             Backend::TsxSim => runtime_tsx_sim::tm_begin(),
         }
     }
@@ -109,6 +115,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::tm_commit(),
             Backend::Swisstm => runtime_swisstm::tm_commit(),
             Backend::Mvlog => runtime_mvlog::tm_commit(),
+            Backend::TscTm => runtime_tsc_tm::tm_commit(),
             Backend::TsxSim => runtime_tsx_sim::tm_commit(),
         }
     }
@@ -121,6 +128,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::tm_abort(),
             Backend::Swisstm => runtime_swisstm::tm_abort(),
             Backend::Mvlog => runtime_mvlog::tm_abort(),
+            Backend::TscTm => runtime_tsc_tm::tm_abort(),
             Backend::TsxSim => runtime_tsx_sim::tm_abort(),
         }
     }
@@ -133,6 +141,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::sim::set_thread_id(id),
             Backend::Swisstm => runtime_swisstm::sim::set_thread_id(id),
             Backend::Mvlog => runtime_mvlog::sim::set_thread_id(id),
+            Backend::TscTm => runtime_tsc_tm::sim::set_thread_id(id),
             Backend::TsxSim => runtime_tsx_sim::sim::set_thread_id(id),
         }
     }
@@ -145,6 +154,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::sim::clear_thread_id(),
             Backend::Swisstm => runtime_swisstm::sim::clear_thread_id(),
             Backend::Mvlog => runtime_mvlog::sim::clear_thread_id(),
+            Backend::TscTm => runtime_tsc_tm::sim::clear_thread_id(),
             Backend::TsxSim => runtime_tsx_sim::sim::clear_thread_id(),
         }
     }
@@ -157,6 +167,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::sim::reset(),
             Backend::Swisstm => runtime_swisstm::sim::reset(),
             Backend::Mvlog => runtime_mvlog::sim::reset(),
+            Backend::TscTm => runtime_tsc_tm::sim::reset(),
             Backend::TsxSim => runtime_tsx_sim::sim::reset(),
         }
     }
@@ -169,6 +180,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::tm_read_u8(addr),
             Backend::Swisstm => runtime_swisstm::tm_read_u8(addr),
             Backend::Mvlog => runtime_mvlog::tm_read_u8(addr),
+            Backend::TscTm => runtime_tsc_tm::tm_read_u8(addr),
             Backend::TsxSim => runtime_tsx_sim::tm_read_u8(addr),
         }
     }
@@ -180,6 +192,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::tm_read_u16(addr),
             Backend::Swisstm => runtime_swisstm::tm_read_u16(addr),
             Backend::Mvlog => runtime_mvlog::tm_read_u16(addr),
+            Backend::TscTm => runtime_tsc_tm::tm_read_u16(addr),
             Backend::TsxSim => runtime_tsx_sim::tm_read_u16(addr),
         }
     }
@@ -191,6 +204,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::tm_read_u32(addr),
             Backend::Swisstm => runtime_swisstm::tm_read_u32(addr),
             Backend::Mvlog => runtime_mvlog::tm_read_u32(addr),
+            Backend::TscTm => runtime_tsc_tm::tm_read_u32(addr),
             Backend::TsxSim => runtime_tsx_sim::tm_read_u32(addr),
         }
     }
@@ -202,6 +216,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::tm_read_u64(addr),
             Backend::Swisstm => runtime_swisstm::tm_read_u64(addr),
             Backend::Mvlog => runtime_mvlog::tm_read_u64(addr),
+            Backend::TscTm => runtime_tsc_tm::tm_read_u64(addr),
             Backend::TsxSim => runtime_tsx_sim::tm_read_u64(addr),
         }
     }
@@ -214,6 +229,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::tm_write_u8(addr, val),
             Backend::Swisstm => runtime_swisstm::tm_write_u8(addr, val),
             Backend::Mvlog => runtime_mvlog::tm_write_u8(addr, val),
+            Backend::TscTm => runtime_tsc_tm::tm_write_u8(addr, val),
             Backend::TsxSim => runtime_tsx_sim::tm_write_u8(addr, val),
         }
     }
@@ -225,6 +241,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::tm_write_u16(addr, val),
             Backend::Swisstm => runtime_swisstm::tm_write_u16(addr, val),
             Backend::Mvlog => runtime_mvlog::tm_write_u16(addr, val),
+            Backend::TscTm => runtime_tsc_tm::tm_write_u16(addr, val),
             Backend::TsxSim => runtime_tsx_sim::tm_write_u16(addr, val),
         }
     }
@@ -236,6 +253,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::tm_write_u32(addr, val),
             Backend::Swisstm => runtime_swisstm::tm_write_u32(addr, val),
             Backend::Mvlog => runtime_mvlog::tm_write_u32(addr, val),
+            Backend::TscTm => runtime_tsc_tm::tm_write_u32(addr, val),
             Backend::TsxSim => runtime_tsx_sim::tm_write_u32(addr, val),
         }
     }
@@ -247,6 +265,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::tm_write_u64(addr, val),
             Backend::Swisstm => runtime_swisstm::tm_write_u64(addr, val),
             Backend::Mvlog => runtime_mvlog::tm_write_u64(addr, val),
+            Backend::TscTm => runtime_tsc_tm::tm_write_u64(addr, val),
             Backend::TsxSim => runtime_tsx_sim::tm_write_u64(addr, val),
         }
     }
@@ -276,6 +295,10 @@ impl Backend {
             }
             Backend::Mvlog => {
                 let states = runtime_mvlog::sim::snapshot_states();
+                bincode::serialize(&states).unwrap_or_default()
+            }
+            Backend::TscTm => {
+                let states = runtime_tsc_tm::sim::snapshot_states();
                 bincode::serialize(&states).unwrap_or_default()
             }
             Backend::TsxSim => {
@@ -330,6 +353,13 @@ impl Backend {
                 runtime_mvlog::sim::restore_states(states);
                 Ok(())
             }
+            Backend::TscTm => {
+                let states: HashMap<u64, Option<Box<runtime_tsc_tm::TxState>>> =
+                    bincode::deserialize(data)
+                        .map_err(|e| format!("deserialize tsc-tm state: {}", e))?;
+                runtime_tsc_tm::sim::restore_states(states);
+                Ok(())
+            }
             Backend::TsxSim => {
                 let states: HashMap<u64, Option<Box<runtime_tsx_sim::TsxThreadState>>> =
                     bincode::deserialize(data)
@@ -362,6 +392,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::sim::take_stats(),
             Backend::Swisstm => runtime_swisstm::sim::take_stats(),
             Backend::Mvlog => runtime_mvlog::sim::take_stats(),
+            Backend::TscTm => runtime_tsc_tm::sim::take_stats(),
             Backend::TsxSim => runtime_tsx_sim::sim::take_stats(),
         }
     }
@@ -375,6 +406,7 @@ impl Backend {
             Backend::Romulus => runtime_romulus::sim::print_stats(s),
             Backend::Swisstm => runtime_swisstm::sim::print_stats(s),
             Backend::Mvlog => runtime_mvlog::sim::print_stats(s),
+            Backend::TscTm => runtime_tsc_tm::sim::print_stats(s),
             Backend::TsxSim => runtime_tsx_sim::sim::print_stats(s),
         }
     }
@@ -490,6 +522,7 @@ mod tests {
         assert_eq!(Backend::Romulus.name(), "romulus");
         assert_eq!(Backend::Swisstm.name(), "swisstm");
         assert_eq!(Backend::Mvlog.name(), "mvlog");
+        assert_eq!(Backend::TscTm.name(), "tsc-tm");
     }
 
     // ── NOrec backend simulation ──────────────────────────
@@ -834,6 +867,89 @@ mod tests {
         b.sim_clear_thread_id();
     }
 
+    // ── TSC-TM backend simulation ─────────────────────────
+
+    #[serial]
+    #[test]
+    fn test_backend_from_name_tsc_tm() {
+        assert_eq!(Backend::from_name("tsc-tm"), Some(Backend::TscTm));
+        assert_eq!(Backend::from_name("tsc_tm"), Some(Backend::TscTm));
+    }
+
+    #[serial]
+    #[test]
+    fn test_tsc_tm_simple_tx() {
+        let tid = alloc_tid();
+        mmap_tm_region();
+        let b = Backend::TscTm;
+        b.init();
+        b.sim_set_thread_id(tid);
+        b.init_thread();
+        let addr = 0x7F00_0000_F400 as *mut u64;
+        unsafe {
+            addr.write(0);
+        }
+        b.begin();
+        let v = b.read_u64(addr);
+        assert_eq!(v, 0);
+        b.write_u64(addr, 55);
+        assert!(b.commit(), "tsc-tm commit should succeed");
+        b.sim_clear_thread_id();
+
+        // Read back
+        b.sim_set_thread_id(tid);
+        b.begin();
+        let v = b.read_u64(addr);
+        assert_eq!(v, 55, "value should persist after commit");
+        b.commit();
+        b.sim_clear_thread_id();
+    }
+
+    #[serial]
+    #[test]
+    fn test_tsc_tm_commit_without_tx() {
+        let tid = alloc_tid();
+        mmap_tm_region();
+        Backend::TscTm.init();
+        Backend::TscTm.sim_set_thread_id(tid);
+        Backend::TscTm.init_thread();
+        assert!(Backend::TscTm.commit());
+        Backend::TscTm.sim_clear_thread_id();
+    }
+
+    #[serial]
+    #[test]
+    fn test_tsc_tm_abort_without_tx() {
+        let tid = alloc_tid();
+        mmap_tm_region();
+        Backend::TscTm.init();
+        Backend::TscTm.sim_set_thread_id(tid);
+        Backend::TscTm.init_thread();
+        Backend::TscTm.abort();
+        Backend::TscTm.sim_clear_thread_id();
+    }
+
+    #[serial]
+    #[test]
+    fn test_tsc_tm_read_write_u32() {
+        let tid = alloc_tid();
+        mmap_tm_region();
+        let b = Backend::TscTm;
+        b.init();
+        b.sim_set_thread_id(tid);
+        b.init_thread();
+        let addr = 0x7F00_0000_F500 as *mut u32;
+        unsafe {
+            addr.write(0);
+        }
+        b.begin();
+        b.write_u32(addr, 0xBEEF);
+        let v = b.read_u32(addr);
+        assert_eq!(v, 0xBEEF);
+        assert!(b.commit());
+        b.sim_clear_thread_id();
+    }
+
     // ── Cross-backend consistency ─────────────────────────
 
     #[serial]
@@ -847,6 +963,7 @@ mod tests {
             Backend::Romulus,
             Backend::Swisstm,
             Backend::Mvlog,
+            Backend::TscTm,
         ] {
             let tid = alloc_tid();
             b.init();
@@ -876,6 +993,7 @@ mod tests {
             Backend::Romulus,
             Backend::Swisstm,
             Backend::Mvlog,
+            Backend::TscTm,
         ] {
             let tid0 = alloc_tid();
             let tid1 = alloc_tid();
@@ -921,6 +1039,7 @@ mod tests {
             Backend::Romulus,
             Backend::Swisstm,
             Backend::Mvlog,
+            Backend::TscTm,
         ] {
             let tid = alloc_tid();
             b.init();

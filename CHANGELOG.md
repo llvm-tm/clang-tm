@@ -2773,3 +2773,23 @@ gate again.
   14 winners vs 7 pre-fix) PASS; `gpu_bank`, `gpu_ycsb_gust`,
   `gpu_memcached_gust`, `gpu_fuzz_counter`, and `make kernel-check`
   all green on the ROCm runner.
+
+## Session 2026-09-25 (3) — TSC-TM simulator coverage + dudetm clippy fix
+
+- Added `explicit_api/rust/workspace/runtime/tsc_tm` (`runtime-tsc-tm`):
+  TL2-derived Rust port of `backends/tm_impl/tsc_tm/tsc_tm.hpp` (guard
+  table with (version<<1)|lock stamps, no global commit clock — TSC
+  timestamps natively / deterministic logical counter in simulation,
+  `release_guard_with_version` monotonic bumps, ROCO, guard-index lock
+  dedup per review-05 R-07). Unit tests cover commit persistence,
+  guard-index sharing, and a threaded stale-read-set validation abort.
+- Wired into the simulator as `tm-sim --backend tsc-tm`
+  (`simulator/src/backend.rs` dispatch + 5 new tests incl. cross-backend
+  lists; `cost_model.rs` reuses the TL2 machine profile) and into the
+  `tm` façade crate (`--no-default-features --features tsc-tm`).
+- GitLab lint fix: clippy 1.98 `manual_clear` in
+  `runtime/dudetm/src/lib.rs` (`truncate(0)` → `clear()`), unblocking
+  `make fmt-check` (the lint job).
+- Docs: IMPLEMENTATIONS (crate + abort-semantics tables), DEVELOPER_GUIDE
+  simulation list, POST_MERGE_TEST_PLAN feature list, TODO TSC-TM RESOLVED
+  (CSMV decision still open).

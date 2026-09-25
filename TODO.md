@@ -146,13 +146,18 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   available; build `gpu_gust_kernel.cuh` microbench path in CI.
 
 ### TSC-TM/CSMV simulator coverage (remaining from review-02 S24)
-- **Files**: `explicit_api/rust/workspace/runtime/` (no `tsc_tm` or `csmv` crates yet), `simulator/Cargo.toml`, `simulator/src/backend.rs`
-- **Issue**: Review-02 S24 added MVLog simulator coverage and expanded fidelity
+- **Files**: `explicit_api/rust/workspace/runtime/tsc_tm/`, `simulator/Cargo.toml`, `simulator/src/backend.rs`
+- **Issue**: ~~Review-02 S24 added MVLog simulator coverage and expanded fidelity
   to 6 backends, but TSC-TM and CSMV cannot be simulated until Rust runtime
-  crates exist.
-- **Next step**: Port TSC-TM as a TL2-derived Rust runtime, or decide whether
-  CSMV should be simulated as a GPU/CPU variant before adding a simulator
-  backend.
+  crates exist.~~ **TSC-TM RESOLVED (2026-09-25, review-06)**: `runtime-tsc-tm`
+  crate (TL2-derived; guard table with version-stamped locks, TSC/logical
+  timestamps, monotonic `release_guard_with_version`, ROCO; ported from the
+  review-05-fixed `backends/tm_impl/tsc_tm/tsc_tm.hpp`) wired into the
+  simulator (`tm-sim --backend tsc-tm`, 5 new backend tests) and the `tm`
+  crate (`--no-default-features --features tsc-tm`).
+- **Next step**: decide whether CSMV should be simulated as a GPU/CPU variant
+  (the C++ CPU variant already exists: `GPU_STM_CPU`/`CSMV` backends) before
+  adding a Rust `csmv` runtime crate.
 
 ### NOrec plugin-mode bypass (incomplete)
 - **File**: `backends/tm_impl/norec_bf/NOrec_BF.hpp`

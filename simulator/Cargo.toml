@@ -18,6 +18,7 @@ runtime-tinystm = { path = "../explicit_api/rust/workspace/runtime/tinystm", fea
 runtime-romulus = { path = "../explicit_api/rust/workspace/runtime/romulus", features = ["simulation", "serde", "stats"] }
 runtime-swisstm = { path = "../explicit_api/rust/workspace/runtime/swisstm", features = ["simulation", "serde", "stats"] }
 runtime-mvlog = { path = "../explicit_api/rust/workspace/runtime/mvlog", features = ["simulation", "serde", "stats"] }
+runtime-tsc-tm = { path = "../explicit_api/rust/workspace/runtime/tsc_tm", features = ["simulation", "serde", "stats"] }
 runtime-tsx-sim = { path = "../explicit_api/rust/workspace/runtime/tsx_sim", features = ["simulation", "serde", "stats"] }
 libc = "0.2"
 libloading = "0.8"
