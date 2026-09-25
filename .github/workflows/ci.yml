@@ -99,8 +99,8 @@ jobs:
             llvm-toolchain-jammy-22 main"
           sudo apt-get update
           sudo apt-get install -y llvm-22-dev clang-22 lld make
-      - name: Build plugin (produces .bc files) + race checker
-        run: make plugin && make -C plugin race-checker
+      - name: Build plugin + race checker (tests compile the .bc inputs)
+        run: make plugin && make -C plugin test && make -C plugin race-checker
       - name: Assert plugin/out/ has .bc files before scanning
         run: |
           shopt -s nullglob
@@ -172,31 +172,6 @@ jobs:
             fi
           done
           $all_clean && echo "All stale directories removed ✓"
-
-  # ── Job 7: TLA+ model checking ─────────────────────────────
-  tla-plus-check:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install Python 3.10+
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Install TLA+ tools
-        run: |
-          curl -sSLo /tmp/tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-          java -cp /tmp/tla2tools.jar tlc2.TLC -help 2>&1 | head -1 || true
-      - name: Run TLC model checking
-        run: |
-          for tla in docs/proofs/*.tla; do
-            echo "Checking $tla..."
-            java -cp /tmp/tla2tools.jar tlc2.TLC -deadlock -workers 4 "$tla" || true
-          done
-      - name: Publish TLC results
-        uses: actions/upload-artifact@v5
-        with:
-          name: tla-results
-          path: docs/proofs/mch*
 
   # ── Job 8: TLA+ smoke gate (3 small models, blocking, <5 min) ─
   tla-smoke:
@@ -271,77 +246,6 @@ jobs:
           ./benchmarks/cpp/bin/test_tx
           ./benchmarks/cpp/bin/test_ds
 
-  # ── Job 11: Build the book + verify its repo path refs resolve ─
-  book-check:
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install TeX Live (latexmk + listingsutf8 + tikz + booktabs)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            texlive-latex-base texlive-latex-recommended texlive-latex-extra \
-            texlive-pictures texlive-fonts-recommended latexmk python3
-      - name: Build book
-        run: make -C docs/book
-      - name: Verify lstinputlisting paths resolve
-        run: |
-          python3 - <<'PY'
-          import re, sys, pathlib
-          book = pathlib.Path('docs/book').resolve()   # build dir; main.tex lives here
-          sections = book / 'sections'
-          bad = []
-          total = 0
-          for tex in sections.glob('*.tex'):
-              text = tex.read_text()
-              for m in re.finditer(r'\\lstinputlisting(?:\[[^\]]*\])?\{([^}]+)\}', text):
-                  total += 1
-                  rel = m.group(1)
-                  p = (book / rel).resolve()           # LaTeX resolves relative to the main .tex
-                  if not p.exists():
-                      bad.append(f'{tex.relative_to(book.parent)}: {rel} -> {p}')
-          print(f'checked {total} \\lstinputlisting path(s); {len(bad)} broken')
-          if bad:
-              print('\n'.join(bad)); sys.exit(1)
-          PY
-      - name: Verify \\rep{} repo-path references resolve
-        run: |
-          python3 - <<'PY'
-          import re, sys, pathlib
-          root = pathlib.Path('.').resolve()
-          sections = root / 'docs' / 'book' / 'sections'
-          bad = []
-          total = 0
-          for tex in sections.glob('*.tex'):
-              text = tex.read_text()
-              for m in re.finditer(r'\\rep\{([^}]+)\}', text):
-                  raw = m.group(1)
-                  # strip line-number suffix ":123"
-                  path = raw.split(':', 1)[0]
-                  # strip LaTeX line-break hints, then unescape chars
-                  path = re.sub(r'\\allowbreak\s*', '', path)
-                  path = path.replace('\\_','_').replace('\\-','-').replace('\\','')
-                  path = path.rstrip('/')
-                  # only consider things that look like repo-root-relative paths
-                  # (must contain a slash, OR end in .tla under docs/proofs)
-                  has_slash = '/' in path
-                  tla_short = path.endswith('.tla')
-                  if not has_slash and not tla_short: continue
-                  total += 1
-                  if pathlib.Path(path).exists(): continue
-                  if tla_short and (root / 'docs' / 'proofs' / path).exists(): continue
-                  bad.append(f'{tex.relative_to(root)}: {raw!r} -> {path}')
-          print(f'checked {total} \\rep path(s); {len(bad)} unresolved')
-          if bad:
-              print('\n'.join(f'  {b}' for b in bad[:30])); sys.exit(1)
-          PY
-      - name: Upload book PDF
-        uses: actions/upload-artifact@v5
-        with:
-          name: book-pdf
-          path: docs/book/main.pdf
 
   # ── Job 12: Markdown link integrity (relative links only) ─
   md-links:

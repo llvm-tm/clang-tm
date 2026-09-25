@@ -142,3 +142,6 @@ review-02/
 review-03/
 review-04/
 review-05/
+
+# All review scratch dirs (never ship)
+review-*/

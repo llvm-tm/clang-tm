@@ -129,9 +129,7 @@ impl BloomFilter {
     }
 
     fn clear(&mut self) {
-        for w in &mut self.bits {
-            *w = 0;
-        }
+        self.bits.fill(0);
     }
 
     fn hash1(addr: u64) -> usize {
@@ -418,7 +416,7 @@ pub fn tm_exit() {
     let mut total_capacity = 0u64;
     let mut total_conflict = 0u64;
     let mut total_fallback = 0u64;
-    for (_, s) in guard.iter() {
+    for s in guard.values() {
         total_commits += s.commit_count;
         total_aborts += s.abort_count;
         total_capacity += s.capacity_aborts;
@@ -1203,7 +1201,7 @@ pub mod sim {
         let mut self_ab = 0u64;
         let mut explicit = 0u64;
         let mut fallback = 0u64;
-        for (_, ts) in guard.iter() {
+        for ts in guard.values() {
             commits += ts.commit_count;
             aborts += ts.abort_count;
             conflict += ts.conflict_aborts;

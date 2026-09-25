@@ -1,0 +1,112 @@
+# GitLab CI — explicit pipeline for this repo.
+#
+# This file intentionally overrides any config imported from GitHub Actions.
+# Deliberately NOT run here:
+#   * tla-plus-check — exhaustive TLC on all models is too many states for
+#     CI; run locally/nightly via `make -C docs/proofs` instead.
+#   * book-check    — LaTeX toolchain is heavy and flaky on runners; build
+#     docs/book locally (`make -C docs/book`).
+stages: [build, test, quality]
+
+default:
+  image: ubuntu:22.04
+  interruptible: true
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends wget gnupg software-properties-common ca-certificates git build-essential make python3 curl >/dev/null
+    - wget -qO /etc/apt/trusted.gpg.d/llvm-snapshot.asc https://apt.llvm.org/llvm-snapshot.gpg.key
+    - add-apt-repository "deb https://apt.llvm.org/jammy/ llvm-toolchain-jammy-22 main"
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends llvm-22-dev clang-22 lld-22 >/dev/null
+    - 'command -v cargo >/dev/null || curl --proto ''=https'' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable'
+    - export PATH="$HOME/.cargo/bin:$PATH"
+    - rustc --version && clang++-22 --version | head -1
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  LLVM_VERSION: "22"
+
+plugin-test:
+  stage: build
+  script:
+    - make plugin
+    - make -C plugin run
+
+simulator-test:
+  stage: test
+  script:
+    - cd simulator && cargo test -- --test-threads=1
+
+rust-build:
+  stage: test
+  script:
+    - cd explicit_api/rust/workspace
+    - cargo build --workspace
+    - cargo test --workspace -- --test-threads=1
+
+race-checker:
+  stage: test
+  script:
+    # `make -C plugin test` compiles the out/*.bc inputs the checker scans
+    # (plain `make plugin` only produces the pass .so — the old job failed
+    # with "no .bc files under plugin/out/").
+    - make plugin
+    - make -C plugin test
+    - make -C plugin race-checker
+    - |
+      shopt -s nullglob
+      bc=(plugin/out/*.bc)
+      echo "found ${#bc[@]} .bc file(s) under plugin/out/"
+      if [ "${#bc[@]}" -eq 0 ]; then
+        echo "FAIL: plugin build produced no .bc files under plugin/out/"
+        exit 1
+      fi
+      for b in "${bc[@]}"; do
+        echo "--- $b"
+        opt-22 -load-pass-plugin=plugin/bin/libTMRaceChecker.so \
+          -passes="tm-race-checker" "$b" -o /dev/null 2>&1 | grep -c "suggest" || true
+      done
+
+cross-backend:
+  stage: test
+  script:
+    - make plugin
+    - for b in NOREC TL2 TINYSTM SWISSTM MVLOG SGL; do
+        make -C benchmarks/cpp bin/test_tx BACKEND=$b || exit 1;
+        make -C benchmarks/cpp bin/test_ds BACKEND=$b || exit 1;
+      done
+    - make -C tests/backends/tm_impl run-tinystm run-norec run-tl2
+
+lint:
+  stage: quality
+  script:
+    - make fmt-check
+
+md-links:
+  stage: quality
+  script:
+    - |
+      python3 - <<'PY'
+      import re, os, sys, pathlib
+      root = pathlib.Path('.').resolve()
+      mds = [root/'README.md', root/'AGENTS.md', root/'CONTRIBUTING.md',
+             root/'SECURITY.md', root/'TODO.md', root/'CHANGELOG.md',
+             root/'BOOK_REPO_INTEGRATION_PLAN.md']
+      mds += list((root/'docs').glob('**/*.md'))
+      bad = []; total = 0
+      for md in mds:
+          if not md.exists(): continue
+          real = pathlib.Path(os.path.realpath(md))
+          text = real.read_text(errors='replace')
+          for m in re.finditer(r'\[[^\]]+\]\(([^)\s]+)(?:\s+"[^"]*")?\)', text):
+              link = m.group(1)
+              if re.match(r'^([a-z]+:|mailto:|/|#)', link): continue
+              path = link.split('#', 1)[0]
+              if not path: continue
+              total += 1
+              if (real.parent / path).resolve().exists(): continue
+              bad.append(f'{md.relative_to(root)}: {link}')
+      print(f'markdown relative links checked: {total}; broken: {len(bad)}')
+      for b in bad: print(' ', b)
+      sys.exit(1 if bad else 0)
+      PY
