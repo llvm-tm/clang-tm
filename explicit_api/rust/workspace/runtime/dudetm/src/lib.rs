@@ -311,7 +311,7 @@ pub fn tm_commit() -> bool {
             lock_at_index(li).unlock_exclusive();
         }
         REDO_LOG.with(|log| {
-            log.borrow_mut().truncate(0);
+            log.borrow_mut().clear();
         });
         TM_ABORT_COUNT.fetch_add(1, Ordering::Relaxed);
         return false;
@@ -396,7 +396,7 @@ pub fn tm_begin() {
 
 pub fn tm_abort() {
     REDO_LOG.with(|log| {
-        log.borrow_mut().truncate(0);
+        log.borrow_mut().clear();
     });
     flush_tx();
 }
