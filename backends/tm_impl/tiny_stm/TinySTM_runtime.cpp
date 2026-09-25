@@ -293,10 +293,21 @@ static void real_tm_begin()
 		tinystm::jmpbuf = (sigjmp_buf *)&tm_jmpbuf;
 		tm_clear_spec_allocs();
 		tm_clear_deferred_frees();
+		// Publish a provisional snapshot lower bound BEFORE begin(): a
+		// concurrent committer computing safe_version must never see this
+		// thread's slot as idle (0) while its transaction — and thus its
+		// reference to still-retired-but-unfreed memory — is already live.
+		// (Previously the slot was stored AFTER begin(), opening a window
+		// where flushers freed memory the just-started snapshot could still
+		// traverse — the use-after-free behind the historical TinySTM
+		// worker-hang / heap-corruption failures.)
+		uint64_t provisional = tinystm::get_clock();
+		g_thread_tx_version[g_tl_tid].store(provisional, std::memory_order_release);
 		tinystm::begin();
-		g_thread_tx_version[g_tl_tid] = 0;
 		uint64_t safe_version = UINT64_MAX;
 		for (size_t i = 1; i < tinystm::MAX_THREADS; i++) {
+			if (i == g_tl_tid)
+				continue;
 			uint64_t v = g_thread_tx_version[i].load(std::memory_order_acquire);
 			if (v != 0 && v < safe_version)
 				safe_version = v;
@@ -464,8 +475,26 @@ static void tm_delete_impl(void *ptr) noexcept
 		std::free(ptr);
 }
 
+// Matching operator new overrides (malloc-based) so delete's free() pairs
+// with a malloc allocation.  Overriding operator delete alone made
+// operator-new blocks be free()d — glibc-tolerated but UB and an
+// ASan alloc-dealloc-mismatch storm (review-06).
+static void *tm_new_impl(std::size_t size) { return std::malloc(size ? size : 1); }
+
+void *operator new(std::size_t size) { return tm_new_impl(size); }
+void *operator new(std::size_t size, std::align_val_t al)
+{
+	(void)al;
+	return tm_new_impl(size);
+}
+void *operator new[](std::size_t size) { return tm_new_impl(size); }
+void *operator new[](std::size_t size, std::align_val_t al)
+{
+	(void)al;
+	return tm_new_impl(size);
+}
 void operator delete(void *ptr) noexcept { tm_delete_impl(ptr); }
-void operator delete(void *ptr, size_t) noexcept { tm_delete_impl(ptr); }
+void operator delete(void *ptr, std::size_t) noexcept { tm_delete_impl(ptr); }
 void operator delete(void *ptr, std::align_val_t) noexcept { tm_delete_impl(ptr); }
 void operator delete(void *ptr, size_t, std::align_val_t) noexcept
 {

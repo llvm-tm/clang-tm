@@ -36,6 +36,9 @@
 #include <csetjmp>
 #include <cstring>
 #include <iostream>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <mutex>
 #include <random>
 #include <thread>
@@ -1285,6 +1288,11 @@ THREAD void worker(ThreadData *data)
 
 MAIN int main(int argc, char *argv[])
 {
+#ifdef __linux__
+	// Let a debugger attach even when /proc/sys/kernel/yama/ptrace_scope
+	// is >0 (stmbench7 is a benchmark; hang diagnosis needs attach).
+	prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+#endif
 	int nb_threads = DEFAULT_NB_THREADS;
 	int duration_ms = DEFAULT_DURATION_MS;
 	int workload = 1;     // 1=read-dom, 2=read-write, 3=write-dom

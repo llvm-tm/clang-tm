@@ -2716,3 +2716,34 @@ repro first:
   HEAD). The C++ MVLog already folded via `log_ws()` (unaffected).
 Post-merge allowlists (`EXPECT_FAIL_*`) are now EMPTY — every gate is a real
 gate again.
+
+## Session 2026-09-25 — proactive_stop removal + TinySTM hang/corruption fixes
+
+- Removed all 15 `proactive_stop` abort sites and the
+  `g_tm_stop_requested`/`g_tx_exit_jmpbuf` exit-on-stop plumbing from
+  TinySTM wbctl/wbetl/wt (tm_hooks keeps the weak stubs solely for the
+  stmbench7 link).
+- Root cause of the historical "worker hang >=2 threads" (the reason
+  0496686 added proactive_stop): TinySTM's vector write-set was scanned
+  linearly per access, so STMBench7 long traversals (~10^5 words) became
+  quadratic — single transactions ran for minutes and no abort fired;
+  plus unbounded pass-injected retry loops. Evidence: RIPs advancing in
+  read/write paths with the abort counter frozen; 208 tx_giveup sites in
+  the instrumented IR after adding the cap.
+- Fixes: hybrid write-set lookup (`ws_index` addr→index overlay above 32
+  entries, keeping the allocation-free vector fast path for small sets,
+  tinystm_common.hpp); `-tm-max-retries` bounded-retry wrapper in the
+  plugin pass (default 0 = unbounded; stmbench7 builds use 100; give-up
+  returns a zeroed return value); deferred-free publication ordering in
+  `real_tm_begin` (snapshot lower bound published before `begin()`, self
+  excluded from the safe-version scan) — closes a window where flushers
+  freed memory the just-started snapshot could still traverse.
+- `operator new` overrides (malloc-based) added next to the existing
+  `operator delete` overrides in TinySTM_runtime: delete was `free()`ing
+  operator-new blocks (glibc-tolerated UB; ASan storm).
+- stmbench7 gained `PR_SET_PTRACER_ANY` so the binaries are debuggable
+  under Yama ptrace_scope=1.
+- Result: wbctl 0/20 hangs at `-t 8 -w 3` (previously 12/12 hangs without
+  the workaround); unit matrices tinystm/wt/wbetl green. Residual write-
+  heavy crashes in wbetl (12/12) are pre-existing (HEAD crashes 8/10) and
+  tracked as a new TODO item with repro + ASAN characterization.

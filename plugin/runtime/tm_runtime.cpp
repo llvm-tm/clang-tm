@@ -16,14 +16,18 @@
 // Per-thread TM state struct — must match the LLVM pass's offset constants:
 //   COUNTER_OFFSET = 0  (nested_call_counter)
 //   JMPRET_OFFSET  = 4  (longjmp_ret)
+//   RETRY_OFFSET   = 8  (retry_count, -tm-max-retries)
 struct TMThreadState {
 	int32_t nested_call_counter;
 	int32_t longjmp_ret;
+	int32_t retry_count;
 };
 
 // ── Per-thread state (must match what tm_hooks.hpp declares) ────────
 __thread int32_t tm_nested_call_counter = 0;
 __thread int32_t tm_longjmp_ret = 0;
+// Adjacent by contract: line 98 casts &tm_nested_call_counter to TMThreadState*.
+__thread int32_t tm_retry_count = 0;
 __thread unsigned char tm_jmpbuf[256];
 __thread uint8_t is_tm_init_thread_ready = 0;
 thread_local uint8_t tm_buffer[TM_BUFFER_SIZE] = {0};

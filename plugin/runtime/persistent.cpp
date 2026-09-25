@@ -22,9 +22,11 @@
 // Per-thread TM state struct — must match the LLVM pass's offset constants:
 //   COUNTER_OFFSET = 0  (nested_call_counter)
 //   JMPRET_OFFSET  = 4  (longjmp_ret)
+//   RETRY_OFFSET   = 8  (retry_count, -tm-max-retries)
 struct TMThreadState {
 	int32_t nested_call_counter;
 	int32_t longjmp_ret;
+	int32_t retry_count;
 };
 
 // Thread-local state

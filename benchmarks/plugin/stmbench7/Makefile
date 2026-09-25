@@ -1,5 +1,9 @@
 TM_PLUGIN := $(abspath ../../../plugin/bin/libTMInstrument.so)
 include ../../../plugin/tm_pipeline.mk
+# Bounded transaction retries: STMBench7 long traversals under heavy write
+# contention can retry forever (unbounded pass-injected retry loop); a budget
+# makes each op terminate so thread join at shutdown is bounded.
+TM_INSTRUMENT_FLAGS += -tm-max-retries=100
 TM_COMPILE_FLAGS += -I$(realpath ..)
 $(eval $(call tm_define_rules))
 

@@ -251,6 +251,7 @@ struct TMRuntimeHooks {
 
 // Forward declaration for --emit-tm-trace (defined in TMInstrumentPass.cpp)
 extern llvm::cl::opt<bool> EmitTrace;
+extern llvm::cl::opt<unsigned> MaxRetries;
 
 // Helpers to emit tm_read/tm_write calls through hook variables.
 // These replace the duplicated switch-on-type chains.

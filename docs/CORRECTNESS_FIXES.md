@@ -475,6 +475,41 @@ not the ratio.
 `gpu_fuzz_counter`, full `gpu/benchmarks` battery (9 binaries, HIP),
 CPU CSMV `bin/test_tx` 114/114 + `bin/test_ds` 207/207.
 
+## 16. TinySTM quadratic write-set + retry/deferred-free races (review-06) ✅
+
+**Symptom.** "TinySTM worker hang at >=2 threads" — the reason commit
+0496686 added the `proactive_stop` workaround. Reproduced with stmbench7
+`-t 8 -w 3`: workers stuck forever in `read/write_word_ctl` with the
+global abort counter frozen (one transaction attempt never finishes).
+
+**Root causes.** (1) `Transaction::write_set` is a vector scanned
+linearly by `ws_find`/`ws_get_or_insert`; STMBench7 long traversals
+touch ~10^5 words, so each access is O(N) and each attempt is O(N²) —
+minutes-long transactions that no contention manager ever aborts.
+(2) The plugin's TX wrapper re-enters its own `sigsetjmp` on every
+abort — an unbounded retry loop. (3) `real_tm_begin` published
+`g_thread_tx_version[tid]` *after* `tinystm::begin()`: a concurrent
+committer computing `safe_version` could see the slot as idle (0) and
+flush (free) retired memory that the just-started snapshot still
+referenced (use-after-free family; heap-corruption aborts).
+
+**Fix.** Hybrid write-set index: above 32 entries a `ws_index`
+(addr→index unordered_map) accelerates `ws_find`/`ws_get_or_insert`/
+`ws_erase` while small transactions keep the allocation-free vector
+path (preserves the documented intruder-benchmark perf rationale).
+New plugin pass option `-tm-max-retries=N` bounds the wrapper retry
+loop (default 0 = unbounded; stmbench7 builds set 100) — on budget
+exhaustion the body is skipped and a zeroed return value produced.
+`real_tm_begin` stores a provisional snapshot lower bound
+(`get_clock()`) before `begin()` and excludes its own slot from the
+safe-version scan. Matching malloc-based `operator new` overrides make
+delete's `free()` legal. `proactive_stop` and all 15 call sites removed.
+
+**Verification.** wbctl 0/20 hangs at `-t 8 -w 3 -d 3000` (was 12/12);
+unit matrices `run-tinystm`, `run-wt`, `run-wbetl` PASS; full
+post-merge gate green. Residual wbetl write-heavy crashes proven
+pre-existing (HEAD crashes 8/10) and tracked separately.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |

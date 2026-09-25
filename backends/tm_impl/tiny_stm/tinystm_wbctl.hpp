@@ -126,9 +126,6 @@ abort_tx(const char *loc = "") //
 		// random backoff when aborts are really bad
 		random_backoff(tx->abort_count);
 	}
-	if (g_tx_exit_jmpbuf && g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		siglongjmp(*g_tx_exit_jmpbuf, 1);
-	}
 	siglongjmp(*jmpbuf, 1);
 	TM_ASSERT(false, "Did not jump");
 }
@@ -136,9 +133,6 @@ abort_tx(const char *loc = "") //
 inline bool //
 validate()  //
 {
-	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop"); // TODO.md: proactive_stop cleanup (P0)
-	}
 	auto *tx = current_tx_wbctl;
 	for (auto &r : tx->read_set) {
 		void *addr = r.addr;
@@ -195,9 +189,6 @@ inline bool is_stack_addr(void *addr)
 inline bool //
 commit()    //
 {
-	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop"); // TODO.md: proactive_stop cleanup (P0)
-	}
 	auto *tx = current_tx_wbctl;
 	volatile word_t commit_version = get_clock();
 
@@ -343,9 +334,6 @@ read_word_ctl(                                                //
     ValueType sz                                              //
 )
 {
-	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop"); // TODO.md: proactive_stop cleanup (P0)
-	}
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 	ByteOffset bo((word_t)addr);
 
@@ -641,10 +629,6 @@ write_word_ctl(                                               //
     ValueType sz                                              //
 )
 {
-	if (g_tm_stop_requested.load(std::memory_order_relaxed)) {
-		abort_tx("proactive_stop"); // TODO.md: proactive_stop cleanup (P0)
-	}
-
 	ByteOffset bo((word_t)addr);
 
 	TM_ASSERT(tx, "tx not defined");
@@ -779,12 +763,7 @@ write_word_ctl(                                               //
 				if (it && it->type != sz) {
 					if (typeSize(it->type) < nbytes) {
 						// Existing entry is narrower — erase (wider write replaces it)
-						for (size_t ei = 0; ei < tx->write_set.size(); ei++) {
-							if (tx->write_set[ei].first == sub_addr) {
-								tx->ws_erase_idx(ei);
-								break;
-							}
-						}
+						tx->ws_erase_addr(sub_addr);
 					}
 				}
 			}

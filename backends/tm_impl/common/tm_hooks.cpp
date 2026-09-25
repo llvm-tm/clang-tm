@@ -11,6 +11,11 @@
 // ── Shared per-thread TM state (used by all backends) ──────────
 __thread int32_t tm_nested_call_counter = 0;
 __thread int32_t tm_longjmp_ret = 0;
+// Contract: stub_tm_get_thread_state() returns &tm_nested_call_counter and
+// the plugin pass accesses offsets 0/4/8 (nested_call_counter/longjmp_ret/
+// retry_count).  Keep these three __thread vars adjacent in declaration
+// order; a real runtime instead returns a proper TMThreadState.
+__thread int32_t tm_retry_count = 0;
 __thread sigjmp_buf tm_jmpbuf;
 
 // ═══════════════════════════════════════════════════════════════
@@ -122,11 +127,10 @@ __attribute__((weak)) void (*tm_trace)(uint32_t,
 // Weak tinystm-namespace stubs (B-07 / B-29 / R-07).
 // benchmarks/plugin/stmbench7/STMbench7.cpp uses tinystm::g_tx_exit_jmpbuf
 // and tinystm::g_tm_stop_requested UNCONDITIONALLY (its "exit-on-stop"
-// worker mechanism), but only the TinySTM runtime defines them (strong, via
-// tinystm_globals.hpp).  clang-tm auto-links tm_hooks.cpp into every plugin
-// build, so providing WEAK definitions here lets the non-TinySTM plugin
-// backends (singlelock/tl2/swisstm/tsxsgl/dudetm/spht) link, while the real
-// TinySTM builds keep their strong definitions. Do NOT make these strong.
+// worker mechanism).  The TinySTM backends no longer read either symbol
+// (proactive_stop removed after the worker-hang workaround became obsolete;
+// see CHANGELOG / TODO.md), so these WEAK definitions are now the ONLY ones
+// and exist purely to satisfy the stmbench7 link. Do NOT make these strong.
 // ═══════════════════════════════════════════════════════════════
 namespace tinystm
 {

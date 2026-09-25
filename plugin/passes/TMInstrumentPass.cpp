@@ -73,6 +73,12 @@ cl::opt<bool> EmitTrace("emit-tm-trace",
                         cl::desc("Emit tm_trace before each instrumented access"),
                         cl::init(false));
 
+cl::opt<unsigned> MaxRetries(
+    "tm-max-retries",
+    cl::desc("After N failed abort/retry cycles skip the TX body and return a "
+             "zeroed value (0 = unbounded retries, the default)"),
+    cl::init(0));
+
 // ===========================================================================
 // Backward-compatibility pass aliases — delegate to the 5-step state
 // ===========================================================================

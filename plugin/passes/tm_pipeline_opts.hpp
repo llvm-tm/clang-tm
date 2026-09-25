@@ -8,5 +8,6 @@ extern llvm::cl::opt<bool> StrictOpaque;
 extern llvm::cl::opt<std::string> OpaqueSymbolsFile;
 extern llvm::cl::opt<bool> TMAudit;
 extern llvm::cl::opt<bool> EmitTrace;
+extern llvm::cl::opt<unsigned> MaxRetries;
 
 #endif

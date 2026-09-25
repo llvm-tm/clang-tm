@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 #include "tm_common.hpp"
@@ -261,10 +262,28 @@ public:
 	std::vector<Lock *> locks_held;
 
 	// ── write_set helpers ───────────────────────────────────────
+	//
+	// Hybrid lookup (review-06): small transactions (the overwhelmingly
+	// common case) keep the allocation-free linear vector scan.  Once a
+	// transaction's write set grows past kWsIndexThreshold (e.g. STMBench7
+	// long traversals touching ~10^5 words), ws_index activates and keeps an
+	// addr→index map so reads/writes stay O(1); without it those operations
+	// degrade to O(N) per access (O(N^2) per transaction) and single
+	// transactions stop terminating inside seconds — the historical
+	// "TinySTM worker hang" (see CHANGELOG, proactive_stop cleanup).
+
+	static constexpr size_t kWsIndexThreshold = 32;
+	std::unordered_map<void *, size_t> ws_index; // only populated when active
 
 	/// Find entry by address; returns pointer or nullptr.
 	WriteLogEntry *ws_find(void *addr)
 	{
+		if (!ws_index.empty()) {
+			auto ix = ws_index.find(addr);
+			if (ix != ws_index.end())
+				return &write_set[ix->second].second;
+			return nullptr;
+		}
 		for (auto &kv : write_set)
 			if (kv.first == addr)
 				return &kv.second;
@@ -273,28 +292,77 @@ public:
 
 	const WriteLogEntry *ws_find(void *addr) const
 	{
+		if (!ws_index.empty()) {
+			auto ix = ws_index.find(addr);
+			if (ix != ws_index.end())
+				return &write_set[ix->second].second;
+			return nullptr;
+		}
 		for (auto &kv : write_set)
 			if (kv.first == addr)
 				return &kv.second;
 		return nullptr;
 	}
 
+	void ws_index_activate()
+	{
+		ws_index.clear();
+		ws_index.reserve(write_set.size() * 2);
+		for (size_t i = 0; i < write_set.size(); i++)
+			ws_index[write_set[i].first] = i;
+	}
+
 	/// Get or create entry for address (like unordered_map::operator[]).
 	WriteLogEntry &ws_get_or_insert(void *addr)
 	{
+		if (!ws_index.empty()) {
+			auto ix = ws_index.find(addr);
+			if (ix != ws_index.end())
+				return write_set[ix->second].second;
+			write_set.emplace_back(addr, WriteLogEntry{});
+			ws_index.emplace(addr, write_set.size() - 1);
+			return write_set.back().second;
+		}
 		for (auto &kv : write_set)
 			if (kv.first == addr)
 				return kv.second;
 		write_set.emplace_back(addr, WriteLogEntry{});
+		if (write_set.size() > kWsIndexThreshold)
+			ws_index_activate();
 		return write_set.back().second;
 	}
 
 	/// Erase entry at position `i` (swap-with-last, O(1) order-destroying).
 	void ws_erase_idx(size_t i)
 	{
-		if (i < write_set.size()) {
-			write_set[i] = write_set.back();
-			write_set.pop_back();
+		if (i >= write_set.size())
+			return;
+		if (!ws_index.empty()) {
+			void *erased = write_set[i].first;
+			void *moved = write_set.back().first;
+			if (erased != moved)
+				ws_index[moved] = i;
+			ws_index.erase(erased);
+		}
+		write_set[i] = write_set.back();
+		write_set.pop_back();
+	}
+
+	/// Erase the entry for `addr` (index-aware).
+	void ws_erase_addr(void *addr)
+	{
+		if (!ws_index.empty()) {
+			auto ix = ws_index.find(addr);
+			if (ix != ws_index.end()) {
+				ws_erase_idx(ix->second);
+			}
+			return;
+		}
+		for (size_t ei = 0; ei < write_set.size(); ei++) {
+			if (write_set[ei].first == addr) {
+				ws_erase_idx(ei);
+				return;
+			}
 		}
 	}
 
@@ -315,6 +383,7 @@ public:
 	{
 		read_set.clear();
 		write_set.clear();
+		ws_index.clear();
 		locks_held.clear();
 	}
 
@@ -378,12 +447,6 @@ extern std::atomic<word_t> g_clock;
 extern std::atomic<tinystm::word_t> thr_counter;
 extern std::atomic<tinystm::word_t> reset_locks_thr;
 extern std::atomic<uint64_t> g_tm_abort_count;
-// When set, forces all in-flight transactions to abort immediately at the
-// next read/write/validate/commit operation (see `proactive_stop` in
-// tinystm_{wbctl,wbetl,wt}.hpp).  Introduced in commit 0496686 as a
-// workaround for a worker-thread hang at >=2 threads, but masks the
-// underlying deadlock/contention bug.  TODO.md: proactive_stop cleanup (P0).
-extern std::atomic<bool> g_tm_stop_requested;
 extern thread_local bool rng_initialized;
 extern thread_local std::mt19937 rng;
 

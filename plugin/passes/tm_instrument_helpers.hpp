@@ -632,9 +632,11 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 	//   struct TMThreadState {
 	//       int32_t nested_call_counter;  // offset 0
 	//       int32_t longjmp_ret;          // offset 4
+	//       int32_t retry_count;          // offset 8 (-tm-max-retries)
 	//   };
 	constexpr int COUNTER_OFFSET = 0;
 	constexpr int JMPRET_OFFSET = 4;
+	constexpr int RETRY_OFFSET = 8;
 
 	TM_DEBUG("Injecting tm_begin/tm_end in transaction function: %s",
 	         F.getName().str().c_str());
@@ -695,9 +697,80 @@ static void injectTransactionBeginEnd(Function &F, Module &M, const TMRuntimeHoo
 	OuterBuilder.CreateStore(SigJmpRetCall, JmpRetPtr);
 	OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetPtr);
 #endif
-	OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 1), CounterPtr);
-	emitHookCall(OuterBuilder, H.begin, {});
-	OuterBuilder.CreateBr(ContBB);
+	if (MaxRetries > 0) {
+#ifndef DISABLE_SETJMP
+		// Bounded retry (-tm-max-retries): a non-zero sigsetjmp return means
+		// abort_tx long-jumped back here.  Count such re-entries; once the
+		// budget is spent, skip the body and return a zeroed value.  This
+		// makes per-transaction-invocation termination bounded so shutdown
+		// (thread join) and pathologically contended workloads (e.g. STMBench7
+		// long traversals under heavy write traffic) cannot retry forever.
+		Value *RetryCntPtr = OuterBuilder.CreateGEP(i32Ty,
+		                                            OuterBuilder.CreateBitCast(StatePtr,
+		                                                                       i8PtrTy),
+		                                            {OuterBuilder.getInt64(2)},
+		                                            "retrycnt_ptr"); // byte offset 8
+		Value *Retried = OuterBuilder.CreateICmpNE(SigJmpRetCall,
+		                                           ConstantInt::get(i32Ty, 0),
+		                                           "tx_retried");
+		BasicBlock *FirstTryBB = BasicBlock::Create(Ctx,
+		                                            "tx_first_try",
+		                                            &F,
+		                                            OuterBB->getNextNode());
+		BasicBlock *RetryTryBB = BasicBlock::Create(Ctx,
+		                                            "tx_retry_try",
+		                                            &F,
+		                                            FirstTryBB->getNextNode());
+		BasicBlock *OuterGoBB = BasicBlock::Create(Ctx,
+		                                           "tx_outer_go",
+		                                           &F,
+		                                           RetryTryBB->getNextNode());
+		BasicBlock *GiveupBB = BasicBlock::Create(Ctx,
+		                                          "tx_giveup",
+		                                          &F,
+		                                          OuterGoBB->getNextNode());
+
+		OuterBuilder.CreateCondBr(Retried, RetryTryBB, FirstTryBB);
+
+		IRBuilder<> FirstB(FirstTryBB);
+		FirstB.CreateStore(ConstantInt::get(i32Ty, 0), RetryCntPtr);
+		FirstB.CreateBr(OuterGoBB);
+
+		IRBuilder<> RetryB(RetryTryBB);
+		Value *OldCnt = RetryB.CreateLoad(i32Ty, RetryCntPtr, "retry_old");
+		Value *NewCnt = RetryB.CreateAdd(OldCnt, ConstantInt::get(i32Ty, 1), "retry_new");
+		RetryB.CreateStore(NewCnt, RetryCntPtr);
+		Value *Spent = RetryB.CreateICmpUGE(NewCnt,
+		                                    ConstantInt::get(i32Ty, MaxRetries),
+		                                    "retry_budget_spent");
+		RetryB.CreateCondBr(Spent, GiveupBB, OuterGoBB);
+
+		IRBuilder<> GoB(OuterGoBB);
+		GoB.CreateStore(ConstantInt::get(i32Ty, 1), CounterPtr);
+		emitHookCall(GoB, H.begin, {});
+		GoB.CreateBr(ContBB);
+
+		IRBuilder<> GiveupB(GiveupBB);
+		GiveupB.CreateStore(ConstantInt::get(i32Ty, 0), CounterPtr);
+		GiveupB.CreateStore(ConstantInt::get(i32Ty, 0), JmpRetPtr);
+		GiveupB.CreateStore(ConstantInt::get(i32Ty, 0), RetryCntPtr);
+		if (F.getReturnType()->isVoidTy())
+			GiveupB.CreateRetVoid();
+		else {
+			Constant *Zero = Constant::getNullValue(F.getReturnType());
+			GiveupB.CreateStore(Zero, RetValAlloca);
+			GiveupB.CreateRet(Zero);
+		}
+#else
+		OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 1), CounterPtr);
+		emitHookCall(OuterBuilder, H.begin, {});
+		OuterBuilder.CreateBr(ContBB);
+#endif
+	} else {
+		OuterBuilder.CreateStore(ConstantInt::get(i32Ty, 1), CounterPtr);
+		emitHookCall(OuterBuilder, H.begin, {});
+		OuterBuilder.CreateBr(ContBB);
+	}
 
 	IRBuilder<> NestedBuilder(NestedBB);
 	NestedBuilder.CreateStore(NestedBuilder.CreateAdd(CounterVal,

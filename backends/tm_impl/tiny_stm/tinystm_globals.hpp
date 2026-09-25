@@ -19,10 +19,6 @@ std::atomic<uint64_t> g_tm_abort_count{0};
 std::atomic<uint64_t> g_unlock_owner_mismatch{0};
 __thread sigjmp_buf *jmpbuf;
 thread_local sigjmp_buf *g_tx_exit_jmpbuf = nullptr;
-// NOTE: proactive_stop aborts all in-flight transactions when stop is
-// requested, masking the root cause of the TinySTM worker hang at >=2
-// threads (commit 0496686).  TODO.md: proactive_stop cleanup (P0).
-std::atomic<bool> g_tm_stop_requested{false};
 } // namespace tinystm
 #elif defined(DESIGN_WBCTL)
 #include "tinystm_wbctl.hpp"
@@ -39,10 +35,6 @@ std::atomic<uint64_t> g_tm_abort_count{0};
 std::atomic<uint64_t> g_unlock_owner_mismatch{0};
 __thread sigjmp_buf *jmpbuf;
 thread_local sigjmp_buf *g_tx_exit_jmpbuf = nullptr;
-// NOTE: proactive_stop aborts all in-flight transactions when stop is
-// requested, masking the root cause of the TinySTM worker hang at >=2
-// threads (commit 0496686).  TODO.md: proactive_stop cleanup (P0).
-std::atomic<bool> g_tm_stop_requested{false};
 } // namespace tinystm
 #elif defined(DESIGN_WT)
 #include "tinystm_wt.hpp"
@@ -59,10 +51,6 @@ std::atomic<uint64_t> g_tm_abort_count{0};
 std::atomic<uint64_t> g_unlock_owner_mismatch{0};
 __thread sigjmp_buf *jmpbuf;
 thread_local sigjmp_buf *g_tx_exit_jmpbuf = nullptr;
-// NOTE: proactive_stop aborts all in-flight transactions when stop is
-// requested, masking the root cause of the TinySTM worker hang at >=2
-// threads (commit 0496686).  TODO.md: proactive_stop cleanup (P0).
-std::atomic<bool> g_tm_stop_requested{false};
 } // namespace tinystm
 #else
 #error "Define one of the following: DESIGN_WBETL, DESIGN_WBCTL, DESIGN_WT"

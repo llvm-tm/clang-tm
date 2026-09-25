@@ -7,17 +7,21 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
 
 ## P0 — Correctness
 
-### TinySTM proactive_stop hang workaround
-- **Files**: `backends/tm_impl/tiny_stm/tinystm_wbctl.hpp` (lines 139, 197, 339, 620),
-  `tinystm_wbetl.hpp` (lines 157, 191, 254, 344),
-  `tinystm_wt.hpp` (lines 200, 250, 321, 440),
-  `tinystm_globals.hpp` (lines 23, 44, 65),
-  `tinystm_common.hpp` (line 355)
-- **Issue**: Under high contention some TinySTM backends hang. A
-  `proactive_stop` call was added as a workaround (commit 0496686) to
-  force-terminate stuck transactions. The underlying hang cause is unknown.
-- **Fix**: Diagnose and remove all `proactive_stop` calls (15 occurrences
-  across 5 files).
+### TinySTM proactive_stop hang workaround — RESOLVED (2026-09-25)
+- **Resolution**: All 15 `proactive_stop` sites + the `g_tm_stop_requested`
+  plumbing removed from the three TinySTM designs. Diagnosis (stmbench7
+  `-t 8 -w 3`): the "hang" was (1) O(N) linear write-set lookup making
+  long-traversal transactions quadratic (single attempts > minutes; abort
+  counters freeze), compounded by (2) unbounded pass-injected retry loops
+  and (3) a deferred-free publication race (snapshot slot stored after
+  begin, letting concurrent flushers free memory the new snapshot still
+  referenced). Fixes: hybrid write-set index (`ws_index`, >32 entries) in
+  `tinystm_common.hpp`; `-tm-max-retries` bounded retry in the plugin
+  wrapper (stmbench7 uses 100); provisional snapshot publication in
+  `TinySTM_runtime.cpp`; matching malloc-based `operator new` overrides
+  for the existing `operator delete` ones. wbctl: 0/20 hangs (was 12/12).
+  Residual `-w 3` crashes are tracked under "stmbench7 data-race corruption".
+
 
 ### TinySTM lock owner re-check — RESOLVED (review-02 S03)
 - **File**: `backends/tm_impl/tiny_stm/tinystm_common.hpp` (`Lock::unlock()`)
@@ -161,6 +165,25 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
 ---
 
 ## P2 — Cleanup
+
+### stmbench7 data-race corruption under write-heavy load
+- **Repro**: `stmbench_tinystm_{wbetl,wbctl,wt} -t 8 -w 3 -d 3000`
+  (deterministic-ish: HEAD wbetl crashed 8/10 before this session; still
+  12/12 after the quadratic/race fixes — pre-existing).
+- **Signatures**: jump-to-small-int via `desc.func`/`wrap_sm*` under gdb
+  (-O0 and -O2); glibc `double free or corruption (!prev)` aborts;
+  underflowed category counters in final stats.
+- **ASAN (link-interceptor build)**: no use-after-free/overflow, but an
+  820k alloc-dealloc-mismatch storm (fixed this session via malloc-based
+  `operator new` overrides — delete previously `free()`d operator-new
+  blocks while `operator new` was NOT overridden).
+- **Suspects**: out-of-TX `pick_*()` readers of `TMSafeVector::size()`
+  vs in-TX pushes; multi-word `std::vector` members (`CompositePart::
+  baseAssemblyIds`) committed word-by-word (WBETL applies eagerly, so
+  readers can see half-initialized headers).
+- **Next step**: full frontend-ASAN build (`-fsanitize=address` at
+  compile+instrument+link) once the pass tolerates ASAN intrinsics
+  (`-tm-allow-opaque` on `asan.*`), or rework SM payloads to POD.
 
 ### stmbench7 -O1 crash
 - **Files**: `benchmarks/plugin/stmbench7/STMbench7.cpp`,
