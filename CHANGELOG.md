@@ -2747,3 +2747,29 @@ gate again.
   the workaround); unit matrices tinystm/wt/wbetl green. Residual write-
   heavy crashes in wbetl (12/12) are pre-existing (HEAD crashes 8/10) and
   tracked as a new TODO item with repro + ASAN characterization.
+
+## Session 2026-09-25 (2) — CI pipeline cleanup + GUST VBox window compaction
+
+- CI: added explicit `.gitlab-ci.yml` (GitLab had been running an imported
+  copy of the GitHub Actions config). `tla-plus-check` and `book-check`
+  dropped from both pipelines (TLC proofs are run on demand via
+  `docs/proofs/Makefile`); `race-checker` fixed to build the plugin IR
+  (`make -C plugin test`) before scanning `plugin/out/*.bc`; `lint` and
+  `md-links` kept as quality jobs. README no longer links into unshipped
+  `review-04/` (plain-text refs instead) and `.gitignore` gained the
+  `review-*/` catch-all — `git ls-files 'review-*'` is empty. tsx_sim got
+  clippy-1.98 fixes (`self.bits.fill(0)`, `guard.values()` ×2).
+- GUST (review-06 follow-up, TODO "GUST follow-ups (a)"): VBox windows
+  are now compacted between kernel launches. `gust_gpu_commit` counts
+  window-overflow aborts in a new device counter;
+  `GUSTBatchExecutor::launch()` calls `gust_gpu_vbox_compact()` when a
+  batch overflowed, keeping each address's newest `GPU_GUST_VBOX_KEEP`
+  (default 1) versions and resetting `head` — correct because the
+  executor quiesces between launches and the next batch's snapshot
+  threshold (GTS) dominates every committed version. The microbench
+  kernel path got the same overflow counter for parity.
+- Docs: `docs/CORRECTNESS_FIXES.md` §17; TODO GUST item (a) RESOLVED.
+- Verification: `gpu_gust_smoke` new invariant 3 (15 hot-key batches,
+  14 winners vs 7 pre-fix) PASS; `gpu_bank`, `gpu_ycsb_gust`,
+  `gpu_memcached_gust`, `gpu_fuzz_counter`, and `make kernel-check`
+  all green on the ROCm runner.

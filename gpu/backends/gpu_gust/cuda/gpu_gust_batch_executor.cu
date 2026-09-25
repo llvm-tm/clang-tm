@@ -20,6 +20,10 @@ __device__ uint64_t*    gust_gpu_write_ptr(){ return g_gust_write_ptr; }
 __device__ GUSTCLEntry* gust_gpu_cl()       { return g_gust_cl; }
 __device__ uint64_t*    gust_gpu_committed(){ return g_gust_committed; }
 __device__ uint64_t*    gust_gpu_aborted()  { return g_gust_aborted; }
+// VBox-window overflow aborts in the latest batch (review-06): these are
+// recoverable via between-launch compaction, unlike validation aborts.
+__device__ uint64_t *g_gust_overflow = nullptr;
+__device__ uint64_t*    gust_gpu_overflow(){ return g_gust_overflow; }
 
 // ── Batch kernel: one warp per 32 transactions, one tx per lane ─
 // `num_txns` must be a multiple of WARP_SIZE (validated by host).
@@ -149,6 +153,12 @@ GUSTBatchExecutor::BatchTiming GUSTBatchExecutor::launch() {
     CUDA_CHECK(cudaEventDestroy(ev_start));
     CUDA_CHECK(cudaEventDestroy(ev_stop));
 
+    // VBox overflow is recoverable: compact every window once per batch
+    // that overflowed (quiescent point — the kernel has completed and
+    // cudaDeviceSynchronize has run).  Hot addresses then keep taking
+    // new commits instead of aborting permanently (review-06).
+    if (gust_gpu_overflow_count() > 0) gust_gpu_vbox_compact();
+
     profile_events_.push_back({timing.kernel_ms, 0, 0, n});
     return timing;
 }
@@ -212,6 +222,11 @@ extern "C" void gust_gpu_init(int num_addrs) {
     CUDA_CHECK(cudaMalloc(&d_aborted, sizeof(uint64_t)));
     CUDA_CHECK(cudaMemset(d_aborted, 0, sizeof(uint64_t)));
     CUDA_CHECK(cudaMemcpyToSymbol(g_gust_aborted, &d_aborted, sizeof(d_aborted)));
+
+    uint64_t    *d_overflow = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_overflow, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(d_overflow, 0, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemcpyToSymbol(g_gust_overflow, &d_overflow, sizeof(d_overflow)));
 }
 
 extern "C" void gust_gpu_shutdown(void) {
@@ -236,6 +251,9 @@ extern "C" void gust_gpu_shutdown(void) {
     if (d_cl) cudaFree(d_cl);
     if (d_committed) cudaFree(d_committed);
     if (d_aborted) cudaFree(d_aborted);
+    uint64_t *d_overflow = nullptr;
+    cudaMemcpyFromSymbol(&d_overflow, g_gust_overflow, sizeof(d_overflow));
+    if (d_overflow) cudaFree(d_overflow);
 }
 
 extern "C" void gust_gpu_snapshot(uint32_t *h_out, int n) {
@@ -265,6 +283,66 @@ extern "C" uint64_t gust_gpu_aborted_count(void) {
     uint64_t v = 0;
     if (d_ptr) CUDA_CHECK(cudaMemcpy(&v, d_ptr, sizeof(uint64_t), cudaMemcpyDeviceToHost));
     return v;
+}
+
+extern "C" uint64_t gust_gpu_overflow_count(void) {
+    uint64_t *d_ptr = nullptr;
+    cudaMemcpyFromSymbol(&d_ptr, g_gust_overflow, sizeof(d_ptr));
+    uint64_t v = 0;
+    if (d_ptr) CUDA_CHECK(cudaMemcpy(&v, d_ptr, sizeof(uint64_t), cudaMemcpyDeviceToHost));
+    return v;
+}
+
+// ── VBox window compaction (review-06) ─────────────────────────
+// Drops the oldest versions in every VBox, keeping the newest
+// GPU_GUST_VBOX_KEEP, and resets head so the next batch gets free
+// slots again.  ONLY safe while no kernel is in flight (the executor
+// calls it after cudaDeviceSynchronize): between launches every
+// committed version ≤ GTS, so the next batch's snapshot threshold is ≥
+// all of them and only the newest body can be the snapshot answer.
+// Without this, a hot address accumulated DEPTH committed versions and
+// every later writer aborted forever (throughput-starved; see TODO).
+__global__ void gust_gpu_vbox_compact_kernel(int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    GUSTVBox *vb = &g_gust_vboxes[i];
+    uint32_t used = vb->head < GPU_GUST_VBOX_DEPTH ? vb->head : GPU_GUST_VBOX_DEPTH;
+    uint64_t vs[GPU_GUST_VBOX_DEPTH];
+    uint32_t vals[GPU_GUST_VBOX_DEPTH];
+    int k = 0;
+    for (uint32_t d = 0; d < used; d++) {
+        uint64_t v = vb->versions[d];
+        if (v != 0) { vs[k] = v; vals[k] = vb->values[d]; k++; }
+    }
+    // selection-sort the newest GPU_GUST_VBOX_KEEP versions to the front
+    const int keep = k < GPU_GUST_VBOX_KEEP ? k : GPU_GUST_VBOX_KEEP;
+    for (int a = 0; a < keep; a++)
+        for (int b = a + 1; b < k; b++)
+            if (vs[b] > vs[a]) {
+                uint64_t tv = vs[a]; vs[a] = vs[b]; vs[b] = tv;
+                uint32_t tvl = vals[a]; vals[a] = vals[b]; vals[b] = tvl;
+            }
+    for (int d = 0; d < GPU_GUST_VBOX_DEPTH; d++) {
+        vb->versions[d] = 0;
+        vb->values[d]   = 0;
+    }
+    for (int d = 0; d < keep; d++) {
+        vb->values[d]   = vals[d];
+        vb->versions[d] = vs[d];
+    }
+    vb->head = (uint32_t)keep;
+}
+
+extern "C" void gust_gpu_vbox_compact(void) {
+    if (g_num_addrs <= 0) return;
+    gust_gpu_vbox_compact_kernel<<<(g_num_addrs + 255) / 256, 256>>>(g_num_addrs);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    uint64_t *d_ptr = nullptr;
+    cudaMemcpyFromSymbol(&d_ptr, g_gust_overflow, sizeof(d_ptr));
+    if (d_ptr) {
+        uint64_t zero = 0;
+        CUDA_CHECK(cudaMemcpy(d_ptr, &zero, sizeof(uint64_t), cudaMemcpyHostToDevice));
+    }
 }
 
 // ── Initial-value seeding ──────────────────────────────────────

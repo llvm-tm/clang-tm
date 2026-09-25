@@ -17,6 +17,7 @@ int gpu_gust_launch(int num_warps) {
     extern int          g_gpu_gust_num_addrs;
     extern uint64_t    *g_gpu_gust_committed;
     extern uint64_t    *g_gpu_gust_aborted;
+    extern uint64_t    *g_gpu_gust_overflow;
 
     int reads_per_thread = 4;
     int writes_per_thread = 2;
@@ -36,6 +37,7 @@ int gpu_gust_launch(int num_warps) {
             g_gpu_gust_num_addrs,
             g_gpu_gust_committed,
             g_gpu_gust_aborted,
+            g_gpu_gust_overflow,
             reads_per_thread,
             writes_per_thread
         );

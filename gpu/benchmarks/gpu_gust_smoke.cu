@@ -62,6 +62,21 @@ __device__ void tx_transfer(int lane_id, int warp_id,
 
 __device__ gust_tx_body_t g_tx_fn = tx_transfer;
 
+// ── Hot-key transaction: increment one address (VBox GC test) ──
+struct HotArg { uint32_t addr; };
+
+__device__ void tx_hot(int lane_id, int warp_id,
+                       void *arg, GUSTWarpState *ws)
+{
+    (void)lane_id; (void)warp_id;
+    HotArg *a = (HotArg*)arg;
+    uint64_t v = gust_gpu_read(ws, a->addr);
+    gust_gpu_write(ws, a->addr, (uint32_t)(v + 1));
+    gust_gpu_commit(ws);
+}
+
+__device__ gust_tx_body_t g_tx_hot = tx_hot;
+
 int main(int argc, char **argv) {
     int num_warps    = (argc > 1) ? atoi(argv[1]) : 4;
     int accounts     = (argc > 2) ? atoi(argv[2]) : 256;
@@ -110,6 +125,29 @@ int main(int argc, char **argv) {
     bool p1 = (commits + aborts == (uint64_t)num_txns);
     bool p2 = (total == expected);
 
+    // ── Phase 2: hot key (VBox window compaction, review-06) ──
+    // Each batch of 32 same-address writers has exactly one winner
+    // (prevalidation), so 15 batches want 15 commits.  The 8-deep
+    // VBox window holds only 7 post-seed versions, so without
+    // between-launch compaction the 8th batch onward abort forever
+    // (7 commits total).  With compaction at most one boundary batch
+    // loses its winner per window fill.
+    gust_tx_body_t d_hot;
+    cudaMemcpyFromSymbol(&d_hot, g_tx_hot, sizeof(gust_tx_body_t));
+    HotArg ha{0};
+    const int hot_batches = 15;
+    uint64_t hot_before = gust_gpu_committed_count();
+    for (int b = 0; b < hot_batches; b++) {
+        for (int i = 0; i < 32; i++)
+            executor.enqueue(d_hot, &ha, sizeof(HotArg));
+        executor.launch();
+    }
+    uint64_t hot_commits = gust_gpu_committed_count() - hot_before;
+    uint32_t hot_after = 0;
+    gust_gpu_snapshot(&hot_after, 1);
+    bool p3 = (hot_commits >= (uint64_t)hot_batches - 2) &&
+              (hot_after == (uint32_t)h_bal[0] + hot_commits);
+
     printf("═══ Results ═══\n");
     printf("  Commits: %llu, Aborts: %llu (total txns %d)\n",
            (unsigned long long)commits, (unsigned long long)aborts, num_txns);
@@ -119,9 +157,13 @@ int main(int argc, char **argv) {
            timing.kernel_ms, num_txns / (timing.kernel_ms / 1000.0));
     printf("  Invariant 1 (all finalized): %s\n", p1 ? "PASS" : "FAIL");
     printf("  Invariant 2 (money conserved): %s\n", p2 ? "PASS" : "FAIL");
-    printf("  %s\n", (p1 && p2) ? "PASS" : "FAIL");
+    printf("  Hot key: %llu/%d batch winners, addr0=%u (pre-hot %u)\n",
+           (unsigned long long)hot_commits, hot_batches, hot_after, h_bal[0]);
+    printf("  Invariant 3 (hot key survives window fills): %s\n",
+           p3 ? "PASS" : "FAIL");
+    printf("  %s\n", (p1 && p2 && p3) ? "PASS" : "FAIL");
 
     delete[] h_bal;
     gust_gpu_shutdown();
-    return (p1 && p2) ? 0 : 1;
+    return (p1 && p2 && p3) ? 0 : 1;
 }

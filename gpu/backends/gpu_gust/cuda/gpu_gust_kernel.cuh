@@ -120,6 +120,7 @@ __global__ void gpu_gust_kernel(
     int           num_addrs,
     uint64_t     *committed_count,
     uint64_t     *abort_count,
+    uint64_t     *overflow_count,   // VBox-window overflows (may be null)
     int           reads_per_thread,
     int           writes_per_thread
 ) {
@@ -309,6 +310,8 @@ __global__ void gpu_gust_kernel(
         }
         if (overflow) {
             is_aborted = 1;
+            if (overflow_count)
+                atomicAdd((unsigned long long*)overflow_count, 1ull);
             __threadfence();
             my_entry->state = GPU_GUST_CL_ABORTED;
         } else {

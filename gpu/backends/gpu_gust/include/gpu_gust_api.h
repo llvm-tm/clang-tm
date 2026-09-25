@@ -16,6 +16,13 @@
 // committed versions a snapshot reader may need to walk back.
 #define GPU_GUST_VBOX_DEPTH     8
 
+// Versions kept when a VBox window is compacted between kernel launches
+// (see gust_gpu_vbox_compact).  1 is correct for the current protocol:
+// every new batch snapshots at the current GTS, which is ≥ every
+// committed version, so only the newest body can ever be the answer.
+// Raise it only if windowed/historical readers are added.
+#define GPU_GUST_VBOX_KEEP      1
+
 // Commit Log capacity.  Must be ≫ maximum number of concurrent update
 // transactions (num_warps * WARP_SIZE).  Bounded circular buffer; slots
 // are indexed by (CTS % CL_SIZE).  Power of two for cheap masking.
@@ -36,9 +43,13 @@ enum {
 // reserve a slot with atomicAdd(head), then publish payload first
 // (value) and version LAST — the version is the publish marker, so a
 // reader that sees a non-zero version is guaranteed to see its value
-// (review-05 fixed the reverse order).  Slots are never reused: if
-// head reaches DEPTH the writing transaction aborts (overflow), which
-// keeps every live (version, value) pair immutable.  Because concurrent
+// (review-05 fixed the reverse order).  Slots are never reused while a
+// kernel is in flight: if head reaches DEPTH the writing transaction
+// aborts (overflow), which keeps every live (version, value) pair
+// immutable.  Between launches (no readers in flight) the window may be
+// compacted — the oldest versions dropped and head reset — via
+// gust_gpu_vbox_compact, so hot addresses do not abort forever after
+// DEPTH total commits (review-06; see gpu_gust_batch_executor.cu).  Because concurrent
 // write-backs append out of version order, snapshot reads must take the
 // MAXIMUM version <= threshold across all slots, not the first slot
 // found (mirrors FindBody in docs/proofs/GPU_GUST.tla).

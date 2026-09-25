@@ -124,10 +124,14 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
 ### GUST follow-ups after review-05 correctness fix
 - **Files**: `gpu/backends/gpu_gust/include/gpu_gust_api.h`,
   `docs/proofs/GPU_GUST.cfg` / `GPU_GUST-liveness.cfg`
-- **Issue**: (a) The fixed protocol never reuses VBox slots; with
+- **Issue**: (a) ~~The fixed protocol never reuses VBox slots; with
   `GPU_GUST_VBOX_DEPTH = 8`, addresses that accumulate > 7 committed
   versions permanently abort their writers (money-safe but throughput-starved
-  under hot-key skew). Needs per-address window sizing or log compaction/GC.
+  under hot-key skew).~~ **RESOLVED (2026-09-25, review-06)**: between-launch
+  window compaction (`gust_gpu_vbox_compact`, `GPU_GUST_VBOX_KEEP`) plus an
+  overflow counter wired into `GUSTBatchExecutor::launch()`; the executor
+  compacts whenever a batch overflowed. Hot-key smoke invariant (15 batches,
+  ≥13 winners) passes; only boundary batches lose their winner.
   (b) The fixed `GPU_GUST.cfg` safety check completed green (532M states,
   222M distinct, 15 m 33 s on 8 workers — fine for nightly); the
   `GPU_GUST-liveness.cfg` run exceeded 15 min on this host and was never
@@ -135,11 +139,11 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   (c) review-05 fix verified on AMD only — re-run the four GUST benchmarks on
   the CUDA/RTX runner. (d) `gpu_gust_kernel.cuh` microbench path still not
   built by any canonical target (carries the same protocol fixes, untested).
-- **Status (2026-09-23, review-05)**: opened; correctness fixes landed
-  (`docs/CORRECTNESS_FIXES.md` §13).
-- **Next step**: size VBox depth from the benchmark's max writes/address, or
-  add reclaim; add `check-GPU_GUST` nightly job with a bounded `-traceGC`/
-  `-workers` budget; CUDA re-verification when the NVIDIA host is available.
+- **Status (2026-09-25, review-06)**: (a) resolved via between-launch VBox
+  compaction (`docs/CORRECTNESS_FIXES.md` §17).
+- **Next step**: add `check-GPU_GUST` nightly job with a bounded
+  `-traceGC`/`-workers` budget; CUDA re-verification when the NVIDIA host is
+  available; build `gpu_gust_kernel.cuh` microbench path in CI.
 
 ### TSC-TM/CSMV simulator coverage (remaining from review-02 S24)
 - **Files**: `explicit_api/rust/workspace/runtime/` (no `tsc_tm` or `csmv` crates yet), `simulator/Cargo.toml`, `simulator/src/backend.rs`

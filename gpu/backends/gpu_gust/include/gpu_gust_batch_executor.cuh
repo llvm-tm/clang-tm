@@ -64,6 +64,7 @@ __device__ uint64_t*    gust_gpu_write_ptr();
 __device__ GUSTCLEntry* gust_gpu_cl();
 __device__ uint64_t*    gust_gpu_committed();
 __device__ uint64_t*    gust_gpu_aborted();
+__device__ uint64_t*    gust_gpu_overflow();
 
 // ── Snapshot / begin ───────────────────────────────────────────
 __device__ inline uint64_t gust_gpu_begin(GUSTWarpState *ws) {
@@ -260,6 +261,10 @@ __device__ inline uint64_t gust_gpu_commit(GUSTWarpState *ws) {
         }
         if (overflow) {
             is_aborted = 1;
+            // Count window overflows separately: unlike validation
+            // aborts these would never recover without between-launch
+            // compaction (review-06).
+            atomicAdd((unsigned long long*)gust_gpu_overflow(), 1ull);
             __threadfence();
             my_entry->state = GPU_GUST_CL_ABORTED;
         } else {
@@ -358,3 +363,10 @@ extern "C" void gust_gpu_snapshot(uint32_t *h_out, int n);
 extern "C" void gust_gpu_seed(const uint32_t *h_vals, int n);
 extern "C" uint64_t gust_gpu_committed_count(void);
 extern "C" uint64_t gust_gpu_aborted_count(void);
+// VBox-window overflow aborts in the latest batch (0 = healthy).
+extern "C" uint64_t gust_gpu_overflow_count(void);
+// Compact every VBox window to its newest GPU_GUST_VBOX_KEEP versions
+// and reset head.  Only call while NO kernel is in flight (quiescent
+// point): correctness relies on every committed version being ≤ GTS,
+// which holds strictly between launches of the batch executor.
+extern "C" void gust_gpu_vbox_compact(void);

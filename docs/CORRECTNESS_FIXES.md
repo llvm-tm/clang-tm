@@ -510,6 +510,29 @@ unit matrices `run-tinystm`, `run-wt`, `run-wbetl` PASS; full
 post-merge gate green. Residual wbetl write-heavy crashes proven
 pre-existing (HEAD crashes 8/10) and tracked separately.
 
+## 17. GUST VBox windows never reclaimed → permanent hot-key starvation (review-06) ✅
+
+**Symptom.** After review-05 made VBox slots immutable (no reuse while a
+kernel is in flight), any address with ≥ `GPU_GUST_VBOX_DEPTH` (8)
+committed versions made every subsequent writer abort with window
+overflow — money-safe but throughput-starved forever under skew (smoke
+hot key: only the first 7 commits ever landed).
+
+**Fix.** Between-launch window compaction: `gust_gpu_commit` now counts
+overflow aborts in a device counter, and `GUSTBatchExecutor::launch()`
+runs `gust_gpu_vbox_compact()` whenever a batch overflowed — a
+kernel that keeps each VBox's newest `GPU_GUST_VBOX_KEEP` (default 1)
+versions and resets `head`. Safe only at the quiescent point the
+executor guarantees (kernel complete + `cudaDeviceSynchronize`): the
+next batch snapshots at the current GTS, which is ≥ every committed
+version, so only the newest body can be the snapshot answer. The
+microbench kernel gained the same overflow counter for parity.
+
+**Verification.** `gpu_gust_smoke` invariant 3: 15 hot-key batches now
+land 14 winners (was 7 — every batch after the window filled aborted);
+`gpu_bank`, `gpu_ycsb_gust`, `gpu_memcached_gust`, `gpu_fuzz_counter`
+and `make kernel-check` all PASS on the ROCm runner.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |

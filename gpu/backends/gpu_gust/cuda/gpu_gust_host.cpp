@@ -19,6 +19,7 @@ GUSTCLEntry *g_gpu_gust_cl = nullptr;
 int          g_gpu_gust_num_addrs = 1024;
 uint64_t    *g_gpu_gust_committed = nullptr;
 uint64_t    *g_gpu_gust_aborted = nullptr;
+uint64_t    *g_gpu_gust_overflow = nullptr;
 
 static std::mutex init_mutex;
 static thread_local int tl_in_tx = 0;
@@ -44,6 +45,8 @@ static void init_device_memory() {
                GPU_GUST_CL_SIZE * sizeof(GUSTCLEntry)));
     CUDA_CHECK(cudaMalloc(&g_gpu_gust_committed, sizeof(uint64_t)));
     CUDA_CHECK(cudaMemset(g_gpu_gust_committed, 0, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&g_gpu_gust_overflow, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(g_gpu_gust_overflow, 0, sizeof(uint64_t)));
     CUDA_CHECK(cudaMalloc(&g_gpu_gust_aborted, sizeof(uint64_t)));
     CUDA_CHECK(cudaMemset(g_gpu_gust_aborted, 0, sizeof(uint64_t)));
 }
@@ -69,6 +72,7 @@ void gpu_gust_exit() {
         cudaFree(g_gpu_gust_gts);
         cudaFree(g_gpu_gust_write_ptr);
         cudaFree(g_gpu_gust_cl);
+        cudaFree(g_gpu_gust_overflow);
         cudaFree(g_gpu_gust_committed);
         cudaFree(g_gpu_gust_aborted);
         cudaDeviceReset();
