@@ -533,6 +533,49 @@ land 14 winners (was 7 — every batch after the window filled aborted);
 `gpu_bank`, `gpu_ycsb_gust`, `gpu_memcached_gust`, `gpu_fuzz_counter`
 and `make kernel-check` all PASS on the ROCm runner.
 
+## 18. TinySTM deferred-free EBR gaps: in-TX `std::free` UAF + re-defer cycling (review-06) ✅
+
+**Symptom.** STMBench7 `-w 3` segfaults (jump to small-int PC, corrupted
+saved rbp/return addresses on live worker frames) and glibc
+`double free or corruption (!prev)` aborts; `test_simple_vector`
+(plugin TinySTM link) stalls after ~5 s of growing slowdown.
+
+**Root cause 1 (UAF).** `tm_delete_impl` / `real_tm_free` freed
+non-region heap pointers immediately while the caller was inside a
+transaction.  A container `grow()` (e.g. `TMSafeVector::grow`) frees
+its old buffer at that moment, while other active transactions'
+read-sets still dereference it — classic read-after-free feeding glibc
+chunk reuse with wild pointers.
+
+**Root cause 2 (cycling stall).** After routing in-TX frees through
+the deferred/retired lists, the flush paths (`tm_flush_deferred_frees`
+/ `tm_flush_retired_frees`) executed the final free as
+`::operator delete(ptr)` — which re-enters the global
+`operator delete` override (`tm_delete_impl`) while `g_in_tx` is still
+set (flush runs from `real_tm_begin`).  The final free was therefore
+re-deferred every cycle: each pass adds a bookkeeping node, the list
+grows O(n) per transaction and every operation becomes O(n²) — the
+"hang".
+
+**Fix.** (a) `tm_delete_impl`/`real_tm_free` now defer non-TM pointers
+onto `g_deferred_frees` when `g_in_tx`, retiring via EBR
+(`tm_move_deferred_to_retired` at commit, freed once no older
+transaction exists).  (b) The flush paths free buffers with
+`std::free()` directly — correct pairing for the malloc-based
+`operator new` override and immune to override re-entry.  (c)
+`real_tm_begin` registers the thread's stack bounds
+(`tm_record_stack_bounds`) on first transaction so
+`isOnCurrentThreadStack()` bypasses work (without them, worker-stack
+words were treated as TM data and abort rollback restored bytes of
+live frames).  (d) `write_word_etl` now aborts when it ends up without
+lock ownership instead of recording an unowned write (defensive).
+
+**Verification.** `test_simple_vector` 3/3 PASS; TinySTM unit matrices
+`test_tx` (114) PASS for WBCTL/WBETL/WT and `test_ds` (207) PASS;
+STMBench7 wbctl 0/8 clean.  wbetl/wt `-w 3` remain crash-prone —
+residual TB-lock data races tracked in TODO (previously masked by the
+cycling bug never executing real frees).
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |

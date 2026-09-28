@@ -278,6 +278,14 @@ static void *real_tm_get_thread_state() { return &g_tm_thread_state; }
 
 static void real_tm_begin()
 {
+	// Register this thread's stack bounds on its first transaction.
+	// Without them stm::isOnCurrentThreadStack() answers false for every
+	// address, so the access-tracking predicate treats live worker-stack
+	// words (saved registers, caller locals reached by reference) as TM
+	// data and an abort rollback restores bytes of frames still in use
+	// (stack corruption with wild returns; review-06).
+	if (!stm::g_tm_stack_low)
+		stm::tm_record_stack_bounds();
 	g_tm_begin_count.fetch_add(1, std::memory_order_relaxed);
 	tm_begin_count++;
 	auto *ts = real_tm_get_thread_state();
@@ -416,9 +424,15 @@ static void real_tm_free(void *ptr)
 			node->next = g_deferred_frees;
 			g_deferred_frees = node;
 		} else {
-			// Non-TM address (e.g. regular heap from ::operator new);
-			// just delete directly without deferred tracking.
-			::operator delete(ptr);
+			// Regular heap (e.g. from ::operator new): defer through the
+			// same list so the buffer is only freed once no transaction
+			// that could reference it is still active (review-06; the
+			// old immediate ::operator delete freed grow()'d vector
+			// buffers under concurrent readers).
+			auto *node = static_cast<FreeNode *>(std::malloc(sizeof(FreeNode)));
+			node->ptr = ptr;
+			node->next = g_deferred_frees;
+			g_deferred_frees = node;
 		}
 	} else {
 		if (stm::isTMAddress(ptr))
@@ -469,6 +483,32 @@ static void tm_delete_impl(void *ptr) noexcept
 {
 	if (!ptr)
 		return;
+	if (g_in_tx) {
+		// Freeing inside a transaction is unsafe for BOTH region and
+		// plain-heap pointers: other transactions may still dereference
+		// the buffer (e.g. a TMSafeVector/std::vector old buffer from a
+		// grow()), and an abort's undo can restore the pointer itself.
+		// Queue on the deferred list; real_tm_end moves it to the EBR
+		// retired list and tm_flush_retired_frees frees it once every
+		// transaction older than the retire stamp has completed
+		// (review-06: immediate std::free here was the STMBench7
+		// write-heavy UAF / double-free-corruption driver).
+		if (stm::isTMAddress(ptr)) {
+			if (g_deferred_frees_set.count(ptr)) {
+				fprintf(stderr, "FATAL: double-free detected in TM: ptr=%p\n", ptr);
+				stm::tm_backtrace_print(2);
+				fflush(stderr);
+				_exit(1);
+			}
+			tm_untrack_spec_alloc(ptr);
+			g_deferred_frees_set.insert(ptr);
+		}
+		auto *node = static_cast<FreeNode *>(std::malloc(sizeof(FreeNode)));
+		node->ptr = ptr;
+		node->next = g_deferred_frees;
+		g_deferred_frees = node;
+		return;
+	}
 	if (stm::isTMAddress(ptr))
 		stm::tm_region_free(ptr);
 	else

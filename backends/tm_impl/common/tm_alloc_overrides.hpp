@@ -216,7 +216,12 @@ inline void tm_flush_deferred_frees()
 		if (stm::isTMAddress(node->ptr))
 			stm::tm_region_free(node->ptr);
 		else
-			::operator delete(node->ptr);
+			// std::free directly: the buffer was allocated by the
+			// malloc-based operator new override; calling
+			// ::operator delete here would re-enter tm_delete_impl
+			// while g_in_tx is set (flush runs inside real_tm_begin)
+			// and re-defer the same pointer forever (review-06).
+			std::free(node->ptr);
 		std::free(node);
 		node = next;
 	}
@@ -329,7 +334,7 @@ inline void tm_flush_retired_frees(uint64_t safe_version)
 					std::lock_guard<std::mutex> lock(g_retired_global_mutex);
 					g_retired_global_set.erase(node->ptr);
 				}
-				::operator delete(node->ptr);
+				std::free(node->ptr);
 			} else {
 				stm::tm_region_free(node->ptr);
 			}

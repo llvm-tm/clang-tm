@@ -63,6 +63,62 @@ constexpr word_t INCARNATION_MASK = 0x7L;                             // wt only
 constexpr word_t LOCK_MASK = (0x7L << INCARNATION_BITS) | OWNED_MASK; // wt only
 constexpr word_t THREAD_MASK = MAX_THREADS - 1;
 
+#ifdef TM_XTHREAD_DEBUG
+// Debug tripwire (review-06): register every transaction thread's stack range
+// and flag any tracked access whose address falls inside ANOTHER thread's
+// stack.  Used to catch the STMBench7 write-heavy foreign-frame corruption.
+struct XThreadRange {
+	std::atomic<uintptr_t> low{0};
+	std::atomic<uintptr_t> high{0};
+};
+inline XThreadRange g_xthread_ranges[MAX_THREADS];
+inline std::atomic<int> g_xthread_max{0};
+inline void tm_xthread_register(word_t id)
+{
+	auto &r = g_xthread_ranges[id & (MAX_THREADS - 1)];
+	if (r.high.load(std::memory_order_relaxed))
+		return;
+	pthread_attr_t attr;
+	void *sa;
+	size_t ss;
+	pthread_getattr_np(pthread_self(), &attr);
+	pthread_attr_getstack(&attr, &sa, &ss);
+	pthread_attr_destroy(&attr);
+	r.low.store((uintptr_t)sa, std::memory_order_relaxed);
+	r.high.store((uintptr_t)sa + ss, std::memory_order_relaxed);
+	int slot = (int)(id & (MAX_THREADS - 1));
+	int cur = g_xthread_max.load(std::memory_order_relaxed);
+	while (
+	    slot + 1 > cur &&
+	    !g_xthread_max.compare_exchange_weak(cur, slot + 1, std::memory_order_relaxed)) {
+	}
+}
+inline bool tm_xthread_check(void *addr, word_t myid)
+{
+	uintptr_t a = (uintptr_t)addr;
+	int n = g_xthread_max.load(std::memory_order_relaxed);
+	int self = (int)(myid & (MAX_THREADS - 1));
+	for (int i = 0; i < n; i++) {
+		if (i == self)
+			continue;
+		uintptr_t lo = g_xthread_ranges[i].low.load(std::memory_order_relaxed);
+		uintptr_t hi = g_xthread_ranges[i].high.load(std::memory_order_relaxed);
+		if (lo && a >= lo && a < hi) {
+			fprintf(stderr,
+			        "[XTHREAD] tx=%llu access=%p inside foreign stack slot %d [%p,%p)\n",
+			        (unsigned long long)myid,
+			        addr,
+			        i,
+			        (void *)lo,
+			        (void *)hi);
+			fflush(stderr);
+			return true;
+		}
+	}
+	return false;
+}
+#endif
+
 constexpr word_t VERSION_MASK = ((~OWNED_MASK) & (~(INCARNATION_MASK << OWNED_BITS)) &
                                  (~(THREAD_MASK << LOCK_BITS))) >>
                                 META_BITS;

@@ -2793,3 +2793,34 @@ gate again.
 - Docs: IMPLEMENTATIONS (crate + abort-semantics tables), DEVELOPER_GUIDE
   simulation list, POST_MERGE_TEST_PLAN feature list, TODO TSC-TM RESOLVED
   (CSMV decision still open).
+
+## Session 2026-09-28 — TinySTM deferred-free EBR completion (review-06 continued)
+
+- `tm_delete_impl`/`real_tm_free` no longer `std::free` heap pointers
+  inside transactions; they defer through `g_deferred_frees` and are
+  reclaimed by the existing EBR machinery (fixes the
+  container-grow use-after-free behind STMBench7 write-heavy crashes;
+  wbctl `-w 3` went 6/12 aborts → 0/12).
+- Fixed a self-reinferced defect introduced by that change: the
+  deferred/retired flush paths called `::operator delete`, re-entering
+  the global override under `g_in_tx` and re-deferring the same
+  pointer forever (O(n²) stall seen in `test_simple_vector`).  Flushes
+  now use `std::free()` (pairs with the malloc-based `operator new`
+  overrides).
+- `real_tm_begin` registers per-thread stack bounds on first TX (the
+  bounds were previously only recorded by the queue runtime; without
+  them abort rollback wrote to live worker frames).
+- STMBench7: bounded in-TX pushes (SM1/SM3/SM5/SM7 capacity pre-checks
+  + `connectionIds` reserves) so no global/element vector reallocates
+  mid-transaction; `write_word_etl` aborts instead of recording an
+  unowned write.
+- New evidence on the residual wbetl/wt `-w 3` corruption: canary
+  locals prove live worker frames get trampled within the first
+  seconds; hardware watchpoints showed the ret-slot transitions
+  (legit prologue pushes first); wt appeared green before this session
+  only because the cycling bug suppressed real frees — with correct
+  frees wt crashes like wbetl (same P2 family, see TODO).
+- Docs: CORRECTNESS_FIXES §18; TODO stmbench7 section updated.
+- Verification: `test_tx` 114 PASS ×{TINYSTM, WBETL, WT}; `test_ds`
+  207 PASS; `test_simple_vector` 3/3; stmbench wbctl 0/8; full
+  post-merge gate green (see below).

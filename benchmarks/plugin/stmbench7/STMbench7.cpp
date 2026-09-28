@@ -779,11 +779,24 @@ TX OpResult op_op15_update_ba(int ba_idx, int nd)
 // STRUCTURE MODIFICATIONS (§3): create/delete elements
 // ====================================================================
 
+// A vector reallocating inside a transaction frees the old buffer while
+// concurrent readers (or a rolled-back vector header) may still
+// reference it — use-after-free / double-free under the heap.  Every
+// post-setup push into an EXISTING element is therefore gated by a
+// capacity pre-check at operation entry (never mid-mutation): the
+// push can only ever land in reserved space.
 // SM1: create composite part (with doc + APs + connections)
 TX OpResult op_sm1_create_cp(int new_id)
 {
 	if ((int)g_compositeParts.size() >= MAX_CP * 2)
 		return {0, true}; // limit growth
+	// The ring loop pushes AP_PER_CP connections and one document
+	// without further checks; refuse entry if the reserved global
+	// capacity for either cannot cover them (no in-TX reallocation).
+	if ((int)g_connections.size() + AP_PER_CP > (int)g_connections.capacity())
+		return {0, true};
+	if (g_documents.size() + 1 > g_documents.capacity())
+		return {0, true};
 	int cp_idx = (int)g_compositeParts.size();
 
 	CompositePart cp;
@@ -816,6 +829,7 @@ TX OpResult op_sm1_create_cp(int new_id)
 		ap.buildDate = 2000;
 		ap.weight = 10;
 		ap.compositePartId = cp_idx;
+		ap.connectionIds.reserve(CONN_PER_AP * 4);
 		g_atomicParts.push_back(ap);
 		g_apById[ap.id] = (int)g_atomicParts.size() - 1;
 		g_apByDate.insert({2000, (int)g_atomicParts.size() - 1});
@@ -854,6 +868,11 @@ TX OpResult op_sm3_create_ap(int cp_idx)
 		return {0, true};
 	if ((int)g_atomicParts.size() >= MAX_AP * 2)
 		return {0, true};
+	// Bounded push: growing an EXISTING CP's list could reallocate
+	// while readers walk it.
+	if (g_compositeParts[cp_idx].atomicPartIds.size() >=
+	    g_compositeParts[cp_idx].atomicPartIds.capacity())
+		return {0, true};
 	AtomicPart ap;
 	ap.id = g_atomicParts.size();
 	ap.x = 0;
@@ -862,6 +881,7 @@ TX OpResult op_sm3_create_ap(int cp_idx)
 	ap.buildDate = 2000;
 	ap.weight = 5;
 	ap.compositePartId = cp_idx;
+	ap.connectionIds.reserve(CONN_PER_AP * 4);
 	g_atomicParts.push_back(ap);
 	g_apById[ap.id] = (int)g_atomicParts.size() - 1;
 	g_apByDate.insert({2000, (int)g_atomicParts.size() - 1});
@@ -885,6 +905,14 @@ TX OpResult op_sm5_create_conn(int from_ap, int to_ap, int typ)
 	if (from_ap < 0 || from_ap >= (int)g_atomicParts.size())
 		return {0, true};
 	if (to_ap < 0 || to_ap >= (int)g_atomicParts.size())
+		return {0, true};
+	// Global cap: g_connections is reserved to MAX_CONN*2; past that a
+	// push would reallocate inside the transaction.
+	if ((int)g_connections.size() >= MAX_CONN * 2)
+		return {0, true};
+	// Bounded push: never grow an existing AP's connectionIds in-TX.
+	if (g_atomicParts[from_ap].connectionIds.size() >=
+	    g_atomicParts[from_ap].connectionIds.capacity())
 		return {0, true};
 	Connection c;
 	c.id = g_connections.size();
@@ -920,6 +948,12 @@ TX OpResult op_sm7_create_ba(int parent_ca_idx)
 	auto &ca = g_complexAssemblies[parent_ca_idx];
 	if (ca.level != TREE_LEVELS - 1)
 		return {0, true}; // only leaf CAs have BAs
+	// Global cap: g_baseAssemblies is reserved to MAX_BA*2.
+	if ((int)g_baseAssemblies.size() >= MAX_BA * 2)
+		return {0, true};
+	// Bounded push: never grow an existing CA's child list in-TX.
+	if (ca.childBaseAssemblyIds.size() >= ca.childBaseAssemblyIds.capacity())
+		return {0, true};
 	int ba_idx = (int)g_baseAssemblies.size();
 	BaseAssembly ba;
 	ba.id = ba_idx;
@@ -1221,6 +1255,7 @@ public:
 };
 
 std::atomic<bool> g_stop_workers{false};
+
 std::atomic<uint64_t> g_total_ops{0};
 std::atomic<uint64_t> g_lt_count{0};
 std::atomic<uint64_t> g_st_count{0};

@@ -176,6 +176,20 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
 ## P2 — Cleanup
 
 ### stmbench7 data-race corruption under write-heavy load
+- **Status 2026-09-28**: wbctl `-w 3` 0/8 clean after the deferred-free
+  EBR fixes (CORRECTNESS_FIXES §18).  wbetl still 2-3/3 crashes at any
+  write share (even `-w 1`); wt also crashes now (0/3 → 2/2 once real
+  frees execute — the cycling bug had masked it).  New evidence: canary
+  locals in `worker()` prove live frames are trampled within the first
+  seconds (`ops=3`); the corruption is constant, crashes are luck.
+  MALLOC_CHECK finds no heap-metadata damage and ASAN reports nothing
+  (stale-pointer writes into *live* objects/frames).  Watchpoints on
+  op ret-slots only caught legit prologue pushes.  Suspect narrows to
+  the TinySTM TB lock-table + lazy-writeback interaction under
+  same-bucket address collisions; next steps: (a) bucket-collision
+  stress unit test (two addresses hashing to one `g_locks_wbetl`
+  slot, interleaved commit/abort), (b) per-word lock audit counters,
+  (c) `rr`/record replay once available.
 - **Repro**: `stmbench_tinystm_{wbetl,wbctl,wt} -t 8 -w 3 -d 3000`
   (deterministic-ish: HEAD wbetl crashed 8/10 before this session; still
   12/12 after the quadratic/race fixes — pre-existing).

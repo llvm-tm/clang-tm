@@ -113,6 +113,9 @@ begin()     //
 
 	TM_ASSERT(!tx->aborted, "begin: stale aborted flag");
 
+#ifdef TM_XTHREAD_DEBUG
+	tm_xthread_register(tx->id);
+#endif
 	tx->start_version = get_clock();
 	tx->end_version = tx->start_version;
 	tx->active = true;
@@ -206,6 +209,13 @@ commit()    //
 		TM_EVENT(COMMIT_WRITEBACK, tx->id, tx->write_set.size());
 		for (auto &it : tx->write_set) {
 			auto *aligned = static_cast<void *>(it.first);
+#ifdef TM_XTHREAD_DEBUG
+			if (tm_xthread_check(aligned, tx->id)) {
+				fprintf(stderr, "[XTHREAD] COMMIT WRITEBACK foreign addr=%p\n", aligned);
+				fflush(stderr);
+				abort();
+			}
+#endif
 			auto &w = it.second;
 			for (unsigned byte_off = 0; byte_off < 8; byte_off++) {
 				if (w.valid & (1 << byte_off)) {
@@ -245,6 +255,12 @@ read_word_etl(                                                //
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 	void *aligned = stm::merge::align_down_8(addr);
 	ByteOffset bo((word_t)aligned);
+#ifdef TM_XTHREAD_DEBUG
+	if (tm_xthread_check(aligned, tx->id)) {
+		abort_tx("read_xthread");
+		__builtin_unreachable();
+	}
+#endif
 
 	TM_ASSERT(tx, "tx not defined");
 	TM_ASSERT(tx->active, "tx not active");
@@ -336,6 +352,12 @@ write_word_etl(                                               //
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 	void *aligned = stm::merge::align_down_8(addr);
 	ByteOffset bo((word_t)aligned);
+#ifdef TM_XTHREAD_DEBUG
+	if (tm_xthread_check(aligned, tx->id)) {
+		abort_tx("write_xthread");
+		__builtin_unreachable();
+	}
+#endif
 
 	TM_ASSERT(tx, "tx not defined");
 	TM_ASSERT_VALID_TX(tx, "write_word_etl");
@@ -397,11 +419,16 @@ write_word_etl(                                               //
 		acquired = false;
 	}
 
-	if (acquired) {
-		TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, lock->get());
-	} else {
-		TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, 0);
+	// review-06: if we do not own this word's lock we MUST NOT record the
+	// write — committing write-back bytes without ownership lets two
+	// transactions scatter the same word byte-by-byte, producing torn
+	// pointer values that are then dereferenced (the STMBench7 -w 3
+	// wild-write / jump-to-small-int corruption).  Abort instead.
+	if (!acquired) {
+		abort_tx("write_lock_not_acquired");
+		__builtin_unreachable();
 	}
+	TM_EVENT2(WRITE_LOCK_ACQUIRE, (uint64_t)addr, (uint64_t)lock, lock->get());
 
 	{
 		bool already_held = false;
