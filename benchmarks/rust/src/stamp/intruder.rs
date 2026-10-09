@@ -84,8 +84,8 @@ fn get_packet(data: &IntruderData) -> Packet {
                 length: tm::tm_read_i32(std::ptr::addr_of_mut!((*p).length)),
                 data: {
                     let mut buf = [0i8; INTRUDER_MAX_DATA];
-                    for i in 0..INTRUDER_MAX_DATA {
-                        buf[i] = tm::tm_read_i8(std::ptr::addr_of_mut!((*p).data[i]));
+                    for (i, slot) in buf.iter_mut().enumerate() {
+                        *slot = tm::tm_read_i8(std::ptr::addr_of_mut!((*p).data[i]));
                     }
                     buf
                 },
@@ -169,8 +169,12 @@ fn get_complete(data: &IntruderData) -> DecodedFlow {
                 data_len: data_len as i32,
                 data: {
                     let mut buf = [0i8; INTRUDER_MAX_DATA * 2];
-                    for i in 0..data_len.min(INTRUDER_MAX_DATA * 2) {
-                        buf[i] = tm::tm_read_i8(std::ptr::addr_of_mut!((*src).data[i]));
+                    for (i, slot) in buf
+                        .iter_mut()
+                        .enumerate()
+                        .take(data_len.min(INTRUDER_MAX_DATA * 2))
+                    {
+                        *slot = tm::tm_read_i8(std::ptr::addr_of_mut!((*src).data[i]));
                     }
                     buf
                 },
@@ -189,7 +193,7 @@ fn detect_attack(data: &[i8], data_len: usize, dictionary: &[String]) -> bool {
     let mut lower = String::with_capacity(len);
     for &c in data.iter().take(len) {
         let bc = c as u8;
-        if bc >= b'A' && bc <= b'Z' {
+        if bc.is_ascii_uppercase() {
             lower.push((bc - b'A' + b'a') as char);
         } else {
             lower.push(bc as char);
@@ -323,14 +327,14 @@ pub fn run(config: &Config, _stop: &AtomicBool, ops: &AtomicU64) {
                 let plen = ((rng.next() % config.max_length as u64) + 1) as usize;
                 let plen = plen.min(INTRUDER_MAX_DATA * 2);
                 let mut buf = [0i8; INTRUDER_MAX_DATA * 2];
-                for i in 0..plen {
-                    buf[i] = (32 + (rng.next() % 95)) as i8;
+                for slot in buf.iter_mut().take(plen) {
+                    *slot = (32 + (rng.next() % 95)) as i8;
                 }
                 (buf, plen)
             };
 
             let num_frags = ((rng.next() % payload_len as u64) + 1) as usize;
-            let num_frags = num_frags.max(1).min(INTRUDER_MAX_PACKETS);
+            let num_frags = num_frags.clamp(1, INTRUDER_MAX_PACKETS);
 
             let base_len = payload_len / num_frags;
             let rem = payload_len % num_frags;
@@ -343,9 +347,8 @@ pub fn run(config: &Config, _stop: &AtomicBool, ops: &AtomicU64) {
                 pkt.num_fragments = num_frags as i32;
                 let this_len = base_len + if f < rem { 1 } else { 0 };
                 pkt.length = this_len as i32;
-                for i in 0..this_len.min(INTRUDER_MAX_DATA) {
-                    pkt.data[i] = payload[offset + i];
-                }
+                let n = this_len.min(INTRUDER_MAX_DATA);
+                pkt.data[..n].copy_from_slice(&payload[offset..offset + n]);
                 offset += this_len;
             }
             total_packets += num_frags;

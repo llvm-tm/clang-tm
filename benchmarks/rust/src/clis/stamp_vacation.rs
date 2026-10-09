@@ -58,15 +58,15 @@ fn main() {
         .map(|_| Vec::with_capacity(num_relations * 5))
         .collect();
     let mut rng = Rng::new(42);
-    for t in 0..3 {
+    for tbl in &mut tables {
         for _ in 0..num_relations {
             let num = ((rng.next() % 5 + 1) * 100) as i32;
             let price = (rng.next() % 5 * 10 + 50) as i32;
-            tables[t].push(TmCell::new(0)); // num_used
-            tables[t].push(TmCell::new(num)); // num_free
-            tables[t].push(TmCell::new(num)); // num_total
-            tables[t].push(TmCell::new(price)); // price
-            tables[t].push(TmCell::new(1)); // active
+            tbl.push(TmCell::new(0)); // num_used
+            tbl.push(TmCell::new(num)); // num_free
+            tbl.push(TmCell::new(num)); // num_total
+            tbl.push(TmCell::new(price)); // price
+            tbl.push(TmCell::new(1)); // active
         }
     }
 
@@ -78,7 +78,7 @@ fn main() {
     let customers = Arc::new(customers);
     let customer_active = Arc::new(customer_active);
 
-    let queries = num_queries_per_tx as i32;
+    let queries = num_queries_per_tx;
     let pct_user = percent_user;
     let qrange = query_range;
     let ttasks = total_tasks;
@@ -98,10 +98,10 @@ fn main() {
                 tm_init_thread();
                 let mut rng = Rng::new(42u64 + tid as u64);
 
-                let tasks_per = ttasks / num_threads as i32;
-                let extra = ttasks % num_threads as i32;
-                let start_idx = tid as i32 * tasks_per + std::cmp::min(tid as i32, extra);
-                let end_idx = start_idx + tasks_per + if (tid as i32) < extra { 1 } else { 0 };
+                let tasks_per = ttasks / num_threads;
+                let extra = ttasks % num_threads;
+                let start_idx = tid * tasks_per + std::cmp::min(tid, extra);
+                let end_idx = start_idx + tasks_per + if tid < extra { 1 } else { 0 };
 
                 for _iter in start_idx..end_idx {
                     let r = (rng.next() % 100) as i32;
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_add_customer() {
-        let mut customer_active = vec![0i32; 10];
+        let mut customer_active = [0i32; 10];
         let customer_id = 3;
         if customer_active[customer_id - 1] == 0 {
             customer_active[customer_id - 1] = 1;
@@ -344,8 +344,8 @@ mod tests {
 
     #[test]
     fn test_remove_reservation() {
-        let mut customer_active = vec![1i32; 10];
-        let mut customers = vec![500i32; 10];
+        let mut customer_active = [1i32; 10];
+        let mut customers = [500i32; 10];
         let customer_id = 5;
         customer_active[customer_id - 1] = 0;
         customers[customer_id - 1] = 0;

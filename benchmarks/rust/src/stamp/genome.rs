@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 
 fn str_hash(s: &[u8], start: usize, len: usize) -> u64 {
     let mut h = 0u64;
-    for i in start..start + len {
-        h = h.wrapping_mul(131).wrapping_add(s[i] as u64);
+    for &b in &s[start..start + len] {
+        h = h.wrapping_mul(131).wrapping_add(b as u64);
     }
     h
 }
@@ -14,7 +14,7 @@ fn str_hash(s: &[u8], start: usize, len: usize) -> u64 {
 pub fn test() -> i32 {
     let mut fails = 0;
     let mut rng = Rng::new(42);
-    let bases = [b'a', b'c', b'g', b't'];
+    let bases = *b"acgt";
     let gene_len = 100;
     let seg_len = 10;
     let gene: Vec<u8> = (0..gene_len)
@@ -51,16 +51,16 @@ pub fn test() -> i32 {
 
 pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
     println!("\n=== Genome ===");
-    let gene_len = config.gene_length.max(1).min(1 << 20);
+    let gene_len = config.gene_length.clamp(1, 1 << 20);
     let seg_len = config.segment_length.max(1).min(gene_len - 1);
-    let num_seg = config.num_segments.max(1).min(1 << 20);
+    let num_seg = config.num_segments.clamp(1, 1 << 20);
     println!(
         "  Gene length: {}  Segment length: {}  Segments: {}",
         gene_len, seg_len, num_seg
     );
 
     let mut rng = Rng::new(42);
-    let bases = [b'a', b'c', b'g', b't'];
+    let bases = *b"acgt";
 
     // Generate gene
     let gene: Vec<u8> = (0..gene_len)

@@ -106,11 +106,7 @@ fn main() {
     eprintln!("FAIL: Counter invariant violated");
     eprintln!(
         "  Got {final_sum}, expected {expected}, diff = {}({})",
-        if final_sum > expected {
-            final_sum - expected
-        } else {
-            expected - final_sum
-        },
+        final_sum.abs_diff(expected),
         if final_sum > expected {
             "created"
         } else {

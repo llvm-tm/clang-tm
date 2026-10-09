@@ -522,11 +522,9 @@ fn main() {
                                 tx.write(&d.encroached[tid], 1);
                             }
 
-                            if ma < ac || enc {
-                                if tx.read(&d.is_referenced[tid]) == 0 {
-                                    tx.write(&d.is_referenced[tid], 1);
-                                    local_bad.push(tid as i64);
-                                }
+                            if (ma < ac || enc) && tx.read(&d.is_referenced[tid]) == 0 {
+                                tx.write(&d.is_referenced[tid], 1);
+                                local_bad.push(tid as i64);
                             }
                             new_count += 1;
                         }
@@ -617,6 +615,27 @@ struct SharedData {
     min_angle: Arc<Vec<TmCell<f64>>>,
 }
 
+impl Clone for SharedData {
+    fn clone(&self) -> Self {
+        SharedData {
+            encroached: self.encroached.clone(),
+            is_garbage: self.is_garbage.clone(),
+            is_referenced: self.is_referenced.clone(),
+            nbr_cnt: self.nbr_cnt.clone(),
+            nbr_data: self.nbr_data.clone(),
+            work_heap: self.work_heap.clone(),
+            work_heap_cnt: self.work_heap_cnt.clone(),
+            elem_count: self.elem_count.clone(),
+            pt_x: self.pt_x.clone(),
+            pt_y: self.pt_y.clone(),
+            circ_x: self.circ_x.clone(),
+            circ_y: self.circ_y.clone(),
+            circ_r: self.circ_r.clone(),
+            min_angle: self.min_angle.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,26 +703,5 @@ mod tests {
         assert!(is_encroached(edge_a, edge_b, Point { x: 1.0, y: 0.5 }));
         assert!(!is_encroached(edge_a, edge_b, Point { x: 1.0, y: 1.5 }));
         assert!(is_encroached(edge_a, edge_b, Point { x: 1.0, y: 1.0 }));
-    }
-}
-
-impl Clone for SharedData {
-    fn clone(&self) -> Self {
-        SharedData {
-            encroached: self.encroached.clone(),
-            is_garbage: self.is_garbage.clone(),
-            is_referenced: self.is_referenced.clone(),
-            nbr_cnt: self.nbr_cnt.clone(),
-            nbr_data: self.nbr_data.clone(),
-            work_heap: self.work_heap.clone(),
-            work_heap_cnt: self.work_heap_cnt.clone(),
-            elem_count: self.elem_count.clone(),
-            pt_x: self.pt_x.clone(),
-            pt_y: self.pt_y.clone(),
-            circ_x: self.circ_x.clone(),
-            circ_y: self.circ_y.clone(),
-            circ_r: self.circ_r.clone(),
-            min_angle: self.min_angle.clone(),
-        }
     }
 }

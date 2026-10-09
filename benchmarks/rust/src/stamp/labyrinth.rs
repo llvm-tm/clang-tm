@@ -73,7 +73,7 @@ pub fn test() -> i32 {
     // Wall blocking middle row
     for col in 0..w {
         unsafe {
-            *g[1 * w + col].ptr() = 1;
+            *g[w + col].ptr() = 1;
         }
     }
     let blocked = {
@@ -252,14 +252,14 @@ pub fn run(config: &Config, stop: &AtomicBool, ops: &AtomicU64) {
 
                     // TX-mark: atomically verify and mark path cells
                     let ok = transaction(|tx| {
-                        for i in 1..path.len().saturating_sub(1) {
-                            let pi = idx(w, h, d, path[i].0, path[i].1, path[i].2);
+                        for p in path.iter().take(path.len().saturating_sub(1)).skip(1) {
+                            let pi = idx(w, h, d, p.0, p.1, p.2);
                             if tx.read(&g[pi]) != 0 {
                                 return false;
                             }
                         }
-                        for i in 1..path.len().saturating_sub(1) {
-                            let pi = idx(w, h, d, path[i].0, path[i].1, path[i].2);
+                        for p in path.iter().take(path.len().saturating_sub(1)).skip(1) {
+                            let pi = idx(w, h, d, p.0, p.1, p.2);
                             tx.write(&g[pi], 1);
                         }
                         true

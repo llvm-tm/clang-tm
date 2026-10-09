@@ -1,3 +1,5 @@
+// WIP port: op set and record fields kept for C++ parity, not all wired yet.
+#![allow(dead_code)]
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -124,11 +126,10 @@ impl Database {
     fn new() -> Self {
         let _rng = Xsrng::new(42);
 
-        let mut modules = Vec::new();
-        modules.push(Module {
+        let modules = vec![Module {
             id: 0,
             root_assembly_id: 0,
-        });
+        }];
 
         // Pre-allocate assembly tree
         let capacity_ca = MAX_CA;
@@ -234,11 +235,11 @@ impl Database {
         // CP-BA bags (no duplicate avoidance in Rust for simplicity)
         {
             let mut bag_rng = Xsrng::new(42);
-            for ci in 0..MAX_CP {
+            for (ci, cp) in composite_parts.iter_mut().enumerate() {
                 let num = 1 + bag_rng.range(0, MAX_CP_BA_BAG - 1);
                 for _ in 0..num {
                     let bi = bag_rng.range(0, MAX_BA);
-                    composite_parts[ci].base_assembly_ids.push(bi);
+                    cp.base_assembly_ids.push(bi);
                     base_assemblies[bi].composite_part_ids.push(ci);
                 }
             }
@@ -250,16 +251,16 @@ impl Database {
             .enumerate()
             .map(|(i, cp)| (unsafe { *cp.build_date.ptr() }, i))
             .collect();
-        raw_idx.sort_by(|a, b| a.0.cmp(&b.0));
+        raw_idx.sort_by_key(|a| a.0);
         let cp_by_date = raw_idx;
 
         // APs + connections
         {
             let mut ap_rng = Xsrng::new(99);
 
-            for ci in 0..MAX_CP {
+            for (ci, cp) in composite_parts.iter_mut().enumerate() {
                 let first = ci * AP_PER_CP;
-                composite_parts[ci].root_atomic_part_id = first as i32;
+                cp.root_atomic_part_id = first as i32;
 
                 for j in 0..AP_PER_CP {
                     let ap_id = first + j;
@@ -274,7 +275,7 @@ impl Database {
                         connection_ids: Vec::with_capacity(CONN_PER_AP * 4),
                         valid: TmCell::new(1),
                     });
-                    composite_parts[ci].atomic_part_ids.push(first + j);
+                    cp.atomic_part_ids.push(first + j);
                 }
 
                 // Connections: ring + chord + random
@@ -565,7 +566,7 @@ fn op_st4(db: &Database, tx: &Transaction, ca_idx: usize) {
     }
 }
 
-fn op_st5(db: &Database, tx: &Transaction, low: i32, high: i32) -> i64 {
+fn op_st5(db: &Database, _tx: &Transaction, low: i32, high: i32) -> i64 {
     let mut cnt = 0i64;
     for &(d, _ci) in &db.cp_by_date {
         if d >= low && d <= high {
@@ -690,7 +691,7 @@ fn op_op7(db: &Database, tx: &Transaction, cp_idx: usize) -> i64 {
     }
 }
 
-fn op_op8(db: &Database, _tx: &Transaction, _cp_idx: usize) -> i64 {
+fn op_op8(_db: &Database, _tx: &Transaction, _cp_idx: usize) -> i64 {
     1
 }
 
@@ -1081,9 +1082,9 @@ fn worker(
     let rng_cell = RefCell::new(Xsrng::new((tid as u64) * 12345 + 42 + 1));
 
     while !stop.load(Ordering::Relaxed) {
-        let desc = pick_operation(&mut *rng_cell.borrow_mut(), write_percent);
+        let desc = pick_operation(&mut rng_cell.borrow_mut(), write_percent);
         transaction(|tx| {
-            execute_op(db, tx, &desc, &mut *rng_cell.borrow_mut());
+            execute_op(db, tx, &desc, &mut rng_cell.borrow_mut());
         });
         total_ops.fetch_add(1, Ordering::Relaxed);
     }

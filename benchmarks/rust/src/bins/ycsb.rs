@@ -141,8 +141,8 @@ impl Record {
 
     fn read_field0(&self, tx: &Transaction) -> [u8; FIELD_SIZE] {
         let mut out = [0u8; FIELD_SIZE];
-        for i in 0..FIELD_SIZE {
-            out[i] = tx.read(&self.data[i]);
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = tx.read(&self.data[i]);
         }
         out
     }
@@ -264,8 +264,8 @@ fn run_worker(
             }
             Distribution::Uniform => (rng.next() % config.key_range as u64) as i64,
             Distribution::Latest => {
-                let max = (config.key_range as i64 + insert_counter as i64)
-                    .min(config.key_range as i64 * 2);
+                let max =
+                    (config.key_range as i64 + insert_counter).min(config.key_range as i64 * 2);
                 max - 1 - (rng.next() % 1000u64) as i64
             }
         };

@@ -4,6 +4,7 @@ use std::sync::{Arc, Barrier};
 use std::time::Instant;
 use tm::*;
 
+#[allow(dead_code)] // used by the test module below
 fn euclidean_dist_sq(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
 }
@@ -98,7 +99,7 @@ fn main() {
 
             s.spawn(move || {
                 tm_init_thread();
-                let chunk = (npoints + num_threads - 1) / num_threads;
+                let chunk = npoints.div_ceil(num_threads);
                 let start_pt = tid * chunk;
                 let end_pt = std::cmp::min(start_pt + chunk, npoints);
 

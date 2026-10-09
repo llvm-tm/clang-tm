@@ -176,7 +176,7 @@ pub fn test() -> i32 {
 
 pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     println!("\n=== Yada ===");
-    let grid_size: usize = config.points.max(10).min(30);
+    let grid_size: usize = config.points.clamp(10, 30);
     let angle = config.dims as f64;
     let jitter = 0.5;
     println!(
@@ -257,8 +257,8 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     }
 
     let mut work_heap_init = Vec::new();
-    for i in 0..init_cnt {
-        if min_angle[i] < angle {
+    for (i, &ma) in min_angle.iter().enumerate().take(init_cnt) {
+        if ma < angle {
             work_heap_init.push(i as i64);
         }
     }

@@ -125,7 +125,7 @@ impl TpccDatabase {
         let num_c = DEFAULT_CUSTOMERS;
         let num_i = DEFAULT_ITEMS;
         let total_orders = num_w * num_d * MAX_ORDERS_PER_DISTRICT;
-        let total_ol = total_orders * MAX_OL_PER_ORDER;
+        let _total_ol = total_orders * MAX_OL_PER_ORDER;
 
         let warehouse = (0..num_w)
             .map(|i| Warehouse {
@@ -184,10 +184,10 @@ impl TpccDatabase {
                     o_id,
                     o_d_id: ((idx / PREPOPULATED_ORDERS) % num_d + 1) as i32,
                     o_w_id: (idx / (PREPOPULATED_ORDERS * num_d) + 1) as i32,
-                    o_c_id: (o_id % num_c as i32 + 1) as i32,
+                    o_c_id: (o_id % num_c as i32 + 1),
                     o_entry_d: 2000,
                     o_carrier_id: TmCell::new(carrier),
-                    o_ol_cnt: (o_id % 11 + 5) as i32,
+                    o_ol_cnt: (o_id % 11 + 5),
                     o_all_local: TmCell::new(1),
                 }
             })
@@ -325,7 +325,7 @@ fn txn_new_order(
     tx: &Transaction,
     w_id: usize,
     d_id: usize,
-    c_id: usize,
+    _c_id: usize,
     rng: &mut Rng,
 ) -> i32 {
     let d_idx = db.idx_d(w_id, d_id);
@@ -347,7 +347,7 @@ fn txn_new_order(
     let mut all_local = 1;
     for ol_num in 1..=num_items {
         // Unique item: ensure no duplicate items in this order
-        let mut i_id = (rng.range(1, db.num_i as u64 + 1)) as usize;
+        let i_id = (rng.range(1, db.num_i as u64 + 1)) as usize;
         // Remote warehouse check: ~1% chance
         let r2 = rng.range(0, 100);
         let ol_sw_id = if r2 < 1 && db.num_w > 1 {
@@ -588,7 +588,7 @@ fn worker(
         if r < 45 {
             transaction(|tx| {
                 let mut rng = rng.borrow_mut();
-                txn_new_order(db, tx, w_id, d_id, c_id, &mut *rng);
+                txn_new_order(db, tx, w_id, d_id, c_id, &mut rng);
             });
             tx_counts.c0.fetch_add(1, Ordering::Relaxed);
         } else if r < 88 {

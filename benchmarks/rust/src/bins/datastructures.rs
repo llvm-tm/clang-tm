@@ -91,7 +91,7 @@ fn sl_insert(tx: &Transaction, head: &TmCell<TmPtr<SLNode>>, key: i64, val: i64)
                 unsafe {
                     drop(Box::from_raw(new_node));
                 }
-                tx.write(&mut unsafe { &mut *cur.get() }.val, val);
+                tx.write(&unsafe { &mut *cur.get() }.val, val);
                 return;
             }
             unsafe {
@@ -135,7 +135,7 @@ fn sl_erase(tx: &Transaction, head: &TmCell<TmPtr<SLNode>>, key: i64) {
         if node.key > key {
             return;
         }
-        prev_ptr = &mut unsafe { &mut *(cur_ptr.get() as *mut SLNode) }.next;
+        prev_ptr = &mut unsafe { &mut *cur_ptr.get() }.next;
     }
 }
 
@@ -441,7 +441,7 @@ impl HashMap {
     }
 
     fn bucket(&self, key: i64) -> &TmCell<TmPtr<HMEntry>> {
-        &self.buckets[((key as usize).wrapping_mul(0x9e3779b9) >> 54) as usize]
+        &self.buckets[(key as usize).wrapping_mul(0x9e3779b9) >> 54]
     }
 
     fn insert_tx(&self, tx: &Transaction, key: i64, val: i64) {
@@ -458,7 +458,7 @@ impl HashMap {
                 return;
             }
             if unsafe { (*cur.get()).key == key } {
-                tx.write(&mut unsafe { &mut *cur.get() }.val, val);
+                tx.write(&unsafe { &mut *cur.get() }.val, val);
                 return;
             }
             prev = &mut unsafe { &mut *cur.get() }.next;
@@ -496,7 +496,7 @@ impl HashMap {
             if node.key > key {
                 return;
             }
-            prev = &mut unsafe { &mut *(cur.get() as *mut HMEntry) }.next;
+            prev = &mut unsafe { &mut *cur.get() }.next;
         }
     }
 

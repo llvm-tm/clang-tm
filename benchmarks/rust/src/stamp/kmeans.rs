@@ -40,7 +40,7 @@ fn accumulate(
     local_sum: &RefCell<Vec<f64>>,
     local_count: &RefCell<Vec<i32>>,
 ) {
-    let chunk = (d.npoints + num_threads - 1) / num_threads;
+    let chunk = d.npoints.div_ceil(num_threads);
     let start = tid * chunk;
     let end = (start + chunk).min(d.npoints);
 
@@ -248,11 +248,10 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
         "  Operations: {}  Elapsed: {} ms  Rate: {} ops/s",
         iter_ops,
         elapsed,
-        if elapsed > 0 {
-            iter_ops * 1000 / elapsed
-        } else {
-            0
-        }
+        iter_ops
+            .checked_mul(1000)
+            .and_then(|x| x.checked_div(elapsed))
+            .unwrap_or(0)
     );
 
     println!("  Centroids:");

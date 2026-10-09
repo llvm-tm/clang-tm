@@ -26,6 +26,7 @@ impl Lcg {
     }
 }
 
+#[allow(dead_code)] // used by the test module below
 fn has_path_dfs(child_count: &[i32], child_data: &[i32], from: i32, to: i32, nvar: usize) -> bool {
     if from == to {
         return false;
@@ -215,12 +216,12 @@ fn main() {
         let ncfg = 1 << np;
         let mut c0 = vec![0i32; ncfg];
         let mut c1 = vec![0i32; ncfg];
-        for r in 0..nr as usize {
+        for rec in &recs[..nr as usize] {
             let mut cfg = 0usize;
             for i in 0..np {
-                cfg = (cfg << 1) | recs[r][parents[i] as usize] as usize;
+                cfg = (cfg << 1) | rec[parents[i] as usize] as usize;
             }
-            if recs[r][var] == 0 {
+            if rec[var] == 0 {
                 c0[cfg] += 1;
             } else {
                 c1[cfg] += 1;
@@ -574,9 +575,9 @@ mod tests {
         let mut child_count = vec![0i32; 3];
         let mut child_data = vec![-1i32; 9];
         child_count[0] = 1;
-        child_data[0 * 3 + 0] = 1;
+        child_data[0] = 1;
         child_count[1] = 1;
-        child_data[1 * 3 + 0] = 2;
+        child_data[3] = 2;
         assert!(has_path_dfs(&child_count, &child_data, 0, 2, 3));
     }
 
@@ -587,11 +588,11 @@ mod tests {
         let mut child_count = vec![0i32; 3];
         let mut child_data = vec![-1i32; 9];
         child_count[0] = 1;
-        child_data[0 * 3 + 0] = 2;
+        child_data[0] = 2;
         child_count[1] = 1;
-        child_data[1 * 3 + 0] = 0;
+        child_data[3] = 0;
         child_count[2] = 1;
-        child_data[2 * 3 + 0] = 1;
+        child_data[2 * 3] = 1;
         assert!(!has_path_dfs(&child_count, &child_data, 0, 2, 3));
     }
 

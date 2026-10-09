@@ -20,7 +20,7 @@ fn grid_idx(w: i32, _h: i32, x: i32, y: i32, z: i32) -> usize {
     (z * _h + y) as usize * w as usize + x as usize
 }
 
-#[allow(unused_variables)]
+#[allow(unused_variables, clippy::too_many_arguments)]
 fn do_expansion(
     dist: &mut [i32],
     cell_states: &[i32],
@@ -146,14 +146,14 @@ fn do_traceback(
 
 fn labyrinth_mark(grid: &[TmCell<i32>], w: i32, h: i32, path: &[Point3D]) -> bool {
     transaction(|tx| {
-        for i in 1..path.len().saturating_sub(1) {
-            let idx = grid_idx(w, h, path[i].x, path[i].y, path[i].z);
+        for p in path.iter().take(path.len().saturating_sub(1)).skip(1) {
+            let idx = grid_idx(w, h, p.x, p.y, p.z);
             if tx.read(&grid[idx]) != -1 {
                 return false;
             }
         }
-        for i in 1..path.len().saturating_sub(1) {
-            let idx = grid_idx(w, h, path[i].x, path[i].y, path[i].z);
+        for p in path.iter().take(path.len().saturating_sub(1)).skip(1) {
+            let idx = grid_idx(w, h, p.x, p.y, p.z);
             tx.write(&grid[idx], -2);
         }
         true

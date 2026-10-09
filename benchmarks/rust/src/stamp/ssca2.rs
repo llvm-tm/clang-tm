@@ -13,13 +13,13 @@ struct Edge {
 }
 
 #[allow(dead_code)]
-struct CSR {
+struct Csr {
     row_ptr: Vec<TmCell<u64>>,
     col_idx: Vec<TmCell<u64>>,
     num_vertices: u64,
 }
 
-fn has_edge(csr: &CSR, src: u64, dst: u64) -> bool {
+fn has_edge(csr: &Csr, src: u64, dst: u64) -> bool {
     transaction(|tx| {
         let start = tx.read(&csr.row_ptr[src as usize]);
         let end = tx.read(&csr.row_ptr[src as usize + 1]);
@@ -111,7 +111,7 @@ pub fn test() -> i32 {
 
 pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
     println!("\n=== SSCA2 ===");
-    let scale = config.scale.max(2).min(20);
+    let scale = config.scale.clamp(2, 20);
     let prob_unidirectional = 0.5;
     let max_paral_edges = 3usize;
     let subgr_edge_length = 3;
@@ -149,8 +149,7 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
     let mut start_v = 0u64;
 
     // Intra-clique edges
-    for c in 0..clique_sizes.len() {
-        let csize = clique_sizes[c];
+    for &csize in &clique_sizes {
         for i in 0..csize {
             for j in 0..csize {
                 if i == j {
@@ -179,8 +178,7 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
 
     // Inter-clique edges
     start_v = 0;
-    for c in 0..clique_sizes.len() {
-        let csize = clique_sizes[c];
+    for &csize in &clique_sizes {
         for i in 0..csize {
             let v = perm[(start_v + i as u64) as usize];
             let mut d = 1u64;
@@ -188,19 +186,17 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
                 if rng.uniform() < prob_intercl_edges / ((d as f64).log2() + 1.0) {
                     let neighbor = (v + d) % tot_vertices;
                     for _ in 0..max_paral_edges {
-                        if rng.uniform() < 0.5 {
-                            if edge_set.insert((v, neighbor)) {
-                                let w = if rng.uniform() < perc_int_weights {
-                                    (rng.next() % (1u64 << scale)) as i64
-                                } else {
-                                    -(rng.next() as i64 % scale as i64)
-                                };
-                                temp_edges.push(Edge {
-                                    src: v,
-                                    dst: neighbor,
-                                    weight: w,
-                                });
-                            }
+                        if rng.uniform() < 0.5 && edge_set.insert((v, neighbor)) {
+                            let w = if rng.uniform() < perc_int_weights {
+                                (rng.next() % (1u64 << scale)) as i64
+                            } else {
+                                -(rng.next() as i64 % scale as i64)
+                            };
+                            temp_edges.push(Edge {
+                                src: v,
+                                dst: neighbor,
+                                weight: w,
+                            });
                         }
                     }
                 }
@@ -240,7 +236,7 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
     }
 
     // Wrap in TmCell for TM reads during triangle counting
-    let csr = Arc::new(CSR {
+    let csr = Arc::new(Csr {
         row_ptr: row_ptr.into_iter().map(TmCell::new).collect(),
         col_idx: col_idx.into_iter().map(TmCell::new).collect(),
         num_vertices,
@@ -256,7 +252,7 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
             let c = csr.clone();
             let go = &g_ops;
             s.spawn(move || {
-                let chunk = (num_vertices + config.threads as u64 - 1) / config.threads as u64;
+                let chunk = num_vertices.div_ceil(config.threads as u64);
                 let start_v = tid as u64 * chunk;
                 let end_v = (start_v + chunk).min(num_vertices);
                 let mut local_ops = 0u64;
@@ -292,6 +288,8 @@ pub fn run(config: &Config, _stop: &AtomicBool, _ops: &AtomicU64) {
         "  Triangles: {}  Elapsed: {} ms  Rate: {} ops/s",
         ops,
         elapsed,
-        if elapsed > 0 { ops * 1000 / elapsed } else { 0 }
+        ops.checked_mul(1000)
+            .and_then(|x| x.checked_div(elapsed))
+            .unwrap_or(0)
     );
 }

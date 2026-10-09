@@ -206,8 +206,8 @@ fn compute_density_ll(data: &BayesData, var: usize, parents: &[i32]) -> f64 {
 
 fn has_path(data: &BayesData, from: i32, to: i32) -> bool {
     thread_local! {
-        static VISITED: RefCell<Vec<bool>> = RefCell::new(Vec::new());
-        static STACK: RefCell<Vec<i32>> = RefCell::new(Vec::new());
+        static VISITED: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+        static STACK: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
     }
     VISITED.with(|v| {
         let mut visited = v.borrow_mut();
@@ -357,13 +357,13 @@ pub fn test() -> i32 {
         let mut a = TestLcg::new(42);
         let first5: Vec<u32> = (0..5).map(|_| a.next()).collect();
         let mut b = TestLcg::new(42);
-        for i in 0..5 {
+        for (i, &want) in first5.iter().enumerate() {
             let got = b.next();
             total += 1;
-            if got != first5[i] {
+            if got != want {
                 eprintln!(
                     "  FAIL: LCG determinism at {}: expected {} got {}",
-                    i, first5[i], got
+                    i, want, got
                 );
                 fails += 1;
             }
@@ -373,7 +373,7 @@ pub fn test() -> i32 {
     // ── d2l/l2d roundtrip ──────────────────────────────────────
     eprintln!("  Testing d2l/l2d roundtrip...");
     {
-        let orig = -0.693147f64;
+        let orig = -std::f64::consts::LN_2;
         let bits = d2l(orig);
         let back = l2d(bits);
         total += 1;
@@ -451,8 +451,8 @@ pub fn test() -> i32 {
 
 pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
     println!("\n=== Bayes ===");
-    let num_var = config.points.max(8).min(64);
-    let num_records = config.num_customers.max(64).min(2048);
+    let num_var = config.points.clamp(8, 64);
+    let num_records = config.num_customers.clamp(64, 2048);
     let max_parents = 8usize;
     let insert_penalty = 2.0;
     let base_penalty = -0.5 * (num_records as f64).ln() * insert_penalty;
@@ -464,13 +464,13 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
 
     let mut rng = Rng::new(42);
     let mut parents_init: Vec<Vec<i32>> = (0..num_var).map(|_| Vec::new()).collect();
-    for v in 1..num_var {
+    for (v, pi) in parents_init.iter_mut().enumerate().skip(1) {
         let n = (rng.next() as usize % max_parents.min(v)) + 1;
         for _ in 0..n {
             loop {
                 let p = (rng.next() as usize) % v;
-                if !parents_init[v].contains(&(p as i32)) {
-                    parents_init[v].push(p as i32);
+                if !pi.contains(&(p as i32)) {
+                    pi.push(p as i32);
                     break;
                 }
             }
@@ -517,8 +517,8 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
         task_list,
     });
 
-    for v in 0..num_var {
-        for &p in &parents_init[v] {
+    for (v, init) in parents_init.iter().enumerate() {
+        for &p in init {
             data.parents[v].peek_insert(p);
             data.children[p as usize].peek_insert(v as i32);
         }
@@ -534,7 +534,7 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
             let d = data.clone();
             let sc = stop;
             let go = &g_ops;
-            let chunk = (num_var + config.threads - 1) / config.threads;
+            let chunk = num_var.div_ceil(config.threads);
             let start = tid * chunk;
             let end = (start + chunk).min(num_var);
             threads.push(s.spawn(move || {

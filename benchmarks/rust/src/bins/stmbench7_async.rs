@@ -11,6 +11,8 @@
 //! Backend selection (default: wbctl):
 //!   cargo run --release --no-default-features --features tl2 --bin stmbench7_async -- -t 4 -d 5000
 
+// WIP port: op set and record fields kept for C++ parity, not all wired yet.
+#![allow(dead_code)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -128,11 +130,10 @@ struct Database {
 impl Database {
     fn new() -> Self {
         let _rng = Xsrng::new(42);
-        let mut modules = Vec::new();
-        modules.push(Module {
+        let modules = vec![Module {
             id: 0,
             root_assembly_id: 0,
-        });
+        }];
         let mut complex_assemblies = Vec::with_capacity(MAX_CA);
         let mut base_assemblies = Vec::with_capacity(MAX_BA * 2);
         let mut composite_parts = Vec::with_capacity(MAX_CP * 2);
@@ -213,11 +214,11 @@ impl Database {
         }
         {
             let mut bag_rng = Xsrng::new(42);
-            for ci in 0..MAX_CP {
+            for (ci, cp) in composite_parts.iter_mut().enumerate() {
                 let num = 1 + bag_rng.range(0, MAX_CP_BA_BAG - 1);
                 for _ in 0..num {
                     let bi = bag_rng.range(0, MAX_BA);
-                    composite_parts[ci].base_assembly_ids.push(bi);
+                    cp.base_assembly_ids.push(bi);
                     base_assemblies[bi].composite_part_ids.push(ci);
                 }
             }
@@ -227,14 +228,14 @@ impl Database {
             .enumerate()
             .map(|(i, cp)| (unsafe { *cp.build_date.ptr() }, i))
             .collect();
-        raw_idx.sort_by(|a, b| a.0.cmp(&b.0));
+        raw_idx.sort_by_key(|a| a.0);
         let cp_by_date = raw_idx;
 
         {
             let mut ap_rng = Xsrng::new(99);
-            for ci in 0..MAX_CP {
+            for (ci, cp) in composite_parts.iter_mut().enumerate() {
                 let first = ci * AP_PER_CP;
-                composite_parts[ci].root_atomic_part_id = first as i32;
+                cp.root_atomic_part_id = first as i32;
                 for j in 0..AP_PER_CP {
                     let ap_id = first + j;
                     atomic_parts.push(AtomicPart {
@@ -248,7 +249,7 @@ impl Database {
                         connection_ids: Vec::with_capacity(CONN_PER_AP * 4),
                         valid: TmCell::new(1),
                     });
-                    composite_parts[ci].atomic_part_ids.push(first + j);
+                    cp.atomic_part_ids.push(first + j);
                 }
                 for j in 0..AP_PER_CP {
                     let a = first + j;
@@ -1001,7 +1002,7 @@ struct AsyncQueue {
 }
 
 impl AsyncQueue {
-    fn new(num_workers: usize, db: Arc<Database>) -> Self {
+    fn new(num_workers: usize, _db: Arc<Database>) -> Self {
         let (task_sender, task_receiver) = std::sync::mpsc::channel::<Task>();
         let rx = Arc::new(std::sync::Mutex::new(task_receiver));
         let completed = Arc::new(AtomicUsize::new(0));
@@ -1137,7 +1138,7 @@ fn main() {
         // Barrier: wait for this batch to complete (like tm_wait_prev_tx)
         queue.wait_for(batch_start + batch_size);
 
-        if batch_no % 10 == 0 || batch_no == 1 {
+        if batch_no.is_multiple_of(10) || batch_no == 1 {
             let elapsed = start_time.elapsed().as_secs_f64();
             println!(
                 "  [batch {}] {} ops, {:.0} ops/s",

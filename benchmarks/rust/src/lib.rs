@@ -6,6 +6,7 @@ impl Rng {
     pub fn new(seed: u64) -> Self {
         Self(Mt19937_64::new(seed))
     }
+    #[allow(clippy::should_implement_trait)] // mirrors the C++ Rng::next() shape
     pub fn next(&mut self) -> u64 {
         self.0.next()
     }

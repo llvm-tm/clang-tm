@@ -215,7 +215,7 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
                                 }
                             }
                         });
-                    } else if choice % 2 == 0 {
+                    } else if choice.is_multiple_of(2) {
                         // Delete customer
                         transaction(|tx| {
                             let c = &t.3[customer_id - 1];
@@ -272,10 +272,9 @@ pub fn run(config: &Config, stop: &AtomicBool, _ops: &AtomicU64) {
         "  Operations: {}  Elapsed: {} ms  Rate: {} ops/s",
         ops_count,
         elapsed,
-        if elapsed > 0 {
-            ops_count * 1000 / elapsed
-        } else {
-            0
-        }
+        ops_count
+            .checked_mul(1000)
+            .and_then(|x| x.checked_div(elapsed))
+            .unwrap_or(0)
     );
 }
