@@ -664,6 +664,20 @@ committed transaction even by the fastest serializable design in the repo.
 The EC column appends: its commit cost does not depend on contention at
 all, because there is nothing to validate against.
 
+One honesty clause before the table, and it is the load-bearing one. The EC
+column is \emph{analytical}: the repository has a correctness PoC of the EC
+bank (\texttt{research/ec-bank/}), not a throughput benchmark, and the
+honest expectation is that TSXSGL beats the EC design on one machine by a
+wide margin --- in-process synchronization costs nanoseconds, while the
+EC alternative pays folds on every read and repairs after every violation.
+EC earns its keep only when what you remove is a \emph{coordination
+round-trip} --- across replicas, shards, sites --- where validation would
+be a network latency and the strict column's numbers would themselves
+collapse by orders of magnitude. The question to ask of your system is
+never ``is EC faster than TSX on my box'' (it is not); it is ``what does
+my validation cost at my scale, and can my application pay repair
+instead.''
+
 \begin{table}[htbp]
 \centering
 \small
@@ -672,20 +686,52 @@ all, because there is nothing to validate against.
  & \textbf{strict/opaque STM} (this book's default) & \textbf{EC bank with compensation} (\texttt{research/ec-bank/}) \\
 \hline
 commit-time work & validation over $2r{+}w$ object-chances per contender; publish or undo & append to local op-set; broadcast; nothing to check \\
-throughput under contention & TSXSGL HW bank: 6.67\,M txn/s (1 thread) $\to$ 1.25\,M (4), conflict aborts 64--71\,$\%$ & flat in $C$: an append does not conflict \\
-work per committed txn & $E = 1/(1-p_{\mathrm{abort}}) \approx 2.8$--$3.4$ at those mixes & $1$, plus repair traffic after violations \\
+throughput under contention & TSXSGL HW bank: 6.67\,M txn/s (1 thread) $\to$ 1.25\,M (4), conflict aborts 64--71\,$\%$ & flat in $C$: an append does not conflict (analytical; unmeasured --- see below) \\
+work per committed txn & $E = 1/(1-p_{\mathrm{abort}}) \approx 2.8$--$3.4$ at those mixes & $1$ at commit $+$ fold at every read $+$ one repair per violation \\
 observable states & only committed serial-legal states & transient invariant violations (negative balances) are visible \\
 invariant enforcement & at commit time, by the runtime & after the fact, by the application's repair rule \\
 external side effects & safe: act after commit & compensation cannot un-send them; effects must be deferrable or compensable \\
 convergence & trivial (one state) & needs CRDT folds + a deterministic culprit rule + causal delivery \\
-where the cost is paid & synchronization at commit & application logic, repair latency, observability of bad states \\
+where the cost is paid & synchronization at commit & reads (folds), repairs (broadcasts), latency of bad states, storage growth, application logic \\
 \hline
 \end{tabular}
-\caption{Two ways to pay for the same invariant. The strict column is the
-TSXSGL bank measurement of Ch.~9 on real hardware; the EC column is
-\texttt{research/ec-bank/} verified by TLC (\texttt{ECBank.tla}).}
+\caption{Two ways to pay for the same invariant --- overhead is conserved,
+not removed. The strict column is the TSXSGL bank measurement of Ch.~9 on
+real hardware; the EC column is \emph{analytical and TLC-verified only}
+(\texttt{research/ec-bank/}, \texttt{ECBank.tla}); no EC throughput
+benchmark exists.}
 \label{tab:ec-vs-stm}
 \end{table}
+
+\subsection*{Where the bill goes: conservation of overhead}
+
+Read the table as one sentence: \emph{the synchronization you delete at
+commit reappears as bookkeeping somewhere else} --- and each place it
+lands is worth pricing against your workload.
+
+\begin{itemize}
+\item \textbf{Reads pay the fold.} The EC bank does not store balances;
+every view is $\mathsf{fold}(A_r)$ computed over an op-set that grows with
+every commit \emph{and every compensation}. A strict STM's read is a cache
+hit; the EC fold is O-size-of-history until compaction exists.
+\item \textbf{Contention pays the repair instead of the retry.} The design
+refuses to pay $E \approx 3$ attempts under contention --- but violations,
+which contention causes, each spawn a compensation broadcast. Both bills
+grow with contention; only one of them is invisible on a profiler.
+\item \textbf{The clock pays.} From violation to converged repair --- at
+least a propagation delay, longer under partition --- the world sees the
+negative balance. That window is a product decision, not a runtime
+guarantee.
+\item \textbf{Storage pays the history.} Grow-only means \emph{grow}: the
+op-set needs compaction, and the causal gate (compensation after parent)
+limits how early any op may be dropped. STM state is O-live-objects;
+EC state is O-all-time-operations until you prove otherwise.
+\item \textbf{The programmer pays the bugs.} A strict STM fails loudly ---
+aborts, and where the runtime is broken, crashes the reader found in
+\S\ref{sec:crash-without-opacity}. The EC design's failure mode is a silent
+money error inside a fold: no abort to count, only a reconciliation report
+nobody reads.
+\end{itemize}
 
 Four conditions must hold before an application may live beyond the cliff,
 and the reader should be able to test each against their own workload.

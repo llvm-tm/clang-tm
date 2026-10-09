@@ -2993,3 +2993,16 @@ Validated the gem5 x86 TSX simulation against real Broadwell-EP hardware
   `check-fast` ALL PASSED. TLC 2.14 quirk confirmed again: `pending ∈ {"N"} ∪
   Int` fails membership ("is an element of Int") — used a boolean flag
   instead.
+
+### Follow-up (same day) — EC trade-off made explicit in §7.7
+
+Per review question ("is TSX actually faster than the weak bank?"): the EC
+column of `tab:ec-vs-stm` had been analytical without saying so. Added to
+Ch.7 §7.7: an honesty clause (single machine — TSXSGL wins wide; EC pays
+off only when the removed coordination is a network round-trip), table rows
+and caption now mark the EC throughput as analytical/unmeasured, and a new
+"Where the bill goes: conservation of overhead" list (reads pay the fold;
+contention pays repairs instead of retries; bad-state visibility window;
+grow-only storage vs causal-gated compaction; silent money-error failure
+mode). Book 363pp, zero new overfull boxes vs baseline. TODO: C++ EC
+throughput benchmark to make the column measured.

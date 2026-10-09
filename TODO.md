@@ -301,7 +301,10 @@ consistency/overhead curve; the book should expose the curve itself.
   (h-uniform + model symbols), Ch.7 ladder bullets/witnesses/§7.7, glossary.)
 - [ ] **EC follow-ups** (see research/ec-bank/README.md): liveness proof of
   compensation in TLA+, batched compensation, richer invariants via a
-  confluence checker.
+  confluence checker. Also: a C++ EC-throughput benchmark so
+  `tab:ec-vs-stm`'s EC column becomes measured, not analytical (the table
+  and \S7.7 now state the analytical status and the conservation-of-overhead
+  list explicitly, so the claim is honest as-is).
 
 ## Completed
 
