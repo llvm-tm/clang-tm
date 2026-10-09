@@ -15,7 +15,13 @@
  * under SI, illegal under any serial execution.
  *
  * The invariant Reserve IS violated by design — `make check-teaching`
- * asserts TLC finds the counterexample, which the book replays.
+ * asserts TLC finds the counterexample, which the book replays.  Two
+ * constant sets are kept: 500/400/500 (the book's worked example) and
+ * 12/8/16 (the C++ demo benchmark/cpp/sidemo/bank_si.cpp, where two
+ * transfers of 8 from two accounts of 12 each pass the predicate
+ * "combined balance stays >= 16 after your draw" individually but not
+ * jointly).  The sibling module BankWeak.tla covers dirty read,
+ * non-repeatable read, and lost update at RU/RC/SI.
  *)
 
 EXTENDS Integers

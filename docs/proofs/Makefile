@@ -4,7 +4,9 @@
 #   make                    — TLC safety check on all backends
 #   make check-teaching    — the book's violation-demonstrating models
 #                            (EagerSTM opacity crash, BankSI write skew +
-#                             serializable contrast); NOT part of `check`
+#                             serializable contrast incl. the 12/8/16 demo
+#                             scenario, BankWeak dirty read / non-repeatable
+#                             read / SI contrast); NOT part of `check`
 #   make check-<BACKEND>   — TLC on a single backend (e.g., make check-TL2)
 #   make check-all         — TLC + coverage on all backends
 #   make verify-sequential — 11 PlusCal backends with Thread={1}
@@ -87,6 +89,36 @@ check-teaching:
 	    || { echo "  FAIL: serializable contrast model does not pass"; \
 	         tail -20 /tmp/banksi-serial-teach.log; exit 1; }
 	@echo "  OK: Reserve holds under optimistic serializability"
+	@echo "=== BankSI demo scenario 12/8/16 (expect: Reserve VIOLATED) ==="
+	@$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) BankSI.tla \
+	    -config BankSI-demo-skew.cfg > /tmp/banksi-demo-teach.log 2>&1; \
+	if grep -q "Invariant Reserve is violated" /tmp/banksi-demo-teach.log; then \
+	    echo "  OK: demo write-skew counterexample found (see /tmp/banksi-demo-teach.log)"; \
+	else echo "  FAIL: demo-scenario Reserve violation NOT found"; exit 1; fi
+	@echo "=== BankSI demo scenario + read-set revalidation (expect: PASS) ==="
+	@$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) BankSI.tla \
+	    -config BankSI-demo-serial.cfg > /tmp/banksi-demo-serial-teach.log 2>&1 \
+	    || { echo "  FAIL: demo-scenario serializable contrast does not pass"; \
+	         tail -20 /tmp/banksi-demo-serial-teach.log; exit 1; }
+	@echo "  OK: demo Reserve holds under optimistic serializability"
+	@echo "=== BankWeak @ RU (expect: CommittedReads VIOLATED — dirty read) ==="
+	@$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) BankWeak.tla \
+	    -config BankWeak-ru.cfg > /tmp/bankweak-ru-teach.log 2>&1; \
+	if grep -q "Invariant CommittedReads is violated" /tmp/bankweak-ru-teach.log; then \
+	    echo "  OK: dirty-read counterexample found (see /tmp/bankweak-ru-teach.log)"; \
+	else echo "  FAIL: expected dirty-read violation NOT found"; exit 1; fi
+	@echo "=== BankWeak @ RC (expect: Repeatable VIOLATED — non-repeatable read) ==="
+	@$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) BankWeak.tla \
+	    -config BankWeak-rc.cfg > /tmp/bankweak-rc-teach.log 2>&1; \
+	if grep -q "Invariant Repeatable is violated" /tmp/bankweak-rc-teach.log; then \
+	    echo "  OK: non-repeatable-read counterexample found (see /tmp/bankweak-rc-teach.log)"; \
+	else echo "  FAIL: expected non-repeatable-read violation NOT found"; exit 1; fi
+	@echo "=== BankWeak @ SI (expect: PASS) ==="
+	@$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) BankWeak.tla \
+	    -config BankWeak-si.cfg > /tmp/bankweak-si-teach.log 2>&1 \
+	    || { echo "  FAIL: SI contrast model does not pass"; \
+	         tail -20 /tmp/bankweak-si-teach.log; exit 1; }
+	@echo "  OK: all three weak-level predicates hold at SI"
 
 # Fast smoke gate: 3 small models, 60s timeout each (blocking CI, <5 min total).
 # A backend may ship a $${b}-smoke.cfg with a deliberately small state space so
