@@ -1,8 +1,16 @@
 CC ?= gcc
 CFLAGS := -O2 -mrtm -pthread -Wall -Wextra
-TARGETS := tsx_conflict_matrix tsx_spurious
+TARGETS := tsx_conflict_matrix tsx_spurious tsx_isolate tsx_sgl_ablation
+GEM5_CC ?= gcc
+GEM5_TARGETS := bin/tsx_conflict_matrix_gem5
 
 all: $(TARGETS)
+
+bin:
+	mkdir -p bin
+
+bin/tsx_conflict_matrix_gem5: tsx_conflict_matrix_gem5.c | bin
+	$(GEM5_CC) $(CFLAGS) -static -o $@ $<
 
 tsx_conflict_matrix: tsx_conflict_matrix.c
 	$(CC) $(CFLAGS) -o $@ $<
@@ -16,6 +24,7 @@ check: all
 	@echo "== spurious =="; ./tsx_spurious 200000 0 || true
 
 clean:
-	rm -f $(TARGETS)
+	rm -f $(TARGETS) bin/tsx_conflict_matrix_gem5
 
-.PHONY: all check clean
+.PHONY: all check clean gem5
+gem5: $(GEM5_TARGETS)

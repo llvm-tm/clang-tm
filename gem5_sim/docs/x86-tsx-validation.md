@@ -168,3 +168,14 @@ Workarounds, in order of preference:
 A real fix would require porting the HTM logic onto a livelock-free
 `MESI_Two_Level` hierarchy; that is tracked in `TODO.md` ("gem5
 multi-threaded livelock") and left as future work.
+
+**Caveat on the §4 sweep rows (added 2026-10-05):** the t2/t4 TSXSGL rows
+above were produced under the automatic tick guard and are **partial ROI
+samples** (the simulation was force-stopped at 2e9 ticks), not completed
+runs — their abort-rate shapes are informative but their totals are not the
+workload's full transaction mix. Re-confirmed 2026-10-05 on a fresh
+v25.1.0.1 build: bank t2 hangs at any `n` (n=100 unfinished after 4 min,
+pristine runtime binary, no instrumentation), while t1 completes normally
+and small-state 2-thread HTM probes (`benchmarks/tsx/tsx_conflict_matrix_gem5`)
+complete because their working set is a single line. See
+`x86-tsx-real-validation.md` §2 for the full reproduction.

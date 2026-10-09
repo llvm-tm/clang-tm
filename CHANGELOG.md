@@ -2824,3 +2824,92 @@ gate again.
 - Verification: `test_tx` 114 PASS ×{TINYSTM, WBETL, WT}; `test_ds`
   207 PASS; `test_simple_vector` 3/3; stmbench wbctl 0/8; full
   post-merge gate green (see below).
+
+## Session 2026-10-02 — Book: isolation levels chapter, opacity crash demo, language survey
+
+- **Book (docs/book)**: added Chapter 7 "The Semantics of Transactions: Isolation
+  Levels and Their Cost" (`sections/ch07.tex`, label `chap:isolation`; short
+  header "The Semantics of Transactions"): dimension framework contrasting TM
+  with databases (crash-awareness free vs structural), RU/RC/RR/SI/SSI/S ladder
+  in Ch.5 history vocabulary, Berenson anomaly matrix with history witnesses,
+  p_abort cost derivation (WW-only vs 2r+w OCC scope; `tools/iso-cost.py`),
+  semantics<->mechanism bridge (MVCC, TinySTM WBCTL/WBETL/WT, early lock
+  release, Calvin/SGL static, GPU snapshot thresholds; `tab:sem-mech`), the
+  "cliff argument" (why sub-serializable levels are unsound in shared memory),
+  4 TikZ figures, BankSI worked example, 6 exercises. Renumbered old
+  Chapters 7-19 -> 8-20 (~100 cross refs). Ch.2 gained §Worked Example: A
+  Correct Program That Crashes Under a Non-Opaque TM (`sec:crash-without-opacity`)
+  with the recorded dual-backend demo output; Ch.3 gained the memory-model vs
+  isolation-level disambiguation; Ch.4 gained a Drop/abort paragraph plus
+  Haskell (`lst:haskell-stm`), Clojure (`lst:clojure-stm`), Scala/Python, and
+  negative-space (JS/PHP/Kotlin) subsections + exercises; Ch.5 §5.4 gained the
+  downward-ladder pointer; front matter gained SI/SSI/MVCC/2PL map rows, a
+  readers-from-databases preface note; Acronyms/Glossary gained ~15 entries;
+  app07 gained a Chapter 7 hint group and hints for all new exercises; app09
+  gained the eager_broken row. Bibliography +9 (berenson95critique, gray93tp,
+  adya99thesis, kleppmann17, peytonjones96concurrent, ghcstm, clojurestm,
+  scala-stm, pystm).
+- **Teaching backend**: `backends/tm_impl/eager_broken/` — intentionally broken
+  eager STM (raw publishes + undo + commit-time value validation), teaching
+  tier in `backends/README.md`, never in test sweeps.
+- **Demo**: `benchmarks/cpp/opaquedemo/nonopaque.cpp` + `BACKEND=EAGER_BROKEN`
+  and `bin/opaquedemo` / `run-opaquedemo` targets: deterministic phantom+SIGSEGV
+  under EAGER_BROKEN (exit 139), clean under NOREC (exit 0).
+- **Proofs**: `docs/proofs/EagerSTM.tla` (+crash cfg, NoCrash violated in 8
+  steps, mirrors the demo), `BankSI.tla` (+skew/serial cfgs), `check-teaching`
+  target asserting all three verdicts; teaching cfgs excluded from `make check`.
+- **Hygiene**: summaries updated/created (ch01 rewritten, ch02/ch03/ch04/ch05/
+  front, new ch07/app08/app09, README appendix count), `digest.txt` staleness
+  banner + Ch.7 entry (full regeneration tracked in TODO.md P2), fixed
+  `tools/extract_book_structure.py` to follow `\input`, fixed pre-existing
+  "model-check every backend in Part~III" -> Part~IV in Ch.2.
+- **Files changed**: docs/book/main.tex, sections/{ch02,ch03,ch04,ch05,ch07,app02,app03,app07,app09,front_map,front_preface}.tex, references.bib, summaries/*, tools/{extract_book_structure.py,iso-cost.py}, digest.txt; backends/tm_impl/eager_broken/*; benchmarks/cpp/{Makefile,opaquedemo/*}; docs/proofs/{EagerSTM*,BankSI*,Makefile}; TODO.md.
+- **Verification**: book builds clean (359 pp, 0 undefined refs/citations);
+  opaquedemo re-run both backends (outputs match the book); `make check-fast`
+  ALL PASSED; NOREC `test_tx` 114 PASS + `test_ds` 207 PASS;
+  `make -C docs/proofs check-teaching` all-green. `make -C docs/proofs check`
+  full sweep: DESEngine never terminated (unbounded bookkeeping counters —
+  fixed with saturation `Cap(n)` so the exhaustive check completes and passes);
+  `check` now prefers a `$b-smoke.cfg` when present and `DUDETM-smoke.cfg`
+  (Data={0}) added for the same reason; Calvin/DESEngine/DistributedSGL/
+  DUDETM + first GPU models green before stopping the sweep per instruction
+  (host had ~490GB of stale TLC `states/` checkpoints causing thrashing; all
+  cleaned). Remaining slow models tracked in TODO.md.
+
+## Session 2026-10-05 — gem5 X86_TSX vs real TSX hardware (intel14v2): validation + TSXSGL SGL-entry race fix
+
+Validated the gem5 x86 TSX simulation against real Broadwell-EP hardware
+(`intel14v2`, E5-2660 v4, `rtm` flag; gem5 v25.1.0.1 X86_TSX built fresh via
+`gem5_sim/setup.sh`). Full report: `gem5_sim/docs/x86-tsx-real-validation.md`.
+
+- **Conflict-detection toys**: rewrote the `tsx_conflict_matrix_gem5.c` stub
+  into a full gem5-SE mirror of the real probe (argv iters, SE-safe pinning);
+  added `benchmarks/tsx/tsx_isolate.c` + `tsx_sgl_ablation.c`. RR/RW/WR/WW
+  ran under gem5 SE (timing + o3) vs fresh intel14v2 ground truth (appended
+  to `benchmarks/tsx/ground_truth_intel14v2.txt`, 2 passes, matches Aug-29
+  baseline). Qualitative match (reader always aborts; writer commits; WW
+  rare, 1 collision seen under o3); gem5 free-run overlap rate ~20x lower
+  than HW (deterministic timing CPU — arrival-process gap, not semantics).
+  Spurious: real 0.0006%/tx vs gem5 0 (structural, SE has no interrupts).
+- **TSXSGL lost-update bug found by the first hardware fuzz of the backend**
+  (`fuzz_counter` 4t: 12/12 runs lost 2–28 increments on real HW; every gem5
+  run passed). Root cause: SGL-entry `sgl_owner=1` plain store not drained
+  before touching shared data (store-buffer visibility window vs in-flight
+  TSX commits). Ablation: pure-TSX PASS, pure-mutex PASS, interlock 8/8 LOST
+  at 4t/800k, entry-side `mfence` 8/8 PASS. Fixed in
+  `backends/tm_impl/tsx_sgl/TSXSGL_runtime.cpp`; documented
+  `docs/CORRECTNESS_FIXES.md` §19 + backend STATUS.md. Post-fix HW: fuzz
+  10/10 + 5/5, bank sustained 10/10, `test_tx`/`test_ds` (114/207) PASS.
+- **Instrumentation**: `TM_TSX_STATS=1` commit/abort/SGL mix counters in the
+  runtime (thread-local — shared atomics incremented inside a live TX inflate
+  abort rates ~2x, caught and fixed mid-session); `TM_TSX_INJECT_PCT` test
+  hook for deterministic mid-TX aborts (13/13 fuzz PASS under injection).
+  `run-bank-gem5.sh`: pass `TM_TSX_STATS=1`, fix `grep -q`+pipefail SIGPIPE
+  false failure in the objdump pre-check, objdump fallback.
+- **Bank head-to-head**: real HW TSXSGL t1 6.67M / t2 2.22M / t4 1.25M txn/s
+  (n=20000; sustained t4 2.5M), conflict-abort mix t2 64% t4 71%, all PASS;
+  gem5 t1 n=20000 0.87M sim-txn/s, mix matches (20000/20000/0). gem5 t2/t4
+  blocked by a pathological slowdown on the *current* build (see TODO);
+  September sweep (pre-regeneration 030 patch) numbers cited as reference.
+- gem5 setup: `setup.sh` failed on the placeholder README in `gem5_sim/gem5/`
+  (non-empty clone target) — worked around locally; candidate for a small fix.

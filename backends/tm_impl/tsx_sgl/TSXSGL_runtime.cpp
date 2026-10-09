@@ -54,6 +54,25 @@ thread_local uint64_t tsx_start_owner = 0;
 static std::mutex global_tx_lock;
 static std::atomic<uint64_t> sgl_owner{0};
 
+// Optional transaction-mix counters; printed at tm_exit() when TM_TSX_STATS=1.
+// Per-thread counters are mandatory: a shared atomic incremented inside the
+// transaction (e.g. right after _xbegin succeeds) makes the counter line a
+// conflict source and inflates the measured abort rate.
+namespace tsx_stats {
+struct PerThread {
+	uint64_t xbegin_attempts = 0;
+	uint64_t tsx_commits = 0;
+	uint64_t conflict_aborts = 0;
+	uint64_t other_aborts = 0;
+	uint64_t sgl_entries = 0;
+};
+static thread_local PerThread me;
+static PerThread total; // merged at tm_exit_thread, never touched inside a TX
+static thread_local uint64_t inject_ctr = 0; // test hook, see real_tm_begin
+} // namespace tsx_stats
+
+static int g_tsx_inject_pct = 0; // TM_TSX_INJECT_PCT (test hook)
+
 // Plugin-required thread-local state
 extern "C" {
 extern __thread int32_t tm_nested_call_counter;
@@ -75,8 +94,22 @@ TM_PLUGIN_LIFECYCLE_FN(do_tm_init, void tm_init())
 		abort();
 	}
 	tm_register_real_hooks(&g_tsxsgl_hooks);
+	if (const char *e = getenv("TM_TSX_INJECT_PCT"))
+		g_tsx_inject_pct = atoi(e);
 }
-TM_PLUGIN_LIFECYCLE_FN(do_tm_exit, void tm_exit()) {}
+TM_PLUGIN_LIFECYCLE_FN(do_tm_exit, void tm_exit())
+{
+	if (getenv("TM_TSX_STATS")) {
+		const auto &t = tsx_stats::total;
+		uint64_t attempts = t.tsx_commits + t.conflict_aborts + t.other_aborts;
+		fprintf(stderr,
+		        "TSX_STATS xbegin_attempts=%llu tsx_commits=%llu conflict_aborts=%llu "
+		        "other_aborts=%llu sgl_entries=%llu\n",
+		        (unsigned long long)attempts, (unsigned long long)t.tsx_commits,
+		        (unsigned long long)t.conflict_aborts, (unsigned long long)t.other_aborts,
+		        (unsigned long long)t.sgl_entries);
+	}
+}
 TM_PLUGIN_LIFECYCLE_FN(do_tm_init_thread, void tm_init_thread())
 {
 	tm_hook_init_thread();
@@ -86,6 +119,11 @@ TM_PLUGIN_LIFECYCLE_FN(do_tm_init_thread, void tm_init_thread())
 TM_PLUGIN_LIFECYCLE_FN(do_tm_exit_thread, void tm_exit_thread())
 {
 	tm_hook_exit_thread();
+	tsx_stats::total.xbegin_attempts += tsx_stats::me.xbegin_attempts;
+	tsx_stats::total.tsx_commits += tsx_stats::me.tsx_commits;
+	tsx_stats::total.conflict_aborts += tsx_stats::me.conflict_aborts;
+	tsx_stats::total.other_aborts += tsx_stats::me.other_aborts;
+	tsx_stats::total.sgl_entries += tsx_stats::me.sgl_entries;
 }
 
 static std::recursive_mutex g_serialize_mutex;
@@ -178,6 +216,12 @@ static void real_tm_begin()
 
 #if defined(__x86_64__) || defined(__i386__)
 	if (tm_rtm::available()) {
+		bool inject_now = false;
+		if (g_tsx_inject_pct > 0 &&
+		    ++tsx_stats::inject_ctr >= (uint64_t)(100 / g_tsx_inject_pct)) {
+			tsx_stats::inject_ctr = 0;
+			inject_now = true;
+		}
 		for (int attempts = 0; attempts < 5; attempts++) {
 			unsigned status = _xbegin();
 			if (status == _XBEGIN_STARTED) {
@@ -187,8 +231,20 @@ static void real_tm_begin()
 				}
 				tsx_start_owner = v;
 				in_tsx = true;
+				// Test hook: deterministic spurious mid-TX abort
+				// (TM_TSX_INJECT_PCT=1..100; ~one abort every 100/pct
+				// transactions).  Decided BEFORE xbegin because any memory
+				// write made inside the transaction rolls back with it —
+				// including a would-be injection counter.
+				if (inject_now) {
+					_xabort(OWNER_CHANGED);
+				}
 				return;
 			}
+			if ((status & _XABORT_EXPLICIT) == 0 && (status & _XABORT_CONFLICT))
+				tsx_stats::me.conflict_aborts++;
+			else
+				tsx_stats::me.other_aborts++;
 
 			if ((status & _XABORT_EXPLICIT) && _XABORT_CODE(status) == LOCK_BUSY) {
 				while (sgl_owner.load(std::memory_order_relaxed) != 0)
@@ -202,7 +258,18 @@ static void real_tm_begin()
 	(void)in_tsx;
 #endif
 	global_tx_lock.lock();
+	tsx_stats::me.sgl_entries++;
 	sgl_owner.store(1, std::memory_order_release);
+#if defined(__x86_64__) || defined(__i386__)
+	// Drain the lock-word store *before* touching any shared data.  Without
+	// this fence the sgl_owner=1 store can sit in this core's store buffer
+	// while we read/write transaction data; a concurrent TSX transaction
+	// that read sgl_owner==0 earlier commits cleanly, and our (stale-based)
+	// data stores land after its commit -> lost updates.  Measured on real
+	// Broadwell-EP: 4 threads, 800k RMW counter fuzz -> 8/8 LOST before,
+	// 8/8 PASS with this acquire-drain fence.
+	_mm_mfence();
+#endif
 	in_tsx = false;
 }
 
@@ -218,6 +285,7 @@ static void real_tm_end()
 			_xabort(OWNER_CHANGED);
 		}
 		_xend();
+		tsx_stats::me.tsx_commits++;
 #endif
 		return;
 	}

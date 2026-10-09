@@ -89,6 +89,11 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   guard to ≥2-thread runs (`--mt-ticks`, default 2e9) so the sweep terminates
   with `status="tick-capped"` instead of hanging. A real fix means porting the
   HTM logic to a livelock-free `MESI_Two_Level` hierarchy — **still open**.
+- **Note (2026-10-05)**: reconfirmed on a fresh v25.1.0.1 X86_TSX build with
+  the pristine TSXSGL runtime (bank t2 n=100 hangs; t1 n=20000 completes;
+  2-line conflict probes complete). The §4 t=2/t=4 rows of
+  `x86-tsx-validation.md` are tick-capped partial samples — see
+  `gem5_sim/docs/x86-tsx-real-validation.md` §2.
 
 ### gem5 POWER8 HTM implementation (8-patch plan, in progress)
 - **Plan**: `gem5_sim/docs/power8-htm-patches.md`
@@ -227,6 +232,21 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   and on `stm.h` / `wrappers.h` / `mod_mem.h` that are not in this repo).
 
 ---
+
+### Regenerate docs/book/digest.txt against the post-Ch.7 structure (P2)
+- **Status 2026-10**: digest carries a staleness banner and a new Ch.7 entry
+  plus corrected front-matter bullets, but its per-chapter entries still use
+  old part/chapter numbers. Regenerate from `docs/book/summaries/` +
+  `tools/extract_book_structure.py` when the book is touched again.
+
+### docs/proofs full `make check` sweep is slow on heavy models (P2)
+- **Status 2026-10-04**: sweep stopped early by request. DESEngine (fixed:
+  saturating counters) and DUDETM (smoke cfg) now terminate quickly.
+  GPU_JVSTM and possibly other GPU_*/heavy models still need
+  `*-smoke.cfg` bounded configs (smaller Addr/Data/thread sets) added to
+  make the full sweep finish in minutes; the mechanism is in place (check
+  prefers `$b-smoke.cfg`). Also clean `docs/proofs/states/` between big
+  runs (~half a TB of checkpoints observed).
 
 ## Completed
 

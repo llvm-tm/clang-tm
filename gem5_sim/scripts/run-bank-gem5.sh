@@ -48,7 +48,8 @@ file "$BIN" | grep -q "ELF 64-bit.*x86-64.*static" || {
 
 # --- 1b. HTM fast-path pre-check (TSXSGL/SPHT built with -mrtm) --------
 if [[ "$BACKEND" == "TSXSGL" || "$BACKEND" == "tsxsgl" || "$BACKEND" == "SPHT" || "$BACKEND" == "spht" ]]; then
-    if ! llvm-objdump -d "$BIN" 2>/dev/null | grep -q "xbegin"; then
+    OBJD=$(command -v llvm-objdump || command -v llvm-objdump-22 || command -v objdump || true)
+    if [ -z "$OBJD" ] || ! "$OBJD" -d "$BIN" 2>/dev/null | grep "xbegin" >/dev/null; then
         echo "ERROR: $BIN lacks xbegin/xend (built without -mrtm) — rebuild with BACKEND=$BACKEND GEM5=1"
         exit 1
     fi
@@ -59,6 +60,7 @@ ENVS=()
 # Make HTM probe visible even under GEM5_M5OPS (tm_rtm.hpp: TM_RTM_DEBUG)
 if [[ "$BACKEND" == "TSXSGL" || "$BACKEND" == "tsxsgl" || "$BACKEND" == "SPHT" || "$BACKEND" == "spht" ]]; then
     ENVS+=(--env "TM_RTM_DEBUG=1")
+    ENVS+=(--env "TM_TSX_STATS=1")
 fi
 if [ "$TRACE" = "1" ]; then
     # SE mode forwards guest file I/O to the host FS: the trace lands in $OUT.

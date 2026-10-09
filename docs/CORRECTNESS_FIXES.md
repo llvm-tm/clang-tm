@@ -576,6 +576,39 @@ STMBench7 wbctl 0/8 clean.  wbetl/wt `-w 3` remain crash-prone —
 residual TB-lock data races tracked in TODO (previously masked by the
 cycling bug never executing real frees).
 
+## 19. TSXSGL SGL-entry store-buffer race: lost updates on real TSX (2026-10-05) ✅
+
+**Symptom.** On real TSX hardware (intel14v2, E5-2660 v4), `fuzz_counter
+BACKEND=TSXSGL` 4 threads lost 2–28 increments in **12/12** runs (2 threads:
+2/3), and `bank -t 4 -d 1000` intermittently printed `FAIL: Money destroyed`.
+All bounded gem5 runs of the same binary passed — the Ruby HTM model has no
+store-buffer visibility window, so it cannot expose this class of race.
+
+**Root cause.** `real_tm_begin()`'s SGL fallback stored `sgl_owner=1` with a
+plain store and then immediately touched transaction data. The store can sit
+in the core's store buffer while its loads/stores on shared data execute; a
+concurrent TSX transaction that had loaded `sgl_owner==0` earlier is never
+invalidated in time, commits, and the SGL core's stale-based stores land
+afterwards → lost update. The `sgl_owner=0` store was equally unprotected,
+but the mutex serializes SGL↔SGL, so only the *entry* fence matters.
+
+**Fix.** `_mm_mfence()` after `sgl_owner.store(1, release)` and before the
+body runs (`backends/tm_impl/tsx_sgl/TSXSGL_runtime.cpp`): drains the lock
+word globally visible before touching data, which invalidates any
+in-flight TSX transaction that read `sgl_owner==0` and forces it to abort
+at commit.
+
+**Isolation evidence** (`benchmarks/tsx/abl*.c` ablations, intel14v2):
+pure-TSX 3/3 PASS, pure-mutex 3/3 PASS, full interlock 8/8 LOST (4 threads,
+800k RMW), mfence-after-entry 8/8 PASS, mfence-after-clear 8/8 LOST.
+
+**Verification.** After the fix: `fuzz_counter` 4×10k 10/10 PASS, 2×50k
+5/5 PASS; `bank -t 4 -d 1000` 10/10 PASS; `bank` bounded t{1,2,4} PASS;
+`test_tx` (114) + `test_ds` (207) PASS. Instrumentation (`TM_TSX_STATS=1`
+env, per-thread counters merged at `tm_exit_thread`) added alongside —
+counters must stay thread-local: an atomic incremented inside the live
+transaction makes the counter line itself a conflict source.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |

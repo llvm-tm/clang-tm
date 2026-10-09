@@ -45,3 +45,21 @@ spurious abort rate = 0.000600%
 # - WW shows ~0.1% aborts for a 1-access TX because the overlap window is
 #   tiny; a 4-access bank transfer shows ~40-60% aborts (see tsx_contention
 #   runs in the same session).
+
+# intel14v2 E5-2660 v4 Broadwell-EP 2026-10-05 (re-verification run)
+# gcc 12.2 -O2 -mrtm -pthread, pinned 1/13 — matches 2026-08-29 baseline
+
+## Conflict matrix (200k iters, short TX, free-running, pinned 1/13)
+
+mode=RR: T1 R 199998/2 (0.0%, 1 conf)  T2 R 199993/7 (0.0%, 1 conf)
+mode=RW: T1 R  68303/131697 (65.8%, 131688 conf)  T2 W 199132/868 (0.4%, 855 conf)
+mode=WR: T1 W 198841/1159 (0.6%, 1150 conf)  T2 R 113002/86998 (43.5%, 86994 conf)
+mode=WW: T1 W 199956/44 (0.0%, 18 conf)  T2 W 199941/59 (0.0%, 41 conf)
+(second matrix pass, same day)
+mode=RR: T1 199997/3  T2 199986/14
+mode=RW: T1 R 61821/138179 (69.1%)  T2 W 199280/720 (0.4%)
+mode=WR: T1 W 199884/116 (0.1%)  T2 R 99770/100230 (50.1%)
+mode=WW: T1 W 199569/431 (0.2%)  T2 W 177551/22449 (11.2%)  <- rare asymmetric collision
+
+## Spurious (1M iters, single thread)
+0 thrash: 999994/6 (0.000600%)   4 thrash: 999994/6 (0.000600%)
