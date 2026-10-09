@@ -20,7 +20,12 @@ carries semantics and which part is mere engineering is the difference between
 tuning a backend and breaking one. Third, when TM meets storage
 (Chapter~19), the two worlds collide on exactly this ground: TiKV and
 Percolator speak snapshot isolation, Calvin speaks static transactions, and
-the reader needs one vocabulary to place them all.
+the reader needs one vocabulary to place them all. Fourth, the chapter ends
+where the map turns back on itself: the cliff argument shows what weak
+levels \emph{cannot} be as runtime guarantees
+(\S\ref{sec:iso-not-in-tm}), and its converse --- what coordination-free
+commits \emph{can} be once the application owns its invariants --- is laid
+out and priced in \S\ref{sec:iso-beyond-cliff}.
 
 This chapter uses the history vocabulary of \S\ref{sec:histories-legality-opacity}
 throughout: histories, committed projections, read-from sources, real-time
@@ -157,29 +162,34 @@ pointer.}
 \index{isolation level!repeatable read}\index{isolation level!snapshot isolation}
 \index{serializable snapshot isolation}
 
-Restated in history vocabulary, the classic ladder has six rungs. Read each
-bullet as a constraint on the \emph{read-from} source of \S\ref{sec:histories-legality-opacity}:
+Restated in history vocabulary (p.~\pageref{cha:notation}), the classic
+ladder has six rungs. Read each bullet as a constraint on the
+\emph{read-from} source of \S\ref{sec:histories-legality-opacity}:
 which write a read event may legitimately draw its value from.
 
 \begin{itemize}
-\item \textbf{Read uncommitted (RU).} A read may take its value from an
-uncommitted write. Dirty reads are legal; so, trivially, is almost everything
+\item \textbf{Read uncommitted (RU),} $\mathsf{RU}(h)$: a read may take its
+value from an uncommitted write:
+$r_T(x)\!\to\!v$ with $v$ from $w_{T'}(x)$, $T'$ undecided. Dirty reads are legal; so, trivially, is almost everything
 else. No mainstream shared-memory language offers an analogue, and
 \S\ref{sec:iso-not-in-tm} explains why the analogue would be a segfault menu.
 
-\item \textbf{Read committed (RC).} Every read takes its value from a
-committed write --- but different reads within one transaction may take
-different snapshots. \emph{Non-repeatable reads} are legal: $r_T(x){=}1$ and
+\item \textbf{Read committed (RC),} $\mathsf{RC}(h)$: every read takes its
+value from a committed write --- but different reads within one transaction
+may take different snapshots: $\forall r_T(x)\!\to\!v\in h:\ v$ from a
+committed $w$, $<_\mathrm{RT}$-free. \emph{Non-repeatable reads} are legal: $r_T(x){=}1$ and
 a later $r_T(x){=}2$ after some $T'$ committed in between. This is the default
 in most production databases, which is itself a fact worth arguing about
 (\S\ref{sec:iso-cost}).
 
-\item \textbf{Repeatable read (RR).} All reads within a transaction see one
-consistent snapshot, so re-reads do not change; but new objects may appear
+\item \textbf{Repeatable read (RR),} $\mathsf{RR}(h)$: all reads within a
+transaction see one consistent snapshot: two reads of one location never
+disagree, but new objects may appear
 between two reads of a \emph{predicate} --- the \emph{phantom} anomaly.
 Row-level implementations pin the rows they touched, not the range.
 
-\item \textbf{Snapshot isolation (SI).} Each transaction reads from a single
+\item \textbf{Snapshot isolation (SI),} $\mathsf{SI}(h)$: each transaction
+reads from a single
 logical snapshot (an instant in the committed history), and a write commits
 only if no concurrent transaction wrote the same object (\emph{first
 committer wins}, a WW test). Phantoms are structurally impossible: the
@@ -189,15 +199,17 @@ committed projection admits a serialization \emph{whose legality is checked
 only against snapshot reads and WW conflicts} --- the weak validation that
 makes it fast.
 
-\item \textbf{Serializable snapshot isolation (SSI).} SI plus a runtime check
+\item \textbf{Serializable snapshot isolation (SSI),} $\mathsf{SSI}(h)$:
+$\mathsf{SI}$ plus a runtime check
 that rejects the anti-dependency cycles responsible for write skew and its
 relatives. It is ``SI with a proof obligation attached'': reads remain
 snapshot-cheap, and the price moves to cycle bookkeeping at commit
 (\cite{kleppmann17}; the mechanism is described in
 \S\ref{sec:iso-cost} and checked in \S\ref{sec:iso-worked-example}).
 
-\item \textbf{Serializability (S),} and above it \textbf{strict
-serializability.} The rungs of Chapter~5. Every anomaly in the Berenson
+\item \textbf{Serializability (S),} $\mathsf{SER}(h)$, and above it
+\textbf{strict serializability,} $\mathsf{SSR}(h)$. The rungs of
+Chapter~5. Every anomaly in the Berenson
 matrix disappears, and with it the need for the application to reason about
 other transactions at all.
 \end{itemize}
@@ -246,9 +258,14 @@ and a witness, next section.
 \index{phantom anomaly}\index{write skew}
 
 Table~\ref{tab:anomaly-matrix} is the Berenson matrix \cite{berenson95critique}
-with two columns ANSI lacked. A check means the anomaly \emph{can occur} at
-that level; a dash means the level prevents it. Each cell is witnessed by a
-two-transaction history in the notation of \S\ref{sec:histories-legality-opacity};
+with two columns ANSI lacked. Each anomaly is a named class of histories
+($\mathsf{Dirty}$, $\mathsf{NonRepeat}$, $\mathsf{Phantom}$,
+$\mathsf{LostUp}$, $\mathsf{Wskew}$), and the table asserts, for each
+checkmark, $\exists h: L(h) \wedge A(h)$ --- \emph{level $L$ admits
+anomaly $A$} (p.~\pageref{cha:notation}). A check means the anomaly
+\emph{can occur} at that level; a dash means the level prevents it. Each
+cell is witnessed by a two-transaction history in the notation of
+\S\ref{sec:histories-legality-opacity};
 the write-skew witness is the one
 \S\ref{sec:iso-worked-example} model-checks.
 
@@ -277,21 +294,21 @@ The witnesses, compactly, over accounts \texttt{x=y=100} with the invariant
 \texttt{x+y $\geq$ 200}:
 
 \begin{itemize}
-\item \emph{Dirty read.} $w_{T_1}(x){\leftarrow}0$; $r_{T_2}(x){\to}0$;
+\item \emph{Dirty read} ($\mathsf{Dirty}$): $w_{T_1}(x){\leftarrow}0$; $r_{T_2}(x){\to}0$;
 $\mathrm{abort}(T_1)$. $T_2$ acted on money that never existed. Only RU
 permits it; this is the row that RU exists to label.
 
-\item \emph{Lost update.} $r_{T_1}(x){\to}0$; $r_{T_2}(x){\to}0$;
+\item \emph{Lost update} ($\mathsf{LostUp}$): $r_{T_1}(x){\to}0$; $r_{T_2}(x){\to}0$;
 $w_{T_1}(x){\leftarrow}1$; $w_{T_2}(x){\leftarrow}1$. Both increments, one
 result. RC permits it because its reads are only committed, not stable;
 everything from RR on detects the WW conflict.
 
-\item \emph{Phantom.} $r_{T_1}(\texttt{SUM over }[1..9]){\to}9$; $T_2$
+\item \emph{Phantom} ($\mathsf{Phantom}$): $r_{T_1}(\texttt{SUM over }[1..9]){\to}9$; $T_2$
 inserts row 10 and commits; $r_{T_1}(\texttt{SUM}){\to}10$. Row-stable
 levels cannot stop it because $T_1$'s second read touched a \emph{predicate},
 not a row; snapshot levels kill it structurally.
 
-\item \emph{Write skew.} Two doctors on call; invariant: at least one stays.
+\item \emph{Write skew} ($\mathsf{Wskew}$): two doctors on call; invariant: at least one stays.
 $T_1$: reads \texttt{mine=off, other=on}, decides both may rest, writes
 \texttt{mine=rest}. $T_2$ mirror-image. Each reads before the other's write;
 neither write touches the object the other read; both pass WW validation.
@@ -564,6 +581,140 @@ and the reason is one sentence the reader should be able to quote in an exam:
 to clients; a TM's correctness conditions are guarantees about the state its
 peers can act on --- and only the top rung bounds the second.}
 
+\section{Beyond the Cliff: When the Application Owns the Invariant}
+\label{sec:iso-beyond-cliff}
+\index{invariant confluence}\index{eventual consistency}
+\index{compensating transaction}\index{SEC (stable eventual consistency)}
+\index{CRDT!operation-set}
+
+The cliff argument is a theorem about \emph{runtime promises}: weak isolation
+cannot be a sound guarantee that one thread makes to another inside a shared
+address space. It is not, however, the end of the descent --- and a backend
+author who reads it as ``coordination is always mandatory'' has taken the
+strongest conclusion the argument supports and called it the only one. There
+is land below the cliff, and production systems live on it daily. What the
+cliff says is exactly this: \emph{the runtime gets to stop enforcing the
+invariant only if somebody else --- the application --- has picked it up.}
+This section walks that concession through to its endpoint, a bank where
+commits take zero coordination, and prices both sides.
+
+\subsection*{The theorem that decides whether you can}
+
+Bailis and colleagues' \emph{invariant confluence}
+\cite{bailis14confluence} decides, from the invariant alone, whether
+coordination-free maintenance is possible. Let $\mathcal{I}$ be the set of
+legal states of the application. An operation set is maintainable without
+coordination iff $\mathcal{I}$ is \emph{confluent}: for any two legal states
+$s_1, s_2 \in \mathcal{I}$ reachable independently, there is a state
+reachable from both that is still in $\mathcal{I}$. The bank invariant
+``no account negative'' is \emph{not} confluent --- two replicas may each
+legitimately debit a shared balance to its last unit along independent
+histories, and every join of the two branches breaks the invariant --- so
+coordination-free implementations face a dilemma with exactly two branches:
+reject or delay one debit (that \emph{is} coordination, wearing a different
+hat) or \emph{accept both and repair afterwards}. The second branch is this
+book's eventual-consistency bank, and its repair mechanism is as old as
+transaction processing itself: the compensating transaction
+\cite{garciamolina87sagas} --- undo by doing the opposite, never by
+rolling back.
+
+\subsection*{The machine: folds over grow-only op-sets}
+
+The design is the SEC framework \cite{burgader17sec} from
+p.~\pageref{cha:notation} put to work. Each commit is a record
+$\{\mathit{id}, \mathit{src}, \mathit{dst}, \mathit{amt}\}$ appended
+\emph{locally} to an operation set $A_r$ --- a CRDT: grow-only,
+idempotent, commutative --- and broadcast asynchronously, with reordering,
+duplicates, and delays. There is no validation, no version, no lock:
+\emph{commit is an append}. Balances are not stored; they are computed,
+$\mathrm{view}_r = \mathsf{fold}(A_r)$, a fold over the ops replica $r$ has
+applied. Convergence and stability come for free with the CRDT
+($A_r = A_s \Rightarrow$ equal views --- \textsf{SEC}); what does not come
+free is safety, because the fold may evaluate to a negative balance on the
+way to convergence. The repair rule is a function of the applied set:
+whenever $x < 0$ in $\mathrm{view}_r$, broadcast the \emph{compensation}
+(the same op with negated amount) of the still-uncompensated debit with
+maximal id. Determinism does the rest: every replica that detects the
+violation emits the identical compensation, the compensations merge
+idempotently, and converged views satisfy the invariant. A compensation is
+delivered only after its parent op (causal delivery, lite), which the model
+checks as \texttt{CausalPending}.
+
+The companion artifact \rep{research/ec-bank/} runs this end to end (a
+three-replica PoC with injected reordering and duplicates,
+\texttt{ec\_bank\_poc.py}) and proves the finite case
+(\texttt{docs/proofs/ECBank.tla}; \texttt{make -C docs/proofs
+check-ECBank}): TLC exhaustively verifies \texttt{TypeOK},
+\texttt{MoneyConserved}, \texttt{SEC}, \texttt{QuiescentSafe} --- in
+symbols, $\mathit{in\text{-}flight} = \emptyset \Rightarrow
+\forall r: \mathsf{Inv}(\mathrm{view}_r)$ --- and \texttt{CausalPending}.
+The transient violations are visible in the trace; the converged state is
+clean. That is the trade, stated once and honestly.
+
+\subsection*{What the free lunch costs}
+
+Table~\ref{tab:ec-vs-stm} prices the two designs against each other with
+the book's own hardware numbers. The strict column is TSXSGL (Chapter~9)
+running the bank benchmark on real hardware: a single hot thread commits
+6.67\,M transactions per second; at four threads the same machine delivers
+1.25\,M, with conflict aborts at 64\,$\%$ (2 threads) to 71\,$\%$ (4
+threads) of the commit mix --- the retry multiplier of
+\S\ref{sec:iso-cost}, $E = 1/(1-p)$, paid at 2.8--3.4 attempts per
+committed transaction even by the fastest serializable design in the repo.
+The EC column appends: its commit cost does not depend on contention at
+all, because there is nothing to validate against.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{M{0.30\linewidth}M{0.31\linewidth}M{0.31\linewidth}}
+\hline
+ & \textbf{strict/opaque STM} (this book's default) & \textbf{EC bank with compensation} (\texttt{research/ec-bank/}) \\
+\hline
+commit-time work & validation over $2r{+}w$ object-chances per contender; publish or undo & append to local op-set; broadcast; nothing to check \\
+throughput under contention & TSXSGL HW bank: 6.67\,M txn/s (1 thread) $\to$ 1.25\,M (4), conflict aborts 64--71\,$\%$ & flat in $C$: an append does not conflict \\
+work per committed txn & $E = 1/(1-p_{\mathrm{abort}}) \approx 2.8$--$3.4$ at those mixes & $1$, plus repair traffic after violations \\
+observable states & only committed serial-legal states & transient invariant violations (negative balances) are visible \\
+invariant enforcement & at commit time, by the runtime & after the fact, by the application's repair rule \\
+external side effects & safe: act after commit & compensation cannot un-send them; effects must be deferrable or compensable \\
+convergence & trivial (one state) & needs CRDT folds + a deterministic culprit rule + causal delivery \\
+where the cost is paid & synchronization at commit & application logic, repair latency, observability of bad states \\
+\hline
+\end{tabular}
+\caption{Two ways to pay for the same invariant. The strict column is the
+TSXSGL bank measurement of Ch.~9 on real hardware; the EC column is
+\texttt{research/ec-bank/} verified by TLC (\texttt{ECBank.tla}).}
+\label{tab:ec-vs-stm}
+\end{table}
+
+Four conditions must hold before an application may live beyond the cliff,
+and the reader should be able to test each against their own workload.
+\textbf{(i)} The invariant must be repairable by application-visible
+operations --- ``balance never negative'' is, by compensating debits;
+``no dangling pointer'' is not, which is exactly the \S\ref{sec:iso-not-in-tm}
+observation reframed: shared-memory invariants are not the kind the
+application can compensate, which is why the runtime must not relax.
+\textbf{(ii)} Side effects must be defeasible or compensable --- a sent
+message is neither.
+\textbf{(iii)} Transient violations must be acceptable to \emph{users}:
+the bank shows a negative balance to whoever looks mid-repair.
+\textbf{(iv)} Convergence must be engineered: a deterministic repair rule
+over a converging op-set, with causal delivery where repairs reference
+their causes. Where those hold, opacity was too strident for the job;
+where they fail, the cliff is real and the top rung is the only floor.
+
+This is not a route back into the ladder for the backends of Part~IV: they
+guarantee memory safety for code that cannot repair it, and they should
+keep paying full price at commit. The point is the axis, not the retreat:
+isolation strength and coordination cost are one curve, the book has now
+drawn it end to end, and the reader --- not the runtime --- chooses where
+on it their invariant lives. The gallery of what is admitted along the way
+is executable: \texttt{make -C benchmarks/cpp run-sidemo} runs the anomaly
+tour of Table~\ref{tab:anomaly-matrix} on this very bank, and
+\texttt{make -C docs/proofs check-teaching} replays each witness under
+TLC.
+
+
 \section{Worked Example: Write Skew, Checked}
 \label{sec:iso-worked-example}
 \index{write skew!model check of}\index{snapshot isolation!model check of}
@@ -615,6 +766,14 @@ shows the hole closed.
 The point of re-running this here is the correspondence, three ways: the
 history notation of Chapter~5, the anomaly row of Table~\ref{tab:anomaly-matrix},
 and the TLC verdict all say the same sentence about the same six events.
+The scenario also runs as executable C++ --- same shape, smaller constants
+($A = B = 12$, two transfers of 8, guard ``combined $\geq 16$ after your
+draw'', cfg \texttt{BankSI-demo-skew}) --- with dirty read, non-repeatable
+read, lost update, and fan-out attached, in
+\rep{benchmarks/cpp/sidemo/bank\_si.cpp}
+(\texttt{make -C benchmarks/cpp run-sidemo}), and its weak-anomaly TLA+
+mirror is \rep{docs/proofs/BankWeak.tla}, both wired into
+\texttt{make -C docs/proofs check-teaching}.
 Exercises extend the model: widen \texttt{DRAW} until SI's two-phase
 validation also rejects (find the boundary), and add the SSI cycle rule as a
 third configuration --- reject a commit whose anti-dependency edges close a
@@ -636,8 +795,17 @@ serializability is one of those holes; in shared memory the holes are
 crash-awareness failures, so the only sound rung is the top, and the sound
 TM design is the one that borrows weak-level \emph{machinery} --- MVCC, early
 lock release, snapshot batching, static scheduling --- while keeping the
-strong \emph{promise}. The mechanisms are in Part~IV; the promises were here.
-
+strong \emph{promise}. The mechanisms are in Part~IV; the promises were
+here. And past the last rung lies one more trade: an application that owns
+its invariant can drop commit-time coordination entirely and repair
+violations by compensating operations --- a trade forced by invariant
+confluence \cite{bailis14confluence}: a non-confluent invariant such as
+``balance never negative'' is paid for at commit or paid for in repairs,
+never for free. The EC bank pays in repairs, observes transient violations
+on the way, and is priced against the strict design in
+Table~\ref{tab:ec-vs-stm} and \S\ref{sec:iso-beyond-cliff}. That trade is
+the one place in the book where weaker beats stronger; it is also the one
+place where the runtime stops being the one that is wrong.
 \section{Exercises}
 
 \begin{enumerate}
@@ -676,6 +844,23 @@ which approximation term does the divergence blame?
 why the ANSI definition of REPEATABLE READ fails to prevent the phantom
 anomaly \emph{for cursor-based reads}, and identify the one assumption about
 cursors that, removed, makes RR and SI equivalent on point queries.
+
+\item \emph{[implementation]} Run \texttt{make -C benchmarks/cpp run-sidemo}
+and read its runtime (\texttt{minitm}, about 120 lines). Add an EC level
+to \texttt{minitm}: \texttt{commit()} appends the write-set to a log that
+is never validated, reads return folds over the log, and every transaction
+always succeeds. Which verdict lines change? Show that
+$\mathsf{LostUp}$ becomes unobservable not because EC prevents it but
+because EC has no atomic read-modify-write to lose --- then explain, in the
+vocabulary of Table~\ref{tab:ec-vs-stm}, where the lost work goes instead.
+
+\item \emph{[open]} ``Balance never negative'' is not invariant-confluent,
+so the EC bank pays it in repairs. Find an application whose invariant
+\emph{is} confluent --- an inventory system with ``never oversold'' is a
+classic candidate --- and argue carefully why coordination-free maintenance
+works there and why the same argument must fail for money. Your argument
+should say what the join of two independently legal states is, and why it
+remains legal.
 \end{enumerate}
 
 \textbf{How to check your work.} Exercise 1 is graded against

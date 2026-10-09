@@ -21,11 +21,16 @@ Terms are defined in the chapter or section named in \emph{see}. Entries marked
     \item[CCT] \index{CCT} Concurrently-Committing-Transaction checking; GUST's
           validation of a commit against still-in-flight transactions
           (\S\ref{sec:gust}).
+    \item[compensating transaction] \index{compensating transaction} A new op
+          that undoes a committed one by doing the opposite (never by rolling
+          back); the repair unit of the eventual-consistency bank
+          (\S\ref{sec:iso-beyond-cliff}), from sagas \cite{garciamolina87sagas}.
     \item[deadlock] \index{deadlock} A state in which every participant waits
           on another and no progress is possible (Part~I).
     \item[dirty read] \index{dirty read} A read taking its value from an uncommitted (possibly aborted) write; the anomaly that labels RU and nothing above it (Table~\ref{tab:anomaly-matrix}).
     \item[divergence] \index{divergence} In SIMT execution, lanes of a warp
           taking different control paths (\S\ref{sec:ballot}).
+    \item[eventual consistency (SEC)] \index{eventual consistency}\index{SEC (stable eventual consistency)} Replica model where state is a grow-only op-set and views are folds over it; equal histories give equal views ($\mathsf{EC}$, \textsf{SEC}: p.~\pageref{cha:notation}, \S\ref{sec:iso-beyond-cliff}).
     \item[fallback] \index{fallback} The software path a best-effort HTM takes
           when hardware speculation aborts (\S\ref{sec:rtm-example}).
     \item[global clock] \index{global clock} A monotonically increasing
@@ -33,6 +38,11 @@ Terms are defined in the chapter or section named in \emph{see}. Entries marked
           (\S\ref{sec:norec-example}).
     \item[GTS] \index{GTS} Global Timestamp in GUST; counts finalized commit-log
           slots (\S\ref{sec:gust}).
+    \item[invariant confluence] \index{invariant confluence} Property of a set
+          of legal states --- any two independently reachable legal states
+          have a legal join; decides whether an invariant can be maintained
+          without coordination \cite{bailis14confluence}
+          (\S\ref{sec:iso-beyond-cliff}).
     \item[intra-warp conflict] \index{intra-warp conflict} A conflict between
           lanes of the same warp, resolved by predicate voting
           (\S\ref{sec:ballot-example}).
