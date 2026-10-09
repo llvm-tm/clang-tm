@@ -66,7 +66,10 @@ static int64_t INITIAL_BALANCE = 1000;
 
 static Config g_cfg; // read by Replica::init for the append-stability reserve
 
-struct Replica {
+// alignas(64): replicas live in one std::vector; without padding the
+// published/counters cachelines of adjacent replicas false-share, which
+// inflates the very inter-thread traffic this bench reports.
+struct alignas(64) Replica {
 	std::vector<Op> log;                // own ops (thread-private)
 	std::atomic<uint64_t> published{0}; // how many of log[] peers may read
 	std::vector<Op> applied;            // merged op-set (deduped by id)
@@ -79,6 +82,9 @@ struct Replica {
 	uint64_t seq = 0;                        // own id counter
 	std::atomic<uint64_t> n_commits{0}, n_compensations{0};
 	std::atomic<uint64_t> fold_ops{0}; // op-records applied to the fold
+	// inter-thread comm profile: op-records READ from peer logs (counts
+	// duplicates re-delivered by gossip), gossip rounds, publish stores.
+	std::atomic<uint64_t> scanned{0}, rounds{0}, pub_stores{0};
 	void init(int accounts)
 	{
 		// Append-stability contract: peers read log[] up to `published`
@@ -117,6 +123,7 @@ static bool merge_round(Replica &r, std::vector<Replica *> &all)
 		Replica &pr = *all[p];
 		uint64_t n = pr.published.load(std::memory_order_acquire);
 		uint64_t &cur = r.cursor[p];
+		r.scanned.fetch_add(n - cur, std::memory_order_relaxed);
 		for (; cur < n; ++cur) {
 			Op o = pr.log[cur];
 			if (r.applied_ids.insert(o.id).second) {
@@ -127,6 +134,7 @@ static bool merge_round(Replica &r, std::vector<Replica *> &all)
 			}
 		}
 	}
+	r.rounds.fetch_add(1, std::memory_order_relaxed);
 	return grew;
 }
 
@@ -154,6 +162,7 @@ static bool repair_pass(Replica &r, int rid)
 			     -culprit->amt}; // deterministic: id from parent
 			r.log.push_back(c);  // broadcast: a compensation is a new op
 			r.published.store(r.log.size(), std::memory_order_release);
+			r.pub_stores.fetch_add(1, std::memory_order_relaxed);
 			r.n_compensations.fetch_add(1, std::memory_order_relaxed);
 			if (r.applied_ids.insert(c.id).second) {
 				r.applied.push_back(c);
@@ -183,6 +192,7 @@ static void worker(Replica *r, int rid, std::vector<Replica *> *all)
 		Op o{r->next_id(rid), 0 /*parent*/, (uint32_t)src, (uint32_t)dst, 1};
 		r->log.push_back(o); // THE COMMIT: append, zero coordination
 		r->published.store(r->log.size(), std::memory_order_release);
+		r->pub_stores.fetch_add(1, std::memory_order_relaxed);
 		r->n_commits.fetch_add(1, std::memory_order_relaxed);
 		if (g_cfg.full && (r->seq % g_cfg.merge_period) == 0) {
 			merge_round(*r, *all);
@@ -250,11 +260,15 @@ int main(int argc, char **argv)
 
 	double secs = std::chrono::duration<double>(t1 - t0).count();
 	uint64_t commits = 0, comps = 0, folds = 0, applied = 0;
+	uint64_t scanned = 0, rounds = 0, pub_stores = 0;
 	for (auto &r : reps) {
 		commits += r.n_commits.load();
 		comps += r.n_compensations.load();
 		folds += r.fold_ops.load();
 		applied += r.applied.size();
+		scanned += r.scanned.load();
+		rounds += r.rounds.load();
+		pub_stores += r.pub_stores.load();
 	}
 	printf("EC bank: threads=%d accounts=%d ops=%llu mode=%s merge_period=%d "
 	       "init_balance=%d\n",
@@ -274,6 +288,18 @@ int main(int argc, char **argv)
 		       (unsigned long long)comps,
 		       (unsigned long long)folds,
 		       (double)applied / c.threads);
+	if (c.full)
+		printf("  comm: %llu log records read incl self (%.2f/commit, %.0f "
+		       "B/commit), "
+		       "%llu gossip rounds, %llu publish stores, %.2f/commit, "
+		       "merge dedup %.0f%%\n",
+		       (unsigned long long)scanned,
+		       (double)scanned / commits,
+		       (double)(scanned * sizeof(Op)) / commits,
+		       (unsigned long long)rounds,
+		       (unsigned long long)pub_stores,
+		       (double)pub_stores / commits,
+		       100.0 * (double)(scanned - folds) / (scanned ? (double)scanned : 1));
 
 	quiesce(all);
 	int64_t conserved = c.accounts * INITIAL_BALANCE;
