@@ -57,6 +57,21 @@ to a strict/opaque STM?  Companion to the book's consistency roadmap
   (Toolchain quirk: the repo's TLC 2.14/SANY rejects `ELSIF`; use
   `ELSE IF`. The TLA+ model avoids a funding op — balances start at
   `BalInit`; the PoC models funding as a `genesis` op exempt from repair.)
+- `ec_bank_bench.cpp` — throughput benchmark (C++17, pthreads, one replica
+  per thread, in-process async broadcast with periodic merge): measures the
+  EC cost of commit (append), fold (reads), and repair (compensations) on
+  the book's bank workload. Quiescence asserts SEC / money conservation /
+  non-negative finals on every run.
+  ```sh
+  g++ -O2 -std=c++17 -pthread -o ec_bank_bench ec_bank_bench.cpp
+  ./ec_bank_bench -t 4 -a 1024 -n 2000000 -b 5      # full: fold+repair on
+  ./ec_bank_bench -t 4 -a 1024 -n 2000000 --commit-only   # append only
+  ```
+  Measured on a 28-core Xeon E5-2660 v4 (the book's `tab:ec-vs-stm`):
+  full EC 0.77 Mops/s (1 replica) → 0.60 (4) — flat in contention;
+  append-only path ~17 Mops/s (the fold+repair machinery costs ~22×);
+  compensation rate 16–24 % of ops under a tight initial balance
+  (`-b 5`), 0 % with slack (`-b 1000`).
 
 ## Answer to "is this possible / who invented it"
 
