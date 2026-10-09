@@ -3006,3 +3006,31 @@ contention pays repairs instead of retries; bad-state visibility window;
 grow-only storage vs causal-gated compaction; silent money-error failure
 mode). Book 363pp, zero new overfull boxes vs baseline. TODO: C++ EC
 throughput benchmark to make the column measured.
+
+### Follow-up 2 (same day) — EC vs strict measured on intel14v2
+
+- **EC throughput benchmark**: new `research/ec-bank/ec_bank_bench.cpp`
+  (one replica per thread, in-process async broadcast + periodic merge;
+  quiescence asserts SEC/conservation/non-negativity). Debugging trail:
+  log-vector `reserve` (peers read `log[]` concurrently — never
+  reallocate), deterministic compensation ids (`culprit.id | (1<<63)`) so
+  cross-replica comps dedup exactly-once, per-account ordered debit sets
+  for O(log n) culprit selection.
+- **Hardware**: intel14v2 — 28-core Xeon E5-2660 v4, TSX (rtm/hle)
+  confirmed, g++ 12.2 (no clang++-22 needed for bank). Fresh tree
+  `~/clang-tm-oct` (rsync `explicit_api/cpp` only — the full
+  `explicit_api` is 2.2G of Rust targets and stalls rsync). Per-backend
+  `make -B` mandatory: renaming `bin/bank` between BACKEND builds tricks
+  make into no-ops (silently produced TSXSGL copies named
+  `bank_norec/bank_sgl` on the first attempt).
+- **Measured** (1024 accounts, pure transfers `-r 0`, 2M txns, medians of
+  3): TSXSGL 10.5M txn/s (t1) → 5.7M (t2) → 2.7M (t4), conflict-abort
+  share 54 % (t2) / 75 % (t4), retry E ≈ 2.2–4.5. NOREC 7.1/2.3/1.4M;
+  SGL 11.0/2.6/1.9M. EC full 0.77/0.67/0.60 Mops/s (`-b 5`), 0.88/0.84/
+  0.75 (`-b 1000`, zero comps); append-only 17/9.1/6.3M — fold+repair
+  costs ~22× at t1.
+- **Book**: `tab:ec-vs-stm` EC column is now measured (was analytical);
+  §7.7 prose rewritten with the same-box comparison (14:1 at t1, 4.5:1 at
+  t4, flatness 1.3× vs 3.8×) and the networked-caveat kept. Book 363pp,
+  ch07 warning count identical to baseline (6 vs 6). README of
+  research/ec-bank documents the bench; TODO EC follow-up updated.

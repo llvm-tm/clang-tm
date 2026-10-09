@@ -301,10 +301,14 @@ consistency/overhead curve; the book should expose the curve itself.
   (h-uniform + model symbols), Ch.7 ladder bullets/witnesses/§7.7, glossary.)
 - [ ] **EC follow-ups** (see research/ec-bank/README.md): liveness proof of
   compensation in TLA+, batched compensation, richer invariants via a
-  confluence checker. Also: a C++ EC-throughput benchmark so
-  `tab:ec-vs-stm`'s EC column becomes measured, not analytical (the table
-  and \S7.7 now state the analytical status and the conservation-of-overhead
-  list explicitly, so the claim is honest as-is).
+  confluence checker.
+  - **Done 2026-10-09**: C++ EC-throughput benchmark
+    (`research/ec-bank/ec_bank_bench.cpp`) added; `tab:ec-vs-stm` and §7.7
+    now carry measured numbers (strict TSXSGL vs EC on the same Xeon
+    E5-2660 v4: 10.5→2.7M txn/s vs 0.77→0.60M ops/s, fold cost 22×,
+    compensation rate 16–24%). Remaining follow-up: model the *networked*
+    case (the in-process replica sim understates EC's win by excluding
+    coordination RTT).
 
 ## Completed
 
