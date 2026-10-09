@@ -254,28 +254,51 @@ Motivated by the EC-compensation research thread (`research/ec-bank/`):
 our default teaching stance (opaque/strict TM) is one point on the
 consistency/overhead curve; the book should expose the curve itself.
 
-- [ ] **Audit current coverage.** Consistency models appear only in passing
+- [x] **Audit current coverage.** Consistency models appear only in passing
   (ch02/ch03 history, ch04/ch07/app03 anomalies). Decide: deepen Ch.7 vs.
   new chapter "Consistency & Coordination".
-- [ ] **Weaker-than-opaque section.** Argument to develop: opacity is often
+  (Done 2026-10-09: Ch.7 *is* the isolation-levels chapter and its cliff
+  section is the exact join point, so we deepened Ch.7 with
+  \S7.7 "Beyond the Cliff: When the Application Owns the Invariant"
+  (label `sec:iso-beyond-cliff`) instead of renumbering the book.)
+- [x] **Weaker-than-opaque section.** Argument to develop: opacity is often
   too strident for applications that can define their own invariants; if the
   app owns invariant management, the runtime can drop synchronization on
   commit (EC/compensating path, `research/ec-bank/`) — more app complexity
   for less coordination overhead. Quantify with bank numbers we already
   have (TSXSGL t1 6.67M txn/s vs t4 1.25M under contention).
-- [ ] **Bank write-skew under SI demo.** Craft transfer transactions so the
+  (Done 2026-10-09: \S7.7 + Table `tab:ec-vs-stm` with the TSXSGL HW
+  numbers and conflict-abort mix; invariant confluence
+  \cite{bailis14confluence}, SEC \cite{burgader17sec}, sagas
+  \cite{garciamolina87sagas} added to references.bib.)
+- [x] **Bank write-skew under SI demo.** Craft transfer transactions so the
   classic SI anomaly shows on our own toy: e.g. two transfers A→X1 and B→X2,
   each guarded by the predicate `A + B >= 16`; disjoint write-sets, shared
   predicate ⇒ SI commits both, invariant breaks; opaque backends prevent it.
   Needs an SI-like teaching runtime (extend `examples/eager_broken` or add
   `SI_STM`) + TLA+ mirror (BankSI.tla already demonstrates skew). Other
   hazards worth the same bank treatment: dirty read, non-repeatable read,
-  fan-out (fork/join), lost update.
-- [ ] **Compact mathematical notation throughout.** Define a small
+  lost update, fan-out.
+  (Done 2026-10-09: `benchmarks/cpp/sidemo/bank_si.cpp` — standalone
+  teaching runtime `minitm` (RU/RC/SI/opaque), five scenarios + contrasts,
+  barrier-deterministic, `make -C benchmarks/cpp run-sidemo`, exits 0 iff
+  exactly the 5 expected anomalies are observed. TLA+ mirrors:
+  BankSI-demo-{skew,serial}.cfg (A=B=12, DRAW=8, RESERVE=16 — the model's
+  predicate is "combined ≥ RESERVE *after* your draw", so 12/8/16 is the
+  self-consistent triple matching the demo) and new BankWeak.tla +
+  BankWeak-{ru,rc,si}.cfg for dirty read / non-repeatable read / lost
+  update. All wired into `make -C docs/proofs check-teaching`. Fan-out has
+  no TLA mirror (book exercise instead).)
+- [x] **Compact mathematical notation throughout.** Define a small
   notation (e.g. views as folds over op-sets `view_r = fold(A_r)`,
   anomaly predicates over histories, `Inv(h)`, per-model quantifier
   skeletons) used uniformly in Ch.5/7 + TLA+/PoC artifacts, so each model
   gets a one-line definition before its prose.
+  (Done 2026-10-09: front-matter "Notation: Histories, Models, and Views on
+  One Page" (`cha:notation`): h/comm(h)/live(h)/⊑/<_RT, SER/SSR/OPQ/SI/EC+SEC
+  skeletons, Inv(h), anomalies as history classes with the
+  ∃h: L(h)∧A(h) reading; applied in Ch.2 (SER/OPQ one-liners), Ch.5 §5.4
+  (h-uniform + model symbols), Ch.7 ladder bullets/witnesses/§7.7, glossary.)
 - [ ] **EC follow-ups** (see research/ec-bank/README.md): liveness proof of
   compensation in TLA+, batched compensation, richer invariants via a
   confluence checker.

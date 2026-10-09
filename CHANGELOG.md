@@ -2948,3 +2948,48 @@ Validated the gem5 x86 TSX simulation against real Broadwell-EP hardware
   write-sets — needs an SI-like teaching runtime; `docs/proofs/BankSI.tla`
   already proves skew), compact mathematical notation for consistency models
   throughout the book, EC liveness/batching follow-ups.
+
+## Session 2026-10-09 — Consistency roadmap in the book: §7.7, notation page, anomaly gallery
+
+- **Roadmap executed** (TODO P2, three of four items; EC follow-ups remain):
+  audit concluded to *deepen Ch.7* (it is the isolation chapter; its cliff
+  section is the join point) rather than add a chapter.
+- **Book §7.7 "Beyond the Cliff: When the Application Owns the Invariant"**
+  (`sec:iso-beyond-cliff`): the cliff argument as a theorem about runtime
+  promises; invariant confluence decides (non-negative balance is not
+  confluent → coordinate or transiently violate + repair); SEC folds
+  (`view_r = fold(A_r)`) over grow-only op-sets; max-id culprit compensation
+  + causal delivery (`research/ec-bank/`, `ECBank.tla`); EC-vs-STM cost
+  table with TSXSGL HW bank numbers (6.67M t1 → 1.25M t4 txn/s, conflict
+  aborts 64–71%, E≈2.8–3.4 attempts) vs append-only commits; four admission
+  conditions; two new exercises (EC level for `minitm`; [open] confluence
+  argument for inventory vs money). Bib: `bailis14confluence`,
+  `burgader17sec`, `garciamolina87sagas` (author lists cross-checked via
+  Crossref; Burgader co-author kept as family name only — not confirmable).
+- **Notation page** (front matter, `cha:notation`): h, comm(h), live(h),
+  ⊑, <_RT; SER/SSR/OPQ/SI/EC+SEC one-line skeletons; Inv(h); anomalies as
+  named history classes, Berenson table read as ∃h: L(h)∧A(h). Applied in
+  Ch.2 (SER/OPQ inline defs), Ch.5 §5.4 (h-uniform, model symbols),
+  Ch.7 ladder + witnesses + summary, glossary (compensating transaction,
+  eventual consistency (SEC), invariant confluence).
+- **Anomaly gallery** `benchmarks/cpp/sidemo/bank_si.cpp` (`bin/bank_si`,
+  `make run-sidemo`): standalone ~130-line teaching runtime `minitm`
+  (RU/RC/SI/opaque), five scenarios (write skew 12/8/16, dirty read,
+  non-repeatable read, lost update, fan-out) each with its stronger
+  contrast; barrier-forced deterministic interleavings (20/20 identical
+  runs); exits 0 iff exactly the 5 expected anomalies observed. Not linked
+  against any backend — deliberately not a TMRealHooks member.
+- **TLA+**: `BankWeak.tla` + `BankWeak-{ru,rc,si}.cfg` (dirty read at RU,
+  non-repeatable read at RC, all three predicates clean at SI;
+  NoLostUpdate predicate included, its RC counterexample left as book
+  exercise); `BankSI-demo-{skew,serial}.cfg` matching the C++ demo's
+  constants — note the demo's predicate is "combined ≥ 16 *after* your
+  draw", so 12/8/16, not 8/8/16 (the latter makes even a single commit
+  violate the reserve). All eight teaching checks wired into
+  `make -C docs/proofs check-teaching` (green).
+- **Verification**: book 362pp, warning set identical to baseline (the 3
+  extra overfull running-head boxes are the pre-existing class reflowed by
+  pagination; zero new content-box overfulls); `check-teaching` green;
+  `check-fast` ALL PASSED. TLC 2.14 quirk confirmed again: `pending ∈ {"N"} ∪
+  Int` fails membership ("is an element of Int") — used a boolean flag
+  instead.
