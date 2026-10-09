@@ -23,8 +23,8 @@
 // The interleaving is forced by three barriers, so the outcome is
 // deterministic on every run, not a race that "sometimes" crashes.
 
-#include "expli_tm_api/tm_api.hpp"
 #include "expli_tm_api/thread_barrier.hpp"
+#include "expli_tm_api/tm_api.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <thread>
@@ -58,14 +58,13 @@ static void writer()
 		tm_read_i4((uint32_t *)&g_seed); // read-set: seed == 1
 		tm_write_ptr(&g_inventory[0], it);
 		tm_write_i4((uint32_t *)&g_count, 1);
-		b_publish.wait();  // now every other thread can look
-		b_peek.wait();     // reader has latched its view: safe to spoil
-		b_spoiled.wait();  // seed has been bumped: commit must fail
-		tm_end();          // validation fails here -> siglongjmp back
+		b_publish.wait(); // now every other thread can look
+		b_peek.wait();    // reader has latched its view: safe to spoil
+		b_spoiled.wait(); // seed has been bumped: commit must fail
+		tm_end();         // validation fails here -> siglongjmp back
 		printf("writer: committed (this should not happen)\n");
 	} else {
-		printf("writer: attempt ended in validation abort (siglongjmp rc=%d)\n",
-		       rc);
+		printf("writer: attempt ended in validation abort (siglongjmp rc=%d)\n", rc);
 	}
 	b_aborted.wait();
 	tm_exit_thread();
@@ -82,12 +81,12 @@ static void reader()
 	int32_t id_latched = (n_latched > 0 && p0) ? ((Item *)p0)->id : 0;
 	int32_t payload_latched = (n_latched > 0 && p0) ? ((Item *)p0)->payload : 0;
 	b_peek.wait(); // let the writer proceed only after our latch is complete
-	printf("reader: mid-flight view: count=%d inventory[0]=%p\n",
-	       n_latched, p0);
+	printf("reader: mid-flight view: count=%d inventory[0]=%p\n", n_latched, p0);
 	if (n_latched > 0 && p0) {
 		printf("reader: phantom item visible (id=%d payload=%d) "
 		       "— the transaction has NOT committed!\n",
-		       id_latched, payload_latched);
+		       id_latched,
+		       payload_latched);
 	}
 
 	b_aborted.wait();
@@ -98,7 +97,9 @@ static void reader()
 	// read mid-flight, after the abort has undone the inventory slot.
 	for (int32_t i = 0; i < n_latched; ++i) {
 		Item *p = (Item *)g_inventory[i];
-		printf("reader: item[%d] = {id=%d, payload=%d}\n", i, p->id,
+		printf("reader: item[%d] = {id=%d, payload=%d}\n",
+		       i,
+		       p->id,
 		       p->payload); // EAGER_BROKEN: p == NULL -> SIGSEGV
 	}
 	if (n_latched == 0)

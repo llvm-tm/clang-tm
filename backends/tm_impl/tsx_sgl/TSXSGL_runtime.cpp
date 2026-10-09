@@ -58,7 +58,8 @@ static std::atomic<uint64_t> sgl_owner{0};
 // Per-thread counters are mandatory: a shared atomic incremented inside the
 // transaction (e.g. right after _xbegin succeeds) makes the counter line a
 // conflict source and inflates the measured abort rate.
-namespace tsx_stats {
+namespace tsx_stats
+{
 struct PerThread {
 	uint64_t xbegin_attempts = 0;
 	uint64_t tsx_commits = 0;
@@ -105,8 +106,10 @@ TM_PLUGIN_LIFECYCLE_FN(do_tm_exit, void tm_exit())
 		fprintf(stderr,
 		        "TSX_STATS xbegin_attempts=%llu tsx_commits=%llu conflict_aborts=%llu "
 		        "other_aborts=%llu sgl_entries=%llu\n",
-		        (unsigned long long)attempts, (unsigned long long)t.tsx_commits,
-		        (unsigned long long)t.conflict_aborts, (unsigned long long)t.other_aborts,
+		        (unsigned long long)attempts,
+		        (unsigned long long)t.tsx_commits,
+		        (unsigned long long)t.conflict_aborts,
+		        (unsigned long long)t.other_aborts,
 		        (unsigned long long)t.sgl_entries);
 	}
 }

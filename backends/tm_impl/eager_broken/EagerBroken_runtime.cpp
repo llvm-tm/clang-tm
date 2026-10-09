@@ -101,8 +101,7 @@ static inline void record_read(void *addr, uint8_t width)
 		read_log.push_back({addr, raw_load(addr, width), width});
 }
 
-template <typename T>
-static inline void eager_write(void *addr, T val)
+template <typename T> static inline void eager_write(void *addr, T val)
 {
 	if (g_in_tx) {
 		uint64_t old = 0;

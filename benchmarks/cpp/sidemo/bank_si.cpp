@@ -42,20 +42,23 @@ enum Level { RU, RC, SI, OPAQUE };
 static const char *level_name(Level l)
 {
 	switch (l) {
-	case RU: return "RU";
-	case RC: return "RC";
-	case SI: return "SI";
-	case OPAQUE: return "OPAQUE (serializable OCC)";
+	case RU:
+		return "RU";
+	case RC:
+		return "RC";
+	case SI:
+		return "SI";
+	case OPAQUE:
+		return "OPAQUE (serializable OCC)";
 	}
 	return "?";
 }
 
-struct Store
-{
+struct Store {
 	std::mutex m;
-	std::map<std::string, int> committed;    // the committed state
-	std::map<std::string, long> version;     // per-object commit counter
-	std::map<std::string, int> pending;      // RU: exposed uncommitted writes
+	std::map<std::string, int> committed; // the committed state
+	std::map<std::string, long> version;  // per-object commit counter
+	std::map<std::string, int> pending;   // RU: exposed uncommitted writes
 
 	int fresh(const std::string &k) { return committed.at(k); }
 };
@@ -65,13 +68,15 @@ class Tx
 	Store *s;
 	Level lvl;
 	std::string name;
-	std::map<std::string, int> reads;      // obj -> value read (snapshot for SI/OPAQUE)
-	std::map<std::string, long> rver;      // obj -> committed version at read
-	std::map<std::string, int> writes;     // obj -> value to install
+	std::map<std::string, int> reads;  // obj -> value read (snapshot for SI/OPAQUE)
+	std::map<std::string, long> rver;  // obj -> committed version at read
+	std::map<std::string, int> writes; // obj -> value to install
 
 public:
 	Tx(Store *s, Level lvl, std::string name)
-	    : s(s), lvl(lvl), name(std::move(name))
+	    : s(s),
+	      lvl(lvl),
+	      name(std::move(name))
 	{
 	}
 
@@ -81,8 +86,10 @@ public:
 		if (lvl == SI || lvl == OPAQUE) {
 			auto it = reads.find(k);
 			if (it != reads.end()) { // snapshot: answer from cache
-				printf("  %s: r(%s)->%d   [snapshot]\n", name.c_str(),
-				       k.c_str(), it->second);
+				printf("  %s: r(%s)->%d   [snapshot]\n",
+				       name.c_str(),
+				       k.c_str(),
+				       it->second);
 				return it->second;
 			}
 			int v = s->committed.at(k);
@@ -93,9 +100,11 @@ public:
 		}
 		if (lvl == RU) {
 			auto pit = s->pending.find(k);
-			int v = pit != s->pending.end() ? pit->second
-			                                : s->committed.at(k);
-			printf("  %s: r(%s)->%d%s\n", name.c_str(), k.c_str(), v,
+			int v = pit != s->pending.end() ? pit->second : s->committed.at(k);
+			printf("  %s: r(%s)->%d%s\n",
+			       name.c_str(),
+			       k.c_str(),
+			       v,
 			       pit != s->pending.end() ? "   [DIRTY: uncommitted!]" : "");
 			if (pit == s->pending.end()) {
 				reads[k] = v; // bookkeeping for the trace only
@@ -127,13 +136,13 @@ public:
 			// WW test: a write conflicts if the object changed since our
 			// snapshot read of it (first committer wins).
 			for (auto &w : writes) {
-				long snap = rver.count(w.first)
-				                ? rver.at(w.first)
-				                : s->version.at(w.first);
+				long snap = rver.count(w.first) ? rver.at(w.first)
+				                                : s->version.at(w.first);
 				if (s->version.at(w.first) != snap) {
 					printf("  %s: ABORT at commit — %s was written after our "
 					       "snapshot\n",
-					       name.c_str(), w.first.c_str());
+					       name.c_str(),
+					       w.first.c_str());
 					return false;
 				}
 			}
@@ -143,7 +152,8 @@ public:
 					if (s->version.at(r.first) != rver.at(r.first)) {
 						printf("  %s: ABORT at commit — read-set stale on %s "
 						       "(predicate revalidated)\n",
-						       name.c_str(), r.first.c_str());
+						       name.c_str(),
+						       r.first.c_str());
 						return false;
 					}
 				}
@@ -185,8 +195,7 @@ static int dump(Store &s, const std::string &k)
 // An atomic view of two accounts: both values read under ONE lock, so
 // the observer's sum is a single instantaneous snapshot, not a torn
 // pair of separately-locked reads.
-static std::pair<int, int> dump2(Store &s, const std::string &a,
-                                 const std::string &b)
+static std::pair<int, int> dump2(Store &s, const std::string &a, const std::string &b)
 {
 	std::lock_guard<std::mutex> g(s.m);
 	return {s.committed.at(a), s.committed.at(b)};
@@ -198,11 +207,16 @@ using namespace minitm;
 
 static std::atomic<int> g_failures{0};
 
-static void verdict(const char *scenario, const char *level, bool anomaly,
+static void verdict(const char *scenario,
+                    const char *level,
+                    bool anomaly,
                     const char *what)
 {
-	printf("  VERDICT: %s at %s — %s %s\n", anomaly ? "ANOMALY" : "clean",
-	       level, what, anomaly ? "OBSERVED" : "prevented");
+	printf("  VERDICT: %s at %s — %s %s\n",
+	       anomaly ? "ANOMALY" : "clean",
+	       level,
+	       what,
+	       anomaly ? "OBSERVED" : "prevented");
 	if (anomaly)
 		g_failures++;
 }
@@ -229,9 +243,12 @@ static void scenario_write_skew(Level lvl)
 	auto body = [&](const char *self, const char *other) {
 		Tx tx(&st, lvl, self);
 		int a = tx.read(self), b = tx.read(other);
-		t1_done.wait(); // both transactions now hold their snapshots
+		t1_done.wait();            // both transactions now hold their snapshots
 		bool ok = a + b - 8 >= 16; // the predicate — on OUR snapshot
-		printf("  %s: predicate %d+%d-8 >= 16 -> %s\n", self, a, b,
+		printf("  %s: predicate %d+%d-8 >= 16 -> %s\n",
+		       self,
+		       a,
+		       b,
 		       ok ? "TRUE, transfer" : "FALSE, skip");
 		if (ok)
 			tx.write(self, a - 8);
@@ -270,9 +287,9 @@ static void scenario_dirty_read(Level lvl)
 		Tx tx(&st, lvl, "T1");
 		int a = tx.read("A");
 		tx.write("A", a - 5);
-		wrote.wait();      // let T2 look at the pending value
+		wrote.wait(); // let T2 look at the pending value
 		read1.wait();
-		tx.abort();        // the debit never happened
+		tx.abort(); // the debit never happened
 		aborted.wait();
 	});
 	std::thread t2([&] {
@@ -286,11 +303,12 @@ static void scenario_dirty_read(Level lvl)
 	t1.join();
 	t2.join();
 
-	printf("  final: A = %d; T2 saw A = %d%s\n", dump(st, "A"), seen,
+	printf("  final: A = %d; T2 saw A = %d%s\n",
+	       dump(st, "A"),
+	       seen,
 	       seen == 7 ? "  <- money that never existed" : "");
 	bool dirty = seen == 7;
-	verdict("dirty read", level_name(lvl), dirty,
-	        "read of an uncommitted write");
+	verdict("dirty read", level_name(lvl), dirty, "read of an uncommitted write");
 }
 
 // ------------------------------------------------------------------
@@ -330,11 +348,12 @@ static void scenario_nonrepeatable(Level lvl)
 	t1.join();
 	t2.join();
 
-	printf("  T2 saw A = %d then %d%s\n", a1, a2,
+	printf("  T2 saw A = %d then %d%s\n",
+	       a1,
+	       a2,
 	       a1 != a2 ? "  <- the same transaction got two answers" : "");
 	bool broke = a1 != a2;
-	verdict("non-repeatable read", level_name(lvl), broke,
-	        "snapshot stability");
+	verdict("non-repeatable read", level_name(lvl), broke, "snapshot stability");
 }
 
 // ------------------------------------------------------------------
@@ -369,7 +388,9 @@ static void scenario_lost_update(Level lvl)
 	int sum = dump(st, "A");
 	int expected = 12 + 4 * (committed_n[0] + committed_n[1]);
 	printf("  final: A = %d; %d deposit(s) committed, expected A = %d\n",
-	       sum, committed_n[0] + committed_n[1], expected);
+	       sum,
+	       committed_n[0] + committed_n[1],
+	       expected);
 	bool lost = sum != expected;
 	verdict("lost update", level_name(lvl), lost, "update accounting");
 }
@@ -399,20 +420,22 @@ static void scenario_fanout(bool atomic_commit)
 		tx.write("B", b + 5);
 		if (!atomic_commit)
 			tx.publish_one("A"); // money has left A...
-		half.wait();              // observer looks HERE
-		seen.wait();              // ...and has finished looking
+		half.wait();             // observer looks HERE
+		seen.wait();             // ...and has finished looking
 		if (!atomic_commit)
 			tx.publish_one("B"); // ...and only now arrives in B
 		else
-			tx.commit();         // ...both accounts, one instant
+			tx.commit(); // ...both accounts, one instant
 		done.wait();
 	});
 	std::thread observer([&] {
 		half.wait();
 		auto ab = dump2(st, "A", "B"); // one instant: both or neither
 		observed_sum = ab.first + ab.second;
-		printf("  observer: A = %d, B = %d, A+B = %d\n", ab.first,
-		       ab.second, observed_sum);
+		printf("  observer: A = %d, B = %d, A+B = %d\n",
+		       ab.first,
+		       ab.second,
+		       observed_sum);
 		seen.wait();
 		done.wait();
 	});
@@ -420,10 +443,13 @@ static void scenario_fanout(bool atomic_commit)
 	observer.join();
 
 	printf("  final: A+B = %d; observer saw A+B = %d\n",
-	       dump(st, "A") + dump(st, "B"), observed_sum);
+	       dump(st, "A") + dump(st, "B"),
+	       observed_sum);
 	bool torn = observed_sum != 24;
-	verdict("fan-out", atomic_commit ? "atomic publish" : "non-atomic",
-	        torn, "atomicity of commit");
+	verdict("fan-out",
+	        atomic_commit ? "atomic publish" : "non-atomic",
+	        torn,
+	        "atomicity of commit");
 }
 
 int main()
