@@ -143,7 +143,7 @@ impl LiveSimState {
         }
 
         // Take ownership of write-set entries so we can drop the borrow.
-        let ws: Vec<WriteEntry> = t.write_set.drain(..).collect();
+        let ws: Vec<WriteEntry> = std::mem::take(&mut t.write_set);
         t.reset();
         // t borrow ends here
 
