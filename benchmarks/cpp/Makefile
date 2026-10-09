@@ -304,6 +304,15 @@ TEST_RO2RW_BIN = bin/test_norec_ro2rw
 OPAQUEDEMO_SRC = opaquedemo/nonopaque.cpp
 OPAQUEDEMO_BIN = bin/opaquedemo
 
+# --- isolation-level anomaly gallery (Book Ch. 7; no backend needed) ---
+# Self-contained teaching runtime (RU/RC/SI/opaque mini-TM over a toy
+# bank). Exits 0 iff the five expected anomalies are observed exactly
+# once each and no stronger level misbehaves. TLA+ mirrors:
+# docs/proofs/BankSI*.cfg (skew) and BankWeak*.cfg (RU/RC/SI); see
+# `make -C docs/proofs check-teaching`.
+SIDEMO_SRC = sidemo/bank_si.cpp
+SIDEMO_BIN = bin/bank_si
+
 # --- Stubs runtime (uninstrumented baseline) --------------------
 STUBS = ../../backends/stubs/tm_stubs.cpp
 
@@ -332,7 +341,7 @@ STAMP_BINS = $(VACATION_BIN) $(LABYRINTH_BIN) $(KMEANS_BIN) $(GENOME_BIN) $(INTR
 
 .PHONY: all stubs clean run-bank run-eigenbench run-bench7 run-vacation run-labyrinth run-kmeans
 .PHONY: run-genome run-intruder run-ssca2 run-bayes run-yada run-fuzz-counter run-fuzz-bank run-fuzz
-.PHONY: run-tpcc run-ycsb run-test-ds run-test-tx run-test-ro2rw run-opaquedemo run-tests run run-stamp
+.PHONY: run-tpcc run-ycsb run-test-ds run-test-tx run-test-ro2rw run-opaquedemo run-sidemo run-tests run run-stamp
 
 all: bin $(BANK_BIN) $(EIGEN_BIN) $(BENCH7_BIN) $(STAMP_BINS) \
      $(FUZZ_CTR_BIN) $(FUZZ_BANK_BIN) $(TPCC_BIN) $(YCSB_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN) $(TEST_RO2RW_BIN) $(RBTREE_BIN)
@@ -373,6 +382,10 @@ $(eval $(call BUILD_RULE,$(TEST_TX_BIN),$(TEST_TX_SRC)))
 $(eval $(call BUILD_RULE,$(TEST_RO2RW_BIN),$(TEST_RO2RW_SRC)))
 $(eval $(call BUILD_RULE,$(RBTREE_BIN),$(RBTREE_SRC)))
 $(eval $(call BUILD_RULE,$(OPAQUEDEMO_BIN),$(OPAQUEDEMO_SRC)))
+
+# Standalone demo: single source, no TM runtime linked.
+$(SIDEMO_BIN): bin $(SIDEMO_SRC) Makefile
+	$(CXX) $(CXXFLAGS) -o $@ $(SIDEMO_SRC) $(LDFLAGS)
 
 # --- Stubs build rules (uninstrumented baseline) ------------------
 $(eval $(call BUILD_STUBS_RULE,$(BANK_STUBS),$(BANK_SRC)))
@@ -440,6 +453,9 @@ run-test-tx: $(TEST_TX_BIN)
 
 run-opaquedemo: $(OPAQUEDEMO_BIN)
 	./$(OPAQUEDEMO_BIN)
+
+run-sidemo: $(SIDEMO_BIN)
+	./$(SIDEMO_BIN)
 
 run-test-ro2rw: $(TEST_RO2RW_BIN)
 	./$(TEST_RO2RW_BIN)
