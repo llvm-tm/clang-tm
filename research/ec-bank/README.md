@@ -72,6 +72,15 @@ to a strict/opaque STM?  Companion to the book's consistency roadmap
   append-only path ~17 Mops/s (the fold+repair machinery costs ~22×);
   compensation rate 16–24 % of ops under a tight initial balance
   (`-b 5`), 0 % with slack (`-b 1000`).
+  **Communication profile** (same box, 2M ops, after an `alignas(64)` fix
+  that removed false sharing between adjacent replicas): the commit path
+  is lock-free and writes only thread-private cache lines — one release
+  store to the replica's own `published` counter per commit (1.16–1.37
+  incl. compensation publishes); gossip reads 1.00 records/commit at one
+  replica, 2.27 at two, 3.99–5.12 at four (32–164 B/commit — fan-out
+  grows linearly with replicas; merge dedup 0–16 %). Bank state is fully
+  replicated: every replica holds all balances, per-account debit sets,
+  and the applied op-set (O(A) + O(all-time-ops), the grow-only bill).
 
 ## Answer to "is this possible / who invented it"
 
