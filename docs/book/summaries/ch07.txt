@@ -1,28 +1,76 @@
-CHAPTER 07 — Transaction API Design – Software Engineering Perspectives
-Part: IV (Implementing Transactional Memory)
-Lines: ~327 | Sections: 9 | Figures: 1 | Tables: 1 | Listings: 3 | TikZ: 1
+CHAPTER 07 — The Semantics of Transactions: Isolation Levels and Their Cost
+Part: III (Foundations: Mathematics and Verification)
+Lines: ~695 | Sections: 9 | Subsections: 1 (named) | Figures: 4 | Tables: 4 | Listings: 1 | TikZ: 4
 
-PURPOSE: Software-engineering view of TM API design: synchronous vs lambda vs
-language-integrated vs future-based vs OO/polymorphic interfaces. The lower
-runtime may be TL2/NOrec/SGL/Percolator; this chapter classifies the
-programming interface.
+PURPOSE: Rebuilds the database isolation-level tradition in the book's
+history vocabulary, quantifies what each rung costs in aborts, and argues
+the chapter's thesis (the "cliff argument"): everything below serializability
+is unsound in shared memory because the TM observer is inside the address
+space; what transfers from the weak levels is their machinery (MVCC, early
+lock release, snapshot batching, static scheduling), not their promises.
 
 SECTIONS
-- Classic Synchronous API
-    tm_begin/tm_end/tm_read/tm_write; retry loop.
-- Worked Example: The Transfer, on the Classic API
-- Worked Example: A Lambda Wrapper
-    C++ lambda-based atomic blocks.
-- Language-Integrated Keywords
-    atomic blocks, transaction_safe, annotations.
-- Asynchronous and Future-Based APIs
-    tm_enqueue / queue-based async; futures.
-- Worked Example: Futures for Batched Transfers
-- Object-Oriented and Polymorphic Interfaces
-    TM<T> wrapper types, method-level transactions.
+- The Shape of the Space: Dimensions of Transaction Semantics
+    Table of eight dimensions (visibility, strictness, ordering, anomalies,
+    crash-awareness, recoverability, progress, durability) with database vs
+    TM ranges; one structural cause: protocol-boundary observer vs in-process
+    observer. Taxonomic lineage: Gray strictness, Berenson anomaly critique,
+    Adya containment, Kleppmann engineering.
+- The Isolation Ladder
+    RU/RC/RR/SI/SSI/S(+strict) restated as read-from constraints; containment
+    reading (Adya); which rungs are implementable in TM (top only).
+- Anomalies: The Matrix and Its Witnesses
+    Berenson matrix (dirty read, non-repeatable, phantom, lost update, write
+    skew) x levels, each cell witnessed as a history; anti-dependency
+    characterization stated (applied depth: no proof); methodology lesson:
+    define guarantees by demonstrable anomalies.
+- The Price Each Rung Buys
+    Derives p_abort from validation scope: SI checks w object-chances per
+    contender, serializable OCC 2r+w; geometric-attempts model continues
+    sec:math-example; table + tikz curve (k=50, r=4, w=1); tool
+    docs/book/tools/iso-cost.py; caveats (independence approx, 2PL waits,
+    SSI cycle tax).
+- From Mechanism to Semantics and Back
+    Mechanism knobs vs promises: version management, write-back/through +
+    TinySTM WBCTL/WBETL/WT, early lock release (EAGER_BROKEN = EAR without
+    version check), eager/lazy detection, static transactions (Calvin, SGL),
+    GPU snapshot thresholds; table sem-mech maps systems x promises.
+- The Half That Cannot Cross Over
+    Cliff argument, five observations (boundary-is-the-guarantee; pointer
+    applications cannot reconcile anomalies; the no-wait prize is already
+    paid; predicates don't exist over memory; recoverability collapses).
+    Quotable line: isolation levels promise about answers to clients, TM
+    conditions about state peers act on.
+- Worked Example: Write Skew, Checked
+    Doctor/bank write-skew history (lst:banksi-history); docs/proofs/
+    BankSI.tla with SERIALIZABLE=FALSE/TRUE configs; make check-teaching;
+    history notation = anomaly matrix = TLC verdict, three ways.
 - Summary
 - Exercises
+    6 tagged: history constructions (RC<RR<SI), general write-skew cycle,
+    sandbox EagerBroken, SSI config in BankSI.tla, cost-table recomputation
+    vs bank simulator, Berenson cursor reading.
 
-FIGURES: fig:api-state-machine (control states of the synchronous API)
-TABLES: tab:api-taxonomy (API families)
-LISTINGS: 3 (classic API, lambda wrapper, futures)
+FIGURES: fig:iso-dimensions (concept map of the dimension product),
+         fig:db-tx-landscape (database client/protocol boundary/versioned
+         store/WAL), fig:iso-ladder (containment ladder with brace marking
+         the TM-implementable top), fig:iso-cost (attempts vs concurrency,
+         S vs SI curves)
+TABLES: tab:iso-dimensions (dimensions x DB/TM ranges),
+        tab:anomaly-matrix (Berenson matrix + SSI),
+        tab:iso-cost (expected attempts at C=4..20),
+        tab:sem-mech (systems x promises: SGL, TL2/NOrec, TinySTM WBCTL,
+        MVLOG/JVSTM, SSI engines, Calvin, Percolator/TiKV, GPU snapshot,
+        EAGER_BROKEN)
+LISTINGS: lst:banksi-history (write-skew history trace)
+KEY LABELS: chap:isolation; sections sec:iso-dimensions, sec:iso-ladder,
+        sec:iso-anomalies, sec:iso-cost, sec:iso-mechanisms,
+        sec:iso-not-in-tm, sec:iso-worked-example
+CITES: gray93tp, berenson95critique, adya99thesis, kleppmann17,
+       felber08tinystm, thomson12calvin, chen17snapshot,
+       papadimitriou79serializability (via ch5 refs), guerraoui08correctness
+NOTE: chapter short title in headers/TOC is "The Semantics of Transactions"
+      (long title has a colon subtitle). Cross-refs in: ch02 (crash section),
+      ch03 (memory-model disambiguation), ch04 (negative-space theory exercise
+      graded against sec:iso-not-in-tm), ch05 (ladder pointer after the
+      three-rung list).

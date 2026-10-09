@@ -14,7 +14,7 @@ TLA+ check, and only then start an exercise.
           The runtime backends and benchmarks build with
           \texttt{-std=c++20}; the LLVM instrumentation plugin requires
           LLVM~22 and its \texttt{clang}. (Note: LLVM~22 removed Arm TME
-          support after the architecture withdrew it --- Chapter~16.)
+          support after the architecture withdrew it --- Chapter~17.)
     \item \textbf{LLVM 22} (for Part~V exercises): \texttt{llvm-config-22},
           \texttt{opt-22}, and the \texttt{clang-22} driver used by the
           \texttt{plugin/clang-tm} wrapper script.
@@ -23,9 +23,9 @@ TLA+ check, and only then start an exercise.
     \item \textbf{Java} and the \texttt{tla2tools.jar} checker (Part~III,
           Appendix~\ref{chap:pluscal-quick-ref}).  Install once with
           \texttt{make -C docs/proofs download-jar}.
-    \item \emph{Optional:} \texttt{rr} (record-and-replay, Chapter~12),
-          the gem5 fork (Chapter~16 --- see below), Docker (cross-builds
-          and Linux CI on macOS), and a CUDA/ROCm toolchain (Chapter~17).
+    \item \emph{Optional:} \texttt{rr} (record-and-replay, Chapter~13),
+          the gem5 fork (Chapter~17 --- see below), Docker (cross-builds
+          and Linux CI on macOS), and a CUDA/ROCm toolchain (Chapter~18).
 \end{itemize}
 
 \section{Building the Companion}
@@ -65,7 +65,7 @@ make -C benchmarks/cpp BACKEND=NOREC run-test-tx
 used lowercase; when in doubt, match the case of the \texttt{ifeq} blocks
 in the Makefile you are driving.)
 
-\paragraph{gem5 (Chapter~16).} Upstream gem5 has no x86 TSX support; use
+\paragraph{gem5 (Chapter~17).} Upstream gem5 has no x86 TSX support; use
 the companion fork (the \textsc{TM-SIM} repository, gem5 v25.1 plus the
 in-tree TSX commit). Build and smoke-test:
 
@@ -75,7 +75,7 @@ tsx-comparison/scripts/run-bank-gem5.sh TSXSGL 1 64 500
 \end{verbatim}
 
 Benchmarks for gem5 are built as static x86-64 binaries with the ROI
-markers of Chapter~16 --- on any host, including macOS, via Docker
+markers of Chapter~17 --- on any host, including macOS, via Docker
 (\texttt{linux/amd64} Alpine image, musl toolchain):
 
 \begin{verbatim}
@@ -104,7 +104,7 @@ Appendix~\ref{chap:pluscal-quick-ref}), run \texttt{check-one
 BACKEND=YourModel}, then delete it before committing so the default
 \texttt{check} target stays green.
 
-\section{GPU Toolchains (Chapter 17)}
+\section{GPU Toolchains (Chapter 18)}
 
 The GPU backends require dedicated hardware.  Under CUDA, compile kernels
 with \texttt{nvcc} and target your \texttt{sm\_XX}.  Under ROCm, use

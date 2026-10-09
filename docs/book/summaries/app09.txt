@@ -1,0 +1,26 @@
+APPENDIX I — Repository Walkthrough
+Lines: ~418 | Sections: 9 | Subsections: 10 | Figures: 0 | Tables: 0 | Listings: 0
+
+PURPOSE: Tour of the companion repo: layout, hook system (why DATA not TEXT),
+explicit API, benchmark entry points, queue/async execution, TLA+ workflow,
+debugging tools, and the backend directory map.
+
+SECTIONS
+- Repository Structure (architecture overview)
+- The Hook System
+    Subsections: Architecture; The Registration Pattern (TMRealHooks,
+    tm_register_real_hooks); Why DATA, Not TEXT (LLVM_TM_PLUGIN pointer
+    variables); Runtime Backend Swapping
+- The Explicit API
+    Subsections: The TM<T> Class; The Retry Loop; Production / Incubating /
+    Experimental tiers; Shared Infrastructure (not backends)
+- Benchmark Entry Points
+- Queue and Async Execution
+- TLA+ Model Checking (docs/proofs; make check + check-teaching)
+- Debugging and Profiling Tools
+- Backend Directory Map (every backends/tm_impl/* with status)
+- Exercises
+
+NOTE: must gain a row for backends/tm_impl/eager_broken (teaching-only,
+intentionally broken STM used by Ch.2 sec:crash-without-opacity; never a
+default, excluded from check-fast).

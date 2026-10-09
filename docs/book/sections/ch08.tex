@@ -1,644 +1,439 @@
-\chapter{Non‑Speculative Designs: Single Lock and Serializers}
-\index{single global lock}\index{SGL}\index{serializers}\index{queue-based transactional memory}\index{non-speculative transactional memory}\index{opacity}\index{Amdahl's law}
+\chapter[Transaction API Design]{Transaction API Design – Software Engineering Perspectives}
+\index{transaction API design}\index{classic synchronous API}\index{language-integrated transactions}\index{transactional futures}\index{object-oriented transactional interfaces}
 
-Non-speculative transactional memory is the control case for the rest of the implementation chapters. It gives up parallel execution inside transactions and obtains, in exchange, the simplest correctness story in the book: one transaction runs at a time, observes a sequential state, and publishes the next sequential state.
+A transactional-memory backend is only useful if programmers can call it correctly. The algorithm may be TL2, NOrec, SGL, TSC-TM, TinySTM, SwissTM, JVSTM, MVLog, or a distributed Percolator-style coordinator, but the application sees a smaller surface: begin, read, write, commit, abort, retry, and sometimes a higher-level wrapper around them. API design is therefore not decoration. It determines where instrumentation happens, who owns retry, which side effects are safe, and how much of the runtime contract is visible in ordinary source code.
 
-This chapter studies two forms of that idea. A single-global-lock TM runs the caller inside one process-wide critical section. A thread serializer sends transaction bodies to a single worker and uses the worker's dequeue order as the serialization order. Both are deliberately simple. That simplicity is useful: SGL-like backends in the companion project are reference implementations, regression oracles, and fallbacks for more optimistic systems such as NOrec, TL2, TSC-TM, SwissTM, TinySTM, and the GPU designs.
+This chapter studies that contract from a software-engineering perspective. We keep the two-account bank transfer as the running example: a transaction debits one account, credits another, respects a floor, and preserves total money on the successful path. The examples deliberately use a small API because the companion implementations expose the same synchronous primitives across many backends. More elaborate interfaces are built by moving responsibility among the programmer, the compiler, the library, and the executor.
 
-\section{Single Global Lock TM}
+\section{Classic Synchronous API}
 
-A single-global-lock transactional memory acquires one global mutex at \texttt{tm\_begin} and releases it at \texttt{tm\_commit}. While the mutex is held, ordinary loads and stores are safe because no other transaction can interleave with them. There is no validation phase, no version-clock protocol, no read-set scan, and no rollback of speculative state. The transaction either performs its writes while holding the lock, or performs no writes because its own control flow decides not to.
+The classic transactional-memory API is a small set of blocking calls:
 
-This design is correct by construction. Every committed transaction has a unique position in the order of lock acquisitions. Every read observes a state produced by the previous committed transaction in that order. Every write becomes visible before the lock is released and before the next transaction begins. Therefore opacity is immediate: even live transactions observe consistent states, because there is never another live writer racing with them.
+\begin{center}
+\texttt{tm\_begin()}, \texttt{tm\_read()}, \texttt{tm\_write()}, \texttt{tm\_commit()}, \texttt{tm\_abort()}.
+\end{center}
 
-SGL is also a yardstick. A speculative STM that performs well only on conflict-free benchmarks but collapses into incorrect behavior under contention has failed the basic contract. Under extreme contention, more elaborate systems should degrade toward a safe serial execution, not toward torn reads, failed validation, or memory-management bugs.
+In the companion codebase this appears in the common denominator exposed by the Part~IV runtimes. An application enters a transaction, performs instrumented loads and stores, and asks the runtime to commit. If the runtime detects a conflict, the transaction aborts and the application retries. The underlying backend decides how conflict detection and validation work: SGL serializes through one lock; TL2 uses versioned ownership records; NOrec validates against a global sequence; TSC-TM uses timestamp-counter ordering; persistent and distributed variants add durability or coordination. The source-level protocol remains the same.
 
-The companion codebase exposed one subtle version of this rule. During single-threaded initialization it is tempting to replace \texttt{tm\_malloc}, \texttt{tm\_free}, \texttt{tm\_read}, and \texttt{tm\_write} with direct stubs. That can appear harmless because there is no concurrency yet. It is not harmless. Initialization often creates objects that later participate in transactional validation, allocation tracking, persistence metadata, or ownership protocols. If initialization bypasses the real backend hooks, later tests may execute with silently disabled validation or incomplete metadata. The fixed rule is simple: even single-threaded setup routes memory and access operations through the selected backend.
+The minimal API hides a transaction descriptor. Each participating thread needs thread-local state: a read set, a write set, a nesting depth or status flag, a retry target, and backend-specific metadata. This is why practical systems often require thread-entry instrumentation. A thread must be initialized before its first transaction and cleaned up at exit. With an executor or task runtime, that requirement moves from ``thread starts once'' to ``worker is prepared before running transactional closures.''
 
-The PlusCal/SGL model from Part~III is the reference execution: one process owns the lock, executes the transaction body, updates the bank state, and releases the lock. There are no read-write conflicts to discover because the model forbids interleaving at the transaction granularity.
+Although the core is byte-oriented, programmers rarely want to write byte loops. Typed wrappers such as \texttt{tm\_read\_i4}, \texttt{tm\_write\_i4}, \texttt{tm\_read\_u8}, or \texttt{tm\_write\_ptr} convert typed operations into a uniform core operation over an address and size. The typed wrapper is not merely syntactic sugar: it fixes alignment, copying, and aliasing conventions at the API boundary. A word-based STM can still implement it by mapping an address to metadata; a byte-based redo log can copy the requested bytes directly.
 
-A thread serializer, studied next, is SGL with the mutex replaced by a work queue. It eliminates lock handoff among callers, but it does not create parallel transaction execution. It merely moves the single execution slot from the caller threads to a worker thread.
+The awkward part is retry. Many C implementations use \texttt{sigsetjmp}/\texttt{siglongjmp}, or an equivalent non-local control transfer, so that an abort can jump back to the most recent transaction start. This is efficient and keeps application code compact, but it creates a frame-lifetime hazard. If a transaction body stores pointers to stack objects, or relies on C++ destructors to run on every abort path, a non-local jump may invalidate those assumptions. Part~VI studies these hazards in detail. At the API level the lesson is already visible: a small primitive set makes the runtime portable, but it exposes responsibility for replay-safe code.
+
+The set of primitives is deliberately small. Nested transactions, retry policies, allocation protocols, logging conventions, and futures can all be built on top. The smaller the primitive contract, the easier it is for many backends to implement it consistently. The cost is that higher-level safety properties must be enforced by wrappers, coding discipline, compiler integration, or verification.
 
 \begin{figure}[htbp]
 \centering
+\resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
-    node distance=2.2cm,
+    node distance=1.8cm and 2.4cm,
     state/.style={draw, rounded corners, minimum width=2.8cm, minimum height=0.9cm, align=center},
-    edge/.style={-{Latex}, thick}
+    arrow/.style={-{Stealth}, thick}
 ]
-\node[state] (idle) {Idle\\lock free};
-\node[state, right=of idle] (active) {Active transaction\\lock held};
-\node[state, right=of active] (commit) {Commit\\publish writes};
-\node[state, below=of active] (queue) {Serializer queue\\pending tasks};
+\node[state] (outside) {Outside\\transaction};
+\node[state, right=of outside] (active) {Active\\read/write set};
+\node[state, right=of active] (commit) {Commit\\validate};
+\node[state, above right=1.2cm and 1.7cm of commit] (done) {Committed\\visible};
+\node[state, below right=1.2cm and 1.7cm of commit] (retry) {Aborted\\retry};
 
-\draw[edge] (idle) -- node[above]{\texttt{tm\_begin}} (active);
-\draw[edge] (active) -- node[above]{\texttt{tm\_commit}} (commit);
-\draw[edge] (commit) to[bend left=25] node[below]{unlock} (idle);
-\draw[edge] (queue) -- node[right]{dequeue one} (active);
-\draw[edge] (idle) -- node[left]{submit} (queue);
-\draw[edge] (active) to[loop above] node{reads/writes} (active);
-\end{tikzpicture}
-\caption{Non-speculative transactional execution. SGL admits one caller by a lock; a serializer admits one submitted task by a queue. Both execute at most one transaction body at a time.}
-\label{fig:nonspec-state-machine}
+\draw[arrow] (outside) -- node[above]{\texttt{tm\_begin}} (active);
+\draw[arrow] (active) edge[loop above] node{\texttt{tm\_read}/\texttt{tm\_write}} (active);
+\draw[arrow] (active) -- node[above]{\texttt{tm\_end}} (commit);
+\draw[arrow] (commit) -- node[above left]{valid} (done);
+\draw[arrow] (commit) -- node[below left]{conflict} (retry);
+\draw[arrow] (retry) |- node[pos=0.25, below]{loop} (outside);
+\end{tikzpicture}%
+}
+\caption{Control states exposed by the synchronous transaction API. Backends differ in validation and metadata, but the source-level protocol is the same.}
+\label{fig:api-state-machine}
 \end{figure}
+
+Figure~\ref{fig:api-state-machine} is the programmer-visible state machine. It says nothing about the validation algorithm, but it fixes the obligation of the caller: transactional reads and writes occur only in the active state; visibility occurs only after a successful commit; abort returns control to retry code, not to a half-committed continuation.
+
+\section{Worked Example: The Transfer, on the Classic API}
+\index{TMD API}\index{tm\_begin}\index{tm\_end}\index{retry loop}
+\label{sec:api-example}
+
+Chapter~1's running example, expressed with the synchronous API and an
+explicit retry loop:
+
+\begin{lstlisting}[language=C, caption={transfer on the synchronous API.}]
+int transfer(int *a, int *b, int n) {
+    int attempts = 0;
+    for (;;) {
+        tm_begin();
+        attempts++;
+        int ba = tm_read_i4(a);
+        int bb = tm_read_i4(b);
+        if (ba - n < 0 || bb + n < 0) { tm_end(); return 0; }
+        tm_write_i4(a, ba - n);
+        tm_write_i4(b, bb + n);
+        if (tm_end() == TM_COMMITTED) return attempts;  /* done */
+        /* aborted: loop and retry */
+    }
+}
+\end{lstlisting}
+
+The code has the shape of an ordinary sequential transfer, but every shared access is routed through the transaction. The two reads define the snapshot used by the decision. The two writes are tentative until \texttt{tm\_end}. If validation fails, neither write becomes part of the abstract history, and the loop re-executes with a fresh snapshot.
+
+The early return deserves attention. The example calls \texttt{tm\_end()} before returning failure, which treats the read-only decision as a transaction. Some APIs provide an explicit \texttt{tm\_abort()} or \texttt{tm\_cancel()} for application-level cancellation. Either convention is valid if the runtime specifies it clearly. What is not valid is leaving the active state by ordinary return while the runtime still believes a descriptor is live.
+
+For a successful transfer of amount \texttt{n}, the local invariant is:
+
+$$
+a' + b' = (a - n) + (b + n) = a + b
+$$
+
+The floor condition is a precondition for installing the write set. If \texttt{a - n < 0}, the transaction commits no debit. If concurrent transactions race on the same accounts, the backend may abort one of them, but no interleaving observes only the debit or only the credit.
+
+Compare with Chapter~1's lock-based version: no lock ordering, no unlock on every early-return path, and the two writes are atomic by construction. The \texttt{sigsetjmp}/\texttt{siglongjmp} machinery hides in \texttt{tm\_begin} and \texttt{tm\_end} --- the frame-lifetime hazard of Part~VI. Every backend in Part~IV implements exactly these five functions, so this source compiles unchanged across all of them. Exercise~3 asks for the \texttt{\_\_transaction\_atomic} equivalent; note the retry loop disappears --- the compiler generates it.
+
+\section{Worked Example: A Lambda Wrapper}
+\index{transactional lambda}\index{C++ wrapper}\index{retry loop}
+
+A thin C++ wrapper can remove duplicated retry loops while preserving the same
+backend contract. The body is still responsible for using instrumented loads and
+stores.
+
+\begin{lstlisting}[language=C++, caption={a C++ retry wrapper over the classic API.}]
+extern "C" {
+enum { TM_ABORTED = 0, TM_COMMITTED = 1 };
+
+void tm_begin(void);
+int  tm_end(void);
+int  tm_read_i4(const int *addr);
+void tm_write_i4(int *addr, int value);
+}
+
+template <class Body>
+auto atomic_retry(Body body) -> decltype(body()) {
+    for (;;) {
+        tm_begin();
+
+        auto result = body();
+
+        if (tm_end() == TM_COMMITTED)
+            return result;
+
+        /* aborted: discard result and execute body again */
+    }
+}
+
+int transfer_with_floor(int *from, int *to, int amount, int from_floor) {
+    return atomic_retry([=]() -> int {
+        if (amount <= 0)
+            return 0;
+
+        int bf = tm_read_i4(from);
+        int bt = tm_read_i4(to);
+
+        if (bf - amount < from_floor)
+            return 0;
+
+        tm_write_i4(from, bf - amount);
+        tm_write_i4(to,   bt + amount);
+        return 1;
+    });
+}
+\end{lstlisting}
+
+The money-conservation step for the successful path is local to the closure:
+
+$$
+\mathit{from}' + \mathit{to}' =
+(\mathit{from} - \mathit{amount}) + (\mathit{to} + \mathit{amount})
+=
+\mathit{from} + \mathit{to}
+$$
+
+The wrapper changes the surface area of the API without changing the backend ABI. The body is a value. The retry policy is centralized. Tests can wrap many operations with the same helper. This is often the first engineering step in a research implementation: keep the C ABI stable, then build safer idioms above it in C++.
+
+The wrapper also marks a boundary that cannot be crossed magically. It does not instrument ordinary loads and stores. If the body dereferences \texttt{*from} directly, the runtime does not know that \texttt{from} belongs in the read set. Similarly, if the closure prints a message, pushes to a non-transactional vector, releases memory, or sends a network request, that side effect may happen repeatedly under abort. A closure-based API improves structure, not semantics.
+
+The wrapper centralises retry policy; the transfer code only describes the atomic update. The closure must be replay-safe: printing, freeing memory, or sending messages inside the body would repeat on abort. This is not language integration. Ordinary loads and stores are still ordinary loads and stores; the wrapper cannot instrument them. And destructors are not a complete substitute for the API: if a backend restarts with \texttt{siglongjmp}, C++ stack unwinding does not run.
+
+\section{Language‑Integrated Keywords}
+
+Language-integrated transactions move the API boundary into the compiler. GCC's \texttt{\_\_transaction\_\allowbreak atomic} is the canonical C/C++ example: the programmer writes a block, and the compiler inserts transaction begin and commit operations, instruments memory accesses, and enforces restrictions on calls from inside the block. The programmer no longer writes a retry loop, and common mistakes such as forgetting \texttt{tm\_end()} disappear.
+
+The appeal is clear. The transaction is syntactically scoped. The compiler can distinguish transactional and non-transactional code. It can instrument ordinary-looking loads and stores, reject unsafe calls, and coordinate with exception handling. In a successful implementation the programmer sees something close to the ideal notation: execute this block atomically.
+
+The cost is also clear. Keywords require compiler, runtime, and ABI support. The implementation must define what happens when a block throws an exception, calls a function that performs I/O, allocates memory, or touches inline assembly. It must decide how cancellation differs from conflict abort. It must preserve opacity: even a transaction that later aborts should not observe inconsistent intermediate states that allow undefined behavior before validation catches up.
+
+An explicit API is easier to port across backends because it is just function calls. A keyword API is easier to use correctly because the compiler controls the shape of the transaction. This is the recurring API trade-off: portability and transparency on one side, static checking and syntactic safety on the other.
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{M{0.22\linewidth}M{0.23\linewidth}M{0.23\linewidth}M{0.22\linewidth}}
+\begin{tabular}{M{0.19\linewidth}M{0.23\linewidth}M{0.23\linewidth}M{0.23\linewidth}}
 \hline
-\thb{0.22\textwidth}{Design} & \thb{0.23\textwidth}{Serialization point} & \thb{0.23\textwidth}{Main cost} & \thb{0.22\textwidth}{Correctness argument} \\
+\thb{0.19\textwidth}{API style} & \thb{0.23\textwidth}{Instrumentation point} & \thb{0.23\textwidth}{Retry owner} & \thb{0.23\textwidth}{Main engineering risk} \\
 \hline
-SGL & Global mutex at \texttt{tm\_begin} & Lock contention and lost parallelism & Mutual exclusion gives a single total order \\
-Thread serializer & Worker dequeues one task & Submission, queueing, loss of locality & Worker order is the serialization order \\
-DistributedSGL & Distributed lock or sequencer & Network latency and failure handling & One distributed owner at a time \\
-PersistentSGL & Persistent critical section protocol & Flushes, fences, recovery metadata & Durable order follows lock-protected commit order \\
+Classic calls & Programmer / wrapper & Application loop & Forgotten access or end path \\
+Language keyword & Compiler & Compiler/runtime & Compiler and ABI support \\
+Typed object wrapper & Library type & Library/runtime & Escaping raw references \\
+Future-based closure & Executor worker & Executor & Replay of side effects \\
+Distributed transaction & Client coordinator & Coordinator & Partial failure and timeouts \\
 \hline
 \end{tabular}
-\caption{A taxonomy of non-speculative serializers. The mechanism changes, but the proof shape is the same: reduce execution to a sequential history.}
-\label{tab:nonspec-taxonomy}
+\caption{API families used in TM systems. The lower-level runtime may still be TL2, NOrec, SGL, Percolator-style two-phase commit, or another backend; the table classifies the programming interface.}
+\label{tab:api-taxonomy}
 \end{table}
 
-The thread-serializer row is not just a thought experiment: the companion
-repository ships one as the \texttt{expli::QueueExecutor}
-(\texttt{explicit\_api/cpp/include/\allowbreak tx\_executor.hpp}, backed by
-\texttt{queue\_runtime.cpp}), and the bank benchmark runs in this mode with
-\texttt{-{}-queue}. Transaction bodies are submitted as closures to a pool of
-worker threads; each worker initializes its own TM thread state and drains
-its queue serially. Two details repay attention when reading the code: the
-worker threads record their stack bounds so the runtime can prove that a
-referenced address is stack-local and bypass instrumentation
-(\texttt{stm::tm\_record\_\allowbreak stack\_\allowbreak bounds}), and statically allocated
-TM-annotated globals are registered explicitly
-(\texttt{tm\_register\_\allowbreak global})
-because they do not live in the TM region --- both are invisible at the
-algorithmic level but load-bearing in practice.
+Table~\ref{tab:api-taxonomy} separates programming interface from implementation technique. For example, a future-based API can still execute a TL2-style transaction inside the worker. A distributed client API can present a closure while using a Percolator-style two-phase commit underneath. The table classifies where the programmer writes the transaction boundary and who owns retry, not the metadata algorithm.
 
-Amdahl's law gives the first-order bound. If fraction f of execution is serialized and N workers are available, the idealized speedup is
+\section{Asynchronous and Future‑Based APIs}
 
-$$
-S_{\max} = \frac{1}{f + \frac{1-f}{N}}
-$$
+A synchronous transaction is tied to the caller's stack. The caller enters the transaction, runs it, and leaves with either a result or an abort. An asynchronous API changes this shape: the caller submits a transaction as work, receives a handle, and later waits for the result. The transaction becomes a unit scheduled by an executor rather than a lexical region on the submitting thread.
 
-where f is the non-parallel fraction and N is the number of cores. For SGL, transaction execution itself belongs to the serialized fraction. The exact value depends on the workload, but the shape is invariant: once all useful work is inside the global lock, more cores mostly add waiting.
+This shift is attractive for systems that already have work queues. Worker threads can consume transaction closures, run the same classic API internally, and resolve futures after commit. The executor can choose scheduling order, limit concurrency, group similar operations, or batch validation attempts. None of that requires changing the bank-transfer body if the closure obeys the same rule as before: shared memory is accessed only through transactional operations.
 
-For example, if nearly all useful application work is performed inside transactions, f approaches one and the speedup approaches one regardless of the number of cores. This is not an implementation accident. It is the price paid for the simple proof.
+The price is lifetime complexity. A future may outlive the stack frame that submitted it. Capturing pointers to local variables is therefore unsafe unless the API proves that the future finishes before the frame exits. Thread-entry initialization also changes. With a synchronous API, the application can initialize transaction state when a user thread starts. With an executor, the worker owns transaction stack state; per-task setup must ensure that no stale descriptor is reused across logically separate transactions.
 
-\section{Thread‑Serializer / Queue‑Based TM}
+Future composition preserves the composability argument from Chapter~1. An atomic closure is a value: it can be stored, submitted, combined with other futures, and awaited at a dependency point. But this composability does not make side effects transactional. A closure that sends a message before commit can still send it twice if the transaction aborts and retries.
 
-A thread serializer uses one worker thread to execute submitted transactions sequentially from a queue. The calling threads package transaction bodies as tasks, submit them, and wait for results. The worker repeatedly dequeues one task, runs it to completion, records the result, and moves to the next task.
+\section{Worked Example: Futures for Batched Transfers}
+\index{transactional future}\index{executor}\index{batching}
 
-The important shift is that mutual exclusion is no longer obtained by making many callers contend for a single lock. Instead, callers contend for queue insertion, and the worker owns the mutable state by convention. This can reduce lock handoff costs for tiny transactions, especially when the queue is efficient and the worker remains hot in cache. It can also hurt latency, because every operation now pays submission, wakeup, scheduling, and reply costs.
+A future-based API moves the retry loop into the worker. The caller receives a
+handle and later observes the committed result.
 
-A serializer is not merely an optimization of SGL. It changes the calling convention. The submitting thread no longer runs the transaction body; the worker does. Therefore transaction-local state cannot be stored only in thread-local variables of the submitter. The descriptor must travel with the task or be rebuilt by the worker.
-
-This matters for real TM backends. A transaction descriptor often contains read sets, write sets, allocation logs, statistics counters, nesting state, epoch information, or persistence metadata. In SGL the descriptor may naturally live on the caller's stack. In a serializer it must be part of the submitted closure, stored in the queue node, or allocated in worker-owned storage. Treating the two designs as interchangeable is a common source of bugs.
-
-Queue serializers also clarify the meaning of a serialization point. For SGL, the serialization point may be taken as the lock acquisition or the commit while the lock is held, depending on the proof style. For a serializer, the serialization order is the dequeue order. The transaction may have been submitted much earlier, but it does not observe memory until the worker runs it.
-
-\section{Worked Example: Bank Transfer Under SGL}
-\label{sec:worked-sgl-bank}
-
-The running bank example has two invariants. First, no account may fall below its floor. Second, the total amount of money is conserved by transfers. SGL enforces both by making each transfer execute as one sequential critical section.
-
-The example below keeps the transactional interface even though the implementation is only a mutex. This is intentional. The same application code can later be moved to TL2, NOrec, TinySTM, or another backend without changing every access site. The abstraction boundary is part of the test: reads, writes, allocation, and commit must pass through the backend selected for the run.
-
-\begin{lstlisting}[language=C++, caption={A compilable SGL-style transactional bank transfer.}]
-#include <cassert>
-#include <cstdint>
-#include <iostream>
-#include <mutex>
-#include <numeric>
-#include <stdexcept>
-#include <thread>
-#include <vector>
-
-struct Account {
-    std::int64_t balance;
-    std::int64_t floor;
-};
-
-class SGLTM {
-public:
-    class Tx {
-    public:
-        explicit Tx(SGLTM& tm) : tm_(tm), active_(true) {
-            tm_.lock_.lock();
-        }
-
-        Tx(const Tx&) = delete;
-        Tx& operator=(const Tx&) = delete;
-
-        ~Tx() {
-            if (active_) {
-                tm_.lock_.unlock();
-            }
-        }
-
-        template <class T>
-        T read(const T& x) const {
-            return x;
-        }
-
-        template <class T>
-        void write(T& x, const T& v) {
-            x = v;
-        }
-
-        void commit() {
-            if (!active_) {
-                throw std::logic_error("double commit");
-            }
-            active_ = false;
-            tm_.lock_.unlock();
-        }
-
-    private:
-        SGLTM& tm_;
-        bool active_;
-    };
-
-    Tx begin() {
-        return Tx(*this);
-    }
-
-private:
-    std::mutex lock_;
-};
-
-class Bank {
-public:
-    Bank(std::size_t n, std::int64_t initial, std::int64_t floor)
-        : accounts_(n, Account{initial, floor}) {}
-
-    bool transfer(std::size_t from, std::size_t to, std::int64_t amount) {
-        if (from == to || from >= accounts_.size() || to >= accounts_.size()) {
-            return false;
-        }
-
-        auto tx = tm_.begin();
-
-        const std::int64_t from_balance = tx.read(accounts_[from].balance);
-        const std::int64_t from_floor = tx.read(accounts_[from].floor);
-        const std::int64_t to_balance = tx.read(accounts_[to].balance);
-
-        if (from_balance - amount < from_floor) {
-            tx.commit();
-            return false;
-        }
-
-        tx.write(accounts_[from].balance, from_balance - amount);
-        tx.write(accounts_[to].balance, to_balance + amount);
-
-        tx.commit();
-        return true;
-    }
-
-    std::int64_t total() const {
-        return std::accumulate(
-            accounts_.begin(), accounts_.end(), std::int64_t{0},
-            [](std::int64_t s, const Account& a) { return s + a.balance; });
-    }
-
-private:
-    SGLTM tm_;
-    std::vector<Account> accounts_;
-};
-
-int main() {
-    constexpr std::size_t accounts = 8;
-    constexpr std::int64_t initial = 100;
-    constexpr std::int64_t floor = 0;
-
-    Bank bank(accounts, initial, floor);
-    const std::int64_t before = bank.total();
-
-    std::vector<std::thread> threads;
-    for (std::size_t t = 0; t < 4; ++t) {
-        threads.emplace_back([&bank, t] {
-            for (int i = 0; i < 10000; ++i) {
-                const std::size_t from = (t + i) % 8;
-                const std::size_t to = (from + 1) % 8;
-                bank.transfer(from, to, 1);
-            }
-        });
-    }
-
-    for (auto& th : threads) {
-        th.join();
-    }
-
-    const std::int64_t after = bank.total();
-    assert(before == after);
-    std::cout << "money conserved: " << after << "\n";
-}
-\end{lstlisting}
-
-The linearization point is the interval protected by the global mutex. Reads and writes still go through \texttt{read} and \texttt{write}; replacing them with stubs during initialization can hide validation bugs in later backends. Failed transfers still commit a read-only transaction; there is no rollback path because no speculative write has escaped. The proof is independent of the number of calling threads: all completed transfers form the mutex acquisition order.
-
-The floor invariant is checked before either balance is changed. Since no other transaction can run between the check and the writes, the check remains valid until commit. The conservation invariant follows because the transaction subtracts and adds the same amount in one critical section.
-
-$$
-\sum_i balance_i' = \sum_i balance_i
-$$
-
-\section{Worked Example: Queue Serializer With Per-Task Descriptors}
-\label{sec:worked-serializer-bank}
-
-A serializer moves execution to a worker thread. The transaction descriptor is therefore attached to the submitted task. In this minimal example the descriptor is just the closure itself plus the returned future; real systems attach allocation logs, statistics, or backend-specific metadata.
-
-The bank object below is intentionally not internally synchronized. All access to it is made through the serializer. This is the same proof technique as SGL, but expressed as ownership transfer: while the worker executes a task, it is the only thread touching the bank state.
-
-\begin{lstlisting}[language=C++, caption={A compilable queue-based serializer for bank transfers.}]
-#include <cassert>
-#include <condition_variable>
-#include <cstdint>
+\begin{lstlisting}[language=C++, caption={submitting bank transfers as transactional futures.}]
 #include <future>
-#include <iostream>
-#include <mutex>
-#include <numeric>
-#include <queue>
-#include <stdexcept>
-#include <thread>
-#include <type_traits>
+#include <utility>
 #include <vector>
-#include <functional>
 
-struct Account {
-    std::int64_t balance;
-    std::int64_t floor;
-};
+extern "C" {
+enum { TM_ABORTED = 0, TM_COMMITTED = 1 };
 
-class Serializer {
-public:
-    Serializer() : stopping_(false), worker_([this] { run(); }) {}
+void tm_begin(void);
+int  tm_end(void);
+int  tm_read_i4(const int *addr);
+void tm_write_i4(int *addr, int value);
+}
 
-    Serializer(const Serializer&) = delete;
-    Serializer& operator=(const Serializer&) = delete;
+/* Concrete helper for transactions returning int. */
+template <class Body>
+std::future<int> submit_tx_int(Body body) {
+    return std::async(std::launch::async,
+        [body = std::move(body)]() mutable -> int {
+            for (;;) {
+                tm_begin();
 
-    ~Serializer() {
-        {
-            std::lock_guard<std::mutex> g(m_);
-            stopping_ = true;
-        }
-        cv_.notify_one();
-        worker_.join();
-    }
+                int result = body();
 
-    template <class F>
-    auto submit(F&& f) -> std::future<std::invoke_result_t<F&>> {
-        using R = std::invoke_result_t<F&>;
+                if (tm_end() == TM_COMMITTED)
+                    return result;
 
-        auto task = std::make_shared<std::packaged_task<R()>>(
-            std::forward<F>(f));
-        std::future<R> result = task->get_future();
-
-        {
-            std::lock_guard<std::mutex> g(m_);
-            if (stopping_) {
-                throw std::runtime_error("submit after stop");
+                /* aborted: retry on this worker */
             }
-            q_.push([task] { (*task)(); });
-        }
-
-        cv_.notify_one();
-        return result;
-    }
-
-private:
-    void run() {
-        for (;;) {
-            std::function<void()> job;
-
-            {
-                std::unique_lock<std::mutex> lk(m_);
-                cv_.wait(lk, [this] { return stopping_ || !q_.empty(); });
-
-                if (stopping_ && q_.empty()) {
-                    return;
-                }
-
-                job = std::move(q_.front());
-                q_.pop();
-            }
-
-            job();
-        }
-    }
-
-    std::mutex m_;
-    std::condition_variable cv_;
-    std::queue<std::function<void()>> q_;
-    bool stopping_;
-    std::thread worker_;
-};
-
-class Bank {
-public:
-    Bank(std::size_t n, std::int64_t initial, std::int64_t floor)
-        : accounts_(n, Account{initial, floor}) {}
-
-    bool transfer_serial(std::size_t from, std::size_t to,
-                         std::int64_t amount) {
-        if (from == to || from >= accounts_.size() || to >= accounts_.size()) {
-            return false;
-        }
-
-        Account& a = accounts_[from];
-        Account& b = accounts_[to];
-
-        if (a.balance - amount < a.floor) {
-            return false;
-        }
-
-        a.balance -= amount;
-        b.balance += amount;
-        return true;
-    }
-
-    std::int64_t total_serial() const {
-        return std::accumulate(
-            accounts_.begin(), accounts_.end(), std::int64_t{0},
-            [](std::int64_t s, const Account& a) { return s + a.balance; });
-    }
-
-private:
-    std::vector<Account> accounts_;
-};
-
-int main() {
-    Serializer ser;
-    Bank bank(8, 100, 0);
-
-    const std::int64_t before =
-        ser.submit([&bank] { return bank.total_serial(); }).get();
-
-    std::vector<std::future<bool>> replies;
-    for (int i = 0; i < 40000; ++i) {
-        replies.push_back(ser.submit([&bank, i] {
-            const std::size_t from = static_cast<std::size_t>(i % 8);
-            const std::size_t to = (from + 1) % 8;
-            return bank.transfer_serial(from, to, 1);
-        }));
-    }
-
-    for (auto& f : replies) {
-        (void)f.get();
-    }
-
-    const std::int64_t after =
-        ser.submit([&bank] { return bank.total_serial(); }).get();
-
-    assert(before == after);
-    std::cout << "money conserved: " << after << "\n";
-}
-\end{lstlisting}
-
-The queue order is the serialization order. The bank object is unsynchronized internally; safety comes from the single worker. The submitter waits on a \texttt{future}, which makes latency visible even when the worker has no lock contention. Thread-local transaction descriptors would be wrong here: the submitting thread and executing thread are different.
-
-The serializer can outperform a contended lock only when the avoided lock traffic is larger than submission and reply overhead. It cannot overcome the fundamental sequential bottleneck. Under a burst of requests, the worker becomes the limiting server and queueing delay dominates.
-
-\paragraph{The companion's version: \texttt{bank --queue}.}
-The repository's bank benchmark runs its transfer workload through exactly
-this pattern, with two production hardenings worth noticing. The executor is
-\texttt{expli::QueueExecutor} constructed with as many workers as queues
-(\texttt{QueueExecutor(nb\_threads, nb\_threads)}), installed in a global hook
-so that every \texttt{TM<T>::transaction(...)} call site is routed through it
-transparently --- inline mode executes the body immediately, queue mode
-enqueues it. Synchronous calls enqueue the closure plus an atomic done-flag
-and spin-wait; asynchronous calls return a future instead. The hardenings:
-first, worker threads record their stack bounds at startup
-(\texttt{stm::tm\_record\_stack\_bounds}) so the address classifier can prove
-stack-locality for bypass decisions, and TM-annotated globals are registered
-explicitly (\texttt{tm\_register\_global}) because static storage is outside
-the mmap'd TM region --- omit either and the instrumentation silently stops
-tracking real accesses, the Bug-1 pattern of \S\ref{sec:debugging-story}.
-Second, all workers park on a start-gate barrier before the measurement
-region begins, so throughput numbers measure transactions rather than thread
-startup. Running it:
-
-\begin{lstlisting}[caption={The companion bank under queue serialization versus inline execution.}]
-$ bank -a 64 -t 4 -d 2000            # inline: callers run TXs directly
-Mode: inline
-...
-$ bank -a 64 -t 4 -d 2000 --queue    # queue: N workers drain N queues
-Mode: queue (4 workers, 4 queues)
-...
-\end{lstlisting}
-
-The instructive observation is that queue mode does not beat inline mode on
-this workload: each caller-thread/worker pair adds a handoff, and the money
-invariant holds in both modes. The exercise is not to find a winner but to see
-the serialization point move from ``caller holds the backend'' to ``worker
-dequeues the task'' with the application code unchanged --- which is precisely
-the property that makes the serializer a drop-in backend rather than a
-rewrite.
-
-\section{Calvin: Static Transactions and Deterministic Execution}
-\index{static transaction}\index{Calvin}\index{deterministic execution}\index{sequencer}\index{snapshot isolation}
-\label{sec:calvin-static}
-
-The serializer of \S\ref{sec:worked-serializer-bank} executes one transaction body at a time, but the calling threads still build the transaction body \emph{speculatively}: they read shared memory, guess, and hope the guess was right. Calvin takes a different position. A transaction is declared \emph{before} it executes: the read-set, the write-set, and the computation are all fixed up front. The sequencer then assigns a total order, snapshots the declared addresses, and runs each body against its own snapshot. Writes are buffered and published only after the body returns successfully.
-
-The word ``static'' is the distinguishing property. In NOrec, TL2, or TinySTM the runtime discovers the read-set and write-set as the transaction executes --- those sets may be different on every retry. In Calvin, the programmer specifies the access sets at declaration time. That static knowledge has two consequences. First, the runtime can validate every declared read against the snapshot \emph{before} executing the body, so no work is wasted on a transaction whose snapshot is already stale. Second, execution is deterministic: given the same snapshot, the body always produces the same writes. Determinism simplifies reasoning about correctness, because the commit of one transaction cannot depend on timing details that differ between runs.
-
-The trade-off is inflexibility. If the read-set is not known until the body runs, the programmer must over-approximate (declaring more addresses than needed, which widens the conflict window) or structure the code so that the access set is visible at the call site. This is natural for message-queue workers, financial settlements, and event-driven simulations where each event's inputs are known before the computation starts, but awkward for interactive code where the read-set depends on data read during execution.
-
-The companion codebase's \texttt{calvin} backend is named after, but is not, the deterministic distributed database of Thomson et al.~\cite{thomson12calvin}; it is a two-phase OCC shared-memory backend. The model below is closer to the original Calvin idea: static declarations, sequenced execution, deterministic results.
-
-\subsection{State: declarations, memory, and a sequencer}
-
-Listing~\ref{lst:calvin-state} defines the shared memory (one atomic word per account), the transaction declaration type (read-set, write-set, and a body that receives a snapshot and returns writes or abort), and the sequencer that dequeues declarations in order, snapshots the read-set, and executes each body.
-
-\begin{lstlisting}[language=Rust, caption={Calvin state: word-addressed memory, static transaction declarations, and the sequencer.}, label={lst:calvin-state}]
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as O};
-use std::sync::Arc;
-use std::thread;
-
-struct Mem { data: Vec<AtomicU64> }
-impl Mem {
-    fn new(n: usize) -> Self {
-        Mem { data: (0..n).map(|_| AtomicU64::new(0)).collect() }
-    }
-    fn alloc(&mut self, v: u64) -> usize {
-        let i = self.data.len();
-        self.data.push(AtomicU64::new(v));
-        i
-    }
-    fn get(&self, a: usize) -> u64 {
-        self.data[a].load(O::Acquire)
-    }
-    fn set(&self, a: usize, v: u64) {
-        self.data[a].store(v, O::Release);
-    }
-}
-
-type BodyFn =
-    Box<dyn Fn(&[u64]) -> Option<Vec<(usize, u64)>> + Send>;
-
-struct TxDecl {
-    reads:  Vec<usize>,            // addresses to snapshot
-    writes: Vec<usize>,            // addresses the body may modify
-    body:   BodyFn,                // None = abort; Some(writes) = commit
-}
-
-struct Sequencer { mem: Arc<Mem>, seqno: AtomicUsize }
-impl Sequencer {
-    fn new(mem: Arc<Mem>) -> Self {
-        Sequencer { mem, seqno: AtomicUsize::new(0) }
-    }
-    fn snapshot(&self, addrs: &[usize]) -> Vec<u64> {
-        addrs.iter().map(|&a| self.mem.get(a)).collect()
-    }
-\end{lstlisting}
-
-The \texttt{TxDecl} type is the static contract. The \texttt{reads} and \texttt{writes} vectors declare which addresses the body will touch; the \texttt{body} closure receives the snapshot values at those addresses and returns \texttt{None} (abort) or \texttt{Some(writes)} (commit). The body never touches shared memory directly --- all reads come from the snapshot, all writes are buffered.
-
-\subsection{Execute and publish}
-
-Listing~\ref{lst:calvin-exec} is the execution loop. The sequencer dequeues one declaration, snapshots the read-set, calls the body, and publishes the writes. The important property is that the body is never retried: if the snapshot is stale, the declaration fails immediately at the \emph{declaration} phase, not the \emph{execution} phase. This is the fundamental difference from speculative STMs: there is no ``abort and retry the body'' because the body is never allowed to see stale data.
-
-\begin{lstlisting}[language=Rust, caption={Calvin execution: snapshot, run body, publish writes. No retry needed.}, label={lst:calvin-exec}]
-    fn run(&self, queue: Vec<TxDecl>) {
-        for decl in queue {
-            let seq = self.seqno.fetch_add(1, O::Relaxed);
-            let snap = self.snapshot(&decl.reads);
-            match (decl.body)(&snap) {
-                None => {
-                    eprintln!("[seq={}] abort (stale snap)", seq);
-                }
-                Some(writes) => {
-                    for (a, v) in writes {
-                        self.mem.set(a, v);
-                    }
-                    println!("[seq={}] committed  snap={:?}",
-                             seq, snap);
-                }
-            }
-        }
-    }
-}
-\end{lstlisting}
-
-The sequencer is single-threaded, which makes the total order explicit: the dequeue order \emph{is} the serialization order. In a distributed Calvin system the sequencer would be a separate process assigning sequence numbers; here the in-process loop is enough to show the idea. The \texttt{AtomicUsize} counter records how many transactions have been processed, and the \texttt{Relaxed} ordering on \texttt{fetch\_add} is sufficient because the total order is established by the sequential loop itself, not by the counter value.
-
-\subsection{Worked Example: Bank Transfer}
-
-Listing~\ref{lst:calvin-demo} builds the transaction queue: transfer declarations interleaved with read-only checker assertions. The deterministic Fisher-Yates shuffle (fixed seed) ensures reproducible interleaving across runs. Each transfer declares its read-set and write-set explicitly; the checker declares read-only addresses and asserts conservation.
-
-\begin{lstlisting}[language=Rust, caption={Calvin bank demo: static transfer declarations, deterministic shuffle, conservation assertion mid-flight.}, label={lst:calvin-demo}]
-const ITERS: u64 = 500;
-const START: u64 = 1_000_000;
-
-fn main() {
-    let mut mem = Mem::new(0);
-    let a = mem.alloc(START);
-    let b = mem.alloc(START);
-    let mem = Arc::new(mem);
-
-    let mut txs: Vec<TxDecl> = Vec::new();
-    for t in 0..8 {
-        let (src, dst) = if t % 2 == 0 { (a, b) }
-                         else { (b, a) };
-        for _ in 0..ITERS {
-            txs.push(TxDecl {
-                reads:  vec![src, dst],
-                writes: vec![src, dst],
-                body: Box::new(move |snap| {
-                    let (s, d) = (snap[0], snap[1]);
-                    if s < 10 { return None; }
-                    Some(vec![(src, s - 10), (dst, d + 10)])
-                }),
-            });
-        }
-    }
-    for _ in 0..500 {
-        txs.push(TxDecl {
-            reads:  vec![a, b],
-            writes: vec![],
-            body: Box::new(move |snap| {
-                assert_eq!(snap[0] + snap[1], 2 * START);
-                Some(vec![])
-            }),
         });
-    }
-    // Deterministic shuffle (fixed seed).
-    { let mut s: u64 = 0xDEAD_BEEF_CAFE_1234;
-      for i in (1..txs.len()).rev() {
-          s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
-          let j = (s >> 33) as usize % (i + 1);
-          txs.swap(i, j);
-      }
-    }
+}
 
-    let seq = Sequencer::new(mem.clone());
-    thread::spawn(move || seq.run(txs)).join().unwrap();
+std::future<int> submit_transfer(int *from, int *to,
+                                 int amount, int from_floor) {
+    return submit_tx_int([=]() -> int {
+        if (amount <= 0)
+            return 0;
 
-    let (fa, fb) = (mem.get(a), mem.get(b));
-    println!("\nfinal A={} B={} total={}", fa, fb, fa + fb);
-    assert_eq!(fa + fb, 2 * START);
+        int bf = tm_read_i4(from);
+        int bt = tm_read_i4(to);
+
+        if (bf - amount < from_floor)
+            return 0;
+
+        tm_write_i4(from, bf - amount);
+        tm_write_i4(to,   bt + amount);
+        return 1;
+    });
+}
+
+int submit_batch_and_count(int *a, int *b, int *c) {
+    std::vector<std::future<int>> fs;
+
+    fs.push_back(submit_transfer(a, b, 10, 0));
+    fs.push_back(submit_transfer(b, c,  7, 0));
+    fs.push_back(submit_transfer(c, a,  3, 0));
+
+    int committed_successes = 0;
+    for (auto &f : fs)
+        committed_successes += f.get();
+
+    return committed_successes;
 }
 \end{lstlisting}
 
-The checker runs inside the sequencer's total order, interleaved with transfers at deterministic positions. Because the snapshot is taken before each body runs, the checker sees a consistent world at every point --- money is either pre-transfer or post-transfer, never half-transferred. This is opacity by construction: no concurrent mutation can sneak between the snapshot and the body because the sequencer is single-threaded.
+The three submitted transfers may execute in any order. If all three commit successfully, the total across \texttt{a}, \texttt{b}, and \texttt{c} is unchanged because each individual transaction preserves its two-account sum. If one returns \texttt{0} because of a floor check, it performs no write and therefore also preserves the global sum. Conflicts affect progress, not the abstract invariant.
 
-Three properties distinguish Calvin from the speculative designs of Chapter~9:
+A production executor would normally avoid creating one operating-system thread per \texttt{std::async}. The listing uses \texttt{std::async} because it is compact and standard. A fixed worker pool would keep per-worker transaction descriptors hot, reduce allocation overhead, and make batching decisions explicit.
 
-\begin{itemize}
-    \item \textbf{No abort-retry loop}. A speculative STM retries the body when validation fails; Calvin rejects stale declarations before the body runs. The body is never wasted work.
-    \item \textbf{Determinism}. Given the same declaration queue, the commit order and the final memory state are identical across runs. Speculative STMs can produce different outcomes depending on thread scheduling.
-    \item \textbf{Static access sets}. The read-set and write-set are visible at declaration time, enabling the runtime to batch, reorder, or optimize declarations before executing them.
-\end{itemize}
+The caller no longer owns transaction stack state; the worker does. Futures make composition explicit: submit many transactions, then join at the dependency point. A real executor can batch validation or scheduling decisions; the source-level API does not require the caller to know which backend is underneath. The closure must capture stable addresses: capturing pointers to caller stack variables is unsafe if the future may outlive the stack frame.
 
-The price is the loss of dynamic read-sets. A body that reads an address discovered during execution cannot declare that address up front, so Calvin is best suited for workloads where inputs are known: message processing, event handlers, map-reduce workers, and batch settlement. For interactive or exploratory code, the speculative designs of Chapter~9 remain the right tool.
+\section{Object‑Oriented and Polymorphic Interfaces}
+
+Object-oriented APIs hide instrumentation inside types. Instead of calling \texttt{tm\_read\_i4(\&x)}, the programmer may write through a wrapper such as \texttt{TM<int>}. The wrapper overloads operations, records reads and writes with the runtime, and prevents some accidental raw access. Template-based STMs, including systems in the RSTM family, use this style to make transactions look like ordinary generic C++ code.
+
+The benefit is type safety at the use site. A \texttt{TM<T>} value can expose only operations that are meaningful inside a transaction. It can choose whether reads return copies, proxies, or transactional references. It can encode ownership rules in constructors and destructors. A transaction-object or visitor pattern goes further: application objects provide methods that register their own fields with the runtime, allowing the transaction to operate at object granularity.
+
+The central trade-off is granularity. Per-object locking and validation are simple, but they can be coarse. Two transactions that update different fields of the same object may conflict unnecessarily. Word-level STM reclaims fine granularity by indexing metadata by address, but then the wrapper must map object operations back to word or byte ranges. This tension appears repeatedly in real systems: the safer interface is often the coarser one, and the faster fine-grained interface is easier to misuse.
+
+Polymorphism adds another cost. Virtual dispatch inside a transaction can obscure which memory locations are touched. If a virtual method performs non-transactional I/O, the runtime cannot roll it back. A good object-oriented API therefore needs a visible distinction between transactional methods, irrevocable methods, and methods forbidden inside a transaction.
+
+\section{The Hook System: Connecting Backends to Benchmarks}
+\index{hook system}\index{function pointer dispatch}\index{TMRealHooks}\index{backend registration}
+\label{sec:hook-system}
+
+Every API style in the preceding sections ultimately calls the same set of
+C functions: \texttt{tm\_begin}, \texttt{tm\_end}, \texttt{tm\_read\_i4},
+\texttt{tm\_write\_i4}, and so on.  In the companion codebase these are not
+ordinary functions but \emph{DATA function-pointer variables}---their addresses
+are taken and called through, not called directly.  This indirection is the
+hook system: a single dispatch layer that connects any benchmark to any backend
+without recompilation.
+
+\paragraph{The hook table.}
+The file \rep{backends/tm\_impl/common/tm\_hooks.hpp} declares a struct
+containing one function pointer per TM operation:
+
+\begin{lstlisting}[caption={The TMRealHooks struct (\texttt{tm\_hooks.hpp}).}]
+struct TMRealHooks {
+    void  (*tm_begin)(void);
+    void  (*tm_end)(void);
+    void  (*tm_init)(void);
+    void  (*tm_exit)(void);
+    void  (*tm_init_thread)(void);
+    void  (*tm_exit_thread)(void);
+    void* (*tm_malloc)(size_t);
+    void* (*tm_calloc)(size_t, size_t);
+    void  (*tm_read_i4)(const void*);
+    void  (*tm_write_i4)(void*, int);
+    void  (*tm_read_u8)(const void*);
+    void  (*tm_write_u8)(void*, uint64_t);
+    void  (*tm_read_f4)(const void*);
+    void  (*tm_write_f4)(void*, float);
+    void  (*tm_read_f8)(void*);
+    void  (*tm_write_f8)(void*, double);
+    void  (*tm_trace)(int, void*, size_t);
+    void* (*tm_get_thread_state)(void);
+    /* ... additional typed read/write pairs ... */
+};
+\end{lstlisting}
+
+\noindent
+The global variables \texttt{tm\_begin}, \texttt{tm\_end},
+\texttt{tm\_read\_i4}, etc.\ (lowercase, matching the classic API names)
+are initialized to stubs that do nothing or return zero.  When a backend
+registers, these stubs are replaced with real implementations.
+
+\paragraph{Backend registration.}
+Each backend's \texttt{*\_runtime.cpp} file calls
+\texttt{tm\_register\_real\_hooks()} at startup.  The NOrec runtime
+(\rep{backends/tm\_impl/norec/NOrec\_runtime.cpp}) is a representative
+example:
+
+\begin{lstlisting}[caption={NOrec hook registration (\texttt{NOrec\_runtime.cpp}).}]
+static TMRealHooks hooks;
+hooks.tm_begin  = norec_begin;
+hooks.tm_end    = norec_end;
+hooks.tm_read_i4  = norec_read_i4;
+hooks.tm_write_i4 = norec_write_i4;
+hooks.tm_malloc = norec_malloc;
+hooks.tm_init   = norec_init;
+hooks.tm_exit   = norec_exit;
+/* ... all fields filled ... */
+tm_register_real_hooks(&hooks);
+\end{lstlisting}
+
+\noindent
+After this call, every subsequent \texttt{tm\_read\_i4(addr)} in the
+benchmark resolves through the global function pointer to
+\texttt{norec\_read\_i4(addr)}.  The benchmark never includes
+\texttt{NOrec.hpp}; it links against the runtime object file, and the
+dispatch happens at the function-pointer level.
+
+\paragraph{Runtime swap.}
+Because the dispatch is through DATA variables, the backend can be swapped at
+runtime: \texttt{tm\_swap\_runtime()} saves the current hooks, installs a
+different backend's hooks, and the next \texttt{tm\_begin()} call enters the
+new algorithm.  The function \texttt{tm\_get\_real\_hooks()} retrieves the
+currently registered hooks for inspection or save/restore.
+
+\paragraph{The dispatch path.}
+A typical read goes through three levels:
+
+\begin{enumerate}
+  \item The benchmark calls \texttt{tm\_read\_i4(\&x)} (a DATA function
+        pointer).
+  \item The pointer resolves to \texttt{norec\_read\_i4} (or TinySTM,
+        TL2, etc.), which checks whether the address is in the TM region
+        and either tracks it in the read-set or passes through to a
+        direct load.
+  \item If the address is not in the TM region (e.g.\ stack-local), the
+        \texttt{LLVM\_TM\_ADDR\_CHECK} macro bypasses the backend
+        entirely and performs a plain load.
+\end{enumerate}
+
+\noindent
+This design means the same benchmark binary can link against different
+backends by swapping the runtime object file, or even swap backends at
+runtime via \texttt{tm\_swap\_runtime()}.  The hook system is the
+\emph{only} coupling between benchmarks and backends.
 
 \section{Summary}
 
-Non-speculative designs are correct by construction and serve as a baseline. Their lack of concurrency limits scalability, but their proof obligations are small: every transaction observes a state produced by the previous committed transaction.
+API design directly affects usability, safety, and performance. The classic synchronous API is small, portable, and close to the runtime, but it relies on programmers or wrappers to place boundaries and instrument accesses correctly. Language keywords shift responsibility to the compiler, reducing common mistakes at the cost of toolchain complexity. Lambda and object wrappers improve structure while preserving a conventional backend ABI, but they cannot make ordinary side effects transactional. Future-based interfaces turn transactions into scheduled work, opening the door to batching and executor-level policies while introducing lifetime and replay hazards.
 
-SGL is the simplest opacity proof in the book. Queue serializers replace lock handoff with task handoff. Calvin replaces speculative execution with static declarations and deterministic sequencing: the read-set is fixed before the body runs, so stale snapshots are rejected without wasting execution work. The trade-off is inflexibility --- the access set must be known at declaration time.
-
-In the companion codebase, SGL-like designs are not toys. They serve as reference backends and regression oracles alongside speculative systems such as NOrec, TL2, TSC-TM, SwissTM, TinySTM, and others. The reported test suites pass \texttt{test\_tx} 114/114 and \texttt{test\_ds} 207/207 for the implemented backends. Measured results on the M1 Pro fuzz/bank workload also show why the baseline matters: TL2 and TSC-TM reach about 2.06M and 2.05M transactions per second in the reported runs, while NOrec-BF improves over NOrec on the read-mostly case. These numbers are not claims about this chapter's designs; they are evidence that the simple serial yardstick remains useful when evaluating faster speculative backends.
+The API is the contract the rest of the book's runtimes implement. The same transfer source can run over simple SGL, optimistic STMs such as NOrec and TL2, timestamped designs such as TSC-TM, persistent variants, and distributed coordinators when the implementation supplies the required primitives. The programmer-facing question remains constant: where is the transaction boundary, who instruments memory, who retries, and what is allowed to become visible before commit?
 
 \section{Exercises}
 \begin{enumerate}
-    \item Calculate the maximum speedup achievable with a single‑global‑lock TM on a 16‑core machine when transactions spend 10\% of their time in a critical section.
-    \item A serializing TM uses a single worker thread. Explain why this design can still outperform fine‑grained locking if transactions are very short and lock overhead dominates.
-    \item Propose a hybrid design that starts with a non‑speculative execution and switches to speculative when contention is low. What information does the runtime need to make the switch?
-    \item \emph{[implementation]} Extend Listing~\ref{sec:worked-sgl-bank} with \texttt{tm\_malloc} and \texttt{tm\_free} hooks. The hooks may still use the process allocator, but calls must pass through the backend object. Explain which tests would fail to detect bugs if initialization bypassed these hooks.
-    \item \emph{[verification]} Write a PlusCal model of the bank transfer under SGL with two accounts, one lock, and two clients. State the money conservation invariant and the account-floor invariant. Model-check both with all transfer amounts in the set \texttt{\{0,1,2\}}.
-    \item \emph{[theory]} Compare SGL and a queue serializer with three costs: lock acquisition, queue submission, and transaction body execution. Derive the condition under which the serializer has lower latency for a single transaction, and then explain why that condition may not imply higher throughput under a burst of requests.
-    \item \emph{[implementation]} Modify the queue serializer so that each task carries an explicit transaction descriptor containing a task id, an allocation log, and a commit flag. Ensure that the descriptor is created by the submitter but finalized by the worker.
-    \item \emph{[verification]} State the refinement mapping from a queue serializer to an abstract sequential TM. Identify the concrete variable that determines the abstract transaction order.
-    \item \emph{[theory]} For a workload in which every transaction runs under SGL, explain why increasing the number of caller threads can reduce throughput even though it does not change the sequential work performed.
-    \item \emph{[implementation]} Build the Calvin bank demo of \S\ref{sec:calvin-static} from the source in Appendix~\ref{chap:rust-mistakes}. Replace the deterministic shuffle with a random one and run it five times. Verify that the final total is always \texttt{2000000} but the committed snapshot values differ. Explain why determinism of the commit \emph{order} does not affect correctness here.
-    \item \emph{[theory]} Calvin rejects stale declarations before executing the body. A speculative STM (Chapter~9) executes the body first, then validates. Derive the condition under which Calvin does strictly less work than a speculative STM for a given workload, and the condition under which the opposite holds. Hint: compare the cost of body execution with the cost of snapshot validation.
+    \item A programmer argues that \texttt{tm\_write} should return a status code indicating whether the write caused an immediate abort. Explain why this violates opacity and propose an alternative.
+    \item Sketch an asynchronous API where multiple transactions are submitted to a work queue and later awaited. Discuss how batching might reduce validation overhead.
+    \item Compare using \texttt{tm\_begin}\slash{}\texttt{tm\_end} versus \texttt{\_\_transaction\_\allowbreak atomic}. Which is less error-prone and why?
+    \item \emph{[implementation]} Extend Listing~\ref{sec:api-example}'s transfer into a reusable \texttt{atomic\_retry} helper for transactions returning \texttt{int}. Add a test that forces at least one abort and checks that the final account sum is unchanged.
+    \item \emph{[verification]} Write a small PlusCal or TLA+ model of the state machine in Figure~\ref{fig:api-state-machine}. Check that no execution reaches \emph{Committed} after a failed validation edge.
+    \item \emph{[theory]} Compare explicit calls, compiler keywords, and future-based closures under opacity. Which API makes it easiest to prevent non-transactional side effects from becoming visible before commit?
+    \item \emph{[implementation]} Implement a \texttt{TM<int>} wrapper with \texttt{load()} and \texttt{store()} methods backed by \texttt{tm\_read\_i4} and \texttt{tm\_write\_i4}. Show one example where exposing a raw \texttt{int *} would bypass instrumentation.
+    \item \emph{[verification]} Model a future-based API with states \emph{submitted}, \emph{running}, \emph{committed}, and \emph{failed}. State an invariant that a future never returns a value produced by an aborted attempt.
+    \item \emph{[theory]} For the bank-transfer example, classify printing a receipt, appending to an audit log, and updating a transactional counter as replay-safe or replay-unsafe. Explain what API support would make each safe.
+    \item \emph{[open]} Transactional semantics can live in the \emph{language} (compiler keywords), the \emph{library} (explicit hooks, closures), or the \emph{hardware} (HTM).  Argue for the layer you think should own opacity.  State the cost your choice imposes on the other two layers, and give the strongest argument against the layer you reject.
 \end{enumerate}
 
 \textbf{How to check your work.} The \emph{[implementation]} exercises are
-verified with the companion: route \texttt{tm\_malloc}/\texttt{tm\_free}
-through the backend of \S\ref{sec:worked-sgl-bank}, and finalize the
-serializer task descriptor per \S\ref{sec:worked-serializer-bank}.  The
-\emph{[verification]} exercises are checked with TLC on the SGL bank model
-(\texttt{MoneyConserved}, account floor; see
-Appendix~\ref{chap:pluscal-quick-ref}).  The \emph{[theory]} exercises are
-graded against \S\ref{sec:worked-sgl-bank} and \S\ref{sec:semantic-obligations}.
+verified with the companion: build the \texttt{atomic\_retry} helper and the
+\texttt{TM<int>} wrapper on \S\ref{sec:api-example}'s retry loop.  The
+\emph{[verification]} exercises are checked with TLC against the state
+machine of Figure~\ref{fig:api-state-machine} (\emph{Committed} reachable only
+via a validation-success edge; see Appendix~\ref{chap:pluscal-quick-ref}).
+The \emph{[theory]} exercises are graded against the API-design discussion of
+\S\ref{sec:api-example}.  The \emph{[open]} exercise has no single right
+answer; it is graded on whether you state the cost your chosen layer
+imposes on the others and answer the strongest counterargument.
 
-\index{global mutex}
+\index{classic transaction API}
+\index{synchronous transaction API}
 \index{transaction descriptor}
-\index{queue submission}
-\index{worker thread}
-\index{serialization order}
-\index{lock acquisition order}
-\index{linearization point}
-\index{bank transfer invariant}
-\index{money conservation}
-\index{account floor invariant}
-\index{backend hooks}
-\index{initialization stubs}
-\index{thread-local state}
-\index{task handoff}
-\index{regression oracle}
-\index{DistributedSGL}
-\index{PersistentSGL}
-
-% -------------------------------------------------------------------
+\index{thread-local transaction state}
+\index{typed transactional read}
+\index{typed transactional write}
+\index{byte-oriented instrumentation}
+\index{word-level STM}
+\index{transaction retry}
+\index{non-local abort}
+\index{frame-lifetime hazard}
+\index{bank transfer transaction}
+\index{money-conservation invariant}
+\index{transactional closure}
+\index{replay-safe closure}
+\index{side effects in transactions}
+\index{language-integrated transactions}
+\index{\_\_transaction\_atomic}
+\index{compiler instrumentation}
+\index{transactional future}
+\index{executor-owned transaction state}
+\index{batched validation}
+\index{object-oriented STM}
+\index{TM wrapper}
+\index{transactional object}
+\index{object granularity}
+\index{raw reference escape}

@@ -74,17 +74,24 @@ def clean_sec(s):
     s = re.sub(r'\\(?:label|index|item|ldots|ref|cite|S|sec|section|subsection|emph|texttt)\b.*', '', s)
     return s.strip()
 
+def expand(body_main):
+    """Replace \\input{sections/X} lines with the file's content (one level of
+    nesting is followed, e.g. ch06 -> ch06_new_section)."""
+    out = []
+    for l in body_main:
+        m = re.search(r'\\input\{sections/([^}]+)\}', l)
+        if m:
+            fname = m.group(1) + '.tex'
+            content = section_contents.get(fname)
+            if content is not None:
+                out.extend(content)
+                continue
+        out.append(l)
+    return out
+
 for title, smain, emain, sidx, eidx in chapters:
     # Collect all lines from main.tex and included section files for this chapter range
-    # A simple approach: count lines in main.tex within the range, plus content from input files
-    body_main = main_lines[smain:emain+1]
-
-    # Count how many \input directives are within this range (to understand structure)
-    # But for structural metrics, we need to look at the included files
-
-    # Figure out which section files are included in this chapter
-    # by looking at all \input directives in main.tex and which chapter they belong to
-    # For now, just use the main.tex body
+    body_main = expand(main_lines[smain:emain+1])
 
     nlines = len(body_main)
 

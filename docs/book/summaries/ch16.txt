@@ -1,32 +1,30 @@
-CHAPTER 16 — Hardware Transactional Memory – Design and Simulation
+CHAPTER 16 — From Source to AST: Lexing and Parsing
 Part: VII (Advanced Topics)
-Lines: ~491 | Sections: 10 | Figures: 1 | Tables: 1 | Listings: 5 | TikZ: 1
+Lines: ~512 | Sections: 8 | Figures: 4 | Tables: 1 | Listings: 5 | TikZ: 4
 
-PURPOSE: HTM: extending cache coherence for transactions, modern HTM
-implementations (Intel RTM), RTM inside, lock subscription, abort-cause
-counters, capacity probes, gem5 simulation, and TLA+ abort/fallback modeling.
+PURPOSE: Front-end mechanics for an atomic language construct: DFA/lexical
+analysis, recursive descent parsing, parser generators (Yacc and modern),
+and lowering an atomic block to TM runtime calls.
 
 SECTIONS
-- Extending Cache Coherence for TM
-    Invalidations and capacity loss as abort signals.
-- Modern HTM Implementations
-    Same semantic contract: opportunistic hardware commit + software fallback.
-- Worked Example: RTM, From the Inside
-- Worked Example: RTM Bank Transfer with Lock Subscription
-    RTM + fallback-lock subscription pattern.
-- Worked Example: Abort-Cause Counters
-- Worked Example: Capacity Probe
-- Simulation with gem5
-    (labelled sec:htm-simulation; exercises reuse it as the simulator
-    fallback when RTM hardware is absent)
-- Worked Example: Model Checking HTM Abort and Fallback
+- Finite Automata and Lexical Analysis
+    DFA for the toy lexer (keywords, identifiers, tokens).
+- Recursive Descent Parsing
+- Parser Generators: From Yacc to Modern Tools
+    LR(0) automaton, shift/reduce, generated parsers.
+- Worked Example: Lexing and Parsing an Atomic Block
+- Worked Example: A Bank Transfer Front End
+    Source-level view of the front-end pipeline (repo instruments at LLVM IR).
+- Worked Example: Model Checking the Parsed Transaction
 - Summary
+    (NEW) Front end identifies transactions; syntax stays stable while
+    backend protocols evolve underneath.
 - Exercises
-    (9 exercises; ex1/ex3 gain companion fallbacks — TSX-SGL backend +
-    sec:hybrid-example for the fallback design, simulator/ for the gem5
-    sweep. Ends with a "How to check your work." block.)
+    (NEW) 6 exercises (DFA, maximal munch, nested atomic blocks + unbalanced
+    braces, second statement kind, EndAtomic "done" verification, front-end
+    choices) followed by a "How to check your work." block.
 
-FIGURES: fig:htm-coherence-abort (coherence-based HTM abort)
-TABLES: tab:htm-implementations (HTM interface/diagnostics/contract)
-LISTINGS: 5 (RTM internals, lock-subscription bank, abort counters, capacity,
-          TLA+ abort/fallback)
+FIGURES: fig:lexer-dfa, fig:front-end-pipeline, fig:lr0-automaton,
+         fig:tm-front-end-lowering
+TABLES: tab:front-end-choices
+LISTINGS: 5 (lexer DFA, parser, atomic-block parse, bank front end, TLA+)

@@ -1,24 +1,26 @@
-CHAPTER 12 — Testing, Debugging, and Scheduling
-Part: VI (Engineering: Testing, Pitfalls, and Performance)
-Lines: ~489 | Sections: 9 | Figures: 1 | Tables: 1 | Listings: 5 | TikZ: 1
+CHAPTER 12 — Compiler Optimizations and Their Impact on TM
+Part: V (Compiler Instrumentation for TM)
+Lines: ~323 | Sections: 9 | Figures: 1 | Tables: 1 | Listings: 4 | TikZ: 1
 
-PURPOSE: Engineering practice for TM: unit tests, invariant tests, abort
-fuzzing, sequential oracles, record-and-replay, deterministic scheduling.
+PURPOSE: Which compiler optimizations break TM and how to guard against them:
+pass ordering, the instrumentation contract, optimization taxonomy, barrier
+hoisting, the "dropped debit" bug.
 
 SECTIONS
-- Unit Testing and Fuzzing
-    Testing layers: unit, invariant, fuzz, replay, model.
-- Worked Example: An Invariant Test for Lost Updates
-- Worked Example: Abort Fuzzing for the Bank Invariant
-- Worked Example: A Sequential Oracle for a Counter Suite
-    Compare parallel result against a single-threaded reference.
-- Record-and-Replay and Deterministic Scheduling
-    Reproduce failing interleavings deterministically.
-- Worked Example: Replay of a Lost-Update
-- Worked Example: A TLA+ Money-Conservation Check
+- Common Optimizations
+    DSE, loop invariants, CSE, reordering, vectorization.
+- Worked Example: Two Optimizations That Break TM
+- The Instrumentation Contract
+    After instrumentation, tm_read_*/tm_write_* are opaque side effects.
+- Worked Example: Barriered Transfer Instrumentation
+- Optimization Taxonomy
+    tab:tm-optimization-taxonomy: optimization -> TM-aware restriction.
+- Worked Example: A Dropped Debit
+    Optimization removing a TM write -> money lost.
+- Contract Between Programmer and Compiler
 - Summary
 - Exercises
 
-FIGURES: fig:tm-debugging-loop (exploration -> replay -> debug loop)
-TABLES: tab:tm-testing-layers
-LISTINGS: 5 (invariant test, fuzz, oracle, replay, TLA+)
+FIGURES: fig:tm-pass-ordering (safe pass ordering around instrumentation)
+TABLES: tab:tm-optimization-taxonomy
+LISTINGS: 4 (breaking optimizations, barriered transfer, dropped debit)

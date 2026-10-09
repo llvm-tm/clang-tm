@@ -1,30 +1,26 @@
-CHAPTER 15 — From Source to AST: Lexing and Parsing
-Part: VII (Advanced Topics)
-Lines: ~512 | Sections: 8 | Figures: 4 | Tables: 1 | Listings: 5 | TikZ: 4
+CHAPTER 15 — Performance Modeling and Tuning
+Part: VI (Engineering: Testing, Pitfalls, and Performance)
+Lines: ~537 | Sections: 9 | Figures: 1 | Tables: 2 | Listings: 4 | TikZ: 1
 
-PURPOSE: Front-end mechanics for an atomic language construct: DFA/lexical
-analysis, recursive descent parsing, parser generators (Yacc and modern),
-and lowering an atomic block to TM runtime calls.
+PURPOSE: How to measure and predict TM performance: metrics/benchmarks,
+analytical models, experimental methodology, abort/retry cost estimation,
+calibration anchors from the companion M1 Pro runs.
 
 SECTIONS
-- Finite Automata and Lexical Analysis
-    DFA for the toy lexer (keywords, identifiers, tokens).
-- Recursive Descent Parsing
-- Parser Generators: From Yacc to Modern Tools
-    LR(0) automaton, shift/reduce, generated parsers.
-- Worked Example: Lexing and Parsing an Atomic Block
-- Worked Example: A Bank Transfer Front End
-    Source-level view of the front-end pipeline (repo instruments at LLVM IR).
-- Worked Example: Model Checking the Parsed Transaction
+- Metrics and Benchmarks
+    Throughput, abort rate, wasted work, commit latency.
+- Analytical Models
+    Little's law, retry cost, contention models.
+- Experimental Methodology
+    Warmup, calibration, variance, reporting.
+- Worked Example: Measuring Attempts in the Bank Benchmark
+- Worked Example: Model Checking a Bounded Contention Counter
+- Worked Example: Reading a Benchmark Report
+- Worked Example: Estimating a Retry Cost
 - Summary
-    (NEW) Front end identifies transactions; syntax stays stable while
-    backend protocols evolve underneath.
 - Exercises
-    (NEW) 6 exercises (DFA, maximal munch, nested atomic blocks + unbalanced
-    braces, second statement kind, EndAtomic "done" verification, front-end
-    choices) followed by a "How to check your work." block.
 
-FIGURES: fig:lexer-dfa, fig:front-end-pipeline, fig:lr0-automaton,
-         fig:tm-front-end-lowering
-TABLES: tab:front-end-choices
-LISTINGS: 5 (lexer DFA, parser, atomic-block parse, bank front end, TLA+)
+FIGURES: fig:perf-state-machine (throughput/abort/wasted-work)
+TABLES: tab:perf-anchors (M1 Pro fuzz/bank measurements),
+        tab:perf-symptoms (tuning symptom -> cause)
+LISTINGS: 4 (attempts measurement, contention TLA+, benchmark report, retry cost)

@@ -182,6 +182,13 @@ ifeq ($(BACKEND),JVSTM)
   DEFS     = -DTM_BACKEND_JVSTM
   EXTRA_INC = -I../../backends/tm_impl/common
 endif
+# ⚠ Teaching backend: intentionally non-opaque (book Ch. 2 / EagerSTM model).
+# Never add EAGER_BROKEN to check-fast/check-all sweeps or benchmark with it.
+ifeq ($(BACKEND),EAGER_BROKEN)
+  RUNTIME  = ../../backends/tm_impl/eager_broken/EagerBroken_runtime.cpp
+  DEFS     = -DTM_BACKEND_EAGERBROKEN
+  EXTRA_INC = -I../../backends/tm_impl/common
+endif
 
 HOOKS_SRC = ../../backends/tm_impl/common/tm_hooks.cpp
 BUILTINS = $(addprefix ../../backends/tm_impl/common/,tm_alloc_overrides.hpp tm_common.hpp \
@@ -292,6 +299,11 @@ TEST_TX_BIN = bin/test_tx
 TEST_RO2RW_SRC = ../../tests/explicit-api/test_norec_ro2rw.cpp
 TEST_RO2RW_BIN = bin/test_norec_ro2rw
 
+# --- non-opacity teaching demo (BACKEND=NOREC or EAGER_BROKEN) ------
+# One source, two semantics: NOREC exits 0; EAGER_BROKEN SIGSEGVs (139).
+OPAQUEDEMO_SRC = opaquedemo/nonopaque.cpp
+OPAQUEDEMO_BIN = bin/opaquedemo
+
 # --- Stubs runtime (uninstrumented baseline) --------------------
 STUBS = ../../backends/stubs/tm_stubs.cpp
 
@@ -320,7 +332,7 @@ STAMP_BINS = $(VACATION_BIN) $(LABYRINTH_BIN) $(KMEANS_BIN) $(GENOME_BIN) $(INTR
 
 .PHONY: all stubs clean run-bank run-eigenbench run-bench7 run-vacation run-labyrinth run-kmeans
 .PHONY: run-genome run-intruder run-ssca2 run-bayes run-yada run-fuzz-counter run-fuzz-bank run-fuzz
-.PHONY: run-tpcc run-ycsb run-test-ds run-test-tx run-test-ro2rw run-tests run run-stamp
+.PHONY: run-tpcc run-ycsb run-test-ds run-test-tx run-test-ro2rw run-opaquedemo run-tests run run-stamp
 
 all: bin $(BANK_BIN) $(EIGEN_BIN) $(BENCH7_BIN) $(STAMP_BINS) \
      $(FUZZ_CTR_BIN) $(FUZZ_BANK_BIN) $(TPCC_BIN) $(YCSB_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN) $(TEST_RO2RW_BIN) $(RBTREE_BIN)
@@ -360,6 +372,7 @@ $(eval $(call BUILD_RULE,$(TEST_DS_BIN),$(TEST_DS_SRC)))
 $(eval $(call BUILD_RULE,$(TEST_TX_BIN),$(TEST_TX_SRC)))
 $(eval $(call BUILD_RULE,$(TEST_RO2RW_BIN),$(TEST_RO2RW_SRC)))
 $(eval $(call BUILD_RULE,$(RBTREE_BIN),$(RBTREE_SRC)))
+$(eval $(call BUILD_RULE,$(OPAQUEDEMO_BIN),$(OPAQUEDEMO_SRC)))
 
 # --- Stubs build rules (uninstrumented baseline) ------------------
 $(eval $(call BUILD_STUBS_RULE,$(BANK_STUBS),$(BANK_SRC)))
@@ -424,6 +437,9 @@ run-test-ds: $(TEST_DS_BIN)
 
 run-test-tx: $(TEST_TX_BIN)
 	./$(TEST_TX_BIN)
+
+run-opaquedemo: $(OPAQUEDEMO_BIN)
+	./$(OPAQUEDEMO_BIN)
 
 run-test-ro2rw: $(TEST_RO2RW_BIN)
 	./$(TEST_RO2RW_BIN)

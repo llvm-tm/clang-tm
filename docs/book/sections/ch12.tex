@@ -1,580 +1,338 @@
-\chapter{Testing, Debugging, and Scheduling}
-\index{testing, debugging, scheduling, fuzzing, deterministic replay, invariant testing, TLA+ model checking}
+\chapter{Compiler Optimizations and Their Impact on TM}
+\index{compiler optimizations!transactional memory}\index{transactional memory!compiler instrumentation}\index{DSE}\index{LICM}\index{CSE}\index{tm\_clobber}\index{transaction\_safe}\index{transaction\_pure}
 
-Transactional memory implementations fail in ways that ordinary unit tests rarely expose. A transaction may read a value that was valid for only a few instructions, validate too early, forget to roll back one write-set entry, or publish a partially committed state. The failure often appears later, after the schedule that caused it has disappeared.
+A transactional memory implementation is not only a runtime algorithm. It is also a contract with the compiler. The runtime may implement SGL, NOrec, TL2, TinySTM, SwissTM, MVLog, or a GPU design such as GUST, but the generated code must still preserve the abstract transaction: every transactional read must be represented in the read-set or validation discipline, and every transactional write must be represented in the write-set or redo/undo discipline.
 
-This chapter treats testing as a layered engineering discipline. At the bottom are cheap invariant tests: the bank still conserves money, a counter still has the expected value, a set still agrees with a sequential oracle. Above them are abort fuzzers, deterministic schedulers, replay tools, and abstract model checkers. The goal is not to prove every line of code correct from tests alone. The goal is to make rare transactional bugs reproducible, local, and small enough to fix.
+This chapter focuses on the danger zone between ordinary optimization and TM instrumentation. The running example is the two-account bank transfer: debit one account, credit another, preserve an account floor, and preserve total money. The compiler is allowed to optimize local arithmetic and stack temporaries aggressively. It is not allowed to erase the debit, hoist a transactional read past a validation boundary, or turn an opaque TM access into an ordinary load.
 
-\section{Unit Testing and Fuzzing}
+\section{Common Optimizations}
 
-The first test for a transactional backend should not assert that a particular interleaving occurred. It should assert that no interleaving can violate an invariant. For transactional data structures, the most useful invariants are usually conservation properties: a sum, a count, a membership relation, or equality with a sequential reference implementation.
+The optimizations that create trouble for TM are not exotic. They are exactly the optimizations expected from a competent compiler: dead-store elimination, loop-invariant code motion, common subexpression elimination, scalar replacement, inlining, and store forwarding. In ordinary single-threaded code, these transformations are semantics-preserving because they reason about what the current function can later observe. In transactional code, the relevant observer is larger: the transaction manager, the conflict detector, the commit protocol, and other threads.
 
-The running bank benchmark has two accounts or a vector of accounts. Transactions transfer money between accounts, optionally respecting an account floor. The main invariant is money conservation: a committed transfer may move value, but it must not create or destroy value. In a shared-counter suite, the corresponding invariant is equality between the final counter value and the number of committed increments. In a set or map benchmark, the invariant is agreement with a single-threaded oracle that applies the same logical operations in a known serial order.
+Dead-store elimination (DSE) removes a store when the compiler cannot find a later read that depends on it. That is fatal if the store is actually a call that appends to a transactional write-set. Loop-invariant code motion (LICM) moves a load out of a loop when the address appears unchanged. That is fatal if each dynamic read must be separately tracked or validated. Common subexpression elimination (CSE) reuses the result of an earlier read. That is fatal when a later transactional read must detect intervening writes or participate in opacity validation.
 
-The best invariants are sums because they are insensitive to schedule. A correct TM may serialize two transfers in either order, but the total balance must remain fixed. A race-free TM preserves the accumulator; a defective TM allows it to drift. Lost updates, torn write-back, duplicate redo-log replay, failed undo, and non-atomic commit all tend to surface as changes in a sum.
+The root problem is the compiler's default memory model. Most middle-end optimizers begin with a sequential, intra-thread view of memory and become conservative only when told that an operation is opaque, volatile, atomic, externally visible, or otherwise side-effecting. TM instrumentation must therefore make transactional effects visible to the optimizer as effects, not as ordinary helper calls that can be deleted or reordered.
 
-Fuzzing changes the distribution of executions. Real workloads may rarely hit capacity aborts, explicit aborts, or conflict windows at just the wrong point. A fuzzer should hit them constantly. Abort fuzzing injects failures after reads, after the first write, after validation, during write-back, and immediately before commit. The resulting workload is artificial, but that is the point: rollback paths must be exercised far more often than production executes them.
+Pass ordering is the practical rule. Ordinary memory optimizations should run before instrumentation. The instrumentation pass then rewrites shared accesses into calls such as \texttt{tm\_read\_i4} and \texttt{tm\_write\_i4}. After that point, memory-affecting optimizations may not rediscover those calls as removable loads and stores. If late optimization is required, it must understand the TM ABI.
 
-The oracle question is central: what is the ground truth for a concurrent data structure? For many tests the answer is a sequential reference implementation run in one thread. The test records operations, applies them to the TM-backed object and to the oracle under the same logical order, and compares the results. For the bank benchmark, the oracle can be even simpler: the initial sum is the expected final sum.
+Stack memory and shared memory must not be treated alike. A local variable that provably lives on the current thread's stack can be promoted to a register, split, folded, or removed. A heap object or annotated global inside a transaction cannot be optimized by the same rules, because it may be part of the transaction's abstract read-set or write-set.
 
-\begin{table}[htbp]
-\centering
-\caption{Testing layers for transactional-memory implementations.}
-\label{tab:tm-testing-layers}
-\begin{tabular}{M{0.22\linewidth}M{0.26\linewidth}M{0.26\linewidth}M{0.16\linewidth}}
-\hline
-\thb{0.22\textwidth}{Layer} & \thb{0.26\textwidth}{Oracle} & \thb{0.26\textwidth}{Bugs exposed} & \thb{0.16\textwidth}{Cost profile} \\
-\hline
-Invariant test & Sum, count, set membership, or sequential reference result & Lost update, torn write-back, non-atomic commit & Cheap; run on every backend \\
-Abort fuzzing & Same invariant after injected aborts & Bad undo log, leaked write-set entry, failed rollback & Moderate; many retries \\
-Deterministic scheduling & Recorded interleaving plus invariant failure & Rare conflict window, order-sensitive validation bug & Higher; bounded schedules \\
-Record-and-replay & Concrete failing execution & Late manifestation of an earlier bad read or write & Debugging cost after failure \\
-TLA+ model checking & Abstract safety property & Missing validation case, illegal state transition & State-space limited \\
-\hline
-\end{tabular}
-\end{table}
+\section{Worked Example: Two Optimizations That Break TM}
+\index{DSE}\index{LICM}
+\label{sec:optim-example}
 
-The companion repository instantiates every layer. The invariant-test layer
-is \texttt{tests/\allowbreak explicit-api/\allowbreak test\_tx.cpp} (114 transaction-semantics cases)
-and \texttt{test\_ds.cpp} (207 data-structure cases), run per backend;
-fuzzing is \texttt{fuzz\_counter}/\texttt{\allowbreak fuzz\_bank} with configurable
-thread and counter counts; the static-analysis layer is the LLVM race
-checker (\texttt{libTMRaceChecker.so}), which scans uninstrumented functions
-for accesses to TM-annotated globals at build time; debug
-\texttt{fprintf}s are kept out of the sources and applied on demand from
-\texttt{patches/debug/}; and \texttt{smoke\_test.sh} sweeps all testable
-backends. Knowing the concrete artifacts matters for the exercises: when one
-asks you to ``add a test,'' it lands in these suites and runs against every
-backend, not just the one you are reading.
+Take the canonical transfer body, already instrumented. Two well-meaning
+optimizations silently delete transactional effects:
 
-These layers are complementary. The companion implementation runs concrete tests across the backends in the codebase, including lock-based, versioned, persistent, distributed, and GPU designs. The important testing pattern is backend independence: the same logical workload and the same invariant should apply to SGL, TL2, NOrec, TinySTM variants, SwissTM, persistent backends, distributed backends, and GPU designs. Backend-specific tests are still needed, but they should come after the generic invariants.
+\begin{lstlisting}[language=C, caption={DSE and LICM on an instrumented transaction.}]
+/* DSE: the compiler sees a store with no later use in this function. */
+int v = tm_read_i4(&a->balance);
+tm_write_i4(&a->balance, v - n);      /* result never read here */
+return 0;                             /* DSE discards the store! */
 
-\section{Worked Example: An Invariant Test for Lost Updates}
-\index{invariant test}\index{money conservation}
-\label{sec:test-example}
+/* LICM: a transactional read is loop-invariant under LICM. */
+for (int i = 0; i < 100; ++i)
+    sum += tm_read_i4(&b[i]);         /* hoisted out of the loop,
+                                         reads b[0] once */
+\end{lstlisting}
 
-The money-conservation assertion that Chapter~1's running example demands:
+The first transformation breaks the write-set. The fact that the function does not read \texttt{a->balance} again is irrelevant: the write is intended to be observed by the TM runtime at commit time. In a write-back algorithm such as TL2, TinySTM-WBCTL, SwissTM, or NOrec, the write may not update memory immediately, but it is still semantically live. It is the speculative debit.
 
-\begin{lstlisting}[language=C, caption={An invariant test for the transfer benchmark.}]
-TEST(bank, money_is_conserved) {
-    int initial = balance_sum();
-    spawn(8, worker);            /* 8 threads each doing transfers */
-    join_all();
-    ASSERT_EQ(initial, balance_sum());   /* sum is invariant */
+The second transformation breaks the read-set. Even if a source expression looks syntactically stable, a transactional read may have to record an address, observe a version, validate a clock, check a Bloom filter, or participate in a later opacity check. Hoisting it out of the loop changes both the values read and the metadata collected by the runtime.
+
+Both are correct under single-threaded semantics and both are wrong for TM: the write must reach the write-set, and the read must see fresh data each iteration. The fix is the contract of the next section: \texttt{tm\_clobber} and the rule that instrumentation runs \emph{after} optimization. These are exactly the ``mismatch bugs seen in the wild'' of the next section --- pass reordering and dead-store elimination of speculative writes.
+
+For the bank example, the intended invariant is:
+
+$$
+a.balance + b.balance = initial\_a + initial\_b
+$$
+
+where \texttt{a} and \texttt{b} are the two accounts. If the compiler deletes the debit but leaves the credit, the invariant is false even though every individual instruction still looks type-correct.
+
+\section{The Instrumentation Contract}
+\label{sec:instrumentation-contract}
+
+The precise, mechanical rules a compiler pass and a TM runtime agree on.
+This section turns the previous section's warnings into a checkable list.
+
+A TM-aware compiler needs an explicit instrumentation contract. The contract identifies which memory operations are transactional, which are ordinary, what metadata must survive lowering, and which transformations are permitted after instrumentation. Without such a contract, the compiler and runtime are each locally correct but globally unsound.
+
+\textbf{Which accesses are instrumented:} heap and shared-global memory operands inside a transaction are rewritten to \texttt{tm\_read\_*}/\texttt{tm\_write\_*} calls, whereas stack-locals bypass via \texttt{LLVM\_TM\_ADDR\_CHECK}, and the \texttt{[[tm::shared]]} annotation (Chapter~4) is the source-level way to put a global on the instrumented side. \textbf{Which are exempt:} accesses that provably target the current thread's stack, addresses registered in the runtime's TM-global registry, and operations in uninstrumented (e.g.\ \texttt{transaction\_pure}) callees are left untouched. \textbf{What metadata is preserved:} the pass must not lose the address-space classification or the width of each access --- the call name itself (\texttt{i4} vs.\ \texttt{i8}) encodes both, so type-preserving rewrites are mandatory. \textbf{Pass ordering:} instrumentation is the \emph{last} memory-affecting pass, so anything that eliminates or reorders memory operations must run before it; running DSE or LICM after instrumentation silently discards read-set/write-set side effects (Section~\ref{sec:optim-example}). \textbf{Barriers for the optimizer:} calls to \texttt{tm\_read\_*}/\texttt{tm\_write\_*} are opaque side-effecting calls and must be marked \texttt{tm\_clobber}-equivalent so the optimizer never treats them as pure loads/stores.
+
+The contract is intentionally independent of the backend. SGL may implement the transaction as a critical section; TL2 and TSC-TM may use clocks; NOrec may validate against a global sequence lock; TinySTM variants may differ in write-back or write-through policy; GPU designs may batch validation and commit logs. The compiler still owes the same thing: preserve the dynamic sequence of transactional effects that the source program requested.
+
+The contract also explains why measured runtime performance must be interpreted together with compiler correctness. For example, the codebase measurements report TL2 and TSC-TM at roughly 2.06M and 2.05M transactions per second on the M1 Pro fuzz/bank benchmark, and NOrec-BF faster than baseline NOrec on the read-mostly case. Those numbers are meaningful only if the compiler has not optimized away the transactional access stream being measured.
+
+\section{Worked Example: Barriered Transfer Instrumentation}
+\index{tm\_clobber}
+\label{sec:worked-barriered-transfer}
+
+The following small C file is intentionally boring. That is the point: the
+compiler may optimize stack temporaries, but it must not delete or reorder the
+transactional calls that construct the read-set and write-set.
+
+\begin{lstlisting}[language=C, caption={A compilable transfer body with opaque TM accessors.}]
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct Account {
+    int32_t balance;
+} Account;
+
+typedef struct Tx {
+    int writes;
+} Tx;
+
+/* In a real backend these enter the read-set and write-set.  The attributes
+   force the compiler to treat the calls as side-effecting boundaries. */
+__attribute__((noinline))
+static int32_t tm_read_i4(Tx *tx, const int32_t *p) {
+    (void)tx;
+    __asm__ __volatile__("" ::: "memory");
+    return *p;
+}
+
+__attribute__((noinline))
+static void tm_write_i4(Tx *tx, int32_t *p, int32_t v) {
+    __asm__ __volatile__("" ::: "memory");
+    *p = v;
+    tx->writes++;
+    __asm__ __volatile__("" ::: "memory");
+}
+
+static int transfer(Tx *tx, Account *from, Account *to,
+                    int32_t amount, int32_t floor) {
+    int32_t from0 = tm_read_i4(tx, &from->balance);
+    int32_t to0   = tm_read_i4(tx, &to->balance);
+
+    if (from0 - amount < floor)
+        return 0;              /* abort or user-level failed transfer */
+
+    /* These stores are live even if this function never reads them again. */
+    tm_write_i4(tx, &from->balance, from0 - amount);
+    tm_write_i4(tx, &to->balance,   to0 + amount);
+    return 1;
+}
+
+int main(void) {
+    Account a = { .balance = 100 };
+    Account b = { .balance =  50 };
+    Tx tx = { .writes = 0 };
+
+    int ok = transfer(&tx, &a, &b, 30, 0);
+    if (!ok || a.balance != 70 || b.balance != 80 || tx.writes != 2)
+        return EXIT_FAILURE;
+
+    puts("transfer committed");
+    return EXIT_SUCCESS;
 }
 \end{lstlisting}
 
-This is intentionally small. It does not inspect the internal read set, write set, commit counter, undo log, or lock table. It treats the TM as a black box and checks the property that all correct implementations must preserve.
+This listing is not a complete STM. It is a minimal executable model of the compiler boundary. The empty inline assembly with a \texttt{memory} clobber prevents the compiler from proving that the accessor is a pure computation. The \texttt{noinline} attribute prevents inlining from exposing the body to later scalar simplification. Production systems prefer a proper intrinsic or ABI-level attribute, but the lesson is the same: the optimizer must see an effect.
 
-The test catches a classic lost update. Suppose two transfers read the same destination balance, compute two different increments, and then one write overwrites the other. No account may become corrupted in isolation; each stored value may still look plausible. The sum exposes the defect because one credit vanished.
+\texttt{from0}, \texttt{to0}, and \texttt{ok} are ordinary stack values, where scalar replacement and register allocation are harmless; \texttt{tm\_write\_i4} is not a dead store but the operation that records the speculative update; the inline memory clobber models the minimum compiler contract, while production runtimes encode the same idea with ABI attributes, intrinsics, or opaque calls; and the bank invariant is not a local property of the function body --- it is preserved only if both writes survive to commit.
 
-A race-free TM preserves the accumulator, while a defect such as a lost update or a torn write-back surfaces as a drift in the sum, as Exercise~1 of this chapter asks you to confirm. The same binary runs against every backend in Part~IV with one flag, so one test suite validates the whole family. Exercise~1 also asks for the abort-fuzzing extension, and \S\ref{sec:test-example} feeds the oracle question of this section: what is ground truth? Combined with \S\ref{sec:math-example}, at abort probability $p = 0.9$ eight threads completing ten successful transactions each require the expected number of attempts $8 \times 10 \div (1-p) = 800$. The test still passes only if undo logging is correct.
-
-The formula is useful because it separates test intensity from logical work. The workload still commits only eighty transfers, but the implementation attempts about eight hundred transactions. A backend with a bad abort path may fail quickly even when the normal, low-abort workload passes.
-
-\section{Worked Example: Abort Fuzzing for the Bank Invariant}
-\index{abort fuzzing}\index{undo log}
-\label{sec:abort-fuzz-bank}
-
-The following standalone C++ test uses a single global lock to make the transaction body serial, then injects explicit aborts after partial updates. The point is not performance. The point is coverage of rollback paths that normal executions rarely hit.
-
-\begin{lstlisting}[language=C++, caption={A compilable abort-fuzzing harness for the bank benchmark.}]
-#include <cassert>
-#include <cstdint>
-#include <exception>
-#include <iostream>
-#include <mutex>
-#include <numeric>
-#include <random>
-#include <thread>
-#include <utility>
-#include <vector>
-
-struct Abort : std::exception {};
-
-struct Account {
-    int balance;
-};
-
-static int balance_sum(const std::vector<Account>& bank) {
-    return std::accumulate(bank.begin(), bank.end(), 0,
-        [](int acc, const Account& a) { return acc + a.balance; });
-}
-
-static bool transfer_with_fuzzed_abort(std::vector<Account>& bank,
-                                       std::mutex& global_lock,
-                                       int from,
-                                       int to,
-                                       int amount,
-                                       std::mt19937& rng,
-                                       double abort_probability) {
-    std::bernoulli_distribution abort_now(abort_probability);
-    std::vector<std::pair<int, int> > undo;  // (index, old_balance)
-
-    auto write_balance = [&](int index, int value) {
-        undo.push_back(std::make_pair(index, bank[index].balance));
-        bank[index].balance = value;
-    };
-
-    global_lock.lock();
-    try {
-        write_balance(from, bank[from].balance - amount);
-
-        if (abort_now(rng)) {
-            throw Abort();
-        }
-
-        write_balance(to, bank[to].balance + amount);
-
-        if (abort_now(rng)) {
-            throw Abort();
-        }
-
-        global_lock.unlock();       // commit
-        return true;
-    } catch (const Abort&) {
-        for (auto it = undo.rbegin(); it != undo.rend(); ++it) {
-            bank[it->first].balance = it->second;
-        }
-        global_lock.unlock();       // abort
-        return false;
-    }
-}
-
-static void worker(std::vector<Account>& bank,
-                   std::mutex& global_lock,
-                   int id,
-                   int successful_transactions) {
-    std::mt19937 rng(0xC0FFEEu + static_cast<unsigned>(id));
-    std::uniform_int_distribution<int> account(0,
-        static_cast<int>(bank.size()) - 1);
-    std::uniform_int_distribution<int> amount(1, 7);
-
-    int committed = 0;
-    while (committed < successful_transactions) {
-        int from = account(rng);
-        int to = account(rng);
-        if (from == to) {
-            continue;
-        }
-
-        if (transfer_with_fuzzed_abort(bank, global_lock, from, to,
-                                       amount(rng), rng, 0.90)) {
-            ++committed;
-        }
-    }
-}
-
-int main() {
-    std::vector<Account> bank(64, Account{1000});
-    std::mutex global_lock;
-
-    const int initial = balance_sum(bank);
-
-    std::vector<std::thread> threads;
-    for (int i = 0; i != 8; ++i) {
-        threads.emplace_back(worker, std::ref(bank), std::ref(global_lock),
-                             i, 10);
-    }
-
-    for (std::thread& t : threads) {
-        t.join();
-    }
-
-    assert(initial == balance_sum(bank));
-    std::cout << "money conserved\n";
-    return 0;
-}
-\end{lstlisting}
-
-The injected abort after the debit catches a missing undo entry for the source account, and the injected abort after the credit catches a rollback loop that restores only the first write. A global lock is acceptable in the harness, because the test is aimed at rollback correctness, not scalability. The same shape appears in production TM tests: run the normal workload, raise the abort rate, and assert the invariant after all threads join.
-
-A useful extension is to randomize the abort site rather than only the abort decision. For write-back TMs this means injecting aborts before validation, after validation, before acquiring write locks, after acquiring a prefix of write locks, before publishing, and after publishing a prefix of locations in a private test build. For undo-log TMs this means aborting after every undo-log append and after every in-place write. Each abort site should have a name in the failure report; otherwise a failing seed only says that rollback is wrong, not which rollback path is wrong.
-
-\section{Worked Example: A Sequential Oracle for a Counter Suite}
-\label{sec:oracle-counter-example}
-
-A conservation invariant is not always enough. A set, map, queue, or counter suite often needs a reference object. The following C++ program uses a mutex-protected sequential oracle beside an intentionally simple transactional interface. In a real backend test, \texttt{tm\_increment} would be replaced by the backend under test.
-
-\begin{lstlisting}[language=C++, caption={A compilable sequential-oracle test for committed increments.}]
-#include <cassert>
-#include <atomic>
-#include <mutex>
-#include <thread>
-#include <vector>
-
-struct Oracle {
-    std::mutex mu;
-    int value = 0;
-
-    void increment() {
-        std::lock_guard<std::mutex> g(mu);
-        ++value;
-    }
-
-    int read() const {
-        return value;
-    }
-};
-
-struct TMCounter {
-    std::atomic<int> value{0};
-
-    void tm_increment() {
-        int old = value.load(std::memory_order_relaxed);
-        while (!value.compare_exchange_weak(old, old + 1,
-               std::memory_order_release,
-               std::memory_order_relaxed)) {
-        }
-    }
-
-    int read() const {
-        return value.load(std::memory_order_acquire);
-    }
-};
-
-int main() {
-    Oracle oracle;
-    TMCounter counter;
-
-    const int threads = 8;
-    const int operations = 1000;
-
-    std::vector<std::thread> workers;
-    for (int tid = 0; tid < threads; ++tid) {
-        workers.emplace_back([&] {
-            for (int i = 0; i < operations; ++i) {
-                counter.tm_increment();
-                oracle.increment();
-            }
-        });
-    }
-
-    for (std::thread& t : workers) {
-        t.join();
-    }
-
-    assert(counter.read() == oracle.read());
-    assert(counter.read() == threads * operations);
-}
-\end{lstlisting}
-
-The oracle is deliberately boring: one mutex, one integer, one serial meaning. The implementation may be concurrent, but the expected result is not. A lost update appears as inequality between \texttt{counter.read()} and \texttt{oracle.read()}. The same pattern scales to maps and sets by recording logical operations and comparing final contents.
-
-\section{Record-and-Replay and Deterministic Scheduling}
-
-Record-and-replay tools and deterministic schedulers address the same pain point: a concurrent failure is useless if it cannot be reproduced. A TM bug may manifest at commit even though the causal mistake was an earlier read, a missed version check, or an overwritten metadata bit. Reverse debugging lets the developer start from the bad final state and walk backward to the first invalid transition.
-
-Tools such as \texttt{rr} record a concrete execution and replay it with stable timing and stable thread behavior. This is valuable for ordinary C and C++ debugging: set a watchpoint on the corrupted account, replay, and step backward or forward around the write that changed it. Deterministic schedulers, in the style of CHESS, are more systematic. They control where threads may preempt and explore schedules up to a bound.
-
-The bound on preemptions is what makes the search usable. Full interleaving exploration grows too quickly: every shared-memory access may interleave with every access in every other thread. Bounded-preemption testing assumes that many bugs require only a small number of unlucky context switches. That assumption is often good for TM implementations because many defects live in short windows: after validation but before write-back, after acquiring one lock but before acquiring the next, or after appending to an undo log but before installing the write.
-
-Record-and-replay and model checking are not substitutes. TLA+ explores an abstract protocol state space and can find missing validation cases before code exists. Replay explores the concrete executable and can expose allocator behavior, memory-ordering mistakes, padding assumptions, and integration bugs that the abstract model intentionally omitted.
+A useful compiler test is to build this file with high optimization and inspect the generated assembly or IR. The local variables may disappear. The two write calls must not.
 
 \begin{figure}[htbp]
 \centering
+\resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
-    node distance=1.6cm and 1.9cm,
-    box/.style={draw, rounded corners, align=center, minimum width=2.7cm, minimum height=0.9cm},
-    arrow/.style={-{Latex[length=2mm]}, thick}
+    node distance=1.5cm and 1.8cm,
+    box/.style={draw, rounded corners, align=center, minimum width=2.9cm, minimum height=0.9cm},
+    bad/.style={draw, rounded corners, align=center, minimum width=2.9cm, minimum height=0.9cm, dashed},
+    arr/.style={-{Latex[length=2mm]}, thick}
 ]
-\node[box] (seed) {fuzz seed\\or schedule};
-\node[box, right=of seed] (run) {run TM\\backend};
-\node[box, right=of run] (check) {check\\invariants};
-\node[box, below=of check] (record) {record failing\\interleaving};
-\node[box, left=of record] (replay) {deterministic\\replay};
-\node[box, left=of replay] (fix) {watchpoint\\and patch};
+\node[box] (src) {TM source\\annotations};
+\node[box, right=of src] (opt) {ordinary\\optimization};
+\node[box, right=of opt] (inst) {TM\\instrumentation};
+\node[box, right=of inst] (code) {codegen};
 
-\draw[arrow] (seed) -- (run);
-\draw[arrow] (run) -- (check);
-\draw[arrow] (check) -- node[right]{fail} (record);
-\draw[arrow] (record) -- (replay);
-\draw[arrow] (replay) -- (fix);
-\draw[arrow] (fix) |- ($(run.south)+(0,-0.35)$) -- (run.south);
-\draw[arrow] (check.north) to[out=90,in=90,looseness=1.1] node[above]{pass: next seed} (seed.north);
-\end{tikzpicture}
-\caption{A TM debugging loop: random or systematic exploration finds a failing interleaving; replay makes the failure local enough to debug.}
-\label{fig:tm-debugging-loop}
+\node[bad, below=of inst] (late) {late DSE/LICM\\forbidden};
+
+\draw[arr] (src) -- (opt);
+\draw[arr] (opt) -- (inst);
+\draw[arr] (inst) -- (code);
+\draw[arr] (inst) -- node[right, align=left] {would see\\TM calls} (late);
+\draw[arr] (late) -| node[pos=0.25, below, align=center] {may delete\\read/write-set effects} (code);
+\end{tikzpicture}%
+}
+\caption{Safe pass ordering for TM compilation. Memory-changing optimizations run before instrumentation; afterward, transactional read and write calls are opaque side effects.}
+\label{fig:tm-pass-ordering}
 \end{figure}
 
-The loop is intentionally closed. A failing seed becomes a regression test. A recorded schedule becomes a deterministic unit test. A TLA+ counterexample becomes a protocol test. The fix is not complete until the same failure mode is represented at the cheapest layer that can catch it.
+\section{Optimization Taxonomy}
+\index{compiler optimization}
+\label{sec:optimization-taxonomy}
 
-\section{A Debugging Story: Three Bugs, One Symptom}
-\index{debugging!case study}\index{LEFTRIGHT backend}\index{money conservation}
-\label{sec:debugging-story}
+Table~\ref{tab:tm-optimization-taxonomy} separates optimizations by what they
+may legally do in a TM-aware compiler. The useful rule is not ``turn the
+optimizer off.'' It is ``keep ordinary optimizations on values that cannot be
+shared; preserve transactional effects on values that can be shared.''
 
-The loop above is best understood through a real failure from the companion
-repository. The \texttt{leftright} backend --- despite its name, a global-clock
-OCC design --- passed every single-threaded test and lost money consistently
-with two or more threads on the bank benchmark: \emph{Money created/destroyed}.
-One symptom, three independent bugs, none of which alone explains the loss,
-and none of which a stack trace would have pointed at.
+\begin{table}[htbp]
+\centering
+\begin{tabular}{M{0.18\linewidth} M{0.30\linewidth} M{0.38\linewidth}}
+\hline
+\thb{0.18\textwidth}{Optimization} & \thb{0.30\textwidth}{Unsafe pattern inside a transaction} & \thb{0.38\textwidth}{TM-aware rule} \\
+\hline
+DSE & Removes \texttt{tm\_write\_*} because no later load observes it in the same function. & Treat write instrumentation as an opaque side effect. A speculative write is live until abort or commit. \\
+LICM & Hoists \texttt{tm\_read\_*} out of a loop because the address expression is syntactically invariant. & Do not move transactional reads across iteration, validation, abort, or commit boundaries unless the runtime explicitly proves it safe. \\
+CSE & Reuses one \texttt{tm\_read\_*} result for a later read of the same address. & CSE is valid for stack locals; transactional reads of shared memory are not pure loads. \\
+Store forwarding & Replaces a transactional read with a previous ordinary store or vice versa. & Forward only within the transaction's own write-set semantics, preserving conflict detection. \\
+Inlining & Exposes \texttt{transaction\_pure} or runtime calls to later passes. & Preserve attributes after inlining; do not accidentally reclassify runtime calls as pure. \\
+SROA & Splits aggregate accesses and changes access width. & Legal only if the pass preserves address classification and emits matching width-specific instrumentation. \\
+\hline
+\end{tabular}
+\caption{Common optimizations and the corresponding TM-aware restrictions.}
+\label{tab:tm-optimization-taxonomy}
+\end{table}
 
-\textbf{Bug 1: the stub allocator.} During process initialization only one
-thread exists, so the hook layer helpfully served \texttt{tm\_malloc} from the
-ordinary system heap ``until real backends are needed.'' Every account object
-allocated during init therefore lived outside the TM region, and the address
-classifier concluded --- correctly! --- that reads and writes to those accounts
-needed no transactional tracking. The OCC machinery ran flawlessly on a
-write-set that was always empty. Lesson: a fast-path predicate
-(\texttt{isTMAddress}) silently disables your entire algorithm when its input
-distribution changes; test the predicate, not just the protocol.
+The table should be read operationally. If an optimization changes only stack temporaries, it is usually harmless. If it changes the number, order, width, or address of transactional accessors, it is part of the TM implementation and must be proved against the runtime's semantics.
 
-\textbf{Bug 2: the null jump buffer.} The retry loop executed
-\texttt{sigsetjmp} into a thread-local buffer but never told the backend where
-that buffer lived, so the backend's pointer stayed null. On abort, the backend
-executed \texttt{siglongjmp(*nullptr, 1)} --- undefined behavior that, on the
-platform in question, dereferenced page zero and faulted in a way the runtime
-absorbed, so control \emph{fell through as if the transaction had committed}.
-The retry loop observed success and moved on. An abort that silently becomes a
-commit is the most dangerous failure mode a TM can have: every invariant test
-will eventually catch it, but no amount of staring at the validation logic
-will find it, because the validation logic never ran. Lesson: wire the
-abort path first and test it with a deliberately-aborting workload before
-trusting any pass.
+A width change is a common source of subtle bugs. Rewriting one 64-bit shared load into two 32-bit transactional reads may change atomicity and validation. Rewriting two adjacent 32-bit writes into one 64-bit write may create a conflict where the source program had two separate accesses, or hide one where the runtime tracks at word granularity. The instrumentation pass must therefore preserve the width classification used by the runtime.
 
-\textbf{Bug 3: the version-only validation blind spot.} The commit protocol
-checked \texttt{observed\_version > end\_version} --- catches a concurrent
-commit that landed \emph{between} two reads, but not one that lands
-\emph{after the last read}. Both transactions validate cleanly at clock~5;
-one commits at clock~6 and writes back; the other then writes back its stale
-snapshot over the fresh data. Money vanished. The fix was value-based
-validation: record the bytes each read returned, and under the commit lock
-re-read and compare --- detecting actual conflicts rather than inferring them
-from clock arithmetic. Lesson: version checks are a filter, not a proof;
-when in doubt, validate values.
+\section{Worked Example: A Dropped Debit}
+\index{TLA+}
+\index{money conservation}
+\label{sec:worked-dropped-debit}
 
-The three bugs compounded: any one of them voids the protocol, so fixing any
-single one changed nothing observable. Only the conjunction restored
-correctness (\texttt{test\_tx} 114/114, bank invariant conserved at 2 and 4
-threads). This is the normal shape of TM failures --- a symptom at the
-invariant layer caused by uncorrelated defects at the allocator, control-flow,
-and protocol layers --- and it is why Chapter~13's pitfall catalog and this
-chapter's layered tests exist. When you meet an unexplained invariant failure,
-resist the urge to debug the protocol first: audit what the hooks actually
-received, whether the abort path actually aborts, and what the validator
-actually compares.
+A compiler bug is a semantic transformation, so it can be modeled directly. The
+following TLA+ module has two transfer actions. \texttt{GoodTransfer} debits one
+account and credits the other. \texttt{BadTransfer} models DSE deleting the
+debit-side \texttt{tm\_write}. TLC finds an invariant violation when the bad
+action is enabled.
 
+\begin{lstlisting}[language={}, caption={TLA+ model of DSE deleting one side of a bank transfer.}]
+--------------------------- MODULE DroppedDebit ---------------------------
+EXTENDS Naturals, TLC
 
-\section{Worked Example: Replay of a Lost-Update}
-\index{deterministic scheduling}\index{replay}
-\label{sec:replay-lost-update}
+CONSTANTS InitA, InitB, Amount, Floor
 
-The next program is deliberately not a correct TM implementation. It is a minimal deterministic scheduler that reproduces a money-conservation failure by forcing a particular interleaving. Each account is atomic to avoid undefined behavior in the C++ memory model; the bug is logical non-atomicity, not a data race.
-
-\begin{lstlisting}[language=C++, caption={A deterministic replay schedule that exposes a non-atomic transfer.}]
-#include <atomic>
-#include <cassert>
-#include <condition_variable>
-#include <iostream>
-#include <mutex>
-#include <thread>
-#include <utility>
-#include <vector>
-
-class Replay {
-public:
-    explicit Replay(std::vector<std::pair<int, int> > script)
-        : script_(std::move(script)), pos_(0) {}
-
-    void checkpoint(int tid, int step) {
-        std::unique_lock<std::mutex> lk(mu_);
-        cv_.wait(lk, [&] {
-            return pos_ < script_.size()
-                && script_[pos_] == std::make_pair(tid, step);
-        });
-        ++pos_;
-        cv_.notify_all();
-    }
-
-private:
-    std::vector<std::pair<int, int> > script_;
-    std::size_t pos_;
-    std::mutex mu_;
-    std::condition_variable cv_;
-};
-
-struct Bank {
-    std::atomic<int> a{100};
-    std::atomic<int> b{100};
-};
-
-static void nonatomic_transfer(Bank& bank, Replay& replay,
-                               int tid, int amount) {
-    replay.checkpoint(tid, 0);
-    int old_a = bank.a.load();
-
-    replay.checkpoint(tid, 1);
-    int old_b = bank.b.load();
-
-    replay.checkpoint(tid, 2);
-    bank.a.store(old_a - amount);
-
-    replay.checkpoint(tid, 3);
-    bank.b.store(old_b + amount);
-}
-
-int main() {
-    Bank bank;
-
-    /*
-       T0 debits A, T1 observes that debit, T1 credits B,
-       then T0 overwrites B with an older value.
-    */
-    Replay replay({
-        {0, 0}, {0, 1}, {0, 2},
-        {1, 0}, {1, 1}, {1, 2}, {1, 3},
-        {0, 3}
-    });
-
-    std::thread t0(nonatomic_transfer, std::ref(bank),
-                   std::ref(replay), 0, 10);
-    std::thread t1(nonatomic_transfer, std::ref(bank),
-                   std::ref(replay), 1, 20);
-
-    t0.join();
-    t1.join();
-
-    const int final_sum = bank.a.load() + bank.b.load();
-
-    assert(bank.a.load() == 70);
-    assert(bank.b.load() == 110);
-    assert(final_sum == 180);
-
-    std::cout << "replayed invariant failure: sum = "
-              << final_sum << "\n";
-    return 0;
-}
-\end{lstlisting}
-
-The schedule is the test case: once recorded, the failure is no longer a Heisenbug. Atomics remove undefined behavior from the demonstration, but they do not provide transaction atomicity. A watchpoint on \texttt{bank.b} identifies the overwrite, because thread 0 writes a value computed before thread 1's credit. A real TM backend prevents this execution by locking, validating, versioning, or aborting one transaction.
-
-The replay script is also a specification of the bug. It says which thread reached which logical point and in what order. That is more useful than a sleep-based test because sleeps encode timing, not causality. Deterministic checkpoints encode the causal edges directly.
-
-\section{Worked Example: A TLA+ Money-Conservation Check}
-\label{sec:tla-bank-conservation}
-
-The following TLA+ model abstracts a single transfer from account \texttt{A} to account \texttt{B}. It includes an abort action that restores both balances from the saved old values. If the restoration of \texttt{a} is removed, the invariant can fail after an abort following the debit.
-
-\begin{lstlisting}[caption={A small TLA+ model for transfer rollback and money conservation.}]
---------------------------- MODULE BankAbort ---------------------------
-EXTENDS Naturals
-
-CONSTANTS InitA, InitB, Amount
-
-VARIABLES a, b, phase, oldA, oldB
+VARIABLES a, b
 
 Init ==
     /\ a = InitA
     /\ b = InitB
-    /\ phase = "start"
-    /\ oldA = InitA
-    /\ oldB = InitB
 
-Read ==
-    /\ phase = "start"
-    /\ oldA' = a
-    /\ oldB' = b
-    /\ phase' = "read"
-    /\ UNCHANGED <<a, b>>
-
-Debit ==
-    /\ phase = "read"
-    /\ a >= Amount
+GoodTransfer ==
+    /\ a - Amount >= Floor
     /\ a' = a - Amount
-    /\ phase' = "debited"
-    /\ UNCHANGED <<b, oldA, oldB>>
-
-Credit ==
-    /\ phase = "debited"
     /\ b' = b + Amount
-    /\ phase' = "credited"
-    /\ UNCHANGED <<a, oldA, oldB>>
 
-Commit ==
-    /\ phase = "credited"
-    /\ phase' = "done"
-    /\ UNCHANGED <<a, b, oldA, oldB>>
+BadTransfer ==
+    /\ a - Amount >= Floor
+    /\ a' = a
+    /\ b' = b + Amount
 
-Abort ==
-    /\ phase \in {"read", "debited", "credited"}
-    /\ a' = oldA
-    /\ b' = oldB
-    /\ phase' = "done"
-    /\ UNCHANGED <<oldA, oldB>>
+Next ==
+    \/ GoodTransfer
+    \/ BadTransfer
+    \/ UNCHANGED <<a, b>>
 
-Next == Read \/ Debit \/ Credit \/ Commit \/ Abort
+MoneyConserved ==
+    a + b = InitA + InitB
 
-MoneyConserved == a + b = InitA + InitB
+FloorOK ==
+    /\ a >= Floor
+    /\ b >= Floor
 
-Spec == Init /\ [][Next]_<<a, b, phase, oldA, oldB>>
+Spec ==
+    Init /\ [][Next]_<<a, b>>
+
 =============================================================================
 \end{lstlisting}
 
-The model is small because it checks one idea: rollback must restore every in-place update. \texttt{MoneyConserved} is the same invariant used by the C++ bank tests, and omitting \texttt{a' = oldA} in \texttt{Abort} models a missing undo-log entry for the debit. The abstraction ignores performance, allocation, and cache behavior; that is why it can exhaustively explore protocol states.
+A minimal TLC configuration is:
 
-A useful workflow is to keep the TLA+ model close to the implementation test. When the implementation adds account floors, the model should add the same precondition. When the implementation distinguishes explicit aborts from conflict aborts, the model can keep one abstract abort action unless the distinction affects safety.
+\begin{lstlisting}[language={}, caption={TLC configuration for the dropped-debit model.}]
+SPECIFICATION Spec
+INVARIANTS MoneyConserved FloorOK
+CONSTANTS
+    InitA = 100
+    InitB = 50
+    Amount = 30
+    Floor = 0
+\end{lstlisting}
 
-\input{sections/ch12_new_section}
+With only \texttt{GoodTransfer}, both invariants hold for this finite instance; enabling \texttt{BadTransfer} produces a state with \texttt{a = 100} and \texttt{b = 80}, in which the floor still holds but money conservation is false. The bug is not in the runtime algorithm but in the compiler transformation that changed the transaction's abstract write-set, and it is the same shape of error that a post-instrumentation DSE pass can introduce in C or LLVM IR.
+
+The model deliberately abstracts away locks, timestamps, ownership records, and validation. That is the point. A compiler pass that deletes one side of the transfer has already changed the sequential meaning of the transaction. No commit protocol can repair an update that was never emitted.
+
+\section{Contract Between Programmer and Compiler}
+
+The programmer-facing half of the contract is a set of annotations and restrictions. The compiler cannot infer every semantic boundary from C or C++ syntax alone. It needs to know which functions may execute inside a transaction, which functions are pure with respect to transactional state, and which globals must be treated as shared transactional objects.
+
+The \texttt{transaction\_safe} annotation says that a function may be called from a transaction and must obey the restrictions required by the TM implementation. The \texttt{transaction\_pure} annotation says that a function is allowed because it has no relevant transactional side effects. The dangerous case is misannotation: a function marked pure but performing shared memory I/O gives the optimizer permission to erase exactly the dependency the runtime needed.
+
+Compiler intrinsics such as \texttt{tm\_clobber} exist to bridge source intent and optimizer mechanics. A source-level annotation classifies a region. An IR-level intrinsic prevents a later pass from turning the instrumented region back into ordinary memory operations.
+
+The contract says what the programmer must protect via \texttt{transaction\_safe} and \texttt{transaction\_pure} annotations, while compiler intrinsics like \texttt{tm\_clobber} inform the optimizer of transactional side effects. The annotation contract is the C++ TM TS's central lesson: without a language-level notion of ``transaction'', the compiler cannot keep its promises, which explains the mismatch bugs seen in the wild --- DATA/TEXT symbol collisions, pass reordering of \texttt{tm\_read}\slash{}\texttt{tm\_write} calls, and dead-store elimination of speculative writes. This programmer-facing contract is the user-visible half of Section~\ref{sec:instrumentation-contract}: the annotations the programmer writes exist to feed the pass the classifications it needs.
+
+A useful way to state the shared responsibility is:
+
+\[
+\small
+\text{source transaction} + \text{correct classification} + \text{opaque instrumentation}
+\Rightarrow \text{runtime-visible transaction}
+\]
+
+If any term is missing, the runtime may still be correct in isolation but the compiled program is not.
 
 \section{Summary}
 
-Testing transactional memory requires a stack of techniques. Invariant tests are cheap and backend-independent; they should run everywhere. Abort fuzzing makes rare rollback paths common. Deterministic scheduling turns timing-sensitive failures into ordinary test cases. Record-and-replay makes concrete executions debuggable. TLA+ model checking explores the abstract protocol and catches missing transitions before they become code.
+Compiler optimizations are not the enemy of transactional memory. Unspecified optimization boundaries are. A practical TM compiler should optimize ordinary code normally, optimize stack temporaries inside transactions normally, and then preserve transactional accessors as opaque side effects after instrumentation.
 
-The most useful tests are small, repeatable, and invariant-driven. A bank sum, a counter value, or agreement with a sequential oracle is often enough to expose a deep atomicity bug. Once a failure is found, the engineering task is to preserve it: keep the seed, keep the schedule, keep the model counterexample, and add the cheapest regression test that still fails without the fix.
+Many aggressive optimizations assume a single-threaded execution model, so a TM-aware compiler must disable or constrain certain optimizations within transactional regions. The safe pipeline is ordinary optimization first, TM instrumentation last, and then only optimizations that respect opaque transactional side effects; and shared memory and stack memory must be classified before rewriting, because optimizing both under the same rules is either slow or wrong.
+
+The bank-transfer example gives the core test: after compilation, both the debit and the credit must still exist as transactional effects, and the reads that justify them must still participate in the runtime's consistency mechanism.
 
 \section{Exercises}
 \begin{enumerate}
-    \item Design a fuzzing strategy that randomly injects aborts to stress-test a TM's undo-log correctness.
-    \item Given a recorded \texttt{rr} trace where a transaction T commits but its writes never appear, hypothesise where to set a watchpoint and how to step backwards to find the bug.
-    \item A deterministic scheduler explores interleavings with a bounded number of preemptions. Explain how this bound trades off completeness for tractability.
-    \item \emph{[implementation]} Extend Listing~\ref{sec:abort-fuzz-bank}'s harness with account floors: no committed transaction may leave an account below zero. Keep money conservation as a separate invariant, and report which invariant fails first.
-    \item \emph{[verification]} Write a two-account TLA+ model of transfer with actions \textsc{Read}, \textsc{Debit}, \textsc{Credit}, \textsc{Commit}, and \textsc{Abort}. Add the money-conservation invariant and then intentionally omit rollback for \textsc{Debit}; confirm that the model checker finds a counterexample.
-    \item \emph{[theory]} Bounded-preemption testing often finds bugs with a small bound. Give one reason this empirical fact is plausible for TM implementations, and one class of TM bug that may require a larger bound or a different exploration strategy.
-    \item \emph{[implementation]} Add named abort sites to the abort-fuzzing harness and print the seed, thread id, source account, destination account, amount, and abort-site name on failure.
-    \item \emph{[verification]} Modify the TLA+ model in Listing~\ref{sec:tla-bank-conservation} to include an account floor. State the invariant that distinguishes money conservation from floor preservation.
-    \item \emph{[theory]} Explain why a sequential oracle is easy for a counter but harder for a concurrent queue whose operations return values during the execution, not only at the end.
-    \item \emph{[literature]} Read Musuvathi et al., \emph{Finding and
-          Reproducing Heisenbugs in Concurrent Programs}
-          \cite{musuvathi08chess}, which introduces CHESS.  Compare its
-          bounded-preemption exploration with this chapter's
-          deterministic-scheduler discussion: state one guarantee CHESS
-          gives that a plain stress test does not, and one workload where
-          its bound still leaves a bug undetected.
+    \item A compiler removes a dead store inside a transaction because the variable is not read afterwards. Explain why this is illegal if the store was meant to be part of a speculative state.
+    \item Design a minimal compiler intrinsic \texttt{tm\_clobber(x)} that tells the optimizer: “treat this store as live even if it appears dead.”
+    \item LICM hoists a transactional read out of a loop. Show a correctness violation that results.
+    \item \emph{[implementation]} Write a small LLVM or source-to-source pass that instruments only heap/global accesses in a transaction and leaves provable stack locals untouched. Test it on the transfer body in Section~\ref{sec:worked-barriered-transfer}.
+    \item \emph{[verification]} Modify the TLA+ model in Section~\ref{sec:worked-dropped-debit} so that \texttt{BadTransfer} drops the credit instead of the debit. Which invariant fails, and which account-floor checks still pass?
+    \item \emph{[theory]} State the weakest condition under which CSE of two transactional reads from the same address is sound. Your answer should mention validation, intervening writes, and abort behavior.
+    \item \emph{[open]} When a compiler transforms a transaction, is the
+          result still ``the same transaction''?  Argue where optimization
+          rights should end: should the compiler be free to reorder,
+          eliminate, and hoist inside a transaction as long as the
+          \emph{abstract} read/write set is unchanged, or does opacity
+          give the programmer a right to the exact memory behaviour
+          written?  State the cost of your position for either compiler
+          writers or programmers.
 \end{enumerate}
 
-\textbf{How to check your work.} The \emph{[implementation]} exercises are
-verified with the companion: extend the harness of \S\ref{sec:abort-fuzz-bank}
-with floors and named abort sites, using \S\ref{sec:replay-lost-update} for
-the \texttt{rr} watchpoint walk.  The \emph{[verification]} exercises are
-checked with TLC against \S\ref{sec:tla-bank-conservation}
-(\texttt{MoneyConserved}, \texttt{FloorsHold}; see
+\textbf{How to check your work.} The \emph{[implementation]} exercise is
+verified with the companion: instrument heap/global accesses in the transfer
+body of \S\ref{sec:worked-barriered-transfer}.  The \emph{[verification]}
+exercise is checked with TLC against the model of
+\S\ref{sec:worked-dropped-debit} (\texttt{MoneyConserved}; see
 Appendix~\ref{chap:pluscal-quick-ref}).  The \emph{[theory]} exercises are
-graded against \S\ref{sec:test-example} and \S\ref{sec:oracle-counter-example}.
-The \emph{[literature]} exercise is graded on whether the guarantee you
-attribute to CHESS is real and the workload you name is one its bounded
-exploration genuinely cannot cover.
+graded against the optimization taxonomy of \S\ref{sec:optimization-taxonomy}.
+The \emph{[open]} exercise has no single right answer; it is graded on
+whether you state who pays the cost of your position and address the
+strongest objection.
 
-\index{lost update}
-\index{torn write-back}
-\index{non-atomic commit}
-\index{sequential oracle}
-\index{abort injection}
-\index{rollback path}
-\index{undo-log entry}
-\index{write set}
-\index{capacity abort}
-\index{conflict abort}
-\index{explicit abort}
-\index{bounded preemption}
-\index{Heisenbug}
-\index{watchpoint}
-\index{reverse debugging}
-\index{record-and-replay}
-\index{CHESS}
-\index{rr}
-\index{TLA+}
-\index{money-conservation invariant}
+\index{dead-store elimination}
+\index{loop-invariant code motion}
+\index{common subexpression elimination}
+\index{scalar replacement of aggregates}
+\index{store forwarding}
+\index{pass ordering}
+\index{TM instrumentation}
+\index{opaque calls}
+\index{transactional read-set}
+\index{transactional write-set}
+\index{write-back STM}
+\index{read validation}
+\index{bank transfer invariant}
 \index{account floor}
-\index{regression test}
-% -------------------------------------------------------------------
+\index{LLVM\_TM\_ADDR\_CHECK}
+\index{transaction\_safe}
+\index{transaction\_pure}
+\index{C++ TM TS}

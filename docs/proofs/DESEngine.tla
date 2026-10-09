@@ -50,6 +50,11 @@ ASSUME Addr \subseteq Nat
 
 (*--------------------------------------------------------------------*)
 (* PlusCal algorithm                                                   *)
+(* Saturation cap on the bookkeeping counters. They are never read by
+    an invariant, and saturating them at 2 keeps the reachable state space
+    finite (and small) so the `make check' sweep terminates.             *)
+Cap(n) == IF n < 2 THEN n + 1 ELSE 2
+
 (*--------------------------------------------------------------------*)
 (* --algorithm DESEngine
 
@@ -83,10 +88,10 @@ L_entry:
             if (conflicting_writers /= {}) then
                 in_tx := [w \in LP |-> IF w \in conflicting_writers THEN FALSE ELSE in_tx[w]];
                 lp_state := [w \in LP |-> IF w \in conflicting_writers THEN "idle" ELSE lp_state[w]];
-                abort_count := [w \in LP |-> IF w \in conflicting_writers THEN abort_count[w] + 1 ELSE abort_count[w]];
+                abort_count := [w \in LP |-> IF w \in conflicting_writers THEN Cap(abort_count[w] + 1) ELSE abort_count[w]];
                 in_flight_writes := in_flight_writes \ {<<w, a2>> : w \in conflicting_writers, a2 \in Addr};
                 in_flight_reads := in_flight_reads \ {<<w, a2>> : w \in conflicting_writers, a2 \in Addr};
-                conflict_aborts := conflict_aborts + Cardinality(conflicting_writers);
+                conflict_aborts := Cap(conflict_aborts + Cardinality(conflicting_writers));
             else
                 in_flight_reads := in_flight_reads \cup {<<self, a>>};
             end if;
@@ -100,12 +105,12 @@ L_entry:
             if (conflicting_readers /= {} \/ conflicting_writers /= {}) then
                 in_tx := [w \in LP |-> IF w \in conflicting_readers \cup conflicting_writers THEN FALSE ELSE in_tx[w]];
                 lp_state := [w \in LP |-> IF w \in conflicting_readers \cup conflicting_writers THEN "idle" ELSE lp_state[w]];
-                abort_count := [w \in LP |-> IF w \in conflicting_readers THEN abort_count[w] + 1
-                                             ELSE IF w \in conflicting_writers THEN abort_count[w] + 1
+                abort_count := [w \in LP |-> IF w \in conflicting_readers THEN Cap(abort_count[w] + 1)
+                                             ELSE IF w \in conflicting_writers THEN Cap(abort_count[w] + 1)
                                              ELSE abort_count[w]];
                 in_flight_reads := in_flight_reads \ {<<rp, a2>> : rp \in conflicting_readers \union conflicting_writers, a2 \in Addr};
                 in_flight_writes := in_flight_writes \ {<<wp, a2>> : wp \in conflicting_readers \union conflicting_writers, a2 \in Addr};
-                conflict_aborts := conflict_aborts + Cardinality(conflicting_readers) + Cardinality(conflicting_writers);
+                conflict_aborts := Cap(conflict_aborts + Cardinality(conflicting_readers) + Cardinality(conflicting_writers));
             else
                 in_flight_writes := in_flight_writes \cup {<<self, a>>};
             end if;
@@ -116,7 +121,7 @@ L_entry:
         in_tx[self] := FALSE;
         in_flight_writes := in_flight_writes \ {<<self, a>> : a \in Addr};
         in_flight_reads := in_flight_reads \ {<<self, a>> : a \in Addr};
-        tx_count[self] := tx_count[self] + 1;
+        tx_count[self] := Cap(tx_count[self] + 1);
         lp_state[self] := "idle";
     or
         (* AbortTx *)
@@ -124,7 +129,7 @@ L_entry:
         in_tx[self] := FALSE;
         in_flight_writes := in_flight_writes \ {<<self, a>> : a \in Addr};
         in_flight_reads := in_flight_reads \ {<<self, a>> : a \in Addr};
-        abort_count[self] := abort_count[self] + 1;
+        abort_count[self] := Cap(abort_count[self] + 1);
         lp_state[self] := "idle";
     or
         (* EnterSGL *)
@@ -148,8 +153,8 @@ L_entry:
         in_tx[self] := FALSE;
         in_flight_writes := in_flight_writes \ {<<self, a>> : a \in Addr};
         in_flight_reads := in_flight_reads \ {<<self, a>> : a \in Addr};
-        abort_count[self] := abort_count[self] + 1;
-        conflict_aborts := conflict_aborts + 1;
+        abort_count[self] := Cap(abort_count[self] + 1);
+        conflict_aborts := Cap(conflict_aborts + 1);
         lp_state[self] := "idle";
     end either;
     goto L_entry;
@@ -157,12 +162,12 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION
-VARIABLES in_flight_writes, in_flight_reads, in_tx, sgl_mode, lp_state,
-          tx_count, abort_count, conflict_aborts, pc, conflicting_writers,
+VARIABLES in_flight_writes, in_flight_reads, in_tx, sgl_mode, lp_state, 
+          tx_count, abort_count, conflict_aborts, pc, conflicting_writers, 
           conflicting_readers
 
-vars == << in_flight_writes, in_flight_reads, in_tx, sgl_mode, lp_state,
-           tx_count, abort_count, conflict_aborts, pc, conflicting_writers,
+vars == << in_flight_writes, in_flight_reads, in_tx, sgl_mode, lp_state, 
+           tx_count, abort_count, conflict_aborts, pc, conflicting_writers, 
            conflicting_readers >>
 
 ProcSet == (LP)
@@ -193,13 +198,13 @@ L_entry(self) == /\ pc[self] = "L_entry"
                             /\ IF (conflicting_writers'[self] /= {})
                                   THEN /\ in_tx' = [w \in LP |-> IF w \in conflicting_writers'[self] THEN FALSE ELSE in_tx[w]]
                                        /\ lp_state' = [w \in LP |-> IF w \in conflicting_writers'[self] THEN "idle" ELSE lp_state[w]]
-                                       /\ abort_count' = [w \in LP |-> IF w \in conflicting_writers'[self] THEN abort_count[w] + 1 ELSE abort_count[w]]
+                                       /\ abort_count' = [w \in LP |-> IF w \in conflicting_writers'[self] THEN Cap(abort_count[w] + 1) ELSE abort_count[w]]
                                        /\ in_flight_writes' = in_flight_writes \ {<<w, a2>> : w \in conflicting_writers'[self], a2 \in Addr}
                                        /\ in_flight_reads' = in_flight_reads \ {<<w, a2>> : w \in conflicting_writers'[self], a2 \in Addr}
-                                       /\ conflict_aborts' = conflict_aborts + Cardinality(conflicting_writers'[self])
+                                       /\ conflict_aborts' = Cap(conflict_aborts + Cardinality(conflicting_writers'[self]))
                                   ELSE /\ in_flight_reads' = (in_flight_reads \cup {<<self, a>>})
-                                       /\ UNCHANGED << in_flight_writes, in_tx,
-                                                       lp_state, abort_count,
+                                       /\ UNCHANGED << in_flight_writes, in_tx, 
+                                                       lp_state, abort_count, 
                                                        conflict_aborts >>
                        /\ UNCHANGED <<sgl_mode, tx_count, conflicting_readers>>
                     \/ /\ lp_state[self] = "active" /\ in_tx[self] = TRUE
@@ -209,29 +214,29 @@ L_entry(self) == /\ pc[self] = "L_entry"
                             /\ IF (conflicting_readers'[self] /= {} \/ conflicting_writers'[self] /= {})
                                   THEN /\ in_tx' = [w \in LP |-> IF w \in conflicting_readers'[self] \cup conflicting_writers'[self] THEN FALSE ELSE in_tx[w]]
                                        /\ lp_state' = [w \in LP |-> IF w \in conflicting_readers'[self] \cup conflicting_writers'[self] THEN "idle" ELSE lp_state[w]]
-                                       /\ abort_count' = [w \in LP |-> IF w \in conflicting_readers'[self] THEN abort_count[w] + 1
-                                                                       ELSE IF w \in conflicting_writers'[self] THEN abort_count[w] + 1
+                                       /\ abort_count' = [w \in LP |-> IF w \in conflicting_readers'[self] THEN Cap(abort_count[w] + 1)
+                                                                       ELSE IF w \in conflicting_writers'[self] THEN Cap(abort_count[w] + 1)
                                                                        ELSE abort_count[w]]
                                        /\ in_flight_reads' = in_flight_reads \ {<<rp, a2>> : rp \in conflicting_readers'[self] \union conflicting_writers'[self], a2 \in Addr}
                                        /\ in_flight_writes' = in_flight_writes \ {<<wp, a2>> : wp \in conflicting_readers'[self] \union conflicting_writers'[self], a2 \in Addr}
-                                       /\ conflict_aborts' = conflict_aborts + Cardinality(conflicting_readers'[self]) + Cardinality(conflicting_writers'[self])
+                                       /\ conflict_aborts' = Cap(conflict_aborts + Cardinality(conflicting_readers'[self]) + Cardinality(conflicting_writers'[self]))
                                   ELSE /\ in_flight_writes' = (in_flight_writes \cup {<<self, a>>})
-                                       /\ UNCHANGED << in_flight_reads, in_tx,
-                                                       lp_state, abort_count,
+                                       /\ UNCHANGED << in_flight_reads, in_tx, 
+                                                       lp_state, abort_count, 
                                                        conflict_aborts >>
                        /\ UNCHANGED <<sgl_mode, tx_count>>
                     \/ /\ lp_state[self] = "active" /\ in_tx[self] = TRUE
                        /\ in_tx' = [in_tx EXCEPT ![self] = FALSE]
                        /\ in_flight_writes' = in_flight_writes \ {<<self, a>> : a \in Addr}
                        /\ in_flight_reads' = in_flight_reads \ {<<self, a>> : a \in Addr}
-                       /\ tx_count' = [tx_count EXCEPT ![self] = tx_count[self] + 1]
+                       /\ tx_count' = [tx_count EXCEPT ![self] = Cap(tx_count[self] + 1)]
                        /\ lp_state' = [lp_state EXCEPT ![self] = "idle"]
                        /\ UNCHANGED <<sgl_mode, abort_count, conflict_aborts, conflicting_writers, conflicting_readers>>
                     \/ /\ lp_state[self] = "active" /\ in_tx[self] = TRUE
                        /\ in_tx' = [in_tx EXCEPT ![self] = FALSE]
                        /\ in_flight_writes' = in_flight_writes \ {<<self, a>> : a \in Addr}
                        /\ in_flight_reads' = in_flight_reads \ {<<self, a>> : a \in Addr}
-                       /\ abort_count' = [abort_count EXCEPT ![self] = abort_count[self] + 1]
+                       /\ abort_count' = [abort_count EXCEPT ![self] = Cap(abort_count[self] + 1)]
                        /\ lp_state' = [lp_state EXCEPT ![self] = "idle"]
                        /\ UNCHANGED <<sgl_mode, tx_count, conflict_aborts, conflicting_writers, conflicting_readers>>
                     \/ /\  \A other \in LP :
@@ -252,8 +257,8 @@ L_entry(self) == /\ pc[self] = "L_entry"
                        /\ in_tx' = [in_tx EXCEPT ![self] = FALSE]
                        /\ in_flight_writes' = in_flight_writes \ {<<self, a>> : a \in Addr}
                        /\ in_flight_reads' = in_flight_reads \ {<<self, a>> : a \in Addr}
-                       /\ abort_count' = [abort_count EXCEPT ![self] = abort_count[self] + 1]
-                       /\ conflict_aborts' = conflict_aborts + 1
+                       /\ abort_count' = [abort_count EXCEPT ![self] = Cap(abort_count[self] + 1)]
+                       /\ conflict_aborts' = Cap(conflict_aborts + 1)
                        /\ lp_state' = [lp_state EXCEPT ![self] = "idle"]
                        /\ UNCHANGED <<sgl_mode, tx_count, conflicting_writers, conflicting_readers>>
                  /\ pc' = [pc EXCEPT ![self] = "L_entry"]

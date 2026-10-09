@@ -1,6 +1,6 @@
 CHAPTER 04 — Programming Languages and Memory Semantics for TM
 Part: II (The Machine Beneath)
-Lines: ~700 | Sections: 7 | Subsections: 2 | Figures: 2 | Tables: 1 | Listings: 5 | TikZ: 2
+Lines: ~850 | Sections: 6 | Subsections: 6 | Figures: 2 | Tables: 1 | Listings: 7 | TikZ: 2
 
 PURPOSE: Language side of the TM boundary: how C/C++/Rust express the memory
 model, ABI hazards, volatile/inline-asm/atomics, and how TM annotations
@@ -16,8 +16,30 @@ SECTIONS
     Send/Sync, ownership vs shared-memory TM, UnsafeCell; safe Rust bank
     transfer with the companion tm crate (TmCell/transaction, no unsafe in
     client code); what the type system proves vs what the runtime owes.
+    NEW para: abort via TmxAbort panic payload + catch_unwind (Drop runs;
+    longjmp unsound in Rust) explains the closure-shaped API; ref app08.
   * Language-Integrated Annotations for TM
     transaction_safe, atomic blocks, [[tm::shared]] style annotations.
+  * Haskell: The Pure Escape Hatch (NEW)
+    GHC STM monad: TVars only path to shared mutable state, retry/orElse
+    (lst:haskell-stm), crash class inexpressible not prevented; retry =
+    read set as wait set; STM monad composition; GHC impl = optimistic
+    multi-version + global commit lock (NOrec-like); unsafePerformIO =
+    boundary breach.
+  * Clojure: References, not Cells (NEW)
+    refs -> immutable values, dosync/alter/commute/sync+refset-of/io!
+    (lst:clojure-stm); placed at SI on Ch.7 ladder (write skew admitted);
+    values as snapshots; io! = enforced privatization discipline; commute =
+    programmer-facing validation dial.
+  * Scala and Python: Library STM Where the VM Removed the Excuse (NEW)
+    scala.concurrent.stm Ref/atomic/orRetry + transformer API; pySTM exists
+    for the no-GIL dialects (Jython/IronPython/PyPy STM experiment): STM
+    appears where shared mutable state becomes real.
+  * The Negative Space: JavaScript, PHP, and Kotlin (NEW)
+    No STM because the three preconditions (shared memory + in-place mutation
+    + need) are designed away: event loops/message passing (JS, PHP),
+    coroutines/channels confinement (Kotlin). STM = shared-mutable-state
+    technology.
 - Worked Example: Atomic Operations for a Counter
     Counter three ways in C AND in Rust (Mutex / AtomicI32 / TmCell
     transaction, 4 threads); composability argument.
@@ -32,7 +54,8 @@ SECTIONS
 FIGURES: fig:language-tm-boundary (language-TM boundary),
          fig:ordering-lattice (memory-ordering lattice)
 TABLES: tab:language-tm-taxonomy (language-integration mechanisms + contracts)
-LISTINGS: 5 (counter C, Rust bank transfer with tm crate, counter Rust,
-ABI-safe bank C++, TLA+ lost-atomicity)
+LISTINGS: 7 (counter C, Rust bank transfer with tm crate, counter Rust,
+ABI-safe bank C++, TLA+ lost-atomicity, Haskell STM, Clojure STM)
 CITES: (boehm08memory via Ch.2; Rust std::sync::atomic orderings map to the
-Ch.3 litmus table)
+Ch.3 litmus table); NEW: peytonjones96concurrent, ghcstm, clojurestm,
+scala-stm, pystm

@@ -2,6 +2,9 @@
 #
 # Targets:
 #   make                    — TLC safety check on all backends
+#   make check-teaching    — the book's violation-demonstrating models
+#                            (EagerSTM opacity crash, BankSI write skew +
+#                             serializable contrast); NOT part of `check`
 #   make check-<BACKEND>   — TLC on a single backend (e.g., make check-TL2)
 #   make check-all         — TLC + coverage on all backends
 #   make verify-sequential — 11 PlusCal backends with Thread={1}
@@ -19,6 +22,10 @@
 #   TLAPM        — path to tlapm (default: tlapm)
 
 TLA2TOOLS_JAR ?= /tmp/tla2tools.jar
+# Per-backend bounded checking: DESEngine's bookkeeping counters are
+# unbounded, so exhaustive search never reaches a fixed point; bound the
+# path length instead. Empty for every other backend (exhaustive).
+DEPTH_DESEngine ?= -depth 10
 TLAPM         ?= tlapm
 TLC_OPTS      ?=
 
@@ -41,14 +48,45 @@ PLUSCAL_BACKENDS := $(shell grep -l '\-\-algorithm' *.tla 2>/dev/null | sed 's/\
 # Default: TLC on all backends (safety only)
 check:
 	@for b in $(BACKENDS); do \
-	    echo "=== TLC: $$b ==="; \
-	    $(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) $$b.tla -config $$b.cfg 2>&1; \
+	    cfg=$$b-smoke.cfg; \
+	    [ -f $$cfg ] || cfg=$$b.cfg; \
+	    echo "=== TLC: $$b (cfg=$$cfg) ==="; \
+	    $(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) $$b.tla -config $$cfg 2>&1; \
 	    echo; \
 	done
+
+## Sweep config convention: a backend with a $b-smoke.cfg is checked with
+# that bounded config (smaller constant sets where the exhaustive product
+# blows up; e.g. DUDETM). Create one when a backend makes `check' crawl.
 
 # TLC with coverage
 check-all: TLC_OPTS += -coverage 1
 check-all: check
+
+# Book Ch. 2 / Ch. 7 teaching models. These models are INTENTIONALLY
+# violated (that is the lesson), so their configs are purpose-suffixed
+# (-crash/-skew) and never picked up by the `check` sweep above.
+# Each sub-check asserts the expected TLC verdict and fails the target
+# otherwise.
+check-teaching:
+	@echo "=== EagerSTM (expect: NoCrash VIOLATED — opacity crash) ==="
+	@$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) EagerSTM.tla \
+	    -config EagerSTM-crash.cfg > /tmp/eagerstm-teach.log 2>&1; \
+	if grep -q "Invariant NoCrash is violated" /tmp/eagerstm-teach.log; then \
+	    echo "  OK: crash-reachable counterexample found (see /tmp/eagerstm-teach.log)"; \
+	else echo "  FAIL: expected NoCrash violation NOT found"; exit 1; fi
+	@echo "=== BankSI (expect: Reserve VIOLATED — SI write skew) ==="
+	@$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) BankSI.tla \
+	    -config BankSI-skew.cfg > /tmp/banksi-skew-teach.log 2>&1; \
+	if grep -q "Invariant Reserve is violated" /tmp/banksi-skew-teach.log; then \
+	    echo "  OK: write-skew counterexample found (see /tmp/banksi-skew-teach.log)"; \
+	else echo "  FAIL: expected Reserve violation NOT found"; exit 1; fi
+	@echo "=== BankSI + read-set revalidation (expect: PASS) ==="
+	@$(JAVA) -cp $(TLA2TOOLS_JAR) tlc2.TLC -deadlock $(TLC_OPTS) BankSI.tla \
+	    -config BankSI-serial.cfg > /tmp/banksi-serial-teach.log 2>&1 \
+	    || { echo "  FAIL: serializable contrast model does not pass"; \
+	         tail -20 /tmp/banksi-serial-teach.log; exit 1; }
+	@echo "  OK: Reserve holds under optimistic serializability"
 
 # Fast smoke gate: 3 small models, 60s timeout each (blocking CI, <5 min total).
 # A backend may ship a $${b}-smoke.cfg with a deliberately small state space so

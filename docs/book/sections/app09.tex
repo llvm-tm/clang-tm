@@ -34,7 +34,7 @@ clang-tm/
 |   +-- tikv/                # distributed TiKV 2PC
 |   +-- queue/               # async queue runtime
 |   +-- tm_region_allocator/ # mmap region + deferred frees
-|   +-- ...                  # 26 backend dirs total (see §"Backend Directory Map")
+|   +-- ...                  # 27 backend dirs total (see §"Backend Directory Map")
 +-- explicit_api/cpp/        # C++ explicit TM API (TM<T>)
 +-- explicit_api/rust/       # Rust workspace (backends + executor)
 +-- benchmarks/cpp/          # bank, fuzz-counter, fuzz-bank, STAMP
@@ -351,6 +351,10 @@ Directory & Notes \\
 \rep{backends/tm\_impl/gacco} & Gacco transactional caches \\
 \rep{backends/tm\_impl/gputx} & GPUTX (GPU) \\
 \rep{backends/tm\_impl/power8\_htm} & POWER8 HTM (gem5) \\
+\rep{backends/tm\_impl/eager\_broken} & \emph{Teaching only}: intentionally
+  broken eager STM used by Chapter~2's non-opacity demo
+  (\S\ref{sec:crash-without-opacity}); never a default, excluded from the
+  test sweep --- see its \rep{STATUS.md} \\
 \bottomrule
 \end{tabular}
 \end{center}

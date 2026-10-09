@@ -44,7 +44,7 @@ or multiple readers share the line. The important caveat for later chapters is
 that GPUs do not provide this coherent private cache model across streaming
 multiprocessors. GPU global memory is coherent only at L2, and the private L1
 caches are not kept coherent across SMs. That absence reshapes GPU TM design
-in Chapter~17.
+in Chapter~18.
 
 Conflict detection granularity is the cache line, not the word. Two
 independent variables can share a line and therefore appear to conflict even
@@ -138,6 +138,14 @@ anomaly each model permits. The pattern to watch for is always the same: the
 model permits an interleaving that sequential consistency forbids, that
 forbidden interleaving breaks a transaction's atomicity, and a fence or a
 stronger atomic closes the hole.
+
+One word of disambiguation before the tour. A memory consistency model
+constrains the visibility and ordering of \emph{individual} accesses.
+Isolation levels --- serializability, snapshot isolation --- constrain which
+partial states of multi-access \emph{transaction units} other transactions may
+observe. The two contracts are orthogonal, and every backend in this book must
+satisfy both: a fence fixes the first, validation the second. Chapter~5 fixes
+the strong end of the isolation contract; Chapter~7 explores the weaker rungs.
 
 \subsection{Sequential Consistency}
 
@@ -360,7 +368,7 @@ acquire/release annotations plus explicit fences recover order. GPUs are
 weaker still in a different dimension: the private L1 caches of a
 streaming multiprocessor are not coherent across SMs at all, so
 ``the order in which stores become visible'' is a per-scope question;
-Chapter~17 rebuilds conflict detection from scratch under that constraint.
+Chapter~18 rebuilds conflict detection from scratch under that constraint.
 
 The portable contract over all of these is the C11/C++11 atomic memory
 model (Chapter~4): \texttt{seq\_cst} gives the SC column, acquire/release
@@ -773,7 +781,7 @@ companion repository (Rust runtimes live under
 \hline
 Cache coherence &
 Conflict signal on invalidation; hardware conflict detection; false conflicts at line granularity &
-TSX-SGL~\cite{intel13tsx,herlihy93} (\rep{backends/\allowbreak tm\_impl/\allowbreak tsx\_sgl}); POWER8-HTM (\rep{backends/\allowbreak tm\_impl/\allowbreak power8\_htm}); all HTM paths of Ch.~16 \\
+TSX-SGL~\cite{intel13tsx,herlihy93} (\rep{backends/\allowbreak tm\_impl/\allowbreak tsx\_sgl}); POWER8-HTM (\rep{backends/\allowbreak tm\_impl/\allowbreak power8\_htm}); all HTM paths of Ch.~17 \\
 Private L1 cache &
 Speculative data home; capacity aborts when transaction working set overflows &
 TSX-SGL~\cite{intel13tsx}; XTM~\cite{chung06xtm} virtualizes capacity at page granularity (\rep{backends/\allowbreak tm\_impl/\allowbreak xtm}); software backends avoid it by keeping metadata in main memory (Part~IV) \\

@@ -1,6 +1,6 @@
 CHAPTER 03 — Hardware Concepts for Transactional Memory
 Part: II (The Machine Beneath)
-Lines: ~870 | Sections: 11 | Subsections: 4 | Figures: 6 | Tables: 2 | Listings: 5 | TikZ: 6
+Lines: ~955 | Sections: 11 | Subsections: 4 | Figures: 6 | Tables: 2 | Listings: 5 | TikZ: 6
 
 PURPOSE: Hardware vocabulary for TM: memory hierarchy, cache coherence,
 out-of-order execution/speculation, store buffers, the memory-model ladder
@@ -26,7 +26,7 @@ SECTIONS
     ldar/stlr, dependencies; message-passing litmus anomaly diagram;
     IRIW; POWER8 HTM backend tie-in (backends/tm_impl/power8_htm).
   * Other Models and the C/C++ Contract
-    RISC-V RVWMO cousin; GPU scopes (Ch.17); C11/C++11 atomics as the
+    RISC-V RVWMO cousin; GPU scopes (Ch.18); C11/C++11 atomics as the
     portable contract; litmus summary table (SB/MP/IRIW x TSO/ARM-POWER).
 - Worked Example: The TSO Store-Buffer Surprise
     Bank transfer writes A then reads B; torn-view diagram (drain window).

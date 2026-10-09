@@ -1,787 +1,644 @@
-\chapter{Speculative Designs: NOrec and Beyond}
-\index{NOrec}\index{TL2}\index{TinySTM}\index{JVSTM}\index{MVLog}\index{value-based validation}\index{global-clock STM}\index{multiversion STM}
+\chapter{Non‑Speculative Designs: Single Lock and Serializers}
+\index{single global lock}\index{SGL}\index{serializers}\index{queue-based transactional memory}\index{non-speculative transactional memory}\index{opacity}\index{Amdahl's law}
 
-Speculative transactional memory replaces coarse serialization with optimistic execution. A transaction reads shared memory, records enough evidence to justify those reads, buffers or protects its writes, and later tries to make the whole execution appear atomic. The reward is concurrency. The price is aborts, metadata traffic, validation, and proof obligations.
+Non-speculative transactional memory is the control case for the rest of the implementation chapters. It gives up parallel execution inside transactions and obtains, in exchange, the simplest correctness story in the book: one transaction runs at a time, observes a sequential state, and publishes the next sequential state.
 
-This chapter studies the speculative in-memory families implemented in the companion repository: NOrec and NOrec-BF, TL2 and TSC-TM, TinySTM variants, JVSTM, and MVLog. The running bank-transfer example remains the test case: a transfer must preserve total money and must not take an account below its floor. Each design is judged by the same question: how does it prevent a transaction from committing an inconsistent snapshot?
+This chapter studies two forms of that idea. A single-global-lock TM runs the caller inside one process-wide critical section. A thread serializer sends transaction bodies to a single worker and uses the worker's dequeue order as the serialization order. Both are deliberately simple. That simplicity is useful: SGL-like backends in the companion project are reference implementations, regression oracles, and fallbacks for more optimistic systems such as NOrec, TL2, TSC-TM, SwissTM, TinySTM, and the GPU designs.
 
-\section{NOrec: Value‑Based Validation}
+\section{Single Global Lock TM}
 
-NOrec is the smallest useful optimistic STM in the repository. It has one global sequence clock, one commit lock, a buffered write-set, and a read-set containing addresses and the values observed at those addresses. There are no ownership records attached to individual memory locations. That absence is the name: \emph{NO ownership RECords}.
+A single-global-lock transactional memory acquires one global mutex at \texttt{tm\_begin} and releases it at \texttt{tm\_commit}. While the mutex is held, ordinary loads and stores are safe because no other transaction can interleave with them. There is no validation phase, no version-clock protocol, no read-set scan, and no rollback of speculative state. The transaction either performs its writes while holding the lock, or performs no writes because its own control flow decides not to.
 
-The algorithm is value-based. A transaction starts by sampling the global clock. A read first consults the transaction's own write-set; if the address has already been written speculatively, the buffered value is returned. Otherwise the read performs the read-validate discipline: capture the clock, read the value, re-check the clock, and validate the old read-set before admitting the new read. If the clock changed, some writer committed during the read, so the transaction retries or validates.
+This design is correct by construction. Every committed transaction has a unique position in the order of lock acquisitions. Every read observes a state produced by the previous committed transaction in that order. Every write becomes visible before the lock is released and before the next transaction begins. Therefore opacity is immediate: even live transactions observe consistent states, because there is never another live writer racing with them.
 
-At commit time, the transaction acquires the single commit lock, re-reads every address in the read-set, compares each value with the recorded value, writes back the buffered writes, and advances the global clock. The clock advance is the linearization point for update transactions. A read-only transaction may linearize at a stable clock sample after validation.
+SGL is also a yardstick. A speculative STM that performs well only on conflict-free benchmarks but collapses into incorrect behavior under contention has failed the basic contract. Under extreme contention, more elaborate systems should degrade toward a safe serial execution, not toward torn reads, failed validation, or memory-management bugs.
 
-The central invariant is simple: every committed transaction must have read values that all coexisted at one logical time. NOrec enforces this without per-location metadata by re-reading values. Clock-only validation is not enough. The companion implementation fixed a real bug class of this form: an ``invisible-it-committed'' execution in which a concurrent commit occurred between a transaction's last read and its commit, but the stale snapshot was not detected because values were not revalidated.
+The companion codebase exposed one subtle version of this rule. During single-threaded initialization it is tempting to replace \texttt{tm\_malloc}, \texttt{tm\_free}, \texttt{tm\_read}, and \texttt{tm\_write} with direct stubs. That can appear harmless because there is no concurrency yet. It is not harmless. Initialization often creates objects that later participate in transactional validation, allocation tracking, persistence metadata, or ownership protocols. If initialization bypasses the real backend hooks, later tests may execute with silently disabled validation or incomplete metadata. The fixed rule is simple: even single-threaded setup routes memory and access operations through the selected backend.
 
-The cost model follows directly. NOrec has the smallest metadata footprint among the in-memory STMs considered here, but validation cost grows with the read-set size. The Bloom-filter variant, NOrec-BF, improves read-mostly workloads by avoiding some expensive bookkeeping and validation work when the filter proves an address is irrelevant to the current conflict check. In the repository's M1 Pro bank/fuzz measurements, NOrec-BF reaches about 829K transactions per second on a read-mostly workload, compared with about 553K for baseline NOrec. That is not a new algorithmic law; it is the expected signature of removing work from the read path.
+The PlusCal/SGL model from Part~III is the reference execution: one process owns the lock, executes the transaction body, updates the bank state, and releases the lock. There are no read-write conflicts to discover because the model forbids interleaving at the transaction granularity.
 
-\section{Worked Example: The NOrec Read Path}
-\index{NOrec}\index{read-validate}\index{read-only transaction}\index{commit order}\index{validation}\index{read-set}
-\label{sec:norec-example}
-
-The read-validate discipline in code, mirroring \S\ref{sec:tso-example}'s
-capture$\rightarrow$read$\rightarrow$recheck:
-
-\begin{lstlisting}[language=C, caption={NOrec read: capture clock, read, re-check clock.}]
-int32_t tm_read_i4(const void *addr) {
-    for (;;) {
-        uint64_t t1 = atomic_load(&g_clock);       /* capture   */
-        int32_t v  = *(const int32_t*)addr;        /* read      */
-        uint64_t t2 = atomic_load(&g_clock);       /* re-check  */
-        if (t1 == t2) return v;                    /* consistent */
-        /* a commit raced us: retry */
-    }
-}
-\end{lstlisting}
-
-Two clock reads bracket the data read; any interleaved commit changes the clock and forces a retry. This is the read-validate pattern the preceding discussion names --- the same one Part~II's store-buffer example revealed in hardware. Note there is no lock and no CAS: the read path is a plain load plus two acquires. That is the entire NOrec point. Exercise~1 of this chapter invites you to drop the second clock read and watch the invariant tests of Part~III fail.
-
-The listing is deliberately minimal. A production NOrec read also checks the transaction's write-set before loading from memory and records the loaded value in the read-set after validation. The essence, however, is the two clock reads around the data read. They prevent a reader from accepting a value that was observed while a writer was publishing.
-
-\section{Worked Example: NOrec Bank Transfer}
-\index{NOrec}\index{bank transfer}\index{money conservation}\index{account floor}\index{value-based validation}
-\label{sec:norec-bank-transfer-example}
-
-The running bank example is deliberately small: transfer money between two
-accounts, preserve total money, and reject transfers that would take the
-source account below its floor.  In NOrec, transaction-local writes are buffered
-until commit; reads first consult the write-set, then perform the
-capture$\rightarrow$read$\rightarrow$recheck protocol.
-
-\begin{lstlisting}[language=C, caption={A compilable C++17 NOrec-style bank transfer with value revalidation.}]
-#include <atomic>
-#include <cstdint>
-#include <mutex>
-#include <unordered_map>
-#include <vector>
-
-struct ReadEntry {
-    const int64_t *addr;
-    int64_t value;
-};
-
-struct WriteEntry {
-    int64_t *addr;
-    int64_t value;
-};
-
-struct Tx {
-    uint64_t start_clock = 0;
-    std::vector<ReadEntry> read_set;
-    std::vector<WriteEntry> write_set;
-};
-
-static std::atomic<uint64_t> g_clock{0};
-static std::mutex g_commit_lock;
-
-static bool validate(const Tx &tx) {
-    for (const ReadEntry &r : tx.read_set) {
-        if (*r.addr != r.value) return false;
-    }
-    return true;
-}
-
-static bool find_write(const Tx &tx, const int64_t *addr, int64_t &out) {
-    for (auto it = tx.write_set.rbegin(); it != tx.write_set.rend(); ++it) {
-        if (it->addr == addr) {
-            out = it->value;
-            return true;
-        }
-    }
-    return false;
-}
-
-static int64_t tx_read(Tx &tx, int64_t *addr) {
-    int64_t buffered = 0;
-    if (find_write(tx, addr, buffered)) return buffered;
-
-    for (;;) {
-        uint64_t c1 = g_clock.load(std::memory_order_acquire);
-        int64_t v = *addr;
-        uint64_t c2 = g_clock.load(std::memory_order_acquire);
-
-        if (c1 == c2 && validate(tx)) {
-            tx.read_set.push_back(ReadEntry{addr, v});
-            return v;
-        }
-
-        tx.read_set.clear();
-        tx.start_clock = g_clock.load(std::memory_order_acquire);
-    }
-}
-
-static void tx_write(Tx &tx, int64_t *addr, int64_t value) {
-    for (WriteEntry &w : tx.write_set) {
-        if (w.addr == addr) {
-            w.value = value;
-            return;
-        }
-    }
-    tx.write_set.push_back(WriteEntry{addr, value});
-}
-
-static bool tx_commit(Tx &tx) {
-    std::lock_guard<std::mutex> guard(g_commit_lock);
-
-    if (!validate(tx)) return false;
-
-    for (const WriteEntry &w : tx.write_set) {
-        *w.addr = w.value;
-    }
-
-    g_clock.fetch_add(1, std::memory_order_release);
-    return true;
-}
-
-static bool transfer(int64_t accounts[2],
-                     int64_t floor[2],
-                     int from,
-                     int to,
-                     int64_t amount) {
-    Tx tx;
-    tx.start_clock = g_clock.load(std::memory_order_acquire);
-
-    int64_t src = tx_read(tx, &accounts[from]);
-    int64_t dst = tx_read(tx, &accounts[to]);
-
-    if (src - amount < floor[from]) return false;
-
-    tx_write(tx, &accounts[from], src - amount);
-    tx_write(tx, &accounts[to], dst + amount);
-
-    return tx_commit(tx);
-}
-
-int main() {
-    int64_t accounts[2] = {100, 100};
-    int64_t floor[2] = {0, 0};
-
-    bool ok = transfer(accounts, floor, 0, 1, 25);
-
-    if (!ok) return 1;
-    if (accounts[0] + accounts[1] != 200) return 2;
-    if (accounts[0] < floor[0] || accounts[1] < floor[1]) return 3;
-
-    return 0;
-}
-\end{lstlisting}
-
-The money-conservation invariant is checked after commit: the sum of committed account balances remains unchanged. The floor check is speculative; it is safe only because commit revalidates the values that justified it. The read path validates the old read-set before admitting a new read; otherwise a transaction can assemble a snapshot from different commit times. NOrec has no per-account ownership record; the commit lock and global sequence clock serialize publication.
+A thread serializer, studied next, is SGL with the mutex replaced by a work queue. It eliminates lock handoff among callers, but it does not create parallel transaction execution. It merely moves the single execution slot from the caller threads to a worker thread.
 
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
-    font=\small,
-    node distance=1.8cm,
-    box/.style={draw, rectangle, rounded corners, minimum width=2.6cm, minimum height=0.8cm, align=center},
-    edge/.style={-{Stealth}, thick}
+    node distance=2.2cm,
+    state/.style={draw, rounded corners, minimum width=2.8cm, minimum height=0.9cm, align=center},
+    edge/.style={-{Latex}, thick}
 ]
-\node[box] (begin) {Begin\\read clock};
-\node[box, right=of begin] (read) {Read account\\record value};
-\node[box, right=of read] (validate) {Validate\\read-set};
-\node[box, right=of validate] (buffer) {Buffer\\debit/credit};
-\node[box, below=of validate] (commit) {Commit lock\\revalidate};
-\node[box, left=of commit] (abort) {Abort\\retry};
-\node[box, right=of commit] (publish) {Write back\\advance clock};
+\node[state] (idle) {Idle\\lock free};
+\node[state, right=of idle] (active) {Active transaction\\lock held};
+\node[state, right=of active] (commit) {Commit\\publish writes};
+\node[state, below=of active] (queue) {Serializer queue\\pending tasks};
 
-\draw[edge] (begin) -- (read);
-\draw[edge] (read) -- (validate);
-\draw[edge] (validate) -- node[above] {ok} (buffer);
-\draw[edge] (buffer) -- (commit);
-\draw[edge] (commit) -- node[above] {ok} (publish);
-\draw[edge] (validate) -- node[left] {changed} (abort);
-\draw[edge] (commit) -- node[above] {changed} (abort);
-\draw[edge] (abort.west) -| ($(begin.south west)+(-0.4,-0.2)$) -- (begin.south);
+\draw[edge] (idle) -- node[above]{\texttt{tm\_begin}} (active);
+\draw[edge] (active) -- node[above]{\texttt{tm\_commit}} (commit);
+\draw[edge] (commit) to[bend left=25] node[below]{unlock} (idle);
+\draw[edge] (queue) -- node[right]{dequeue one} (active);
+\draw[edge] (idle) -- node[left]{submit} (queue);
+\draw[edge] (active) to[loop above] node{reads/writes} (active);
 \end{tikzpicture}
-\caption{NOrec bank-transfer state machine.  The transaction may validate during reads and must validate again while holding the commit lock; only then may it publish both account updates and advance the global clock.}
-\label{fig:norec-bank-state-machine}
+\caption{Non-speculative transactional execution. SGL admits one caller by a lock; a serializer admits one submitted task by a queue. Both execute at most one transaction body at a time.}
+\label{fig:nonspec-state-machine}
 \end{figure}
-
-\section{Worked Example: TL2 Read Barrier}
-
-TL2 moves part of the validation burden from values to metadata. Each transactional location has a versioned lock word. A read samples the lock word, reads the payload, then samples the lock word again. The two samples must agree, the location must not be locked by a writer, and the version must not be newer than the transaction's start timestamp.
-
-\begin{lstlisting}[language=C, caption={A compilable C++17 TL2-style read barrier for one integer location.}]
-#include <atomic>
-#include <cstdint>
-
-struct VersionedInt {
-    std::atomic<uint64_t> meta;  // low bit = locked, high bits = version
-    int64_t value;
-};
-
-static constexpr uint64_t LOCKED = 1;
-
-struct ReadRecord {
-    VersionedInt *obj;
-    uint64_t observed_meta;
-    int64_t observed_value;
-};
-
-static bool is_locked(uint64_t meta) {
-    return (meta & LOCKED) != 0;
-}
-
-static uint64_t version(uint64_t meta) {
-    return meta >> 1;
-}
-
-static bool tl2_read(VersionedInt *obj,
-                     uint64_t start_time,
-                     ReadRecord &out) {
-    for (;;) {
-        uint64_t m1 = obj->meta.load(std::memory_order_acquire);
-        if (is_locked(m1) || version(m1) > start_time) return false;
-
-        int64_t v = obj->value;
-
-        uint64_t m2 = obj->meta.load(std::memory_order_acquire);
-        if (m1 == m2 && !is_locked(m2)) {
-            out = ReadRecord{obj, m2, v};
-            return true;
-        }
-    }
-}
-
-int main() {
-    VersionedInt account{{2}, 100}; // version 1, unlocked
-    ReadRecord r{};
-    return tl2_read(&account, 1, r) && r.observed_value == 100 ? 0 : 1;
-}
-\end{lstlisting}
-
-TL2 reads are invisible: the reader does not write to shared metadata. The metadata double-check prevents a read from crossing a writer's lock/unlock interval. The start timestamp defines the snapshot; versions newer than that timestamp force abort.
-
-\section{TL2: The Textbook Global-Clock STM}
-
-TL2 is the standard global-clock optimistic STM. A transaction reads the global version clock at begin time. That value is its snapshot time. Each transactional location has version metadata; each transaction has a read-set and a buffered write-set. Reads are invisible, but they are not unchecked: the read barrier records the observed version and later validation ensures the version did not change.
-
-The commit protocol is lock-then-validate. The writer acquires ownership of every location in its write-set, validates the read-set against recorded versions, obtains a fresh commit timestamp, writes back the buffered values, installs the new versions, and releases the locks. The commit timestamp is the serialization point.
-
-\begin{figure}[ht]
-\centering
-\begin{tikzpicture}[font=\small]
-  % global clock timeline
-  \draw[-{Stealth}] (0,0) -- (11,0) node[right] {global clock};
-  \foreach \x/\lab in {1/$5$,3/$5$,5/$6$,7/$6$,9/$7$}
-    \draw (\x,0.08) -- (\x,-0.08) node[below] {\lab};
-  % T1: begins at 5, reads, then aborts after clock advances
-  \node[draw,rectangle,minimum height=0.5cm,minimum width=3.2cm,fill=black!6]
-        (T1) at (2.1,1.0) {\texttt{read x}};
-  \draw[-{Stealth}] (T1.south) -- (1.4,0.05);
-  \draw[-,thick,black!30] (1.4,0.05) -- (5.4,0.05);
-  \node at (4.6,1.0) {$T_1$ begin@5};
-  % T2: begins at 5, writes x, commits at clock 6
-  \node[draw,rectangle,minimum height=0.5cm,minimum width=3.2cm,fill=black!6]
-        (T2) at (4.4,2.2) {\texttt{write x}};
-  \draw[-{Stealth}] (T2.south) -- (3.4,0.05);
-  \draw[-,thick,black!50] (3.4,0.05) -- (5.0,0.05);
-  \draw[-{Stealth},thick] (5.0,0.05) -- (5.4,0.05);
-  \node at (6.6,2.2) {$T_2$ begin@5, commit@6};
-  \node[align=left,text width=7.2cm] at (7.6,1.0)
-        {$T_1$ re-validates at commit: version of \texttt{x}\\
-         moved past its snapshot $\Rightarrow$ abort};
-\end{tikzpicture}
-\caption{TL2 timeline: $T_1$ and $T_2$ both begin at clock 5; $T_2$ commits (advancing the clock to 6) before $T_1$ validates, so $T_1$ must abort.}
-\label{fig:tl2-timeline}
-\end{figure}
-
-The validation rule is the opacity rule in executable form: every read-set entry must still have the recorded version, and that version must be no later than the transaction's snapshot. This is why invisible reads are safe. The reader does not announce itself, but it later proves that no writer changed what it observed.
-
-The repository's TL2 and TSC-TM backends show the expected signature on the M1 Pro bank/fuzz workload: both are around 2.05M transactions per second, with TL2 measured at about 2.06M and TSC-TM at about 2.05M. The important lesson is not the exact number; it is that a tight global-clock OCC design can be far faster than value-only NOrec when metadata checks are cheap and contention is moderate.
-
-\section{TinySTM Design Variants}
-
-TinySTM is not one algorithm but a configurable family. The two main axes are version management and conflict timing. Version management decides where speculative writes live before commit. Write-back mode keeps new values in the transaction's private write-set until commit. Write-through mode installs new values in memory immediately and records undo information for abort. Conflict timing decides whether a transaction acquires ownership eagerly, at write time, or lazily, at commit time.
-
-The repository exposes the important TinySTM styles: WBCTL, WT, and WBETL. In WBCTL, writes are buffered and locks are taken at commit time. Abort is cheap: discard the write-set. In WT, writes go through to memory, so abort must restore old values from an undo log. WT can detect write conflicts early, which helps under some high-contention patterns, but it makes rollback heavier and exposes more metadata traffic.
-
-The observable distinction is where data lives. In write-back, shared memory remains unchanged until commit. In write-through, shared memory may contain speculative state protected by locks and undo records. Both can be correct; they discharge different obligations. Write-back must ensure write-set forwarding for reads-after-writes. Write-through must ensure that no other transaction treats speculative memory as committed.
-
-TinySTM also illustrates cache-level engineering. Versioned write-set entries can avoid repeated metadata reads. Read-set bypass can avoid redundant validation when a read is satisfied from the write-set. These optimizations pay when transaction-local reuse is high; they add overhead when transactions touch many locations once.
-
-\section{Multiversion STMs: JVSTM and MVLog}
-
-Multiversion STMs avoid many read-only aborts by retaining history. A reader does not need to prove that the present still matches the past; it reads the past directly.
-
-JVSTM stores each transactional variable in a VBox, a versioned box containing a history of bodies. Each body records a version and a value. A transaction with read-version walks the VBox history and returns the newest body whose version is no greater than that read-version. Read-only transactions never abort because their snapshot is materialized by the version histories. Writers still validate: at commit, a global clock increments under a lock, and writers append new VBox bodies after checking that the heads they depended on have not changed.
-
-MVLog uses a different representation. It negotiates a commit slot at begin time with a single atomic increment, maintains an ever-growing log of committed write-sets, and tracks the newest writer per address. Its no-false-negative Bloom filter lets reads skip log work when the address is provably clean. The cost is history management. Memory grows with transaction count unless old versions and log entries are reclaimed. Epochs, hazard pointers, or equivalent schemes become part of the algorithm rather than an implementation afterthought.
-
-This is also why multiversion ideas dominate many GPU TM designs. Read-only transactions do not abort, commit slots are cheap atomics, and validation can be expressed as bulk log or version checks. The repository's GPU designs, including CSMV and GUST, use related ideas at warp and block granularity, with GUST using an AtomicINC commit-log design and CCT/MRV validation.
-
-\section{Worked Example: MVLog Snapshot Read}
-
-The following small program is not the repository MVLog backend. It is a compact model of the same idea: a reader chooses a snapshot version and then reads the newest committed version not newer than that snapshot.
-
-\begin{lstlisting}[language=C, caption={A compilable C++17 multiversion account read.}]
-#include <cstdint>
-#include <vector>
-
-struct VersionedValue {
-    uint64_t version;
-    int64_t value;
-};
-
-struct VBox {
-    // Newest entry first.
-    std::vector<VersionedValue> history;
-};
-
-static bool read_at(const VBox &box, uint64_t snapshot, int64_t &out) {
-    for (const VersionedValue &entry : box.history) {
-        if (entry.version <= snapshot) {
-            out = entry.value;
-            return true;
-        }
-    }
-    return false;
-}
-
-static void append_commit(VBox &box, uint64_t version, int64_t value) {
-    box.history.insert(box.history.begin(), VersionedValue{version, value});
-}
-
-int main() {
-    VBox account{{VersionedValue{2, 90}, VersionedValue{1, 100}}};
-
-    int64_t old_snapshot = 0;
-    if (!read_at(account, 1, old_snapshot)) return 1;
-    if (old_snapshot != 100) return 2;
-
-    append_commit(account, 3, 80);
-
-    int64_t stable_snapshot = 0;
-    if (!read_at(account, 2, stable_snapshot)) return 3;
-    return stable_snapshot == 90 ? 0 : 4;
-}
-\end{lstlisting}
-
-The reader's snapshot version, not the current head, determines the value returned. Appending a new version does not invalidate an old read-only transaction. Reclamation is the hard part: the body at version 1 cannot be freed while any reader may still hold snapshot 1.
-
-\section{Comparing the Family}
-\index{comparison}\index{version management}\index{conflict detection}
-
-The speculative STM design space is small enough to fit in one matrix. The axes are conflict detection, version management, metadata placement, read visibility, and the linearization point. A runtime is a point in this space.
-
-NOrec is the simplicity endpoint: one clock, one commit lock, value re-reading, no ownership records. TL2 adds per-location version metadata and becomes the textbook OCC baseline. TinySTM exposes the engineering trade-off between write-back and write-through. JVSTM and MVLog spend memory to make read-only snapshots stable. The recurring invariant is unchanged: a transaction must not commit a snapshot that never existed.
-
-\begin{table}[ht]
-\centering
-\small
-\begin{tabular}{lM{3.1cm}M{3.4cm}M{3.4cm}}
-\hline
-\textbf{Design} & \thb{3.1cm}{\textbf{Read-set validation}} & \thb{3.4cm}{\textbf{Write-set ownership}} & \thb{3.4cm}{\textbf{Commit linearization}} \\
-\hline
-SGL & none (mutex)           & direct writes under lock      & lock release \\
-NOrec & clock-capture re-read & buffered, no locks            & clock advance \\
-TL2 & per-location version   & buffered, commit lock         & clock advance + write-back \\
-TinySTM WBCTL & lock/version check & commit-time locking           & lock release \\
-TinySTM WT & versioned metadata   & write-through + undo log       & lock release \\
-JVSTM & none (history walk)   & VBox append under lock        & clock increment \\
-MVLog & no-false-negative bloom & commit-log slot + index      & slot publish \\
-\hline
-\end{tabular}
-\caption{The comparison matrix used throughout this chapter and the exercises: each row gives the same four facts --- read validation rule, write ownership, and the linearization point. A backend ``family'' is a choice in each column; opacity arguments in Part~III are written column-by-column.}
-\label{tab:family-matrix}
-\end{table}
-
-Per-runtime performance follows from the same columns. SGL serializes everything, so throughput is capped by the time of one transaction. NOrec validates whole read-sets. TL2 pays clock and metadata traffic, plus commit serialization. TinySTM pays ownership metadata traffic and, in write-through mode, rollback cost. Multiversion systems pay for history, log scans, and reclamation. In the repository measurements, MVLog's cost is visible: about 275K transactions per second on a write-heavy workload and about 109K on a read-mostly workload in the reported M1 Pro bank/fuzz runs.
-
-\section{Backend Taxonomy: The Repository in One Table}
-\index{backend taxonomy}\index{SGL}\index{TinySTM}\index{WBCTL}\index{NOrec}\index{TL2}\index{MVLog}\index{JVSTM}\index{SwissTM}\index{Romulus}\index{XTM}\index{TSX}\index{GPU TM}\index{persistent TM}\index{distributed TM}\index{reclamation}\index{private memory}\index{memory reclamation}
-The companion repository contains 20+ runtimes. This book explains the
-families; the table maps \emph{which repository backend is which family},
-so a reader looking for ``where is the code for X'' can find it and so the
-prose never overclaims that every backend is analysed in depth:
-
-\begin{table}[ht]
-\centering
-\small
-\begin{tabular}{lll}
-\hline
-\textbf{Repository backend} & \textbf{Family} & \textbf{Chapter} \\
-\hline
-\texttt{sgl}                 & single global lock   & Ch.~8 \\
-\texttt{tsxsgl}, \texttt{spht} & HTM + SGL fallback  & Ch.~8, 16 \\
-\texttt{norec}, \texttt{norec\_bf} & value-based validation & Ch.~9 \\
-\texttt{tl2}, \texttt{tsc\_tm}     & global-clock OCC     & Ch.~9 \\
-\texttt{tinystm} (\texttt{wbctl}/\texttt{wt}/\texttt{wbetl}) & per-object locking & Ch.~9 \\
-\texttt{jvstm}, \texttt{mvlog}      & multiversion         & Ch.~9 \\
-\texttt{swisstm}, \texttt{romulus}, \texttt{leftright} & OCC variants & Ch.~9 \\
-\texttt{xtm}, \texttt{dudetm}, \texttt{nvhtm} & page/persistent/hybrid & Ch.~13 \\
-\texttt{persistent\_sgl}, \texttt{distributed\_sgl}, \texttt{tikv} & persistent/distributed & Ch.~18 \\
-\texttt{gust}, \texttt{csmv}, \texttt{jvstm-gpu}, \texttt{gputx}, \texttt{gacco}, \texttt{gpu\_stm} & GPU warp TM & Ch.~17 \\
-\hline
-\end{tabular}
-\caption{Repository backend $\rightarrow$ family $\rightarrow$ where it is discussed. Backends without a dedicated prose section are still exercised by the benchmark suite and, where present, have a PlusCal/TLA+ model (Table~\ref{tab:traceability}).}
-\label{tab:backend-taxonomy}
-\end{table}
-
-The table is intentionally conservative. It does not claim that SwissTM, Romulus, LeftRight, XTM, DUDETM, NV-HTM, TiKV, or the GPU runtimes are fully developed in this chapter. It places them in the map. Later chapters return to persistence, distribution, hardware transactions, and GPU validation.
-
-The repository test status gives confidence that the implementations share a common semantic target: the transactional tests pass across the speculative families, and the backends without a dedicated section are still exercised by the benchmark suite and the PlusCal/TLA+ models of Part~III.
-
-\section{Semantic Obligations Checklist}
-\label{sec:semantic-obligations}
-Part~I introduced opacity, sandboxing, and privatization; here is where each is \emph{discharged} by a concrete runtime mechanism, so no promise from Chapter~2 floats unresolved.
-
-\emph{Opacity} is discharged by the Ch.~9 read-validate discipline (\S\ref{sec:norec-example}) and the TLA+ invariants of Table~\ref{tab:traceability}. \emph{Sandboxing} falls to Ch.~13 memory management: speculative writes must live in the write-set or the TM region, never the caller's heap. \emph{Privatization} is handled by Ch.~9 (publishing objects) and Ch.~13: a committed object handed to a non-transactional thread must be fully written back before publication. \emph{Irrevocability} (operations that cannot abort, e.g.\ I/O) is covered by Ch.~8's serializing designs and Ch.~13's policy. \emph{Memory reclamation} (when a freed address may be reused) is Ch.~13's deferred frees and the double-free hazards of region allocators. \emph{Signal safety} (what \texttt{siglongjmp} may do inside a transaction) is Ch.~13's policy section. \emph{Compiler obligations} (which accesses must stay instrumented) are the contract of Chapter~11.
-
-\section{Worked Example: The TL2 Commit Path}
-\index{TL2}\index{commit protocol}\index{commit lock}\index{global clock}\index{OCC}\index{validation}\index{version management}
-\label{sec:tl2-example}
-
-The five-phase commit that Chapter~6's model and Part~III's invariants check:
-
-\begin{lstlisting}[language=C, caption={TL2 commit: lock, validate, write back, publish.}]
-bool tm_end(void) {
-    if (!commit_lock.try_lock()) return retry();        /* 1. serialise */
-    for (each r in read_set)                            /* 2. validate */
-        if (version_of(r.addr) != r.observed_version)
-            { commit_lock.unlock(); return retry(); }
-    uint64_t ts = global_clock.fetch_add(1) + 1;        /* 3. new version */
-    for (each w in write_set) {                         /* 4. write back */
-        *(w.addr) = w.value;
-        store_version(w.addr, ts);
-    }
-    commit_lock.unlock();                               /* 5. publish   */
-    return true;
-}
-\end{lstlisting}
-
-Step 2 is the expensive one: the read-set is validated against per-location version metadata, not a global clock. Step 4 writes back \emph{under} the commit lock, then advances the clock so no concurrent reader can observe a half-published write-set. The stored-value trap is step 4 interacting with step 2: without the read-validate pattern of \S\ref{sec:norec-example}, a stale read-set can validate against an old version while the write-back overwrites a newer commit. The same five steps appear in the PlusCal model of Part~III, and in the GPU backends of Part~VII at warp granularity.
-
-\section{Worked Example: Account-Floor PlusCal Model}
-\index{PlusCal}\index{TLA+}\index{model checking}\index{account floor}\index{money conservation}
-\label{sec:pluscal-bank-floor-example}
-
-The model below is intentionally small enough for TLC.  Two processes repeatedly
-try to transfer one unit in opposite directions.  The commit action is atomic:
-it checks the floor against the current state and then updates both accounts.
-This is the serial specification that NOrec, TL2, TinySTM, JVSTM, and MVLog
-must refine.
-
-\begin{lstlisting}[language={}, caption={PlusCal/TLA+ model of two-account transfer with conservation and floor invariants.}]
----- MODULE BankTransferFloor ----
-EXTENDS Naturals, TLC
-
-CONSTANT Init0, Init1, Floor0, Floor1
-
-ASSUME Init0 >= Floor0 /\ Init1 >= Floor1
-
-(*
---algorithm Bank
-variables bal = [0 |-> Init0, 1 |-> Init1];
-
-define
-  TotalOK == bal[0] + bal[1] = Init0 + Init1
-  FloorsOK == bal[0] >= Floor0 /\ bal[1] >= Floor1
-end define;
-
-process (P \in {0, 1})
-variables from = P, to = 1 - P, amount = 1;
-begin
-Loop:
-  while TRUE do
-    if bal[from] - amount >=
-       IF from = 0 THEN Floor0 ELSE Floor1 then
-      bal[from] := bal[from] - amount;
-      bal[to] := bal[to] + amount;
-    end if;
-  end while;
-end process;
-end algorithm;
-*)
-
-====
-\end{lstlisting}
-
-A minimal TLC configuration is:
-
-\begin{lstlisting}[language={}, caption={TLC configuration for the PlusCal account-floor model.}]
-SPECIFICATION Spec
-CONSTANTS
-  Init0 = 2
-  Init1 = 2
-  Floor0 = 0
-  Floor1 = 0
-INVARIANTS
-  TotalOK
-  FloorsOK
-\end{lstlisting}
-
-The invariant \texttt{TotalOK} is the money-conservation property: transfers move value; they do not create or destroy it. The invariant \texttt{FloorsOK} is the safety property enforced by the transactional read of the source account followed by validation. To model a broken STM, split the guarded update into separate read, validate, debit, and credit actions, then remove the final validation; TLC should find an execution where the guard was true for a stale source value. This model is a serial specification, not an implementation model. The implementation models add clocks, read-sets, write-sets, locks, or version histories.
 
 \begin{table}[htbp]
 \centering
-\small
-\begin{tabular}{M{0.16\linewidth}M{0.30\linewidth}M{0.14\linewidth}M{0.26\linewidth}}
+\begin{tabular}{M{0.22\linewidth}M{0.23\linewidth}M{0.23\linewidth}M{0.22\linewidth}}
 \hline
-\thb{0.16\textwidth}{\textbf{Backend family}} & \thb{0.30\textwidth}{\textbf{Snapshot mechanism}} & \thb{0.14\textwidth}{\textbf{Read-only aborts}} & \thb{0.26\textwidth}{\textbf{Main cost}} \\
+\thb{0.22\textwidth}{Design} & \thb{0.23\textwidth}{Serialization point} & \thb{0.23\textwidth}{Main cost} & \thb{0.22\textwidth}{Correctness argument} \\
 \hline
-NOrec & global clock + value re-read & possible & read-set validation \\
-NOrec-BF & global clock + bloom-filter bypass & possible & false positives and validation \\
-TL2/TSC-TM & start timestamp + per-location versions & possible & metadata traffic and commit lock \\
-TinySTM WBCTL & per-location lock/version words & possible & ownership metadata \\
-TinySTM WT & write-through + undo log & possible & rollback and eager conflicts \\
-JVSTM & version history walk & no & history retention \\
-MVLog & commit log + newest-writer index & no for stable snapshots & log scan and reclamation \\
+SGL & Global mutex at \texttt{tm\_begin} & Lock contention and lost parallelism & Mutual exclusion gives a single total order \\
+Thread serializer & Worker dequeues one task & Submission, queueing, loss of locality & Worker order is the serialization order \\
+DistributedSGL & Distributed lock or sequencer & Network latency and failure handling & One distributed owner at a time \\
+PersistentSGL & Persistent critical section protocol & Flushes, fences, recovery metadata & Durable order follows lock-protected commit order \\
 \hline
 \end{tabular}
-\caption{Snapshot mechanisms in the speculative STM family.  The measured repository results match the expected signatures: TL2 and TSC-TM are close on the M1 Pro bank/fuzz workload, NOrec-BF improves read-mostly NOrec, and MVLog pays for history and log management.}
-\label{tab:snapshot-taxonomy}
+\caption{A taxonomy of non-speculative serializers. The mechanism changes, but the proof shape is the same: reduce execution to a sequential history.}
+\label{tab:nonspec-taxonomy}
 \end{table}
 
-\section{A Complete NOrec in Rust}
-\index{Rust}\index{sequence lock}\index{commit lock}\index{NOrec!complete implementation}\index{opacity!local justification}
-\label{sec:norec-rust-complete}
+The thread-serializer row is not just a thought experiment: the companion
+repository ships one as the \texttt{expli::QueueExecutor}
+(\texttt{explicit\_api/cpp/include/\allowbreak tx\_executor.hpp}, backed by
+\texttt{queue\_runtime.cpp}), and the bank benchmark runs in this mode with
+\texttt{-{}-queue}. Transaction bodies are submitted as closures to a pool of
+worker threads; each worker initializes its own TM thread state and drains
+its queue serially. Two details repay attention when reading the code: the
+worker threads record their stack bounds so the runtime can prove that a
+referenced address is stack-local and bypass instrumentation
+(\texttt{stm::tm\_record\_\allowbreak stack\_\allowbreak bounds}), and statically allocated
+TM-annotated globals are registered explicitly
+(\texttt{tm\_register\_\allowbreak global})
+because they do not live in the TM region --- both are invisible at the
+algorithmic level but load-bearing in practice.
 
-The worked examples of this chapter showed fragments: a read path in
-\S\ref{sec:norec-example}, a transfer in
-\S\ref{sec:norec-bank-transfer-example}. This section assembles the whole
-algorithm --- begin, read, write, commit, and the retry loop around them ---
-into one compilable program, and explains every line that matters. The
-language is Rust, and the choice is didactic rather than cosmetic: in
-\emph{safe} Rust there are no casts between integers and pointers, so the
-implementation cannot quietly rely on undefined behavior. Every design
-decision must be made explicitly, which is exactly the discipline an STM
-author needs. The repository ships a full-featured Rust NOrec with these
-same bones (\rep{explicit\_api/rust/workspace/runtime/norec}); the version
-below strips it to roughly two hundred lines of standard-library-only code,
-verified with the compiler and the bank test that follows.
+Amdahl's law gives the first-order bound. If fraction f of execution is serialized and N workers are available, the idealized speedup is
 
-Four choices define the design, and each is the smallest honest version of
-a choice NOrec makes \cite{dalessandro10norec}:
+$$
+S_{\max} = \frac{1}{f + \frac{1-f}{N}}
+$$
+
+where f is the non-parallel fraction and N is the number of cores. For SGL, transaction execution itself belongs to the serialized fraction. The exact value depends on the workload, but the shape is invariant: once all useful work is inside the global lock, more cores mostly add waiting.
+
+For example, if nearly all useful application work is performed inside transactions, f approaches one and the speedup approaches one regardless of the number of cores. This is not an implementation accident. It is the price paid for the simple proof.
+
+\section{Thread‑Serializer / Queue‑Based TM}
+
+A thread serializer uses one worker thread to execute submitted transactions sequentially from a queue. The calling threads package transaction bodies as tasks, submit them, and wait for results. The worker repeatedly dequeues one task, runs it to completion, records the result, and moves to the next task.
+
+The important shift is that mutual exclusion is no longer obtained by making many callers contend for a single lock. Instead, callers contend for queue insertion, and the worker owns the mutable state by convention. This can reduce lock handoff costs for tiny transactions, especially when the queue is efficient and the worker remains hot in cache. It can also hurt latency, because every operation now pays submission, wakeup, scheduling, and reply costs.
+
+A serializer is not merely an optimization of SGL. It changes the calling convention. The submitting thread no longer runs the transaction body; the worker does. Therefore transaction-local state cannot be stored only in thread-local variables of the submitter. The descriptor must travel with the task or be rebuilt by the worker.
+
+This matters for real TM backends. A transaction descriptor often contains read sets, write sets, allocation logs, statistics counters, nesting state, epoch information, or persistence metadata. In SGL the descriptor may naturally live on the caller's stack. In a serializer it must be part of the submitted closure, stored in the queue node, or allocated in worker-owned storage. Treating the two designs as interchangeable is a common source of bugs.
+
+Queue serializers also clarify the meaning of a serialization point. For SGL, the serialization point may be taken as the lock acquisition or the commit while the lock is held, depending on the proof style. For a serializer, the serialization order is the dequeue order. The transaction may have been submitted much earlier, but it does not observe memory until the worker runs it.
+
+\section{Worked Example: Bank Transfer Under SGL}
+\label{sec:worked-sgl-bank}
+
+The running bank example has two invariants. First, no account may fall below its floor. Second, the total amount of money is conserved by transfers. SGL enforces both by making each transfer execute as one sequential critical section.
+
+The example below keeps the transactional interface even though the implementation is only a mutex. This is intentional. The same application code can later be moved to TL2, NOrec, TinySTM, or another backend without changing every access site. The abstraction boundary is part of the test: reads, writes, allocation, and commit must pass through the backend selected for the run.
+
+\begin{lstlisting}[language=C++, caption={A compilable SGL-style transactional bank transfer.}]
+#include <cassert>
+#include <cstdint>
+#include <iostream>
+#include <mutex>
+#include <numeric>
+#include <stdexcept>
+#include <thread>
+#include <vector>
+
+struct Account {
+    std::int64_t balance;
+    std::int64_t floor;
+};
+
+class SGLTM {
+public:
+    class Tx {
+    public:
+        explicit Tx(SGLTM& tm) : tm_(tm), active_(true) {
+            tm_.lock_.lock();
+        }
+
+        Tx(const Tx&) = delete;
+        Tx& operator=(const Tx&) = delete;
+
+        ~Tx() {
+            if (active_) {
+                tm_.lock_.unlock();
+            }
+        }
+
+        template <class T>
+        T read(const T& x) const {
+            return x;
+        }
+
+        template <class T>
+        void write(T& x, const T& v) {
+            x = v;
+        }
+
+        void commit() {
+            if (!active_) {
+                throw std::logic_error("double commit");
+            }
+            active_ = false;
+            tm_.lock_.unlock();
+        }
+
+    private:
+        SGLTM& tm_;
+        bool active_;
+    };
+
+    Tx begin() {
+        return Tx(*this);
+    }
+
+private:
+    std::mutex lock_;
+};
+
+class Bank {
+public:
+    Bank(std::size_t n, std::int64_t initial, std::int64_t floor)
+        : accounts_(n, Account{initial, floor}) {}
+
+    bool transfer(std::size_t from, std::size_t to, std::int64_t amount) {
+        if (from == to || from >= accounts_.size() || to >= accounts_.size()) {
+            return false;
+        }
+
+        auto tx = tm_.begin();
+
+        const std::int64_t from_balance = tx.read(accounts_[from].balance);
+        const std::int64_t from_floor = tx.read(accounts_[from].floor);
+        const std::int64_t to_balance = tx.read(accounts_[to].balance);
+
+        if (from_balance - amount < from_floor) {
+            tx.commit();
+            return false;
+        }
+
+        tx.write(accounts_[from].balance, from_balance - amount);
+        tx.write(accounts_[to].balance, to_balance + amount);
+
+        tx.commit();
+        return true;
+    }
+
+    std::int64_t total() const {
+        return std::accumulate(
+            accounts_.begin(), accounts_.end(), std::int64_t{0},
+            [](std::int64_t s, const Account& a) { return s + a.balance; });
+    }
+
+private:
+    SGLTM tm_;
+    std::vector<Account> accounts_;
+};
+
+int main() {
+    constexpr std::size_t accounts = 8;
+    constexpr std::int64_t initial = 100;
+    constexpr std::int64_t floor = 0;
+
+    Bank bank(accounts, initial, floor);
+    const std::int64_t before = bank.total();
+
+    std::vector<std::thread> threads;
+    for (std::size_t t = 0; t < 4; ++t) {
+        threads.emplace_back([&bank, t] {
+            for (int i = 0; i < 10000; ++i) {
+                const std::size_t from = (t + i) % 8;
+                const std::size_t to = (from + 1) % 8;
+                bank.transfer(from, to, 1);
+            }
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    const std::int64_t after = bank.total();
+    assert(before == after);
+    std::cout << "money conserved: " << after << "\n";
+}
+\end{lstlisting}
+
+The linearization point is the interval protected by the global mutex. Reads and writes still go through \texttt{read} and \texttt{write}; replacing them with stubs during initialization can hide validation bugs in later backends. Failed transfers still commit a read-only transaction; there is no rollback path because no speculative write has escaped. The proof is independent of the number of calling threads: all completed transfers form the mutex acquisition order.
+
+The floor invariant is checked before either balance is changed. Since no other transaction can run between the check and the writes, the check remains valid until commit. The conservation invariant follows because the transaction subtracts and adds the same amount in one critical section.
+
+$$
+\sum_i balance_i' = \sum_i balance_i
+$$
+
+\section{Worked Example: Queue Serializer With Per-Task Descriptors}
+\label{sec:worked-serializer-bank}
+
+A serializer moves execution to a worker thread. The transaction descriptor is therefore attached to the submitted task. In this minimal example the descriptor is just the closure itself plus the returned future; real systems attach allocation logs, statistics, or backend-specific metadata.
+
+The bank object below is intentionally not internally synchronized. All access to it is made through the serializer. This is the same proof technique as SGL, but expressed as ownership transfer: while the worker executes a task, it is the only thread touching the bank state.
+
+\begin{lstlisting}[language=C++, caption={A compilable queue-based serializer for bank transfers.}]
+#include <cassert>
+#include <condition_variable>
+#include <cstdint>
+#include <future>
+#include <iostream>
+#include <mutex>
+#include <numeric>
+#include <queue>
+#include <stdexcept>
+#include <thread>
+#include <type_traits>
+#include <vector>
+#include <functional>
+
+struct Account {
+    std::int64_t balance;
+    std::int64_t floor;
+};
+
+class Serializer {
+public:
+    Serializer() : stopping_(false), worker_([this] { run(); }) {}
+
+    Serializer(const Serializer&) = delete;
+    Serializer& operator=(const Serializer&) = delete;
+
+    ~Serializer() {
+        {
+            std::lock_guard<std::mutex> g(m_);
+            stopping_ = true;
+        }
+        cv_.notify_one();
+        worker_.join();
+    }
+
+    template <class F>
+    auto submit(F&& f) -> std::future<std::invoke_result_t<F&>> {
+        using R = std::invoke_result_t<F&>;
+
+        auto task = std::make_shared<std::packaged_task<R()>>(
+            std::forward<F>(f));
+        std::future<R> result = task->get_future();
+
+        {
+            std::lock_guard<std::mutex> g(m_);
+            if (stopping_) {
+                throw std::runtime_error("submit after stop");
+            }
+            q_.push([task] { (*task)(); });
+        }
+
+        cv_.notify_one();
+        return result;
+    }
+
+private:
+    void run() {
+        for (;;) {
+            std::function<void()> job;
+
+            {
+                std::unique_lock<std::mutex> lk(m_);
+                cv_.wait(lk, [this] { return stopping_ || !q_.empty(); });
+
+                if (stopping_ && q_.empty()) {
+                    return;
+                }
+
+                job = std::move(q_.front());
+                q_.pop();
+            }
+
+            job();
+        }
+    }
+
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::queue<std::function<void()>> q_;
+    bool stopping_;
+    std::thread worker_;
+};
+
+class Bank {
+public:
+    Bank(std::size_t n, std::int64_t initial, std::int64_t floor)
+        : accounts_(n, Account{initial, floor}) {}
+
+    bool transfer_serial(std::size_t from, std::size_t to,
+                         std::int64_t amount) {
+        if (from == to || from >= accounts_.size() || to >= accounts_.size()) {
+            return false;
+        }
+
+        Account& a = accounts_[from];
+        Account& b = accounts_[to];
+
+        if (a.balance - amount < a.floor) {
+            return false;
+        }
+
+        a.balance -= amount;
+        b.balance += amount;
+        return true;
+    }
+
+    std::int64_t total_serial() const {
+        return std::accumulate(
+            accounts_.begin(), accounts_.end(), std::int64_t{0},
+            [](std::int64_t s, const Account& a) { return s + a.balance; });
+    }
+
+private:
+    std::vector<Account> accounts_;
+};
+
+int main() {
+    Serializer ser;
+    Bank bank(8, 100, 0);
+
+    const std::int64_t before =
+        ser.submit([&bank] { return bank.total_serial(); }).get();
+
+    std::vector<std::future<bool>> replies;
+    for (int i = 0; i < 40000; ++i) {
+        replies.push_back(ser.submit([&bank, i] {
+            const std::size_t from = static_cast<std::size_t>(i % 8);
+            const std::size_t to = (from + 1) % 8;
+            return bank.transfer_serial(from, to, 1);
+        }));
+    }
+
+    for (auto& f : replies) {
+        (void)f.get();
+    }
+
+    const std::int64_t after =
+        ser.submit([&bank] { return bank.total_serial(); }).get();
+
+    assert(before == after);
+    std::cout << "money conserved: " << after << "\n";
+}
+\end{lstlisting}
+
+The queue order is the serialization order. The bank object is unsynchronized internally; safety comes from the single worker. The submitter waits on a \texttt{future}, which makes latency visible even when the worker has no lock contention. Thread-local transaction descriptors would be wrong here: the submitting thread and executing thread are different.
+
+The serializer can outperform a contended lock only when the avoided lock traffic is larger than submission and reply overhead. It cannot overcome the fundamental sequential bottleneck. Under a burst of requests, the worker becomes the limiting server and queueing delay dominates.
+
+\paragraph{The companion's version: \texttt{bank --queue}.}
+The repository's bank benchmark runs its transfer workload through exactly
+this pattern, with two production hardenings worth noticing. The executor is
+\texttt{expli::QueueExecutor} constructed with as many workers as queues
+(\texttt{QueueExecutor(nb\_threads, nb\_threads)}), installed in a global hook
+so that every \texttt{TM<T>::transaction(...)} call site is routed through it
+transparently --- inline mode executes the body immediately, queue mode
+enqueues it. Synchronous calls enqueue the closure plus an atomic done-flag
+and spin-wait; asynchronous calls return a future instead. The hardenings:
+first, worker threads record their stack bounds at startup
+(\texttt{stm::tm\_record\_stack\_bounds}) so the address classifier can prove
+stack-locality for bypass decisions, and TM-annotated globals are registered
+explicitly (\texttt{tm\_register\_global}) because static storage is outside
+the mmap'd TM region --- omit either and the instrumentation silently stops
+tracking real accesses, the Bug-1 pattern of \S\ref{sec:debugging-story}.
+Second, all workers park on a start-gate barrier before the measurement
+region begins, so throughput numbers measure transactions rather than thread
+startup. Running it:
+
+\begin{lstlisting}[caption={The companion bank under queue serialization versus inline execution.}]
+$ bank -a 64 -t 4 -d 2000            # inline: callers run TXs directly
+Mode: inline
+...
+$ bank -a 64 -t 4 -d 2000 --queue    # queue: N workers drain N queues
+Mode: queue (4 workers, 4 queues)
+...
+\end{lstlisting}
+
+The instructive observation is that queue mode does not beat inline mode on
+this workload: each caller-thread/worker pair adds a handoff, and the money
+invariant holds in both modes. The exercise is not to find a winner but to see
+the serialization point move from ``caller holds the backend'' to ``worker
+dequeues the task'' with the application code unchanged --- which is precisely
+the property that makes the serializer a drop-in backend rather than a
+rewrite.
+
+\section{Calvin: Static Transactions and Deterministic Execution}
+\index{static transaction}\index{Calvin}\index{deterministic execution}\index{sequencer}\index{snapshot isolation}
+\label{sec:calvin-static}
+
+The serializer of \S\ref{sec:worked-serializer-bank} executes one transaction body at a time, but the calling threads still build the transaction body \emph{speculatively}: they read shared memory, guess, and hope the guess was right. Calvin takes a different position. A transaction is declared \emph{before} it executes: the read-set, the write-set, and the computation are all fixed up front. The sequencer then assigns a total order, snapshots the declared addresses, and runs each body against its own snapshot. Writes are buffered and published only after the body returns successfully.
+
+The word ``static'' is the distinguishing property. In NOrec, TL2, or TinySTM the runtime discovers the read-set and write-set as the transaction executes --- those sets may be different on every retry. In Calvin, the programmer specifies the access sets at declaration time. That static knowledge has two consequences. First, the runtime can validate every declared read against the snapshot \emph{before} executing the body, so no work is wasted on a transaction whose snapshot is already stale. Second, execution is deterministic: given the same snapshot, the body always produces the same writes. Determinism simplifies reasoning about correctness, because the commit of one transaction cannot depend on timing details that differ between runs.
+
+The trade-off is inflexibility. If the read-set is not known until the body runs, the programmer must over-approximate (declaring more addresses than needed, which widens the conflict window) or structure the code so that the access set is visible at the call site. This is natural for message-queue workers, financial settlements, and event-driven simulations where each event's inputs are known before the computation starts, but awkward for interactive code where the read-set depends on data read during execution.
+
+The companion codebase's \texttt{calvin} backend is named after, but is not, the deterministic distributed database of Thomson et al.~\cite{thomson12calvin}; it is a two-phase OCC shared-memory backend. The model below is closer to the original Calvin idea: static declarations, sequenced execution, deterministic results.
+
+\subsection{State: declarations, memory, and a sequencer}
+
+Listing~\ref{lst:calvin-state} defines the shared memory (one atomic word per account), the transaction declaration type (read-set, write-set, and a body that receives a snapshot and returns writes or abort), and the sequencer that dequeues declarations in order, snapshots the read-set, and executes each body.
+
+\begin{lstlisting}[language=Rust, caption={Calvin state: word-addressed memory, static transaction declarations, and the sequencer.}, label={lst:calvin-state}]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as O};
+use std::sync::Arc;
+use std::thread;
+
+struct Mem { data: Vec<AtomicU64> }
+impl Mem {
+    fn new(n: usize) -> Self {
+        Mem { data: (0..n).map(|_| AtomicU64::new(0)).collect() }
+    }
+    fn alloc(&mut self, v: u64) -> usize {
+        let i = self.data.len();
+        self.data.push(AtomicU64::new(v));
+        i
+    }
+    fn get(&self, a: usize) -> u64 {
+        self.data[a].load(O::Acquire)
+    }
+    fn set(&self, a: usize, v: u64) {
+        self.data[a].store(v, O::Release);
+    }
+}
+
+type BodyFn =
+    Box<dyn Fn(&[u64]) -> Option<Vec<(usize, u64)>> + Send>;
+
+struct TxDecl {
+    reads:  Vec<usize>,            // addresses to snapshot
+    writes: Vec<usize>,            // addresses the body may modify
+    body:   BodyFn,                // None = abort; Some(writes) = commit
+}
+
+struct Sequencer { mem: Arc<Mem>, seqno: AtomicUsize }
+impl Sequencer {
+    fn new(mem: Arc<Mem>) -> Self {
+        Sequencer { mem, seqno: AtomicUsize::new(0) }
+    }
+    fn snapshot(&self, addrs: &[usize]) -> Vec<u64> {
+        addrs.iter().map(|&a| self.mem.get(a)).collect()
+    }
+\end{lstlisting}
+
+The \texttt{TxDecl} type is the static contract. The \texttt{reads} and \texttt{writes} vectors declare which addresses the body will touch; the \texttt{body} closure receives the snapshot values at those addresses and returns \texttt{None} (abort) or \texttt{Some(writes)} (commit). The body never touches shared memory directly --- all reads come from the snapshot, all writes are buffered.
+
+\subsection{Execute and publish}
+
+Listing~\ref{lst:calvin-exec} is the execution loop. The sequencer dequeues one declaration, snapshots the read-set, calls the body, and publishes the writes. The important property is that the body is never retried: if the snapshot is stale, the declaration fails immediately at the \emph{declaration} phase, not the \emph{execution} phase. This is the fundamental difference from speculative STMs: there is no ``abort and retry the body'' because the body is never allowed to see stale data.
+
+\begin{lstlisting}[language=Rust, caption={Calvin execution: snapshot, run body, publish writes. No retry needed.}, label={lst:calvin-exec}]
+    fn run(&self, queue: Vec<TxDecl>) {
+        for decl in queue {
+            let seq = self.seqno.fetch_add(1, O::Relaxed);
+            let snap = self.snapshot(&decl.reads);
+            match (decl.body)(&snap) {
+                None => {
+                    eprintln!("[seq={}] abort (stale snap)", seq);
+                }
+                Some(writes) => {
+                    for (a, v) in writes {
+                        self.mem.set(a, v);
+                    }
+                    println!("[seq={}] committed  snap={:?}",
+                             seq, snap);
+                }
+            }
+        }
+    }
+}
+\end{lstlisting}
+
+The sequencer is single-threaded, which makes the total order explicit: the dequeue order \emph{is} the serialization order. In a distributed Calvin system the sequencer would be a separate process assigning sequence numbers; here the in-process loop is enough to show the idea. The \texttt{AtomicUsize} counter records how many transactions have been processed, and the \texttt{Relaxed} ordering on \texttt{fetch\_add} is sufficient because the total order is established by the sequential loop itself, not by the counter value.
+
+\subsection{Worked Example: Bank Transfer}
+
+Listing~\ref{lst:calvin-demo} builds the transaction queue: transfer declarations interleaved with read-only checker assertions. The deterministic Fisher-Yates shuffle (fixed seed) ensures reproducible interleaving across runs. Each transfer declares its read-set and write-set explicitly; the checker declares read-only addresses and asserts conservation.
+
+\begin{lstlisting}[language=Rust, caption={Calvin bank demo: static transfer declarations, deterministic shuffle, conservation assertion mid-flight.}, label={lst:calvin-demo}]
+const ITERS: u64 = 500;
+const START: u64 = 1_000_000;
+
+fn main() {
+    let mut mem = Mem::new(0);
+    let a = mem.alloc(START);
+    let b = mem.alloc(START);
+    let mem = Arc::new(mem);
+
+    let mut txs: Vec<TxDecl> = Vec::new();
+    for t in 0..8 {
+        let (src, dst) = if t % 2 == 0 { (a, b) }
+                         else { (b, a) };
+        for _ in 0..ITERS {
+            txs.push(TxDecl {
+                reads:  vec![src, dst],
+                writes: vec![src, dst],
+                body: Box::new(move |snap| {
+                    let (s, d) = (snap[0], snap[1]);
+                    if s < 10 { return None; }
+                    Some(vec![(src, s - 10), (dst, d + 10)])
+                }),
+            });
+        }
+    }
+    for _ in 0..500 {
+        txs.push(TxDecl {
+            reads:  vec![a, b],
+            writes: vec![],
+            body: Box::new(move |snap| {
+                assert_eq!(snap[0] + snap[1], 2 * START);
+                Some(vec![])
+            }),
+        });
+    }
+    // Deterministic shuffle (fixed seed).
+    { let mut s: u64 = 0xDEAD_BEEF_CAFE_1234;
+      for i in (1..txs.len()).rev() {
+          s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+          let j = (s >> 33) as usize % (i + 1);
+          txs.swap(i, j);
+      }
+    }
+
+    let seq = Sequencer::new(mem.clone());
+    thread::spawn(move || seq.run(txs)).join().unwrap();
+
+    let (fa, fb) = (mem.get(a), mem.get(b));
+    println!("\nfinal A={} B={} total={}", fa, fb, fa + fb);
+    assert_eq!(fa + fb, 2 * START);
+}
+\end{lstlisting}
+
+The checker runs inside the sequencer's total order, interleaved with transfers at deterministic positions. Because the snapshot is taken before each body runs, the checker sees a consistent world at every point --- money is either pre-transfer or post-transfer, never half-transferred. This is opacity by construction: no concurrent mutation can sneak between the snapshot and the body because the sequencer is single-threaded.
+
+Three properties distinguish Calvin from the speculative designs of Chapter~10:
 
 \begin{itemize}
-    \item One global sequence clock, with the commit lock encoded in its
-          low bit --- even means ``version $v$,'' odd means ``version $v$
-          under commit.''
-    \item Writes buffered in a per-transaction write-set, visible only at
-          commit.
-    \item Reads recorded as $(slot, value)$ pairs and validated against
-          the \emph{begin} snapshot version.
-    \item Any detected staleness aborts the whole transaction; the retry
-          loop re-executes it from scratch.
+    \item \textbf{No abort-retry loop}. A speculative STM retries the body when validation fails; Calvin rejects stale declarations before the body runs. The body is never wasted work.
+    \item \textbf{Determinism}. Given the same declaration queue, the commit order and the final memory state are identical across runs. Speculative STMs can produce different outcomes depending on thread scheduling.
+    \item \textbf{Static access sets}. The read-set and write-set are visible at declaration time, enabling the runtime to batch, reorder, or optimize declarations before executing them.
 \end{itemize}
 
-Listing~\ref{lst:norec-rust-state} is the state. Cells live in a region:
-one machine word each, addressed by slot index, guarded by nothing but the
-clock. The \texttt{Word} trait admits any fixed-size \texttt{Copy} type;
-the two implementations shown cover the accounts of this chapter, and more
-are added mechanically. Note what the type system contributes: a
-\texttt{TmCell<T>} is just an index plus a phantom type, so threads share
-the region through an \texttt{Arc} and cells by copy, and no unsafe block
-appears anywhere in the file.
-
-\lstinputlisting[language=Rust, caption={State: a word-trait, the shared region, typed cell handles, and the per-thread transaction log.}, label={lst:norec-rust-state}, linerange=1-46]{listings/norec_rust_complete.rs}
-
-Allocation takes \texttt{\&mut self} on purpose. Growing the heap while
-other threads hold slots would require the same kind of careful protocol
-the companion's region allocators implement; here the rule is simply that
-all allocation happens before the region is frozen into an \texttt{Arc},
-and the signature enforces it.
-
-Listing~\ref{lst:norec-rust-begin} adds the driver and \texttt{begin}.
-The retry loop has exactly three exits per attempt: the body returns a
-value, the body signals \texttt{Abort}, or \texttt{commit} fails. All
-three land in the same place --- clear the logs, sample the clock, run
-again. This is the explicit-API shape of Chapter~8's \texttt{tm\_begin}
-and \texttt{tm\_end}, collapsed into one closure. Sampling the clock in
-\texttt{begin} waits out any in-flight commit; the wait is bounded because
-the commit lock is held only for the write-back of one transaction's
-write-set, never across arbitrary user code.
-
-\lstinputlisting[language=Rust, caption={The retry loop and begin: sample an unlocked clock, clear the logs, run, commit or retry.}, label={lst:norec-rust-begin}, linerange=60-90]{listings/norec_rust_complete.rs}
-
-Listing~\ref{lst:norec-rust-readwrite} is the heart. A read first serves
-itself from the write-set (read-own-writes), then performs the
-capture$\rightarrow$read$\rightarrow$recheck discipline of
-\S\ref{sec:norec-example} with one addition: the captured value must equal
-\texttt{rv}, the version sampled at \emph{begin}. That single comparison
-is what validates the entire prior read-set. Because every commit moves
-the global clock, a stable clock proves that no commit has interleaved
-since the snapshot was taken, so every earlier recorded read still
-coexists with the value about to be admitted. This is precisely the
-chapter's earlier sentence --- ``validate the old read-set before
-admitting the new read'' --- reduced, under a single global clock, to one
-integer comparison. It is also the mechanism that lifts the design above
-plain serializability toward the local-justification form of opacity
-defined in \S\ref{sec:histories-legality-opacity}: a live transaction's
-reads are always justified by the memory state at version \texttt{rv}.
-
-\lstinputlisting[language=Rust, caption={Read and write: serve from the write-set first; otherwise capture--read--recheck against the begin version.}, label={lst:norec-rust-readwrite}, linerange=92-117]{listings/norec_rust_complete.rs}
-
-One simplification deserves honesty: the real NOrec lets a transaction
-\emph{extend} its snapshot --- on detecting a moved clock it re-validates
-its old read-set under the newer version and continues. This
-implementation instead aborts whenever the clock leaves \texttt{rv},
-which is strictly more conservative and easier to prove correct; the
-extension policy is Exercise~13.
-
-Listing~\ref{lst:norec-rust-commit} is the commit protocol. A writer
-acquires the single commit lock by flipping bit~0 of the clock with a
-CAS; the loser aborts immediately, making the design weakly progressive
-in the ladder of \S\ref{sec:progress-ladder}. Under the lock, memory is
-frozen --- every writer in the system needs this same lock --- so comparing
-each recorded read against current memory is meaningful. On mismatch the
-transaction stores \texttt{rv} back: the same version, lock cleared,
-nothing published, because it changed nothing. On success it writes the
-buffered values and publishes with \texttt{rv + 2}. The bump by two (not
-one) keeps versions even forever; odd numbers exist only transiently
-while a writer holds the lock.
-
-\lstinputlisting[language=Rust, caption={Commit: acquire the lock bit, re-validate reads against frozen memory, write back, publish with a Release clock bump.}, label={lst:norec-rust-commit}, linerange=119-150]{listings/norec_rust_complete.rs}
-
-The memory orderings are load-bearing, and they are the portable answer to
-the puzzle of \S\ref{sec:tso-example}. Every data access is
-\texttt{Relaxed}; all synchronization is carried by the single clock
-variable. A writer's data stores precede its \texttt{Release} store of the
-new version; a reader whose \texttt{Acquire} load observes that version is
-guaranteed to see every write published with it. That Release/Acquire pair
-is the generalization of the store-buffer story from Part~II to weakly
-ordered machines: on x86 the relaxed accesses would compile to plain
-moves, while on ARM the pairing emits the barriers the litmus tests of
-Chapter~3 demanded. The commit-time validation loads are sound under
-\texttt{Relaxed} for the same reason --- they execute after the
-\texttt{Acquire} CAS, so no previously committed state can be invisible
-to them.
-
-A read-only transaction commits trivially: its reads were validated
-continuously, so there is nothing to do, and it linearizes at its last
-successful read. An update transaction linearizes at the clock bump ---
-the moment its writes become visible to every subsequent snapshot.
-
-Listing~\ref{lst:norec-rust-demo} runs the chapter's example end to end:
-eight mover threads transfer 10 units between accounts $A$ and $B$
-honoring the floor rule, while a checker thread continuously executes
-read-only transactions asserting conservation \emph{mid-flight}. Note the
-distinction in the mover body: a floor violation returns
-\texttt{Ok(false)} --- a committed business outcome, exactly as in
-Listing~\ref{lst:rust-bank} --- whereas \texttt{Abort} is reserved for the
-STM's own invalid-snapshot signal.
-
-\lstinputlisting[language=Rust, caption={The bank demo: movers honor the floor; a checker thread asserts conservation inside concurrent read-only transactions.}, label={lst:norec-rust-demo}, linerange=152-212]{listings/norec_rust_complete.rs}
-
-Typical output on the development machine (Apple M1 Pro, rustc 1.96):
-
-\begin{quote}
-\small\ttfamily
-final total = 2000000\\
-snapshot checks passed: 229337
-\end{quote}
-
-Money is conserved at the end, and --- the stronger property --- every one
-of the hundreds of thousands of concurrent read-only snapshots observed a
-consistent world. That is opacity demonstrated empirically: the checker
-thread shares no locks with the movers, yet it never observes half of a
-transfer.
-
-Three caveats bound the claim. First, correctness assumes all accesses to
-cells go through transactions; a plain write to \texttt{mem} would be
-invisible to validation, exactly as in every backend of Part~VII.
-Second, the design has no starvation guarantee. Under sustained write
-contention, readers can lose the race repeatedly --- the retry loop is
-unbounded and unfair --- which is why production backends pair speculation
-with fallback locks and why the progress ladder of
-\S\ref{sec:progress-ladder} ranks guarantees the way it does. Third, the
-fixed-snapshot policy aborts where the paper's forward-extension policy
-would proceed, trading throughput for proof simplicity; measuring that
-trade is Exercise~12.
+The price is the loss of dynamic read-sets. A body that reads an address discovered during execution cannot declare that address up front, so Calvin is best suited for workloads where inputs are known: message processing, event handlers, map-reduce workers, and batch settlement. For interactive or exploratory code, the speculative designs of Chapter~10 remain the right tool.
 
 \section{Summary}
 
-Speculation unlocks concurrency but introduces aborts. Different version-management policies trade off simplicity for performance. The design space is small: clocks, locks, logs, and history --- every real STM is a combination of these. NOrec shows the value-only endpoint, TL2 the metadata-based baseline, TinySTM the write-back versus write-through engineering choice, and JVSTM and MVLog the multiversion alternative that buys read-only stability at the price of reclamation. Section~\ref{sec:norec-rust-complete} closes the loop by assembling the NOrec endpoint into a complete, compilable implementation.
+Non-speculative designs are correct by construction and serve as a baseline. Their lack of concurrency limits scalability, but their proof obligations are small: every transaction observes a state produced by the previous committed transaction.
+
+SGL is the simplest opacity proof in the book. Queue serializers replace lock handoff with task handoff. Calvin replaces speculative execution with static declarations and deterministic sequencing: the read-set is fixed before the body runs, so stale snapshots are rejected without wasting execution work. The trade-off is inflexibility --- the access set must be known at declaration time.
+
+In the companion codebase, SGL-like designs are not toys. They serve as reference backends and regression oracles alongside speculative systems such as NOrec, TL2, TSC-TM, SwissTM, TinySTM, and others. The reported test suites pass \texttt{test\_tx} 114/114 and \texttt{test\_ds} 207/207 for the implemented backends. Measured results on the M1 Pro fuzz/bank workload also show why the baseline matters: TL2 and TSC-TM reach about 2.06M and 2.05M transactions per second in the reported runs, while NOrec-BF improves over NOrec on the read-mostly case. These numbers are not claims about this chapter's designs; they are evidence that the simple serial yardstick remains useful when evaluating faster speculative backends.
 
 \section{Exercises}
 \begin{enumerate}
-    \item In NOrec, T1 writes to \texttt{x}, then T2 writes to \texttt{x} and commits. Explain why T1 will abort.
-    \item TinySTM can be configured for eager locking or commit‑time locking. Given a workload with high contention on a single location, predict which mode will perform better and justify your answer.
-    \item Design a simple experiment using the STAMP benchmark suite to compare the abort rates of NOrec and TinySTM's write‑through variant.
-    \item In TL2, explain why the read-set validation must re-read the metadata (not just remember the snapshot) and sketch the read-validate pattern that prevents a partially committed write from being observed.
-    \item Write a PlusCal model of a TL2 commit that omits the read-set re-validation, and run TLC to produce a counterexample (Part~III workflow).
-    \item Compare memory overhead: NOrec, TL2, JVSTM, and MVLog, for a workload with a large read-set and small write-set.
-    \item \emph{[implementation]} Modify the NOrec bank-transfer example in \S\ref{sec:norec-bank-transfer-example} to retry aborted transactions in a bounded loop.  Report separately the number of floor rejections and validation aborts.
-    \item \emph{[verification]} Extend the PlusCal model in \S\ref{sec:pluscal-bank-floor-example} with a speculative local variable \texttt{seen}.  Split the transfer into read, check, debit, and credit actions, then add a commit-time validation action.  Show which invariant fails when the validation action is removed.
-    \item \emph{[theory]} In Table~\ref{tab:snapshot-taxonomy}, identify which families implement invisible reads.  For each such family, state the proof obligation that prevents an inconsistent snapshot from being committed.
-    \item \emph{[literature]} Read the NOrec paper \cite{dalessandro10norec}
-          and the TL2 paper \cite{dice06tl2}.  Map each paper's algorithm
-          onto the read-validate pattern of this chapter's worked examples,
-          and state one simplification the book makes that the original
-          paper does not (e.g.\ meta-data layout, retry policy, or the
-          treatment of writes to unread locations).
-    \item \emph{[open]} NOrec is deliberately simpler than TL2 --- a global
-          clock and value-based validation instead of per-address ownership
-          records --- and in the chapter's experiments it is often at least
-          competitive.  Argue a position: is the field's emphasis on
-          asymptotically ``better'' algorithms (multi-versioning, timestamp
-          domains) a net positive, or has it pushed designers toward
-          complexity that simpler value-based designs would beat in
-          practice?  Define what ``better'' should mean before you argue.
-    \item \emph{[implementation]} Instrument the complete Rust NOrec of
-          \S\ref{sec:norec-rust-complete} with abort counters: classify
-          each retry as (a)~stale at read (\texttt{s1 != rv}), (b)~raced
-          mid-read (\texttt{s1 != s2}), (c)~commit-CAS loss, or
-          (d)~commit-time validation failure.  Run the bank demo with 2,
-          8, and 16 mover threads and report the distribution.  Explain
-          why category~(d) shrinks toward zero as contention rises.
-    \item \emph{[theory]} The real NOrec extends a transaction's snapshot:
-          on observing a moved clock it re-validates its recorded reads
-          against the new version and continues instead of restarting.
-          Prove that this extension preserves opacity as defined in
-          \S\ref{sec:histories-legality-opacity}.  Then construct an
-          interleaving of the bank demo in which the extension policy
-          commits a transfer that the fixed-snapshot policy of
-          Listing~\ref{lst:norec-rust-readwrite} aborts, and argue which
-          policy you would ship.
+    \item Calculate the maximum speedup achievable with a single‑global‑lock TM on a 16‑core machine when transactions spend 10\% of their time in a critical section.
+    \item A serializing TM uses a single worker thread. Explain why this design can still outperform fine‑grained locking if transactions are very short and lock overhead dominates.
+    \item Propose a hybrid design that starts with a non‑speculative execution and switches to speculative when contention is low. What information does the runtime need to make the switch?
+    \item \emph{[implementation]} Extend Listing~\ref{sec:worked-sgl-bank} with \texttt{tm\_malloc} and \texttt{tm\_free} hooks. The hooks may still use the process allocator, but calls must pass through the backend object. Explain which tests would fail to detect bugs if initialization bypassed these hooks.
+    \item \emph{[verification]} Write a PlusCal model of the bank transfer under SGL with two accounts, one lock, and two clients. State the money conservation invariant and the account-floor invariant. Model-check both with all transfer amounts in the set \texttt{\{0,1,2\}}.
+    \item \emph{[theory]} Compare SGL and a queue serializer with three costs: lock acquisition, queue submission, and transaction body execution. Derive the condition under which the serializer has lower latency for a single transaction, and then explain why that condition may not imply higher throughput under a burst of requests.
+    \item \emph{[implementation]} Modify the queue serializer so that each task carries an explicit transaction descriptor containing a task id, an allocation log, and a commit flag. Ensure that the descriptor is created by the submitter but finalized by the worker.
+    \item \emph{[verification]} State the refinement mapping from a queue serializer to an abstract sequential TM. Identify the concrete variable that determines the abstract transaction order.
+    \item \emph{[theory]} For a workload in which every transaction runs under SGL, explain why increasing the number of caller threads can reduce throughput even though it does not change the sequential work performed.
+    \item \emph{[implementation]} Build the Calvin bank demo of \S\ref{sec:calvin-static} from the source in Appendix~\ref{chap:rust-mistakes}. Replace the deterministic shuffle with a random one and run it five times. Verify that the final total is always \texttt{2000000} but the committed snapshot values differ. Explain why determinism of the commit \emph{order} does not affect correctness here.
+    \item \emph{[theory]} Calvin rejects stale declarations before executing the body. A speculative STM (Chapter~10) executes the body first, then validates. Derive the condition under which Calvin does strictly less work than a speculative STM for a given workload, and the condition under which the opposite holds. Hint: compare the cost of body execution with the cost of snapshot validation.
 \end{enumerate}
 
 \textbf{How to check your work.} The \emph{[implementation]} exercises are
-verified with the companion: bound the retry loop of
-\S\ref{sec:norec-bank-transfer-example}, instrument the abort
-classification of \S\ref{sec:norec-rust-complete} (compile the listing
-with any stable Rust toolchain; it needs only the standard library), and
-compare abort rates with
-\texttt{make -C benchmarks/cpp BACKEND=... run-intruder}.  The
-\emph{[verification]} exercises are checked with TLC against
-\S\ref{sec:pluscal-bank-floor-example} and a TL2 commit model that omits the
-read-set re-validation (\texttt{MoneyConserved}; see
+verified with the companion: route \texttt{tm\_malloc}/\texttt{tm\_free}
+through the backend of \S\ref{sec:worked-sgl-bank}, and finalize the
+serializer task descriptor per \S\ref{sec:worked-serializer-bank}.  The
+\emph{[verification]} exercises are checked with TLC on the SGL bank model
+(\texttt{MoneyConserved}, account floor; see
 Appendix~\ref{chap:pluscal-quick-ref}).  The \emph{[theory]} exercises are
-graded against \S\ref{sec:norec-example}, \S\ref{sec:tl2-example}, and
-Table~\ref{tab:snapshot-taxonomy}.  The \emph{[literature]} exercise is
-graded on the accuracy of your mapping: the simplification you name must
-be real and must be attributed to the right paper.  The \emph{[open]}
-exercise has no single right answer; it is graded on whether you define
-``better'' first and defend the definition.
+graded against \S\ref{sec:worked-sgl-bank} and \S\ref{sec:semantic-obligations}.
 
-\index{value-based validation}
-\index{read-validate discipline}
-\index{invisible-it-committed}
-\index{NOrec-BF}
-\index{Bloom-filter validation}
-\index{TSC-TM}
-\index{WBCTL}
-\index{WBETL}
-\index{write-back version management}
-\index{write-through version management}
-\index{undo log}
-\index{commit-time locking}
-\index{eager locking}
-\index{read barrier}
-\index{invisible reads}
-\index{read-set validation}
-\index{ownership records}
-\index{commit serialization}
-\index{snapshot mechanism}
-\index{VBox}
-\index{version history}
-\index{commit log}
-\index{newest-writer index}
-\index{memory reclamation}
-\index{epoch}
-\index{hazard pointer}
-\index{per-location version}
-\index{versioned lock word}
+\index{global mutex}
+\index{transaction descriptor}
+\index{queue submission}
+\index{worker thread}
+\index{serialization order}
+\index{lock acquisition order}
+\index{linearization point}
+\index{bank transfer invariant}
+\index{money conservation}
+\index{account floor invariant}
+\index{backend hooks}
+\index{initialization stubs}
+\index{thread-local state}
+\index{task handoff}
+\index{regression oracle}
+\index{DistributedSGL}
+\index{PersistentSGL}
+
+% -------------------------------------------------------------------

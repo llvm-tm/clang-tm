@@ -197,6 +197,7 @@ hardware that forces these fences; Part~IV designs the software runtimes that
 place them.
 
 \section{TM Semantics: Opacity, Sandboxing, Privatization}
+\label{sec:tm-semantics}
 
 Correctness for transactional memory is usually defined by a condition called
 \emph{opacity}. Opacity extends serializability to aborted transactions. A
@@ -228,7 +229,7 @@ memory, modifies it speculatively, and then another thread takes the object
 private without waiting for the transaction to finish. Naive STMs corrupt this
 scenario because the private copy and the speculative copy diverge. These three
 conditions---serializability plus opacity, sandboxing, and privatization---are
-the yardstick used to model-check every backend in Part~III.
+the yardstick used to model-check every backend of Part~IV.
 
 Figure~\ref{fig:transactional-state-machine} shows the execution state machine
 that all the runtimes in this book refine. The programmer marks only the
@@ -312,8 +313,128 @@ $(x,y)=(0,1)$ never existed at any single instant. A state that never existed
 was observed. Opacity forbids this: even an aborted transaction must read a
 state that lies on some valid serialization. This is the precise gap the
 invariants of Part~III encode. The exact history is replayed on NOrec and TL2
-in Chapter~9, where both must reject the read that would produce the mixed
-snapshot.
+in Chapter~10, where both must reject the read that would produce the mixed
+snapshot. The next section turns the same gap into an executable crash.
+
+\section{Worked Example: A Correct Program That Crashes Under a Non-Opaque TM}
+\label{sec:crash-without-opacity}
+
+Every history so far has had transactions on both sides. The question this
+chapter has been circling is what happens when one side is \emph{ordinary,
+non-transactional code} --- a consumer that takes published data private,
+exactly the privatization boundary of \S\ref{sec:tm-semantics}. Databases
+never face this question. A database client is a separate process: uncommitted
+values simply do not cross the protocol boundary, so the question ``can the
+application see a half-built record?'' is answered \emph{by the interface}, at
+zero cost, in every isolation level. Shared memory has no such interface. The
+application reads the same cells the runtime is speculating on; the only thing
+standing between a phantom value and a pointer dereference is the TM's own
+guarantees. Crash-awareness --- never letting even a doomed transaction expose
+state that could not have existed --- is not a free dimension for TM the way
+it is for a database. It is what opacity buys \cite{guerraoui08correctness}.
+
+The companion repository makes this concrete. \rep{benchmarks/cpp/opaquedemo/}
+holds one program with two backends compiled into it:
+
+\begin{itemize}
+    \item \texttt{make bin/opaquedemo BACKEND=NOREC} --- the opaque baseline
+          of Chapter~10: writes are sandboxed until commit.
+    \item \texttt{make bin/opaquedemo BACKEND=EAGER\_BROKEN} --- a teaching
+          backend (\rep{backends/tm\_impl/\allowbreak eager\_broken/}) implementing the
+          \emph{trivially eager} STM: writes publish immediately, abort undoes
+          them, commit validates values. Its committed projection looks
+          serializable; its mid-flight views are not.
+\end{itemize}
+
+\begin{lstlisting}[language=C++, caption={The non-opacity demo, condensed from
+the file at \rep{benchmarks/cpp/opaquedemo/}. Three barriers force the
+interleaving, so the outcome is not a race but a certainty.},
+label={lst:opaquedemo}]
+void *g_inventory[4]; int32_t g_count = 0, g_seed = 1;
+
+/* writer: publish an item, then abort via genuine validation failure */
+void writer() {
+    if (sigsetjmp(tm_jmpbuf, 0) == 0) {
+        tm_begin();
+        Item *it = (Item *)tm_malloc(sizeof(Item));
+        tm_write_i4((uint32_t *)&it->id, 7);
+        tm_write_i4((uint32_t *)&it->payload, 700);
+        tm_read_i4((uint32_t *)&g_seed);          // read-set: seed == 1
+        tm_write_ptr(&g_inventory[0], it);        // EAGER: visible NOW
+        tm_write_i4((uint32_t *)&g_count, 1);     // EAGER: visible NOW
+        b_publish.wait();                         // every thread may look
+        b_peek.wait();                            // reader has latched
+        b_spoiled.wait();                         // seed := 2 (committed)
+        tm_end();                                 // validation fails -> longjmp
+    }
+    b_aborted.wait();
+}
+
+/* reader: NOT a transaction -- the privatized consumer */
+void reader() {
+    b_publish.wait();
+    int32_t n = g_count;             // latch the published view
+    b_peek.wait();
+    b_aborted.wait();                // the writer's transaction has ABORTED
+    for (int32_t i = 0; i < n; ++i) {          // use the latched count
+        Item *p = (Item *)g_inventory[i];      // EAGER_BROKEN: NULL -> SIGSEGV
+        printf("item[%d] = %d\n", i, p->payload);
+    }
+}
+
+/* main is the spoiler: commit seed := 2 so the writer must abort */
+int main() { /* spawn writer+reader, run a small txn writing g_seed=2, join */ }
+\end{lstlisting}
+
+The spoiler commits a bump of \texttt{g\_seed} between the writer's read and
+its commit, so \emph{both} backends must abort the writer. The barriers make
+the schedule deterministic: the reader latches its view while the writer is
+mid-flight, the abort runs, and only then does the reader rescan. One source,
+two outcomes:
+
+\begin{quote}\ttfamily\small
+== NOREC (opaque: writes sandboxed until commit) ==\\
+reader: mid-flight view: count=0 inventory[0]=(nil)\\
+writer: attempt ended in validation abort (siglongjmp rc=1)\\
+reader: transaction has aborted; final count=0\\
+reader: consistent view preserved; nothing to scan\\
+main: survived --- no phantom state was ever observed\\
+\hfill\emph{exit code 0}\\[2mm]
+== EAGER\_BROKEN (trivially eager, non-opaque by design) ==\\
+reader: mid-flight view: count=1 inventory[0]=0x7460c2e01000\\
+reader: phantom item visible (id=7 payload=700) --- the transaction has NOT committed!\\
+writer: attempt ended in validation abort (siglongjmp rc=1)\\
+reader: transaction has aborted; final count=0\\
+\hfill\emph{Segmentation fault (exit code 139)}
+\end{quote}
+
+Read the eager run carefully, because it defeats a common paraphrase of
+opacity. The eager backend \emph{does} undo: after the abort, memory is back
+to \texttt{count=0, inventory[0]=NULL}, and the committed projection is
+spotless. The crash comes from the view the consumer latched \emph{while} the
+transaction was in flight: a count of 1 backed by an item that no serial
+execution ever produced, and a slot that the abort emptied underneath a latched
+count. NoCrash for the consumer program follows exactly when every view,
+including mid-flight and aborted ones, lies on some serial history --- which
+is opacity, not undo. NOrec cannot show the phantom because its writes exist
+only in the private write-set until the commit instant.
+
+Chapter~6 turns the same scenario into a model:
+\rep{docs/proofs/EagerSTM.tla} (\texttt{make check-teaching}) extends the
+program counters with a \texttt{crash} location for the consumer and TLC finds
+the crash-reachable counterexample in eight steps --- the machine-checked twin
+of the segfault above --- while the same model family with sandboxed writes
+(NOrec's model, Chapter~10) admits none.
+
+The crash is only one failure class. The same non-atomic visibility also
+\emph{deadlocks} correct lock-free programs: a concurrent search structure
+whose readers can see node links one at a time can witness a split in
+progress --- a parent pointing at an old child while the child already points
+at the new parent --- and spin between the two halves forever. A TM that
+promises per-word atomicity but not transaction-level visibility has broken
+programs that never touch a lock. The full dimension analysis --- why weak
+isolation is \emph{structurally} dangerous in shared memory in a way it is not
+in databases --- is the subject of Chapter~7.
 
 \section{Worked Example: A Minimal Litmus-Test Harness}
 
@@ -372,7 +493,7 @@ int main(void) {
 
 Each chapter that introduces a runtime in Part~IV ships the same litmus tests,
 so a regression in any backend is a one-line change to spot. The invariant
-tests of Chapter~12 are the same technique made stochastic: the schedule is
+tests of Chapter~13 are the same technique made stochastic: the schedule is
 randomized, and the assertion is a global invariant such as money conservation.
 
 \section{Worked Example: Flattening Nested Bank Transactions}
@@ -563,6 +684,22 @@ original correctness condition for concurrent objects with the
 opacity requirement used throughout this book: identify one history
 the two conditions treat differently, and state which condition a
 failing (aborted) transaction exposes that the other cannot express.
+
+\item \emph{[implementation]} Build and run the demo of
+Section~\ref{sec:crash-without-opacity} with both backends
+(\texttt{BACKEND=NOREC} and \texttt{BACKEND=EAGER\_BROKEN}). Before running
+each, write down the reader's predicted \texttt{count} and
+\texttt{inventory[0]} at the three barrier points, and whether the process
+survives. Then remove the \texttt{b\_aborted.wait()} in the reader: does the
+eager backend still crash, and does the NOrec outcome change? Explain both in
+terms of which views the backend is required to make serializable.
+
+\item \emph{[verification]} Open \rep{docs/proofs/EagerSTM.tla} and check it
+with \texttt{EagerSTM-crash.cfg}: TLC reports \texttt{NoCrash} violated.
+Read the counterexample and identify the two events that correspond to the
+reader's latched \texttt{count} and the undo of \texttt{inventory[0]}. Then
+sandbox the writes in the model (buffer them until commit, as NOrec does) and
+recheck: the invariant should now hold.
 \end{enumerate}
 
 \textbf{How to check your work.} The \emph{[implementation]} exercises are
@@ -575,7 +712,9 @@ The \emph{[theory]} exercises are graded against Table~\ref{tab:tm-family-taxono
 and the serializable-but-not-opaque worked example.  The
 \emph{[literature]} exercise is graded on the accuracy of your mapping:
 the one-history difference must be real, and you must show which
-condition it distinguishes.
+condition it distinguishes.  Exercises on the non-opacity demo are checked
+against the two recorded runs of \S\ref{sec:crash-without-opacity}; the
+sandboxed \texttt{EagerSTM.tla} variant must pass \texttt{NoCrash}.
 
 \index{linearizability}
 \index{strict serializability}

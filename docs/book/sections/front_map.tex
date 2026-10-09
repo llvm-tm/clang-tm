@@ -9,16 +9,19 @@ here so later chapters can be read without re-decoding:
 \hline
 TM & Transactional Memory (the concept, Ch.~1--2) \\
 STM & Software TM: conflict detection in the runtime (Part~IV) \\
-HTM & Hardware TM: conflict detection in the cache hierarchy (Ch.~16) \\
-SGL & Single Global Lock --- the reference non-speculative design (Ch.~8) \\
-TL2 & Global-clock, versioned-lock STM (Ch.~9) \\
-NOrec & No Read-Lock, value-based validation (Ch.~9) \\
-TinySTM & Lock-based STM with per-object locks (WBCTL/WT variants, Ch.~9) \\
-JVSTM / MVLog & Multi-version STMs (Ch.~9) \\
+HTM & Hardware TM: conflict detection in the cache hierarchy (Ch.~17) \\
+SGL & Single Global Lock --- the reference non-speculative design (Ch.~9) \\
+TL2 & Global-clock, versioned-lock STM (Ch.~10) \\
+NOrec & No Read-Lock, value-based validation (Ch.~10) \\
+TinySTM & Lock-based STM with per-object locks (WBCTL/WT variants, Ch.~10) \\
+JVSTM / MVLog & Multi-version STMs (Ch.~10) \\
 PlusCal / TLA+ / TLC & Specification language, logic, and model checker (Ch.~6) \\
-OCC / read-validate & Optimistic concurrency control; validate-then-write-back (Ch.~9) \\
-RTM & Intel Restricted Transactional Memory (Ch.~16) \\
-GUST & AtomicINC commit-log GPU TM (Ch.~17) \\
+OCC / read-validate & Optimistic concurrency control; validate-then-write-back (Ch.~10) \\
+SI / SSI & Snapshot isolation and serializable snapshot isolation: the database rungs below serializability, with their anomalies (Ch.~7) \\
+MVCC & Multi-version concurrency control: the mechanism snapshot levels are built on (Ch.~7, Ch.~14) \\
+2PL & Two-phase locking: pessimistic serializability; locks held to commit (Ch.~2, Ch.~7) \\
+RTM & Intel Restricted Transactional Memory (Ch.~17) \\
+GUST & AtomicINC commit-log GPU TM (Ch.~18) \\
 \end{tabular}
 \end{center}
 
@@ -30,8 +33,11 @@ GUST & AtomicINC commit-log GPU TM (Ch.~17) \\
           correct runtime must preserve'' is understood before ``what the
           runtime does with the calls.'' The runtimes in turn precede the
           compiler instrumentation (Part~V) that targets them, so the runtime
-          ABI of Chapter~7 is fixed before ``what an instrumentation pass
-          must preserve'' is read.
+          ABI of Chapter~8 is fixed before ``what an instrumentation pass
+          must preserve'' is read. Chapter~7's isolation-level analysis closes
+          the formal part for the same reason: the vocabulary of weak levels,
+          anomalies, and their costs is established before the storage systems
+          of Chapter~19 speak it back.
     \item Readers who prefer runtimes-first can start at Part~IV and consult
           Parts~III and V on demand; cross-references mark every such jump.
 \end{itemize}

@@ -1,513 +1,636 @@
-\chapter{From Source to AST: Lexing and Parsing}
-\index{lexing}\index{parsing}\index{finite automata}\index{DFA}\index{recursive descent}\index{parser generator}\index{AST}\index{atomic block}
+\chapter{Performance Modeling and Tuning}
+\index{performance modeling, throughput, abort rate, wasted work, Little's Law, queueing theory, benchmarks, STAMP, profiling, bank benchmark, model checking}
 
-A transactional memory system is usually introduced at the runtime boundary: a transaction begins, reads and writes are tracked, validation happens, and a commit either publishes updates or retries. But a programmer does not write read-set manipulation by hand. The programmer writes a source-level construct, a library call, or code that an instrumentation pass recognizes. Somewhere before the runtime can execute, the program has to be decomposed into structure.
+Transactional memory performance is not summarized by a single number. A system can have high throughput while wasting most of its cycles on doomed attempts, or it can have zero aborts while serializing all work through one lock. The useful question is not ``which backend is fastest?'' but ``which cost dominates on this machine, for this workload, at this contention level?''
 
-This chapter follows that front-end path: characters become tokens, tokens become an abstract syntax tree, and the tree identifies the region that later becomes transactional instrumentation. The companion repository instruments at LLVM IR rather than shipping a source language, but the conceptual pipeline is the same. The tiny language used here is deliberately small: an \texttt{atomic} block, a bank transfer statement, and assertions about money conservation.
+This chapter gives a compact toolkit for answering that question. We start with metrics, then move to analytical models, measurement hygiene, and worked examples. The running example is again the two-account bank transfer with an account floor and a money-conservation invariant: it is small enough to measure carefully, but rich enough to expose aborts, semantic rejects, validation cost, and serialization.
 
-\section{Finite Automata and Lexical Analysis}
+The companion repository carries this toolkit as code, and the exercises refer to it. Real-hardware costs come from RDTSC-instrumented profiling patches (\texttt{patches/profile/tsx/} measures XBEGIN/XEND/abort cycle costs of the TSX-SGL backend on Broadwell-EP); they are packaged as portable \emph{machine profiles} (\texttt{machine\_profiles/broadwell\_ep\_v4.json}, \texttt{skylake.json}); and the discrete-event simulators (\texttt{simulator/}, binaries \texttt{tm-des} and \texttt{tm-sim}) replay transaction traces against either the real backend or a calibrated per-event cost model, so a design question can be answered at three fidelities: measured, cycle-accurate simulated (Chapter~17's gem5 flow), and cost-model estimated.
 
-Lexical analysis is the first useful compression step in a compiler. It turns a stream of characters into a stream of tokens: \texttt{atomic}, \texttt{\char`\{}, identifiers, numbers, semicolons, and so on. The important fact is that a lexer is not mysterious machinery. It is a finite automaton with a small amount of bookkeeping for token text and source position.
+\section{Metrics and Benchmarks}
 
-Regular expressions are a convenient notation for such machines. An identifier may be described as a letter followed by zero or more letters or digits. A decimal number may be described as one or more digits. A fixed keyword such as \texttt{atomic} is just a six-character path through the automaton. Every regular expression can be compiled to a nondeterministic finite automaton, then to a deterministic finite automaton by subset construction. A hand-written lexer implements the same transition function directly in code.
+The primary metric in most transactional-memory experiments is committed throughput: the number of committed transactions per second. It is attractive because it is easy to compare, but it is also easy to misuse. Throughput hides why transactions are slow. A low number may be caused by validation cost, cache-line bouncing, write-set publication, read-set scanning, logging, persistence barriers, scheduler interference, or simply a workload that does little useful parallel work.
 
-The key policy is \emph{maximal munch}: consume the longest prefix that forms a valid token. Without it, \texttt{atomicity} could be tokenized as \texttt{atomic} followed by \texttt{ity}. That would be wrong for ordinary language design. The usual rule is to consume the longest identifier-like string and then check whether the result is a reserved word. The alternative is the dedicated DFA path in Figure~\ref{fig:lexer-dfa}, where \texttt{atomic} is accepted as a keyword only if the word ends exactly there.
+Abort rate is the natural companion metric. For a fixed workload and fixed transaction size, rising abort rate usually predicts falling throughput. But abort rate alone is misleading. A transaction that aborts after one read wastes little work; a transaction that aborts after a long traversal, a large speculative update set, or a persistence flush wastes much more. The better measure is wasted work: restarts multiplied by lost progress, interpreted together with commit latency.
 
-For the transactional examples in this book, the lexer has no semantic knowledge. It does not know whether an account has enough money, whether a transfer preserves a floor, or whether a runtime backend is NOrec, TL2, SGL, TinySTM, or SwissTM. It only recognizes surface categories.
+The usual first-order metrics are:
 
-\begin{figure}[ht]
-\centering
-\begin{tikzpicture}[font=\small, node distance=1.5cm]
-  \tikzstyle{st}=[circle,draw,inner sep=1pt,minimum size=7mm]
-  \tikzstyle{acc}=[circle,draw,double,inner sep=1pt,minimum size=7mm]
-  \node[st] (q0) {$q_0$};
-  \node[st] (q1) [right=1.2cm of q0] {$q_1$};
-  \node[st] (q2) [right=1.2cm of q1] {$q_2$};
-  \node[st] (q3) [right=1.2cm of q2] {$q_3$};
-  \node[st] (q4) [right=1.2cm of q3] {$q_4$};
-  \node[st] (q5) [right=1.2cm of q4] {$q_5$};
-  \node[acc] (q6) [right=1.2cm of q5] {$q_6$};
-  \node[acc] (qid) [above=1.4cm of q3] {$q_{id}$};
-  \node[acc] (qnum) [above=1.4cm of q0,xshift=0.6cm] {$q_{num}$};
-  \node[acc] (qlb) [below=1.4cm of q0,xshift=-0.4cm] {\texttt{\char`\{}};
-  \node[acc] (qrb) [below=1.4cm of q0,xshift=0.5cm] {\texttt{\char`\}}};
-  \node[acc] (qs)  [below=1.4cm of q0,xshift=1.4cm] {\texttt{;}};
-  \draw[-{Stealth}] (q0) -- node[above] {\texttt{a}} (q1);
-  \draw[-{Stealth}] (q1) -- node[above] {\texttt{t}} (q2);
-  \draw[-{Stealth}] (q2) -- node[above] {\texttt{o}} (q3);
-  \draw[-{Stealth}] (q3) -- node[above] {\texttt{m}} (q4);
-  \draw[-{Stealth}] (q4) -- node[above] {\texttt{i}} (q5);
-  \draw[-{Stealth}] (q5) -- node[above] {\texttt{c}} (q6);
-  \draw[-{Stealth}] (q0) to[out=120,in=180] node[above left] {letter$\neq$\texttt{a}} (qid);
-  \draw[-{Stealth}] (q0) to[out=60,in=-180] node[above] {digit} (qnum);
-  \draw[-{Stealth}] (q1) to[out=110,in=190] (qid);
-  \draw[-{Stealth}] (q2) to[out=110,in=190] (qid);
-  \draw[-{Stealth}] (q3) to[out=110,in=190] (qid);
-  \draw[-{Stealth}] (q4) to[out=110,in=190] (qid);
-  \draw[-{Stealth}] (q5) to[out=110,in=190] (qid);
-  \draw[-{Stealth}] (q6) to[out=110,in=190] (qid);
-  \node[font=\scriptsize] at ($(q1)!0.5!(qid)-(0.25,0)$) {$\neg$\texttt{t}};
-  \node[font=\scriptsize] at ($(q2)!0.5!(qid)-(0.25,0)$) {$\neg$\texttt{o}};
-  \node[font=\scriptsize] at ($(q3)!0.5!(qid)-(0.25,0)$) {$\neg$\texttt{m}};
-  \node[font=\scriptsize] at ($(q4)!0.5!(qid)-(0.25,0)$) {$\neg$\texttt{i}};
-  \node[font=\scriptsize] at ($(q5)!0.5!(qid)-(0.25,0)$) {$\neg$\texttt{c}};
-  \node[font=\scriptsize] at ($(q6)!0.5!(qid)-(0.25,0)$) {letter$\mid$digit};
-  \draw[-{Stealth}] (qid) to[out=80,in=100,looseness=4] node[above] {letter$\mid$digit} (qid);
-  \draw[-{Stealth}] (qnum) to[out=80,in=100,looseness=4] node[above] {digit} (qnum);
-  \draw[-{Stealth}] (q0) -- node[below left,font=\scriptsize] {\texttt{\char`\{}} (qlb);
-  \draw[-{Stealth}] (q0) -- node[below,font=\scriptsize] {\texttt{\char`\}}} (qrb);
-  \draw[-{Stealth}] (q0) -- node[below right,font=\scriptsize] {\texttt{;}} (qs);
-\end{tikzpicture}
-\caption{A DFA for the toy lexer. A dedicated path recognizes the keyword \texttt{atomic}; any other continuation falls into the identifier state $q_{id}$, so \texttt{atomically} is an identifier, not a keyword. \texttt{\char`\{}, \texttt{\char`\}}, and \texttt{;} are single-character tokens.}
-\label{fig:lexer-dfa}
-\end{figure}
+Committed throughput is normally reported in transactions per second; abort rate, split by cause when possible (validation failure, lock conflict, capacity abort, explicit semantic reject, or fallback path); attempts per committed transaction; latency distribution for committed transactions; wasted work, estimated from aborted attempt duration or from progress counters; speedup over a single global lock; occupancy or parallelism, meaning the mean number of in-flight transactions; and energy under contention, when the platform exposes trustworthy counters.
 
-A practical lexer also records source spans. A token should carry at least its kind, spelling, and byte or line-column position. The parser can then report ``expected \texttt{\char`\}}'' at the right location instead of merely failing. Diagnostics are not an afterthought; they are part of the front-end contract.
+Benchmark choice determines which metric matters. The STAMP suite remains a useful vocabulary because its kernels exercise different access shapes. The eight kernels are \texttt{bayes}, \texttt{genome}, \texttt{intruder}, \texttt{kmeans}, \texttt{labyrinth}, \texttt{ssca2}, \texttt{vacation}, and \texttt{yada}. They cover read-heavy phases, write-heavy phases, long transactions, graph traversals, tree-shaped data, and irregular memory access. A backend that performs well on \texttt{kmeans} may still collapse on \texttt{yada}; the former may be dominated by simple reads, while the latter may be dominated by conflict and validation.
 
-\section{Recursive Descent Parsing}
+Microbenchmarks have a different role. A counter benchmark isolates the cost of one contended location. A bank benchmark controls account count, transfer amount, account floor, and write-set size. A linked-list benchmark varies traversal length and update probability. These tests are not substitutes for applications; they are instruments for parameter sweeps. They tell us whether a performance cliff is caused by contention, read-set length, write-set length, metadata locality, or validation frequency.
 
-Parsing gives hierarchical meaning to the flat token stream. A sequence such as \texttt{atomic \char`\{ transfer checking savings 7; \char`\}} is not just seven tokens. It is an atomic block containing one statement whose operands are two account identifiers and one amount.
+For the companion codebase, SGL is the conservative baseline; TL2, NOrec, NOrec-BF, TSC-TM, TinySTM variants, SwissTM, DUDETM, and MVLog show different points in the design space. The measured M1 Pro fuzz/bank anchors in Table~\ref{tab:perf-anchors} are calibration points, not universal rankings. The GPU designs, including GUST, require separate interpretation because their commit and validation costs are shaped by warp occupancy, memory coalescing, and global-memory atomics.
 
-Recursive descent is the simplest didactic parser because each grammar rule becomes one function. A rule for an atomic block becomes \texttt{parse\_atomic}. A rule for a transfer statement becomes \texttt{parse\_transfer}. A rule for an identifier becomes \texttt{expect\_id}. The call stack mirrors the grammar.
+\section{Analytical Models}
+\label{sec:perf-analytical}
 
-A suitable grammar fragment is:
+Analytical models are not replacements for measurement. They are compression devices: they turn a noisy run into a small set of hypotheses about cost. A good model explains why a curve bends, where a backend stops scaling, and which counter should move if the hypothesis is right.
+
+A minimal optimistic TM model has five states: ready, executing, validating, committing, and aborting. Transactions spend useful time in execution, bookkeeping time in validation and commit, and wasted time on paths that end in abort. Figure~\ref{fig:perf-state-machine} shows this state machine.
+
+Queueing theory gives the first sanity check. Little's Law relates mean concurrency, committed throughput, and mean latency:
 
 $$
-\begin{array}{rcl}
-\textit{atomic-block} & ::= & \texttt{atomic} \ \texttt{\char`\{} \ \textit{stmt-list} \ \texttt{\char`\}} \\
-\textit{stmt-list} & ::= & \textit{stmt} \ \textit{stmt-list} \mid \epsilon \\
-\textit{stmt} & ::= & \textit{transfer} \mid \textit{assertion}
-\end{array}
+L = \lambda W
 $$
 
-In code, the parser usually avoids writing the recursive list rule literally. Instead it loops until it sees the closing brace. That loop is still the same grammar idea, expressed in a form that gives better error messages and avoids deep recursion on long statement lists.
+Here, the symbol $L$ is the mean number of in-flight transactions, the symbol $\lambda$ is committed throughput, and the symbol $W$ is mean transaction latency. If latency doubles while the number of in-flight transactions stays fixed, committed throughput must fall. This is why high abort rates are damaging even before CPUs are saturated: retries inflate the residence time of a logical transaction in the system.
 
-Recursive descent has limits. Direct left recursion cannot be parsed by a naive recursive function, because the function calls itself before consuming a token. It also provides no automatic conflict report: if two alternatives begin with the same token, the author must decide how much lookahead is needed. Finally, there is no separate grammar artifact unless the team writes one; the grammar lives in the parser source.
+A simple retry model assumes that each attempt aborts independently with probability
+
+$$
+p_{\mathrm{abort}}.
+$$
+
+Then the mean attempts per committed transaction is
+
+$$
+E[\mathrm{attempts\ per\ commit}] =
+\frac{1}{1-p_{\mathrm{abort}}}.
+$$
+
+This is useful at low to moderate contention. It lets us read an observed attempts-per-commit column as an implied abort probability, or predict how many attempted transactions a backend must execute to produce one commit.
+
+The model breaks down under high contention for three reasons. First, aborts are not independent: if many threads repeatedly touch the same hot account or ownership record, their retries are correlated. Second, retries change the machine state: cache residency, branch predictor state, coherence traffic, and allocator state are different after a failed attempt. Third, queueing delay feeds back into conflicts. Longer attempts overlap with more peers, increasing the probability of another conflict.
+
+Cost-per-operation models are more concrete. They decompose a transaction into begin, read barrier, write barrier, validation, commit, abort cleanup, and retry delay. Each component is calibrated in cycles or nanoseconds against real runs. This is the machine-profile approach used by the companion simulator. It is especially useful when comparing algorithms with similar throughput but different internal costs, such as TL2 and TSC-TM in the fuzz/bank slice.
+
+The model is strongest when conflicts are approximately independent and the working set fits the relevant cache level. It misses memory-hierarchy cliffs, coherence storms, preemption, cache-line false conflicts, and backend-specific effects such as TSX capacity aborts or persistence fences. When the model fails, the failure is diagnostic: it says the missing cost is now the experiment.
 
 \begin{figure}[htbp]
 \centering
-\begin{tikzpicture}[font=\small, node distance=1.8cm]
-  \tikzstyle{box}=[draw,rounded corners,align=center,minimum width=2.6cm,minimum height=0.9cm]
-  \node[box] (src) {Source\\\texttt{atomic \{...\}}};
-  \node[box] (lex) [right=of src] {Lexer\\maximal munch};
-  \node[box] (tok) [right=of lex] {Token stream\\keywords, ids};
-  \node[box] (parse) [right=of tok] {Parser\\grammar rules};
-  \node[box] (ast) [below=1.2cm of parse] {AST\\atomic block};
-  \node[box] (ir) [left=of ast] {Instrumentation\\read/write calls};
-  \node[box] (rt) [left=of ir] {TM runtime\\NOrec, TL2, SGL, ...};
-  \draw[-{Stealth}] (src) -- (lex);
-  \draw[-{Stealth}] (lex) -- (tok);
-  \draw[-{Stealth}] (tok) -- (parse);
-  \draw[-{Stealth}] (parse) -- (ast);
-  \draw[-{Stealth}] (ast) -- (ir);
-  \draw[-{Stealth}] (ir) -- (rt);
+\begin{tikzpicture}[
+    node distance=1.7cm,
+    every node/.style={draw, rounded corners, align=center, minimum width=2.8cm, minimum height=0.8cm},
+    arrow/.style={-{Latex[length=2mm]}, thick}
+]
+\node (ready) {Ready\\transaction};
+\node[right=of ready] (execute) {Execute\\reads/writes};
+\node[right=of execute] (validate) {Validate\\read set};
+\node[right=of validate] (commit) {Commit\\publish writes};
+\node[below=of validate] (abort) {Abort\\discard work};
+
+\draw[arrow] (ready) -- (execute);
+\draw[arrow] (execute) -- (validate);
+\draw[arrow] (validate) -- node[above, draw=none, minimum width=0cm] {valid} (commit);
+\draw[arrow] (validate) -- node[right, draw=none, minimum width=0cm] {conflict} (abort);
+\draw[arrow] (abort.west) -| node[pos=0.25, below, draw=none, minimum width=0cm] {retry} (ready.south);
 \end{tikzpicture}
-\caption{A source-level view of the front-end pipeline. The companion repository instruments at LLVM IR rather than shipping a source-level language, but the logical artifacts are the same: source text becomes tokens, tokens become an AST, and the AST-equivalent control region becomes calls into a concrete TM backend.}
-\label{fig:front-end-pipeline}
+\caption{A minimal performance state machine for optimistic TM. Throughput counts transitions into commit; abort rate counts transitions into abort; wasted work is the time spent in execute before an abort.}
+\label{fig:perf-state-machine}
 \end{figure}
 
-Figure~\ref{fig:front-end-pipeline} separates front-end structure from runtime policy. The lexer and parser identify an atomic region. They do not decide whether the implementation uses a single global lock, TL2 versioned locks, NOrec validation, TinySTM write-back or write-through modes, SwissTM conflict management, persistent logging, or a GPU commit protocol. That boundary is healthy: syntax should remain stable while backend protocols evolve.
+\section{Experimental Methodology}
 
-\section{Parser Generators: From Yacc to Modern Tools}
-\index{parser generator}\index{yacc}\index{bison}\index{LR(0) automaton}\index{ANTLR}\index{tree-sitter}
+A TM measurement is an experiment on a whole stack: backend, compiler, allocator, scheduler, CPU frequency policy, memory hierarchy, and benchmark. The methodology must make these variables visible.
 
-The most direct answer to ``is Yacc still in use?'' is: yes, and its descendants
-are everywhere.  The principle Yacc established --- write the grammar, get a
-table-driven parser for free --- is the backbone of countless real compilers,
-and the shift-and-reduce automaton it builds is exactly the kind of object
-this chapter's automata language can describe.
+Warm-up matters. The first seconds of a run may include page faults, allocator growth, branch predictor training, cache population, JIT compilation in managed systems, or lazy initialization. A benchmark should either discard a warm-up interval or run long enough that initialization noise is negligible. Result stabilization matters for the same reason. A single best run is not evidence; repeated runs with variance are.
 
-A parser generator makes the grammar an explicit artifact. Instead of encoding every rule as a function, the programmer writes productions and lets the tool compute states, transitions, lookahead, and reductions. This is valuable when the language grows beyond a small teaching grammar. It is also valuable when diagnostics and maintenance matter: a grammar file can be reviewed independently from semantic actions.
+Profiling with \texttt{perf} or platform-specific counters helps separate algorithm cost from machine cost. Useful events include cycles, instructions, cache misses, branch misses, lock contention, context switches, and, where available, hardware-transaction abort causes. On platforms without \texttt{perf}, equivalent vendor tools or coarse counters can still reveal whether a curve is CPU-bound, memory-bound, or scheduler-bound.
 
-\emph{Yacc (1975)} compiled a context-free grammar into an \textsc{LALR(1)} parser table; its modern form is \textsc{GNU Bison}, still maintained and still the parser behind many C/C++-adjacent tools (e.g.\ SQL engines, shell grammars). \emph{The generated automaton is a real object.} For a simple grammar, the parser Bison produces is an \textsc{LALR(1)} table built over the LR(0) item-set automaton with one state per set of viable items, as in Figure~\ref{fig:lr0-automaton} for the grammar in Listing~\ref{lst:expr-grammar}. The LR(0) skeleton alone is not a parser: state~$I_1$ in the figure contains both $E' \to E\cdot$ (accept/reduce) and $E \to E\cdot+T$ (shift), a shift/reduce conflict that is resolved only because LALR(1) consults the lookahead token. Keep that in mind when reading the figure: it shows the states, not the lookahead that disambiguates them. \emph{Recursive descent you write; an LR table you compute.} This is the trade-off: hand-written parsers read like the grammar but must avoid left recursion; generated parsers accept the grammar as-is but hide the shift/reduce machinery behind the table. \emph{Modern tools}. \textsc{ANTLR} (ALL(*), with Python and many other targets) generates recursive-descent parsers from grammar files; \textsc{tree-sitter} builds error-tolerant, incremental \textsc{GLR} parsers used by editors; Python projects commonly use \textsc{PLY} (a Yacc port), \textsc{SLY} (its successor), or \textsc{Lark} (Earley/LALR from \textsc{EBNF}). \emph{What this means for transactional constructs}: nothing about \texttt{atomic} is hard to parse --- any of these tools can host the grammar --- so the interesting work stays downstream, in the instrumentation and runtime, where the rest of this book lives. \emph{Scope note}: this section is a deliberate, self-contained detour. The companion repository instruments at the LLVM-IR level (Chapter~10) and does \emph{not} implement a source-level TM language, so no front-end generator is shipped; the DFA and LR(0) automata here exist to ground the vocabulary (``shift'', ``reduce'', ``item set'') rather than to build a product. Readers who want only the TM pipeline may skip to the worked example.
+A central rule is to compare against the uninstrumented baseline, not just against other TMs. Transactional instrumentation can dominate algorithmic differences. If an uninstrumented bank transfer runs much faster than every TM backend at one thread, the gap is not contention; it is barrier, metadata, logging, and compiler cost. Only after this baseline is known does it make sense to compare NOrec against TL2 or TinySTM against SwissTM.
 
-The table in an LR parser is a compact encoding of two choices. A \emph{shift} consumes another token and moves to a new state. A \emph{reduce} recognizes that the symbols on top of the stack match the right-hand side of a production and replaces them by the left-hand side. Conflicts mean the grammar and parser class do not determine a unique action for a particular state and lookahead token.
+Benchmark hygiene includes pinning threads when possible, disabling frequency scaling when appropriate, reporting variance, and using enough repetitions to make five percent differences meaningful. The machine profile should record CPU model, core count, memory configuration, operating system, compiler version, optimization flags, backend configuration, workload parameters, and commit hash. Reproducibility is not a ceremonial appendix; it is the only way to distinguish an algorithmic result from a local accident.
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{M{0.20\linewidth}M{0.24\linewidth}M{0.30\linewidth}M{0.16\linewidth}}
+\caption{Measured anchors from the companion M1 Pro fuzz/bank runs. These are calibration points, not universal rankings.}
+\label{tab:perf-anchors}
+\begin{tabular}{M{0.15\linewidth}M{0.19\linewidth}M{0.23\linewidth}M{0.31\linewidth}}
 \hline
-\thb{0.20\textwidth}{Approach} & \thb{0.24\textwidth}{Parser shape} & \thb{0.30\textwidth}{Strength} & \thb{0.16\textwidth}{Cost} \\
+\thb{0.15\textwidth}{Backend} & \thb{0.19\textwidth}{Workload slice} & \thb{0.23\textwidth}{Throughput} & \thb{0.31\textwidth}{Modeling use} \\
 \hline
-Hand recursive descent & Functions over tokens & Transparent AST construction & No left recursion \\
-Yacc/Bison & Table-driven LALR & Compact grammar file & Shift/reduce debugging \\
-ANTLR & Generated recursive descent & Rich grammar notation & Toolchain dependency \\
-tree-sitter & Incremental GLR & Editor-grade recovery & More machinery \\
+NOrec-BF & read-mostly & about 829K txns/s & Bloom-filtered read-set cost \\
+NOrec & read-mostly & about 553K txns/s & global-clock validation cost \\
+TL2 & fuzz/bank & about 2.06M txns/s & ownership-record fast path \\
+TSC-TM & fuzz/bank & about 2.05M txns/s & timestamp fast path \\
+MVLog & write-heavy & about 275K txns/s & multi-version log pressure \\
+MVLog & read-mostly & about 109K txns/s & multi-version read overhead \\
 \hline
 \end{tabular}
-\caption{Front-end choices for an \texttt{atomic} construct. The syntax is simple enough for any row; the engineering choice is driven by diagnostics, integration, and maintenance.}
-\label{tab:front-end-choices}
 \end{table}
 
-\begin{lstlisting}[language={}, caption={A grammar small enough to see the whole automaton, written in Yacc-style BNF.}, label={lst:expr-grammar}]
-expr  ::= expr '+' term   |  term
-term  ::= id
-\end{lstlisting}
-
-\begin{figure}[ht]
+\begin{table}[htbp]
 \centering
-\begin{tikzpicture}[font=\small, node distance=2.6cm]
-  \tikzstyle{item}=[rounded corners,draw,inner sep=3pt,align=left]
-  \node[item] (I0) at (0,0) {\ttfamily $E'\to\cdot E$\\ $E\to\cdot E+T$\\ $E\to\cdot T$\\ $T\to\cdot id$};
-  \node[item,double,double distance=1.5pt] (I1) at (4.5,2.4) {\ttfamily $E'\to E\cdot$\\ $E\to E\cdot+T$};
-  \node[item] (I2) at (4.5,0) {\ttfamily $E\to T\cdot$};
-  \node[item] (I3) at (4.5,-2.6) {\ttfamily $T\to id\cdot$};
-  \node[item] (I4) at (9.5,2.4) {\ttfamily $E\to E+\cdot T$\\ $T\to\cdot id$};
-  \node[item] (I5) at (9.5,0) {\ttfamily $E\to E+T\cdot$};
-  \draw[-{Stealth}] (I0) -- node[above,pos=0.4] {$E$} (I1);
-  \draw[-{Stealth}] (I0) -- node[right] {$T$} (I2);
-  \draw[-{Stealth}] (I0) -- node[right,pos=0.3] {$id$} (I3);
-  \draw[-{Stealth}] (I1) -- node[above] {$+$} (I4);
-  \draw[-{Stealth}] (I4) -- node[right] {$T$} (I5);
-  \draw[-{Stealth}] (I4) to[out=-165,in=15,looseness=1.0] node[below,pos=0.35] {$id$} (I3);
-\end{tikzpicture}
-\caption{The LR(0) item-set automaton for Listing~\ref{lst:expr-grammar}, augmented with $E'\to E$ so the accept state is visible.  Reading the ``$\cdot$'' as a parse position, each state is a set of viable items; a dot before a non-terminal is a shift, and a dot at the end of a complete item is a reduce.  A Yacc-family generator computes this skeleton and then overlays LALR(1) lookahead sets to resolve states such as $I_1$ (which mixes $E' \to E\cdot$ and $E \to E\cdot+T$); the tables it walks at parse time encode both.}
-\label{fig:lr0-automaton}
-\end{figure}
+\caption{Common tuning symptoms and likely causes in optimistic TM experiments.}
+\label{tab:perf-symptoms}
+\begin{tabular}{M{0.28\linewidth}M{0.34\linewidth}M{0.30\linewidth}}
+\hline
+\thb{0.28\textwidth}{Symptom} & \thb{0.34\textwidth}{Likely cause} & \thb{0.30\textwidth}{First check} \\
+\hline
+High abort rate, short attempts & hot metadata or hot data item & conflict-address histogram \\
+High abort rate, long attempts & late validation failure & read-set length and validation point \\
+Low abort rate, low throughput & instrumentation or serialization cost & uninstrumented and SGL baselines \\
+Good one-thread rate, poor scaling & coherence traffic or false sharing & cache-line layout and owner records \\
+Large run-to-run variance & scheduler or frequency noise & pinning, repetitions, variance report \\
+\hline
+\end{tabular}
+\end{table}
 
-The grammar in Listing~\ref{lst:expr-grammar} is intentionally left-recursive. A direct recursive-descent parser for \texttt{expr} would call itself before consuming input. An LR parser has no such problem: left recursion is often the natural way to express left-associative operators in bottom-up parsing.
+\section{Worked Example: Measuring Attempts in the Bank Benchmark}
+\index{bank benchmark}\index{single global lock}\index{wasted work}
+\label{sec:perf-bank-attempts}
 
-\section{Worked Example: Lexing and Parsing an Atomic Block}
-\index{lexer}\index{recursive descent parser}\index{AST}
-\label{sec:parser-example}
+This standalone C++17 program implements the bank benchmark with a single
+global lock. It is intentionally simple: the point is to produce a clean
+baseline for throughput, attempts, semantic rejects, and the money-conservation
+invariant before replacing the critical section by NOrec, TL2, TinySTM, or
+another backend.
 
-The whole front end for a tiny transactional language, in miniature:
-
-\begin{lstlisting}[language=C, caption={A hand-written lexer for the keywords of an atomic block.}]
-enum Token { T_ATOMIC, T_IDENT, T_NUMBER, T_LBRACE, T_RBRACE, T_SEMI, T_END };
-
-struct Token next_token(const char **src) {
-    skip_ws(src);
-    if (**src == '\0') return T_END;
-    if (**src == '{') { (*src)++; return T_LBRACE; }
-    if (**src == '}') { (*src)++; return T_RBRACE; }
-    if (strncmp(*src, "atomic", 6) == 0) { *src += 6; return T_ATOMIC; }
-    /* ... identifiers, numbers, ';' ... */
-}
-\end{lstlisting}
-
-The listing is schematic: it shows the shape of a lexer, not the complete maximal-munch implementation. A production lexer must avoid accepting \texttt{atomicity} as \texttt{atomic}. The robust version scans a whole identifier first, then compares the spelling with the reserved-word table. That single design choice removes a class of prefix bugs.
-
-A parser for the corresponding atomic block has three phases. First, it expects the keyword. Second, it consumes the opening brace. Third, it parses statements until it sees the matching closing brace. The result is an AST node representing an atomic control region. Later passes lower that node into calls that begin, read, write, validate, commit, or abort a concrete backend transaction.
-
-Each grammar rule becomes one function in the recursive-descent parser --- the \texttt{atomic \{ \ldots \}} production being a small subtree. The DFA for this lexer is Exercise~1 of this chapter: six token kinds, all reachable from the start state. The AST's atomic control region is the source-level analogue of the region the companion instrumentation pass recovers from LLVM IR in Part~V --- the pass operates on IR, never on source text or ASTs. Exercise~3 extends the parser to nested atomic blocks and unbalanced-brace detection.
-
-The important separation is that the parser recognizes \emph{where} the transaction is; it does not implement the transaction. In the repository, the concrete backends include SGL, TSX-SGL, SPHT, NOrec, NOrec-BF, TL2, TSC-TM, TinySTM modes, SwissTM, DUDETM, NV-HTM, XTM, Romulus, LeftRight, JVSTM, MVLog, PersistentSGL, DistributedSGL, TiKV-style distributed commit, and GPU designs. The front end should not contain special cases for any of them.
-
-\section{Worked Example: A Bank Transfer Front End}
-\index{bank transfer}\index{AST!bank transfer}
-
-The running example is a bank transaction with account floors and a conservation
-check. The concrete surface language below is deliberately small:
-
-\begin{lstlisting}[language={}, caption={The tiny source language parsed by Listing~\ref{lst:bank-parser}.}]
-atomic {
-  transfer checking savings 7;
-  assert_conservation;
-}
-\end{lstlisting}
-
-This source says three things. It opens an atomic region. It transfers seven units from \texttt{checking} to \texttt{savings}. It asks the implementation or verifier to check that the total amount of money is preserved. The parser records those facts without choosing a synchronization protocol.
-
-\begin{lstlisting}[language=C++, caption={A complete C++17 lexer and recursive-descent parser for a bank-transfer atomic block.}, label={lst:bank-parser}]
-#include <cctype>
+\begin{lstlisting}[language=C++, caption={A compilable SGL bank benchmark that reports attempts and checks conservation.}]
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
 #include <iostream>
-#include <stdexcept>
-#include <string>
-#include <string_view>
+#include <mutex>
+#include <random>
+#include <thread>
 #include <vector>
 
-enum class Tok {
-    Atomic, Transfer, AssertConservation, Id, Num,
-    LBrace, RBrace, Semi, End
+struct Account {
+    long long balance;
 };
 
-struct Token {
-    Tok kind;
-    std::string text;
-    int value = 0;
+struct Stats {
+    std::uint64_t attempts = 0;
+    std::uint64_t commits = 0;
+    std::uint64_t rejects = 0;
 };
 
-struct Lexer {
-    std::string_view s;
-    std::size_t i = 0;
+static bool transfer_sgl(std::vector<Account>& bank,
+                         std::mutex& global_lock,
+                         std::size_t from,
+                         std::size_t to,
+                         long long amount,
+                         long long floor,
+                         Stats& stats) {
+    ++stats.attempts;
 
-    explicit Lexer(std::string_view input) : s(input) {}
+    std::lock_guard<std::mutex> guard(global_lock);
 
-    void skip_ws() {
-        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) i++;
+    if (from == to) {
+        ++stats.commits;
+        return true;
     }
 
-    Token next() {
-        skip_ws();
-        if (i == s.size()) return {Tok::End, ""};
+    if (bank[from].balance - amount < floor) {
+        ++stats.rejects;          // semantic reject, not a TM conflict
+        return false;
+    }
 
-        char c = s[i];
-        if (c == '{') { i++; return {Tok::LBrace, "{"}; }
-        if (c == '}') { i++; return {Tok::RBrace, "}"}; }
-        if (c == ';') { i++; return {Tok::Semi, ";"}; }
+    bank[from].balance -= amount;
+    bank[to].balance += amount;
+    ++stats.commits;
+    return true;
+}
 
-        if (std::isdigit(static_cast<unsigned char>(c))) {
-            int v = 0;
-            while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) {
-                v = v * 10 + (s[i] - '0');
-                i++;
+int main(int argc, char** argv) {
+    const std::size_t threads =
+        argc > 1 ? static_cast<std::size_t>(std::strtoull(argv[1], nullptr, 10)) : 4;
+    const std::size_t accounts =
+        argc > 2 ? static_cast<std::size_t>(std::strtoull(argv[2], nullptr, 10)) : 64;
+    const int seconds =
+        argc > 3 ? std::atoi(argv[3]) : 2;
+
+    const long long initial_balance = 1000;
+    const long long floor = 0;
+    const long long amount = 1;
+
+    std::vector<Account> bank(accounts, Account{initial_balance});
+    const long long initial_total =
+        static_cast<long long>(accounts) * initial_balance;
+
+    std::mutex global_lock;
+    std::atomic<bool> stop{false};
+    std::vector<Stats> per_thread(threads);
+    std::vector<std::thread> workers;
+
+    auto start = std::chrono::steady_clock::now();
+
+    for (std::size_t tid = 0; tid < threads; ++tid) {
+        workers.emplace_back([&, tid] {
+            std::mt19937_64 rng(0xC0FFEEULL + tid);
+            std::uniform_int_distribution<std::size_t> pick(0, accounts - 1);
+
+            while (!stop.load(std::memory_order_relaxed)) {
+                std::size_t from = pick(rng);
+                std::size_t to = pick(rng);
+                transfer_sgl(bank, global_lock, from, to,
+                             amount, floor, per_thread[tid]);
             }
-            return {Tok::Num, "", v};
+        });
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    stop.store(true, std::memory_order_relaxed);
+
+    for (auto& t : workers) {
+        t.join();
+    }
+
+    auto end = std::chrono::steady_clock::now();
+    double elapsed =
+        std::chrono::duration<double>(end - start).count();
+
+    std::uint64_t attempts = 0;
+    std::uint64_t commits = 0;
+    std::uint64_t rejects = 0;
+    for (const Stats& s : per_thread) {
+        attempts += s.attempts;
+        commits += s.commits;
+        rejects += s.rejects;
+    }
+
+    long long final_total = 0;
+    for (const Account& a : bank) {
+        final_total += a.balance;
+        if (a.balance < floor) {
+            std::cerr << "floor violation\n";
+            return 2;
         }
-
-        if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
-            std::size_t start = i;
-            while (i < s.size() &&
-                   (std::isalnum(static_cast<unsigned char>(s[i])) || s[i] == '_')) {
-                i++;
-            }
-            std::string w(s.substr(start, i - start));
-            if (w == "atomic") return {Tok::Atomic, w};
-            if (w == "transfer") return {Tok::Transfer, w};
-            if (w == "assert_conservation") return {Tok::AssertConservation, w};
-            return {Tok::Id, w};
-        }
-
-        throw std::runtime_error("unexpected character");
-    }
-};
-
-struct Transfer {
-    std::string from;
-    std::string to;
-    int amount;
-};
-
-struct AtomicBlock {
-    std::vector<Transfer> transfers;
-    bool checks_conservation = false;
-};
-
-struct Parser {
-    Lexer lex;
-    Token cur;
-
-    explicit Parser(std::string_view input) : lex(input), cur(lex.next()) {}
-
-    void bump() { cur = lex.next(); }
-
-    void expect(Tok k, const char *what) {
-        if (cur.kind != k) throw std::runtime_error(std::string("expected ") + what);
-        bump();
     }
 
-    std::string expect_id() {
-        if (cur.kind != Tok::Id) throw std::runtime_error("expected identifier");
-        std::string out = cur.text;
-        bump();
-        return out;
+    if (final_total != initial_total) {
+        std::cerr << "money conservation violation\n";
+        return 3;
     }
 
-    int expect_num() {
-        if (cur.kind != Tok::Num) throw std::runtime_error("expected number");
-        int out = cur.value;
-        bump();
-        return out;
-    }
+    std::cout << "threads=" << threads
+              << " accounts=" << accounts
+              << " commits=" << commits
+              << " attempts=" << attempts
+              << " rejects=" << rejects
+              << " txns_per_sec=" << commits / elapsed
+              << " attempts_per_commit="
+              << (commits == 0 ? 0.0 : static_cast<double>(attempts) / commits)
+              << "\n";
 
-    Transfer parse_transfer() {
-        expect(Tok::Transfer, "transfer");
-        std::string from = expect_id();
-        std::string to = expect_id();
-        int amount = expect_num();
-        expect(Tok::Semi, ";");
-        if (amount <= 0) throw std::runtime_error("transfer amount must be positive");
-        return {from, to, amount};
-    }
-
-    AtomicBlock parse_atomic() {
-        AtomicBlock block;
-        expect(Tok::Atomic, "atomic");
-        expect(Tok::LBrace, "{");
-
-        while (cur.kind != Tok::RBrace) {
-            if (cur.kind == Tok::Transfer) {
-                block.transfers.push_back(parse_transfer());
-            } else if (cur.kind == Tok::AssertConservation) {
-                bump();
-                expect(Tok::Semi, ";");
-                block.checks_conservation = true;
-            } else {
-                throw std::runtime_error("expected statement");
-            }
-        }
-
-        expect(Tok::RBrace, "}");
-        expect(Tok::End, "end of input");
-        return block;
-    }
-};
-
-int main() {
-    const char *program =
-        "atomic { transfer checking savings 7; assert_conservation; }";
-
-    Parser p(program);
-    AtomicBlock ast = p.parse_atomic();
-
-    std::cout << "atomic block with " << ast.transfers.size() << " transfer(s)\n";
-    for (const auto &t : ast.transfers) {
-        std::cout << t.from << " -> " << t.to << " amount " << t.amount << "\n";
-    }
-    std::cout << "conservation check: "
-              << (ast.checks_conservation ? "yes" : "no") << "\n";
+    return 0;
 }
 \end{lstlisting}
 
-The lexer performs maximal munch and then classifies reserved words; therefore \texttt{atomicity} is an identifier, not \texttt{atomic} followed by \texttt{ity}. The parser rejects negative or zero transfer amounts before any runtime backend is involved. The AST records \emph{intent}: a transfer and a conservation check. Later chapters lower that intent to read/write instrumentation for concrete backends such as SGL, NOrec, TL2, or TSC-TM. Account floors are semantic checks. They do not belong in the lexer and only partly belong in the parser; the parser can reject syntactic nonsense, but balance-dependent checks require execution or verification.
+SGL has no speculative conflict aborts, so any reject in this program is caused by the account floor, not by validation failure. The invariant check is part of the benchmark, not a debugging afterthought: a fast run that loses money is not a performance result. The same driver shape can wrap a TM backend: keep the random stream, account count, transfer amount, and invariant checks fixed, then replace only the transaction boundary and memory-access API. Attempts per commit is still useful for SGL because it separates useful commits from semantic rejects; for optimistic TM, add a separate counter for validation aborts.
 
-A useful compiler discipline is to reject errors at the earliest responsible layer. Misspelled keywords and malformed numbers are lexical errors. Missing semicolons and unmatched braces are parse errors. Duplicate declarations can be handled during parsing or a following name-resolution pass. Insufficient balance requires either execution, static analysis, or model checking, because it depends on values.
+\section[Model Checking a Bounded Contention Counter]{Worked Example: Model Checking a Bounded Contention Counter}
+\index{TLA+}\index{model checking}\index{contention}
+\label{sec:perf-tla-bank}
 
-\section{Worked Example: Model Checking the Parsed Transaction}
-\index{TLA+}\index{model checking}\index{money conservation}
+The next TLA+ module is deliberately small. It models two workers, two
+accounts, a single owner slot, bounded attempts, account floors, and money
+conservation. It is not a full TM algorithm. It is a sanity model for the
+counters used in a performance report: each attempt is either in flight,
+committed, or aborted.
 
-Once a parser has produced an AST, the next question is whether the semantics
-attached to that AST preserve the intended invariant. The following TLA+
-module models the single parsed statement
-\texttt{transfer checking savings 7;} inside an atomic block. TLC can check
-\texttt{MoneyConserved}, \texttt{Floors}, and \texttt{TypeOK} as invariants.
+\begin{lstlisting}[caption={A bounded TLA+ model for bank attempts, commits, and aborts.}]
+---- MODULE BankFloorContention ----
+EXTENDS Naturals, TLC
 
-\begin{lstlisting}[language={}, caption={A TLA+ model of the parsed bank transfer.}, label={lst:tla-parsed-bank}]
----- MODULE ParsedBank ----
-EXTENDS Naturals
+A == {1, 2}
+Workers == {1, 2}
+InitBal == [i \in A |-> 5]
+Floor == 0
+Amount == 1
+MaxAttempts == 6
 
-VARIABLES acct0, acct1, pc
+VARIABLES bal, owner, attempts, commits, aborts
+
+vars == <<bal, owner, attempts, commits, aborts>>
+
+From(w) == IF w = 1 THEN 1 ELSE 2
+To(w) == IF w = 1 THEN 2 ELSE 1
+
+TotalAttempts == attempts[1] + attempts[2]
 
 Init ==
-    /\ acct0 = 100
-    /\ acct1 = 100
-    /\ pc = "before"
+  /\ bal = InitBal
+  /\ owner = 0
+  /\ attempts = [w \in Workers |-> 0]
+  /\ commits = 0
+  /\ aborts = 0
 
-BeginAtomic ==
-    /\ pc = "before"
-    /\ pc' = "inside"
-    /\ UNCHANGED <<acct0, acct1>>
+Acquire(w) ==
+  /\ owner = 0
+  /\ TotalAttempts < MaxAttempts
+  /\ owner' = w
+  /\ attempts' = [attempts EXCEPT ![w] = @ + 1]
+  /\ UNCHANGED <<bal, commits, aborts>>
 
-Transfer ==
-    /\ pc = "inside"
-    /\ acct0 >= 7
-    /\ acct0' = acct0 - 7
-    /\ acct1' = acct1 + 7
-    /\ pc' = "after"
+BusyAbort(w) ==
+  /\ owner # 0
+  /\ owner # w
+  /\ TotalAttempts < MaxAttempts
+  /\ owner' = owner
+  /\ attempts' = [attempts EXCEPT ![w] = @ + 1]
+  /\ aborts' = aborts + 1
+  /\ UNCHANGED <<bal, commits>>
 
-EndAtomic ==
-    /\ pc = "after"
-    /\ pc' = "after"
-    /\ UNCHANGED <<acct0, acct1>>
+Finish(w) ==
+  LET f == From(w)
+      t == To(w)
+  IN
+    /\ owner = w
+    /\ owner' = 0
+    /\ IF bal[f] >= Floor + Amount
+          THEN /\ bal' = [bal EXCEPT ![f] = @ - Amount,
+                                     ![t] = @ + Amount]
+               /\ commits' = commits + 1
+               /\ aborts' = aborts
+          ELSE /\ bal' = bal
+               /\ commits' = commits
+               /\ aborts' = aborts + 1
+    /\ attempts' = attempts
 
 Next ==
-    \/ BeginAtomic
-    \/ Transfer
-    \/ EndAtomic
+  \E w \in Workers:
+      Acquire(w) \/ BusyAbort(w) \/ Finish(w)
 
-Spec ==
-    Init /\ [][Next]_<<acct0, acct1, pc>>
-
-MoneyConserved ==
-    acct0 + acct1 = 200
-
-Floors ==
-    /\ acct0 >= 0
-    /\ acct1 >= 0
+Spec == Init /\ [][Next]_vars
 
 TypeOK ==
-    /\ acct0 \in Nat
-    /\ acct1 \in Nat
-    /\ pc \in {"before", "inside", "after", "done"}
+  /\ bal \in [A -> Nat]
+  /\ owner \in Workers \cup {0}
+  /\ attempts \in [Workers -> Nat]
+  /\ commits \in Nat
+  /\ aborts \in Nat
+
+MoneyConserved ==
+  bal[1] + bal[2] = InitBal[1] + InitBal[2]
+
+Floors ==
+  /\ bal[1] >= Floor
+  /\ bal[2] >= Floor
+
+AttemptsAccounted ==
+  attempts[1] + attempts[2] =
+    commits + aborts + (IF owner = 0 THEN 0 ELSE 1)
+
+\* TLC: check SPECIFICATION Spec
+\* TLC: check INVARIANTS TypeOK MoneyConserved Floors AttemptsAccounted
 ====
 \end{lstlisting}
 
-The model is small enough to inspect directly. The parsed transfer is represented by one action. That is intentional: this model checks the sequential meaning of the AST, not the opacity or commit protocol of a particular TM implementation. A lower-level model of TL2, NOrec, or a GPU commit-log protocol would introduce read sets, write sets, versions, validation, and interleavings.
+The invariant \texttt{AttemptsAccounted} is the accounting identity behind the benchmark columns: an attempt is committed, aborted, or still owned. The owner slot makes contention explicit: a worker that arrives while another worker owns the slot increments both attempts and aborts. The money invariant is independent of the performance counters, so do not infer correctness from high throughput. Bounding attempts makes the state space finite; the same idea is used in larger model-checked specifications for the companion backends.
 
-The model is intentionally closer to the AST than to machine code: it has a \texttt{Transfer} action, not individual loads and stores. The floor guard appears in \texttt{Transfer}. Removing \texttt{acct0 >= 7} gives TLC a direct counterexample to \texttt{Floors} if the initial balance is smaller than the transfer amount. Money conservation is independent of the backend choice. SGL, TL2, NOrec, TinySTM, SwissTM, and the other tested backends differ in synchronization protocol, not in the sequential meaning of this AST. The repository's test suites check concrete implementations; the TLA+ model checks the small transition system that the implementation is meant to refine.
+\section{Worked Example: Reading a Benchmark Report}
+\index{benchmark}\index{throughput}\index{abort rate}
+\label{sec:perf-example}
 
-One subtlety is worth noticing: \texttt{TypeOK} allows \texttt{"done"}, but the listed \texttt{EndAtomic} action leaves \texttt{pc} at \texttt{"after"}. A stricter final-state model would set \texttt{pc'} to \texttt{"done"}. That correction does not affect money conservation, but it does affect progress-style properties that distinguish a completed transaction from one still at the end of the block.
+What Part~III's models and this chapter's methodology look like when filled in
+with a real sweep across backends:
 
-\begin{figure}[htbp]
-\centering
-\begin{tikzpicture}[font=\small, node distance=2.2cm]
-  \tikzstyle{state}=[draw,rounded corners,align=center,minimum width=2.5cm,minimum height=0.9cm]
-  \node[state] (src) {Source\\atomic block};
-  \node[state] (tok) [right=of src] {Tokens\\keyword, ids, num};
-  \node[state] (ast) [right=of tok] {AST\\Transfer node};
-  \node[state] (sem) [below=of ast] {Semantic action\\debit and credit};
-  \node[state] (inv) [left=of sem] {Invariant check\\floor, conservation};
-  \node[state] (rt) [left=of inv] {Runtime lowering\\TM backend calls};
-  \draw[-{Stealth}] (src) -- node[above] {lex} (tok);
-  \draw[-{Stealth}] (tok) -- node[above] {parse} (ast);
-  \draw[-{Stealth}] (ast) -- node[right] {eval} (sem);
-  \draw[-{Stealth}] (sem) -- node[above] {check} (inv);
-  \draw[-{Stealth}] (inv) -- node[above] {lower} (rt);
-\end{tikzpicture}
-\caption{The path from transactional source through tokens and an abstract syntax
-tree to the semantic actions, invariant checks, and TM runtime lowering that a
-front end drives.}
-\label{fig:tm-front-end-lowering}
-\end{figure}
+\begin{lstlisting}[caption={A protocol for separating instrumentation cost from contention.}]
+backend   threads   tx/s       aborts   attempt/tx
+--------- -------   --------   -------  ----------
+uninstr.  1         8.2M       --       --
+NOrec     1         450K       0        1.00
+NOrec     4         402K       1.2M     1.08
+NOrec     8         313K       3.1M     1.17
+TL2       8         298K       3.3M     1.19
+SGL       8         210K       0        1.00
+\end{lstlisting}
+
+The \texttt{uninstr.} row is the baseline this chapter insists on: instrumentation cost is
+$$
+\frac{8.2\ \mathrm{M}}{450\ \mathrm{K}} \approx 18.2,
+$$
+measured against the uninstrumented backend, not against another TM. The \texttt{attempt/tx} column is the geometric retry model of \S\ref{sec:perf-analytical} read backwards: at 8 threads, NOrec averages 1.17 attempts per committed transaction, so
+$$
+p_{\mathrm{abort}} \approx 1 - \frac{1}{1.17} \approx 0.15.
+$$
+SGL shows the serialisation bottleneck of Part~IV: zero aborts, but throughput below every speculative backend at 8 threads. Exercise~3 asks for the experiment design; the machine-profile record is what the companion simulator's cost calibration consumes.
+
+\section{Worked Example: Estimating a Retry Cost}
+
+The retry model becomes actionable when it is tied to a measurement record. The following C++17 fragment reads committed transactions, attempts, and elapsed seconds from standard input, then reports an implied abort probability and an average time per attempt. It is intentionally backend-neutral: the same calculation can be applied to TL2, NOrec, TSC-TM, or a TinySTM configuration if the counters have the same meaning.
+
+\begin{lstlisting}[language=C++, caption={A small C++17 calculator for retry-model calibration.}]
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <stdexcept>
+
+struct Run {
+    double commits;
+    double attempts;
+    double seconds;
+};
+
+static Run parse(int argc, char** argv) {
+    if (argc != 4) {
+        throw std::runtime_error("usage: retry_cost COMMITS ATTEMPTS SECONDS");
+    }
+    Run r{std::atof(argv[1]), std::atof(argv[2]), std::atof(argv[3])};
+    if (r.commits <= 0.0 || r.attempts < r.commits || r.seconds <= 0.0) {
+        throw std::runtime_error("invalid counters");
+    }
+    return r;
+}
+
+int main(int argc, char** argv) {
+    try {
+        const Run r = parse(argc, argv);
+        const double attempts_per_commit = r.attempts / r.commits;
+        const double p_abort = 1.0 - (1.0 / attempts_per_commit);
+        const double committed_throughput = r.commits / r.seconds;
+        const double attempt_rate = r.attempts / r.seconds;
+        const double seconds_per_attempt = r.seconds / r.attempts;
+
+        std::cout << std::fixed << std::setprecision(6)
+                  << "attempts_per_commit=" << attempts_per_commit << "\n"
+                  << "implied_p_abort=" << p_abort << "\n"
+                  << "committed_txns_per_sec=" << committed_throughput << "\n"
+                  << "attempts_per_sec=" << attempt_rate << "\n"
+                  << "seconds_per_attempt=" << seconds_per_attempt << "\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << "\n";
+        return 2;
+    }
+}
+\end{lstlisting}
+
+For example, if a run reports
+
+$$
+\mathrm{commits}=1{,}000{,}000
+$$
+
+and
+
+$$
+\mathrm{attempts}=1{,}250{,}000,
+$$
+
+then attempts per commit is
+
+$$
+1.25
+$$
+
+and the implied abort probability is
+
+$$
+1 - \frac{1}{1.25} = 0.20.
+$$
+
+The number is not a proof that aborts are independent. It is a compact way to compare runs that use the same workload and counter definitions.
+
+Attempts and commits must be counted at the same semantic boundary; counting inner validation retries in one backend and whole transaction retries in another makes the ratio meaningless. The implied abort probability is a model parameter, not a directly observed fact. Time per attempt is often more revealing than abort rate when comparing read-set validation schemes.
+
+\section{Worked Example: Calibrating a Cost Model from a Machine Profile}
+\index{calibration}\index{machine profile}\index{cost model}\index{Broadwell-EP}
+\label{sec:perf-calibration}
+
+A cost model is only as honest as its constants. The companion keeps those
+constants in \emph{machine profile} files --- JSON records of measured cycle
+costs --- so that the same profile feeds the simulator's cost mode, the DES
+engine, and back-of-envelope arithmetic like this one. Here is the TSX block
+of \texttt{simulator/machine\_profiles/broadwell\_ep\_v4.json}, collected on
+an Xeon E5-2648L v4 (1.8~GHz, RTM available, microcode \texttt{0xb000040})
+with the RDTSC profiling patch of \texttt{patches/profile/tsx}:
+
+\begin{lstlisting}[caption={The measured TSX block of the Broadwell-EP machine profile.}]
+"tsx": {
+    "xbegin_cycles": 60.0,
+    "xend_cycles": 178.0,
+    "xabort_cycles": 1500.0,
+    "read_l1_cycles": 5.0,
+    "write_l1_cycles": 6.0,
+    "mutex_lock_cycles": 75.0,
+    "conflict_abort_penalty": 2500.0,
+    "max_read_lines": 512,
+    "max_write_lines": 128
+}
+\end{lstlisting}
+
+The numbers repay attention. Entering a hardware transaction costs
+$60$ cycles --- thirty L1 reads. Committing costs $178$: the write-back and
+publication protocol is three times the entry cost. A conflict abort costs
+$2500$, fourteen times a commit, because the pipeline flush and retry machinery
+dominate everything else. Now predict the single-thread cost of the two-account
+bank transfer under the TSX fast path: begin ($60$), two L1 reads ($2\times5$),
+two L1 writes ($2\times6$), commit ($178$):
+
+$$
+C_{\mathrm{tx}} = 60 + 2{\cdot}5 + 2{\cdot}6 + 178 = 260\ \mathrm{cycles}
+\;\approx\; 144\ \mathrm{ns} @ 1.8\ \mathrm{GHz},
+$$
+
+a ceiling of roughly $6.9$M committed transfers per second per core --- before
+memory misses, retries, or fallback. Contention enters through the renewal
+argument of \S\ref{sec:math-example}: every attempt pays begin plus body
+($82$ cycles), a success adds $178$, an abort adds $2500$ and forces a full
+retry, so with abort probability $p$ per attempt,
+
+$$
+E[C] \;=\; 260 \;+\; \frac{p}{1-p}\,(82 + 2500).
+$$
+
+At $p=0.05$ the expected cost is ${\approx}396$ cycles ($1.53\times$ the
+contention-free figure); at $p=0.20$ it is ${\approx}906$ cycles
+($3.5\times$). The nonlinearity is the point: each abort does not merely waste
+one attempt's work, it replaces a $178$-cycle commit with a $2500$-cycle
+penalty, which is why abort-rate reductions dominate instruction-count
+optimizations in HTM tuning --- and why the capacity probe of
+\S\ref{sec:htm-capacity-probe} exists.
+
+Two methodological cautions, both learned the hard way in the companion's own
+calibration sessions. First, calibrate against \emph{uninstrumented} runs:
+the event-logging build used to produce traces can be over $100\times$ slower
+than the plain binary, and a cost model fitted to it models the logger, not
+the machine. Second, distinguish measured from estimated constants: in this
+profile the TSX numbers are RDTSC measurements, while the software-backend
+overheads (NOrec begin $25$/commit $60$, TL2 begin $35$/commit $90$) are
+structured estimates --- the JSON's \texttt{description} field says so
+explicitly, and any consumer of the profile should carry the same caveat
+forward. The simulator's \texttt{--machine-profile} and
+\texttt{--clock-mode cost} flags make the contract executable: given a trace
+and this file, it reports estimated wall time, and the gap between that
+estimate and the real run is the residual error of the model, to be attacked
+with the next measurement.
+
 
 \section{Summary}
 
-The front end is where a transaction is \emph{identified}, not where it is
-\emph{implemented}.  Characters become tokens by maximal munch (a finite
-automaton); tokens become an AST by recursive descent or a generated LR
-parser; the AST exposes the atomic region to later passes.  The companion
-repository instruments at LLVM IR rather than shipping a source language,
-but the logical artifacts are identical, and the same boundary holds:
-syntax stays stable while the backend protocol (SGL, NOrec, TL2, a GPU
-commit log, or a distributed store) evolves underneath it.
+Performance evaluation of transactional memory requires both analytical models and careful empirical measurement. Throughput is the headline number, but it must be interpreted with aborts, attempts per commit, latency, wasted work, and validation cost.
+
+A useful report records the uninstrumented baseline, the SGL baseline, backend configuration, machine profile, toolchain, workload parameters, repetitions, variance, and correctness checks. The bank invariant is part of performance methodology: a fast backend that violates the account floor or money conservation is not a faster implementation of the same program.
+
+The best models are deliberately modest. Little's Law explains concurrency and latency. The retry model explains attempts per commit at low contention. Cost-per-operation models explain where cycles go. When measurements disagree with the model, the next experiment should identify the missing cost.
 
 \section{Exercises}
-\label{sec:ch15-exercises}
 \begin{enumerate}
-    \item \emph{[theory]} Figure~\ref{fig:lexer-dfa} shows the DFA for the
-          six token kinds of the toy lexer (keyword \texttt{atomic},
-          identifier, number, \texttt{\char`\{}, \texttt{\char`\}},
-          \texttt{;}).  Extend it: add an \texttt{assert\_conservation}
-          keyword token, and say what happens --- and which state is
-          reached --- when the input ends mid-keyword (``\texttt{atom}'').
-          Then minimize the DFA and state which states merge.
-    \item \emph{[theory]} Explain why maximal munch makes
-          \texttt{atomically} a single identifier, and give the
-          two-token parse that a lexer stopping at the \texttt{atomic}
-          prefix would produce.  Which part of the parser would the mistake
-          corrupt?
-    \item \emph{[implementation]} Extend the parser in
-          Listing~\ref{lst:bank-parser} to accept \emph{nested} atomic
-          blocks and to report the source position of an unbalanced brace.
-          Test with both \texttt{atomic \char`\{ atomic \char`\}
-          \char`\}} and a missing closing brace.
-    \item \emph{[implementation]} Add a second statement kind to
-          Listing~\ref{lst:bank-parser} --- for example a
-          \texttt{deposit account amount;} --- extend the AST accordingly,
-          and verify that the parser rejects a transfer with a negative
-          amount before any backend runs.
-    \item \emph{[verification]} Modify \texttt{EndAtomic} in
-          Listing~\ref{lst:tla-parsed-bank} so that \texttt{pc} reaches
-          \texttt{"done"}.  Check that \texttt{TypeOK},
-          \texttt{MoneyConserved}, and \texttt{Floors} still hold, and
-          state what progress-style property the original model cannot
-          express.
-    \item \emph{[theory]} Using Table~\ref{tab:front-end-choices}, justify
-          which row best hosts an \texttt{atomic} construct for a research
-          TM, and explain why the companion instead instruments at LLVM IR
-          (Chapter~10) rather than shipping a source-level language
-          (Figure~\ref{fig:front-end-pipeline}).
+    \item Fit a simple Markov model to STAMP’s \texttt{intruder} benchmark and estimate the abort probability that maximizes throughput.
+    \item Use Little’s Law to explain why a high abort rate causes a sharp drop in throughput even when the system is not CPU-saturated.
+    \item Design an experiment to measure the overhead of TM instrumentation vs. fine-grained locking for a linked list.
+    \item \emph{[implementation]} Modify Listing~\ref{sec:perf-bank-attempts}'s benchmark so that it records per-thread latency samples for committed transfers. Report median, 95th percentile, and maximum latency, and explain why the maximum is unstable under contention.
+    \item \emph{[verification]} Extend the TLA+ model in \S\ref{sec:perf-tla-bank} with a third worker. Add an invariant stating that the number of in-flight attempts is at most one, and check that money conservation still holds.
+    \item \emph{[theory]} Starting from the retry model
+    $$
+    E[\mathrm{attempts\ per\ commit}] =
+    \frac{1}{1-p_{\mathrm{abort}}},
+    $$
+    derive the predicted committed throughput when each attempt costs a fixed time
+    $$
+    C_{\mathrm{attempt}}.
+    $$
+    State two concrete reasons why this prediction fails for TL2 or NOrec under high write contention.
+    \item \emph{[implementation]} Add a conflict-address histogram to the bank benchmark. Report the ten hottest accounts and explain whether the observed aborts are caused by data skew or by metadata layout.
+    \item \emph{[verification]} Add a bounded latency counter to the TLA+ model and state an invariant that every completed attempt is counted exactly once as either a commit or an abort.
+    \item \emph{[theory]} Suppose two backends have the same committed throughput but one has twice the attempts per commit. Give two workload changes under which the higher-attempt backend is likely to become worse.
+    \item \emph{[open]} This chapter insists on the uninstrumented baseline,
+          machine profiles, and invariant checks before a number is called a
+          result.  Argue a position: should artifact submission and
+          machine-profile disclosure be a \emph{condition of publication}
+          for TM systems research, or would that raise the bar so high that
+          exploratory and negative results stop being published at all?
+          State what you think a ``reproducible result'' minimally requires.
+    \item \emph{[implementation]} Using the Broadwell-EP profile of
+          \S\ref{sec:perf-calibration}, extend the retry-cost calculator of
+          \S\ref{sec:perf-example} to read the JSON profile and report the
+          predicted cost per committed transfer at abort probabilities
+          $0.01$, $0.05$, and $0.20$. Then run the companion's bank benchmark
+          on any available backend, compute its measured attempts per commit,
+          and report predicted-versus-measured throughput with the residual
+          attributed (one paragraph) to the costs the TSX block omits.
 \end{enumerate}
 
 \textbf{How to check your work.} The \emph{[implementation]} exercises are
-verified by compiling and running the parser against the test inputs listed
-above; the companion's front end is conceptual, so the repository does not
-ship this lexer --- the ``source of truth'' is the instrumented LLVM IR of
-Part~V.  The \emph{[verification]} exercise is checked with TLC against
-Listing~\ref{lst:tla-parsed-bank} (see
-Appendix~\ref{chap:pluscal-quick-ref});
-start with \texttt{TypeOK}, then confirm the corrected model still passes
-\texttt{MoneyConserved} and \texttt{Floors}.  The \emph{[theory]}
-exercises are graded against the definitions of
-\S\ref{sec:parser-example} and Table~\ref{tab:front-end-choices}.
+verified with the companion: extend \S\ref{sec:perf-bank-attempts} for
+per-thread latency samples and a conflict-address histogram; Exercise~11 is
+graded on the prediction arithmetic
+($E[C] = 260 + \frac{p}{1-p}\cdot 2582$ cycles from the profile's constants)
+and on an honest residual analysis rather than on matching the measurement.
+The
+\emph{[verification]} exercises are checked with TLC against
+\S\ref{sec:perf-tla-bank} (in-flight bound and one-to-one commit/abort
+accounting; see Appendix~\ref{chap:pluscal-quick-ref}).  The
+\emph{[theory]} exercises are graded against \S\ref{sec:perf-analytical}.
+The \emph{[open]} exercise has no single right answer; it is graded on
+whether you state a minimal definition of ``reproducible result'' and
+defend it against the cost objection you raise.
+
+\index{attempts per commit}
+\index{semantic reject}
+\index{commit latency}
+\index{latency distribution}
+\index{machine profile}
+\index{cost-per-operation model}
+\index{Bloom-filtered read set}
+\index{global-clock validation}
+\index{ownership record}
+\index{timestamp fast path}
+\index{multi-version log pressure}
+\index{warm-up interval}
+\index{outlier rejection}
+\index{frequency scaling}
+\index{thread pinning}
+\index{uninstrumented baseline}
+\index{conflict-address histogram}
+\index{false sharing}
+\index{coherence storm}
+\index{retry model}
+\index{queueing delay}

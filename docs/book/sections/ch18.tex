@@ -1,849 +1,835 @@
-\chapter{Persistent and Distributed Transactional Memory}
-\index{persistent TM}\index{distributed TM}\index{durability}\index{crash recovery}\index{two-phase commit}\index{redo log}\index{Percolator}\index{TiKV}\index{PersistentSGL}\index{DistributedSGL}
+\chapter{Transactional Memory for GPUs}
+\label{chap:gpu-tm}
 
-Two extensions of the TM contract change the runtime far more than the
-language: making commits survive crashes (persistent TM) and making the
-same API span multiple machines (distributed TM). Both keep the ordinary
-bank invariant, then add a stronger one --- durability, or agreement across
-nodes --- and both force the commit path to become explicit about ordering.
-The two worked examples below implement and verify each extension.
+Every chapter so far has leaned on two structural facts about commodity
+processors: a cache-coherence protocol that can be exploited for conflict
+detection, and speculative hardware that can roll a thread back on an abort.
+GPUs provide neither. This chapter explains why the whole CPU-centred design
+space of Parts~II, IV, and VII must be rebuilt, and how a distinct GPU TM
+design space has emerged in its place: lock-step warp execution, software
+conflict detection, multi-versioned commit logs, and batch commit.
 
-The running example remains the two-account bank transfer. In volatile TM,
-the transfer is correct when it preserves the account floor and conserves the
-sum of all balances. In persistent TM, a committed transfer must also survive
-a crash. In distributed TM, all replicas or participants must agree on the same
-commit decision. These are not cosmetic changes. They move the design pressure
-from fast conflict detection to commit ordering, recovery records, stable
-metadata, and replay rules.
+\section{The GPU Execution Model}
 
-The companion implementation includes both minimal and production-shaped
-instances of these ideas: for persistence, DUDETM~\cite{liu17dudetm}
-(decoupled durable transactions: persistence as a background concern),
-SPHT~\cite{castro21spht} (group-commit persistent HTM, measured on real
-Optane hardware), NV-HTM~\cite{castro18nvhtm}, and a minimal PersistentSGL;
-for distribution, DistributedSGL and a TiKV-backed~\cite{peng10percolator}
-Percolator two-phase-commit backend, plus the volatile baselines used earlier
-in the book. Two naming cautions. First, the repository's \texttt{nvhtm}
-backend is a \emph{scaffold}: its TM region is DRAM-backed \texttt{mmap}, so
-it provides HTM atomicity plus redo-log instrumentation but \emph{no} crash
-recovery (its own notes state this plainly). Second, the repository's
-\texttt{romulus} backend is \emph{not} the persistent Romulus of Correia et
-al.~\cite{correia18romulus} discussed below --- it is a volatile
-version-table OCC that merely borrows the name. The volatile CPU backends are
-exercised by the shared test suites (\texttt{test\_tx}: 114 cases,
-\texttt{test\_ds}: 207 cases); the persistent and distributed backends carry
-partial coverage only (plugin-pipeline builds and manual verification), and
-each such limit is flagged where the design is presented. Model checking is
-used to pin down the small-state corner cases that ordinary tests rarely hit:
-\texttt{PersistentSGL.tla}, \texttt{DUDETM.tla}, \texttt{NVHTM.tla},
-\texttt{SPHT.tla}, \texttt{DistributedSGL.tla}, and \texttt{TiKV.tla} all
-live in \texttt{docs/proofs} and pass TLC's safety checks.
+A modern GPU is a throughput-oriented device. It does not try to make one
+thread fast; it runs tens of thousands of threads and hides memory latency
+by switching between them. The execution model that results is SIMT
+(single instruction, multiple threads):
 
-\section{Worked Example: Durable Bank Commit}
-\index{persistent TM}\index{durability}\index{redo log}\index{crash recovery}
-\label{sec:durable-bank-example}
+\begin{itemize}
+    \item \textbf{Warps and lock step.} 32 threads (a warp; AMD calls it a
+          wavefront of 64) share a single program counter. One instruction is
+          broadcast to all lanes of a warp each cycle. Lanes that should not
+          take a path are masked off rather than branched around
+          (divergence, Section~\ref{sec:ballot}).
+    \item \textbf{Free-for-all scheduling.} The hardware interleaves warps on
+          a streaming multiprocessor (SM) to hide latency. There is no
+          fairness contract and no guarantee that a warped-out thread makes
+          progress.
+    \item \textbf{Threads are pinned.} A thread occupies its lane for the
+          lifetime of the kernel. There is no thread migration and, crucially,
+          no analogue of the CPU \texttt{sigsetjmp}/\texttt{siglongjmp}
+          rollback that CPU STMs use to restart aborted transactions.
+    \item \textbf{A weak memory model.} Global memory is relaxed. Ordering is
+          restored only by explicit device-scope fences
+          (\texttt{\_\_threadfence()}) or block/system-scope variants.
+\end{itemize}
 
-Persistent TM asks for the ordinary TM invariant plus a crash invariant. A
-committed transfer must not disappear after power loss, and recovery must not
-apply it twice. The small example below uses one durable intent record. The
-record stores the post-state, so redo is idempotent.
+\textbf{The decisive absence is cache coherence.} GPU L1 caches are private
+to an SM and are not kept coherent. Threads in different SMs synchronise only
+through the L2 cache and global memory, by explicit atomic operations
+(\texttt{atomicAdd}, \texttt{atomicCAS}, \texttt{atomicInc},
+\texttt{atomicExch}). Hardware transactional memory in the sense of Herlihy
+and Moss --- transactional states layered onto a snooping coherence protocol
+\cite{herlihy93} --- has no substrate on which to be built. Everything that
+Parts~II and VII established about coherence-based conflict detection and
+speculative stores simply does not apply.
 
-The commit protocol has three externally visible phases. First, the runtime
-chooses an outcome while all ordinary TM checks still hold. Second, it forces a
-commit intent to durable storage. Third, it installs the data and clears the
-intent. A crash before the intent is forced is an abort. A crash after the
-intent is forced is a commit that recovery must finish.
+\section{Three Foundational Absences}
 
-\begin{lstlisting}[language=C, caption={A minimal durable two-account transfer with idempotent redo.}]
-#include <array>
-#include <cstdint>
-#include <cstddef>
-#include <stdexcept>
-#include <fcntl.h>
-#include <unistd.h>
+\begin{itemize}
+    \item \textbf{No hardware TM on the market.} Neither NVIDIA nor AMD
+          exposes transactional instructions to programmers. Every published
+          GPU HTM design --- KILO~TM, WarpTM, the snapshot-isolation HTM ---
+          exists only in simulation
+          \cite{fung11kilotm,fung13warptm,chen17snapshot}. GPU TM on real
+          silicon is software TM.
+    \item \textbf{No speculative state.} There is no reorder buffer, store
+          buffer, or speculation queue whose flush undoes a transaction. An
+          abort is a software action: discard the write-set, reset
+          transaction-local state, and re-execute the body.
+    \item \textbf{One coherent point, shared.} The only memory level at which
+          threads can observe each other is L2. Metadata such as lock tables,
+          versioned boxes, and commit logs must live there --- and every probe
+          of that metadata competes for the same atomics bandwidth as the
+          program's data. Eager (visible) reads, which a CPU STM hides behind
+          its L1, are prohibitively expensive at GPU scale.
+\end{itemize}
 
-static const uint64_t MAGIC = 0x544d5f42414e4b31ULL; /* "TM_BANK1" */
+The consequence: the GPU TM design space is \emph{exactly} the software-TM
+space of Part~IV, but solved under constraints the CPU never imposes. The
+rest of this chapter is about those constraints.
 
-struct Journal {
-    uint64_t magic;
-    uint32_t from, to;
-    int64_t old_from, old_to;
-    int64_t new_from, new_to;
-    uint64_t sum;
-};
+\section{Lock-Step Execution, Divergence, and the Ballot Contract}
+\label{sec:ballot}
 
-struct Image {
-    Journal journal;
-    std::array<int64_t, 2> balance;
-    int64_t floor;
-};
+A warp executes one instruction for all its lanes at once. Computation on
+lane-local values is SIMD-cheap; computation that depends on \emph{which}
+lanes are active --- voting, reduction, convergence --- is different: it must
+be performed collectively by every active lane at the same instruction.
 
-static uint64_t checksum(const Journal& j) {
-    return j.magic ^ j.from ^ (uint64_t(j.to) << 7) ^
-           uint64_t(j.old_from) ^ (uint64_t(j.old_to) << 11) ^
-           uint64_t(j.new_from) ^ (uint64_t(j.new_to) << 17);
+\textbf{You cannot spin.} If a lane spins on a lock held by another lane of
+the same warp, the whole warp stalls --- owner included --- and deadlocks.
+CPU-style spin-based contention management (TL2's commit lock, TinySTM's
+spin) \cite{dice06tl2,riegel06disc} is therefore unusable. GPU STMs replace
+waiting with \emph{self-abort}: lock sorting (GPU-STM
+\cite{xu14gpustm}), priority-based lock stealing (PR-STM
+\cite{shen15prstm}), or warp-mask retry (the lightweight STMs of Holey and
+Zhai \cite{holey14}).
+
+\textbf{Conflict detection becomes a warp vote.} Because lock step is cheap,
+the whole warp can resolve its intra-warp conflicts in one transaction using
+\texttt{\_\_ballot\_sync}, the primitive that collects one predicate bit from
+each lane into a 32-bit mask. Predicate voting replaces the point-to-point
+messages of a CPU coherence protocol.
+
+But the ballot carries a contract that is easy to violate:
+\textbf{every active lane must reach the call}. Guarding a ballot behind a
+per-lane condition is undefined behaviour that silently misbehaves on some
+NVIDIA silicon and raises a fatal HSA exception on AMD ROCm. The portable
+pattern hoists the ballot out of the lane-guarded block and lets lane~0 act
+on the result:
+
+\medskip
+\noindent\textbf{Scope of ``lock step.''} ``Lock-step'' here means the
+\textit{architectural} contract of a warp in the SM's current scheduling
+model, not a hardware guarantee of perfect temporal lock-step. On NVIDIA,
+the independent thread scheduler (Volta and later) permits lanes of one
+warp to diverge in \emph{execution} while preserving converged semantics
+only at explicit reconvergence points (\texttt{\_\_syncwarp}, ballots).
+AMD's wavefront semantics differ again (two quads, predication-based
+execution). Every assumption this chapter makes about ballot-based
+coordination --- all active lanes at the call, uniform trip counts in
+loops feeding a ballot --- therefore holds \emph{as a programming
+contract we adopt}, verified on the backends by on-target tests and the
+formal models of Section~\ref{sec:tla}, rather than as a fact of the
+hardware.
+
+\begin{verbatim}
+/* BROKEN: the ballot executes only when lane == 0 (undefined). */
+if (lane == 0) {
+    uint64_t m = __ballot_sync(~0ULL, conflict);
+    if (m) flag = 1;
 }
 
-static bool valid(const Journal& j) {
-    return j.magic == MAGIC && j.sum == checksum(j);
+/* CORRECT: every lane executes the ballot; lane 0 acts on it. */
+{
+    uint64_t m = __ballot_sync(~0ULL, conflict);
+    if (lane == 0 && m) flag = 1;
+}
+\end{verbatim}
+
+The same contract applies to \texttt{\_\_syncwarp()} and to any loop that
+feeds a ballot: a short-circuited loop such as
+\texttt{for (w = 0; w < n \&\& !conflict; ++w)} lets some lanes exit early
+and desynchronises the barrier inside the loop body. These are not exotic
+theoretical failures; both were real bugs found while porting the GPU
+backends of this book to AMD hardware, and both were caught only by
+on-target testing and by the formal models of Section~\ref{sec:tla}. The
+lesson is uniform: \textbf{every lane must enter every synchronous
+primitive}.
+
+\section{Worked Example: Counting Aborts With a Ballot}
+\index{warp}\index{\_\_ballot\_sync}\index{GPU TM}\index{SIMT}\index{wavefront}\index{divergence}\index{private memory}\index{versioned box}\index{multi-version TM}
+\label{sec:ballot-example}
+
+Predicate voting turns an abort decision into a warp-wide count. PR-STM and
+the GUST-style backends use this exact pattern to let a warp resolve
+intra-warp conflicts in one instruction:
+
+\begin{lstlisting}[language=C++, caption={Counting aborted lanes with \_\_ballot\_sync.}]
+bool conflict = (read_set_overlap(&mine, &yours, lane));
+/* every lane executes the ballot -- never inside `if (lane == k)` */
+uint32_t mask = __ballot_sync(0xffffffffu, conflict);
+if (lane == 0) {
+    int aborted = __popc(mask);      /* lanes that lost the vote */
+    if (aborted == WARP_SIZE)
+        *retry_budget -= 1;          /* all lost: fall back or back off */
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item The 32-bit \texttt{mask} is one bit per lane; \texttt{\_\_popc}
+          counts the losers in a single instruction.
+    \item This is the software replacement for the coherence messages a CPU
+          protocol would send: one vote replaces 32 point-to-point
+          invalidation checks.
+    \item Exercise~4 of this chapter asks exactly for this pattern; the
+          TLA+ models of Section~\ref{sec:tla} represent the same count as an
+          \texttt{activeMask} update.
+\end{itemize}
+
+\section{Capacity: Large Read/Write Sets in a Shallow Memory Hierarchy}
+\label{sec:capacity}
+
+A CPU transaction's read-set and write-set grow in registers and L1,
+decoupled from the machine's storage capacity by fast private caches. A GPU
+thread has almost nothing:
+
+\begin{itemize}
+    \item The \textbf{register file} is the only per-thread storage, a few
+          words per lane. A read-set of even a few hundred entries cannot
+          live there.
+    \item Per-thread \emph{local memory} is really a private slice of global
+          memory: cached in L1 when it fits, spilled to L2 when it does not.
+          Every spill costs bandwidth and latency.
+    \item \emph{Shared memory} (tens of KB per block) is the natural home of
+          a warp's transaction descriptor and read/write set, but its size
+          --- and the fact that it is shared among a block's threads --- makes
+          it a scarce, contended resource. Large transactions spill their sets
+          to global memory.
+    \item The natural conflict-detection granularity is the 32-bit word or
+          the 128-byte cache line, not the object. Irregular workloads such as
+          the STAMP kernels (\texttt{bayes}, \texttt{intruder},
+          \texttt{labyrinth}) \cite{minh08stamp} routinely touch hundreds of
+          distinct lines per transaction.
+\end{itemize}
+
+\textbf{Compaction is mandatory.} Hardware designs use Bloom-filter read-set
+signatures (KILO TM \cite{fung11kilotm}); software designs compact the
+read-set to version metadata or use per-address lock tables
+\cite{shen15prstm,nunes22csmv}. The engineering rule of thumb is simple: a
+transaction whose tracked footprint does not fit on chip is a capacity abort
+waiting to happen --- and on a GPU, \emph{every} transaction competes with
+every other transaction in the same block for the same on-chip space.
+
+\textbf{Coalescing cuts both ways.} When 32 lanes access 32 consecutive
+addresses, the hardware merges them into one wide memory transaction --- a
+gift to throughput. When a transactional workload accesses \emph{scattered}
+addresses (hash tables, trees, linked lists --- the furniture of GPU STM
+benchmarks), the memory subsystem instead serialises 32 narrow accesses, one
+per lane, and coalescing stops helping. The access pattern of the workload,
+not the TM algorithm, often dominates measured performance.
+
+\section{Worked Example: Warp-Uniform Bank Transfer With Self-Abort}
+\label{sec:gpu-bank-transfer-example}
+\index{bank transfer}\index{self-abort}\index{warp}\index{money conservation}\index{account floor}
+
+The bank benchmark is a useful minimal GPU TM workload: each transaction reads
+two balances, checks the source account floor, and either transfers a fixed
+amount or aborts without changing state. The kernel below is deliberately
+small. It is not a full STM; it is the lock-based shape that GPU STMs refine:
+acquire metadata without spinning, perform the update only after both locks
+are held, and use a warp-uniform ballot to count aborts.
+
+\begin{lstlisting}[language=C++, caption={A CUDA bank-transfer kernel using sorted locks and warp-uniform abort counting.}]
+#include <stdint.h>
+
+#ifndef WARP_SIZE
+#define WARP_SIZE 32
+#endif
+
+__device__ __forceinline__ int lane_id() {
+    return threadIdx.x & (WARP_SIZE - 1);
 }
 
-static void write_all(int fd, const void* p, size_t n, off_t off) {
-    const char* b = static_cast<const char*>(p);
-    while (n != 0) {
-        ssize_t k = ::pwrite(fd, b, n, off);
-        if (k <= 0) throw std::runtime_error("pwrite failed");
-        b += k; n -= size_t(k); off += k;
-    }
+__device__ __forceinline__ int lock_account(int *locks, int id) {
+    return atomicCAS(&locks[id], 0, 1) == 0;
 }
 
-static void read_all(int fd, void* p, size_t n, off_t off) {
-    char* b = static_cast<char*>(p);
-    while (n != 0) {
-        ssize_t k = ::pread(fd, b, n, off);
-        if (k <= 0) throw std::runtime_error("pread failed");
-        b += k; n -= size_t(k); off += k;
-    }
+__device__ __forceinline__ void unlock_account(int *locks, int id) {
+    __threadfence();          /* publish balance writes before unlocking */
+    atomicExch(&locks[id], 0);
 }
 
-class DurableBank {
-    int fd_;
-    Image img_{};
+/* Each lane attempts one transfer:
+     from[i] -> to[i], amount[i].
+   On success, total money is unchanged. On abort, no balance is changed. */
+__global__ void bank_transfer_kernel(int *balances,
+                                     const int *floors,
+                                     int *locks,
+                                     const int *from,
+                                     const int *to,
+                                     const int *amount,
+                                     int n,
+                                     unsigned int *abort_count) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int lane = lane_id();
 
-    void sync() {
-        if (::fsync(fd_) != 0) throw std::runtime_error("fsync failed");
-    }
+    bool abort_tx = false;
+    bool committed = false;
 
-    void clear_journal() {
-        img_.journal = Journal{};
-        write_all(fd_, &img_.journal, sizeof(Journal), 0);
-        sync();
-    }
+    if (tid < n) {
+        int a = from[tid];
+        int b = to[tid];
+        int x = amount[tid];
 
-    void flush_image() {
-        write_all(fd_, &img_, sizeof(Image), 0);
-        sync();
-    }
-
-    void recover() {
-        if (!valid(img_.journal)) return;
-        const Journal& j = img_.journal;
-        if (j.from >= 2 || j.to >= 2) throw std::runtime_error("bad journal");
-        img_.balance[j.from] = j.new_from;  /* idempotent redo */
-        img_.balance[j.to] = j.new_to;
-        write_all(fd_, &img_.balance, sizeof(img_.balance),
-                  offsetof(Image, balance));
-        sync();
-        clear_journal();
-    }
-
-public:
-    explicit DurableBank(const char* path) {
-        fd_ = ::open(path, O_RDWR | O_CREAT, 0644);
-        if (fd_ < 0) throw std::runtime_error("open failed");
-
-        off_t n = ::lseek(fd_, 0, SEEK_END);
-        if (n < off_t(sizeof(Image))) {
-            img_.balance = {1000, 1000};
-            img_.floor = 0;
-            flush_image();
+        if (a == b || x < 0) {
+            abort_tx = true;
         } else {
-            read_all(fd_, &img_, sizeof(Image), 0);
-            recover();
+            int first  = (a < b) ? a : b;
+            int second = (a < b) ? b : a;
+
+            int got_first = lock_account(locks, first);
+            int got_second = 0;
+
+            if (got_first) {
+                got_second = lock_account(locks, second);
+            }
+
+            if (!got_first || !got_second) {
+                abort_tx = true;        /* no spin: retry in a later kernel pass */
+            } else {
+                int ba = balances[a];
+                int bb = balances[b];
+
+                if (ba - x < floors[a]) {
+                    abort_tx = true;    /* account floor would be violated */
+                } else {
+                    balances[a] = ba - x;
+                    balances[b] = bb + x;
+                    committed = true;
+                }
+
+                unlock_account(locks, second);
+                unlock_account(locks, first);
+            }
+
+            if (got_first && !got_second) {
+                unlock_account(locks, first);
+            }
         }
     }
 
-    ~DurableBank() {
-        if (fd_ >= 0) ::close(fd_);
+    /* Every active lane reaches the ballot, including lanes with tid >= n. */
+    unsigned int mask = __ballot_sync(0xffffffffu, abort_tx);
+    if (lane == 0) {
+        atomicAdd(abort_count, (unsigned int)__popc(mask));
     }
 
-    bool transfer(uint32_t from, uint32_t to, int64_t amount) {
-        if (from >= 2 || to >= 2 || from == to || amount < 0) return false;
-        if (img_.balance[from] - amount < img_.floor) return false;
-
-        Journal j{};
-        j.magic = MAGIC;
-        j.from = from; j.to = to;
-        j.old_from = img_.balance[from];
-        j.old_to = img_.balance[to];
-        j.new_from = j.old_from - amount;
-        j.new_to = j.old_to + amount;
-        j.sum = checksum(j);
-
-        img_.journal = j;
-        write_all(fd_, &img_.journal, sizeof(Journal), 0);
-        sync();                         /* durable commit intent */
-
-        img_.balance[from] = j.new_from;
-        img_.balance[to] = j.new_to;
-        write_all(fd_, &img_.balance, sizeof(img_.balance),
-                  offsetof(Image, balance));
-        sync();                         /* durable data */
-
-        clear_journal();                /* recovery no longer needed */
-        return true;
-    }
-
-    int64_t total() const {
-        return img_.balance[0] + img_.balance[1];
-    }
-};
-
-int main() {
-    DurableBank b("bank.img");
-    b.transfer(0, 1, 5);
-    return b.total() == 2000 ? 0 : 2;
+    (void)committed;          /* retained for instrumentation builds */
 }
 \end{lstlisting}
 
 \begin{itemize}
-    \item The durable intent record is not a full database log. It is the minimum needed to make one committed transfer recoverable.
-    \item The post-state makes recovery idempotent: replaying the same journal record writes the same balances.
-    \item The account floor is checked before the durable commit point. Recovery must not re-run policy code; it must complete the already chosen outcome.
-    \item The money-conservation invariant is checked after restart by the same observation used in volatile tests: the total balance remains unchanged.
+    \item Lock acquisition is sorted by account id, but failure does not spin.
+          The transaction self-aborts and can be retried by the enclosing
+          driver.
+    \item The transfer writes both balances only after both locks are held.
+          Therefore a committed transaction preserves the total balance; an
+          aborted transaction writes nothing.
+    \item The ballot is outside the per-lane transaction body. Even inactive
+          lanes execute it with \texttt{abort\_tx == false}, preserving the
+          SIMT contract of Section~\ref{sec:ballot}.
+    \item The device fence before \texttt{atomicExch} is the publication edge:
+          data writes must reach global visibility before another lane can
+          acquire the account lock.
 \end{itemize}
-
-The example is deliberately conservative. It uses \texttt{fsync} as the storage
-ordering primitive and a single image rather than a segmented log. A real
-persistent TM backend may use cache-line write-back, epoch barriers, nonvolatile
-allocation protocols, or copy-on-write roots. The same correctness rule remains:
-once the commit point is durable, recovery must be able to discover the decision
-and complete the update without consulting volatile state.
-
-\section{Worked Example: Model Checking Distributed Commit}
-\index{distributed TM}\index{two-phase commit}\index{TLA+}\index{money conservation}
-\label{sec:distributed-commit-example}
-
-Distributed TM turns validation into a protocol. A coordinator may decide only
-after participants vote, and the data update must remain atomic from the
-client's point of view. This TLA+ model is intentionally small: two accounts,
-one transfer, one prepare phase, and one commit decision. (The full-scale
-version checked in the repository is
-\texttt{docs/proofs/\allowbreak DistributedSGL.tla};
-read this mini-model as its teaching skeleton.) A naming caution: the
-repository's \texttt{calvin} backend borrows its name from, but is not, the
-deterministic distributed database of Thomson et al.~\cite{thomson12calvin};
-it is a two-phase OCC shared-memory backend.
-
-\begin{lstlisting}[caption={A TLA+ model of one distributed bank transfer with prepare/commit.}]
---------------------------- MODULE MiniDistributedBank ---------------------------
-EXTENDS Naturals, TLC
-
-Accounts == 1..2
-From == 1
-To == 2
-Amount == 3
-Floor == 0
-InitBal == [a \in Accounts |-> 10]
-
-VARIABLES bal, phase, vote, decision
-
-vars == <<bal, phase, vote, decision>>
-
-Init ==
-    /\ bal = InitBal
-    /\ phase = "idle"
-    /\ vote = [r \in Accounts |-> "none"]
-    /\ decision = "none"
-
-Begin ==
-    /\ phase = "idle"
-    /\ phase' = "prepare"
-    /\ UNCHANGED <<bal, vote, decision>>
-
-Prepare(r) ==
-    /\ phase = "prepare"
-    /\ vote[r] = "none"
-    /\ vote' =
-        [vote EXCEPT ![r] =
-            IF r = From
-            THEN IF bal[From] - Amount >= Floor THEN "yes" ELSE "no"
-            ELSE "yes"]
-    /\ UNCHANGED <<bal, phase, decision>>
-
-AllVoted ==
-    \A r \in Accounts: vote[r] \in {"yes", "no"}
-
-DecideCommit ==
-    /\ phase = "prepare"
-    /\ \A r \in Accounts: vote[r] = "yes"
-    /\ phase' = "commit"
-    /\ decision' = "commit"
-    /\ UNCHANGED <<bal, vote>>
-
-DecideAbort ==
-    /\ phase = "prepare"
-    /\ AllVoted
-    /\ \E r \in Accounts: vote[r] = "no"
-    /\ phase' = "done"
-    /\ decision' = "abort"
-    /\ UNCHANGED <<bal, vote>>
-
-ApplyCommit ==
-    /\ phase = "commit"
-    /\ bal' = [bal EXCEPT ![From] = @ - Amount,
-                          ![To] = @ + Amount]
-    /\ phase' = "done"
-    /\ UNCHANGED <<vote, decision>>
-
-Next ==
-    \/ Begin
-    \/ \E r \in Accounts: Prepare(r)
-    \/ DecideCommit
-    \/ DecideAbort
-    \/ ApplyCommit
-
-Spec == Init /\ [][Next]_vars
-
-TypeOK ==
-    /\ phase \in {"idle", "prepare", "commit", "done"}
-    /\ decision \in {"none", "commit", "abort"}
-    /\ \A a \in Accounts: bal[a] \in Nat
-    /\ \A r \in Accounts: vote[r] \in {"none", "yes", "no"}
-
-MoneyConserved ==
-    bal[1] + bal[2] = InitBal[1] + InitBal[2]
-
-FloorsHold ==
-    \A a \in Accounts: bal[a] >= Floor
-
-=============================================================================
-\end{lstlisting}
-
-\begin{itemize}
-    \item The model separates decision from application. This exposes the window in which a real coordinator must recover enough state to finish.
-    \item The invariant is the same as the sequential bank example: balances stay above the floor and the total amount of money is conserved.
-    \item The prepare votes are local, but the commit is global. This is the essential cost of exporting a TM abstraction over a distributed store.
-    \item The model is small enough for exhaustive checking, but already contains the main distributed failure boundary: a decision without a completed data update.
-\end{itemize}
-
-The model also shows why distributed TM is not merely TL2 with sockets. A local
-STM can usually retry when validation fails. A distributed transaction may have
-already locked keys, recorded a primary decision, or exposed a timestamp to
-another node. Abort, retry, and recovery become protocol states rather than
-local control-flow choices.
 
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
-    node distance=1.55cm and 2.2cm,
-    state/.style={draw, rounded corners, align=center, minimum width=2.5cm, minimum height=0.9cm},
-    edge/.style={-{Latex}, thick}
+    node distance=1.55cm and 1.85cm,
+    state/.style={draw, rounded corners, align=center, minimum width=2.55cm, minimum height=0.9cm},
+    arrow/.style={-Latex, thick}
 ]
-\node[state] (start) {transaction\\executes};
-\node[state, right=of start] (validate) {validate\\floor and conflicts};
-\node[state, right=of validate] (intent) {force decision\\journal or votes};
-\node[state, below=of intent] (apply) {apply data\\redo or commit};
-\node[state, left=of apply] (done) {clear metadata\\return commit};
-\node[state, below=of validate] (recover) {recovery\\finishes decision};
+\node[state] (begin) {Begin\\snapshot GTS};
+\node[state, right=of begin] (exec) {Execute\\buffer reads/writes};
+\node[state, right=of exec] (reserve) {Reserve slots\\AtomicINC};
+\node[state, below=of reserve] (cct) {CCT check\\pending writers};
+\node[state, left=of cct] (mrv) {MRV check\\finalised versions};
+\node[state, left=of mrv] (write) {Install versions\\per VBox};
+\node[state, below=of write] (publish) {Publish batch\\advance GTS};
+\node[state, below=of cct] (abort) {Abort\\discard write-set};
 
-\draw[edge] (start) -- (validate);
-\draw[edge] (validate) -- node[above, align=center] {success} (intent);
-\draw[edge] (intent) -- (apply);
-\draw[edge] (apply) -- (done);
-\draw[edge] (intent) -- node[right, align=center] {crash} (recover);
-\draw[edge] (recover) -- (apply);
-\draw[edge] (validate) -- node[left, align=center] {abort} (recover);
+\draw[arrow] (begin) -- (exec);
+\draw[arrow] (exec) -- (reserve);
+\draw[arrow] (reserve) -- (cct);
+\draw[arrow] (cct) -- node[above, sloped] {ok} (mrv);
+\draw[arrow] (mrv) -- node[above, sloped] {ok} (write);
+\draw[arrow] (write) -- (publish);
+
+\draw[arrow] (cct) -- node[right] {conflict} (abort);
+\draw[arrow] (mrv) -- node[above, sloped] {moved past snapshot} (abort);
+\draw[arrow] (abort.east) .. controls ($(abort.east)+(1.1,0)$) and ($(begin.south)+(0,-0.9)$) .. node[below] {retry} (begin.south);
 \end{tikzpicture}
-\caption{Commit ordering in persistent and distributed TM.}
-\label{fig:persistent-distributed-commit-order}
+\caption{A GUST-style GPU commit path. Slot reservation is non-blocking; validation is split between concurrently committing transactions and already finalised versions.}
+\label{fig:gpu-gust-commit-path}
 \end{figure}
 
-\begin{table}[htbp]
-\centering
-\begin{tabular}{M{0.17\textwidth}M{0.17\textwidth}M{0.24\textwidth}M{0.24\textwidth}}
-\hline
-\thb{0.17\textwidth}{Backend or design} & \thb{0.17\textwidth}{Scope} & \thb{0.24\textwidth}{Commit record} & \thb{0.24\textwidth}{Main recovery or agreement rule} \\
-\hline
-PersistentSGL & persistent single process & dual write to a persistent file under one lock & write-through: memory and file updated together at commit \\
-NV-HTM (paper~\cite{castro18nvhtm}) & persistent HTM hybrid & per-thread redo logs + checkpoints & durable commit only after the log (and dependencies) reach PM \\
-DUDETM~\cite{liu17dudetm} & persistent STM/HTM & decoupled redo logs, background persist & atomic visibility at commit; durability deferred to a replayer \\
-SPHT~\cite{castro21spht} & persistent HTM & group-commit log (PCL) + linked logs & batched durability; parallel replay at recovery \\
-Romulus (paper~\cite{correia18romulus}) & persistent objects & copy-on-write persistent roots & publish a recoverable root atomically; \emph{not} the repo's volatile OCC of the same name \\
-DistributedSGL & single-machine multi-process simulation (shared \texttt{mmap}) & global lock + full-state sync at commit & one global order across processes on the host \\
-TiKV / Percolator-2PC & distributed key-value store & primary lock and commit timestamp & commit primary before secondaries \\
-\hline
-\end{tabular}
-\caption{Persistent and distributed TM designs compared by commit obligation.}
-\label{tab:persistent-distributed-taxonomy}
-\end{table}
 
-\section{The Companion's Persistent Backends}
-\label{sec:persistent-backends}
-\index{DUDETM}\index{SPHT}\index{group commit}\index{redo log!decoupled}\index{per-thread commit log}
+\section[Commit at GPU Scale]{Commit at GPU Scale: From Serial Locks to Batched Multi-Versioning}
+\label{sec:commit}
 
-Table~\ref{tab:persistent-distributed-taxonomy} sorts designs by their commit
-obligation; this section walks the two research-grade persistent backends the
-companion actually implements, because they occupy opposite ends of the
-spectrum in Figure~\ref{fig:persistent-distributed-commit-order}: DUDETM makes
-durability \emph{trail} visibility, while SPHT batches durability into epochs
-without ever delaying visibility past a hardware commit.
+A CPU system runs a few dozen cores; a GPU kernel launches thousands of
+\emph{concurrent transactions}. Every single-threaded choke point of a CPU
+TM becomes a hard bottleneck:
 
-\paragraph{DUDETM: durability as a background concern.}
-DUDETM~\cite{liu17dudetm} splits the durable transaction into three phases.
-\emph{Perform}: the STM transaction runs exactly as any volatile backend runs
-it --- read-set, write-set, validation, publish --- and the TM commit makes the
-writes atomically visible with no persistence barrier anywhere in the path.
-\emph{Persist}: each write was meanwhile appended as a redo entry
-$(addr, size, value)$ to a non-volatile log; after the TM commits, a background
-flusher drains the log to NVM (\texttt{clwb} + fence), overlapped with the
-thread's next transaction. \emph{Reproduce}: after a crash, recovery scans the
-log, replays every \emph{complete} transaction's writes idempotently, and
-truncates. The design's whole point is the inversion: the visibility commit
-point stays where volatile TM put it, and the durability point trails behind
-it, so forward progress never waits on I/O. The cost is a recovery window ---
-state that is visible-but-not-yet-durable must be reconstructible purely from
-the log, which is why log completeness markers are load-bearing. The checked
-model \texttt{docs/proofs/DUDETM.tla} (PlusCal) encodes exactly this split;
-TLC verifies \texttt{LogBounds} (the per-thread ring log never overruns its
-tail) and \texttt{Persist\allowbreak FileValid} (every persisted entry is well-typed ---
-the recovery machinery may assume structure even for entries it has not
-replayed yet).
+\begin{itemize}
+    \item \textbf{No commit locks.} A global commit lock that serialises
+          commits (as in TL2 \cite{dice06tl2}) or any CAS-based append to a
+          shared structure leads to one winner and thousands of spinning
+          losers. GUST reports that, at 8960 threads on an RTX~6000~Ada,
+          the hardware sustains roughly \textbf{100$\times$ more concurrent
+          AtomicINCs than CASes} \cite{nunes23gust} --- an atomic-append
+          throughput comparison, not a commit-rate measurement, but it is
+          exactly the operation a commit-log append performs. The design
+          rule: commit-slot allocation must be \emph{never-failing}
+          (AtomicINC), not \emph{contended} (CAS).
+    \item \textbf{Validation cost is a sum, not a constant.} Commit-time
+          validation is $O(|\text{read-set}|)$ per transaction and happens for
+          thousands of transactions per batch, so the aggregate is
+          $O(\sum |\text{read-set}|)$; validation against \emph{concurrently
+          committing} transactions adds a cross-product term. Cheap
+          per-transaction costs explode multiplicatively at GPU concurrency.
+    \item \textbf{Multi-versioning kills the abort chain.} If a transaction
+          reads a consistent old snapshot instead of watching for conflicts,
+          read-only transactions \emph{never abort}. This property, inherited
+          from JVSTM \cite{cachopo06}, is what makes the most scalable GPU
+          STMs (CSMV \cite{nunes22csmv}, GUST \cite{nunes23gust})
+          multi-versioned: writers append versions and readers walk history,
+          instead of every read being a potential conflict.
+    \item \textbf{Batch everything.} Because warps move in lock step, the
+          natural unit of commit is \emph{the warp}, not the thread. GUST has
+          a warp reserve \texttt{WARP\_SIZE} contiguous commit-log slots with
+          one AtomicINC, validate as a group, write back, and publish the
+          batch with a single advance of the global timestamp
+          \cite{nunes23gust}. CSMV goes further and decouples execution from
+          commit entirely, dedicating \emph{server warps} to validate and
+          commit the writes of \emph{client warps} \cite{nunes22csmv}.
+\end{itemize}
 
-\paragraph{SPHT: group commit on a hardware fast path.}
-SPHT~\cite{castro21spht} keeps restricted transactions on RTM but gives every
-thread a \emph{per-thread commit log} (PCL): an append-only NVM region into
-which transactions append $(addr, size, value)$ entries as they execute,
-inside the hardware transaction. Durability enters at \emph{epoch boundaries}:
-the PCL accumulates several durably-committed transactions' entries until a
-watermark fires (log roughly three-quarters full, or an epoch timer), then one
-cache-line write-back sweep plus a single fence publishes the entire epoch.
-One sync amortizes many transactions; recovery assigns one worker per PCL and
-replays them in parallel. When RTM aborts persistently, the thread falls back
-to a global-lock path --- and the fallback must be engineered as carefully as
-the fast path: the companion's own history includes a bug class where a naive
-fallback leaked the mutex across the retry loop's \texttt{siglongjmp}, a
-concrete instance of the frame-hazard pitfalls Chapter~13 catalogs. The
-checked model \texttt{docs/proofs/SPHT.tla} (PlusCal) carries the dual-path
-state machine and crash/recovery; TLC verifies \texttt{TSXSafety},
-\texttt{LockExclusion}, \texttt{TSXvsSGLSafety},
-\texttt{DurableSeqMonotonic}, and \texttt{PCLBounds}.
+\section{Worked Example: Commit-Slot Allocation, CAS vs.\ AtomicINC}
+\index{AtomicINC}\index{commit log}\index{commit-slot allocation}\index{CCT}\index{MRV}\index{GTS}\index{versioned box}\index{batch publication}\index{GPU TM}
+\label{sec:slot-example}
 
-\begin{table}[htbp]
-\centering
-\begin{tabular}{M{0.20\linewidth}M{0.28\linewidth}M{0.22\linewidth}M{0.20\linewidth}}
-\hline
-\thb{0.20\textwidth}{Backend} & \thb{0.28\textwidth}{Durability enters at} & \thb{0.22\textwidth}{Checked model} & \thb{0.20\textwidth}{Key invariants} \\
-\hline
-PersistentSGL & inside the global lock (dual write) & \texttt{PersistentSGL.tla} & \texttt{NVMAgrees\allowbreak WithMem} \\
-DUDETM & after visibility, in a background flusher & \texttt{DUDETM.tla} & \texttt{LogBounds}, \texttt{Persist\allowbreak FileValid} \\
-SPHT & at epoch boundaries (group commit) & \texttt{SPHT.tla} & \texttt{DurableSeq\allowbreak Monotonic}, \texttt{PCL\allowbreak Bounds} \\
-NV-HTM (repo scaffold) & nowhere yet (DRAM-backed region) & \texttt{NVHTM.tla} & \texttt{TSXSafety}, \texttt{RetryBound} \\
-TiKV backend & at the TiKV 2PC commit record & \texttt{TiKV.tla} & \texttt{Snapshot\allowbreak Isolation}, \texttt{Commit\allowbreak Ordering} \\
-\hline
-\end{tabular}
-\caption{Where durability enters each companion backend, and the TLA+ model that pins it down. All five models live in \texttt{docs/proofs} and pass TLC safety checks.}
-\label{tab:durability-entry-points}
-\end{table}
+The ``never-failing not contended'' rule of the previous section, in code.
+Two ways for a warp to claim commit-log slots:
 
-Table~\ref{tab:durability-entry-points} summarizes the spectrum. Read the
-models alongside the code: each is small enough to hold in your head at once,
-and each names its invariants after the obligation they discharge --- a habit
-worth copying when you add the next backend.
+\begin{lstlisting}[language=C++, caption={CAS vs.\ AtomicINC commit-slot reservation.}]
+/* CAS: one winner per contention point; losers spin or retry. */
+while (!atomicCAS(&g_next, base, base + WARP_SIZE)) {}  /* convoy */
 
-
-\section{Worked Example: PersistentSGL Commit Ordering}
-
-A single global lock is the simplest place to add durability because it removes
-interleavings from the commit path. PersistentSGL is not scalable, but it is a
-useful reference design: if the lock is held, the runtime can force the journal,
-force the data, and clear the journal without another transaction observing a
-half-installed update.
-
-The listing below compresses that rule into a small C++ program. It is not a
-replacement for the earlier durable image; it isolates the ordering discipline
-that a persistent SGL backend enforces. (The repository's own
-\texttt{PersistentSGL} takes the degenerate form of this design: no intent
-record at all, but a write-through \emph{dual write} --- every committed store
-is applied to memory and to a persistent file in the same critical section,
-which is exactly what its checked model \texttt{PersistentSGL.tla} encodes.
-The intent-record form shown here is the generalization a real undo/redo
-backend would use.)
-
-\begin{lstlisting}[language=C++, caption={A small PersistentSGL-style commit path for the bank invariant.}]
-#include <array>
-#include <cstdint>
-#include <mutex>
-#include <stdexcept>
-
-struct Bank {
-    std::array<int64_t, 2> balance{1000, 1000};
-    int64_t floor = 0;
-};
-
-struct Intent {
-    bool valid = false;
-    uint32_t from = 0;
-    uint32_t to = 0;
-    int64_t new_from = 0;
-    int64_t new_to = 0;
-};
-
-class PersistentSGLBank {
-    std::mutex global_;
-    Bank bank_;
-    Intent intent_;
-
-    void persist_intent() {
-        if (!intent_.valid) throw std::runtime_error("empty intent");
-        /* Real backend: write-back intent cache lines, then persist barrier. */
-    }
-
-    void persist_data() {
-        /* Real backend: write-back modified balances, then persist barrier. */
-    }
-
-    void persist_clear() {
-        /* Real backend: persist the invalid journal state. */
-    }
-
-public:
-    bool transfer(uint32_t from, uint32_t to, int64_t amount) {
-        std::lock_guard<std::mutex> guard(global_);
-
-        if (from >= 2 || to >= 2 || from == to || amount < 0) return false;
-        if (bank_.balance[from] - amount < bank_.floor) return false;
-
-        intent_.valid = true;
-        intent_.from = from;
-        intent_.to = to;
-        intent_.new_from = bank_.balance[from] - amount;
-        intent_.new_to = bank_.balance[to] + amount;
-        persist_intent();              /* durable commit point */
-
-        bank_.balance[from] = intent_.new_from;
-        bank_.balance[to] = intent_.new_to;
-        persist_data();
-
-        intent_.valid = false;
-        persist_clear();
-        return true;
-    }
-
-    void recover() {
-        std::lock_guard<std::mutex> guard(global_);
-        if (!intent_.valid) return;
-        bank_.balance[intent_.from] = intent_.new_from;
-        bank_.balance[intent_.to] = intent_.new_to;
-        persist_data();
-        intent_.valid = false;
-        persist_clear();
-    }
-
-    int64_t total() const {
-        return bank_.balance[0] + bank_.balance[1];
-    }
-};
+/* AtomicINC: never fails; every warp claims its own slots. */
+int base = atomicAdd(&g_next, WARP_SIZE);   /* no retry, no loop */
 \end{lstlisting}
 
 \begin{itemize}
-    \item The global lock is a correctness simplifier: it serializes volatile execution and durable publication.
-    \item The durable commit point is the forced intent, not the later balance write.
-    \item Recovery performs no validation and no user policy. It only completes a decision already made durable.
-    \item The design is a baseline. More concurrent persistent algorithms must preserve the same ordering while allowing multiple transactions to prepare or publish.
+    \item Both allocate \texttt{WARP\_SIZE} contiguous slots; the CAS version
+          makes concurrent warps contend for the \emph{right} to allocate,
+          the AtomicINC version lets them all allocate and sort it out later.
+    \item GUST reports the underlying hardware asymmetry quantified:
+          roughly $100\times$ more concurrent AtomicINCs than CASes at
+          8960 threads (RTX~6000~Ada) \cite{nunes23gust} --- the ``no
+          commit locks'' bullet, measured.
+    \item The \texttt{base} value is the warp's commit timestamp; lane
+          \texttt{l} owns slot \texttt{base + l}, exactly the GUST batch
+          publication of Section~\ref{sec:gust}.
+    \item The TLA+ model of Section~\ref{sec:tla} abstracts the AtomicINC as
+          one atomic action per warp --- the whole batch in one step.
 \end{itemize}
 
-\section{Worked Example: Percolator-Style Primary Commit}
-\label{sec:percolator-commit-example}
-\index{TiKV!key mapping}\index{address-to-key mapping}
+\begin{table}[htbp]
+\centering
+\begin{tabular}{M{0.14\linewidth}M{0.15\linewidth}M{0.13\linewidth}M{0.16\linewidth}M{0.26\linewidth}}
+\hline
+\thb{0.14\textwidth}{\textbf{Commit style}} & \thb{0.15\textwidth}{\textbf{Allocator}} & \thb{0.13\textwidth}{\textbf{Waiting}} & \thb{0.16\textwidth}{\textbf{Reader rule}} & \thb{0.26\textwidth}{\textbf{GPU consequence}} \\
+\hline
+Global lock & one lock & spin or block & single latest value &
+Simple, but one serial point throttles thousands of lanes. \\
+CAS log append & CAS on tail & retry loop & latest or validated value &
+Correct but creates a convoy when many warps append together. \\
+AtomicINC log append & atomic add on tail & none for allocation & snapshot plus validation &
+Every warp obtains slots; conflicts are handled by validation, not allocation failure. \\
+Client--server commit & server warp queue & client waits for service & multi-version snapshot &
+Moves contended metadata to server warps; best suited when commit work can be amortised. \\
+Read-only MVCC & none on read path & none & stable old version &
+Read-only transactions never abort, matching the JVSTM and CSMV design point. \\
+\hline
+\end{tabular}
+\caption{GPU commit strategies differ mainly in where they place the serialisation point.}
+\label{tab:gpu-commit-strategies}
+\end{table}
 
-TiKV-style distributed TM follows the Percolator shape~\cite{peng10percolator}:
-prewrite locks the write set, the primary key records the commit decision, and
-secondary keys are resolved afterward. This splits agreement into a recoverable
-primary decision and idempotent cleanup of secondaries. The companion ships
-both a runnable backend --- the Rust \texttt{tikv} runtime, which drives a real
-TiKV cluster's optimistic transactions through the same TM hook API as every
-volatile backend in this book --- and a checked PlusCal model,
-\texttt{docs/proofs/TiKV.tla}. The small TLA+ model below abstracts keys as the
-two bank accounts.
 
-\paragraph{Mapping TM addresses to keys.}
-The first design question in a distributed TM is deceptively simple: what is a
-distributed \emph{address}? Two processes cannot agree on virtual pointers ---
-\texttt{mmap} places each process's TM region wherever the OS pleases --- so
-the backend maps each TM address to a key by its \emph{offset from the region
-base}, rendered as fixed-width hex:
+\section{A Taxonomy of GPU TM}
+\label{sec:taxonomy}
 
-\begin{lstlisting}[caption={The address-to-key mapping of the companion's TiKV backend: region offsets, not pointers, so independent processes agree on keys.}]
-fn addr_key(addr: *const u8) -> Vec<u8> {
-    let start = addrspace::tm_region_start();
-    let offset = (addr as usize).wrapping_sub(start);
-    format!("tm:{offset:016x}").into_bytes()
-}
+Table~\ref{tab:gpu-tm} summarises the main published designs, both the
+simulated hardware proposals and the software systems that run on real
+silicon. Three of the software rows are realised, at some level, in the
+backends accompanying this book: PR-STM in
+\texttt{backends\slash{}tm\_impl\slash{}gpu\_stm}, CSMV in \texttt{backends\slash{}tm\_impl\slash{}csmv},
+and GUST in \texttt{gpu\slash{}backends\slash{}gpu\_gust}. The repository
+additionally implements GPUTX
+(\texttt{backends\slash{}tm\_impl\slash{}gputx}), which is not a table row;
+the remaining literature rows (GPU-STM, the Holey--Zhai lightweight STMs,
+OFG-STM) have no companion implementation.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lllM{9cm}}
+\hline
+\textbf{System} & \textbf{Year} & \textbf{Type} & \thb{9cm}{\textbf{Key idea}} \\
+\hline
+KILO TM \cite{fung11kilotm} & 2011 & HW & word-level, value-based conflicts; commit units; no coherence \\
+WarpTM \cite{fung13warptm} & 2013 & HW & warp-level management; temporal conflict detection \\
+SI-HTM \cite{chen17snapshot} & 2017 & HW & multi-version memory; snapshot isolation; write-skew elimination \\
+GPU-STM \cite{xu14gpustm} & 2014 & SW & encounter-time lock sorting to avoid deadlock \\
+Lightweight \cite{holey14} & 2014 & SW & eager/pessimistic/invisible reads; warp-mask retry \\
+PR-STM \cite{shen15prstm} & 2015 & SW & 32-bit priority lock word; lock stealing; commit-time validation \\
+CSMV \cite{nunes22csmv} & 2022 & SW & multi-version; client--server commit (server warps validate) \\
+OFG-STM \cite{perlin24ofg} & 2024 & SW & obstruction-free; locator ownership; warp GC \\
+GUST \cite{nunes23gust} & 2023 & SW & AtomicINC commit log; CCT/MRV validation; batch publication \\
+\hline
+\end{tabular}
+\caption{A taxonomy of GPU TM systems.}
+\label{tab:gpu-tm}
+\end{table}
+
+\section{Hardware Proposals: KILO TM, WarpTM, and Snapshot Isolation}
+\label{sec:hardware}
+
+The hardware line of work, all simulation-based, shows what a future GPU
+vendor could ship. KILO~TM \cite{fung11kilotm} was the first credible design:
+because GPUs lack coherence, it detects conflicts \emph{by value}, keeping a
+read-log and write-log in each thread's local memory and validating them
+against committed values at commit units distributed near the L2 banks, using
+Bloom filters for compact speculative validation. Its reported $59\%$ of
+fine-grained-lock performance on irregular kernels, for an area cost of about
+$0.5\%$ of a commercial GPU, is the canonical data point that GPU HTM is
+possible but not free.
+
+WarpTM \cite{fung13warptm} added two optimisations to KILO~TM that directly
+echo the software concerns of this chapter. \emph{Warp-level transaction
+management} resolves intra-warp conflicts before the warp ever reaches the
+commit units --- exactly what software warps do with
+\texttt{\_\_ballot\_sync} --- so a conflict-free warp commits as a unit and
+amortises commit-message traffic. \emph{Temporal conflict detection} lets
+read-only transactions commit silently using globally synchronised timers,
+attacking the same read-abort problem that multi-versioning attacks in
+software. Together they bought roughly $65\%$ throughput and $34\%$ energy
+savings over the base design.
+
+The snapshot-isolation HTM \cite{chen17snapshot} extended a multi-versioned
+memory system to let write--read conflicts pass, aborting only on
+write--write conflicts, and eliminating the associated write-skew anomaly on
+the fly. Its motivation --- long transactions over complex data structures
+should not die because of reads --- is the same one that drives the MVCC
+software systems below.
+
+\section{Software TM in the Wild}
+\label{sec:software}
+
+The software systems are what actually runs, and their progression is a
+textbook version of the CPU STM evolution of Part~IV:
+
+\begin{itemize}
+    \item \textbf{Lock-based.} GPU-STM \cite{xu14gpustm} applies
+          encounter-time lock sorting so that a warp never spins on a lock in
+          a deadlock-prone lock order. PR-STM \cite{shen15prstm} packs
+          \texttt{[priority:8 | version:23 | locked:1]} into a 32-bit lock
+          word, acquires locks by priority-aware CAS at commit time, and lets
+          a higher-priority transaction \emph{steal} a lock from a
+          lower-priority holder, turning contention into a clean self-abort
+          instead of a spin. The lightweight STMs of Holey and Zhai
+          \cite{holey14} provide three flavours --- eager read-write
+          conflicts (ESTM), pessimistic (PSTM), and invisible reads (ISTM)
+          --- with shadow metadata in global memory and per-thread logs in
+          local memory.
+    \item \textbf{Multi-versioned.} CSMV \cite{nunes22csmv} is JVSTM's
+          multi-version design \cite{cachopo06} rebuilt for GPU economics:
+          \emph{client} warps execute transactions and buffer writes; a few
+          \emph{server} warps hold the versioned metadata, validate, and
+          commit, so the contended shared state never leaves on-chip storage.
+          Read-only transactions never abort.
+    \item \textbf{Obstruction-free.} OFG-STM \cite{perlin24ofg} uses
+          locator-based ownership and warp-wide garbage collection with
+          Cooperative Groups, avoiding locks. Its stated advantage --- a
+          warp-cooperative solution to locator reclamation (the GPU analogue
+          of hazard pointers) --- is a GPU-native answer to a lock-free
+          pain point.
+\end{itemize}
+
+\section{Case Study: GUST and the Snapshot Threshold}
+\label{sec:gust}
+
+GUST \cite{nunes23gust}, implemented in this project's
+\texttt{gpu/backends/gpu\_gust}, is a multi-version system whose one idea is
+to replace contended commit-time synchronisation with an AtomicINC. It is
+\emph{one design point} in the GPU commit-protocol space, not the canonical
+answer: the rest of the chapter positions it against the global-lock,
+CAS-append, client--server, and read-only MVCC alternatives of
+Table~\ref{tab:gpu-commit-strategies} (Section ``Commit at GPU Scale'').
+Several of
+its design points are worth teaching on their own:
+
+\begin{itemize}
+    \item \textbf{Versioned boxes.} Each address owns a circular buffer of the
+          most recent committed \texttt{(timestamp, value)} pairs, appended
+          to increasingly (slot = \texttt{head \% DEPTH}).
+    \item \textbf{Commit log and GTS.} A bounded global commit log holds the
+          state (free, pending, committed, aborted) and write-set of every
+          in-flight transaction. A global timestamp (GTS) counts
+          \emph{finalised} slots. A transaction snapshots GTS at begin and
+          never re-reads earlier than that snapshot.
+    \item \textbf{CCT + MRV validation.} On commit a warp validates against
+          two classes of earlier transactions: those still finalising
+          (compared directly against their commit-log write-sets ---
+          concurrently-committing-transaction checking, CCT) and those already
+          finalised (checked via the most recent version, MRV --- if any read
+          VBox has moved past the snapshot, abort).
+    \item \textbf{Batch publication.} A warp reserves \texttt{WARP\_SIZE}
+          slots with one AtomicINC, writes back all its versions, and advances
+          GTS by \texttt{WARP\_SIZE} only when it observes GTS equal to its
+          base --- a full-warp group commit.
+\end{itemize}
+
+The subtlety that bit during bring-up illustrates why this chapter exists. An
+early kernel draft used \texttt{snapshot = startTS + 1} on the intuition that
+a committing transaction becomes visible one tick later. But GTS counts
+\emph{finalised} slots: a writer that reserved slot $c$ publishes version
+$c+1$ and is visible \emph{iff} $c < startTS$. The naive $+1$ let an
+in-flight writer at exactly $c = startTS$ slip into the snapshot --- a
+missed-conflict hole that neither validation phase could see. In a CPU STM
+paper this would be a footnote; on a GPU, with thousands of concurrent
+transactions, it is a data-corruption bug that is only tractable with the
+right tools.
+
+\section{Worked Example: The Snapshot Threshold, in Code}
+\index{snapshot threshold}\index{CCT}\index{MRV}
+\label{sec:snapshot-example}
+
+The off-by-one that Section~\ref{sec:gust} describes, and its fix:
+
+\begin{lstlisting}[language=C++, caption={GUST snapshot: why startTS+1 is a missed-conflict hole.}]
+/* GTS counts FINALISED slots. A writer reserving slot c publishes
+   version c+1, visible iff c < startTS. */
+
+int snapshot = *gts;                  /* correct: only finalised slots */
+// int snapshot = *gts + 1;           /* bug: lets an in-flight writer
+//                                        at c == startTS into the read */
+
+/* Suppose startTS = 5 and an in-flight writer holds slot 5 (not yet
+   finalised).  The +1 form reads version 6, but that writer publishes
+   version 6 only after finalising --- a value that does not exist yet.
+   The reader proceeds on a snapshot that was never real. */
 \end{lstlisting}
 
-This one function carries the whole portability argument of Chapter~2's DSM
-lineage: TreadMarks moved shared memory across machines with per-page diffs;
-here the same idea shrinks to a naming convention. The rest of the backend is
-deliberately boring. Reads consult the local write-set, then the local
-read-set cache, then issue a lazy TiKV \texttt{get}; writes buffer in a local
-write-set; commit flushes the buffered writes atomically through TiKV's
-optimistic two-phase commit (Percolator prewrite, then commit with the primary
-key first). Contention surfaces not as a validation failure but as a gRPC-era
-error from a conflicting commit; the backend rolls its transaction back and
-signals an abort, and the ordinary retry loop re-executes --- the distributed
-analogue of the abort/retry edge in Figure~\ref{fig:transactional-state-machine}.
-Throughput is correspondingly lower than shared-memory backends (the network
-replaces the cache line), but the invariant discipline is identical: money is
-conserved across every committed transfer, now under a protocol whose commit
-point lives on a different machine than the data.
+\begin{itemize}
+    \item The correct form reads only finalised slots: a writer visible at
+          version $v$ must have reserved $v-1 < startTS$, so the read must
+          use \emph{startTS}, not \texttt{startTS+1}.
+    \item Neither CCT nor MRV validation can catch this: the reader believes
+          it has a valid snapshot and never re-checks the in-flight writer.
+    \item This is the exercise of this chapter's Exercise~3, and it is
+          exactly what the TLA+ model's \texttt{InvNoMissedConflict}
+          invariant caught before the kernel was fixed.
+\end{itemize}
 
+\section{Worked Example: Money Conservation in TLA+}
+\label{sec:gpu-bank-tla-example}
+\index{TLA+}\index{model checking}\index{money conservation}\index{account floor}
 
-\begin{lstlisting}[caption={A TLA+ model of a primary-key distributed commit decision.}]
------------------------------ MODULE MiniPercolatorBank -----------------------------
+The following finite TLA+ model captures the semantic contract of the bank
+transaction independently of any particular GPU implementation. TLC can check
+it directly: each step chooses a source, destination, and amount; a step is
+enabled only when the source account remains above its floor. The invariants
+are the two properties the GPU kernel must preserve.
+
+\begin{lstlisting}[caption={A finite TLA+ bank-transfer model for TLC.}]
+----------------------------- MODULE BankTransferGPU -----------------------------
 EXTENDS Naturals, TLC
 
-Keys == 1..2
-Primary == 1
-Secondary == 2
-Amount == 4
-Floor == 0
-InitBal == [k \in Keys |-> 10]
+Accounts == {"A", "B", "C"}
 
-VARIABLES bal, lock, primaryDecision, phase
+InitBalance == [
+  "A" |-> 10,
+  "B" |-> 10,
+  "C" |-> 10
+]
 
-vars == <<bal, lock, primaryDecision, phase>>
+Floor == [
+  "A" |-> 2,
+  "B" |-> 2,
+  "C" |-> 2
+]
+
+Amounts == 1..3
+
+VARIABLE bal
+
+Total(b) == b["A"] + b["B"] + b["C"]
 
 Init ==
-    /\ bal = InitBal
-    /\ lock = [k \in Keys |-> FALSE]
-    /\ primaryDecision = "none"
-    /\ phase = "begin"
+  bal = InitBalance
 
-Prewrite(k) ==
-    /\ phase = "begin"
-    /\ lock[k] = FALSE
-    /\ IF k = Primary
-       THEN bal[Primary] - Amount >= Floor
-       ELSE TRUE
-    /\ lock' = [lock EXCEPT ![k] = TRUE]
-    /\ UNCHANGED <<bal, primaryDecision, phase>>
-
-AllLocked ==
-    \A k \in Keys: lock[k] = TRUE
-
-CommitPrimary ==
-    /\ phase = "begin"
-    /\ AllLocked
-    /\ primaryDecision = "none"
-    /\ primaryDecision' = "commit"
-    /\ phase' = "primaryCommitted"
-    /\ UNCHANGED <<bal, lock>>
-
-CommitSecondaries ==
-    /\ phase = "primaryCommitted"
-    /\ primaryDecision = "commit"
-    /\ bal' = [bal EXCEPT ![Primary] = @ - Amount,
-                          ![Secondary] = @ + Amount]
-    /\ lock' = [k \in Keys |-> FALSE]
-    /\ phase' = "done"
-    /\ UNCHANGED primaryDecision
-
-Abort ==
-    /\ phase = "begin"
-    /\ primaryDecision = "none"
-    /\ primaryDecision' = "abort"
-    /\ lock' = [k \in Keys |-> FALSE]
-    /\ phase' = "done"
-    /\ UNCHANGED bal
+Transfer(src, dst, amt) ==
+  /\ src \in Accounts
+  /\ dst \in Accounts
+  /\ src # dst
+  /\ amt \in Amounts
+  /\ bal[src] >= Floor[src] + amt
+  /\ bal' =
+       [a \in Accounts |->
+          IF a = src THEN bal[a] - amt
+          ELSE IF a = dst THEN bal[a] + amt
+          ELSE bal[a]]
 
 Next ==
-    \/ \E k \in Keys: Prewrite(k)
-    \/ CommitPrimary
-    \/ CommitSecondaries
-    \/ Abort
+  \E src, dst \in Accounts:
+    \E amt \in Amounts:
+      Transfer(src, dst, amt)
 
-Spec == Init /\ [][Next]_vars
+Spec ==
+  Init /\ [][Next]_bal
 
 MoneyConserved ==
-    bal[1] + bal[2] = InitBal[1] + InitBal[2]
+  Total(bal) = Total(InitBalance)
 
-FloorsHold ==
-    \A k \in Keys: bal[k] >= Floor
+FloorsPreserved ==
+  \A a \in Accounts:
+    bal[a] >= Floor[a]
 
 TypeOK ==
-    /\ phase \in {"begin", "primaryCommitted", "done"}
-    /\ primaryDecision \in {"none", "commit", "abort"}
-    /\ \A k \in Keys: lock[k] \in BOOLEAN
-    /\ \A k \in Keys: bal[k] \in Nat
+  bal \in [Accounts -> Nat]
 
 =============================================================================
 \end{lstlisting}
 
 \begin{itemize}
-    \item The primary record is the distributed commit point.
-    \item Secondary cleanup is allowed to lag because the primary decision can be re-read.
-    \item The account floor is checked before prewrite succeeds on the debit key.
-    \item The model captures the same obligation as the durable log: once commit is discoverable, later recovery must finish the data update.
+    \item \texttt{MoneyConserved} is the serial meaning of a transfer: debit
+          and credit are one atomic effect.
+    \item \texttt{FloorsPreserved} is stronger than absence of negative
+          balances; the floor is part of the transaction's precondition.
+    \item A GPU TM backend can abort, retry, batch, or multi-version the
+          transaction, but a committed history must refine this small model.
+    \item This model is also a useful negative test: remove the floor guard
+          from \texttt{Transfer} and TLC quickly finds a violation of
+          \texttt{FloorsPreserved}.
 \end{itemize}
 
-\section{Queue Execution and Async TM}
-\index{queue execution}\index{async TM}\index{QueueExecutor}\index{worker pool}
-\label{sec:queue-execution}
 
-The synchronous API of \S\ref{sec:api-example} assumes a dedicated thread
-per transaction: the thread calls \texttt{tm\_begin}, executes the body, and
-calls \texttt{tm\_end}.  The queue runtime inverts this model: the application
-enqueues transactional closures, and a pool of worker threads executes them.
-This is the ``future-based closure'' row of Table~\ref{tab:api-taxonomy}, made
-concrete.
+\section{Verifying GPU Protocols with TLA+}
+\label{sec:tla}
 
-\begin{center}
-\begin{tikzpicture}[
-    qnode/.style={draw, rounded corners, align=center, minimum width=2.4cm, minimum height=0.7cm},
-    node distance=2.2cm
-]
-\node[qnode] (caller) {Caller\\thread};
-\node[qnode, right=of caller] (queue) {Shared\\queue};
-\node[qnode, right=of queue] (worker) {Worker\\pool};
-\node[qnode, right=of worker] (backend) {TM\\backend};
-\draw[->] (caller) -- node[above]{\texttt{tm\_enqueue}} (queue);
-\draw[->] (queue) -- node[above]{dequeue} (worker);
-\draw[->] (worker) -- node[above]{begin/end} (backend);
-\draw[->] (worker.south) |- node[below, pos=0.3]{result} (caller.south);
-\end{tikzpicture}
-\end{center}
+Because GPU protocols replace hardware guarantees with software discipline,
+they are prime candidates for the model-checking workflow of Part~III. The
+models accompanying this book --- \texttt{GPU\_PR\_STM.tla},
+\texttt{GPU\_SIMT.tla}, \texttt{GPU\_JVSTM.tla}, \texttt{GPU\_CSMV.tla},
+\texttt{GPU\_GUST.tla} --- make the warp the unit of concurrency and encode the SIMT lock step as a
+shared warp \texttt{phase} with per-thread arrays and an \texttt{activeMask}
+to express divergence:
 
-\noindent
-The C++ queue runtime (\rep{backends/tm\_impl/queue/queue\_runtime.cpp})
-implements this pattern.  The entry point is:
+\begin{itemize}
+    \item \textbf{Warp-as-process.} One TLA+ process per warp manages all of
+          its lanes' transactions; a single transition steps the whole warp,
+          matching the shared program counter.
+    \item \textbf{Divergence as masking.} Lanes that finish early are removed
+          from the active mask; the warp continues with the survivors, exactly
+          as a real divergence point does.
+    \item \textbf{Bounded phases.} Reads, writes, and validation are explicit
+          phases (\texttt{L\_read} $\rightarrow$ \texttt{L\_write}
+          $\rightarrow$ \texttt{L\_validate}), bounding the state space by
+          \texttt{ReadsPerThread} instead of an unbounded \texttt{either}.
+    \item \textbf{Opacity is an invariant.} The GUST model's
+          \texttt{InvNoMissedConflict} states that no committed transaction
+          may be followed by another committed transaction that wrote an
+          address the first one read --- serialisable/opaque semantics, not
+          just absence of lost updates.
+\end{itemize}
 
-\begin{lstlisting}[language=C++, caption={Enqueuing a transaction (\texttt{queue\_runtime.cpp}).}]
-void real_tm_enqueue(void (*fn)(void*), void *arg) {
-    {
-        std::lock_guard<std::mutex> lock(g_queue_mutex);
-        g_queue.push({fn, arg});
-    }
-    g_queue_cv.notify_one();
-}
-\end{lstlisting}
-
-\noindent
-The caller does not know which worker thread will run the transaction.
-Worker threads spin in a loop that dequeues work items and executes them
-inside \texttt{tm\_begin}/\texttt{tm\_end} retry loops:
-
-\begin{lstlisting}[language=C++, caption={Worker loop (\texttt{queue\_runtime.cpp}).}]
-void worker_loop() {
-    tm_init_thread();
-    stm::tm_record_stack_bounds();
-    while (!g_stop.load()) {
-        QueueItem item;
-        {
-            std::unique_lock lock(g_queue_mutex);
-            g_queue_cv.wait(lock, []{
-                return !g_queue.empty() || g_stop.load();
-            });
-            if (g_stop.load()) break;
-            item = g_queue.front();
-            g_queue.pop();
-        }
-        bool done = false;
-        while (!done) {
-            tm_begin();
-            if (tm_longjmp_ret != 0) continue;
-            item.fn(item.arg);
-            done = (tm_end() == TM_COMMITTED);
-        }
-    }
-    tm_exit_thread();
-}
-\end{lstlisting}
-
-\noindent
-The Rust executor (\rep{explicit\_api/rust/workspace/tm-executor/src/lib.rs})
-provides the same pattern through a \texttt{QueueExecutor} trait with
-\texttt{execute} (synchronous) and \texttt{execute\_async} (returns a
-\texttt{JoinHandle}) methods.
-
-\paragraph{Concurrency and the TM invariant.}
-When multiple workers dequeue transactions simultaneously, the TM backend
-provides the same conflict detection and atomicity guarantees as the
-synchronous case.  The bank invariant holds: if two concurrent transfers
-touch disjoint accounts, both commit; if they touch the same account, one
-aborts and retries.  The queue layer adds no new correctness obligations
-beyond ensuring that each worker calls \texttt{tm\_init\_thread()} before
-its first transaction and \texttt{tm\_exit\_thread()} at shutdown.
-
-\paragraph{The global registration problem.}
-Static TM-annotated globals (e.g.\ \texttt{static TM int counter}) live in
-the BSS segment, not in the TM region allocated by \texttt{tm\_malloc}.
-The \texttt{LLVM\_TM\_ADDR\_CHECK} macro would normally bypass them.  The
-companion solves this with \texttt{tm\_register\_global()}, which the
-instrumentation pass calls during \texttt{main()} for every TM-annotated
-global.  Registered globals are tracked in a global vector and exempted from
-the bypass, ensuring that queue worker threads see consistent values.
+TLC has checked tens of millions of states across these models with no
+violations: the GUST model ran 1.9M states on the small configuration (0
+errors) and over 25M on the large one without violations before timing out.
+The models caught real bugs --- most notably the \texttt{startTS} vs.\
+\texttt{startTS+1} snapshot hole of Section~\ref{sec:gust}, found first in
+the model (via \texttt{InvNoMissedConflict}) and then confirmed in the
+kernel. The \texttt{\_\_ballot\_sync} divergence class of
+Section~\ref{sec:ballot}, by contrast, was caught by on-target testing and
+review, not by the models: the all-lanes ballot contract is a hardware
+convention that sits below the models' abstraction, and no amount of TLC
+state exploration would have found it. That division of labour is the
+lesson: TLA+ says \emph{what} must be true; only the hardware says
+\emph{how} it will let you express it.
 
 \section{Summary}
-\begin{itemize}
-    \item Persistent TM adds a crash invariant to the ordinary money-conservation invariant; the durable worked example shows the minimum journal needed.
-    \item The companion's persistent backends span a spectrum of \emph{where durability enters the commit path}: inside the lock (PersistentSGL), after visibility in a background flusher (DUDETM), batched at epoch boundaries (SPHT), and not at all yet (the NV-HTM scaffold). Each is pinned by a checked TLA+ model whose invariants name the obligation they discharge (Table~\ref{tab:durability-entry-points}).
-    \item Distributed TM turns validation into a protocol; the model-checking example pins the failure boundary at ``a decision without a completed data update,'' and the TiKV backend shows the same API spanning machines once addresses become region offsets.
-    \item Both extensions keep the same TM API --- only the commit path and its ordering obligations change.
-\end{itemize}
 
-Persistent and distributed TM are therefore best understood as commit-path
-extensions. The speculative body of the transaction still reads, writes,
-validates, and aborts. The difference is that commit becomes an externally
-recoverable fact. PersistentSGL makes that fact a durable journal record.
-Percolator-style distributed TM makes it a primary-key decision. In both cases,
-the implementation must answer the same recovery question: after a crash or
-partition, which transactions are committed, which are aborted, and which
-updates remain to be completed?
+\begin{itemize}
+    \item GPUs have no cache coherence, no speculative hardware, and no vendor
+          TM: GPU TM is software TM, run at a scale and under constraints the
+          CPU design space never anticipated.
+    \item Lock-step warp execution turns spinning into self-abort and conflict
+          detection into predicate voting via \texttt{\_\_ballot\_sync}.
+    \item Read/write sets that do not fit on chip, coalescing that works
+          against scattered accesses, and thousands of concurrent transactions
+          all push designs toward multi-versioning and batch commit.
+    \item The recurring winners --- CSMV's client--server commit and GUST's
+          AtomicINC commit log --- trade a serial CAS for an increment, and a
+          read abort for a consistent snapshot.
+    \item Hardware proposals (KILO TM, WarpTM, snapshot-isolation HTM) show the
+          design space is real but simulated; the software systems show it is
+          live silicon reality.
+    \item Formal models at warp granularity are a practical, not academic,
+          tool: they caught the very bugs (the ballot contract, the snapshot
+          threshold) that the GPU community has repeatedly tripped over.
+\end{itemize}
 
 \section{Exercises}
 \begin{enumerate}
-    \item \emph{[implementation]} Extend the durable bank example in \S\ref{sec:durable-bank-example} to four accounts and two concurrent worker threads. Keep one global durable commit lock, then record the throughput change relative to an in-memory SGL version. Do not claim durability until the journal and data writes have both been forced to storage.
-    \item \emph{[verification]} Modify the TLA+ model in \S\ref{sec:distributed-commit-example} so that the coordinator may crash after deciding commit but before applying the update. Add a recovery action and check that \texttt{MoneyConserved} and \texttt{FloorsHold} still hold.
-    \item \emph{[implementation]} Replace the single intent record in \S\ref{sec:durable-bank-example} with a bounded redo-log array. Add sequence numbers, reject torn records during recovery, and keep redo idempotent.
-    \item \emph{[verification]} Extend the Percolator-style model so that secondary cleanup may be skipped nondeterministically. Add a recovery action that consults the primary decision and prove that committed transfers eventually reach \texttt{done} under weak fairness.
-    \item \emph{[theory]} Compare PersistentSGL, Romulus, and TiKV-style two-phase commit as instances of the same abstract rule: a commit decision must become recoverable before its effects are required to be visible.
-    \item \emph{[verification]} The SPHT model's \texttt{TSXvsSGLSafety} invariant states $\forall t:\ \texttt{sgl} \neq 0 \Rightarrow \lnot\texttt{tsx\_mode}[t]$ --- when any thread occupies the global-lock fallback, no thread may be in a hardware transaction. Explain why group commit needs this \emph{system-wide} exclusion rather than a per-thread one: what goes wrong if the lock holder excludes only its own TSX mode while another thread keeps executing an RTM transaction? Then modify the model's SGL-entry guard to permit exactly that overlap and report which checked invariant fails first.
-    \item \emph{[implementation]} Add a second background flusher thread to your Exercise~3 redo-log bank so that persistence trails visibility exactly as DUDETM prescribes: the committing thread never blocks on I/O. Demonstrate a crash window (kill the process between visibility and persistence) and show that recovery reconstructs the visible-but-undurable state from the log.
-    \item \emph{[literature]} Read Peng and Dabek's Percolator paper
-          \cite{peng10percolator}, which this chapter's TiKV-style model
-          abbreviates.  Map its per-row locks and commit timestamps onto
-          the TLA+ model of \S\ref{sec:distributed-commit-example}, and
-          identify one guarantee of the paper (e.g.\ write-write
-          conflict resolution, the two-phase protocol under replication)
-          that the book's abstract model does not represent.
+    \item \emph{[theory]} A warp of 32 lanes runs a transaction that spins on a lock held by
+          another lane of the same warp. Explain on which hardware this
+          deadlocks and why. How does PR-STM's priority stealing turn the same
+          situation into progress?
+    \item \emph{[theory]} GPU-STM sorts locks to avoid deadlock while PR-STM steals locks by
+          priority. Contrast the two contention policies under (a) uniformly
+          random and (b) skewed (hot-spot) access patterns.
+    \item \emph{[theory]} GUST uses \texttt{snapshot = startTS}, not \texttt{startTS + 1}.
+          Construct a two-transaction history where the $+1$ variant lets an
+          in-flight writer's version appear in a reader's snapshot, and
+          explain why neither CCT nor MRV catches it.
+    \item \emph{[theory]} Using the ballot pattern of Section~\ref{sec:ballot}, compute the
+          number of aborted lanes in a warp via \texttt{\_\_popc} on the
+          ballot result, and explain why the ballot cannot be moved inside a
+          lane-guarded branch.
+    \item \emph{[theory]} CSMV dedicates server warps to committing client warps' writes.
+          Identify the serialisation point this creates, and propose how a
+          workload dominated by read-only transactions could bypass it.
+    \item \emph{[verification]} Using the TLA+ workflow of Part~III, sketch an invariant for a
+          warp-level commit log that would have caught the GUST snapshot bug.
+          What bounds would you impose to keep TLC tractable?
+\item \emph{[implementation]} Extend the kernel in Section~\ref{sec:gpu-bank-transfer-example} with a bounded per-lane retry counter. The retry loop must not contain a ballot whose trip count differs by lane. Report, for a fixed input batch, the number of commits, aborts, and transactions that exceeded the retry bound.
+
+\item \emph{[verification]} Add an explicit abort action to the TLA+ model in Section~\ref{sec:gpu-bank-tla-example} that leaves \texttt{bal} unchanged. Check that the conservation, floor, and type invariants remain true.
+
+\item \emph{[theory]} Compare the serialisation points in Table~\ref{tab:gpu-commit-strategies}. For each row, identify whether the bottleneck is metadata allocation, validation, version installation, or publication, and explain which bottleneck is most sensitive to increasing warp count.
+
+\item \emph{[literature]} Read the KILO TM paper \cite{fung11kilotm} and the
+          GUST technical report \cite{nunes23gust}.  KILO TM validates with
+          hardware-managed read/write logs and Bloom filters; GUST with
+          CCT/MRV over a commit log.  Compare the two \emph{validation
+          units} --- where the validation state lives, what it is checked
+          against, and what an abort costs in each.
+
+\item \emph{[open]} Every GPU TM in this chapter is either a simulation
+          proposal (KILO TM, WarpTM, snapshot-isolation HTM) or a research
+          system (CSMV, GUST, PR-STM); none ships in a commercial SDK.
+          Argue a position: will GPU TM ever be productized, or should GPUs
+          expose transaction-like higher-level APIs (e.g.\ atomic
+          task/stream abstractions) instead, with TM confined to research?
+          State the hardware or software change your position depends on.
 \end{enumerate}
 
-\textbf{How to check your work.} The \emph{[implementation]} exercises are
-verified with the companion: extend the durable bank of
-\S\ref{sec:durable-bank-example} to four accounts and a bounded redo-log
-array, and (Exercise~8) split persistence onto a background thread following
-the DUDETM discipline of \S\ref{sec:persistent-backends}.  The
-\emph{[verification]} exercises are checked with TLC against
-\S\ref{sec:distributed-commit-example} (crash recovery,
-\texttt{MoneyConserved}, \texttt{FloorsHold}; see
-Appendix~\ref{chap:pluscal-quick-ref}), with Exercise~7 checked against the
-repository's \texttt{docs/proofs/SPHT.tla} (graded on your argument for
-system-wide exclusion and on correctly identifying the first invariant the
-weakened guard violates).
-The \emph{[theory]} exercise is graded against
-Tables~\ref{tab:persistent-distributed-taxonomy}
-and~\ref{tab:durability-entry-points}.  The \emph{[literature]} exercise is
-graded on whether the guarantee you name as unrepresented is real in the
-paper and genuinely absent from the book's model.
-
-\index{commit intent}
-\index{idempotent redo}
-\index{persistent commit point}
-\index{durable publication}
-\index{storage ordering}
-\index{fsync}
-\index{journal clearing}
-\index{crash invariant}
-\index{primary key commit}
-\index{secondary cleanup}
-\index{participant vote}
-\index{coordinator recovery}
-\index{prepare phase}
-\index{commit decision}
-\index{PersistentSGL recovery}
-\index{TiKV}
-\index{Percolator two-phase commit}
-\index{Romulus}
-\index{NV-HTM}
-\index{DistributedSGL}
+\textbf{How to check your work.} The \emph{[implementation]} exercise is
+verified with the companion: extend the kernel of
+\S\ref{sec:gpu-bank-transfer-example} with the bounded per-lane retry
+counter, keeping the ballot of \S\ref{sec:ballot} outside the lane-guarded
+branch.  The \emph{[verification]} exercises are checked with TLC against
+\S\ref{sec:gpu-bank-tla-example} (conservation, floor, and type invariants;
+see Appendix~\ref{chap:pluscal-quick-ref}).  The \emph{[theory]} exercises
+are graded against \S\ref{sec:ballot}, \S\ref{sec:gust}, and
+Table~\ref{tab:gpu-commit-strategies}.  The \emph{[literature]} exercise is
+graded on whether your ``validation unit'' contrast is drawn accurately
+for both papers.  The \emph{[open]} exercise has no single right answer;
+it is graded on whether you state the hardware or software change your
+position depends on and defend it against the strongest objection.

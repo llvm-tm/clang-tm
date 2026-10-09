@@ -132,7 +132,7 @@ A TM read path typically needs only relaxed plus a compiler fence.}
 
 \section{Language Integration Case Studies}
 
-The two case studies in this section sit at opposite ends of the
+The first two case studies in this section sit at opposite ends of the
 integration spectrum. Rust integrates by \emph{ruling things out}: the
 borrow checker removes data races before the program runs, and the TM
 layer supplies only the multi-location atomicity that the type system
@@ -142,7 +142,11 @@ plugin) integrates by \emph{rewriting}: the compiler instruments the
 accesses an annotation marks and hands them to the runtime. Reading the
 two side by side makes the trade-off concrete: what each mechanism proves
 at compile time, what it leaves to the runtime, and what breaks when the
-contract is violated.
+contract is violated. The remaining subsections widen the lens: Haskell
+and Clojure as worked contrasts --- languages that redesigned shared
+state so that TM becomes the natural, indeed only, way to mutate it ---
+then Scala and Python as library-level adoptions, and finally the
+negative space: why JavaScript, PHP, and Kotlin never grew one.
 
 \subsection{Rust: The Borrow Checker and TM}
 
@@ -198,6 +202,23 @@ are inaccessible), and the cells may be shared across threads only because
 two writes commit together. That is the runtime's obligation, and it is
 discharged by the same OCC protocols as the C++ backends of Part~IV.
 
+One design consequence deserves its own paragraph, because it is where Rust's
+safety and TM's abort semantics collide. The C++ backends abort with
+\texttt{sigsetjmp}/\texttt{siglongjmp} (\S\ref{sec:crash-without-opacity}
+uses exactly that machinery): the jump unwinds the stack by force, running
+no destructors. In C++ that is already a hazard we manage by convention; in
+Rust it would be unsound by definition, because the language guarantees
+\texttt{Drop} runs. So the companion's Rust runtime aborts differently: a
+contention abort is a panic carrying a private \texttt{TmxAbort} payload,
+unwound through the transaction body and caught by the
+\texttt{catch\_unwind} inside \texttt{transaction()}; every local's
+\texttt{Drop} runs on the way out, and a real user panic is re-raised rather
+than swallowed as an abort. That single mechanism choice explains the shape
+of the API: the transaction is a closure, not a begin/commit pair, because
+an API that returns across frames needs an unwindable stack to be safe.
+Appendix~\ref{chap:rust-mistakes} collects the further traps that live where
+\texttt{unsafe} code, \texttt{Drop}, and TM aborts overlap.
+
 \subsection{Language-Integrated Annotations for TM}
 
 GCC's \texttt{\_\_transaction\_atomic} is the canonical example of a
@@ -243,6 +264,185 @@ Rust trait boundary & safe wrapper around \texttt{UnsafeCell} & runtime owns int
 \hline
 \end{tabular}
 \end{table}
+
+\subsection{Haskell: The Pure Escape Hatch}
+\index{Haskell}\index{GHC!STM monad}\index{retry}
+
+Haskell has no mutable heap to instrument, and that absence turns the
+integration question inside out. The language's concurrency story began with
+Concurrent Haskell's message-passing processes \cite{peytonjones96concurrent};
+its shared-mutable-state story landed later, as the \texttt{STM} monad in the
+GHC runtime \cite{ghcstm} --- and it is the purest implementation of
+transactional memory that exists, in the sense that transactional code has
+nowhere else to touch.
+
+\begin{lstlisting}[language=Haskell, caption={Bank transfer and blocking
+audit in GHC's STM. \texttt{retry} aborts the transaction and registers the
+read set as the wait set: \texttt{atomically (report a b)} suspends until some
+transaction writes \texttt{a} or \texttt{b}.}, label={lst:haskell-stm}]
+transfer :: TVar Int -> TVar Int -> Int -> STM ()
+transfer from to amt = do
+  f <- readTVar from
+  if f < amt then retry
+             else do writeTVar from (f - amt)
+                     t <- readTVar to
+                     writeTVar to (t + amt)
+
+report :: TVar Int -> TVar Int -> STM (Int, Int)
+report a b = do
+  x <- readTVar a;  y <- readTVar b
+  check (x >= 0 && y >= 0)   -- check c  ==  if c then return () else retry
+  return (x, y)
+
+main = atomically (transfer checking savings 10)
+\end{lstlisting}
+
+Three properties fall out of the type system rather than the runtime, and
+they are exactly the guarantees Chapter~7 says a TM must buy for itself.
+
+\begin{itemize}
+\item \textbf{The observer boundary is language-enforced.} All shared mutable
+state lives in \texttt{TVar}s, and the only way to read one is inside
+\texttt{STM}, which only \texttt{atomically} can run. There is therefore no
+privatization gap: no ordinary code path can observe uncommitted writes,
+because uncommitted writes exist only in a transaction's local structure and
+the language cannot express a load of that structure. The crash class of
+\S\ref{sec:crash-without-opacity} is not ``prevented by the runtime'' in
+Haskell; it is \emph{inexpressible}. The \texttt{unsafePerformIO} escape
+hatch --- a pointer into the raw heap --- is precisely where GHC's own
+documentation warns that STM guarantees evaporate: the boundary we drew for
+databases in Figure~\ref{fig:db-tx-landscape} is, once again, the whole game.
+\item \textbf{Blocking is transactional.} \texttt{retry} (Listing
+\ref{lst:haskell-stm}) aborts, remembers the read set, and re-runs when any
+read location is written. Waiting needs no locks, no condition variables, and
+no lock-order discipline --- deadlocks from lock holding are structurally
+impossible, and the wait-for set is the read set, which the runtime already
+tracks. This is the mechanism Chapter~13 uses for GPU warp suspensions and
+Chapter~15's retry model treats as validation failure with external
+wake-up.
+\item \textbf{Composition is substitution.} \texttt{STM} is a monad:
+transactions compose by ordinary function application, and
+\texttt{orElse} offers transactional disjunction --- try one, on
+\texttt{retry} fall back with all state restored. Nesting that Chapter~2
+flattened by hand comes for free because a composed \texttt{STM} block either
+runs as one atomic unit or is discarded whole.
+\end{itemize}
+
+Implementation-wise, GHC's runtime is an optimistic multi-version STM that a
+reader of Part~IV will recognize \cite{ghcstm}: each transaction keeps private
+\emph{multi-version tokens} per \texttt{TVar}, reads need no locks, commit
+takes a single global lock and bumps a commit clock, and abort simply
+discards tokens. It resembles NOrec with per-location versioning --- same
+promise (opaque serializability), similar cost structure (global serialization
+point at commit). Haskell thus gives the book's cleanest existence proof that
+strong semantics and a simple runtime coexist --- and it was obtained by
+removing the shared heap, a move unavailable to C.
+
+\subsection{Clojure: References, not Cells}
+\index{Clojure}\index{ref (Clojure)}\index{io (Clojure)}
+
+Clojure reaches the same summit from the other side: instead of removing the
+mutable heap, it removes mutable \emph{values}. The language's reference type
+\texttt{ref} points at an immutable value; transactions coordinate the
+swapping of refs between immutable values \cite{clojurestm}. A half-built map
+is not a thing that exists --- a value is built privately, then a ref points
+at it at commit.
+
+\begin{lstlisting}[caption={Transfer, blocking read, and the \texttt{io!}
+discipline in Clojure.}, label={lst:clojure-stm}]
+(def checking (ref 100))
+(def savings  (ref 200))
+
+(defn transfer [from to amt]
+  (dosync                            ; transaction body
+    (when (>= @from amt)             ; snapshot read
+      (alter from - amt)
+      (alter to   + amt))))
+
+(defn balance-report [a b]
+  (sync (refset-of a)                ; block until 'a' changes; no tx needed
+    (println @a @b)))
+
+(defn notify! [msg]
+  (io! (println msg)))               ; io! THROWS if called inside dosync
+\end{lstlisting}
+
+The ladder of Chapter~7 places Clojure precisely: reads come from a
+consistent snapshot; \texttt{alter} validates on write-write conflicts
+(first updater wins); reads never abort a commit. That is snapshot isolation
+--- write skew is admitted, and the language's own documentation says so ---
+which is tolerable in Clojure for the reason \S\ref{sec:iso-not-in-tm} gives
+for databases: observers never hold a pointer into the middle of a value, so
+an anomaly yields a stale decision about an immutable thing, not a dangling
+reference to a torn one. The design carries three lessons for the rest of
+this book.
+
+\begin{itemize}
+\item \textbf{Values as snapshots.} Because refs swap between immutable
+values, a reader's view is always internally consistent by construction ---
+the mechanism behind Figure~\ref{fig:db-tx-landscape} in a language without
+a server. Chapter~14's multi-version backends do the same trick per object;
+Clojure does it globally by fiat of the type system (all values are
+immutable; mutation is reassignment).
+\item \textbf{Privatization by convention, enforced.} \texttt{io!}
+(Listing~\ref{lst:clojure-stm}) declares ``this side effect must not run
+speculatively'': executing it inside a transaction throws immediately, and
+outside one it runs normally. Compare Chapter~2's privatization hazard --- a
+C program \emph{hopes} it published safely; a Clojure program's publish
+points announce themselves. The \texttt{!} naming convention on side-effecting
+functions makes the transactional boundary a visible part of the API surface.
+\item \textbf{Validation relaxation as a knob.} \texttt{commute} marks an
+update as commutative (metadata counters, set inserts), exempting it from
+the WW first-winner rule and reducing aborts at the price of weaker read
+guarantees --- an explicit, programmer-facing dial between the rungs of
+Figure~\ref{fig:iso-ladder}, in a language whose default is near its top.
+\end{itemize}
+
+\subsection{Scala and Python: Library STM Where the VM Removed the Excuse}
+\index{Scala}\index{Python}\index{pySTM}
+
+Two more languages host transactional memories as libraries, and their
+histories explain exactly when STM gets adopted rather than designed in.
+Scala's \texttt{scala.concurrent.stm} puts shared state in \texttt{Ref}
+cells with an \texttt{atomic \{ \}} block; reads validate lazily, and
+\texttt{orRetry} provides the blocking idiom of Listing
+\ref{lst:haskell-stm} inside an imperative host. It never became Scala's
+default concurrency story --- the ecosystem went to message passing
+(actors) --- but its \emph{transformer} API, which passes the current value
+through a function rather than computing new values from separately-read
+ones, remains the cleanest expression of commutative updates anywhere.
+
+Python's case is a controlled experiment. CPython's global interpreter lock
+makes cross-thread mutation of plain objects ``accidentally'' sequenced, so
+STM answers no question there; Jython and IronPython run threads natively,
+have no GIL, and carry no built-in lock --- and exactly those dialects grew
+\texttt{pySTM} \cite{pystm}: decorators marking transactional classes,
+\texttt{with transaction():} blocks, optimistic validation with the usual
+retry semantics. STM appeared precisely where shared mutable state first
+became real. It is the same lesson Haskell and Clojure teach from the
+opposite direction: transactional memory is the shared-mutable-state
+technology, and a language adopts it at exactly the rate that it commits to
+sharing mutable state.
+
+\subsection{The Negative Space: JavaScript, PHP, and Kotlin}
+\index{JavaScript}\index{PHP}\index{Kotlin}\index{STM!absent from languages}
+
+No mainstream JavaScript, PHP, or Kotlin runtime offers transactional memory,
+and the absence is not lag --- it is diagnosis. STM answers three questions
+that must all be present: threads share memory; values are mutable in place;
+the programmer needs multi-location atomicity as a primitive. JavaScript and
+PHP answer away the first: their concurrency models are event loops and
+message passing (Web Workers post messages; SharedArrayBuffer exists for
+atomics, but the ecosystems standardized on passing snapshots, not sharing
+mutation). Kotlin answers away the third for the same reason Clojure does,
+in reverse: coroutines and channels give structured confinement, so the
+need to share mutated state across threads is designed out at the
+programming-model level, and the JVM's stdlib carries no STM to import.
+The languages that grew STM (Haskell, Clojure, Java briefly via libraries
+and the C++ TS attempt) share one property: they kept mutable shared state
+and needed a discipline for it. The ones that never grew it removed the
+state, the sharing, or the need. A book about STM should be able to say what
+it is \emph{not} for, and these three are the answer.
 
 \section{Worked Example: Atomic Operations for a Counter}
 \label{sec:atomics-example}
@@ -521,7 +721,13 @@ atomicity. A type system that prevents data races still cannot enforce
 atomicity across multiple memory locations without TM support; the Rust
 listings of this chapter (Listings~\ref{lst:rust-bank}
 and~\ref{lst:counter-rust}) show where the language's guarantees end and
-the runtime's begin.
+the runtime's begin. The survey subsections add the contrast case: Haskell
+and Clojure reach opacity-like safety by \emph{redesigning shared state} ---
+no raw heap, or immutable values behind refs --- making the crash class of
+\S\ref{sec:crash-without-opacity} inexpressible rather than merely prevented,
+while Scala and Python show library STM appearing exactly where shared mutable
+state becomes real, and JavaScript, PHP, and Kotlin show what its absence
+means: the questions were designed away first.
 
 The key takeaway for the rest of the book is that the language integration is
 a boundary. The compiler decides what is instrumented; the runtime decides how
@@ -584,6 +790,15 @@ distinction into several concrete atomicity properties.  Choose one
 property from the paper, restate it in this chapter's terminology, and
 give one program that the property protects that plain opacity of the
 \texttt{atomic} block does not.
+
+\item \emph{[theory]} Haskell and Clojure both make the crash class of
+Section~\ref{sec:crash-without-opacity} inexpressible, by opposite means:
+Haskell removes the mutable heap, Clojure removes mutable values. For each
+language, name the feature that plays the role of the database's protocol
+boundary, and explain why neither mechanism can be retrofitted onto a C
+program by runtime cooperation alone. Then identify the one escape hatch in
+each language (one per language) through which the crash class re-enters, and
+what it costs the programmer.
 \end{enumerate}
 
 \textbf{How to check your work.} The \emph{[implementation]} exercises are
@@ -592,7 +807,9 @@ verified with the companion: extend Listing~\ref{lst:abi-safe-bank} with
 Exercise~3.  The \emph{[verification]} exercises are checked with TLC against
 Listing~\ref{lst:bank-tm-atomicity} (\texttt{InvMoney}, \texttt{InvFloor}; see
 Appendix~\ref{chap:pluscal-quick-ref}).  The \emph{[theory]} exercises are
-graded against \S\ref{sec:atomics-example}.  The \emph{[literature]}
+graded against \S\ref{sec:atomics-example}.  The final \emph{[theory]}
+exercise is graded against \S\ref{sec:iso-not-in-tm}: the boundary analysis
+there is the model answer.  The \emph{[literature]}
 exercise is graded on the accuracy of your restatement: the chosen
 property must be a real one from the paper, and your counterexample must
 be one the property (and not plain block opacity) protects.

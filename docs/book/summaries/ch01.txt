@@ -1,28 +1,38 @@
-CHAPTER 01 — Transactional Memory Foundations
-Part: I (Motivation and Overview)
-Lines: 453 | Sections: 8 | Figures: 3 | Tables: 1 | Listings: 2 | TikZ: 0
+CHAPTER 01 — The Locking Crisis (Why Transactional Memory?)
+Part: I (Why Transactional Memory?)
+Lines: ~454 | Sections: 8 | Subsections: 0 | Figures: 1 | Tables: 1 | Listings: 5 | TikZ: 1
 
-PURPOSE: Introduce the core problem of concurrent memory access and present
-transactional memory as a solution. The bank transfer example is introduced
-as the running example throughout the book.
+PURPOSE: Pure-motivation chapter (no TM exposition): shared memory's history
+sets the stage, then locks are shown to fail at composition. The "innocent
+change" that introduces a second lock and inverts lock order is the book's
+founding bug; the bank transfer enters here as the running example.
 
 SECTIONS
-- The Concurrency Problem
-    Data races, critical sections, lock-based programming drawbacks.
-- Transactional Memory Overview
-    Transaction concept, ACID properties, hardware vs software TM.
-- The Bank Transfer Example
-    Shared state, atomic transfer, the running example.
-- TM API Design
-    tm_begin, tm_end, tm_read, tm_write, tm_commit, tm_abort.
-- Correctness Conditions
-    Strict serializability, opacity, progress conditions.
-- Hardware Transactional Memory
-    RTM (Haswell+, Ivy Bridge), XABORT, HLE, TSX fundamentals.
-- Taxonomy of TM Systems
-    Optimistic vs conservative, single-version vs multi-version,
-    thread-level speculation vs word-level tracking.
+- Why Synchronization Became a First-Class Problem
+    Three eras (distributed -> DSM -> multicore/synchronization era); how
+    each left its stamp on coordination problems. (History prose; sets up
+    Ch.2's own telling.)
+- The Cost of Mixing Synchronization with Logic
+    Locking crisis: critical sections as a second language; deadlock,
+    priority inversion, lost wake-up, data races, Heisenbugs.
+- Composability -- The "Innocent Change" Problem
+    Lock-order obligations are not in interfaces; two correct components
+    deadlock when composed. The thesis of the chapter.
+- Running Example: The Innocent Change in Code
+    Bank transfer: global-lock version (lst:transfer-basic), the innocent
+    two-lock change with ordering obligation (lst:transfer-safe), same logic
+    as a transaction (lst:transfer-atomic).
+- Worked Example: Reproducing the Two-Lock Deadlock
+    Compilable pthread deadlock (lst:two-lock-deadlock); the deadlock comes
+    from opposite orders in transfer_safe vs audit, not either section alone.
+- Worked Example: Model Checking the Bank Invariant
+    BankAtomic TLA+ model (lst:bank-atomic): money conservation + floor
+    without mutexes or lock order.
+- Summary
+- Exercises
 
-FIGURES: fig:tx-lifecycle (tx lifecycle as Markov chain)
-TABLES: tab:tm-taxonomy (taxonomy of TM designs)
-LISTINGS: 1 (bank transfer skeleton)
+FIGURES: fig:two-lock-deadlock (two-lock deadlock interleaving, TikZ)
+TABLES: tab:locking-crisis-taxonomy (failure modes of hand-rolled locking)
+LISTINGS: 5 (transfer-basic, transfer-safe, transfer-atomic,
+          two-lock-deadlock, bank-atomic TLA+)
+CITES: lamport78 (era-1 framing)

@@ -1,0 +1,23 @@
+APPENDIX H — Common Rust Mistakes in Transactional Memory
+Lines: ~203 | Sections: 6 (\section*, unnumbered) | Listings: 5
+
+PURPOSE: Field guide of the five recurring Rust-vs-TM mistakes, each with a
+wrong-then-right listing.
+
+SECTIONS (all \section*)
+- Mistake 1: Forgetting the Abort Signal
+    Treating a contention abort as a returned Result instead of an unwind;
+    the transaction closure must be panic-through-safe.
+- Mistake 2: Closure Captures and Lifetime Errors
+    Capturing &mut across the retry boundary; what to capture instead.
+- Mistake 3: Send and Sync Violations
+    Moving TxHandle/!Sync state across threads; why transaction() bounds the
+    handle to one thread.
+- Mistake 4: Incorrect Memory Ordering
+    Hand-rolled atomics around TmCell; which fences the runtime already owns.
+- Mistake 5: Mutable Aliasing Through Unsafe
+    Aliasing the UnsafeCell interior outside a transaction; breaks the
+    opaque-promise and the borrow invariant both.
+- Summary
+
+CITES: (none; companion-code guide)

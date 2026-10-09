@@ -1,46 +1,29 @@
-CHAPTER 09 — Speculative Designs: NOrec and Beyond
+CHAPTER 09 — Non-Speculative Designs: Single Lock and Serializers
 Part: IV (Implementing Transactional Memory)
-Lines: ~587 | Sections: 15 | Figures: 2 | Tables: 3 | Listings: 7 | TikZ: 2
+Lines: ~424 | Sections: 6 | Figures: 1 | Tables: 1 | Listings: 2 | TikZ: 1
 
-PURPOSE: The speculative STM family: NOrec (value-based validation), TL2
-(global-clock), TinySTM variants (WBCTL/WBETL/WT), multi-version STMs
-(JVSTM, MVLog), plus a backend taxonomy of the whole companion repo.
+PURPOSE: Simplest TM designs that reduce execution to a sequential history:
+single global lock (SGL) and thread-serializer / queue-based TM. Proof shape:
+sequential equivalence.
 
 SECTIONS
-- NOrec: Value-Based Validation
-    Read/commit protocol; commit lock; global clock; validation.
-- Worked Example: The NOrec Read Path
-- Worked Example: NOrec Bank Transfer
-- Worked Example: TL2 Read Barrier
-- TL2: The Textbook Global-Clock STM
-    TL2 timeline, versioned locks.
-- TinySTM Design Variants
-    WBCTL, WBETL, WT (write-back eager, write-back lazy, write-through).
-- Multiversion STMs: JVSTM and MVLog
-    Versioned boxes (JVSTM); commit-log MVCC (MVLog).
-- Worked Example: MVLog Snapshot Read
-- Comparing the Family
-    family-matrix: read validation rule, write ownership, linearization point.
-- Backend Taxonomy: The Repository in One Table
-    Every repo backend -> family -> where discussed (Table tab:backend-taxonomy).
-- Semantic Obligations Checklist
-- Worked Example: The TL2 Commit Path
-- Worked Example: Account-Floor PlusCal Model
-- A Complete NOrec in Rust (sec:norec-rust-complete)
-    Whole algorithm end to end in safe Rust (~200 lines, std only): Word trait,
-    Region (sequence clock with commit lock in bit 0 + word heap), TmCell<T>,
-    Tx {rv, ws, rs}; retry loop; read = write-set lookup then
-    capture-read-recheck against the BEGIN version (validates whole read-set
-    implicitly); commit = CAS lock bit, re-validate reads under lock, write
-    back, publish rv+2 with Release. Fixed-snapshot policy (conservative vs
-    paper's forward extension). Memory orderings: Relaxed data + one
-    Release/Acquire clock variable. Bank demo: 8 movers + checker thread,
-    money conserved, 170k-233k mid-flight snapshot checks pass. Verified:
-    rustc 1.96, source at docs/book/listings/norec_rust_complete.rs.
-    Exercises 12 (abort classification) and 13 (snapshot-extension proof).
+- Single Global Lock TM
+    One mutex; begin acquires, end releases; no speculation.
+- Thread-Serializer / Queue-Based TM
+    Tasks submitted to a queue, executed one at a time.
+- Worked Example: Bank Transfer Under SGL
+- Worked Example: Queue Serializer With Per-Task Descriptors
+- Calvin: Static Transactions and Deterministic Execution (sec:calvin-static)
+    Static declarations (read-set, write-set, body) → sequencer assigns total
+    order → snapshot declared addresses → body runs against snapshot → writes
+    published. No abort-retry loop (stale snapshots rejected at declaration,
+    not execution). Deterministic commit order. Trade-off: access sets must be
+    known upfront (natural for message handlers, batch work; awkward for
+    interactive code). Companion "calvin" backend = two-phase OCC, not this.
+    3 listings (state, execute, demo bank transfer). Exercises 10-11.
 - Summary
 - Exercises
 
-FIGURES: fig:norec-bank-state-machine (NOrec commit), fig:tl2-timeline
-TABLES: tab:family-matrix, tab:backend-taxonomy, tab:snapshot-taxonomy
-LISTINGS: 11 (NOrec read path, bank, TL2 barrier, MVLog read, TL2 commit, PlusCal model+cfg, NOrec-in-Rust state/begin/readwrite/commit/demo)
+FIGURES: fig:nonspec-state-machine (SGL admits by lock; serializer by queue)
+TABLES: tab:nonspec-taxonomy (non-speculative serializers)
+LISTINGS: 2 (SGL bank, queue serializer)

@@ -2,8 +2,8 @@
 
 One short plain-text file per chapter lives in this directory:
 
-- `ch01.txt` ... `ch19.txt` — the 19 main chapters
-- `app01.txt` ... `app07.txt` — the 7 appendices
+- `ch01.txt` ... `ch20.txt` — the 20 main chapters
+- `app01.txt` ... `app09.txt` — the 9 appendices
 - `front.txt` — front matter (Preface, Map of Protocols and Acronyms)
 
 ## Purpose

@@ -1,439 +1,689 @@
-\chapter[Transaction API Design]{Transaction API Design – Software Engineering Perspectives}
-\index{transaction API design}\index{classic synchronous API}\index{language-integrated transactions}\index{transactional futures}\index{object-oriented transactional interfaces}
+\chapter[The Semantics of Transactions]{The Semantics of Transactions:
+Isolation Levels and Their Cost}
+\label{chap:isolation}
+\index{isolation level}\index{snapshot isolation}\index{serializability!cost of}
+\index{anomaly}\index{write skew}\index{phantom}
 
-A transactional-memory backend is only useful if programmers can call it correctly. The algorithm may be TL2, NOrec, SGL, TSC-TM, TinySTM, SwissTM, JVSTM, MVLog, or a distributed Percolator-style coordinator, but the application sees a smaller surface: begin, read, write, commit, abort, retry, and sometimes a higher-level wrapper around them. API design is therefore not decoration. It determines where instrumentation happens, who owns retry, which side effects are safe, and how much of the runtime contract is visible in ordinary source code.
+Part~III closed with the strongest conditions in the book: serializability,
+strict serializability, opacity. Strength is not free, and it is not the only
+direction the space has. Databases spent fifty years exploring what lies
+\emph{below} serializability, built a named taxonomy of the rungs and the
+anomalies each admits, and developed a working cost theory for the trade. That
+theory is the subject of this chapter. It matters to a TM author for three
+reasons. First, it explains why every backend in Part~IV sits at the top of
+the ladder: the weaker rungs are \emph{structurally} unsound in shared memory
+in a way they are not in a database. Second, the mechanisms invented to
+implement the weaker rungs --- multi-version snapshots, early lock release,
+snapshot thresholds --- are the same mechanisms our backends use while
+guaranteeing the strongest level, and understanding which part of a mechanism
+carries semantics and which part is mere engineering is the difference between
+tuning a backend and breaking one. Third, when TM meets storage
+(Chapter~19), the two worlds collide on exactly this ground: TiKV and
+Percolator speak snapshot isolation, Calvin speaks static transactions, and
+the reader needs one vocabulary to place them all.
 
-This chapter studies that contract from a software-engineering perspective. We keep the two-account bank transfer as the running example: a transaction debits one account, credits another, respects a floor, and preserves total money on the successful path. The examples deliberately use a small API because the companion implementations expose the same synchronous primitives across many backends. More elaborate interfaces are built by moving responsibility among the programmer, the compiler, the library, and the executor.
+This chapter uses the history vocabulary of \S\ref{sec:histories-legality-opacity}
+throughout: histories, committed projections, read-from sources, real-time
+order. Where Chapter~5 built the ladder upward from serializability, this
+chapter descends from it, and then shows where the ladder stops applying.
 
-\section{Classic Synchronous API}
+\section{The Shape of the Space: Dimensions of Transaction Semantics}
+\label{sec:iso-dimensions}
+\index{transaction semantics!dimensions of}
 
-The classic transactional-memory API is a small set of blocking calls:
-
-\begin{center}
-\texttt{tm\_begin()}, \texttt{tm\_read()}, \texttt{tm\_write()}, \texttt{tm\_commit()}, \texttt{tm\_abort()}.
-\end{center}
-
-In the companion codebase this appears in the common denominator exposed by the Part~IV runtimes. An application enters a transaction, performs instrumented loads and stores, and asks the runtime to commit. If the runtime detects a conflict, the transaction aborts and the application retries. The underlying backend decides how conflict detection and validation work: SGL serializes through one lock; TL2 uses versioned ownership records; NOrec validates against a global sequence; TSC-TM uses timestamp-counter ordering; persistent and distributed variants add durability or coordination. The source-level protocol remains the same.
-
-The minimal API hides a transaction descriptor. Each participating thread needs thread-local state: a read set, a write set, a nesting depth or status flag, a retry target, and backend-specific metadata. This is why practical systems often require thread-entry instrumentation. A thread must be initialized before its first transaction and cleaned up at exit. With an executor or task runtime, that requirement moves from ``thread starts once'' to ``worker is prepared before running transactional closures.''
-
-Although the core is byte-oriented, programmers rarely want to write byte loops. Typed wrappers such as \texttt{tm\_read\_i4}, \texttt{tm\_write\_i4}, \texttt{tm\_read\_u8}, or \texttt{tm\_write\_ptr} convert typed operations into a uniform core operation over an address and size. The typed wrapper is not merely syntactic sugar: it fixes alignment, copying, and aliasing conventions at the API boundary. A word-based STM can still implement it by mapping an address to metadata; a byte-based redo log can copy the requested bytes directly.
-
-The awkward part is retry. Many C implementations use \texttt{sigsetjmp}/\texttt{siglongjmp}, or an equivalent non-local control transfer, so that an abort can jump back to the most recent transaction start. This is efficient and keeps application code compact, but it creates a frame-lifetime hazard. If a transaction body stores pointers to stack objects, or relies on C++ destructors to run on every abort path, a non-local jump may invalidate those assumptions. Part~VI studies these hazards in detail. At the API level the lesson is already visible: a small primitive set makes the runtime portable, but it exposes responsibility for replay-safe code.
-
-The set of primitives is deliberately small. Nested transactions, retry policies, allocation protocols, logging conventions, and futures can all be built on top. The smaller the primitive contract, the easier it is for many backends to implement it consistently. The cost is that higher-level safety properties must be enforced by wrappers, coding discipline, compiler integration, or verification.
-
-\begin{figure}[htbp]
-\centering
-\resizebox{\textwidth}{!}{%
-\begin{tikzpicture}[
-    node distance=1.8cm and 2.4cm,
-    state/.style={draw, rounded corners, minimum width=2.8cm, minimum height=0.9cm, align=center},
-    arrow/.style={-{Stealth}, thick}
-]
-\node[state] (outside) {Outside\\transaction};
-\node[state, right=of outside] (active) {Active\\read/write set};
-\node[state, right=of active] (commit) {Commit\\validate};
-\node[state, above right=1.2cm and 1.7cm of commit] (done) {Committed\\visible};
-\node[state, below right=1.2cm and 1.7cm of commit] (retry) {Aborted\\retry};
-
-\draw[arrow] (outside) -- node[above]{\texttt{tm\_begin}} (active);
-\draw[arrow] (active) edge[loop above] node{\texttt{tm\_read}/\texttt{tm\_write}} (active);
-\draw[arrow] (active) -- node[above]{\texttt{tm\_end}} (commit);
-\draw[arrow] (commit) -- node[above left]{valid} (done);
-\draw[arrow] (commit) -- node[below left]{conflict} (retry);
-\draw[arrow] (retry) |- node[pos=0.25, below]{loop} (outside);
-\end{tikzpicture}%
-}
-\caption{Control states exposed by the synchronous transaction API. Backends differ in validation and metadata, but the source-level protocol is the same.}
-\label{fig:api-state-machine}
-\end{figure}
-
-Figure~\ref{fig:api-state-machine} is the programmer-visible state machine. It says nothing about the validation algorithm, but it fixes the obligation of the caller: transactional reads and writes occur only in the active state; visibility occurs only after a successful commit; abort returns control to retry code, not to a half-committed continuation.
-
-\section{Worked Example: The Transfer, on the Classic API}
-\index{TMD API}\index{tm\_begin}\index{tm\_end}\index{retry loop}
-\label{sec:api-example}
-
-Chapter~1's running example, expressed with the synchronous API and an
-explicit retry loop:
-
-\begin{lstlisting}[language=C, caption={transfer on the synchronous API.}]
-int transfer(int *a, int *b, int n) {
-    int attempts = 0;
-    for (;;) {
-        tm_begin();
-        attempts++;
-        int ba = tm_read_i4(a);
-        int bb = tm_read_i4(b);
-        if (ba - n < 0 || bb + n < 0) { tm_end(); return 0; }
-        tm_write_i4(a, ba - n);
-        tm_write_i4(b, bb + n);
-        if (tm_end() == TM_COMMITTED) return attempts;  /* done */
-        /* aborted: loop and retry */
-    }
-}
-\end{lstlisting}
-
-The code has the shape of an ordinary sequential transfer, but every shared access is routed through the transaction. The two reads define the snapshot used by the decision. The two writes are tentative until \texttt{tm\_end}. If validation fails, neither write becomes part of the abstract history, and the loop re-executes with a fresh snapshot.
-
-The early return deserves attention. The example calls \texttt{tm\_end()} before returning failure, which treats the read-only decision as a transaction. Some APIs provide an explicit \texttt{tm\_abort()} or \texttt{tm\_cancel()} for application-level cancellation. Either convention is valid if the runtime specifies it clearly. What is not valid is leaving the active state by ordinary return while the runtime still believes a descriptor is live.
-
-For a successful transfer of amount \texttt{n}, the local invariant is:
-
-$$
-a' + b' = (a - n) + (b + n) = a + b
-$$
-
-The floor condition is a precondition for installing the write set. If \texttt{a - n < 0}, the transaction commits no debit. If concurrent transactions race on the same accounts, the backend may abort one of them, but no interleaving observes only the debit or only the credit.
-
-Compare with Chapter~1's lock-based version: no lock ordering, no unlock on every early-return path, and the two writes are atomic by construction. The \texttt{sigsetjmp}/\texttt{siglongjmp} machinery hides in \texttt{tm\_begin} and \texttt{tm\_end} --- the frame-lifetime hazard of Part~VI. Every backend in Part~IV implements exactly these five functions, so this source compiles unchanged across all of them. Exercise~3 asks for the \texttt{\_\_transaction\_atomic} equivalent; note the retry loop disappears --- the compiler generates it.
-
-\section{Worked Example: A Lambda Wrapper}
-\index{transactional lambda}\index{C++ wrapper}\index{retry loop}
-
-A thin C++ wrapper can remove duplicated retry loops while preserving the same
-backend contract. The body is still responsible for using instrumented loads and
-stores.
-
-\begin{lstlisting}[language=C++, caption={a C++ retry wrapper over the classic API.}]
-extern "C" {
-enum { TM_ABORTED = 0, TM_COMMITTED = 1 };
-
-void tm_begin(void);
-int  tm_end(void);
-int  tm_read_i4(const int *addr);
-void tm_write_i4(int *addr, int value);
-}
-
-template <class Body>
-auto atomic_retry(Body body) -> decltype(body()) {
-    for (;;) {
-        tm_begin();
-
-        auto result = body();
-
-        if (tm_end() == TM_COMMITTED)
-            return result;
-
-        /* aborted: discard result and execute body again */
-    }
-}
-
-int transfer_with_floor(int *from, int *to, int amount, int from_floor) {
-    return atomic_retry([=]() -> int {
-        if (amount <= 0)
-            return 0;
-
-        int bf = tm_read_i4(from);
-        int bt = tm_read_i4(to);
-
-        if (bf - amount < from_floor)
-            return 0;
-
-        tm_write_i4(from, bf - amount);
-        tm_write_i4(to,   bt + amount);
-        return 1;
-    });
-}
-\end{lstlisting}
-
-The money-conservation step for the successful path is local to the closure:
-
-$$
-\mathit{from}' + \mathit{to}' =
-(\mathit{from} - \mathit{amount}) + (\mathit{to} + \mathit{amount})
-=
-\mathit{from} + \mathit{to}
-$$
-
-The wrapper changes the surface area of the API without changing the backend ABI. The body is a value. The retry policy is centralized. Tests can wrap many operations with the same helper. This is often the first engineering step in a research implementation: keep the C ABI stable, then build safer idioms above it in C++.
-
-The wrapper also marks a boundary that cannot be crossed magically. It does not instrument ordinary loads and stores. If the body dereferences \texttt{*from} directly, the runtime does not know that \texttt{from} belongs in the read set. Similarly, if the closure prints a message, pushes to a non-transactional vector, releases memory, or sends a network request, that side effect may happen repeatedly under abort. A closure-based API improves structure, not semantics.
-
-The wrapper centralises retry policy; the transfer code only describes the atomic update. The closure must be replay-safe: printing, freeing memory, or sending messages inside the body would repeat on abort. This is not language integration. Ordinary loads and stores are still ordinary loads and stores; the wrapper cannot instrument them. And destructors are not a complete substitute for the API: if a backend restarts with \texttt{siglongjmp}, C++ stack unwinding does not run.
-
-\section{Language‑Integrated Keywords}
-
-Language-integrated transactions move the API boundary into the compiler. GCC's \texttt{\_\_transaction\_\allowbreak atomic} is the canonical C/C++ example: the programmer writes a block, and the compiler inserts transaction begin and commit operations, instruments memory accesses, and enforces restrictions on calls from inside the block. The programmer no longer writes a retry loop, and common mistakes such as forgetting \texttt{tm\_end()} disappear.
-
-The appeal is clear. The transaction is syntactically scoped. The compiler can distinguish transactional and non-transactional code. It can instrument ordinary-looking loads and stores, reject unsafe calls, and coordinate with exception handling. In a successful implementation the programmer sees something close to the ideal notation: execute this block atomically.
-
-The cost is also clear. Keywords require compiler, runtime, and ABI support. The implementation must define what happens when a block throws an exception, calls a function that performs I/O, allocates memory, or touches inline assembly. It must decide how cancellation differs from conflict abort. It must preserve opacity: even a transaction that later aborts should not observe inconsistent intermediate states that allow undefined behavior before validation catches up.
-
-An explicit API is easier to port across backends because it is just function calls. A keyword API is easier to use correctly because the compiler controls the shape of the transaction. This is the recurring API trade-off: portability and transparency on one side, static checking and syntactic safety on the other.
+A transaction semantics is not a point chosen from a menu; it is a position in
+a product of independent questions. Ask them in order and the design space
+becomes legible --- for databases, for TM, and for the hybrids of
+Chapter~19. Table~\ref{tab:iso-dimensions} lists the dimensions that carry
+real weight, with the range databases chose and the range TM is forced
+into. The forcing is systematic: in a database the observer of a transaction
+is a \emph{client behind a protocol boundary} --- a separate process whose
+every view is a request the engine answers from committed state --- while in
+TM the observer is a \emph{peer inside the address space}, whose every load
+hits the same cells the runtime speculates on. Read the two rightmost columns
+against that one difference and they stop looking like separate traditions
+and start looking like one design space probed at different boundaries.
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{M{0.19\linewidth}M{0.23\linewidth}M{0.23\linewidth}M{0.23\linewidth}}
+\small
+\begin{tabular}{M{0.15\linewidth}M{0.25\linewidth}M{0.24\linewidth}M{0.23\linewidth}}
 \hline
-\thb{0.19\textwidth}{API style} & \thb{0.23\textwidth}{Instrumentation point} & \thb{0.23\textwidth}{Retry owner} & \thb{0.23\textwidth}{Main engineering risk} \\
+\thb{0.15\textwidth}{Dimension} & \thb{0.25\textwidth}{Question} & \thb{0.24\textwidth}{Database range} & \thb{0.23\textwidth}{TM range} \\
 \hline
-Classic calls & Programmer / wrapper & Application loop & Forgotten access or end path \\
-Language keyword & Compiler & Compiler/runtime & Compiler and ABI support \\
-Typed object wrapper & Library type & Library/runtime & Escaping raw references \\
-Future-based closure & Executor worker & Executor & Replay of side effects \\
-Distributed transaction & Client coordinator & Coordinator & Partial failure and timeouts \\
+Uncommitted visibility & may a read see an uncommitted transaction's data? & dirty allowed (RU) $\to$ never (RC and above) & never, by sandboxing; a runtime that allows it is the crash of \S\ref{sec:crash-without-opacity} \\
+Strictness & when are writes visible, in what commit order? & deferred to commit; strict levels order commits & the backend's commit instant: lock release, clock bump, single CAS \\
+Ordering & must the serialization follow real time? & both (SQL: serializable $\ne$ strict) & strict by default in global-clock designs (TL2, TSC-TM); optional elsewhere \\
+Inter-unit anomalies & which read/write interleavings are illegal? & the Berenson matrix (\S\ref{sec:iso-anomalies}): 6+ named anomalies & one legal answer: none (serializability); see \S\ref{sec:iso-not-in-tm} \\
+Crash-awareness & can a doomed transaction corrupt an observer? & trivially no: uncommitted state never crosses the protocol boundary & only via opacity; TM's non-negotiable rung \\
+Recoverability & may a commit depend on an uncommitted one (cascading aborts)? & yes at weak levels; ``recoverable/strict'' are levels of \cite{gray93tp} & dimension collapses: undo is in-runtime and never cascades outward \\
+Progress & under what contention must every transaction commit? & rarely specified (locks wait) & first-class: the progress ladder (\S\ref{sec:progress-ladder}) \\
+Durability & which states survive failure? & WAL, replication, group commit & orthogonal; only the persistent backends of Chapter~19 carry it \\
 \hline
 \end{tabular}
-\caption{API families used in TM systems. The lower-level runtime may still be TL2, NOrec, SGL, Percolator-style two-phase commit, or another backend; the table classifies the programming interface.}
-\label{tab:api-taxonomy}
+\caption{The dimensions of transaction semantics, as a database author and a
+TM author meet them. The two rightmost columns differ mostly because of one
+structural fact: the database observer is outside the engine, the TM observer
+is inside the program.}
+\label{tab:iso-dimensions}
 \end{table}
 
-Table~\ref{tab:api-taxonomy} separates programming interface from implementation technique. For example, a future-based API can still execute a TL2-style transaction inside the worker. A distributed client API can present a closure while using a Percolator-style two-phase commit underneath. The table classifies where the programmer writes the transaction boundary and who owns retry, not the metadata algorithm.
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  dim/.style={draw, rounded corners=2pt, align=center, minimum width=4.3cm,
+              minimum height=1.05cm, inner sep=3pt},
+  core/.style={draw, fill=black!6, rounded corners=3pt, align=center,
+               minimum width=3.6cm, minimum height=1.2cm, very thick}]
+\node[core] (c) {a transaction\\semantics is a\\point in this\\product};
+\node[dim, above right=0.9cm and 1.7cm of c.north] (v) {\textbf{visibility}: who may\\see uncommitted data?};
+\node[dim, above left=0.9cm and 1.7cm of c.north] (s) {\textbf{strictness}: when are\\writes visible, in what order?};
+\node[dim, right=1.6cm of c] (o) {\textbf{ordering}: must\\serialization follow\\real time?};
+\node[dim, left=1.6cm of c] (a) {\textbf{anomalies}: which\\interleavings are illegal?};
+\node[dim, below right=0.9cm and 1.7cm of c.south] (p) {\textbf{progress}: when must\\a transaction commit?};
+\node[dim, below left=0.9cm and 1.7cm of c.south] (d) {\textbf{durability/recovery}:\\which states outlive\\the transaction?};
+\draw (c) -- (v); \draw (c) -- (s); \draw (c) -- (o);
+\draw (c) -- (a); \draw (c) -- (p); \draw (c) -- (d);
+\node[below=1.05cm of c, align=center, text width=11cm, font=\footnotesize\itshape]
+{crash-awareness is not a separate box: it is the \textbf{visibility}\\
+dimension evaluated at the observer's most vulnerable instant ---\\
+shared memory exposes the product, a protocol boundary hides it};
+\end{tikzpicture}
+\caption{The concept map of transaction semantics used throughout this chapter.
+Chapters place each backend of Part~IV at a point in this product;
+Table~\ref{tab:sem-mech} maps mechanisms onto it.}
+\label{fig:iso-dimensions}
+\end{figure}
 
-\section{Asynchronous and Future‑Based APIs}
+\subsection*{The taxonomic lineage}
 
-A synchronous transaction is tied to the caller's stack. The caller enters the transaction, runs it, and leaves with either a result or an abort. An asynchronous API changes this shape: the caller submits a transaction as work, receives a handle, and later waits for the result. The transaction becomes a unit scheduled by an executor rather than a lexical region on the submitting thread.
+The vocabulary above is inherited, and the inheritance is contested in useful
+ways. Gray's textbook \cite{gray93tp} organizes semantics by \emph{strictness}
+--- who may see what before whom, in what commit order --- yielding the
+serial-and-strict hierarchy that Chapter~5 restated as real-time-preserving
+serializations. ANSI SQL organized by \emph{level labels} (READ UNCOMMITTED
+through SERIALIZABLE defined by permitted phenomena), which failed:
+Berenson and colleagues \cite{berenson95critique} showed in 1995 that the
+ANSI definitions neither capture all anomalies (write skew and lost update
+were missing from the matrix) nor order the levels correctly, and proposed
+defining levels by the anomalies they admit. Adya generalized both into
+\emph{weak consistency theory}: each level is a class of histories, and one
+level is stronger than another when its class contains the other's
+\cite{adya99thesis} --- the containment picture drawn as
+Figure~\ref{fig:iso-ladder}. Kleppmann's engineering survey \cite{kleppmann17}
+is the modern reference for what production systems actually promise at each
+rung. This book follows Berenson's anomaly-first method and Adya's containment
+language, because both translate directly into the history vocabulary of
+Chapter~5 and into TLA+ invariants in Chapter~6; and it follows Gray in
+treating commit order as a dimension of its own, because the backends of
+Part~IV differ along it visibly (single lock, global clock, commit chain).
 
-This shift is attractive for systems that already have work queues. Worker threads can consume transaction closures, run the same classic API internally, and resolve futures after commit. The executor can choose scheduling order, limit concurrency, group similar operations, or batch validation attempts. None of that requires changing the bank-transfer body if the closure obeys the same rule as before: shared memory is accessed only through transactional operations.
+Figure~\ref{fig:db-tx-landscape} shows the database side of the boundary that
+drives everything else: why one of the hardest problems in transaction
+semantics --- keeping a doomed transaction from corrupting its observers ---
+is answered for free by an interface, at zero runtime cost.
 
-The price is lifetime complexity. A future may outlive the stack frame that submitted it. Capturing pointers to local variables is therefore unsafe unless the API proves that the future finishes before the frame exits. Thread-entry initialization also changes. With a synchronous API, the application can initialize transaction state when a user thread starts. With an executor, the worker owns transaction stack state; per-task setup must ensure that no stale descriptor is reused across logically separate transactions.
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\small,
+  box/.style={draw, rounded corners=2pt, align=center, inner sep=4pt},
+  store/.style={draw, fill=black!5, align=center, inner sep=4pt}]
+\node[box, minimum width=3.1cm, minimum height=1.5cm] (c1) {client $T_1$\\ \emph{separate process}};
+\node[box, minimum width=3.1cm, minimum height=1.5cm, below=0.8cm of c1] (c2) {client $T_2$\\ \emph{separate process}};
+\draw[dashed, very thick] ($(c1.west)+(-1.1cm,0.9cm)$) -- ++(0,-4.1cm)
+   node[midway, rotate=90, anchor=south, font=\itshape, xshift=-0.12cm] {protocol boundary};
+\node[store, right=1.9cm of c1, minimum width=2.9cm] (buf) {uncommitted\\state\\(private)};
+\node[store, right=1.1cm of buf, minimum width=3.4cm] (mv) {versioned store\\$x{:}\;v_1, v_2, \ldots$};
+\node[store, below=0.55cm of mv, minimum width=3.4cm] (wal) {commit log (WAL)};
+\draw[-{Stealth}] (c1) -- node[above, font=\scriptsize] {reads/requests} (mv);
+\draw[-{Stealth}] (c2) -- node[above, font=\scriptsize] {reads/requests} (mv);
+\draw[-{Stealth}] (buf) -- (mv);
+\draw[-{Stealth}] (mv) -- (wal);
+\node[right=0.45cm of buf, align=left, font=\footnotesize\itshape, text width=4.2cm]
+{uncommitted versions never cross the boundary:\\ the crash-awareness problem\\ does not exist on this side};
+\end{tikzpicture}
+\caption{A database transaction system. Observers are clients behind a
+protocol boundary; uncommitted state lives strictly inside the engine. Every
+isolation level in \S\ref{sec:iso-ladder} is a promise \emph{about request
+answers}, which is why even READ UNCOMMITTED cannot hand a client a dangling
+pointer.}
+\label{fig:db-tx-landscape}
+\end{figure}
 
-Future composition preserves the composability argument from Chapter~1. An atomic closure is a value: it can be stored, submitted, combined with other futures, and awaited at a dependency point. But this composability does not make side effects transactional. A closure that sends a message before commit can still send it twice if the transaction aborts and retries.
+\section{The Isolation Ladder}
+\label{sec:iso-ladder}
+\index{isolation level!read uncommitted}\index{isolation level!read committed}
+\index{isolation level!repeatable read}\index{isolation level!snapshot isolation}
+\index{serializable snapshot isolation}
 
-\section{Worked Example: Futures for Batched Transfers}
-\index{transactional future}\index{executor}\index{batching}
+Restated in history vocabulary, the classic ladder has six rungs. Read each
+bullet as a constraint on the \emph{read-from} source of \S\ref{sec:histories-legality-opacity}:
+which write a read event may legitimately draw its value from.
 
-A future-based API moves the retry loop into the worker. The caller receives a
-handle and later observes the committed result.
+\begin{itemize}
+\item \textbf{Read uncommitted (RU).} A read may take its value from an
+uncommitted write. Dirty reads are legal; so, trivially, is almost everything
+else. No mainstream shared-memory language offers an analogue, and
+\S\ref{sec:iso-not-in-tm} explains why the analogue would be a segfault menu.
 
-\begin{lstlisting}[language=C++, caption={submitting bank transfers as transactional futures.}]
-#include <future>
-#include <utility>
-#include <vector>
+\item \textbf{Read committed (RC).} Every read takes its value from a
+committed write --- but different reads within one transaction may take
+different snapshots. \emph{Non-repeatable reads} are legal: $r_T(x){=}1$ and
+a later $r_T(x){=}2$ after some $T'$ committed in between. This is the default
+in most production databases, which is itself a fact worth arguing about
+(\S\ref{sec:iso-cost}).
 
-extern "C" {
-enum { TM_ABORTED = 0, TM_COMMITTED = 1 };
+\item \textbf{Repeatable read (RR).} All reads within a transaction see one
+consistent snapshot, so re-reads do not change; but new objects may appear
+between two reads of a \emph{predicate} --- the \emph{phantom} anomaly.
+Row-level implementations pin the rows they touched, not the range.
 
-void tm_begin(void);
-int  tm_end(void);
-int  tm_read_i4(const int *addr);
-void tm_write_i4(int *addr, int value);
-}
+\item \textbf{Snapshot isolation (SI).} Each transaction reads from a single
+logical snapshot (an instant in the committed history), and a write commits
+only if no concurrent transaction wrote the same object (\emph{first
+committer wins}, a WW test). Phantoms are structurally impossible: the
+snapshot is a consistent whole database. What SI still admits is the
+infamous \emph{write skew} (\S\ref{sec:iso-anomalies}). Formally: the
+committed projection admits a serialization \emph{whose legality is checked
+only against snapshot reads and WW conflicts} --- the weak validation that
+makes it fast.
 
-/* Concrete helper for transactions returning int. */
-template <class Body>
-std::future<int> submit_tx_int(Body body) {
-    return std::async(std::launch::async,
-        [body = std::move(body)]() mutable -> int {
-            for (;;) {
-                tm_begin();
+\item \textbf{Serializable snapshot isolation (SSI).} SI plus a runtime check
+that rejects the anti-dependency cycles responsible for write skew and its
+relatives. It is ``SI with a proof obligation attached'': reads remain
+snapshot-cheap, and the price moves to cycle bookkeeping at commit
+(\cite{kleppmann17}; the mechanism is described in
+\S\ref{sec:iso-cost} and checked in \S\ref{sec:iso-worked-example}).
 
-                int result = body();
+\item \textbf{Serializability (S),} and above it \textbf{strict
+serializability.} The rungs of Chapter~5. Every anomaly in the Berenson
+matrix disappears, and with it the need for the application to reason about
+other transactions at all.
+\end{itemize}
 
-                if (tm_end() == TM_COMMITTED)
-                    return result;
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\small,
+  rung/.style={draw, rounded corners=1pt, minimum width=4.0cm, align=center,
+               inner sep=3pt},
+  anom/.style={align=left, font=\footnotesize}]
+\node[rung] (rr) at (0,0) {RU};
+\node[rung] (rc) at (0,-0.9) {RC};
+\node[rung] (rpr) at (0,-1.8) {RR / cursor stability};
+\node[rung] (si) at (0,-2.7) {SI};
+\node[rung] (ssi) at (0,-3.6) {SSI};
+\node[rung, very thick] (s) at (0,-4.5) {S};
+\node[rung, very thick] (ss) at (0,-5.4) {strict S};
+\draw[-{Stealth}, thick] (rr) -- (rc); \draw[-{Stealth}, thick] (rc) -- (rpr);
+\draw[-{Stealth}, thick] (rpr) -- (si); \draw[-{Stealth}, thick] (si) -- (ssi);
+\draw[-{Stealth}, thick] (ssi) -- (s); \draw[-{Stealth}, thick] (s) -- (ss);
+\node[anom, right=0.55cm of rr] {dirty reads, lost updates, phantoms: all legal};
+\node[anom, right=0.55cm of rc] {no dirty reads; non-repeatable reads legal};
+\node[anom, right=0.55cm of rpr] {no re-read changes; phantoms legal};
+\node[anom, right=0.55cm of si] {no phantoms; \textbf{write skew legal}};
+\node[anom, right=0.55cm of ssi] {no anomalies; commit-cycle checks};
+\node[anom, right=0.55cm of s] {no anomalies};
+\draw[decorate, decoration={brace, amplitude=4pt}] (-3.1,-5.55) -- (-3.1,0.15);
+\node[font=\footnotesize\itshape, rotate=90, anchor=south east] at (-3.5,-5.45) {implementable in shared memory: only the top};
+\end{tikzpicture}
+\caption{The isolation ladder in Adya's containment sense: each rung admits
+strictly fewer anomalies than the one below. Thick borders mark the rungs
+this book's backends occupy; the brace marks the \S\ref{sec:iso-not-in-tm}
+result --- below serializability, the ladder does not transfer to shared
+memory.}
+\label{fig:iso-ladder}
+\end{figure}
 
-                /* aborted: retry on this worker */
-            }
-        });
-}
+The containment reading (Adya): each rung's set of admissible histories is a
+proper superset of the rung below's, so every guarantee you drop is a hole
+some implementation can drive an anomaly through --- and each hole has a name
+and a witness, next section.
 
-std::future<int> submit_transfer(int *from, int *to,
-                                 int amount, int from_floor) {
-    return submit_tx_int([=]() -> int {
-        if (amount <= 0)
-            return 0;
+\section{Anomalies: The Matrix and Its Witnesses}
+\label{sec:iso-anomalies}
+\index{dirty read}\index{non-repeatable read}\index{lost update}
+\index{phantom anomaly}\index{write skew}
 
-        int bf = tm_read_i4(from);
-        int bt = tm_read_i4(to);
+Table~\ref{tab:anomaly-matrix} is the Berenson matrix \cite{berenson95critique}
+with two columns ANSI lacked. A check means the anomaly \emph{can occur} at
+that level; a dash means the level prevents it. Each cell is witnessed by a
+two-transaction history in the notation of \S\ref{sec:histories-legality-opacity};
+the write-skew witness is the one
+\S\ref{sec:iso-worked-example} model-checks.
 
-        if (bf - amount < from_floor)
-            return 0;
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{M{0.28\linewidth}cccccc}
+\hline
+\thb{0.28\textwidth}{Anomaly} & RU & RC & RR & SI & SSI & S \\
+\hline
+dirty read ($r$ from an aborted write) & \checkmark & -- & -- & -- & -- & -- \\
+non-repeatable read ($r(x){=}a$ then $r(x){=}b$) & \checkmark & \checkmark & -- & -- & -- & -- \\
+phantom ($r(P)$ then $r'(P)$ differs on a range) & \checkmark & \checkmark & \checkmark & -- & -- & -- \\
+lost update (concurrent writes; one increment vanishes) & \checkmark & \checkmark & -- & -- & -- & -- \\
+write skew (disjoint reads, overlapping intent) & \checkmark & \checkmark & \checkmark & \checkmark & -- & -- \\
+\hline
+\end{tabular}
+\caption{The anomaly matrix of Berenson et al. \cite{berenson95critique}, with
+SSI added. The last row is the anomaly ANSI missed: SI's own paper family
+debated for a decade whether it was ``real'';
+\S\ref{sec:iso-worked-example} settles it with TLC.}
+\label{tab:anomaly-matrix}
+\end{table}
 
-        tm_write_i4(from, bf - amount);
-        tm_write_i4(to,   bt + amount);
-        return 1;
-    });
-}
+The witnesses, compactly, over accounts \texttt{x=y=100} with the invariant
+\texttt{x+y $\geq$ 200}:
 
-int submit_batch_and_count(int *a, int *b, int *c) {
-    std::vector<std::future<int>> fs;
+\begin{itemize}
+\item \emph{Dirty read.} $w_{T_1}(x){\leftarrow}0$; $r_{T_2}(x){\to}0$;
+$\mathrm{abort}(T_1)$. $T_2$ acted on money that never existed. Only RU
+permits it; this is the row that RU exists to label.
 
-    fs.push_back(submit_transfer(a, b, 10, 0));
-    fs.push_back(submit_transfer(b, c,  7, 0));
-    fs.push_back(submit_transfer(c, a,  3, 0));
+\item \emph{Lost update.} $r_{T_1}(x){\to}0$; $r_{T_2}(x){\to}0$;
+$w_{T_1}(x){\leftarrow}1$; $w_{T_2}(x){\leftarrow}1$. Both increments, one
+result. RC permits it because its reads are only committed, not stable;
+everything from RR on detects the WW conflict.
 
-    int committed_successes = 0;
-    for (auto &f : fs)
-        committed_successes += f.get();
+\item \emph{Phantom.} $r_{T_1}(\texttt{SUM over }[1..9]){\to}9$; $T_2$
+inserts row 10 and commits; $r_{T_1}(\texttt{SUM}){\to}10$. Row-stable
+levels cannot stop it because $T_1$'s second read touched a \emph{predicate},
+not a row; snapshot levels kill it structurally.
 
-    return committed_successes;
-}
-\end{lstlisting}
+\item \emph{Write skew.} Two doctors on call; invariant: at least one stays.
+$T_1$: reads \texttt{mine=off, other=on}, decides both may rest, writes
+\texttt{mine=rest}. $T_2$ mirror-image. Each reads before the other's write;
+neither write touches the object the other read; both pass WW validation.
+Commit both: \texttt{mine=rest, other=rest} --- an outcome no serial
+execution produces. The two transactions have \emph{no write-write conflict
+and no read-write conflict with a stable value}; what they have is an
+\emph{anti-dependency}: $T_1$ read a value $T_2$ later overwrote. Formally,
+$T_1 \mathop{\sim} T_2$ when $T_1$ reads-from a value that $T_2$ writes
+afterward. SI executions are serializable exactly when the graph of read,
+write, and anti-dependencies is acyclic \cite{berenson95critique}; SI permits
+the cycle, SSI's commit-time cycle detection does not. This is stated for
+use, not proved --- it is the sort of theorem to take as a paper exercise.
+\end{itemize}
 
-The three submitted transfers may execute in any order. If all three commit successfully, the total across \texttt{a}, \texttt{b}, and \texttt{c} is unchanged because each individual transaction preserves its two-account sum. If one returns \texttt{0} because of a floor check, it performs no write and therefore also preserves the global sum. Conflicts affect progress, not the abstract invariant.
+The historical footnote matters for how to read the matrix: ANSI defined its
+levels \emph{syntactically}, by which phenomena a standard-conforming
+implementation might exhibit, and the critique \cite{berenson95critique}
+showed (a) the phenomenon list was incomplete --- lost update and write skew
+were absent from the ANSI definitions --- and (b) no level between RR and S
+could ever have prevented them anyway. The lesson a backend author should
+take is methodological: define your guarantees by the anomalies you can
+demonstrate against them, not by the label. Chapter~6's bug-injection
+workflow (\S\ref{sec:verify-workflow}) is exactly that method, mechanized.
 
-A production executor would normally avoid creating one operating-system thread per \texttt{std::async}. The listing uses \texttt{std::async} because it is compact and standard. A fixed worker pool would keep per-worker transaction descriptors hot, reduce allocation overhead, and make batching decisions explicit.
+\section{The Price Each Rung Buys}
+\label{sec:iso-cost}
+\index{abort probability!derivation from isolation}\index{wasted work}
 
-The caller no longer owns transaction stack state; the worker does. Futures make composition explicit: submit many transactions, then join at the dependency point. A real executor can batch validation or scheduling decisions; the source-level API does not require the caller to know which backend is underneath. The closure must capture stable addresses: capturing pointers to caller stack variables is unsafe if the future may outlive the stack frame.
+Weak levels are not free; they are \emph{cheap to validate and expensive to
+live with}. This section quantifies the cheap side, continuing the geometric
+retry model of \S\ref{sec:math-example}: expected attempts
+$E=1/(1-p_{\mathrm{abort}})$, effective service time
+$S_{\mathrm{eff}} = S/(1-p_{\mathrm{abort}})$ feeding Little's Law. What
+Chapter~5 left as a parameter --- the abort probability $p$ --- isolation
+semantics actually derives.
 
-\section{Object‑Oriented and Polymorphic Interfaces}
+Assume a hot set of $k$ objects, each transaction reading $r$ and writing $w$
+of them, and $C{-}1$ concurrent contenders, accesses uniform and independent
+(the approximation regime of \S\ref{sec:math-example} and \S5.10's two-phase
+validation cost; both fail together when access is data-dependent,
+and the escape hatch is the same: model checking, Part~III). A commit attempt
+fails validation iff some contender conflicts on what the level checks:
 
-Object-oriented APIs hide instrumentation inside types. Instead of calling \texttt{tm\_read\_i4(\&x)}, the programmer may write through a wrapper such as \texttt{TM<int>}. The wrapper overloads operations, records reads and writes with the runtime, and prevents some accidental raw access. Template-based STMs, including systems in the RSTM family, use this style to make transactions look like ordinary generic C++ code.
+\begin{align}
+p_{\mathrm{abort}}^{\mathrm{SI}} &\approx 1 - \left(1 - \tfrac{w}{k}\right)^{w(C-1)}
+\qquad\text{(WW test only; reads never abort)}\\[1mm]
+p_{\mathrm{abort}}^{\mathrm{S}} &\approx 1 - \left(1 - \tfrac{w}{k}\right)^{(2r+w)(C-1)}
+\qquad\text{(RW, WR, and WW; value-validated OCC)}
+\end{align}
 
-The benefit is type safety at the use site. A \texttt{TM<T>} value can expose only operations that are meaningful inside a transaction. It can choose whether reads return copies, proxies, or transactional references. It can encode ownership rules in constructors and destructors. A transaction-object or visitor pattern goes further: application objects provide methods that register their own fields with the runtime, allowing the transaction to operate at object granularity.
+The exponent difference is the whole story of SI: a serializable optimistic
+transaction's validation is violated by $2r+w$ object-chances per contender;
+an SI transaction's by $w$. Reads --- typically the bulk of a transaction ---
+drop out of the failure condition entirely. Table~\ref{tab:iso-cost} gives
+numbers for a bank-like workload ($k=50$ hot accounts, $r=4$, $w=1$);
+Figure~\ref{fig:iso-cost} draws them.
 
-The central trade-off is granularity. Per-object locking and validation are simple, but they can be coarse. Two transactions that update different fields of the same object may conflict unnecessarily. Word-level STM reclaims fine granularity by indexing metadata by address, but then the wrapper must map object operations back to word or byte ranges. This tension appears repeatedly in real systems: the safer interface is often the coarser one, and the faster fine-grained interface is easier to misuse.
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{M{0.34\linewidth}ccccc}
+\hline
+\thb{0.34\textwidth}{$C$ (concurrent txs)} & 4 & 8 & 12 & 16 & 20 \\
+\hline
+$E[\text{attempts}]$, serializable OCC & 1.7 & 3.6 & 7.4 & 15.3 & 31.7 \\
+$E[\text{attempts}]$, SI & 1.1 & 1.2 & 1.3 & 1.4 & 1.5 \\
+\hline
+\end{tabular}
+\caption{Expected attempts per committed transaction, $k=50$, $r=4$, $w=1$.
+At $C=20$ the serializable design pays thirty work-units per committed
+transaction; SI pays one and a half --- and admits write skew to do it.}
+\label{tab:iso-cost}
+\end{table}
 
-Polymorphism adds another cost. Virtual dispatch inside a transaction can obscure which memory locations are touched. If a virtual method performs non-transactional I/O, the runtime cannot roll it back. A good object-oriented API therefore needs a visible distinction between transactional methods, irrevocable methods, and methods forbidden inside a transaction.
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\small, scale=0.62,
+  axis/.style={->, thick}, every node/.style={font=\scriptsize}]
+\draw[axis] (0,0) -- (11,0) node[right] {$C$ (concurrency)};
+\draw[axis] (0,0) -- (0,7.2) node[above] {$E[\text{attempts}]$};
+\foreach \x/\l in {0/2,2.5/6,5/10,7.5/14,10/18} \draw (\x,0.1) -- (\x,-0.1) node[below] {\l};
+\foreach \y/\l in {0/1,1.8/5,3.6/10,5.4/20,6.8/30} \draw (0.1,\y) -- (-0.1,\y) node[left] {\l};
+% S curve: C=2..18 -> E=1.2,1.73,2.48,3.57,5.14,7.39,10.6,15.3,22.0 clipped at 30
+\draw[thick, black!70] plot[smooth] coordinates
+ {(0,0.13) (1,1.0) (2,2.3) (3,4.0) (4,5.7) (5,7.15) (5.7,7.2)};
+\node[anchor=west] at (4.2,5.9) {serializable OCC};
+% SI curve: C=2..18 -> 1.02,1.06,1.11,1.15,1.20,1.25,1.30,1.35,1.41
+\draw[thick, black!70, densely dashed] plot[smooth] coordinates
+ {(0,0.02) (2,0.26) (4,0.44) (6,0.62) (8,0.79) (10,0.95)};
+\node[anchor=west] at (6.6,1.3) {snapshot isolation};
+\end{tikzpicture}
+\caption{Expected attempts versus concurrency ($k=50$, $r=4$, $w=1$): the
+validation-scope difference between S and SI compounds multiplicatively.
+Recompute with \texttt{tools/iso-cost.py}; measure in the bank simulator of
+\S\ref{sec:math-bank-simulation} for the data-dependent case.}
+\label{fig:iso-cost}
+\end{figure}
 
-\section{The Hook System: Connecting Backends to Benchmarks}
-\index{hook system}\index{function pointer dispatch}\index{TMRealHooks}\index{backend registration}
-\label{sec:hook-system}
+Three honest caveats, each of which is a paragraph in \S5.10: (i) the
+independence approximation overstates conflicts for skewed-but-local
+workloads and understates them for global hot rows; (ii) serializable here
+means value-validated OCC --- a two-phase-locking serializable engine trades
+the retry multiplier for waits, and its ``attempts'' stay at $1.0$ while its
+throughput collapses elsewhere in the queue; (iii) SSI pays a third term
+again: snapshot reads with commit-time anti-dependency tracking cost
+roughly $1.1$--$1.4\times$ SI in reported measurements of real engines
+(\cite{kleppmann17}, FoundationDB and CockroachDB engineering posts). The
+row a database designer walks is SI $\to$ SSI $\to$ S, and the walk is made
+because the anomaly row of Table~\ref{tab:anomaly-matrix} is a
+\emph{correctness} row, not a performance one.
 
-Every API style in the preceding sections ultimately calls the same set of
-C functions: \texttt{tm\_begin}, \texttt{tm\_end}, \texttt{tm\_read\_i4},
-\texttt{tm\_write\_i4}, and so on.  In the companion codebase these are not
-ordinary functions but \emph{DATA function-pointer variables}---their addresses
-are taken and called through, not called directly.  This indirection is the
-hook system: a single dispatch layer that connects any benchmark to any backend
-without recompilation.
+Read the table once more from the TM side: our backends all pay the first
+row's cost and consider it a bargain, because the second row's saving is
+bought with the only anomaly in shared memory that turns into the crash class
+of \S\ref{sec:crash-without-opacity}: state that a consumer can act on. In a
+database, write skew costs a double-dispatched doctor; in a bank simulator it
+costs a negative reserve; both are recoverable. A pointer torn the same way
+is not.
 
-\paragraph{The hook table.}
-The file \rep{backends/tm\_impl/common/tm\_hooks.hpp} declares a struct
-containing one function pointer per TM operation:
+\section{From Mechanism to Semantics and Back}
+\label{sec:iso-mechanisms}
+\index{write-back}\index{write-through}\index{early lock release}
+\index{version management!multi-version}\index{static transactions}
 
-\begin{lstlisting}[caption={The TMRealHooks struct (\texttt{tm\_hooks.hpp}).}]
-struct TMRealHooks {
-    void  (*tm_begin)(void);
-    void  (*tm_end)(void);
-    void  (*tm_init)(void);
-    void  (*tm_exit)(void);
-    void  (*tm_init_thread)(void);
-    void  (*tm_exit_thread)(void);
-    void* (*tm_malloc)(size_t);
-    void* (*tm_calloc)(size_t, size_t);
-    void  (*tm_read_i4)(const void*);
-    void  (*tm_write_i4)(void*, int);
-    void  (*tm_read_u8)(const void*);
-    void  (*tm_write_u8)(void*, uint64_t);
-    void  (*tm_read_f4)(const void*);
-    void  (*tm_write_f4)(void*, float);
-    void  (*tm_read_f8)(void*);
-    void  (*tm_write_f8)(void*, double);
-    void  (*tm_trace)(int, void*, size_t);
-    void* (*tm_get_thread_state)(void);
-    /* ... additional typed read/write pairs ... */
-};
-\end{lstlisting}
+Semantics and mechanism are often conflated in the backend literature, and
+the conflation costs students chapters of confusion. The clean way to separate
+them: the dimensions of Table~\ref{tab:iso-dimensions} are \emph{promises};
+the mechanism knobs below are \emph{machines} that can implement various
+promises at various costs. Two machines can share a knob and guarantee
+different things; one machine can be tuned across several promises. This
+section lists the knobs and who turns them; Part~IV is the catalogue.
 
-\noindent
-The global variables \texttt{tm\_begin}, \texttt{tm\_end},
-\texttt{tm\_read\_i4}, etc.\ (lowercase, matching the classic API names)
-are initialized to stubs that do nothing or return zero.  When a backend
-registers, these stubs are replaced with real implementations.
+\begin{itemize}
+\item \textbf{Version management: overwrite vs version.} Single-version
+designs mutate the object and undo on abort (SGL, TL2); multi-version designs
+install new versions and let readers pick by snapshot (MVLOG; JVSTM and OFG
+downstream). MVCC is the mechanism by which databases \emph{implement} the SI
+promise of stable snapshot reads --- but note the decoupling: multi-version
+TM backends (Chapter~14) use versioning for \emph{concurrency under
+serializability}, validating read-sets that single-version designs do not.
+The snapshot mechanism is reusable; the SI semantics is a separate promise
+about what need not be validated.
 
-\paragraph{Backend registration.}
-Each backend's \texttt{*\_runtime.cpp} file calls
-\texttt{tm\_register\_real\_hooks()} at startup.  The NOrec runtime
-(\rep{backends/tm\_impl/norec/NOrec\_runtime.cpp}) is a representative
-example:
+\item \textbf{Write policy: write-back vs write-through, and TinySTM's three.}
+Write-back buffers speculative writes until commit (sandboxed);
+write-through publishes immediately (eager). TinySTM \cite{felber08tinystm}
+exposes the middle ground as configurations: \texttt{WBCTL}, writes buffered
+but locks released early (contention-triggered); \texttt{WBETL}, locks
+released eagerly for writes already owned; \texttt{WT}, eager publishing with
+undo on abort. \emph{Early lock release} is the pivotal trick: it preserves
+serializability because a released lock's value remains protected by a
+per-object version counter checked at commit --- the promise (serializable)
+survives while the machine (lock holding) shrinks. Remove the version check,
+keep the early release, and you have EAGER\_BROKEN: the same machine, a
+different and worse promise. That single missing check is
+\S\ref{sec:crash-without-opacity}'s segfault.
 
-\begin{lstlisting}[caption={NOrec hook registration (\texttt{NOrec\_runtime.cpp}).}]
-static TMRealHooks hooks;
-hooks.tm_begin  = norec_begin;
-hooks.tm_end    = norec_end;
-hooks.tm_read_i4  = norec_read_i4;
-hooks.tm_write_i4 = norec_write_i4;
-hooks.tm_malloc = norec_malloc;
-hooks.tm_init   = norec_init;
-hooks.tm_exit   = norec_exit;
-/* ... all fields filled ... */
-tm_register_real_hooks(&hooks);
-\end{lstlisting}
+\item \textbf{Conflict detection: eager vs lazy.} Pessimistic systems detect
+at first access (lock acquisition); optimistic at commit (validation).
+Optimistic plus sandboxed writes is the OCC pattern of NOrec and TL2
+(Chapter~10); the family matrix Table~\ref{tab:family-matrix} and the snapshot
+taxonomy Table~\ref{tab:snapshot-taxonomy} organize Part~IV along exactly
+this knob.
 
-\noindent
-After this call, every subsequent \texttt{tm\_read\_i4(addr)} in the
-benchmark resolves through the global function pointer to
-\texttt{norec\_read\_i4(addr)}.  The benchmark never includes
-\texttt{NOrec.hpp}; it links against the runtime object file, and the
-dispatch happens at the function-pointer level.
+\item \textbf{Static vs dynamic transactions.} A static transaction's read
+and write sets are known before it runs; Calvin \cite{thomson12calvin} makes
+a database of them: control decisions are deferred until the full batch of
+intentions is known, transactions are \emph{serialized first and executed
+deterministically afterwards}, and validation cost becomes scheduling cost.
+The TM analogue is SGL (Chapter~9): with one lock, every interleaving is
+serializable by construction, and the ``schedule'' is lock order. Calvin's
+lesson is the ladder's deepest cost saving --- anomalies are cheap to prevent
+\emph{if you know the whole future}; the GPU systems of Chapter~18
+rediscover this per-warp.
 
-\paragraph{Runtime swap.}
-Because the dispatch is through DATA variables, the backend can be swapped at
-runtime: \texttt{tm\_swap\_runtime()} saves the current hooks, installs a
-different backend's hooks, and the next \texttt{tm\_begin()} call enters the
-new algorithm.  The function \texttt{tm\_get\_real\_hooks()} retrieves the
-currently registered hooks for inspection or save/restore.
+\item \textbf{Snapshot thresholds.} GPU TMs batch loads into snapshot reads
+(Chapter~18, \S\ref{sec:snapshot-example}; \cite{chen17snapshot}): reads
+inside the batch are answered from one instant, like SI, while commit
+validation stays serializable. It is the cleanest existing demonstration
+that the \emph{mechanism} of snapshot reads and the \emph{semantics} of SI
+come apart: the GPU gets SI-style read stability and still rejects every
+anomaly in Table~\ref{tab:anomaly-matrix}.
+\end{itemize}
 
-\paragraph{The dispatch path.}
-A typical read goes through three levels:
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{M{0.21\linewidth}M{0.13\linewidth}M{0.17\linewidth}M{0.15\linewidth}M{0.20\linewidth}}
+\hline
+\thb{0.21\linewidth}{System} & \thb{0.13\linewidth}{promise} & \thb{0.17\linewidth}{versions} & \thb{0.15\linewidth}{detection} & \thb{0.20\linewidth}{notes} \\
+\hline
+SGL / TSXSGL & S (strict) & single & eager (lock) & schedule $\equiv$ lock order; Chapter~9 \\
+TL2, NOrec & S (strict) & single & lazy (validate) & sandboxed writes, version counters; Chapter~10 \\
+TinySTM WBCTL & S (strict) & single & hybrid & early lock release under version check \\
+MVLOG, JVSTM & S (strict) & multi & lazy & snapshots for concurrency, read-set validation kept \\
+SSI engines & S via SSI & multi & lazy + cycles & anti-dependency bookkeeping at commit \\
+Calvin & S & single & scheduling & static transactions; \S\ref{sec:calvin-static} \\
+Percolator / TiKV & SI(+locks) & multi & lazy + locks & distributed SI; Chapter~19 \\
+GPU snapshot TM & S & batched & lazy & snapshot reads $\ne$ SI; Chapter~18 \\
+EAGER\_BROKEN & none & single & lazy & validation kept, sandbox dropped; Chapter~2 \\
+\hline
+\end{tabular}
+\caption{Mechanisms $\times$ promises. Rows sharing knobs with different
+promises are the point: mechanism does not imply semantics. Each row is a
+backend or reference system covered in Part~IV or Chapter~19.}
+\label{tab:sem-mech}
+\end{table}
+
+\section{The Half That Cannot Cross Over}
+\label{sec:iso-not-in-tm}
+\index{isolation level!not transferable to TM}\index{cliff argument}
+
+Here is the chapter's thesis, stated plainly: the isolation ladder has a
+cliff, and shared memory is below it. Not ``weak levels are inadvisable'' in
+shared memory --- they are unsound defaults whose failure mode is the program
+itself. Five observations, cumulatively.
 
 \begin{enumerate}
-  \item The benchmark calls \texttt{tm\_read\_i4(\&x)} (a DATA function
-        pointer).
-  \item The pointer resolves to \texttt{norec\_read\_i4} (or TinySTM,
-        TL2, etc.), which checks whether the address is in the TM region
-        and either tracks it in the read-set or passes through to a
-        direct load.
-  \item If the address is not in the TM region (e.g.\ stack-local), the
-        \texttt{LLVM\_TM\_ADDR\_CHECK} macro bypasses the backend
-        entirely and performs a plain load.
+\item \textbf{The boundary is the guarantee.} A database can offer dirty
+reads because the reader is a requestor: even the dirtiest answer is a
+\emph{copy} handed across a protocol boundary at one instant, and the
+application's stack is built by the application, never by the engine. Shared
+memory has no such boundary: weakening visibility hands the peer a live
+location mid-mutation. The crash-awareness dimension of
+Table~\ref{tab:iso-dimensions} is free on one side of the boundary and
+structural on the other. \S\ref{sec:crash-without-opacity} is the executable
+proof.
+
+\item \textbf{Applications cannot reconcile pointers.} The weak-level bargain
+in databases is ``the anomaly is visible, and your application logic absorbs
+it'' --- re-validate before dispatch, use idempotent operations, let the
+billing job fix double-debits. Real applications do exactly this, which is
+why RC is a production default. The reconciliation assumes anomalies are
+\emph{values you can re-read and re-decide about}. A consumer that latched
+\texttt{count=1} cannot re-decide its way out of dereferencing
+\texttt{inventory[0]}; pointer-and-length invariants have no idempotent
+repair. Every weak level's escape hatch is an application discipline that
+shared-memory code does not have.
+
+\item \textbf{The concurrency prize is smaller than it looks.} Databases pay
+for strength in \emph{waits}: locks held across interactive workloads stall
+throughput, and that stall is the reason weak levels exist. TM aborts instead
+of waiting: our serializable OCC designs already run fully concurrently
+inside transactions and pay only the retry multiplier of
+\S\ref{sec:iso-cost}. The prize weak levels sell --- not waiting for
+uncommitted writers --- is something serializable TM never withholds. You
+cannot sell a saving on a cost that isn't there.
+
+\item \textbf{Predicate structure does not exist.} RR-vs-SI separation turns
+entirely on range predicates over an index. An address space is not a
+predicate-indexed collection; ``phantom'' over memory means ``an object
+appeared,'' which in a GC-less program is precisely the lost-update/aliasing
+family the top rung already forbids. The rung's reason for being fails to
+transfer.
+
+\item \textbf{Recoverability collapses.} The Gray--Reuter levels of
+recoverability --- cascading aborts, strict schedules
+\cite{gray93tp} --- exist because committed-but-uncommitted chains cross
+processes and logs. In TM, undo is a private log in a runtime that never
+exposes a partially committed transaction to anyone; there is no outside for
+a cascade to escape into. The dimension does not weaken the top rung; it is
+simply absent.
 \end{enumerate}
 
-\noindent
-This design means the same benchmark binary can link against different
-backends by swapping the runtime object file, or even swap backends at
-runtime via \texttt{tm\_swap\_runtime()}.  The hook system is the
-\emph{only} coupling between benchmarks and backends.
+What does cross over is the machinery: MVCC for read stability, early lock
+release, snapshot batching, static scheduling. The backends of Part~IV borrow
+all of it. What does not cross over are the promises below serializability,
+and the reason is one sentence the reader should be able to quote in an exam:
+\emph{a database's isolation levels are guarantees about the answers it gives
+to clients; a TM's correctness conditions are guarantees about the state its
+peers can act on --- and only the top rung bounds the second.}
+
+\section{Worked Example: Write Skew, Checked}
+\label{sec:iso-worked-example}
+\index{write skew!model check of}\index{snapshot isolation!model check of}
+
+The witnesses of \S\ref{sec:iso-anomalies} were hand histories; this section
+replays one under TLC, so the reader can see the same argument in the
+machine. The scenario is the doctor pair restated as a bank: accounts
+\texttt{x=y=500}, a per-account reserve floor \texttt{RESERVE=500}
+implemented as a cross-check --- each transaction reads both balances and
+draws \texttt{DRAW=400} from its own account only if the \emph{other} account
+can absorb the shortfall, a policy whose only enforcement is the reads.
+
+\begin{lstlisting}[caption={The write-skew history at SI (both transactions
+commit; the outcome admits no serial explanation).},
+label={lst:banksi-history}]
+T1: r(x)=500   r(y)=500   w(x<-100)   commit
+T2: r(x)=500   r(y)=500   w(y<-100)   commit
+final: x=100, y=100   -- both drew; neither saw the other's draw.
+\end{lstlisting}
+
+Trace \texttt{lst:banksi-history} against the ladder: no read sees an
+uncommitted write (each reads 500, committed), the snapshot of each is
+internally consistent, no WW conflict exists (disjoint write sets) --- every
+condition SI checks passes. And the final state violates the invariant, so
+no serialization of \{T1, T2\} explains it: the history is SI and not
+serializable. The dependency graph has $T_1 \sim T_2$ (T1 read $y$, T2 wrote
+$y$ later) and $T_2 \sim T_1$ --- a 2-cycle of anti-dependencies, the
+smallest SSI-rejectable configuration.
+
+The machine version is \rep{docs/proofs/BankSI.tla}, one model with a boolean
+constant \texttt{SERIALIZABLE}:
+
+\begin{verbatim}
+    make -C docs/proofs check-teaching
+\end{verbatim}
+
+\begin{itemize}
+\item \texttt{BankSI-skew.cfg} (\texttt{SERIALIZABLE=FALSE} --- validation
+checks only the WW rule): TLC returns \emph{Invariant Reserve is violated}
+with the trace of Listing~\ref{lst:banksi-history}, one commit after the
+other, at model depth 6.
+\item \texttt{BankSI-serial.cfg} (\texttt{SERIALIZABLE=TRUE} --- validation
+adds the read-set check against later writes): no error. The extra check is
+exactly the term $(2r+w)$ vs $w$ from \S\ref{sec:iso-cost}: the model shows
+the anomaly, and the same model with the serializable validation installed
+shows the hole closed.
+\end{itemize}
+
+The point of re-running this here is the correspondence, three ways: the
+history notation of Chapter~5, the anomaly row of Table~\ref{tab:anomaly-matrix},
+and the TLC verdict all say the same sentence about the same six events.
+Exercises extend the model: widen \texttt{DRAW} until SI's two-phase
+validation also rejects (find the boundary), and add the SSI cycle rule as a
+third configuration --- reject a commit whose anti-dependency edges close a
+cycle among committed transactions.
 
 \section{Summary}
 
-API design directly affects usability, safety, and performance. The classic synchronous API is small, portable, and close to the runtime, but it relies on programmers or wrappers to place boundaries and instrument accesses correctly. Language keywords shift responsibility to the compiler, reducing common mistakes at the cost of toolchain complexity. Lambda and object wrappers improve structure while preserving a conventional backend ABI, but they cannot make ordinary side effects transactional. Future-based interfaces turn transactions into scheduled work, opening the door to batching and executor-level policies while introducing lifetime and replay hazards.
-
-The API is the contract the rest of the book's runtimes implement. The same transfer source can run over simple SGL, optimistic STMs such as NOrec and TL2, timestamped designs such as TSC-TM, persistent variants, and distributed coordinators when the implementation supplies the required primitives. The programmer-facing question remains constant: where is the transaction boundary, who instruments memory, who retries, and what is allowed to become visible before commit?
+Transaction semantics is a product of dimensions --- visibility, strictness,
+ordering, anomaly set, crash-awareness, recoverability, progress, durability
+--- and the two traditions explored different faces of it because their
+observers sit at different places: a database client behind a protocol
+boundary, a TM thread inside the address space. The database ladder
+(RU $\subset$ RC $\subset$ RR $\subset$ SI $\subset$ SSI $\subset$ S) is
+anomaly-defined after Berenson \cite{berenson95critique}, containment-ordered
+after Adya \cite{adya99thesis}, and costs what \S\ref{sec:iso-cost} computes:
+weaker levels validate $w$ instead of $2r+w$ object-chances per contender and
+buy their concurrency by admitting named holes. Every rung below
+serializability is one of those holes; in shared memory the holes are
+crash-awareness failures, so the only sound rung is the top, and the sound
+TM design is the one that borrows weak-level \emph{machinery} --- MVCC, early
+lock release, snapshot batching, static scheduling --- while keeping the
+strong \emph{promise}. The mechanisms are in Part~IV; the promises were here.
 
 \section{Exercises}
+
 \begin{enumerate}
-    \item A programmer argues that \texttt{tm\_write} should return a status code indicating whether the write caused an immediate abort. Explain why this violates opacity and propose an alternative.
-    \item Sketch an asynchronous API where multiple transactions are submitted to a work queue and later awaited. Discuss how batching might reduce validation overhead.
-    \item Compare using \texttt{tm\_begin}\slash{}\texttt{tm\_end} versus \texttt{\_\_transaction\_\allowbreak atomic}. Which is less error-prone and why?
-    \item \emph{[implementation]} Extend Listing~\ref{sec:api-example}'s transfer into a reusable \texttt{atomic\_retry} helper for transactions returning \texttt{int}. Add a test that forces at least one abort and checks that the final account sum is unchanged.
-    \item \emph{[verification]} Write a small PlusCal or TLA+ model of the state machine in Figure~\ref{fig:api-state-machine}. Check that no execution reaches \emph{Committed} after a failed validation edge.
-    \item \emph{[theory]} Compare explicit calls, compiler keywords, and future-based closures under opacity. Which API makes it easiest to prevent non-transactional side effects from becoming visible before commit?
-    \item \emph{[implementation]} Implement a \texttt{TM<int>} wrapper with \texttt{load()} and \texttt{store()} methods backed by \texttt{tm\_read\_i4} and \texttt{tm\_write\_i4}. Show one example where exposing a raw \texttt{int *} would bypass instrumentation.
-    \item \emph{[verification]} Model a future-based API with states \emph{submitted}, \emph{running}, \emph{committed}, and \emph{failed}. State an invariant that a future never returns a value produced by an aborted attempt.
-    \item \emph{[theory]} For the bank-transfer example, classify printing a receipt, appending to an audit log, and updating a transactional counter as replay-safe or replay-unsafe. Explain what API support would make each safe.
-    \item \emph{[open]} Transactional semantics can live in the \emph{language} (compiler keywords), the \emph{library} (explicit hooks, closures), or the \emph{hardware} (HTM).  Argue for the layer you think should own opacity.  State the cost your choice imposes on the other two layers, and give the strongest argument against the layer you reject.
+\item \emph{[theory]} Write a two-transaction history over one object that
+satisfies RC and violates RR. Then write one that satisfies RR and violates
+SI. For each, name the anomaly row of Table~\ref{tab:anomaly-matrix} that
+separates them, in the read-from vocabulary of \S\ref{sec:histories-legality-opacity}.
+
+\item \emph{[theory]} Generalize the write-skew witness to $n$ transactions
+each reading $n{-}1$ objects and writing one: give the anti-dependency cycle
+and show it passes WW-only validation for any $n \geq 2$.
+
+\item \emph{[implementation]} \texttt{EagerBroken} validates values at commit
+but publishes eagerly. Add sandboxing (buffer writes, publish at commit) and
+keep everything else. Run \texttt{bin/opaquedemo} again. The phantom must
+disappear and the writer must still abort. Which single promise did you just
+restore --- serializability, strictness, or opacity? Justify from the demo's
+three barrier views.
+
+\item \emph{[verification]} Extend \texttt{docs/proofs/BankSI.tla} with a
+third configuration \texttt{SERIALIZABLE=SSI}: track anti-dependency edges
+between committed transactions as uninterpreted ``cycle'' flags for the
+two-transaction case and abort a commit that would close a 2-cycle. Check
+that \texttt{Reserve} holds, and that unlike the \texttt{SERIALIZABLE=TRUE}
+configuration, a history exists in which one transaction's \emph{reads} are
+not revalidated.
+
+\item \emph{[measurement]} Recompute Table~\ref{tab:iso-cost} for $k=20$,
+$r=8$, $w=2$, and predict the concurrency $C^*$ at which serializable OCC
+exceeds $E=10$ attempts. Then run the bank simulator of
+\S\ref{sec:math-bank-simulation} with matching parameters and compare the
+measured retry counts against the prediction. Where do they diverge, and
+which approximation term does the divergence blame?
+
+\item \emph{[literature]} Read \cite{berenson95critique} §3–4. Reconstruct
+why the ANSI definition of REPEATABLE READ fails to prevent the phantom
+anomaly \emph{for cursor-based reads}, and identify the one assumption about
+cursors that, removed, makes RR and SI equivalent on point queries.
 \end{enumerate}
 
-\textbf{How to check your work.} The \emph{[implementation]} exercises are
-verified with the companion: build the \texttt{atomic\_retry} helper and the
-\texttt{TM<int>} wrapper on \S\ref{sec:api-example}'s retry loop.  The
-\emph{[verification]} exercises are checked with TLC against the state
-machine of Figure~\ref{fig:api-state-machine} (\emph{Committed} reachable only
-via a validation-success edge; see Appendix~\ref{chap:pluscal-quick-ref}).
-The \emph{[theory]} exercises are graded against the API-design discussion of
-\S\ref{sec:api-example}.  The \emph{[open]} exercise has no single right
-answer; it is graded on whether you state the cost your chosen layer
-imposes on the others and answer the strongest counterargument.
-
-\index{classic transaction API}
-\index{synchronous transaction API}
-\index{transaction descriptor}
-\index{thread-local transaction state}
-\index{typed transactional read}
-\index{typed transactional write}
-\index{byte-oriented instrumentation}
-\index{word-level STM}
-\index{transaction retry}
-\index{non-local abort}
-\index{frame-lifetime hazard}
-\index{bank transfer transaction}
-\index{money-conservation invariant}
-\index{transactional closure}
-\index{replay-safe closure}
-\index{side effects in transactions}
-\index{language-integrated transactions}
-\index{\_\_transaction\_atomic}
-\index{compiler instrumentation}
-\index{transactional future}
-\index{executor-owned transaction state}
-\index{batched validation}
-\index{object-oriented STM}
-\index{TM wrapper}
-\index{transactional object}
-\index{object granularity}
-\index{raw reference escape}
+\textbf{How to check your work.} Exercise 1 is graded against
+Figure~\ref{fig:iso-ladder}. Exercise 3 is verified by the two recorded
+outputs of \S\ref{sec:crash-without-opacity} and \texttt{make run-opaquedemo}.
+Exercise 4 is checked with \texttt{make -C docs/proofs check-teaching} after
+adding your config; the SSI model must reject the Listing~\ref{lst:banksi-history}
+trace while permitting its revalidated reads. Exercise 5's prediction is a
+one-line geometric solve; the simulator comparison must report relative error
+per contention level.
+</content>

@@ -12,7 +12,8 @@
     \item Parts~III and IV (formal verification and runtime designs) are the conceptual core.
     \item Part~V (compilers) and Part~III (mathematics) are self-contained detours; their notation is reused later.
     \item A one-semester course could cover Parts~I, III, IV, and VI; a full course adds V and VII.
-    \item A single running example --- a two-account \texttt{transfer()} --- threads through the book: it appears as locked code in Chapter~1, as an API call in Chapter~7, as the test case for every runtime in Chapter~9, and again as the invariant-bearing workload for the HTM, GPU, persistent, and distributed runtimes of Chapters~16--19.
+    \item Readers coming from databases will feel at home in Parts~I and III, and Chapter~7 is written for you: it rebuilds the isolation-level ladder of Berenson, Gray, and Adya in this book's history vocabulary, settles what each rung costs, and then argues exactly where the ladder stops applying to shared memory --- bring your ANSI instincts and expect them to be challenged at \S\ref{sec:iso-not-in-tm}.
+    \item A single running example --- a two-account \texttt{transfer()} --- threads through the book: it appears as locked code in Chapter~1, as an API call in Chapter~8, as the test case for every runtime in Chapter~10, and again as the invariant-bearing workload for the HTM, GPU, persistent, and distributed runtimes of Chapters~16--19.
 \end{itemize}
 \textbf{The companion codebase.}
 \begin{itemize}

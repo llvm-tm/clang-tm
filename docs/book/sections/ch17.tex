@@ -1,835 +1,556 @@
-\chapter{Transactional Memory for GPUs}
-\label{chap:gpu-tm}
+\chapter{Hardware Transactional Memory – Design and Simulation}
+\index{hardware transactional memory!design}\index{hardware transactional memory!simulation}\index{RTM}\index{TME}\index{cache coherence}\index{capacity aborts}\index{fallback paths}
 
-Every chapter so far has leaned on two structural facts about commodity
-processors: a cache-coherence protocol that can be exploited for conflict
-detection, and speculative hardware that can roll a thread back on an abort.
-GPUs provide neither. This chapter explains why the whole CPU-centred design
-space of Parts~II, IV, and VII must be rebuilt, and how a distinct GPU TM
-design space has emerged in its place: lock-step warp execution, software
-conflict detection, multi-versioned commit logs, and batch commit.
+Hardware transactional memory, or HTM, is the most direct attempt to make transactions disappear into the memory hierarchy. Instead of maintaining read sets, write sets, undo logs, and validation logic in software, the processor extends speculation and coherence so that a region of ordinary loads and stores either commits atomically or aborts and restores the pre-transaction state.
 
-\section{The GPU Execution Model}
+This chapter studies HTM as an architectural idea and as a practical programming interface. The running example remains the two-account bank transfer: a transfer must preserve the account floor and the money-conservation invariant,
 
-A modern GPU is a throughput-oriented device. It does not try to make one
-thread fast; it runs tens of thousands of threads and hides memory latency
-by switching between them. The execution model that results is SIMT
-(single instruction, multiple threads):
+$$
+\operatorname{total}(b)=b_0+b_1=\operatorname{constant}.
+$$
 
-\begin{itemize}
-    \item \textbf{Warps and lock step.} 32 threads (a warp; AMD calls it a
-          wavefront of 64) share a single program counter. One instruction is
-          broadcast to all lanes of a warp each cycle. Lanes that should not
-          take a path are masked off rather than branched around
-          (divergence, Section~\ref{sec:ballot}).
-    \item \textbf{Free-for-all scheduling.} The hardware interleaves warps on
-          a streaming multiprocessor (SM) to hide latency. There is no
-          fairness contract and no guarantee that a warped-out thread makes
-          progress.
-    \item \textbf{Threads are pinned.} A thread occupies its lane for the
-          lifetime of the kernel. There is no thread migration and, crucially,
-          no analogue of the CPU \texttt{sigsetjmp}/\texttt{siglongjmp}
-          rollback that CPU STMs use to restart aborted transactions.
-    \item \textbf{A weak memory model.} Global memory is relaxed. Ordering is
-          restored only by explicit device-scope fences
-          (\texttt{\_\_threadfence()}) or block/system-scope variants.
-\end{itemize}
+The central lesson is deliberately modest: HTM can make the fast path extremely cheap, but it is a best-effort mechanism. Correctness lives in the fallback path.
 
-\textbf{The decisive absence is cache coherence.} GPU L1 caches are private
-to an SM and are not kept coherent. Threads in different SMs synchronise only
-through the L2 cache and global memory, by explicit atomic operations
-(\texttt{atomicAdd}, \texttt{atomicCAS}, \texttt{atomicInc},
-\texttt{atomicExch}). Hardware transactional memory in the sense of Herlihy
-and Moss --- transactional states layered onto a snooping coherence protocol
-\cite{herlihy93} --- has no substrate on which to be built. Everything that
-Parts~II and VII established about coherence-based conflict detection and
-speculative stores simply does not apply.
+\section{Extending Cache Coherence for TM}
 
-\section{Three Foundational Absences}
+Herlihy and Moss proposed the basic hardware idea: add transactional states to a MESI-like cache-coherence protocol. A transactional load marks a cache line as part of the transaction's read set. A transactional store marks a line as part of its write set and delays publication until commit. Their proposal used states such as XCOMMIT and XABORT to distinguish speculative lines from ordinary modified or shared lines.
 
-\begin{itemize}
-    \item \textbf{No hardware TM on the market.} Neither NVIDIA nor AMD
-          exposes transactional instructions to programmers. Every published
-          GPU HTM design --- KILO~TM, WarpTM, the snapshot-isolation HTM ---
-          exists only in simulation
-          \cite{fung11kilotm,fung13warptm,chen17snapshot}. GPU TM on real
-          silicon is software TM.
-    \item \textbf{No speculative state.} There is no reorder buffer, store
-          buffer, or speculation queue whose flush undoes a transaction. An
-          abort is a software action: discard the write-set, reset
-          transaction-local state, and re-execute the body.
-    \item \textbf{One coherent point, shared.} The only memory level at which
-          threads can observe each other is L2. Metadata such as lock tables,
-          versioned boxes, and commit logs must live there --- and every probe
-          of that metadata competes for the same atomics bandwidth as the
-          program's data. Eager (visible) reads, which a CPU STM hides behind
-          its L1, are prohibitively expensive at GPU scale.
-\end{itemize}
+The cache hierarchy then becomes the transaction manager. It tracks which lines have been read, which lines have been written, and whether another core sends a coherence message that invalidates a transactional assumption. A conflicting invalidation to a transactional line is an abort signal. The hardware discards the speculative writes and restarts execution at the checkpointed program counter.
 
-The consequence: the GPU TM design space is \emph{exactly} the software-TM
-space of Part~IV, but solved under constraints the CPU never imposes. The
-rest of this chapter is about those constraints.
+The expensive requirement is undo. If the processor has overwritten a cache line speculatively, it must still be able to restore the pre-transaction value. A simple design keeps both the new value and enough old state inside the cache. This is fast when the transaction fits in the tracked cache structures and brittle when it does not. Evicting a transactional line may lose either the value needed for rollback or the metadata needed for conflict detection. The conservative answer is a capacity abort.
 
-\section{Lock-Step Execution, Divergence, and the Ballot Contract}
-\label{sec:ballot}
-
-A warp executes one instruction for all its lanes at once. Computation on
-lane-local values is SIMD-cheap; computation that depends on \emph{which}
-lanes are active --- voting, reduction, convergence --- is different: it must
-be performed collectively by every active lane at the same instruction.
-
-\textbf{You cannot spin.} If a lane spins on a lock held by another lane of
-the same warp, the whole warp stalls --- owner included --- and deadlocks.
-CPU-style spin-based contention management (TL2's commit lock, TinySTM's
-spin) \cite{dice06tl2,riegel06disc} is therefore unusable. GPU STMs replace
-waiting with \emph{self-abort}: lock sorting (GPU-STM
-\cite{xu14gpustm}), priority-based lock stealing (PR-STM
-\cite{shen15prstm}), or warp-mask retry (the lightweight STMs of Holey and
-Zhai \cite{holey14}).
-
-\textbf{Conflict detection becomes a warp vote.} Because lock step is cheap,
-the whole warp can resolve its intra-warp conflicts in one transaction using
-\texttt{\_\_ballot\_sync}, the primitive that collects one predicate bit from
-each lane into a 32-bit mask. Predicate voting replaces the point-to-point
-messages of a CPU coherence protocol.
-
-But the ballot carries a contract that is easy to violate:
-\textbf{every active lane must reach the call}. Guarding a ballot behind a
-per-lane condition is undefined behaviour that silently misbehaves on some
-NVIDIA silicon and raises a fatal HSA exception on AMD ROCm. The portable
-pattern hoists the ballot out of the lane-guarded block and lets lane~0 act
-on the result:
-
-\medskip
-\noindent\textbf{Scope of ``lock step.''} ``Lock-step'' here means the
-\textit{architectural} contract of a warp in the SM's current scheduling
-model, not a hardware guarantee of perfect temporal lock-step. On NVIDIA,
-the independent thread scheduler (Volta and later) permits lanes of one
-warp to diverge in \emph{execution} while preserving converged semantics
-only at explicit reconvergence points (\texttt{\_\_syncwarp}, ballots).
-AMD's wavefront semantics differ again (two quads, predication-based
-execution). Every assumption this chapter makes about ballot-based
-coordination --- all active lanes at the call, uniform trip counts in
-loops feeding a ballot --- therefore holds \emph{as a programming
-contract we adopt}, verified on the backends by on-target tests and the
-formal models of Section~\ref{sec:tla}, rather than as a fact of the
-hardware.
-
-\begin{verbatim}
-/* BROKEN: the ballot executes only when lane == 0 (undefined). */
-if (lane == 0) {
-    uint64_t m = __ballot_sync(~0ULL, conflict);
-    if (m) flag = 1;
-}
-
-/* CORRECT: every lane executes the ballot; lane 0 acts on it. */
-{
-    uint64_t m = __ballot_sync(~0ULL, conflict);
-    if (lane == 0 && m) flag = 1;
-}
-\end{verbatim}
-
-The same contract applies to \texttt{\_\_syncwarp()} and to any loop that
-feeds a ballot: a short-circuited loop such as
-\texttt{for (w = 0; w < n \&\& !conflict; ++w)} lets some lanes exit early
-and desynchronises the barrier inside the loop body. These are not exotic
-theoretical failures; both were real bugs found while porting the GPU
-backends of this book to AMD hardware, and both were caught only by
-on-target testing and by the formal models of Section~\ref{sec:tla}. The
-lesson is uniform: \textbf{every lane must enter every synchronous
-primitive}.
-
-\section{Worked Example: Counting Aborts With a Ballot}
-\index{warp}\index{\_\_ballot\_sync}\index{GPU TM}\index{SIMT}\index{wavefront}\index{divergence}\index{private memory}\index{versioned box}\index{multi-version TM}
-\label{sec:ballot-example}
-
-Predicate voting turns an abort decision into a warp-wide count. PR-STM and
-the GUST-style backends use this exact pattern to let a warp resolve
-intra-warp conflicts in one instruction:
-
-\begin{lstlisting}[language=C++, caption={Counting aborted lanes with \_\_ballot\_sync.}]
-bool conflict = (read_set_overlap(&mine, &yours, lane));
-/* every lane executes the ballot -- never inside `if (lane == k)` */
-uint32_t mask = __ballot_sync(0xffffffffu, conflict);
-if (lane == 0) {
-    int aborted = __popc(mask);      /* lanes that lost the vote */
-    if (aborted == WARP_SIZE)
-        *retry_budget -= 1;          /* all lost: fall back or back off */
-}
-\end{lstlisting}
-
-\begin{itemize}
-    \item The 32-bit \texttt{mask} is one bit per lane; \texttt{\_\_popc}
-          counts the losers in a single instruction.
-    \item This is the software replacement for the coherence messages a CPU
-          protocol would send: one vote replaces 32 point-to-point
-          invalidation checks.
-    \item Exercise~4 of this chapter asks exactly for this pattern; the
-          TLA+ models of Section~\ref{sec:tla} represent the same count as an
-          \texttt{activeMask} update.
-\end{itemize}
-
-\section{Capacity: Large Read/Write Sets in a Shallow Memory Hierarchy}
-\label{sec:capacity}
-
-A CPU transaction's read-set and write-set grow in registers and L1,
-decoupled from the machine's storage capacity by fast private caches. A GPU
-thread has almost nothing:
-
-\begin{itemize}
-    \item The \textbf{register file} is the only per-thread storage, a few
-          words per lane. A read-set of even a few hundred entries cannot
-          live there.
-    \item Per-thread \emph{local memory} is really a private slice of global
-          memory: cached in L1 when it fits, spilled to L2 when it does not.
-          Every spill costs bandwidth and latency.
-    \item \emph{Shared memory} (tens of KB per block) is the natural home of
-          a warp's transaction descriptor and read/write set, but its size
-          --- and the fact that it is shared among a block's threads --- makes
-          it a scarce, contended resource. Large transactions spill their sets
-          to global memory.
-    \item The natural conflict-detection granularity is the 32-bit word or
-          the 128-byte cache line, not the object. Irregular workloads such as
-          the STAMP kernels (\texttt{bayes}, \texttt{intruder},
-          \texttt{labyrinth}) \cite{minh08stamp} routinely touch hundreds of
-          distinct lines per transaction.
-\end{itemize}
-
-\textbf{Compaction is mandatory.} Hardware designs use Bloom-filter read-set
-signatures (KILO TM \cite{fung11kilotm}); software designs compact the
-read-set to version metadata or use per-address lock tables
-\cite{shen15prstm,nunes22csmv}. The engineering rule of thumb is simple: a
-transaction whose tracked footprint does not fit on chip is a capacity abort
-waiting to happen --- and on a GPU, \emph{every} transaction competes with
-every other transaction in the same block for the same on-chip space.
-
-\textbf{Coalescing cuts both ways.} When 32 lanes access 32 consecutive
-addresses, the hardware merges them into one wide memory transaction --- a
-gift to throughput. When a transactional workload accesses \emph{scattered}
-addresses (hash tables, trees, linked lists --- the furniture of GPU STM
-benchmarks), the memory subsystem instead serialises 32 narrow accesses, one
-per lane, and coalescing stops helping. The access pattern of the workload,
-not the TM algorithm, often dominates measured performance.
-
-\section{Worked Example: Warp-Uniform Bank Transfer With Self-Abort}
-\label{sec:gpu-bank-transfer-example}
-\index{bank transfer}\index{self-abort}\index{warp}\index{money conservation}\index{account floor}
-
-The bank benchmark is a useful minimal GPU TM workload: each transaction reads
-two balances, checks the source account floor, and either transfers a fixed
-amount or aborts without changing state. The kernel below is deliberately
-small. It is not a full STM; it is the lock-based shape that GPU STMs refine:
-acquire metadata without spinning, perform the update only after both locks
-are held, and use a warp-uniform ballot to count aborts.
-
-\begin{lstlisting}[language=C++, caption={A CUDA bank-transfer kernel using sorted locks and warp-uniform abort counting.}]
-#include <stdint.h>
-
-#ifndef WARP_SIZE
-#define WARP_SIZE 32
-#endif
-
-__device__ __forceinline__ int lane_id() {
-    return threadIdx.x & (WARP_SIZE - 1);
-}
-
-__device__ __forceinline__ int lock_account(int *locks, int id) {
-    return atomicCAS(&locks[id], 0, 1) == 0;
-}
-
-__device__ __forceinline__ void unlock_account(int *locks, int id) {
-    __threadfence();          /* publish balance writes before unlocking */
-    atomicExch(&locks[id], 0);
-}
-
-/* Each lane attempts one transfer:
-     from[i] -> to[i], amount[i].
-   On success, total money is unchanged. On abort, no balance is changed. */
-__global__ void bank_transfer_kernel(int *balances,
-                                     const int *floors,
-                                     int *locks,
-                                     const int *from,
-                                     const int *to,
-                                     const int *amount,
-                                     int n,
-                                     unsigned int *abort_count) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int lane = lane_id();
-
-    bool abort_tx = false;
-    bool committed = false;
-
-    if (tid < n) {
-        int a = from[tid];
-        int b = to[tid];
-        int x = amount[tid];
-
-        if (a == b || x < 0) {
-            abort_tx = true;
-        } else {
-            int first  = (a < b) ? a : b;
-            int second = (a < b) ? b : a;
-
-            int got_first = lock_account(locks, first);
-            int got_second = 0;
-
-            if (got_first) {
-                got_second = lock_account(locks, second);
-            }
-
-            if (!got_first || !got_second) {
-                abort_tx = true;        /* no spin: retry in a later kernel pass */
-            } else {
-                int ba = balances[a];
-                int bb = balances[b];
-
-                if (ba - x < floors[a]) {
-                    abort_tx = true;    /* account floor would be violated */
-                } else {
-                    balances[a] = ba - x;
-                    balances[b] = bb + x;
-                    committed = true;
-                }
-
-                unlock_account(locks, second);
-                unlock_account(locks, first);
-            }
-
-            if (got_first && !got_second) {
-                unlock_account(locks, first);
-            }
-        }
-    }
-
-    /* Every active lane reaches the ballot, including lanes with tid >= n. */
-    unsigned int mask = __ballot_sync(0xffffffffu, abort_tx);
-    if (lane == 0) {
-        atomicAdd(abort_count, (unsigned int)__popc(mask));
-    }
-
-    (void)committed;          /* retained for instrumentation builds */
-}
-\end{lstlisting}
-
-\begin{itemize}
-    \item Lock acquisition is sorted by account id, but failure does not spin.
-          The transaction self-aborts and can be retried by the enclosing
-          driver.
-    \item The transfer writes both balances only after both locks are held.
-          Therefore a committed transaction preserves the total balance; an
-          aborted transaction writes nothing.
-    \item The ballot is outside the per-lane transaction body. Even inactive
-          lanes execute it with \texttt{abort\_tx == false}, preserving the
-          SIMT contract of Section~\ref{sec:ballot}.
-    \item The device fence before \texttt{atomicExch} is the publication edge:
-          data writes must reach global visibility before another lane can
-          acquire the account lock.
-\end{itemize}
+This explains why coherence-based HTM tends to work best for short, cache-resident critical sections. It is ideal for the common case in which a lock protects a small update, such as the bank transfer touching two account records. It is much less robust for long scans, large read sets, or transactions that call into the operating system.
 
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
-    node distance=1.55cm and 1.85cm,
-    state/.style={draw, rounded corners, align=center, minimum width=2.55cm, minimum height=0.9cm},
-    arrow/.style={-Latex, thick}
+    box/.style={draw, rounded corners, align=center, minimum width=2.8cm, minimum height=0.9cm},
+    smallbox/.style={draw, rounded corners, align=center, minimum width=2.3cm, minimum height=0.8cm},
+    arr/.style={-{Latex}, thick}
 ]
-\node[state] (begin) {Begin\\snapshot GTS};
-\node[state, right=of begin] (exec) {Execute\\buffer reads/writes};
-\node[state, right=of exec] (reserve) {Reserve slots\\AtomicINC};
-\node[state, below=of reserve] (cct) {CCT check\\pending writers};
-\node[state, left=of cct] (mrv) {MRV check\\finalised versions};
-\node[state, left=of mrv] (write) {Install versions\\per VBox};
-\node[state, below=of write] (publish) {Publish batch\\advance GTS};
-\node[state, below=of cct] (abort) {Abort\\discard write-set};
+\node[box] (begin) {XBEGIN\\checkpoint PC};
+\node[box, right=1.4cm of begin] (track) {L1 tracks\\read/write lines};
+\node[box, right=1.4cm of track] (body) {speculative\\loads/stores};
+\node[box, right=1.4cm of body] (commit) {XEND\\publish writes};
 
-\draw[arrow] (begin) -- (exec);
-\draw[arrow] (exec) -- (reserve);
-\draw[arrow] (reserve) -- (cct);
-\draw[arrow] (cct) -- node[above, sloped] {ok} (mrv);
-\draw[arrow] (mrv) -- node[above, sloped] {ok} (write);
-\draw[arrow] (write) -- (publish);
+\node[smallbox, below=1.1cm of track] (inv) {coherence\\invalidation};
+\node[smallbox, below=1.1cm of body] (evict) {capacity\\eviction};
+\node[box, below=1.1cm of $(inv)!0.5!(evict)$] (abort) {abort\\restore checkpoint};
 
-\draw[arrow] (cct) -- node[right] {conflict} (abort);
-\draw[arrow] (mrv) -- node[above, sloped] {moved past snapshot} (abort);
-\draw[arrow] (abort.east) .. controls ($(abort.east)+(1.1,0)$) and ($(begin.south)+(0,-0.9)$) .. node[below] {retry} (begin.south);
+\draw[arr] (begin) -- (track);
+\draw[arr] (track) -- (body);
+\draw[arr] (body) -- (commit);
+\draw[arr] (inv) -- (track);
+\draw[arr] (track) -- node[left, align=center]{conflict} (abort);
+\draw[arr] (evict) -- node[right, align=center]{lost tracking} (abort);
+\draw[arr] (body) -- (evict);
+\draw[arr] (abort.west) -| (begin.south);
 \end{tikzpicture}
-\caption{A GUST-style GPU commit path. Slot reservation is non-blocking; validation is split between concurrently committing transactions and already finalised versions.}
-\label{fig:gpu-gust-commit-path}
+\caption{Coherence-based HTM treats invalidations and capacity loss as abort signals. Commit is cheap only while the read and write sets remain tracked in cache.}
+\label{fig:htm-coherence-abort}
 \end{figure}
 
+The figure is also a useful mental model for software design. Every extra cache line touched inside the transaction becomes part of the speculative footprint. Debug counters, logging buffers, allocator metadata, and accidental reads of shared state all increase the chance of abort. In HTM programming, minimizing the hardware footprint is not merely an optimization; it is part of making progress likely.
 
-\section[Commit at GPU Scale]{Commit at GPU Scale: From Serial Locks to Batched Multi-Versioning}
-\label{sec:commit}
+\section{Modern HTM Implementations}
 
-A CPU system runs a few dozen cores; a GPU kernel launches thousands of
-\emph{concurrent transactions}. Every single-threaded choke point of a CPU
-TM becomes a hard bottleneck:
+Commodity HTM is not one mechanism. It is a family of best-effort mechanisms with similar semantics and different interfaces. Intel Restricted Transactional Memory, or RTM, exposes instructions such as \texttt{xbegin}, \texttt{xend}, and \texttt{xabort}. ARM Transactional Memory Extension, or TME, exposes similar architectural concepts with implementation-defined tracking and diagnostics. IBM's Blue Gene/Q and POWER implementations are the longevity case study: they show that coherence-based HTM can be made practical when the architecture and platform expose a sufficiently mature interface.
 
-\begin{itemize}
-    \item \textbf{No commit locks.} A global commit lock that serialises
-          commits (as in TL2 \cite{dice06tl2}) or any CAS-based append to a
-          shared structure leads to one winner and thousands of spinning
-          losers. GUST reports that, at 8960 threads on an RTX~6000~Ada,
-          the hardware sustains roughly \textbf{100$\times$ more concurrent
-          AtomicINCs than CASes} \cite{nunes23gust} --- an atomic-append
-          throughput comparison, not a commit-rate measurement, but it is
-          exactly the operation a commit-log append performs. The design
-          rule: commit-slot allocation must be \emph{never-failing}
-          (AtomicINC), not \emph{contended} (CAS).
-    \item \textbf{Validation cost is a sum, not a constant.} Commit-time
-          validation is $O(|\text{read-set}|)$ per transaction and happens for
-          thousands of transactions per batch, so the aggregate is
-          $O(\sum |\text{read-set}|)$; validation against \emph{concurrently
-          committing} transactions adds a cross-product term. Cheap
-          per-transaction costs explode multiplicatively at GPU concurrency.
-    \item \textbf{Multi-versioning kills the abort chain.} If a transaction
-          reads a consistent old snapshot instead of watching for conflicts,
-          read-only transactions \emph{never abort}. This property, inherited
-          from JVSTM \cite{cachopo06}, is what makes the most scalable GPU
-          STMs (CSMV \cite{nunes22csmv}, GUST \cite{nunes23gust})
-          multi-versioned: writers append versions and readers walk history,
-          instead of every read being a potential conflict.
-    \item \textbf{Batch everything.} Because warps move in lock step, the
-          natural unit of commit is \emph{the warp}, not the thread. GUST has
-          a warp reserve \texttt{WARP\_SIZE} contiguous commit-log slots with
-          one AtomicINC, validate as a group, write back, and publish the
-          batch with a single advance of the global timestamp
-          \cite{nunes23gust}. CSMV goes further and decouples execution from
-          commit entirely, dedicating \emph{server warps} to validate and
-          commit the writes of \emph{client warps} \cite{nunes22csmv}.
-\end{itemize}
+The shared semantic contract is simple: a hardware transaction may commit, but software must not depend on eventual commit. It may abort because another core conflicts with its read or write set. It may abort because the transaction exceeds implementation capacity. It may abort because it executes an unsupported instruction, takes an interrupt, faults on a page, or hits a microarchitectural limit that is not visible in the source code.
 
-\section{Worked Example: Commit-Slot Allocation, CAS vs.\ AtomicINC}
-\index{AtomicINC}\index{commit log}\index{commit-slot allocation}\index{CCT}\index{MRV}\index{GTS}\index{versioned box}\index{batch publication}\index{GPU TM}
-\label{sec:slot-example}
+This best-effort rule distinguishes HTM from the software backends studied earlier. In NOrec, TL2, TinySTM, SwissTM, JVSTM, MVLog, and the persistent and distributed designs, the implementation owns the retry protocol. With HTM, the processor owns only the fast attempt. The program must provide a correct fallback path.
 
-The ``never-failing not contended'' rule of the previous section, in code.
-Two ways for a warp to claim commit-log slots:
+The simplest fallback is a global lock: try HTM a few times, then serialize. The companion codebase includes TSX-SGL as the natural instance of this idea. More elaborate hybrids use phased execution or hybrid STM, switching between hardware and software modes as contention and capacity behavior change. The important correctness rule is unchanged: the hardware path must synchronize with the fallback path, usually by reading the fallback lock inside the transaction. This is called lock subscription.
 
-\begin{lstlisting}[language=C++, caption={CAS vs.\ AtomicINC commit-slot reservation.}]
-/* CAS: one winner per contention point; losers spin or retry. */
-while (!atomicCAS(&g_next, base, base + WARP_SIZE)) {}  /* convoy */
+The glibc lock-elision history is the warning sign. Eliding locks transparently is attractive, but the best-effort contract, platform errata, and subtle subscription rules make correctness and long-term maintenance difficult. When lock elision is used, it must be treated as a performance path over an ordinary correct synchronization protocol, not as a replacement for that protocol.
 
-/* AtomicINC: never fails; every warp claims its own slots. */
-int base = atomicAdd(&g_next, WARP_SIZE);   /* no retry, no loop */
-\end{lstlisting}
+Two further interface details complete the picture. \texttt{XTEST} is the introspection instruction of the x86 TSX family: it returns true when executed inside a transactional region (RTM or HLE) and false otherwise, so that \emph{shared} code --- a lock acquisition, a library call --- can detect that it is running speculatively and adjust, most commonly by making lock operations no-ops inside an enclosing transaction instead of aborting it. Any design that routes hardware and software executions through one function body needs exactly this predicate; the companion's runtimes carry the same idea in software form (\texttt{current\_tx->active}). Second, RTM had a sibling interface: Hardware Lock Elision (HLE) marked ordinary \texttt{LOCK}-prefixed instructions with \texttt{xacquire}/\texttt{xrelease} prefixes and asked the processor to elide the lock speculatively, falling back to the plain locked operation on abort. HLE required no new control flow, which made it attractive to libc implementers --- and precisely because the elision was invisible at the source level, programmers could not add subscription reads, retry budgets, or abort accounting to the elided region. That asymmetry, more than any single erratum, is why HLE aged out of the ecosystem while explicit RTM loops survived in HTM-aware codebases.
 
-\begin{itemize}
-    \item Both allocate \texttt{WARP\_SIZE} contiguous slots; the CAS version
-          makes concurrent warps contend for the \emph{right} to allocate,
-          the AtomicINC version lets them all allocate and sort it out later.
-    \item GUST reports the underlying hardware asymmetry quantified:
-          roughly $100\times$ more concurrent AtomicINCs than CASes at
-          8960 threads (RTX~6000~Ada) \cite{nunes23gust} --- the ``no
-          commit locks'' bullet, measured.
-    \item The \texttt{base} value is the warp's commit timestamp; lane
-          \texttt{l} owns slot \texttt{base + l}, exactly the GUST batch
-          publication of Section~\ref{sec:gust}.
-    \item The TLA+ model of Section~\ref{sec:tla} abstracts the AtomicINC as
-          one atomic action per warp --- the whole batch in one step.
-\end{itemize}
+The availability reality is the final fact, and it motivates this chapter's simulation section. TSX arrived on Haswell (2013) as RTM plus HLE; early steppings had it disabled by microcode once, and in 2021 Intel again shipped microcode disabling TSX on Haswell, Broadwell, and Skylake-family client parts. Cascade Lake server parts shipped with TSX present but disabled by default (enableable in firmware), while recent client generations removed it outright. AMD has never implemented TSX. Arm's TME was specified but never shipped in a commercial core and was withdrawn from the architecture reference manual in 2025~\cite{arm25tmew} --- removed from LLVM~22, the very toolchain Part~V's plugin builds with. Only IBM POWER continues to expose a coherence-based HTM with a mature interface (\texttt{tbegin.}/\texttt{tend.}/\texttt{tabort.}/\texttt{tsr.}, the TEXASR failure-record register, and rollback-only-transaction state). The practical consequence for this book: on most machines you can buy today, none of Table~\ref{tab:htm-implementations}'s first two rows can be executed at all, which is exactly why \S\ref{sec:htm-simulation} exists --- a simulated ISA keeps the instruction set available regardless of what the host implements, and the companion's RDTSC profiling patch (\texttt{patches/profile/tsx}) preserves measurements from the last widely available RTM parts.
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{M{0.14\linewidth}M{0.15\linewidth}M{0.13\linewidth}M{0.16\linewidth}M{0.26\linewidth}}
+\begin{tabular}{M{0.18\textwidth}M{0.25\textwidth}M{0.25\textwidth}M{0.22\textwidth}}
 \hline
-\thb{0.14\textwidth}{\textbf{Commit style}} & \thb{0.15\textwidth}{\textbf{Allocator}} & \thb{0.13\textwidth}{\textbf{Waiting}} & \thb{0.16\textwidth}{\textbf{Reader rule}} & \thb{0.26\textwidth}{\textbf{GPU consequence}} \\
+\thb{0.18\textwidth}{\textbf{Mechanism}} & \thb{0.25\textwidth}{\textbf{Tracking}} & \thb{0.25\textwidth}{\textbf{Abort sources}} & \thb{0.22\textwidth}{\textbf{Software obligation}} \\
 \hline
-Global lock & one lock & spin or block & single latest value &
-Simple, but one serial point throttles thousands of lanes. \\
-CAS log append & CAS on tail & retry loop & latest or validated value &
-Correct but creates a convoy when many warps append together. \\
-AtomicINC log append & atomic add on tail & none for allocation & snapshot plus validation &
-Every warp obtains slots; conflicts are handled by validation, not allocation failure. \\
-Client--server commit & server warp queue & client waits for service & multi-version snapshot &
-Moves contended metadata to server warps; best suited when commit work can be amortised. \\
-Read-only MVCC & none on read path & none & stable old version &
-Read-only transactions never abort, matching the JVSTM and CSMV design point. \\
+Intel RTM & Cache-resident speculative read/write sets; explicit \texttt{\_xbegin}, \texttt{\_xend}, \texttt{\_xabort}. & Conflict, capacity, unsupported instruction, interrupt, page fault, explicit abort. & Always provide a correct fallback; subscribe to fallback lock inside the transaction.\\
+ARM TME & Architectural transaction begin/end (\texttt{TSTART}/\allowbreak\texttt{TCOMMIT}/\allowbreak\texttt{TCANCEL}/\allowbreak\texttt{TTEST}) with implementation-defined tracking. & Similar best-effort causes; exact diagnostics are implementation-specific. & Same best-effort rule; never assume eventual commit. \emph{TME never shipped in a commercial core and was withdrawn from the Arm ARM in 2025~\cite{arm25tmew}; it is studied here as a design point, not a shipping ISA.}\\
+IBM POWER HTM & Coherence-based tracking with a mature architectural interface (\texttt{tbegin.}/\allowbreak\texttt{tend.}/\allowbreak\texttt{tabort.}/\allowbreak\texttt{tsr.}, TEXASR failure recording, ROT). & Conflict, capacity, non-transactional events, implementation limits. & Use retry budgets and fallback paths; exploit richer platform diagnostics where available.\\
+gem5 Ruby/HTM model & Simulated cache hierarchy and coherence protocol (\texttt{MESI\_Three\_\allowbreak Level\_HTM}); ISA-agnostic HTM sequencer with calibrated begin/commit latencies. L0 cache tracks read/write sets with configurable line limits (128 read, 32 write) and triggers \texttt{LD\_FAIL}/\texttt{ST\_FAIL} on conflict or capacity aborts. & Commit path and abort callbacks are modeled; the x86 fault path maps cache failure reasons (\texttt{FAIL\_SELF}~$\to$~capacity, \texttt{FAIL\_REMOTE}~$\to$~conflict) to the EAX status word via \texttt{GenericHtmFailureFault}, exercising the same fallback code paths as real hardware (see \S\ref{sec:htm-simulation}). & Use simulation to separate effects that hardware counters collapse; Ruby coherence traffic and L0 set-associativity effects become directly observable.\\
 \hline
 \end{tabular}
-\caption{GPU commit strategies differ mainly in where they place the serialisation point.}
-\label{tab:gpu-commit-strategies}
+\caption{HTM implementations differ in interface and diagnostics, but share the same semantic contract: hardware commit is opportunistic and software fallback is mandatory.}
+\label{tab:htm-implementations}
 \end{table}
 
+\section{Worked Example: RTM, From the Inside}
+\index{HTM}\index{RTM}\index{xbegin}\index{xend}
+\label{sec:rtm-example}
 
-\section{A Taxonomy of GPU TM}
-\label{sec:taxonomy}
+Intel RTM is the closest commodity hardware comes to a transaction:
 
-Table~\ref{tab:gpu-tm} summarises the main published designs, both the
-simulated hardware proposals and the software systems that run on real
-silicon. Three of the software rows are realised, at some level, in the
-backends accompanying this book: PR-STM in
-\texttt{backends\slash{}tm\_impl\slash{}gpu\_stm}, CSMV in \texttt{backends\slash{}tm\_impl\slash{}csmv},
-and GUST in \texttt{gpu\slash{}backends\slash{}gpu\_gust}. The repository
-additionally implements GPUTX
-(\texttt{backends\slash{}tm\_impl\slash{}gputx}), which is not a table row;
-the remaining literature rows (GPU-STM, the Holey--Zhai lightweight STMs,
-OFG-STM) have no companion implementation.
-
-\begin{table}[ht]
-\centering
-\begin{tabular}{lllM{9cm}}
-\hline
-\textbf{System} & \textbf{Year} & \textbf{Type} & \thb{9cm}{\textbf{Key idea}} \\
-\hline
-KILO TM \cite{fung11kilotm} & 2011 & HW & word-level, value-based conflicts; commit units; no coherence \\
-WarpTM \cite{fung13warptm} & 2013 & HW & warp-level management; temporal conflict detection \\
-SI-HTM \cite{chen17snapshot} & 2017 & HW & multi-version memory; snapshot isolation; write-skew elimination \\
-GPU-STM \cite{xu14gpustm} & 2014 & SW & encounter-time lock sorting to avoid deadlock \\
-Lightweight \cite{holey14} & 2014 & SW & eager/pessimistic/invisible reads; warp-mask retry \\
-PR-STM \cite{shen15prstm} & 2015 & SW & 32-bit priority lock word; lock stealing; commit-time validation \\
-CSMV \cite{nunes22csmv} & 2022 & SW & multi-version; client--server commit (server warps validate) \\
-OFG-STM \cite{perlin24ofg} & 2024 & SW & obstruction-free; locator ownership; warp GC \\
-GUST \cite{nunes23gust} & 2023 & SW & AtomicINC commit log; CCT/MRV validation; batch publication \\
-\hline
-\end{tabular}
-\caption{A taxonomy of GPU TM systems.}
-\label{tab:gpu-tm}
-\end{table}
-
-\section{Hardware Proposals: KILO TM, WarpTM, and Snapshot Isolation}
-\label{sec:hardware}
-
-The hardware line of work, all simulation-based, shows what a future GPU
-vendor could ship. KILO~TM \cite{fung11kilotm} was the first credible design:
-because GPUs lack coherence, it detects conflicts \emph{by value}, keeping a
-read-log and write-log in each thread's local memory and validating them
-against committed values at commit units distributed near the L2 banks, using
-Bloom filters for compact speculative validation. Its reported $59\%$ of
-fine-grained-lock performance on irregular kernels, for an area cost of about
-$0.5\%$ of a commercial GPU, is the canonical data point that GPU HTM is
-possible but not free.
-
-WarpTM \cite{fung13warptm} added two optimisations to KILO~TM that directly
-echo the software concerns of this chapter. \emph{Warp-level transaction
-management} resolves intra-warp conflicts before the warp ever reaches the
-commit units --- exactly what software warps do with
-\texttt{\_\_ballot\_sync} --- so a conflict-free warp commits as a unit and
-amortises commit-message traffic. \emph{Temporal conflict detection} lets
-read-only transactions commit silently using globally synchronised timers,
-attacking the same read-abort problem that multi-versioning attacks in
-software. Together they bought roughly $65\%$ throughput and $34\%$ energy
-savings over the base design.
-
-The snapshot-isolation HTM \cite{chen17snapshot} extended a multi-versioned
-memory system to let write--read conflicts pass, aborting only on
-write--write conflicts, and eliminating the associated write-skew anomaly on
-the fly. Its motivation --- long transactions over complex data structures
-should not die because of reads --- is the same one that drives the MVCC
-software systems below.
-
-\section{Software TM in the Wild}
-\label{sec:software}
-
-The software systems are what actually runs, and their progression is a
-textbook version of the CPU STM evolution of Part~IV:
-
-\begin{itemize}
-    \item \textbf{Lock-based.} GPU-STM \cite{xu14gpustm} applies
-          encounter-time lock sorting so that a warp never spins on a lock in
-          a deadlock-prone lock order. PR-STM \cite{shen15prstm} packs
-          \texttt{[priority:8 | version:23 | locked:1]} into a 32-bit lock
-          word, acquires locks by priority-aware CAS at commit time, and lets
-          a higher-priority transaction \emph{steal} a lock from a
-          lower-priority holder, turning contention into a clean self-abort
-          instead of a spin. The lightweight STMs of Holey and Zhai
-          \cite{holey14} provide three flavours --- eager read-write
-          conflicts (ESTM), pessimistic (PSTM), and invisible reads (ISTM)
-          --- with shadow metadata in global memory and per-thread logs in
-          local memory.
-    \item \textbf{Multi-versioned.} CSMV \cite{nunes22csmv} is JVSTM's
-          multi-version design \cite{cachopo06} rebuilt for GPU economics:
-          \emph{client} warps execute transactions and buffer writes; a few
-          \emph{server} warps hold the versioned metadata, validate, and
-          commit, so the contended shared state never leaves on-chip storage.
-          Read-only transactions never abort.
-    \item \textbf{Obstruction-free.} OFG-STM \cite{perlin24ofg} uses
-          locator-based ownership and warp-wide garbage collection with
-          Cooperative Groups, avoiding locks. Its stated advantage --- a
-          warp-cooperative solution to locator reclamation (the GPU analogue
-          of hazard pointers) --- is a GPU-native answer to a lock-free
-          pain point.
-\end{itemize}
-
-\section{Case Study: GUST and the Snapshot Threshold}
-\label{sec:gust}
-
-GUST \cite{nunes23gust}, implemented in this project's
-\texttt{gpu/backends/gpu\_gust}, is a multi-version system whose one idea is
-to replace contended commit-time synchronisation with an AtomicINC. It is
-\emph{one design point} in the GPU commit-protocol space, not the canonical
-answer: the rest of the chapter positions it against the global-lock,
-CAS-append, client--server, and read-only MVCC alternatives of
-Table~\ref{tab:gpu-commit-strategies} (Section ``Commit at GPU Scale'').
-Several of
-its design points are worth teaching on their own:
-
-\begin{itemize}
-    \item \textbf{Versioned boxes.} Each address owns a circular buffer of the
-          most recent committed \texttt{(timestamp, value)} pairs, appended
-          to increasingly (slot = \texttt{head \% DEPTH}).
-    \item \textbf{Commit log and GTS.} A bounded global commit log holds the
-          state (free, pending, committed, aborted) and write-set of every
-          in-flight transaction. A global timestamp (GTS) counts
-          \emph{finalised} slots. A transaction snapshots GTS at begin and
-          never re-reads earlier than that snapshot.
-    \item \textbf{CCT + MRV validation.} On commit a warp validates against
-          two classes of earlier transactions: those still finalising
-          (compared directly against their commit-log write-sets ---
-          concurrently-committing-transaction checking, CCT) and those already
-          finalised (checked via the most recent version, MRV --- if any read
-          VBox has moved past the snapshot, abort).
-    \item \textbf{Batch publication.} A warp reserves \texttt{WARP\_SIZE}
-          slots with one AtomicINC, writes back all its versions, and advances
-          GTS by \texttt{WARP\_SIZE} only when it observes GTS equal to its
-          base --- a full-warp group commit.
-\end{itemize}
-
-The subtlety that bit during bring-up illustrates why this chapter exists. An
-early kernel draft used \texttt{snapshot = startTS + 1} on the intuition that
-a committing transaction becomes visible one tick later. But GTS counts
-\emph{finalised} slots: a writer that reserved slot $c$ publishes version
-$c+1$ and is visible \emph{iff} $c < startTS$. The naive $+1$ let an
-in-flight writer at exactly $c = startTS$ slip into the snapshot --- a
-missed-conflict hole that neither validation phase could see. In a CPU STM
-paper this would be a footnote; on a GPU, with thousands of concurrent
-transactions, it is a data-corruption bug that is only tractable with the
-right tools.
-
-\section{Worked Example: The Snapshot Threshold, in Code}
-\index{snapshot threshold}\index{CCT}\index{MRV}
-\label{sec:snapshot-example}
-
-The off-by-one that Section~\ref{sec:gust} describes, and its fix:
-
-\begin{lstlisting}[language=C++, caption={GUST snapshot: why startTS+1 is a missed-conflict hole.}]
-/* GTS counts FINALISED slots. A writer reserving slot c publishes
-   version c+1, visible iff c < startTS. */
-
-int snapshot = *gts;                  /* correct: only finalised slots */
-// int snapshot = *gts + 1;           /* bug: lets an in-flight writer
-//                                        at c == startTS into the read */
-
-/* Suppose startTS = 5 and an in-flight writer holds slot 5 (not yet
-   finalised).  The +1 form reads version 6, but that writer publishes
-   version 6 only after finalising --- a value that does not exist yet.
-   The reader proceeds on a snapshot that was never real. */
+\begin{lstlisting}[language=C, caption={The RTM contract: begin, body, fall back on abort.}]
+unsigned status = _xbegin();
+if (status == _XBEGIN_STARTED) {
+    /* transactional region */
+    *a -= n; *b += n;            /* both become visible atomically */
+    _xend();                     /* commit                        */
+} else {
+    /* abort: EAX status word encodes the reason (conflict, ...) */
+    lock(&g_fallback);           /* best-effort -> serial fallback  */
+    *a -= n; *b += n;
+    unlock(&g_fallback);
+}
 \end{lstlisting}
 
-\begin{itemize}
-    \item The correct form reads only finalised slots: a writer visible at
-          version $v$ must have reserved $v-1 < startTS$, so the read must
-          use \emph{startTS}, not \texttt{startTS+1}.
-    \item Neither CCT nor MRV validation can catch this: the reader believes
-          it has a valid snapshot and never re-checks the in-flight writer.
-    \item This is the exercise of this chapter's Exercise~3, and it is
-          exactly what the TLA+ model's \texttt{InvNoMissedConflict}
-          invariant caught before the kernel was fixed.
-\end{itemize}
+Compare with \S\ref{sec:api-example}: where the STM used a retry loop, RTM uses a hardware fallback instead of a software retry. The \texttt{status} value is a 32-bit word written to \texttt{EAX}: bit~0 set means the abort came from \texttt{\_xabort} (bits 31:24 then carry the \texttt{\_xabort} argument), bit~1 means the transaction \emph{may} succeed on retry, bit~2 a data conflict, bit~3 a capacity overflow, bit~4 a debug breakpoint, bit~5 nesting overflow. It is the entire diagnostics interface --- far poorer than the abort-accounting of Part~VI, which is why profiling tools must infer RTM reasons (Part~VII). Exercise~1 asks for the fallback design; the phased-hybrid and HSTM discussion above is exactly this fallback made adaptive. The transaction's atomicity is enforced by the L1/L2 coherence tracking of the first section --- which is why capacity aborts are unavoidable (see Part~VII's GPU contrast). \textbf{Abort taxonomy}: RTM collapses many causes into the single EAX status word. The practical breakdown is \emph{conflict} (another core touched the read/write set), \emph{capacity} (the transaction outgrew the L1 tracking --- unavoidable at large read/write sets), \emph{unsupported instruction} (e.g.\ most syscalls and \texttt{rdfsbase}), and \emph{debug/explicit} (\texttt{\_xabort} or a debugger single-step). Profilers cannot distinguish conflict from capacity reliably from the status alone --- this is the reason the Part~VII simulator model re-measures them. \textbf{Fallback correctness is the real contract.} The \texttt{lock(\&g\_fallback)} path above is a second, serial execution of the same body. It must be \emph{called with the same state view} as the aborted TSX attempt and must itself be transactional-safe: a crash between the fallback lock and its unlock is indistinguishable from a crash inside the transaction. The failure mode to design against is the \emph{retry loop deadlock}: a hybrid that falls back to a lock but is also invoked by the STM-style retry loop can deadlock on its own fallback mutex (a real bug class in the companion repo's SPHT backend).
 
-\section{Worked Example: Money Conservation in TLA+}
-\label{sec:gpu-bank-tla-example}
-\index{TLA+}\index{model checking}\index{money conservation}\index{account floor}
+The listing is intentionally small, but it hides two non-negotiable rules. First, the fallback body must be the same logical operation as the transactional body. Second, the fallback lock must be visible to the transaction. Without that visibility, the hardware path and fallback path are merely two unsynchronized implementations of the same update.
 
-The following finite TLA+ model captures the semantic contract of the bank
-transaction independently of any particular GPU implementation. TLC can check
-it directly: each step chooses a source, destination, and amount; a step is
-enabled only when the source account remains above its floor. The invariants
-are the two properties the GPU kernel must preserve.
+\section{Worked Example: RTM Bank Transfer with Lock Subscription}
+\index{lock subscription}\index{fallback lock}\index{money conservation}
+\label{sec:rtm-bank-transfer}
 
-\begin{lstlisting}[caption={A finite TLA+ bank-transfer model for TLC.}]
------------------------------ MODULE BankTransferGPU -----------------------------
-EXTENDS Naturals, TLC
+The fallback lock must be visible to the hardware transaction. Otherwise a serialized fallback transfer can race with a hardware transaction that never read the lock.
 
-Accounts == {"A", "B", "C"}
+\begin{lstlisting}[language=C, caption={A compilable RTM bank transfer with account floors and fallback lock subscription.}]
+/* Compile on x86-64 with:
+ *   c++ -std=c++17 -O2 -mrtm bank_rtm.cc -o bank_rtm
+ */
+#include <immintrin.h>
+#include <atomic>
+#include <array>
+#include <cassert>
+#include <thread>
 
-InitBalance == [
-  "A" |-> 10,
-  "B" |-> 10,
-  "C" |-> 10
-]
+struct Account {
+    long balance;
+    long floor;
+};
 
-Floor == [
-  "A" |-> 2,
-  "B" |-> 2,
-  "C" |-> 2
-]
+static std::atomic<bool> g_fallback{false};
 
-Amounts == 1..3
+static void lock_fallback() {
+    bool expected = false;
+    while (!g_fallback.compare_exchange_weak(
+               expected, true,
+               std::memory_order_acquire,
+               std::memory_order_relaxed)) {
+        expected = false;
+        std::this_thread::yield();
+    }
+}
 
-VARIABLE bal
+static void unlock_fallback() {
+    g_fallback.store(false, std::memory_order_release);
+}
 
-Total(b) == b["A"] + b["B"] + b["C"]
+static bool transfer_body(Account& from, Account& to, long amount) {
+    if (amount < 0) return false;
+
+    __int128 after = static_cast<__int128>(from.balance) - amount;
+    if (after < from.floor) return false;
+
+    from.balance -= amount;
+    to.balance += amount;
+    return true;
+}
+
+static bool transfer(Account& from, Account& to, long amount) {
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        unsigned status = _xbegin();
+
+        if (status == _XBEGIN_STARTED) {
+            /*
+             * Lock subscription: if the fallback path is active, abort.
+             * The load places g_fallback in the transactional read set.
+             */
+            if (g_fallback.load(std::memory_order_acquire))
+                _xabort(0xF0);
+
+            bool ok = transfer_body(from, to, amount);
+            _xend();
+            return ok;
+        }
+
+        if ((status & _XABORT_EXPLICIT) &&
+            _XABORT_CODE(status) == 0xF0) {
+            std::this_thread::yield();
+            continue;
+        }
+
+        if ((status & _XABORT_RETRY) == 0)
+            break;
+    }
+
+    lock_fallback();
+    bool ok = transfer_body(from, to, amount);
+    unlock_fallback();
+    return ok;
+}
+
+static long total(const std::array<Account, 2>& a) {
+    return a[0].balance + a[1].balance;
+}
+
+int main() {
+    std::array<Account, 2> bank = {{{100, 0}, {100, 0}}};
+
+    long before = total(bank);
+    bool ok1 = transfer(bank[0], bank[1], 25);
+    bool ok2 = transfer(bank[0], bank[1], 1000);
+
+    assert(ok1);
+    assert(!ok2);
+    assert(bank[0].balance >= bank[0].floor);
+    assert(bank[1].balance >= bank[1].floor);
+    assert(total(bank) == before);
+}
+\end{lstlisting}
+
+The invariant is money conservation: every successful transfer subtracts and adds the same amount. The account-floor check is inside both the RTM path and the fallback path; fallback is not a different algorithm. The transaction reads \texttt{g\_fallback}; that read is not an optimization but the synchronization point between hardware and software execution. The retry budget is deliberately finite, because a best-effort HTM transaction is allowed to abort forever. Finally, the explicit abort code \texttt{0xF0} separates ``fallback lock is held'' from ordinary conflicts in local diagnostics, though it does not make RTM deterministic.
+
+The companion backends use this same pattern at different levels. SGL serializes everything. TSX-SGL attempts the critical section in hardware and falls back to serialization. Software systems such as TL2, NOrec, TSC-TM, SwissTM, and TinySTM do not depend on cache-resident speculation, but they pay for metadata, validation, and logging. The measured results in the companion project reflect that trade-off: for the fuzz/bank workload on an M1 Pro, TL2 and TSC-TM are around two million transactions per second, while NOrec-BF improves the read-mostly NOrec path by reducing validation cost. These numbers are workload-specific; they are useful here only as a reminder that HTM is one point in a larger design space.
+
+\section{Worked Example: Abort-Cause Counters}
+\label{sec:htm-abort-counters}
+
+RTM exposes limited status bits. A useful first diagnostic is therefore local accounting: count commits, explicit subscription aborts, retryable aborts, and non-retryable aborts. The counters must be updated outside the transaction. If the transaction aborts, writes performed inside it vanish; if the writes force extra cache lines into the transaction, they also perturb the abort rate being measured.
+
+\begin{lstlisting}[language=C, caption={Per-thread RTM counters kept outside the transactional footprint.}]
+/* Compile on x86-64 with:
+ *   c++ -std=c++17 -O2 -mrtm rtm_counters.cc -o rtm_counters
+ */
+#include <immintrin.h>
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+
+struct Counters {
+    std::uint64_t commits = 0;
+    std::uint64_t explicit_lock = 0;
+    std::uint64_t retryable = 0;
+    std::uint64_t nonretryable = 0;
+};
+
+static std::atomic<bool> g_lock{false};
+
+static void critical_increment(int& x) {
+    ++x;
+}
+
+static void run_once(int& x, Counters& c) {
+    for (int i = 0; i != 4; ++i) {
+        unsigned s = _xbegin();
+        if (s == _XBEGIN_STARTED) {
+            if (g_lock.load(std::memory_order_acquire))
+                _xabort(0xF0);
+            critical_increment(x);
+            _xend();
+            ++c.commits;
+            return;
+        }
+
+        if ((s & _XABORT_EXPLICIT) && _XABORT_CODE(s) == 0xF0) {
+            ++c.explicit_lock;
+        } else if (s & _XABORT_RETRY) {
+            ++c.retryable;
+        } else {
+            ++c.nonretryable;
+            break;
+        }
+    }
+
+    while (g_lock.exchange(true, std::memory_order_acquire)) {
+    }
+    critical_increment(x);
+    g_lock.store(false, std::memory_order_release);
+}
+
+int main() {
+    int x = 0;
+    Counters c;
+    run_once(x, c);
+    assert(x == 1);
+    assert(c.commits + c.explicit_lock + c.retryable + c.nonretryable >= 1);
+}
+\end{lstlisting}
+
+Counters are diagnostic state, not transactional state: a counter increment inside RTM would be rolled back on abort and would add another write line on commit. The status bits classify symptoms; they do not fully explain the microarchitectural cause.
+
+\section{Worked Example: Capacity Probe}
+\label{sec:htm-capacity-probe}
+
+The following program sweeps the number of cache lines touched by a transaction. It is not a benchmark result; it is a harness for observing the qualitative transition from small, cache-resident transactions to transactions that frequently abort for capacity or other implementation limits.
+
+\begin{lstlisting}[language=C, caption={A small RTM capacity probe that varies the transactional footprint.}]
+/* Compile on x86-64 with:
+ *   c++ -std=c++17 -O2 -mrtm rtm_capacity.cc -o rtm_capacity
+ */
+#include <immintrin.h>
+#include <array>
+#include <cassert>
+#include <cstddef>
+#include <iostream>
+
+struct alignas(64) Line {
+    int value;
+    char pad[60];
+};
+
+int main() {
+    std::array<Line, 256> lines{};
+    for (std::size_t touched = 1; touched <= lines.size(); touched *= 2) {
+        unsigned status = _xbegin();
+        if (status == _XBEGIN_STARTED) {
+            for (std::size_t i = 0; i < touched; ++i)
+                lines[i].value++;
+            _xend();
+            std::cout << touched << " commit\n";
+        } else {
+            std::cout << touched << " abort status=" << status << "\n";
+        }
+    }
+
+    long sum = 0;
+    for (const auto& l : lines)
+        sum += l.value;
+    assert(sum >= 0);
+}
+\end{lstlisting}
+
+Aligning each element to a cache line makes the footprint easier to reason about. The program does not assume a particular capacity threshold. The same idea is useful in simulation, where cache sizes and associativity can be varied deliberately.
+
+\section{Simulation with gem5}
+\label{sec:htm-simulation}
+
+Simulation answers questions that a single counter or the EAX status word on real hardware often blurs. The hardware does convey the coarse reason --- a conflict (bit~2), a capacity overflow (bit~3), or an explicit abort (bit~0) --- which is enough for a fallback policy. But it does not say \emph{which} coherence event caused a conflict (remote read versus remote write, Snoop versus directory), \emph{which} line was evicted on a capacity abort, or how the abort rate scales as the L1 associativity or line size changes, because those structures are not externally visible. A simulator exposes the cache hierarchy, coherence protocol, and transactional metadata directly, so each of these causes can be isolated and varied.
+
+\subsection{SE vs FS: two levels of full-system fidelity}
+\label{sec:se-vs-fs}
+
+gem5 emulates the \emph{entire CPU and memory system} in both modes; the difference is how much of the operating system is emulated.
+
+\begin{table}[htbp]
+\centering
+\caption{gem5 SE vs FS for TM: what is simulated and when to use which.}
+\label{tab:se-vs-fs}
+\begin{tabular}{M{0.18\textwidth}M{0.38\textwidth}M{0.36\textwidth}}
+\hline
+\thb{0.18\textwidth}{Mode} & \thb{0.38\textwidth}{What runs in the simulator} & \thb{0.36\textwidth}{Use for tiny benchmarks} \\
+\hline
+SE (syscall emulation) & CPU pipeline, Ruby caches, coherence, \texttt{MESI\_Three\_Level\_HTM}, DRAM. Syscalls (\texttt{mmap}, \texttt{futex}, \texttt{clone}) are \emph{emulated} by gem5, not passed to the host OS. $>99\%$ of a bank/STAMP run is cycle-accurate. & Default. Fast ($\sim$0.15\,s host for 2k transactions, \texttt{x86-se-bank.py}). No disk image, no \texttt{/dev/kvm}. The \texttt{FS tiny} bank in \S\ref{sec:htm-simulation} is SE. \\
+FS (full system) & Above plus boot of \texttt{x86-ubuntu-24.04}, devices, interrupt controller, full Linux kernel. With \texttt{KVM} the boot is fast-forwarded, then switched to \texttt{Timing}. & Only for kernel interactions (page faults, interrupts, \texttt{rseq}). Slower ($\sim$30\,s for the same tiny workload, \texttt{x86-fs-tiny.py}). Requires disk image and, for speed, \texttt{/dev/kvm}. \\
+\hline
+\end{tabular}
+\end{table}
+
+For the throughput numbers of Chapter~15 the two modes give the same answer: the STAMP and bank tiny configurations (\texttt{-m 10 -n 10}, \texttt{-g 256}, \texttt{-t 1--2}, 2\,k transfers) spend no time in the kernel beyond thread start and memory mapping. SE mode is therefore a representative measurement of the region of interest for such user-space microbenchmarks, bracketed by \texttt{m5} reset/dump markers; it is not a full-system measurement in the sense of running a real kernel and its interrupts, page faults, and scheduler --- that is FS mode's job. Move to FS only when the experiment itself is about the kernel.
+
+
+
+The companion gem5 fork (the \textsc{TM-SIM} repository, gem5 v25.1~\cite{binkert11gem5} plus an in-tree x86 TSX implementation) is the concrete vehicle. Upstream gem5 contains \emph{no} x86 TSX support; the fork adds the decoder and instruction semantics for \texttt{XBEGIN}/\texttt{XEND}/\texttt{XABORT}/\texttt{XTEST} and drives them through Ruby's \texttt{MESI\_Three\_Level\_HTM} protocol, whose ISA-agnostic \texttt{HTMSequencer} is calibrated with the measured Broadwell-EP costs of Chapter~15's machine profiles (\texttt{htm\_start\_\allowbreak latency}\,\allowbreak${}=60$ and \texttt{htm\_commit\_\allowbreak latency}\,\allowbreak${}=178$ cycles, matching the RDTSC-profiled XBEGIN/XEND costs from real hardware).
+
+The key idea is that the simulator executes the same \texttt{x86-64 ELF} binary that would run on real hardware, but substitutes a simulated CPU pipeline and cache hierarchy for the physical one. This means the compiler-generated fallback code --- the same code path that handles RTM aborts on real silicon --- is exercised identically in simulation. A benchmark compiled against TSX-SGL runs inside gem5 without modification; when the simulated L0 cache detects a conflict or capacity limit, the fault reaches the same instruction semantics as a real \texttt{XBEGIN} abort. Cross-compilation is necessary because the host (often macOS or ARM) differs from the simulated ISA (x86-64), and syscall-emulation (SE) mode is sufficient for microbenchmarks because the transactional workload never enters the kernel --- the \texttt{m5} reset/dump markers bracket the region of interest so that only the transactional phase is measured.
+
+The workflow is:
+
+\begin{enumerate}
+    \item build the TSX target: \texttt{scons build/X86\_TSX/gem5.opt --with-ruby};
+    \item cross-compile a static benchmark against a TSX-consuming backend (\texttt{make BACKEND=TSXSGL GEM5=1} in the companion repository --- the host needs no TSX; only the simulated CPU executes it);
+    \item run in syscall-emulation mode with a bounded, ROI-delimited workload (\texttt{bank -n 500}), with \texttt{m5} statistics reset/dump markers bracketing the transactional phase;
+    \item read per-transaction cycles and read/write-set histograms from the Ruby HTM sequencer statistics;
+    \item for full-system fidelity, boot once, checkpoint, and restore with the detailed CPU model so that only the region of interest is simulated slowly.
+\end{enumerate}
+
+\paragraph{Why the abort fault mapping matters.} On real hardware, when \texttt{\_xbegin} fails, the processor writes a status word into EAX that tells the software \emph{why}: bit~2 for a data conflict, bit~3 for a capacity overflow, bit~0 for an explicit \texttt{\_xabort}. The compiler-generated fallback path tests these bits to decide whether to retry, acquire the global lock, or give up. For the simulation to exercise this same fallback code, the simulated cache hierarchy must detect conflicts and capacity limits and route them through the same instruction semantics as real x86 TSX. Without this mapping, the fallback path would never fire in simulation, and the abort-handling logic would remain untested.
+
+\paragraph{How the mapping works.} When the L0 cache detects a conflict during a transactional load, it sends an \texttt{LD\_FAIL} signal to the sequencer with a Ruby failure reason: \texttt{FAIL\_REMOTE} (another core touched the line) for a coherence conflict, or \texttt{FAIL\_SELF} (the line was evicted from L0) for a capacity abort. A transactional store that encounters the same conditions triggers \texttt{ST\_FAIL}. The sequencer converts the Ruby failure reason to an \texttt{HtmFailureFaultCause} --- \texttt{MEMORY} for conflict, \texttt{SIZE} for capacity --- and delivers it through \texttt{GenericHtmFailureFault}. The fault handler restores the pre-\texttt{XBEGIN} checkpoint and writes the Intel RTM status word into EAX: bit~2 for memory aborts, bit~3 for size aborts, or bit~0 plus the abort code for \texttt{XABORT}.
+
+The same fault mechanism fires for both loads and stores, so write-write conflicts (\texttt{ST\_FAIL} from a coherence invalidation of a transactionally-written line) are handled identically to read-write conflicts (\texttt{LD\_FAIL} from a remote exclusive request hitting a transactionally-read line). The compiler-generated fallback path then tests the EAX bits and enters the software lock, exactly as it would on real hardware. This is what makes gem5 fundamentally different from a trace-driven simulator: the same binary, the same code path, the same fallback logic --- only the timing and the conflict-detection mechanism are simulated.
+
+The capacity probe above becomes more informative in simulation than on a fixed machine. On real hardware, the abort boundary is affected by undocumented structures and unrelated activity. In simulation, the experimenter can hold the workload constant and vary L1 size, associativity, line size, or contention. This makes transient effects visible: evictions mid-transaction, write-set coalescing, false conflicts inside a coherence domain, and instruction events that force an abort.
+
+A simulation is a framework for testing whether a model is consistent with observations. The hypothesis here is that the gem5 fork's \texttt{MESI\_Three\_Level\_HTM} protocol, calibrated with measured Broadwell-EP latencies, reproduces the abort-frequency and throughput behaviour of real RTM hardware on the same workload. Running the same benchmark on real hardware and in simulation, and comparing the abort-rate breakdown and per-transaction cycle count, tests that hypothesis. When the numbers agree, the model is validated for that workload class; when they disagree, the divergence points to a mechanism the model is missing --- TLB events, interrupt masking, microarchitectural replay --- and that divergence is itself the useful result.
+
+The companion project uses three instruments at different fidelities. Real-hardware profiling (the RDTSC patch of \texttt{patches/profile/tsx}) provides ground truth on the last widely available RTM parts. The gem5 fork provides a mechanistic view: Ruby coherence traffic, L0 set-associativity effects, and abort-fault routing are directly observable. The Rust cost-model simulator (\texttt{tsx\_sim}) provides speed: it replays \texttt{TM\_TRACE} \texttt{JSONL} traces through a calibrated cycle-estimation model to explore large parameter sweeps quickly. Crucially, \texttt{tsx\_sim} is \emph{not} inside gem5 --- gem5 executes the \texttt{x86-64 ELF} directly via its own \texttt{HTMSequencer} and Ruby coherence, while \texttt{tsx\_sim} is a separate DES backend (\texttt{runtime/tsx\_sim/src/lib.rs}) that replays traces outside gem5. They share the same Broadwell calibration but are independent simulators at different fidelities.
+
+\section{Worked Example: Model Checking HTM Abort and Fallback}
+\index{TLA+}\index{abort}\index{fallback path}
+\label{sec:htm-fallback-tla}
+
+A small model is enough to expose the essential rule: abort may occur at any time before commit, and fallback must preserve the same invariants as the hardware path.
+
+The model below represents one thread attempting a hardware transaction and a second thread that may interfere. Three variables capture the state: \texttt{bal} holds the two account balances, \texttt{pc} is the process state (\texttt{"idle"} or \texttt{"tx"}), and \texttt{snap} is the snapshot taken at \texttt{XBEGIN} --- the value of \texttt{bal} that the transaction believes it is working against. The actions model the RTM contract: \texttt{Begin} takes a snapshot and enters the transactional state; \texttt{Commit} checks that the snapshot is still valid (the abstract coherence check) and, if so, applies the transfer; \texttt{Abort} models a hardware abort that rolls back with no effect; \texttt{InterfereAbort} models another thread committing successfully while our transaction is mid-flight, which forces our transaction to abort; and \texttt{Fallback} executes the same transfer serially from the \texttt{idle} state, modelling the global-lock path. The model deliberately omits caches, lines, and invalidations --- the proof boundary is the software contract (snapshot validity implies atomicity), not the hardware mechanism that enforces it.
+
+\begin{lstlisting}[language={}, caption={TLA+ model of one transferring transaction, abort, interference, and fallback.}]
+-------------------------- MODULE BankHTMFallback --------------------------
+EXTENDS Integers, TLC
+
+Accounts == {0, 1}
+InitA == 100
+InitB == 100
+Floor == 0
+Amt == 7
+
+VARIABLES bal, pc, snap
+
+vars == <<bal, pc, snap>>
+
+Total(b) == b[0] + b[1]
+
+CanMove(b) == b[0] - Amt >= Floor
+
+Move(b) == [b EXCEPT ![0] = @ - Amt,
+                      ![1] = @ + Amt]
 
 Init ==
-  bal = InitBalance
+    /\ bal = [a \in Accounts |-> IF a = 0 THEN InitA ELSE InitB]
+    /\ pc = "idle"
+    /\ snap = bal
 
-Transfer(src, dst, amt) ==
-  /\ src \in Accounts
-  /\ dst \in Accounts
-  /\ src # dst
-  /\ amt \in Amounts
-  /\ bal[src] >= Floor[src] + amt
-  /\ bal' =
-       [a \in Accounts |->
-          IF a = src THEN bal[a] - amt
-          ELSE IF a = dst THEN bal[a] + amt
-          ELSE bal[a]]
+Begin ==
+    /\ pc = "idle"
+    /\ pc' = "tx"
+    /\ snap' = bal
+    /\ UNCHANGED bal
+
+Abort ==
+    /\ pc = "tx"
+    /\ pc' = "idle"
+    /\ UNCHANGED <<bal, snap>>
+
+Commit ==
+    /\ pc = "tx"
+    /\ bal = snap
+    /\ CanMove(snap)
+    /\ bal' = Move(bal)
+    /\ pc' = "idle"
+    /\ snap' = snap
+
+CommitNoFunds ==
+    /\ pc = "tx"
+    /\ bal = snap
+    /\ ~CanMove(snap)
+    /\ pc' = "idle"
+    /\ UNCHANGED <<bal, snap>>
+
+Fallback ==
+    /\ pc = "idle"
+    /\ CanMove(bal)
+    /\ bal' = Move(bal)
+    /\ pc' = "idle"
+    /\ UNCHANGED snap
+
+InterfereAbort ==
+    /\ pc = "tx"
+    /\ CanMove(bal)
+    /\ bal' = Move(bal)
+    /\ pc' = "idle"
+    /\ snap' = snap
 
 Next ==
-  \E src, dst \in Accounts:
-    \E amt \in Amounts:
-      Transfer(src, dst, amt)
+    \/ Begin
+    \/ Abort
+    \/ Commit
+    \/ CommitNoFunds
+    \/ Fallback
+    \/ InterfereAbort
 
-Spec ==
-  Init /\ [][Next]_bal
+Spec == Init /\ [][Next]_vars
 
-MoneyConserved ==
-  Total(bal) = Total(InitBalance)
+MoneyConserved == Total(bal) = InitA + InitB
 
-FloorsPreserved ==
-  \A a \in Accounts:
-    bal[a] >= Floor[a]
+FloorSafe == \A a \in Accounts : bal[a] >= Floor
 
-TypeOK ==
-  bal \in [Accounts -> Nat]
-
+THEOREM Spec => []MoneyConserved
+THEOREM Spec => []FloorSafe
 =============================================================================
 \end{lstlisting}
 
-\begin{itemize}
-    \item \texttt{MoneyConserved} is the serial meaning of a transfer: debit
-          and credit are one atomic effect.
-    \item \texttt{FloorsPreserved} is stronger than absence of negative
-          balances; the floor is part of the transaction's precondition.
-    \item A GPU TM backend can abort, retry, batch, or multi-version the
-          transaction, but a committed history must refine this small model.
-    \item This model is also a useful negative test: remove the floor guard
-          from \texttt{Transfer} and TLC quickly finds a violation of
-          \texttt{FloorsPreserved}.
-\end{itemize}
+\texttt{Commit} requires \texttt{bal = snap}; this is the abstract coherence check --- if the snapshot is stale, hardware must not commit it. \texttt{InterfereAbort} models another successful transfer that conflicts with the running transaction; the running transaction aborts, but money is still conserved. \texttt{Fallback} executes only from \texttt{idle}, so it is serialized with respect to the modeled hardware transaction. Both invariants are safety properties; they do not claim that a best-effort transaction eventually commits.
 
-
-\section{Verifying GPU Protocols with TLA+}
-\label{sec:tla}
-
-Because GPU protocols replace hardware guarantees with software discipline,
-they are prime candidates for the model-checking workflow of Part~III. The
-models accompanying this book --- \texttt{GPU\_PR\_STM.tla},
-\texttt{GPU\_SIMT.tla}, \texttt{GPU\_JVSTM.tla}, \texttt{GPU\_CSMV.tla},
-\texttt{GPU\_GUST.tla} --- make the warp the unit of concurrency and encode the SIMT lock step as a
-shared warp \texttt{phase} with per-thread arrays and an \texttt{activeMask}
-to express divergence:
-
-\begin{itemize}
-    \item \textbf{Warp-as-process.} One TLA+ process per warp manages all of
-          its lanes' transactions; a single transition steps the whole warp,
-          matching the shared program counter.
-    \item \textbf{Divergence as masking.} Lanes that finish early are removed
-          from the active mask; the warp continues with the survivors, exactly
-          as a real divergence point does.
-    \item \textbf{Bounded phases.} Reads, writes, and validation are explicit
-          phases (\texttt{L\_read} $\rightarrow$ \texttt{L\_write}
-          $\rightarrow$ \texttt{L\_validate}), bounding the state space by
-          \texttt{ReadsPerThread} instead of an unbounded \texttt{either}.
-    \item \textbf{Opacity is an invariant.} The GUST model's
-          \texttt{InvNoMissedConflict} states that no committed transaction
-          may be followed by another committed transaction that wrote an
-          address the first one read --- serialisable/opaque semantics, not
-          just absence of lost updates.
-\end{itemize}
-
-TLC has checked tens of millions of states across these models with no
-violations: the GUST model ran 1.9M states on the small configuration (0
-errors) and over 25M on the large one without violations before timing out.
-The models caught real bugs --- most notably the \texttt{startTS} vs.\
-\texttt{startTS+1} snapshot hole of Section~\ref{sec:gust}, found first in
-the model (via \texttt{InvNoMissedConflict}) and then confirmed in the
-kernel. The \texttt{\_\_ballot\_sync} divergence class of
-Section~\ref{sec:ballot}, by contrast, was caught by on-target testing and
-review, not by the models: the all-lanes ballot contract is a hardware
-convention that sits below the models' abstraction, and no amount of TLC
-state exploration would have found it. That division of labour is the
-lesson: TLA+ says \emph{what} must be true; only the hardware says
-\emph{how} it will let you express it.
+The model omits caches, lines, and invalidations. That is intentional. At the proof boundary, HTM contributes one rule: a transaction may commit only if its snapshot is still valid. Everything else is fallback correctness. This is why the companion project model-checks the software contract as well as testing the implementations.
 
 \section{Summary}
 
-\begin{itemize}
-    \item GPUs have no cache coherence, no speculative hardware, and no vendor
-          TM: GPU TM is software TM, run at a scale and under constraints the
-          CPU design space never anticipated.
-    \item Lock-step warp execution turns spinning into self-abort and conflict
-          detection into predicate voting via \texttt{\_\_ballot\_sync}.
-    \item Read/write sets that do not fit on chip, coalescing that works
-          against scattered accesses, and thousands of concurrent transactions
-          all push designs toward multi-versioning and batch commit.
-    \item The recurring winners --- CSMV's client--server commit and GUST's
-          AtomicINC commit log --- trade a serial CAS for an increment, and a
-          read abort for a consistent snapshot.
-    \item Hardware proposals (KILO TM, WarpTM, snapshot-isolation HTM) show the
-          design space is real but simulated; the software systems show it is
-          live silicon reality.
-    \item Formal models at warp granularity are a practical, not academic,
-          tool: they caught the very bugs (the ballot contract, the snapshot
-          threshold) that the GPU community has repeatedly tripped over.
-\end{itemize}
+HTM leverages existing speculation and cache coherence to make short transactions fast. A commit can be nearly as cheap as leaving a speculative region, and conflict detection can be piggybacked on invalidation traffic already present in the memory hierarchy.
+
+The cost is uncertainty. Transactions can abort for conflicts, capacity, interrupts, faults, unsupported instructions, and implementation limits. Therefore every HTM design is also a fallback design. Correct programs subscribe to the fallback lock, bound their retries, keep diagnostics outside the transactional footprint, and validate the same invariants on the hardware and software paths.
 
 \section{Exercises}
 \begin{enumerate}
-    \item \emph{[theory]} A warp of 32 lanes runs a transaction that spins on a lock held by
-          another lane of the same warp. Explain on which hardware this
-          deadlocks and why. How does PR-STM's priority stealing turn the same
-          situation into progress?
-    \item \emph{[theory]} GPU-STM sorts locks to avoid deadlock while PR-STM steals locks by
-          priority. Contrast the two contention policies under (a) uniformly
-          random and (b) skewed (hot-spot) access patterns.
-    \item \emph{[theory]} GUST uses \texttt{snapshot = startTS}, not \texttt{startTS + 1}.
-          Construct a two-transaction history where the $+1$ variant lets an
-          in-flight writer's version appear in a reader's snapshot, and
-          explain why neither CCT nor MRV catches it.
-    \item \emph{[theory]} Using the ballot pattern of Section~\ref{sec:ballot}, compute the
-          number of aborted lanes in a warp via \texttt{\_\_popc} on the
-          ballot result, and explain why the ballot cannot be moved inside a
-          lane-guarded branch.
-    \item \emph{[theory]} CSMV dedicates server warps to committing client warps' writes.
-          Identify the serialisation point this creates, and propose how a
-          workload dominated by read-only transactions could bypass it.
-    \item \emph{[verification]} Using the TLA+ workflow of Part~III, sketch an invariant for a
-          warp-level commit log that would have caught the GUST snapshot bug.
-          What bounds would you impose to keep TLC tractable?
-\item \emph{[implementation]} Extend the kernel in Section~\ref{sec:gpu-bank-transfer-example} with a bounded per-lane retry counter. The retry loop must not contain a ballot whose trip count differs by lane. Report, for a fixed input batch, the number of commits, aborts, and transactions that exceeded the retry bound.
-
-\item \emph{[verification]} Add an explicit abort action to the TLA+ model in Section~\ref{sec:gpu-bank-tla-example} that leaves \texttt{bal} unchanged. Check that the conservation, floor, and type invariants remain true.
-
-\item \emph{[theory]} Compare the serialisation points in Table~\ref{tab:gpu-commit-strategies}. For each row, identify whether the bottleneck is metadata allocation, validation, version installation, or publication, and explain which bottleneck is most sensitive to increasing warp count.
-
-\item \emph{[literature]} Read the KILO TM paper \cite{fung11kilotm} and the
-          GUST technical report \cite{nunes23gust}.  KILO TM validates with
-          hardware-managed read/write logs and Bloom filters; GUST with
-          CCT/MRV over a commit log.  Compare the two \emph{validation
-          units} --- where the validation state lives, what it is checked
-          against, and what an abort costs in each.
-
-\item \emph{[open]} Every GPU TM in this chapter is either a simulation
-          proposal (KILO TM, WarpTM, snapshot-isolation HTM) or a research
-          system (CSMV, GUST, PR-STM); none ships in a commercial SDK.
-          Argue a position: will GPU TM ever be productized, or should GPUs
-          expose transaction-like higher-level APIs (e.g.\ atomic
-          task/stream abstractions) instead, with TM confined to research?
-          State the hardware or software change your position depends on.
+    \item \emph{[implementation]} In Intel RTM, a transaction that exceeds the L1 cache capacity always aborts. Propose a software fallback path and discuss its performance implications. If you do not have RTM hardware, ground the design in the companion's TSX-SGL backend (\texttt{backends/tm\_impl/tsx\_sgl}) and the phased-hybrid model of \S\ref{sec:hybrid-example}.
+    \item \emph{[theory]} Using a conceptual pipeline diagram, show why a transaction that triggers a TLB miss is likely to abort.
+    \item \emph{[implementation]} Footprint sweep: run the capacity probe of \S\ref{sec:htm-capacity-probe} on RTM hardware with the companion's RDTSC profiling patch (\texttt{patches/profile/tsx}), or on any host against the companion's TSX simulation backend (\texttt{simulator/}, \texttt{runtime/tsx\_sim}), and plot the abort rate as the number of touched cache lines grows. Explain the trend. On the gem5 fork (\S\ref{sec:htm-simulation}), vary the L0 \texttt{htmReadLines} and \texttt{htmWriteLines} limits to observe where capacity aborts appear.
+    \item \emph{[implementation]} Extend Listing~\ref{sec:rtm-bank-transfer}'s transfer code to collect per-thread counters for commits, explicit fallback-lock aborts, retryable aborts, and non-retryable aborts. Keep the counters outside the transaction and explain why updating them inside RTM would distort the measured abort rate.
+    \item \emph{[verification]} Modify the TLA+ model in \S\ref{sec:htm-fallback-tla} so that transfers may go in both directions. State and check the money-conservation invariant and an account-floor invariant for both accounts.
+    \item \emph{[theory]} Explain why lock subscription is necessary for opacity in a hybrid HTM plus lock fallback design. Give an execution in which omitting the subscription lets a hardware transaction commit concurrently with the fallback critical section.
+    \item \emph{[implementation]} Modify the capacity probe so that it first reads many cache lines and then writes only two. Compare the expected abort behavior with a write-heavy transaction that writes every touched line.
+    \item \emph{[verification]} Add a boolean fallback-lock variable to the TLA+ model. Permit \texttt{Begin} only when the lock is clear, and add an explicit abort transition when the lock becomes held during a transaction.
+    \item \emph{[theory]} Explain why a best-effort HTM interface cannot provide wait-freedom by itself, even when every individual transaction is finite and conflict-free in the source program.
+    \item \emph{[literature]} Read the original Herlihy--Moss proposal
+          \cite{herlihy93} and Lev, Moir, and Nussbaum's
+          \emph{Phased Transactional Memory} \cite{lev07phased}.  Explain
+          how the phased hybrid generalizes the raw XCOMMIT/XABORT design:
+          which part of Herlihy--Moss survives, which part is replaced by
+          a software fallback, and what the phase-change criterion buys
+          over a fixed subscription lock.
+    \item \emph{[open]} Best-effort HTM moved the fallback obligation into
+          software and that decision let TSX ship.  Argue a position:
+          should the field push hardware toward \emph{stronger} guarantees
+          (progress, capacity, deterministic aborts), or is best-effort
+          the right abstraction and the remaining work purely in software?
+          Tie your position to at least one mechanism from this chapter
+          (capacity, conflict, fallback lock).
 \end{enumerate}
 
-\textbf{How to check your work.} The \emph{[implementation]} exercise is
-verified with the companion: extend the kernel of
-\S\ref{sec:gpu-bank-transfer-example} with the bounded per-lane retry
-counter, keeping the ballot of \S\ref{sec:ballot} outside the lane-guarded
-branch.  The \emph{[verification]} exercises are checked with TLC against
-\S\ref{sec:gpu-bank-tla-example} (conservation, floor, and type invariants;
-see Appendix~\ref{chap:pluscal-quick-ref}).  The \emph{[theory]} exercises
-are graded against \S\ref{sec:ballot}, \S\ref{sec:gust}, and
-Table~\ref{tab:gpu-commit-strategies}.  The \emph{[literature]} exercise is
-graded on whether your ``validation unit'' contrast is drawn accurately
-for both papers.  The \emph{[open]} exercise has no single right answer;
-it is graded on whether you state the hardware or software change your
-position depends on and defend it against the strongest objection.
+\textbf{How to check your work.} The \emph{[implementation]} exercises
+verify on the companion: the fallback design of Exercise~1 maps onto
+\texttt{backends/tm\_impl/tsx\_sgl} (TSX path with lock subscription);
+Exercise~4 is checked with the abort counters of
+\S\ref{sec:htm-abort-counters}; and Exercise~3/7 run the capacity probe of
+\S\ref{sec:htm-capacity-probe} on real RTM hardware or against the
+\texttt{tsx\_sim} cost-model backend.  The \emph{[verification]} exercises are
+checked with TLC against the model of \S\ref{sec:htm-fallback-tla} using
+the workflow of Appendix~\ref{chap:pluscal-quick-ref}.  The
+\emph{[theory]} exercises are graded against the definition of
+\S\ref{sec:rtm-example} and the subscription argument of
+\S\ref{sec:htm-fallback-tla}.  The \emph{[literature]} exercise is graded
+on whether your ``survives / replaced'' split matches the two papers.  The
+\emph{[open]} exercise has no single right answer; it is graded on whether
+your position is tied to a concrete mechanism from this chapter.
+
+\index{Herlihy and Moss}
+\index{XCOMMIT}
+\index{XABORT}
+\index{MESI}
+\index{speculative stores}
+\index{transactional read set}
+\index{transactional write set}
+\index{coherence invalidation}
+\index{capacity abort}
+\index{conflict abort}
+\index{unsupported instruction abort}
+\index{Intel TSX}
+\index{Intel RTM}
+\index{ARM TME}
+\index{IBM POWER HTM}
+\index{XTEST}
+\index{HLE}
+\index{xacquire}
+\index{xrelease}
+\index{TSX availability}
+\index{gem5}
+\index{Ruby memory system}
+\index{lock elision}
+\index{TSX-SGL}
+\index{phased hybrid TM}
+\index{hybrid STM}
+\index{abort counters}
+\index{cache footprint}
+\index{fallback serialization}
+\index{opacity!HTM fallback}
+\index{bank transfer invariant}
+% -------------------------------------------------------------------

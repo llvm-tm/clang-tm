@@ -1,25 +1,46 @@
-CHAPTER 10 — Compiler Fundamentals – IRs and Passes
-Part: V (Compiler Instrumentation for TM)
-Lines: ~384 | Sections: 7 | Figures: 2 | Tables: 1 | Listings: 4 | TikZ: 2
+CHAPTER 10 — Speculative Designs: NOrec and Beyond
+Part: IV (Implementing Transactional Memory)
+Lines: ~587 | Sections: 15 | Figures: 2 | Tables: 3 | Listings: 7 | TikZ: 2
 
-PURPOSE: How a compiler pass instruments loads/stores into TM runtime calls:
-compilation pipeline, pass placement, IR transformation, instrumentation
-policies, address policy.
+PURPOSE: The speculative STM family: NOrec (value-based validation), TL2
+(global-clock), TinySTM variants (WBCTL/WBETL/WT), multi-version STMs
+(JVSTM, MVLog), plus a backend taxonomy of the whole companion repo.
 
 SECTIONS
-- The Compilation Pipeline
-    Source -> IR -> optimization -> instrumentation -> codegen.
-- Instrumentation as a Compiler Pass
-    Pass sits between IR optimization and codegen; emits ABI calls.
-- Worked Example: A Load, Before and After the Pass
-- Worked Example: Instrumenting a Bank Transfer
-    Transfer's loads/stores become tm_read_*/tm_write_*.
-- Worked Example: Model Checking the Address Policy
-    TLA+ check of the address-bypass policy.
+- NOrec: Value-Based Validation
+    Read/commit protocol; commit lock; global clock; validation.
+- Worked Example: The NOrec Read Path
+- Worked Example: NOrec Bank Transfer
+- Worked Example: TL2 Read Barrier
+- TL2: The Textbook Global-Clock STM
+    TL2 timeline, versioned locks.
+- TinySTM Design Variants
+    WBCTL, WBETL, WT (write-back eager, write-back lazy, write-through).
+- Multiversion STMs: JVSTM and MVLog
+    Versioned boxes (JVSTM); commit-log MVCC (MVLog).
+- Worked Example: MVLog Snapshot Read
+- Comparing the Family
+    family-matrix: read validation rule, write ownership, linearization point.
+- Backend Taxonomy: The Repository in One Table
+    Every repo backend -> family -> where discussed (Table tab:backend-taxonomy).
+- Semantic Obligations Checklist
+- Worked Example: The TL2 Commit Path
+- Worked Example: Account-Floor PlusCal Model
+- A Complete NOrec in Rust (sec:norec-rust-complete)
+    Whole algorithm end to end in safe Rust (~200 lines, std only): Word trait,
+    Region (sequence clock with commit lock in bit 0 + word heap), TmCell<T>,
+    Tx {rv, ws, rs}; retry loop; read = write-set lookup then
+    capture-read-recheck against the BEGIN version (validates whole read-set
+    implicitly); commit = CAS lock bit, re-validate reads under lock, write
+    back, publish rv+2 with Release. Fixed-snapshot policy (conservative vs
+    paper's forward extension). Memory orderings: Relaxed data + one
+    Release/Acquire clock variable. Bank demo: 8 movers + checker thread,
+    money conserved, 170k-233k mid-flight snapshot checks pass. Verified:
+    rustc 1.96, source at docs/book/listings/norec_rust_complete.rs.
+    Exercises 12 (abort classification) and 13 (snapshot-extension proof).
 - Summary
 - Exercises
 
-FIGURES: fig:compiler-tm-pass (pass placement),
-         fig:address-policy-state-machine (private/heap/global/unknown)
-TABLES: tab:instrumentation-policies (compiler/runtime/programmer decision)
-LISTINGS: 4 (load before/after, instrumented transfer, TLA+ policy)
+FIGURES: fig:norec-bank-state-machine (NOrec commit), fig:tl2-timeline
+TABLES: tab:family-matrix, tab:backend-taxonomy, tab:snapshot-taxonomy
+LISTINGS: 11 (NOrec read path, bank, TL2 barrier, MVLog read, TL2 commit, PlusCal model+cfg, NOrec-in-Rust state/begin/readwrite/commit/demo)

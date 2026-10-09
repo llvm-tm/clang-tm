@@ -7,6 +7,7 @@ Terms are defined in the chapter or section named in \emph{see}. Entries marked
     \item[abort] \index{abort} The discard of a transaction's speculative
           writes and restart of its body. Opposed to \emph{commit}
           (\S\ref{sec:api-example}).
+    \item[anti-dependency] \index{anti-dependency} $T_1$ anti-depends on $T_2$ when $T_1$ reads a value $T_2$ later overwrites; anti-dependency cycles are what snapshot isolation admits and SSI rejects (\S\ref{sec:iso-anomalies}).
     \item[atomic block] \index{atomic block} A programming-language construct
           whose body is executed transactionally; see \S\ref{sec:atomics-example}.
     \item[ballot] \index{ballot} \texttt{\_\_ballot\_sync}, the GPU primitive
@@ -22,6 +23,7 @@ Terms are defined in the chapter or section named in \emph{see}. Entries marked
           (\S\ref{sec:gust}).
     \item[deadlock] \index{deadlock} A state in which every participant waits
           on another and no progress is possible (Part~I).
+    \item[dirty read] \index{dirty read} A read taking its value from an uncommitted (possibly aborted) write; the anomaly that labels RU and nothing above it (Table~\ref{tab:anomaly-matrix}).
     \item[divergence] \index{divergence} In SIMT execution, lanes of a warp
           taking different control paths (\S\ref{sec:ballot}).
     \item[fallback] \index{fallback} The software path a best-effort HTM takes
@@ -34,18 +36,22 @@ Terms are defined in the chapter or section named in \emph{see}. Entries marked
     \item[intra-warp conflict] \index{intra-warp conflict} A conflict between
           lanes of the same warp, resolved by predicate voting
           (\S\ref{sec:ballot-example}).
+    \item[isolation level] \index{isolation level} A database promise about which interleavings of transaction units are legal --- RU, RC, RR, SI, SSI, S --- ordered by containment; \S\ref{sec:iso-ladder}.
     \item[linearizability / serializability] \index{serializability} The
           guarantee that a history is equivalent to some serial execution
           (\S\ref{sec:tso-example}).
     \item[liveness] \index{liveness} The guarantee that a good state is
           eventually reached; contrasted with \emph{safety}
           (\S\ref{sec:pluscal-example}).
+    \item[lost update] \index{lost update} Two transactions read the same value and both write; one write survives. Admitted below RR; detected by every WW test (Table~\ref{tab:anomaly-matrix}).
     \item[MRV] \index{MRV} Most-Recent-Version checking; GUST's validation of
           finalised transactions via their latest VBox bodies
           (\S\ref{sec:gust}).
+    \item[non-repeatable read] \index{non-repeatable read} Successive reads inside one transaction returning different committed values; legal at RC, illegal from RR upward.
     \item[opacity] \index{opacity} Opacity ensures aborted transactions see a
           consistent state; a serializable-but-not-opaque history is dismantled
           in \S\ref{sec:tso-example}.
+    \item[phantom] \index{phantom anomaly} A re-evaluated range (predicate) read gaining rows from concurrent inserts; legal below SI (\S\ref{sec:iso-anomalies}).
     \item[read set / write set] \index{read set} \index{write set} The
           addresses a transaction reads and writes; maintained by the runtime
           during the body (\S\ref{sec:norec-example}).
@@ -55,10 +61,14 @@ Terms are defined in the chapter or section named in \emph{see}. Entries marked
     \item[retry loop] \index{retry loop} The \texttt{sigsetjmp}/
           \texttt{siglongjmp} machinery that restarts aborted transactions
           (\S\ref{sec:jmpbuf-example}).
+    \item[read uncommitted / read committed / repeatable read] \index{isolation level!read uncommitted} \index{isolation level!read committed} \index{isolation level!repeatable read} The three lowest rungs of the isolation ladder (\S\ref{sec:iso-ladder}).
     \item[safety] \index{safety} The guarantee that a bad state is never
           reached; contrasted with \emph{liveness} (\S\ref{sec:pluscal-example}).
     \item[simulation (CPU)] \index{simulation} Time-discrete execution of a
           trace or model to predict a design's behaviour (Parts~I, III, and VI).
+    \item[snapshot isolation (SI)] \index{snapshot isolation} Each transaction reads one consistent snapshot; commits validate a write-write test only; admits write skew (\S\ref{sec:iso-ladder}, checked in \S\ref{sec:iso-worked-example}).
+    \item[SSI] \index{serializable snapshot isolation} Snapshot isolation plus runtime rejection of anti-dependency cycles (\S\ref{sec:iso-ladder}).
+    \item[strictness (schedules)] \index{strictness} Gray's commit-order discipline: commits ordered by when their effects became visible; the ancestor of strict serializability (\S\ref{sec:iso-dimensions}).
     \item[store buffer] \index{store buffer} A per-core FIFO that delays store
           visibility, the source of TSO reordering (\S\ref{sec:tso-example}).
     \item[TSX] \index{TSX} Intel Transactional Synchronization Extensions; the
@@ -68,6 +78,7 @@ Terms are defined in the chapter or section named in \emph{see}. Entries marked
           (version, value) bodies used by JVSTM, GUST, and other multi-version
           STMs (\S\ref{sec:gust}).
     \item[versioned box] \index{versioned box} \emph{See} VBox.
+    \item[write skew] \index{write skew} Two transactions read overlapping preconditions and write disjoint sets, each validating the other's constraint before breaking it; the signature SI anomaly with no lost write and no dirty read --- and the reason the isolation ladder has a cliff in shared memory (\S\ref{sec:iso-anomalies}, \S\ref{sec:iso-not-in-tm}).
 \end{description}
 
 % -------------------------------------------------------------------

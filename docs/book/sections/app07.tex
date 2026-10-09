@@ -86,6 +86,20 @@ selectively.
           must also handle \emph{aborted} transactions' reads, which
           linearizability is free to ignore because it only ever considers
           completed operations.
+    \item \emph{[implementation]} Without the \texttt{b\_aborted} wait the
+          eager reader scans while the item is still linked: no segfault, but
+          the phantom \texttt{item[0]=700} is still printed --- the crash is
+          deferred, not prevented. NOrec is unchanged (its \texttt{count} is
+          always 0 mid-flight). The promise you rely on in both is opacity:
+          every view must lie on some serial history, not just the final
+          memory (\S\ref{sec:crash-without-opacity}).
+    \item \emph{[verification]} In the counterexample, locate the consumer
+          step that latches \texttt{count}=1 (a program-counter read) and the
+          action that empties \texttt{inventory[0]} (the undo); the crash is
+          their composition. Sandbox the model's writes --- buffer them in a
+          transaction-local map, apply at \texttt{Commit} --- and
+          \texttt{NoCrash} passes. Verify with
+          \texttt{make -C docs/proofs check-teaching}.
 \end{enumerate}
 
 \section*{Chapter 3 --- Hardware Concepts for Transactional Memory}
@@ -169,6 +183,18 @@ selectively.
           State one scenario where the workaround still leaks, e.g.\ a
           non-transactional write through an alias the compiler could not
           see at instrument time.
+    \item \emph{[theory]} Haskell's boundary is the \texttt{STM} monad:
+          shared state \emph{is} \texttt{TVar}s, and raw memory cannot be
+          loaded from transactional code at all. Clojure's boundary is
+          immutability: refs swap between complete values, so no observer
+          holds a location inside a value. Neither is retrofittable onto C
+          by runtime cooperation because each is the \emph{absence} of a
+          representation --- you cannot un-give C its mutable heap or its
+          mutable values from a library. Escape hatches: GHC's
+          \texttt{unsafePerformIO} (cost: every STM guarantee evaporates
+          through the raw pointer) and Clojure's uncoordinated mutable host
+          objects (cost: no synchronization at all, by the caller).
+          Model answer in \S\ref{sec:iso-not-in-tm}.
 \end{enumerate}
 
 \section*{Chapter 5 --- Mathematical Foundations}
@@ -251,7 +277,45 @@ selectively.
           it.
 \end{enumerate}
 
-\section*{Chapter 7 --- Transaction API Design}
+\section*{Chapter 7 --- The Semantics of Transactions}
+
+\begin{enumerate}
+    \item \emph{[theory]} First history: two committed transactions, one
+          write between your two reads of $x$ (non-repeatable read: the RC
+          row). Second: a range read whose second pass sees a row another
+          transaction inserted (phantom: the only anomaly separating RR from
+          SI on the matrix). Phrase both as read-from violations relative to
+          the snapshot a stable level would force.
+    \item \emph{[theory]} $T_i$ reads object $i{+}1 \bmod n$ and writes
+          object $i$: the anti-dependency ring $T_1 \sim T_2 \sim \cdots
+          \sim T_n \sim T_1$ passes WW-only validation because the write
+          sets are singletons and pairwise disjoint.
+    \item \emph{[implementation]} The promise restored is \emph{opacity}
+          (specifically its sandboxing half): serializability of the
+          committed projection was already validated. Justify from the three
+          barrier views --- before sandboxing the mid-flight view is
+          unserializable; after, it equals the pre-transaction state
+          (\S\ref{sec:crash-without-opacity}).
+    \item \emph{[verification]} For two transactions a 2-cycle is the
+          boolean ``each anti-depends on the other'' maintained at commit;
+          abort the second committer. Contrast traces: under SSI a
+          transaction whose read was overwritten may still commit (reads
+          unvalidated), which \texttt{SERIALIZABLE=TRUE} forbids. Check with
+          your new cfg next to \texttt{BankSI-skew.cfg}.
+    \item \emph{[measurement]} $p_{\mathrm{abort}} = 1 -
+          (1-w/k)^{(2r+w)(C-1)}$ with $k{=}20$, $r{=}8$, $w{=}2$ gives
+          $E{>}10$ near $C=4$; the simulator's measured retry counts run
+          lower because real bank access is local, not uniform --- the
+          independence term in the exponent is the one to blame
+          (\S\ref{sec:iso-cost} caveats; \texttt{tools/iso-cost.py}).
+    \item \emph{[literature]} ANSI RR quantified over \emph{point} reads,
+          so a re-executed \emph{predicate} (range) is unconstrained;
+          removing cursor re-positioning --- point reads only, or reading
+          one snapshot --- collapses RR and SI. Cite the critique's
+          phenomenon list against your example.
+\end{enumerate}
+
+\section*{Chapter 8 --- Transaction API Design}
 
 \begin{enumerate}
     \item \texttt{tm\_write} returning a status at write time would expose
@@ -294,7 +358,7 @@ selectively.
           who decides what gets undone.
 \end{enumerate}
 
-\section*{Chapter 8 --- Non-Speculative Designs: Single Lock and Serializers}
+\section*{Chapter 9 --- Non-Speculative Designs: Single Lock and Serializers}
 
 \begin{enumerate}
     \item Apply Amdahl's law with a 10\% critical fraction and 16 cores:
@@ -328,7 +392,7 @@ selectively.
           the lock-convoy effect.
 \end{enumerate}
 
-\section*{Chapter 9 --- Speculative Designs: NOrec and Beyond}
+\section*{Chapter 10 --- Speculative Designs: NOrec and Beyond}
 
 \begin{enumerate}
     \item T1's write set entry for \texttt{x} no longer matches memory when
@@ -375,7 +439,7 @@ selectively.
           concedes the workload where its own choice loses.
 \end{enumerate}
 
-\section*{Chapter 10 --- Compiler Fundamentals: IRs and Passes}
+\section*{Chapter 11 --- Compiler Fundamentals: IRs and Passes}
 
 \begin{enumerate}
     \item Identify the loads and stores that touch shared addresses and
@@ -383,7 +447,7 @@ selectively.
           \texttt{tm\_write\_*} barrier call.
     \item Whole-program instrumentation bloats read/write sets, forces
           stack-locals through barriers, and destroys register promotion;
-          the instrumentation policy of Chapter~10 fixes this with the
+          the instrumentation policy of Chapter~11 fixes this with the
           address-space classification.
     \item Mark transaction blocks with an intrinsic and run the pass only
           over their basic blocks, using \texttt{LLVM\_TM\_ADDR\_CHECK} for
@@ -401,7 +465,7 @@ selectively.
           \texttt{malloc}ed shared data.
 \end{enumerate}
 
-\section*{Chapter 11 --- Compiler Optimizations and Their Impact on TM}
+\section*{Chapter 12 --- Compiler Optimizations and Their Impact on TM}
 
 \begin{enumerate}
     \item The store is speculative state; removing it lets a commit publish
@@ -430,7 +494,7 @@ selectively.
           relaxation and where opacity's line falls.
 \end{enumerate}
 
-\section*{Chapter 12 --- Testing, Debugging, and Scheduling}
+\section*{Chapter 13 --- Testing, Debugging, and Scheduling}
 
 \begin{enumerate}
     \item Inject aborts at random points and run the undo-log test suite;
@@ -468,7 +532,7 @@ selectively.
           real-time/signal interleaving the model does not schedule.
 \end{enumerate}
 
-\section*{Chapter 13 --- Pitfalls: Memory, Signals, and Optimizations}
+\section*{Chapter 14 --- Pitfalls: Memory, Signals, and Optimizations}
 
 \begin{enumerate}
     \item The node is speculative allocation; freeing it on abort can
@@ -487,12 +551,12 @@ selectively.
     \item \emph{[verification]} Model Figure~\ref{fig:tx-resource-state} with
           two accounts, one transfer, and an abort action; check floors and
           conservation under both commit and abort paths.
-    \item \emph{[theory]} The condition matches Chapter~11: no intervening
+    \item \emph{[theory]} The condition matches Chapter~12: no intervening
           write, no invalidation between the reads, and identical abort
           behavior; otherwise opacity breaks.
 \end{enumerate}
 
-\section*{Chapter 14 --- Performance Modeling and Tuning}
+\section*{Chapter 15 --- Performance Modeling and Tuning}
 
 \begin{enumerate}
     \item Fit a retry chain to STAMP intruder and find where throughput
@@ -533,7 +597,7 @@ selectively.
           and defends it against the cost objection.
 \end{enumerate}
 
-\section*{Chapter 15 --- From Source to AST: Lexing and Parsing}
+\section*{Chapter 16 --- From Source to AST: Lexing and Parsing}
 
 \begin{enumerate}
     \item \emph{[theory]} Draw the DFA for the six token kinds (keyword
@@ -559,12 +623,12 @@ selectively.
     \item \emph{[theory]} Justify the choice in
           Table~\ref{tab:front-end-choices}: an \texttt{atomic} construct is
           trivial syntax, so the companion instruments at LLVM IR
-          (Chapter~10) rather than shipping a source language; syntax must
+          (Chapter~11) rather than shipping a source language; syntax must
           stay stable while backends evolve
           (Figure~\ref{fig:front-end-pipeline}).
 \end{enumerate}
 
-\section*{Chapter 16 --- Hardware Transactional Memory}
+\section*{Chapter 17 --- Hardware Transactional Memory}
 
 \begin{enumerate}
     \item A capacity abort means the hardware path is exhausted; fall back to
@@ -620,7 +684,7 @@ selectively.
           provide or give up.
 \end{enumerate}
 
-\section*{Chapter 17 --- Transactional Memory for GPUs}
+\section*{Chapter 18 --- Transactional Memory for GPUs}
 
 \begin{enumerate}
     \item \emph{[theory]} On lock-step hardware (SIMT) a warp spinning on a lock held by its
@@ -674,7 +738,7 @@ selectively.
           change (a native transaction API) its position depends on.
 \end{enumerate}
 
-\section*{Chapter 18 --- Persistent and Distributed Transactional Memory}
+\section*{Chapter 19 --- Persistent and Distributed Transactional Memory}
 
 \begin{enumerate}
     \item \emph{[implementation]} Extend \S\ref{sec:durable-bank-example} to
@@ -712,7 +776,7 @@ selectively.
           neither replication nor lock-order recovery.
 \end{enumerate}
 
-\section*{Chapter 19 --- Open Questions and Emerging Directions}
+\section*{Chapter 20 --- Open Questions and Emerging Directions}
 
 \begin{enumerate}
     \item \emph{[theory]} The answer turns on whether the RTM and STM paths

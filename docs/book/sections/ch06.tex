@@ -80,7 +80,7 @@ evidence, not a theorem; the liveness false-negatives noted in
 Part~VII are the price of bounding unbounded counters.  Second,
 \emph{abstraction}: the models abstract away the \texttt{sigsetjmp} retry
 machinery, cache geometry, and compiler effects, so they cannot catch bugs
-that live below the abstraction line (Chapter~13's DATA/TEXT symbol collision
+that live below the abstraction line (Chapter~14's DATA/TEXT symbol collision
 is a real example).  Third, \emph{extraction}: nothing guarantees the C++ code
 implements the model; the repository manages that risk by keeping model and
 runtime side by side and by tracing each chapter's runtime to its model file
@@ -558,12 +558,12 @@ reproducible rather than rhetorical:
 \hline
 \textbf{Runtime (Part IV/VII)} & \textbf{TLA+ model} & \textbf{Key invariant} & \textbf{Result} \\
 \hline
-SGL (Ch.~8)     & \texttt{SGL.tla}         & opacity (all invariants) & TLC pass \\
-NOrec (Ch.~9)   & \texttt{NOrec.tla}       & value-validation opacity  & TLC pass \\
-TL2 (Ch.~9)     & \texttt{TL2.tla}         & versioned-lock correctness & TLC pass \\
-TinySTM (Ch.~9) & \texttt{TinySTM\_WBCTL.tla} & lock/ownership invariants & TLC pass \\
-Romulus (Ch.~9) & \texttt{Romulus.tla}     & read-validate OCC          & TLC pass \\
-GPU GUST (Ch.~17)& \texttt{GPU\_GUST.tla}  & \texttt{InvNoMissedConflict} & TLC pass \\
+SGL (Ch.~9)     & \texttt{SGL.tla}         & opacity (all invariants) & TLC pass \\
+NOrec (Ch.~10)   & \texttt{NOrec.tla}       & value-validation opacity  & TLC pass \\
+TL2 (Ch.~10)     & \texttt{TL2.tla}         & versioned-lock correctness & TLC pass \\
+TinySTM (Ch.~10) & \texttt{TinySTM\_WBCTL.tla} & lock/ownership invariants & TLC pass \\
+Romulus (Ch.~10) & \texttt{Romulus.tla}     & read-validate OCC          & TLC pass \\
+GPU GUST (Ch.~18)& \texttt{GPU\_GUST.tla}  & \texttt{InvNoMissedConflict} & TLC pass \\
 \hline
 \end{tabular}
 \caption{Runtime-to-model traceability in the companion repository: every chapter that introduces a runtime names the PlusCal/TLA+ file, the invariant checked, and the outcome. The repository's \texttt{docs/proofs} directory is the source of truth; this table is its index.}

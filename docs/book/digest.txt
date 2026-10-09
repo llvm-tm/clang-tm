@@ -1,3 +1,15 @@
+STALE NOTE (2026-10): chapter titles below are stable, but part
+assignments and cross-chapter numbers in entries marked as older predate the
+addition of Chapter 7 and the ch07->ch20 renumbering (see structure note
+below). Canonical per-chapter map: docs/book/summaries/. Full digest
+regeneration is tracked in TODO.md.
+============================================================
+
+### Book structure (2026-10): docs/book gained Chapter 7 (The Semantics of
+Transactions: Isolation Levels and Their Cost) between PlusCal/TLA+ and the
+API chapter; old Chapters 7-19 shifted to 8-20. Chapter titles below are
+stable; part assignments and cross-chapter numbers in older entries predate
+the shift.
 
 ============================================================
 FRONT: Preface
@@ -5,18 +17,19 @@ FRONT: Preface
 Assumed background.
   * Computer architecture: caches, cache coherence, out-of-order execution (one semester).
   * Operating systems / concurrency: threads, locks, semaphores, atomics.
-  * Compilers: a first course; the essential material is recapped in Part III.
-  * Discrete mathematics and basic probability for the modeling parts (Parts IV and V).
+  * Compilers: a first course; the essential material is recapped in Part V.
+  * Discrete mathematics and basic probability for the modeling parts (Part III).
 How to read this book.
   * Parts I-II motivate TM and ground it in real hardware; readers with a strong OS/architecture background may skim them.
-  * Parts V and VII (formal verification and runtime designs) are the conceptual core.
-  * Part III (compilers) and Part IV (mathematics) are self-contained detours; their notation is reused later.
-  * A one-semester course could cover Parts I, VII, VIII, and V; a full course adds III, IV, IX, and X.
-  * A single running example - a two-account transfer() - threads through the book: it appears as locked code in Chapter 1, as an API call in Chapter 10, and as the test case for every runtime in Chapter 12.
+  * Parts III and IV (formal verification and runtime designs) are the conceptual core.
+  * Part V (compilers) and Part III (mathematics) are self-contained detours; their notation is reused later.
+  * A one-semester course could cover Parts I, III, IV, and VI; a full course adds V and VII.
+  * Readers from databases: Chapter 7 rebuilds the isolation ladder (Berenson/Gray/Adya) in this book's history vocabulary and argues where it fails in shared memory (sec:iso-not-in-tm).
+  * A single running example - a two-account transfer() - threads through the book: it appears as locked code in Chapter 1, as an API call in Chapter 8, and as the test case for every runtime in Chapter 10.
 The companion codebase.
   * This book is written against a working repository: 20+ STM backends, an LLVM instrumentation plugin, TLA+/PlusCal models, the STAMP benchmarks, and GPU backends.
-  * Exercises are tagged [implementation] (write code), [verification] (write a TLA+ model), or [theory] (prove or derive) so instructors can mix them.
-  * Every runtime design in Part VII exists as buildable code and as a model-checked TLA+ specification.
+  * Exercises are tagged [implementation], [verification], [theory], [literature], or [open] so instructors can mix them.
+  * Every runtime design in Part IV exists as buildable code and as a model-checked TLA+ specification.
 Getting the code running.
   * The full toolchain instructions live in the Development Environment Setup chapter at the back; the minimum you need for most chapters is: make in the repository root (builds the backends and benchmarks), a recent clang/g++ with C++17, and java plus the tla2tools.jar for the model-checking exercises.
   * Exercise tracks: the tags let you follow one coherent path end-to-end. The implementer track (all [implementation]) builds a runtime of each family; the verifier track (all [verification]) builds a PlusCal/TLA+ model for each design; the theory track (all [theory]) carries the opacity and performance arguments across chapters. Each track's exercises are cumulative - later ones reuse the artifacts of earlier ones.
@@ -799,6 +812,40 @@ reproducible rather than rhetorical:
 ############################################################
 PART: Implementing Transactional Memory
 ############################################################
+
+============================================================
+CHAPTER: The Semantics of Transactions: Isolation Levels and Their Cost (NEW)
+============================================================
+
+== The Shape of the Space: Dimensions of Transaction Semantics ==
+  * A transaction semantics = a point in a product of dimensions: visibility, strictness, ordering, anomalies, crash-awareness, recoverability, progress, durability.
+  * Database and TM ranges differ for one structural reason: the DB observer is a client behind a protocol boundary; the TM observer is a peer inside the address space.
+  * Crash-awareness is free in databases (uncommitted state never crosses the boundary) and structural in TM (it is exactly opacity).
+  * Taxonomies: Gray's strictness hierarchy (gray93tp), Berenson et al.'s anomaly critique of ANSI levels, Adya's containment theory, Kleppmann's engineering survey.
+
+== The Isolation Ladder ==
+  * RU, RC, RR, SI, SSI, S(+strict) restated as read-from constraints in the Ch.5 history vocabulary.
+  * Containment (Adya): each rung admits strictly fewer anomalies; only the top is implementable in shared memory.
+
+== Anomalies: The Matrix and Its Witnesses ==
+  * Berenson matrix: dirty read, non-repeatable read, phantom, lost update, write skew x levels, each cell witnessed by a two-transaction history.
+  * Write skew = anti-dependency cycle; SI admits it, SSI's commit-time cycle detection rejects it (characterization stated, not proved: applied depth).
+
+== The Price Each Rung Buys ==
+  * Isolation semantics derives p_abort: SI validates w object-chances per contender, serializable OCC 2r+w.
+  * Table/curve: at C=20 (k=50,r=4,w=1) serializable OCC pays E=31.7 attempts, SI 1.5 - bought with write skew. tools/iso-cost.py recomputes.
+  * Caveats: independence approximation, 2PL trades retries for waits, SSI pays a cycle-tracking tax.
+
+== From Mechanism to Semantics and Back ==
+  * Mechanism knobs: version management (single/multi), write policy (WB/WT/TinySTM WBCTL/WBETL), early lock release (serializable only under version check), eager/lazy detection, static transactions (Calvin/SGL), GPU snapshot thresholds.
+  * EAGER_BROKEN = early release without the version check: same machine, worse promise. Mechanism does not imply semantics (tab:sem-mech).
+
+== The Half That Cannot Cross Over ==
+  * Cliff argument, five observations: boundary-is-the-guarantee; applications cannot reconcile pointers; the no-wait prize is already paid by serializable TM; predicates don't exist over memory; recoverability collapses.
+  * Quote: isolation levels are guarantees about answers given to clients; TM conditions are guarantees about the state peers can act on.
+
+== Worked Example: Write Skew, Checked ==
+  * The write-skew history (x=y=500, DRAW=400) traced in history notation; docs/proofs/BankSI.tla with SERIALIZABLE=FALSE violates Reserve, TRUE passes; make check-teaching.
 
 ============================================================
 CHAPTER: Transaction API Design – Software Engineering Perspectives

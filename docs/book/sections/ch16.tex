@@ -1,556 +1,513 @@
-\chapter{Hardware Transactional Memory – Design and Simulation}
-\index{hardware transactional memory!design}\index{hardware transactional memory!simulation}\index{RTM}\index{TME}\index{cache coherence}\index{capacity aborts}\index{fallback paths}
+\chapter{From Source to AST: Lexing and Parsing}
+\index{lexing}\index{parsing}\index{finite automata}\index{DFA}\index{recursive descent}\index{parser generator}\index{AST}\index{atomic block}
 
-Hardware transactional memory, or HTM, is the most direct attempt to make transactions disappear into the memory hierarchy. Instead of maintaining read sets, write sets, undo logs, and validation logic in software, the processor extends speculation and coherence so that a region of ordinary loads and stores either commits atomically or aborts and restores the pre-transaction state.
+A transactional memory system is usually introduced at the runtime boundary: a transaction begins, reads and writes are tracked, validation happens, and a commit either publishes updates or retries. But a programmer does not write read-set manipulation by hand. The programmer writes a source-level construct, a library call, or code that an instrumentation pass recognizes. Somewhere before the runtime can execute, the program has to be decomposed into structure.
 
-This chapter studies HTM as an architectural idea and as a practical programming interface. The running example remains the two-account bank transfer: a transfer must preserve the account floor and the money-conservation invariant,
+This chapter follows that front-end path: characters become tokens, tokens become an abstract syntax tree, and the tree identifies the region that later becomes transactional instrumentation. The companion repository instruments at LLVM IR rather than shipping a source language, but the conceptual pipeline is the same. The tiny language used here is deliberately small: an \texttt{atomic} block, a bank transfer statement, and assertions about money conservation.
+
+\section{Finite Automata and Lexical Analysis}
+
+Lexical analysis is the first useful compression step in a compiler. It turns a stream of characters into a stream of tokens: \texttt{atomic}, \texttt{\char`\{}, identifiers, numbers, semicolons, and so on. The important fact is that a lexer is not mysterious machinery. It is a finite automaton with a small amount of bookkeeping for token text and source position.
+
+Regular expressions are a convenient notation for such machines. An identifier may be described as a letter followed by zero or more letters or digits. A decimal number may be described as one or more digits. A fixed keyword such as \texttt{atomic} is just a six-character path through the automaton. Every regular expression can be compiled to a nondeterministic finite automaton, then to a deterministic finite automaton by subset construction. A hand-written lexer implements the same transition function directly in code.
+
+The key policy is \emph{maximal munch}: consume the longest prefix that forms a valid token. Without it, \texttt{atomicity} could be tokenized as \texttt{atomic} followed by \texttt{ity}. That would be wrong for ordinary language design. The usual rule is to consume the longest identifier-like string and then check whether the result is a reserved word. The alternative is the dedicated DFA path in Figure~\ref{fig:lexer-dfa}, where \texttt{atomic} is accepted as a keyword only if the word ends exactly there.
+
+For the transactional examples in this book, the lexer has no semantic knowledge. It does not know whether an account has enough money, whether a transfer preserves a floor, or whether a runtime backend is NOrec, TL2, SGL, TinySTM, or SwissTM. It only recognizes surface categories.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[font=\small, node distance=1.5cm]
+  \tikzstyle{st}=[circle,draw,inner sep=1pt,minimum size=7mm]
+  \tikzstyle{acc}=[circle,draw,double,inner sep=1pt,minimum size=7mm]
+  \node[st] (q0) {$q_0$};
+  \node[st] (q1) [right=1.2cm of q0] {$q_1$};
+  \node[st] (q2) [right=1.2cm of q1] {$q_2$};
+  \node[st] (q3) [right=1.2cm of q2] {$q_3$};
+  \node[st] (q4) [right=1.2cm of q3] {$q_4$};
+  \node[st] (q5) [right=1.2cm of q4] {$q_5$};
+  \node[acc] (q6) [right=1.2cm of q5] {$q_6$};
+  \node[acc] (qid) [above=1.4cm of q3] {$q_{id}$};
+  \node[acc] (qnum) [above=1.4cm of q0,xshift=0.6cm] {$q_{num}$};
+  \node[acc] (qlb) [below=1.4cm of q0,xshift=-0.4cm] {\texttt{\char`\{}};
+  \node[acc] (qrb) [below=1.4cm of q0,xshift=0.5cm] {\texttt{\char`\}}};
+  \node[acc] (qs)  [below=1.4cm of q0,xshift=1.4cm] {\texttt{;}};
+  \draw[-{Stealth}] (q0) -- node[above] {\texttt{a}} (q1);
+  \draw[-{Stealth}] (q1) -- node[above] {\texttt{t}} (q2);
+  \draw[-{Stealth}] (q2) -- node[above] {\texttt{o}} (q3);
+  \draw[-{Stealth}] (q3) -- node[above] {\texttt{m}} (q4);
+  \draw[-{Stealth}] (q4) -- node[above] {\texttt{i}} (q5);
+  \draw[-{Stealth}] (q5) -- node[above] {\texttt{c}} (q6);
+  \draw[-{Stealth}] (q0) to[out=120,in=180] node[above left] {letter$\neq$\texttt{a}} (qid);
+  \draw[-{Stealth}] (q0) to[out=60,in=-180] node[above] {digit} (qnum);
+  \draw[-{Stealth}] (q1) to[out=110,in=190] (qid);
+  \draw[-{Stealth}] (q2) to[out=110,in=190] (qid);
+  \draw[-{Stealth}] (q3) to[out=110,in=190] (qid);
+  \draw[-{Stealth}] (q4) to[out=110,in=190] (qid);
+  \draw[-{Stealth}] (q5) to[out=110,in=190] (qid);
+  \draw[-{Stealth}] (q6) to[out=110,in=190] (qid);
+  \node[font=\scriptsize] at ($(q1)!0.5!(qid)-(0.25,0)$) {$\neg$\texttt{t}};
+  \node[font=\scriptsize] at ($(q2)!0.5!(qid)-(0.25,0)$) {$\neg$\texttt{o}};
+  \node[font=\scriptsize] at ($(q3)!0.5!(qid)-(0.25,0)$) {$\neg$\texttt{m}};
+  \node[font=\scriptsize] at ($(q4)!0.5!(qid)-(0.25,0)$) {$\neg$\texttt{i}};
+  \node[font=\scriptsize] at ($(q5)!0.5!(qid)-(0.25,0)$) {$\neg$\texttt{c}};
+  \node[font=\scriptsize] at ($(q6)!0.5!(qid)-(0.25,0)$) {letter$\mid$digit};
+  \draw[-{Stealth}] (qid) to[out=80,in=100,looseness=4] node[above] {letter$\mid$digit} (qid);
+  \draw[-{Stealth}] (qnum) to[out=80,in=100,looseness=4] node[above] {digit} (qnum);
+  \draw[-{Stealth}] (q0) -- node[below left,font=\scriptsize] {\texttt{\char`\{}} (qlb);
+  \draw[-{Stealth}] (q0) -- node[below,font=\scriptsize] {\texttt{\char`\}}} (qrb);
+  \draw[-{Stealth}] (q0) -- node[below right,font=\scriptsize] {\texttt{;}} (qs);
+\end{tikzpicture}
+\caption{A DFA for the toy lexer. A dedicated path recognizes the keyword \texttt{atomic}; any other continuation falls into the identifier state $q_{id}$, so \texttt{atomically} is an identifier, not a keyword. \texttt{\char`\{}, \texttt{\char`\}}, and \texttt{;} are single-character tokens.}
+\label{fig:lexer-dfa}
+\end{figure}
+
+A practical lexer also records source spans. A token should carry at least its kind, spelling, and byte or line-column position. The parser can then report ``expected \texttt{\char`\}}'' at the right location instead of merely failing. Diagnostics are not an afterthought; they are part of the front-end contract.
+
+\section{Recursive Descent Parsing}
+
+Parsing gives hierarchical meaning to the flat token stream. A sequence such as \texttt{atomic \char`\{ transfer checking savings 7; \char`\}} is not just seven tokens. It is an atomic block containing one statement whose operands are two account identifiers and one amount.
+
+Recursive descent is the simplest didactic parser because each grammar rule becomes one function. A rule for an atomic block becomes \texttt{parse\_atomic}. A rule for a transfer statement becomes \texttt{parse\_transfer}. A rule for an identifier becomes \texttt{expect\_id}. The call stack mirrors the grammar.
+
+A suitable grammar fragment is:
 
 $$
-\operatorname{total}(b)=b_0+b_1=\operatorname{constant}.
+\begin{array}{rcl}
+\textit{atomic-block} & ::= & \texttt{atomic} \ \texttt{\char`\{} \ \textit{stmt-list} \ \texttt{\char`\}} \\
+\textit{stmt-list} & ::= & \textit{stmt} \ \textit{stmt-list} \mid \epsilon \\
+\textit{stmt} & ::= & \textit{transfer} \mid \textit{assertion}
+\end{array}
 $$
 
-The central lesson is deliberately modest: HTM can make the fast path extremely cheap, but it is a best-effort mechanism. Correctness lives in the fallback path.
+In code, the parser usually avoids writing the recursive list rule literally. Instead it loops until it sees the closing brace. That loop is still the same grammar idea, expressed in a form that gives better error messages and avoids deep recursion on long statement lists.
 
-\section{Extending Cache Coherence for TM}
-
-Herlihy and Moss proposed the basic hardware idea: add transactional states to a MESI-like cache-coherence protocol. A transactional load marks a cache line as part of the transaction's read set. A transactional store marks a line as part of its write set and delays publication until commit. Their proposal used states such as XCOMMIT and XABORT to distinguish speculative lines from ordinary modified or shared lines.
-
-The cache hierarchy then becomes the transaction manager. It tracks which lines have been read, which lines have been written, and whether another core sends a coherence message that invalidates a transactional assumption. A conflicting invalidation to a transactional line is an abort signal. The hardware discards the speculative writes and restarts execution at the checkpointed program counter.
-
-The expensive requirement is undo. If the processor has overwritten a cache line speculatively, it must still be able to restore the pre-transaction value. A simple design keeps both the new value and enough old state inside the cache. This is fast when the transaction fits in the tracked cache structures and brittle when it does not. Evicting a transactional line may lose either the value needed for rollback or the metadata needed for conflict detection. The conservative answer is a capacity abort.
-
-This explains why coherence-based HTM tends to work best for short, cache-resident critical sections. It is ideal for the common case in which a lock protects a small update, such as the bank transfer touching two account records. It is much less robust for long scans, large read sets, or transactions that call into the operating system.
+Recursive descent has limits. Direct left recursion cannot be parsed by a naive recursive function, because the function calls itself before consuming a token. It also provides no automatic conflict report: if two alternatives begin with the same token, the author must decide how much lookahead is needed. Finally, there is no separate grammar artifact unless the team writes one; the grammar lives in the parser source.
 
 \begin{figure}[htbp]
 \centering
-\begin{tikzpicture}[
-    box/.style={draw, rounded corners, align=center, minimum width=2.8cm, minimum height=0.9cm},
-    smallbox/.style={draw, rounded corners, align=center, minimum width=2.3cm, minimum height=0.8cm},
-    arr/.style={-{Latex}, thick}
-]
-\node[box] (begin) {XBEGIN\\checkpoint PC};
-\node[box, right=1.4cm of begin] (track) {L1 tracks\\read/write lines};
-\node[box, right=1.4cm of track] (body) {speculative\\loads/stores};
-\node[box, right=1.4cm of body] (commit) {XEND\\publish writes};
-
-\node[smallbox, below=1.1cm of track] (inv) {coherence\\invalidation};
-\node[smallbox, below=1.1cm of body] (evict) {capacity\\eviction};
-\node[box, below=1.1cm of $(inv)!0.5!(evict)$] (abort) {abort\\restore checkpoint};
-
-\draw[arr] (begin) -- (track);
-\draw[arr] (track) -- (body);
-\draw[arr] (body) -- (commit);
-\draw[arr] (inv) -- (track);
-\draw[arr] (track) -- node[left, align=center]{conflict} (abort);
-\draw[arr] (evict) -- node[right, align=center]{lost tracking} (abort);
-\draw[arr] (body) -- (evict);
-\draw[arr] (abort.west) -| (begin.south);
+\begin{tikzpicture}[font=\small, node distance=1.8cm]
+  \tikzstyle{box}=[draw,rounded corners,align=center,minimum width=2.6cm,minimum height=0.9cm]
+  \node[box] (src) {Source\\\texttt{atomic \{...\}}};
+  \node[box] (lex) [right=of src] {Lexer\\maximal munch};
+  \node[box] (tok) [right=of lex] {Token stream\\keywords, ids};
+  \node[box] (parse) [right=of tok] {Parser\\grammar rules};
+  \node[box] (ast) [below=1.2cm of parse] {AST\\atomic block};
+  \node[box] (ir) [left=of ast] {Instrumentation\\read/write calls};
+  \node[box] (rt) [left=of ir] {TM runtime\\NOrec, TL2, SGL, ...};
+  \draw[-{Stealth}] (src) -- (lex);
+  \draw[-{Stealth}] (lex) -- (tok);
+  \draw[-{Stealth}] (tok) -- (parse);
+  \draw[-{Stealth}] (parse) -- (ast);
+  \draw[-{Stealth}] (ast) -- (ir);
+  \draw[-{Stealth}] (ir) -- (rt);
 \end{tikzpicture}
-\caption{Coherence-based HTM treats invalidations and capacity loss as abort signals. Commit is cheap only while the read and write sets remain tracked in cache.}
-\label{fig:htm-coherence-abort}
+\caption{A source-level view of the front-end pipeline. The companion repository instruments at LLVM IR rather than shipping a source-level language, but the logical artifacts are the same: source text becomes tokens, tokens become an AST, and the AST-equivalent control region becomes calls into a concrete TM backend.}
+\label{fig:front-end-pipeline}
 \end{figure}
 
-The figure is also a useful mental model for software design. Every extra cache line touched inside the transaction becomes part of the speculative footprint. Debug counters, logging buffers, allocator metadata, and accidental reads of shared state all increase the chance of abort. In HTM programming, minimizing the hardware footprint is not merely an optimization; it is part of making progress likely.
+Figure~\ref{fig:front-end-pipeline} separates front-end structure from runtime policy. The lexer and parser identify an atomic region. They do not decide whether the implementation uses a single global lock, TL2 versioned locks, NOrec validation, TinySTM write-back or write-through modes, SwissTM conflict management, persistent logging, or a GPU commit protocol. That boundary is healthy: syntax should remain stable while backend protocols evolve.
 
-\section{Modern HTM Implementations}
+\section{Parser Generators: From Yacc to Modern Tools}
+\index{parser generator}\index{yacc}\index{bison}\index{LR(0) automaton}\index{ANTLR}\index{tree-sitter}
 
-Commodity HTM is not one mechanism. It is a family of best-effort mechanisms with similar semantics and different interfaces. Intel Restricted Transactional Memory, or RTM, exposes instructions such as \texttt{xbegin}, \texttt{xend}, and \texttt{xabort}. ARM Transactional Memory Extension, or TME, exposes similar architectural concepts with implementation-defined tracking and diagnostics. IBM's Blue Gene/Q and POWER implementations are the longevity case study: they show that coherence-based HTM can be made practical when the architecture and platform expose a sufficiently mature interface.
+The most direct answer to ``is Yacc still in use?'' is: yes, and its descendants
+are everywhere.  The principle Yacc established --- write the grammar, get a
+table-driven parser for free --- is the backbone of countless real compilers,
+and the shift-and-reduce automaton it builds is exactly the kind of object
+this chapter's automata language can describe.
 
-The shared semantic contract is simple: a hardware transaction may commit, but software must not depend on eventual commit. It may abort because another core conflicts with its read or write set. It may abort because the transaction exceeds implementation capacity. It may abort because it executes an unsupported instruction, takes an interrupt, faults on a page, or hits a microarchitectural limit that is not visible in the source code.
+A parser generator makes the grammar an explicit artifact. Instead of encoding every rule as a function, the programmer writes productions and lets the tool compute states, transitions, lookahead, and reductions. This is valuable when the language grows beyond a small teaching grammar. It is also valuable when diagnostics and maintenance matter: a grammar file can be reviewed independently from semantic actions.
 
-This best-effort rule distinguishes HTM from the software backends studied earlier. In NOrec, TL2, TinySTM, SwissTM, JVSTM, MVLog, and the persistent and distributed designs, the implementation owns the retry protocol. With HTM, the processor owns only the fast attempt. The program must provide a correct fallback path.
+\emph{Yacc (1975)} compiled a context-free grammar into an \textsc{LALR(1)} parser table; its modern form is \textsc{GNU Bison}, still maintained and still the parser behind many C/C++-adjacent tools (e.g.\ SQL engines, shell grammars). \emph{The generated automaton is a real object.} For a simple grammar, the parser Bison produces is an \textsc{LALR(1)} table built over the LR(0) item-set automaton with one state per set of viable items, as in Figure~\ref{fig:lr0-automaton} for the grammar in Listing~\ref{lst:expr-grammar}. The LR(0) skeleton alone is not a parser: state~$I_1$ in the figure contains both $E' \to E\cdot$ (accept/reduce) and $E \to E\cdot+T$ (shift), a shift/reduce conflict that is resolved only because LALR(1) consults the lookahead token. Keep that in mind when reading the figure: it shows the states, not the lookahead that disambiguates them. \emph{Recursive descent you write; an LR table you compute.} This is the trade-off: hand-written parsers read like the grammar but must avoid left recursion; generated parsers accept the grammar as-is but hide the shift/reduce machinery behind the table. \emph{Modern tools}. \textsc{ANTLR} (ALL(*), with Python and many other targets) generates recursive-descent parsers from grammar files; \textsc{tree-sitter} builds error-tolerant, incremental \textsc{GLR} parsers used by editors; Python projects commonly use \textsc{PLY} (a Yacc port), \textsc{SLY} (its successor), or \textsc{Lark} (Earley/LALR from \textsc{EBNF}). \emph{What this means for transactional constructs}: nothing about \texttt{atomic} is hard to parse --- any of these tools can host the grammar --- so the interesting work stays downstream, in the instrumentation and runtime, where the rest of this book lives. \emph{Scope note}: this section is a deliberate, self-contained detour. The companion repository instruments at the LLVM-IR level (Chapter~11) and does \emph{not} implement a source-level TM language, so no front-end generator is shipped; the DFA and LR(0) automata here exist to ground the vocabulary (``shift'', ``reduce'', ``item set'') rather than to build a product. Readers who want only the TM pipeline may skip to the worked example.
 
-The simplest fallback is a global lock: try HTM a few times, then serialize. The companion codebase includes TSX-SGL as the natural instance of this idea. More elaborate hybrids use phased execution or hybrid STM, switching between hardware and software modes as contention and capacity behavior change. The important correctness rule is unchanged: the hardware path must synchronize with the fallback path, usually by reading the fallback lock inside the transaction. This is called lock subscription.
-
-The glibc lock-elision history is the warning sign. Eliding locks transparently is attractive, but the best-effort contract, platform errata, and subtle subscription rules make correctness and long-term maintenance difficult. When lock elision is used, it must be treated as a performance path over an ordinary correct synchronization protocol, not as a replacement for that protocol.
-
-Two further interface details complete the picture. \texttt{XTEST} is the introspection instruction of the x86 TSX family: it returns true when executed inside a transactional region (RTM or HLE) and false otherwise, so that \emph{shared} code --- a lock acquisition, a library call --- can detect that it is running speculatively and adjust, most commonly by making lock operations no-ops inside an enclosing transaction instead of aborting it. Any design that routes hardware and software executions through one function body needs exactly this predicate; the companion's runtimes carry the same idea in software form (\texttt{current\_tx->active}). Second, RTM had a sibling interface: Hardware Lock Elision (HLE) marked ordinary \texttt{LOCK}-prefixed instructions with \texttt{xacquire}/\texttt{xrelease} prefixes and asked the processor to elide the lock speculatively, falling back to the plain locked operation on abort. HLE required no new control flow, which made it attractive to libc implementers --- and precisely because the elision was invisible at the source level, programmers could not add subscription reads, retry budgets, or abort accounting to the elided region. That asymmetry, more than any single erratum, is why HLE aged out of the ecosystem while explicit RTM loops survived in HTM-aware codebases.
-
-The availability reality is the final fact, and it motivates this chapter's simulation section. TSX arrived on Haswell (2013) as RTM plus HLE; early steppings had it disabled by microcode once, and in 2021 Intel again shipped microcode disabling TSX on Haswell, Broadwell, and Skylake-family client parts. Cascade Lake server parts shipped with TSX present but disabled by default (enableable in firmware), while recent client generations removed it outright. AMD has never implemented TSX. Arm's TME was specified but never shipped in a commercial core and was withdrawn from the architecture reference manual in 2025~\cite{arm25tmew} --- removed from LLVM~22, the very toolchain Part~V's plugin builds with. Only IBM POWER continues to expose a coherence-based HTM with a mature interface (\texttt{tbegin.}/\texttt{tend.}/\texttt{tabort.}/\texttt{tsr.}, the TEXASR failure-record register, and rollback-only-transaction state). The practical consequence for this book: on most machines you can buy today, none of Table~\ref{tab:htm-implementations}'s first two rows can be executed at all, which is exactly why \S\ref{sec:htm-simulation} exists --- a simulated ISA keeps the instruction set available regardless of what the host implements, and the companion's RDTSC profiling patch (\texttt{patches/profile/tsx}) preserves measurements from the last widely available RTM parts.
+The table in an LR parser is a compact encoding of two choices. A \emph{shift} consumes another token and moves to a new state. A \emph{reduce} recognizes that the symbols on top of the stack match the right-hand side of a production and replaces them by the left-hand side. Conflicts mean the grammar and parser class do not determine a unique action for a particular state and lookahead token.
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{M{0.18\textwidth}M{0.25\textwidth}M{0.25\textwidth}M{0.22\textwidth}}
+\begin{tabular}{M{0.20\linewidth}M{0.24\linewidth}M{0.30\linewidth}M{0.16\linewidth}}
 \hline
-\thb{0.18\textwidth}{\textbf{Mechanism}} & \thb{0.25\textwidth}{\textbf{Tracking}} & \thb{0.25\textwidth}{\textbf{Abort sources}} & \thb{0.22\textwidth}{\textbf{Software obligation}} \\
+\thb{0.20\textwidth}{Approach} & \thb{0.24\textwidth}{Parser shape} & \thb{0.30\textwidth}{Strength} & \thb{0.16\textwidth}{Cost} \\
 \hline
-Intel RTM & Cache-resident speculative read/write sets; explicit \texttt{\_xbegin}, \texttt{\_xend}, \texttt{\_xabort}. & Conflict, capacity, unsupported instruction, interrupt, page fault, explicit abort. & Always provide a correct fallback; subscribe to fallback lock inside the transaction.\\
-ARM TME & Architectural transaction begin/end (\texttt{TSTART}/\allowbreak\texttt{TCOMMIT}/\allowbreak\texttt{TCANCEL}/\allowbreak\texttt{TTEST}) with implementation-defined tracking. & Similar best-effort causes; exact diagnostics are implementation-specific. & Same best-effort rule; never assume eventual commit. \emph{TME never shipped in a commercial core and was withdrawn from the Arm ARM in 2025~\cite{arm25tmew}; it is studied here as a design point, not a shipping ISA.}\\
-IBM POWER HTM & Coherence-based tracking with a mature architectural interface (\texttt{tbegin.}/\allowbreak\texttt{tend.}/\allowbreak\texttt{tabort.}/\allowbreak\texttt{tsr.}, TEXASR failure recording, ROT). & Conflict, capacity, non-transactional events, implementation limits. & Use retry budgets and fallback paths; exploit richer platform diagnostics where available.\\
-gem5 Ruby/HTM model & Simulated cache hierarchy and coherence protocol (\texttt{MESI\_Three\_\allowbreak Level\_HTM}); ISA-agnostic HTM sequencer with calibrated begin/commit latencies. L0 cache tracks read/write sets with configurable line limits (128 read, 32 write) and triggers \texttt{LD\_FAIL}/\texttt{ST\_FAIL} on conflict or capacity aborts. & Commit path and abort callbacks are modeled; the x86 fault path maps cache failure reasons (\texttt{FAIL\_SELF}~$\to$~capacity, \texttt{FAIL\_REMOTE}~$\to$~conflict) to the EAX status word via \texttt{GenericHtmFailureFault}, exercising the same fallback code paths as real hardware (see \S\ref{sec:htm-simulation}). & Use simulation to separate effects that hardware counters collapse; Ruby coherence traffic and L0 set-associativity effects become directly observable.\\
+Hand recursive descent & Functions over tokens & Transparent AST construction & No left recursion \\
+Yacc/Bison & Table-driven LALR & Compact grammar file & Shift/reduce debugging \\
+ANTLR & Generated recursive descent & Rich grammar notation & Toolchain dependency \\
+tree-sitter & Incremental GLR & Editor-grade recovery & More machinery \\
 \hline
 \end{tabular}
-\caption{HTM implementations differ in interface and diagnostics, but share the same semantic contract: hardware commit is opportunistic and software fallback is mandatory.}
-\label{tab:htm-implementations}
+\caption{Front-end choices for an \texttt{atomic} construct. The syntax is simple enough for any row; the engineering choice is driven by diagnostics, integration, and maintenance.}
+\label{tab:front-end-choices}
 \end{table}
 
-\section{Worked Example: RTM, From the Inside}
-\index{HTM}\index{RTM}\index{xbegin}\index{xend}
-\label{sec:rtm-example}
+\begin{lstlisting}[language={}, caption={A grammar small enough to see the whole automaton, written in Yacc-style BNF.}, label={lst:expr-grammar}]
+expr  ::= expr '+' term   |  term
+term  ::= id
+\end{lstlisting}
 
-Intel RTM is the closest commodity hardware comes to a transaction:
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[font=\small, node distance=2.6cm]
+  \tikzstyle{item}=[rounded corners,draw,inner sep=3pt,align=left]
+  \node[item] (I0) at (0,0) {\ttfamily $E'\to\cdot E$\\ $E\to\cdot E+T$\\ $E\to\cdot T$\\ $T\to\cdot id$};
+  \node[item,double,double distance=1.5pt] (I1) at (4.5,2.4) {\ttfamily $E'\to E\cdot$\\ $E\to E\cdot+T$};
+  \node[item] (I2) at (4.5,0) {\ttfamily $E\to T\cdot$};
+  \node[item] (I3) at (4.5,-2.6) {\ttfamily $T\to id\cdot$};
+  \node[item] (I4) at (9.5,2.4) {\ttfamily $E\to E+\cdot T$\\ $T\to\cdot id$};
+  \node[item] (I5) at (9.5,0) {\ttfamily $E\to E+T\cdot$};
+  \draw[-{Stealth}] (I0) -- node[above,pos=0.4] {$E$} (I1);
+  \draw[-{Stealth}] (I0) -- node[right] {$T$} (I2);
+  \draw[-{Stealth}] (I0) -- node[right,pos=0.3] {$id$} (I3);
+  \draw[-{Stealth}] (I1) -- node[above] {$+$} (I4);
+  \draw[-{Stealth}] (I4) -- node[right] {$T$} (I5);
+  \draw[-{Stealth}] (I4) to[out=-165,in=15,looseness=1.0] node[below,pos=0.35] {$id$} (I3);
+\end{tikzpicture}
+\caption{The LR(0) item-set automaton for Listing~\ref{lst:expr-grammar}, augmented with $E'\to E$ so the accept state is visible.  Reading the ``$\cdot$'' as a parse position, each state is a set of viable items; a dot before a non-terminal is a shift, and a dot at the end of a complete item is a reduce.  A Yacc-family generator computes this skeleton and then overlays LALR(1) lookahead sets to resolve states such as $I_1$ (which mixes $E' \to E\cdot$ and $E \to E\cdot+T$); the tables it walks at parse time encode both.}
+\label{fig:lr0-automaton}
+\end{figure}
 
-\begin{lstlisting}[language=C, caption={The RTM contract: begin, body, fall back on abort.}]
-unsigned status = _xbegin();
-if (status == _XBEGIN_STARTED) {
-    /* transactional region */
-    *a -= n; *b += n;            /* both become visible atomically */
-    _xend();                     /* commit                        */
-} else {
-    /* abort: EAX status word encodes the reason (conflict, ...) */
-    lock(&g_fallback);           /* best-effort -> serial fallback  */
-    *a -= n; *b += n;
-    unlock(&g_fallback);
+The grammar in Listing~\ref{lst:expr-grammar} is intentionally left-recursive. A direct recursive-descent parser for \texttt{expr} would call itself before consuming input. An LR parser has no such problem: left recursion is often the natural way to express left-associative operators in bottom-up parsing.
+
+\section{Worked Example: Lexing and Parsing an Atomic Block}
+\index{lexer}\index{recursive descent parser}\index{AST}
+\label{sec:parser-example}
+
+The whole front end for a tiny transactional language, in miniature:
+
+\begin{lstlisting}[language=C, caption={A hand-written lexer for the keywords of an atomic block.}]
+enum Token { T_ATOMIC, T_IDENT, T_NUMBER, T_LBRACE, T_RBRACE, T_SEMI, T_END };
+
+struct Token next_token(const char **src) {
+    skip_ws(src);
+    if (**src == '\0') return T_END;
+    if (**src == '{') { (*src)++; return T_LBRACE; }
+    if (**src == '}') { (*src)++; return T_RBRACE; }
+    if (strncmp(*src, "atomic", 6) == 0) { *src += 6; return T_ATOMIC; }
+    /* ... identifiers, numbers, ';' ... */
 }
 \end{lstlisting}
 
-Compare with \S\ref{sec:api-example}: where the STM used a retry loop, RTM uses a hardware fallback instead of a software retry. The \texttt{status} value is a 32-bit word written to \texttt{EAX}: bit~0 set means the abort came from \texttt{\_xabort} (bits 31:24 then carry the \texttt{\_xabort} argument), bit~1 means the transaction \emph{may} succeed on retry, bit~2 a data conflict, bit~3 a capacity overflow, bit~4 a debug breakpoint, bit~5 nesting overflow. It is the entire diagnostics interface --- far poorer than the abort-accounting of Part~VI, which is why profiling tools must infer RTM reasons (Part~VII). Exercise~1 asks for the fallback design; the phased-hybrid and HSTM discussion above is exactly this fallback made adaptive. The transaction's atomicity is enforced by the L1/L2 coherence tracking of the first section --- which is why capacity aborts are unavoidable (see Part~VII's GPU contrast). \textbf{Abort taxonomy}: RTM collapses many causes into the single EAX status word. The practical breakdown is \emph{conflict} (another core touched the read/write set), \emph{capacity} (the transaction outgrew the L1 tracking --- unavoidable at large read/write sets), \emph{unsupported instruction} (e.g.\ most syscalls and \texttt{rdfsbase}), and \emph{debug/explicit} (\texttt{\_xabort} or a debugger single-step). Profilers cannot distinguish conflict from capacity reliably from the status alone --- this is the reason the Part~VII simulator model re-measures them. \textbf{Fallback correctness is the real contract.} The \texttt{lock(\&g\_fallback)} path above is a second, serial execution of the same body. It must be \emph{called with the same state view} as the aborted TSX attempt and must itself be transactional-safe: a crash between the fallback lock and its unlock is indistinguishable from a crash inside the transaction. The failure mode to design against is the \emph{retry loop deadlock}: a hybrid that falls back to a lock but is also invoked by the STM-style retry loop can deadlock on its own fallback mutex (a real bug class in the companion repo's SPHT backend).
+The listing is schematic: it shows the shape of a lexer, not the complete maximal-munch implementation. A production lexer must avoid accepting \texttt{atomicity} as \texttt{atomic}. The robust version scans a whole identifier first, then compares the spelling with the reserved-word table. That single design choice removes a class of prefix bugs.
 
-The listing is intentionally small, but it hides two non-negotiable rules. First, the fallback body must be the same logical operation as the transactional body. Second, the fallback lock must be visible to the transaction. Without that visibility, the hardware path and fallback path are merely two unsynchronized implementations of the same update.
+A parser for the corresponding atomic block has three phases. First, it expects the keyword. Second, it consumes the opening brace. Third, it parses statements until it sees the matching closing brace. The result is an AST node representing an atomic control region. Later passes lower that node into calls that begin, read, write, validate, commit, or abort a concrete backend transaction.
 
-\section{Worked Example: RTM Bank Transfer with Lock Subscription}
-\index{lock subscription}\index{fallback lock}\index{money conservation}
-\label{sec:rtm-bank-transfer}
+Each grammar rule becomes one function in the recursive-descent parser --- the \texttt{atomic \{ \ldots \}} production being a small subtree. The DFA for this lexer is Exercise~1 of this chapter: six token kinds, all reachable from the start state. The AST's atomic control region is the source-level analogue of the region the companion instrumentation pass recovers from LLVM IR in Part~V --- the pass operates on IR, never on source text or ASTs. Exercise~3 extends the parser to nested atomic blocks and unbalanced-brace detection.
 
-The fallback lock must be visible to the hardware transaction. Otherwise a serialized fallback transfer can race with a hardware transaction that never read the lock.
+The important separation is that the parser recognizes \emph{where} the transaction is; it does not implement the transaction. In the repository, the concrete backends include SGL, TSX-SGL, SPHT, NOrec, NOrec-BF, TL2, TSC-TM, TinySTM modes, SwissTM, DUDETM, NV-HTM, XTM, Romulus, LeftRight, JVSTM, MVLog, PersistentSGL, DistributedSGL, TiKV-style distributed commit, and GPU designs. The front end should not contain special cases for any of them.
 
-\begin{lstlisting}[language=C, caption={A compilable RTM bank transfer with account floors and fallback lock subscription.}]
-/* Compile on x86-64 with:
- *   c++ -std=c++17 -O2 -mrtm bank_rtm.cc -o bank_rtm
- */
-#include <immintrin.h>
-#include <atomic>
-#include <array>
-#include <cassert>
-#include <thread>
+\section{Worked Example: A Bank Transfer Front End}
+\index{bank transfer}\index{AST!bank transfer}
 
-struct Account {
-    long balance;
-    long floor;
-};
+The running example is a bank transaction with account floors and a conservation
+check. The concrete surface language below is deliberately small:
 
-static std::atomic<bool> g_fallback{false};
-
-static void lock_fallback() {
-    bool expected = false;
-    while (!g_fallback.compare_exchange_weak(
-               expected, true,
-               std::memory_order_acquire,
-               std::memory_order_relaxed)) {
-        expected = false;
-        std::this_thread::yield();
-    }
-}
-
-static void unlock_fallback() {
-    g_fallback.store(false, std::memory_order_release);
-}
-
-static bool transfer_body(Account& from, Account& to, long amount) {
-    if (amount < 0) return false;
-
-    __int128 after = static_cast<__int128>(from.balance) - amount;
-    if (after < from.floor) return false;
-
-    from.balance -= amount;
-    to.balance += amount;
-    return true;
-}
-
-static bool transfer(Account& from, Account& to, long amount) {
-    for (int attempt = 0; attempt < 8; ++attempt) {
-        unsigned status = _xbegin();
-
-        if (status == _XBEGIN_STARTED) {
-            /*
-             * Lock subscription: if the fallback path is active, abort.
-             * The load places g_fallback in the transactional read set.
-             */
-            if (g_fallback.load(std::memory_order_acquire))
-                _xabort(0xF0);
-
-            bool ok = transfer_body(from, to, amount);
-            _xend();
-            return ok;
-        }
-
-        if ((status & _XABORT_EXPLICIT) &&
-            _XABORT_CODE(status) == 0xF0) {
-            std::this_thread::yield();
-            continue;
-        }
-
-        if ((status & _XABORT_RETRY) == 0)
-            break;
-    }
-
-    lock_fallback();
-    bool ok = transfer_body(from, to, amount);
-    unlock_fallback();
-    return ok;
-}
-
-static long total(const std::array<Account, 2>& a) {
-    return a[0].balance + a[1].balance;
-}
-
-int main() {
-    std::array<Account, 2> bank = {{{100, 0}, {100, 0}}};
-
-    long before = total(bank);
-    bool ok1 = transfer(bank[0], bank[1], 25);
-    bool ok2 = transfer(bank[0], bank[1], 1000);
-
-    assert(ok1);
-    assert(!ok2);
-    assert(bank[0].balance >= bank[0].floor);
-    assert(bank[1].balance >= bank[1].floor);
-    assert(total(bank) == before);
+\begin{lstlisting}[language={}, caption={The tiny source language parsed by Listing~\ref{lst:bank-parser}.}]
+atomic {
+  transfer checking savings 7;
+  assert_conservation;
 }
 \end{lstlisting}
 
-The invariant is money conservation: every successful transfer subtracts and adds the same amount. The account-floor check is inside both the RTM path and the fallback path; fallback is not a different algorithm. The transaction reads \texttt{g\_fallback}; that read is not an optimization but the synchronization point between hardware and software execution. The retry budget is deliberately finite, because a best-effort HTM transaction is allowed to abort forever. Finally, the explicit abort code \texttt{0xF0} separates ``fallback lock is held'' from ordinary conflicts in local diagnostics, though it does not make RTM deterministic.
+This source says three things. It opens an atomic region. It transfers seven units from \texttt{checking} to \texttt{savings}. It asks the implementation or verifier to check that the total amount of money is preserved. The parser records those facts without choosing a synchronization protocol.
 
-The companion backends use this same pattern at different levels. SGL serializes everything. TSX-SGL attempts the critical section in hardware and falls back to serialization. Software systems such as TL2, NOrec, TSC-TM, SwissTM, and TinySTM do not depend on cache-resident speculation, but they pay for metadata, validation, and logging. The measured results in the companion project reflect that trade-off: for the fuzz/bank workload on an M1 Pro, TL2 and TSC-TM are around two million transactions per second, while NOrec-BF improves the read-mostly NOrec path by reducing validation cost. These numbers are workload-specific; they are useful here only as a reminder that HTM is one point in a larger design space.
-
-\section{Worked Example: Abort-Cause Counters}
-\label{sec:htm-abort-counters}
-
-RTM exposes limited status bits. A useful first diagnostic is therefore local accounting: count commits, explicit subscription aborts, retryable aborts, and non-retryable aborts. The counters must be updated outside the transaction. If the transaction aborts, writes performed inside it vanish; if the writes force extra cache lines into the transaction, they also perturb the abort rate being measured.
-
-\begin{lstlisting}[language=C, caption={Per-thread RTM counters kept outside the transactional footprint.}]
-/* Compile on x86-64 with:
- *   c++ -std=c++17 -O2 -mrtm rtm_counters.cc -o rtm_counters
- */
-#include <immintrin.h>
-#include <atomic>
-#include <cassert>
-#include <cstdint>
-
-struct Counters {
-    std::uint64_t commits = 0;
-    std::uint64_t explicit_lock = 0;
-    std::uint64_t retryable = 0;
-    std::uint64_t nonretryable = 0;
-};
-
-static std::atomic<bool> g_lock{false};
-
-static void critical_increment(int& x) {
-    ++x;
-}
-
-static void run_once(int& x, Counters& c) {
-    for (int i = 0; i != 4; ++i) {
-        unsigned s = _xbegin();
-        if (s == _XBEGIN_STARTED) {
-            if (g_lock.load(std::memory_order_acquire))
-                _xabort(0xF0);
-            critical_increment(x);
-            _xend();
-            ++c.commits;
-            return;
-        }
-
-        if ((s & _XABORT_EXPLICIT) && _XABORT_CODE(s) == 0xF0) {
-            ++c.explicit_lock;
-        } else if (s & _XABORT_RETRY) {
-            ++c.retryable;
-        } else {
-            ++c.nonretryable;
-            break;
-        }
-    }
-
-    while (g_lock.exchange(true, std::memory_order_acquire)) {
-    }
-    critical_increment(x);
-    g_lock.store(false, std::memory_order_release);
-}
-
-int main() {
-    int x = 0;
-    Counters c;
-    run_once(x, c);
-    assert(x == 1);
-    assert(c.commits + c.explicit_lock + c.retryable + c.nonretryable >= 1);
-}
-\end{lstlisting}
-
-Counters are diagnostic state, not transactional state: a counter increment inside RTM would be rolled back on abort and would add another write line on commit. The status bits classify symptoms; they do not fully explain the microarchitectural cause.
-
-\section{Worked Example: Capacity Probe}
-\label{sec:htm-capacity-probe}
-
-The following program sweeps the number of cache lines touched by a transaction. It is not a benchmark result; it is a harness for observing the qualitative transition from small, cache-resident transactions to transactions that frequently abort for capacity or other implementation limits.
-
-\begin{lstlisting}[language=C, caption={A small RTM capacity probe that varies the transactional footprint.}]
-/* Compile on x86-64 with:
- *   c++ -std=c++17 -O2 -mrtm rtm_capacity.cc -o rtm_capacity
- */
-#include <immintrin.h>
-#include <array>
-#include <cassert>
-#include <cstddef>
+\begin{lstlisting}[language=C++, caption={A complete C++17 lexer and recursive-descent parser for a bank-transfer atomic block.}, label={lst:bank-parser}]
+#include <cctype>
 #include <iostream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
 
-struct alignas(64) Line {
-    int value;
-    char pad[60];
+enum class Tok {
+    Atomic, Transfer, AssertConservation, Id, Num,
+    LBrace, RBrace, Semi, End
+};
+
+struct Token {
+    Tok kind;
+    std::string text;
+    int value = 0;
+};
+
+struct Lexer {
+    std::string_view s;
+    std::size_t i = 0;
+
+    explicit Lexer(std::string_view input) : s(input) {}
+
+    void skip_ws() {
+        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) i++;
+    }
+
+    Token next() {
+        skip_ws();
+        if (i == s.size()) return {Tok::End, ""};
+
+        char c = s[i];
+        if (c == '{') { i++; return {Tok::LBrace, "{"}; }
+        if (c == '}') { i++; return {Tok::RBrace, "}"}; }
+        if (c == ';') { i++; return {Tok::Semi, ";"}; }
+
+        if (std::isdigit(static_cast<unsigned char>(c))) {
+            int v = 0;
+            while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) {
+                v = v * 10 + (s[i] - '0');
+                i++;
+            }
+            return {Tok::Num, "", v};
+        }
+
+        if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
+            std::size_t start = i;
+            while (i < s.size() &&
+                   (std::isalnum(static_cast<unsigned char>(s[i])) || s[i] == '_')) {
+                i++;
+            }
+            std::string w(s.substr(start, i - start));
+            if (w == "atomic") return {Tok::Atomic, w};
+            if (w == "transfer") return {Tok::Transfer, w};
+            if (w == "assert_conservation") return {Tok::AssertConservation, w};
+            return {Tok::Id, w};
+        }
+
+        throw std::runtime_error("unexpected character");
+    }
+};
+
+struct Transfer {
+    std::string from;
+    std::string to;
+    int amount;
+};
+
+struct AtomicBlock {
+    std::vector<Transfer> transfers;
+    bool checks_conservation = false;
+};
+
+struct Parser {
+    Lexer lex;
+    Token cur;
+
+    explicit Parser(std::string_view input) : lex(input), cur(lex.next()) {}
+
+    void bump() { cur = lex.next(); }
+
+    void expect(Tok k, const char *what) {
+        if (cur.kind != k) throw std::runtime_error(std::string("expected ") + what);
+        bump();
+    }
+
+    std::string expect_id() {
+        if (cur.kind != Tok::Id) throw std::runtime_error("expected identifier");
+        std::string out = cur.text;
+        bump();
+        return out;
+    }
+
+    int expect_num() {
+        if (cur.kind != Tok::Num) throw std::runtime_error("expected number");
+        int out = cur.value;
+        bump();
+        return out;
+    }
+
+    Transfer parse_transfer() {
+        expect(Tok::Transfer, "transfer");
+        std::string from = expect_id();
+        std::string to = expect_id();
+        int amount = expect_num();
+        expect(Tok::Semi, ";");
+        if (amount <= 0) throw std::runtime_error("transfer amount must be positive");
+        return {from, to, amount};
+    }
+
+    AtomicBlock parse_atomic() {
+        AtomicBlock block;
+        expect(Tok::Atomic, "atomic");
+        expect(Tok::LBrace, "{");
+
+        while (cur.kind != Tok::RBrace) {
+            if (cur.kind == Tok::Transfer) {
+                block.transfers.push_back(parse_transfer());
+            } else if (cur.kind == Tok::AssertConservation) {
+                bump();
+                expect(Tok::Semi, ";");
+                block.checks_conservation = true;
+            } else {
+                throw std::runtime_error("expected statement");
+            }
+        }
+
+        expect(Tok::RBrace, "}");
+        expect(Tok::End, "end of input");
+        return block;
+    }
 };
 
 int main() {
-    std::array<Line, 256> lines{};
-    for (std::size_t touched = 1; touched <= lines.size(); touched *= 2) {
-        unsigned status = _xbegin();
-        if (status == _XBEGIN_STARTED) {
-            for (std::size_t i = 0; i < touched; ++i)
-                lines[i].value++;
-            _xend();
-            std::cout << touched << " commit\n";
-        } else {
-            std::cout << touched << " abort status=" << status << "\n";
-        }
-    }
+    const char *program =
+        "atomic { transfer checking savings 7; assert_conservation; }";
 
-    long sum = 0;
-    for (const auto& l : lines)
-        sum += l.value;
-    assert(sum >= 0);
+    Parser p(program);
+    AtomicBlock ast = p.parse_atomic();
+
+    std::cout << "atomic block with " << ast.transfers.size() << " transfer(s)\n";
+    for (const auto &t : ast.transfers) {
+        std::cout << t.from << " -> " << t.to << " amount " << t.amount << "\n";
+    }
+    std::cout << "conservation check: "
+              << (ast.checks_conservation ? "yes" : "no") << "\n";
 }
 \end{lstlisting}
 
-Aligning each element to a cache line makes the footprint easier to reason about. The program does not assume a particular capacity threshold. The same idea is useful in simulation, where cache sizes and associativity can be varied deliberately.
+The lexer performs maximal munch and then classifies reserved words; therefore \texttt{atomicity} is an identifier, not \texttt{atomic} followed by \texttt{ity}. The parser rejects negative or zero transfer amounts before any runtime backend is involved. The AST records \emph{intent}: a transfer and a conservation check. Later chapters lower that intent to read/write instrumentation for concrete backends such as SGL, NOrec, TL2, or TSC-TM. Account floors are semantic checks. They do not belong in the lexer and only partly belong in the parser; the parser can reject syntactic nonsense, but balance-dependent checks require execution or verification.
 
-\section{Simulation with gem5}
-\label{sec:htm-simulation}
+A useful compiler discipline is to reject errors at the earliest responsible layer. Misspelled keywords and malformed numbers are lexical errors. Missing semicolons and unmatched braces are parse errors. Duplicate declarations can be handled during parsing or a following name-resolution pass. Insufficient balance requires either execution, static analysis, or model checking, because it depends on values.
 
-Simulation answers questions that a single counter or the EAX status word on real hardware often blurs. The hardware does convey the coarse reason --- a conflict (bit~2), a capacity overflow (bit~3), or an explicit abort (bit~0) --- which is enough for a fallback policy. But it does not say \emph{which} coherence event caused a conflict (remote read versus remote write, Snoop versus directory), \emph{which} line was evicted on a capacity abort, or how the abort rate scales as the L1 associativity or line size changes, because those structures are not externally visible. A simulator exposes the cache hierarchy, coherence protocol, and transactional metadata directly, so each of these causes can be isolated and varied.
+\section{Worked Example: Model Checking the Parsed Transaction}
+\index{TLA+}\index{model checking}\index{money conservation}
 
-\subsection{SE vs FS: two levels of full-system fidelity}
-\label{sec:se-vs-fs}
+Once a parser has produced an AST, the next question is whether the semantics
+attached to that AST preserve the intended invariant. The following TLA+
+module models the single parsed statement
+\texttt{transfer checking savings 7;} inside an atomic block. TLC can check
+\texttt{MoneyConserved}, \texttt{Floors}, and \texttt{TypeOK} as invariants.
 
-gem5 emulates the \emph{entire CPU and memory system} in both modes; the difference is how much of the operating system is emulated.
+\begin{lstlisting}[language={}, caption={A TLA+ model of the parsed bank transfer.}, label={lst:tla-parsed-bank}]
+---- MODULE ParsedBank ----
+EXTENDS Naturals
 
-\begin{table}[htbp]
-\centering
-\caption{gem5 SE vs FS for TM: what is simulated and when to use which.}
-\label{tab:se-vs-fs}
-\begin{tabular}{M{0.18\textwidth}M{0.38\textwidth}M{0.36\textwidth}}
-\hline
-\thb{0.18\textwidth}{Mode} & \thb{0.38\textwidth}{What runs in the simulator} & \thb{0.36\textwidth}{Use for tiny benchmarks} \\
-\hline
-SE (syscall emulation) & CPU pipeline, Ruby caches, coherence, \texttt{MESI\_Three\_Level\_HTM}, DRAM. Syscalls (\texttt{mmap}, \texttt{futex}, \texttt{clone}) are \emph{emulated} by gem5, not passed to the host OS. $>99\%$ of a bank/STAMP run is cycle-accurate. & Default. Fast ($\sim$0.15\,s host for 2k transactions, \texttt{x86-se-bank.py}). No disk image, no \texttt{/dev/kvm}. The \texttt{FS tiny} bank in \S\ref{sec:htm-simulation} is SE. \\
-FS (full system) & Above plus boot of \texttt{x86-ubuntu-24.04}, devices, interrupt controller, full Linux kernel. With \texttt{KVM} the boot is fast-forwarded, then switched to \texttt{Timing}. & Only for kernel interactions (page faults, interrupts, \texttt{rseq}). Slower ($\sim$30\,s for the same tiny workload, \texttt{x86-fs-tiny.py}). Requires disk image and, for speed, \texttt{/dev/kvm}. \\
-\hline
-\end{tabular}
-\end{table}
-
-For the throughput numbers of Chapter~14 the two modes give the same answer: the STAMP and bank tiny configurations (\texttt{-m 10 -n 10}, \texttt{-g 256}, \texttt{-t 1--2}, 2\,k transfers) spend no time in the kernel beyond thread start and memory mapping. SE mode is therefore a representative measurement of the region of interest for such user-space microbenchmarks, bracketed by \texttt{m5} reset/dump markers; it is not a full-system measurement in the sense of running a real kernel and its interrupts, page faults, and scheduler --- that is FS mode's job. Move to FS only when the experiment itself is about the kernel.
-
-
-
-The companion gem5 fork (the \textsc{TM-SIM} repository, gem5 v25.1~\cite{binkert11gem5} plus an in-tree x86 TSX implementation) is the concrete vehicle. Upstream gem5 contains \emph{no} x86 TSX support; the fork adds the decoder and instruction semantics for \texttt{XBEGIN}/\texttt{XEND}/\texttt{XABORT}/\texttt{XTEST} and drives them through Ruby's \texttt{MESI\_Three\_Level\_HTM} protocol, whose ISA-agnostic \texttt{HTMSequencer} is calibrated with the measured Broadwell-EP costs of Chapter~14's machine profiles (\texttt{htm\_start\_\allowbreak latency}\,\allowbreak${}=60$ and \texttt{htm\_commit\_\allowbreak latency}\,\allowbreak${}=178$ cycles, matching the RDTSC-profiled XBEGIN/XEND costs from real hardware).
-
-The key idea is that the simulator executes the same \texttt{x86-64 ELF} binary that would run on real hardware, but substitutes a simulated CPU pipeline and cache hierarchy for the physical one. This means the compiler-generated fallback code --- the same code path that handles RTM aborts on real silicon --- is exercised identically in simulation. A benchmark compiled against TSX-SGL runs inside gem5 without modification; when the simulated L0 cache detects a conflict or capacity limit, the fault reaches the same instruction semantics as a real \texttt{XBEGIN} abort. Cross-compilation is necessary because the host (often macOS or ARM) differs from the simulated ISA (x86-64), and syscall-emulation (SE) mode is sufficient for microbenchmarks because the transactional workload never enters the kernel --- the \texttt{m5} reset/dump markers bracket the region of interest so that only the transactional phase is measured.
-
-The workflow is:
-
-\begin{enumerate}
-    \item build the TSX target: \texttt{scons build/X86\_TSX/gem5.opt --with-ruby};
-    \item cross-compile a static benchmark against a TSX-consuming backend (\texttt{make BACKEND=TSXSGL GEM5=1} in the companion repository --- the host needs no TSX; only the simulated CPU executes it);
-    \item run in syscall-emulation mode with a bounded, ROI-delimited workload (\texttt{bank -n 500}), with \texttt{m5} statistics reset/dump markers bracketing the transactional phase;
-    \item read per-transaction cycles and read/write-set histograms from the Ruby HTM sequencer statistics;
-    \item for full-system fidelity, boot once, checkpoint, and restore with the detailed CPU model so that only the region of interest is simulated slowly.
-\end{enumerate}
-
-\paragraph{Why the abort fault mapping matters.} On real hardware, when \texttt{\_xbegin} fails, the processor writes a status word into EAX that tells the software \emph{why}: bit~2 for a data conflict, bit~3 for a capacity overflow, bit~0 for an explicit \texttt{\_xabort}. The compiler-generated fallback path tests these bits to decide whether to retry, acquire the global lock, or give up. For the simulation to exercise this same fallback code, the simulated cache hierarchy must detect conflicts and capacity limits and route them through the same instruction semantics as real x86 TSX. Without this mapping, the fallback path would never fire in simulation, and the abort-handling logic would remain untested.
-
-\paragraph{How the mapping works.} When the L0 cache detects a conflict during a transactional load, it sends an \texttt{LD\_FAIL} signal to the sequencer with a Ruby failure reason: \texttt{FAIL\_REMOTE} (another core touched the line) for a coherence conflict, or \texttt{FAIL\_SELF} (the line was evicted from L0) for a capacity abort. A transactional store that encounters the same conditions triggers \texttt{ST\_FAIL}. The sequencer converts the Ruby failure reason to an \texttt{HtmFailureFaultCause} --- \texttt{MEMORY} for conflict, \texttt{SIZE} for capacity --- and delivers it through \texttt{GenericHtmFailureFault}. The fault handler restores the pre-\texttt{XBEGIN} checkpoint and writes the Intel RTM status word into EAX: bit~2 for memory aborts, bit~3 for size aborts, or bit~0 plus the abort code for \texttt{XABORT}.
-
-The same fault mechanism fires for both loads and stores, so write-write conflicts (\texttt{ST\_FAIL} from a coherence invalidation of a transactionally-written line) are handled identically to read-write conflicts (\texttt{LD\_FAIL} from a remote exclusive request hitting a transactionally-read line). The compiler-generated fallback path then tests the EAX bits and enters the software lock, exactly as it would on real hardware. This is what makes gem5 fundamentally different from a trace-driven simulator: the same binary, the same code path, the same fallback logic --- only the timing and the conflict-detection mechanism are simulated.
-
-The capacity probe above becomes more informative in simulation than on a fixed machine. On real hardware, the abort boundary is affected by undocumented structures and unrelated activity. In simulation, the experimenter can hold the workload constant and vary L1 size, associativity, line size, or contention. This makes transient effects visible: evictions mid-transaction, write-set coalescing, false conflicts inside a coherence domain, and instruction events that force an abort.
-
-A simulation is a framework for testing whether a model is consistent with observations. The hypothesis here is that the gem5 fork's \texttt{MESI\_Three\_Level\_HTM} protocol, calibrated with measured Broadwell-EP latencies, reproduces the abort-frequency and throughput behaviour of real RTM hardware on the same workload. Running the same benchmark on real hardware and in simulation, and comparing the abort-rate breakdown and per-transaction cycle count, tests that hypothesis. When the numbers agree, the model is validated for that workload class; when they disagree, the divergence points to a mechanism the model is missing --- TLB events, interrupt masking, microarchitectural replay --- and that divergence is itself the useful result.
-
-The companion project uses three instruments at different fidelities. Real-hardware profiling (the RDTSC patch of \texttt{patches/profile/tsx}) provides ground truth on the last widely available RTM parts. The gem5 fork provides a mechanistic view: Ruby coherence traffic, L0 set-associativity effects, and abort-fault routing are directly observable. The Rust cost-model simulator (\texttt{tsx\_sim}) provides speed: it replays \texttt{TM\_TRACE} \texttt{JSONL} traces through a calibrated cycle-estimation model to explore large parameter sweeps quickly. Crucially, \texttt{tsx\_sim} is \emph{not} inside gem5 --- gem5 executes the \texttt{x86-64 ELF} directly via its own \texttt{HTMSequencer} and Ruby coherence, while \texttt{tsx\_sim} is a separate DES backend (\texttt{runtime/tsx\_sim/src/lib.rs}) that replays traces outside gem5. They share the same Broadwell calibration but are independent simulators at different fidelities.
-
-\section{Worked Example: Model Checking HTM Abort and Fallback}
-\index{TLA+}\index{abort}\index{fallback path}
-\label{sec:htm-fallback-tla}
-
-A small model is enough to expose the essential rule: abort may occur at any time before commit, and fallback must preserve the same invariants as the hardware path.
-
-The model below represents one thread attempting a hardware transaction and a second thread that may interfere. Three variables capture the state: \texttt{bal} holds the two account balances, \texttt{pc} is the process state (\texttt{"idle"} or \texttt{"tx"}), and \texttt{snap} is the snapshot taken at \texttt{XBEGIN} --- the value of \texttt{bal} that the transaction believes it is working against. The actions model the RTM contract: \texttt{Begin} takes a snapshot and enters the transactional state; \texttt{Commit} checks that the snapshot is still valid (the abstract coherence check) and, if so, applies the transfer; \texttt{Abort} models a hardware abort that rolls back with no effect; \texttt{InterfereAbort} models another thread committing successfully while our transaction is mid-flight, which forces our transaction to abort; and \texttt{Fallback} executes the same transfer serially from the \texttt{idle} state, modelling the global-lock path. The model deliberately omits caches, lines, and invalidations --- the proof boundary is the software contract (snapshot validity implies atomicity), not the hardware mechanism that enforces it.
-
-\begin{lstlisting}[language={}, caption={TLA+ model of one transferring transaction, abort, interference, and fallback.}]
--------------------------- MODULE BankHTMFallback --------------------------
-EXTENDS Integers, TLC
-
-Accounts == {0, 1}
-InitA == 100
-InitB == 100
-Floor == 0
-Amt == 7
-
-VARIABLES bal, pc, snap
-
-vars == <<bal, pc, snap>>
-
-Total(b) == b[0] + b[1]
-
-CanMove(b) == b[0] - Amt >= Floor
-
-Move(b) == [b EXCEPT ![0] = @ - Amt,
-                      ![1] = @ + Amt]
+VARIABLES acct0, acct1, pc
 
 Init ==
-    /\ bal = [a \in Accounts |-> IF a = 0 THEN InitA ELSE InitB]
-    /\ pc = "idle"
-    /\ snap = bal
+    /\ acct0 = 100
+    /\ acct1 = 100
+    /\ pc = "before"
 
-Begin ==
-    /\ pc = "idle"
-    /\ pc' = "tx"
-    /\ snap' = bal
-    /\ UNCHANGED bal
+BeginAtomic ==
+    /\ pc = "before"
+    /\ pc' = "inside"
+    /\ UNCHANGED <<acct0, acct1>>
 
-Abort ==
-    /\ pc = "tx"
-    /\ pc' = "idle"
-    /\ UNCHANGED <<bal, snap>>
+Transfer ==
+    /\ pc = "inside"
+    /\ acct0 >= 7
+    /\ acct0' = acct0 - 7
+    /\ acct1' = acct1 + 7
+    /\ pc' = "after"
 
-Commit ==
-    /\ pc = "tx"
-    /\ bal = snap
-    /\ CanMove(snap)
-    /\ bal' = Move(bal)
-    /\ pc' = "idle"
-    /\ snap' = snap
-
-CommitNoFunds ==
-    /\ pc = "tx"
-    /\ bal = snap
-    /\ ~CanMove(snap)
-    /\ pc' = "idle"
-    /\ UNCHANGED <<bal, snap>>
-
-Fallback ==
-    /\ pc = "idle"
-    /\ CanMove(bal)
-    /\ bal' = Move(bal)
-    /\ pc' = "idle"
-    /\ UNCHANGED snap
-
-InterfereAbort ==
-    /\ pc = "tx"
-    /\ CanMove(bal)
-    /\ bal' = Move(bal)
-    /\ pc' = "idle"
-    /\ snap' = snap
+EndAtomic ==
+    /\ pc = "after"
+    /\ pc' = "after"
+    /\ UNCHANGED <<acct0, acct1>>
 
 Next ==
-    \/ Begin
-    \/ Abort
-    \/ Commit
-    \/ CommitNoFunds
-    \/ Fallback
-    \/ InterfereAbort
+    \/ BeginAtomic
+    \/ Transfer
+    \/ EndAtomic
 
-Spec == Init /\ [][Next]_vars
+Spec ==
+    Init /\ [][Next]_<<acct0, acct1, pc>>
 
-MoneyConserved == Total(bal) = InitA + InitB
+MoneyConserved ==
+    acct0 + acct1 = 200
 
-FloorSafe == \A a \in Accounts : bal[a] >= Floor
+Floors ==
+    /\ acct0 >= 0
+    /\ acct1 >= 0
 
-THEOREM Spec => []MoneyConserved
-THEOREM Spec => []FloorSafe
-=============================================================================
+TypeOK ==
+    /\ acct0 \in Nat
+    /\ acct1 \in Nat
+    /\ pc \in {"before", "inside", "after", "done"}
+====
 \end{lstlisting}
 
-\texttt{Commit} requires \texttt{bal = snap}; this is the abstract coherence check --- if the snapshot is stale, hardware must not commit it. \texttt{InterfereAbort} models another successful transfer that conflicts with the running transaction; the running transaction aborts, but money is still conserved. \texttt{Fallback} executes only from \texttt{idle}, so it is serialized with respect to the modeled hardware transaction. Both invariants are safety properties; they do not claim that a best-effort transaction eventually commits.
+The model is small enough to inspect directly. The parsed transfer is represented by one action. That is intentional: this model checks the sequential meaning of the AST, not the opacity or commit protocol of a particular TM implementation. A lower-level model of TL2, NOrec, or a GPU commit-log protocol would introduce read sets, write sets, versions, validation, and interleavings.
 
-The model omits caches, lines, and invalidations. That is intentional. At the proof boundary, HTM contributes one rule: a transaction may commit only if its snapshot is still valid. Everything else is fallback correctness. This is why the companion project model-checks the software contract as well as testing the implementations.
+The model is intentionally closer to the AST than to machine code: it has a \texttt{Transfer} action, not individual loads and stores. The floor guard appears in \texttt{Transfer}. Removing \texttt{acct0 >= 7} gives TLC a direct counterexample to \texttt{Floors} if the initial balance is smaller than the transfer amount. Money conservation is independent of the backend choice. SGL, TL2, NOrec, TinySTM, SwissTM, and the other tested backends differ in synchronization protocol, not in the sequential meaning of this AST. The repository's test suites check concrete implementations; the TLA+ model checks the small transition system that the implementation is meant to refine.
+
+One subtlety is worth noticing: \texttt{TypeOK} allows \texttt{"done"}, but the listed \texttt{EndAtomic} action leaves \texttt{pc} at \texttt{"after"}. A stricter final-state model would set \texttt{pc'} to \texttt{"done"}. That correction does not affect money conservation, but it does affect progress-style properties that distinguish a completed transaction from one still at the end of the block.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\small, node distance=2.2cm]
+  \tikzstyle{state}=[draw,rounded corners,align=center,minimum width=2.5cm,minimum height=0.9cm]
+  \node[state] (src) {Source\\atomic block};
+  \node[state] (tok) [right=of src] {Tokens\\keyword, ids, num};
+  \node[state] (ast) [right=of tok] {AST\\Transfer node};
+  \node[state] (sem) [below=of ast] {Semantic action\\debit and credit};
+  \node[state] (inv) [left=of sem] {Invariant check\\floor, conservation};
+  \node[state] (rt) [left=of inv] {Runtime lowering\\TM backend calls};
+  \draw[-{Stealth}] (src) -- node[above] {lex} (tok);
+  \draw[-{Stealth}] (tok) -- node[above] {parse} (ast);
+  \draw[-{Stealth}] (ast) -- node[right] {eval} (sem);
+  \draw[-{Stealth}] (sem) -- node[above] {check} (inv);
+  \draw[-{Stealth}] (inv) -- node[above] {lower} (rt);
+\end{tikzpicture}
+\caption{The path from transactional source through tokens and an abstract syntax
+tree to the semantic actions, invariant checks, and TM runtime lowering that a
+front end drives.}
+\label{fig:tm-front-end-lowering}
+\end{figure}
 
 \section{Summary}
 
-HTM leverages existing speculation and cache coherence to make short transactions fast. A commit can be nearly as cheap as leaving a speculative region, and conflict detection can be piggybacked on invalidation traffic already present in the memory hierarchy.
-
-The cost is uncertainty. Transactions can abort for conflicts, capacity, interrupts, faults, unsupported instructions, and implementation limits. Therefore every HTM design is also a fallback design. Correct programs subscribe to the fallback lock, bound their retries, keep diagnostics outside the transactional footprint, and validate the same invariants on the hardware and software paths.
+The front end is where a transaction is \emph{identified}, not where it is
+\emph{implemented}.  Characters become tokens by maximal munch (a finite
+automaton); tokens become an AST by recursive descent or a generated LR
+parser; the AST exposes the atomic region to later passes.  The companion
+repository instruments at LLVM IR rather than shipping a source language,
+but the logical artifacts are identical, and the same boundary holds:
+syntax stays stable while the backend protocol (SGL, NOrec, TL2, a GPU
+commit log, or a distributed store) evolves underneath it.
 
 \section{Exercises}
+\label{sec:ch15-exercises}
 \begin{enumerate}
-    \item \emph{[implementation]} In Intel RTM, a transaction that exceeds the L1 cache capacity always aborts. Propose a software fallback path and discuss its performance implications. If you do not have RTM hardware, ground the design in the companion's TSX-SGL backend (\texttt{backends/tm\_impl/tsx\_sgl}) and the phased-hybrid model of \S\ref{sec:hybrid-example}.
-    \item \emph{[theory]} Using a conceptual pipeline diagram, show why a transaction that triggers a TLB miss is likely to abort.
-    \item \emph{[implementation]} Footprint sweep: run the capacity probe of \S\ref{sec:htm-capacity-probe} on RTM hardware with the companion's RDTSC profiling patch (\texttt{patches/profile/tsx}), or on any host against the companion's TSX simulation backend (\texttt{simulator/}, \texttt{runtime/tsx\_sim}), and plot the abort rate as the number of touched cache lines grows. Explain the trend. On the gem5 fork (\S\ref{sec:htm-simulation}), vary the L0 \texttt{htmReadLines} and \texttt{htmWriteLines} limits to observe where capacity aborts appear.
-    \item \emph{[implementation]} Extend Listing~\ref{sec:rtm-bank-transfer}'s transfer code to collect per-thread counters for commits, explicit fallback-lock aborts, retryable aborts, and non-retryable aborts. Keep the counters outside the transaction and explain why updating them inside RTM would distort the measured abort rate.
-    \item \emph{[verification]} Modify the TLA+ model in \S\ref{sec:htm-fallback-tla} so that transfers may go in both directions. State and check the money-conservation invariant and an account-floor invariant for both accounts.
-    \item \emph{[theory]} Explain why lock subscription is necessary for opacity in a hybrid HTM plus lock fallback design. Give an execution in which omitting the subscription lets a hardware transaction commit concurrently with the fallback critical section.
-    \item \emph{[implementation]} Modify the capacity probe so that it first reads many cache lines and then writes only two. Compare the expected abort behavior with a write-heavy transaction that writes every touched line.
-    \item \emph{[verification]} Add a boolean fallback-lock variable to the TLA+ model. Permit \texttt{Begin} only when the lock is clear, and add an explicit abort transition when the lock becomes held during a transaction.
-    \item \emph{[theory]} Explain why a best-effort HTM interface cannot provide wait-freedom by itself, even when every individual transaction is finite and conflict-free in the source program.
-    \item \emph{[literature]} Read the original Herlihy--Moss proposal
-          \cite{herlihy93} and Lev, Moir, and Nussbaum's
-          \emph{Phased Transactional Memory} \cite{lev07phased}.  Explain
-          how the phased hybrid generalizes the raw XCOMMIT/XABORT design:
-          which part of Herlihy--Moss survives, which part is replaced by
-          a software fallback, and what the phase-change criterion buys
-          over a fixed subscription lock.
-    \item \emph{[open]} Best-effort HTM moved the fallback obligation into
-          software and that decision let TSX ship.  Argue a position:
-          should the field push hardware toward \emph{stronger} guarantees
-          (progress, capacity, deterministic aborts), or is best-effort
-          the right abstraction and the remaining work purely in software?
-          Tie your position to at least one mechanism from this chapter
-          (capacity, conflict, fallback lock).
+    \item \emph{[theory]} Figure~\ref{fig:lexer-dfa} shows the DFA for the
+          six token kinds of the toy lexer (keyword \texttt{atomic},
+          identifier, number, \texttt{\char`\{}, \texttt{\char`\}},
+          \texttt{;}).  Extend it: add an \texttt{assert\_conservation}
+          keyword token, and say what happens --- and which state is
+          reached --- when the input ends mid-keyword (``\texttt{atom}'').
+          Then minimize the DFA and state which states merge.
+    \item \emph{[theory]} Explain why maximal munch makes
+          \texttt{atomically} a single identifier, and give the
+          two-token parse that a lexer stopping at the \texttt{atomic}
+          prefix would produce.  Which part of the parser would the mistake
+          corrupt?
+    \item \emph{[implementation]} Extend the parser in
+          Listing~\ref{lst:bank-parser} to accept \emph{nested} atomic
+          blocks and to report the source position of an unbalanced brace.
+          Test with both \texttt{atomic \char`\{ atomic \char`\}
+          \char`\}} and a missing closing brace.
+    \item \emph{[implementation]} Add a second statement kind to
+          Listing~\ref{lst:bank-parser} --- for example a
+          \texttt{deposit account amount;} --- extend the AST accordingly,
+          and verify that the parser rejects a transfer with a negative
+          amount before any backend runs.
+    \item \emph{[verification]} Modify \texttt{EndAtomic} in
+          Listing~\ref{lst:tla-parsed-bank} so that \texttt{pc} reaches
+          \texttt{"done"}.  Check that \texttt{TypeOK},
+          \texttt{MoneyConserved}, and \texttt{Floors} still hold, and
+          state what progress-style property the original model cannot
+          express.
+    \item \emph{[theory]} Using Table~\ref{tab:front-end-choices}, justify
+          which row best hosts an \texttt{atomic} construct for a research
+          TM, and explain why the companion instead instruments at LLVM IR
+          (Chapter~11) rather than shipping a source-level language
+          (Figure~\ref{fig:front-end-pipeline}).
 \end{enumerate}
 
-\textbf{How to check your work.} The \emph{[implementation]} exercises
-verify on the companion: the fallback design of Exercise~1 maps onto
-\texttt{backends/tm\_impl/tsx\_sgl} (TSX path with lock subscription);
-Exercise~4 is checked with the abort counters of
-\S\ref{sec:htm-abort-counters}; and Exercise~3/7 run the capacity probe of
-\S\ref{sec:htm-capacity-probe} on real RTM hardware or against the
-\texttt{tsx\_sim} cost-model backend.  The \emph{[verification]} exercises are
-checked with TLC against the model of \S\ref{sec:htm-fallback-tla} using
-the workflow of Appendix~\ref{chap:pluscal-quick-ref}.  The
-\emph{[theory]} exercises are graded against the definition of
-\S\ref{sec:rtm-example} and the subscription argument of
-\S\ref{sec:htm-fallback-tla}.  The \emph{[literature]} exercise is graded
-on whether your ``survives / replaced'' split matches the two papers.  The
-\emph{[open]} exercise has no single right answer; it is graded on whether
-your position is tied to a concrete mechanism from this chapter.
-
-\index{Herlihy and Moss}
-\index{XCOMMIT}
-\index{XABORT}
-\index{MESI}
-\index{speculative stores}
-\index{transactional read set}
-\index{transactional write set}
-\index{coherence invalidation}
-\index{capacity abort}
-\index{conflict abort}
-\index{unsupported instruction abort}
-\index{Intel TSX}
-\index{Intel RTM}
-\index{ARM TME}
-\index{IBM POWER HTM}
-\index{XTEST}
-\index{HLE}
-\index{xacquire}
-\index{xrelease}
-\index{TSX availability}
-\index{gem5}
-\index{Ruby memory system}
-\index{lock elision}
-\index{TSX-SGL}
-\index{phased hybrid TM}
-\index{hybrid STM}
-\index{abort counters}
-\index{cache footprint}
-\index{fallback serialization}
-\index{opacity!HTM fallback}
-\index{bank transfer invariant}
-% -------------------------------------------------------------------
+\textbf{How to check your work.} The \emph{[implementation]} exercises are
+verified by compiling and running the parser against the test inputs listed
+above; the companion's front end is conceptual, so the repository does not
+ship this lexer --- the ``source of truth'' is the instrumented LLVM IR of
+Part~V.  The \emph{[verification]} exercise is checked with TLC against
+Listing~\ref{lst:tla-parsed-bank} (see
+Appendix~\ref{chap:pluscal-quick-ref});
+start with \texttt{TypeOK}, then confirm the corrected model still passes
+\texttt{MoneyConserved} and \texttt{Floors}.  The \emph{[theory]}
+exercises are graded against the definitions of
+\S\ref{sec:parser-example} and Table~\ref{tab:front-end-choices}.

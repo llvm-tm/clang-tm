@@ -1,22 +1,39 @@
-CHAPTER 18 — Persistent and Distributed Transactional Memory
+CHAPTER 18 — Transactional Memory for GPUs
 Part: VII (Advanced Topics)
-Lines: 752 | Sections: 6 | Figures: 1 | Tables: 1 | Listings: 4 | TikZ: 1
+Lines: ~795 | Sections: 17 | Figures: 1 | Tables: 2 | Listings: 5 | TikZ: 1
 
-PURPOSE: TM that must survive or span machines: durable/persistent commit
-(redo logs, idempotent recovery), distributed commit (Percolator-style 2PC,
-TiKV backend), commit ordering obligations.
+PURPOSE: TM on GPUs: execution model, why GPUs lack TM essentials, lock-step
+execution and the ballot contract, capacity limits, GPU-scale commit
+strategies (serial locks -> batched multi-versioning), a taxonomy of GPU TM,
+hardware proposals (KILO TM, WarpTM, Snapshot), software systems (PR-STM,
+CSMV, OFG-STM), and the GUST case study with its snapshot threshold.
 
 SECTIONS
-- Worked Example: Durable Bank Commit
-    Persistent bank with durable commit.
-- Worked Example: Model Checking Distributed Commit
-- Worked Example: PersistentSGL Commit Ordering
-    Dual-write mem+nvm pattern.
-- Worked Example: Percolator-Style Primary Commit
-    2PC primary commit; TiKV backend.
+- The GPU Execution Model
+    SIMT, warps, blocks, shallow memory hierarchy.
+- Three Foundational Absences
+    What GPUs lack that TM assumes.
+- Lock-Step Execution, Divergence, and the Ballot Contract
+    __ballot_sync / __syncwarp lockstep requirement.
+- Worked Example: Counting Aborts With a Ballot
+- Capacity: Large Read/Write Sets in a Shallow Memory Hierarchy
+- Worked Example: Warp-Uniform Bank Transfer With Self-Abort
+- Commit at GPU Scale: From Serial Locks to Batched Multi-Versioning
+    tab:gpu-commit-strategies serialization point.
+- Worked Example: Commit-Slot Allocation, CAS vs. AtomicINC
+- A Taxonomy of GPU TM
+- Hardware Proposals: KILO TM, WarpTM, and Snapshot Isolation
+- Software TM in the Wild
+    PR-STM, CSMV, OFG-STM.
+- Case Study: GUST and the Snapshot Threshold
+    startTS vs startTS+1; CCT + MRV hybrid validation; batch publication.
+- Worked Example: The Snapshot Threshold, in Code
+- Worked Example: Money Conservation in TLA+
+- Verifying GPU Protocols with TLA+
+    GPU_JVSTM, GPU_GUST models.
 - Summary
 - Exercises
 
-FIGURES: fig:persistent-distributed-commit-order (commit ordering comparison)
-TABLES: tab:persistent-distributed-taxonomy (designs by commit obligation)
-LISTINGS: 4 (durable bank, distributed commit TLA+, PersistentSGL, Percolator)
+FIGURES: fig:gpu-gust-commit-path (GUST commit path)
+TABLES: tab:gpu-commit-strategies, tab:gpu-tm
+LISTINGS: 5 (ballot, warp bank, commit-slot, snapshot threshold, TLA+ money)

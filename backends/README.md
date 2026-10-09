@@ -44,6 +44,7 @@ backends/
 │   ├── leftright/              # Left-Right
 │   ├── spht/                   # SPHT
 │   ├── xtm/                    # XTM
+│   ├── eager_broken/           # TEACHING-ONLY broken STM (book Ch.2 demo)
 │   └── tm_region_allocator/    # TM address-space region allocator
 └── README.md
 ```
@@ -76,6 +77,7 @@ triage is:
 | `production` | `tiny_stm`, `tl2`, `norec`, `norec_bf`, `swisstm`, `single_global_lock`, `tsx_sgl`, `persistent_sgl`, `xtm`, `romulus`, `leftright`, `spht` | Safe to depend on; covered by the standard C++ correctness path or explicitly documented as hardware-required. |
 | `incubating` | `tsc_tm`, `mvlog`, `csmv`, `gpu_stm`, `nvhtm`, `dudetm`, `distributed_sgl`, `queue`, `jvstm`, `tikv` | Useful and partially tested, but still moving toward a stable gate. |
 | `experimental` | `calvin`, `gacco`, `gputx`, `power8_htm` | Design/research scaffolds; do not treat as stable backends. |
+| `teaching` | `eager_broken` | Intentionally broken (non-opaque eager) STM used by the book's Chapter 2 crash demo; never a default, excluded from the test sweeps. See `tm_impl/eager_broken/STATUS.md`. |
 | `support` | `common`, `tm_region_allocator` | Shared infrastructure, not selectable STMs. |
 
 ## Runtime API
