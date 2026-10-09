@@ -248,6 +248,38 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   prefers `$b-smoke.cfg`). Also clean `docs/proofs/states/` between big
   runs (~half a TB of checkpoints observed).
 
+## P2 — Roadmap: consistency models in the book (opened 2026-10-05)
+
+Motivated by the EC-compensation research thread (`research/ec-bank/`):
+our default teaching stance (opaque/strict TM) is one point on the
+consistency/overhead curve; the book should expose the curve itself.
+
+- [ ] **Audit current coverage.** Consistency models appear only in passing
+  (ch02/ch03 history, ch04/ch07/app03 anomalies). Decide: deepen Ch.7 vs.
+  new chapter "Consistency & Coordination".
+- [ ] **Weaker-than-opaque section.** Argument to develop: opacity is often
+  too strident for applications that can define their own invariants; if the
+  app owns invariant management, the runtime can drop synchronization on
+  commit (EC/compensating path, `research/ec-bank/`) — more app complexity
+  for less coordination overhead. Quantify with bank numbers we already
+  have (TSXSGL t1 6.67M txn/s vs t4 1.25M under contention).
+- [ ] **Bank write-skew under SI demo.** Craft transfer transactions so the
+  classic SI anomaly shows on our own toy: e.g. two transfers A→X1 and B→X2,
+  each guarded by the predicate `A + B >= 16`; disjoint write-sets, shared
+  predicate ⇒ SI commits both, invariant breaks; opaque backends prevent it.
+  Needs an SI-like teaching runtime (extend `examples/eager_broken` or add
+  `SI_STM`) + TLA+ mirror (BankSI.tla already demonstrates skew). Other
+  hazards worth the same bank treatment: dirty read, non-repeatable read,
+  fan-out (fork/join), lost update.
+- [ ] **Compact mathematical notation throughout.** Define a small
+  notation (e.g. views as folds over op-sets `view_r = fold(A_r)`,
+  anomaly predicates over histories, `Inv(h)`, per-model quantifier
+  skeletons) used uniformly in Ch.5/7 + TLA+/PoC artifacts, so each model
+  gets a one-line definition before its prose.
+- [ ] **EC follow-ups** (see research/ec-bank/README.md): liveness proof of
+  compensation in TLA+, batched compensation, richer invariants via a
+  confluence checker.
+
 ## Completed
 
 Items below were fixed and kept here for historical reference only.

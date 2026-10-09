@@ -2913,3 +2913,38 @@ Validated the gem5 x86 TSX simulation against real Broadwell-EP hardware
   September sweep (pre-regeneration 030 patch) numbers cited as reference.
 - gem5 setup: `setup.sh` failed on the placeholder README in `gem5_sim/gem5/`
   (non-empty clone target) — worked around locally; candidate for a small fix.
+
+## Session 2026-10-09 — EC-compensating bank: formal model + PoC + consistency roadmap
+
+- **Research thread** (`research/ec-bank/`): can a transactional system keep
+  the non-negative-balance invariant under eventual consistency with
+  automated compensating ("negative") transactions? Answer: yes, without
+  commit-time coordination, at the cost of isolation — transient negative
+  balances are observable and repairs are undo-by-doing-the-opposite ops.
+  Literature map (README): invariant confluence (Bailis et al., VLDB'14 /
+  CIDR'21 — non-negative balance is *not* invariant-confluent), SEC
+  (Burgader et al., OPODIS'17), Sagas (Garcia-Molina & Salem '87), Hetz '93,
+  Causal+ (OSDI'11), F1 (ICDE'16), Rondit et al. (ICDE'15), CRDTs/Yjs.
+- **Formal model** `docs/proofs/ECBank.tla` + `.cfg`: 2 replicas, 2 transfers
+  oversubscribing one account, async causal broadcast, max-id deterministic
+  culprit rule, grow-only applied-set CRDT. TLC exhaustively checks TypeOK,
+  MoneyConserved, SEC, QuiescentSafe, CausalPending (25 distinct states,
+  clean; `make -C docs/proofs check-ECBank`). Two counterexamples fixed
+  during modeling: repair must enqueue `CompOf(culprit)` (the raw culprit
+  re-delivery double-counted deltas and broke SEC); parent-of compensation
+  is an id, not an op record.
+- **PoC** `research/ec-bank/ec_bank_poc.py`: 3 replica threads, random
+  delivery order + duplicate injections, causal gate, compensation broadcast;
+  demo (1 compensation, transient negative observed, converges to
+  non-negative conserved state) + 200-seed stress over {2,3,5,8} concurrent
+  transfers: 0 invariant failures.
+- **Toolchain findings**: repo's TLC 2.14 (tla2tools.jar) rejects `ELSIF`
+  (use `ELSE IF`); trailing `\*` comments inside a `VARIABLES` list break
+  SANY parsing; TLC reads the config *before* parsing, so a missing cfg
+  masks everything (earlier "clean parse" signals were meaningless).
+- **Roadmap** added to TODO.md (P2 "consistency models in the book"):
+  deepen/weaker-than-opaque section (app-owned invariants vs synchronization
+  overhead), bank-based SI write-skew demo (predicate `A+B >= 16`, disjoint
+  write-sets — needs an SI-like teaching runtime; `docs/proofs/BankSI.tla`
+  already proves skew), compact mathematical notation for consistency models
+  throughout the book, EC liveness/batching follow-ups.
