@@ -121,18 +121,19 @@ If the useful service time of a transaction is fixed but validation aborts attem
 
 Chapter~2 introduced opacity informally through the mixed-snapshot history of Listing~\ref{lst:serializable-not-opaque}. Every invariant checked in Part~III is ultimately a statement about histories, so this section gives the definitions their formal clothing. The vocabulary is small --- one data type and four predicates --- and it is reused verbatim when Chapter~6 turns correctness into checkable invariants.
 
-A \emph{history} $H$ is a finite sequence of events. Each event belongs to a transaction $T$ and takes one of five forms: $\mathrm{begin}(T)$, a read $r_T(x)\!\to\!v$ returning value $v$ from location $x$, a write $w_T(x)\!\leftarrow\!v$, and the two terminal events $\mathrm{commit}(T)$ and $\mathrm{abort}(T)$. A history is \emph{well-formed} if every transaction begins before it reads or writes, acts only between its begin and its terminal event, and has at most one terminal event. Real executions are always prefixes of well-formed histories: a thread may be mid-transaction when we stop observing.
+A \emph{history} $h$ is a finite sequence of events. Each event belongs to a transaction $T$ and takes one of five forms: $\mathrm{begin}(T)$, a read $r_T(x)\!\to\!v$ returning value $v$ from location $x$, a write $w_T(x)\!\leftarrow\!v$, and the two terminal events $\mathrm{commit}(T)$ and $\mathrm{abort}(T)$. A history is \emph{well-formed} if every transaction begins before it reads or writes, acts only between its begin and its terminal event, and has at most one terminal event. Real executions are always prefixes of well-formed histories: a thread may be mid-transaction when we stop observing.
 
-Two derived sequences matter. The \emph{committed projection} $\mathrm{comm}(H)$ keeps only the events of transactions that committed. The \emph{real-time order} $<_{RT}$ relates two transactions when every event of the first precedes every event of the second; overlapping transactions are unrelated. Both are mechanical to compute from a trace, which is why they reappear as assertions in test harnesses.
+Two derived sequences matter. The \emph{committed projection} $\mathrm{comm}(h)$ keeps only the events of transactions that committed. The \emph{real-time order} $<_\mathrm{RT}$ relates two transactions when every event of the first precedes every event of the second; overlapping transactions are unrelated. Both are mechanical to compute from a trace, which is why they reappear as assertions in test harnesses.
 
-A history becomes meaningful once we choose a \emph{serialization}: a total order of a set of transactions consistent with their event order inside $H$. Given a serialization $S$, each read event has a \emph{read-from} source: the latest write to the same location by an earlier transaction in $S$, or the initial value if none exists. $S$ is \emph{legal} if every read returns exactly its read-from value under ordinary sequential semantics. Legality is the entire content of ``the transaction saw a state that could really have existed.''
+A history becomes meaningful once we choose a \emph{serialization}: a total order of a set of transactions consistent with their event order inside $h$. Given a serialization $S$, each read event has a \emph{read-from} source: the latest write to the same location by an earlier transaction in $S$, or the initial value if none exists. $S$ is \emph{legal} if every read returns exactly its read-from value under ordinary sequential semantics. Legality is the entire content of ``the transaction saw a state that could really have existed.''
 
-With these pieces, the correctness ladder has three rungs:
+With these pieces, the correctness ladder has three rungs, in the notation
+of p.~\pageref{cha:notation}:
 
 \begin{itemize}
-\item \textbf{Serializability} (of commits): $\mathrm{comm}(H)$ admits a legal serialization. Aborted transactions are irrelevant --- this is the database-classic condition of Papadimitriou \cite{papadimitriou79serializability}.
-\item \textbf{Strict serializability}: the serialization must additionally preserve $<_{RT}$. This is what a global-clock backend such as TL2 or TSC-TM buys you and what a coarse lock trivially guarantees.
-\item \textbf{Opacity} \cite{guerraoui08correctness}: \emph{every finite prefix} of $H$ admits a legal serialization of \emph{all} transactions live or finished in that prefix, preserving $<_{RT}$ where it is defined. Aborted transactions must observe legal states too.
+\item \textbf{Serializability} (of commits), $\mathsf{SER}(h)$: $\mathrm{comm}(h)$ admits a legal serialization. Aborted transactions are irrelevant --- this is the database-classic condition of Papadimitriou \cite{papadimitriou79serializability}.
+\item \textbf{Strict serializability}, $\mathsf{SSR}(h)$: the serialization must additionally preserve $<_\mathrm{RT}$. This is what a global-clock backend such as TL2 or TSC-TM buys you and what a coarse lock trivially guarantees.
+\item \textbf{Opacity} \cite{guerraoui08correctness}, $\mathsf{OPQ}(h)$: \emph{every prefix} $h' \sqsubseteq h$ admits a legal serialization of \emph{all} transactions live or finished in that prefix, preserving $<_\mathrm{RT}$ where it is defined. Aborted transactions must observe legal states too.
 \end{itemize}
 
 These are the strong rungs. The ladder continues \emph{downward} ---
@@ -144,7 +145,7 @@ backends all implement the top of the ladder; the weaker rungs appear when TM
 meets databases (Chapter~19) and when a backend is deliberately broken
 (\S\ref{sec:crash-without-opacity}).
 
-Opacity is strictly stronger than serializability, and the gap is exactly one aborted transaction's illegal observation. Recast Listing~\ref{lst:serializable-not-opaque} in the new vocabulary. The history contains $r_{T_1}(x)\!\to\!0$, then $w_{T_2}(x)\!\leftarrow\!1$, $w_{T_2}(y)\!\leftarrow\!1$, $\mathrm{commit}(T_2)$, then $r_{T_1}(y)\!\to\!1$, then $\mathrm{abort}(T_1)$. Try any serialization $S$ of $\{T_1, T_2\}$. If $T_2$ precedes $T_1$, the read-from source of $r_{T_1}(x)$ is $w_{T_2}(x)$, so legality demands the read return $1$ --- it returned $0$. If $T_1$ precedes $T_2$, the read-from source of $r_{T_1}(y)$ is the initial value, so legality demands $0$ --- it returned $1$. No legal total order exists: the history is not opaque. Yet $\mathrm{comm}(H) = \{T_2\}$ serializes trivially: the history is serializable. One predicate separates them, and only the aborted transaction feels the difference.
+Opacity is strictly stronger than serializability, and the gap is exactly one aborted transaction's illegal observation. Recast Listing~\ref{lst:serializable-not-opaque} in the new vocabulary. The history contains $r_{T_1}(x)\!\to\!0$, then $w_{T_2}(x)\!\leftarrow\!1$, $w_{T_2}(y)\!\leftarrow\!1$, $\mathrm{commit}(T_2)$, then $r_{T_1}(y)\!\to\!1$, then $\mathrm{abort}(T_1)$. Try any serialization $S$ of $\{T_1, T_2\}$. If $T_2$ precedes $T_1$, the read-from source of $r_{T_1}(x)$ is $w_{T_2}(x)$, so legality demands the read return $1$ --- it returned $0$. If $T_1$ precedes $T_2$, the read-from source of $r_{T_1}(y)$ is the initial value, so legality demands $0$ --- it returned $1$. No legal total order exists: the history is not opaque. Yet $\mathrm{comm}(h) = \{T_2\}$ serializes trivially: the history is serializable. One predicate separates them, and only the aborted transaction feels the difference.
 
 Opacity is expensive to guarantee for aborted transactions that read many locations. \emph{Virtual world consistency} \cite{imbs12vwc} weakens it: committed transactions must serialize legally as before, but an aborted transaction needs only consistency with its own causal past. The weakening permits invisible-read protocols that never validate aborted readers, at the price of letting a doomed transaction see states no serial execution produced. Multi-version designs sit naturally near this end of the spectrum; value-validated designs such as NOrec pay the opacity price on every read.
 
@@ -793,7 +794,7 @@ State clearly whether the result changes if the two validation phases are correl
     \item \emph{[implementation]} Add counters to the DFA in the trace-record worked example so that it reports the number of commits, aborts, retries, and rejected records in a file.
     \item \emph{[verification]} Extend the TLA+ bank model to include two transactions that may both begin from the same balance snapshot. Add a validation condition that prevents stale commits, then check money conservation.
     \item \emph{[theory]} Use Little's Law to compare two systems with the same committed throughput but different residence times. Explain which one has more in-flight transactions and why that matters for contention.
-    \item \emph{[theory]} Consider the history $H$ over locations $x$ and $y$, both initially $0$: $r_{T_1}(x)\!\to\!0$; $w_{T_2}(x)\!\leftarrow\!5$; $\mathrm{commit}(T_2)$; $w_{T_3}(y)\!\leftarrow\!7$; $\mathrm{commit}(T_3)$; $r_{T_1}(y)\!\to\!7$; $\mathrm{abort}(T_1)$. Prove $H$ is serializable by exhibiting a legal serialization of its committed projection, then prove it is not opaque by showing that no legal serialization of all three transactions exists.
+    \item \emph{[theory]} Consider the history $h$ over locations $x$ and $y$, both initially $0$: $r_{T_1}(x)\!\to\!0$; $w_{T_2}(x)\!\leftarrow\!5$; $\mathrm{commit}(T_2)$; $w_{T_3}(y)\!\leftarrow\!7$; $\mathrm{commit}(T_3)$; $r_{T_1}(y)\!\to\!7$; $\mathrm{abort}(T_1)$. Prove $h$ is serializable by exhibiting a legal serialization of its committed projection, then prove it is not opaque by showing that no legal serialization of all three transactions exists.
     \item \emph{[theory]}\label{ex:vwc-vs-opacity} A backend guarantees virtual world consistency but not opacity. Describe a concrete bank scenario in which an aborted transaction's illegal observation is harmless, and one in which the same observation becomes harmful once the transaction's \emph{compensating action} (a plain, non-transactional write) executes after the abort.
 \end{enumerate}
 
@@ -807,7 +808,7 @@ validation following the read-set check of \S\ref{sec:norec-example}.  The
 \emph{[theory]} exercises are graded against \S\ref{sec:math-example}, with
 Exercises~10--11 additionally graded against the definitions of
 \S\ref{sec:histories-legality-opacity} (Exercise~10's expected answer:
-$\mathrm{comm}(H)$ serializes as $T_2 < T_3$, while every placement of $T_1$
+$\mathrm{comm}(h)$ serializes as $T_2 < T_3$, while every placement of $T_1$
 in a full serialization makes one of its two reads illegal).
 
 \index{DFA}

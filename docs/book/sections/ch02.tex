@@ -128,6 +128,11 @@ concurrently executing transactions do not interfere with one another. The
 strongest standard isolation guarantee is \emph{serializability}: the
 observable behavior of a set of concurrent transactions must be equivalent to
 some serial execution of those same transactions, one at a time.
+Formally, writing $h$ for the history of a run and
+$\mathrm{comm}(h)$ for its committed projection, serializability is the
+one-line condition $\mathsf{SER}(h)$: \emph{$\mathrm{comm}(h)$ admits a
+legal serialization} (Notation page, p.~\pageref{cha:notation}; unpacked
+in Chapter~5).
 
 Serializability is a beautiful correctness criterion because it is
 implementation-independent. It says nothing about locks, timestamps, or
@@ -205,7 +210,10 @@ transactional execution is opaque if there exists a serial order of all
 transactions, committed and aborted, such that every transaction sees a state
 that is consistent with that serial order. In other words, even a transaction
 that eventually aborts must never observe a state that no serial execution
-could have produced. This single formal condition subsumes the weak-versus-
+could have produced. One line, in the notation of p.~\pageref{cha:notation}:
+$\mathsf{OPQ}(h)$ holds iff every prefix $h' \sqsubseteq h$ admits a legal
+serialization of $\mathrm{live}(h')$, the transactions still running in
+$h'$. This single formal condition subsumes the weak-versus-
 strong-atomicity debate: a TM that guarantees opacity for all accesses,
 transactional and non-transactional, is strong-atomic; a TM that guarantees it
 only for transactional accesses is weak-atomic. Opacity gives one yardstick

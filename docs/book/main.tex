@@ -14,6 +14,8 @@
 \usepackage{booktabs}
 % M{width}: body cell, vertically centered, ragged-right
 \newcolumntype{M}[1]{>{\raggedright\arraybackslash}m{#1}}
+% L{width}: top-aligned body cell, ragged-right (notation page)
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
 % \thb{width}{text}: header cell, vertically aligned to the bottom of the row
 \newcommand{\thb}[2]{\multicolumn{1}{@{}>{\raggedright\arraybackslash}b{#1}@{}}{#2}}
 % \rep{path}: compact repository path
@@ -122,6 +124,7 @@
 
 
 \input{sections/front_preface}
+\input{sections/front_notation}
 
 \mainmatter
 

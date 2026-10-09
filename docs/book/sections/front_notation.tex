@@ -1,0 +1,56 @@
+\chapter*{Notation: Histories, Models, and Views on One Page}
+\label{cha:notation}
+\addcontentsline{toc}{chapter}{Notation: Histories, Models, and Views on One Page}
+
+This page fixes the book's mathematical vocabulary for consistency models.
+Every model and anomaly defined in the book --- informally in Chapter~2,
+formally in Chapter~5, level by level in Chapter~7 --- is stated in this
+notation, and every model-checking artifact in \rep{docs/proofs/} is its
+mechanization: a TLC invariant is an anomaly predicate or a model class
+checked on a bounded fragment of $h$.
+
+\medskip
+\noindent\textbf{Histories.} A \emph{history} $h$ is a sequence of events
+$\mathrm{begin}(T)$, $r_T(x)\!\to\!v$, $w_T(x)\!\leftarrow\!v$,
+$\mathrm{commit}(T)$, $\mathrm{abort}(T)$.
+$\mathrm{comm}(h)$ is the \emph{committed projection} (events of
+transactions that committed); $\mathrm{live}(h)$ the transactions begun but
+not yet terminated in $h$; $h' \sqsubseteq h$ that $h'$ is a prefix of $h$;
+$<_{\mathrm{RT}}$ the \emph{real-time order} on transactions (all of one
+before all of the other). A \emph{serialization} $S$ is a total order of
+transactions; $S$ is \emph{legal} for $h$ if every read of $h$ returns the
+value sequential replay under $S$ would produce (its \emph{read-from}
+value).
+
+\medskip
+\noindent\textbf{Model skeletons.} Each correctness condition is one
+quantifier line over histories:
+
+\smallskip
+\begin{tabular}{M{0.10\linewidth}M{0.52\linewidth}M{0.26\linewidth}}
+\hline
+$\mathsf{SER}$ & $\mathrm{comm}(h)$ admits a legal serialization & Ch.~5, 7 \\
+$\mathsf{SSR}$ & $\mathsf{SER}$, plus preserving $<_{\mathrm{RT}}$ & Ch.~5, 7 \\
+$\mathsf{OPQ}$ & every $h' \sqsubseteq h$ admits a legal serialization of $\mathrm{live}(h')$, preserving $<_{\mathrm{RT}}$ where defined & Ch.~5 \\
+$\mathsf{SI}$ & one snapshot per transaction; commits pass the WW test against it --- predicates \emph{not} validated & Ch.~7 \\
+$\mathsf{EC}$ & state $=$ grow-only op-set $A_r$; $\mathrm{view}_r = \mathsf{fold}(A_r)$; \textsf{SEC}: $A_r = A_s \Rightarrow$ equal views & Ch.~7 (\S\ref{sec:iso-beyond-cliff}) \\
+\hline
+\end{tabular}
+\smallskip
+
+\noindent A history $h$ \emph{satisfies} a model when it is in its class
+(e.g.\ $\mathsf{OPQ}(h)$). Implementations satisfy models by producing only
+satisfying histories.
+
+\medskip
+\noindent\textbf{Invariants and anomalies.} $\mathsf{Inv}(h)$ is a
+predicate over the states observable in $h$ --- e.g.\ for the bank,
+$\mathsf{Inv}(h) \equiv x + y \geq \mathit{RESERVE}$ at every committed
+state. An \emph{anomaly} is a named class of histories
+($\mathsf{Dirty}$, $\mathsf{NonRepeat}$, $\mathsf{LostUp}$,
+$\mathsf{Wskew}$, \ldots), and the Berenson table of
+Table~\ref{tab:anomaly-matrix} is exactly the assertion
+$\exists h: L(h) \wedge A(h)$: \emph{level $L$ admits anomaly
+$A$}. Each anomaly's witness appears in \S\ref{sec:iso-anomalies} and,
+mechanized, as a violated TLC invariant
+(\rep{docs/proofs/BankSI.tla}, \rep{BankWeak.tla}).
