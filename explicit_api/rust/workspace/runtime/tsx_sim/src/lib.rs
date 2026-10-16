@@ -297,13 +297,6 @@ fn max_write() -> usize {
     *CONFIG_MAX_WRITE.get_or_init(TsxThreadState::max_write_lines)
 }
 
-#[allow(dead_code)]
-fn dbg_enabled() -> bool {
-    static ON: std::sync::LazyLock<bool> =
-        std::sync::LazyLock::new(|| std::env::var("TSX_SIM_DEBUG").is_ok());
-    *ON
-}
-
 /// Publish ring for loss analysis: every TSX commit publish and SGL write
 /// is recorded as (addr, mem_before, new, kind, tid).  kind: 0=TSX commit,
 /// 1=SGL write.  Appended only while holding GLOBAL_STATE, so ordering with
@@ -314,7 +307,9 @@ static RING: std::sync::LazyLock<Mutex<Vec<RingEntry>>> =
     std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
 
 fn ring_push(addr: u64, before: u64, newv: u64, kind: u8, tid: u64) {
-    RING.lock().unwrap().push((addr, before, newv, kind, tid));
+    RING.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((addr, before, newv, kind, tid));
 }
 
 /// DBG: log a u64 at addr (debug only).
@@ -360,7 +355,7 @@ fn with_state<F, R>(tid: u64, f: F) -> R
 where
     F: FnOnce(&mut TsxThreadState) -> R,
 {
-    let mut guard = GLOBAL_STATE.lock().unwrap();
+    let mut guard = GLOBAL_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let state = guard.entry(tid).or_insert_with(TsxThreadState::new);
     f(state)
 }
@@ -376,9 +371,19 @@ pub fn tm_exit() {
     if let Ok(ring) = RING.try_lock() {
         if let Ok(path) = std::env::var("TSX_SIM_RING_FILE") {
             use std::io::Write;
-            let mut f = std::fs::File::create(path).unwrap();
-            for &(addr, before, newv, kind, tid) in ring.iter() {
-                writeln!(f, "{addr:#x} {before:#x} {newv:#x} {kind} {tid}").unwrap();
+            // Best-effort diagnostic dump: a failure to write the ring file
+            // must not panic during teardown, so log and continue.
+            match std::fs::File::create(&path) {
+                Ok(mut f) => {
+                    for &(addr, before, newv, kind, tid) in ring.iter() {
+                        if let Err(e) = writeln!(f, "{addr:#x} {before:#x} {newv:#x} {kind} {tid}")
+                        {
+                            eprintln!("[RING] write to {path} failed: {e}");
+                            break;
+                        }
+                    }
+                }
+                Err(e) => eprintln!("[RING] cannot create {path}: {e}"),
             }
         }
         if !ring.is_empty() {
@@ -410,7 +415,7 @@ pub fn tm_exit() {
         }
     }
     // Print aggregated stats
-    let guard = GLOBAL_STATE.lock().unwrap();
+    let guard = GLOBAL_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let mut total_commits = 0u64;
     let mut total_aborts = 0u64;
     let mut total_capacity = 0u64;
@@ -556,7 +561,7 @@ pub fn tm_commit() -> bool {
     compiler_fence(Ordering::SeqCst);
 
     // Lock global state once for the entire commit operation
-    let mut guard = GLOBAL_STATE.lock().unwrap();
+    let mut guard = GLOBAL_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     // SGL fallback commit: our writes are already in memory (write-through).
     // Invalidate every in-flight transaction whose read-set intersects our
@@ -719,7 +724,9 @@ pub fn tm_commit() -> bool {
 
     if ww_conflict {
         // Write-write: our transaction must also abort (second writer loses, first wins in eager, but at commit we abort both for safety)
-        let our_state = guard.get_mut(&our_tid).unwrap();
+        let our_state = guard
+            .get_mut(&our_tid)
+            .expect("our_tid present in GLOBAL_STATE");
         our_state.active = false;
         our_state.committed_successfully = false;
         our_state.conflict_aborts += 1;
@@ -734,7 +741,9 @@ pub fn tm_commit() -> bool {
 
     // No WW conflict — commit successfully.
     // (WR conflicts already aborted the other threads; our writes win.)
-    let our_state = guard.get_mut(&our_tid).unwrap();
+    let our_state = guard
+        .get_mut(&our_tid)
+        .expect("our_tid present in GLOBAL_STATE");
     our_state.persistent_retries = 0;
     our_state.cycles += COST_XEND;
     our_state.active = false;
@@ -1165,7 +1174,7 @@ pub mod sim {
     }
 
     pub fn snapshot_states() -> std::collections::HashMap<u64, Option<Box<TsxThreadState>>> {
-        let guard = GLOBAL_STATE.lock().unwrap();
+        let guard = GLOBAL_STATE.lock().unwrap_or_else(|e| e.into_inner());
         guard
             .iter()
             .map(|(&k, v)| (k, Some(Box::new(v.clone()))))
@@ -1173,7 +1182,7 @@ pub mod sim {
     }
 
     pub fn restore_states(states: std::collections::HashMap<u64, Option<Box<TsxThreadState>>>) {
-        let mut guard = GLOBAL_STATE.lock().unwrap();
+        let mut guard = GLOBAL_STATE.lock().unwrap_or_else(|e| e.into_inner());
         guard.clear();
         for (k, v) in states {
             if let Some(state) = v {
@@ -1186,14 +1195,14 @@ pub mod sim {
         let Some(tid) = runtime_core::try_current_sim_thread_id() else {
             return;
         };
-        let mut guard = GLOBAL_STATE.lock().unwrap();
+        let mut guard = GLOBAL_STATE.lock().unwrap_or_else(|e| e.into_inner());
         guard.remove(&tid);
     }
 
     #[cfg(feature = "stats")]
     pub fn take_stats() -> runtime_core::SyncCounters {
         let s = runtime_core::SyncCounters::new();
-        let guard = GLOBAL_STATE.lock().unwrap();
+        let guard = GLOBAL_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let mut commits = 0u64;
         let mut aborts = 0u64;
         let mut conflict = 0u64;

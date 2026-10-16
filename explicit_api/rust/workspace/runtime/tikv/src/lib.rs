@@ -377,7 +377,11 @@ macro_rules! def_read {
                     let copy_len = bytes.len().min(n);
                     let mut arr = [0u8; 8];
                     arr[..copy_len].copy_from_slice(&bytes[..copy_len]);
-                    <$ty>::from_ne_bytes(arr[..n].try_into().unwrap())
+                    <$ty>::from_ne_bytes(
+                        arr[..n]
+                            .try_into()
+                            .expect("arr prefix has length size_of::<$ty>()"),
+                    )
                 }
                 None => unsafe { addr.read() },
             }

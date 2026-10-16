@@ -713,7 +713,12 @@ fn mkdir_parent(path: &str) {
 fn mmap_file(path: &str, size: usize, flags: libc::c_int) -> *mut u8 {
     use std::ffi::CString;
     mkdir_parent(path);
-    let cpath = CString::new(path).unwrap();
+    // A path with an interior NUL cannot be passed to open(2); treat it like
+    // any other open failure (return null) rather than panicking.
+    let Ok(cpath) = CString::new(path) else {
+        eprintln!("addrspace: path {path:?} contains an interior NUL byte");
+        return std::ptr::null_mut();
+    };
     let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o644) };
     if fd < 0 {
         eprintln!("addrspace: open({path}) failed");
@@ -751,22 +756,30 @@ fn mmap_file(path: &str, size: usize, flags: libc::c_int) -> *mut u8 {
 
 #[inline]
 fn sc_block_size(sc: usize) -> u16 {
-    SC_BLOCK_SIZE.get().unwrap()[sc]
+    SC_BLOCK_SIZE
+        .get()
+        .expect("addrspace::init() must be called before allocating")[sc]
 }
 
 #[inline]
 fn sc_block_count(sc: usize) -> u16 {
-    SC_BLOCK_COUNT.get().unwrap()[sc]
+    SC_BLOCK_COUNT
+        .get()
+        .expect("addrspace::init() must be called before allocating")[sc]
 }
 
 #[inline]
 fn sc_bitmap_bytes(sc: usize) -> u16 {
-    SC_BITMAP_BYTES.get().unwrap()[sc]
+    SC_BITMAP_BYTES
+        .get()
+        .expect("addrspace::init() must be called before allocating")[sc]
 }
 
 #[inline]
 fn sc_data_off(sc: usize) -> u16 {
-    SC_DATA_OFF.get().unwrap()[sc]
+    SC_DATA_OFF
+        .get()
+        .expect("addrspace::init() must be called before allocating")[sc]
 }
 
 // ── Size-class lookup ───────────────────────────────────────

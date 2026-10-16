@@ -138,7 +138,8 @@ thread_local! {
 fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     TX.with(|tx| {
         let mut b = tx.borrow_mut();
-        f(b.as_mut().expect("no active transaction"))
+        f(b.as_mut()
+            .expect("no active transaction: call tm_begin()/transaction() first"))
     })
 }
 

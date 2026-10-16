@@ -57,7 +57,7 @@ fn multi_tx(num_threads: usize) {
     thread::sleep(std::time::Duration::from_secs(2));
     stop.store(true, Ordering::Relaxed);
     for h in handles {
-        h.join().unwrap();
+        h.join().expect("worker thread panicked");
     }
     println!(
         "multi_tx({} threads): {} commits, {} aborts",

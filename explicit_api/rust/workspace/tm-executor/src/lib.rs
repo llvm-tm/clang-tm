@@ -142,7 +142,7 @@ impl QueueExecutor {
             let task: Option<Task> = 'search: {
                 for a in 0..inner.num_q {
                     let q = (start_q + a) % inner.num_q;
-                    let mut guard = inner.queues[q].lock().unwrap();
+                    let mut guard = inner.queues[q].lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(f) = guard.pop_front() {
                         break 'search Some(f);
                     }
@@ -152,7 +152,7 @@ impl QueueExecutor {
                             .wait_while(guard, |q| {
                                 q.is_empty() && !inner.shutdown.load(Ordering::Relaxed)
                             })
-                            .unwrap();
+                            .unwrap_or_else(|e| e.into_inner());
                         waited = true;
                         // Re-check after wake
                         if let Some(f) = guard.pop_front() {
@@ -182,7 +182,9 @@ impl QueueExecutor {
     fn enqueue(&self, task: Box<dyn FnOnce() + Send>) {
         let qidx = self.inner.next_q.fetch_add(1, Ordering::Relaxed) % self.inner.num_q;
         {
-            let mut lock = self.inner.queues[qidx].lock().unwrap();
+            let mut lock = self.inner.queues[qidx]
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             lock.push_back(task);
         }
         self.inner.cvs[qidx].notify_one();

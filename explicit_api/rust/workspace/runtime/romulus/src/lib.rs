@@ -71,7 +71,8 @@ fn sim_tx_store() -> &'static SyncUnsafeCell<HashMap<u64, Option<Box<TxState>>>>
 fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     TX.with(|tx| {
         let mut b = tx.borrow_mut();
-        f(b.as_mut().expect("TX not active"))
+        f(b.as_mut()
+            .expect("no active transaction: call tm_begin()/transaction() first"))
     })
 }
 
@@ -80,8 +81,12 @@ fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     let tid = runtime_core::current_sim_thread_id();
     let store = sim_tx_store();
     let map = unsafe { &mut *store.get() };
-    let state = map.get_mut(&tid).expect("no sim state for thread");
-    f(state.as_mut().expect("no active transaction"))
+    let state = map
+        .get_mut(&tid)
+        .expect("no state for simulated thread: call tm_init_thread() first");
+    f(state
+        .as_mut()
+        .expect("no active transaction: call tm_begin()/transaction() first"))
 }
 
 #[cfg(not(feature = "simulation"))]

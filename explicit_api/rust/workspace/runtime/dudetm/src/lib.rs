@@ -65,16 +65,6 @@ fn lock_at_index(idx: usize) -> &'static Lock {
     &locks()[idx]
 }
 
-#[allow(dead_code)]
-fn try_lock(addr: usize) -> bool {
-    lock_at_index(lock_index(addr)).try_lock_exclusive()
-}
-
-#[allow(dead_code)]
-fn unlock(addr: usize) {
-    lock_at_index(lock_index(addr)).unlock_exclusive();
-}
-
 fn read_version(addr: usize) -> u64 {
     lock_at_index(lock_index(addr)).version()
 }
@@ -144,7 +134,8 @@ thread_local! {
 fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     TX.with(|tx| {
         let mut b = tx.borrow_mut();
-        f(b.as_mut().expect("no active transaction"))
+        f(b.as_mut()
+            .expect("no active transaction: call tm_begin()/transaction() first"))
     })
 }
 

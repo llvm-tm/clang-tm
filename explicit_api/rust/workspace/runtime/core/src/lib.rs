@@ -312,10 +312,18 @@ pub fn clear_sim_thread_id() {
     SIM_THREAD_ID.with(|c| c.set(None));
 }
 
-/// Get the current simulated thread ID (panics if not set).
+/// Get the current simulated thread ID.
+///
+/// # Panics
+/// If no simulated thread ID has been set for this OS thread. The simulator
+/// calls [`set_sim_thread_id`] before invoking any backend function; hitting
+/// this means the caller used a backend outside the simulator's thread setup.
 #[cfg(feature = "simulation")]
 pub fn current_sim_thread_id() -> SimThreadId {
-    SIM_THREAD_ID.with(|c| c.get().expect("sim_thread_id not set"))
+    SIM_THREAD_ID.with(|c| {
+        c.get()
+            .expect("sim_thread_id not set: call set_sim_thread_id() before using a backend")
+    })
 }
 
 /// Get the current simulated thread ID, or `None` if not set.
@@ -344,35 +352,49 @@ impl<T> SimStateStore<T> {
     }
 
     /// Access the state of the currently active simulated thread.
+    ///
+    /// The lock is recovered from poisoning (`into_inner`): a panic while
+    /// holding it has already been reported, and cascading "called unwrap on
+    /// Err" panics would only mask the original failure.
+    ///
+    /// # Panics
+    /// If nothing was [`insert`](Self::insert)ed for the current thread.
     pub fn with<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut T) -> R,
     {
         let tid = current_sim_thread_id();
-        let mut map = self.inner.lock().unwrap();
-        let state = map.get_mut(&tid).expect("no state for sim thread");
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let state = map
+            .get_mut(&tid)
+            .expect("no state for simulated thread: call tm_init_thread() first");
         f(state)
     }
 
     /// Access the state of a specific simulated thread.
+    ///
+    /// # Panics
+    /// If nothing was [`insert`](Self::insert)ed for `tid`.
     pub fn with_tid<F, R>(&self, tid: SimThreadId, f: F) -> R
     where
         F: FnOnce(&mut T) -> R,
     {
-        let mut map = self.inner.lock().unwrap();
-        let state = map.get_mut(&tid).expect("no state for sim thread");
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let state = map
+            .get_mut(&tid)
+            .expect("no state for simulated thread: call tm_init_thread() first");
         f(state)
     }
 
     /// Insert state for a simulated thread (called on thread init).
     pub fn insert(&self, tid: SimThreadId, state: T) {
-        let mut map = self.inner.lock().unwrap();
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(tid, state);
     }
 
     /// Remove and return state for a simulated thread (called on thread exit).
     pub fn remove(&self, tid: SimThreadId) -> Option<T> {
-        let mut map = self.inner.lock().unwrap();
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         map.remove(&tid)
     }
 
@@ -381,13 +403,13 @@ impl<T> SimStateStore<T> {
     where
         T: Clone,
     {
-        let map = self.inner.lock().unwrap();
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         map.clone()
     }
 
     /// Restore thread states from a snapshot.
     pub fn restore(&self, map: std::collections::HashMap<SimThreadId, T>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         *inner = map;
     }
 }

@@ -180,28 +180,35 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
 
 ## P2 — Cleanup
 
-### Rust runtime: migrate `expect()`/`unwrap()` to `Result` (opened 2026-10)
+### Rust runtime: `expect()`/`unwrap()` triage + hardening — DONE (2026-10)
 - **Context**: ~81 non-test `.expect(`/`.unwrap()` call sites across 15
-  `explicit_api/rust/workspace` crates (highest: `runtime/tsx_sim` 12,
-  `runtime/core` 9, `addrspace` 9, `runtime/tikv` 7). Panics on the library
-  path abort the process instead of surfacing an error to the caller.
-- **Why deferred**: changing these signatures to return `Result` is an
-  API-breaking change (touches public fns, the `tm` crate re-exports, and every
-  test), so it is a deliberate, separately-reviewed refactor rather than a
-  drive-by cleanup. Many sites are genuinely infallible (e.g. locking a mutex
-  the runtime owns) and only need a documented justification via
-  `expect("invariant: …")`.
-- **Next steps**: (a) triage each site into infallible-with-message vs.
-  must-propagate; (b) migrate the must-propagate ones crate by crate, keeping
-  `cargo test --features wbctl -p tm -- --test-threads=1` green.
+  `explicit_api/rust/workspace` crates. Panics on the library path abort the
+  process instead of surfacing an error.
+- **Outcome**: a full `Result`-returning public API was rejected — the backend
+  entry points (`tm_begin`, `tm_commit`, `tm_read_*`, …) mirror the C
+  `TMRealHooks` ABI, so they cannot return `Result`; the correct behaviour at
+  that boundary is to fail fast. Instead:
+  - every bare `.unwrap()` on the library path was removed: mutex locks are now
+    poison-recovering (`unwrap_or_else(|e| e.into_inner())`, the existing
+    codebase idiom — 68 uses), and remaining invariants (sim-thread state, active
+    transaction, `Layout`, `try_into`) use `.expect("<actionable invariant>")`;
+  - genuinely fallible I/O no longer panics: `addrspace::mmap_file` returns null
+    on a NUL-containing path, and `tsx_sim::tm_exit`'s `TSX_SIM_RING_FILE` dump
+    logs and continues on create/write failure;
+  - `mvlog::tm_begin` uses `get_or_insert_with` instead of an init-then-unwrap.
+  - Remaining bare `.unwrap()` are only in `#[test]` fns and the two binary
+    `main`s (converted to `.expect("worker thread panicked")`).
+- **Verification**: workspace 41 tests, simulator 112, clippy clean, fmt clean.
 
-### Rust runtime: audit `#[allow(dead_code)]` sites (opened 2026-10)
-- **Context**: 34 `#[allow(dead_code)]` attributes across the `runtime/*` crates
-  and `simulator/src/tm_model.rs`, mostly around `sim`-gated or feature-gated
-  helpers.
-- **Next steps**: remove attributes the compiler no longer needs and add a
-  one-line reason to the ones that stay (why the item is intentionally unused
-  in some feature configurations).
+### Rust runtime: `#[allow(dead_code)]` audit — DONE (2026-10)
+- Removed genuinely dead helpers: `try_lock`/`unlock` (dudetm, tl2 — superseded
+  by direct `lock_at_index(..).try_lock_exclusive()` calls), `tx_active`/
+  `tx_aborted` (tsxsgl), `dbg_enabled` (tsx_sim). Verified with default,
+  `simulation`, and `simulation,stats` builds.
+- The remaining `#[allow(dead_code)]` are on `TxState` fields that are written
+  but only read under the `simulation`/`stats` features (or kept for struct
+  symmetry), plus the `simulator/src/tm_model.rs` lock-inspection helpers; they
+  stay because feature-gating makes them load-bearing in specific builds.
 
 ### stmbench7 data-race corruption under write-heavy load
 - **Status 2026-09-28**: wbctl `-w 3` 0/8 clean after the deferred-free

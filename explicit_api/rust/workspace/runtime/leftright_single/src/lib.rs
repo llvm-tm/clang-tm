@@ -91,8 +91,12 @@ unsafe fn write_memory(addr: usize, val: u64, bytes: u8) {
 
 // ── Init / Exit ──────────────────────────────────────────────────
 pub fn tm_init() {
-    unsafe { LEFT.as_ptr().as_mut() }.unwrap().clear();
-    unsafe { RIGHT.as_ptr().as_mut() }.unwrap().clear();
+    unsafe { LEFT.as_ptr().as_mut() }
+        .expect("static LEFT cell is initialized")
+        .clear();
+    unsafe { RIGHT.as_ptr().as_mut() }
+        .expect("static RIGHT cell is initialized")
+        .clear();
     ACTIVE.store(false, Ordering::Release);
     LEFT_READERS.store(0, Ordering::Release);
     RIGHT_READERS.store(0, Ordering::Release);

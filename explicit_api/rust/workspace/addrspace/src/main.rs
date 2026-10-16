@@ -134,7 +134,7 @@ fn bench_mt(
         })
         .collect::<Vec<_>>()
         .into_iter()
-        .map(|h| h.join().unwrap())
+        .map(|h| h.join().expect("worker thread panicked"))
         .sum();
     let ms = start.elapsed().as_millis() as i64;
     let secs = ms as f64 / 1000.0;

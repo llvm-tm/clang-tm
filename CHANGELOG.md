@@ -3103,3 +3103,55 @@ Continuation of the review follow-up (commits `a6f208f`, `3b5e289`, `fe083a0`,
 **Verification**: explicit NOREC 120/120 + 207/207; plugin suite 11/11 with
 `test_counter_race` passing; simulator 112 tests, Rust workspace 41, fmt/clippy
 clean; `make fmt-check` clean.
+
+## Session 2026-10-16 — Queue-test build fixes; Rust panic-site migration
+
+Follow-up to the same-day review session (commit `e6d81bd` + the migration
+commit).
+
+**Pre-existing issues resolved** (`e6d81bd`):
+
+- Three plugin queue-test sources referenced by `plugin/Makefile` were never
+  committed, so `test_queue_leftright_manual`, `test_queue_tx_wait` and
+  `bench_queue_wait_auto/manual` could not be built from a fresh clone. Tracked
+  (clang-formatted).
+- `test_queue_leftright` and `test_queue_leftright_manual` omitted `tm_hooks.o`
+  from their link lines (undefined retry-loop TLS) → added it. With it present,
+  `leftright_runtime.o` and `queue_runtime.o` conflicted on the strong global
+  `g_tm_queue_global` → leftright's copy is now `__attribute__((weak))` (the
+  queue runtime's strong definition wins when both are linked).
+- Deleted the abandoned `tests/expli-api/` directory (a typo duplicate of
+  `tests/explicit-api/` predating the rename; older superseded sources plus ~12MB
+  of `.o`/`.dSYM` artifacts) and the orphan `tests/plugin/test_queue_extended.cpp`
+  (superseded by `test_queue_multi.cpp`). `make fmt-check` now passes in a dirty
+  tree. All five queue targets build and run.
+
+**Rust panic-site migration**:
+
+- Triaged the ~81 non-test `expect()`/`unwrap()` sites. A `Result`-returning
+  public API was rejected: the backend entry points mirror the C `TMRealHooks`
+  ABI and must fail fast, so the migration is hardening, not signature changes.
+- Removed every bare `.unwrap()` on the library path. Mutex locks now recover
+  from poisoning (`unwrap_or_else(|e| e.into_inner())`, the 68-use codebase
+  idiom); invariants carry actionable `.expect(...)` messages (sim-thread state,
+  active transaction, `Layout`, `try_into`). Fallible I/O no longer panics:
+  `addrspace::mmap_file` returns null on a NUL path, `tsx_sim`'s ring-file dump
+  logs and continues. `mvlog::tm_begin` uses `get_or_insert_with`.
+- Dead-code audit: removed `try_lock`/`unlock` (dudetm, tl2), `tx_active`/
+  `tx_aborted` (tsxsgl), `dbg_enabled` (tsx_sim). Remaining `#[allow(dead_code)]`
+  are feature-gated/reserved struct fields and the `tm_model.rs` lock-inspection
+  helpers.
+
+**Files changed**: `backends/tm_impl/leftright/leftright_runtime.cpp`,
+`plugin/Makefile`, `tests/plugin/{bench_queue_wait_compare,test_queue_leftright_manual,test_queue_tx_wait}.cpp`;
+`explicit_api/rust/workspace/{runtime/core,runtime/mvlog,runtime/tsx_sim,
+runtime/leftright_single,runtime/tikv,runtime/sgl-distributed,runtime/dudetm,
+runtime/tl2,runtime/tsxsgl,runtime/norec,runtime/romulus,runtime/swisstm,
+runtime/tinystm,runtime/nvhtm,runtime/spht,runtime/xtm},addrspace,tm-executor`;
+`TODO.md`, `CHANGELOG.md`.
+
+**Verification** (macOS arm64, LLVM 22, Rust 1.99.1): queue targets build+pass
+(auto-wait 56013 tx/s, manual-wait 372119 tx/s); plugin suite 11/11; LEFTRIGHT
+explicit `test_tx` 120/120, `test_ds` 207/207; Rust workspace 41 tests;
+simulator 112 tests; `cargo clippy --workspace --all-targets` clean; `cargo fmt
+--check` clean; default + `simulation` + `simulation,stats` builds clean.

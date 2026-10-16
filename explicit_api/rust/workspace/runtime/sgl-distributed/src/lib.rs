@@ -74,7 +74,8 @@ pub fn tm_init() {
 
     let page = page_size();
     let state_size = page; // one page for shared state
-    let cpath = std::ffi::CString::new(shm_file.as_str()).unwrap();
+    let cpath = std::ffi::CString::new(shm_file.as_str())
+        .expect("sgl-distributed: shm_file path contains an interior NUL byte");
     let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o644) };
     assert!(fd >= 0, "sgl-distributed: open({shm_file}) failed");
 

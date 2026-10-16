@@ -217,7 +217,8 @@ impl TxState {
 fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     TX.with(|tx| {
         let mut b = tx.borrow_mut();
-        f(b.as_mut().expect("no active transaction"))
+        f(b.as_mut()
+            .expect("no active transaction: call tm_begin()/transaction() first"))
     })
 }
 
@@ -226,8 +227,12 @@ fn with_tx<R>(f: impl FnOnce(&mut TxState) -> R) -> R {
     let tid = runtime_core::current_sim_thread_id();
     let store = sim_tx_store();
     let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
-    let state = map.get_mut(&tid).expect("no sim state for thread");
-    f(state.as_mut().expect("no active transaction"))
+    let state = map
+        .get_mut(&tid)
+        .expect("no state for simulated thread: call tm_init_thread() first");
+    f(state
+        .as_mut()
+        .expect("no active transaction: call tm_begin()/transaction() first"))
 }
 
 #[cfg(not(feature = "simulation"))]
@@ -828,21 +833,19 @@ pub fn tm_begin() {
     #[cfg(not(feature = "simulation"))]
     TX.with(|tx| {
         let mut b = tx.borrow_mut();
-        if b.is_none() {
-            *b = Some(Box::new(TxState::new()));
-        }
-        begin_impl(b.as_mut().unwrap());
+        let state = b.get_or_insert_with(|| Box::new(TxState::new()));
+        begin_impl(state);
     });
     #[cfg(feature = "simulation")]
     {
         let tid = runtime_core::current_sim_thread_id();
         let store = sim_tx_store();
         let mut map = store.lock().unwrap_or_else(|e| e.into_inner());
-        let slot = map.get_mut(&tid).expect("no sim state for thread");
-        if slot.is_none() {
-            *slot = Some(Box::new(TxState::new()));
-        }
-        begin_impl(slot.as_mut().unwrap());
+        let slot = map
+            .get_mut(&tid)
+            .expect("no state for simulated thread: call tm_init_thread() first");
+        let state = slot.get_or_insert_with(|| Box::new(TxState::new()));
+        begin_impl(state);
     }
 }
 
