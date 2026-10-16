@@ -3042,8 +3042,12 @@ Full-tree review follow-up. Three fixes:
 - **macOS explicit-API link failure**: `tm_region_allocator.cpp`'s B-30
   static-global bridge used an undefined *weak* data reference, which the
   Mach-O linker rejects — every `benchmarks/cpp` link failed on macOS even
-  though CI (Linux-only) stayed green. The bridge is now `#if defined(__ELF__)`;
-  macOS plugin-mode bridging is tracked in `TODO.md`.
+  though CI (Linux-only) stayed green. Fixed portably with **weak definitions**
+  (`extern … __attribute__((weak))`) that explicit-API builds link as no-ops and
+  plugin builds let the module's strong definitions override, on both ELF and
+  Mach-O (see the follow-up session below; the interim `__ELF__` guard was
+  removed). `tests/plugin/test_counter_race.cpp` now asserts `g_counter==200000`
+  and is run by `plugin/run_tests.sh`.
 - **Region-allocator realloc**: 11 backends hand-rolled `real_tm_realloc` with
   `memcpy(p, ptr, size)` using the NEW size (heap over-read when growing) or
   dropped the old contents entirely (TinySTM). All now route through
@@ -3062,3 +3066,40 @@ tsc_tm,mvlog,tiny_stm,eager_broken,power8_htm,nvhtm,gacco,jvstm}, new
 `test_ds` 207/207 for NOREC/TINYSTM/TL2/SWISSTM/TSC_TM/MVLOG/NORECBF/CSMV;
 NOREC ASan build clean; `bank --test` money conserved; plugin suite 11/11;
 simulator 112 tests; Rust workspace 41 tests; fmt/clippy clean.
+
+## Session 2026-10-16 — Portability bridge, macOS CI, fuzz/coverage, dedup
+
+Continuation of the review follow-up (commits `a6f208f`, `3b5e289`, `fe083a0`,
+`b32db90`):
+
+- **Portable static-global bridge** (`a6f208f`): replaced the interim
+  `#if defined(__ELF__)` guard with weak *definitions* of
+  `tm_symbol_count`/`tm_symbol_addresses`/`tm_symbol_sizes`; the plugin's strong
+  definitions win on both ELF and Mach-O. `-Wl,-undefined,dynamic_lookup` on
+  executables proved unreliable (hang/crash) and was abandoned.
+  `test_counter_race` now returns non-zero on lost updates and is wired into
+  `plugin/run_tests.sh`; `TODO.md` bridging entry marked RESOLVED.
+- **CI** (`3b5e289`): added a `macos-portability` job (builds+runs `test_tx`/
+  `test_ds` for NOREC/TINYSTM/TL2) and a `fuzz-smoke` job. `nightly.yml` gained a
+  non-blocking `cpp-coverage` job; `benchmarks/cpp/Makefile` gained a
+  `COVERAGE=1` knob. **`tests/fuzz/test_ds_fuzzer.cpp` did not compile** (wrong
+  API: `flat_map::reserve`, `flat_multimap::clear`, buffer over-read on the loop
+  tail) — rewritten against the real API (~4M execs clean); both fuzz sources are
+  now tracked so fresh clones can build them.
+- **Hook-table dedup** (`fe083a0`): `tm_hooks.cpp`'s eight hand-copied hook
+  tables are generated from `TM_HOOK_FIELDS(X)` / `TM_HOOK_ACCESS_FIELDS(X)`
+  declared next to `TMRealHooks`; `stub_*` names unified. 1272 → 1074 lines.
+- **Simulator dispatch** (`b32db90`): `simulator/src/backend.rs`'s repeated
+  eight-arm `match self` for ~18 one-to-one forwarding methods collapsed into a
+  `dispatch_backend!(self, call)` macro; genuinely per-backend methods
+  (TSX-only `try_begin`, snapshot/restore, `is_*`) stay explicit. 1089 → 953
+  lines.
+- **Docs**: added `docs/API_REFERENCE.md` (C++ typed/raw + plugin + Rust `tm`
+  surfaces, backend selection) and linked it from `docs/README.md`. Filed P2
+  TODOs for the Rust `expect()`→`Result` migration (~81 non-test sites) and the
+  `#[allow(dead_code)]` audit (34 sites), both deferred as API-breaking /
+  wide-touching.
+
+**Verification**: explicit NOREC 120/120 + 207/207; plugin suite 11/11 with
+`test_counter_race` passing; simulator 112 tests, Rust workspace 41, fmt/clippy
+clean; `make fmt-check` clean.

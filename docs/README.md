@@ -11,6 +11,7 @@ work items, see [`../TODO.md`](../TODO.md).
 | Document | What it is | Read it when… |
 |----------|-----------|---------------|
 | [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) | Build, test, and add-a-backend walkthrough | You are new to the repo and want to build something or add a backend |
+| [API_REFERENCE.md](API_REFERENCE.md) | Public API for the C++ typed/raw and plugin paths and the Rust `tm` crate | You are writing code against the TM API |
 | [REQUIREMENTS.md](REQUIREMENTS.md) | Software requirements + per-platform install + `check-requirements.sh` | Your build is failing on missing LLVM/Clang/toolchain |
 | [IMPLEMENTATIONS.md](IMPLEMENTATIONS.md) | Reference for every STM/HTM/distributed backend | You want to understand or compare a specific backend's algorithm |
 | [BACKEND_COMPARISON.md](BACKEND_COMPARISON.md) | WBCTL vs NOrec vs SGL across STAMP/TPC-C/STMbench7 | You are choosing a backend for a workload |

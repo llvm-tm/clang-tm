@@ -180,6 +180,29 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
 
 ## P2 — Cleanup
 
+### Rust runtime: migrate `expect()`/`unwrap()` to `Result` (opened 2026-10)
+- **Context**: ~81 non-test `.expect(`/`.unwrap()` call sites across 15
+  `explicit_api/rust/workspace` crates (highest: `runtime/tsx_sim` 12,
+  `runtime/core` 9, `addrspace` 9, `runtime/tikv` 7). Panics on the library
+  path abort the process instead of surfacing an error to the caller.
+- **Why deferred**: changing these signatures to return `Result` is an
+  API-breaking change (touches public fns, the `tm` crate re-exports, and every
+  test), so it is a deliberate, separately-reviewed refactor rather than a
+  drive-by cleanup. Many sites are genuinely infallible (e.g. locking a mutex
+  the runtime owns) and only need a documented justification via
+  `expect("invariant: …")`.
+- **Next steps**: (a) triage each site into infallible-with-message vs.
+  must-propagate; (b) migrate the must-propagate ones crate by crate, keeping
+  `cargo test --features wbctl -p tm -- --test-threads=1` green.
+
+### Rust runtime: audit `#[allow(dead_code)]` sites (opened 2026-10)
+- **Context**: 34 `#[allow(dead_code)]` attributes across the `runtime/*` crates
+  and `simulator/src/tm_model.rs`, mostly around `sim`-gated or feature-gated
+  helpers.
+- **Next steps**: remove attributes the compiler no longer needs and add a
+  one-line reason to the ones that stay (why the item is intentionally unused
+  in some feature configurations).
+
 ### stmbench7 data-race corruption under write-heavy load
 - **Status 2026-09-28**: wbctl `-w 3` 0/8 clean after the deferred-free
   EBR fixes (CORRECTNESS_FIXES §18).  wbetl still 2-3/3 crashes at any
