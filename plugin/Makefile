@@ -218,9 +218,9 @@ $(OUT_DIR)/leftright_runtime.o: $(BACKENDS_DIR)/tm_impl/leftright/leftright_runt
 	  -I $(BACKENDS_DIR)/tm_impl/common -I $(BACKENDS_DIR)/tm_impl -I $(BACKENDS_DIR) $< -o $@
 
 $(BIN_DIR)/test_queue_leftright: $(OUT_DIR)/test_queue.opt.bc \
-  $(OUT_DIR)/leftright_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o | $(BIN_DIR)
+  $(OUT_DIR)/leftright_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o $(OUT_DIR)/tm_hooks.o | $(BIN_DIR)
 	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/test_queue.opt.bc \
-	  $(OUT_DIR)/leftright_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o -o $@
+	  $(OUT_DIR)/leftright_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o $(OUT_DIR)/tm_hooks.o -o $@
 
 $(OUT_DIR)/test_queue_leftright_manual.bc: $(TEST_DIR)/test_queue_leftright_manual.cpp | $(OUT_DIR)
 	$(CLANG_TM) --compile-only -std=c++20 $(TM_COMPILE_FLAGS) $< -o $@
@@ -231,9 +231,9 @@ $(OUT_DIR)/test_queue_leftright_manual.opt.bc: $(OUT_DIR)/test_queue_leftright_m
 	$(CLANG_TM) --optimize-only $(TM_OPT_LEVEL) $< -o $@
 
 $(BIN_DIR)/test_queue_leftright_manual: $(OUT_DIR)/test_queue_leftright_manual.opt.bc \
-  $(OUT_DIR)/leftright_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o | $(BIN_DIR)
+  $(OUT_DIR)/leftright_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o $(OUT_DIR)/tm_hooks.o | $(BIN_DIR)
 	$(CXX) $(DEFAULT_LINK_FLAGS) $(OUT_DIR)/test_queue_leftright_manual.opt.bc \
-	  $(OUT_DIR)/leftright_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o -o $@
+	  $(OUT_DIR)/leftright_runtime.o $(OUT_DIR)/queue_runtime.o $(OUT_DIR)/tm_region_allocator.o $(OUT_DIR)/tm_hooks.o -o $@
 
 # Queue TX wait test (no plugin — manual API calls)
 $(OUT_DIR)/test_queue_tx_wait.o: $(TEST_DIR)/test_queue_tx_wait.cpp | $(OUT_DIR)

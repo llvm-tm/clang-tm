@@ -44,8 +44,12 @@ extern __thread int32_t tm_longjmp_ret;
 extern __thread sigjmp_buf tm_jmpbuf;
 __thread int tm_init_thread_call_count = 0;
 
-// Define the global queue-active flag locally (queue_runtime.cpp is not linked).
-std::atomic<int> g_tm_queue_global{0};
+// Weak default for the global queue-active flag. queue_runtime.cpp provides a
+// strong definition; when the queue runtime is linked alongside this backend the
+// strong one wins. Built standalone (leftright without the queue runtime), the
+// weak definition here is used. Avoids a duplicate-symbol error when both TUs
+// are linked together (the leftright queue tests do exactly that).
+__attribute__((weak)) std::atomic<int> g_tm_queue_global{0};
 
 extern const TMRealHooks g_leftright_hooks;
 
