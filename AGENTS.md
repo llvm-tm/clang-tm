@@ -46,7 +46,7 @@ Start at [`docs/README.md`](docs/README.md) (index of all docs). Key entries:
 
 ## Key conventions
 
-- **Hooks**: every C++ backend registers a `TMRealHooks` table (22 function
+- **Hooks**: every C++ backend registers a   `TMRealHooks` table (23 function
   pointers) via `tm_register_real_hooks()`. Hook functions must be `static`.
   In `LLVM_TM_PLUGIN` builds, `tm_init`/`tm_exit`/`tm_init_thread`/
   `tm_exit_thread` are DATA variables (function pointers), not TEXT functions —
@@ -74,7 +74,7 @@ Start at [`docs/README.md`](docs/README.md) (index of all docs). Key entries:
 ## Verification before you stop
 
 - C++ backend change → `make -C benchmarks/cpp bin/test_tx BACKEND=<B>` and
-  `bin/test_ds BACKEND=<B>` (114 / 207 tests).
+  `bin/test_ds BACKEND=<B>` (120 / 207 tests).
 - Plugin change → `make -C plugin run`.
 - Rust change → `cargo test` in the affected crate (use `--test-threads=1` for
   the workspace `tm` crate to avoid a pre-existing Condvar race).

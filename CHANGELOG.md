@@ -3034,3 +3034,31 @@ throughput benchmark to make the column measured.
   t4, flatness 1.3× vs 3.8×) and the networked-caveat kept. Book 363pp,
   ch07 warning count identical to baseline (6 vs 6). README of
   research/ec-bank documents the bench; TODO EC follow-up updated.
+
+## Session 2026-10-16 — realloc correctness, macOS portability, doc counts
+
+Full-tree review follow-up. Three fixes:
+
+- **macOS explicit-API link failure**: `tm_region_allocator.cpp`'s B-30
+  static-global bridge used an undefined *weak* data reference, which the
+  Mach-O linker rejects — every `benchmarks/cpp` link failed on macOS even
+  though CI (Linux-only) stayed green. The bridge is now `#if defined(__ELF__)`;
+  macOS plugin-mode bridging is tracked in `TODO.md`.
+- **Region-allocator realloc**: 11 backends hand-rolled `real_tm_realloc` with
+  `memcpy(p, ptr, size)` using the NEW size (heap over-read when growing) or
+  dropped the old contents entirely (TinySTM). All now route through
+  `stm::tm_region_realloc` (copies min(old,new)); speculative-alloc backends
+  `tm_untrack_spec_alloc()` the old pointer first. GACCO/JVSTM also stopped
+  leaking the old block.
+- **Docs**: reconciled `TMRealHooks` field count (22→23), plugin-test count
+  (18→11), `test_tx` count (114→120) and the check-fast backend list across
+  README/AGENTS/CONTRIBUTING/DEVELOPER_GUIDE/POST_MERGE_TEST_PLAN.
+
+**Files changed**: backends/tm_impl/{tm_region_allocator,norec,tl2,swisstm,
+tsc_tm,mvlog,tiny_stm,eager_broken,power8_htm,nvhtm,gacco,jvstm}, new
+`test_tm_realloc` in tests/explicit-api/test_tx.cpp, docs.
+
+**Verification** (macOS arm64, LLVM 22, Rust 1.99.1): `test_tx` 120/120 and
+`test_ds` 207/207 for NOREC/TINYSTM/TL2/SWISSTM/TSC_TM/MVLOG/NORECBF/CSMV;
+NOREC ASan build clean; `bank --test` money conserved; plugin suite 11/11;
+simulator 112 tests; Rust workspace 41 tests; fmt/clippy clean.

@@ -537,7 +537,7 @@ MVLog is within ~1–4% of NOrec across workloads (commit lock + slot-claim over
 ## Shared Infrastructure
 
 ### Hook System (`backends/tm_impl/common/tm_hooks.hpp`)
-- `TMRealHooks` struct with 21 function pointers (7 reads, 7 writes, 5 lifecycle, 2 misc)
+- `TMRealHooks` struct with 23 function pointers (7 reads, 7 writes, 4 alloc, 5 lifecycle)
 - `tm_register_real_hooks()` — registers a backend's hooks
 - `tm_swap_runtime()` — runtime backend switching
 - `tm_get_real_hooks()` — retrieve registered hooks

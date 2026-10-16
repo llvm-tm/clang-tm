@@ -24,7 +24,7 @@ labels: backend
 ## Validation plan
 
 <!-- How will you prove correctness?
-     - C++: test_tx (114) + test_ds (207) on the new backend
+     - C++: test_tx (120) + test_ds (207) on the new backend
      - Rust: cargo test --features <name> -p tm
      - TLA+ model? (see docs/proofs.md)
      - Simulator fidelity check? -->

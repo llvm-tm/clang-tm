@@ -19,7 +19,7 @@ verify. See [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md).
 Before you push, the fast smoke gate must pass:
 
 ```sh
-make check-fast   # ~60s: plugin + 3 C++ backends + Rust sim + workspace
+make check-fast   # ~60s: plugin + 4 C++ backends + Rust sim + workspace
 ```
 
 Formatting is enforced in CI (`make fmt-check`). Run it locally before opening
@@ -49,13 +49,13 @@ so the Toolchain requirements above must be met.
 ## How to add a C++ backend
 
 1. Create `backends/tm_impl/<name>/<Name>_runtime.cpp` and `<name>.hpp`.
-2. Implement the 22+ `static` hook functions (begin/end, read/write for 7
+2. Implement the 23 `static` hook functions (begin/end, read/write for 7
    types, alloc, env).
 3. Build a `TMRealHooks` registration table with all function pointers.
 4. Register via `tm_register_real_hooks()` in `tm_init()`.
 5. Add an `ifeq (BACKEND,<NAME>)` block in `benchmarks/cpp/Makefile`.
 6. Test: `make -C benchmarks/cpp bin/test_tx BACKEND=<NAME>` and
-   `bin/test_ds BACKEND=<NAME>` (114 / 207 tests).
+   `bin/test_ds BACKEND=<NAME>` (120 / 207 tests).
 
 Hooks must be `static`. In `LLVM_TM_PLUGIN` builds, `tm_init`/`tm_exit`/
 `tm_init_thread`/`tm_exit_thread` are DATA variables (function pointers), not

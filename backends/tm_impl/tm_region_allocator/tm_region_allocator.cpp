@@ -60,9 +60,16 @@ static std::atomic<int> g_region_inited{0};
 // untracked (isTMGlobal()==false) and their accesses bypassed version/lock
 // bookkeeping — a silent data race (B-30). We bridge the two mechanisms here,
 // once, at tm_region_init() (called from every backend's real_tm_init before
-// any transaction runs). Declared weak so explicit-API builds (which compile
-// this file but have no plugin, hence no table) still link: the weak count then
-// reads 0 and the loop is skipped.
+// any transaction runs).
+//
+// Portability: the bridge relies on an *undefined weak* data reference — a
+// GNU-ld/ELF feature that lets an explicit-API build (no plugin, hence no
+// table) link with the reference reading 0. The Mach-O linker (macOS) rejects
+// undefined weak data references outright, which broke every explicit-API link
+// on macOS. We therefore only take this path on ELF targets; elsewhere the
+// bridge is compiled out (the table is unavailable to non-plugin builds
+// anyway). TODO.md: macOS plugin-mode static-global bridging.
+#if defined(__ELF__)
 extern "C" {
 extern const uint32_t tm_symbol_count __attribute__((weak));
 extern void *const tm_symbol_addresses[] __attribute__((weak));
@@ -96,6 +103,9 @@ static void registerStaticTMSymbols()
 			    TMGlobalRange{(const char *)addr, (const char *)addr + size});
 	}
 }
+#else
+static void registerStaticTMSymbols() {}
+#endif
 
 // ── Size class table (compile-time) ───────────────────────
 static constexpr uint16_t kSizeTable[MAX_CLASSES] = {16,   24,   32,   40,   48,   56,

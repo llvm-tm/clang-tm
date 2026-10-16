@@ -39,7 +39,7 @@ The TM API C++ project implements Software Transactional Memory (STM) across 26 
 
 ```
 make                            # Print help (default target; same as `make help`)
-make check-fast                 # ~60s smoke: plugin + 3 C++ backends + Rust (start here)
+make check-fast                 # ~60s smoke: plugin + 4 C++ backends + Rust (start here)
 make all                        # Build plugin + plugin-benchmarks + expli-benchmarks
 make plugin                     # Build libTMInstrument.so
 make -C benchmarks/cpp all      # Build all expli benchmarks (BACKEND=tinystm default)
@@ -56,7 +56,7 @@ Backend selection: `BACKEND={TINYSTM,WBETL,WT,NOREC,NORECBF,SWISSTM,TL2,TSC_TM,M
 
 ```
 make -C benchmarks/cpp bin/test_tx BACKEND=NOREC
-./benchmarks/cpp/bin/test_tx    # 114 tests
+./benchmarks/cpp/bin/test_tx    # 120 tests
 make -C benchmarks/cpp bin/test_ds BACKEND=NOREC
 ./benchmarks/cpp/bin/test_ds    # 207 tests
 ```
@@ -127,7 +127,7 @@ Pipeline: `collect → clone → redirect → instrument-fn → cleanup`
 ## How to Add a C++ Backend
 
 1. Create `backends/tm_impl/<name>/<Name>_runtime.cpp` and `<name>.hpp`
-2. Implement 22+ static hook functions (begin, end, read/write for 7 types, alloc, env)
+2. Implement 23 static hook functions (begin, end, read/write for 7 types, alloc, env)
 3. Build a `TMRealHooks` registration table with all function pointers
 4. Register via `tm_register_real_hooks()` in `tm_init()`
 5. Add `ifeq (BACKEND,<NAME>)` block in `benchmarks/cpp/Makefile`
@@ -146,7 +146,7 @@ Pipeline: `collect → clone → redirect → instrument-fn → cleanup`
 
 | Test | Command | Count |
 |------|---------|-------|
-| Transaction correctness | `make -C benchmarks/cpp bin/test_tx BACKEND=NOREC` | 114 |
+| Transaction correctness | `make -C benchmarks/cpp bin/test_tx BACKEND=NOREC` | 120 |
 | Data structure correctness | `make -C benchmarks/cpp bin/test_ds BACKEND=NOREC` | 207 |
 | All C++ backends | `make check-all` | 17 in `$(BACKENDS_TESTS)` × 321 each (SGL/LEFTRIGHT/ROMULUS require manual `./bin/test_tx`) |
 | Plugin tests | `make -C plugin run` | ~25 instrumented + 2 race + 1 persist-sgl |
@@ -169,7 +169,7 @@ debug patches + Rust `tm-sim` trace replay, with a worked `bank_tl2` example).
 
 ## Key Patterns
 
-- **Hooks**: All C++ backends register via `TMRealHooks` struct (22 function pointers). Hooks must be `static` to avoid TEXT-vs-DATA symbol conflicts.
+- **Hooks**: All C++ backends register via `TMRealHooks` struct (23 function pointers). Hooks must be `static` to avoid TEXT-vs-DATA symbol conflicts.
 - **Allocation**: `tm_region_malloc` allocates from a fixed mmap'd region. Inside transactions, `tm_track_spec_alloc` adds to the speculative allocation list (cleared on abort).
 - **TLS**: Three shared TLS variables (`tm_jmpbuf`, `tm_nested_call_counter`, `tm_longjmp_ret`) defined in `tm_hooks.cpp`.
 - **Simulation**: Rust backends gate thread-local state behind `#[cfg(feature = "simulation")]` — replaces `thread_local!` with `SyncUnsafeCell<HashMap<u64, State>>`. No `Mutex` needed since the simulator is single-threaded. Currently enabled for: norec, tl2, tinystm, romulus, swisstm, mvlog, tsc-tm, tsx_sim.

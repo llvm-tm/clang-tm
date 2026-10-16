@@ -34,7 +34,7 @@ smoke, and the known-broken cases are called out inline).
 
 ## 1. C++ explicit-API correctness (backends)
 
-Primary gate: `benchmarks/cpp` `test_tx` (114/114) + `test_ds` (207/207)
+Primary gate: `benchmarks/cpp` `test_tx` (120/120) + `test_ds` (207/207)
 across all backends. The top-level `check-all` target automates this.
 
 ```sh
@@ -84,7 +84,7 @@ make check-all            # 17 backends: TINYSTM WBETL WT NOREC NORECBF SWISSTM
 
 - [ ] `make -C plugin` builds `libTMInstrument.so`, `libTMRaceChecker.so`,
       `libTMFuzzStrategy.so`
-- [ ] `make -C plugin run` — all 18 plugin tests pass
+- [ ] `make -C plugin run` — all 11 plugin tests pass
 - [ ] `make -C plugin run_noinst` (uninstrumented variants)
 - [ ] `make -C plugin test_persist_sgl` (persistence)
 - [ ] `make -C plugin/bank bank_tinystm` builds a plugin-instrumented binary

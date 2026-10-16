@@ -177,12 +177,13 @@ static void *real_tm_calloc(size_t nmemb, size_t size)
 }
 static void *real_tm_realloc(void *ptr, size_t size)
 {
-	void *p = stm::tm_region_malloc(size);
-	if (ptr) {
-		memcpy(p, ptr, size);
-		stm::tm_region_free(ptr);
-	}
-	return tm_track_alloc_result(p, size);
+	// Route through the region allocator's realloc, which copies
+	// min(old_size, new_size) bytes. The previous hand-rolled version
+	// memcpy'd `size` (the NEW size) out of the old block — a heap
+	// over-read whenever the allocation grew. Untrack the old pointer
+	// first so a later abort does not double-free it.
+	tm_untrack_spec_alloc(ptr);
+	return tm_track_alloc_result(stm::tm_region_realloc(ptr, size), size);
 }
 static void real_tm_free(void *ptr)
 {

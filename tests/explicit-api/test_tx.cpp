@@ -156,6 +156,53 @@ static void test_tm_calloc()
 	printf("      (tm_calloc inside TX works — no crash)\n");
 }
 
+// ── Test TM::realloc preserves contents ─────────────────────
+// Regression: backends used to memcpy the NEW size out of the old block
+// (heap over-read when growing) or drop the old contents entirely.
+// Under the CI ASan job an over-read aborts; a plain run catches the
+// lost-contents variant.
+static void test_tm_realloc()
+{
+	expli::TM<int>::begin();
+
+	const int n_old = 16;
+	int *p = (int *)expli::TM<int>::malloc(n_old * sizeof(int));
+	CHECK(p != nullptr, "tm_realloc malloc");
+	for (int i = 0; i < n_old; i++) {
+		p[i] = i + 1;
+		expli::TM<int>::write_at(&p[i], p[i]);
+	}
+
+	// Grow: the first n_old elements must survive.
+	const int n_new = 64;
+	int *q = (int *)expli::TM<int>::realloc(p, n_new * sizeof(int));
+	CHECK(q != nullptr, "tm_realloc grow returns non-null");
+	bool preserved = true;
+	for (int i = 0; i < n_old; i++)
+		if (q[i] != i + 1)
+			preserved = false;
+	CHECK(preserved, "tm_realloc grow preserves contents");
+
+	// The newly-grown tail is writable and readable.
+	for (int i = n_old; i < n_new; i++)
+		expli::TM<int>::write_at(&q[i], i);
+	CHECK(expli::TM<int>::read_at(&q[n_new - 1]) == n_new - 1,
+	      "tm_realloc tail writable");
+
+	// Shrink: min(old, new) elements survive.
+	int *r = (int *)expli::TM<int>::realloc(q, 8 * sizeof(int));
+	CHECK(r != nullptr, "tm_realloc shrink returns non-null");
+	preserved = true;
+	for (int i = 0; i < 8; i++)
+		if (r[i] != i + 1)
+			preserved = false;
+	CHECK(preserved, "tm_realloc shrink preserves prefix");
+
+	expli::TM<int>::free(r);
+	expli::TM<int>::end();
+	printf("      (tm_realloc grow/shrink preserves contents — no crash)\n");
+}
+
 // ── Test TM<int*> (pointer specialization) ──────────────────
 static void test_tm_pointer()
 {
@@ -249,6 +296,8 @@ int main()
 	printf("  tm_malloc/free:   %s\n", failures ? "FAIL" : "PASS");
 	test_tm_calloc();
 	printf("  tm_calloc:        %s\n", failures ? "FAIL" : "PASS");
+	test_tm_realloc();
+	printf("  tm_realloc:       %s\n", failures ? "FAIL" : "PASS");
 	test_tm_pointer();
 	printf("  TM<int*> ptr:     %s\n", failures ? "FAIL" : "PASS");
 	test_tm_ptr_operator();

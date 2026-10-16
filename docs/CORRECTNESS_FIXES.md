@@ -609,6 +609,35 @@ env, per-thread counters merged at `tm_exit_thread`) added alongside —
 counters must stay thread-local: an atomic incremented inside the live
 transaction makes the counter line itself a conflict source.
 
+## 20. Region-allocator `realloc` over-read and lost contents ✅
+
+**Symptom.** `real_tm_realloc` in 11 backends copied into the new block the
+number of bytes given by the *new* size (`memcpy(p, ptr, size)`), reading past
+the end of the old allocation whenever it grew — an out-of-bounds read that
+ASan flags (heap-buffer-overflow) but a plain run usually survives. TinySTM's
+variant didn't copy at all: it zeroed the new block and freed the old one,
+silently discarding the contents.
+
+**Root cause.** Each backend re-implemented realloc instead of using the
+region allocator's correct helper (`stm::tm_region_realloc`, which copies
+`min(old_size, new_size)`).
+
+**Fix.** Route every `real_tm_realloc` through `stm::tm_region_realloc`.
+Backends that track speculative allocations call `tm_untrack_spec_alloc(ptr)`
+first so a later abort does not double-free the replaced block; GACCO/JVSTM,
+which never freed the old block, now do.
+
+**Files.** `backends/tm_impl/{norec,tl2,swisstm,tsc_tm,mvlog,tiny_stm,
+eager_broken,power8_htm,nvhtm,gacco,jvstm}/*_runtime.cpp`.
+
+**Regression test.** `test_tm_realloc` in `tests/explicit-api/test_tx.cpp`
+grows and shrinks a TM allocation inside a TX and checks the prefix survives;
+it runs under the CI ASan job (NOREC/TL2).
+
+**Verification.** `test_tx` 120/120 for NOREC/TINYSTM/TL2/SWISSTM/TSC_TM/
+MVLOG/NORECBF/CSMV; NOREC ASan build clean; `test_ds` 207/207; bank money
+conserved.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |

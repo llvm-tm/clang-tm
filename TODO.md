@@ -233,6 +233,20 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
 
 ---
 
+### macOS plugin-mode static-global bridging (P2)
+- **File**: `backends/tm_impl/tm_region_allocator/tm_region_allocator.cpp`
+- **Issue**: The `registerStaticTMSymbols()` bridge (review-04 B-30/B-21)
+  consumes the plugin-emitted `tm_symbol_{count,addresses,sizes}` table via an
+  *undefined weak* data reference — a GNU-ld/ELF feature. The Mach-O linker
+  rejects such references, which broke every explicit-API link on macOS. The
+  bridge is now compiled out on non-ELF targets (`#if defined(__ELF__)`), which
+  unblocks macOS explicit-API builds but disables the B-30 static-global bridge
+  for macOS *plugin* builds.
+- **Next step**: restore the bridge on Mach-O. Options: have the plugin emit a
+  concrete accessor the runtime can call, or gate a strong reference behind
+  `-DLLVM_TM_PLUGIN` and add `-Wl,-undefined,dynamic_lookup` to the macOS
+  plugin link line. Add a macOS CI job so this stays fixed.
+
 ### Regenerate docs/book/digest.txt against the post-Ch.7 structure (P2)
 - **Status 2026-10**: digest carries a staleness banner and a new Ch.7 entry
   plus corrected front-matter bullets, but its per-chapter entries still use

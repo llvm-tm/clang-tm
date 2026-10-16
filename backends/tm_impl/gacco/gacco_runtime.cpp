@@ -348,12 +348,10 @@ static void *real_tm_calloc(size_t n, size_t s)
 }
 static void *real_tm_realloc(void *p, size_t s)
 {
-	if (!p)
-		return stm::tm_region_malloc(s);
-	void *n = stm::tm_region_malloc(s);
-	if (n && p)
-		memcpy(n, p, s);
-	return n;
+	// Region-allocator realloc copies min(old, new) bytes and releases the
+	// old block; the previous version copied the NEW size (over-read) and
+	// never freed the old block (leak).
+	return stm::tm_region_realloc(p, s);
 }
 static void real_tm_free(void *p)
 {

@@ -392,11 +392,11 @@ static void *real_tm_calloc(size_t nmemb, size_t size)
 }
 static void *real_tm_realloc(void *ptr, size_t size)
 {
-	void *p = stm::tm_region_malloc(size);
-	memset(p, 0, size);
-	if (ptr) {
-		stm::tm_region_free(ptr);
-	}
+	// Use the region allocator's realloc (copies min(old, new) bytes).
+	// The previous version zeroed the new block and dropped the old
+	// contents entirely — a silent data loss on every realloc.
+	tm_untrack_spec_alloc(ptr);
+	void *p = stm::tm_region_realloc(ptr, size);
 	tm_track_spec_alloc(p);
 	return p;
 }

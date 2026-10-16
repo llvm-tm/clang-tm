@@ -180,11 +180,10 @@ static void *real_tm_calloc(size_t nmemb, size_t size)
 
 static void *real_tm_realloc(void *ptr, size_t size)
 {
-	void *p = stm::tm_region_malloc(size);
-	if (ptr) {
-		memcpy(p, ptr, size);
-		stm::tm_region_free(ptr);
-	}
+	// Region-allocator realloc copies min(old, new) bytes; the previous
+	// version memcpy'd the NEW size out of the old block (over-read).
+	tm_untrack_spec_alloc(ptr);
+	void *p = stm::tm_region_realloc(ptr, size);
 	tm_track_spec_alloc(p);
 	return p;
 }

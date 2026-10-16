@@ -72,8 +72,8 @@ cargo run --release --bin bank -- -d 100 -t 2 --test
 ## Verify Your Setup
 
 ```bash
-# ~60s smoke test: plugin + 18 instrumented plugin tests +
-# test_tx/test_ds for TINYSTM/NOREC/TL2 + Rust simulator + Rust workspace.
+# ~60s smoke test: plugin + 11 instrumented plugin tests +
+# test_tx/test_ds for TINYSTM/NOREC/TL2/CSMV + Rust simulator + Rust workspace.
 # Stops at the first failure.
 make check-fast
 

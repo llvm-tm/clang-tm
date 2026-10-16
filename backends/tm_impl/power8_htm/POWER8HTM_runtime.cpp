@@ -243,14 +243,11 @@ static void *real_tm_calloc(size_t n, size_t s)
 }
 static void *real_tm_realloc(void *p, size_t s)
 {
-	if (!p)
-		return real_tm_malloc(s);
-	void *np = stm::tm_region_malloc(s);
-	if (np) {
-		std::memcpy(np, p, s);
-		stm::tm_region_free(p);
-		tm_track_spec_alloc(np);
-	}
+	// Region-allocator realloc copies min(old, new) bytes; the previous
+	// version memcpy'd the NEW size out of the old block (over-read).
+	tm_untrack_spec_alloc(p);
+	void *np = stm::tm_region_realloc(p, s);
+	tm_track_spec_alloc(np);
 	return np;
 }
 static void real_tm_free(void *p)
