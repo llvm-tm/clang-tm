@@ -17,6 +17,32 @@ pub enum Backend {
     TsxSim,
 }
 
+// Expand to an eight-arm `match self` that dispatches the given call to the
+// matching `runtime_*` crate. Every simulation backend exposes the same
+// `tm_*` / `sim::*` API, so the call tokens are reused verbatim:
+//
+//     dispatch_backend!(self, tm_begin())
+//     dispatch_backend!(self, sim::set_thread_id(id))
+//     dispatch_backend!(self, tm_write_u32(addr, val))
+//
+// Methods that are not a homogeneous one-to-one forward (TSX-only `try_begin`,
+// per-backend snapshot/restore types, `is_*` predicates) are written out by
+// hand instead.
+macro_rules! dispatch_backend {
+    ($self:expr, $($call:tt)*) => {
+        match $self {
+            Backend::Norec => runtime_norec::$($call)*,
+            Backend::Tl2 => runtime_tl2::$($call)*,
+            Backend::Tinystm => runtime_tinystm::$($call)*,
+            Backend::Romulus => runtime_romulus::$($call)*,
+            Backend::Swisstm => runtime_swisstm::$($call)*,
+            Backend::Mvlog => runtime_mvlog::$($call)*,
+            Backend::TscTm => runtime_tsc_tm::$($call)*,
+            Backend::TsxSim => runtime_tsx_sim::$($call)*,
+        }
+    };
+}
+
 impl Backend {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
@@ -46,42 +72,15 @@ impl Backend {
     }
 
     pub fn init(&self) {
-        match self {
-            Backend::Norec => runtime_norec::tm_init(),
-            Backend::Tl2 => runtime_tl2::tm_init(),
-            Backend::Tinystm => runtime_tinystm::tm_init(),
-            Backend::Romulus => runtime_romulus::tm_init(),
-            Backend::Swisstm => runtime_swisstm::tm_init(),
-            Backend::Mvlog => runtime_mvlog::tm_init(),
-            Backend::TscTm => runtime_tsc_tm::tm_init(),
-            Backend::TsxSim => runtime_tsx_sim::tm_init(),
-        }
+        dispatch_backend!(self, tm_init())
     }
 
     pub fn init_thread(&self) {
-        match self {
-            Backend::Norec => runtime_norec::tm_init_thread(),
-            Backend::Tl2 => runtime_tl2::tm_init_thread(),
-            Backend::Tinystm => runtime_tinystm::tm_init_thread(),
-            Backend::Romulus => runtime_romulus::tm_init_thread(),
-            Backend::Swisstm => runtime_swisstm::tm_init_thread(),
-            Backend::Mvlog => runtime_mvlog::tm_init_thread(),
-            Backend::TscTm => runtime_tsc_tm::tm_init_thread(),
-            Backend::TsxSim => runtime_tsx_sim::tm_init_thread(),
-        }
+        dispatch_backend!(self, tm_init_thread())
     }
 
     pub fn begin(&self) {
-        match self {
-            Backend::Norec => runtime_norec::tm_begin(),
-            Backend::Tl2 => runtime_tl2::tm_begin(),
-            Backend::Tinystm => runtime_tinystm::tm_begin(),
-            Backend::Romulus => runtime_romulus::tm_begin(),
-            Backend::Swisstm => runtime_swisstm::tm_begin(),
-            Backend::Mvlog => runtime_mvlog::tm_begin(),
-            Backend::TscTm => runtime_tsc_tm::tm_begin(),
-            Backend::TsxSim => runtime_tsx_sim::tm_begin(),
-        }
+        dispatch_backend!(self, tm_begin())
     }
 
     /// Attempt to begin a transaction.  Returns `true` if TSX was entered
@@ -108,166 +107,49 @@ impl Backend {
     }
 
     pub fn commit(&self) -> bool {
-        match self {
-            Backend::Norec => runtime_norec::tm_commit(),
-            Backend::Tl2 => runtime_tl2::tm_commit(),
-            Backend::Tinystm => runtime_tinystm::tm_commit(),
-            Backend::Romulus => runtime_romulus::tm_commit(),
-            Backend::Swisstm => runtime_swisstm::tm_commit(),
-            Backend::Mvlog => runtime_mvlog::tm_commit(),
-            Backend::TscTm => runtime_tsc_tm::tm_commit(),
-            Backend::TsxSim => runtime_tsx_sim::tm_commit(),
-        }
+        dispatch_backend!(self, tm_commit())
     }
 
     pub fn abort(&self) {
-        match self {
-            Backend::Norec => runtime_norec::tm_abort(),
-            Backend::Tl2 => runtime_tl2::tm_abort(),
-            Backend::Tinystm => runtime_tinystm::tm_abort(),
-            Backend::Romulus => runtime_romulus::tm_abort(),
-            Backend::Swisstm => runtime_swisstm::tm_abort(),
-            Backend::Mvlog => runtime_mvlog::tm_abort(),
-            Backend::TscTm => runtime_tsc_tm::tm_abort(),
-            Backend::TsxSim => runtime_tsx_sim::tm_abort(),
-        }
+        dispatch_backend!(self, tm_abort())
     }
 
     pub fn sim_set_thread_id(&self, id: u64) {
-        match self {
-            Backend::Norec => runtime_norec::sim::set_thread_id(id),
-            Backend::Tl2 => runtime_tl2::sim::set_thread_id(id),
-            Backend::Tinystm => runtime_tinystm::sim::set_thread_id(id),
-            Backend::Romulus => runtime_romulus::sim::set_thread_id(id),
-            Backend::Swisstm => runtime_swisstm::sim::set_thread_id(id),
-            Backend::Mvlog => runtime_mvlog::sim::set_thread_id(id),
-            Backend::TscTm => runtime_tsc_tm::sim::set_thread_id(id),
-            Backend::TsxSim => runtime_tsx_sim::sim::set_thread_id(id),
-        }
+        dispatch_backend!(self, sim::set_thread_id(id))
     }
 
     pub fn sim_clear_thread_id(&self) {
-        match self {
-            Backend::Norec => runtime_norec::sim::clear_thread_id(),
-            Backend::Tl2 => runtime_tl2::sim::clear_thread_id(),
-            Backend::Tinystm => runtime_tinystm::sim::clear_thread_id(),
-            Backend::Romulus => runtime_romulus::sim::clear_thread_id(),
-            Backend::Swisstm => runtime_swisstm::sim::clear_thread_id(),
-            Backend::Mvlog => runtime_mvlog::sim::clear_thread_id(),
-            Backend::TscTm => runtime_tsc_tm::sim::clear_thread_id(),
-            Backend::TsxSim => runtime_tsx_sim::sim::clear_thread_id(),
-        }
+        dispatch_backend!(self, sim::clear_thread_id())
     }
 
     pub fn sim_reset(&self) {
-        match self {
-            Backend::Norec => runtime_norec::sim::reset(),
-            Backend::Tl2 => runtime_tl2::sim::reset(),
-            Backend::Tinystm => runtime_tinystm::sim::reset(),
-            Backend::Romulus => runtime_romulus::sim::reset(),
-            Backend::Swisstm => runtime_swisstm::sim::reset(),
-            Backend::Mvlog => runtime_mvlog::sim::reset(),
-            Backend::TscTm => runtime_tsc_tm::sim::reset(),
-            Backend::TsxSim => runtime_tsx_sim::sim::reset(),
-        }
+        dispatch_backend!(self, sim::reset())
     }
 
     pub fn read_u8(&self, addr: *mut u8) -> u8 {
-        match self {
-            Backend::Norec => runtime_norec::tm_read_u8(addr),
-            Backend::Tl2 => runtime_tl2::tm_read_u8(addr),
-            Backend::Tinystm => runtime_tinystm::tm_read_u8(addr),
-            Backend::Romulus => runtime_romulus::tm_read_u8(addr),
-            Backend::Swisstm => runtime_swisstm::tm_read_u8(addr),
-            Backend::Mvlog => runtime_mvlog::tm_read_u8(addr),
-            Backend::TscTm => runtime_tsc_tm::tm_read_u8(addr),
-            Backend::TsxSim => runtime_tsx_sim::tm_read_u8(addr),
-        }
+        dispatch_backend!(self, tm_read_u8(addr))
     }
     pub fn read_u16(&self, addr: *mut u16) -> u16 {
-        match self {
-            Backend::Norec => runtime_norec::tm_read_u16(addr),
-            Backend::Tl2 => runtime_tl2::tm_read_u16(addr),
-            Backend::Tinystm => runtime_tinystm::tm_read_u16(addr),
-            Backend::Romulus => runtime_romulus::tm_read_u16(addr),
-            Backend::Swisstm => runtime_swisstm::tm_read_u16(addr),
-            Backend::Mvlog => runtime_mvlog::tm_read_u16(addr),
-            Backend::TscTm => runtime_tsc_tm::tm_read_u16(addr),
-            Backend::TsxSim => runtime_tsx_sim::tm_read_u16(addr),
-        }
+        dispatch_backend!(self, tm_read_u16(addr))
     }
     pub fn read_u32(&self, addr: *mut u32) -> u32 {
-        match self {
-            Backend::Norec => runtime_norec::tm_read_u32(addr),
-            Backend::Tl2 => runtime_tl2::tm_read_u32(addr),
-            Backend::Tinystm => runtime_tinystm::tm_read_u32(addr),
-            Backend::Romulus => runtime_romulus::tm_read_u32(addr),
-            Backend::Swisstm => runtime_swisstm::tm_read_u32(addr),
-            Backend::Mvlog => runtime_mvlog::tm_read_u32(addr),
-            Backend::TscTm => runtime_tsc_tm::tm_read_u32(addr),
-            Backend::TsxSim => runtime_tsx_sim::tm_read_u32(addr),
-        }
+        dispatch_backend!(self, tm_read_u32(addr))
     }
     pub fn read_u64(&self, addr: *mut u64) -> u64 {
-        match self {
-            Backend::Norec => runtime_norec::tm_read_u64(addr),
-            Backend::Tl2 => runtime_tl2::tm_read_u64(addr),
-            Backend::Tinystm => runtime_tinystm::tm_read_u64(addr),
-            Backend::Romulus => runtime_romulus::tm_read_u64(addr),
-            Backend::Swisstm => runtime_swisstm::tm_read_u64(addr),
-            Backend::Mvlog => runtime_mvlog::tm_read_u64(addr),
-            Backend::TscTm => runtime_tsc_tm::tm_read_u64(addr),
-            Backend::TsxSim => runtime_tsx_sim::tm_read_u64(addr),
-        }
+        dispatch_backend!(self, tm_read_u64(addr))
     }
 
     pub fn write_u8(&self, addr: *mut u8, val: u8) {
-        match self {
-            Backend::Norec => runtime_norec::tm_write_u8(addr, val),
-            Backend::Tl2 => runtime_tl2::tm_write_u8(addr, val),
-            Backend::Tinystm => runtime_tinystm::tm_write_u8(addr, val),
-            Backend::Romulus => runtime_romulus::tm_write_u8(addr, val),
-            Backend::Swisstm => runtime_swisstm::tm_write_u8(addr, val),
-            Backend::Mvlog => runtime_mvlog::tm_write_u8(addr, val),
-            Backend::TscTm => runtime_tsc_tm::tm_write_u8(addr, val),
-            Backend::TsxSim => runtime_tsx_sim::tm_write_u8(addr, val),
-        }
+        dispatch_backend!(self, tm_write_u8(addr, val))
     }
     pub fn write_u16(&self, addr: *mut u16, val: u16) {
-        match self {
-            Backend::Norec => runtime_norec::tm_write_u16(addr, val),
-            Backend::Tl2 => runtime_tl2::tm_write_u16(addr, val),
-            Backend::Tinystm => runtime_tinystm::tm_write_u16(addr, val),
-            Backend::Romulus => runtime_romulus::tm_write_u16(addr, val),
-            Backend::Swisstm => runtime_swisstm::tm_write_u16(addr, val),
-            Backend::Mvlog => runtime_mvlog::tm_write_u16(addr, val),
-            Backend::TscTm => runtime_tsc_tm::tm_write_u16(addr, val),
-            Backend::TsxSim => runtime_tsx_sim::tm_write_u16(addr, val),
-        }
+        dispatch_backend!(self, tm_write_u16(addr, val))
     }
     pub fn write_u32(&self, addr: *mut u32, val: u32) {
-        match self {
-            Backend::Norec => runtime_norec::tm_write_u32(addr, val),
-            Backend::Tl2 => runtime_tl2::tm_write_u32(addr, val),
-            Backend::Tinystm => runtime_tinystm::tm_write_u32(addr, val),
-            Backend::Romulus => runtime_romulus::tm_write_u32(addr, val),
-            Backend::Swisstm => runtime_swisstm::tm_write_u32(addr, val),
-            Backend::Mvlog => runtime_mvlog::tm_write_u32(addr, val),
-            Backend::TscTm => runtime_tsc_tm::tm_write_u32(addr, val),
-            Backend::TsxSim => runtime_tsx_sim::tm_write_u32(addr, val),
-        }
+        dispatch_backend!(self, tm_write_u32(addr, val))
     }
     pub fn write_u64(&self, addr: *mut u64, val: u64) {
-        match self {
-            Backend::Norec => runtime_norec::tm_write_u64(addr, val),
-            Backend::Tl2 => runtime_tl2::tm_write_u64(addr, val),
-            Backend::Tinystm => runtime_tinystm::tm_write_u64(addr, val),
-            Backend::Romulus => runtime_romulus::tm_write_u64(addr, val),
-            Backend::Swisstm => runtime_swisstm::tm_write_u64(addr, val),
-            Backend::Mvlog => runtime_mvlog::tm_write_u64(addr, val),
-            Backend::TscTm => runtime_tsc_tm::tm_write_u64(addr, val),
-            Backend::TsxSim => runtime_tsx_sim::tm_write_u64(addr, val),
-        }
+        dispatch_backend!(self, tm_write_u64(addr, val))
     }
 
     /// Serialize the backend's per-thread state to a byte blob.
@@ -385,30 +267,12 @@ impl Backend {
 
     /// Take snapshot of internal sync counters and reset them.
     pub fn take_stats(&self) -> runtime_core::SyncCounters {
-        match self {
-            Backend::Norec => runtime_norec::sim::take_stats(),
-            Backend::Tl2 => runtime_tl2::sim::take_stats(),
-            Backend::Tinystm => runtime_tinystm::sim::take_stats(),
-            Backend::Romulus => runtime_romulus::sim::take_stats(),
-            Backend::Swisstm => runtime_swisstm::sim::take_stats(),
-            Backend::Mvlog => runtime_mvlog::sim::take_stats(),
-            Backend::TscTm => runtime_tsc_tm::sim::take_stats(),
-            Backend::TsxSim => runtime_tsx_sim::sim::take_stats(),
-        }
+        dispatch_backend!(self, sim::take_stats())
     }
 
     /// Print internal sync counters to stderr.
     pub fn print_stats(&self, s: &runtime_core::SyncCounters) {
-        match self {
-            Backend::Norec => runtime_norec::sim::print_stats(s),
-            Backend::Tl2 => runtime_tl2::sim::print_stats(s),
-            Backend::Tinystm => runtime_tinystm::sim::print_stats(s),
-            Backend::Romulus => runtime_romulus::sim::print_stats(s),
-            Backend::Swisstm => runtime_swisstm::sim::print_stats(s),
-            Backend::Mvlog => runtime_mvlog::sim::print_stats(s),
-            Backend::TscTm => runtime_tsc_tm::sim::print_stats(s),
-            Backend::TsxSim => runtime_tsx_sim::sim::print_stats(s),
-        }
+        dispatch_backend!(self, sim::print_stats(s))
     }
 }
 
