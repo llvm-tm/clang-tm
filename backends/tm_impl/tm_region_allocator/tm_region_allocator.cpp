@@ -62,27 +62,24 @@ static std::atomic<int> g_region_inited{0};
 // once, at tm_region_init() (called from every backend's real_tm_init before
 // any transaction runs).
 //
-// Portability: the bridge relies on an *undefined weak* data reference — a
-// GNU-ld/ELF feature that lets an explicit-API build (no plugin, hence no
-// table) link with the reference reading 0. The Mach-O linker (macOS) rejects
-// undefined weak data references outright, which broke every explicit-API link
-// on macOS. We therefore only take this path on ELF targets; elsewhere the
-// bridge is compiled out (the table is unavailable to non-plugin builds
-// anyway). TODO.md: macOS plugin-mode static-global bridging.
-#if defined(__ELF__)
+// Portability: instead of the GNU-ld-only *undefined weak reference* trick
+// (which Mach-O rejects outright — it broke every explicit-API link on macOS),
+// we provide *weak definitions* of the table here: count = 0 and empty arrays.
+// An explicit-API build (no plugin) links only these, so the loop below is a
+// no-op. A plugin build additionally links the module's *strong* definitions
+// emitted by createTMSymbolTables(); the linker prefers a strong definition
+// over a weak one on both ELF and Mach-O, so the real table is used. This needs
+// no linker flags and no platform guard.
 extern "C" {
-extern const uint32_t tm_symbol_count __attribute__((weak));
-extern void *const tm_symbol_addresses[] __attribute__((weak));
-extern const uint64_t tm_symbol_sizes[] __attribute__((weak));
+extern __attribute__((weak)) const uint32_t tm_symbol_count = 0;
+extern __attribute__((weak)) void *const tm_symbol_addresses[1] = {nullptr};
+extern __attribute__((weak)) const uint64_t tm_symbol_sizes[1] = {0};
 }
 
 static void registerStaticTMSymbols()
 {
-	// Weak symbols resolve to 0 when the plugin did not emit the table
-	// (e.g. explicit-API builds, or a module with no TM globals).
-	if (&tm_symbol_count == nullptr || tm_symbol_addresses == nullptr ||
-	    tm_symbol_sizes == nullptr)
-		return;
+	// The weak defaults above make this a no-op unless the plugin linked a
+	// real table (count > 0) with matching strong arrays.
 	const uint32_t n = tm_symbol_count;
 	for (uint32_t i = 0; i < n; i++) {
 		void *addr = tm_symbol_addresses[i];
@@ -103,9 +100,6 @@ static void registerStaticTMSymbols()
 			    TMGlobalRange{(const char *)addr, (const char *)addr + size});
 	}
 }
-#else
-static void registerStaticTMSymbols() {}
-#endif
 
 // ── Size class table (compile-time) ───────────────────────
 static constexpr uint16_t kSizeTable[MAX_CLASSES] = {16,   24,   32,   40,   48,   56,

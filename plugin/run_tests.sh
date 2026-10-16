@@ -74,4 +74,10 @@ if [ -x ./bin/test_math_opaque ]; then
   run_test test_math_opaque "Math opaque test PASSED"
 fi
 
+# Static TM-global bridge (B-30): a TM-annotated file-scope counter updated by
+# two threads must not lose increments. Non-zero exit (FAIL) aborts via set -e.
+if [ -x ./bin/test_counter_race ]; then
+  run_test test_counter_race "counter_race: g_counter=200000 (expected 200000) PASS"
+fi
+
 echo "All tests passed."

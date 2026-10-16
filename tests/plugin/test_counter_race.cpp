@@ -21,7 +21,13 @@ MAIN int main()
 	std::thread t2(worker);
 	t1.join();
 	t2.join();
-	printf("counter_race: g_counter=%d (expected 200000)\n", g_counter);
+	// g_counter is a static TM global: without the B-30 static-global bridge
+	// (registerStaticTMSymbols) its accesses bypass the backend's version/lock
+	// bookkeeping and the increments are lost. This is the regression test.
+	const bool ok = (g_counter == 200000);
+	printf("counter_race: g_counter=%d (expected 200000) %s\n",
+	       g_counter,
+	       ok ? "PASS" : "FAIL");
 	fflush(stdout);
-	return 0;
+	return ok ? 0 : 1;
 }
