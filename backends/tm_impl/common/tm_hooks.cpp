@@ -11,7 +11,7 @@
 // ── Shared per-thread TM state (used by all backends) ──────────
 __thread int32_t tm_nested_call_counter = 0;
 __thread int32_t tm_longjmp_ret = 0;
-// Contract: stub_tm_get_thread_state() returns &tm_nested_call_counter and
+// Contract: stub_get_thread_state() returns &tm_nested_call_counter and
 // the plugin pass accesses offsets 0/4/8 (nested_call_counter/longjmp_ret/
 // retry_count).  Keep these three __thread vars adjacent in declaration
 // order; a real runtime instead returns a proper TMThreadState.
@@ -55,11 +55,11 @@ static void stub_write_f4(float *a, float v) { *a = v; }
 static void stub_write_f8(double *a, double v) { *a = v; }
 static void stub_write_ptr(void **a, void *v) { *a = v; }
 
-static void *stub_tm_get_env() { return (void *)&tm_jmpbuf; }
+static void *stub_get_env() { return (void *)&tm_jmpbuf; }
 
-static void stub_tm_set_jmpbuf(void *buf) { (void)buf; }
+static void stub_set_jmpbuf(void *buf) { (void)buf; }
 
-static void *stub_tm_get_thread_state() { return (void *)&tm_nested_call_counter; }
+static void *stub_get_thread_state() { return (void *)&tm_nested_call_counter; }
 
 } // extern "C"
 
@@ -99,9 +99,9 @@ int (*tm_sigsetjmp)(void *, int) = (int (*)(void *, int))__sigsetjmp;
 // musl and other libcs: sigsetjmp is a real exported function symbol.
 int (*tm_sigsetjmp)(void *, int) = (int (*)(void *, int))sigsetjmp;
 #endif
-void *(*tm_get_env)() = stub_tm_get_env;
-void (*tm_set_jmpbuf)(void *) = stub_tm_set_jmpbuf;
-void *(*tm_get_thread_state)() = stub_tm_get_thread_state;
+void *(*tm_get_env)() = stub_get_env;
+void (*tm_set_jmpbuf)(void *) = stub_set_jmpbuf;
+void *(*tm_get_thread_state)() = stub_get_thread_state;
 
 // Init/exit hooks — defined as DATA variables so the LLVM pass can load
 // through them.  Only compiled under -DLLVM_TM_PLUGIN; without the plugin
@@ -174,29 +174,9 @@ static void apply_hooks_unlocked()
 		// Trace wrappers are active: update the trace's saved real hooks
 		// and keep the trace wrappers in place.  The delegation chain is:
 		//   benchmark → trace_begin → s_trace_real_hooks.begin (= real backend)
-		s_trace_real_hooks.begin = s_real_hooks.begin;
-		s_trace_real_hooks.end = s_real_hooks.end;
-		s_trace_real_hooks.malloc = s_real_hooks.malloc;
-		s_trace_real_hooks.calloc = s_real_hooks.calloc;
-		s_trace_real_hooks.realloc = s_real_hooks.realloc;
-		s_trace_real_hooks.free = s_real_hooks.free;
-		s_trace_real_hooks.read_i1 = s_real_hooks.read_i1;
-		s_trace_real_hooks.read_i2 = s_real_hooks.read_i2;
-		s_trace_real_hooks.read_i4 = s_real_hooks.read_i4;
-		s_trace_real_hooks.read_i8 = s_real_hooks.read_i8;
-		s_trace_real_hooks.read_f4 = s_real_hooks.read_f4;
-		s_trace_real_hooks.read_f8 = s_real_hooks.read_f8;
-		s_trace_real_hooks.read_ptr = s_real_hooks.read_ptr;
-		s_trace_real_hooks.write_i1 = s_real_hooks.write_i1;
-		s_trace_real_hooks.write_i2 = s_real_hooks.write_i2;
-		s_trace_real_hooks.write_i4 = s_real_hooks.write_i4;
-		s_trace_real_hooks.write_i8 = s_real_hooks.write_i8;
-		s_trace_real_hooks.write_f4 = s_real_hooks.write_f4;
-		s_trace_real_hooks.write_f8 = s_real_hooks.write_f8;
-		s_trace_real_hooks.write_ptr = s_real_hooks.write_ptr;
-		s_trace_real_hooks.get_env = s_real_hooks.get_env;
-		s_trace_real_hooks.set_jmpbuf = s_real_hooks.set_jmpbuf;
-		s_trace_real_hooks.get_thread_state = s_real_hooks.get_thread_state;
+		// TMRealHooks is a plain struct of function pointers, so a full copy
+		// is sufficient (all 23 fields).
+		s_trace_real_hooks = s_real_hooks;
 		// Keep tm_begin/end etc. set to trace wrappers (already installed by
 		// tm_trace_hook_init constructor).  s_trace_real_hooks now points
 		// to the real backend, so trace wrappers will delegate correctly.
@@ -206,29 +186,9 @@ static void apply_hooks_unlocked()
 			return single ? stub : (real ? real : stub);
 		};
 
-		tm_begin = pick(stub_begin, r->begin);
-		tm_end = pick(stub_end, r->end);
-		tm_malloc = pick(stub_malloc, r->malloc);
-		tm_calloc = pick(stub_calloc, r->calloc);
-		tm_realloc = pick(stub_realloc, r->realloc);
-		tm_free = pick(stub_free, r->free);
-		tm_read_i1 = pick(stub_read_i1, r->read_i1);
-		tm_read_i2 = pick(stub_read_i2, r->read_i2);
-		tm_read_i4 = pick(stub_read_i4, r->read_i4);
-		tm_read_i8 = pick(stub_read_i8, r->read_i8);
-		tm_read_f4 = pick(stub_read_f4, r->read_f4);
-		tm_read_f8 = pick(stub_read_f8, r->read_f8);
-		tm_read_ptr = pick(stub_read_ptr, r->read_ptr);
-		tm_write_i1 = pick(stub_write_i1, r->write_i1);
-		tm_write_i2 = pick(stub_write_i2, r->write_i2);
-		tm_write_i4 = pick(stub_write_i4, r->write_i4);
-		tm_write_i8 = pick(stub_write_i8, r->write_i8);
-		tm_write_f4 = pick(stub_write_f4, r->write_f4);
-		tm_write_f8 = pick(stub_write_f8, r->write_f8);
-		tm_write_ptr = pick(stub_write_ptr, r->write_ptr);
-		tm_get_env = pick(stub_tm_get_env, r->get_env);
-		tm_set_jmpbuf = pick(stub_tm_set_jmpbuf, r->set_jmpbuf);
-		tm_get_thread_state = pick(stub_tm_get_thread_state, r->get_thread_state);
+#define TM_PICK(f) tm_##f = pick(stub_##f, r->f);
+		TM_HOOK_FIELDS(TM_PICK)
+#undef TM_PICK
 	}
 }
 
@@ -271,99 +231,15 @@ const TMRealHooks *tm_get_real_hooks() { return &s_real_hooks; }
 void tm_swap_runtime(const TMRealHooks *hooks)
 {
 	std::lock_guard<std::mutex> lock(s_hook_mutex);
-	if (hooks->begin)
-		tm_begin = hooks->begin;
-	if (hooks->end)
-		tm_end = hooks->end;
-	if (hooks->malloc)
-		tm_malloc = hooks->malloc;
-	if (hooks->calloc)
-		tm_calloc = hooks->calloc;
-	if (hooks->realloc)
-		tm_realloc = hooks->realloc;
-	if (hooks->free)
-		tm_free = hooks->free;
-	if (hooks->read_i1)
-		tm_read_i1 = hooks->read_i1;
-	if (hooks->read_i2)
-		tm_read_i2 = hooks->read_i2;
-	if (hooks->read_i4)
-		tm_read_i4 = hooks->read_i4;
-	if (hooks->read_i8)
-		tm_read_i8 = hooks->read_i8;
-	if (hooks->read_f4)
-		tm_read_f4 = hooks->read_f4;
-	if (hooks->read_f8)
-		tm_read_f8 = hooks->read_f8;
-	if (hooks->read_ptr)
-		tm_read_ptr = hooks->read_ptr;
-	if (hooks->write_i1)
-		tm_write_i1 = hooks->write_i1;
-	if (hooks->write_i2)
-		tm_write_i2 = hooks->write_i2;
-	if (hooks->write_i4)
-		tm_write_i4 = hooks->write_i4;
-	if (hooks->write_i8)
-		tm_write_i8 = hooks->write_i8;
-	if (hooks->write_f4)
-		tm_write_f4 = hooks->write_f4;
-	if (hooks->write_f8)
-		tm_write_f8 = hooks->write_f8;
-	if (hooks->write_ptr)
-		tm_write_ptr = hooks->write_ptr;
-	if (hooks->get_env)
-		tm_get_env = hooks->get_env;
-	if (hooks->set_jmpbuf)
-		tm_set_jmpbuf = hooks->set_jmpbuf;
-	if (hooks->get_thread_state)
-		tm_get_thread_state = hooks->get_thread_state;
-	// Also update s_real_hooks so tm_hook_init_thread() doesn't revert
-	if (hooks->begin)
-		s_real_hooks.begin = hooks->begin;
-	if (hooks->end)
-		s_real_hooks.end = hooks->end;
-	if (hooks->malloc)
-		s_real_hooks.malloc = hooks->malloc;
-	if (hooks->calloc)
-		s_real_hooks.calloc = hooks->calloc;
-	if (hooks->realloc)
-		s_real_hooks.realloc = hooks->realloc;
-	if (hooks->free)
-		s_real_hooks.free = hooks->free;
-	if (hooks->read_i1)
-		s_real_hooks.read_i1 = hooks->read_i1;
-	if (hooks->read_i2)
-		s_real_hooks.read_i2 = hooks->read_i2;
-	if (hooks->read_i4)
-		s_real_hooks.read_i4 = hooks->read_i4;
-	if (hooks->read_i8)
-		s_real_hooks.read_i8 = hooks->read_i8;
-	if (hooks->read_f4)
-		s_real_hooks.read_f4 = hooks->read_f4;
-	if (hooks->read_f8)
-		s_real_hooks.read_f8 = hooks->read_f8;
-	if (hooks->read_ptr)
-		s_real_hooks.read_ptr = hooks->read_ptr;
-	if (hooks->write_i1)
-		s_real_hooks.write_i1 = hooks->write_i1;
-	if (hooks->get_env)
-		s_real_hooks.get_env = hooks->get_env;
-	if (hooks->set_jmpbuf)
-		s_real_hooks.set_jmpbuf = hooks->set_jmpbuf;
-	if (hooks->write_i2)
-		s_real_hooks.write_i2 = hooks->write_i2;
-	if (hooks->write_i4)
-		s_real_hooks.write_i4 = hooks->write_i4;
-	if (hooks->write_i8)
-		s_real_hooks.write_i8 = hooks->write_i8;
-	if (hooks->write_f4)
-		s_real_hooks.write_f4 = hooks->write_f4;
-	if (hooks->write_f8)
-		s_real_hooks.write_f8 = hooks->write_f8;
-	if (hooks->write_ptr)
-		s_real_hooks.write_ptr = hooks->write_ptr;
-	if (hooks->get_thread_state)
-		s_real_hooks.get_thread_state = hooks->get_thread_state;
+	// Swap in every non-null hook and mirror it into s_real_hooks so
+	// tm_hook_init_thread() does not revert the phase switch.
+#define TM_SWAP(f)                                                                       \
+	if (hooks->f) {                                                                      \
+		tm_##f = hooks->f;                                                               \
+		s_real_hooks.f = hooks->f;                                                       \
+	}
+	TM_HOOK_FIELDS(TM_SWAP)
+#undef TM_SWAP
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -957,51 +833,14 @@ __attribute__((constructor)) static void tm_trace_hook_init()
 
 	// Save current hooks as trace real hooks (separate from s_real_hooks
 	// so trace and sampling can coexist without recursion).
-	s_trace_real_hooks.begin = tm_begin;
-	s_trace_real_hooks.end = tm_end;
-	s_trace_real_hooks.malloc = tm_malloc;
-	s_trace_real_hooks.calloc = tm_calloc;
-	s_trace_real_hooks.realloc = tm_realloc;
-	s_trace_real_hooks.free = tm_free;
-	s_trace_real_hooks.read_i1 = tm_read_i1;
-	s_trace_real_hooks.read_i2 = tm_read_i2;
-	s_trace_real_hooks.read_i4 = tm_read_i4;
-	s_trace_real_hooks.read_i8 = tm_read_i8;
-	s_trace_real_hooks.read_f4 = tm_read_f4;
-	s_trace_real_hooks.read_f8 = tm_read_f8;
-	s_trace_real_hooks.read_ptr = tm_read_ptr;
-	s_trace_real_hooks.write_i1 = tm_write_i1;
-	s_trace_real_hooks.write_i2 = tm_write_i2;
-	s_trace_real_hooks.write_i4 = tm_write_i4;
-	s_trace_real_hooks.write_i8 = tm_write_i8;
-	s_trace_real_hooks.write_f4 = tm_write_f4;
-	s_trace_real_hooks.write_f8 = tm_write_f8;
-	s_trace_real_hooks.write_ptr = tm_write_ptr;
-	s_trace_real_hooks.get_env = tm_get_env;
-	s_trace_real_hooks.set_jmpbuf = tm_set_jmpbuf;
-	s_trace_real_hooks.get_thread_state = tm_get_thread_state;
+#define TM_SAVE_CUR(f) s_trace_real_hooks.f = tm_##f;
+	TM_HOOK_FIELDS(TM_SAVE_CUR)
+#undef TM_SAVE_CUR
 
 	// Replace hooks with trace wrappers
-	tm_begin = trace_begin;
-	tm_end = trace_end;
-	tm_malloc = trace_malloc;
-	tm_calloc = trace_calloc;
-	tm_realloc = trace_realloc;
-	tm_free = trace_free;
-	tm_read_i1 = trace_read_i1;
-	tm_read_i2 = trace_read_i2;
-	tm_read_i4 = trace_read_i4;
-	tm_read_i8 = trace_read_i8;
-	tm_read_f4 = trace_read_f4;
-	tm_read_f8 = trace_read_f8;
-	tm_read_ptr = trace_read_ptr;
-	tm_write_i1 = trace_write_i1;
-	tm_write_i2 = trace_write_i2;
-	tm_write_i4 = trace_write_i4;
-	tm_write_i8 = trace_write_i8;
-	tm_write_f4 = trace_write_f4;
-	tm_write_f8 = trace_write_f8;
-	tm_write_ptr = trace_write_ptr;
+#define TM_TRACE_INSTALL(f) tm_##f = trace_##f;
+	TM_HOOK_ACCESS_FIELDS(TM_TRACE_INSTALL)
+#undef TM_TRACE_INSTALL
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1202,29 +1041,9 @@ __attribute__((constructor)) static void tm_sample_hook_init()
 		return;
 
 	// Save current hooks as real hooks
-	s_real_hooks.begin = tm_begin;
-	s_real_hooks.end = tm_end;
-	s_real_hooks.malloc = tm_malloc;
-	s_real_hooks.calloc = tm_calloc;
-	s_real_hooks.realloc = tm_realloc;
-	s_real_hooks.free = tm_free;
-	s_real_hooks.read_i1 = tm_read_i1;
-	s_real_hooks.read_i2 = tm_read_i2;
-	s_real_hooks.read_i4 = tm_read_i4;
-	s_real_hooks.read_i8 = tm_read_i8;
-	s_real_hooks.read_f4 = tm_read_f4;
-	s_real_hooks.read_f8 = tm_read_f8;
-	s_real_hooks.read_ptr = tm_read_ptr;
-	s_real_hooks.write_i1 = tm_write_i1;
-	s_real_hooks.write_i2 = tm_write_i2;
-	s_real_hooks.write_i4 = tm_write_i4;
-	s_real_hooks.write_i8 = tm_write_i8;
-	s_real_hooks.write_f4 = tm_write_f4;
-	s_real_hooks.write_f8 = tm_write_f8;
-	s_real_hooks.write_ptr = tm_write_ptr;
-	s_real_hooks.get_env = tm_get_env;
-	s_real_hooks.set_jmpbuf = tm_set_jmpbuf;
-	s_real_hooks.get_thread_state = tm_get_thread_state;
+#define TM_SAVE_CUR(f) s_real_hooks.f = tm_##f;
+	TM_HOOK_FIELDS(TM_SAVE_CUR)
+#undef TM_SAVE_CUR
 
 	// Set sampling mode
 	tm_set_sampling_mode(mode);
@@ -1239,26 +1058,9 @@ __attribute__((constructor)) static void tm_sample_hook_init()
 		g_phase_full = std::atoll(phase_full_str);
 
 	// Replace hooks with sampling wrappers
-	tm_begin = sample_begin;
-	tm_end = sample_end;
-	tm_malloc = sample_malloc;
-	tm_calloc = sample_calloc;
-	tm_realloc = sample_realloc;
-	tm_free = sample_free;
-	tm_read_i1 = sample_read_i1;
-	tm_read_i2 = sample_read_i2;
-	tm_read_i4 = sample_read_i4;
-	tm_read_i8 = sample_read_i8;
-	tm_read_f4 = sample_read_f4;
-	tm_read_f8 = sample_read_f8;
-	tm_read_ptr = sample_read_ptr;
-	tm_write_i1 = sample_write_i1;
-	tm_write_i2 = sample_write_i2;
-	tm_write_i4 = sample_write_i4;
-	tm_write_i8 = sample_write_i8;
-	tm_write_f4 = sample_write_f4;
-	tm_write_f8 = sample_write_f8;
-	tm_write_ptr = sample_write_ptr;
+#define TM_SAMPLE_INSTALL(f) tm_##f = sample_##f;
+	TM_HOOK_ACCESS_FIELDS(TM_SAMPLE_INSTALL)
+#undef TM_SAMPLE_INSTALL
 }
 
 __attribute__((destructor)) static void tm_trace_hook_fini()

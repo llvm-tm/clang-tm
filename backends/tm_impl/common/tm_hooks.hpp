@@ -140,6 +140,62 @@ struct TMRealHooks {
 	void *(*get_thread_state)() = nullptr;
 };
 
+// Canonical field lists for TMRealHooks. Declared here, right next to the
+// struct, so the hook tables in tm_hooks.cpp can be generated from a single
+// source of truth instead of hand-copied 23-fold (a field forgotten in one of
+// the copies is a silent hook-installation bug). X(field) is invoked once per
+// field.
+//   TM_HOOK_FIELDS(X)        — every field (23).
+//   TM_HOOK_ACCESS_FIELDS(X) — the subset that has a trace/sample wrapper:
+//                              begin..write_ptr (20). get_env / set_jmpbuf /
+//                              get_thread_state are never wrapped.
+#define TM_HOOK_FIELDS(X)                                                                \
+	X(begin)                                                                             \
+	X(end)                                                                               \
+	X(malloc)                                                                            \
+	X(calloc)                                                                            \
+	X(realloc)                                                                           \
+	X(free)                                                                              \
+	X(read_i1)                                                                           \
+	X(read_i2)                                                                           \
+	X(read_i4)                                                                           \
+	X(read_i8)                                                                           \
+	X(read_f4)                                                                           \
+	X(read_f8)                                                                           \
+	X(read_ptr)                                                                          \
+	X(write_i1)                                                                          \
+	X(write_i2)                                                                          \
+	X(write_i4)                                                                          \
+	X(write_i8)                                                                          \
+	X(write_f4)                                                                          \
+	X(write_f8)                                                                          \
+	X(write_ptr)                                                                         \
+	X(get_env)                                                                           \
+	X(set_jmpbuf)                                                                        \
+	X(get_thread_state)
+
+#define TM_HOOK_ACCESS_FIELDS(X)                                                         \
+	X(begin)                                                                             \
+	X(end)                                                                               \
+	X(malloc)                                                                            \
+	X(calloc)                                                                            \
+	X(realloc)                                                                           \
+	X(free)                                                                              \
+	X(read_i1)                                                                           \
+	X(read_i2)                                                                           \
+	X(read_i4)                                                                           \
+	X(read_i8)                                                                           \
+	X(read_f4)                                                                           \
+	X(read_f8)                                                                           \
+	X(read_ptr)                                                                          \
+	X(write_i1)                                                                          \
+	X(write_i2)                                                                          \
+	X(write_i4)                                                                          \
+	X(write_i8)                                                                          \
+	X(write_f4)                                                                          \
+	X(write_f8)                                                                          \
+	X(write_ptr)
+
 void tm_register_real_hooks(const TMRealHooks *hooks);
 void tm_set_num_threads(int n);
 void tm_hook_init_thread();
