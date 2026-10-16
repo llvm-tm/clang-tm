@@ -208,3 +208,43 @@ jobs:
       - name: Skip (no toolchain)
         if: steps.tc.outputs.mode == 'none'
         run: echo "No nvcc/hipcc on runner; skipping GPU compile check."
+
+  # ── Weekly C++ coverage report (non-blocking) ─────────────────────────────
+  # Complements the Rust coverage job above. Builds the explicit-API tests with
+  # source-based coverage (COVERAGE=1) and prints an llvm-cov line report for the
+  # region allocator, common runtime and one representative backend. Early
+  # warning only; never reds the pipeline.
+  cpp-coverage:
+    if: contains(github.event.schedule, '0 5 * * 0')
+    continue-on-error: true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22 llvm-22-dev clang-22 make
+      - name: Build coverage test binaries (NOREC)
+        run: make -C benchmarks/cpp bin/test_tx bin/test_ds BACKEND=NOREC COVERAGE=1 STATIC=0
+      - name: Run tests and collect profiles
+        run: |
+          rm -f /tmp/*.profraw
+          LLVM_PROFILE_FILE=/tmp/tx_%p.profraw ./benchmarks/cpp/bin/test_tx > /dev/null
+          LLVM_PROFILE_FILE=/tmp/ds_%p.profraw ./benchmarks/cpp/bin/test_ds > /dev/null
+      - name: Report coverage (test_ds)
+        run: |
+          llvm-profdata-22 merge -sparse /tmp/ds_*.profraw -o /tmp/ds.profdata
+          llvm-cov-22 report ./benchmarks/cpp/bin/test_ds -instr-profile=/tmp/ds.profdata \
+            backends/tm_impl/norec backends/tm_impl/common \
+            backends/tm_impl/tm_region_allocator explicit_api | tail -40
+      - name: Report coverage (test_tx)
+        run: |
+          llvm-profdata-22 merge -sparse /tmp/tx_*.profraw -o /tmp/tx.profdata
+          llvm-cov-22 report ./benchmarks/cpp/bin/test_tx -instr-profile=/tmp/tx.profdata \
+            backends/tm_impl/norec backends/tm_impl/common \
+            backends/tm_impl/tm_region_allocator explicit_api | tail -40

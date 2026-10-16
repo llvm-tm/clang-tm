@@ -39,6 +39,14 @@ else
   SANITIZE_FLAGS :=
   SANITIZE_FORCE_DYNAMIC :=
 endif
+# Source-based coverage (clang): COVERAGE=1 builds with
+# -fprofile-instr-generate -fcoverage-mapping so `llvm-cov` can report line
+# coverage of a test run. See .github/workflows/nightly.yml (cpp-coverage).
+ifeq ($(COVERAGE),1)
+  COVERAGE_FLAGS := -fprofile-instr-generate -fcoverage-mapping
+else
+  COVERAGE_FLAGS :=
+endif
 # -static is unsupported by the macOS linker, so static linking (self-contained
 # binaries) is the default only on Linux. Override with STATIC=0 to link
 # dynamically (faster builds) or STATIC=1 to force static on any platform.
@@ -54,8 +62,8 @@ ifeq ($(STATIC),1)
 else
   STATIC_FLAG :=
 endif
-CXXFLAGS  = -std=c++20 -O3 $(MARCH) -pthread -DNDEBUG $(STATIC_FLAG) $(SANITIZE_FLAGS) -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp $(CXXFLAGS_GCC_FIX)
-LDFLAGS   = $(STATIC_FLAG) -pthread $(SANITIZE_FLAGS) $(CXXFLAGS_GCC_FIX)
+CXXFLAGS  = -std=c++20 -O3 $(MARCH) -pthread -DNDEBUG $(STATIC_FLAG) $(SANITIZE_FLAGS) $(COVERAGE_FLAGS) -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp $(CXXFLAGS_GCC_FIX)
+LDFLAGS   = $(STATIC_FLAG) -pthread $(SANITIZE_FLAGS) $(COVERAGE_FLAGS) $(CXXFLAGS_GCC_FIX)
 
 # --- Choose backend (default: TinySTM/WBCTL) --------------------
 BACKEND ?= TINYSTM

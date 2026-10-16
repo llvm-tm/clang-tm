@@ -392,3 +392,48 @@ jobs:
           done
           echo "header-compiles: $PASS pass, $FAIL fail, $SKIP skipped"
           [ "$FAIL" = 0 ]
+
+  # ── Job 15: macOS portability gate (Mach-O link + arm64) ──
+  # Before this job, CI was Linux-only and silently missed two classes of
+  # breakage: the Mach-O weak-symbol link failure in tm_region_allocator.cpp
+  # and the explicit-API-only regressions (e.g. the realloc over-read). No LLVM
+  # install is needed — the explicit API uses the platform clang only.
+  macos-portability:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - name: Show toolchain
+        run: |
+          clang++ --version
+          uname -m
+      - name: Build + run explicit-API tests (Mach-O link gate)
+        run: |
+          set -e
+          for b in NOREC TINYSTM TL2; do
+            echo "=== $b ==="
+            make -C benchmarks/cpp -j4 bin/test_tx bin/test_ds BACKEND=$b
+            ./benchmarks/cpp/bin/test_tx | tee /tmp/tx.out | tail -1
+            ./benchmarks/cpp/bin/test_ds | tee /tmp/ds.out | tail -1
+            grep -qE "ALL [0-9]+ tests PASSED" /tmp/tx.out
+            grep -qE "ALL [0-9]+ tests PASSED" /tmp/ds.out
+          done
+
+  # ── Job 16: Fuzz smoke (libFuzzer, short) ─────────────────
+  fuzz-smoke:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install clang (libFuzzer runtime)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang make
+      - name: Build fuzz targets
+        run: make -C tests/fuzz -j2 CXX=clang++
+      - name: Run fuzz targets (30s each)
+        run: |
+          ./tests/fuzz/test_tx_fuzzer -max_total_time=30 -print_final_stats
+          ./tests/fuzz/test_ds_fuzzer -max_total_time=30 -print_final_stats
