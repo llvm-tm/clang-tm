@@ -6,9 +6,13 @@ Rust's compiler catches many mistakes that would silently compile in C++ and
 surface only as rare data races, use-after-free, or silent lost updates
 under concurrency. This appendix catalogues mistakes that arise specifically
 in transactional-memory code, explains what the compiler says, and shows
-what would go wrong in C++. Every code fragment compiles under
-\texttt{rustc 1.96}; the errors shown are the actual compiler output when the
-indicated line is removed or altered.
+what would go wrong in C++. The fragments assume the Rust transaction API
+of \S\ref{sec:norec-rust-complete} (Chapter~10): \texttt{TmCell<T>} is a
+lightweight handle to transactional storage (an index plus a phantom type),
+\texttt{region.transaction(|tx| \ldots)} runs a closure under the retry
+loop, and \texttt{tx.read}/\texttt{tx.write} are its barriers. Every code
+fragment compiles under \texttt{rustc 1.96}; the errors shown are the
+actual compiler output when the indicated line is removed or altered.
 
 \section*{Mistake 1: Forgetting the Abort Signal}
 
@@ -44,25 +48,25 @@ runtime \emph{did} abort, the value would be stale --- a silent lost update.
 
 \section*{Mistake 2: Closure Captures and Lifetime Errors}
 
-\begin{lstlisting}[language=Rust, caption={A closure that captures a stack reference.}]
-let cell = TmCell::new(42_u64);
-let r = &cell;                           // borrow of local
-region.transaction(|tx| {
-    let v = tx.read(r)?;                 // ERROR: `r` does not live long enough
-    Ok(v)
-});
+\begin{lstlisting}[language=Rust, caption={A stored transaction body that borrows a local.}]
+let boxed;
+{
+    let cell = TmCell::new(42_u64);
+    boxed = Box::new(|tx: &mut Tx| tx.read(&cell)); // body borrows `cell`
+}   // ERROR[E0597]: `cell` does not live long enough:
+    // the stored transaction body still borrows it
 \end{lstlisting}
 
 The compiler says:
 
 \begin{quote}
-\texttt{error[E0597]:} \texttt{\`r'} does not live long enough\\
-\texttt{note:} closure invoked with a reference that would be dropped\\
-before the closure completes
+\texttt{error[E0597]:} \texttt{`cell'} does not live long enough\\
+\texttt{note:} borrow of \texttt{cell} occurs here, but the stored closure
+that captures it could run after \texttt{cell} is dropped
 \end{quote}
 
-\textbf{What the programmer intended:} read \texttt{cell} inside the closure
-by borrowing it.
+\textbf{What the programmer intended:} write a transaction body over
+\texttt{cell} now and run it later.
 
 \textbf{What Rust enforces:} the closure passed to \texttt{transaction}
 may be called multiple times (the retry loop). The borrow checker ensures
@@ -77,8 +81,12 @@ is alive during \texttt{tm\_begin}/\texttt{tm\_end}). But if the closure
 were stored and executed later (as in an executor), the pointer would
 dangle --- a use-after-free that the compiler cannot detect.
 
-\textbf{Fix:} pass the \texttt{TmCell} by copy (\texttt{cell} is
-\texttt{Copy}), not by reference: \texttt{tx.read(\&cell)?;}.
+\textbf{Fix:} keep the body inside the scope of \texttt{cell} --- call
+\texttt{region.transaction(\ldots)} directly instead of storing the
+closure. If the body truly must outlive the local, move the handle in
+(\texttt{move |tx| tx.read(\&cell)}); \texttt{TmCell} handles are
+\texttt{Copy} (index plus phantom type), so a copied handle is cheap and
+independent of the original.
 
 \section*{Mistake 3: \texttt{Send} and \texttt{Sync} Violations}
 
@@ -140,7 +148,7 @@ committing thread's write-set is fully visible. On x86 this happens to
 work because of the strong store-ordering model; on ARM it does not.
 
 \textbf{What Rust enforces:} the compiler forces you to \emph{choose} an
-ordering. The three choices (\texttt{Relaxed}, \texttt{Acquire},
+ordering. The five choices (\texttt{Relaxed}, \texttt{Acquire},
 \texttt{Release}, \texttt{AcqRel}, \texttt{SeqCst}) are all explicit in
 the source code, making the ordering assumption visible and reviewable. A
 code review can check whether the Release store / Acquire load pair is

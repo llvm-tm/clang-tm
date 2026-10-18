@@ -1,7 +1,9 @@
 \chapter[Transaction API Design]{Transaction API Design – Software Engineering Perspectives}
 \index{transaction API design}\index{classic synchronous API}\index{language-integrated transactions}\index{transactional futures}\index{object-oriented transactional interfaces}
 
-A transactional-memory backend is only useful if programmers can call it correctly. The algorithm may be TL2, NOrec, SGL, TSC-TM, TinySTM, SwissTM, JVSTM, MVLog, or a distributed Percolator-style coordinator, but the application sees a smaller surface: begin, read, write, commit, abort, retry, and sometimes a higher-level wrapper around them. API design is therefore not decoration. It determines where instrumentation happens, who owns retry, which side effects are safe, and how much of the runtime contract is visible in ordinary source code.
+A transactional-memory backend is only useful if programmers can call it correctly. The algorithm may be TL2, NOrec, SGL, TSC-TM, TinySTM, SwissTM, JVSTM, MVLog, or a distributed Percolator-style coordinator (Google's Percolator made a
+two-phase commit protocol the template for distributed transactions), but the
+application sees a smaller surface: begin, read, write, commit, abort, retry, and sometimes a higher-level wrapper around them. API design is therefore not decoration. It determines where instrumentation happens, who owns retry, which side effects are safe, and how much of the runtime contract is visible in ordinary source code.
 
 This chapter studies that contract from a software-engineering perspective. We keep the two-account bank transfer as the running example: a transaction debits one account, credits another, respects a floor, and preserves total money on the successful path. The examples deliberately use a small API because the companion implementations expose the same synchronous primitives across many backends. More elaborate interfaces are built by moving responsibility among the programmer, the compiler, the library, and the executor.
 
@@ -19,7 +21,7 @@ The minimal API hides a transaction descriptor. Each participating thread needs 
 
 Although the core is byte-oriented, programmers rarely want to write byte loops. Typed wrappers such as \texttt{tm\_read\_i4}, \texttt{tm\_write\_i4}, \texttt{tm\_read\_u8}, or \texttt{tm\_write\_ptr} convert typed operations into a uniform core operation over an address and size. The typed wrapper is not merely syntactic sugar: it fixes alignment, copying, and aliasing conventions at the API boundary. A word-based STM can still implement it by mapping an address to metadata; a byte-based redo log can copy the requested bytes directly.
 
-The awkward part is retry. Many C implementations use \texttt{sigsetjmp}/\texttt{siglongjmp}, or an equivalent non-local control transfer, so that an abort can jump back to the most recent transaction start. This is efficient and keeps application code compact, but it creates a frame-lifetime hazard. If a transaction body stores pointers to stack objects, or relies on C++ destructors to run on every abort path, a non-local jump may invalidate those assumptions. Part~VI studies these hazards in detail. At the API level the lesson is already visible: a small primitive set makes the runtime portable, but it exposes responsibility for replay-safe code.
+The awkward part is retry. Many C implementations use \texttt{sigsetjmp}/\texttt{siglongjmp}, or an equivalent non-local control transfer, so that an abort can jump back to the most recent transaction start. This is efficient and keeps application code compact, but it creates a frame-lifetime hazard. If a transaction body stores pointers to stack objects, or relies on C++ destructors to run on every abort path, a non-local jump may invalidate those assumptions. Part~VI (Chapters~13--15) studies these hazards in detail. At the API level the lesson is already visible: a small primitive set makes the runtime portable, but it exposes responsibility for replay-safe code.
 
 The set of primitives is deliberately small. Nested transactions, retry policies, allocation protocols, logging conventions, and futures can all be built on top. The smaller the primitive contract, the easier it is for many backends to implement it consistently. The cost is that higher-level safety properties must be enforced by wrappers, coding discipline, compiler integration, or verification.
 
@@ -58,7 +60,7 @@ Figure~\ref{fig:api-state-machine} is the programmer-visible state machine. It s
 Chapter~1's running example, expressed with the synchronous API and an
 explicit retry loop:
 
-\begin{lstlisting}[language=C, caption={transfer on the synchronous API.}]
+\begin{lstlisting}[language=C, caption={transfer on the synchronous API.}, label={lst:api-transfer}]
 int transfer(int *a, int *b, int n) {
     int attempts = 0;
     for (;;) {
@@ -87,7 +89,7 @@ $$
 
 The floor condition is a precondition for installing the write set. If \texttt{a - n < 0}, the transaction commits no debit. If concurrent transactions race on the same accounts, the backend may abort one of them, but no interleaving observes only the debit or only the credit.
 
-Compare with Chapter~1's lock-based version: no lock ordering, no unlock on every early-return path, and the two writes are atomic by construction. The \texttt{sigsetjmp}/\texttt{siglongjmp} machinery hides in \texttt{tm\_begin} and \texttt{tm\_end} --- the frame-lifetime hazard of Part~VI. Every backend in Part~IV implements exactly these five functions, so this source compiles unchanged across all of them. Exercise~3 asks for the \texttt{\_\_transaction\_atomic} equivalent; note the retry loop disappears --- the compiler generates it.
+Compare with Chapter~1's lock-based version: no lock ordering, no unlock on every early-return path, and the two writes are atomic by construction. The \texttt{sigsetjmp}/\texttt{siglongjmp} machinery hides in \texttt{tm\_begin} and \texttt{tm\_end} --- the frame-lifetime hazard of Part~VI (Chapters~13--15). Every backend in Part~IV implements the hook table of \S\ref{sec:hook-system}; on the classic API of this chapter they reduce to four entry points --- \texttt{tm\_begin}, typed read, typed write, \texttt{tm\_end} --- so this source compiles unchanged across all of them. Exercise~3 asks for the \texttt{\_\_transaction\_atomic} equivalent; note the retry loop disappears --- the compiler generates it.
 
 \section{Worked Example: A Lambda Wrapper}
 \index{transactional lambda}\index{C++ wrapper}\index{retry loop}
@@ -271,7 +273,8 @@ The caller no longer owns transaction stack state; the worker does. Futures make
 
 \section{Object‑Oriented and Polymorphic Interfaces}
 
-Object-oriented APIs hide instrumentation inside types. Instead of calling \texttt{tm\_read\_i4(\&x)}, the programmer may write through a wrapper such as \texttt{TM<int>}. The wrapper overloads operations, records reads and writes with the runtime, and prevents some accidental raw access. Template-based STMs, including systems in the RSTM family, use this style to make transactions look like ordinary generic C++ code.
+Object-oriented APIs hide instrumentation inside types. Instead of calling \texttt{tm\_read\_i4(\&x)}, the programmer may write through a wrapper such as \texttt{TM<int>}. The wrapper overloads operations, records reads and writes with the runtime, and prevents some accidental raw access. Template-based STMs, including systems in the RSTM family (Stanford's
+research STM framework), use this style to make transactions look like ordinary generic C++ code.
 
 The benefit is type safety at the use site. A \texttt{TM<T>} value can expose only operations that are meaningful inside a transaction. It can choose whether reads return copies, proxies, or transactional references. It can encode ownership rules in constructors and destructors. A transaction-object or visitor pattern goes further: application objects provide methods that register their own fields with the runtime, allowing the transaction to operate at object granularity.
 
@@ -286,38 +289,49 @@ Polymorphism adds another cost. Virtual dispatch inside a transaction can obscur
 Every API style in the preceding sections ultimately calls the same set of
 C functions: \texttt{tm\_begin}, \texttt{tm\_end}, \texttt{tm\_read\_i4},
 \texttt{tm\_write\_i4}, and so on.  In the companion codebase these are not
-ordinary functions but \emph{DATA function-pointer variables}---their addresses
-are taken and called through, not called directly.  This indirection is the
+ordinary functions but \emph{DATA function-pointer variables}: global
+variables in the data segment that hold the address of the current backend's
+implementation, called indirectly, rather than function symbols linked into
+the text segment.  (Keeping every hook a data symbol is also what prevents
+the DATA-vs-TEXT symbol collisions of Chapter~14.)  This indirection is the
 hook system: a single dispatch layer that connects any benchmark to any backend
 without recompilation.
 
 \paragraph{The hook table.}
-The file \rep{backends/tm\_impl/common/tm\_hooks.hpp} declares a struct
-containing one function pointer per TM operation:
+The file \rep{backends/tm\_impl/common/tm\_hooks.hpp} declares one function
+pointer per TM operation (abridged: seven reads and seven matching writes;
+the full table has 21 hooks):
 
-\begin{lstlisting}[caption={The TMRealHooks struct (\texttt{tm\_hooks.hpp}).}]
-struct TMRealHooks {
-    void  (*tm_begin)(void);
-    void  (*tm_end)(void);
-    void  (*tm_init)(void);
-    void  (*tm_exit)(void);
-    void  (*tm_init_thread)(void);
-    void  (*tm_exit_thread)(void);
-    void* (*tm_malloc)(size_t);
-    void* (*tm_calloc)(size_t, size_t);
-    void  (*tm_read_i4)(const void*);
-    void  (*tm_write_i4)(void*, int);
-    void  (*tm_read_u8)(const void*);
-    void  (*tm_write_u8)(void*, uint64_t);
-    void  (*tm_read_f4)(const void*);
-    void  (*tm_write_f4)(void*, float);
-    void  (*tm_read_f8)(void*);
-    void  (*tm_write_f8)(void*, double);
-    void  (*tm_trace)(int, void*, size_t);
-    void* (*tm_get_thread_state)(void);
-    /* ... additional typed read/write pairs ... */
-};
+\begin{lstlisting}[caption={The hook variables (\texttt{tm\_hooks.hpp}, abridged).}]
+extern "C" {
+/* lifecycle and allocation */
+void    (*tm_begin)();
+void    (*tm_end)();
+void*   (*tm_malloc)(size_t);
+void*   (*tm_calloc)(size_t, size_t);
+void*   (*tm_realloc)(void*, size_t);
+void    (*tm_free)(void*);
+/* typed reads and writes (i1/i2/i4/i8/f4/f8/ptr) */
+uint32_t (*tm_read_i4)(uint32_t*);
+void     (*tm_write_i4)(uint32_t*, uint32_t);
+/* control transfer and observation */
+int      (*tm_sigsetjmp)(void*, int);
+void     (*tm_trace)(uint32_t, void*, uint64_t, uint64_t);
+void*    (*tm_get_thread_state)();
+}
 \end{lstlisting}
+
+\noindent
+The same shape appears as a struct, \texttt{TMRealHooks}, whose fields drop
+the \texttt{tm\_} prefix (\texttt{begin}, \texttt{end}, \texttt{read\_i4},
+\ldots); that struct is what backends register.  Note that the companion's
+\texttt{tm\_end} returns \texttt{void}: unlike the book-level listings of
+\S\ref{sec:api-example}, which read a commit status from \texttt{tm\_end},
+the companion signals an abort by \emph{never returning} --- \texttt{tm\_begin}
+is paired with \texttt{sigsetjmp}, and validation failure \texttt{siglongjmp}s
+back to that retry target (the mechanism, and its frame hazards, are dissected
+in Chapter~14).  Both conventions implement the same state machine of
+Figure~\ref{fig:api-state-machine}.
 
 \noindent
 The global variables \texttt{tm\_begin}, \texttt{tm\_end},
@@ -331,23 +345,23 @@ Each backend's \texttt{*\_runtime.cpp} file calls
 (\rep{backends/tm\_impl/norec/NOrec\_runtime.cpp}) is a representative
 example:
 
-\begin{lstlisting}[caption={NOrec hook registration (\texttt{NOrec\_runtime.cpp}).}]
-static TMRealHooks hooks;
-hooks.tm_begin  = norec_begin;
-hooks.tm_end    = norec_end;
-hooks.tm_read_i4  = norec_read_i4;
-hooks.tm_write_i4 = norec_write_i4;
-hooks.tm_malloc = norec_malloc;
-hooks.tm_init   = norec_init;
-hooks.tm_exit   = norec_exit;
-/* ... all fields filled ... */
+\begin{lstlisting}[caption={NOrec hook registration (\texttt{NOrec\_runtime.cpp}, abridged).}]
+static const TMRealHooks hooks = {
+    .begin     = real_tm_begin,
+    .end       = real_tm_end,
+    .malloc    = real_tm_malloc,
+    .calloc    = real_tm_calloc,
+    .read_i4   = real_tm_read_i4,
+    .write_i4  = real_tm_write_i4,
+    /* ... all 21 fields filled; implementations are static ... */
+};
 tm_register_real_hooks(&hooks);
 \end{lstlisting}
 
 \noindent
 After this call, every subsequent \texttt{tm\_read\_i4(addr)} in the
-benchmark resolves through the global function pointer to
-\texttt{norec\_read\_i4(addr)}.  The benchmark never includes
+benchmark resolves through the global function pointer to the backend's
+\texttt{real\_tm\_read\_i4(addr)}.  The benchmark never includes
 \texttt{NOrec.hpp}; it links against the runtime object file, and the
 dispatch happens at the function-pointer level.
 
@@ -364,12 +378,15 @@ A typical read goes through three levels:
 \begin{enumerate}
   \item The benchmark calls \texttt{tm\_read\_i4(\&x)} (a DATA function
         pointer).
-  \item The pointer resolves to \texttt{norec\_read\_i4} (or TinySTM,
-        TL2, etc.), which checks whether the address is in the TM region
+  \item The pointer resolves to \texttt{real\_tm\_read\_i4} (or TinySTM,
+        TL2, etc.), which checks whether the address is in the \emph{TM
+        region} --- the runtime's preallocated, \texttt{mmap}-ed managed
+        address range that backs all transactional state (Chapter~14) ---
         and either tracks it in the read-set or passes through to a
         direct load.
   \item If the address is not in the TM region (e.g.\ stack-local), the
-        \texttt{LLVM\_TM\_ADDR\_CHECK} macro bypasses the backend
+        \texttt{LLVM\_TM\_ADDR\_CHECK} macro (defined in the
+        instrumentation pass, Chapter~11) bypasses the backend
         entirely and performs a plain load.
 \end{enumerate}
 
@@ -390,7 +407,7 @@ The API is the contract the rest of the book's runtimes implement. The same tran
     \item A programmer argues that \texttt{tm\_write} should return a status code indicating whether the write caused an immediate abort. Explain why this violates opacity and propose an alternative.
     \item Sketch an asynchronous API where multiple transactions are submitted to a work queue and later awaited. Discuss how batching might reduce validation overhead.
     \item Compare using \texttt{tm\_begin}\slash{}\texttt{tm\_end} versus \texttt{\_\_transaction\_\allowbreak atomic}. Which is less error-prone and why?
-    \item \emph{[implementation]} Extend Listing~\ref{sec:api-example}'s transfer into a reusable \texttt{atomic\_retry} helper for transactions returning \texttt{int}. Add a test that forces at least one abort and checks that the final account sum is unchanged.
+    \item \emph{[implementation]} Extend Listing~\ref{lst:api-transfer}'s transfer into a reusable \texttt{atomic\_retry} helper for transactions returning \texttt{int}. Add a test that forces at least one abort and checks that the final account sum is unchanged.
     \item \emph{[verification]} Write a small PlusCal or TLA+ model of the state machine in Figure~\ref{fig:api-state-machine}. Check that no execution reaches \emph{Committed} after a failed validation edge.
     \item \emph{[theory]} Compare explicit calls, compiler keywords, and future-based closures under opacity. Which API makes it easiest to prevent non-transactional side effects from becoming visible before commit?
     \item \emph{[implementation]} Implement a \texttt{TM<int>} wrapper with \texttt{load()} and \texttt{store()} methods backed by \texttt{tm\_read\_i4} and \texttt{tm\_write\_i4}. Show one example where exposing a raw \texttt{int *} would bypass instrumentation.
@@ -401,7 +418,7 @@ The API is the contract the rest of the book's runtimes implement. The same tran
 
 \textbf{How to check your work.} The \emph{[implementation]} exercises are
 verified with the companion: build the \texttt{atomic\_retry} helper and the
-\texttt{TM<int>} wrapper on \S\ref{sec:api-example}'s retry loop.  The
+\texttt{TM<int>} wrapper on Listing~\ref{lst:api-transfer}'s retry loop.  The
 \emph{[verification]} exercises are checked with TLC against the state
 machine of Figure~\ref{fig:api-state-machine} (\emph{Committed} reachable only
 via a validation-success edge; see Appendix~\ref{chap:pluscal-quick-ref}).

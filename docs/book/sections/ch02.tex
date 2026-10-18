@@ -65,8 +65,9 @@ memory. The classic systems --- Ivy \cite{li89dsm} and TreadMarks
 protocols. They assigned each page a \emph{home node} that owned the current
 value, transferred ownership on write, and used invalidation messages to tell
 readers their copies were stale. Later systems relaxed the coherence contract
-to \emph{release consistency}, letting the programmer declare which accesses
-needed ordering and which did not, in exchange for reduced message traffic.
+to \emph{release consistency}: instead of ordering every access, the protocol
+guarantees ordering only around explicit release and acquire synchronization
+events, in exchange for reduced message traffic.
 Almost every concept used later in this book --- ownership records, read and
 write sets, versioning, invalidation, and the idea that a synchronization
 primitive can be \emph{lazy} about ordering --- appears in some form in the
@@ -113,7 +114,8 @@ chapter and the next will show that they are not sufficient. The search for
 better primitives produced wait-free and lock-free data structures
 \cite{herlihy91} and, ultimately, transactional memory --- in hardware by
 Herlihy and Moss~\cite{herlihy93} and in software by Shavit and
-Touitou~\cite{shavit95stm} --- the subject of this book. Every subsequent chapter is a descendant of the
+Touitou~\cite{shavit95stm} --- an approach called \emph{software transactional
+memory} (STM), the subject of this book. Every subsequent chapter is a descendant of the
 distributed, distributed-shared-memory, and multicore eras: the protocols we
 study are distributed algorithms, simulated and then hardware-supported,
 adapted to the one shared address space the multicore provides.
@@ -144,17 +146,25 @@ thread may observe the partial effects of an aborted transaction before that
 transaction discovers it should abort. Serializability does not speak about
 aborted transactions, but a shared-memory programmer must care about them.
 
-Database mechanisms will reappear throughout this book. The version clock, the
-read set and write set, validation, and write-ahead logging all have direct
-analogues in transactional memory. The database-to-STM mapping is close but not
-identical. Databases protect persistent state with disk-based logging and
-two-phase locking. Transactional memory protects volatile memory with in-memory
+Database mechanisms will reappear throughout this book. The \emph{version
+clock} (a global counter stamping each commit so executions can be ordered),
+the read set and write set, validation (re-checking at commit that nothing a
+transaction read has changed since), and \emph{write-ahead logging} (recording
+the intent to change data in a log before touching the data itself) all have
+direct analogues in transactional memory. The database-to-STM mapping is close
+but not identical. Databases protect persistent state with disk-based logging
+and \emph{two-phase locking} (2PL: a transaction acquires locks as it grows
+and releases none until after its commit or abort decision, which is why its
+schedule is serializable). Transactional memory protects volatile memory with in-memory
 metadata and optimistic validation. The cost centre shifts from I/O and log
 forces to cache coherence traffic, fence latency, and validation work. That
 shift changes which designs win.
 
 Isolation is a spectrum. Read committed, repeatable read, and serializable are
-familiar database isolation levels. Transactional memory typically targets the
+the classic database isolation levels; Chapter~7 derives that ladder from
+scratch, so no database background is needed to follow the references to them
+later in this book.
+Transactional memory typically targets the
 strongest end of that spectrum, and then goes one step further by insisting on
 a property called \emph{opacity}. Opacity closes the gap that serializability
 leaves open for aborted transactions. The rest of this chapter defines opacity
@@ -197,7 +207,10 @@ The formal backbone for reasoning about visibility is Lamport's
 happens-before the read in the execution's partial order. Transactional memory
 uses the happens-before relation to argue that a commit makes its entire
 write-set visible atomically, as if all writes in the write-set occur at the
-single instant of the transaction's linearization point. Part~II examines the
+single instant of the transaction's \emph{linearization point} --- the moment
+at which a concurrent operation appears, to every other thread, to take effect.
+Linearizability is the general correctness condition behind this notion;
+Exercise~8 at the end of this chapter assigns its classic statement. Part~II examines the
 hardware that forces these fences; Part~IV designs the software runtimes that
 place them.
 
@@ -283,7 +296,7 @@ different ways, which is why their performance envelopes differ so widely.
 \centering
 \begin{tabular}{M{0.18\linewidth} M{0.22\linewidth} M{0.27\linewidth} M{0.23\linewidth}}
 \hline
-\thb{0.18\textwidth}{Family} & \thb{0.22\textwidth}{Examples in the codebase} & \thb{0.27\textwidth}{Serialization point} & \thb{0.23\textwidth}{Bank-transfer consequence} \\
+\thb{0.18\textwidth}{Family} & \thb{0.22\textwidth}{Representative systems (Ch.~9--10, 17--19)} & \thb{0.27\textwidth}{Serialization point} & \thb{0.23\textwidth}{Bank-transfer consequence} \\
 \hline
 Coarse lock & SGL, PersistentSGL, DistributedSGL & Lock acquisition or durable lock protocol & Simple proof; poor scalability under independent transfers. \\
 Hardware fast path & TSX-SGL & Hardware transaction commit, with SGL fallback & Fast when transactions fit hardware limits; fallback preserves correctness. \\
@@ -293,7 +306,7 @@ Persistent or distributed TM & NV-HTM, Romulus, XTM, TiKV & Durable commit recor
 GPU TM & PR-STM, CSMV, GPUTX, GAccO, GPU-JVSTM, GUST & Kernel-level commit protocol or commit log & Conflicts are batched across many lightweight threads. \\
 \hline
 \end{tabular}
-\caption{Transactional implementations differ mainly in where they serialize a transaction and how they validate the read set. The companion implementations all pass the same bank-style correctness tests, but expose different performance envelopes.}
+\caption{Transactional implementations differ mainly in where they serialize a transaction and how they validate the read set. The named systems are developed in the chapters indicated in the first column; the companion repository carries buildable versions of each. The companion implementations all pass the same bank-style correctness tests, but expose different performance envelopes.}
 \label{tab:tm-family-taxonomy}
 \end{table}
 
@@ -356,7 +369,12 @@ holds one program with two backends compiled into it:
 
 \begin{lstlisting}[language=C++, caption={The non-opacity demo, condensed from
 the file at \rep{benchmarks/cpp/opaquedemo/}. Three barriers force the
-interleaving, so the outcome is not a race but a certainty.},
+interleaving, so the outcome is not a race but a certainty. The
+\texttt{tm\_*} calls are the transactional runtime API of Chapter~8;
+\texttt{sigsetjmp(tm\_jmpbuf,{})} with a later \texttt{tm\_end()} that never
+returns on abort is the control-transfer idiom dissected in Chapter~14;
+\texttt{b\_*} are four program-created barriers and \texttt{Item} a
+two-field \texttt{\{id, payload\}} struct defined in the demo's full source.},
 label={lst:opaquedemo}]
 void *g_inventory[4]; int32_t g_count = 0, g_seed = 1;
 
@@ -422,7 +440,9 @@ to \texttt{count=0, inventory[0]=NULL}, and the committed projection is
 spotless. The crash comes from the view the consumer latched \emph{while} the
 transaction was in flight: a count of 1 backed by an item that no serial
 execution ever produced, and a slot that the abort emptied underneath a latched
-count. NoCrash for the consumer program follows exactly when every view,
+count. \texttt{NoCrash} --- the model-checking invariant of Chapter~6's
+\texttt{EagerSTM.tla} saying ``the consumer never dereferences a phantom
+pointer'' --- holds for the consumer program exactly when every view,
 including mid-flight and aborted ones, lies on some serial history --- which
 is opacity, not undo. NOrec cannot show the phantom because its writes exist
 only in the private write-set until the commit instant.
@@ -563,7 +583,8 @@ The outer transaction is the only real synchronization boundary. Inner
 transactions are ordinary function calls with atomicity inherited from the
 enclosing transaction. The money-conservation assertion is checked while the
 lock is held, so it observes a stable state. This SGL implementation is useful
-as a reference backend and oracle, not as the performance target.
+as a reference backend and \emph{oracle} --- the ground-truth implementation
+whose outputs tests compare against --- not as the performance target.
 
 \section{Worked Example: Model Checking Money Conservation}
 
@@ -651,8 +672,10 @@ conditions are the yardstick for the rest of the book.
 serializable but not opaque. Explain which serial order witnesses the
 serializability and why the history violates opacity.
 
-\item \emph{[theory]} Explain why a TM that uses simple timestamp ordering
-without validation can produce a non-serializable outcome. Identify
+\item \emph{[theory]} Explain why a TM that uses simple \emph{timestamp
+ordering} (each transaction gets a timestamp at begin, and an access is
+ordered --- or the accessor rejected --- by that timestamp alone, with no
+end-of-transaction validation) can produce a non-serializable outcome. Identify
 which hazard class remains unchecked.
 
 \item \emph{[implementation]} Replace the single global lock in the

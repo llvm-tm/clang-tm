@@ -325,6 +325,17 @@ abandon the lock-order law altogether.
 \index{model checking}
 \index{TLA+}
 
+\emph{Model checking} means exhaustively exploring the reachable states of a
+finite formal model of a program or protocol, checking at each state that a
+stated invariant holds: not running the code, but enumerating every
+interleaving up to some bound. The tool used throughout this book is
+\emph{TLC}, the model checker for \emph{TLA+} specifications;
+Appendix~\ref{chap:pluscal-quick-ref} is the syntax quick reference, and reading the
+listing below needs only two rules --- each action describes one atomic step,
+and a prime ($x'$) is the value of $x$ \emph{after} the step. An invariant
+that holds of the initial state and is preserved by every action is called
+\emph{inductive}, and TLC confirms induction state-by-state.
+
 The locking bug is an implementation artifact. The intended application
 invariant is simple: an accepted transfer preserves total money and never
 leaves an account below the floor. A model of the atomic transfer states

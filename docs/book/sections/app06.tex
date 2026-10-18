@@ -7,6 +7,20 @@ that promise good.  Everything below is tested against the companion
 repository, so a working setup is: run the build, run the tests, run one
 TLA+ check, and only then start an exercise.
 
+\section{Acquiring the Companion}
+
+The repository is public:
+
+\begin{verbatim}
+git clone https://github.com/llvm-tm/clang-tm.git
+cd clang-tm
+\end{verbatim}
+
+All commands in this appendix assume the repository root (which is also
+this book's parent directory; the book sources live in
+\texttt{docs/book/}).  The toolchain is probed by
+\texttt{tools/check-requirements.sh}.
+
 \section{Minimum Toolchain}
 
 \begin{itemize}
@@ -61,6 +75,9 @@ others named in \texttt{benchmarks/cpp/Makefile} are valid):
 make -C benchmarks/cpp BACKEND=NOREC run-test-tx
 \end{verbatim}
 
+That Makefile uppercases \texttt{BACKEND} before matching its
+\texttt{ifeq} blocks, so \texttt{BACKEND=norec} works too.
+
 (The top-level Makefile's own \texttt{BACKEND} passthrough historically
 used lowercase; when in doubt, match the case of the \texttt{ifeq} blocks
 in the Makefile you are driving.)
@@ -71,7 +88,8 @@ in-tree TSX commit). Build and smoke-test:
 
 \begin{verbatim}
 scons build/X86_TSX/gem5.opt --with-ruby -j$(nproc)
-tsx-comparison/scripts/run-bank-gem5.sh TSXSGL 1 64 500
+gem5_sim/scripts/run-bank-gem5.sh NOREC 1 64 500   # usage:
+#   run-bank-gem5.sh [BACKEND] [THREADS] [ACCOUNTS] [TXNS]
 \end{verbatim}
 
 Benchmarks for gem5 are built as static x86-64 binaries with the ROI
@@ -94,6 +112,7 @@ Chapter~6 (\S\ref{sec:verify-workflow}) defines the workflow; the
 \begin{verbatim}
 make -C docs/proofs download-jar        # one-time: fetches tla2tools.jar
 make -C docs/proofs check               # TLC safety check, all backends
+make -C docs/proofs check-teaching      # the book's teaching models only
 make -C docs/proofs check-one BACKEND=TL2
 make -C docs/proofs verify-liveness     # fairness-based properties
 \end{verbatim}

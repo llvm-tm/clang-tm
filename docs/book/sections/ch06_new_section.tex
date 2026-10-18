@@ -2,28 +2,20 @@
 \index{TLA+}\index{TLC}\index{counterexample}\index{validation bug}\index{NOrec}\index{model checking!trace to code}
 \label{sec:tla-to-code}
 
-The earlier worked examples showed a broken PlusCal model and the TLC
-counterexample it produced.  This section completes the loop: the same
-stale-snapshot bug is traced from the model to the actual C++ backend, the
-corresponding code is identified, and the fix is verified by re-running TLC.
+The earlier worked example showed a deliberately broken NOrec-style commit
+action (Listing~\ref{lst:broken-commit}) and the value-recheck guard it
+omits (Listing~\ref{lst:commit-recheck}).  This section completes the loop:
+the same stale-snapshot bug gets a full TLC counterexample, that trace is
+followed into the actual C++ backend, and the fix is verified by re-running
+TLC.
 
 \subsection{The Broken Model}
 
-Consider a simplified NOrec commit action that omits the value recheck:
-
-\begin{lstlisting}[caption={A deliberately broken commit action: write-back without re-checking read-set values.}]
-BrokenCommit ==
-  /\ ok
-  /\ ~commitLock
-  /\ commitLock' = TRUE
-  /\ IF r1 >= amount THEN
-        /\ bal' = [bal EXCEPT ![1] = @ - amount,
-                              ![2] = @ + amount]
-        /\ clock' = clock + 1
-     ELSE
-        /\ bal' = bal
-        /\ clock' = clock
-\end{lstlisting}
+The broken commit action of Listing~\ref{lst:broken-commit} is the one
+mutation applied to the \texttt{BankNOrecValue} model earlier in this
+chapter: delete the commit-time value recheck
+(\texttt{r1 = bal[1] /\ r2 = bal[2]}) from inside the lock, and keep
+everything else.
 
 The guard \texttt{ok} was set earlier by the optimistic validation:
 if the clock had not changed since the snapshot, \texttt{ok} became
@@ -37,33 +29,42 @@ unconditionally.
 TLC finds a short two-transaction trace.  The schedule is:
 
 \begin{enumerate}
-  \item Transaction~1 records \texttt{snap = 0}, reads
-        \texttt{r1 = bal[1] = 10} and \texttt{r2 = bal[2] = 10}.
-  \item Transaction~2 transfers 5 from account~1 to account~2.
-        \texttt{bal[1] = 5}, \texttt{bal[2] = 15}, \texttt{clock = 1}.
-  \item Transaction~1's optimistic validation now fires: the clock has
-        changed (\texttt{clock = 1}, \texttt{snap = 0}), so it
-        re-reads both accounts, finds them equal to its cached
-        \texttt{r1} and \texttt{r2}, and sets \texttt{ok = TRUE}.
-  \item Transaction~1 enters the broken commit, which acquires the lock
-        and writes back \texttt{bal[1] = 10 - 1 = 9},
-        \texttt{bal[2] = 10 + 1 = 11}.
+  \item Transaction~1 records \texttt{snap = 0} and reads
+        \texttt{r1 = bal[1] = 10}, \texttt{r2 = bal[2] = 10}.
+  \item Transaction~1's optimistic validation fires while the clock is
+        still \texttt{0}: unchanged since \texttt{snap}, so
+        \texttt{ok = TRUE}.
+  \item Transaction~2 transfers 1 from account~1 to account~2 and
+        commits: \texttt{bal = <<9, 11>>}, \texttt{clock = 1}.
+  \item Transaction~1 enters the broken commit: the guard
+        \texttt{ok /\ r1 >= amount} still holds on its cached values, so
+        it acquires the lock and writes \texttt{bal[1] = 9 - 1 = 8},
+        \texttt{bal[2] = 11 + 1 = 12} --- without rechecking that
+        \texttt{bal} still matches what it read.
 \end{enumerate}
 
-The final state is \texttt{bal[1] = 9}, \texttt{bal[2] = 11} ---
-total money is 20, but account~1 was debited using a stale snapshot
-from \emph{before} Transaction~2's transfer.  The correct outcome
-should be \texttt{bal[1] = 4}, \texttt{bal[2] = 16}.  TLC reports:
+The final state is \texttt{bal = <<8, 12>>}.  Money is conserved (20) and
+the floors hold, yet the history admits \emph{no legal serialization}:
+Transaction~1 committed against a read of \texttt{(10, 10)}, but no serial
+order can give both transactions the values they read --- T1's reads must
+precede T2's commit and its writes must follow it, and no replay under any
+commit order reproduces \texttt{r1 = 10} for a transaction placed after
+T2.  This is exactly a lost update.  Money conservation cannot see it (the
+total survives); what catches it is the read-from legality invariant of
+\S\ref{sec:histories-legality-opacity} --- recorded reads must match the
+values a replay under the commit order produces, the same shape used by the
+strongest invariant of the companion's models.  With that invariant in the
+configuration, TLC reports:
 
 \begin{lstlisting}[caption={TLC counterexample output (simplified).}]
-Invariant MoneyConserved violated.
-State 4: bal = <<9, 11>>, clock = 1, committed = <<TRUE, TRUE>>
+Invariant NoStaleCommit violated (recorded reads fail replay under commit order).
+State 5: bal = <<8, 12>>, clock = 1
+  replay expects bal[1] = 9 for Tx 1's r1; recorded r1 = 10
 \end{lstlisting}
 
-The invariant that fails is \texttt{MoneyConserved == Total(bal) = 20}:
-the total is still 20, but the money distribution is wrong.  A sharper
-invariant---one that tracks whether each individual transfer's debit
-and credit are both visible---would also fail.
+Note what the counterexample buys and costs: a conservation-only run of the
+same model passes this trace silently --- the total is still 20 --- which
+is why the chapter's models carry a legality invariant, not just a sum.
 
 \subsection{Tracing to C++}
 
@@ -125,28 +126,25 @@ stale values would proceed to write-back and publish incorrect results
 The connection between model and code is direct:
 
 \begin{itemize}
-  \item The PlusCal commit action's missing recheck corresponds to
+  \item The broken commit action's missing recheck corresponds to
         removing the \texttt{iseq()} comparison in
         \texttt{validate()}.
   \item The CAS retry in the C++ code corresponds to the
-        \texttt{elsif clk = snapshot[self]} branch in the PlusCal
-        model: if the clock changed, the transaction must re-validate
-        before attempting the CAS again.
+        \texttt{Validate} branch of the \texttt{BankNOrecValue} model
+        above: if the clock changed since the snapshot, the transaction
+        must re-validate (\texttt{ok := (r1 = bal[1] /\ r2 = bal[2])})
+        before attempting the commit again.
   \item The value-based comparison (\texttt{iseq}) is the same check
-        that the correct PlusCal model encodes as
+        that the correct model encodes as
         \texttt{r1 = bal[1] /\ r2 = bal[2]}.
 \end{itemize}
 
 \subsection{The Fix}
 
-The fix in the model is to restore the value recheck:
-
-\begin{lstlisting}[caption={The correct commit guard.}]
-CommitRecheck ==
-  /\ clock = snap
-  /\ r1 = bal[1]
-  /\ r2 = bal[2]
-\end{lstlisting}
+The fix in the model is to restore the value recheck: re-add the guard of
+Listing~\ref{lst:commit-recheck}
+(\texttt{clock = snap /\ r1 = bal[1] /\ r2 = bal[2]}) inside the commit
+action, under the lock.
 
 In the C++ code, the recheck already exists as the \texttt{iseq()} test
 inside \texttt{validate()}.  The lesson is that the model and the code

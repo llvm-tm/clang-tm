@@ -1,7 +1,7 @@
 \chapter{Compiler Optimizations and Their Impact on TM}
 \index{compiler optimizations!transactional memory}\index{transactional memory!compiler instrumentation}\index{DSE}\index{LICM}\index{CSE}\index{tm\_clobber}\index{transaction\_safe}\index{transaction\_pure}
 
-A transactional memory implementation is not only a runtime algorithm. It is also a contract with the compiler. The runtime may implement SGL, NOrec, TL2, TinySTM, SwissTM, MVLog, or a GPU design such as GUST, but the generated code must still preserve the abstract transaction: every transactional read must be represented in the read-set or validation discipline, and every transactional write must be represented in the write-set or redo/undo discipline.
+A transactional memory implementation is not only a runtime algorithm. It is also a contract with the compiler. The runtime may implement SGL, NOrec, TL2, TinySTM, SwissTM, MVLog, or a GPU design such as GUST (Chapter~18), but the generated code must still preserve the abstract transaction: every transactional read must be represented in the read-set or validation discipline, and every transactional write must be represented in the write-set or redo/undo discipline.
 
 This chapter focuses on the danger zone between ordinary optimization and TM instrumentation. The running example is the two-account bank transfer: debit one account, credit another, preserve an account floor, and preserve total money. The compiler is allowed to optimize local arithmetic and stack temporaries aggressively. It is not allowed to erase the debit, hoist a transactional read past a validation boundary, or turn an opaque TM access into an ordinary load.
 
@@ -40,7 +40,7 @@ The first transformation breaks the write-set. The fact that the function does n
 
 The second transformation breaks the read-set. Even if a source expression looks syntactically stable, a transactional read may have to record an address, observe a version, validate a clock, check a Bloom filter, or participate in a later opacity check. Hoisting it out of the loop changes both the values read and the metadata collected by the runtime.
 
-Both are correct under single-threaded semantics and both are wrong for TM: the write must reach the write-set, and the read must see fresh data each iteration. The fix is the contract of the next section: \texttt{tm\_clobber} and the rule that instrumentation runs \emph{after} optimization. These are exactly the ``mismatch bugs seen in the wild'' of the next section --- pass reordering and dead-store elimination of speculative writes.
+Both are correct under single-threaded semantics and both are wrong for TM: the write must reach the write-set, and the read must see fresh data each iteration. The fix is the contract of the next section: \texttt{tm\_clobber}-style optimizer barriers (an intrinsic telling the optimizer that the call has touched --- ``clobbered'' --- memory it cannot see; developed below in \S\ref{sec:contract-programmer-compiler}) and the rule that instrumentation runs \emph{after} optimization. These are exactly the ``mismatch bugs seen in the wild'' of the next section --- pass reordering and dead-store elimination of speculative writes.
 
 For the bank example, the intended invariant is:
 
@@ -62,7 +62,9 @@ A TM-aware compiler needs an explicit instrumentation contract. The contract ide
 
 The contract is intentionally independent of the backend. SGL may implement the transaction as a critical section; TL2 and TSC-TM may use clocks; NOrec may validate against a global sequence lock; TinySTM variants may differ in write-back or write-through policy; GPU designs may batch validation and commit logs. The compiler still owes the same thing: preserve the dynamic sequence of transactional effects that the source program requested.
 
-The contract also explains why measured runtime performance must be interpreted together with compiler correctness. For example, the codebase measurements report TL2 and TSC-TM at roughly 2.06M and 2.05M transactions per second on the M1 Pro fuzz/bank benchmark, and NOrec-BF faster than baseline NOrec on the read-mostly case. Those numbers are meaningful only if the compiler has not optimized away the transactional access stream being measured.
+The contract also explains why measured runtime performance must be interpreted together with compiler correctness. For example, the codebase measurements report TL2 and TSC-TM at roughly 2.06M and 2.05M transactions per second on the M1 Pro fuzz/bank benchmark, and NOrec-BF faster than baseline NOrec on the read-mostly case. These runs come
+from the Apple M1 Pro development machine behind the anchors of
+Table~\ref{tab:perf-anchors} (Chapter~15). Those numbers are meaningful only if the compiler has not optimized away the transactional access stream being measured.
 
 \section{Worked Example: Barriered Transfer Instrumentation}
 \index{tm\_clobber}
@@ -183,7 +185,7 @@ LICM & Hoists \texttt{tm\_read\_*} out of a loop because the address expression 
 CSE & Reuses one \texttt{tm\_read\_*} result for a later read of the same address. & CSE is valid for stack locals; transactional reads of shared memory are not pure loads. \\
 Store forwarding & Replaces a transactional read with a previous ordinary store or vice versa. & Forward only within the transaction's own write-set semantics, preserving conflict detection. \\
 Inlining & Exposes \texttt{transaction\_pure} or runtime calls to later passes. & Preserve attributes after inlining; do not accidentally reclassify runtime calls as pure. \\
-SROA & Splits aggregate accesses and changes access width. & Legal only if the pass preserves address classification and emits matching width-specific instrumentation. \\
+SROA (scalar replacement of aggregate operands --- splitting a struct into per-field scalars) & Splits aggregate accesses and changes access width. & Legal only if the pass preserves address classification and emits matching width-specific instrumentation. \\
 \hline
 \end{tabular}
 \caption{Common optimizations and the corresponding TM-aware restrictions.}
@@ -262,6 +264,7 @@ With only \texttt{GoodTransfer}, both invariants hold for this finite instance; 
 The model deliberately abstracts away locks, timestamps, ownership records, and validation. That is the point. A compiler pass that deletes one side of the transfer has already changed the sequential meaning of the transaction. No commit protocol can repair an update that was never emitted.
 
 \section{Contract Between Programmer and Compiler}
+\label{sec:contract-programmer-compiler}
 
 The programmer-facing half of the contract is a set of annotations and restrictions. The compiler cannot infer every semantic boundary from C or C++ syntax alone. It needs to know which functions may execute inside a transaction, which functions are pure with respect to transactional state, and which globals must be treated as shared transactional objects.
 
@@ -269,7 +272,7 @@ The \texttt{transaction\_safe} annotation says that a function may be called fro
 
 Compiler intrinsics such as \texttt{tm\_clobber} exist to bridge source intent and optimizer mechanics. A source-level annotation classifies a region. An IR-level intrinsic prevents a later pass from turning the instrumented region back into ordinary memory operations.
 
-The contract says what the programmer must protect via \texttt{transaction\_safe} and \texttt{transaction\_pure} annotations, while compiler intrinsics like \texttt{tm\_clobber} inform the optimizer of transactional side effects. The annotation contract is the C++ TM TS's central lesson: without a language-level notion of ``transaction'', the compiler cannot keep its promises, which explains the mismatch bugs seen in the wild --- DATA/TEXT symbol collisions, pass reordering of \texttt{tm\_read}\slash{}\texttt{tm\_write} calls, and dead-store elimination of speculative writes. This programmer-facing contract is the user-visible half of Section~\ref{sec:instrumentation-contract}: the annotations the programmer writes exist to feed the pass the classifications it needs.
+The contract says what the programmer must protect via \texttt{transaction\_safe} and \texttt{transaction\_pure} annotations, while compiler intrinsics like \texttt{tm\_clobber} inform the optimizer of transactional side effects. The annotation contract is the C++ TM Technical Specification's (Chapter~4) central lesson: without a language-level notion of ``transaction'', the compiler cannot keep its promises, which explains the mismatch bugs seen in the wild --- DATA/TEXT symbol collisions (hook names that exist as both data symbols and code symbols, Chapter~8), pass reordering of \texttt{tm\_read}\slash{}\texttt{tm\_write} calls, and dead-store elimination of speculative writes. This programmer-facing contract is the user-visible half of Section~\ref{sec:instrumentation-contract}: the annotations the programmer writes exist to feed the pass the classifications it needs.
 
 A useful way to state the shared responsibility is:
 

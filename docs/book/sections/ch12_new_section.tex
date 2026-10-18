@@ -123,8 +123,11 @@ never touched.
 \label{sec:tsx-profiling}
 
 Understanding performance requires hardware-level measurement.  The
-companion's TSX profiling infrastructure instruments the TSXSGL
-backend with RDTSC timestamps at each TSX primitive and produces
+companion's TSX profiling infrastructure (TSX = Intel's Transactional
+Synchronization Extensions, the hardware lock-elision ISA behind the
+TSXSGL backend and Chapters~15 and~17) instruments the TSXSGL
+backend with RDTSC (Read Time-Stamp Counter, an x86 instruction that
+returns a cycle counter) timestamps at each TSX primitive and produces
 calibration data for the simulator's cost model.
 
 The profiling patch (\rep{patches/profile/tsx/0001-tsxsgl-tsx-timing-instrumentation.patch})
@@ -174,7 +177,7 @@ non-transactional functions for loads and stores to TM-annotated
 globals and emits source-location warnings suggesting
 \texttt{[[tm::shared]]} annotation:
 
-\begin{lstlisting}[language=bash, caption={Running the race checker.}]
+\begin{lstlisting}[language=bash, caption={Running the race checker. \texttt{opt} is LLVM's mid-level optimizer driver (\texttt{opt-22} for LLVM~22); \texttt{myapp.bc} is LLVM bitcode, the compiler's internal representation of the program.}]
 opt-22 -load-pass-plugin=plugin/bin/libTMRaceChecker.so \
        -passes="tm-race-checker" myapp.bc -o /dev/null
 \end{lstlisting}

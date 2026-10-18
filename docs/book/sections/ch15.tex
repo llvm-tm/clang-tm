@@ -5,7 +5,7 @@ Transactional memory performance is not summarized by a single number. A system 
 
 This chapter gives a compact toolkit for answering that question. We start with metrics, then move to analytical models, measurement hygiene, and worked examples. The running example is again the two-account bank transfer with an account floor and a money-conservation invariant: it is small enough to measure carefully, but rich enough to expose aborts, semantic rejects, validation cost, and serialization.
 
-The companion repository carries this toolkit as code, and the exercises refer to it. Real-hardware costs come from RDTSC-instrumented profiling patches (\texttt{patches/profile/tsx/} measures XBEGIN/XEND/abort cycle costs of the TSX-SGL backend on Broadwell-EP); they are packaged as portable \emph{machine profiles} (\texttt{machine\_profiles/broadwell\_ep\_v4.json}, \texttt{skylake.json}); and the discrete-event simulators (\texttt{simulator/}, binaries \texttt{tm-des} and \texttt{tm-sim}) replay transaction traces against either the real backend or a calibrated per-event cost model, so a design question can be answered at three fidelities: measured, cycle-accurate simulated (Chapter~17's gem5 flow), and cost-model estimated.
+The companion repository carries this toolkit as code, and the exercises refer to it. Real-hardware costs come from RDTSC-instrumented profiling patches (\texttt{patches/profile/tsx/} measures XBEGIN/XEND/abort cycle costs of the TSX-SGL backend on Broadwell-EP; the TSX instructions and the TSXSGL backend are the subject of \S\ref{sec:htm-capacity-probe} and Chapter~17); they are packaged as portable \emph{machine profiles} (\texttt{machine\_profiles/broadwell\_ep\_v4.json}, \texttt{skylake.json}); and the discrete-event simulators (\texttt{simulator/}, binaries \texttt{tm-des} and \texttt{tm-sim}) replay transaction traces against either the real backend or a calibrated per-event cost model, so a design question can be answered at three fidelities: measured, cycle-accurate simulated (Chapter~17's gem5 flow --- gem5 is a widely used open-source processor simulator that models a full machine, including caches and the memory hierarchy, in enough detail to report cycle counts), and cost-model estimated.
 
 \section{Metrics and Benchmarks}
 
@@ -17,11 +17,11 @@ The usual first-order metrics are:
 
 Committed throughput is normally reported in transactions per second; abort rate, split by cause when possible (validation failure, lock conflict, capacity abort, explicit semantic reject, or fallback path); attempts per committed transaction; latency distribution for committed transactions; wasted work, estimated from aborted attempt duration or from progress counters; speedup over a single global lock; occupancy or parallelism, meaning the mean number of in-flight transactions; and energy under contention, when the platform exposes trustworthy counters.
 
-Benchmark choice determines which metric matters. The STAMP suite remains a useful vocabulary because its kernels exercise different access shapes. The eight kernels are \texttt{bayes}, \texttt{genome}, \texttt{intruder}, \texttt{kmeans}, \texttt{labyrinth}, \texttt{ssca2}, \texttt{vacation}, and \texttt{yada}. They cover read-heavy phases, write-heavy phases, long transactions, graph traversals, tree-shaped data, and irregular memory access. A backend that performs well on \texttt{kmeans} may still collapse on \texttt{yada}; the former may be dominated by simple reads, while the latter may be dominated by conflict and validation.
+Benchmark choice determines which metric matters. The STAMP suite (Stanford Transactional Applications for Multi-Processing; Chapter~10) remains a useful vocabulary because its kernels exercise different access shapes. The eight kernels are \texttt{bayes}, \texttt{genome}, \texttt{intruder}, \texttt{kmeans}, \texttt{labyrinth}, \texttt{ssca2}, \texttt{vacation}, and \texttt{yada}. They cover read-heavy phases, write-heavy phases, long transactions, graph traversals, tree-shaped data, and irregular memory access. A backend that performs well on \texttt{kmeans} may still collapse on \texttt{yada}; the former may be dominated by simple reads, while the latter may be dominated by conflict and validation.
 
 Microbenchmarks have a different role. A counter benchmark isolates the cost of one contended location. A bank benchmark controls account count, transfer amount, account floor, and write-set size. A linked-list benchmark varies traversal length and update probability. These tests are not substitutes for applications; they are instruments for parameter sweeps. They tell us whether a performance cliff is caused by contention, read-set length, write-set length, metadata locality, or validation frequency.
 
-For the companion codebase, SGL is the conservative baseline; TL2, NOrec, NOrec-BF, TSC-TM, TinySTM variants, SwissTM, DUDETM, and MVLog show different points in the design space. The measured M1 Pro fuzz/bank anchors in Table~\ref{tab:perf-anchors} are calibration points, not universal rankings. The GPU designs, including GUST, require separate interpretation because their commit and validation costs are shaped by warp occupancy, memory coalescing, and global-memory atomics.
+For the companion codebase, SGL is the conservative baseline; TL2, NOrec, NOrec-BF, TSC-TM, TinySTM variants, SwissTM, DUDETM, and MVLog show different points in the design space. The measured Apple M1 Pro fuzz/bank anchors in Table~\ref{tab:perf-anchors} are calibration points, not universal rankings. The GPU designs, including GUST (Chapter~18), require separate interpretation because their commit and validation costs are shaped by warp occupancy, memory coalescing, and global-memory atomics.
 
 \section{Analytical Models}
 \label{sec:perf-analytical}
@@ -83,12 +83,13 @@ The model is strongest when conflicts are approximately independent and the work
 \end{figure}
 
 \section{Experimental Methodology}
+\label{sec:experimental-setup}
 
 A TM measurement is an experiment on a whole stack: backend, compiler, allocator, scheduler, CPU frequency policy, memory hierarchy, and benchmark. The methodology must make these variables visible.
 
 Warm-up matters. The first seconds of a run may include page faults, allocator growth, branch predictor training, cache population, JIT compilation in managed systems, or lazy initialization. A benchmark should either discard a warm-up interval or run long enough that initialization noise is negligible. Result stabilization matters for the same reason. A single best run is not evidence; repeated runs with variance are.
 
-Profiling with \texttt{perf} or platform-specific counters helps separate algorithm cost from machine cost. Useful events include cycles, instructions, cache misses, branch misses, lock contention, context switches, and, where available, hardware-transaction abort causes. On platforms without \texttt{perf}, equivalent vendor tools or coarse counters can still reveal whether a curve is CPU-bound, memory-bound, or scheduler-bound.
+Profiling with \texttt{perf} (the Linux performance-counter tool, which samples hardware counters such as cache misses and branch mispredictions) or platform-specific counters helps separate algorithm cost from machine cost. Useful events include cycles, instructions, cache misses, branch misses, lock contention, context switches, and, where available, hardware-transaction abort causes. On platforms without \texttt{perf}, equivalent vendor tools or coarse counters can still reveal whether a curve is CPU-bound, memory-bound, or scheduler-bound.
 
 A central rule is to compare against the uninstrumented baseline, not just against other TMs. Transactional instrumentation can dominate algorithmic differences. If an uninstrumented bank transfer runs much faster than every TM backend at one thread, the gap is not contention; it is barrier, metadata, logging, and compiler cost. Only after this baseline is known does it make sense to compare NOrec against TL2 or TinySTM against SwissTM.
 
@@ -96,7 +97,7 @@ Benchmark hygiene includes pinning threads when possible, disabling frequency sc
 
 \begin{table}[htbp]
 \centering
-\caption{Measured anchors from the companion M1 Pro fuzz/bank runs. These are calibration points, not universal rankings.}
+\caption{Measured anchors from the companion Apple M1 Pro fuzz/bank runs. These are calibration points, not universal rankings.}
 \label{tab:perf-anchors}
 \begin{tabular}{M{0.15\linewidth}M{0.19\linewidth}M{0.23\linewidth}M{0.31\linewidth}}
 \hline
@@ -139,7 +140,7 @@ baseline for throughput, attempts, semantic rejects, and the money-conservation
 invariant before replacing the critical section by NOrec, TL2, TinySTM, or
 another backend.
 
-\begin{lstlisting}[language=C++, caption={A compilable SGL bank benchmark that reports attempts and checks conservation.}]
+\begin{lstlisting}[language=C++, caption={A compilable SGL bank benchmark that reports attempts and checks conservation.}, label={lst:perf-bank}]
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -486,10 +487,12 @@ Attempts and commits must be counted at the same semantic boundary; counting inn
 
 A cost model is only as honest as its constants. The companion keeps those
 constants in \emph{machine profile} files --- JSON records of measured cycle
-costs --- so that the same profile feeds the simulator's cost mode, the DES
-engine, and back-of-envelope arithmetic like this one. Here is the TSX block
-of \texttt{simulator/machine\_profiles/broadwell\_ep\_v4.json}, collected on
-an Xeon E5-2648L v4 (1.8~GHz, RTM available, microcode \texttt{0xb000040})
+costs --- so that the same profile feeds the simulator's cost mode, the
+discrete-event simulation (DES) engine, and back-of-envelope arithmetic like
+this one. Here is the TSX block of
+\texttt{simulator/machine\_profiles/broadwell\_ep\_v4.json}, collected on
+an Xeon E5-2648L v4 (1.8~GHz, RTM---Restricted Transactional Memory, the
+x86 instruction set behind TSX---available, microcode \texttt{0xb000040})
 with the RDTSC profiling patch of \texttt{patches/profile/tsx}:
 
 \begin{lstlisting}[caption={The measured TSX block of the Broadwell-EP machine profile.}]
@@ -535,7 +538,7 @@ contention-free figure); at $p=0.20$ it is ${\approx}906$ cycles
 one attempt's work, it replaces a $178$-cycle commit with a $2500$-cycle
 penalty, which is why abort-rate reductions dominate instruction-count
 optimizations in HTM tuning --- and why the capacity probe of
-\S\ref{sec:htm-capacity-probe} exists.
+\S\ref{sec:htm-capacity-probe} (Chapter~17) exists.
 
 Two methodological cautions, both learned the hard way in the companion's own
 calibration sessions. First, calibrate against \emph{uninstrumented} runs:
@@ -566,7 +569,7 @@ The best models are deliberately modest. Little's Law explains concurrency and l
     \item Fit a simple Markov model to STAMP’s \texttt{intruder} benchmark and estimate the abort probability that maximizes throughput.
     \item Use Little’s Law to explain why a high abort rate causes a sharp drop in throughput even when the system is not CPU-saturated.
     \item Design an experiment to measure the overhead of TM instrumentation vs. fine-grained locking for a linked list.
-    \item \emph{[implementation]} Modify Listing~\ref{sec:perf-bank-attempts}'s benchmark so that it records per-thread latency samples for committed transfers. Report median, 95th percentile, and maximum latency, and explain why the maximum is unstable under contention.
+    \item \emph{[implementation]} Modify Listing~\ref{lst:perf-bank}'s benchmark so that it records per-thread latency samples for committed transfers. Report median, 95th percentile, and maximum latency, and explain why the maximum is unstable under contention.
     \item \emph{[verification]} Extend the TLA+ model in \S\ref{sec:perf-tla-bank} with a third worker. Add an invariant stating that the number of in-flight attempts is at most one, and check that money conservation still holds.
     \item \emph{[theory]} Starting from the retry model
     $$

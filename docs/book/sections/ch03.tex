@@ -210,7 +210,9 @@ other. Each load bypasses its own store buffer, reads the shared memory,
 and finds $0$. The outcome $r_1{=}r_2{=}0$---both threads believe they went
 first---is forbidden under SC and allowed under TSO. This litmus test is
 the classic \emph{store-buffering} (SB) test, also known as Dekker's
-example, and closing it requires a full \texttt{mfence} between the store
+example, and closing it requires a full \texttt{mfence} (x86's full
+memory-fence instruction; ARM's equivalent is \texttt{dmb}, POWER's is
+\texttt{sync}) between the store
 and the load.
 
 Two further consequences follow from the same relaxation. First, a core
@@ -291,6 +293,16 @@ the ARMv8 acquire/release load-store instructions (\texttt{ldar}/
 (an address-dependent load cannot be hoisted above the load that computes
 its address).
 
+In the event vocabulary of Chapter~5 (and of the notation page), this is
+the cleanest way to see what a fence does: it is an edge added to the
+happens-before order $\mathit{hb}$ that constrains no
+location --- the one ordering in this book that a value-independent
+operation introduces. The per-core event lists of Figure~\ref{fig:weak-model}
+below are histories in the weaker sense: their ``then'' is program order
+alone, and a fence or the release/acquire pair is what promotes that local
+order into happens-before, so the reader's $\mathit{rf}$ edges can no longer
+straddle an un-ordered pair of stores.
+
 Figure~\ref{fig:weak-model} shows the canonical anomaly: the
 \emph{message-passing} (MP) litmus test. The writer publishes a payload
 and then a flag; the reader polls the flag and then reads the payload.
@@ -314,8 +326,10 @@ dependency-ordered reads---facts that the lock-free read paths of
 Part~IV lean on heavily.
 
 The repository carries one backend that targets this family directly:
-a POWER8 HTM-with-fallback runtime (\texttt{backends/tm\_impl/
-power8\_htm/}), which uses the hardware transactional instructions of
+a runtime built on \emph{hardware transactional memory} (HTM) with a
+lock fallback, for POWER8
+(\texttt{backends/tm\_impl/power8\_htm/}), which uses the hardware
+transactional instructions of
 POWER8 and inherits exactly these ordering rules for its fallback path.
 Every x86-tuned fence placement in this book was audited against the
 ARM/POWER column of Table~\ref{tab:litmus-models} before the Rust and C++
@@ -362,7 +376,8 @@ barrier) is inserted on at least one side.}
 \subsection{Other Models and the C/C++ Contract}
 
 Two further points on the spectrum matter for later chapters. RISC-V's
-RVWMO is, for practical purposes, a cousin of the ARM/POWER column of
+RVWMO (the RISC-V Weak Memory Order) is, for practical purposes, a cousin of
+the ARM/POWER column of
 Table~\ref{tab:litmus-models}: ordinary accesses are weakly ordered, and
 acquire/release annotations plus explicit fences recover order. GPUs are
 weaker still in a different dimension: the private L1 caches of a
@@ -792,7 +807,8 @@ Timestamp counter or logical clock &
 Global commit order; version clocks for read-set validation &
 TL2~\cite{dice06tl2}, TSC-TM (companion variant of TL2), NOrec-BF~\cite{dalessandro10norec} (companion extension), JVSTM~\cite{cachopo06}, MVLog (companion), LEFTRIGHT~\cite{ramalhete15leftright} (companion OCC variant, \rep{backends/\allowbreak tm\_impl/\allowbreak leftright}) \\
 No coherent cache across GPU SMs &
-Software conflict detection; warp-level voting; multi-version commit logs &
+Software conflict detection; warp-level voting (a \emph{warp} is a group of
+GPU threads executing in lockstep; Ch.~18); multi-version commit logs &
 PR-STM~\cite{shen15prstm}, CSMV~\cite{nunes22csmv}, GPUTX~\cite{xu14gpustm}, GAccO~\cite{holey14}, GUST~\cite{nunes23gust}; \rep{gpu/\allowbreak backends/} \\
 Persistent memory ordering &
 Durable commit requires write ordering and crash consistency; undo/redo logs &
@@ -822,7 +838,8 @@ But store buffers hide visibility, so a software TM must insert fences to make
 a commit's write-set visible atomically. The hardware substrate thus both
 enables and constrains every design in the chapters that follow.
 
-The memory-model ladder of \S3.3 gives that obligation a precise shape.
+The memory-model ladder of \S\ref{sec:tso-model} and \S\ref{sec:weak-model}
+gives that obligation a precise shape.
 Sequential consistency has no anomalies; TSO has exactly one (the
 store-buffering outcome of Figure~\ref{fig:tso-model}); the ARM and POWER
 family adds message-passing and IRIW anomalies (Figure~\ref{fig:weak-model}).
@@ -913,7 +930,7 @@ message-passing exercise (the crate in
 TLC against Listing~\ref{lst:bank-atomic-commit}
 ($\sum \mathrm{balance}[a]=200$; see Appendix~\ref{chap:pluscal-quick-ref}).
 The \emph{[theory]} exercises are graded against
-\S\ref{sec:tso-example} and \S\ref{sec:hardware}.  The \emph{[open]}
+\S\ref{sec:tso-example} and \S\ref{sec:weak-model}.  The \emph{[open]}
 exercise has no single right answer; it is graded on whether you connect
 your position to at least one concrete mechanism from this chapter and
 address the strongest objection.

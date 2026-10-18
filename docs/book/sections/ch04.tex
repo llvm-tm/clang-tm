@@ -6,7 +6,9 @@ The programmer writes an atomic block over ordinary variables; the compiler
 decides which of those variables are transactional; the runtime decides how
 their accesses are tracked. Between the source text and the runtime sits a
 memory model --- a contract about which reorderings the compiler and hardware
-may perform --- and a set of ABI hazards that break silently when violated.
+may perform --- and a set of \emph{ABI} (application binary interface --- the
+low-level contract between compiled objects: symbol names, calling
+conventions, data layouts) hazards that break silently when violated.
 
 This chapter examines the language side of that boundary: \texttt{volatile},
 inline assembly, atomics, the C/C++ memory model, and how Rust's ownership
@@ -61,7 +63,7 @@ state. The classic trap in this repository was a DATA-vs-TEXT symbol
 collision: the runtime exposed \texttt{tm\_sigsetjmp} as a function pointer in
 a data symbol, while the compiler emitted a direct call to the symbol's
 address. The generated code jumped to the pointer variable, not to the
-function. The pitfalls chapter returns to this failure. The rule is simple:
+function. Chapter~14 (the pitfalls chapter) returns to this failure. The rule is simple:
 every runtime hook that the compiler may call must be a real function symbol,
 not a data symbol containing a pointer.
 
@@ -190,17 +192,52 @@ Listing~\ref{lst:rust-bank} is the bank transfer of this chapter's C++
 examples, in safe Rust: no \texttt{unsafe} block appears anywhere in the
 client, yet both balances update as one atomic unit or not at all.
 
-\lstinputlisting[language=Rust, caption={The bank transfer in safe Rust
-with the companion \texttt{tm} crate: atomicity without a single
-\texttt{unsafe} block in client code.}, label={lst:rust-bank},
-firstline=6, lastline=31]{listings/rust_bank_transfer.rs}
+\begin{lstlisting}[language=Rust, caption={The bank transfer in safe Rust
+with the companion \texttt{tm} crate (complete file; builds in the companion
+workspace as \texttt{cargo build --example bank\_transfer}): atomicity without
+a single \texttt{unsafe} block in client code. \texttt{tm\_init}/\texttt{tm\_exit}
+start and stop the TM runtime for the process; \texttt{transaction} returns
+\texttt{false} (or panics with the runtime's private abort payload) to abort
+with no effect at all.}, label={lst:rust-bank}]
+// Companion listing: the bank transfer in safe Rust.
+// Source: adapted from explicit_api/rust/workspace/tm/examples/simple.rs
+// This file compiles against the `tm` crate: cargo build --example bank_transfer
+use tm::{TmCell, transaction, tm_init, tm_exit};
+use std::sync::Arc;
+
+fn main() {
+    tm_init();
+
+    let a = Arc::new(TmCell::new(100_i64));
+    let b = Arc::new(TmCell::new(100_i64));
+
+    // Both reads and both writes are one atomic unit.
+    let ok = transaction(|tx| {
+        let bal_a = tx.read(&a);
+        let bal_b = tx.read(&b);
+        if bal_a < 10 {
+            return false; // floor check: abort, no effect at all
+        }
+        tx.write(&a, bal_a - 10);
+        tx.write(&b, bal_b + 10);
+        true
+    });
+    assert!(ok);
+
+    let total = transaction(|tx| tx.read(&a) + tx.read(&b));
+    assert_eq!(total, 200);
+
+    tm_exit();
+}
+\end{lstlisting}
 
 What the borrow checker proved here: no thread can read or write
 \texttt{a} or \texttt{b} outside \texttt{transaction} (the cells' interiors
 are inaccessible), and the cells may be shared across threads only because
 \texttt{TmCell} is \texttt{Sync}. What it did \emph{not} prove: that the
 two writes commit together. That is the runtime's obligation, and it is
-discharged by the same OCC protocols as the C++ backends of Part~IV.
+discharged by the same optimistic concurrency control (OCC) protocols as the
+C++ backends of Part~IV.
 
 One design consequence deserves its own paragraph, because it is where Rust's
 safety and TM's abort semantics collide. The C++ backends abort with
@@ -310,8 +347,9 @@ the language cannot express a load of that structure. The crash class of
 \S\ref{sec:crash-without-opacity} is not ``prevented by the runtime'' in
 Haskell; it is \emph{inexpressible}. The \texttt{unsafePerformIO} escape
 hatch --- a pointer into the raw heap --- is precisely where GHC's own
-documentation warns that STM guarantees evaporate: the boundary we drew for
-databases in Figure~\ref{fig:db-tx-landscape} is, once again, the whole game.
+documentation warns that STM guarantees evaporate: the boundary Chapter~7
+draws for databases (its Figure~\ref{fig:db-tx-landscape}) is, once again,
+the whole game.
 \item \textbf{Blocking is transactional.} \texttt{retry} (Listing
 \ref{lst:haskell-stm}) aborts, remembers the read set, and re-runs when any
 read location is written. Waiting needs no locks, no condition variables, and
@@ -360,7 +398,7 @@ discipline in Clojure.}, label={lst:clojure-stm}]
       (alter to   + amt))))
 
 (defn balance-report [a b]
-  (sync (refset-of a)                ; block until 'a' changes; no tx needed
+  (sync a                              ; block until 'a' changes; no tx needed
     (println @a @b)))
 
 (defn notify! [msg]
@@ -369,9 +407,13 @@ discipline in Clojure.}, label={lst:clojure-stm}]
 
 The ladder of Chapter~7 places Clojure precisely: reads come from a
 consistent snapshot; \texttt{alter} validates on write-write conflicts
-(first updater wins); reads never abort a commit. That is snapshot isolation
---- write skew is admitted, and the language's own documentation says so ---
-which is tolerable in Clojure for the reason \S\ref{sec:iso-not-in-tm} gives
+(first updater wins); reads never abort a commit. That is \emph{snapshot
+isolation}. Snapshot isolation admits \emph{write skew}: two transactions
+each read state that was consistent at read time, write only what they
+checked, and jointly commit an inconsistent result (Chapter~7 defines both
+precisely). The language's own documentation concedes write skew, and that
+is tolerable in Clojure for the reason \S\ref{sec:iso-not-in-tm}
+(Chapter~7) gives
 for databases: observers never hold a pointer into the middle of a value, so
 an anomaly yields a stale decision about an immutable thing, not a dangling
 reference to a torn one. The design carries three lessons for the rest of
@@ -380,7 +422,8 @@ this book.
 \begin{itemize}
 \item \textbf{Values as snapshots.} Because refs swap between immutable
 values, a reader's view is always internally consistent by construction ---
-the mechanism behind Figure~\ref{fig:db-tx-landscape} in a language without
+the mechanism behind Figure~\ref{fig:db-tx-landscape} (Chapter~7) in a
+language without
 a server. Chapter~14's multi-version backends do the same trick per object;
 Clojure does it globally by fiat of the type system (all values are
 immutable; mutation is reassignment).
@@ -395,7 +438,8 @@ functions makes the transactional boundary a visible part of the API surface.
 update as commutative (metadata counters, set inserts), exempting it from
 the WW first-winner rule and reducing aborts at the price of weaker read
 guarantees --- an explicit, programmer-facing dial between the rungs of
-Figure~\ref{fig:iso-ladder}, in a language whose default is near its top.
+Figure~\ref{fig:iso-ladder} (Chapter~7), in a language whose default is
+near its top.
 \end{itemize}
 
 \subsection{Scala and Python: Library STM Where the VM Removed the Excuse}
@@ -808,7 +852,7 @@ Exercise~3.  The \emph{[verification]} exercises are checked with TLC against
 Listing~\ref{lst:bank-tm-atomicity} (\texttt{InvMoney}, \texttt{InvFloor}; see
 Appendix~\ref{chap:pluscal-quick-ref}).  The \emph{[theory]} exercises are
 graded against \S\ref{sec:atomics-example}.  The final \emph{[theory]}
-exercise is graded against \S\ref{sec:iso-not-in-tm}: the boundary analysis
+exercise is graded against \S\ref{sec:iso-not-in-tm} in Chapter~7: the boundary analysis
 there is the model answer.  The \emph{[literature]}
 exercise is graded on the accuracy of your restatement: the chosen
 property must be a real one from the paper, and your counterexample must

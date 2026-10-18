@@ -10,7 +10,8 @@ mechanization: a TLC invariant is an anomaly predicate or a model class
 checked on a bounded fragment of $h$.
 
 \medskip
-\noindent\textbf{Histories.} A \emph{history} $h$ is a sequence of events
+\noindent\textbf{Histories.} A \emph{history} $h$ (written
+$\mathcal{H}$ in much of the TM literature) is a sequence of events
 $\mathrm{begin}(T)$, $r_T(x)\!\to\!v$, $w_T(x)\!\leftarrow\!v$,
 $\mathrm{commit}(T)$, $\mathrm{abort}(T)$.
 $\mathrm{comm}(h)$ is the \emph{committed projection} (events of
@@ -21,6 +22,23 @@ before all of the other). A \emph{serialization} $S$ is a total order of
 transactions; $S$ is \emph{legal} for $h$ if every read of $h$ returns the
 value sequential replay under $S$ would produce (its \emph{read-from}
 value).
+
+\medskip
+\noindent\textbf{Relations on events.} The sequence order of one
+transaction's events is its \emph{program order} $\mathit{po}$; a legality
+witness $S$ fixes each read's \emph{read-from} edge, written
+$r_T(x)\mathrel{\mathit{rf}}w_{T'}(x)$. \emph{Happens-before} is
+$\mathit{hb}:= (\mathit{po}\cup\mathit{rf})^+$; events unrelated by
+$\mathit{hb}$ are \emph{concurrent}. Events \emph{conflict}
+($e \bowtie e'$) when they access a common location, at least one is a
+write, and they belong to different transactions; a \emph{data race} is a
+pair of concurrent conflicting events (Chapter~3's memory models).
+Legality decomposes by location, so transactions touching disjoint
+locations never conflict --- the embarrassingly-parallel baseline behind
+every abort-rate model in this book. Fences add location-free edges to
+$\mathit{hb}$; a CAS is a read--write pair constrained to share one
+$\mathit{rf}$ edge; lock acquires/releases are events $l_T(m)$
+(Chs.~9, 17).
 
 \medskip
 \noindent\textbf{Model skeletons.} Each correctness condition is one

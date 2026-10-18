@@ -23,7 +23,7 @@ A discrete-time Markov chain is a state machine with probabilities on its outgoi
 
 For transactional memory, the smallest lifecycle has four states: Active, Validating, Aborted, and Committed. A transaction runs user code in Active, checks its read set or ownership metadata in Validating, either installs its writes and reaches Committed, or discards speculative work and reaches Aborted. Retrying returns the transaction to Active.
 
-A discrete-time Markov chain has states, a transition matrix, and steady-state probabilities. Modeling a transaction's lifecycle uses the states Active, Validating, Aborted, and Committed, shown in Figure~\ref{fig:tx-lifecycle}. The key modeling assumption is that transitions are memoryless, which is reasonable for abort/retry loops where the only thing the model remembers is whether the last attempt aborted. The expected number of retries before a successful commit is a closed form via the geometric distribution, derived below. The continuous-time counterpart, the CTMC and its queueing cousin, is used in Part~VI for throughput prediction. The model's \emph{purpose} in the book is to give every later chapter a number where it can get one, and to hand off where it cannot: data-dependent contention belongs to Part~III's model checking.
+A discrete-time Markov chain has states, a transition matrix, and steady-state probabilities. Modeling a transaction's lifecycle uses the states Active, Validating, Aborted, and Committed, shown in Figure~\ref{fig:tx-lifecycle}. The key modeling assumption is that transitions are memoryless, which is reasonable for abort/retry loops where the only thing the model remembers is whether the last attempt aborted. The expected number of retries before a successful commit is a closed form via the geometric distribution, derived below. The continuous-time counterpart, the continuous-time Markov chain (CTMC) and its queueing cousin, is used in Part~VI for throughput prediction. The model's \emph{purpose} in the book is to give every later chapter a number where it can get one, and to hand off where it cannot: data-dependent contention belongs to Part~III's model checking.
 
 \begin{figure}[ht]
 \centering
@@ -127,6 +127,33 @@ Two derived sequences matter. The \emph{committed projection} $\mathrm{comm}(h)$
 
 A history becomes meaningful once we choose a \emph{serialization}: a total order of a set of transactions consistent with their event order inside $h$. Given a serialization $S$, each read event has a \emph{read-from} source: the latest write to the same location by an earlier transaction in $S$, or the initial value if none exists. $S$ is \emph{legal} if every read returns exactly its read-from value under ordinary sequential semantics. Legality is the entire content of ``the transaction saw a state that could really have existed.''
 
+Three relations on events turn these objects into a language for
+concurrency. Restricting $h$'s order to a single thread's events gives that
+thread's \emph{program order} $\mathit{po}$. A serialization $S$ fixes, for
+each read, the write it reads from; write $r_T(x) \mathrel{\mathit{rf}}
+w_{T'}(x)$ when $w_{T'}$ is that source, and call the result the
+\emph{read-from} edges of $(h,S)$. Happens-before is their transitive
+closure, $\mathit{hb} := (\mathit{po} \cup \mathit{rf})^+$; two events
+unrelated by $\mathit{hb}$ are \emph{concurrent}. Two events
+\emph{conflict}, $e \bowtie e'$, when they access a common location, at
+least one is a write, and they belong to different transactions. With these
+symbols, Chapter~3's memory models and this chapter's isolation ladder share
+one vocabulary: a \emph{data race} --- two threads accessing the same
+location with at least one write and no ordering between them --- is exactly
+a pair of concurrent conflicting events; strong atomicity (Chapter~2)
+promises no such pair exists between a transaction and any other thread, and
+weak atomicity makes no such promise. Locality is free as well: legality is
+defined location by location, so transactions touching disjoint locations
+never conflict and commit concurrently on every backend --- the
+embarrassingly-parallel baseline against which every abort-rate model in
+this book measures contention. Two vocabulary extensions are used later
+without further ceremony: a \emph{compare-and-swap} is a read--write pair on
+one location constrained to share a single $\mathit{rf}$ edge (a CAS reads
+what it conditionally overwrites, atomically), and a \emph{lock event}
+$l_T(m)$ --- acquire or release --- is how Chapters~9 and~17 put lock-based
+backends and lock subscription into histories; a fence, finally, is an
+$\mathit{hb}$ edge that names no location.
+
 With these pieces, the correctness ladder has three rungs, in the notation
 of p.~\pageref{cha:notation}:
 
@@ -147,11 +174,13 @@ meets databases (Chapter~19) and when a backend is deliberately broken
 
 Opacity is strictly stronger than serializability, and the gap is exactly one aborted transaction's illegal observation. Recast Listing~\ref{lst:serializable-not-opaque} in the new vocabulary. The history contains $r_{T_1}(x)\!\to\!0$, then $w_{T_2}(x)\!\leftarrow\!1$, $w_{T_2}(y)\!\leftarrow\!1$, $\mathrm{commit}(T_2)$, then $r_{T_1}(y)\!\to\!1$, then $\mathrm{abort}(T_1)$. Try any serialization $S$ of $\{T_1, T_2\}$. If $T_2$ precedes $T_1$, the read-from source of $r_{T_1}(x)$ is $w_{T_2}(x)$, so legality demands the read return $1$ --- it returned $0$. If $T_1$ precedes $T_2$, the read-from source of $r_{T_1}(y)$ is the initial value, so legality demands $0$ --- it returned $1$. No legal total order exists: the history is not opaque. Yet $\mathrm{comm}(h) = \{T_2\}$ serializes trivially: the history is serializable. One predicate separates them, and only the aborted transaction feels the difference.
 
-Opacity is expensive to guarantee for aborted transactions that read many locations. \emph{Virtual world consistency} \cite{imbs12vwc} weakens it: committed transactions must serialize legally as before, but an aborted transaction needs only consistency with its own causal past. The weakening permits invisible-read protocols that never validate aborted readers, at the price of letting a doomed transaction see states no serial execution produced. Multi-version designs sit naturally near this end of the spectrum; value-validated designs such as NOrec pay the opacity price on every read.
+Opacity is expensive to guarantee for aborted transactions that read many locations. \emph{Virtual world consistency} \cite{imbs12vwc} weakens it: committed transactions must serialize legally as before, but an aborted transaction needs only consistency with its own causal past. The weakening permits \emph{invisible-read} protocols --- reads that leave
+no trace in shared metadata, so there is nothing to validate --- that never
+validate aborted readers, at the price of letting a doomed transaction see states no serial execution produced. Multi-version designs sit naturally near this end of the spectrum; value-validated designs such as NOrec pay the opacity price on every read.
 
 The definitions descend from the original STM papers. Shavit and Touitou proposed the abstraction \cite{shavit95stm}; TMS1 \cite{herlihy03tms1} supplied structural details --- nesting, composition, the locator-based object model that JVSTM's VBox and OFG-STM's locators inherit --- and TMS2 \cite{herlihy03tms2} made dynamic-sized data structures transactional. All three treated only committed transactions; opacity arrived later precisely because implementations kept failing on aborted ones.
 
-Safety says nothing about whether a transaction ever commits. That is the domain of \emph{progress conditions}. An implementation is \emph{wait-free} if every operation completes in a bounded number of its own steps; \emph{lock-free} if some operation completes in finitely many steps system-wide; and \emph{obstruction-free} \cite{herlihy03obstructionfree} if a transaction completes when it runs alone long enough. Obstruction-freedom is the classic TM bargain: optimistic validation gives it cheaply, but under sustained contention the system may livelock unless a contention manager intervenes. Lock-based designs (the SGL family) offer only deadlock-freedom and can starve individual transactions. This distinction is why the liveness columns in the companion's proof suite distinguish ``passes'' from ``starvation possible'' --- most optimistic backends admit schedules where one thread retries forever, and weak fairness on the retry step does not rule them out.
+Safety says nothing about whether a transaction ever commits. That is the domain of \emph{progress conditions}. An implementation is \emph{wait-free} if every operation completes in a bounded number of its own steps; \emph{lock-free} if some operation completes in finitely many steps system-wide; and \emph{obstruction-free} \cite{herlihy03obstructionfree} if a transaction completes when it runs alone long enough. Obstruction-freedom is the classic TM bargain: optimistic validation gives it cheaply, but under sustained contention the system may livelock unless a contention manager intervenes. Lock-based designs (the SGL family) offer only deadlock-freedom and can starve individual transactions. This distinction is why the liveness columns in the companion's proof suite distinguish ``passes'' from ``starvation possible'' --- most optimistic backends admit schedules where one thread retries forever, and weak fairness on the retry step --- the liveness assumption that a step attempted continuously enough is eventually completed --- does not rule them out.
 
 Finally, note what makes these predicates tractable for a model checker. Opacity quantifies over all finite prefixes and all serializations --- apparently unbounded. Bounding the universe (two accounts, one amount, at most $k$ transactions) bounds both quantities, and the read-from legality condition collapses into per-state invariants of the form ``every committed slot's recorded reads match the values a replay would produce,'' which is literally the shape of the strongest invariant in the companion's multi-version models. What TLC then establishes is opacity for the bounded fragment; the transfer of trust to the unbounded system rests on the modeling discipline of keeping the invariant structure identical.
 
@@ -246,7 +275,9 @@ obstruction-free TM cannot even provide wait-free operation termination;
 it cannot provide strict disjoint-access parallelism (transactions touching
 disjoint objects must not contend on the same base object); it cannot have
 invisible reads; and its reads cannot avoid incurring a linear number of
-memory stalls or expensive read-after-write primitives. Then they
+memory stalls or expensive read-after-write primitives (load-linked /
+store-conditional style instructions that must retry until the
+core can prove nothing interfered). Then they
 exhibited a simple \emph{lock-based}, progressive, opaque TM that violates
 every one of those bounds at once. The conclusion is a linear complexity
 separation between non-blocking and blocking TMs: the obstruction-free
@@ -326,8 +357,11 @@ state at the time its operations take effect, while a read-only
 transaction may read from any state that existed during its lifetime.
 TMS2 is thus stricter than TMS1 but still more permissive than opacity.
 Doherty, Groves, Luchangco, and Moir made both conditions fully formal by
-specifying them as I/O automata, proved that TMS2 implements TMS1 by a
-simulation argument, exhibited histories separating the two, and framed
+specifying them as I/O automata (a standard formalism for concurrent
+systems: state machines with input and output actions, composed by
+intersection of allowed schedules), proved that TMS2 implements TMS1 by a
+simulation argument (a machine-verified mapping showing every behavior of
+the implementation is matched by the specification), exhibited histories separating the two, and framed
 the pragmatic question of which condition proofs should target
 \cite{doherty13tms}.
 
@@ -539,7 +573,7 @@ int main() {
 }
 \end{lstlisting}
 
-The simulation separates safety from performance: retries change the number of attempts, not the invariant. The account floor is checked before the write set is installed. The expected mean attempts approach the geometric value as the number of transfers grows. Real backends replace the synthetic Bernoulli validator with concrete validation mechanisms: NOrec validates a value-based read set, TL2 validates versions, and MV designs validate snapshots.
+The simulation separates safety from performance: retries change the number of attempts, not the invariant. The account floor is checked before the write set is installed. The expected mean attempts approach the geometric value as the number of transfers grows. Real backends replace the synthetic Bernoulli validator with concrete validation mechanisms: NOrec validates a value-based read set, TL2 validates versions, and multi-version designs validate snapshots.
 
 \begin{figure}[htbp]
 \centering
@@ -564,7 +598,7 @@ The simulation separates safety from performance: retries change the number of a
 \index{TLA+}\index{model checking}\index{invariant}
 \label{sec:math-bank-tla}
 
-The same bank example can be written as a finite-state TLA+ model. TLC checks all reachable states for the two invariants used throughout the book: money is conserved and every account remains above the floor.
+The same bank example can be written as a finite-state TLA+ model. TLC checks all reachable states for the two invariants used throughout the book: money is conserved and every account remains above the floor. Four reading rules make the listing legible (Appendix~\ref{chap:pluscal-quick-ref} is the full quick reference): a \emph{prime} ($x'$) denotes the value of $x$ \emph{after} one atomic step; $[\mathit{set} \backslash\mathrm{in} \mid\!\to v]$ builds a function (a record when the keys are fixed), and $[\,f \mathbin{\texttt{EXCEPT}}\; ![\mathit{key}] = \dots\,]$ copies $f$ with one key updated, where $@$ inside the new expression means the old value; $\mathsf{UNCHANGED}\; v$ abbreviates $v' = v$; and $[]P$ reads ``$P$ holds at every reachable state,'' so $\mathsf{Spec} == \mathsf{Init} \wedge [][\mathsf{Next}]_\mathit{Vars}$ says the run starts at $\mathsf{Init}$ and every step is a $\mathsf{Next}$ step or does nothing observable to $\mathit{Vars}$.
 
 \begin{lstlisting}[caption={A model-checkable TLA+ specification for a two-account transfer.}]
 ---- MODULE BankInvariant ----
@@ -804,7 +838,8 @@ verified with the companion: extend the simulation of
 \emph{[verification]} exercises are checked with TLC against
 \S\ref{sec:math-bank-tla} (money conservation; see
 Appendix~\ref{chap:pluscal-quick-ref}), with Exercise~8's stale-commit
-validation following the read-set check of \S\ref{sec:norec-example}.  The
+validation following the read-set check of \S\ref{sec:norec-example}
+(Chapter~10).  The
 \emph{[theory]} exercises are graded against \S\ref{sec:math-example}, with
 Exercises~10--11 additionally graded against the definitions of
 \S\ref{sec:histories-legality-opacity} (Exercise~10's expected answer:

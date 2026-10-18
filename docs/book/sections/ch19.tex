@@ -22,7 +22,9 @@ instances of these ideas: for persistence, DUDETM~\cite{liu17dudetm}
 SPHT~\cite{castro21spht} (group-commit persistent HTM, measured on real
 Optane hardware), NV-HTM~\cite{castro18nvhtm}, and a minimal PersistentSGL;
 for distribution, DistributedSGL and a TiKV-backed~\cite{peng10percolator}
-Percolator two-phase-commit backend, plus the volatile baselines used earlier
+Percolator two-phase-commit (2PC: a coordinator asks every participant to
+prepare and vote, and commits only if all vote yes) backend, plus the
+volatile baselines used earlier
 in the book. Two naming cautions. First, the repository's \texttt{nvhtm}
 backend is a \emph{scaffold}: its TM region is DRAM-backed \texttt{mmap}, so
 it provides HTM atomicity plus redo-log instrumentation but \emph{no} crash
@@ -46,7 +48,9 @@ live in \texttt{docs/proofs} and pass TLC's safety checks.
 Persistent TM asks for the ordinary TM invariant plus a crash invariant. A
 committed transfer must not disappear after power loss, and recovery must not
 apply it twice. The small example below uses one durable intent record. The
-record stores the post-state, so redo is idempotent.
+record stores the post-state (the values after the transfer), so redo
+(re-applying the logged update during recovery) is idempotent: replaying it
+writes the same values however many times it runs.
 
 The commit protocol has three externally visible phases. First, the runtime
 chooses an outcome while all ordinary TM checks still hold. Second, it forces a
@@ -203,9 +207,12 @@ int main() {
     \item The money-conservation invariant is checked after restart by the same observation used in volatile tests: the total balance remains unchanged.
 \end{itemize}
 
-The example is deliberately conservative. It uses \texttt{fsync} as the storage
+The example is deliberately conservative. It uses \texttt{fsync} (the POSIX
+call that forces a file's pending writes out to stable storage) as the storage
 ordering primitive and a single image rather than a segmented log. A real
-persistent TM backend may use cache-line write-back, epoch barriers, nonvolatile
+persistent TM backend may use cache-line write-back, epoch barriers (hardware
+or library mechanisms that guarantee all writes issued before the barrier have
+reached memory), nonvolatile
 allocation protocols, or copy-on-write roots. The same correctness rule remains:
 once the commit point is durable, recovery must be able to discover the decision
 and complete the update without consulting volatile state.
@@ -386,7 +393,10 @@ it --- read-set, write-set, validation, publish --- and the TM commit makes the
 writes atomically visible with no persistence barrier anywhere in the path.
 \emph{Persist}: each write was meanwhile appended as a redo entry
 $(addr, size, value)$ to a non-volatile log; after the TM commits, a background
-flusher drains the log to NVM (\texttt{clwb} + fence), overlapped with the
+flusher drains the log to NVM (non-volatile memory: media such as Intel
+Optane that retains contents across power loss; \texttt{clwb} --- the x86
+instruction that writes one cache line back to memory --- plus a fence),
+overlapped with the
 thread's next transaction. \emph{Reproduce}: after a crash, recovery scans the
 log, replays every \emph{complete} transaction's writes idempotently, and
 truncates. The design's whole point is the inversion: the visibility commit

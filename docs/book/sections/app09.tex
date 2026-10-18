@@ -5,7 +5,10 @@
 This appendix is a guided tour of the companion repository.  Every
 \emph{[implementation]} exercise in the book refers to at least one
 directory listed here; this chapter maps those references to concrete
-paths and explains the role of each component.  Read this appendix before
+paths and explains the role of each component.  All listings below are
+quoted verbatim from the repository (see Appendix~\ref{chap:dev-setup} for
+how to acquire it); the printed book embeds their content, so reading the
+appendix itself needs no checkout.  Read this appendix before
 starting Part~IV or Part~V exercises.
 
 \section{Repository Structure}
@@ -121,7 +124,7 @@ the function address from that variable at call time.  This is why
 function \emph{declaration} (TEXT).  If it were TEXT, the pass would emit
 a direct call to the function's machine code, which on some platforms
 collides with the DATA symbol of the same name---see
-Appendix~\ref{chap:rust-mistakes} Exercise~3 for the concrete failure.
+Appendix~\ref{chap:rust-mistakes} Mistake~3 for the concrete failure.
 
 \subsection{Runtime Backend Swapping}
 
@@ -250,7 +253,7 @@ make -C docs/proofs check              # safety (all backends)
 make -C docs/proofs verify-liveness    # fairness-based liveness
 \end{verbatim}
 
-Table~6.1 in Chapter~6 gives the full traceability table linking each
+Table~\ref{tab:traceability} in Chapter~6 gives the full traceability table linking each
 TLA+ model to its C++ implementation, state-space size, and invariant
 count.
 
@@ -385,7 +388,7 @@ Directory & Notes \\
           pattern with two backends linked in a single binary.
 
     \item \emph{[verification]} Pick any backend from the traceability
-          table (Table~6.1), read its PlusCal model in
+          table (Table~\ref{tab:traceability}), read its PlusCal model in
           \rep{docs/proofs/}, and identify which state variable corresponds
           to which C++ field.  For example, in the NOrec model
           (\rep{NOrec.tla}), the variable \texttt{clock} corresponds to

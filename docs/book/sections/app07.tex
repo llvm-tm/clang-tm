@@ -141,8 +141,9 @@ selectively.
     \item \emph{[open]} There is no single right answer.  A ``ahead of its
           time'' case points at Herlihy--Moss needing per-address versioning
           hardware that never shipped; a ``right on time'' case points at
-          the modern integration of HTM with strong-atomicity fallback and
-          software STM (\S\ref{sec:hardware}).  A strong answer names the
+           the modern integration of HTM with strong-atomicity fallback and
+           software STM (Chapter~17 and its worked hybrid,
+           \S\ref{sec:hybrid-example}).  A strong answer names the
           hardware primitive that was (or was not) missing in 1993.
 \end{enumerate}
 
@@ -307,7 +308,8 @@ selectively.
           $E{>}10$ near $C=4$; the simulator's measured retry counts run
           lower because real bank access is local, not uniform --- the
           independence term in the exponent is the one to blame
-          (\S\ref{sec:iso-cost} caveats; \texttt{tools/iso-cost.py}).
+           (\S\ref{sec:iso-cost} caveats; the book's
+           \texttt{docs/book/tools/iso-cost.py}).
     \item \emph{[literature]} ANSI RR quantified over \emph{point} reads,
           so a re-executed \emph{predicate} (range) is unconstrained;
           removing cursor re-positioning --- point reads only, or reading
@@ -437,6 +439,21 @@ selectively.
           asymptotics matter (long-running transactions, high abort rates).
           A strong answer defines ``better'' explicitly before arguing and
           concedes the workload where its own choice loses.
+    \item \emph{[implementation]} Increment the four counters at the exact
+          abort sites of \S\ref{sec:norec-rust-complete}: (a) in
+          \texttt{read()} where \texttt{s1 != rv}, (b) in \texttt{read()}
+          where \texttt{s1 != s2}, (c) where the commit CAS fails, (d) where
+          commit-time validation fails.  Category~(d) shrinks with rising
+          contention because conflicts get caught earlier --- at a read or
+          at the CAS --- before validation is ever reached.
+    \item \emph{[theory]} Snapshot extension preserves opacity because the
+          re-validated reads still witness \emph{one} consistent instant of
+          the global clock --- the extended snapshot replaces the begin-time
+          instant.  Ship-argument material: a transfer that the
+          fixed-snapshot policy aborts (it re-reads and sees the clock
+          moved) is committed by the extension after re-validating against
+          the new version; weigh fewer aborts against the larger validation
+          cost per retry.
 \end{enumerate}
 
 \section*{Chapter 11 --- Compiler Fundamentals: IRs and Passes}

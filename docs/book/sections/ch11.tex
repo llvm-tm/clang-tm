@@ -11,7 +11,7 @@ A conventional compiler pipeline has three broad stages. The front end turns sou
 
 A transactional-memory compiler pass normally belongs in the middle end, after the source-level transaction construct has been lowered but before final code generation. At that point the pass can still see memory operations explicitly, can query alias and escape information, and can replace loads and stores with calls into the TM runtime.
 
-LLVM IR and GCC GIMPLE are the two useful reference points. LLVM IR is a typed, static-single-assignment representation with explicit \texttt{load}, \texttt{store}, \texttt{call}, and control-flow instructions. GCC GIMPLE is also a simplified, typed IR, with memory operations made explicit enough for data-flow analysis and transformation. In both systems, the TM pass is conceptually simple: find memory accesses inside transactions, decide whether each access targets transactional shared state, and rewrite the selected operations into runtime calls.
+LLVM IR and GCC GIMPLE are the two useful reference points. LLVM IR is a typed, static-single-assignment (SSA) representation with explicit \texttt{load}, \texttt{store}, \texttt{call}, and control-flow instructions. Reading IR needs only four rules: identifiers starting with \texttt{\%} are virtual registers, and in SSA each is written exactly once (\texttt{\%1 = load i32, i32* \%p} loads an \texttt{i32} from the pointer \texttt{\%p} into \texttt{\%1}); bare types like \texttt{i32} are machine integers, \texttt{i32*} a pointer to one; identifiers starting with \texttt{@} are functions and globals; and a \emph{basic block} is a straight-line run of instructions with one entry and one exit. GCC GIMPLE is also a simplified, typed IR, with memory operations made explicit enough for data-flow analysis and transformation. In both systems, the TM pass is conceptually simple: find memory accesses inside transactions, decide whether each access targets transactional shared state, and rewrite the selected operations into runtime calls.
 
 \begin{figure}[htbp]
 \centering
@@ -40,7 +40,7 @@ LLVM IR and GCC GIMPLE are the two useful reference points. LLVM IR is a typed, 
 \draw[arr] (abi) -- (obj);
 \end{tikzpicture}%
 }
-\caption{A compiler TM pass sits between IR optimization and code generation; its output is ordinary code with calls into the runtime ABI.}
+\caption{A compiler TM pass sits between IR optimization and code generation; its output is ordinary code with calls into the runtime ABI. \texttt{atomic\_tx} here is book notation for whatever source-level boundary the front end recognizes --- in the companion, a function annotation that the Chapter~12 plugin detects; in GCC, \texttt{\_\_transaction\_atomic} (Chapter~4).}
 \label{fig:compiler-tm-pass}
 \end{figure}
 
@@ -50,7 +50,7 @@ The important design point is that the output of the pass is still ordinary code
 
 Instrumentation replaces transactional memory accesses with calls to a runtime. A source-level read such as \texttt{x = a->balance} becomes a typed read barrier. A source-level write such as \texttt{a->balance = x} becomes a typed write barrier. Transaction entry and exit become calls such as \texttt{\_\_tm\_begin} and \texttt{\_\_tm\_end}, or indirect calls through a hooks table when the backend is selected dynamically.
 
-In LLVM, the pass can be structured as a function pass or a module pass. A function pass is convenient when transaction boundaries are already represented inside each function, for example by intrinsics delimiting the transaction. A module pass is needed when global registration, constructor emission, or cross-function rewriting is required. The GCC GIMPLE equivalent traverses statements inside basic blocks, recognizes memory references, and replaces selected statements with calls to declared runtime functions.
+In LLVM, the pass can be structured as a function pass or a module pass --- LLVM's two units of rewriting, one function at a time versus the whole program's globals together. A function pass is convenient when transaction boundaries are already represented inside each function, for example by \emph{intrinsics} (compiler-known functions whose call the pass can recognize and replace) delimiting the transaction. A module pass is needed when global registration, constructor emission, or cross-function rewriting is required. The GCC GIMPLE equivalent traverses statements inside basic blocks, recognizes memory references, and replaces selected statements with calls to declared runtime functions.
 
 A minimal instrumentation algorithm is:
 
@@ -178,7 +178,7 @@ shape of the code produced by the pass: ordinary source-level loads and stores
 have become calls through the transactional ABI. The stub runtime below makes
 the file compile and lets the invariant be tested in a single-threaded run.
 
-\begin{lstlisting}[language=C, caption={Compilable C++17 model of an instrumented bank transfer.}]
+\begin{lstlisting}[language=C++, caption={Compilable C++17 model of an instrumented bank transfer.}]
 #include <assert.h>
 #include <stdint.h>
 

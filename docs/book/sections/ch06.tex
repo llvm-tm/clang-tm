@@ -63,7 +63,8 @@ against the C++ implementation.
   temporal; liveness properties such as ``a transaction that keeps retrying
   eventually commits'' are outside its comfort zone.
 \item \textbf{SPIN (Promela).}  SPIN is the closest relative: an
-  explicit-state LTL model checker with an algorithm-like input language.  It
+  explicit-state LTL (linear temporal logic) model checker with an
+  algorithm-like input language.  It
   would serve.  TLA+ wins on three practical points: the PlusCal surface syntax
   is closer to the pseudo-code used elsewhere in the book; the specification is
   ordinary math (sets, functions, records) rather than a C-like DSL, so the
@@ -99,6 +100,20 @@ pseudo-code: it has processes, labels, assignment, conditionals, loops,
 \texttt{either/or}, \texttt{await}, and \texttt{assert}.  The PlusCal translator
 turns that algorithm into ordinary TLA+ actions.  This matters in a textbook:
 the pseudo-code can be the checked artifact, not a paraphrase of it.
+
+Four notation rules cover every listing in this chapter (the quick reference
+is Appendix~\ref{chap:pluscal-quick-ref}): a \emph{prime}, $x'$, is the value
+of $x$ \emph{after} one action, unprimed $x$ its value before; an action is
+just a predicate relating the two (a conjunction of guards and next-value
+constraints --- \texttt{UNCHANGED} $v$ means $v' = v$);
+$[\,f \mathbin{\texttt{EXCEPT}}\; ![\mathit{key}] = \dots\,]$ copies function
+$f$ with one key updated, where $@$ denotes the old value; and the translator
+emits $\mathsf{Spec} == \mathsf{Init} \wedge [][\mathsf{Next}]_\mathit{vars}$
+below each algorithm --- ``starts at $\mathsf{Init}$, every step is a
+$\mathsf{Next}$ step or a stutter, and each process step is taken at least
+once when it stays continuously enabled'' (that last clause is the
+\emph{weak fairness} assumption; without it, liveness claims are vacuous) ---
+which is what \texttt{SPECIFICATION Spec} in a configuration file names.
 
 A TM model normally has three layers of state: \textbf{application state}, the
 heap being protected, such as the two account balances in the bank example;
@@ -246,7 +261,9 @@ end process
 The state machine is serial by construction.  At most one process can pass
 \texttt{begin\_tx}; all application reads and writes occur while the lock is
 held; the lock is released only after write-back.  The model therefore gives a
-baseline refinement target: any optimistic backend that claims to implement the
+baseline \emph{refinement} target --- refinement being the proof relation
+``every behavior of the implementation matches some behavior of the
+specification'' --- : any optimistic backend that claims to implement the
 same transaction should expose only histories equivalent to some SGL ordering.
 
 Every invariant of this chapter is trivially true here --- the lock serialises
@@ -333,7 +350,7 @@ Here is the smallest useful NOrec mutation: commit after a changed clock without
 checking the values again.  The code below is intentionally wrong.  It is a
 model-testing tool, not a runtime design.
 
-\begin{lstlisting}[caption={A deliberately broken NOrec-style commit action.}]
+\begin{lstlisting}[caption={A deliberately broken NOrec-style commit action.}, label={lst:broken-commit}]
 BrokenCommit ==
   /\ ok
   /\ ~commitLock
@@ -349,7 +366,7 @@ BrokenCommit ==
 
 The missing condition is the final value recheck:
 
-\begin{lstlisting}[caption={The commit guard that the broken action omitted.}]
+\begin{lstlisting}[caption={The commit guard that the broken action omitted.}, label={lst:commit-recheck}]
 CommitRecheck ==
   /\ clock = snap
   /\ r1 = bal[1]
@@ -571,7 +588,7 @@ GPU GUST (Ch.~18)& \texttt{GPU\_GUST.tla}  & \texttt{InvNoMissedConflict} & TLC 
 \end{table}
 
 The performance numbers reported elsewhere in the book are deliberately absent
-from these models.  For example, the M1 Pro fuzz/bank measurements distinguish
+from these models.  For example, the Apple M1 Pro fuzz/bank measurements distinguish
 NOrec-BF, NOrec, TL2, TSC-TM, and MVLog as engineering artifacts.  TLC checks a
 different claim: whether the abstract protocol admits a forbidden history in a
 bounded state space.  The two claims should reinforce each other, not replace
@@ -614,7 +631,7 @@ finite, and hostile: they should make wrong interleavings easy for TLC to find.
     \item \emph{[theory]} Explain why ``TLC passed'' on a finite model does
           not transfer to the C++ implementation automatically.  Name two
           abstraction gaps --- the call stack and \texttt{jmp\_buf}
-          lifetimes (\S\ref{sec:jmpbuf-example}), and unbounded state such
+          lifetimes (\S\ref{sec:jmpbuf-example}, Chapter~14), and unbounded state such
           as the commit clock or the allocator --- that the model omits and
           the implementation still owns.
     \item \emph{[literature]} Read Lamport's \emph{The Temporal Logic of

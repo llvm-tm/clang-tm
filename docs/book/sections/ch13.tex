@@ -68,7 +68,7 @@ This is intentionally small. It does not inspect the internal read set, write se
 
 The test catches a classic lost update. Suppose two transfers read the same destination balance, compute two different increments, and then one write overwrites the other. No account may become corrupted in isolation; each stored value may still look plausible. The sum exposes the defect because one credit vanished.
 
-A race-free TM preserves the accumulator, while a defect such as a lost update or a torn write-back surfaces as a drift in the sum, as Exercise~1 of this chapter asks you to confirm. The same binary runs against every backend in Part~IV with one flag, so one test suite validates the whole family. Exercise~1 also asks for the abort-fuzzing extension, and \S\ref{sec:test-example} feeds the oracle question of this section: what is ground truth? Combined with \S\ref{sec:math-example}, at abort probability $p = 0.9$ eight threads completing ten successful transactions each require the expected number of attempts $8 \times 10 \div (1-p) = 800$. The test still passes only if undo logging is correct.
+A race-free TM preserves the accumulator, while a defect such as a lost update or a torn write-back surfaces as a drift in the sum, as Exercise~1 of this chapter asks you to confirm. The same binary runs against every backend in Part~IV with one flag, so one test suite validates the whole family. Exercise~1 also asks for the abort-fuzzing extension, and \S\ref{sec:test-example} feeds the oracle question of this section: what is ground truth? Combined with \S\ref{sec:math-example} (Chapter~5), at abort probability $p = 0.9$ eight threads completing ten successful transactions each require the expected number of attempts $8 \times 10 \div (1-p) = 800$. The test still passes only if undo logging is correct.
 
 The formula is useful because it separates test intensity from logical work. The workload still commits only eighty transfers, but the implementation attempts about eight hundred transactions. A backend with a bad abort path may fail quickly even when the normal, low-abort workload passes.
 
@@ -78,7 +78,7 @@ The formula is useful because it separates test intensity from logical work. The
 
 The following standalone C++ test uses a single global lock to make the transaction body serial, then injects explicit aborts after partial updates. The point is not performance. The point is coverage of rollback paths that normal executions rarely hit.
 
-\begin{lstlisting}[language=C++, caption={A compilable abort-fuzzing harness for the bank benchmark.}]
+\begin{lstlisting}[language=C++, caption={A compilable abort-fuzzing harness for the bank benchmark.}, label={lst:abort-fuzz}]
 #include <cassert>
 #include <cstdint>
 #include <exception>
@@ -259,13 +259,13 @@ int main() {
 }
 \end{lstlisting}
 
-The oracle is deliberately boring: one mutex, one integer, one serial meaning. The implementation may be concurrent, but the expected result is not. A lost update appears as inequality between \texttt{counter.read()} and \texttt{oracle.read()}. The same pattern scales to maps and sets by recording logical operations and comparing final contents.
+The oracle is deliberately boring: one mutex, one integer, one serial meaning. The implementation may be concurrent, but the expected result is not. The \texttt{std::memory\_order} arguments on the atomic operations (Chapter~3's vocabulary: \texttt{relaxed} imposes no ordering with respect to other accesses, \texttt{acquire}/\texttt{release} establish a happens-before handshake between a writer and a reader) matter for how the counter interacts with the rest of the program, but the CAS loop itself is the mechanism: \texttt{compare\_exchange\_weak} re-reads \texttt{value} into \texttt{old} on failure and the loop retries. A lost update appears as inequality between \texttt{counter.read()} and \texttt{oracle.read()}. The same pattern scales to maps and sets by recording logical operations and comparing final contents.
 
 \section{Record-and-Replay and Deterministic Scheduling}
 
 Record-and-replay tools and deterministic schedulers address the same pain point: a concurrent failure is useless if it cannot be reproduced. A TM bug may manifest at commit even though the causal mistake was an earlier read, a missed version check, or an overwritten metadata bit. Reverse debugging lets the developer start from the bad final state and walk backward to the first invalid transition.
 
-Tools such as \texttt{rr} record a concrete execution and replay it with stable timing and stable thread behavior. This is valuable for ordinary C and C++ debugging: set a watchpoint on the corrupted account, replay, and step backward or forward around the write that changed it. Deterministic schedulers, in the style of CHESS, are more systematic. They control where threads may preempt and explore schedules up to a bound.
+Tools such as \texttt{rr} (an open-source record-and-replay debugger: every nondeterministic input --- memory loads, system-call results, thread scheduling --- is logged so the run can be replayed backward and forward identically) record a concrete execution and replay it with stable timing and stable thread behavior. This is valuable for ordinary C and C++ debugging: set a watchpoint on the corrupted account, replay, and step backward or forward around the write that changed it. Deterministic schedulers, in the style of CHESS \cite{musuvathi08chess}, are more systematic: CHESS runs the program under its own thread scheduler, forcing context switches at chosen instructions, and explores all executions up to a bound on the number of forced preemptions.
 
 The bound on preemptions is what makes the search usable. Full interleaving exploration grows too quickly: every shared-memory access may interleave with every access in every other thread. Bounded-preemption testing assumes that many bugs require only a small number of unlucky context switches. That assumption is often good for TM implementations because many defects live in short windows: after validation but before write-back, after acquiring one lock but before acquiring the next, or after appending to an undo log but before installing the write.
 
@@ -456,7 +456,7 @@ The replay script is also a specification of the bug. It says which thread reach
 
 The following TLA+ model abstracts a single transfer from account \texttt{A} to account \texttt{B}. It includes an abort action that restores both balances from the saved old values. If the restoration of \texttt{a} is removed, the invariant can fail after an abort following the debit.
 
-\begin{lstlisting}[caption={A small TLA+ model for transfer rollback and money conservation.}]
+\begin{lstlisting}[caption={A small TLA+ model for transfer rollback and money conservation.}, label={lst:tla-bank-abort}]
 --------------------------- MODULE BankAbort ---------------------------
 EXTENDS Naturals
 
@@ -528,11 +528,11 @@ The most useful tests are small, repeatable, and invariant-driven. A bank sum, a
     \item Design a fuzzing strategy that randomly injects aborts to stress-test a TM's undo-log correctness.
     \item Given a recorded \texttt{rr} trace where a transaction T commits but its writes never appear, hypothesise where to set a watchpoint and how to step backwards to find the bug.
     \item A deterministic scheduler explores interleavings with a bounded number of preemptions. Explain how this bound trades off completeness for tractability.
-    \item \emph{[implementation]} Extend Listing~\ref{sec:abort-fuzz-bank}'s harness with account floors: no committed transaction may leave an account below zero. Keep money conservation as a separate invariant, and report which invariant fails first.
+    \item \emph{[implementation]} Extend Listing~\ref{lst:abort-fuzz}'s harness with account floors: no committed transaction may leave an account below zero. Keep money conservation as a separate invariant, and report which invariant fails first.
     \item \emph{[verification]} Write a two-account TLA+ model of transfer with actions \textsc{Read}, \textsc{Debit}, \textsc{Credit}, \textsc{Commit}, and \textsc{Abort}. Add the money-conservation invariant and then intentionally omit rollback for \textsc{Debit}; confirm that the model checker finds a counterexample.
     \item \emph{[theory]} Bounded-preemption testing often finds bugs with a small bound. Give one reason this empirical fact is plausible for TM implementations, and one class of TM bug that may require a larger bound or a different exploration strategy.
     \item \emph{[implementation]} Add named abort sites to the abort-fuzzing harness and print the seed, thread id, source account, destination account, amount, and abort-site name on failure.
-    \item \emph{[verification]} Modify the TLA+ model in Listing~\ref{sec:tla-bank-conservation} to include an account floor. State the invariant that distinguishes money conservation from floor preservation.
+    \item \emph{[verification]} Modify the TLA+ model in Listing~\ref{lst:tla-bank-abort} to include an account floor. State the invariant that distinguishes money conservation from floor preservation.
     \item \emph{[theory]} Explain why a sequential oracle is easy for a counter but harder for a concurrent queue whose operations return values during the execution, not only at the end.
     \item \emph{[literature]} Read Musuvathi et al., \emph{Finding and
           Reproducing Heisenbugs in Concurrent Programs}
@@ -548,7 +548,8 @@ verified with the companion: extend the harness of \S\ref{sec:abort-fuzz-bank}
 with floors and named abort sites, using \S\ref{sec:replay-lost-update} for
 the \texttt{rr} watchpoint walk.  The \emph{[verification]} exercises are
 checked with TLC against \S\ref{sec:tla-bank-conservation}
-(\texttt{MoneyConserved}, \texttt{FloorsHold}; see
+(\texttt{MoneyConserved}; adding a floor and its \texttt{FloorsHold}-style
+invariant is exactly what Exercise~8 asks you to do; see
 Appendix~\ref{chap:pluscal-quick-ref}).  The \emph{[theory]} exercises are
 graded against \S\ref{sec:test-example} and \S\ref{sec:oracle-counter-example}.
 The \emph{[literature]} exercise is graded on whether the guarantee you

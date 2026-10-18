@@ -96,7 +96,7 @@ messages of a CPU coherence protocol.
 But the ballot carries a contract that is easy to violate:
 \textbf{every active lane must reach the call}. Guarding a ballot behind a
 per-lane condition is undefined behaviour that silently misbehaves on some
-NVIDIA silicon and raises a fatal HSA exception on AMD ROCm. The portable
+NVIDIA silicon and raises a fatal HSA (Heterogeneous System Architecture, AMD's GPU compute platform, whose user-mode stack is called ROCm, the Radeon Open Compute runtime) exception on AMD ROCm. The portable
 pattern hoists the ballot out of the lane-guarded block and lets lane~0 act
 on the result:
 
@@ -220,7 +220,11 @@ two balances, checks the source account floor, and either transfers a fixed
 amount or aborts without changing state. The kernel below is deliberately
 small. It is not a full STM; it is the lock-based shape that GPU STMs refine:
 acquire metadata without spinning, perform the update only after both locks
-are held, and use a warp-uniform ballot to count aborts.
+are held, and use a warp-uniform ballot to count aborts. The listing shows
+only the device side: the \texttt{\_\_global\_\_} kernel runs on the GPU, and
+a host program would copy \texttt{balances} and \texttt{locks} to device
+memory and launch it as \texttt{bank\_transfer\_kernel<<<blocks, threads>>>(
+balances, locks)}; CUDA's host mechanics are out of scope here.
 
 \begin{lstlisting}[language=C++, caption={A CUDA bank-transfer kernel using sorted locks and warp-uniform abort counting.}]
 #include <stdint.h>
@@ -353,7 +357,7 @@ __global__ void bank_transfer_kernel(int *balances,
 \draw[arrow] (mrv) -- node[above, sloped] {moved past snapshot} (abort);
 \draw[arrow] (abort.east) .. controls ($(abort.east)+(1.1,0)$) and ($(begin.south)+(0,-0.9)$) .. node[below] {retry} (begin.south);
 \end{tikzpicture}
-\caption{A GUST-style GPU commit path. Slot reservation is non-blocking; validation is split between concurrently committing transactions and already finalised versions.}
+\caption{A GUST-style GPU commit path. Slot reservation is non-blocking (one AtomicINC --- atomic increment, a never-failing fetch-and-add); validation is split between concurrently committing transactions and already finalised versions.}
 \label{fig:gpu-gust-commit-path}
 \end{figure}
 
@@ -371,7 +375,7 @@ TM becomes a hard bottleneck:
           shared structure leads to one winner and thousands of spinning
           losers. GUST reports that, at 8960 threads on an RTX~6000~Ada,
           the hardware sustains roughly \textbf{100$\times$ more concurrent
-          AtomicINCs than CASes} \cite{nunes23gust} --- an atomic-append
+          AtomicINCs (atomic increments --- never-failing fetch-and-adds) than CASes} \cite{nunes23gust} --- an atomic-append
           throughput comparison, not a commit-rate measurement, but it is
           exactly the operation a commit-log append performs. The design
           rule: commit-slot allocation must be \emph{never-failing}
@@ -407,8 +411,16 @@ The ``never-failing not contended'' rule of the previous section, in code.
 Two ways for a warp to claim commit-log slots:
 
 \begin{lstlisting}[language=C++, caption={CAS vs.\ AtomicINC commit-slot reservation.}]
-/* CAS: one winner per contention point; losers spin or retry. */
-while (!atomicCAS(&g_next, base, base + WARP_SIZE)) {}  /* convoy */
+/* AtomicINC = atomic increment (a never-failing fetch-and-add). */
+__device__ int g_next = 0;              /* commit-log tail pointer */
+enum { WARP_SIZE = 32 };
+
+/* CAS: one winner per contention point; losers reload and retry. */
+{
+    int base = g_next;                  /* read the tail */
+    while (!atomicCAS(&g_next, base, base + WARP_SIZE))
+        base = g_next;                  /* loser reloads and retries: convoy */
+}
 
 /* AtomicINC: never fails; every warp claims its own slots. */
 int base = atomicAdd(&g_next, WARP_SIZE);   /* no retry, no loop */
@@ -516,7 +528,9 @@ memory system to let write--read conflicts pass, aborting only on
 write--write conflicts, and eliminating the associated write-skew anomaly on
 the fly. Its motivation --- long transactions over complex data structures
 should not die because of reads --- is the same one that drives the MVCC
-software systems below.
+(multi-version concurrency control: writers append new versions, readers walk
+the version history, so readers never abort on a writer) software systems
+below.
 
 \section{Software TM in the Wild}
 \label{sec:software}
@@ -565,7 +579,7 @@ Several of
 its design points are worth teaching on their own:
 
 \begin{itemize}
-    \item \textbf{Versioned boxes.} Each address owns a circular buffer of the
+    \item \textbf{Versioned boxes (VBox).} Each address owns a circular buffer of the
           most recent committed \texttt{(timestamp, value)} pairs, appended
           to increasingly (slot = \texttt{head \% DEPTH}).
     \item \textbf{Commit log and GTS.} A bounded global commit log holds the
@@ -622,9 +636,10 @@ int snapshot = *gts;                  /* correct: only finalised slots */
           use \emph{startTS}, not \texttt{startTS+1}.
     \item Neither CCT nor MRV validation can catch this: the reader believes
           it has a valid snapshot and never re-checks the in-flight writer.
-    \item This is the exercise of this chapter's Exercise~3, and it is
-          exactly what the TLA+ model's \texttt{InvNoMissedConflict}
-          invariant caught before the kernel was fixed.
+    \item This is exactly what this chapter's Exercise~3 asks you to
+          reproduce, and what the TLA+ model's
+          \texttt{InvNoMissedConflict} invariant caught before the kernel
+          was fixed.
 \end{itemize}
 
 \section{Worked Example: Money Conservation in TLA+}

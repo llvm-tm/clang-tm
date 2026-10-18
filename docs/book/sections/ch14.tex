@@ -17,7 +17,7 @@ This chapter's companion implementation tracks two structures: a \textbf{specula
 
 Balanced-free reasoning asks whether every committed allocation is eventually matched by a committed free, and whether every aborted allocation is reclaimed without becoming visible.  Region allocators complicate this reasoning because address reuse is common.  A naive detector that remembers only pointer values may conclude that a pointer was freed twice, even when the same numeric address belongs to a later generation of the region.  Production systems therefore attach ownership, epoch, or generation information to allocation records when region reuse is possible.
 
-Deferred freeing also interacts with validation.  Suppose transaction \texttt{T1} frees an account record while transaction \texttt{T2} has read that record.  If \texttt{T1} commits and immediately releases the object to the general allocator, \texttt{T2} may later validate a reused address rather than the original object.  The read path must treat deferred-free metadata as part of the object state, or reclamation must be delayed by epochs, hazard pointers, quiescence, or a global serializing path.
+Deferred freeing also interacts with validation.  Suppose transaction \texttt{T1} frees an account record while transaction \texttt{T2} has read that record.  If \texttt{T1} commits and immediately releases the object to the general allocator, \texttt{T2} may later validate a reused address rather than the original object.  The read path must treat deferred-free metadata as part of the object state, or reclamation must be delayed by epochs, hazard pointers, quiescence (a thread is \emph{quiescent} when it can be proved to hold no references to shared data at all), or a global serializing path.
 
 \begin{table}[htbp]
 \centering
@@ -55,7 +55,7 @@ Generation advances with region \\
 \label{tab:tx-memory-rules}
 \end{table}
 
-The companion implementations exercise this rule across simple and realistic backends.  SGL avoids most subtlety by serializing all transactions.  Write-buffered STMs need explicit allocation and deferred-free metadata.  Persistent systems such as Romulus, NV-HTM, and PersistentSGL add another dimension: the allocation decision and the durability decision must agree after recovery.  Distributed systems such as TiKV's Percolator-style two-phase commit add yet another: a participant must not reclaim an object while another participant can still observe the old version.
+The companion implementations exercise this rule across simple and realistic backends.  SGL avoids most subtlety by serializing all transactions.  Write-buffered STMs need explicit allocation and deferred-free metadata.  Persistent systems such as Romulus, NV-HTM, and PersistentSGL (the persistent-memory designs of Chapter~19) add another dimension: the allocation decision and the durability decision must agree after recovery.  Distributed systems such as TiKV (an open-source distributed transactional key-value store) in Percolator-style two-phase commit add yet another: a participant must not reclaim an object while another participant can still observe the old version.
 
 \section{Worked Example: Deferred Free in a Bank Transfer}
 \index{deferred free}\index{speculative allocation}\index{money conservation}
@@ -261,11 +261,11 @@ Abort is a control-flow operation.  In many C and C++ STMs, the runtime records 
 
 This mechanism is dangerous because the saved context includes stack state.  If a transaction begins inside a function and that function returns while the retry buffer remains reachable, a later abort jumps into a frame that no longer exists.  The bug is not a failed validation; it is undefined control flow.
 
-The pitfalls fall into several categories. The first is the \emph{stack-corruption hazard}: a transaction begins inside a function, the function returns, and a later abort jumps into the now-corrupted frame. The second concerns alternate signal stacks and safe checkpointing strategies. The third is the DATA-symbol subtlety: the runtime exports \texttt{tm\_sigsetjmp}\slash{}\texttt{tm\_longjmp} as function pointers rather than functions, so a DATA/TEXT symbol collision with a compiler-generated direct call is a classic segfault, fixed in the companion repo and instructive in its own right. The fourth is the choice between TLS and stack-local jmp buffers: the retry buffer should live in thread-local storage so that it outlives any single frame.
+The pitfalls fall into several categories. The first is the \emph{stack-corruption hazard}: a transaction begins inside a function, the function returns, and a later abort jumps into the now-corrupted frame. The second concerns alternate signal stacks and safe checkpointing strategies. The third is the DATA-symbol subtlety: the runtime exports \texttt{tm\_sigsetjmp}\slash{}\texttt{tm\_longjmp} as function pointers rather than functions, so a DATA/TEXT symbol collision with a compiler-generated direct call is a classic segfault, fixed in the companion repo and instructive in its own right. The fourth is the choice between thread-local storage (TLS: per-thread global variables, declared \texttt{\_Thread\_local} in C11) and stack-local jmp buffers: the retry buffer should live in TLS so that it outlives any single frame.
 
 Alternate signal stacks solve a different problem: they provide stack space for a signal handler when the normal stack is compromised or too small.  They do not make arbitrary \texttt{longjmp} targets valid.  The retry target must be owned by the runtime and re-established for each attempt.
 
-The DATA-symbol subtlety is easy to miss in mixed compiler/runtime systems.  If the ABI exposes \texttt{tm\_sigsetjmp} as a data object containing a function pointer, generated code must load the pointer and call through it.  If generated code emits a direct call to \texttt{tm\_sigsetjmp} as though it were a text symbol, execution jumps to the address of the pointer object itself.  The result is a crash whose cause looks like signal failure but is actually a symbol-kind mismatch.
+The DATA-symbol subtlety is easy to miss in mixed compiler/runtime systems.  If the ABI (application binary interface: the agreement between separately compiled components on symbol kinds, layouts, and calling conventions) exposes \texttt{tm\_sigsetjmp} as a data object containing a function pointer, generated code must load the pointer and call through it.  If generated code emits a direct call to \texttt{tm\_sigsetjmp} as though it were a text symbol, execution jumps to the address of the pointer object itself.  The result is a crash whose cause looks like signal failure but is actually a symbol-kind mismatch.
 
 \subsection{The Conservative Signal-Safety Policy}
 \index{signal safety}
@@ -282,7 +282,7 @@ This policy is conservative by design.  It is stricter than what a hand-audited 
 \label{sec:jmpbuf-example}
 
 Why \texttt{sigsetjmp} inside a returning function is a corruption bomb ---
-the retry-loop primitive of \S\ref{sec:api-example} hides this:
+the retry-loop primitive of \S\ref{sec:api-example} (Chapter~8) hides this:
 
 \begin{lstlisting}[language=C, caption={A transaction that outlives its own frame.}]
 void helper(int *a, int *b, int n) {
@@ -401,7 +401,7 @@ The failure modes have concrete names: dead-store elimination, loop-invariant co
 
 Dead-store elimination is unsafe when the store being removed is a transactional write-barrier effect rather than a redundant scalar store.  Loop-invariant code motion is unsafe when it moves a transactional read outside the validation window.  Common-subexpression elimination is unsafe when it merges two reads that should both validate against intervening commits.  Barrier hoisting is unsafe when it moves the actual memory load before the runtime has checked ownership or recorded the read.
 
-The right interface depends on the implementation.  A pure library STM can use opaque function calls, compiler barriers, volatile metadata accesses, and careful ABI boundaries.  A compiler-integrated TM can represent transactional reads and writes as intrinsics with explicit memory effects.  Hardware-assisted paths such as TSX-SGL still need compiler discipline: the compiler must not move operations across begin, abort, fallback, or commit boundaries in a way that changes transactional semantics.
+The right interface depends on the implementation.  A pure library STM can use opaque function calls, compiler barriers, volatile metadata accesses, and careful ABI boundaries.  A compiler-integrated TM can represent transactional reads and writes as intrinsics with explicit memory effects.  Hardware-assisted paths such as TSX-SGL (SGL layered on Intel's Transactional Synchronization Extensions, the x86 hardware lock-elision ISA developed in Chapters~15 and~17) still need compiler discipline: the compiler must not move operations across begin, abort, fallback, or commit boundaries in a way that changes transactional semantics.
 
 The key rule is simple.  A transactional access is not merely an access to the program variable.  It is an access to the program variable plus an access to the concurrency-control protocol.
 

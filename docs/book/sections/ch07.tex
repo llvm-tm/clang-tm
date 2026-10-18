@@ -63,7 +63,7 @@ Inter-unit anomalies & which read/write interleavings are illegal? & the Berenso
 Crash-awareness & can a doomed transaction corrupt an observer? & trivially no: uncommitted state never crosses the protocol boundary & only via opacity; TM's non-negotiable rung \\
 Recoverability & may a commit depend on an uncommitted one (cascading aborts)? & yes at weak levels; ``recoverable/strict'' are levels of \cite{gray93tp} & dimension collapses: undo is in-runtime and never cascades outward \\
 Progress & under what contention must every transaction commit? & rarely specified (locks wait) & first-class: the progress ladder (\S\ref{sec:progress-ladder}) \\
-Durability & which states survive failure? & WAL, replication, group commit & orthogonal; only the persistent backends of Chapter~19 carry it \\
+Durability & which states survive failure? & WAL (write-ahead log), replication, group commit & orthogonal; only the persistent backends of Chapter~19 carry it \\
 \hline
 \end{tabular}
 \caption{The dimensions of transaction semantics, as a database author and a
@@ -107,7 +107,7 @@ The vocabulary above is inherited, and the inheritance is contested in useful
 ways. Gray's textbook \cite{gray93tp} organizes semantics by \emph{strictness}
 --- who may see what before whom, in what commit order --- yielding the
 serial-and-strict hierarchy that Chapter~5 restated as real-time-preserving
-serializations. ANSI SQL organized by \emph{level labels} (READ UNCOMMITTED
+serializations. ANSI (American National Standards Institute) SQL organized by \emph{level labels} (READ UNCOMMITTED
 through SERIALIZABLE defined by permitted phenomena), which failed:
 Berenson and colleagues \cite{berenson95critique} showed in 1995 that the
 ANSI definitions neither capture all anomalies (write skew and lost update
@@ -204,8 +204,11 @@ $\mathsf{SI}$ plus a runtime check
 that rejects the anti-dependency cycles responsible for write skew and its
 relatives. It is ``SI with a proof obligation attached'': reads remain
 snapshot-cheap, and the price moves to cycle bookkeeping at commit
-(\cite{kleppmann17}; the mechanism is described in
-\S\ref{sec:iso-cost} and checked in \S\ref{sec:iso-worked-example}).
+(\cite{kleppmann17}; the mechanism: each transaction records the anti-dependencies created by
+its snapshot reads --- reads a concurrent committer later overwrote --- and
+aborts a commit that would close an anti-dependency cycle;
+\S\ref{sec:iso-worked-example} model-checks the write-skew anomaly this
+bookkeeping exists to catch).
 
 \item \textbf{Serializability (S),} $\mathsf{SER}(h)$, and above it
 \textbf{strict serializability,} $\mathsf{SSR}(h)$. The rungs of
@@ -356,7 +359,7 @@ fails validation iff some contender conflicts on what the level checks:
 p_{\mathrm{abort}}^{\mathrm{SI}} &\approx 1 - \left(1 - \tfrac{w}{k}\right)^{w(C-1)}
 \qquad\text{(WW test only; reads never abort)}\\[1mm]
 p_{\mathrm{abort}}^{\mathrm{S}} &\approx 1 - \left(1 - \tfrac{w}{k}\right)^{(2r+w)(C-1)}
-\qquad\text{(RW, WR, and WW; value-validated OCC)}
+\qquad\text{(RW, WR, and WW; value-validated OCC --- optimistic concurrency control)}
 \end{align}
 
 The exponent difference is the whole story of SI: a serializable optimistic
@@ -402,7 +405,8 @@ transaction; SI pays one and a half --- and admits write skew to do it.}
 \end{tikzpicture}
 \caption{Expected attempts versus concurrency ($k=50$, $r=4$, $w=1$): the
 validation-scope difference between S and SI compounds multiplicatively.
-Recompute with \texttt{tools/iso-cost.py}; measure in the bank simulator of
+Recompute with the book's \texttt{tools/iso-cost.py} (in the book sources,
+\texttt{docs/book/tools/}); measure in the bank simulator of
 \S\ref{sec:math-bank-simulation} for the data-dependent case.}
 \label{fig:iso-cost}
 \end{figure}
@@ -410,7 +414,8 @@ Recompute with \texttt{tools/iso-cost.py}; measure in the bank simulator of
 Three honest caveats, each of which is a paragraph in \S5.10: (i) the
 independence approximation overstates conflicts for skewed-but-local
 workloads and understates them for global hot rows; (ii) serializable here
-means value-validated OCC --- a two-phase-locking serializable engine trades
+means value-validated OCC --- a two-phase-locking
+(2PL: every lock taken before commit and none released before it) serializable engine trades
 the retry multiplier for waits, and its ``attempts'' stay at $1.0$ while its
 throughput collapses elsewhere in the queue; (iii) SSI pays a third term
 again: snapshot reads with commit-time anti-dependency tracking cost
@@ -445,9 +450,11 @@ section lists the knobs and who turns them; Part~IV is the catalogue.
 \item \textbf{Version management: overwrite vs version.} Single-version
 designs mutate the object and undo on abort (SGL, TL2); multi-version designs
 install new versions and let readers pick by snapshot (MVLOG; JVSTM and OFG
-downstream). MVCC is the mechanism by which databases \emph{implement} the SI
+downstream). MVCC (multi-version concurrency control: each object keeps a
+version history, and readers choose the version matching their snapshot) is
+the mechanism by which databases \emph{implement} the SI
 promise of stable snapshot reads --- but note the decoupling: multi-version
-TM backends (Chapter~14) use versioning for \emph{concurrency under
+TM backends (Chapter~10) use versioning for \emph{concurrency under
 serializability}, validating read-sets that single-version designs do not.
 The snapshot mechanism is reusable; the SI semantics is a separate promise
 about what need not be validated.
@@ -505,7 +512,7 @@ TL2, NOrec & S (strict) & single & lazy (validate) & sandboxed writes, version c
 TinySTM WBCTL & S (strict) & single & hybrid & early lock release under version check \\
 MVLOG, JVSTM & S (strict) & multi & lazy & snapshots for concurrency, read-set validation kept \\
 SSI engines & S via SSI & multi & lazy + cycles & anti-dependency bookkeeping at commit \\
-Calvin & S & single & scheduling & static transactions; \S\ref{sec:calvin-static} \\
+Calvin & S & single & scheduling & static transactions; \S\ref{sec:calvin-static} (Chapter~9) \\
 Percolator / TiKV & SI(+locks) & multi & lazy + locks & distributed SI; Chapter~19 \\
 GPU snapshot TM & S & batched & lazy & snapshot reads $\ne$ SI; Chapter~18 \\
 EAGER\_BROKEN & none & single & lazy & validation kept, sandbox dropped; Chapter~2 \\
@@ -620,7 +627,7 @@ rolling back.
 
 \subsection*{The machine: folds over grow-only op-sets}
 
-The design is the SEC framework \cite{burgader17sec} from
+The design is the SEC (stable eventual consistency) framework \cite{burgader17sec} from
 p.~\pageref{cha:notation} put to work. Each commit is a record
 $\{\mathit{id}, \mathit{src}, \mathit{dst}, \mathit{amt}\}$ appended
 \emph{locally} to an operation set $A_r$ --- a CRDT: grow-only,

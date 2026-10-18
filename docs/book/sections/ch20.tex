@@ -18,7 +18,7 @@ The companion project makes the question unusually concrete. The same two-accoun
           protocols at thousands of concurrent transactions.
     \item Persistent TM: durable commit with volatile metadata; crash-consistency without a database's write-ahead log.
     \item Distributed TM: exporting the TM API over replicated or geo-distributed storage (the companion repo wraps a TiKV cluster).
-    \item Hybrid systems: HTM fast path, STM (or serialized) fallback, and the theory of phased hybrids (PhTM~\cite{lev07phased}, Hybrid-NOrec, Invyswell).
+    \item Hybrid systems: HTM fast path, STM (or serialized) fallback, and the theory of phased hybrids (PhTM~\cite{lev07phased}, plus published hybrids such as Hybrid-NOrec and Invyswell, which run a software NOrec-style or invisible-read STM behind the hardware fast path).
     \item Verified/certified STMs: mechanically checked backends, and the growing standard of TLA+-verified designs.
     \item Energy-aware TM: correlation between abort rate and power on mobile/embedded cores.
 \end{itemize}
@@ -27,7 +27,7 @@ The implementation boundary is now part of the research question. The companion
 repo has working CPU backends from SGL through SwissTM, TinySTM variants,
 NOrec-BF, TL2, TSC-TM, MVLog, persistent and distributed SGL, and a TiKV
 Percolator-style backend; it also contains GPU designs such as PR-STM, CSMV,
-GPUTX, GAccO, and GUST (GPU-JVSTM exists as a checked TLA+ model,
+GPUTX, GAccO (a published multi-version GPU STM), and GUST (GPU-JVSTM exists as a checked TLA+ model,
 \texttt{GPU\_JVSTM.tla}, but has no implementation). The volatile CPU backends
 are tested against the same transactional and data-structure suites; the GPU,
 persistent, and distributed backends carry partial coverage (some are
@@ -296,7 +296,7 @@ void tx_region(void) {
 
 \begin{itemize}
     \item This is \S\ref{sec:rtm-example} plus one idea: the fallback is a full STM instead of a global lock, so concurrent commits survive the fallback (no serialisation cliff).
-    \item The capacity check turns a wasted-retry storm into a clean handover --- the performance chapter's ``wasted work'' metric in miniature.
+    \item The capacity check turns a wasted-retry storm into a clean handover --- Chapter~15's ``wasted work'' metric in miniature.
     \item The phased-hybrid theory~\cite{lev07phased} governs exactly when to flip; adversarial timing of the flip (flip just before the STM path would have won) is the pathological case to analyse.
     \item Exercise~1 asks whether this is more livelock-prone than pure STM --- the answer turns on whether the hardware and software paths agree on conflict ownership.
 \end{itemize}
@@ -378,14 +378,19 @@ The bank invariant is the unifying test. It is simple enough to model, small eno
 
 \textbf{How to check your work.} Exercise~6 is verified with TLC: extend
 \S\ref{sec:distributed-commit-example}'s model with \texttt{prepared},
-then run \texttt{make -C docs/proofs check-one BACKEND=BankPrepare} (the
-TLC commands are in Appendix~\ref{chap:pluscal-quick-ref}) and confirm
+then run \texttt{make -C docs/proofs check-one BACKEND=BankPrepare} after
+saving your extended model as \texttt{BankPrepare.tla} with a matching
+\texttt{.cfg} in \texttt{docs/proofs/} (the TLC commands are in
+Appendix~\ref{chap:pluscal-quick-ref}) and confirm
 \texttt{MoneyConserved} still passes.  Exercise~5 is verified against the
-companion's persistent backends: the commit-marker ordering is the one the
-\texttt{PersistentSGL} and \texttt{Romulus} backends
-(\texttt{backends/tm\_impl/persistent\_sgl},
-\texttt{backends/tm\_impl/romulus}) already implement, so you can diff
-your proposed ordering against theirs.  The \emph{[theory]} exercises are
+companion's persistent backends: \texttt{PersistentSGL}
+(\texttt{backends/tm\_impl/persistent\_sgl}) makes each committed store
+durable by writing it to a mirrored image inside the global lock (the
+dual-write design of Chapter~19), so compare your proposed commit-marker
+(journal) ordering against that backend and the \texttt{PersistentSGL.tla}
+model in \texttt{docs/proofs/}.  Do \emph{not} diff against the
+\texttt{romulus} backend: as Chapter~19's naming caution explains, it is a
+volatile version-table OCC that merely borrows the persistent Romulus name.  The \emph{[theory]} exercises are
 graded against this chapter's synthesis and the definitions in
 \S\ref{sec:hybrid-example}, \S\ref{sec:durable-bank-example}, and
 \S\ref{sec:htm-fallback-tla}.  The \emph{[open]} exercises have no single

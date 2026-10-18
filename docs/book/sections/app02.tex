@@ -1,31 +1,55 @@
 \chapter{Acronyms}
 
 \begin{description}
+    \item[2PC] Two-Phase Commit (coordinator/prepare/vote protocol; Chs.~7, 19).
     \item[2PL] Two-Phase Locking (pessimistic serializability; Ch.~7).
+    \item[ABI] Application Binary Interface (symbol/calling conventions; Chs.~8, 11, 14).
+    \item[ANSI] American National Standards Institute (body behind the SQL standard; Ch.~7).
+    \item[CAS] Compare-And-Swap.
     \item[CCT] Concurrently-Committing-Transaction (GUST).
+    \item[CSE] Common-Subexpression Elimination.
     \item[CSMV] Client--Server Multi-Version \cite{nunes22csmv}.
+    \item[DES] Discrete-Event Simulation (Ch.~15).
+    \item[DFA] Deterministic Finite Automaton (lexer state machine; Ch.~16).
     \item[DSE] Dead-Store Elimination.
+    \item[GLR] Generalized LR (ambiguous-input parser variant; Ch.~16).
     \item[GTS] Global Timestamp (GUST).
+    \item[HSA] Heterogeneous System Architecture (AMD compute platform/ROCm; Ch.~18).
     \item[HTM] Hardware Transactional Memory.
     \item[JVSTM] Java Versioned Software Transactional Memory (multi-version) \cite{cachopo06}.
+    \item[LALR] Lookahead Left-to-right Rightmost-derivation (parser table class; Ch.~16).
+    \item[LL/SC] Load-Linked / Store-Conditional (RISC-V/POWER atomics; Ch.~3).
+    \item[LTL] Linear Temporal Logic (Ch.~6).
     \item[LICM] Loop-Invariant Code Motion.
     \item[MRV] Most-Recent-Version (GUST).
-    \item[MVCC] Multi-Version Concurrency Control (snapshot mechanism; Ch.~7, Ch.~14).
+    \item[MVCC] Multi-Version Concurrency Control (snapshot mechanism; Chs.~7, 10, 18).
     \item[MVLog] Multi-Version Commit-Log STM (this book, Part~IV).
+    \item[NVM] Non-Volatile Memory (crash-retentive media; Ch.~19).
     \item[NOrec] NO Ownership RECords (value-based validation).
     \item[OCC] Optimistic Concurrency Control.
-    \item[RTM] Restricted Transactional Memory (Intel).
+    \item[PM] Persistent Memory (programming term for NVM accessed as memory; Ch.~19).
+    \item[RDTSC] Read Time-Stamp Counter (x86 cycle counter; Chs.~13, 15, 17).
+    \item[ROI] Region of Interest (measured interval; Ch.~17).
+    \item[RTM] Restricted Transactional Memory (Intel TSX instruction set).
+    \item[RVWMO] RISC-V Weak Memory Order (Ch.~3).
     \item[RU / RC / RR] ANSI SQL isolation levels: read uncommitted, read committed, repeatable read (Ch.~7).
     \item[SGL] Single Global Lock.
     \item[SI / SSI] Snapshot Isolation; Serializable Snapshot Isolation (Ch.~7).
+    \item[SIMT] Single Instruction, Multiple Threads (GPU execution model; Ch.~18).
+    \item[SROA] Scalar Replacement Of Aggregates (LLVM pass; Ch.~12).
+    \item[STAMP] Stanford Transactional Applications for Multi-Processing (benchmark suite; Chs.~10, 15).
     \item[STM] Software Transactional Memory.
     \item[TLA+ / PlusCal] Temporal Logic of Actions; the PlusCal algorithmic notation compiled to TLA+.
     \item[TLC] The TLA+ model checker.
     \item[TL2] Transactional Locking II (global-clock OCC).
+    \item[TLS] Thread-Local Storage (Ch.~14).
     \item[TM] Transactional Memory.
+    \item[TME] Transactional Memory Extensions (Arm's specified-but-never-shipped HTM; Ch.~17).
     \item[TSO] Total Store Order.
     \item[TSX] Transactional Synchronization Extensions (Intel).
     \item[VBox] Versioned Box.
+    \item[WBCTL / WBETL / WT] TinySTM configurations: write-back contention-based try-lock, write-back eager try-lock, write-through (Ch.~9).
+    \item[WAL] Write-Ahead Log (Durability; Ch.~7).
 \end{description}
 
 % -------------------------------------------------------------------

@@ -15,7 +15,7 @@ At commit time, the transaction acquires the single commit lock, re-reads every 
 
 The central invariant is simple: every committed transaction must have read values that all coexisted at one logical time. NOrec enforces this without per-location metadata by re-reading values. Clock-only validation is not enough. The companion implementation fixed a real bug class of this form: an ``invisible-it-committed'' execution in which a concurrent commit occurred between a transaction's last read and its commit, but the stale snapshot was not detected because values were not revalidated.
 
-The cost model follows directly. NOrec has the smallest metadata footprint among the in-memory STMs considered here, but validation cost grows with the read-set size. The Bloom-filter variant, NOrec-BF, improves read-mostly workloads by avoiding some expensive bookkeeping and validation work when the filter proves an address is irrelevant to the current conflict check. In the repository's M1 Pro bank/fuzz measurements, NOrec-BF reaches about 829K transactions per second on a read-mostly workload, compared with about 553K for baseline NOrec. That is not a new algorithmic law; it is the expected signature of removing work from the read path.
+The cost model follows directly. NOrec has the smallest metadata footprint among the in-memory STMs considered here, but validation cost grows with the read-set size. The Bloom-filter variant, NOrec-BF, improves read-mostly workloads by avoiding some expensive bookkeeping and validation work when the filter proves an address is irrelevant to the current conflict check; a \emph{Bloom filter} is a compact probabilistic set-membership structure that may report a false positive but never a false negative, which is exactly the conservative direction validation needs. In the repository's bank/fuzz measurements on an Apple M1 Pro machine, NOrec-BF reaches about 829K transactions per second on a read-mostly workload, compared with about 553K for baseline NOrec. That is not a new algorithmic law; it is the expected signature of removing work from the read path.
 
 \section{Worked Example: The NOrec Read Path}
 \index{NOrec}\index{read-validate}\index{read-only transaction}\index{commit order}\index{validation}\index{read-set}
@@ -27,9 +27,9 @@ capture$\rightarrow$read$\rightarrow$recheck:
 \begin{lstlisting}[language=C, caption={NOrec read: capture clock, read, re-check clock.}]
 int32_t tm_read_i4(const void *addr) {
     for (;;) {
-        uint64_t t1 = atomic_load(&g_clock);       /* capture   */
+        uint64_t t1 = atomic_load_explicit(&g_clock, memory_order_acquire);
         int32_t v  = *(const int32_t*)addr;        /* read      */
-        uint64_t t2 = atomic_load(&g_clock);       /* re-check  */
+        uint64_t t2 = atomic_load_explicit(&g_clock, memory_order_acquire);
         if (t1 == t2) return v;                    /* consistent */
         /* a commit raced us: retry */
     }
@@ -50,7 +50,7 @@ source account below its floor.  In NOrec, transaction-local writes are buffered
 until commit; reads first consult the write-set, then perform the
 capture$\rightarrow$read$\rightarrow$recheck protocol.
 
-\begin{lstlisting}[language=C, caption={A compilable C++17 NOrec-style bank transfer with value revalidation.}]
+\begin{lstlisting}[language=C++, caption={A compilable C++17 NOrec-style bank transfer with value revalidation.}]
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -203,7 +203,7 @@ The money-conservation invariant is checked after commit: the sum of committed a
 
 TL2 moves part of the validation burden from values to metadata. Each transactional location has a versioned lock word. A read samples the lock word, reads the payload, then samples the lock word again. The two samples must agree, the location must not be locked by a writer, and the version must not be newer than the transaction's start timestamp.
 
-\begin{lstlisting}[language=C, caption={A compilable C++17 TL2-style read barrier for one integer location.}]
+\begin{lstlisting}[language=C++, caption={A compilable C++17 TL2-style read barrier for one integer location.}]
 #include <atomic>
 #include <cstdint>
 
@@ -254,6 +254,8 @@ int main() {
 
 TL2 reads are invisible: the reader does not write to shared metadata. The metadata double-check prevents a read from crossing a writer's lock/unlock interval. The start timestamp defines the snapshot; versions newer than that timestamp force abort.
 
+A pedantic note the book's own Part~II demands: the \texttt{value} field above is deliberately a plain \texttt{int64\_t}, not an atomic, and it is read by a plain load. The acquire loads on \texttt{meta} carry all the ordering the protocol claims, and on every machine this book targets the compiled code is safe; but as \emph{C++ text} a plain read concurrent with a plain write is a data race by the letter of the standard. Production backends either declare the payload atomic and load it \texttt{relaxed}, or document the race as benign-by-annotation; Chapter~14 handles the same question for allocator and signal paths.
+
 \section{TL2: The Textbook Global-Clock STM}
 
 TL2 is the standard global-clock optimistic STM. A transaction reads the global version clock at begin time. That value is its snapshot time. Each transactional location has version metadata; each transaction has a read-set and a buffered write-set. Reads are invisible, but they are not unchecked: the read barrier records the observed version and later validation ensures the version did not change.
@@ -290,13 +292,13 @@ The commit protocol is lock-then-validate. The writer acquires ownership of ever
 
 The validation rule is the opacity rule in executable form: every read-set entry must still have the recorded version, and that version must be no later than the transaction's snapshot. This is why invisible reads are safe. The reader does not announce itself, but it later proves that no writer changed what it observed.
 
-The repository's TL2 and TSC-TM backends show the expected signature on the M1 Pro bank/fuzz workload: both are around 2.05M transactions per second, with TL2 measured at about 2.06M and TSC-TM at about 2.05M. The important lesson is not the exact number; it is that a tight global-clock OCC design can be far faster than value-only NOrec when metadata checks are cheap and contention is moderate.
+The repository's TL2 and TSC-TM backends show the expected signature on the bank/fuzz workload on an Apple M1 Pro machine: both are around 2.05M transactions per second, with TL2 measured at about 2.06M and TSC-TM at about 2.05M. The important lesson is not the exact number; it is that a tight global-clock OCC design can be far faster than value-only NOrec when metadata checks are cheap and contention is moderate.
 
 \section{TinySTM Design Variants}
 
 TinySTM is not one algorithm but a configurable family. The two main axes are version management and conflict timing. Version management decides where speculative writes live before commit. Write-back mode keeps new values in the transaction's private write-set until commit. Write-through mode installs new values in memory immediately and records undo information for abort. Conflict timing decides whether a transaction acquires ownership eagerly, at write time, or lazily, at commit time.
 
-The repository exposes the important TinySTM styles: WBCTL, WT, and WBETL. In WBCTL, writes are buffered and locks are taken at commit time. Abort is cheap: discard the write-set. In WT, writes go through to memory, so abort must restore old values from an undo log. WT can detect write conflicts early, which helps under some high-contention patterns, but it makes rollback heavier and exposes more metadata traffic.
+The repository exposes the important TinySTM styles: WBCTL, WT, and WBETL. In WBCTL (write-back, commit-time locking), writes are buffered and locks are taken at commit time. Abort is cheap: discard the write-set. In WT, writes go through to memory, so abort must restore old values from an undo log. WT can detect write conflicts early, which helps under some high-contention patterns, but it makes rollback heavier and exposes more metadata traffic. WBETL (write-back, encounter-time locking) keeps the buffered write-set of WBCTL but acquires each location's lock at its \emph{first write} --- the encounter time --- so write conflicts surface mid-transaction while reads stay lock-free.
 
 The observable distinction is where data lives. In write-back, shared memory remains unchanged until commit. In write-through, shared memory may contain speculative state protected by locks and undo records. Both can be correct; they discharge different obligations. Write-back must ensure write-set forwarding for reads-after-writes. Write-through must ensure that no other transaction treats speculative memory as committed.
 
@@ -306,17 +308,17 @@ TinySTM also illustrates cache-level engineering. Versioned write-set entries ca
 
 Multiversion STMs avoid many read-only aborts by retaining history. A reader does not need to prove that the present still matches the past; it reads the past directly.
 
-JVSTM stores each transactional variable in a VBox, a versioned box containing a history of bodies. Each body records a version and a value. A transaction with read-version walks the VBox history and returns the newest body whose version is no greater than that read-version. Read-only transactions never abort because their snapshot is materialized by the version histories. Writers still validate: at commit, a global clock increments under a lock, and writers append new VBox bodies after checking that the heads they depended on have not changed.
+JVSTM stores each transactional variable in a VBox (a \emph{versioned box}), a container holding a history of versions. Each version records a version number and the value computed at that version. A transaction holding a read-version walks the VBox history and returns the newest version whose version is no greater than that read-version. Read-only transactions never abort because their snapshot is materialized by the version histories. Writers still validate: at commit, a global clock increments under a lock, and writers append new VBox bodies after checking that the heads they depended on have not changed.
 
-MVLog uses a different representation. It negotiates a commit slot at begin time with a single atomic increment, maintains an ever-growing log of committed write-sets, and tracks the newest writer per address. Its no-false-negative Bloom filter lets reads skip log work when the address is provably clean. The cost is history management. Memory grows with transaction count unless old versions and log entries are reclaimed. Epochs, hazard pointers, or equivalent schemes become part of the algorithm rather than an implementation afterthought.
+MVLog uses a different representation. It negotiates a commit slot at begin time with a single atomic increment, maintains an ever-growing log of committed write-sets, and tracks the newest writer per address. Its no-false-negative Bloom filter lets reads skip log work when the address is provably clean. The cost is history management. Memory grows with transaction count unless old versions and log entries are reclaimed. Two standard lock-free reclamation schemes become part of the algorithm rather than an implementation afterthought (both are developed in Chapter~14): \emph{epochs}, which retire versions only after every thread has passed a quiescent point, and \emph{hazard pointers}, in which each reader publishes the addresses it is inspecting so reclamation can skip them.
 
-This is also why multiversion ideas dominate many GPU TM designs. Read-only transactions do not abort, commit slots are cheap atomics, and validation can be expressed as bulk log or version checks. The repository's GPU designs, including CSMV and GUST, use related ideas at warp and block granularity, with GUST using an AtomicINC commit-log design and CCT/MRV validation.
+This is also why multiversion ideas dominate many GPU TM designs. Read-only transactions do not abort, commit slots are cheap atomics, and validation can be expressed as bulk log or version checks. The repository's GPU designs (Chapter~18) use related ideas at GPU granularity --- where the natural unit is a \emph{warp}, a group of GPU threads that step in lockstep --- and their commit logs and validation tables are GPU-specific designs analyzed there.
 
 \section{Worked Example: MVLog Snapshot Read}
 
 The following small program is not the repository MVLog backend. It is a compact model of the same idea: a reader chooses a snapshot version and then reads the newest committed version not newer than that snapshot.
 
-\begin{lstlisting}[language=C, caption={A compilable C++17 multiversion account read.}]
+\begin{lstlisting}[language=C++, caption={A compilable C++17 multiversion account read.}]
 #include <cstdint>
 #include <vector>
 
@@ -452,7 +454,7 @@ bool tm_end(void) {
 }
 \end{lstlisting}
 
-Step 2 is the expensive one: the read-set is validated against per-location version metadata, not a global clock. Step 4 writes back \emph{under} the commit lock, then advances the clock so no concurrent reader can observe a half-published write-set. The stored-value trap is step 4 interacting with step 2: without the read-validate pattern of \S\ref{sec:norec-example}, a stale read-set can validate against an old version while the write-back overwrites a newer commit. The same five steps appear in the PlusCal model of Part~III, and in the GPU backends of Part~VII at warp granularity.
+Step 2 is the expensive one: the read-set is validated against per-location version metadata, not a global clock. Step 4 writes back \emph{under} the commit lock, then advances the clock so no concurrent reader can observe a half-published write-set. The stored-value trap is step 4 interacting with step 2: without the read-validate pattern of \S\ref{sec:norec-example}, a stale read-set can validate against an old version while the write-back overwrites a newer commit. The same five steps appear in the PlusCal model of Part~III, and in the GPU backends of Part~VII (Chapter~18) at warp granularity.
 
 \section{Worked Example: Account-Floor PlusCal Model}
 \index{PlusCal}\index{TLA+}\index{model checking}\index{account floor}\index{money conservation}
@@ -531,7 +533,7 @@ JVSTM & version history walk & no & history retention \\
 MVLog & commit log + newest-writer index & no for stable snapshots & log scan and reclamation \\
 \hline
 \end{tabular}
-\caption{Snapshot mechanisms in the speculative STM family.  The measured repository results match the expected signatures: TL2 and TSC-TM are close on the M1 Pro bank/fuzz workload, NOrec-BF improves read-mostly NOrec, and MVLog pays for history and log management.}
+\caption{Snapshot mechanisms in the speculative STM family.  The measured repository results match the expected signatures: TL2 and TSC-TM are close on the Apple M1 Pro bank/fuzz workload, NOrec-BF improves read-mostly NOrec, and MVLog pays for history and log management.}
 \label{tab:snapshot-taxonomy}
 \end{table}
 
@@ -546,12 +548,18 @@ algorithm --- begin, read, write, commit, and the retry loop around them ---
 into one compilable program, and explains every line that matters. The
 language is Rust, and the choice is didactic rather than cosmetic: in
 \emph{safe} Rust there are no casts between integers and pointers, so the
-implementation cannot quietly rely on undefined behavior. Every design
+implementation cannot quietly rely on undefined behavior. (The Rust crib
+notes in Chapter~9's Calvin section cover \texttt{Arc}, \texttt{Vec},
+\texttt{Option}, and closures; the two new concepts here are a \emph{trait},
+Rust's interface mechanism, and \texttt{Copy}, the marker meaning
+``duplicates on assignment rather than moves.'') Every design
 decision must be made explicitly, which is exactly the discipline an STM
 author needs. The repository ships a full-featured Rust NOrec with these
 same bones (\rep{explicit\_api/rust/workspace/runtime/norec}); the version
 below strips it to roughly two hundred lines of standard-library-only code,
-verified with the compiler and the bank test that follows.
+verified with the compiler and the bank test that follows. The five listings
+below partition that one file exhaustively, in order: every line of
+\texttt{listings/norec\_rust\_complete.rs} appears exactly once across them.
 
 Four choices define the design, and each is the smallest honest version of
 a choice NOrec makes \cite{dalessandro10norec}:
@@ -595,7 +603,7 @@ and \texttt{tm\_end}, collapsed into one closure. Sampling the clock in
 the commit lock is held only for the write-back of one transaction's
 write-set, never across arbitrary user code.
 
-\lstinputlisting[language=Rust, caption={The retry loop and begin: sample an unlocked clock, clear the logs, run, commit or retry.}, label={lst:norec-rust-begin}, linerange=60-90]{listings/norec_rust_complete.rs}
+\lstinputlisting[language=Rust, caption={Lines 47--90 of \texttt{norec\_rust\_complete.rs}: region methods (including the \texttt{\&mut self} allocation), the retry loop, and \texttt{begin}: sample an unlocked clock, clear the logs, run, commit or retry.}, label={lst:norec-rust-begin}, linerange=47-90]{listings/norec_rust_complete.rs}
 
 Listing~\ref{lst:norec-rust-readwrite} is the heart. A read first serves
 itself from the write-set (read-own-writes), then performs the
@@ -613,7 +621,7 @@ plain serializability toward the local-justification form of opacity
 defined in \S\ref{sec:histories-legality-opacity}: a live transaction's
 reads are always justified by the memory state at version \texttt{rv}.
 
-\lstinputlisting[language=Rust, caption={Read and write: serve from the write-set first; otherwise capture--read--recheck against the begin version.}, label={lst:norec-rust-readwrite}, linerange=92-117]{listings/norec_rust_complete.rs}
+\lstinputlisting[language=Rust, caption={Lines 91--117 of \texttt{norec\_rust\_complete.rs}: read and write: serve from the write-set first; otherwise capture--read--recheck against the begin version.}, label={lst:norec-rust-readwrite}, linerange=91-117]{listings/norec_rust_complete.rs}
 
 One simplification deserves honesty: the real NOrec lets a transaction
 \emph{extend} its snapshot --- on detecting a moved clock it re-validates
@@ -624,7 +632,8 @@ extension policy is Exercise~13.
 
 Listing~\ref{lst:norec-rust-commit} is the commit protocol. A writer
 acquires the single commit lock by flipping bit~0 of the clock with a
-CAS; the loser aborts immediately, making the design weakly progressive
+CAS (compare-and-swap: store a new value only if the current one matches
+the expected value); the loser aborts immediately, making the design weakly progressive
 in the ladder of \S\ref{sec:progress-ladder}. Under the lock, memory is
 frozen --- every writer in the system needs this same lock --- so comparing
 each recorded read against current memory is meaningful. On mismatch the
@@ -634,7 +643,7 @@ buffered values and publishes with \texttt{rv + 2}. The bump by two (not
 one) keeps versions even forever; odd numbers exist only transiently
 while a writer holds the lock.
 
-\lstinputlisting[language=Rust, caption={Commit: acquire the lock bit, re-validate reads against frozen memory, write back, publish with a Release clock bump.}, label={lst:norec-rust-commit}, linerange=119-150]{listings/norec_rust_complete.rs}
+\lstinputlisting[language=Rust, caption={Lines 118--150 of \texttt{norec\_rust\_complete.rs}: commit: acquire the lock bit, re-validate reads against frozen memory, write back, publish with a Release clock bump.}, label={lst:norec-rust-commit}, linerange=118-150]{listings/norec_rust_complete.rs}
 
 The memory orderings are load-bearing, and they are the portable answer to
 the puzzle of \S\ref{sec:tso-example}. Every data access is
@@ -664,7 +673,7 @@ distinction in the mover body: a floor violation returns
 Listing~\ref{lst:rust-bank} --- whereas \texttt{Abort} is reserved for the
 STM's own invalid-snapshot signal.
 
-\lstinputlisting[language=Rust, caption={The bank demo: movers honor the floor; a checker thread asserts conservation inside concurrent read-only transactions.}, label={lst:norec-rust-demo}, linerange=152-212]{listings/norec_rust_complete.rs}
+\lstinputlisting[language=Rust, caption={Lines 151--212 of \texttt{norec\_rust\_complete.rs}: the bank demo: movers honor the floor; a checker thread asserts conservation inside concurrent read-only transactions.}, label={lst:norec-rust-demo}, linerange=151-212]{listings/norec_rust_complete.rs}
 
 Typical output on the development machine (Apple M1 Pro, rustc 1.96):
 
@@ -682,7 +691,7 @@ transfer.
 
 Three caveats bound the claim. First, correctness assumes all accesses to
 cells go through transactions; a plain write to \texttt{mem} would be
-invisible to validation, exactly as in every backend of Part~VII.
+invisible to validation, exactly as in every backend of Part~IV.
 Second, the design has no starvation guarantee. Under sustained write
 contention, readers can lose the race repeatedly --- the retry loop is
 unbounded and unfair --- which is why production backends pair speculation
@@ -700,7 +709,7 @@ Speculation unlocks concurrency but introduces aborts. Different version-managem
 \begin{enumerate}
     \item In NOrec, T1 writes to \texttt{x}, then T2 writes to \texttt{x} and commits. Explain why T1 will abort.
     \item TinySTM can be configured for eager locking or commit‑time locking. Given a workload with high contention on a single location, predict which mode will perform better and justify your answer.
-    \item Design a simple experiment using the STAMP benchmark suite to compare the abort rates of NOrec and TinySTM's write‑through variant.
+    \item Design a simple experiment using the STAMP benchmark suite (Stanford Transactional Applications for Multi-Processing: the eight standalone programs \texttt{bayes}, \texttt{genome}, \texttt{intruder}, \texttt{kmeans}, \texttt{labyrinth}, \texttt{ssca2}, \texttt{vacation}, \texttt{yada}, the standard STM evaluation set introduced in Chapter~15) to compare the abort rates of NOrec and TinySTM's write‑through variant.
     \item In TL2, explain why the read-set validation must re-read the metadata (not just remember the snapshot) and sketch the read-validate pattern that prevents a partially committed write from being observed.
     \item Write a PlusCal model of a TL2 commit that omits the read-set re-validation, and run TLC to produce a counterexample (Part~III workflow).
     \item Compare memory overhead: NOrec, TL2, JVSTM, and MVLog, for a workload with a large read-set and small write-set.
@@ -745,7 +754,8 @@ verified with the companion: bound the retry loop of
 classification of \S\ref{sec:norec-rust-complete} (compile the listing
 with any stable Rust toolchain; it needs only the standard library), and
 compare abort rates with
-\texttt{make -C benchmarks/cpp BACKEND=... run-intruder}.  The
+\texttt{make -C benchmarks/cpp BACKEND=... run-intruder} (\texttt{intruder} is
+the STAMP conflict-attack kernel; see Chapter~15).  The
 \emph{[verification]} exercises are checked with TLC against
 \S\ref{sec:pluscal-bank-floor-example} and a TL2 commit model that omits the
 read-set re-validation (\texttt{MoneyConserved}; see
