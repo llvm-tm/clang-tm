@@ -146,6 +146,25 @@ static std::mutex s_hook_mutex;
 static std::atomic<int> s_thread_count{1}; // main thread counts as 1
 static TMRealHooks s_real_hooks;
 static bool s_registered = false;
+
+// ── Only write the dispatch table when it actually changes ───────
+// The tm_* globals are read on EVERY TM call by instrumented code, without
+// holding s_hook_mutex (that would be far too expensive).  So a writer must
+// touch them only when the table it installs differs from the installed one:
+// re-installing identical pointers is still a plain data race against a
+// concurrent dispatch (ThreadSanitizer reports one per hook field), and a
+// reader can in principle observe a half-written table that mixes real and
+// stub hooks — exactly the "stubs silently no-op a transaction" hazard
+// described in apply_hooks_unlocked().
+//
+// s_hooks_dirty is bumped whenever the INTENDED table changes (a backend
+// registers hooks, a phase swap installs new ones); apply_hooks_unlocked()
+// consumes it.  Idempotent requests — the common case of every additional
+// worker thread calling tm_hook_init_thread()/tm_set_num_threads() once the
+// backend is already registered — then become no-ops instead of 23 concurrent
+// writes to live dispatch pointers.  Both counters are mutex-protected.
+static uint64_t s_hooks_dirty = 0;
+static uint64_t s_hooks_applied = 0;
 static bool g_trace_active = false;
 static TMRealHooks s_trace_real_hooks;
 
@@ -190,6 +209,7 @@ static void apply_hooks_unlocked()
 		TM_HOOK_FIELDS(TM_PICK)
 #undef TM_PICK
 	}
+	s_hooks_applied = s_hooks_dirty;
 }
 
 void tm_register_real_hooks(const TMRealHooks *hooks)
@@ -197,6 +217,7 @@ void tm_register_real_hooks(const TMRealHooks *hooks)
 	std::lock_guard<std::mutex> lock(s_hook_mutex);
 	s_real_hooks = *hooks;
 	s_registered = true;
+	++s_hooks_dirty; // the intended table changed: publish it
 	apply_hooks_unlocked();
 }
 
@@ -204,22 +225,28 @@ void tm_set_num_threads(int n)
 {
 	std::lock_guard<std::mutex> lock(s_hook_mutex);
 	s_thread_count.store(n);
-	if (s_registered)
+	// The intended table depends only on which hooks are registered, not on
+	// the thread count, so a re-count alone never changes it.
+	if (s_registered && s_hooks_applied != s_hooks_dirty)
 		apply_hooks_unlocked();
 }
 
 // Called by each backend's tm_init_thread().
-// Increments the thread count. If the count exceeds 1 (multi-thread),
-// atomically swaps to real hooks under the global lock.
+// Increments the thread count. If the count exceeds 1 (multi-thread)
+// and the dispatch table has not been published since the last change,
+// install the real hooks under the global lock.
 void tm_hook_init_thread()
 {
 	int prev = s_thread_count.fetch_add(1);
 	if (prev >= 1 && s_registered) {
-		// We're transitioning to multi-threaded: lock and install real hooks.
-		// All threads currently executing TM operations will see the new
-		// hooks on their next TM call (since each call loads the pointer).
+		// We may be transitioning to multi-threaded. The table only needs
+		// publishing if it changed since the last install (normally it was
+		// already published by tm_register_real_hooks while the program was
+		// still single-threaded); re-writing it here while other threads are
+		// mid-transaction would race their lockless dispatch reads.
 		std::lock_guard<std::mutex> lock(s_hook_mutex);
-		apply_hooks_unlocked();
+		if (s_hooks_applied != s_hooks_dirty)
+			apply_hooks_unlocked();
 	}
 }
 
@@ -240,6 +267,14 @@ void tm_swap_runtime(const TMRealHooks *hooks)
 	}
 	TM_HOOK_FIELDS(TM_SWAP)
 #undef TM_SWAP
+	// The intended table changed. We just wrote the fields ourselves, so in
+	// the normal (non-trace) case the installed table already matches the
+	// intended one and there is nothing left to publish; under tracing the
+	// wrappers must be re-established by the next apply_hooks_unlocked(), so
+	// the change is left pending there.
+	++s_hooks_dirty;
+	if (!g_trace_active)
+		s_hooks_applied = s_hooks_dirty;
 }
 
 // ═══════════════════════════════════════════════════════════════
