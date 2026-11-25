@@ -141,7 +141,7 @@ jobs:
         run: |
           # PRs gate on 3 core backends (fast); push to main tests all.
           if [ "${{ github.event_name }}" = "push" ]; then
-            BACKENDS="TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL XTM LEFTRIGHT ROMULUS"
+            BACKENDS="TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL XTM LEFTRIGHT ROMULUS ACCELTL2"
           else
             BACKENDS="TINYSTM NOREC TL2"
           fi
