@@ -326,6 +326,15 @@ TEST_TX_BIN = bin/test_tx
 TEST_RO2RW_SRC = ../../tests/explicit-api/test_norec_ro2rw.cpp
 TEST_RO2RW_BIN = bin/test_norec_ro2rw
 
+# --- concurrency differential driver (T1 bug hunt; see tools/diff_backends.sh) ---
+# Self-verifying: additive-delta workload + post-commit shadow model.
+DIFF_OPS_SRC = ../../tests/concurrency/drv_diff_ops.cpp
+DIFF_OPS_BIN = bin/drv_diff_ops
+MINI_DIFF_SRC = ../../tests/concurrency/mini_diff.cpp
+MINI_DIFF_BIN = bin/mini_diff
+WIDTH_REPRO_SRC = ../../tests/concurrency/repro_width_clobber.cpp
+WIDTH_REPRO_BIN = bin/repro_width_clobber
+
 # --- non-opacity teaching demo (BACKEND=NOREC or EAGER_BROKEN) ------
 # One source, two semantics: NOREC exits 0; EAGER_BROKEN SIGSEGVs (139).
 OPAQUEDEMO_SRC = opaquedemo/nonopaque.cpp
@@ -368,7 +377,7 @@ STAMP_BINS = $(VACATION_BIN) $(LABYRINTH_BIN) $(KMEANS_BIN) $(GENOME_BIN) $(INTR
 
 .PHONY: all stubs clean run-bank run-eigenbench run-bench7 run-vacation run-labyrinth run-kmeans
 .PHONY: run-genome run-intruder run-ssca2 run-bayes run-yada run-fuzz-counter run-fuzz-bank run-fuzz
-.PHONY: run-tpcc run-ycsb run-test-ds run-test-tx run-test-ro2rw run-opaquedemo run-sidemo run-tests run run-stamp
+.PHONY: run-tpcc run-ycsb run-test-ds run-test-tx run-test-ro2rw run-opaquedemo run-sidemo run-tests run run-stamp run-diff-ops
 
 all: bin $(BANK_BIN) $(EIGEN_BIN) $(BENCH7_BIN) $(STAMP_BINS) \
      $(FUZZ_CTR_BIN) $(FUZZ_BANK_BIN) $(TPCC_BIN) $(YCSB_BIN) $(TEST_DS_BIN) $(TEST_TX_BIN) $(TEST_RO2RW_BIN) $(RBTREE_BIN)
@@ -379,8 +388,24 @@ stubs: bin $(BANK_STUBS) $(EIGEN_STUBS) $(BENCH7_STUBS) $(STAMP_STUBS) \
 bin:
 	mkdir -p bin STAMP/kmeans STAMP/genome STAMP/intruder STAMP/ssca2
 
+# --- Backend-switch detection ---------------------------------------------
+# Link rules below are file-prerequisite based, and switching BACKEND changes
+# no file timestamps: after `make bin/test_tx BACKEND=A`, running
+# `make bin/test_tx BACKEND=B` finds the existing binary newer than all of
+# B's prerequisites and reports "up to date" — silently running A's code
+# under B's name (this has burned real debugging time; `make -B` or
+# `make clean` were the only workarounds). The stamp file is regenerated
+# whenever BACKEND changes, and since every link rule depends on it, the
+# switch now forces a correct relink.
+BACKEND_STAMP := bin/.backend-$(BACKEND)
+
+$(BACKEND_STAMP):
+	@mkdir -p bin
+	@rm -f bin/.backend-*
+	@printf '%s\n' '$(BACKEND)' > $@
+
 define BUILD_RULE
-$(1): bin $(2) $(RUNTIME) $(REGION_ALLOC) $(HOOKS_SRC) $(EXTRA_SRC) $(BUILTINS) Makefile
+$(1): bin $(BACKEND_STAMP) $(2) $(RUNTIME) $(REGION_ALLOC) $(HOOKS_SRC) $(EXTRA_SRC) $(BUILTINS) Makefile
 	$$(CXX) $$(CXXFLAGS) $$(EXTRA_INC) $$(DEFS) -o $$@ $(2) $$(RUNTIME) $$(REGION_ALLOC) $$(HOOKS_SRC) $$(EXTRA_SRC) $$(LDFLAGS) $$(EXTRA_LDLIBS)
 endef
 
@@ -407,6 +432,9 @@ $(eval $(call BUILD_RULE,$(YCSB_BIN),$(YCSB_SRC)))
 $(eval $(call BUILD_RULE,$(TEST_DS_BIN),$(TEST_DS_SRC)))
 $(eval $(call BUILD_RULE,$(TEST_TX_BIN),$(TEST_TX_SRC)))
 $(eval $(call BUILD_RULE,$(TEST_RO2RW_BIN),$(TEST_RO2RW_SRC)))
+$(eval $(call BUILD_RULE,$(DIFF_OPS_BIN),$(DIFF_OPS_SRC)))
+$(eval $(call BUILD_RULE,$(MINI_DIFF_BIN),$(MINI_DIFF_SRC)))
+$(eval $(call BUILD_RULE,$(WIDTH_REPRO_BIN),$(WIDTH_REPRO_SRC)))
 $(eval $(call BUILD_RULE,$(RBTREE_BIN),$(RBTREE_SRC)))
 $(eval $(call BUILD_RULE,$(OPAQUEDEMO_BIN),$(OPAQUEDEMO_SRC)))
 
@@ -486,6 +514,9 @@ run-sidemo: $(SIDEMO_BIN)
 
 run-test-ro2rw: $(TEST_RO2RW_BIN)
 	./$(TEST_RO2RW_BIN)
+
+run-diff-ops: $(DIFF_OPS_BIN)
+	./$(DIFF_OPS_BIN) $(DIFF_OPS_ARGS)
 
 run-bench7: $(BENCH7_BIN)
 	./$(BENCH7_BIN) 4 5000
