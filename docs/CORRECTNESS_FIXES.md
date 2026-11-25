@@ -1056,6 +1056,54 @@ removes the most is that these were *shared* primitives: one edit in
 `any_type_mapping` cleared seven backends at once. The rest of the triage table,
 with the per-backend frames still reporting, is in `TODO.md`.
 
+## 31. Shared state written from thread-lifecycle paths (3 bugs) (2026-11-26) ✅
+
+Three separate races surfaced once every backend could be swept under
+ThreadSanitizer. None of them is in a transaction's data path, which is why they
+survived every functional test: all three are reached from `tm_init_thread()` /
+`tm_exit_thread()` / the first call of a probe, and the damage is a lost update
+in a *counter* or a pointer published without a happens-before edge.
+
+**a) `tm_rtm::available()` cached its probe in a plain `static int`.**
+`static int cached = -1; if (cached < 0) { …CPUID…; _xbegin(); cached = 1 or 0; }`
+— the initialisation of a function-local static is synchronised, the later
+assignments are not. Concurrent callers therefore (i) re-ran the live
+`_xbegin()` probe, duplicating a transaction on the CPU and the fallback warning
+on stderr, and (ii) read and wrote `cached` with no ordering, which is a data
+race. ThreadSanitizer named the object (`tm_rtm::available()::cached`) only after
+the reported address was mapped back through the PIE load base read from
+`/proc/<pid>/maps`, because TSan's external symbolizer crashes with
+`llvm-symbolizer-22` in this environment (see `TODO.md`).
+*Fix*: the probe runs exactly once under `std::call_once` and publishes into a
+`std::atomic<int>`; the fast path is one relaxed load, and a thread arriving
+during the probe waits for the result instead of starting a nested `_xbegin()`
+of its own.
+
+**b) TSXSGL merged per-thread statistics with plain `+=` at thread exit.**
+`tsx_stats::total` was a plain struct and `tm_exit_thread()` did five
+`total.X += me.X;`. Every thread's exit wrote the same five words: ThreadSanitizer
+reported all five write/write races, and the practical effect is that the
+`TM_TSX_STATS` totals silently lose contributions — the printed statistics
+under-report rather than corrupt anything, which is exactly why no test caught
+it. *Fix*: `total` became a struct of relaxed `std::atomic<uint64_t>` with
+`fetch_add`. It is never touched inside a transaction, so this costs nothing on
+the fast path.
+
+**c) SPHT published its epoch table from `init_thread()`.**
+`g_durable_seqs` is a plain global pointer that `group_commit()` dereferences on
+every group commit. It was allocated inside `init_thread()` under the guard
+"this thread incremented `g_num_threads` to 0", which gives the allocating store
+no happens-before edge to the other threads' reads — a second thread could see
+the pointer while it was still null (silently skipping its epoch publication,
+i.e. a recovery-visible bug) or not yet visible at all. *Fix*: allocate it in
+`init()`, which runs single-threaded before any transaction exists.
+
+**Verification.** SPHT and TSXSGL go from 1 and 5 ThreadSanitizer warnings to
+**0** on `drv_diff_ops -S 1 -T 4 -n 200`; `test_tx` 120/120 and `test_ds`
+207/207 for both; TSXSGL `bank -t 4 -n 5000` reports `sgl_entries=5000`, i.e.
+the totals now account for every transaction (this host has no RTM, so the RTM
+counters are legitimately zero).
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |

@@ -68,7 +68,19 @@ struct PerThread {
 	uint64_t sgl_entries = 0;
 };
 static thread_local PerThread me;
-static PerThread total; // merged at tm_exit_thread, never touched inside a TX
+// The merged counters are touched by EVERY thread, at tm_exit_thread().  As
+// plain uint64_t fields the five read-modify-writes there raced each other
+// (ThreadSanitizer reported all five) and silently lost counts, so the totals
+// printed by tm_exit() could be too small.  They are never touched inside a
+// transaction, so relaxed atomics are enough and cost nothing on the fast path.
+struct Total {
+	std::atomic<uint64_t> xbegin_attempts{0};
+	std::atomic<uint64_t> tsx_commits{0};
+	std::atomic<uint64_t> conflict_aborts{0};
+	std::atomic<uint64_t> other_aborts{0};
+	std::atomic<uint64_t> sgl_entries{0};
+};
+static Total total;
 static thread_local uint64_t inject_ctr = 0; // test hook, see real_tm_begin
 } // namespace tsx_stats
 
@@ -122,11 +134,16 @@ TM_PLUGIN_LIFECYCLE_FN(do_tm_init_thread, void tm_init_thread())
 TM_PLUGIN_LIFECYCLE_FN(do_tm_exit_thread, void tm_exit_thread())
 {
 	tm_hook_exit_thread();
-	tsx_stats::total.xbegin_attempts += tsx_stats::me.xbegin_attempts;
-	tsx_stats::total.tsx_commits += tsx_stats::me.tsx_commits;
-	tsx_stats::total.conflict_aborts += tsx_stats::me.conflict_aborts;
-	tsx_stats::total.other_aborts += tsx_stats::me.other_aborts;
-	tsx_stats::total.sgl_entries += tsx_stats::me.sgl_entries;
+	tsx_stats::total.xbegin_attempts.fetch_add(tsx_stats::me.xbegin_attempts,
+	                                           std::memory_order_relaxed);
+	tsx_stats::total.tsx_commits.fetch_add(tsx_stats::me.tsx_commits,
+	                                       std::memory_order_relaxed);
+	tsx_stats::total.conflict_aborts.fetch_add(tsx_stats::me.conflict_aborts,
+	                                           std::memory_order_relaxed);
+	tsx_stats::total.other_aborts.fetch_add(tsx_stats::me.other_aborts,
+	                                        std::memory_order_relaxed);
+	tsx_stats::total.sgl_entries.fetch_add(tsx_stats::me.sgl_entries,
+	                                       std::memory_order_relaxed);
 }
 
 static std::recursive_mutex g_serialize_mutex;

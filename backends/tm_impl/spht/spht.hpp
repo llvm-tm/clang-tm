@@ -130,7 +130,16 @@ inline bool rtm_available() { return tm_rtm::available(); }
 
 inline void init()
 {
-	g_durable_seqs = nullptr;
+	// The epoch table is a plain global pointer that every thread reads in
+	// group_commit().  Allocating it lazily in init_thread() -- guarded only by
+	// "the thread that happened to increment the counter first" -- published it
+	// without any happens-before edge to the other threads, so a second thread
+	// could read the pointer while it was still null or not yet visibly written
+	// (ThreadSanitizer reported it at init_thread).  Allocate it here instead:
+	// init() runs single-threaded before any transaction exists.
+	if (!g_durable_seqs)
+		g_durable_seqs = (std::atomic<uint64_t> *)calloc(64,
+		                                                 sizeof(std::atomic<uint64_t>));
 	g_num_threads.store(0, std::memory_order_relaxed);
 }
 
@@ -151,11 +160,7 @@ inline void init_thread()
 		g_pcl->entries.reserve(4096);
 	}
 
-	uint64_t tid = g_num_threads.fetch_add(1, std::memory_order_acq_rel);
-	if (tid == 0) {
-		g_durable_seqs = (std::atomic<uint64_t> *)calloc(64,
-		                                                 sizeof(std::atomic<uint64_t>));
-	}
+	g_num_threads.fetch_add(1, std::memory_order_acq_rel);
 	current_tx->pcl = g_pcl;
 	current_tx->tx_seq = 0;
 
