@@ -75,6 +75,8 @@ Start at [`docs/README.md`](docs/README.md) (index of all docs). Key entries:
 
 - C++ backend change → `make -C benchmarks/cpp bin/test_tx BACKEND=<B>` and
   `bin/test_ds BACKEND=<B>` (120 / 207 tests).
+- Suspected concurrency bug → `make check-diff` (self-verifying differential
+  driver across all backends; see `docs/DEVELOPER_GUIDE.md`).
 - Plugin change → `make -C plugin run`.
 - Rust change → `cargo test` in the affected crate (use `--test-threads=1` for
   the workspace `tm` crate to avoid a pre-existing Condvar race).

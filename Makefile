@@ -26,7 +26,7 @@ PLUGIN := $(LLVM_PLUGIN_DIR)/bin/libTMInstrument.so
 # Build everything with `make all`; run the ~60s smoke test with `make check-fast`.
 .DEFAULT_GOAL := help
 
-.PHONY: all clean plugin plugin-benchmarks expli-benchmarks tests check check-fast check-all post-merge-check compiledb clean-book clean-proofs help info test_run fmt fmt-check
+.PHONY: all clean plugin plugin-benchmarks expli-benchmarks tests check check-fast check-all check-diff post-merge-check compiledb clean-book clean-proofs help info test_run fmt fmt-check
 
 all: info plugin plugin-benchmarks expli-benchmarks
 
@@ -124,6 +124,7 @@ help:
 	@echo "  check               - Build + run the instrumented plugin tests"
 	@echo "  check-fast          - Fast smoke: plugin + TINYSTM/NOREC/TL2/CSMV + Rust workspaces"
 	@echo "  check-all           - Full sweep: test_tx/test_ds across all C++ backends"
+	@echo "  check-diff          - T1 differential concurrency sweep (all backends, same seeds)"
 	@echo "  post-merge-check    - Everything gate: plugin+C+++Rust+sim+lint+units+GPU battery+integrity"
 	@echo "  test_run            - Run a couple of plugin benchmarks"
 	@echo "  compiledb           - Generate compile_commands.json for clangd"
@@ -199,6 +200,13 @@ check-all:
 #   POST_MERGE_ONLY=cpp make post-merge-check   # one section
 post-merge-check:
 	./tools/post-merge-check.sh
+
+# --- T1 differential concurrency sweep -------------------------------------
+# Self-verifying additive-delta driver (tests/concurrency/drv_diff_ops.cpp)
+# built per backend and run with identical seeds; no oracle binary needed.
+# Override the backend list with BACKENDS="TL2 SGL" and the seeds positionally.
+check-diff:
+	./tools/diff_backends.sh $(DIFF_SEEDS)
 
 # --- IDE / clangd support (S08) ---------------------------------------------
 # Generate root compile_commands.json from the plugin and a representative C++

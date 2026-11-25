@@ -44,13 +44,14 @@ make all                        # Build plugin + plugin-benchmarks + expli-bench
 make plugin                     # Build libTMInstrument.so
 make -C benchmarks/cpp all      # Build all expli benchmarks (BACKEND=tinystm default)
 make -C plugin run              # Build and run plugin tests
-make check-all                  # Build+test all C++ backends (17 in $(BACKENDS_TESTS); SGL/LEFTRIGHT/ROMULUS skip auto-run)
+make check-all                  # Build+test all C++ backends ($(BACKENDS_TESTS); SGL/LEFTRIGHT/ROMULUS skip auto-run)
+make check-diff                 # Differential concurrency sweep: one self-verifying driver, every backend, same seeds
 ```
 
 > **New here?** Run `make check-fast` to confirm the whole toolchain works, then
 > read the [documentation index](README.md) to find the doc you need.
 
-Backend selection: `BACKEND={TINYSTM,WBETL,WT,NOREC,NORECBF,SWISSTM,TL2,TSC_TM,MVLOG,SGL,LEFTRIGHT,ROMULUS,XTM,SPHT,TSXSGL,GPU_STM_CPU,CSMV,POWER8HTM,CALVIN,GACCO,GPUTX,JVSTM}` (22 values accepted by `benchmarks/cpp/Makefile`; `$(BACKENDS_TESTS)` in the top-level `Makefile` covers 17 of them for the auto-init sweep).
+Backend selection: `BACKEND={TINYSTM,WBETL,WT,NOREC,NORECBF,SWISSTM,TL2,TSC_TM,MVLOG,SGL,LEFTRIGHT,ROMULUS,XTM,SPHT,TSXSGL,GPU_STM_CPU,CSMV,POWER8HTM,CALVIN,GACCO,GPUTX,JVSTM,ACCELTL2}` (23 values accepted by `benchmarks/cpp/Makefile`; `$(BACKENDS_TESTS)` in the top-level `Makefile` covers 21 of them for the auto-init sweep). Switching `BACKEND` forces a relink automatically (a stamp file records the last backend — see [correctness fixes §22](CORRECTNESS_FIXES.md)); before that fix, `make bin/test_tx BACKEND=B` after `BACKEND=A` could silently keep A's binary.
 
 ### Explicit API (no LLVM needed)
 
@@ -148,11 +149,49 @@ Pipeline: `collect → clone → redirect → instrument-fn → cleanup`
 |------|---------|-------|
 | Transaction correctness | `make -C benchmarks/cpp bin/test_tx BACKEND=NOREC` | 120 |
 | Data structure correctness | `make -C benchmarks/cpp bin/test_ds BACKEND=NOREC` | 207 |
-| All C++ backends | `make check-all` | 17 in `$(BACKENDS_TESTS)` × 321 each (SGL/LEFTRIGHT/ROMULUS require manual `./bin/test_tx`) |
+| All C++ backends | `make check-all` | `$(BACKENDS_TESTS)` (21) × 321 each (SGL/LEFTRIGHT/ROMULUS require manual `./bin/test_tx`) |
+| Differential concurrency | `make check-diff` | 21 backends × 2 seeds × 2 thread counts, self-verifying |
 | Plugin tests | `make -C plugin run` | ~25 instrumented + 2 race + 1 persist-sgl |
 | Simulator lib tests | `cargo test --lib` | 60+ (7 sim backends × ~12 each) |
 | Simulator integration | `cargo test --test sim_engine_test` | 26 |
 | Rust workspace | `cargo test --manifest-path explicit_api/rust/workspace/Cargo.toml -- --test-threads=1` | 9 |
+
+### Differential concurrency driver (`tests/concurrency/drv_diff_ops.cpp`)
+
+`make check-diff` (or `tools/diff_backends.sh [seeds…]`, `BACKENDS="TL2 SGL"`
+to narrow) builds one backend-agnostic driver per backend and runs it with
+identical seeds. Every transactional write in the workload is a bounded
+**additive delta**, so deltas commute and every legal commit order must
+produce the same final state — the driver checks
+`final(o) == init(o) + Σ deltas of committed txns to o` against a
+post-commit shadow model, with no oracle binary and no history logging.
+Extra in-transaction checks: repeatable reads (charged only on commit, so
+legitimate OCC aborts don't count), reads within the window implied by the
+concurrent commits, read-after-own-write (incl. the 1-byte path), and
+transactional pointer slots that must always resolve to legal
+`tm_malloc`'d targets. Waves of short-lived threads exercise TLS
+lifecycle; a final single-threaded wave exercises `tm_malloc`/`tm_realloc`
+grow/shrink/free after the slab has churned.
+
+```
+make -C benchmarks/cpp bin/drv_diff_ops BACKEND=TL2
+./benchmarks/cpp/bin/drv_diff_ops -S 1 -T 8 -n 1500   # exit 2 = violation
+  -S seed  -T threads  -n txns/thread
+  -R   give each thread a disjoint object slice (no legitimate conflicts)
+  -M mask op classes: 1 ADD, 2 TRANSFER, 4 CHECK, 8 READOWN, 16 slot
+        double-read, 32 pointer churn, 64 multi-block batch, 128 alloc wave
+  DIFF_OPS_DUMP=1 / _CHECK_EARLY=1 / _LOG=1 / _DIAG=1  per-object diffs,
+        mid-run check, commit journal, layout + hook pointers
+```
+
+Read the file header before editing it: three setjmp/retry traps found
+while building it (per-attempt resets and the shadow flush must both sit
+*after* the `sigsetjmp` return point) make a *correct* backend look broken.
+
+`tests/concurrency/mini_diff.cpp` (`bin/mini_diff`) is the stripped-down
+core of the same idea — two threads, disjoint ranges, pure positive adds —
+useful as a 20-line sanity check when porting a new backend or narrowing a
+failure down to the API layer (`-shared` makes the ranges overlap).
 
 ## Debugging
 
