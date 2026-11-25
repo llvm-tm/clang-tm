@@ -3407,3 +3407,68 @@ Verification: `make check-fast` ALL PASSED, `make -C plugin run` all tests pass,
 CSMV `test_tx` 120/120 + `test_ds` 207/207, driver `-T 8 -n 3000` seeds 1–3
 clean, CSMV TSan 0 warnings. Docs: `docs/CORRECTNESS_FIXES.md` §27–§29,
 `TODO.md` follow-ups (CSMV GPU gaps, TSan triage, two latent CSMV hazards).
+
+### Draining the TSan triage list: 178 warnings → 2, and 18/19 race-clean
+
+With every backend linking under `-fsanitize=thread`, the T1 differential driver
+could be swept for data races per backend (each binary symbolized separately,
+against a snapshot of *itself* — an earlier pass that reused one binary produced
+garbage frame names). What fell out was two patterns plus three one-off bugs,
+recorded as `docs/CORRECTNESS_FIXES.md` §30 and §31.
+
+**§30 The speculative-read / in-place-install pair (12 backends).** In TL2,
+TSC_TM, TinySTM, WT, WBETL, NOrec, NOrec-BF, LeftRight, Romulus, MVLog,
+SwissTM and XTM, a committer installs a committed value *into the object* while
+a lockless speculative reader may be loading that same word — the intended
+protocol (the racing value is rejected later by version validation, which is why
+readers take no lock) but written with plain accesses, i.e. UB. Readers became
+width-exact relaxed atomic loads and installs release stores, through a new
+shared helper (`common/tm_word_access.hpp`) wired into the shared
+`stm::any_type_mapping<T>::setp/store` — which is why one edit cleared seven
+backends — and into each backend's own copy where it has one. Two were not
+mechanical: SwissTM validated with `(void)*addr;` inside its version window and
+then `return *addr;` *outside* it, so the value returned could come from a later
+commit than the version its read-set entry records (it now returns the in-window
+value); XTM installed a whole private page with `memcpy(page, priv, 4096)` into a
+page a reader that slipped past the ownership check may still be loading, so that
+became word-wise release stores.
+
+**§31 Shared state written from thread-lifecycle paths (3 bugs).**
+`tm_rtm::available()` cached its live `_xbegin()` probe in a plain `static int`
+behind an unsynchronised `if (cached < 0)`, so concurrent callers re-probed and
+raced on the cache (now `call_once` + an atomic publish; the reported address was
+identified by mapping it back through the PIE load base from `/proc/<pid>/maps`,
+because TSan's external symbolizer crashes with `llvm-symbolizer-22` here).
+TSXSGL merged its per-thread counters into a plain `tsx_stats::total` with five
+`+=` in `tm_exit_thread()` — write/write races that silently lost counts, so
+`TM_TSX_STATS` under-reported (now relaxed atomics). SPHT allocated the epoch
+table `g_durable_seqs`, which every `group_commit()` dereferences, inside
+`init_thread()` under a "whoever incremented the counter first" guard, giving the
+storing thread no happens-before edge to the other readers — a second thread
+could skip its epoch publication entirely; it is allocated in `init()` now.
+
+**Result**: warnings per backend before → after — TL2 14→0, ACCELTL2 16→2,
+TINYSTM 11→0, WT 21→0, WBETL 4→0, NOREC 10→0, NORECBF 13→0, LEFTRIGHT 19→0,
+ROMULUS 11→0, MVLOG 7→0, SWISSTM 24→0, TSC_TM 17→0, XTM 6→0, TSXSGL 5→0,
+GPU_STM_CPU 2→0, SPHT 1→0; SGL, JVSTM and CSMV were clean throughout. All 19
+keep **zero** consistency violations, `test_tx` 120/120 and `test_ds` 207/207
+per backend, `bank` conserves money, and the unit suite stays green. Only
+ACCELTL2's OpenCL/SVM host-side table (2 races + a thread that is never joined)
+is left, and that needs a machine with a real IGP. `ci.yml`'s `tsan-gate` job
+grew from 3 to **18** backends, so a new race in any of them fails the PR.
+
+**gem5 ARM TME, corrected and improved.** Two claims I wrote earlier tonight
+were wrong and are fixed in `gem5_sim/README.md` and `TODO.md`: the TME workload
+sources *do* exist (`workloads/tme/{array_sum,hash_table}.c`, using
+`__tstart`/`__tcommit`), and `configs/arm-tme-kvm.py` is not stuck on the KVM CPU
+— it switches to a Timing CPU after boot. The real defects were that the release
+never included the `TME` extension (gem5 reads it in `src/arch/arm/isa.cc` and
+`ID_AA64ISAR0_EL1.TME`, so the instructions were undefined) and that
+`workloads/tme/Makefile` asked for `-march=armv8.1-a` without `+tme`, which means
+`arm_acle.h` never declares the intrinsics. The config now
+`release.add(ArmExtension("TME"))`, the Makefile builds `armv8.1-a+tme` and fails
+with an explanation when the compiler cannot do TME (clang has none through
+LLVM 22 — verified: no `tme` in its AArch64 feature list, `__ARM_FEATURE_TME`
+never defined), and a non-blocking `htm-workloads-compile` nightly job builds the
+RTM and TME workloads so they cannot rot again. An end-to-end ARM run still needs
+an ARM/ALL gem5 build, which this repo does not produce.

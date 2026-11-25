@@ -307,11 +307,11 @@ jobs:
   # ── Job 10b: TSan race gate (race-clean backends) ─────────
   # These backends report zero ThreadSanitizer warnings on the T1 differential
   # driver, and the driver exits non-zero on any consistency violation, so this
-  # job fails on a newly introduced race. The remaining backends still carry
-  # known backend-internal races (known-issues table in
-  # docs/CORRECTNESS_FIXES.md, triage table in TODO.md) and are swept
-  # non-blocking in nightly.yml until that list drains; add a backend here as
-  # soon as its row in that table reaches 0.
+  # job fails on a newly introduced race. Only ACCELTL2 is missing: it still
+  # carries known races in its OpenCL/SVM guard table (known-issues table in
+  # docs/CORRECTNESS_FIXES.md, triage table in TODO.md) and is swept
+  # non-blocking in nightly.yml until that drains; add a backend here as soon as
+  # its row in that table reaches 0.
   tsan-gate:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     strategy:
@@ -330,6 +330,12 @@ jobs:
           - LEFTRIGHT
           - ROMULUS
           - MVLOG
+          - SWISSTM
+          - TSC_TM
+          - XTM
+          - TSXSGL
+          - SPHT
+          - GPU_STM_CPU
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     env:
