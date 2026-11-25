@@ -189,6 +189,31 @@ jobs:
               tools/diff_backends.sh 1
           fi
 
+  # ── Job 5c: Per-backend unit suite ──────────────────────
+  # Deterministic, fast (each test ~ms) correctness checks compiled directly
+  # against each runtime: counter_st/mt, write_set_validation, overlap_stress,
+  # read_lock_interference, readall_write_interference, abba_deadlock,
+  # subword_counters, plus the region-allocator tests. This is the gate that
+  # catches version-store aliasing and sub-word clobbering without relying on
+  # the stochastic concurrency driver. All 11 backends pass locally.
+  backend-unit:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 lld make
+      - name: Build and run all backend unit tests
+        run: |
+          make -C tests/backends/tm_impl -j4 all
+          make -C tests/backends/tm_impl run
+
   # ── Job 6: Stale directory check ────────────────────────
   stale-check:
     runs-on: ubuntu-22.04

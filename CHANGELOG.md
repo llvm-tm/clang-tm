@@ -3285,6 +3285,17 @@ for CSMV without gating any other counter.
 `tools/diff_backends.sh`, `TODO.md`, `docs/CORRECTNESS_FIXES.md` (§24, §25,
 known-issues table).
 
+**CI hardening**: the three backends the driver caught bugs in (CSMV,
+GPU_STM_CPU, JVSTM) were absent from CI's `cross-backend` list — which is why
+CI never saw the defects — so they were added to the push-to-main gate (all
+pass `test_tx` 120/120 + `test_ds` 207/207). Added a `diff-concurrency` job
+running `tools/diff_backends.sh` over the fixed backends plus references
+(CSMV's rare race allowanced so the job is deterministic), and a
+`backend-unit` job running the full deterministic `tests/backends/tm_impl`
+suite (counter/write-set/overlap/sub-word/AB-BA + region-allocator tests,
+11 backends, all green locally) — the gate that catches version-store
+aliasing and sub-word clobbering without the stochastic driver.
+
 **Verification**: CSMV `test_tx` 120/120, `test_ds` 207/207;
 `repro_bucket_alias` clean; `drv_diff_ops` clean at `-T 1` for all op-class
 masks (1/2/4/8/16) and `-T 4`/`-T 8` full mask on seeds 1–3. GPU_STM_CPU
