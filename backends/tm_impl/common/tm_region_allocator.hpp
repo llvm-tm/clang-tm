@@ -8,6 +8,13 @@
 #include <new>
 #include <pthread.h>
 #include <vector>
+#ifdef TM_DEBUG_ALLOC
+// Must be at file scope: including them inside namespace stm (where the
+// leak tracker below lives) breaks every standard header that follows.
+#include <cstring>
+#include <string>
+#include <unordered_map>
+#endif
 
 namespace stm
 {
@@ -137,10 +144,6 @@ extern thread_local LargeHdr *g_tl_large_free_list;
 // tracking compiles to nothing (zero overhead).
 
 #ifdef TM_DEBUG_ALLOC
-#include <cstdint>
-#include <cstring>
-#include <string>
-#include <unordered_map>
 // Per-thread set of (ptr, size) of live TM allocations
 extern thread_local std::unordered_map<void *, size_t> *g_tl_debug_allocs;
 #endif

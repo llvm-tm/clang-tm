@@ -638,11 +638,56 @@ it runs under the CI ASan job (NOREC/TL2).
 MVLOG/NORECBF/CSMV; NOREC ASan build clean; `test_ds` 207/207; bank money
 conserved.
 
+## 21. TM-region retire set never erased → permanent region leak → fuzz OOM (2026-11-25) ✅
+
+**Symptom.** CI `fuzz-smoke` red since `3b5e289`: libFuzzer exit 71 (OOM) in
+`test_tx_fuzzer` at ~8.4 M execs against the 2 GB limit. Reproducible locally:
+the TM region burned ~34 slabs / 2 M driver iterations.
+
+**Root cause.** Two independent leaks in the deferred-free pipeline:
+
+1. `tm_flush_retired_frees()` erased **heap** pointers from
+   `g_retired_global_set` after `::free`, but never erased **TM-region**
+   pointers after `tm_region_free`. The region allocator recycles addresses,
+   so the next time a reused address was retired,
+   `tm_move_deferred_to_retired()` saw it in the set ("already retired by
+   another thread") and dropped it — the block was never freed again. Every
+   alloc/free cycle through a recycled address leaked its block permanently.
+2. The fuzz harness itself fought the region allocator: it built 4 fresh
+   `expli::TM<int>` objects per fuzz iteration (`TM<T>` values live forever
+   in the region — no per-object destructor path), never freed `TM_malloc`
+   results, and left transactions open across inputs (suppressing the
+   deferred-free flush that happens at `begin()`/`clear()`).
+
+**Fix.**
+
+1. `backends/tm_impl/common/tm_alloc_overrides.hpp`: erase the pointer from
+   `g_retired_global_set` in the TM-region branch of `tm_flush_retired_frees()`
+   too (mirrors the heap branch).
+2. `tests/fuzz/test_tx_fuzzer.cpp` rewritten: the four `TM<int>` objects are
+   `static` (constructed once); each input runs inside one outer
+   `expli::TM<int>::transaction()` frame (so the sigsetjmp retry frame and the
+   op stream share a frame, and no op observes an inactive tx); nested `end()`
+   only when `tm_nested_call_counter > 1`; `TM_malloc` results are `tm_free`d
+   inside the transaction (deferred release at commit).
+3. Incidental: `backends/tm_impl/common/tm_region_allocator.hpp` `#include`d
+   standard headers *inside* `namespace stm` under `TM_DEBUG_ALLOC`, so the
+   repo's own leak-tracker mode never compiled. Includes hoisted to file
+   scope. (The `g_tl_debug_allocs` tracker it declares is itself a dead stub
+   — tracked in TODO.md.)
+
+**Verification.** Slab burn 34→23/2 M iterations (allocator-only driver);
+both fuzz targets exit 0 repeatedly at the CI 30 s budget (~100 MB RSS) and
+at a 120 s soak; `test_tx` 120/120 + `test_ds` 207/207 for TINYSTM/NOREC/TL2
+unchanged; `make check-fast` green apart from the pre-existing CSMV failure
+(separate row in the table below).
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |
 |-------|----------|-------|
 | TinySTM STMbench7 crash (STL vector realloc) | High | STL-in-TM incompatibility, pre-existing |
+| **CSMV `test_tx` fails 1/120 (pre-existing)** | Medium | "TM<TM<int>*> []: FAIL" + "thread lifecycle: FAIL". Reproduces on a **clean checkout** (verified 2026-11-25 via `git stash`), both via `make check-fast` and a direct `BACKEND=CSMV` build — not a regression from the fuzz/leak fixes. `test_ds` passes 207/207. Tracked in TODO.md (P0). |
 | LEFTRIGHT write-set `observed_version` | Low | Uses global clock at read time instead of per-address version; correct with global lock but more conservative than needed |
 | stmbench7 times out with >1 thread | Low | Data race in `ts_multimap::lower_bound()` — pre-existing |
 | **`test_queue_multi` counter mismatch (351 vs 400)** | Low | `counter` is a plain `static int` (not TM-tracked). The `TX` annotation creates a TM transaction wrapper, but the LLVM pass instruments only TM-annotated globals. 4 threads × 100 increments of a non-TM variable without atomic/lock protection → classic lost-update race. Expected 400, consistently observed ~351. Fix: either declare counter as `TM int counter` or use `std::atomic<int>`. Also affects `bench_queue_compare.cpp` and `bench_queue_compare2.cpp` (same plain-`static int counter` pattern). |

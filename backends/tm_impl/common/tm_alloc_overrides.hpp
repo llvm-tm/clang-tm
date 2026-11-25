@@ -336,6 +336,15 @@ inline void tm_flush_retired_frees(uint64_t safe_version)
 				}
 				std::free(node->ptr);
 			} else {
+				// TM-region addresses MUST also be erased (review-06 set
+				// exists to dedup cross-thread retires): the region
+				// allocator recycles addresses, so a stale entry makes a
+				// later move_deferred_to_retired of the reused block
+				// "already retired" and silently leak the block forever.
+				{
+					std::lock_guard<std::mutex> lock(g_retired_global_mutex);
+					g_retired_global_set.erase(node->ptr);
+				}
 				stm::tm_region_free(node->ptr);
 			}
 			std::free(node);
