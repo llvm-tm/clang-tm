@@ -59,6 +59,15 @@ processor = SimpleSwitchableProcessor(
 )
 
 release = ArmDefaultRelease.for_kvm()
+# ArmDefaultRelease does not advertise the Armv8.1 Transactional Memory
+# Extension, and gem5 reads it from the release in exactly two places that
+# matter here: src/arch/arm/isa.cc (gives the ISA its TME support) and
+# ID_AA64ISAR0_EL1.TME in src/arch/arm/regs/misc.cc (what software uses to
+# discover TME).  Without this the workload's TSTART/TCOMMIT/SEND encodings are
+# simply undefined on the Timing CPU that takes over after boot.  Note the boot
+# phase itself runs on the KVM CPU, i.e. the *host* ISA, so the TME binary must
+# only be executed after simulator.switch_processor() below.
+release.add(ArmExtension("TME"))
 platform = VExpress_GEM5_V1()
 
 board = ArmBoard(

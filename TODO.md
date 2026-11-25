@@ -249,36 +249,24 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   (`CSMV_SERVER_COMMIT=1`, commit `f142ad9`); porting it to the kernel needs a
   GPU runner, because the `gpu/` tree is only *compiled* in `nightly.yml` and
   never correctness-gated.
- - **TSan sweep follow-ups (measured 2026-11-26, after the hook-publication fix
-   and the shared-atomics fix of §30)**: `-fsanitize=thread` now links for **all**
-   backends (the runtime `operator new/delete` overrides are gated off under
-   `__SANITIZE_THREAD__`, which is what made TINYSTM/WT/WBETL/NOREC/NORECBF/MVLOG
-   fail to link), and `drv_diff_ops -S 1 -T 4 -n 200` reports **zero consistency
-   violations for all 19 backends**. Data-race warnings went **178 → 56** with the
-   shared `stm::any_type_mapping` atomics; 12 of the 19 backends are now
-   completely clean:
+ - **TSan sweep follow-ups (final sweep 2026-11-26)**: `-fsanitize=thread` links
+   for **all** backends (the runtime `operator new/delete` overrides are gated off
+   under `__SANITIZE_THREAD__`, which is what made TINYSTM/WT/WBETL/NOREC/
+   NORECBF/MVLOG fail to link), `drv_diff_ops -S 1 -T 4 -n 200` reports **zero
+   consistency violations for all 19 backends**, and **18 of the 19 report zero
+   data races** — from 178 warnings tree-wide at the start of the night
+   (docs/CORRECTNESS_FIXES.md §29–§31 records the causes). Warnings per backend,
+   before → after: TL2 14→0, ACCELTL2 16→2, TINYSTM 11→0, WT 21→0, WBETL 4→0,
+   NOREC 10→0, NORECBF 13→0, LEFTRIGHT 19→0, ROMULUS 11→0, MVLOG 7→0, SWISSTM
+   24→0, TSC_TM 17→0, XTM 6→0, TSXSGL 5→0, GPU_STM_CPU 2→0, SPHT 1→0, and 0
+   throughout for SGL, JVSTM and CSMV.
 
-   | backend | races (was) | remaining frames |
+   | backend | still open | where |
    |---|---|---|
-   | SWISSTM | 24 (22) | `swisstm::STM::read_impl<u…` / `read_u32` vs `rollback` |
-   | TSC_TM | 17 (15) | `tsctm::STM::commit` vs its own `read_impl<uns…` |
-   | XTM | 6 (7) | `xtm::read_word` (its page-granular path, not the shared primitive) vs `commit` |
-   | TSXSGL | 5 (5) | reported at `tm_exit_thread` — thread-exit path, needs detail |
-   | ACCELTL2 | 2 (16) | OpenCL/SVM guard table + `tl2::STM::init` (see below) |
-   | GPU_STM_CPU | 1 (2) | `read_common`'s 8-byte case is a plain `memcpy` load while installs use `__atomic_store_n` — one-line fix |
-   | SPHT | 1 (1) | `spht::init_thread`: unsynchronised lazy `g_pcl = new PCL()` — needs `call_once` |
-   | CSMV, JVSTM, SGL, TL2, TINYSTM, WT, WBETL, NOREC, NORECBF, LEFTRIGHT, ROMULUS, MVLOG | **0** | clean (counts before §30: 0, 0, 0, 14, 11, 21, 4, 10, 13, 19, 11, 7) |
+   | ACCELTL2 | 2 races + 1 thread leak | OpenCL/SVM guard table and `tl2::STM::init` — host-side table management, not the STM core; see the next entry |
 
-   (SWISSTM/TSC_TM/XTM counts move ±2 between runs — TSan reports what it happens
-   to observe — so treat those as unchanged rather than regressed.)
-
-   Next fixes, in the order that removes the most: **SWISSTM**'s read path (its
-   sequence-number loop does `(void)*addr;` and then `return *addr;` — both plain,
-   and the returned load is *outside* the validated window, so it should return
-   the value captured inside it); **TSC_TM**'s `read_impl` (same shape, own file);
-   **XTM**'s `read_word` page path; then SPHT's once-init and GPU_STM_CPU's
-   8-byte load. Keep the `tsan-gate` matrix in `.github/workflows/ci.yml` in step
-   with the clean list as each one lands.
+   `.github/workflows/ci.yml`'s `tsan-gate` job now gates on all 18 clean
+   backends; add ACCELTL2 when its row empties.
 - **CSMV commit path can reuse a published version node (latent)**:
   `real_tm_end()` reuses `g_tx.writes[i].node` if it is non-null. Today the
   write set is cleared at every `begin`, so the field is always null and the
@@ -341,27 +329,38 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   have inverted polarity — do not mimic. SPR map: TFHAR=128, TFIAR=129,
   TEXASR=130. tcheck CR field: 0 non-tx / 1 suspended / 2 transactional.
 
-### ARM TME simulation is not exercisable yet (found 2026-11-26)
+### ARM TME: buildable now, still no end-to-end run (found 2026-11-26)
 
 - **Files**: `gem5_sim/configs/arm-tme-kvm.py`, `gem5_sim/workloads/tme/`,
-  `gem5_sim/scripts/run-arm-tme.sh`, status table in `gem5_sim/README.md`
-- **Gap 1 — extension never enabled**: the config builds its release with
-  `ArmDefaultRelease.for_kvm()` and never adds `"TME"` to `extensions`, so
-  gem5's TME support (`src/arch/arm/insts/tme64*`, `ArmExtension.TME`, Ruby HTM
-  hooks — all present in the pinned v25.1.0.1) is never turned on and
-  `tstart`/`tcommit` would be undefined at runtime.
-- **Gap 2 — wrong CPU model for TME**: `for_kvm()` selects the KVM CPU, which
-  executes the *host* ISA; the transactional phase must run on Timing/O3 for
-  gem5's implementation to be involved.
-- **Gap 3 — no workloads**: `workloads/tme/Makefile` builds `array_sum` and
-  `hash_table` from `.c` files that do not exist, and its
-  `-march=armv8.1-a` lacks `+tme`, so TME instructions would not assemble even
-  with sources present.
-- **Next step**: add a release with `extensions = ArmDefaultRelease.extensions +
-  ["TME"]`, switch the detailed phase to a gem5 CPU, and port
-  `workloads/rtm/array_sum.c` to TME (`tsbegin/tscommit/tsend` via inline asm or
-  `__builtin_arm_*`) as `workloads/tme/array_sum.c`. x86 TSX is the reference
-  path that works end to end.
+  `gem5_sim/scripts/run-arm-tme.sh`, `nightly.yml` (`htm-workloads-compile`),
+  status table in `gem5_sim/README.md`
+- **Fixed 2026-11-26**:
+  - the config's release (`ArmDefaultRelease.for_kvm()`) never included `"TME"`,
+    and gem5 reads TME from the release in `src/arch/arm/isa.cc` and
+    `ID_AA64ISAR0_EL1.TME` — so `TSTART`/`TCOMMIT`/`SEND` were undefined on the
+    Timing CPU the config switches to after boot. It now calls
+    `release.add(ArmExtension("TME"))`.
+  - `workloads/tme/Makefile` asked for `-march=armv8.1-a` without `+tme`, and
+    the ACLE TME intrinsics are only declared with the feature on. It now builds
+    with `armv8.1-a+tme` and fails with an explanation when the compiler cannot
+    do TME (notably clang: no `tme` feature through LLVM 22, `__ARM_FEATURE_TME`
+    never defined — this needs `gcc-aarch64-linux-gnu`).
+  - A weekly non-blocking `htm-workloads-compile` job compiles the RTM and TME
+    workloads so neither can rot silently again.
+- **Two of my initial claims here were wrong and are corrected**: the TME
+  workload *sources* do exist (`workloads/tme/{array_sum,hash_table}.c`, using
+  `__tstart`/`__tcommit`), and the config is not stuck on the KVM CPU — it is a
+  `SimpleSwitchableProcessor(KVM → TIMING)` that switches after boot.
+- **Remaining gap**: no ARM (or ALL) gem5 build exists in this repo —
+  `setup.sh`/`build.sh` produce `build/X86_TSX` — and `scripts/run-arm-tme.sh`
+  wants `gem5/build/ALL/gem5.opt` plus an ARM full-system resource
+  (`arm-ubuntu-24.04-boot-with-systemd`), so the TME path has never been *run*.
+  x86 TSX remains the reference path that works end to end
+  (`docs/x86-tsx-real-validation.md`).
+- **Next step**: build gem5 for ARM (`./build.sh all`, or a `KVM`+`ARM` target)
+  on a machine with the time for it, run `scripts/run-arm-tme.sh`, and record
+  the abort/commit counters the workload prints next to the x86 numbers.
+
 
 ### GPU benchmark stubs (@experimental)
 - **Files**: `gpu/benchmarks/gpu_tpcc.cu` (line 28),

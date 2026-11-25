@@ -45,18 +45,32 @@ this directory, not from the design docs.
 | Runner | `scripts/run-bank-gem5.sh` | `scripts/run-power8-htm.sh` | `scripts/run-arm-tme.sh` (`run-tme.sh` is a wrapper) |
 | gem5 support | in-tree + `patches/001`, `030`, `031` | `patches/002` (`HTMCheckpoint`, TEXASR/TFIAR, TM instruction classes) — present in the vendored tree (`src/arch/power/{htm,tm}.{cc,hh}`) | upstream: `src/arch/arm/insts/tme64*`, `ArmExtension.TME`, Ruby HTM hooks |
 | Build target | `build/X86_TSX` (what `setup.sh` builds) | needs a POWER build — `setup.sh` does **not** produce one | needs an ARM/ALL build |
-| Workloads | `workloads/rtm/{array_sum,hash_table}.c` | `workloads/power8/` (C + hand-written `.S`); runner wants a prebuilt `workloads/power8/<bench>` binary, which is not committed | **none**: `workloads/tme/Makefile` builds `array_sum`/`hash_table` from `.c` files that do not exist |
-| Status | **Working** — SE-mode runs verified, see `docs/x86-tsx-real-validation.md` and `m5out/bank-*` | **Partial** — implementation present, end-to-end run not demonstrated here | **Not exercisable yet** (see below) |
+| Workloads | `workloads/rtm/{array_sum,hash_table}.c` — build here with `make` (needs `-mrtm`) | `workloads/power8/` (C + hand-written `.S`); runner wants a prebuilt `workloads/power8/<bench>` binary, which is not committed | `workloads/tme/{array_sum,hash_table}.c` (ACLE `__tstart`/`__tcommit`/`__tsend`) |
+| Status | **Working** — SE-mode runs verified, see `docs/x86-tsx-real-validation.md` and `m5out/bank-*` | **Partial** — implementation present, end-to-end run not demonstrated here | **Buildable, not yet run** (see below) |
 
-**ARM TME gaps, concretely.** `configs/arm-tme-kvm.py` builds its release with
-`ArmDefaultRelease.for_kvm()` and never adds the extension, so the model never
-enables TME — `tstart`/`tcommit` would be undefined at runtime. Enabling it
-means a release whose `extensions` list includes `"TME"` (see
-`gem5/src/arch/arm/ArmSystem.py`) and running the transactional phase on a
- Timing/O3 CPU rather than the KVM CPU (`for_kvm()` executes the *host* ISA, so
-it cannot supply gem5's TME implementation). On the workload side the Makefile's
-`-march=armv8.1-a` also lacks the `+tme` feature, so TME instructions would not
-assemble even if the sources existed. Tracked in `TODO.md`.
+**ARM TME, concretely.** gem5 v25.1.0.1 implements TME (`src/arch/arm/insts/tme64*`)
+and turns it on from the board's release in exactly two places: `src/arch/arm/isa.cc`
+(gives the ISA its TME support) and `ID_AA64ISAR0_EL1.TME` in
+`src/arch/arm/regs/misc.cc` (what software probes). `configs/arm-tme-kvm.py`
+booted with `ArmDefaultRelease.for_kvm()`, which does **not** include `TME`, so
+the workload's `TSTART`/`TCOMMIT`/`SEND` encodings were undefined on the Timing
+CPU the config switches to after boot — it now calls
+`release.add(ArmExtension("TME"))`.
+
+Two more things had to be true before the workload could exist as a binary, and
+both were wrong: the Makefile asked for `-march=armv8.1-a` without `+tme` (TME
+is *optional* in that architecture version, so `arm_acle.h` never declared the
+intrinsics), and clang cannot build them at all — through LLVM 22 its AArch64
+feature list has no `tme` and `__ARM_FEATURE_TME` is never defined. The Makefile
+now asks for `armv8.1-a+tme` and fails with that explanation instead of a screen
+of implicit-declaration errors; `nightly.yml`'s `htm-workloads-compile` job
+builds both the RTM and the TME workloads (the latter with
+`gcc-aarch64-linux-gnu`) so they cannot rot again.
+
+What is still missing is the run itself: this repo builds only
+`build/X86_TSX`, and an ARM/ALL gem5 build plus a full-system boot image is a
+much larger download/compile than CI does here. Tracked in `TODO.md`.
+
 
 ## Directory Layout
 
