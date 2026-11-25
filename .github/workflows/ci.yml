@@ -304,6 +304,63 @@ jobs:
           ./benchmarks/cpp/bin/test_ds
 
 
+  # ── Job 10b: TSan race gate (race-clean backends) ─────────
+  # SGL, JVSTM and CSMV report zero ThreadSanitizer warnings on the T1
+  # differential driver, and the driver exits non-zero on any consistency
+  # violation, so this job fails on a newly introduced race. The other backends
+  # still carry known backend-internal races (see the known-issues table in
+  # docs/CORRECTNESS_FIXES.md and the triage table in TODO.md) and are swept
+  # non-blocking in nightly.yml until that list drains.
+  tsan-gate:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [SGL, JVSTM, CSMV]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      # The symbolizer is left to TSan's default; if a race ever appears, the
+      # follow-up step resolves the reported offsets with addr2line so the log is
+      # still readable.
+      TSAN_OPTIONS: halt_on_error=0:detect_deadlocks=1:second_deadlock_stack=1
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 lld make
+      - name: Build TSan differential driver (${{ matrix.backend }})
+        run: make -C benchmarks/cpp bin/drv_diff_ops BACKEND=${{ matrix.backend }} SANITIZE=thread
+      - name: Run TSan differential driver (${{ matrix.backend }})
+        run: |
+          set -o pipefail
+          ./benchmarks/cpp/bin/drv_diff_ops -S 1 -T 4 -n 200 2>&1 | tee /tmp/tsan-run.log
+      - name: Run TSan differential driver (${{ matrix.backend }}, server-commit mode)
+        if: matrix.backend == 'CSMV'
+        # CPU model of the GPU block-0 server commit: one global lock serialises
+        # each validate -> assign-ts -> install sequence (see the runtime).
+        run: |
+          set -o pipefail
+          CSMV_SERVER_COMMIT=1 ./benchmarks/cpp/bin/drv_diff_ops -S 1 -T 4 -n 200 2>&1 \
+            | tee -a /tmp/tsan-run.log
+      - name: Symbolise any race report
+        if: failure()
+        run: |
+          # Best effort: TSan's external symbolizer is unreliable in CI images, so
+          # resolve the reported "drv_diff_ops+0x…" offsets with addr2line here.
+          BIN=benchmarks/cpp/bin/drv_diff_ops
+          grep -oE 'drv_diff_ops\+0x[0-9a-f]+' /tmp/tsan-run.log 2>/dev/null |
+            sed 's/.*+0x//' | sort -u | while read -r off; do
+              printf '0x%s  ' "$off"
+              addr2line -f -C -e "$BIN" "0x$off" | head -2 | tr '\n' ' '
+              echo
+            done
+
   # ── Job 12: Markdown link integrity (relative links only) ─
   md-links:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
