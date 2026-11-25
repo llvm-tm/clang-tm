@@ -141,7 +141,7 @@ jobs:
         run: |
           # PRs gate on 3 core backends (fast); push to main tests all.
           if [ "${{ github.event_name }}" = "push" ]; then
-            BACKENDS="TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL XTM LEFTRIGHT ROMULUS ACCELTL2"
+            BACKENDS="TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL XTM LEFTRIGHT ROMULUS ACCELTL2 CSMV GPU_STM_CPU JVSTM"
           else
             BACKENDS="TINYSTM NOREC TL2"
           fi
@@ -156,6 +156,38 @@ jobs:
             [ "$tx_pass" -ge 1 ] || { echo "CROSS-BACKEND FAIL (test_tx): $backend"; exit 1; }
             [ "$ds_pass" -ge 1 ] || { echo "CROSS-BACKEND FAIL (test_ds): $backend"; exit 1; }
           done
+
+  # ── Job 5b: Differential concurrency driver ─────────────
+  # Runs the self-verifying T1 driver (tests/concurrency/drv_diff_ops.cpp)
+  # plus the sub-word/bucket-aliasing repros across backends. Catches lost
+  # updates / version-store aliasing the functional test_tx/test_ds cannot.
+  # CSMV's rare OCC race is allowanced inside diff_backends.sh (reported, not
+  # gated); any other backend's failure fails the job.
+  diff-concurrency:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 lld make
+      - name: Run differential concurrency sweep
+        run: |
+          # Seed 1 deterministically catches the aliasing/width class these
+          # fixes addressed; the backends here include the three the driver
+          # caught bugs in (CSMV, JVSTM, GPU_STM_CPU) plus core references.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            BACKENDS="TINYSTM NOREC NORECBF SWISSTM TL2 MVLOG SGL LEFTRIGHT XTM CSMV GPU_STM_CPU JVSTM" \
+              tools/diff_backends.sh 1
+          else
+            BACKENDS="TL2 NOREC SGL CSMV GPU_STM_CPU JVSTM" \
+              tools/diff_backends.sh 1
+          fi
 
   # ── Job 6: Stale directory check ────────────────────────
   stale-check:
