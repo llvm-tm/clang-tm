@@ -3202,6 +3202,19 @@ The inverse of GPU_STM_CPU/CSMV: transactions run on CPU as in TL2, and the
   but never dispatched to: tile-graph/DMA programming model, no shared
   pointer atomics (rationale in `accel_tl2/Implementation_notes.md`).
 
+**Follow-up — ACCELTL2 perf bug + measured verdict.** Profiling ACCELTL2
+vs TL2 exposed a real defect: `clSVMAlloc` was called without
+`CL_MEM_SVM_FINE_GRAIN_BUFFER`, so the AMD ICD returned coarse-grain
+memory with a nearly-uncached CPU mapping — a 30–80× penalty on every
+guard access, dispatch or not. Fixed (flag now passed; guarded table +
+log). Measured verdict after the fix (synthetic read-set driver, gfx1151):
+**ACCELTL2 is not faster than TL2 in any measured regime** — equal within
+noise below the dispatch threshold, 2–20× slower when dispatching (GPU
+floor + single-queue serialization dominate; analysis + table in
+`backends/tm_impl/accel_tl2/Implementation_notes.md`). The bench driver
+also initially hid all aborts (counters placed before `sigsetjmp`, which
+`siglongjmp` rewinds past) — a reusable pitfall for future harnesses.
+
 **Follow-up — lint red on rustc 1.100** (introduced when CI's `stable`
 advanced past 1.100 on 2026-11-09, independent of this session's changes):
 clippy's tightened `needless_bool` (`runtime/swisstm` — `cm_should_abort`,

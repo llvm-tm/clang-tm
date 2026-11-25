@@ -24,12 +24,54 @@ accelerator over shared memory.
 - `accel_probe.cpp` `dlopen`s `libOpenCL.so.1` (no build-time GPU dep —
   CI-safe) and requires `CL_DEVICE_SVM_FINE_GRAIN_BUFFER`.
 - When available, `tl2::init()` (under `-DTM_ACCEL_GPU`) places the
-  guard table in `clSVMAlloc` memory. CPU code uses it through the same
+  guard table in `clSVMAlloc` memory **with the
+  `CL_MEM_SVM_FINE_GRAIN_BUFFER` allocation flag** — without it the AMD
+  ICD returns coarse-grain memory whose CPU-side mapping is effectively
+  uncached (~160 ns/guard access vs ~2 ns; measured as a 30–80×
+  backend-wide slowdown). CPU code uses the table through the same
   virtual pointer via `std::atomic`; GPU kernels read the **live**
   table — no staging copies in either direction.
-- Measured on Radeon 8060S: kernel dispatch+sync floor ≈ 17 µs; CPU
-  scans at ~2–4 ns/entry → crossover ~5–10k entries, hence the default
-  `TM_ACCEL_MIN=4096`.
+- Kernel-side legality: gfx1151 reports `SVM Atomics: No`; the kernel
+  only performs a plain global atomic on the conflict flag (its own
+  buffer, read by the CPU after `clFinish`) and plain loads of guards,
+  which does not require the SVM-atomics capability.
+
+## Measured performance (Radeon 8060S iGPU, synthetic read-set workload, 2026-11-25)
+
+Read-set sizes K+64 (incl. hot-zone overlap), 8 threads, contended hot
+write zone; throughput in commits/s; `bench` = per-entry read-then-write
+transactions (source kept off-tree):
+
+| read entries | TL2 | ACCELTL2 (GPU off) | ACCELTL2 (GPU forced) |
+|---|---|---|---|
+| 128 | 326k | 266k | 64k |
+| 1088 | 129k | 136k | 6.2k |
+| 16448 | 14.6k | 5.1k* | 4.9k* |
+| 65600 | 3.8k | 2.0k* | 1.8k* |
+
+\* default threshold 4096 already dispatches at these sizes.
+
+**Conclusion: on this machine ACCELTL2 is not faster than TL2 in any
+measured regime.** Why the pre-abort filter loses despite a per-entry
+faster device scan:
+1. GPU dispatch+sync floor (≈17 µs) exceeds the whole CPU validation
+   scan up to ≥10⁵ entries (CPU scan at 65k entries ≈ 30 µs total
+   *including* the rest of the attempt).
+2. Every successful commit pays GPU scan **plus** the full CPU
+   validation (the clean verdict is not trusted — see safety argument).
+3. One shared command queue serializes concurrent dispatches
+   (observed: abort rate collapses 89%→3% at K=64 with GPU on — the
+   queue acts as a global commit lock).
+4. Even with a trusted clean verdict, the read-set *logging* (CPU,
+   unavoidable in TL2-style STM) dominates large-read attempts,
+   shrinking the winnable fraction.
+
+Keep the backend for: detection/reporting infrastructure, the safe
+pre-abort machinery, and future hardware where (a) GPU scan round-trip
+is ≪ µs or (b) whole-commit offload is viable. Default `TM_ACCEL_MIN`
+(4096) is set so real small/medium transactions never dispatch; on
+fine-grain-SVM machines below the threshold the guard table costs ≈ TL2
+within noise (1088-entry row).
 
 ## Commit-path integration (safety argument)
 

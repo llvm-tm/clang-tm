@@ -61,8 +61,12 @@ constexpr cl_device_type CL_DEVICE_TYPE_GPU = 1ULL << 2;
 constexpr uint64_t CL_DEVICE_NAME = 0x102B;
 constexpr uint64_t CL_DEVICE_SVM_CAPABILITIES = 0x1003;
 constexpr uint64_t CL_DEVICE_SVM_FINE_GRAIN_BUFFER = 1ULL << 1;
+constexpr uint64_t CL_DEVICE_SVM_ATOMICS = 1ULL << 3;
 constexpr uint64_t CL_PROGRAM_BUILD_LOG = 0x1006;
 constexpr cl_mem_flags CL_MEM_READ_WRITE = 1ULL << 1;
+// cl_svm_mem_flags for clSVMAlloc (distinct namespace from cl_mem_flags):
+constexpr cl_svm_mem_flags CL_MEM_SVM_FINE_GRAIN_BUFFER = 1ULL << 10;
+constexpr cl_svm_mem_flags CL_MEM_SVM_ATOMICS = 1ULL << 11;
 
 struct OpenCLEntryPoints {
 	void *lib = nullptr;
@@ -168,6 +172,7 @@ struct State {
 	bool available = false;
 	bool verbose = false;
 	uint64_t min = 4096;
+	uint64_t svm_caps = 0;
 	size_t cap = 1u << 20; // max read-set entries per dispatch
 
 	OpenCLEntryPoints cl;
@@ -358,10 +363,15 @@ std::atomic<uint64_t> *shared_guard_table(size_t n_entries)
 {
 	if (!probe_available() || g.guards_svm)
 		return reinterpret_cast<std::atomic<uint64_t> *>(g.guards_svm);
+	// CL_MEM_SVM_FINE_GRAIN_BUFFER as an ALLOCATION flag is required to
+	// actually get fine-grain memory: without it the runtime may fall
+	// back to coarse-grain placement, whose CPU-side mapping is uncached
+	// on at least the AMD ICD (measured: guard-table loads ~160 ns vs
+	// ~2 ns cached — i.e. a 30-80x backend-wide slowdown).
 	// Alignment 0 = let the runtime choose (explicit large alignments are
 	// rejected by some ICDs, e.g. AMD's for gfx1151).
 	g.guards_svm = g.cl.SVMAlloc(g.ctx,
-	                             CL_MEM_READ_WRITE,
+	                             CL_MEM_READ_WRITE | CL_MEM_SVM_FINE_GRAIN_BUFFER,
 	                             n_entries * sizeof(uint64_t),
 	                             0);
 	if (!g.guards_svm) {
@@ -370,8 +380,14 @@ std::atomic<uint64_t> *shared_guard_table(size_t n_entries)
 			printf("[accel] clSVMAlloc(guards) failed — falling back to CPU path\n");
 		return nullptr;
 	}
-	// Read-set staging + conflict flag, also device-visible.
-	g.log_svm = g.cl.SVMAlloc(g.ctx, CL_MEM_READ_WRITE, g.cap * 2 * sizeof(uint64_t), 0);
+	// Read-set staging + conflict flag, also device-visible (fine-grain
+	// so the CPU-packed log is live without migration; the kernel's
+	// atomic_max is a device-plain atomic on its own buffer, legal
+	// without CL_DEVICE_SVM_ATOMICS).
+	g.log_svm = g.cl.SVMAlloc(g.ctx,
+	                          CL_MEM_READ_WRITE | CL_MEM_SVM_FINE_GRAIN_BUFFER,
+	                          g.cap * 2 * sizeof(uint64_t),
+	                          0);
 	g.flag_svm = (int *)g.cl.SVMAlloc(g.ctx, CL_MEM_READ_WRITE, sizeof(int), 0);
 	if (!g.log_svm || !g.flag_svm) {
 		g.available = false;
