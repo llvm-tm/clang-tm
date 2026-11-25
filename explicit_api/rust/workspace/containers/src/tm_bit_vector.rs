@@ -49,8 +49,8 @@ impl<const N: usize> TMBitVector<N> {
     pub fn all(&self) -> bool {
         let nwords = N.div_ceil(64);
         let last_bits = N % 64;
-        for i in 0..nwords - 1 {
-            if self.words[i].load(Ordering::Relaxed) != !0u64 {
+        for word in &self.words[..nwords - 1] {
+            if word.load(Ordering::Relaxed) != !0u64 {
                 return false;
             }
         }

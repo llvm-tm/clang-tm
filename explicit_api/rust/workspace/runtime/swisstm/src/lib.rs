@@ -193,10 +193,9 @@ fn cm_should_abort(tx: &TxState, orec: &Orec, spin_count: &mut u32) -> bool {
         return true; // Owner earned priority, we should abort
     }
     let owner_cm = orec.read_owner_cm_ts();
-    if owner_cm < tx.cm_ts {
-        return true;
-    }
-    false // We have higher priority, keep waiting
+    // true: owner earned priority → abort; false: we have higher
+    // priority, keep waiting
+    owner_cm < tx.cm_ts
 }
 
 fn cm_backoff(abort_count: u64) {
@@ -628,10 +627,8 @@ fn validate(tx: &TxState) -> bool {
 // ── Extend (validate + advance valid_ts) ────────────────
 fn extend(tx: &mut TxState) -> bool {
     let ts = G_CLOCK.load(Ordering::Acquire);
-    if ts > tx.valid_ts && validate(tx) {
-        return true;
-    }
-    false
+    // validate() only runs when the clock advanced (&& short-circuits)
+    ts > tx.valid_ts && validate(tx)
 }
 
 // ── Abort cleanup ───────────────────────────────────────

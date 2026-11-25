@@ -3202,11 +3202,24 @@ The inverse of GPU_STM_CPU/CSMV: transactions run on CPU as in TL2, and the
   but never dispatched to: tile-graph/DMA programming model, no shared
   pointer atomics (rationale in `accel_tl2/Implementation_notes.md`).
 
+**Follow-up — lint red on rustc 1.100** (introduced when CI's `stable`
+advanced past 1.100 on 2026-11-09, independent of this session's changes):
+clippy's tightened `needless_bool` (`runtime/swisstm` — `cm_should_abort`,
+`extend`) and `needless_range_loop` (`containers/tm_bit_vector.rs` —
+`all()`) fired under `-D warnings`. Reduced to the equivalent expressions
+(short-circuit semantics preserved); `make fmt-check` green on 1.100.
+Remaining non-fatal: cargo's new "unused dependency" manifest warnings
+(`runtime-core` in leftright_single/tsx_sim, `libloading` in the workspace
+root) — left in place, they are advisory.
+
 **Files changed**: `backends/tm_impl/common/tm_alloc_overrides.hpp`,
 `backends/tm_impl/common/tm_region_allocator.hpp`,
 `tests/fuzz/test_tx_fuzzer.cpp`, `backends/tm_impl/tl2/tl2.hpp`,
 `backends/tm_impl/tl2/tl2_runtime.cpp`, `benchmarks/cpp/Makefile`,
-`Makefile`, `backends/tm_impl/accel_tl2/*` (new); `TODO.md`,
+`Makefile`, `backends/tm_impl/accel_tl2/*` (new);
+`explicit_api/rust/workspace/runtime/swisstm/src/lib.rs`,
+`explicit_api/rust/workspace/containers/src/tm_bit_vector.rs`,
+`.github/workflows/ci.yml`, `AGENTS.md`; `TODO.md`,
 `docs/IMPLEMENTATIONS.md`, `docs/CORRECTNESS_FIXES.md`.
 
 **Verification** (AMD Ryzen AI MAX+ 395, gfx1151 iGPU, LLVM 22): ACCELTL2
