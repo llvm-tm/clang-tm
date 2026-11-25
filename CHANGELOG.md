@@ -3319,3 +3319,36 @@ previously-flaky driver configs are now clean across seeds 1–8 at the full-mas
 `-M 1 -T 4 -n 2500` / `-M 1 -T 8 -n 3000` configs. GPU_STM_CPU (§24) 120/120 +
 207/207, driver `alloc_viol=0`. All changed files pass
 `clang-format-22 --style=file`.
+
+## Session 2026-11-25 — CSMV GPU block-0 server: investigation + CPU protocol model
+
+Question: does CSMV implement the server kernel (block 0 of the grid), as
+`docs/proofs/GPU_STM_PLAN.md:19` specifies ("client-server commit: server
+validates, clients batch writes")? **No.** Neither GPU path has a server:
+`csmv_kernel.cu` (`csmv_persistent_kernel`) is warp-per-txn, leader-driven,
+with NO commit validation at all; `csmv_batch_executor.cu` (`csmv_batch_kernel`)
+is warp-per-txn with a per-entry atomic spinlock (`lock→validate→prepend`).
+The only `<<<1,1>>>` kernel is the GC `drain_retire` relink. A repo-wide grep
+for `blockIdx.x==0`/server/coordinator returns zero hits. Also found: both GPU
+entry indexers (`csmv_kernel.cu:17` and `csmv_gpu_entry_idx`) key version
+chains by `>> 3` with no owner tag — the same sub-word aliasing fixed on CPU
+(§25) is still present on GPU. The persistent kernel is orphaned (no consumers;
+the GPU benchmarks all use the batch executor).
+
+Rather than ship an un-runnable GPU concurrency protocol (no GPU here; the GPU
+tree is only *compiled* in nightly, never correctness-gated), I added the CPU
+model of the block-0 server first, as the agreed verification substrate: an
+opt-in `CSMV_SERVER_COMMIT=1` mode in `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`
+that serialises each commit's entire validate→assign-ts→install sequence under
+one global "server" lock (clients keep doing lockless MVCC reads), skipping the
+distributed per-entry locks and the inline full-table GC the server path does
+not hold. This is the runnable reference for the protocol the GPU server would
+implement.
+
+**Verification**: with `CSMV_SERVER_COMMIT=1` the T1 differential driver is
+clean across seeds 1–6 at `-T 4 -n 1500` and seeds 1–3 at `-T 8 -n 2000`
+(`quiesce_viol=0 v_range=0 v_double_read=0`); `test_tx` 120/120 and `test_ds`
+207/207 in BOTH modes; `repro_bucket_alias` clean; `run-csmv` all PASS. The
+default (server-off) path is unchanged and still clean.
+
+**Files**: `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`.

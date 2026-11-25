@@ -40,6 +40,20 @@ static std::atomic<uint64_t> g_csmv_clock{0};
 static std::atomic<uint64_t> g_csmv_low_water{0};
 static std::atomic<int> g_csmv_active_txns{0};
 
+// ── Server-commit mode (CPU model of the GPU block-0 server) ────
+// docs/proofs/GPU_STM_PLAN.md specifies CSMV's protocol as "client-server
+// commit: server validates, clients batch writes". On the GPU that server is
+// block 0 of the grid; here, when enabled (env CSMV_SERVER_COMMIT=1), a single
+// global "server" lock serialises each transaction's entire
+// validate -> assign-commit-ts -> install sequence instead of the distributed
+// per-entry locks. Clients (the other threads) still do lockless MVCC reads of
+// committed versions, exactly as GPU client warps do. This lets the runnable
+// T1 differential driver validate the server's serialisation logic on the CPU
+// (where it can actually be executed). OFF by default; the default
+// distributed per-entry-lock commit path below is unchanged.
+static std::mutex g_csmv_server_lock;
+static bool g_csmv_server_mode = false;
+
 // ── Per-thread CSMV transaction state ────────────────────────────
 
 static thread_local CSMVThreadTx g_tx;
@@ -138,22 +152,32 @@ static void real_tm_end()
 {
 	uint64_t commit_ts = 0;
 
-	// ── Lock all write-set entries (in address order) ─────────
-	// First sort by entry pointer to prevent deadlock
-	if (g_tx.num_writes > 1) {
-		std::sort(g_tx.writes.begin(),
-		          g_tx.writes.end(),
-		          [](const CSMVWriteEntry &a, const CSMVWriteEntry &b) {
-			          return a.entry < b.entry;
-		          });
-	}
+	if (g_csmv_server_mode) {
+		// Block-0 server model: one global lock serialises the whole
+		// validate→commit→install critical section; per-entry locks are
+		// unused on this path. Ordering the clock increment and the version
+		// installs here is what makes the server the single serialisation
+		// point (first-committer-wins on any read-set conflict).
+		g_csmv_server_lock.lock();
+	} else {
+		// ── Lock all write-set entries (in address order) ─────
+		// First sort by entry pointer to prevent deadlock
+		if (g_tx.num_writes > 1) {
+			std::sort(g_tx.writes.begin(),
+			          g_tx.writes.end(),
+			          [](const CSMVWriteEntry &a, const CSMVWriteEntry &b) {
+				          return a.entry < b.entry;
+			          });
+		}
 
-	// Lock — skip consecutive duplicate entries. Since entries are now keyed
-	// one-per-address and write_common dedups by address, duplicates cannot
-	// occur, but the guard is kept so lock/unlock stay balanced regardless.
-	for (int i = 0; i < g_tx.num_writes; i++) {
-		if (i == 0 || g_tx.writes[i].entry != g_tx.writes[i - 1].entry)
-			g_tx.writes[i].entry->lock.lock();
+		// Lock — skip consecutive duplicate entries. Since entries are now
+		// keyed one-per-address and write_common dedups by address,
+		// duplicates cannot occur, but the guard is kept so lock/unlock stay
+		// balanced regardless.
+		for (int i = 0; i < g_tx.num_writes; i++) {
+			if (i == 0 || g_tx.writes[i].entry != g_tx.writes[i - 1].entry)
+				g_tx.writes[i].entry->lock.lock();
+		}
 	}
 
 	// ── Validate read-set ────────────────────────────────────
@@ -206,16 +230,24 @@ static void real_tm_end()
 	}
 
 	// ── Unlock ───────────────────────────────────────────────
-	for (int i = g_tx.num_writes - 1; i >= 0; i--) {
-		if (i == 0 || g_tx.writes[i].entry != g_tx.writes[i - 1].entry)
-			g_tx.writes[i].entry->lock.unlock();
+	if (g_csmv_server_mode) {
+		g_csmv_server_lock.unlock();
+	} else {
+		for (int i = g_tx.num_writes - 1; i >= 0; i--) {
+			if (i == 0 || g_tx.writes[i].entry != g_tx.writes[i - 1].entry)
+				g_tx.writes[i].entry->lock.unlock();
+		}
 	}
 
 	g_tx.commit_count++;
 	g_csmv_active_txns.fetch_sub(1, std::memory_order_relaxed);
 
 	// ── Opportunistic GC every CSMV_GC_INTERVAL commits ──────
-	if (g_tx.commit_count % CSMV_GC_INTERVAL == 0) {
+	// (skipped in server mode: the sweep uses per-entry locks that the
+	//  server commit path does not hold, so it would race the server; the
+	//  GPU server kernel has no inline full-table GC either. Driver runs
+	//  are short, so leaving version chains un-GCed is fine there.)
+	if (!g_csmv_server_mode && g_tx.commit_count % CSMV_GC_INTERVAL == 0) {
 		// Update low_water_mark: minimum start_time of all active txns
 		// (since we don't have cross-thread tracking here, use a safe
 		//  conservative approximation: clock - max_active_window)
@@ -248,10 +280,14 @@ static void real_tm_end()
 	return;
 
 abort_tx:
-	// Release any held locks
-	for (int i = g_tx.num_writes - 1; i >= 0; i--) {
-		if (i == 0 || g_tx.writes[i].entry != g_tx.writes[i - 1].entry)
-			g_tx.writes[i].entry->lock.unlock();
+	// Release any held locks (server lock, or the per-entry write locks)
+	if (g_csmv_server_mode) {
+		g_csmv_server_lock.unlock();
+	} else {
+		for (int i = g_tx.num_writes - 1; i >= 0; i--) {
+			if (i == 0 || g_tx.writes[i].entry != g_tx.writes[i - 1].entry)
+				g_tx.writes[i].entry->lock.unlock();
+		}
 	}
 	g_csmv_active_txns.fetch_sub(1, std::memory_order_relaxed);
 	siglongjmp(tm_jmpbuf, 1);
@@ -458,6 +494,10 @@ extern "C" void tm_init()
 #endif
 {
 	stm::tm_region_init();
+
+	// CPU model of the GPU block-0 server commit (see g_csmv_server_mode).
+	if (const char *e = std::getenv("CSMV_SERVER_COMMIT"))
+		g_csmv_server_mode = (e[0] != '\0' && e[0] != '0');
 
 	// Allocate and zero-initialize object table
 	g_csmv_table = (CSMVObjectEntry *)std::calloc(CSMV_TABLE_SIZE,
