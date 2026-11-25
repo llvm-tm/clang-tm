@@ -106,40 +106,73 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   fixed-array pattern with silent drop at its own 64/32 limits — fix it if
   that path ever becomes load-bearing.
 
-### CSMV version store is keyed by hash bucket, so word-sharing objects alias (found 2026-11-25, pre-existing, OPEN)
+### CSMV version store aliased word-sharing objects — RESOLVED (found & fixed 2026-11-25)
 
-- **Symptom**: purely **sequential**, no contention, zero aborts.
+- **Symptom (as filed)**: purely **sequential**, no contention, zero aborts.
   `bin/repro_bucket_alias BACKEND=CSMV`: 16 int32 objects in one block, each
   RMW'd +1 in its own transaction → 40/48 transactional reads wrong and
   16/16 committed values wrong (e.g. `c[0]` reads 1002 when its own history
-  says 1001 — the value of its word-mate `c[1]`). TL2/SGL/… clean.
-  `bin/drv_diff_ops BACKEND=CSMV` reports `quiesce_viol≈78-80` of 144
-  objects at `-T 1` as well as `-T 4/-T 8`, plus `v_range≈200`.
-- **Root cause**: `csmv_get_entry()` buckets by `(uintptr_t)addr >> 3`, and
-  `CSMVVersionNode` is `{timestamp, value, next}` with **no address field**,
-  so the two int32 halves of an 8-byte word share one version chain.
-  `read_common()`'s fast path returns `entry->head->value` — whichever
-  object in that word wrote last. The driver/repro then *write that foreign
-  value back* in their read-modify-write, so committed memory diverges too,
-  not just reads.
-- **Bisect evidence**: `drv_diff_ops` op-class masks that write a single
-  fixed word (`-M 4`, `-M 16`) are clean; masks spreading writes across
-  several int32/uint8 objects (`-M 1/2/8`) fail — and byte objects are worse
-  still (16 bytes share two buckets).
-- **Suggested fix**: make the chain per *address*, either by tagging each
-  bucket with its owning address and probing on collision (keeps the
-  existing `entry->head` commit/validation/GC code intact and makes the
-  table a real open-addressed map — must fail loudly rather than corrupt if
-  it fills), or by chaining per-address heads inside a bucket. Note
-  `csmv_api.h` comments describe the validation convention as shared with a
-  GPU executor; no GPU sources exist in this repo, but re-check before
-  changing `CSMVObjectEntry`/`CSMVVersionNode` layout.
-- **Acceptance test**: `bin/repro_bucket_alias` clean and
-  `bin/drv_diff_ops` `quiesce_viol=0 v_range=0` at `-T 1` and `-T 8`, with
-  `test_tx` 120/120 and `test_ds` 207/207.
-- **Files**: `backends/tm_impl/csmv/include/csmv_api.h`,
-  `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`,
-  `tests/concurrency/repro_bucket_alias.cpp`.
+  says 1001 — the value of its word-mate `c[1]`). `bin/drv_diff_ops`
+  reported `quiesce_viol≈78-80` of 144 objects at `-T 1` too, plus
+  `v_range≈200`. TL2/SGL/… clean.
+- **Root cause**: `csmv_get_entry()` bucketed by `(uintptr_t)addr >> 3`,
+  which erases bit 2 and so maps the two int32 halves of an 8-byte word (and
+  the many sub-byte objects inside 8 bytes) to ONE entry, and `CSMVVersionNode`
+  is `{timestamp, value, next}` with no address field, so those objects
+  shared one version chain. `read_common()`'s fast path returned
+  `entry->head->value` — whichever word-mate wrote last — and the driver's
+  read-modify-write then committed that foreign value.
+- **Fix**: the table is now open-addressed and keyed by the exact address.
+  `CSMVObjectEntry` gained `std::atomic<void *> owner` (nullptr = unused);
+  `csmv_get_entry()` hashes the full address (multiplicative), then linearly
+  probes, matching `owner==addr` or claiming an empty slot via CAS; a bounded
+  probe (1024) aborts loudly instead of silently sharing. Entries are claimed
+  once and never released (region addresses reused by the allocator map back
+  to the same entry), so there are no tombstones and no rehash. The commit
+  lock-order (by entry pointer) and the read-set validation are unchanged.
+  Files: `backends/tm_impl/csmv/include/csmv_api.h`,
+  `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`. Documented in
+  `docs/CORRECTNESS_FIXES.md` §25.
+- **Verification**: `repro_bucket_alias` clean; `drv_diff_ops` clean at
+  `-T 1` for **every** op-class mask (M=1/2/4/8/16) and on seeds 1-3, and
+  clean at `-T 4`/`-T 8` on the full mask; `test_tx` 120/120, `test_ds`
+  207/207.
+- **Caveat**: `csmv_api.h` comments say the validation convention is shared
+  with a GPU executor. No GPU sources exist in this repo, but re-check that
+  executor before relying on the new `CSMVObjectEntry` layout.
+
+### CSMV rare lost-update / phantom under contention (found 2026-11-25, pre-existing, OPEN)
+
+- **Symptom**: after the bucket-aliasing fix above, a **rare** anomaly
+  remains under real concurrency. `bin/drv_diff_ops BACKEND=CSMV` reports
+  `quiesce_viol` of **1–4** on roughly **1 in 3** runs of the `check-diff`
+  scenarios (`-T 4 -n 1500`, `-T 8 -n 1200`, full or ADD-only mask), and the
+  rate rises with `-n` (more commits). Per-object deltas are off by only 1–5
+  and in **both** directions (`final > shadow` and `final < shadow`). Only
+  `quiesce_viol` fires — `v_range`, `v_readown`, `v_double_read`, `v_ptr`,
+  `alloc_viol` all stay 0. `-T 1` is always clean.
+- **Isolated, not the driver, not the addressing change**: identical seeds
+  (`-T 4` seeds 2/5/8, `-T 8` seeds 2/4/7) are clean on TL2/SGL/NOREC. The
+  aliasing fix only refines the address→entry map (strictly removes sharing,
+  never adds a write), so it cannot add a lost update; the mass `-T 1`
+  corruption previously masked this smaller, rarer one.
+- **Ruled out**: GC/reclamation is NOT the cause — disabling reclamation
+  (`new_lwm = 0`, so the sweep never frees) still reproduces (`quiesce_viol`
+  1, 2, 0, 0 on seeds 1-4 at `-M 1 -T 4 -n 2500`).
+- **Where to look**: the OCC commit path in
+  `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp` `real_tm_end()` and
+  `read_common()`. Reads take no lock and validation compares only the
+  current `head` ts against the observed ts; the mixed-direction ±small
+  deltas point at a commit_ts/visibility ordering subtlety rather than a
+  plain lock-order bug. Reproduce with
+  `for S in 1..8; drv_diff_ops -S $S -T 4 -n 1500 -M 1` and capture the
+  `VIOLATION CNT/BYTE` lines.
+- **Harness status**: `tools/diff_backends.sh` treats a nonzero
+  `quiesce_viol` with **every other counter zero** as known-open for CSMV
+  (reported, not gated); any other counter still fails, so this allowance
+  cannot hide a new defect.
+- **Files**: `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`,
+  `tests/concurrency/drv_diff_ops.cpp`.
 
 ---
 

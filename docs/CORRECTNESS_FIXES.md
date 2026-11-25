@@ -803,13 +803,60 @@ just the counters) and the commit-time sort runs over the vector range.
 `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`,
 `backends/tm_impl/gpu_stm/cpu/gpu_stm_cpu_runtime.cpp`.
 
+## 25. CSMV version store aliased word-sharing objects (2026-11-25) ✅
+
+**Symptom.** Purely sequential, zero contention, zero aborts.
+`tests/concurrency/repro_bucket_alias.cpp` puts 16 int32 objects in one
+TM-allocated block and adds 1 to each in its own transaction: CSMV reported
+**40/48 transactional reads wrong** and **16/16 committed values wrong**
+(`c[0]` reads `c[1]`'s value). The differential driver reported
+`quiesce_viol≈78-80` of 144 objects already at `-T 1`, plus ~200
+out-of-window reads. Every one of the 20 other backends was clean on the
+identical seed.
+
+**Root cause.** `csmv_get_entry()` mapped an address to a table slot with
+`(uintptr_t)addr >> 3`. That shift drops bit 2, so the two int32 halves of
+any 8-byte word — and every sub-word object packed inside those 8 bytes —
+landed in the SAME entry, and `CSMVVersionNode {timestamp, value, next}`
+stored no address to tell them apart. They therefore shared a single version
+chain, and `read_common()`'s fast path returned `entry->head->value`: the
+value of whichever word-mate committed most recently. A read-modify-write
+then wrote that foreign value back, corrupting committed memory, not just
+reads. (The old code's own comments — "same hash bucket", "different
+addresses may map to the same entry" — acknowledged the collision but the
+per-entry validation and version chains silently relied on it not mattering.)
+
+**Fix.** The table is now a real open-addressed map keyed by the exact
+address. `CSMVObjectEntry` gained `std::atomic<void *> owner` (nullptr =
+unused). `csmv_get_entry()` hashes the full address with a multiplicative
+hash (so low-bit neighbours scatter), then linearly probes: an entry whose
+`owner == addr` is returned, an empty entry is claimed via
+`compare_exchange_strong`, and any other owner means "probe on". A probe
+limit (1024) **aborts loudly** rather than falling back to a shared entry.
+Entries are claimed once and never released — a region address reused by the
+allocator maps back to the same entry — so there are no tombstones and no
+rehash. Commit lock-ordering (sort by entry pointer) and read-set validation
+are unchanged; `write_common`'s dedup and the lock-skip guard were updated
+now that entry↔address is one-to-one.
+
+**Verification.** `repro_bucket_alias` now clean; `drv_diff_ops` clean at
+`-T 1` for **every** op-class mask (M = 1/2/4/8/16) on seeds 1-3, and clean
+at `-T 4`/`-T 8` on the full mask; `test_tx` 120/120 and `test_ds` 207/207.
+A **separate, rare** contention anomaly remains (see the known-issues table);
+it was previously hidden by this one's mass corruption.
+
+**Files**: `backends/tm_impl/csmv/include/csmv_api.h`,
+`backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`,
+`tests/concurrency/repro_bucket_alias.cpp`.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |
 |-------|----------|-------|
 | TinySTM STMbench7 crash (STL vector realloc) | High | STL-in-TM incompatibility, pre-existing |
 | ~~CSMV `test_tx` fails 1/120~~ → **fixed 2026-11-25 (§24)** | — | Fixed-size read/write sets (64 reads / 32 writes) that **silently dropped** overflow entries. `test_tx`'s `tm_realloc` case writes 16+48 words in one transaction, so its tail write never reached memory (the `TM<int*>`/`thread lifecycle` FAIL labels were `test_tx`'s cumulative counter bleeding). Same pattern in GPU_STM_CPU, where it also tripped the differential driver's allocator wave. CSMV now 120/120, GPU_STM_CPU 120/120 + driver clean. |
-| **CSMV version store aliases word-sharing objects** | High | Sequential, zero contention, zero aborts: version chains live in a bucket indexed by `(addr >> 3)` and `CSMVVersionNode` records no address, so the two int32 halves of an 8-byte word share one chain and read back each other's values — which a read-modify-write then commits. `bin/repro_bucket_alias BACKEND=CSMV`: 40/48 transactional reads and 16/16 committed values wrong (`c[0]` reads `c[1]`'s value). `drv_diff_ops` `quiesce_viol≈78-80` already at `-T 1`, plus ~200 out-of-window reads. All 20 other backends clean. Fix sketch + acceptance test in TODO.md (P0). |
+| ~~CSMV version store aliases word-sharing objects~~ → **fixed 2026-11-25 (§25)** | — | Version chains were keyed by `(addr >> 3)` with no address tag, so word-sharing objects shared a chain and read back each other's values (which a read-modify-write committed). `repro_bucket_alias` was 40/48 reads + 16/16 committed wrong at `-T 1`. Fixed by an owner-tagged, open-addressed, exact-address table. Clean now at `-T 1` for all masks and `-T 4/-T 8` full mask; `test_tx` 120/120, `test_ds` 207/207. |
+| **CSMV rare lost-update / phantom under contention** | Medium | After §25, a **rare** anomaly survives: `drv_diff_ops` reports `quiesce_viol` 1–4 on ~1 in 3 `check-diff`-scenario runs (more with larger `-n`), deltas off by 1–5 in both directions, `quiesce_viol` the only nonzero counter, `-T 1` always clean. Isolated to CSMV (TL2/SGL/NOREC clean on the same failing seeds); GC/reclamation ruled out (still reproduces with reclamation disabled). Lives in the OCC commit path / lockless read validation. `tools/diff_backends.sh` reports it known-open for CSMV (nonzero `quiesce_viol` with all other counters zero) without gating it. Tracked in TODO.md. |
 | LEFTRIGHT write-set `observed_version` | Low | Uses global clock at read time instead of per-address version; correct with global lock but more conservative than needed |
 | stmbench7 times out with >1 thread | Low | Data race in `ts_multimap::lower_bound()` — pre-existing |
 | **`test_queue_multi` counter mismatch (351 vs 400)** | Low | `counter` is a plain `static int` (not TM-tracked). The `TX` annotation creates a TM transaction wrapper, but the LLVM pass instruments only TM-annotated globals. 4 threads × 100 increments of a non-TM variable without atomic/lock protection → classic lost-update race. Expected 400, consistently observed ~351. Fix: either declare counter as `TM int counter` or use `std::atomic<int>`. Also affects `bench_queue_compare.cpp` and `bench_queue_compare2.cpp` (same plain-`static int counter` pattern). |

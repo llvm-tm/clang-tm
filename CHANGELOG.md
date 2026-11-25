@@ -3244,3 +3244,49 @@ plain TL2 regression 120/120 + 207/207; both fuzz targets exit 0 (30 s × severa
 120 s soak, RSS ≤ ~400 MB); `check-fast` plugin+TINYSTM+NOREC+TL2 green.
 CSMV test_tx fails identically on a clean checkout (pre-existing, unrelated
 — logged in TODO.md).
+
+## Session 2026-11-25 — CSMV: two real concurrency bugs found by the T1 driver
+
+Continued the T1 bug-hunt sweep. The differential driver
+(`tests/concurrency/drv_diff_ops.cpp`) plus a new minimal reproducer
+(`tests/concurrency/repro_bucket_alias.cpp`) surfaced two *independent*
+pre-existing CSMV defects, previously confounded with a third (the §24
+read/write-set overflow) and with each other. Corrected an earlier mislabel:
+the "CSMV realloc-tail" and "CSMV loses updates under contention" TODO items
+were three distinct bugs, now separated.
+
+1. **Read/write sets silently dropped overflow entries (§24, fixed, commit
+   282e6ff).** CSMV and GPU_STM_CPU kept fixed 64-read/32-write transaction
+   sets guarded by `if (num < MAX)`; entries past the limit were dropped with
+   no abort. `test_tx`'s `tm_realloc` case writes 64 words in one transaction,
+   so its tail write was discarded — that was the sole real `test_tx` failure
+   (other FAIL labels were `test_tx`'s cumulative counter). Sets are now
+   vectors with the old constants as `reserve()`.
+
+2. **Version store aliased word-sharing objects (§25, fixed).** Version
+   chains were keyed by `(addr >> 3)` with no address tag, so the two int32
+   halves of an 8-byte word shared a chain and read back each other's values,
+   which a read-modify-write then committed — a purely sequential corruption
+   (`repro_bucket_alias`: 40/48 reads + 16/16 committed wrong). Fixed by
+   making the table open-addressed and keyed by the exact address:
+   `CSMVObjectEntry` gains an atomic `owner`, `csmv_get_entry` hashes the full
+   address and linearly probes, claiming empty slots via CAS and aborting
+   loudly past a probe bound instead of sharing. Commit/GC code untouched.
+
+After (2), a **third, rare** contention anomaly remains open: `drv_diff_ops`
+shows `quiesce_viol` 1–4 on ~1 in 3 check-diff runs (both delta directions,
+only `quiesce_viol` nonzero, `-T 1` always clean), isolated to CSMV
+(TL2/SGL/NOREC clean on the same seeds) and with GC/reclamation ruled out.
+Logged as a separate open item; `tools/diff_backends.sh` reports it known-open
+for CSMV without gating any other counter.
+
+**Files changed**: `backends/tm_impl/csmv/include/csmv_api.h`,
+`backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`,
+`tools/diff_backends.sh`, `TODO.md`, `docs/CORRECTNESS_FIXES.md` (§24, §25,
+known-issues table).
+
+**Verification**: CSMV `test_tx` 120/120, `test_ds` 207/207;
+`repro_bucket_alias` clean; `drv_diff_ops` clean at `-T 1` for all op-class
+masks (1/2/4/8/16) and `-T 4`/`-T 8` full mask on seeds 1–3. GPU_STM_CPU
+(§24 fix from earlier) 120/120 + 207/207, driver `alloc_viol=0`. All new
+files pass `clang-format-22 --style=file`.

@@ -28,10 +28,18 @@ struct CSMVVersionNode {
 };
 
 // ── CSMV Object Entry ───────────────────────────────────────────
-// Each object entry has a mutex for commit serialization and an
-// atomic head pointer to the newest version node.
+// One entry per transacted ADDRESS. The table is open-addressed: `owner`
+// records the address an entry belongs to (nullptr = unused) and a lookup
+// whose address does not match probes on. The bucket index alone does NOT
+// identify an object — `(addr >> 3)` puts the two int32 halves of an 8-byte
+// word in the same bucket, and before `owner` existed they shared one
+// version chain, so a read of one returned the other's value (see
+// docs/CORRECTNESS_FIXES.md, TODO.md).
+// Each entry has a mutex for commit serialization and an atomic head
+// pointer to the newest version node.
 
 struct CSMVObjectEntry {
+	std::atomic<void *> owner;
 #if !defined(__CUDACC__) && !defined(__HIPCC__)
 	std::mutex lock;
 #endif

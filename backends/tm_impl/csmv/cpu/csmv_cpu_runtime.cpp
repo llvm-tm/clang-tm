@@ -75,8 +75,38 @@ static void gc_flush()
 
 static CSMVObjectEntry *csmv_get_entry(void *addr)
 {
-	uint64_t idx = ((uintptr_t)addr >> 3) & (CSMV_TABLE_SIZE - 1);
-	return &g_csmv_table[idx];
+	// Hash the FULL address so addresses that differ only in the low bits —
+	// e.g. the two int32 halves of one 8-byte word, which `(addr >> 3)` put
+	// in the same slot — scatter apart. Linear probing with an owner tag
+	// then identifies the entry by address exactly, so every object gets its
+	// own version chain. Entries are claimed once and never released (a
+	// freed region address reused by the allocator maps to the same entry),
+	// so there are no tombstones and a lookup is a clean probe-until-match.
+	uint64_t h = (uint64_t)(uintptr_t)addr * 0x9E3779B97F4A7C15ull;
+	uint64_t mask = CSMV_TABLE_SIZE - 1;
+	uint64_t idx = (h >> (64 - 20)) & mask; // high bits → [0, CSMV_TABLE_SIZE)
+	for (uint64_t probe = 0; probe < 1024; probe++) {
+		CSMVObjectEntry *e = &g_csmv_table[(idx + probe) & mask];
+		void *owner = e->owner.load(std::memory_order_acquire);
+		if (owner == addr)
+			return e;
+		if (owner == nullptr) {
+			void *expected = nullptr;
+			if (e->owner.compare_exchange_strong(expected,
+			                                     addr,
+			                                     std::memory_order_acq_rel,
+			                                     std::memory_order_acquire))
+				return e;
+			// Lost the claim to another address — try the next slot.
+			continue;
+		}
+		// Occupied by a different address — keep probing.
+	}
+	fprintf(stderr,
+	        "FATAL: csmv_cpu: no slot for address %p within probe limit "
+	        "(object table full or over-clustering)\n",
+	        addr);
+	std::abort();
 }
 
 // ── begin / end ──────────────────────────────────────────────────
@@ -109,7 +139,9 @@ static void real_tm_end()
 		          });
 	}
 
-	// Lock — skip duplicates (same entry, different addresses hashing to same slot)
+	// Lock — skip consecutive duplicate entries. Since entries are now keyed
+	// one-per-address and write_common dedups by address, duplicates cannot
+	// occur, but the guard is kept so lock/unlock stay balanced regardless.
 	for (int i = 0; i < g_tx.num_writes; i++) {
 		if (i == 0 || g_tx.writes[i].entry != g_tx.writes[i - 1].entry)
 			g_tx.writes[i].entry->lock.lock();
@@ -284,9 +316,9 @@ static void write_common(void *data_addr, uint64_t val, uint8_t bytes)
 {
 	CSMVObjectEntry *entry = csmv_get_entry(data_addr);
 
-	// Check if we already have a write to this entry (same hash bucket)
-	// Use data_addr for matching, not entry pointer (different addresses may map
-	// to the same entry — each has its own write entry)
+	// Check if we already have a write to this address. Entries are now keyed
+	// one-per-address (see csmv_get_entry), so matching on data_addr is
+	// equivalent to matching on entry; kept explicit for clarity.
 	for (int i = 0; i < g_tx.num_writes; i++) {
 		if (g_tx.writes[i].entry == entry && g_tx.writes[i].data_addr == data_addr) {
 			g_tx.writes[i].val = val;
@@ -422,6 +454,7 @@ extern "C" void tm_init()
 
 	// Initialize each entry's head to nullptr
 	for (uint64_t i = 0; i < CSMV_TABLE_SIZE; i++) {
+		new (&g_csmv_table[i].owner) std::atomic<void *>{nullptr};
 		new (&g_csmv_table[i].lock) std::mutex();
 		new (&g_csmv_table[i].head) std::atomic<CSMVVersionNode *>{nullptr};
 	}
