@@ -209,6 +209,34 @@ jobs:
         if: steps.tc.outputs.mode == 'none'
         run: echo "No nvcc/hipcc on runner; skipping GPU compile check."
 
+  # ── Weekly HTM workload compile check (non-blocking) ──────────────────────
+  # gem5_sim/workloads/ holds the bare-metal HTM programs the ISA simulations
+  # run: x86 RTM (-mrtm) and Arm TME (ACLE __tstart/__tcommit/__tsend). They
+  # are not part of any other job, so they can silently rot -- and the TME ones
+  # already could not be built at all, because the Makefile asked for
+  # -march=armv8.1-a without +tme (TME is optional in that architecture
+  # version, so arm_acle.h never declares the intrinsics). Compiling them here
+  # is the only check available without an ARM machine: gem5's ARM binary is not
+  # built in this repo (see gem5_sim/README.md), and clang has no Arm TME
+  # support at all, which is why this uses a GCC cross-compiler.
+  htm-workloads-compile:
+    if: contains(github.event.schedule, '0 5 * * 0')
+    continue-on-error: true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build x86 RTM workloads (host toolchain)
+        run: |
+          make -C gem5_sim/workloads/rtm all
+          file gem5_sim/workloads/rtm/array_sum
+      - name: Install AArch64 cross toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build Arm TME workloads (cross toolchain)
+        run: |
+          make -C gem5_sim/workloads/tme all CROSS_COMPILE=aarch64-linux-gnu-
+          file gem5_sim/workloads/tme/array_sum
+
   # ── Weekly C++ coverage report (non-blocking) ─────────────────────────────
   # Complements the Rust coverage job above. Builds the explicit-API tests with
   # source-based coverage (COVERAGE=1) and prints an llvm-cov line report for the
