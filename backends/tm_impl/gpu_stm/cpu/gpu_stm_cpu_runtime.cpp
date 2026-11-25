@@ -257,7 +257,10 @@ static uint64_t read_common(uint32_t *lock_entry_ptr, void *data_ptr, uint8_t by
 		val = __atomic_load_n((uint32_t *)data_ptr, __ATOMIC_ACQUIRE);
 		break;
 	default:
-		__builtin_memcpy(&val, data_ptr, 8);
+		// Same reason as the narrower cases: a committer installs 8-byte values
+		// with __atomic_store_n (see the write-back path), so this side must not
+		// be a plain memcpy load of the same word.
+		val = __atomic_load_n((uint64_t *)data_ptr, __ATOMIC_ACQUIRE);
 		break;
 	}
 	return val;

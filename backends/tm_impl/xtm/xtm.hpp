@@ -248,8 +248,20 @@ inline bool commit()
 			void *page = kv.first;
 			void *priv = kv.second;
 
-			// Copy the private page back to the original location
-			std::memcpy(page, priv, PAGE_SIZE);
+			// Copy the private page back to the original location.  This may NOT
+			// be a bulk memcpy: a reader that passed its ownership check before
+			// this transaction acquired the page can still be loading a word of
+			// it (that reader's version snapshot makes it abort later, but the
+			// access itself would be a plain load racing a plain store, i.e.
+			// undefined behaviour).  Installing word by word with release stores
+			// keeps the same bytes on x86-64 - each is one mov - while making the
+			// racing loads well defined.  It costs the SIMD width of the copy.
+			{
+				const uint64_t *src = (const uint64_t *)priv;
+				uint64_t *dst = (uint64_t *)page;
+				for (size_t w = 0; w < PAGE_SIZE / sizeof(uint64_t); w++)
+					__atomic_store_n(&dst[w], src[w], __ATOMIC_RELEASE);
+			}
 
 			size_t idx = xadt_index(page);
 			// Bump version to invalidate any concurrent snapshots

@@ -228,27 +228,31 @@ public:
 			// lazy-write-back: value in memory is still the original,
 			// so restoring from undo-log is a no-op for the value,
 			// but we must release the w_lock).
+			// Release-ordered, width-exact atomic stores: this undo-restore
+			// writes into the transactional object while lockless readers may be
+			// loading the same word, so plain stores here are a data race on the
+			// C++ memory model (they were reported as such by ThreadSanitizer).
 			switch (we.type) {
 			case ValueType::UINT8:
-				*reinterpret_cast<uint8_t *>(we.byte_addr) = we.old_value.u1;
+				tm_word::store_release((uint8_t *)we.byte_addr, we.old_value.u1);
 				break;
 			case ValueType::UINT16:
-				*reinterpret_cast<uint16_t *>(we.byte_addr) = we.old_value.u2;
+				tm_word::store_release((uint16_t *)we.byte_addr, we.old_value.u2);
 				break;
 			case ValueType::UINT32:
-				*reinterpret_cast<uint32_t *>(we.byte_addr) = we.old_value.u4;
+				tm_word::store_release((uint32_t *)we.byte_addr, we.old_value.u4);
 				break;
 			case ValueType::UINT64:
-				*reinterpret_cast<uint64_t *>(we.byte_addr) = we.old_value.u8;
+				tm_word::store_release((uint64_t *)we.byte_addr, we.old_value.u8);
 				break;
 			case ValueType::FLOAT:
-				*reinterpret_cast<float *>(we.byte_addr) = we.old_value.f4;
+				tm_word::store_release((float *)we.byte_addr, we.old_value.f4);
 				break;
 			case ValueType::DOUBLE:
-				*reinterpret_cast<double *>(we.byte_addr) = we.old_value.f8;
+				tm_word::store_release((double *)we.byte_addr, we.old_value.f8);
 				break;
 			case ValueType::POINTER:
-				*reinterpret_cast<void **>(we.byte_addr) = we.old_value.ptr;
+				tm_word::store_release((void **)we.byte_addr, we.old_value.ptr);
 				break;
 			}
 		}
@@ -392,6 +396,7 @@ public:
 		}
 
 		word_t version;
+		T observed;
 		while (true) {
 			version = orec->r_lock.load(std::memory_order_acquire);
 			if (version == READ_LOCKED) {
@@ -399,7 +404,15 @@ public:
 				continue;
 			}
 
-			(void)*addr;
+			// Width-exact relaxed atomic load, and the value RETURNED is this
+			// one.  Two separate problems with the previous plain accesses:
+			//   * a committer may be installing a value into this word in place
+			//     (Phase 4's write_value_to_addr), and a plain load racing that
+			//     store is undefined behaviour - see tm_word_access.hpp;
+			//   * re-loading after the window (the old `return *addr`) could hand
+			//     back a value from a LATER commit than the `version` recorded in
+			//     the read-set entry, i.e. a value the entry does not describe.
+			observed = tm_word::load_relaxed(addr);
 			word_t version2 = orec->r_lock.load(std::memory_order_acquire);
 			if (version == version2)
 				break;
@@ -419,7 +432,7 @@ public:
 			rollback(tx);
 		}
 
-		return *addr;
+		return observed;
 	}
 
 	// Read functions

@@ -668,7 +668,15 @@ public:
 		e.locked_by_me = locked;
 		tx->read_set.push_back(e);
 
-		return from_word<T>(to_word(*addr));
+		// Lockless read of the data word: a concurrent committer may be
+		// installing a committed value into it in place (the write-back loop in
+		// commit()).  That is the intended protocol -- the value is only trusted
+		// once commit() re-checks this entry's guard version -- but a plain load
+		// of a word another thread may be storing is undefined behaviour, so it
+		// is a width-exact relaxed atomic load.  Relaxed is enough: the ordering
+		// that matters is the guard's acquire/release pair in validation, and a
+		// racing value is rejected by version, never by ordering.
+		return from_word<T>(to_word(tm_word::load_relaxed(addr)));
 	}
 
 	// Read functions
@@ -804,29 +812,37 @@ public:
 		// new version but only a subset of the values written (stale read).
 		for (auto &e : tx->write_set) {
 			TM_EVENT2(COMMIT_WRITEBACK, (word_t)e.addr, (word_t)e.dtype, 0);
+			// Release-ordered width-exact atomic stores: lockless speculative
+			// readers may be loading this very word right now (read_impl loads
+			// with a relaxed atomic for exactly that reason), so a plain in-place
+			// store here is a data race on the C++ memory model.
 			switch (e.dtype) {
 			case DataType::UINT8:
-				*(uint8_t *)e.addr = (uint8_t)e.new_value();
+				tm_word::store_release((uint8_t *)e.addr, (uint8_t)e.new_value());
 				break;
 			case DataType::UINT16:
-				*(uint16_t *)e.addr = (uint16_t)e.new_value();
+				tm_word::store_release((uint16_t *)e.addr, (uint16_t)e.new_value());
 				break;
 			case DataType::UINT32:
-				*(uint32_t *)e.addr = (uint32_t)e.new_value();
+				tm_word::store_release((uint32_t *)e.addr, (uint32_t)e.new_value());
 				break;
 			case DataType::FLOAT: {
 				uint32_t bits = (uint32_t)e.new_value();
-				*(float *)e.addr = *(float *)&bits;
+				float f;
+				__builtin_memcpy(&f, &bits, sizeof(f));
+				tm_word::store_release((float *)e.addr, f);
 			} break;
 			case DataType::UINT64:
-				*(uint64_t *)e.addr = (uint64_t)e.new_value();
+				tm_word::store_release((uint64_t *)e.addr, e.new_value());
 				break;
 			case DataType::DOUBLE: {
 				uint64_t bits = e.new_value();
-				*(double *)e.addr = *(double *)&bits;
+				double d;
+				__builtin_memcpy(&d, &bits, sizeof(d));
+				tm_word::store_release((double *)e.addr, d);
 			} break;
 			case DataType::PTR:
-				*(word_t *)e.addr = e.new_value();
+				tm_word::store_release((word_t *)e.addr, e.new_value());
 				break;
 			}
 		}
