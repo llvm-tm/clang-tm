@@ -75,6 +75,18 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   (forcing RO→RW promotion mid-tx); fails if RO-phase reads are ever skipped.
   PASS on NOREC, NORECBF, TINYSTM.
 
+### CSMV `test_tx` fails 1/120 (found 2026-11-25, pre-existing)
+
+- **Symptom**: `TM<TM<int>*> []: FAIL` and `thread lifecycle: FAIL`.
+  Reproduces both under `make check-fast` and with a direct
+  `make -C benchmarks/cpp bin/test_tx BACKEND=CSMV` build. Reproduces on a
+  clean checkout (`git stash` verified) — **pre-existing**, surfaced while
+  fixing the fuzz-smoke OOM. `test_ds` passes 207/207.
+- **Next step**: isolate the `TM<TM<int>*>` (TM pointer to a TM object)
+  read/write path in `csmv_get_entry`/version-node GC — the two failing
+  checks both exercise pointer-typed metadata inside transactions.
+- **Files**: `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`.
+
 ---
 
 ## P1 — Fidelity
@@ -290,6 +302,30 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   make the full sweep finish in minutes; the mechanism is in place (check
   prefers `$b-smoke.cfg`). Also clean `docs/proofs/states/` between big
   runs (~half a TB of checkpoints observed).
+
+### AccelTL2 follow-ups (opened 2026-11-25)
+
+- **Clean-verdict fast path (P2)**: skipping CPU step-5 validation after a
+  device "clean" verdict needs a guard-state epoch proof — the naive
+  clock-unchanged check is unsound against transient writer locks (a writer
+  can lock, then abort, returning the guard's version while the pre-scan's
+  "clean" was taken mid-lock). Design in
+  `backends/tm_impl/accel_tl2/Implementation_notes.md`.
+- **Single command queue (P2)**: concurrent large commits serialize their
+  GPU dispatches on one queue + mutex (`accel_probe.cpp` `dispatch_mu`).
+  Fine for the current pre-abort-filter role; revisit if dispatches become
+  frequent (per-thread queues or batched dispatch).
+- **NPU path (research)**: XDNA-class NPUs stay detect-only; a real NPU
+  offload needs the guard state in DMA-staged snapshots — different design,
+  not zero-copy. Keep detection + rationale; re-probe only if a
+  shared-VA NPU programming model (e.g. oneLevelZero-style SVM) lands.
+
+### Dead `TM_DEBUG_ALLOC` tracker (`g_tl_debug_allocs`) (P2, found 2026-11-25)
+- `backends/tm_impl/common/tm_region_allocator.hpp` declares
+  `g_tl_debug_allocs` and prints it under `-DTM_DEBUG_ALLOC`, but nothing
+  ever defines/updates it — the leak-tracker mode reports an empty map (and
+  only compiles since the 2026-11-25 include-ordering fix). Either wire the
+  tracker into `tm_region_malloc`/`tm_region_free` or delete it.
 
 ## P2 — Roadmap: consistency models in the book (opened 2026-10-05)
 

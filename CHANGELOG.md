@@ -3155,3 +3155,66 @@ runtime/tinystm,runtime/nvhtm,runtime/spht,runtime/xtm},addrspace,tm-executor`;
 explicit `test_tx` 120/120, `test_ds` 207/207; Rust workspace 41 tests;
 simulator 112 tests; `cargo clippy --workspace --all-targets` clean; `cargo fmt
 --check` clean; default + `simulation` + `simulation,stats` builds clean.
+
+## Session 2026-11-25 — fuzz-smoke OOM fix (region retire-set leak) + ACCELTL2 accelerator-validation backend
+
+**CI red since `3b5e289` (fuzz-smoke, exit 71 = libFuzzer OOM).** Root cause
+chain, two independent leaks in the TM-region retire pipeline plus a fuzz
+harness that fought the region allocator:
+
+- `tm_flush_retired_frees()` never erased **TM-region** pointers from
+  `g_retired_global_set` (heap pointers were erased). The region allocator
+  recycles addresses, so on the second retirement of a reused block,
+  `tm_move_deferred_to_retired()` treated it as "already retired by another
+  thread" and dropped it — the block was never `tm_region_free`'d again: a
+  permanent ~165 B/exec region leak. Fixed in
+  `backends/tm_impl/common/tm_alloc_overrides.hpp` (erase in the TM branch
+  too; verified with a sampling LD_PRELOAD malloc tracer + gdb breakpoint
+  counters + `g_next_slab_idx` instrumentation: slab burn dropped from
+  34→23/2M before the harness fix landed, and the 30 s fuzz targets now
+  finish at ~100 MB vs the 2048 MB libFuzzer limit — old harness OOMed at
+  ~8.4 M execs).
+- `tests/fuzz/test_tx_fuzzer.cpp` was rewritten to hold its 4 `TM<int>`
+  objects as `static` (TM<T> values live in the never-freed region), to run
+  every input inside one outer `TM::transaction` frame (sigsetjmp frame in
+  the right frame; ops can no longer observe an inactive tx), and to
+  `tm_free` its `TM_malloc` results inside the tx (deferred release at
+  commit). Both fuzz targets now run 30 s CI-length clean, repeatedly.
+- `backends/tm_impl/common/tm_region_allocator.hpp`: the
+  `#ifdef TM_DEBUG_ALLOC` block `#include`d standard headers *inside*
+  `namespace stm`, so the repo's own leak-checker mode never compiled.
+  Includes hoisted to file scope (no behavior change without the flag).
+
+**New backend: ACCELTL2** (`BACKEND=ACCELTL2`, `benchmarks/cpp/Makefile`).
+The inverse of GPU_STM_CPU/CSMV: transactions run on CPU as in TL2, and the
+*read-set validation scan* is offloaded to a runtime-discovered accelerator.
+- `backends/tm_impl/accel_tl2/accel_probe.{hpp,cpp}`: `dlopen`s
+  `libOpenCL.so.1` (zero build-time GPU deps — CI-safe), requires
+  `CL_DEVICE_SVM_FINE_GRAIN_BUFFER`, places the TL2 guard table in
+  `clSVMAlloc` memory under `-DTM_ACCEL_GPU` (all tl2.hpp hooks are
+  `#ifdef`-gated; plain TL2 codegen unchanged), and JITs a 6-line
+  prevalidation kernel run before lock acquisition on large read sets
+  (`TM_ACCEL_MIN`, default 4096; measured dispatch floor ≈17 µs on a
+  Radeon 8060S). A device-reported conflict aborts before lock churn; a
+  clean verdict is not trusted — CPU steps stay authoritative, so
+  semantics match TL2 exactly.
+- NPUs (AMD XDNA `amdxdna`, `/dev/accel/accel0`) are detected and reported
+  but never dispatched to: tile-graph/DMA programming model, no shared
+  pointer atomics (rationale in `accel_tl2/Implementation_notes.md`).
+
+**Files changed**: `backends/tm_impl/common/tm_alloc_overrides.hpp`,
+`backends/tm_impl/common/tm_region_allocator.hpp`,
+`tests/fuzz/test_tx_fuzzer.cpp`, `backends/tm_impl/tl2/tl2.hpp`,
+`backends/tm_impl/tl2/tl2_runtime.cpp`, `benchmarks/cpp/Makefile`,
+`Makefile`, `backends/tm_impl/accel_tl2/*` (new); `TODO.md`,
+`docs/IMPLEMENTATIONS.md`, `docs/CORRECTNESS_FIXES.md`.
+
+**Verification** (AMD Ryzen AI MAX+ 395, gfx1151 iGPU, LLVM 22): ACCELTL2
+test_tx 120/120 + test_ds 207/207 at default threshold **and** with
+`TM_ACCEL_MIN=1` (GPU kernel exercised on writing commits); 8-thread
+contended `bank` with `TM_ACCEL_MIN=1`: 222,353 GPU prevalidations over the
+shared SVM guard table, 49,936 conflicts aborted pre-lock, money conserved;
+plain TL2 regression 120/120 + 207/207; both fuzz targets exit 0 (30 s × several +
+120 s soak, RSS ≤ ~400 MB); `check-fast` plugin+TINYSTM+NOREC+TL2 green.
+CSMV test_tx fails identically on a clean checkout (pre-existing, unrelated
+— logged in TODO.md).
