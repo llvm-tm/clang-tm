@@ -762,13 +762,54 @@ to 575) on `-T 4` and `-T 8`.
 **Files**: `backends/tm_impl/jvstm/jvstm_runtime.cpp`,
 `tests/concurrency/repro_width_clobber.cpp`.
 
+## 24. CSMV/GPU_STM_CPU read/write sets silently dropped overflow entries (2026-11-25) ✅
+
+**Symptom.** CSMV's `test_tx` reported 1/120 failing — the check being
+`tm_realloc tail writable`, i.e. after growing a 16-element block to 64
+inside a transaction, `read_at(&q[63])` did not return what the same
+transaction wrote. GPU_STM_CPU additionally failed the differential driver's
+allocator wave (`alloc_viol=64/64`).
+
+**Root cause.** Neither backend's allocator (both call the shared, already
+fixed `stm::tm_region_realloc`) nor its `realloc` hook: the per-thread
+transaction sets were fixed arrays whose insert paths read
+
+```c
+if (g_tx.num_writes < CSMV_MAX_WRITES) { /* record */ }   // else: dropped
+```
+
+so a transaction touching more than 32 distinct words lost every write past
+the 32nd — and a transaction past 64 reads lost validation for those
+objects. The failing test writes 16 + 48 = 64 words in one transaction.
+Dropping is silent: no abort, no error, just an update that never happens.
+(Instrumenting the pre-fix code confirmed the mechanism, and also showed
+the driver's own transactions peaked at 4 reads / 4 writes — i.e. the
+driver's remaining CSMV failures are a *different* bug, see the
+word-aliasing row below.)
+
+**Fix.** The sets grow: `std::vector` in
+`backends/tm_impl/csmv/include/csmv_api.h` (`CSMVReadEntry`/`CSMVWriteEntry`)
+and `backends/tm_impl/gpu_stm/cpu/gpu_stm_cpu_runtime.cpp`
+(`ReadEntry`/`WriteEntry`), with the old `*_MAX_READS`/`*_MAX_WRITES`
+constants kept as the per-transaction `reserve()` so the hot path stays
+allocation-free for ordinary transactions. `begin()` clears the vectors (not
+just the counters) and the commit-time sort runs over the vector range.
+
+**Verification.** CSMV `test_tx` **120/120** (was 119/120) and `test_ds`
+207/207; GPU_STM_CPU 120/120 and 207/207 with
+`drv_diff_ops … alloc_viol=0` (was 64/64) at `-T 1` and `-T 4`.
+
+**Files**: `backends/tm_impl/csmv/include/csmv_api.h`,
+`backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`,
+`backends/tm_impl/gpu_stm/cpu/gpu_stm_cpu_runtime.cpp`.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |
 |-------|----------|-------|
 | TinySTM STMbench7 crash (STL vector realloc) | High | STL-in-TM incompatibility, pre-existing |
-| **CSMV `test_tx` fails 1/120 (pre-existing)** | Medium | The single failing check is `tm_realloc tail writable` (`TM<TM<int>*> []` / `thread lifecycle` only *print* FAIL — `test_tx` reports the cumulative counter per section). Reproduces on a **clean checkout** (verified 2026-11-25 via `git stash`), both via `make check-fast` and a direct `BACKEND=CSMV` build — not a regression from the fuzz/leak fixes. `test_ds` passes 207/207. Also reproduced by Wave D of `tests/concurrency/drv_diff_ops.cpp` (64/64 reps). Tracked in TODO.md (P0). |
-| **CSMV loses committed updates under contention (pre-existing)** | High | The T1 differential driver (`tests/concurrency/drv_diff_ops.cpp`) reports ~78-80/144 objects whose final value ≠ init + Σ committed deltas, plus ~200 reads outside the legal concurrent-commit window, on every seed; bisects to op classes whose writes spread over *multiple* words and passes when all writes hit one word (suspect: version/guard aliasing between neighbouring words). All 20 other backends clean on identical seeds. CSMV is not in the CI `cross-backend` list, so CI never saw this. Tracked in TODO.md (P0). |
+| ~~CSMV `test_tx` fails 1/120~~ → **fixed 2026-11-25 (§24)** | — | Fixed-size read/write sets (64 reads / 32 writes) that **silently dropped** overflow entries. `test_tx`'s `tm_realloc` case writes 16+48 words in one transaction, so its tail write never reached memory (the `TM<int*>`/`thread lifecycle` FAIL labels were `test_tx`'s cumulative counter bleeding). Same pattern in GPU_STM_CPU, where it also tripped the differential driver's allocator wave. CSMV now 120/120, GPU_STM_CPU 120/120 + driver clean. |
+| **CSMV version store aliases word-sharing objects** | High | Sequential, zero contention, zero aborts: version chains live in a bucket indexed by `(addr >> 3)` and `CSMVVersionNode` records no address, so the two int32 halves of an 8-byte word share one chain and read back each other's values — which a read-modify-write then commits. `bin/repro_bucket_alias BACKEND=CSMV`: 40/48 transactional reads and 16/16 committed values wrong (`c[0]` reads `c[1]`'s value). `drv_diff_ops` `quiesce_viol≈78-80` already at `-T 1`, plus ~200 out-of-window reads. All 20 other backends clean. Fix sketch + acceptance test in TODO.md (P0). |
 | LEFTRIGHT write-set `observed_version` | Low | Uses global clock at read time instead of per-address version; correct with global lock but more conservative than needed |
 | stmbench7 times out with >1 thread | Low | Data race in `ts_multimap::lower_bound()` — pre-existing |
 | **`test_queue_multi` counter mismatch (351 vs 400)** | Low | `counter` is a plain `static int` (not TM-tracked). The `TX` annotation creates a TM transaction wrapper, but the LLVM pass instruments only TM-annotated globals. 4 threads × 100 increments of a non-TM variable without atomic/lock protection → classic lost-update race. Expected 400, consistently observed ~351. Fix: either declare counter as `TM int counter` or use `std::atomic<int>`. Also affects `bench_queue_compare.cpp` and `bench_queue_compare2.cpp` (same plain-`static int counter` pattern). |

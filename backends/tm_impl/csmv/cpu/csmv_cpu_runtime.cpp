@@ -86,6 +86,10 @@ static void real_tm_begin()
 	g_tx.start_clock = g_csmv_clock.load(std::memory_order_acquire);
 	g_tx.num_reads = 0;
 	g_tx.num_writes = 0;
+	g_tx.reads.clear();
+	g_tx.writes.clear();
+	g_tx.reads.reserve(CSMV_MAX_READS);
+	g_tx.writes.reserve(CSMV_MAX_WRITES);
 	g_csmv_active_txns.fetch_add(1, std::memory_order_relaxed);
 	tm_clear_spec_allocs();
 	tm_clear_deferred_frees();
@@ -98,9 +102,11 @@ static void real_tm_end()
 	// ── Lock all write-set entries (in address order) ─────────
 	// First sort by entry pointer to prevent deadlock
 	if (g_tx.num_writes > 1) {
-		std::sort(g_tx.writes,
-		          g_tx.writes + g_tx.num_writes,
-		          [](const auto &a, const auto &b) { return a.entry < b.entry; });
+		std::sort(g_tx.writes.begin(),
+		          g_tx.writes.end(),
+		          [](const CSMVWriteEntry &a, const CSMVWriteEntry &b) {
+			          return a.entry < b.entry;
+		          });
 	}
 
 	// Lock — skip duplicates (same entry, different addresses hashing to same slot)
@@ -266,11 +272,8 @@ static uint64_t read_common(void *data_addr)
 	// still equals this ts; recording the head ts instead admits lost updates
 	// when the read hit an older-than-head version (see docs/CORRECTNESS_FIXES
 	// .md, review-05 G-04).
-	if (g_tx.num_reads < CSMV_MAX_READS) {
-		g_tx.reads[g_tx.num_reads].entry = entry;
-		g_tx.reads[g_tx.num_reads].observed_ts = observed;
-		g_tx.num_reads++;
-	}
+	g_tx.reads.push_back({entry, observed});
+	g_tx.num_reads++;
 
 	return result;
 }
@@ -292,15 +295,10 @@ static void write_common(void *data_addr, uint64_t val, uint8_t bytes)
 		}
 	}
 
-	// Add new write entry
-	if (g_tx.num_writes < CSMV_MAX_WRITES) {
-		g_tx.writes[g_tx.num_writes].entry = entry;
-		g_tx.writes[g_tx.num_writes].data_addr = data_addr;
-		g_tx.writes[g_tx.num_writes].node = nullptr;
-		g_tx.writes[g_tx.num_writes].val = val;
-		g_tx.writes[g_tx.num_writes].bytes = bytes;
-		g_tx.num_writes++;
-	}
+	// Add new write entry (the set grows — see csmv_api.h on why the old
+	// fixed array that dropped overflow entries silently lost updates)
+	g_tx.writes.push_back({entry, data_addr, nullptr, val, bytes});
+	g_tx.num_writes++;
 }
 
 // ── Alloc — use TM region allocator ───────────────────────────────

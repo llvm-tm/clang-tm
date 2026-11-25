@@ -3,13 +3,19 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 // ── CSMV Configuration ──────────────────────────────────────────
 
 #define CSMV_TABLE_SIZE (1 << 20) // 1M object entries
-#define CSMV_MAX_READS 64         // max reads per tx
-#define CSMV_MAX_WRITES 32        // max writes per tx
-#define CSMV_GC_INTERVAL 1024     // GC every N commits
+// Initial reserve for a transaction's read/write sets. They are NOT limits:
+// the sets grow. They used to be fixed arrays that SILENTLY DROPPED entries
+// past 64 reads / 32 writes — a dropped write is a lost update and a dropped
+// read removes that object from validation (it is what made test_tx's
+// `tm_realloc` case fail: 16+48 writes in one transaction).
+#define CSMV_MAX_READS 64
+#define CSMV_MAX_WRITES 32
+#define CSMV_GC_INTERVAL 1024 // GC every N commits
 
 // ── CSMV Version Node ───────────────────────────────────────────
 // Each version node holds a timestamp, the data value (word-sized),
@@ -34,21 +40,26 @@ struct CSMVObjectEntry {
 
 // ── CSMV Thread Transaction State ───────────────────────────────
 
+struct CSMVReadEntry {
+	CSMVObjectEntry *entry;
+	uint64_t observed_ts;
+};
+
+struct CSMVWriteEntry {
+	CSMVObjectEntry *entry;
+	void *data_addr;
+	CSMVVersionNode *node;
+	uint64_t val;
+	uint8_t bytes;
+};
+
 struct CSMVThreadTx {
 	uint64_t start_clock;
+	// Kept in step with the vectors below so the hot loops stay index-based.
 	int num_reads;
 	int num_writes;
-	struct {
-		CSMVObjectEntry *entry;
-		uint64_t observed_ts;
-	} reads[CSMV_MAX_READS];
-	struct {
-		CSMVObjectEntry *entry;
-		void *data_addr;
-		CSMVVersionNode *node;
-		uint64_t val;
-		uint8_t bytes;
-	} writes[CSMV_MAX_WRITES];
+	std::vector<CSMVReadEntry> reads;
+	std::vector<CSMVWriteEntry> writes;
 	int commit_count;
 };
 

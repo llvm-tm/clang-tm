@@ -38,6 +38,26 @@ for be in $BACKENDS; do
 			fi
 		done
 	done
+	# Granularity pins: cheap single-threaded checks that localise a failure
+	# to a specific mechanism rather than "the model disagreed".
+	if make -C benchmarks/cpp bin/repro_width_clobber BACKEND="$be" >/dev/null 2>&1; then
+		if ! ./benchmarks/cpp/bin/repro_width_clobber >/dev/null 2>&1; then
+			ok=0
+			echo "== $be: FAIL repro_width_clobber (sub-word commit clobbers neighbours)"
+		fi
+	fi
+	if make -C benchmarks/cpp bin/repro_bucket_alias BACKEND="$be" >/dev/null 2>&1; then
+		if ! ./benchmarks/cpp/bin/repro_bucket_alias >/dev/null 2>&1; then
+			# Known open: CSMV version chains are keyed by (addr>>3) bucket
+			# without an address tag (TODO.md P0). Reported, not gated.
+			if [ "$be" = CSMV ]; then
+				echo "== $be: known-open repro_bucket_alias (bucket aliasing, TODO P0)"
+			else
+				ok=0
+				echo "== $be: FAIL repro_bucket_alias (version store aliases word-sharing objects)"
+			fi
+		fi
+	fi
 	if [ $ok -eq 1 ]; then
 		echo "== $be: PASS"
 		passed="$passed $be"

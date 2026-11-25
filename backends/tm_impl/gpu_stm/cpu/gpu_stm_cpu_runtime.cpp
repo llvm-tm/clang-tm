@@ -49,21 +49,27 @@ static inline uint32_t my_prid()
 static std::atomic<uint64_t> gpu_global_clock{0};
 
 // ── Per-thread PR-STM state ───────────────────────────────────────
-
-struct [[gnu::aligned(64)]] GpuStmThreadTx {
+// The read/write sets grow: PR_STM_MAX_READS/PR_STM_MAX_WRITES are only the
+// initial reserve. As fixed arrays they SILENTLY DROPPED entries past 64
+// reads / 32 writes — a dropped write is a lost update, a dropped read
+// removes that object from validation.
+struct GpuStmThreadTx {
 	uint64_t start_clock;
+	// Kept in step with the vectors so the hot loops stay index-based.
 	int num_reads;
 	int num_writes;
-	struct {
+	struct ReadEntry {
 		uint32_t lock_idx;
 		uint32_t ver;
-	} reads[PR_STM_MAX_READS];
-	struct {
+	};
+	struct WriteEntry {
 		uint32_t lock_idx;
 		void *data_addr;
 		uint64_t val;
 		uint8_t bytes;
-	} writes[PR_STM_MAX_WRITES];
+	};
+	std::vector<ReadEntry> reads;
+	std::vector<WriteEntry> writes;
 };
 
 static thread_local GpuStmThreadTx g_tx;
@@ -75,6 +81,10 @@ static void real_tm_begin()
 	g_tx.start_clock = gpu_global_clock.load(std::memory_order_relaxed);
 	g_tx.num_reads = 0;
 	g_tx.num_writes = 0;
+	g_tx.reads.clear();
+	g_tx.writes.clear();
+	g_tx.reads.reserve(PR_STM_MAX_READS);
+	g_tx.writes.reserve(PR_STM_MAX_WRITES);
 	tm_clear_spec_allocs();
 	tm_clear_deferred_frees();
 }
@@ -228,10 +238,9 @@ static uint64_t read_common(uint32_t *lock_entry_ptr, void *data_ptr, uint8_t by
 		return g_tx.writes[wi].val;
 	}
 	uint32_t lw = __atomic_load_n(lock_entry_ptr, __ATOMIC_ACQUIRE);
-	if (g_tx.num_reads < PR_STM_MAX_READS) {
+	{
 		uint32_t idx = (uint32_t)(lock_entry_ptr - gpu_lock_table);
-		g_tx.reads[g_tx.num_reads].lock_idx = idx;
-		g_tx.reads[g_tx.num_reads].ver = pr_stm_get_version(lw);
+		g_tx.reads.push_back({idx, pr_stm_get_version(lw)});
 		g_tx.num_reads++;
 	}
 	// Load exactly `bytes` — a 1-byte object must not be widened to a
@@ -259,12 +268,9 @@ static void write_common(uint32_t *lock_entry_ptr,
                          uint64_t val,
                          uint8_t bytes)
 {
-	if (g_tx.num_writes < PR_STM_MAX_WRITES) {
+	{
 		uint32_t idx = (uint32_t)(lock_entry_ptr - gpu_lock_table);
-		g_tx.writes[g_tx.num_writes].lock_idx = idx;
-		g_tx.writes[g_tx.num_writes].data_addr = data_ptr;
-		g_tx.writes[g_tx.num_writes].val = val;
-		g_tx.writes[g_tx.num_writes].bytes = bytes;
+		g_tx.writes.push_back({idx, data_ptr, val, bytes});
 		g_tx.num_writes++;
 	}
 }

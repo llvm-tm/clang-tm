@@ -75,17 +75,71 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   (forcing RO→RW promotion mid-tx); fails if RO-phase reads are ever skipped.
   PASS on NOREC, NORECBF, TINYSTM.
 
-### CSMV `test_tx` fails 1/120 (found 2026-11-25, pre-existing)
+### CSMV/GPU_STM_CPU fixed-size read/write sets dropped overflow entries — RESOLVED (2026-11-25)
 
-- **Symptom**: `TM<TM<int>*> []: FAIL` and `thread lifecycle: FAIL`.
-  Reproduces both under `make check-fast` and with a direct
-  `make -C benchmarks/cpp bin/test_tx BACKEND=CSMV` build. Reproduces on a
-  clean checkout (`git stash` verified) — **pre-existing**, surfaced while
-  fixing the fuzz-smoke OOM. `test_ds` passes 207/207.
-- **Next step**: isolate the `TM<TM<int>*>` (TM pointer to a TM object)
-  read/write path in `csmv_get_entry`/version-node GC — the two failing
-  checks both exercise pointer-typed metadata inside transactions.
-- **Files**: `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`.
+- **Symptom as filed**: `test_tx` "fails 1/120" with labels `tm_realloc`,
+  `TM<int*> ptr`, `TM<TM<int>*> []`, `thread lifecycle` — but only **one**
+  check actually fails: `tm_realloc tail writable`
+  (`read_at(&q[n_new-1]) == n_new-1` after a 16→64 grow inside a tx). The
+  other labels are the file-global `failures` counter bleeding into later
+  sections (`printf("  %s: %s\n", name, failures ? "FAIL" : "PASS")` prints
+  the *cumulative* count). Wave D of `bin/drv_diff_ops -M 128` reproduced it
+  64/64 on CSMV and GPU_STM_CPU.
+- **Root cause** (not the allocator, which is shared and fine): the CPU
+  runtimes kept `reads[CSMV_MAX_READS]`/`writes[CSMV_MAX_WRITES]` = 64/32
+  fixed arrays guarded by `if (num < MAX)`, i.e. **overflow entries were
+  silently discarded**. The realloc test writes 16+48 = 64 words in one
+  transaction, so every write past the 32nd — including the tail element it
+  then reads back — was dropped on commit. A dropped read-set entry is
+  equally bad: that object stops being validated.
+- **Fix**: the sets grow (vectors, with the old limits kept as the initial
+  reserve) in `backends/tm_impl/csmv/{include/csmv_api.h,cpu/csmv_cpu_runtime.cpp}`
+  and `backends/tm_impl/gpu_stm/cpu/gpu_stm_cpu_runtime.cpp`.
+- **Verification**: CSMV `test_tx` 120/120 (was 119/120) + `test_ds`
+  207/207; GPU_STM_CPU 120/120 + 207/207 and `drv_diff_ops`
+  `alloc_viol=0` (was 64/64). Instrumented the pre-fix code to confirm the
+  mechanism: the 64-write transaction hit the drop path, while the driver's
+  small transactions never did (max 4 reads / 4 writes) — which is why the
+  remaining CSMV failure below is a different bug.
+- **Note**: `backends/tm_impl/gpu_stm/cpu/pr_stm_cpu.cpp` (the GPU-simulation
+  library, not linked into the `GPU_STM_CPU` backend) still has the same
+  fixed-array pattern with silent drop at its own 64/32 limits — fix it if
+  that path ever becomes load-bearing.
+
+### CSMV version store is keyed by hash bucket, so word-sharing objects alias (found 2026-11-25, pre-existing, OPEN)
+
+- **Symptom**: purely **sequential**, no contention, zero aborts.
+  `bin/repro_bucket_alias BACKEND=CSMV`: 16 int32 objects in one block, each
+  RMW'd +1 in its own transaction → 40/48 transactional reads wrong and
+  16/16 committed values wrong (e.g. `c[0]` reads 1002 when its own history
+  says 1001 — the value of its word-mate `c[1]`). TL2/SGL/… clean.
+  `bin/drv_diff_ops BACKEND=CSMV` reports `quiesce_viol≈78-80` of 144
+  objects at `-T 1` as well as `-T 4/-T 8`, plus `v_range≈200`.
+- **Root cause**: `csmv_get_entry()` buckets by `(uintptr_t)addr >> 3`, and
+  `CSMVVersionNode` is `{timestamp, value, next}` with **no address field**,
+  so the two int32 halves of an 8-byte word share one version chain.
+  `read_common()`'s fast path returns `entry->head->value` — whichever
+  object in that word wrote last. The driver/repro then *write that foreign
+  value back* in their read-modify-write, so committed memory diverges too,
+  not just reads.
+- **Bisect evidence**: `drv_diff_ops` op-class masks that write a single
+  fixed word (`-M 4`, `-M 16`) are clean; masks spreading writes across
+  several int32/uint8 objects (`-M 1/2/8`) fail — and byte objects are worse
+  still (16 bytes share two buckets).
+- **Suggested fix**: make the chain per *address*, either by tagging each
+  bucket with its owning address and probing on collision (keeps the
+  existing `entry->head` commit/validation/GC code intact and makes the
+  table a real open-addressed map — must fail loudly rather than corrupt if
+  it fills), or by chaining per-address heads inside a bucket. Note
+  `csmv_api.h` comments describe the validation convention as shared with a
+  GPU executor; no GPU sources exist in this repo, but re-check before
+  changing `CSMVObjectEntry`/`CSMVVersionNode` layout.
+- **Acceptance test**: `bin/repro_bucket_alias` clean and
+  `bin/drv_diff_ops` `quiesce_viol=0 v_range=0` at `-T 1` and `-T 8`, with
+  `test_tx` 120/120 and `test_ds` 207/207.
+- **Files**: `backends/tm_impl/csmv/include/csmv_api.h`,
+  `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`,
+  `tests/concurrency/repro_bucket_alias.cpp`.
 
 ---
 

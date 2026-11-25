@@ -334,6 +334,8 @@ MINI_DIFF_SRC = ../../tests/concurrency/mini_diff.cpp
 MINI_DIFF_BIN = bin/mini_diff
 WIDTH_REPRO_SRC = ../../tests/concurrency/repro_width_clobber.cpp
 WIDTH_REPRO_BIN = bin/repro_width_clobber
+BUCKET_REPRO_SRC = ../../tests/concurrency/repro_bucket_alias.cpp
+BUCKET_REPRO_BIN = bin/repro_bucket_alias
 
 # --- non-opacity teaching demo (BACKEND=NOREC or EAGER_BROKEN) ------
 # One source, two semantics: NOREC exits 0; EAGER_BROKEN SIGSEGVs (139).
@@ -435,6 +437,7 @@ $(eval $(call BUILD_RULE,$(TEST_RO2RW_BIN),$(TEST_RO2RW_SRC)))
 $(eval $(call BUILD_RULE,$(DIFF_OPS_BIN),$(DIFF_OPS_SRC)))
 $(eval $(call BUILD_RULE,$(MINI_DIFF_BIN),$(MINI_DIFF_SRC)))
 $(eval $(call BUILD_RULE,$(WIDTH_REPRO_BIN),$(WIDTH_REPRO_SRC)))
+$(eval $(call BUILD_RULE,$(BUCKET_REPRO_BIN),$(BUCKET_REPRO_SRC)))
 $(eval $(call BUILD_RULE,$(RBTREE_BIN),$(RBTREE_SRC)))
 $(eval $(call BUILD_RULE,$(OPAQUEDEMO_BIN),$(OPAQUEDEMO_SRC)))
 
