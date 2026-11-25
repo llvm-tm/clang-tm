@@ -62,7 +62,7 @@ Start at [`docs/README.md`](docs/README.md) (index of all docs). Key entries:
 - **Default LLVM version is 22** (`llvm-config-22`, `opt-22`, `clang++-22`);
   tooling honors optional `LLVM_VERSION` (CI also probes LLVM 23).
 - **Backends**: `TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL
-  LEFTRIGHT ROMULUS XTM SPHT TSXSGL` + GPU (`GPU_STM_CPU`, `CSMV`, …).
+  LEFTRIGHT ROMULUS XTM SPHT TSXSGL ACCELTL2` + GPU (`GPU_STM_CPU`, `CSMV`, …).
 
 ## Requirements
 
