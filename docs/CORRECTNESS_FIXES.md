@@ -893,10 +893,127 @@ counters).
 **Files**: `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`,
 `tools/diff_backends.sh`.
 
+## 27. CSMV read the raw object 8 bytes wide at every width (2026-11-26) ✅
+
+**Symptom.** ThreadSanitizer on `drv_diff_ops BACKEND=CSMV` reported 16 data
+races, 6 of them inside the TM data region: a plain 8-byte read at an address
+whose neighbour had just been written by 4-byte atomic stores at commit
+(e.g. `Read of size 8 at 0x…1098` vs `atomic write of size 4 at 0x…109c`).
+
+**Root cause.** `read_common()`'s "no versions yet" fallback read the object
+with `*(uint64_t *)data_addr`, whatever the access width. Reached from
+`real_tm_read_i4` (and `i1`/`i2`), that loads 8 bytes for a 4-byte object, so
+it (a) touched bytes belonging to the *adjacent* object, which is exactly what
+the commit-time `__atomic_store_n` write-back publishes there — a formal data
+race on a neighbouring object's value; (b) paired a plain load with an atomic
+store, so no ordering argument covers it; and (c) could over-read past the end
+of the mapped TM region for an object at the very end.
+
+**Fix.** `raw_load(data_addr, bytes)` reads with the object's own width using
+`__atomic_load_n` with the same widths as `real_tm_end`'s write-back, so the
+load pairs with the store; all seven read stubs now pass their width into
+`read_common()`.
+
+**Verification.** TSan warnings for CSMV: 16 → 0 (seeds 1–2, `-T 4 -n 400`),
+all driver counters 0; `test_tx` 120/120, `test_ds` 207/207,
+`tests/backends/tm_impl run-csmv` all PASS.
+
+## 28. CSMV version GC freed the version a live snapshot still needed (2026-11-26) ✅
+
+**Symptom.** New unit test `tests/backends/tm_impl/test_gc_reader.cpp`: one
+transaction reads an object, stays open while four other threads commit ~6000
+versions (several GC sweeps), and reads the object again. Pre-fix it printed
+`reader saw 1 then 0` — a committed value silently replaced by zero — in
+**6/6** runs.
+
+**Root cause — two compounding defects in the sweep.**
+
+1. The low-water mark was guessed as `clock - 1000` ("since we don't have
+   cross-thread tracking here"), not the oldest snapshot among running
+   transactions. Any transaction that lived while 1000 other commits happened
+   was already below the mark.
+2. The trim loop was `while (head->next && head->next->timestamp < new_lwm)
+   unlink(head->next)`, which frees *every* version older than the mark —
+   including the **floor** version, the newest one at or below it, which is
+   precisely what a reader at the low-water mark selects. `gc_flush()` then
+   `std::free`s the node immediately, with no epoch or hazard pointer.
+
+Together: the reader's walk either followed a freed link (use-after-free) or
+fell off the end of the chain, where `read_common()` returns `observed = 0` and
+the raw/unwritten value — a silently wrong read rather than a crash.
+
+**Fix.**
+
+- **Registry-driven low-water mark.** Each thread claims a slot and publishes a
+  *lower bound* on the snapshot it is about to take **before** reading the
+  clock; `csmv_low_water_mark()` = min(clock read before the scan, all slot
+  values). A transaction the scan sees contributed a value stored before its
+  clock read; one it does not see starts after the scan's clock load, and the
+  clock is monotonic — so the mark is always ≤ every live or future snapshot.
+  Conservatism now costs memory only, never correctness. The registry is
+  nesting-safe (only the outermost transaction publishes), a stale slot is
+  overwritten on reuse so a `longjmp` out of user code cannot pin GC forever,
+  and running out of slots disables reclamation instead of guessing.
+- **Floor-preserving trim.** Find the newest version with `ts <= lwm` and free
+  only nodes *strictly older* than it; skip the entry entirely when no version
+  is `<= lwm`. Every freed version then has a newer one whose timestamp is
+  ≤ every live snapshot, so no active or future reader can select it, and no
+  live reader can be holding a pointer below its own stop point.
+- **Lockless link access.** Chain links are now read/written through
+  `link_of()`/`set_link()` (acquire/release): readers walk without the entry
+  lock while the sweep unlinks under it.
+
+**Verification.** `gc_reader` fails 6/6 pre-fix and passes post-fix — and is
+not vacuous: the same run reported `sweeps=130 nodes_reclaimed=48393` while the
+reader kept its value. `bank -t 8 -n 50000` reclaimed 77556 nodes across 42453
+sweeps and still printed `PASS: Money conserved`; driver `-T 8 -n 3000`
+(seeds 1–3, 24344 commits) all counters 0; TSan 0 warnings; `test_tx`
+120/120 and `test_ds` 207/207. The `gc_reader` invariant is asserted strictly
+only on CSMV (multi-version reads); lock-based backends in the same suite
+detect a stale re-read at commit time, so for them the test checks only that no
+uncommitted value is ever observed.
+
+## 29. Hook-table publication raced against every thread start (all backends) (2026-11-26) ✅
+
+**Symptom.** ThreadSanitizer reported the *same* 10 races in the shared
+dispatch layer for every backend: writes to `tm_begin`, `tm_end`,
+`tm_read_i1..i8`, `tm_write_i1..i8`, … from `apply_hooks_unlocked()` (frame
+`tm_hook_init_thread → tm_init_thread`) against reads of the same globals by a
+thread executing a transaction.
+
+**Root cause.** `tm_hook_init_thread()` re-installed all 23 hook pointers each
+time a new thread started, *after* the backend had already registered (the
+registration path installs the real hooks while the program is still
+single-threaded). The re-install is idempotent in *value* but not in *effect*:
+instrumented code loads these globals on every TM call without holding
+`s_hook_mutex`, so the re-write is a plain data race, and a thread can in
+principle observe a half-written table that mixes real and stub hooks — the
+exact "stubs silently no-op a transaction" hazard the function's own comment
+warns about.
+
+**Fix.** The dispatch table is written only when the *intended* table actually
+changed: `s_hooks_dirty` is bumped by `tm_register_real_hooks()` /
+`tm_swap_runtime()` and consumed by `apply_hooks_unlocked()`, so thread-count
+changes (`tm_hook_init_thread()`, `tm_set_num_threads()`) no longer re-publish.
+Under tracing the change stays pending so the next apply still re-establishes
+the wrapper chain, preserving that path's behaviour.
+
+**Verification.** Hook-global races eliminated: a post-fix TSan sweep of all 19
+backends (each symbolized against its own binary) reports **0** races attributable
+to `apply_hooks_unlocked`/`tm_hook_init_thread`, down from 10 per backend
+pre-fix. SGL, JVSTM and CSMV reach **0** warnings overall; what remains in the
+other backends is backend-internal (`commit` vs lockless speculative reads) and
+is triaged in `TODO.md`. Behaviour unchanged: `check-fast` green, `make -C plugin
+run` green, the 11-backend `tests/backends/tm_impl` suite green,
+`test_tx`/`test_ds` 120/207 for the C++ backends.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |
 |-------|----------|-------|
+| Per-backend ThreadSanitizer data races (triage open) | Medium | Post-§29 sweep of `drv_diff_ops -S 1 -T 4 -n 200`: **178** warnings over 16 backends, **0 consistency violations** in any backend, 0 warnings on SGL/JVSTM/CSMV. Concentrated in `commit` writing values in place under locks vs lockless speculative reads (SWISSTM 22, WT 21, LEFTRIGHT 19, ACCELTL2/TL2 16/14, TSC_TM 15, …). Likely deliberate in these designs but formally UB; per-backend counts, frames and the relaxed-atomics remediation plan are in `TODO.md`. Blocking a TSan-gated CI job. |
+| ARM TME simulation not exercisable | Medium | `configs/arm-tme-kvm.py` never adds `"TME"` to the release's extensions and uses the KVM CPU (host ISA); `workloads/tme/` has a Makefile whose sources do not exist and lacks `-march=…+tme`. gem5 v25.1.0.1 itself supports TME (`tme64*`, `ArmExtension.TME`). Details in `gem5_sim/README.md` and `TODO.md`. |
+| CSMV GPU kernel: no commit validation, `>>3` aliasing, no server | High | `gpu/backends/csmv/cuda/`: `csmv_device_commit` performs no read-set validation (conflicting transactions both install versions), `csmv_gpu_entry_idx()` still keys chains by `>> 3` with no owner tag (§25 on CPU, unfixed on GPU), and neither GPU path implements the block-0/server-warp commit that `docs/proofs/GPU_STM_PLAN.md:19` specifies. CPU model of the server commit exists (`CSMV_SERVER_COMMIT=1`). Porting needs a GPU runner: the `gpu/` tree is compiled in `nightly.yml` only, never correctness-gated. |
 | TinySTM STMbench7 crash (STL vector realloc) | High | STL-in-TM incompatibility, pre-existing |
 | ~~CSMV `test_tx` fails 1/120~~ → **fixed 2026-11-25 (§24)** | — | Fixed-size read/write sets (64 reads / 32 writes) that **silently dropped** overflow entries. `test_tx`'s `tm_realloc` case writes 16+48 words in one transaction, so its tail write never reached memory (the `TM<int*>`/`thread lifecycle` FAIL labels were `test_tx`'s cumulative counter bleeding). Same pattern in GPU_STM_CPU, where it also tripped the differential driver's allocator wave. CSMV now 120/120, GPU_STM_CPU 120/120 + driver clean. |
 | ~~CSMV version store aliases word-sharing objects~~ → **fixed 2026-11-25 (§25)** | — | Version chains were keyed by `(addr >> 3)` with no address tag, so word-sharing objects shared a chain and read back each other's values (which a read-modify-write committed). `repro_bucket_alias` was 40/48 reads + 16/16 committed wrong at `-T 1`. Fixed by an owner-tagged, open-addressed, exact-address table. Clean now at `-T 1` for all masks and `-T 4/-T 8` full mask; `test_tx` 120/120, `test_ds` 207/207. |

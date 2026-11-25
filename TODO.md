@@ -177,6 +177,130 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
 - **Harness**: the `tools/diff_backends.sh` known-open allowance for CSMV was
   **removed** — CSMV is now gated on every counter like all backends.
 
+### CSMV raw object reads were over-wide at every access width — RESOLVED (found & fixed 2026-11-26)
+
+- **Files**: `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`
+- **Found by**: `-fsanitize=thread` on `tests/concurrency/drv_diff_ops.cpp`
+  (6 of the 16 CSMV races were in the TM data region).
+- **Issue**: the "no versions yet" fallback in `read_common()` did
+  `*(uint64_t *)data_addr` regardless of access width. Reached from
+  `real_tm_read_i4`/`i2`/`i1` that reads 8 bytes for a narrow object, so it
+  touched the **neighbouring** object's bytes — where that object's commit
+  write-back publishes its value — with a plain load against the write-back's
+  atomic store, and could over-read past the end of the mapped region.
+- **Fix**: `raw_load(addr, bytes)` — width-exact `__atomic_load_n` using the
+  same widths as `real_tm_end`'s `__atomic_store_n` write-back; the seven read
+  stubs pass their width.
+- **Verification**: CSMV TSan warnings 16 → 0; driver counters all 0;
+  `test_tx`/`test_ds` 120/207. `docs/CORRECTNESS_FIXES.md` §27.
+
+### CSMV version GC freed the version a live snapshot still needed — RESOLVED (found & fixed 2026-11-26)
+
+- **Files**: `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`,
+  `tests/backends/tm_impl/test_gc_reader.cpp` (new)
+- **Issue**: two compounding defects. (1) The GC low-water mark was the guess
+  `clock - 1000` rather than the oldest snapshot among running transactions.
+  (2) The sweep unlinked every version with `timestamp < lwm`, including the
+  **floor** version (newest at or below the mark) that a reader at the mark
+  selects, and `gc_flush()` `std::free`d it immediately — no epoch, no hazard
+  pointer. A live reader then followed a freed link (UAF) or fell off the chain
+  end and read `0` where a committed value lived.
+- **Fix**: active-transaction registry (per-thread slot publishing a *lower
+  bound* on the snapshot before the clock is read; mark = min(clock-before-scan,
+  slots)) → always ≤ every live/future snapshot; nesting-safe; stale slots
+  overwritten on reuse; slots exhausted ⇒ reclamation disabled. Sweep keeps the
+  floor and frees only strictly older versions, skips entries whose versions
+  are all newer than the mark, and touches chain links with acquire/release
+  because readers traverse them locklessly.
+- **Verification**: new `gc_reader` test fails **6/6** before the fix
+  (`reader saw 1 then 0`) and passes after, in a run that still reclaimed
+  48393 version nodes (not a vacuous pass); `bank -t 8 -n 50000` reclaimed
+  77556 nodes, money conserved; driver `-T 8 -n 3000` seeds 1–3 clean; TSan 0
+  warnings; all 11 unit-test backends PASS. `docs/CORRECTNESS_FIXES.md` §28.
+
+### Hook-table publication raced against every thread start (ALL backends) — RESOLVED (found & fixed 2026-11-26)
+
+- **Files**: `backends/tm_impl/common/tm_hooks.cpp`
+- **Issue**: `tm_hook_init_thread()` re-installed all 23 hook function pointers
+  on every thread start. Instrumented code reads those globals on **every TM
+  call** without `s_hook_mutex`, so the redundant re-write is a plain data race
+  and a thread could in principle observe a half-installed table mixing real
+  and stub hooks (stubs silently no-op transactions — the hazard that file's
+  own comment warns about). TSan reported the same 10 races for every backend.
+- **Fix**: publish only when the *intended* table changed (`s_hooks_dirty` /
+  `s_hooks_applied` generation counters bumped by `tm_register_real_hooks()`
+  and `tm_swap_runtime()`); thread-count changes no longer re-publish. Trace
+  mode keeps its pending re-publish so the wrapper chain is preserved.
+- **Verification**: hook-global races gone in every TSan-linkable backend;
+  SGL/JVSTM/CSMV reach 0 warnings; `check-fast`, `make -C plugin run`,
+  all-backends unit suite and `test_tx`/`test_ds` unchanged.
+  `docs/CORRECTNESS_FIXES.md` §29.
+
+### Follow-ups opened 2026-11-26 (P1)
+
+- **CSMV GPU kernel still has three known gaps** (`gpu/backends/csmv/cuda/`):
+  (a) no commit-time read-set validation in `csmv_device_commit` at all →
+  conflicting transactions both install versions (lost updates by design);
+  (b) `csmv_gpu_entry_idx()` still keys version chains by `>> 3` with no owner
+  tag ⇒ the §25 sub-word aliasing, unfixed on GPU; (c) no block-0 / server-warp
+  commit as specified by `docs/proofs/GPU_STM_PLAN.md:19` ("client-server
+  commit: server validates, clients batch writes") — neither GPU path has a
+  server. A CPU model of the server commit is in place and driver-proven
+  (`CSMV_SERVER_COMMIT=1`, commit `f142ad9`); porting it to the kernel needs a
+  GPU runner, because the `gpu/` tree is only *compiled* in `nightly.yml` and
+  never correctness-gated.
+- **TSan sweep follow-ups (measured 2026-11-26)**: `-fsanitize=thread` now links
+  for **all** backends (the runtime `operator new/delete` overrides are gated off
+  under `__SANITIZE_THREAD__`, which is what made TINYSTM/WT/WBETL/NOREC/
+  NORECBF/MVLOG fail to link), and `drv_diff_ops -S 1 -T 4 -n 200` reports **zero
+  consistency violations for every one of the 19 backends**. What remains are
+  data-race warnings inside the backends themselves (per-run counts, symbols
+  resolved against each backend's own binary — an earlier pass that reused a
+  single binary gave misleading names):
+
+  | backend | races | racing frames |
+  |---|---|---|
+  | SWISSTM | 22 | `swisstm::STM::read_u32` / `read_impl<u…` vs `rollback` |
+  | WT | 21 | `stm::any_type_mapping<unsigned long>` vs `tinystm::tm_write_i4` |
+  | LEFTRIGHT | 19 | `leftright::read_word` / `commit` vs `real_tm_end` |
+  | ACCELTL2 | 16 | `tl2::STM::commit` / `commit` vs `read_uint32` |
+  | TL2 | 14 | same pair as ACCELTL2 (shared core) |
+  | TSC_TM | 15 | `tsctm::commit` vs `read_impl<uns…` |
+  | NORECBF | 13 | `stm::read_value_from_addr` / `norecbf::commit` |
+  | ROMULUS | 11 | `romulus::commit` vs `read_word` |
+  | NOREC | 10 | `stm::read_value_from_addr` / `norec::commit` |
+  | NORECBF/TINYSTM/WT family | 11 | `tinystm::commit` vs `read_value_from_addr` |
+  | MVLOG | 7 | `mvlog::read_word` / `commit` |
+  | XTM | 7 | `xtm::commit` vs `read_word` |
+  | TSXSGL | 5 | `tm_exit_thread` (thread-exit path) |
+  | WBETL | 4 | `stm::read_value_from_addr`, `tinystm::tm_read` |
+  | GPU_STM_CPU | 2 | `read_common` vs `real_tm_end` |
+  | SPHT | 1 | `spht::init_thread` |
+  | SGL, JVSTM, CSMV | 0 | clean |
+
+  Triage hypothesis (unverified): most of these are the single-version pattern
+  where a committer writes a value **into the object in place** under its locks
+  while a lockless speculative reader reads the same word and is later rejected
+  by validation. That is deliberate in these designs, but formally it is a plain
+  load racing a plain store; expressing it as relaxed atomic accesses
+  (`__atomic_load_n(…, __ATOMIC_RELAXED)` for speculative reads, release stores
+  for the in-place install) keeps x86 codegen identical while removing the UB —
+  and TSan-clean backends are the prerequisite for gating a TSan CI job (T3/T4)
+  and for the sanitizer matrices beyond the current handful. Work backends one at
+  a time, `test_tx`/`test_ds` + unit suite + driver per backend.
+- **CSMV commit path can reuse a published version node (latent)**:
+  `real_tm_end()` reuses `g_tx.writes[i].node` if it is non-null. Today the
+  write set is cleared at every `begin`, so the field is always null and the
+  path is dead — but if a retry path ever kept a write set, it would rewrite
+  the `timestamp`/`value`/`next` of a node already visible in the chain. Either
+  delete the branch or assert the node is unpublished before using it.
+- **CSMV GC slot pinning if a thread dies mid-transaction**: a thread that
+  leaves a slot registered (killed without `tm_exit_thread`, or a `longjmp`
+  that never reaches `csmv_reg_end()`) pins the low-water mark until some later
+  thread reuses that slot. Bounded (4096 slots) and conservative, but unbounded
+  version growth if it happens early. Consider a heartbeat/epoch or a
+  per-slot thread-id + liveness check.
+
 ---
 
 ## P1 — Fidelity
@@ -215,6 +339,28 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   Linux kernel TM docs + LLVM HTM builtins; ACHILLES `htm_test.S`/`tbegin_tend.S`
   have inverted polarity — do not mimic. SPR map: TFHAR=128, TFIAR=129,
   TEXASR=130. tcheck CR field: 0 non-tx / 1 suspended / 2 transactional.
+
+### ARM TME simulation is not exercisable yet (found 2026-11-26)
+
+- **Files**: `gem5_sim/configs/arm-tme-kvm.py`, `gem5_sim/workloads/tme/`,
+  `gem5_sim/scripts/run-arm-tme.sh`, status table in `gem5_sim/README.md`
+- **Gap 1 — extension never enabled**: the config builds its release with
+  `ArmDefaultRelease.for_kvm()` and never adds `"TME"` to `extensions`, so
+  gem5's TME support (`src/arch/arm/insts/tme64*`, `ArmExtension.TME`, Ruby HTM
+  hooks — all present in the pinned v25.1.0.1) is never turned on and
+  `tstart`/`tcommit` would be undefined at runtime.
+- **Gap 2 — wrong CPU model for TME**: `for_kvm()` selects the KVM CPU, which
+  executes the *host* ISA; the transactional phase must run on Timing/O3 for
+  gem5's implementation to be involved.
+- **Gap 3 — no workloads**: `workloads/tme/Makefile` builds `array_sum` and
+  `hash_table` from `.c` files that do not exist, and its
+  `-march=armv8.1-a` lacks `+tme`, so TME instructions would not assemble even
+  with sources present.
+- **Next step**: add a release with `extensions = ArmDefaultRelease.extensions +
+  ["TME"]`, switch the detailed phase to a gem5 CPU, and port
+  `workloads/rtm/array_sum.c` to TME (`tsbegin/tscommit/tsend` via inline asm or
+  `__builtin_arm_*`) as `workloads/tme/array_sum.c`. x86 TSX is the reference
+  path that works end to end.
 
 ### GPU benchmark stubs (@experimental)
 - **Files**: `gpu/benchmarks/gpu_tpcc.cu` (line 28),

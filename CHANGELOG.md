@@ -3352,3 +3352,58 @@ clean across seeds 1–6 at `-T 4 -n 1500` and seeds 1–3 at `-T 8 -n 2000`
 default (server-off) path is unchanged and still clean.
 
 **Files**: `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`.
+
+## Session 2026-11-26 (night) — TSan-driven bug hunt: CSMV GC/raw-read fixes + shared hook publication
+
+Turned the T1 differential driver loose under `-fsanitize=thread`. That produced
+three real bugs, one of them in code shared by every backend.
+
+**§27 CSMV over-wide raw reads.** `read_common()`'s unversioned fallback read
+`*(uint64_t *)data_addr` at every access width, so an `i4` read of a 4-byte
+object touched the neighbour's bytes — where the neighbour's commit write-back
+publishes its value — with a plain load against an atomic store (and could
+over-read past the mapped region). Now a width-exact `__atomic_load_n` matching
+the write-back widths. CSMV TSan warnings 16 → 0.
+
+**§28 CSMV GC freed versions live snapshots needed.** The low-water mark was the
+guess `clock - 1000` (the code said so: "since we don't have cross-thread
+tracking here"), and the sweep unlinked *every* version with
+`timestamp < lwm` — including the floor version a reader at the mark still
+selects — freeing it immediately with no epoch or hazard pointer. A new unit
+test (`tests/backends/tm_impl/test_gc_reader.cpp`, one snapshot held open across
+~6000 other commits) fails **6/6** before the change with `reader saw 1 then 0`:
+a committed value silently replaced by zero, one scheduling step from a
+use-after-free. Replaced by an active-transaction registry whose mark is provably
+≤ every live/future snapshot (per-thread slot publishing a lower bound on the
+snapshot *before* reading the clock, min'ed with the clock read before the scan),
+floor-preserving trimming, and acquire/release chain links for the lockless
+walkers. The test passes after the change in a run that still reclaimed 48393
+nodes, so the green is not from GC being switched off; `bank -t 8 -n 50000`
+reclaims 77556 nodes and still conserves money.
+
+**§29 Hook publication race (ALL backends).** `tm_hook_init_thread()` re-wrote
+all 23 dispatch pointers on every thread start while other threads dispatched
+through them locklessly — idempotent in value, a data race in effect, and in
+principle able to expose a half-written table mixing real and stub hooks (the
+hazard that file's own comment documents). Publishing is now gated on a
+dirty/applied generation counter, so only an actual change to the intended table
+writes. The same 10 races disappeared for every backend.
+
+**Sanitizer coverage unblocked.** TINYSTM/WT/WBETL/NOREC/NORECBF/MVLOG could not
+link under `-fsanitize=thread` at all: their global `operator new/delete`
+overrides collide with the TSan runtime's interceptors (`multiple definition of
+operator delete`). Those overrides only add region-aware freeing and absurd-size
+diagnostics, so they are now gated off under `__SANITIZE_THREAD__`; all six link
+and run under TSan, which is what a per-backend TSan CI matrix needs.
+
+**Also**: `gc_reader` is asserted strictly only on CSMV (multi-version reads) —
+lock-based backends abort the reader at the conflicting re-read or detect it at
+commit, so for them it checks that no uncommitted value is ever observed; that
+distinction (an aborted-before-observing reader is legitimate) is what the first
+version of the test got wrong, and it reported false failures on five backends.
+
+Verification: `make check-fast` ALL PASSED, `make -C plugin run` all tests pass,
+`make fmt-check` clean, `tests/backends/tm_impl` 11 backends × 10 tests green,
+CSMV `test_tx` 120/120 + `test_ds` 207/207, driver `-T 8 -n 3000` seeds 1–3
+clean, CSMV TSan 0 warnings. Docs: `docs/CORRECTNESS_FIXES.md` §27–§29,
+`TODO.md` follow-ups (CSMV GPU gaps, TSan triage, two latent CSMV hazards).

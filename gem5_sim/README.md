@@ -33,6 +33,31 @@ docker run --rm --platform linux/amd64 \
 All simulations use the calibrated `MESI_Three_Level_HTM` Ruby cache hierarchy
 with Broadwell-EP timing parameters (xbegin=60 cycles, xend=178 cycles). `patches/030` fixes in-tree HTM bugs (WW `ST_FAIL` was ignored, 32-line capacity was 512, `RAX` abort code was never set, `CLONE_VM` broken on macOS SE) — run `./gem5_sim/setup.sh --build` to rebuild after pulling.
 
+## Simulation status by ISA (checked 2026-11-26)
+
+What each of the three hardware-TM simulations actually needs, and how far it is.
+Checked against the pinned gem5 (`.gem5-version`, v25.1.0.1) and the files in
+this directory, not from the design docs.
+
+| | x86 TSX (RTM) | POWER8 HTM | ARM TME |
+|---|---|---|---|
+| Config | `configs/x86-tsx-fs.py`, `configs/x86-se-bank*.py` | `configs/power8-htm.py` | `configs/arm-tme-kvm.py` |
+| Runner | `scripts/run-bank-gem5.sh` | `scripts/run-power8-htm.sh` | `scripts/run-arm-tme.sh` (`run-tme.sh` is a wrapper) |
+| gem5 support | in-tree + `patches/001`, `030`, `031` | `patches/002` (`HTMCheckpoint`, TEXASR/TFIAR, TM instruction classes) — present in the vendored tree (`src/arch/power/{htm,tm}.{cc,hh}`) | upstream: `src/arch/arm/insts/tme64*`, `ArmExtension.TME`, Ruby HTM hooks |
+| Build target | `build/X86_TSX` (what `setup.sh` builds) | needs a POWER build — `setup.sh` does **not** produce one | needs an ARM/ALL build |
+| Workloads | `workloads/rtm/{array_sum,hash_table}.c` | `workloads/power8/` (C + hand-written `.S`); runner wants a prebuilt `workloads/power8/<bench>` binary, which is not committed | **none**: `workloads/tme/Makefile` builds `array_sum`/`hash_table` from `.c` files that do not exist |
+| Status | **Working** — SE-mode runs verified, see `docs/x86-tsx-real-validation.md` and `m5out/bank-*` | **Partial** — implementation present, end-to-end run not demonstrated here | **Not exercisable yet** (see below) |
+
+**ARM TME gaps, concretely.** `configs/arm-tme-kvm.py` builds its release with
+`ArmDefaultRelease.for_kvm()` and never adds the extension, so the model never
+enables TME — `tstart`/`tcommit` would be undefined at runtime. Enabling it
+means a release whose `extensions` list includes `"TME"` (see
+`gem5/src/arch/arm/ArmSystem.py`) and running the transactional phase on a
+ Timing/O3 CPU rather than the KVM CPU (`for_kvm()` executes the *host* ISA, so
+it cannot supply gem5's TME implementation). On the workload side the Makefile's
+`-march=armv8.1-a` also lacks the `+tme` feature, so TME instructions would not
+assemble even if the sources existed. Tracked in `TODO.md`.
+
 ## Directory Layout
 
 ```
