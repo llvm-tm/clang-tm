@@ -1007,11 +1007,60 @@ is triaged in `TODO.md`. Behaviour unchanged: `check-fast` green, `make -C plugi
 run` green, the 11-backend `tests/backends/tm_impl` suite green,
 `test_tx`/`test_ds` 120/207 for the C++ backends.
 
+## 30. Speculative reads raced the in-place commit install (6 backends) (2026-11-26) ✅
+
+**Symptom.** ThreadSanitizer on `drv_diff_ops` reported data races whose two
+sides were always the same pair of functions: a backend's `commit`/write-back
+storing a value **into the transactional object**, and another thread's
+`read_word`/`read_value_from_addr`/`any_type_mapping<…>::…` loading that same
+word. Counts per backend: TL2 14, ACCELTL2 16, TINYSTM 11, WT 21, WBETL 4,
+NOREC 10, NORECBF 13 (and more in backends that build the same primitives through
+their own helpers).
+
+**Root cause.** This is the *intended* protocol in these designs: readers do not
+take the owner's lock, they take the word's version/guard and a racing value is
+rejected at validation. But both sides expressed that deliberate overlap as
+**plain** accesses, and a plain load concurrent with a plain store of the same
+object is undefined behaviour under the C++ memory model — the compiler is free
+to split, widen, cache or re-order either side, and TSan is right to report it.
+Nothing in the current code made the "this word may be written under me" intent
+visible to the compiler.
+
+**Fix.** The speculative side became a *relaxed* atomic load (its value is
+validated by version, so it needs no ordering), and the install side a *release*
+atomic store. On x86-64 an aligned 1–8 byte access is already a single
+instruction, so the generated code is unchanged; what changed is that the access
+pair is no longer UB and can no longer be transformed apart.
+
+Two shared helpers carry the change, because the pattern is shared:
+
+- `backends/tm_impl/common/tm_word_access.hpp` (new) — `tm_word::load_relaxed` /
+  `tm_word::store_release`, width-exact. They go through an integer view of the
+  object because the `__atomic` builtins reject `float`/`double`, and move the
+  bits with `memcpy` instead of casting a pointer to an unrelated type.
+- `stm::any_type_mapping<T>::setp/store` in `common/tm_common.hpp` — the shared
+  load/store primitives behind TinySTM, WT, WBETL, NOrec, NOrec-BF (and the
+  `read_word`/`write_value_to_addr` pairs of other backends) now use them, so one
+  edit covers that whole family.
+- TL2's own `read_impl` and write-back loop use them directly.
+
+**Verification.** ThreadSanitizer warnings on `drv_diff_ops -S 1 -T 4 -n 200`,
+before → after: TL2 14 → **0**, ACCELTL2 16 → 2 (the remainder is its OpenCL/SVM
+guard table, not the STM core — see `TODO.md`), TINYSTM 11 → **0**, WT 21 →
+**0**, WBETL 4 → **0**, NOREC 10 → **0**, NORECBF 13 → **0**, LEFTRIGHT 19 →
+**0**, ROMULUS 11 → **0**, MVLOG 7 → **0**. Tree-wide: **178 → 56** warnings,
+with 12 of 19 backends now completely clean. Every run keeps all driver
+consistency counters at 0, `test_tx` 120/120 + `test_ds` 207/207 hold for each
+backend, and the 11-backend `tests/backends/tm_impl` suite is green. What
+removes the most is that these were *shared* primitives: one edit in
+`any_type_mapping` cleared seven backends at once. The rest of the triage table,
+with the per-backend frames still reporting, is in `TODO.md`.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |
 |-------|----------|-------|
-| Per-backend ThreadSanitizer data races (triage open) | Medium | Post-§29 sweep of `drv_diff_ops -S 1 -T 4 -n 200`: **178** warnings over 16 backends, **0 consistency violations** in any backend, 0 warnings on SGL/JVSTM/CSMV. Concentrated in `commit` writing values in place under locks vs lockless speculative reads (SWISSTM 22, WT 21, LEFTRIGHT 19, ACCELTL2/TL2 16/14, TSC_TM 15, …). Likely deliberate in these designs but formally UB; per-backend counts, frames and the relaxed-atomics remediation plan are in `TODO.md`. Blocking a TSan-gated CI job. |
+| Per-backend ThreadSanitizer data races (triage open) | Medium | Post-§29/§30 sweep of `drv_diff_ops -S 1 -T 4 -n 200`: **56** warnings over 7 backends, **0 consistency violations** in any backend, and 12 of 19 backends report zero warnings. What remains is backend-internal: SWISSTM 24 and TSC_TM 17 (own `read_impl`), XTM 6, TSXSGL 5, ACCELTL2 2 (OpenCL/SVM table), GPU_STM_CPU 1, SPHT 1. Per-backend counts, frames and the next fixes are in `TODO.md`. `.github/workflows/ci.yml`'s `tsan-gate` job gates on the clean list. |
 | ARM TME simulation not exercisable | Medium | `configs/arm-tme-kvm.py` never adds `"TME"` to the release's extensions and uses the KVM CPU (host ISA); `workloads/tme/` has a Makefile whose sources do not exist and lacks `-march=…+tme`. gem5 v25.1.0.1 itself supports TME (`tme64*`, `ArmExtension.TME`). Details in `gem5_sim/README.md` and `TODO.md`. |
 | CSMV GPU kernel: no commit validation, `>>3` aliasing, no server | High | `gpu/backends/csmv/cuda/`: `csmv_device_commit` performs no read-set validation (conflicting transactions both install versions), `csmv_gpu_entry_idx()` still keys chains by `>> 3` with no owner tag (§25 on CPU, unfixed on GPU), and neither GPU path implements the block-0/server-warp commit that `docs/proofs/GPU_STM_PLAN.md:19` specifies. CPU model of the server commit exists (`CSMV_SERVER_COMMIT=1`). Porting needs a GPU runner: the `gpu/` tree is compiled in `nightly.yml` only, never correctness-gated. |
 | TinySTM STMbench7 crash (STL vector realloc) | High | STL-in-TM incompatibility, pre-existing |

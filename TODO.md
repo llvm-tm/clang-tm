@@ -249,45 +249,36 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   (`CSMV_SERVER_COMMIT=1`, commit `f142ad9`); porting it to the kernel needs a
   GPU runner, because the `gpu/` tree is only *compiled* in `nightly.yml` and
   never correctness-gated.
-- **TSan sweep follow-ups (measured 2026-11-26)**: `-fsanitize=thread` now links
-  for **all** backends (the runtime `operator new/delete` overrides are gated off
-  under `__SANITIZE_THREAD__`, which is what made TINYSTM/WT/WBETL/NOREC/
-  NORECBF/MVLOG fail to link), and `drv_diff_ops -S 1 -T 4 -n 200` reports **zero
-  consistency violations for every one of the 19 backends**. What remains are
-  data-race warnings inside the backends themselves (per-run counts, symbols
-  resolved against each backend's own binary — an earlier pass that reused a
-  single binary gave misleading names):
+ - **TSan sweep follow-ups (measured 2026-11-26, after the hook-publication fix
+   and the shared-atomics fix of §30)**: `-fsanitize=thread` now links for **all**
+   backends (the runtime `operator new/delete` overrides are gated off under
+   `__SANITIZE_THREAD__`, which is what made TINYSTM/WT/WBETL/NOREC/NORECBF/MVLOG
+   fail to link), and `drv_diff_ops -S 1 -T 4 -n 200` reports **zero consistency
+   violations for all 19 backends**. Data-race warnings went **178 → 56** with the
+   shared `stm::any_type_mapping` atomics; 12 of the 19 backends are now
+   completely clean:
 
-  | backend | races | racing frames |
-  |---|---|---|
-  | SWISSTM | 22 | `swisstm::STM::read_u32` / `read_impl<u…` vs `rollback` |
-  | WT | 21 | `stm::any_type_mapping<unsigned long>` vs `tinystm::tm_write_i4` |
-  | LEFTRIGHT | 19 | `leftright::read_word` / `commit` vs `real_tm_end` |
-  | ACCELTL2 | 16 | `tl2::STM::commit` / `commit` vs `read_uint32` |
-  | TL2 | 14 | same pair as ACCELTL2 (shared core) |
-  | TSC_TM | 15 | `tsctm::commit` vs `read_impl<uns…` |
-  | NORECBF | 13 | `stm::read_value_from_addr` / `norecbf::commit` |
-  | ROMULUS | 11 | `romulus::commit` vs `read_word` |
-  | NOREC | 10 | `stm::read_value_from_addr` / `norec::commit` |
-  | NORECBF/TINYSTM/WT family | 11 | `tinystm::commit` vs `read_value_from_addr` |
-  | MVLOG | 7 | `mvlog::read_word` / `commit` |
-  | XTM | 7 | `xtm::commit` vs `read_word` |
-  | TSXSGL | 5 | `tm_exit_thread` (thread-exit path) |
-  | WBETL | 4 | `stm::read_value_from_addr`, `tinystm::tm_read` |
-  | GPU_STM_CPU | 2 | `read_common` vs `real_tm_end` |
-  | SPHT | 1 | `spht::init_thread` |
-  | SGL, JVSTM, CSMV | 0 | clean |
+   | backend | races (was) | remaining frames |
+   |---|---|---|
+   | SWISSTM | 24 (22) | `swisstm::STM::read_impl<u…` / `read_u32` vs `rollback` |
+   | TSC_TM | 17 (15) | `tsctm::STM::commit` vs its own `read_impl<uns…` |
+   | XTM | 6 (7) | `xtm::read_word` (its page-granular path, not the shared primitive) vs `commit` |
+   | TSXSGL | 5 (5) | reported at `tm_exit_thread` — thread-exit path, needs detail |
+   | ACCELTL2 | 2 (16) | OpenCL/SVM guard table + `tl2::STM::init` (see below) |
+   | GPU_STM_CPU | 1 (2) | `read_common`'s 8-byte case is a plain `memcpy` load while installs use `__atomic_store_n` — one-line fix |
+   | SPHT | 1 (1) | `spht::init_thread`: unsynchronised lazy `g_pcl = new PCL()` — needs `call_once` |
+   | CSMV, JVSTM, SGL, TL2, TINYSTM, WT, WBETL, NOREC, NORECBF, LEFTRIGHT, ROMULUS, MVLOG | **0** | clean (counts before §30: 0, 0, 0, 14, 11, 21, 4, 10, 13, 19, 11, 7) |
 
-  Triage hypothesis (unverified): most of these are the single-version pattern
-  where a committer writes a value **into the object in place** under its locks
-  while a lockless speculative reader reads the same word and is later rejected
-  by validation. That is deliberate in these designs, but formally it is a plain
-  load racing a plain store; expressing it as relaxed atomic accesses
-  (`__atomic_load_n(…, __ATOMIC_RELAXED)` for speculative reads, release stores
-  for the in-place install) keeps x86 codegen identical while removing the UB —
-  and TSan-clean backends are the prerequisite for gating a TSan CI job (T3/T4)
-  and for the sanitizer matrices beyond the current handful. Work backends one at
-  a time, `test_tx`/`test_ds` + unit suite + driver per backend.
+   (SWISSTM/TSC_TM/XTM counts move ±2 between runs — TSan reports what it happens
+   to observe — so treat those as unchanged rather than regressed.)
+
+   Next fixes, in the order that removes the most: **SWISSTM**'s read path (its
+   sequence-number loop does `(void)*addr;` and then `return *addr;` — both plain,
+   and the returned load is *outside* the validated window, so it should return
+   the value captured inside it); **TSC_TM**'s `read_impl` (same shape, own file);
+   **XTM**'s `read_word` page path; then SPHT's once-init and GPU_STM_CPU's
+   8-byte load. Keep the `tsan-gate` matrix in `.github/workflows/ci.yml` in step
+   with the clean list as each one lands.
 - **CSMV commit path can reuse a published version node (latent)**:
   `real_tm_end()` reuses `g_tx.writes[i].node` if it is non-null. Today the
   write set is cleared at every `begin`, so the field is always null and the
@@ -300,6 +291,16 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   thread reuses that slot. Bounded (4096 slots) and conservative, but unbounded
   version growth if it happens early. Consider a heartbeat/epoch or a
   per-slot thread-id + liveness check.
+- **ACCELTL2 OpenCL/SVM path: 2 races + 1 thread leak**
+  (`backends/tm_impl/acceltl2/`): the shared `any_type_mapping` atomics took
+  ACCELTL2 from 16 TSan warnings to 3, and what remains is accelerator plumbing
+  rather than the STM core — two 8-byte write/write races inside the
+  SVM-allocated guard table (TSan shows them at SVM addresses with
+  `operator new`/`operator delete` frames because it does not know the
+  `clSVMAlloc` region, i.e. host threads mutate the shared table without common
+  synchronisation) plus one **thread leak** (a thread that is never joined).
+  Review needs a machine with a real IGP; benign in practice today, but
+  unsynchronised.
 
 ---
 

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "tm_region_allocator.hpp"
+#include "tm_word_access.hpp"
 
 #ifdef LLVM_TM_PLUGIN
 // The LLVM pass only generates tm_read_*/tm_write_* for TM-tracked addresses
@@ -109,12 +110,26 @@ struct any_type_t {
 
 template <typename T> struct any_type_mapping;
 
+// setp()/store() move a value between a log entry and a TRANSACTIONAL address.
+// That address may be getting installed in place by another thread's commit at
+// the same moment — readers deliberately take no lock there, and a racing value
+// is rejected later by version validation. Expressed as memcpy, that overlap is
+// a plain access racing a plain access: undefined behaviour, and a
+// ThreadSanitizer data race. So both go through the width-exact atomic helpers
+// in tm_word_access.hpp: a relaxed load (the value's validity comes from the
+// version check, not from ordering) and a release store.
 #define MAP_ANY(T, AT, M, AM)                                                            \
 	template <> struct any_type_mapping<T> {                                             \
 		static T &get(any_type_t &t) { return t.M; }                                     \
 		static void set(any_type_t &t, T v) { t.M = v; }                                 \
-		static void setp(any_type_t &t, void *a) { memcpy(&t.AM, a, sizeof(AT)); }       \
-		static void store(any_type_t &t, void *a) { memcpy(a, &t.AM, sizeof(AT)); }      \
+		static void setp(any_type_t &t, void *a)                                         \
+		{                                                                                \
+			t.AM = tm_word::load_relaxed((AT *)a);                                       \
+		}                                                                                \
+		static void store(any_type_t &t, void *a)                                        \
+		{                                                                                \
+			tm_word::store_release((AT *)a, t.AM);                                       \
+		}                                                                                \
 	};
 
 MAP_ANY(uint8_t, uint8_t, u1, u1)
