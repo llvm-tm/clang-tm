@@ -40,6 +40,78 @@ static std::atomic<uint64_t> g_csmv_clock{0};
 static std::atomic<uint64_t> g_csmv_low_water{0};
 static std::atomic<int> g_csmv_active_txns{0};
 
+// ── Active-transaction registry (drives the GC low-water mark) ───
+// Version reclamation must never free a version that some transaction can
+// still select, so the low-water mark has to be the OLDEST snapshot among
+// running transactions — not a guess like `clock - 1000`. Each thread claims
+// one slot and publishes a LOWER BOUND on the snapshot it is about to take,
+// before it reads the clock; GC takes the minimum over the slots and the clock
+// value it read before scanning. That bound is always <= every live or future
+// snapshot: a transaction whose slot the scan saw contributed a value stored
+// before its clock read, and one it did not see (still INACTIVE) starts after
+// the scan's clock load, which is monotonic. Being conservative only costs
+// memory, never correctness. CSMV_CLOCK_INACTIVE marks a free slot.
+#define CSMV_MAX_ACTIVES 4096
+#define CSMV_CLOCK_INACTIVE (0xFFFFFFFFFFFFFFFFull)
+static std::atomic<uint64_t> g_csmv_slots[CSMV_MAX_ACTIVES];
+static std::atomic<int> g_csmv_slot_ctr{0};
+static std::atomic<bool> g_csmv_gc_off{false}; // registry overflow: never sweep
+static thread_local int g_csmv_slot = -1;
+static thread_local int g_csmv_depth = 0;
+
+// Called at every (possibly nested) begin, before the clock is read. Only the
+// outermost transaction publishes: a nested begin must not raise the bound
+// above the snapshot its enclosing transaction is still reading.
+static void csmv_reg_begin()
+{
+	if (g_csmv_depth++ == 0) {
+		if (g_csmv_slot < 0) {
+			int s = g_csmv_slot_ctr.fetch_add(1, std::memory_order_relaxed);
+			if (s >= CSMV_MAX_ACTIVES) {
+				// More threads than slots: be conservative and stop
+				// reclaiming rather than free a version in use.
+				g_csmv_gc_off.store(true, std::memory_order_relaxed);
+				g_csmv_slot_ctr.store(CSMV_MAX_ACTIVES, std::memory_order_relaxed);
+				return;
+			}
+			g_csmv_slot = s;
+		}
+		// Stale values left by a transaction that never reached csmv_reg_end()
+		// (e.g. a longjmp out of a user callback) are overwritten here, so a
+		// leak cannot pin the low-water mark forever.
+		g_csmv_slots[g_csmv_slot].store(g_csmv_clock.load(std::memory_order_acquire),
+		                                std::memory_order_release);
+	}
+}
+
+static void csmv_reg_end()
+{
+	if (g_csmv_depth > 0 && --g_csmv_depth == 0) {
+		if (g_csmv_slot >= 0)
+			g_csmv_slots[g_csmv_slot].store(CSMV_CLOCK_INACTIVE,
+			                                std::memory_order_release);
+	}
+}
+
+// Oldest snapshot any running (or about-to-run) transaction can select.
+// Returns 0 to mean "do not sweep this round".
+static uint64_t csmv_low_water_mark()
+{
+	if (g_csmv_gc_off.load(std::memory_order_relaxed))
+		return 0;
+	// Read the clock FIRST: any transaction that starts after this point
+	// takes a snapshot >= this value, so it bounds the unregistered ones.
+	uint64_t lwm = g_csmv_clock.load(std::memory_order_acquire);
+	for (int i = 0; i < CSMV_MAX_ACTIVES; i++) {
+		uint64_t v = g_csmv_slots[i].load(std::memory_order_acquire);
+		if (v == CSMV_CLOCK_INACTIVE)
+			continue;
+		if (v < lwm)
+			lwm = v;
+	}
+	return lwm;
+}
+
 // ── Server-commit mode (CPU model of the GPU block-0 server) ────
 // docs/proofs/GPU_STM_PLAN.md specifies CSMV's protocol as "client-server
 // commit: server validates, clients batch writes". On the GPU that server is
@@ -83,6 +155,21 @@ static void gc_flush()
 		std::free(tmp->node);
 		std::free(tmp);
 	}
+}
+
+// ── Version-chain link access ────────────────────────────────────
+// Readers walk the chain without the entry lock while the committer prepends
+// and the GC sweep unlinks under it, so the link field is accessed with
+// acquire/release atomics (the field itself stays a plain pointer: the GPU
+// kernels share this struct and use plain device loads).
+static inline CSMVVersionNode *link_of(CSMVVersionNode *n)
+{
+	return __atomic_load_n(&n->next, __ATOMIC_ACQUIRE);
+}
+
+static inline void set_link(CSMVVersionNode *n, CSMVVersionNode *v)
+{
+	__atomic_store_n(&n->next, v, __ATOMIC_RELEASE);
 }
 
 // ── Hash helpers ─────────────────────────────────────────────────
@@ -136,6 +223,7 @@ static CSMVObjectEntry *csmv_get_entry(void *addr)
 
 static void real_tm_begin()
 {
+	csmv_reg_begin(); // publish a bound on the snapshot before reading the clock
 	g_tx.start_clock = g_csmv_clock.load(std::memory_order_acquire);
 	g_tx.num_reads = 0;
 	g_tx.num_writes = 0;
@@ -208,7 +296,7 @@ static void real_tm_end()
 		}
 		node->timestamp = commit_ts;
 		node->value = val;
-		node->next = old_head;
+		set_link(node, old_head);
 
 		entry->head.store(node, std::memory_order_release);
 
@@ -241,6 +329,7 @@ static void real_tm_end()
 
 	g_tx.commit_count++;
 	g_csmv_active_txns.fetch_sub(1, std::memory_order_relaxed);
+	csmv_reg_end(); // this transaction can no longer select a version
 
 	// ── Opportunistic GC every CSMV_GC_INTERVAL commits ──────
 	// (skipped in server mode: the sweep uses per-entry locks that the
@@ -248,26 +337,43 @@ static void real_tm_end()
 	//  GPU server kernel has no inline full-table GC either. Driver runs
 	//  are short, so leaving version chains un-GCed is fine there.)
 	if (!g_csmv_server_mode && g_tx.commit_count % CSMV_GC_INTERVAL == 0) {
-		// Update low_water_mark: minimum start_time of all active txns
-		// (since we don't have cross-thread tracking here, use a safe
-		//  conservative approximation: clock - max_active_window)
-		uint64_t now = g_csmv_clock.load(std::memory_order_relaxed);
+		// Low-water mark = the OLDEST snapshot any running transaction can
+		// still select (see csmv_low_water_mark). The previous
+		// `clock - 1000` guess could run ahead of a long-running reader and
+		// free the version it was about to read.
 		uint64_t prev = g_csmv_low_water.load(std::memory_order_relaxed);
-		uint64_t new_lwm = now > 1000 ? now - 1000 : 0;
-		g_csmv_low_water.store(new_lwm, std::memory_order_relaxed);
+		uint64_t new_lwm = csmv_low_water_mark();
+		if (new_lwm > prev)
+			g_csmv_low_water.store(new_lwm, std::memory_order_relaxed);
 
-		// Sweep version lists: trim nodes older than low_water
-		if (new_lwm > prev) {
+		// Sweep version lists.
+		if (new_lwm > prev && new_lwm > 0) {
 			for (uint64_t i = 0; i < CSMV_TABLE_SIZE; i++) {
 				CSMVObjectEntry *entry = &g_csmv_table[i];
 				std::lock_guard<std::mutex> lk(entry->lock);
 				CSMVVersionNode *head = entry->head.load(std::memory_order_relaxed);
 				if (!head)
 					continue;
-				// Keep the newest node (always needed) + any with ts >= lwm
-				while (head->next && head->next->timestamp < new_lwm) {
-					CSMVVersionNode *old = head->next;
-					head->next = old->next;
+				// Floor = the newest version a reader at the low-water mark
+				// would still select. Only versions OLDER than the floor are
+				// unreachable: each of them has a newer version whose
+				// timestamp is <= the floor's <= every live snapshot, so no
+				// active or future reader can select it. Trimming by
+				// "timestamp < lwm" instead (as this used to) also dropped
+				// the floor itself, making a reader fall off the end of the
+				// chain and read 0 in place of a committed value.
+				CSMVVersionNode *floor = nullptr;
+				for (CSMVVersionNode *n = head; n; n = link_of(n)) {
+					if (n->timestamp <= new_lwm) {
+						floor = n;
+						break;
+					}
+				}
+				if (!floor)
+					continue; // every version is newer than any snapshot
+				while (link_of(floor)) {
+					CSMVVersionNode *old = link_of(floor);
+					set_link(floor, link_of(old));
 					gc_reclaim_node(old);
 				}
 			}
@@ -290,6 +396,7 @@ abort_tx:
 		}
 	}
 	g_csmv_active_txns.fetch_sub(1, std::memory_order_relaxed);
+	csmv_reg_end();
 	siglongjmp(tm_jmpbuf, 1);
 }
 
@@ -306,7 +413,28 @@ static int find_write(void *data_addr)
 	return -1;
 }
 
-static uint64_t read_common(void *data_addr)
+// Raw (unversioned) value of an object, read with the object's own width and
+// with the same atomicity as the commit-time write-back in real_tm_end.
+// Reading a fixed 8 bytes for a narrower object is wrong twice over: it
+// touches bytes owned by the *neighbouring* object (a formal data race against
+// that object's commit store, reported by ThreadSanitizer), and it can
+// over-read past the end of the mapped TM region. The width must match the
+// __atomic_store_n widths in real_tm_end so the load pairs with the store.
+static uint64_t raw_load(void *data_addr, uint8_t bytes)
+{
+	switch (bytes) {
+	case 1:
+		return __atomic_load_n((uint8_t *)data_addr, __ATOMIC_ACQUIRE);
+	case 2:
+		return __atomic_load_n((uint16_t *)data_addr, __ATOMIC_ACQUIRE);
+	case 4:
+		return __atomic_load_n((uint32_t *)data_addr, __ATOMIC_ACQUIRE);
+	default:
+		return __atomic_load_n((uint64_t *)data_addr, __ATOMIC_ACQUIRE);
+	}
+}
+
+static uint64_t read_common(void *data_addr, uint8_t bytes)
 {
 	// Check write-set first (read-own-writes)
 	int wi = find_write(data_addr);
@@ -329,7 +457,7 @@ static uint64_t read_common(void *data_addr)
 	if (head == nullptr) {
 		// No versions yet — return raw value (initial state before any write)
 		// This supports non-TM initialization (e.g., TM<int> x(10))
-		result = *(uint64_t *)data_addr;
+		result = raw_load(data_addr, bytes);
 		observed = 0;
 	} else if (head->timestamp <= g_tx.start_clock) {
 		// Head is the newest version and within our snapshot → fast path
@@ -346,7 +474,7 @@ static uint64_t read_common(void *data_addr)
 				observed = node->timestamp;
 				break;
 			}
-			node = node->next;
+			node = link_of(node);
 		}
 	}
 
@@ -393,27 +521,27 @@ static void real_tm_free(void *p) { stm::tm_region_free(p); }
 
 // ── Read stubs ───────────────────────────────────────────────────
 
-static uint8_t real_tm_read_i1(uint8_t *a) { return (uint8_t)read_common(a); }
-static uint16_t real_tm_read_i2(uint16_t *a) { return (uint16_t)read_common(a); }
-static uint32_t real_tm_read_i4(uint32_t *a) { return (uint32_t)read_common(a); }
-static uint64_t real_tm_read_i8(uint64_t *a) { return read_common(a); }
+static uint8_t real_tm_read_i1(uint8_t *a) { return (uint8_t)read_common(a, 1); }
+static uint16_t real_tm_read_i2(uint16_t *a) { return (uint16_t)read_common(a, 2); }
+static uint32_t real_tm_read_i4(uint32_t *a) { return (uint32_t)read_common(a, 4); }
+static uint64_t real_tm_read_i8(uint64_t *a) { return read_common(a, 8); }
 static float real_tm_read_f4(float *a)
 {
-	uint64_t r = read_common(a);
+	uint64_t r = read_common(a, 4);
 	float v;
 	__builtin_memcpy(&v, &r, 4);
 	return v;
 }
 static double real_tm_read_f8(double *a)
 {
-	uint64_t r = read_common(a);
+	uint64_t r = read_common(a, 8);
 	double v;
 	__builtin_memcpy(&v, &r, 8);
 	return v;
 }
 static void *real_tm_read_ptr(void **a)
 {
-	uint64_t r = read_common(a);
+	uint64_t r = read_common(a, 8);
 	void *v;
 	__builtin_memcpy(&v, &r, 8);
 	return v;
@@ -499,6 +627,10 @@ extern "C" void tm_init()
 	if (const char *e = std::getenv("CSMV_SERVER_COMMIT"))
 		g_csmv_server_mode = (e[0] != '\0' && e[0] != '0');
 
+	// Active-transaction registry starts empty.
+	for (int i = 0; i < CSMV_MAX_ACTIVES; i++)
+		g_csmv_slots[i].store(CSMV_CLOCK_INACTIVE, std::memory_order_relaxed);
+
 	// Allocate and zero-initialize object table
 	g_csmv_table = (CSMVObjectEntry *)std::calloc(CSMV_TABLE_SIZE,
 	                                              sizeof(CSMVObjectEntry));
@@ -554,5 +686,6 @@ static void do_tm_exit_thread()
 extern "C" void tm_exit_thread()
 #endif
 {
+	csmv_reg_end(); // drop this thread's snapshot from the low-water mark
 	tm_hook_exit_thread();
 }

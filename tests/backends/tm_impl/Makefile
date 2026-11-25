@@ -58,7 +58,7 @@ RUNTIME_csmv := $(RUNTIME_DIR)/csmv/cpu/csmv_cpu_runtime.cpp
 FLAGS_csmv := -DTM_BACKEND_CSMV
 
 # ── Test source files ──────────────────────────────────────────────
-TESTS := counter_st counter_mt write_set_validation overlap_stress read_lock_interference readall_write_interference abba_deadlock subword_counters
+TESTS := counter_st counter_mt write_set_validation overlap_stress read_lock_interference readall_write_interference abba_deadlock subword_counters gc_reader
 
 # ── Standalone allocator tests (no backend runtime) ─────────────────
 ALLOC_TESTS := region_alloc region_stress
