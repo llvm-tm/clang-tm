@@ -74,6 +74,8 @@ override BACKEND := $(shell echo "$(BACKEND)" | tr '[:lower:]' '[:upper:]')
 CXXFLAGS += -I../.. -I../../explicit_api/cpp
 EXTRA_INC =
 RUNTIME =
+EXTRA_SRC =
+EXTRA_LDLIBS =
 REGION_ALLOC = ../../backends/tm_impl/tm_region_allocator/tm_region_allocator.cpp
 
 ifeq ($(BACKEND),TINYSTM)
@@ -115,6 +117,23 @@ ifeq ($(BACKEND),TL2)
   RUNTIME  = ../../backends/tm_impl/tl2/tl2_runtime.cpp
   DEFS     = -DTM_BACKEND_TL2
   EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tl2
+endif
+# ACCELTL2 — TL2 core + runtime-detected accelerator validation.
+# Reuses tl2_runtime.cpp/tl2.hpp behind -DTM_ACCEL_GPU plus the accel
+# module (OpenCL dlopen'd at runtime — no GPU toolchain needed to build;
+# degrades to the plain CPU path when no fine-grain-SVM device exists).
+# See backends/tm_impl/accel_tl2/accel_probe.hpp for TM_ACCEL_* knobs.
+ifeq ($(BACKEND),ACCELTL2)
+  # dlopen of libOpenCL requires a DYNAMIC executable: with the default
+  # STATIC=1 link on Linux, glibc's dlopen cannot bind the ICD loader and
+  # ocl-icd segfaults during clGetPlatformIDs.
+  override STATIC := 0
+  STATIC_FLAG :=
+  RUNTIME  = ../../backends/tm_impl/tl2/tl2_runtime.cpp
+  EXTRA_SRC = ../../backends/tm_impl/accel_tl2/accel_probe.cpp
+  EXTRA_LDLIBS = -ldl
+  DEFS     = -DTM_BACKEND_TL2 -DTM_ACCEL_GPU
+  EXTRA_INC = -I../../backends/tm_impl/common -I../../backends/tm_impl/tl2 -I../../backends/tm_impl/accel_tl2
 endif
 ifeq ($(BACKEND),TSC_TM)
   RUNTIME  = ../../backends/tm_impl/tsc_tm/tsc_tm_runtime.cpp
@@ -361,8 +380,8 @@ bin:
 	mkdir -p bin STAMP/kmeans STAMP/genome STAMP/intruder STAMP/ssca2
 
 define BUILD_RULE
-$(1): bin $(2) $(RUNTIME) $(REGION_ALLOC) $(HOOKS_SRC) $(BUILTINS) Makefile
-	$$(CXX) $$(CXXFLAGS) $$(EXTRA_INC) $$(DEFS) -o $$@ $(2) $$(RUNTIME) $$(REGION_ALLOC) $$(HOOKS_SRC) $$(LDFLAGS)
+$(1): bin $(2) $(RUNTIME) $(REGION_ALLOC) $(HOOKS_SRC) $(EXTRA_SRC) $(BUILTINS) Makefile
+	$$(CXX) $$(CXXFLAGS) $$(EXTRA_INC) $$(DEFS) -o $$@ $(2) $$(RUNTIME) $$(REGION_ALLOC) $$(HOOKS_SRC) $$(EXTRA_SRC) $$(LDFLAGS) $$(EXTRA_LDLIBS)
 endef
 
 define BUILD_STUBS_RULE

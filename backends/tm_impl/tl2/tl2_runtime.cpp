@@ -58,6 +58,9 @@ TM_PLUGIN_LIFECYCLE_FN(do_tm_init, extern "C" void tm_init())
 
 TM_PLUGIN_LIFECYCLE_FN(do_tm_exit, extern "C" void tm_exit())
 {
+#ifdef TM_ACCEL_GPU
+	accel::shutdown();
+#endif
 	stm::tm_region_destroy();
 }
 

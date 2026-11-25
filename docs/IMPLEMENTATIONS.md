@@ -534,6 +534,50 @@ MVLog is within ~1–4% of NOrec across workloads (commit lock + slot-claim over
 
 ---
 
+## 21. AccelTL2 (ACCELTL2) — TL2 + runtime-detected accelerator validation
+
+**Algorithm:** the full TL2 backend (`backends/tm_impl/tl2/`, compiled with
+`-DTM_ACCEL_GPU`) plus a zero-copy accelerator offload of the commit-time
+**read-set validation scan**. The inverse of §15/§16: transactions execute on
+CPU threads as usual; the accelerator only pre-scans the guard table.
+
+**Design status:** `incubating` (`backends/tm_impl/accel_tl2/STATUS.md`);
+C++ only; validated on AMD Ryzen AI MAX+ 395 (Radeon 8060S `gfx1151` iGPU,
+ROCm/OpenCL): `test_tx` 120/120 and `test_ds` 207/207 at the default dispatch
+threshold and with `TM_ACCEL_MIN=1` (every writing commit through the GPU
+kernel).
+
+**How it works:**
+- `accel_probe.cpp` `dlopen`s `libOpenCL.so.1` at runtime — **no build-time
+  GPU dependency**, so CI builds the backend anywhere; absent a GPU with
+  `CL_DEVICE_SVM_FINE_GRAIN_BUFFER` everything degrades to the plain CPU path.
+- With a fine-grain-SVM device, `tl2::init()` places the guard table
+  (`g_guards`) in `clSVMAlloc` memory: CPU `std::atomic` and GPU kernels share
+  one physical copy through the same virtual pointer — no staging copies.
+- `commit()` dispatches a JIT'd 6-line kernel (one work-item per read entry:
+  flag any guard that is locked or whose version differs from the observed
+  one) **before** write-set sorting and lock acquisition, when the read log
+  has ≥ `TM_ACCEL_MIN` entries (default 4096; measured kernel floor ≈17 µs vs
+  ~2–4 ns/entry CPU scan). A device-reported conflict aborts immediately,
+  saving lock churn on doomed large commits.
+- **Safety:** the device verdict is only ever used to *abort early*; a clean
+  verdict is not trusted and CPU validation steps run in full, so opacity
+  semantics are identical to TL2. Transient writer locks can cause spurious
+  aborts (never missed conflicts) — TM callers must tolerate aborts anyway.
+- NPUs (AMD XDNA `amdxdna` at `/dev/accel/accel0`, or anything under
+  `/sys/class/accel`) are detected and **reported but never used**: tile-graph
+  over DMA buffers, no shared-pointer atomics (see
+  `backends/tm_impl/accel_tl2/Implementation_notes.md`).
+
+**Key files:**
+- `backends/tm_impl/accel_tl2/accel_probe.{hpp,cpp}` — detection, SVM guard
+  table, dispatch (`TM_ACCEL_DISABLE`/`TM_ACCEL_MIN`/`TM_ACCEL_VERBOSE`)
+- `backends/tm_impl/tl2/tl2.hpp` — all accel code `#ifdef TM_ACCEL_GPU`
+- `benchmarks/cpp/Makefile` — `BACKEND=ACCELTL2` (forces `STATIC=0`: static
+  linking breaks glibc `dlopen` of the ICD loader)
+
+---
+
 ## Shared Infrastructure
 
 ### Hook System (`backends/tm_impl/common/tm_hooks.hpp`)
@@ -642,6 +686,7 @@ The Rust workspace in `explicit_api/rust/workspace/` implements the same algorit
 | DUDETM | 114/114 | 207/207 | PASS | PASS | — | — |
 | GPU_STM_CPU | 114/114 | 207/207 | PASS** | — | — | — |
 | **CSMV_CPU** | 114/114 | 207/207 | TBD | — | — | — |
+| ACCELTL2 | 120/120 | 207/207 | — | — | — | — |
 | MVLog | 114/114 | 207/207 | PASS | PASS | — | — |
 | TIKV | — | — | PASS | — | — | — |
 

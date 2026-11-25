@@ -24,6 +24,13 @@
 #include <type_traits>
 #include <vector>
 
+#ifdef TM_ACCEL_GPU
+// ACCELTL2: runtime accelerator probe + zero-copy guard table + GPU
+// read-set prevalidation (see backends/tm_impl/accel_tl2/).  Never
+// defined for the plain TL2 backend — its codegen is unchanged.
+#include "accel_probe.hpp"
+#endif
+
 namespace tl2
 {
 
@@ -250,7 +257,20 @@ class STM
 {
 private:
 	static std::atomic<word_t> g_clock;
+#ifdef TM_ACCEL_GPU
+	// When an accelerator is available this points into device-shared
+	// (fine-grain SVM) memory allocated by accel::shared_guard_table();
+	// otherwise at the static backing store (accel_backing()).
+	static std::atomic<word_t> *g_guards;
+
+	static std::atomic<word_t> *accel_backing()
+	{
+		static std::atomic<word_t> backing[GUARD_TABLE_SIZE];
+		return backing;
+	}
+#else
 	static std::atomic<word_t> g_guards[GUARD_TABLE_SIZE];
+#endif
 	static std::atomic<bool> initialized;
 
 	static word_t get_guard_idx(word_t *addr)
@@ -287,9 +307,16 @@ public:
 	{
 		if (!initialized.load(std::memory_order_seq_cst)) {
 			g_clock.store(1, std::memory_order_relaxed);
-			for (auto &g : g_guards) {
-				g.store(0, std::memory_order_relaxed);
+#ifdef TM_ACCEL_GPU
+			if (!g_guards) {
+				std::atomic<word_t> *shared = nullptr;
+				if (accel::probe_available())
+					shared = accel::shared_guard_table(GUARD_TABLE_SIZE);
+				g_guards = shared ? shared : accel_backing();
 			}
+#endif
+			for (unsigned gi = 0; gi < GUARD_TABLE_SIZE; gi++)
+				g_guards[gi].store(0, std::memory_order_relaxed);
 			initialized.store(true);
 		}
 	}
@@ -681,6 +708,36 @@ public:
 			return true;
 		}
 
+#ifdef TM_ACCEL_GPU
+		// ACCELTL2 zero-copy pre-validation: the guard table lives in
+		// fine-grain-SVM memory shared with the accelerator, so for large
+		// read sets we dispatch a parallel guard-table scan BEFORE sorting
+		// and acquiring any locks — a doomed commit aborts without lock
+		// churn.  Verdict safety: a guard the device saw locked or with a
+		// changed version fails (or is about to fail) Step 5's check in the
+		// same state; a transient-lock false positive is possible (writer
+		// later aborts), never a missed conflict.  A CLEAN verdict is not
+		// trusted: Steps 3-5 below still run in full, so all correctness
+		// remains with the CPU code path.
+		if (accel::guards_shared() && tx->read_set.size() >= accel::min_entries()) {
+			static thread_local std::vector<uint64_t> s_packed;
+			s_packed.resize(tx->read_set.size() * 2);
+			uint64_t *pk = s_packed.data();
+			for (const auto &re : tx->read_set) {
+				pk[0] = (uint64_t)(((uintptr_t)re.guard_addr - (uintptr_t)g_guards) /
+				                   sizeof(g_guards[0]));
+				pk[1] = (uint64_t)re.observed_version;
+				pk += 2;
+			}
+			if (accel::prevalidate(s_packed.data(), tx->read_set.size(), g_guards)) {
+				TM_EVENT(TX_ABORT, (word_t)tx, tx->start_version);
+				tx->active = false;
+				tx->aborted = true;
+				return false;
+			}
+		}
+#endif
+
 		// Step 3: Acquire write-set locks, handling guard-table aliasing
 		// Sort by address to guarantee deadlock-free lock acquisition
 		std::sort(tx->write_set.begin(),
@@ -823,7 +880,11 @@ public:
 };
 
 std::atomic<word_t> STM::g_clock{1};
+#ifdef TM_ACCEL_GPU
+std::atomic<word_t> *STM::g_guards = nullptr; // bound in init(): shared or backing
+#else
 std::atomic<word_t> STM::g_guards[GUARD_TABLE_SIZE];
+#endif
 std::atomic<bool> STM::initialized{false};
 
 thread_local Transaction *current_tx = nullptr;
