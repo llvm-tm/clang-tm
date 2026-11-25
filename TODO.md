@@ -141,38 +141,41 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   with a GPU executor. No GPU sources exist in this repo, but re-check that
   executor before relying on the new `CSMVObjectEntry` layout.
 
-### CSMV rare lost-update / phantom under contention (found 2026-11-25, pre-existing, OPEN)
+### CSMV rare lost-update / phantom under contention — RESOLVED (found & fixed 2026-11-25; self-introduced regression)
 
-- **Symptom**: after the bucket-aliasing fix above, a **rare** anomaly
-  remains under real concurrency. `bin/drv_diff_ops BACKEND=CSMV` reports
-  `quiesce_viol` of **1–4** on roughly **1 in 3** runs of the `check-diff`
-  scenarios (`-T 4 -n 1500`, `-T 8 -n 1200`, full or ADD-only mask), and the
-  rate rises with `-n` (more commits). Per-object deltas are off by only 1–5
-  and in **both** directions (`final > shadow` and `final < shadow`). Only
-  `quiesce_viol` fires — `v_range`, `v_readown`, `v_double_read`, `v_ptr`,
-  `alloc_viol` all stay 0. `-T 1` is always clean.
-- **Isolated, not the driver, not the addressing change**: identical seeds
-  (`-T 4` seeds 2/5/8, `-T 8` seeds 2/4/7) are clean on TL2/SGL/NOREC. The
-  aliasing fix only refines the address→entry map (strictly removes sharing,
-  never adds a write), so it cannot add a lost update; the mass `-T 1`
-  corruption previously masked this smaller, rarer one.
-- **Ruled out**: GC/reclamation is NOT the cause — disabling reclamation
-  (`new_lwm = 0`, so the sweep never frees) still reproduces (`quiesce_viol`
-  1, 2, 0, 0 on seeds 1-4 at `-M 1 -T 4 -n 2500`).
-- **Where to look**: the OCC commit path in
-  `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp` `real_tm_end()` and
-  `read_common()`. Reads take no lock and validation compares only the
-  current `head` ts against the observed ts; the mixed-direction ±small
-  deltas point at a commit_ts/visibility ordering subtlety rather than a
-  plain lock-order bug. Reproduce with
-  `for S in 1..8; drv_diff_ops -S $S -T 4 -n 1500 -M 1` and capture the
-  `VIOLATION CNT/BYTE` lines.
-- **Harness status**: `tools/diff_backends.sh` treats a nonzero
-  `quiesce_viol` with **every other counter zero** as known-open for CSMV
-  (reported, not gated); any other counter still fails, so this allowance
-  cannot hide a new defect.
-- **Files**: `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`,
-  `tests/concurrency/drv_diff_ops.cpp`.
+- **Symptom**: after the bucket-aliasing fix, a **rare** anomaly survived
+  under real concurrency: `drv_diff_ops BACKEND=CSMV` reported `quiesce_viol`
+  1–4 on ~1 in 3 `check-diff` runs (rate rose with `-n`), deltas off by 1–5 in
+  **both** directions, `quiesce_viol` the only nonzero counter, `-T 1` always
+  clean.
+- **Actual root cause — a bug in my own §25 fix** (not pre-existing; the
+  earlier "isolated / cannot be the addressing change" note here was wrong).
+  `csmv_get_entry()` claimed an empty slot with
+  `compare_exchange_strong`, and on CAS **failure** it unconditionally probed
+  to the next slot. But the CAS usually fails because another thread just
+  claimed **that same slot for the same address** (two threads first-touching
+  a hot object). The loser then claimed a *second* slot for that address, so
+  the address had two version chains; reads and writes landing on different
+  chains lost or phantomed deltas. This is why it was CSMV-only, rare (needs
+  a concurrent first-touch), `-T 1`-clean (no race), and rose with thread
+  count and `-n`.
+- **Fix**: on CAS failure, `expected` now holds the winning owner — if it is
+  our own address, return that slot (the other thread established our entry);
+  only probe on when a *different* address won it. The table is append-only
+  (entries never released) and the probe order is fixed per address, so every
+  lookup converges on the single slot where the address was first claimed.
+  Also hardened the lockless version-chain walk: `entry->head.load` went from
+  `memory_order_consume` to `acquire` (mainstream compilers compile consume as
+  *relaxed*, which leaves the `head->timestamp`/`->value`/`->next` reads below
+  unordered against the load — the readers do not hold the entry lock, so the
+  walk depends on this acquire pairing with the committer's release-store).
+- **Verification**: previously-failing configs run clean across many seeds —
+  full mask `-T 4 -n 1500` and `-T 8 -n 1200` (seeds 1–8), and the
+  highest-frequency `-M 1 -T 4 -n 2500` and `-M 1 -T 8 -n 3000` (seeds 1–8);
+  `test_tx` 120/120, `test_ds` 207/207; `make -C tests/backends/tm_impl
+  run-csmv` all PASS. Documented as `docs/CORRECTNESS_FIXES.md` §26.
+- **Harness**: the `tools/diff_backends.sh` known-open allowance for CSMV was
+  **removed** — CSMV is now gated on every counter like all backends.
 
 ---
 

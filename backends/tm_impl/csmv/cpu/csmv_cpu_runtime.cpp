@@ -97,7 +97,16 @@ static CSMVObjectEntry *csmv_get_entry(void *addr)
 			                                     std::memory_order_acq_rel,
 			                                     std::memory_order_acquire))
 				return e;
-			// Lost the claim to another address — try the next slot.
+			// CAS failed: `expected` now holds whoever won this slot. If it is
+			// OUR OWN address (the common case — another thread first-touching
+			// the same hot object claimed this very slot for us), this is our
+			// entry; return it. Only if a DIFFERENT address won it do we probe
+			// on. Probing on unconditionally here was a bug: the loser would
+			// claim a SECOND slot for the same address, splitting its version
+			// chain across two entries and silently losing/phantoming updates
+			// for whichever thread used the wrong one.
+			if (expected == addr)
+				return e;
 			continue;
 		}
 		// Occupied by a different address — keep probing.
@@ -270,8 +279,14 @@ static uint64_t read_common(void *data_addr)
 
 	CSMVObjectEntry *entry = csmv_get_entry(data_addr);
 
-	// Traverse version list to find newest version ≤ start_clock
-	CSMVVersionNode *head = entry->head.load(std::memory_order_consume);
+	// Traverse version list to find newest version ≤ start_clock.
+	// acquire (not consume): mainstream compilers compile consume as relaxed,
+	// which would leave the head->timestamp / ->value / ->next reads below
+	// unordered against this load, so a reader could follow a published head
+	// to a node whose fields are not yet visible. This walk is lockless (the
+	// committer holds the entry lock; readers do not), so it depends on this
+	// acquire pairing with the committer's release-store of head.
+	CSMVVersionNode *head = entry->head.load(std::memory_order_acquire);
 	uint64_t result;
 	uint64_t observed;
 

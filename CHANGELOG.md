@@ -3245,6 +3245,7 @@ plain TL2 regression 120/120 + 207/207; both fuzz targets exit 0 (30 s × severa
 CSMV test_tx fails identically on a clean checkout (pre-existing, unrelated
 — logged in TODO.md).
 
+
 ## Session 2026-11-25 — CSMV: two real concurrency bugs found by the T1 driver
 
 Continued the T1 bug-hunt sweep. The differential driver
@@ -3273,31 +3274,48 @@ were three distinct bugs, now separated.
    address and linearly probes, claiming empty slots via CAS and aborting
    loudly past a probe bound instead of sharing. Commit/GC code untouched.
 
-After (2), a **third, rare** contention anomaly remains open: `drv_diff_ops`
-shows `quiesce_viol` 1–4 on ~1 in 3 check-diff runs (both delta directions,
-only `quiesce_viol` nonzero, `-T 1` always clean), isolated to CSMV
-(TL2/SGL/NOREC clean on the same seeds) and with GC/reclamation ruled out.
-Logged as a separate open item; `tools/diff_backends.sh` reports it known-open
-for CSMV without gating any other counter.
+3. **The "third bug" turned out to be my own §25 regression (§26, fixed).**
+   After (2) a rare `quiesce_viol` (1–4) survived on ~1 in 3 driver runs, both
+   delta directions, `-T 1` always clean; I first logged it as a separate
+   pre-existing defect. It was actually a bug I had introduced with the open
+   addressing: `csmv_get_entry` claimed a slot with a CAS and, **on CAS
+   failure, probed to the next slot** — but a failure almost always means a
+   concurrent thread just claimed *that same slot for the same address* (two
+   threads first-touching a hot object). The loser then claimed a *second*
+   slot for the address, splitting its version chain and silently
+   losing/phantoming updates. That fully explains the symptoms (CSMV-only,
+   rare, both-direction, `-T 1`-clean, scaling with thread count and `-n`).
+   Fix: on a failed CAS `expected` holds the winning owner — return the slot
+   when it is our own address, probe on only for a different address (the
+   table is append-only and probe order is fixed per address, so lookups
+   converge on one slot). Also hardened the lockless `head` load from
+   `memory_order_consume` (compiled as relaxed by mainstream compilers) to
+   `acquire`.
 
 **Files changed**: `backends/tm_impl/csmv/include/csmv_api.h`,
 `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`,
 `tools/diff_backends.sh`, `TODO.md`, `docs/CORRECTNESS_FIXES.md` (§24, §25,
-known-issues table).
+§26, known-issues table), `.github/workflows/ci.yml`.
 
-**CI hardening**: the three backends the driver caught bugs in (CSMV,
-GPU_STM_CPU, JVSTM) were absent from CI's `cross-backend` list — which is why
-CI never saw the defects — so they were added to the push-to-main gate (all
-pass `test_tx` 120/120 + `test_ds` 207/207). Added a `diff-concurrency` job
-running `tools/diff_backends.sh` over the fixed backends plus references
-(CSMV's rare race allowanced so the job is deterministic), and a
-`backend-unit` job running the full deterministic `tests/backends/tm_impl`
-suite (counter/write-set/overlap/sub-word/AB-BA + region-allocator tests,
-11 backends, all green locally) — the gate that catches version-store
-aliasing and sub-word clobbering without the stochastic driver.
+**CI hardening** (commits 1ebdcf7, 2837847): the three backends the driver
+caught bugs in (CSMV, GPU_STM_CPU, JVSTM) were absent from CI's `cross-backend`
+list — which is why CI never saw the defects — so they were added to the
+push-to-main `test_tx`/`test_ds` gate (all green 120/120 + 207/207). Added a
+`diff-concurrency` job running `tools/diff_backends.sh` over those backends
+plus core references, and a `backend-unit` job running the full deterministic
+`tests/backends/tm_impl` suite (counter / write_set_validation / overlap_stress
+/ subword_counters / abba_deadlock / region-allocator, 11 backends, all green
+locally) — the gate that catches version-store aliasing and sub-word
+clobbering without the stochastic driver. The CSMV known-open allowance was
+removed once §26 landed, so CSMV is now gated on every counter like everyone
+else.
 
-**Verification**: CSMV `test_tx` 120/120, `test_ds` 207/207;
-`repro_bucket_alias` clean; `drv_diff_ops` clean at `-T 1` for all op-class
-masks (1/2/4/8/16) and `-T 4`/`-T 8` full mask on seeds 1–3. GPU_STM_CPU
-(§24 fix from earlier) 120/120 + 207/207, driver `alloc_viol=0`. All new
-files pass `clang-format-22 --style=file`.
+**Verification** (forced rebuilds, binaries checked for backend identity): CSMV
+`test_tx` 120/120, `test_ds` 207/207; `repro_bucket_alias` and
+`repro_width_clobber` clean; `make -C tests/backends/tm_impl run-csmv` all
+PASS (incl. counter_mt / write_set_validation / overlap_stress). The
+previously-flaky driver configs are now clean across seeds 1–8 at the full-mask
+`-T 4 -n 1500` / `-T 8 -n 1200` scenarios and the high-frequency
+`-M 1 -T 4 -n 2500` / `-M 1 -T 8 -n 3000` configs. GPU_STM_CPU (§24) 120/120 +
+207/207, driver `alloc_viol=0`. All changed files pass
+`clang-format-22 --style=file`.

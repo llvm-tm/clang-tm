@@ -31,22 +31,6 @@ for be in $BACKENDS; do
 			rc=$?
 			line=$(echo "$out" | grep RESULT | tail -1)
 			if [ $rc -ne 0 ]; then
-				# Known-open CSMV race (TODO P1): a rare lost-update /
-				# phantom in the OCC commit path that surfaces ONLY as a
-				# small nonzero quiesce_viol with every other counter at
-				# zero. Reported but not gated. Any other nonzero counter
-				# is treated as a real failure so this allowance cannot
-				# mask a new defect.
-				if [ "$be" = CSMV ]; then
-					qv=$(echo "$line" | grep -oE 'quiesce_viol=[0-9]+' | grep -oE '[0-9]+')
-					other=$(echo "$line" |
-						grep -oE '(v_double_read|v_range|v_readown|v_ptr|alloc_viol)=[0-9]+' |
-						grep -vE '=0$')
-					if [ "${qv:-0}" -gt 0 ] && [ -z "$other" ]; then
-						echo "== $be: known-open seed=$seed $sc — rare OCC quiesce_viol=$qv (TODO P1)"
-						continue
-					fi
-				fi
 				ok=0
 				echo "== $be: FAIL seed=$seed $sc"
 				echo "$out" | grep -m5 VIOLATION

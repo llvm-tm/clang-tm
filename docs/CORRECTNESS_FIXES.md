@@ -842,12 +842,56 @@ now that entry↔address is one-to-one.
 **Verification.** `repro_bucket_alias` now clean; `drv_diff_ops` clean at
 `-T 1` for **every** op-class mask (M = 1/2/4/8/16) on seeds 1-3, and clean
 at `-T 4`/`-T 8` on the full mask; `test_tx` 120/120 and `test_ds` 207/207.
-A **separate, rare** contention anomaly remains (see the known-issues table);
-it was previously hidden by this one's mass corruption.
+(Note: the open-addressing introduced here had its own rare race — a double
+slot-claim on a failed CAS — found by the driver and fixed in §26.)
 
 **Files**: `backends/tm_impl/csmv/include/csmv_api.h`,
 `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`,
 `tests/concurrency/repro_bucket_alias.cpp`.
+
+## 26. CSMV open-addressing double-claimed a slot on a failed CAS (2026-11-25) ✅
+
+**Symptom.** After §25, `drv_diff_ops BACKEND=CSMV` reported a **rare**
+`quiesce_viol` (1–4) on ~1 in 3 `check-diff` runs, rising with `-n`, deltas
+off by 1–5 in both directions, `quiesce_viol` the only nonzero counter, and
+`-T 1` always clean. CSMV-only (TL2/SGL/NOREC clean on the same seeds); GC
+reclamation ruled out (still reproduced with reclamation disabled).
+
+**Root cause — a regression in §25's own fix.** `csmv_get_entry()` claimed a
+free slot with `compare_exchange_strong` and, when the CAS failed,
+unconditionally advanced to the next probe slot. The failure almost always
+means another thread just claimed **that same slot for the same address**
+(the two threads first-touching a hot object at once). So the loser claimed a
+*second* slot for the address, giving it two independent version chains; reads
+and writes that landed on different chains silently lost or phantomed deltas.
+This explains every symptom: CSMV-only, rare (needs a concurrent first-touch),
+`-T 1`-clean (no race at one thread), and frequency scaling with thread count
+and commit count.
+
+**Fix.** On a failed CAS, `expected` holds the owner that won the slot; if it
+equals our address we return that slot (the other thread established our
+entry), and only probe on when a *different* address won it. The table is
+append-only (entries are never released) and the probe order is fixed per
+address, so every lookup converges on the one slot where the address was
+first claimed — no address can end up on two slots.
+
+**Hardening (rare-model corner case).** The lockless version-chain walk in
+`read_common()` loaded `entry->head` with `memory_order_consume`, which
+mainstream compilers emit as *relaxed* — leaving the `head->timestamp`,
+`->value` and `->next` reads below unordered against the load. Readers do not
+take the entry lock, so the walk relies on this load pairing with the
+committer's release-store; changed to `memory_order_acquire` (free on x86,
+correct on weak memory models and under `-O3`).
+
+**Verification.** Previously-failing configs clean across many seeds: full
+mask `-T 4 -n 1500` / `-T 8 -n 1200` (seeds 1–8), and `-M 1 -T 4 -n 2500` /
+`-M 1 -T 8 -n 3000` (seeds 1–8); `test_tx` 120/120, `test_ds` 207/207;
+`make -C tests/backends/tm_impl run-csmv` all PASS. The CSMV known-open
+allowance was removed from `tools/diff_backends.sh` (now gated on all
+counters).
+
+**Files**: `backends/tm_impl/csmv/cpu/csmv_cpu_runtime.cpp`,
+`tools/diff_backends.sh`.
 
 ## Known remaining issues (not yet fixed)
 
@@ -856,7 +900,7 @@ it was previously hidden by this one's mass corruption.
 | TinySTM STMbench7 crash (STL vector realloc) | High | STL-in-TM incompatibility, pre-existing |
 | ~~CSMV `test_tx` fails 1/120~~ → **fixed 2026-11-25 (§24)** | — | Fixed-size read/write sets (64 reads / 32 writes) that **silently dropped** overflow entries. `test_tx`'s `tm_realloc` case writes 16+48 words in one transaction, so its tail write never reached memory (the `TM<int*>`/`thread lifecycle` FAIL labels were `test_tx`'s cumulative counter bleeding). Same pattern in GPU_STM_CPU, where it also tripped the differential driver's allocator wave. CSMV now 120/120, GPU_STM_CPU 120/120 + driver clean. |
 | ~~CSMV version store aliases word-sharing objects~~ → **fixed 2026-11-25 (§25)** | — | Version chains were keyed by `(addr >> 3)` with no address tag, so word-sharing objects shared a chain and read back each other's values (which a read-modify-write committed). `repro_bucket_alias` was 40/48 reads + 16/16 committed wrong at `-T 1`. Fixed by an owner-tagged, open-addressed, exact-address table. Clean now at `-T 1` for all masks and `-T 4/-T 8` full mask; `test_tx` 120/120, `test_ds` 207/207. |
-| **CSMV rare lost-update / phantom under contention** | Medium | After §25, a **rare** anomaly survives: `drv_diff_ops` reports `quiesce_viol` 1–4 on ~1 in 3 `check-diff`-scenario runs (more with larger `-n`), deltas off by 1–5 in both directions, `quiesce_viol` the only nonzero counter, `-T 1` always clean. Isolated to CSMV (TL2/SGL/NOREC clean on the same failing seeds); GC/reclamation ruled out (still reproduces with reclamation disabled). Lives in the OCC commit path / lockless read validation. `tools/diff_backends.sh` reports it known-open for CSMV (nonzero `quiesce_viol` with all other counters zero) without gating it. Tracked in TODO.md. |
+| ~~CSMV rare lost-update / phantom under contention~~ → **fixed 2026-11-25 (§26)** | — | A regression in §25's own open-addressing: `csmv_get_entry` claimed a **second** slot for an address whenever a slot-claim CAS failed (which it does when a concurrent thread first-touches the same hot object and wins that slot). Two version chains per address → rare lost/phantom updates (`quiesce_viol` 1–4 on ~1 in 3 driver runs, `-T 1` always clean). Fixed by returning the winner's slot when the failed CAS was for our own address; also hardened the lockless head load from `consume` (compiled as relaxed) to `acquire`. |
 | LEFTRIGHT write-set `observed_version` | Low | Uses global clock at read time instead of per-address version; correct with global lock but more conservative than needed |
 | stmbench7 times out with >1 thread | Low | Data race in `ts_multimap::lower_bound()` — pre-existing |
 | **`test_queue_multi` counter mismatch (351 vs 400)** | Low | `counter` is a plain `static int` (not TM-tracked). The `TX` annotation creates a TM transaction wrapper, but the LLVM pass instruments only TM-annotated globals. 4 threads × 100 increments of a non-TM variable without atomic/lock protection → classic lost-update race. Expected 400, consistently observed ~351. Fix: either declare counter as `TM int counter` or use `std::atomic<int>`. Also affects `bench_queue_compare.cpp` and `bench_queue_compare2.cpp` (same plain-`static int counter` pattern). |
