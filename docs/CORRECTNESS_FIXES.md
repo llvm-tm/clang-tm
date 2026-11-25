@@ -682,12 +682,93 @@ at a 120 s soak; `test_tx` 120/120 + `test_ds` 207/207 for TINYSTM/NOREC/TL2
 unchanged; `make check-fast` green apart from the pre-existing CSMV failure
 (separate row in the table below).
 
+## 22. Switching `BACKEND` silently reused the previous backend's binary (2026-11-25) ✅
+
+**Symptom.** A differential sweep script that looped
+`make bin/drv_diff_ops BACKEND=$b; ./bin/drv_diff_ops` reported the *same*
+violation counts for three different backends, and a follow-up "control"
+run reported CSMV clean while a later run of the same command on the same
+commit failed 79/144 tracked objects.
+
+**Root cause.** `benchmarks/cpp/Makefile` links each binary directly from
+sources (no per-backend object files), with file prerequisites
+(`$(RUNTIME)`, sources, `Makefile`). Switching `BACKEND` changes which
+files those prerequisites *name*, but the previously linked binary is
+already newer than every prerequisite of the *new* backend, so make
+declares the target `"up to date"` and does nothing — the old backend's
+code keeps running under the new backend's name. Verified directly:
+
+```
+$ make bin/test_tx BACKEND=TL2 >/dev/null
+$ make bin/test_tx BACKEND=SGL
+make: 'bin/test_tx' is up to date.
+$ nm -C bin/test_tx | grep -c 'tl2::'
+23          # ← still TinySTM-free TL2 code despite BACKEND=SGL
+```
+
+Only `make -B` or `make clean` avoided it, so any
+`for b in …; do make … BACKEND=$b; ./bin/…; done` loop in docs, scripts or
+a shell session can produce measurements attributed to the wrong backend.
+
+**Fix.** `benchmarks/cpp/Makefile` now maintains a stamp file
+(`bin/.backend-$(BACKEND)`) that every link rule depends on; the stamp rule
+deletes any existing `.backend-*` stamp and writes the current name, so a
+backend change creates a prerequisite newer than every linked binary and
+forces the relink. Same-backend rebuilds still no-op (verified: 1 compile
+per switch, 0 on repeat), and `make clean` (`rm -rf bin`) clears it.
+
+**Verification.** TL2 → SGL → TL2 switches each relinked and each binary
+matched its backend (`nm -C bin/test_tx | grep -c 'tl2::'` = 0 for the SGL
+build, 23 for the TL2 build); repeat invocations of the same backend
+compiled nothing. Re-running the 21-backend differential sweep after the
+fix produced per-backend-distinct results.
+
+**Files**: `benchmarks/cpp/Makefile`.
+
+## 23. JVSTM committed every write as 8 bytes → destroyed neighbours (2026-11-25) ✅
+
+**Symptom.** The T1 differential driver (`tests/concurrency/drv_diff_ops.cpp`)
+reported 51–61 of 144 tracked objects whose final value disagreed with the
+committed-delta model on every seed, many of them sitting at exactly `0`
+where the model said ~1000, plus several hundred reads far outside the
+legal concurrent-commit window. `test_tx` (120) and `test_ds` (207) both
+passed, and JVSTM is not in CI's `cross-backend` list, so nothing else
+covered it.
+
+**Root cause.** `backends/tm_impl/jvstm/jvstm_runtime.cpp` versioned
+locations without tracking access width: `JvstmWriteEntry` was
+`{addr, value}`, `get_or_create_vbox()` seeded the box with
+`memcpy(&initial_val, addr, sizeof(uint64_t))`, and commit wrote through
+with `memcpy(we.addr, &we.value, sizeof(uint64_t))` — for **every** width.
+A committed `tm_write_i1` therefore stored its byte zero-extended into an
+8-byte slot and wrote 8 bytes back, zeroing up to seven adjacent bytes; a
+committed `tm_write_i4` zeroed the following int32. Reads over-read the
+same way (an 8-byte load can also run past a small allocation).
+
+**Fix.** Width became part of a version box's identity: boxes are keyed by
+`(address, width)` (`box_key()`), read/write entries carry `width`, the
+seed load and the write-through `memcpy` use exactly `width` bytes, and
+read-own-writes falls back to the low `width` bytes of a wider queued write
+to the same address. Mixed-width access to one address now gets separate
+boxes instead of a shared 8-byte slot.
+
+**Verification.** `tests/concurrency/repro_width_clobber.cpp` (new, minimal):
+before — writing `c[3]` zeroed `c[4]`; one 1-byte commit zeroed `b[6..12]`;
+a halfword commit zeroed `s[3..5]`. After — clean, and identical to the
+TL2/SGL reference output. JVSTM `test_tx` 120/120, `test_ds` 207/207, and
+the differential driver is now `quiesce_viol=0 v_range=0` (was 51–61 / up
+to 575) on `-T 4` and `-T 8`.
+
+**Files**: `backends/tm_impl/jvstm/jvstm_runtime.cpp`,
+`tests/concurrency/repro_width_clobber.cpp`.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |
 |-------|----------|-------|
 | TinySTM STMbench7 crash (STL vector realloc) | High | STL-in-TM incompatibility, pre-existing |
-| **CSMV `test_tx` fails 1/120 (pre-existing)** | Medium | "TM<TM<int>*> []: FAIL" + "thread lifecycle: FAIL". Reproduces on a **clean checkout** (verified 2026-11-25 via `git stash`), both via `make check-fast` and a direct `BACKEND=CSMV` build — not a regression from the fuzz/leak fixes. `test_ds` passes 207/207. Tracked in TODO.md (P0). |
+| **CSMV `test_tx` fails 1/120 (pre-existing)** | Medium | The single failing check is `tm_realloc tail writable` (`TM<TM<int>*> []` / `thread lifecycle` only *print* FAIL — `test_tx` reports the cumulative counter per section). Reproduces on a **clean checkout** (verified 2026-11-25 via `git stash`), both via `make check-fast` and a direct `BACKEND=CSMV` build — not a regression from the fuzz/leak fixes. `test_ds` passes 207/207. Also reproduced by Wave D of `tests/concurrency/drv_diff_ops.cpp` (64/64 reps). Tracked in TODO.md (P0). |
+| **CSMV loses committed updates under contention (pre-existing)** | High | The T1 differential driver (`tests/concurrency/drv_diff_ops.cpp`) reports ~78-80/144 objects whose final value ≠ init + Σ committed deltas, plus ~200 reads outside the legal concurrent-commit window, on every seed; bisects to op classes whose writes spread over *multiple* words and passes when all writes hit one word (suspect: version/guard aliasing between neighbouring words). All 20 other backends clean on identical seeds. CSMV is not in the CI `cross-backend` list, so CI never saw this. Tracked in TODO.md (P0). |
 | LEFTRIGHT write-set `observed_version` | Low | Uses global clock at read time instead of per-address version; correct with global lock but more conservative than needed |
 | stmbench7 times out with >1 thread | Low | Data race in `ts_multimap::lower_bound()` — pre-existing |
 | **`test_queue_multi` counter mismatch (351 vs 400)** | Low | `counter` is a plain `static int` (not TM-tracked). The `TX` annotation creates a TM transaction wrapper, but the LLVM pass instruments only TM-annotated globals. 4 threads × 100 increments of a non-TM variable without atomic/lock protection → classic lost-update race. Expected 400, consistently observed ~351. Fix: either declare counter as `TM int counter` or use `std::atomic<int>`. Also affects `bench_queue_compare.cpp` and `bench_queue_compare2.cpp` (same plain-`static int counter` pattern). |

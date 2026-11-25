@@ -21,6 +21,12 @@ extern __thread sigjmp_buf tm_jmpbuf;
 // ── VBox: Versioned Box ────────────────────────────────────
 // Each body is an immutable node in a singly-linked list,
 // ordered newest-first (prepend on commit).
+//
+// A box is keyed by (address, ACCESS WIDTH). Width is part of the identity
+// on purpose: the body value is copied in and out with exactly `width`
+// bytes. Keying by address alone forced the commit write-through to assume
+// 8 bytes for every width, which zeroed up to 7 neighbouring bytes on every
+// sub-word commit (see tests/concurrency/repro_width_clobber.cpp).
 struct VBoxBody {
 	uint64_t version;
 	uint64_t value; // stored as uint64_t (covers all data types)
@@ -33,19 +39,28 @@ struct VBox {
 
 // ── Global state ───────────────────────────────────────────
 static std::mutex g_box_mutex;
-static std::unordered_map<void *, VBox *> g_boxes;
+static std::unordered_map<uint64_t, VBox *> g_boxes;
 static std::mutex g_commit_lock;
 static std::atomic<uint64_t> g_clock{0};
+
+// Address is 48-bit on supported targets; width (1/2/4/8) lives in the top
+// byte, so distinct widths never collide and no pointer bits are lost.
+static inline uint64_t box_key(void *addr, unsigned width)
+{
+	return ((uint64_t)(uintptr_t)addr) ^ ((uint64_t)width << 56);
+}
 
 // ── Per-thread state ───────────────────────────────────────
 struct JvstmReadEntry {
 	void *addr;
 	uint64_t captured_version;
+	unsigned width;
 };
 
 struct JvstmWriteEntry {
 	void *addr;
 	uint64_t value;
+	unsigned width;
 };
 
 static thread_local uint64_t t_rv = 0;
@@ -54,18 +69,20 @@ static thread_local std::vector<JvstmWriteEntry> t_write_set;
 static thread_local bool t_has_write = false;
 
 // ── VBox helpers ───────────────────────────────────────────
-static VBox *get_or_create_vbox(void *addr)
+static VBox *get_or_create_vbox(void *addr, unsigned width)
 {
 	std::lock_guard<std::mutex> lock(g_box_mutex);
-	auto it = g_boxes.find(addr);
+	auto it = g_boxes.find(box_key(addr, width));
 	if (it != g_boxes.end())
 		return it->second;
-	// Create VBox with initial body (version=0, value=current memory)
+	// Create VBox with initial body (version=0, value=current memory).
+	// Copy exactly `width` bytes: an 8-byte load here would both over-read
+	// past a small allocation and capture a neighbour's bits.
 	uint64_t initial_val = 0;
-	memcpy(&initial_val, addr, sizeof(uint64_t));
+	memcpy(&initial_val, addr, width);
 	VBoxBody *body = new VBoxBody{0, initial_val, nullptr};
 	VBox *box = new VBox{body};
-	g_boxes[addr] = box;
+	g_boxes[box_key(addr, width)] = box;
 	return box;
 }
 
@@ -109,7 +126,7 @@ static void real_tm_end()
 	// Validate read-set: each VBox head version must match captured
 	bool valid = true;
 	for (auto &re : t_read_set) {
-		VBox *box = get_or_create_vbox(re.addr);
+		VBox *box = get_or_create_vbox(re.addr, re.width);
 		VBoxBody *head = box->head.load(std::memory_order_acquire);
 		if (head->version != re.captured_version) {
 			valid = false;
@@ -119,7 +136,7 @@ static void real_tm_end()
 	// Validate write-set: each VBox head version must be ≤ rv
 	if (valid) {
 		for (auto &we : t_write_set) {
-			VBox *box = get_or_create_vbox(we.addr);
+			VBox *box = get_or_create_vbox(we.addr, we.width);
 			VBoxBody *head = box->head.load(std::memory_order_acquire);
 			if (head->version > t_rv) {
 				valid = false;
@@ -129,15 +146,17 @@ static void real_tm_end()
 	}
 	if (valid) {
 		// Prepend new bodies to each written VBox AND write-through to memory
-		// so that .peek() (direct memory read) sees latest committed value
+		// so that .peek() (direct memory read) sees latest committed value.
+		// The write-through copies the width the write actually had — copying
+		// a fixed 8 bytes destroyed the neighbours of sub-word writes.
 		for (auto &we : t_write_set) {
-			VBox *box = get_or_create_vbox(we.addr);
+			VBox *box = get_or_create_vbox(we.addr, we.width);
 			VBoxBody *new_body = new VBoxBody{ct,
 			                                  we.value,
 			                                  box->head.load(std::memory_order_relaxed)};
 			box->head.store(new_body, std::memory_order_release);
 			// Write-through: update the original memory location
-			memcpy(we.addr, &we.value, sizeof(uint64_t));
+			memcpy(we.addr, &we.value, we.width);
 		}
 		g_commit_lock.unlock();
 	} else {
@@ -159,56 +178,65 @@ static void real_tm_abort()
 }
 
 // ── Tracked read/write ─────────────────────────────────────
-static uint64_t read_tracked(void *addr)
+static uint64_t read_tracked(void *addr, unsigned width)
 {
 	// Check write-set first (read-own-writes)
 	for (auto &we : t_write_set) {
-		if (we.addr == addr)
+		if (we.addr == addr && we.width == width)
 			return we.value;
 	}
-	VBox *box = get_or_create_vbox(addr);
+	// Same address written at a different width earlier in this transaction:
+	// serve the low `width` bytes of what we already have queued there
+	// rather than an older committed value.
+	for (auto &we : t_write_set) {
+		if (we.addr == addr && we.width >= width) {
+			uint64_t mask = (width >= 8) ? ~0ull : ((1ull << (8 * width)) - 1);
+			return we.value & mask;
+		}
+	}
+	VBox *box = get_or_create_vbox(addr, width);
 	VBoxBody *body = find_body(box, t_rv);
-	t_read_set.push_back({addr, body->version});
+	t_read_set.push_back({addr, body->version, width});
 	return body->value;
 }
 
-static void write_tracked(void *addr, uint64_t val)
+static void write_tracked(void *addr, uint64_t val, unsigned width)
 {
 	for (auto &we : t_write_set) {
-		if (we.addr == addr) {
+		if (we.addr == addr && we.width == width) {
 			we.value = val;
 			return;
 		}
 	}
-	t_write_set.push_back({addr, val});
+	t_write_set.push_back({addr, val, width});
 	t_has_write = true;
 }
 
 static uint8_t real_tm_read_i1(int8_t *a)
 {
 	LLVM_TM_ADDR_CHECK(a);
-	return (uint8_t)read_tracked((void *)a);
+	return (uint8_t)read_tracked((void *)a, 1);
 }
 static uint16_t real_tm_read_i2(int16_t *a)
 {
 	LLVM_TM_ADDR_CHECK(a);
-	return (uint16_t)read_tracked((void *)a);
+	return (uint16_t)read_tracked((void *)a, 2);
 }
 static uint32_t real_tm_read_i4(int32_t *a)
 {
 	LLVM_TM_ADDR_CHECK(a);
-	return (uint32_t)read_tracked((void *)a);
+	return (uint32_t)read_tracked((void *)a, 4);
 }
 static uint64_t real_tm_read_i8(int64_t *a)
 {
 	LLVM_TM_ADDR_CHECK(a);
-	return (uint64_t)read_tracked((void *)a);
+	return (uint64_t)read_tracked((void *)a, 8);
 }
 static float real_tm_read_f4(float *a)
 {
 	LLVM_TM_ADDR_CHECK(a);
 	float v;
-	uint32_t tmp = (uint32_t)read_tracked((void *)a);
+	uint32_t tmp = (uint32_t)read_tracked((void *)a, 4);
 	memcpy(&v, &tmp, 4);
 	return v;
 }
@@ -216,7 +244,7 @@ static double real_tm_read_f8(double *a)
 {
 	LLVM_TM_ADDR_CHECK(a);
 	double v;
-	uint64_t tmp = read_tracked((void *)a);
+	uint64_t tmp = read_tracked((void *)a, 8);
 	memcpy(&v, &tmp, 8);
 	return v;
 }
@@ -224,36 +252,36 @@ static double real_tm_read_f8(double *a)
 static void real_tm_write_i1(int8_t *a, uint8_t v)
 {
 	LLVM_TM_ADDR_CHECK_WRITE(a, v);
-	write_tracked((void *)a, v);
+	write_tracked((void *)a, v, 1);
 }
 static void real_tm_write_i2(int16_t *a, uint16_t v)
 {
 	LLVM_TM_ADDR_CHECK_WRITE(a, v);
-	write_tracked((void *)a, v);
+	write_tracked((void *)a, v, 2);
 }
 static void real_tm_write_i4(int32_t *a, uint32_t v)
 {
 	LLVM_TM_ADDR_CHECK_WRITE(a, v);
-	write_tracked((void *)a, v);
+	write_tracked((void *)a, v, 4);
 }
 static void real_tm_write_i8(int64_t *a, uint64_t v)
 {
 	LLVM_TM_ADDR_CHECK_WRITE(a, v);
-	write_tracked((void *)a, v);
+	write_tracked((void *)a, v, 8);
 }
 static void real_tm_write_f4(float *a, float v)
 {
 	LLVM_TM_ADDR_CHECK_WRITE(a, v);
 	uint32_t tmp;
 	memcpy(&tmp, &v, 4);
-	write_tracked((void *)a, tmp);
+	write_tracked((void *)a, tmp, 4);
 }
 static void real_tm_write_f8(double *a, double v)
 {
 	LLVM_TM_ADDR_CHECK_WRITE(a, v);
 	uint64_t tmp;
 	memcpy(&tmp, &v, 8);
-	write_tracked((void *)a, tmp);
+	write_tracked((void *)a, tmp, 8);
 }
 
 static void *real_tm_malloc(size_t s) { return stm::tm_region_malloc(s); }
