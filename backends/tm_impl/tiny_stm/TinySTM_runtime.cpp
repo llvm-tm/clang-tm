@@ -515,6 +515,13 @@ static void tm_delete_impl(void *ptr) noexcept
 		std::free(ptr);
 }
 
+// ThreadSanitizer links its own operator new/delete interceptors
+// (libclang_rt.tsan_cxx), so defining ours here makes the link fail with
+// "multiple definition of operator delete". Ours only add region-aware freeing
+// and absurd-size diagnostics; under a thread-sanitizer build allocation is the
+// sanitizer's business, so they are left out. Plugin builds rewrite new/delete
+// in user IR instead of relying on these globals and are not sanitizer builds.
+#if !defined(__SANITIZE_THREAD__)
 // Matching operator new overrides (malloc-based) so delete's free() pairs
 // with a malloc allocation.  Overriding operator delete alone made
 // operator-new blocks be free()d — glibc-tolerated but UB and an
@@ -547,3 +554,4 @@ void operator delete[](void *ptr, size_t, std::align_val_t) noexcept
 {
 	tm_delete_impl(ptr);
 }
+#endif // !__SANITIZE_THREAD__

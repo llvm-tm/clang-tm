@@ -23,7 +23,10 @@ extern __thread sigjmp_buf tm_jmpbuf;
 }
 
 // Debug: catch absurd operator new sizes with backtrace
-#ifndef MVLOG_AS_WRAPPER
+// ThreadSanitizer provides its own operator new/delete interceptors; defining
+// ours on top of them fails the link (multiple definition). Leave allocation to the
+// sanitizer in TSan builds.
+#if !defined(MVLOG_AS_WRAPPER) && !defined(__SANITIZE_THREAD__)
 void *operator new(size_t size)
 {
 	if (size > (1ULL << 42)) { // > 4TB
@@ -54,7 +57,7 @@ void operator delete(void *p) noexcept { std::free(p); }
 void operator delete[](void *p) noexcept { std::free(p); }
 void operator delete(void *p, size_t) noexcept { std::free(p); }
 void operator delete[](void *p, size_t) noexcept { std::free(p); }
-#endif // !MVLOG_AS_WRAPPER
+#endif // !MVLOG_AS_WRAPPER && !__SANITIZE_THREAD__
 
 thread_local bool g_in_tx = false;
 thread_local FreeNode *g_deferred_frees = nullptr;
