@@ -367,6 +367,20 @@ What was left has one half done and three new gaps measured (P2, opened 2026-11-
   to **0** and makes every complete-history dump balance `TX_BEGIN` against ends
   exactly. A `-T 1` log had hidden all of this, which is why the README and
   `docs/DEBUGGING_BACKENDS.md` no longer recommend `-T 1` as a workaround.
+- ~~**The fourteenth invariant could never fire.**~~ → **found and fixed the same day
+  (§41).** `check_user_oracle` read `parsed["_raw_text"]`, which `parse_event_log` never
+  sets, and searched for `TM-INVARIANT: FAIL`, a prefix no program in the tree prints — the
+  real format is `INVARIANT: money conservation: FAIL …` (`fuzz_bank.cpp:108`), which the
+  parser recognises but filed into a single slot the check never consulted, so a later PASS
+  overwrote a FAIL. A/B on that real line: old code 0 findings, new code 1.
+  `window_around_failure()` also dropped `dump_starts`, so the windowed copies the tool
+  tells you to use for 100 k-event logs reported every wrapped log as unwrapped.
+- **Keep the checker's contract gated — `make check-pytools`.** Added with §41: eleven
+  one-defect fixtures asserting exact count *and* severity, plus the CLI's five exit-code
+  cases, run by CI's `lint` job. The checker is still not a gate on *backend* behaviour (the
+  three bullets below), which is exactly why its own verdicts needed pinning: nothing in the
+  tree would have noticed if a check had gone silent. When you settle one of those bullets,
+  the fixture that pins its current severity changes in the same commit.
 - **`Abort causality` does not know TL2's vocabulary.** Now that aborts are logged it
   fires on clean TL2 runs: 96 warnings at `-S 1 -T 4 -n 200`, 316 at
   `-S 2 -T 4 -n 1000` and 263 at `-S 3 -T 4 -n 1000`, because `ABORT_CAUSAL_EVENTS` is
@@ -389,19 +403,29 @@ What was left has one half done and three new gaps measured (P2, opened 2026-11-
   at all; with the payload convention restored, lock discipline is **0** and address
   validity is 4 for both backends, and every remaining critical is `version_ordering`
   (1 371 / 2 031).
-- **`Version ordering` vs NOrec's moving snapshot — and an unresolved soundness
-  question.** 1 371 (NOREC) and 2 031 (NORECBF) criticals per `-T 4 -n 300` log, now the
-  only thing the checker still calls CRITICAL on these two backends. NOrec's commit path
-  does `tx->snapshot = validate();` when the commit-lock CAS fails, so reads taken
-  afterwards log a newer snapshot than `TX_BEGIN` did, which is exactly what the check
-  flags. The check is therefore wrong *for this backend* — but the adjacent question is
-  not cosmetic: are values read under the earlier snapshot still valid against the later
-  one that commit-time validation will use? The driver's four consistency oracles never
-  fired across the 484 runs of the 2026-11-26 op-mask/thread sweep, so this is
-  unresolved rather than known-bad. Start at `NOrec.hpp`'s commit path (`tx->snapshot =
-  validate()`) and `read_impl`'s use of `tx->snapshot`; a targeted driver scenario (two
-  counters, high contention, `-M 2` transfers only, snapshot forced to move between the
-  two reads) is the way to test it.
+- ~~**`Version ordering` vs NOrec's moving snapshot — and an unresolved soundness
+  question.**~~ → **investigated and cleared (§40): the check, not the backend, was
+  wrong.** `tx->snapshot` can only advance through `validate()`, and `validate()` re-reads
+  *every* logged address and `abort_tx()`s if any value changed (`NOrec.hpp:246-250`)
+  before returning a clock it has re-checked for stability — so the returned snapshot
+  carries a proof about the whole read set, and the commit CAS against it proves nothing
+  committed since. Measured with a scratch-instrumented `NOrec.hpp` (restored
+  byte-identically; the clean rebuild verified to carry 0 `g_dbg_` symbols and 0
+  `NORECDBG` strings): snapshot advancements 895 / 3 406 / 6 804 / 26 408 / 9 753 across
+  five shapes including `-M 2`-only transfers at `-T 8/16/32`, and the value-check abort
+  count equalled the driver's `aborts=` in **every** row (61 / 349 / 1 227 / 5 308 /
+  1 790) — that check is the only thing that aborts NOrec in these workloads, it fires
+  thousands of times a run, and all four consistency oracles stayed 0 over the 112 120
+  commits those five runs made.
+- **`version_ordering` is now a WARNING and should become backend-aware instead.** The
+  demotion (§40) stopped the 1 371 / 2 031 NOrec and NORECBF findings reading as CRITICAL
+  — the three real logs measured are now `0 critical` (1 416 / 2 119 / 352 warnings) while
+  the deliberately-broken fixture still yields 3 criticals. But softer is not the same as
+  correct: the check should know which discipline a log's backend uses — the versioned-lock
+  backends where `read_version > start_version` is a genuine stale read, versus the
+  value-validated ones (NOrec, NORECBF, TL2) where it is normal traffic — rather than
+  warning for everyone. Either name the discipline per backend in the tool and default to
+  warning for unknown ones, or find a discriminator inside the log itself.
 - **`check_address_validity` misclassifies the TM region as stack.** It flagged
   5 218 events / 152 addresses as "stack" for pointers in the mmap'd region
   (`0x7f…` range, region base + 0x1000). Harmless as a WARNING, but it buries real

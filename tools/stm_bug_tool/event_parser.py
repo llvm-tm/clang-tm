@@ -61,7 +61,8 @@ def parse_event_log(text: str) -> dict:
             "dump_start": int,          # the LAST dump's wrap offset
             "dump_starts": [int, ...],  # one per dump header in the log
             "invariant_fail": bool,
-            "invariant_result": str or None
+            "invariant_result": str or None,
+            "oracle_lines": [str, ...]   # every "INVARIANT: ..." result line
         }
     """
     result = {
@@ -77,6 +78,11 @@ def parse_event_log(text: str) -> dict:
         "dump_starts": [],
         "invariant_fail": False,
         "invariant_result": None,
+        # Every oracle result line, not just the last. A run can report several
+        # (fuzz_bank prints one per check), and invariant_checker's user-oracle
+        # invariant needs each FAIL: keeping only invariant_result meant a PASS
+        # printed after a FAIL hid the FAIL.
+        "oracle_lines": [],
     }
 
     in_log = False
@@ -98,6 +104,7 @@ def parse_event_log(text: str) -> dict:
         m = INVARIANT_RESULT_RE.match(line)
         if m:
             result["invariant_result"] = line.strip()
+            result["oracle_lines"].append(line.strip())
             if "FAIL" in line:
                 result["invariant_fail"] = True
             continue
@@ -192,6 +199,14 @@ def window_around_failure(parsed: dict, window: int = 200) -> dict:
         "sigsegv_addr": parsed["sigsegv_addr"],
         "total_entries": len(parsed.get("events", [])),
         "dump_start": parsed["dump_start"],
+        # Carried through so a windowed copy still knows what it lost and what the
+        # program itself concluded: dropping dump_starts made every windowed log look
+        # unwrapped (is_ring_wrapped() then reads the one surviving dump_start), and
+        # dropping the oracle lines hid the verdict that motivated the windowing.
+        "dump_starts": parsed.get("dump_starts", []),
+        "oracle_lines": parsed.get("oracle_lines", []),
+        "invariant_fail": parsed.get("invariant_fail", False),
+        "invariant_result": parsed.get("invariant_result"),
     }
 
 

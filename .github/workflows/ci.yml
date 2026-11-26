@@ -275,6 +275,11 @@ jobs:
         run: python3 -m pip install -r requirements.txt
       - name: Compile Python tools
         run: python3 -m compileall -q tools plugin simulator patches benchmarks gem5_sim
+      - name: Event-log checker fixtures
+        # The checker is not a gate on backend behaviour (vocabulary still open,
+        # TODO.md), but its severity/exit-code contract is asserted here so that
+        # demoting or promoting an invariant is a deliberate, reviewed change.
+        run: make check-pytools
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

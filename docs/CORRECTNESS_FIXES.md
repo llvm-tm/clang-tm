@@ -1713,12 +1713,116 @@ is why its gates are the functional pair, `bank` and the differential sweep),
 criticals (1 371 and 2 031) and is a genuine mismatch, not this class of bug: NOrec's
 `validate()` reassigns `tx->snapshot` mid-transaction when the commit lock is contended,
 so reads logged afterwards legitimately carry a newer snapshot than `TX_BEGIN`'s, which
-is what the check calls a stale read. Whether NOrec's own commit-time validation is
-sound against a snapshot that moved under reads taken earlier is a separate question —
-the driver's oracles (double-read, range, read-own, pointer) never fired across the 484
-runs of the 2026-11-26 mask/thread sweep — and it is recorded in `TODO.md` with the code
-reference rather than assumed either way. `abort_causality` (41 and 84 warnings) is the
+is what the check calls a stale read. §40 settles why that is *sound*, and the check was
+demoted to `WARNING` on the strength of it. `abort_causality` (41 and 84 warnings) is the
 same per-backend vocabulary gap recorded in `TODO.md`.
+
+## 40. NOrec moves its snapshot mid-transaction — investigated and cleared, not a bug (2026-11-26) ✅
+
+**Why it looked wrong.** `commit()` retries the global-clock CAS with
+`tx->snapshot = validate();` (`backends/tm_impl/norec/NOrec.hpp:280`) and the read path
+does the same whenever the clock has moved (`:487`). A snapshot that advances past the
+one a value was read under is the textbook shape of a lost update: read `x` at `S`,
+someone commits `x`, snapshot advances to `S'`, commit's CAS succeeds against `S'`, and
+the stale `x` is written back over theirs. The invariant checker flags exactly this
+(`version_ordering`, 1 371 findings on a NOrec log and 2 031 on NORECBF), and `TODO.md`
+carried it as an unresolved soundness question.
+
+**Why it is sound.** The snapshot can only move *through* `validate()`, and `validate()`
+does not compare versions — it re-reads **every** logged address and aborts if any value
+differs from what was observed (`NOrec.hpp:246-250`), then re-checks that the clock did
+not change during that scan (`:252`) before returning it. So a returned snapshot `S'`
+carries the proof that the whole read set still matches memory at `S'`; the CAS from `S'`
+then proves nothing committed after that. In the scenario above, the second read's
+`validate()` sees `x` changed and calls `abort_tx()`. NORECBF's Bloom-filter fast path
+(`NOrec_BF.hpp:315` region) skips the memory scan only when the committed-writes filter
+is disjoint from the read set *and* its generation is unchanged, with the same clock
+double-check around it — the argument is "no false negatives", not "probably fine".
+
+**Measured, not just argued.** A scratch build of `NOrec.hpp` (never committed; restored
+byte-identically, clean rebuild then verified to contain 0 `g_dbg_` symbols and 0
+`NORECDBG` strings) counted snapshot advancements, `validate()` calls, and aborts raised
+by the value comparison. `drv_diff_ops`, identity `g_norec_hooks`:
+
+| shape | driver `aborts=` | snapshot moves | value-check aborts | `validate()` calls | oracles |
+|---|---|---|---|---|---|
+| `-S 1 -M 2 -T 8 -n 2000` | 61 | 895 | 61 | 2 693 | all 0 |
+| `-S 2 -M 2 -T 16 -n 1500` | 349 | 3 406 | 349 | 12 459 | all 0 |
+| `-S 1 -M 1 -T 8 -n 2000` | 1 227 | 6 804 | 1 227 | 15 510 | all 0 |
+| `-S 1 -T 8 -n 2000` (mixed) | 5 308 | 26 408 | 5 308 | 83 749 | all 0 |
+| `-S 3 -M 2 -T 32 -n 1200` | 1 790 | 9 753 | 1 790 | 47 563 | all 0 |
+
+`-M 2` is the transfer op alone — read two counters, write both — which is maximal
+lost-update exposure, and `aborts` equals the value-check abort count in **every** row:
+`validate()` is the only thing that ever aborts NOrec in these workloads, it fires
+thousands of times per run, and all four consistency oracles (`v_double_read`, `v_range`,
+`v_readown`, `v_ptr`) plus `quiesce_viol`/`alloc_viol` stay at 0 across the 112 120 commits
+those five runs made.
+The path is exercised, and it catches exactly the case the worry was about.
+
+**What changed as a result.** `version_ordering` in
+`tools/stm_bug_tool/invariant_checker.py` is now a `WARNING` instead of a `CRITICAL`,
+with the reason and these numbers in its docstring: the check encodes the start-version
+discipline of the versioned-lock backends, while NOrec, NORECBF and TL2 derive safety
+from whole-read-set *value* validation and legitimately log newer-version reads. After
+the demotion the three real logs measured are `0 critical` (NOrec 1 416 warnings, NORECBF
+2 119, the TL2 §38 log 352) while the deliberately-broken fixture still reports 3
+criticals, so the remaining `CRITICAL` classes are still live. Turning this into a
+backend-aware invariant rather than a softer one is still open in `TODO.md`.
+
+## 41. The checker's fourteenth invariant had never been able to fire (2026-11-26) ✅
+
+**Root cause.** `check_user_oracle` — the invariant that is supposed to surface what the
+program itself concluded — read `parsed["_raw_text"]`, and `parse_event_log()` never sets
+that key:
+
+```python
+raw = parsed.get("_raw_text", "")
+if not raw:
+    return violations            # always, for every log ever parsed
+for line in raw.splitlines():
+    if "TM-INVARIANT: FAIL" in line:     # a string no program in the tree prints
+```
+
+Two independent dead ends in one function, and the second is the interesting one: the
+repo's oracles print `INVARIANT: money conservation: FAIL (…)`
+(`benchmarks/cpp/fuzz-bank/fuzz_bank.cpp:108`, `fuzz_counter.cpp:112`), which the parser
+*does* recognise (`INVARIANT_RESULT_RE`) — but only into `invariant_result`, a single slot
+the checker never consulted, which a later PASS overwrites. So `User oracle: ok` meant
+"this check ran", not "the program's verdicts were clean", and the tool's README has been
+advertising it since it was written. The general shape to watch for: an invariant reading
+a field no producer writes, where the failure mode is silence, not an error.
+
+**Fix** (`tools/stm_bug_tool/event_parser.py`, `invariant_checker.py`):
+
+- the parser collects every oracle line as `oracle_lines` (keeping `invariant_result` as
+  the last-line field, which `tools/tm-fuzz/tm-fuzz.py` has its own copy of and uses);
+- `check_user_oracle` reports a `CRITICAL` per `FAIL` line from that list, and keeps the
+  old `TM-INVARIANT:` scan as a legacy path for callers that do attach raw text;
+- `window_around_failure()` now carries `dump_starts`, `oracle_lines` and the two
+  invariant fields. It had been dropping `dump_starts`, so a windowed copy — which is
+  what the tool tells you to use on a 100 k-event log — reported **every** wrapped log as
+  unwrapped, quietly disabling the "history is incomplete" caveat and the leniency that
+  depends on it.
+
+**Verification.** A/B on the same input, old implementation run side by side against the
+new one: on the `fuzz_bank` FAIL line the old code reports **0** findings, the new reports
+**1** (`INVARIANT: money conservation: FAIL (sum=99 expected=100)`); with a PASS printed
+after the FAIL, the last-line field holds the PASS while the new list still yields the 1
+`CRITICAL`. Unchanged on all five real logs the repo's docs quote (NOrec 0 critical /
+1 416 warnings, NORECBF 0/2 119, the §38 TL2 log 0/352, the broken fixture 3 criticals,
+the valid fixture 0/2), so nothing started firing that had not been.
+
+**And the reason this was findable at all.** This commit also adds
+`tools/stm_bug_tool/selftest.py` (gated as `make check-pytools`, run by CI's `lint` job):
+eleven hand-written traces, one defect each, asserting the exact count *and severity* of
+every finding, plus the CLI's five exit-code cases. The checker itself is still not a CI
+gate on backend behaviour — its per-backend vocabulary is open in `TODO.md` — which is
+exactly why its own contract needed pinning: nothing else in the tree would have noticed
+if all fourteen invariants had gone silent. Two guards keep the suite honest in both
+directions: the `clean` fixture must report *nothing*, and at least one fixture must
+produce a `CRITICAL`. The `User oracle` fixture is the one that fails against the
+pre-fix code.
 
 ## Known remaining issues (not yet fixed)
 

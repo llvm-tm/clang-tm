@@ -30,7 +30,7 @@ severity each violation is reported at:
 | Abort causality | A `TX_ABORT` is preceded by a causal event (version/gap/lock failure) — WARNING: backends abort for reasons not all logged |
 | No orphan locks | Locks held at the end of the log (or at a `SIGSEGV`) without release |
 | Gap check outcome | Every `GAP_CHECK` is followed by `TX_ABORT` or a matching success path |
-| Version ordering | Within a thread, read-set versions are ≤ the transaction's start version |
+| Version ordering | Within a thread, read-set versions are ≤ the transaction's start version — a `WARNING`: it encodes the versioned-lock discipline, and value-validated backends (NOrec, NORECBF, TL2) break it by design (`docs/CORRECTNESS_FIXES.md` §40) |
 | Address validity | Event addresses are plausible (region/heap/stack classification) |
 | Crash signature | Classifies the retained tail leading up to a `SIGSEGV` |
 | No commit after abort | An aborted transaction does not later take the commit lock or publish |
@@ -38,7 +38,7 @@ severity each violation is reported at:
 | TX memory balance | Speculative allocations that survived a transaction are accounted for |
 | Address reuse | A read/write on an address that was freed and not re-allocated (use-after-free) |
 | Sequential baseline | Final value per address equals a `--baseline` single-threaded run (opt-in) |
-| User oracle | `INVARIANT: … FAIL` lines the application printed are reported |
+| User oracle | `INVARIANT: … FAIL` verdict lines the program printed (`fuzz_bank`, `fuzz_counter`) are reported. It looked for a key nothing ever set, so it had never fired for any log until 2026-11-26 — `docs/CORRECTNESS_FIXES.md` §41 |
 
 CRITICAL findings make the exit status 1; WARNING findings do not unless
 `--strict` was given.
@@ -101,16 +101,41 @@ in which every other aborting backend logs them. Fixed in
 identical commit counts). Before trusting a lifecycle `CRITICAL` from an unfamiliar
 backend, count its `TX_ABORT` events against the driver's own `aborts=` line.
 
-**Not every invariant is backend-neutral yet.** A `-T 4 -n 300` NOrec log (built the
-same way) produced 3 427 `CRITICAL`s — 1 246 lock-discipline and 1 250
-address-validity of them were NOrec logging its commit-lock *version* where the address
-belongs, and never logging the unlock; `docs/CORRECTNESS_FIXES.md` §39 fixes both to 0.
-What remains is a genuine vocabulary mismatch: `Version ordering` flags 1 371 reads
-because NOrec's commit path reassigns `tx->snapshot` under contention (`TODO.md`), and
-`Abort causality` fires (96, 316 and 263 times on clean TL2 runs at three shapes; 41 and
-84 on the two NOrec logs) because that check's causal event set does not include the
-conflict evidence these backends log. These are measured and listed in `TODO.md`; the
-checker is a diagnostic tool, not a CI gate, until each is settled.
+**What `CRITICAL` means here.** A `-T 4 -n 300` NOrec log (built the same way) once
+produced 3 427 `CRITICAL`s. 1 246 lock-discipline and 1 250 address-validity of them were
+NOrec logging its commit-lock *version* where the address belongs, and never logging the
+unlock — `docs/CORRECTNESS_FIXES.md` §39 fixes both to 0. The remaining 1 371 were
+`Version ordering`, which turned out to be the check being wrong rather than the backend:
+NOrec advances `tx->snapshot` only through a `validate()` that re-reads and value-checks
+the entire read set first, so its newer-version reads are safe by construction — measured
+in §40, where the value-check abort count equalled the driver's `aborts=` in every shape
+and all four consistency oracles stayed at 0. That check is now a `WARNING`. All three
+real logs measured afterwards are `0 critical` (NOrec 1 416 warnings, NORECBF 2 119, the
+§38 TL2 log 352) while the deliberately-broken fixture still reports 3, so the `CRITICAL`
+class stays meaningful and `--strict` still distinguishes clean from not.
+
+Still open, measured and listed in `TODO.md`: `Abort causality` fires (96, 316 and 263
+times on clean TL2 runs at three shapes; 41 and 84 on the two NOrec logs) because its
+causal event set does not include the conflict evidence these backends log, and
+`Version ordering` is soft rather than backend-aware. So the checker remains a diagnostic
+tool, not a gate on backend behaviour.
+
+## Testing the checker itself
+
+`selftest.py` holds hand-written traces — one per defect, nothing else in them — and the
+exact count and severity each must produce, plus the CLI's exit codes:
+
+```bash
+make check-pytools          # == python3 tools/stm_bug_tool/selftest.py
+```
+
+It runs in CI (the `lint` job), because the alternative is worse: the checker is not
+otherwise gated, so a `CRITICAL` becoming a `WARNING`, or an invariant quietly losing the
+input it reads, would show up as a green build and a tool that says nothing is wrong for a
+month. Two guards in it are worth knowing about: the `clean` fixture must produce **no**
+findings at all, and at least one fixture must produce a `CRITICAL` — a suite that never
+says "bad" is as useless as one that never says "good". `stale_read` pins §40's demotion
+specifically, so re-promoting `Version ordering` has to be an edit to that file.
 
 
 ## Usage

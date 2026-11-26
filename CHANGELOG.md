@@ -3875,3 +3875,47 @@ Gates: `test_tx` 120/120 and `test_ds` 207/207 for NOREC and NORECBF, `bank -t 8
 conserving, `run-norec` PASS (NORECBF has no unit target in `tests/backends/tm_impl`),
 `BACKENDS="NOREC NORECBF" tools/diff_backends.sh 1 2` → `FAIL: none` on the widened
 scenario set, `make check-fast`, `make fmt-check`.
+
+## Session 2026-11-26 (morning, fifth block) — NOrec's moving snapshot cleared, and the checker's own contract put under test (§40, §41)
+
+Followed the one open item that could still have been a soundness bug rather than
+tooling vocabulary: NOrec advances `tx->snapshot` mid-transaction
+(`commit()`'s CAS retry does `tx->snapshot = validate()`, the read path does the same
+whenever the clock moved). Read the code and measured it with a **scratch** build of
+`NOrec.hpp` (never committed — restored byte-identically, clean rebuild verified to carry
+0 `g_dbg_` symbols and 0 `NORECDBG` strings), counting snapshot advancements, `validate()`
+calls and aborts raised by the value comparison. `validate()` does not compare versions: it
+re-reads *every* logged address and aborts on any change, then re-checks the clock is
+unchanged before returning it — so a returned snapshot carries a proof about the whole read
+set. Across five driver shapes (`-M 2` transfers alone at `-T 8/16/32`, `-M 1`, and mixed)
+the value-check abort count equalled the driver's `aborts=` in **every** row
+(61 / 349 / 1 227 / 5 308 / 1 790, against 895 – 26 408 snapshot moves) and all four oracles stayed 0 over 112 120 commits. Not a
+bug: `version_ordering` was the check asserting the versioned-lock discipline onto
+value-validated backends, and it is now a `WARNING` with the reasoning in its docstring
+(§40). All three real logs measured afterwards are `0 critical`; the broken fixture still
+yields 3.
+
+Writing that up is what exposed §41: `check_user_oracle` read `parsed["_raw_text"]`, which
+`parse_event_log` never sets, looking for `TM-INVARIANT: FAIL`, which nothing prints — the
+real format is `INVARIANT: money conservation: FAIL …` (`fuzz_bank.cpp:108`), which the
+parser filed into a single slot the check never consulted, so a PASS after a FAIL hid it.
+Fourteen invariants, one of which had never been able to fire, in a tool nothing gates. The
+parser now collects every oracle line, the check reports a `CRITICAL` per `FAIL` (A/B on the
+real line: old 0 findings, new 1), and `window_around_failure()` carries `dump_starts` —
+it had been dropping them, so the windowed copies the README tells you to use on a 100 k-event
+log reported every wrapped log as unwrapped.
+
+The durable part is the guard, not the fix: `tools/stm_bug_tool/selftest.py` (new
+`make check-pytools`, wired into CI's `lint` job) pins eleven one-defect fixtures with exact
+finding counts *and* severities plus the CLI's five exit-code cases, with two
+anti-vacuity guards — the clean fixture must find nothing, and some fixture must produce a
+`CRITICAL`. `stale_read` pins §40's demotion so re-promoting it has to be an edit to that
+file. Verified the change moves nothing else: unchanged on all five real logs the docs quote
+(0/1 416, 0/2 119, 0/352, 3 criticals, 0/2).
+
+Gates: `make check-pytools` (16 cases, ALL PASSED), `python3 -m compileall -q tools`, `make
+fmt-check`, `make check-fast`, ci.yml re-parsed (18 jobs), `make help` lists the new target.
+Docs: `tools/stm_bug_tool/README.md` (invariant table, a "Testing the checker itself"
+section), `docs/DEVELOPER_GUIDE.md` (target list + `lint` row), `docs/DEBUGGING_BACKENDS.md`,
+`TODO.md` (§40 cleared; the backend-aware `version_ordering` and `abort_causality` items
+stay open), §40 and §41 in `docs/CORRECTNESS_FIXES.md`.

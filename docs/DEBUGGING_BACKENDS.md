@@ -43,6 +43,12 @@ make -C tests/backends clean all CXXFLAGS="-DTM_EVENT_LOG -UNDEBUG"
   python3 tools/stm_bug_tool/invariant_checker.py --log /tmp/events.txt   # exit 1 on CRITICAL
   ```
 
+  Before blaming a `CRITICAL` on the checker, note that its own contract is pinned:
+  `make check-pytools` (`tools/stm_bug_tool/selftest.py`) asserts each invariant's
+  expected findings against one-defect fixtures, in CI, so a check that has quietly
+  stopped being able to fire — or a severity that drifted — is a test failure rather
+  than a month of reassuring output (`docs/CORRECTNESS_FIXES.md` §41).
+
   The lifecycle and lock-discipline checks pair events per thread id, so a `-T 4`
   dump is fine (they used to pair in one global stream and produce false positives;
   see `tools/stm_bug_tool/README.md`). What a lifecycle `CRITICAL` needs to be

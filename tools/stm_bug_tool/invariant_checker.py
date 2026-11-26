@@ -283,8 +283,22 @@ def check_version_ordering(parsed: dict) -> list:
     When the ring buffer wraps, TX_BEGIN events may be missing, so we can
     only verify ordering for TXs whose TX_BEGIN is in the visible window.
 
-    Stale read = read_version > tx_start_version (concurrent writer).
+    Stale read = read_version > tx_start_version
     (Not inverted: read_version < tx_start_version is NORMAL.)
+
+    WARNING, not CRITICAL, and deliberately so. This encodes the start-version
+    discipline of the versioned-lock backends; the ones that validate by *value*
+    over the whole read set — NOrec and NORECBF (their `validate()` re-reads every
+    logged address and aborts on any change, backends/tm_impl/norec/NOrec.hpp:246)
+    and TL2 (which validates every read-set entry at commit) — legitimately read a
+    guard newer than their start version, because safety comes from that value check
+    rather than from the version comparison. Measured on 2026-11-26 (docs/
+    CORRECTNESS_FIXES.md §40): NOrec's snapshot advances 895 to 26 408 times per
+    driver run, its full-read-set value check accounts for 100 % of the aborts the
+    driver reports in every shape measured, and all four consistency oracles stay at
+    0 — so these findings are expected traffic there, not evidence of a stale read.
+    A CRITICAL has to be something no backend can explain; making this
+    backend-aware (rather than merely softer) is still open in `TODO.md`.
     """
     violations = []
     events = parsed["events"]
@@ -308,9 +322,12 @@ def check_version_ordering(parsed: dict) -> list:
                 if read_version > tx_start_version:
                     violations.append({
                         "invariant": "version_ordering",
-                        "severity": "CRITICAL",
+                        "severity": "WARNING",
                         "description": f"Read version {read_version} > TX start version "
-                                       f"{tx_start_version} (stale read — concurrent writer)",
+                                       f"{tx_start_version} — stale read on a "
+                                       f"versioned-lock backend, expected traffic on a "
+                                       f"value-validated one (see the invariant's "
+                                       f"docstring)",
                         "events": [ev],
                     })
 
@@ -868,18 +885,33 @@ def check_sequential_baseline(parsed: dict) -> list:
 # ── Invariant 14: User Oracle Support ─────────────────────────────
 
 def check_user_oracle(parsed: dict) -> list:
-    """Check for user oracle results embedded in the event log.
+    """Surface the program's own invariant verdicts in the report.
 
-    User oracles (registered via tm_register_invariant_callback)
-    output 'TM-INVARIANT: FAIL' lines when invariants are violated.
-    Parse them from the raw log text.
+    The fuzz/oracle programs (`benchmarks/cpp/fuzz-bank/fuzz_bank.cpp`,
+    `benchmarks/cpp/fuzz-counter/fuzz_counter.cpp`) print
+    `INVARIANT: <name>: PASS|FAIL …` next to their event dump, and the parser
+    collects those lines as `oracle_lines` because they are not events.
+
+    Before 2026-11-26 this read `parsed["_raw_text"]`, which nothing ever set, and
+    searched for "TM-INVARIANT: FAIL", a string no program in the tree prints: the
+    invariant therefore reported ok for every log ever fed to it. The fixture
+    `oracle_failure` in `selftest.py` is what keeps it alive now.
     """
     violations = []
-    raw = parsed.get("_raw_text", "")
-    if not raw:
-        return violations
 
-    for line in raw.splitlines():
+    for line in parsed.get("oracle_lines", []):
+        if "FAIL" not in line:
+            continue
+        violations.append({
+            "invariant": "user_oracle",
+            "severity": "CRITICAL",
+            "description": line.strip(),
+            "events": [],
+        })
+
+    # Legacy path: a caller that attached the raw text (e.g. a harness that only
+    # has the console output) used the older TM-INVARIANT prefix.
+    for line in parsed.get("_raw_text", "").splitlines():
         if "TM-INVARIANT: FAIL" in line:
             violations.append({
                 "invariant": "user_oracle",

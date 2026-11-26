@@ -46,6 +46,7 @@ make -C benchmarks/cpp all      # Build all expli benchmarks (BACKEND=tinystm de
 make -C plugin run              # Build and run plugin tests
 make check-all                  # Build+test all C++ backends ($(BACKENDS_TESTS); SGL/LEFTRIGHT/ROMULUS skip auto-run)
 make check-diff                 # Differential concurrency sweep: one self-verifying driver, every backend, same seeds
+make check-pytools              # Event-log checker fixtures: the invariant checker's own count/severity/exit-code contract
 ```
 
 > **New here?** Run `make check-fast` to confirm the whole toolchain works, then
@@ -230,7 +231,7 @@ debug patches + Rust `tm-sim` trace replay, with a worked `bank_tl2` example).
 | backend-unit | yes | `tests/backends/tm_impl` deterministic per-backend unit suite (12 backends × 10 tests, built at `-O0 -g` without `NDEBUG` so runtime assertions are live; per-backend exclusions carry their reason in the Makefile) |
 | stale-check | yes | Assert legacy directories (`llvm_tm_plugin`, `expli-benchmarks`, `plugin-benchmarks`, `rust_tm_api`) are gone |
 | tla-smoke | yes | Blocking 3-model smoke (`SGL`, `NOrec-smoke`, `TinySTM_WBCTL`), 60 s/model budget |
-| lint | yes | `clang-format-22`, `cargo fmt --check`, `clippy -D warnings` |
+| lint | yes | `clang-format-22`, `cargo fmt --check`, `clippy -D warnings`, `compileall` over the Python tools, and `make check-pytools` (the event-log checker's fixture suite: exact finding counts, severities and CLI exit codes — see `tools/stm_bug_tool/README.md`) |
 | sanitizer | yes | ASan+UBSan build + run of `bank`, `test_tx`, `test_ds` over all 22 C++ backends (no memory errors anywhere; ACCELTL2 runs with `TM_ACCEL_DISABLE=1`, matching `tsan-gate`, since the OpenCL ICD's own threads are not ours — its device path is covered by `nightly.yml`'s `accel-e2e`). LeakSanitizer is on per-backend (`leak_check: true`) for the 12 measured clean and off for the 10 that still leak at exit, so a new leak fails without having to disable leak checking globally |
 | ubsan-gate | yes | `-fsanitize=undefined` build + `drv_diff_ops` over all 22 C++ backends; catches hook-table function-pointer type mismatches and pointer-arithmetic UB that the race gate cannot |
 | tsan-gate | yes | `-fsanitize=thread` build + `drv_diff_ops` over all 22 C++ backends, each race-clean on 12 seeds at two shapes (CSMV also in `CSMV_SERVER_COMMIT=1` mode; ACCELTL2 with `TM_ACCEL_DISABLE=1`, since its device path's only reports come from the OpenCL driver); a new race or consistency violation fails the PR. GPUTX joined on 2026-11-26, once its lock-free reads became width-exact relaxed atomics paired with per-word commit counters — before that it reported 12–15 races, all `do_read()` vs the commit write-back (docs/CORRECTNESS_FIXES.md §35, §37) |
