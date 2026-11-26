@@ -63,6 +63,7 @@ static int money_conserved(void *)
 struct StderrCapture {
 	int saved_fd = -1;
 	char path[64];
+	char last_hit[256] = ""; // the last needle-matching line, for content assertions
 
 	explicit StderrCapture(const char *name)
 	{
@@ -93,8 +94,14 @@ struct StderrCapture {
 		ssize_t len;
 		while ((len = getline(&line, &cap, f)) != -1) {
 			// The exact substring invariant_checker.py's check_user_oracle looks for.
-			if (strstr(line, "TM-INVARIANT: FAIL") != nullptr)
+			if (strstr(line, "TM-INVARIANT: FAIL") != nullptr) {
 				hits++;
+				snprintf(last_hit,
+				         sizeof(last_hit),
+				         "%.*s",
+				         (int)strcspn(line, "\n"),
+				         line);
+			}
 		}
 		free(line);
 		fclose(f);
@@ -182,11 +189,11 @@ int main()
 	int dirty_hits;
 	int calls_before = g_oracle_calls;
 	char verdict_path[64];
+	StderrCapture dirty_cap("dirty");
 	{
-		StderrCapture cap("dirty");
 		print_money(kTransfer);
-		dirty_hits = cap.finish();
-		snprintf(verdict_path, sizeof(verdict_path), "%s", cap.path);
+		dirty_hits = dirty_cap.finish();
+		snprintf(verdict_path, sizeof(verdict_path), "%s", dirty_cap.path);
 	}
 	check("oracle_called_for_violation",
 	      g_oracle_calls - calls_before == 1,
@@ -194,6 +201,18 @@ int main()
 	      1);
 	check("violation_counted", g_oracle_failures == 1, g_oracle_failures, 1);
 	check("violation_reported", dirty_hits == 1, dirty_hits, 1);
+
+	// The line has to point at a transaction. The field it used to print,
+	// t_current_tx_id, only advances under TM_TRACE_PATH, so it always said "tx 0"; the
+	// wrapper now counts its own oracle-checked commits, and the violation is the
+	// (kCleanTxns+1)-th commit on this thread.
+	char want[32];
+	snprintf(want, sizeof(want), "after commit #%d", kCleanTxns + 1);
+	check("verdict_names_the_commit",
+	      strstr(dirty_cap.last_hit, want) != nullptr,
+	      strstr(dirty_cap.last_hit, want) != nullptr,
+	      1);
+	printf("      %s\n", dirty_cap.last_hit);
 
 	printf("\n  (final sum %lld, expected %lld — the violation is deliberate)\n",
 	       (long long)g_last_sum,

@@ -4029,3 +4029,27 @@ misleading diagnostic rather than letting the fixture bless it.
 Gates: the 12-backend run above, `make fmt-check`, `make check-fast`. Docs: `TODO.md` (gap
 closed, new item opened), `docs/DEVELOPER_GUIDE.md` (`backend-unit` row names the test),
 `tools/stm_bug_tool/README.md` (the fixture now has a producer behind it).
+
+## Session 2026-11-26 (morning, ninth block) — the oracle's FAIL line now names a real commit
+
+Closed the item the previous block had just opened. `tm_hooks.cpp`'s oracle wrapper printed
+`TM-INVARIANT: FAIL (… after tx %llu …)` from `t_current_tx_id`, which is incremented only in
+`trace_begin()` under `TM_TRACE_PATH` — so with an oracle registered and tracing off, the
+normal case, every single report said `after tx 0` (the previous block's own captured output
+shows exactly that, twice, for two different commits). The line's entire purpose is to point
+at a transaction.
+
+Fix is the narrow, honest one: the wrapper counts the commits it runs the oracle over, per
+thread, and prints `after commit #N`. It cannot be wrong about the thing the line claims,
+because the wrapper runs exactly once per committed transaction — which is what the test pins.
+The `TM-INVARIANT: FAIL` prefix that both `tools/tm-fuzz/tm-fuzz.py:262` and
+`check_user_oracle` match is byte-identical. `t_current_tx_id` is left alone and is still
+trace-path-only, noted in `TODO.md` so nobody reads it as a transaction id elsewhere.
+
+`test_invariant_callback.cpp` gained an eighth check (`verdict_names_the_commit`) asserting
+the failing verdict names commit #21 — the violation is the 21st of 21 commits, derived from
+`kCleanTxns` rather than hard-coded — and the selftest fixture carries the new format.
+**12/12 backends pass 8/8.**
+
+Gates: `make fmt-check`, `make check-pytools`, `make check-fast`, `test_tx` 120/120 and
+`test_ds` 207/207 on TL2 and CSMV (the change is in shared hook code).

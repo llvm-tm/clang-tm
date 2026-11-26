@@ -386,14 +386,15 @@ What was left has one half done and three new gaps measured (P2, opened 2026-11-
   `TM-INVARIANT: FAIL` to stderr. All 12 backends pass 7/7, and the captured stderr fed to
   `invariant_checker.py` gives `1 critical`, exit 1 — the first time a program's own verdict
   in this repo reaches the tool's verdict through a gate.
-- **The oracle FAIL line names a transaction that did not happen.** `tm_hooks.cpp:831` prints
-  `after tx %llu` from `t_current_tx_id`, but that counter is incremented only on the trace
-  path (`:344`, under `TM_TRACE_PATH`), so with an oracle registered and no tracing — the
-  normal case — every report says `after tx 0`. The prefix and the callback return code are
-  what both `tools/tm-fuzz/tm-fuzz.py:262` and `check_user_oracle` match, so nothing is
-  missed; it is a misleading diagnostic on the one line whose whole job is to point at a
-  transaction. Either advance a commit counter in the wrapper (it already runs per commit) or
-  print the oracle invocation count instead.
+- ~~**The oracle FAIL line names a transaction that did not happen.**~~ → **fixed same day.**
+  `tm_hooks.cpp` printed `after tx %llu` from `t_current_tx_id`, which is incremented only in
+  `trace_begin()` (under `TM_TRACE_PATH`), so with an oracle registered and tracing off — the
+  normal case — every report said `after tx 0`, on the one line whose whole job is to point at
+  a transaction. The wrapper now counts the commits it has run the oracle over (per thread)
+  and prints `after commit #N`; the `TM-INVARIANT: FAIL` prefix both consumers match is
+  byte-identical. `test_invariant_callback.cpp` pins the content (the violation is commit #21
+  of 21) on all 12 backends. `t_current_tx_id` itself is unchanged and remains a
+  trace-path-only counter — do not read it as a transaction id elsewhere.
 - **Keep the checker's contract gated — `make check-pytools`.** Added with §41: eleven
   one-defect fixtures asserting exact count *and* severity, plus the CLI's five exit-code
   cases, run by CI's `lint` job. The checker is still not a gate on *backend* behaviour (the

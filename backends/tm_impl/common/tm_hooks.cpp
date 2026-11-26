@@ -818,6 +818,15 @@ static void *g_invariant_data = nullptr;
 // Saved original tm_end before we wrapped it
 static void (*g_original_tm_end)() = nullptr;
 
+// Per-thread count of commits this wrapper has run the oracle over. The FAIL line needs
+// *some* way to point at a transaction, and the obvious candidate, t_current_tx_id, is
+// incremented only in trace_begin() (:344, under TM_TRACE_PATH) — so with an oracle
+// registered and tracing off, which is the normal case, every report said "after tx 0".
+// This counter cannot be wrong about the thing the line is claiming: the wrapper runs
+// exactly once per committed transaction (a test pins that), so it is the commit ordinal
+// for the thread that just committed.
+static thread_local uint64_t t_oracle_commits = 0;
+
 extern "C" {
 
 static void end_with_invariant()
@@ -827,13 +836,18 @@ static void end_with_invariant()
 	if (g_invariant_cb) {
 		int result = g_invariant_cb(g_invariant_data);
 		if (result != 0) {
+			// "TM-INVARIANT: FAIL" is the substring both tools/tm-fuzz/tm-fuzz.py:262 and
+			// invariant_checker.py's check_user_oracle match — keep that prefix verbatim.
+			// The fixture oracle_callback_failure in tools/stm_bug_tool/selftest.py and
+			// tests/backends/tm_impl/test_invariant_callback.cpp pin the rest.
 			fprintf(stderr,
 			        "TM-INVARIANT: FAIL (callback returned %d "
-			        "after tx %llu on thread 0x%llx)\n",
+			        "after commit #%llu on thread 0x%llx)\n",
 			        result,
-			        (unsigned long long)t_current_tx_id,
+			        (unsigned long long)(t_oracle_commits + 1),
 			        (unsigned long long)(uintptr_t)pthread_self());
 		}
+		t_oracle_commits++;
 	}
 }
 
