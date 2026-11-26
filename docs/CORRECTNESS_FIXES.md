@@ -711,8 +711,9 @@ Only `make -B` or `make clean` avoided it, so any
 a shell session can produce measurements attributed to the wrong backend.
 
 **Fix.** `benchmarks/cpp/Makefile` now maintains a stamp file
-(`bin/.backend-$(BACKEND)`) that every link rule depends on; the stamp rule
-deletes any existing `.backend-*` stamp and writes the current name, so a
+(`bin/.backend-$(BACKEND)`, since §36 `.backend-$(BACKEND)-san$(SANITIZE)-…`)
+that every link rule depends on; the stamp rule deletes any existing
+`.backend-*` stamp and writes the current name, so a
 backend change creates a prerequisite newer than every linked binary and
 forces the relink. Same-backend rebuilds still no-op (verified: 1 compile
 per switch, 0 on repeat), and `make clean` (`rm -rf bin`) clears it.
@@ -1326,11 +1327,166 @@ happening "only at a quiescence point", which the code has never done; it now
 documents the real scheme, both bounds, and why the concurrent
 `BloomFilter::clear()` is sound only because of them.
 
+## 35. GPUTX published without a commit order, losing updates as concurrency rose (2026-11-26) ✅
+
+**Symptom.** `tests/concurrency/drv_diff_ops.cpp` failed its additive-delta
+oracle on GPUTX only, at rates that rose monotonically with the thread count
+(`-n 5000`, 200 seeds each, pre-fix):
+
+| shape | failing seeds | rate |
+|---|---|---|
+| `-T 24` | 36/200 | 18 % |
+| `-T 32` | 81/200 | 41 % |
+| `-T 64` | 196/200 | 98 % |
+
+Each failure was a single counter short by a few deltas, e.g.
+`VIOLATION CNT[0]: final=23185 shadow=23186`. `-T 8` had not failed in 12 seeds,
+which is why `-T 4`/`-T 8` shapes in CI never saw it. Verified the way this repo
+requires: forced rebuild, `nm -C` binary identity (GPUTX symbols present, no
+other backend's), 200 seeds per point, and the other 20 backends clean on the
+identical `-T 32` shape — so the harness was not the variable.
+
+**Root cause.** GPUTX is a priority/rank scheme with **lock-free reads**: a read
+logs `(address, observed value)` and nothing else, and validation at commit
+compares that value with memory. Two things made that unsound:
+
+1. Nothing ordered *validate → apply* against another transaction's commit. The
+   write locks are per address and are only taken by writers, so an address in
+   our **read** set could be committed by someone else in the window between our
+   validation and our write-back. We then applied a value derived from a read
+   that was no longer in memory — a lost update. Nothing in the backend made the
+   commit atomic the way MVLog/NOrec's commit lock or TL2's per-word version
+   stamps do.
+2. The code knew this was needed. `try_lock_write()`'s higher-rank branch said
+   *"the holder will notice our higher rank when they try to commit and abort
+   themselves"* — **no such check exists**; `real_tm_end()` looked at neither
+   rank nor lock state. A documented mechanism had simply never been written.
+
+Three alternative explanations were measured and excluded with temporary
+instrumentation (added, run, reverted): writes or reads taking the
+non-transactional path (`ootx_writes=0`, `ootx_reads=0`), and the reentrant
+lock shortcut firing through a `holder` left by an earlier transaction of the
+same thread (`reent_steal=0`). ThreadSanitizer and AddressSanitizer report
+nothing on the shape, consistent with a protocol hole rather than a data race.
+
+**Fix** (`backends/tm_impl/gputx/gputx_runtime.cpp`). Take a single global
+commit lock before validating, release it after the writes are applied, exactly
+the pattern MVLog and LEFTRIGHT already use:
+
+```cpp
+commit_lock_acquire();          // nothing may publish while we validate
+for (auto &rd : g_reads)  { /* value validation, unchanged */ }
+for (auto &w  : g_writes) { /* still ours? see below */ }
+for (auto &w  : g_writes) memcpy(w.addr, &w.val, w.width);
+release_locks();
+commit_lock_release();
+```
+
+Two details worth keeping:
+
+- The commit lock is taken **after** the per-address write locks and a
+  commit-lock holder takes no write locks, so the wait-for graph cannot cycle
+  (this is the same ordering argument as MVLog's, which takes it after its
+  predecessor wait for the same reason).
+- Before publishing, each write's lock slot must still report `holder == g_tid`.
+  That holds by construction (`try_lock_write` only ever claims a *free* slot and
+  nothing else clears one), but checking it turns the assumption into a
+  guarantee: publishing over an address another transaction holds is precisely
+  how a committed write disappears. `abort_in_commit()` releases the commit lock
+  and the write locks before `siglongjmp`, because unwinding leaves no chance to
+  clean up afterwards.
+
+**Verification.** All 200-seed tables are clean after the fix: `-T 16` 0/200,
+`-T 24` 0/200, `-T 32` 0/200, `-T 64` 0/200, plus `-T 8 -n 20000` 0/100,
+`-T 128 -n 2000` 0/50, `-T 32 -n 50000` 0/10, and 0/10 on each of the `-M 16`,
+`-M 8` and `-R` legs. Total commits are **identical** to pre-fix (32 068 800 at
+`-T 32`, 24 068 800 at `-T 24`) while aborts rose only 9 % (`-T 24`) to 21 %
+(`-T 64`), so this is not "fewer transactions committed, fewer chances to
+notice". Binary identity re-checked with `nm -C` (GPUTX symbols present, 0 from
+any other backend). `test_tx` 120/120, `test_ds` 207/207, `bank` reports
+"PASS: Money conserved" at `-t 4` and `-t 32`, and
+`make -C tests/backends/tm_impl run-gputx` passes. AddressSanitizer with
+`detect_leaks=1` (GPUTX is in the leak-gated set): 0 findings on
+`bank`/`test_tx`/`test_ds`. UBSan: 0 `runtime error:` at `-T 8 -n 1000` and
+`-T 32 -n 5000`. `tools/diff_backends.sh` across all 22 default backends — GPUTX
+now included, with a new `-T 16` leg added precisely because this bug class is
+invisible below it — reports `BUILD_FAIL: none FAIL: none`. `make check-fast` and
+`make fmt-check` are clean.
+
+**The ThreadSanitizer reports are pre-existing, measured as an A/B.** Same host,
+same options, same shapes, HEAD build versus the fixed build (each log
+symbolised with `addr2line` against the binary that produced it):
+
+| shape | HEAD build | fixed build |
+|---|---|---|
+| `-T 4 -n 200` | 15 race reports | 12 |
+| `-T 8 -n 1000` | 17 race reports, `quiesce_viol=1` | 12, `quiesce_viol=0` |
+
+In both builds every report is the same pair: the write is `real_tm_end()`'s
+write-back (`memcpy(w.addr, &w.val, w.width)`) and the previous access is
+`do_read()`'s plain load (`memcpy(&v, addr, width)`). Neither build reports a
+deadlock or a `SEGV`, so the new lock introduced no finding; the fixed build also
+stopped losing the update that TSan's perturbed timing exposed at `-T 8`. The
+residual reports are the design limit below, not a regression — which is why
+GPUTX stays out of the `tsan-gate` list.
+
+**What is still not right.** Two limitations survive and are recorded in
+`TODO.md`, not papered over:
+
+- Validation is still **value-based**, so it cannot distinguish a concurrent
+  commit that changed a read word from one that changed it and changed it back.
+  The driver's counters only increase, so it cannot observe this; a general fix
+  is a per-slot version stamp read with the seqlock discipline (sample
+  version → value → version, abort on mismatch), which the lock table could
+  carry in a new field.
+- Reads are still plain unlocked accesses of memory that committing threads
+  write, which is a data race in the C++ model: 12 reports remain at
+  `-T 4 -n 200` after the fix, all of them the `do_read()` load against
+  `real_tm_end()`'s write-back. That is why GPUTX is **not** in the `tsan-gate`
+  backend list even though it is in the ASan and UBSan gates. The same per-slot
+  version work fixes both.
+
+## 36. `SANITIZE=` did not participate in the backend stamp, so a sanitizer sweep could measure the wrong binary (2026-11-26) ✅
+
+**Root cause.** `benchmarks/cpp/Makefile` links every backend to the *same*
+target path and detects a backend switch through `bin/.backend-$(BACKEND)`
+(§ "the stale-binary trap"). `SANITIZE` and `COVERAGE` change the compile and
+link flags the same way a backend switch does, and also touch no prerequisite
+file — so after `make bin/drv_diff_ops BACKEND=X SANITIZE=address`, a plain
+`make bin/drv_diff_ops BACKEND=X` reported "up to date" and ran the *sanitized*
+binary as the clean one. The inverse is the dangerous direction: a local
+"sanitizer sweep" that reuses the previous clean binary reports zero sanitizer
+findings for a binary that was never sanitized. Every local sweep in this repo's
+session notes has been run with `-B` precisely because of the backend case; the
+sanitizer case was the same trap with a different knob.
+
+**Fix.** The stamp name encodes the mode:
+`bin/.backend-$(BACKEND)-san$(SANITIZE)-$(if $(COVERAGE),cov1,cov0)`. The stamp
+rule already deletes every `.backend-*`, so no other rule or clean target
+changed. `EXTRA_CXXFLAGS` is deliberately *not* encoded (free-form text makes a
+poor file name), and the comment says so: builds that add defines still need
+`-B`, which is how the event-logger recipe in `tools/stm_bug_tool/README.md` is
+written.
+
+**Verification.** Same backend, alternating modes, checking what actually got
+linked:
+
+```
+$ make -B   bin/drv_diff_ops BACKEND=GPUTX                       → relink; __ubsan symbols 0
+$ make      bin/drv_diff_ops BACKEND=GPUTX SANITIZE=undefined    → relink; __ubsan symbols 111
+$ make      bin/drv_diff_ops BACKEND=GPUTX                       → relink; __ubsan symbols 0
+```
+
+Before the change the second and third invocations relink nothing (the old stamp
+name was identical), so the `__ubsan` counts stay at whatever the first build
+left. `make fmt-check` and `make check-fast` are unaffected.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |
 |-------|----------|-------|
-| GPUTX lost updates at high thread counts (found, not fixed) | Medium | `drv_diff_ops` loses committed deltas on GPUTX at rates that rise with concurrency — 0/12 seeds at `-T 8`, 1/12 at `-T 16`, 4/12 at both `-T 24` and `-T 32` (`-n 5000`; single counter short by a few deltas), and it is the only backend of 21 that fails the 294-run long-slot sweep. Not a data race (TSan/ASan clean on the shape) and not the harness (the other 20 are clean at `-T 32`). Out-of-transaction writes and a stale `holder` reentrancy hit were measured and excluded. The design gap: `try_lock_write` documents that an outranked holder "will notice our higher rank when they try to commit and abort themselves", but `real_tm_end()` checks only value equality — no rank, no lock state — and nothing makes validate-then-apply atomic w.r.t. other committers (MVLog/NOrec use a commit lock, TL2 word versions). Repro, eliminated hypotheses and the candidate fix are in `TODO.md`; `-T 16`/`-T 32` are deliberately kept out of `tools/diff_backends.sh` until it is fixed, since that script gates CI. |
+| ~~GPUTX lost updates at high thread counts~~ → **fixed 2026-11-26 (§35)** | — | A commit validated its lock-free read set and then applied its writes with nothing ordering the two against another thread's commit: 36/200 seeds failed at `-T 24`, 81/200 at `-T 32`, 196/200 at `-T 64`. `try_lock_write` documented a rank check at commit that was never implemented. Fixed by serialising validate+apply under a global commit lock (MVLog/LEFTRIGHT's pattern) plus an ownership re-check before publish; 0/200 at all three shapes after. "|
+| GPUTX validation is value-based and its reads are unsynchronised | Medium | Consequence of the §35 design, not of the fix: validation compares logged values with memory, so a commit that changed a read word and changed it back is invisible (the driver's counters only increment, so it cannot observe this), and reads are plain accesses of memory that committing threads write — a data race in the C++ model, which is why GPUTX is in the ASan/UBSan gates but not the `tsan-gate` list. Both want the same change: a per-slot version in the lock table, read with the seqlock discipline (version → value → version, abort on mismatch). Design recorded in `TODO.md`. |
 | Exit-time leaks (10 backends) and JVSTM's unbounded version history | Medium | All 21 backends are clean of AddressSanitizer *memory* errors on `bank`/`test_tx`/`test_ds`, but LeakSanitizer still fails `bank` on TINYSTM, WBETL, WT, SWISSTM, XTM, SPHT, LEFTRIGHT, ROMULUS and CALVIN and `test_tx` on JVSTM, so `ci.yml` gates leaks on the 11 backends measured clean and disables them elsewhere (per-backend `leak_check`, never globally). Three distinct owners, measured on `bank -t 4 -d 1000`: the benchmark's own executor/future objects (LEFTRIGHT 53.6 KB/1079, ROMULUS 71.4 KB/326, XTM 1.4 KB/12 — harness, not backend, but it also distorts memory measurements), backend metadata never released (SPHT 524 KB in 8 allocations of wait/epoch state, SWISSTM's ownership-record table, TINYSTM's `thread_local` deferred- and retired-free lists which a worker's exit simply drops — 130 KB/31), and version records that are never reclaimed (JVSTM: peak RSS rises **10.9x** when the transaction count rises 10x, 856 KB to 9.3 MB, while MVLOG/CSMV/SWISSTM stay flat because they trim). Fix designs in `TODO.md`. |
 | Per-backend ThreadSanitizer races (drained) | Low | Post-§30/§31 sweep of `drv_diff_ops -S 1 -T 4 -n 200`: **every** backend reports **0** warnings and **0** consistency violations, ACCELTL2 included. Its device path still prints 12 reports under ThreadSanitizer, but every one of them has its stack inside `libamdocl64.so`/`libhsa-runtime64.so.1` and none names one of our sources (§32); `tests/concurrency/tsan-suppressions-opencl.txt` documents them, `ci.yml`'s `tsan-gate` gates the CPU path, and `nightly.yml`'s `accel-e2e` covers the device path functionally. |
 | `tm_swap_runtime()` publication | Low | A phase switch writes all 23 dispatch pointers under `s_hook_mutex` while other threads read them locklessly, so a switch racing with live transactions could mix two backends' hooks. Its only caller (`tests/explicit-api/test_phase_switch.cpp`) is single-threaded, so this is latent rather than live, and no sanitizer case exercises it. Needs per-thread shadow tables or a quiescence epoch; see `TODO.md`. |

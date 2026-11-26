@@ -51,7 +51,7 @@ make check-diff                 # Differential concurrency sweep: one self-verif
 > **New here?** Run `make check-fast` to confirm the whole toolchain works, then
 > read the [documentation index](README.md) to find the doc you need.
 
-Backend selection: `BACKEND={TINYSTM,WBETL,WT,NOREC,NORECBF,SWISSTM,TL2,TSC_TM,MVLOG,SGL,LEFTRIGHT,ROMULUS,XTM,SPHT,TSXSGL,GPU_STM_CPU,CSMV,POWER8HTM,CALVIN,GACCO,GPUTX,JVSTM,ACCELTL2}` (23 values accepted by `benchmarks/cpp/Makefile`; `$(BACKENDS_TESTS)` in the top-level `Makefile` covers 21 of them for the auto-init sweep). Switching `BACKEND` forces a relink automatically (a stamp file records the last backend — see [correctness fixes §22](CORRECTNESS_FIXES.md)); before that fix, `make bin/test_tx BACKEND=B` after `BACKEND=A` could silently keep A's binary.
+Backend selection: `BACKEND={TINYSTM,WBETL,WT,NOREC,NORECBF,SWISSTM,TL2,TSC_TM,MVLOG,SGL,LEFTRIGHT,ROMULUS,XTM,SPHT,TSXSGL,GPU_STM_CPU,CSMV,POWER8HTM,CALVIN,GACCO,GPUTX,JVSTM,ACCELTL2}` (23 values accepted by `benchmarks/cpp/Makefile`; `$(BACKENDS_TESTS)` in the top-level `Makefile` covers 21 of them for the auto-init sweep). Switching `BACKEND` forces a relink automatically (a stamp file records the last backend — see [correctness fixes §22](CORRECTNESS_FIXES.md)); before that fix, `make bin/test_tx BACKEND=B` after `BACKEND=A` could silently keep A's binary. The same stamp also records the `SANITIZE`/`COVERAGE` mode (§36), because those change the flags without touching any file make watches — without it, a sanitizer sweep could reuse the previous, unsanitized binary and report nothing.
 
 ### Explicit API (no LLVM needed)
 

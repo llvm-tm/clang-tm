@@ -13,7 +13,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 
 SEEDS="${*:-1 2 3}"
-BACKENDS="${BACKENDS:-TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL LEFTRIGHT ROMULUS XTM SPHT TSXSGL GPU_STM_CPU CSMV JVSTM GACCO CALVIN ACCELTL2}"
+BACKENDS="${BACKENDS:-TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL LEFTRIGHT ROMULUS XTM SPHT TSXSGL GPU_STM_CPU CSMV JVSTM GACCO CALVIN GPUTX ACCELTL2}"
 # -T threads -n txns/thread per scenario (quick CI set; add more locally)
 #
 # The -n 2000 -T 8 legs are deliberately at least 16 384 slots (commits +
@@ -25,8 +25,12 @@ BACKENDS="${BACKENDS:-TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SG
 #   -M 8   read-own-write path (re-read of a just-written object, two widths).
 #   -R     objects partitioned per thread, so sets are disjoint by construction and
 #          any violation is aliasing rather than a scheduling accident.
-SCENARIOS=("-T 4 -n 1500" "-T 8 -n 1200" "-T 8 -n 2000 -M 16" "-T 8 -n 2000 -M 8"
-          "-T 8 -n 2000 -R")
+#   -T 16  the class of bug that only appears when enough transactions are in
+#          flight to interleave a commit between another's validation and its
+#          publish: GPUTX's §35 lost update needed 16+ threads (0/12 seeds at
+#          -T 8, 36/200 at -T 24), so every leg below 16 passed right over it.
+SCENARIOS=("-T 4 -n 1500" "-T 8 -n 1200" "-T 16 -n 1500" "-T 8 -n 2000 -M 16"
+          "-T 8 -n 2000 -M 8" "-T 8 -n 2000 -R")
 
 fails=""; builds=""; passed=""
 for be in $BACKENDS; do

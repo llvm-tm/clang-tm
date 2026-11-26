@@ -3661,3 +3661,52 @@ which is why the checks' single-stream pairing is a TODO item and the documented
 recipe is `-T 1`; the `check_address_validity` "stack" misclassification of
 mmap'd-region pointers is recorded too. `docs/DEBUGGING_BACKENDS.md` §1 now shows
 how to get a trace out of a clean run.
+
+## Session 2026-11-26 (pre-dawn, second block) — GPUTX lost committed writes because nothing ordered validate → publish (§35)
+
+Raising the differential driver's thread count turned up the bug every existing
+shape was blind to. GPUTX failed `drv_diff_ops`' additive-delta oracle at 36/200
+seeds at `-T 24`, 81/200 at `-T 32` and 196/200 at `-T 64` (`-n 5000`), each time
+one counter short by a few deltas, while `-T 8` had never failed — so no CI shape
+could see it. **Root cause:** GPUTX validates lock-free reads by comparing logged
+values with memory and then applies its writes, with nothing making the two steps
+atomic against another thread's commit; its write locks only exclude other writers
+of the *same* address, so an address in the read set could be committed in between.
+The code knew: `try_lock_write` promised that an outranked holder "will notice our
+higher rank when they try to commit and abort themselves", and `real_tm_end()`
+looks at neither rank nor lock state. **Fix:** one global commit lock held across
+validate+apply (MVLog's and LEFTRIGHT's pattern, taken after the per-address write
+locks and released after the write-back, so no wait cycle can form), plus a check
+that every address still reports our own `tid` in its lock slot before publishing.
+Post-fix: 0/200 at `-T 16`, `-T 24`, `-T 32` and `-T 64`, 0/100 at `-T 8 -n 20000`,
+0/50 at `-T 128`, 0/10 at `-T 32 -n 50000`, with commit totals identical to pre-fix
+and aborts up only 9–21 % — so not a "fewer commits" artifact. `test_tx` 120/120,
+`test_ds` 207/207, `bank` conserved at `-t 4`/`-t 32`, the `tm_impl` unit suite,
+ASan with leaks on, and UBSan are all clean.
+
+**What was *not* fixed, measured rather than asserted.** ThreadSanitizer still
+reports races on GPUTX, and an A/B on identical shapes and options proves they are
+not new: 15 → 12 reports at `-T 4 -n 200`, 17 → 12 at `-T 8 -n 1000`, and every
+one of them is `do_read()`'s plain load against `real_tm_end()`'s write-back
+(`addr2line` against each reporting binary). Zero deadlocks and zero `SEGV`s in
+either build. The fixed build also stopped losing the update that TSan's timing
+exposed at `-T 8` (`quiesce_viol=1` → `0`). Validation is still value-based, so a
+commit that changed a read word and changed it back stays invisible. Both limits
+need the same change — a per-slot version stamp read with the seqlock discipline —
+and the design plus its acceptance test (GPUTX joining `tsan-gate` race-free) is in
+`TODO.md`; `docs/CORRECTNESS_FIXES.md` §35 has the tables.
+
+**Verification tooling, because that is where this bug hid.** (1) §36:
+`benchmarks/cpp/Makefile`'s backend-switch stamp ignored `SANITIZE`/`COVERAGE`,
+which change the flags without touching any prerequisite file — so a "sanitizer
+sweep" could reuse the previous clean binary and report zero findings for a binary
+that was never sanitized. The stamp name now encodes both, verified by counting
+`__ubsan` symbols across alternating builds (0 → 111 → 0, each relinked).
+(2) `tools/diff_backends.sh` gained a `-T 16 -n 1500` scenario and GPUTX joined its
+default backend list and the `diff-concurrency` push leg: shapes below 16 threads
+passed straight over §35. (3) `docs/POST_MERGE_TEST_PLAN.md` still described
+review-05 G-20/G-21 as allowlisted expected-fails, but both allowlists in
+`tools/post-merge-check.sh` are empty; corrected, with today's evidence
+(`run-swisstm` passes, `test_tx` 120/120 on GPUTX and GACCO). `docs/IMPLEMENTATIONS.md`
+§19 and `backends/tm_impl/gputx/STATUS.md` describe the commit lock and the two
+open limits.

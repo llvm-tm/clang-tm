@@ -369,60 +369,45 @@ Two things left, both measured today:
   (`0x7f…` range, region base + 0x1000). Harmless as a WARNING, but it buries real
   findings; classify against the region bounds `tm_region_allocator` knows.
 
-### GPUTX loses committed writes, more often as thread count rises (P1, found 2026-11-26, NOT fixed)
+### GPUTX lost committed writes as thread count rose — RESOLVED (found & fixed 2026-11-26, §35)
 
-`drv_diff_ops` fails its additive-delta oracle on GPUTX, and the failure rate
-tracks the thread count:
+`drv_diff_ops` failed its additive-delta oracle on GPUTX at rates that tracked
+the thread count (`-n 5000`, 200 seeds each, pre-fix): `-T 24` 36/200, `-T 32`
+81/200, `-T 64` 196/200, while `-T 8` had never failed in 12 seeds — which is why
+every existing CI shape (`-T 4`, `-T 8`) missed it entirely. Fixed by taking a
+global commit lock across validate+apply (the pattern MVLog and LEFTRIGHT
+already use) and re-checking write-lock ownership before publish; post-fix
+0/200 at `-T 24`, `-T 32` and `-T 64` with identical commit counts and a 9–21 %
+abort-rate increase. `docs/CORRECTNESS_FIXES.md` §35 has the root cause, the
+three hypotheses that instrumentation excluded (out-of-transaction reads/writes,
+the reentrant-lock shortcut) and the ordering argument for why the new lock
+cannot deadlock.
 
-| shape | failing seeds |
-|---|---|
-| `-T 8 -n 5000`  | 0/12 |
-| `-T 16 -n 5000` | 1/12 |
-| `-T 24 -n 5000` | 4/12 |
-| `-T 32 -n 5000` | 4/12 |
+Follow-ups this leaves open (P2, opened 2026-11-26):
 
-Always a single counter short by a few deltas, e.g. `VIOLATION CNT[0]:
-final=23185 shadow=23186`. Verified the honest way: `make -B` rebuild, `nm -C`
-binary identity (GPUTX symbols present, no other backend's), 12 seeds per point.
-In the 21-backend long-slot sweep this was the only failure (293/294 runs clean),
-so the harness is not the variable — the other 20 backends ran the same `-T 32`
-shape clean.
-
-**Eliminated by measurement** (temporary instrumentation, reverted): writes or
-reads taking the non-transactional path (`ootx_writes=0`, `ootx_reads=0`), and the
-reentrant-lock shortcut being taken through a stale `holder` left by an earlier
-transaction of the same thread (`reent_steal=0`). ThreadSanitizer and
-AddressSanitizer report nothing on this shape, consistent with a protocol hole
-rather than a data race.
-
-**The code-level gap.** `try_lock_write()`'s higher-rank branch says:
-
-```c
-// (The holder will notice our higher rank when they try to commit
-//  and abort themselves.)
-```
-
-No such check exists: `real_tm_end()` validates by comparing each logged read
-against current memory and then applies its writes, and it looks at no rank and no
-lock state. So a transaction whose read value was superseded between validation
-and apply applies anyway — and there is no ordering device to close that window
-the way MVLog and NOrec have a commit lock or TL2 has per-word version stamps.
-GPUTX's "version" is the raw memory value, which cannot reveal a commit that
-landed after the check.
-
-**Candidate fix.** Serialise validate-then-apply under one global commit lock
-(acquired after the per-address write locks, released after the writes are
-applied, exactly MVLog's pattern), which keeps the rank scheme for the
-*abort-on-conflict* decision while making the commit decision atomic. Lock order
-stays write-locks → commit-lock (nothing takes a write lock while holding the
-commit lock), so no new cycle. Alternative: per-word version stamps, which is the
-change that actually scales.
-
-**How to validate a fix.** The rates above must go to 0/12 at `-T 24` *and*
-`-T 32`; `test_tx`/`test_ds` must stay 120/207; TSan and ASan clean at `-T 32`;
-and check-diff must stay green. Only then should `-T 16`/`-T 32` be added to
-`tools/diff_backends.sh`'s `SCENARIOS` — they are deliberately absent now, because
-that script gates CI and GPUTX would fail it.
+- **GPUTX still validates by value and still reads unsynchronised.** Validation
+  compares the logged value with memory, so a commit that changed a read word and
+  changed it back is invisible; and reads are plain accesses of memory that
+  committing threads write, which is a data race in the C++ model — measured
+  after §35: **12 `WARNING: ThreadSanitizer: data race` reports at
+  `-T 4 -n 200`** (HEAD's own build reports 15), every one of them
+  `do_read()`'s `memcpy` load against `real_tm_end()`'s write-back. That is why
+  GPUTX is in the ASan/UBSan gates but deliberately not in `tsan-gate`. Both
+  want one change: a `std::atomic<uint64_t> ver` per `GPUTXLock` slot, bumped
+  under the commit lock when a write to that slot is applied, and read with the
+  seqlock discipline — `v1 = ver(acquire)`, load value, `v2 = ver(load-load
+  fence between value and v2)`, log the value only if `v1 == v2`, and validate
+  `ver == v1` under the commit lock. Note the slot granularity is 16 bytes
+  (`LOCK_SHIFT = 4`), so version bumps alias across neighbours: extra aborts,
+  never extra commits. Acceptance: GPUTX joins `tsan-gate` with 0 data-race
+  reports at `-T 4 -n 200`, and the `-T 16/-T 24/-T 32/-T 64` rate tables in §35
+  stay at 0/200.
+- **Give GPUTX a permanent regression leg.** It was absent from both
+  `tools/diff_backends.sh`'s default backend list and the `diff-concurrency`
+  job's lists, so the bug had no gate at all. It is now in the default list and
+  the push-side CI leg (`-T 4/-T 8` shapes). A `-T 16 -n 5000` leg is what
+  actually distinguishes fixed from flaky for this bug class (it failed 18 % at
+  `-T 24` before) — add it as a nightly-only shape if PR time becomes an issue.
 
 ### MVLog: reclamation is outside its model, and the fold serialises every commit (P2, opened 2026-11-26)
 

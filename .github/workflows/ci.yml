@@ -180,13 +180,15 @@ jobs:
         run: |
           # Seed 1 deterministically catches the aliasing/width class these
           # fixes addressed; the backends here include every one the driver
-          # has caught a bug in (CSMV, JVSTM, GPU_STM_CPU, MVLOG) plus core references.
+          # has caught a bug in (CSMV, JVSTM, GPU_STM_CPU, MVLOG, GPUTX) plus
+          # core references. GPUTX's §35 lost update only showed at 16+ threads,
+          # which is why the sweep below also runs a -T 16 leg.
           # tools/diff_backends.sh also runs single-op-class (-M) and per-thread
           # partitioned (-R) shapes at enough slots to cross MVLog's reclamation
           # threshold: the mixed shape at a smaller slot count passed right over
           # the §34 lost update, and neither shape is reachable below that.
           if [ "${{ github.event_name }}" = "push" ]; then
-            BACKENDS="TINYSTM NOREC NORECBF SWISSTM TL2 MVLOG SGL LEFTRIGHT XTM CSMV GPU_STM_CPU JVSTM" \
+            BACKENDS="TINYSTM NOREC NORECBF SWISSTM TL2 MVLOG SGL LEFTRIGHT XTM CSMV GPU_STM_CPU JVSTM GPUTX" \
               tools/diff_backends.sh 1
           else
             BACKENDS="TL2 NOREC SGL CSMV GPU_STM_CPU JVSTM" \

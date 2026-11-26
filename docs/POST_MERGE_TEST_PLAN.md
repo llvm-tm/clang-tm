@@ -182,8 +182,11 @@ it is a true single regression gate:
 - **§11 GPU battery** — HIP build of `gpu/benchmarks` + all 9 benchmark
   binaries (skipped when hipcc is absent).
 
-Known pre-existing failures (review-05 G-20 swisstm `write_set_validation`;
-G-21 GPUTX/GACCO `test_tx` peek path) are **allowlisted** as expected-fail;
-an allowlisted test that starts passing also fails the gate, so the lists
-cannot silently rot. Note: `make check-all` (Makefile) predates this and has
-no allowlist — prefer `make post-merge-check` / the script.
+Both allowlists are **empty** as of 2026-11-26: the review-05 entries they used
+to carry have been fixed and removed — G-20 (swisstm `write_set_validation`, and
+`make -C tests/backends/tm_impl run-swisstm` passes today) and G-21 (the
+double-write-to-one-address bug in the `test_tx` peek path, with `test_tx`
+120/120 on both GPUTX and GACCO). The mechanism itself stays: an allowlisted test
+that starts passing also fails the gate, so a list cannot silently rot.
+Note: `make check-all` (Makefile) predates this and has no allowlist — prefer
+`make post-merge-check` / the script.
