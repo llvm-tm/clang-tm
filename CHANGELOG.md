@@ -3965,3 +3965,32 @@ Gates: `test_tx` 120/120, `test_ds` 207/207, `bank -t 8` conserving, `run-tl2` P
 `make fmt-check`, `make check-fast`. Docs: §42 in `docs/CORRECTNESS_FIXES.md`, checker
 README (invariant table, the `abort_causality` paragraph, refreshed baselines), `TODO.md`,
 `docs/DEVELOPER_GUIDE.md` untouched (no CI change).
+
+## Session 2026-11-26 (morning, seventh block) — a follow-up grep showed §41's diagnosis was half wrong, so §41 is corrected
+
+A grep I had run earlier (for `tm_register_invariant_callback`) came back while I was
+cleaning up, and it contradicted something I had written with confidence: §41 asserted that
+`check_user_oracle`'s needle, `TM-INVARIANT: FAIL`, was "a string no program in the tree
+prints". It is printed — `backends/tm_impl/common/tm_hooks.cpp:831`, from the
+`tm_register_invariant_callback()` wrapper around `tm_end`, to stderr, and
+`tools/tm-fuzz/tm-fuzz.py:262` parses it.
+
+That was not just a bad sentence. Because I believed the callback format was fictional, my
+fix collected oracle lines with `INVARIANT_RESULT_RE`, still anchored at `^INVARIANT:`, which
+matches the fuzz programs and skips the `TM-` prefix — so the callback oracle stayed reachable
+only through the dead `_raw_text` field, i.e. not at all, while §41 claimed the class was
+closed. Measured on the callback's own line: 0 findings from the committed code, and 0 from
+the parser (`oracle_lines: []`, `invariant_fail: False`) — confirmed before touching anything.
+
+Corrected: the regex is `^(?:TM-)?INVARIANT:` (now 1 finding, `invariant_fail` set too),
+`check_user_oracle`'s docstring names both producers with their file:line, `selftest.py` has
+an `oracle_callback_failure` fixture using the `fprintf`'s verbatim format string so the
+second prefix cannot silently regress, and §41 carries an explicit **Correction** section
+rather than being quietly rewritten. The five real logs the docs quote are unchanged (none
+contains a `TM-INVARIANT` line). `TODO.md` gains the gap this exposed: **no in-tree program
+registers an oracle callback**, so the hook wrapper that rewrites the `tm_end` function
+pointer has no end-to-end coverage at all — the checker can now report a verdict that nothing
+in this repo will ever produce.
+
+Gates: `make check-pytools` (14 fixtures + 5 exit-code cases, ALL PASSED),
+`python3 -m compileall -q tools`, `make fmt-check`, `make check-fast`.

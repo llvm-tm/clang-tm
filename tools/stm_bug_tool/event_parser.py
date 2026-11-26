@@ -47,7 +47,11 @@ EVENT_HEADER_RE = re.compile(
 INVARIANT_FAIL_RE = re.compile(r'INVARIANT:.*FAIL')
 
 # Pattern for result line (printed by fuzz_bank/fuzz_counter/fuzz_alloc to stderr)
-INVARIANT_RESULT_RE = re.compile(r'^INVARIANT:')
+# Pattern for result lines from the program's own oracles. Two prefixes exist in this
+# tree: the fuzz programs print `INVARIANT: money conservation: FAIL` (fuzz_bank.cpp:108)
+# and the tm_register_invariant_callback() wrapper prints `TM-INVARIANT: FAIL`
+# (tm_hooks.cpp:831, to stderr). Both are oracle verdicts and both belong in the report.
+INVARIANT_RESULT_RE = re.compile(r'^(?:TM-)?INVARIANT:')
 
 
 def parse_event_log(text: str) -> dict:
@@ -62,7 +66,7 @@ def parse_event_log(text: str) -> dict:
             "dump_starts": [int, ...],  # one per dump header in the log
             "invariant_fail": bool,
             "invariant_result": str or None,
-            "oracle_lines": [str, ...]   # every "INVARIANT: ..." result line
+            "oracle_lines": [str, ...]   # every oracle verdict line, either prefix
         }
     """
     result = {

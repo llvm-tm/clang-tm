@@ -368,13 +368,22 @@ What was left has one half done and three new gaps measured (P2, opened 2026-11-
   exactly. A `-T 1` log had hidden all of this, which is why the README and
   `docs/DEBUGGING_BACKENDS.md` no longer recommend `-T 1` as a workaround.
 - ~~**The fourteenth invariant could never fire.**~~ → **found and fixed the same day
-  (§41).** `check_user_oracle` read `parsed["_raw_text"]`, which `parse_event_log` never
-  sets, and searched for `TM-INVARIANT: FAIL`, a prefix no program in the tree prints — the
-  real format is `INVARIANT: money conservation: FAIL …` (`fuzz_bank.cpp:108`), which the
-  parser recognises but filed into a single slot the check never consulted, so a later PASS
-  overwrote a FAIL. A/B on that real line: old code 0 findings, new code 1.
-  `window_around_failure()` also dropped `dump_starts`, so the windowed copies the tool
-  tells you to use for 100 k-event logs reported every wrapped log as unwrapped.
+  (§41, with a correction).** `check_user_oracle` read `parsed["_raw_text"]`, which
+  `parse_event_log` never sets, so it returned before looking at anything. The string it
+  searched for, `TM-INVARIANT: FAIL`, is real — `backends/tm_impl/common/tm_hooks.cpp:831`,
+  the `tm_register_invariant_callback()` wrapper — which my first write-up got wrong and the
+  first fix then tripped over: `INVARIANT_RESULT_RE` was anchored at `^INVARIANT:`, so the
+  fuzz programs' lines were collected and the callback's were not, leaving that oracle
+  reachable only through the dead field. The regex is `^(?:TM-)?INVARIANT:` now, with an
+  `oracle_callback_failure` fixture using the `fprintf`'s verbatim format string (measured on
+  that line: 0 findings before the regex change, 1 `CRITICAL` after).
+- **No in-tree program registers an oracle callback, so that path is untested end to end.**
+  `tm_register_invariant_callback` is defined (`tm_hooks.cpp:842`) and documented
+  (`docs/fuzz-tool-plan.md:106`) and `tools/tm-fuzz/tm-fuzz.py:262` parses its output, but
+  nothing in `tests/` or `benchmarks/` calls it. A small `test_tx`-style case — register a
+  callback that fails a stated invariant on a bank, run it multi-threaded, check the tool
+  reports the `CRITICAL` — would exercise the hook wrapper (which rewrites the `tm_end`
+  function pointer, so it is worth covering for that reason alone) as well as the checker.
 - **Keep the checker's contract gated — `make check-pytools`.** Added with §41: eleven
   one-defect fixtures asserting exact count *and* severity, plus the CLI's five exit-code
   cases, run by CI's `lint` job. The checker is still not a gate on *backend* behaviour (the

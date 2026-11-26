@@ -1781,24 +1781,40 @@ raw = parsed.get("_raw_text", "")
 if not raw:
     return violations            # always, for every log ever parsed
 for line in raw.splitlines():
-    if "TM-INVARIANT: FAIL" in line:     # a string no program in the tree prints
+    if "TM-INVARIANT: FAIL" in line:     # a real format — see the correction below
 ```
 
-Two independent dead ends in one function, and the second is the interesting one: the
-repo's oracles print `INVARIANT: money conservation: FAIL (…)`
-(`benchmarks/cpp/fuzz-bank/fuzz_bank.cpp:108`, `fuzz_counter.cpp:112`), which the parser
-*does* recognise (`INVARIANT_RESULT_RE`) — but only into `invariant_result`, a single slot
-the checker never consulted, which a later PASS overwrites. So `User oracle: ok` meant
-"this check ran", not "the program's verdicts were clean", and the tool's README has been
-advertising it since it was written. The general shape to watch for: an invariant reading
-a field no producer writes, where the failure mode is silence, not an error.
+One dead end, then: `parsed["_raw_text"]` is never set by anything, so the function
+returned immediately whatever the log said, and `User oracle: ok` meant "this check ran",
+not "the program's verdicts were clean". The string it looked for is genuine
+(`tm_hooks.cpp:831`), which matters for the fix — see the correction below, because my
+first attempt here got that wrong and left half the oracles uncollected. The general shape
+to watch for: an invariant reading a field no producer writes, where the failure mode is
+silence rather than an error.
+
+**Correction, same day.** This section originally asserted two dead ends, the second being
+that `TM-INVARIANT: FAIL` was "a string no program in the tree prints". That is **false**:
+`backends/tm_impl/common/tm_hooks.cpp:831` prints exactly that, from the
+`tm_register_invariant_callback()` wrapper around `tm_end` (and
+`tools/tm-fuzz/tm-fuzz.py:262` parses it). The consequence was not cosmetic — the fix below
+collected oracle lines with `INVARIANT_RESULT_RE`, which was anchored at `^INVARIANT:`, so
+it matched the fuzz programs' `INVARIANT: …` lines and *skipped* the callback's `TM-…`
+ones: the callback oracle stayed reachable only through the dead `_raw_text` path, i.e. not
+at all. Found when a follow-up grep for the callback API turned up the `fprintf`. The regex
+is `^(?:TM-)?INVARIANT:` now, `selftest.py` has an `oracle_callback_failure` fixture using
+the `fprintf`'s verbatim format string, and the docstring on `check_user_oracle` names both
+producers. Measured on the same callback line before and after the regex change: **0**
+findings, then **1** `CRITICAL`. The five real logs the docs quote are unchanged (none
+contains a `TM-INVARIANT` line).
 
 **Fix** (`tools/stm_bug_tool/event_parser.py`, `invariant_checker.py`):
 
-- the parser collects every oracle line as `oracle_lines` (keeping `invariant_result` as
-  the last-line field, which `tools/tm-fuzz/tm-fuzz.py` has its own copy of and uses);
+- the parser collects every oracle line as `oracle_lines` — either prefix, since
+  `INVARIANT_RESULT_RE` is `^(?:TM-)?INVARIANT:` (see the correction above) — keeping
+  `invariant_result` as the last-line field, which `tools/tm-fuzz/tm-fuzz.py` has its own
+  copy of and uses;
 - `check_user_oracle` reports a `CRITICAL` per `FAIL` line from that list, and keeps the
-  old `TM-INVARIANT:` scan as a legacy path for callers that do attach raw text;
+  `TM-INVARIANT:` text scan for callers that hand over console output instead of a dump;
 - `window_around_failure()` now carries `dump_starts`, `oracle_lines` and the two
   invariant fields. It had been dropping `dump_starts`, so a windowed copy — which is
   what the tool tells you to use on a 100 k-event log — reported **every** wrapped log as

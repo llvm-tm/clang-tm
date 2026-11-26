@@ -905,15 +905,19 @@ def check_sequential_baseline(parsed: dict) -> list:
 def check_user_oracle(parsed: dict) -> list:
     """Surface the program's own invariant verdicts in the report.
 
-    The fuzz/oracle programs (`benchmarks/cpp/fuzz-bank/fuzz_bank.cpp`,
-    `benchmarks/cpp/fuzz-counter/fuzz_counter.cpp`) print
-    `INVARIANT: <name>: PASS|FAIL …` next to their event dump, and the parser
-    collects those lines as `oracle_lines` because they are not events.
+    Two oracle prefixes exist in this tree and both are collected by the parser as
+    `oracle_lines`: the fuzz programs print `INVARIANT: money conservation: FAIL …`
+    (`benchmarks/cpp/fuzz-bank/fuzz_bank.cpp:108`), and `tm_register_invariant_callback()`
+    prints `TM-INVARIANT: FAIL (callback returned N after tx T …)` from its `tm_end`
+    wrapper (`backends/tm_impl/common/tm_hooks.cpp:831`, on stderr, so it lands in the
+    same `2>` file as the event dump).
 
-    Before 2026-11-26 this read `parsed["_raw_text"]`, which nothing ever set, and
-    searched for "TM-INVARIANT: FAIL", a string no program in the tree prints: the
-    invariant therefore reported ok for every log ever fed to it. The fixture
-    `oracle_failure` in `selftest.py` is what keeps it alive now.
+    Before 2026-11-26 this read `parsed["_raw_text"]`, which nothing ever set, so it
+    reported ok for every log regardless of format — see `docs/CORRECTNESS_FIXES.md` §41.
+    The first fix under-collected: `INVARIANT_RESULT_RE` was anchored at `^INVARIANT:` and
+    so skipped the callback's `TM-` prefix, leaving that oracle visible only through the
+    same dead `_raw_text` field. `oracle_callback_failure` in `selftest.py` pins both
+    formats now.
     """
     violations = []
 
@@ -927,8 +931,9 @@ def check_user_oracle(parsed: dict) -> list:
             "events": [],
         })
 
-    # Legacy path: a caller that attached the raw text (e.g. a harness that only
-    # has the console output) used the older TM-INVARIANT prefix.
+    # For a caller that hands over console output rather than a parsed dump (the only
+    # way to get raw text in): the callback format is line-anchored above, and this path
+    # catches it anywhere in the text.
     for line in parsed.get("_raw_text", "").splitlines():
         if "TM-INVARIANT: FAIL" in line:
             violations.append({

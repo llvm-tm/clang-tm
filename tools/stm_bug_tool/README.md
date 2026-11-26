@@ -38,7 +38,7 @@ severity each violation is reported at:
 | TX memory balance | Speculative allocations that survived a transaction are accounted for |
 | Address reuse | A read/write on an address that was freed and not re-allocated (use-after-free) |
 | Sequential baseline | Final value per address equals a `--baseline` single-threaded run (opt-in) |
-| User oracle | `INVARIANT: … FAIL` verdict lines the program printed (`fuzz_bank`, `fuzz_counter`) are reported. It looked for a key nothing ever set, so it had never fired for any log until 2026-11-26 — `docs/CORRECTNESS_FIXES.md` §41 |
+| User oracle | `INVARIANT: … FAIL` **and** `TM-INVARIANT: FAIL` verdict lines the program printed — the fuzz programs and the `tm_register_invariant_callback()` wrapper (`tm_hooks.cpp:831`) — are reported. It read a key nothing ever set, so it had never fired for any log until 2026-11-26 — `docs/CORRECTNESS_FIXES.md` §41, including the correction to its first fix |
 
 CRITICAL findings make the exit status 1; WARNING findings do not unless
 `--strict` was given.

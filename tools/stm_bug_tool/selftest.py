@@ -193,6 +193,16 @@ FIXTURES = {
         {"address_reuse": (1, "CRITICAL")},
         "READ_LOCK_ACQUIRE at a flushed address",
     ),
+    # The other oracle format in this tree, printed by the
+    # tm_register_invariant_callback() wrapper (tm_hooks.cpp:831, verbatim format
+    # string). It was invisible twice over before 2026-11-26: the dead `_raw_text`
+    # field, and an anchored result-line regex that skipped the `TM-` prefix.
+    "oracle_callback_failure": (
+        log(BEGIN, READ, WSET, ACQ, WB, REL, COMMIT)
+        + "TM-INVARIANT: FAIL (callback returned 1 after tx 7 on thread 0x7f0000000000)\n",
+        {"user_oracle": (1, "CRITICAL")},
+        "the callback oracle's TM-INVARIANT prefix reaches the report too",
+    ),
     # The program's own oracle verdict, in the format fuzz_bank actually prints
     # (`INVARIANT: <name>: FAIL …`). The PASS line after it is what used to hide
     # the FAIL: the parser kept only the last result line.
