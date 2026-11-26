@@ -335,6 +335,95 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   `x86-tsx-validation.md` are tick-capped partial samples — see
   `gem5_sim/docs/x86-tsx-real-validation.md` §2.
 
+### Event-log invariant checker: runnable now, but its pairing is single-stream (P2, opened 2026-11-26)
+
+`tools/stm_bug_tool/invariant_checker.py` implements 14 checks and had **no
+command-line entry point at all** — no `__main__`, no argparse — so the usage its
+own README documented (`--log FILE`) could not work and nothing could run it in
+CI. It now has a CLI (`--log`, `--baseline`, `--events`, `--quiet`, `--strict`,
+`--max-show`; exit 1 on any CRITICAL, 2 on warnings with `--strict`), and the
+README's invariant table lists what is actually implemented (it listed seven
+invariants, three of which — money conservation, counter monotonicity, no-lost-
+updates — are not functions in the file).
+
+To give it an input from a clean run, `drv_diff_ops` now dumps each worker's ring
+under `DRV_EVENT_DUMP=1` (a `TM_EVENT_DUMP` no-op unless built with
+`-DTM_EVENT_LOG`), and `benchmarks/cpp/Makefile` gained `EXTRA_CXXFLAGS` so such a
+build does not have to clobber `CXXFLAGS` (which carries the `-I` paths). Verified
+end to end: TL2, `-T 1 -n 300`, 5 806 events → 0 critical, rc 0; a hand-made log
+with an orphan commit and an unmatched `TX_BEGIN` → 3 critical, rc 1 (so the gate
+is not vacuous).
+
+Two things left, both measured today:
+
+- **Pair the lifecycle and lock-discipline checks per thread id.** They pair in
+  one global stream, so a log containing dumps from concurrently running threads
+  produces false criticals: a TL2 run whose driver oracles were all zero reported
+  93 criticals + 87 warnings across 52 dumps, and the identical shape at `-T 1`
+  reported none. `group_by_thread()` is already imported and unused — use it in
+  `check_complete_tx_lifecycle` and `check_lock_discipline`, then wire a nightly
+  job (`-T 1` today, `-T 4+` after the fix). The CLI currently warns when a log
+  holds more than one dump, which is the stopgap, not the fix.
+- **`check_address_validity` misclassifies the TM region as stack.** It flagged
+  5 218 events / 152 addresses as "stack" for pointers in the mmap'd region
+  (`0x7f…` range, region base + 0x1000). Harmless as a WARNING, but it buries real
+  findings; classify against the region bounds `tm_region_allocator` knows.
+
+### GPUTX loses committed writes, more often as thread count rises (P1, found 2026-11-26, NOT fixed)
+
+`drv_diff_ops` fails its additive-delta oracle on GPUTX, and the failure rate
+tracks the thread count:
+
+| shape | failing seeds |
+|---|---|
+| `-T 8 -n 5000`  | 0/12 |
+| `-T 16 -n 5000` | 1/12 |
+| `-T 24 -n 5000` | 4/12 |
+| `-T 32 -n 5000` | 4/12 |
+
+Always a single counter short by a few deltas, e.g. `VIOLATION CNT[0]:
+final=23185 shadow=23186`. Verified the honest way: `make -B` rebuild, `nm -C`
+binary identity (GPUTX symbols present, no other backend's), 12 seeds per point.
+In the 21-backend long-slot sweep this was the only failure (293/294 runs clean),
+so the harness is not the variable — the other 20 backends ran the same `-T 32`
+shape clean.
+
+**Eliminated by measurement** (temporary instrumentation, reverted): writes or
+reads taking the non-transactional path (`ootx_writes=0`, `ootx_reads=0`), and the
+reentrant-lock shortcut being taken through a stale `holder` left by an earlier
+transaction of the same thread (`reent_steal=0`). ThreadSanitizer and
+AddressSanitizer report nothing on this shape, consistent with a protocol hole
+rather than a data race.
+
+**The code-level gap.** `try_lock_write()`'s higher-rank branch says:
+
+```c
+// (The holder will notice our higher rank when they try to commit
+//  and abort themselves.)
+```
+
+No such check exists: `real_tm_end()` validates by comparing each logged read
+against current memory and then applies its writes, and it looks at no rank and no
+lock state. So a transaction whose read value was superseded between validation
+and apply applies anyway — and there is no ordering device to close that window
+the way MVLog and NOrec have a commit lock or TL2 has per-word version stamps.
+GPUTX's "version" is the raw memory value, which cannot reveal a commit that
+landed after the check.
+
+**Candidate fix.** Serialise validate-then-apply under one global commit lock
+(acquired after the per-address write locks, released after the writes are
+applied, exactly MVLog's pattern), which keeps the rank scheme for the
+*abort-on-conflict* decision while making the commit decision atomic. Lock order
+stays write-locks → commit-lock (nothing takes a write lock while holding the
+commit lock), so no new cycle. Alternative: per-word version stamps, which is the
+change that actually scales.
+
+**How to validate a fix.** The rates above must go to 0/12 at `-T 24` *and*
+`-T 32`; `test_tx`/`test_ds` must stay 120/207; TSan and ASan clean at `-T 32`;
+and check-diff must stay green. Only then should `-T 16`/`-T 32` be added to
+`tools/diff_backends.sh`'s `SCENARIOS` — they are deliberately absent now, because
+that script gates CI and GPUTX would fail it.
+
 ### MVLog: reclamation is outside its model, and the fold serialises every commit (P2, opened 2026-11-26)
 
 Fixed the correctness half today (CORRECTNESS_FIXES.md §34: the fold skipped the

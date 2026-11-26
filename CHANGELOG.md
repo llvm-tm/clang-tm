@@ -3622,3 +3622,42 @@ the circular wait MVLog's ordered commit log documents as its head-of-line
 blocking cost. Adding the backend needed a per-backend exclusion mechanism, which
 the Makefile did not have; every backend's suite was re-run to confirm the shared
 run-recipe change is inert for the other 12 (all rc=0, no FAIL lines).
+
+## Session 2026-11-26 (pre-dawn) — GPUTX lost updates found at high thread counts; event-log checker made runnable
+
+**A long-slot driver sweep across all 21 backends (294 runs) found one failure:
+GPUTX loses committed writes, more often as threads increase** — 0/12 seeds at
+`-T 8`, 1/12 at `-T 16`, 4/12 at `-T 24` and at `-T 32` (`-n 5000`; e.g.
+`VIOLATION CNT[0]: final=23185 shadow=23186`). Verified with `make -B`, `nm -C`
+binary identity and 12 seeds per point; the other 20 backends ran the same
+`-T 32` shape clean, so the harness is not the variable. Instrumentation (added,
+measured, reverted — the runtime is byte-identical to HEAD again) excluded
+non-transactional writes/reads (`ootx_writes=0`, `ootx_reads=0`) and a reentrant
+lock shortcut taken through a stale `holder` (`reent_steal=0`). What is left is a
+design gap: `try_lock_write` documents that an outranked holder "will notice our
+higher rank when they try to commit and abort themselves", but `real_tm_end()`
+compares only read values — no rank, no lock state — and nothing makes
+validate-then-apply atomic against other committers the way MVLog/NOrec's commit
+lock or TL2's word versions do. Recorded as found-not-fixed in `TODO.md` (P1, with
+repro, the eliminated hypotheses, the candidate fix and the acceptance test) and in
+the CORRECTNESS_FIXES known-issues table. `-T 16`/`-T 32` are deliberately **not**
+added to `tools/diff_backends.sh`, because that script gates CI.
+
+**`tools/stm_bug_tool/invariant_checker.py` had 14 checks and no CLI at all**, so
+the usage its README documented could not run and CI could not call it. Added the
+entry point (`--log/--baseline/--events/--quiet/--strict`, exit 1 on CRITICAL,
+2 on warnings with `--strict`), a per-dump warning when a log concatenates several
+thread dumps, and honest ring-wrap detection (the parser only keeps the last
+header, so `dumping from #1630` previously read as "not wrapped"). Corrected the
+README's invariant table, which listed three invariants that do not exist in the
+file. To give it an input from a clean run, `drv_diff_ops` now dumps each worker's
+ring under `DRV_EVENT_DUMP=1` (zero cost unless built with `-DTM_EVENT_LOG`) and
+`benchmarks/cpp/Makefile` gained `EXTRA_CXXFLAGS` (overriding `CXXFLAGS` drops the
+`-I` paths). Verified end to end: TL2 `-T 1 -n 300` → 5 806 events, 0 critical,
+rc 0; a synthetic log with an orphan commit and an unmatched `TX_BEGIN` → 3
+critical, rc 1, so the gate is not vacuous. Feeding the same tool a *concurrent*
+run (52 interleaved dumps, driver oracles all zero) produced 93 false criticals,
+which is why the checks' single-stream pairing is a TODO item and the documented
+recipe is `-T 1`; the `check_address_validity` "stack" misclassification of
+mmap'd-region pointers is recorded too. `docs/DEBUGGING_BACKENDS.md` §1 now shows
+how to get a trace out of a clean run.
