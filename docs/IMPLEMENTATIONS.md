@@ -475,17 +475,20 @@ The two-phase overhead (2× execution) is acceptable in async/queue settings whe
 - No atomicMax-based conflict tracking (locks use compare-exchange with priority comparison)
 - Rank increases with each abort (prevents starvation)
 - Reads are lock-free; writes acquire priority-respecting exclusive locks
+- Commits are serialised by one global commit lock (§35): the rank scheme decides
+  who aborts on a *conflict*, the commit lock makes *validate → publish* atomic
 
 **Key files:**
-- `backends/tm_impl/gputx/gputx_runtime.cpp` — 280 lines, priority locks + rank system + hook table
+- `backends/tm_impl/gputx/gputx_runtime.cpp` — priority locks + rank system + commit lock + hook table
 - `gpu/backends/gpu_gputx/` — GPU version of the same priority scheme (kernels)
 
 **Notes:**
-- Write lock: CAS with priority check. If lock held by lower rank, higher-rank tx spins briefly then retries; lower-rank tx aborts on finding higher rank holder.
-- Read validation at commit: compare current memory values against captured read-set values
+- Write lock: CAS with priority check. A slot is only ever claimed when it is free, so a holder is never displaced; the waiting transaction spins briefly and then aborts, and its retry carries a higher rank.
+- Read validation at commit: compare current memory values against captured read-set values, **under the commit lock**, and re-check that every write's lock slot still reports our own `tid` before publishing. The lock is required: without it a commit landing between validation and write-back is invisible to a value comparison, which is how §35 lost updates.
 - Priority aging: g_retries is a counter that increases on each abort, making high-abort transactions eventually win all conflicts
 - The priority scheme provides starvation freedom without explicit fairness mechanisms
-- Test status: TBD
+- Known limits (recorded in `TODO.md`): validation is value-based, so a commit that changed a read word and changed it back is invisible; and reads are plain accesses of memory that committing threads write, so the backend is not ThreadSanitizer-clean by design and is gated under ASan/UBSan and the differential driver, not under `tsan-gate`.
+- Test status: `drv_diff_ops` differential sweep (`tools/diff_backends.sh`, incl. a `-T 16` leg — the bug class here needs ≥16 threads), `test_tx` 120/120, `test_ds` 207/207, ASan incl. the leak gate, UBSan 0 findings.
 
 ---
 

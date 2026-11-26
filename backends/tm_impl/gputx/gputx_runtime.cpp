@@ -14,6 +14,7 @@
 
 #include "tm_common.hpp"
 #include "tm_hooks.hpp"
+#include "tm_platform.hpp"
 #include "tm_region_allocator.hpp"
 
 extern "C" {
@@ -79,6 +80,29 @@ static thread_local unsigned g_backoff_seed = 1;
 static std::atomic<uint64_t> g_next_tid{1};
 static std::atomic<uint64_t> g_clock{0}; // global timestamp for ranking
 
+// ── Commit lock ──────────────────────────────────────────
+// Reads take no locks, so validating them is only meaningful if nothing can
+// commit between the validation and the write-back.  A write lock excludes
+// other writers of THAT address only: an address in our READ set can be
+// committed by someone else right after we validated it, and we would then
+// apply a value derived from a read that is no longer in memory (a lost
+// update).  Holding one lock across validate+apply makes the state we
+// validate the state we apply on, which is what try_lock_write's comment
+// already assumed ("the holder will notice our higher rank when they try to
+// commit") without any such check existing.
+//
+// Lock order is write-locks -> commit-lock, and a commit-lock holder takes no
+// write locks (it only validates and applies), so the order cannot cycle.
+static std::atomic<uint32_t> g_commit_lock{0};
+
+static void commit_lock_acquire()
+{
+	while (g_commit_lock.exchange(1, std::memory_order_acquire))
+		stm::tm_cpu_relax();
+}
+
+static void commit_lock_release() { g_commit_lock.store(0, std::memory_order_release); }
+
 // ── Lock helpers ─────────────────────────────────────────
 // GPUTX write-lock with priority-based conflict resolution.
 // If someone else holds the lock, compare ranks — lower rank aborts.
@@ -108,10 +132,14 @@ static bool try_lock_write(void *addr)
 		return false;
 	}
 	if (g_rank > other_rank) {
-		// We have higher priority — spin and retry.
-		// (The holder will notice our higher rank when they try to commit
-		//  and abort themselves.)
-		// For simplicity: spin-wait a few iterations then abort anyway.
+		// We have higher priority, but the holder is never asked to step
+		// aside: a slot is only ever taken when it is free, so the "holder
+		// will notice our higher rank when they try to commit" idea this
+		// branch used to describe does not exist — and correctness does not
+		// depend on it, because real_tm_end() validates and publishes under
+		// the commit lock.  Spin a few iterations in case the holder is
+		// about to finish, then abort; the retry gets a higher rank (age
+		// escalation), so the wait is bounded.
 		for (int i = 0; i < 100; i++) {
 			expected = 0;
 			if (lk.holder.compare_exchange_weak(expected,
@@ -136,6 +164,18 @@ static void release_locks()
 	}
 }
 
+// Abort a transaction that is mid-commit.  Both locks possibly held are
+// dropped BEFORE unwinding: siglongjmp leaves no chance to clean up after it.
+static void abort_in_commit()
+{
+	commit_lock_release();
+	release_locks();
+	g_retries++;
+	g_in_tx = false;
+	tm_longjmp_ret = 1;
+	siglongjmp(tm_jmpbuf, 1);
+}
+
 // ── Static backend implementation ────────────────────────
 
 static void real_tm_begin()
@@ -158,6 +198,9 @@ static void real_tm_end()
 		return;
 	if (!g_in_tx)
 		return;
+	// Freeze the commit state: no other transaction may publish between our
+	// validation and our write-back (see the g_commit_lock comment).
+	commit_lock_acquire();
 	// Validate reads: for each read, check that no concurrent writer
 	// modified the value (compare against write-buffer).
 	// Validate each observed read against memory: the value must not
@@ -169,11 +212,18 @@ static void real_tm_end()
 		uint64_t cur = 0;
 		memcpy(&cur, rd.addr, rd.width);
 		if (cur != rd.val) {
-			release_locks();
-			g_retries++;
-			g_in_tx = false;
-			tm_longjmp_ret = 1;
-			siglongjmp(tm_jmpbuf, 1);
+			abort_in_commit();
+			return;
+		}
+	}
+	// We must still hold the write lock of every address we are about to
+	// publish.  try_lock_write() only ever takes a free slot and nothing else
+	// clears one, so this holds by construction — checking it is what turns
+	// that assumption into a guarantee, because publishing over an address
+	// someone else holds is precisely how a committed write goes missing.
+	for (auto &w : g_writes) {
+		if (g_locks[lock_idx(w.addr)].holder.load(std::memory_order_acquire) != g_tid) {
+			abort_in_commit();
 			return;
 		}
 	}
@@ -182,6 +232,7 @@ static void real_tm_end()
 		memcpy(w.addr, &w.val, w.width);
 	}
 	release_locks();
+	commit_lock_release();
 	g_retries = 0; // reset on success
 	g_in_tx = false;
 }
