@@ -1646,6 +1646,80 @@ what the check's own docstring calls `extend()`); and a `-T 4 -n 300` NOrec log
 produces 3 081 criticals, 1 250 of them lock discipline. The checker is a diagnostic
 until those are reconciled, not a CI gate.
 
+## 39. NOrec's commit lock left the trace unpairable, and its payload read as page-zero writes (2026-11-26) ✅
+
+**Root cause.** Both NOrec variants log their commit-lock traffic against the wrong
+field. `commit()` does
+
+```c++
+TM_EVENT2(COMMIT_LOCK_ACQUIRE, expect, desire, 0);   // NOrec.hpp, NOrec_BF.hpp
+...
+set_clock(expect + 2);                               // that store IS the unlock
+```
+
+so `addr1` carries the *clock value* (`0x38`, `0x1f8`, …) instead of the address of
+what was locked, and the unlock logs nothing at all. Every other backend in the tree
+uses the convention `addr1` = address, extra fields = metadata (TL2 logs the guarded
+address and the guard index, TinySTM the lock word). Two consequences, both measured on
+a `-S 3 -T 4 -n 300` event-log run:
+
+- `tools/stm_bug_tool/invariant_checker.py` classifies `addr1` of `COMMIT_LOCK_ACQUIRE`
+  as a memory address, so all **1 246** acquires (NOREC) and **1 227** (NORECBF) came
+  back as page-zero-zone `CRITICAL` address-validity findings.
+- `lock_discipline` pairs an acquire with the release carrying the *same* `addr1`. With
+  a per-varying `addr1` and no release event whatsoever, the invariant was not merely
+  failing, it was **unexpressible**: 0 `LOCK_RELEASE` events against 1 246 acquires, so
+  1 246 `CRITICAL`s — and a global lock genuinely leaked (which would serialise the
+  runtime forever, since every commit CASes on that one word) would have been
+  indistinguishable from normal traffic.
+
+**Fix** (`backends/tm_impl/norec/NOrec.hpp`, `backends/tm_impl/norec_bf/NOrec_BF.hpp`,
+instrumentation only, compiled out without `-DTM_EVENT_LOG`): log the lock itself in
+`addr1` with the versions in `addr2`/`data`, and emit `LOCK_RELEASE` at the clock store
+that performs the unlock.
+
+**Verification.** Same commands, same shape (`-S 3 -T 4 -n 300`), same seeds,
+identity-checked event-log builds, invariant checker unchanged between the two runs:
+
+| backend | metric | before | after |
+|---|---|---|---|
+| NOREC | `COMMIT_LOCK_ACQUIRE` with `addr1 < 0x1000` | 1 246 | **0** |
+| NOREC | `LOCK_RELEASE` events | 0 | 1 166 |
+| NOREC | `lock_discipline` findings | 1 246 | **0** |
+| NOREC | `address_validity` findings | 1 250 | 4 |
+| NOREC | total `CRITICAL` | 3 427 | 1 371 |
+| NORECBF | lock discipline / address validity / total | 1 227 / 1 231 / 3 754 | **0** / 4 / 2 031 |
+
+The 4 remaining address-validity findings are the known separate item (the mmap'd TM
+region classified as stack — `TODO.md`). Every remaining `CRITICAL` in both backends is
+`version_ordering`, which this does not address (below).
+
+The timing-independent evidence, because abort counts vary run to run (42 → 63 for NOREC
+between the two runs, and the extra ring writes perturb timing): per-(dump, thread)
+acquire/release balance. Before the fix, 57 such pairs were imbalanced and **48 of them
+were dumps holding a complete history** (e.g. 44 acquires against 0 releases). After it,
+3 pairs are imbalanced and **none of them is a complete-history dump** — all sit in the
+four wrapped Wave-A windows and are off by one, at the truncation boundary. NORECBF: 56
+imbalanced pairs (48 of them complete-history) → 4 (none complete-history).
+
+Backend gates on the changed source: `test_tx` 120/120 and `test_ds` 207/207 for both
+backends, `bank -t 8` conserving money, `make -C tests/backends/tm_impl run-norec` PASS
+(NORECBF has no unit-suite target — it is not in that Makefile's `BACKENDS` list, which
+is why its gates are the functional pair, `bank` and the differential sweep),
+`BACKENDS="NOREC NORECBF" tools/diff_backends.sh 1 2` → `FAIL: none`, `make check-fast`,
+`make fmt-check`.
+
+**What this does not fix.** `version_ordering` now accounts for *all* remaining NOrec
+criticals (1 371 and 2 031) and is a genuine mismatch, not this class of bug: NOrec's
+`validate()` reassigns `tx->snapshot` mid-transaction when the commit lock is contended,
+so reads logged afterwards legitimately carry a newer snapshot than `TX_BEGIN`'s, which
+is what the check calls a stale read. Whether NOrec's own commit-time validation is
+sound against a snapshot that moved under reads taken earlier is a separate question —
+the driver's oracles (double-read, range, read-own, pointer) never fired across the 484
+runs of the 2026-11-26 mask/thread sweep — and it is recorded in `TODO.md` with the code
+reference rather than assumed either way. `abort_causality` (41 and 84 warnings) is the
+same per-backend vocabulary gap recorded in `TODO.md`.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |

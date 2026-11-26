@@ -347,7 +347,10 @@ commit()    //
 		expect = tx->snapshot;
 		desire = expect + 1;
 	}
-	TM_EVENT2(COMMIT_LOCK_ACQUIRE, expect, desire, 0);
+	// addr1 is the lock, not the version — see the same note in NOrec.hpp: the
+	// checker classifies addr1 as a memory address, and per-varying addr1 values make
+	// the acquire/release pairing unexpressible.
+	TM_EVENT2(COMMIT_LOCK_ACQUIRE, (word_t)&global_lock, desire, expect);
 
 	for (auto &w : tx->write_set) {
 		// Invalid-address safety net only (null/early page).  Non-TM-region
@@ -379,6 +382,8 @@ commit()    //
 	// - global_lock is now expect+1 (odd, lock held)
 	// - Release by setting to expect+2 (next even version)
 	set_clock(expect + 2);
+	// The unlock, logged (see NOrec.hpp): 1 227 acquires had no release event at all.
+	TM_EVENT2(LOCK_RELEASE, (word_t)&global_lock, expect + 2, 0);
 
 	tx->reset();
 	TM_EVENT2(COMMIT_SUCCESS, tx->id, expect + 2, 0);

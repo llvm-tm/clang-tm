@@ -97,17 +97,20 @@ on its two conflict-abort routes (guard-acquire failure and read-set validation
 failure), so a contended TL2 run reported 130 and 317 lifecycle criticals at two
 shapes with zero real violations, and 0 `TX_ABORT` events in 19 210 events of a log
 in which every other aborting backend logs them. Fixed in
-`docs/CORRECTNESS_FIXES.md` §38, which also records the A/B (130 → 0 and 317 → 0 at
+`docs/CORRECTNESS_FIXES.md` §38, which also records the A/B (130, 317 and 372 → 0 at
 identical commit counts). Before trusting a lifecycle `CRITICAL` from an unfamiliar
 backend, count its `TX_ABORT` events against the driver's own `aborts=` line.
 
 **Not every invariant is backend-neutral yet.** A `-T 4 -n 300` NOrec log (built the
-same way) currently produces 3 081 `CRITICAL`s — 1 250 lock-discipline, 1 254
-address-validity, 581 version-ordering — and a clean TL2 log produces `Abort
-causality` warnings (96 and 316 at the two shapes above) because that check's causal
-event set does not include the conflict evidence TL2 logs. These are unreconciled
-checker/backend vocabulary mismatches, measured and listed in `TODO.md`; the checker
-is a diagnostic tool, not a CI gate, until each is settled.
+same way) produced 3 427 `CRITICAL`s — 1 246 lock-discipline and 1 250
+address-validity of them were NOrec logging its commit-lock *version* where the address
+belongs, and never logging the unlock; `docs/CORRECTNESS_FIXES.md` §39 fixes both to 0.
+What remains is a genuine vocabulary mismatch: `Version ordering` flags 1 371 reads
+because NOrec's commit path reassigns `tx->snapshot` under contention (`TODO.md`), and
+`Abort causality` fires (96, 316 and 263 times on clean TL2 runs at three shapes; 41 and
+84 on the two NOrec logs) because that check's causal event set does not include the
+conflict evidence these backends log. These are measured and listed in `TODO.md`; the
+checker is a diagnostic tool, not a CI gate, until each is settled.
 
 
 ## Usage

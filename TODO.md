@@ -382,13 +382,26 @@ What was left has one half done and three new gaps measured (P2, opened 2026-11-
   the `extend()` the check's own docstring describes. It needs to become
   backend-conditional — TL2 reads with a newer version by design, TinySTM-style
   backends must not.
-- **A `-T 4` NOrec log produces 3 081 criticals** (`-S 3 -n 300`, event-log build,
-  same recipe): 1 250 lock discipline, 1 254 address validity, 581 version ordering,
-  24 abort causality, 4 orphan locks. NOrec commits under one global version lock, so
-  an address-keyed per-thread lock ledger probably does not describe it at all
-  (acquire on one thread, release accounted elsewhere). Until this is understood the
-  checker stays a diagnostic tool, not a nightly/PR gate — that is why no CI job runs
-  it.
+- ~~**A `-T 4` NOrec log produces thousands of criticals**~~ → **half fixed (§39).**
+  Measured before: `-S 3 -T 4 -n 300` gave 3 427 criticals for NOREC (1 246 lock
+  discipline, 1 250 address validity, 935 version ordering) and 3 754 for NORECBF. Both
+  of the big ones were NOrec logging the *clock value* in `addr1` and no `LOCK_RELEASE`
+  at all; with the payload convention restored, lock discipline is **0** and address
+  validity is 4 for both backends, and every remaining critical is `version_ordering`
+  (1 371 / 2 031).
+- **`Version ordering` vs NOrec's moving snapshot — and an unresolved soundness
+  question.** 1 371 (NOREC) and 2 031 (NORECBF) criticals per `-T 4 -n 300` log, now the
+  only thing the checker still calls CRITICAL on these two backends. NOrec's commit path
+  does `tx->snapshot = validate();` when the commit-lock CAS fails, so reads taken
+  afterwards log a newer snapshot than `TX_BEGIN` did, which is exactly what the check
+  flags. The check is therefore wrong *for this backend* — but the adjacent question is
+  not cosmetic: are values read under the earlier snapshot still valid against the later
+  one that commit-time validation will use? The driver's four consistency oracles never
+  fired across the 484 runs of the 2026-11-26 op-mask/thread sweep, so this is
+  unresolved rather than known-bad. Start at `NOrec.hpp`'s commit path (`tx->snapshot =
+  validate()`) and `read_impl`'s use of `tx->snapshot`; a targeted driver scenario (two
+  counters, high contention, `-M 2` transfers only, snapshot forced to move between the
+  two reads) is the way to test it.
 - **`check_address_validity` misclassifies the TM region as stack.** It flagged
   5 218 events / 152 addresses as "stack" for pointers in the mmap'd region
   (`0x7f…` range, region base + 0x1000). Harmless as a WARNING, but it buries real
@@ -459,6 +472,27 @@ remain:
   fold eagerly when an entry leaves the window) is a measurement-first change:
   time `bank -t 8` and the driver with the threshold at 1024 vs 16384 before
   picking.
+- **Measured: that serialisation is a cliff in thread count, not a linear cost**
+  (measured 2026-11-26, `drv_diff_ops`, identity `g_mvlog_hooks`, seed 1, wall clock):
+
+  | shape | wall | commits | aborts (share) |
+  |---|---|---|---|
+  | `-T 8 -n 1200` | <1 s | 9 944 | 6 305 (39 %) |
+  | `-T 16 -n 1200` | <1 s | 19 544 | 22 940 (54 %) |
+  | `-T 32 -n 1200` | 25 s | 38 744 | 80 209 (67 %) |
+  | `-T 48 -n 1200` | >200 s, stopped | — | — |
+  | `-T 64 -n 1200` | >200 s, stopped | — | — |
+  | `-T 32 -n 300` | 6 s | 9 944 | 19 257 (66 %) |
+  | `-T 64 -n 300` | >118 s, stopped (37 min CPU) | — | — |
+
+  Same work at quarter size finishes at `-T 32` in 6 s but does not finish at `-T 64`
+  in 118 s, so the cost is per-thread-contention, not transaction count — consistent
+  with every commit queueing behind an O(window) scan: the expected wait grows with the
+  number of threads, and the abort share growing 39 % → 67 % means each retry costs the
+  system more log entries, feeding back. Whether it terminates at `-T 64` at all is
+  unmeasured (I stopped it, so no claim either way). No CI shape exceeds `-T 16`, so
+  nothing is currently exposed to this; if MVLog is ever expected to scale, the chunked
+  fold above is the fix to try, and `-T 32 -n 1200` at 25 s is the number to beat.
 
 Coverage note for any future windowed-reclamation backend: a driver scenario must
 claim **more slots than the backend's reclamation threshold** or it never

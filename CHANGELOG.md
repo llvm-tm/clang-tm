@@ -3829,3 +3829,49 @@ TL2 gates on the changed source: `test_tx` 120/120, `test_ds` 207/207,
 `run-tl2` PASS, `make check-fast`, `make fmt-check`. Also worth remembering: my
 binary-identity grep `\bg_[a-z_]*hooks\b` silently matched nothing for TL2 because
 `tl2` contains a digit — the class needs `[a-z0-9_]`.
+
+## Session 2026-11-26 (morning, fourth block) — NOrec's trace vocabulary, an op-mask sweep, and MVLog's contention cliff (§39)
+
+Swept the driver over axes `ci.yml` never runs — the six single op-class masks
+(`-M 1/2/4/32/64/128`: ADD, TRANSFER, CHECK, PTRCHURN, SMALLBATCH, Wave-D alloc) at
+`-T 8 -n 2000`, plus `-T 32`, `-T 64`, `-R -T 16`, `-R -T 32` and `-T 1 -n 40000`, for
+all 22 C++ backends × 2 seeds: **484 runs, 0 invariant violations**, 44 unsupported
+(`-R -T 32` needs NT to divide the object counts) and 2 timeouts, both MVLog at
+`-T 64`. `-M 32` (pointer churn alone — the class both CSMV aliasing bugs lived in,
+diluted behind counter ops in the default `0xff` mask) is now a `diff_backends.sh`
+scenario, so it and the `-T 16`/`-M`/`-R` legs are gated on every PR.
+
+`§39`: both NOrec variants logged `COMMIT_LOCK_ACQUIRE` with the **clock value** in
+`addr1` (`0x38`, `0x1f8`, …) instead of the lock's address, and logged nothing for the
+unlock, which is a `set_clock(expect + 2)` store. Consequences measured on one
+`-S 3 -T 4 -n 300` event-log run: 1 246 of 1 246 acquires (NOREC; 1 227 for NORECBF)
+classified as page-zero address findings, and 0 `LOCK_RELEASE` events against them — so
+the lock-discipline invariant was not failing so much as unexpressible, and a genuinely
+leaked global commit lock (which would serialise the runtime forever, every commit CASes
+on that one word) would have been invisible. Logging `&global_lock` in `addr1` with the
+versions in `addr2`/`data`, and a `LOCK_RELEASE` at the clock store, takes lock
+discipline 1 246 → **0** and address validity 1 250 → 4 (NOREC), 1 227 → **0** and
+1 231 → 4 (NORECBF); totals 3 427 → 1 371 and 3 754 → 2 031. Per-(`dump`,`thread`)
+acquire/release balance is the timing-independent half: 57 imbalanced pairs with **48**
+of them in complete-history dumps (44 acquires against 0 releases) → 3 pairs, **none** in
+a complete-history dump.
+
+What that exposed but does not claim to fix: all remaining NOrec criticals are now
+`version_ordering` (1 371 / 2 031), because NOrec's commit path reassigns
+`tx->snapshot = validate()` under contention while values read earlier stay in the read
+set. The checker is wrong for the backend either way, but whether commit-time validation
+against a snapshot that moved is sound is a real open question — put in `TODO.md` with
+the code reference, the observation that no driver oracle ever fired on it, and a sketch
+of the scenario that would test it, rather than an assumption either way.
+
+Also measured and recorded rather than acted on: MVLog's serialised fold is a *cliff* in
+thread count at fixed work per thread — `<1 s` at `-T 8` and `-T 16`, **25 s** at
+`-T 32`, `>200 s` at `-T 48`/`-T 64`, abort share 39 % → 54 % → 67 %, and quarter-sized
+work at `-T 64` still unfinished at 118 s (37 min of CPU) where `-T 32` takes 6 s. No CI
+shape exceeds `-T 16`, so nothing is exposed today; the numbers are the baseline for the
+chunked-fold idea already in `TODO.md`.
+
+Gates: `test_tx` 120/120 and `test_ds` 207/207 for NOREC and NORECBF, `bank -t 8`
+conserving, `run-norec` PASS (NORECBF has no unit target in `tests/backends/tm_impl`),
+`BACKENDS="NOREC NORECBF" tools/diff_backends.sh 1 2` → `FAIL: none` on the widened
+scenario set, `make check-fast`, `make fmt-check`.

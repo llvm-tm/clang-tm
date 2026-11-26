@@ -281,7 +281,14 @@ commit()    //
 		expect = tx->snapshot;
 		desire = expect + 1;
 	}
-	TM_EVENT2(COMMIT_LOCK_ACQUIRE, expect, desire, 0);
+	// addr1 is the lock, not the version. Every other backend puts the address of
+	// what it locked in addr1 (TL2 the guarded address, TinySTM the lock word) and
+	// metadata in data; tools/stm_bug_tool/invariant_checker.py classifies addr1 as a
+	// memory address, so logging the clock value here made every acquire look like a
+	// page-zero access (1 246 of them in one -T 4 -n 300 run) — and because each
+	// acquire then carried a different addr1, the acquire/release pairing this
+	// backend does have was unexpressible in the trace.
+	TM_EVENT2(COMMIT_LOCK_ACQUIRE, (word_t)&global_lock, desire, expect);
 
 	for (auto &w : tx->write_set) {
 		TM_EVENT2(COMMIT_WRITEBACK, (word_t)w.addr, (word_t)w.type, 0);
@@ -292,6 +299,12 @@ commit()    //
 	// - global_lock is now expect+1 (odd, lock held)
 	// - Release by setting to expect+2 (next even version)
 	set_clock(expect + 2);
+	// That store IS the unlock, so log it. Without this the invariant "every
+	// COMMIT_LOCK_ACQUIRE has a LOCK_RELEASE" can never hold for NOrec (measured: 0
+	// LOCK_RELEASE events against 1 246 acquires), and a global lock that really was
+	// leaked — which would serialise the runtime forever — would be indistinguishable
+	// from normal traffic in the trace.
+	TM_EVENT2(LOCK_RELEASE, (word_t)&global_lock, expect + 2, 0);
 
 	tx->reset();
 	TM_EVENT2(COMMIT_SUCCESS, tx->id, expect + 2, 0);

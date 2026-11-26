@@ -186,7 +186,11 @@ jobs:
           # tools/diff_backends.sh also runs single-op-class (-M) and per-thread
           # partitioned (-R) shapes at enough slots to cross MVLog's reclamation
           # threshold: the mixed shape at a smaller slot count passed right over
-          # the §34 lost update, and neither shape is reachable below that.
+          # the §34 lost update, and neither shape is reachable below that. Since
+          # 2026-11-26 that set includes -M 32, pointer churn on its own — the op
+          # class both CSMV aliasing bugs lived in, which the default 0xff mask
+          # dilutes behind the counter ops. Measured clean on all 22 backends at
+          # -M 1/2/4/32/64/128 before being gated.
           if [ "${{ github.event_name }}" = "push" ]; then
             BACKENDS="TINYSTM NOREC NORECBF SWISSTM TL2 MVLOG SGL LEFTRIGHT XTM CSMV GPU_STM_CPU JVSTM GPUTX" \
               tools/diff_backends.sh 1

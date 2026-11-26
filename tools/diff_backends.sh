@@ -23,6 +23,11 @@ BACKENDS="${BACKENDS:-TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SG
 #   -M 16  every transaction writes the same scratch counter: maximum single-address
 #          contention, which is what turned the fold bug into a visible lost update.
 #   -M 8   read-own-write path (re-read of a just-written object, two widths).
+#   -M 32  pointer churn ALONE: the op class whose invariant is "a pointer the
+#          model handed out still denotes the same object". Both CSMV aliasing bugs
+#          (§25's sub-word version aliasing and the over-wide raw reads) live here,
+#          and diluted into the default 0xff mask a regression in it can hide behind
+#          the counter ops that dominate the transaction mix.
 #   -R     objects partitioned per thread, so sets are disjoint by construction and
 #          any violation is aliasing rather than a scheduling accident.
 #   -T 16  the class of bug that only appears when enough transactions are in
@@ -30,7 +35,7 @@ BACKENDS="${BACKENDS:-TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SG
 #          publish: GPUTX's §35 lost update needed 16+ threads (0/12 seeds at
 #          -T 8, 36/200 at -T 24), so every leg below 16 passed right over it.
 SCENARIOS=("-T 4 -n 1500" "-T 8 -n 1200" "-T 16 -n 1500" "-T 8 -n 2000 -M 16"
-          "-T 8 -n 2000 -M 8" "-T 8 -n 2000 -R")
+          "-T 8 -n 2000 -M 8" "-T 8 -n 2000 -M 32" "-T 8 -n 2000 -R")
 
 fails=""; builds=""; passed=""
 for be in $BACKENDS; do
