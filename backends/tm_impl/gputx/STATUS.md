@@ -2,13 +2,24 @@
 
 **Status:** `experimental`
 
-GPUTx-style rank/priority concurrency, with commits serialised by one global
-commit lock (docs/CORRECTNESS_FIXES.md §35): validate → publish is atomic, which
-is what `try_lock_write`'s comment always promised and the code never did.
-Correctness gates that cover it: `tools/diff_backends.sh` (including a `-T 16`
-leg — the §35 lost update needed ≥16 threads to appear), `test_tx` 120/120,
-`test_ds` 207/207, ASan with the leak gate, and UBSan. Deliberately **not** in
-`tsan-gate`: reads are plain accesses of memory that committing threads write, so
-the backend races in the C++ model (12 data-race reports at `-T 4 -n 200`, all of
-them a `do_read()` load against the write-back) until reads get per-slot version
-stamps — recorded with the design in `TODO.md`.
+GPUTx-style rank/priority concurrency, with two things the original scaffold
+lacked: commits are serialised by one global commit lock, so validate → publish is
+atomic (docs/CORRECTNESS_FIXES.md §35), and its lock-free reads are width-exact
+relaxed atomics paired with per-word commit counters, so validation does not have to
+trust a value alone and the accesses are not undefined behaviour (§37). That makes
+the backend race-clean under ThreadSanitizer, so it is gated like the rest.
+
+Correctness gates covering it: `tsan-gate`, `ubsan-gate`, ASan including the leak
+gate, the `tests/backends/tm_impl` unit suite, and `tools/diff_backends.sh` (with a
+`-T 16` leg — the §35 lost update needed ≥16 threads to appear).
+
+Kept at `experimental` deliberately, despite the full gate coverage:
+
+- the rank scheme never displaces a lock holder — it spins, then aborts, relying on
+  age escalation for fairness, and under ThreadSanitizer that path does not finish
+  at 16 threads (`TODO.md`);
+- the stronger validation costs aborts, 24–29 % more at identical commit totals
+  (§37's table), and the 1 M-entry version table can alias two far-apart addresses
+  onto one counter, which is a spurious abort, never a wrong commit;
+- none of this has been measured against the other backends on a contention-heavy
+  benchmark. Promotion needs that comparison, not just green CI.

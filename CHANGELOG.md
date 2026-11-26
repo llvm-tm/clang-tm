@@ -3746,3 +3746,47 @@ is 46 `tl2::` symbols plus 12 `accel::` ones, not an `acceltl2` hooks table.
 All three jobs' YAML re-parsed programmatically afterwards (22/22 in `sanitizer` and
 `ubsan-gate`, 21/22 in `tsan-gate` with the one exception named in the comment, and
 12 `leak_check: true` entries), and `make fmt-check` and `make check-fast` are clean.
+
+## Session 2026-11-26 (morning, second block) — GPUTX's reads stopped racing the commit path (§37)
+
+Took the follow-up §35 left: GPUTX validated by *value* and reached transactional
+words through `memcpy`, so a commit that changed a word and changed it back was
+invisible to validation, and every read of a word another thread was installing was
+a plain load racing a plain store — undefined behaviour, and 12–15 ThreadSanitizer
+reports per driver run, which is why the backend was the one exception to
+`tsan-gate`. Accesses now go through the tree's existing width-exact
+`tm_word::load_relaxed`/`store_release` helpers, and each 8-byte word carries a
+committed-write counter that a commit bumps under §35's commit lock after its values
+land; readers sample (versions, value, versions) with acquire fences, retry a torn
+sample up to four times, and fail validation if it stays torn. The soundness argument
+is worth stating precisely because it is not the textbook seqlock one: a writer bumps
+with release ordering only *after* its stores, so a reader that never observes the new
+version has no synchronises-with edge and may load the new value while its second
+version read returns the old one. That is harmless because validation re-reads the
+counters **under the commit lock**, whose acquire/release pairing makes every bump
+performed under it visible to the next holder, and the counters only increase — a
+sample that recorded too low a version aborts rather than commits. The sample is
+therefore a precision device; the lock is what makes it safe.
+
+Granularity was chosen by measurement rather than by plausibility: the first attempt
+put the counter in `GPUTXLock`, which aliases at 16 bytes, and per-word cost 16–30 %
+fewer aborts for the same soundness over 200-seed tables. The honest price against
+the §35 build is aborts up 24–29 % (e.g. 7.15 M → 9.18 M at `-T 32 -n 5000`) at
+**identical commit totals**, with 0 failures in all 750 runs, so no throughput was
+lost on these shapes — the extra aborts are absorbed by retries. `TODO.md` also gained
+a measured fact that bounds what this can claim: under TSan, `drv_diff_ops -T 16`
+does not finish in 200 s on the §35 build *or* this one (both `rc=124`), so
+wide-thread TSan evidence for GPUTX does not exist in either direction — and I made
+§36's own mistake mid-session (setting `TSAN_OPTIONS` on an unsanitized binary) and
+only counted the rerun where `nm -C` showed 644 `__tsan` symbols.
+
+Verification: 0 TSan warnings over 12 seeds at `-T 4 -n 200` and `-T 8 -n 1000`
+(was 12 and 15) and also at `-T 8 -n 5000` and the `-M 16`/`-R` legs with all oracles
+0; `test_tx` 120/120, `test_ds` 207/207, `bank` conserved at `-t 4`/`-t 32`,
+`run-gputx` PASS; ASan with `detect_leaks=1` clean on all three CI binaries; UBSan 0
+findings under `halt_on_error=1`; the 22-backend `diff_backends.sh` sweep with
+`FAIL: none`; `check-fast` and `fmt-check`. `tsan-gate` now covers all 22 C++
+backends, and its job comment, `DEVELOPER_GUIDE.md`, `IMPLEMENTATIONS.md` §19, the
+backend's `STATUS.md` and `CORRECTNESS_FIXES.md`'s known-issues rows were rewritten to
+match — §35's own "what is still not right" block was kept but retitled as what that
+commit shipped, since its numbers are the baseline §37 is measured against.

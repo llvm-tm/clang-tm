@@ -387,23 +387,22 @@ jobs:
 
 
   # ── Job 10b: TSan race gate (race-clean backends) ─────────
-  # 21 of the tree's 22 C++ backends are gated: each reports zero ThreadSanitizer
+  # All 22 of the tree's C++ backends are gated: each reports zero ThreadSanitizer
   # warnings on the T1 differential driver, and the driver exits non-zero on any
-  # consistency violation, so a race or anomaly introduced into a gated backend
-  # fails the PR. Two things this deliberately does NOT claim:
+  # consistency violation, so a race or anomaly introduced into any backend fails
+  # the PR. Two things this still does NOT claim:
   #   * ACCELTL2 is gated on its CPU path only (see the TM_ACCEL_DISABLE comment
   #     below); its device-backed SVM path needs a machine with a real IGP and
   #     stays in the non-blocking nightly sweep.
-  #   * GPUTX is not gated here at all. Its reads are plain accesses of memory
-  #     that committing threads write back, so it reports 12 races at -T 4 -n 200
-  #     and 15 at -T 8 -n 1000, every one of them do_read()'s load against
-  #     real_tm_end()'s write-back (docs/CORRECTNESS_FIXES.md §35). It is gated
-  #     under ASan, UBSan and the differential driver; the per-slot version stamps
-  #     that would make it race-clean, and the acceptance test for adding it, are
-  #     in TODO.md. GACCO and CALVIN were measured on 12 seeds each at both shapes
-  #     with 0 warnings before being added.
-  # When a gated backend regresses, docs/CORRECTNESS_FIXES.md's known-issues table
-  # and the triage table in TODO.md say where the pattern usually is.
+  #   * "Zero warnings" is about the memory model, not about how much work a
+  #     backend does to get there: GPUTX only joined on 2026-11-26, once its
+  #     lock-free reads became width-exact relaxed atomics paired with per-word
+  #     commit counters (docs/CORRECTNESS_FIXES.md §37); before that it reported
+  #     12-15 races whose every site was do_read() against the commit write-back.
+  # GACCO, CALVIN and GPUTX were each measured on 12 seeds at both shapes before
+  # being added. When a gated backend regresses, docs/CORRECTNESS_FIXES.md's
+  # known-issues table and the triage table in TODO.md say where the pattern
+  # usually is.
   tsan-gate:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     strategy:
@@ -430,6 +429,7 @@ jobs:
           - GPU_STM_CPU
           - GACCO
           - CALVIN
+          - GPUTX
           - ACCELTL2
     runs-on: ubuntu-22.04
     timeout-minutes: 25

@@ -1428,23 +1428,24 @@ write-back (`memcpy(w.addr, &w.val, w.width)`) and the previous access is
 deadlock or a `SEGV`, so the new lock introduced no finding; the fixed build also
 stopped losing the update that TSan's perturbed timing exposed at `-T 8`. The
 residual reports are the design limit below, not a regression — which is why
-GPUTX stays out of the `tsan-gate` list.
+GPUTX stayed out of the `tsan-gate` list *at the time of this commit*.
 
-**What is still not right.** Two limitations survive and are recorded in
-`TODO.md`, not papered over:
+**What was still not right** (both items fixed the same day by §37, which is what
+the numbers below were measured against — left here because they are what §35
+actually shipped):
 
-- Validation is still **value-based**, so it cannot distinguish a concurrent
+- Validation was still **value-based**, so it could not distinguish a concurrent
   commit that changed a read word from one that changed it and changed it back.
-  The driver's counters only increase, so it cannot observe this; a general fix
-  is a per-slot version stamp read with the seqlock discipline (sample
+  The driver's counters only increase, so it cannot observe this; the fix is a
+  per-slot version stamp read with the seqlock discipline (sample
   version → value → version, abort on mismatch), which the lock table could
   carry in a new field.
-- Reads are still plain unlocked accesses of memory that committing threads
-  write, which is a data race in the C++ model: 12 reports remain at
+- Reads were still plain unlocked accesses of memory that committing threads
+  write, which is a data race in the C++ model: 12 reports remained at
   `-T 4 -n 200` after the fix, all of them the `do_read()` load against
-  `real_tm_end()`'s write-back. That is why GPUTX is **not** in the `tsan-gate`
-  backend list even though it is in the ASan and UBSan gates. The same per-slot
-  version work fixes both.
+  `real_tm_end()`'s write-back. That is why GPUTX was **not** in the `tsan-gate`
+  backend list even though it is in the ASan and UBSan gates. The same
+  version-stamp work fixes both — see §37.
 
 ## 36. `SANITIZE=` did not participate in the backend stamp, so a sanitizer sweep could measure the wrong binary (2026-11-26) ✅
 
@@ -1481,14 +1482,107 @@ Before the change the second and third invocations relink nothing (the old stamp
 name was identical), so the `__ubsan` counts stay at whatever the first build
 left. `make fmt-check` and `make check-fast` are unaffected.
 
+## 37. GPUTX's lock-free reads raced the commit write-back, and value-only validation could not see a commit at all (2026-11-26) ✅
+
+**Root cause.** §35 made *validate → publish* atomic but left the two halves of the
+read path as they were, and both were wrong in the same way: `do_read()` reached a
+transactional word through `memcpy`, i.e. as a plain load, while `real_tm_end()`
+installed committed values with plain `memcpy` stores — so every read of a word
+someone else was committing was a data race in the C++ model (undefined behaviour
+whether or not the protocol is sound, and 12–15 ThreadSanitizer reports per run).
+And validation compared the *value* it had observed with the value now in memory,
+which cannot distinguish "nobody published here" from "someone published here,
+changed the word and changed it back". §35 recorded both as design limits; this is
+the work it pointed at.
+
+**Fix** (`backends/tm_impl/gputx/gputx_runtime.cpp`):
+
+- Every transactional access goes through width-exact `tm_word::load_relaxed` /
+  `tm_word::store_release` (`backends/tm_impl/common/tm_word_access.hpp`, the same
+  helpers that made the other lock-based backends race-clean). On x86-64 the
+  generated instruction is unchanged; what changes is that the pair is no longer UB
+  and the compiler may not split or widen it.
+- A `std::atomic<uint64_t>` **committed-write counter per 8-byte word**
+  (`g_versions`, 1 M entries, same table size as the locks, indexed at `>>3`). A
+  commit stores its values and then bumps the counter of every word it published to
+  — values first, versions second, both under §35's commit lock.
+- Readers take a seqlock-style sample: versions, `acquire` fence, value, `acquire`
+  fence, versions again, retried up to four times; a sample that stays torn is
+  logged as `kVersionUnstable` and therefore aborts. An unaligned access that
+  straddles a word boundary samples and validates **both** endpoint words, and the
+  writer bumps both, so coverage is exact for the widths the hooks can deliver.
+- Validation at commit (already under the commit lock) compares the sampled versions
+  with the current ones, and keeps the value comparison too — the value check is what
+  still covers stores that never bump a version, i.e. an application writing to
+  transactional memory outside a transaction.
+
+**Why it is sound, not just quiet.** The sample is a *precision* device; the safety
+comes from where validation happens. A writer bumps with release ordering only after
+its stores land, so a reader that never sees the new version gets no
+synchronises-with edge and may legitimately load the new value while its second
+version read still returns the old one — a sample that looks stable but records a
+version that is too low. That cannot commit: versions only ever increase, and the
+commit lock's acquire/release pairing makes every bump performed under it visible to
+the next holder, so the validation read is exact rather than racy, and a too-low
+sample simply aborts.
+
+**Granularity was measured, not guessed.** The first version kept the counter in
+`GPUTXLock` (16-byte aliasing, `LOCK_SHIFT = 4`). Per-word cost 16–30 % less for the
+same soundness — 200 seeds, clean build, commit totals identical in every row:
+
+| shape | §35 build | per-slot versions | per-word versions (shipped) |
+|---|---|---|---|
+| `-T 16 -n 5000` | 1,760,617 aborts | 2,662,832 | **2,238,158** |
+| `-T 24 -n 5000` | 4,049,449 | 6,356,657 | **5,151,107** |
+| `-T 32 -n 5000` | 7,151,936 | 11,537,950 | **9,176,993** |
+| `-T 64 -n 5000` | 29,703,560 | 51,089,151 | **37,858,628** |
+| `-T 8 -n 20000` | 814,105 | 1,251,074 | **1,009,762** |
+| `-T 128 -n 2000` | 13,360,627 | 23,888,528 | **16,819,186** |
+
+So the honest cost of the stronger validation is **aborts up 24–29 % at identical
+commit totals** (0 failures in every one of those 750 runs). No throughput was lost
+on these shapes; the extra aborts are absorbed by retries.
+
+**Verification.** The race numbers, on forced rebuilds identified by their hooks
+table and by `__tsan` symbols (`nm -C`), with the job's own options:
+
+| shape | §35-era build | this change |
+|---|---|---|
+| `-T 4 -n 200`, 12 seeds | 12 race reports | **0**, 0 non-zero exits |
+| `-T 8 -n 1000`, 12 seeds | 15 race reports | **0**, 0 non-zero exits |
+| `-T 8 -n 2000` | 17 races, exit 66 | **0 races**, exit 0, commits 16344 identical |
+| `-T 16 -n 400` | 11 races, then 200 s timeout | 0 races, then 200 s timeout |
+
+That last row matters for what it does *not* say: under TSan this backend does not
+finish at 16 threads **in either build**, so that is a pre-existing property of its
+spin-then-abort path and not a regression from this change — and it means there is no
+wide-thread TSan evidence for GPUTX in either direction (`TODO.md`). It also caught
+me making §36's own mistake mid-session: the first "0 races" came from running the
+*unsanitized* binary with `TSAN_OPTIONS` set, and only the rebuild that printed 644
+`__tsan` symbols is a measurement.
+
+Everything else, on the same source: `test_tx` 120/120, `test_ds` 207/207,
+`bank` money conserved at `-t 4` and `-t 32`, `make -C tests/backends/tm_impl
+run-gputx` PASS; ASan with `detect_leaks=1` clean on `bank`/`test_tx`/`test_ds`
+(GPUTX is leak-gated); UBSan 0 `runtime error:` under `halt_on_error=1`; TSan also
+clean at `-T 8 -n 5000` and on the `-M 16` and `-R` legs, with
+`quiesce_viol=0 alloc_viol=0`; the full 22-backend `diff_backends.sh` sweep
+(`FAIL: none`, `BUILD_FAIL: none`); `make check-fast` and `make fmt-check`.
+
+**What this does not claim.** The driver's counters only ever increment, so no oracle
+here could observe the changed-and-changed-back hole this closes: the evidence for
+that half is the argument above, not a red test that went green. The measurable result
+is that GPUTX's accesses stopped being undefined behaviour, which is why it joined
+`tsan-gate` (all 22 C++ backends gated now) instead of being excepted from it.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |
 |-------|----------|-------|
 | ~~GPUTX lost updates at high thread counts~~ → **fixed 2026-11-26 (§35)** | — | A commit validated its lock-free read set and then applied its writes with nothing ordering the two against another thread's commit: 36/200 seeds failed at `-T 24`, 81/200 at `-T 32`, 196/200 at `-T 64`. `try_lock_write` documented a rank check at commit that was never implemented. Fixed by serialising validate+apply under a global commit lock (MVLog/LEFTRIGHT's pattern) plus an ownership re-check before publish; 0/200 at all three shapes after. "|
-| GPUTX validation is value-based and its reads are unsynchronised | Medium | Consequence of the §35 design, not of the fix: validation compares logged values with memory, so a commit that changed a read word and changed it back is invisible (the driver's counters only increment, so it cannot observe this), and reads are plain accesses of memory that committing threads write — a data race in the C++ model, which is why GPUTX is in the ASan/UBSan gates but not the `tsan-gate` list. Both want the same change: a per-slot version in the lock table, read with the seqlock discipline (version → value → version, abort on mismatch). Design recorded in `TODO.md`. |
+| ~~GPUTX validation is value-based and its reads are unsynchronised~~ → **fixed 2026-11-26 (§37)** | — | Both faces of one design decision: reads reached transactional words through `memcpy` while commits installed values with plain stores (12–15 ThreadSanitizer reports per run), and validation compared logged values with memory, so a commit that changed a read word and changed it back was invisible. Fixed with width-exact `tm_word` accesses plus a per-8-byte-word commit counter bumped under the commit lock and sampled with the seqlock discipline. GPUTX is in `tsan-gate` now; the measured price is aborts up 24–29 % at identical commit totals. |
 | Exit-time leaks (10 backends) and JVSTM's unbounded version history | Medium | All 21 backends are clean of AddressSanitizer *memory* errors on `bank`/`test_tx`/`test_ds`, but LeakSanitizer still fails `bank` on TINYSTM, WBETL, WT, SWISSTM, XTM, SPHT, LEFTRIGHT, ROMULUS and CALVIN and `test_tx` on JVSTM, so `ci.yml` gates leaks on the 11 backends measured clean and disables them elsewhere (per-backend `leak_check`, never globally). Three distinct owners, measured on `bank -t 4 -d 1000`: the benchmark's own executor/future objects (LEFTRIGHT 53.6 KB/1079, ROMULUS 71.4 KB/326, XTM 1.4 KB/12 — harness, not backend, but it also distorts memory measurements), backend metadata never released (SPHT 524 KB in 8 allocations of wait/epoch state, SWISSTM's ownership-record table, TINYSTM's `thread_local` deferred- and retired-free lists which a worker's exit simply drops — 130 KB/31), and version records that are never reclaimed (JVSTM: peak RSS rises **10.9x** when the transaction count rises 10x, 856 KB to 9.3 MB, while MVLOG/CSMV/SWISSTM stay flat because they trim). Fix designs in `TODO.md`. |
-| Per-backend ThreadSanitizer races (drained; GPUTX is the exception) | Low | The post-§30/§31 sweep of `drv_diff_ops -S 1 -T 4 -n 200` found **0** warnings on the 19 backends it covered, ACCELTL2 included (its device path prints 12 reports, but every one has its stack inside `libamdocl64.so`/`libhsa-runtime64.so.1` and none names one of our sources (§32); `tests/concurrency/tsan-suppressions-opencl.txt` documents them, `ci.yml`'s `tsan-gate` gates the CPU path, and `nightly.yml`'s `accel-e2e` covers the device path functionally). GACCO and CALVIN were swept on 2026-11-26 with the same options at `-T 4 -n 200` and `-T 8 -n 1000`, 12 seeds each: **0** warnings and 0 non-zero exits, so both are gated now. **GPUTX is not gateable and is not gated**: 12 reports at `-T 4 -n 200`, 15 at `-T 8 -n 1000`, all of them `do_read()`'s load against `real_tm_end()`'s write-back (§35); the fix is per-slot version stamps, in `TODO.md`. |
+| Per-backend ThreadSanitizer races (drained, all 22 C++ backends gated) | Low | The post-§30/§31 sweep of `drv_diff_ops -S 1 -T 4 -n 200` found **0** warnings on the 19 backends it covered, ACCELTL2 included (its device path prints 12 reports, but every one has its stack inside `libamdocl64.so`/`libhsa-runtime64.so.1` and none names one of our sources (§32); `tests/concurrency/tsan-suppressions-opencl.txt` documents them, `ci.yml`'s `tsan-gate` gates the CPU path, and `nightly.yml`'s `accel-e2e` covers the device path functionally). GACCO and CALVIN were swept on 2026-11-26 with the same options at `-T 4 -n 200` and `-T 8 -n 1000`, 12 seeds each: **0** warnings and 0 non-zero exits, so both are gated. GPUTX was the last exception and is gone: it reported 12 and 15 races on those shapes, all `do_read()` against `real_tm_end()`'s write-back, and §37's `tm_word` accesses plus per-word commit versions took both shapes to **0** over 12 seeds, so the gate now covers every C++ backend in the tree. One limit worth repeating: under TSan GPUTX does not finish at `-T 16` in either the pre- or post-§37 build (both time out at 200 s), so wide-thread TSan evidence does not exist for it — the gate's shapes stop at `-T 8` for every backend. |
 | `tm_swap_runtime()` publication | Low | A phase switch writes all 23 dispatch pointers under `s_hook_mutex` while other threads read them locklessly, so a switch racing with live transactions could mix two backends' hooks. Its only caller (`tests/explicit-api/test_phase_switch.cpp`) is single-threaded, so this is latent rather than live, and no sanitizer case exercises it. Needs per-thread shadow tables or a quiescence epoch; see `TODO.md`. |
 | ARM TME simulation: built but never run | Medium | gem5 v25.1.0.1 implements TME, and the path is now complete on the input side: `configs/arm-tme-kvm.py` adds the `TME` release extension, `workloads/tme/Makefile` builds with `-march=armv8.1-a+tme` (needs `gcc-aarch64-linux-gnu`; clang has no Arm TME support through LLVM 22), and `nightly.yml` compiles both the RTM and TME workloads. Still missing: an ARM/ALL gem5 build (`setup.sh` only produces `build/X86_TSX`) and therefore an end-to-end `scripts/run-arm-tme.sh` run. x86 TSX is the reference path that works. |
 | CSMV GPU kernel: no commit validation, `>>3` aliasing, no server | High | `gpu/backends/csmv/cuda/`: `csmv_device_commit` performs no read-set validation (conflicting transactions both install versions), `csmv_gpu_entry_idx()` still keys chains by `>> 3` with no owner tag (§25 on CPU, unfixed on GPU), and neither GPU path implements the block-0/server-warp commit that `docs/proofs/GPU_STM_PLAN.md:19` specifies. CPU model of the server commit exists (`CSMV_SERVER_COMMIT=1`). Porting needs a GPU runner: the `gpu/` tree is compiled in `nightly.yml` only, never correctness-gated. |

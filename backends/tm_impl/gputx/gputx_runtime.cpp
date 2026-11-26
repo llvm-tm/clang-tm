@@ -58,6 +58,113 @@ static inline size_t lock_idx(const void *addr)
 	return ((uintptr_t)addr >> LOCK_SHIFT) & (LOCK_TABLE_SIZE - 1);
 }
 
+// Committed-write counters, one per 8-byte word, bumped under the commit lock
+// after the values are in memory.  Readers pair them with their load (see
+// load_stamped) and validate them under the commit lock, so validation does not
+// have to trust the value alone: a commit that changed a word and changed it back
+// is invisible to a value comparison, which was §35's residual hole.
+//
+// Word (not lock-slot) granularity is deliberate.  Locks alias at 16 bytes, so
+// slot-sized versions would make every reader of the other counters in a slot
+// abort whenever one of them commits; at 8 bytes that spurious conflict surface
+// halves.  And it makes coverage exact: a naturally aligned 1/2/4/8-byte access
+// always lies within one word, and for an unaligned one that straddles a word
+// boundary, load_stamped and the validation loop below look at BOTH endpoint words,
+// so a write to either is seen.
+static std::atomic<uint64_t> g_versions[LOCK_TABLE_SIZE];
+
+static inline size_t word_idx(const void *addr)
+{
+	return ((uintptr_t)addr >> 3) & (LOCK_TABLE_SIZE - 1);
+}
+
+// Width-exact atomic access (backends/tm_impl/common/tm_word_access.hpp).  A
+// committing thread stores transactional words in place while a lock-free reader
+// may be loading the very same word, and a plain load racing a plain store is
+// undefined behaviour regardless of the protocol being sound — that is what
+// ThreadSanitizer reported here before these helpers were used.  On x86-64 the
+// generated instruction is the same.
+static uint64_t load_atomic(const void *addr, uint8_t width)
+{
+	switch (width) {
+	case 1:
+		return tm_word::load_relaxed((const uint8_t *)addr);
+	case 2:
+		return tm_word::load_relaxed((const uint16_t *)addr);
+	case 4:
+		return tm_word::load_relaxed((const uint32_t *)addr);
+	case 8:
+		return tm_word::load_relaxed((const uint64_t *)addr);
+	default: {
+		// Only 1/2/4/8 reach a TM access hook; keep anything else working the
+		// slow way rather than pretending to be atomic about it.
+		uint64_t v = 0;
+		memcpy(&v, addr, width);
+		return v;
+	}
+	}
+}
+
+static void store_atomic(void *addr, uint64_t val, uint8_t width)
+{
+	switch (width) {
+	case 1:
+		tm_word::store_release((uint8_t *)addr, (uint8_t)val);
+		return;
+	case 2:
+		tm_word::store_release((uint16_t *)addr, (uint16_t)val);
+		return;
+	case 4:
+		tm_word::store_release((uint32_t *)addr, (uint32_t)val);
+		return;
+	case 8:
+		tm_word::store_release((uint64_t *)addr, val);
+		return;
+	default:
+		memcpy(addr, &val, width);
+		return;
+	}
+}
+
+// Sentinel for a read whose version sample stayed torn (someone kept publishing
+// into one of its words while we were loading).  Real versions never reach it.
+static constexpr uint64_t kVersionUnstable = ~0ull;
+
+// Sample (versions, value, versions) the way a seqlock reader does.  The fences
+// keep the value load from being hoisted above the first version reads or sunk
+// below the second.  Equal versions mean we saw no publish across our load.
+//
+// Be precise about what that buys: the sample is a *precision* device, not the
+// safety device.  A writer bumps with release ordering only after its stores have
+// landed, so a reader that never observes the new version gets no synchronises-with
+// edge, and on real hardware it is permitted to load the new value while its second
+// version read still sees the old one — a sample that looks stable but records a
+// version too low.  What makes that harmless is where validation happens: under the
+// commit lock, whose acquire/release pairing makes every bump performed under it
+// visible to the next holder, and versions only ever increase.  So a too-low sample
+// fails the version comparison and aborts; it cannot commit.  The sample only decides
+// whether we abort *unnecessarily*.
+static bool load_stamped(void *addr,
+                         uint8_t width,
+                         uint64_t *val,
+                         uint64_t *ver_lo,
+                         uint64_t *ver_hi)
+{
+	const size_t lo = word_idx(addr);
+	const size_t hi = word_idx(static_cast<const char *>(addr) + (width ? width - 1 : 0));
+	uint64_t lo1 = g_versions[lo].load(std::memory_order_relaxed);
+	uint64_t hi1 = g_versions[hi].load(std::memory_order_relaxed);
+	std::atomic_thread_fence(std::memory_order_acquire);
+	uint64_t value = load_atomic(addr, width);
+	std::atomic_thread_fence(std::memory_order_acquire);
+	uint64_t hi2 = g_versions[hi].load(std::memory_order_relaxed);
+	uint64_t lo2 = g_versions[lo].load(std::memory_order_relaxed);
+	*val = value;
+	*ver_lo = lo1;
+	*ver_hi = hi1;
+	return lo1 == lo2 && hi1 == hi2;
+}
+
 // ── Per-thread state ─────────────────────────────────────
 static thread_local bool g_in_tx = false;
 static thread_local uint64_t g_rank = 0;    // current priority
@@ -68,7 +175,15 @@ struct GPUTXOp {
 	uint64_t val;
 	uint8_t width;
 };
-static thread_local std::vector<GPUTXOp> g_reads;  // (addr, observed value, width)
+struct GPUTXRead {
+	void *addr;
+	uint64_t val;
+	uint8_t width;
+	uint64_t ver_lo; // version of the access's first word (see load_stamped)
+	uint64_t ver_hi; // version of its last word; equal to ver_lo when aligned
+};
+static thread_local std::vector<GPUTXRead>
+    g_reads; // (addr, observed value, width, version)
 static thread_local std::vector<GPUTXOp> g_writes; // (addr, newest value, width)
 struct GPUTXBufEntry {
 	uint64_t val;
@@ -201,17 +316,24 @@ static void real_tm_end()
 	// Freeze the commit state: no other transaction may publish between our
 	// validation and our write-back (see the g_commit_lock comment).
 	commit_lock_acquire();
-	// Validate reads: for each read, check that no concurrent writer
-	// modified the value (compare against write-buffer).
-	// Validate each observed read against memory: the value must not
-	// have changed since we read it.  (Do NOT validate against the
-	// buffered new value for read-then-write addresses — memory still
-	// holds the old value until we apply writes below, so expecting the
-	// buffered value would abort every read-modify-write transaction.)
+	// Validate reads against the frozen commit state.  The versions are the real
+	// test: they change exactly when some transaction publishes into a word the
+	// read covers, whether or not the value ended up different.  The value
+	// comparison is kept as well because it also covers writes that never bump a
+	// version (an out-of-transaction store to transactional memory is the
+	// application's own data race, but it should not turn into a silent lost
+	// update here).
 	for (auto &rd : g_reads) {
-		uint64_t cur = 0;
-		memcpy(&cur, rd.addr, rd.width);
-		if (cur != rd.val) {
+		const size_t lo = word_idx(rd.addr);
+		const size_t hi = word_idx(static_cast<char *>(rd.addr) +
+		                           (rd.width ? rd.width - 1 : 0));
+		if (rd.ver_lo == kVersionUnstable ||
+		    g_versions[lo].load(std::memory_order_relaxed) != rd.ver_lo ||
+		    g_versions[hi].load(std::memory_order_relaxed) != rd.ver_hi) {
+			abort_in_commit();
+			return;
+		}
+		if (load_atomic(rd.addr, rd.width) != rd.val) {
 			abort_in_commit();
 			return;
 		}
@@ -227,9 +349,23 @@ static void real_tm_end()
 			return;
 		}
 	}
-	// Apply writes to memory (write-back).
+	// Apply writes to memory (write-back), then bump the version of every word we
+	// published to.  Values first, versions second, and both while the commit lock
+	// is held: that is what lets the next holder's validation see our bump, and
+	// what keeps a reader that sampled equal versions from ever having loaded a
+	// value out of the middle of this loop.  (We validate the value each
+	// transaction OBSERVED, never the buffered new value: memory still held the old
+	// one until here, so expecting the buffered value would abort every
+	// read-modify-write transaction.)
+	for (auto &w : g_writes)
+		store_atomic(w.addr, w.val, w.width);
 	for (auto &w : g_writes) {
-		memcpy(w.addr, &w.val, w.width);
+		const size_t lo = word_idx(w.addr);
+		const size_t hi = word_idx(static_cast<char *>(w.addr) +
+		                           (w.width ? w.width - 1 : 0));
+		g_versions[lo].fetch_add(1, std::memory_order_release);
+		if (hi != lo)
+			g_versions[hi].fetch_add(1, std::memory_order_release);
 	}
 	release_locks();
 	commit_lock_release();
@@ -250,25 +386,30 @@ static void real_tm_abort()
 
 static uint64_t do_read(void *addr, uint8_t width)
 {
-	if (!g_in_tx) {
-		uint64_t v = 0;
-		memcpy(&v, addr, width);
-		return v;
-	}
+	if (!g_in_tx)
+		return load_atomic(addr, width);
 	auto it = g_write_buffer.find(addr);
 	if (it != g_write_buffer.end()) {
 		return it->second.val; // read-own-write
 	}
-	uint64_t v = 0;
-	memcpy(&v, addr, width);
-	g_reads.push_back({addr, v, width});
+	// Retry the (versions, value, versions) sample a few times: on a word another
+	// thread publishes to constantly, a single attempt would usually come back torn
+	// and fail validation.  A sample that is still torn is recorded as unstable and
+	// so aborts rather than committing on a version it cannot vouch for.
+	uint64_t v = 0, ver_lo = 0, ver_hi = 0;
+	bool stable = false;
+	for (int attempt = 0; attempt < 4 && !stable; attempt++)
+		stable = load_stamped(addr, width, &v, &ver_lo, &ver_hi);
+	if (!stable)
+		ver_lo = ver_hi = kVersionUnstable;
+	g_reads.push_back({addr, v, width, ver_lo, ver_hi});
 	return v;
 }
 
 static void do_write(void *addr, uint64_t val, uint8_t width)
 {
 	if (!g_in_tx) {
-		memcpy(addr, &val, width);
+		store_atomic(addr, val, width);
 		return;
 	}
 	// For simplicity, always lock on first write to an address.

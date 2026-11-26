@@ -385,29 +385,32 @@ cannot deadlock.
 
 Follow-ups this leaves open (P2, opened 2026-11-26):
 
-- **GPUTX still validates by value and still reads unsynchronised.** Validation
-  compares the logged value with memory, so a commit that changed a read word and
-  changed it back is invisible; and reads are plain accesses of memory that
-  committing threads write, which is a data race in the C++ model — measured
-  after §35: **12 `WARNING: ThreadSanitizer: data race` reports at
-  `-T 4 -n 200`** (HEAD's own build reports 15), every one of them
-  `do_read()`'s `memcpy` load against `real_tm_end()`'s write-back. That is why
-  GPUTX is in the ASan/UBSan gates but deliberately not in `tsan-gate`. Both
-  want one change: a `std::atomic<uint64_t> ver` per `GPUTXLock` slot, bumped
-  under the commit lock when a write to that slot is applied, and read with the
-  seqlock discipline — `v1 = ver(acquire)`, load value, `v2 = ver(load-load
-  fence between value and v2)`, log the value only if `v1 == v2`, and validate
-  `ver == v1` under the commit lock. Note the slot granularity is 16 bytes
-  (`LOCK_SHIFT = 4`), so version bumps alias across neighbours: extra aborts,
-  never extra commits. Acceptance: GPUTX joins `tsan-gate` with 0 data-race
-  reports at `-T 4 -n 200`, and the `-T 16/-T 24/-T 32/-T 64` rate tables in §35
-  stay at 0/200.
+- ~~**GPUTX still validates by value and still reads unsynchronised.**~~ →
+  **RESOLVED same day (§37).** Fixed as sketched here — width-exact
+  `tm_word::load_relaxed`/`store_release` at every transactional access, plus a
+  `std::atomic<uint64_t>` commit counter per *8-byte word* (not per 16-byte lock
+  slot: slot granularity cost 16–30 % more aborts for the same soundness, measured)
+  bumped under the commit lock after the values land, read with the seqlock
+  discipline and validated under the commit lock. Acceptance met: 0 data-race
+  reports at `-T 4 -n 200` and `-T 8 -n 1000` over 12 seeds each (was 12 and 15),
+  and the `-T 16/24/32/64` rate tables stay at 0/200. Cost: aborts up 27–29 % at
+  identical commit totals. GPUTX is in `tsan-gate` now.
+- **GPUTX does not finish under TSan at ≥16 threads, with or without §37.**
+  `drv_diff_ops -S 1 -T 16 -n 400` under `-fsanitize=thread` hits a 200 s timeout on
+  the §35-era build *and* on the version-stamp build (both `rc=124`), while `-T 8`
+  shapes finish in under a second. So the backend's spin-then-abort path is
+  superlinear once TSan's shadow memory is in play, and there is no wide-thread TSan
+  evidence for it either way — `ci.yml`'s `tsan-gate` shapes stop at `-T 8` for every
+  backend, which is why this does not block anything. Worth measuring clean-vs-TSan
+  scaling before adding any high-thread TSan shape anywhere; if the design is the
+  cause, the fix is a bounded spin with an abort instead of a spin loop (the
+  `try_lock_write` path already aborts — the spin is what costs).
 - **Give GPUTX a permanent regression leg.** It was absent from both
   `tools/diff_backends.sh`'s default backend list and the `diff-concurrency`
-  job's lists, so the bug had no gate at all. It is now in the default list and
-  the push-side CI leg (`-T 4/-T 8` shapes). A `-T 16 -n 5000` leg is what
-  actually distinguishes fixed from flaky for this bug class (it failed 18 % at
-  `-T 24` before) — add it as a nightly-only shape if PR time becomes an issue.
+  job's lists, so the bug had no gate at all. Done: GPUTX is in the default list,
+  in the push-side CI legs, and `SCENARIOS` gained a `-T 16 -n 1500` leg — the shape
+  that actually distinguishes fixed from flaky for this bug class (it failed 18 % at
+  `-T 24` before). `tsan-gate`, `ubsan-gate` and the ASan leak gate cover it too.
 
 ### MVLog: reclamation is outside its model, and the fold serialises every commit (P2, opened 2026-11-26)
 

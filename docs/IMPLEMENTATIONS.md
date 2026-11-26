@@ -474,21 +474,21 @@ The two-phase overhead (2× execution) is acceptable in async/queue settings whe
 - No GPU pre-computation phase (ranks are assigned at begin())
 - No atomicMax-based conflict tracking (locks use compare-exchange with priority comparison)
 - Rank increases with each abort (prevents starvation)
-- Reads are lock-free; writes acquire priority-respecting exclusive locks
+- Reads take no locks; they are width-exact relaxed atomics paired with a per-8-byte-word commit counter (seqlock sampling), and writes acquire priority-respecting exclusive locks
 - Commits are serialised by one global commit lock (§35): the rank scheme decides
   who aborts on a *conflict*, the commit lock makes *validate → publish* atomic
 
 **Key files:**
-- `backends/tm_impl/gputx/gputx_runtime.cpp` — priority locks + rank system + commit lock + hook table
+- `backends/tm_impl/gputx/gputx_runtime.cpp` — priority locks + per-word commit counters + commit lock + hook table
 - `gpu/backends/gpu_gputx/` — GPU version of the same priority scheme (kernels)
 
 **Notes:**
 - Write lock: CAS with priority check. A slot is only ever claimed when it is free, so a holder is never displaced; the waiting transaction spins briefly and then aborts, and its retry carries a higher rank.
-- Read validation at commit: compare current memory values against captured read-set values, **under the commit lock**, and re-check that every write's lock slot still reports our own `tid` before publishing. The lock is required: without it a commit landing between validation and write-back is invisible to a value comparison, which is how §35 lost updates.
+- Read validation at commit, **under the commit lock**, compares the commit counters sampled with each read against the current ones for every word the access covers (and the observed value as well, which additionally covers stores that never bumped a version). Before §37 the version did not exist and validation compared values alone — so a commit that changed a word and changed it back was invisible — while the accesses themselves were plain loads racing the commit's stores, i.e. undefined behaviour that ThreadSanitizer reported. Both are fixed with `tm_word::load_relaxed`/`store_release` plus a `g_versions` counter per 8-byte word, bumped after the values land and still under the commit lock; the reader's (versions, value, versions) sample is fenced, retried up to four times, and recorded as unstable if it stays torn.
+- Version counters are per 8-byte word, not per lock slot: measured on 200 seeds, slot-sized counters (locks alias at `LOCK_SHIFT = 4`, 16 bytes) cost 16–30 % more aborts for the same soundness. An unaligned access that straddles a word boundary samples, validates and bumps both endpoint words.
 - Priority aging: g_retries is a counter that increases on each abort, making high-abort transactions eventually win all conflicts
 - The priority scheme provides starvation freedom without explicit fairness mechanisms
-- Known limits (recorded in `TODO.md`): validation is value-based, so a commit that changed a read word and changed it back is invisible; and reads are plain accesses of memory that committing threads write, so the backend is not ThreadSanitizer-clean by design and is gated under ASan/UBSan and the differential driver, not under `tsan-gate`.
-- Test status: `drv_diff_ops` differential sweep (`tools/diff_backends.sh`, incl. a `-T 16` leg — the bug class here needs ≥16 threads), `test_tx` 120/120, `test_ds` 207/207, ASan incl. the leak gate, UBSan 0 findings.
+- Test status: gated by `tsan-gate` (race-clean since §37), `ubsan-gate`, ASan with the leak gate, `tests/backends/tm_impl`, and `tools/diff_backends.sh` (incl. a `-T 16` leg — the §35 lost update needed ≥16 threads). `test_tx` 120/120, `test_ds` 207/207.
 
 ---
 
