@@ -299,8 +299,7 @@ static void real_tm_end()
 		// allocate unconditionally so the hazard cannot come back with a future
 		// retry path (a leaked node would be a bug; a re-published one is
 		// silent corruption).
-		CSMVVersionNode *node =
-		    (CSMVVersionNode *)std::malloc(sizeof(CSMVVersionNode));
+		CSMVVersionNode *node = (CSMVVersionNode *)std::malloc(sizeof(CSMVVersionNode));
 		g_tx.writes[i].node = node;
 		node->timestamp = commit_ts;
 		node->value = val;

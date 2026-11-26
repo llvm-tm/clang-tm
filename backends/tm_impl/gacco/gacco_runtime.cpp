@@ -254,22 +254,22 @@ static void do_write(void *addr, uint64_t val, uint8_t width)
 	g_writes.push_back({addr, val, width});
 }
 
-static uint8_t real_tm_read_i1(int8_t *a)
+static uint8_t real_tm_read_i1(uint8_t *a)
 {
 	LLVM_TM_ADDR_CHECK(a);
 	return (uint8_t)do_read((void *)a, 1);
 }
-static uint16_t real_tm_read_i2(int16_t *a)
+static uint16_t real_tm_read_i2(uint16_t *a)
 {
 	LLVM_TM_ADDR_CHECK(a);
 	return (uint16_t)do_read((void *)a, 2);
 }
-static uint32_t real_tm_read_i4(int32_t *a)
+static uint32_t real_tm_read_i4(uint32_t *a)
 {
 	LLVM_TM_ADDR_CHECK(a);
 	return (uint32_t)do_read((void *)a, 4);
 }
-static uint64_t real_tm_read_i8(int64_t *a)
+static uint64_t real_tm_read_i8(uint64_t *a)
 {
 	LLVM_TM_ADDR_CHECK(a);
 	return (uint64_t)do_read((void *)a, 8);
@@ -291,22 +291,22 @@ static double real_tm_read_f8(double *a)
 	return v;
 }
 
-static void real_tm_write_i1(int8_t *a, uint8_t v)
+static void real_tm_write_i1(uint8_t *a, uint8_t v)
 {
 	LLVM_TM_ADDR_CHECK_WRITE(a, v);
 	do_write((void *)a, v, 1);
 }
-static void real_tm_write_i2(int16_t *a, uint16_t v)
+static void real_tm_write_i2(uint16_t *a, uint16_t v)
 {
 	LLVM_TM_ADDR_CHECK_WRITE(a, v);
 	do_write((void *)a, v, 2);
 }
-static void real_tm_write_i4(int32_t *a, uint32_t v)
+static void real_tm_write_i4(uint32_t *a, uint32_t v)
 {
 	LLVM_TM_ADDR_CHECK_WRITE(a, v);
 	do_write((void *)a, v, 4);
 }
-static void real_tm_write_i8(int64_t *a, uint64_t v)
+static void real_tm_write_i8(uint64_t *a, int64_t v)
 {
 	LLVM_TM_ADDR_CHECK_WRITE(a, v);
 	do_write((void *)a, v, 8);
@@ -383,17 +383,17 @@ static TMRealHooks g_gacco_hooks = {
     .calloc = real_tm_calloc,
     .realloc = real_tm_realloc,
     .free = real_tm_free,
-    .read_i1 = (uint8_t (*)(uint8_t *))real_tm_read_i1,
-    .read_i2 = (uint16_t (*)(uint16_t *))real_tm_read_i2,
-    .read_i4 = (uint32_t (*)(uint32_t *))real_tm_read_i4,
-    .read_i8 = (uint64_t (*)(uint64_t *))real_tm_read_i8,
+    .read_i1 = real_tm_read_i1,
+    .read_i2 = real_tm_read_i2,
+    .read_i4 = real_tm_read_i4,
+    .read_i8 = real_tm_read_i8,
     .read_f4 = real_tm_read_f4,
     .read_f8 = real_tm_read_f8,
     .read_ptr = real_tm_read_ptr,
-    .write_i1 = (void (*)(uint8_t *, uint8_t))real_tm_write_i1,
-    .write_i2 = (void (*)(uint16_t *, uint16_t))real_tm_write_i2,
-    .write_i4 = (void (*)(uint32_t *, uint32_t))real_tm_write_i4,
-    .write_i8 = (void (*)(uint64_t *, int64_t))real_tm_write_i8,
+    .write_i1 = real_tm_write_i1,
+    .write_i2 = real_tm_write_i2,
+    .write_i4 = real_tm_write_i4,
+    .write_i8 = real_tm_write_i8,
     .write_f4 = real_tm_write_f4,
     .write_f8 = real_tm_write_f8,
     .write_ptr = real_tm_write_ptr,

@@ -447,8 +447,12 @@ inline void *tm_region_malloc(size_t sz) noexcept
 		alloc_sz = (alloc_sz + 15) & ~15ULL;
 
 		char *p = g_tl_slab.bump;
-		char *next = p + alloc_sz;
-		if (next > g_tl_slab.end) [[unlikely]] {
+		// A thread's first allocation has no slab yet, and computing
+		// nullptr + alloc_sz is itself undefined (UndefinedBehaviorSanitizer flags
+		// it), so the empty slab has to be recognised without any arithmetic on
+		// it. The branch taken is the same one the old comparison always reached.
+		char *next = p ? p + alloc_sz : nullptr;
+		if (!next || next > g_tl_slab.end) [[unlikely]] {
 			size_t needed = (alloc_sz + g_slab_size - 1) >> g_slab_size_shift;
 			size_t idx = g_next_slab_idx.fetch_add(needed, std::memory_order_relaxed);
 			char *slab = g_tm_region_start + idx * g_slab_size;
@@ -615,8 +619,11 @@ inline void *tm_region_chunk_alloc(int sc) noexcept
 {
 	// Bump-allocate a CHUNK_SIZE block from the current slab
 	char *p = g_tl_slab.bump;
-	char *next = p + CHUNK_SIZE;
-	if (next > g_tl_slab.end) [[unlikely]] {
+	// Same empty-slab guard as tm_region_malloc: nullptr + CHUNK_SIZE is
+	// undefined, so a thread with no slab yet must be detected by the pointer
+	// itself rather than by an overflow comparison.
+	char *next = p ? p + CHUNK_SIZE : nullptr;
+	if (!next || next > g_tl_slab.end) [[unlikely]] {
 		size_t slab_sz = g_slab_size;
 		size_t idx = g_next_slab_idx.fetch_add(1, std::memory_order_relaxed);
 		char *slab = g_tm_region_start + idx * slab_sz;
